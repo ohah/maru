@@ -1006,6 +1006,9 @@ fn storeHitRows(self: *AppSession, term: *Term, leaf_rect: maru.session.SplitRec
         .wrap = term.rt.editor_wrap orelse self.loaded_config.config.editor.wrap,
         .drawn = true,
     };
+    // **폭 기억은 기하가 선 «뒤»에 뜬다** — 앞에서 뜨면 언제나 0 이다(첫 판이 그랬고, 판정자가
+    // `drawn=0` 으로 그것을 드러냈다). 세로 기억이 행 배열 뒤에 오는 것과 같은 순서 규율이다.
+    term.rt.editor_drawn_content_cols = term.rt.editor_hit_geom.content_width;
 }
 
 /// **좌우 두 열**을 한 ops 배열에 그린다(N1.5 c). 조합은 컴포넌트가 소유하고(`diff_frame.build`),
@@ -3427,7 +3430,7 @@ fn applyEditAsOne(self: *AppSession, term: *Term, changes: []maru.session.editor
 
     const scroll_anchor = captureScrollAnchor(term);
     const rows_before = drawnDocLines(term);
-    const cols_before = term.rt.editor_hit_geom.content_width; // 가로도 스냅숏이 비워지기 전에 뜬다
+    const cols_before = drawnContentCols(term); // 가로도 스냅숏이 비워지기 전에 뜬다(폴백은 마지막으로 그린 폭)
     const max_before = term.rt.editor_max_cols; // 상한도 — `refreshAfterEdit` 가 이것도 버린다
     const inverse = term.rt.editor_doc.?.file.apply(.{ .changes = changes }, &sels) catch {
         self.allocator.free(before);
@@ -3584,6 +3587,13 @@ pub fn revealCurrentFindMatch(self: *AppSession, term: *Term) void {
 /// 랩이 켜지면 한 줄이 여러 행을 차지하므로 둘이 다르고, 그 차이를 무시하면 "가운데 뒀다"고
 /// 하면서 화면 밖에 두게 된다. `editor_hit_lines`는 행마다의 문서 줄이고 화면 아래로 갈수록
 /// 커지므로(같은 줄의 조각들이 이어 붙는다), **값이 바뀌는 횟수**가 곧 줄 수다.
+/// 지금 그려진 **본문 폭**(열). 스냅숏이 비었으면 **마지막으로 그린 폭**이다 — `drawnDocLines` 와
+/// 같은 근거다(편집이 기하를 비우지만 뷰포트 폭은 편집으로 안 바뀐다).
+fn drawnContentCols(term: *const Term) u16 {
+    const w = term.rt.editor_hit_geom.content_width;
+    return if (w == 0) term.rt.editor_drawn_content_cols else w;
+}
+
 fn drawnDocLines(term: *const Term) usize {
     const n = term.rt.editor_hit_rows_len;
     // **편집이 비운 스냅숏은 «안 그렸다» 가 아니다.** 뷰포트 크기는 편집으로 안 바뀌므로 직전 값이
@@ -6523,7 +6533,7 @@ pub fn insertText(self: *AppSession, term: *Term, text: []const u8) bool {
     // **편집 전 화면 맨 위를 offset으로 떠 둔다** — 뷰포트 위에서 줄이 바뀌면 줄 번호가 밀린다.
     const scroll_anchor = captureScrollAnchor(term);
     const rows_before = drawnDocLines(term); // 스냅숏이 비워지기 전에 떠 둔다(노출이 쓴다)
-    const cols_before = term.rt.editor_hit_geom.content_width; // 가로도 스냅숏이 비워지기 전에 뜬다
+    const cols_before = drawnContentCols(term); // 가로도 스냅숏이 비워지기 전에 뜬다(폴백은 마지막으로 그린 폭)
     const max_before = term.rt.editor_max_cols; // 상한도 — `refreshAfterEdit` 가 이것도 버린다
     const inverse = term.rt.editor_doc.?.file.apply(.{ .changes = ranges.items }, &sels) catch {
         self.allocator.free(before);
@@ -7121,7 +7131,7 @@ pub fn toggleLineComment(self: *AppSession, term: *Term) bool {
 
     const scroll_anchor = captureScrollAnchor(term);
     const rows_before = drawnDocLines(term);
-    const cols_before = term.rt.editor_hit_geom.content_width; // 가로도 스냅숏이 비워지기 전에 뜬다
+    const cols_before = drawnContentCols(term); // 가로도 스냅숏이 비워지기 전에 뜬다(폴백은 마지막으로 그린 폭)
     const max_before = term.rt.editor_max_cols; // 상한도 — `refreshAfterEdit` 가 이것도 버린다
     const inverse = term.rt.editor_doc.?.file.apply(.{ .changes = ranges.items }, &sels) catch {
         self.allocator.free(before);
@@ -7155,7 +7165,7 @@ fn applyLineEdit(self: *AppSession, term: *Term, ranges: []const maru.session.ed
     const before_primary = sels.primary;
     const scroll_anchor = captureScrollAnchor(term);
     const rows_before = drawnDocLines(term);
-    const cols_before = term.rt.editor_hit_geom.content_width; // 가로도 스냅숏이 비워지기 전에 뜬다
+    const cols_before = drawnContentCols(term); // 가로도 스냅숏이 비워지기 전에 뜬다(폴백은 마지막으로 그린 폭)
     const max_before = term.rt.editor_max_cols; // 상한도 — `refreshAfterEdit` 가 이것도 버린다
     const inverse = term.rt.editor_doc.?.file.apply(.{ .changes = ranges }, &sels) catch {
         self.allocator.free(before);
@@ -7628,7 +7638,7 @@ pub fn pasteText(self: *AppSession, term: *Term, clipboard: []const u8) bool {
 
     const scroll_anchor = captureScrollAnchor(term);
     const rows_before = drawnDocLines(term); // 스냅숏이 비워지기 전에 떠 둔다(노출이 쓴다)
-    const cols_before = term.rt.editor_hit_geom.content_width; // 가로도 스냅숏이 비워지기 전에 뜬다
+    const cols_before = drawnContentCols(term); // 가로도 스냅숏이 비워지기 전에 뜬다(폴백은 마지막으로 그린 폭)
     const max_before = term.rt.editor_max_cols; // 상한도 — `refreshAfterEdit` 가 이것도 버린다
     const inverse = term.rt.editor_doc.?.file.apply(.{ .changes = dedup.items }, &sels) catch {
         self.allocator.free(before);
@@ -7761,7 +7771,7 @@ pub fn deleteBy(self: *AppSession, term: *Term, backward: bool, unit: DeleteUnit
     // **편집 전 화면 맨 위를 offset으로 떠 둔다** — 뷰포트 위에서 줄이 바뀌면 줄 번호가 밀린다.
     const scroll_anchor = captureScrollAnchor(term);
     const rows_before = drawnDocLines(term); // 스냅숏이 비워지기 전에 떠 둔다(노출이 쓴다)
-    const cols_before = term.rt.editor_hit_geom.content_width; // 가로도 스냅숏이 비워지기 전에 뜬다
+    const cols_before = drawnContentCols(term); // 가로도 스냅숏이 비워지기 전에 뜬다(폴백은 마지막으로 그린 폭)
     const max_before = term.rt.editor_max_cols; // 상한도 — `refreshAfterEdit` 가 이것도 버린다
     const inverse = term.rt.editor_doc.?.file.apply(.{ .changes = ranges.items }, &sels) catch {
         self.allocator.free(before);
@@ -8245,6 +8255,16 @@ pub fn releaseEditorTerm(self: *AppSession, term: *Term) void {
     // 클릭을 막지만, 세우는 쪽만 한 단위이고 놓는 쪽이 아니면 그 규율이 반쪽이 된다.
     term.rt.editor_hit_geom = .{};
     term.rt.editor_hit_rows_len = 0;
+    // **기억도 같은 단위로 비운다** — 이 함수의 일이 «이 Term 의 편집기 상태를 놓는 것» 이고 위
+    // 둘이 그 자리에 있다.
+    //
+    // **오늘 이 줄은 관측되지 않는다**(적대적 5 회차 — 코드로 확인했다): 호출자는 둘뿐이고
+    // (`destroyTerm` · 세션 teardown) **둘 다 Term 을 파괴**한다. 파일을 새로 열면 언제나 새 Term 이라
+    // 옛 값이 다음 문서로 새는 길이 없다. 그래서 판정자도 두지 않았다 — 픽스처로 이 함수를 부르면
+    // 세션 해제가 **두 번째 해제**를 해 죽는다(이 함수는 멱등하지 않다). 그 사실을 여기 적어 둔다:
+    // 뒷날 Term 이 문서를 **갈아 끼우게** 되면 이 줄이 비로소 일을 하고, 그때 판정자가 설 수 있다.
+    term.rt.editor_drawn_doc_lines = 0;
+    term.rt.editor_drawn_content_cols = 0;
     if (term.rt.editor_path) |p| self.allocator.free(p);
     setEditorPreedit(self, term, ""); // 조합 중이던 글자(N3)
     dropFoldState(self, term); // 접힘 층을 통째로 놓는다(그 함수 doc)
@@ -15663,7 +15683,11 @@ test "DHS7 타이핑도 가로로 caret 을 따라간다 — 편집 전 폭·상
     //    그 사이 프레임이 없으면 상한을 모른다. 그때 0 으로 clamp 하면 화면이 되감긴다.
     //    caret 을 **화면 밖**에 두어 clamp 갈래까지 실제로 지난다(안 그러면 「이미 보인다」에서 끝난다).
     //    **그 상태를 여기서 만든다** — 편집은 더 이상 상한을 안 버리므로(`maxColsAfterEdit`), 남는
-    //    「모른다」는 아직 **한 번도 안 센** 문서다(`kept == 0` 갈래).
+    //    「모른다」는 아직 **한 번도 안 센** 문서다(`kept == 0` 갈래). 그래서 **폭 캐시까지 버린다**:
+    //    캐시가 성하면 `maxColsFromCache` 가 정확한 답을 내 「모른다」가 성립하지 않는다. 예전에는
+    //    캐시를 둔 채로도 이 단언이 섰는데, 그건 상한 가드가 아니라 **폭 가드**(`visible == 0`)가
+    //    막아 준 것이었다 — 폭을 기억하게 되자(`editor_drawn_content_cols`) 그 위장이 벗겨졌다.
+    dropLineCols(fx.session, term);
     term.rt.editor_max_cols = 0;
     term.rt.editor_first_col = 40;
     term.rt.editor_selection = editor_selection.Selection.at(5 + 350);
@@ -26453,4 +26477,62 @@ test "SCRL1 프레임 사이에 편집이 둘 와도 화면이 안 떨린다 (�
 
     // **화면이 그대로여야 한다.** 같은 줄에 글자 하나를 더했을 뿐인데 화면이 움직이면 그것이 떨림이다.
     try testing.expectEqual(after_first, fx.term.rt.editor_first_line);
+}
+
+test "SCRL3 랩이 걸려도 프레임 사이 편집 둘이 화면을 안 흔든다 (적대적 6회차)" {
+    // 제보의 떨림은 `wrap=false` 에서 났다(로그가 그렇게 적는다). 랩이 켜지면 한 논리 줄이 시각 행
+    // 여럿이라 **여백 규칙의 「줄」과 화면의 「행」이 갈린다** — 같은 왕복이 다른 이유로 날 수 있다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try BigEditorFixture.init(allocator, 200, .long_line); // 한 줄 200 자 — 확실히 랩된다
+    defer fx.deinit(allocator);
+    fx.term.rt.editor_wrap = true;
+
+    fx.term.rt.editor_first_line = 14;
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    defer drawn.dl.deinit(allocator);
+
+    const doc = fx.term.rt.editor_doc.?;
+    const line20 = doc.file.lines.line(20) orelse return error.NoLine;
+    fx.term.rt.editor_selection = maru.session.editor.selection.Selection.at(line20.start + 10);
+
+    try testing.expect(insertText(fx.session, fx.term, "a"));
+    const after_first = fx.term.rt.editor_first_line;
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_hit_rows_len); // 전제: 스냅숏이 비었다
+    try testing.expect(insertText(fx.session, fx.term, "b"));
+    try testing.expectEqual(after_first, fx.term.rt.editor_first_line);
+}
+
+test "SCRL4 프레임 사이 편집 둘에서도 가로 노출이 산다 (적대적 9회차 — 인접 축)" {
+    // **세로와 같은 구멍이다.** 가로 노출은 `cols_before`(= `editor_hit_geom.content_width`)로 푸는데,
+    // 편집이 그 기하를 비운다(`refreshAfterEdit`). 그래서 **프레임 사이에 편집이 둘** 오면 두 번째의
+    // `cols_before` 가 0 이고, 문서가 *"그래도 0 이면 아무 일도 안 한다"* 로 적어 둔 갈래에 걸려
+    // **긴 줄 끝에서 caret 이 화면 밖으로 나간 채 안 돌아온다** — 2026-09-08 이 세로와 같은 모양으로
+    // 풀었다고 적은 바로 그 결함이, 「편집 전」이 이미 「직전 편집 뒤」인 순간에 되살아난다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try BigEditorFixture.init(allocator, 50, .long_line); // 한 줄 200 자
+    defer fx.deinit(allocator);
+    fx.term.rt.editor_wrap = false; // 가로 축이 살아 있어야 한다
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    defer drawn.dl.deinit(allocator);
+    try testing.expect(fx.term.rt.editor_hit_geom.content_width > 0);
+
+    // 긴 줄의 **오른쪽 끝**에 caret 을 둔다 — 화면 밖이라 노출이 가로를 밀어야 한다.
+    const doc = fx.term.rt.editor_doc.?;
+    const line3 = doc.file.lines.line(3) orelse return error.NoLine;
+    fx.term.rt.editor_selection = maru.session.editor.selection.Selection.at(line3.contentEnd());
+
+    try testing.expect(insertText(fx.session, fx.term, "a"));
+    const col_after_first = fx.term.rt.editor_first_col;
+    try testing.expect(col_after_first > 0); // 전제: 첫 편집이 가로를 밀었다
+
+    // **다시 그리지 않고** 둘째 편집 — `cols_before` 가 0 인 그 순간이다.
+    try testing.expectEqual(@as(u16, 0), fx.term.rt.editor_hit_geom.content_width);
+    try testing.expect(insertText(fx.session, fx.term, "b"));
+
+    // **caret 이 한 글자 더 오른쪽으로 갔으므로 가로도 정확히 한 칸 따라가야 한다.**
+    // `>=` 로 재면 «안 움직였다» 도 통과한다 — 그것이 바로 이 판정자가 잡으려는 상태다.
+    try testing.expectEqual(col_after_first + 1, fx.term.rt.editor_first_col);
 }

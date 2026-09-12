@@ -263,13 +263,13 @@ pub fn rowsForVisual(
             // **랩으로 이어진 행은 번호를 비운다**(§4). 판정은 `VisualRow`가 소유한다 — 여기서
             // `piece == 0`을 다시 쓰면 규칙이 두 곳에 생긴다.
             .number = if (!v.showsLineNumber()) null else if (numbers) |table| blk: {
-                const idx = first_line + v.line;
+                const idx = v.docIndex(first_line);
                 break :blk if (idx < table.len) (if (table[idx]) |num| @as(usize, num) else null) else null;
-            } else first_line + v.line + 1,
+            } else v.docIndex(first_line) + 1,
             .visual_row = i,
             // **이어진 조각에는 안 붙인다** — 한 줄에 표식이 여러 개 서면 접힌 줄 수를 오해한다.
             .fold = if (!v.showsLineNumber()) .none else if (folds) |table| blk: {
-                const idx = first_line + v.line;
+                const idx = v.docIndex(first_line);
                 break :blk if (idx < table.len) table[idx] else .none;
             } else .none,
         };

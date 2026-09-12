@@ -136,6 +136,7 @@ zig build test > /tmp/t.log 2>&1;  mise run test-verdict /tmp/t.log
 - Notification Center app receipt의 canonical pipe payload strict parse, helper-click/identity/kind/deadline 재결속과 absent `0600` exclusive publication을 검증: `zig build test-session-host-notification-app-receipt`.
 - Notification Center app/helper process composition의 단일 deadline, child/OS 시도 선기록, 성공한 exclusive receipt만의 소유권, receipt→request→helper→app→root 역순 cleanup과 exact retry authority를 검증: `zig build test-session-host-notification-process-owner`.
 - Notification Center release app을 ambient environment 없이 격리 `/s`·`/h`와 framed duplex fd 3 하나로 실행하고 exact cleanup command/receipt와 process-group 권위를 보존하는 경계를 검증: `zig build test-session-host-notification-app-child`.
+- Notification Center app/helper 실제 child를 단일 absolute deadline과 UUID-derived `0700` root에 결합하고, 정상 app exit 뒤 exact `/s`·`/h`만 제거하며 예상 밖 sibling에는 fail-close하는 concrete adapter를 검증: `zig build test-session-host-notification-concrete`.
 - 별도 signable AX helper의 실제 `print` LF를 포함한 canonical click receipt, nonce/timeline 결속, closed argv/environment, bounded stdout/stderr와 typed Accessibility/Aqua provisioning exit를 검증: `zig build test-session-host-notification-helper-receipt && zig build test-session-host-notification-helper-child`.
 
 - signed-upgrade 릴리스 증거 하네스의 canonical v2 writer·UUID/runtime-count 정책과 제품 executable compile만 빠르게 검증(macOS, 서명 아티팩트 불필요): `zig build test-session-host-signed-upgrade-harness`.

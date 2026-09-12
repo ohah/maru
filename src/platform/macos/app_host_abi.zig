@@ -158,8 +158,8 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
     try std.testing.expectEqualStrings("maru build: mtime=unknown pid=42", buildIdentityLine(&buf, null, 42));
 }
 
-test "ABI v182 session config bootstrap observation and notification cold route values match the C header" {
-    try std.testing.expectEqual(@as(u32, 182), abi_version);
+test "ABI v183 notification release end-all and cold route values match the C header" {
+    try std.testing.expectEqual(@as(u32, 183), abi_version);
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @intFromEnum(AppInstanceLeaseResult.acquired));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_HELD), @intFromEnum(AppInstanceLeaseResult.held));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_UNSAFE), @intFromEnum(AppInstanceLeaseResult.unsafe));
@@ -1493,6 +1493,13 @@ pub export fn maru_macos_app_session_request_window_close(session: ?*AppSession)
 pub export fn maru_macos_app_session_request_app_quit(session: ?*AppSession) void {
     const app_session = session orelse return;
     app_session.requestAppQuit();
+}
+
+/// Provisioned Notification Center scenario only: start the same bounded end-all state machine
+/// as the user's alternate Quit action without synthesizing a UI decision.
+pub export fn maru_macos_app_session_request_notification_release_end_all(session: ?*AppSession) u32 {
+    const app_session = session orelse return 0;
+    return @intFromBool(app_session.requestAppQuitEndAll());
 }
 
 /// host의 late protected-file preflight가 이미 수락한 Quit을 취소할 때 app-global lifecycle latch를 되돌린다.

@@ -110,6 +110,11 @@ pub fn launch(inputs: Inputs, execution: *Execution) !void {
     try launchInternal(&executor, inputs, execution);
 }
 
+pub fn validateInputs(inputs: Inputs) !void {
+    var storage: CommandStorage = .{};
+    _ = try commandPlan(inputs, &storage);
+}
+
 pub fn launchWith(executor: anytype, inputs: Inputs, execution: *Execution) !void {
     if (!builtin.is_test) @compileError("launchWith is a test-only seam");
     try launchInternal(executor, inputs, execution);
@@ -177,7 +182,7 @@ pub fn commandPlanForTest(inputs: Inputs, storage: *CommandStorage) !Plan {
 }
 
 const RealExecutor = struct {
-    fn spawn(_: *@This(), plan: Plan, child: *bounded.InheritedPipeChild) !void {
+    fn spawn(_: *@This(), plan: Plan, child: *bounded.InheritedSocketChild) !void {
         var argv = [_:null]?[*:0]const u8{plan.executable.ptr};
         var environment: [14:null]?[*:0]const u8 = @splat(null);
         for (plan.environment, 0..) |entry, index| environment[index] = entry.ptr;

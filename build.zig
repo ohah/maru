@@ -16040,6 +16040,35 @@ pub fn build(b: *std.Build) void {
         run_notification_continuity_remote_backend_tests.setCwd(b.path("."));
         session_host_notification_continuity_receipt_step.dependOn(&run_notification_continuity_remote_backend_tests.step);
         run_session_host_tests.step.dependOn(&run_notification_continuity_remote_backend_tests.step);
+        const notification_continuity_app_session_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/app_session.zig"),
+                .target = target,
+                .optimize = baseline_phase_optimize,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "maru", .module = maru_mod },
+                    .{ .name = "syntax", .module = syntax_mod },
+                },
+            }),
+            .filters = &.{"N3 stable notification route는 projection과 keep-alive가 없어도"},
+        });
+        notification_continuity_app_session_tests.root_module.linkFramework("AppKit", .{});
+        notification_continuity_app_session_tests.root_module.linkFramework("Metal", .{});
+        notification_continuity_app_session_tests.root_module.linkFramework("MetalKit", .{});
+        notification_continuity_app_session_tests.root_module.linkFramework("QuartzCore", .{});
+        notification_continuity_app_session_tests.root_module.linkFramework("CoreText", .{});
+        notification_continuity_app_session_tests.root_module.linkFramework("CoreGraphics", .{});
+        notification_continuity_app_session_tests.root_module.linkFramework("ImageIO", .{});
+        notification_continuity_app_session_tests.root_module.addCSourceFile(.{
+            .file = b.path("src/platform/macos/coretext_smoke.m"),
+            .flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined" },
+        });
+        const run_notification_continuity_app_session_tests = b.addRunArtifact(notification_continuity_app_session_tests);
+        run_notification_continuity_app_session_tests.addArg("--maru-expect-tests=4");
+        run_notification_continuity_app_session_tests.setCwd(b.path("."));
+        session_host_notification_continuity_receipt_step.dependOn(&run_notification_continuity_app_session_tests.step);
+        run_session_host_tests.step.dependOn(&run_notification_continuity_app_session_tests.step);
         const notification_process_owner_mod = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/session_host/release_adapter_notification_process_owner.zig"),
             .target = target,
@@ -16088,11 +16117,7 @@ pub fn build(b: *std.Build) void {
         run_notification_app_child_tests.setCwd(b.path("."));
         session_host_notification_app_child_step.dependOn(&run_notification_app_child_tests.step);
         run_session_host_tests.step.dependOn(&run_notification_app_child_tests.step);
-        const notification_helper_receipt_mod = b.createModule(.{
-            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_notification_helper_receipt.zig"),
-            .target = target,
-            .optimize = baseline_phase_optimize,
-        });
+        const notification_helper_receipt_mod = notification_continuity_helper_receipt_mod;
         const notification_helper_receipt_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("tests/session_host_release_adapter_notification_helper_receipt.zig"),
@@ -16154,6 +16179,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "release_adapter_notification_process_owner", .module = notification_process_owner_mod },
                 .{ .name = "release_adapter_notification_app_child", .module = notification_app_child_mod },
                 .{ .name = "release_adapter_notification_app_receipt", .module = notification_app_receipt_mod },
+                .{ .name = "release_adapter_notification_continuity_receipt", .module = notification_continuity_receipt_mod },
                 .{ .name = "release_adapter_notification_helper_child", .module = notification_helper_child_mod },
                 .{ .name = "release_adapter_notification_helper_receipt", .module = notification_helper_receipt_mod },
                 .{ .name = "release_adapter_notification_workspace", .module = notification_workspace_mod },

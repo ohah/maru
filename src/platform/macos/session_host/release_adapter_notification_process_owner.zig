@@ -52,7 +52,8 @@ pub fn executeWith(steps: anytype, execution: *Execution) !void {
     execution.helper_attempted = true;
     const click = steps.runHelper(deadline) catch |err| return fail(steps, execution, err);
     const app_receipt = steps.collectAppReceipt(deadline) catch |err| return fail(steps, execution, err);
-    steps.publishReceipt(deadline, click, app_receipt) catch |err| return fail(steps, execution, err);
+    const continuity_receipt = steps.collectContinuityReceipt(deadline) catch |err| return fail(steps, execution, err);
+    steps.publishReceipt(deadline, click, app_receipt, continuity_receipt) catch |err| return fail(steps, execution, err);
     // The exclusive publisher owns rollback until it returns success. Recording earlier would
     // authorize cleanup of a pre-existing destination after DestinationExists.
     execution.receipt_attempted = true;

@@ -1,8 +1,8 @@
 const std = @import("std");
 const owner = @import("release_adapter_notification_process_owner");
 
-const Event = enum { bind, root, app, helper, collect, publish, clean_receipt, clean_request, clean_helper, clean_app, clean_root };
-const normal = [_]Event{ .bind, .root, .app, .helper, .collect, .publish, .clean_request, .clean_helper, .clean_app, .clean_root };
+const Event = enum { bind, root, app, helper, collect, collect_continuity, publish, clean_receipt, clean_request, clean_helper, clean_app, clean_root };
+const normal = [_]Event{ .bind, .root, .app, .helper, .collect, .collect_continuity, .publish, .clean_request, .clean_helper, .clean_app, .clean_root };
 
 const Recorder = struct {
     events: [32]Event = undefined,
@@ -43,10 +43,16 @@ const Recorder = struct {
         try self.add(.collect);
         return 9;
     }
-    pub fn publishReceipt(self: *@This(), d: *u8, click: u8, receipt: u8) !void {
+    pub fn collectContinuityReceipt(self: *@This(), d: *u8) !u8 {
+        try self.same(d);
+        try self.add(.collect_continuity);
+        return 11;
+    }
+    pub fn publishReceipt(self: *@This(), d: *u8, click: u8, receipt: u8, continuity: u8) !void {
         try self.same(d);
         try std.testing.expectEqual(@as(u8, 7), click);
         try std.testing.expectEqual(@as(u8, 9), receipt);
+        try std.testing.expectEqual(@as(u8, 11), continuity);
         try self.add(.publish);
     }
     pub fn cleanupReceipt(self: *@This()) !void {
@@ -80,6 +86,7 @@ test "R2b2 records every external attempt before failure and cleans in reverse" 
         .{ Event.app, &[_]Event{ .clean_request, .clean_app, .clean_root } },
         .{ Event.helper, &[_]Event{ .clean_request, .clean_helper, .clean_app, .clean_root } },
         .{ Event.collect, &[_]Event{ .clean_request, .clean_helper, .clean_app, .clean_root } },
+        .{ Event.collect_continuity, &[_]Event{ .clean_request, .clean_helper, .clean_app, .clean_root } },
         .{ Event.publish, &[_]Event{ .clean_request, .clean_helper, .clean_app, .clean_root } },
     };
     inline for (cases) |case| {

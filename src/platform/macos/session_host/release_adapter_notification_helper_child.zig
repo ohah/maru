@@ -6,8 +6,13 @@ const bounded = @import("bounded_process");
 const receipt = @import("release_adapter_notification_helper_receipt");
 
 pub const Provisioning = enum { accessibility, aqua };
+pub const Clicked = struct {
+    observed_at_ns: u64,
+    clicked_at_ns: u64,
+    receipt_bytes: []const u8,
+};
 pub const Result = union(enum) {
-    clicked: receipt.Observed,
+    clicked: Clicked,
     not_provisioned: Provisioning,
 };
 
@@ -75,7 +80,7 @@ fn runInternal(
     try validateInputs(executable, expected, budget_ns);
 
     storage.in_use = true;
-    defer clear(storage);
+    defer if (storage.in_use) clear(storage);
     const nonce = std.fmt.bufPrintZ(&storage.nonce, "{s}", .{expected.visible_nonce}) catch return error.InvalidInput;
     const deadline = std.fmt.bufPrintZ(&storage.deadline, "{d}", .{expected.deadline_ns}) catch return error.InvalidInput;
     storage.argv = .{ executable.ptr, "click", nonce.ptr, deadline.ptr, null };
@@ -85,9 +90,21 @@ fn runInternal(
         .environment = &storage.environment,
     }, &storage.stdout, &storage.stderr, budget_ns);
     if (observation.stderr.len != 0) return error.UnexpectedOutput;
+    if (observation.stdout.len > storage.stdout.len) return error.UnexpectedOutput;
+    const owned_stdout = storage.stdout[0..observation.stdout.len];
+    if (observation.stdout.ptr != owned_stdout.ptr) @memcpy(owned_stdout, observation.stdout);
     return switch (observation.termination) {
         .exited => |code| switch (code) {
-            0 => .{ .clicked = try receipt.parse(allocator, observation.stdout, expected) },
+            0 => blk: {
+                const parsed = try receipt.parse(allocator, owned_stdout, expected);
+                clearTransient(storage);
+                storage.in_use = false;
+                break :blk .{ .clicked = .{
+                    .observed_at_ns = parsed.observed_at_ns,
+                    .clicked_at_ns = parsed.clicked_at_ns,
+                    .receipt_bytes = owned_stdout,
+                } };
+            },
             70 => if (observation.stdout.len == 0) .{ .not_provisioned = .accessibility } else error.UnexpectedOutput,
             71 => if (observation.stdout.len == 0) .{ .not_provisioned = .aqua } else error.UnexpectedOutput,
             else => error.HelperFailed,
@@ -134,11 +151,15 @@ fn canonicalAbsolute(value: []const u8) bool {
 }
 
 fn clear(storage: *Storage) void {
+    clearTransient(storage);
+    @memset(&storage.stdout, 0);
+    storage.in_use = false;
+}
+
+fn clearTransient(storage: *Storage) void {
     @memset(std.mem.asBytes(&storage.nonce), 0);
     @memset(std.mem.asBytes(&storage.deadline), 0);
     @memset(&storage.argv, null);
     @memset(&storage.environment, null);
-    @memset(&storage.stdout, 0);
     @memset(&storage.stderr, 0);
-    storage.in_use = false;
 }

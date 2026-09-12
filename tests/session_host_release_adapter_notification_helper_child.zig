@@ -33,6 +33,7 @@ test "R2b2 helper child runs exact closed argv and parses clicked receipt" {
     var storage: child.Storage = .{};
     const result = try child.runWith(&executor, std.testing.allocator, executable, expected, 99, &storage);
     try std.testing.expectEqual(@as(u64, 42), result.clicked.clicked_at_ns);
+    try std.testing.expectEqualStrings(canonical, result.clicked.receipt_bytes);
     try std.testing.expectEqual(@as(usize, 1), executor.calls);
     try std.testing.expect(!storage.in_use);
 }

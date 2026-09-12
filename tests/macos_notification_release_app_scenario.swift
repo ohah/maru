@@ -11,7 +11,7 @@ private struct NotificationReleaseAppScenarioTests {
         absentModeIsOrdinaryLaunchButPartialModeFails()
         isolationAndDescriptorInputsFailClosed()
         try runnerRootMustBeOwnedDirectoryWithExactMode()
-        try receiptSinkUsesOneInheritedSocketExactlyOnce()
+        try receiptSinkRequiresOrderedAppAndContinuityFrames()
         exactNotificationCleanupTouchesOnlyOneIdentifier()
         try cleanupControlUsesExactFramedRequestAndReceipt()
     }
@@ -39,6 +39,10 @@ private struct NotificationReleaseAppScenarioTests {
         precondition(Darwin.socketpair(AF_UNIX, SOCK_STREAM, 0, &descriptors) == 0)
         defer { _ = Darwin.close(descriptors[0]) }
         let sink = try NotificationReleaseReceiptSink(fileDescriptor: descriptors[1])
+        try sink.publishAppReceipt("{\"schema\":\"app\"}")
+        try sink.publishContinuityReceipt("{\"schema\":\"continuity\"}")
+        precondition(readFrame(descriptor: descriptors[0]) == "{\"schema\":\"app\"}")
+        precondition(readFrame(descriptor: descriptors[0]) == "{\"schema\":\"continuity\"}")
         var performed = false
         var finished: Bool?
         sink.listenForCleanup(
@@ -152,15 +156,24 @@ private struct NotificationReleaseAppScenarioTests {
         precondition(!notificationReleaseValidateRunnerRoot("/private/tmp"))
     }
 
-    private static func receiptSinkUsesOneInheritedSocketExactlyOnce() throws {
+    private static func receiptSinkRequiresOrderedAppAndContinuityFrames() throws {
         var descriptors = [Int32](repeating: -1, count: 2)
         precondition(Darwin.socketpair(AF_UNIX, SOCK_STREAM, 0, &descriptors) == 0)
         defer { _ = Darwin.close(descriptors[0]) }
         let sink = try NotificationReleaseReceiptSink(fileDescriptor: descriptors[1])
-        try sink.publish("{\"schema\":\"receipt\"}")
         do {
-            try sink.publish("duplicate")
+            try sink.publishContinuityReceipt("out-of-order")
+            preconditionFailure("continuity publication preceded app receipt")
+        } catch NotificationReleaseAppScenarioError.invalidReceipt {}
+        try sink.publishAppReceipt("{\"schema\":\"receipt\"}")
+        do {
+            try sink.publishAppReceipt("duplicate")
             preconditionFailure("duplicate publication succeeded")
+        } catch NotificationReleaseAppScenarioError.alreadyPublished {}
+        try sink.publishContinuityReceipt("{\"schema\":\"continuity\"}")
+        do {
+            try sink.publishContinuityReceipt("duplicate")
+            preconditionFailure("duplicate continuity publication succeeded")
         } catch NotificationReleaseAppScenarioError.alreadyPublished {}
 
         var header = [UInt8](repeating: 0, count: 4)
@@ -169,6 +182,7 @@ private struct NotificationReleaseAppScenarioTests {
         var bytes = [UInt8](repeating: 0, count: 20)
         precondition(Darwin.read(descriptors[0], &bytes, bytes.count) == bytes.count)
         precondition(String(decoding: bytes, as: UTF8.self) == "{\"schema\":\"receipt\"}")
+        precondition(readFrame(descriptor: descriptors[0]) == "{\"schema\":\"continuity\"}")
 
         do {
             _ = try NotificationReleaseReceiptSink(fileDescriptor: 1)

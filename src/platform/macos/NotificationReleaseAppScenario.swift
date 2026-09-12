@@ -140,7 +140,8 @@ func notificationReleaseValidateRunnerRoot(_ root: String) -> Bool {
 
 final class NotificationReleaseReceiptSink {
     private var fileDescriptor: Int32
-    private var published = false
+    private var appReceiptPublished = false
+    private var continuityReceiptPublished = false
     private var listening = false
     private let lock = NSLock()
 
@@ -163,15 +164,28 @@ final class NotificationReleaseReceiptSink {
         if fileDescriptor >= 0 { _ = Darwin.close(fileDescriptor) }
     }
 
-    func publish(_ receipt: String) throws {
+    func publishAppReceipt(_ receipt: String) throws {
         lock.lock()
         defer { lock.unlock() }
-        guard !published else { throw NotificationReleaseAppScenarioError.alreadyPublished }
+        guard !appReceiptPublished else { throw NotificationReleaseAppScenarioError.alreadyPublished }
         let bytes = Array(receipt.utf8)
         guard !bytes.isEmpty, bytes.count <= 1024 else {
             throw NotificationReleaseAppScenarioError.invalidReceipt
         }
-        published = true
+        appReceiptPublished = true
+        try writeFrame(bytes)
+    }
+
+    func publishContinuityReceipt(_ receipt: String) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard appReceiptPublished else { throw NotificationReleaseAppScenarioError.invalidReceipt }
+        guard !continuityReceiptPublished else { throw NotificationReleaseAppScenarioError.alreadyPublished }
+        let bytes = Array(receipt.utf8)
+        guard !bytes.isEmpty, bytes.count <= 1024 else {
+            throw NotificationReleaseAppScenarioError.invalidReceipt
+        }
+        continuityReceiptPublished = true
         try writeFrame(bytes)
     }
 
@@ -181,7 +195,7 @@ final class NotificationReleaseReceiptSink {
         finished: @escaping (Bool) -> Void
     ) {
         lock.lock()
-        guard !listening, fileDescriptor >= 0 else {
+        guard !listening, continuityReceiptPublished, fileDescriptor >= 0 else {
             lock.unlock()
             finished(false)
             return

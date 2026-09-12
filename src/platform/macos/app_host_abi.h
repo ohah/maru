@@ -9,7 +9,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 183u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 184u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -1122,6 +1122,36 @@ uint32_t maru_macos_app_session_activate_notification_runtime(
     uint64_t runtime_id_hi,
     uint64_t runtime_id_lo,
     uint32_t action
+);
+/* Provisioned release scenario only. Capture an exact current controller generation/PID pair and
+   screen-before marker, then bind the app attach timestamp and send the after marker through the
+   real PTY. The second leaf takes the canonical continuity receipt after a later tick observes the
+   same generation/PIDs and both markers. begin/commit: 1=accepted, 0=null session, 2=failed.
+   take: 0=pending, 1=ready exact once, 2=failed. v184. */
+uint32_t maru_macos_app_session_begin_notification_continuity(
+    MaruAppHostSession *session,
+    uint64_t host_id_hi,
+    uint64_t host_id_lo,
+    uint64_t runtime_id_hi,
+    uint64_t runtime_id_lo,
+    const uint8_t *before_ptr,
+    size_t before_len,
+    const uint8_t *after_ptr,
+    size_t after_len
+);
+uint32_t maru_macos_app_session_commit_notification_continuity(
+    MaruAppHostSession *session,
+    uint32_t scenario,
+    const uint8_t *request_ptr,
+    size_t request_len,
+    uint64_t event_id,
+    uint64_t attached_at_ns,
+    uint64_t deadline_ns
+);
+uint32_t maru_macos_app_session_take_notification_continuity_receipt(
+    MaruAppHostSession *session,
+    const uint8_t **out_ptr,
+    size_t *out_len
 );
 /* G12 BEL: 활성 세션에 pending 벨이 있으면 1(코어 플래그 비움), 없으면 0. Swift가 tick마다 호출해 시스템 벨
    (NSSound.beep)을 울린다(벨은 OS 소유). */

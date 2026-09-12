@@ -4532,7 +4532,6 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         if Bundle.main.bundleIdentifier != nil {
             UNUserNotificationCenter.current().delegate = delegate
         }
-        delegate.armNotificationReleaseCleanupControl()
         app.setActivationPolicy(.regular)
         app.run()
         Darwin.exit(delegate.exitCode)
@@ -6387,6 +6386,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             let status = renderTick()
             explicitSurface = nil
             if status == Self.statusOK {
+                pollNotificationReleaseContinuity(surface)
                 _ = surface.protectedTickFaultLatch.record(tickSucceeded: true, currentProtected: false)
                 // 첫(메인) 창의 첫 tick에 launch 진단 요약을 한 번 남긴다.
                 if surface === windows.first, !launchSummaryWritten {
@@ -8001,6 +8001,40 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         case .recovered: kind = .recovered
         case .queued, .rejected: return
         }
+        let compactNonce = configuration.runnerNonce.replacingOccurrences(of: "-", with: "")
+        let beforeMarker = "MARU_BEFORE_\(compactNonce)"
+        let afterMarker = "MARU_AFTER_\(compactNonce)"
+        var continuitySession: OpaquePointer?
+        for surface in windows {
+            guard let session = surface.appSession else { continue }
+            let matched = maru_macos_app_session_activate_notification_runtime(
+                session, route.hostIdHi, route.hostIdLo, route.runtimeIdHi, route.runtimeIdLo, 0
+            )
+            if matched == 2 || (matched == 1 && continuitySession != nil) {
+                failNotificationReleaseScenario()
+                return
+            }
+            if matched == 1 { continuitySession = session }
+        }
+        guard let continuitySession,
+              beforeMarker.utf8CString.withUnsafeBufferPointer({ before in
+                  afterMarker.utf8CString.withUnsafeBufferPointer { after in
+                      maru_macos_app_session_begin_notification_continuity(
+                          continuitySession,
+                          route.hostIdHi,
+                          route.hostIdLo,
+                          route.runtimeIdHi,
+                          route.runtimeIdLo,
+                          UnsafeRawPointer(before.baseAddress!).assumingMemoryBound(to: UInt8.self),
+                          before.count - 1,
+                          UnsafeRawPointer(after.baseAddress!).assumingMemoryBound(to: UInt8.self),
+                          after.count - 1
+                      ) == 1
+                  }
+              }) else {
+            failNotificationReleaseScenario()
+            return
+        }
         let attachedAtNs = notificationReleaseContinuousTimeNs()
         guard owner.observeAttach(
             requestIdentifier: configuration.expectation.requestIdentifier,
@@ -8015,9 +8049,51 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             failNotificationReleaseScenario()
             return
         }
+        let scenarioCode: UInt32 = configuration.expectation.scenario == .guiZero ? 1 : 2
+        let committed = configuration.expectation.requestIdentifier.utf8CString.withUnsafeBufferPointer { request in
+            maru_macos_app_session_commit_notification_continuity(
+                continuitySession,
+                scenarioCode,
+                UnsafeRawPointer(request.baseAddress!).assumingMemoryBound(to: UInt8.self),
+                request.count - 1,
+                route.eventId,
+                attachedAtNs,
+                configuration.expectation.deadlineNs
+            ) == 1
+        }
+        guard committed else {
+            failNotificationReleaseScenario()
+            return
+        }
         do {
-            try sink.publish(receipt)
+            try sink.publishAppReceipt(receipt)
         } catch {
+            failNotificationReleaseScenario()
+        }
+    }
+
+    private func pollNotificationReleaseContinuity(_ surface: TerminalSurface) {
+        guard notificationReleaseScenario != nil,
+              let session = surface.appSession,
+              let sink = notificationReleaseReceiptSink else { return }
+        var pointer: UnsafePointer<UInt8>? = nil
+        var length: size_t = 0
+        switch maru_macos_app_session_take_notification_continuity_receipt(session, &pointer, &length) {
+        case 0:
+            return
+        case 1:
+            guard let pointer, length > 0 else {
+                failNotificationReleaseScenario()
+                return
+            }
+            do {
+                let receipt = String(decoding: UnsafeBufferPointer(start: pointer, count: length), as: UTF8.self)
+                try sink.publishContinuityReceipt(receipt)
+                armNotificationReleaseCleanupControl()
+            } catch {
+                failNotificationReleaseScenario()
+            }
+        default:
             failNotificationReleaseScenario()
         }
     }

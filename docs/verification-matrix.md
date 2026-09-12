@@ -3013,8 +3013,10 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   봉인하고, 그 뒤 runner marker를 실제 PTY input으로 보낸다. 후속 tick의 fresh observation이 같은 generation·PID와 두 marker를
   확인해야 두 번째 frame을 낸다. **R2b3b1**은 `RemoteTermBackend.notificationContinuityIdentity`가 exact
   handle/host/runtime와 current observation에 결속된 generation·host PID·child PID를 하나의 fail-closed 값으로 내도록 구현한다.
-  남은 R2b3b2는 이 값과 screen/input을 AppSession 상태머신 및 child transport에 연결한다. 테스트가
-  boolean·PID·screen 결과를 직접 주입해 `passed`를 만드는 seam과 제품 외 caller는 금지한다. R2b3b가 green인 뒤 R2c mounted candidate
+  **R2b3b2**는 이 값과 screen/input을 AppSession 상태머신 및 child transport에 연결하고, app receipt 뒤 두 번째 frame을
+  내며 parent가 helper/app 원문과 함께 strict parse하도록 구현됐다. 실제 daemon·PTY의 controlled one-shot child gate는
+  controller 인계, 좁은 grid soft-wrap, before 보존과 after 왕복을 검증한다. 테스트가 boolean·PID·screen 결과를 직접 주입해
+  `passed`를 만드는 seam과 제품 외 caller는 금지한다. 다음은 R2c mounted candidate
   composition이 두 scenario proof를 R2a owner 순서로 실행한다.
   로그인된 전용 macOS runner의 새 mode `0700` root에서 DMG를
   read-only mount하고 그 안의 exact `Maru.app`과 main executable을 no-follow pin한다. 앱·CLI·helper의 동일

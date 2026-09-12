@@ -493,9 +493,15 @@ pub fn createTerm(
 
             // Exact saved host를 먼저 복구한다. current host bootstrap 실패로 pool/backend가 없어도 이 함수가
             // N-1 query-only 연결에서 둘을 만들 수 있어, 새 host 가용성과 기존 세션 복원이 독립적이다.
+            const pooled_matches = if (app_session_mod.app_remote_host_pool) |*pool|
+                pool.get(reconnect_host) != null
+            else
+                false;
             const legacy_matches = app_session_mod.app_remote_host_pool == null and
                 app_session_mod.app_remote_client != null and app_session_mod.app_remote_client.?.host_id == reconnect_host;
-            if (!legacy_matches and (app_session_mod.app_remote_host_pool != null or reconnect_host_id.len > 0)) {
+            if (!pooled_matches and !legacy_matches and
+                (app_session_mod.app_remote_host_pool != null or reconnect_host_id.len > 0))
+            {
                 // 여기서 처음으로 "영구"와 "일시"가 갈린다. host 프로세스가 사라졌다는 긍정적 증거(host_gone)만
                 // PersistentRuntimeGone으로 올린다 — caller가 그 Term만 종료 placeholder로 둘 수 있게 하는 신호다.
                 // 나머지는 종전처럼 Unavailable(fail-closed)이다. 오분류 비용이 비대칭이라 보수적으로 가른다:

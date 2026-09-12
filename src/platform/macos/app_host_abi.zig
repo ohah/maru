@@ -158,8 +158,8 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
     try std.testing.expectEqualStrings("maru build: mtime=unknown pid=42", buildIdentityLine(&buf, null, 42));
 }
 
-test "ABI v183 notification release end-all and cold route values match the C header" {
-    try std.testing.expectEqual(@as(u32, 183), abi_version);
+test "ABI v184 notification release end-all and cold route values match the C header" {
+    try std.testing.expectEqual(@as(u32, 184), abi_version);
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @intFromEnum(AppInstanceLeaseResult.acquired));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_HELD), @intFromEnum(AppInstanceLeaseResult.held));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_UNSAFE), @intFromEnum(AppInstanceLeaseResult.unsafe));
@@ -2227,6 +2227,68 @@ pub export fn maru_macos_app_session_activate_notification_runtime(
         return 2;
     }
     return if (handled) 1 else 0;
+}
+
+/// Starts the product-owned before observation for the exact notification route. Markers are
+/// runner-derived scalar values; identity, screen, and handle are observed only inside AppSession.
+pub export fn maru_macos_app_session_begin_notification_continuity(
+    session: ?*AppSession,
+    host_id_hi: u64,
+    host_id_lo: u64,
+    runtime_id_hi: u64,
+    runtime_id_lo: u64,
+    before_ptr: ?[*]const u8,
+    before_len: usize,
+    after_ptr: ?[*]const u8,
+    after_len: usize,
+) u32 {
+    const app_session = session orelse return 0;
+    if (before_len == 0 or before_len > 128 or after_len == 0 or after_len > 128) return 2;
+    const before = if (before_ptr) |ptr| ptr[0..before_len] else return 2;
+    const after = if (after_ptr) |ptr| ptr[0..after_len] else return 2;
+    const host_id = (@as(u128, host_id_hi) << 64) | host_id_lo;
+    const runtime_id = (@as(u128, runtime_id_hi) << 64) | runtime_id_lo;
+    app_session.beginNotificationContinuity(host_id, runtime_id, before, after) catch return 2;
+    return 1;
+}
+
+/// Finalizes the app receipt identity and sends the after marker through the real remote backend.
+pub export fn maru_macos_app_session_commit_notification_continuity(
+    session: ?*AppSession,
+    scenario: u32,
+    request_ptr: ?[*]const u8,
+    request_len: usize,
+    event_id: u64,
+    attached_at_ns: u64,
+    deadline_ns: u64,
+) u32 {
+    const app_session = session orelse return 0;
+    if ((scenario != 1 and scenario != 2) or request_len == 0 or request_len > 128) return 2;
+    const request = if (request_ptr) |ptr| ptr[0..request_len] else return 2;
+    app_session.commitNotificationContinuity(@intCast(scenario), request, event_id, attached_at_ns, deadline_ns) catch return 2;
+    return 1;
+}
+
+/// Takes the canonical second frame exact once. 0=pending, 1=ready, 2=sticky failure.
+pub export fn maru_macos_app_session_take_notification_continuity_receipt(
+    session: ?*AppSession,
+    out_ptr: ?*?[*]const u8,
+    out_len: ?*usize,
+) u32 {
+    const app_session = session orelse return 2;
+    const ptr = out_ptr orelse return 2;
+    const len = out_len orelse return 2;
+    ptr.* = null;
+    len.* = 0;
+    return switch (app_session.takeNotificationContinuityReceipt()) {
+        .pending => 0,
+        .failed => 2,
+        .ready => |receipt_bytes| blk: {
+            ptr.* = receipt_bytes.ptr;
+            len.* = receipt_bytes.len;
+            break :blk 1;
+        },
+    };
 }
 
 // G12 BEL: 활성 세션에 pending 벨이 있으면 1(코어 플래그 비움), 없으면 0. Swift가 tick마다 호출해 시스템 벨

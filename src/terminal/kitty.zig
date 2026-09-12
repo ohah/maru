@@ -116,6 +116,11 @@ pub const StoredPlacement = struct {
     parent_placement_id: u32 = 0,
     parent_offset_x: i32 = 0,
     parent_offset_y: i32 = 0,
+    /// **이 placement 가 속한 화면.** kitty 명세에서 그래픽은 화면에 귀속된다 — alt 화면(vim 이
+    /// 쓰는 그것)으로 넘어가면 primary 의 이미지는 보이지 않아야 하고, 돌아오면 다시 보여야 한다.
+    /// `anchor_row` 는 그 화면 기준 절대 행이라 화면이 다르면 **좌표계 자체가 다르다** — 섞어
+    /// 그리면 엉뚱한 자리에 찍힌다(실측: vim 화면 위에 셸의 이미지가 그대로 떴다).
+    on_alt: bool = false,
 };
 
 /// 디코드된 kitty graphics 이미지(픽셀 버퍼를 소유). bpp=3(RGB)/4(RGBA). generation은 storage가
@@ -275,17 +280,34 @@ fn kittyAdvanceRows(self: *const TerminalCore, cmd: KittyGraphicsCommand) u16 {
     return @intFromFloat(@min(span, 65535.0));
 }
 
-/// placement를 추가하거나 같은 (image_id, placement_id)면 교체한다. 상한 초과면 거부(graceful),
+/// placement를 추가하거나 같은 (image_id, placement_id, 화면)이면 교체한다. 상한 초과면 거부(graceful),
 /// OOM이면 표시를 포기한다(절대 panic 없음 — 출력 경로 견고성).
+///
+/// **화면이 키에 들어간다.** alt 화면의 TUI 가 같은 (image_id, placement_id) 를 쓰면 primary 의
+/// placement 를 덮어써 버리고, alt 를 떠난 뒤 셸 화면의 이미지가 사라진다 — 두 화면은 좌표계도
+/// 수명도 다르므로 자리도 따로 쓴다.
 fn addOrReplacePlacement(self: *TerminalCore, p: StoredPlacement) void {
     for (self.kitty_placements.items) |*existing| {
-        if (existing.image_id == p.image_id and existing.placement_id == p.placement_id) {
+        if (existing.image_id == p.image_id and existing.placement_id == p.placement_id and
+            existing.on_alt == p.on_alt)
+        {
             existing.* = p;
             return;
         }
     }
     if (self.kitty_placements.items.len >= core.TerminalCore.max_kitty_placements) return; // 폭주 방어선
     self.kitty_placements.append(self.allocator, p) catch {};
+}
+
+/// alt 화면에서 만들어진 placement 를 전부 버린다(`leaveAltScreen` 이 부른다). 이미지는 건드리지
+/// 않는다 — 픽셀은 세션 소유이고 primary 에서 다시 배치될 수 있다.
+pub fn dropAltScreenPlacements(self: *TerminalCore) void {
+    var i: usize = 0;
+    while (i < self.kitty_placements.items.len) {
+        if (self.kitty_placements.items[i].on_alt) {
+            _ = self.kitty_placements.orderedRemove(i);
+        } else i += 1;
+    }
 }
 
 /// 특정 image_id의 placement를 모두 제거한다(delete 시 이미지와 함께). 순서를 보존해(orderedRemove)
@@ -351,6 +373,7 @@ pub fn kittyImageVisibleInViewport(self: *TerminalCore, image_id: u32) bool {
     const top_abs: i64 = @intCast(self.screen.sb.count - @min(self.view_offset, self.screen.sb.count));
     for (self.kitty_placements.items) |p| {
         if (p.image_id != image_id) continue;
+        if (p.on_alt != self.alt_active) continue; // 다른 화면 = 안 보인다 = 돌 필요 없다
         // 상대 placement 는 부모가 정한다 — 부모를 못 풀면 렌더도 그리지 않으므로 여기서도 뺀다
         // (`buildPlacementViews` 와 같은 판단이라야 「보이는데 안 돈다」가 생기지 않는다).
         var anchor_row = p.anchor_row;
@@ -380,6 +403,9 @@ pub fn buildPlacementViews(self: *TerminalCore, top_abs: usize) []const types.Ki
     }
     var out: usize = 0;
     for (self.kitty_placements.items) |p| {
+        // **다른 화면의 placement 는 그리지 않는다.** 지우지도 않는다 — alt 를 떠나면 primary 의
+        // 이미지가 그 자리에 다시 나타나야 한다(vim 을 닫으면 그 전 화면이 그대로 돌아오는 것과 같다).
+        if (p.on_alt != self.alt_active) continue;
         // relative placement 는 **여기서** 부모 위치를 푼다 — 저장 시점에 굳히면 부모가 움직여도
         // 안 따라간다(명세는 따라가야 한다고 정한다). 부모가 없거나 virtual(화면 위치를 코어가
         // 모른다)이면 **그리지 않는다** — 엉뚱한 자리에 놓는 것보다 낫다.
@@ -633,6 +659,7 @@ fn kittyDisplay(self: *TerminalCore, cmd: KittyGraphicsCommand) KittyStatus {
         .placement_id = cmd.placement_id,
         .anchor_row = self.screen.sb.count + self.screen.cursor.row, // 커서의 절대 행
         .anchor_col = self.screen.cursor.col,
+        .on_alt = self.alt_active, // 지금 화면에 귀속시킨다
         .cell_x_offset = cmd.cell_x_offset,
         .cell_y_offset = cmd.cell_y_offset,
         .src_x = cmd.src_x,

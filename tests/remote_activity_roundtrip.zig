@@ -177,6 +177,87 @@ test "헬퍼 activity 왕복: 저쪽이 훑은 자리·라벨·결말이 파서�
     try std.testing.expectEqual(local.items[1].line_offset, flags.resume_offset);
 }
 
+test "헬퍼 activity: 미결 호출이 없으면 자국이 곧 읽은 데까지다 (RAV7b)" {
+    // 🔥 적대적 C2: 위 왕복 판정자는 **미결 호출이 있는** 픽스처만 태운다 — 그러면 헬퍼가 자국을
+    // 「언제나 가장 이른 활동 줄」로 내도 안 걸리고, **자랄 때마다 파일을 통째로 다시 훑는다**
+    // (이 슬라이스가 없애려던 그것). 되돌릴 이유가 없을 때 **안 되돌리는지**를 여기서 본다.
+    const bin = helperBin() orelse return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "/tmp/maru-rav7b-done.{d}.jsonl", .{std.c.getpid()});
+    const f = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true });
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    // 호출 하나 · 그 결말 하나 — **기다리는 것이 없다**.
+    const body =
+        \\{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_01","name":"Bash","input":{"command":"echo hi"}}]}}
+        \\{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"hi","tool_use_id":"toolu_01"}]}}
+        \\
+    ;
+    _ = try f.writePositional(io, &.{body}, 0);
+    f.close(io);
+
+    const out = try runHelper(gpa, io, bin, path);
+    defer gpa.free(out.stdout);
+    defer gpa.free(out.stderr);
+
+    var parser = wire.Parser.init(out.stdout);
+    var flags: wire.ScanFlags = .{};
+    while (try parser.next()) |ev| switch (ev) {
+        .flags => |fl| flags = fl,
+        .remote_error => |msg| {
+            std.debug.print("원격이 실패를 보고했다: {s}\n", .{msg});
+            return error.TestUnexpectedResult;
+        },
+        else => {},
+    };
+    try std.testing.expect(parser.complete());
+
+    const size = (try std.Io.Dir.cwd().statFile(io, path, .{})).size;
+    try std.testing.expectEqual(size, flags.head_bytes);
+    // **되돌리지 않았다.** 마지막 줄이 개행으로 끝나므로 `consumed` 가 곧 파일 끝이다.
+    try std.testing.expectEqual(size, flags.resume_offset);
+}
+
+test "헬퍼 activity: 미완 줄은 자국 밖이다 — 반쪽 줄을 활동으로 세지 않는다 (RAV7b)" {
+    // 마지막 줄이 개행 없이 끝나면 그 줄은 **아직 안 본 것**이다. 자국이 파일 끝이면 다음 회차가
+    // 그 줄을 건너뛰어 **그 활동이 영영 사라진다**(§4.2 의 `last_offset` 규율).
+    const bin = helperBin() orelse return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "/tmp/maru-rav7b-partial.{d}.jsonl", .{std.c.getpid()});
+    const f = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true });
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    const complete =
+        \\{"type":"assistant","message":{"content":[{"type":"text","text":"a"}]}}
+    ;
+    const half = "{\"type\":\"assis";
+    var at: u64 = 0;
+    at += try f.writePositional(io, &.{complete}, at);
+    at += try f.writePositional(io, &.{"\n"}, at);
+    _ = try f.writePositional(io, &.{half}, at);
+    f.close(io);
+
+    const out = try runHelper(gpa, io, bin, path);
+    defer gpa.free(out.stdout);
+    defer gpa.free(out.stderr);
+
+    var parser = wire.Parser.init(out.stdout);
+    var flags: wire.ScanFlags = .{};
+    while (try parser.next()) |ev| switch (ev) {
+        .flags => |fl| flags = fl,
+        else => {},
+    };
+    try std.testing.expect(parser.complete());
+
+    // **읽기는 파일 끝까지 갔지만** 자국은 개행 다음에서 멈춘다.
+    try std.testing.expectEqual(@as(u64, complete.len + 1 + half.len), flags.head_bytes);
+    try std.testing.expectEqual(@as(u64, complete.len + 1), flags.resume_offset);
+}
+
 test "헬퍼 activity: 상대경로는 원격이 거부한다 — 저쪽 cwd 의 다른 파일을 안 연다" {
     const bin = helperBin() orelse return error.SkipZigTest;
     const gpa = std.testing.allocator;

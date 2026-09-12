@@ -217,6 +217,30 @@ test "빌드가 만드는 변종과 앱이 찾는 변종이 같다" {
     try std.testing.expect(std.mem.indexOf(u8, install, "pub fn assetRelPath") != null);
 }
 
+test "읽다 죽은 파일에는 자국을 안 찍는다 (RAV7b · 적대적 A1)" {
+    // 🔥 **실물로는 못 만든다.** `Truncated` 는 읽기 실패나 OOM 에서만 나므로 픽스처로 재현할 수
+    // 없고, 그래서 이 계약은 **소스에서만** 셀 수 있다(§6.3 게이트와 같은 자리·같은 이유).
+    //
+    // **막는 것**: 머리 파일을 읽다 중간에 죽었는데 그 자리를 자국으로 찍으면, 신선도가 그 자리에서
+    // 1 바이트를 청해 **언제나 바이트를 받는다**(파일이 더 크니까) — 그것을 「자랐다」로 읽어
+    // **매 주기마다 통째로 다시 훑는다**. RAV7b 가 없애려던 바로 그것이 되돌아온다.
+    const allocator = std.testing.allocator;
+    const src = try read(allocator, "tools/remote-watch/main.zig", 256 * 1024);
+    defer allocator.free(src);
+    const code = try stripComments(allocator, src);
+    defer allocator.free(code);
+
+    // ⑴ 자국을 찍는 가드가 **읽기 실패를 본다**. `at == 0` 만 보면 위 결함이 그대로 산다.
+    try std.testing.expect(std.mem.indexOf(u8, code, "if (at == 0 and !head_broke)") != null);
+    // ⑵ 그 깃발이 **머리 파일의** 실패에서만 선다 — 부모가 깨졌다고 머리 자국을 버리면 신선도가
+    //    쓸데없이 꺼진다(부모는 어차피 안 자란다).
+    try std.testing.expect(std.mem.indexOf(u8, code, "head_broke = at == 0;") != null);
+    // ⑶ 자국 둘이 **같은 가드 아래** 있다. 하나만 지키면 다른 하나가 거짓으로 국경을 건넌다.
+    const guarded = try bodyOf(code, "if (at == 0 and !head_broke)", "\n        }", 512);
+    try std.testing.expect(std.mem.indexOf(u8, guarded, "head_bytes =") != null);
+    try std.testing.expect(std.mem.indexOf(u8, guarded, "resume_offset =") != null);
+}
+
 /// 줄 주석(`//`)을 벗긴다. 문자열 안의 `//` 는 이 소스에 없다 — 생기면 이 헬퍼부터 고쳐야 한다.
 fn stripComments(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;

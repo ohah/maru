@@ -131,6 +131,9 @@ zig build test > /tmp/t.log 2>&1;  mise run test-verdict /tmp/t.log
 
 ## 빌드와 테스트
 
+- Notification Center release 앱 경로의 closed mode, 격리 root, 실제 delegate→attach 결과 결속과 상속 pipe receipt를 검증: `zig build test-session-host-notification-app-scenario`.
+- Notification Center release callback/attach pure owner의 exact request/route/time 결속을 검증: `zig build test-session-host-notification-scenario-receipt`.
+
 - signed-upgrade 릴리스 증거 하네스의 canonical v2 writer·UUID/runtime-count 정책과 제품 executable compile만 빠르게 검증(macOS, 서명 아티팩트 불필요): `zig build test-session-host-signed-upgrade-harness`.
 
 - candidate evidence와 네 local attestation bundle의 atomic durable aggregate handoff 및 격리 APFS 실측: `zig build test-session-host-release-adapter-candidate-aggregate-handoff` (Debug·ReleaseFast에서 harness-owned 임시 루트만 사용하며 실제 앱 session-host 상태나 프로세스는 건드리지 않는다).

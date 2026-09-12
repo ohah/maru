@@ -220,7 +220,7 @@ test "Swift startup acquires the writer lease before AppKit and mutable app boot
     try std.testing.expect(failure_exit < config_bootstrap);
     const prelease_forbidden = [_][]const u8{
         "NSApplication.shared",
-        "MaruAppHostController()",
+        "MaruAppHostController(",
         "setActivationPolicy",
         "app.run()",
     };

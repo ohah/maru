@@ -70,9 +70,24 @@ final class NotificationReleaseScenarioReceiptOwner {
     }
 
     @discardableResult
-    func observeAttach(_ kind: NotificationReleaseAttachKind, atNs: UInt64) -> Bool {
+    func observeAttach(
+        requestIdentifier: String,
+        hostIdHigh: UInt64,
+        hostIdLow: UInt64,
+        runtimeIdHigh: UInt64,
+        runtimeIdLow: UInt64,
+        eventId: UInt64,
+        kind: NotificationReleaseAttachKind,
+        atNs: UInt64
+    ) -> Bool {
         guard !failed, attachAtNs == nil, attachKind == nil,
-              let callbackAtNs, atNs > callbackAtNs, atNs < expectation.deadlineNs else {
+              let callbackAtNs, atNs > callbackAtNs, atNs < expectation.deadlineNs,
+              requestIdentifier == expectation.requestIdentifier,
+              hostIdHigh == expectation.hostIdHigh,
+              hostIdLow == expectation.hostIdLow,
+              runtimeIdHigh == expectation.runtimeIdHigh,
+              runtimeIdLow == expectation.runtimeIdLow,
+              eventId == expectation.eventId else {
             failed = true
             return false
         }

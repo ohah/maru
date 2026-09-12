@@ -2972,8 +2972,16 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   exact once로 결속하고 fixed JSON receipt로만 투영한다. callback 전 attach, 중복 callback/attach, 같은 request의 다른 route,
   시간 역전·deadline 초과는 receipt를 만들지 않으며 다른 request는 transaction을 오염시키지 않고 무시한다. 이 pure
   final-address owner는 OS response를 합성하거나 attach를
-  실행하지 않으며, 후속 앱 scenario mode가 실제 delegate/attach 경로에서만 호출한다. R2b2 concrete adapter와 앱 scenario mode,
-  R2c mounted candidate composition은 R2a owner를 통과해야 한다.
+  실행하지 않으며, 앱 scenario mode가 실제 delegate/attach 경로에서만 호출한다. 앱 mode는 closed scenario와 canonical
+  request/route/deadline을 시작 시 한 번만 읽고, runner가 미리 연 **상속 write FD** 하나에만 complete receipt를 exact once 쓴다.
+  pathname을 열거나 기존 파일을 지우지 않으며, `sun_path` 상한 안의 UUID-derived compact 0700 root 아래 짧은 `/s` session-host와
+  `/h` HOME을 쓰고 그 root를 증명하는 runner-owned launch nonce가
+  없으면 제품 AppSession 생성 전에 fail-close한다. 실제 delegate callback이 같은 request/route를 admit한 뒤 정상 attach 경로가
+  `bound` 또는 `recovered`를 반환한 경우에만 owner를 완성하며, queued cold callback도 원래 callback 시각을 보존한다. malformed
+  mode/env/FD, callback·attach 불일치, short/duplicate write는 receipt가 아니다. 이 app scenario mode와 pure owner는
+  `test-session-host-notification-app-scenario` 및 `test-session-host-notification-scenario-receipt`가 검증한다. 상위 R2b2 concrete adapter가 pipe/FD payload를
+  strict parse한 뒤 absent 0600 leaf publication과 child/notification/root cleanup을 단일 소유한다. R2b2 concrete adapter와 앱
+  scenario mode, R2c mounted candidate composition은 R2a owner를 통과해야 한다.
   로그인된 전용 macOS runner의 새 mode `0700` root에서 DMG를
   read-only mount하고 그 안의 exact `Maru.app`과 main executable을 no-follow pin한다. 앱·CLI·helper의 동일
   TeamIdentifier/hardened runtime과 candidate digest를 확인한 뒤에만 두 시나리오를 순서대로 실행한다. runner는 이미

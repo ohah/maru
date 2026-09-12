@@ -82569,6 +82569,72 @@ test "활동 뷰: 원격 신선도 답이 「자랐을 때만」 다시 훑는�
     try std.testing.expectEqual(@as(u64, 0), session.agent_activity.remote_resume_offset);
 }
 
+test "활동 뷰: 원격 신선도 — 부모 경로가 소비자까지 온다 (RAV4b)" {
+    // 🔥 **기존 결함의 고침**(계획 §21.6). `refresh` 는 `remoteHeadChain` 으로 **머리 하나**만
+    // 세우는데 헬퍼는 부모까지 훑어 `file_index = 1` 히트를 보낸다 — 그 경로를 안 받으면
+    // `remotePathForIndex(1)` 이 null 이라 **부모 활동을 펼치면 「못 읽었다」**가 뜬다. 저쪽은 줄 수
+    // 있는데 이쪽이 **경로를 몰라서** 못 청하는 것이고, Codex 재개는 실측 58% 다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    session.agent_activity.source_remote = true;
+    // `refresh` 가 세우는 모양 — **머리 하나**다.
+    _ = session.agent_activity.chain.append("/home/u/child.jsonl");
+    try std.testing.expectEqual(@as(?[]const u8, null), session.agent_activity.chain.get(1));
+
+    // 저쪽이 부모까지 풀어 보냈다.
+    var result: agent_image_scan_backend.Result = .{ .remote_head_bytes = 4096 };
+    defer result.deinit(allocator);
+    _ = result.remote_chain.setAt(0, "/home/u/child.jsonl");
+    _ = result.remote_chain.setAt(1, "/home/u/parent.jsonl");
+
+    agent_activity_ops.applyRemoteStamps(session, &result);
+
+    // **이제 부모 경로를 안다** — 펼침이 그 파일의 구간을 청할 수 있다.
+    try std.testing.expectEqualStrings("/home/u/parent.jsonl", session.agent_activity.chain.get(1).?);
+    try std.testing.expectEqualStrings("/home/u/child.jsonl", session.agent_activity.chain.head());
+}
+
+test "활동 뷰: 원격 신선도 — 체인을 못 푼 답은 경로를 «안 덮는다» (RAV4b)" {
+    // 머리가 빈 답은 체인을 아예 못 푼 것이다(전송 실패·잘림). 그때 덮으면 **지금 보고 있는 소스의
+    // 경로까지 잃어** 펼침·신선도가 통째로 죽는다 — 「덜 아는 쪽」이 아니라 **더 잃는 쪽**이다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    session.agent_activity.source_remote = true;
+    _ = session.agent_activity.chain.append("/home/u/child.jsonl");
+
+    var result: agent_image_scan_backend.Result = .{ .partial = true }; // 체인이 비었다
+    defer result.deinit(allocator);
+    agent_activity_ops.applyRemoteStamps(session, &result);
+
+    try std.testing.expectEqualStrings("/home/u/child.jsonl", session.agent_activity.chain.head());
+}
+
 test "활동 뷰: 원격 신선도 자국은 체인이 여럿이어도 산다 (RAV7b)" {
     // 🔥 **RAV7a 적대적 S1 을 고치는 자리.** 그때는 `scanned_bytes`(체인 전체의 합)밖에 없어 파일이
     // 둘 이상이면 자국을 **0 으로 버렸고**, 그래서 재개 세션(Codex 실측 58%)은 신선도가 통째로

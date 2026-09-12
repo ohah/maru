@@ -343,6 +343,19 @@ pub const Chain = struct {
         return true;
     }
 
+    /// **그 자리에** 놓는다(RAV4b). 원격 wire 는 `F <index> <path>` 로 **번호와 함께** 오고, 헬퍼는
+    /// 줄을 **건너뛸 수 있다**(경로가 상한을 넘으면) — `append` 로 받으면 자리가 밀려 `file_index` 가
+    /// **엉뚱한 파일**을 가리킨다(계약 §2.1 이 금하는 그것).
+    ///
+    /// 계획 §11.3 G1 이 「자리를 번호로 싣는다 — 못 연 파일이 있어도 뒤가 안 밀린다」고 정한 것을
+    /// **받는 쪽이 지키는** 자리다. 빈 자리는 `get` 이 null 을 낸다.
+    pub fn setAt(self: *Chain, i: usize, value: []const u8) bool {
+        if (i >= max_chain) return false;
+        if (!self.files[i].set(value)) return false;
+        if (i + 1 > self.len) self.len = i + 1;
+        return true;
+    }
+
     pub fn clear(self: *Chain) void {
         for (&self.files) |*f| f.clear();
         self.len = 0;

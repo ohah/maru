@@ -50,6 +50,14 @@ pub const Result = struct {
     /// 거짓 주석을 잡았다). 남겨 두는 이유는 RAV7b-3 이다: 이어읽기는 「부모를 재사용하고 머리만
     /// 다시 훑는다」이고, **재사용할 부모가 있는지**가 곧 이 값이다.
     remote_file_count: u8 = 0,
+    /// 🔥 **원격이 푼 체인 그대로**(RAV4b). 소비자의 `chain` 은 `remoteHeadChain` 으로 **머리 하나**만
+    /// 세우는데 헬퍼는 부모까지 훑어 `file_index = 1` 히트를 보낸다 — 그 경로를 안 받으면
+    /// `chain.get(1)` 이 null 이라 **재개 세션에서 부모 활동을 펼치면 「못 읽었다」**가 뜬다
+    /// (저쪽은 줄 수 있는데 이쪽이 못 청한다 · 계획 §21.6 · Codex 재개 실측 58%).
+    ///
+    /// ⚠️ **`F` 줄의 번호를 자리로 쓴다**(적대적 S6). 헬퍼는 줄을 건너뛸 수 있으므로 순서대로 담으면
+    /// 자리가 밀려 `file_index` 가 **엉뚱한 파일**을 가리킨다(계획 §11.3 G1 이 번호를 실은 이유다).
+    remote_chain: index.Chain = .{},
     /// **머리 파일에서 읽은 바이트**(판 2 · RAV7b). 신선도가 이 자리에서 1 바이트를 청한다 —
     /// `scanned_bytes`(체인 전체의 합)와 **다른 값이다**.
     remote_head_bytes: u64 = 0,
@@ -569,7 +577,10 @@ fn remoteResultFromWire(allocator: std.mem.Allocator, bytes: []const u8, exit_co
         malformed = true;
         break :blk null;
     }) |event| switch (event) {
-        .file => result.remote_file_count +|= 1,
+        .file => |cf| {
+            result.remote_file_count +|= 1;
+            _ = result.remote_chain.setAt(cf.index, cf.path);
+        },
         .flags => |flags| {
             result.partial = result.partial or flags.partial;
             result.image_partial = result.image_partial or flags.image_partial;
@@ -712,6 +723,44 @@ test "원격 매핑: 체인 파일 수를 센다" {
         defer result.deinit(testing.allocator);
         try testing.expectEqual(@as(u8, 2), result.remote_file_count);
     }
+}
+
+test "원격 매핑: 체인 경로를 그대로 싣는다 — 부모 펼침이 그것에 달려 있다 (RAV4b)" {
+    // 🔥 §21.6 의 기존 결함: 소비자의 `chain` 은 **머리 하나**뿐인데 헬퍼는 부모까지 훑어
+    // `file_index = 1` 히트를 보낸다. 그 경로가 안 오면 `chain.get(1)` 이 null 이라 **재개 세션에서
+    // 부모 활동을 펼치면 「못 읽었다」**가 뜬다 — 저쪽은 줄 수 있는데 이쪽이 못 청한다.
+    var buf: [8192]u8 = undefined;
+    var n = wire.appendHeader(&buf, 0).?;
+    n = wire.appendFile(&buf, n, 0, "/home/u/child.jsonl").?;
+    n = wire.appendFile(&buf, n, 1, "/home/u/parent.jsonl").?;
+    n = wire.appendFlags(&buf, n, .{ .head_bytes = 10, .resume_offset = 10 }).?;
+    n = wire.appendTail(&buf, n, 0).?;
+
+    var result = remoteResultFromWire(testing.allocator, buf[0..n], 0, 1);
+    defer result.deinit(testing.allocator);
+    try testing.expectEqualStrings("/home/u/child.jsonl", result.remote_chain.get(0).?);
+    try testing.expectEqualStrings("/home/u/parent.jsonl", result.remote_chain.get(1).?);
+}
+
+test "원격 매핑: 체인은 «번호»를 자리로 쓴다 — 줄이 빠져도 뒤가 안 밀린다 (RAV4b · 적대적 S6)" {
+    // 🔥 헬퍼는 `appendFile(…) orelse continue` 로 줄을 **건너뛸 수 있다**(경로가 상한을 넘으면).
+    // 순서대로 담으면 자리가 밀려 `file_index = 2` 인 히트가 **엉뚱한 파일**을 가리키고, 펼침이 남의
+    // 바이트를 읽는다(계약 §2.1). 계획 §11.3 G1 이 번호를 실은 이유이고, 받는 쪽이 그것을 지킨다.
+    var buf: [8192]u8 = undefined;
+    var n = wire.appendHeader(&buf, 0).?;
+    n = wire.appendFile(&buf, n, 0, "/home/u/child.jsonl").?;
+    // 자리 1 은 **안 온다**(헬퍼가 건너뛰었다).
+    n = wire.appendFile(&buf, n, 2, "/home/u/grand.jsonl").?;
+    n = wire.appendFlags(&buf, n, .{ .head_bytes = 10, .resume_offset = 10 }).?;
+    n = wire.appendTail(&buf, n, 0).?;
+
+    var result = remoteResultFromWire(testing.allocator, buf[0..n], 0, 1);
+    defer result.deinit(testing.allocator);
+    try testing.expectEqualStrings("/home/u/child.jsonl", result.remote_chain.get(0).?);
+    // **빈 자리는 비어 있다** — 밀어 넣지 않는다.
+    try testing.expectEqual(@as(?[]const u8, null), result.remote_chain.get(1));
+    // 그리고 자리 2 는 **자리 2** 다.
+    try testing.expectEqualStrings("/home/u/grand.jsonl", result.remote_chain.get(2).?);
 }
 
 test "원격 매핑: 체인이 여럿이어도 머리 자국을 쓴다 — 합과 갈라 싣는다 (RAV7b)" {

@@ -10651,3 +10651,32 @@ test "마우스 리포트: 모드가 무엇을 거르는가 — motion 과 x10 r
     core.reportMouse(0, 3, 4, 30, 80, false, false, 0);
     try std.testing.expectEqualStrings("\x1b[<0;4;5m", core.pendingResponse()); // 소문자 m = release
 }
+
+test "kitty 애니메이션: 안 움직인 이미지의 generation 은 안 올라간다 (적대적 검증)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 6 });
+    defer core.deinit();
+    var b64: [64]u8 = undefined;
+    var seq: [200]u8 = undefined;
+    const px = [_]u8{ 1, 2, 3, 255 } ** 4;
+    const enc = std.base64.standard.Encoder.encode(&b64, &px);
+
+    // 두 애니메이션을 만든다. 하나는 gap 이 짧아 곧 넘어가고(A), 하나는 아주 길어 안 넘어간다(B).
+    for ([_]u32{ 1, 2 }) |id| {
+        try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i={d},q=2;{s}\x1b\\", .{ id, enc }));
+        try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i={d},z=10,q=2;{s}\x1b\\", .{ id, enc }));
+        try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=p,i={d},p={d},q=2\x1b\\", .{ id, id }));
+    }
+    try core.write("\x1b_Ga=a,i=1,r=1,z=10,s=3,q=2\x1b\\"); // A: gap 10ms
+    try core.write("\x1b_Ga=a,i=2,r=1,z=100000,s=3,q=2\x1b\\"); // B: gap 100초 — 안 넘어간다
+
+    const gen_b_before = core.kitty_images.map.get(2).?.generation;
+    const frame_b_before = core.kitty_images.map.get(2).?.current_frame;
+
+    // **회귀 판정**: `changed` 가 함수 전역이라 A 가 넘어가면 그 뒤로 **안 움직인 B 까지** generation 이
+    // 올라갔다. generation 은 렌더러의 텍스처 재업로드 키다 — 안 바뀐 이미지를 매 tick 다시 올리는
+    // 셈이고, 애니메이션이 여럿이면 그만큼 곱해진다(픽셀은 그대로인데 GPU 업로드만 늘어난다).
+    try std.testing.expect(core.advanceAnimations(10));
+    try std.testing.expectEqual(@as(u32, 2), core.kitty_images.map.get(1).?.current_frame); // A 는 넘어갔다
+    try std.testing.expectEqual(frame_b_before, core.kitty_images.map.get(2).?.current_frame); // B 는 그대로
+    try std.testing.expectEqual(gen_b_before, core.kitty_images.map.get(2).?.generation); // **그러니 generation 도 그대로**
+}

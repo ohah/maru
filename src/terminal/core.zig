@@ -10607,3 +10607,47 @@ test "OSC 52: 상한 초과와 빈 데이터 두 방어선 (적대적 검증 스
     try std.testing.expect(!core.takeClipboardWriteRejected()); // 1회성이다
     try std.testing.expectEqualStrings("Hello", core.clipboard_write.items); // 이전 내용은 보존
 }
+
+test "마우스 리포트: 모드가 무엇을 거르는가 — motion 과 x10 release (적대적 검증 스윕)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 6 });
+    defer core.deinit();
+
+    // **방어선 스윕에서 나온 두 자리**(2026-09-12). 마우스 모드는 「무엇을 보고하는가」가 아니라
+    // **「무엇을 거르는가」**로 갈린다. 그 필터 둘을 지워도 아무도 몰랐다 — 켠 모드에서 나가는
+    // 바이트만 재고 있었고, **안 나가야 하는 것이 안 나가는지**는 아무도 안 봤다.
+    //
+    // 걸러지지 않으면 앱은 요청하지 않은 이벤트를 받는다: normal 모드 앱이 drag 마다 보고를 받아
+    // 선택이 제멋대로 늘어나고, x10 앱은 release 를 press 로 오해해 클릭이 두 번 든다.
+
+    // (1) **motion 은 button·any 에서만** 나간다. normal(1000)에서는 걸러진다.
+    try core.write("\x1b[?1000h\x1b[?1006h"); // normal + SGR
+    core.clearResponse();
+    core.reportMouse(0, 3, 4, 30, 80, true, true, 0); // motion=true
+    try std.testing.expectEqual(@as(usize, 0), core.pendingResponse().len);
+    // 같은 자리에서 press 는 나간다 — 게이트가 넓어 리포트를 통째로 막은 게 아니다(양성 대조).
+    core.reportMouse(0, 3, 4, 30, 80, true, false, 0);
+    try std.testing.expectEqualStrings("\x1b[<0;4;5M", core.pendingResponse());
+    core.clearResponse();
+
+    // button(1002)으로 올리면 같은 motion 이 나간다 — 필터가 모드에 달렸음을 증명한다.
+    try core.write("\x1b[?1002h");
+    core.clearResponse();
+    core.reportMouse(0, 3, 4, 30, 80, true, true, 0);
+    try std.testing.expectEqualStrings("\x1b[<32;4;5M", core.pendingResponse()); // motion 은 +32
+    core.clearResponse();
+
+    // (2) **x10(9)은 release 를 안 보낸다.** press 만 나간다.
+    try core.write("\x1b[?1002l\x1b[?1000l\x1b[?9h");
+    core.clearResponse();
+    core.reportMouse(0, 3, 4, 30, 80, false, false, 0); // release
+    try std.testing.expectEqual(@as(usize, 0), core.pendingResponse().len);
+    core.reportMouse(0, 3, 4, 30, 80, true, false, 0); // press 는 나간다(양성 대조)
+    try std.testing.expect(core.pendingResponse().len > 0);
+    core.clearResponse();
+
+    // normal(1000)에서는 release 가 나간다 — x10 만의 규칙임을 증명한다.
+    try core.write("\x1b[?9l\x1b[?1000h\x1b[?1006h");
+    core.clearResponse();
+    core.reportMouse(0, 3, 4, 30, 80, false, false, 0);
+    try std.testing.expectEqualStrings("\x1b[<0;4;5m", core.pendingResponse()); // 소문자 m = release
+}

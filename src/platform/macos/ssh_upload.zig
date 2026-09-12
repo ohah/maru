@@ -284,6 +284,21 @@ pub fn runArgvCapped(
 /// 「잘림」으로 읽는다 — 조용한 절단이 아니다.
 ///
 /// stdin 은 즉시 EOF 다(목록은 입력이 없다).
+/// 취소를 묻는 주기(ms). 짧으면 CPU 를 태우고 길면 접는 것이 늦다 — `poll` 한 번의 비용은 무시할
+/// 수준이라 **반응성 쪽**으로 기운다(로컬 워커가 64 KiB 청크마다 보는 것과 같은 결).
+const cancel_poll_ms: i32 = 50;
+
+/// **접을지 묻는 훅**(RAV7b-4). `null` 이면 예전과 **바이트 동일**하다 — 훅을 안 주는 호출자(RF
+/// 스택 전부)는 아무것도 안 바뀐다.
+///
+/// 참을 내면 읽기를 멈추고 **읽기 fd 를 닫는다**: 자식(ssh·헬퍼)은 다음 write 의 EPIPE 로 끝난다
+/// (헬퍼 `putAll` 이 그 계약이고, 상한 초과가 **이미 같은 수법**을 쓴다 — 적대적 V4).
+pub const CancelHook = struct {
+    ctx: *anyopaque,
+    /// **백그라운드 스레드에서 불린다.** `std.Io` 도 로컬 파일시스템도 만지지 말 것.
+    should_cancel: *const fn (ctx: *anyopaque) bool,
+};
+
 pub fn runRemoteCapped(
     allocator: std.mem.Allocator,
     ctl: []const u8,
@@ -292,6 +307,19 @@ pub fn runRemoteCapped(
     args: []const []const u8,
     max_bytes: usize,
     out: *[]u8,
+) !c_int {
+    return runRemoteCappedCancelable(allocator, ctl, dest, script, args, max_bytes, out, null);
+}
+
+pub fn runRemoteCappedCancelable(
+    allocator: std.mem.Allocator,
+    ctl: []const u8,
+    dest: []const u8,
+    script: []const u8,
+    args: []const []const u8,
+    max_bytes: usize,
+    out: *[]u8,
+    cancel: ?CancelHook,
 ) !c_int {
     const cmd = try remote_shell.wrapAlloc(allocator, script, args);
     defer allocator.free(cmd);
@@ -339,7 +367,23 @@ pub fn runRemoteCapped(
     errdefer buf.deinit(allocator);
     var tmp: [16 * 1024]u8 = undefined;
     var overflowed = false;
+    var cancelled = false;
     while (true) {
+        // **접을지 먼저 묻는다**(RAV7b-4). 훅이 없으면 이 블록은 통째로 안 돈다 — 예전 경로 그대로다.
+        if (cancel) |c| {
+            // `read` 는 블로킹이라 취소를 **영영 못 본다**. 짧은 `poll` 로 깨어나 묻는다 — 자식이
+            // 아직 아무것도 안 썼어도(ssh 접속·저쪽 스캔 중) 그 사이에 접을 수 있다.
+            var fds = [_]std.posix.pollfd{.{ .fd = out_pipe[0], .events = std.posix.POLL.IN, .revents = 0 }};
+            // 🔥 **`poll` 실패를 타임아웃과 가른다**(적대적 W1). `catch 0` 으로 뭉개면 영구 실패
+            // (EBADF 등)에서 **영원히 `continue`** 하고 `read` 를 **한 번도 안 한다** — 취소가 안 오면
+            // 그 스레드가 굳는다. 실패면 예전 경로(블로킹 `read`)로 떨어뜨린다.
+            const ready: usize = std.posix.poll(&fds, cancel_poll_ms) catch 1;
+            if (c.should_cancel(c.ctx)) {
+                cancelled = true;
+                break;
+            }
+            if (ready == 0) continue; // 아직 올 것이 없다 — 다시 묻는다
+        }
         const n = std.c.read(out_pipe[0], &tmp, tmp.len);
         if (n < 0) {
             if (std.posix.errno(n) == .INTR) continue; // 시그널은 잘림이 아니다 — 재시도(적대적 검증 3 회차)
@@ -353,9 +397,19 @@ pub fn runRemoteCapped(
             break;
         }
     }
-    _ = std.c.close(out_pipe[0]); // 넘쳤으면 이 닫기가 자식을 EPIPE 로 끝낸다
+    // 🔥 **접었으면 자식을 «죽인다»**(적대적 W3). fd 를 닫으면 자식은 **다음 write 의 EPIPE** 로
+    // 끝나는데, 헬퍼는 **스캔 중에 아무것도 안 쓴다**(레코드는 라벨 패스에서 나간다) — 3.88 GB 를
+    // 훑는 6.3 초 동안 write 가 없어 EPIPE 가 **안 오고**, 아래 `reapPid` 가 그만큼 막힌다. 그러면
+    // `inflight` 가 안 풀려 **새 스캔이 여전히 안 걸린다** — 취소의 목적이 통째로 사라진다.
+    //
+    // `-S <ctl>` 로 붙은 **client** 만 죽는다. master 는 남으므로 다음 왕복이 곧바로 선다.
+    if (cancelled) _ = std.c.kill(pid, std.posix.SIG.TERM);
+    _ = std.c.close(out_pipe[0]); // 넘쳤거나 접었으면 이 닫기가 자식을 EPIPE 로 끝낸다
     out.* = try buf.toOwnedSlice(allocator);
     const code = reapPid(pid);
+    // **접은 답은 성공이 아니다.** 읽다 만 바이트는 꼬리가 없어 파서가 잘림으로 읽지만, 호출자가
+    // 코드만 보고 「깨끗한 0」으로 오독하지 않게 여기서도 가른다(넘침과 같은 규율).
+    if (cancelled) return -3;
     // 넘친 출력은 성공 코드여도 **완결이 아니다** — 꼬리를 잃었으니 파서가 잘림으로 읽지만, 호출자가
     // 코드만 보고 「깨끗한 0」으로 오독하지 않게 여기서도 가른다.
     if (overflowed) return -2;

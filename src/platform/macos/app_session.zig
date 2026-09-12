@@ -82608,6 +82608,9 @@ test "활동 뷰: 원격 신선도 — 이어읽은 답이 앞 목록에 이어 
     try session.agent_activity.all_hits.append(allocator, mk(100, 0));
     try session.agent_activity.all_labels.append(allocator, .{});
     try session.agent_activity.all_labels.append(allocator, .{});
+    // **본문 비트도 같은 자리다**(RAV8b-2 · 적대적 AA5) — 길이가 어긋나면 병합이 물러난다.
+    try session.agent_activity.all_body_flags.append(allocator, 0);
+    try session.agent_activity.all_body_flags.append(allocator, 0);
 
     // 저쪽이 자국 250 뒤만 보냈다.
     var result: agent_image_scan_backend.Result = .{ .remote_resumed_from = 250 };
@@ -82615,6 +82618,7 @@ test "활동 뷰: 원격 신선도 — 이어읽은 답이 앞 목록에 이어 
     _ = result.remote_chain.setAt(0, head);
     try result.hits.append(allocator, mk(400, 0));
     try result.labels.append(allocator, .{});
+    try result.body_flags.append(allocator, 0);
 
     try std.testing.expect(agent_activity_ops.mergeResumedInto(session, &result));
 
@@ -82713,12 +82717,14 @@ test "활동 뷰: 원격 신선도 — 체인이 갈리면 이어 붙이지 않�
     }.f;
     try session.agent_activity.all_hits.append(allocator, mk(100));
     try session.agent_activity.all_labels.append(allocator, .{});
+    try session.agent_activity.all_body_flags.append(allocator, 0);
 
     var result: agent_image_scan_backend.Result = .{ .remote_resumed_from = 250 };
     defer result.deinit(allocator);
     _ = result.remote_chain.setAt(0, "/home/u/other.jsonl"); // **다른 세션**
     try result.hits.append(allocator, mk(400));
     try result.labels.append(allocator, .{});
+    try result.body_flags.append(allocator, 0);
 
     // 🔥 **«false» 다** — 이 답은 자국 뒤만 든 부분 목록이라 그대로 쓰면 앞 활동이 사라진다
     //    (적대적 U8). 호출자가 버리고 다음 tick 이 통째로 다시 훑는다.
@@ -82795,6 +82801,186 @@ test "활동 뷰: 원격 신선도 — 체인을 못 푼 답은 경로를 «안 
     agent_activity_ops.applyRemoteStamps(session, &result);
 
     try std.testing.expectEqualStrings("/home/u/child.jsonl", session.agent_activity.chain.head());
+}
+
+test "활동 뷰: 원격 신선도 — 이어읽기가 본문 비트도 잇는다 (RAV8b-2 · 적대적 AA5)" {
+    // 🔥 이어읽기는 앞 히트를 **재사용**하는데 그 비트를 안 이으면 `body_flags` 가 **새 것만** 남아
+    // 히트와 길이가 어긋난다 — `applyRemoteBodyMatches` 가 그것을 「못 봤다」로 읽어 **검색 결과가
+    // 통째로 죽는다**. 라벨과 **같은 표**(`kept_src`)로 잇는다(적대적 T1 이 만든 그것).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const head = "/home/u/s.jsonl";
+    session.agent_activity.source_remote = true;
+    _ = session.agent_activity.chain.append(head);
+
+    const mk = struct {
+        fn f(off: u64) maru.session.agent_image_index.Hit {
+            return .{
+                .line_offset = off,
+                .data_offset = off,
+                .data_len = 1,
+                .kind = .claude_tool_use,
+                .mime = .png,
+                .file_index = 0,
+            };
+        }
+    }.f;
+    const matched = maru.session.remote_activity_wire.body_matched_bit;
+    // 지난 목록(뒤집혀 있다) — 100 은 **걸린 줄**이다.
+    try session.agent_activity.all_hits.append(allocator, mk(300));
+    try session.agent_activity.all_hits.append(allocator, mk(100));
+    try session.agent_activity.all_labels.append(allocator, .{});
+    try session.agent_activity.all_labels.append(allocator, .{});
+    try session.agent_activity.all_body_flags.append(allocator, 0); // 300 — 안 걸림
+    try session.agent_activity.all_body_flags.append(allocator, matched); // 100 — 걸림
+
+    var result: agent_image_scan_backend.Result = .{ .remote_resumed_from = 250 };
+    defer result.deinit(allocator);
+    _ = result.remote_chain.setAt(0, head);
+    try result.hits.append(allocator, mk(400));
+    try result.labels.append(allocator, .{});
+    try result.body_flags.append(allocator, matched); // 새 줄도 걸렸다
+
+    try std.testing.expect(agent_activity_ops.mergeResumedInto(session, &result));
+
+    // 길이가 **같다** — 이것이 깨지면 검색 결과가 통째로 죽는다.
+    try std.testing.expectEqual(result.hits.items.len, result.body_flags.items.len);
+    // **앞 줄(100)의 비트가 살아남았다** — 이어읽기가 그 줄을 다시 안 봤으니 옛 답이 맞다.
+    try std.testing.expectEqual(matched, result.body_flags.items[0]);
+    try std.testing.expectEqual(matched, result.body_flags.items[1]);
+}
+
+test "활동 뷰: 원격 신선도 — 저쪽이 준 본문 비트가 검색 결과가 된다 (RAV8b-2)" {
+    // 🔥 **RAV8a 의 「아직 못 한다」를 없애는 자리.** 저쪽이 스캔하면서 찾은 비트를 `body.matches`
+    // 로 바꾼다 — 자리는 히트에서 그대로 만든다(적대적 Z2).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    session.agent_activity.source_remote = true;
+    try session.agent_activity.body.query.appendSlice(allocator, "hello");
+
+    const mk = struct {
+        fn f(off: u64) maru.session.agent_image_index.Hit {
+            return .{
+                .line_offset = off,
+                .data_offset = off,
+                .data_len = 1,
+                .kind = .claude_tool_use,
+                .mime = .png,
+                .file_index = 0,
+            };
+        }
+    }.f;
+    var result: agent_image_scan_backend.Result = .{};
+    defer result.deinit(allocator);
+    try result.hits.append(allocator, mk(100));
+    try result.hits.append(allocator, mk(200));
+    try result.body_flags.append(allocator, 0); // 안 걸림
+    try result.body_flags.append(allocator, maru.session.remote_activity_wire.body_matched_bit);
+
+    agent_activity_ops.applyRemoteBodyMatches(session, &result);
+
+    // **걸린 것만** 결과가 된다.
+    try std.testing.expectEqual(@as(usize, 1), session.agent_activity.body.matches.items.len);
+    try std.testing.expectEqual(@as(u64, 200), session.agent_activity.body.matches.items[0].data_offset);
+    try std.testing.expect(session.agent_activity.body.answered);
+    // **「끝까지 못 봤다」가 없으면 `partial` 도 없다** — 「없다」가 참이라는 뜻이다.
+    try std.testing.expect(!session.agent_activity.body.partial);
+    // 그리고 RAV8a 의 「아직 못 한다」는 **꺼진다**.
+    try std.testing.expect(!session.agent_activity.body.remote_unsupported);
+}
+
+test "활동 뷰: 원격 신선도 — 「끝까지 못 봤다」가 「없다」를 덮는다 (RAV8b-2)" {
+    // 🔥 0 건일 때야말로 그 구분이 가장 중요하다 — 사용자가 「없다」를 믿고 검색을 그만둔다
+    // (계약 §2.2 · 적대적 Y4).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    session.agent_activity.source_remote = true;
+    try session.agent_activity.body.query.appendSlice(allocator, "hello");
+
+    var result: agent_image_scan_backend.Result = .{};
+    defer result.deinit(allocator);
+    try result.hits.append(allocator, .{
+        .line_offset = 100,
+        .data_offset = 100,
+        .data_len = 1,
+        .kind = .claude_tool_use,
+        .mime = .png,
+        .file_index = 0,
+    });
+    // 안 걸렸지만 **끝까지 못 봤다**.
+    try result.body_flags.append(allocator, maru.session.remote_activity_wire.body_truncated_bit);
+
+    agent_activity_ops.applyRemoteBodyMatches(session, &result);
+
+    try std.testing.expectEqual(@as(usize, 0), session.agent_activity.body.matches.items.len);
+    try std.testing.expect(session.agent_activity.body.answered);
+    try std.testing.expect(session.agent_activity.body.partial); // 「없다」가 아니다
+}
+
+test "활동 뷰: 원격 신선도 — 안 물었으면 답도 안 세운다 (RAV8b-2)" {
+    // 검색어 없이 온 스캔은 비트가 전부 0 이다. 그것을 「답」으로 세우면 **다음 `Enter` 가
+    // `settledFor` 에 막혀** 검색이 영영 안 걸린다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    session.agent_activity.source_remote = true;
+    // **검색어가 없다.**
+    var result: agent_image_scan_backend.Result = .{};
+    defer result.deinit(allocator);
+
+    agent_activity_ops.applyRemoteBodyMatches(session, &result);
+    try std.testing.expect(!session.agent_activity.body.answered);
 }
 
 test "활동 뷰: 원격 신선도 자국은 체인이 여럿이어도 산다 (RAV7b)" {

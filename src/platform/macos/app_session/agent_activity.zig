@@ -268,6 +268,10 @@ pub const State = struct {
     filter: Filter = .images,
     all_hits: std.ArrayList(index.Hit) = .empty,
     all_labels: std.ArrayList(context.Label) = .empty,
+    /// **원격 본문 검색 비트**(RAV8b-2 · `all_hits` 와 **같은 자리**). 이어읽기가 앞 히트를 재사용할
+    /// 때 이 배열도 **같은 표로** 이어야 한다 — 안 그러면 길이가 어긋나 검색 결과가 통째로 죽는다
+    /// (적대적 AA5).
+    all_body_flags: std.ArrayList(u8) = .empty,
     /// 검색어(+IME 조합). 비면 필터가 꺼진 것이고 `hits` 는 `all_hits` 와 같다.
     ///
     /// 사이드바·find·아카이브 검색과 **같은 `OverlayInput`** 이다 — 한글은 IME 조합으로 들어오므로
@@ -347,6 +351,7 @@ pub const State = struct {
         self.labels.deinit(allocator);
         self.all_hits.deinit(allocator);
         self.all_labels.deinit(allocator);
+        self.all_body_flags.deinit(allocator);
         self.search.deinit(allocator);
         self.body.deinit(allocator);
         self.dropTiles(allocator);
@@ -398,6 +403,7 @@ pub const State = struct {
         self.labels.clearAndFree(allocator);
         self.all_hits.clearAndFree(allocator);
         self.all_labels.clearAndFree(allocator);
+        self.all_body_flags.clearAndFree(allocator);
         self.search.clear();
         self.search_active = false;
         self.remote_failed = false;
@@ -1139,8 +1145,17 @@ pub fn submitBodySearch(self: *AppSession) void {
         if (body_remote.settledFor(q)) return;
         body_remote.reset(self.allocator);
         body_remote.query.appendSlice(self.allocator, q) catch return;
-        body_remote.answered = true;
-        body_remote.remote_unsupported = true;
+        // **저쪽에 다시 물어야 한다**(RAV8b-2 · 계획 §26.2). 자리를 저쪽에 보낼 수 없으므로
+        // (최악 270 KB — 적대적 Y5) 헬퍼가 **스캔하면서** 찾는다 — 검색은 재스캔이다.
+        //
+        // ⚠️ **`Enter` 에만 온다**(적대적 Z4). 매 글자마다 왕복하면 이어읽기로 싸졌어도 남의
+        // 서버를 태운다(§6.2 의 예산). 이 함수가 이미 그 자리다.
+        body_remote.awaiting = 0;
+        body_remote.resubmit = false;
+        // 🔥 **검색어가 바뀌면 이어읽기를 안 한다**(적대적 AA4). 이어읽기는 앞 히트를 **재사용**하는데
+        // 그 비트는 **옛 검색어**로 매긴 것이다 — 그대로 두면 틀린 줄이 「걸렸다」로 뜬다.
+        self.agent_activity.remote_resume_offset = 0;
+        refresh(self, true); // 검색은 통째로 — 그 뒤 갱신은 다시 이어읽기로 돌아간다
         self.metal_dirty = true;
         return;
     }
@@ -1326,7 +1341,15 @@ pub fn refresh(self: *AppSession, force: bool) void {
 
     // **자국이 있으면 그 자리부터 청한다**(RAV7b-3b-2). 소스가 갈렸으면 위 `clear` 가 이미 0 으로
     // 만들어 놨으므로 여기서 분기를 새로 안 만든다(적대적 T3).
-    if (backend.submit(self.agent_activity.chain, remote, self.agent_activity.remote_resume_offset)) |generation| {
+    // **검색어도 함께 보낸다**(RAV8b-2). 저쪽이 스캔하면서 본문도 본다 — 자리를 보낼 수 없어
+    // (최악 270 KB · 적대적 Y5) 검색이 재스캔이 된 이유다(§26.2).
+    const body_q = if (self.agent_activity.source_remote) self.agent_activity.body.query.items else &.{};
+    if (backend.submit(
+        self.agent_activity.chain,
+        remote,
+        self.agent_activity.remote_resume_offset,
+        body_q,
+    )) |generation| {
         self.agent_activity.awaiting = generation;
     } else {
         // 워커가 바쁘다(직전 스캔이 아직 도는 중). 다음 tick 이 다시 건다.
@@ -1392,7 +1415,7 @@ pub fn poll(self: *AppSession) void {
     const backend = backendPtr(self) orelse return;
 
     if (self.agent_activity.resubmit and !self.agent_activity.chain.isEmpty()) {
-        if (backend.submit(self.agent_activity.chain, null, 0)) |generation| {
+        if (backend.submit(self.agent_activity.chain, null, 0, &.{})) |generation| {
             self.agent_activity.awaiting = generation;
             self.agent_activity.resubmit = false;
         }
@@ -1425,6 +1448,9 @@ pub fn poll(self: *AppSession) void {
     self.agent_activity.all_hits = result.hits; // 소유 이동 — 여기서부터 세션이 푼다
     self.agent_activity.all_labels.deinit(self.allocator);
     self.agent_activity.all_labels = result.labels;
+    self.agent_activity.all_body_flags.deinit(self.allocator);
+    self.agent_activity.all_body_flags = result.body_flags;
+    result.body_flags = .empty;
     // 길이가 어긋나면 라벨을 통째로 버린다 — 남의 이미지에 붙은 설명보다 없는 편이 낫다.
     if (self.agent_activity.all_labels.items.len != self.agent_activity.all_hits.items.len) {
         self.agent_activity.all_labels.clearRetainingCapacity();
@@ -1513,6 +1539,7 @@ pub fn poll(self: *AppSession) void {
     // ⚠️ 0 이면 여전히 신선도가 꺼진다 — 옛 판(10) 헬퍼가 깔린 원격이면 이 칸이 0 으로 온다. 그때는
     // 재진입마다 다시 훑는다: **덜 아는 쪽**으로 기운다.
     applyRemoteStamps(self, &result);
+    applyRemoteBodyMatches(self, &result);
     self.agent_activity.built = true;
     self.agent_activity.awaiting = 0;
     self.agent_activity.resubmit = false;
@@ -4142,12 +4169,16 @@ pub fn mergeResumedInto(self: *AppSession, result: *scan_backend.Result) bool {
     std.mem.reverse(index.Hit, prior_hits);
     reverseFoldOwners(prior_hits);
     std.mem.reverse(context.Label, prior_labels);
+    // 🔥 **본문 비트도 함께 뒤집는다**(적대적 AA5). 이 배열은 히트와 **같은 자리**라 하나만 뒤집으면
+    // 표가 어긋나고, 그러면 **남의 줄이 「걸렸다」로 뜬다** — 판정자가 그것을 잡았다.
+    std.mem.reverse(u8, self.agent_activity.all_body_flags.items);
     // 실패하면 **원래대로 돌려놓는다** — 이 함수는 아무 자국도 안 남기고 물러난다.
     var restore = true;
     defer if (restore) {
         std.mem.reverse(index.Hit, prior_hits);
         reverseFoldOwners(prior_hits);
         std.mem.reverse(context.Label, prior_labels);
+        std.mem.reverse(u8, self.agent_activity.all_body_flags.items);
     };
 
     var merged = index.mergeResumed(
@@ -4161,17 +4192,30 @@ pub fn mergeResumedInto(self: *AppSession, result: *scan_backend.Result) bool {
     // **라벨을 같은 표로 자른다**(적대적 T1). 남긴 것이 연속이 아니라 개수로는 못 자른다.
     var labels: std.ArrayList(context.Label) = .empty;
     labels.ensureTotalCapacity(self.allocator, merged.hits.items.len) catch return false;
+    // 🔥 **본문 비트도 같은 표로 잇는다**(적대적 AA5). 안 이으면 `body_flags` 가 **새 것만** 남아
+    // 히트와 길이가 어긋나고, `applyRemoteBodyMatches` 가 그것을 「못 봤다」로 읽는다 — 검색이
+    // 이어읽기와 겹칠 때마다 결과가 통째로 죽는다.
+    var bflags: std.ArrayList(u8) = .empty;
+    bflags.ensureTotalCapacity(self.allocator, merged.hits.items.len) catch {
+        labels.deinit(self.allocator);
+        return false;
+    };
+    const prior_bflags = self.agent_activity.all_body_flags.items; // 위에서 이미 파일 순서다
     for (merged.kept_src.items) |src| {
         if (src >= prior_labels.len) {
             labels.deinit(self.allocator);
+            bflags.deinit(self.allocator);
             return false;
         }
         labels.appendAssumeCapacity(prior_labels[src]);
+        bflags.appendAssumeCapacity(if (src < prior_bflags.len) prior_bflags[src] else 0);
     }
     for (result.labels.items) |l| labels.appendAssumeCapacity(l);
+    for (result.body_flags.items) |bf| bflags.appendAssumeCapacity(bf);
     // 여기서 어긋나면 라벨이 남의 활동에 붙는다 — 그 전에 멈춘다.
-    if (labels.items.len != merged.hits.items.len) {
+    if (labels.items.len != merged.hits.items.len or bflags.items.len != merged.hits.items.len) {
         labels.deinit(self.allocator);
+        bflags.deinit(self.allocator);
         return false;
     }
 
@@ -4179,10 +4223,55 @@ pub fn mergeResumedInto(self: *AppSession, result: *scan_backend.Result) bool {
     restore = false;
     result.hits.deinit(self.allocator);
     result.labels.deinit(self.allocator);
+    result.body_flags.deinit(self.allocator);
     result.hits = merged.hits;
     result.labels = labels;
+    result.body_flags = bflags;
     merged.hits = .empty; // 소유가 `result` 로 갔다
     return true;
+}
+
+/// 원격 스캔이 실어 온 **본문 검색 비트**를 `body.matches` 로 바꾼다(RAV8b-2 · 계획 §27).
+///
+/// **판정자가 직접 부르는 제품 함수다** — 부수효과를 `poll` 안에 묻으면 판정자가 겨눌 것이 없다
+/// (RAV7a 적대적 T4).
+///
+/// ⚠️ **`in_command`/`in_result` 를 안 가른다**(적대적 Z1). 그 둘의 소비자는 **판정자뿐**이고 제품
+/// 화면은 안 쓴다 — 비트를 둘 더 실어 보낼 이유가 없다.
+pub fn applyRemoteBodyMatches(self: *AppSession, result: *const scan_backend.Result) void {
+    if (!self.agent_activity.source_remote) return;
+    const body = &self.agent_activity.body;
+    // **물어본 적이 없으면 답도 없다.** 검색어 없이 온 스캔은 비트가 전부 0 이고, 그것을 「답」으로
+    // 세우면 다음 `Enter` 가 `settledFor` 에 막힌다.
+    if (body.query.items.len == 0) return;
+    // 길이가 어긋나면 자리를 못 잇는다 — 「못 봤다」로 둔다.
+    if (result.body_flags.items.len != result.hits.items.len) {
+        body.answered = true;
+        body.partial = true;
+        return;
+    }
+
+    body.matches.clearRetainingCapacity();
+    var truncated = false;
+    for (result.hits.items, result.body_flags.items) |hit, bits| {
+        if (bits & wire.body_truncated_bit != 0) truncated = true;
+        if (bits & wire.body_matched_bit == 0) continue;
+        body.matches.append(self.allocator, .{
+            .data_offset = hit.data_offset,
+            .file = hit.file_index,
+        }) catch {
+            // 다 못 담았으면 **「못 봤다」다** — 「없다」로 뭉개면 사용자가 검색을 그만둔다.
+            body.answered = true;
+            body.partial = true;
+            return;
+        };
+    }
+    // **`find` 는 이분 탐색이다** — 스캐너가 파일 순서로 담으므로 이미 오름차순이지만, 그 전제를
+    // 여기서 못박는다(체인이 여럿이면 파일 번호가 먼저다).
+    std.mem.sort(body_backend.Match, body.matches.items, {}, body_backend.lessThan);
+    body.answered = true;
+    body.partial = truncated;
+    body.remote_unsupported = false;
 }
 
 /// 원격 스캔이 낸 **자국 둘**을 받아 둔다. **판정자가 직접 부르는 제품 함수**다 — 부수효과를 겨눈

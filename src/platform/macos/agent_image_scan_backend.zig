@@ -36,6 +36,8 @@ pub const Result = struct {
     ///
     /// 길이가 어긋나면 라벨이 남의 이미지에 붙는다. 그래서 `hits` 를 건드리는 자리는 이것도 같이 건든다.
     labels: std.ArrayList(context.Label) = .empty,
+    /// **본문 검색 비트**(RAV8b · 히트와 **같은 자리**). 검색어를 안 보냈으면 전부 0 이다.
+    body_flags: std.ArrayList(u8) = .empty,
     partial: bool = false,
     /// 종류별로 나눈 「다 못 봤다」 — 활동만 잘렸는데 이미지 필터에서 그 문구를 내면 거짓말이다.
     image_partial: bool = false,
@@ -77,6 +79,7 @@ pub const Result = struct {
     pub fn deinit(self: *Result, allocator: std.mem.Allocator) void {
         self.hits.deinit(allocator);
         self.labels.deinit(allocator);
+        self.body_flags.deinit(allocator);
         self.* = .{};
     }
 };
@@ -123,6 +126,8 @@ const Job = struct {
     remote: ?OwnedRemote = null,
     /// **이어읽기 자국**(RAV7b-3b-2). 0 이면 처음부터 — 로컬 갈래는 안 본다.
     resume_from: u64 = 0,
+    /// **본문 검색어**(RAV8b-2 · owned). 비면 안 찾는다 — 로컬 갈래는 안 본다.
+    body_query: []u8 = &.{},
 };
 
 /// job 이 **소유하는** 원격 목적지 사본. 세션이 먼저 죽어도 워커가 안전하게 읽는다(이 파일의
@@ -175,7 +180,7 @@ pub const Backend = struct {
     /// ⚠️ **슬롯은 로컬과 같은 하나를 쓴다.** 계획 §6.2·열린 질문 ④ 가 정한 「자기 상한 1」이 이
     /// 구조에서 저절로 선다 — `inflight` 가 하나라 원격 왕복이 도는 동안 새 job 이 안 뜬다.
     /// `resume_from` 은 **이어읽기 자국**(RAV7b-3b-2). 0 이면 처음부터 — 로컬은 언제나 0 이다.
-    pub fn submit(self: *Backend, chain: index.Chain, remote: ?RemoteTarget, resume_from: u64) ?u64 {
+    pub fn submit(self: *Backend, chain: index.Chain, remote: ?RemoteTarget, resume_from: u64, body_query: []const u8) ?u64 {
         const state = self.state;
         if (state.shutting_down.load(.acquire)) return null;
 
@@ -217,13 +222,28 @@ pub const Backend = struct {
             };
             owned = .{ .ctl = ctl, .dest = dest };
         }
-        job.* = .{ .state = state, .chain = chain, .generation = generation, .remote = owned, .resume_from = resume_from };
+        // **검색어는 사본이다** — 워커가 다른 스레드에서 읽고, 그 사이 사용자가 또 친다.
+        const owned_query = state.allocator.dupe(u8, body_query) catch {
+            if (owned) |*o| o.deinit(state.allocator);
+            state.allocator.destroy(job);
+            finish(state, null);
+            return null;
+        };
+        job.* = .{
+            .state = state,
+            .chain = chain,
+            .generation = generation,
+            .remote = owned,
+            .resume_from = resume_from,
+            .body_query = owned_query,
+        };
         _ = state.refs.fetchAdd(1, .monotonic);
         const thread = std.Thread.spawn(.{}, worker, .{job}) catch {
             _ = state.refs.fetchSub(1, .acq_rel);
             // **원격 사본도 여기서 푼다**(적대적 N2). 워커가 안 떴으므로 그 `defer` 가 안 돈다 —
             // 로컬 갈래에는 없던 자리이고, job 이 값만 들던 시절의 `destroy` 하나로는 모자란다.
             if (job.remote) |*r| r.deinit(state.allocator);
+            state.allocator.free(job.body_query);
             state.allocator.destroy(job);
             finish(state, null);
             return null;
@@ -397,6 +417,7 @@ fn worker(job: *Job) void {
     const state = job.state;
     defer {
         if (job.remote) |*r| r.deinit(state.allocator);
+        state.allocator.free(job.body_query);
         state.allocator.destroy(job);
         state.release();
     }
@@ -408,7 +429,7 @@ fn worker(job: *Job) void {
         // 읽어 **가장 짧은 주기**로 돈다 — 원격 왕복은 로컬 스캔보다 비싼데(실측 6.3 초 + 네트워크)
         // 그 규율이 꺼져 있었다. 로컬이 「9 초 스캔이면 그만큼 쉰다」로 지키는 그것이다.
         const started: i128 = std.Io.Clock.awake.now(state.io).nanoseconds;
-        var result = remoteScan(state.allocator, state, job.chain, r, job.generation, job.resume_from);
+        var result = remoteScan(state.allocator, state, job.chain, r, job.generation, job.resume_from, job.body_query);
         const ended: i128 = std.Io.Clock.awake.now(state.io).nanoseconds;
         result.scan_ns = @intCast(@max(0, ended - started));
         finish(state, result);
@@ -557,6 +578,7 @@ fn remoteScan(
     remote: OwnedRemote,
     generation: u64,
     resume_from: u64,
+    body_query: []const u8,
 ) Result {
     if (comptime builtin.os.tag != .macos) unreachable; // submit 이 이미 막는다
 
@@ -566,6 +588,22 @@ fn remoteScan(
 
     var from_buf: [24]u8 = undefined;
     const from_text = std.fmt.bufPrint(&from_buf, "{d}", .{resume_from}) catch "0";
+    // **플래그 둘을 조합한다**(RAV7b-3 이어읽기 · RAV8b 본문 검색). 둘 다 없으면 판 11 과 같은 모양이다.
+    var argv_buf: [5][]const u8 = undefined;
+    var argv_n: usize = 0;
+    argv_buf[argv_n] = head;
+    argv_n += 1;
+    if (resume_from != 0) {
+        argv_buf[argv_n] = "--from";
+        argv_buf[argv_n + 1] = from_text;
+        argv_n += 2;
+    }
+    if (body_query.len != 0) {
+        argv_buf[argv_n] = "--search";
+        argv_buf[argv_n + 1] = body_query;
+        argv_n += 2;
+    }
+    const argv = argv_buf[0..argv_n];
 
     // 🔥 **접을 수 있게 건다**(RAV7b-4 · §13.6 N3 의 비대칭을 없앤다). 로컬 워커는 청크마다
     // `cancelled_upto` 를 보는데 원격은 `runRemoteCapped` 한 번에 갇혀 있었다 — pane 을 옮겨도
@@ -579,7 +617,7 @@ fn remoteScan(
         ssh_upload.activity_script,
         // **자국이 있으면 그 자리부터 청한다**(RAV7b-3b-2). 저쪽이 못 지키면 `resumed_from = 0` 으로
         // 알려 오고, 받는 쪽은 그때 이어 붙이지 않는다(§20.3).
-        if (resume_from == 0) &.{head} else &.{ head, "--from", from_text },
+        argv,
         wire.max_wire_bytes,
         &out,
         .{ .ctx = &cancel_ctx, .should_cancel = RemoteCancel.shouldCancel },
@@ -627,9 +665,15 @@ fn remoteResultFromWire(allocator: std.mem.Allocator, bytes: []const u8, exit_co
                 malformed = true;
                 break;
             };
+            result.body_flags.append(allocator, rec.body_flags) catch {
+                _ = result.hits.pop();
+                malformed = true;
+                break;
+            };
             result.labels.append(allocator, rec.label) catch {
                 // **길이가 어긋나면 라벨이 남의 활동에 붙는다**(`Result` 주석) — 방금 넣은 자리를 뺀다.
                 _ = result.hits.pop();
+                _ = result.body_flags.pop();
                 malformed = true;
                 break;
             };

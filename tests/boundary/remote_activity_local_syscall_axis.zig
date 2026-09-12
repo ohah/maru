@@ -224,7 +224,7 @@ test "RAV7b-4: 접은 전송은 «성공 코드»를 안 낸다" {
     }
 }
 
-test "RAV8a §6.3: 체인을 «통째로 받는» 워커는 원격에서 안 걸린다" {
+test "RAV8a/8b §6.3: 체인을 «통째로 받는» 워커는 원격에서 안 걸리고, 대신 저쪽에 묻는다" {
     // 🔥 **게이트 자신의 구멍이었다**(계획 §25.2). 이 축은 `agent_activity.zig` 의 `chain.get(`
     // 호출 수로 「경로를 주는 문은 둘뿐」을 지키는데, **본문 검색 워커는 `chain` 을 통째로 받아**
     // 자기 안에서 `get` 하고 `Dir.cwd().openFile` 로 연다 — **두 문을 우회하는 세 번째 문**이고
@@ -243,20 +243,31 @@ test "RAV8a §6.3: 체인을 «통째로 받는» 워커는 원격에서 안 걸
         std.debug.print("🔥 본문 검색이 원격에서도 걸린다 — 워커가 저쪽 경로를 이쪽에서 연다(계약 §2.1).\n", .{});
         return error.TestUnexpectedResult;
     }
-    // **「없다」가 아니라 「아직 못 한다」로 답한다**(§2.2). 조용한 0 건은 「본문에 없다」로 읽힌다.
-    if (std.mem.indexOf(u8, code, "remote_unsupported = true;") == null) {
-        std.debug.print("🔥 원격 본문 검색이 조용히 0 건을 낸다 — 「없다」와 「못 했다」가 안 갈린다.\n", .{});
+    // 🔥 **대신 저쪽에 묻는다**(RAV8b-2). 그 재스캔이 없으면 원격에서 본문 검색이 **영영 안 된다** —
+    // RAV8a 의 「아직 못 한다」가 영구 상태가 되는 것이고, 그것은 기능이 아니라 포기다.
+    // ⚠️ **주석을 벗긴 코드에서 센다** — needle 에 주석을 붙이면 영영 안 맞는다(이 파일이 겪은 그것).
+    const body_remote_block = bodyOf(code, "if (self.agent_activity.source_remote) {") orelse "";
+    if (std.mem.indexOf(u8, body_remote_block, "refresh(self, true);") == null) {
+        std.debug.print("🔥 원격 본문 검색이 저쪽에 묻지 않는다 — 「아직 못 한다」가 영구 상태가 된다.\n", .{});
         return error.TestUnexpectedResult;
     }
-    // 그리고 **화면이 그것을 말한다** — ⚠️ 문자열이 **있는지**가 아니라 그 분기가 **서는지**를 센다.
-    // `if (false) return t(.…)` 도 그 이름을 포함하므로, 조건까지 붙여야 뮤테이션이 죽는다.
-    if (std.mem.indexOf(u8, code, "if (body_remote) return maru.i18n.t(.agent_activity_body_remote_unsupported);") == null) {
-        std.debug.print("🔥 화면이 「아직 못 한다」를 안 말한다 — 그 분기가 서지 않는다.\n", .{});
+    // **검색어가 저쪽으로 간다.** 안 보내면 헬퍼가 비트를 안 세우고 답은 언제나 0 건이다.
+    if (std.mem.indexOf(u8, code, "const body_q = if (self.agent_activity.source_remote)") == null) {
+        std.debug.print("🔥 검색어가 저쪽으로 안 간다 — 답이 언제나 0 건이 된다.\n", .{});
         return error.TestUnexpectedResult;
     }
-    // 그 조건이 **검색어에 딸려 있어야** 한다 — 안 그러면 옛 답의 문구가 새 검색어에 남는다.
-    if (std.mem.indexOf(u8, code, "self.agent_activity.body.remote_unsupported and") == null) {
-        std.debug.print("🔥 「아직 못 한다」가 검색어와 안 묶여 있다.\n", .{});
+    // 🔥 **검색어가 바뀌면 이어읽기를 안 한다**(적대적 AA4). 이어읽기는 앞 히트를 **재사용**하는데
+    // 그 비트는 **옛 검색어**로 매긴 것이다 — 그대로 두면 **틀린 줄이 「걸렸다」로 뜬다**.
+    // ⚠️ `bodyOf` 는 `\n}\n` 까지 자르므로 **함수 안 블록**에는 안 맞는다 — 코드 전체에서 **유일한**
+    // 모양으로 겨눈다(이 스택에서 네 번째로 겪는 needle 함정이다).
+    if (std.mem.indexOf(u8, code, "self.agent_activity.remote_resume_offset = 0;\n        refresh(self, true);") == null) {
+        std.debug.print("🔥 검색어가 바뀌었는데 이어읽기를 한다 — 옛 검색어의 비트가 남는다.\n", .{});
+        return error.TestUnexpectedResult;
+    }
+    // **안 물었으면 답도 안 세운다**(적대적 Z5). 검색어 없이 온 스캔을 「답」으로 세우면 다음
+    // `Enter` 가 `settledFor` 에 막혀 검색이 영영 안 걸린다.
+    if (std.mem.indexOf(u8, code, "if (body.query.items.len == 0) return;") == null) {
+        std.debug.print("🔥 안 물어본 스캔이 「답」으로 선다 — 다음 검색이 자기 게이트에 막힌다.\n", .{});
         return error.TestUnexpectedResult;
     }
 }

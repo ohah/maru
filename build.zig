@@ -14742,7 +14742,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
         const run_github_deployment_tests = b.addRunArtifact(github_deployment_tests);
-        run_github_deployment_tests.addArg("--maru-expect-tests=7");
+        run_github_deployment_tests.addArg("--maru-expect-tests=9");
         run_github_deployment_tests.setCwd(b.path("."));
         session_host_release_adapter_github_deployment_step.dependOn(&run_github_deployment_tests.step);
     }
@@ -18248,9 +18248,9 @@ pub fn build(b: *std.Build) void {
     // 유지하고, `zig build test` 와 `test-macos-only` 에는 이 하나만 걸린다(가족 블록들의 `test_step.dependOn` ·
     // `macos_only_test_step.dependOn` 을 뺐다). 모듈 표는 tools/release_adapter_test_modules.zig 에 있다(왜 거기인지는 그 파일 머리).
     //
-    // 173 = 이 집계가 실제로 컴파일하는 test 수(러너가 정확히 잠근다). 가족 블록별 `--maru-expect-tests` 의
+    // 175 = 이 집계가 실제로 컴파일하는 test 수(러너가 정확히 잠근다). 가족 블록별 `--maru-expect-tests` 의
     // 합보다 작을 수 있다: 여러 판정자 파일이 같은 product 모듈의 test 를 끌어오는데 바이너리가 하나면 한 번만 센다.
-    const ra_all_expected_tests: usize = 173;
+    const ra_all_expected_tests: usize = 175;
     const ra_all_step = b.step(
         "test-session-host-release-adapter-all",
         "Run the posix session-host release adapter judges from one binary per optimize mode",

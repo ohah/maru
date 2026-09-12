@@ -3047,7 +3047,9 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   배타 게시한다. permission/UI session/배너/클릭/attach/cleanup 실패는 skip/pass가 아니라 typed `not_provisioned` 또는
   failed artifact이며, 사용자 workspace·session-host registry를 읽거나 지우지 않는다. Notification Center 정리는 전체
   삭제가 아니라 이번 UUID의 exact request identifier 두 개만 대상으로 하고, 외부 알림을 열거 결과에 기록하지 않는다.
-- **N3-R3 protected workflow binding (미착수):** tag release의 signed candidate를 별도
+- **N3-R3 protected workflow binding (R3a 구현, R3b 미착수):** R3a는 기존 release 전용 protected-deployment
+  verifier의 의미를 바꾸지 않고 reviewed policy로 environment/workflow/job identity를 결속해, `release` signing job과
+  Notification 전용 job이 같은 strict run/attempt/job/deployment 알고리즘을 공유하게 한다. R3b는 tag release의 signed candidate를 별도
   `Session host product` environment와 고정 self-hosted macOS label을 가진 job으로 전달한다. job은 R2를 실행하고
   attempt-scoped artifact attestation을 게시한다. 최종 release evidence는 exact run/attempt/job/deployment와 candidate
   identity, R1 leaf digest를 교차검증해야 하며, hosted runner·다른 ref·다른 candidate·재실행의 옛 artifact를 섞지 않는다.

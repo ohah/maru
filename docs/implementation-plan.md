@@ -1456,7 +1456,7 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    Notification Center 배너 클릭은 provisioned signed runner가 필요한 별도 release gate다.
 
    **현재 판정(2026-09-11 코드·gate 대조): P1~P5의 일반 제품 경로와 ad-hoc gate는 완료했지만,
-   provisioned product transaction 자체는 N3-R2c와 R3가 미완료다.** R2b1의 별도 signable AX helper와 R2b2의
+   provisioned product transaction 자체는 N3-R3와 actual provisioned run이 미완료다.** R2b1의 별도 signable AX helper와 R2b2의
    callback/attach receipt owner·actual delegate/attach를 상속 write FD에 결속하는 격리 app scenario mode까지 구현됐다.
    R2b2의 canonical app receipt strict parser와 absent `0600` exclusive publication leaf, process composition의 단일
    deadline·시도 선기록·역순 cleanup/retry owner도 구현됐다. ambient environment 0·inherited fd 3 하나인 실제 앱
@@ -1465,11 +1465,10 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    notification request cleanup syscall을 결속하는 concrete adapter도 구현됐다. 다음은 caller boolean 없이 동일 daemon/child PID와
    attach 전 screen·attach 후 실제 PTY input→screen 왕복을 증명하는 R2b3a strict continuity receipt owner까지 구현됐다. 다음은
    R2b3b1의 exact remote generation/PID product observation과 R2b3b2의 app-owned attach 전후 screen/input 상태머신,
-   두 번째 framed receipt 및 parent strict composition까지 구현됐다. 다음은 mounted signed candidate composition 및
-   protected workflow binding을 이어서 구현한다. P4의 actual
+   두 번째 framed receipt 및 parent strict composition까지 구현됐다. mounted signed candidate R2c composition도 구현되어
+   canonical leaf publication과 rollback까지 Debug·ReleaseFast gate가 닫혔다. 다음은 protected workflow binding R3를 구현한다. P4의 actual
    Notification Center·durable tombstone과 P5d의 packaged CLI/localhost SSH는 provisioned Developer ID 배포 artifact
-   재실행이 phase 완료 증거로 남아 있다. N3-R2c는 구현 잔여이고, 그 구현이 닫힌 뒤 실제 Developer ID 실행만
-   release provenance gate로 남는다. 실행 중 업그레이드
+   재실행이 phase 완료 증거로 남아 있다. 실행 중 업그레이드
    U4/U5의 frozen N-1/current 서명 artifact·실제 앱 notice·**서명 업그레이드 soak**도 별도 release gate다. release와 무관한 L1
    launch→first drawable baseline과 CR6e-c3c v2 key→screen E2E baseline도 구현·실측됐다.
    `performance-budget.md`의 **일반 세션 호스트 장시간 연속 soak 계측**도 CR6f-idle-soak로

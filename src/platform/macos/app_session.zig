@@ -2112,6 +2112,12 @@ const TermRuntime = struct {
     /// 구분되지 않는다(11차 적대적 검증). 4가 아닌 값을 줄 수 있어야 그 둘이 갈린다. 뒷날 설정이
     /// 생기면 그것이 이 필드를 채운다.
     editor_tab_width: u8 = chrome.components.editor_view.frame.default_tab_width,
+    /// **가로로 볼 수 있는 최대 열**(`editor.max-columns`). `0` 은 설정에서 「무제한」이지만 **여기에는
+    /// 0 이 안 들어온다** — `editorMaxColumns` 가 그것을 `maxInt(u32)` 로 옮겨 담는다. 그래야 소비처가
+    /// 「0 은 무제한」이라는 규칙을 저마다 다시 적지 않는다(탭 폭이 같은 이유로 여기서 clamp 된다).
+    ///
+    /// 렌더가 쓰는 그 값이고, 셈·체크포인트·가로 상한이 **전부 이 하나**를 읽는다.
+    editor_max_columns: u32 = chrome.components.editor_view.frame.default_max_columns,
     /// 렌더가 실어 두는 **막대 기하**(창 좌표). 포인터가 막대를 잡았는지 판정하고 드래그가 이 값으로
     /// offset을 계산한다 — `editor_max_top_line`을 싣는 것과 같은 관례다(렌더만 아는 값을 입력이 쓴다).
     ///
@@ -21349,6 +21355,25 @@ pub const AppSession = struct {
                 // ① 저하: 행 수를 아직 다 못 셌다 → 스크롤바가 실제보다 짧다(§2.1).
                 if (active_term.rt.editor_row_cache.countingIncomplete() and rn < max_status_bar_right_items) {
                     if (self.buildStatusBarItem(icons.codepoint(.hourglass), maru.i18n.t(.editor_counting_rows), bar_cols, fg, icon_fg, .plain)) |dl| {
+                        right_frames[rn] = dl;
+                        right_widths[rn] = @as(u32, dl.size.cols) * self.cell_width_px;
+                        right_ids[rn] = .editor_degraded;
+                        rn += 1;
+                    }
+                }
+                // ①-b 저하: **가로 보기가 상한에 걸렸다**(`editor.max-columns` — §3.8). 그 너머 글자는
+                // 그려지지 않는데 화면만 보면 「더 안 밀린다」로만 보여 **버그로 읽힌다**. VSCode 가
+                // 같은 자리에서 *"Rendering paused for long line for performance reasons. This can be
+                // configured via `editor.stopRenderingLineAfter`"* 로 알리는 것과 같은 몫이다 — 그쪽은
+                // 그 줄 hover 이고 우리는 상태바다(우리에겐 저하를 모으는 자리가 이미 있다).
+                //
+                // **판정은 「셈이 상한에서 멈췄나」 하나다.** 그 값이 곧 갈 수 있는 끝이므로(가로 위치의
+                // 상한이 `max_cols - 보이는 열`이다) 상한에 닿았다는 것과 잘렸다는 것이 같은 사실이다.
+                if (active_term.rt.editor_max_cols >= active_term.rt.editor_max_columns and
+                    active_term.rt.editor_max_cols > 0 and
+                    rn < max_status_bar_right_items)
+                {
+                    if (self.buildStatusBarItem(icons.codepoint(.hourglass), maru.i18n.t(.editor_columns_capped), bar_cols, fg, icon_fg, .plain)) |dl| {
                         right_frames[rn] = dl;
                         right_widths[rn] = @as(u32, dl.size.cols) * self.cell_width_px;
                         right_ids[rn] = .editor_degraded;
@@ -61532,6 +61557,57 @@ test "SBL3 상태바 언어 항목 — 뜨고, 자리가 맞고, 표시 전용�
         if (@as(Id, @enumFromInt(e.id)) == .editor_language) lang_after = i;
     }
     try std.testing.expect(lang_after == null);
+}
+
+test "SB-MAXCOL: 가로 보기가 상한에 걸리면 상태바가 «알린다» (제품 경계)" {
+    // **조용히 안 움직이는 것은 버그로 읽힌다.** 상한(`editor.max-columns`)에 걸리면 그 너머 글자가
+    // 안 그려지는데 화면만 보면 「더 안 밀린다」로만 보인다. VSCode 가 같은 상황을 *"Rendering paused
+    // for long line for performance reasons. This can be configured via `editor.stopRenderingLineAfter`"*
+    // 로 알리는 것과 같은 몫이고, 우리는 저하를 모으는 자리(`ItemId.editor_degraded`)가 이미 있다.
+    //
+    // **판정자가 상태바 경계를 넘어야 한다** — 내부 값만 보면 항목을 안 더해도 초록이다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session); // **구조체 자체도 놓는다** — `deinit` 은 내용만 놓는다(`SB1` 과 같은 쌍)
+    defer session.deinit();
+
+    var collected: std.ArrayList(AppSession.CollectedPane) = .empty;
+    defer {
+        for (collected.items) |*c| c.deinit(allocator);
+        collected.deinit(allocator);
+    }
+    const builder = pane_ops.paneFrameBuilder(session);
+    const colors: metal_frame.CellColors = .{ .default_fg = session.appearance.theme.foreground };
+
+    // **상한을 낮춰 둔다** — 그러면 이 저장소의 평범한 소스도 걸린다(그 편이 픽스처가 간단하다).
+    session.loaded_config.config.editor.max_columns = 40;
+    const editor_term = editor_ops.openPathInActivePane(session, "src/session/editor/selection.zig") catch return error.SkipZigTest;
+    editor_term.rt.editor_wrap = false;
+
+    session.collectStatusBarItems(&collected, builder, colors);
+    var capped_seen = false;
+    for (session.statusBarTree().entries) |e| {
+        const id: chrome.components.status_bar.ItemId = @enumFromInt(e.id);
+        if (id == .editor_degraded) capped_seen = true;
+    }
+    // 픽스처 자기 검증 — 정말 상한에 걸렸다.
+    try std.testing.expect(editor_term.rt.editor_max_cols >= editor_term.rt.editor_max_columns);
+    try std.testing.expect(capped_seen);
+
+    // **상한을 풀면 사라진다** — 늘 뜨는 항목이면 이 판정자가 항진명제다.
+    // **config reload 경로를 그대로 탄다** — 그 함수가 값을 다시 넣고 파생값을 다시 세운다.
+    session.loaded_config.config.editor.max_columns = 0;
+    editor_ops.applyConfigTabWidth(session);
+    for (collected.items) |*c| c.deinit(allocator);
+    collected.clearRetainingCapacity();
+    session.collectStatusBarItems(&collected, builder, colors);
+    var still_seen = false;
+    for (session.statusBarTree().entries) |e| {
+        const id: chrome.components.status_bar.ItemId = @enumFromInt(e.id);
+        if (id == .editor_degraded) still_seen = true;
+    }
+    try std.testing.expect(!still_seen);
 }
 
 test "SB1: 편집기 pane이 활성일 때만 편집기 항목이 뜨고, 순서가 버려지는 순서다" {

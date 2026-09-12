@@ -747,7 +747,7 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
     // 여는 경로에서 세는 그 계산과 같아야 캡처가 제품을 예고하기 때문이다(§4.1a).
     const hscroll_max_cols: ?u32 = if (scenario.id == .editor_hscroll) blk: {
         var widest: u32 = 0;
-        for (lines) |line| widest = @max(widest, editor_view.content.lineColumnsUpTo(line, lab_tab_width, editor_view.frame.max_cols_count_limit));
+        for (lines) |line| widest = @max(widest, editor_view.content.lineColumnsUpTo(line, lab_tab_width, editor_view.frame.default_max_columns));
         break :blk widest;
     } else null;
     // 행 저장소가 고정이므로 **거기에 맞춰 자른다.** 지금 fixture로는 넘지 않지만, 줄을 늘리거나

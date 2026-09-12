@@ -1434,6 +1434,11 @@ pub fn leaveAltScreen(self: *TerminalCore) void {
     self.saved_screen = .{};
     self.kitty_flags = self.saved_kitty_flags; // 그 화면의 키보드 모드도 함께 — alt 의 flag 가 셸로 새지 않는다
     self.saved_kitty_flags = .{};
+    // **alt 의 그래픽 배치는 alt 와 함께 죽는다.** alt 버퍼(cells)를 방금 해제했으므로 그 좌표계는
+    // 더 이상 없다 — 남겨 두면 다시 alt 로 들어갔을 때 이전 TUI 의 이미지가 새 TUI 화면에 나타난다.
+    // 이미지 자체(전송된 픽셀)는 지우지 않는다. 그건 화면이 아니라 세션에 속하고, 같은 이미지를
+    // primary 에서 다시 배치할 수 있어야 한다(재전송 없이 — 그게 kitty 가 id 를 두는 이유다).
+    self.dropAltScreenPlacements();
     self.semantic_state = .unknown; // primary 복귀 — 진행 중 영역을 이어받지 않는다(다음 프롬프트가 재마킹)
     self.alt_active = false;
     self.pen_link = 0; // 화면 전환 — 열린 링크를 닫는다(Ghostty endHyperlink)

@@ -1569,6 +1569,12 @@ pub const TerminalCore = struct {
         self.default_bg_rgb = bg;
     }
 
+    /// alt 화면에서 만들어진 placement 를 버린다. 본문: kitty.dropAltScreenPlacements.
+    /// screen.leaveAltScreen 이 self. 로 호출한다(screen→kitty 역전 방지 facade — buildPlacementViews 와 같은 규약).
+    pub fn dropAltScreenPlacements(self: *TerminalCore) void {
+        kitty.dropAltScreenPlacements(self);
+    }
+
     /// 렌더 placement view 합성. 본문: kitty.buildPlacementViews. screen.snapshot이 self.로 호출(screen→kitty 역전 방지 facade).
     pub fn buildPlacementViews(self: *TerminalCore, top_abs: usize) []const types.KittyPlacement {
         return kitty.buildPlacementViews(self, top_abs);
@@ -10529,6 +10535,116 @@ test "kitty 애니메이션: 리사이즈로 화면 밖이 되면 멈추고 되�
 
     try core.resize(10, 24); // 폭만 — 재래핑이지 세로 이동이 아니다
     try std.testing.expect(core.advanceAnimations(40));
+}
+
+// **그래픽 배치는 화면에 귀속된다.** alt 화면(vim 이 쓰는 그것)으로 넘어가면 셸 화면의 이미지는
+// 안 보여야 하고, 돌아오면 그 자리에 다시 있어야 한다.
+//
+// 이 판정자가 생긴 이유(적대적 검증 2회차, 라이브 실측): placement 에 화면 범위가 없어 `ESC[?1049h`
+// 뒤에도 primary 의 이미지가 **vim 화면 위에 그대로 그려졌다**. `anchor_row` 는 그 화면 기준 절대
+// 행이라 화면이 다르면 좌표계 자체가 다르다 — 섞어 그리면 엉뚱한 자리에 찍힌다.
+test "kitty placement: primary 이미지는 alt 화면에 안 보이고 돌아오면 다시 보인다 (적대적 검증)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 8 });
+    defer core.deinit();
+    core.setCellMetrics(10, 20);
+    var b64: [64]u8 = undefined;
+    var seq: [200]u8 = undefined;
+    const px = [_]u8{ 5, 6, 7, 255 } ** 4;
+    const enc = std.base64.standard.Encoder.encode(&b64, &px);
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+    try core.write("\x1b_Ga=p,i=1,c=2,r=1,q=2\x1b\\");
+    try std.testing.expectEqual(@as(usize, 1), core.buildPlacementViews(core.screen.sb.count).len);
+
+    try core.write("\x1b[?1049h"); // alt 진입
+    try std.testing.expectEqual(@as(usize, 0), core.buildPlacementViews(core.screen.sb.count).len);
+    // **지운 것이 아니다** — 저장은 남아 있어야 돌아왔을 때 되살아난다. evict 보호도 그 저장을 본다.
+    try std.testing.expect(kitty.kittyImageHasPlacement(&core, 1));
+
+    try core.write("\x1b[?1049l"); // primary 복귀
+    try std.testing.expectEqual(@as(usize, 1), core.buildPlacementViews(core.screen.sb.count).len);
+}
+
+// alt 안에서 만든 배치는 **alt 와 함께 죽는다**. 남겨 두면 다음에 다시 alt 로 들어갔을 때 이전
+// TUI 의 이미지가 새 TUI 화면에 나타난다(버퍼는 새것인데 배치만 옛것이라 자리도 엉뚱하다).
+// 이미지 자체는 지우지 않는다 — 픽셀은 화면이 아니라 세션에 속한다(그게 kitty 가 id 를 두는 이유다).
+test "kitty placement: alt 에서 만든 배치는 alt 를 떠날 때 사라지고 이미지는 남는다 (적대적 검증)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 8 });
+    defer core.deinit();
+    core.setCellMetrics(10, 20);
+    var b64: [64]u8 = undefined;
+    var seq: [200]u8 = undefined;
+    const px = [_]u8{ 5, 6, 7, 255 } ** 4;
+    const enc = std.base64.standard.Encoder.encode(&b64, &px);
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+
+    try core.write("\x1b[?1049h");
+    try core.write("\x1b_Ga=p,i=1,c=2,r=1,q=2\x1b\\"); // alt 안에서 배치
+    try std.testing.expectEqual(@as(usize, 1), core.buildPlacementViews(core.screen.sb.count).len);
+
+    try core.write("\x1b[?1049l");
+    try std.testing.expectEqual(@as(usize, 0), core.buildPlacementViews(core.screen.sb.count).len);
+    try std.testing.expect(!kitty.kittyImageHasPlacement(&core, 1)); // 배치는 갔다
+    try std.testing.expect(core.kitty_images.map.get(1) != null); // 이미지(픽셀)는 남았다
+
+    // 남은 이미지는 재전송 없이 primary 에 다시 배치할 수 있어야 한다.
+    try core.write("\x1b_Ga=p,i=1,c=2,r=1,q=2\x1b\\");
+    try std.testing.expectEqual(@as(usize, 1), core.buildPlacementViews(core.screen.sb.count).len);
+}
+
+// 두 화면이 **같은 (image_id, placement_id)** 를 써도 서로 덮지 않는다. 화면이 교체 키에 안 들어가면
+// alt 의 TUI 가 배치를 하나 만드는 것만으로 셸 화면의 배치가 사라진다 — alt 를 떠난 뒤에야 드러나는
+// 결함이라 더 찾기 어렵다.
+test "kitty placement: 같은 id 라도 화면이 다르면 서로 덮지 않는다 (적대적 검증)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 8 });
+    defer core.deinit();
+    core.setCellMetrics(10, 20);
+    var b64: [64]u8 = undefined;
+    var seq: [200]u8 = undefined;
+    const px = [_]u8{ 5, 6, 7, 255 } ** 4;
+    const enc = std.base64.standard.Encoder.encode(&b64, &px);
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+    try core.write("\x1b[3;5H");
+    try core.write("\x1b_Ga=p,i=1,p=9,c=2,r=1,q=2\x1b\\"); // primary: 3 행 5 열
+
+    try core.write("\x1b[?1049h");
+    try core.write("\x1b[7;1H");
+    try core.write("\x1b_Ga=p,i=1,p=9,c=2,r=1,q=2\x1b\\"); // alt: 같은 id·같은 placement_id
+    const alt_views = core.buildPlacementViews(core.screen.sb.count);
+    try std.testing.expectEqual(@as(usize, 1), alt_views.len);
+    try std.testing.expectEqual(@as(u16, 0), alt_views[0].col); // alt 것이다
+
+    try core.write("\x1b[?1049l");
+    const back = core.buildPlacementViews(core.screen.sb.count);
+    try std.testing.expectEqual(@as(usize, 1), back.len);
+    try std.testing.expectEqual(@as(u16, 4), back[0].col); // primary 것이 그대로 살아 있다
+}
+
+// 애니메이션 전진도 같은 판단을 써야 한다. 안 그러면 alt 화면 동안 **안 보이는 프레임**이 계속
+// 넘어가고, generation 이 오를 때마다 화면 스트리밍이 그 이미지의 픽셀을 통째로 다시 싣는다.
+test "kitty placement: alt 화면 동안에는 primary 애니메이션이 돌지 않는다 (적대적 검증)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 8 });
+    defer core.deinit();
+    core.setCellMetrics(10, 20);
+    var b64: [64]u8 = undefined;
+    var seq: [200]u8 = undefined;
+    const px = [_]u8{ 5, 6, 7, 255 } ** 4;
+    const enc = std.base64.standard.Encoder.encode(&b64, &px);
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+    try core.write("\x1b_Ga=p,i=1,c=2,r=1,q=2\x1b\\");
+    try core.write("\x1b_Ga=a,i=1,s=3,v=0,q=2\x1b\\");
+    try std.testing.expect(core.advanceAnimations(40)); // 양성 대조
+
+    try core.write("\x1b[?1049h");
+    const hidden = core.kitty_images.map.get(1).?;
+    const frame = hidden.current_frame;
+    const gen = hidden.generation;
+    for (0..20) |_| try std.testing.expect(!core.advanceAnimations(40));
+    try std.testing.expectEqual(frame, core.kitty_images.map.get(1).?.current_frame);
+    try std.testing.expectEqual(gen, core.kitty_images.map.get(1).?.generation); // 픽셀 재전송 없음
+
+    try core.write("\x1b[?1049l");
+    try std.testing.expect(core.advanceAnimations(40)); // 돌아오면 그 자리에서 이어 돈다
 }
 
 test "kitty 애니메이션: 루트를 다시 전송하면 프레임도 함께 놓아준다 (적대적 검증)" {

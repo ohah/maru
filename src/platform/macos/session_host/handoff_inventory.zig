@@ -341,8 +341,11 @@ pub const stored_placement_groups = [_]Group{
             "parent_placement_id",
             "parent_offset_x",
             "parent_offset_y",
+            // 배치가 속한 화면(primary/alt). 이 비트를 안 나르면 exec 뒤 alt 의 배치가 primary 것으로
+            // 되살아나 셸 화면에 TUI 의 이미지가 뜬다.
+            "on_alt",
         },
-        .why = "placement identity, absolute anchor, crop, extent, stacking order, and the parent link that a relative placement resolves its position from must remain exact",
+        .why = "placement identity, owning screen, absolute anchor, crop, extent, stacking order, and the parent link that a relative placement resolves its position from must remain exact",
     },
 };
 

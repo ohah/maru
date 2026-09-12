@@ -15417,6 +15417,10 @@ pub fn build(b: *std.Build) void {
         "test-session-host-notification-product",
         "Validate Notification Center product transaction ownership and cleanup",
     );
+    const session_host_notification_app_receipt_step = b.step(
+        "test-session-host-notification-app-receipt",
+        "Validate canonical Notification Center app receipt parsing and publication",
+    );
     const session_host_release_adapter_candidate_baseline_app_step = b.step(
         "test-session-host-release-adapter-candidate-baseline-app",
         "Validate preserved baseline candidate app authority",
@@ -15887,6 +15891,45 @@ pub fn build(b: *std.Build) void {
         run_notification_product_tests.setCwd(b.path("."));
         session_host_release_adapter_notification_product_step.dependOn(&run_notification_product_tests.step);
         run_session_host_tests.step.dependOn(&run_notification_product_tests.step);
+
+        const notification_app_receipt_identity_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_identity.zig"),
+            .target = target,
+            .optimize = baseline_phase_optimize,
+        });
+        const notification_app_receipt_files_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_files.zig"),
+            .target = target,
+            .optimize = baseline_phase_optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "safe_open", .module = b.createModule(.{
+                    .root_source_file = b.path("src/platform/macos/safe_open.zig"),
+                    .target = target,
+                    .optimize = baseline_phase_optimize,
+                }) },
+                .{ .name = "release_adapter_identity", .module = notification_app_receipt_identity_mod },
+            },
+        });
+        const notification_app_receipt_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_notification_app_receipt.zig"),
+            .target = target,
+            .optimize = baseline_phase_optimize,
+            .imports = &.{.{ .name = "release_adapter_files", .module = notification_app_receipt_files_mod }},
+        });
+        const notification_app_receipt_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_release_adapter_notification_app_receipt.zig"),
+                .target = target,
+                .optimize = baseline_phase_optimize,
+                .imports = &.{.{ .name = "release_adapter_notification_app_receipt", .module = notification_app_receipt_mod }},
+            }),
+        });
+        const run_notification_app_receipt_tests = b.addRunArtifact(notification_app_receipt_tests);
+        run_notification_app_receipt_tests.addArg("--maru-expect-tests=8");
+        run_notification_app_receipt_tests.setCwd(b.path("."));
+        session_host_notification_app_receipt_step.dependOn(&run_notification_app_receipt_tests.step);
+        run_session_host_tests.step.dependOn(&run_notification_app_receipt_tests.step);
     }
     const session_host_release_adapter_candidate_compatibility_step = b.step(
         "test-session-host-release-adapter-candidate-compatibility",

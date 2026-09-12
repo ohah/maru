@@ -2979,8 +2979,15 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   없으면 제품 AppSession 생성 전에 fail-close한다. 실제 delegate callback이 같은 request/route를 admit한 뒤 정상 attach 경로가
   `bound` 또는 `recovered`를 반환한 경우에만 owner를 완성하며, queued cold callback도 원래 callback 시각을 보존한다. malformed
   mode/env/FD, callback·attach 불일치, short/duplicate write는 receipt가 아니다. 이 app scenario mode와 pure owner는
-  `test-session-host-notification-app-scenario` 및 `test-session-host-notification-scenario-receipt`가 검증한다. 상위 R2b2 concrete adapter가 pipe/FD payload를
-  strict parse한 뒤 absent 0600 leaf publication과 child/notification/root cleanup을 단일 소유한다. R2b2 concrete adapter와 앱
+  `test-session-host-notification-app-scenario` 및 `test-session-host-notification-scenario-receipt`가 검증한다. 상위 R2b2 concrete adapter의
+  첫 final-address leaf는 pipe/FD payload를 **앱의 canonical JSON 바이트 그대로** strict parse하고 expected scenario/request/route,
+  helper click 뒤 callback, attach kind(`gui-zero=recovered`, `gui-live-then-quit=bound`)와 absolute deadline을 다시 결속한 뒤에만
+  기존 exclusive file publisher로 absent `0600` leaf를 게시한다. whitespace·field-order·unknown/duplicate field·비정규 숫자·1,024-byte
+  초과·identity/time/kind drift와 기존 destination은 부분 publication 없이 실패해야 한다. 그 위 process composition이
+  helper/app child와 exact notification/root cleanup을 단일 소유한다. **이 receipt final-address leaf는 구현됐고**
+  `test-session-host-notification-app-receipt`가 Debug·ReleaseFast canonical/hostile parse, 전 allocation fail-index, 실제 absent `0600`
+  publication과 file-SSOT source boundary를 검증한다. 남은 R2b2 process composition은 helper/app child와 exact cleanup을 이 leaf에
+  결속해야 한다. R2b2 concrete adapter와 앱
   scenario mode, R2c mounted candidate composition은 R2a owner를 통과해야 한다.
   로그인된 전용 macOS runner의 새 mode `0700` root에서 DMG를
   read-only mount하고 그 안의 exact `Maru.app`과 main executable을 no-follow pin한다. 앱·CLI·helper의 동일

@@ -1181,6 +1181,11 @@ pub fn advanceAnimations(self: *TerminalCore, elapsed_ms: u64) bool {
         // 애니메이션 이미지가 **영원히 「가장 새것」** 이 되어 evict 순서가 뒤집힌다(정작 쓸모 있는
         // 정지 이미지가 먼저 밀려난다). 다시 화면에 걸리면 그 자리에서 이어 돈다 — 상태는 남는다.
         if (!kittyImageHasPlacement(self, img.id)) continue;
+        // **이 이미지가 움직였는가를 따로 센다.** 예전엔 함수 전역 `changed` 하나로 판정해서, 앞의
+        // 이미지가 한 번 넘어가면 그 뒤로 **안 움직인 이미지까지** generation 이 올라갔다.
+        // generation 은 렌더러의 텍스처 재업로드 키다 — 픽셀은 그대로인데 GPU 업로드만 늘어나고,
+        // 애니메이션이 여럿이면 그만큼 곱해진다(적대적 검증 실측: 안 움직인 이미지가 매 tick +2).
+        var img_changed = false;
         img.elapsed_ms += elapsed_ms;
         var guard: u32 = 0; // 아주 긴 elapsed 나 gap=0 에서도 유한하게 끝난다
         while (guard < 1024) : (guard += 1) {
@@ -1200,11 +1205,12 @@ pub fn advanceAnimations(self: *TerminalCore, elapsed_ms: u64) bool {
                 next = 1;
             }
             img.current_frame = next;
+            img_changed = true;
             changed = true;
             if (!img.frameSkipped(next)) break; // 건너뛰는 프레임이면 곧바로 다음으로
             img.elapsed_ms = img.frameGapMs(next); // skip 은 시간을 쓰지 않는다
         }
-        if (changed) bumpGeneration(self, img);
+        if (img_changed) bumpGeneration(self, img);
     }
     return changed;
 }

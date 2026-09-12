@@ -94,7 +94,7 @@ const Executor = struct {
         self.calls += 1;
         try std.testing.expectEqual(@as(usize, 13), plan.environment.len);
         if (self.fail_pristine) return error.Injected;
-        result.* = .{ .owner = result, .pid = 41, .read_fd = 42 };
+        result.* = .{ .owner = result, .pid = 41, .fd = 42 };
         if (self.fail_after_owner) return error.Injected;
     }
 };
@@ -128,4 +128,22 @@ test "R2b2 app child plan uses receipt SSOT scenarios" {
     value.expected.scenario = receipt.Scenario.gui_live_then_quit;
     const plan = try child.commandPlanForTest(value, &storage);
     try std.testing.expectEqualStrings("MARU_SESSION_HOST_NOTIFICATION_SCENARIO=gui-live-then-quit", plan.environment[1]);
+}
+
+test "R2b2 app cleanup command and receipt are canonical and exact-request bound" {
+    var command_storage: [320]u8 = undefined;
+    var receipt_storage: [320]u8 = undefined;
+    const expected = inputs().expected;
+    const command = try child.formatCleanupCommand(expected, &command_storage);
+    const acknowledgement = try child.formatCleanupReceipt(expected, &receipt_storage);
+    try std.testing.expectEqualStrings(
+        "{\"schema\":\"maru.session-host-notification-cleanup-command.v1\",\"request_identifier\":\"" ++ request ++ "\"}",
+        command,
+    );
+    try std.testing.expectEqualStrings(
+        "{\"schema\":\"maru.session-host-notification-cleanup-receipt.v1\",\"request_identifier\":\"" ++ request ++ "\"}",
+        acknowledgement,
+    );
+    var too_short: [8]u8 = undefined;
+    try std.testing.expectError(error.InvalidInput, child.formatCleanupCommand(expected, &too_short));
 }

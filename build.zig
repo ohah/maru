@@ -15432,7 +15432,7 @@ pub fn build(b: *std.Build) void {
     );
     const session_host_notification_app_child_step = b.step(
         "test-session-host-notification-app-child",
-        "Validate the closed inherited-pipe Notification Center app child",
+        "Validate the closed framed-socket Notification Center app child",
     );
     const session_host_notification_helper_receipt_step = b.step(
         "test-session-host-notification-helper-receipt",
@@ -15995,7 +15995,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
         const run_notification_app_child_tests = b.addRunArtifact(notification_app_child_tests);
-        run_notification_app_child_tests.addArg("--maru-expect-tests=6");
+        run_notification_app_child_tests.addArg("--maru-expect-tests=7");
         run_notification_app_child_tests.setCwd(b.path("."));
         session_host_notification_app_child_step.dependOn(&run_notification_app_child_tests.step);
         run_session_host_tests.step.dependOn(&run_notification_app_child_tests.step);
@@ -18345,7 +18345,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
         const run_bounded_process_tests = b.addRunArtifact(bounded_process_tests);
-        run_bounded_process_tests.addArg("--maru-expect-tests=22");
+        run_bounded_process_tests.addArg("--maru-expect-tests=24");
         run_bounded_process_tests.setCwd(b.path("."));
         session_host_bounded_process_step.dependOn(&run_bounded_process_tests.step);
         if (process_optimize == optimize) session_host_step.dependOn(&run_bounded_process_tests.step); // test-session-host 는 잡의 -Doptimize 모드만

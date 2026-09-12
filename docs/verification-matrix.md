@@ -2973,14 +2973,14 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   시간 역전·deadline 초과는 receipt를 만들지 않으며 다른 request는 transaction을 오염시키지 않고 무시한다. 이 pure
   final-address owner는 OS response를 합성하거나 attach를
   실행하지 않으며, 앱 scenario mode가 실제 delegate/attach 경로에서만 호출한다. 앱 mode는 closed scenario와 canonical
-  request/route/deadline을 시작 시 한 번만 읽고, runner가 미리 연 **상속 write FD** 하나에만 complete receipt를 exact once 쓴다.
+  request/route/deadline을 시작 시 한 번만 읽고, runner가 미리 연 **상속 framed socket FD** 하나에만 complete receipt를 exact once 쓴다.
   pathname을 열거나 기존 파일을 지우지 않으며, `sun_path` 상한 안의 UUID-derived compact 0700 root 아래 짧은 `/s` session-host와
   `/h` HOME을 쓰고 그 root를 증명하는 runner-owned launch nonce가
   없으면 제품 AppSession 생성 전에 fail-close한다. 실제 delegate callback이 같은 request/route를 admit한 뒤 정상 attach 경로가
   `bound` 또는 `recovered`를 반환한 경우에만 owner를 완성하며, queued cold callback도 원래 callback 시각을 보존한다. malformed
   mode/env/FD, callback·attach 불일치, short/duplicate write는 receipt가 아니다. 이 app scenario mode와 pure owner는
   `test-session-host-notification-app-scenario` 및 `test-session-host-notification-scenario-receipt`가 검증한다. 상위 R2b2 concrete adapter의
-  첫 final-address leaf는 pipe/FD payload를 **앱의 canonical JSON 바이트 그대로** strict parse하고 expected scenario/request/route,
+  첫 final-address leaf는 첫 socket frame payload를 **앱의 canonical JSON 바이트 그대로** strict parse하고 expected scenario/request/route,
   helper click 뒤 callback, attach kind(`gui-zero=recovered`, `gui-live-then-quit=bound`)와 absolute deadline을 다시 결속한 뒤에만
   기존 exclusive file publisher로 absent `0600` leaf를 게시한다. whitespace·field-order·unknown/duplicate field·비정규 숫자·1,024-byte
   초과·identity/time/kind drift와 기존 destination은 부분 publication 없이 실패해야 한다. 그 위 process composition이
@@ -2989,15 +2989,16 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   publication과 file-SSOT source boundary를 검증한다. process composition의 단일 deadline, child/OS 시도 선기록,
   성공한 exclusive receipt만의 소유권, receipt→request→helper→app→root 역순 cleanup과 실패한 authority만 남기는 exact retry owner도 구현됐고
   `test-session-host-notification-process-owner`가 Debug·ReleaseFast에서 검증한다. 실제 app child는 ambient environment 없이
-  UUID-derived `/s`·`/h`와 inherited fd 3 하나만 받고 receipt EOF와 process-group cleanup을 별도 lifetime으로 보존하며,
+  UUID-derived `/s`·`/h`와 inherited fd 3 하나만 받고 bounded receipt frame 뒤 exact cleanup command/receipt와 process-group cleanup을 별도 lifetime으로 보존하며,
   helper child는 exact `click nonce deadline` argv·empty environment·bounded stdout/stderr에서 실제 Swift `print`의 LF까지
   canonical parse하고 exit 70/71만 typed Accessibility/Aqua `not_provisioned`로 분류한다. Debug·ReleaseFast
   `test-session-host-notification-app-child`, `test-session-host-notification-helper-receipt`,
   `test-session-host-notification-helper-child`가 path/nonce/timeline/alias/copy/cap+1/allocator와 closed process 경계를 검증한다.
   앱 bundle identity의 제품 exact cleanup leaf는 클릭 callback에서 request identifier 하나만 pending·delivered store에
   전달하고 열거·전체 삭제를 금지하며, `test-session-host-notification-app-scenario`가 foreign identifier 비접촉을 검증한다.
-  남은 R2b2 concrete adapter는 이 child 경계를 owner에 연결하고 UUID-derived `0700` root 및 실패 시에도 같은 제품 leaf를
-  호출하고 완료를 증명하는 제한된 child control을 결속해야 한다. R2b2 concrete adapter와 앱
+  framed duplex child control은 exact request에 결속된 cleanup command를 받은 앱이 같은 제품 leaf를 호출하고 pending/delivered
+  부재를 deadline 안에 재검사한 뒤 canonical receipt를 보내고 정상 종료할 때만 완료된다. transport와 Swift runtime 배선은
+  구현됐으며, 남은 R2b2 concrete adapter는 이 child 경계를 process owner에 연결하고 UUID-derived `0700` root 수명을 결속해야 한다. R2b2 concrete adapter와 앱
   scenario mode, R2c mounted candidate composition은 R2a owner를 통과해야 한다.
   로그인된 전용 macOS runner의 새 mode `0700` root에서 DMG를
   read-only mount하고 그 안의 exact `Maru.app`과 main executable을 no-follow pin한다. 앱·CLI·helper의 동일

@@ -26,9 +26,9 @@ test "N3-R2b2 app scenario observes only the real callback and normal attach pat
     try std.testing.expectEqual(@as(usize, 0), count(host, "UNNotificationResponse("));
 
     try expectOne(scenario, "let ticks = mach_continuous_time()");
-    try expectOne(scenario, "(status.st_mode & S_IFMT) == S_IFIFO");
+    try expectOne(scenario, "(status.st_mode & S_IFMT) == S_IFSOCK");
     try expectOne(scenario, "Darwin.fcntl(fileDescriptor, F_SETNOSIGPIPE, 1)");
-    try expectOne(scenario, "Darwin.write(fileDescriptor, buffer.baseAddress, buffer.count)");
+    try expectOne(scenario, "Darwin.write(fileDescriptor, buffer.baseAddress!.advanced(by: offset), buffer.count - offset)");
     try expectOne(scenario, "Darwin.lstat(root, &status) == 0");
     try expectOne(scenario, "(status.st_mode & 0o777) == 0o700");
     try expectOne(host, "notificationReleaseValidateRunnerRoot(configuration.runnerRoot)");
@@ -37,7 +37,7 @@ test "N3-R2b2 app scenario observes only the real callback and normal attach pat
         host,
         "notificationReleaseReceiptSink = nil\n        exitCode = 1\n        // Let the delegate callback's defer invoke Apple's completion handler before AppKit begins\n        // termination. The release runner treats a nonzero child exit as failure either way.\n        DispatchQueue.main.async { NSApp.terminate(nil) }",
     ) != null);
-    inline for (.{ "FileManager", "removeItem", "unlink(", "O_CREAT", "O_TRUNC" }) |forbidden| {
+    inline for (.{ "FileManager", "removeItem", "unlink(", "O_CREAT", "O_TRUNC", "removeAllDelivered", "removeAllPending" }) |forbidden| {
         try std.testing.expectEqual(@as(usize, 0), count(scenario, forbidden));
     }
     try expectOne(scenario, "runnerRoot == \"/private/tmp/mn-\\(runnerNonce.replacingOccurrences(of: \"-\", with: \"\"))\"");

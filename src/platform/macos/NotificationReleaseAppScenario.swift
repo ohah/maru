@@ -85,7 +85,7 @@ struct NotificationReleaseAppScenarioConfiguration {
               fixedHome == home,
               let deadlineNs = canonicalUInt64(deadlineText), deadlineNs > 0,
               let descriptorValue = canonicalUInt64(descriptorText), descriptorValue <= UInt64(Int32.max),
-              let receiptFileDescriptor = Int32(exactly: descriptorValue), receiptFileDescriptor > STDERR_FILENO,
+              let receiptFileDescriptor = Int32(exactly: descriptorValue), receiptFileDescriptor == 3,
               let route = routeParser(requestIdentifier, hostId, runtimeId, eventText),
               route.eventId != 0 else { return .invalid }
 
@@ -141,6 +141,8 @@ func notificationReleaseValidateRunnerRoot(_ root: String) -> Bool {
 final class NotificationReleaseReceiptSink {
     private var fileDescriptor: Int32
     private var published = false
+    private var listening = false
+    private let lock = NSLock()
 
     init(fileDescriptor: Int32) throws {
         guard fileDescriptor > STDERR_FILENO, Darwin.fcntl(fileDescriptor, F_GETFD) != -1 else {
@@ -148,7 +150,7 @@ final class NotificationReleaseReceiptSink {
         }
         var status = stat()
         guard Darwin.fstat(fileDescriptor, &status) == 0,
-              (status.st_mode & S_IFMT) == S_IFIFO,
+              (status.st_mode & S_IFMT) == S_IFSOCK,
               status.st_uid == Darwin.geteuid(),
               Darwin.fcntl(fileDescriptor, F_SETNOSIGPIPE, 1) != -1,
               Darwin.fcntl(fileDescriptor, F_SETFD, FD_CLOEXEC) != -1 else {
@@ -162,18 +164,105 @@ final class NotificationReleaseReceiptSink {
     }
 
     func publish(_ receipt: String) throws {
+        lock.lock()
+        defer { lock.unlock() }
         guard !published else { throw NotificationReleaseAppScenarioError.alreadyPublished }
         let bytes = Array(receipt.utf8)
         guard !bytes.isEmpty, bytes.count <= 1024 else {
             throw NotificationReleaseAppScenarioError.invalidReceipt
         }
         published = true
-        let count = bytes.withUnsafeBytes { buffer in
-            Darwin.write(fileDescriptor, buffer.baseAddress, buffer.count)
+        try writeFrame(bytes)
+    }
+
+    func listenForCleanup(
+        requestIdentifier: String,
+        perform: @escaping (@escaping (Bool) -> Void) -> Void,
+        finished: @escaping (Bool) -> Void
+    ) {
+        lock.lock()
+        guard !listening, fileDescriptor >= 0 else {
+            lock.unlock()
+            finished(false)
+            return
         }
+        listening = true
+        let descriptor = fileDescriptor
+        lock.unlock()
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self,
+                  let command = self.readFrame(descriptor: descriptor, cap: 512),
+                  String(decoding: command, as: UTF8.self) == Self.cleanupCommand(requestIdentifier) else {
+                DispatchQueue.main.async { finished(false) }
+                return
+            }
+            DispatchQueue.main.async {
+                perform { success in
+                    guard success else { finished(false); return }
+                    do {
+                        try self.publishCleanupReceipt(requestIdentifier: requestIdentifier)
+                        finished(true)
+                    } catch {
+                        finished(false)
+                    }
+                }
+            }
+        }
+    }
+
+    private static func cleanupCommand(_ requestIdentifier: String) -> String {
+        "{\"schema\":\"maru.session-host-notification-cleanup-command.v1\",\"request_identifier\":\"\(requestIdentifier)\"}"
+    }
+
+    private func publishCleanupReceipt(requestIdentifier: String) throws {
+        let receipt = "{\"schema\":\"maru.session-host-notification-cleanup-receipt.v1\",\"request_identifier\":\"\(requestIdentifier)\"}"
+        lock.lock()
+        defer { lock.unlock() }
+        try writeFrame(Array(receipt.utf8))
         let descriptor = fileDescriptor
         fileDescriptor = -1
         _ = Darwin.close(descriptor)
-        guard count == bytes.count else { throw NotificationReleaseAppScenarioError.writeFailed }
+    }
+
+    private func writeFrame(_ bytes: [UInt8]) throws {
+        var length = UInt32(bytes.count).bigEndian
+        let headerCount = withUnsafeBytes(of: &length) { writeAll($0) }
+        guard headerCount else { throw NotificationReleaseAppScenarioError.writeFailed }
+        let bodyCount = bytes.withUnsafeBytes { writeAll($0) }
+        guard bodyCount else { throw NotificationReleaseAppScenarioError.writeFailed }
+    }
+
+    private func writeAll(_ buffer: UnsafeRawBufferPointer) -> Bool {
+        var offset = 0
+        while offset < buffer.count {
+            let count = Darwin.write(fileDescriptor, buffer.baseAddress!.advanced(by: offset), buffer.count - offset)
+            if count < 0 && errno == EINTR { continue }
+            guard count > 0 else { return false }
+            offset += count
+        }
+        return true
+    }
+
+    private func readFrame(descriptor: Int32, cap: Int) -> [UInt8]? {
+        var header = [UInt8](repeating: 0, count: 4)
+        guard readAll(descriptor: descriptor, into: &header) else { return nil }
+        let length = header.reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
+        guard length > 0, length <= cap else { return nil }
+        var body = [UInt8](repeating: 0, count: Int(length))
+        return readAll(descriptor: descriptor, into: &body) ? body : nil
+    }
+
+    private func readAll(descriptor: Int32, into bytes: inout [UInt8]) -> Bool {
+        var offset = 0
+        while offset < bytes.count {
+            let remaining = bytes.count - offset
+            let count = bytes.withUnsafeMutableBytes {
+                Darwin.read(descriptor, $0.baseAddress!.advanced(by: offset), remaining)
+            }
+            if count < 0 && errno == EINTR { continue }
+            guard count > 0 else { return false }
+            offset += count
+        }
+        return true
     }
 }

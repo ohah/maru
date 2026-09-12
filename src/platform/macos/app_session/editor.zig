@@ -582,7 +582,15 @@ pub fn cursorPosition(term: *const Term) ?struct { line: usize, column: usize, t
     if (term.rt.editor_diff != null) return null;
     const sel = term.rt.editor_selection orelse return null;
     const doc = term.rt.editor_doc orelse return null;
-    const off = @min(sel.focus, doc.file.content.len);
+    // **`clampOffset` 이 그 모듈이 정한 관용구다**(적대적 11 회차). `lineAt` 은
+    // `offset <= byteLen()` 을 **assert 로 전제**하고("문서 끝을 넘는 offset 은 정상이 아니다"),
+    // 그 doc 이 *"Release 에서는 `clampOffset` 을 거치도록 소비처를 유도한다"* 고 적어 두었다.
+    // 손으로 `@min` 을 쓰면 같은 뜻이 두 모양이 된다 — 이름을 부르는 쪽이 낫다.
+    //
+    // **판정자가 이 자리를 밟는다**(줄어든 문서에 남은 옛 offset). 다만 그 변이를 «죽는다» 로는
+    // 못 잡는다 — 판정자 바이너리의 최적화 모드에서 `assert` 가 컴파일되어 사라지기 때문이다.
+    // 잡는 것은 «경로가 그 자리를 지나고 결과가 정해져 있다» 까지다.
+    const off = doc.file.lines.clampOffset(sel.focus);
     const line_idx = doc.file.lines.lineAt(off);
     const line = doc.file.lines.line(line_idx) orelse return null;
 
@@ -6655,8 +6663,9 @@ pub fn sendSelectionToAgent(self: *AppSession, source: *Term, target_id: u64) bo
     const bracketed = term_ops.bracketedPasteFor(self, target_id) orelse return false;
     var payload_buf: [maru.session.agent_selection.max_quote_bytes + 1024]u8 = undefined;
     const payload = buildSelectionPayload(self, source, bracketed, &payload_buf) orelse return false;
-    // 대상은 **id 로 고정**된다 — `submitPaste` 가 그 계약을 든다(뒤에 탭이 바뀌어도 원래 surface 로).
-    term_ops.submitPaste(self, payload, false, target_id);
+    // 대상은 **id 로 고정**되고, **빚은 모드도 함께 간다** — `submitPaste` 가 bracketed 를 다시 읽으면
+    // 그 사이 2004 가 꺼졌을 때 여러 줄 인용이 감싸이지 않은 채 셸로 들어간다(§4. 적대적 10 회차).
+    term_ops.submitPasteShaped(self, payload, false, target_id, bracketed);
     return true;
 }
 
@@ -25593,4 +25602,161 @@ test "NSH 값싼 판정과 실제 열거는 같은 답을 낸다 (적대적 8회
         term_ops.collectAgentTargets(h.fx.session, &buf, &folders).items.len > 0,
         term_ops.hasAgentTarget(h.fx.session),
     );
+}
+
+test "NSH 빚은 모드로 인코딩한다 — 그 사이 2004 가 꺼져도 갈리지 않는다 (적대적 10회차)" {
+    // **§4 가 «유일한 진짜 위험» 이라 적은 자리다.** 페이로드는 대상의 bracketed 를 읽어 모양이
+    // 정해지고(켜짐=여러 줄 인용), 주입은 인코딩을 위해 **다시** 읽었다. 두 읽기 사이에 코어 락이
+    // 풀리므로 PTY reader 가 그 사이 2004 를 끄면 **여러 줄이 안 감싸인 채 셸로** 들어간다.
+    //
+    // 위험도 판정(`paste_protection`)이 그 값을 그대로 쓰므로, **확인 모달이 뜨는지**로 어느 모드가
+    // 쓰였는지를 잰다 — 인코딩 바이트는 큐에 넣고 곧바로 흘러 판정자가 못 본다(NS5 가 조립을
+    // 갈라 둔 것과 같은 이유).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    // 대상 터미널 하나를 고른다.
+    var target: ?*Term = null;
+    for (pane_ops.activePane(fx.session).terms.items) |t| {
+        if (t.kind == .terminal and t.surface.remote == null) target = t;
+    }
+    const term = target orelse return error.SkipZigTest;
+
+    // 여러 줄 페이로드 + 「bracketed 면 안전」 정책. 이 둘이라야 두 모드가 **다른 답**을 낸다.
+    fx.session.loaded_config.config.input.paste_protection = true;
+    fx.session.loaded_config.config.input.bracketed_paste_is_safe = true;
+    const multi = "첫 줄\n둘째 줄\n셋째 줄";
+
+    // ⑴ 코어는 **꺼짐**이고 빚은 모드도 안 넘기면 → 위험하다고 보고 확인 모달이 뜬다(대조군).
+    term_ops.submitPaste(fx.session, multi, false, term.surface.id);
+    try testing.expect(fx.session.chrome_host.confirm.open);
+    fx.session.chrome_host.confirm.dismiss();
+    fx.session.pending_paste_confirm.clearRetainingCapacity();
+
+    // ⑵ **빚은 모드(켜짐)를 넘기면** 그 값으로 감싸 보내므로 묻지 않는다 — 코어를 다시 안 읽는다.
+    term_ops.submitPasteShaped(fx.session, multi, false, term.surface.id, true);
+    try testing.expect(!fx.session.chrome_host.confirm.open);
+}
+
+test "NSH 문서가 줄어들어도 안 죽고, 낡은 스냅숏이면 내려간다 (적대적 11회차 — 편집과 프레임 사이)" {
+    // 상자가 떠 있는 동안 문서가 바뀔 수 있다(되돌리기·잘라내기·외부 갱신). 그러면 **선택 offset 은
+    // 새 내용보다 뒤**일 수 있고, 행 배열은 아직 **편집 전 프레임**의 것이다. 클릭 경로가 그
+    // 어긋남으로 여러 번 다쳤던 자리라(스냅숏 신선도) 같은 값을 읽는 이 경로도 함께 잰다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h = try helperFixture(allocator);
+    defer h.fx.deinit(allocator);
+    defer h.drawn.dl.deinit(allocator);
+
+    const doc = h.fx.term.rt.editor_doc orelse return error.NoDoc;
+    const full = doc.file.content.len;
+    try testing.expect(full > 10);
+    h.fx.term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = full };
+    showSendHelper(h.fx.session, h.fx.term);
+
+    // 문서를 통째로 지운다 — 선택 focus 가 새 내용 밖이다.
+    try testing.expect(selectAll(h.fx.session, h.fx.term));
+    try testing.expect(deleteText(h.fx.session, h.fx.term, false));
+    try testing.expect(h.fx.term.rt.editor_doc.?.file.content.len < full);
+
+    // **안 죽는다.** 답은 둘 중 하나로 정해져 있다 — 살아 있으면 앵커가 유효한 자리여야 하고,
+    // 아니면 내려가 있어야 한다. 어느 쪽이든 «죽지 않는다» 만으로는 부족해서 상태를 함께 못박는다.
+    const alive = refreshSendHelper(h.fx.session);
+    try testing.expectEqual(alive, h.fx.session.chrome_host.send_helper.open);
+
+    // **여기가 진짜 위험한 자리다** — 줄어든 문서에 **범위 밖 선택**이 남은 상태. 위 전체 삭제는
+    // 선택이 비어 먼저 걸러지므로 이 갈래를 안 밟는다(변이 M14 가 그것을 증명했다: clamp 를 빼도
+    // 판정자가 안 울었다). 그래서 그 상태를 **직접 만든다** — 클램프가 없으면 `lineAt` 이 범위 밖
+    // offset 을 받아 죽는다.
+    //
+    // **행 배열이 살아 있어야 그 자리에 닿는다** — 편집이 스냅숏을 비우면 앵커가 그 앞에서
+    // `null` 로 접혀 clamp 를 안 지난다(첫 판이 그래서 M14 를 놓쳤다). 그래서 **다시 그린다**.
+    var redrawn = appendPaneFrame(h.fx.session, h.fx.leaf_rect, h.fx.term) orelse
+        return error.EditorPaneDidNotDraw;
+    defer redrawn.dl.deinit(allocator);
+    try testing.expect(h.fx.term.rt.editor_hit_rows_len > 0); // 전제: 이번엔 행이 있다
+
+    const shrunk = h.fx.term.rt.editor_doc.?.file.content.len;
+    h.fx.term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = shrunk + 4096 };
+    // `lines.lineAt` 은 `offset <= byteLen()` 을 **assert 로 전제**한다 — 묶지 않으면 여기서 죽는다.
+    _ = refreshSendHelper(h.fx.session);
+    showSendHelper(h.fx.session, h.fx.term); // 새로 띄우는 경로도 같은 자리를 지난다
+
+    // 그리고 **페이로드도** 같은 범위 밖 선택에서 만들어진다(조립도 같은 clamp 를 쓴다).
+    var buf: [maru.session.agent_selection.max_quote_bytes + 1024]u8 = undefined;
+    const payload = buildSelectionPayload(h.fx.session, h.fx.term, true, &buf);
+    if (shrunk > 0) try testing.expect(payload != null);
+}
+
+test "NSH 읽기 전용 문서에서도 뜬다 — 보내기는 문서를 고치지 않는다 (적대적 12회차)" {
+    // 편집 항목(잘라내기·붙여넣기)은 읽기 전용에서 사라지지만(NS4), **보내기는 읽기 동작**이다.
+    // 여기에 읽기 전용 게이트가 실수로 붙으면 «읽기 전용으로 연 파일은 에이전트에 못 보낸다» 가
+    // 되는데, 그것이야말로 이 기능을 가장 많이 쓸 상태다(탐색기로 연 파일은 읽기 전용이었다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h = try helperFixture(allocator);
+    defer h.fx.deinit(allocator);
+    defer h.drawn.dl.deinit(allocator);
+
+    h.fx.term.rt.editor_doc.?.file.read_only = true;
+    h.fx.term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 5 };
+    showSendHelper(h.fx.session, h.fx.term);
+    try testing.expect(h.fx.session.chrome_host.send_helper.open);
+
+    // 그리고 실제로 보낼 수 있다.
+    var buf: [maru.session.agent_selection.max_quote_bytes + 1024]u8 = undefined;
+    try testing.expect(buildSelectionPayload(h.fx.session, h.fx.term, true, &buf) != null);
+}
+
+test "NSH split 에서 상자가 옆 pane 위로 나와도 그 클릭은 상자 것이다 (적대적 13회차 — 소유권)" {
+    // 상자는 **오버레이**라 pane 경계를 넘어 그려진다(편집기가 왼쪽 열이고 캐럿이 오른쪽 끝에
+    // 있으면 상자가 divider 를 넘어간다). 그때 그 클릭이 pane 라우팅으로 내려가면 **상자를 눌렀는데
+    // 옆 pane 이 포커스를 가져간다** — 눌린 것과 일어난 일이 다르다.
+    //
+    // `mouse` 의 분기 순서가 그 계약이다: 헬퍼는 pane 라우팅 **앞**, 모달 **뒤**.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    fx.session.surface_initialized = true;
+    fx.session.backing_width_px = 1200;
+    fx.session.backing_height_px = 800;
+
+    const editor_pane = pane_ops.activePane(fx.session);
+    try pane_ops.splitActivePane(fx.session, .horizontal);
+    const other_pane = pane_ops.activePane(fx.session);
+    try testing.expect(other_pane != editor_pane); // 전제: 실제로 갈라졌다
+
+    // 편집기 pane 으로 포커스를 되돌리고 그 사각으로 그린다.
+    try testing.expect(pane_ops.focusPaneByPtr(fx.session, editor_pane));
+    var rects: std.ArrayList(app_session_mod.PaneTree.LeafRect) = .empty;
+    defer rects.deinit(allocator);
+    try tab_ops.activeTabLeafRects(fx.session, allocator, fx.session.termRect(), &rects);
+    var leaf: ?maru.session.SplitRect = null;
+    for (rects.items) |lr| {
+        if (lr.leaf == editor_pane) leaf = lr.rect;
+    }
+    var drawn = appendPaneFrame(fx.session, leaf orelse return error.NoActiveLeaf, fx.term) orelse
+        return error.EditorPaneDidNotDraw;
+    defer drawn.dl.deinit(allocator);
+
+    fx.term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 5 };
+    showSendHelper(fx.session, fx.term);
+    try testing.expect(fx.session.chrome_host.send_helper.open);
+
+    const on = helperHitPoint(fx.session) orelse return error.HelperNotOnScreen;
+    fx.session.last_agent_target = null;
+    fx.session.mouse(1, on.x, on.y, 0, 0);
+
+    // **상자 것이다.** split 이 터미널을 하나 더 만들었으므로 후보가 둘이고, 그래서 이 클릭은
+    // «바로 보내기» 가 아니라 **대상 메뉴**로 간다(§5) — 그 자체가 상자가 클릭을 가졌다는 증거다.
+    try testing.expect(fx.session.chrome_host.context_menu.open);
+    try testing.expect(fx.session.editor_context_menu != null);
+    try testing.expect(fx.session.last_agent_target == null); // 아직 안 골랐으니 안 보냈다
+    // **그리고 포커스가 안 옮겨졌다** — pane 라우팅이 이 클릭을 가져갔다면 옆 pane 이 활성이 된다.
+    try testing.expectEqual(editor_pane, pane_ops.activePane(fx.session));
+    try testing.expect(other_pane != pane_ops.activePane(fx.session));
+    settings_ops.closeContextMenu(fx.session);
 }

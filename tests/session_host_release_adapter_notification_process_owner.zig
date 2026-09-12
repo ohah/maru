@@ -1,8 +1,8 @@
 const std = @import("std");
 const owner = @import("release_adapter_notification_process_owner");
 
-const Event = enum { bind, root, app, helper, collect, collect_continuity, publish, clean_receipt, clean_request, clean_helper, clean_app, clean_root };
-const normal = [_]Event{ .bind, .root, .app, .helper, .collect, .collect_continuity, .publish, .clean_request, .clean_helper, .clean_app, .clean_root };
+const Event = enum { bind, root, runtime, app, notification, helper, collect, collect_continuity, publish, clean_receipt, clean_request, clean_helper, clean_app, clean_runtime, clean_root };
+const normal = [_]Event{ .bind, .root, .runtime, .app, .notification, .helper, .collect, .collect_continuity, .publish, .clean_request, .clean_helper, .clean_app, .clean_runtime, .clean_root };
 
 const Recorder = struct {
     events: [32]Event = undefined,
@@ -29,9 +29,17 @@ const Recorder = struct {
         try self.same(d);
         try self.add(.root);
     }
+    pub fn prepareRuntime(self: *@This(), d: *u8) !void {
+        try self.same(d);
+        try self.add(.runtime);
+    }
     pub fn launchApp(self: *@This(), d: *u8) !void {
         try self.same(d);
         try self.add(.app);
+    }
+    pub fn emitNotification(self: *@This(), d: *u8) !void {
+        try self.same(d);
+        try self.add(.notification);
     }
     pub fn runHelper(self: *@This(), d: *u8) !u8 {
         try self.same(d);
@@ -67,6 +75,9 @@ const Recorder = struct {
     pub fn cleanupApp(self: *@This()) !void {
         try self.add(.clean_app);
     }
+    pub fn cleanupRuntime(self: *@This()) !void {
+        try self.add(.clean_runtime);
+    }
     pub fn cleanupRoot(self: *@This()) !void {
         try self.add(.clean_root);
     }
@@ -83,11 +94,13 @@ test "R2b2 composes app helper receipts and exact cleanup under one deadline" {
 test "R2b2 records every external attempt before failure and cleans in reverse" {
     const cases = .{
         .{ Event.root, &[_]Event{.clean_root} },
-        .{ Event.app, &[_]Event{ .clean_request, .clean_app, .clean_root } },
-        .{ Event.helper, &[_]Event{ .clean_request, .clean_helper, .clean_app, .clean_root } },
-        .{ Event.collect, &[_]Event{ .clean_request, .clean_helper, .clean_app, .clean_root } },
-        .{ Event.collect_continuity, &[_]Event{ .clean_request, .clean_helper, .clean_app, .clean_root } },
-        .{ Event.publish, &[_]Event{ .clean_request, .clean_helper, .clean_app, .clean_root } },
+        .{ Event.runtime, &[_]Event{ .clean_runtime, .clean_root } },
+        .{ Event.app, &[_]Event{ .clean_request, .clean_app, .clean_runtime, .clean_root } },
+        .{ Event.notification, &[_]Event{ .clean_request, .clean_app, .clean_runtime, .clean_root } },
+        .{ Event.helper, &[_]Event{ .clean_request, .clean_helper, .clean_app, .clean_runtime, .clean_root } },
+        .{ Event.collect, &[_]Event{ .clean_request, .clean_helper, .clean_app, .clean_runtime, .clean_root } },
+        .{ Event.collect_continuity, &[_]Event{ .clean_request, .clean_helper, .clean_app, .clean_runtime, .clean_root } },
+        .{ Event.publish, &[_]Event{ .clean_request, .clean_helper, .clean_app, .clean_runtime, .clean_root } },
     };
     inline for (cases) |case| {
         var execution: owner.Execution = .{};
@@ -116,6 +129,20 @@ test "R2b2 cleanup failure retains only its exact retry authority" {
     try std.testing.expect(!execution.root_attempted);
     recorder.cleanup_fail = null;
     try owner.retryCleanupWith(&recorder, &execution);
+    try std.testing.expect(execution.owner == null);
+}
+
+test "R3b2 runtime cleanup failure fences root removal until retry" {
+    var execution: owner.Execution = .{};
+    var recorder: Recorder = .{ .fail = .runtime, .cleanup_fail = .clean_runtime };
+    try std.testing.expectError(error.CleanupFailed, owner.executeWith(&recorder, &execution));
+    try std.testing.expect(execution.runtime_attempted);
+    try std.testing.expect(execution.root_attempted);
+    try std.testing.expect(std.mem.indexOfScalar(Event, recorder.events[0..recorder.len], .clean_root) == null);
+
+    recorder.cleanup_fail = null;
+    try owner.retryCleanupWith(&recorder, &execution);
+    try std.testing.expectEqualSlices(Event, &.{ .clean_runtime, .clean_root }, recorder.events[recorder.len - 2 .. recorder.len]);
     try std.testing.expect(execution.owner == null);
 }
 

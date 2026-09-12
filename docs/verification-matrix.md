@@ -3053,7 +3053,11 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   `release_adapter_notification_candidate_product.zig`는 runner 입력을 owned snapshot으로 만든 뒤, caller가 추측한
   mount 경로가 아니라 DMG authority가 read-only mount 수명 안에서 발급한 `MountedCandidate`의 app/helper 경로만 두 R2c
   scenario에 주입한다. 전역 source inventory는 P5d와 Notification product가 `observeWithMountedGate`를 각각 한 번만 호출하고
-  둘 다 GitHub credential/workflow를 import하지 않음을 고정한다. R3b2는 격리 runtime과 실제 notification을 준비하는
+  둘 다 GitHub credential/workflow를 import하지 않음을 고정한다. R3b2 준비 순서는 caller가 동적 ID를 추측하지
+  않도록 R2 process owner가 새 mode `0700` root를 만든 직후, AppKit launch 전에 실행하는 단일 transaction으로 둔다.
+  이 단계가 실제 host/runtime identity를 반환하고 실패 시 app보다 먼저 기록된 runtime cleanup authority가 root 제거
+  전에 회수한다. 따라서 preparer는 ambient `MARU_SESSION_HOST_ROOT`나 사용자 registry를 조회해 자신이 만든 host를
+  재발견하지 않는다. R3b2는 이 경계에서 격리 runtime과 실제 notification을 준비하는
   token-free 제품 CLI 및 tag release의 signed candidate를 별도
   `Session host product` environment와 고정 self-hosted macOS label을 가진 job으로 전달한다. job은 R2를 실행하고
   attempt-scoped artifact attestation을 게시한다. 최종 release evidence는 exact run/attempt/job/deployment와 candidate

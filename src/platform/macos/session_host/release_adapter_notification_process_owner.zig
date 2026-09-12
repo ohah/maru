@@ -7,6 +7,7 @@
 pub const Execution = struct {
     owner: ?*Execution = null,
     root_attempted: bool = false,
+    runtime_attempted: bool = false,
     app_attempted: bool = false,
     helper_attempted: bool = false,
     request_attempted: bool = false,
@@ -15,18 +16,18 @@ pub const Execution = struct {
 
     pub fn ownsReceipt(self: *const @This()) bool {
         return self.owner == self and self.successful and self.receipt_attempted and
-            !self.root_attempted and !self.app_attempted and !self.helper_attempted and
+            !self.root_attempted and !self.runtime_attempted and !self.app_attempted and !self.helper_attempted and
             !self.request_attempted;
     }
 
     pub fn needsCleanup(self: *const @This()) bool {
-        return self.owner == self and !self.successful and (self.root_attempted or
+        return self.owner == self and !self.successful and (self.root_attempted or self.runtime_attempted or
             self.app_attempted or self.helper_attempted or self.request_attempted or
             self.receipt_attempted);
     }
 
     fn pristine(self: *const @This()) bool {
-        return self.owner == null and !self.root_attempted and !self.app_attempted and
+        return self.owner == null and !self.root_attempted and !self.runtime_attempted and !self.app_attempted and
             !self.helper_attempted and !self.request_attempted and !self.receipt_attempted and
             !self.successful;
     }
@@ -46,9 +47,17 @@ pub fn executeWith(steps: anytype, execution: *Execution) !void {
 
     execution.root_attempted = true;
     steps.createRoot(deadline) catch |err| return fail(steps, execution, err);
+    // The real host/runtime identity does not exist before the private root exists. Keep this
+    // preparation inside the same owner transaction so a failed spawn cannot escape cleanup or
+    // force a caller to inspect the ambient user registry to rediscover what it created.
+    execution.runtime_attempted = true;
+    steps.prepareRuntime(deadline) catch |err| return fail(steps, execution, err);
     execution.app_attempted = true;
     execution.request_attempted = true;
     steps.launchApp(deadline) catch |err| return fail(steps, execution, err);
+    // The callback delegate is live only after launch. Releasing the prepared child earlier can
+    // race the actual Notification Center response ahead of the product observer installation.
+    steps.emitNotification(deadline) catch |err| return fail(steps, execution, err);
     execution.helper_attempted = true;
     const click = steps.runHelper(deadline) catch |err| return fail(steps, execution, err);
     const app_receipt = steps.collectAppReceipt(deadline) catch |err| return fail(steps, execution, err);
@@ -119,7 +128,17 @@ fn cleanupEphemeralInternal(steps: anytype, execution: *Execution, clean: *bool)
         };
         if (this_clean) execution.app_attempted = false;
     }
-    if (execution.root_attempted) {
+    if (execution.runtime_attempted) {
+        var this_clean = true;
+        steps.cleanupRuntime() catch {
+            clean.* = false;
+            this_clean = false;
+        };
+        if (this_clean) execution.runtime_attempted = false;
+    }
+    // A failed runtime cleanup may leave a live daemon able to recreate children. Never remove
+    // its containing root until that exact runtime authority has been recovered.
+    if (execution.root_attempted and !execution.runtime_attempted) {
         var this_clean = true;
         steps.cleanupRoot() catch {
             clean.* = false;

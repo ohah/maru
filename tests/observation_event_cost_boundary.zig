@@ -124,4 +124,72 @@ test "관측 이벤트 비용 계측: 단일 지점에서 원자적으로 세고
     }
     // 조용할 때는 한 줄도 안 찍어야 로그가 원인을 덮지 않는다.
     try std.testing.expect(has(session, "if (events == 0) return;"));
+    try std.testing.expect(has(session, "if (!any) return;"));
+
+    // ③ **진단 장부는 프로세스 전역이다.** 세는 카운터가 전역인데 장부를 세션마다 두면 창이 둘일 때
+    //    같은 증분을 각자 소비해 **값까지 똑같은 줄이 두 번** 찍힌다.
+    //
+    //    2026-09-12 실측: 로그 최근 300 줄 중 **276 줄(92 %)이 이 진단**이었고 그중 절반이 중복이었다.
+    //    진짜 신호는 5 줄(1.7 %). 그 탓에 시작 시점의 `session host upgrade result` 가 회전으로 밀려나
+    //    「업그레이드가 왜 안 됐나」를 앱을 두 번 재시작하며 헛짚었다 — **진단이 진단을 지웠다.**
+    for ([_][]const u8{
+        "var diag_obs_tick: u32 = 0;",
+        "var diag_site_tick: u32 = 0;",
+        "var diag_last_drain_calls: u64 = 0;",
+        "var diag_site_last_calls = ",
+    }) |needle| {
+        if (!has(session, needle)) {
+            std.debug.print("진단 장부 «{s}» 가 전역이 아니다 — 창마다 같은 줄이 두 번 찍힌다\n", .{needle});
+            return error.DiagnosticLedgerNotGlobal;
+        }
+    }
+    // 세션 필드로 되돌아가면 빨개진다.
+    try std.testing.expect(!has(session, "obs_diag_last_drain_calls: u64 = 0,"));
+    try std.testing.expect(!has(session, "digest_site_last_calls: ["));
+
+    // ④ **자리별 내역은 총량보다 드물게 찍는다.** 한 번에 네 줄이라 같은 주기면 로그의 대부분을 차지한다.
+    //
+    //    **값이 아니라 관계를 고정한다.** 처음엔 `= 3600;` 을 통째로 잠갔는데, 30 초로 «조정» 하는 것도
+    //    빨개졌다(적대적 검증 Z1) — 의도는 「총량보다 드물다」이지 특정 숫자가 아니다. 오늘 이 실수를
+    //    네 번 했다.
+    const site_iv = parseConst(session, "const digest_site_interval_ticks: u32 = ") orelse
+        return error.SiteIntervalMissing;
+    const total_iv = parseConst(session, "const notify_diag_interval_ticks: u32 = ") orelse
+        return error.TotalIntervalMissing;
+    if (site_iv <= total_iv) {
+        std.debug.print(
+            "자리별 간격 {d} 이 총량 간격 {d} 이하 — 네 줄짜리가 같은 주기면 로그를 덮는다\n",
+            .{ site_iv, total_iv },
+        );
+        return error.SiteIntervalNotRarer;
+    }
+
+    // ⑤ 게이트는 **표본을 읽기 전에** 있어야 한다. 뒤에 두면 매 틱 읽고 버려 비용만 남는다(Z5).
+    const fn_at = std.mem.indexOf(u8, session, "fn logDigestSiteDiag() void {") orelse
+        return error.SiteDiagMissing;
+    // 게이트는 **자기 틱**을 세야 한다. 총량의 틱을 쓰면 같은 주기로 돌아 드물게 찍는 의미가 사라진다(Z2).
+    const gate_at = std.mem.indexOfPos(u8, session, fn_at, "diag_site_tick % digest_site_interval_ticks != 0") orelse
+        return error.SiteGateMissing;
+    const sample_at = std.mem.indexOfPos(u8, session, fn_at, "digestSiteSamples(") orelse
+        return error.SiteSampleMissing;
+    try std.testing.expect(gate_at < sample_at);
+
+    // ⑥ 장부를 **갱신한다.** 안 하면 매 창의 증분이 누적 전체가 되어 숫자가 조용히 거짓이 된다(Z3).
+    for ([_][]const u8{
+        "diag_site_last_calls[i] = sample.calls;",
+        "diag_site_last_bytes[i] = sample.bytes;",
+    }) |needle| {
+        if (!has(session, needle)) {
+            std.debug.print("장부 갱신 «{s}» 이 없다 — 증분이 누적 전체가 된다\n", .{needle});
+            return error.LedgerNotAdvanced;
+        }
+    }
+}
+
+/// `const <이름> = <숫자>;` 에서 숫자만 읽는다. 값을 리터럴로 잠그지 않고 **관계**를 재기 위한 것이다.
+fn parseConst(src: []const u8, decl: []const u8) ?u64 {
+    const at = std.mem.indexOf(u8, src, decl) orelse return null;
+    const rest = src[at + decl.len ..];
+    const end = std.mem.indexOfAny(u8, rest, ";\n") orelse return null;
+    return std.fmt.parseInt(u64, std.mem.trim(u8, rest[0..end], " "), 10) catch null;
 }

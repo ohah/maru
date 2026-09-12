@@ -3607,7 +3607,7 @@ pub fn build(b: *std.Build) void {
                     .{ .name = "syntax", .module = syntax_mod },
                 },
             }),
-            .filters = &.{ "원격 펼침", "IG-원격", "원격 신선도" },
+            .filters = &.{ "원격 펼침", "IG-원격", "원격 신선도", "원격 매핑" },
         });
         remote_activity_vertical_tests.root_module.link_libc = true;
         for ([_][]const u8{ "AppKit", "Metal", "MetalKit", "QuartzCore", "CoreText", "CoreGraphics", "ImageIO" }) |fw| {
@@ -3618,8 +3618,11 @@ pub fn build(b: *std.Build) void {
             .flags = &.{"-fobjc-arc"},
         });
         const run_remote_activity_vertical = b.addRunArtifact(remote_activity_vertical_tests);
-        // 이름 있는 둘 + 이 그래프의 이름 없는 test 블록들(필터와 무관하게 컴파일된다).
-        run_remote_activity_vertical.addArg("--maru-expect-tests=6");
+        // 이름 있는 넷 + 원격 wire **매핑** 판정자 + 이 그래프의 이름 없는 test 블록들(필터와
+        // 무관하게 컴파일된다). ⚠️ 매핑을 여기 넣은 이유: `agent_image_scan_backend` 는 `maru` 모듈
+        // 의존이 있어 **단독 `zig test` 로 안 돌고**, 전체 `zig build test` 는 캐시로 건너뛴다 —
+        // 그러면 새 매핑 판정자가 「돌았는지」를 개수로 확인할 데가 아예 없다.
+        run_remote_activity_vertical.addArg("--maru-expect-tests=18");
         run_remote_activity_vertical.setCwd(b.path("."));
         b.step("test-remote-activity-vertical", "Run the remote activity view vertical judges only").dependOn(&run_remote_activity_vertical.step);
 
@@ -14221,7 +14224,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
         const run_release_adapter_contract_tests = b.addRunArtifact(release_adapter_contract_tests);
-        run_release_adapter_contract_tests.addArg("--maru-expect-tests=19");
+        run_release_adapter_contract_tests.addArg("--maru-expect-tests=18");
         run_release_adapter_contract_tests.setCwd(b.path("."));
         session_host_release_adapter_contract_step.dependOn(&run_release_adapter_contract_tests.step);
     }

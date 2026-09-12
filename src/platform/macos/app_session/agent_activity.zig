@@ -229,9 +229,16 @@ pub const State = struct {
     /// 펼침 요청의 세대(RAV5b). 다른 것을 열거나 소스가 갈리면 올라가고, **늦게 온 원격 답**은
     /// 여기서 버려진다 — 안 버리면 남의 명령이 뜬다.
     detail_generation: u64 = 0,
-    /// **원격 스캔이 읽은 바이트**(RAV7). 원격은 로컬 `stat` 자국을 쓸 수 없으므로(§13.2) 이 값이
-    /// 자국이다 — 다음 신선도 확인이 **그 자리에서 1 바이트를 청해** 자랐는지 본다.
+    /// **원격 스캔이 머리 파일에서 읽은 바이트**(RAV7 · 판 2 부터 RAV7b). 원격은 로컬 `stat` 자국을
+    /// 쓸 수 없으므로(§13.2) 이 값이 자국이다 — 다음 신선도 확인이 **그 자리에서 1 바이트를 청해**
+    /// 자랐는지 본다.
+    ///
+    /// ⚠️ **체인 전체의 합이 아니다.** RAV7a 는 그 합밖에 없어 파일이 둘 이상이면 자국을 버렸고,
+    /// 재개 세션(실측 58%)은 신선도가 꺼진 채였다(적대적 S1).
     remote_scanned_bytes: u64 = 0,
+    /// **이어읽기 자국**(판 2 · RAV7b · 계획 §19.2) — 머리 파일의 이 자리부터 다시 훑으면 같은
+    /// 결과를 얻는다. 아직 아무도 안 쓴다(RAV7b-3 의 일이다).
+    remote_resume_offset: u64 = 0,
     /// 이 인덱스가 선 **pane 의 surface id**. 포커스가 옮겨 갔는지는 이 값으로만 안다(계약 §2.1
     /// «범위는 활성 pane»). 경로로는 못 가른다 — 에이전트가 안 붙은 pane 은 경로가 **아예 없어서**
     /// 「같은 것을 보고 있다」와 구별되지 않는다. `0` 은 아직 어떤 pane 도 기록하지 않았다는 뜻이고,
@@ -398,6 +405,7 @@ pub const State = struct {
         // **옛 파일의 크기**다 — 그대로 두면 신선도가 **새 파일**의 그 자리를 묻고, 새 파일이 더
         // 작으면 영영 빈 답이라 **자라도 갱신이 안 된다**.
         self.remote_scanned_bytes = 0;
+        self.remote_resume_offset = 0;
         // **소스가 갈리면 본문 결과는 남의 파일 것이다.** 오프셋은 파일 절대값이라 그대로 두면
         // 새 세션의 엉뚱한 호출이 「본문에서 맞았다」로 선다.
         self.body.reset(allocator);
@@ -1459,14 +1467,13 @@ pub fn poll(self: *AppSession) void {
     // **원격 자국을 찍는다**(RAV7). 다음 신선도 확인이 이 자리에서 1 바이트를 청해 자랐는지 본다 —
     // 로컬의 `head_stamp`(stat)에 해당하는 값이다.
     //
-    // ⚠️ **체인이 하나일 때만 찍는다**(적대적 S1). `scanned_bytes` 는 **체인 전체의 합**이라 파일이
-    // 둘 이상이면 머리 파일의 크기가 아니다 — 그 자리에서 1 바이트를 청하면 **영영 빈 답**이고
-    // 신선도가 죽는다(Codex 재개는 실측 58%). 0 이면 신선도가 꺼지고 재진입마다 다시 훑는다 —
-    // **덜 아는 쪽**으로 기운다.
-    if (self.agent_activity.source_remote) {
-        self.agent_activity.remote_scanned_bytes =
-            if (result.remote_file_count == 1) result.scanned_bytes else 0;
-    }
+    // 🔥 **머리 파일의 것을 쓴다**(판 2 · RAV7b). RAV7a 는 `scanned_bytes`(**체인 전체의 합**)밖에
+    // 없어서 파일이 둘 이상이면 자국을 **버렸고**, 그래서 재개 세션(실측 58%)은 신선도가 통째로
+    // 꺼진 채였다(적대적 S1). 이제 저쪽이 머리 것을 따로 실으므로 체인에서도 판정이 선다.
+    //
+    // ⚠️ 0 이면 여전히 신선도가 꺼진다 — 옛 판(10) 헬퍼가 깔린 원격이면 이 칸이 0 으로 온다. 그때는
+    // 재진입마다 다시 훑는다: **덜 아는 쪽**으로 기운다.
+    applyRemoteStamps(self, &result);
     self.agent_activity.built = true;
     self.agent_activity.awaiting = 0;
     self.agent_activity.resubmit = false;
@@ -4055,6 +4062,16 @@ fn decodeRemoteTarget(self: *AppSession) ?struct { owned: []u8, target: decode_b
 }
 
 // ── 원격 신선도(RAV7) ───────────────────────────────────────────────────────────────────────────
+
+/// 원격 스캔이 낸 **자국 둘**을 받아 둔다. **판정자가 직접 부르는 제품 함수**다 — 부수효과를 겨눈
+/// 판정자가 실은 아무것도 안 재고 있던 일(RAV7a 적대적 T4)을 겪고 나서 이 스택은 결정을 값으로,
+/// 적용을 작은 함수로 가른다.
+pub fn applyRemoteStamps(self: *AppSession, result: *const scan_backend.Result) void {
+    // **로컬 pane 의 결과는 안 받는다.** 저쪽 크기로 이쪽 파일을 판정하면 신선도가 거짓을 말한다.
+    if (!self.agent_activity.source_remote) return;
+    self.agent_activity.remote_scanned_bytes = result.remote_head_bytes;
+    self.agent_activity.remote_resume_offset = result.remote_resume_offset;
+}
 
 /// 원격 신선도 확인의 결말.
 pub const RemoteFreshOutcome = struct {

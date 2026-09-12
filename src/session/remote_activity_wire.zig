@@ -22,7 +22,7 @@
 //! ## wire v1 (줄 지향 + 길이 접두 라벨)
 //!
 //! ```text
-//! maru-rav 1\n                    머리 — 판이 다르면 즉시 거부(구 GUI ↔ 신 헬퍼의 조용한 오독 방지)
+//! maru-rav 2\n                    머리 — 판이 다르면 즉시 거부(구 GUI ↔ 신 헬퍼의 조용한 오독 방지)
 //! F <index> <len> <경로>\n         체인의 파일 하나. **인덱스를 명시한다**(순서가 아니다 — §G1)
 //! S <p> <ip> <ap> <scanned>\n      스캔 플래그 셋(partial·image_partial·activity_partial)과 읽은 바이트
 //! A <필드 19 개> <len> <라벨>\n     활동·이미지 한 건(아래)
@@ -78,8 +78,8 @@ pub const max_chain = index.max_chain;
 /// 최대의 3 배로 잡는다(로컬 `readCodexParentId` 와 같은 값·같은 근거).
 pub const codex_meta_window_bytes: usize = 64 * 1024;
 
-pub const wire_version: u32 = 1;
-pub const header_line = "maru-rav 1";
+pub const wire_version: u32 = 2;
+pub const header_line = "maru-rav 2";
 
 /// 한 wire 가 실을 수 있는 활동·이미지 수. 스캐너의 상한들이 이 값을 정한다 — 그보다 큰 수를
 /// 주장하는 wire 는 저쪽이 오염됐다는 뜻이라 파서가 거기서 멈춘다.
@@ -126,7 +126,19 @@ pub const ScanFlags = struct {
     image_partial: bool = false,
     activity_partial: bool = false,
     /// 저쪽이 실제로 읽은 바이트. 화면이 쓰지는 않지만 **진단이 이 값으로 「정말 훑었나」를 본다**.
+    ///
+    /// ⚠️ **체인 전체의 합이다** — 머리 파일의 크기가 아니다. 신선도는 `head_bytes` 를 봐야 한다
+    /// (RAV7a 적대적 S1 이 그 혼동으로 재개 세션 58% 의 신선도를 껐다).
     scanned_bytes: u64 = 0,
+    /// **머리 파일(자리 0)에서 읽은 바이트**(판 2 · RAV7b). 신선도가 「그 자리에서 1 바이트」를 청할
+    /// 때 쓰는 값이다 — 체인이 여럿이어도 이 값은 머리 파일의 것이라 판정이 성립한다.
+    head_bytes: u64 = 0,
+    /// **이어읽기 자국**(판 2 · RAV7b · 계획 §19.2). 머리 파일의 이 자리부터 다시 훑으면 같은 결과를
+    /// 얻는다 — `consumed` 와 「살아 있는 미결 호출의 가장 이른 줄」 중 **작은 쪽**이다.
+    ///
+    /// 🔥 `head_bytes` 와 **다른 값이다**: 저쪽은 「읽은 데까지」, 이쪽은 「결말이 다 붙은 데까지」다.
+    /// 둘을 섞으면 이어읽기 구간의 결과 줄이 주인을 못 찾아 「진행중」이 영영 남는다.
+    resume_offset: u64 = 0,
 };
 
 /// `A ` 뒤에 오는 **10 진 필드의 수**(라벨 길이 칸 포함, 라벨 바이트 제외). 판정자가 오염된 줄을
@@ -138,7 +150,7 @@ pub const record_fields: usize = 24;
 // 되면 그만큼을 라벨로 읽고 지나간다. 머리말 대조가 그 갈림을 막는 유일한 수단이므로, 여기서 둘을
 // 묶어 **한쪽만 고치면 컴파일이 깨지게** 한다.
 comptime {
-    const expected_fields_for_version = [_]usize{ 0, 24 }; // [판] = 필드 수
+    const expected_fields_for_version = [_]usize{ 0, 24, 24 }; // [판] = 필드 수
     if (wire_version >= expected_fields_for_version.len or
         expected_fields_for_version[wire_version] != record_fields)
     {
@@ -157,6 +169,7 @@ comptime {
 // 렌더 parity 가드(`remote_screen.expectSnapshotParity`)가 같은 수법으로 화면 축을 지키고 있다 —
 // 분류를 **강제**하되 무엇을 안 싣는지는 사람이 정한다.
 fn assertCovered(comptime T: type, comptime carried: []const []const u8, comptime derived: []const []const u8) void {
+    @setEvalBranchQuota(10_000);
     inline for (@typeInfo(T).@"struct".fields) |f| {
         comptime var seen = false;
         inline for (carried ++ derived) |name| {
@@ -185,6 +198,13 @@ comptime {
         // 히트를 못 보므로 저쪽에서도 못 채운다. 실어 봐야 언제나 0 이다.
         "seq", "seq_total",
     });
+
+    // **`S` 줄도 같은 규율이다**(RAV7b). 이 타입은 이 모듈이 정의하지만 인코더·파서는 손으로
+    // 맞추므로, 필드를 더하고 한쪽을 잊으면 그 값은 **영영 기본값**이다 — `Hit` 이 겪은 그것
+    // (적대적 A2)과 정확히 같은 모양이라 같은 못을 박는다.
+    assertCovered(ScanFlags, &.{
+        "partial", "image_partial", "activity_partial", "scanned_bytes", "head_bytes", "resume_offset",
+    }, &.{});
 }
 
 /// wire 한 건 — `Hit` 과 그 라벨·시각.
@@ -263,7 +283,9 @@ pub fn appendFlags(out: []u8, at: usize, flags: ScanFlags) ?usize {
     n = appendField(out, n, @intFromBool(flags.partial)) orelse return null;
     n = appendField(out, n, @intFromBool(flags.image_partial)) orelse return null;
     n = appendField(out, n, @intFromBool(flags.activity_partial)) orelse return null;
-    n = appendDecimal(out, n, flags.scanned_bytes) orelse return null;
+    n = appendField(out, n, flags.scanned_bytes) orelse return null;
+    n = appendField(out, n, flags.head_bytes) orelse return null;
+    n = appendDecimal(out, n, flags.resume_offset) orelse return null;
     n = appendBytes(out, n, "\n") orelse return null;
     return n;
 }
@@ -533,12 +555,19 @@ pub const Parser = struct {
         const ip = try self.takeDecimal();
         const ap = try self.takeDecimal();
         if (p > 1 or ip > 1 or ap > 1) return ParseError.Malformed;
-        const scanned = try self.takeDecimalLine();
+        const scanned = try self.takeDecimal();
+        const head = try self.takeDecimal();
+        const resume_at = try self.takeDecimalLine();
+        // **자국이 읽은 바이트를 넘을 수는 없다.** 넘으면 그 자리에서 이어 읽을 때 저쪽이 안 읽은
+        // 구간을 「이미 봤다」로 치게 된다 — 그 사이 활동이 통째로 사라진다(계약 §2.2).
+        if (resume_at > head) return ParseError.Malformed;
         return .{
             .partial = p == 1,
             .image_partial = ip == 1,
             .activity_partial = ap == 1,
             .scanned_bytes = scanned,
+            .head_bytes = head,
+            .resume_offset = resume_at,
         };
     }
 
@@ -665,7 +694,12 @@ test "왕복: 머리·파일·플래그·레코드·꼬리가 그대로 돌아�
     var buf: [4096]u8 = undefined;
     var n = appendHeader(&buf, 0).?;
     n = appendFile(&buf, n, 2, "/home/u/.codex/sessions/2026/09/11/rollout-a.jsonl").?;
-    n = appendFlags(&buf, n, .{ .activity_partial = true, .scanned_bytes = 261_533_353 }).?;
+    n = appendFlags(&buf, n, .{
+        .activity_partial = true,
+        .scanned_bytes = 261_533_353,
+        .head_bytes = 4_096_000,
+        .resume_offset = 4_090_112,
+    }).?;
 
     var label: context.Label = .{ .time_s = 1_757_500_000 };
     const text = "zig build test";
@@ -684,6 +718,10 @@ test "왕복: 머리·파일·플래그·레코드·꼬리가 그대로 돌아�
     try testing.expect(ev_flags.flags.activity_partial);
     try testing.expect(!ev_flags.flags.partial);
     try testing.expectEqual(@as(u64, 261_533_353), ev_flags.flags.scanned_bytes);
+    // **판 2 의 자국 둘**(RAV7b). `scanned_bytes` 는 체인 전체의 합이고 이 둘은 **머리 파일**의
+    // 것이라 셋이 서로 다른 수여야 한다 — 한 자리라도 섞이면 여기서 죽는다.
+    try testing.expectEqual(@as(u64, 4_096_000), ev_flags.flags.head_bytes);
+    try testing.expectEqual(@as(u64, 4_090_112), ev_flags.flags.resume_offset);
 
     const ev_rec = (try p.next()).?;
     try testing.expectEqual(sampleHit(), ev_rec.record.hit);
@@ -692,6 +730,30 @@ test "왕복: 머리·파일·플래그·레코드·꼬리가 그대로 돌아�
 
     try testing.expectEqual(@as(?Event, null), try p.next());
     try testing.expect(p.complete());
+}
+
+test "자국이 읽은 바이트를 넘는다고 주장하면 거부한다 (RAV7b)" {
+    // 🔥 **넘으면 안 읽은 구간을 「이미 봤다」로 친다.** 이어읽기가 그 자리부터 시작하므로 그 사이
+    // 활동이 **통째로 사라진다** — 「비었다」와 「못 봤다」를 가르는 계약(§2.2)이 여기서 깨진다.
+    var buf: [256]u8 = undefined;
+    const h = appendHeader(&buf, 0).?;
+    var line: [128]u8 = undefined;
+    const bad = std.fmt.bufPrint(&line, "S 0 0 0 100 40 41\n", .{}) catch unreachable;
+    @memcpy(buf[h..][0..bad.len], bad);
+
+    var p = Parser.init(buf[0 .. h + bad.len]);
+    try testing.expectError(ParseError.Malformed, p.next());
+}
+
+test "자국이 읽은 바이트와 같은 것은 받는다 — 미결 호출이 없으면 그 자리다 (RAV7b)" {
+    var buf: [256]u8 = undefined;
+    var n = appendHeader(&buf, 0).?;
+    n = appendFlags(&buf, n, .{ .head_bytes = 4096, .resume_offset = 4096 }).?;
+    n = appendTail(&buf, n, 0).?;
+
+    var p = Parser.init(buf[0..n]);
+    const ev = (try p.next()).?;
+    try testing.expectEqual(@as(u64, 4096), ev.flags.resume_offset);
 }
 
 test "꼬리가 없으면 완결이 아니다 — 잘림을 온전한 척 읽지 않는다" {
@@ -721,10 +783,19 @@ test "꼬리 count 가 어긋나면 거부한다 — 중간 유실을 잡는다"
     try testing.expectError(ParseError.CountMismatch, p.next());
 }
 
-test "판이 다르면 즉시 거부한다" {
-    const bytes = "maru-rav 2\nX 0\n";
-    var p = Parser.init(bytes);
-    try testing.expectError(ParseError.UnsupportedVersion, p.next());
+test "판이 다르면 즉시 거부한다 — 앞판도 뒷판도" {
+    // **뒷판**(우리보다 새 헬퍼).
+    {
+        var p = Parser.init("maru-rav 3\nX 0\n");
+        try testing.expectError(ParseError.UnsupportedVersion, p.next());
+    }
+    // 🔥 **앞판**(옛 헬퍼가 아직 깔려 있는 실제 경우 — RAV7b 가 판 1 → 2 로 올렸다). 여기서 안
+    // 걸리면 `S` 줄의 자리가 밀린 값을 읽어 **자국이 엉뚱한 수**가 되고, 이어읽기가 안 읽은 구간을
+    // 「이미 봤다」로 친다.
+    {
+        var p = Parser.init("maru-rav 1\nX 0\n");
+        try testing.expectError(ParseError.UnsupportedVersion, p.next());
+    }
 }
 
 test "원격 오류도 완결이다 — 「못 읽는다」와 「비었다」를 가른다" {
@@ -1209,7 +1280,7 @@ test "범위: 원격 오류도 완결이다 — 「못 읽었다」와 「빈 �
 
 test "범위: 활동 wire 를 범위 파서에 먹이면 거부한다 — 형식이 갈려 있다" {
     var buf: [1024]u8 = undefined;
-    const n = appendHeader(&buf, 0).?; // `maru-rav 1`
+    const n = appendHeader(&buf, 0).?; // `maru-rav 2`
     var p = RangeParser.init(buf[0..n]);
     try testing.expectError(ParseError.UnsupportedVersion, p.next());
 }

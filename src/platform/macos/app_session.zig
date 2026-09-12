@@ -81857,6 +81857,42 @@ test "활동 뷰: 원격 신선도 답이 「자랐을 때만」 다시 훑는�
     //    묻고, 새 파일이 더 작으면 영영 빈 답이라 **자라도 갱신이 안 된다**.
     session.agent_activity.clear(allocator);
     try std.testing.expectEqual(@as(u64, 0), session.agent_activity.remote_scanned_bytes);
+    try std.testing.expectEqual(@as(u64, 0), session.agent_activity.remote_resume_offset);
+}
+
+test "활동 뷰: 원격 신선도 자국은 체인이 여럿이어도 산다 (RAV7b)" {
+    // 🔥 **RAV7a 적대적 S1 을 고치는 자리.** 그때는 `scanned_bytes`(체인 전체의 합)밖에 없어 파일이
+    // 둘 이상이면 자국을 **0 으로 버렸고**, 그래서 재개 세션(Codex 실측 58%)은 신선도가 통째로
+    // 꺼진 채 재진입마다 다시 훑었다. 판 2 가 머리 것을 따로 실으므로 이제 산다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    session.agent_activity.source_remote = true;
+    // 체인 둘 · 합은 100 만인데 **머리는 4,096** 이다.
+    var result: agent_image_scan_backend.Result = .{
+        .remote_file_count = 2,
+        .scanned_bytes = 1_000_000,
+        .remote_head_bytes = 4_096,
+        .remote_resume_offset = 2_048,
+    };
+    defer result.deinit(allocator);
+
+    agent_activity_ops.applyRemoteStamps(session, &result);
+
+    // **합이 아니라 머리 것이 자국이다.** 합을 쓰면 그 자리는 파일 끝 너머라 영영 빈 답이다.
+    try std.testing.expectEqual(@as(u64, 4_096), session.agent_activity.remote_scanned_bytes);
+    try std.testing.expectEqual(@as(u64, 2_048), session.agent_activity.remote_resume_offset);
 }
 
 test "활동 뷰: 원격 펼침 결말이 로컬과 같은 규칙으로 풀린다 (RAV5b)" {

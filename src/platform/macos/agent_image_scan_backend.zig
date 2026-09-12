@@ -41,13 +41,17 @@ pub const Result = struct {
     image_partial: bool = false,
     activity_partial: bool = false,
     scanned_bytes: u64 = 0,
-    /// 원격이 실은 **체인 파일 수**(RAV7a 적대적 S1). 신선도 자국은 `scanned_bytes` 를 쓰는데 그것은
-    /// **체인 전체의 합**이라, 파일이 둘 이상이면 머리 파일의 크기가 아니다 — 그 자리에서 1 바이트를
-    /// 청하면 **영영 빈 답**이고 신선도가 죽는다(Codex 재개는 실측 58%).
+    /// 원격이 실은 **체인 파일 수**(RAV7a 적대적 S1).
     ///
-    /// 그래서 **하나일 때만** 자국으로 쓴다. 여럿일 때의 올바른 자국은 「머리 파일이 읽힌 바이트」인데
-    /// 그것을 실으려면 wire 판을 올려야 한다 — RAV7b 의 일이다.
+    /// ⚠️ **더는 신선도의 근거가 아니다**(RAV7b). 판 2 가 `remote_head_bytes` 를 따로 실으므로 체인이
+    /// 여럿이어도 신선도가 산다 — 이 값은 진단과 「원격이 체인을 풀었나」를 보는 데 남는다.
     remote_file_count: u8 = 0,
+    /// **머리 파일에서 읽은 바이트**(판 2 · RAV7b). 신선도가 이 자리에서 1 바이트를 청한다 —
+    /// `scanned_bytes`(체인 전체의 합)와 **다른 값이다**.
+    remote_head_bytes: u64 = 0,
+    /// **이어읽기 자국**(판 2 · RAV7b · 계획 §19.2). 머리 파일의 이 자리부터 다시 훑으면 같은 결과를
+    /// 얻는다. RAV7b-3 이 쓴다 — 지금은 싣고 두기만 한다.
+    remote_resume_offset: u64 = 0,
     scan_ns: u64 = 0,
     /// 이 결과를 만든 요청. main actor 가 「지금 보고 있는 것」과 대조해 늦게 온 것을 버린다.
     generation: u64 = 0,
@@ -561,6 +565,8 @@ fn remoteResultFromWire(allocator: std.mem.Allocator, bytes: []const u8, exit_co
             result.image_partial = result.image_partial or flags.image_partial;
             result.activity_partial = result.activity_partial or flags.activity_partial;
             result.scanned_bytes = flags.scanned_bytes;
+            result.remote_head_bytes = flags.head_bytes;
+            result.remote_resume_offset = flags.resume_offset;
         },
         .record => |rec| {
             result.hits.append(allocator, rec.hit) catch {
@@ -676,10 +682,7 @@ test "원격 매핑: 원격 오류는 「비었다」가 아니라 「못 봤다
     try testing.expectEqual(@as(usize, 0), result.hits.items.len);
 }
 
-test "원격 매핑: 체인 파일 수를 센다 — 신선도 자국이 그 값에 달려 있다" {
-    // 🔥 적대적 S1: `scanned_bytes` 는 **체인 전체의 합**이다. 파일이 둘 이상이면 그것은 머리 파일의
-    // 크기가 아니라서, 그 자리에서 1 바이트를 청하는 신선도 판정이 **영영 빈 답**을 받는다.
-    // 소비자가 「하나일 때만」을 가릴 수 있게 개수를 싣는다.
+test "원격 매핑: 체인 파일 수를 센다" {
     var buf: [8192]u8 = undefined;
     {
         const bytes = buildWire(&buf, .{}, &.{sampleRecord()});
@@ -698,6 +701,29 @@ test "원격 매핑: 체인 파일 수를 센다 — 신선도 자국이 그 값
         defer result.deinit(testing.allocator);
         try testing.expectEqual(@as(u8, 2), result.remote_file_count);
     }
+}
+
+test "원격 매핑: 체인이 여럿이어도 머리 자국을 쓴다 — 합과 갈라 싣는다 (RAV7b)" {
+    // 🔥 **RAV7a 적대적 S1 을 고치는 자리.** 그때는 `scanned_bytes`(**체인 전체의 합**)밖에 없어
+    // 파일이 둘 이상이면 자국을 **버렸고**, 재개 세션(실측 58%)은 신선도가 통째로 꺼졌다. 판 2 가
+    // 머리 것을 따로 싣는다 — 셋이 서로 다른 수로 도착해야 한다.
+    var buf: [8192]u8 = undefined;
+    var n = wire.appendHeader(&buf, 0).?;
+    n = wire.appendFile(&buf, n, 0, "/home/u/child.jsonl").?;
+    n = wire.appendFile(&buf, n, 1, "/home/u/parent.jsonl").?;
+    n = wire.appendFlags(&buf, n, .{
+        .scanned_bytes = 1_000_000, // 체인 전체
+        .head_bytes = 4_096, // 머리만
+        .resume_offset = 2_048, // 미결 호출까지 되돌린 자리
+    }).?;
+    n = wire.appendTail(&buf, n, 0).?;
+
+    var result = remoteResultFromWire(testing.allocator, buf[0..n], 0, 1);
+    defer result.deinit(testing.allocator);
+    try testing.expectEqual(@as(u64, 1_000_000), result.scanned_bytes);
+    try testing.expectEqual(@as(u64, 4_096), result.remote_head_bytes);
+    try testing.expectEqual(@as(u64, 2_048), result.remote_resume_offset);
+    try testing.expectEqual(@as(u8, 2), result.remote_file_count);
 }
 
 test "원격 매핑: 자리와 라벨의 길이는 언제나 같다" {

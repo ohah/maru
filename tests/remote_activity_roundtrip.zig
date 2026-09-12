@@ -114,6 +114,7 @@ test "헬퍼 activity 왕복: 저쪽이 훑은 자리·라벨·결말이 파서�
     var parser = wire.Parser.init(out.stdout);
     var saw_file = false;
     var saw_flags = false;
+    var flags: wire.ScanFlags = .{};
     var i: usize = 0;
     var labels: std.ArrayList(wire.Label) = .empty;
     defer labels.deinit(gpa);
@@ -129,6 +130,7 @@ test "헬퍼 activity 왕복: 저쪽이 훑은 자리·라벨·결말이 파서�
             try std.testing.expect(!fl.partial);
             try std.testing.expect(!fl.activity_partial);
             try std.testing.expect(fl.scanned_bytes > 0);
+            flags = fl;
             saw_flags = true;
         },
         .record => |rec| {
@@ -162,6 +164,17 @@ test "헬퍼 activity 왕복: 저쪽이 훑은 자리·라벨·결말이 파서�
     // ── 결말(AV2)도 국경을 건넜는지 ────────────────────────────────────────────────────────
     try std.testing.expect(local.items[0].result.found);
     try std.testing.expect(local.items[0].result.failed); // `is_error: true`
+
+    // ── 판 2 의 자국 둘(RAV7b) ────────────────────────────────────────────────────────────
+    // **머리 파일이 읽힌 바이트**. 체인이 하나라 `scanned_bytes` 와 같지만, **다른 값으로 실려야**
+    // 한다 — 헬퍼가 이 칸을 안 채우면 0 이고 신선도가 통째로 꺼진다(RAV7a 적대적 S1).
+    const size = (try std.Io.Dir.cwd().statFile(io, path, .{})).size;
+    try std.testing.expectEqual(size, flags.head_bytes);
+
+    // **이어읽기 자국이 미결 호출까지 되돌아야 한다.** 픽스처의 셋째 줄(`toolu_02` Read)은 결과가
+    // 없다 — 자국이 파일 끝이면 다음 회차가 그 결말을 영영 못 붙이고 「진행중」이 남는다(§19.2).
+    try std.testing.expect(flags.resume_offset < flags.head_bytes);
+    try std.testing.expectEqual(local.items[1].line_offset, flags.resume_offset);
 }
 
 test "헬퍼 activity: 상대경로는 원격이 거부한다 — 저쪽 cwd 의 다른 파일을 안 연다" {
@@ -286,7 +299,9 @@ test "헬퍼 activity: 재개 세션은 부모 rollout 까지 훑는다 (RAV4)" 
     var saw_parent_file = false;
     var saw_parent_activity = false;
     var saw_child_activity = false;
+    var flags: wire.ScanFlags = .{};
     while (try parser.next()) |ev| switch (ev) {
+        .flags => |fl| flags = fl,
         .file => |cf| {
             files += 1;
             if (std.mem.endsWith(u8, cf.path, parent_name)) {
@@ -311,7 +326,6 @@ test "헬퍼 activity: 재개 세션은 부모 rollout 까지 훑는다 (RAV4)" 
             std.debug.print("원격이 실패를 보고했다: {s}\n", .{msg});
             return error.TestUnexpectedResult;
         },
-        else => {},
     };
 
     try std.testing.expect(parser.complete());
@@ -319,6 +333,15 @@ test "헬퍼 activity: 재개 세션은 부모 rollout 까지 훑는다 (RAV4)" 
     try std.testing.expect(saw_parent_file);
     try std.testing.expect(saw_child_activity);
     try std.testing.expect(saw_parent_activity);
+
+    // ── 🔥 **자국은 머리 파일의 것이다**(RAV7b — RAV7a 적대적 S1 을 고치는 자리) ──────────────
+    // `scanned_bytes` 는 **체인 전체의 합**이라 자식보다 크다. 신선도가 그 값으로 자식 파일의 그
+    // 자리를 물으면 **영영 빈 답**이고, 재개 세션(실측 58%)은 신선도가 통째로 죽는다.
+    var child_size_buf: [256]u8 = undefined;
+    const child_abs = try std.fmt.bufPrint(&child_size_buf, "{s}/{s}", .{ day, child_name });
+    const child_size = (try std.Io.Dir.cwd().statFile(io, child_abs, .{})).size;
+    try std.testing.expectEqual(child_size, flags.head_bytes);
+    try std.testing.expect(flags.scanned_bytes > flags.head_bytes); // 부모까지 훑었다
 }
 
 test "헬퍼 activity: 부모 id 로 «끝나기만» 하는 파일에는 안 속는다 (RAV4)" {

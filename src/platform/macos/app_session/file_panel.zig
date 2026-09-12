@@ -841,6 +841,15 @@ pub fn updateFileTree(self: *AppSession) !void {
         if (got) |outcome| agent_activity_ops.finishRemoteDetail(self, outcome);
     }
 
+    // 원격 신선도 결말(RAV7) — 같은 자리에서 드레인한다.
+    {
+        self.remote_fresh_mutex.lockUncancelable(self.io);
+        const got = self.remote_fresh_outcome;
+        self.remote_fresh_outcome = null;
+        self.remote_fresh_mutex.unlock(self.io);
+        if (got) |outcome| agent_activity_ops.finishRemoteFreshness(self, outcome);
+    }
+
     // follow 가 펌프보다 **먼저다**(적대적 검증 3 회차): 적용이 이번 tick 의 ctl·스캔 요청을 세우고
     // 같은 tick 의 펌프가 그것을 쏜다 — 뒤에 두면 첫 활성화가 한 프레임 늦고, ctl 갱신도 한 tick
     // 낡은 것을 쓴다.

@@ -3603,7 +3603,7 @@ pub fn build(b: *std.Build) void {
                     .{ .name = "syntax", .module = syntax_mod },
                 },
             }),
-            .filters = &.{ "원격 펼침", "IG-원격" },
+            .filters = &.{ "원격 펼침", "IG-원격", "원격 신선도" },
         });
         remote_activity_vertical_tests.root_module.link_libc = true;
         for ([_][]const u8{ "AppKit", "Metal", "MetalKit", "QuartzCore", "CoreText", "CoreGraphics", "ImageIO" }) |fw| {
@@ -3615,7 +3615,7 @@ pub fn build(b: *std.Build) void {
         });
         const run_remote_activity_vertical = b.addRunArtifact(remote_activity_vertical_tests);
         // 이름 있는 둘 + 이 그래프의 이름 없는 test 블록들(필터와 무관하게 컴파일된다).
-        run_remote_activity_vertical.addArg("--maru-expect-tests=5");
+        run_remote_activity_vertical.addArg("--maru-expect-tests=6");
         run_remote_activity_vertical.setCwd(b.path("."));
         b.step("test-remote-activity-vertical", "Run the remote activity view vertical judges only").dependOn(&run_remote_activity_vertical.step);
 

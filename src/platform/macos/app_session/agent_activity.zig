@@ -57,6 +57,12 @@ fn pollFreshness(self: *AppSession) void {
     self.agent_activity.last_stat_ms = now_ms;
 
     const path = activeSourcePath(self) orelse return;
+    // **원격은 로컬 `stat` 을 못 쓴다**(§13.2) — 저쪽에 물어야 하고 그것은 왕복이라 tick 을 막으면
+    // 안 된다. 워커를 걸고 물러난다(답이 오면 드레인이 `refresh` 를 건다).
+    if (self.agent_activity.source_remote) {
+        beginRemoteFreshness(self, path);
+        return;
+    }
     if (!headChanged(self, path)) return;
     refresh(self, true); // 자랐다 — 다시 훑는다(`force` 로 위 게이트를 지나간다)
 }
@@ -223,6 +229,9 @@ pub const State = struct {
     /// 펼침 요청의 세대(RAV5b). 다른 것을 열거나 소스가 갈리면 올라가고, **늦게 온 원격 답**은
     /// 여기서 버려진다 — 안 버리면 남의 명령이 뜬다.
     detail_generation: u64 = 0,
+    /// **원격 스캔이 읽은 바이트**(RAV7). 원격은 로컬 `stat` 자국을 쓸 수 없으므로(§13.2) 이 값이
+    /// 자국이다 — 다음 신선도 확인이 **그 자리에서 1 바이트를 청해** 자랐는지 본다.
+    remote_scanned_bytes: u64 = 0,
     /// 이 인덱스가 선 **pane 의 surface id**. 포커스가 옮겨 갔는지는 이 값으로만 안다(계약 §2.1
     /// «범위는 활성 pane»). 경로로는 못 가른다 — 에이전트가 안 붙은 pane 은 경로가 **아예 없어서**
     /// 「같은 것을 보고 있다」와 구별되지 않는다. `0` 은 아직 어떤 pane 도 기록하지 않았다는 뜻이고,
@@ -1443,6 +1452,9 @@ pub fn poll(self: *AppSession) void {
     // 못 봤고 자리도 없다」가 실패의 모양이다.
     self.agent_activity.remote_failed = self.agent_activity.source_remote and
         result.partial and result.scanned_bytes == 0 and result.hits.items.len == 0;
+    // **원격 자국을 찍는다**(RAV7). 다음 신선도 확인이 이 자리에서 1 바이트를 청해 자랐는지 본다 —
+    // 로컬의 `head_stamp`(stat)에 해당하는 값이다.
+    if (self.agent_activity.source_remote) self.agent_activity.remote_scanned_bytes = result.scanned_bytes;
     self.agent_activity.built = true;
     self.agent_activity.awaiting = 0;
     self.agent_activity.resubmit = false;
@@ -4028,4 +4040,138 @@ fn decodeRemoteTarget(self: *AppSession) ?struct { owned: []u8, target: decode_b
         .owned = owned,
         .target = .{ .ctl = owned[0..ctx.ctl.len], .dest = owned[ctx.ctl.len..] },
     };
+}
+
+// ── 원격 신선도(RAV7) ───────────────────────────────────────────────────────────────────────────
+
+/// 원격 신선도 확인의 결말.
+pub const RemoteFreshOutcome = struct {
+    /// 어느 스캔의 자국에 대한 답인가. 그 사이 다시 훑었으면 드레인이 버린다.
+    stamp: u64,
+    /// **자랐다.** 자국 자리에서 바이트가 나왔다는 뜻이다.
+    grew: bool = false,
+};
+
+const RemoteFreshJob = struct {
+    session: *AppSession,
+    ctl: []u8,
+    dest: []u8,
+    path: []u8,
+    stamp: u64,
+};
+
+/// 원격 소스가 **자랐는지** 묻는다 — 왕복 하나로.
+///
+/// 🔥 **판을 안 올린다.** 「크기를 알려 달라」는 새 서브커맨드를 만들 수도 있지만, 이미 있는 문
+/// (`read <path> <off> <len>`)으로 같은 것을 안다: **직전 스캔이 읽은 바이트 수 자리에서 1 바이트를
+/// 청한다.** 빈 답이면 그 자리가 아직 파일 끝이고(안 자랐다), 1 바이트가 오면 자랐다.
+///
+/// 트랜스크립트는 **append-only** 라 이 판정이 성립한다 — `/clear` 는 **새 파일**을 만들고 그때는
+/// 경로가 바뀌어 `refresh` 의 「소스가 갈렸나」가 먼저 잡는다.
+///
+/// **이것이 RAV7 의 값이다**: 그 전에는 뷰에 들어올 때마다 **통째로 다시 훑었다**(원격은 로컬 `stat`
+/// 자국을 쓸 수 없어서 — §13.2). 이제는 왕복 하나로 「안 자랐다」를 확인하고 물러난다.
+fn beginRemoteFreshness(self: *AppSession, path: []const u8) void {
+    if (!builtin.target.os.tag.isDarwin()) return;
+    if (self.remote_fresh_inflight) return;
+    // 자국이 0 이면 아직 한 번도 안 훑었다 — 물을 것이 없다.
+    const stamp = self.agent_activity.remote_scanned_bytes;
+    if (stamp == 0) return;
+
+    const term = pane_ops.activePane(self).activeTerm();
+    const ctx = self.remoteUploadContextFor(term) orelse return;
+    defer ctx.deinit(self.allocator);
+
+    const job = self.allocator.create(RemoteFreshJob) catch return;
+    job.* = .{
+        .session = self,
+        .ctl = self.allocator.dupe(u8, ctx.ctl) catch {
+            self.allocator.destroy(job);
+            return;
+        },
+        .dest = undefined,
+        .path = undefined,
+        .stamp = stamp,
+    };
+    job.dest = self.allocator.dupe(u8, ctx.dest) catch {
+        self.allocator.free(job.ctl);
+        self.allocator.destroy(job);
+        return;
+    };
+    job.path = self.allocator.dupe(u8, path) catch {
+        self.allocator.free(job.dest);
+        self.allocator.free(job.ctl);
+        self.allocator.destroy(job);
+        return;
+    };
+
+    self.remote_fresh_inflight = true;
+    const thread = std.Thread.spawn(.{}, remoteFreshWorker, .{job}) catch {
+        self.remote_fresh_inflight = false;
+        self.allocator.free(job.path);
+        self.allocator.free(job.dest);
+        self.allocator.free(job.ctl);
+        self.allocator.destroy(job);
+        return;
+    };
+    thread.detach();
+}
+
+/// 백그라운드: 자국 자리에서 1 바이트를 청해 본다. **`std.Io` 도 로컬 파일시스템도 안 만진다.**
+fn remoteFreshWorker(job: *RemoteFreshJob) void {
+    const self = job.session;
+    const allocator = self.allocator;
+    defer {
+        allocator.free(job.path);
+        allocator.free(job.dest);
+        allocator.free(job.ctl);
+        allocator.destroy(job);
+    }
+
+    var outcome: RemoteFreshOutcome = .{ .stamp = job.stamp };
+    var off_buf: [24]u8 = undefined;
+    if (std.fmt.bufPrint(&off_buf, "{d}", .{job.stamp})) |off_text| {
+        var out: []u8 = &.{};
+        const code = ssh_upload.runRemoteCapped(
+            allocator,
+            job.ctl,
+            job.dest,
+            ssh_upload.activity_read_script,
+            &.{ job.path, off_text, "1" },
+            wire.max_range_wire_bytes,
+            &out,
+        ) catch -1;
+        defer allocator.free(out);
+        if (code == 0) {
+            var parser = wire.RangeParser.init(out);
+            var got: ?[]const u8 = null;
+            var bad = false;
+            while (parser.next() catch blk: {
+                bad = true;
+                break :blk null;
+            }) |ev| switch (ev) {
+                .bytes => |b| got = b,
+                .remote_error => bad = true,
+            };
+            // **못 읽었으면 「안 자랐다」로 둔다.** 그 실패를 「자랐다」로 읽으면 매 주기마다 통째로
+            // 다시 훑게 되고(RAV7 이 없애려던 그것), 화면에는 아무 근거도 안 뜬다.
+            if (!bad and parser.complete()) {
+                if (got) |b| outcome.grew = b.len > 0;
+            }
+        }
+    } else |_| {}
+
+    self.remote_fresh_mutex.lockUncancelable(self.io);
+    self.remote_fresh_outcome = outcome;
+    self.remote_fresh_mutex.unlock(self.io);
+}
+
+/// tick 이 신선도 답을 낸다(드레인). **판정자가 직접 부르는 제품 함수**다.
+pub fn finishRemoteFreshness(self: *AppSession, outcome: RemoteFreshOutcome) void {
+    self.remote_fresh_inflight = false;
+    if (!self.agent_activity.source_remote) return;
+    // 그 사이 다시 훑었으면 이 답은 옛 자국의 것이다 — 버린다.
+    if (outcome.stamp != self.agent_activity.remote_scanned_bytes) return;
+    if (!outcome.grew) return;
+    refresh(self, true); // 자랐다 — 다시 훑는다(`force` 로 게이트를 지나간다)
 }

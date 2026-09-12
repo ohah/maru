@@ -311,6 +311,12 @@ pub const SocketServer = struct {
         if (ops.sample_metadata_sources) |sample| sample(ops.ctx, now_ns);
     }
 
+    /// cadence tick 마다 runtime 들의 kitty 애니메이션을 전진시킨다. backend 가 이 op 를 안 내면 no-op 이다.
+    pub fn advanceAnimations(self: *SocketServer, now_ns: u64) void {
+        const ops = self.runtime_ops orelse return;
+        if (ops.advance_animations) |advance| advance(ops.ctx, now_ns);
+    }
+
     pub fn drainOwnerWake(self: *SocketServer) bool {
         const drain = self.owner_wake_drain orelse return false;
         return drain(self.owner_wake_ctx.?);

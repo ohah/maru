@@ -262,6 +262,10 @@ pub const RuntimeOps = struct {
     ) anyerror!MetadataChangeToken = null,
     /// Sole-owner bounded sampler. Calling before its deadline is an O(1) no-op.
     sample_metadata_sources: ?*const fn (ctx: *anyopaque, now_ns: u64) void = null,
+    /// kitty 애니메이션을 host cadence 에 맞춰 전진시킨다(20ms tick). **core 가 host 에 사는 한 이 일은 host 몫이다**
+    /// — app 프로세스에 꽂으면 거기 core 는 비어 있어 죽은 코드가 된다(실측으로 확인). 프레임이 실제로 넘어간
+    /// runtime 만 screen change 를 publish 하므로, 애니메이션이 없으면 tick 당 비용은 맵 순회 하나다.
+    advance_animations: ?*const fn (ctx: *anyopaque, now_ns: u64) void = null,
     /// Pending notification을 지우지 않고 off-side JSON과 generation token으로 복제한다. server가 response를
     /// canonical control queue에 admission한 뒤에만 `notification_commit`으로 같은 generation을 소비한다.
     notification_peek: *const fn (
@@ -4964,6 +4968,9 @@ pub const FakeRuntimeOps = struct {
 
     /// 벨·OSC 52가 core에 대기 중인 상황을 흉내낸다(실 pending 조회는 runtime_manager smoke).
     observation_urgent: bool = false,
+    /// cadence 경계가 애니메이션 전진을 부른 횟수. 배선이 끊기면 이 값이 0 에 머문다.
+    animation_ticks: usize = 0,
+    animation_last_now_ns: u64 = 0,
     spawn_count: usize = 0,
     spawn_argv0: [64]u8 = undefined,
     spawn_argv0_len: usize = 0,
@@ -5401,8 +5408,14 @@ pub const FakeRuntimeOps = struct {
         };
     }
 
+    fn advanceAnimationsFn(ctx: *anyopaque, now_ns: u64) void {
+        const self: *FakeRuntimeOps = @ptrCast(@alignCast(ctx));
+        self.animation_ticks += 1;
+        self.animation_last_now_ns = now_ns;
+    }
+
     pub fn ops(self: *FakeRuntimeOps) RuntimeOps {
-        return .{ .ctx = self, .spawn = spawnFn, .terminate = terminateFn, .write_input = writeInputFn, .resize = resizeFn, .snapshot = snapshotFn, .delta = deltaFn, .notification_peek = notificationPeekFn, .notification_commit = notificationCommitFn, .notification_config_update = notificationConfigUpdateFn, .core_command = coreCommandFn, .selected_text = selectedTextFn, .select_op = selectOpFn, .find = findFn, .observation = observationFn, .cached_observation = cachedObservationFn, .report_mouse = reportMouseFn, .link_at = linkAtFn, .clipboard_write = clipboardWriteFn, .observation_urgent = observationUrgentFn };
+        return .{ .ctx = self, .advance_animations = advanceAnimationsFn, .spawn = spawnFn, .terminate = terminateFn, .write_input = writeInputFn, .resize = resizeFn, .snapshot = snapshotFn, .delta = deltaFn, .notification_peek = notificationPeekFn, .notification_commit = notificationCommitFn, .notification_config_update = notificationConfigUpdateFn, .core_command = coreCommandFn, .selected_text = selectedTextFn, .select_op = selectOpFn, .find = findFn, .observation = observationFn, .cached_observation = cachedObservationFn, .report_mouse = reportMouseFn, .link_at = linkAtFn, .clipboard_write = clipboardWriteFn, .observation_urgent = observationUrgentFn };
     }
 
     pub fn opsWithScreenChangeToken(self: *FakeRuntimeOps) RuntimeOps {

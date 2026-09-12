@@ -7252,8 +7252,15 @@ chunk_index:u32 | chunk_count:u32 | record_bytes...
   pointer를 포함하지 않는다.
 - delta record는 `set_runs`, `clear_rect`, `scroll_rect`, `cursor`, `modes`, `image_place/remove`, `prompt_marks`(full-replace),
   `scroll_state`(스크롤백 길이·view offset — `screen_meta`는 snapshot에만 실려 스크롤만 바뀐 프레임에서 client 값이
-  stale이 되므로 delta로 따로 나른다)의
-  bounded operation list다. metadata title/cwd/process/agent/notification은 screen delta에 섞지 않는다. 일반 runtime
+  stale이 되므로 delta로 따로 나른다), `image_blob`(snapshot과 같은 레코드 — client가 아직 모르거나 `generation`이 바뀐
+  이미지의 **픽셀 전체**를 delta로도 나른다. 이게 없으면 attach 이후에 전송된 이미지가 client에 영영 안 닿는다)의
+  bounded operation list다.
+  - `image_blob`의 단위는 **이미지 한 장 전체**지 바뀐 영역이 아니다. 그래서 `generation`이 오르면 픽셀이 한 바이트도 안
+    바뀌었어도 통째로 다시 실린다. 실측(64x64 RGBA=16 KiB 이미지, kitty 애니메이션 프레임 1회 전진): delta 16,441 bytes.
+    host cadence가 20ms이므로 최대 50fps → 그 작은 이미지도 822 KB/s, 실제 크기(400x300 RGBA=480 KiB)면 24 MB/s다.
+  - **따라서 프레임이 매 tick 바뀌는 원격 애니메이션은 이 계약 위에 그대로 얹을 수 없다.** 프레임들을 미리 한 번 보내고
+    delta는 「지금 몇 번 프레임」만 나르는 레코드가 먼저 있어야 한다. 그 레코드가 생기기 전까지 host는 애니메이션을
+    전진시키지 않는다(로컬 app 프로세스의 core는 비어 있어서 거기 꽂은 전진은 애초에 죽은 코드다). metadata title/cwd/process/agent/notification은 screen delta에 섞지 않는다. 일반 runtime
   metadata는 hello의 `runtime_metadata_v1` capability를 명시한 client에만 attach response initial full-state와 JSON
   `runtime.metadata` event full-state로 전송한다. 같은 MRSH v2 구 client에는 알 수 없는 async event를 push하지 않는다.
   client는 response/snapshot/delta 대기 중에도 shared wire validator를 통과한 event만 stream별 단조 revision 최신 한 건으로
@@ -7437,7 +7444,7 @@ GUI가 `*LivePtySession`을 안 드는 컴파일 타임 red test, boundary check
 - **P3-b(screen-stream codec) ✅**: `src/session/screen_stream.zig`에 §12 current `maru.screen-stream.v2`와
   capability-tagged frozen N-1 v1 reader를 구현했다 —
   28-byte record header, snapshot record(screen_meta·row/run·image_placement·image_blob·prompt_marks), delta record(set_runs·
-  clear_rect·scroll_rect·cursor·modes·image_place·image_remove·prompt_marks) encode/decode와 `rowWidthMatches`(폭·continuation 검증)·UTF-8/truncation/
+  clear_rect·scroll_rect·cursor·modes·image_place·image_remove·image_blob·prompt_marks) encode/decode와 `rowWidthMatches`(폭·continuation 검증)·UTF-8/truncation/
   cap 거부. 순수 codec이라 non-macOS에서 wire 회귀를 고정한다(`test-session-host`).
 - **P3-c(runtime registry) ✅**: `session_host/registry.zig`에 `TerminalRuntimeRegistry`와 controller/observer capability
   state machine(§9)을 구현했다 — runtime_id(u128) 소유표, 새 attach(observer/controller)·detach·prepared takeover/release·

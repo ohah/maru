@@ -7557,6 +7557,70 @@ test "Zig 는 플랫폼 접근성 어휘를 갖지 않는다 — 투영은 adapt
 //
 // 그래서 macOS 잡이 `zig build test-macos-only` 로 그것들을 돈다. 등록을 빠뜨리면 그 게이트는 **다시
 // CI 밖**이 되므로, 여기서 짝이 맞는지 센다.
+test "macOS 전용 «판정자 스텝»은 하나도 CI 밖에 안 남는다" {
+    // 🔥 **짝 게이트의 구멍을 막는다**(계획 §28). 그쪽은 「`test_step` 에 붙은 줄 **다음**」만 보므로
+    // **어디에도 안 붙은** 이름 스텝은 셀 대상이 아니었다 — 그래서 아홉 개가 CI 밖에 남았고, 그중
+    // `test-macos-metal-smoke` 는 **빨간 채로** 있었다(`clip_index` 를 더한 커밋이 ObjC 미러를 안
+    // 맞췄는데 아무도 안 봤다).
+    //
+    // **여기서는 스텝 «이름»을 센다**: `if (macos)` 블록 안에서 `b.step("test-…")` 로 만들어진 것은
+    // 전부 `macos_only_test_step` 에 닿거나 CI yml 이 직접 불러야 한다.
+    const allocator = std.testing.allocator;
+    const source = try readZigFileZ(allocator, "build.zig");
+    defer allocator.free(source);
+    const ci = try readZigFileZ(allocator, ".github/workflows/ci.yml");
+    defer allocator.free(ci);
+
+    var in_macos: usize = 0;
+    var depth: usize = 0;
+    var seen: usize = 0;
+    var orphans: usize = 0;
+    // ⚠️ **줄의 «위치»가 필요하다** — 이름으로 `indexOf` 하면 설명 문자열·주석의 첫 등장을 집어
+    //    엉뚱한 자리를 본다(처음 쓴 판이 그렇게 빨갛게 났다). 커서를 직접 든다.
+    var cursor: usize = 0;
+    while (cursor < source.len) {
+        const nl = std.mem.indexOfScalarPos(u8, source, cursor, '\n') orelse source.len;
+        const line = source[cursor..nl];
+        defer cursor = nl + 1;
+
+        if ((std.mem.indexOf(u8, line, "target.result.os.tag == .macos") != null or
+            std.mem.indexOf(u8, line, "builtin.os.tag == .macos") != null) and
+            std.mem.indexOf(u8, line, "if (") != null)
+        {
+            in_macos = depth + 1;
+        }
+        for (line) |c| {
+            if (c == '{') depth += 1;
+            if (c == '}' and depth > 0) depth -= 1;
+        }
+        if (in_macos != 0 and depth < in_macos) in_macos = 0;
+        if (in_macos == 0) continue;
+
+        const at = std.mem.indexOf(u8, line, "b.step(\"test-") orelse continue;
+        const rest = line[at + "b.step(\"".len ..];
+        const end = std.mem.indexOfScalar(u8, rest, '"') orelse continue;
+        const name = rest[0..end];
+        seen += 1;
+
+        // ⑴ CI yml 이 직접 부르나.
+        var buf: [128]u8 = undefined;
+        const invoked = std.fmt.bufPrint(&buf, "zig build {s}", .{name}) catch continue;
+        if (std.mem.indexOf(u8, ci, invoked) != null) continue;
+        // ⑵ **그 줄부터 «다음 스텝 선언 직전»까지** 본다. 고정 창(800 B)으로 뒀더니 **이웃의 부착을
+        //    빌려** 새 고아가 통과했다 — 적대적 CA1 이 가짜 스텝을 넣어 그것을 드러냈다.
+        const scan_from = cursor + at;
+        const next_step = std.mem.indexOfPos(u8, source, scan_from + 1, "b.step(") orelse source.len;
+        if (std.mem.indexOf(u8, source[scan_from..next_step], "macos_only_test_step.dependOn(") != null) continue;
+
+        std.debug.print("🔥 `{s}` 가 CI 밖이다 — `macos_only_test_step` 에 붙이거나 ci.yml 이 부르게 하라.\n", .{name});
+        orphans += 1;
+    }
+
+    try std.testing.expectEqual(@as(usize, 0), orphans);
+    // **0 개를 세고도 초록이 되지 않게** — 블록 탐지가 깨지면 `seen` 이 0 이 된다.
+    try std.testing.expect(seen >= 9);
+}
+
 test "macOS 전용 게이트는 test 와 test-macos-only 에 짝으로 붙는다" {
     const allocator = std.testing.allocator;
     const source = try readZigFileZ(allocator, "build.zig");

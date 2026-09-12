@@ -98,6 +98,14 @@ typedef struct {
     // 쓰지 않지만(0), 크기/오프셋 계약(metal_smoke 테스트)을 위해 둔다.
     uint32_t origin_x;
     uint32_t origin_y;
+    // 🔥 Zig `NativeMetalCell.clip_index`/`_clip_pad` 와 layout 을 맞춘다(ABI v169). smoke 는 자르지
+    // 않지만(0) **이 필드가 없으면 구조체가 4 바이트 짧아** Zig 가 넘긴 배열을 훑을 때마다 자리가
+    // 밀리고, ObjC 가 **남의 셀의 atlas 좌표**를 읽어 smoke 가 거짓 신호를 낸다.
+    //
+    // ⚠️ 그 일이 실제로 있었다: `clip_index` 를 더한 커밋이 이 미러를 안 맞췄고, Zig 쪽 ABI 판정자가
+    // `expected 64, found 68` 로 잡았지만 **그 스텝이 CI 밖이라** 아무도 안 봤다(계획 §28).
+    uint16_t clip_index;
+    uint16_t clip_pad;
 } MaruMetalSmokeCell;
 
 typedef struct {

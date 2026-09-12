@@ -36,6 +36,7 @@ const editor_pairs = maru.session.editor.pairs;
 const occurrence = maru.session.editor.occurrence;
 const chrome_editor = maru.chrome.components.editor_view;
 const settings_ops = @import("settings.zig");
+const input_ops = @import("input.zig");
 const chrome_scroll_area = maru.chrome.ui.scroll_area;
 const chrome_draw_lowering = app_session_mod.chrome_draw_lowering;
 const renderer = app_session_mod.renderer;
@@ -26001,4 +26002,55 @@ test "NSH 상자가 떠 있어도 우클릭은 메뉴 것이다, 그리고 상�
     var after = (try h.fx.session.buildChromeOverlayPrep()) orelse return error.HelperNotDrawn;
     defer after.dl.deinit(allocator);
     try testing.expect(after.dl.cells.len > 0);
+}
+
+test "NSH 상자는 «오버레이» 가 아니다 — 세 집합이 갈려야 한다 (적대적 25회차 — Swift 경계)" {
+    // 이 구분에 **Swift 가 달려 있다.** `maru_macos_app_session_any_overlay_open` 이 1 이면
+    // `performKeyEquivalent` 가 메뉴바 단축키(⌘D 등)를 양보하고, 커서 blink 도 그 집합으로 갈린다.
+    // 상자가 그 집합에 들어가면 **고르기만 했는데 ⌘D 가 죽고 커서가 안 깜빡인다** — 그런데 그
+    // 회귀는 어떤 판정자도 안 울린다. 여기서 세 값을 한꺼번에 못박는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h = try helperFixture(allocator);
+    defer h.fx.deinit(allocator);
+    defer h.drawn.dl.deinit(allocator);
+
+    h.fx.term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 5 };
+    showSendHelper(h.fx.session, h.fx.term);
+    try testing.expect(h.fx.session.chrome_host.send_helper.open);
+
+    try testing.expect(!h.fx.session.anyOverlayOpen()); // ⌘D·blink 는 그대로다
+    try testing.expect(!h.fx.session.anyModalOverlayOpen()); // 입력을 막지 않는다
+    try testing.expect(h.fx.session.overlayFrameNeeded()); // 그래도 **그려지기는** 한다
+
+    // 대조군: 진짜 모달(컨텍스트 메뉴)은 셋 다 참이다 — 위 셋이 항등식이 아님을 보인다.
+    try testing.expect(settings_ops.showEditorContextMenu(h.fx.session, h.fx.term, 10, 10));
+    try testing.expect(h.fx.session.anyOverlayOpen());
+    try testing.expect(h.fx.session.anyModalOverlayOpen());
+    try testing.expect(h.fx.session.overlayFrameNeeded());
+    settings_ops.closeContextMenu(h.fx.session);
+}
+
+test "NSH 상자가 떠 있어도 키는 편집기 것이다 (적대적 26회차 — 모달이 아니라는 말의 값)" {
+    // §6.2 의 «모달이 아니다» 는 문장이 아니라 **동작**이어야 한다. 고르기를 마쳤을 뿐인 사용자가
+    // 이어서 타이핑을 못 하면 이 기능은 방해물이다. `Esc` 만 판정자가 있었고 일반 글자는 없었다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h = try helperFixture(allocator);
+    defer h.fx.deinit(allocator);
+    defer h.drawn.dl.deinit(allocator);
+
+    h.fx.term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 5 };
+    showSendHelper(h.fx.session, h.fx.term);
+    try testing.expect(h.fx.session.chrome_host.send_helper.open);
+
+    const before = h.fx.term.rt.editor_doc.?.file.content.len;
+    // **평범한 글자는 키 경로가 아니라 확정 텍스트로 온다** — macOS 는 `NSTextInputClient` 확정으로
+    // 보내고 `handleKeyEvent` 에는 meta chord 만 닿는다(`input.zig` 가 그 사실을 적어 두었다).
+    // 판정자가 키로 때리면 «상자가 키를 먹었다» 와 «애초에 그 경로가 아니다» 를 못 가른다.
+    try testing.expect(input_ops.sendCommittedText(h.fx.session, "X"));
+    // **문서가 바뀌었다** — 글자가 상자에 먹히지 않고 편집기로 갔다(고른 5 글자가 X 로 바뀐다).
+    try testing.expect(h.fx.term.rt.editor_doc.?.file.content.len != before);
+    // 그리고 선택이 사라졌으므로 상자는 다음 판정에서 내려간다.
+    try testing.expect(!refreshSendHelper(h.fx.session));
 }

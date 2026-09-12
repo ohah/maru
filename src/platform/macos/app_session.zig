@@ -81457,7 +81457,8 @@ test "활동 뷰: 결과 요약은 본문이 없을 때만 「이미지」다 (�
         agent_activity_ops.formatResultSummary(&buf, .{ .found = true, .image = true, .lines = 0 }),
     );
     // 본문이 있는 그림 결과 → **줄 수가 남는다**
-    const with_body = agent_activity_ops.formatResultSummary(&buf, .{ .found = true, .image = true, .lines = 3 });
+    // **자리를 채운다** — 본문이 있다는 사실은 줄 수가 아니라 `body.offset` 이 든다(계획 §29).
+    const with_body = agent_activity_ops.formatResultSummary(&buf, .{ .found = true, .image = true, .lines = 3, .body = .{ .offset = 120 } });
     try std.testing.expect(!std.mem.eql(u8, img, with_body));
     try std.testing.expect(std.mem.indexOfScalar(u8, with_body, '3') != null);
     // 결과를 못 찾은 호출은 여전히 **빈 칸**이다 — 「모른다」를 「이미지」로 적지 않는다.
@@ -83096,6 +83097,39 @@ test "활동 뷰: 원격 펼침 결말이 로컬과 같은 규칙으로 풀린�
         const op = session.agent_activity.open.?;
         try std.testing.expect(op.detail.remote_failed); // ② 의 상태 그대로
         try std.testing.expectEqual(@as(usize, 0), op.detail.command.len);
+    }
+
+    // ── ④ 🔥 **읽어 올 본문이 없어도 결과 칸은 선다**(계획 §29 · 적대적 EA4).
+    //
+    //    원격은 `body_wanted = found and offset != 0` 로 걸러 본문을 **안 받아 온다**. 예전 판은
+    //    받은 것이 없으면 결과 칸을 **아예 안 세웠고**, 그래서 그림 결과가 로컬에서는 「이미지」인데
+    //    **원격에서는 빈 칸**이었다 — 계약 §2.3 이 금지하는 「원격과 로컬이 다른 것을 보여 준다」다.
+    {
+        session.agent_activity.hits.items[0].result = .{ .found = true, .image = true, .lines = 0 };
+        const cmd = try allocator.dupe(u8, "\"Read\"");
+        agent_activity_ops.finishRemoteDetail(session, .{
+            .hit_index = 0,
+            .generation = session.agent_activity.detail_generation,
+            .command = cmd,
+            // 본문은 **안 온다** — 저쪽에 읽을 자리가 없다.
+        });
+        const op = session.agent_activity.open.?;
+        try std.testing.expect(op.detail.has_result);
+        try std.testing.expectEqualStrings(maru.i18n.t(.agent_activity_result_image), op.detail.result);
+    }
+
+    // ── ⑤ 같은 자리에서 **「완료」**도 선다 — 결말은 왔고 자리만 모르는 경우다.
+    {
+        session.agent_activity.hits.items[0].result = .{ .found = true };
+        const cmd = try allocator.dupe(u8, "\"ToolSearch\"");
+        agent_activity_ops.finishRemoteDetail(session, .{
+            .hit_index = 0,
+            .generation = session.agent_activity.detail_generation,
+            .command = cmd,
+        });
+        const op = session.agent_activity.open.?;
+        try std.testing.expect(op.detail.has_result);
+        try std.testing.expectEqualStrings(maru.i18n.t(.agent_activity_result_done), op.detail.result);
     }
 }
 
@@ -86194,7 +86228,7 @@ test "활동 뷰 요약 칸: 크기는 언제나, 실패는 provider 가 적었�
     try std.testing.expectEqualStrings("", agent_activity_ops.formatResultSummary(&buf, .{ .found = false }));
     // ② 끝났다 → 크기만
     {
-        const out = agent_activity_ops.formatResultSummary(&buf, .{ .found = true, .lines = 12 });
+        const out = agent_activity_ops.formatResultSummary(&buf, .{ .found = true, .lines = 12, .body = .{ .offset = 120 } });
         try std.testing.expect(std.mem.startsWith(u8, out, "12"));
         try std.testing.expect(std.mem.indexOf(u8, out, maru.i18n.t(.agent_activity_result_lines_suffix)) != null);
         // 실패가 아니면 실패 낱말이 **없다**.
@@ -86202,16 +86236,67 @@ test "활동 뷰 요약 칸: 크기는 언제나, 실패는 provider 가 적었�
     }
     // ③ 실패했다 → 실패 + 크기(둘 다 있어야 한다 — 실패만 남기면 「얼마나」가 사라진다)
     {
-        const out = agent_activity_ops.formatResultSummary(&buf, .{ .found = true, .failed = true, .lines = 3 });
+        const out = agent_activity_ops.formatResultSummary(&buf, .{ .found = true, .failed = true, .lines = 3, .body = .{ .offset = 120 } });
         try std.testing.expect(std.mem.indexOf(u8, out, maru.i18n.t(.agent_activity_result_failed)) != null);
         try std.testing.expect(std.mem.indexOf(u8, out, "3") != null);
     }
     // ④ 빈 결과는 0 줄이라고 **말한다**(못 찾은 것과 다른 사실이다).
+    //
+    // ⚠️ **자리를 채운다.** 빈 결과(`""`)도 **자리는 있다** — 스캐너는 여는 따옴표 «다음»을 가리키므로
+    // `body.offset` 이 0 일 수 없다. 그 0 은 「본문을 못 읽었다」만의 표현이다(아래 ⑤ · 계획 §29).
     {
-        const out = agent_activity_ops.formatResultSummary(&buf, .{ .found = true, .lines = 0 });
+        const out = agent_activity_ops.formatResultSummary(&buf, .{ .found = true, .lines = 0, .body = .{ .offset = 120 } });
         try std.testing.expect(out.len != 0);
         try std.testing.expect(std.mem.startsWith(u8, out, "0"));
     }
+    // ⑤ 🔥 **결말은 왔는데 본문을 못 읽었다**(계획 §29 — 실측 153/66,942 `tool_reference`).
+    //    빈 칸이면 「결말을 못 봤다」는 거짓이고, 「0줄」이면 크기를 지어내는 거짓이다.
+    {
+        const out = agent_activity_ops.formatResultSummary(&buf, .{ .found = true, .lines = 0 });
+        try std.testing.expectEqualStrings(maru.i18n.t(.agent_activity_result_done), out);
+        try std.testing.expect(std.mem.indexOfScalar(u8, out, '0') == null);
+    }
+    // ⑥ 그 경우에도 **실패는 삼키지 않는다**(계약 §2.3 — provider 가 적은 유일한 근거다).
+    {
+        const out = agent_activity_ops.formatResultSummary(&buf, .{ .found = true, .failed = true, .lines = 0 });
+        try std.testing.expect(std.mem.indexOf(u8, out, maru.i18n.t(.agent_activity_result_failed)) != null);
+        try std.testing.expect(std.mem.indexOf(u8, out, maru.i18n.t(.agent_activity_result_done)) != null);
+    }
+}
+
+test "펼침의 결과 칸: 읽을 자리가 없어도 «로컬과 원격이 같은 낱말»을 쓴다 (계획 §29 · 적대적 EA4)" {
+    // 🔥 **원격 펼침이 로컬과 갈라져 있었다.** 원격은 `body_wanted = found and offset != 0` 로
+    // 걸러 본문을 안 받아 오는데, 받은 것이 없으면 **결과 칸을 아예 안 세웠다** — 그래서 그림
+    // 결과는 원격에서 **빈 칸**이고 로컬에서는 「이미지」였다(계약 §2.3 위반, 기존 결함).
+    //
+    // 이 판정자는 **낱말을 고르는 자리 하나**(`detailResultWord`)를 직접 잰다. 양쪽이 그것을
+    // 부르므로, 여기서 갈래가 고정되면 두 경로가 함께 고정된다.
+    const img = maru.i18n.t(.agent_activity_result_image);
+    const done = maru.i18n.t(.agent_activity_result_done);
+
+    // ① 본문 없는 그림 결과 → 「이미지」
+    try std.testing.expectEqualStrings(img, agent_activity_ops.detailResultWord(.{
+        .found = true,
+        .image = true,
+        .lines = 0,
+    }).?);
+    // ② 결말은 왔는데 자리를 모른다 → 「완료」
+    try std.testing.expectEqualStrings(done, agent_activity_ops.detailResultWord(.{ .found = true }).?);
+    // ③ 읽을 자리가 있으면 **낱말을 안 쓴다** — 그 자리를 읽어 전문을 보여 준다.
+    try std.testing.expect(agent_activity_ops.detailResultWord(.{
+        .found = true,
+        .lines = 12,
+        .body = .{ .offset = 120 },
+    }) == null);
+    // ④ Codex 의 그림 결과는 **본문이 있다** — 「이미지」로 덮으면 provider 가 적어 준 말을 지운다.
+    try std.testing.expect(agent_activity_ops.detailResultWord(.{
+        .found = true,
+        .image = true,
+        .lines = 3,
+        .body = .{ .offset = 120 },
+    }) == null);
+    // ⑤ 결말이 아예 없으면 낱말이 없다 — 결과 칸 자체가 안 선다.
+    try std.testing.expect(agent_activity_ops.detailResultWord(.{ .found = false }) == null);
 }
 
 test "원격 탐색기 유지: 파일을 열어도 발행이 원격에 남는다 (RF7)" {

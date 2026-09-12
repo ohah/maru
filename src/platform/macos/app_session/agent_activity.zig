@@ -1970,8 +1970,8 @@ fn loadOpenDetail(self: *AppSession, n: usize) void {
         // 처럼 보인다. AV5 가 여기에 썸네일을 붙일 자리이기도 하다.
         //
         // Codex 는 `output` 첫 원소가 `text` 라 읽을 것이 있다 — 그쪽은 아래 갈래로 간다.
-        if (hit.result.image and hit.result.lines == 0) {
-            op.detail.result = self.allocator.dupe(u8, maru.i18n.t(.agent_activity_result_image)) catch &.{};
+        if (detailResultWord(hit.result)) |word| {
+            op.detail.result = self.allocator.dupe(u8, word) catch &.{};
             op.detail.result_truncated = false;
         } else {
             op.detail.result = readDetailPart(
@@ -1985,6 +1985,27 @@ fn loadOpenDetail(self: *AppSession, n: usize) void {
         }
     }
     self.metal_dirty = true;
+}
+
+/// 결과 **전문 대신 적는 낱말**. 읽을 자리가 없는 결말이 둘 있고, 그 둘은 서로 다른 사실이다.
+///
+/// 🔥 **이 함수가 단일 출처다.** 로컬 펼침(`loadOpenDetail`)과 원격 펼침(`applyRemoteDetail`)이
+/// 갈라져 있었고, 그래서 **원격에서는 그림 결과의 결과 칸이 빈 채로 섰다** — 계약 §2.3 이 금지하는
+/// 「원격과 로컬이 다른 것을 보여 준다」다(적대적 EA4).
+///
+/// null 이면 **읽을 자리가 있다** — 호출자가 그 자리를 읽는다.
+///
+/// **`pub` 인 이유는 판정자다**(`formatResultSummary` 와 같은 규율) — 도크를 세우고 원격 왕복을
+/// 돌리지 않고도 「로컬과 원격이 같은 낱말을 쓴다」를 직접 잴 수 있어야 한다.
+pub fn detailResultWord(result: maru.session.agent_image_index.ResultSummary) ?[:0]const u8 {
+    if (!result.found) return null;
+    // **본문이 없는 그림 결과는 「이미지」라고 적는다.** Claude 는 `content` 가 이미지 블록만
+    // 들어(실측 542/542) 읽을 자리가 없다. Codex 는 `output` 첫 원소가 `text` 라 읽을 것이 있다.
+    if (result.image and result.lines == 0) return maru.i18n.t(.agent_activity_result_image);
+    // **자리를 모르면 읽지 않는다**(계획 §29). 0 을 그대로 넘기면 **줄 머리의 JSON** 을 결과
+    // 전문으로 실어 보여 준다 — 없는 내용을 지어내지 않는다는 이 파일의 규율과 반대다.
+    if (result.body.offset == 0) return maru.i18n.t(.agent_activity_result_done);
+    return null;
 }
 
 /// 한 조각을 읽어 **여러 줄 그대로** 푼다. 못 읽으면 빈 조각이다 — 없는 내용을 지어내지 않는다.
@@ -3672,6 +3693,21 @@ pub fn formatResultSummary(buf: []u8, result: maru.session.agent_image_index.Res
         @memcpy(buf[0..text.len], text);
         return buf[0..text.len];
     }
+    // 🔥 **결말은 왔는데 본문을 못 읽은 경우**(계획 §29). `body.offset` 이 0 인 것이 그 단일 표현이다 —
+    // 정상 결과의 자리는 줄 머리의 JSON 뒤라 0 일 수 없고, 빈 결과(`""`)조차 여는 따옴표 **다음**을
+    // 가리켜 0 이 아니다. 여기서 줄 수 갈래로 흘려보내면 화면이 **「0줄」이라는 거짓**을 적는다.
+    if (result.body.offset == 0) {
+        const text = maru.i18n.t(.agent_activity_result_done);
+        if (result.failed) {
+            return std.fmt.bufPrint(buf, "{s} \u{00b7} {s}", .{
+                maru.i18n.t(.agent_activity_result_failed),
+                text,
+            }) catch text;
+        }
+        if (text.len > buf.len) return text; // 상수 문자열이라 버퍼 없이도 안전하다
+        @memcpy(buf[0..text.len], text);
+        return buf[0..text.len];
+    }
     const suffix = maru.i18n.t(.agent_activity_result_lines_suffix);
     if (result.failed) {
         return std.fmt.bufPrint(buf, "{s} \u{00b7} {d}{s}", .{
@@ -4097,8 +4133,8 @@ pub fn finishRemoteDetail(self: *AppSession, outcome: RemoteDetailOutcome) void 
     // **로컬과 같은 규칙으로 푼다**(`decodeDetailPart` — 그 함수가 단일 출처다).
     op.detail.deinit(self.allocator);
     op.detail.command = decodeDetailPart(self, outcome.command, false, &op.detail.command_truncated, null);
+    const hit = self.agent_activity.hits.items[outcome.hit_index];
     if (outcome.body.len > 0) {
-        const hit = self.agent_activity.hits.items[outcome.hit_index];
         op.detail.has_result = true;
         op.detail.result = decodeDetailPart(
             self,
@@ -4107,6 +4143,12 @@ pub fn finishRemoteDetail(self: *AppSession, outcome: RemoteDetailOutcome) void 
             &op.detail.result_truncated,
             &op.detail.result_exit_code,
         );
+    } else if (detailResultWord(hit.result)) |word| {
+        // 🔥 **원격도 로컬과 같은 낱말을 적는다**(계약 §2.3 · 적대적 EA4). 저쪽에서 읽어 올 자리가
+        // 없을 뿐 **결말은 왔고**, 그 사실은 이쪽이 이미 든 레코드가 안다.
+        op.detail.has_result = true;
+        op.detail.result = self.allocator.dupe(u8, word) catch &.{};
+        op.detail.result_truncated = false;
     }
     op.detail.remote_failed = false;
     self.metal_dirty = true;

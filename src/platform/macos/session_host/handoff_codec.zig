@@ -2545,3 +2545,39 @@ test "전제 검증: 크기 분해가 «무엇이 큰지» 를 실제로 가른�
     // **가르는 힘이 있는가** — 결합문자 세션의 store 몫이 평범한 쪽보다 확실히 커야 한다.
     try std.testing.expect(b.stores > a.stores);
 }
+
+// **exec 를 넘어 재생이 이어지는가** — 기존 handoff 판정자는 프레임 픽셀·번호·반복 수를 보지만
+// `anim_state` 와 은행(`elapsed_ms`)은 안 본다. 그 둘이 빠지면 host 업그레이드 뒤 애니메이션이
+// 조용히 멈추거나(state 유실) 위상이 튄다(은행 유실) — 앱은 자기가 보낸 프레임이 사라진 것을
+// 모르므로 다시 보내지 않는다. 적대적 검증 5회차에서 실측으로 확인하고 고정한다.
+test "handoff v1 이 재생 상태와 은행까지 나른다 — exec 뒤 위상이 정확히 이어진다 (적대적 검증)" {
+    const allocator = std.testing.allocator;
+    var before = try TerminalCore.init(allocator, .{ .cols = 10, .rows = 4 });
+    defer before.deinit();
+    before.setCellMetrics(10, 20);
+    var b64: [64]u8 = undefined;
+    var seq: [200]u8 = undefined;
+    const px = [_]u8{ 7, 7, 7, 255 } ** 4;
+    const enc = std.base64.standard.Encoder.encode(&b64, &px);
+    try before.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+    try before.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+    try before.write("\x1b_Ga=p,i=1,c=2,r=1,q=2\x1b\\");
+    try before.write("\x1b_Ga=a,i=1,s=3,v=0,q=2\x1b\\");
+    // **gap 에 못 미치는 25ms 를 은행에 남긴 채** 넘긴다 — 프레임 번호만 보는 판정자는 이 상태를 못 본다.
+    try std.testing.expect(!before.advanceAnimations(25));
+
+    const bytes = try encodeCore(allocator, &before);
+    defer allocator.free(bytes);
+    var after = try decodeCore(allocator, bytes);
+    defer after.deinit();
+
+    const a = after.kitty_images.map.get(1).?;
+    try std.testing.expect(a.anim_state == .running); // 멈춰 있으면 영영 안 돈다
+    try std.testing.expectEqual(@as(u64, 25), a.elapsed_ms); // 은행이 사라지면 위상이 튄다
+    try std.testing.expectEqual(@as(u32, 1), a.current_frame);
+    try std.testing.expectEqual(before.kitty_placements.items.len, after.kitty_placements.items.len);
+
+    // exec 뒤 host 가 tick 을 다시 준다. 은행 25 + 15 = 40ms 라 **정확히 그 tick 에** 한 장 넘어간다.
+    try std.testing.expect(after.advanceAnimations(15));
+    try std.testing.expectEqual(@as(u32, 2), after.kitty_images.map.get(1).?.current_frame);
+}

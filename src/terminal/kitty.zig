@@ -333,6 +333,38 @@ pub fn kittyImageHasPlacement(self: *const TerminalCore, image_id: u32) bool {
     return false;
 }
 
+/// 이 이미지가 **지금 뷰포트에 한 줄이라도 걸쳐 있는가.** placement 가 있기만 한 것과 다르다 —
+/// 위로 스크롤해 지나간 이미지도 placement 는 남는다(스크롤백을 되짚으면 다시 보여야 하므로 옳다).
+///
+/// 애니메이션 전진이 이것을 묻는 이유: 안 보이는 프레임은 CPU 만 쓰는 게 아니라 **대역폭을 쓴다**.
+/// 프레임이 넘어가면 `generation` 이 오르고, 화면 스트리밍은 generation 이 바뀐 이미지의 픽셀을
+/// 통째로 다시 싣는다. 실측(적대적 검증 3회차): 100 줄 밖으로 스크롤된 32x32 애니메이션이 delta 에
+/// placement **없이** blob 4,153 바이트를 매 프레임 실었다 — client 가 그릴 수 없는 픽셀이다.
+///
+/// virtual placement(U=1)는 화면 위치를 코어가 모른다(placeholder 셀이 정한다). 그래서 그런
+/// 이미지는 「보인다」고 본다 — 모르는 것을 안 보인다고 단정해 멈추면 도는 애니메이션이 죽는다.
+pub fn kittyImageVisibleInViewport(self: *TerminalCore, image_id: u32) bool {
+    for (self.kitty_virtual_placements.items) |v| {
+        if (v.image_id == image_id) return true;
+    }
+    const rows: i64 = @intCast(self.size.rows);
+    const top_abs: i64 = @intCast(self.screen.sb.count - @min(self.view_offset, self.screen.sb.count));
+    for (self.kitty_placements.items) |p| {
+        if (p.image_id != image_id) continue;
+        // 상대 placement 는 부모가 정한다 — 부모를 못 풀면 렌더도 그리지 않으므로 여기서도 뺀다
+        // (`buildPlacementViews` 와 같은 판단이라야 「보이는데 안 돈다」가 생기지 않는다).
+        var anchor_row = p.anchor_row;
+        if (p.parent_image_id != 0) {
+            const resolved = resolveRelativeAnchor(self, p) orelse continue;
+            anchor_row = resolved.row;
+        }
+        const start = @as(i64, @intCast(anchor_row)) - top_abs;
+        const span: i64 = @intCast(placementCellSpan(self, p).rows);
+        if (start < rows and start + span > 0) return true; // 한 줄이라도 겹치면 보인다
+    }
+    return false;
+}
+
 /// 저장된 placement(절대 행)를 뷰포트 상대 types.KittyPlacement로 환산해 재사용 버퍼에 담아 돌려준다.
 /// placement가 없으면 빈 슬라이스(할당 없음). 화면 위/아래로 벗어났는지의 판단은 셀 span을 아는 렌더러 몫이라
 /// 코어는 모든 placement를 그대로 환산해 노출한다(row는 i32 — 음수 가능). top_abs는 뷰포트 최상단의 절대 행이다.
@@ -1176,11 +1208,13 @@ pub fn advanceAnimations(self: *TerminalCore, elapsed_ms: u64) bool {
     var it = self.kitty_images.map.valueIterator();
     while (it.next()) |img| {
         if (img.anim_state != .running or img.frameCount() < 2) continue;
-        // **화면에 없으면 진행하지 않는다.** 두 가지를 함께 막는다 — ① 아무도 못 보는 프레임에 CPU 를
+        // **뷰포트에 안 보이면 진행하지 않는다.** 셋을 함께 막는다 — ① 아무도 못 보는 프레임에 CPU 를
         // 쓴다. ② evict 는 최저 `generation` 을 고르는데 애니메이션이 매 tick 그것을 올리므로, 숨은
         // 애니메이션 이미지가 **영원히 「가장 새것」** 이 되어 evict 순서가 뒤집힌다(정작 쓸모 있는
-        // 정지 이미지가 먼저 밀려난다). 다시 화면에 걸리면 그 자리에서 이어 돈다 — 상태는 남는다.
-        if (!kittyImageHasPlacement(self, img.id)) continue;
+        // 정지 이미지가 먼저 밀려난다). ③ generation 이 오르면 화면 스트리밍이 그 이미지의 픽셀을
+        // **통째로 다시 싣는다** — 스크롤해 지나간 애니메이션이 매 프레임 대역폭을 먹는다.
+        // 다시 화면에 걸리면 그 자리에서 이어 돈다 — 상태는 남는다.
+        if (!kittyImageVisibleInViewport(self, img.id)) continue;
         // **이 이미지가 움직였는가를 따로 센다.** 예전엔 함수 전역 `changed` 하나로 판정해서, 앞의
         // 이미지가 한 번 넘어가면 그 뒤로 **안 움직인 이미지까지** generation 이 올라갔다.
         // generation 은 렌더러의 텍스처 재업로드 키다 — 픽셀은 그대로인데 GPU 업로드만 늘어나고,

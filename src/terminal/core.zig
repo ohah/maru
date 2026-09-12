@@ -10390,6 +10390,147 @@ test "kitty 애니메이션: 밀린 시간은 한 프레임분만 남는다 — 
     try std.testing.expect(after.elapsed_ms <= after.frameGapMs(after.current_frame));
 }
 
+// **스크롤로 지나간 애니메이션은 멈춘다.** placement 는 남지만(스크롤백을 되짚으면 다시 보여야
+// 하므로 옳다) 뷰포트에 없으면 전진하지 않는다. 안 그러면 프레임마다 `generation` 이 올라
+// 화면 스트리밍이 **그릴 수도 없는 픽셀**을 통째로 다시 싣는다 — 실측(적대적 검증 3회차):
+// 100 줄 밖으로 밀린 32x32 애니메이션이 delta 에 placement 없이 blob 4,153 바이트를 실었다.
+test "kitty 애니메이션: 뷰포트 밖으로 스크롤되면 멈추고 돌아오면 이어 돈다 (적대적 검증)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    core.setCellMetrics(10, 20);
+    var b64: [64]u8 = undefined;
+    var seq: [200]u8 = undefined;
+    const px = [_]u8{ 9, 9, 9, 255 } ** 4;
+    const enc = std.base64.standard.Encoder.encode(&b64, &px);
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+    try core.write("\x1b_Ga=p,i=1,c=2,r=1,q=2\x1b\\");
+    try core.write("\x1b_Ga=a,i=1,s=3,v=0,q=2\x1b\\");
+
+    // 화면 안에 있을 때는 돈다(양성 대조 — 게이트가 넓어 멈춘 게 아님을 먼저 증명한다).
+    try std.testing.expect(core.advanceAnimations(40));
+
+    // 위로 밀어낸다. placement 자체는 남아 있어야 한다 — 지워 버리면 되돌아가도 안 보인다.
+    for (0..50) |_| try core.write("x\r\n");
+    try std.testing.expect(kitty.kittyImageHasPlacement(&core, 1));
+    const frame_when_hidden = core.kitty_images.map.get(1).?.current_frame;
+    const gen_when_hidden = core.kitty_images.map.get(1).?.generation;
+    for (0..20) |_| try std.testing.expect(!core.advanceAnimations(40));
+    // 프레임도 generation 도 그대로 — generation 이 오르면 안 보이는 픽셀이 다시 실린다.
+    try std.testing.expectEqual(frame_when_hidden, core.kitty_images.map.get(1).?.current_frame);
+    try std.testing.expectEqual(gen_when_hidden, core.kitty_images.map.get(1).?.generation);
+
+    // 스크롤백을 되짚어 다시 보이면 **그 자리에서 이어** 돈다(처음부터가 아니다).
+    core.view_offset = 50;
+    try std.testing.expect(core.advanceAnimations(40));
+    try std.testing.expect(core.kitty_images.map.get(1).?.current_frame != frame_when_hidden);
+}
+
+// **재생 속도 계약**: host 는 20ms cadence 로 tick 을 준다. 그 위에서 실제 재생률이 명세한
+// `gap` 을 지키는지 잰다(적대적 검증 4회차 실측):
+//
+// | gap | 6 초 동안 | 이상치 | 오차 |
+// |---|---|---|---|
+// | 20ms | 300 장 | 300 | 0% |
+// | 30ms | 200 장 | 200 | 0% |
+// | 33ms | 181 장 | 181 | 0% |
+// | 40ms | 150 장 | 150 | 0% |
+// | 100ms | 60 장 | 60 | 0% |
+// | 10ms | 300 장 | 600 | **-50%** |
+//
+// gap 이 tick 간격보다 **짧으면** 재생은 cadence 로 묶인다 — 20ms 마다 한 장이 상한이다. 그건
+// 고칠 수 없는 것이고(코어는 자기 시계가 없다), **중요한 건 그때도 밀린 시간이 쌓이지 않는 것**이다.
+// gap 이 tick 보다 길면 오차가 **0** 이어야 한다. 나머지를 한 프레임분까지 보존하기 때문이다 —
+// 여기서 나머지를 버리면 33ms 가 40ms 로 반올림돼 21% 느려진다.
+test "kitty 애니메이션: cadence 20ms 위에서 gap 을 정확히 지킨다 (적대적 검증)" {
+    for ([_]u32{ 20, 30, 33, 40, 100, 10 }) |gap| {
+        var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+        defer core.deinit();
+        core.setCellMetrics(10, 20);
+        var b64: [64]u8 = undefined;
+        var seq: [200]u8 = undefined;
+        const px = [_]u8{ 1, 2, 3, 255 } ** 4;
+        const enc = std.base64.standard.Encoder.encode(&b64, &px);
+        try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+        var k: usize = 0;
+        while (k < 3) : (k += 1) try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+        try core.write("\x1b_Ga=p,i=1,c=2,r=1,q=2\x1b\\");
+        var n: usize = 1;
+        while (n <= 4) : (n += 1) try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=a,i=1,r={d},z={d},q=2\x1b\\", .{ n, gap }));
+        try core.write("\x1b_Ga=a,i=1,s=3,v=0,q=2\x1b\\");
+
+        var moved: usize = 0;
+        for (0..300) |_| { // 20ms x 300 = 6 초
+            if (core.advanceAnimations(20)) moved += 1;
+        }
+        const ideal: usize = 6000 / gap;
+        try std.testing.expectEqual(@min(ideal, 300), moved);
+    }
+}
+
+// 멈춘 애니메이션은 **시간도 안 먹는다**. 은행이 정지 중에 쌓이면 재개하는 순간 그만큼 쏟아진다
+// (같은 결의 결함을 3회차에서 한 번 잡았다 — [밀린 시간은 한 프레임분만 남는다]).
+test "kitty 애니메이션: s=1 로 멈춘 동안에는 은행도 쌓이지 않는다 (적대적 검증)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    core.setCellMetrics(10, 20);
+    var b64: [64]u8 = undefined;
+    var seq: [200]u8 = undefined;
+    const px = [_]u8{ 1, 2, 3, 255 } ** 4;
+    const enc = std.base64.standard.Encoder.encode(&b64, &px);
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+    var k: usize = 0;
+    while (k < 2) : (k += 1) try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+    try core.write("\x1b_Ga=p,i=1,c=2,r=1,q=2\x1b\\");
+    try core.write("\x1b_Ga=a,i=1,s=3,v=0,q=2\x1b\\");
+    try std.testing.expect(core.advanceAnimations(40));
+    const paused_at = core.kitty_images.map.get(1).?.current_frame;
+
+    try core.write("\x1b_Ga=a,i=1,s=1,q=2\x1b\\"); // 정지
+    for (0..50) |_| try std.testing.expect(!core.advanceAnimations(40)); // 2 초를 흘려보낸다
+    const paused = core.kitty_images.map.get(1).?;
+    try std.testing.expectEqual(paused_at, paused.current_frame);
+    try std.testing.expectEqual(@as(u64, 0), paused.elapsed_ms); // 2 초가 은행에 없다
+
+    // 재개는 **그 자리에서** 이어진다 — 처음으로 되감기지 않고, 밀린 2 초를 쏟지도 않는다.
+    try core.write("\x1b_Ga=a,i=1,s=3,q=2\x1b\\");
+    var rushed: usize = 0;
+    for (0..3) |_| {
+        if (core.advanceAnimations(1)) rushed += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 0), rushed); // 1ms 세 번으로는 한 장도 안 넘어간다
+    try std.testing.expect(core.advanceAnimations(40)); // 40ms 가 지나야 한 장
+}
+
+// 가시성 판정은 **리사이즈로도 흔들린다** — 행 수가 줄면 아래쪽 placement 가 화면 밖이 되고,
+// 늘리면 다시 들어온다. 이 판정자가 없으면 「스크롤만」 보는 가시성 게이트가 리사이즈에서
+// 틀린 쪽으로 굳어도(늘 보인다 / 늘 안 보인다) 아무도 모른다. 폭만 바꾸는 재래핑에서는
+// 계속 돌아야 한다(내용이 위아래로 움직이지 않는다).
+test "kitty 애니메이션: 리사이즈로 화면 밖이 되면 멈추고 되돌리면 이어 돈다 (적대적 검증)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 24 });
+    defer core.deinit();
+    core.setCellMetrics(10, 20);
+    var b64: [64]u8 = undefined;
+    var seq: [200]u8 = undefined;
+    const px = [_]u8{ 4, 4, 4, 255 } ** 4;
+    const enc = std.base64.standard.Encoder.encode(&b64, &px);
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+    try core.write("\x1b[20;1H"); // 20 번째 줄 — 24 줄에선 보이고 8 줄에선 밖이다
+    try core.write("\x1b_Ga=p,i=1,c=2,r=1,q=2\x1b\\");
+    try core.write("\x1b_Ga=a,i=1,s=3,v=0,q=2\x1b\\");
+    try std.testing.expect(core.advanceAnimations(40));
+
+    try core.resize(20, 8);
+    try std.testing.expect(!core.advanceAnimations(40));
+
+    try core.resize(20, 24);
+    try std.testing.expect(core.advanceAnimations(40));
+
+    try core.resize(10, 24); // 폭만 — 재래핑이지 세로 이동이 아니다
+    try std.testing.expect(core.advanceAnimations(40));
+}
+
 test "kitty 애니메이션: 루트를 다시 전송하면 프레임도 함께 놓아준다 (적대적 검증)" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
     defer core.deinit();

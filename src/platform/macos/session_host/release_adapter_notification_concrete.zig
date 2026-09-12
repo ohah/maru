@@ -107,6 +107,11 @@ const Steps = struct {
         try workspace.prepare(&self.execution.root, self.inputs.runner_root);
     }
 
+    /// R2 receives an already prepared scenario today. R3b2 replaces this no-op through the
+    /// product composition, after this owner has created the private root and before AppKit can
+    /// observe the runtime. The hook is deliberately part of the production ordering contract.
+    pub fn prepareRuntime(_: *@This(), _: *i128) !void {}
+
     pub fn launchApp(self: *@This(), _: *i128) !void {
         try app_child.launch(.{
             .executable = self.inputs.app_executable,
@@ -115,6 +120,8 @@ const Steps = struct {
             .runner_root = self.inputs.runner_root,
         }, &self.execution.app);
     }
+
+    pub fn emitNotification(_: *@This(), _: *i128) !void {}
 
     pub fn runHelper(self: *@This(), deadline: *i128) !helper_child.Clicked {
         const observed = try helper_child.run(self.io, self.allocator, self.inputs.helper_executable, self.inputs.helper_expected, try remaining(self.io, deadline.*), &self.execution.helper);
@@ -172,6 +179,8 @@ const Steps = struct {
         if (self.execution.app.owner == null) return;
         try self.execution.app.cleanup();
     }
+
+    pub fn cleanupRuntime(_: *@This()) !void {}
 
     pub fn cleanupRoot(self: *@This()) !void {
         if (self.execution.root.owner == null) return;

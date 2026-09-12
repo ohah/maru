@@ -16176,7 +16176,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
         const run_notification_process_owner_tests = b.addRunArtifact(notification_process_owner_tests);
-        run_notification_process_owner_tests.addArg("--maru-expect-tests=5");
+        run_notification_process_owner_tests.addArg("--maru-expect-tests=6");
         run_notification_process_owner_tests.setCwd(b.path("."));
         session_host_notification_process_owner_step.dependOn(&run_notification_process_owner_tests.step);
         run_session_host_tests.step.dependOn(&run_notification_process_owner_tests.step);

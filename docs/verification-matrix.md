@@ -3018,7 +3018,11 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   controller 인계, 좁은 grid soft-wrap, before 보존과 after 왕복을 검증한다. 테스트가 boolean·PID·screen 결과를 직접 주입해
   `passed`를 만드는 seam과 제품 외 caller는 금지한다. R2c mounted candidate composition은 두 scenario
   proof를 R2a owner 순서로 실행하기 전, DMG authority가 마운트 안의 exact main·CLI·AX helper를 no-follow
-  descriptor로 모두 pin하고 세 regular executable의 digest와 서로 다른 inode를 같은 mount 수명 끝까지 재검증한다.
+  descriptor로 모두 pin하고 세 regular executable의 digest와 서로 다른 inode를 같은 mount 수명 끝까지 재검증한다. 이
+  mounted executable authority와 세 실행파일의 strict codesign·유일한 동일 `TeamIdentifier`·`CodeDirectory`
+  `runtime` flag 결속은 구현됐고, Debug·ReleaseFast `test-session-host-notification-candidate-identity`가 path
+  substitution, signer/runtime drift, bind 후 byte drift를 fail-close하는지 검증한다. 다음은 이 authority를 R2a owner의
+  두 scenario·최종 leaf 순서에 연결하는 composition이다.
   로그인된 전용 macOS runner의 새 mode `0700` root에서 DMG를
   read-only mount하고 그 안의 exact `Maru.app`과 main executable을 no-follow pin한다. 앱·CLI·helper의 동일
   TeamIdentifier/hardened runtime과 candidate digest를 확인한 뒤에만 두 시나리오를 순서대로 실행한다. runner는 이미

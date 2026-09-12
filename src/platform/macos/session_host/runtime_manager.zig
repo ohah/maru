@@ -383,6 +383,11 @@ pub const RuntimeManager = struct {
     /// Runtime-scoped E3b source tokens. Streams retain only an admission-owned delivery copy.
     metadata_samplers: std.AutoHashMapUnmanaged(u128, runtime_metadata_sampler.Record) = .empty,
     next_metadata_sample_ns: u64 = 0,
+    /// kitty 애니메이션 전진의 직전 tick 시각. 경과 ms 는 이 값과의 차이다 — 호출 횟수로 세면 cadence 가
+    /// 밀리거나 겹칠 때 재생 속도가 벽시계에서 떨어진다. 0 은 「아직 기준이 없다」다.
+    anim_last_ns: u64 = 0,
+    anim_ticks: u64 = 0,
+    anim_advances: u64 = 0,
     metadata_sampler_visits: u64 = 0,
     metadata_sampler_changes: u64 = 0,
     metadata_sampler_failures: u64 = 0,
@@ -459,6 +464,9 @@ pub const RuntimeManager = struct {
         self.observation_caches = .empty;
         self.metadata_samplers = .empty;
         self.next_metadata_sample_ns = 0;
+        self.anim_last_ns = 0;
+        self.anim_ticks = 0;
+        self.anim_advances = 0;
         self.metadata_sampler_visits = 0;
         self.metadata_sampler_changes = 0;
         self.metadata_sampler_failures = 0;
@@ -617,7 +625,7 @@ pub const RuntimeManager = struct {
 
     /// server.zig가 dispatch에 넘길 중립 vtable. `ctx`는 이 매니저다.
     pub fn runtimeOps(self: *RuntimeManager) server.RuntimeOps {
-        return .{ .ctx = self, .spawn = spawnOp, .terminate = terminateOp, .write_input = writeInputOp, .resize = resizeOp, .snapshot = snapshotOp, .delta = deltaOp, .screen_change_token = screenChangeTokenOp, .metadata_change_token = metadataChangeTokenOp, .sample_metadata_sources = sampleMetadataSourcesOp, .notification_peek = notificationPeekOp, .notification_commit = notificationCommitOp, .notification_config_update = notificationConfigUpdateOp, .core_command = coreCommandOp, .selected_text = selectedTextOp, .select_op = selectOpOp, .find = findOp, .observation = observationOp, .cached_observation = cachedObservationOp, .report_mouse = reportMouseOp, .link_at = linkAtOp, .clipboard_write = clipboardWriteOp, .observation_urgent = observationUrgentOp };
+        return .{ .ctx = self, .spawn = spawnOp, .terminate = terminateOp, .write_input = writeInputOp, .resize = resizeOp, .snapshot = snapshotOp, .delta = deltaOp, .screen_change_token = screenChangeTokenOp, .metadata_change_token = metadataChangeTokenOp, .sample_metadata_sources = sampleMetadataSourcesOp, .advance_animations = advanceAnimationsOp, .notification_peek = notificationPeekOp, .notification_commit = notificationCommitOp, .notification_config_update = notificationConfigUpdateOp, .core_command = coreCommandOp, .selected_text = selectedTextOp, .select_op = selectOpOp, .find = findOp, .observation = observationOp, .cached_observation = cachedObservationOp, .report_mouse = reportMouseOp, .link_at = linkAtOp, .clipboard_write = clipboardWriteOp, .observation_urgent = observationUrgentOp };
     }
 
     pub const OwnerDrainSummary = struct {
@@ -2189,6 +2197,62 @@ pub const RuntimeManager = struct {
             .incarnation = record.token.incarnation,
             .revision = record.token.revision,
         };
+    }
+
+    /// kitty 애니메이션을 벽시계 경과만큼 전진시킨다(host cadence tick).
+    ///
+    /// **왜 host 인가**: terminal core 가 이 프로세스에 산다. app 프로세스 쪽 core 는 비어 있어서 거기 꽂은
+    /// 전진은 한 번도 안 불린다(계측으로 확인: terms=0, kitty_images=0).
+    ///
+    /// **왜 delta 가 아니라 tick 인가**: delta 는 screen change token 이 올라야 열린다. 애니메이션은 스스로
+    /// 출력을 만들지 않으므로 전진이 delta 안에 있으면 영원히 안 불린다. 순서가 거꾸로다 — 전진이 먼저고
+    /// 그 결과로 change 를 publish 해야 producer 가 깬다.
+    ///
+    /// **대역폭**: 프레임이 넘어간 이미지는 delta 에 blob 전체가 다시 실린다(실측 16,441 B / 64x64 이미지,
+    /// `screen_snapshot.zig` 의 대역폭 계약 판정자). 로컬 소켓이라 감당하지만, host 가 원격 기계로 가면
+    /// 이 계약 위에 그대로 둘 수 없다 — 그때는 프레임을 미리 보내고 인덱스만 나르는 레코드가 필요하다
+    /// (`docs/persistent-session-host.md` §12).
+    fn advanceAnimations(self: *RuntimeManager, now_ns: u64) void {
+        self.anim_ticks +|= 1;
+        const last = self.anim_last_ns;
+        self.anim_last_ns = now_ns;
+        if (last == 0 or now_ns <= last) return; // 첫 tick 은 기준만 세운다. 시계 역행도 한 tick 버린다.
+        // 잠자기·정지에서 깨면 경과가 수 분일 수 있다. 그대로 넘기면 한 번에 수천 프레임을 감아
+        // 「멈춰 있던 만큼 빨리 감기」가 된다. 한 tick 이 옮길 수 있는 상한을 1초로 둔다.
+        const elapsed_ms = @min((now_ns - last) / std.time.ns_per_ms, 1000);
+        if (elapsed_ms == 0) return;
+
+        var items: [upgrade_limits.max_runtime_count]struct {
+            runtime_id: u128,
+            handle: RuntimeHandle,
+        } = undefined;
+        var count: usize = 0;
+        var it = self.host_registry.entries.iterator();
+        while (it.next()) |entry| {
+            if (count == items.len) break;
+            const slot = entry.value_ptr.*.runtime orelse continue;
+            items[count] = .{ .runtime_id = entry.key_ptr.*, .handle = @intFromPtr(slot) };
+            count += 1;
+        }
+        for (items[0..count]) |item| {
+            const surface = self.backend_impl.surfaceFor(item.handle) orelse continue;
+            const moved = blk: {
+                // reader 스레드가 같은 core 를 쓴다 — 프레임 전진도 core mutation 이라 lock 아래여야 한다.
+                surface.lockCore(self.io);
+                defer surface.unlockCore(self.io);
+                break :blk surface.core.advanceAnimations(elapsed_ms);
+            };
+            if (!moved) continue; // 돌고 있는 애니메이션이 없으면 여기서 끝 — publish 도 delta 도 없다.
+            self.anim_advances +|= 1;
+            // publish 실패는 이 프레임을 알리지 못한 것뿐이다. 다음 tick 이 다시 시도하고, 그 사이 core 는
+            // 이미 전진해 있으므로 프레임이 되감기지 않는다.
+            self.publishScreenChange(item.runtime_id) catch {};
+        }
+    }
+
+    fn advanceAnimationsOp(ctx: *anyopaque, now_ns: u64) void {
+        const self: *RuntimeManager = @ptrCast(@alignCast(ctx));
+        self.advanceAnimations(now_ns);
     }
 
     fn sampleMetadataSourcesOp(ctx: *anyopaque, now_ns: u64) void {
@@ -5256,4 +5320,134 @@ test "runtime manager: empty argv is rejected before allocating a handle" {
     const ops = mgr.runtimeOps();
     try std.testing.expectError(error.EmptyArgv, ops.spawn(ops.ctx, .{ .argv = &.{}, .cwd = null, .cols = 80, .rows = 24 }));
     try std.testing.expectEqual(@as(usize, 0), host_registry.count()); // 실패라 registry에 아무것도 안 남는다.
+}
+
+/// 판정자용 애니메이션을 코어에 세운다 — 2x2 RGBA `frames` 장, 간격은 전부 기본 40ms, 화면에 걸고 무한 재생.
+/// PTY 를 거치지 않고 core 에 직접 쓴다(판정자가 reader 스레드 타이밍에 매달리지 않게).
+fn armTestAnimation(surface: anytype, io: std.Io, frames: usize) !void {
+    const allocator = std.testing.allocator;
+    var px: [2 * 2 * 4]u8 = undefined;
+    @memset(&px, 0x11); // 픽셀 값은 무관하다 — 이 판정자가 보는 것은 「몇 번 프레임인가」다
+    var b64: [32]u8 = undefined;
+    const enc = std.base64.standard.Encoder.encode(&b64, &px);
+    surface.lockCore(io);
+    defer surface.unlockCore(io);
+    const root = try std.fmt.allocPrint(allocator, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc});
+    defer allocator.free(root);
+    try surface.core.write(root);
+    for (1..frames) |_| {
+        const frame = try std.fmt.allocPrint(allocator, "\x1b_Ga=f,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc});
+        defer allocator.free(frame);
+        try surface.core.write(frame);
+    }
+    try surface.core.write("\x1b_Ga=p,i=1,c=2,r=1,q=2\x1b\\"); // 화면에 안 걸린 이미지는 일부러 전진하지 않는다
+    try surface.core.write("\x1b_Ga=a,i=1,s=3,v=0,q=2\x1b\\"); // s=3 재생, v=0 무한
+}
+
+fn testFrameOf(surface: anytype, io: std.Io) u32 {
+    surface.lockCore(io);
+    defer surface.unlockCore(io);
+    const img = surface.core.kitty_images.map.get(1) orelse return 0;
+    return img.current_frame;
+}
+
+// **host 가 애니메이션의 시계다.** core 가 이 프로세스에 살기 때문이다 — app 프로세스 쪽 core 는 비어 있어
+// 거기 꽂은 전진은 한 번도 안 불린다(계측: terms=0, kitty_images=0). 이 판정자는 셋을 함께 고정한다:
+// ① tick 이 프레임을 넘긴다 ② 넘어갔으면 screen change 가 올라 producer 가 깬다(안 올리면 delta 가 안 열려
+// client 화면이 첫 프레임에 멈춘다) ③ 속도는 tick 횟수가 아니라 **벽시계 차**가 정한다.
+test "runtime manager: host cadence 가 kitty 애니메이션을 전진시키고 screen change 를 올린다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer host_registry.deinit();
+    var mgr: RuntimeManager = undefined;
+    mgr.init(allocator, std.testing.io, &host_registry, null);
+    defer mgr.deinit();
+
+    const ops = mgr.runtimeOps();
+    const rid = try ops.spawn(ops.ctx, .{ .argv = &.{"/bin/cat"}, .cwd = null, .cols = 24, .rows = 6 });
+    defer ops.terminate(ops.ctx, rid);
+    const surface = mgr.backend_impl.surfaceFor(mgr.handleFor(rid).?).?;
+    try armTestAnimation(surface, std.testing.io, 2);
+    try std.testing.expectEqual(@as(u32, 1), testFrameOf(surface, std.testing.io));
+
+    const advance = ops.advance_animations.?;
+    const token_before = try ops.screen_change_token.?(ops.ctx, rid);
+
+    // **첫 tick 은 기준만 잡는다.** 여기서 넘기면 경과가 「0 부터 지금까지」가 되어, host 가 오래 떠
+    // 있었을수록 첫 프레임이 크게 튄다.
+    advance(ops.ctx, 10 * std.time.ns_per_ms);
+    try std.testing.expectEqual(@as(u32, 1), testFrameOf(surface, std.testing.io));
+    try std.testing.expect(std.meta.eql(token_before, try ops.screen_change_token.?(ops.ctx, rid)));
+
+    // 40ms 경과 — gap 이 40ms 이므로 정확히 한 장.
+    advance(ops.ctx, 50 * std.time.ns_per_ms);
+    try std.testing.expectEqual(@as(u32, 2), testFrameOf(surface, std.testing.io));
+    const token_after = try ops.screen_change_token.?(ops.ctx, rid);
+    try std.testing.expect(!std.meta.eql(token_before, token_after)); // producer 가 깨야 client 가 본다
+    try std.testing.expectEqual(@as(u64, 1), mgr.anim_advances);
+
+    // **tick 이 잦다고 빨라지지 않는다.** 1ms 씩 세 번은 gap 에 못 미치므로 프레임도 change 도 그대로다.
+    for (0..3) |i| advance(ops.ctx, (51 + i) * std.time.ns_per_ms);
+    try std.testing.expectEqual(@as(u32, 2), testFrameOf(surface, std.testing.io));
+    try std.testing.expect(std.meta.eql(token_after, try ops.screen_change_token.?(ops.ctx, rid)));
+    try std.testing.expectEqual(@as(u64, 1), mgr.anim_advances);
+}
+
+// 안 도는 세션은 **공짜여야 한다**. 전진이 screen change 를 무조건 올리면 애니메이션이 하나도 없는 세션까지
+// 20ms 마다 delta 투영이 열려, 조용한 터미널이 쉬지 않고 화면을 다시 만든다.
+test "runtime manager: 애니메이션이 없으면 tick 은 screen change 를 올리지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer host_registry.deinit();
+    var mgr: RuntimeManager = undefined;
+    mgr.init(allocator, std.testing.io, &host_registry, null);
+    defer mgr.deinit();
+
+    const ops = mgr.runtimeOps();
+    const rid = try ops.spawn(ops.ctx, .{ .argv = &.{"/bin/cat"}, .cwd = null, .cols = 24, .rows = 6 });
+    defer ops.terminate(ops.ctx, rid);
+    const advance = ops.advance_animations.?;
+    const token_before = try ops.screen_change_token.?(ops.ctx, rid);
+
+    advance(ops.ctx, 10 * std.time.ns_per_ms);
+    for (0..10) |i| advance(ops.ctx, (100 + i * 50) * std.time.ns_per_ms);
+    try std.testing.expect(std.meta.eql(token_before, try ops.screen_change_token.?(ops.ctx, rid)));
+    try std.testing.expectEqual(@as(u64, 0), mgr.anim_advances);
+    try std.testing.expectEqual(@as(u64, 11), mgr.anim_ticks); // tick 은 돌았다 — 공짜였을 뿐이다
+}
+
+// 시계는 **뒤로 가고 멈춘다**. 기계가 잠들었다 깨면 경과가 수 분이고, 그대로 넘기면 사용자가 보는 것은
+// 애니메이션이 아니라 「빨리 감기」다. 역행은 한 tick 을 버리고, 긴 정지는 1 초까지만 옮긴다.
+test "runtime manager: 애니메이션 전진은 시계 역행을 버리고 긴 정지를 1 초로 자른다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer host_registry.deinit();
+    var mgr: RuntimeManager = undefined;
+    mgr.init(allocator, std.testing.io, &host_registry, null);
+    defer mgr.deinit();
+
+    const ops = mgr.runtimeOps();
+    const rid = try ops.spawn(ops.ctx, .{ .argv = &.{"/bin/cat"}, .cwd = null, .cols = 24, .rows = 6 });
+    defer ops.terminate(ops.ctx, rid);
+    const surface = mgr.backend_impl.surfaceFor(mgr.handleFor(rid).?).?;
+    // 프레임 여섯 장이라야 상한이 **보인다** — 두 장이면 몇 번을 감든 결과가 1 아니면 2 라 구분이 안 된다.
+    try armTestAnimation(surface, std.testing.io, 6);
+    const advance = ops.advance_animations.?;
+
+    advance(ops.ctx, 1_000 * std.time.ns_per_ms); // 기준
+    advance(ops.ctx, 500 * std.time.ns_per_ms); // 역행 — 이 tick 은 버린다
+    try std.testing.expectEqual(@as(u32, 1), testFrameOf(surface, std.testing.io));
+    try std.testing.expectEqual(@as(u64, 0), mgr.anim_advances);
+
+    // 역행 뒤 기준이 다시 잡혔으므로 그 자리에서 이어 간다(영구히 멈추지 않는다). 60ms → 한 장, 나머지 20ms.
+    advance(ops.ctx, 560 * std.time.ns_per_ms);
+    try std.testing.expectEqual(@as(u32, 2), testFrameOf(surface, std.testing.io));
+
+    // 2 초를 건너뛰었다. 1 초 상한이면 (20+1000)/40 = 25 장 → 프레임 2 에서 **3**.
+    // 상한이 없으면 (20+2000)/40 = 50 장 → **4** 가 된다. 그 차이가 이 한 줄이다.
+    advance(ops.ctx, 2_560 * std.time.ns_per_ms);
+    try std.testing.expectEqual(@as(u32, 3), testFrameOf(surface, std.testing.io));
 }

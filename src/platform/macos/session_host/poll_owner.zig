@@ -534,6 +534,9 @@ pub const Owner = struct {
         if (now_ns < self.next_cadence_ns) return;
         self.next_cadence_ns = now_ns +| cadence_ns;
         self.server.sampleMetadataSources(now_ns);
+        // 애니메이션은 **여기**가 유일한 시계다. 출력 wake 갈래에 두면 셸이 조용한 세션에서 영영 안 돈다 —
+        // 애니메이션은 스스로 PTY 출력을 만들지 않는다(뷰포트 조정이 같은 이유로 여기 있는 것과 같다).
+        self.server.advanceAnimations(now_ns);
         const gate_open = if (self.server.admission_gate) |gate| gate.snapshot().open else true;
         for (self.clients, 0..) |maybe_client, index| {
             const client = maybe_client orelse continue;
@@ -4767,4 +4770,57 @@ test "S11-6 조정 알림은 client 의 strict decoder 를 통과한다" {
         },
         else => return error.TestUnexpectedResult,
     }
+}
+
+// kitty 애니메이션의 시계는 **cadence 경계 하나**다.
+//
+// 이 배선이 왜 따로 판정을 받는가: 전진을 출력 wake 갈래(= PTY 가 바이트를 뱉을 때)에 두면 셸이 조용한
+// 세션에서 애니메이션이 영영 안 돈다 — 애니메이션은 스스로 출력을 만들지 않는다. 그리고 delta 갈래에 두면
+// 순서가 거꾸로다: delta 는 screen change 가 올라야 열리는데, 그 change 를 만드는 게 바로 전진이다.
+// 그래서 **poll 회차의 cadence 경계**만이 이 일을 할 수 있고, 이 판정자는 그 한 줄이 사라지는 것을 막는다.
+test "poll owner: 애니메이션 전진은 cadence 경계마다 정확히 한 번 불린다" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_len = try tmp.dir.realPath(testing.io, &dir_buf);
+    const dir_raw = dir_buf[0..dir_len];
+    const dir_path = try testing.allocator.dupeZ(u8, dir_raw);
+    defer testing.allocator.free(dir_path);
+    const socket_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/anim.sock", .{dir_raw}, 0);
+    defer testing.allocator.free(socket_path);
+    var runtime_registry = registry.TerminalRuntimeRegistry.init(testing.allocator);
+    defer runtime_registry.deinit();
+    _ = try runtime_registry.register(0xAA, 80, 24);
+    var server = try socket_server.SocketServer.bind(testing.allocator, dir_path, socket_path, 0xB2, &runtime_registry);
+    defer server.deinit();
+    var fake_runtime: server_mod.FakeRuntimeOps = .{};
+    server.runtime_ops = fake_runtime.ops();
+    var owner = try Owner.init(testing.allocator, testing.io, &server);
+    defer owner.deinit();
+
+    // 경계가 지났다 — 전진이 한 번 불리고, 그 tick 의 시각이 그대로 전달된다(경과를 재는 쪽이 벽시계를
+    // 쓰려면 이 값이 있어야 한다).
+    owner.next_cadence_ns = 0;
+    owner.scheduleCadence(1_000_000);
+    try testing.expectEqual(@as(usize, 1), fake_runtime.animation_ticks);
+    try testing.expectEqual(@as(u64, 1_000_000), fake_runtime.animation_last_now_ns);
+
+    // 아직 다음 경계 전이다 — 폴이 여러 번 돌아도 전진은 안 는다. 애니메이션 속도는 poll 빈도가 아니라
+    // cadence 가 정한다.
+    owner.scheduleCadence(1_000_001);
+    owner.scheduleCadence(1_000_002);
+    try testing.expectEqual(@as(usize, 1), fake_runtime.animation_ticks);
+
+    // 다음 경계를 넘기면 다시 한 번.
+    owner.scheduleCadence(1_000_000 + cadence_ns);
+    try testing.expectEqual(@as(usize, 2), fake_runtime.animation_ticks);
+
+    // **op 를 안 내는 backend 도 있다**(구 test seam). 그때 이 경로는 조용한 no-op 이라야지 터지면 안 된다.
+    var bare: server_mod.FakeRuntimeOps = .{};
+    var bare_ops = bare.ops();
+    bare_ops.advance_animations = null;
+    server.runtime_ops = bare_ops;
+    owner.scheduleCadence(1_000_000 + 2 * cadence_ns);
+    try testing.expectEqual(@as(usize, 0), bare.animation_ticks);
 }

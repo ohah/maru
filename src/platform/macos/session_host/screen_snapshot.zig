@@ -1441,3 +1441,45 @@ test "bounded projector uses a transparent exact allocation ceiling" {
     defer allocator.free(exact);
     try std.testing.expectEqualSlices(u8, expected, exact);
 }
+
+test "screen delta: generation 이 바뀐 이미지는 blob 전체가 다시 실린다 (대역폭 계약)" {
+    const allocator = std.testing.allocator;
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 80, .rows = 24 });
+    defer core.deinit();
+    core.setCellMetrics(10, 20);
+
+    // 64x64 RGBA = 16 KiB 이미지(작은 편) — 실제 앱 이미지는 이보다 훨씬 크다.
+    const W = 64;
+    const px = try allocator.alloc(u8, W * W * 4);
+    defer allocator.free(px);
+    @memset(px, 0xAB);
+    const b64 = try allocator.alloc(u8, std.base64.standard.Encoder.calcSize(px.len));
+    defer allocator.free(b64);
+    const enc = std.base64.standard.Encoder.encode(b64, px);
+    const cmd = try std.fmt.allocPrint(allocator, "\x1b_Ga=t,f=32,s={d},v={d},i=1,q=2;{s}\x1b\\", .{ W, W, enc });
+    defer allocator.free(cmd);
+    try core.write(cmd);
+    const frame = try std.fmt.allocPrint(allocator, "\x1b_Ga=f,f=32,s={d},v={d},i=1,z=40,q=2;{s}\x1b\\", .{ W, W, enc });
+    defer allocator.free(frame);
+    try core.write(frame);
+    try core.write("\x1b_Ga=p,i=1,c=10,r=5,q=2\x1b\\");
+    try core.write("\x1b_Ga=a,i=1,r=1,z=40,s=3,q=2\x1b\\");
+
+    const base = try projectSnapshot(allocator, &core, .{ .generation = 1 });
+    defer allocator.free(base);
+
+    // 프레임을 한 번 넘긴다 — 픽셀 크기도 내용도 그대로이고 generation 만 바뀐다.
+    try std.testing.expect(core.advanceAnimations(40));
+    var res = try computeDelta(allocator, base, &core, .{ .generation = 2 });
+    defer res.deinit(allocator);
+
+    // **현재 wire 계약**: `generation` 이 바뀐 이미지는 delta 가 **blob 전체를 다시 싣는다**.
+    // 실측(2026-09-12): 64x64 RGBA(16 KiB) 이미지가 프레임 하나 넘어가면 delta 가 16,441 바이트다 —
+    // 픽셀은 한 바이트도 안 바뀌었는데(같은 0xAB) 프레임 번호만 달라졌을 뿐이다.
+    //
+    // 애니메이션이 이 위에서 돌면 그 값에 프레임 레이트가 곱해진다. host cadence 가 20ms 이므로
+    // 최대 50fps → 이 작은 이미지도 **822 KB/s**, 실제 크기(400x300 RGBA=480 KiB)면 **24 MB/s** 다.
+    // 그래서 원격 애니메이션은 이 계약 위에 **그대로 얹을 수 없다** — 프레임을 미리 보내고 「지금 몇 번
+    // 프레임」만 나르는 레코드가 먼저 필요하다. 이 판정자는 그 전제(지금은 통째로 실린다)를 고정한다.
+    try std.testing.expect(res.delta.len >= px.len);
+}

@@ -712,6 +712,11 @@ pub const runtime_manager_groups = [_]Group{
             "observation_caches",
             "metadata_samplers",
             "next_metadata_sample_ns",
+            // 애니메이션 시계 baseline·계수기. exec 뒤 0 으로 시작해도 첫 tick 이 baseline 만 잡고 넘어가므로
+            // 프레임이 튀지 않는다(경과를 「호출 횟수」가 아니라 두 tick 의 차로 재기 때문이다).
+            "anim_last_ns",
+            "anim_ticks",
+            "anim_advances",
             "metadata_sampler_visits",
             "metadata_sampler_changes",
             "metadata_sampler_failures",

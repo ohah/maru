@@ -55,7 +55,10 @@ test {
 }
 // 짧은 대기(스모크 전용). `app/live_pty.zig`가 같은 이유로 같은 것을 쓴다 — std에 노출이 없다.
 extern "c" fn usleep(usec: c_uint) c_int;
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 const session_host_entrypoint = @import("platform/macos/session_host/entrypoint.zig");
+const notification_runtime_contract = @import("platform/macos/session_host/release_adapter_notification_runtime_contract.zig");
+const notification_runtime_child_command = notification_runtime_contract.child_command;
 const session_host_build_options = @import("session_host_build_options");
 const session_host_admin_cli = if (builtin.os.tag == .macos)
     @import("platform/macos/session_host/admin_cli.zig")
@@ -316,6 +319,10 @@ fn dispatch(
     // 자식이 이 인자로 재실행돼 host 모드로 진입한다(사용자가 직접 칠 명령이 아니라 usage에 안 넣는다). macOS 전용.
     if (std.mem.eql(u8, command, session_host_entrypoint.subcommand)) {
         try runSessionHostDaemon(io, allocator, &args, stdout, stderr);
+        return;
+    }
+    if (std.mem.eql(u8, command, notification_runtime_child_command)) {
+        try runNotificationReleaseRuntimeChild(io, allocator, &args, stdout, stderr);
         return;
     }
 
@@ -13812,6 +13819,281 @@ fn runSessionHostDaemon(io: std.Io, allocator: std.mem.Allocator, args: anytype,
         try stderr.print("maru {s} is macOS-only\n", .{session_host_entrypoint.subcommand});
         return error.UnknownCommand;
     }
+}
+
+/// R3b2 release runner child. The parent intentionally cannot link the live session-host graph a
+/// second time, so this exact candidate executable prepares and cleans its own isolated daemon.
+/// This command is hidden and accepts only a UUID-derived `/tmp/mn-*` root already owned mode 0700.
+fn runNotificationReleaseRuntimeChild(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    args: anytype,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+) !void {
+    if (builtin.os.tag != .macos) return error.UnknownCommand;
+    const operation = args.next() orelse return error.UnknownCommand;
+    const root_raw = args.next() orelse return error.UnknownCommand;
+    if (!notificationReleaseRoot(root_raw)) return error.UnknownCommand;
+    const root = try allocator.dupeZ(u8, root_raw);
+    defer allocator.free(root);
+    try requirePrivateDirectory(root);
+
+    if (std.mem.eql(u8, operation, "prepare")) {
+        const nonce = args.next() orelse return error.UnknownCommand;
+        const visible = args.next() orelse return error.UnknownCommand;
+        const before = args.next() orelse return error.UnknownCommand;
+        const deadline_text = args.next() orelse return error.UnknownCommand;
+        if (args.next() != null or !notificationReleaseNonce(root, nonce) or
+            !notificationReleaseScalar(visible, 160) or !notificationReleaseScalar(before, 128))
+            return error.UnknownCommand;
+        const deadline_ns = std.fmt.parseInt(i128, deadline_text, 10) catch return error.UnknownCommand;
+        if (deadline_ns <= std.Io.Clock.awake.now(io).nanoseconds) return error.UnknownCommand;
+        try notificationReleasePrepare(io, allocator, root, visible, before, deadline_ns, stdout);
+        return;
+    }
+    if (std.mem.eql(u8, operation, "cleanup")) {
+        const host_text = args.next() orelse return error.UnknownCommand;
+        const runtime_text = args.next() orelse return error.UnknownCommand;
+        if (args.next() != null or !lowerHexExact(host_text, 32) or !lowerHexExact(runtime_text, 32))
+            return error.UnknownCommand;
+        try notificationReleaseCleanup(io, allocator, root, host_text, runtime_text);
+        return;
+    }
+    try stderr.writeAll("invalid notification release runtime operation\n");
+    return error.UnknownCommand;
+}
+
+fn notificationReleasePrepare(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    root: [:0]const u8,
+    visible: []const u8,
+    before: []const u8,
+    deadline_ns: i128,
+    stdout: *std.Io.Writer,
+) !void {
+    const session_host = @import("platform/macos/session_host.zig");
+    var host_id: u128 = 0;
+    while (host_id == 0) std.c.arc4random_buf(std.mem.asBytes(&host_id).ptr, @sizeOf(u128));
+    var base_storage: [128]u8 = undefined;
+    const base = try std.fmt.bufPrintZ(&base_storage, "{s}/s", .{root});
+    // The one-shot parent starts with an intentionally empty environment. The detached daemon
+    // inherits only this exact isolated namespace; without it short-endpoint validation rejects
+    // the explicit socket before startup readiness can become ready.
+    if (setenv("MARU_SESSION_HOST_ROOT", base.ptr, 1) != 0)
+        return error.SessionRootEnvironmentFailed;
+    try requirePrivateDirectory(base);
+    var helper_root_storage: [128]u8 = undefined;
+    const helper_root = try std.fmt.bufPrintZ(&helper_root_storage, "{s}/h", .{root});
+    try requirePrivateDirectory(helper_root);
+    var session_storage: [160]u8 = undefined;
+    const session_dir = try std.fmt.bufPrintZ(&session_storage, "{s}/session-host", .{base});
+    var socket_dir_storage: [160]u8 = undefined;
+    const socket_dir = try std.fmt.bufPrintZ(&socket_dir_storage, "{s}/sh", .{base});
+    try createNotificationReleaseLeaf(session_dir);
+    errdefer _ = std.c.rmdir(session_dir.ptr);
+    try createNotificationReleaseLeaf(socket_dir);
+    errdefer _ = std.c.rmdir(socket_dir.ptr);
+    var socket_storage: [192]u8 = undefined;
+    const socket = try session_host.short_endpoint.socketPathUnder(&socket_storage, base, host_id);
+    const self_executable = try std.process.executablePathAlloc(io, allocator);
+    defer allocator.free(self_executable);
+    try session_host.launcher.spawnSessionHostDetached(allocator, self_executable, session_dir, socket, host_id);
+
+    var admin = try notificationReleaseConnect(allocator, io, socket, deadline_ns);
+    var admin_live = true;
+    defer if (admin_live) admin.deinit();
+    if (admin.host_id != host_id) return error.HostIdentityMismatch;
+    const host_pid = try notificationReleasePeerPid(admin.fd);
+    var runtime_id: ?[32]u8 = null;
+    errdefer {
+        if (runtime_id) |rid| notificationReleaseTerminateRuntime(allocator, &admin, &rid) catch {};
+        admin.deinit();
+        admin_live = false;
+        _ = std.c.kill(host_pid, std.c.SIG.TERM);
+    }
+    var trigger_storage: [144]u8 = undefined;
+    const trigger = try std.fmt.bufPrint(&trigger_storage, "{s}/h/emit", .{root});
+    const params = try std.fmt.allocPrint(
+        allocator,
+        "{{\"argv\":[\"/bin/sh\",\"-c\",\"/usr/bin/printf '%s\\\\n' \\\"$2\\\"; while [ ! -f \\\"$1\\\" ]; do /bin/sleep 0.05; done; /usr/bin/printf '\\\\033]777;notify;Maru;%s\\\\033\\\\\\\\' \\\"$3\\\"; exec /bin/cat\",\"maru-notification-child\",\"{s}\",\"{s}\",\"{s}\"],\"cols\":80,\"rows\":24}}",
+        .{ trigger, before, visible },
+    );
+    defer allocator.free(params);
+    const response = try admin.call("runtime.spawn", params);
+    defer allocator.free(response);
+    runtime_id = session_host.client.extractRuntimeId(response) orelse return error.InvalidRuntimeReceipt;
+    try notificationReleaseWaitForBefore(io, allocator, &admin, &runtime_id.?, before, deadline_ns);
+    admin.deinit();
+    admin_live = false;
+    try stdout.print(
+        "{{\"schema\":\"{s}\",\"host_id\":\"{x:0>32}\",\"runtime_id\":\"{s}\",\"event_id\":1}}\n",
+        .{ notification_runtime_contract.receipt_schema, host_id, runtime_id.? },
+    );
+    try stdout.flush();
+}
+
+fn notificationReleaseWaitForBefore(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    admin: anytype,
+    runtime_id: *const [32]u8,
+    before: []const u8,
+    deadline_ns: i128,
+) !void {
+    const session_host = @import("platform/macos/session_host.zig");
+    const deadline = session_host.client_deadline.AbsoluteDeadline.fromAbsolute(io, deadline_ns) catch
+        return error.BeforeMarkerTimeout;
+    const params = try std.fmt.allocPrint(allocator, "{{\"runtime_id\":\"{s}\",\"mode\":\"controller\"}}", .{runtime_id});
+    defer allocator.free(params);
+    const response = try admin.callUntil("runtime.attach", params, deadline);
+    defer allocator.free(response);
+    const stream_id = session_host.client.extractU64Field(response, "\"stream_id\":") orelse
+        return error.RuntimeAttachFailed;
+    var attached = true;
+    defer if (attached) notificationReleaseDetach(allocator, admin, stream_id) catch {};
+    var assembler = session_host.screen_assembler.ScreenAssembler.initForCodec(allocator, admin.screen_codec_version);
+    defer assembler.deinit();
+    const snapshot = try admin.readSnapshotUntil(stream_id, deadline);
+    defer allocator.free(snapshot);
+    try assembler.applySnapshot(snapshot);
+    while (!notificationReleaseScreenContains(&assembler, before)) {
+        if (std.Io.Clock.awake.now(io).nanoseconds >= deadline_ns) return error.BeforeMarkerTimeout;
+        if (try admin.readStreamBatch(stream_id)) |batch| {
+            defer batch.deinit();
+            if (batch.is_snapshot) try assembler.applySnapshot(batch.bytes) else try assembler.applyDelta(batch.bytes);
+        }
+        _ = usleep(10_000);
+    }
+    try notificationReleaseDetach(allocator, admin, stream_id);
+    attached = false;
+}
+
+fn notificationReleaseDetach(allocator: std.mem.Allocator, admin: anytype, stream_id: u64) !void {
+    const params = try std.fmt.allocPrint(allocator, "{{\"stream_id\":{d}}}", .{stream_id});
+    defer allocator.free(params);
+    const response = try admin.call("runtime.detach", params);
+    defer allocator.free(response);
+    if (!std.mem.eql(u8, response, "{\"result\":{\"detached\":true}}"))
+        return error.InvalidDetachReceipt;
+}
+
+fn notificationReleaseScreenContains(assembler: anytype, marker: []const u8) bool {
+    var row: u16 = 0;
+    while (row < assembler.rows_count) : (row += 1) {
+        var bytes: [4096]u8 = undefined;
+        var used: usize = 0;
+        for (assembler.rowRuns(row)) |run| {
+            var repeat: u32 = 0;
+            while (repeat < run.count) : (repeat += 1) {
+                if (run.grapheme.len > bytes.len - used) break;
+                @memcpy(bytes[used..][0..run.grapheme.len], run.grapheme);
+                used += run.grapheme.len;
+            }
+        }
+        if (std.mem.indexOf(u8, bytes[0..used], marker) != null) return true;
+    }
+    return false;
+}
+
+fn notificationReleaseCleanup(io: std.Io, allocator: std.mem.Allocator, root: [:0]const u8, host_text: []const u8, runtime_text: []const u8) !void {
+    const session_host = @import("platform/macos/session_host.zig");
+    const host_id = try std.fmt.parseInt(u128, host_text, 16);
+    var base_storage: [128]u8 = undefined;
+    const base = try std.fmt.bufPrintZ(&base_storage, "{s}/s", .{root});
+    try requirePrivateDirectory(base);
+    var socket_storage: [192]u8 = undefined;
+    const socket = try session_host.short_endpoint.socketPathUnder(&socket_storage, base, host_id);
+    var admin = try session_host.client.Client.connectAdmin(allocator, socket);
+    defer admin.deinit();
+    if (admin.host_id != host_id) return error.HostIdentityMismatch;
+    const host_pid = try notificationReleasePeerPid(admin.fd);
+    var runtime_id: [32]u8 = undefined;
+    @memcpy(&runtime_id, runtime_text);
+    try notificationReleaseTerminateRuntime(allocator, &admin, &runtime_id);
+    const kill_rc = std.c.kill(host_pid, std.c.SIG.TERM);
+    if (kill_rc != 0 and std.posix.errno(kill_rc) != .SRCH) return error.HostCleanupFailed;
+    const expires_at = std.math.add(i128, std.Io.Clock.awake.now(io).nanoseconds, 5 * std.time.ns_per_s) catch
+        std.math.maxInt(i128);
+    while (std.Io.Clock.awake.now(io).nanoseconds < expires_at) {
+        const alive = std.c.kill(host_pid, @enumFromInt(0));
+        if (alive != 0 and std.posix.errno(alive) == .SRCH) return;
+        _ = usleep(10_000);
+    }
+    return error.HostCleanupTimeout;
+}
+
+fn notificationReleaseTerminateRuntime(allocator: std.mem.Allocator, admin: anytype, runtime_id: *const [32]u8) !void {
+    const params = try std.fmt.allocPrint(allocator, "{{\"runtime_id\":\"{s}\"}}", .{runtime_id});
+    defer allocator.free(params);
+    const response = try admin.call("runtime.terminate", params);
+    defer allocator.free(response);
+    if (!std.mem.eql(u8, response, "{\"result\":{\"terminated\":true}}"))
+        return error.InvalidTerminateReceipt;
+}
+
+fn notificationReleaseConnect(allocator: std.mem.Allocator, io: std.Io, socket: [:0]const u8, deadline_ns: i128) !@import("platform/macos/session_host.zig").client.Client {
+    const session_host = @import("platform/macos/session_host.zig");
+    while (std.Io.Clock.awake.now(io).nanoseconds < deadline_ns) {
+        if (session_host.client.Client.connect(allocator, socket, .gui)) |client| return client else |_| {}
+        _ = usleep(10_000);
+    }
+    return error.DaemonNotReady;
+}
+
+fn notificationReleasePeerPid(fd: std.c.fd_t) !std.c.pid_t {
+    const sol_local: c_int = 0;
+    const local_peerpid: c_int = 0x002;
+    var pid: std.c.pid_t = 0;
+    var len: std.c.socklen_t = @sizeOf(std.c.pid_t);
+    if (std.c.getsockopt(fd, sol_local, local_peerpid, &pid, &len) != 0 or len != @sizeOf(std.c.pid_t) or pid <= 0)
+        return error.PeerPidUnavailable;
+    return pid;
+}
+
+fn createNotificationReleaseLeaf(path: [:0]const u8) !void {
+    if (std.c.mkdir(path.ptr, 0o700) != 0) return error.CreateFailed;
+}
+
+fn requirePrivateDirectory(path: [:0]const u8) !void {
+    var info: std.posix.Stat = undefined;
+    if (std.c.fstatat(std.posix.AT.FDCWD, path.ptr, &info, std.posix.AT.SYMLINK_NOFOLLOW) != 0 or
+        !std.posix.S.ISDIR(info.mode) or info.uid != std.c.getuid() or (info.mode & 0o777) != 0o700)
+        return error.InvalidPrivateRoot;
+}
+
+fn notificationReleaseRoot(root: []const u8) bool {
+    if (root.len != "/tmp/mn-".len + 32 or !std.mem.startsWith(u8, root, "/tmp/mn-")) return false;
+    return lowerHexExact(root["/tmp/mn-".len..], 32);
+}
+
+fn notificationReleaseNonce(root: []const u8, nonce: []const u8) bool {
+    if (nonce.len != 36) return false;
+    var compact: [32]u8 = undefined;
+    var at: usize = 0;
+    for (nonce, 0..) |byte, index| {
+        if (index == 8 or index == 13 or index == 18 or index == 23) {
+            if (byte != '-') return false;
+        } else {
+            if (!lowerHexExact(nonce[index .. index + 1], 1) or at == compact.len) return false;
+            compact[at] = byte;
+            at += 1;
+        }
+    }
+    return at == compact.len and std.mem.eql(u8, root["/tmp/mn-".len..], &compact);
+}
+
+fn notificationReleaseScalar(value: []const u8, max: usize) bool {
+    if (value.len == 0 or value.len > max) return false;
+    for (value) |byte| if (!std.ascii.isAlphanumeric(byte) and byte != '-' and byte != '_') return false;
+    return true;
+}
+
+fn lowerHexExact(value: []const u8, len: usize) bool {
+    if (value.len != len) return false;
+    for (value) |byte| if (!std.ascii.isDigit(byte) and !(byte >= 'a' and byte <= 'f')) return false;
+    return true;
 }
 
 /// 호스트 OS가 아직 못 하는 CLI 기능. 어느 것이 왜 막혀 있는지를 **한 곳에** 둔다.

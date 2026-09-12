@@ -7,12 +7,14 @@ const app_receipt = @import("release_adapter_notification_app_receipt");
 const continuity_receipt = @import("release_adapter_notification_continuity_receipt");
 const helper_child = @import("release_adapter_notification_helper_child");
 const helper_receipt = @import("release_adapter_notification_helper_receipt");
+const runtime_preparation = @import("release_adapter_notification_runtime_preparation");
 const workspace = @import("release_adapter_notification_workspace");
 const files = @import("release_adapter_files");
 
 pub const Inputs = struct {
     app_executable: [:0]const u8,
     helper_executable: [:0]const u8,
+    runtime_preparation_executable: ?[:0]const u8 = null,
     runner_nonce: []const u8,
     runner_root: [:0]const u8,
     output_path: [:0]const u8,
@@ -30,9 +32,11 @@ pub const Execution = struct {
     app: app_child.Execution = .{},
     helper: helper_child.Storage = .{},
     receipt: files.PinnedReleaseFile = .{},
+    preparation: runtime_preparation.Prepared = .{},
     app_frame: [app_receipt.max_receipt_bytes]u8 = undefined,
     continuity_frame: [continuity_receipt.max_receipt_bytes]u8 = undefined,
     cleanup_frame: [512]u8 = undefined,
+    app_cleanup_proved_runtime_gone: bool = false,
 };
 
 pub const Published = struct {
@@ -78,12 +82,17 @@ const Steps = struct {
     result: ?Result = null,
 
     pub fn bind(self: *@This()) !void {
-        try app_child.validateInputs(.{
-            .executable = self.inputs.app_executable,
-            .expected = self.inputs.app_expected,
-            .runner_nonce = self.inputs.runner_nonce,
-            .runner_root = self.inputs.runner_root,
-        });
+        if (self.inputs.runtime_preparation_executable == null) {
+            try app_child.validateInputs(.{
+                .executable = self.inputs.app_executable,
+                .expected = self.inputs.app_expected,
+                .runner_nonce = self.inputs.runner_nonce,
+                .runner_root = self.inputs.runner_root,
+            });
+        } else if (self.inputs.app_expected.request_identifier.len != 0 or
+            self.inputs.app_expected.host_id.len != 0 or self.inputs.app_expected.runtime_id.len != 0 or
+            self.inputs.app_expected.event_id != 0)
+            return error.InvalidInput;
         try helper_child.validateInputs(self.inputs.helper_executable, self.inputs.helper_expected, self.inputs.budget_ns);
         if (!canonicalAbsolute(self.inputs.output_path) or
             self.inputs.app_expected.deadline_ns != self.inputs.helper_expected.deadline_ns or
@@ -110,7 +119,27 @@ const Steps = struct {
     /// R2 receives an already prepared scenario today. R3b2 replaces this no-op through the
     /// product composition, after this owner has created the private root and before AppKit can
     /// observe the runtime. The hook is deliberately part of the production ordering contract.
-    pub fn prepareRuntime(_: *@This(), _: *i128) !void {}
+    pub fn prepareRuntime(self: *@This(), deadline: *i128) !void {
+        const executable = self.inputs.runtime_preparation_executable orelse return;
+        try runtime_preparation.prepare(self.allocator, self.io, .{
+            .executable = executable,
+            .runner_root = self.inputs.runner_root,
+            .runner_nonce = self.inputs.runner_nonce,
+            .visible_nonce = self.inputs.helper_expected.visible_nonce,
+            .before_marker = self.inputs.before_marker,
+            .deadline_ns = deadline.*,
+        }, &self.execution.preparation);
+        self.inputs.app_expected.request_identifier = self.execution.preparation.requestIdentifier();
+        self.inputs.app_expected.host_id = self.execution.preparation.hostId();
+        self.inputs.app_expected.runtime_id = self.execution.preparation.runtimeId();
+        self.inputs.app_expected.event_id = 1;
+        try app_child.validateInputs(.{
+            .executable = self.inputs.app_executable,
+            .expected = self.inputs.app_expected,
+            .runner_nonce = self.inputs.runner_nonce,
+            .runner_root = self.inputs.runner_root,
+        });
+    }
 
     pub fn launchApp(self: *@This(), _: *i128) !void {
         try app_child.launch(.{
@@ -121,7 +150,10 @@ const Steps = struct {
         }, &self.execution.app);
     }
 
-    pub fn emitNotification(_: *@This(), _: *i128) !void {}
+    pub fn emitNotification(self: *@This(), _: *i128) !void {
+        if (self.inputs.runtime_preparation_executable != null)
+            try runtime_preparation.emit(&self.execution.preparation);
+    }
 
     pub fn runHelper(self: *@This(), deadline: *i128) !helper_child.Clicked {
         const observed = try helper_child.run(self.io, self.allocator, self.inputs.helper_executable, self.inputs.helper_expected, try remaining(self.io, deadline.*), &self.execution.helper);
@@ -170,7 +202,8 @@ const Steps = struct {
 
     pub fn cleanupRequest(self: *@This()) !void {
         if (self.execution.app.owner == null) return;
-        try self.execution.app.requestCleanup(self.io, self.inputs.app_expected, &self.execution.cleanup_frame, try remaining(self.io, self.deadline_ns));
+        try self.execution.app.requestCleanup(self.io, self.actualExpected(), &self.execution.cleanup_frame, try remaining(self.io, self.deadline_ns));
+        self.execution.app_cleanup_proved_runtime_gone = true;
     }
 
     pub fn cleanupHelper(_: *@This()) !void {}
@@ -180,11 +213,29 @@ const Steps = struct {
         try self.execution.app.cleanup();
     }
 
-    pub fn cleanupRuntime(_: *@This()) !void {}
+    pub fn cleanupRuntime(self: *@This()) !void {
+        if (self.execution.preparation.owner != &self.execution.preparation) return;
+        if (self.execution.app_cleanup_proved_runtime_gone) {
+            try runtime_preparation.releaseAfterAppCleanup(&self.execution.preparation);
+            self.execution.app_cleanup_proved_runtime_gone = false;
+        } else {
+            try runtime_preparation.cleanup(self.io, &self.execution.preparation);
+        }
+    }
 
     pub fn cleanupRoot(self: *@This()) !void {
         if (self.execution.root.owner == null) return;
         try self.execution.root.cleanup(self.io);
+    }
+
+    fn actualExpected(self: *@This()) app_receipt.Expected {
+        if (self.execution.preparation.owner != &self.execution.preparation) return self.inputs.app_expected;
+        var expected = self.inputs.app_expected;
+        expected.request_identifier = self.execution.preparation.requestIdentifier();
+        expected.host_id = self.execution.preparation.hostId();
+        expected.runtime_id = self.execution.preparation.runtimeId();
+        expected.event_id = 1;
+        return expected;
     }
 };
 
@@ -199,6 +250,7 @@ fn aliasesExecution(execution: *Execution, inputs: Inputs) bool {
     const values = [_][]const u8{
         inputs.app_executable,
         inputs.helper_executable,
+        inputs.runtime_preparation_executable orelse "",
         inputs.runner_nonce,
         inputs.runner_root,
         inputs.output_path,

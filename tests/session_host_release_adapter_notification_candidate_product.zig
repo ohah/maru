@@ -15,6 +15,9 @@ test "mounted candidate alone supplies executable paths to both notification sce
     try std.testing.expectEqualStrings(candidate.main_path, result.gui_live_then_quit.app_executable);
     try std.testing.expectEqualStrings(candidate.helper_path, result.gui_zero.helper_executable);
     try std.testing.expectEqualStrings(candidate.helper_path, result.gui_live_then_quit.helper_executable);
+    try std.testing.expectEqualStrings(candidate.mounted_cli_path, result.gui_zero.runtime_preparation_executable.?);
+    try std.testing.expectEqualStrings("", result.gui_zero.app_expected.request_identifier);
+    try std.testing.expectEqual(@as(u64, 0), result.gui_zero.app_expected.event_id);
     try std.testing.expectEqualStrings(sha, result.candidate_dmg_sha256);
 }
 
@@ -25,7 +28,7 @@ test "caller scenario identity and mounted executable identity remain separate a
     const source = inputs();
     const result = subject.materializeForTest(&source, candidate);
     try std.testing.expectEqualStrings(zero_uuid, result.gui_zero.runner_nonce);
-    try std.testing.expectEqualStrings("/private/tmp/mn-123e4567e89b42d3a456426614174000", result.gui_zero.runner_root);
+    try std.testing.expectEqualStrings("/tmp/mn-123e4567e89b42d3a456426614174000", result.gui_zero.runner_root);
     try std.testing.expectEqualStrings(candidate.main_path, result.gui_zero.app_executable);
     try std.testing.expectEqualStrings(candidate.helper_path, result.gui_zero.helper_executable);
 }
@@ -98,7 +101,7 @@ fn scenario(kind: app_receipt.Scenario, uuid: []const u8, event: u64) subject.Sc
     const zero = kind == .gui_zero;
     return .{
         .runner_nonce = uuid,
-        .runner_root = if (zero) "/private/tmp/mn-123e4567e89b42d3a456426614174000" else "/private/tmp/mn-123e4567e89b42d3a456426614174001",
+        .runner_root = if (zero) "/tmp/mn-123e4567e89b42d3a456426614174000" else "/tmp/mn-123e4567e89b42d3a456426614174001",
         .output_path = if (zero) "/private/tmp/zero.json" else "/private/tmp/live.json",
         .app_expected = .{ .scenario = kind, .request_identifier = if (zero) "maru-11111111111111111111111111111111-22222222222222222222222222222222-1" else "maru-11111111111111111111111111111111-22222222222222222222222222222222-2", .host_id = "11111111111111111111111111111111", .runtime_id = "22222222222222222222222222222222", .event_id = event, .clicked_at_ns = 1, .deadline_ns = 100 },
         .helper_expected = .{ .visible_nonce = if (zero) zero_uuid ++ "-gui-zero" else live_uuid ++ "-gui-live-then-quit", .deadline_ns = 100 },

@@ -55,9 +55,14 @@ pub const Plan = struct {
 pub const MountedCandidate = struct {
     cli_path: [:0]const u8,
     app_bundle_path: [:0]const u8,
+    main_path: [:0]const u8 = "",
+    mounted_cli_path: [:0]const u8 = "",
+    helper_path: [:0]const u8 = "",
     main_sha256: []const u8,
     cli_sha256: []const u8,
+    helper_sha256: []const u8 = "",
     designated_requirement_sha256: []const u8,
+    team_id: []const u8 = "",
 };
 
 const NoopGate = struct {
@@ -219,9 +224,20 @@ pub fn observeWithGate(
         return err;
     };
     const cli_hex: [64]u8 = std.fmt.bytesToHex(cli_digest, .lower);
+    var helper_digest: [32]u8 = undefined;
+    hashFd(product.helper_fd, &helper_digest) catch |err| {
+        product.close();
+        product_open = false;
+        detachAndCleanup(ops, &staged, device, baseline, budget_ns) catch |cleanup_err| return cleanup_err;
+        cleanup_needed = false;
+        return err;
+    };
+    const helper_hex: [64]u8 = std.fmt.bytesToHex(helper_digest, .lower);
     var app_path_buf: [max_path_bytes:0]u8 = undefined;
     var plist_path_buf: [max_path_bytes]u8 = undefined;
-    var executable_path_buf: [max_path_bytes]u8 = undefined;
+    var executable_path_buf: [max_path_bytes:0]u8 = undefined;
+    var mounted_cli_path_buf: [max_path_bytes:0]u8 = undefined;
+    var helper_path_buf: [max_path_bytes:0]u8 = undefined;
     const app_path = std.fmt.bufPrintZ(&app_path_buf, "{s}/Maru.app", .{staged.mountPath()}) catch {
         product.close();
         product_open = false;
@@ -236,7 +252,21 @@ pub fn observeWithGate(
         cleanup_needed = false;
         return error.InvalidPath;
     };
-    const executable_path = std.fmt.bufPrint(&executable_path_buf, "{s}/Maru.app/Contents/MacOS/maru-macos-app", .{staged.mountPath()}) catch {
+    const executable_path = std.fmt.bufPrintZ(&executable_path_buf, "{s}/Maru.app/Contents/MacOS/maru-macos-app", .{staged.mountPath()}) catch {
+        product.close();
+        product_open = false;
+        detachAndCleanup(ops, &staged, device, baseline, budget_ns) catch |cleanup_err| return cleanup_err;
+        cleanup_needed = false;
+        return error.InvalidPath;
+    };
+    const mounted_cli_path = std.fmt.bufPrintZ(&mounted_cli_path_buf, "{s}/Maru.app/Contents/MacOS/maru", .{staged.mountPath()}) catch {
+        product.close();
+        product_open = false;
+        detachAndCleanup(ops, &staged, device, baseline, budget_ns) catch |cleanup_err| return cleanup_err;
+        cleanup_needed = false;
+        return error.InvalidPath;
+    };
+    const helper_path = std.fmt.bufPrintZ(&helper_path_buf, "{s}/Maru.app/Contents/Helpers/maru-session-host-notification-center-helper", .{staged.mountPath()}) catch {
         product.close();
         product_open = false;
         detachAndCleanup(ops, &staged, device, baseline, budget_ns) catch |cleanup_err| return cleanup_err;
@@ -293,9 +323,14 @@ pub fn observeWithGate(
     const mounted: MountedCandidate = .{
         .cli_path = staged.extractedCliPath(),
         .app_bundle_path = app_path,
+        .main_path = executable_path,
+        .mounted_cli_path = mounted_cli_path,
+        .helper_path = helper_path,
         .main_sha256 = &executable_hex,
         .cli_sha256 = &cli_hex,
+        .helper_sha256 = &helper_hex,
         .designated_requirement_sha256 = observed.signing().designated_requirement_sha256,
+        .team_id = observed.team_id,
     };
     gate.execute(mounted) catch |err| {
         product.close();
@@ -742,10 +777,12 @@ const Product = struct {
     plist_fd: c.fd_t,
     executable_fd: c.fd_t,
     cli_fd: c.fd_t,
+    helper_fd: c.fd_t,
     app_stat: posix.Stat,
     plist_stat: posix.Stat,
     executable_stat: posix.Stat,
     cli_stat: posix.Stat,
+    helper_stat: posix.Stat,
     fn open(mount_path: []const u8) Error!Product {
         var mount_buf: [max_path_bytes:0]u8 = undefined;
         const mount_z = std.fmt.bufPrintZ(&mount_buf, "{s}", .{mount_path}) catch return error.InvalidPath;
@@ -759,23 +796,28 @@ const Product = struct {
         defer _ = c.close(contents_fd);
         const macos_fd = openDirAt(contents_fd, "MacOS") catch return error.InvalidProduct;
         defer _ = c.close(macos_fd);
+        const helpers_fd = openDirAt(contents_fd, "Helpers") catch return error.InvalidProduct;
+        defer _ = c.close(helpers_fd);
         const plist_fd = openFileAt(contents_fd, "Info.plist") catch return error.InvalidProduct;
         errdefer _ = c.close(plist_fd);
         const executable_fd = openFileAt(macos_fd, "maru-macos-app") catch return error.InvalidProduct;
         errdefer _ = c.close(executable_fd);
         const cli_fd = openFileAt(macos_fd, "maru") catch return error.InvalidProduct;
         errdefer _ = c.close(cli_fd);
+        const helper_fd = openFileAt(helpers_fd, "maru-session-host-notification-center-helper") catch return error.InvalidProduct;
+        errdefer _ = c.close(helper_fd);
         var result: Product = undefined;
         result.app_fd = app_fd;
         result.plist_fd = plist_fd;
         result.executable_fd = executable_fd;
         result.cli_fd = cli_fd;
+        result.helper_fd = helper_fd;
         if (c.fstat(app_fd, &result.app_stat) != 0 or c.fstat(plist_fd, &result.plist_stat) != 0 or
-            c.fstat(executable_fd, &result.executable_stat) != 0 or c.fstat(cli_fd, &result.cli_stat) != 0 or
+            c.fstat(executable_fd, &result.executable_stat) != 0 or c.fstat(cli_fd, &result.cli_stat) != 0 or c.fstat(helper_fd, &result.helper_stat) != 0 or
             result.app_stat.dev != root_stat.dev or result.plist_stat.dev != root_stat.dev or
-            result.executable_stat.dev != root_stat.dev or result.cli_stat.dev != root_stat.dev or
-            result.executable_stat.nlink != 1 or result.cli_stat.nlink != 1 or
-            (result.executable_stat.dev == result.cli_stat.dev and result.executable_stat.ino == result.cli_stat.ino))
+            result.executable_stat.dev != root_stat.dev or result.cli_stat.dev != root_stat.dev or result.helper_stat.dev != root_stat.dev or
+            result.executable_stat.nlink != 1 or result.cli_stat.nlink != 1 or result.helper_stat.nlink != 1 or
+            sameInode(result.executable_stat, result.cli_stat) or sameInode(result.executable_stat, result.helper_stat) or sameInode(result.cli_stat, result.helper_stat))
             return error.InvalidProduct;
         return result;
     }
@@ -785,18 +827,24 @@ const Product = struct {
         var plist: posix.Stat = undefined;
         var executable: posix.Stat = undefined;
         var cli: posix.Stat = undefined;
+        var helper: posix.Stat = undefined;
         return c.fstat(self.app_fd, &app) == 0 and c.fstat(self.plist_fd, &plist) == 0 and
-            c.fstat(self.executable_fd, &executable) == 0 and c.fstat(self.cli_fd, &cli) == 0 and sameStat(self.app_stat, app) and
-            sameStat(self.plist_stat, plist) and sameStat(self.executable_stat, executable) and sameStat(self.cli_stat, cli);
+            c.fstat(self.executable_fd, &executable) == 0 and c.fstat(self.cli_fd, &cli) == 0 and c.fstat(self.helper_fd, &helper) == 0 and sameStat(self.app_stat, app) and
+            sameStat(self.plist_stat, plist) and sameStat(self.executable_stat, executable) and sameStat(self.cli_stat, cli) and sameStat(self.helper_stat, helper);
     }
 
     fn close(self: *Product) void {
+        _ = c.close(self.helper_fd);
         _ = c.close(self.cli_fd);
         _ = c.close(self.executable_fd);
         _ = c.close(self.plist_fd);
         _ = c.close(self.app_fd);
     }
 };
+
+fn sameInode(left: posix.Stat, right: posix.Stat) bool {
+    return left.dev == right.dev and left.ino == right.ino;
+}
 
 fn detachAndCleanup(ops: anytype, staged: *Staged, device: []const u8, baseline: MountProbe, budget_ns: i128) Error!void {
     var args: ArgsStorage = undefined;

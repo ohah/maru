@@ -14,10 +14,11 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-mkdir -p "$source_root/Maru.app/Contents/MacOS"
+mkdir -p "$source_root/Maru.app/Contents/MacOS" "$source_root/Maru.app/Contents/Helpers"
 printf '%s\n' fixture-plist > "$source_root/Maru.app/Contents/Info.plist"
 printf '%s\n' frozen-product > "$source_root/Maru.app/Contents/MacOS/maru-macos-app"
 printf '%s\n' candidate-cli > "$source_root/Maru.app/Contents/MacOS/maru"
+printf '%s\n' notification-helper > "$source_root/Maru.app/Contents/Helpers/maru-session-host-notification-center-helper"
 hdiutil create -quiet -fs HFS+ -format UDZO -srcfolder "$source_root" "$dmg"
 
 MARU_DMG_AUTHORITY_CANDIDATE="$dmg" \

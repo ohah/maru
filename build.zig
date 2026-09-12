@@ -672,6 +672,7 @@ pub fn build(b: *std.Build) void {
     }
 
     var macos_app_bundle_command: ?*std.Build.Step = null;
+    var notification_release_helper_binary: ?std.Build.LazyPath = null;
     if (target.result.os.tag == .macos) {
         const macos_swift_target = swiftMacOSTarget(b, target.result);
 
@@ -2145,9 +2146,29 @@ pub fn build(b: *std.Build) void {
         const grammar_license_cp = cp_buf.items;
         const grammar_license_names = names_buf.items;
 
+        // R2c executes this AX helper from the signed candidate itself. Build it for the same
+        // deployment target as the app; passing the lazy output as a bundle-command argument also
+        // makes the package edge explicit instead of depending on an ambient zig-out file.
+        const notification_release_helper_compile = b.addSystemCommand(&.{
+            "xcrun", "swiftc", "-parse-as-library", "-target", swiftMacOSTarget(b, target.result),
+        });
+        notification_release_helper_compile.addFileArg(b.path("tools/session-host/notification-center-helper.swift"));
+        notification_release_helper_compile.addArgs(&.{
+            "-framework", "AppKit", "-framework", "ApplicationServices", "-framework", "CoreGraphics", "-o",
+        });
+        const notification_release_helper_bin = notification_release_helper_compile.addOutputFileArg(
+            "maru-session-host-notification-center-helper",
+        );
+        notification_release_helper_binary = notification_release_helper_bin;
+        const notification_helper_arg = grammar_licenses.items.len + 3;
+        const notification_helper_cp = b.fmt(
+            "cp \"${{{d}}}\" zig-out/Maru.app/Contents/Helpers/maru-session-host-notification-center-helper; ",
+            .{notification_helper_arg},
+        );
+
         const macos_app_bundle = b.addSystemCommand(&.{
             "sh", "-eu", "-c",
-            b.fmt("{s}{s}{s}{s}{s}", .{
+            b.fmt("{s}{s}{s}{s}{s}{s}", .{
                 // ⑴ 번들 앞부분(정적)
                 // set -e로 어느 단계든 실패하면 즉시 멈춘다. 폰트가 없는 clean checkout에서 glob이
                 // 빈 채 cp가 조용히 실패하지 않도록, 번들 전에 .ttf 존재를 명시적으로 확인하고 명확한
@@ -2185,6 +2206,7 @@ pub fn build(b: *std.Build) void {
                     "",
                 // ⑵ grammar 라이선스 복사 — **표에서 만든다**($3부터 순서대로). 손으로 적으면 언어를
                 //    늘릴 때 여기만 빠지고, 그 누락은 아무 테스트도 안 깨뜨린다.
+                notification_helper_cp,
                 grammar_license_cp,
                 // ⑶ 확인 목록도 같은 표에서 — 복사와 검사가 갈리면 검사가 헛돈다.
                 "for lic in tree-sitter-LICENSE ",
@@ -2225,6 +2247,7 @@ pub fn build(b: *std.Build) void {
                     "printf 'APPL????' > zig-out/Maru.app/Contents/PkgInfo; " ++
                     // 개발/CI bundle도 release와 같은 inside-out 순서를 검증한다. ad-hoc 서명이라 비밀/인증서는 필요 없다.
                     "codesign --force --sign - --entitlements src/platform/macos/MaruMermaidRenderer.entitlements zig-out/Maru.app/Contents/Helpers/MaruMermaidRenderer.app; " ++
+                    "codesign --force --sign - zig-out/Maru.app/Contents/Helpers/maru-session-host-notification-center-helper; " ++
                     "codesign --force --sign - zig-out/Maru.app/Contents/MacOS/maru; " ++
                     "codesign --force --sign - zig-out/Maru.app/Contents/MacOS/maru-macos-app; " ++
                     "codesign --force --sign - zig-out/Maru.app; " ++
@@ -2241,6 +2264,7 @@ pub fn build(b: *std.Build) void {
         // **순서가 위에서 만든 `$3`부터와 같아야 한다.** 표 하나를 두 번 도므로 어긋날 수 없다.
         if (grammar_licenses.items.len == 0) @panic("no grammar LICENSE collected");
         for (grammar_licenses.items) |lic| macos_app_bundle.addFileArg(lic.path);
+        macos_app_bundle.addFileArg(notification_release_helper_bin);
         macos_app_bundle.setCwd(b.path("."));
         macos_app_bundle.step.dependOn(&macos_app_compile.step);
         macos_app_bundle.step.dependOn(remote_watch_step); // 번들이 싣는 것을 먼저 만든다(RW2b)
@@ -2298,6 +2322,7 @@ pub fn build(b: *std.Build) void {
                 // 중첩 바이너리(형제 maru CLI)를 먼저 개별 서명한다(inside-out) — 번들 서명은 main executable만 봉인하므로
                 // 추가 실행파일은 따로 서명해야 hardened runtime 공증을 통과한다.
                 "codesign --force --options runtime --timestamp --entitlements src/platform/macos/MaruMermaidRenderer.entitlements --sign \"$MARU_SIGN_IDENTITY\" zig-out/Maru.app/Contents/Helpers/MaruMermaidRenderer.app; " ++
+                "codesign --force --options runtime --timestamp --sign \"$MARU_SIGN_IDENTITY\" zig-out/Maru.app/Contents/Helpers/maru-session-host-notification-center-helper; " ++
                 "codesign --force --options runtime --timestamp --sign \"$MARU_SIGN_IDENTITY\" zig-out/Maru.app/Contents/MacOS/maru; " ++
                 "codesign --force --options runtime --timestamp --sign \"$MARU_SIGN_IDENTITY\" zig-out/Maru.app; " ++
                 "codesign --verify --strict --deep zig-out/Maru.app; " ++
@@ -4118,25 +4143,8 @@ pub fn build(b: *std.Build) void {
     // xucred/LOCAL_PEERPID를 더하므로 **macOS에서만** test step에 배선한다(ubuntu CI에 미검증 Linux 소켓
     // 경로를 걸지 않는다 — un-gate는 Linux 호스트 검증 후 후속). maru 모듈(1a control_plane)을 import한다.
     if (target.result.os.tag == .macos) {
-        const notification_center_helper_compile = b.addSystemCommand(&.{
-            "xcrun",
-            "swiftc",
-            "-parse-as-library",
-            "-target",
-            swiftMacOSTarget(b, target.result),
-        });
-        notification_center_helper_compile.addFileArg(
-            b.path("tools/session-host/notification-center-helper.swift"),
-        );
-        notification_center_helper_compile.addArgs(&.{
-            "-framework", "AppKit",
-            "-framework", "ApplicationServices",
-            "-framework", "CoreGraphics",
-            "-o",
-        });
-        const notification_center_helper_bin = notification_center_helper_compile.addOutputFileArg(
-            "maru-session-host-notification-center-helper",
-        );
+        const notification_center_helper_bin = notification_release_helper_binary orelse
+            @panic("macOS notification helper product binary missing");
         const notification_center_helper_boundary = b.addSystemCommand(&.{"sh"});
         notification_center_helper_boundary.addFileArg(
             b.path("tests/session-host-notification-helper-boundary.sh"),
@@ -4177,8 +4185,8 @@ pub fn build(b: *std.Build) void {
         );
         notification_center_helper_step.dependOn(&notification_center_helper_boundary.step);
         notification_center_helper_step.dependOn(&run_notification_center_helper_policy.step);
-        test_step.dependOn(&notification_center_helper_compile.step);
-        macos_only_test_step.dependOn(&notification_center_helper_compile.step);
+        test_step.dependOn(&notification_center_helper_boundary.step);
+        macos_only_test_step.dependOn(&notification_center_helper_boundary.step);
         test_step.dependOn(&run_notification_center_helper_policy.step);
         macos_only_test_step.dependOn(&run_notification_center_helper_policy.step);
 

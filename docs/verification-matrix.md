@@ -2956,7 +2956,7 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   없이 fail-close한다. `test-session-host-release-evidence`가 Debug·ReleaseFast에서 canonical round-trip, candidate/stable
   identity·PID·nonce·timestamp·outcome drift와 전 allocation fail-index를 검증한다. 이 leaf writer의 green은 실제 OS click이나
   signed candidate 실행 증거가 아니며 R2 없이 완료로 승격하지 않는다.
-- **N3-R2 provisioned product runner (R2a·R2b1·R2b2 구현, R2b3 진행, R2c 미착수):** R2a transaction owner는 candidate·app·helper·Aqua/permission
+- **N3-R2 provisioned product runner (R2a·R2b1·R2b2·R2b3 구현, R2c 진행):** R2a transaction owner는 candidate·app·helper·Aqua/permission
   authority를 실행 전에 결속하고, 하나의 absolute deadline 아래 `gui_zero` 실행→전 권위 재검증→`gui_live_then_quit`
   실행→전 권위 재검증→두 exact request 역순 cleanup·부재 재검증→R1 leaf 배타 게시→최종 재검증 순서를 고정한다. 각 child attempt는 호출 전에 기록하며 실패 시
   leaf→live→zero 역순으로 이번 UUID의 소유물만 정리한다. cleanup 실패는 성공이나 원래 오류로 덮지 않고 exact retry
@@ -3016,8 +3016,9 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   **R2b3b2**는 이 값과 screen/input을 AppSession 상태머신 및 child transport에 연결하고, app receipt 뒤 두 번째 frame을
   내며 parent가 helper/app 원문과 함께 strict parse하도록 구현됐다. 실제 daemon·PTY의 controlled one-shot child gate는
   controller 인계, 좁은 grid soft-wrap, before 보존과 after 왕복을 검증한다. 테스트가 boolean·PID·screen 결과를 직접 주입해
-  `passed`를 만드는 seam과 제품 외 caller는 금지한다. 다음은 R2c mounted candidate
-  composition이 두 scenario proof를 R2a owner 순서로 실행한다.
+  `passed`를 만드는 seam과 제품 외 caller는 금지한다. R2c mounted candidate composition은 두 scenario
+  proof를 R2a owner 순서로 실행하기 전, DMG authority가 마운트 안의 exact main·CLI·AX helper를 no-follow
+  descriptor로 모두 pin하고 세 regular executable의 digest와 서로 다른 inode를 같은 mount 수명 끝까지 재검증한다.
   로그인된 전용 macOS runner의 새 mode `0700` root에서 DMG를
   read-only mount하고 그 안의 exact `Maru.app`과 main executable을 no-follow pin한다. 앱·CLI·helper의 동일
   TeamIdentifier/hardened runtime과 candidate digest를 확인한 뒤에만 두 시나리오를 순서대로 실행한다. runner는 이미

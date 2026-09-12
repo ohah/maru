@@ -1171,6 +1171,10 @@ pub const Client = struct {
                 return self.beginClose(.resource_exhausted);
             };
             self.invalidateSubscriptionOutput(stream, tracker);
+            // 복구 통지조차 못 넣어 결국 닫히는 경우가 있다 — 슬롯이 청크로 가득 차면
+            // `snapshotInvalidatedFrame` 도 자리를 못 얻는다. 그때는 되살릴 스트림이 아니라 닫히는
+            // 연결이므로 attach 를 남기면 **매달린 attachment** 가 된다. 옛 동작으로 돌아간다.
+            if (self.isClosing()) self.connection.rollbackPreparedAttach(stream);
             return;
         }
         prepared.output.commit(&self.connection);

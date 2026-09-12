@@ -10647,6 +10647,54 @@ test "kitty placement: alt 화면 동안에는 primary 애니메이션이 돌지
     try std.testing.expect(core.advanceAnimations(40)); // 돌아오면 그 자리에서 이어 돈다
 }
 
+// **가상 배치(U=1)도 화면을 가린다.** placeholder 셀이 없는 화면에서는 어떤 virtual placement 도
+// 그려질 수 없다 — alt 화면(vim)이 정확히 그 경우다. 실측(적대적 검증 6회차): 이 조건이 없을 때
+// U=1 애니메이션이 alt 화면에서 **5/5 회** 전진했고, 그때마다 generation 이 올라 화면 스트리밍이
+// 안 보이는 픽셀을 통째로 다시 실었다.
+//
+// 코어는 placeholder 를 **해독하지 않는다**(전경색 24비트 + 결합문자 셋 → image_id 는 렌더러 몫).
+// 「그런 셀이 있기는 한가」만 본다. 그래서 이 판정자는 `terminal.unicode_placeholder_codepoint` 로
+// 진짜 placeholder 셀을 찍어, 코어와 렌더러가 같은 값을 본다는 것까지 함께 고정한다.
+test "kitty 애니메이션: placeholder 셀이 없는 화면에서는 U=1 애니메이션이 돌지 않는다 (적대적 검증)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    core.setCellMetrics(10, 20);
+    var b64: [64]u8 = undefined;
+    var seq: [200]u8 = undefined;
+    const px = [_]u8{ 3, 3, 3, 255 } ** 4;
+    const enc = std.base64.standard.Encoder.encode(&b64, &px);
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+    try core.write("\x1b_Ga=p,i=1,U=1,c=2,r=1,q=2\x1b\\"); // 가상 배치 등록
+    try core.write("\x1b_Ga=a,i=1,s=3,v=0,q=2\x1b\\");
+
+    // **등록만으로는 안 돈다** — 화면에 placeholder 셀이 찍혀야 그릴 자리가 생긴다.
+    try std.testing.expect(!core.advanceAnimations(40));
+
+    // **값 자체를 못으로 박는다.** 이 판정자가 상수를 그대로 쓰기 때문에, 상수가 틀린 값으로 바뀌면
+    // 찍는 쪽과 보는 쪽이 함께 움직여 조용히 통과한다. 명세가 U+10EEEE 로 고정한 값이라 리터럴로 건다.
+    try std.testing.expectEqual(@as(u21, 0x10EEEE), types.unicode_placeholder_codepoint);
+
+    // placeholder 를 찍는다(전경색 RGB 하위 24비트 = image_id, 결합문자는 렌더러가 읽는다).
+    // **첫 셀에 찍지 않는다.** 홈 자리에 두면 「화면을 훑는다」가 「첫 칸만 본다」로 줄어들어도
+    // 판정자가 통과한다(적대적 검증 6회차 돌연변이 V4 가 실제로 그렇게 살아남았다). 마지막 행에 찍는다.
+    try core.write("\x1b[4;8H\x1b[38;2;0;0;1m");
+    screen.writeCodepoint(&core, types.unicode_placeholder_codepoint);
+    try std.testing.expect(core.advanceAnimations(40)); // 이제 돈다
+
+    // alt 화면은 자기 버퍼라 placeholder 가 없다 — 멈춰야 한다.
+    try core.write("\x1b[?1049h");
+    const frame = core.kitty_images.map.get(1).?.current_frame;
+    const gen = core.kitty_images.map.get(1).?.generation;
+    for (0..5) |_| try std.testing.expect(!core.advanceAnimations(40));
+    try std.testing.expectEqual(frame, core.kitty_images.map.get(1).?.current_frame);
+    try std.testing.expectEqual(gen, core.kitty_images.map.get(1).?.generation); // 픽셀 재전송 없음
+
+    // 돌아오면 primary 의 placeholder 가 다시 있으므로 이어 돈다.
+    try core.write("\x1b[?1049l");
+    try std.testing.expect(core.advanceAnimations(40));
+}
+
 test "kitty 애니메이션: 루트를 다시 전송하면 프레임도 함께 놓아준다 (적대적 검증)" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
     defer core.deinit();

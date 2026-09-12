@@ -363,11 +363,32 @@ pub fn kittyImageHasPlacement(self: *const TerminalCore, image_id: u32) bool {
 /// 통째로 다시 싣는다. 실측(적대적 검증 3회차): 100 줄 밖으로 스크롤된 32x32 애니메이션이 delta 에
 /// placement **없이** blob 4,153 바이트를 매 프레임 실었다 — client 가 그릴 수 없는 픽셀이다.
 ///
-/// virtual placement(U=1)는 화면 위치를 코어가 모른다(placeholder 셀이 정한다). 그래서 그런
-/// 이미지는 「보인다」고 본다 — 모르는 것을 안 보인다고 단정해 멈추면 도는 애니메이션이 죽는다.
+/// virtual placement(U=1)는 **어느 셀에** 그려질지를 코어가 모른다 — placeholder 셀이 정하고, 그
+/// 셀을 이미지 타일로 푸는 해독(전경색 24비트 + 결합문자 셋)은 렌더러 몫이다. 코어에 그 해독을
+/// 복제하면 같은 규칙이 두 곳에 생겨 한쪽만 고쳐도 아무도 모른다.
+///
+/// 그래서 코어는 **싸게 알 수 있는 것만** 묻는다: 지금 화면에 placeholder 셀이 하나라도 있는가.
+/// 없으면 어떤 virtual placement 도 그려질 수 없다 — alt 화면(vim)이 정확히 그 경우다. 실측(적대적
+/// 검증 6회차): 이 조건이 없을 때 U=1 애니메이션이 alt 화면에서 5/5 회 전진했다. 안 보이는 프레임이
+/// generation 을 올리면 화면 스트리밍이 픽셀을 통째로 다시 싣는다.
+///
+/// 위로 스크롤한 상태(`view_offset > 0`)에서는 **보인다고 본다** — placeholder 가 스크롤백 행에
+/// 있을 수 있는데 활성 grid 만 훑어서는 알 수 없다. 모르면 멈추지 않는다(정지가 더 나쁜 오답이다).
+/// 활성 화면에 Unicode placeholder 셀이 하나라도 있는가. 첫 개에서 끝내므로 보통 몇 셀만 본다.
+/// **어느 이미지인지는 묻지 않는다** — 그 해독은 렌더러 몫이고, 여기서 필요한 것은 「virtual
+/// placement 가 그려질 수 있는 화면인가」뿐이다.
+fn activeScreenHasPlaceholder(self: *const TerminalCore) bool {
+    for (self.screen.cells) |cell| {
+        if (cell.codepoint == types.unicode_placeholder_codepoint) return true;
+    }
+    return false;
+}
+
 pub fn kittyImageVisibleInViewport(self: *TerminalCore, image_id: u32) bool {
     for (self.kitty_virtual_placements.items) |v| {
-        if (v.image_id == image_id) return true;
+        if (v.image_id != image_id) continue;
+        if (self.view_offset > 0) return true; // 스크롤백은 안 훑는다 — 모르면 멈추지 않는다
+        return activeScreenHasPlaceholder(self);
     }
     const rows: i64 = @intCast(self.size.rows);
     const top_abs: i64 = @intCast(self.screen.sb.count - @min(self.view_offset, self.screen.sb.count));

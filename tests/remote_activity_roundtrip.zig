@@ -87,6 +87,14 @@ fn runHelper(gpa: std.mem.Allocator, io: std.Io, bin: []const u8, path: []const 
 }
 
 /// **이어읽기 요청**(RAV7b-3 · 판 12) — 그 자리부터 머리 파일만 훑는다.
+/// **본문 검색 요청**(RAV8b · 판 13).
+fn runHelperSearch(gpa: std.mem.Allocator, io: std.Io, bin: []const u8, path: []const u8, q: []const u8) !std.process.RunResult {
+    return std.process.run(gpa, io, .{
+        .argv = &.{ bin, "activity", path, "--search", q },
+        .stdout_limit = .limited(wire.max_wire_bytes),
+    });
+}
+
 fn runHelperFrom(gpa: std.mem.Allocator, io: std.Io, bin: []const u8, path: []const u8, from: u64) !std.process.RunResult {
     var buf: [24]u8 = undefined;
     const text = try std.fmt.bufPrint(&buf, "{d}", .{from});
@@ -100,12 +108,15 @@ fn runHelperFrom(gpa: std.mem.Allocator, io: std.Io, bin: []const u8, path: []co
 const Parsed = struct {
     hits: std.ArrayList(wire.Hit) = .empty,
     labels: std.ArrayList(wire.Label) = .empty,
+    /// 본문 검색 비트(RAV8b) — 히트와 **같은 자리**다.
+    body_flags: std.ArrayList(u8) = .empty,
     flags: wire.ScanFlags = .{},
     files: usize = 0,
 
     fn deinit(self: *Parsed, gpa: std.mem.Allocator) void {
         self.hits.deinit(gpa);
         self.labels.deinit(gpa);
+        self.body_flags.deinit(gpa);
     }
 };
 
@@ -119,6 +130,7 @@ fn parseAll(gpa: std.mem.Allocator, bytes: []const u8) !Parsed {
         .record => |rec| {
             try out.hits.append(gpa, rec.hit);
             try out.labels.append(gpa, rec.label);
+            try out.body_flags.append(gpa, rec.body_flags);
         },
         .remote_error => |msg| {
             std.debug.print("원격이 실패를 보고했다: {s}\n", .{msg});
@@ -299,6 +311,69 @@ test "헬퍼 activity: 미완 줄은 자국 밖이다 — 반쪽 줄을 활동�
     // **읽기는 파일 끝까지 갔지만** 자국은 개행 다음에서 멈춘다.
     try std.testing.expectEqual(@as(u64, complete.len + 1 + half.len), flags.head_bytes);
     try std.testing.expectEqual(@as(u64, complete.len + 1), flags.resume_offset);
+}
+
+test "헬퍼 activity --search: 본문에 걸린 줄만 비트가 선다 — 로컬과 같은 규칙 (RAV8b)" {
+    // 🔥 **이 슬라이스의 핵심 계약이다.** 저쪽이 로컬과 **다른 규칙**으로 찾으면 「원격에서만 안
+    // 걸리는 줄」이 생기고, 그것은 사용자가 **화면만 보고는 못 가린다**(계약 §2.3).
+    //
+    // 로컬은 조각을 `unescape*` 로 푼 뒤 `matches`(ASCII 대소문자 무시)로 본다 — 헬퍼가 **같은
+    // 함수**를 물었는지 실물로 확인한다.
+    const bin = helperBin() orelse return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "/tmp/maru-rav8b.{d}.jsonl", .{std.c.getpid()});
+    const f = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true });
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    const body =
+        \\{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_01","name":"Bash","input":{"command":"zig build test-remote"}}]}}
+        \\{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_02","name":"Bash","input":{"command":"echo hello"}}]}}
+        \\
+    ;
+    _ = try f.writePositional(io, &.{body}, 0);
+    f.close(io);
+
+    // ── ① 검색어가 없으면 **비트를 안 세운다**.
+    {
+        const out = try runHelper(gpa, io, bin, path);
+        defer gpa.free(out.stdout);
+        defer gpa.free(out.stderr);
+        var got = try parseAll(gpa, out.stdout);
+        defer got.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 2), got.body_flags.items.len);
+        for (got.body_flags.items) |bf| try std.testing.expectEqual(@as(u8, 0), bf);
+    }
+    // ── ② 첫 줄에만 있는 말 — **그 줄만** 선다.
+    {
+        const out = try runHelperSearch(gpa, io, bin, path, "test-remote");
+        defer gpa.free(out.stdout);
+        defer gpa.free(out.stderr);
+        var got = try parseAll(gpa, out.stdout);
+        defer got.deinit(gpa);
+        try std.testing.expectEqual(wire.body_matched_bit, got.body_flags.items[0]);
+        try std.testing.expectEqual(@as(u8, 0), got.body_flags.items[1]);
+    }
+    // ── ③ 🔥 **대소문자를 무시한다** — 로컬 `matches` 와 같은 규칙이다.
+    {
+        const out = try runHelperSearch(gpa, io, bin, path, "HELLO");
+        defer gpa.free(out.stdout);
+        defer gpa.free(out.stderr);
+        var got = try parseAll(gpa, out.stdout);
+        defer got.deinit(gpa);
+        try std.testing.expectEqual(@as(u8, 0), got.body_flags.items[0]);
+        try std.testing.expectEqual(wire.body_matched_bit, got.body_flags.items[1]);
+    }
+    // ── ④ 없는 말은 **없다** — 「못 봤다」가 아니다.
+    {
+        const out = try runHelperSearch(gpa, io, bin, path, "nowhere-at-all");
+        defer gpa.free(out.stdout);
+        defer gpa.free(out.stderr);
+        var got = try parseAll(gpa, out.stdout);
+        defer got.deinit(gpa);
+        for (got.body_flags.items) |bf| try std.testing.expectEqual(@as(u8, 0), bf);
+    }
 }
 
 test "헬퍼 activity --from: 이어읽은 자리가 통째로 훑은 것과 «바이트까지» 같다 (RAV7b-3)" {

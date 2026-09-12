@@ -29,7 +29,10 @@ const context = maru.session.agent_image_context;
 ///
 /// 펼침의 상한(`agent_activity.max_detail_bytes` = 8 KiB)과 **다른 값인 것이 맞다.** 펼침은 화면에
 /// 그릴 만큼만 읽으면 되지만, 검색은 「있나 없나」라 끝까지 봐야 답이 참이다.
-pub const max_probe_bytes: usize = 64 * 1024;
+/// 🔥 **단일 출처는 wire 다**(RAV8b). 원격 헬퍼가 같은 값으로 읽어야 「원격과 로컬이 같은 것을
+/// 보여 준다」가 선다(계약 §2.3) — 두 곳에 손으로 두면 한쪽만 바뀌고, 그 차이는 「끝까지 못 봤다」의
+/// **경계가 갈리는** 것이라 같은 파일에서 다른 답이 나온다(적대적 Y3).
+pub const max_probe_bytes: usize = maru.session.remote_activity_wire.max_probe_bytes;
 
 /// 한 호출에서 **어디를 읽을 것인가**. main actor 가 인덱스에서 뽑아 넘긴다.
 pub const Probe = struct {

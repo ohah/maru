@@ -20,11 +20,11 @@ pub const remote_dir = "$HOME/.cache/maru";
 /// 판 9 = `activity`(RAV2 — 원격 에이전트 활동) · 판 10 = `read`(RAV5 — 펼침·이미지의 구간) ·
 /// 판 11 = 활동 wire 판 2(RAV7b — `head_bytes` · `resume_offset`) ·
 /// 판 12 = `activity --from`(RAV7b-3 — 이어읽기) + 활동 wire 판 3(`resumed_from`).
-pub const version_line = "maru-remote-watch 12";
+pub const version_line = "maru-remote-watch 13";
 
 /// 원격에 놓일 파일 이름. **판을 이름에 박는다** — 안 그러면 옛 판이 깔린 원격에서 새 maru 가
 /// 「이미 있다」로 읽고 조용히 옛 감시자를 쓴다.
-pub const remote_binary = "maru-remote-watch-12";
+pub const remote_binary = "maru-remote-watch-13";
 
 /// ⑴ **이미 있고 «돌아가는가»**. 파일 존재만 보면 아키텍처가 틀린 바이너리나 잘린 파일을 「설치됨」
 /// 으로 읽는다 — 그러면 감시가 조용히 안 된다. **실행해 보는 것**이 그 둘을 함께 가른다.

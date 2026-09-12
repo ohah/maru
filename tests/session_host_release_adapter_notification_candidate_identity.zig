@@ -96,6 +96,16 @@ test "R2c mounted main CLI and helper bind to one signer before execution" {
     try authority.deinit();
 }
 
+test "R2c production bind rejects an expired caller deadline before observation" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const now = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
+    var expired: identity.Authority = .{};
+    try std.testing.expectError(error.TimedOut, identity.bindUntil(std.testing.io, fixture.view(), &expired, now));
+    try std.testing.expect(expired.value() == null);
+}
+
 test "R2c foreign signer and missing hardened runtime publish no authority" {
     var fixture: Fixture = undefined;
     try fixture.init();

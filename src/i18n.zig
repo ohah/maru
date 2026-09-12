@@ -409,6 +409,7 @@ const Table = struct {
     /// 본문을 **다 못 훑었다**(파일을 못 열었다). 「걸린 것이 없다」와 다른 사실이라 나눈다 —
     /// 스캔의 `agent_activity_partial` 과 같은 규율이고, 개수 줄보다 **먼저** 나온다.
     agent_activity_body_partial: [:0]const u8,
+    agent_activity_body_remote_unsupported: [:0]const u8,
     /// 검색이 **어디서** 맞았나 — `{0}` 라벨에서, `{1}` 본문에서만. 두 수를 가르는 이유는 사용자가
     /// 「내가 친 말이 이름에 있었나 본문에 있었나」를 알아야 다음 검색어를 고르기 때문이다.
     agent_activity_match_split: [:0]const u8,
@@ -1496,6 +1497,7 @@ const en: Table = .{
     .agent_activity_body_hint = " \u{23ce} full text",
     .agent_activity_body_searching = "Searching full text\u{2026}",
     .agent_activity_body_partial = "Could not read every body",
+    .agent_activity_body_remote_unsupported = "Body search is local-only for now",
     .agent_activity_match_split = "{0} by label \u{00b7} +{1} by body",
     .agent_activity_filter_images = "Images",
     .agent_activity_filter_execs = "Commands",
@@ -2155,6 +2157,7 @@ const ko: Table = .{
     .agent_activity_body_hint = " \u{23ce} 본문",
     .agent_activity_body_searching = "본문을 훑는 중\u{2026}",
     .agent_activity_body_partial = "본문을 다 훑지 못했습니다",
+    .agent_activity_body_remote_unsupported = "본문 검색은 아직 로컬 세션만 됩니다",
     .agent_activity_match_split = "라벨 {0} \u{00b7} 본문 +{1}",
     .agent_activity_filter_images = "이미지",
     .agent_activity_filter_execs = "명령",

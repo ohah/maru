@@ -852,6 +852,13 @@ pub const BodySearch = struct {
     answered: bool = false,
     /// 열지 못한 파일이 있었다.
     partial: bool = false,
+    /// 🔥 **원격이라 아직 못 한다**(RAV8a). 「본문에 그 말이 없다」와 **다른 사실**이다 — 조용히
+    /// 0 건을 내면 사용자는 전자로 읽는데 실제로는 **묻지도 않았다**(계약 §2.2).
+    ///
+    /// 이 축의 워커는 `chain` 을 통째로 받아 `Dir.cwd().openFile` 로 여는데, 원격 경로를 그렇게
+    /// 열면 **같은 모양의 홈 경로가 이쪽에도 있을 때 남의 대화를 읽는다**(계약 §2.1). 저쪽에서
+    /// 검색하는 것은 RAV8b 의 일이다.
+    remote_unsupported: bool = false,
     read_bytes: u64 = 0,
     search_ns: u64 = 0,
 
@@ -869,6 +876,7 @@ pub const BodySearch = struct {
         self.resubmit = false;
         self.answered = false;
         self.partial = false;
+        self.remote_unsupported = false;
         self.read_bytes = 0;
         self.search_ns = 0;
     }
@@ -1119,6 +1127,23 @@ pub fn submitBodySearch(self: *AppSession) void {
     const q = self.agent_activity.queryText();
     if (q.len == 0) return;
     if (self.agent_activity.chain.isEmpty()) return;
+
+    // 🔥 **원격이면 안 건다**(RAV8a · 계약 §2.1). 이 워커는 `chain` 을 **통째로 받아** 자기 안에서
+    // `Dir.cwd().openFile` 로 연다 — 저쪽 경로를 이쪽에서 여는 것이고, 양쪽이 macOS 이고 사용자
+    // 이름이 같으면 **같은 모양의 홈 경로가 이쪽에도 있어 남의 대화를 읽는다**.
+    //
+    // **「없다」가 아니라 「아직 못 한다」로 답한다**(§2.2). 조용히 0 건을 내면 사용자는 「그 말이
+    // 본문에 없다」로 읽는데, 사실은 **묻지도 않았다**. 저쪽에서 검색하는 것은 RAV8b 의 일이다.
+    if (self.agent_activity.source_remote) {
+        const body_remote = &self.agent_activity.body;
+        if (body_remote.settledFor(q)) return;
+        body_remote.reset(self.allocator);
+        body_remote.query.appendSlice(self.allocator, q) catch return;
+        body_remote.answered = true;
+        body_remote.remote_unsupported = true;
+        self.metal_dirty = true;
+        return;
+    }
     // 같은 검색어에 **이미 답했거나 답하는 중이면** 다시 훑지 않는다 — `Enter` 를 두 번 누르는
     // 것이 17.7 MB 를 두 번 읽을 이유가 되지 않는다. 셋을 다 보는 이유는 `settledFor` 에 있다.
     const body = &self.agent_activity.body;
@@ -3792,6 +3817,11 @@ pub fn noticeText(self: *const AppSession, buf: []u8) []const u8 {
     //
     // ⚠️ 2 회차가 이 분기를 넣었는데 자리가 `n == 0` **뒤**였다. 주석은 「개수보다 먼저다」라고
     // 적혀 있었으니 **주석이 거짓**이었고, 고치려던 혼동이 0 건일 때 고스란히 남아 있었다.
+    // 🔥 **「아직 못 한다」가 「다 못 봤다」보다도 먼저다**(RAV8a). 원격에서는 본문을 **묻지도
+    // 않았다** — 조용히 0 건을 내면 사용자는 「그 말이 본문에 없다」로 읽고 검색을 그만둔다.
+    const body_remote = self.agent_activity.body.remote_unsupported and
+        self.agent_activity.body.appliesTo(self.agent_activity.queryText());
+    if (body_remote) return maru.i18n.t(.agent_activity_body_remote_unsupported);
     const body_partial = self.agent_activity.body.partial and
         self.agent_activity.body.appliesTo(self.agent_activity.queryText());
     if (body_partial) return maru.i18n.t(.agent_activity_body_partial);

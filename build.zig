@@ -5775,6 +5775,26 @@ pub fn build(b: *std.Build) void {
     digest_site_step.dependOn(&run_digest_site.step);
     boundary_step.dependOn(&run_digest_site.step);
 
+    // 캐시한 `recipe` 다이제스트가 상하지 않는가. 캐싱 자체보다 이 가드가 중요하다 — 캐시가 상하면
+    // 드리프트를 잡으라고 있는 씰이 드리프트를 감춘다.
+    const recipe_cache_step = b.step(
+        "test-recipe-digest-cache",
+        "Cached recipe digest stays valid: single assignment plus a debug recompute check",
+    );
+    const recipe_cache_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/recipe_digest_cache_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_recipe_cache = b.addRunArtifact(recipe_cache_tests);
+    run_recipe_cache.addArg("--maru-expect-tests=1");
+    run_recipe_cache.addArg("--maru-expect-passed=1");
+    run_recipe_cache.setCwd(b.path("."));
+    recipe_cache_step.dependOn(&run_recipe_cache.step);
+    boundary_step.dependOn(&run_recipe_cache.step);
+
     const preflight_reason_step = b.step(
         "test-preflight-reject-reason",
         "Preflight rejection records the child exit status (eight paths shared one name)",

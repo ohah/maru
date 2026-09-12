@@ -689,13 +689,19 @@ pub const PreparationFrame = struct {
     source_lease_mirror: PendingEventSourceLease,
     snapshot: RuntimeSemanticSnapshot,
     recipe: event_preparation.EventPreparationRecipe,
-    /// **실험 전용(debug·test 에서만 읽는다).** `recipe` 가 프레임 생성 후 실제로 바뀌는지 재려고 생성
-    /// 시점의 다이제스트를 남긴다. 씰에는 **쓰지 않는다** — 이 PR 은 계약을 조금도 바꾸지 않는다.
+    /// `recipe` 다이제스트. **프레임 생성 시 한 번 계산해 매 씰·검증에서 재사용한다.**
     ///
-    /// #3557 은 `snapshot` 과 `recipe` 를 **함께** 캐시했다가 debug 대조가 `fatalIntegrity` 로 잡았는데,
-    /// 둘을 묶어 검사해 **어느 쪽이 바뀌는지는 안 갈렸다.** `recipe` 는 `sealInput` 해싱의 **51 %**(2,944 B)
-    /// 라, 그것만 불변이면 절반이 안전하게 사라진다. 아니면 그 길은 완전히 닫힌다.
-    recipe_digest_probe: cleanup.Digest,
+    /// `recipe` 는 `sealInput` 구조체 해싱의 **51 %**(2,944 B × 호출 수)였다. 유휴 2.27 MB/초,
+    /// 브라우저 부하 33 MB/초 중 절반이다.
+    ///
+    /// **불변은 추측이 아니라 측정이다.** #3557 은 `snapshot` 과 `recipe` 를 함께 캐시했다가 debug 재계산
+    /// 대조가 `fatalIntegrity`(exit 86)로 잡아 닫혔는데, 둘을 묶어 검사해 어느 쪽이 범인인지 안 갈렸다.
+    /// #3581 이 `recipe` 하나만 탐침으로 걸었고 — 그 스모크와 Debug 전체 테스트가 **통과했다.**
+    /// 바뀌던 것은 `snapshot` 이었다.
+    ///
+    /// **아래 debug 대조는 그대로 남긴다.** 나중에 누가 `recipe` 를 변경 가능하게 만들면 캐시가 조용히
+    /// 상해 씰이 거짓이 된다 — 측정으로 얻은 전제라 코드로 지켜야 한다.
+    recipe_digest_cache: cleanup.Digest,
     scratch: PreparationScratch,
     dto_content_digest: cleanup.Digest,
     transfer_projection_mask: u8,
@@ -738,15 +744,18 @@ pub const PreparationFrame = struct {
         if (!self.validate()) process_seal.fatalIntegrity(.invalid_preparation_frame);
     }
 
-    /// **매번 계산한 값을 그대로 돌려준다** — 씰 계약은 한 비트도 안 바뀐다. debug·test 에서만 생성 시점의
-    /// 탐침과 대조해, `recipe` 가 정말 불변인지 **증거로** 남긴다. ReleaseFast 에는 대조가 없다.
+    /// 캐시를 돌려준다. **씰이 덮는 바이트는 완전히 동일하다** — 바뀔 수 없는 값을 다시 계산하지 않을 뿐이다.
+    ///
+    /// debug·test 에서는 **실제로 다시 계산해 대조한다.** 소스 판정자는 문법적 대입만 보므로 `@memcpy` 나
+    /// 포인터 경유 변경을 못 본다. 이 대조가 그 구멍을 닫고, ReleaseFast 에는 남지 않아 이 최적화가
+    /// 없애려던 비용이 되살아나지 않는다.
     fn recipeDigestChecked(self: *const PreparationFrame) cleanup.Digest {
-        const now = rawDigest(.seal_recipe, recipe_digest_domain, std.mem.asBytes(&self.recipe));
         if (builtin.mode == .Debug or builtin.is_test) {
-            if (!std.crypto.timing_safe.eql(cleanup.Digest, now, self.recipe_digest_probe))
+            const now = rawDigest(.seal_recipe, recipe_digest_domain, std.mem.asBytes(&self.recipe));
+            if (!std.crypto.timing_safe.eql(cleanup.Digest, now, self.recipe_digest_cache))
                 process_seal.fatalIntegrity(.callback_drift);
         }
-        return now;
+        return self.recipe_digest_cache;
     }
 
     fn sealInput(self: *const PreparationFrame) cleanup.PendingPreparationFrameSealInput {
@@ -808,7 +817,7 @@ pub fn initFrameInPlace(frame: *PreparationFrame, input: FrameInitInput, runtime
     frame.source_lease_mirror = .{};
     frame.snapshot = input.snapshot;
     frame.recipe = input.recipe;
-    frame.recipe_digest_probe = rawDigest(.recipe_probe, recipe_digest_domain, std.mem.asBytes(&frame.recipe));
+    frame.recipe_digest_cache = rawDigest(.recipe_probe, recipe_digest_domain, std.mem.asBytes(&frame.recipe));
     frame.scratch = .{};
     frame.dto_content_digest = [_]u8{0} ** 32;
     frame.transfer_projection_mask = 0;

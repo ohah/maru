@@ -101,6 +101,103 @@ pub const InheritedPipeChild = struct {
     }
 };
 
+/// A process group with one private full-duplex framed socket inherited as fd 3. Unlike the
+/// receipt-only pipe, this keeps app identity alive long enough for the owner to request exact OS
+/// cleanup and receive a bounded acknowledgement before reaping the child.
+pub const InheritedSocketChild = struct {
+    owner: ?*InheritedSocketChild = null,
+    pid: c.pid_t = -1,
+    fd: c.fd_t = -1,
+
+    pub fn readFrame(self: *@This(), io: std.Io, output: []u8, budget_ns: i128) Error![]const u8 {
+        if (!self.valid() or output.len == 0 or budget_ns <= 0) return error.InvalidOwner;
+        const deadline = deadlineAfter(io, budget_ns);
+        var header: [4]u8 = undefined;
+        try readSocketExactUntil(io, self.fd, &header, deadline);
+        const length = std.mem.readInt(u32, &header, .big);
+        if (length == 0 or length > output.len) return error.OutputTooLarge;
+        try readSocketExactUntil(io, self.fd, output[0..length], deadline);
+        return output[0..length];
+    }
+
+    pub fn writeFrame(self: *@This(), io: std.Io, payload: []const u8, budget_ns: i128) Error!void {
+        if (!self.valid() or payload.len == 0 or payload.len > std.math.maxInt(u32) or budget_ns <= 0)
+            return error.InvalidOwner;
+        const deadline = deadlineAfter(io, budget_ns);
+        var header: [4]u8 = undefined;
+        std.mem.writeInt(u32, &header, @intCast(payload.len), .big);
+        try writeSocketExactUntil(io, self.fd, &header, deadline);
+        try writeSocketExactUntil(io, self.fd, payload, deadline);
+    }
+
+    pub fn waitSuccess(self: *@This(), io: std.Io, budget_ns: i128) Error!void {
+        if (!self.valid() or budget_ns <= 0) return error.InvalidOwner;
+        const start = std.Io.Clock.awake.now(io).nanoseconds;
+        const deadline = std.math.add(i128, start, budget_ns) catch std.math.maxInt(i128);
+        var status: c_int = 0;
+        while (true) {
+            switch (pollChild(self.pid, &status)) {
+                .running => {},
+                .failed => return error.WaitFailed,
+                .reaped => {
+                    const unsigned: u32 = @bitCast(status);
+                    _ = c.close(self.fd);
+                    self.* = .{};
+                    if (!c.W.IFEXITED(unsigned) or c.W.EXITSTATUS(unsigned) != 0) return error.ChildFailed;
+                    return;
+                },
+            }
+            if (std.Io.Clock.awake.now(io).nanoseconds >= deadline) return error.TimedOut;
+            var descriptor = [_]c.pollfd{.{ .fd = self.fd, .events = 0, .revents = 0 }};
+            _ = c.poll(&descriptor, 1, poll_quantum_ms);
+        }
+    }
+
+    pub fn terminate(self: *@This()) Error!void {
+        if (!self.valid()) return error.InvalidOwner;
+        terminateGroup(self.pid);
+        if (!reapChild(self.pid, null)) return error.WaitFailed;
+        _ = c.close(self.fd);
+        self.* = .{};
+    }
+
+    fn valid(self: *const @This()) bool {
+        return self.owner == self and self.pid > 0 and self.fd >= 0;
+    }
+};
+
+pub fn spawnEnvironmentInheritedSocket(
+    executable: [:0]const u8,
+    argv: [*:null]const ?[*:0]const u8,
+    environment: [*:null]const ?[*:0]const u8,
+    result: *InheritedSocketChild,
+) Error!void {
+    if (result.owner != null or result.pid != -1 or result.fd != -1) return error.InvalidOwner;
+    if (executable.len < 2 or executable[0] != '/' or std.mem.indexOfScalar(u8, executable, 0) != null)
+        return error.InvalidExecutable;
+    var sockets: [2]c.fd_t = undefined;
+    if (c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &sockets) != 0) return error.PipeFailed;
+    errdefer closePipe(&sockets);
+    if (!setCloseOnExec(sockets[0]) or !setCloseOnExec(sockets[1])) return error.PipeFailed;
+    const dev_null = c.open("/dev/null", .{ .ACCMODE = .RDWR, .CLOEXEC = true }, @as(c.mode_t, 0));
+    if (dev_null < 0) return error.SpawnSetupFailed;
+    defer _ = c.close(dev_null);
+    const max_fd = getdtablesize();
+    if (max_fd <= 4) return error.SpawnSetupFailed;
+    const pid = c.fork();
+    if (pid < 0) return error.SpawnFailed;
+    if (pid == 0) childExecInheritedSocket(executable, argv, environment, sockets, dev_null, max_fd);
+    _ = c.close(sockets[1]);
+    sockets[1] = -1;
+    if (!establishProcessGroup(pid)) {
+        terminateGroup(pid);
+        _ = reapChild(pid, null);
+        return error.ProcessGroupFailed;
+    }
+    result.* = .{ .owner = result, .pid = pid, .fd = sockets[0] };
+    sockets[0] = -1;
+}
+
 /// Starts a child with a closed environment and exactly one extra descriptor at fd 3. Standard
 /// input/output/error are `/dev/null`; protocol bytes can leave only through the inherited pipe.
 pub fn spawnEnvironmentInheritedPipe(
@@ -778,6 +875,79 @@ fn childExecInheritedPipe(
     while (inherited_fd < max_fd) : (inherited_fd += 1) _ = c.close(inherited_fd);
     _ = execve(executable.ptr, argv, environment);
     c._exit(126);
+}
+
+fn childExecInheritedSocket(
+    executable: [:0]const u8,
+    argv: [*:null]const ?[*:0]const u8,
+    environment: [*:null]const ?[*:0]const u8,
+    sockets: [2]c.fd_t,
+    dev_null: c.fd_t,
+    max_fd: c_int,
+) noreturn {
+    const protocol_fd: c.fd_t = 3;
+    if (c.setpgid(0, 0) != 0 or
+        c.dup2(dev_null, 0) < 0 or c.dup2(dev_null, 1) < 0 or c.dup2(dev_null, 2) < 0 or
+        c.dup2(sockets[1], protocol_fd) < 0 or
+        c.fcntl(protocol_fd, c.F.SETFD, @as(c_int, 0)) != 0) c._exit(126);
+    var inherited_fd: c_int = 4;
+    while (inherited_fd < max_fd) : (inherited_fd += 1) _ = c.close(inherited_fd);
+    _ = execve(executable.ptr, argv, environment);
+    c._exit(126);
+}
+
+fn deadlineAfter(io: std.Io, budget_ns: i128) i128 {
+    return std.math.add(i128, std.Io.Clock.awake.now(io).nanoseconds, budget_ns) catch std.math.maxInt(i128);
+}
+
+fn readSocketExactUntil(io: std.Io, fd: c.fd_t, output: []u8, deadline: i128) Error!void {
+    var used: usize = 0;
+    while (used < output.len) {
+        const now = std.Io.Clock.awake.now(io).nanoseconds;
+        if (now >= deadline) return error.TimedOut;
+        const remaining_ms = @divTrunc(deadline - now + std.time.ns_per_ms - 1, std.time.ns_per_ms);
+        var descriptor = [_]c.pollfd{.{ .fd = fd, .events = c.POLL.IN, .revents = 0 }};
+        const rc = c.poll(&descriptor, 1, @intCast(@min(remaining_ms, poll_quantum_ms)));
+        if (rc < 0) {
+            if (posix.errno(rc) == .INTR) continue;
+            return error.CaptureFailed;
+        }
+        if (rc == 0) continue;
+        if (descriptor[0].revents & (c.POLL.ERR | c.POLL.NVAL) != 0 or
+            descriptor[0].revents & (c.POLL.IN | c.POLL.HUP) == 0) return error.CaptureFailed;
+        const count = c.read(fd, output[used..].ptr, output.len - used);
+        if (count < 0) {
+            if (posix.errno(count) == .INTR) continue;
+            return error.CaptureFailed;
+        }
+        if (count == 0) return error.CaptureFailed;
+        used += @intCast(count);
+    }
+}
+
+fn writeSocketExactUntil(io: std.Io, fd: c.fd_t, payload: []const u8, deadline: i128) Error!void {
+    var used: usize = 0;
+    while (used < payload.len) {
+        const now = std.Io.Clock.awake.now(io).nanoseconds;
+        if (now >= deadline) return error.TimedOut;
+        const remaining_ms = @divTrunc(deadline - now + std.time.ns_per_ms - 1, std.time.ns_per_ms);
+        var descriptor = [_]c.pollfd{.{ .fd = fd, .events = c.POLL.OUT, .revents = 0 }};
+        const rc = c.poll(&descriptor, 1, @intCast(@min(remaining_ms, poll_quantum_ms)));
+        if (rc < 0) {
+            if (posix.errno(rc) == .INTR) continue;
+            return error.CaptureFailed;
+        }
+        if (rc == 0) continue;
+        if (descriptor[0].revents & (c.POLL.ERR | c.POLL.HUP | c.POLL.NVAL) != 0 or
+            descriptor[0].revents & c.POLL.OUT == 0) return error.CaptureFailed;
+        const count = c.write(fd, payload[used..].ptr, payload.len - used);
+        if (count < 0) {
+            if (posix.errno(count) == .INTR) continue;
+            return error.CaptureFailed;
+        }
+        if (count == 0) return error.CaptureFailed;
+        used += @intCast(count);
+    }
 }
 
 /// What the parent should do after `setpgid` on the freshly forked child failed.

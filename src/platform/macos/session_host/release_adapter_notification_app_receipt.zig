@@ -1,6 +1,6 @@
 //! Final-address parser and publisher for one app-owned Notification Center receipt.
 //!
-//! The app writes one bounded JSON document to an inherited pipe. This leaf accepts only the
+//! The app writes one bounded JSON document as the first inherited-socket frame. This leaf accepts only the
 //! app's canonical byte rendering, binds it back to runner-owned identity and helper click time,
 //! and delegates durable publication to the existing exclusive 0600 file boundary.
 

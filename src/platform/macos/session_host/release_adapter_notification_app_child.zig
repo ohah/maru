@@ -1,8 +1,8 @@
 //! Closed launch boundary for the Maru app side of one notification release scenario.
 //!
-//! The app receives no ambient environment and can publish protocol bytes only through inherited
-//! fd 3. Its process group remains separately owned after receipt EOF so the composition owner can
-//! remove the exact notification before terminating the GUI.
+//! The app receives no ambient environment and exchanges bounded frames only through inherited
+//! fd 3. Its process group remains separately owned after the attach receipt so the composition
+//! owner can request product-owned exact notification cleanup before reaping the GUI.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -41,11 +41,37 @@ pub const Plan = struct {
 
 pub const Execution = struct {
     owner: ?*Execution = null,
-    child: bounded.InheritedPipeChild = .{},
+    child: bounded.InheritedSocketChild = .{},
 
     pub fn readReceipt(self: *@This(), io: std.Io, output: []u8, budget_ns: i128) ![]const u8 {
         if (self.owner != self) return error.InvalidOwner;
-        return self.child.readReceipt(io, output, budget_ns);
+        return self.child.readFrame(io, output, budget_ns);
+    }
+
+    pub fn requestCleanup(
+        self: *@This(),
+        io: std.Io,
+        expected: receipt.Expected,
+        frame_storage: []u8,
+        budget_ns: i128,
+    ) !void {
+        if (self.owner != self) return error.InvalidOwner;
+        try receipt.validateExpected(expected);
+        if (budget_ns <= 0) return error.InvalidInput;
+        const deadline = std.math.add(
+            i128,
+            std.Io.Clock.awake.now(io).nanoseconds,
+            budget_ns,
+        ) catch std.math.maxInt(i128);
+        var command_storage: [320]u8 = undefined;
+        const command = try formatCleanupCommand(expected, &command_storage);
+        try self.child.writeFrame(io, command, try remainingBudget(io, deadline));
+        const acknowledgement = try self.child.readFrame(io, frame_storage, try remainingBudget(io, deadline));
+        var expected_storage: [320]u8 = undefined;
+        const wanted = try formatCleanupReceipt(expected, &expected_storage);
+        if (!std.mem.eql(u8, acknowledgement, wanted)) return error.InvalidReceipt;
+        try self.child.waitSuccess(io, try remainingBudget(io, deadline));
+        self.* = .{};
     }
 
     pub fn cleanup(self: *@This()) !void {
@@ -54,6 +80,30 @@ pub const Execution = struct {
         self.* = .{};
     }
 };
+
+fn remainingBudget(io: std.Io, deadline: i128) !i128 {
+    const now = std.Io.Clock.awake.now(io).nanoseconds;
+    if (now >= deadline) return error.TimedOut;
+    return deadline - now;
+}
+
+pub fn formatCleanupCommand(expected: receipt.Expected, output: []u8) ![]const u8 {
+    try receipt.validateExpected(expected);
+    return std.fmt.bufPrint(
+        output,
+        "{{\"schema\":\"maru.session-host-notification-cleanup-command.v1\",\"request_identifier\":\"{s}\"}}",
+        .{expected.request_identifier},
+    ) catch error.InvalidInput;
+}
+
+pub fn formatCleanupReceipt(expected: receipt.Expected, output: []u8) ![]const u8 {
+    try receipt.validateExpected(expected);
+    return std.fmt.bufPrint(
+        output,
+        "{{\"schema\":\"maru.session-host-notification-cleanup-receipt.v1\",\"request_identifier\":\"{s}\"}}",
+        .{expected.request_identifier},
+    ) catch error.InvalidInput;
+}
 
 pub fn launch(inputs: Inputs, execution: *Execution) !void {
     var executor = RealExecutor{};
@@ -67,7 +117,7 @@ pub fn launchWith(executor: anytype, inputs: Inputs, execution: *Execution) !voi
 
 fn launchInternal(executor: anytype, inputs: Inputs, execution: *Execution) !void {
     if (execution.owner != null or execution.child.owner != null or execution.child.pid != -1 or
-        execution.child.read_fd != -1 or execution.child.receipt_complete or execution.child.receipt_failed) return error.InvalidOwner;
+        execution.child.fd != -1) return error.InvalidOwner;
     if (aliasesInputs(std.mem.asBytes(execution), inputs)) return error.InvalidOwner;
     var storage: CommandStorage = .{};
     const plan = try commandPlan(inputs, &storage);
@@ -131,7 +181,7 @@ const RealExecutor = struct {
         var argv = [_:null]?[*:0]const u8{plan.executable.ptr};
         var environment: [14:null]?[*:0]const u8 = @splat(null);
         for (plan.environment, 0..) |entry, index| environment[index] = entry.ptr;
-        try bounded.spawnEnvironmentInheritedPipe(plan.executable, &argv, &environment, child);
+        try bounded.spawnEnvironmentInheritedSocket(plan.executable, &argv, &environment, child);
     }
 };
 

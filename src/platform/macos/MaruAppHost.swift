@@ -4532,6 +4532,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         if Bundle.main.bundleIdentifier != nil {
             UNUserNotificationCenter.current().delegate = delegate
         }
+        delegate.armNotificationReleaseCleanupControl()
         app.setActivationPolicy(.regular)
         app.run()
         Darwin.exit(delegate.exitCode)
@@ -8016,9 +8017,77 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
         do {
             try sink.publish(receipt)
-            notificationReleaseReceiptSink = nil
         } catch {
             failNotificationReleaseScenario()
+        }
+    }
+
+    private func armNotificationReleaseCleanupControl() {
+        guard let configuration = notificationReleaseScenario,
+              let sink = notificationReleaseReceiptSink else { return }
+        let requestIdentifier = configuration.expectation.requestIdentifier
+        let deadlineNs = configuration.expectation.deadlineNs
+        sink.listenForCleanup(
+            requestIdentifier: requestIdentifier,
+            perform: { [weak self] complete in
+                guard let self,
+                      Self.removeExactNotificationRequest(
+                          requestIdentifier,
+                          center: UNUserNotificationCenter.current()
+                      ) else {
+                    complete(false)
+                    return
+                }
+                self.verifyExactNotificationAbsent(
+                    requestIdentifier,
+                    deadlineNs: deadlineNs,
+                    complete: complete
+                )
+            },
+            finished: { [weak self] success in
+                guard let self else { return }
+                if !success {
+                    self.failNotificationReleaseScenario()
+                    return
+                }
+                self.notificationReleaseReceiptSink = nil
+                self.exitCode = 0
+                NSApp.terminate(nil)
+            }
+        )
+    }
+
+    private func verifyExactNotificationAbsent(
+        _ requestIdentifier: String,
+        deadlineNs: UInt64,
+        complete: @escaping (Bool) -> Void
+    ) {
+        guard notificationReleaseContinuousTimeNs() < deadlineNs else {
+            complete(false)
+            return
+        }
+        let center = UNUserNotificationCenter.current()
+        center.getPendingNotificationRequests { [weak self] pending in
+            guard let self else { complete(false); return }
+            let pendingAbsent = !pending.contains { $0.identifier == requestIdentifier }
+            UNUserNotificationCenter.current().getDeliveredNotifications { delivered in
+                let deliveredAbsent = !delivered.contains { $0.request.identifier == requestIdentifier }
+                DispatchQueue.main.async {
+                    if pendingAbsent && deliveredAbsent {
+                        complete(true)
+                    } else if notificationReleaseContinuousTimeNs() < deadlineNs {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.025) {
+                            self.verifyExactNotificationAbsent(
+                                requestIdentifier,
+                                deadlineNs: deadlineNs,
+                                complete: complete
+                            )
+                        }
+                    } else {
+                        complete(false)
+                    }
+                }
+            }
         }
     }
 

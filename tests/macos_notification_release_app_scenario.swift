@@ -11,8 +11,9 @@ private struct NotificationReleaseAppScenarioTests {
         absentModeIsOrdinaryLaunchButPartialModeFails()
         isolationAndDescriptorInputsFailClosed()
         try runnerRootMustBeOwnedDirectoryWithExactMode()
-        try receiptSinkUsesOneInheritedPipeExactlyOnce()
+        try receiptSinkUsesOneInheritedSocketExactlyOnce()
         exactNotificationCleanupTouchesOnlyOneIdentifier()
+        try cleanupControlUsesExactFramedRequestAndReceipt()
     }
 
     private static func exactNotificationCleanupTouchesOnlyOneIdentifier() {
@@ -33,6 +34,46 @@ private struct NotificationReleaseAppScenarioTests {
         precondition(delivered == [[request]])
     }
 
+    private static func cleanupControlUsesExactFramedRequestAndReceipt() throws {
+        var descriptors = [Int32](repeating: -1, count: 2)
+        precondition(Darwin.socketpair(AF_UNIX, SOCK_STREAM, 0, &descriptors) == 0)
+        defer { _ = Darwin.close(descriptors[0]) }
+        let sink = try NotificationReleaseReceiptSink(fileDescriptor: descriptors[1])
+        var performed = false
+        var finished: Bool?
+        sink.listenForCleanup(
+            requestIdentifier: request,
+            perform: { complete in performed = true; complete(true) },
+            finished: { finished = $0 }
+        )
+        let command = "{\"schema\":\"maru.session-host-notification-cleanup-command.v1\",\"request_identifier\":\"\(request)\"}"
+        writeFrame(descriptor: descriptors[0], text: command)
+        let limit = Date().addingTimeInterval(1)
+        while finished == nil && Date() < limit {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
+        }
+        precondition(performed && finished == true)
+        let acknowledgement = readFrame(descriptor: descriptors[0])
+        precondition(acknowledgement == "{\"schema\":\"maru.session-host-notification-cleanup-receipt.v1\",\"request_identifier\":\"\(request)\"}")
+    }
+
+    private static func writeFrame(descriptor: Int32, text: String) {
+        let body = Array(text.utf8)
+        var frame = [UInt8(UInt32(body.count) >> 24), UInt8((UInt32(body.count) >> 16) & 0xff),
+                     UInt8((UInt32(body.count) >> 8) & 0xff), UInt8(UInt32(body.count) & 0xff)]
+        frame.append(contentsOf: body)
+        precondition(Darwin.write(descriptor, frame, frame.count) == frame.count)
+    }
+
+    private static func readFrame(descriptor: Int32) -> String {
+        var header = [UInt8](repeating: 0, count: 4)
+        precondition(Darwin.read(descriptor, &header, 4) == 4)
+        let length = header.reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
+        var body = [UInt8](repeating: 0, count: Int(length))
+        precondition(Darwin.read(descriptor, &body, body.count) == body.count)
+        return String(decoding: body, as: UTF8.self)
+    }
+
     private static func validEnvironment() -> [String: String] {
         let root = "/private/tmp/mn-\(nonce.replacingOccurrences(of: "-", with: ""))"
         return [
@@ -43,7 +84,7 @@ private struct NotificationReleaseAppScenarioTests {
             "MARU_SESSION_HOST_NOTIFICATION_RUNTIME_ID": "00000000000000000000000000000002",
             "MARU_SESSION_HOST_NOTIFICATION_EVENT_ID": "7",
             "MARU_SESSION_HOST_NOTIFICATION_DEADLINE_NS": "1000",
-            "MARU_SESSION_HOST_NOTIFICATION_RECEIPT_FD": "9",
+            "MARU_SESSION_HOST_NOTIFICATION_RECEIPT_FD": "3",
             "MARU_SESSION_HOST_NOTIFICATION_RUNNER_NONCE": nonce,
             "MARU_SESSION_HOST_NOTIFICATION_RUNNER_ROOT": root,
             "MARU_SESSION_HOST_ROOT": root + "/s",
@@ -66,7 +107,7 @@ private struct NotificationReleaseAppScenarioTests {
         guard case .armed(let config) = result else { preconditionFailure("valid mode rejected") }
         precondition(parserCalls == 1)
         precondition(config.expectation.scenario == .guiZero)
-        precondition(config.receiptFileDescriptor == 9)
+        precondition(config.receiptFileDescriptor == 3)
         precondition(config.runnerNonce == nonce)
         let longestSocket = config.runnerRoot + "/s/sh/00000000000000000000000000000000.sock"
         precondition(longestSocket.utf8.count + 1 <= 104)
@@ -85,7 +126,8 @@ private struct NotificationReleaseAppScenarioTests {
     private static func isolationAndDescriptorInputsFailClosed() {
         for mutation in [
             ("MARU_SESSION_HOST_NOTIFICATION_RECEIPT_FD", "1"),
-            ("MARU_SESSION_HOST_NOTIFICATION_RECEIPT_FD", "+9"),
+            ("MARU_SESSION_HOST_NOTIFICATION_RECEIPT_FD", "+3"),
+            ("MARU_SESSION_HOST_NOTIFICATION_RECEIPT_FD", "4"),
             ("MARU_SESSION_HOST_NOTIFICATION_RUNNER_NONCE", "not-a-uuid"),
             ("MARU_SESSION_HOST_ROOT", "/Users/example/Library/Application Support/maru/session-host"),
             ("HOME", "/Users/example"),
@@ -110,9 +152,9 @@ private struct NotificationReleaseAppScenarioTests {
         precondition(!notificationReleaseValidateRunnerRoot("/private/tmp"))
     }
 
-    private static func receiptSinkUsesOneInheritedPipeExactlyOnce() throws {
+    private static func receiptSinkUsesOneInheritedSocketExactlyOnce() throws {
         var descriptors = [Int32](repeating: -1, count: 2)
-        precondition(Darwin.pipe(&descriptors) == 0)
+        precondition(Darwin.socketpair(AF_UNIX, SOCK_STREAM, 0, &descriptors) == 0)
         defer { _ = Darwin.close(descriptors[0]) }
         let sink = try NotificationReleaseReceiptSink(fileDescriptor: descriptors[1])
         try sink.publish("{\"schema\":\"receipt\"}")
@@ -121,10 +163,12 @@ private struct NotificationReleaseAppScenarioTests {
             preconditionFailure("duplicate publication succeeded")
         } catch NotificationReleaseAppScenarioError.alreadyPublished {}
 
-        var bytes = [UInt8](repeating: 0, count: 64)
-        let count = Darwin.read(descriptors[0], &bytes, bytes.count)
-        precondition(count == 20)
-        precondition(String(decoding: bytes[0..<Int(count)], as: UTF8.self) == "{\"schema\":\"receipt\"}")
+        var header = [UInt8](repeating: 0, count: 4)
+        precondition(Darwin.read(descriptors[0], &header, header.count) == header.count)
+        precondition(header == [0, 0, 0, 20])
+        var bytes = [UInt8](repeating: 0, count: 20)
+        precondition(Darwin.read(descriptors[0], &bytes, bytes.count) == bytes.count)
+        precondition(String(decoding: bytes, as: UTF8.self) == "{\"schema\":\"receipt\"}")
 
         do {
             _ = try NotificationReleaseReceiptSink(fileDescriptor: 1)

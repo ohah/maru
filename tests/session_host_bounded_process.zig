@@ -345,6 +345,42 @@ test "bounded inherited pipe rejects copied owners and closes every ambient desc
     try std.testing.expectError(error.InvalidOwner, copied.terminate());
 }
 
+test "bounded inherited socket exchanges framed receipt and cleanup before graceful exit" {
+    const before = try countOpenFds();
+    const environment = [_:null]?[*:0]const u8{};
+    const argv = [_:null]?[*:0]const u8{
+        shell.ptr,
+        "-c",
+        "printf '\\000\\000\\000\\007receipt' >&3; dd bs=1 count=4 <&3 >/dev/null 2>/dev/null; IFS= read -r command <&3; [ \"$command\" = cleanup ]",
+    };
+    var child: process.InheritedSocketChild = .{};
+    try process.spawnEnvironmentInheritedSocket(shell, &argv, &environment, &child);
+    var output: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("receipt", try child.readFrame(std.testing.io, &output, std.time.ns_per_s));
+    try child.writeFrame(std.testing.io, "cleanup\n", std.time.ns_per_s);
+    try child.waitSuccess(std.testing.io, std.time.ns_per_s);
+    try std.testing.expectEqual(before, try countOpenFds());
+}
+
+test "bounded inherited socket rejects copied owner and retains cleanup after hostile frame" {
+    const before = try countOpenFds();
+    const environment = [_:null]?[*:0]const u8{};
+    const argv = [_:null]?[*:0]const u8{
+        shell.ptr,
+        "-c",
+        "printf '\\000\\000\\000\\021' >&3; sleep 10",
+    };
+    var child: process.InheritedSocketChild = .{};
+    try process.spawnEnvironmentInheritedSocket(shell, &argv, &environment, &child);
+    var copied = child;
+    var output: [4]u8 = undefined;
+    try std.testing.expectError(error.InvalidOwner, copied.readFrame(std.testing.io, &output, std.time.ns_per_s));
+    try std.testing.expectError(error.OutputTooLarge, child.readFrame(std.testing.io, &output, std.time.ns_per_s));
+    try child.terminate();
+    try std.testing.expectError(error.InvalidOwner, copied.terminate());
+    try std.testing.expectEqual(before, try countOpenFds());
+}
+
 test "bounded observation separates stdout and stderr and preserves nonzero exit" {
     var stdout: [4]u8 = undefined;
     var stderr: [4]u8 = undefined;

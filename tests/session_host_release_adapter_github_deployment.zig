@@ -68,6 +68,62 @@ test "current attempt job binds exactly one protected release deployment" {
     try std.testing.expectEqual(environment.id, observation.environment_id);
 }
 
+test "reviewed notification policy binds only its own protected job and environment" {
+    const notification_jobs = try std.mem.replaceOwned(u8, std.testing.allocator, jobs, "universal dmg (signed + notarized)", "session host notification product");
+    defer std.testing.allocator.free(notification_jobs);
+    const notification_deployments = try std.mem.replaceOwned(u8, std.testing.allocator, deployments, "release", "Session host product");
+    defer std.testing.allocator.free(notification_deployments);
+    const notification_statuses = try std.mem.replaceOwned(u8, std.testing.allocator, statuses, "release", "Session host product");
+    defer std.testing.allocator.free(notification_statuses);
+    var notification_environment = environment;
+    notification_environment.name = "Session host product";
+    const backing = [_]github_deployment.StatusBacking{.{
+        .deployment_id = 5_659_920_837,
+        .bytes = notification_statuses,
+    }};
+    const observation = try github_deployment.parseAndBindForProfile(
+        std.testing.allocator,
+        notification_jobs,
+        notification_deployments,
+        &backing,
+        expected,
+        notification_environment,
+        .notification_product,
+    );
+    try std.testing.expectEqual(@as(u64, 90_618_357_140), observation.job_id);
+
+    try std.testing.expectError(error.UnprotectedEnvironment, github_deployment.parseAndBindForProfile(
+        std.testing.allocator,
+        notification_jobs,
+        notification_deployments,
+        &backing,
+        expected,
+        environment,
+        .notification_product,
+    ));
+    try std.testing.expectError(error.DeploymentMismatch, github_deployment.parseAndBindForProfile(
+        std.testing.allocator,
+        jobs,
+        notification_deployments,
+        &backing,
+        expected,
+        notification_environment,
+        .notification_product,
+    ));
+}
+
+test "prepared transaction seals policy across every stage" {
+    var prepared: github_deployment.Prepared = .{};
+    try prepared.prepareJobs(std.testing.allocator, jobs, expected);
+    defer prepared.deinit() catch {};
+    try std.testing.expectError(error.DeploymentMismatch, prepared.prepareDeploymentsForProfile(
+        std.testing.allocator,
+        deployments,
+        expected,
+        .notification_product,
+    ));
+}
+
 test "non-bypass environment protection and official pending history are both mandatory" {
     const backing = [_]github_deployment.StatusBacking{.{ .deployment_id = 5_659_920_837, .bytes = statuses }};
     var unprotected = environment;

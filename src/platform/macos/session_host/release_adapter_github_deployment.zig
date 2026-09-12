@@ -12,6 +12,31 @@ const github_environment = @import("release_adapter_github_environment");
 
 pub const max_response_bytes = github_json.max_response_bytes;
 pub const max_collection_entries: usize = 100;
+const max_policy_value_bytes: usize = 255;
+const max_policy_key_bytes: usize = 4 * (2 + max_policy_value_bytes);
+
+pub const Profile = enum { release, notification_product };
+
+const Policy = struct {
+    repository_name: []const u8,
+    environment_name: []const u8,
+    workflow_name: []const u8,
+    job_name: []const u8,
+};
+
+const release_policy: Policy = .{
+    .repository_name = contract.repository_name,
+    .environment_name = contract.protected_environment_name,
+    .workflow_name = contract.release_workflow_name,
+    .job_name = contract.release_signing_job_name,
+};
+
+const notification_product_policy: Policy = .{
+    .repository_name = contract.repository_name,
+    .environment_name = "Session host product",
+    .workflow_name = contract.release_workflow_name,
+    .job_name = "session host notification product",
+};
 
 const StrictU64 = struct {
     value: u64,
@@ -110,6 +135,8 @@ pub const Prepared = struct {
     matched: [max_collection_entries]bool = @splat(false),
     candidate_count: usize = 0,
     failed: bool = false,
+    policy_key: [max_policy_key_bytes]u8 = @splat(0),
+    policy_key_len: usize = 0,
 
     pub fn deinit(self: *Prepared) !void {
         if (self.owner != self) return error.InvalidOwner;
@@ -119,25 +146,38 @@ pub const Prepared = struct {
     }
 
     pub fn prepareJobs(self: *Prepared, allocator: std.mem.Allocator, bytes: []const u8, expected: context_mod.Context) !void {
+        return self.prepareJobsForProfile(allocator, bytes, expected, .release);
+    }
+
+    pub fn prepareJobsForProfile(self: *Prepared, allocator: std.mem.Allocator, bytes: []const u8, expected: context_mod.Context, profile: Profile) !void {
+        const policy = policyFor(profile);
         if (self.owner != null or self.jobs != null or self.deployments != null) return error.InvalidOwner;
+        try validatePolicy(policy);
         var parsed = try parse(ApiJobs, allocator, bytes);
         errdefer parsed.deinit();
         if (parsed.value.jobs.len > max_collection_entries) return error.DeploymentMismatch;
-        const job = try bindJob(parsed.value, expected);
+        const job = try bindJob(parsed.value, expected, policy);
+        self.policy_key_len = try writePolicyKey(&self.policy_key, policy);
         self.jobs = parsed;
         self.job = job;
         self.owner = self;
     }
 
     pub fn prepareDeployments(self: *Prepared, allocator: std.mem.Allocator, bytes: []const u8, expected: context_mod.Context) !void {
+        return self.prepareDeploymentsForProfile(allocator, bytes, expected, .release);
+    }
+
+    pub fn prepareDeploymentsForProfile(self: *Prepared, allocator: std.mem.Allocator, bytes: []const u8, expected: context_mod.Context, profile: Profile) !void {
+        const policy = policyFor(profile);
         if (self.owner != self or self.jobs == null or self.deployments != null or self.failed) return error.InvalidOwner;
+        try matchPolicy(self, policy);
         errdefer self.failed = true;
         var parsed = try parse([]const ApiDeployment, allocator, bytes);
         errdefer parsed.deinit();
         if (parsed.value.len > max_collection_entries) return error.DeploymentMismatch;
         for (parsed.value) |deployment| {
-            if (!baseDeploymentMatches(deployment, expected)) continue;
-            if (!deploymentAuthorityMatches(deployment)) return error.DeploymentMismatch;
+            if (!baseDeploymentMatches(deployment, expected, policy)) continue;
+            if (!deploymentAuthorityMatches(deployment, policy)) return error.DeploymentMismatch;
             for (self.candidate_ids[0..self.candidate_count]) |id| if (id == deployment.id.value) return error.DeploymentMismatch;
             self.candidate_ids[self.candidate_count] = deployment.id.value;
             self.candidate_count += 1;
@@ -151,7 +191,13 @@ pub const Prepared = struct {
     }
 
     pub fn acceptStatuses(self: *Prepared, allocator: std.mem.Allocator, deployment_id: u64, bytes: []const u8) !void {
+        return self.acceptStatusesForProfile(allocator, deployment_id, bytes, .release);
+    }
+
+    pub fn acceptStatusesForProfile(self: *Prepared, allocator: std.mem.Allocator, deployment_id: u64, bytes: []const u8, profile: Profile) !void {
+        const policy = policyFor(profile);
         if (self.owner != self or self.deployments == null or self.job == null or self.failed) return error.InvalidOwner;
+        try matchPolicy(self, policy);
         errdefer self.failed = true;
         var index: ?usize = null;
         for (self.candidate_ids[0..self.candidate_count], 0..) |id, candidate_index| if (id == deployment_id) {
@@ -161,14 +207,20 @@ pub const Prepared = struct {
         const candidate_index = index orelse return error.DeploymentMismatch;
         if (self.received[candidate_index]) return error.DeploymentMismatch;
         const deployment = deploymentFor(self.deployments.?.value, deployment_id) orelse return error.DeploymentMismatch;
-        self.matched[candidate_index] = try statusesBind(allocator, bytes, deployment, self.job.?.url);
+        self.matched[candidate_index] = try statusesBind(allocator, bytes, deployment, self.job.?.url, policy);
         self.received[candidate_index] = true;
     }
 
     pub fn finish(self: *Prepared, environment: github_environment.Observation) !Observation {
+        return self.finishForProfile(environment, .release);
+    }
+
+    pub fn finishForProfile(self: *Prepared, environment: github_environment.Observation, profile: Profile) !Observation {
+        const policy = policyFor(profile);
         if (self.owner != self or self.deployments == null or self.job == null or self.failed) return error.InvalidOwner;
+        try matchPolicy(self, policy);
         errdefer self.failed = true;
-        if (!recognizedProtection(environment)) return error.UnprotectedEnvironment;
+        if (!recognizedProtection(environment, policy)) return error.UnprotectedEnvironment;
         var match_count: usize = 0;
         var deployment_id: u64 = 0;
         for (0..self.candidate_count) |index| {
@@ -192,15 +244,29 @@ pub fn parseAndBind(
     expected: context_mod.Context,
     environment: github_environment.Observation,
 ) Error!Observation {
-    if (!recognizedProtection(environment)) return error.UnprotectedEnvironment;
+    return parseAndBindForProfile(allocator, jobs_bytes, deployments_bytes, status_backings, expected, environment, .release);
+}
+
+pub fn parseAndBindForProfile(
+    allocator: std.mem.Allocator,
+    jobs_bytes: []const u8,
+    deployments_bytes: []const u8,
+    status_backings: []const StatusBacking,
+    expected: context_mod.Context,
+    environment: github_environment.Observation,
+    profile: Profile,
+) Error!Observation {
+    const policy = policyFor(profile);
+    try validatePolicy(policy);
+    if (!recognizedProtection(environment, policy)) return error.UnprotectedEnvironment;
     if (status_backings.len > max_collection_entries) return error.DeploymentMismatch;
     try validateBackingIdentity(status_backings);
     var prepared: Prepared = .{};
-    try prepared.prepareJobs(allocator, jobs_bytes, expected);
+    try prepared.prepareJobsForProfile(allocator, jobs_bytes, expected, profile);
     defer prepared.deinit() catch {};
-    try prepared.prepareDeployments(allocator, deployments_bytes, expected);
-    for (status_backings) |backing| try prepared.acceptStatuses(allocator, backing.deployment_id, backing.bytes);
-    return prepared.finish(environment);
+    try prepared.prepareDeploymentsForProfile(allocator, deployments_bytes, expected, profile);
+    for (status_backings) |backing| try prepared.acceptStatusesForProfile(allocator, backing.deployment_id, backing.bytes, profile);
+    return prepared.finishForProfile(environment, profile);
 }
 
 fn parse(comptime T: type, allocator: std.mem.Allocator, bytes: []const u8) Error!std.json.Parsed(T) {
@@ -215,44 +281,44 @@ fn parse(comptime T: type, allocator: std.mem.Allocator, bytes: []const u8) Erro
     };
 }
 
-fn bindJob(response: ApiJobs, expected: context_mod.Context) Error!Job {
+fn bindJob(response: ApiJobs, expected: context_mod.Context, policy: Policy) Error!Job {
     if (response.total_count.value != response.jobs.len) return error.DeploymentMismatch;
     var matched: ?Job = null;
     for (response.jobs) |job| {
-        if (!std.mem.eql(u8, job.name, contract.release_signing_job_name)) continue;
+        if (!std.mem.eql(u8, job.name, policy.job_name)) continue;
         if (matched != null or job.id.value == 0 or
             job.run_id.value != expected.build.run_id or
             job.run_attempt.value != expected.build.run_attempt or
             !std.mem.eql(u8, job.head_sha, expected.source_commit) or
             !std.mem.eql(u8, job.status, "in_progress") or job.conclusion != null or
-            !std.mem.eql(u8, job.workflow_name, contract.release_workflow_name) or
-            !canonicalJobUrl(job.html_url, expected.build.run_id, job.id.value))
+            !std.mem.eql(u8, job.workflow_name, policy.workflow_name) or
+            !canonicalJobUrl(job.html_url, expected.build.run_id, job.id.value, policy.repository_name))
             return error.DeploymentMismatch;
         matched = .{ .id = job.id.value, .url = job.html_url };
     }
     return matched orelse error.DeploymentMismatch;
 }
 
-fn canonicalJobUrl(url: []const u8, run_id: u64, job_id: u64) bool {
+fn canonicalJobUrl(url: []const u8, run_id: u64, job_id: u64, repository_name: []const u8) bool {
     var buffer: [context_mod.max_value_bytes]u8 = undefined;
     const expected = std.fmt.bufPrint(
         &buffer,
-        "https://github.com/ohah/maru/actions/runs/{d}/job/{d}",
-        .{ run_id, job_id },
+        "https://github.com/{s}/actions/runs/{d}/job/{d}",
+        .{ repository_name, run_id, job_id },
     ) catch return false;
     return std.mem.eql(u8, url, expected);
 }
 
-fn baseDeploymentMatches(deployment: ApiDeployment, expected: context_mod.Context) bool {
+fn baseDeploymentMatches(deployment: ApiDeployment, expected: context_mod.Context, policy: Policy) bool {
     return deployment.id.value != 0 and
         std.mem.eql(u8, deployment.sha, expected.source_commit) and
         std.mem.eql(u8, deployment.ref, expected.tag) and
         std.mem.eql(u8, deployment.task, "deploy") and
-        std.mem.eql(u8, deployment.environment, contract.protected_environment_name) and
-        std.mem.eql(u8, deployment.original_environment, contract.protected_environment_name);
+        std.mem.eql(u8, deployment.environment, policy.environment_name) and
+        std.mem.eql(u8, deployment.original_environment, policy.environment_name);
 }
 
-fn deploymentAuthorityMatches(deployment: ApiDeployment) bool {
+fn deploymentAuthorityMatches(deployment: ApiDeployment, policy: Policy) bool {
     if (deployment.performed_via_github_app.id.value == 0 or
         !std.mem.eql(u8, deployment.performed_via_github_app.slug, "github-actions") or
         !std.mem.eql(u8, deployment.performed_via_github_app.owner.login, "github")) return false;
@@ -260,7 +326,7 @@ fn deploymentAuthorityMatches(deployment: ApiDeployment) bool {
     const expected_repository = std.fmt.bufPrint(
         &repository_url,
         "https://api.github.com/repos/{s}",
-        .{contract.repository_name},
+        .{policy.repository_name},
     ) catch return false;
     if (!std.mem.eql(u8, deployment.repository_url, expected_repository)) return false;
     var statuses_url: [context_mod.max_value_bytes]u8 = undefined;
@@ -291,6 +357,7 @@ fn statusesBind(
     bytes: []const u8,
     deployment: ApiDeployment,
     job_url: []const u8,
+    policy: Policy,
 ) Error!bool {
     var statuses = try parse([]const ApiStatus, allocator, bytes);
     defer statuses.deinit();
@@ -303,11 +370,11 @@ fn statusesBind(
         for (statuses.value[0..index]) |earlier| {
             if (earlier.id.value == status.id.value) return error.DeploymentMismatch;
         }
-        if (statusForJob(status, "in_progress", job_url)) {
+        if (statusForJob(status, "in_progress", job_url, policy.environment_name)) {
             current_count = std.math.add(u8, current_count, 1) catch
                 return error.DeploymentMismatch;
         }
-        if (statusForJob(status, "pending", job_url)) saw_pending = true;
+        if (statusForJob(status, "pending", job_url, policy.environment_name)) saw_pending = true;
     }
     return current_count == 1 and saw_pending;
 }
@@ -340,16 +407,16 @@ fn statusAuthorityMatches(status: ApiStatus, deployment: ApiDeployment) bool {
     return std.mem.eql(u8, status.url, expected_status);
 }
 
-fn statusForJob(status: ApiStatus, state: []const u8, job_url: []const u8) bool {
+fn statusForJob(status: ApiStatus, state: []const u8, job_url: []const u8, environment_name: []const u8) bool {
     return std.mem.eql(u8, status.state, state) and
-        std.mem.eql(u8, status.environment, contract.protected_environment_name) and
+        std.mem.eql(u8, status.environment, environment_name) and
         status.log_url != null and std.mem.eql(u8, status.log_url.?, job_url) and
         status.target_url != null and std.mem.eql(u8, status.target_url.?, job_url);
 }
 
-fn recognizedProtection(environment: github_environment.Observation) bool {
+fn recognizedProtection(environment: github_environment.Observation, policy: Policy) bool {
     if (environment.id == 0 or environment.can_admins_bypass or
-        !std.mem.eql(u8, environment.name, contract.protected_environment_name)) return false;
+        !std.mem.eql(u8, environment.name, policy.environment_name)) return false;
     if (environment.required_reviewer_count > 6 or
         (environment.required_reviewer_count == 0 and environment.prevent_self_review) or
         environment.wait_timer_minutes > 43_200 or
@@ -359,6 +426,41 @@ fn recognizedProtection(environment: github_environment.Observation) bool {
         environment.wait_timer_minutes > 0 or
         (environment.branch_policy_rule and
             (environment.protected_branches != environment.custom_branch_policies));
+}
+
+fn validatePolicy(policy: Policy) Error!void {
+    for ([_][]const u8{ policy.repository_name, policy.environment_name, policy.workflow_name, policy.job_name }) |value| {
+        if (value.len == 0 or value.len > max_policy_value_bytes or
+            std.mem.indexOfAny(u8, value, "\r\n\x00") != null) return error.DeploymentMismatch;
+    }
+    if (!std.mem.eql(u8, policy.repository_name, contract.repository_name)) return error.DeploymentMismatch;
+}
+
+fn policyFor(profile: Profile) Policy {
+    return switch (profile) {
+        .release => release_policy,
+        .notification_product => notification_product_policy,
+    };
+}
+
+fn writePolicyKey(output: *[max_policy_key_bytes]u8, policy: Policy) Error!usize {
+    try validatePolicy(policy);
+    var index: usize = 0;
+    for ([_][]const u8{ policy.repository_name, policy.environment_name, policy.workflow_name, policy.job_name }) |value| {
+        output[index] = @intCast(value.len >> 8);
+        output[index + 1] = @intCast(value.len & 0xff);
+        index += 2;
+        @memcpy(output[index..][0..value.len], value);
+        index += value.len;
+    }
+    return index;
+}
+
+fn matchPolicy(prepared: *const Prepared, policy: Policy) Error!void {
+    var key: [max_policy_key_bytes]u8 = @splat(0);
+    const len = try writePolicyKey(&key, policy);
+    if (len != prepared.policy_key_len or !std.mem.eql(u8, key[0..len], prepared.policy_key[0..prepared.policy_key_len]))
+        return error.DeploymentMismatch;
 }
 
 /// Public only so std's allocation-failure harness can cover the complete successful path.

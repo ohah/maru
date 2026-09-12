@@ -78,7 +78,13 @@ pub fn bind(io: std.Io, candidate: dmg.MountedCandidate, result: *Authority, bud
     if (budget_ns <= 0) return error.InvalidBudget;
     const now = std.Io.Clock.awake.now(io).nanoseconds;
     const deadline_ns = std.math.add(i128, now, budget_ns) catch return error.InvalidBudget;
+    try bindUntil(io, candidate, result, deadline_ns);
+}
+
+/// Binds signer and file authority against the caller's transaction-wide absolute deadline.
+pub fn bindUntil(io: std.Io, candidate: dmg.MountedCandidate, result: *Authority, deadline_ns: i128) !void {
     var observer = RealObserver{ .io = io, .deadline_ns = deadline_ns };
+    _ = try observer.remaining();
     try bindWith(&observer, candidate, result);
     _ = try observer.remaining();
 }

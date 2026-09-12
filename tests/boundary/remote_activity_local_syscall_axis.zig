@@ -33,6 +33,20 @@ const backend_path = "src/platform/macos/agent_image_scan_backend.zig";
 const decode_path = "src/platform/macos/agent_image_decode_backend.zig";
 const activity_path = "src/platform/macos/app_session/agent_activity.zig";
 
+/// 줄 주석(`//`)을 벗긴다. **세야 하는 것은 「쓰는가」이지 「언급하는가」가 아니다** — 규율을
+/// 설명하는 주석이 그 규율을 어긴 것으로 걸리면 게이트가 자기 문서를 벌준다.
+fn stripComments(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    var it = std.mem.splitScalar(u8, src, '\n');
+    while (it.next()) |line| {
+        const keep = if (std.mem.indexOf(u8, line, "//")) |at| line[0..at] else line;
+        try out.appendSlice(allocator, keep);
+        try out.append(allocator, '\n');
+    }
+    return out.toOwnedSlice(allocator);
+}
+
 fn readSource(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {
     var file = try std.Io.Dir.cwd().openFile(io, path, .{});
     defer file.close(io);
@@ -143,10 +157,16 @@ test "RAV3 §6.3: 경로를 주는 한 곳이 원격을 막는다 — 네 소비
         return error.TestUnexpectedResult;
     }
 
-    // **그 문을 우회하는 자리가 없어야 한다.** `chain.get` 직접 호출은 `pathForIndex` 안의 하나뿐이다.
+    // **그 문을 우회하는 자리가 없어야 한다.** `chain.get` 직접 호출은 두 문 안의 것뿐이다.
+    //
+    // ⚠️ **주석을 벗기고 센다**(RAV4b 에서 재발). 안 그러면 「그 규율을 설명하는 주석」이 호출로
+    // 걸린다 — `remote_watch_contract_boundary` 가 **이미 같은 함정을 겪고** `stripComments` 를
+    // 뒀는데, 그 교훈이 이 게이트에는 안 와 있었다. 세야 하는 것은 「언급하는가」가 아니라 **「쓰는가」**다.
+    const activity_code = try stripComments(gpa, activity_src);
+    defer gpa.free(activity_code);
     var count: usize = 0;
     var at: usize = 0;
-    while (std.mem.indexOfPos(u8, activity_src, at, "chain.get(")) |found| {
+    while (std.mem.indexOfPos(u8, activity_code, at, "chain.get(")) |found| {
         count += 1;
         at = found + 1;
     }

@@ -4071,6 +4071,19 @@ pub fn applyRemoteStamps(self: *AppSession, result: *const scan_backend.Result) 
     if (!self.agent_activity.source_remote) return;
     self.agent_activity.remote_scanned_bytes = result.remote_head_bytes;
     self.agent_activity.remote_resume_offset = result.remote_resume_offset;
+
+    // 🔥 **저쪽이 푼 체인을 받는다**(RAV4b · 계획 §21.6). `refresh` 는 `remoteHeadChain` 으로 **머리
+    // 하나**만 세우는데 헬퍼는 부모까지 훑어 `file_index = 1` 히트를 보낸다 — 그 경로를 안 받으면
+    // `remotePathForIndex(1)` 이 null 이라 **재개 세션에서 부모 활동을 펼치면 「못 읽었다」**가 뜬다.
+    // 저쪽은 그 바이트를 줄 수 있는데 이쪽이 **경로를 몰라서** 못 청하는 것이다(Codex 재개 58%).
+    //
+    // **머리가 비면 안 받는다.** 그 답은 체인을 아예 못 푼 것이고, 그때 덮으면 지금 보고 있는 소스의
+    // 경로까지 잃는다.
+    //
+    // ⚠️ **`head()` 로 본다 — `get(0)` 이 아니다.** §6.3 게이트가 「경로를 주는 문은 **둘뿐**」
+    // (`pathForIndex` · `remotePathForIndex`)을 `chain.get(` 호출 수로 세는데, 여기서 `get` 을 쓰면
+    // 세 번째가 되어 그 축이 빨개진다. 뜻으로도 `head()` 가 맞다 — 묻는 것이 「머리가 있나」다.
+    if (result.remote_chain.head().len != 0) self.agent_activity.chain = result.remote_chain;
 }
 
 /// 원격 신선도 확인의 결말.

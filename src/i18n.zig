@@ -432,6 +432,7 @@ const Table = struct {
     cfg_sidebar_width_pt: [:0]const u8,
     cfg_editor_wrap: [:0]const u8,
     cfg_editor_tab_width: [:0]const u8,
+    cfg_editor_max_columns: [:0]const u8,
     cfg_editor_scroll_beyond_last_column: [:0]const u8,
     cfg_editor_cursor_surrounding_lines: [:0]const u8,
     cfg_editor_cursor_surrounding_columns: [:0]const u8,
@@ -549,6 +550,7 @@ const Table = struct {
     editor_readonly: [:0]const u8,
     /// 행 수를 아직 다 못 셌다 — 그동안 스크롤바 길이가 실제보다 짧다(§2.1의 "없는 대로 그린다").
     editor_counting_rows: [:0]const u8,
+    editor_columns_capped: [:0]const u8,
     /// 원격이 없어 fetch를 누를 수 없다는 진술. **왜 안 되는지 말한다** — 비활성만 두면 고장으로 읽힌다.
     scm_no_remote: [:0]const u8,
     /// fetch가 끝났고 새로 온 것이 없다. 실패와 구별해야 한다 — 그쪽은 stderr가 이유를 말한다.
@@ -1412,6 +1414,7 @@ const en: Table = .{
     .scm_commit_slow = "The commit is taking a while",
     .editor_readonly = "Read-only",
     .editor_counting_rows = "Counting rows…",
+    .editor_columns_capped = "Long line: view capped (editor.max-columns)",
     .scm_no_remote = "This repository has no remote",
     .scm_fetch_done = "Fetched from the remote",
     .scm_menu_push = "Type git push",
@@ -1502,6 +1505,7 @@ const en: Table = .{
     .cfg_sidebar_width_pt = "Sidebar width (pt)",
     .cfg_editor_wrap = "Wrap long lines",
     .cfg_editor_tab_width = "Tab width (columns)",
+    .cfg_editor_max_columns = "Max horizontal columns (0 = unlimited)",
     .cfg_editor_scroll_beyond_last_column = "Scroll past the longest line (columns)",
     .cfg_editor_cursor_surrounding_lines = "Lines to keep above and below the cursor",
     .cfg_editor_cursor_surrounding_columns = "Columns to keep left and right of the cursor",
@@ -2066,6 +2070,7 @@ const ko: Table = .{
     .scm_commit_slow = "커밋이 오래 걸리는 중",
     .editor_readonly = "읽기 전용",
     .editor_counting_rows = "행 수 세는 중…",
+    .editor_columns_capped = "긴 줄: 보기가 상한에 걸렸다 (editor.max-columns)",
     .scm_no_remote = "이 저장소에는 원격이 없습니다",
     .scm_fetch_done = "원격에서 가져왔습니다",
     .scm_menu_push = "git push 넣기",
@@ -2157,6 +2162,7 @@ const ko: Table = .{
     .cfg_sidebar_width_pt = "사이드바 폭(pt)",
     .cfg_editor_wrap = "긴 줄 자동 줄바꿈",
     .cfg_editor_tab_width = "탭 폭(칸)",
+    .cfg_editor_max_columns = "가로 최대 열(0 = 무제한)",
     .cfg_editor_scroll_beyond_last_column = "가장 긴 줄 너머로 밀기(칸)",
     .cfg_editor_cursor_surrounding_lines = "커서 위·아래로 남길 줄 수",
     .cfg_editor_cursor_surrounding_columns = "커서 좌·우로 남길 칸 수",

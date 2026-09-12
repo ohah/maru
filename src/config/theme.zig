@@ -1105,6 +1105,25 @@ pub const EditorConfig = struct {
     /// 방어하지만 설정에서 그 값이 오는 것 자체를 허용하지 않는다.
     tab_width: u32 = 4,
 
+    /// **가로로 볼 수 있는 최대 열**(§3.8 — *"초장문·극단 입력에서 기능을 줄인다"*). `0` = 무제한.
+    ///
+    /// 가장 긴 줄을 셀 때 여기서 멈추고, 가로 위치의 상한이 `max_cols - 보이는 열`이므로 **이 값이
+    /// 곧 갈 수 있는 끝**이다. 그 너머의 글자는 그려지지 않는다.
+    ///
+    /// **기본 100,000 의 근거는 실제 파일이다.** 이 저장소에서 편집기가 **열 수 있는**(UTF-8) 파일의
+    /// 가장 긴 줄이 33,061자(`docs/verification-matrix.md`)이고, 그 셋째까지가 15,000자 미만이다.
+    /// 10만이면 그 세 배이고, **VSCode·Monaco 기본값(`editor.stopRenderingLineAfter` = 10,000)의
+    /// 열 배**다 — 그쪽은 그 너머를 *"Rendering paused for long line for performance reasons"* 로
+    /// 알리고 멈춘다(그 관례를 따르면서 값만 넉넉히 잡는다).
+    ///
+    /// **비용이 이 값에 선형이다.** 여는 경로가 줄마다 여기까지 세고(폭 합 캐시), 가로로 밀면
+    /// 줄마다 여기까지의 체크포인트를 세운다. 실측(ReleaseFast): 560만 열 한 줄에서 폭 세기 70.7ms ·
+    /// 체크포인트 71.8ms 이므로 10만이면 각각 **1~2ms** 다.
+    ///
+    /// **`0`(무제한)을 고르면 그 값을 사용자가 진다.** 체크포인트는 프레임에 나눠 세우므로(§2.1 점진
+    /// 계수) 한 프레임이 통째로 멈추지는 않지만, 다 설 때까지 프레임이 무겁다.
+    max_columns: u32 = 100_000,
+
     /// 편집기 caret **모양**(§9). 터미널의 `cursor.shape`와 **같은 값 이름**(`block`·`bar`·
     /// `underline`)을 쓰되 **키는 따로 둔다** — 그쪽은 *"앱이 DECSCUSR로 지정하지 않았을 때의
     /// 기본값"*이고 이쪽은 **그냥 그 모양**이다. 편집기에는 모양을 지정할 앱이 없으므로 "기본값"과
@@ -1174,6 +1193,9 @@ pub const EditorConfig = struct {
         // **이쪽은 `hidden`이 아니다.** 위 `wrap`이 가려진 이유는 *"값이 렌더에 닿는 경로가 없어
         // 토글해도 아무 일이 없다"*였는데, 탭 폭은 이 슬라이스에서 그 경로가 선다.
         .tab_width = Meta{ .key_seg = "tab-width", .doc = .cfg_editor_tab_width, .range = .{ 1, 16 }, .widget = .number, .section = .editor },
+        // **하한이 0 이다** — 그 값이 「무제한」이라는 뜻을 갖는다(Monaco 의 `-1` 과 같은 자리, 다만
+        // 우리 u32 에는 음수가 없으므로 0 을 쓴다). 상한 1,000,000 은 그 위가 실용 밖이라는 판단이다.
+        .max_columns = Meta{ .key_seg = "max-columns", .doc = .cfg_editor_max_columns, .range = .{ 0, 1_000_000 }, .widget = .number, .section = .editor },
         // 필드명은 `cursor_shape`지만 키는 `editor.cursor-shape`(key_seg). `cursor.shape`와 **같은
         // enum**을 쓰므로 값 파싱·GUI dropdown이 그대로 공유된다.
         .cursor_shape = Meta{ .key_seg = "cursor-shape", .doc = .cfg_editor_cursor_shape, .widget = .dropdown, .section = .editor },

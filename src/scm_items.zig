@@ -96,6 +96,7 @@ pub fn actionOf(action: scm_view.RowAction) types.RowAction {
     return switch (action) {
         .stage => .stage,
         .unstage => .unstage,
+        .resolve => .resolve,
         .none => .none,
     };
 }
@@ -121,11 +122,15 @@ test "디렉터리가 없으면 dir 이 빈다" {
     try testing.expectEqualStrings("", item.file.dir);
 }
 
-test "충돌 행은 동작이 없다 — `git add` 가 해결로 표시하기 때문" {
-    const row = scm_view.Row{ .file = .{ .section = .changes, .path = "a.txt", .letter = 'U', .action = .none, .conflicted = true } };
+test "충돌 행은 스테이지가 아니라 해결이다 — `git add` 가 해결로 표시하기 때문" {
+    // **모델이 `.resolve` 를 주면 항목도 `.resolve` 다**(S1). 여기서 `.stage` 로 새면 충돌 행에 `+` 가
+    // 서고, 그 `+` 는 충돌 표시가 든 파일을 "해결됨"으로 커밋한다.
+    const row = scm_view.Row{ .file = .{ .section = .changes, .path = "a.txt", .letter = 'U', .action = .resolve, .conflicted = true } };
     const item = itemFor(row, 0, 0, null, no_collapse);
     try testing.expectEqual(types.StatusKind.conflicted, item.file.status);
-    try testing.expectEqual(types.RowAction.none, item.file.action);
+    try testing.expectEqual(types.RowAction.resolve, item.file.action);
+    // 동작 없음도 그대로 옮긴다(같은 함수가 둘을 섞으면 위 단언이 무의미하다).
+    try testing.expectEqual(types.RowAction.none, actionOf(.none));
 }
 
 test "상태 글자 → 색 계열" {

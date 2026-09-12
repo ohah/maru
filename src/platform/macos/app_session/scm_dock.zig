@@ -2916,8 +2916,15 @@ fn submitRowWrite(self: *AppSession, ref: component.ids.RowRef) void {
         .file => |file| file,
         .section, .more, .notice => return,
     };
-    // 모델이 이미 판정한 것을 다시 판정하지 않는다 — 충돌 행은 여기서 `.none`이라 아무 일도 일어나지 않는다.
-    // 규칙은 **중립이 소유한다**(`git_write_command.kindForRow`) — Windows 표면도 같은 것을 쓴다.
+    // **충돌 행은 쓰기가 아니라 열기다**(S1). 여기서 갈라야 하는 이유: 아래 `kindForRow`는 `.resolve`에
+    // `null`을 내므로 그냥 두면 버튼이 **아무 일도 안 하는 컨트롤**이 된다(그 `null`은 "git을 부르지
+    // 말라"는 뜻이고 "동작이 없다"는 뜻이 아니다).
+    if (row.action == .resolve) {
+        git_ops.openEditorForScmRow(self, repo, row);
+        return;
+    }
+    // 모델이 이미 판정한 것을 다시 판정하지 않는다. 규칙은 **중립이 소유한다**
+    // (`git_write_command.kindForRow`) — Windows 표면도 같은 것을 쓴다.
     const kind = git_write_command.kindForRow(row.action, model.head.unborn) orelse return;
     const paths = [_][]const u8{row.path};
     if (!submitWrite(self, repo, kind, &paths)) return;

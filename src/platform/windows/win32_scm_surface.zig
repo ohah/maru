@@ -133,6 +133,9 @@ pub fn writeFor(built: *const Built, intent: component.ids.Intent) ?Write {
                 .file => |f| f,
                 else => return null,
             };
+            // **충돌 행(`.resolve`)은 여기서 `null`이다** — git 쓰기가 아니라 「편집기에서 열기」이고
+            // (S1 — docs/editor-merge-conflicts.md §5) 이 표면에는 아직 편집기가 없다. macOS 쪽은
+            // `submitRowWrite`가 그 갈래를 먼저 가른다. 여기서 무엇이든 내면 그것은 `git add`가 된다.
             const kind = git_write_command.kindForRow(row.action, built.model.head.unborn) orelse return null;
             return .{ .kind = kind, .path = row.path };
         },

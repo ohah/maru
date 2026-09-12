@@ -5082,9 +5082,26 @@ pub fn completeFileTreeTrash(
 /// 터미널 링크와 NSOpenPanel이 공유하는 FP5 열기 단일 경로. 호출자는 절대경로만 넘기며, 확장자와 regular-file
 /// 판정은 여기서 다시 확인한다. 기존 entry면 DockPanel.open이 새 surface를 만들지 않고 그 탭만 활성화한다.
 pub fn openFilePanelPath(self: *AppSession, path: []const u8) FilePanelOpenPathResult {
+    const open_kind = file_panel_bridge.openKindForPath(path) orelse return .unsupported;
+    return openFilePanelPathAs(self, path, open_kind);
+}
+
+/// 같은 길이되 **여는 종류를 호출자가 정한다**. 확장자 분류는 「이 파일을 평소 무엇으로 보나」를 답하고,
+/// 부르는 쪽이 그와 **다른 질문**을 들고 올 때가 있다.
+///
+/// 지금 그 유일한 호출자는 병합 충돌 해결(S1 — docs/editor-merge-conflicts.md §5)이다: `.md`·`.svg`는
+/// 기본 모드가 `.read`(렌더된 화면)라 그대로 열면 `<<<<<<<` 마커가 **아예 안 보인다**. 충돌을 고치려면
+/// 원문이어야 하므로 그 경로는 `.text`를 들고 온다.
+///
+/// **검증은 나누지 않는다** — 절대경로·UTF-8·mutation busy·도크 초기화·`stat`이 전부 여기 한 번뿐이고
+/// `openFilePanelPath`도 이 함수를 지난다. 두 벌이 되면 한쪽에만 검사가 빠진다.
+pub fn openFilePanelPathAs(
+    self: *AppSession,
+    path: []const u8,
+    open_kind: file_panel_bridge.OpenKind,
+) FilePanelOpenPathResult {
     if (fileTreeFileMutationBusy(self) or !self.dock_initialized or path.len == 0 or !std.fs.path.isAbsolute(path) or
         !std.unicode.utf8ValidateSlice(path)) return .failed;
-    const open_kind = file_panel_bridge.openKindForPath(path) orelse return .unsupported;
     const stat = std.Io.Dir.cwd().statFile(self.io, path, .{}) catch return .failed;
     if (stat.kind != .file) return .failed;
     return openFilePanelPathAfterValidation(self, path, open_kind, null);

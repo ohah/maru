@@ -742,7 +742,7 @@ pub fn main(init: std.process.Init) !void {
         // **고친 뒤에도 그대로** 캡처했다(2026-08-31). `scm_blocker` 도 같은 이유로 빠져 있었다.
         // 갈래를 다 적어 두면 새 시나리오는 컴파일 오류로 드러난다.
         const rect = (switch (scenario_id) {
-            .scm_rows, .scm_history, .scm_row_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_small_font, .scm_blocker, .dock_over_status_bar => chrome.components.scm_dock.build.scrollTextViewport(frame.tree),
+            .scm_rows, .scm_history, .scm_row_hover, .scm_conflict_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_small_font, .scm_blocker, .dock_over_status_bar => chrome.components.scm_dock.build.scrollTextViewport(frame.tree),
             .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome => chrome.components.file_tree.build.scrollTextViewport(frame.tree),
             .empty, .loading, .retained_list, .font_specimen, .partial_scroll, .partial_group_scroll, .scrollbar, .sticky_at_rest, .sticky_pinned, .sticky_pushed, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .sort_toggle_hover, .sort_toggle_pressed, .sidebar_status_strip, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .context_menu_checked, .context_menu_send, .context_menu_unchecked, .editor_real_file, .editor_typescript, .editor_selection, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_find, .editor_diff_selection, .editor_diff, .editor_diff_scrolled => chrome.components.session_dock.build.scrollTextViewport(frame.tree),
         }) orelse break :blk null;
@@ -995,6 +995,7 @@ fn scenarioFromEnvValue(raw: []const u8) ?lab.ScenarioId {
     if (std.mem.eql(u8, raw, "scm-rows")) return .scm_rows;
     if (std.mem.eql(u8, raw, "scm-history")) return .scm_history;
     if (std.mem.eql(u8, raw, "scm-row-hover")) return .scm_row_hover;
+    if (std.mem.eql(u8, raw, "scm-conflict-hover")) return .scm_conflict_hover;
     if (std.mem.eql(u8, raw, "scm-repo-hover")) return .scm_repo_hover;
     if (std.mem.eql(u8, raw, "scm-scrolled")) return .scm_scrolled;
     if (std.mem.eql(u8, raw, "scm-small-font")) return .scm_small_font;
@@ -1018,6 +1019,7 @@ fn artifactName(id: lab.ScenarioId) []const u8 {
         .scm_rows => "scm-rows",
         .scm_history => "scm-history",
         .scm_row_hover => "scm-row-hover",
+        .scm_conflict_hover => "scm-conflict-hover",
         .scm_repo_hover => "scm-repo-hover",
         .scm_scrolled => "scm-scrolled",
         .scm_small_font => "scm-small-font",

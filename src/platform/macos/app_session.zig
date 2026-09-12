@@ -73946,6 +73946,322 @@ test "소스 컨트롤: `+` 버튼을 누르면 **그 행의** 스테이지 inte
     try std.testing.expectEqual(chrome.components.scm_dock.types.RowAction.stage, props.items[5].file.action);
 }
 
+// [S1 — docs/editor-merge-conflicts.md §5] 충돌 행의 동작 버튼을 **실제로 눌러** 편집 가능한 편집기가
+// 열리는가. **제품 경계를 넘는다**: `openEditorForScmRow`를 직접 부르면 그 위의 두 층(모델이 `.resolve`를
+// 내는가 · `submitRowWrite`가 그 갈래를 가르는가)이 죽어 있어도 초록이다. 그래서 published tree의 버튼
+// rect에 포인터를 내리고 올려 intent를 받고, **그 intent를 제품 핸들러에 넣는다**.
+test "SCMC1 충돌 행의 동작 버튼은 편집 가능한 편집기를 연다 — `git add`가 아니다 (제품 경계)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    // **실제 파일이 있어야 한다** — 여는 경로가 `stat`으로 regular file을 확인한다(그 검사를 우회하면
+    // 이 판정자는 "열었다"를 증언하지 못한다).
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "conflict.txt",
+        .data = "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> topic\n",
+    });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const repo = root_buf[0..try tmp.dir.realPath(std.testing.io, &root_buf)];
+
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    try pinTermsOutsideRepo(session, allocator);
+    session.git_backend = try git_backend_mod.Backend.init(session.io);
+    session.git_backend.?.state.?.shutting_down = true;
+
+    const launcher = file_panel_ops.filePanelDockControlRect(session) orelse return error.MissingDockLauncher;
+    session.mouse(1, @floatFromInt(launcher.x + 1), @floatFromInt(launcher.y + 1), 0, 0);
+    dock_ops.setDockView(session, .source_control);
+
+    // **충돌 하나와 평범한 변경 하나**를 함께 둔다(픽스처가 두 개념을 갈라야 한다) — 충돌만 있으면
+    // "모든 행이 편집기를 연다"로 갈려도 초록이다.
+    session.git_result = .{
+        .status = try git_backend_mod.worker_allocator.dupe(u8, "# branch.head main\nu UU N... 100644 100644 100644 100644 aaa bbb ccc conflict.txt\n1 .M N... 1 2 3 a b plain.txt\n"),
+        .numstat_head = try git_backend_mod.worker_allocator.dupe(u8, "1\t0\tplain.txt\n"),
+        .ok = true,
+    };
+    git_ops.rememberGitRepo(session, repo);
+
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const projection = scm_dock_ops.project(session, arena) orelse return error.MissingProjection;
+    const props = scm_dock_ops.testProps(session, projection);
+    const sizes = chrome.components.scm_dock.build.bufferSizes(props.items);
+    const frame = try chrome.components.scm_dock.build.build(props, .{
+        .nodes = try arena.alloc(chrome.ui.tree.UiNode, sizes.nodes),
+        .entries = try arena.alloc(chrome.ui.tree.RectEntry, sizes.entries),
+        .layout_items = try arena.alloc(chrome.ui.layout.Item, sizes.layout_items),
+        .flex_scratch = try arena.alloc(chrome.ui.layout.FlexScratch, sizes.flex_scratch),
+        .child_rects = try arena.alloc(chrome.ui.layout.UiRect, sizes.child_rects),
+        .actions = try arena.alloc(chrome.components.scm_dock.ids.Entry, sizes.actions),
+    });
+    scm_dock_ops.publishScmDockFrame(session, frame, props.items);
+
+    // 0=머리 줄 · 1=커밋 입력 · 2=커밋 버튼 · 3=그룹 헤더 · **4=conflict.txt** · 5=plain.txt.
+    // **투영이 `+`가 아니다**를 먼저 못박는다 — 이 값이 `.stage`로 갈리면 아래 클릭이 `git add`다.
+    try std.testing.expectEqual(chrome.components.scm_dock.types.RowAction.resolve, props.items[4].file.action);
+    try std.testing.expectEqual(chrome.components.scm_dock.types.RowAction.stage, props.items[5].file.action);
+
+    const content = dock_ops.dockGeometry(session).tree_content;
+    const button = blk: {
+        for (session.scm_dock_entries.items) |entry| {
+            if (entry.id != chrome.components.scm_dock.build.NodeIds.itemAction(4)) continue;
+            break :blk .{
+                .x = @as(f64, @floatFromInt(content.x)) + entry.rect.x + entry.rect.width / 2,
+                .y = @as(f64, @floatFromInt(content.y)) + entry.rect.y + entry.rect.height / 2,
+            };
+        }
+        // **버튼이 아예 없으면 실패다.** 충돌 행에 동작이 없던 때에는 이 노드가 선언되지도 않았다.
+        return error.MissingActionRect;
+    };
+
+    _ = scm_dock_ops.scmDockPointer(session, .down, button.x, button.y);
+    const intent = scm_dock_ops.scmDockPointer(session, .up, button.x, button.y) orelse return error.NoIntent;
+    switch (intent) {
+        // **모델 인덱스는 항목 자리와 다르다**(0=그룹 헤더 · **1=conflict.txt** · 2=plain.txt) — 머리
+        // 줄·커밋 줄 둘은 모델 행이 아니라 host가 앞에 끼우는 항목이다. 창 자리를 실었다면 여기가 갈린다.
+        .row_action => |ref| try std.testing.expectEqual(@as(u32, 1), ref.model_index),
+        else => return error.WrongIntent,
+    }
+    scm_dock_ops.applyScmDockIntent(session, intent);
+
+    // ⑴ **편집기가 열렸다.** entry 하나가 그 경로로 서 있고, 비교(`.diff`)가 아니다.
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const abs = try std.fmt.bufPrint(&abs_buf, "{s}/conflict.txt", .{repo});
+    const entry = blk: {
+        var it = file_panel_ops.fileEntries(session);
+        while (it.next()) |candidate| {
+            if (std.mem.eql(u8, candidate.path, abs)) break :blk candidate;
+        }
+        return error.MissingEditorEntry;
+    };
+    // **`.diff`가 아니다.** `diff_base`는 기본값이 있는 필드라 그것으로는 못 가른다 — kind가 판정이다.
+    // `.txt`는 확장자 분류가 `.text`를 주므로(`openKindForPath`) 그 값을 그대로 못박는다 — 탐색기가
+    // 여는 것과 **같은 kind**여야 「평범한 편집기가 그대로 편집한다」가 참이다.
+    try std.testing.expectEqual(dock_panel.EntryKind.text, entry.kind);
+
+    // ⑵ **그 Term이 편집기이고 읽기 전용이 아니다**(계약의 관측점). 비교 뷰가 읽기 전용이라 해결을 못
+    // 하던 것이 이 슬라이스의 출발점이므로, 「열렸다」만으로는 부족하다.
+    const term = pane_ops.activePane(session).activeTerm();
+    try std.testing.expectEqual(@as(u64, entry.surface_id), term.surfaceId());
+    try std.testing.expect(term.kind == .editor);
+    const doc = term.rt.editor_doc orelse return error.MissingDocument;
+    try std.testing.expect(!doc.file.read_only);
+    // 충돌 표시가 든 **그 파일**을 들고 있다(다른 파일을 열고 초록이 되지 않게).
+    try std.testing.expect(std.mem.startsWith(u8, doc.file.content, "<<<<<<< HEAD"));
+
+    // ⑶ **git 쓰기가 한 번도 안 갔다.** `.resolve`가 `kindForRow`를 지나 `.stage`로 새면 여기가 빨개진다 —
+    // 그것이 「충돌 표시를 남긴 파일이 해결됨으로 커밋된다」는 바로 그 사고다.
+    try std.testing.expect(session.scm_write_repo == null);
+    try std.testing.expect(session.scm_pending == null);
+}
+
+// [S1] **같은 행의 두 길은 서로를 뺏지 않는다.** 기본 클릭은 지금까지대로 비교를 열고(읽기 전용),
+// 동작 버튼만 편집기를 연다 — 한쪽이 다른 쪽 경로를 삼키면 「무엇이 충돌했나」나 「고치기」 중 하나가 사라진다.
+test "SCMC2 충돌 행의 기본 클릭은 그대로 비교를 연다 (제품 경계)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "conflict.txt", .data = "<<<<<<< HEAD\nx\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const repo = root_buf[0..try tmp.dir.realPath(std.testing.io, &root_buf)];
+
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    try pinTermsOutsideRepo(session, allocator);
+    session.git_backend = try git_backend_mod.Backend.init(session.io);
+    session.git_backend.?.state.?.shutting_down = true;
+    dock_ops.setDockView(session, .source_control);
+    session.git_result = .{
+        .status = try git_backend_mod.worker_allocator.dupe(u8, "# branch.head main\nu UU N... 100644 100644 100644 100644 aaa bbb ccc conflict.txt\n"),
+        .ok = true,
+    };
+    git_ops.rememberGitRepo(session, repo);
+
+    var rows_buf: [64]maru.session.scm_view.Row = undefined;
+    var scratch: [std.fs.max_path_bytes]u8 = undefined;
+    const model = git_ops.buildScmModel(session, &rows_buf, &scratch) orelse return error.MissingModel;
+    const file = switch (model.rows[1]) {
+        .file => |f| f,
+        else => return error.WrongRow,
+    };
+    try std.testing.expect(file.conflicted);
+
+    // **기본 클릭의 intent를 제품 핸들러에 넣는다**(`.open_row`). 여기서 `openDiffForScmRow`를 직접
+    // 부르면 그 위 층(행 클릭이 어느 함수로 가는가)이 편집기로 갈려도 초록이다 — 실제로 그 변이가
+    // 3회차에서 살아남아 이 줄이 이렇게 바뀌었다.
+    scm_dock_ops.applyScmDockIntent(session, .{ .open_row = .{ .repo_index = 0, .model_index = 1 } });
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const abs = try std.fmt.bufPrint(&abs_buf, "{s}/conflict.txt", .{repo});
+    const diff = git_ops.diffTermFor(session, abs, .conflict) orelse return error.MissingDiffTerm;
+    const diff_entry = diff.file_entry orelse return error.MissingEntry;
+    try std.testing.expectEqual(dock_panel.EntryKind.diff, diff_entry.kind);
+
+    // 그 다음 동작 버튼 경로(`.row_action`)가 **다른 Term**을 연다 — 같은 경로라도 비교와 편집기는
+    // 서로를 덮지 않는다. 이쪽도 제품 핸들러를 지난다.
+    scm_dock_ops.applyScmDockIntent(session, .{ .row_action = .{ .repo_index = 0, .model_index = 1 } });
+    var editors: usize = 0;
+    var diffs: usize = 0;
+    var it = file_panel_ops.fileEntries(session);
+    while (it.next()) |candidate| {
+        if (!std.mem.eql(u8, candidate.path, abs)) continue;
+        if (candidate.kind == .diff) diffs += 1 else editors += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), diffs);
+    try std.testing.expectEqual(@as(usize, 1), editors);
+}
+
+// [S1] **거부하는 갈래 여섯.** 「닿을 수 있는지부터 재라」 — 위 둘은 여는 데 성공하는 경로만 지나므로,
+// 막아야 하는 자리(루트 밖·하위 모듈)와 저하를 말해야 하는 자리(이진 파일·못 여는 파일)는 **무판정**으로
+// 남는다. 넷 다 "아무 일도 안 일어난다"로 같아 보이므로 **문구가 갈리는지**까지 본다.
+test "SCMC3 편집기로 열지 못하는 여섯 — 막고, 이유를 갈라 말한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // 이진 파일 하나(확장자 분류가 편집기를 안 준다)와, **없는 파일**은 만들지 않는다.
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "shot.png", .data = "\x89PNG\r\n" });
+    // **이진 확장자**는 분류가 `null`을 낸다 — 이미지(`.png`)와 **다른 갈래**라 따로 세운다.
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "bundle.zip", .data = "PK\x03\x04" });
+    try tmp.dir.createDirPath(std.testing.io, "adir");
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const repo = root_buf[0..try tmp.dir.realPath(std.testing.io, &root_buf)];
+
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    session.git_backend = try git_backend_mod.Backend.init(session.io);
+    session.git_backend.?.state.?.shutting_down = true;
+    // **도크를 세운다.** 여는 경로의 첫 줄이 `dock_initialized`를 보므로, 이것 없이는 여섯이 전부
+    // `.failed`로 떨어져 「이유를 갈라 말한다」가 **거짓으로 초록**이 된다(문구 넷이 한 문구가 된다).
+    const launcher = file_panel_ops.filePanelDockControlRect(session) orelse return error.MissingDockLauncher;
+    session.mouse(1, @floatFromInt(launcher.x + 1), @floatFromInt(launcher.y + 1), 0, 0);
+
+    const before = blk: {
+        var n: usize = 0;
+        var it = file_panel_ops.fileEntries(session);
+        while (it.next()) |_| n += 1;
+        break :blk n;
+    };
+
+    const Case = struct { row: maru.session.scm_view.FileRow, want: maru.i18n.Key };
+    const cases = [_]Case{
+        // ⑴ 루트 밖 — 비교 경로와 **같은 판정**이어야 한다(한쪽으로 막힌 파일이 다른 쪽으로 열리면 안 된다).
+        .{ .row = .{ .section = .changes, .path = "../escape.txt", .letter = 'U', .action = .resolve, .conflicted = true }, .want = .git_path_outside_repo },
+        // ⑵ 하위 모듈 — 디렉터리라 열리지 않는다. 조용히 실패하면 "안 눌렸다"로 읽힌다.
+        .{ .row = .{ .section = .changes, .path = "vendor", .letter = 'U', .action = .resolve, .conflicted = true, .submodule = true }, .want = .git_submodule_no_diff },
+        // ⑶ 이진 파일 — 편집기가 **없다**. 못 연 것과 다른 사실이다.
+        .{ .row = .{ .section = .changes, .path = "shot.png", .letter = 'U', .action = .resolve, .conflicted = true }, .want = .git_conflict_not_editable },
+        // ⑷ 이진 확장자 — 분류가 `null`이다. `.png`과 **다른 갈래**이고, 조용히 돌아가면 무동작이 된다.
+        .{ .row = .{ .section = .changes, .path = "bundle.zip", .letter = 'U', .action = .resolve, .conflicted = true }, .want = .git_conflict_not_editable },
+        // ⑸ **디렉터리** — 이름만 보면 텍스트 파일과 구별되지 않는다(확장자가 없을 뿐). 여는 검증의
+        // `stat`이 이것을 막고, 그 검증은 이제 충돌 경로와 탐색기가 **함께 쓰는** 함수에 있다.
+        .{ .row = .{ .section = .changes, .path = "adir", .letter = 'U', .action = .resolve, .conflicted = true }, .want = .git_conflict_open_failed },
+        // ⑹ 없는 파일 — `stat`이 실패한다.
+        .{ .row = .{ .section = .changes, .path = "gone.txt", .letter = 'U', .action = .resolve, .conflicted = true }, .want = .git_conflict_open_failed },
+    };
+    for (cases) |case| {
+        @memset(&session.notice_message_buf, 0);
+        git_ops.openEditorForScmRow(session, repo, case.row);
+        const want = maru.i18n.t(case.want);
+        // **문구가 갈린다**를 본다 — 넷을 한 문구로 묶으면 사용자가 무엇을 해야 할지 모른다.
+        if (!std.mem.startsWith(u8, &session.notice_message_buf, want)) {
+            std.debug.print("\ncase {s}: want=[{s}] got=[{s}]\n", .{ case.row.path, want, std.mem.sliceTo(&session.notice_message_buf, 0) });
+            return error.WrongNotice;
+        }
+        // 그리고 **아무것도 안 열렸다**. 문구만 맞고 Term이 서면 빈 화면이 남는다.
+        var now: usize = 0;
+        var it = file_panel_ops.fileEntries(session);
+        while (it.next()) |_| now += 1;
+        try std.testing.expectEqual(before, now);
+    }
+
+    // **반대쪽 한 줄** — 마크다운은 열린다. 그리고 `.markdown`이 아니라 **`.text`**로 열려야 한다:
+    // `.markdown`의 기본 모드는 `.read`(렌더된 화면)이고 거기에는 `<<<<<<<`가 아예 안 보인다 —
+    // 고치러 연 화면이 고칠 것을 감춘다. 이 한 줄이 없으면 위 여섯은 「전부 거부한다」로 갈려도 초록이다.
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "notes.md", .data = "<<<<<<< HEAD\n# ours\n" });
+    @memset(&session.notice_message_buf, 0);
+    git_ops.openEditorForScmRow(session, repo, .{ .section = .changes, .path = "notes.md", .letter = 'U', .action = .resolve, .conflicted = true });
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const md_abs = try std.fmt.bufPrint(&abs_buf, "{s}/notes.md", .{repo});
+    const md_entry = blk: {
+        var it = file_panel_ops.fileEntries(session);
+        while (it.next()) |candidate| {
+            if (std.mem.eql(u8, candidate.path, md_abs)) break :blk candidate;
+        }
+        return error.MissingEditorEntry;
+    };
+    try std.testing.expectEqual(dock_panel.EntryKind.text, md_entry.kind);
+    try std.testing.expectEqual(dock_panel.Mode.source_edit, md_entry.mode);
+}
+
+// [S1 · ②d] **그 행이 선 저장소를 연다.** 목록에는 저장소가 여럿일 수 있고 비활성 저장소도 파일 줄을
+// 낸다 — 활성 저장소로 떨어지면 **같은 이름의 남의 파일**을 열거나(더 나쁘다) 아무것도 안 연다.
+// 비교 경로가 예전에 정확히 그렇게 깨졌고(그 함수의 머리말), 편집기 경로도 같은 함정을 지난다.
+test "SCMC4 두 번째 저장소의 충돌 행은 **그 저장소의** 파일을 연다 (P3d-②d)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    // **활성 저장소(A)에는 그 파일이 없다.** 있으면 활성으로 떨어져도 열려 이 판정자가 무의미해진다.
+    var tmp_a = std.testing.tmpDir(.{});
+    defer tmp_a.cleanup();
+    var tmp_b = std.testing.tmpDir(.{});
+    defer tmp_b.cleanup();
+    try tmp_b.dir.writeFile(std.testing.io, .{ .sub_path = "conflict.txt", .data = "<<<<<<< HEAD\nb\n" });
+    var a_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var b_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const repo_a = a_buf[0..try tmp_a.dir.realPath(std.testing.io, &a_buf)];
+    const repo_b = b_buf[0..try tmp_b.dir.realPath(std.testing.io, &b_buf)];
+
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    session.git_backend = try git_backend_mod.Backend.init(session.io);
+    session.git_backend.?.state.?.shutting_down = true;
+    try pinTermsOutsideRepo(session, allocator);
+    const launcher = file_panel_ops.filePanelDockControlRect(session) orelse return error.MissingDockLauncher;
+    session.mouse(1, @floatFromInt(launcher.x + 1), @floatFromInt(launcher.y + 1), 0, 0);
+    dock_ops.setDockView(session, .source_control);
+    session.git_result = .{
+        .status = try git_backend_mod.worker_allocator.dupe(u8, "# branch.head main\n1 .M N... 1 2 3 a b one.txt\n"),
+        .ok = true,
+    };
+    git_ops.rememberGitRepo(session, repo_a);
+
+    // 두 번째 저장소는 **머리 줄 읽기 결과**로 목록에 든다(비활성 저장소가 파일 줄을 내는 그 길).
+    const worktrees = try std.fmt.allocPrint(git_backend_mod.worker_allocator, "worktree {s}\nbranch refs/heads/main\n\nworktree {s}\nbranch refs/heads/side\n", .{ repo_a, repo_b });
+    session.git_result.?.worktrees = worktrees;
+    scm_dock_ops.invalidateRepoList(session);
+    try session.scm_repo_status.append(allocator, .{
+        .path = try allocator.dupe(u8, repo_b),
+        .branch = try allocator.dupe(u8, "side"),
+        .detached = false,
+        .count = 1,
+        .ahead = 0,
+        .behind = 0,
+        .has_ab = false,
+        .status_text = try allocator.dupe(u8, "# branch.head side\nu UU N... 100644 100644 100644 100644 aaa bbb ccc conflict.txt\n"),
+    });
+
+    // 저장소 1의 모델: 0=그룹 헤더 · 1=conflict.txt.
+    scm_dock_ops.applyScmDockIntent(session, .{ .row_action = .{ .repo_index = 1, .model_index = 1 } });
+
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const want = try std.fmt.bufPrint(&abs_buf, "{s}/conflict.txt", .{repo_b});
+    var found = false;
+    var it = file_panel_ops.fileEntries(session);
+    while (it.next()) |entry| {
+        // **A 밑의 경로가 서면 실패다** — 활성 저장소로 떨어졌다는 뜻이다.
+        try std.testing.expect(!std.mem.startsWith(u8, entry.path, repo_a));
+        if (std.mem.eql(u8, entry.path, want)) found = true;
+    }
+    try std.testing.expect(found);
+}
+
 // [손 확인] "첫 파일은 열리는데 두 번째가 안 열린다". 클릭 경로(행 → openDiffForScmRow)를 그대로 태워 재현한다.
 test "소스 컨트롤: 여러 행을 연달아 눌러도 각각 diff Term이 열린다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;

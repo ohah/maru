@@ -851,7 +851,7 @@ pub fn build(b: *std.Build) void {
         macos_chrome_lab_smoke.root_module.linkFramework("QuartzCore", .{});
 
         const macos_chrome_lab_smoke_step = b.step("macos-chrome-lab-smoke", "Capture deterministic Chrome Lab scenarios through the product Metal renderer");
-        inline for ([_][]const u8{ "empty", "loading", "retained-list", "font-specimen", "partial-scroll", "partial-group-scroll", "scrollbar", "sticky-at-rest", "sticky-pinned", "sticky-pushed", "detail-loading", "detail-ready", "detail-stale", "detail-unavailable", "sidebar-status-strip", "editor-gutter", "editor-scrolled", "editor-font-large", "editor-hazard", "editor-wide-glyph", "editor-wrap", "editor-hscroll", "editor-folded", "editor-wrap-scrolled", "editor-wrap-stale-scroll", "editor-real-file", "editor-typescript", "editor-selection", "editor-find", "editor-caret-bar", "editor-caret-block", "editor-caret-underline", "editor-diff-selection", "editor-diff", "editor-diff-scrolled", "context-menu-checked", "context-menu-unchecked", "context-menu-send", "scm-rows", "scm-history", "scm-row-hover", "scm-repo-hover", "scm-scrolled", "scm-commit-edit", "scm-blocker", "scm-small-font", "dock-over-status-bar", "file-tree-rows", "file-tree-row-hover", "file-tree-scrolled", "file-tree-over-chrome", "sort-toggle-hover", "sort-toggle-pressed" }) |scenario| {
+        inline for ([_][]const u8{ "empty", "loading", "retained-list", "font-specimen", "partial-scroll", "partial-group-scroll", "scrollbar", "sticky-at-rest", "sticky-pinned", "sticky-pushed", "detail-loading", "detail-ready", "detail-stale", "detail-unavailable", "sidebar-status-strip", "editor-gutter", "editor-scrolled", "editor-font-large", "editor-hazard", "editor-wide-glyph", "editor-wrap", "editor-hscroll", "editor-folded", "editor-wrap-scrolled", "editor-wrap-stale-scroll", "editor-real-file", "editor-typescript", "editor-selection", "editor-find", "editor-caret-bar", "editor-caret-block", "editor-caret-underline", "editor-diff-selection", "editor-diff", "editor-diff-scrolled", "context-menu-checked", "context-menu-unchecked", "context-menu-send", "scm-rows", "scm-history", "scm-row-hover", "scm-conflict-hover", "scm-repo-hover", "scm-scrolled", "scm-commit-edit", "scm-blocker", "scm-small-font", "dock-over-status-bar", "file-tree-rows", "file-tree-row-hover", "file-tree-scrolled", "file-tree-over-chrome", "sort-toggle-hover", "sort-toggle-pressed" }) |scenario| {
             const run_chrome_lab = b.addRunArtifact(macos_chrome_lab_smoke);
             run_chrome_lab.setCwd(b.path("."));
             run_chrome_lab.setEnvironmentVariable("MARU_CHROME_LAB_SCENARIO", scenario);
@@ -3549,6 +3549,23 @@ pub fn build(b: *std.Build) void {
     const run_file_tree_model_tests = b.addRunArtifact(file_tree_model_tests);
     run_file_tree_model_tests.addArg("--maru-expect-tests=24"); // 이름 있는 셋 + 이 그래프의 이름 없는 test 블록들(필터와 무관하게 컴파일된다)
     b.step("test-file-tree-model", "Run the pure file tree model unit tests only (RF5a filter)").dependOn(&run_file_tree_model_tests.step);
+
+    // 소스 컨트롤 **행 동작 규칙**만(S1 — 충돌 행은 스테이지가 아니라 해결이다). 같은 이유로 maru
+    // 그래프에 필터를 건다: 이 판정자들은 `test-editor` 그래프에 **없어서**(실측 2026-09-12) 그 이름만
+    // 돌리던 적대적 검증이 `scm_view`·`git_write_command` 변이를 전부 「살아남음」으로 읽었다.
+    const scm_row_model_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/maru.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "shutdown_wire_contract", .module = shutdown_wire_contract_mod }},
+        }),
+        .filters = &.{ "충돌 행은 스테이지가 아니라", "충돌과 평범한 변경이 섞인 섹션", "행: 스테이지·언스테이지·충돌" },
+    });
+    scm_row_model_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
+    const run_scm_row_model_tests = b.addRunArtifact(scm_row_model_tests);
+    b.step("test-scm-row-model", "Run the SCM row-action model judges only (S1 filter)").dependOn(&run_scm_row_model_tests.step);
 
     // 원격 변경 결과 wire(RF6a) 순수 판정자만. 같은 이유로 maru 그래프에 필터를 건다.
     const remote_mutation_wire_tests = addProjectTest(b, .{

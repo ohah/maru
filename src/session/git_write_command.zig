@@ -803,7 +803,10 @@ pub fn kindForRow(action: scm_view.RowAction, unborn: bool) ?Kind {
     return switch (action) {
         .stage => .stage,
         .unstage => if (unborn) .unstage_unborn else .unstage,
-        .none => null,
+        // **`.resolve`는 git을 부르지 않는다** — 충돌 행의 동작은 「편집기에서 열기」이고 index를
+        // 건드리지 않는다(S1). 여기서 `.stage`로 떨어뜨리면 해결 버튼이 곧 `git add`가 되어,
+        // 충돌 표시를 남긴 파일이 "해결됨"으로 커밋된다(§3.5가 `+`를 금지한 바로 그 사고).
+        .resolve, .none => null,
     };
 }
 
@@ -823,9 +826,13 @@ test "행: 스테이지·언스테이지·충돌" {
     try testing.expectEqual(Kind.unstage_unborn, kindForRow(.unstage, true).?);
     // 스테이지는 unborn 에서도 같다(`add` 는 HEAD 를 안 본다).
     try testing.expectEqual(Kind.stage, kindForRow(.stage, true).?);
-    // 충돌 행은 아무 일도 없다.
+    // 동작 없는 행은 아무 일도 없다.
     try testing.expectEqual(@as(?Kind, null), kindForRow(.none, false));
     try testing.expectEqual(@as(?Kind, null), kindForRow(.none, true));
+    // **충돌 행의 해결 동작도 git 쓰기가 아니다**(S1). unborn 여부와 무관하게 `null`이다 —
+    // 여기서 무엇이든 나오면 「편집기에서 열기」 버튼이 index를 바꾼다.
+    try testing.expectEqual(@as(?Kind, null), kindForRow(.resolve, false));
+    try testing.expectEqual(@as(?Kind, null), kindForRow(.resolve, true));
 }
 
 test "섹션: 일괄 명령도 unborn 특례를 탄다" {

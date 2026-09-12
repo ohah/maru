@@ -164,13 +164,28 @@ var adoption_reject_site: []const u8 = "none";
 
 fn notePreparedAttachRejected(site: []const u8) void {
     adoption_reject_site = site;
+    adoption_reject_error = "-";
+}
+
+/// 자리가 **여러 오류를 한 이름으로 묶는** 경우의 마지막 구분자.
+///
+/// 2026-09-12 실측: `site=screen_batch_enqueue` 까지 왔는데 그 자리는 `GlobalLimit` 을 뺀 **다섯**을
+/// 한 이름으로 낸다 — `ScreenInvalidated`·`SlotLimit`·`ChunkLimit`·`OutOfMemory`·`Stale`. 고칠 곳이
+/// 전부 다르다. 한도를 보면 `max_chunks_per_slot`(4096)은 `frames=11` 로 못 걸리고 `per_slot_bytes`
+/// 는 18 MiB 라, `screen_soft_bytes`(8 MiB)가 유력하다 — 그러나 그건 **추론이다.**
+/// 이 축에서 네 번 추측으로 틀렸다. 이름 하나면 끝난다.
+var adoption_reject_error: []const u8 = "-";
+
+fn notePreparedAttachRejectedErr(site: []const u8, err: anyerror) void {
+    adoption_reject_site = site;
+    adoption_reject_error = @errorName(err);
 }
 
 fn noteAttachAdoption(adopted: SubscriptionAdoption, frames: usize) void {
     if (builtin.is_test) return;
     host_log.line(
-        "session host attach not admitted: adoption={s} site={s} frames={d}",
-        .{ @tagName(adopted), adoption_reject_site, frames },
+        "session host attach not admitted: adoption={s} site={s} err={s} frames={d}",
+        .{ @tagName(adopted), adoption_reject_site, adoption_reject_error, frames },
     );
 }
 
@@ -888,7 +903,7 @@ pub const Client = struct {
                         slot.enqueueOwnedScreenBatch(tracker, frames) catch |retry_err| {
                             for (frames) |bytes| self.allocator.free(bytes);
                             if (retry_err == error.GlobalLimit) return .deferred_global_pressure;
-                            notePreparedAttachRejected("reclaim_retry_failed");
+                            notePreparedAttachRejectedErr("reclaim_retry_failed", retry_err);
                             return .rejected;
                         };
                         self.consumePreparedCatchup(prepared_catchup);
@@ -899,7 +914,7 @@ pub const Client = struct {
                 return .deferred_global_pressure;
             }
             for (frames) |bytes| self.allocator.free(bytes);
-            notePreparedAttachRejected("screen_batch_enqueue");
+            notePreparedAttachRejectedErr("screen_batch_enqueue", err);
             return .rejected;
         };
         self.consumePreparedCatchup(prepared_catchup);

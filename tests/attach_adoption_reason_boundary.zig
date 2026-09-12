@@ -93,13 +93,30 @@ test "attach 거절은 어느 판정이었는지와 프레임 수를 남긴다" 
         }
     }
     // ⑤ 로그가 자리를 **함께** 낸다. 판정만으로는 여덟이 뭉친다.
+    //
+    //    **조각으로 고정한다.** 포맷 문자열을 통째로 잠갔다가 오늘 세 번 개선을 막았다 — 자리(`site`)를
+    //    더할 때, 오류 이름(`err`)을 더할 때. 고정할 의도는 「한 줄에 이것들이 함께 나온다」이지 문자열
+    //    전체의 철자가 아니다.
+    try std.testing.expect(std.mem.indexOf(u8, src, "attach not admitted:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, src, "site={s}") != null);
+
+    // ⑥ **오류를 여럿 묶는 자리는 이름까지 낸다.** `screen_batch_enqueue` 는 `GlobalLimit` 을 뺀 다섯을
+    //    한 이름으로 낸다(`ScreenInvalidated`·`SlotLimit`·`ChunkLimit`·`OutOfMemory`·`Stale`) — 고칠 곳이
+    //    전부 다르다. 자리만으로는 거기서 또 막힌다.
+    //    `@errorName` 이 파일 어딘가에 있기만 하면 통과하던 것을 **함수 안으로** 좁힌다 — 그 안에서
+    //    고정 문자열로 바꿔치면 이름이 사라지는데 바깥만 보면 안 잡힌다(적대적 검증 X3 생존).
+    const err_fn_at = std.mem.indexOf(u8, src, "fn notePreparedAttachRejectedErr(") orelse
+        return error.ErrorAccessorMissing;
+    const err_fn_end = std.mem.indexOfPos(u8, src, err_fn_at, "\n}\n") orelse src.len;
+    try std.testing.expect(std.mem.indexOf(u8, src[err_fn_at..err_fn_end], "@errorName(err)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, src, "err={s}") != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
         src,
-        "session host attach not admitted: adoption={s} site={s} frames={d}",
+        "notePreparedAttachRejectedErr(\"screen_batch_enqueue\", err)",
     ) != null);
 
-    // ⑥ 조용한 옛 모습이 되살아나면 빨개진다.
+    // ⑦ 조용한 옛 모습이 되살아나면 빨개진다.
     try std.testing.expect(std.mem.indexOf(
         u8,
         src,

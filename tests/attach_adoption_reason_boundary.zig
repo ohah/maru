@@ -151,9 +151,14 @@ test "prepared attach 는 전송이 깨진 게 아니면 연결 대신 스트림
     // ② 복구하는 길에서는 attach 를 **되돌리지 않는다.** 되돌리면 구동부가 훑는 `localStreams` 에서
     //    빠져 재동기화를 돌릴 주체가 사라진다 — 연결만 살아 있고 화면은 영영 안 온다.
     //    (되돌리기는 트래커를 못 찾은 «진짜» 고장 갈래에만 남는다. 그 갈래는 무효화 앞에 있다.)
+    //    **되돌리기 자체를 금지하지는 않는다.** 복구 통지조차 못 넣어 결국 닫히는 경우(슬롯이 청크로
+    //    가득 참)에는 되돌려야 «매달린 attachment» 가 안 남는다. 금지할 것은 **조건 없는** 되돌리기다.
     if (std.mem.indexOfPos(u8, body, invalidate_at, "rollbackPreparedAttach(")) |after| {
-        std.debug.print("복구 뒤에 attach 되돌리기가 있다(+{d}) — 재동기화 주체가 사라진다\n", .{after});
-        return error.RecoveryRollsBackAttach;
+        const between = body[invalidate_at..after];
+        if (std.mem.indexOf(u8, between, "isClosing()") == null) {
+            std.debug.print("복구 뒤 되돌리기가 무조건이다(+{d}) — 재동기화 주체가 사라진다\n", .{after});
+            return error.RecoveryRollsBackAttach;
+        }
     }
 
     // ③ 거절 배치의 **크기**를 남긴다. `ScreenInvalidated` 는 연성 상한 초과와 길이 0 청크 둘에서

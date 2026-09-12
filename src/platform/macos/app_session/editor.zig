@@ -26054,3 +26054,164 @@ test "NSH 상자가 떠 있어도 키는 편집기 것이다 (적대적 26회차
     // 그리고 선택이 사라졌으므로 상자는 다음 판정에서 내려간다.
     try testing.expect(!refreshSendHelper(h.fx.session));
 }
+
+test "NSH 후보는 보이는 워크스페이스 탭 것뿐이다 (적대적 35회차 — 안 보이는 곳으로 보내지 않는다)" {
+    // **사용자 질문이 드러낸 축이다**(2026-09-12). §5 는 "그 창의 터미널" 이라 적었는데 코드는 활성
+    // 탭으로 좁힌다. 좁히는 쪽이 맞다 — 안 보이는 탭의 터미널로 보내면 페이로드가 눈에 안 띄는 곳에
+    // 떨어지고 «어디 갔는지» 를 알 방법이 없다. 그런데 그 범위를 **재는 판정자가 없었다**: 누군가
+    // 열거를 `self.tabs` 전체로 넓히면 조용히 그 상태가 된다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    const home_tab = fx.session.app_window.active_tab;
+    var buf: [app_session_mod.max_agent_targets]maru.session.agent_selection.Candidate = undefined;
+    var folders: [app_session_mod.max_agent_targets][std.fs.max_path_bytes]u8 = undefined;
+    const before = term_ops.collectAgentTargets(fx.session, &buf, &folders);
+    const home_count = before.items.len;
+    try testing.expect(home_count > 0); // 전제: 이 탭에 보낼 곳이 있다
+
+    // 새 워크스페이스 탭 — 자기 터미널을 갖는다.
+    _ = try tab_ops.newTab(fx.session);
+    const other_tab = fx.session.app_window.active_tab;
+    try testing.expect(other_tab != home_tab);
+    const in_other = term_ops.collectAgentTargets(fx.session, &buf, &folders);
+    try testing.expect(in_other.items.len > 0); // 그 탭에도 있다(그쪽에서 보면 보인다)
+
+    // **원래 탭으로 돌아오면 수가 그대로여야 한다** — 늘어났다면 다른 탭 것이 섞인 것이다.
+    try testing.expect(tab_ops.switchTab(fx.session, home_tab));
+    const after = term_ops.collectAgentTargets(fx.session, &buf, &folders);
+    try testing.expectEqual(home_count, after.items.len);
+    try testing.expectEqual(home_count, after.eligible); // 잘린 것도 없다
+
+    // 그리고 **그 탭의 surface id 만** 들었다.
+    const tab = fx.session.tabs.items[home_tab];
+    for (after.items) |c| {
+        var found = false;
+        for (tab.panes.items) |pane| {
+            for (pane.terms.items) |t| {
+                if (t.surface.id == c.surface_id) found = true;
+            }
+        }
+        try testing.expect(found);
+    }
+}
+
+test "IME8 확정-먼저 순서에서도 다음 조합의 자리가 새로 잡힌다 — 한글 연속 입력" {
+    // **사용자 제보(2026-09-12)**: 한글을 치면 조합 글자가 엉뚱한 자리에 보이고 확정이 앞으로 튄다.
+    //
+    // **IME7 과 순서가 반대다.** 그쪽은 `setMarkedText` 가 먼저 오고 확정이 `imeEnd` 에서 늦게
+    // 들어가는 갈래를 재고(큐에 쌓이는 경로), 이쪽은 확정이 **먼저** 문서에 들어간 뒤 새 조합이
+    // 걸리는 갈래다. 둘 중 하나만 재면 나머지 순서에서 앵커가 낡아도 조용하다.
+    //
+    // macOS 한글 IME 는 한 이벤트에서 **확정 + 새 조합**을 함께 보낸다(`insertText:` 로 완성된
+    // 음절을 확정하고 곧바로 `setMarkedText:` 로 다음 음절을 건다). 그런데 확정 경로가 조합 상태를
+    // 안 비우면, 그 다음 `setEditorPreedit` 이 **이전 조합이 남아 있다고 보고 앵커를 안 옮긴다**
+    // (`editor_preedit.len == 0` 일 때만 잡는다). 그러면 조합 고스트가 **직전 글자 자리**에 그려지고,
+    // 조합 끝 경로(`Selection.at(editor_preedit_at)`)가 **그 낡은 자리**에 확정을 넣는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    fx.session.surface_initialized = true;
+
+    // 문서 맨 앞에 caret 을 두고 조합을 시작한다.
+    fx.term.rt.editor_selection = maru.session.editor.selection.Selection.at(0);
+    fx.session.ime_terminal_target_id = fx.term.surface.id;
+    fx.session.ime_active = true;
+
+    setEditorPreedit(fx.session, fx.term, "한");
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_preedit_at); // 조합 시작 자리
+
+    // ── 같은 이벤트: 「한」 확정 + 「글」 조합 시작 ─────────────────────────────
+    try testing.expect(input_ops.sendCommittedText(fx.session, "한"));
+    const after_commit = fx.term.rt.editor_selection.?.start();
+    try testing.expectEqual(@as(usize, 3), after_commit); // "한" 은 3 byte
+
+    setEditorPreedit(fx.session, fx.term, "글");
+    // **다음 조합의 자리는 확정 뒤의 caret 이어야 한다.** 여기가 0 이면 조합 고스트가 「한」 자리에
+    // 그려지고, 확정도 그 자리로 간다 — 제보된 증상 그대로다.
+    try testing.expectEqual(after_commit, fx.term.rt.editor_preedit_at);
+}
+
+test "NSH 조합 중에도 상자가 입력을 방해하지 않는다 (적대적 36회차 — 제보 인접 축)" {
+    // 고른 뒤 **한글을 치기 시작하면** 조합이 서고 선택은 아직 남아 있다 — 그동안 상자가 떠 있다.
+    // 상자는 모달이 아니므로 조합 고스트·확정이 그대로 가야 하고, 확정으로 선택이 사라지면 상자는
+    // 다음 판정에서 내려간다. (사용자 제보 2026-09-12 인접 축 — 조합과 상자가 겹치는 자리를
+    // 아무도 안 재고 있었다.)
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h = try helperFixture(allocator);
+    defer h.fx.deinit(allocator);
+    defer h.drawn.dl.deinit(allocator);
+
+    h.fx.term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 5 };
+    showSendHelper(h.fx.session, h.fx.term);
+    try testing.expect(h.fx.session.chrome_host.send_helper.open);
+
+    // 조합이 선다 — 상자가 떠 있어도 문서에는 안 들어가고 화면에만 뜬다(IME1 계약).
+    h.fx.session.ime_terminal_target_id = h.fx.term.surface.id;
+    h.fx.session.ime_active = true;
+    const before_len = h.fx.term.rt.editor_doc.?.file.content.len;
+    setEditorPreedit(h.fx.session, h.fx.term, "한");
+    try testing.expectEqual(before_len, h.fx.term.rt.editor_doc.?.file.content.len);
+    try testing.expect(h.fx.term.rt.editor_preedit.len > 0);
+    // 상자는 조합을 이유로 사라지지 않는다(선택이 아직 있다).
+    try testing.expect(refreshSendHelper(h.fx.session));
+
+    // 확정 — 고른 5 글자가 「한」 으로 바뀐다(상자가 그 경로를 막지 않는다).
+    try testing.expect(input_ops.sendCommittedText(h.fx.session, "한"));
+    try testing.expect(h.fx.term.rt.editor_doc.?.file.content.len != before_len);
+    // 선택이 사라졌으므로 상자는 내려간다.
+    try testing.expect(!refreshSendHelper(h.fx.session));
+}
+
+test "EM-RT 그린 자리를 누르면 그 자리가 나온다 — 좌표 왕복 전수 (제보 재현 하네스)" {
+    // **사용자 제보(2026-09-12)**: 드래그·클릭을 하다 보면 캐럿이 엉뚱한 데로 간다(파일 종류 무관).
+    // 왕복 불변식 ①(§4.1g)은 지금까지 **한 점**으로만 재고 있었다 — 그린 행 × 열을 **전수로** 훑어
+    // 「그린 자리 = 누르면 답하는 자리」를 잰다. 어긋남이 하나라도 있으면 그것이 곧 재현이다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    fx.session.surface_initialized = true;
+    fx.session.backing_width_px = 1200;
+    fx.session.backing_height_px = 800;
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, fx.term) orelse return error.EditorPaneDidNotDraw;
+    defer drawn.dl.deinit(allocator);
+
+    const geom = fx.term.rt.editor_hit_geom;
+    const rows_len = fx.term.rt.editor_hit_rows_len;
+    try testing.expect(rows_len > 0); // 전제: 실제로 그렸다
+
+    var checked: usize = 0;
+    var r: usize = 0;
+    while (r < rows_len) : (r += 1) {
+        var c: u32 = 0;
+        while (c < 12) : (c += 1) {
+            const x = @as(f64, @floatFromInt(geom.body_x + @as(i32, @intCast(geom.content_left_px)))) +
+                (@as(f64, @floatFromInt(c)) + 0.5) * @as(f64, @floatFromInt(geom.cell_w_px));
+            const y = @as(f64, @floatFromInt(geom.body_y)) + (@as(f64, @floatFromInt(r)) + 0.5) * @as(f64, @floatFromInt(geom.cell_h_px));
+            const off = hitTestBody(fx.term, x, y) orelse continue;
+            const doc = fx.term.rt.editor_doc.?;
+            const line_idx = doc.file.lines.lineAt(doc.file.lines.clampOffset(off));
+            const line = doc.file.lines.line(line_idx) orelse continue;
+            const a = chrome_editor.hit.bodyAnchor(.{
+                .body_x = geom.body_x,
+                .body_y = geom.body_y,
+                .content_left_px = geom.content_left_px,
+                .content_width = geom.content_width,
+                .cell_w_px = geom.cell_w_px,
+                .cell_h_px = geom.cell_h_px,
+                .tab_width = geom.tab_width,
+            }, fx.term.rt.editor_hit_rows[0..rows_len], fx.term.rt.editor_hit_lines[0..rows_len], fx.term.rt.editor_lines, line_idx, off -| line.start) orelse
+                return error.AnchorLost; // 그린 자리를 눌렀는데 되돌아갈 자리가 없다
+            // **누른 행 = 답한 행.** 어긋나면 그것이 제보된 증상이다.
+            try testing.expectEqual(r, a.row);
+            checked += 1;
+        }
+    }
+    try testing.expect(checked > 0); // 공허하게 통과하지 않는다
+}

@@ -1071,7 +1071,7 @@ fn diacriticIndex(cp: u21) ?u32 {
 }
 
 /// kitty unicode placeholder 셀의 base codepoint(U+10EEEE).
-pub const placeholder_codepoint: u21 = 0x10EEEE;
+pub const placeholder_codepoint: u21 = terminal.unicode_placeholder_codepoint; // 단일 출처는 코어(terminal/types.zig)
 
 /// 한 placeholder 셀이 가리키는 것 — 어느 이미지의 어느 타일인가.
 const PlaceholderCell = struct {

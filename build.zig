@@ -15421,6 +15421,10 @@ pub fn build(b: *std.Build) void {
         "test-session-host-notification-app-receipt",
         "Validate canonical Notification Center app receipt parsing and publication",
     );
+    const session_host_notification_process_owner_step = b.step(
+        "test-session-host-notification-process-owner",
+        "Validate single-owner Notification Center app/helper process composition",
+    );
     const session_host_release_adapter_candidate_baseline_app_step = b.step(
         "test-session-host-release-adapter-candidate-baseline-app",
         "Validate preserved baseline candidate app authority",
@@ -15930,6 +15934,24 @@ pub fn build(b: *std.Build) void {
         run_notification_app_receipt_tests.setCwd(b.path("."));
         session_host_notification_app_receipt_step.dependOn(&run_notification_app_receipt_tests.step);
         run_session_host_tests.step.dependOn(&run_notification_app_receipt_tests.step);
+        const notification_process_owner_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_notification_process_owner.zig"),
+            .target = target,
+            .optimize = baseline_phase_optimize,
+        });
+        const notification_process_owner_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_release_adapter_notification_process_owner.zig"),
+                .target = target,
+                .optimize = baseline_phase_optimize,
+                .imports = &.{.{ .name = "release_adapter_notification_process_owner", .module = notification_process_owner_mod }},
+            }),
+        });
+        const run_notification_process_owner_tests = b.addRunArtifact(notification_process_owner_tests);
+        run_notification_process_owner_tests.addArg("--maru-expect-tests=5");
+        run_notification_process_owner_tests.setCwd(b.path("."));
+        session_host_notification_process_owner_step.dependOn(&run_notification_process_owner_tests.step);
+        run_session_host_tests.step.dependOn(&run_notification_process_owner_tests.step);
     }
     const session_host_release_adapter_candidate_compatibility_step = b.step(
         "test-session-host-release-adapter-candidate-compatibility",

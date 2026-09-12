@@ -1458,8 +1458,9 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    **현재 판정(2026-09-11 코드·gate 대조): P1~P5의 일반 제품 경로와 ad-hoc gate는 완료했지만,
    provisioned product transaction 자체는 N3-R2b2/R2c와 R3가 미완료다.** R2b1의 별도 signable AX helper와 R2b2의
    callback/attach receipt owner·actual delegate/attach를 상속 write FD에 결속하는 격리 app scenario mode까지 구현됐다.
-   R2b2의 canonical app receipt strict parser와 absent `0600` exclusive publication leaf도 구현됐다. 다음은 그 leaf에
-   helper·앱 child와 exact notification/root cleanup을 결속하는 process composition과 mounted signed candidate
+   R2b2의 canonical app receipt strict parser와 absent `0600` exclusive publication leaf, process composition의 단일
+   deadline·시도 선기록·역순 cleanup/retry owner도 구현됐다. 다음은 그 owner에 실제 helper·앱 child spawn/pipe와 exact
+   notification/root syscall을 결속하는 concrete adapter와 mounted signed candidate
    composition 및 protected workflow binding을 이어서 구현한다. P4의 actual
    Notification Center·durable tombstone과 P5d의 packaged CLI/localhost SSH는 provisioned Developer ID 배포 artifact
    재실행이 phase 완료 증거로 남아 있다. N3-R2b2/R2c는 구현 잔여이고, 그 구현이 닫힌 뒤 실제 Developer ID 실행만

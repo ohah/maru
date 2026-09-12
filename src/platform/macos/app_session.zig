@@ -2873,6 +2873,37 @@ var app_reconnect_product_coordinator: session_host.reconnect_product_coordinato
 var app_recovered_sessions_projection: session_host.recovered_sessions_projection.Projection = .{};
 var app_recovered_sessions_workspace_generation: u64 = 0;
 
+/// 진단 장부는 **프로세스 전역**이다. 세는 카운터가 전역인데 장부를 세션마다 두면 창이 둘일 때 같은
+/// 증분을 각자 소비해 **완전히 같은 줄이 두 번** 찍힌다.
+///
+/// 2026-09-12 실측: 로그 최근 300 줄 중 **276 줄(92 %)이 이 진단**이었고 그중 절반이 값까지 똑같은
+/// 중복이었다. 진짜 신호는 5 줄(1.7 %). 그 탓에 시작 시점의 `session host upgrade result` 가 회전으로
+/// 밀려나, 「업그레이드가 왜 안 됐나」를 앱을 두 번 재시작하며 헛짚었다 — **진단이 진단을 지웠다.**
+///
+/// 전역으로 두면 먼저 도는 세션이 증분을 소비하고, 두 번째는 0 을 보고 조기 반환한다. 값이 안 변한
+/// 창에서도 같은 이유로 조용해진다.
+var diag_obs_tick: u32 = 0;
+/// 자리별 내역은 **한 창에 네 줄**이라 가장 시끄럽다. 총량(`observation cost`)은 5 초마다 한 줄로
+/// 추세를 주고, 내역은 1 분마다면 「어느 자리가 큰가」를 판단하기에 충분하다.
+///
+/// 2026-09-12 실측: 이 진단이 로그의 61 % 를 차지해 시작 시점 증거를 회전으로 밀어냈다.
+const digest_site_interval_ticks: u32 = 3600;
+var diag_site_tick: u32 = 0;
+/// 알림 RPC 장부도 같은 이유로 전역이다 — `app_remote_backend` 가 프로세스 하나뿐이라 세션마다 두면
+/// 창 수만큼 같은 줄이 찍힌다.
+var diag_notify_tick: u32 = 0;
+var diag_notify_last_label_changed: u64 = 0;
+var diag_notify_last_generation_stale: u64 = 0;
+var diag_notify_last_failed: u64 = 0;
+var diag_last_drain_calls: u64 = 0;
+var diag_last_events: u64 = 0;
+var diag_last_digest_calls: u64 = 0;
+var diag_last_digest_bytes: u64 = 0;
+var diag_last_seals: u64 = 0;
+var diag_last_raw_digest_bytes: u64 = 0;
+var diag_site_last_calls = [_]u64{0} ** session_host.remote_runtime.RemoteRuntime.digest_site_count;
+var diag_site_last_bytes = [_]u64{0} ** session_host.remote_runtime.RemoteRuntime.digest_site_count;
+
 var app_recovered_sessions_launch_attempted: bool = false;
 var app_recovered_session_windows: std.ArrayListUnmanaged(*AppSession) = .empty;
 var app_recovered_session_window_generation: u64 = 0;
@@ -6481,21 +6512,6 @@ pub const AppSession = struct {
     /// 이 경로였는데(2026-09-10 가중 프로파일) 「실패가 반복돼서」인지 「라벨 변경이 공유 세대를 올려
     /// 나머지가 stale 이 돼서」인지 구분할 수단이 없었다. 원인을 모르는 채로 백오프를 넣으면 그 둘 중
     /// 하나에만 듣고, 어느 쪽인지도 영영 모른다.
-    notify_diag_tick: u32 = 0,
-    obs_diag_tick: u32 = 0,
-    obs_diag_last_drain_calls: u64 = 0,
-    obs_diag_last_events: u64 = 0,
-    obs_diag_last_digest_calls: u64 = 0,
-    obs_diag_last_digest_bytes: u64 = 0,
-    obs_diag_last_seals: u64 = 0,
-    obs_diag_last_raw_digest_bytes: u64 = 0,
-    digest_site_last_calls: [session_host.remote_runtime.RemoteRuntime.digest_site_count]u64 =
-        [_]u64{0} ** session_host.remote_runtime.RemoteRuntime.digest_site_count,
-    digest_site_last_bytes: [session_host.remote_runtime.RemoteRuntime.digest_site_count]u64 =
-        [_]u64{0} ** session_host.remote_runtime.RemoteRuntime.digest_site_count,
-    notify_diag_last_label_changed: u64 = 0,
-    notify_diag_last_generation_stale: u64 = 0,
-    notify_diag_last_failed: u64 = 0,
     // frametime_diag(logFrameTime) 1초 창 누적(MARU_DEBUG 관측 전용) — 실효 rate·mean/max·단계 비중 요약용.
     // release에선 logFrameTime을 호출부 ft_on 게이트로 아예 진입 안 해 이 필드는 안 쓰인다(초기값 유지).
     ft_window_start: i128 = 0,
@@ -18146,8 +18162,8 @@ pub const AppSession = struct {
                 }
             }
         }
-        self.logNotificationRpcDiag(rb);
-        self.logObservationEventDiag();
+        logNotificationRpcDiag(rb);
+        logObservationEventDiag();
     }
 
     /// **이벤트당 비용을 줄일 수 있는가** 를 가르는 두 숫자를 주기적으로 한 줄 남긴다.
@@ -18162,22 +18178,22 @@ pub const AppSession = struct {
     ///
     /// `notify_diag_interval_ticks` 마다, 그리고 **이벤트가 있었을 때만** 찍는다 — 조용하면 한 줄도
     /// 안 나오므로 로그가 원인을 덮지 않는다.
-    fn logObservationEventDiag(self: *AppSession) void {
-        self.obs_diag_tick +%= 1;
-        if (self.obs_diag_tick % notify_diag_interval_ticks != 0) return;
+    fn logObservationEventDiag() void {
+        diag_obs_tick +%= 1;
+        if (diag_obs_tick % notify_diag_interval_ticks != 0) return;
         const ev = session_host.remote_runtime.RemoteRuntime.observationEventCounters();
-        const drains = ev.drain_calls -% self.obs_diag_last_drain_calls;
-        const events = ev.events_settled -% self.obs_diag_last_events;
-        const digests = ev.digest_calls -% self.obs_diag_last_digest_calls;
-        const bytes = ev.digest_input_bytes -% self.obs_diag_last_digest_bytes;
-        self.obs_diag_last_drain_calls = ev.drain_calls;
-        self.obs_diag_last_events = ev.events_settled;
-        self.obs_diag_last_digest_calls = ev.digest_calls;
-        self.obs_diag_last_digest_bytes = ev.digest_input_bytes;
-        const seals = ev.seals -% self.obs_diag_last_seals;
-        const raw_bytes = ev.raw_digest_bytes -% self.obs_diag_last_raw_digest_bytes;
-        self.obs_diag_last_seals = ev.seals;
-        self.obs_diag_last_raw_digest_bytes = ev.raw_digest_bytes;
+        const drains = ev.drain_calls -% diag_last_drain_calls;
+        const events = ev.events_settled -% diag_last_events;
+        const digests = ev.digest_calls -% diag_last_digest_calls;
+        const bytes = ev.digest_input_bytes -% diag_last_digest_bytes;
+        diag_last_drain_calls = ev.drain_calls;
+        diag_last_events = ev.events_settled;
+        diag_last_digest_calls = ev.digest_calls;
+        diag_last_digest_bytes = ev.digest_input_bytes;
+        const seals = ev.seals -% diag_last_seals;
+        const raw_bytes = ev.raw_digest_bytes -% diag_last_raw_digest_bytes;
+        diag_last_seals = ev.seals;
+        diag_last_raw_digest_bytes = ev.raw_digest_bytes;
         if (events == 0) return;
         const per_drain_x100 = if (drains == 0) 0 else events * 100 / drains;
         const digest_per_event_x100 = events_digest: {
@@ -18198,7 +18214,7 @@ pub const AppSession = struct {
                 raw_bytes,
             },
         );
-        self.logDigestSiteDiag();
+        logDigestSiteDiag();
     }
 
     /// **어느 자리가 해싱 대역폭을 쓰는가.** 총량(`raw_digest_bytes`)만으로는 못 고친다 — 자리마다
@@ -18209,7 +18225,11 @@ pub const AppSession = struct {
     /// **나머지 2,200 B 의 출처를 모른다.** 자리별로 세지 않으면 추측이 된다.
     ///
     /// 바이트가 큰 순으로 상위 넷만 낸다. 열 자리를 전부 찍으면 로그가 원인을 덮는다.
-    fn logDigestSiteDiag(self: *AppSession) void {
+    fn logDigestSiteDiag() void {
+        // 자체 게이트를 둔다. 총량(`observation cost`)은 5 초마다 한 줄로 추세를 주고, 자리별 내역은
+        // **한 번에 네 줄**이라 같은 주기로 찍으면 로그의 대부분을 차지한다(실측 61 %).
+        diag_site_tick +%= 1;
+        if (diag_site_tick % digest_site_interval_ticks != 0) return;
         const rb = session_host.remote_runtime.RemoteRuntime;
         var now: [rb.digest_site_count]rb.DigestSiteSample = undefined;
         rb.digestSiteSamples(&now);
@@ -18218,12 +18238,12 @@ pub const AppSession = struct {
         for (now, 0..) |sample, i| {
             deltas[i] = .{
                 .name = sample.name,
-                .calls = sample.calls -% self.digest_site_last_calls[i],
-                .bytes = sample.bytes -% self.digest_site_last_bytes[i],
+                .calls = sample.calls -% diag_site_last_calls[i],
+                .bytes = sample.bytes -% diag_site_last_bytes[i],
             };
             if (deltas[i].calls != 0) any = true;
-            self.digest_site_last_calls[i] = sample.calls;
-            self.digest_site_last_bytes[i] = sample.bytes;
+            diag_site_last_calls[i] = sample.calls;
+            diag_site_last_bytes[i] = sample.bytes;
         }
         if (!any) return;
         // 바이트 내림차순으로 상위 넷.
@@ -18249,16 +18269,16 @@ pub const AppSession = struct {
     /// 매 틱 찍으면 로그가 원인을 덮으므로 `notify_diag_interval_ticks` 마다, 그리고 **보낸 것이 있을
     /// 때만** 찍는다. 조용한 상태에서는 한 줄도 안 나온다 — 그 침묵 자체가 「정상이면 RPC 0」이라는
     /// 호출부 주석이 참이라는 증거가 된다.
-    fn logNotificationRpcDiag(self: *AppSession, rb: anytype) void {
-        self.notify_diag_tick +%= 1;
-        if (self.notify_diag_tick % notify_diag_interval_ticks != 0) return;
+    fn logNotificationRpcDiag(rb: anytype) void {
+        diag_notify_tick +%= 1;
+        if (diag_notify_tick % notify_diag_interval_ticks != 0) return;
         const now = rb.notificationRpcCounters();
-        const label = now.label_changed -% self.notify_diag_last_label_changed;
-        const stale = now.generation_stale -% self.notify_diag_last_generation_stale;
-        const failed = now.failed -% self.notify_diag_last_failed;
-        self.notify_diag_last_label_changed = now.label_changed;
-        self.notify_diag_last_generation_stale = now.generation_stale;
-        self.notify_diag_last_failed = now.failed;
+        const label = now.label_changed -% diag_notify_last_label_changed;
+        const stale = now.generation_stale -% diag_notify_last_generation_stale;
+        const failed = now.failed -% diag_notify_last_failed;
+        diag_notify_last_label_changed = now.label_changed;
+        diag_notify_last_generation_stale = now.generation_stale;
+        diag_notify_last_failed = now.failed;
         if (label == 0 and stale == 0 and failed == 0) return;
         std.log.info(
             "notification rpc: ticks={d} label_changed={d} generation_stale={d} failed={d} err={s}",

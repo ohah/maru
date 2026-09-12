@@ -6916,8 +6916,12 @@ pub fn sendHelperClick(self: *AppSession, x_px: f64, y_px: f64) bool {
     if (collected.items.len == 1 and collected.eligible == 1) {
         if (sendSelectionToAgent(self, term, collected.items[0].surface_id)) {
             self.last_agent_target = collected.items[0].surface_id; // 메뉴 경로와 같은 규율
+            return true;
         }
-        return true;
+        // **못 보냈으면 조용히 끝내지 않는다**(적대적 21 회차). 그 자리에서 대상이 사라졌거나 문서가
+        // 참조를 못 만드는 상태다 — 눌렀는데 **아무 일도 안 일어나면** 사용자는 무엇이 틀렸는지 알
+        // 방법이 없다(이 문서가 후보 0 에서 상자를 안 띄우는 것과 같은 근거다). 아래로 흘려
+        // 메뉴를 연다: 지금 무엇을 고를 수 있는지가 그 자체로 답이다.
     }
     _ = settings_ops.showEditorContextMenu(self, term, anchor_x, anchor_y);
     self.metal_dirty = true;
@@ -25925,4 +25929,76 @@ test "NSH 라벨은 제품 i18n 키에서 온다 — 리터럴을 새로 짓지 
     const label = sendHelperItems(h.fx.session)[0];
     // 머리글은 덧말(잘린 수·주 선택만)이 붙을 수 있으므로 **그 키로 시작**하는 것까지가 계약이다.
     try testing.expect(std.mem.startsWith(u8, label, maru.i18n.t(.ctx_send_selection)));
+}
+
+test "NSH 못 보내면 조용히 끝내지 않고 메뉴를 연다 (적대적 21회차 — 눌러도 아무 일 없는 갈래)" {
+    // 후보가 하나라 «바로 보내기» 로 갔는데 그 보내기가 실패할 수 있다(그 자리에서 대상이 죽었거나
+    // 문서가 참조를 못 만든다). 조용히 `return` 하면 **눌렀는데 아무 일도 안 일어난다** — 이 문서가
+    // 후보 0 에서 상자를 아예 안 띄우는 것과 같은 이유로 그 상태를 만들지 않는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h = try helperFixture(allocator);
+    defer h.fx.deinit(allocator);
+    defer h.drawn.dl.deinit(allocator);
+
+    h.fx.term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 5 };
+    showSendHelper(h.fx.session, h.fx.term);
+    const on = helperHitPoint(h.fx.session) orelse return error.HelperNotOnScreen;
+
+    // 누르기 **직전에** 참조를 못 만드는 상태로 만든다(핀된 경로 소실 — 이름 바꾸기·닫힘 경로가
+    // 실제로 그렇게 만든다). 상자는 이미 떠 있으므로 이 클릭은 보내기로 간다.
+    const saved = h.fx.term.rt.editor_path;
+    h.fx.term.rt.editor_path = null;
+    defer h.fx.term.rt.editor_path = saved;
+    h.fx.session.last_agent_target = null;
+
+    try testing.expect(sendHelperClick(h.fx.session, on.x, on.y)); // 클릭은 상자 것이다
+    try testing.expect(h.fx.session.last_agent_target == null); // 못 보냈다
+    // **그 대신 메뉴가 뜬다** — 무엇을 고를 수 있는지가 답이다.
+    try testing.expect(h.fx.session.chrome_host.context_menu.open);
+    settings_ops.closeContextMenu(h.fx.session);
+}
+
+test "NSH 상자가 떠 있어도 우클릭은 메뉴 것이다, 그리고 상자는 살아남는다 (적대적 23회차 — 공존)" {
+    // 헬퍼 라우팅은 **primary 버튼만** 받는다. 우클릭까지 삼키면 상자가 떠 있는 동안 편집기
+    // 컨텍스트 메뉴를 못 연다 — 같은 본문에서 손동작 하나가 다른 손동작을 막는 상태다.
+    //
+    // 그리고 메뉴가 열린 동안 상자는 **안 그려지지만 상태는 남는다**(§6.2 «그리기 — 게이트가 둘»).
+    // 메뉴를 닫으면 고른 것이 그대로이므로 다시 떠야 한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h = try helperFixture(allocator);
+    defer h.fx.deinit(allocator);
+    defer h.drawn.dl.deinit(allocator);
+
+    h.fx.term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 5 };
+    showSendHelper(h.fx.session, h.fx.term);
+    try testing.expect(h.fx.session.chrome_host.send_helper.open);
+
+    // 본문 우클릭 — 편집기 메뉴가 뜬다.
+    const pt = bodyPointInActivePane(h.fx.session) orelse return error.SkipZigTest;
+    h.fx.session.mouse(1, pt.x, pt.y, 2, 0);
+    try testing.expect(h.fx.session.chrome_host.context_menu.open);
+    try testing.expect(h.fx.session.editor_context_menu != null);
+    // 상자는 **상태로 남아 있다**(그리기만 억제된다).
+    try testing.expect(h.fx.session.chrome_host.send_helper.open);
+
+    // 메뉴가 떠 있는 프레임에서는 상자를 **안 낸다** — bounding box 가 하나라 둘을 함께 못 낸다.
+    {
+        var with_menu = (try h.fx.session.buildChromeOverlayPrep()) orelse return error.MenuNotDrawn;
+        defer with_menu.dl.deinit(allocator);
+        const saved = h.fx.session.chrome_host.send_helper.open;
+        h.fx.session.chrome_host.send_helper.open = false;
+        var menu_only = (try h.fx.session.buildChromeOverlayPrep()) orelse return error.MenuNotDrawn;
+        defer menu_only.dl.deinit(allocator);
+        h.fx.session.chrome_host.send_helper.open = saved;
+        try testing.expectEqual(menu_only.dl.cells.len, with_menu.dl.cells.len);
+    }
+
+    // 메뉴를 닫으면 다시 그려진다.
+    settings_ops.closeContextMenu(h.fx.session);
+    try testing.expect(refreshSendHelper(h.fx.session));
+    var after = (try h.fx.session.buildChromeOverlayPrep()) orelse return error.HelperNotDrawn;
+    defer after.dl.deinit(allocator);
+    try testing.expect(after.dl.cells.len > 0);
 }

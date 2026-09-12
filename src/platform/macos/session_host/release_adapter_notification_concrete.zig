@@ -4,6 +4,7 @@ const std = @import("std");
 const owner = @import("release_adapter_notification_process_owner");
 const app_child = @import("release_adapter_notification_app_child");
 const app_receipt = @import("release_adapter_notification_app_receipt");
+const continuity_receipt = @import("release_adapter_notification_continuity_receipt");
 const helper_child = @import("release_adapter_notification_helper_child");
 const helper_receipt = @import("release_adapter_notification_helper_receipt");
 const workspace = @import("release_adapter_notification_workspace");
@@ -17,6 +18,9 @@ pub const Inputs = struct {
     output_path: [:0]const u8,
     app_expected: app_receipt.Expected,
     helper_expected: helper_receipt.Expected,
+    submitted_at_ns: u64,
+    before_marker: []const u8,
+    after_marker: []const u8,
     budget_ns: i128,
 };
 
@@ -27,11 +31,17 @@ pub const Execution = struct {
     helper: helper_child.Storage = .{},
     receipt: files.PinnedReleaseFile = .{},
     app_frame: [app_receipt.max_receipt_bytes]u8 = undefined,
+    continuity_frame: [continuity_receipt.max_receipt_bytes]u8 = undefined,
     cleanup_frame: [512]u8 = undefined,
 };
 
+pub const Published = struct {
+    app: app_receipt.Observed,
+    continuity: continuity_receipt.Observed,
+};
+
 pub const Result = union(enum) {
-    published: app_receipt.Observed,
+    published: Published,
     not_provisioned: helper_child.Provisioning,
 };
 
@@ -56,6 +66,7 @@ const Steps = struct {
     execution: *Execution,
     deadline_ns: i128 = 0,
     app_frame_len: usize = 0,
+    continuity_frame_len: usize = 0,
     result: ?Result = null,
 
     pub fn bind(self: *@This()) !void {
@@ -68,6 +79,9 @@ const Steps = struct {
         try helper_child.validateInputs(self.inputs.helper_executable, self.inputs.helper_expected, self.inputs.budget_ns);
         if (!canonicalAbsolute(self.inputs.output_path) or
             self.inputs.app_expected.deadline_ns != self.inputs.helper_expected.deadline_ns or
+            self.inputs.submitted_at_ns == 0 or self.inputs.submitted_at_ns >= self.inputs.app_expected.deadline_ns or
+            !canonicalScalar(self.inputs.before_marker) or !canonicalScalar(self.inputs.after_marker) or
+            std.mem.eql(u8, self.inputs.before_marker, self.inputs.after_marker) or
             !std.mem.startsWith(u8, self.inputs.helper_expected.visible_nonce, self.inputs.runner_nonce) or
             aliasesExecution(self.execution, self.inputs))
             return error.InvalidInput;
@@ -94,7 +108,7 @@ const Steps = struct {
         }, &self.execution.app);
     }
 
-    pub fn runHelper(self: *@This(), deadline: *i128) !helper_receipt.Observed {
+    pub fn runHelper(self: *@This(), deadline: *i128) !helper_child.Clicked {
         const observed = try helper_child.run(self.io, self.allocator, self.inputs.helper_executable, self.inputs.helper_expected, try remaining(self.io, deadline.*), &self.execution.helper);
         return switch (observed) {
             .clicked => |click| click,
@@ -111,12 +125,27 @@ const Steps = struct {
         return self.execution.app_frame[0..self.app_frame_len];
     }
 
-    pub fn publishReceipt(self: *@This(), _: *i128, click: helper_receipt.Observed, bytes: []const u8) !void {
+    pub fn collectContinuityReceipt(self: *@This(), deadline: *i128) ![]const u8 {
+        const bytes = try self.execution.app.readReceipt(self.io, &self.execution.continuity_frame, try remaining(self.io, deadline.*));
+        self.continuity_frame_len = bytes.len;
+        return self.execution.continuity_frame[0..self.continuity_frame_len];
+    }
+
+    pub fn publishReceipt(self: *@This(), _: *i128, click: helper_child.Clicked, app_bytes: []const u8, continuity_bytes: []const u8) !void {
         var expected = self.inputs.app_expected;
         expected.clicked_at_ns = click.clicked_at_ns;
-        const observed = try app_receipt.parse(self.allocator, bytes, expected);
-        try files.publishSummaryOwnedExclusive(&self.execution.receipt, self.inputs.output_path, bytes);
-        self.result = .{ .published = observed };
+        const app_observed = try app_receipt.parse(self.allocator, app_bytes, expected);
+        const continuity_observed = try continuity_receipt.parse(self.allocator, continuity_bytes, .{
+            .visible_nonce = self.inputs.helper_expected.visible_nonce,
+            .app = expected,
+            .app_receipt_bytes = app_bytes,
+            .helper_receipt_bytes = click.receipt_bytes,
+            .submitted_at_ns = self.inputs.submitted_at_ns,
+            .before_marker = self.inputs.before_marker,
+            .after_marker = self.inputs.after_marker,
+        });
+        try files.publishSummaryOwnedExclusive(&self.execution.receipt, self.inputs.output_path, continuity_bytes);
+        self.result = .{ .published = .{ .app = app_observed, .continuity = continuity_observed } };
     }
 
     pub fn cleanupReceipt(self: *@This()) !void {
@@ -160,6 +189,8 @@ fn aliasesExecution(execution: *Execution, inputs: Inputs) bool {
         inputs.app_expected.host_id,
         inputs.app_expected.runtime_id,
         inputs.helper_expected.visible_nonce,
+        inputs.before_marker,
+        inputs.after_marker,
     };
     for (values) |value| if (overlaps(destination, value)) return true;
     return false;
@@ -178,5 +209,11 @@ fn canonicalAbsolute(value: []const u8) bool {
     var components = std.mem.splitScalar(u8, value[1..], '/');
     while (components.next()) |component|
         if (component.len == 0 or std.mem.eql(u8, component, ".") or std.mem.eql(u8, component, "..")) return false;
+    return true;
+}
+
+fn canonicalScalar(value: []const u8) bool {
+    if (value.len == 0 or value.len > 128) return false;
+    for (value) |byte| if (!std.ascii.isAlphanumeric(byte) and byte != '-' and byte != '_') return false;
     return true;
 }

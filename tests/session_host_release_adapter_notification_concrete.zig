@@ -24,6 +24,9 @@ fn inputs() concrete.Inputs {
             .deadline_ns = 100,
         },
         .helper_expected = .{ .visible_nonce = nonce ++ "-gui-zero", .deadline_ns = 100 },
+        .submitted_at_ns = 1,
+        .before_marker = "MARU_BEFORE_123e4567e89b42d3a456426614174000",
+        .after_marker = "MARU_AFTER_123e4567e89b42d3a456426614174000",
         .budget_ns = 0,
     };
 }

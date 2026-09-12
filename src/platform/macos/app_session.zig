@@ -258,7 +258,9 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 183: provisioned Notification Center scenario가 사용자 확인 UI를 합성하지 않고 기존
 // Quit and End All Sessions 상태머신을 시작하는 export를 추가한다. cleanup receipt 뒤 실제
 // daemon/runtime 종료가 끝나기 전에 app process가 성공 종료하지 못하게 하는 provisioned release 진입점이다.
-pub const abi_version: u32 = 183;
+// 184: provisioned Notification Center child obtains a two-phase continuity proof from the exact
+// attached remote Term and takes the resulting canonical second socket frame through new ABI leaves.
+pub const abi_version: u32 = 184;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -3636,6 +3638,237 @@ pub const AppSession = struct {
         adopt_recovered,
     };
 
+    pub const NotificationContinuityPhase = enum(u8) { idle, observed_before, input_sent, ready, taken, failed };
+
+    pub const NotificationContinuityState = struct {
+        phase: NotificationContinuityPhase = .idle,
+        handle: app.TermRuntimeHandle = 0,
+        host_id: u128 = 0,
+        runtime_id: u128 = 0,
+        generation: u64 = 0,
+        host_pid: i32 = 0,
+        child_pid: i32 = 0,
+        before_observed_at_ns: u64 = 0,
+        attached_at_ns: u64 = 0,
+        input_sent_at_ns: u64 = 0,
+        deadline_ns: u64 = 0,
+        event_id: u64 = 0,
+        scenario: u8 = 0,
+        request_len: u8 = 0,
+        before_len: u8 = 0,
+        after_len: u8 = 0,
+        request: [128]u8 = undefined,
+        before_marker: [128]u8 = undefined,
+        after_marker: [128]u8 = undefined,
+        receipt_len: u16 = 0,
+        receipt: [2048]u8 = undefined,
+    };
+
+    fn notificationContinuityScalar(value: []const u8) bool {
+        if (value.len == 0 or value.len > 128) return false;
+        for (value) |byte| if (!std.ascii.isAlphanumeric(byte) and byte != '-' and byte != '_') return false;
+        return true;
+    }
+
+    fn notificationContinuityRequest(value: []const u8) bool {
+        if (value.len == 0 or value.len > 128) return false;
+        for (value) |byte| if (!std.ascii.isLower(byte) and !std.ascii.isDigit(byte) and byte != '-') return false;
+        return true;
+    }
+
+    /// `dumpRecentText` serializes a soft-wrapped grid with row separators and right padding.
+    /// Continuity markers are random whitespace-free scalars, so count them across that projection
+    /// whitespace while preserving duplicate occurrences (echo + output must still fail closed).
+    fn notificationContinuityMarkerCount(text: []const u8, marker: []const u8) usize {
+        var count: usize = 0;
+        var start: usize = 0;
+        while (start < text.len) : (start += 1) {
+            if (text[start] != marker[0]) continue;
+            var text_index = start + 1;
+            var marker_index: usize = 1;
+            while (marker_index < marker.len) {
+                while (text_index < text.len and std.ascii.isWhitespace(text[text_index])) text_index += 1;
+                if (text_index >= text.len or text[text_index] != marker[marker_index]) break;
+                text_index += 1;
+                marker_index += 1;
+            }
+            if (marker_index == marker.len) {
+                count += 1;
+                start = text_index - 1;
+            }
+        }
+        return count;
+    }
+
+    fn exactNotificationContinuityTerm(self: *AppSession, host_id: u128, runtime_id: u128) ?*Term {
+        const remote = if (app_remote_backend) |*value| value else return null;
+        var result: ?*Term = null;
+        for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
+            if (term.kind != .terminal or term.surface.remote == null or !term.rt.live_initialized) continue;
+            if (remote.runtimeHostId(term.rt.handle) != host_id) continue;
+            const runtime_hex = remote.runtimeIdFor(term.rt.handle) orelse continue;
+            const observed_runtime = std.fmt.parseInt(u128, &runtime_hex, 16) catch continue;
+            if (observed_runtime != runtime_id or result != null) return null;
+            result = term;
+        };
+        return result;
+    }
+
+    /// Captures the first product observation after the exact runtime attachment exists but before
+    /// Swift finalizes the app receipt's attach timestamp. No caller supplies identity or outcomes.
+    pub fn beginNotificationContinuity(
+        self: *AppSession,
+        host_id: u128,
+        runtime_id: u128,
+        before_marker: []const u8,
+        after_marker: []const u8,
+    ) !void {
+        if (self.notification_continuity.phase != .idle or host_id == 0 or runtime_id == 0 or
+            !notificationContinuityScalar(before_marker) or !notificationContinuityScalar(after_marker) or
+            std.mem.eql(u8, before_marker, after_marker)) return error.InvalidAuthority;
+        const term = self.exactNotificationContinuityTerm(host_id, runtime_id) orelse return error.InvalidAuthority;
+        const remote = if (app_remote_backend) |*value| value else return error.InvalidAuthority;
+        const identity = remote.notificationContinuityIdentity(term.rt.handle, host_id, runtime_id) orelse
+            return error.InvalidAuthority;
+        const recent = self.backendFor(term).dumpRecentText(term.rt.handle, self.allocator, 64, 64 * 1024) catch
+            return error.InvalidAuthority;
+        defer self.allocator.free(recent);
+        if (notificationContinuityMarkerCount(recent, before_marker) != 1 or
+            notificationContinuityMarkerCount(recent, after_marker) != 0)
+            return error.InvalidAuthority;
+        const now_i = std.Io.Clock.awake.now(self.io).nanoseconds;
+        if (now_i <= 0 or now_i > std.math.maxInt(u64)) return error.InvalidAuthority;
+        var state: NotificationContinuityState = .{
+            .phase = .observed_before,
+            .handle = term.rt.handle,
+            .host_id = host_id,
+            .runtime_id = runtime_id,
+            .generation = identity.connection_generation,
+            .host_pid = identity.host_pid,
+            .child_pid = identity.child_pid,
+            .before_observed_at_ns = @intCast(now_i),
+            .before_len = @intCast(before_marker.len),
+            .after_len = @intCast(after_marker.len),
+        };
+        @memcpy(state.before_marker[0..before_marker.len], before_marker);
+        @memcpy(state.after_marker[0..after_marker.len], after_marker);
+        self.notification_continuity = state;
+    }
+
+    /// Binds the app receipt identity and timestamp, then sends the runner-derived marker through
+    /// the real owning backend. The input timestamp is recorded only after the backend accepts it.
+    pub fn commitNotificationContinuity(
+        self: *AppSession,
+        scenario: u8,
+        request_identifier: []const u8,
+        event_id: u64,
+        attached_at_ns: u64,
+        deadline_ns: u64,
+    ) !void {
+        var state = &self.notification_continuity;
+        if (state.phase != .observed_before or (scenario != 1 and scenario != 2) or
+            !notificationContinuityRequest(request_identifier) or event_id == 0 or
+            attached_at_ns <= state.before_observed_at_ns or attached_at_ns >= deadline_ns)
+            return error.InvalidAuthority;
+        const term = self.exactNotificationContinuityTerm(state.host_id, state.runtime_id) orelse return error.InvalidAuthority;
+        if (term.rt.handle != state.handle) return error.InvalidAuthority;
+        const remote = if (app_remote_backend) |*value| value else return error.InvalidAuthority;
+        const identity = remote.notificationContinuityIdentity(state.handle, state.host_id, state.runtime_id) orelse
+            return error.InvalidAuthority;
+        if (identity.connection_generation != state.generation or identity.host_pid != state.host_pid or
+            identity.child_pid != state.child_pid) return error.InvalidAuthority;
+        var command_storage: [160]u8 = undefined;
+        const marker = state.after_marker[0..state.after_len];
+        const command = std.fmt.bufPrint(&command_storage, "printf '%s\\n' '{s}'\r", .{marker}) catch
+            return error.InvalidAuthority;
+        self.backendFor(term).writeInput(state.handle, command) catch {
+            self.failNotificationContinuity();
+            return error.InvalidAuthority;
+        };
+        const now_i = std.Io.Clock.awake.now(self.io).nanoseconds;
+        if (now_i <= attached_at_ns or now_i >= deadline_ns or now_i > std.math.maxInt(u64)) {
+            self.failNotificationContinuity();
+            return error.InvalidAuthority;
+        }
+        state.scenario = scenario;
+        state.event_id = event_id;
+        state.attached_at_ns = attached_at_ns;
+        state.deadline_ns = deadline_ns;
+        state.input_sent_at_ns = @intCast(now_i);
+        state.request_len = @intCast(request_identifier.len);
+        @memcpy(state.request[0..request_identifier.len], request_identifier);
+        state.phase = .input_sent;
+    }
+
+    fn failNotificationContinuity(self: *AppSession) void {
+        self.notification_continuity.phase = .failed;
+    }
+
+    fn advanceNotificationContinuity(self: *AppSession) void {
+        var state = &self.notification_continuity;
+        if (state.phase != .input_sent) return;
+        const now_i = std.Io.Clock.awake.now(self.io).nanoseconds;
+        if (now_i <= 0 or now_i >= state.deadline_ns or now_i > std.math.maxInt(u64)) {
+            self.failNotificationContinuity();
+            return;
+        }
+        const term = self.exactNotificationContinuityTerm(state.host_id, state.runtime_id) orelse {
+            self.failNotificationContinuity();
+            return;
+        };
+        if (term.rt.handle != state.handle) {
+            self.failNotificationContinuity();
+            return;
+        }
+        const remote = if (app_remote_backend) |*value| value else {
+            self.failNotificationContinuity();
+            return;
+        };
+        const identity = remote.notificationContinuityIdentity(state.handle, state.host_id, state.runtime_id) orelse {
+            self.failNotificationContinuity();
+            return;
+        };
+        if (identity.connection_generation != state.generation or identity.host_pid != state.host_pid or
+            identity.child_pid != state.child_pid)
+        {
+            self.failNotificationContinuity();
+            return;
+        }
+        const recent = self.backendFor(term).dumpRecentText(state.handle, self.allocator, 64, 64 * 1024) catch return;
+        defer self.allocator.free(recent);
+        const before = state.before_marker[0..state.before_len];
+        const after = state.after_marker[0..state.after_len];
+        const before_count = notificationContinuityMarkerCount(recent, before);
+        const after_count = notificationContinuityMarkerCount(recent, after);
+        // The sealed before observation cannot legitimately disappear or multiply, and a duplicate
+        // after marker can never become unique on an append-only terminal screen. Fail immediately
+        // instead of disguising permanent proof corruption as a deadline wait.
+        if (before_count != 1 or after_count > 1) {
+            self.failNotificationContinuity();
+            return;
+        }
+        if (after_count == 0) return;
+        const scenario_text = if (state.scenario == 1) "gui-zero" else "gui-live-then-quit";
+        const request = state.request[0..state.request_len];
+        const body = std.fmt.bufPrint(&state.receipt, "{{\"schema\":\"maru.session-host-notification-continuity-receipt.v1\",\"scenario\":\"{s}\",\"request_identifier\":\"{s}\",\"host_id\":\"{x:0>32}\",\"runtime_id\":\"{x:0>32}\",\"event_id\":{d},\"attached_at_ns\":{d},\"connection_generation_before\":{d},\"connection_generation_after\":{d},\"host_pid_before\":{d},\"host_pid_after\":{d},\"child_pid_before\":{d},\"child_pid_after\":{d},\"before_marker\":\"{s}\",\"after_marker\":\"{s}\",\"before_observed_at_ns\":{d},\"input_sent_at_ns\":{d},\"after_observed_at_ns\":{d}}}", .{ scenario_text, request, state.host_id, state.runtime_id, state.event_id, state.attached_at_ns, state.generation, state.generation, state.host_pid, state.host_pid, state.child_pid, state.child_pid, before, after, state.before_observed_at_ns, state.input_sent_at_ns, @as(u64, @intCast(now_i)) }) catch {
+            self.failNotificationContinuity();
+            return;
+        };
+        state.receipt_len = @intCast(body.len);
+        state.phase = .ready;
+    }
+
+    pub fn takeNotificationContinuityReceipt(self: *AppSession) union(enum) { pending, ready: []const u8, failed } {
+        return switch (self.notification_continuity.phase) {
+            .ready => blk: {
+                self.notification_continuity.phase = .taken;
+                break :blk .{ .ready = self.notification_continuity.receipt[0..self.notification_continuity.receipt_len] };
+            },
+            .failed => .failed,
+            else => .pending,
+        };
+    }
+
     /// N3 stable notification response 제품 경로. process-local surface id는 cold launch 뒤 재사용될 수 있으므로
     /// stable handle과 현재 RemoteTermBackend binding을 exact 비교해 같은 세션 안의 live Term만 먼저 활성화한다.
     /// caller가 primary에서 `.adopt_recovered`를 고른 마지막 단계만 app-global projection의 exact 한 행을 기존
@@ -4633,6 +4866,7 @@ pub const AppSession = struct {
     /// attach가 controller를 못 얻고 observer로 강등된 Term이 있다(§9). 다음 tick에 한 번 알린다 — 알리지
     /// 않으면 사용자는 화면만 갱신되고 입력이 전부 무시되는 터미널을 이유도 모른 채 쓰게 된다.
     observer_attach_notice_pending: bool = false,
+    notification_continuity: NotificationContinuityState = .{},
     /// codex `config.toml`에 적힌 신뢰 값이 우리 커맨드의 값과 **다른** 훅 수(계약 §2.1). 커맨드를 고치면
     /// 키는 그대로인데 값만 낡고, codex는 그 훅을 `modified`로 보고 **실행하지 않는다**. 우리는 남의 값을
     /// 덮지 않으므로(무한 승인 프롬프트 방지) 이 상태는 사용자가 codex에서 승인해야 풀린다 — 그래서
@@ -18908,6 +19142,7 @@ pub const AppSession = struct {
             }
         }
         if (ft_on) ft_drain = std.Io.Clock.awake.now(self.io).nanoseconds; // drain(모든 Term PTY pump) 끝
+        self.advanceNotificationContinuity();
         self.total_output_events += drain_summary.output_events;
         self.total_exit_events += drain_summary.exit_events;
         term_ops.surfaceClipboardWriteRejected(self); // 상한 초과로 거부된 OSC 52 쓰기를 notice로 표면화(무음 실패 방지)
@@ -77828,13 +78063,22 @@ fn runCr6RecoveredSessionRealHostFixture(comptime mode: Cr6RecoveredFixtureMode)
         std.debug.print("CR6a-2 fixture: legacy endpoint did not become ready\n", .{});
         return error.TestUnexpectedResult;
     }
-    defer spawner.?.deinit();
-    const spawn_response = try spawner.?.call("runtime.spawn", "{\"argv\":[\"/bin/cat\"],\"cols\":40,\"rows\":10}");
+    defer if (spawner) |*client| client.deinit();
+    const spawn_request = if (mode == .notification_direct)
+        "{\"argv\":[\"/bin/sh\",\"-c\",\"stty -echo; exec cat\"],\"cols\":40,\"rows\":10}"
+    else
+        "{\"argv\":[\"/bin/cat\"],\"cols\":40,\"rows\":10}";
+    const spawn_response = try spawner.?.call("runtime.spawn", spawn_request);
     defer allocator.free(spawn_response);
     const runtime_id = session_host.client.extractRuntimeId(spawn_response) orelse {
         std.debug.print("CR6a-2 fixture: spawn response omitted runtime id\n", .{});
         return error.TestUnexpectedResult;
     };
+    // The fixture child exists only to create the durable runtime. Release its controller lease
+    // before the product AppSession attaches; otherwise the host correctly downgrades the app to
+    // observer and this would test a caller-injected marker instead of real app-owned input.
+    spawner.?.deinit();
+    spawner = null;
 
     app_recovered_sessions_projection.deinit(std.heap.smp_allocator);
     app_recovered_sessions_workspace_generation = 0;
@@ -77985,6 +78229,71 @@ fn runCr6RecoveredSessionRealHostFixture(comptime mode: Cr6RecoveredFixtureMode)
         try std.testing.expect(!session.restore_runtime_force_attach);
         try std.testing.expectEqual(host_id, app_remote_backend.?.runtimeHostId(pane_ops.activePane(session).activeTerm().rt.handle).?);
         try std.testing.expectEqual(runtime_id, app_remote_backend.?.runtimeIdFor(pane_ops.activePane(session).activeTerm().rt.handle).?);
+
+        // R2b3b2 uses the actual adopted product Term, its real backend input, and host screen
+        // projection. Neither PID/generation nor marker outcomes are injected into the state.
+        const term = pane_ops.activePane(session).activeTerm();
+        const before_marker = "MARU_BEFORE_123e4567e89b42d3a456426614174000";
+        const after_marker = "MARU_AFTER_123e4567e89b42d3a456426614174000";
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            AppSession.notificationContinuityMarkerCount(
+                "MARU_BEFORE_123e4567e89b42d3a45642661417\n    4000   \n",
+                before_marker,
+            ),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 2),
+            AppSession.notificationContinuityMarkerCount(
+                before_marker ++ "\n" ++ before_marker,
+                before_marker,
+            ),
+        );
+        try session.backendFor(term).writeInput(term.rt.handle, before_marker ++ "\r");
+        var before_visible = false;
+        var pump_attempt: usize = 0;
+        while (pump_attempt < 200 and !before_visible) : (pump_attempt += 1) {
+            _ = try term.rt.pump.drainAvailable();
+            const recent = try session.backendFor(term).dumpRecentText(term.rt.handle, allocator, 64, 64 * 1024);
+            defer allocator.free(recent);
+            before_visible = AppSession.notificationContinuityMarkerCount(recent, before_marker) == 1;
+            if (!before_visible) _ = usleep(5 * 1000);
+        }
+        try std.testing.expect(before_visible);
+        try session.beginNotificationContinuity(host_id, runtime_value, before_marker, after_marker);
+        const before_at = session.notification_continuity.before_observed_at_ns;
+        _ = usleep(1000);
+        const deadline_ns: u64 = @intCast(std.Io.Clock.awake.now(io).nanoseconds + 5 * std.time.ns_per_s);
+        var request_storage: [128]u8 = undefined;
+        const request_identifier = try std.fmt.bufPrint(
+            &request_storage,
+            "maru-{x:0>32}-{x:0>32}-7",
+            .{ host_id, runtime_value },
+        );
+        try session.commitNotificationContinuity(
+            1,
+            request_identifier,
+            7,
+            before_at + 1,
+            deadline_ns,
+        );
+        var ready = false;
+        pump_attempt = 0;
+        while (pump_attempt < 200 and !ready) : (pump_attempt += 1) {
+            _ = try term.rt.pump.drainAvailable();
+            session.advanceNotificationContinuity();
+            ready = session.notification_continuity.phase == .ready;
+            if (!ready) _ = usleep(5 * 1000);
+        }
+        try std.testing.expect(ready);
+        const continuity = session.takeNotificationContinuityReceipt();
+        const bytes = switch (continuity) {
+            .ready => |value| value,
+            else => return error.TestUnexpectedResult,
+        };
+        try std.testing.expect(std.mem.indexOf(u8, bytes, before_marker) != null);
+        try std.testing.expect(std.mem.indexOf(u8, bytes, after_marker) != null);
+        try std.testing.expectEqual(AppSession.NotificationContinuityPhase.taken, session.notification_continuity.phase);
     }
     if (mode != .inert and mode != .notification_direct) {
         const row_before = app_recovered_sessions_projection.rows[0];

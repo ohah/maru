@@ -1714,3 +1714,74 @@ RAV8b-2 의 적대적 검증이 겨눌 지점이다.
 
 ⚠️ **needle 함정 네 번째**: 소스 축 게이트의 `bodyOf` 는 `\n}\n` 까지 자르므로 **함수 안 블록**에
 안 맞고, 주석을 벗기면 **빈 줄이 남아** 여러 줄 needle 이 어긋난다. 짧고 유일한 모양으로 겨눠야 한다.
+
+## 28. 후속 A — 짝 게이트의 구멍이 **빨간 판정자를 숨기고 있었다** (2026-09-12)
+
+§25.2 가 「어디에도 안 붙은 이름 스텝은 여전히 통과한다」를 남겼다. 그것을 재 봤더니:
+
+| 스텝 | 결과 |
+| --- | --- |
+| `test-macos-window-smoke` | 2 passed |
+| **`test-macos-metal-smoke`** | 🔥 **FAIL — expected 64, found 68** |
+| `test-macos-chrome-lab-smoke` | 72 passed |
+| `test-macos-app-pty-metal-smoke` | 46 passed |
+| `test-macos-coretext-smoke` | 104 passed |
+| `test-macos-glyph-texture-smoke` | 4 passed |
+| `test-macos-glyph-text-smoke` | 11 passed |
+| `test-macos-editor-smoke` | ok |
+| `test-remote-explorer` | 11 passed |
+
+**아홉이 CI 밖이었고 그중 하나는 빨간 채로 있었다.** 아홉 다 헤드리스에서 돈다 — GUI 를 요구해서
+빠진 것이 아니라 **그냥 안 붙어 있었다**.
+
+### 28.1 숨어 있던 결함 — ObjC 미러가 4 바이트 짧다
+
+`clip_index` 를 더한 커밋(ABI v169)이 Zig `NativeMetalCell` 을 64 → 68 로 키웠는데 **ObjC
+`MaruMetalSmokeCell` 을 안 맞췄다**. Zig 는 `cells: [*]const NativeMetalCell` 를 그대로 넘기므로
+**ObjC 가 자기 크기로 훑어 매 셀마다 자리가 밀리고 남의 atlas 좌표를 읽는다** — 그 판정자가 정확히
+그 위험을 주석에 적어 두고 잡았지만, **스텝이 CI 밖이라 아무도 안 봤다**.
+
+### 28.2 구멍의 원인이 둘이었다
+
+1. **짝 게이트가 「`test_step` 에 붙은 줄 다음」만 봤다** — 어디에도 안 붙은 스텝은 셀 대상이 아니다.
+2. 🔥 **`macos_only_test_step` 선언이 3,500 줄쯤에 있었다** — 그 **위**에서 만들어진 스텝들은 **붙을
+   수조차 없었다**. 선언을 `build()` 맨 앞으로 옮겼다.
+
+### 28.3 고친 것
+
+- ObjC 미러에 `clip_index`/`clip_pad` 를 더했다(38 → **39 판정자**).
+- 🔥 **미러를 지키는 판정자를 새로 썼다.** 기존 ABI 판정자는 `@sizeOf(NativeMetalCell)` 만 보므로
+  **ObjC 쪽이 낡아도 초록**이다 — 뮤테이션이 그것을 드러냈다(미러를 지워도 안 죽었다). 새 판정자는
+  `@typeInfo` 로 Zig **모든 필드**를 돌며 미러에 있는지 센다.
+- 아홉을 전부 `macos_only_test_step` 에 걸었다.
+- **새 게이트**: `if (macos)` 블록의 `b.step("test-…")` 는 전부 집계에 닿거나 ci.yml 이 직접 불러야
+  한다.
+
+### 28.4 적대적 5 회
+
+| 회차 | 물음 | 찾은 것 |
+| --- | --- | --- |
+| **CA1** | 🔥 **새 고아를 정말 잡나** | **안 잡았다.** 고정 창(800 B)이 **이웃의 부착을 빌려**, `test-remote-explorer` 뒤에 가짜 스텝을 넣었더니 통과했다. 창을 **다음 `b.step(` 직전**까지로 잘랐다 |
+| **CA2** | ci.yml 직접 호출은 면제되나 | ✅ 반증. `test-macos-only`·`test-remote-scm`·`test-editor` 가 그 경로로 통과한다 |
+| **CA3** | 미러 게이트가 **새 필드**를 아나 | ✅ `@typeInfo` 로 돌아 **자동**이다 |
+| **CA4** | 그것을 **실증**하면 | ✅ Zig 에 `brand_new_field` 를 더하니 **즉시 3 실패** — 원래 결함이 재발할 수 없다 |
+| **CA5** | 부착 하나를 떼면 | ✅ 개별로 문다 |
+
+⚠️ **「언급」을 「사용」으로 세는 함정이 네 번째다.** 미러 게이트가 처음에 **내가 쓴 주석**의
+`clip_index` 를 필드로 읽어, 미러를 지워도 초록이었다 — 주석을 벗기고서야 죽는다.
+
+**뮤테이션 넷 전부 죽는다**: 스텝을 CI 에서 뗀다 · ObjC 미러를 어긋낸다 · 가짜 고아를 넣는다 ·
+부착 하나를 뗀다.
+
+### 28.5 적대적 5 회 더 (2026-09-12)
+
+| 회차 | 물음 | 찾은 것 |
+| --- | --- | --- |
+| **CB1** | `test-` 가 **아닌** 검사 스텝은 | ⚠️ **부분 갭.** `macos-app-host-swift-check`(Swift 타입 체크)가 그 관례 밖이라 게이트가 안 세고 CI 에도 없다. **안 넓혔다** — 그것은 판정자가 아니라 **도구**이고, CI 는 같은 축을 `macos-app-host-abi-lib`(Swift 가 링크하는 바로 그 정적 라이브러리 컴파일)로 이미 덮는다. `macos-*-smoke` 들은 **실행 도구**이고 그 판정자가 `test-macos-*-smoke` 다(쌍) |
+| **CB2** | ci.yml 면제가 **부분 문자열**이라 느슨한가 | ✅ **반증.** `test-macos-onl`(= `test-macos-only` 의 접두)을 넣어 봐도 **잡힌다** — `zig build <name>` 으로 맞추므로 접두가 통과하지 않는다 |
+| **CB3** | 집계가 **정말 CI 에서 도나** | ✅ 반증. `file-explorer-macos` job(`runs-on: macos-15`)이 `zig build test-macos-only` 를 부른다 |
+| **CB4** | macOS 러너 시간이 **얼마나 느나** | ✅ 반증. 캐시가 따뜻하면 다섯이 **1.4 초**다. CI 는 차가운 캐시지만 그 그래프는 `test-macos-only` 가 이미 컴파일하는 것과 겹친다 |
+| **CB5** | 새로 건 것 중 **flaky** 가 있나 | ✅ 반증. 가장 의심스러운 PTY+Metal 스모크가 **3 연속 47/47** |
+
+**CB1 을 안 넓힌 것이 판단이다.** 게이트를 「모든 macOS 스텝」으로 넓히면 `macos-dmg`·`macos-app` 같은
+**빌드 산출물**까지 CI 에 걸어야 한다 — 그것은 릴리스 경로이고 별도 결정이다(계약 §CI 게이트 범위).

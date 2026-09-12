@@ -854,15 +854,68 @@ test "NativeMetalCell ABI keeps atlas placement and uv fields tightly packed" {
     // NativeMetalCell은 appkit_metal_smoke.m의 MaruMetalSmokeCell과 같은 메모리 모양이어야
     // 한다. 필드를 추가할 때 이 크기가 예고 없이 바뀌면 ObjC bridge가 atlas 좌표를 다른
     // 값으로 읽어 Metal smoke가 거짓 신호를 낼 수 있다. foreground·background(u32)에 이어 panel
-    // 픽셀 origin_x/origin_y(u32) 추가로 64바이트가 됐다. offset도 고정해, 새 필드를 끼워 넣어 기존
-    // 필드가 밀리면 크기는 같아도 잡히게 한다.
-    try std.testing.expectEqual(@as(usize, 64), @sizeOf(NativeMetalCell));
+    // 픽셀 origin_x/origin_y(u32) 추가로 64바이트가 됐고, **clip_index/_clip_pad(u16 둘)** 로 68이
+    // 됐다(ABI v169). offset도 고정해, 새 필드를 끼워 넣어 기존 필드가 밀리면 크기는 같아도 잡히게 한다.
+    //
+    // 🔥 **이 판정자가 실제로 그 일을 잡았다** — `clip_index` 를 더한 커밋이 ObjC 미러
+    // (`MaruMetalSmokeCell`)를 안 맞췄다. 그런데 **이 스텝이 CI 밖이라** 아무도 안 봤다: 짝 게이트가
+    // 「어디에도 안 붙은 이름 스텝」을 못 세고 있었다(계획 §28).
+    try std.testing.expectEqual(@as(usize, 68), @sizeOf(NativeMetalCell));
     try std.testing.expectEqual(@as(usize, 4), @alignOf(NativeMetalCell));
     try std.testing.expectEqual(@as(usize, 48), @offsetOf(NativeMetalCell, "foreground"));
     try std.testing.expectEqual(@as(usize, 52), @offsetOf(NativeMetalCell, "background"));
     try std.testing.expectEqual(@as(usize, 56), @offsetOf(NativeMetalCell, "origin_x"));
     try std.testing.expectEqual(@as(usize, 60), @offsetOf(NativeMetalCell, "origin_y"));
     try std.testing.expectEqual(@as(usize, 8), @offsetOf(NativeMetalCell, "codepoint"));
+    try std.testing.expectEqual(@as(usize, 64), @offsetOf(NativeMetalCell, "clip_index"));
+}
+
+test "ObjC 미러(MaruMetalSmokeCell)가 Zig 필드를 «하나도 빠뜨리지 않는다»" {
+    // 🔥 **위 판정자가 못 보는 절반이다.** `@sizeOf(NativeMetalCell)` 은 **Zig 쪽만** 보므로, ObjC
+    // 미러가 낡아도 초록이다 — 그런데 Zig 가 넘긴 배열(`cells: [*]const NativeMetalCell`)을 ObjC 가
+    // 자기 크기로 훑으므로, 어긋나면 **매 셀마다 자리가 밀려 남의 atlas 좌표를 읽는다**.
+    //
+    // 그 일이 실제로 있었다: `clip_index` 추가 커밋이 미러를 안 맞췄고, 위 판정자가 잡았지만 **그
+    // 스텝이 CI 밖이라** 아무도 안 봤다(계획 §28). 이제 스텝은 CI 에 붙었고, 이 판정자가 **미러
+    // 자체**를 못박는다.
+    const allocator = std.testing.allocator;
+    const src = try std.Io.Dir.cwd().readFileAlloc(
+        std.testing.io,
+        "src/platform/macos/appkit_metal_smoke.m",
+        allocator,
+        .limited(256 * 1024),
+    );
+    defer allocator.free(src);
+
+    const open = std.mem.indexOf(u8, src, "typedef struct {") orelse return error.TestUnexpectedResult;
+    const close = std.mem.indexOfPos(u8, src, open, "} MaruMetalSmokeCell;") orelse return error.TestUnexpectedResult;
+
+    // ⚠️ **주석을 벗기고 센다.** 안 그러면 「이 필드가 왜 필요한지 설명하는 주석」이 필드로 걸려
+    //    미러를 지워도 초록이다 — 뮤테이션이 그것을 드러냈다. 세야 하는 것은 「언급하는가」가 아니라
+    //    **「선언하는가」**다(이 저장소가 같은 함정을 네 번째로 겪는 자리다).
+    var stripped: std.ArrayList(u8) = .empty;
+    defer stripped.deinit(allocator);
+    var lines = std.mem.splitScalar(u8, src[open..close], '\n');
+    while (lines.next()) |line| {
+        const keep = if (std.mem.indexOf(u8, line, "//")) |at| line[0..at] else line;
+        try stripped.appendSlice(allocator, keep);
+        try stripped.append(allocator, '\n');
+    }
+    const body = stripped.items;
+
+    // `NativeMetalCell` 의 **모든 필드**가 미러에 있어야 한다 — 이름으로 센다(순서는 아래 offset
+    // 판정자가 이미 못박는다).
+    inline for (@typeInfo(NativeMetalCell).@"struct".fields) |f| {
+        // Zig 의 `_clip_pad` 는 C 에서 `clip_pad` 다(선행 밑줄은 예약어 관례라 안 쓴다).
+        const want = comptime if (std.mem.eql(u8, f.name, "_clip_pad")) "clip_pad" else f.name;
+        if (std.mem.indexOf(u8, body, want) == null) {
+            std.debug.print(
+                "🔥 ObjC 미러에 `{s}` 가 없다 — Zig {d} B 짜리 셀을 ObjC 가 더 짧게 훑어 자리가 밀린다.\n",
+                .{ want, @sizeOf(NativeMetalCell) },
+            );
+            return error.TestUnexpectedResult;
+        }
+    }
 }
 
 test "NativeMetalRasterUpload ABI keeps raster byte ranges visible to ObjC" {

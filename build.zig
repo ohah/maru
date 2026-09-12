@@ -96,6 +96,16 @@ fn linkSessionHostNotificationCompileStub(b: *std.Build, compile: *std.Build.Ste
 }
 
 pub fn build(b: *std.Build) void {
+    // 🔥 **macOS 전용 게이트의 집계 — 선언이 «첫 사용보다 앞»이어야 한다**(계획 §28).
+    //
+    // 예전에는 이 선언이 3,500 줄쯤에 있었고, 그 **위에서 만들어진 macOS 스텝 아홉 개는 붙을 수조차
+    // 없었다** — 그래서 CI 밖에 남았고, 그중 `test-macos-metal-smoke` 는 **빨간 채로** 있었다
+    // (`clip_index` 를 더한 커밋이 ObjC 미러를 안 맞췄는데 아무도 안 봤다).
+    const macos_only_test_step = b.step(
+        "test-macos-only",
+        "Run the gates that only exist on macOS (the ubuntu check job cannot build them)",
+    );
+
     // macOS 배포 하한을 11.0(Big Sur, Apple Silicon 시작 버전)으로 고정해 구형 macOS에서도
     // 실행되게 한다. 단 이 기본값은 macOS 호스트에서 빌드할 때만 건다.
     //   os_version_min을 모든 호스트의 default_target에 박으면, Linux CI에서 target이
@@ -719,6 +729,7 @@ pub fn build(b: *std.Build) void {
         const run_macos_window_smoke_tests = b.addRunArtifact(macos_window_smoke_tests);
         run_macos_window_smoke_tests.setCwd(b.path("."));
         test_macos_window_smoke_step.dependOn(&run_macos_window_smoke_tests.step);
+        macos_only_test_step.dependOn(&run_macos_window_smoke_tests.step);
 
         // Metal smoke는 AppKit 창 위에 CAMetalLayer가 실제 drawable을 present하고,
         // RendererState/GlyphFrame에서 온 atlas slot/UV/raster bytes를 제품 atlas texture
@@ -808,6 +819,7 @@ pub fn build(b: *std.Build) void {
         const run_macos_metal_smoke_tests = b.addRunArtifact(macos_metal_smoke_tests);
         run_macos_metal_smoke_tests.setCwd(b.path("."));
         test_macos_metal_smoke_step.dependOn(&run_macos_metal_smoke_tests.step);
+        macos_only_test_step.dependOn(&run_macos_metal_smoke_tests.step);
 
         // Chrome Lab readback은 synthetic UiTree를 제품 lowering과 renderer의 오프스크린
         // screenshot pass까지 잇는다. 일반 앱 tab/workspace에 Lab을 넣지 않으며 scenario마다
@@ -900,6 +912,7 @@ pub fn build(b: *std.Build) void {
         const run_macos_chrome_lab_smoke_tests = b.addRunArtifact(macos_chrome_lab_smoke_tests);
         run_macos_chrome_lab_smoke_tests.setCwd(b.path("."));
         test_macos_chrome_lab_smoke_step.dependOn(&run_macos_chrome_lab_smoke_tests.step);
+        macos_only_test_step.dependOn(&run_macos_chrome_lab_smoke_tests.step);
 
         // App PTY Metal smoke는 headless app-pty-smoke와 visible Metal smoke를 잇는다.
         // controlled PTY command output이 SurfaceRuntime/AppWindow를 거쳐 CoreText
@@ -959,6 +972,7 @@ pub fn build(b: *std.Build) void {
         const run_macos_app_pty_metal_smoke_tests = b.addRunArtifact(macos_app_pty_metal_smoke_tests);
         run_macos_app_pty_metal_smoke_tests.setCwd(b.path("."));
         test_macos_app_pty_metal_smoke_step.dependOn(&run_macos_app_pty_metal_smoke_tests.step);
+        macos_only_test_step.dependOn(&run_macos_app_pty_metal_smoke_tests.step);
 
         // Swift host type-check는 앱을 실행하지 않고 C header import와 AppKit 타입 사용만 본다.
         // 실행 smoke와 분리해 두면 launch 실패와 Swift/Zig ABI shape 실패를 따로 볼 수 있다.
@@ -1049,6 +1063,7 @@ pub fn build(b: *std.Build) void {
         const run_macos_coretext_smoke_tests = b.addRunArtifact(macos_coretext_smoke_tests);
         run_macos_coretext_smoke_tests.setCwd(b.path("."));
         test_macos_coretext_smoke_step.dependOn(&run_macos_coretext_smoke_tests.step);
+        macos_only_test_step.dependOn(&run_macos_coretext_smoke_tests.step);
 
         // Glyph texture smoke는 창을 띄우지 않고 CoreText CPU bitmap을 Metal texture로
         // 업로드한 뒤 blit readback으로 픽셀이 보존되는지 확인한다. 실제 text draw와
@@ -1090,6 +1105,7 @@ pub fn build(b: *std.Build) void {
         const run_macos_glyph_texture_smoke_tests = b.addRunArtifact(macos_glyph_texture_smoke_tests);
         run_macos_glyph_texture_smoke_tests.setCwd(b.path("."));
         test_macos_glyph_texture_smoke_step.dependOn(&run_macos_glyph_texture_smoke_tests.step);
+        macos_only_test_step.dependOn(&run_macos_glyph_texture_smoke_tests.step);
 
         // Glyph text smoke는 CoreText CPU bitmap을 Metal texture로 올린 뒤 실제
         // AppKit 창의 CAMetalLayer에서 fragment shader로 샘플링한다. 제품 renderer는
@@ -1138,6 +1154,7 @@ pub fn build(b: *std.Build) void {
         const run_macos_glyph_text_smoke_tests = b.addRunArtifact(macos_glyph_text_smoke_tests);
         run_macos_glyph_text_smoke_tests.setCwd(b.path("."));
         test_macos_glyph_text_smoke_step.dependOn(&run_macos_glyph_text_smoke_tests.step);
+        macos_only_test_step.dependOn(&run_macos_glyph_text_smoke_tests.step);
     }
 
     // **중계만 따로 돌리는 스텝**(S10c). 전체 스위트는 3천 개가 넘어 한 번 도는 데 20분 넘게
@@ -2092,6 +2109,7 @@ pub fn build(b: *std.Build) void {
 
         const macos_editor_smoke_step = b.step("test-macos-editor-smoke", "Assert the MergeView product WKWebView gate");
         macos_editor_smoke_step.dependOn(&macos_editor_smoke_run.step);
+        macos_only_test_step.dependOn(&macos_editor_smoke_run.step);
 
         // 눈으로 볼 때만 창을 띄운다(기본은 accessory라 CI에서 창이 뜨지 않는다).
         const macos_editor_smoke_display = b.addSystemCommand(&.{"./zig-out/bin/maru-macos-editor-smoke"});
@@ -3525,10 +3543,6 @@ pub fn build(b: *std.Build) void {
     // 컴파일·실행하는 값이었다. ReleaseFast 는 (1) 가족의 전용 스텝(`test-session-host-*`)이 두 모드를 그대로
     // 돌리고, (2) posix 집계는 리눅스 `check` 잡의 `zig build test` 가 두 모드로 돈다. 판정자 내용은 같다.
     // 루프 밖(단일 모드) 부착은 그대로 둔다.
-    const macos_only_test_step = b.step(
-        "test-macos-only",
-        "Run the gates that only exist on macOS (the ubuntu check job cannot build them)",
-    );
 
     // **파일 트리 백엔드는 모든 호스트에서 테스트한다**(W8.1, 계약 §2m). 이 파일은
     // `src/platform/macos/` 에 있지만 macOS 프레임워크를 하나도 안 쓴다 — 순수 Zig + std 이고
@@ -3678,6 +3692,7 @@ pub fn build(b: *std.Build) void {
         run_remote_explorer_tests.addArg("--maru-expect-tests=11"); // 이름 있는 8 + 이 그래프의 이름 없는 test 블록들(필터와 무관하게 컴파일된다)
         run_remote_explorer_tests.setCwd(b.path("."));
         b.step("test-remote-explorer", "Run the remote explorer vertical judges only").dependOn(&run_remote_explorer_tests.step);
+        macos_only_test_step.dependOn(&run_remote_explorer_tests.step);
     }
 
     // **헬퍼 `list` ↔ 코덱 파서 왕복 게이트**(RF2a — docs/plans/remote-file-tree.md §10). 헬퍼는

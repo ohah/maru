@@ -418,6 +418,12 @@ jobs:
       #
       # `test` 전체를 여기서 다시 돌리지 않는다 — 나머지 52개는 ubuntu `check` 가 이미 돌고, 겹쳐
       # 돌리면 macOS 러너 시간만 먹는다. 등록 누락은 `tests/boundary/imports.zig` 가 센다.
+      # 🔥 **집계에 새로 붙인 `test-macos-editor-smoke` 가 웹 번들을 만든다**
+      # (`bun run --cwd web scripts/build-editor-smoke.ts`). 이 잡은 지금까지 웹 의존성을 안 깔았고,
+      # 그래서 그 스텝이 콜드 러너에서 exit 1 로 죽었다 — 로컬은 이미 깔려 있어 초록이었다.
+      # `session host bundled CLI macOS` 가 같은 이유로 이미 이 스텝을 든다.
+      - name: Install web bundle dependencies for the editor smoke
+        run: bun install --cwd web --frozen-lockfile
       - name: Run the gates that only exist on macOS
         run: zig build test-macos-only
       # **원격 SCM 을 실물 SSH 위에서 돈다.** 그 판정자들은 control socket 이 없으면 `SkipZigTest` 라,

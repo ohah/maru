@@ -147,6 +147,13 @@ pub const ScenarioId = enum {
     /// 자릿수가 늘어도(9→10) 본문 시작 열이 흔들리지 않는지가 단위 테스트로 안 보이는 부분이다.
     /// 좌표계를 셀↔픽셀로 오갈 때 어긋나는 회귀는 캡처로만 드러난다(탭 제목 이관 때 실제로 그랬다).
     editor_gutter,
+    /// 같은 편집기에 **인라인 위젯 행**이 둘 섞인 상태(S1.5 — docs/editor-merge-conflicts.md §5).
+    ///
+    /// **이 조각은 혼자서는 소비자가 없다** — 마커를 읽어 위젯을 만드는 것은 S2 다. 그래서 픽스처가
+    /// 위젯 표를 직접 주고, 이 캡처가 그 행의 **유일한 시각 증거**가 된다. 여기서 보는 것 셋:
+    /// ⑴ 위젯 행에 **줄 번호가 없다**(그리고 아래 글자 행의 번호가 **건너뛰지 않는다**),
+    /// ⑵ 위젯 글자가 본문 열에 서고, ⑶ 위젯이 붙은 만큼 아래 줄들이 **밀린다**(행을 실제로 차지한다).
+    editor_widget_row,
     /// N1 §4 — 뷰포트 컬링. 문서 중간으로 스크롤한 상태를 픽셀로 본다. **줄 번호가 1이 아니라
     /// first_row+1에서 시작하는지**가 핵심이고, gutter 폭이 자릿수를 따라 넓어지는지도 함께 나온다.
     editor_scrolled,
@@ -357,7 +364,7 @@ pub fn buildFrame(
         .scm_history => buildScmHistoryFrame(scenario, tokens, buffers),
         .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome => buildFileTreeFrame(scenario, tokens, buffers),
         .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper => buildContextMenuFrame(scenario, tokens, buffers),
-        .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_selection, .editor_find, .editor_caret_bar, .editor_caret_block, .editor_caret_underline => buildEditorGutterFrame(scenario, buffers),
+        .editor_gutter, .editor_widget_row, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_selection, .editor_find, .editor_caret_bar, .editor_caret_block, .editor_caret_underline => buildEditorGutterFrame(scenario, buffers),
         .editor_diff, .editor_diff_scrolled, .editor_diff_selection => buildEditorDiffFrame(scenario, buffers),
         // 위 early return이 처리한다 — 여기 오면 분기가 갈린 것이다.
         .sidebar_status_strip => unreachable,
@@ -455,6 +462,17 @@ const editor_find_marks = [_][]const chrome.components.editor_view.frame.Mark{
 /// 현재 매치는 **둘째 줄의 둘째 것**이다. 첫 것을 고르면 "앞에서 자른 것"과 구분이 안 되고,
 /// 마지막을 고르면 "뒤에서 자른 것"과 구분이 안 된다 — 가운데여야 셋으로 가르는 코드가 판정된다.
 const editor_find_current: chrome.components.editor_view.frame.CurrentMatch = .{ .line = 1, .start = 15 };
+
+/// `editor_widget_row` 픽스처의 위젯 표. **둘을 둔다** — 하나면 「그 줄에만 우연히 맞는」 상태와
+/// 「규칙이 맞는」 상태가 안 갈린다. 하나는 **열 0**, 하나는 **들여쓴 자리**에 세워 `Widget.col` 이
+/// 실제로 먹는지 본다(둘 다 0 이면 그 필드를 지워도 골든이 같다).
+const editor_widget_rows = [_]?chrome.components.editor_view.content.Widget{
+    null, // 0: 자
+    .{ .text = "현재 것 채택 · 들어온 것 채택 · 둘 다 채택", .col = 0 }, // 1: import 줄 위
+    null, // 2
+    null, // 3: pub fn main
+    .{ .text = "↑ 여기서 고른다", .col = 8 }, // 4: 들여쓴 줄 위 — `col` 이 먹는지 본다
+};
 
 const editor_fixture_lines = [_][]const u8{
     // 8칸마다 `|`인 자. **격자 배치의 회귀 가드다** — 격자면 파이프 간격이 정확히 cell_w의
@@ -803,7 +821,9 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
         var index_scratch: [4096]u8 = undefined;
         const counted = @min(line_count, row_capacity);
         for (lines[0..counted], 0..) |line, i| {
-            counts[i] = editor_view.content.rowCount(line, lab_tab_width, layout.content.width, true, &index_scratch).rows;
+            // **위젯 행은 이 시나리오(`editor_wrap_scrolled`)에 없다** — 있으면 여기서도 세야 한다
+            // (세는 쪽과 그리는 쪽이 갈리면 스크롤이 화면과 어긋난다).
+            counts[i] = editor_view.content.rowCount(line, lab_tab_width, layout.content.width, true, 0, &index_scratch).rows;
         }
         var starts: [row_capacity + 1]u32 = undefined;
         const index = editor_view.visual_map.buildIndex(counts[0..counted], &starts);
@@ -881,6 +901,9 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
         .total_lines = if (scenario.id == .editor_folded) 24 else line_count,
         .line_numbers = if (scenario.id == .editor_folded) &editor_folded_numbers else null,
         .folds = if (scenario.id == .editor_folded) &editor_folded_marks else null,
+        // **위젯 행은 이 시나리오에만 준다**(S1.5) — 다른 골든까지 행이 밀리면 그 캡처들이 이
+        // 축까지 떠안는다(caret 을 한 시나리오에만 켜는 것과 같은 판단).
+        .line_widgets = if (scenario.id == .editor_widget_row) &editor_widget_rows else &.{},
         .selection_marks = if (scenario.id == .editor_selection) &editor_selection_marks else null,
         .search_marks = if (scenario.id == .editor_find) &editor_find_marks else null,
         .search_current = if (scenario.id == .editor_find) editor_find_current else null,
@@ -1158,7 +1181,7 @@ fn buildDockFrame(
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
             .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
             // editor_gutter는 buildEditorGutterFrame이 처리한다 — 도크 목록을 타지 않는다.
-            .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper, .scm_rows, .scm_history, .scm_row_hover, .scm_conflict_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_selection, .editor_find, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_diff, .editor_diff_scrolled, .editor_diff_selection => unreachable,
+            .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper, .scm_rows, .scm_history, .scm_row_hover, .scm_conflict_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_widget_row, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_selection, .editor_find, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_diff, .editor_diff_scrolled, .editor_diff_selection => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{

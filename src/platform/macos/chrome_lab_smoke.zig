@@ -78,6 +78,7 @@ fn faceFor(variant: FontVariant) system_text.Face {
 fn labQuadLayer(id: lab.ScenarioId) u32 {
     return switch (id) {
         .editor_gutter,
+        .editor_widget_row,
         .editor_scrolled,
         .editor_font_large,
         .editor_hazard,
@@ -744,7 +745,7 @@ pub fn main(init: std.process.Init) !void {
         const rect = (switch (scenario_id) {
             .scm_rows, .scm_history, .scm_row_hover, .scm_conflict_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_small_font, .scm_blocker, .dock_over_status_bar => chrome.components.scm_dock.build.scrollTextViewport(frame.tree),
             .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome => chrome.components.file_tree.build.scrollTextViewport(frame.tree),
-            .empty, .loading, .retained_list, .font_specimen, .partial_scroll, .partial_group_scroll, .scrollbar, .sticky_at_rest, .sticky_pinned, .sticky_pushed, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .sort_toggle_hover, .sort_toggle_pressed, .sidebar_status_strip, .editor_gutter, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .context_menu_checked, .context_menu_send, .context_menu_send_helper, .context_menu_unchecked, .editor_real_file, .editor_typescript, .editor_selection, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_find, .editor_diff_selection, .editor_diff, .editor_diff_scrolled => chrome.components.session_dock.build.scrollTextViewport(frame.tree),
+            .empty, .loading, .retained_list, .font_specimen, .partial_scroll, .partial_group_scroll, .scrollbar, .sticky_at_rest, .sticky_pinned, .sticky_pushed, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .sort_toggle_hover, .sort_toggle_pressed, .sidebar_status_strip, .editor_gutter, .editor_widget_row, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .context_menu_checked, .context_menu_send, .context_menu_send_helper, .context_menu_unchecked, .editor_real_file, .editor_typescript, .editor_selection, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_find, .editor_diff_selection, .editor_diff, .editor_diff_scrolled => chrome.components.session_dock.build.scrollTextViewport(frame.tree),
         }) orelse break :blk null;
         break :blk .{
             .x = @intFromFloat(@max(rect.x, 0)),
@@ -973,6 +974,7 @@ fn scenarioFromEnvValue(raw: []const u8) ?lab.ScenarioId {
     if (std.mem.eql(u8, raw, "detail-stale")) return .detail_stale;
     if (std.mem.eql(u8, raw, "detail-unavailable")) return .detail_unavailable;
     if (std.mem.eql(u8, raw, "editor-gutter")) return .editor_gutter;
+    if (std.mem.eql(u8, raw, "editor-widget-row")) return .editor_widget_row;
     if (std.mem.eql(u8, raw, "editor-scrolled")) return .editor_scrolled;
     if (std.mem.eql(u8, raw, "editor-font-large")) return .editor_font_large;
     if (std.mem.eql(u8, raw, "editor-hazard")) return .editor_hazard;
@@ -1053,6 +1055,7 @@ fn artifactName(id: lab.ScenarioId) []const u8 {
         .detail_unavailable => "detail-unavailable",
         .sidebar_status_strip => "sidebar-status-strip",
         .editor_gutter => "editor-gutter",
+        .editor_widget_row => "editor-widget-row",
         .editor_scrolled => "editor-scrolled",
         .editor_font_large => "editor-font-large",
         .editor_hazard => "editor-hazard",

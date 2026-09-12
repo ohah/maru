@@ -106,6 +106,13 @@ pub fn bodyPoint(
         break :blk @min(r, rows.len - 1);
     };
     const v = rows[row_i];
+    // **위젯 행은 문서 좌표를 내지 않는다**(S1.5 — docs/editor-merge-conflicts.md §5). 그 행에는
+    // 문서 글자가 없으므로 offset 을 만들어 내면 **없는 자리**를 가리키고, caret 이 거기 선다.
+    //
+    // **드래그가 그 행을 지날 때는 선택이 그대로 멈춘다**(마지막 값이 남는다) — 위젯 행 위의 좌표를
+    // 아래위 아무 줄로 「가장 가까운 쪽」이라 해석하면 그 추측이 어느 방향이든 틀릴 때가 있고,
+    // 멈추는 쪽은 적어도 사용자가 마지막으로 본 상태와 같다.
+    if (v.kind != .text) return null;
 
     const source_line: usize = row_lines[row_i];
     if (source_line >= lines.len) return null;
@@ -155,6 +162,27 @@ test "세로는 묶는다 — 위아래로 벗어나도 첫·마지막 행이다
     try testing.expectEqual(@as(usize, 0), bodyPoint(g, rows, &row_lines, &lines, 0, -1000).?.row);
     try testing.expectEqual(@as(usize, 2), bodyPoint(g, rows, &row_lines, &lines, 0, 100_000).?.row);
     try testing.expectEqual(@as(usize, 1), bodyPoint(g, rows, &row_lines, &lines, 0, 20).?.row);
+}
+
+test "WID5 위젯 행은 문서 좌표를 «내지 않는다» — 없는 자리에 caret 이 서면 안 된다" {
+    // S1.5 — docs/editor-merge-conflicts.md §5. 위젯 행에는 문서 글자가 없다. 여기서 offset 을
+    // 만들어 내면 **앵커 줄의 글자**를 가리키게 되는데(위젯이 `line` 을 들고 있으므로), 사용자는
+    // 아무 글자도 없는 자리를 눌렀는데 caret 이 다른 줄로 뛰는 것을 본다.
+    var buf: [4]visual_map.VisualRow = undefined;
+    const rows = fixtureRows(3, &buf);
+    buf[1].kind = .widget; // 가운데 행이 위젯이다
+    const row_lines = [_]u32{ 0, 1, 2 };
+    const lines = [_][]const u8{ "aaaa", "bbbb", "cccc" };
+    const g = Geometry{ .body_x = 0, .body_y = 0, .content_left_px = 0, .content_width = 80, .cell_w_px = 9, .cell_h_px = 19, .tab_width = 4 };
+
+    // 위젯 행 한가운데를 눌렀다 — 답이 없다.
+    try testing.expectEqual(@as(?Point, null), bodyPoint(g, rows, &row_lines, &lines, 20, 20));
+    // **위아래 글자 행은 그대로 답한다** — 위젯 하나가 히트테스트를 통째로 끄면 안 된다.
+    try testing.expectEqual(@as(usize, 0), bodyPoint(g, rows, &row_lines, &lines, 20, 5).?.row);
+    try testing.expectEqual(@as(usize, 2), bodyPoint(g, rows, &row_lines, &lines, 20, 40).?.row);
+    // **위로 벗어난 드래그가 위젯 행에 묶이면 거기서도 null 이다**(계약: 그때는 선택이 멈춘다).
+    buf[0].kind = .widget;
+    try testing.expectEqual(@as(?Point, null), bodyPoint(g, rows, &row_lines, &lines, 0, -1000));
 }
 
 test "극단 좌표에서 안 죽는다 — 드래그는 화면 밖으로 나간다" {

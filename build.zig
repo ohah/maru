@@ -15425,6 +15425,18 @@ pub fn build(b: *std.Build) void {
         "test-session-host-notification-process-owner",
         "Validate single-owner Notification Center app/helper process composition",
     );
+    const session_host_notification_app_child_step = b.step(
+        "test-session-host-notification-app-child",
+        "Validate the closed inherited-pipe Notification Center app child",
+    );
+    const session_host_notification_helper_receipt_step = b.step(
+        "test-session-host-notification-helper-receipt",
+        "Validate strict canonical Notification Center helper click receipts",
+    );
+    const session_host_notification_helper_child_step = b.step(
+        "test-session-host-notification-helper-child",
+        "Validate the closed Notification Center Accessibility helper child",
+    );
     const session_host_release_adapter_candidate_baseline_app_step = b.step(
         "test-session-host-release-adapter-candidate-baseline-app",
         "Validate preserved baseline candidate app authority",
@@ -15952,6 +15964,85 @@ pub fn build(b: *std.Build) void {
         run_notification_process_owner_tests.setCwd(b.path("."));
         session_host_notification_process_owner_step.dependOn(&run_notification_process_owner_tests.step);
         run_session_host_tests.step.dependOn(&run_notification_process_owner_tests.step);
+        const notification_app_child_bounded_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/bounded_process.zig"),
+            .target = target,
+            .optimize = baseline_phase_optimize,
+        });
+        const notification_app_child_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_notification_app_child.zig"),
+            .target = target,
+            .optimize = baseline_phase_optimize,
+            .imports = &.{
+                .{ .name = "bounded_process", .module = notification_app_child_bounded_mod },
+                .{ .name = "release_adapter_notification_app_receipt", .module = notification_app_receipt_mod },
+            },
+        });
+        const notification_app_child_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_release_adapter_notification_app_child.zig"),
+                .target = target,
+                .optimize = baseline_phase_optimize,
+                .imports = &.{
+                    .{ .name = "release_adapter_notification_app_child", .module = notification_app_child_mod },
+                    .{ .name = "release_adapter_notification_app_receipt", .module = notification_app_receipt_mod },
+                },
+            }),
+        });
+        const run_notification_app_child_tests = b.addRunArtifact(notification_app_child_tests);
+        run_notification_app_child_tests.addArg("--maru-expect-tests=6");
+        run_notification_app_child_tests.setCwd(b.path("."));
+        session_host_notification_app_child_step.dependOn(&run_notification_app_child_tests.step);
+        run_session_host_tests.step.dependOn(&run_notification_app_child_tests.step);
+        const notification_helper_receipt_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_notification_helper_receipt.zig"),
+            .target = target,
+            .optimize = baseline_phase_optimize,
+        });
+        const notification_helper_receipt_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_release_adapter_notification_helper_receipt.zig"),
+                .target = target,
+                .optimize = baseline_phase_optimize,
+                .imports = &.{.{ .name = "release_adapter_notification_helper_receipt", .module = notification_helper_receipt_mod }},
+            }),
+        });
+        const run_notification_helper_receipt_tests = b.addRunArtifact(notification_helper_receipt_tests);
+        run_notification_helper_receipt_tests.addArg("--maru-expect-tests=5");
+        run_notification_helper_receipt_tests.setCwd(b.path("."));
+        session_host_notification_helper_receipt_step.dependOn(&run_notification_helper_receipt_tests.step);
+        run_session_host_tests.step.dependOn(&run_notification_helper_receipt_tests.step);
+        const notification_helper_child_bounded_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/bounded_process.zig"),
+            .target = target,
+            .optimize = baseline_phase_optimize,
+        });
+        const notification_helper_child_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_notification_helper_child.zig"),
+            .target = target,
+            .optimize = baseline_phase_optimize,
+            .imports = &.{
+                .{ .name = "bounded_process", .module = notification_helper_child_bounded_mod },
+                .{ .name = "release_adapter_notification_helper_receipt", .module = notification_helper_receipt_mod },
+            },
+        });
+        const notification_helper_child_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_release_adapter_notification_helper_child.zig"),
+                .target = target,
+                .optimize = baseline_phase_optimize,
+                .imports = &.{
+                    .{ .name = "bounded_process", .module = notification_helper_child_bounded_mod },
+                    .{ .name = "release_adapter_notification_helper_child", .module = notification_helper_child_mod },
+                    .{ .name = "release_adapter_notification_helper_receipt", .module = notification_helper_receipt_mod },
+                },
+            }),
+        });
+        const run_notification_helper_child_tests = b.addRunArtifact(notification_helper_child_tests);
+        run_notification_helper_child_tests.addArg("--maru-expect-tests=6");
+        run_notification_helper_child_tests.setCwd(b.path("."));
+        session_host_notification_helper_child_step.dependOn(&run_notification_helper_child_tests.step);
+        run_session_host_tests.step.dependOn(&run_notification_helper_child_tests.step);
     }
     const session_host_release_adapter_candidate_compatibility_step = b.step(
         "test-session-host-release-adapter-candidate-compatibility",
@@ -18249,7 +18340,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
         const run_bounded_process_tests = b.addRunArtifact(bounded_process_tests);
-        run_bounded_process_tests.addArg("--maru-expect-tests=19");
+        run_bounded_process_tests.addArg("--maru-expect-tests=22");
         run_bounded_process_tests.setCwd(b.path("."));
         session_host_bounded_process_step.dependOn(&run_bounded_process_tests.step);
         if (process_optimize == optimize) session_host_step.dependOn(&run_bounded_process_tests.step); // test-session-host 는 잡의 -Doptimize 모드만

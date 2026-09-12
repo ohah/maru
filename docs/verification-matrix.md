@@ -2988,8 +2988,14 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   `test-session-host-notification-app-receipt`가 Debug·ReleaseFast canonical/hostile parse, 전 allocation fail-index, 실제 absent `0600`
   publication과 file-SSOT source boundary를 검증한다. process composition의 단일 deadline, child/OS 시도 선기록,
   성공한 exclusive receipt만의 소유권, receipt→request→helper→app→root 역순 cleanup과 실패한 authority만 남기는 exact retry owner도 구현됐고
-  `test-session-host-notification-process-owner`가 Debug·ReleaseFast에서 검증한다. 남은 R2b2 concrete adapter는 이 owner에
-  실제 helper/app child spawn·pipe와 exact notification/root syscall을 결속해야 한다. R2b2 concrete adapter와 앱
+  `test-session-host-notification-process-owner`가 Debug·ReleaseFast에서 검증한다. 실제 app child는 ambient environment 없이
+  UUID-derived `/s`·`/h`와 inherited fd 3 하나만 받고 receipt EOF와 process-group cleanup을 별도 lifetime으로 보존하며,
+  helper child는 exact `click nonce deadline` argv·empty environment·bounded stdout/stderr에서 실제 Swift `print`의 LF까지
+  canonical parse하고 exit 70/71만 typed Accessibility/Aqua `not_provisioned`로 분류한다. Debug·ReleaseFast
+  `test-session-host-notification-app-child`, `test-session-host-notification-helper-receipt`,
+  `test-session-host-notification-helper-child`가 path/nonce/timeline/alias/copy/cap+1/allocator와 closed process 경계를 검증한다.
+  남은 R2b2 concrete adapter는 이 child 경계를 owner에 연결하고 UUID-derived `0700` root 및 앱 bundle identity의 exact
+  notification request cleanup syscall을 결속해야 한다. R2b2 concrete adapter와 앱
   scenario mode, R2c mounted candidate composition은 R2a owner를 통과해야 한다.
   로그인된 전용 macOS runner의 새 mode `0700` root에서 DMG를
   read-only mount하고 그 안의 exact `Maru.app`과 main executable을 no-follow pin한다. 앱·CLI·helper의 동일

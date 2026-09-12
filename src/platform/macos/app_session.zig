@@ -4847,6 +4847,13 @@ pub const AppSession = struct {
     // confirm_accept가 allow_unsafe로 재제출(submitPaste)하고, confirm_cancel/새 모달이 비운다. items.len>0 = 보류 중.
     // pending_close/reset/quit과 배타(한 번에 한 모달 — showConfirmButtons가 열 때 비운다).
     pending_paste_confirm: std.ArrayList(u8) = .empty,
+    /// 위 payload 를 **어떤 bracketed 모드로 빚었는가**(적대적 15 회차 — 없으면 그 자리에서 다시 읽는다).
+    ///
+    /// **확인 모달은 창이 사람 시간만큼 넓다.** 모달이 뜬 동안 사용자가 읽고 고르는 몇 초 사이에
+    /// 대상의 DECSET 2004 가 꺼질 수 있고(에이전트 CLI 종료), 그때 `confirmPendingPaste` 가 모드를
+    /// 다시 읽으면 **여러 줄 인용이 감싸이지 않은 채** 셸로 들어간다 — `send-selection-to-agent.md`
+    /// §4 가 막으려는 바로 그 상태다. payload 와 **한 단위로** 들어야 그 갈림이 없다.
+    pending_paste_shaped: ?bool = null,
     /// 위 payload가 향할 surface id(0=보류 없음). **모달을 띄운 시점의 대상**을 고정한다 — 확인하는 동안
     /// 사용자가 탭/pane을 옮기거나 다른 pane에 드롭해도 payload는 원래 pane으로 간다(예전엔 확정 시 activeSurface를
     /// 다시 읽어 엉뚱한 pane에 위험한 내용이 주입될 수 있었다 — code-review).
@@ -14325,8 +14332,11 @@ pub const AppSession = struct {
     /// 옮겼어도 payload는 원래 pane으로 간다(그 사이 그 Term이 닫혔으면 submitPaste가 no-op으로 버린다).
     /// submitPaste는 allow_unsafe면 payload를 안 건드리므로 소비 후 버퍼를 비운다.
     fn confirmPendingPaste(self: *AppSession, target_id: u64) void {
-        term_ops.submitPaste(self, self.pending_paste_confirm.items, true, target_id);
+        // **빚은 모드를 그대로 들고 간다**(적대적 15 회차) — 모달이 떠 있던 동안 2004 가 바뀌었을 수
+        // 있고, 여기서 다시 읽으면 페이로드의 모양과 인코딩이 갈린다(위 필드 doc).
+        term_ops.submitPasteShaped(self, self.pending_paste_confirm.items, true, target_id, self.pending_paste_shaped);
         self.pending_paste_confirm.clearRetainingCapacity();
+        self.pending_paste_shaped = null; // payload 와 한 단위로 비운다
     }
 
     // 드롭 업로드 백그라운드 스레드에 넘기는 작업 묶음(모두 owned — 워커가 해제). io를 안 싣는다:

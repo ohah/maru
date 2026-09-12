@@ -1338,9 +1338,13 @@ pub fn submitPasteShaped(self: *AppSession, payload: []const u8, allow_unsafe: b
         // 미리보기 주입: 붙여넣을 내용을 확인창에 함께 보여준다(Ghostty식). show가 body를 리셋하므로 그 뒤에 준다.
         self.chrome_host.confirm.body = self.buildPastePreview(payload);
         self.pending_paste_confirm.clearRetainingCapacity();
+        // **모드를 payload 와 한 단위로 보관한다**(적대적 15 회차). 확인을 거쳐 돌아왔을 때 다시
+        // 읽으면, 모달이 떠 있던 몇 초 사이에 바뀐 값으로 인코딩한다.
+        self.pending_paste_shaped = shaped;
         self.pending_paste_confirm.appendSlice(self.allocator, payload) catch {
             // 보관 실패(OOM): 유령 확인(예 눌러도 아무것도 안 붙는)을 막으려 모달도 닫는다.
             self.pending_paste_confirm.clearRetainingCapacity();
+            self.pending_paste_shaped = null;
             self.chrome_host.confirm.dismiss();
         };
         return;

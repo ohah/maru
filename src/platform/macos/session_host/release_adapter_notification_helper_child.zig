@@ -46,6 +46,11 @@ pub fn run(
     return runInternal(&executor, allocator, executable, expected, budget_ns, storage);
 }
 
+pub fn validateInputs(executable: [:0]const u8, expected: receipt.Expected, budget_ns: i128) !void {
+    if (!canonicalAbsolute(executable) or budget_ns <= 0) return error.InvalidInput;
+    try receipt.validateExpected(expected);
+}
+
 pub fn runWith(
     executor: anytype,
     allocator: std.mem.Allocator,
@@ -67,8 +72,7 @@ fn runInternal(
     storage: *Storage,
 ) !Result {
     if (storage.in_use or aliasesStorage(storage, executable, expected.visible_nonce)) return error.InvalidOwner;
-    if (!canonicalAbsolute(executable) or budget_ns <= 0) return error.InvalidInput;
-    try receipt.validateExpected(expected);
+    try validateInputs(executable, expected, budget_ns);
 
     storage.in_use = true;
     defer clear(storage);

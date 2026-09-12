@@ -255,7 +255,10 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 177: drop_image가 Swift가 먼저 atomic 저장한 로컬 임시 PNG 경로를 PNG 바이트와 함께 받는다. host-backed
 // 비동기 freshness barrier가 로컬로 판정된 뒤에도 원래 이미지를 재생성하지 않고 정확한 target surface에 경로를
 // 붙일 수 있게 하는 수명 계약이다. export 시그니처를 바꾸므로 낡은 Swift/new Zig 조합은 ABI 가드에서 실패해야 한다.
-pub const abi_version: u32 = 182;
+// 183: provisioned Notification Center scenario가 사용자 확인 UI를 합성하지 않고 기존
+// Quit and End All Sessions 상태머신을 시작하는 export를 추가한다. cleanup receipt 뒤 실제
+// daemon/runtime 종료가 끝나기 전에 app process가 성공 종료하지 못하게 하는 provisioned release 진입점이다.
+pub const abi_version: u32 = 183;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -8791,6 +8794,41 @@ pub const AppSession = struct {
         self.quit_decision = .none;
     }
 
+    /// Provisioned Notification Center 시나리오가 exact notification cleanup을 확인한 뒤 쓰는
+    /// 비대화형 진입점. 사용자 alternate 버튼과 같은 상태머신만 시작하며 synthetic 종료 성공을
+    /// 만들지 않는다. 마지막 remote target의 admin outcome과 source-zero가 닫혀야 quit_decision이
+    /// accepted가 되고, 그 전에는 AppKit process가 살아 있어 부모의 waitSuccess가 끝나지 않는다.
+    pub fn requestAppQuitEndAll(self: *AppSession) bool {
+        if (file_panel_ops.blockSessionExitForFilePanels(self) or
+            !std.meta.eql(self.pending_app_quit_shutdown, PendingAppQuitShutdown{})) return false;
+        app_quit_keep_alive = false;
+        app_quit_end_all = true;
+        if (is_macos and app_remote_backend != null) {
+            const now = std.Io.Clock.awake.now(self.io).nanoseconds;
+            const target_count = app_remote_backend.?.prepareAppQuitEndAll(now) catch
+                session_host.pending_term_close_graph.fatalProofLoss();
+            if (target_count == 0) {
+                self.quit_decision = .accepted;
+                app_quitting = true;
+            } else {
+                const deadline = app_remote_backend.?.appQuitShutdownDeadline() orelse
+                    session_host.pending_term_close_graph.fatalProofLoss();
+                session_host.pending_app_quit_shutdown.prepare(
+                    &self.pending_app_quit_shutdown,
+                    @intFromPtr(self),
+                    @intFromPtr(&app_remote_backend.?),
+                    @intCast(now),
+                    deadline,
+                    target_count,
+                ) catch session_host.pending_term_close_graph.fatalProofLoss();
+            }
+        } else {
+            self.quit_decision = .accepted;
+            app_quitting = true;
+        }
+        return true;
+    }
+
     /// host의 종료 승인 직전 재검사에서 보호 파일이 발견되어 이미 수락한 Quit을 취소할 때 호출한다. 앱은 계속
     /// 실행되므로 다음 명시 close/Quit이 이전 detach/end-all snapshot을 재사용하지 않게 process-global latch를 되돌린다.
     pub fn cancelAcceptedAppQuit(self: *AppSession) void {
@@ -11357,31 +11395,7 @@ pub const AppSession = struct {
                 self.pending_confirm = .none;
                 if (owner == .quit) {
                     // P4 "종료 및 세션 끝내기"(§6 row 3): 기본 "종료"(detach·생존)와 달리 host-backed runtime도 다 terminate한다.
-                    app_quit_keep_alive = false;
-                    app_quit_end_all = true;
-                    if (is_macos and app_remote_backend != null) {
-                        const now = std.Io.Clock.awake.now(self.io).nanoseconds;
-                        const target_count = app_remote_backend.?.prepareAppQuitEndAll(now) catch
-                            session_host.pending_term_close_graph.fatalProofLoss();
-                        if (target_count == 0) {
-                            self.quit_decision = .accepted;
-                            app_quitting = true;
-                        } else {
-                            const deadline = app_remote_backend.?.appQuitShutdownDeadline() orelse
-                                session_host.pending_term_close_graph.fatalProofLoss();
-                            session_host.pending_app_quit_shutdown.prepare(
-                                &self.pending_app_quit_shutdown,
-                                @intFromPtr(self),
-                                @intFromPtr(&app_remote_backend.?),
-                                @intCast(now),
-                                deadline,
-                                target_count,
-                            ) catch session_host.pending_term_close_graph.fatalProofLoss();
-                        }
-                    } else {
-                        self.quit_decision = .accepted;
-                        app_quitting = true;
-                    }
+                    _ = self.requestAppQuitEndAll();
                 } else if (owner == .file_panel_close) {
                     if (self.pending_file_panel_close) |pending| {
                         if (pending.phase == .confirm_dirty) {
@@ -40337,6 +40351,17 @@ test "persistent session quit policy: setting off terminates instead of detachin
     app_quit_end_all = false;
     session.is_quick = true;
     try std.testing.expect(!session.shouldDetachRemoteOnAppQuit(&term));
+
+    // The provisioned notification scenario must select the exact same destructive policy as
+    // the user's alternate Quit action. With no remote targets it closes synchronously; a real
+    // backend uses the existing pending_app_quit_shutdown progression tested below.
+    try std.testing.expect(app_remote_backend == null);
+    session.is_quick = false;
+    try std.testing.expect(session.requestAppQuitEndAll());
+    try std.testing.expect(app_quit_end_all);
+    try std.testing.expect(!app_quit_keep_alive);
+    try std.testing.expect(app_quitting);
+    try std.testing.expectEqual(QuitDecision.accepted, session.quit_decision);
 }
 
 test "persistent session policy: a stale second-window config cannot overwrite the app-wide toggle" {

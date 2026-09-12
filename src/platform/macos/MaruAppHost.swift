@@ -8050,9 +8050,17 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                     self.failNotificationReleaseScenario()
                     return
                 }
+                guard let session = self.primary?.appSession,
+                      maru_macos_app_session_request_notification_release_end_all(session) == 1 else {
+                    self.failNotificationReleaseScenario()
+                    return
+                }
                 self.notificationReleaseReceiptSink = nil
+                // The existing Quit-and-End-All state machine publishes quit_decision only after
+                // every exact remote target reaches terminal source-zero. drainQuitDecision then
+                // performs the ordinary final checkpoint and AppKit termination. The parent does
+                // not accept this scenario until the process exits successfully.
                 self.exitCode = 0
-                NSApp.terminate(nil)
             }
         )
     }

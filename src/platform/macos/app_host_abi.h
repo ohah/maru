@@ -9,7 +9,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 182u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 183u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -761,6 +761,11 @@ int32_t maru_macos_app_session_request_window_close(
    명령 유무와 무관하게 항상 "maru를 종료할까요?" 확인 모달을 띄운다. Swift는 이 호출 뒤 .terminateLater를 돌려주고,
    모달 확정/취소가 다음 tick FrameSummary.quit_decision(1=accepted·2=cancelled)에 실리면 NSApp.reply로 진행/취소한다. */
 void maru_macos_app_session_request_app_quit(
+    MaruAppHostSession *session
+);
+/* Provisioned Notification Center scenario only: start the existing bounded Quit-and-End-All
+   state machine without synthesizing the user's confirmation UI. Returns 1 only when armed. v183. */
+uint32_t maru_macos_app_session_request_notification_release_end_all(
     MaruAppHostSession *session
 );
 /* host의 종료 승인 직전 protected-file 재검사에서 Quit을 취소할 때 이미 수락한 앱 전역 lifecycle latch를 되돌린다.

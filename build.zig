@@ -15451,6 +15451,10 @@ pub fn build(b: *std.Build) void {
         "test-session-host-notification-helper-child",
         "Validate the closed Notification Center Accessibility helper child",
     );
+    const session_host_notification_concrete_step = b.step(
+        "test-session-host-notification-concrete",
+        "Validate the concrete Notification Center app/helper composition and exact root lifetime",
+    );
     const session_host_release_adapter_candidate_baseline_app_step = b.step(
         "test-session-host-release-adapter-candidate-baseline-app",
         "Validate preserved baseline candidate app authority",
@@ -15927,17 +15931,18 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = baseline_phase_optimize,
         });
+        const notification_shared_safe_open_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/safe_open.zig"),
+            .target = target,
+            .optimize = baseline_phase_optimize,
+        });
         const notification_app_receipt_files_mod = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/session_host/release_adapter_files.zig"),
             .target = target,
             .optimize = baseline_phase_optimize,
             .link_libc = true,
             .imports = &.{
-                .{ .name = "safe_open", .module = b.createModule(.{
-                    .root_source_file = b.path("src/platform/macos/safe_open.zig"),
-                    .target = target,
-                    .optimize = baseline_phase_optimize,
-                }) },
+                .{ .name = "safe_open", .module = notification_shared_safe_open_mod },
                 .{ .name = "release_adapter_identity", .module = notification_app_receipt_identity_mod },
             },
         });
@@ -16026,17 +16031,12 @@ pub fn build(b: *std.Build) void {
         run_notification_helper_receipt_tests.setCwd(b.path("."));
         session_host_notification_helper_receipt_step.dependOn(&run_notification_helper_receipt_tests.step);
         run_session_host_tests.step.dependOn(&run_notification_helper_receipt_tests.step);
-        const notification_helper_child_bounded_mod = b.createModule(.{
-            .root_source_file = b.path("src/platform/macos/session_host/bounded_process.zig"),
-            .target = target,
-            .optimize = baseline_phase_optimize,
-        });
         const notification_helper_child_mod = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/session_host/release_adapter_notification_helper_child.zig"),
             .target = target,
             .optimize = baseline_phase_optimize,
             .imports = &.{
-                .{ .name = "bounded_process", .module = notification_helper_child_bounded_mod },
+                .{ .name = "bounded_process", .module = notification_app_child_bounded_mod },
                 .{ .name = "release_adapter_notification_helper_receipt", .module = notification_helper_receipt_mod },
             },
         });
@@ -16046,7 +16046,7 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .optimize = baseline_phase_optimize,
                 .imports = &.{
-                    .{ .name = "bounded_process", .module = notification_helper_child_bounded_mod },
+                    .{ .name = "bounded_process", .module = notification_app_child_bounded_mod },
                     .{ .name = "release_adapter_notification_helper_child", .module = notification_helper_child_mod },
                     .{ .name = "release_adapter_notification_helper_receipt", .module = notification_helper_receipt_mod },
                 },
@@ -16057,6 +16057,50 @@ pub fn build(b: *std.Build) void {
         run_notification_helper_child_tests.setCwd(b.path("."));
         session_host_notification_helper_child_step.dependOn(&run_notification_helper_child_tests.step);
         run_session_host_tests.step.dependOn(&run_notification_helper_child_tests.step);
+        const notification_workspace_base_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_pre_publish_workspace.zig"),
+            .target = target,
+            .optimize = baseline_phase_optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "safe_open", .module = notification_shared_safe_open_mod }},
+        });
+        const notification_workspace_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_notification_workspace.zig"),
+            .target = target,
+            .optimize = baseline_phase_optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "release_adapter_pre_publish_workspace", .module = notification_workspace_base_mod }},
+        });
+        const notification_concrete_mod = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/release_adapter_notification_concrete.zig"),
+            .target = target,
+            .optimize = baseline_phase_optimize,
+            .imports = &.{
+                .{ .name = "release_adapter_notification_process_owner", .module = notification_process_owner_mod },
+                .{ .name = "release_adapter_notification_app_child", .module = notification_app_child_mod },
+                .{ .name = "release_adapter_notification_app_receipt", .module = notification_app_receipt_mod },
+                .{ .name = "release_adapter_notification_helper_child", .module = notification_helper_child_mod },
+                .{ .name = "release_adapter_notification_helper_receipt", .module = notification_helper_receipt_mod },
+                .{ .name = "release_adapter_notification_workspace", .module = notification_workspace_mod },
+                .{ .name = "release_adapter_files", .module = notification_app_receipt_files_mod },
+            },
+        });
+        const notification_concrete_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_release_adapter_notification_concrete.zig"),
+                .target = target,
+                .optimize = baseline_phase_optimize,
+                .imports = &.{
+                    .{ .name = "release_adapter_notification_concrete", .module = notification_concrete_mod },
+                    .{ .name = "release_adapter_notification_workspace", .module = notification_workspace_mod },
+                },
+            }),
+        });
+        const run_notification_concrete_tests = b.addRunArtifact(notification_concrete_tests);
+        run_notification_concrete_tests.addArg("--maru-expect-tests=3");
+        run_notification_concrete_tests.setCwd(b.path("."));
+        session_host_notification_concrete_step.dependOn(&run_notification_concrete_tests.step);
+        run_session_host_tests.step.dependOn(&run_notification_concrete_tests.step);
     }
     const session_host_release_adapter_candidate_compatibility_step = b.step(
         "test-session-host-release-adapter-candidate-compatibility",

@@ -2998,8 +2998,8 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   전달하고 열거·전체 삭제를 금지하며, `test-session-host-notification-app-scenario`가 foreign identifier 비접촉을 검증한다.
   framed duplex child control은 exact request에 결속된 cleanup command를 받은 앱이 같은 제품 leaf를 호출하고 pending/delivered
   부재를 deadline 안에 재검사한 뒤 canonical receipt를 보내고 정상 종료할 때만 완료된다. transport와 Swift runtime 배선은
-  구현됐으며, 남은 R2b2 concrete adapter는 이 child 경계를 process owner에 연결하고 UUID-derived `0700` root 수명을 결속해야 한다. R2b2 concrete adapter와 앱
-  scenario mode, R2c mounted candidate composition은 R2a owner를 통과해야 한다.
+  구현됐다. R2b2 concrete adapter도 이 child 경계를 process owner에 연결해 입력의 단일 absolute deadline과 UUID-derived `0700` root 수명을 결속한다. app child의 cleanup acknowledgement는 알림 부재 확인 뒤 기존 `Quit and End All Sessions` 상태머신을 시작하며, 부모가 정상 app exit를 관측한 뒤에만 daemon/runtime이 끝난 exact `/s`·`/h`를 descriptor-owned 역순으로 정리한다. 성공 receipt는 root 밖 final address에 held-inode 권위로 남기고, 예상 밖 root sibling은 삭제하지 않고 fail-close한다. 살아 있는 daemon 위로 root를 재귀 삭제하거나 PID를 pathname에서 추측하지 않는다. `test-session-host-notification-concrete`가 실제 child 진입점 컴파일, 선검증, root exact cleanup을 Debug·ReleaseFast에서 검증한다. 앱
+  scenario mode와 concrete adapter, R2c mounted candidate composition은 R2a owner를 통과해야 한다.
   로그인된 전용 macOS runner의 새 mode `0700` root에서 DMG를
   read-only mount하고 그 안의 exact `Maru.app`과 main executable을 no-follow pin한다. 앱·CLI·helper의 동일
   TeamIdentifier/hardened runtime과 candidate digest를 확인한 뒤에만 두 시나리오를 순서대로 실행한다. runner는 이미

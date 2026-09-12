@@ -23,6 +23,14 @@ test "N3-R2b2 app scenario observes only the real callback and normal attach pat
     try expectOne(host, "case .bound: kind = .bound");
     try expectOne(host, "case .recovered: kind = .recovered");
     try expectOne(host, "try sink.publish(receipt)");
+    try expectOne(host, "maru_macos_app_session_request_notification_release_end_all(session) == 1");
+    try expectOne(host, "The existing Quit-and-End-All state machine publishes quit_decision only after");
+    const cleanup_control = between(
+        host,
+        "private func armNotificationReleaseCleanupControl()",
+        "private func verifyExactNotificationAbsent(",
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 0), count(cleanup_control, "NSApp.terminate"));
     try std.testing.expectEqual(@as(usize, 0), count(host, "UNNotificationResponse("));
 
     try expectOne(scenario, "let ticks = mach_continuous_time()");
@@ -62,6 +70,12 @@ fn count(haystack: []const u8, needle: []const u8) usize {
         start = index + needle.len;
     }
     return result;
+}
+
+fn between(haystack: []const u8, start_needle: []const u8, end_needle: []const u8) ?[]const u8 {
+    const start = std.mem.indexOf(u8, haystack, start_needle) orelse return null;
+    const end = std.mem.indexOfPos(u8, haystack, start + start_needle.len, end_needle) orelse return null;
+    return haystack[start..end];
 }
 
 fn readSource(allocator: std.mem.Allocator, path: []const u8) ![]u8 {

@@ -984,6 +984,7 @@ pub fn build(b: *std.Build) void {
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/AgentSessionArchiveSmokeDriver.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/SessionHostInputSourcePolicy.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/NotificationReleaseScenarioReceipt.swift"));
+        macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/NotificationReleaseAppScenario.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/MaruAppHost.swift"));
         macos_app_host_swift_check_cmd.setCwd(b.path("."));
         macos_app_host_swift_check_step.dependOn(&macos_app_host_swift_check_cmd.step);
@@ -1823,6 +1824,7 @@ pub fn build(b: *std.Build) void {
         macos_app_compile.addFileArg(b.path("src/platform/macos/AgentSessionArchiveSmokeDriver.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/SessionHostInputSourcePolicy.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/NotificationReleaseScenarioReceipt.swift"));
+        macos_app_compile.addFileArg(b.path("src/platform/macos/NotificationReleaseAppScenario.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/MaruAppHost.swift"));
         macos_app_compile.addFileArg(macos_app_host_abi_lib.getEmittedBin());
         macos_app_compile.addArgs(&.{
@@ -4178,6 +4180,48 @@ pub fn build(b: *std.Build) void {
         notification_scenario_receipt_step.dependOn(&run_notification_scenario_receipt_tests.step);
         test_step.dependOn(&run_notification_scenario_receipt_tests.step);
         macos_only_test_step.dependOn(&run_notification_scenario_receipt_tests.step);
+
+        const notification_app_scenario_tests = b.addSystemCommand(&.{
+            "xcrun",
+            "swiftc",
+            "-parse-as-library",
+            "-target",
+            swiftMacOSTarget(b, target.result),
+        });
+        notification_app_scenario_tests.addFileArg(
+            b.path("src/platform/macos/NotificationReleaseScenarioReceipt.swift"),
+        );
+        notification_app_scenario_tests.addFileArg(
+            b.path("src/platform/macos/NotificationReleaseAppScenario.swift"),
+        );
+        notification_app_scenario_tests.addFileArg(
+            b.path("tests/macos_notification_release_app_scenario.swift"),
+        );
+        notification_app_scenario_tests.addArg("-o");
+        const notification_app_scenario_test_bin = notification_app_scenario_tests.addOutputFileArg(
+            "maru-notification-release-app-scenario-tests",
+        );
+        const run_notification_app_scenario_tests = b.addSystemCommand(&.{"/usr/bin/env"});
+        run_notification_app_scenario_tests.addFileArg(notification_app_scenario_test_bin);
+        const notification_app_scenario_step = b.step(
+            "test-session-host-notification-app-scenario",
+            "Validate isolated app scenario admission and inherited receipt FD",
+        );
+        notification_app_scenario_step.dependOn(&run_notification_app_scenario_tests.step);
+        const notification_app_scenario_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_notification_app_scenario_boundary.zig"),
+                .target = target,
+                .optimize = .Debug,
+            }),
+        });
+        const run_notification_app_scenario_boundary_tests = b.addRunArtifact(notification_app_scenario_boundary_tests);
+        run_notification_app_scenario_boundary_tests.setCwd(b.path("."));
+        notification_app_scenario_step.dependOn(&run_notification_app_scenario_boundary_tests.step);
+        test_step.dependOn(&run_notification_app_scenario_tests.step);
+        macos_only_test_step.dependOn(&run_notification_app_scenario_tests.step);
+        test_step.dependOn(&run_notification_app_scenario_boundary_tests.step);
+        macos_only_test_step.dependOn(&run_notification_app_scenario_boundary_tests.step);
 
         const file_panel_termination_policy_tests = b.addSystemCommand(&.{
             "xcrun",

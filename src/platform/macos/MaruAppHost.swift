@@ -3915,12 +3915,21 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         let runtimeIdLo: UInt64
         let eventId: UInt64
     }
+    private enum StableNotificationAttachOutcome {
+        case queued
+        case bound
+        case recovered
+        case rejected
+    }
     // Notification Center can deliver the launch response before AppSession/recovery publication.
     // Keep only typed scalars, deduplicate the OS callback key, and never let persisted userInfo grow
     // an unbounded launch queue. MainActor owns both this queue and all AppSession mutation.
     private static let maxPendingStableNotificationRoutes = 8
     private var pendingStableNotificationRoutes: [StableNotificationRoute] = []
     private var stableNotificationRoutingReady = false
+    private let notificationReleaseScenario: NotificationReleaseAppScenarioConfiguration?
+    private var notificationReleaseReceiptOwner: NotificationReleaseScenarioReceiptOwner?
+    private var notificationReleaseReceiptSink: NotificationReleaseReceiptSink?
     // 앱-전역 "메인/첫 일반 창" 별칭(= windows.first). 앱 요약·종료처럼 특정 한 창이 기준일 때 쓴다. 창별
     // 타게팅 세분화(key 창 기준 메뉴/포커스)는 W4. TerminalSurface는 reference라 `primary?.field = x` 변형은
     // 객체를 통해 그대로 동작한다(컬렉션 재대입이 아님).
@@ -4417,7 +4426,59 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         ProcessInfo.processInfo.environment["MARU_SESSION_DEFAULT_FALSE_EVIDENCE_SMOKE"] == "1"
     }
 
+    init(
+        notificationReleaseScenario: NotificationReleaseAppScenarioConfiguration? = nil,
+        notificationReleaseReceiptSink: NotificationReleaseReceiptSink? = nil
+    ) {
+        self.notificationReleaseScenario = notificationReleaseScenario
+        self.notificationReleaseReceiptSink = notificationReleaseReceiptSink
+        if let notificationReleaseScenario {
+            self.notificationReleaseReceiptOwner = NotificationReleaseScenarioReceiptOwner(
+                expectation: notificationReleaseScenario.expectation
+            )
+        }
+        super.init()
+    }
+
     static func main() {
+        let scenarioLoad = NotificationReleaseAppScenarioConfiguration.load(
+            environment: ProcessInfo.processInfo.environment
+        ) { requestIdentifier, hostId, runtimeId, eventId in
+            guard let event = UInt64(eventId) else { return nil }
+            let route = Self.parseStableNotificationRoute(
+                ["hid": hostId, "rid": runtimeId, "eid": NSNumber(value: event)],
+                requestIdentifier: requestIdentifier
+            )
+            guard let route else { return nil }
+            return (
+                route.hostIdHi, route.hostIdLo,
+                route.runtimeIdHi, route.runtimeIdLo,
+                route.eventId
+            )
+        }
+        let notificationReleaseScenario: NotificationReleaseAppScenarioConfiguration?
+        let notificationReleaseReceiptSink: NotificationReleaseReceiptSink?
+        switch scenarioLoad {
+        case .ordinary:
+            notificationReleaseScenario = nil
+            notificationReleaseReceiptSink = nil
+        case .invalid:
+            fputs("maru: invalid notification release app scenario\n", stderr)
+            Darwin.exit(64)
+        case .armed(let configuration):
+            do {
+                guard notificationReleaseValidateRunnerRoot(configuration.runnerRoot) else {
+                    throw NotificationReleaseAppScenarioError.invalidReceipt
+                }
+                notificationReleaseScenario = configuration
+                notificationReleaseReceiptSink = try NotificationReleaseReceiptSink(
+                    fileDescriptor: configuration.receiptFileDescriptor
+                )
+            } catch {
+                fputs("maru: invalid notification release app authority\n", stderr)
+                Darwin.exit(64)
+            }
+        }
         let leaseStatus = acquireAppInstanceWriterLeaseBeforeAppKit()
         guard leaseStatus == UInt32(MARU_APP_INSTANCE_LEASE_ACQUIRED) else {
             let failure = appInstanceLeaseFailureReason(leaseStatus)
@@ -4457,7 +4518,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
 
         let app = NSApplication.shared
-        let delegate = MaruAppHostController()
+        let delegate = MaruAppHostController(
+            notificationReleaseScenario: notificationReleaseScenario,
+            notificationReleaseReceiptSink: notificationReleaseReceiptSink
+        )
 
         // NSApplication의 delegate 수명은 제품 앱 전체 수명과 같아야 한다. 지역 변수만
         // 두면 future refactor에서 delegate가 일찍 해제될 수 있으므로 명시적으로 잡아 둔다.
@@ -7844,12 +7908,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         )
     }
 
-    private func handleStableNotificationRoute(_ route: StableNotificationRoute) {
+    @discardableResult
+    private func handleStableNotificationRoute(_ route: StableNotificationRoute) -> StableNotificationAttachOutcome {
         guard stableNotificationRoutingReady else {
-            if pendingStableNotificationRoutes.contains(route) { return }
-            guard pendingStableNotificationRoutes.count < Self.maxPendingStableNotificationRoutes else { return }
+            if pendingStableNotificationRoutes.contains(route) { return .rejected }
+            guard pendingStableNotificationRoutes.count < Self.maxPendingStableNotificationRoutes else { return .rejected }
             pendingStableNotificationRoutes.append(route)
-            return
+            return .queued
         }
 
         // Pass 1 probes every normal Window without mutation. Exactly one live binding may win; two
@@ -7866,9 +7931,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 route.runtimeIdLo,
                 0
             )
-            if matched == 2 { return }
+            if matched == 2 { return .rejected }
             guard matched == 1 else { continue }
-            if boundSurface != nil { return }
+            if boundSurface != nil { return .rejected }
             boundSurface = surface
         }
         if let surface = boundSurface, let session = surface.appSession {
@@ -7879,10 +7944,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 route.runtimeIdHi,
                 route.runtimeIdLo,
                 1
-            ) == 1 else { return }
+            ) == 1 else { return .rejected }
             surface.window?.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
-            return
+            return .bound
         }
 
         // Pass 2 is primary-only and may consume one current Recovered Sessions row. Zig performs
@@ -7896,17 +7961,70 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                   route.runtimeIdHi,
                   route.runtimeIdLo,
                   2
-              ) == 1 else { return }
+              ) == 1 else { return .rejected }
         surface.window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         withSurface(surface) { _ = renderTick() }
+        return .recovered
+    }
+
+    private func finishNotificationReleaseScenario(
+        route: StableNotificationRoute,
+        outcome: StableNotificationAttachOutcome
+    ) {
+        guard let configuration = notificationReleaseScenario,
+              let owner = notificationReleaseReceiptOwner,
+              let sink = notificationReleaseReceiptSink,
+              route.hostIdHi == configuration.expectation.hostIdHigh,
+              route.hostIdLo == configuration.expectation.hostIdLow,
+              route.runtimeIdHi == configuration.expectation.runtimeIdHigh,
+              route.runtimeIdLo == configuration.expectation.runtimeIdLow,
+              route.eventId == configuration.expectation.eventId else { return }
+        let kind: NotificationReleaseAttachKind
+        switch outcome {
+        case .bound: kind = .bound
+        case .recovered: kind = .recovered
+        case .queued, .rejected: return
+        }
+        let attachedAtNs = notificationReleaseContinuousTimeNs()
+        guard owner.observeAttach(
+            requestIdentifier: configuration.expectation.requestIdentifier,
+            hostIdHigh: route.hostIdHi,
+            hostIdLow: route.hostIdLo,
+            runtimeIdHigh: route.runtimeIdHi,
+            runtimeIdLow: route.runtimeIdLo,
+            eventId: route.eventId,
+            kind: kind,
+            atNs: attachedAtNs
+        ), let receipt = owner.receipt() else {
+            failNotificationReleaseScenario()
+            return
+        }
+        do {
+            try sink.publish(receipt)
+            notificationReleaseReceiptSink = nil
+        } catch {
+            failNotificationReleaseScenario()
+        }
+    }
+
+    private func failNotificationReleaseScenario() {
+        guard notificationReleaseScenario != nil else { return }
+        notificationReleaseReceiptSink = nil
+        exitCode = 1
+        // Let the delegate callback's defer invoke Apple's completion handler before AppKit begins
+        // termination. The release runner treats a nonzero child exit as failure either way.
+        DispatchQueue.main.async { NSApp.terminate(nil) }
     }
 
     private func drainPendingStableNotificationRoutes() {
         guard stableNotificationRoutingReady else { return }
         let pending = pendingStableNotificationRoutes
         pendingStableNotificationRoutes.removeAll(keepingCapacity: true)
-        for route in pending { handleStableNotificationRoute(route) }
+        for route in pending {
+            let outcome = handleStableNotificationRoute(route)
+            finishNotificationReleaseScenario(route: route, outcome: outcome)
+        }
     }
 
     // 알림 클릭 → 발신 터미널로 점프. userInfo의 (token, surface_id)에서 token으로 정확한 창(세션)을 고르고(surface.id는
@@ -7925,13 +8043,34 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             userInfo,
             requestIdentifier: request.identifier
         )
+        let callbackAtNs = notificationReleaseContinuousTimeNs()
         let hasStableKey = userInfo["hid"] != nil || userInfo["rid"] != nil || userInfo["eid"] != nil
         let localRoute = hasStableKey ? nil : Self.parseNotificationRoute(userInfo)
         Task { @MainActor [weak self] in
             defer { completionHandler() } // 누락 시 OS 경고 — 모든 경로에서 보장.
             guard let self else { return }
             if let stableRoute {
-                self.handleStableNotificationRoute(stableRoute)
+                var releaseCallbackAdmitted = false
+                if self.notificationReleaseScenario != nil,
+                   let owner = self.notificationReleaseReceiptOwner {
+                    releaseCallbackAdmitted = owner.observeCallback(
+                        requestIdentifier: request.identifier,
+                        hostIdHigh: stableRoute.hostIdHi,
+                        hostIdLow: stableRoute.hostIdLo,
+                        runtimeIdHigh: stableRoute.runtimeIdHi,
+                        runtimeIdLow: stableRoute.runtimeIdLo,
+                        eventId: stableRoute.eventId,
+                        atNs: callbackAtNs
+                    )
+                    if owner.failed {
+                        self.failNotificationReleaseScenario()
+                        return
+                    }
+                }
+                let outcome = self.handleStableNotificationRoute(stableRoute)
+                if releaseCallbackAdmitted {
+                    self.finishNotificationReleaseScenario(route: stableRoute, outcome: outcome)
+                }
                 return
             }
             // Any stable-key-shaped response that failed strict parsing is malformed persisted input.

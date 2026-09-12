@@ -7828,6 +7828,20 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         UNUserNotificationCenter.current().add(request)
     }
 
+    /// Product-owned exact cleanup. Never enumerate Notification Center and never use the broad
+    /// remove-all APIs: a release scenario is allowed to reuse this leaf, not to invent a second
+    /// cleanup policy that could touch a user's unrelated Maru notifications.
+    @discardableResult
+    private nonisolated static func removeExactNotificationRequest(
+        _ requestIdentifier: String,
+        center: UNUserNotificationCenter
+    ) -> Bool {
+        NotificationExactCleanup(
+            removePending: center.removePendingNotificationRequests(withIdentifiers:),
+            removeDelivered: center.removeDeliveredNotifications(withIdentifiers:)
+        ).remove(requestIdentifier: requestIdentifier)
+    }
+
     /// Shared C leaf also used by the daemon Objective-C adapter. Keeping the canonical identifier
     /// formatter below both callers prevents one side from silently creating a second OS row.
     private nonisolated static func hostNotificationIdentifier(
@@ -8038,6 +8052,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                                             didReceive response: UNNotificationResponse,
                                             withCompletionHandler completionHandler: @escaping () -> Void) {
         let request = response.notification.request
+        // A clicked request no longer has useful Notification Center lifetime. Remove exactly this
+        // identifier through the same product leaf later used by the provisioned release runner.
+        // Invalid identifiers fail closed and routing below still applies its independent parser.
+        _ = Self.removeExactNotificationRequest(request.identifier, center: center)
         let userInfo = request.content.userInfo
         let stableRoute = Self.parseStableNotificationRoute(
             userInfo,

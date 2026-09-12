@@ -16025,6 +16025,21 @@ pub fn build(b: *std.Build) void {
         run_notification_continuity_receipt_tests.setCwd(b.path("."));
         session_host_notification_continuity_receipt_step.dependOn(&run_notification_continuity_receipt_tests.step);
         run_session_host_tests.step.dependOn(&run_notification_continuity_receipt_tests.step);
+        const notification_continuity_remote_backend_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/remote_term_backend.zig"),
+                .target = target,
+                .optimize = baseline_phase_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"R2b3b1 notification continuity identity"},
+        });
+        const run_notification_continuity_remote_backend_tests = b.addRunArtifact(notification_continuity_remote_backend_tests);
+        run_notification_continuity_remote_backend_tests.addArg("--maru-expect-tests=1");
+        run_notification_continuity_remote_backend_tests.setCwd(b.path("."));
+        session_host_notification_continuity_receipt_step.dependOn(&run_notification_continuity_remote_backend_tests.step);
+        run_session_host_tests.step.dependOn(&run_notification_continuity_remote_backend_tests.step);
         const notification_process_owner_mod = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/session_host/release_adapter_notification_process_owner.zig"),
             .target = target,

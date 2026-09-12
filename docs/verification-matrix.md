@@ -3008,7 +3008,12 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   app receipt 다음 exact 두 번째 frame만 받고 두 receipt와 helper click을 하나의 final-address scenario proof로 결속한다.
   **R2b3a strict receipt owner는 구현됐고**, `test-session-host-notification-continuity-receipt`가 canonical second frame,
   app/helper 원문 재검증, generation/PID/marker/timeline drift, caller outcome field와 전 allocation fail-index를 Debug·ReleaseFast에서
-  검증한다. 남은 R2b3b는 이 frame을 실제 app attach 전후 관측과 child transport에 연결한다. 테스트가
+  검증한다. R2b3b의 제품 관측은 네트워크 attach 전에 존재하지 않는 cold-launch screen을 요구하지 않는다. exact runtime의
+  attach가 initial snapshot을 조립한 직후, app receipt의 attach 완료 시각을 확정하기 전에 첫 generation·PID·before marker를
+  봉인하고, 그 뒤 runner marker를 실제 PTY input으로 보낸다. 후속 tick의 fresh observation이 같은 generation·PID와 두 marker를
+  확인해야 두 번째 frame을 낸다. **R2b3b1**은 `RemoteTermBackend.notificationContinuityIdentity`가 exact
+  handle/host/runtime와 current observation에 결속된 generation·host PID·child PID를 하나의 fail-closed 값으로 내도록 구현한다.
+  남은 R2b3b2는 이 값과 screen/input을 AppSession 상태머신 및 child transport에 연결한다. 테스트가
   boolean·PID·screen 결과를 직접 주입해 `passed`를 만드는 seam과 제품 외 caller는 금지한다. R2b3b가 green인 뒤 R2c mounted candidate
   composition이 두 scenario proof를 R2a owner 순서로 실행한다.
   로그인된 전용 macOS runner의 새 mode `0700` root에서 DMG를

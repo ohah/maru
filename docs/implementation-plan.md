@@ -1464,7 +1464,8 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    receipt·typed Accessibility/Aqua provisioning 분류도 구현됐다. UUID-derived `0700` root와 앱 bundle identity의 exact
    notification request cleanup syscall을 결속하는 concrete adapter도 구현됐다. 다음은 caller boolean 없이 동일 daemon/child PID와
    attach 전 screen·attach 후 실제 PTY input→screen 왕복을 증명하는 R2b3a strict continuity receipt owner까지 구현됐다. 다음은
-   이를 app child의 실제 attach 전후 관측과 두 번째 framed receipt에 결속하는 R2b3b 뒤 mounted signed candidate composition 및
+   R2b3b1의 exact remote generation/PID product observation까지 구현됐다. 다음은 이를 app child의 실제 attach 전후
+   screen/input 상태머신과 두 번째 framed receipt에 결속하는 R2b3b2 뒤 mounted signed candidate composition 및
    protected workflow binding을 이어서 구현한다. P4의 actual
    Notification Center·durable tombstone과 P5d의 packaged CLI/localhost SSH는 provisioned Developer ID 배포 artifact
    재실행이 phase 완료 증거로 남아 있다. N3-R2b3b/R2c는 구현 잔여이고, 그 구현이 닫힌 뒤 실제 Developer ID 실행만

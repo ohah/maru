@@ -394,6 +394,10 @@ pub const State = struct {
         self.search.clear();
         self.search_active = false;
         self.remote_failed = false;
+        // 🔥 **자국도 지운다**(적대적 T1). 소스가 갈리면(pane 이동 · `/clear` 로 새 파일) 이 값은
+        // **옛 파일의 크기**다 — 그대로 두면 신선도가 **새 파일**의 그 자리를 묻고, 새 파일이 더
+        // 작으면 영영 빈 답이라 **자라도 갱신이 안 된다**.
+        self.remote_scanned_bytes = 0;
         // **소스가 갈리면 본문 결과는 남의 파일 것이다.** 오프셋은 파일 절대값이라 그대로 두면
         // 새 세션의 엉뚱한 호출이 「본문에서 맞았다」로 선다.
         self.body.reset(allocator);
@@ -1454,7 +1458,15 @@ pub fn poll(self: *AppSession) void {
         result.partial and result.scanned_bytes == 0 and result.hits.items.len == 0;
     // **원격 자국을 찍는다**(RAV7). 다음 신선도 확인이 이 자리에서 1 바이트를 청해 자랐는지 본다 —
     // 로컬의 `head_stamp`(stat)에 해당하는 값이다.
-    if (self.agent_activity.source_remote) self.agent_activity.remote_scanned_bytes = result.scanned_bytes;
+    //
+    // ⚠️ **체인이 하나일 때만 찍는다**(적대적 S1). `scanned_bytes` 는 **체인 전체의 합**이라 파일이
+    // 둘 이상이면 머리 파일의 크기가 아니다 — 그 자리에서 1 바이트를 청하면 **영영 빈 답**이고
+    // 신선도가 죽는다(Codex 재개는 실측 58%). 0 이면 신선도가 꺼지고 재진입마다 다시 훑는다 —
+    // **덜 아는 쪽**으로 기운다.
+    if (self.agent_activity.source_remote) {
+        self.agent_activity.remote_scanned_bytes =
+            if (result.remote_file_count == 1) result.scanned_bytes else 0;
+    }
     self.agent_activity.built = true;
     self.agent_activity.awaiting = 0;
     self.agent_activity.resubmit = false;
@@ -4048,8 +4060,15 @@ fn decodeRemoteTarget(self: *AppSession) ?struct { owned: []u8, target: decode_b
 pub const RemoteFreshOutcome = struct {
     /// 어느 스캔의 자국에 대한 답인가. 그 사이 다시 훑었으면 드레인이 버린다.
     stamp: u64,
+    /// **어느 파일**에 물었나(owned). 자국은 크기라 **다른 세션과 우연히 같을 수 있다** — 그때
+    /// 경로를 안 보면 남의 pane 을 재스캔한다(적대적 T3).
+    path: []u8 = &.{},
     /// **자랐다.** 자국 자리에서 바이트가 나왔다는 뜻이다.
     grew: bool = false,
+
+    pub fn deinit(self: RemoteFreshOutcome, allocator: std.mem.Allocator) void {
+        allocator.free(self.path);
+    }
 };
 
 const RemoteFreshJob = struct {
@@ -4128,7 +4147,11 @@ fn remoteFreshWorker(job: *RemoteFreshJob) void {
         allocator.destroy(job);
     }
 
-    var outcome: RemoteFreshOutcome = .{ .stamp = job.stamp };
+    var outcome: RemoteFreshOutcome = .{
+        .stamp = job.stamp,
+        // job 이 곧 죽으므로 **사본을 넘긴다**(못 잡으면 경로 없이 가고, 드레인이 그것을 버린다).
+        .path = allocator.dupe(u8, job.path) catch &.{},
+    };
     var off_buf: [24]u8 = undefined;
     if (std.fmt.bufPrint(&off_buf, "{d}", .{job.stamp})) |off_text| {
         var out: []u8 = &.{};
@@ -4168,10 +4191,31 @@ fn remoteFreshWorker(job: *RemoteFreshJob) void {
 
 /// tick 이 신선도 답을 낸다(드레인). **판정자가 직접 부르는 제품 함수**다.
 pub fn finishRemoteFreshness(self: *AppSession, outcome: RemoteFreshOutcome) void {
+    defer outcome.deinit(self.allocator);
     self.remote_fresh_inflight = false;
-    if (!self.agent_activity.source_remote) return;
-    // 그 사이 다시 훑었으면 이 답은 옛 자국의 것이다 — 버린다.
-    if (outcome.stamp != self.agent_activity.remote_scanned_bytes) return;
-    if (!outcome.grew) return;
+    if (!remoteFreshnessWantsRescan(self, outcome)) return;
     refresh(self, true); // 자랐다 — 다시 훑는다(`force` 로 게이트를 지나간다)
+}
+
+/// 이 답이 **재스캔을 부르는가** — 순수 판정이다.
+///
+/// 🔥 **부수효과와 가른 이유**(적대적 T4): 판정자 하네스에는 스캔 백엔드가 없어 `refresh` 가 첫 줄에서
+/// 물러난다 — 그래서 가드를 **없애도 아무 자국이 안 남았고**, 뮤테이션 셋이 죽지 않았다. 결정을 값으로
+/// 내면 판정자가 그것을 직접 겨눈다(전송과 매핑을 가르는 이 스택의 규율과 같은 결).
+pub fn remoteFreshnessWantsRescan(self: *const AppSession, outcome: RemoteFreshOutcome) bool {
+    if (!self.agent_activity.source_remote) return false;
+    // 🔥 **뷰를 떠났으면 안 훑는다**(적대적 T2 · 계약 §7③ 「볼 때만 훑는다」). 폴링 진입점이 그
+    // 가드를 갖지만 **왕복이 도는 사이** 떠날 수 있고, 그때 재스캔을 걸면 아무도 안 보는 목록을
+    // 위해 남의 서버가 최악 6.3 초를 태운다.
+    if (!dock_ops.dockVisible(self) or self.dock.view != .agent_activity) return false;
+    // **어느 파일에 물었는지 본다**(적대적 T3). 자국은 크기라 다른 세션과 우연히 같을 수 있다 —
+    // 그때 경로를 안 보면 남의 pane 을 재스캔한다(그 자체는 안전하지만 **쓸데없는 왕복**이다).
+    if (outcome.path.len == 0) return false;
+    if (!std.mem.eql(u8, outcome.path, self.agent_activity.chain.head())) return false;
+    // **자국이 0 이면 신선도가 꺼져 있다**(체인이 여럿이라 자국을 못 찍었다 — 적대적 S1). 그때 오는
+    // 답은 판정의 근거가 없다.
+    if (self.agent_activity.remote_scanned_bytes == 0) return false;
+    // 그 사이 다시 훑었으면 이 답은 옛 자국의 것이다 — 버린다.
+    if (outcome.stamp != self.agent_activity.remote_scanned_bytes) return false;
+    return outcome.grew;
 }

@@ -25,6 +25,17 @@ const image_scale = maru.session.image_scale;
 /// 넷 — 측정한 워커 상한(초당 229 장)과 맞는다. 스레드 부대비용은 회당 0.039 ms 로 무시할 수준이다.
 pub const max_inflight: usize = 4;
 
+/// **원격일 때의 동시 장수**(RAV6 · 적대적 S3).
+///
+/// 🔥 로컬의 넷을 원격에 그대로 쓰면 그림만으로 **ssh 연결 넷**을 만든다. 활동 축은 이미 스캔 1 ·
+/// 펼침 1 · 신선도 1 을 쓰므로 최악 **일곱**이 되고, `MaxSessions`(기본 10)에는 터미널 1 + RA5 채널 1
+/// + 원격 트리 2 가 이미 앉아 있다 — **초과는 오류가 아니라 조용한 새 연결**이다(RF 실측: 16 동시
+/// 요청에서 TCP 4 → 16, 비밀번호 인증이면 묻는 자식이 붙박인다).
+///
+/// 그래서 원격은 **하나**다. 잃는 것은 썸네일이 채워지는 속도뿐이고(디코드는 장당 4 ms 인데 왕복이
+/// 수십~수백 ms 라 어차피 전송이 지배한다), 지키는 것은 **남의 서버의 연결 예산**이다.
+pub const max_remote_inflight: usize = 1;
+
 /// worker 가 main actor 로 넘기는 완료본. **픽셀 소유가 통째로 이동한다** — 받은 쪽이 푼다.
 pub const Result = struct {
     /// 인덱스의 몇 번째 이미지인가. 격자 자리와 잇는 유일한 키다.
@@ -182,7 +193,8 @@ pub const Backend = struct {
         state.mutex.lockUncancelable(state.io);
         // **상한까지 동시에 건다.** 예전에는 「하나라도 돌거나 안 가져간 결과가 있으면」 물러났는데,
         // 그것이 처리량을 틱 주기로 묶었다. 이제는 `max_inflight` 만큼 겹쳐 건다.
-        if (state.inflight >= max_inflight) {
+        const limit: usize = if (remote != null) max_remote_inflight else max_inflight;
+        if (state.inflight >= limit) {
             state.mutex.unlock(state.io);
             return null;
         }

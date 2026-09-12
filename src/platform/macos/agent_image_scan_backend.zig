@@ -408,7 +408,7 @@ fn worker(job: *Job) void {
         // 읽어 **가장 짧은 주기**로 돈다 — 원격 왕복은 로컬 스캔보다 비싼데(실측 6.3 초 + 네트워크)
         // 그 규율이 꺼져 있었다. 로컬이 「9 초 스캔이면 그만큼 쉰다」로 지키는 그것이다.
         const started: i128 = std.Io.Clock.awake.now(state.io).nanoseconds;
-        var result = remoteScan(state.allocator, job.chain, r, job.generation, job.resume_from);
+        var result = remoteScan(state.allocator, state, job.chain, r, job.generation, job.resume_from);
         const ended: i128 = std.Io.Clock.awake.now(state.io).nanoseconds;
         result.scan_ns = @intCast(@max(0, ended - started));
         finish(state, result);
@@ -538,7 +538,26 @@ fn worker(job: *Job) void {
 ///
 /// **정확성은 안 깨진다** — 늦게 온 결과는 `generation` 대조에서 버려진다. 잃는 것은 **지연**뿐이고
 /// (실측 3.82 GB 에서 6.3 초), 그 대가로 전송 층을 안 건드린다. 취소 가능한 전송은 RAV7 의 일이다.
-fn remoteScan(allocator: std.mem.Allocator, chain: index.Chain, remote: OwnedRemote, generation: u64, resume_from: u64) Result {
+/// 원격 스캔의 **취소 문맥**(RAV7b-4). 백그라운드 스레드에서 atomic 하나만 읽는다 —
+/// `std.Io` 도 로컬 파일시스템도 안 만진다(§6.3 게이트가 그 자리를 센다).
+const RemoteCancel = struct {
+    state: *State,
+    generation: u64,
+
+    fn shouldCancel(ctx: *anyopaque) bool {
+        const self: *RemoteCancel = @ptrCast(@alignCast(ctx));
+        return self.state.cancelled_upto.load(.acquire) >= self.generation;
+    }
+};
+
+fn remoteScan(
+    allocator: std.mem.Allocator,
+    state: *State,
+    chain: index.Chain,
+    remote: OwnedRemote,
+    generation: u64,
+    resume_from: u64,
+) Result {
     if (comptime builtin.os.tag != .macos) unreachable; // submit 이 이미 막는다
 
     // 체인의 **첫 파일**만 본다 — 부모 rollout 을 저쪽에서 푸는 것은 RAV4 다.
@@ -548,8 +567,12 @@ fn remoteScan(allocator: std.mem.Allocator, chain: index.Chain, remote: OwnedRem
     var from_buf: [24]u8 = undefined;
     const from_text = std.fmt.bufPrint(&from_buf, "{d}", .{resume_from}) catch "0";
 
+    // 🔥 **접을 수 있게 건다**(RAV7b-4 · §13.6 N3 의 비대칭을 없앤다). 로컬 워커는 청크마다
+    // `cancelled_upto` 를 보는데 원격은 `runRemoteCapped` 한 번에 갇혀 있었다 — pane 을 옮겨도
+    // 왕복이 끝날 때까지(첫 스캔은 최악 6.3 초) 새 스캔이 안 걸렸다.
+    var cancel_ctx: RemoteCancel = .{ .state = state, .generation = generation };
     var out: []u8 = &.{};
-    const code = ssh_upload.runRemoteCapped(
+    const code = ssh_upload.runRemoteCappedCancelable(
         allocator,
         remote.ctl,
         remote.dest,
@@ -559,6 +582,7 @@ fn remoteScan(allocator: std.mem.Allocator, chain: index.Chain, remote: OwnedRem
         if (resume_from == 0) &.{head} else &.{ head, "--from", from_text },
         wire.max_wire_bytes,
         &out,
+        .{ .ctx = &cancel_ctx, .should_cancel = RemoteCancel.shouldCancel },
     ) catch {
         // 전송 자체를 못 세웠다(fork/pipe). wire 가 없으니 매핑도 없다 — 「못 봤다」로 돌려준다.
         return .{ .generation = generation, .partial = true };
@@ -731,6 +755,19 @@ test "원격 매핑: 체인 파일 수를 센다" {
         defer result.deinit(testing.allocator);
         try testing.expectEqual(@as(u8, 2), result.remote_file_count);
     }
+}
+
+test "원격 매핑: 접힌 답은 「못 봤다」다 — 읽다 만 것을 온전한 척 읽지 않는다 (RAV7b-4)" {
+    // 🔥 취소는 **읽기 fd 를 닫는다**(적대적 V4) — 그때까지 읽은 바이트는 꼬리가 없어 파서가 잘림으로
+    // 읽지만, 전송이 `-3` 을 내므로 **코드만 봐도** 가려진다(넘침 `-2` 와 같은 규율).
+    //
+    // 그 답을 「활동이 없다」로 읽으면 **화면이 빈 목록**이 된다 — 계약 §2.2 가 금지하는 거짓이다.
+    var buf: [8192]u8 = undefined;
+    const bytes = buildWire(&buf, .{}, &.{sampleRecord()});
+    // 꼬리까지 온전한 wire 라도 **코드가 접힘이면** 「다 못 봤다」다.
+    var result = remoteResultFromWire(testing.allocator, bytes, -3, 1);
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.partial);
 }
 
 test "원격 매핑: 체인 경로를 그대로 싣는다 — 부모 펼침이 그것에 달려 있다 (RAV4b)" {

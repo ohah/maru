@@ -32,6 +32,7 @@ const std = @import("std");
 const backend_path = "src/platform/macos/agent_image_scan_backend.zig";
 const decode_path = "src/platform/macos/agent_image_decode_backend.zig";
 const activity_path = "src/platform/macos/app_session/agent_activity.zig";
+const upload_path = "src/platform/macos/ssh_upload.zig";
 
 /// 줄 주석(`//`)을 벗긴다. **세야 하는 것은 「쓰는가」이지 「언급하는가」가 아니다** — 규율을
 /// 설명하는 주석이 그 규율을 어긴 것으로 걸리면 게이트가 자기 문서를 벌준다.
@@ -182,6 +183,73 @@ test "RAV3 §6.3: 경로를 주는 한 곳이 원격을 막는다 — 네 소비
         "    if (!self.agent_activity.source_remote) return null;") == null)
     {
         std.debug.print("🔥 저쪽 경로를 주는 문(`remotePathForIndex`)이 로컬을 안 막는다.\n", .{});
+        return error.TestUnexpectedResult;
+    }
+}
+
+test "RAV7b-4: 접은 전송은 «성공 코드»를 안 낸다" {
+    // 🔥 **실물로는 못 만든다** — 취소는 타이밍이라 픽스처로 재현할 수 없다. 그래서 이 계약은
+    // 소스에서만 센다(A1 의 자국 가드와 같은 자리·같은 이유).
+    //
+    // **막는 것**: 접으면 읽다 만 바이트가 남는다. 그것을 `0`(성공)으로 돌려주면 받는 쪽은 꼬리가
+    // 없는 wire 를 「활동이 없다」로 읽어 **화면이 빈 목록**이 된다(계약 §2.2). 넘침이 `-2` 를 내는
+    // 것과 **같은 규율**이다.
+    const gpa = std.testing.allocator;
+    const src = try readSource(gpa, std.testing.io, upload_path);
+    defer gpa.free(src);
+    const code = try stripComments(gpa, src);
+    defer gpa.free(code);
+
+    if (std.mem.indexOf(u8, code, "if (cancelled) return -3;") == null) {
+        std.debug.print("🔥 접은 전송이 성공 코드를 낸다 — 읽다 만 답이 「활동이 없다」로 읽힌다.\n", .{});
+        return error.TestUnexpectedResult;
+    }
+    // 그리고 **접었으면 읽기 루프를 빠져나온다**.
+    if (std.mem.indexOf(u8, code, "cancelled = true;") == null) {
+        std.debug.print("🔥 읽기 루프가 취소로 빠져나가지 않는다.\n", .{});
+        return error.TestUnexpectedResult;
+    }
+    // 🔥 **자식을 죽인다**(적대적 W3). fd 닫기만으로는 **다음 write 의 EPIPE** 를 기다리는데, 헬퍼는
+    // 스캔 중에 아무것도 안 쓴다 — 6.3 초 동안 write 가 없어 `reapPid` 가 그만큼 막히고 `inflight`
+    // 가 안 풀려 **새 스캔이 여전히 안 걸린다**(취소의 목적이 사라진다).
+    if (std.mem.indexOf(u8, code, "if (cancelled) _ = std.c.kill(pid,") == null) {
+        std.debug.print("🔥 접고도 자식을 안 죽인다 — `reapPid` 가 왕복이 끝날 때까지 막힌다.\n", .{});
+        return error.TestUnexpectedResult;
+    }
+    // 🔥 **`poll` 실패를 타임아웃과 가른다**(적대적 W1). `catch 0` 이면 영구 실패에서 영원히
+    // `continue` 하고 `read` 를 한 번도 안 한다 — 그 스레드가 굳는다.
+    if (std.mem.indexOf(u8, code, "std.posix.poll(&fds, cancel_poll_ms) catch 1") == null) {
+        std.debug.print("🔥 `poll` 실패가 타임아웃과 같은 길로 간다 — 영구 실패에서 굳는다.\n", .{});
+        return error.TestUnexpectedResult;
+    }
+}
+
+test "RAV7b-4 §6.3: 취소 훅이 로컬 파일시스템을 안 만진다" {
+    // 취소 훅은 **전송이 도는 동안** 백그라운드 스레드에서 반복 호출된다(50 ms 마다). 거기서
+    // `std.Io` 나 로컬 파일을 만지면 그 자리가 곧 계약 §2.1 위반이고, **읽기 루프 안**이라 가장
+    // 조용하게 샌다 — atomic 하나만 읽어야 한다.
+    const gpa = std.testing.allocator;
+    const scan_src = try readSource(gpa, std.testing.io, backend_path);
+    defer gpa.free(scan_src);
+    const code = try stripComments(gpa, scan_src);
+    defer gpa.free(code);
+
+    // ⚠️ 이 파일의 `bodyOf` 는 `\n}\n` 까지 자르므로 **구조체 안 함수**에는 안 맞는다 — 취소 문맥
+    // 통째(`const RemoteCancel = struct {`)를 잘라 그 안을 본다. needle 은 **유일해야 한다**(이
+    // 스택에서 세 번 당한 그것).
+    const body = bodyOf(code, "const RemoteCancel = struct {") orelse {
+        std.debug.print("🔥 취소 문맥(`RemoteCancel`)이 없다 — 원격이 다시 못 접는 상태다.\n", .{});
+        return error.TestUnexpectedResult;
+    };
+    for ([_][]const u8{ "Dir.cwd()", "openFile", "readPositional", "statFile", "std.Io" }) |needle| {
+        if (std.mem.indexOf(u8, body, needle) != null) {
+            std.debug.print("🔥 취소 훅이 `{s}` 를 만진다 — 백그라운드 스레드다(계약 §2.1).\n", .{needle});
+            return error.TestUnexpectedResult;
+        }
+    }
+    // **그 값 하나만 본다.**
+    if (std.mem.indexOf(u8, body, "cancelled_upto.load(.acquire)") == null) {
+        std.debug.print("🔥 취소 훅이 `cancelled_upto` 를 안 본다 — 무엇으로 접는가?\n", .{});
         return error.TestUnexpectedResult;
     }
 }

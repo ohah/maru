@@ -2217,9 +2217,12 @@ pub const RuntimeManager = struct {
         const last = self.anim_last_ns;
         self.anim_last_ns = now_ns;
         if (last == 0 or now_ns <= last) return; // 첫 tick 은 기준만 세운다. 시계 역행도 한 tick 버린다.
-        // 잠자기·정지에서 깨면 경과가 수 분일 수 있다. 그대로 넘기면 한 번에 수천 프레임을 감아
-        // 「멈춰 있던 만큼 빨리 감기」가 된다. 한 tick 이 옮길 수 있는 상한을 1초로 둔다.
-        const elapsed_ms = @min((now_ns - last) / std.time.ns_per_ms, 1000);
+        // **여기서 경과를 자르지 않는다.** 잠자기에서 깨면 이 값이 수 분일 수 있지만, 밀린 시간을
+        // 어떻게 다룰지는 core 가 정한다 — core 는 호출당 프레임을 한 장만 넘기고 남은 시간을 한
+        // 프레임분으로 잘라 버린다(`kitty.advanceAnimations`). 여기에도 상한을 두면 같은 정책이 두
+        // 곳에 생겨, 한쪽만 고쳐도 판정자가 통과하는 자리가 된다(적대적 검증에서 실제로 그랬다 —
+        // 여기 1초 상한을 1000초로 바꿔도 판정자 다섯이 전부 초록이었다).
+        const elapsed_ms = (now_ns - last) / std.time.ns_per_ms;
         if (elapsed_ms == 0) return;
 
         var items: [upgrade_limits.max_runtime_count]struct {
@@ -5418,9 +5421,10 @@ test "runtime manager: 애니메이션이 없으면 tick 은 screen change 를 �
     try std.testing.expectEqual(@as(u64, 11), mgr.anim_ticks); // tick 은 돌았다 — 공짜였을 뿐이다
 }
 
-// 시계는 **뒤로 가고 멈춘다**. 기계가 잠들었다 깨면 경과가 수 분이고, 그대로 넘기면 사용자가 보는 것은
-// 애니메이션이 아니라 「빨리 감기」다. 역행은 한 tick 을 버리고, 긴 정지는 1 초까지만 옮긴다.
-test "runtime manager: 애니메이션 전진은 시계 역행을 버리고 긴 정지를 1 초로 자른다" {
+// 시계는 **뒤로 간다**(sleep/wake, 시계 조정). 음수 경과를 부호 없는 타입으로 받으면 그 자리에서
+// 죽고, baseline 을 다시 안 잡으면 그 뒤로 영영 멈춘다. host 가 책임지는 것은 여기까지다 — 밀린
+// 시간을 어떻게 쓸지는 core 가 정한다(`kitty 애니메이션: 밀린 시간은 한 프레임분만 남는다`).
+test "runtime manager: 애니메이션 전진은 시계 역행 tick 을 버리고 그 자리에서 기준을 다시 잡는다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
@@ -5433,7 +5437,6 @@ test "runtime manager: 애니메이션 전진은 시계 역행을 버리고 긴 
     const rid = try ops.spawn(ops.ctx, .{ .argv = &.{"/bin/cat"}, .cwd = null, .cols = 24, .rows = 6 });
     defer ops.terminate(ops.ctx, rid);
     const surface = mgr.backend_impl.surfaceFor(mgr.handleFor(rid).?).?;
-    // 프레임 여섯 장이라야 상한이 **보인다** — 두 장이면 몇 번을 감든 결과가 1 아니면 2 라 구분이 안 된다.
     try armTestAnimation(surface, std.testing.io, 6);
     const advance = ops.advance_animations.?;
 
@@ -5446,8 +5449,9 @@ test "runtime manager: 애니메이션 전진은 시계 역행을 버리고 긴 
     advance(ops.ctx, 560 * std.time.ns_per_ms);
     try std.testing.expectEqual(@as(u32, 2), testFrameOf(surface, std.testing.io));
 
-    // 2 초를 건너뛰었다. 1 초 상한이면 (20+1000)/40 = 25 장 → 프레임 2 에서 **3**.
-    // 상한이 없으면 (20+2000)/40 = 50 장 → **4** 가 된다. 그 차이가 이 한 줄이다.
+    // 2 초를 건너뛰어도 **한 장만** 넘어간다 — core 가 호출당 한 장으로 묶고 남은 시간을 버리기
+    // 때문이다. 「오래 멈췄다가 깨면 그만큼 빨리 감긴다」가 여기서 끊긴다.
     advance(ops.ctx, 2_560 * std.time.ns_per_ms);
     try std.testing.expectEqual(@as(u32, 3), testFrameOf(surface, std.testing.io));
+    try std.testing.expectEqual(@as(u64, 2), mgr.anim_advances);
 }

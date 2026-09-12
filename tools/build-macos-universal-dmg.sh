@@ -101,7 +101,7 @@ codesign --verify --strict --deep "$app"
 echo "==> P5d signed artifact PATH + localhost SSH gate"
 MARU_P5D_REQUIRE_DEVELOPER_ID=1 \
 "$ZIG" build test-session-host-p5d-artifact \
-	-Dp5d-artifact-cli="$app/Contents/MacOS/maru" -Doptimize=ReleaseFast -j1
+	-Dp5d-artifact-cli="$app/Contents/MacOS/maru" -Dp5d-artifact-app-root="$app" -Doptimize=ReleaseFast -j1
 
 echo "==> notarize .app + staple (티켓을 .app에 부착 — dmg에서 꺼내 복사해도 Gatekeeper 통과)"
 ditto -c -k --keepParent "$app" "$work/app.zip"

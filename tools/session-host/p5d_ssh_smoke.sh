@@ -9,7 +9,6 @@ if [ "$#" -ne 4 ]; then
 fi
 
 BUNDLE_CLI=$1
-PRODUCT_TEST=$2
 APP_ROOT=$2
 PRODUCT_TEST=$3
 UPLOAD_TEST=$4

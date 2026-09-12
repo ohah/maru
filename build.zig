@@ -19133,10 +19133,14 @@ pub fn build(b: *std.Build) void {
         session_host_p5d_step.dependOn(session_host_3d_step);
         session_host_p5d_step.dependOn(&run_session_host_ssh_upload_boundary_tests.step);
         session_host_p5d_step.dependOn(&run_session_host_ssh_reconnect_isolation_boundary_tests.step);
+        // 스크립트는 `<private-bundle-cli> <mounted-app-root> <attach-e2e> <ssh-upload-e2e>` 네 개를
+        // 받는다. app root 는 CLI 가 들어 있는 번들 자체다 — 스크립트가 그것으로 `codesign --verify
+        // --strict --deep` 을 돌리고 GUI/Helper 바이너리를 찾는다.
         const run_session_host_p5d = b.addSystemCommand(&.{
             "sh",
             "tools/session-host/p5d_ssh_smoke.sh",
             "zig-out/Maru.app/Contents/MacOS/maru",
+            "zig-out/Maru.app",
         });
         run_session_host_p5d.addArtifactArg(session_host_3d_product_e2e_tests);
         const session_host_ssh_upload_product_tests = addProjectTest(b, .{
@@ -19193,10 +19197,19 @@ pub fn build(b: *std.Build) void {
             "p5d-artifact-cli",
             "Path to a prebuilt signed Maru.app CLI for the P5d release gate",
         ) orelse "";
+        // `-Dp5d-artifact-cli` 는 **번들 안의 CLI 경로**이고, 스크립트가 검증하는 대상은 **번들 자체**다.
+        // 둘은 서로 유도할 수 있지만(두 단계 위), 마운트 경로를 문자열로 깎으면 심링크·공백에서 조용히
+        // 어긋난다 — 호출자가 이미 쥐고 있는 값을 그대로 받는다.
+        const p5d_artifact_app_root = b.option(
+            []const u8,
+            "p5d-artifact-app-root",
+            "Mounted .app bundle that -Dp5d-artifact-cli lives in (P5d verifies its signature)",
+        ) orelse "zig-out/Maru.app";
         const run_session_host_p5d_artifact = b.addSystemCommand(&.{
             "sh",
             "tools/session-host/p5d_ssh_smoke.sh",
             p5d_artifact_cli,
+            p5d_artifact_app_root,
         });
         run_session_host_p5d_artifact.addArtifactArg(session_host_3d_product_e2e_tests);
         run_session_host_p5d_artifact.addArtifactArg(session_host_ssh_upload_product_tests);

@@ -5432,6 +5432,10 @@ pub const AppSession = struct {
     remote_detail_inflight: bool = false,
     remote_detail_mutex: std.Io.Mutex = .init,
     remote_detail_outcome: ?agent_activity_ops.RemoteDetailOutcome = null,
+    /// 원격 신선도(RAV7) — 단발 워커. 저쪽 파일이 자랐는지 왕복 하나로 묻는다.
+    remote_fresh_inflight: bool = false,
+    remote_fresh_mutex: std.Io.Mutex = .init,
+    remote_fresh_outcome: ?agent_activity_ops.RemoteFreshOutcome = null,
     /// 원격 이름 변경(RF6b) — 단발 워커. 로컬 변경 백엔드를 안 탄다(§2.4).
     remote_rename_inflight: bool = false,
     remote_rename_mutex: std.Io.Mutex = .init,
@@ -22351,6 +22355,15 @@ pub const AppSession = struct {
             outcome.deinit(self.allocator);
             self.remote_detail_outcome = null;
         }
+        // 원격 신선도 워커도 같은 가드다(RAV7) — detach 스레드가 self.remote_fresh_* 을 건드린다.
+        while (true) {
+            self.remote_fresh_mutex.lockUncancelable(self.io);
+            const still_running = self.remote_fresh_inflight and self.remote_fresh_outcome == null;
+            self.remote_fresh_mutex.unlock(self.io);
+            if (!still_running) break;
+            std.atomic.spinLoopHint();
+        }
+        self.remote_fresh_outcome = null;
         // 원격 이름 변경 워커도 같은 가드다(RF6b) — detach 스레드가 self.remote_rename_* 을 건드린다.
         while (true) {
             self.remote_rename_mutex.lockUncancelable(self.io);
@@ -81688,6 +81701,46 @@ test "설정 줄이 없으면 내장 기본값이 그대로 정책이 된다 (G3
     // ── ③ **이 test 의 요점.** 지금 기본값이 무엇인지 못 박는다. 뒤집는 커밋은 이 한 줄을 반드시
     //    함께 고쳐야 하므로 전환이 **리뷰 diff 에 보인다** — 조용한 뒤집기를 막는 유일한 자리다.
     try std.testing.expect((config_mod.Config{}).session.keep_alive_after_quit == true);
+}
+
+test "활동 뷰: 원격 신선도 답이 「자랐을 때만」 다시 훑는다 (RAV7)" {
+    // **이 판정자가 재는 것**: 왕복 하나로 「안 자랐다」를 확인하고 **물러나는가**. 그 전에는 뷰에
+    // 들어올 때마다 통째로 다시 훑었다(원격은 로컬 stat 자국을 못 쓴다 — §13.2).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    session.agent_activity.source_remote = true;
+    session.agent_activity.remote_scanned_bytes = 4096;
+    session.agent_activity.built = true;
+
+    // ── ① 안 자랐으면 **아무것도 안 한다**. `built` 가 그대로면 재스캔이 안 걸린 것이다.
+    agent_activity_ops.finishRemoteFreshness(session, .{ .stamp = 4096, .grew = false });
+    try std.testing.expect(session.agent_activity.built);
+    try std.testing.expectEqual(@as(u64, 0), session.agent_activity.awaiting);
+
+    // ── ② **옛 자국의 답은 버린다.** 그 사이 다시 훑었으면 이 답은 지난 파일 크기의 것이다 —
+    //    안 버리면 자라지도 않았는데 스캔이 걸리거나, 그 반대로 자란 것을 놓친다.
+    agent_activity_ops.finishRemoteFreshness(session, .{ .stamp = 1234, .grew = true });
+    try std.testing.expect(session.agent_activity.built);
+    try std.testing.expectEqual(@as(u64, 0), session.agent_activity.awaiting);
+
+    // ── ③ **로컬 pane 의 답은 무시한다.** pane 이 그새 로컬로 바뀌었는데 원격 답을 쓰면 저쪽
+    //    크기로 이쪽 파일을 판정하게 된다.
+    session.agent_activity.source_remote = false;
+    agent_activity_ops.finishRemoteFreshness(session, .{ .stamp = 4096, .grew = true });
+    try std.testing.expect(session.agent_activity.built);
 }
 
 test "활동 뷰: 원격 펼침 결말이 로컬과 같은 규칙으로 풀린다 (RAV5b)" {

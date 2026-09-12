@@ -227,3 +227,28 @@ test "RAV6 §6.3: 원격 그림도 로컬 파일을 안 연다" {
         return error.TestUnexpectedResult;
     }
 }
+
+test "RAV7 §6.3: 원격 신선도 워커도 로컬 파일시스템을 안 만진다" {
+    const gpa = std.testing.allocator;
+    const activity_src = try readSource(gpa, std.testing.io, activity_path);
+    defer gpa.free(activity_src);
+
+    const body = bodyOf(activity_src, "fn remoteFreshWorker(") orelse {
+        std.debug.print("원격 신선도 워커를 못 찾았다 — 갈래가 사라졌거나 이름이 바뀌었다.\n", .{});
+        return error.TestUnexpectedResult;
+    };
+    for (local_fs_tokens) |token| {
+        if (std.mem.indexOf(u8, body, token) != null) {
+            std.debug.print("🔥 `remoteFreshWorker` 안에 로컬 파일시스템 토큰 `{s}` 가 있다.\n" ++
+                "  저쪽 크기를 이쪽 `stat` 으로 재면 **같은 모양의 로컬 파일**이 자국이 된다(계약 §2.1).\n", .{token});
+            return error.TestUnexpectedResult;
+        }
+    }
+
+    // **원격은 로컬 신선도 경로로 안 간다.** `stampOf`/`headChanged` 는 로컬 `stat` 이다.
+    const marker = "if (self.agent_activity.source_remote) {\n        beginRemoteFreshness(self, path);";
+    if (std.mem.indexOf(u8, activity_src, marker) == null) {
+        std.debug.print("🔥 원격 소스가 로컬 신선도 검사(`headChanged` → `stat`)로 흘러간다(계약 §2.1).\n", .{});
+        return error.TestUnexpectedResult;
+    }
+}

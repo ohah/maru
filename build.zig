@@ -15523,6 +15523,10 @@ pub fn build(b: *std.Build) void {
         "test-session-host-notification-concrete",
         "Validate the concrete Notification Center app/helper composition and exact root lifetime",
     );
+    const session_host_notification_candidate_identity_step = b.step(
+        "test-session-host-notification-candidate-identity",
+        "Validate mounted Notification Center candidate signer and executable identity",
+    );
     const session_host_release_adapter_candidate_baseline_app_step = b.step(
         "test-session-host-release-adapter-candidate-baseline-app",
         "Validate preserved baseline candidate app authority",
@@ -16964,6 +16968,15 @@ pub fn build(b: *std.Build) void {
             const apple_product_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_apple_product.zig"), .target = target, .optimize = composition_optimize, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "product_identity", .module = b.createModule(.{ .root_source_file = b.path("src/platform/macos/product_identity.zig"), .target = target, .optimize = composition_optimize }) } } });
             const apple_transport_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_apple_transport.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "bounded_process", .module = bounded_mod }, .{ .name = "release_adapter_apple_product", .module = apple_product_mod } } });
             const dmg_authority_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_dmg_authority.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "bounded_process", .module = bounded_mod }, .{ .name = "safe_open", .module = safe_open_mod }, .{ .name = "release_adapter_files", .module = files_mod }, .{ .name = "release_adapter_apple_product", .module = apple_product_mod }, .{ .name = "release_adapter_apple_transport", .module = apple_transport_mod } } });
+            const notification_candidate_identity_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_notification_candidate_identity.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_adapter_dmg_authority", .module = dmg_authority_mod }, .{ .name = "release_adapter_files", .module = files_mod }, .{ .name = "bounded_process", .module = bounded_mod } } });
+            const notification_candidate_identity_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_notification_candidate_identity.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_adapter_notification_candidate_identity", .module = notification_candidate_identity_mod }, .{ .name = "release_adapter_dmg_authority", .module = dmg_authority_mod }, .{ .name = "release_adapter_files", .module = files_mod } } }) });
+            const run_notification_candidate_identity_tests = b.addRunArtifact(notification_candidate_identity_tests);
+            run_notification_candidate_identity_tests.addArg("--maru-expect-tests=5");
+            run_notification_candidate_identity_tests.setCwd(b.path("."));
+            session_host_notification_candidate_identity_step.dependOn(&run_notification_candidate_identity_tests.step);
+            if (composition_optimize == optimize) session_host_step.dependOn(&run_notification_candidate_identity_tests.step);
+            test_step.dependOn(&run_notification_candidate_identity_tests.step);
+            if (composition_optimize == .Debug) macos_only_test_step.dependOn(&run_notification_candidate_identity_tests.step);
             const candidate_product_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_candidate_product.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_adapter_apple_product", .module = apple_product_mod }, .{ .name = "release_adapter_apple_transport", .module = apple_transport_mod }, .{ .name = "release_adapter_candidate_files", .module = candidate_files_mod }, .{ .name = "release_adapter_dmg_authority", .module = dmg_authority_mod } } });
             const candidate_product_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_candidate_product.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_github_draft_creation", .module = draft_creation_mod }, .{ .name = "release_adapter_candidate_attestation", .module = candidate_attestation_mod }, .{ .name = "release_adapter_candidate_files", .module = candidate_files_mod }, .{ .name = "release_adapter_apple_product", .module = apple_product_mod }, .{ .name = "release_adapter_candidate_product", .module = candidate_product_mod } } }) });
             const run_candidate_product_tests = b.addRunArtifact(candidate_product_tests);

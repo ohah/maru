@@ -985,6 +985,7 @@ pub fn build(b: *std.Build) void {
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/SessionHostInputSourcePolicy.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/NotificationReleaseScenarioReceipt.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/NotificationReleaseAppScenario.swift"));
+        macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/NotificationExactCleanup.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/MaruAppHost.swift"));
         macos_app_host_swift_check_cmd.setCwd(b.path("."));
         macos_app_host_swift_check_step.dependOn(&macos_app_host_swift_check_cmd.step);
@@ -1825,6 +1826,7 @@ pub fn build(b: *std.Build) void {
         macos_app_compile.addFileArg(b.path("src/platform/macos/SessionHostInputSourcePolicy.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/NotificationReleaseScenarioReceipt.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/NotificationReleaseAppScenario.swift"));
+        macos_app_compile.addFileArg(b.path("src/platform/macos/NotificationExactCleanup.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/MaruAppHost.swift"));
         macos_app_compile.addFileArg(macos_app_host_abi_lib.getEmittedBin());
         macos_app_compile.addArgs(&.{
@@ -4193,6 +4195,9 @@ pub fn build(b: *std.Build) void {
         );
         notification_app_scenario_tests.addFileArg(
             b.path("src/platform/macos/NotificationReleaseAppScenario.swift"),
+        );
+        notification_app_scenario_tests.addFileArg(
+            b.path("src/platform/macos/NotificationExactCleanup.swift"),
         );
         notification_app_scenario_tests.addFileArg(
             b.path("tests/macos_notification_release_app_scenario.swift"),

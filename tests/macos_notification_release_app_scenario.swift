@@ -12,6 +12,25 @@ private struct NotificationReleaseAppScenarioTests {
         isolationAndDescriptorInputsFailClosed()
         try runnerRootMustBeOwnedDirectoryWithExactMode()
         try receiptSinkUsesOneInheritedPipeExactlyOnce()
+        exactNotificationCleanupTouchesOnlyOneIdentifier()
+    }
+
+    private static func exactNotificationCleanupTouchesOnlyOneIdentifier() {
+        var pending: [[String]] = []
+        var delivered: [[String]] = []
+        let cleanup = NotificationExactCleanup(
+            removePending: { pending.append($0) },
+            removeDelivered: { delivered.append($0) }
+        )
+        precondition(cleanup.remove(requestIdentifier: request))
+        precondition(pending == [[request]])
+        precondition(delivered == [[request]])
+
+        for invalid in ["", "bad\nrequest", String(repeating: "x", count: 192)] {
+            precondition(!cleanup.remove(requestIdentifier: invalid))
+        }
+        precondition(pending == [[request]])
+        precondition(delivered == [[request]])
     }
 
     private static func validEnvironment() -> [String: String] {

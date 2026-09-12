@@ -4286,6 +4286,38 @@ pub const RemoteTermBackend = struct {
         return entry.host_id;
     }
 
+    pub const NotificationContinuityIdentity = struct {
+        connection_generation: u64,
+        host_pid: i32,
+        child_pid: i32,
+    };
+
+    /// Release-only continuity observation for the exact already-attached runtime. Identity is
+    /// returned as one value so AppSession cannot accidentally combine a route from one entry,
+    /// a generation from another adapter, and cached PIDs from a stale observation.
+    pub fn notificationContinuityIdentity(
+        self: *RemoteTermBackend,
+        handle: RuntimeHandle,
+        expected_host_id: u128,
+        expected_runtime_id: u128,
+    ) ?NotificationContinuityIdentity {
+        if (expected_host_id == 0 or expected_runtime_id == 0) return null;
+        const entry = self.runtimes.get(handle) orelse return null;
+        if (entry.host_id != expected_host_id or !self.currentAttachmentLive(handle) or
+            self.attachedAsObserver(handle)) return null;
+        const runtime_id_hex = entry.runtime.runtimeIdHex();
+        const runtime_id = std.fmt.parseInt(u128, &runtime_id_hex, 16) catch return null;
+        if (runtime_id != expected_runtime_id) return null;
+        const generation = RemoteRuntime.backend_api.connectionGeneration(entry.runtime);
+        const identity = RemoteRuntime.backend_api.processIdentity(entry.runtime);
+        if (generation == 0 or identity.host_pid <= 0 or identity.child_pid <= 0) return null;
+        return .{
+            .connection_generation = generation,
+            .host_pid = identity.host_pid,
+            .child_pid = identity.child_pid,
+        };
+    }
+
     /// Captures the immutable routing identity before a user action admits an async observation
     /// request. Completion must compare the whole tuple again; a recycled handle or same runtime
     /// ID on a newer backend generation is not the original drop target.
@@ -8652,4 +8684,50 @@ test "config generation 시작값은 프로세스마다 뒤로 가지 않는다"
     // 구조체 리터럴 기본값 1 은 테스트 전용이다. 제품 init 이 그 값을 그대로 두면 host 의 보존 record 를
     // 넘지 못해 이 PR 이 고친 무한 재시도로 되돌아간다.
     try std.testing.expect(first > 1);
+}
+
+test "R2b3b1 notification continuity identity is exact current and indivisible" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fixture: remote_runtime.testing_api.SemanticFixture = undefined;
+    try fixture.initInPlace();
+    defer fixture.deinit();
+    remote_runtime.testing_api.setContinuityObservation(
+        &fixture.runtime,
+        .{ .host_pid = 101, .child_pid = 202 },
+        .current,
+    );
+
+    var backend_value = b5TestBackend(testing.allocator);
+    defer backend_value.runtimes.deinit(testing.allocator);
+    const handle: RuntimeHandle = 77;
+    const host_id: u128 = 0x1111;
+    const runtime_id = try std.fmt.parseInt(u128, &fixture.runtime.runtimeIdHex(), 16);
+    try backend_value.runtimes.put(testing.allocator, handle, .{
+        .runtime = &fixture.runtime,
+        .host_id = host_id,
+        .host_adapter_generation = 1,
+        .runtime_generation = 1,
+    });
+
+    const observed = backend_value.notificationContinuityIdentity(handle, host_id, runtime_id) orelse
+        return error.TestUnexpectedResult;
+    try testing.expectEqual(fixture.adapter.connectionGeneration(), observed.connection_generation);
+    try testing.expectEqual(@as(i32, 101), observed.host_pid);
+    try testing.expectEqual(@as(i32, 202), observed.child_pid);
+    try testing.expect(backend_value.notificationContinuityIdentity(handle, host_id + 1, runtime_id) == null);
+    try testing.expect(backend_value.notificationContinuityIdentity(handle, host_id, runtime_id + 1) == null);
+
+    remote_runtime.testing_api.setContinuityObservation(
+        &fixture.runtime,
+        .{ .host_pid = 101, .child_pid = 202 },
+        .stale,
+    );
+    try testing.expect(backend_value.notificationContinuityIdentity(handle, host_id, runtime_id) == null);
+    remote_runtime.testing_api.setContinuityObservation(
+        &fixture.runtime,
+        .{ .host_pid = 101, .child_pid = 202 },
+        .current,
+    );
+    remote_runtime.testing_api.setContinuityObserver(&fixture.runtime);
+    try testing.expect(backend_value.notificationContinuityIdentity(handle, host_id, runtime_id) == null);
 }

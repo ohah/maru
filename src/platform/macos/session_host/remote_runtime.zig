@@ -3625,6 +3625,10 @@ pub const RemoteRuntime = struct {
             );
         }
 
+        pub fn connectionGeneration(runtime: *const RemoteRuntime) u64 {
+            return runtime.currentGenerationConst().connection_generation;
+        }
+
         pub fn observationMatches(runtime: *const RemoteRuntime, out: *const term_backend.RuntimeObservation) bool {
             const observation = &runtime.currentGenerationConst().observation;
             return out.availability == observation.availability and
@@ -7643,6 +7647,19 @@ fn shouldSendCoreCommand(runtime_core_command_v1: bool, runtime_clear_screen_v1:
 
 pub const testing_api = if (builtin.is_test) struct {
     pub const SemanticFixture = B4SemanticFixture;
+
+    pub fn setContinuityObservation(
+        runtime: *RemoteRuntime,
+        identity: ProcessIdentity,
+        availability: term_backend.ObservationAvailability,
+    ) void {
+        runtime.process_identity = identity;
+        runtime.currentGeneration().observation.availability = availability;
+    }
+
+    pub fn setContinuityObserver(runtime: *RemoteRuntime) void {
+        runtime.currentGeneration().attachment.statePtr().role = .observer;
+    }
 
     pub fn initSemanticRuntimeOnAdapter(
         runtime: *RemoteRuntime,

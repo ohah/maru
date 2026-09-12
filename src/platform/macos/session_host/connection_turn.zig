@@ -187,6 +187,30 @@ fn notePreparedAttachRejectedErr(site: []const u8, err: anyerror, batch_bytes: u
     adoption_reject_bytes = batch_bytes;
 }
 
+const ResyncSweepBlock = struct {
+    streams: usize,
+    invalidated: usize,
+    no_tracker: usize,
+    state_stale: usize,
+    not_pending: usize,
+    cannot_attempt: usize,
+    backoff: usize,
+};
+
+/// 직전과 **같은 분포면 다시 안 찍는다.** 멈춘 상태는 틱마다 같은 값을 내므로 그대로 두면 초당
+/// 수십 줄이 된다 — 오늘 로그의 92 % 가 진단이었던 일을 되풀이하지 않는다(#3605).
+var last_sweep_block: ?ResyncSweepBlock = null;
+
+fn noteResyncSweepBlocked(now: ResyncSweepBlock) void {
+    if (builtin.is_test) return;
+    if (last_sweep_block) |prev| if (std.meta.eql(prev, now)) return;
+    last_sweep_block = now;
+    host_log.line(
+        "session host resync sweep blocked: streams={d} invalidated={d} no_tracker={d} state_stale={d} not_pending={d} cannot_attempt={d} backoff={d}",
+        .{ now.streams, now.invalidated, now.no_tracker, now.state_stale, now.not_pending, now.cannot_attempt, now.backoff },
+    );
+}
+
 fn noteAttachAdoption(adopted: SubscriptionAdoption, frames: usize) void {
     if (builtin.is_test) return;
     host_log.line(
@@ -491,18 +515,57 @@ pub const Client = struct {
         if (self.producer_streams.len == 0) return 1;
 
         const slot = self.reactor.get(self.admission) catch return 1;
+        // **왜 아무도 안 뽑혔는지 센다.** 여섯 갈래가 전부 조용히 `continue`·`false` 로 빠지는데,
+        // 화면이 멈춘 순간 「고를 것이 없었다」와 「있었는데 다 막혔다」가 로그에서 똑같아 보인다.
+        //
+        // 2026-09-13 실측: ssh 가 끊긴 뒤 터미널에 입력이 안 먹다가 **pane 을 하나 만들면 나머지가
+        // 전부 복구됐다.** 데이터가 사라진 게 아니라 이 sweep 이 멈춰 있다가 `localStreams` 가
+        // 바뀌며 다시 돌았다는 뜻이다 — 그런데 무엇이 막고 있었는지는 어디에도 안 남는다.
+        var blocked_no_tracker: usize = 0;
+        var blocked_state_stale: usize = 0;
+        var invalidated_seen: usize = 0;
+        var blocked_not_pending: usize = 0;
+        var blocked_cannot_attempt: usize = 0;
+        var blocked_backoff: usize = 0;
+        var chose = false;
         for (self.producer_streams, 0..) |candidate, index| {
-            const candidate_tracker = self.trackers.get(candidate) orelse continue;
-            const state = slot.screenState(candidate_tracker) catch continue;
-            if (state == .invalidated and
-                self.connection.resyncPending(candidate) and
-                (slot.canAttemptResync(candidate_tracker) catch false) and
-                (slot.resyncAttemptReady(candidate_tracker, now_ns) catch false))
-            {
-                self.producer_sweep_cursor = index;
-                break;
+            const candidate_tracker = self.trackers.get(candidate) orelse {
+                blocked_no_tracker += 1;
+                continue;
+            };
+            const state = slot.screenState(candidate_tracker) catch {
+                blocked_state_stale += 1;
+                continue;
+            };
+            if (state != .invalidated) continue;
+            invalidated_seen += 1;
+            if (!self.connection.resyncPending(candidate)) {
+                blocked_not_pending += 1;
+                continue;
             }
+            if (!(slot.canAttemptResync(candidate_tracker) catch false)) {
+                blocked_cannot_attempt += 1;
+                continue;
+            }
+            if (!(slot.resyncAttemptReady(candidate_tracker, now_ns) catch false)) {
+                blocked_backoff += 1;
+                continue;
+            }
+            self.producer_sweep_cursor = index;
+            chose = true;
+            break;
         }
+        // **막혔을 때만 낸다.** sweep 은 틱마다 도므로 늘 찍으면 로그를 통째로 먹는다. 무효화된
+        // 스트림이 있는데 아무도 못 뽑힌 순간이 곧 「멈춰 있다」이고, 그때만 한 줄이면 족하다.
+        if (!chose and invalidated_seen != 0) noteResyncSweepBlocked(.{
+            .streams = self.producer_streams.len,
+            .invalidated = invalidated_seen,
+            .no_tracker = blocked_no_tracker,
+            .state_stale = blocked_state_stale,
+            .not_pending = blocked_not_pending,
+            .cannot_attempt = blocked_cannot_attempt,
+            .backoff = blocked_backoff,
+        });
         return self.producer_streams.len;
     }
 

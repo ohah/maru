@@ -15546,6 +15546,10 @@ pub fn build(b: *std.Build) void {
         "test-session-host-notification-candidate-gate",
         "Validate R2c mounted candidate scenario composition and final evidence lifetime",
     );
+    const session_host_notification_candidate_product_step = b.step(
+        "test-session-host-notification-candidate-product",
+        "Validate the R3b mounted-DMG Notification Center product bridge",
+    );
     const session_host_release_adapter_candidate_baseline_app_step = b.step(
         "test-session-host-release-adapter-candidate-baseline-app",
         "Validate preserved baseline candidate app authority",
@@ -17018,6 +17022,15 @@ pub fn build(b: *std.Build) void {
             if (composition_optimize == optimize) session_host_step.dependOn(&run_notification_candidate_gate_tests.step);
             test_step.dependOn(&run_notification_candidate_gate_tests.step);
             if (composition_optimize == .Debug) macos_only_test_step.dependOn(&run_notification_candidate_gate_tests.step);
+            const notification_candidate_product_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_notification_candidate_product.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_adapter_dmg_authority", .module = dmg_authority_mod }, .{ .name = "release_adapter_apple_product", .module = apple_product_mod }, .{ .name = "release_adapter_apple_transport", .module = apple_transport_mod }, .{ .name = "release_adapter_notification_concrete", .module = nc_concrete_mod }, .{ .name = "release_adapter_notification_candidate_gate", .module = notification_candidate_gate_mod }, .{ .name = "release_adapter_notification_app_receipt", .module = nc_app_receipt_mod }, .{ .name = "release_adapter_notification_helper_receipt", .module = nc_helper_receipt_mod }, .{ .name = "release_adapter_notification_helper_child", .module = nc_helper_child_mod } } });
+            const notification_candidate_product_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_notification_candidate_product.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_adapter_notification_candidate_product", .module = notification_candidate_product_mod }, .{ .name = "release_adapter_notification_app_receipt", .module = nc_app_receipt_mod }, .{ .name = "release_adapter_dmg_authority", .module = dmg_authority_mod } } }) });
+            const run_notification_candidate_product_tests = b.addRunArtifact(notification_candidate_product_tests);
+            run_notification_candidate_product_tests.addArg("--maru-expect-tests=4");
+            run_notification_candidate_product_tests.setCwd(b.path("."));
+            session_host_notification_candidate_product_step.dependOn(&run_notification_candidate_product_tests.step);
+            if (composition_optimize == optimize) session_host_step.dependOn(&run_notification_candidate_product_tests.step);
+            test_step.dependOn(&run_notification_candidate_product_tests.step);
+            if (composition_optimize == .Debug) macos_only_test_step.dependOn(&run_notification_candidate_product_tests.step);
             const candidate_product_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_candidate_product.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_adapter_apple_product", .module = apple_product_mod }, .{ .name = "release_adapter_apple_transport", .module = apple_transport_mod }, .{ .name = "release_adapter_candidate_files", .module = candidate_files_mod }, .{ .name = "release_adapter_dmg_authority", .module = dmg_authority_mod } } });
             const candidate_product_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_candidate_product.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_github_draft_creation", .module = draft_creation_mod }, .{ .name = "release_adapter_candidate_attestation", .module = candidate_attestation_mod }, .{ .name = "release_adapter_candidate_files", .module = candidate_files_mod }, .{ .name = "release_adapter_apple_product", .module = apple_product_mod }, .{ .name = "release_adapter_candidate_product", .module = candidate_product_mod } } }) });
             const run_candidate_product_tests = b.addRunArtifact(candidate_product_tests);

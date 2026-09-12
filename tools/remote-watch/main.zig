@@ -45,7 +45,10 @@ extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_
 ///
 /// 판 10: `read` 서브커맨드(RAV5 — 펼침·이미지가 읽을 **구간**). 활동 wire 는 자리만 싣고 바이트는
 /// 안 싣는다(계약 §2.4) — 그 바이트를 요청형으로 당겨오는 문이다.
-pub const version_line = "maru-remote-watch 10\n";
+///
+/// 판 11: 활동 wire **판 2**(RAV7b — `head_bytes` · `resume_offset`). 받는 쪽이 「머리 파일이
+/// 자랐나」를 체인에서도 묻고, 다음 회차가 **어디부터** 훑을지 안다.
+pub const version_line = "maru-remote-watch 11\n";
 
 /// **판 2 부터는 내지 않는다**(RW7d — 한도에서 폴링으로 내려간다). 상수를 남겨 두는 이유는 원격에
 /// 아직 **판 1 바이너리가 도는 경우**가 있어서다 — 그쪽은 여전히 이 코드로 나가고, 앱은 그것을
@@ -87,7 +90,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // **활동 모드**(RAV2 — [계획](../../docs/plans/remote-agent-activity.md) §5). 트랜스크립트 하나를
-    // 훑어 `maru-rav 1` wire 를 stdout 에 내고 끝난다 — `list` 와 같이 **한 번 답하고 죽는** 모드다.
+    // 훑어 `maru-rav 2` wire 를 stdout 에 내고 끝난다 — `list` 와 같이 **한 번 답하고 죽는** 모드다.
     //
     // 목록 wire 와 달리 인코더를 **손으로 안 든다** — 위 머리말이 적은 대로 모듈을 문다.
     if (std.mem.eql(u8, root, "activity")) {
@@ -1027,6 +1030,10 @@ fn runActivity(io: std.Io, gpa: std.mem.Allocator, file_path: []const u8) void {
 
     var offset: u64 = 0;
     var truncated = false;
+    // **머리 파일(자리 0)의 자국**(RAV7b · 계획 §19). `offset` 은 체인 전체의 합이라 신선도도
+    // 이어읽기도 그 값으로는 성립하지 않는다 — 머리 것만 따로 든다.
+    var head_bytes: u64 = 0;
+    var resume_offset: u64 = 0;
     var opened: [activity_wire.max_chain]?std.Io.File = .{null} ** activity_wire.max_chain;
     defer for (&opened) |*maybe| {
         if (maybe.*) |f| f.close(io);
@@ -1055,6 +1062,7 @@ fn runActivity(io: std.Io, gpa: std.mem.Allocator, file_path: []const u8) void {
         // 이어 붙으면 없던 활동이 생긴다.
         scanner.deinit(gpa);
         scanner = .{ .file_index = @intCast(at) };
+        const before = offset;
         scanOne(io, gpa, file, chunk, &scanner, &hits, watch_channel, &offset) catch |err| switch (err) {
             // 🔥 **채널이 끊겼으면 곧바로 접는다 — 다음 파일로 안 간다**(적대적 O2). 여기서 `truncated`
             // 로 뭉개면 M1 의 고침이 체인에서 **깨진다**: 받는 이가 없는데 부모 rollout(실측 최대
@@ -1062,6 +1070,12 @@ fn runActivity(io: std.Io, gpa: std.mem.Allocator, file_path: []const u8) void {
             error.ChannelGone => return,
             error.Truncated => truncated = true,
         };
+        // **머리 파일의 것만 찍는다**(RAV7b). 자라는 것은 머리뿐이고(부모 rollout 은 재개 시점에
+        // 끝난 파일이다), 이어읽기도 거기서만 일어난다 — 계획 §19.1.
+        if (at == 0) {
+            head_bytes = offset - before;
+            resume_offset = scanner.resumeOffset(hits.items);
+        }
     }
 
     {
@@ -1071,6 +1085,8 @@ fn runActivity(io: std.Io, gpa: std.mem.Allocator, file_path: []const u8) void {
             .image_partial = scanner.image_partial,
             .activity_partial = scanner.activity_partial,
             .scanned_bytes = offset,
+            .head_bytes = head_bytes,
+            .resume_offset = resume_offset,
         }) orelse return;
         if (!putAll(line[0..at])) return;
     }

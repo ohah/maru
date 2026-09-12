@@ -1761,6 +1761,29 @@ pub const StreamScanner = struct {
         }
     }
 
+    /// **이어읽기 자국** — 다음 회차가 이 파일의 어디부터 훑어야 하나(RAV7b · 계획 §19.2).
+    ///
+    /// 🔥 `consumed`(마지막 개행 다음)만으로는 **모자란다.** 명령은 앞 구간에 있고 결과는 뒤 구간에
+    /// 온다 — 이어읽기 구간에서 결과 줄을 만나면 그 주인이 이쪽 스캐너에 **없어** 결말이 안 붙고,
+    /// 화면에 「진행중」이 **영영 남는다**(계약 §2.2 가 금지하는 거짓).
+    ///
+    /// 상태를 나르는 대신 **자국을 뒤로 당긴다**: 살아 있는 미결 호출 중 가장 이른 줄. 그 자리부터는
+    /// 모든 호출이 새로 발견되고 결과도 같은 구간에서 만나므로 **상태가 필요 없다**.
+    ///
+    /// ⚠️ **링이 넘쳐 덮인 호출은 여기 안 잡힌다** — 그 결말은 통째 스캔에서도 이미 잃는다
+    /// (`max_pending_calls`). 이어읽기가 새로 만드는 결함이 아니다.
+    pub fn resumeOffset(self: *const StreamScanner, out: []const Hit) u64 {
+        var at = self.consumed;
+        if (self.pending_live == 0) return at;
+        for (self.pending.items) |e| {
+            if (e.id_len == 0) continue;
+            if (e.hit_index >= out.len) continue;
+            const line = out[e.hit_index].line_offset;
+            if (line < at) at = line;
+        }
+        return at;
+    }
+
     /// 청크 하나를 먹인다. `chunk` 는 `self.consumed + self.carry.len` 위치부터의 바이트여야 한다.
     pub fn feed(
         self: *StreamScanner,
@@ -2707,6 +2730,87 @@ test "활동: Codex custom_tool_call 은 input 이 대상이고 결과 레코드
     try testing.expectEqual(Kind.codex_tool_call, hits.items[0].kind);
     try testing.expectEqual(Activity.exec, hits.items[0].activity);
     try testing.expectEqualStrings("sed -n '1,20p' src/main.zig", activityAt(&hits, 0, call));
+}
+
+test "이어읽기 자국: 미결 호출이 있으면 그 줄까지 되돌린다 (RAV7b)" {
+    // 🔥 **`consumed` 만으로는 모자란다.** 명령은 앞 구간, 결과는 뒤 구간에 온다 — 자국을 `consumed`
+    // 에 두면 이어읽기 구간의 결과 줄이 주인을 못 찾아 결말이 안 붙고, 화면에 「진행중」이 **영영
+    // 남는다**(계약 §2.2 가 금지하는 거짓).
+    const allocator = testing.allocator;
+    const done_call =
+        \\{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_done","name":"Bash","input":{"command":"echo a"}}]}}
+    ;
+    const done_result =
+        \\{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_done","content":"a"}]}}
+    ;
+    const open_call =
+        \\{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_open","name":"Bash","input":{"command":"echo b"}}]}}
+    ;
+    const tail =
+        \\{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}
+    ;
+
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(allocator);
+    for ([_][]const u8{ done_call, done_result, open_call, tail }) |line| {
+        try text.appendSlice(allocator, line);
+        try text.append(allocator, '\n');
+    }
+    // 미결 호출의 줄이 시작하는 자리 — 자국은 **여기까지** 되돌아야 한다.
+    const open_at: u64 = done_call.len + 1 + done_result.len + 1;
+
+    var scanner: StreamScanner = .{};
+    defer scanner.deinit(allocator);
+    var hits: std.ArrayList(Hit) = .empty;
+    defer hits.deinit(allocator);
+    try scanner.feed(allocator, text.items, &hits);
+
+    // 파일은 다 읽혔다 — `consumed` 는 끝이다.
+    try testing.expectEqual(@as(u64, text.items.len), scanner.consumed);
+    // 그런데 `toolu_open` 은 아직 결말이 없다 — 자국은 그 줄로 당겨진다.
+    try testing.expectEqual(open_at, scanner.resumeOffset(hits.items));
+}
+
+test "이어읽기 자국: 결말이 다 붙었으면 읽은 데까지다 (RAV7b)" {
+    // **되돌릴 이유가 없으면 안 되돌린다.** 늘 되돌리면 이어읽기가 매번 같은 구간을 다시 훑는다.
+    const allocator = testing.allocator;
+    const call =
+        \\{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_01","name":"Bash","input":{"command":"echo a"}}]}}
+    ;
+    const result =
+        \\{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_01","content":"a"}]}}
+    ;
+
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(allocator);
+    for ([_][]const u8{ call, result }) |line| {
+        try text.appendSlice(allocator, line);
+        try text.append(allocator, '\n');
+    }
+
+    var scanner: StreamScanner = .{};
+    defer scanner.deinit(allocator);
+    var hits: std.ArrayList(Hit) = .empty;
+    defer hits.deinit(allocator);
+    try scanner.feed(allocator, text.items, &hits);
+
+    try testing.expectEqual(@as(u64, text.items.len), scanner.consumed);
+    try testing.expectEqual(@as(u64, text.items.len), scanner.resumeOffset(hits.items));
+}
+
+test "이어읽기 자국: 미완 줄은 자국 밖이다 — 다음 회차가 그 줄을 처음부터 본다 (RAV7b)" {
+    // 개행을 못 만난 꼬리는 `consumed` 에 안 든다. 그것이 곧 「그 줄은 아직 안 봤다」이고,
+    // 이어읽기가 그 자리부터 시작해야 **반쪽 줄을 활동으로 세지 않는다**(§4.2 의 규율).
+    const allocator = testing.allocator;
+    var scanner: StreamScanner = .{};
+    defer scanner.deinit(allocator);
+    var hits: std.ArrayList(Hit) = .empty;
+    defer hits.deinit(allocator);
+
+    const complete = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"a\"}]}}";
+    try scanner.feed(allocator, complete ++ "\n" ++ "{\"type\":\"assis", &hits);
+
+    try testing.expectEqual(@as(u64, complete.len + 1), scanner.resumeOffset(hits.items));
 }
 
 test "활동: 상한은 종류별이다 — 활동이 넘쳐도 이미지가 밀려나지 않는다" {

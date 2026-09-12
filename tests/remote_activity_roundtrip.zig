@@ -341,11 +341,117 @@ test "헬퍼 activity --from: 이어읽은 자리가 통째로 훑은 것과 «�
     try std.testing.expect(part.flags.scanned_bytes < full.flags.scanned_bytes);
 
     // ── ③ 🔥 **자국 뒤의 히트가 바이트까지 같다.**
+    //
+    // ⚠️ **이 픽스처에는 이미지가 없다** — 그래서 `fold_owner`(접기 주인)가 안 갈린다. 그 값은
+    // **배열 자리**라 이어읽기에서 반드시 달라지고, 그 축은 아래 판정자가 따로 문다(적대적 9).
     try std.testing.expectEqual(full.hits.items.len - 1, part.hits.items.len);
     for (part.hits.items, 0..) |h, i| {
         try std.testing.expectEqual(full.hits.items[i + 1], h);
         try std.testing.expectEqualStrings(full.labels.items[i + 1].text(), part.labels.items[i].text());
     }
+}
+
+test "헬퍼 activity --from: 접기 주인은 «배열 자리»라 달라진다 — 오프셋은 같다 (RAV7b-3)" {
+    // 🔥 적대적 9: 위 판정자는 「바이트까지 같다」고 단언하는데 **이미지가 있으면 그것이 거짓**이다.
+    // `fold_owner` 는 `out` 배열의 **인덱스**이고(스캐너 `fold_owner = idx`), 이어읽기는 배열이
+    // 짧으므로 같은 이미지가 **다른 값**을 받는다.
+    //
+    // **그래서 RAV7b-3b 가 병합할 때 remap 해야 한다** — 안 하면 접힌 이미지가 **엉뚱한 호출로
+    // 접히거나** 「전체」에서 통째로 사라진다(퇴출이 같은 이유로 `remapFoldsAfterEvict` 를 둔다).
+    // 이 판정자는 그 사실을 **계약으로 고정**한다: 자리는 갈리고 **오프셋은 안 갈린다**.
+    const bin = helperBin() orelse return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "/tmp/maru-rav7b3-fold.{d}.jsonl", .{std.c.getpid()});
+    const f = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true });
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    const first =
+        \\{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_X","name":"Bash","input":{"command":"first"}}]}}
+    ;
+    const rest =
+        \\{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_A","name":"Read","input":{"file_path":"/x.png"}}]}}
+        \\{"type":"user","message":{"content":[{"tool_use_id":"toolu_A","type":"tool_result","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}]}]}}
+        \\
+    ;
+    var at: u64 = 0;
+    at += try f.writePositional(io, &.{first}, at);
+    at += try f.writePositional(io, &.{"\n"}, at);
+    const from = at; // 둘째 줄이 시작하는 자리
+    _ = try f.writePositional(io, &.{rest}, at);
+    f.close(io);
+
+    const full_out = try runHelper(gpa, io, bin, path);
+    defer gpa.free(full_out.stdout);
+    defer gpa.free(full_out.stderr);
+    var full = try parseAll(gpa, full_out.stdout);
+    defer full.deinit(gpa);
+
+    const part_out = try runHelperFrom(gpa, io, bin, path, from);
+    defer gpa.free(part_out.stdout);
+    defer gpa.free(part_out.stderr);
+    var part = try parseAll(gpa, part_out.stdout);
+    defer part.deinit(gpa);
+
+    try std.testing.expectEqual(from, part.flags.resumed_from);
+    try std.testing.expectEqual(@as(usize, 3), full.hits.items.len); // Bash · Read · 이미지
+    try std.testing.expectEqual(@as(usize, 2), part.hits.items.len); //        Read · 이미지
+
+    // 이미지는 마지막이다. **주인은 갈린다** — 통째에서는 자리 1, 이어읽기에서는 자리 0.
+    const full_img = full.hits.items[2];
+    const part_img = part.hits.items[1];
+    try std.testing.expect(full_img.fold_owner != part_img.fold_owner);
+    try std.testing.expectEqual(@as(u32, 1), full_img.fold_owner);
+    try std.testing.expectEqual(@as(u32, 0), part_img.fold_owner);
+
+    // 🔥 **오프셋은 안 갈린다.** 파일 절대값이므로 — 이것이 깨지면 펼침·디코드가 엉뚱한 바이트를
+    // 읽는다(계약 §2.1).
+    try std.testing.expectEqual(full_img.line_offset, part_img.line_offset);
+    try std.testing.expectEqual(full_img.data_offset, part_img.data_offset);
+    try std.testing.expectEqual(full_img.data_len, part_img.data_len);
+    // 주인 호출의 결과(이미지 자리)도 같은 바이트를 가리킨다.
+    try std.testing.expectEqual(full.hits.items[1].result.image_offset, part.hits.items[0].result.image_offset);
+}
+
+test "헬퍼 activity --from: 자란 구간에 활동이 없으면 «0 건»이다 — 못 읽은 것이 아니다 (RAV7b-3)" {
+    // 적대적 11: 자란 구간이 텍스트뿐이면 히트가 0 이다. 그것은 **「활동이 없다」**이지 실패가
+    // 아니고, `resumed_from` 이 그 사실을 말한다 — 받는 쪽은 **앞 히트를 그대로 두고** 0 건을
+    // 더해야 한다. 목록을 갈아 끼우면 화면이 **빈다**(RAV7b-3b 가 지킬 계약이다).
+    const bin = helperBin() orelse return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "/tmp/maru-rav7b3-empty.{d}.jsonl", .{std.c.getpid()});
+    const f = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true });
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    const call =
+        \\{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_X","name":"Bash","input":{"command":"first"}}]}}
+    ;
+    const text =
+        \\{"type":"assistant","message":{"content":[{"type":"text","text":"활동이 아닌 줄"}]}}
+    ;
+    var at: u64 = 0;
+    at += try f.writePositional(io, &.{call}, at);
+    at += try f.writePositional(io, &.{"\n"}, at);
+    const from = at;
+    at += try f.writePositional(io, &.{text}, at);
+    _ = try f.writePositional(io, &.{"\n"}, at);
+    f.close(io);
+
+    const out = try runHelperFrom(gpa, io, bin, path, from);
+    defer gpa.free(out.stdout);
+    defer gpa.free(out.stderr);
+    var got = try parseAll(gpa, out.stdout);
+    defer got.deinit(gpa);
+
+    try std.testing.expectEqual(@as(usize, 0), got.hits.items.len); // 0 건
+    try std.testing.expectEqual(from, got.flags.resumed_from); // **이어읽었다**
+    try std.testing.expect(!got.flags.partial); // 「못 봤다」가 아니다
+    // 파일 크기는 그대로 — 신선도가 여기서 1 바이트를 청한다.
+    const size = (try std.Io.Dir.cwd().statFile(io, path, .{})).size;
+    try std.testing.expectEqual(size, got.flags.head_bytes);
 }
 
 test "헬퍼 activity --from: 파일보다 뒤를 청하면 처음부터 훑는다 — 빈 목록을 만들지 않는다 (RAV7b-3)" {

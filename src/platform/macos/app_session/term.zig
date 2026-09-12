@@ -1260,6 +1260,25 @@ pub fn refreshAfterReap(self: *AppSession, tab_index: usize) void {
 /// 모달을 띄운 뒤 반환한다(confirmPendingPaste가 allow_unsafe=true로 재호출). 게이트 판정은 core가 단일
 /// 출처(pasteNeedsConfirmation — bracketed 상태·설정 반영). 큐/flush는 기존 non-blocking 경로 그대로.
 pub fn submitPaste(self: *AppSession, payload: []const u8, allow_unsafe: bool, target_id: u64) void {
+    submitPasteShaped(self, payload, allow_unsafe, target_id, null);
+}
+
+/// 위와 같되 **페이로드를 이미 어떤 모드로 빚은 호출자**가 그 모드를 넘긴다(적대적 10 회차).
+///
+/// **왜 넘겨야 하는가 — 판정이 두 벌이면 §4 가 깨진다.** 선택 보내기(NS5)는 대상의 bracketed 를
+/// 먼저 읽어 **페이로드의 모양**을 정하고(켜져 있으면 인용 여러 줄, 꺼져 있으면 참조 한 줄), 그
+/// 뒤 이 함수가 인코딩을 위해 **다시** 읽었다. 두 읽기 사이에 코어 락이 풀리고 그 사이 PTY reader
+/// 스레드가 DECSET 2004 를 끌 수 있다 — 에이전트 CLI 가 그 순간 끝나면 그렇다. 그러면
+/// **여러 줄 인용이 bracketed 없이 셸에 들어가고 줄마다 명령이 된다.** 그것이
+/// `send-selection-to-agent.md` §4 가 «이 기능의 유일한 진짜 위험» 이라 적은 바로 그 자리다.
+///
+/// 넘긴 값을 쓰면 그 방향이 **구조적으로 불가능**해진다: 여러 줄 페이로드는 `bracketed = true` 로
+/// 빚은 경우에만 나오고 그때 인코딩도 반드시 감싼다. 반대 방향(그 사이 2004 가 **켜진** 경우)은
+/// 참조 한 줄을 감싸 보내는 것이라 무해하다.
+///
+/// **확인 모달 판정도 같은 값을 쓴다** — 인코딩과 다른 모드로 위험도를 재면, 감싸서 나갈 바이트를
+/// 안 감싼 것으로 보고 묻거나 그 반대가 된다.
+pub fn submitPasteShaped(self: *AppSession, payload: []const u8, allow_unsafe: bool, target_id: u64, shaped: ?bool) void {
     // 대상 surface를 **id로** 잡는다(활성이 아니라). 없거나(닫힌 Term) web이면 붙일 PTY가 없으니 no-op —
     // 예전엔 activeSurface를 그때그때 다시 읽어, 확인 모달을 거친 재진입(confirmPendingPaste)에서 그 사이
     // 바뀐 활성 pane에 payload가 주입되거나 web sentinel의 core를 만져 조용히 사라졌다(code-review).
@@ -1277,7 +1296,7 @@ pub fn submitPaste(self: *AppSession, payload: []const u8, allow_unsafe: bool, t
             }
         }.pred) orelse return;
         const obs = &loc.pane.terms.items[loc.term_index].rt.observation;
-        bracketed = obs.availability != .unavailable and obs.bracketed_paste;
+        bracketed = shaped orelse (obs.availability != .unavailable and obs.bracketed_paste);
         needs_confirm = !allow_unsafe and maru.terminal.pasteNeedsConfirmationWith(
             bracketed,
             payload,
@@ -1288,14 +1307,26 @@ pub fn submitPaste(self: *AppSession, payload: []const u8, allow_unsafe: bool, t
         // **로컬 코어 접근은 lockCore 하에서** — 대상이 활성 pane이 아닐 수 있고(대상 고정), 그 pane의 PTY reader
         // 스레드가 같은 코어를 쓴다. 판정(pasteNeedsConfirmation)과 인코딩에 필요한 bracketed를 한 번에 잠금 안에서
         // 끝내고, 모달 열기·큐 적재는 잠금 밖에서 한다(모달/할당을 잠금 안에서 하지 않는다 — 경합 시간 최소).
-        surface.lockCore(self.io);
-        needs_confirm = !allow_unsafe and surface.core.pasteNeedsConfirmation(
-            payload,
-            self.loaded_config.config.input.paste_protection,
-            self.loaded_config.config.input.bracketed_paste_is_safe,
-        );
-        bracketed = surface.core.bracketedPasteEnabled(); // 인코딩에 필요한 유일한 코어 상태 — bool만 복사
-        surface.unlockCore(self.io);
+        if (shaped) |b| {
+            // **코어를 안 읽는다** — 호출자가 이미 그 모드로 페이로드를 빚었고, 여기서 다시 읽으면
+            // 그 사이 바뀐 값으로 인코딩해 위 doc 의 그 갈림이 생긴다. 위험도도 같은 값으로 잰다.
+            bracketed = b;
+            needs_confirm = !allow_unsafe and maru.terminal.pasteNeedsConfirmationWith(
+                b,
+                payload,
+                self.loaded_config.config.input.paste_protection,
+                self.loaded_config.config.input.bracketed_paste_is_safe,
+            );
+        } else {
+            surface.lockCore(self.io);
+            needs_confirm = !allow_unsafe and surface.core.pasteNeedsConfirmation(
+                payload,
+                self.loaded_config.config.input.paste_protection,
+                self.loaded_config.config.input.bracketed_paste_is_safe,
+            );
+            bracketed = surface.core.bracketedPasteEnabled(); // 인코딩에 필요한 유일한 코어 상태 — bool만 복사
+            surface.unlockCore(self.io);
+        }
     }
     // **인코딩은 락 밖에서**: 멀티MB payload의 할당·복사를 코어 뮤텍스 안에서 하면 그동안 그 pane의 PTY
     // reader 스레드가 막힌다(code-review). 순수 변형(encodePasteWith)이 bool 하나만 받는다.

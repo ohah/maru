@@ -71,7 +71,7 @@ test "보낼 것을 든 채 끊긴 연결은 «정상» 으로 분류돼도 로�
     try std.testing.expect(std.mem.indexOf(u8, src, "pending_out={d}") != null);
 
     // ④ **안쪽 사유까지 싣는다**(2026-09-08). 바깥 `ClientCloseReason` 의 `client_closing` 하나가
-    //    `connection_turn.CloseReason` 열 가지(eof · socket_error · protocol_error · resource_exhausted ·
+    //    `connection_turn.CloseReason`의 사유들(eof · socket_error · protocol_error · resource_exhausted · internal_error ·
     //    admission_closed · peer_requested · reply_flushed · partial_timeout · upgrade_completed ·
     //    upgrade_failed)를 통째로 뭉갠다. 실측에서 「host 가 먼저 닫았다」까지는 갈렸는데 그 열 중
     //    무엇인지 몰라 멈췄다 — `protocol_error` 와 `resource_exhausted` 와 `partial_timeout` 은 고칠

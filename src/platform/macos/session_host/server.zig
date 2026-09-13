@@ -422,7 +422,13 @@ pub const PreparedCatchupBatch = struct {
 pub const catchup_host_expiry_ns: u64 = 2 * std.time.ns_per_s;
 
 /// `handleFrame`이 caller(socket write loop)에게 지시하는 것. `reply`/`reply_and_close`의 바이트는 **caller 소유**다
-/// (socket에 write한 뒤 free). `close`는 응답 없이 connection을 닫으라는 뜻이다(runtime에는 손대지 않는다).
+/// (socket에 write한 뒤 free). `close`는 응답 없이 connection을 닫으라는 뜻이며 원인을 보존한다(runtime에는 손대지 않는다).
+pub const CloseReason = enum {
+    protocol_error,
+    resource_exhausted,
+    internal_error,
+};
+
 pub const Action = union(enum) {
     pub const PreparedCatchupArm = struct {
         self_addr: usize = 0,
@@ -497,7 +503,7 @@ pub const Action = union(enum) {
     /// Socket adapter가 bytes 전량 write에 성공한 뒤 completed marker를 publish하고, fd close/active count 감소가 끝난
     /// 후에만 daemon outer loop가 attempt를 take한다.
     upgrade_accepted: UpgradeAccepted,
-    close,
+    close: CloseReason,
     /// 응답 없이 connection을 유지한다(input_bytes 같은 fire-and-forget stream frame 처리 후). caller는 아무것도 write하지 않는다.
     none,
     /// The first valid resync ACK changed connection authority. The socket owner uses its injected
@@ -964,12 +970,12 @@ pub const Connection = struct {
     pub fn handleFrameAt(self: *Connection, frame: framing.Frame, now_ns: u64) HandleError!Action {
         if (frame.header.major != protocol.version_major) {
             self.state = .closed;
-            return .close;
+            return .{ .close = .protocol_error };
         }
         return switch (self.state) {
             .pre_hello => self.handleHello(frame),
             .ready => self.handleReady(frame, now_ns),
-            .closed => .close,
+            .closed => .{ .close = .protocol_error },
         };
     }
 
@@ -977,19 +983,19 @@ pub const Connection = struct {
         // 첫 frame은 반드시 hello. 아니면 조용히 닫는다(잘못된 client/socket 혼선).
         if (frame.header.kind != .hello) {
             self.state = .closed;
-            return .close;
+            return .{ .close = .protocol_error };
         }
 
         var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, frame.payload, .{}) catch {
             self.state = .closed;
-            return .close; // hello가 파싱 불가면 attach 전이라 응답 없이 닫는다.
+            return .{ .close = .protocol_error }; // hello가 파싱 불가면 attach 전이라 응답 없이 닫는다.
         };
         defer parsed.deinit();
         const obj = switch (parsed.value) {
             .object => |o| o,
             else => {
                 self.state = .closed;
-                return .close;
+                return .{ .close = .protocol_error };
             },
         };
 
@@ -999,7 +1005,7 @@ pub const Connection = struct {
         // element would let a syntactically invalid hello enable a later capability.
         if (!stringArrayFieldValid(obj, "capabilities")) {
             self.state = .closed;
-            return .close;
+            return .{ .close = .protocol_error };
         }
         self.client_kind = parseClientKind(strField(obj, "client_kind"));
         self.runtime_metadata_v1 = stringArrayContains(obj, "capabilities", "runtime_metadata_v1");
@@ -1052,7 +1058,7 @@ pub const Connection = struct {
     fn handleReady(self: *Connection, frame: framing.Frame, now_ns: u64) HandleError!Action {
         if (frame.header.kind == .request and frame.header.request_id == 0) {
             self.state = .closed;
-            return .close;
+            return .{ .close = .protocol_error };
         }
         if (self.client_kind == .admin) return self.handleAdminReady(frame, now_ns);
         switch (frame.header.kind) {
@@ -1070,12 +1076,12 @@ pub const Connection = struct {
             .hello => {
                 // hello는 connection당 한 번. 두 번째 hello는 protocol 위반.
                 self.state = .closed;
-                return .close;
+                return .{ .close = .protocol_error };
             },
             else => {
                 // stream_ack 등 stream demux frame은 e2d에서 처리한다. 그 전까지 미지 kind는 connection을 닫는다.
                 self.state = .closed;
-                return .close;
+                return .{ .close = .protocol_error };
             },
         }
     }
@@ -1471,7 +1477,7 @@ pub const Connection = struct {
             error.ObservationTransactionCorrupt,
             => {
                 self.state = .closed;
-                return .close;
+                return .{ .close = .internal_error };
             },
             else => return self.replyError(request_id, .internal),
         };
@@ -1484,7 +1490,7 @@ pub const Connection = struct {
         const revision = if (changed)
             std.math.add(u64, sub.observation_revision, 1) catch {
                 self.state = .closed;
-                return .close;
+                return .{ .close = .internal_error };
             }
         else
             sub.observation_revision;
@@ -1534,7 +1540,7 @@ pub const Connection = struct {
             error.ObservationTransactionCorrupt,
             => {
                 self.state = .closed;
-                return .close;
+                return .{ .close = .internal_error };
             },
             else => return self.replyError(request_id, .internal),
         };
@@ -1547,7 +1553,7 @@ pub const Connection = struct {
         const revision = if (changed)
             std.math.add(u64, sub.observation_revision, 1) catch {
                 self.state = .closed;
-                return .close;
+                return .{ .close = .internal_error };
             }
         else
             sub.observation_revision;
@@ -1880,7 +1886,7 @@ pub const Connection = struct {
             ) orelse {
                 self.rollbackAttach(stream);
                 self.state = .closed;
-                return .close;
+                return .{ .close = .resource_exhausted };
             };
         }
         var prepared_transferred = false;
@@ -1899,7 +1905,7 @@ pub const Connection = struct {
                 => {
                     self.rollbackAttach(stream);
                     self.state = .closed;
-                    return .close;
+                    return .{ .close = .internal_error };
                 },
                 else => null,
             };
@@ -1922,7 +1928,7 @@ pub const Connection = struct {
                 const source_token = read_token(ops.ctx, id.?) catch {
                     self.rollbackAttach(stream);
                     self.state = .closed;
-                    return .close;
+                    return .{ .close = .internal_error };
                 };
                 if (self.attachments.getPtr(stream)) |sub| {
                     if (prepared_product)
@@ -1978,7 +1984,7 @@ pub const Connection = struct {
                 // the negotiated control frame after JSON escaping/envelope overhead. This is a
                 // producer contract violation, not a peer request error.
                 self.state = .closed;
-                return .close;
+                return .{ .close = .internal_error };
             },
         };
         var reply_transferred = false;
@@ -1999,7 +2005,7 @@ pub const Connection = struct {
                 }
                 self.rollbackAttach(stream);
                 self.state = .closed;
-                return .close;
+                return .{ .close = .internal_error };
             }
         else
             null;
@@ -2010,12 +2016,19 @@ pub const Connection = struct {
             }
             self.rollbackAttach(stream);
             self.state = .closed;
-            return .close;
+            return .{ .close = .internal_error };
         };
         const snap_bytes = projected_snapshot.bytes;
-        if (snap_bytes.len > protocol.max_viewport_snapshot or
-            projected_snapshot.frontier.sequence != 0)
-        {
+        if (snap_bytes.len > protocol.max_viewport_snapshot) {
+            self.allocator.free(snap_bytes);
+            if (prepared_product) {
+                prepared_output.rollback(self);
+                prepared_transferred = true;
+            }
+            self.rollbackAttach(stream);
+            return self.replyError(request_id, .payload_too_large);
+        }
+        if (projected_snapshot.frontier.sequence != 0) {
             self.allocator.free(snap_bytes);
             if (prepared_product) {
                 prepared_output.rollback(self);
@@ -2023,7 +2036,7 @@ pub const Connection = struct {
             }
             self.rollbackAttach(stream);
             self.state = .closed;
-            return .close;
+            return .{ .close = .internal_error };
         }
         // snapshot을 이 stream의 delta base로 보관한다(free하지 않고 subscription이 소유). chunk frame은 payload를 복사한다.
         if (prepared_product) {
@@ -2711,7 +2724,7 @@ pub const Connection = struct {
             // controller bytes는 ACK 없는 ownership transfer다. host queue admission 실패 뒤 연결을 usable로
             // 두면 client는 성공으로 간주한 입력을 영구 유실하므로 EOF detach/reconnect 경계로 fail-close한다.
             self.state = .closed;
-            return .close;
+            return .{ .close = .internal_error };
         };
         return .none;
     }
@@ -2724,7 +2737,7 @@ pub const Connection = struct {
             !std.mem.eql(u8, frame.payload, "{\"action\":\"resync\"}"))
         {
             self.state = .closed;
-            return .close;
+            return .{ .close = .protocol_error };
         }
         const sub = self.attachments.getPtr(frame.header.stream_id) orelse return .none;
         if (!sub.awaiting_resync_ack) return .none;
@@ -2745,7 +2758,7 @@ pub const Connection = struct {
         const ops = self.runtime_ops orelse return .none;
         ops.core_command(ops.ctx, runtime_id, .scroll_to_bottom) catch {
             self.state = .closed;
-            return .close;
+            return .{ .close = .internal_error };
         };
         return .none;
     }
@@ -2762,29 +2775,29 @@ pub const Connection = struct {
 
         var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, frame.payload, .{}) catch {
             self.state = .closed;
-            return .close;
+            return .{ .close = .protocol_error };
         };
         defer parsed.deinit();
         const params = switch (parsed.value) {
             .object => |object| object,
             else => {
                 self.state = .closed;
-                return .close;
+                return .{ .close = .protocol_error };
             },
         };
         if (intFieldU64(params, "stream_id") != stream) {
             self.state = .closed;
-            return .close;
+            return .{ .close = .protocol_error };
         }
         const command = core_command_wire.decodeParams(params) orelse {
             self.state = .closed;
-            return .close;
+            return .{ .close = .protocol_error };
         };
         ops.core_command(ops.ctx, runtime_id, command) catch {
             // 응답 없는 frame의 host queue admission(OOM/QueueClosed)이 실패하면 command를 재전송할 ACK가 없다.
             // 성공처럼 connection을 유지해 최종 focus/config를 조용히 잃지 말고 connection 전체를 fail-close한다.
             self.state = .closed;
-            return .close;
+            return .{ .close = .internal_error };
         };
         return .none;
     }
@@ -2797,7 +2810,7 @@ pub const Connection = struct {
             frame.header.flags != protocol.Flags.optional or frame.payload.len != 8)
         {
             self.state = .closed;
-            return .close;
+            return .{ .close = .protocol_error };
         }
         const sub = self.attachments.getPtr(frame.header.stream_id) orelse return .none;
         if (!reg.Capability.has(
@@ -2807,7 +2820,7 @@ pub const Connection = struct {
         const nonce = std.mem.readInt(u64, frame.payload[0..8], .big);
         if (nonce == 0 or sub.observation_probe_nonce != null) {
             self.state = .closed;
-            return .close;
+            return .{ .close = .protocol_error };
         }
         sub.observation_probe_nonce = nonce;
         return .none;
@@ -3926,7 +3939,11 @@ fn parseExactHex128(s: []const u8) ?u128 {
 
 const testing = std.testing;
 
-const FedResult = struct { action: []const u8, frame: ?framing.Frame };
+const FedResult = struct {
+    action: []const u8,
+    frame: ?framing.Frame,
+    close_reason: ?CloseReason = null,
+};
 
 /// 완성된 wire frame 하나를 handleFrame에 넣고 응답을 파싱해 돌려주는 공통 경로.
 fn runWire(conn: *Connection, wire: []const u8) !FedResult {
@@ -3939,7 +3956,7 @@ fn runWire(conn: *Connection, wire: []const u8) !FedResult {
 
     const action = try conn.handleFrame(in);
     switch (action) {
-        .close => return .{ .action = "close", .frame = null },
+        .close => |reason| return .{ .action = "close", .frame = null, .close_reason = reason },
         .none => return .{ .action = "none", .frame = null },
         .resync_ack => return .{ .action = "resync_ack", .frame = null },
         .reply, .reply_and_close => |bytes| {
@@ -4108,6 +4125,7 @@ test "server: first non-hello frame closes the connection" {
     var conn = Connection.init(testing.allocator, 0xABCD, &registry);
     const r = try feedJson(&conn, .request, 1, "{\"method\":\"host.info\"}");
     try testing.expectEqualStrings("close", r.action);
+    try testing.expectEqual(CloseReason.protocol_error, r.close_reason.?);
     try testing.expectEqual(Connection.State.closed, conn.state);
 }
 
@@ -6255,6 +6273,7 @@ test "server: every invalid RuntimeOps metadata class closes before attach wire 
             "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}",
         );
         try testing.expectEqualStrings("close", attach.action);
+        try testing.expectEqual(CloseReason.internal_error, attach.close_reason.?);
         try testing.expect(attach.frame == null);
         try testing.expectEqual(Connection.State.closed, conn.state);
         try testing.expectEqual(@as(usize, 0), conn.attachmentCount());
@@ -6354,8 +6373,12 @@ test "server: initial attach accepts exact viewport snapshot cap and rejects cap
         "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"bb\",\"mode\":\"observer\"}}",
     );
     defer if (oversized.frame) |frame| frame.deinit(allocator);
-    try testing.expectEqualStrings("close", oversized.action);
-    try testing.expectEqual(@as(?framing.Frame, null), oversized.frame);
+    try testing.expectEqualStrings("reply", oversized.action);
+    try testing.expect(oversized.frame != null);
+    try testing.expectEqual(protocol.Kind.response, oversized.frame.?.header.kind);
+    try testing.expectEqual(@as(u64, 3), oversized.frame.?.header.request_id);
+    try testing.expect(std.mem.indexOf(u8, oversized.frame.?.payload, "payload_too_large") != null);
+    try testing.expectEqual(Connection.State.ready, conn.state);
     try testing.expectEqual(@as(usize, 1), conn.attachmentCount());
     try testing.expect(subscriptions.resolveLocal(.{
         .connection = connection_key,
@@ -6365,6 +6388,16 @@ test "server: initial attach accepts exact viewport snapshot cap and rejects cap
         @as(u8, 0),
         registry.capabilitiesOfSubscription(0xBB, .{ .value = 2 }),
     );
+
+    const still_live = try feedJson(&conn, .ping, 4, "sibling-still-live");
+    defer if (still_live.frame) |frame| frame.deinit(allocator);
+    try testing.expectEqualStrings("reply", still_live.action);
+    try testing.expectEqual(protocol.Kind.pong, still_live.frame.?.header.kind);
+    try testing.expectEqualStrings("sibling-still-live", still_live.frame.?.payload);
+    try testing.expect(subscriptions.resolveLocal(.{
+        .connection = connection_key,
+        .stream_id = 1,
+    }) != null);
 }
 
 test "server: product attach reserves retained budget before snapshot projection" {
@@ -6420,6 +6453,7 @@ test "server: product attach reserves retained budget before snapshot projection
         "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}",
     );
     try testing.expectEqualStrings("close", attach.action);
+    try testing.expectEqual(CloseReason.resource_exhausted, attach.close_reason.?);
     try testing.expectEqual(@as(usize, 1), budget.prepare_calls);
     try testing.expectEqual(@as(usize, 0), fake.snapshot_calls);
     try testing.expectEqual(@as(usize, 0), conn.attachmentCount());

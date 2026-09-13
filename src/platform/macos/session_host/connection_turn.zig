@@ -25,6 +25,7 @@ pub const CloseReason = enum {
     socket_error,
     protocol_error,
     resource_exhausted,
+    internal_error,
     admission_closed,
     peer_requested,
     reply_flushed,
@@ -437,13 +438,13 @@ pub const Client = struct {
 
     /// **왜 닫는 중인지.** 열려 있으면 `null`.
     ///
-    /// `beginClose` 는 열 가지 사유(`CloseReason`)를 받아 상태에 담는데, 지금까지 그 값은 **밖으로 한
+    /// `beginClose` 는 닫힘 사유(`CloseReason`)를 받아 상태에 담는데, 지금까지 그 값은 **밖으로 한
     /// 번도 안 나갔다** — `poll_owner.logClientClosed` 는 자기 바깥 enum 만 찍고, 그중 `client_closing`
     /// 하나가 「host 상태기가 스스로 닫았다」 전부를 뭉갠다.
     ///
     /// 2026-09-08 실측: GUI 가 `client poison: reason=connection_eof` 로 끊겼고 host 는
     /// `reason=client_closing pending_out=21` 을 남겼다. `closed_by_peer` 가 거짓이었으므로 **host 가
-    /// 먼저 닫은 것**까지는 갈렸는데, 열 가지 중 무엇인지는 알 수 없었다 — `protocol_error` 와
+    /// 먼저 닫은 것**까지는 갈렸는데, 안쪽 사유 중 무엇인지는 알 수 없었다 — `protocol_error` 와
     /// `resource_exhausted` 와 `partial_timeout` 은 고칠 곳이 완전히 다르다.
     pub fn closeReason(self: *const Client) ?CloseReason {
         return switch (self.state) {
@@ -1147,7 +1148,11 @@ pub const Client = struct {
                 self.pending_upgrade = accepted.attempt_id;
                 self.close_after_flush = .upgrade_completed;
             },
-            .close => self.beginClose(.peer_requested),
+            .close => |reason| self.beginClose(switch (reason) {
+                .protocol_error => .protocol_error,
+                .resource_exhausted => .resource_exhausted,
+                .internal_error => .internal_error,
+            }),
             .none => try self.syncTrackers(),
             .resync_ack => |stream| {
                 try self.syncTrackers();

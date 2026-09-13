@@ -2827,6 +2827,12 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   reader 없는 product fallback의 실제 SGR bytes로 같은 셀 중복, 1000/1002 mode, Shift/Option override와 chrome 경유 재진입을
   함께 고정하고, host 행은 독립 forkpty child가 받은 bytes와 viewport 밖 authoritative selection text를 검증한다.
   capability 없는 구 host의 motion 0·selection transaction no-op은 동적 legacy process E2E가 아니라 source boundary다.
+- **P4 shared-connection attach rejection·truthful close reason: 구현.** initial attach snapshot이
+  `max_viewport_snapshot`을 넘으면 그 attach의 registry/subscription/projection reservation만 rollback하고 동일 request id의
+  `payload_too_large`를 응답한다. 같은 connection의 기존 sibling stream과 `ready` 상태, 후속 ping/pong이 유지되는 것을
+  server 제품 타입 테스트로 고정한다. 응답 없이 닫는 server action은 `protocol_error | resource_exhausted | internal_error`
+  payload를 필수로 가지며 connection turn이 이를 전수 매핑한다. generic server close를 `peer_requested`로 접는 배선이
+  없고 close enum/payload가 사라지지 않는지는 `test-close-site-name` source boundary가 검증한다.
 - **P4 E2 runtime-shared observation cache: 구현(E2a·E2b·E2c artifact/cap gate).** E1은 위 `CR6f output-wake`와 같은 순서 항목이다.
   E2a의 `runtime_observation_cache.Cache`는 canonical bytes와 checked-monotonic change token을 소유하고, 동일 bytes의
   allocation/token 증가 0, changed prepare→exact-token commit, stale prepared 거부, OOM·token overflow 때 이전 bytes/token

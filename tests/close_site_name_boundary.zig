@@ -23,6 +23,7 @@
 const std = @import("std");
 
 const turn_path = "src/platform/macos/session_host/connection_turn.zig";
+const server_path = "src/platform/macos/session_host/server.zig";
 const owner_path = "src/platform/macos/session_host/poll_owner.zig";
 const max_source_bytes = 8 * 1024 * 1024;
 
@@ -112,4 +113,21 @@ test "닫힘은 사유와 함께 어느 줄이었는지 남긴다" {
     // ⑤ 사유·주소를 **대체하지 않고 더한다.** 이름이 틀릴 때 주소가 마지막 근거로 남아야 한다.
     try std.testing.expect(std.mem.indexOf(u8, owner, "why={s}") != null);
     try std.testing.expect(std.mem.indexOf(u8, owner, "why_ra=0x{x}") != null);
+}
+
+test "server close 사유는 peer 요청으로 거짓 변환되지 않는다" {
+    const a = std.testing.allocator;
+    const turn_raw = try read(a, turn_path);
+    defer a.free(turn_raw);
+    const turn = try stripComments(a, turn_raw);
+    defer a.free(turn);
+    const server_raw = try read(a, server_path);
+    defer a.free(server_raw);
+    const server = try stripComments(a, server_raw);
+    defer a.free(server);
+
+    try std.testing.expect(std.mem.indexOf(u8, turn, ".close => self.beginClose(.peer_requested)") == null);
+    try std.testing.expect(std.mem.indexOf(u8, turn, ".close => |reason|") != null);
+    try std.testing.expect(std.mem.indexOf(u8, server, "close: CloseReason") != null);
+    try std.testing.expect(std.mem.indexOf(u8, server, "pub const CloseReason = enum") != null);
 }

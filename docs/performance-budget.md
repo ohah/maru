@@ -299,7 +299,7 @@ marker를 쓰기 시작한 시각을 포함하지 않으므로 전체 end-to-end
 
 ## executeScript 16 MiB 구현 gate와 대용량 후속 연구
 
-[control-plane-protocol.md §4.4](control-plane-protocol.md)가 구현 상태와 채택 계약의 단일 출처다. 5f-5c에서 strict-CSP `callAsyncJavaScript` expression+args+await, raw strict-JSON ≤512 KiB inline, 그 초과~16 MiB progressive JSON-RPC chunk, screenshot 공통 pump, connection 4 MiB/process 32 MiB queued+writer-owned 회계, Swift `Data` pin/pull/release와 CLI atomic spool이 live가 됐다. correctness와 실제 WKWebView pump p95/max는 자동 gate지만 RSS·bridge/frame 귀속은 아래 Track 5 성능 gate에 남아 있으므로 hello 16 MiB capability는 아직 광고하지 않는다.
+[control-plane-protocol.md §4.4](control-plane-protocol.md)가 채택된 전송 계약을 소유한다. 5f-5c 경로는 strict-CSP `callAsyncJavaScript` expression+args+await, raw strict-JSON ≤512 KiB inline, 그 초과~16 MiB progressive JSON-RPC chunk, screenshot 공통 pump, connection 4 MiB/process 32 MiB queued+writer-owned 회계, Swift `Data` pin/pull/release와 CLI atomic spool을 사용한다. hello 16 MiB capability의 공개 여부는 아래 Track 5 성능 gate와 [검증 매트릭스](verification-matrix.md)가 소유한다.
 
 | 항목 | Track 5 16 MiB 완료 예산 | 실패 시 |
 | --- | --- | --- |

@@ -134,7 +134,7 @@ Command+B      -> 초기에는 오류
 
 이 parser 계약은 config 파일 parser와 독립으로 단위 테스트할 수 있다. `KeyChord.parse("Ctrl+Cmd+,")` 같은 작은 단위 테스트로 검증하고, config 파일 parser(`src/config/loader.zig`)가 이 함수를 호출해 `keybind` 줄을 해석한다. config 파일의 위치·형식·키는 [설정(config) 파일](configuration.md)이 단일 출처다.
 
-현재 구현 상태:
+키 입력 계약은 다음 코드 경로에 대응한다.
 
 - `src/config/keybinding.zig`가 `KeyChord.parse`와 `KeyBindingResolver`의 최소 계약을 구현한다.
 - `Cmd+B`, `ctrl+cmd+,`, `Shift+Alt+F13` 같은 key chord 문자열은 parser 단위 테스트로 검증한다.

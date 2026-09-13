@@ -218,7 +218,7 @@ src/
     windows/
     linux/
   workspace/            project workspace, layout restore, recent workspaces
-  observability/        DebugEvent, TraceEvent, DebugSnapshot, ReplayRunner
+  observability/        TraceEvent, RenderSnapshot, replayTrace
   plugin/               future action/plugin/Wasm boundary
 ```
 

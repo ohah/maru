@@ -136,7 +136,7 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 - **hex 클릭** → 인라인 편집(text 위젯 재사용 — `editText`→`setText`, hex 검증).
 - (예전 `←→` 16색 프리셋 순환은 제거 — `←→`는 방향키 영역 포커스 이동(←=네비·→=폼, §4)에 쓰이지 색을 조절하지 않는다. 색은 HSV picker·hex로 고른다.)
 
-- **미구현(후속)**: 옵셔널 색(`?[]const u8` sidebar 파생색), IME 조합 편집, 값 길이에 따른 박스 폭 확장, picker의 연속(non-discrete) 해상도·alpha. (color 스와치 rich 둥근 quad 렌더는 구현됨 — 위 참조.)
+옵셔널 색(`?[]const u8` sidebar 파생색), IME 조합 편집, 값 길이에 따른 박스 폭 확장, picker의 연속 해상도·alpha는 이 위젯 계약 밖의 별도 이니셔티브다. 진행 상태는 [검증 매트릭스](verification-matrix.md)가 소유한다. color 스와치의 rich 둥근 quad 계약은 위 설명을 따른다.
 
 ### 6.3 테마 프리셋(named 테마) — 특수 행
 

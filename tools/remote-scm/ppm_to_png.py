@@ -27,6 +27,10 @@ def read_ppm(path):
         i = j
     if fields[0] != b"P6":
         raise SystemExit(f"ppm_to_png: P6 가 아니다: {fields[0]!r}")
+    # **maxval 을 본다.** 255 가 아니면 픽셀이 채널당 2 바이트라 아래 stride 가 통째로 틀린다 —
+    # 그림은 나오되 **조용히 깨진다**. 읽는 쪽(`tests/support/ppm.zig`)도 같은 자리에서 거절한다.
+    if fields[3] != b"255":
+        raise SystemExit(f"ppm_to_png: maxval 이 255 가 아니다: {fields[3]!r}")
     return int(fields[1]), int(fields[2]), raw[i + 1 :]
 
 

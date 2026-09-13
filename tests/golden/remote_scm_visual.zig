@@ -48,6 +48,49 @@ const channel_tolerance: u8 = 2;
 /// 도크 열. 프레임의 나머지는 결정적이지 않다(위 표).
 const dock_column: ppm.Rect = .{ .x = 778, .y = 60, .w = 182, .h = 500 };
 
+/// **이 그림을 만든 것들.** 캡처보다 나중에 바뀐 것이 하나라도 있으면 그 그림은 **지금 것이 아니다.**
+///
+/// ⚠️ **여기에 앱 실행 파일이 들어 있는 것이 핵심이다.** 이웃 게이트(`dock_visual.zig`)는 시나리오
+/// 소스 둘만 보고 「그 밖의 변경으로 캡처가 낡는 경우는 못 잡는다」를 한계로 적어 뒀는데, 이 캡처는
+/// **실행 파일이 직접 그린다** — 도크 렌더든 원격 읽기든 앱을 다시 빌드하면 그 파일의 mtime 이 움직인다.
+/// 그래서 소스 목록보다 좁고 정확하다.
+const capture_producers = [_][]const u8{
+    "zig-out/Maru.app/Contents/MacOS/maru-macos-app",
+    "tools/remote-scm/capture.sh",
+    "tools/remote-scm/capture_inner.sh",
+};
+
+/// 캡처가 생산자보다 **먼저** 만들어졌나 — 순수 판정(시각만 받는다).
+fn captureIsStale(capture_ns: i128, newest_producer_ns: i128) bool {
+    return capture_ns < newest_producer_ns;
+}
+
+test "낡은 캡처는 낡았다고 판정한다" {
+    // **실측으로 확인한 구멍**(적대적 검증 2026-09-14): 캡처 파일의 mtime 을 2020 년으로 돌려 놓아도
+    // 이 게이트가 **초록**이었다. 골든과 같기만 하면 통과하므로, 6 년 묵은 그림으로 「지금 코드의
+    // 화면을 확인했다」고 말하게 된다. 이웃 게이트가 사흘 묵은 캡처를 「회귀」로 오판한 것과 같은 축이다.
+    try std.testing.expect(captureIsStale(100, 200)); // 캡처가 먼저 = 낡았다
+    try std.testing.expect(!captureIsStale(200, 100)); // 캡처가 나중 = 신선하다
+    try std.testing.expect(!captureIsStale(100, 100)); // 같은 시각은 낡은 것이 아니다
+}
+
+/// 캡처가 생산자보다 낡았으면 **가장 최근 생산자의 이름**을 돌려준다(아니면 `null`). stat 이 안 되는
+/// 생산자는 건너뛴다 — 없는 파일 때문에 게이트를 못 돌게 하지 않는다.
+fn stalerThan(io: std.Io, capture_path: []const u8) ?[]const u8 {
+    const cap = std.Io.Dir.cwd().statFile(io, capture_path, .{}) catch return null;
+    var newest_ns: i128 = 0;
+    var newest_name: ?[]const u8 = null;
+    for (capture_producers) |src| {
+        const st = std.Io.Dir.cwd().statFile(io, src, .{}) catch continue;
+        if (st.mtime.nanoseconds > newest_ns) {
+            newest_ns = st.mtime.nanoseconds;
+            newest_name = src;
+        }
+    }
+    if (newest_name == null) return null;
+    return if (captureIsStale(cap.mtime.nanoseconds, newest_ns)) newest_name else null;
+}
+
 const Case = struct {
     name: []const u8,
     rect: ppm.Rect,
@@ -84,6 +127,18 @@ test "원격 SCM 도크 열이 골든과 같다" {
             else => return err,
         };
         defer allocator.free(capture_bytes);
+
+        // ⚠️ **낡은 그림으로 통과하지 않는다.** `zig-out` 의 캡처는 코드를 고쳐도 저절로 안 바뀐다 —
+        // 그대로 두면 이 게이트는 **지금 코드와 무관한 그림**을 골든과 비교하고, 같으면 초록을 낸다.
+        // 그 초록은 「지금 화면을 확인했다」는 **가장 그럴듯한 거짓말**이다. 이웃 게이트는 그 사실을
+        // 알려만 주는데(경고), 여기서는 **실패로 만든다** — 다시 찍는 길이 한 줄이기 때문이다.
+        if (stalerThan(io, capture_path)) |producer| {
+            std.debug.print(
+                "캡처가 낡았다: {s} 가 그림보다 나중이다 — 다시 찍어라:\n  mise run macos-remote-scm-visual-golden\n",
+                .{producer},
+            );
+            return error.RemoteScmCaptureStale;
+        }
 
         var frame = try ppm.decodeP6(allocator, capture_bytes);
         defer frame.deinit(allocator);

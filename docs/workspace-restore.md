@@ -174,8 +174,8 @@ surface custom-name="" title="ended" cwd="/repo" command="/bin/zsh" cols=100 row
 
 | 필드 | 위치 | 형식·수명 | 키가 없을 때 |
 | --- | --- | --- | --- |
-| `runtime-handle` (**구현**) | terminal `surface` line | `<host-id>:<runtime-id>`, 양쪽 모두 lowercase 32 hex. 한 quoted scalar로 all-or-none | 선언적 surface. 설정에 맞는 새 runtime 생성 후보이며 기존 process continuation 아님 |
-| `runtime-state` (**P4 R1 구현**) | terminal `surface` line | 키 부재=`live`, 유일한 명시 값 `ended`. ended는 정확한 handle과 함께 마지막 runtime의 묘비로 유지 | live/legacy surface |
+| `runtime-handle` | terminal `surface` line | `<host-id>:<runtime-id>`, 양쪽 모두 lowercase 32 hex. 한 quoted scalar로 all-or-none | 선언적 surface. 설정에 맞는 새 runtime 생성 후보이며 기존 process continuation 아님 |
+| `runtime-state` | terminal `surface` line | 키 부재=`live`, 유일한 명시 값 `ended`. ended는 정확한 handle과 함께 마지막 runtime의 묘비로 유지 | live/legacy surface |
 
 규칙:
 
@@ -191,7 +191,7 @@ surface custom-name="" title="ended" cwd="/repo" command="/bin/zsh" cols=100 row
 - **P4 R1 gate:** `runtime-state="ended"`는 `runtime-handle`과 함께 있을 때만 유효하다. reader는 host probe·attach·새 shell
   spawn 없이 placeholder를 만들고, writer는 Enter로 새 runtime 생성에 성공할 때만 구 handle/state를 새 live handle로
   교체한다. 알 수 없는 state, ended인데 handle 부재, live와 ended의 모순은 checkpoint 전체를 거부한다.
-- **P4 R2a 구현 슬라이스:** publish 전 전체 모델을 검증한다. 하나의 `runtime-handle`은
+- publish 전 전체 모델을 검증한다. 하나의 `runtime-handle`은
   canonical owner terminal surface 하나에만 나타나야 한다. v1 manifest에는 같은 handle의 read-only mirror도 저장하지 않는다.
   중복이면 현재 live 모델과 마지막 완전 파일을 보존하고 새 checkpoint를 쓰지 않는다.
 - legacy bare `runtime-id`도 current host에서 같은 runtime을 가리킬 수 있으므로 같은 bare ID끼리, 또는 같은
@@ -199,12 +199,12 @@ surface custom-name="" title="ended" cwd="/repo" command="/bin/zsh" cols=100 row
   두 writable owner로 attach하는 것보다 fail-close를 택한다.
 - semantic validator는 persistent binding을 최대 4,096개로 제한한다. exact cap은 허용하고 cap+1은 checkpoint 전체를
   거부해 launch preflight의 hash-table 작업·메모리를 손상 manifest로 무한히 늘릴 수 없게 한다.
-- **P4 R2a 구현 슬라이스:** reader도 어떤 runtime attach/spawn이나 Window publish보다 먼저 전역 중복을 검사한다. 검증 실패 때 일부 창만 attach하는
+- reader도 어떤 runtime attach/spawn이나 Window publish보다 먼저 전역 중복을 검사한다. 검증 실패 때 일부 창만 attach하는
   side effect를 만들지 않는다.
-- **계획:** live handle인데 host가 runtime 부재를 긍정적으로 확인하면 해당 surface를 ended로 전이시킨다. endpoint를
+- live handle인데 host가 runtime 부재를 긍정적으로 확인하면 해당 surface를 ended로 전이시킨다. endpoint를
   찾지 못했거나 protocol 지원 범위 밖인 것만으로는 영구 부재를 단정하지 않는다. host에는 있지만 manifest에 없는 runtime은
   `Recovered Sessions`에 둔다.
-- **P4 R2b 목표:** R2a가 승인한 manifest와 exact host별 bounded/paginated ID-only inventory를 attach/spawn 전에
+- publish 전 검증을 통과한 manifest와 exact host별 bounded/paginated ID-only inventory를 attach/spawn 전에
   대조하되, inventory는 derived recovery projection일 뿐 canonical restore의 성공 조건이 아니다. ended exact handle과
   다시 일치한 live runtime은 generic orphan으로 새 탭을 만들지 않고 tombstone 제자리 복구 후보로 둔다.
   inventory-only orphan은 삭제·자동 attach하지 않고 primary Window의 typed virtual `Recovered Sessions` group에
@@ -416,7 +416,7 @@ surface custom-name="<term custom_name>" title="<auto OSC title>" cwd=... ...
 
 ## 직렬화 전략: 스칼라 필드 key-addressed 파싱
 
-> 상태: **구현됨**(`src/session/workspace.zig`의 `LineFields`). 이 절은 파서의 실패 모델과 하위호환 경계를 정의하는 단일 출처다.
+> 파서는 `src/session/workspace.zig`의 `LineFields`를 사용한다. 이 절은 파서의 실패 모델과 하위호환 경계를 정의하는 단일 출처다.
 
 **동기.** per-tab 스칼라 속성(현재 `custom_name`·`pinned`·`background_color`·`accent_color`; 앞으로 아이콘·정렬·메모 등 계속 추가 예정)이
 늘 때, strict positional 파서라면 그 키가 없는 옛 파일을 **통째 파싱 실패**로 떨궈 **업데이트마다 워크스페이스 배치가 1회 리셋**된다

@@ -20,6 +20,12 @@ rm -rf "$CAP_HOME"
 mkdir -p "$CAP_HOME/.cache/maru" "$CAP_HOME/.config/maru"
 trap 'rm -rf "$CAP_HOME"' EXIT INT TERM
 
+# ⚠️ **영속 세션 host 를 끈다.** 켜져 있으면 앱이 데몬에 붙는데, 그 데몬이 앱보다 낡았으면
+# 「영속 세션 host 업데이트 결과: …」가 **모달 토스트로 도크를 덮는다**. 앱을 방금 빌드했을 때 정확히
+# 그 상태가 되므로, 캡처 직전에 빌드하는 이 하니스에서는 **자주** 덮인다 — 골든이 그 자리에서 흔들렸다
+# (적대적 검증 2026-09-14). 이 캡처가 보려는 것은 도크이고 원격 SCM 은 host 축과 무관하다.
+printf 'session.keep-alive-after-quit = false\n' > "$CAP_HOME/.config/maru/config"
+
 CTL_WANT=$(zig run "$ROOT/tools/remote-scm/ctl_path.zig" -- "$CAP_HOME" "$MARU_REMOTE_SCM_DEST" 2>&1 | tail -1)
 case "$CTL_WANT" in
 "$CAP_HOME"/*) ;;

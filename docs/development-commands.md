@@ -772,6 +772,9 @@ sh tools/remote-scm/capture.sh /tmp/rs7-x.png MARU_FORCE_SCM_COMMIT_EXPAND=0   #
 - **원격 pane 은 강제한다**(`MARU_FORCE_REMOTE_SCM`). 진짜 `maru ssh` 를 태우면 셸 타이밍에 매달리는데,
   이 캡처가 보려는 것은 「원격일 때 도크가 무엇을 그리나」이지 진입 경로가 아니다. 그 아래(저장소 판정·
   원격 읽기·렌더)는 전부 제품 경로다.
+- ⚠️ **영속 세션 host 를 끈다**(`session.keep-alive-after-quit = false`). 켜져 있으면 앱이 데몬에 붙는데
+  그 데몬이 앱보다 낡았으면 「영속 세션 host 업데이트 결과: …」가 **모달 토스트로 도크를 덮는다.**
+  이 하니스는 캡처 직전에 앱을 빌드하므로 **자주** 그 상태가 된다 — 실제로 골든이 그 자리에서 흔들렸다.
 
 **골든으로 잰다**: `mise run macos-remote-scm-visual-golden` 한 줄로 돌린다(찍고 나서 비교한다).
 `zig build test-remote-scm-visual-golden` 만 따로 돌리면 **디스크에 남아 있는 옛 캡처와 비교**되고,

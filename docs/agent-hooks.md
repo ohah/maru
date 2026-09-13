@@ -1212,6 +1212,14 @@ fork·exec)는 다를 수 있다. 다만 그 차이는 spawn 비용 자체의 �
   | GUI 프로세스 | 그 프로세스 pid(십진) | `surface_id`(십진) | `getpgid` |
   | host(keep-alive) | `host_<32 hex host_id>` | `<32 hex runtime_id>` | host manifest·소켓 |
 
+  ⚠️ **원격 이벤트 귀속은 host 소유일 때 pane 칸만 본다**(2026-09-13 실측). 인스턴스 칸은 **세대마다 바뀐다** —
+  원격 pane 의 env 는 **그 pane 이 만들어질 때** 심긴 값이고 앱은 **지금**의 `host_id` 를 쓰므로, 호스트가 새로
+  시작하면 그 전에 만들어진 pane 의 이벤트가 앱의 어떤 Term 과도 안 맞는다(그 세션만 배지가 영영 안 선다).
+  `runtime_id` 는 랜덤 128 비트라 **전역 유일**하므로 pane 칸만으로 「어느 Term 인가」가 정해진다. 판정은
+  `app_session/agent.zig` 의 `remoteEventIsOurs` 가 하고, **32 hex 폭일 때만** 그 규칙을 쓴다 — 그 폭이 곧
+  `runtime_id` 라는 증거다. **GUI 소유는 그대로 전체를 본다**: `surface_id` 는 프로세스 로컬이라 인스턴스 칸이
+  없으면 다른 앱 인스턴스의 Term 과 부딪친다.
+
   **host 칸이 pid 가 아닌 이유**: host 는 업그레이드로 **프로세스가 바뀌어도 같은 host** 다
   (`upgrade_bootstrap` 이 `invocation.host_id != state.host.host_id` 를 거부한다 — 후계자가 같은 id 를 물려받는다).
   pid 로 이름을 지으면 업그레이드 뒤 그 칸이 «죽은 인스턴스» 로 보여 **살아 있는 runtime 의 로그를 정리가

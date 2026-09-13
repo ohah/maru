@@ -5877,6 +5877,25 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    // collectOutput 이 «어느 자리에서» 접혔는가. 스물넷이 OutOfMemory 하나로 뭉쳐 있었다.
+    const collect_fail_step = b.step(
+        "test-collect-failure-site",
+        "A folded collectOutput failure records which site and the original error",
+    );
+    const collect_fail_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/collect_failure_site_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_collect_fail = b.addRunArtifact(collect_fail_tests);
+    run_collect_fail.addArg("--maru-expect-tests=1");
+    run_collect_fail.addArg("--maru-expect-passed=1");
+    run_collect_fail.setCwd(b.path("."));
+    collect_fail_step.dependOn(&run_collect_fail.step);
+    boundary_step.dependOn(&run_collect_fail.step);
+
     // 재동기화 sweep 이 «무엇에» 막혔는가. 여섯 갈래가 전부 조용히 빠져, 멈춤과 정상이 같아 보였다.
     const sweep_blocker_step = b.step(
         "test-resync-sweep-blocker",

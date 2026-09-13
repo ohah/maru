@@ -2865,6 +2865,37 @@ pub const Connection = struct {
         return self.collectOutputForLocalStreamAtEpoch(stream, now_ns, now_ns);
     }
 
+    /// `collectOutput` 이 **어느 자리에서** 접혔는가, 그리고 **원래 오류가 무엇이었는가**.
+    ///
+    /// 2026-09-13 실측: 터미널 브라우저를 세션 호스트에서 띄우면 GUI 연결이
+    /// `why=resource_exhausted site=tick_collect_oom` 으로 끊겼다. 자리 이름(#3634)이 여기까지
+    /// 데려왔는데, **이 함수 안에서 스물넷이 다시 `OutOfMemory` 하나로 접힌다** — 그중 진짜 할당
+    /// 실패는 일부이고 나머지는 원격 runtime ops 가 낸 서로 다른 오류를 `else =>` 로 뭉갠 것이다.
+    /// 그래서 `resource_exhausted` 가 「메모리가 모자랐다」는 뜻이 아닐 수 있다.
+    ///
+    /// 오늘 같은 모양을 세 번 풀었다(attach 자리 → 오류 이름 → 닫힘 자리). 매번 **이름을 붙이자 한 번의
+    /// 재현으로 끝났다.** 오류 집합은 넓히지 않는다 — 호출자 전수가 흔들리고, 지금 필요한 것은 «무엇이
+    /// 접혔는지» 뿐이다.
+    var collect_fail_site: []const u8 = "-";
+    var collect_fail_error: []const u8 = "-";
+
+    fn collectFail(site: []const u8) error{OutOfMemory} {
+        collect_fail_site = site;
+        collect_fail_error = "-";
+        return error.OutOfMemory;
+    }
+
+    fn collectFailErr(site: []const u8, err: anyerror) error{OutOfMemory} {
+        collect_fail_site = site;
+        collect_fail_error = @errorName(err);
+        return error.OutOfMemory;
+    }
+
+    /// 접힌 자리와 원래 오류. 닫기 직전에 읽는다 — 다음 실패가 덮어쓰기 전이다.
+    pub fn lastCollectFailure() struct { site: []const u8, err: []const u8 } {
+        return .{ .site = collect_fail_site, .err = collect_fail_error };
+    }
+
     pub fn collectOutputForLocalStreamAtEpoch(
         self: *Connection,
         stream: subscription_identity.LocalStreamId,
@@ -2897,12 +2928,12 @@ pub const Connection = struct {
             if (ops.metadata_change_token) |read_token|
                 read_token(ops.ctx, sub.runtime_id) catch |err| switch (err) {
                     error.RuntimeNotFound => {
-                        if (!self.runtimeMissing(stream)) return error.OutOfMemory;
+                        if (!self.runtimeMissing(stream)) return collectFail("metadata_token");
                         output.rollback(self);
                         self.endMissingRuntime(stream);
                         return null;
                     },
-                    else => return error.OutOfMemory,
+                    else => return collectFailErr("metadata_token", err),
                 }
             else
                 null
@@ -2931,7 +2962,7 @@ pub const Connection = struct {
                 .{ .cadence_epoch = observation_epoch_ns },
             ) catch |err| switch (err) {
                 error.RuntimeNotFound => {
-                    if (!self.runtimeMissing(stream)) return error.OutOfMemory;
+                    if (!self.runtimeMissing(stream)) return collectFail("observation");
                     output.rollback(self);
                     self.endMissingRuntime(stream);
                     return null;
@@ -2945,7 +2976,7 @@ pub const Connection = struct {
                     return null;
                 },
                 error.TransientObservationUnavailable => null,
-                else => return error.OutOfMemory,
+                else => return collectFailErr("observation", err),
             };
             if (maybe_observation) |obs| {
                 const current = obs.canonical_json;
@@ -2986,7 +3017,7 @@ pub const Connection = struct {
                         0,
                         event_body,
                     ) catch |err| switch (err) {
-                        error.OutOfMemory => return error.OutOfMemory,
+                        error.OutOfMemory => return collectFailErr("observation_frame", err),
                         error.PayloadTooLarge => {
                             self.state = .closed;
                             output.rollback(self);
@@ -2995,7 +3026,7 @@ pub const Connection = struct {
                     };
                     list.append(self.allocator, frame) catch {
                         self.allocator.free(frame);
-                        return error.OutOfMemory;
+                        return collectFail("observation_append");
                     };
                     if (changed) {
                         output.next_observation_token = obs.change_token;
@@ -3014,13 +3045,13 @@ pub const Connection = struct {
         const screen_change_token: ?ScreenChangeToken = if (ops.screen_change_token) |read_token|
             read_token(ops.ctx, sub.runtime_id) catch |err| switch (err) {
                 error.RuntimeNotFound => {
-                    if (!self.runtimeMissing(stream)) return error.OutOfMemory;
+                    if (!self.runtimeMissing(stream)) return collectFail("metadata_token_post");
                     self.discardPreparedOutput(&list, &output);
                     output.rollback(self);
                     self.endMissingRuntime(stream);
                     return null;
                 },
-                else => return error.OutOfMemory,
+                else => return collectFailErr("metadata_token_post", err),
             }
         else
             null;
@@ -3048,17 +3079,17 @@ pub const Connection = struct {
                 return null;
             }
             const next_sequence = std.math.add(u64, sub.screen_sequence, 1) catch
-                return error.OutOfMemory;
+                return collectFail("sequence_overflow");
             const projected = ops.snapshot(ops.ctx, sub.runtime_id, next_sequence, self.allocator) catch |err| {
                 if (err == error.RuntimeNotFound) {
-                    if (!self.runtimeMissing(stream)) return error.OutOfMemory;
+                    if (!self.runtimeMissing(stream)) return collectFail("snapshot");
                     self.discardPreparedOutput(&list, &output);
                     output.rollback(self);
                     self.endMissingRuntime(stream);
                     return null;
                 }
                 if (err != error.TransientSnapshotUnavailable)
-                    return error.OutOfMemory;
+                    return collectFail("snapshot");
                 // Metadata and snapshot are one recovery transaction. Never expose a metadata-only
                 // batch to an adapter when the snapshot producer failed.
                 self.discardPreparedOutput(&list, &output);
@@ -3069,8 +3100,8 @@ pub const Connection = struct {
             defer self.allocator.free(projected.bytes);
             if (projected.bytes.len > protocol.max_viewport_snapshot or
                 projected.frontier.sequence != next_sequence)
-                return error.OutOfMemory;
-            output.next_base = self.allocator.dupe(u8, projected.bytes) catch return error.OutOfMemory;
+                return collectFail("snapshot_frame");
+            output.next_base = self.allocator.dupe(u8, projected.bytes) catch return collectFail("snapshot_base_dupe");
             output.replace_base = true;
             output.clear_resync = sub.resync_pending;
             output.next_screen_sequence = projected.frontier.sequence;
@@ -3082,13 +3113,13 @@ pub const Connection = struct {
             // overflow would then retry every tick forever while the client silently freezes on an
             // old base. The adapter fail-closes this connection and revokes its leases.
             const next_sequence = std.math.add(u64, sub.screen_sequence, 1) catch
-                return error.OutOfMemory;
+                return collectFail("sequence_overflow_delta");
             const update = ops.delta(ops.ctx, sub.runtime_id, base, next_sequence, self.allocator) catch |err|
                 switch (err) {
                     // Runtime teardown races are stream lifecycle, not transport corruption. The
                     // caller's existing ended/detach path must keep the shared connection usable.
                     error.RuntimeNotFound => {
-                        if (!self.runtimeMissing(stream)) return error.OutOfMemory;
+                        if (!self.runtimeMissing(stream)) return collectFail("delta");
                         self.discardPreparedOutput(&list, &output);
                         output.rollback(self);
                         self.endMissingRuntime(stream);
@@ -3096,14 +3127,14 @@ pub const Connection = struct {
                     },
                     // Projection cap/OOM and unknown producer failures cannot masquerade as an
                     // unchanged screen; fail-close prevents an infinite stale-base retry loop.
-                    else => return error.OutOfMemory,
+                    else => return collectFailErr("delta", err),
                 };
             defer self.allocator.free(update.send);
             if (update.send.len > protocol.max_viewport_snapshot or
                 update.new_base.len > protocol.max_viewport_snapshot)
             {
                 self.allocator.free(update.new_base);
-                return error.OutOfMemory;
+                return collectFail("delta_frame");
             }
             output.next_base = update.new_base;
             output.replace_base = true;
@@ -3113,13 +3144,13 @@ pub const Connection = struct {
                 try self.appendChunks(&list, kind, stream, update.send);
                 if (update.frontier.sequence != next_sequence or
                     (!update.is_snapshot and update.frontier.generation != sub.screen_generation))
-                    return error.OutOfMemory;
+                    return collectFail("delta_append");
                 output.next_screen_sequence = update.frontier.sequence;
                 output.next_screen_generation = update.frontier.generation;
             } else if (update.frontier.sequence != sub.screen_sequence or
                 update.frontier.generation != sub.screen_generation)
             {
-                return error.OutOfMemory;
+                return collectFail("delta_admit");
             }
         };
 
@@ -3133,20 +3164,20 @@ pub const Connection = struct {
                 .identity = pending.identity,
                 .target = target,
             };
-            const payload = barrier.encode() catch return error.OutOfMemory;
+            const payload = barrier.encode() catch return collectFail("barrier_encode");
             const barrier_frame = self.encodeWithFlags(
                 .screen_frontier_barrier,
                 0,
                 stream,
                 0,
                 &payload,
-            ) catch return error.OutOfMemory;
+            ) catch return collectFail("barrier_frame");
             list.append(self.allocator, barrier_frame) catch {
                 self.allocator.free(barrier_frame);
-                return error.OutOfMemory;
+                return collectFail("barrier_append");
             };
             var after = sub.catchup;
-            after.admit(barrier, now_ns) catch return error.OutOfMemory;
+            after.admit(barrier, now_ns) catch return collectFail("barrier_admit");
             output.prepared_catchup = .{
                 .before = sub.catchup,
                 .after = after,
@@ -3167,7 +3198,7 @@ pub const Connection = struct {
             output.rollback(self);
             return null;
         }
-        output.frames = list.toOwnedSlice(self.allocator) catch return error.OutOfMemory;
+        output.frames = list.toOwnedSlice(self.allocator) catch return collectFail("frames_finalize");
         output.frames_taken = false;
         return output;
     }

@@ -17,7 +17,8 @@ test "GitHub transport closes every scalar endpoint" {
         .{ .request = .{ .commit = sha }, .expected = "repos/ohah/maru/git/commits/" ++ sha },
         .{ .request = .{ .tag_ref = "v1.2.3" }, .expected = "repos/ohah/maru/git/ref/tags/v1.2.3" },
         .{ .request = .{ .annotated_tag = sha }, .expected = "repos/ohah/maru/git/tags/" ++ sha },
-        .{ .request = .environment, .expected = "repos/ohah/maru/environments/release" },
+        .{ .request = .{ .environment = .release }, .expected = "repos/ohah/maru/environments/release" },
+        .{ .request = .{ .environment = .session_host_product }, .expected = "repos/ohah/maru/environments/Session%20host%20product" },
     };
     for (cases) |case| {
         var storage: transport.EndpointStorage = undefined;
@@ -26,6 +27,10 @@ test "GitHub transport closes every scalar endpoint" {
         try std.testing.expect(!plan.paginated);
         try std.testing.expectEqual(transport.PageShape.none, plan.page_shape);
     }
+
+    var deployment_storage: transport.EndpointStorage = undefined;
+    const notification_deployments = try transport.plan(&deployment_storage, .{ .deployments = .{ .source_sha = sha, .environment = .session_host_product } });
+    try std.testing.expectEqualStrings("repos/ohah/maru/deployments?sha=" ++ sha ++ "&environment=Session%20host%20product&per_page=100", notification_deployments.endpoint);
 }
 
 test "GitHub transport closes collection queries and flattening" {

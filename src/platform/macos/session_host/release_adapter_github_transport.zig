@@ -21,7 +21,10 @@ pub const Attempt = struct {
 
 pub const DeploymentQuery = struct {
     source_sha: []const u8,
+    environment: Environment = .release,
 };
+
+pub const Environment = enum { release, session_host_product };
 
 pub const Request = union(enum) {
     repository,
@@ -31,7 +34,7 @@ pub const Request = union(enum) {
     commit: []const u8,
     tag_ref: []const u8,
     annotated_tag: []const u8,
-    environment,
+    environment: Environment,
     attempt_jobs: Attempt,
     deployments: DeploymentQuery,
     deployment_statuses: u64,
@@ -83,7 +86,10 @@ pub fn plan(storage: *EndpointStorage, request: Request) Error!Plan {
             try validSha(sha);
             break :blk try render(storage, "repos/ohah/maru/git/tags/{s}", .{sha});
         },
-        .environment => try render(storage, "repos/ohah/maru/environments/release", .{}),
+        .environment => |selected| switch (selected) {
+            .release => try render(storage, "repos/ohah/maru/environments/release", .{}),
+            .session_host_product => try render(storage, "repos/ohah/maru/environments/Session%20host%20product", .{}),
+        },
         .attempt_jobs => |attempt| blk: {
             try validId(attempt.run_id);
             try validId(attempt.attempt);
@@ -95,11 +101,10 @@ pub fn plan(storage: *EndpointStorage, request: Request) Error!Plan {
         },
         .deployments => |query| blk: {
             try validSha(query.source_sha);
-            break :blk try render(
-                storage,
-                "repos/ohah/maru/deployments?sha={s}&environment=release&per_page=100",
-                .{query.source_sha},
-            );
+            break :blk switch (query.environment) {
+                .release => try render(storage, "repos/ohah/maru/deployments?sha={s}&environment=release&per_page=100", .{query.source_sha}),
+                .session_host_product => try render(storage, "repos/ohah/maru/deployments?sha={s}&environment=Session%20host%20product&per_page=100", .{query.source_sha}),
+            };
         },
         .deployment_statuses => |deployment_id| blk: {
             try validId(deployment_id);

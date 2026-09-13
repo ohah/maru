@@ -18,6 +18,8 @@ const run = "{\"id\":33335653781,\"run_attempt\":2,\"event\":\"push\",\"head_sha
 const environment = "{\"id\":161088068,\"name\":\"release\",\"can_admins_bypass\":false,\"protection_rules\":[{\"id\":1,\"type\":\"required_reviewers\",\"prevent_self_review\":true,\"reviewers\":[{\"type\":\"User\",\"reviewer\":{\"id\":7}}]}],\"deployment_branch_policy\":null}";
 const jobs = "{\"total_count\":1,\"jobs\":[{\"id\":90618357140,\"run_id\":33335653781,\"run_attempt\":2,\"head_sha\":\"" ++ source ++ "\",\"status\":\"in_progress\",\"conclusion\":null,\"name\":\"universal dmg (signed + notarized)\",\"workflow_name\":\"Release\",\"html_url\":\"https://github.com/ohah/maru/actions/runs/33335653781/job/90618357140\"}]}";
 const slurped_jobs = "[" ++ jobs ++ "]";
+const notification_environment = "{\"id\":161088069,\"name\":\"Session host product\",\"can_admins_bypass\":false,\"protection_rules\":[{\"id\":1,\"type\":\"required_reviewers\",\"prevent_self_review\":true,\"reviewers\":[{\"type\":\"User\",\"reviewer\":{\"id\":7}}]}],\"deployment_branch_policy\":null}";
+const notification_jobs = "[{\"total_count\":1,\"jobs\":[{\"id\":90618357141,\"run_id\":33335653781,\"run_attempt\":2,\"head_sha\":\"" ++ source ++ "\",\"status\":\"in_progress\",\"conclusion\":null,\"name\":\"session host notification product\",\"workflow_name\":\"Release\",\"html_url\":\"https://github.com/ohah/maru/actions/runs/33335653781/job/90618357141\"}]}]";
 
 const Clock = struct {
     value: i128 = 100,
@@ -47,6 +49,7 @@ const Authority = struct {
 };
 const Executor = struct {
     deployments: usize,
+    profile: enum { release, notification } = .release,
     winner: usize = 0,
     calls: usize = 0,
     budgets: [composition.max_total_commands]i128 = @splat(0),
@@ -63,13 +66,13 @@ const Executor = struct {
             try std.testing.expectEqual(@as(usize, 1), call_index);
             return copy(output, run);
         }
-        if (std.mem.endsWith(u8, endpoint, "/environments/release")) {
+        if (std.mem.endsWith(u8, endpoint, if (self.profile == .release) "/environments/release" else "/environments/Session%20host%20product")) {
             try std.testing.expectEqual(@as(usize, 2), call_index);
-            return copy(output, environment);
+            return copy(output, if (self.profile == .release) environment else notification_environment);
         }
         if (std.mem.indexOf(u8, endpoint, "/jobs?") != null) {
             try std.testing.expectEqual(@as(usize, 3), call_index);
-            return copy(output, slurped_jobs);
+            return copy(output, if (self.profile == .release) slurped_jobs else notification_jobs);
         }
         var writer = std.Io.Writer.fixed(output);
         if (std.mem.indexOf(u8, endpoint, "/deployments?") != null) {
@@ -78,7 +81,8 @@ const Executor = struct {
             for (0..self.deployments) |index| {
                 if (index != 0) try writer.writeByte(',');
                 const id = 5_659_920_000 + index;
-                try writer.print("{{\"id\":{d},\"sha\":\"{s}\",\"ref\":\"v1.2.3\",\"task\":\"deploy\",\"environment\":\"release\",\"original_environment\":\"release\",\"statuses_url\":\"https://api.github.com/repos/ohah/maru/deployments/{d}/statuses\",\"repository_url\":\"https://api.github.com/repos/ohah/maru\",\"performed_via_github_app\":{{\"id\":15368,\"slug\":\"github-actions\",\"owner\":{{\"login\":\"github\"}}}}}}", .{ id, source, id });
+                const environment_name = if (self.profile == .release) "release" else "Session host product";
+                try writer.print("{{\"id\":{d},\"sha\":\"{s}\",\"ref\":\"v1.2.3\",\"task\":\"deploy\",\"environment\":\"{s}\",\"original_environment\":\"{s}\",\"statuses_url\":\"https://api.github.com/repos/ohah/maru/deployments/{d}/statuses\",\"repository_url\":\"https://api.github.com/repos/ohah/maru\",\"performed_via_github_app\":{{\"id\":15368,\"slug\":\"github-actions\",\"owner\":{{\"login\":\"github\"}}}}}}", .{ id, source, environment_name, environment_name, id });
             }
             try writer.writeAll("]]\n");
             return writer.buffered();
@@ -89,9 +93,10 @@ const Executor = struct {
             const match = try std.fmt.bufPrint(&needle, "/deployments/{d}/statuses", .{id});
             if (std.mem.indexOf(u8, endpoint, match) != null) {
                 try std.testing.expectEqual(5 + index, call_index);
-                const job = "https://github.com/ohah/maru/actions/runs/33335653781/job/90618357140";
-                try writer.print("[[{{\"id\":1,\"state\":\"pending\",\"environment\":\"release\",\"log_url\":\"{s}\",\"target_url\":\"{s}\",\"url\":\"https://api.github.com/repos/ohah/maru/deployments/{d}/statuses/1\",\"deployment_url\":\"https://api.github.com/repos/ohah/maru/deployments/{d}\",\"repository_url\":\"https://api.github.com/repos/ohah/maru\"}}", .{ job, job, id, id });
-                if (index == self.winner) try writer.print(",{{\"id\":2,\"state\":\"in_progress\",\"environment\":\"release\",\"log_url\":\"{s}\",\"target_url\":\"{s}\",\"url\":\"https://api.github.com/repos/ohah/maru/deployments/{d}/statuses/2\",\"deployment_url\":\"https://api.github.com/repos/ohah/maru/deployments/{d}\",\"repository_url\":\"https://api.github.com/repos/ohah/maru\"}}", .{ job, job, id, id });
+                const job = if (self.profile == .release) "https://github.com/ohah/maru/actions/runs/33335653781/job/90618357140" else "https://github.com/ohah/maru/actions/runs/33335653781/job/90618357141";
+                const environment_name = if (self.profile == .release) "release" else "Session host product";
+                try writer.print("[[{{\"id\":1,\"state\":\"pending\",\"environment\":\"{s}\",\"log_url\":\"{s}\",\"target_url\":\"{s}\",\"url\":\"https://api.github.com/repos/ohah/maru/deployments/{d}/statuses/1\",\"deployment_url\":\"https://api.github.com/repos/ohah/maru/deployments/{d}\",\"repository_url\":\"https://api.github.com/repos/ohah/maru\"}}", .{ environment_name, job, job, id, id });
+                if (index == self.winner) try writer.print(",{{\"id\":2,\"state\":\"in_progress\",\"environment\":\"{s}\",\"log_url\":\"{s}\",\"target_url\":\"{s}\",\"url\":\"https://api.github.com/repos/ohah/maru/deployments/{d}/statuses/2\",\"deployment_url\":\"https://api.github.com/repos/ohah/maru/deployments/{d}\",\"repository_url\":\"https://api.github.com/repos/ohah/maru\"}}", .{ environment_name, job, job, id, id });
                 try writer.writeAll("]]\n");
                 return writer.buffered();
             }
@@ -138,6 +143,19 @@ test "one and one hundred deployment candidates publish exact current authority"
         try std.testing.expectEqual(@as(u64, 90_618_357_140), value.job_id);
         try std.testing.expectEqual(@as(u64, 5_659_920_000 + count - 1), value.deployment_id);
     }
+}
+
+test "notification product profile selects only its protected job and environment" {
+    var authority = Authority{};
+    var executor = Executor{ .deployments = 1, .profile = .notification };
+    var clock = Clock{};
+    var response: [65536]u8 = undefined;
+    var result: composition.CurrentGitHubAuthority = .{};
+    try composition.authenticateProfileWith(&authority, &executor, &clock, std.testing.allocator, expected, "/opt/trusted/gh", "token", &response, 10_000, .notification_product, &result);
+    defer result.deinit() catch {};
+    const value = result.value().?;
+    try std.testing.expectEqual(@as(u64, 90_618_357_141), value.job_id);
+    try std.testing.expectEqual(@as(u64, 161_088_069), value.environment_id);
 }
 
 test "zero candidates and pre-owned output publish nothing without authority drift" {

@@ -81,12 +81,12 @@ test "릴리스 워크플로: 신뢰 획득 단계가 체크아웃보다 **앞**
 
     // 단계가 하나뿐이어야 한다 — 둘이면 어느 쪽이 앞인지 아래 순서 판정이 답을 못 낸다.
     try std.testing.expectEqual(@as(usize, 1), countExactLines(text, "    environment: release"));
-    try std.testing.expectEqual(@as(usize, 4), countExactLines(text, "    runs-on: macos-15"));
-    try std.testing.expectEqual(@as(usize, 4), countExactLines(text, "      - name: Capture trusted GitHub CLI before checkout"));
+    try std.testing.expectEqual(@as(usize, 5), countExactLines(text, "    runs-on: macos-15"));
+    try std.testing.expectEqual(@as(usize, 5), countExactLines(text, "      - name: Capture trusted GitHub CLI before checkout"));
     try std.testing.expectEqual(@as(usize, 4), countExactLines(text, "        id: trusted-gh"));
-    try std.testing.expectEqual(@as(usize, 4), countMatchingLines(text, pinned_checkout));
-    // release writer, checkout 없는 timing observer, read-only verifier 두 개가 각각 runner-provided gh를 찾는다.
-    try std.testing.expectEqual(@as(usize, 5), countMatchingLines(text, "command -v gh"));
+    try std.testing.expectEqual(@as(usize, 6), countMatchingLines(text, pinned_checkout));
+    // release writer, checkout 없는 timing observer, read-only verifier들이 각각 runner-provided gh를 찾는다.
+    try std.testing.expectEqual(@as(usize, 6), countMatchingLines(text, "command -v gh"));
 
     // **이 한 줄이 이 파일의 요점이다.** 체크아웃 뒤에 `gh` 를 찾으면 그 PATH 는 방금 받아 온
     // 저장소가 건드릴 수 있는 것이라, 무엇을 붙들었는지 우리가 말할 수 없게 된다.
@@ -249,7 +249,7 @@ test "live 릴리스 워크플로: top-level은 권위 캡처 뒤 local caller �
     const text = try readWorkflow(arena_state.allocator());
 
     try std.testing.expectEqual(@as(usize, 0), countExactLines(text, "permissions:"));
-    try std.testing.expectEqual(@as(usize, 5), countExactLines(text, "    permissions:"));
+    try std.testing.expectEqual(@as(usize, 7), countExactLines(text, "    permissions:"));
     try std.testing.expectEqual(@as(usize, 1), countExactLines(text, "      contents: write # GitHub Release 생성/업로드"));
     try std.testing.expectEqual(@as(usize, 1), countExactLines(text, "      id-token: write # artifact attestation OIDC"));
     try std.testing.expectEqual(@as(usize, 1), countExactLines(text, "      attestations: write # artifact attestation publication"));
@@ -292,11 +292,79 @@ test "live 릴리스 워크플로: top-level은 권위 캡처 뒤 local caller �
     try std.testing.expectEqual(@as(usize, 0), countMatchingLines(live_block, "GH_TOKEN"));
     try std.testing.expectEqual(@as(usize, 0), countMatchingLines(live_block, "profile:"));
 
-    try std.testing.expectEqual(@as(usize, 3), countMatchingLines(text, "zig build"));
+    try std.testing.expectEqual(@as(usize, 5), countMatchingLines(text, "zig build"));
     try std.testing.expectEqual(@as(usize, 3), countMatchingLines(text, "\"$TRUSTED_ZIG\" build"));
     const signed_block = blockUntil(text, "      - name: Build signed + notarized universal dmg", "      - name: Build session host live release executables") orelse
         return error.SignedBuildBlockMissing;
     try std.testing.expectEqual(@as(usize, 1), countMatchingLines(signed_block, "ZIG: ${{ steps.trusted-zig.outputs.path }}"));
+}
+
+test "N3-R3 알림 제품 job은 전용 protected self-hosted runner에서 token-free candidate를 실행한다" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const text = try readWorkflow(arena_state.allocator());
+    const at = std.mem.indexOf(u8, text, "  session-host-notification-product:") orelse
+        return error.NotificationProductJobMissing;
+    const job = blockUntil(text[at..], "  session-host-notification-product:", "  session-host-notification-verification:") orelse
+        return error.NotificationProductJobMissing;
+
+    inline for (.{
+        "    name: session host notification product",
+        "    needs: universal-dmg",
+        "    environment: Session host product",
+        "    runs-on: [self-hosted, macOS, ARM64, session-host-product]",
+        "      contents: read",
+        "      id-token: write",
+        "      attestations: write",
+        "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+        "maru-universal-dmg-${{ github.run_attempt }}",
+        "session-host-release-notification-candidate",
+        "maru.session-host-notification-center.v1",
+        "actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661",
+        "id: notification-attestation",
+        "steps.notification-attestation.outputs.bundle-path",
+        "steps.notification-setup.outputs.bundle-copy",
+        "steps.notification-setup.outputs.result",
+        "maru.session-host-notification-product-result.v1",
+        "not_provisioned_accessibility",
+        "not_provisioned_aqua",
+        "Upload typed Notification Center product result",
+        "if: always() && steps.notification-setup.outcome == 'success'",
+        "session-host-notification-result-${{ github.run_attempt }}",
+        "Freeze Notification Center attestation bundle",
+        "/usr/bin/cmp -s \"$MARU_SOURCE_BUNDLE\" \"$MARU_BUNDLE_COPY\"",
+        "/bin/chmod 0600 \"$MARU_BUNDLE_COPY\"",
+        "test \"$(/usr/bin/stat -f '%Lp' \"$MARU_BUNDLE_COPY\")\" = '600'",
+    }) |needle| try std.testing.expect(countMatchingLines(job, needle) >= 1);
+
+    try std.testing.expectEqual(@as(usize, 1), countExactLines(job, "    permissions:"));
+    try std.testing.expectEqual(@as(usize, 0), countMatchingLines(job, "contents: write"));
+    try std.testing.expectEqual(@as(usize, 0), countMatchingLines(job, "GH_TOKEN"));
+    try std.testing.expectEqual(@as(usize, 0), countMatchingLines(job, "github.token"));
+    try std.testing.expectEqual(@as(usize, 0), countMatchingLines(job, "workflow_dispatch"));
+}
+
+test "N3-R3 알림 verifier는 완료된 protected product와 same-attempt attestation만 승인한다" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const text = try readWorkflow(arena_state.allocator());
+    const at = std.mem.indexOf(u8, text, "  session-host-notification-verification:") orelse return error.NotificationVerifierJobMissing;
+    const job = blockUntil(text[at..], "  session-host-notification-verification:", "  session-host-release-live-timing:") orelse return error.NotificationVerifierJobMissing;
+    inline for (.{
+        "needs: session-host-notification-product",
+        "runs-on: macos-15",
+        "actions: read",
+        "contents: read",
+        "session-host-notification-product-${{ github.run_attempt }}",
+        "session-host-release-notification-workflow-verifier",
+        "GH_TOKEN: ${{ github.token }}",
+        "session-host-notification-workflow-pass.v1",
+        "session-host-notification-workflow-pass-${{ github.run_attempt }}",
+        "if-no-files-found: error",
+    }) |needle| try std.testing.expect(countMatchingLines(job, needle) >= 1);
+    try std.testing.expectEqual(@as(usize, 0), countMatchingLines(job, "id-token: write"));
+    try std.testing.expectEqual(@as(usize, 0), countMatchingLines(job, "attestations: write"));
+    try std.testing.expectEqual(@as(usize, 0), countMatchingLines(job, "contents: write"));
 }
 
 test "live 릴리스 timing job은 GitHub-issued top-level step만 read-only로 기록한다" {

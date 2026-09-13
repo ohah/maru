@@ -75,19 +75,35 @@ const RealAuthority = struct {
 };
 
 pub fn authenticate(io: std.Io, allocator: std.mem.Allocator, expected: context_mod.Context, cli: Cli, token: []const u8, response: []u8, budget_ns: i128, result: *CurrentGitHubAuthority) !void {
+    return authenticateProfile(io, allocator, expected, cli, token, response, budget_ns, .release, result);
+}
+
+pub fn authenticateProfile(io: std.Io, allocator: std.mem.Allocator, expected: context_mod.Context, cli: Cli, token: []const u8, response: []u8, budget_ns: i128, profile: deployment.Profile, result: *CurrentGitHubAuthority) !void {
     var authority = RealAuthority{ .pinned = cli.pinned };
     var executor = transport_macos.BoundedExecutor{ .io = io };
     var clock = RealClock{};
-    return authenticateWith(&authority, &executor, &clock, allocator, expected, cli.path, token, response, budget_ns, result);
+    return authenticateProfileWith(&authority, &executor, &clock, allocator, expected, cli.path, token, response, budget_ns, profile, result);
 }
 
 pub fn authenticateUntil(io: std.Io, allocator: std.mem.Allocator, expected: context_mod.Context, cli: Cli, token: []const u8, response: []u8, deadline: *deadline_mod.Deadline, result: *CurrentGitHubAuthority) !void {
+    return authenticateProfileUntil(io, allocator, expected, cli, token, response, deadline, .release, result);
+}
+
+pub fn authenticateProfileUntil(io: std.Io, allocator: std.mem.Allocator, expected: context_mod.Context, cli: Cli, token: []const u8, response: []u8, deadline: *deadline_mod.Deadline, profile: deployment.Profile, result: *CurrentGitHubAuthority) !void {
+    return authenticateProfilePhaseUntil(io, allocator, expected, cli, token, response, deadline, profile, .executing, result);
+}
+
+pub fn authenticateProfilePhaseUntil(io: std.Io, allocator: std.mem.Allocator, expected: context_mod.Context, cli: Cli, token: []const u8, response: []u8, deadline: *deadline_mod.Deadline, profile: deployment.Profile, phase: deployment.Phase, result: *CurrentGitHubAuthority) !void {
     var authority = RealAuthority{ .pinned = cli.pinned };
     var executor = transport_macos.BoundedExecutor{ .io = io };
-    return authenticateUntilWith(&authority, &executor, deadline, allocator, expected, cli.path, token, response, result);
+    return authenticateProfilePhaseUntilWith(&authority, &executor, deadline, allocator, expected, cli.path, token, response, profile, phase, result);
 }
 
 pub fn authenticateWith(authority: anytype, executor: anytype, clock: anytype, allocator: std.mem.Allocator, expected: context_mod.Context, executable: [:0]const u8, token: []const u8, response: []u8, budget_ns: i128, result: *CurrentGitHubAuthority) !void {
+    return authenticateProfileWith(authority, executor, clock, allocator, expected, executable, token, response, budget_ns, .release, result);
+}
+
+pub fn authenticateProfileWith(authority: anytype, executor: anytype, clock: anytype, allocator: std.mem.Allocator, expected: context_mod.Context, executable: [:0]const u8, token: []const u8, response: []u8, budget_ns: i128, profile: deployment.Profile, result: *CurrentGitHubAuthority) !void {
     if (result.owner != null) return error.InvalidOwner;
     if (budget_ns <= 0) return error.TimedOut;
     const started = try clock.now();
@@ -95,10 +111,18 @@ pub fn authenticateWith(authority: anytype, executor: anytype, clock: anytype, a
     const expires = std.math.add(i128, started, budget_ns) catch return error.TimedOut;
     if (expires <= started) return error.TimedOut;
     var deadline = BudgetDeadline(@TypeOf(clock)){ .clock = clock, .started = started, .expires = expires };
-    return authenticateUntilWith(authority, executor, &deadline, allocator, expected, executable, token, response, result);
+    return authenticateProfileUntilWith(authority, executor, &deadline, allocator, expected, executable, token, response, profile, result);
 }
 
 pub fn authenticateUntilWith(authority: anytype, executor: anytype, deadline: anytype, allocator: std.mem.Allocator, expected: context_mod.Context, executable: [:0]const u8, token: []const u8, response: []u8, result: *CurrentGitHubAuthority) !void {
+    return authenticateProfileUntilWith(authority, executor, deadline, allocator, expected, executable, token, response, .release, result);
+}
+
+pub fn authenticateProfileUntilWith(authority: anytype, executor: anytype, deadline: anytype, allocator: std.mem.Allocator, expected: context_mod.Context, executable: [:0]const u8, token: []const u8, response: []u8, profile: deployment.Profile, result: *CurrentGitHubAuthority) !void {
+    return authenticateProfilePhaseUntilWith(authority, executor, deadline, allocator, expected, executable, token, response, profile, .executing, result);
+}
+
+pub fn authenticateProfilePhaseUntilWith(authority: anytype, executor: anytype, deadline: anytype, allocator: std.mem.Allocator, expected: context_mod.Context, executable: [:0]const u8, token: []const u8, response: []u8, profile: deployment.Profile, phase: deployment.Phase, result: *CurrentGitHubAuthority) !void {
     if (result.owner != null) return error.InvalidOwner;
 
     const repository_bytes = try fetchUntil(authority, executor, deadline, allocator, executable, token, .repository, response);
@@ -114,21 +138,29 @@ pub fn authenticateUntilWith(authority: anytype, executor: anytype, deadline: an
     if (run_observation.source_commit.len != source_commit.len) return error.RunMismatch;
     @memcpy(&source_commit, run_observation.source_commit);
 
-    const environment_bytes = try fetchUntil(authority, executor, deadline, allocator, executable, token, .environment, response);
-    var parsed_environment = try environment.parseAndBind(allocator, environment_bytes);
+    const selected_environment: transport_macos.Environment = switch (profile) {
+        .release => .release,
+        .notification_product => .session_host_product,
+    };
+    const expected_environment_name = switch (profile) {
+        .release => "release",
+        .notification_product => "Session host product",
+    };
+    const environment_bytes = try fetchUntil(authority, executor, deadline, allocator, executable, token, .{ .environment = selected_environment }, response);
+    var parsed_environment = try environment.parseAndBindName(allocator, environment_bytes, expected_environment_name);
     defer parsed_environment.deinit();
 
     var prepared: deployment.Prepared = .{};
     const jobs_bytes = try fetchUntil(authority, executor, deadline, allocator, executable, token, .{ .attempt_jobs = .{ .run_id = expected.build.run_id, .attempt = expected.build.run_attempt } }, response);
-    try prepared.prepareJobs(allocator, jobs_bytes, expected);
+    try prepared.prepareJobsForProfilePhase(allocator, jobs_bytes, expected, profile, phase);
     defer prepared.deinit() catch {};
-    const deployments_bytes = try fetchUntil(authority, executor, deadline, allocator, executable, token, .{ .deployments = .{ .source_sha = expected.source_commit } }, response);
-    try prepared.prepareDeployments(allocator, deployments_bytes, expected);
+    const deployments_bytes = try fetchUntil(authority, executor, deadline, allocator, executable, token, .{ .deployments = .{ .source_sha = expected.source_commit, .environment = selected_environment } }, response);
+    try prepared.prepareDeploymentsForProfile(allocator, deployments_bytes, expected, profile);
     for (try prepared.candidateIds()) |deployment_id| {
         const status_bytes = try fetchUntil(authority, executor, deadline, allocator, executable, token, .{ .deployment_statuses = deployment_id }, response);
-        try prepared.acceptStatuses(allocator, deployment_id, status_bytes);
+        try prepared.acceptStatusesForProfilePhase(allocator, deployment_id, status_bytes, profile, phase);
     }
-    const deployment_observation = try prepared.finish(parsed_environment.observation().*);
+    const deployment_observation = try prepared.finishForProfile(parsed_environment.observation().*, profile);
 
     result.repository_id = repository_id;
     result.run_id = run_observation.run_id;

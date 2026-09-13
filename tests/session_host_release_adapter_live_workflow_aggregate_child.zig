@@ -26,7 +26,7 @@ test "aggregate child applies canonical prepare success from actual separated st
         fixture.executable,
         &args,
         &environment,
-        std.time.ns_per_s,
+        observe_budget_ns,
         &storage,
     ));
     try std.testing.expectEqual(@as(u8, 5), state.next_index);
@@ -57,7 +57,7 @@ test "aggregate child preserves all closed finalize outcomes" {
             fixture.executable,
             &args,
             &environment,
-            std.time.ns_per_s,
+            observe_budget_ns,
             &storage,
         ));
         try std.testing.expectEqual(row.outcome, state.outcome);
@@ -78,7 +78,7 @@ test "aggregate child preserves all closed finalize outcomes" {
             fixture.executable,
             &args,
             &environment,
-            std.time.ns_per_s,
+            observe_budget_ns,
             &storage,
         ));
         try std.testing.expectEqual(row.outcome, state.outcome);
@@ -87,10 +87,10 @@ test "aggregate child preserves all closed finalize outcomes" {
 
 test "signal framing drift and both stream failures conservatively terminate reducer state" {
     const rows = [_]struct { tag: []const u8, result: child.RunResult, budget: i128 }{
-        .{ .tag = "v1.2.9", .result = .observed, .budget = std.time.ns_per_s },
-        .{ .tag = "v1.2.10", .result = .observed, .budget = std.time.ns_per_s },
-        .{ .tag = "v1.2.11", .result = .observation_failed, .budget = std.time.ns_per_s },
-        .{ .tag = "v1.2.12", .result = .observation_failed, .budget = std.time.ns_per_s },
+        .{ .tag = "v1.2.9", .result = .observed, .budget = observe_budget_ns },
+        .{ .tag = "v1.2.10", .result = .observed, .budget = observe_budget_ns },
+        .{ .tag = "v1.2.11", .result = .observation_failed, .budget = observe_budget_ns },
+        .{ .tag = "v1.2.12", .result = .observation_failed, .budget = observe_budget_ns },
         .{ .tag = "v1.2.90", .result = .observation_failed, .budget = 80 * std.time.ns_per_ms },
     };
     for (rows) |row| {
@@ -126,7 +126,7 @@ test "signal framing drift and both stream failures conservatively terminate red
         missing,
         &args,
         &environment,
-        std.time.ns_per_s,
+        observe_budget_ns,
         &storage,
     ));
     try std.testing.expectEqual(phase.Outcome.audit_required, state.outcome);
@@ -149,7 +149,7 @@ test "nonaggregate wrong-stage and terminal invocations fail before fork" {
         fixture.executable,
         &cleanup,
         &environment,
-        std.time.ns_per_s,
+        observe_budget_ns,
         &storage,
     ));
     try fixture.expectNotInvoked();
@@ -163,7 +163,7 @@ test "nonaggregate wrong-stage and terminal invocations fail before fork" {
         fixture.executable,
         &prepare,
         &environment,
-        std.time.ns_per_s,
+        observe_budget_ns,
         &storage,
     ));
     storage.in_use = false;
@@ -175,7 +175,7 @@ test "nonaggregate wrong-stage and terminal invocations fail before fork" {
         "relative-validator",
         &prepare,
         &environment,
-        std.time.ns_per_s,
+        observe_budget_ns,
         &storage,
     ));
     try std.testing.expectError(error.InvalidBudget, child.runAndApply(
@@ -196,7 +196,7 @@ test "nonaggregate wrong-stage and terminal invocations fail before fork" {
         fixture.executable,
         &prepare,
         &environment,
-        std.time.ns_per_s,
+        observe_budget_ns,
         &storage,
     ));
     try fixture.expectNotInvoked();
@@ -208,7 +208,7 @@ test "nonaggregate wrong-stage and terminal invocations fail before fork" {
         fixture.executable,
         &prepare,
         &environment,
-        std.time.ns_per_s,
+        observe_budget_ns,
         &storage,
     ));
     try fixture.expectNotInvoked();
@@ -230,7 +230,7 @@ test "environment inventory and command context drift fail before fork" {
         fixture.executable,
         &args,
         environment[0 .. environment.len - 1],
-        std.time.ns_per_s,
+        observe_budget_ns,
         &storage,
     ));
     environment[10] = environment[0];
@@ -240,7 +240,7 @@ test "environment inventory and command context drift fail before fork" {
         fixture.executable,
         &args,
         &environment,
-        std.time.ns_per_s,
+        observe_budget_ns,
         &storage,
     ));
     environment = try trustedEnvironment("v1.2.0", &environment_storage);
@@ -251,7 +251,7 @@ test "environment inventory and command context drift fail before fork" {
         fixture.executable,
         &args,
         &environment,
-        std.time.ns_per_s,
+        observe_budget_ns,
         &storage,
     ));
     environment = try trustedEnvironment("v1.2.1", &environment_storage);
@@ -261,7 +261,7 @@ test "environment inventory and command context drift fail before fork" {
         fixture.executable,
         &args,
         &environment,
-        std.time.ns_per_s,
+        observe_budget_ns,
         &storage,
     ));
     environment = try trustedEnvironment("v1.2.0", &environment_storage);
@@ -272,7 +272,7 @@ test "environment inventory and command context drift fail before fork" {
         fixture.executable,
         &args,
         &environment,
-        std.time.ns_per_s,
+        observe_budget_ns,
         &storage,
     ));
     try fixture.expectNotInvoked();
@@ -296,7 +296,7 @@ test "argument alias with owner storage fails before storage can overwrite input
         fixture.executable,
         &args,
         &environment,
-        std.time.ns_per_s,
+        observe_budget_ns,
         &storage,
     ));
     try fixture.expectNotInvoked();
@@ -315,7 +315,7 @@ test "argument alias with owner storage fails before storage can overwrite input
         fixture.executable,
         &canonical,
         aliased_entries[0..canonical_environment.len],
-        std.time.ns_per_s,
+        observe_budget_ns,
         &storage,
     ));
     try fixture.expectNotInvoked();
@@ -331,7 +331,7 @@ test "argument alias with owner storage fails before storage can overwrite input
         fixture.executable,
         aliased_descriptors[0..canonical.len],
         &environment,
-        std.time.ns_per_s,
+        observe_budget_ns,
         &storage,
     ));
     try fixture.expectNotInvoked();
@@ -345,7 +345,7 @@ test "argument alias with owner storage fails before storage can overwrite input
         fixture.executable,
         &canonical,
         &environment,
-        std.time.ns_per_s,
+        observe_budget_ns,
         &storage,
     ));
     try fixture.expectNotInvoked();
@@ -366,7 +366,7 @@ test "closed child environment excludes ambient secrets" {
         fixture.executable,
         &args,
         &environment,
-        std.time.ns_per_s,
+        observe_budget_ns,
         &storage,
     ));
     try std.testing.expectEqual(phase.Outcome.active, state.outcome);
@@ -383,7 +383,7 @@ test "repeated aggregate child runs leave parent descriptor count unchanged" {
         const args = prepareArgs("v1.2.0");
         var environment_storage: EnvironmentStorage = undefined;
         const environment = try trustedEnvironment("v1.2.0", &environment_storage);
-        _ = try child.runAndApply(std.testing.io, &state, fixture.executable, &args, &environment, std.time.ns_per_s, &storage);
+        _ = try child.runAndApply(std.testing.io, &state, fixture.executable, &args, &environment, observe_budget_ns, &storage);
     }
     try std.testing.expectEqual(before, try countOpenFds());
 }
@@ -450,6 +450,39 @@ fn stateAt(index: usize) !phase.State {
     for (stages[0..index]) |stage| try phase.apply(&state, .{ .stage = stage, .result = .succeeded });
     return state;
 }
+
+/// 「관측이 끝까지 간다」를 재는 행들의 예산.
+///
+/// 이 판정자들의 주제는 «관측 결과가 reducer 에 어떻게 실리는가» 이지 «얼마나 빨리» 가 아니다. 그런데
+/// 여기서 도는 것은 실제 `fork + exec /bin/sh + 파이프 읽기 + wait` 이고, **그 비용이 생각보다 크다.**
+///
+/// **실측(2026-09-14, 한가한 기계에서 관측 하나)**
+///
+/// | | 관측 1회 |
+/// |---|---|
+/// | 단독 실행 | 356 ~ **988 ms** |
+/// | 같은 바이너리 8중 병렬 | 중앙값 2,659 ms · p90 2,972 ms · 최대 **2,998 ms** |
+///
+/// 그래서 예전 값 1초는 **부하에서만 아슬아슬한 것이 아니라 한가할 때도 12 ms 남는** 값이었고, 조금만
+/// 밀리면 `TimedOut` 이 `.observation_failed` 로 뭉개져 「관측이 틀렸다」처럼 읽혔다(그 뭉갬을 푸느라
+/// 조사에 시간이 들었다 — 제품 쪽 `catch` 에 이제 이유가 남는다).
+///
+/// **왜 한 번이 수백 ms 인가**: 행마다 `Fixture` 가 tmp 에 스크립트를 **새로 쓰고** 실행하는데, macOS 는
+/// 새 실행 파일의 **첫 실행**을 검사한다. 같은 파일 재실행은 5 ms 인데 새 파일은 매번 ~150 ms 였다
+/// (별도 실험으로 확인). 즉 제품이 느린 것이 아니라 판정자가 그 세금을 행마다 낸다.
+///
+/// **10초인 이유**: 위 최악(8중 병렬 3.0 s)의 3.3 배. 큰 값의 대가는 **자식이 진짜로 멈췄을 때 그만큼
+/// 늦게 빨개지는 것**이라, 여유와 멈춤 감지 사이에서 고른 값이다(사용자 결정 2026-09-14 — 처음에는 30 초로
+/// 적었는데 그건 실측 전에 고른 수였다). 정상 경로는 예산을 기다리지 않으므로 평소 비용은 0 이다
+/// (단독 실행 총시간 6.22 s → 6.35 s 로 변화 없음).
+///
+/// **이 값이 다시 빨개지면 수를 올리기 전에 위 표를 다시 재라.** 3.3 배가 모자랐다는 것은 기계가 더
+/// 느려졌다는 뜻일 수도 있지만, 관측 하나가 **왜** 비싼지(첫 실행 검사) 쪽이 바뀌었다는 뜻일 수도 있다 —
+/// 그때는 숫자가 아니라 그 비용을 없애는 것이 맞다(행마다 새 스크립트를 쓰지 않는 것).
+///
+/// **시간 계약은 이 상수가 아니라 아래 80 ms 행이 잰다** — 예산을 넘기면 포기한다는 것은 거기서 고정하고,
+/// 여기서는 그 축을 빼서 판정자가 제 주제만 재게 한다.
+const observe_budget_ns: i128 = 10 * std.time.ns_per_s;
 
 const Fixture = struct {
     tmp: std.testing.TmpDir,

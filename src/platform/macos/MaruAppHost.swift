@@ -6079,6 +6079,25 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 즉시 덮여 사라졌다 — 복원이 무언가를 버리면서 묘비도 만든 경우(host 불통 시 가장 흔한 조합)에 사용자는
         // 체크포인트가 백업된다는 사실을 전혀 못 봤다(code-review). 둘 중 이쪽이 데이터 관련이라 우선하고, 묘비는
         // 화면 안내(writeEndedPlaceholderGuidance)로 pane에 계속 남으므로 토스트를 양보해도 정보가 사라지지 않는다.
+        if !workspaceRestoreIncomplete, let workspaceURL = workspaceFileURL {
+            // **복원이 완전히 성공했다 — 백업 불변식을 다시 무장한다.**
+            //
+            // `ensureBackup` 은 `O_EXCL` 이라 `.bak` 이 있으면 아무것도 안 한다. 그 자체는 의도다(연속된
+            // 불완전 실행이 「가장 완전한 첫 사본」을 밀어내지 않게). 빠져 있던 것은 **해제 단계**였고,
+            // 그래서 7 월 25 일 사본이 7 주를 눌러앉아 정작 필요할 때 되돌릴 것이 없었다(2026-09-13 실측:
+            // 복원 실패가 7421 B 를 341 B 로 덮었는데 `.bak` 은 두 달 전 것이었다).
+            //
+            // 지금 `workspace.v1` 은 방금 온전히 복원됐으므로 옛 `.bak` 은 더 이상 「마지막 완전본」이
+            // 아니다. 지워 두면 다음 불완전 실행이 **신선한** 사본을 남길 수 있다. 실패는 무시한다 —
+            // 지우지 못해도 지금 파일은 멀쩡하고, 다음 성공이 다시 시도한다.
+            let parent = Data(workspaceURL.deletingLastPathComponent().path.utf8)
+            let result = parent.withUnsafeBytes { raw in
+                maru_macos_workspace_checkpoint_release_backup(raw.bindMemory(to: UInt8.self).baseAddress, raw.count)
+            }
+            if result != Self.statusOK {
+                fputs("workspace checkpoint: backup release failed status=\(result) — 다음 성공 복원이 다시 시도한다\n", stderr)
+            }
+        }
         if workspaceRestoreIncomplete {
             // 문장은 Zig 가 고른다 — Swift 는 **상태만** 알린다(docs/i18n.md §7.2).
             if let session = primary?.appSession {

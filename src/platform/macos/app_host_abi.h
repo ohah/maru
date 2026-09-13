@@ -1484,6 +1484,14 @@ uint32_t maru_macos_workspace_checkpoint_publish_final(
     uint32_t preserve_previous
 );
 
+/* 복원이 **완전히 성공한** 실행이 `.bak`을 해제해 백업 불변식을 다시 무장한다. `ensureBackup`은 `O_EXCL`이라
+   `.bak`이 있으면 아무것도 안 하는데(연속된 불완전 실행이 첫 사본을 밀어내지 않게 — 의도), 해제 단계가 없어
+   7주 된 사본이 눌러앉았고 정작 필요할 때 되돌릴 것이 없었다(2026-09-13 실측). 없으면 성공이다. */
+uint32_t maru_macos_workspace_checkpoint_release_backup(
+    const uint8_t *parent_path,
+    size_t parent_path_len
+);
+
 /* 저장된 workspace 텍스트(헤더 + N개 창; UTF-8)에서 활성(key) 창의 인덱스를 준다(M3e). Swift가 복원 loop 뒤
    이 인덱스의 창을 makeKeyAndOrderFront해 재시작 후 활성 창을 되살린다. active-window=1 마커가 있는 첫 창의
    인덱스, 없으면(옛 파일·무마커·parse 실패) -1 → Swift 무동작(현행 동작 유지). 포맷 파싱은 Zig 단일 권위. */

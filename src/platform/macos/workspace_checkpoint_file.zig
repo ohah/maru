@@ -149,6 +149,37 @@ fn snapshotAside(parent_path: [:0]const u8) Result {
 
 const backup_leaf: [:0]const u8 = "workspace.v1.bak";
 
+/// 복원이 **완전히 성공한** 실행에서 `workspace.v1.bak` 을 해제해 백업 불변식을 다시 무장한다.
+///
+/// `ensureBackup` 은 `O_EXCL` 이라 **`.bak` 이 이미 있으면 아무것도 안 하고 성공을 반환한다.** 그 자체는
+/// 의도다 — 연속된 불완전 실행이 「가장 완전한 첫 사본」을 밀어내지 않게 한다. 빠져 있던 것은 **그
+/// 불변식을 다시 무장하는 단계**다. 복원이 성공한 순간 `workspace.v1` 자체가 신뢰할 수 있으므로 옛
+/// `.bak` 은 더 이상 「마지막 완전본」이 아니다. 안 지우면 첫 사본이 영구히 눌러앉는다.
+///
+/// 2026-09-13 실측: `.bak` 이 **7 월 25 일 4614 B** 에서 7 주째 멈춰 있었다. 그 상태에서 복원이 실패한
+/// 종료 저장이 원본을 7421 B → 341 B 로 덮었고 **되돌릴 사본이 없었다.** 하루에 다섯 번.
+///
+/// 없으면 성공이다(`ENOENT`). 지울 것이 없다는 뜻이고, 그것이 곧 무장된 상태다.
+pub fn releaseBackup(parent_path: [:0]const u8) Result {
+    const parent_fd = c.open(parent_path.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .DIRECTORY = true, .NOFOLLOW = true }, @as(c.mode_t, 0));
+    if (parent_fd < 0) return .open_parent_failed;
+    defer _ = c.close(parent_fd);
+    var parent_stat: posix.Stat = undefined;
+    if (c.fstat(parent_fd, &parent_stat) != 0 or !posix.S.ISDIR(parent_stat.mode) or parent_stat.uid != c.getuid())
+        return .open_parent_failed;
+    // `ensureBackup` 과 **같은 안전 계약**으로 연다 — 현재 UID 의 regular file 이 아니면 건드리지 않는다.
+    // 남의 것이나 symlink 를 지우는 편이 낡은 `.bak` 을 남기는 것보다 훨씬 나쁘다.
+    const fd = c.openat(parent_fd, backup_leaf.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true }, @as(c.mode_t, 0));
+    if (fd < 0) return if (posix.errno(-1) == .NOENT) .committed else .backup_failed;
+    var st: posix.Stat = undefined;
+    const ok = c.fstat(fd, &st) == 0 and posix.S.ISREG(st.mode) and st.uid == c.getuid();
+    _ = c.close(fd);
+    if (!ok) return .backup_failed;
+    if (c.unlinkat(parent_fd, backup_leaf.ptr, 0) != 0)
+        return if (posix.errno(-1) == .NOENT) .committed else .backup_failed;
+    return .committed;
+}
+
 fn ensureBackup(parent_path: [:0]const u8) Result {
     const parent_fd = c.open(parent_path.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .DIRECTORY = true, .NOFOLLOW = true }, @as(c.mode_t, 0));
     if (parent_fd < 0) return .backup_failed;

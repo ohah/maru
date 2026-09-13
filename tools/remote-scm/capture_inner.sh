@@ -30,13 +30,28 @@ esac
 # 따라가고, `sun_path` 한도는 **건네는 경로**에 걸리므로 양쪽 다 짧으면 된다.
 ln -s "$MARU_REMOTE_SCM_CTL" "$CTL_WANT"
 
-# 커밋이 하나뿐이면 「목록이 섰다」와 「한 줄만 그렸다」를 구별하기 어렵다 — 몇 개 더 쌓는다.
+# **저장소를 결정론으로 다시 세운다.** 골든으로 굳히려면 화면의 글자가 실행마다 같아야 하는데,
+# 커밋 SHA 와 상대시각이 그렇지 않다. 셋을 고정한다:
+#
+#  1. **신원과 시각을 박는다** → 같은 트리 + 같은 저자/시각 = **같은 SHA**. 하니스가 만든 `seed` 커밋은
+#     시각이 안 박혀 있으므로 그 이력을 쓰지 않고 **처음부터 다시 만든다**(저장소는 이 캡처의 것이다).
+#  2. **시각을 미래로 둔다.** 히스토리 탭의 상대시각은 `방금`/`N분 전`…인데, 과거로 박으면 실행 날짜가
+#     지날수록 글자가 자란다. 제품은 **미래 시각을 `방금`으로 접으므로**(시계가 어긋난 커밋 규율)
+#     미래로 박으면 언제 찍어도 `방금`이다.
+#  3. **기본 브랜치를 박는다**(`-b main`) — `init.defaultBranch` 는 기계마다 다르다.
 GIT=/usr/bin/git
+FIXED_DATE="2099-01-01T00:00:00+00:00"
+rm -rf "$MARU_REMOTE_SCM_REPO"
+mkdir -p "$MARU_REMOTE_SCM_REPO"
+"$GIT" -C "$MARU_REMOTE_SCM_REPO" init -q -b main .
 n=1
-while [ "$n" -le 3 ]; do
+while [ "$n" -le 4 ]; do
 	echo "line $n" > "$MARU_REMOTE_SCM_REPO/capture$n.txt"
 	"$GIT" -C "$MARU_REMOTE_SCM_REPO" add -A
-	"$GIT" -C "$MARU_REMOTE_SCM_REPO" -c commit.gpgsign=false commit -q -m "원격 커밋 $n — 저쪽 기계에서 읽은 것"
+	GIT_AUTHOR_NAME="Maru Capture" GIT_AUTHOR_EMAIL=capture@maru.test \
+		GIT_COMMITTER_NAME="Maru Capture" GIT_COMMITTER_EMAIL=capture@maru.test \
+		GIT_AUTHOR_DATE="$FIXED_DATE" GIT_COMMITTER_DATE="$FIXED_DATE" \
+		"$GIT" -C "$MARU_REMOTE_SCM_REPO" -c commit.gpgsign=false commit -q -m "원격 커밋 $n — 저쪽 기계에서 읽은 것"
 	n=$((n + 1))
 done
 
@@ -64,5 +79,9 @@ env -u CLAUDE_CODE_CHILD_SESSION \
 }
 [ -s "$SHOT" ] || { echo "capture: 스크린샷이 안 나왔다" >&2; tail -20 "$CAP_HOME/app.log" >&2; exit 1; }
 
+# **PPM 도 남긴다.** 골든 게이트는 PPM 을 읽는다(`tests/support/ppm.zig` 가 P6 만 안다) — 사람은
+# PNG 를 보고 기계는 PPM 을 본다.
+OUT_PPM=${OUT%.png}.ppm
+cp "$SHOT" "$OUT_PPM"
 python3 "$ROOT/tools/remote-scm/ppm_to_png.py" "$SHOT" "$OUT"
-echo "capture: $OUT"
+echo "capture: $OUT (+ $OUT_PPM)"

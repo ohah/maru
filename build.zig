@@ -4069,6 +4069,29 @@ pub fn build(b: *std.Build) void {
     const dock_visual_golden_step = b.step("test-dock-visual-golden", "Compare Session Dock smoke captures against committed golden images");
     dock_visual_golden_step.dependOn(&run_dock_visual_golden.step);
 
+    // ── 원격 SCM 시각 골든 ────────────────────────────────────────────────────────────────
+    //
+    // 이웃(`test-dock-visual-golden`)은 Chrome Lab 의 결정론적 시나리오를 보는데 **거기에는 원격이 없다.**
+    // 원격 히스토리는 실물 sshd·control socket·원격 저장소가 동시에 있어야 화면이 서므로, 캡처는
+    // `tools/remote-scm/capture.sh` 가 만들고 이 스텝은 **비교만** 한다(캡처가 없으면 건너뛴다).
+    const remote_scm_visual_golden_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/golden/remote_scm_visual.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "ppm", .module = ppm_mod }},
+        }),
+    });
+    const run_remote_scm_visual_golden = b.addRunArtifact(remote_scm_visual_golden_tests);
+    run_remote_scm_visual_golden.setCwd(b.path("."));
+    // 캡처는 스크립트가 만들고 골든 갱신은 파일을 쓴다 — 캐시된 성공을 재사용하면 stale 판정이 된다.
+    run_remote_scm_visual_golden.has_side_effects = true;
+    b.step(
+        "test-remote-scm-visual-golden",
+        "Compare the remote SCM dock capture against committed golden images",
+    ).dependOn(&run_remote_scm_visual_golden.step);
+
     const chrome_ui_test_step = b.step("test-chrome-ui", "Run the focused typed Chrome UI tree, interaction, and paint tests");
     chrome_ui_test_step.dependOn(&run_chrome_ui_tests.step);
 

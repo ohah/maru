@@ -251,6 +251,17 @@ depends = ["macos-chrome-lab-smoke"]
 env = { MARU_REQUIRE_GOLDEN = "1" }
 run = "zig build test-dock-visual-golden"
 
+[tasks.macos-remote-scm-visual-golden]
+description = "Capture the remote SCM dock on a live sshd and gate it against committed golden images"
+# 캡처가 없으면 비교가 조용히 건너뛰므로, 이 태스크는 **찍고 나서** 잰다. 캡처 실패를 skip 으로
+# 넘기면 게이트가 무력화되고 아무도 눈치채지 못한다(도크 골든이 같은 이유로 `MARU_REQUIRE_GOLDEN` 을 켠다).
+env = { MARU_REQUIRE_GOLDEN = "1" }
+run = [
+  "zig build macos-app-bundle",
+  "sh tools/remote-scm/capture.sh zig-out/remote-scm-capture/history-expanded.png MARU_FORCE_SCM_COMMIT_EXPAND=0",
+  "zig build test-remote-scm-visual-golden",
+]
+
 [tasks.macos-browser-bounded-smoke]
 description = "Run and assert the bounded browser.executeScript WKWebView/socket smoke"
 run = "zig build -Doptimize=ReleaseSafe macos-browser-bounded-smoke"

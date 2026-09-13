@@ -33,9 +33,9 @@ Maru가 저장하는 것은 다시 시작하기 위한 **설명서**다.
   web Term(인앱 브라우저/마크다운 패널) — 아래 절
 ```
 
-**web Term(4e)은 원칙적으로 저장하지 않는다**(예외 둘: 파일 Term은 §FP16, 브라우저 URL은 §WP-P — 아래). `workspace.Surface`에 kind 필드가 없어 web 패널을 표현할 수 없고(포맷에 kind 추가는 Phase 5), sentinel core를 일반 surface로 직렬화하면 복원 시 셸로 오spawn되므로 `captureWorkspaceTab`이 web Term을 **스킵**한다. 한 pane이 web Term만 가진 경우(모든 terminal Term을 닫음) surfaces가 비면 복원이 `error.EmptyPane`으로 전체를 중단하므로, 그 pane엔 **기본 셸 placeholder 하나**를 넣어 기본 로그인 셸로 복원한다(브라우저 콘텐츠·URL은 어차피 미영속). web 콘텐츠 영속은 Phase 5(콘텐츠·브리지)와 함께 포맷에 kind를 더해 다룬다. **구현 완료(2026-07-20, ABI v137)**: Explorer UX 보강은 기존 window line에 열린 빈 도크용 `dock-presented=1`과 explicit root의 단일 length-framed `dock-tree-roots` field를 추가했다. root field가 없으면 inferred이고 `0:` payload는 explicit-empty다. 유효한 `0:`만으로는 도크 표시를 파생하지 않지만, 손상된 root field는 explicit-empty로 강등하면서 field 존재가 나타낸 표시 의도를 보존하며 terminal과 dock entry를 폐기하지 않는다. 복원은 root를 canonical/no-follow identity로 검증하고 missing/invalid root만 버린 뒤 rows와 safety watcher를 함께 stage하며, root validation이 pending이면 restore를 거부한다. 전체 apply의 fail-index OOM 검증은 기존 tab/dock/root/rows/watch를 원자적으로 보존한다(상세 단일 출처=[file-panel.md](file-panel.md) §5·§7). Markdown entry mode와 dirty content 미영속 계약은 그대로다.
+**web Term(4e)은 원칙적으로 저장하지 않는다**(예외 둘: 파일 Term은 §FP16, 브라우저 URL은 §WP-P — 아래). `workspace.Surface`에 kind 필드가 없어 web 패널을 표현할 수 없고(포맷에 kind 추가는 Phase 5), sentinel core를 일반 surface로 직렬화하면 복원 시 셸로 오spawn되므로 `captureWorkspaceTab`이 web Term을 **스킵**한다. 한 pane이 web Term만 가진 경우(모든 terminal Term을 닫음) surfaces가 비면 복원이 `error.EmptyPane`으로 전체를 중단하므로, 그 pane엔 **기본 셸 placeholder 하나**를 넣어 기본 로그인 셸로 복원한다(브라우저 콘텐츠·URL은 어차피 미영속). web 콘텐츠 영속은 Phase 5(콘텐츠·브리지)와 함께 포맷에 kind를 더해 다룬다. Explorer UX 계약(ABI v137)은 기존 window line에 열린 빈 도크용 `dock-presented=1`과 explicit root의 단일 length-framed `dock-tree-roots` field를 둔다. root field가 없으면 inferred이고 `0:` payload는 explicit-empty다. 유효한 `0:`만으로는 도크 표시를 파생하지 않지만, 손상된 root field는 explicit-empty로 강등하면서 field 존재가 나타낸 표시 의도를 보존하며 terminal과 dock entry를 폐기하지 않는다. 복원은 root를 canonical/no-follow identity로 검증하고 missing/invalid root만 버린 뒤 rows와 safety watcher를 함께 stage하며, root validation이 pending이면 restore를 거부한다. 전체 apply의 fail-index OOM 검증은 기존 tab/dock/root/rows/watch를 원자적으로 보존한다(상세 단일 출처=[file-panel.md](file-panel.md) §5·§7). Markdown entry mode와 dirty content 미영속 계약은 그대로다.
 
-**FP16 목표(계획 — [file-panel.md](file-panel.md) §5.0이 단일 출처)**: 파일 패널이 전역 도크에서 워크스페이스 Term으로 옮겨오면 "web Term은 저장하지 않는다"는 위 규칙에 예외가 하나 생긴다 — **파일 Term은 저장한다**(현재 `dock-entry`로 저장되던 것을 잃지 않기 위해). 단 위 문단이 밝힌 이유("`workspace.Surface`에 kind 필드가 없고, sentinel core를 일반 surface로 직렬화하면 복원 시 셸로 오spawn된다") 때문에 **`Surface` 레코드에 넣지 않고** pane 줄의 별도 반복 키 `file-term=`으로 저장한다. 그래서 `captureWorkspaceTab`의 web Term 스킵과 `restoreSpawn`의 PTY attach 경로, host-backed identity(`runtime_host_id:runtime_id`) 검증은 **한 줄도 바뀌지 않는다**. 브라우저 web Term은 계속 미영속이다(URL 영속은 별도 보안 판단 필요). 그 결과 FP16에서 **두 곳이 "비-web"에서 "persisted(터미널 + 파일)" 기준으로 넓어져야 한다** — ⑴ `active_term` remap(현행: 앞의 비-web Term 수), ⑵ web-only 셸 placeholder 조건(현행: `surfaces.items.len == 0`, PTY 목록만 본다). ⑵를 안 넓히면 **파일 Term만 있는 pane에 엉뚱한 셸 placeholder가 삽입**되고, ⑴을 안 넓히면 복원 활성 탭이 어긋난다. 브라우저 Term만 있는 pane은 여전히 persisted 0이라 placeholder를 받는다(현행 동작 유지).
+**FP16 계약([file-panel.md](file-panel.md) §5.0이 단일 출처)**: 파일 패널이 전역 도크에서 워크스페이스 Term으로 옮겨오면 "web Term은 저장하지 않는다"는 위 규칙에 예외가 하나 생긴다 — **파일 Term은 저장한다**(현재 `dock-entry`로 저장되던 것을 잃지 않기 위해). 단 위 문단이 밝힌 이유("`workspace.Surface`에 kind 필드가 없고, sentinel core를 일반 surface로 직렬화하면 복원 시 셸로 오spawn된다") 때문에 **`Surface` 레코드에 넣지 않고** pane 줄의 별도 반복 키 `file-term=`으로 저장한다. 그래서 `captureWorkspaceTab`의 web Term 스킵과 `restoreSpawn`의 PTY attach 경로, host-backed identity(`runtime_host_id:runtime_id`) 검증은 **한 줄도 바뀌지 않는다**. 브라우저 web Term은 계속 미영속이다(URL 영속은 별도 보안 판단 필요). 그 결과 FP16에서 **두 곳이 "비-web"에서 "persisted(터미널 + 파일)" 기준으로 넓어져야 한다** — ⑴ `active_term` remap(현행: 앞의 비-web Term 수), ⑵ web-only 셸 placeholder 조건(현행: `surfaces.items.len == 0`, PTY 목록만 본다). ⑵를 안 넓히면 **파일 Term만 있는 pane에 엉뚱한 셸 placeholder가 삽입**되고, ⑴을 안 넓히면 복원 활성 탭이 어긋난다. 브라우저 Term만 있는 pane은 여전히 persisted 0이라 placeholder를 받는다(현행 동작 유지).
 
 ## 브라우저 Term URL 영속 (WP-P)
 
@@ -61,7 +61,7 @@ Maru가 저장하는 것은 다시 시작하기 위한 **설명서**다.
 - **시작 시 네트워크 요청이 나간다**(사용자 승인). 사용자가 직접 열어 둔 탭이므로 복원이 자연스럽고, 안 하면 빈 탭만 남아 의미가 없다는 판단이다.
 - 브라우저가 여럿이면 tick당 하나씩 로드된다(동시 N개 로드로 시작 프레임을 굶기지 않게).
 
-## 영속 session host와의 관계 (부분 구현)
+## 영속 session host와의 관계
 
 실행 중 shared host connection이 unusable이 된 뒤의 reconnect는 workspace restore가 아니다. 성공/일시 실패 모두
 `runtime-handle={host_id,runtime_id}`와 `runtime-state=live`를 바꾸거나 checkpoint를 dirty로 만들지 않는다. 이 경로는
@@ -89,14 +89,15 @@ workspace restore와 persistent-session attach는 서로 대체하지 않는다.
 현재 `maru.workspace.v1`의 terminal `runtime-handle`은 구현됐다. writer는
 `<host-id>:<runtime-id>`를 함께 쓰고 reader는 길이·lowercase hex·구분자를 fail-closed 검증한다. 옛
 `runtime-id` 단독 파일은 한 번의 attach migration을 위해 읽지만 새 live capture는 bare ID를 만들지 않는다.
-첫 복원의 ended placeholder와 `⏎` 제자리 재생성은 구현됐다. **P4 R1 구현 슬라이스는**
+첫 복원의 ended placeholder와 `⏎` 제자리 재생성은 제품 계약이다. P4 R1은
 positive-Gone의 정확한 handle을 `runtime-state="ended"`와 함께 owned 상태로 보존하고, 다음 restore가 host
 probe·attach·새 shell spawn 없이 placeholder를 직접 만드는 durable tombstone까지를 한 gate로 묶는다. Enter로 새
-runtime 생성이 성공한 때만 구 handle/state를 버린다. **P4 R2a의 전역 runtime binding 중복 검증도 core/ABI/source-order
-fixture까지 구현됐다.** R2b의 host inventory core/wire와 secure discovery/ephemeral collector 모듈은 구현됐지만
-제품 restore coordinator에 아직 연결되지 않았다. `Recovered Sessions` projection/adopt와 incremental checkpoint는
-여전히 미구현이다. 정상 종료 한 번에만
-저장하는 현재 방식이라 GUI 비정상 종료 직전 layout은 잃을 수 있으므로 이 항목들은 opt-in 영속 session의 P4 gate다.
+runtime 생성이 성공한 때만 구 handle/state를 버린다. P4 R2a는 전역 runtime binding 중복을 core/ABI/source-order
+fixture에서 거부한다. R2b는 host inventory core/wire와 secure discovery/ephemeral collector를 제품 restore coordinator에
+연결하고, primary Window의 `Recovered Sessions` projection/adopt를 제공한다. incremental checkpoint는 committed mutation을
+app-global generation으로 접어 background publication하며, R7 제품 경로는 GUI 강제 종료 뒤 이 checkpoint로 여러 Window와
+live runtime을 복원한다. 현재 검증 상태와 환경 의존 gate는 [검증 매트릭스](verification-matrix.md)의
+`영속 터미널 세션 호스트·외부 attach` 행이 소유한다.
 `workspace-binding-id`와 persistent quick layout은 default-on 범위에서 제거했다. 세부 소유권·ID·접속 실패 행렬은
 persistent-session 문서를 따른다.
 
@@ -132,7 +133,8 @@ drop을 재생산하고(자기영속 루프), 그 사이 사용자가 만든 창
 "복원이 계속 실패하는 동안"에만 발생하는 반면, 백업 없는 덮어쓰기는 «첫 번째 실패에서 즉시» 되돌릴 수 없는 손실**이기
 때문이다. 비용이 비대칭이다.
 
-**해소 방향(미구현).** 두 손실 중 하나를 고르지 않아도 된다.
+**별도 개선 계약.** 아래 경로를 채택하면 두 손실 중 하나를 고르지 않아도 된다. 채택·구현 상태는
+[검증 매트릭스](verification-matrix.md)의 `Workspace restore checkpoint backup re-arm` 행이 소유한다.
 
 1. **복원이 완전히 성공한 실행에서 `.bak`을 해제한다.** 그 시점의 `workspace.v1`은 신뢰할 수 있으므로 「마지막 완전본」
    불변식을 다시 무장해도 안전하다. 이것만 있으면 `O_EXCL`의 원래 의도(연속 실패가 첫 사본을 밀어내지 않음)가
@@ -154,7 +156,7 @@ live→ended로 **처음** 전이한 실행은 exact `runtime-handle + runtime-s
 throwaway host runtime을 하나도 spawn하지 않는다. primary Window 적용 실패 때만 빈 deferred session을 폐기하고 명시적인
 새 default-shell session으로 fallback하며, 이 실행은 위 `restore incomplete` 보호를 그대로 적용한다.
 
-## 영속 session binding wire (runtime-handle 구현, durable tombstone R1)
+## 영속 session binding wire
 
 새 DB나 창별 파일을 만들지 않고 기존 `~/Library/Application Support/maru/workspace.v1` 하나가 Window/Workspace 배치의
 단일 출처다. 현재 직렬화 모델에서 `Window`=OS 창, `Tab`=Workspace, `Pane`=split leaf, `Surface`=terminal Term이므로
@@ -243,7 +245,7 @@ surface custom-name="" title="ended" cwd="/repo" command="/bin/zsh" cols=100 row
   atomic replace 대상인 `workspace.v1` inode를 직접 잠그거나 정상 실행 중 lock file을 unlink하지 않는다. 두 번째 app
   process는 config·manifest write, restore, runtime 생성이 0인 명시적 unsupported 상태로 종료해 last-writer-wins를
   막는다. collaborative multi-app edit/read-only attach는 P5 이후 별도 범위다. `maru attach` CLI는 manifest를 쓰지 않는다.
-  **L0 구현 완료:** lease는 Swift의 workspace URL에서 sibling path를 파생하고 Zig process-global owner가 보유한다.
+  L0 계약에서 lease는 Swift의 workspace URL에서 sibling path를 파생하고 Zig process-global owner가 보유한다.
   `NSApplication.shared`/Dock/controller 생성 전 startup loser는 `second instance unsupported`와 exit 2로 종료해
   termination/save 경로 자체에 진입하지 않는다.
   lock parent/leaf 생성은 fresh profile 획득을 위한 lease artifact로 허용되는 유일한 loser-side filesystem effect다.

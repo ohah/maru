@@ -9903,7 +9903,7 @@ Windows 경로가 다른 점은 macOS에서 그것이 *우연*이 아니라 *확
 WezTerm은 맨 파일 경로 링크를 지원하지 않는다(정규식 `hyperlink_rules`만, [issue #6257](https://github.com/wezterm/wezterm/issues/6257) 열림).
 iTerm2는 Semantic History가 macOS 전용이라 이 문제가 없다.
 
-### 5.1a hover도 존재검증을 한다 (결정 완료)
+### 5.1a hover도 존재검증을 한다
 
 밑줄이 뜨는데 클릭하면 아무 일도 없는 상태 — 위 "알려진 오탐"이 남긴 잔여물이자, Windows 이전부터 macOS에
 있던 것이다 — 를 닫았다. hover가 `selection.urlAnchorAt`(**분류만**) 대신 `TerminalCore.openableLinkAnchorAt`

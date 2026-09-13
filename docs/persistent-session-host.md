@@ -4,10 +4,14 @@
 다른 터미널의 `maru attach` 클라이언트가 재접속하는 기능의 단일 출처다. 탭/split UI, workspace restore,
 control-plane, PTY 종료 정책과 책임이 겹치지 않도록 소유권·ID·종료 의미·복구·검증 단계를 정한다.
 
+현재 구현·검증 상태는 [실제 구현 계획](implementation-plan.md)과
+[검증 매트릭스](verification-matrix.md)가 소유한다. 이 문서의 날짜·체크 표식은 당시의 구현 근거를 보존하는
+역사 기록일 뿐 현재 상태 판정에 사용하지 않는다.
+
 > 기본값은 [설정](configuration.md)의 `session.keep-alive-after-quit` 행이 단일 출처다(여기 다시 적지 않는다 — 그 서술이 낡아 실제로 오독을 냈다). 그 값이 `true`면
 > 새 terminal이 host(`maru-sessiond` = `maru __session-host`)-backed로 떠 **정상 GUI Quit 뒤** 살아남고 재실행 시
 > 재접속한다 — 호스트 프로세스, `runtime-handle`(=`host_id:runtime_id`), GUI 재접속(`attachExisting`)은 **존재한다**
-> (§멀티윈도우 "구현 상태 ✅" 노트·종료 매트릭스 참조). **원격 스크롤백·기본 드래그 선택·복사·검색, 자동 desync 리싱크, 그리고 원격 렌더
+> (§멀티윈도우와 동시 client 규칙·종료 매트릭스 참조). **원격 스크롤백·기본 드래그 선택·복사·검색, 자동 desync 리싱크, 그리고 원격 렌더
 > 패리티(색 theme-aware·kitty 이미지·OSC 133 prompt 마크)도 구현됐다** — 원격 파이프라인이 in-process와 렌더 관점에서 동등하며,
 > 새 화면 필드가 원격 경로를 빠뜨리면 comptime parity 가드가 컴파일 에러로 잡는다(`remote_screen.zig` `expectSnapshotParity`).
 > 원격 spawn은 MRSH v2의 strict method `runtime.spawn_full`로 argv/cwd/login/GUI 시점 부모 환경
@@ -57,8 +61,8 @@ control-plane, PTY 종료 정책과 책임이 겹치지 않도록 소유권·ID�
 > **후속/백로그**(2026-09-01 코드 대조로 정리 — 앞선 2026-08-24 목록의 셋 중 **둘은 이미 닫혀 있었다**):
 > ✅ **기본값 `true` 전환은 2026-09-04 에 끝났다**(main). **G3 릴리스 A/B 계약은 타지 않았다** — 그 계약은
 > 「기본값이 바뀌기 **전에** 설치한 사용자」를 옮기기 위한 것인데 **릴리스가 0 개라 그런 사용자가 없다**.
-> 출하 **뒤에** 이 값을 다시 바꾼다면 그때는 G3 가 단일 출처다(아래 §6 백로그 계약). 이 문서는 목표 상태를 함께 기술한다 —
-> **구현 완료 여부는 각 절의 "구현 상태" 표식으로 구분한다**(표식 없는 서술은 목표 설계).
+> 출하 **뒤에** 이 값을 다시 바꾼다면 그때는 G3 가 단일 출처다(아래 §6 백로그 계약). 아래 체크 표식은
+> 이 문서 머리의 역사 기록 선언을 따르며 현재 완료 여부는 검증 매트릭스로만 판정한다.
 >
 > ✅ **닫힌 둘**(옛 목록에 남아 있던 것):
 > - **incremental checkpoint** — 신호(`AppSession.workspaceChanged(kind)`)부터 구동(디바운스 500 ms·재시도
@@ -385,7 +389,7 @@ runtime 종료 뒤 기존 handle        -> ended (자동 respawn/resume 없음)
 재접속 때 45→3으로 바뀌며, child 환경은 실행 중 교체할 수 없기 때문이다. runtime identity를 현재 GUI surface binding으로
 resolve하는 control-plane rebinding이 구현되기 전에는 persistent Term 내부의 self selector 연속성을 지원한다고 세지 않는다.
 
-**구현 상태(2026-08-24) ✅ — 에이전트 훅 신원은 예외다.** 같은 이유(«GUI process-local 값은 재접속을 못 넘는다»)
+**에이전트 훅 신원 예외(2026-08-24 기록).** 같은 이유(«GUI process-local 값은 재접속을 못 넘는다»)
 때문에 훅 로그 경로도 이 child 밖에 있었는데, 그쪽은 **host 가 자기 신원을 실어** 해결했다 —
 `MARU_HOOK_INSTANCE=host_<32 hex host_id>` 와 `MARU_HOOK_PANE=<32 hex runtime_id>` 다. 둘 다 재실행·업그레이드를
 넘어 살아 있는 이름이라(그래서 pid 가 아니다) child 환경을 교체할 필요가 없다.
@@ -449,12 +453,12 @@ surface ... runtime-handle="<32 lowercase host-id>:<32 lowercase runtime-id>" ru
 
 - 한 `Maru.app` process의 모든 `AppSession`/Window는 앱 전역 session-host connection 하나를 multiplex해 공유한다. 창마다
   daemon이나 socket을 만들지 않는다.
-- **구현 상태(P3-e3-4d) ✅**: 위 "앱 전역 connection 하나 공유"는 구현됐다 — 원격 backend/연결이 `AppSession`(창) 필드가
+- **앱 전역 connection 공유 계약**: 원격 backend/연결은 `AppSession`(창) 필드가
   아니라 **모듈-전역**(app process당 하나, `app_runtime` 옆)이라 창을 여러 개 열어도 연결·backend를 공유한다(첫 창이 세우고
   이후 창은 재사용; 창 close는 그 창의 원격 Term만 회수하고 공유 backend는 안 닫는다 — `routing`/`live_registry`와 동일).
   창별로 연결하던 초기 배선은 두 번째 창이 handshake 타임아웃→in-process 폴백하는 버그였다(전역화로 해소).
 
-  ✅ **daemon 은 더 이상 serial 이 아니다**(2026-08-24 정정). 근거가 둘이다 — ⑴ **문서 자신**: §P5a1 이
+  **daemon reactor 전환 기록**(2026-08-24 정정). 근거가 둘이다 — ⑴ **문서 자신**: §P5a1 이
   「T0b2b 가 이미 serial serve loop 를 listener+32-client single-owner poll reactor 로 교체했다」고 적어 두었다
   (즉 이 문단은 그때부터 §P5a1 과 모순이었다). ⑵ **실측**: 실 fork host 에 client 를 **둘 붙여** 각각 runtime
   을 띄웠고 둘째 연결의 handshake 도 통과했다. 코드에서도 `acceptAllowed` 가 `active_count < max_clients`(32)
@@ -590,7 +594,7 @@ $0.appSession != nil }` 불성립) arm 하지 않고, 세션별 `workspace_check
 **원자적 교체 seam 은 Windows 가 실제로 필요할 때 만든다.** 지금 옮기면 POSIX 전용 «공용» 모듈이 된다.
 
 구체 wire와 손상/하위호환 규칙의 단일 출처는
-[Workspace Restore 전략](workspace-restore.md#영속-session-binding-wire-runtime-handle-구현-durable-tombstone-r1)이다.
+[Workspace Restore 전략](workspace-restore.md#영속-session-binding-wire)이다.
 일반 layout은 optional scalar만으로 v1을 유지한다. 현재 parser가 첫 unknown top-level trailing line에서 성공 종료하는
 동작은 legacy 관용성이지 새 block 확장점이 아니다. 새 line kind·카운트·tree 변경이 필요해지면 여기서 정한 범위를
 벗어나므로 멈추고
@@ -7350,6 +7354,10 @@ redaction과 GUI 없이 replay 가능한 의미를 고정한 뒤 version을 유�
 
 ## 13. 구현 단계와 종료 gate
 
+이 절은 단계별 계약과 구현 당시의 검증 근거를 보존하는 **구현 이력 부록**이다. 아래의 `완료`·`구현` 표기는
+각 slice가 닫힐 때의 근거를 설명하며 현재 프로젝트 상태의 단일 출처가 아니다. 현재 상태는
+[실제 구현 계획](implementation-plan.md)과 [검증 매트릭스](verification-matrix.md)만 갱신한다.
+
 이 계획의 제품 범위는 P1~P5다. P4가 opt-in 일반 Window의 영속 세션
 (멀티윈도우·manifest·background 알림)을 완성하고, P5는 다른 terminal/SSH의 개별 runtime attach를 독립적으로 완성한다.
 P5 CLI와 U5 자동 host migration 전체는 `session.keep-alive-after-quit=true`의 선결이 아니다. 실제 frozen
@@ -7379,7 +7387,7 @@ green을 만든 뒤 stress/실제 앱 gate를 붙인다. 이미 구현되어 red
 current-main red 1건을 branch 회귀와 구분해 PR에 그대로 기록한다. P0는 설계 승인 단계라 사용자 리뷰가 필요하지만,
 P1 이후 구현 gate는 아래 자동화 계약을 만족해야 한다.
 
-### P1 — legacy provider session continuity 잔여 제거 ✅
+### P1 — legacy provider session continuity 잔여 제거
 
 완료. provider session을 실행에 복원하던 이전 source build/dev 호환용 typed reader/no-op/cleanup 코드를 제거했으며,
 영속 host의 fallback으로 재사용하지 않는다.
@@ -7420,7 +7428,7 @@ config와 숫자 이름의 recognized hook-event/session/transcript mapping을 �
 manifest가 같고 `.maru-backup`·`agent-hook-cleanup-v2`·신규/삭제 파일이 0이어야 한다.
 parent 또는 explicit base와 `env.*` upsert의 mapping env 회귀, live agent observer L2와 AppSession DTO 회귀도 자동 검증한다.
 
-### P2 — process 경계 없는 `TermRuntimeBackend` seam ✅
+### P2 — process 경계 없는 `TermRuntimeBackend` seam
 
 완료. terminal runtime의 수명·입출력·관측을 `TermRuntimeBackend` 계약 뒤에 두었고, GUI layout(`TermRuntime`)은
 `*LivePtySession`을 직접 들지 않고 opaque `RuntimeHandle`과 계약만으로 spawn/attach/input/resize/pump/terminate/observe를
@@ -7871,9 +7879,11 @@ foreground process, SSH destination의 owned 값은 비어 있어야 한다. 그
     실행이 final 저장까지 가는지 여부는 [Workspace Restore](workspace-restore.md)의 「checkpoint 보호」가 단일
     출처다 — 여기에 결론을 복제하지 않는다. 백업을 **실제로 뜨는 경우의 안전 계약**만 이 문서가 소유한다: final
     writer는 현재 UID의 regular source를 no-follow로 열고 `workspace.v1.bak`을 `O_EXCL|O_NOFOLLOW`, mode `0600`으로
-    한 번만 만든다. 기존 `.bak`은 current UID regular `0600`일 때만 보존하며 symlink/non-regular/wrong-mode는 Quit을
-    취소한다. `O_EXCL`이라 기존 `.bak`이 있으면 새로 뜨지 않는다는 점이 곧 「복원이 성공했을 때 `.bak`을 해제해야
-    한다」는 미구현 항목의 근거다(단일 출처의 「해소 방향」).
+    한 번만 만든다. 기존 `.bak`은 current UID regular file이어야 하며 mode가 더 넓으면 `0600`으로 축소한 뒤
+    보존한다. symlink/non-regular/다른 UID 또는 권한 축소 실패는 Quit을 취소한다. `O_EXCL`이라 기존 `.bak`이
+    있으면 새로 뜨지 않는다는 점이 곧 「복원이 성공했을 때 `.bak`을 해제하고 다음 실패에 다시 무장해야 한다」는
+    별도 개선 계약의 근거다. 채택·검증 상태는 [검증 매트릭스](verification-matrix.md)의
+    `Workspace restore checkpoint backup re-arm` 행이 소유한다.
     명시적 `Quit and End All Sessions`는 runtime admin shutdown 완료 뒤에도 같은 final checkpoint를 시도하지만,
     실패 시 orphan runtime을 남기지 않도록 종료를 계속하는 유일한 예외다.
     실제 AppKit 제품 gate는 먼저 쓰기 가능한 격리 Application Support에서 `NSApplication.terminate`를 호출해

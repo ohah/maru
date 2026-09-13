@@ -2629,17 +2629,25 @@ pub fn build(b: *std.Build) void {
             "sh", "-eu", "-c",
             "root=zig-out/maru-macos-app/session-host-r1-home; " ++
                 "checkpoint=\"$root/Library/Application Support/maru/workspace.v1\"; " ++
+                "iteration=0; " ++
                 "run_once() { " ++
+                "iteration=$((iteration + 1)); summary=\"$root/app-summary-$iteration.txt\"; test ! -e \"$summary\"; " ++
                 "before=$(/usr/bin/stat -f '%i' \"$checkpoint\"); " ++
-                "./zig-out/Maru.app/Contents/MacOS/maru-macos-app & pid=$!; " ++
+                "MARU_APP_SUMMARY_PATH=\"$summary\" ./zig-out/Maru.app/Contents/MacOS/maru-macos-app & pid=$!; " ++
                 "trap 'kill -KILL \"$pid\" 2>/dev/null || true; wait \"$pid\" 2>/dev/null || true' EXIT; " ++
-                "attempt=0; while test \"$(/usr/bin/stat -f '%i' \"$checkpoint\")\" = \"$before\"; do " ++
+                "attempt=0; while kill -0 \"$pid\" 2>/dev/null && test \"$(/usr/bin/stat -f '%i' \"$checkpoint\")\" = \"$before\"; do " ++
                 "kill -0 \"$pid\" 2>/dev/null; attempt=$((attempt + 1)); test \"$attempt\" -lt 100; sleep 0.1; done; " ++
-                "sleep 0.2; kill -0 \"$pid\"; " ++
-                "test -z \"$(/usr/bin/pgrep -P \"$pid\" 2>/dev/null || true)\"; " ++
+                "attempt=0; while kill -0 \"$pid\" 2>/dev/null; do " ++
+                "attempt=$((attempt + 1)); test \"$attempt\" -lt 100; sleep 0.1; done; " ++
+                "wait \"$pid\"; trap - EXIT; " ++
+                "test \"$(/usr/bin/stat -f '%i' \"$checkpoint\")\" != \"$before\"; " ++
+                "/usr/bin/grep -Eq '^process_state=2$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^final_frame_ended=true$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^output_events=0$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^terminal_input_events=0$' \"$summary\"; " ++
                 "/usr/bin/grep -Eq 'runtime-handle=\"1234567890abcdef1234567890abcdef:fedcba0987654321fedcba0987654321\" runtime-state=\"ended\"' \"$checkpoint\"; " ++
                 "test ! -e \"$checkpoint.bak\"; test ! -e \"$root/Library/Application Support/maru/.workspace.v1.tmp\"; " ++
-                "kill -KILL \"$pid\"; wait \"$pid\" 2>/dev/null || true; trap - EXIT; }; " ++
+                "}; " ++
                 "run_once; cp \"$checkpoint\" \"$root/after-first.v1\"; run_once; " ++
                 "cmp -s \"$root/after-first.v1\" \"$checkpoint\"",
         });

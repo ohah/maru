@@ -43,7 +43,8 @@
 > **`marker_present`(1 차 셸의 표식이 2 차에서 보임)** · `before/after_capture`(렌더 캡처).
 > **오래 「CI 에서 못 돈다」고 적혀 있었으나 시도한 적이 없는 가정이었다** — 재 보니 러너에 WindowServer 가
 > 있고 통과한다(2분 14초, macOS 잡 중 최저). 후자는 ended manifest를 제품 checkpoint 생성본으로 두 번
-> 재실행하고 각 실행의 직접 child 0과 `SIGKILL` 뒤 exact tombstone을 확인한다. ⚠️ 덮지 않는 것: live runtime이
+> 재실행하고 각 실행이 실제 AppKit Quit/final checkpoint를 거쳐 exit 0 한 뒤 exact tombstone을 확인한다. timeout
+> `SIGKILL`은 실패 정리에만 쓰인다. ⚠️ 덮지 않는 것: live runtime이
 > 있는 최신 멀티 윈도우 checkpoint의 강제 종료 복원(R7), GUI 부재 중 알림(OS 배너), Developer ID artifact.
 
 > **host launch 실패 즉시 감지(P3-d2d, 2026-08-25):** double-fork 는 손자를 orphan 으로 만들어 부모에게

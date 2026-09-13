@@ -3213,6 +3213,24 @@ pub export fn maru_macos_workspace_checkpoint_publish(
     return @intFromEnum(workspace_checkpoint_file.publish(path, bytes_ptr[0..snapshot_len]));
 }
 
+/// 복원이 **완전히 성공한** 실행이 `workspace.v1.bak` 을 해제한다 — 백업 불변식을 다시 무장한다.
+/// `ensureBackup` 의 `O_EXCL` 은 첫 사본을 지키려는 의도였지만, 해제 단계가 없어 7 주 된 사본이
+/// 눌러앉았고 정작 필요할 때 되돌릴 것이 없었다(2026-09-13 실측).
+pub export fn maru_macos_workspace_checkpoint_release_backup(
+    parent_path: ?[*]const u8,
+    parent_path_len: usize,
+) u32 {
+    const path_ptr = parent_path orelse return @intFromEnum(workspace_checkpoint_file.Result.open_parent_failed);
+    if (parent_path_len == 0 or parent_path_len > std.fs.max_path_bytes or
+        std.mem.indexOfScalar(u8, path_ptr[0..parent_path_len], 0) != null)
+        return @intFromEnum(workspace_checkpoint_file.Result.open_parent_failed);
+    var path_buf: [std.fs.max_path_bytes + 1]u8 = undefined;
+    @memcpy(path_buf[0..parent_path_len], path_ptr[0..parent_path_len]);
+    path_buf[parent_path_len] = 0;
+    const path: [:0]const u8 = path_buf[0..parent_path_len :0];
+    return @intFromEnum(workspace_checkpoint_file.releaseBackup(path));
+}
+
 pub export fn maru_macos_workspace_checkpoint_publish_final(
     parent_path: ?[*]const u8,
     parent_path_len: usize,

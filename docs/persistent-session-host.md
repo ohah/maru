@@ -6221,22 +6221,17 @@ orphan recovery entry(`Recovered Sessions`)의 primary-only 표시와 실제 row
 | handle 형식 손상(길이·대소문자·구분자) | `InvalidPersistentRuntimeIdentity` | 존재하는 손상은 숨기지 않는다 |
 
 **호스트가 자기 사정으로 끊을 때의 규칙.** 위 표의 "소켓 끊김"은 원인을
-묻지 않는다. 그런데 그 끊김이 **호스트 자신의 판단**일 수 있고, 그때 지켜야 할 것이 둘이다.
+묻지 않는다. 그런데 그 끊김이 **호스트 자신의 판단**일 수 있고, 그때 지켜야 할 규칙이 있다.
 
-1. **자기 쪽 cap 초과로 공유 연결을 죽이지 않는다.** 아래 "cap 초과는 typed protocol error를 응답한 뒤 connection을
+**자기 쪽 cap 초과로 공유 연결을 죽이지 않는다.** 아래 "cap 초과는 typed protocol error를 응답한 뒤 connection을
    닫는다"는 **상대가 보낸 입력**이 클 때의 규칙이다. 한 runtime의 attach snapshot이 `max_viewport_snapshot`(16 MiB)을
    넘는 것은 **상대의 잘못이 아니다** — 그 runtime이 그만큼 그렸을 뿐이다. 그 연결은 다른 runtime들이 함께 쓰므로,
    그 attach 하나만 typed error로 거절하고 연결과 나머지 subscription은 유지해야 한다.
-2. **close 사유를 상대에게 돌려 적지 않는다.** `peer_requested`는 peer가 실제로 close를 요청했을 때만 쓴다. 호스트가
-   스스로 내린 판단을 그 이름으로 기록하면 **로그가 거짓말을 하고**, 사고 조사가 잘못된 쪽을 파게 된다.
-
-**2026-09-13 실측 — 이 둘을 어겨서 일어난 일.** `terminal-browser-pane` runtime 하나의 snapshot이 16 MiB를 넘었다.
-`server.zig`는 typed error 없이 `self.state = .closed; return .close`로 **연결 전체**를 끊었고, `connection_turn.zig`는
-그것을 `beginClose(.peer_requested)`로 기록했다. 결과:
+**2026-09-13 실측 — 이 규칙을 어겨서 일어난 일.** `terminal-browser-pane` runtime 하나의 attach snapshot이 16 MiB를
+넘었다. `server.zig`는 그 request만 거절하는 대신 `self.state = .closed` 로 **연결 전체**를 끊었다. 사유 자체는
+`internal_error` 로 정직하게 실린다 — 문제는 이름이 아니라 **범위**다. 결과:
 
 - 그 탭 하나가 아니라 **그 연결에 딸린 창 전부**가 apply 실패했다(창 2·탭 12 전멸).
-- 앱은 `connection_eof`를 읽고, 호스트 로그는 `why=peer_requested`를 남겼다 — **양쪽이 서로를 가리켰다.**
-  `pending_out=6`(보낼 것이 6개 남았는데 "상대가 요청")이 유일한 이상 신호였다.
 - 실패한 복원 상태가 종료 저장에서 원본을 덮어 7421 B → 341 B가 됐다(그 손실 자체는 막았다 —
   [workspace-restore.md](workspace-restore.md) "checkpoint 보호").
 

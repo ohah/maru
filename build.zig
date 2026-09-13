@@ -5994,6 +5994,25 @@ pub fn build(b: *std.Build) void {
     collect_fail_step.dependOn(&run_collect_fail.step);
     boundary_step.dependOn(&run_collect_fail.step);
 
+    // 복원이 성공하면 `.bak` 을 해제해 백업 불변식을 다시 무장하는가. 7 주 된 사본이 눌러앉았다.
+    const backup_rearm_step = b.step(
+        "test-workspace-backup-rearm",
+        "A fully successful restore releases the stale .bak so the backup invariant re-arms",
+    );
+    const backup_rearm_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/workspace_backup_rearm_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_backup_rearm = b.addRunArtifact(backup_rearm_tests);
+    run_backup_rearm.addArg("--maru-expect-tests=1");
+    run_backup_rearm.addArg("--maru-expect-passed=1");
+    run_backup_rearm.setCwd(b.path("."));
+    backup_rearm_step.dependOn(&run_backup_rearm.step);
+    boundary_step.dependOn(&run_backup_rearm.step);
+
     // 원격 runtime 의 host 코어에도 셀 메트릭이 닿는가. 안 닿으면 CSI 16t 가 침묵해 화면이 커진다.
     const remote_cell_metrics_step = b.step(
         "test-remote-cell-metrics-sync",

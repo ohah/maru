@@ -3886,6 +3886,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var workspaceRestoreIncomplete = false
     private let workspaceCheckpointWriter = DispatchQueue(label: "dev.maru.workspace-checkpoint", qos: .utility)
     private var workspaceCheckpointArmed = false
+    /// The durable-tombstone product smoke asks for one ordinary AppKit Quit only after the
+    /// background checkpoint has committed.  The external harness may kill the process solely
+    /// on timeout; a passing row must leave through the normal final-checkpoint state machine.
+    private var sessionHostR1TombstoneQuitRequested = false
     private var workspaceCheckpointFailureNotice: UInt32 = UInt32(MARU_WORKSPACE_CHECKPOINT_NOTICE_NONE)
     private var workspaceCheckpointActiveWindow: ObjectIdentifier?
     private var workspaceCheckpointFrames: [ObjectIdentifier: NSRect] = [:]
@@ -12186,6 +12190,18 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                             self.setWorkspaceCheckpointFailure(UInt32(MARU_WORKSPACE_CHECKPOINT_NOTICE_NONE))
                         }
                         self.handleWorkspaceCheckpointEffect(next, snapshot: nil)
+                        if committed,
+                           effect.reason != UInt32(MARU_WORKSPACE_CHECKPOINT_REASON_FINAL_QUIT),
+                           self.isSessionHostR1TombstoneSmokeMode,
+                           !self.sessionHostR1TombstoneQuitRequested {
+                            self.sessionHostR1TombstoneQuitRequested = true
+                            fputs("workspace checkpoint: durable tombstone smoke requests normal Quit\n", stderr)
+                            // This scenario has no user to answer the confirmation sheet.  It skips
+                            // only that UI decision; applicationShouldTerminate still requires the
+                            // ordinary C4 final checkpoint before returning terminateNow.
+                            self.bypassQuitConfirm = true
+                            NSApp.terminate(nil)
+                        }
                     }
                 }
             }

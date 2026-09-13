@@ -23,6 +23,8 @@ test "P4 C3c 경계는 main capture immutable bytes serial C2 writer를 고정�
     defer allocator.free(swift);
     const abi = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "src/platform/macos/app_host_abi.zig", allocator, .limited(512 * 1024));
     defer allocator.free(abi);
+    const build = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "build.zig", allocator, .limited(2 * 1024 * 1024));
+    defer allocator.free(build);
 
     for ([_][]const u8{
         "private func captureWorkspaceSnapshot(useTerminationKeyWindow: Bool, publishedOnly: Bool) -> Data?",
@@ -41,6 +43,11 @@ test "P4 C3c 경계는 main capture immutable bytes serial C2 writer를 고정�
     try std.testing.expect(std.mem.indexOf(u8, swift, "!workspaceRestoreIncomplete") != null);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, swift, "MARU_SESSION_HOST_R1_TOMBSTONE_SMOKE\"] == \"maru-test-only-v1\""));
     try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, swift, "MARU_SESSION_HOST_R1_TOMBSTONE_MARKER"));
+    try std.testing.expect(std.mem.indexOf(u8, swift, "sessionHostR1TombstoneQuitRequested") != null);
+    try std.testing.expect(std.mem.indexOf(u8, swift, "effect.reason != UInt32(MARU_WORKSPACE_CHECKPOINT_REASON_FINAL_QUIT)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build, "^final_frame_ended=true$") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build, "^terminal_input_events=0$") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build, "stat -f '%i'") != null);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, swift, "MARU_SESSION_HOST_C4_QUIT_CANCEL_SMOKE\"] == \"maru-test-only-v1\""));
     try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, swift, "MARU_SESSION_HOST_C4_QUIT_CANCEL_MARKER"));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, swift, "RunLoop.main.perform(inModes: [.common])"));

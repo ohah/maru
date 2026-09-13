@@ -106,7 +106,11 @@ const budgets = struct {
     // I/O–렌더 스레딩 Phase 3(docs/plans/io-render-threading.md §9.7): 메인발 코어 mutate를 I/O 스레드로 위임하는
     // CoreCommandQueue 1건 라운드트립(enqueue→pop→free) 비용 — 위임 latency의 바닥(락+append/pop+dupe).
     // UI 이벤트 빈도(스크롤·마우스 60~120Hz)에서 무시 가능해야 한다. 100k회 2s=회당 20µs 상한(구조 회귀만 잡는 여유).
-    const core_command_queue_ns = 500 * std.time.ns_per_ms;
+    // **이 항목은 러너 변동이 크다.** 같은 코드로 CI 두 번에 116ms / 269ms (2.3배)가 나왔다 —
+    // 회당 비용이 수십 ns 라 스케줄링·캐시 상태가 그대로 드러난다. 예산 500ms 면 나쁜 날에 54% 를
+    // 써서 조금만 더 흔들려도 제품과 무관하게 실패한다. 1000ms 로 둬 최악 실행에서도 27% 다.
+    // 그 대가로 감지력은 ~3.7배(최악 실행 기준)라 다른 항목(2.9~4.8배)과 같은 대역이다.
+    const core_command_queue_ns = 1000 * std.time.ns_per_ms;
 };
 
 pub fn main(init: std.process.Init) !void {

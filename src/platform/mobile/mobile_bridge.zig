@@ -4619,12 +4619,24 @@ pub export fn maru_mobile_atlas_count() u32 {
 /// 가로는 셀의 절반이므로 `상한/2 × 상한 × 4` 면 어떤 셀 크기에서도 든다.
 var synth_rgba: [(atlas_cell_max / 2) * atlas_cell_max * 4]u8 = undefined;
 
-pub export fn maru_mobile_synthesize(cp: u32, out: [*]u8, stride: u32) u32 {
+pub export fn maru_mobile_synthesize(cp: u32, out: [*]u8, stride: u32, cap: usize) u32 {
     const w = atlas_cell_w / 2;
     const h = atlas_cell_h;
     const rgba_stride = w * 4;
     if (@as(usize, rgba_stride) * h > synth_rgba.len) {
         setLastError("synth_slot_too_small");
+        return 0;
+    }
+    // **host 버퍼는 우리가 모른다 — 그러니 물어서 확인한다.** `out` 은 raw 포인터라 Zig 의 경계 검사가
+    // 없다. 셀 크기(`atlas_cell_w/h`)는 host 가 `maru_mobile_atlas_geometry` 로 바꾸는 **런타임 전역**이라,
+    // host 가 더 작은 셀을 전제로 잡아 둔 버퍼에 큰 셀을 쓰면 남의 메모리를 덮는다 — 조용히. 같은 부류의
+    // 조용함이 2026-09-13 CI 를 태웠다(길이를 크게 적어 인접 메모리를 읽던 자리).
+    if (w > stride) {
+        setLastError("synth_stride_too_small"); // 행이 제 stride 를 넘겨 다음 행을 침범한다
+        return 0;
+    }
+    if (@as(usize, stride) * h > cap) {
+        setLastError("synth_out_too_small");
         return 0;
     }
     const buf = synth_rgba[0 .. @as(usize, rgba_stride) * h];

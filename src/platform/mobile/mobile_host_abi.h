@@ -185,7 +185,7 @@ unsigned int maru_mobile_color_atlas_count(void);
 /// 브라유·파워라인은 maru 가 절차 합성해 셀을 가장자리까지 채운다(폰트 글리프는 셀에 안 맞아
 /// 끊기고 이음매가 보인다). 반환값은 잉크 픽셀 수이고 **0 이면 합성 대상이 아니다**(폰트로).
 /// 합성은 슬롯의 **왼쪽 절반**만 쓴다 — 대상이 전부 단폭이고 그리는 쪽도 절반만 샘플링한다.
-unsigned int maru_mobile_synthesize(unsigned int cp, unsigned char *out, unsigned int stride);
+unsigned int maru_mobile_synthesize(unsigned int cp, unsigned char *out, unsigned int stride, unsigned long cap);
 
 /// 다음 슬롯 — 상위 16비트=열, 하위 16비트=행.
 ///

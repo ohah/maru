@@ -318,6 +318,45 @@ pub fn dropAltScreenPlacements(self: *TerminalCore) void {
     }
 }
 
+/// `d=r`/`d=R` — id 가 [lo, hi] 인 **이미지**를 지운다. 소문자면 그 이미지들의 placement 만 거두고
+/// 대문자면 이미지 데이터까지 free 한다. 다른 타깃과 달리 **대상이 placement 가 아니라 이미지**라
+/// (명세: "Delete all images whose id is ...") 화면에 안 걸린 이미지도 걸린다.
+fn deleteImageIdRange(self: *TerminalCore, lo: u32, hi: u32, free_image: bool) void {
+    // 지울 id 를 먼저 모은다 — 순회 중 맵을 건드리면 iterator 가 무효가 된다.
+    var doomed: std.ArrayListUnmanaged(u32) = .empty;
+    defer doomed.deinit(self.allocator);
+    var it = self.kitty_images.map.keyIterator();
+    while (it.next()) |id| {
+        if (id.* >= lo and id.* <= hi) doomed.append(self.allocator, id.*) catch return; // OOM 이면 지운 만큼만
+    }
+    for (doomed.items) |id| {
+        removePlacementsForImage(self, id);
+        removeVirtualPlacements(self, id, 0);
+        if (free_image) {
+            self.kitty_images.remove(self.allocator, id);
+            forgetImageNumberFor(self, id);
+        }
+    }
+}
+
+/// `d=f`/`d=F` — 애니메이션 프레임(2..N)만 놓아준다. 루트 프레임(=이미지 픽셀)은 남으므로 그림은
+/// 계속 보이고 애니메이션만 멈춘다. 재생 상태도 함께 되돌린다 — 프레임이 없는데 `running` 으로
+/// 두면 `advanceAnimations` 가 매 tick 그 이미지를 헛돈다(frameCount()<2 로 걸러지긴 하지만,
+/// 「재생 중」이라는 관측 가능한 상태가 거짓이 된다).
+fn dropAnimationFrames(self: *TerminalCore, img: *KittyImage) void {
+    for (img.frames) |f| {
+        self.kitty_images.total_bytes -|= f.data.len; // 총량 회계에서 뺀다(프레임도 한도에 든다)
+        self.allocator.free(f.data);
+    }
+    if (img.frames.len > 0) self.allocator.free(img.frames);
+    img.frames = &.{};
+    img.current_frame = 1;
+    img.elapsed_ms = 0;
+    img.anim_state = .stopped;
+    img.loops_left = 0;
+    bumpGeneration(self, img); // 보이는 프레임이 루트로 돌아갔으므로 렌더가 다시 올려야 한다
+}
+
 /// 특정 image_id의 placement를 모두 제거한다(delete 시 이미지와 함께). 순서를 보존해(orderedRemove)
 /// 노출 순서를 결정적으로 둔다 — placement 수는 작아 비용이 무시할 만하다.
 fn removePlacementsForImage(self: *TerminalCore, image_id: u32) void {
@@ -885,6 +924,56 @@ fn placementCoversCell(self: *const TerminalCore, p: StoredPlacement, abs_row: u
     return col - p.anchor_col < span.cols;
 }
 
+/// placement 를 조건으로 지운다 — `d=c`/`p`/`q`/`x`/`y` 가 공유하는 몸통이다. 대문자(`free_image`)면
+/// 그 이미지 데이터까지 free 한다. 가상 placement(U=1)는 셀 좌표에 앵커가 없으므로(placeholder 셀이
+/// 자리를 정한다) **셀 기반 판정의 대상이 아니다** — 이미지를 free 할 때만 함께 거둔다.
+fn deletePlacementsWhere(
+    self: *TerminalCore,
+    free_image: bool,
+    ctx: anytype,
+    pred: fn (self: *const TerminalCore, p: StoredPlacement, ctx: @TypeOf(ctx)) bool,
+) void {
+    var i: usize = 0;
+    while (i < self.kitty_placements.items.len) {
+        const p = self.kitty_placements.items[i];
+        if (!pred(self, p, ctx)) {
+            i += 1;
+            continue;
+        }
+        _ = self.kitty_placements.orderedRemove(i);
+        if (free_image) {
+            removeVirtualPlacements(self, p.image_id, 0);
+            self.kitty_images.remove(self.allocator, p.image_id);
+            forgetImageNumberFor(self, p.image_id);
+        }
+    }
+}
+
+/// 명세의 셀 좌표는 **1-based** 다("x=1, y=1 is the top left cell"). 0 이나 미지정(0)은 좌표가
+/// 아니므로 그 축을 판정에서 빼지 않고 **명령을 거부한다** — 0 을 0-based 로 읽으면 엉뚱한 행/열을
+/// 지운다(조용한 오작동이 침묵보다 나쁘다).
+const CellTarget = struct { abs_row: usize, col: u16, z: ?i32 };
+
+fn cellPredicate(self: *const TerminalCore, p: StoredPlacement, t: CellTarget) bool {
+    if (t.z) |z| if (p.z != z) return false;
+    return placementCoversCell(self, p, t.abs_row, t.col);
+}
+
+const AxisTarget = struct { abs_row: ?usize, col: ?u16 };
+
+fn axisPredicate(self: *const TerminalCore, p: StoredPlacement, t: AxisTarget) bool {
+    const span = placementCellSpan(self, p);
+    if (t.abs_row) |row| {
+        if (row < p.anchor_row) return false;
+        if (row - p.anchor_row >= span.rows) return false;
+    }
+    if (t.col) |col| {
+        if (col < p.anchor_col) return false;
+        if (col - p.anchor_col >= span.cols) return false;
+    }
+    return true;
+}
+
 /// 커서가 놓인 셀을 덮는 placement 를 모두 지운다(`d=c`/`d=C`). 대문자면 그 placement 가 마지막
 /// 사용처였던 이미지 데이터까지 free 한다. 가상 placement(U=1)는 셀 좌표에 앵커가 없다 — 화면
 /// 텍스트의 placeholder 가 위치를 정한다 — 그래서 커서 판정 대상이 아니다.
@@ -1002,7 +1091,39 @@ fn kittyDelete(self: *TerminalCore, cmd: KittyGraphicsCommand) KittyStatus {
             }
         },
         'c' => deleteAtCursor(self, free_image), // 커서가 놓인 셀을 덮는 placement
-        else => return .enotsupp, // p/q/x/y/r/f 는 미지원
+        'p', 'q' => { // 특정 셀(그리고 `q` 는 z-index 까지)을 덮는 placement
+            // 좌표는 1-based 다. 0 은 「좌표가 아니다」이므로 거부한다 — 0-based 로 읽으면 엉뚱한
+            // 셀을 지운다. `q` 는 `z` 를 **반드시** 쓰지만 z=0 은 유효한 z-index 라 존재 검사를 못 한다
+            // (명세도 기본값 0 이다) — 그래서 z 는 그대로 쓰고 셀 좌표만 검증한다.
+            if (cmd.src_x == 0 or cmd.src_y == 0) return .einval;
+            const col: u16 = @intCast(@min(cmd.src_x - 1, std.math.maxInt(u16)));
+            const abs_row = self.screen.sb.count + (cmd.src_y - 1);
+            deletePlacementsWhere(self, free_image, CellTarget{
+                .abs_row = abs_row,
+                .col = col,
+                .z = if (target == 'q') cmd.z else null,
+            }, cellPredicate);
+        },
+        'x' => { // 그 열을 덮는 placement 전부
+            if (cmd.src_x == 0) return .einval;
+            const col: u16 = @intCast(@min(cmd.src_x - 1, std.math.maxInt(u16)));
+            deletePlacementsWhere(self, free_image, AxisTarget{ .abs_row = null, .col = col }, axisPredicate);
+        },
+        'y' => { // 그 행을 덮는 placement 전부
+            if (cmd.src_y == 0) return .einval;
+            const abs_row = self.screen.sb.count + (cmd.src_y - 1);
+            deletePlacementsWhere(self, free_image, AxisTarget{ .abs_row = abs_row, .col = null }, axisPredicate);
+        },
+        'r' => { // id 범위 [x, y] 의 **이미지**를 지운다(placement 가 아니라 이미지가 대상이다)
+            if (cmd.src_x == 0 or cmd.src_y < cmd.src_x) return .einval;
+            deleteImageIdRange(self, cmd.src_x, cmd.src_y, free_image);
+        },
+        'f' => { // 애니메이션 프레임만 지운다 — 이미지(루트 프레임)는 남는다
+            if (cmd.image_id == 0) return .einval;
+            const img = self.kitty_images.map.getPtr(cmd.image_id) orelse return .enoent;
+            dropAnimationFrames(self, img);
+        },
+        else => return .enotsupp, // 명세에 없는 타깃
     }
     // 부모가 사라졌으면 그것을 기준으로 놓인 relative placement 도 함께 거둔다(명세의 수명 연동).
     removeOrphanedRelatives(self);

@@ -169,6 +169,18 @@ pub const Tab = struct {
     // 고정점·옛 파일 flat 정상) 옛 리더가 미지 키로 skip하는 forward-compat도 유지한다. reader는 없으면 false. 비마커 leaf
     // 카드에만 의미(마커·최상위-run 뒷카드는 위치 파생). 전 탭 false면 byte-identical. 기본 false.
     top_level: bool = false,
+    // 카드 하위 Term 목록(사이드바 세션 목록)이 접혔는가 — docs/sidebar-agent-list.md §4. 목록 대상이 에이전트 전수에서
+    // **Term 전수**로 넓어진 뒤로(§2) 행 구성은 바로 이 파일이 복원하는 Term들이라, 접힘 값과 행 수가 같은 파일에서
+    // 함께 복원된다(그래서 영속한다 — 2026-09-13 사용자 결정).
+    //
+    // **파일에서의 기본값은 「접힘」이다**(다른 bool 스칼라들과 반대 방향 — 2026-09-13 사용자 결정). 키가 없는 줄
+    // (이 필드 이전에 쓰인 옛 파일, 구버전이 덮어쓴 파일)은 **접힌 것으로** 읽는다. 그래서 writer는 접힘일 때 키를
+    // **생략**하고 펼침일 때만 `agents-collapsed=0`을 쓴다 — 생략=기본값 규율은 그대로고(옛 파일 round-trip 고정점),
+    // 옛 리더가 미지 키로 skip하는 forward-compat도 그대로다. 구조체 기본값(false=펼침)은 **모델 쪽 기본**이라
+    // 파일 기본과 다르다: 명시 안 한 Tab 리터럴·새 워크스페이스는 펼침(§1)이고, 파일에 쓸 때 `=0`으로 박힌다.
+    //
+    // 토글 행이 안 생기는 카드(에이전트 0 + Term 1개)에서 어떤 값으로 읽히든 무해하다 — 렌더가 행 존재로 게이트한다.
+    agents_collapsed: bool = false,
     tree: []const TreeNode, // preorder; leaf의 pane 인덱스가 panes를 가리킨다
     panes: []const Pane,
 };
@@ -447,6 +459,11 @@ fn writeTab(w: *std.Io.Writer, tab: Tab) !void {
     // §2.1 재설계 서브파티션 마커(top-level, §14). group_start와 무관하게 밖에서 쓴다. false면 키 생략(additive·
     // key-addressed — 옛 파일/비-top-level 카드의 라인 문자열을 안 바꿔 round-trip 고정점·양쪽 호환). true면 스칼라.
     if (tab.top_level) try w.writeAll(" top-level=1");
+    // 카드 하위 Term 목록 접힘(docs/sidebar-agent-list.md §4). 그룹 접힘(group-collapsed)과 **다른 축**이라
+    // group_start와 무관하게 밖에서 쓴다. 이 키만 **접힘이 파일 기본값**이라 생략 방향이 반대다(§Tab 주석): 접힘이면
+    // 키 생략(키 없는 옛 줄 = 접힘이므로 round-trip 고정점), 펼침이면 `agents-collapsed=0`을 명시한다. 옛 리더는
+    // 어느 쪽이든 미지 키로 skip한다(양쪽 호환).
+    if (!tab.agents_collapsed) try w.writeAll(" agents-collapsed=0");
     try w.writeByte('\n');
     for (tab.tree) |node| try writeTreeNode(w, node);
     for (tab.panes) |pane| try writePane(w, pane);
@@ -830,6 +847,10 @@ fn parseTab(a: std.mem.Allocator, lines: *LineIter, limits: *ParseLimits) ParseE
     // §2.1 재설계 서브파티션 마커(top-level, §14). additive 스칼라라 없으면 false. 비마커 leaf 카드에만 의미 — 렌더/파생이
     // 위치·group_start로 게이트하므로 그 밖 탭에서 true로 읽혀도 무해(7 파생 경계 리셋/break만 반응, 전역 파티션 무관).
     const top_level = (try f.getUint("top-level", u8, 0)) != 0;
+    // 카드 하위 Term 목록 접힘(docs/sidebar-agent-list.md §4). **기본값이 1(접힘)인 유일한 스칼라**다 — 키가 없는 줄은
+    // 이 필드를 모르던 버전이 쓴 것이라 사용자 의도가 없고, 그때는 접어 둔다(2026-09-13 사용자 결정). 펼침은 writer가
+    // `=0`으로 명시한다. 토글 행이 없는 카드에서 어떤 값으로 읽혀도 무해(렌더가 행 존재로 게이트).
+    const agents_collapsed = (try f.getUint("agents-collapsed", u8, 1)) != 0;
 
     var tree: std.ArrayList(TreeNode) = .empty;
     // 구조 불변식: pane P개 탭의 split 트리는 leaf P + split (P−1) = 정확히 2P−1 노드다. 그보다 많이 읽히면
@@ -839,7 +860,7 @@ fn parseTab(a: std.mem.Allocator, lines: *LineIter, limits: *ParseLimits) ParseE
     var panes: std.ArrayList(Pane) = .empty;
     var i: usize = 0;
     while (i < pane_count) : (i += 1) try panes.append(a, try parsePane(a, lines, limits));
-    return .{ .active_pane = active_pane, .custom_name = custom_name, .pinned = pinned, .background_color = background_color, .accent_color = accent_color, .group_start = group_start, .group_collapsed = group_collapsed, .group_depth = group_depth, .group_color = group_color, .local_pinned = local_pinned, .top_level = top_level, .tree = try tree.toOwnedSlice(a), .panes = try panes.toOwnedSlice(a) };
+    return .{ .active_pane = active_pane, .custom_name = custom_name, .pinned = pinned, .background_color = background_color, .accent_color = accent_color, .group_start = group_start, .group_collapsed = group_collapsed, .group_depth = group_depth, .group_color = group_color, .local_pinned = local_pinned, .top_level = top_level, .agents_collapsed = agents_collapsed, .tree = try tree.toOwnedSlice(a), .panes = try panes.toOwnedSlice(a) };
 }
 
 /// 한 subtree를 preorder로 읽어 out에 append(self-delimiting). split는 뒤따르는 두 subtree(a,b)를 재귀로 소비.
@@ -1242,7 +1263,7 @@ test "workspace serialize: 단일 창/탭/pane/surface" {
 
     try std.testing.expect(std.mem.indexOf(u8, text, "maru.workspace.v1\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "window tabs=1 active-tab=0\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "tab panes=1 active-pane=0 custom-name=\"work\" pinned=0 background-color=0 accent-color=0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "tab panes=1 active-pane=0 custom-name=\"work\" pinned=0 background-color=0 accent-color=0 agents-collapsed=0\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "tree-node leaf pane=0\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "pane surfaces=1 active-term=0 custom-name=\"\"\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "surface custom-name=\"\" title=\"app shell\" cwd=\"/home/user/proj\" command=\"/bin/zsh\" cols=80 rows=24\n") != null);
@@ -1371,7 +1392,7 @@ test "workspace serialize: split 트리(중첩) + 멀티 pane" {
     const text = try serialize(std.testing.allocator, .{ .windows = &windows });
     defer std.testing.allocator.free(text);
 
-    try std.testing.expect(std.mem.indexOf(u8, text, "tab panes=3 active-pane=2 custom-name=\"split\" pinned=0 background-color=0 accent-color=0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "tab panes=3 active-pane=2 custom-name=\"split\" pinned=0 background-color=0 accent-color=0 agents-collapsed=0\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "tree-node split horizontal ratio=500\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "tree-node split vertical ratio=300\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "tree-node leaf pane=2\n") != null);
@@ -1753,7 +1774,7 @@ test "workspace round-trip: tab pinned·background_color·accent_color 보존" {
 
     const text = try serialize(std.testing.allocator, .{ .windows = &windows });
     defer std.testing.allocator.free(text);
-    try std.testing.expect(std.mem.indexOf(u8, text, "pinned=1 background-color=14524766 accent-color=4881348\n") != null); // 0xDDA15E=14524766, 0x4A7BC4=4881348
+    try std.testing.expect(std.mem.indexOf(u8, text, "pinned=1 background-color=14524766 accent-color=4881348 agents-collapsed=0\n") != null); // 0xDDA15E=14524766, 0x4A7BC4=4881348
 
     var parsed = try parse(std.testing.allocator, text);
     defer parsed.deinit();
@@ -1761,6 +1782,47 @@ test "workspace round-trip: tab pinned·background_color·accent_color 보존" {
     try std.testing.expectEqual(true, tab.pinned);
     try std.testing.expectEqual(@as(u32, 0xDDA15E), tab.background_color);
     try std.testing.expectEqual(@as(u32, 0x4A7BC4), tab.accent_color);
+}
+
+test "workspace round-trip: tab agents_collapsed 보존(카드 하위 Term 목록 접힘)" {
+    // docs/sidebar-agent-list.md §4. 그룹 접힘(group-collapsed)과 **다른 축**이라 group-start 없는 탭에도 실린다.
+    // 이 키만 생략 방향이 반대다: **접힘이 파일 기본값**이라 접힘이면 키 생략, 펼침이면 `agents-collapsed=0` 명시.
+    const surfaces = [_]Surface{.{ .command = "/bin/zsh", .cols = 80, .rows = 24 }};
+    const panes = [_]Pane{.{ .surfaces = &surfaces }};
+    const tree = [_]TreeNode{.{ .leaf = 0 }};
+    const tabs = [_]Tab{
+        .{ .custom_name = "web", .agents_collapsed = true, .tree = &tree, .panes = &panes },
+        .{ .custom_name = "docs", .tree = &tree, .panes = &panes }, // 모델 기본 = 펼침 → `=0` 명시
+    };
+    const windows = [_]Window{.{ .tabs = &tabs }};
+
+    const text = try serialize(std.testing.allocator, .{ .windows = &windows });
+    defer std.testing.allocator.free(text);
+    // 접힌 탭은 accent-color=0 바로 뒤 개행 — 키가 안 붙는다(키 없는 옛 줄과 같은 뜻이라 round-trip 고정점).
+    try std.testing.expect(std.mem.indexOf(u8, text, "custom-name=\"web\" pinned=0 background-color=0 accent-color=0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "custom-name=\"docs\" pinned=0 background-color=0 accent-color=0 agents-collapsed=0\n") != null);
+
+    var parsed = try parse(std.testing.allocator, text);
+    defer parsed.deinit();
+    try std.testing.expectEqual(true, parsed.workspace.windows[0].tabs[0].agents_collapsed);
+    try std.testing.expectEqual(false, parsed.workspace.windows[0].tabs[1].agents_collapsed); // `=0` 명시 → 펼침
+
+    // 하위호환: 이 키를 모르던 버전이 쓴 줄(키 없음)은 **접힘**으로 읽는다(사용자 의도가 없는 값이라 접어 둔다).
+    const legacy =
+        header ++ "\n" ++
+        "window tabs=1 active-tab=0\n" ++
+        "tab panes=1 custom-name=\"legacy\"\n" ++ // agents-collapsed 없음(구버전)
+        "tree-node leaf pane=0\n" ++
+        "pane surfaces=1 custom-name=\"\"\n" ++
+        "surface custom-name=\"\" title=\"\" cwd=\"/w\" command=\"/bin/zsh\" cols=100 rows=30\n";
+    var lp = try parse(std.testing.allocator, legacy);
+    defer lp.deinit();
+    try std.testing.expectEqual(true, lp.workspace.windows[0].tabs[0].agents_collapsed);
+
+    // 그 옛 줄을 다시 쓰면 키가 안 붙는다 — 접힘이 파일 기본값이라 고정점이 유지된다(파일이 안 자란다).
+    const rewritten = try serialize(std.testing.allocator, lp.workspace);
+    defer std.testing.allocator.free(rewritten);
+    try std.testing.expect(std.mem.indexOf(u8, rewritten, "agents-collapsed") == null);
 }
 
 test "workspace round-trip: tab group_start·group_collapsed 보존(위치 파생 그룹 마커)" {
@@ -1779,9 +1841,9 @@ test "workspace round-trip: tab group_start·group_collapsed 보존(위치 파�
     const text = try serialize(std.testing.allocator, .{ .windows = &windows });
     defer std.testing.allocator.free(text);
     // 그룹 시작 탭(web)만 group-start/group-collapsed를 낸다.
-    try std.testing.expect(std.mem.indexOf(u8, text, "custom-name=\"web\" pinned=0 background-color=0 accent-color=0 group-start=\"frontend\" group-collapsed=1\n") != null);
-    // 마커 없는 탭(docs)은 accent-color=0 바로 뒤 개행 — group-start 키가 안 붙는다.
-    try std.testing.expect(std.mem.indexOf(u8, text, "custom-name=\"docs\" pinned=0 background-color=0 accent-color=0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "custom-name=\"web\" pinned=0 background-color=0 accent-color=0 group-start=\"frontend\" group-collapsed=1 agents-collapsed=0\n") != null);
+    // 마커 없는 탭(docs)은 group-start 키가 안 붙고, 목록 펼침이라 agents-collapsed=0으로 끝난다.
+    try std.testing.expect(std.mem.indexOf(u8, text, "custom-name=\"docs\" pinned=0 background-color=0 accent-color=0 agents-collapsed=0\n") != null);
 
     var parsed = try parse(std.testing.allocator, text);
     defer parsed.deinit();
@@ -1819,11 +1881,11 @@ test "workspace round-trip: tab group_color 보존(SG5-2 — 비영은 group-col
     const text = try serialize(std.testing.allocator, .{ .windows = &windows });
     defer std.testing.allocator.free(text);
     // 색 있는 그룹: group-collapsed 뒤에 group-color=4881348.
-    try std.testing.expect(std.mem.indexOf(u8, text, "group-start=\"frontend\" group-collapsed=0 group-color=4881348\n") != null);
-    // 색 없는 그룹: group-collapsed=0 바로 뒤 개행(group-color 키 없음).
-    try std.testing.expect(std.mem.indexOf(u8, text, "group-start=\"backend\" group-collapsed=0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "group-start=\"frontend\" group-collapsed=0 group-color=4881348 agents-collapsed=0\n") != null);
+    // 색 없는 그룹: group-collapsed=0 뒤에 group-color 키 없이 agents-collapsed=0(목록 펼침)만 붙는다.
+    try std.testing.expect(std.mem.indexOf(u8, text, "group-start=\"backend\" group-collapsed=0 agents-collapsed=0\n") != null);
     // 소속 카드(docs)에는 group-color가 안 붙는다(그룹 시작 아님).
-    try std.testing.expect(std.mem.indexOf(u8, text, "custom-name=\"docs\" pinned=0 background-color=0 accent-color=0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "custom-name=\"docs\" pinned=0 background-color=0 accent-color=0 agents-collapsed=0\n") != null);
 
     var parsed = try parse(std.testing.allocator, text);
     defer parsed.deinit();
@@ -1859,10 +1921,10 @@ test "workspace round-trip: tab group_depth 보존(SG5-3 중첩 — >1은 group-
 
     const text = try serialize(std.testing.allocator, .{ .windows = &windows });
     defer std.testing.allocator.free(text);
-    // 부모(depth 1): group-collapsed=0 바로 뒤 개행(group-depth 키 없음).
-    try std.testing.expect(std.mem.indexOf(u8, text, "group-start=\"parent\" group-collapsed=0\n") != null);
+    // 부모(depth 1): group-collapsed=0 뒤에 group-depth 키 없이 agents-collapsed=0(목록 펼침)만 붙는다.
+    try std.testing.expect(std.mem.indexOf(u8, text, "group-start=\"parent\" group-collapsed=0 agents-collapsed=0\n") != null);
     // 자식(depth 2): group-collapsed 뒤에 group-depth=2.
-    try std.testing.expect(std.mem.indexOf(u8, text, "group-start=\"child\" group-collapsed=0 group-depth=2\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "group-start=\"child\" group-collapsed=0 group-depth=2 agents-collapsed=0\n") != null);
 
     var parsed = try parse(std.testing.allocator, text);
     defer parsed.deinit();
@@ -1899,9 +1961,9 @@ test "workspace round-trip: tab local_pinned 보존(GL §13 — true는 local-pi
     const text = try serialize(std.testing.allocator, .{ .windows = &windows });
     defer std.testing.allocator.free(text);
     // 로컬 pin 멤버(docs): accent-color=0 바로 뒤에 local-pinned=1(그룹 마커가 아니라 group-* 키가 안 붙는다).
-    try std.testing.expect(std.mem.indexOf(u8, text, "custom-name=\"docs\" pinned=0 background-color=0 accent-color=0 local-pinned=1\n") != null);
-    // 비-로컬-pin 멤버(api): accent-color=0 바로 뒤 개행(local-pinned 키 없음).
-    try std.testing.expect(std.mem.indexOf(u8, text, "custom-name=\"api\" pinned=0 background-color=0 accent-color=0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "custom-name=\"docs\" pinned=0 background-color=0 accent-color=0 local-pinned=1 agents-collapsed=0\n") != null);
+    // 비-로컬-pin 멤버(api): local-pinned 키가 안 붙고 agents-collapsed=0(목록 펼침)으로 끝난다.
+    try std.testing.expect(std.mem.indexOf(u8, text, "custom-name=\"api\" pinned=0 background-color=0 accent-color=0 agents-collapsed=0\n") != null);
 
     var parsed = try parse(std.testing.allocator, text);
     defer parsed.deinit();
@@ -1938,9 +2000,9 @@ test "workspace round-trip: tab top_level 보존(§2.1 재설계 §14 — true�
     const text = try serialize(std.testing.allocator, .{ .windows = &windows });
     defer std.testing.allocator.free(text);
     // top-level 카드(top): accent-color=0 바로 뒤에 top-level=1(그룹 마커가 아니라 group-* 키가 안 붙는다).
-    try std.testing.expect(std.mem.indexOf(u8, text, "custom-name=\"top\" pinned=0 background-color=0 accent-color=0 top-level=1\n") != null);
-    // 비-top 멤버(docs): accent-color=0 바로 뒤 개행(top-level 키 없음).
-    try std.testing.expect(std.mem.indexOf(u8, text, "custom-name=\"docs\" pinned=0 background-color=0 accent-color=0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "custom-name=\"top\" pinned=0 background-color=0 accent-color=0 top-level=1 agents-collapsed=0\n") != null);
+    // 비-top 멤버(docs): top-level 키가 안 붙고 agents-collapsed=0(목록 펼침)으로 끝난다.
+    try std.testing.expect(std.mem.indexOf(u8, text, "custom-name=\"docs\" pinned=0 background-color=0 accent-color=0 agents-collapsed=0\n") != null);
 
     var parsed = try parse(std.testing.allocator, text);
     defer parsed.deinit();

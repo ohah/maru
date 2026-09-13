@@ -599,7 +599,7 @@ pub fn focusAgentRow(self: *AppSession, tab_index: usize, pane_index: usize, ter
 }
 
 /// 카드 아래에 붙는 **세션 목록 행**(에이전트 + 일반 터미널)을 방출한다: `N sessions` 토글 + (펼쳐졌으면) 행들.
-/// 접힘은 `tab.agents_collapsed`가 든다(비영속, §4).
+/// 접힘은 `tab.agents_collapsed`가 든다(workspace.v1 영속 — §4. 파일에 키가 없으면 접힘으로 읽는다).
 ///
 /// **목록을 낼지 말지**(사용자 결정 2026-08-11 — docs/sidebar-agent-list.md §1):
 ///   - 에이전트가 하나라도 있으면 **Term이 1개여도** 목록을 낸다. 접기는 개수가 아니라 "이 카드를 지금 얼마나

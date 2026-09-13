@@ -1453,6 +1453,8 @@ pub fn captureWorkspaceTab(self: *AppSession, arena: std.mem.Allocator, tab: *Ta
         .group_color = tab.group_color, // 그룹 공통 색(SG5-2) — 그룹 시작 탭에만 의미(무색=0)
         .local_pinned = tab.local_pinned, // 그룹-로컬 pin(GL §13) — 멤버 카드에만 의미(기본 false)
         .top_level = tab.top_level, // §2.1 재설계 서브파티션 마커(§14) — 비마커 leaf 카드에만 의미(기본 false)
+        // 카드 하위 Term 목록 접힘(docs/sidebar-agent-list.md §4) — 토글 행이 생기는 카드에만 의미(기본 false).
+        .agents_collapsed = tab.agents_collapsed,
         .tree = try tree.toOwnedSlice(arena),
         .panes = try panes.toOwnedSlice(arena),
     };
@@ -1548,6 +1550,8 @@ pub fn buildWorkspaceTab(self: *AppSession, m: maru.session.workspace.Tab) !*Tab
     tab.group_color = m.group_color; // 그룹 공통 색 복원(SG5-2) — 무색=0 폴백
     tab.local_pinned = m.local_pinned; // 그룹-로컬 pin 복원(GL §13) — 멤버 카드 subtree-로컬 float 상태(기본 false)
     tab.top_level = m.top_level; // §2.1 재설계 서브파티션 마커 복원(§14) — 비마커 leaf 카드의 최상위 복귀 신호(기본 false)
+    // 카드 하위 Term 목록 접힘 복원(docs/sidebar-agent-list.md §4) — 토글 행이 안 생기면 값은 안 쓰인다(기본 false)
+    tab.agents_collapsed = m.agents_collapsed;
     // 워크스페이스 사용자 rename 복원 — 마지막 fallible 단계. OOM 시 위 errdefer(panes·tab·group_start)가 정리한다.
     tab.custom_name = try self.dupeCustomName(m.custom_name);
     tab.pinned = m.pinned; // 위치 고정 복원

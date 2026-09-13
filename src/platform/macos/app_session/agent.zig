@@ -1900,6 +1900,9 @@ pub fn consumeRemoteAgentLines(self: *AppSession, term: *Term, lines: []const []
             // `recordRemoteCursors` 가 한 곳에서 한다.
             .heartbeat, .ignored, .cursor => {},
             .event => |e| {
+                // **본 횟수를 센다.** 비교가 안 일어나는 것과 안 맞는 것은 원인이 아주 다른데,
+                // 지금까지 로그로는 구분할 수 없었다(2026-09-13).
+                self.remote_events_seen +|= 1;
                 // **우리 pane 의 것만 먹는다.** 채널은 host 당 하나라(RA4) 여러 pane 이 섞여 온다.
                 // 형태 검증(경로 문자·대문자 등)은 채널이 이미 했다(`parseFrame`). 여기서는 **우리
                 // 것인가**만 본다 — 발급할 때 쓴 값과 바이트가 같아야 한다.

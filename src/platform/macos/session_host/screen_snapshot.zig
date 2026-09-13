@@ -1589,3 +1589,145 @@ test "screen delta: attach 뒤에 등록된 U=1 격자가 delta 로 client 에 �
         try std.testing.expect(s.header.kind != .image_virtual);
     }
 }
+
+fn deltaHasKind(bytes: []const u8, want: screen_stream.RecordKind) !bool {
+    var rs = screen_stream.RecordStream{ .bytes = bytes };
+    while (try rs.next()) |rec| {
+        const s = try screen_stream.RecordStream.split(rec);
+        if (s.header.kind == want) return true;
+    }
+    return false;
+}
+
+// **attach 뒤에 움직인 축은 전부 delta 로 client 에 닿아야 한다.**
+//
+// 이 판정자가 생긴 이유: `image_virtual`(U=1 격자)이 레코드 정의에 「snapshot·delta 공용」이라고
+// **선언돼 있는데도** delta 로는 한 번도 안 나갔다. attach 시점 snapshot 에 없던 격자는 영영 안
+// 들어와서, 라이브에서 placeholder 이미지가 두부 글리프로 떴다(#3640). 축 하나가 조용히 빠져도
+// 다른 판정자는 전부 초록이었다 — 각 축을 **따로** 보는 판정자만 있었기 때문이다.
+//
+// 그래서 축을 **한자리에서 전수로** 몬다. 새 레코드 종류를 더하면 이 표에 줄을 더해야 하고,
+// 안 더하면 「delta 로 흐르는가」를 아무도 안 묻는 축이 다시 생긴다.
+//
+// **byte 등가로 보지 않는다.** `ScreenAssembler.toSnapshot` 은 meta+row 만 재방출하는 부분
+// 재구성이고(설계상 그렇다), 헤더의 generation/sequence 도 섞인다 — 그걸로 비교하면 멀쩡한 축이
+// 빨갛게 나온다(실측으로 확인하고 이 방식으로 바꿨다). 축마다 그 축의 상태를 직접 읽는다.
+test "screen delta: attach 뒤 움직인 모든 축이 delta 로 client 에 닿는다 (전수)" {
+    const allocator = std.testing.allocator;
+    const Axis = enum { text, cursor, modes, scroll, image_pixels, placement, virtual_placement, prompt, link, image_gone };
+    const expect_kind = std.EnumArray(Axis, screen_stream.RecordKind).init(.{
+        .text = .set_runs,
+        .cursor = .cursor,
+        .modes = .modes,
+        .scroll = .scroll_state,
+        .image_pixels = .image_blob,
+        .placement = .image_place,
+        .virtual_placement = .image_virtual,
+        .prompt = .prompt_marks,
+        .link = .link_spans,
+        .image_gone = .image_remove,
+    });
+
+    // **새 레코드 종류가 생기면 이 표에 줄이 하나 늘어야 한다.** 안 그러면 「delta 로 흐르는가」를
+    // 아무도 안 묻는 축이 조용히 또 생긴다 — `image_virtual` 이 정확히 그렇게 빠져 있었다.
+    // 여기 없는 종류는 **왜 없는지**를 아래 목록이 이름으로 밝혀야 한다.
+    {
+        const not_producer_emitted = [_]screen_stream.RecordKind{
+            .screen_meta, // snapshot 전용(delta 는 scroll_state 로 나른다)
+            .row, // snapshot 전용(delta 는 set_runs)
+            .image_placement, // snapshot 대역(delta 는 image_place)
+            .image_blob, // 아래 image_pixels 축이 본다 — snapshot·delta 공용이라 두 대역에 다 있다
+            .clear_rect, // producer 미방출(§12 — 지금은 set_runs 가 전부를 덮는다)
+            .scroll_rect, // producer 미방출(같은 이유)
+        };
+        for (std.enums.values(screen_stream.RecordKind)) |kind| {
+            var classified = false;
+            for (std.enums.values(Axis)) |axis| {
+                if (expect_kind.get(axis) == kind) classified = true;
+            }
+            for (not_producer_emitted) |k| {
+                if (k == kind) classified = true;
+            }
+            if (!classified) {
+                std.debug.print("\n레코드 종류 {s} 가 축 표에도 예외 목록에도 없다 — delta 로 흐르는지 아무도 안 묻는다\n", .{@tagName(kind)});
+                return error.TestUnexpectedResult;
+            }
+        }
+    }
+
+    for (std.enums.values(Axis)) |axis| {
+        var core = try terminal.TerminalCore.init(allocator, .{ .cols = 40, .rows = 8 });
+        defer core.deinit();
+        core.setCellMetrics(10, 20);
+        var b64: [32]u8 = undefined;
+        var seq: [128]u8 = undefined;
+        const raw = [_]u8{ 3, 4, 5, 255 } ** 4;
+        const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
+
+        // attach 시점 사전 상태(축마다 다르다 — 「사라짐」을 보려면 먼저 있어야 한다).
+        switch (axis) {
+            .image_pixels, .placement, .virtual_placement, .image_gone => {
+                try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=4,q=2;{s}\x1b\\", .{b64s}));
+                if (axis == .image_gone) try core.write("\x1b_Ga=p,i=4,c=1,r=1,q=2\x1b\\");
+            },
+            else => {},
+        }
+        const base = try projectSnapshot(allocator, &core, .{ .generation = 1 });
+        defer allocator.free(base);
+        var asm_ = screen_assembler.ScreenAssembler.init(allocator);
+        defer asm_.deinit();
+        try asm_.applySnapshot(base);
+
+        // attach **뒤에** 그 축을 움직인다 — 실제 셸이 하는 일의 순서다.
+        switch (axis) {
+            .text => try core.write("hello axis"),
+            .cursor => try core.write("\x1b[4;9H"),
+            .modes => try core.write("\x1b[?1h"),
+            .scroll => {
+                for (0..20) |_| try core.write("line\r\n");
+                core.view_offset = 3;
+            },
+            .image_pixels => try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=9,q=2;{s}\x1b\\", .{b64s})),
+            .placement => try core.write("\x1b_Ga=p,i=4,c=1,r=1,q=2\x1b\\"),
+            .virtual_placement => try core.write("\x1b_Ga=p,i=4,U=1,c=1,r=1,q=2\x1b\\"),
+            .prompt => try core.write("\x1b]133;A\x1b\\prompt"),
+            .link => try core.write("see https://example.com/x here"),
+            .image_gone => try core.write("\x1b_Ga=d,d=I,i=4,q=2\x1b\\"),
+        }
+
+        var res = try computeDelta(allocator, base, &core, .{ .generation = 1, .sequence = 1 });
+        defer res.deinit(allocator);
+        // ① 그 축의 레코드가 delta 에 실렸는가.
+        try std.testing.expect(try deltaHasKind(res.delta, expect_kind.get(axis)));
+        try asm_.applyDelta(res.delta);
+
+        // ② client 상태가 실제로 그 변화를 반영하는가 — 「실렸다」는 값이 맞다는 뜻이 아니다.
+        switch (axis) {
+            .text => {
+                var found = false;
+                for (asm_.rowRuns(0)) |run| {
+                    if (std.mem.indexOf(u8, run.grapheme, "h") != null) found = true;
+                }
+                try std.testing.expect(found);
+            },
+            .cursor => {
+                try std.testing.expectEqual(@as(u16, 3), asm_.cursor.row);
+                try std.testing.expectEqual(@as(u16, 8), asm_.cursor.col);
+            },
+            .modes => try std.testing.expect(asm_.modes != 0),
+            .scroll => try std.testing.expectEqual(@as(u32, 3), asm_.view_offset),
+            .image_pixels => try std.testing.expect(asm_.imageById(9) != null),
+            .placement => try std.testing.expectEqual(@as(usize, 1), asm_.imagePlacements().len),
+            .virtual_placement => try std.testing.expectEqual(@as(usize, 1), asm_.imageVirtualPlacements().len),
+            .prompt => {
+                var marked = false;
+                for (asm_.promptMarks()) |m| if (m.kind != 0) {
+                    marked = true;
+                };
+                try std.testing.expect(marked);
+            },
+            .link => try std.testing.expect(asm_.linkSpans().len > 0),
+            .image_gone => try std.testing.expect(asm_.imageById(4) == null),
+        }
+    }
+}

@@ -47,6 +47,11 @@
 > `SIGKILL`은 실패 정리에만 쓰인다. ⚠️ 덮지 않는 것: live runtime이
 > 있는 최신 멀티 윈도우 checkpoint의 강제 종료 복원(R7), GUI 부재 중 알림(OS 배너), Developer ID artifact.
 
+> Developer ID tombstone 경로는 `release.yml`의 `session host tombstone product` job까지 배선됐다. exact-attempt
+> DMG를 read-only mount하고 그 안의 `Maru.app`만 두 번 정상 Quit시켜 canonical
+> `maru.session-host-signed-tombstone-relaunch.v1` leaf와 attestation bundle을 만든다. 현재 source/codec/runner gate는
+> 구현됐지만 hosted same-attempt verifier와 provisioned tag 실행은 아직 완료 조건에 포함되지 않는다.
+
 > **host launch 실패 즉시 감지(P3-d2d, 2026-08-25):** double-fork 는 손자를 orphan 으로 만들어 부모에게
 > `waitpid` 할 자식이 없다. 그래서 `execv` 실패를 **알 방법이 아예 없었고**, 호출부가 재시도 예산
 > (150 × 20ms)을 통째로 문 뒤 `startup_timeout` 으로 끝냈다 — **실측 4123 ms**(파일은 있는데 실행이 안 되는

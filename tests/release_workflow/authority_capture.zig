@@ -84,7 +84,7 @@ test "릴리스 워크플로: 신뢰 획득 단계가 체크아웃보다 **앞**
     try std.testing.expectEqual(@as(usize, 5), countExactLines(text, "    runs-on: macos-15"));
     try std.testing.expectEqual(@as(usize, 5), countExactLines(text, "      - name: Capture trusted GitHub CLI before checkout"));
     try std.testing.expectEqual(@as(usize, 4), countExactLines(text, "        id: trusted-gh"));
-    try std.testing.expectEqual(@as(usize, 6), countMatchingLines(text, pinned_checkout));
+    try std.testing.expectEqual(@as(usize, 7), countMatchingLines(text, pinned_checkout));
     // release writer, checkout 없는 timing observer, read-only verifier들이 각각 runner-provided gh를 찾는다.
     try std.testing.expectEqual(@as(usize, 6), countMatchingLines(text, "command -v gh"));
 
@@ -249,7 +249,7 @@ test "live 릴리스 워크플로: top-level은 권위 캡처 뒤 local caller �
     const text = try readWorkflow(arena_state.allocator());
 
     try std.testing.expectEqual(@as(usize, 0), countExactLines(text, "permissions:"));
-    try std.testing.expectEqual(@as(usize, 7), countExactLines(text, "    permissions:"));
+    try std.testing.expectEqual(@as(usize, 8), countExactLines(text, "    permissions:"));
     try std.testing.expectEqual(@as(usize, 1), countExactLines(text, "      contents: write # GitHub Release 생성/업로드"));
     try std.testing.expectEqual(@as(usize, 1), countExactLines(text, "      id-token: write # artifact attestation OIDC"));
     try std.testing.expectEqual(@as(usize, 1), countExactLines(text, "      attestations: write # artifact attestation publication"));
@@ -292,11 +292,35 @@ test "live 릴리스 워크플로: top-level은 권위 캡처 뒤 local caller �
     try std.testing.expectEqual(@as(usize, 0), countMatchingLines(live_block, "GH_TOKEN"));
     try std.testing.expectEqual(@as(usize, 0), countMatchingLines(live_block, "profile:"));
 
-    try std.testing.expectEqual(@as(usize, 5), countMatchingLines(text, "zig build"));
+    try std.testing.expectEqual(@as(usize, 6), countMatchingLines(text, "zig build"));
     try std.testing.expectEqual(@as(usize, 3), countMatchingLines(text, "\"$TRUSTED_ZIG\" build"));
     const signed_block = blockUntil(text, "      - name: Build signed + notarized universal dmg", "      - name: Build session host live release executables") orelse
         return error.SignedBuildBlockMissing;
     try std.testing.expectEqual(@as(usize, 1), countMatchingLines(signed_block, "ZIG: ${{ steps.trusted-zig.outputs.path }}"));
+}
+
+test "R1 tombstone 제품 job은 exact DMG mount와 token-free normal Quit runner만 사용한다" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const text = try readWorkflow(arena_state.allocator());
+    const at = std.mem.indexOf(u8, text, "  session-host-tombstone-product:") orelse
+        return error.TombstoneProductJobMissing;
+    const job = blockUntil(text[at..], "  session-host-tombstone-product:", "  session-host-notification-product:") orelse
+        return error.TombstoneProductJobMissing;
+    for ([_][]const u8{
+        "environment: Session host product",
+        "runs-on: [self-hosted, macOS, ARM64, session-host-product]",
+        "name: maru-universal-dmg-${{ github.run_attempt }}",
+        "/usr/bin/hdiutil attach -readonly -nobrowse -noautoopen",
+        "app=\"$mountpoint/Maru.app\"",
+        "macos-session-host-signed-tombstone-evidence",
+        "/usr/bin/env -i PATH=\"$PATH\" HOME=\"$HOME\"",
+        "maru.session-host-signed-tombstone-relaunch.v1",
+        "actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661",
+    }) |needle| try std.testing.expect(std.mem.indexOf(u8, job, needle) != null);
+    try std.testing.expectEqual(@as(usize, 0), countMatchingLines(job, "GH_TOKEN"));
+    try std.testing.expectEqual(@as(usize, 1), countMatchingLines(job, "hdiutil attach"));
+    try std.testing.expectEqual(@as(usize, 0), countMatchingLines(job, "kill -KILL"));
 }
 
 test "N3-R3 알림 제품 job은 전용 protected self-hosted runner에서 token-free candidate를 실행한다" {

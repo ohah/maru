@@ -2676,7 +2676,6 @@ pub fn build(b: *std.Build) void {
         run_tombstone_candidate.addArgs(&.{ tombstone_candidate_app, tombstone_candidate_dmg, tombstone_candidate_uuid, tombstone_candidate_root, tombstone_candidate_output });
         run_tombstone_candidate.setCwd(b.path("."));
         run_tombstone_candidate.setEnvironmentVariable("MARU_SESSION_HOST_R1_TOMBSTONE_SMOKE", "maru-test-only-v1");
-        run_tombstone_candidate.step.dependOn(&file_panel_web_build.step);
         tombstone_candidate_step.dependOn(&run_tombstone_candidate.step);
 
         const session_host_c4_quit_cancel_step = b.step(

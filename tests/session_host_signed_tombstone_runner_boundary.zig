@@ -25,4 +25,5 @@ test "runner requires normal Quit zero recovery activity immutable candidate and
     }) |needle| try std.testing.expect(std.mem.indexOf(u8, source, needle) != null);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "kill -KILL"));
     try std.testing.expect(std.mem.indexOf(u8, source, "kill -TERM") == null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "MARU_WEB_APP_ROOT") == null);
 }

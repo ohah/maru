@@ -5994,6 +5994,25 @@ pub fn build(b: *std.Build) void {
     collect_fail_step.dependOn(&run_collect_fail.step);
     boundary_step.dependOn(&run_collect_fail.step);
 
+    // 자리별 다이제스트 진단이 «한 세션 안에» 나오는가. 5 시간 주기라 한 번도 안 나왔다.
+    const digest_site_period_step = b.step(
+        "test-digest-site-diag-period",
+        "The per-site digest diagnostic must appear within a single session",
+    );
+    const digest_site_period_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/digest_site_diag_period_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_digest_site_period = b.addRunArtifact(digest_site_period_tests);
+    run_digest_site_period.addArg("--maru-expect-tests=1");
+    run_digest_site_period.addArg("--maru-expect-passed=1");
+    run_digest_site_period.setCwd(b.path("."));
+    digest_site_period_step.dependOn(&run_digest_site_period.step);
+    boundary_step.dependOn(&run_digest_site_period.step);
+
     // 워크스페이스 복원이 «어느 창 블록에서» 실패했는가. 주 창 실패가 조용해 원인이 안 보였다.
     const ws_restore_log_step = b.step(
         "test-workspace-restore-block-log",

@@ -313,7 +313,20 @@ run = "zig build test-stress-soak"
 
 [tasks.perf]
 description = "Run local performance budget harness"
-run = "zig build perf"
+# **배포와 같은 모드로 잰다.** 이 하네스는 `-Doptimize` 없이 불려 **Debug** 로 돌고 있었다.
+# 배포는 ReleaseFast 다(release.yml) — 그래서 이 게이트의 숫자는 사용자가 겪는 성능과 연결이
+# 끊겨 있었다. 실측(2026-09-13, 같은 기계·같은 하네스):
+#
+#   scrollback_rewrap   Debug 1951ms / ReleaseFast 8ms   (244배, 예산 2000ms 의 97.5% 를 쓰고 있었다)
+#   kitty_image_pipeline      1025ms /              4ms  (256배)
+#   core_resize_loop          1471ms /             29ms  (51배)
+#
+# 두 방향으로 틀렸다 — ⑴ 예산의 97% 를 쓰고 있어 러너가 붐비면 **제품과 무관하게** 실패하고
+# ⑵ 릴리스 수치는 예산의 0.2~5% 라 배포 빌드가 10배 느려져도 통과한다.
+#
+# 다른 perf/soak 태스크(cr6e 기준선·앱 기동·idle soak)는 이미 `-Doptimize=ReleaseFast` 를 명시한다.
+# 이 태스크만 예외였다.
+run = "zig build perf -Doptimize=ReleaseFast"
 
 [tasks.fmt]
 description = "Format Zig sources"

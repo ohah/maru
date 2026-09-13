@@ -17,11 +17,24 @@ pub const TagProtection = enum {
     historical_unavailable,
 };
 
+pub const RunnerEnvironment = enum {
+    github_hosted,
+    self_hosted,
+
+    fn wire(self: @This()) []const u8 {
+        return switch (self) {
+            .github_hosted => "github-hosted",
+            .self_hosted => "self-hosted",
+        };
+    }
+};
+
 pub const Expected = struct {
     context: context_mod.Context,
     subject_name: []const u8,
     subject_sha256: []const u8,
     tag_protection: TagProtection = .current_required,
+    runner_environment: RunnerEnvironment = .github_hosted,
 };
 
 pub const ArgsStorage = struct {
@@ -73,15 +86,24 @@ pub fn planBundle(storage: *ArgsStorage, artifact_path: []const u8, bundle_path:
     const source_ref = std.fmt.bufPrint(&storage.source_ref, "refs/tags/{s}", .{expected.context.tag}) catch
         return error.InvalidExpected;
     const values = [_][]const u8{
-        "attestation",                             "verify",                         artifact_path,                  "--bundle",
-        bundle_path,                               "--repo",                         "ohah/maru",                    "--signer-workflow",
-        "ohah/maru/.github/workflows/release.yml", "--signer-digest",                expected.context.source_commit, "--source-digest",
-        expected.context.source_commit,            "--source-ref",                   source_ref,                     "--deny-self-hosted-runners",
-        "--predicate-type",                        "https://slsa.dev/provenance/v1", "--format",                     "json",
+        "attestation",                             "verify",          artifact_path,                  "--bundle",
+        bundle_path,                               "--repo",          "ohah/maru",                    "--signer-workflow",
+        "ohah/maru/.github/workflows/release.yml", "--signer-digest", expected.context.source_commit, "--source-digest",
+        expected.context.source_commit,            "--source-ref",    source_ref,
     };
-    comptime std.debug.assert(values.len == max_args);
     for (values, 0..) |value, index| storage.args[index] = value;
-    return .{ .args = &storage.args };
+    var count = values.len;
+    if (expected.runner_environment == .github_hosted) {
+        storage.args[count] = "--deny-self-hosted-runners";
+        count += 1;
+    }
+    const suffix = [_][]const u8{ "--predicate-type", "https://slsa.dev/provenance/v1", "--format", "json" };
+    for (suffix) |value| {
+        storage.args[count] = value;
+        count += 1;
+    }
+    std.debug.assert(count <= max_args);
+    return .{ .args = storage.args[0..count] };
 }
 
 /// Builds the same closed verifier command for a child whose cwd is a held directory vnode.
@@ -98,14 +120,23 @@ fn planValidated(storage: *ArgsStorage, artifact_path: []const u8, expected: Exp
     const source_ref = std.fmt.bufPrint(&storage.source_ref, "refs/tags/{s}", .{expected.context.tag}) catch
         return error.InvalidExpected;
     const values = [_][]const u8{
-        "attestation",                    "verify",                                  artifact_path,     "--repo",                       "ohah/maru",
-        "--signer-workflow",              "ohah/maru/.github/workflows/release.yml", "--signer-digest", expected.context.source_commit, "--source-digest",
-        expected.context.source_commit,   "--source-ref",                            source_ref,        "--deny-self-hosted-runners",   "--predicate-type",
-        "https://slsa.dev/provenance/v1", "--format",                                "json",
+        "attestation",                  "verify",                                  artifact_path,     "--repo",                       "ohah/maru",
+        "--signer-workflow",            "ohah/maru/.github/workflows/release.yml", "--signer-digest", expected.context.source_commit, "--source-digest",
+        expected.context.source_commit, "--source-ref",                            source_ref,
     };
-    comptime std.debug.assert(values.len == max_api_args);
     for (values, 0..) |value, index| storage.args[index] = value;
-    return .{ .args = storage.args[0..max_api_args] };
+    var count = values.len;
+    if (expected.runner_environment == .github_hosted) {
+        storage.args[count] = "--deny-self-hosted-runners";
+        count += 1;
+    }
+    const suffix = [_][]const u8{ "--predicate-type", "https://slsa.dev/provenance/v1", "--format", "json" };
+    for (suffix) |value| {
+        storage.args[count] = value;
+        count += 1;
+    }
+    std.debug.assert(count <= max_api_args);
+    return .{ .args = storage.args[0..count] };
 }
 
 pub fn parseAndBind(allocator: std.mem.Allocator, bytes: []const u8, expected: Expected) Error!Observed {
@@ -149,7 +180,7 @@ pub fn parseAndBind(allocator: std.mem.Allocator, bytes: []const u8, expected: E
         .{ .name = "githubWorkflowRef", .value = source_ref },
         .{ .name = "buildSignerURI", .value = workflow_uri },
         .{ .name = "buildSignerDigest", .value = expected.context.source_commit },
-        .{ .name = "runnerEnvironment", .value = "github-hosted" },
+        .{ .name = "runnerEnvironment", .value = expected.runner_environment.wire() },
         .{ .name = "sourceRepositoryURI", .value = repo_uri },
         .{ .name = "sourceRepositoryDigest", .value = expected.context.source_commit },
         .{ .name = "sourceRepositoryRef", .value = source_ref },
@@ -195,7 +226,10 @@ pub fn parseAndBind(allocator: std.mem.Allocator, bytes: []const u8, expected: E
     try requireString(dependency, "uri", dependency_uri);
     try requireString(try objectField(dependency, "digest"), "gitCommit", expected.context.source_commit);
     const run_details = try objectField(predicate, "runDetails");
-    try requireString(try objectField(run_details, "builder"), "id", "https://github.com/actions/runner/github-hosted");
+    var builder_storage: [64]u8 = undefined;
+    const builder = std.fmt.bufPrint(&builder_storage, "https://github.com/actions/runner/{s}", .{expected.runner_environment.wire()}) catch
+        return error.InvalidExpected;
+    try requireString(try objectField(run_details, "builder"), "id", builder);
     try requireString(try objectField(run_details, "metadata"), "invocationId", run_uri);
     const timestamps = try arrayField(result, "verifiedTimestamps");
     if (timestamps.items.len == 0) return error.AttestationMismatch;

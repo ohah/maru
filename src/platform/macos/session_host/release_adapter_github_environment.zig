@@ -91,6 +91,12 @@ pub const Parsed = struct {
 /// Parses one bounded response and binds it to the contract-owned `release` environment. Returned
 /// slices remain valid until `Parsed.deinit`.
 pub fn parseAndBind(allocator: std.mem.Allocator, bytes: []const u8) Error!Parsed {
+    return parseAndBindName(allocator, bytes, contract.protected_environment_name);
+}
+
+/// Parses one bounded response and binds it to the caller-selected closed environment name.
+pub fn parseAndBindName(allocator: std.mem.Allocator, bytes: []const u8, expected_name: []const u8) Error!Parsed {
+    if (expected_name.len == 0 or expected_name.len > 255) return error.EnvironmentMismatch;
     github_json.validateCompleteResponse(bytes) catch |err| return err;
     var inner = std.json.parseFromSlice(ApiEnvironment, allocator, bytes, .{
         .allocate = .alloc_always,
@@ -104,7 +110,7 @@ pub fn parseAndBind(allocator: std.mem.Allocator, bytes: []const u8) Error!Parse
 
     const value = inner.value;
     if (value.id.value == 0 or value.can_admins_bypass == null or value.can_admins_bypass.? or
-        !std.mem.eql(u8, value.name, contract.protected_environment_name))
+        !std.mem.eql(u8, value.name, expected_name))
         return error.EnvironmentMismatch;
 
     var required_reviewer_count: u8 = 0;

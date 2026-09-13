@@ -180,13 +180,272 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: maru-universal-dmg
+          name: maru-universal-dmg-${{ github.run_attempt }}
           path: dist/session-host-candidate-*/Maru-*-universal.dmg
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 14
 
       # TODO(후속): Homebrew tap(ohah/homebrew-maru) cask version/sha256 자동 bump PR.
       # tap repo write 토큰이 필요해 별도로 추가한다(distribution.md "CI 릴리스" 5단계).
+
+  session-host-notification-product:
+    name: session host notification product
+    needs: universal-dmg
+    environment: Session host product
+    runs-on: [self-hosted, macOS, ARM64, session-host-product]
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        with:
+          cache_save: false
+
+      - name: Download exact-attempt signed candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: maru-universal-dmg-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/maru-session-host-notification-candidate-${{ github.run_attempt }}
+
+      - name: Derive closed Notification Center product paths
+        id: notification-setup
+        shell: bash
+        env:
+          MARU_REF_TYPE: ${{ github.ref_type }}
+          MARU_TAG: ${{ github.ref_name }}
+          MARU_REPOSITORY: ${{ github.repository }}
+          MARU_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          umask 077
+          test "$MARU_REF_TYPE" = tag
+          test "$MARU_REPOSITORY" = ohah/maru
+          case "$MARU_TAG" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) exit 1 ;;
+          esac
+          MARU_VERSION=${MARU_TAG#v}
+          MARU_CANDIDATE="$RUNNER_TEMP/maru-session-host-notification-candidate-$MARU_ATTEMPT"
+          MARU_DMG="$MARU_CANDIDATE/Maru-$MARU_VERSION-universal.dmg"
+          test "$(/usr/bin/stat -f '%HT' "$MARU_DMG")" = 'Regular File'
+          test ! -L "$MARU_DMG"
+          MARU_ROOT="$RUNNER_TEMP/maru-session-host-notification-$MARU_ATTEMPT"
+          test ! -e "$MARU_ROOT"
+          test ! -L "$MARU_ROOT"
+          /bin/mkdir -m 0700 "$MARU_ROOT"
+          MARU_TEST_UUID=$(/usr/bin/uuidgen | /usr/bin/tr '[:upper:]' '[:lower:]')
+          MARU_ZERO_UUID=$(/usr/bin/uuidgen | /usr/bin/tr '[:upper:]' '[:lower:]')
+          MARU_LIVE_UUID=$(/usr/bin/uuidgen | /usr/bin/tr '[:upper:]' '[:lower:]')
+          for value in "$MARU_TEST_UUID" "$MARU_ZERO_UUID" "$MARU_LIVE_UUID"; do
+            [[ "$value" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]]
+          done
+          test "$MARU_TEST_UUID" != "$MARU_ZERO_UUID"
+          test "$MARU_TEST_UUID" != "$MARU_LIVE_UUID"
+          test "$MARU_ZERO_UUID" != "$MARU_LIVE_UUID"
+          MARU_ZERO_COMPACT=${MARU_ZERO_UUID//-/}
+          MARU_LIVE_COMPACT=${MARU_LIVE_UUID//-/}
+          {
+            printf 'test-uuid=%s\n' "$MARU_TEST_UUID"
+            printf 'zero-uuid=%s\n' "$MARU_ZERO_UUID"
+            printf 'live-uuid=%s\n' "$MARU_LIVE_UUID"
+            printf 'dmg=%s\n' "$MARU_DMG"
+            printf 'preflight-dmg-work=%s/preflight-dmg-work\n' "$MARU_ROOT"
+            printf 'product-dmg-work=%s/product-dmg-work\n' "$MARU_ROOT"
+            printf 'zero-root=/tmp/mn-%s\n' "$MARU_ZERO_COMPACT"
+            printf 'live-root=/tmp/mn-%s\n' "$MARU_LIVE_COMPACT"
+            printf 'zero-receipt=%s/gui-zero.json\n' "$MARU_ROOT"
+            printf 'live-receipt=%s/gui-live.json\n' "$MARU_ROOT"
+            printf 'output=%s/notification-center.json\n' "$MARU_ROOT"
+            printf 'bundle-copy=%s/notification-center.bundle.json\n' "$MARU_ROOT"
+            printf 'result=%s/notification-center-result.json\n' "$MARU_ROOT"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build token-free Notification Center candidate runner
+        run: mise exec -- zig build session-host-release-notification-candidate -Doptimize=ReleaseFast
+
+      - name: Run signed Notification Center product transaction
+        shell: bash
+        env:
+          MARU_EXE: ${{ github.workspace }}/zig-out/bin/maru-session-host-release-notification-candidate
+          MARU_TEST_UUID: ${{ steps.notification-setup.outputs.test-uuid }}
+          MARU_ZERO_UUID: ${{ steps.notification-setup.outputs.zero-uuid }}
+          MARU_LIVE_UUID: ${{ steps.notification-setup.outputs.live-uuid }}
+          MARU_DMG: ${{ steps.notification-setup.outputs.dmg }}
+          MARU_PREFLIGHT_DMG_WORK: ${{ steps.notification-setup.outputs.preflight-dmg-work }}
+          MARU_PRODUCT_DMG_WORK: ${{ steps.notification-setup.outputs.product-dmg-work }}
+          MARU_ZERO_ROOT: ${{ steps.notification-setup.outputs.zero-root }}
+          MARU_LIVE_ROOT: ${{ steps.notification-setup.outputs.live-root }}
+          MARU_ZERO_RECEIPT: ${{ steps.notification-setup.outputs.zero-receipt }}
+          MARU_LIVE_RECEIPT: ${{ steps.notification-setup.outputs.live-receipt }}
+          MARU_OUTPUT: ${{ steps.notification-setup.outputs.output }}
+          MARU_RESULT: ${{ steps.notification-setup.outputs.result }}
+        run: |
+          set -euo pipefail
+          test ! -e "$MARU_RESULT"
+          set +e
+          /usr/bin/env -i \
+            GITHUB_REPOSITORY="$GITHUB_REPOSITORY" \
+            GITHUB_REPOSITORY_ID="$GITHUB_REPOSITORY_ID" \
+            GITHUB_REF="$GITHUB_REF" \
+            GITHUB_REF_TYPE="$GITHUB_REF_TYPE" \
+            GITHUB_REF_NAME="$GITHUB_REF_NAME" \
+            GITHUB_SHA="$GITHUB_SHA" \
+            GITHUB_WORKFLOW_REF="$GITHUB_WORKFLOW_REF" \
+            GITHUB_RUN_ID="$GITHUB_RUN_ID" \
+            GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+            GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" \
+            GITHUB_REF_PROTECTED="$GITHUB_REF_PROTECTED" \
+            "$MARU_EXE" run \
+              --test-uuid "$MARU_TEST_UUID" --zero-uuid "$MARU_ZERO_UUID" --live-uuid "$MARU_LIVE_UUID" \
+              --dmg "$MARU_DMG" --preflight-dmg-work "$MARU_PREFLIGHT_DMG_WORK" \
+              --product-dmg-work "$MARU_PRODUCT_DMG_WORK" --zero-root "$MARU_ZERO_ROOT" \
+              --live-root "$MARU_LIVE_ROOT" --zero-receipt "$MARU_ZERO_RECEIPT" \
+              --live-receipt "$MARU_LIVE_RECEIPT" --output "$MARU_OUTPUT"
+          status=$?
+          set -e
+          case "$status" in
+            0) result=passed ;;
+            70) result=not_provisioned_accessibility ;;
+            71) result=not_provisioned_aqua ;;
+            *) result=failed ;;
+          esac
+          /usr/bin/jq -cn \
+            --arg schema 'maru.session-host-notification-product-result.v1' \
+            --arg result "$result" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg source_sha "$GITHUB_SHA" \
+            --arg test_uuid "$MARU_TEST_UUID" \
+            --argjson run_id "$GITHUB_RUN_ID" \
+            --argjson run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --argjson exit_code "$status" \
+            '{$schema,$result,$repository,$source_sha,$run_id,$run_attempt,$test_uuid,$exit_code}' > "$MARU_RESULT"
+          test "$status" -eq 0
+          test "$(/usr/bin/jq -r '.schema' "$MARU_OUTPUT")" = 'maru.session-host-notification-center.v1'
+
+      - name: Upload typed Notification Center product result
+        if: always() && steps.notification-setup.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: session-host-notification-result-${{ github.run_attempt }}
+          path: ${{ steps.notification-setup.outputs.result }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Attest Notification Center evidence
+        id: notification-attestation
+        uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
+        with:
+          subject-path: ${{ steps.notification-setup.outputs.output }}
+
+      - name: Freeze Notification Center attestation bundle
+        shell: bash
+        env:
+          MARU_SOURCE_BUNDLE: ${{ steps.notification-attestation.outputs.bundle-path }}
+          MARU_BUNDLE_COPY: ${{ steps.notification-setup.outputs.bundle-copy }}
+        run: |
+          set -euo pipefail
+          umask 077
+          test "$(/usr/bin/stat -f '%HT' "$MARU_SOURCE_BUNDLE")" = 'Regular File'
+          test ! -L "$MARU_SOURCE_BUNDLE"
+          test ! -e "$MARU_BUNDLE_COPY"
+          /bin/cp "$MARU_SOURCE_BUNDLE" "$MARU_BUNDLE_COPY"
+          /bin/chmod 0600 "$MARU_BUNDLE_COPY"
+          test "$(/usr/bin/stat -f '%HT' "$MARU_BUNDLE_COPY")" = 'Regular File'
+          test "$(/usr/bin/stat -f '%Lp' "$MARU_BUNDLE_COPY")" = '600'
+          test ! -L "$MARU_BUNDLE_COPY"
+          /usr/bin/cmp -s "$MARU_SOURCE_BUNDLE" "$MARU_BUNDLE_COPY"
+
+      - name: Upload exact-attempt Notification Center evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: session-host-notification-product-${{ github.run_attempt }}
+          path: |
+            ${{ steps.notification-setup.outputs.output }}
+            ${{ steps.notification-setup.outputs.bundle-copy }}
+          if-no-files-found: error
+          retention-days: 14
+
+  session-host-notification-verification:
+    name: session host notification verification
+    needs: session-host-notification-product
+    runs-on: macos-15
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Capture trusted GitHub CLI before checkout
+        id: notification-trusted-gh
+        shell: bash
+        run: |
+          set -euo pipefail
+          canonical=$(/usr/bin/realpath "$(command -v gh)")
+          test "$canonical" = "${canonical//$'\n'/}"
+          test "$canonical" = "${canonical//$'\r'/}"
+          test "$(/usr/bin/stat -f '%HT' "$canonical")" = 'Regular File'
+          test -x "$canonical"
+          sha256=$(/usr/bin/shasum -a 256 "$canonical" | /usr/bin/awk '{print $1}')
+          [[ "$sha256" =~ ^[0-9a-f]{64}$ ]]
+          printf 'path=%s\nsha256=%s\n' "$canonical" "$sha256" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        with:
+          cache_save: false
+
+      - name: Download exact-attempt Notification Center evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: session-host-notification-product-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/session-host-notification-product-${{ github.run_attempt }}
+
+      - name: Build Notification Center workflow verifier
+        run: mise exec -- zig build session-host-release-notification-workflow-verifier -Doptimize=ReleaseFast
+
+      - name: Verify protected Notification Center product verdict
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TRUSTED_GH: ${{ steps.notification-trusted-gh.outputs.path }}
+          TRUSTED_GH_SHA256: ${{ steps.notification-trusted-gh.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          root="$RUNNER_TEMP/session-host-notification-product-$GITHUB_RUN_ATTEMPT"
+          evidence="$root/notification-center.json"
+          files=("$root"/*)
+          test "${#files[@]}" -eq 2
+          test "$(/usr/bin/stat -f '%HT' "$evidence")" = 'Regular File'
+          test ! -L "$evidence"
+          bundle=''
+          for path in "${files[@]}"; do
+            test "$(/usr/bin/stat -f '%HT' "$path")" = 'Regular File'
+            test ! -L "$path"
+            if [ "$path" != "$evidence" ]; then bundle="$path"; fi
+          done
+          test -n "$bundle"
+          output="$RUNNER_TEMP/session-host-notification-workflow-pass.json"
+          test ! -e "$output"
+          verifier="$GITHUB_WORKSPACE/zig-out/bin/maru-session-host-release-notification-workflow-verifier"
+          "$verifier" verify "$TRUSTED_GH" "$TRUSTED_GH_SHA256" "$evidence" "$bundle" "$output"
+          test "$(/usr/bin/stat -f '%HT' "$output")" = 'Regular File'
+          test "$(/usr/bin/stat -f '%Lp' "$output")" = '400'
+          test "$(/usr/bin/jq -r '.schema' "$output")" = 'maru.session-host-notification-workflow-pass.v1'
+
+      - name: Upload canonical Notification Center workflow pass record
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: session-host-notification-workflow-pass-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/session-host-notification-workflow-pass.json
+          if-no-files-found: error
+          retention-days: 90
 
   session-host-release-live-timing:
     name: session host live release timing

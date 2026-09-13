@@ -229,6 +229,23 @@ test "artifact attestation binds exact verified certificate and SLSA subject" {
     try std.testing.expectEqualStrings(subject_sha, observed.subject_sha256);
 }
 
+test "self-hosted product attestation is explicit and never uses the deny-self-hosted flag" {
+    var self_expected = expected();
+    self_expected.runner_environment = .self_hosted;
+    var storage: attestation.ArgsStorage = undefined;
+    const plan = try attestation.planBundle(&storage, "/tmp/notification-center.json", "/tmp/attestation.json", self_expected);
+    for (plan.args) |arg| try std.testing.expect(!std.mem.eql(u8, arg, "--deny-self-hosted-runners"));
+
+    const certificate = try std.mem.replaceOwned(u8, std.testing.allocator, valid_json, "runnerEnvironment\":\"github-hosted", "runnerEnvironment\":\"self-hosted");
+    defer std.testing.allocator.free(certificate);
+    const self_json = try std.mem.replaceOwned(u8, std.testing.allocator, certificate, "actions/runner/github-hosted", "actions/runner/self-hosted");
+    defer std.testing.allocator.free(self_json);
+    var observed = try attestation.parseAndBind(std.testing.allocator, self_json, self_expected);
+    defer observed.deinit(std.testing.allocator);
+    try std.testing.expect(observed.verified);
+    try std.testing.expectError(error.AttestationMismatch, attestation.parseAndBind(std.testing.allocator, self_json, expected()));
+}
+
 fn expectMutation(old: []const u8, replacement: []const u8) !void {
     const mutated = try std.mem.replaceOwned(u8, std.testing.allocator, valid_json, old, replacement);
     defer std.testing.allocator.free(mutated);

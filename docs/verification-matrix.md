@@ -3045,9 +3045,11 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   같은 monotonic transaction에 결속한다. 앱의 일반 cold/live
   route가 같은 host/runtime과 기존 child PID에 붙어 before marker를 보존하고 새 input/output을 왕복한 뒤에만 R1 leaf를
   배타 게시한다. permission/UI session/배너/클릭/attach/cleanup 실패는 skip/pass가 아니라 typed `not_provisioned` 또는
-  failed artifact이며, 사용자 workspace·session-host registry를 읽거나 지우지 않는다. Notification Center 정리는 전체
+  failed artifact이며, 제품 CLI는 Accessibility/Aqua 미제공을 각각 exit 70/71로 보존하고 workflow는 모든 정상 종료를
+  `maru.session-host-notification-product-result.v1` 진단 artifact로 남긴다. 이 artifact는 R1 또는 workflow pass 권위가 아니다.
+  사용자 workspace·session-host registry를 읽거나 지우지 않는다. Notification Center 정리는 전체
   삭제가 아니라 이번 UUID의 exact request identifier 두 개만 대상으로 하고, 외부 알림을 열거 결과에 기록하지 않는다.
-- **N3-R3 protected workflow binding (R3a·R3b1 및 R3b2 제품 CLI 구현, provisioned workflow 미완료):** R3a는 기존 release 전용 protected-deployment
+- **N3-R3 protected workflow binding (R3a·R3b1·R3b2 workflow 구현, provisioned 실행 미완료):** R3a는 기존 release 전용 protected-deployment
   verifier의 의미를 바꾸지 않고 reviewed policy로 environment/workflow/job identity를 결속해, `release` signing job과
   Notification 전용 job이 같은 strict run/attempt/job/deployment 알고리즘을 공유하게 한다. R3b1의
   `release_adapter_notification_candidate_product.zig`는 runner 입력을 owned snapshot으로 만든 뒤, caller가 추측한
@@ -3063,11 +3065,14 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   증명하지 못한 실패 경로에서는 같은 child가 exact runtime과 peer PID를 종료하고 host 부재까지 기다린 뒤에만 root
   제거를 허용한다. 실제 제품 executable prepare→receipt→cleanup smoke는
   `test-session-host-notification-runtime-preparation`이 소유하며 사용자 registry나 알림 trigger를 읽지 않는다.
-  남은 R3b2는 이 token-free 제품 CLI 및 tag release의 signed candidate를 별도
-  `Session host product` environment와 고정 self-hosted macOS label을 가진 job으로 전달한다. job은 R2를 실행하고
-  attempt-scoped artifact attestation을 게시한다. 최종 release evidence는 exact run/attempt/job/deployment와 candidate
-  identity, R1 leaf digest를 교차검증해야 하며, hosted runner·다른 ref·다른 candidate·재실행의 옛 artifact를 섞지 않는다.
-  제품 CLI component만으로도 실행 가능한 provisioned workflow나 Notification Center artifact가 되는 것은 아니다. repository environment의 이름만 존재하거나
+  R3b2 workflow는 이 token-free 제품 CLI 및 tag release의 signed candidate를 별도
+  `Session host product` environment와 고정 `[self-hosted, macOS, ARM64, session-host-product]` label 집합을 가진
+  `session host notification product` job으로 전달한다. job은 `universal-dmg`가 게시한 exact attempt의 DMG artifact만
+  내려받아 R2를 실행하고
+  attempt-scoped artifact attestation을 게시한다. 뒤따르는 hosted verifier는 완료-success인 exact
+  run/attempt/job/deployment와 protected environment, self-hosted attestation, candidate identity 및 R1 leaf digest를 교차검증한 뒤에만
+  `maru.session-host-notification-workflow-pass.v1` canonical record를 배타 게시한다. hosted runner·다른 ref·다른 candidate·재실행의 옛 artifact를 섞지 않는다.
+  정적 workflow와 제품 CLI component만으로 provisioned Notification Center artifact를 주장하지 않는다. repository environment의 이름만 존재하거나
   job이 `skipped`인 상태는 protection 통과가 아니다. R1~R3와 실제
   provisioned run이 모두 green이 되기 전에는 P4 notification 또는 영속 세션 호스트 전체 완료를 주장하지 않는다.
 

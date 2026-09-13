@@ -112,6 +112,29 @@ test "reviewed notification policy binds only its own protected job and environm
     ));
 }
 
+test "completed notification profile requires successful job and deployment status" {
+    const named_jobs = try std.mem.replaceOwned(u8, std.testing.allocator, jobs, "universal dmg (signed + notarized)", "session host notification product");
+    defer std.testing.allocator.free(named_jobs);
+    const completed_jobs = try std.mem.replaceOwned(u8, std.testing.allocator, named_jobs, "\"status\":\"in_progress\",\"conclusion\":null", "\"status\":\"completed\",\"conclusion\":\"success\"");
+    defer std.testing.allocator.free(completed_jobs);
+    const notification_deployments = try std.mem.replaceOwned(u8, std.testing.allocator, deployments, "release", "Session host product");
+    defer std.testing.allocator.free(notification_deployments);
+    const named_statuses = try std.mem.replaceOwned(u8, std.testing.allocator, statuses, "release", "Session host product");
+    defer std.testing.allocator.free(named_statuses);
+    const successful_statuses = try std.mem.replaceOwned(u8, std.testing.allocator, named_statuses, "in_progress", "success");
+    defer std.testing.allocator.free(successful_statuses);
+    var notification_environment = environment;
+    notification_environment.name = "Session host product";
+
+    var prepared: github_deployment.Prepared = .{};
+    try prepared.prepareJobsForProfilePhase(std.testing.allocator, completed_jobs, expected, .notification_product, .completed);
+    defer prepared.deinit() catch {};
+    try prepared.prepareDeploymentsForProfile(std.testing.allocator, notification_deployments, expected, .notification_product);
+    try prepared.acceptStatusesForProfilePhase(std.testing.allocator, 5_659_920_837, successful_statuses, .notification_product, .completed);
+    const observation = try prepared.finishForProfile(notification_environment, .notification_product);
+    try std.testing.expectEqual(@as(u64, 90_618_357_140), observation.job_id);
+}
+
 test "prepared transaction seals policy across every stage" {
     var prepared: github_deployment.Prepared = .{};
     try prepared.prepareJobs(std.testing.allocator, jobs, expected);

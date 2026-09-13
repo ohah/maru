@@ -16,6 +16,7 @@ const max_policy_value_bytes: usize = 255;
 const max_policy_key_bytes: usize = 4 * (2 + max_policy_value_bytes);
 
 pub const Profile = enum { release, notification_product };
+pub const Phase = enum { executing, completed };
 
 const Policy = struct {
     repository_name: []const u8,
@@ -137,6 +138,7 @@ pub const Prepared = struct {
     failed: bool = false,
     policy_key: [max_policy_key_bytes]u8 = @splat(0),
     policy_key_len: usize = 0,
+    phase: Phase = .executing,
 
     pub fn deinit(self: *Prepared) !void {
         if (self.owner != self) return error.InvalidOwner;
@@ -150,16 +152,21 @@ pub const Prepared = struct {
     }
 
     pub fn prepareJobsForProfile(self: *Prepared, allocator: std.mem.Allocator, bytes: []const u8, expected: context_mod.Context, profile: Profile) !void {
+        return self.prepareJobsForProfilePhase(allocator, bytes, expected, profile, .executing);
+    }
+
+    pub fn prepareJobsForProfilePhase(self: *Prepared, allocator: std.mem.Allocator, bytes: []const u8, expected: context_mod.Context, profile: Profile, phase: Phase) !void {
         const policy = policyFor(profile);
         if (self.owner != null or self.jobs != null or self.deployments != null) return error.InvalidOwner;
         try validatePolicy(policy);
         var parsed = try parse(ApiJobs, allocator, bytes);
         errdefer parsed.deinit();
         if (parsed.value.jobs.len > max_collection_entries) return error.DeploymentMismatch;
-        const job = try bindJob(parsed.value, expected, policy);
+        const job = try bindJob(parsed.value, expected, policy, phase);
         self.policy_key_len = try writePolicyKey(&self.policy_key, policy);
         self.jobs = parsed;
         self.job = job;
+        self.phase = phase;
         self.owner = self;
     }
 
@@ -195,9 +202,14 @@ pub const Prepared = struct {
     }
 
     pub fn acceptStatusesForProfile(self: *Prepared, allocator: std.mem.Allocator, deployment_id: u64, bytes: []const u8, profile: Profile) !void {
+        return self.acceptStatusesForProfilePhase(allocator, deployment_id, bytes, profile, .executing);
+    }
+
+    pub fn acceptStatusesForProfilePhase(self: *Prepared, allocator: std.mem.Allocator, deployment_id: u64, bytes: []const u8, profile: Profile, phase: Phase) !void {
         const policy = policyFor(profile);
         if (self.owner != self or self.deployments == null or self.job == null or self.failed) return error.InvalidOwner;
         try matchPolicy(self, policy);
+        if (self.phase != phase) return error.DeploymentMismatch;
         errdefer self.failed = true;
         var index: ?usize = null;
         for (self.candidate_ids[0..self.candidate_count], 0..) |id, candidate_index| if (id == deployment_id) {
@@ -207,7 +219,7 @@ pub const Prepared = struct {
         const candidate_index = index orelse return error.DeploymentMismatch;
         if (self.received[candidate_index]) return error.DeploymentMismatch;
         const deployment = deploymentFor(self.deployments.?.value, deployment_id) orelse return error.DeploymentMismatch;
-        self.matched[candidate_index] = try statusesBind(allocator, bytes, deployment, self.job.?.url, policy);
+        self.matched[candidate_index] = try statusesBind(allocator, bytes, deployment, self.job.?.url, policy, phase);
         self.received[candidate_index] = true;
     }
 
@@ -281,7 +293,7 @@ fn parse(comptime T: type, allocator: std.mem.Allocator, bytes: []const u8) Erro
     };
 }
 
-fn bindJob(response: ApiJobs, expected: context_mod.Context, policy: Policy) Error!Job {
+fn bindJob(response: ApiJobs, expected: context_mod.Context, policy: Policy, phase: Phase) Error!Job {
     if (response.total_count.value != response.jobs.len) return error.DeploymentMismatch;
     var matched: ?Job = null;
     for (response.jobs) |job| {
@@ -290,13 +302,20 @@ fn bindJob(response: ApiJobs, expected: context_mod.Context, policy: Policy) Err
             job.run_id.value != expected.build.run_id or
             job.run_attempt.value != expected.build.run_attempt or
             !std.mem.eql(u8, job.head_sha, expected.source_commit) or
-            !std.mem.eql(u8, job.status, "in_progress") or job.conclusion != null or
+            !jobStateMatches(job, phase) or
             !std.mem.eql(u8, job.workflow_name, policy.workflow_name) or
             !canonicalJobUrl(job.html_url, expected.build.run_id, job.id.value, policy.repository_name))
             return error.DeploymentMismatch;
         matched = .{ .id = job.id.value, .url = job.html_url };
     }
     return matched orelse error.DeploymentMismatch;
+}
+
+fn jobStateMatches(job: ApiJob, phase: Phase) bool {
+    return switch (phase) {
+        .executing => std.mem.eql(u8, job.status, "in_progress") and job.conclusion == null,
+        .completed => std.mem.eql(u8, job.status, "completed") and job.conclusion != null and std.mem.eql(u8, job.conclusion.?, "success"),
+    };
 }
 
 fn canonicalJobUrl(url: []const u8, run_id: u64, job_id: u64, repository_name: []const u8) bool {
@@ -358,6 +377,7 @@ fn statusesBind(
     deployment: ApiDeployment,
     job_url: []const u8,
     policy: Policy,
+    phase: Phase,
 ) Error!bool {
     var statuses = try parse([]const ApiStatus, allocator, bytes);
     defer statuses.deinit();
@@ -370,7 +390,8 @@ fn statusesBind(
         for (statuses.value[0..index]) |earlier| {
             if (earlier.id.value == status.id.value) return error.DeploymentMismatch;
         }
-        if (statusForJob(status, "in_progress", job_url, policy.environment_name)) {
+        const terminal_state = if (phase == .executing) "in_progress" else "success";
+        if (statusForJob(status, terminal_state, job_url, policy.environment_name)) {
             current_count = std.math.add(u8, current_count, 1) catch
                 return error.DeploymentMismatch;
         }

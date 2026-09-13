@@ -6040,6 +6040,10 @@ pub const AppSession = struct {
     scm_log_seq: u64 = 0,
     /// 읽기가 실패했나. **커밋이 없는 것과 다른 사실**이라 화면 문구가 갈린다.
     scm_log_failed: bool = false,
+    /// **왜 못 읽었나**(RS7d). `scm_log_failed` 가 참일 때만 뜻이 있다 — 목록 읽기의 `git_failure` 와
+    /// 같은 타입이고, 세 사유는 사용자가 할 일이 각각 다르다(원격에 git 을 깐다 · 연결을 다시 붙인다 ·
+    /// 저장소를 본다).
+    scm_log_failure: git_backend_mod.ReadFailure = .generic,
     /// 그 출력이 상한에서 잘렸나. **조용히 자르지 않는다**(목록 읽기와 같은 규율).
     scm_log_truncated: bool = false,
     /// 히스토리에서 고른 커밋의 **OID**(P4). 파일 행 강조와 다른 축이라 값을 따로 든다.
@@ -6068,6 +6072,8 @@ pub const AppSession = struct {
     /// 바뀌었을 수 있어, 도착 시점의 «지금 활성» 이 아니라 이 값으로 되찾는다.
     scm_turn_summary_session: ?[]u8 = null,
     scm_commit_files_failed: bool = false,
+    /// 위와 같은 축(RS7d) — 펼친 커밋의 파일 목록을 왜 못 읽었나.
+    scm_commit_files_failure: git_backend_mod.ReadFailure = .generic,
     scm_commit_files_truncated: bool = false,
     /// 펼친 커밋에서 **지금 열어 둔 파일**의 자리(P4b). 목록이 무엇을 보고 있는지 말해야 파일 여럿을
     /// 오갈 때 길을 잃지 않는다.
@@ -70520,6 +70526,9 @@ test "원격 목록을 보는 동안 로컬 저장소에 손이 가지 않는다
     try std.testing.expectEqual(@as(u64, 0), session.scm_log_seq); // 로컬 git 으로 떨어지지 않았다
     try std.testing.expect(session.scm_log_failed); // 조용한 무동작이 아니다
     try std.testing.expect(session.scm_log_dest != null); // 그 실패가 **어느 기계의** 것인지도 적었다
+    // **이유까지 적었다**(RS7d). 소켓이 없는 것은 저장소 이야기가 아니라 연결 이야기다 — 사용자가 할
+    // 일이 「연결을 다시 붙인다」로 갈린다.
+    try std.testing.expectEqual(git_backend_mod.ReadFailure.remote_transport, session.scm_log_failure);
 
     // **멱등이다** — 매 tick 도는 경로라, 같은 상태를 반복해 다시 쓰면 렌더를 계속 깨운다.
     session.metal_dirty = false;
@@ -70556,7 +70565,9 @@ test "원격 목록을 보는 동안 로컬 저장소에 손이 가지 않는다
         var saw_failed_notice = false;
         for (projection.items) |item| switch (item) {
             .notice => |text| {
-                if (std.mem.eql(u8, text, maru.i18n.t(.scm_log_read_failed))) saw_failed_notice = true;
+                // **뭉뚱그린 「읽지 못했습니다」가 아니라 이유가 선다**(RS7d).
+                if (std.mem.eql(u8, text, maru.i18n.t(.scm_remote_transport_failed))) saw_failed_notice = true;
+                try std.testing.expect(!std.mem.eql(u8, text, maru.i18n.t(.scm_log_read_failed)));
                 // 「읽는 중…」이 이 화면에 서면 안 된다 — 그것이 바로 이 판정자가 막는 거짓말이다.
                 try std.testing.expect(!std.mem.eql(u8, text, maru.i18n.t(.scm_loading)));
             },

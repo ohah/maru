@@ -1185,8 +1185,22 @@ pub fn termCwdForDisplay(self: *AppSession, term: *Term, buf: *[std.fs.max_path_
 /// 돌리는 것은 후속(요청 큐가 필요하다).
 pub fn requestIgnoredForPaths(self: *AppSession, dir_path: []const u8, entries: anytype) void {
     if (self.git_backend == null) return;
+    // ⚠️ **저장소는 «방금 읽은 그 디렉터리»에서 나온다 — 도크가 기억하는 것이 아니다.**
+    //
+    // 예전에는 `gitRepoRoot` 를 썼는데 그 함수의 2 순위는 **도크가 직전에 목록을 읽은 저장소**
+    // (`git_repo`)다. 그 값은 원격일 수 있고(원격 SCM), 원격이 아니어도 탐색기가 보는 것과 **다른
+    // 저장소**일 수 있다 — 그러면 아래 `relativeUnderRoot` 가 전부 null 을 내 **질의가 통째로 사라진다.**
+    // 사용자에게는 「어느 순간부터 `.gitignore` 흐림이 안 된다」로만 보이고, 화면 어디에도 그 사실이 없다.
+    //
+    // 답이 **인자 안에 있는데** 세션 상태를 물은 것이 결함의 모양이었다. `dir_path` 를 걸어 올라가면
+    // 그 항목들을 실제로 소유한 저장소가 나오고, 그러면 **원격 경로가 여기로 샐 길 자체가 없다**
+    // (원격 탐색기는 이 함수를 아예 안 부른다 — `updateFileTree` 의 원격 갈래 주석).
+    //
+    // **캐시(`repoRootForCached`)를 안 쓴다**: 그쪽은 터미널 cwd 하나를 키로 드는 한 칸짜리라, 여기서
+    // 다른 경로로 부르면 매번 서로를 밀어낸다. 이 경로는 프레임마다가 아니라 **디렉터리를 읽을 때만**
+    // 돌고 바로 뒤에서 git 프로세스를 띄우므로, walk-up 의 `access(2)` 여덟 번은 그 비용에 묻힌다.
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const repo = gitRepoRoot(self, &repo_buf) orelse return; // 저장소가 아니면 물어볼 것이 없다
+    const repo = AppSession.repoRootFor(dir_path, &repo_buf) orelse return; // 저장소가 아니면 물어볼 것이 없다
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
     const git_exe = git_backend_mod.locate(&exe_buf) orelse return;
 

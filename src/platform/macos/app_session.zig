@@ -70669,6 +70669,57 @@ test "원격 목록을 보는 동안 로컬 저장소에 손이 가지 않는다
     try std.testing.expect(session.scm_write_error == null);
 }
 
+test "탐색기의 .gitignore 흐림은 «방금 읽은 그 디렉터리»의 저장소에 묻는다" {
+    // **결함의 모양**(2026-09-13, RS7 적대적 검증 5회차에서 발견). 이 질의는 `gitRepoRoot` 로 저장소를
+    // 골랐는데, 그 함수의 2 순위는 **도크가 직전에 목록을 읽은 저장소**다. 원격 SCM 목록을 한 번 보고
+    // 탐색기로 돌아오면 그 값이 **원격 경로**인 채 남고(`followActiveTerminalRepo` 는 소스 컨트롤 뷰에서만
+    // 돈다), 그러면 로컬 항목들이 그 경로 **아래에 없어** 상대경로 변환이 전부 실패한다 — 질의가 통째로
+    // 사라지고 사용자에게는 「어느 순간부터 흐림이 안 된다」로만 보인다.
+    //
+    // 답은 인자 안에 있었다: `dir_path` 를 걸어 올라가면 그 항목들을 실제로 소유한 저장소가 나온다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.git_backend = try git_backend_mod.Backend.init(session.io);
+    session.git_backend.?.state.?.shutting_down = true; // 실제 git 을 안 띄운다(판정 대상은 «무엇에 묻나»다)
+
+    // **원격 목록을 본 상태를 만든다.** 활성 Term 도 원격으로 몰아 `gitRepoRoot` 의 1 순위를 비운다 —
+    // 그래야 2 순위(도크가 기억한 저장소)가 답하고, 그것이 이 결함이 사는 구간이다.
+    const term = pane_ops.activePane(session).activeTerm();
+    try term.surface.core.write("\x1b]5379;ssh;user@build-box\x07");
+    git_ops.rememberGitRepo(session, "/srv/app");
+    git_ops.rememberGitRepoDest(session, "user@build-box");
+    try std.testing.expect(git_ops.scmTargetIsRemote(session));
+
+    // 탐색기가 읽은 것은 **이 저장소의 로컬 디렉터리**다(테스트는 저장소 안에서 돈다).
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const here_len = try std.process.currentPath(session.io, &cwd_buf);
+    const here = cwd_buf[0..here_len];
+
+    const before = session.git_ignore_request_id;
+    const entries = [_]struct { name: []const u8 }{
+        .{ .name = "build.zig" },
+        .{ .name = "zig-out" },
+    };
+    git_ops.requestIgnoredForPaths(session, here, &entries);
+
+    // **물었다.** 옛 코드에서는 여기가 `before` 그대로였다 — 원격 경로 아래가 아니라 한 항목도 못 만들었다.
+    try std.testing.expect(session.git_ignore_request_id != before);
+    try std.testing.expectEqual(@as(usize, entries.len), session.git_ignore_query_paths.items.len);
+    // 상대경로여야 한다 — 절대경로를 주면 git 이 저장소 밖으로 보고 답이 조용히 빈다(함수 계약).
+    for (session.git_ignore_query_paths.items) |rel| {
+        try std.testing.expect(!std.fs.path.isAbsolute(rel));
+    }
+
+    // **저장소가 아닌 곳은 여전히 안 묻는다** — 「모르면 흐리게 하지 않는다」가 그대로다.
+    const after_ask = session.git_ignore_request_id;
+    git_ops.requestIgnoredForPaths(session, "/", &entries);
+    try std.testing.expectEqual(after_ask, session.git_ignore_request_id);
+}
+
 test "원격 pane 의 «돌고 있나» 는 낡은 관측을 믿지 않는다 (RS4c 적대적 검증 2회차)" {
     const busy = term_ops.observationKnownBusy;
     const Sem = maru.terminal.SemanticPrompt;

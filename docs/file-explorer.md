@@ -336,6 +336,21 @@ thumb이 셀 경계로 스냅해 목록과 어긋난다.
 - **배치**: 트리가 **도크의 현재 뷰 영역 전체**다 — `Geometry.tree = dock - view_bar`(§3.5)이고 `editor`/`tab_bar`/`header`/`content`/`tree_divider` rect와 그 hit-test·드래그(`treeDividerHitRect`·`treeSizePtForPointer`·`dock_tree_divider` 제스처)는 삭제됐다. 도크 폭이 곧 트리 폭이라 폭 조절은 outer divider 하나뿐이다(`dock.tree_size`와 `dock-tree-size` 키는 B-4에서 제거했다 — 도크 폭이 곧 트리 폭이라 잴 것이 없다). 부작용: **트리 좌측 가장자리가 outer divider의 grab band와 겹친다**(옛 배치에선 트리가 우측이라 안 겹쳤다). 그래서 `min_editor_cols`(28셀)·`min_tree_cols`(12셀)·`default_tree_cols`(18셀) 상수와 editor↔tree divider도 함께 사라졌다(B-4에서 삭제). 남은 폭 하한은 pt 기준 `min_right_pt`를 계속 강제한다(`@max(requested_px, @min(min_dock, max_dock))`). 옛 420pt 기본·240pt 하한은 **editor + tree를 함께 담던 시절의 값**이라 트리 전용에는 과했다(화면 절반 가까이 차지 — 사용자 확인 2026-07-28). 자동 도크(`dock.size == 0`)의 탐색기·소스 컨트롤은 좌측 사이드바와 같은 성격의 목록 열이므로 **기본 180pt·하한 120pt**(`theme.SidebarConfig.width_pt`의 기본·범위와 같은 값. 레이어가 달라 상수는 공유하지 않고 값만 맞춘다)을 쓴다. `agent_sessions`만 같은 자동 sentinel에서 480pt를 쓰는 consumer-specific 예외이며, 수동으로 저장한 0 이외 폭은 어느 뷰도 바꾸지 않는다([agent-session-list-layout.md](agent-session-list-layout.md) §2.1). bottom은 가로 띠라 성격이 달라(폭이 아니라 높이) 300/160pt를 유지한다. 폭 조절은 이제 **terminal↔dock outer divider 하나**가 담당하며, 그 divider가 곧 트리 폭이다(현행 `dock-size`가 그 값이다 — `dock-tree-size`는 **키 자체가 제거**돼 더는 쓰지도 읽지도 않고, 옛 파일의 그 키는 unknown field 관용으로 조용히 무시된다). 확장 grab band·live reframe·mouse-down offset 보존 계약은 outer divider에 그대로 남는다. **트리 자체는 WKWebView가 아니라 GPU 셀 chrome이므로 도크에 web surface가 하나도 없고**, 그 결과 §4의 도크-aware 예외 둘이 제거된다.
 - **루트**: inferred mode에서는 열린 파일이 git repo 안이면 repo 루트, 밖이면 부모 폴더를 합류시킨다. explicit mode에서는 open/add/remove 명령만 표시 root를 바꾼다. 서로 겹치지 않는 루트는 멀티루트 섹션으로 두고, parent/child로 겹치면 가장 바깥 ancestor 하나로 정규화한다. ~~root가 없으면 cwd를 암묵 추가하지 않고 빈 안내를 표시한다.~~ → **root가 없으면 §1의 자동 따라가기가 활성 터미널의 저장소를 root로 세운다**(2026-08-11 결정). 빈 상태에서 "아무것도 없음"을 보여 주는 것보다 지금 일하는 곳을 보여 주는 편이 맞고, root **밖**과 root **없음**을 다르게 다룰 이유가 없다. 터미널이 cwd를 안 주면(파일 Term·원격 세션) 예전대로 빈 안내다.
 - **내용**: 폴더 접기(lazy 열거), 파일 클릭=열기(§6), 열린 파일 하이라이트 + dirty 점, **최근 파일 접이식 섹션**(파일 열람 히스토리 흡수처).
+- **`.gitignore` 흐림**(2026-08-18 사용자 결정): 방금 열거한 디렉터리의 항목들을
+  `git check-ignore -z` 로 **한 번에** 물어 무시 대상을 흐리게 그린다. 판정 권위는 git 에 남긴다 —
+  `.gitignore` 를 우리가 파싱하면 부정·중첩·`**` 문법을 다시 구현해야 하고 git 과 미세하게 어긋난다.
+  화면에 **펼쳐 보이는 것만** 묻는다(`status --ignored` 는 무시된 트리 *안까지* 열거해 `node_modules`
+  같은 곳에서 비용이 폭발한다).
+
+  ⚠️ **저장소는 「방금 읽은 그 디렉터리」에서 나온다 — 도크가 기억하는 저장소가 아니다.**
+  `dir_path` 를 걸어 올라가 `.git` 을 찾고, 그 루트 기준 **상대경로**로 묻는다. 도크의 대상 저장소
+  (`gitRepoRoot`)를 쓰면 그 2 순위가 **직전에 목록을 읽은 저장소**라, 탐색기가 보는 것과 다른 저장소일
+  때(대표적으로 [원격 SCM](plans/remote-scm.md) 목록을 본 뒤) 상대경로 변환이 전부 실패해 **질의가
+  통째로 사라진다** — 사용자에게는 「어느 순간부터 흐림이 안 된다」로만 보인다. 답이 인자 안에 있으므로
+  세션 상태를 묻지 않는다. 원격 트리는 이 질의를 **아예 안 건다**(로컬 git 에 원격 경로를 대는 일이라
+  [원격 파일 트리](plans/remote-file-tree.md) §2.4 가 그렇게 정했다).
+
+  거절되거나 실패하면 그 화면은 **판정 없이 남는다** — 모르면 흐리게 하지 않는다.
 - **선택과 키보드 포커스(ABI v127)**: 트리는 row index가 아니라 `절대 경로 + row kind` identity로 transient selection을 소유한다. scan 완료·접기·FSEvents rebuild로 row index가 바뀌어도 같은 row가 남으면 선택을 복원하고, 사라지면 가장 가까운 조작 가능한 조상/이웃으로 결정적으로 이동한다. 클릭 또는 `focus_file_tree`가 Zig의 단일 `FocusOwner`를 `.file_tree { restore_surface: ?surface_id }`로 바꾸고 Metal view를 first responder로 만든다. 현재 구현의 기본 `⌘⇧E`는 이 action에 연결되어 있으며, FP9에서 §3.4의 `toggle_file_panel_focus`로 기본 chord만 이전한다. surface id는 앱 전역 비재사용이라 generation token을 겸하며 Esc 때 entry와 native WKWebView 존재를 다시 검증한다. `file_tree_focus`는 이 union의 파생 getter일 뿐 별도 mutable boolean이 아니다. 선택과 keyboard focus는 workspace에 저장하지 않는다. 포커스 중 선택은 theme accent 배경과 WCAG 4.5 이상 대비가 나는 파생 전경을 marker·이름·dirty/conflict 표시 전체에 적용하고, 포커스 밖에서는 dim으로 그린다. active 파일 표시는 별도 marker로 유지한다.
 
   ⚠️ **그래서 트리를 통째로 갈아끼우는 자리도 선택을 지우지 않는다**(2026-08-27 사용자 보고 — "열면 맨 위로

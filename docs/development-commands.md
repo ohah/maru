@@ -747,6 +747,32 @@ zig build test > /tmp/t.log 2>&1;  mise run test-verdict /tmp/t.log
 - 영속 세션 호스트 2d3 callback/proof-loss gate: `zig build test-session-host-2d3`. 2d2를 상속하고 Debug·ReleaseFast에서 unique component 12개, stage별 전용 fresh-exec subprocess 3개, boundary 1개를 실행한다. pre-callback proof loss는 free 0, post-callback proof loss는 target free exact 1 뒤 공통 `fatalIntegrity(.proof_loss)` exit 86, callback reentry는 같은 Client mutation `Busy`와 독립 Client read 허용을 exact transcript로 검증한다.
 - 영속 세션 호스트 CR3a-2e actual attach parity gate: `zig build test-session-host-2e`. 2d3을 상속하고 generation attach의 binding·cleanup row·pin·batch adapter가 wire 전에 준비되는지, accepted stream이 allocation 없는 suffix로 exact once 결속되는지 검증한다. 최종 gate는 Debug·ReleaseFast마다 준비 계약 4개, actual socket 6개, rollback 4개, boundary 1개를 exact-count한다.
 
+### 원격 SCM 화면을 찍는다 (제품 Metal 경로)
+
+원격 히스토리는 **실물 sshd · control socket · 원격 저장소가 동시에** 있어야 화면이 선다. 그래서
+그 축은 오래도록 「손으로 봐야 하는 것」으로 남아 있었고, [PR 체크리스트](pr-checklist.md)가 요구하는
+PNG 캡처 없이 PR 이 올라갔다. 설비는 이미 있었고(원격 하니스 · 강제 픽스처 · `MARU_SCREENSHOT`)
+잇는 자리만 없었다.
+
+```sh
+zig build macos-app-bundle                                   # 앱이 먼저 있어야 한다
+sh tools/remote-scm/capture.sh /tmp/rs7.png                  # 히스토리 목록
+sh tools/remote-scm/capture.sh /tmp/rs7-x.png MARU_FORCE_SCM_COMMIT_EXPAND=0   # 커밋을 펼친 화면
+```
+
+`tools/remote-scm/ssh_harness.sh` 를 **그대로 재사용한다** — sshd·키·원격 저장소를 두 벌로 만들지
+않는다. 뒤에 붙이는 `KEY=VALUE` 는 앱 env 를 덮으므로 탭(`MARU_FORCE_SCM_TAB`)·펼침·지연
+(`MARU_SCREENSHOT_DELAY_MS`)을 골라 찍을 수 있다.
+
+- **격리 HOME 은 짧다**(`/tmp/maru-cap.<pid>`). 앱이 control socket 경로를
+  `<HOME>/.cache/maru/ctl-<…>` 로 만드는데 그 경로가 `sun_path`(104)를 넘으면 **조용히** 못 연다.
+  사용자의 진짜 `~/.cache/maru` 를 안 건드리는 이유이기도 하다 — 죽은 소켓을 남기면 나중에 진짜
+  `maru ssh` 가 그것을 재사용한다.
+- **세션 기록·탐색기 root 는 빈다**(격리 HOME 이라 그렇다). 도크의 그 뷰를 찍으려면 실제 HOME 이 필요하다.
+- **원격 pane 은 강제한다**(`MARU_FORCE_REMOTE_SCM`). 진짜 `maru ssh` 를 태우면 셸 타이밍에 매달리는데,
+  이 캡처가 보려는 것은 「원격일 때 도크가 무엇을 그리나」이지 진입 경로가 아니다. 그 아래(저장소 판정·
+  원격 읽기·렌더)는 전부 제품 경로다.
+
 ### `/tmp` 픽스처 잔재를 거둔다 (로컬 위생)
 
 session host 픽스처는 `/tmp/maru-<이름>-<pid>` 를 만들고 그 안에 daemon 을 띄운다. daemon 이 owner lock·

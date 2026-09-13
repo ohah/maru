@@ -817,6 +817,25 @@ test "controlSocketPath: 결정론적이고 dest별로 다르다" {
     try std.testing.expect(!std.mem.eql(u8, p1, p3)); // 다른 dest → 다른 경로(목적지별 유일)
 }
 
+test "controlSocketPath: 모양이 곧 계약이다 — 캡처 하니스가 그 규칙을 한 벌 더 갖고 있다" {
+    // ⚠️ **이 경로는 앱이 스스로 만든다.** 그래서 원격 SCM 화면을 찍는 하니스
+    // (`tools/remote-scm/capture.sh`)는 control socket 을 **앱이 찾을 자리**에 놓아야 하고, 그러려면
+    // 같은 규칙을 한 벌 더 갖고 있어야 한다(`tools/remote-scm/ctl_path.zig`).
+    //
+    // 사본은 낡는다 — 그래서 **모양을 여기서 못박는다**. 이 판정자가 죽으면 그 파일도 같이 고친다.
+    // 안 그러면 하니스는 엉뚱한 자리에 소켓을 놓고, 캡처는 「저장소를 확인할 수 없습니다」가 된다.
+    const a = std.testing.allocator;
+    const p = try controlSocketPath(a, "/tmp/cap", "127.0.0.1");
+    defer a.free(p);
+    var expect_buf: [128]u8 = undefined;
+    const expect = try std.fmt.bufPrint(
+        &expect_buf,
+        "/tmp/cap/.cache/maru/ctl-{x}",
+        .{std.hash.Wyhash.hash(0, "127.0.0.1")},
+    );
+    try std.testing.expectEqualStrings(expect, p);
+}
+
 test "controlSocketPath: home 끝 슬래시를 정규화한다" {
     const a = std.testing.allocator;
     const p = try controlSocketPath(a, "/Users/me/", "host");

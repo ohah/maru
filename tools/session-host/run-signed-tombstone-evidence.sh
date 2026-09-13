@@ -48,7 +48,7 @@ run_once() {
     before=$(/usr/bin/stat -f '%i' "$checkpoint")
     HOME="$root" CFFIXED_USER_HOME="$root" MARU_SESSION_HOST_ROOT="$root/session-host" \
       MARU_CONFIG="$root/.config/maru/config" \
-      MARU_WEB_APP_ROOT="$PWD/web/dist" MARU_APP_SUMMARY_PATH="$summary" "$exe" &
+      MARU_APP_SUMMARY_PATH="$summary" "$exe" &
     cleanup_pid=$!
     attempt=0
     while /bin/kill -0 "$cleanup_pid" 2>/dev/null; do

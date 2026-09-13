@@ -188,6 +188,123 @@ jobs:
       # TODO(후속): Homebrew tap(ohah/homebrew-maru) cask version/sha256 자동 bump PR.
       # tap repo write 토큰이 필요해 별도로 추가한다(distribution.md "CI 릴리스" 5단계).
 
+  session-host-tombstone-product:
+    name: session host tombstone product
+    needs: universal-dmg
+    environment: Session host product
+    runs-on: [self-hosted, macOS, ARM64, session-host-product]
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        with:
+          cache_save: false
+
+      - name: Download exact-attempt signed candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: maru-universal-dmg-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/maru-session-host-tombstone-candidate-${{ github.run_attempt }}
+
+      - name: Run mounted signed durable-tombstone transaction
+        id: tombstone-product
+        shell: bash
+        env:
+          MARU_REF_TYPE: ${{ github.ref_type }}
+          MARU_TAG: ${{ github.ref_name }}
+          MARU_REPOSITORY: ${{ github.repository }}
+          MARU_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          umask 077
+          test "$MARU_REF_TYPE" = tag
+          test "$MARU_REPOSITORY" = ohah/maru
+          [[ "$MARU_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          version=${MARU_TAG#v}
+          candidate="$RUNNER_TEMP/maru-session-host-tombstone-candidate-$MARU_ATTEMPT"
+          dmg="$candidate/Maru-$version-universal.dmg"
+          test "$(/usr/bin/stat -f '%HT' "$dmg")" = 'Regular File'
+          test ! -L "$dmg"
+          test_uuid=$(/usr/bin/uuidgen | /usr/bin/tr '[:upper:]' '[:lower:]')
+          [[ "$test_uuid" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]]
+
+          compact=${test_uuid//-/}
+          root="/tmp/mt-$compact"
+          evidence_root="$RUNNER_TEMP/maru-session-host-tombstone-$MARU_ATTEMPT"
+          mountpoint="$evidence_root/mount"
+          output="$evidence_root/tombstone-relaunch.json"
+          test ! -e "$root"
+          test ! -e "$evidence_root"
+          /bin/mkdir -m 0700 "$evidence_root"
+          /bin/mkdir -m 0700 "$mountpoint"
+          mounted=false
+          cleanup() {
+            if $mounted; then /usr/bin/hdiutil detach "$mountpoint" >/dev/null; fi
+            case "$root" in /tmp/mt-[0-9a-f][0-9a-f]*) /bin/rm -rf "$root" ;; esac
+          }
+          trap cleanup EXIT HUP INT TERM
+          /usr/bin/hdiutil attach -readonly -nobrowse -noautoopen -mountpoint "$mountpoint" "$dmg" >/dev/null
+          mounted=true
+          /sbin/mount | /usr/bin/grep -F " on $mountpoint " | /usr/bin/grep -Fq 'read-only'
+          app="$mountpoint/Maru.app"
+          test "$(/usr/bin/stat -f '%HT' "$app/Contents/MacOS/maru-macos-app")" = 'Regular File'
+          test ! -L "$app/Contents/MacOS/maru-macos-app"
+          /usr/bin/env -i PATH="$PATH" HOME="$HOME" \
+            mise exec -- zig build macos-session-host-signed-tombstone-evidence \
+              -Dsession-host-tombstone-candidate-app="$app" \
+              -Dsession-host-tombstone-candidate-dmg="$dmg" \
+              -Dsession-host-tombstone-test-uuid="$test_uuid" \
+              -Dsession-host-tombstone-root="$root" \
+              -Dsession-host-tombstone-output="$output"
+          test "$mounted" = true
+          /usr/bin/hdiutil detach "$mountpoint" >/dev/null
+          mounted=false
+          test "$(/usr/bin/stat -f '%HT' "$output")" = 'Regular File'
+          test "$(( $(/usr/bin/stat -f '%Lp' "$output") ))" -eq 600
+          test ! -L "$output"
+          test "$(/usr/bin/jq -r '.schema' "$output")" = 'maru.session-host-signed-tombstone-relaunch.v1'
+          printf 'output=%s\n' "$output" >> "$GITHUB_OUTPUT"
+
+      - name: Attest durable-tombstone evidence
+        id: tombstone-attestation
+        uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
+        with:
+          subject-path: ${{ steps.tombstone-product.outputs.output }}
+
+      - name: Freeze durable-tombstone attestation bundle
+        id: tombstone-bundle
+        shell: bash
+        env:
+          MARU_SOURCE_BUNDLE: ${{ steps.tombstone-attestation.outputs.bundle-path }}
+          MARU_OUTPUT: ${{ steps.tombstone-product.outputs.output }}
+        run: |
+          set -euo pipefail
+          umask 077
+          bundle="${MARU_OUTPUT%/*}/tombstone-relaunch.bundle.json"
+          test "$(/usr/bin/stat -f '%HT' "$MARU_SOURCE_BUNDLE")" = 'Regular File'
+          test ! -L "$MARU_SOURCE_BUNDLE"
+          test ! -e "$bundle"
+          /bin/cp "$MARU_SOURCE_BUNDLE" "$bundle"
+          /bin/chmod 0600 "$bundle"
+          /usr/bin/cmp -s "$MARU_SOURCE_BUNDLE" "$bundle"
+          printf 'bundle=%s\n' "$bundle" >> "$GITHUB_OUTPUT"
+
+      - name: Upload exact-attempt durable-tombstone evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: session-host-tombstone-product-${{ github.run_attempt }}
+          path: |
+            ${{ steps.tombstone-product.outputs.output }}
+            ${{ steps.tombstone-bundle.outputs.bundle }}
+          if-no-files-found: error
+          retention-days: 14
+
   session-host-notification-product:
     name: session host notification product
     needs: universal-dmg

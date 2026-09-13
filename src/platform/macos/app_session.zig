@@ -70460,10 +70460,64 @@ test "원격 목록을 보는 동안 로컬 저장소에 손이 가지 않는다
     try std.testing.expectEqualStrings(maru.i18n.t(.scm_remote_read_only), session.scm_write_error.?);
 
     // ⑶ **자동 경로도 안 돈다.** 인텐트를 안 거치고 tick 이 굴리는 셋이다.
+    //
+    // ⚠️ **판정자를 RS7-0 에서 고쳤다**(계획 §18.1). 옛 단언은 `scm_log_repo == null` 이었는데 그 필드는
+    // `pumpScmLog` 가 아니라 **`drainScmLog` 가** 세운다 — 읽기를 걸어도 초록이었다. 게다가 이 세션의
+    // `scm_tab` 이 기본값(`.changes`)이라 그 펌프는 첫 줄에서 빠져나가 **아무것도 시험하지 않았다.**
+    // 그래서 ⑴ 탭을 실제로 세우고 ⑵ 「읽기를 걸었는가」를 나르는 값(`scm_log_seq`)을 본다. 그 값은
+    // 제출 **직전**에 오르므로 백엔드가 `shutting_down` 으로 거절해도 움직인다 — 판정 대상이
+    // 「백엔드가 받았나」가 아니라 「우리가 걸려고 했나」라서 이 축이 맞다.
+    session.scm_tab = .history;
     scm_dock_ops.pumpScmLog(session);
+    try std.testing.expectEqual(@as(u64, 0), session.scm_log_seq); // 로컬 히스토리를 읽으려 들지 않았다
+    try std.testing.expect(session.scm_log_repo == null);
+
     scm_dock_ops.pumpCommitFiles(session);
-    try std.testing.expect(session.scm_log_repo == null); // 로컬 히스토리를 읽지 않았다
     try std.testing.expect(session.scm_commit_files_inflight == 0);
+
+    // **가드는 「새로 읽는 것」만 막는다 — 이미 선 목록은 따로 버려야 한다**(적대적 검증 3회차).
+    // `dropScmLogIfRepoChanged` 의 비교는 **경로로만** 하는데, 로컬 `/srv/app` → 원격 `/srv/app` 처럼
+    // 경로가 같고 기계만 바뀌는 전환에서는 「안 바뀌었다」를 낸다 — 그러면 **로컬에서 읽은 커밋이
+    // 원격 히스토리로 그대로 남는다**(§5 2회차가 안내 줄에서 겪은 것과 같은 형태).
+    scm_dock_ops.seedScmLogForTest(session, "/srv/app", "aaaa1111\x1f\x1fAmy\x1f1\x1f\x1f로컬 커밋\x1e");
+    try std.testing.expect(session.scm_log_repo != null); // 전제: 목록이 서 있다
+    scm_dock_ops.dropScmLogIfRepoChanged(session);
+    try std.testing.expect(session.scm_log_repo == null);
+    try std.testing.expectEqual(@as(usize, 0), session.scm_log_text.len);
+
+    // **그리고 그 자리가 「읽는 중…」으로 남지 않는다**(계획 §2.3 — 지원하지 않으면 이유를 말한다).
+    // 가드가 읽기를 막으므로 `scm_log_repo` 는 영영 null 이고, 그대로 두면 사용자는 느린 것으로 읽는다.
+    {
+        var arena_state = std.heap.ArenaAllocator.init(allocator);
+        defer arena_state.deinit();
+        session.scm_tab = .history;
+        const projection = scm_dock_ops.projectTabForTest(session, arena_state.allocator()) orelse
+            return error.NoProjection;
+        var saw_remote_notice = false;
+        for (projection.items) |item| switch (item) {
+            .notice => |text| {
+                if (std.mem.eql(u8, text, maru.i18n.t(.scm_log_remote_unsupported))) saw_remote_notice = true;
+                // 「읽는 중…」이 이 화면에 서면 안 된다 — 그것이 바로 이 판정자가 막는 거짓말이다.
+                try std.testing.expect(!std.mem.eql(u8, text, maru.i18n.t(.scm_loading)));
+            },
+            else => {},
+        };
+        try std.testing.expect(saw_remote_notice);
+    }
+
+    // **에이전트 탭의 턴 요약도 같은 구멍이었다**(적대적 검증 5회차 — 계획 §18.1). 링을 채우는
+    // `captureTurnSnapshot` 은 원격에서 안 돌지만 **링은 로컬 세션에서 이미 차 있을 수 있고**, 그
+    // 미확인 턴이 `git_repo`(원격 경로)로 로컬 git 을 부른다. 그래서 링을 실제로 채운 뒤에 본다 —
+    // 비워 두면 `nextUnknownFiles()` 에서 빠져나가 가드를 시험하지 못한다.
+    const ring = testTurnRing(session);
+    ring.push(.{ .tree = "aaaa1111", .surface_id = 1, .captured_s = 100, .agent_kind = 1 });
+    ring.push(.{ .tree = "bbbb2222", .surface_id = 1, .captured_s = 200, .agent_kind = 1 });
+    try std.testing.expect(ring.nextUnknownFiles() != null); // 전제: 물어볼 턴이 있다
+    session.scm_tab = .agent;
+    scm_dock_ops.pumpTurnSummaries(session);
+    try std.testing.expectEqual(@as(u64, 0), session.scm_commit_files_seq);
+    try std.testing.expect(session.scm_turn_summary_inflight == 0);
+    session.scm_tab = .changes;
 
     // ⑷ **로컬로 돌아오면 원격 안내를 치운다.** 남기면 로컬 목록 위에 「원격 세션이라…」가 뜬다.
     git_ops.rememberGitRepoDest(session, null);

@@ -949,7 +949,14 @@ fn projectHistory(self: *AppSession, arena: std.mem.Allocator) ?Projection {
     }
     if (count == 0) {
         // 셋을 구별한다: 아직 못 읽음 · 읽었지만 커밋 없음 · 읽기 실패.
-        items[n] = .{ .notice = if (self.scm_log_failed)
+        //
+        // **원격이 그 앞에 하나 더 온다**(RS7-0 — [계획](../../../../docs/plans/remote-scm.md) §18.1).
+        // 가드가 읽기를 막으므로 `scm_log_repo` 가 영영 `null` 이고, 그대로 두면 목록이 **영영
+        // 「읽는 중…」**이라 사용자는 느린 것으로 읽는다 — §2.3 의 「지원하지 않는 동작은 이유를
+        // 말한다」가 이 자리에도 걸린다. **RS7b 가 실제로 읽게 되면 이 가지를 지운다.**
+        items[n] = .{ .notice = if (git_ops.scmTargetIsRemote(self))
+            maru.i18n.t(.scm_log_remote_unsupported)
+        else if (self.scm_log_failed)
             maru.i18n.t(.scm_log_read_failed)
         else if (self.scm_log_repo == null)
             maru.i18n.t(.scm_loading)
@@ -2319,6 +2326,13 @@ pub fn selectScmTab(self: *AppSession, tab: component.types.Tab) void {
 pub fn pumpScmLog(self: *AppSession) void {
     if (self.dock.view != .source_control or !dock_ops.dockVisible(self)) return;
     if (self.scm_tab != .history) return;
+    // **원격 목록을 보는 동안 로컬 git 으로 커밋 목록을 읽지 않는다**(RS7-0 — [계획](../../../../docs/plans/remote-scm.md) §18.1).
+    // `git_repo` 에 든 것이 원격 경로라, 이쪽 기계에 우연히 같은 경로가 있으면 **남의 저장소 커밋**이
+    // 원격 히스토리로 뜬다 — `pumpCommitFiles` 와 같은 줄이다.
+    //
+    // ⚠️ 이 줄은 RS2 적대적 검증 1회차가 「막았다」고 적어 둔 셋 중 **실제로는 안 들어간** 자리다
+    // (계획 §5 의 정정). 원격 히스토리 자체는 RS7b 가 연다 — 그때 이 줄이 원격 라우팅으로 바뀐다.
+    if (git_ops.scmTargetIsRemote(self)) return;
     if (self.scm_log_inflight != 0) return;
     const repo = self.git_repo orelse return; // 저장소를 못 잡았으면 읽을 것도 없다
     // 이미 **그 저장소를 그 상한으로** 읽어 뒀으면 다시 읽지 않는다.
@@ -2365,7 +2379,16 @@ pub fn drainScmLog(self: *AppSession) void {
 pub fn dropScmLogIfRepoChanged(self: *AppSession) void {
     const repo = self.git_repo orelse "";
     const current = self.scm_log_repo orelse return;
-    if (std.mem.eql(u8, current, repo)) return;
+    // ⚠️ **호스트가 바뀌어도 버린다**(RS7-0 — [계획](../../../../docs/plans/remote-scm.md) §18.1,
+    // 적대적 검증 2026-09-13 3회차). 아래 비교는 **경로로만** 하는데, 로컬 `/srv/app` → 원격 `/srv/app`
+    // 처럼 경로가 같고 기계만 바뀌는 전환에서는 「안 바뀌었다」를 낸다 — 그러면 **로컬에서 읽은 커밋
+    // 목록이 원격 히스토리로 그대로 남는다.** §5 2회차가 안내 줄에서 겪은 것과 같은 형태이고, 가드
+    // (`pumpScmLog`)만으로는 안 닫힌다: 가드는 새로 읽는 것을 막을 뿐 **이미 선 목록**을 안 건드린다.
+    //
+    // 조건이 「원격이면」 하나로 끝나는 근거: RS7-0 뒤로 원격일 때는 읽지 않으므로 화면에 선 목록은
+    // **언제나 로컬에서 읽은 것**이다. RS7b 가 원격을 실제로 읽게 되면 이 조건은 `(host, path)` 쌍
+    // 비교로 바뀐다.
+    if (!git_ops.scmTargetIsRemote(self) and std.mem.eql(u8, current, repo)) return;
     self.allocator.free(current);
     self.scm_log_repo = null;
     if (self.scm_log_text.len > 0) self.allocator.free(self.scm_log_text);
@@ -2531,6 +2554,13 @@ pub fn pumpCommitFiles(self: *AppSession) void {
 pub fn pumpTurnSummaries(self: *AppSession) void {
     if (self.dock.view != .source_control or !dock_ops.dockVisible(self)) return;
     if (self.scm_tab != .agent) return; // 안 보는 탭 때문에 프로세스를 띄우지 않는다
+    // **원격 목록을 보는 동안에는 턴 요약도 안 읽는다**(RS7-0 — [계획](../../../../docs/plans/remote-scm.md) §18.1,
+    // 적대적 검증 2026-09-13 5회차). RS2 1회차는 이 자리를 세지 않았다 — 링을 채우는
+    // `captureTurnSnapshot` 만 막으면 된다고 봤기 때문인데, **링은 로컬 세션에서 이미 차 있을 수 있다.**
+    // 에이전트 탭을 연 채 원격 pane 으로 옮기면 그 미확인 턴이 `git_repo`(원격 경로)로 로컬 git 을 부른다.
+    //
+    // **이 가드는 RS7b 뒤에도 남는다** — 턴 축(스냅샷을 찍는 쓰기 경로)은 RS7 의 범위가 아니다.
+    if (git_ops.scmTargetIsRemote(self)) return;
     if (self.scm_commit_files_inflight != 0 or self.scm_turn_summary_inflight != 0) return;
     const identity = git_ops.activeOrLastSessionIdentity(self);
     if (identity.len == 0) return;
@@ -3975,6 +4005,23 @@ pub fn forgetRepoStatus(self: *AppSession) void {
     // 돌고 있는 답도 버린다 — 그 답은 **옛 기계**의 것이라 새 목록에 실리면 안 된다.
     self.scm_repo_status_inflight = 0;
     self.metal_dirty = true;
+}
+
+/// 판정자용: 커밋 목록을 직접 심는다. 진짜 저장소 없이 「화면에 이미 선 목록이 있다」를 세울 방법이
+/// 이것뿐이다 — 그 상태가 **호스트 전환에서 남는가**(RS7-0)를 보려면 목록이 먼저 서 있어야 한다.
+/// 소유는 세션이 진다(`deinit` 가 둘 다 푼다).
+pub fn seedScmLogForTest(self: *AppSession, repo: []const u8, text: []const u8) void {
+    const repo_copy = self.allocator.dupe(u8, repo) catch return;
+    const text_copy = self.allocator.dupe(u8, text) catch {
+        self.allocator.free(repo_copy);
+        return;
+    };
+    if (self.scm_log_repo) |old| self.allocator.free(old);
+    if (self.scm_log_text.len > 0) self.allocator.free(self.scm_log_text);
+    self.scm_log_repo = repo_copy;
+    self.scm_log_text = text_copy;
+    self.scm_log_failed = false;
+    self.scm_log_truncated = false;
 }
 
 /// 판정자용: 머리 줄 요약을 직접 심는다(성공 항목). 진짜 저장소 없이 「캐시에 남의 기계 값이 있다」를

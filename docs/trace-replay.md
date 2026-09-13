@@ -105,7 +105,10 @@ grep -E "read-error|process-exit" /tmp/maru.trace
 
 단일 출처: `read_error` 무검증 종료가 산 셸을 죽이고 탭을 닫던 루트커즈와 그 닫기 게이트는 [PTY 운영 모델](pty-operating-model.md)의 "read_error vs 검증된 exit — 워크스페이스 자동 닫기 게이트" 절.
 
-## GUI inspector 설계 방향 (후속 — 미구현)
+## GUI inspector 별도 이니셔티브 계약
+
+이 기능의 현재 검증 상태와 착수 gate는 [검증 매트릭스](verification-matrix.md)의
+`Trace GUI inspector` 행이 소유한다.
 
 캡처한 세션을 사람이 **넘겨보며 각 순간의 화면을 보는** 뷰어다(트레이드오프 논의 결과 확정된 방향).
 

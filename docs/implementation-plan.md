@@ -1485,6 +1485,12 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    임의로 만들지 않는다. 동일 환경·동일 executable의 독립 3묶음 60회에서 전체 p95 22.199ms와
    단발 max 73.833ms를 관측했고, 20회 묶음의 nearest-rank p95 30ms와 개별 hang 100ms를
    기존 strict validator에 배선했다. 이는 다른 기기 등급을 주장하지 않는 현재 제품 경로의 회귀 예산이다.
+   **비릴리스 잔여 범위:** restore-incomplete 실행은 현재 손상된 manifest를 덮지 않도록 background/final checkpoint를
+   건너뛴다. 완전 복원 성공 뒤 stale `.bak`을 해제하고 다음 첫 저장에서 backup을 다시 무장하는 경로는
+   [검증 매트릭스](verification-matrix.md)의 `Workspace restore checkpoint backup re-arm` 행에 구현 전으로 남긴다.
+   capability 없는 N-1 host의 lifecycle polling/fallback, 실제 다른 UID process 거부, 실제 AppKit 입력기 후보창·조합
+   픽셀 검증도 일반 current-current 제품 경로의 완료 주장과 분리한다. 앞의 첫 항목은 호환 확장이고 뒤의 두 항목은
+   환경 의존 검증 gap이다.
    G3은 출하 뒤 기본값을 다시 바꿀 때만
    여는 별도 백로그이고 P6은 선택 확장 범위다.
 

@@ -6665,6 +6665,12 @@ pub const AppSession = struct {
     /// 거짓말을 한다(2026-09-12).
     unmatched_event_nonce_raw_len: usize = 0,
     unmatched_term_nonce_raw_len: usize = 0,
+    /// 이번 분배에서 Term 들이 **`.event` 프레임을 본 횟수**.
+    ///
+    /// `open` 은 **분배 시작 시점**의 채널 상태일 뿐이다. 그 뒤 `feed` 가 그 줄을 `.event` 로 안 보면
+    /// 비교 자체가 일어나지 않고, 미매칭 기록조차 안 남는다 — 그러면 값이 글자 그대로 같은데도
+    /// 「하나도 안 맞는다」로 보인다(2026-09-13 에 그 고리에 갇혔다).
+    remote_events_seen: usize = 0,
     /// 주인을 못 찾은 마지막 이벤트의 nonce 와, 그때 Term 이 들고 있던 nonce.
     /// 둘을 **나란히** 찍어야 「어디서 갈렸는지」가 보인다 — 하나만으로는 대조가 안 된다.
     unmatched_event_nonce: [maru.session.agent_hook_command.remote_pane_nonce_max]u8 = undefined,
@@ -15741,7 +15747,7 @@ pub const AppSession = struct {
         if (self.unmatched_reported) return;
         self.unmatched_reported = true;
         std.log.scoped(.agent).warn(
-            "orphan agent nonce: dest={s} event={s}({d}) term={s}({d}){s} ({d} fed, {d} with nonce, {d} open, saw_hello={}, none matched) mine=[{s}]",
+            "orphan agent nonce: dest={s} event={s}({d}) term={s}({d}){s} ({d} fed, {d} with nonce, {d} open, {d} events seen, saw_hello={}, none matched) mine=[{s}]",
             .{
                 dest,
                 self.unmatched_event_nonce[0..self.unmatched_event_nonce_len],
@@ -15752,6 +15758,7 @@ pub const AppSession = struct {
                 fed,
                 with_nonce,
                 open_channels,
+                self.remote_events_seen,
                 if (self.remote_agent_hosts.get(dest)) |h| h.saw_hello else false,
                 mine,
             },
@@ -15826,6 +15833,7 @@ pub const AppSession = struct {
     /// 반복됐다. 그래서 조건별로 세고, **아무도 못 받으면** 기본 레벨로 알린다(계약 §1.2 의 결).
     fn feedRemoteAgentTerms(self: *AppSession, dest: []const u8, lines: []const []const u8, now_ms: u64) void {
         self.remote_nonce_matched = 0;
+        self.remote_events_seen = 0;
         var fed: usize = 0;
         var with_nonce: usize = 0;
         // **몇이 실제로 먹을 수 있나.** `fed` 는 「분배 후보였다」일 뿐이고, 채널이 `hello` 관문을 못
@@ -24973,6 +24981,71 @@ test "RG1: `_` 가 없거나 스풀 이름이면 판정하지 않는다" {
         "t36",
         "host_f377d61ed8ebb82f727c12c4d2cfedaf_051c73ccfe837237ad404ea76df937e1",
     ));
+}
+test "RF7: 이벤트를 본 횟수를 센다 — 「비교가 안 일어난다」와 「안 맞는다」를 가른다" {
+    // `open` 은 **분배 시작 시점**의 채널 상태일 뿐이다. 그 뒤 `feed` 가 그 줄을 `.event` 로 안 보면
+    // 비교 자체가 일어나지 않고 미매칭 기록조차 안 남는다 — 그러면 값이 글자 그대로 같은데도
+    // 「하나도 안 맞는다」로 보인다(2026-09-13 에 그 고리에 갇혔다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const term = pane_ops.activePane(session).activeTerm();
+    term.agent_remote_channel = maru.session.remote_agent_stream.Channel.initOpen(0);
+    term.rt.observation.ssh_remote_dest_present = true;
+    try term.rt.observation.ssh_remote_dest.appendSlice(a, "openClaw");
+    const mine = "host_aaaa_mine";
+    @memcpy(term.agent_remote_nonce[0..mine.len], mine);
+    term.agent_remote_nonce_len = mine.len;
+
+    // 이벤트 둘을 흘린다 — 하나는 우리 것, 하나는 남의 것.
+    session.feedRemoteAgentTerms("openClaw", &.{
+        "{\"nonce\":\"host_aaaa_mine\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"Stop\\\"}\"}",
+        "{\"nonce\":\"host_bbbb_other\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"Stop\\\"}\"}",
+    }, 1);
+
+    try std.testing.expectEqual(@as(usize, 2), session.remote_events_seen); // 둘 다 봤다
+    try std.testing.expectEqual(@as(usize, 1), session.remote_nonce_matched); // 하나가 우리 것
+}
+test "RF7: 채널이 관문 앞이면 이벤트를 아예 못 본다 — 그것이 0 으로 드러난다" {
+    // `waiting_hello` 는 닫히지도 않았고 이벤트도 못 낸다. 그 상태에서는 비교가 **한 번도** 안 일어나며,
+    // 셈이 0 이면 그 사실이 로그에 그대로 남는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const term = pane_ops.activePane(session).activeTerm();
+    term.agent_remote_channel = maru.session.remote_agent_stream.Channel.init(0); // 관문 앞
+    term.rt.observation.ssh_remote_dest_present = true;
+    try term.rt.observation.ssh_remote_dest.appendSlice(a, "openClaw");
+    const mine = "host_aaaa_mine";
+    @memcpy(term.agent_remote_nonce[0..mine.len], mine);
+    term.agent_remote_nonce_len = mine.len;
+
+    session.feedRemoteAgentTerms("openClaw", &.{
+        "{\"nonce\":\"host_aaaa_mine\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"Stop\\\"}\"}",
+    }, 1);
+
+    try std.testing.expectEqual(@as(usize, 0), session.remote_events_seen); // 아예 못 봤다
+    try std.testing.expectEqual(@as(usize, 0), session.remote_nonce_matched);
 }
 test "RF6: 잘린 값이 「같아」 보이지 않게 원본 길이를 남긴다" {
     // 진단 버퍼는 `remote_pane_nonce_max`(70)인데 스트리머가 싣는 값은 `remote_log_name_max`(82)까지

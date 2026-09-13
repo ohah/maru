@@ -120,6 +120,16 @@ struct EditorSmoke {
         //    증거가 있어야 한다. 반드시 차단돼야 하는 eval을 일부러 시도한다 — **위 계측이 모두 끝난 뒤**에.
         let cspEnforced = evaluate(webView, "window.__maruEditorSmoke.csp_self_test()") as? Bool ?? false
         summary["csp_enforced"] = String(cspEnforced)
+        // **위반은 비동기로 도착한다.** `securitypolicyviolation` 은 eval 이 막힌 그 자리에서가 아니라
+        // 이벤트 루프를 한 바퀴 돈 뒤 수집기에 들어온다. 바로 읽으면 한가한 기계에서는 우연히 맞고
+        // 부하가 걸린 CI 에서는 **아직 0** 이라, 「수집기가 죽었다」로 오진한다(실측: 같은 커밋이 로컬
+        // 초록 / CI 빨강). 그래서 개수가 늘 때까지 벽시계로 기다린다 — 이 저장소가 워커 대기에 쓰는
+        // 규율과 같다(반복 횟수가 아니라 마감으로 센다).
+        let violationsBaseline = jsonArrayCount(violations)
+        _ = waitFor(
+            webView: webView,
+            expression: "window.__maruEditorSmoke.violations.length > \(violationsBaseline)"
+        )
         let violationsAfterSelfTest = (evaluate(webView, "JSON.stringify(window.__maruEditorSmoke.violations)") as? String) ?? "[]"
         summary["csp_self_test_violations"] = violationsAfterSelfTest
         // 자가검증이 위반을 **실제로 만들어야** 수집기도 살아 있다는 뜻이다(수집기가 죽어 있으면 위 0도 거짓이다).

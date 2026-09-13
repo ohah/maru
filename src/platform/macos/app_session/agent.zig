@@ -814,7 +814,11 @@ pub fn pollAgentKinds(self: *AppSession) void {
                 // (적대적 검증 2 회차가 잡았다).
                 //
                 // 원격에서는 **훅 줄이 더 확실한 소스다** — 그 줄을 쓴 것이 그 provider 이기 때문이다.
-                const remote_owns_kind = term.agent_remote_channel != null;
+                // ⚠️ **「채널이 열렸나」가 아니라 「훅이 말해 준 적이 있나」로 잰다.** 채널만 보고 멈추면
+                // 훅이 영영 안 오는 동안에도 판정이 멈춘 채라, 아이콘이 옛 provider 색으로 굳거나 아예
+                // 안 선다 — 2026-09-13 실측에서 「코덱스가 아닌데 초록」·「클로드인데 주황이 아니다」가
+                // 그 모양이었다. 훅이 오면 그때부터 훅이 이긴다(아래 `agent_kind_from_hook`).
+                const remote_owns_kind = term.agent_kind_from_hook;
                 if ((periodic_kind_probe or pgid_changed) and foreground_available and !remote_owns_kind) {
                     const prev = term.agent_kind;
                     term.agent_kind = classifyAgentProcesses(term.rt.observation.foreground_processes.items);
@@ -1934,6 +1938,7 @@ pub fn consumeRemoteAgentLines(self: *AppSession, term: *Term, lines: []const []
                     .codex
                 else
                     .none;
+                if (kind != .none) term.agent_kind_from_hook = true; // 이제부터 훅이 이긴다
                 if (kind != .none and term.agent_kind != kind) {
                     term.agent_kind = kind;
                     self.metal_dirty = true;

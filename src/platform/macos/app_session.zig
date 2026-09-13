@@ -25021,6 +25021,43 @@ test "RG1: `_` 가 없거나 스풀 이름이면 판정하지 않는다" {
         "host_f377d61ed8ebb82f727c12c4d2cfedaf_051c73ccfe837237ad404ea76df937e1",
     ));
 }
+test "AK3: 훅이 provider 를 말하면 그때부터 훅이 이긴다 — 그 전에는 프로세스 판정이 돈다" {
+    // 원격에서는 훅이 더 확실한 소스라 그것이 오면 화면·프로세스 판정을 멈춘다. 그런데 그 멈춤을
+    // 「채널이 열렸나」로 재면 **훅이 영영 안 오는 동안에도** 판정이 멈춘 채라, 아이콘이 옛 provider
+    // 색으로 굳거나 아예 안 선다 — 2026-09-13 실측에서 「코덱스가 아닌데 초록」·「클로드인데 주황이
+    // 아니다」가 그 모양이었다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const term = pane_ops.activePane(session).activeTerm();
+    term.agent_remote_channel = maru.session.remote_agent_stream.Channel.initOpen(0);
+    term.rt.observation.ssh_remote_dest_present = true;
+    try term.rt.observation.ssh_remote_dest.appendSlice(a, "openClaw");
+    const mine = "host_aaaa_mine";
+    @memcpy(term.agent_remote_nonce[0..mine.len], mine);
+    term.agent_remote_nonce_len = mine.len;
+
+    // 채널은 열렸지만 훅은 아직 아무 말도 안 했다 — 프로세스 판정이 계속 돌아야 한다.
+    try std.testing.expect(!term.agent_kind_from_hook);
+
+    // 우리 것인 훅 줄이 오면 **그때부터** 훅이 이긴다.
+    session.feedRemoteAgentTerms("openClaw", &.{
+        "{\"nonce\":\"host_aaaa_mine\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"Stop\\\"}\"}",
+    }, 1);
+
+    try std.testing.expect(term.agent_kind_from_hook);
+    try std.testing.expectEqual(AgentKind.claude, term.agent_kind);
+}
 test "RF7: 이벤트를 본 횟수를 센다 — 「비교가 안 일어난다」와 「안 맞는다」를 가른다" {
     // `open` 은 **분배 시작 시점**의 채널 상태일 뿐이다. 그 뒤 `feed` 가 그 줄을 `.event` 로 안 보면
     // 비교 자체가 일어나지 않고 미매칭 기록조차 안 남는다 — 그러면 값이 글자 그대로 같은데도

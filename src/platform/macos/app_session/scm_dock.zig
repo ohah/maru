@@ -952,16 +952,24 @@ fn projectHistory(self: *AppSession, arena: std.mem.Allocator) ?Projection {
         //
         // **원격도 같은 셋으로 답한다**(RS7b). 히스토리를 저쪽 기계에서 읽게 됐으므로 「아직 못 읽는다」
         // 라는 네 번째 상태가 없어졌다 — RS7-0 이 두었던 그 가지를 여기서 지웠다.
+        //
+        // ⚠️ **첫 커밋 전(unborn)은 「없다」다 — 「못 읽었다」가 아니다**(누적 적대적 검증 2026-09-13
+        // 4회차). `git log` 는 unborn 에서 **exit 128** 로 끝나므로 우리 눈에는 실패로 온다. 그대로 두면
+        // 갓 `git init` 한 저장소가 「커밋을 읽지 못했습니다」로 보이고 사용자는 고칠 것을 찾는다 —
+        // §3.5.3 이 약속한 셋이 실제로는 그 자리에서 어긋나 있었다. 목록 읽기가 이미 그 사실을
+        // 알고 있으므로(`# branch.oid (initial)`) 다시 묻지 않는다.
         items[n] = .{
-            .notice = if (self.scm_log_failed)
+            .notice = if (self.scm_log_repo == null)
+                maru.i18n.t(.scm_loading)
+            else if (scmRepoIsUnborn(self))
+                maru.i18n.t(.scm_no_commits)
+            else if (self.scm_log_failed)
                 // **읽기 실패는 이유를 말한다**(RS7d — §18.5). 목록 읽기의 `scmEmptyNotice` 와 **같은 표**다.
                 switch (self.scm_log_failure) {
                     .remote_git_missing => maru.i18n.t(.scm_remote_git_missing),
                     .remote_transport => maru.i18n.t(.scm_remote_transport_failed),
                     .generic => maru.i18n.t(.scm_log_read_failed),
                 }
-            else if (self.scm_log_repo == null)
-                maru.i18n.t(.scm_loading)
             else
                 maru.i18n.t(.scm_no_commits),
         };
@@ -2331,6 +2339,17 @@ pub fn selectScmTab(self: *AppSession, tab: component.types.Tab) void {
     self.metal_dirty = true;
 }
 
+/// 이 저장소가 **첫 커밋 전**인가. 목록 읽기(`status --branch`)가 이미 답을 갖고 있으므로 히스토리가
+/// 따로 묻지 않는다 — 한 번 더 물으면 원격에서는 왕복이 하나 더 는다.
+///
+/// 목록을 아직 못 읽었으면 `false` 다. **「모른다」를 「없다」로 말하지 않는다** — 그 구간의 문구는
+/// 「읽는 중…」이 맡는다.
+fn scmRepoIsUnborn(self: *const AppSession) bool {
+    const result = self.git_result orelse return false;
+    if (!result.ok) return false;
+    return maru.session.git_status.parseHead(result.status).unborn;
+}
+
 /// 히스토리 탭이 지금 필요한 읽기를 건다. **그 탭을 볼 때만** 돈다 — 안 보는 목록을 읽는 것은
 /// 프로세스를 공짜로 띄우는 일이다(§6 비용 규율).
 pub fn pumpScmLog(self: *AppSession) void {
@@ -2339,8 +2358,20 @@ pub fn pumpScmLog(self: *AppSession) void {
     if (self.scm_log_inflight != 0) return;
     const repo = self.git_repo orelse return; // 저장소를 못 잡았으면 읽을 것도 없다
     // 이미 **그 저장소를 그 상한으로** 읽어 뒀으면 다시 읽지 않는다.
+    //
+    // ⚠️ **실패도 답이다**(누적 적대적 검증 2026-09-13 3회차). 예전에는 `!failed` 와 `text.len > 0` 을
+    // 함께 물어서, 답이 실패로 오면 **매 tick 다시 물었다** — 첫 커밋 전(unborn) 저장소는 `git log` 가
+    // exit 128 이라 그 상태가 **영구적**이고, 그래서 프로세스를 프레임마다 띄웠다. RS7b 뒤로는 그것이
+    // **ssh 왕복**이다.
+    //
+    // 이웃 둘이 이미 같은 규율을 적어 두었다 — `pumpCommitFiles` 의 「실패도 답이다」와
+    // `applyTurnSummary` 의 「실패해도 «읽었다»로 표시한다 — 안 그러면 같은 턴을 매 tick 다시 물어
+    // 프로세스를 무한히 띄운다」. 히스토리만 그 규율 밖에 있었다.
+    //
+    // **다시 읽는 길은 그대로다**: 저장소·기계가 바뀌면 `dropScmLogIfRepoChanged` 가 버리고,
+    // `더 보기` 와 쓰기 뒤 재읽기는 표식을 지우며, 사용자는 새로고침을 누른다.
     if (self.scm_log_repo) |current| {
-        if (std.mem.eql(u8, current, repo) and !self.scm_log_failed and self.scm_log_text.len > 0) return;
+        if (std.mem.eql(u8, current, repo)) return;
     }
 
     // **목록이 원격이면 그 기계에서 읽는다**(RS7b — [계획](../../../../docs/plans/remote-scm.md) §18.3).

@@ -70811,6 +70811,96 @@ test "«다시 읽어라» 표식만 남은 목록도 기계가 갈리면 버린
     try std.testing.expect(!session.metal_dirty);
 }
 
+test "히스토리: 실패도 답이다 — 매 tick 다시 묻지 않는다 (누적 적대적 검증)" {
+    // **결함**(2026-09-13). 히스토리 펌프의 「이미 읽어 뒀나」가 `!scm_log_failed` 를 함께 물어서, 답이
+    // 실패로 오면 **매 tick 다시 물었다.** 첫 커밋 전(unborn) 저장소는 `git log` 가 exit 128 이라 그
+    // 상태가 **영구적**이고, 그래서 프로세스를 프레임마다 띄웠다 — RS7b 뒤로는 그것이 **ssh 왕복**이다.
+    //
+    // 이웃 둘이 이미 같은 규율을 적어 두었다: `pumpCommitFiles` 의 「실패도 답이다」와
+    // `applyTurnSummary` 의 「실패해도 «읽었다»로 표시한다 — 안 그러면 프로세스를 무한히 띄운다」.
+    // 히스토리만 그 규율 밖에 있었다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.git_backend = try git_backend_mod.Backend.init(session.io);
+    session.git_backend.?.state.?.shutting_down = true; // 실제 git 을 안 띄운다
+
+    const launcher = file_panel_ops.filePanelDockControlRect(session) orelse return error.MissingDockLauncher;
+    session.mouse(1, @floatFromInt(launcher.x + 1), @floatFromInt(launcher.y + 1), 0, 0);
+    dock_ops.setDockView(session, .source_control);
+    session.scm_tab = .history;
+
+    // **로컬** 저장소를 하나 읽어 뒀는데 그 답이 실패였다(unborn 이 그 모양이다).
+    git_ops.rememberGitRepo(session, "/srv/app");
+    scm_dock_ops.seedScmLogForTest(session, "/srv/app", "", null);
+    session.scm_log_failed = true;
+
+    const before = session.scm_log_seq;
+    scm_dock_ops.pumpScmLog(session);
+    scm_dock_ops.pumpScmLog(session);
+    scm_dock_ops.pumpScmLog(session);
+    // 옛 코드는 부를 때마다 하나씩 올랐다 — 프레임마다 프로세스 하나다.
+    try std.testing.expectEqual(before, session.scm_log_seq);
+
+    // **다시 읽는 길은 그대로다** — 표식을 지우면(`더 보기` · 쓰기 뒤 재읽기) 다음 tick 이 묻는다.
+    scm_dock_ops.invalidateScmLog(session);
+    scm_dock_ops.pumpScmLog(session);
+    try std.testing.expect(session.scm_log_seq != before);
+}
+
+test "히스토리: 첫 커밋 전 저장소는 «없다»고 말한다 — «못 읽었다»가 아니라 (누적 적대적 검증)" {
+    // `git log` 는 unborn 에서 **exit 128**(실측)이라 우리 눈에는 실패로 온다. 그대로 두면 갓
+    // `git init` 한 저장소가 「커밋을 읽지 못했습니다」로 보이고 사용자는 고칠 것을 찾는다 —
+    // 도크 문서 §3.5.3 이 약속한 셋이 그 자리에서 어긋나 있었다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    session.scm_tab = .history;
+
+    // 목록 읽기는 성공했고 **unborn** 이라고 말한다(`# branch.oid (initial)`).
+    session.git_result = .{
+        .status = try git_backend_mod.worker_allocator.dupe(u8, "# branch.oid (initial)\n# branch.head main\n"),
+        .ok = true,
+    };
+    // 그런데 히스토리 읽기는 **실패**로 왔다(exit 128).
+    scm_dock_ops.seedScmLogForTest(session, "/repo", "", null);
+    session.scm_log_failed = true;
+
+    const projection = scm_dock_ops.projectTabForTest(session, arena_state.allocator()) orelse
+        return error.NoProjection;
+    var saw_no_commits = false;
+    for (projection.items) |item| switch (item) {
+        .notice => |text| {
+            if (std.mem.eql(u8, text, maru.i18n.t(.scm_no_commits))) saw_no_commits = true;
+            // 「읽지 못했습니다」는 이 화면의 사실이 아니다.
+            try std.testing.expect(!std.mem.eql(u8, text, maru.i18n.t(.scm_log_read_failed)));
+        },
+        else => {},
+    };
+    try std.testing.expect(saw_no_commits);
+
+    // **「모른다」를 「없다」로 말하지 않는다** — 목록을 아직 못 읽었으면 unborn 판정이 서지 않는다.
+    if (session.git_result) |*r| r.deinit(git_backend_mod.worker_allocator);
+    session.git_result = null;
+    const after = scm_dock_ops.projectTabForTest(session, arena_state.allocator()) orelse
+        return error.NoProjection;
+    var saw_failed = false;
+    for (after.items) |item| switch (item) {
+        .notice => |text| {
+            if (std.mem.eql(u8, text, maru.i18n.t(.scm_log_read_failed))) saw_failed = true;
+        },
+        else => {},
+    };
+    try std.testing.expect(saw_failed);
+}
+
 test "원격 pane 의 «돌고 있나» 는 낡은 관측을 믿지 않는다 (RS4c 적대적 검증 2회차)" {
     const busy = term_ops.observationKnownBusy;
     const Sem = maru.terminal.SemanticPrompt;

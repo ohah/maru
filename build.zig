@@ -4969,7 +4969,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_perf_gate_mode_boundary_tests = b.addRunArtifact(perf_gate_mode_boundary_tests);
-    run_perf_gate_mode_boundary_tests.addArg("--maru-expect-tests=1");
+    run_perf_gate_mode_boundary_tests.addArg("--maru-expect-tests=2");
     run_perf_gate_mode_boundary_tests.setCwd(b.path("."));
     boundary_step.dependOn(&run_perf_gate_mode_boundary_tests.step);
     const session_host_cr6f_boundary_tests = addProjectTest(b, .{

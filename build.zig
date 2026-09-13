@@ -2663,6 +2663,22 @@ pub fn build(b: *std.Build) void {
         run_session_host_r1_tombstone.step.dependOn(&session_host_r1_tombstone_fixture.step);
         session_host_r1_tombstone_step.dependOn(&run_session_host_r1_tombstone.step);
 
+        const tombstone_candidate_app = b.option([]const u8, "session-host-tombstone-candidate-app", "Absolute Maru.app path on the read-only candidate DMG") orelse "";
+        const tombstone_candidate_dmg = b.option([]const u8, "session-host-tombstone-candidate-dmg", "Absolute pinned signed candidate DMG") orelse "";
+        const tombstone_candidate_uuid = b.option([]const u8, "session-host-tombstone-test-uuid", "Canonical protected-workflow test UUID") orelse "";
+        const tombstone_candidate_root = b.option([]const u8, "session-host-tombstone-root", "Absolute absent isolated product root") orelse "";
+        const tombstone_candidate_output = b.option([]const u8, "session-host-tombstone-output", "Absolute absent canonical tombstone evidence leaf") orelse "";
+        const tombstone_candidate_step = b.step(
+            "macos-session-host-signed-tombstone-evidence",
+            "Run the mounted signed candidate through two normal tombstone Quit cycles",
+        );
+        const run_tombstone_candidate = b.addSystemCommand(&.{ "sh", "tools/session-host/run-signed-tombstone-evidence.sh" });
+        run_tombstone_candidate.addArgs(&.{ tombstone_candidate_app, tombstone_candidate_dmg, tombstone_candidate_uuid, tombstone_candidate_root, tombstone_candidate_output });
+        run_tombstone_candidate.setCwd(b.path("."));
+        run_tombstone_candidate.setEnvironmentVariable("MARU_SESSION_HOST_R1_TOMBSTONE_SMOKE", "maru-test-only-v1");
+        run_tombstone_candidate.step.dependOn(&file_panel_web_build.step);
+        tombstone_candidate_step.dependOn(&run_tombstone_candidate.step);
+
         const session_host_c4_quit_cancel_step = b.step(
             "macos-session-host-c4-quit-cancel-smoke",
             "Run actual AppKit final checkpoint success and failure Quit handshake smoke",
@@ -17197,6 +17213,13 @@ pub fn build(b: *std.Build) void {
             session_host_release_adapter_tombstone_evidence_step.dependOn(&run_tombstone_evidence_tests.step);
             test_step.dependOn(&run_tombstone_evidence_tests.step);
             if (composition_optimize == .Debug) macos_only_test_step.dependOn(&run_tombstone_evidence_tests.step);
+            const tombstone_runner_boundary_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_signed_tombstone_runner_boundary.zig"), .target = target, .optimize = composition_optimize }) });
+            const run_tombstone_runner_boundary_tests = b.addRunArtifact(tombstone_runner_boundary_tests);
+            run_tombstone_runner_boundary_tests.addArg("--maru-expect-tests=1");
+            run_tombstone_runner_boundary_tests.setCwd(b.path("."));
+            session_host_release_adapter_tombstone_evidence_step.dependOn(&run_tombstone_runner_boundary_tests.step);
+            test_step.dependOn(&run_tombstone_runner_boundary_tests.step);
+            if (composition_optimize == .Debug) macos_only_test_step.dependOn(&run_tombstone_runner_boundary_tests.step);
             const notification_workflow_verifier_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_notification_workflow_verifier.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_files", .module = files_mod }, .{ .name = "release_evidence", .module = nc_evidence_mod }, .{ .name = "release_adapter_notification_workflow_record", .module = notification_workflow_record_mod }, .{ .name = "release_adapter_github_current_authority", .module = current_authority_mod }, .{ .name = "release_adapter_github_attestation", .module = artifact_attestation_mod }, .{ .name = "release_adapter_github_cli_authority", .module = cli_mod }, .{ .name = "release_adapter_deadline", .module = deadline_mod }, .{ .name = "release_adapter_attestation_bundle_contract", .module = attestation_bundle_contract_mod } } });
             const notification_workflow_verifier_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_notification_workflow_verifier.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_evidence", .module = nc_evidence_mod }, .{ .name = "release_adapter_notification_workflow_record", .module = notification_workflow_record_mod }, .{ .name = "release_adapter_notification_workflow_verifier", .module = notification_workflow_verifier_mod } } }) });
             const run_notification_workflow_verifier_tests = b.addRunArtifact(notification_workflow_verifier_tests);

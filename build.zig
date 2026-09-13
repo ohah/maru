@@ -5192,6 +5192,33 @@ pub fn build(b: *std.Build) void {
     // 그래서 하위 스텝을 스텝으로 의존하지 않고 그 안의 run 을 `if (<loop>_optimize == optimize)` 로 걸러 붙인다.
     // 단일 모드(`.optimize = optimize`) 아티팩트는 그대로 붙인다. 가족의 전용 스텝 자체는 여전히 두 모드를 돈다.
     const session_host_step = b.step("test-session-host", "MRSH protocol/framing codec unit tests (session host)");
+    const session_host_attach_isolation_step = b.step(
+        "test-session-host-attach-isolation",
+        "Oversized initial attach is typed and preserves the shared connection",
+    );
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |attach_isolation_optimize| {
+        const attach_isolation_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/server.zig"),
+                .target = target,
+                .optimize = attach_isolation_optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{
+                "first non-hello frame closes the connection",
+                "every invalid RuntimeOps metadata class closes",
+                "initial attach accepts exact viewport snapshot cap",
+                "product attach reserves retained budget before snapshot projection",
+            },
+        });
+        const run_attach_isolation_tests = b.addRunArtifact(attach_isolation_tests);
+        run_attach_isolation_tests.addArg("--maru-expect-tests=4");
+        run_attach_isolation_tests.addArg("--maru-expect-passed=4");
+        session_host_attach_isolation_step.dependOn(&run_attach_isolation_tests.step);
+        if (attach_isolation_optimize == optimize)
+            session_host_step.dependOn(&run_attach_isolation_tests.step);
+    }
+    boundary_step.dependOn(session_host_attach_isolation_step);
     const session_host_handoff_exhaustive_step = b.step(
         "test-session-host-handoff-exhaustive",
         "Verify every stable handoff core field with valid non-default canonical round trips",
@@ -6045,8 +6072,8 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_close_site = b.addRunArtifact(close_site_tests);
-    run_close_site.addArg("--maru-expect-tests=1");
-    run_close_site.addArg("--maru-expect-passed=1");
+    run_close_site.addArg("--maru-expect-tests=2");
+    run_close_site.addArg("--maru-expect-passed=2");
     run_close_site.setCwd(b.path("."));
     close_site_step.dependOn(&run_close_site.step);
     boundary_step.dependOn(&run_close_site.step);

@@ -6220,7 +6220,7 @@ orphan recovery entry(`Recovered Sessions`)의 primary-only 표시와 실제 row
 | 소켓 끊김·타임아웃·`controller_busy`·`unauthorized`·`queue_invalidated`·미지 error code | `PersistentRuntimeUnavailable` | runtime이 살아 있을 수 있다 |
 | handle 형식 손상(길이·대소문자·구분자) | `InvalidPersistentRuntimeIdentity` | 존재하는 손상은 숨기지 않는다 |
 
-**호스트가 자기 사정으로 끊을 때의 규칙(미구현 — 아래는 정책이고 현재 코드는 어긴다).** 위 표의 "소켓 끊김"은 원인을
+**호스트가 자기 사정으로 끊을 때의 규칙.** 위 표의 "소켓 끊김"은 원인을
 묻지 않는다. 그런데 그 끊김이 **호스트 자신의 판단**일 수 있고, 그때 지켜야 할 것이 둘이다.
 
 1. **자기 쪽 cap 초과로 공유 연결을 죽이지 않는다.** 아래 "cap 초과는 typed protocol error를 응답한 뒤 connection을
@@ -6240,10 +6240,11 @@ orphan recovery entry(`Recovered Sessions`)의 primary-only 표시와 실제 row
 - 실패한 복원 상태가 종료 저장에서 원본을 덮어 7421 B → 341 B가 됐다(그 손실 자체는 막았다 —
   [workspace-restore.md](workspace-restore.md) "checkpoint 보호").
 
-`server.zig`의 `return .close`는 **29곳**이고 사유가 제각각이다(프로토콜 버전 불일치, 잘못된 frame kind, 중복 hello,
-`request_id=0`, snapshot 초과, `stream_id` 불일치, nonce 재사용). 전부 `peer_requested` 하나로 접힌다. 1979행에는
-`producer contract violation, not a peer request error`라는 주석이 **이미** 있다 — 거짓이라는 건 알려져 있었고 이름만
-그대로였다. 각 close에 사유 이름을 붙이는 것이 선결 조건이다.
+구현 계약은 `server.Action.close`가 원인을 payload로 운반하고 socket adapter가 이를 손실 없이
+`connection_turn.CloseReason`으로 옮기는 것이다. peer frame 위반은 `protocol_error`, host의 bounded resource 거부는
+`resource_exhausted`, runtime/producer 불변식 위반은 `internal_error`다. `peer_requested`는 실제 peer close 요청을
+프로토콜에 도입하기 전까지 이 경로에서 만들지 않는다. initial attach snapshot cap 초과는 connection close가 아니라
+그 request의 `payload_too_large` 응답이며, attach rollback 뒤 기존 sibling subscription과 ready state가 그대로 남아야 한다.
 
 현재 코드는 probe를 `absent|indeterminate`로, owner lease를 `free|held|unknown`으로 구분해 위 표의 긍정 증거 요건을
 구현했다. durable tombstone은 이 분류를 재사용하며 미확정 상태를 영구 부재로 넓히지 않는다.

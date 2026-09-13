@@ -15777,6 +15777,11 @@ pub const AppSession = struct {
 
     fn reportOrphanNonce(self: *AppSession, dest: []const u8, lines_len: usize, fed: usize, with_nonce: usize, open_channels: usize, mine: []const u8) void {
         if (lines_len == 0 or fed == 0) return; // 분배 자체가 없었으면 이 축이 아니다
+        // ⚠️ **이번 분배에서 이벤트를 하나도 못 봤으면 말할 게 없다.** `unmatched_*` 는 한 번 담기면
+        // 남아 있어, 그대로 찍으면 **과거 tick 의 event 와 이번 tick 의 `mine` 을 나란히** 보여준다 —
+        // 그 둘은 시점이 달라 「글자 그대로 같은데 안 맞는다」는 **착시**를 만든다. 2026-09-13 에 그
+        // 착시로 며칠을 돌았다(하트비트만 와도 이 줄이 떴다).
+        if (self.remote_events_seen == 0) return;
         if (self.remote_nonce_matched > 0) {
             self.unmatched_reported = false; // 다시 붙었다 — 다음에 끊기면 또 말한다
             self.unmatched_is_near = false;
@@ -25020,6 +25025,46 @@ test "RG1: `_` 가 없거나 스풀 이름이면 판정하지 않는다" {
         "t36",
         "host_f377d61ed8ebb82f727c12c4d2cfedaf_051c73ccfe837237ad404ea76df937e1",
     ));
+}
+test "RF8: 이벤트를 하나도 못 본 분배에서는 orphan 을 말하지 않는다 — 과거 값이 되살아나면 안 된다" {
+    // `unmatched_*` 는 한 번 담기면 남아 있다. 그대로 찍으면 **과거 tick 의 event 와 이번 tick 의
+    // `mine` 을 나란히** 보여주고, 시점이 다른 둘이 「글자 그대로 같은데 안 맞는다」는 **착시**를 만든다
+    // — 2026-09-13 에 그 착시로 며칠을 돌았다(하트비트만 와도 이 줄이 떴다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const term = pane_ops.activePane(session).activeTerm();
+    term.agent_remote_channel = maru.session.remote_agent_stream.Channel.initOpen(0);
+    term.rt.observation.ssh_remote_dest_present = true;
+    try term.rt.observation.ssh_remote_dest.appendSlice(a, "openClaw");
+    const mine = "host_aaaa_mine";
+    @memcpy(term.agent_remote_nonce[0..mine.len], mine);
+    term.agent_remote_nonce_len = mine.len;
+
+    // ① 남의 이벤트가 와서 미매칭이 기록되고 보고된다.
+    session.feedRemoteAgentTerms("openClaw", &.{
+        "{\"nonce\":\"host_bbbb_other\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"Stop\\\"}\"}",
+    }, 1);
+    try std.testing.expect(session.unmatched_reported);
+    try std.testing.expect(session.unmatched_event_nonce_len > 0);
+
+    // ② 다음 분배는 **하트비트만** — 이벤트가 하나도 없다.
+    session.unmatched_reported = false; // 다시 말할 수 있는 상태로 두고
+    session.feedRemoteAgentTerms("openClaw", &.{"{\"hb\":1}"}, 2);
+
+    try std.testing.expectEqual(@as(usize, 0), session.remote_events_seen);
+    // **말하지 않았다** — 과거 값을 이번 목록과 나란히 찍으면 착시가 된다.
+    try std.testing.expect(!session.unmatched_reported);
 }
 test "RF7: 이벤트를 본 횟수를 센다 — 「비교가 안 일어난다」와 「안 맞는다」를 가른다" {
     // `open` 은 **분배 시작 시점**의 채널 상태일 뿐이다. 그 뒤 `feed` 가 그 줄을 `.event` 로 안 보면

@@ -113,13 +113,34 @@ test "collectOutput 이 접히면 어느 자리였는지와 원래 오류를 남
         std.mem.indexOf(u8, server[err_fn_at..err_fn_end], "@errorName(err)") != null,
     );
 
-    // ⑤ **오류 집합을 넓히지 않는다.** 넓히면 호출자 전수가 흔들린다 — 지금 필요한 것은
+    // ⑤ **헬퍼를 안 거치고 새는 길이 없다.** `try` 로 빠져나가면 `collect_fail_site` 는 «직전
+    //    실패의 이름» 을 그대로 들고 있어 로그가 거짓말을 한다 — 적대적 검증에서 `appendChunks`
+    //    (큰 이미지가 실제로 지나가는 경로)가 정확히 그랬다.
+    {
+        var it = std.mem.splitScalar(u8, body, '\n');
+        while (it.next()) |line| {
+            const t = std.mem.trim(u8, line, " \t");
+            if (std.mem.startsWith(u8, t, "try ") or std.mem.indexOf(u8, t, " try self.") != null) {
+                std.debug.print("헬퍼를 안 거치는 길이 남았다: {s}\n", .{t});
+                return error.UnnamedLeakPath;
+            }
+        }
+    }
+
+    // ⑥ **진입에서 이름을 지운다.** 그래도 새는 길이 생기면 «-» 로 나가야 한다 — 모르는 것을
+    //    모른다고 말하는 편이, 직전 이름을 물려주는 것보다 언제나 낫다.
+    const reset_at = std.mem.indexOf(u8, body, "collect_fail_site = \"-\";") orelse
+        return error.EntryResetMissing;
+    const first_fail = std.mem.indexOf(u8, body, "collectFail") orelse return error.NoFailSites;
+    try std.testing.expect(reset_at < first_fail);
+
+    // ⑦ **오류 집합을 넓히지 않는다.** 넓히면 호출자 전수가 흔들린다 — 지금 필요한 것은
     //    「무엇이 접혔는지」뿐이고, 그것은 곁다리 기록으로 충분하다.
     try std.testing.expect(
         std.mem.indexOf(u8, server[err_fn_at..err_fn_end], "error{OutOfMemory}") != null,
     );
 
-    // ⑥ **닫기 «전» 에 남긴다.** 뒤에 두면 닫힘 경로가 먼저 돌아 그 줄이 영영 안 나간다
+    // ⑧ **닫기 «전» 에 남긴다.** 뒤에 두면 닫힘 경로가 먼저 돌아 그 줄이 영영 안 나간다
     //    (#3634 가 같은 이유로 이름을 사유보다 먼저 저장한다).
     const note_at = std.mem.indexOf(u8, turn, "noteCollectFailure();") orelse
         return error.NoticeMissing;
@@ -127,7 +148,7 @@ test "collectOutput 이 접히면 어느 자리였는지와 원래 오류를 남
         return error.CloseSiteMissing;
     try std.testing.expect(note_at < close_at);
 
-    // ⑦ 한 줄에 **자리와 오류가 함께** 나온다.
+    // ⑨ 한 줄에 **자리와 오류가 함께** 나온다.
     const log_at = std.mem.indexOf(u8, turn, "fn noteCollectFailure(") orelse
         return error.NoticeFnMissing;
     const log_end = std.mem.indexOfPos(u8, turn, log_at, "\n}\n") orelse turn.len;

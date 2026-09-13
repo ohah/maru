@@ -2902,6 +2902,11 @@ pub const Connection = struct {
         now_ns: u64,
         observation_epoch_ns: u64,
     ) (HandleError || error{ProjectionBudgetUnavailable})!?CollectedOutput {
+        // **이름을 먼저 지운다.** 헬퍼를 안 거치고 `try` 로 새는 경로가 있으면, 지우지 않으면
+        // «직전 실패의 이름» 이 그대로 찍혀 로그가 거짓말을 한다 — 거짓 이름은 없는 것보다 나쁘다
+        // (적대적 검증 2026-09-13: `appendChunks` 가 정확히 그 경로였다).
+        collect_fail_site = "-";
+        collect_fail_error = "-";
         const ops = self.runtime_ops orelse return null;
         const sub = self.attachments.getPtr(stream) orelse return null;
         var list: std.ArrayListUnmanaged([]u8) = .empty;
@@ -2997,18 +3002,18 @@ pub const Connection = struct {
                         return null;
                     }
                     const event_body = if (observation_probe_nonce) |nonce|
-                        try self.stringify(.{
+                        self.stringify(.{
                             .event = "runtime.metadata",
                             .metadata_revision = next_revision,
                             .observation_probe_nonce = nonce,
                             .metadata = RawCanonicalObservation{ .bytes = current },
-                        })
+                        }) catch |err| return collectFailErr("observation_stringify", err)
                     else
-                        try self.stringify(.{
+                        self.stringify(.{
                             .event = "runtime.metadata",
                             .metadata_revision = next_revision,
                             .metadata = RawCanonicalObservation{ .bytes = current },
-                        });
+                        }) catch |err| return collectFailErr("observation_stringify", err);
                     defer self.allocator.free(event_body);
                     const frame = self.encodeWithFlags(
                         .event,
@@ -3108,7 +3113,8 @@ pub const Connection = struct {
             output.next_screen_sequence = projected.frontier.sequence;
             output.next_screen_generation = projected.frontier.generation;
             output.next_screen_change_token = screen_change_token;
-            try self.appendChunks(&list, .snapshot_chunk, stream, projected.bytes);
+            self.appendChunks(&list, .snapshot_chunk, stream, projected.bytes) catch |err|
+                return collectFailErr("snapshot_chunks", err);
         } else if (sub.base) |base| if (screen_changed) {
             // A valid delta producer failure cannot be treated as "no change": bounded projection
             // overflow would then retry every tick forever while the client silently freezes on an
@@ -3142,7 +3148,8 @@ pub const Connection = struct {
             output.next_screen_change_token = screen_change_token;
             if (update.send.len != 0) {
                 const kind: protocol.Kind = if (update.is_snapshot) .snapshot_chunk else .delta_chunk;
-                try self.appendChunks(&list, kind, stream, update.send);
+                self.appendChunks(&list, kind, stream, update.send) catch |err|
+                    return collectFailErr("delta_chunks", err);
                 if (update.frontier.sequence != next_sequence or
                     (!update.is_snapshot and update.frontier.generation != sub.screen_generation))
                     return collectFail("delta_seq_mismatch");

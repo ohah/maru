@@ -513,6 +513,8 @@ pub const TerminalCore = struct {
     /// 등록한다. 실제 배치는 화면의 placeholder 셀이 정하므로 스크롤·eviction 보정 대상이 아니다(그 셀이
     /// 텍스트와 함께 움직인다). 같은 (image_id, placement_id)는 교체한다.
     kitty_virtual_placements: std.ArrayListUnmanaged(types.KittyVirtualPlacement) = .empty,
+    /// `buildVirtualPlacementViews` 의 재사용 버퍼(현재 화면 것만 담는다) — placement_views 와 같은 규약.
+    virtual_placement_views: []types.KittyVirtualPlacement = &.{},
     /// image **number**(`I=`) → 배정한 image id. 클라이언트가 id 충돌을 피하려고 번호로 보낼 때,
     /// 터미널이 id 를 정하고 이 표로 기억한다 — 같은 번호로 다시 오면 **같은 id 를 재사용**해
     /// 이전 이미지를 교체한다(명세: 같은 번호는 이전 것을 대체). display/delete 도 번호로 참조한다.
@@ -753,6 +755,7 @@ pub const TerminalCore = struct {
         self.kitty_images.deinit(self.allocator);
         self.kitty_placements.deinit(self.allocator);
         self.kitty_virtual_placements.deinit(self.allocator);
+        if (self.virtual_placement_views.len > 0) self.allocator.free(self.virtual_placement_views);
         self.kitty_image_numbers.deinit(self.allocator);
         self.kitty_chunk.deinit(self.allocator);
         self.apc_buffer.deinit(self.allocator);
@@ -1573,6 +1576,11 @@ pub const TerminalCore = struct {
     /// screen.leaveAltScreen 이 self. 로 호출한다(screen→kitty 역전 방지 facade — buildPlacementViews 와 같은 규약).
     pub fn dropAltScreenPlacements(self: *TerminalCore) void {
         kitty.dropAltScreenPlacements(self);
+    }
+
+    /// 현재 화면의 virtual placement view. 본문: kitty.buildVirtualPlacementViews(screen→kitty 역전 방지 facade).
+    pub fn buildVirtualPlacementViews(self: *TerminalCore) []const types.KittyVirtualPlacement {
+        return kitty.buildVirtualPlacementViews(self);
     }
 
     /// 렌더 placement view 합성. 본문: kitty.buildPlacementViews. screen.snapshot이 self.로 호출(screen→kitty 역전 방지 facade).
@@ -10693,6 +10701,77 @@ test "kitty 애니메이션: placeholder 셀이 없는 화면에서는 U=1 애�
     // 돌아오면 primary 의 placeholder 가 다시 있으므로 이어 돈다.
     try core.write("\x1b[?1049l");
     try std.testing.expect(core.advanceAnimations(40));
+}
+
+// **U=1 격자도 화면에 귀속된다.** #3631 이 정규 배치를 화면에 묶을 때 가상 배치는 「위치를
+// placeholder 셀이 정하니 구조상 이미 귀속된다」고 보고 손대지 않았다 — **틀렸다**. 위치는
+// 그렇지만 **격자(c x r)** 는 전역 등록부에 있고 교체 키에 화면이 없었다. 실측(적대적 검증):
+// primary 에 2x2 로 등록한 뒤 alt 에서 같은 (image_id, placement_id) 로 10x10 을 등록하면
+// primary 의 등록이 **덮이고**, alt 를 떠나도 10x10 으로 남는다. 그러면 primary 의 placeholder
+// 셀들이 남의 격자로 타일을 떠 엉뚱한 크기로 그려진다.
+test "kitty placement: alt 의 U=1 등록이 primary 격자를 덮지 않는다 (적대적 검증)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 8 });
+    defer core.deinit();
+    core.setCellMetrics(10, 20);
+    var b64: [64]u8 = undefined;
+    var seq: [200]u8 = undefined;
+    const px = [_]u8{ 1, 2, 3, 255 } ** 4;
+    const enc = std.base64.standard.Encoder.encode(&b64, &px);
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+
+    try core.write("\x1b_Ga=p,i=1,U=1,c=2,r=2,q=2\x1b\\"); // primary: 2x2
+    {
+        const views = core.buildVirtualPlacementViews();
+        try std.testing.expectEqual(@as(usize, 1), views.len);
+        try std.testing.expectEqual(@as(u32, 2), views[0].columns);
+    }
+
+    try core.write("\x1b[?1049h");
+    try core.write("\x1b_Ga=p,i=1,U=1,c=10,r=10,q=2\x1b\\"); // alt: 같은 키, 다른 격자
+    {
+        const views = core.buildVirtualPlacementViews();
+        try std.testing.expectEqual(@as(usize, 1), views.len); // alt 에서는 alt 것만 보인다
+        try std.testing.expectEqual(@as(u32, 10), views[0].columns);
+    }
+
+    try core.write("\x1b[?1049l");
+    {
+        const views = core.buildVirtualPlacementViews();
+        try std.testing.expectEqual(@as(usize, 1), views.len);
+        try std.testing.expectEqual(@as(u32, 2), views[0].columns); // primary 격자가 그대로다
+        try std.testing.expectEqual(@as(u32, 2), views[0].rows);
+    }
+    // alt 의 등록은 alt 와 함께 죽는다 — 저장부에도 primary 것 하나만 남는다.
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_virtual_placements.items.len);
+}
+
+// 화면이 다르면 **애니메이션도 안 돈다**. 안 그러면 alt 에 있는 동안 primary 의 U=1 이미지가
+// 프레임을 넘겨 generation 이 오르고, 화면 스트리밍이 안 보이는 픽셀을 다시 싣는다.
+test "kitty 애니메이션: 다른 화면에 등록된 U=1 은 전진하지 않는다 (적대적 검증)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 8 });
+    defer core.deinit();
+    core.setCellMetrics(10, 20);
+    var b64: [64]u8 = undefined;
+    var seq: [200]u8 = undefined;
+    const px = [_]u8{ 1, 2, 3, 255 } ** 4;
+    const enc = std.base64.standard.Encoder.encode(&b64, &px);
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+    try core.write("\x1b_Ga=p,i=1,U=1,c=2,r=2,q=2\x1b\\");
+    try core.write("\x1b_Ga=a,i=1,s=3,v=0,q=2\x1b\\");
+    // primary 에 placeholder 를 찍으면 돈다(양성 대조).
+    try core.write("\x1b[3;1H\x1b[38;2;0;0;1m");
+    screen.writeCodepoint(&core, types.unicode_placeholder_codepoint);
+    try std.testing.expect(core.advanceAnimations(40));
+
+    // alt 에는 그 등록도 placeholder 도 없다 — 멈춰야 한다.
+    try core.write("\x1b[?1049h");
+    const frame = core.kitty_images.map.get(1).?.current_frame;
+    for (0..5) |_| try std.testing.expect(!core.advanceAnimations(40));
+    try std.testing.expectEqual(frame, core.kitty_images.map.get(1).?.current_frame);
+
+    try core.write("\x1b[?1049l");
+    try std.testing.expect(core.advanceAnimations(40)); // 돌아오면 이어 돈다
 }
 
 test "kitty 애니메이션: 루트를 다시 전송하면 프레임도 함께 놓아준다 (적대적 검증)" {

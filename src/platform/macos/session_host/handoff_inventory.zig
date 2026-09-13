@@ -220,6 +220,7 @@ pub const terminal_core_groups = [_]Group{
             "link_ids",
             "grapheme_ids",
             "placement_views",
+            "virtual_placement_views", // placement_views 와 같은 재사용 버퍼 — 값이 아니라 파생물이다
             "image_views",
             "viewport_cells",
             "viewport_prompt_marks",

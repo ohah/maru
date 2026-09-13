@@ -308,6 +308,14 @@ pub fn dropAltScreenPlacements(self: *TerminalCore) void {
             _ = self.kitty_placements.orderedRemove(i);
         } else i += 1;
     }
+    // U=1 격자도 같다 — alt 의 등록은 alt 와 함께 죽는다. 안 그러면 다시 alt 에 들어갔을 때
+    // 이전 TUI 의 격자가 새 TUI 에 적용된다.
+    var v: usize = 0;
+    while (v < self.kitty_virtual_placements.items.len) {
+        if (self.kitty_virtual_placements.items[v].on_alt) {
+            _ = self.kitty_virtual_placements.orderedRemove(v);
+        } else v += 1;
+    }
 }
 
 /// 특정 image_id의 placement를 모두 제거한다(delete 시 이미지와 함께). 순서를 보존해(orderedRemove)
@@ -387,6 +395,7 @@ fn activeScreenHasPlaceholder(self: *const TerminalCore) bool {
 pub fn kittyImageVisibleInViewport(self: *TerminalCore, image_id: u32) bool {
     for (self.kitty_virtual_placements.items) |v| {
         if (v.image_id != image_id) continue;
+        if (v.on_alt != self.alt_active) continue; // 다른 화면의 격자는 지금 그릴 수 없다
         if (self.view_offset > 0) return true; // 스크롤백은 안 훑는다 — 모르면 멈추지 않는다
         return activeScreenHasPlaceholder(self);
     }
@@ -457,6 +466,27 @@ pub fn buildPlacementViews(self: *TerminalCore, top_abs: usize) []const types.Ki
         out += 1;
     }
     return self.placement_views[0..out];
+}
+
+/// **현재 화면에 속한** virtual placement 만 돌려준다(렌더·원격 투영 공용). 다른 화면 것은 빼되
+/// 지우지는 않는다 — 돌아오면 그 화면의 격자가 되살아나야 한다(`buildPlacementViews` 와 같은 규약).
+pub fn buildVirtualPlacementViews(self: *TerminalCore) []const types.KittyVirtualPlacement {
+    const n = self.kitty_virtual_placements.items.len;
+    if (n == 0) return &.{};
+    if (self.virtual_placement_views.len != n) {
+        if (self.virtual_placement_views.len > 0) self.allocator.free(self.virtual_placement_views);
+        self.virtual_placement_views = self.allocator.alloc(types.KittyVirtualPlacement, n) catch {
+            self.virtual_placement_views = &.{};
+            return &.{}; // OOM 이면 노출만 포기한다(렌더는 후속이라 영향 없음 — placement 와 같은 처리)
+        };
+    }
+    var out: usize = 0;
+    for (self.kitty_virtual_placements.items) |vp| {
+        if (vp.on_alt != self.alt_active) continue;
+        self.virtual_placement_views[out] = vp;
+        out += 1;
+    }
+    return self.virtual_placement_views[0..out];
 }
 
 /// 저장된 kitty graphics 이미지를 KittyImageView로 빌려 재사용 버퍼에 담아 돌려준다. 이미지가 없으면 빈
@@ -673,6 +703,7 @@ fn kittyDisplay(self: *TerminalCore, cmd: KittyGraphicsCommand) KittyStatus {
             .columns = cmd.columns,
             .rows = cmd.rows,
             .z = cmd.z,
+            .on_alt = self.alt_active, // 격자도 화면에 귀속된다
         });
     }
     addOrReplacePlacement(self, .{
@@ -766,7 +797,9 @@ fn forgetImageNumberFor(self: *TerminalCore, image_id: u32) void {
 /// 같은 규칙). 상한은 일반 placement와 같은 방어선을 쓴다.
 fn addOrReplaceVirtualPlacement(self: *TerminalCore, vp: types.KittyVirtualPlacement) KittyStatus {
     for (self.kitty_virtual_placements.items) |*existing| {
-        if (existing.image_id == vp.image_id and existing.placement_id == vp.placement_id) {
+        if (existing.image_id == vp.image_id and existing.placement_id == vp.placement_id and
+            existing.on_alt == vp.on_alt)
+        {
             existing.* = vp;
             return .ok;
         }

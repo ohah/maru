@@ -824,7 +824,11 @@ pub fn pollAgentKinds(self: *AppSession) void {
                     term.agent_kind = classifyAgentProcesses(term.rt.observation.foreground_processes.items);
                     if (diag_gate.maruDebugEnabled()) std.log.scoped(.agentdiag).info("kind={s} pgid_changed={} live={} term=0x{x}", .{ @tagName(term.agent_kind), pgid_changed, term.rt.live_initialized, @intFromPtr(term) });
                     if (term.agent_kind != prev) {
-                        if (displayed) self.metal_dirty = true; // 보이는 Term의 에이전트 변화만 재렌더
+                        // ⚠️ **`displayed` 로 막지 않는다.** 탭 바는 **안 보이는 Term 의 kind 도** 그린다
+                        // (제목 옆 점). 보이는 것만 재렌더하면 그 점이 옛 provider 색으로 남는다 —
+                        // 2026-09-14 실측: **사이드바는 맞는데 상단 탭만 틀렸다.** 훅 경로는 이미 무조건
+                        // 세우고 있어 두 경로가 달랐다. kind 변화는 프로세스가 바뀔 때뿐이라 잦지 않다.
+                        self.metal_dirty = true;
                         if (diag_gate.maruDebugEnabled()) std.log.scoped(.agent).info("agent: {s}", .{@tagName(term.agent_kind)});
                         // 새 프로세스의 대화를 이전 세션 것과 섞지 않는다. 응답 줄이 사라지면 행 줄 수도
                         // 바뀌므로 **재투영까지** 해야 한다 — metal_dirty만으로는 행 높이가 옛 값으로 남는다.

@@ -895,6 +895,24 @@ const cases = [_]Case{
         .rect = .{ .x = 100, .y = 82, .w = 380, .h = 18 },
     },
     .{
+        // **병합 충돌 마커**(S2 — docs/editor-merge-conflicts.md §5). 이 crop 이 §7 ③ 의 답을 굳힌다:
+        // 밴드는 **마커 줄에만** 깔리고 본문 두 쪽은 안 칠해진다. 「현재 것」을 초록, 「들어온 것」을
+        // 빨강으로 칠하면 그것은 이미 답을 말하는 것이다 — 들어온 쪽은 지워질 것이 아니라 후보다.
+        //
+        // 같은 crop 이 **구문 색이 살아 있는지**도 본다(밴드는 배경, 구문은 전경이라 안 겹친다).
+        .name = "editor-conflict-bands",
+        .capture = "editor-conflict.ppm",
+        .contract = "마커 줄에만 밴드가 깔리고, 구간 안 코드는 구문 색 그대로 읽힌다",
+        .rect = .{ .x = 0, .y = 34, .w = 400, .h = 86 },
+    },
+    .{
+        // 구간 **위**에 선 고르기 줄. 줄 번호가 없고(위젯 행이다), 세 이름이 한 줄에 선다.
+        .name = "editor-conflict-actions",
+        .capture = "editor-conflict.ppm",
+        .contract = "충돌 구간 위에 「현재 것 채택·들어온 것 채택·둘 다 채택」이 번호 없이 선다",
+        .rect = .{ .x = 0, .y = 17, .w = 480, .h = 18 },
+    },
+    .{
         .name = "editor-right-edge-wide-glyph",
         .capture = "editor-gutter.ppm",
         .contract = "오른쪽 경계에 2칸 글자가 걸치면 통째로 뺀다(반쪽을 그리지 않는다)",

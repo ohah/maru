@@ -166,6 +166,9 @@ pub const editor = struct {
     pub const diff_state = @import("session/editor/diff_state.zig");
     pub const intraline = @import("session/editor/intraline.zig");
     pub const fold = @import("session/editor/fold.zig");
+    /// S2: 병합 충돌 **마커 구간**(docs/editor-merge-conflicts.md §5). 순수 계산이라 여기 산다 —
+    /// 줄 배열을 받아 구간을 내고, 그리기·동작은 위층이 붙인다.
+    pub const conflict = @import("session/editor/conflict.zig");
     /// 문서 내 검색의 일치 계산(§5.1) — 순수 함수라 여기 산다. 오버레이 UI는 chrome이 이미 갖고 있다.
     pub const find = @import("session/editor/find.zig");
     /// N2: 편집 가능한 텍스트 버퍼(§3.0 — persistent rope). `document`가 파일 *속성*을 든다면

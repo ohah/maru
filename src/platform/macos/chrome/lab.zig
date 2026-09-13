@@ -154,6 +154,11 @@ pub const ScenarioId = enum {
     /// ⑴ 위젯 행에 **줄 번호가 없다**(그리고 아래 글자 행의 번호가 **건너뛰지 않는다**),
     /// ⑵ 위젯 글자가 본문 열에 서고, ⑶ 위젯이 붙은 만큼 아래 줄들이 **밀린다**(행을 실제로 차지한다).
     editor_widget_row,
+    /// **병합 충돌 마커가 든 편집기**(S2 — docs/editor-merge-conflicts.md §5). 세 가지가 한 캡처에
+    /// 든다: ⑴ 마커 줄에만 깔린 밴드(본문 두 쪽은 안 칠한다 — 어느 쪽도 편들지 않는다),
+    /// ⑵ 구간 «위»에 선 「고르기」 줄, ⑶ 구간 **안의 코드가 구문 색 그대로** 읽힌다(§7 ③ 의 답 —
+    /// 밴드는 배경이고 구문은 전경이라 겹치지 않는다).
+    editor_conflict,
     /// N1 §4 — 뷰포트 컬링. 문서 중간으로 스크롤한 상태를 픽셀로 본다. **줄 번호가 1이 아니라
     /// first_row+1에서 시작하는지**가 핵심이고, gutter 폭이 자릿수를 따라 넓어지는지도 함께 나온다.
     editor_scrolled,
@@ -364,7 +369,7 @@ pub fn buildFrame(
         .scm_history => buildScmHistoryFrame(scenario, tokens, buffers),
         .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome => buildFileTreeFrame(scenario, tokens, buffers),
         .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper => buildContextMenuFrame(scenario, tokens, buffers),
-        .editor_gutter, .editor_widget_row, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_selection, .editor_find, .editor_caret_bar, .editor_caret_block, .editor_caret_underline => buildEditorGutterFrame(scenario, buffers),
+        .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_selection, .editor_find, .editor_caret_bar, .editor_caret_block, .editor_caret_underline => buildEditorGutterFrame(scenario, buffers),
         .editor_diff, .editor_diff_scrolled, .editor_diff_selection => buildEditorDiffFrame(scenario, buffers),
         // 위 early return이 처리한다 — 여기 오면 분기가 갈린 것이다.
         .sidebar_status_strip => unreachable,
@@ -473,6 +478,73 @@ const editor_widget_rows = [_]?chrome.components.editor_view.content.Widget{
     null, // 3: pub fn main
     .{ .text = "↑ 여기서 고른다", .col = 8 }, // 4: 들여쓴 줄 위 — `col` 이 먹는지 본다
 };
+
+/// `editor_conflict` 픽스처. **git 이 내는 모양 그대로**다(`git-merge(1)`) — 라벨까지 포함해야
+/// 캡처가 제품에서 보는 것과 같은 글자 수를 갖는다.
+const editor_conflict_lines = [_][]const u8{
+    "pub fn greet() void {",
+    "<<<<<<< HEAD",
+    "    const msg = \"ours\";",
+    "=======",
+    "    const msg = \"theirs\";",
+    ">>>>>>> topic",
+    "    print(msg);",
+    "}",
+};
+
+/// 밴드와 위젯 표는 **손으로 안 적는다** — 제품이 쓰는 그 파서(`session.editor.conflict.scan`)로
+/// 만든다. 손으로 적으면 이 캡처가 증언하는 것이 「내가 적은 표를 그리는가」로 줄어든다: 파서가
+/// 마커를 못 읽어도 그림은 똑같이 예쁘게 나온다.
+var editor_conflict_bands: [editor_conflict_lines.len]chrome.components.editor_view.frame.RowBand = undefined;
+
+/// 픽스처 줄에서 구간을 찾아 밴드와 위젯 표를 채운다. **제품과 같은 규칙**을 지나므로, 마커 인식이
+/// 망가지면 이 캡처가 함께 빨개진다.
+fn fillConflictTables() void {
+    @memset(&editor_conflict_bands, .none);
+    for (&editor_conflict_widgets) |*w| w.* = null;
+    var regions: [8]maru.session.editor.conflict.Region = undefined;
+    const found = maru.session.editor.conflict.scan(&editor_conflict_lines, &regions);
+    const label = fillConflictLabel();
+    for (found) |r| {
+        for ([_]?u32{ r.start, r.base, r.separator, r.end }) |maybe| {
+            const li = maybe orelse continue;
+            if (li < editor_conflict_bands.len) editor_conflict_bands[li] = .conflict_marker;
+        }
+        if (r.start < editor_conflict_widgets.len) {
+            editor_conflict_widgets[r.start] = .{ .text = label, .col = 4 };
+        }
+    }
+}
+
+/// 구간 «위»의 고르기 줄. 글자는 제품과 **같은 i18n 키**에서 온다 — Lab 이 자기 문구를 지어내면
+/// 캡처가 제품을 예고하지 못한다.
+var editor_conflict_widgets = [_]?chrome.components.editor_view.content.Widget{ null, null, null, null, null, null, null, null };
+
+/// 고르기 줄의 글자를 **제품과 같은 i18n 키**에서 만든다. `comptime` 으로 못 잇는 이유: 표는 런타임에
+/// 고르는 값이다(언어 전환). 버퍼가 **전역**인 것은 그려진 op 이 이 글자를 빌려 가기 때문이다 —
+/// 스택에 두면 함수가 끝나는 순간 op 이 죽은 자리를 가리킨다.
+var conflict_label_buf: [192]u8 = undefined;
+
+fn fillConflictLabel() []const u8 {
+    const names = [_][]const u8{
+        maru.i18n.t(.editor_conflict_accept_current),
+        maru.i18n.t(.editor_conflict_accept_incoming),
+        maru.i18n.t(.editor_conflict_accept_both),
+    };
+    var w: usize = 0;
+    for (names, 0..) |name, i| {
+        if (i > 0) {
+            const gap = "   ";
+            if (w + gap.len > conflict_label_buf.len) break;
+            @memcpy(conflict_label_buf[w..][0..gap.len], gap);
+            w += gap.len;
+        }
+        if (w + name.len > conflict_label_buf.len) break;
+        @memcpy(conflict_label_buf[w..][0..name.len], name);
+        w += name.len;
+    }
+    return conflict_label_buf[0..w];
+}
 
 const editor_fixture_lines = [_][]const u8{
     // 8칸마다 `|`인 자. **격자 배치의 회귀 가드다** — 격자면 파이프 간격이 정확히 cell_w의
@@ -753,6 +825,7 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
         .editor_caret_bar, .editor_caret_block, .editor_caret_underline => &editor_caret_lines,
         .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll => &editor_wrap_lines,
         .editor_folded => &editor_folded_lines,
+        .editor_conflict => &editor_conflict_lines,
         .editor_selection => &editor_selection_lines,
         .editor_find => &editor_find_lines,
         else => &editor_fixture_lines,
@@ -903,7 +976,15 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
         .folds = if (scenario.id == .editor_folded) &editor_folded_marks else null,
         // **위젯 행은 이 시나리오에만 준다**(S1.5) — 다른 골든까지 행이 밀리면 그 캡처들이 이
         // 축까지 떠안는다(caret 을 한 시나리오에만 켜는 것과 같은 판단).
-        .line_widgets = if (scenario.id == .editor_widget_row) &editor_widget_rows else &.{},
+        .line_widgets = switch (scenario.id) {
+            .editor_widget_row => &editor_widget_rows,
+            .editor_conflict => blk: {
+                fillConflictTables();
+                break :blk &editor_conflict_widgets;
+            },
+            else => &.{},
+        },
+        .row_bands = if (scenario.id == .editor_conflict) &editor_conflict_bands else null,
         .selection_marks = if (scenario.id == .editor_selection) &editor_selection_marks else null,
         .search_marks = if (scenario.id == .editor_find) &editor_find_marks else null,
         .search_current = if (scenario.id == .editor_find) editor_find_current else null,
@@ -1181,7 +1262,7 @@ fn buildDockFrame(
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
             .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
             // editor_gutter는 buildEditorGutterFrame이 처리한다 — 도크 목록을 타지 않는다.
-            .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper, .scm_rows, .scm_history, .scm_row_hover, .scm_conflict_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_widget_row, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_selection, .editor_find, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_diff, .editor_diff_scrolled, .editor_diff_selection => unreachable,
+            .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper, .scm_rows, .scm_history, .scm_row_hover, .scm_conflict_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_selection, .editor_find, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_diff, .editor_diff_scrolled, .editor_diff_selection => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{

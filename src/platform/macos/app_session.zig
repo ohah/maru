@@ -1760,6 +1760,28 @@ const TermRuntime = struct {
     /// 같다(§4.1f). 접힘이 바뀔 때만 다시 만들고 프레임마다는 읽기만 한다.
     editor_visible_lines: []const []const u8 = &.{},
     editor_visible_numbers: []const ?u32 = &.{},
+    /// **보이는 줄** 축의 위젯 표(S2 — 충돌 구간 머리에 서는 「고르기」 줄). `editor_visible_lines`
+    /// 와 **같은 축**이라 접힘이 바뀌면 함께 다시 투영해야 한다(S1.5 계약이 그것을 호출자의 일로
+    /// 정했다 — 컴포넌트는 어느 문서 줄인지 모른다).
+    editor_conflict_widgets: []?chrome.components.editor_view.content.Widget = &.{},
+    /// 찾아낸 충돌 구간(문서 줄 기준). 「고르기」가 지울 범위를 여기서 읽는다.
+    editor_conflicts: []maru.session.editor.conflict.Region = &.{},
+    /// **보이는 줄** 축의 밴드 표 — 마커 줄에만 위험 계열을 깐다(S2, §7 ③ 의 답).
+    editor_conflict_bands: []chrome.components.editor_view.frame.RowBand = &.{},
+    /// 위젯 행에 그린 **세 이름의 글자**(구간마다 같으므로 **하나만** 잡아 모든 위젯이 가리킨다).
+    editor_conflict_label: []u8 = &.{},
+    /// 그 줄에서 **어느 열 구간이 어느 동작인가**. 클릭을 동작으로 옮기는 유일한 표다 —
+    /// 글자를 다시 재서 맞히면 그리는 쪽과 **두 규칙**이 되고, 그 둘은 폰트·언어가 바뀌면 갈린다.
+    editor_conflict_actions: []AppSession.ConflictActionSpan = &.{},
+    /// 위 표들이 **지금 문서·지금 축**을 보고 만들어졌나. `false` 면 다음 조회가 다시 훑는다.
+    ///
+    /// **판 번호가 아니라 깃발인 이유**(적대적 검증 2회차 실측): 처음에는 「문서 길이 + 줄 배열
+    /// 주소」를 판 번호로 삼고 **동시에** 편집·접힘 자리에서 버리기도 했다. 둘이 같은 일을 하니
+    /// 한쪽을 지워도 다른 쪽이 덮어 **어느 변이도 안 죽었다** — 「두 방어가 서로를 가린다」. 버리는
+    /// 자리(편집·접힘·문서 해제)가 이미 한 곳으로 모여 있으므로, 방어를 **하나로** 줄인다.
+    editor_conflicts_valid: bool = false,
+    /// 그 판을 훑었을 때 **보이는 줄 배열의 길이**. 접힘이 바뀌면 표의 축이 갈리므로 다시 투영한다.
+    editor_conflicts_axis_len: usize = 0,
     /// **줄별 표시 폭 캐시**(L2 — [layering](../../../docs/native-editor-layering.md) §2).
     /// `editor_lines`와 **같은 첨자**이고, 문서 내용과 탭 폭만의 함수다.
     ///
@@ -10117,6 +10139,21 @@ pub const AppSession = struct {
         if (action) |a| self.dispatchAppAction(a);
     }
 
+    /// 충돌 구간에서 **무엇을 고르는가**(S2). 「Ignore」는 두지 않는다 — 손으로 고치는 것과 같다.
+    pub const ConflictChoice = enum { current, incoming, both };
+
+    /// 위젯 행의 **한 동작이 차지하는 열 구간**과 그것이 가리키는 구간·선택.
+    pub const ConflictActionSpan = struct {
+        /// **보이는 줄** 축의 행(위젯이 그 줄 위에 선다).
+        visible_line: u32,
+        /// `editor_conflicts` 의 몇 번째 구간인가.
+        region: u32,
+        choice: ConflictChoice,
+        /// 그 이름이 차지하는 열 `[from, to)`.
+        from_col: u32,
+        to_col: u32,
+    };
+
     pub const FilePanelOpenPathResult = enum(u32) {
         unsupported = 0,
         opened = 1,
@@ -13807,6 +13844,16 @@ pub const AppSession = struct {
                     //    (결정표가 *"막대 위 클릭은 상위가 먼저 가져간다"*고 적은 그 순서다). gutter는
                     //    `hitTestBody`가 `null`을 주므로 접힘 화살표 자리를 안 뺏는다.
                     // 비교 뷰는 축이 달라 함수가 갈린다(§4.1g "비교 뷰"). 같은 순서 자리다.
+                    // ⓑ'' 충돌 **고르기 줄** 클릭 → 그 자리에서 고친다(S2). **본문 선택 앞**이다 —
+                    //    위젯 행은 문서 줄이 아니라 히트테스트가 거절하므로 지금은 순서가 결과를
+                    //    안 바꾸지만, 그 거절이 없어지는 날 이 순서가 유일한 방어다(접힘 화살표와
+                    //    같은 근거, 같은 자리).
+                    if (editor_ops.acceptConflictAtPoint(self, pane, x_px, y_px)) {
+                        _ = pane_ops.focusPaneByPtr(self, pane);
+                        self.drag_autoscroll = 0;
+                        self.mouse_drag_selecting = false;
+                        return;
+                    }
                     if (editor_ops.beginDiffBodySelection(self, pane, x_px, y_px)) {
                         _ = pane_ops.focusPaneByPtr(self, pane);
                         self.drag_autoscroll = 0;

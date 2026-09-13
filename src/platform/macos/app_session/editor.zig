@@ -454,6 +454,10 @@ pub fn buildPaneOps(
     line_seeks: []const ?chrome_editor.content.Seek,
     /// 논리 줄마다의 **커서 자리**(줄 안 byte offset, 오름차순). `null`이면 커서가 없다.
     carets: ?[]const []const u32,
+    /// 줄 **위**에 세울 위젯 행(S2 — 충돌 구간의 「고르기」 줄). `lines` 와 같은 축이다.
+    widgets: []const ?chrome_editor.content.Widget,
+    /// 줄 배경 밴드(S2 — 충돌 마커 줄). `widgets` 와 같은 축이다.
+    bands: ?[]const chrome_editor.frame.RowBand,
     /// 지금 커서를 그릴 순간인가(blink). 세션의 `blink_visible`이 그대로 온다.
     caret_visible: bool,
     /// caret 모양(`editor.cursor-shape`). **호출자가 넘긴다** — `tab_width`와 같은 이유로
@@ -478,7 +482,7 @@ pub fn buildPaneOps(
     const inset: i32 = @intCast(chrome_editor.frame.content_inset_px);
     const inner: chrome_draw.Rect = .{ .x = 0, .y = 0, .w = rect.w -| chrome_editor.frame.content_inset_px * 2, .h = rect.h -| chrome_editor.frame.content_inset_px * 2 };
     const w = diff_frame.buildSide(
-        .{ .lines = lines, .first_col = first_col, .numbers = numbers, .total_lines = total_lines, .folds = folds, .content_max_cols = content_max_cols, .row_cache = row_cache, .selection_marks = selection_marks, .search_marks = search_marks, .search_current = search_current, .search_marker_lines = search_marker_lines, .search_marker_current = search_marker_current, .line_colors = line_colors, .line_seeks = line_seeks, .carets = carets },
+        .{ .lines = lines, .first_col = first_col, .numbers = numbers, .total_lines = total_lines, .folds = folds, .content_max_cols = content_max_cols, .row_cache = row_cache, .selection_marks = selection_marks, .search_marks = search_marks, .search_current = search_current, .search_marker_lines = search_marker_lines, .search_marker_current = search_marker_current, .line_colors = line_colors, .line_seeks = line_seeks, .carets = carets, .widgets = widgets, .bands = bands },
         .{ .first_line = first_line, .first_piece = first_piece, .caret_visible = caret_visible, .caret_shape = caret_shape, .wrap = wrap, .tab_width = tab_width, .cell_w_px = cell_w_px, .cell_h_px = cell_h_px, .font_px = font_px },
         inner,
         // **배경만 뒤로 물린다.** 내용 op이 (0,0)에서 시작해야 셀 격자 양자화(`buildTextDrawList`가
@@ -545,6 +549,58 @@ pub fn hitSnapshotStale(self: *AppSession, term: *Term) bool {
         geom.tab_width != term.rt.editor_tab_width or
         geom.cell_w_px != self.cell_width_px or
         geom.cell_h_px != self.cell_height_px;
+}
+
+/// 그 좌표가 **충돌 고르기 줄의 한 이름 위**인가. 맞으면 눌러서 일어날 일을 돌려준다(S2).
+///
+/// **`hitTestBody` 와 다른 함수인 이유**: 그쪽은 문서 offset 을 내는 자리이고 위젯 행에는 그런 것이
+/// 없다(S1.5 가 그래서 `null` 을 내게 했다). 여기서 내는 것은 **동작**이고, 그 둘을 한 반환값에
+/// 담으면 호출자가 매번 종류를 가르게 된다.
+/// 포인터 경로의 창구 — 그 자리가 「고르기」면 **눌러서 고친다**(S2).
+///
+/// **본문 선택보다 앞에 선다.** 위젯 행은 문서 줄이 아니라 히트테스트가 `null` 을 내므로 순서가 지금
+/// 결과를 바꾸지는 않지만, 그 거절이 없어지는 날 이 순서가 유일한 방어다(접힘 화살표가 같은 자리에
+/// 같은 이유로 적어 둔 문장이다).
+pub fn acceptConflictAtPoint(self: *AppSession, pane: *Pane, x_px: f64, y_px: f64) bool {
+    if (pane.terms.items.len == 0) return false;
+    const term = pane.activeTerm();
+    const hit = conflictActionAtPoint(term, x_px, y_px) orelse return false;
+    return acceptConflict(self, term, hit.region, hit.choice);
+}
+
+pub fn conflictActionAtPoint(term: *Term, x_px: f64, y_px: f64) ?AppSession.ConflictActionSpan {
+    if (term.kind != .editor) return null;
+    if (term.rt.editor_diff != null) return null;
+    const spans = term.rt.editor_conflict_actions;
+    if (spans.len == 0) return null;
+    const rows_len = term.rt.editor_hit_rows_len;
+    if (rows_len == 0) return null;
+    const geom = term.rt.editor_hit_geom;
+    if (geom.cell_h_px == 0 or geom.cell_w_px == 0) return null;
+
+    // **행은 그린 배열에서 찾는다** — 스크롤·접힘이 반영된 그 값이라야 화면과 같은 자리를 가리킨다.
+    const rel_y = y_px - @as(f64, @floatFromInt(geom.body_y));
+    if (rel_y < 0) return null;
+    const row: usize = @intFromFloat(rel_y / @as(f64, @floatFromInt(geom.cell_h_px)));
+    if (row >= rows_len) return null;
+    const v = term.rt.editor_hit_rows[row];
+    if (v.kind != .widget) return null; // 글자 행은 이 함수의 것이 아니다
+
+    // 열은 본문 왼쪽 끝에서 센다(위젯 글자가 `col = 0` 에서 시작한다).
+    const rel_x = x_px - @as(f64, @floatFromInt(geom.body_x)) - @as(f64, @floatFromInt(geom.content_left_px));
+    if (rel_x < 0) return null;
+    const col: u32 = @intFromFloat(rel_x / @as(f64, @floatFromInt(geom.cell_w_px)));
+
+    // **`v.line` 은 뷰포트 첫 줄로부터의 «상대» 값이고 표는 «절대» 축이다**(S1.5 가 `VisualRow.line`
+    // 을 그렇게 정의했고, `storeHitRows` 가 같은 자리에 같은 문장을 적어 두었다). 더하지 않으면
+    // **스크롤한 화면에서 누르는 자리가 통째로 밀린다** — 적대적 검증 3회차가 이 자리를 열었다.
+    const visible_line: usize = @as(usize, v.line) + term.rt.editor_first_line;
+    for (spans) |sp| {
+        if (sp.visible_line != visible_line) continue;
+        // **닫힌-열린 구간이다** — 이름 사이의 공백을 어느 쪽도 안 가져간다(겹치면 한 클릭이 둘이 된다).
+        if (col >= sp.from_col and col < sp.to_col) return sp;
+    }
+    return null;
 }
 
 pub fn hitTestBody(term: *Term, x_px: f64, y_px: f64) ?usize {
@@ -1263,7 +1319,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     const pf = if (diff_state_opt) |st| blk: {
         // **상태 줄은 가로로 안 민다** — 한 줄짜리 문구라 밀면 화면에서 사라진다.
         // 한 줄짜리 상태 문구다 — 캐시가 아낄 것이 없다.
-        if (st.view != .compare) break :blk buildPaneOps(lines, null, null, lines.len, term.rt.editor_first_line, 0, 0, null, null, buildSelectionMarks(self, term), null, null, @as([]const u32, &.{}), null, syntaxColors(self, term), &.{}, buildCaretRows(self, term), self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
+        if (st.view != .compare) break :blk buildPaneOps(lines, null, null, lines.len, term.rt.editor_first_line, 0, 0, null, null, buildSelectionMarks(self, term), null, null, @as([]const u32, &.{}), null, syntaxColors(self, term), &.{}, buildCaretRows(self, term), &.{}, null, self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
         // **좌우가 세로를 공유한다**(§3.5) — 행 배열이 이미 같은 길이라 같은 인덱스가 같은 높이다.
         // 가로는 각자다(§3.5의 그 규칙은 CM6가 "양쪽 줄 길이가 달라 한쪽을 따라가면 다른 쪽이
         // 엉뚱한 곳을 본다"고 적어 둔 근거에서 왔다) — 입력이 붙을 때 열별 `first_col`이 여기 온다.
@@ -1290,7 +1346,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
         var seek_buf: [512]?chrome_editor.content.Seek = undefined;
         const fc = effectiveFirstCol(wrap, term, false);
         const seek_n = buildLineSeeks(self, term, draw_lines.len, term.rt.editor_first_line, fc, &seek_buf);
-        break :blk buildPaneOps(draw_lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), fc, maxColsForRender(self, term, false), row_cache, buildSelectionMarks(self, term), find_marks, find_current, marker_lines, marker_current, syntaxColors(self, term), seek_buf[0..seek_n], buildCaretRows(self, term), self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
+        break :blk buildPaneOps(draw_lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), fc, maxColsForRender(self, term, false), row_cache, buildSelectionMarks(self, term), find_marks, find_current, marker_lines, marker_current, syntaxColors(self, term), seek_buf[0..seek_n], buildCaretRows(self, term), conflictWidgets(self, term), conflictBands(term), self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
     };
     if (pf.ops_len == 0) return null;
     // **그린 행들을 Term에 남긴다**(§4.1g ②). `visual_rows`는 이 함수의 스택이라 반환과 함께
@@ -6403,6 +6459,16 @@ pub fn saveDocument(self: *AppSession, term: *Term) bool {
     // 위해 남아 있다.
     term.rt.editor_doc.?.saved_hash = contentHash(saved_content);
     self.metal_dirty = true;
+    // **마커가 남았으면 말한다**(S2 — docs/editor-merge-conflicts.md §5). 저장을 막지는 **않는다**:
+    // 마커를 남긴 채 저장하는 것은 정당한 중간 상태다(반쯤 고치다 멈추는 흐름이 있다). 막아야 하는
+    // 것은 **모른 채** 커밋하는 일이고, 그것을 막는 수단은 「말하는 것」이다 —
+    // `editor-surface-dock.md` 가 충돌 행에 `+` 를 두지 않은 이유로 든 바로 그 사고다.
+    //
+    // **`scan` 과 같은 판정을 쓴다**(`hasUnresolved`) — 여기서 「`<<<<<<<` 가 보이면」으로 따로 재면
+    // 닫히지 않은 마커가 든 멀쩡한 파일마다 경고가 뜬다.
+    if (maru.session.editor.conflict.hasUnresolved(term.rt.editor_lines)) {
+        self.showNoticeKey(.editor_conflict_markers_remain);
+    }
     return true;
 }
 
@@ -7895,6 +7961,270 @@ fn maxColsAfterEdit(term: *Term, kept: u32) u32 {
     return @min(max, limit);
 }
 
+/// 충돌 구간 캐시를 **버린다**. 문서나 접힘이 바뀌면 표의 축이 갈리므로 다시 훑어야 한다.
+/// 렌더가 읽는 창구 — 표가 낡았으면 여기서 다시 만든다(§4.1 규율: 렌더 시점에 한 번).
+fn conflictWidgets(self: *AppSession, term: *Term) []const ?chrome_editor.content.Widget {
+    ensureConflicts(self, term);
+    return term.rt.editor_conflict_widgets;
+}
+
+/// 렌더가 읽는 창구(밴드 쪽). **`conflictWidgets` 가 이미 훑었다** — 같은 프레임에서 두 번 훑지
+/// 않게 여기서는 만들어 둔 것만 준다(둘의 순서가 바뀌면 이 주석이 틀린다).
+/// 지금 문서의 구간 수 — 표를 **다시 훑게 한 뒤** 센다(낡은 표를 그대로 세면 판정이 공허하다).
+fn conflictRegionCount(self: *AppSession, term: *Term) usize {
+    ensureConflicts(self, term);
+    return term.rt.editor_conflicts.len;
+}
+
+fn conflictBands(term: *Term) ?[]const chrome_editor.frame.RowBand {
+    if (term.rt.editor_conflict_bands.len == 0) return null;
+    return term.rt.editor_conflict_bands;
+}
+
+fn dropConflicts(self: *AppSession, term: *Term) void {
+    if (term.rt.editor_conflicts.len > 0) self.allocator.free(term.rt.editor_conflicts);
+    if (term.rt.editor_conflict_widgets.len > 0) self.allocator.free(term.rt.editor_conflict_widgets);
+    if (term.rt.editor_conflict_label.len > 0) self.allocator.free(term.rt.editor_conflict_label);
+    if (term.rt.editor_conflict_actions.len > 0) self.allocator.free(term.rt.editor_conflict_actions);
+    if (term.rt.editor_conflict_bands.len > 0) self.allocator.free(term.rt.editor_conflict_bands);
+    term.rt.editor_conflicts = &.{};
+    term.rt.editor_conflict_widgets = &.{};
+    term.rt.editor_conflict_label = &.{};
+    term.rt.editor_conflict_actions = &.{};
+    term.rt.editor_conflict_bands = &.{};
+    term.rt.editor_conflicts_valid = false;
+    term.rt.editor_conflicts_axis_len = 0;
+}
+
+/// 위젯 행의 한 이름과 그 열 구간(이름 짓기 전에는 익명 struct 라 함수 경계를 못 넘었다).
+const ConflictLabelSpan = struct { choice: AppSession.ConflictChoice, from: u32, to: u32 };
+
+/// 세 이름 사이의 구분. **번역하지 않는다** — 문장이 아니라 구두점이고, 언어마다 달라질 것이 없다.
+const conflict_action_gap = "   ";
+
+/// 위젯 행에 그릴 세 이름과 그 **열 구간**을 만든다. 글자와 구간이 **한 함수에서 함께** 나오는 것이
+/// 계약이다 — 그리는 쪽과 누르는 쪽이 각자 재면 폰트·언어가 바뀌는 날 조용히 갈리고, 그러면
+/// 「현재 것」을 눌렀는데 「둘 다」가 일어난다.
+fn buildConflictLabel(
+    self: *AppSession,
+    out_spans: *[3]ConflictLabelSpan,
+) ?[]u8 {
+    const names = [_][]const u8{
+        maru.i18n.t(.editor_conflict_accept_current),
+        maru.i18n.t(.editor_conflict_accept_incoming),
+        maru.i18n.t(.editor_conflict_accept_both),
+    };
+    const choices = [_]AppSession.ConflictChoice{ .current, .incoming, .both };
+    var total: usize = 0;
+    for (names) |n| total += n.len;
+    total += conflict_action_gap.len * (names.len - 1);
+
+    const buf = self.allocator.alloc(u8, total) catch return null;
+    var w: usize = 0;
+    var col: u32 = 0;
+    for (names, choices, 0..) |name, choice, i| {
+        if (i > 0) {
+            @memcpy(buf[w..][0..conflict_action_gap.len], conflict_action_gap);
+            w += conflict_action_gap.len;
+            col += chrome_editor.content.columnsOf(conflict_action_gap);
+        }
+        const from = col;
+        @memcpy(buf[w..][0..name.len], name);
+        w += name.len;
+        // **열은 렌더가 쓰는 그 함수로 센다**(`content.columnsOf`) — byte 길이로 세면 한글에서
+        // 두 배로 어긋나 누르는 자리가 글자와 갈린다.
+        col += chrome_editor.content.columnsOf(name);
+        out_spans[i] = .{ .choice = choice, .from = from, .to = col };
+    }
+    return buf;
+}
+
+/// 충돌 구간을 훑고 **보이는 줄** 축의 위젯 표와 동작 구간 표를 만든다
+/// (S2 — docs/editor-merge-conflicts.md §5).
+///
+/// **문서를 훑고, 보이는 축으로 옮긴다.** 구간을 찾는 것은 문서 줄 기준이어야 한다(접힌 줄 안에도
+/// 마커가 있다). 그린 표는 **보이는 줄** 기준이다 — `line_widgets` 가 `lines` 와 같은 축이라는
+/// S1.5 계약이 그렇게 정했고, 그 옮김이 **호출자의 일**이라고 적힌 자리가 여기다.
+///
+/// **접힌 구간의 위젯은 안 세운다.** 머리 줄이 안 보이면 그 「고르기」를 누를 방법이 없고, 보이는
+/// 다른 줄에 얹으면 **엉뚱한 줄 위에** 뜬다.
+fn ensureConflicts(self: *AppSession, term: *Term) void {
+    if (term.kind != .editor) return;
+    if (term.rt.editor_doc == null) return; // 문서가 없으면 훑을 것이 없다
+    // **비교 뷰에는 안 붙인다** — 읽기 전용이고 좌우 두 문서라 「고르기」가 무엇을 고칠지 말할 수 없다.
+    if (term.rt.editor_diff != null) return;
+    const axis = editorLines(term);
+    // **성한 표가 있으면 그대로 쓴다.** 버리는 것은 편집·접힘·문서 해제 세 자리가 하고, 여기서는
+    // 「성한가」만 본다 — 판 번호로 **한 번 더** 재면 그 둘이 서로를 가려 어느 쪽을 지워도 안 드러난다.
+    // 축 길이는 함께 본다: 표가 성해도 축이 바뀌었으면 가리키는 줄이 다르다.
+    if (term.rt.editor_conflicts_valid and term.rt.editor_conflicts_axis_len == axis.len) return;
+
+    dropConflicts(self, term);
+    term.rt.editor_conflicts_valid = true;
+    term.rt.editor_conflicts_axis_len = axis.len;
+    const source = term.rt.editor_lines;
+    if (source.len == 0) return;
+
+    var regions: [max_conflict_regions]maru.session.editor.conflict.Region = undefined;
+    const found = maru.session.editor.conflict.scan(source, &regions);
+    // **구간이 없으면 표도 안 잡는다** — 충돌 없는 문서가 대부분이고, 그때 줄 수만큼의 저장소를
+    // 잡으면 문서를 열 때마다 그만큼 는다.
+    if (found.len == 0) return;
+
+    var label_spans: [3]ConflictLabelSpan = undefined;
+    const label = buildConflictLabel(self, &label_spans) orelse return;
+    errdefer self.allocator.free(label);
+
+    const owned = self.allocator.alloc(maru.session.editor.conflict.Region, found.len) catch {
+        self.allocator.free(label);
+        return;
+    };
+    @memcpy(owned, found);
+    const table = self.allocator.alloc(?chrome_editor.content.Widget, axis.len) catch {
+        self.allocator.free(label);
+        self.allocator.free(owned);
+        return;
+    };
+    @memset(table, null);
+    const bands = self.allocator.alloc(chrome_editor.frame.RowBand, axis.len) catch {
+        self.allocator.free(label);
+        self.allocator.free(owned);
+        self.allocator.free(table);
+        return;
+    };
+    @memset(bands, .none);
+    var spans: std.ArrayList(AppSession.ConflictActionSpan) = .empty;
+    defer spans.deinit(self.allocator);
+
+    for (owned, 0..) |r, ri| {
+        const visible_index = visibleIndexOf(term, r.start, axis.len);
+        // **마커 줄에만** 깐다(본문 두 쪽은 안 칠한다 — 어느 쪽도 편들지 않는다).
+        for ([_]?u32{ r.start, r.base, r.separator, r.end }) |maybe_doc_line| {
+            const doc_line = maybe_doc_line orelse continue;
+            const vi = visibleIndexOf(term, doc_line, axis.len) orelse continue;
+            if (vi < bands.len) bands[vi] = .conflict_marker;
+        }
+        const k = visible_index orelse continue;
+        if (k >= table.len) continue;
+        table[k] = .{ .text = label, .col = 0 };
+        for (label_spans) |sp| {
+            spans.append(self.allocator, .{
+                .visible_line = @intCast(k),
+                .region = @intCast(ri),
+                .choice = sp.choice,
+                .from_col = sp.from,
+                .to_col = sp.to,
+            }) catch break;
+        }
+    }
+
+    const owned_spans = spans.toOwnedSlice(self.allocator) catch {
+        self.allocator.free(label);
+        self.allocator.free(owned);
+        self.allocator.free(table);
+        self.allocator.free(bands);
+        return;
+    };
+    term.rt.editor_conflict_bands = bands;
+    term.rt.editor_conflicts = owned;
+    term.rt.editor_conflict_widgets = table;
+    term.rt.editor_conflict_label = label;
+    term.rt.editor_conflict_actions = owned_spans;
+}
+
+/// 문서 줄 → **보이는 줄** 자리(접혀서 안 보이면 `null`).
+///
+/// **한 함수가 소유한다** — 구간 머리(위젯)와 마커 줄(밴드)이 각자 옮기면 접힌 문서에서 둘이
+/// 다른 줄을 가리키고, 그러면 「고르기」가 엉뚱한 줄 위에 뜬다.
+fn visibleIndexOf(term: *Term, doc_line: u32, axis_len: usize) ?usize {
+    const numbers = term.rt.editor_visible_numbers;
+    if (numbers.len == 0) return if (doc_line < axis_len) doc_line else null; // 접힘 없음 — 축이 같다
+    const want: u32 = doc_line + 1; // `editor_visible_numbers` 는 1-based 다
+    for (numbers, 0..) |num, k| {
+        if (num != null and num.? == want) return k;
+    }
+    return null;
+}
+
+/// 그 구간을 고른 대로 **한 번의 편집**으로 바꾼다(S2 — docs/editor-merge-conflicts.md §5).
+///
+/// **편집이 하나인 것이 계약이다.** 「마커 세 줄을 지우고 한쪽을 남긴다」를 여러 편집으로 쪼개면
+/// 사용자가 **여러 번 되돌려야** 하고, 그 중간 상태(마커 반쪽만 남은 파일)가 되돌리기 스택에 남는다.
+/// `applyEditAsOne` 이 그 묶음을 소유한다(§3.3).
+///
+/// **지우는 범위는 마커 줄까지다.** `<<<<<<<` 줄의 시작부터 `>>>>>>>` 줄의 **줄바꿈까지** — 줄바꿈을
+/// 빼면 고른 뒤 빈 줄이 하나 남고, 더 먹으면 다음 줄이 붙어 올라온다.
+pub fn acceptConflict(self: *AppSession, term: *Term, region_index: usize, choice: AppSession.ConflictChoice) bool {
+    if (term.kind != .editor) return false;
+    const doc = term.rt.editor_doc orelse return false;
+    if (doc.file.read_only) return false;
+    ensureConflicts(self, term);
+    if (region_index >= term.rt.editor_conflicts.len) return false;
+    const r = term.rt.editor_conflicts[region_index];
+
+    const lines = doc.file.lines;
+    const head = lines.line(r.start) orelse return false;
+    const tail = lines.line(r.end) orelse return false;
+    const content = doc.file.content;
+    const remove_from = head.start;
+    const remove_to = @min(tail.end_with_ending, content.len);
+    if (remove_to < remove_from) return false;
+
+    // 고른 쪽의 **본문 줄들**을 원문 그대로 잇는다. 줄 범위가 비면 빈 글이다(한쪽이 통째로 지워진
+    // 충돌이 그렇다 — 그때 결과도 비어야 맞다).
+    const ours = r.ours();
+    const theirs = r.theirs();
+    const ours_text = sliceOfLines(doc, ours.from, ours.to);
+    const theirs_text = sliceOfLines(doc, theirs.from, theirs.to);
+
+    var joined: ?[]u8 = null;
+    defer if (joined) |j| self.allocator.free(j);
+    const replacement: []const u8 = switch (choice) {
+        .current => ours_text,
+        .incoming => theirs_text,
+        // **둘 다**는 «현재 것» 다음에 «들어온 것»이다(VS Code 와 같은 순서 — 파일에 적힌 순서다).
+        .both => blk: {
+            const j = self.allocator.alloc(u8, ours_text.len + theirs_text.len) catch return false;
+            @memcpy(j[0..ours_text.len], ours_text);
+            @memcpy(j[ours_text.len..], theirs_text);
+            joined = j;
+            break :blk j;
+        },
+    };
+
+    // **커서가 없으면 구간 머리에 놓는다.** 편집 경로는 커서 집합을 통해 문서를 고치는데
+    // (`applyEditAsOne`), 위젯을 누르는 것은 **본문을 한 번도 안 누른 상태**에서도 일어난다 —
+    // 파일을 열자마자 고르는 것이 흔한 흐름이다. 그때 커서가 없다고 아무 일도 안 하면 사용자에게는
+    // 「눌렀는데 안 된다」로만 보인다(실측: 방금 연 문서에서 그랬다).
+    //
+    // **이미 있으면 안 건드린다** — 누르는 것은 CodeLens 를 누르는 일이고, 그것이 커서를 옮기는
+    // 동작은 아니다. 있는 커서는 `applyEditAsOne` 이 편집을 지나 옮겨 준다.
+    if (term.rt.editor_selection == null) {
+        term.rt.editor_selection = editor_selection.Selection.at(remove_from);
+    }
+    var changes = [_]maru.session.editor.delta.Change{.{ .start = remove_from, .end = remove_to, .text = replacement }};
+    return applyEditAsOne(self, term, &changes);
+}
+
+/// `[from, to)` 줄들의 **원문 조각**(줄바꿈 포함). 범위가 비면 빈 조각이다.
+///
+/// **원문을 그대로 빌린다 — 다시 짓지 않는다.** 줄을 모아 새로 이으면 줄바꿈 종류(`\r\n`)가 바뀌고,
+/// 그러면 「한쪽을 골랐을 뿐인데 파일 전체의 줄 끝이 달라지는」 일이 그 구간에서만 일어난다.
+fn sliceOfLines(doc: anytype, from: u32, to: u32) []const u8 {
+    if (to <= from) return &.{};
+    const lines = doc.file.lines;
+    const first = lines.line(from) orelse return &.{};
+    const last = lines.line(to - 1) orelse return &.{};
+    const content = doc.file.content;
+    const end = @min(last.end_with_ending, content.len);
+    if (end <= first.start) return &.{};
+    return content[first.start..end];
+}
+
+/// 한 문서에서 인식할 충돌 구간의 상한. **§3.8 규율** — 초장문·극단 입력에서 기능을 줄인다.
+/// 실제 병합에서 이보다 많은 구간이 나오면 파일을 손으로 여는 편이 빠르다.
+pub const max_conflict_regions: usize = 256;
+
 fn refreshAfterEdit(self: *AppSession, term: *Term, edit: ?syntax_color.EditSpan) error{OutOfMemory}!void {
     // **가로 위치를 먼저 떠 둔다** — 아래 ⑷ 가 그것을 0 으로 되돌린다. `defer` 안에서 뜨면
     // 늦다: `rebuildVisible` 이 같은 폐기를 **먼저** 불러 그때는 이미 0 이다(실측으로 걸렸다).
@@ -7983,6 +8313,7 @@ fn refreshAfterEdit(self: *AppSession, term: *Term, edit: ?syntax_color.EditSpan
         if (term.rt.editor_lines.len > 0) self.allocator.free(term.rt.editor_lines);
         term.rt.editor_lines = &.{};
         dropLineCols(self, term);
+        dropConflicts(self, term); // 문서가 갈렸다 — 구간도 옛 줄 번호다
         // 보이는 줄도 같은 버퍼를 빌린다 — 함께 놓는다.
         dropFoldState(self, term);
         return err;
@@ -8080,6 +8411,8 @@ fn dropFoldState(self: *AppSession, term: *Term) void {
 /// `max_cols`가 2000이라 `first_col`이 1911까지 갔다(화면엔 두 줄뿐. 적대적 검증 2026-08-17).
 /// 렌더가 싣는 값들도 옛 배열의 것이라 함께 버린다.
 fn invalidateFoldDerived(self: *AppSession, term: *Term) void {
+    // **위젯 표는 보이는 줄 축이다**(S1.5) — 접힘이 바뀌면 그 축이 갈리므로 함께 버린다.
+    dropConflicts(self, term);
     term.rt.editor_max_cols = 0;
     term.rt.editor_max_cols_right = 0;
     term.rt.editor_first_col = 0;
@@ -8247,6 +8580,7 @@ pub fn releaseEditorTerm(self: *AppSession, term: *Term) void {
     if (term.rt.editor_lines.len > 0) self.allocator.free(term.rt.editor_lines);
     term.rt.editor_lines = &.{};
     dropLineCols(self, term); // 체크포인트도 함께 놓는다
+    dropConflicts(self, term); // 충돌 구간·위젯 표도 문서와 함께 죽는다(S2)
     // 체인 마디의 열 범위도 문서와 함께 죽는다(§7.5) — 렌더가 채우는 파생값이라 문서가 없으면
     // 가리킬 것이 없다. `SP18` 이 이 자리를 잡았다(픽스처가 심은 값이 누수로 드러났다).
     term.rt.editor_crumb_spans.deinit(self.allocator);
@@ -14379,6 +14713,580 @@ fn undoFixture(fx: *PaneFixture, allocator: std.mem.Allocator, name: []const u8,
     const path = try std.fs.path.join(allocator, &.{ root, name });
     defer allocator.free(path);
     return try openPathInActivePane(fx.session, path);
+}
+
+// ── 병합 충돌 마커(S2 — docs/editor-merge-conflicts.md §5) ──────────────────────────────────
+
+/// 판정자 전용: 그 **보이는 줄**의 위젯이 화면 몇 번째 행인가.
+///
+/// **화면 행 ≠ 보이는 줄이다** — 위젯이 행을 더하므로 앞에 위젯이 하나 있으면 그 뒤가 전부 한 칸
+/// 밀린다. 첫 구간에서는 둘이 우연히 같아, 이 계산 없이 적은 판정자는 **맞는 자리를 우연히** 눌렀다
+/// (적대적 검증 3회차에서 둘째 구간이 그것을 드러냈다).
+fn widgetScreenRowForTest(term: *Term, visible_line: u32) ?usize {
+    for (term.rt.editor_hit_rows[0..term.rt.editor_hit_rows_len], 0..) |v, i| {
+        if (v.kind == .widget and @as(usize, v.line) + term.rt.editor_first_line == visible_line) return i;
+    }
+    return null;
+}
+
+const conflict_fixture =
+    "fn greet() {\n" ++
+    "<<<<<<< HEAD\n" ++
+    "  return \"ours\";\n" ++
+    "=======\n" ++
+    "  return \"theirs\";\n" ++
+    ">>>>>>> topic\n" ++
+    "}\n";
+
+test "CFL1 충돌 파일을 열면 구간을 «인식하고» 그 줄 위에 고르기 줄이 선다 (제품 경계)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "conflict.txt", conflict_fixture);
+
+    // **렌더가 읽는 그 창구를 지난다** — 표를 직접 만들면 「렌더가 그것을 받는가」가 안 보인다.
+    const widgets = conflictWidgets(fx.session, term);
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_conflicts.len);
+    const r = term.rt.editor_conflicts[0];
+    try testing.expectEqual(@as(u32, 1), r.start);
+    try testing.expectEqual(@as(u32, 3), r.separator);
+    try testing.expectEqual(@as(u32, 5), r.end);
+
+    // 위젯은 **구간 머리 줄 위**에 하나뿐이다.
+    var count: usize = 0;
+    var at: ?usize = null;
+    for (widgets, 0..) |w, i| if (w != null) {
+        count += 1;
+        at = i;
+    };
+    try testing.expectEqual(@as(usize, 1), count);
+    try testing.expectEqual(@as(usize, 1), at.?); // `<<<<<<<` 줄
+    // **열 0 에서 시작한다** — Lab 픽스처는 들여쓴 값을 쓰므로 골든이 이 값을 안 지킨다. 제품의
+    // 열이 밀리면 그리는 자리와 `from_col` 이 갈려 누르는 자리가 어긋난다.
+    try testing.expectEqual(@as(u32, 0), widgets[at.?].?.col);
+
+    // 동작 구간은 셋이고 **열이 겹치지 않는다** — 겹치면 한 클릭이 두 동작이 된다.
+    const spans = term.rt.editor_conflict_actions;
+    try testing.expectEqual(@as(usize, 3), spans.len);
+    try testing.expectEqual(AppSession.ConflictChoice.current, spans[0].choice);
+    try testing.expectEqual(AppSession.ConflictChoice.incoming, spans[1].choice);
+    try testing.expectEqual(AppSession.ConflictChoice.both, spans[2].choice);
+    try testing.expect(spans[0].to_col <= spans[1].from_col);
+    try testing.expect(spans[1].to_col <= spans[2].from_col);
+    try testing.expect(spans[0].from_col < spans[0].to_col); // 폭이 0 이면 못 누른다
+
+    try testing.expectEqual(@as(u32, 0), spans[0].from_col); // 첫 이름은 줄 머리에서 시작한다
+
+    // **구간이 글자의 «열» 을 덮는다** — 끝 구간의 끝이 라벨 전체의 열 폭과 같아야 한다.
+    //
+    // **한국어로 갈아 끼우고 잰다.** 기본값(영어)은 라벨이 ASCII 라 **열과 byte 가 같고**, 그러면
+    // 열을 byte 길이로 센 변이가 살아남는다(적대적 검증 1회차 실측 — 그 변이가 이 단언을 통과했다).
+    // 누르는 자리를 구간에서 거꾸로 계산하는 판정자는 둘이 함께 틀려도 자기끼리 맞아 초록이다.
+    const restore = maru.i18n.lang();
+    defer maru.i18n.setLang(restore);
+    maru.i18n.setLang(.ko);
+    dropConflicts(fx.session, term);
+    ensureConflicts(fx.session, term);
+    const ko_spans = term.rt.editor_conflict_actions;
+    try testing.expectEqual(@as(usize, 3), ko_spans.len);
+    try testing.expectEqual(
+        chrome_editor.content.columnsOf(term.rt.editor_conflict_label),
+        ko_spans[ko_spans.len - 1].to_col,
+    );
+    // **그리고 byte 길이와는 달라야 한다** — 같으면 이 픽스처가 그 둘을 못 가른다(공허 방지).
+    try testing.expect(term.rt.editor_conflict_label.len != ko_spans[ko_spans.len - 1].to_col);
+}
+
+test "CFL2 고르기는 «편집 하나»다 — 되돌리기 한 번에 마커까지 돌아온다 (제품 경계)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const Case = struct { choice: AppSession.ConflictChoice, want: []const u8 };
+    const cases = [_]Case{
+        .{ .choice = .current, .want = "fn greet() {\n  return \"ours\";\n}\n" },
+        .{ .choice = .incoming, .want = "fn greet() {\n  return \"theirs\";\n}\n" },
+        // **둘 다**는 파일에 적힌 순서 그대로다(현재 것 → 들어온 것).
+        .{ .choice = .both, .want = "fn greet() {\n  return \"ours\";\n  return \"theirs\";\n}\n" },
+    };
+    for (cases) |case| {
+        var fx = try PaneFixture.init(allocator);
+        defer fx.deinit(allocator);
+        const term = try undoFixture(&fx, allocator, "conflict.txt", conflict_fixture);
+
+        try testing.expect(acceptConflict(fx.session, term, 0, case.choice));
+        const doc = term.rt.editor_doc.?;
+        try testing.expectEqualStrings(case.want, doc.file.content);
+        // **마커가 사라졌다** — 구간을 다시 훑으면 없다.
+        try testing.expect(!maru.session.editor.conflict.hasUnresolved(term.rt.editor_lines));
+
+        // **되돌리기 한 번**에 통째로 돌아온다. 여러 편집으로 쪼갰다면 여기서 반쪽이 남는다.
+        try testing.expect(undoEdit(fx.session, term));
+        try testing.expectEqualStrings(conflict_fixture, term.rt.editor_doc.?.file.content);
+        try testing.expect(maru.session.editor.conflict.hasUnresolved(term.rt.editor_lines));
+    }
+}
+
+test "CFL3 diff3 — «현재 것»이 base 를 안 데려온다 (제품 경계)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    // `merge.conflictStyle = diff3` 의 모양. 이것을 모르면 「현재 것 채택」이 **원본까지** 남긴다.
+    const diff3 =
+        "<<<<<<< HEAD\n" ++
+        "ours\n" ++
+        "||||||| base\n" ++
+        "original\n" ++
+        "=======\n" ++
+        "theirs\n" ++
+        ">>>>>>> topic\n";
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "d3.txt", diff3);
+
+    ensureConflicts(fx.session, term);
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_conflicts.len);
+    try testing.expectEqual(@as(?u32, 2), term.rt.editor_conflicts[0].base);
+
+    try testing.expect(acceptConflict(fx.session, term, 0, .current));
+    try testing.expectEqualStrings("ours\n", term.rt.editor_doc.?.file.content);
+}
+
+test "CFL4 마커가 «아닌» 줄에는 고르기가 안 붙는다 — 멀쩡한 파일이 충돌로 보이면 안 된다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    // 여덟 개짜리 장식 구분선과, 문자열 안의 마커 글자 — 이 저장소 자신의 코드에 둘 다 있다.
+    const innocent =
+        "// ========\n" ++
+        "const marker = \"<<<<<<<\";\n" ++
+        "========\n" ++
+        "    <<<<<<< indented\n";
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "innocent.zig", innocent);
+
+    const widgets = conflictWidgets(fx.session, term);
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_conflicts.len);
+    for (widgets) |w| try testing.expect(w == null);
+    // 표를 아예 안 잡는다 — 충돌 없는 문서가 대부분이라 그때 줄 수만큼 잡으면 그냥 낭비다.
+    try testing.expectEqual(@as(usize, 0), widgets.len);
+}
+
+test "CFL5 고르기 줄을 «실제로 눌러» 고친다 — 세 이름이 각자 다른 일을 한다 (제품 경계)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const Case = struct { which: usize, want: []const u8 };
+    const cases = [_]Case{
+        .{ .which = 0, .want = "fn greet() {\n  return \"ours\";\n}\n" },
+        .{ .which = 1, .want = "fn greet() {\n  return \"theirs\";\n}\n" },
+        .{ .which = 2, .want = "fn greet() {\n  return \"ours\";\n  return \"theirs\";\n}\n" },
+    };
+    for (cases) |case| {
+        var fx = try PaneFixture.init(allocator);
+        defer fx.deinit(allocator);
+        const term = try undoFixture(&fx, allocator, "conflict.txt", conflict_fixture);
+        term.rt.editor_wrap = false;
+
+        // **그려야 누를 수 있다** — 히트 행·기하가 그때 굳는다(§4.1g). 그리지 않고 좌표를 넣으면
+        // 이 판정자는 「아무 데나 눌러도 안 된다」만 확인하게 된다.
+        var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.NoFrame;
+        drawn.dl.deinit(allocator);
+
+        const spans = term.rt.editor_conflict_actions;
+        try testing.expectEqual(@as(usize, 3), spans.len);
+        const sp = spans[case.which];
+        const geom = term.rt.editor_hit_geom;
+        // 그 이름의 **한가운데**를 누른다(경계는 아래 판정자가 따로 본다).
+        const mid_col = sp.from_col + (sp.to_col - sp.from_col) / 2;
+        const row = widgetScreenRowForTest(term, sp.visible_line) orelse return error.NoWidgetRow;
+        const x: f64 = @floatFromInt(geom.body_x + @as(i32, @intCast(geom.content_left_px)) + @as(i32, @intCast(mid_col * geom.cell_w_px)) + @as(i32, @intCast(geom.cell_w_px / 2)));
+        const y: f64 = @floatFromInt(geom.body_y + @as(i32, @intCast(row * geom.cell_h_px)) + @as(i32, @intCast(geom.cell_h_px / 2)));
+
+        // **제품 핸들러를 지난다** — `acceptConflict` 를 직접 부르면 그 위 층(좌표 → 어느 이름)이
+        // 죽어 있어도 초록이다.
+        try testing.expect(acceptConflictAtPoint(fx.session, pane_ops.activePane(fx.session), x, y));
+        try testing.expectEqualStrings(case.want, term.rt.editor_doc.?.file.content);
+    }
+}
+
+test "CFL6 이름 «사이»와 글자 행은 고르기가 아니다 — 한 클릭이 두 동작이 되면 안 된다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "conflict.txt", conflict_fixture);
+    term.rt.editor_wrap = false;
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.NoFrame;
+    drawn.dl.deinit(allocator);
+
+    const spans = term.rt.editor_conflict_actions;
+    const geom = term.rt.editor_hit_geom;
+    const widget_row = widgetScreenRowForTest(term, spans[0].visible_line) orelse return error.NoWidgetRow;
+    const y: f64 = @floatFromInt(geom.body_y + @as(i32, @intCast(widget_row * geom.cell_h_px)) + @as(i32, @intCast(geom.cell_h_px / 2)));
+    const xOf = struct {
+        fn f(g: @TypeOf(geom), col: u32) f64 {
+            return @floatFromInt(g.body_x + @as(i32, @intCast(g.content_left_px)) + @as(i32, @intCast(col * g.cell_w_px)) + @as(i32, @intCast(g.cell_w_px / 2)));
+        }
+    }.f;
+
+    // ⑴ 첫 이름의 **끝 열**은 그 이름이 아니다(닫힌-열린 구간) — 겹치면 다음 이름과 둘 다 맞는다.
+    const at_end = conflictActionAtPoint(term, xOf(geom, spans[0].to_col), y);
+    if (at_end) |hit| try testing.expect(hit.choice != .current);
+
+    // ⑵ **이름 사이의 공백**은 어느 동작도 아니다.
+    if (spans[1].from_col > spans[0].to_col) {
+        try testing.expectEqual(@as(?AppSession.ConflictActionSpan, null), conflictActionAtPoint(term, xOf(geom, spans[0].to_col), y));
+    }
+
+    // ⑶ **글자 행**은 고르기가 아니다 — 본문을 누르면 커서가 서야지 문서가 바뀌면 안 된다.
+    const text_y: f64 = @floatFromInt(geom.body_y + @as(i32, @intCast((widget_row + 1) * geom.cell_h_px)) + @as(i32, @intCast(geom.cell_h_px / 2)));
+    try testing.expectEqual(@as(?AppSession.ConflictActionSpan, null), conflictActionAtPoint(term, xOf(geom, spans[0].from_col + 1), text_y));
+    // 그리고 그 클릭으로는 문서가 안 바뀐다.
+    const before = term.rt.editor_doc.?.file.content.len;
+    try testing.expect(!acceptConflictAtPoint(fx.session, pane_ops.activePane(fx.session), xOf(geom, spans[0].from_col + 1), text_y));
+    try testing.expectEqual(before, term.rt.editor_doc.?.file.content.len);
+}
+
+test "CFL7 마커 줄에만 밴드가 깔린다 — 어느 쪽도 편들지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "conflict.txt", conflict_fixture);
+    ensureConflicts(fx.session, term);
+    const bands = term.rt.editor_conflict_bands;
+    try testing.expectEqual(term.rt.editor_lines.len, bands.len);
+
+    // 0 `fn greet() {` · 1 `<<<<<<<` · 2 ours · 3 `=======` · 4 theirs · 5 `>>>>>>>` · 6 `}`
+    const want = [_]chrome_editor.frame.RowBand{ .none, .conflict_marker, .none, .conflict_marker, .none, .conflict_marker, .none };
+    for (want, 0..) |w, i| {
+        if (i >= bands.len) break;
+        try testing.expectEqual(w, bands[i]);
+    }
+}
+
+test "CFL8 마커를 남긴 채 저장하면 «말한다» — 막지는 않는다 (제품 경계)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "conflict.txt", conflict_fixture);
+
+    @memset(&fx.session.notice_message_buf, 0);
+    // **저장은 된다** — 반쯤 고치다 멈추는 것은 정당한 중간 상태다. 막아야 하는 것은 «모른 채» 두는 일이다.
+    try testing.expect(saveDocument(fx.session, term));
+    try testing.expect(std.mem.startsWith(u8, &fx.session.notice_message_buf, maru.i18n.t(.editor_conflict_markers_remain)));
+
+    // **고친 뒤에는 조용하다** — 늘 말하면 그 문구가 무의미해진다.
+    try testing.expect(acceptConflict(fx.session, term, 0, .current));
+    @memset(&fx.session.notice_message_buf, 0);
+    try testing.expect(saveDocument(fx.session, term));
+    try testing.expectEqual(@as(u8, 0), fx.session.notice_message_buf[0]);
+}
+
+test "CFL10 표가 «낡지 않는다» — 편집·같은 길이 편집·접힘 셋 다 다시 훑는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+
+    // ⑴ **고른 뒤**: 구간이 사라졌으니 표도 비어야 한다. 안 버리면 없는 구간의 「고르기」가 남아
+    //    있고, 누르면 **이미 지워진 줄 번호**로 문서를 자른다.
+    {
+        var fx = try PaneFixture.init(allocator);
+        defer fx.deinit(allocator);
+        const term = try undoFixture(&fx, allocator, "c.txt", conflict_fixture);
+        try testing.expectEqual(@as(usize, 1), conflictRegionCount(fx.session, term));
+        try testing.expect(acceptConflict(fx.session, term, 0, .current));
+        try testing.expectEqual(@as(usize, 0), conflictRegionCount(fx.session, term));
+        for (conflictWidgets(fx.session, term)) |w| try testing.expect(w == null);
+    }
+
+    // ⑵ **길이가 그대로인 편집**: `=======` 를 `======x` 로 바꾼다(7자 그대로). 문서 길이가 안 변하므로
+    //    「길이로만」 판을 재는 캐시는 옛 표를 그대로 쓴다 — 그러면 마커가 아닌 줄에 고르기가 남는다.
+    {
+        var fx = try PaneFixture.init(allocator);
+        defer fx.deinit(allocator);
+        const term = try undoFixture(&fx, allocator, "c.txt", conflict_fixture);
+        try testing.expectEqual(@as(usize, 1), conflictRegionCount(fx.session, term));
+        const at = std.mem.indexOf(u8, term.rt.editor_doc.?.file.content, "=======").?;
+        term.rt.editor_selection = editor_selection.Selection.at(at + 6);
+        var changes = [_]maru.session.editor.delta.Change{.{ .start = at + 6, .end = at + 7, .text = "x" }};
+        try testing.expect(applyEditAsOne(fx.session, term, &changes));
+        try testing.expectEqual(@as(usize, 0), conflictRegionCount(fx.session, term));
+    }
+
+    // ⑶ **접으면 축이 갈린다.** 표는 «보이는 줄» 축이라(S1.5) 그대로 쓰면 엉뚱한 줄 위에 뜬다.
+    {
+        var fx = try PaneFixture.init(allocator);
+        defer fx.deinit(allocator);
+        const term = try undoFixture(&fx, allocator, "c.txt", conflict_fixture);
+        const before = conflictWidgets(fx.session, term).len;
+        try testing.expect(before > 0);
+        _ = foldAll(fx.session);
+        const axis = editorLines(term).len;
+        // **공허 방지** — 접히지 않았으면 이 갈래는 아무것도 안 본 것이다(픽스처가 접을 블록을 갖는지).
+        try testing.expect(axis != before);
+        // 축이 줄었으면 표도 그 축이어야 한다 — 길이가 그대로면 옛 축의 표를 쓴 것이다.
+        try testing.expectEqual(axis, conflictWidgets(fx.session, term).len);
+    }
+}
+
+test "CFL13 구간이 여럿이면 «각각» 고르기가 서고, 고른 것만 사라진다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    // **구간 하나짜리 픽스처만 쓰면 상한·인덱싱이 안 보인다** — 하나만 인식해도 초록이다
+    // (적대적 검증 2회차에서 상한을 1 로 줄인 변이가 살아남았다).
+    const two =
+        "<<<<<<< HEAD\na1\n=======\nb1\n>>>>>>> t\n" ++
+        "middle\n" ++
+        "<<<<<<< HEAD\na2\n=======\nb2\n>>>>>>> t\n";
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "two.txt", two);
+
+    try testing.expectEqual(@as(usize, 2), conflictRegionCount(fx.session, term));
+    var widget_rows: usize = 0;
+    for (conflictWidgets(fx.session, term)) |w| {
+        if (w != null) widget_rows += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), widget_rows);
+    // 동작 구간도 구간마다 셋이다.
+    try testing.expectEqual(@as(usize, 6), term.rt.editor_conflict_actions.len);
+    try testing.expectEqual(@as(u32, 0), term.rt.editor_conflict_actions[0].region);
+    try testing.expectEqual(@as(u32, 1), term.rt.editor_conflict_actions[3].region);
+
+    // **그 줄의 동작만 맞는다.** 그려 놓고 둘째 구간의 고르기 줄을 눌러 본다 — 줄을 안 보면
+    // 첫째 구간의 구간표가 먼저 맞아 **남의 것**을 고친다(적대적 검증 3회차에서 그 변이가 살았다).
+    term.rt.editor_wrap = false;
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.NoFrame;
+    drawn.dl.deinit(allocator);
+    const second = term.rt.editor_conflict_actions[3]; // 둘째 구간의 첫 이름
+    const geom = term.rt.editor_hit_geom;
+    // **화면 행 ≠ 보이는 줄이다.** 위젯이 행을 더하므로 그 줄의 위젯이 화면 몇 번째 행인지는
+    // 그린 배열에서 찾아야 한다 — 사용자가 누르는 자리도 「그려진 그 행」이다.
+    const screen_row = widgetScreenRowForTest(term, second.visible_line) orelse return error.NoWidgetRow;
+    const hit = conflictActionAtPoint(
+        term,
+        @floatFromInt(geom.body_x + @as(i32, @intCast(geom.content_left_px)) + @as(i32, @intCast((second.from_col + 1) * geom.cell_w_px))),
+        @floatFromInt(geom.body_y + @as(i32, @intCast(screen_row * geom.cell_h_px)) + @as(i32, @intCast(geom.cell_h_px / 2))),
+    ) orelse return error.NoHit;
+    try testing.expectEqual(@as(u32, 1), hit.region);
+
+    // **둘째만 고른다** — 첫째는 그대로 남아야 한다(인덱스가 밀리면 엉뚱한 것이 사라진다).
+    try testing.expect(acceptConflict(fx.session, term, 1, .incoming));
+    try testing.expectEqual(@as(usize, 1), conflictRegionCount(fx.session, term));
+    const after = term.rt.editor_doc.?.file.content;
+    try testing.expect(std.mem.indexOf(u8, after, "a1") != null); // 첫 구간은 그대로
+    try testing.expect(std.mem.indexOf(u8, after, "b2") != null); // 둘째는 들어온 것만
+    try testing.expect(std.mem.indexOf(u8, after, "a2") == null);
+}
+
+test "CFL11 고를 수 «없는» 자리에서는 안 고친다 — 읽기 전용·비교 뷰" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "c.txt", conflict_fixture);
+    try testing.expectEqual(@as(usize, 1), conflictRegionCount(fx.session, term));
+
+    // **읽기 전용이면 안 고친다.** 여기서 고치면 「못 고치는 파일」이라 적어 둔 그 계약이 깨진다.
+    term.rt.editor_doc.?.file.read_only = true;
+    const before = term.rt.editor_doc.?.file.content.len;
+    try testing.expect(!acceptConflict(fx.session, term, 0, .current));
+    try testing.expectEqual(before, term.rt.editor_doc.?.file.content.len);
+    term.rt.editor_doc.?.file.read_only = false;
+
+    // **없는 구간 번호**도 안 고친다(늦은 클릭이 그 상태를 만든다).
+    try testing.expect(!acceptConflict(fx.session, term, 99, .current));
+    try testing.expectEqual(before, term.rt.editor_doc.?.file.content.len);
+
+    // **비교 뷰에는 아예 안 붙는다.** 읽기 전용이고 좌우 두 문서라 「고르기」가 무엇을 고칠지 말할 수
+    // 없다 — 붙으면 **고칠 수 있다고 거짓말하는 줄**이 뜬다. 표를 버리고 비교 상태를 세운 뒤 다시
+    // 훑게 해서 본다(상태를 세우는 것만으로는 옛 표가 남는다).
+    dropConflicts(fx.session, term);
+    term.rt.editor_diff = .{ .view = .unchanged };
+    defer term.rt.editor_diff = null;
+    ensureConflicts(fx.session, term);
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_conflicts.len);
+    for (term.rt.editor_conflict_widgets) |w| try testing.expect(w == null);
+    try testing.expect(conflictActionAtPoint(term, 0, 0) == null);
+}
+
+test "CFL12 이미 있는 커서를 «안 뺏는다» — 누르는 것은 CodeLens 이지 커서가 아니다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "c.txt", conflict_fixture);
+    ensureConflicts(fx.session, term);
+
+    // 커서를 **구간 뒤**(마지막 줄)에 놓는다 — 편집이 그 자리를 앞으로 당기지만, 구간 머리로
+    // **점프하지는 않아야** 한다.
+    const content_len = term.rt.editor_doc.?.file.content.len;
+    term.rt.editor_selection = editor_selection.Selection.at(content_len - 1);
+    const region_start = term.rt.editor_doc.?.file.lines.line(term.rt.editor_conflicts[0].start).?.start;
+
+    try testing.expect(acceptConflict(fx.session, term, 0, .current));
+    const after = term.rt.editor_selection.?.start();
+    // 구간 머리로 옮겨졌다면 커서를 뺏은 것이다.
+    try testing.expect(after != region_start);
+    try testing.expect(after > region_start);
+}
+
+test "CFL14 한쪽이 «빈» 충돌 — 고르면 그쪽이 통째로 사라진다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    // 한쪽이 통째로 지워진 충돌은 흔하다(한 브랜치가 줄을 지우고 다른 쪽이 고친 경우). 그때
+    // 「빈 범위」를 **빈 글**로 안 다루면 줄 하나를 통째로 빌려 와 엉뚱한 줄이 남는다.
+    const empty_ours =
+        "head\n" ++
+        "<<<<<<< HEAD\n" ++
+        "=======\n" ++
+        "theirs\n" ++
+        ">>>>>>> t\n" ++
+        "tail\n";
+    {
+        var fx = try PaneFixture.init(allocator);
+        defer fx.deinit(allocator);
+        const term = try undoFixture(&fx, allocator, "e.txt", empty_ours);
+        try testing.expect(acceptConflict(fx.session, term, 0, .current)); // 빈 쪽을 고른다
+        try testing.expectEqualStrings("head\ntail\n", term.rt.editor_doc.?.file.content);
+    }
+    {
+        var fx = try PaneFixture.init(allocator);
+        defer fx.deinit(allocator);
+        const term = try undoFixture(&fx, allocator, "e.txt", empty_ours);
+        try testing.expect(acceptConflict(fx.session, term, 0, .both));
+        try testing.expectEqualStrings("head\ntheirs\ntail\n", term.rt.editor_doc.?.file.content);
+    }
+}
+
+test "CFL15 구간 머리가 «안 보이면» 고르기를 안 세운다 — 아무 줄에나 얹지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    // 접으면 그 문서 줄이 보이는 축에서 사라진다. 「가장 가까운 보이는 줄」로 떨어뜨리면 **엉뚱한
+    // 줄 위에** 고르기가 뜨고, 누르면 그 줄과 무관한 구간을 고친다.
+    //
+    // **접기 명령 대신 번호 표를 직접 세운다.** `foldAll` 은 문법·들여쓰기에서 범위를 찾는데, 픽스처가
+    // 그 조건을 만족하는지는 이 판정자가 보려는 것과 다른 축이다 — 실제로 이 픽스처는 안 접혔고,
+    // 그러면 판정자가 **아무것도 안 보는 채로 초록**이 된다(적대적 검증 3회차). 규칙(`visibleIndexOf`)
+    // 이 보는 것은 번호 표 하나이므로, 그 표를 그대로 준다.
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "f.txt", conflict_fixture);
+    try testing.expectEqual(@as(usize, 1), conflictRegionCount(fx.session, term));
+
+    // 문서 줄 0·6 만 보인다(구간 머리 = 줄 1 은 접혀 사라졌다). 번호는 1-based 다.
+    var numbers = [_]?u32{ 1, 7 };
+    const saved_lines = term.rt.editor_visible_lines;
+    var visible = [_][]const u8{ term.rt.editor_lines[0], term.rt.editor_lines[6] };
+    term.rt.editor_visible_numbers = &numbers;
+    term.rt.editor_visible_lines = &visible;
+    defer {
+        // **스택 조각을 남기고 나가면 해제가 그것을 놓으려 한다** — 원래 값으로 되돌린다.
+        term.rt.editor_visible_numbers = &.{};
+        term.rt.editor_visible_lines = saved_lines;
+    }
+
+    dropConflicts(fx.session, term);
+    ensureConflicts(fx.session, term);
+    var widget_rows: usize = 0;
+    for (term.rt.editor_conflict_widgets) |w| {
+        if (w != null) widget_rows += 1;
+    }
+    // **안 보이면 아예 없다** — 다른 줄에 얹지 않는다.
+    try testing.expectEqual(@as(usize, 0), widget_rows);
+    // 동작 구간도 없다 — 표만 비우고 구간을 남기면 클릭이 죽은 자리를 가리킨다.
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_conflict_actions.len);
+
+    // **보이면 선다**(반대쪽) — 이 한 줄이 없으면 「늘 안 세운다」로 갈려도 초록이다.
+    var all_numbers = [_]?u32{ 1, 2, 3, 4, 5, 6, 7 };
+    term.rt.editor_visible_numbers = &all_numbers;
+    term.rt.editor_visible_lines = term.rt.editor_lines;
+    dropConflicts(fx.session, term);
+    ensureConflicts(fx.session, term);
+    var seen: usize = 0;
+    for (term.rt.editor_conflict_widgets) |w| {
+        if (w != null) seen += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), seen);
+}
+
+test "CFL16 «스크롤한» 화면에서도 누른 자리가 맞는다 — 상대/절대 축" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    // 히트 행의 `line` 은 **뷰포트 첫 줄로부터의 상대** 값이고 동작 표는 **절대** 축이다. 화면 맨
+    // 위가 0 이면 둘이 같아 **우연히 맞으므로**, 스크롤한 상태라야 그 차이가 보인다
+    // (적대적 검증 3회차에서 그 덧셈을 지운 변이가 살았다 — 기존 판정자가 전부 `first_line = 0` 이다).
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(allocator);
+    for (0..30) |i| {
+        var buf: [32]u8 = undefined;
+        try body.appendSlice(allocator, try std.fmt.bufPrint(&buf, "line {d}\n", .{i}));
+    }
+    try body.appendSlice(allocator, "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> t\n");
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "long.txt", body.items);
+    term.rt.editor_wrap = false;
+    var warm = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.NoFrame;
+    warm.dl.deinit(allocator);
+
+    // 문서 끝으로 굴린다 — 구간이 화면에 들어오고 `first_line` 이 0 이 아니게 된다.
+    term.rt.editor_first_line = term.rt.editor_max_top_line;
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.NoFrame;
+    drawn.dl.deinit(allocator);
+    try testing.expect(term.rt.editor_first_line > 0); // 공허 방지 — 안 굴렀으면 이 판정은 무의미하다
+
+    const spans = term.rt.editor_conflict_actions;
+    try testing.expectEqual(@as(usize, 3), spans.len);
+    const row = widgetScreenRowForTest(term, spans[2].visible_line) orelse return error.NoWidgetRow;
+    const geom = term.rt.editor_hit_geom;
+    const hit = conflictActionAtPoint(
+        term,
+        @floatFromInt(geom.body_x + @as(i32, @intCast(geom.content_left_px)) + @as(i32, @intCast((spans[2].from_col + 1) * geom.cell_w_px))),
+        @floatFromInt(geom.body_y + @as(i32, @intCast(row * geom.cell_h_px)) + @as(i32, @intCast(geom.cell_h_px / 2))),
+    ) orelse return error.NoHit;
+    try testing.expectEqual(AppSession.ConflictChoice.both, hit.choice);
+}
+
+test "CFL9 «진짜 git 이 낸» 파일 — 두 스타일 그대로 (재현 2026-09-13)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    // **이 두 글자 덩이는 손으로 안 적었다.** 임시 저장소를 만들어 같은 줄을 양쪽에서 고치고
+    // `git merge` 와 `git -c merge.conflictStyle=diff3 merge` 를 실제로 돌려 나온 파일을 그대로
+    // 옮겼다. 손으로 적으면 「내가 상상한 모양」을 검사하게 되고, 실제로 다른 자리가 있다 —
+    // diff3 의 라벨이 `base` 같은 낱말이 아니라 **짧은 SHA**(`||||||| d7db4cc`)라는 것이 그렇다.
+    const allocator = testing.allocator;
+    const merged =
+        "pub fn greet() void {\n" ++
+        "<<<<<<< HEAD\n" ++
+        "    const msg = \"ours\";\n" ++
+        "=======\n" ++
+        "    const msg = \"theirs\";\n" ++
+        ">>>>>>> topic\n" ++
+        "    print(msg);\n" ++
+        "}\n";
+    const merged_diff3 =
+        "pub fn greet() void {\n" ++
+        "<<<<<<< HEAD\n" ++
+        "    const msg = \"ours\";\n" ++
+        "||||||| d7db4cc\n" ++
+        "    const msg = \"base\";\n" ++
+        "=======\n" ++
+        "    const msg = \"theirs\";\n" ++
+        ">>>>>>> topic\n" ++
+        "    print(msg);\n" ++
+        "}\n";
+    const resolved = "pub fn greet() void {\n    const msg = \"ours\";\n    print(msg);\n}\n";
+
+    for ([_][]const u8{ merged, merged_diff3 }) |data| {
+        var fx = try PaneFixture.init(allocator);
+        defer fx.deinit(allocator);
+        const term = try undoFixture(&fx, allocator, "greet.zig", data);
+        ensureConflicts(fx.session, term);
+        try testing.expectEqual(@as(usize, 1), term.rt.editor_conflicts.len);
+        // **두 스타일이 같은 답을 낸다** — diff3 의 원본 줄이 「현재 것」에 안 섞인다.
+        try testing.expect(acceptConflict(fx.session, term, 0, .current));
+        try testing.expectEqualStrings(resolved, term.rt.editor_doc.?.file.content);
+    }
 }
 
 test "UNDO8 편집·되돌리기·다시하기를 섞어도 문서가 모델과 같다 (상태 기계 퍼즈)" {

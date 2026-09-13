@@ -1812,8 +1812,8 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    allocation-free 재구성 결과가 그 projection과 exact 일치할 때만 반환한다. 따라서 payload 재파싱은 두 번째 SSOT가 아니다. 내부 상태가 이 envelope를
    넘거나 주소가 봉인된 canonical slot과 exact 일치하지 않으면 compile/admission 단계에서 거부한다.
    public release·cleanup pin·quarantine까지 C2로 구현 완료했다. C3-1의 `GenerationAttachment` inline owner/mirror/wrapper와
-   teardown 합성은 C3-1로 구현 완료했다. C3-2의 release-pending→purge-first 제품 drain도 구현했으며 C3-3의 actual
-   socket event/source-zero는 아직 미구현이다.
+   teardown 합성은 C3-1로 구현 완료했다. C3-2의 release-pending→purge-first 제품 drain도 구현했고, confirmed poison,
+   revoke ordering, atomic event settlement·비동기 close와 C3-3c actual socket/source-zero까지 구현 완료했다.
    C2는 `GenerationTransport.releaseEvent(owner:*EventOwner) EventError!void` 하나만 public facade에 추가해
    transport declaration을 exact 14로 만든다. C2의 production-type facade take/release는 test-only settlement를 호출하지 않으며,
    C3가 소유하는 `GenerationAttachment` 제품 drain·purge orchestration도 선취하지 않는다. C2의 private 구현 경계는

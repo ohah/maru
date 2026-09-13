@@ -1639,10 +1639,11 @@ interaction 이관 전체를 완료로 표시하지 않는다. 한 consumer가 �
 
 ### 영속 host CR 실행 중 transport reconnect gate
 
-**상태: 부분 구현(CR0a·CR3a·CR3b R1·R2a·R2b·R2c·R3 완료).** `RemoteRuntime`/Surface/pump/routing 주소를 고정한 stable shell과 generation bundle,
+**상태: 구현 완료(CR0a~CR6f).** `RemoteRuntime`/Surface/pump/routing 주소를 고정한 stable shell과 generation bundle,
 stable `ScreenSource` borrow, 앱 전역 host job, existing-host-only controller recovery를
 [persistent-session-host.md](persistent-session-host.md#실행-중-connection-invalidation과-재연결)가 소유한다. raw in-place
-field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다.
+field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다. 이 완료 표식은 실행 중 reconnect gate에만 해당하며,
+provisioned Developer ID·Notification Center 등 아래의 외부 release gate 완료를 뜻하지 않는다.
 
 - CR0a(구현): raw `failClosed`와 내부 `invalidateConnection*` 직접 callsite 0, semantic `Outcome`과 connection-fatal
   `ConnectionReason`의 타입 분리, typed tuple exhaustive golden table, expected/unexpected 분류와 최초 reason 불변을

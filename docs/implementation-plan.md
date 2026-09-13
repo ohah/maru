@@ -1455,22 +1455,24 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    projection/config-off 상태의 secure registry exact attach, 재응답의 중복 attach 0을 검증한다. 실제
    Notification Center 배너 클릭은 provisioned signed runner가 필요한 별도 release gate다.
 
-   **현재 판정(2026-09-11 코드·gate 대조): P1~P5의 일반 제품 경로와 ad-hoc gate는 완료했지만,
-   provisioned product transaction 자체는 N3-R3와 actual provisioned run이 미완료다.** R2b1의 별도 signable AX helper와 R2b2의
+   **현재 판정(2026-09-13 코드·gate 대조): P1~P5의 일반 제품 경로와 ad-hoc gate, N3-R3 protected
+   workflow/artifact binding은 완료했지만 actual provisioned run은 미완료다.** R2b1의 별도 signable AX helper와 R2b2의
    callback/attach receipt owner·actual delegate/attach를 상속 write FD에 결속하는 격리 app scenario mode까지 구현됐다.
    R2b2의 canonical app receipt strict parser와 absent `0600` exclusive publication leaf, process composition의 단일
    deadline·시도 선기록·역순 cleanup/retry owner도 구현됐다. ambient environment 0·inherited fd 3 하나인 실제 앱
    spawn/process-group owner와 closed argv/environment의 AX helper 실행, 실제 stdout LF까지 포함한 canonical helper click
    receipt·typed Accessibility/Aqua provisioning 분류도 구현됐다. UUID-derived `0700` root와 앱 bundle identity의 exact
-   notification request cleanup syscall을 결속하는 concrete adapter도 구현됐다. 다음은 caller boolean 없이 동일 daemon/child PID와
-   attach 전 screen·attach 후 실제 PTY input→screen 왕복을 증명하는 R2b3a strict continuity receipt owner까지 구현됐다. 다음은
+   notification request cleanup syscall을 결속하는 concrete adapter도 구현됐다. caller boolean 없이 동일 daemon/child PID와
+   attach 전 screen·attach 후 실제 PTY input→screen 왕복을 증명하는 R2b3a strict continuity receipt owner도 구현됐다.
    R2b3b1의 exact remote generation/PID product observation과 R2b3b2의 app-owned attach 전후 screen/input 상태머신,
    두 번째 framed receipt 및 parent strict composition까지 구현됐다. mounted signed candidate R2c composition도 구현되어
    canonical leaf publication과 rollback까지 Debug·ReleaseFast gate가 닫혔다. R3a의 닫힌 protected-deployment profile과
    R3b1의 token-free mounted-DMG product bridge와 R3b2의 격리 runtime 준비 제품 CLI도 구현됐다. mounted candidate의
    hidden one-shot command가 빈 환경에서 exact root만 주입해 detached host/runtime을 만들고 attach snapshot의 before
    marker를 확인한 뒤 동적 identity receipt를 반환하며, 실제 제품 prepare→cleanup smoke가 host 부재까지 검증한다.
-   다음은 R3b2의 protected workflow/artifact binding이다. P4의 actual
+   R3b2의 protected workflow는 token-free 제품 CLI를 별도 `Session host product` environment의 self-hosted 제품 job에
+   연결하고, 뒤따르는 hosted verifier가 exact run/attempt/job/deployment·attestation·candidate·R1 leaf를 재검증한
+   canonical workflow pass record만 게시한다. 남은 것은 이 workflow를 provisioned runner에서 실제 실행하는 것이다. P4의 actual
    Notification Center·durable tombstone과 P5d의 packaged CLI/localhost SSH는 provisioned Developer ID 배포 artifact
    재실행이 phase 완료 증거로 남아 있다. 실행 중 업그레이드
    U4/U5의 frozen N-1/current 서명 artifact·실제 앱 notice·**서명 업그레이드 soak**도 별도 release gate다. release와 무관한 L1

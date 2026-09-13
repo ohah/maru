@@ -3305,13 +3305,15 @@ pub export fn maru_macos_app_session_apply_workspace_window(
         // **한 겹 더 있다.** `PersistentRuntimeUnavailable` 은 네 자리에서 나오고 그중 둘은
         // 원래 오류를 통째로 버린다 — 풀에 호스트가 없는 것과 연결이 닫힌 것은 고칠 곳이 다르다.
         std.log.scoped(.app).warn(
-            "workspace apply failed: window_index={d} err={s} attach_site={s} attach_raw={s} attach_outcome={s}",
+            "workspace apply failed: window_index={d} err={s} attach_site={s} attach_raw={s} attach_outcome={s} host_site={s} host_reason={s}",
             .{
                 window_index,
                 @errorName(err),
                 AppSession.attach_fail_site,
                 AppSession.attach_fail_raw,
                 AppSession.attach_fail_outcome,
+                AppSession.restore_host_site,
+                AppSession.restore_host_reason,
             },
         );
         return @intFromEnum(Status.create_failed);

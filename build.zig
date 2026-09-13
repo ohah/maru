@@ -6017,6 +6017,25 @@ pub fn build(b: *std.Build) void {
     collect_fail_step.dependOn(&run_collect_fail.step);
     boundary_step.dependOn(&run_collect_fail.step);
 
+    // 호스트 어댑터 확보 실패가 «어디서·왜» 였는지 남기는가. 아홉 자리가 익명이라 attach_site=- 만 보였다.
+    const restore_host_site_step = b.step(
+        "test-restore-host-site",
+        "Every host-adapter give-up records which site and the original reason",
+    );
+    const restore_host_site_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/restore_host_site_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_restore_host_site = b.addRunArtifact(restore_host_site_tests);
+    run_restore_host_site.addArg("--maru-expect-tests=1");
+    run_restore_host_site.addArg("--maru-expect-passed=1");
+    run_restore_host_site.setCwd(b.path("."));
+    restore_host_site_step.dependOn(&run_restore_host_site.step);
+    boundary_step.dependOn(&run_restore_host_site.step);
+
     // 복원이 성공하면 `.bak` 을 해제해 백업 불변식을 다시 무장하는가. 7 주 된 사본이 눌러앉았다.
     const backup_rearm_step = b.step(
         "test-workspace-backup-rearm",

@@ -80,7 +80,31 @@ test "collectOutput 이 접히면 어느 자리였는지와 원래 오류를 남
         return error.TooFewLabelled;
     }
 
-    // ③ **원래 오류가 있는 자리는 그것을 싣는다.** 이름만 남기고 오류를 버리면 「ops 가 무엇을
+    // ③ **이름이 조건과 어긋나지 않는다.** 첫 판은 「이름이 붙었는가」만 봤고, 그래서 크기 상한을
+    //    지키는 자리에 `snapshot_frame`(인코딩 실패처럼 읽힌다) 같은 **거짓 이름**이 붙어도 통과했다.
+    //    거짓 이름은 없는 것보다 나쁘다 — 다음 조사를 통째로 엉뚱한 데로 보낸다.
+    //
+    //    값이 아니라 **짝**을 고정한다: 크기 상한(`max_viewport_snapshot`)을 지키는 자리는
+    //    `oversize` 로, frontier/sequence 를 지키는 자리는 `mismatch` 로 끝난다.
+    {
+        var at: usize = 0;
+        while (std.mem.indexOfPos(u8, body, at, "protocol.max_viewport_snapshot")) |guard| : (at = guard + 1) {
+            const tail = body[guard..@min(guard + 260, body.len)];
+            const call = std.mem.indexOf(u8, tail, "collectFail(\"") orelse continue;
+            const name_start = call + "collectFail(\"".len;
+            const name_end = std.mem.indexOfPos(u8, tail, name_start, "\"") orelse continue;
+            const name = tail[name_start..name_end];
+            if (std.mem.indexOf(u8, name, "oversize") == null) {
+                std.debug.print("크기 상한을 지키는 자리에 «{s}» — 이름이 조건과 어긋난다\n", .{name});
+                return error.LabelContradictsGuard;
+            }
+        }
+    }
+    // 크기와 시퀀스가 **한 이름에 뭉치지 않는다.** 둘은 고칠 곳이 정반대다.
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"snapshot_oversize\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"snapshot_seq_mismatch\"") != null);
+
+    // ④ **원래 오류가 있는 자리는 그것을 싣는다.** 이름만 남기고 오류를 버리면 「ops 가 무엇을
     //    냈는가」가 사라져, 진짜 할당 실패와 원격 오류가 다시 같아 보인다.
     const err_fn_at = std.mem.indexOf(u8, server, "fn collectFailErr(") orelse
         return error.ErrAccessorMissing;
@@ -89,13 +113,13 @@ test "collectOutput 이 접히면 어느 자리였는지와 원래 오류를 남
         std.mem.indexOf(u8, server[err_fn_at..err_fn_end], "@errorName(err)") != null,
     );
 
-    // ④ **오류 집합을 넓히지 않는다.** 넓히면 호출자 전수가 흔들린다 — 지금 필요한 것은
+    // ⑤ **오류 집합을 넓히지 않는다.** 넓히면 호출자 전수가 흔들린다 — 지금 필요한 것은
     //    「무엇이 접혔는지」뿐이고, 그것은 곁다리 기록으로 충분하다.
     try std.testing.expect(
         std.mem.indexOf(u8, server[err_fn_at..err_fn_end], "error{OutOfMemory}") != null,
     );
 
-    // ⑤ **닫기 «전» 에 남긴다.** 뒤에 두면 닫힘 경로가 먼저 돌아 그 줄이 영영 안 나간다
+    // ⑥ **닫기 «전» 에 남긴다.** 뒤에 두면 닫힘 경로가 먼저 돌아 그 줄이 영영 안 나간다
     //    (#3634 가 같은 이유로 이름을 사유보다 먼저 저장한다).
     const note_at = std.mem.indexOf(u8, turn, "noteCollectFailure();") orelse
         return error.NoticeMissing;
@@ -103,7 +127,7 @@ test "collectOutput 이 접히면 어느 자리였는지와 원래 오류를 남
         return error.CloseSiteMissing;
     try std.testing.expect(note_at < close_at);
 
-    // ⑥ 한 줄에 **자리와 오류가 함께** 나온다.
+    // ⑦ 한 줄에 **자리와 오류가 함께** 나온다.
     const log_at = std.mem.indexOf(u8, turn, "fn noteCollectFailure(") orelse
         return error.NoticeFnMissing;
     const log_end = std.mem.indexOfPos(u8, turn, log_at, "\n}\n") orelse turn.len;

@@ -3098,9 +3098,10 @@ pub const Connection = struct {
                 return null;
             };
             defer self.allocator.free(projected.bytes);
-            if (projected.bytes.len > protocol.max_viewport_snapshot or
-                projected.frontier.sequence != next_sequence)
-                return collectFail("snapshot_frame");
+            if (projected.bytes.len > protocol.max_viewport_snapshot)
+                return collectFail("snapshot_oversize");
+            if (projected.frontier.sequence != next_sequence)
+                return collectFail("snapshot_seq_mismatch");
             output.next_base = self.allocator.dupe(u8, projected.bytes) catch return collectFail("snapshot_base_dupe");
             output.replace_base = true;
             output.clear_resync = sub.resync_pending;
@@ -3134,7 +3135,7 @@ pub const Connection = struct {
                 update.new_base.len > protocol.max_viewport_snapshot)
             {
                 self.allocator.free(update.new_base);
-                return collectFail("delta_frame");
+                return collectFail("delta_oversize");
             }
             output.next_base = update.new_base;
             output.replace_base = true;
@@ -3144,13 +3145,13 @@ pub const Connection = struct {
                 try self.appendChunks(&list, kind, stream, update.send);
                 if (update.frontier.sequence != next_sequence or
                     (!update.is_snapshot and update.frontier.generation != sub.screen_generation))
-                    return collectFail("delta_append");
+                    return collectFail("delta_seq_mismatch");
                 output.next_screen_sequence = update.frontier.sequence;
                 output.next_screen_generation = update.frontier.generation;
             } else if (update.frontier.sequence != sub.screen_sequence or
                 update.frontier.generation != sub.screen_generation)
             {
-                return collectFail("delta_admit");
+                return collectFail("delta_frontier_mismatch");
             }
         };
 

@@ -8,6 +8,8 @@ const std = @import("std");
 const bounded = @import("bounded_process");
 const context = @import("release_adapter_context");
 const contract = @import("release_adapter_contract");
+// 진단 전용(제품 경로를 안 바꾼다) — 같은 디렉터리의 leaf 모듈이라 build 배선이 필요 없다.
+const host_log = @import("host_log.zig");
 const cli_authority = @import("release_adapter_github_cli_authority");
 const mapping = @import("release_adapter_live_workflow_aggregate_event");
 const phase = @import("release_adapter_live_workflow_phase");
@@ -88,7 +90,12 @@ pub fn runAndApply(
         &storage.stdout,
         &storage.stderr,
         budget_ns,
-    ) catch {
+    ) catch |observe_error| {
+        // **왜 못 봤는지를 남긴다.** 아래 `.observation_failed` 는 「자식을 끝까지 못 봤다」 하나로 뭉개진
+        // 결론이라, 예산 초과인지 spawn 실패인지 파이프 오류인지가 사라진다. 2026-09-14 에 그 뭉갬 때문에
+        // 판정자 실패가 「관측이 틀렸다」처럼 읽혀 조사에 시간이 들었다(실제 이유는 `TimedOut` 이었다).
+        // 결론은 그대로 두고 이유만 로그로 흘린다 — 제품 경로는 한 줄도 안 바뀐다.
+        host_log.line("release-adapter: aggregate child observation failed: {s}", .{@errorName(observe_error)});
         try mapping.applyObservation(state, command, .{
             .termination = .{ .unknown = 0 },
             .stdout = .{ .bytes = "", .complete = false },

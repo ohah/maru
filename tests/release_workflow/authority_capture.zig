@@ -81,12 +81,12 @@ test "릴리스 워크플로: 신뢰 획득 단계가 체크아웃보다 **앞**
 
     // 단계가 하나뿐이어야 한다 — 둘이면 어느 쪽이 앞인지 아래 순서 판정이 답을 못 낸다.
     try std.testing.expectEqual(@as(usize, 1), countExactLines(text, "    environment: release"));
-    try std.testing.expectEqual(@as(usize, 5), countExactLines(text, "    runs-on: macos-15"));
-    try std.testing.expectEqual(@as(usize, 5), countExactLines(text, "      - name: Capture trusted GitHub CLI before checkout"));
+    try std.testing.expectEqual(@as(usize, 6), countExactLines(text, "    runs-on: macos-15"));
+    try std.testing.expectEqual(@as(usize, 6), countExactLines(text, "      - name: Capture trusted GitHub CLI before checkout"));
     try std.testing.expectEqual(@as(usize, 4), countExactLines(text, "        id: trusted-gh"));
-    try std.testing.expectEqual(@as(usize, 7), countMatchingLines(text, pinned_checkout));
+    try std.testing.expectEqual(@as(usize, 8), countMatchingLines(text, pinned_checkout));
     // release writer, checkout 없는 timing observer, read-only verifier들이 각각 runner-provided gh를 찾는다.
-    try std.testing.expectEqual(@as(usize, 6), countMatchingLines(text, "command -v gh"));
+    try std.testing.expectEqual(@as(usize, 7), countMatchingLines(text, "command -v gh"));
 
     // **이 한 줄이 이 파일의 요점이다.** 체크아웃 뒤에 `gh` 를 찾으면 그 PATH 는 방금 받아 온
     // 저장소가 건드릴 수 있는 것이라, 무엇을 붙들었는지 우리가 말할 수 없게 된다.
@@ -249,7 +249,7 @@ test "live 릴리스 워크플로: top-level은 권위 캡처 뒤 local caller �
     const text = try readWorkflow(arena_state.allocator());
 
     try std.testing.expectEqual(@as(usize, 0), countExactLines(text, "permissions:"));
-    try std.testing.expectEqual(@as(usize, 8), countExactLines(text, "    permissions:"));
+    try std.testing.expectEqual(@as(usize, 9), countExactLines(text, "    permissions:"));
     try std.testing.expectEqual(@as(usize, 1), countExactLines(text, "      contents: write # GitHub Release 생성/업로드"));
     try std.testing.expectEqual(@as(usize, 1), countExactLines(text, "      id-token: write # artifact attestation OIDC"));
     try std.testing.expectEqual(@as(usize, 1), countExactLines(text, "      attestations: write # artifact attestation publication"));
@@ -292,7 +292,7 @@ test "live 릴리스 워크플로: top-level은 권위 캡처 뒤 local caller �
     try std.testing.expectEqual(@as(usize, 0), countMatchingLines(live_block, "GH_TOKEN"));
     try std.testing.expectEqual(@as(usize, 0), countMatchingLines(live_block, "profile:"));
 
-    try std.testing.expectEqual(@as(usize, 6), countMatchingLines(text, "zig build"));
+    try std.testing.expectEqual(@as(usize, 7), countMatchingLines(text, "zig build"));
     try std.testing.expectEqual(@as(usize, 3), countMatchingLines(text, "\"$TRUSTED_ZIG\" build"));
     const signed_block = blockUntil(text, "      - name: Build signed + notarized universal dmg", "      - name: Build session host live release executables") orelse
         return error.SignedBuildBlockMissing;
@@ -305,7 +305,7 @@ test "R1 tombstone 제품 job은 exact DMG mount와 token-free normal Quit runne
     const text = try readWorkflow(arena_state.allocator());
     const at = std.mem.indexOf(u8, text, "  session-host-tombstone-product:") orelse
         return error.TombstoneProductJobMissing;
-    const job = blockUntil(text[at..], "  session-host-tombstone-product:", "  session-host-notification-product:") orelse
+    const job = blockUntil(text[at..], "  session-host-tombstone-product:", "  session-host-tombstone-verification:") orelse
         return error.TombstoneProductJobMissing;
     for ([_][]const u8{
         "environment: Session host product",
@@ -321,6 +321,24 @@ test "R1 tombstone 제품 job은 exact DMG mount와 token-free normal Quit runne
     try std.testing.expectEqual(@as(usize, 0), countMatchingLines(job, "GH_TOKEN"));
     try std.testing.expectEqual(@as(usize, 1), countMatchingLines(job, "hdiutil attach"));
     try std.testing.expectEqual(@as(usize, 0), countMatchingLines(job, "kill -KILL"));
+}
+
+test "R1 tombstone hosted verifier requires completed same-attempt product and attestation" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const text = try readWorkflow(arena_state.allocator());
+    const at = std.mem.indexOf(u8, text, "  session-host-tombstone-verification:") orelse return error.TombstoneVerifierMissing;
+    const job = blockUntil(text[at..], "  session-host-tombstone-verification:", "  session-host-notification-product:") orelse return error.TombstoneVerifierMissing;
+    for ([_][]const u8{
+        "needs: session-host-tombstone-product",
+        "actions: read",
+        "name: session-host-tombstone-product-${{ github.run_attempt }}",
+        "session-host-release-tombstone-workflow-verifier",
+        "GH_TOKEN: ${{ github.token }}",
+        "tombstone-relaunch.bundle.json",
+        "maru.session-host-tombstone-workflow-pass.v1",
+        "retention-days: 90",
+    }) |needle| try std.testing.expect(std.mem.indexOf(u8, job, needle) != null);
 }
 
 test "N3-R3 알림 제품 job은 전용 protected self-hosted runner에서 token-free candidate를 실행한다" {

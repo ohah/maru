@@ -49,8 +49,9 @@
 
 > Developer ID tombstone 경로는 `release.yml`의 `session host tombstone product` job까지 배선됐다. exact-attempt
 > DMG를 read-only mount하고 그 안의 `Maru.app`만 두 번 정상 Quit시켜 canonical
-> `maru.session-host-signed-tombstone-relaunch.v1` leaf와 attestation bundle을 만든다. 현재 source/codec/runner gate는
-> 구현됐지만 hosted same-attempt verifier와 provisioned tag 실행은 아직 완료 조건에 포함되지 않는다.
+> `maru.session-host-signed-tombstone-relaunch.v1` leaf와 attestation bundle을 만든다. hosted verifier는 완료된 exact
+> run/attempt의 별도 tombstone deployment와 self-hosted attestation을 다시 결속해 read-only canonical pass record를
+> 게시한다. source/codec/runner/verifier 배선은 구현됐지만 provisioned tag 실행은 아직 완료 조건에 포함되지 않는다.
 
 > **host launch 실패 즉시 감지(P3-d2d, 2026-08-25):** double-fork 는 손자를 orphan 으로 만들어 부모에게
 > `waitpid` 할 자식이 없다. 그래서 `execv` 실패를 **알 방법이 아예 없었고**, 호출부가 재시도 예산

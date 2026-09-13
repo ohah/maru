@@ -55,7 +55,8 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) !std.json.Parsed(R
     if (!std.mem.eql(u8, value.schema, schema) or value.repository_id == 0 or value.run_id == 0 or value.run_attempt == 0 or
         value.job_id == 0 or value.deployment_id == 0 or value.environment_id == 0 or !lowerHex(value.source_sha, 40) or
         value.workflow_ref.len == 0 or !std.mem.eql(u8, value.evidence_name, "tombstone-relaunch.json") or
-        !lowerHex(value.evidence_sha256, 64) or !lowerHex(value.candidate_dmg_sha256, 64) or
+        !lowerHex(value.evidence_sha256, 64) or !canonicalUuid(value.test_uuid) or !runtimeHandle(value.runtime_handle) or
+        !lowerHex(value.candidate_dmg_sha256, 64) or
         !lowerHex(value.candidate_executable_sha256, 64) or !lowerHex(value.designated_requirement_sha256, 64) or
         !lowerHex(value.checkpoint_sha256, 64)) return error.InvalidRecord;
     const canonical = try encodeRecord(allocator, value);
@@ -78,4 +79,18 @@ fn lowerHex(value: []const u8, expected: usize) bool {
     if (value.len != expected) return false;
     for (value) |byte| if (!std.ascii.isDigit(byte) and !(byte >= 'a' and byte <= 'f')) return false;
     return true;
+}
+
+fn canonicalUuid(value: []const u8) bool {
+    if (value.len != 36 or value[8] != '-' or value[13] != '-' or value[18] != '-' or value[23] != '-' or
+        value[14] != '4' or (value[19] != '8' and value[19] != '9' and value[19] != 'a' and value[19] != 'b')) return false;
+    for (value, 0..) |byte, index| {
+        if (index == 8 or index == 13 or index == 18 or index == 23) continue;
+        if (!std.ascii.isDigit(byte) and !(byte >= 'a' and byte <= 'f')) return false;
+    }
+    return true;
+}
+
+fn runtimeHandle(value: []const u8) bool {
+    return value.len == 65 and value[32] == ':' and lowerHex(value[0..32], 32) and lowerHex(value[33..], 32);
 }

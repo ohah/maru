@@ -886,6 +886,41 @@ fn has(argv: []const []const u8, needle: []const u8) bool {
     return false;
 }
 
+test "원격으로 나가는 토큰에는 제어문자가 없다 — 명령 종류 전부" {
+    // **왜 이 판정자가 있나**(RS7a — [계획](../../docs/plans/remote-scm.md) §2.2 ⑵ · §18.2).
+    // `buildRemote` 는 argv 의 모든 토큰을 `remote_shell.tokenIsSafe` 에 태우고, 하나라도 제어문자가
+    // 있으면 **명령 자체를 만들지 않는다**(`null` → 호출자는 `error.GitFailed`). 그 술어는 «관측에서
+    // 온 더러운 값» 을 막으려고 세운 것인데, **우리가 박아 둔 토큰도 똑같이 걸린다** — 히스토리
+    // (`.log`)가 정확히 그랬다: `git_log.format_spec` 이 필드 구분자를 날 바이트(`\x1f`)로 들고 있어
+    // 그 명령은 원격으로 **영영** 못 나갔고, 화면에는 전송도 git 도 아닌 우리 술어가 원인인 실패가 떴다.
+    //
+    // **세는 방식이 중요하다.** 「제어문자 든 토큰 0 건」이 아니라 **「명령 종류 전부가 통과한다」**로
+    // 센다 — 금지된 모양은 갈아입으면 새지만, 허용된 자리를 전수로 세면 kind 가 늘 때 이 판정자도
+    // 따라 는다(kind 를 더하면 `inline for` 가 자동으로 그것을 본다).
+    //
+    // **우리 토큰만 겨눈다.** 호출자가 주는 `arg` 는 인쇄 가능한 값으로 고정한다 — 그 자리의 안전은
+    // `buildRemote` 가 실행 시점에 이미 보고, 여기서 더러운 값을 넣으면 **우리 토큰의 결함이 그 실패에
+    // 가려진다**.
+    var buf: [max_argv][]const u8 = undefined;
+    const printable_arg = "aaaa1111 bbbb2222"; // 모든 kind 가 받아도 되는 인쇄 가능한 값(hex 쌍 · 공백)
+    inline for (@typeInfo(Kind).@"enum".fields) |field| {
+        const kind: Kind = @enumFromInt(field.value);
+        const argv = build(kind, "/usr/bin/git", "/repo", printable_arg, &buf);
+        for (argv) |token| {
+            if (!remoteTokenIsSafe(token)) {
+                std.debug.print("kind={s} 의 토큰에 제어문자가 있다 (len={d})\n", .{ field.name, token.len });
+                return error.RemoteTokenHasControlChar;
+            }
+        }
+    }
+
+    // `check-ignore` 는 kind 하나로 못 만들어 전용 빌더를 쓴다(경로가 argv 뒤에 붙는다) — 그래서
+    // 위 루프가 **원리적으로 못 보는** 자리다. 같은 규율을 여기서도 센다.
+    var ignore_buf: [max_argv][]const u8 = undefined;
+    const ignore_argv = buildCheckIgnore("/usr/bin/git", "/repo", &.{ "a.txt", "dir/b.txt" }, &ignore_buf);
+    for (ignore_argv) |token| try testing.expect(remoteTokenIsSafe(token));
+}
+
 test "경로를 C-quote하지 않게 강제한다(비ASCII 파일명)" {
     // 기본값이면 `한글.txt`가 `"\355\225\234\352\270\200.txt"`로 나와 blobSpec·open(2) 양쪽에서 실패한다.
     var buf: [max_argv][]const u8 = undefined;

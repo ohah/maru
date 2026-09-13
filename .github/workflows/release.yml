@@ -305,6 +305,79 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  session-host-tombstone-verification:
+    name: session host tombstone verification
+    needs: session-host-tombstone-product
+    runs-on: macos-15
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Capture trusted GitHub CLI before checkout
+        id: tombstone-trusted-gh
+        shell: bash
+        run: |
+          set -euo pipefail
+          canonical=$(/usr/bin/realpath "$(command -v gh)")
+          test "$canonical" = "${canonical//$'\n'/}"
+          test "$canonical" = "${canonical//$'\r'/}"
+          test "$(/usr/bin/stat -f '%HT' "$canonical")" = 'Regular File'
+          test -x "$canonical"
+          sha256=$(/usr/bin/shasum -a 256 "$canonical" | /usr/bin/awk '{print $1}')
+          [[ "$sha256" =~ ^[0-9a-f]{64}$ ]]
+          printf 'path=%s\nsha256=%s\n' "$canonical" "$sha256" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        with:
+          cache_save: false
+
+      - name: Download exact-attempt durable-tombstone evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: session-host-tombstone-product-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/session-host-tombstone-product-${{ github.run_attempt }}
+
+      - name: Build durable-tombstone workflow verifier
+        run: mise exec -- zig build session-host-release-tombstone-workflow-verifier -Doptimize=ReleaseFast
+
+      - name: Verify protected durable-tombstone product verdict
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TRUSTED_GH: ${{ steps.tombstone-trusted-gh.outputs.path }}
+          TRUSTED_GH_SHA256: ${{ steps.tombstone-trusted-gh.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          root="$RUNNER_TEMP/session-host-tombstone-product-$GITHUB_RUN_ATTEMPT"
+          evidence="$root/tombstone-relaunch.json"
+          bundle="$root/tombstone-relaunch.bundle.json"
+          files=("$root"/*)
+          test "${#files[@]}" -eq 2
+          for path in "$evidence" "$bundle"; do
+            test "$(/usr/bin/stat -f '%HT' "$path")" = 'Regular File'
+            test ! -L "$path"
+          done
+          output="$RUNNER_TEMP/session-host-tombstone-workflow-pass.json"
+          test ! -e "$output"
+          verifier="$GITHUB_WORKSPACE/zig-out/bin/maru-session-host-release-tombstone-workflow-verifier"
+          "$verifier" verify "$TRUSTED_GH" "$TRUSTED_GH_SHA256" "$evidence" "$bundle" "$output"
+          test "$(/usr/bin/stat -f '%HT' "$output")" = 'Regular File'
+          test "$(/usr/bin/stat -f '%Lp' "$output")" = '400'
+          test "$(/usr/bin/jq -r '.schema' "$output")" = 'maru.session-host-tombstone-workflow-pass.v1'
+
+      - name: Upload canonical durable-tombstone workflow pass record
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: session-host-tombstone-workflow-pass-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/session-host-tombstone-workflow-pass.json
+          if-no-files-found: error
+          retention-days: 90
+
   session-host-notification-product:
     name: session host notification product
     needs: universal-dmg

@@ -36,3 +36,22 @@ test "authority attestation and leaf drift publish nothing" {
     l.normal_quit_count = 1;
     try std.testing.expectError(error.InvalidEvidence, record.encode(std.testing.allocator, context, l, "tombstone-relaunch.json", digest, authority(), attestation()));
 }
+
+test "parser rejects malformed UUID and runtime handle" {
+    const bytes = try record.encode(std.testing.allocator, context, leaf(), "tombstone-relaunch.json", digest, authority(), attestation());
+    defer std.testing.allocator.free(bytes);
+
+    const uuid_marker = "123e4567-e89b-42d3-a456-426614174000";
+    const uuid_offset = std.mem.indexOf(u8, bytes, uuid_marker).?;
+    var malformed_uuid = try std.testing.allocator.dupe(u8, bytes);
+    defer std.testing.allocator.free(malformed_uuid);
+    malformed_uuid[uuid_offset + 14] = '3';
+    try std.testing.expectError(error.InvalidRecord, record.parse(std.testing.allocator, malformed_uuid));
+
+    const handle_marker = "1234567890abcdef1234567890abcdef:fedcba0987654321fedcba0987654321";
+    const handle_offset = std.mem.indexOf(u8, bytes, handle_marker).?;
+    var malformed_handle = try std.testing.allocator.dupe(u8, bytes);
+    defer std.testing.allocator.free(malformed_handle);
+    malformed_handle[handle_offset + 32] = '-';
+    try std.testing.expectError(error.InvalidRecord, record.parse(std.testing.allocator, malformed_handle));
+}

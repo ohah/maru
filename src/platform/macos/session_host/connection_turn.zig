@@ -248,6 +248,8 @@ pub const Client = struct {
     /// `attach not admitted` 가 여덟 자리를 한 사유로 뭉치던 것을 자리 이름으로 끝낸 것과 같은
     /// 방식이다(#3577·#3603 → #3610). 전부에 붙이지 않고 **실제로 막힌 경로부터** 붙인다.
     close_site: []const u8 = "-",
+    /// 그 자리를 만든 **오류 이름**. 이름만으로 못 좁히는 자리가 있다(§beginCloseAtErr).
+    close_error: []const u8 = "-",
     close_after_flush: ?CloseReason = null,
     pending_upgrade: ?u128 = null,
     upgrade_gate_closed: bool = false,
@@ -466,6 +468,11 @@ pub const Client = struct {
     /// 「이름이 붙은 그 자리」가 갈린다.
     pub fn closeSite(self: *const Client) []const u8 {
         return self.close_site;
+    }
+
+    /// 그 자리를 만든 **오류 이름**. `-` 면 오류가 아니라 판단으로 닫은 것이다(§beginCloseAtErr).
+    pub fn closeError(self: *const Client) []const u8 {
+        return self.close_error;
     }
 
     pub fn isUpgradeDraining(self: *const Client) bool {
@@ -756,7 +763,7 @@ pub const Client = struct {
         if (self.close_after_flush != null) return;
         var lease = if (self.admission_gate) |gate| gate.tryEnter() orelse return else null;
         defer if (lease) |*held| held.release();
-        slot.beginDispatch() catch return self.beginCloseAt("tick_begin_dispatch", .resource_exhausted);
+        slot.beginDispatch() catch |err| return self.beginCloseAtErr("tick_begin_dispatch", @errorName(err), .resource_exhausted);
         defer slot.endDispatch() catch unreachable;
         self.connection.expireCatchups(now_ns);
         if (self.producer_streams.len == 0 and self.trackers.count() != 0)
@@ -1081,15 +1088,15 @@ pub const Client = struct {
         stream: subscription_identity.LocalStreamId,
         tracker: slot_mod.ScreenTrackerKey,
     ) void {
-        const slot = self.reactor.get(self.admission) catch
-            return self.beginCloseAt("invalidate_slot_lookup", .socket_error);
-        slot.invalidateAndPurgeScreenTracker(tracker) catch
-            return self.beginCloseAt("invalidate_purge_tracker", .socket_error);
+        const slot = self.reactor.get(self.admission) catch |err|
+            return self.beginCloseAtErr("invalidate_slot_lookup", @errorName(err), .socket_error);
+        slot.invalidateAndPurgeScreenTracker(tracker) catch |err|
+            return self.beginCloseAtErr("invalidate_purge_tracker", @errorName(err), .socket_error);
         self.connection.markSubscriptionOutputInvalidated(stream);
-        const notice = self.connection.snapshotInvalidatedFrame(stream) catch
-            return self.beginCloseAt("invalidate_notice_build", .resource_exhausted);
-        self.adoptControl(notice) catch
-            return self.beginCloseAt("invalidate_notice_adopt", .resource_exhausted);
+        const notice = self.connection.snapshotInvalidatedFrame(stream) catch |err|
+            return self.beginCloseAtErr("invalidate_notice_build", @errorName(err), .resource_exhausted);
+        self.adoptControl(notice) catch |err|
+            return self.beginCloseAtErr("invalidate_notice_adopt", @errorName(err), .resource_exhausted);
     }
 
     fn dispatch(self: *Client, frame: framing.Frame, now_ns: u64) error{OutOfMemory}!void {
@@ -1574,8 +1581,23 @@ pub const Client = struct {
     /// 자리 이름을 남기고 닫는다. `beginClose` 는 **첫 호출이 이긴다** — 이름도 같이 이겨야 사유와
     /// 짝이 맞으므로, 이름을 «먼저» 두고 그 안에서 닫는다.
     noinline fn beginCloseAt(self: *Client, site: []const u8, reason: CloseReason) void {
+        self.beginCloseAtErr(site, "-", reason);
+    }
+
+    /// 자리 이름과 **그 자리를 만든 오류**를 함께 남기고 닫는다.
+    ///
+    /// 이름만으로 부족한 자리가 있다. `invalidate_purge_tracker` 가 그랬다 —
+    /// `invalidateAndPurgeScreenTracker` 는 `error{ Stale, PartialFrame }` 둘로 실패하는데 호출부의
+    /// `catch` 가 `|err|` 없이 오류를 버려, 로그는 **어디서**만 말하고 **무엇**은 말하지 못했다.
+    /// 고칠 곳이 정반대다: `Stale` 은 트래커 신원(슬롯 재사용) 문제이고, `PartialFrame` 은 소켓에
+    /// 절반 쓰인 청크가 있어 지금은 버릴 수 없다는 뜻이라 **기다렸다 버리면 되는** 것이다.
+    ///
+    /// 2026-09-13 실측: 터미널 브라우저를 여는 순간 이 자리로 연결이 죽어 **세션 23 개가 한꺼번에
+    /// detach** 됐다. 둘 중 어느 것이었는지 끝내 알 수 없었다.
+    noinline fn beginCloseAtErr(self: *Client, site: []const u8, err_name: []const u8, reason: CloseReason) void {
         if (self.isClosing()) return;
         self.close_site = site;
+        self.close_error = err_name;
         self.state = .{ .closing = reason };
         self.close_ra = @returnAddress();
     }

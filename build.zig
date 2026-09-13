@@ -6017,6 +6017,25 @@ pub fn build(b: *std.Build) void {
     collect_fail_step.dependOn(&run_collect_fail.step);
     boundary_step.dependOn(&run_collect_fail.step);
 
+    // 닫는 자리가 «그 자리를 만든 오류»까지 남기는가. Stale 과 PartialFrame 은 고칠 곳이 정반대다.
+    const close_error_step = b.step(
+        "test-close-error-name",
+        "A close records the error that created it, not just the site",
+    );
+    const close_error_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/close_error_name_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_close_error = b.addRunArtifact(close_error_tests);
+    run_close_error.addArg("--maru-expect-tests=1");
+    run_close_error.addArg("--maru-expect-passed=1");
+    run_close_error.setCwd(b.path("."));
+    close_error_step.dependOn(&run_close_error.step);
+    boundary_step.dependOn(&run_close_error.step);
+
     // 호스트 어댑터 확보 실패가 «어디서·왜» 였는지 남기는가. 아홉 자리가 익명이라 attach_site=- 만 보였다.
     const restore_host_site_step = b.step(
         "test-restore-host-site",

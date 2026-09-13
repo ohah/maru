@@ -52,6 +52,8 @@ test "P3-e4d-1 metadata parity uses actual daemon runtimes and no test wire" {
     try std.testing.expectEqual(@as(usize, 1), count(matrix, "이 완료 표식은 실행 중 reconnect gate에만 해당하며,"));
     try std.testing.expectEqual(@as(usize, 1), count(ssot, "C3-3c actual socket/source-zero까지 구현 완료했다."));
     try std.testing.expectEqual(@as(usize, 0), count(ssot, "socket event/source-zero는 아직 미구현이다."));
+    try std.testing.expectEqual(@as(usize, 1), count(plan, "C3-3b1~b6 event settlement와 비동기 close는 구현 완료했다."));
+    try std.testing.expectEqual(@as(usize, 0), count(plan, "b3 이후 event settlement와 비동기 close는 미구현"));
 
     try std.testing.expect(std.mem.indexOf(u8, body, "daemon.runSessionHost") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "HostAdapter.initInPlace") != null);

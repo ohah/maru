@@ -141,10 +141,12 @@ pub fn authenticateProfilePhaseUntilWith(authority: anytype, executor: anytype, 
     const selected_environment: transport_macos.Environment = switch (profile) {
         .release => .release,
         .notification_product => .session_host_product,
+        .tombstone_product => .session_host_product,
     };
     const expected_environment_name = switch (profile) {
         .release => "release",
         .notification_product => "Session host product",
+        .tombstone_product => "Session host product",
     };
     const environment_bytes = try fetchUntil(authority, executor, deadline, allocator, executable, token, .{ .environment = selected_environment }, response);
     var parsed_environment = try environment.parseAndBindName(allocator, environment_bytes, expected_environment_name);

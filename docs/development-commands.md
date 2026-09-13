@@ -773,6 +773,16 @@ sh tools/remote-scm/capture.sh /tmp/rs7-x.png MARU_FORCE_SCM_COMMIT_EXPAND=0   #
   이 캡처가 보려는 것은 「원격일 때 도크가 무엇을 그리나」이지 진입 경로가 아니다. 그 아래(저장소 판정·
   원격 읽기·렌더)는 전부 제품 경로다.
 
+**골든으로 잰다**: `mise run macos-remote-scm-visual-golden` 한 줄로 돌린다(찍고 나서 비교한다).
+`zig build test-remote-scm-visual-golden` 만 따로 돌리면 **디스크에 남아 있는 옛 캡처와 비교**되고,
+캡처가 아예 없으면 **조용히 건너뛴다** — 태스크가 `MARU_REQUIRE_GOLDEN=1` 을 켜는 이유다(도크 골든과
+같은 규율). 골든 갱신은 `MARU_UPDATE_GOLDEN=1` 이고, 갱신 뒤에는
+[무엇이 찍혀 있어야 하는지](../tests/fixtures/golden/remote-scm/README.md)와 대조해 **눈으로 확인**한다.
+
+캡처는 **도크 열만** 골든으로 굳힌다. 프레임의 나머지는 결정적이지 않다 — 같은 트리에서 두 번 찍어
+쟀다(2026-09-14): 전체 960×600 은 **959 픽셀**이 달랐고 도크 열은 **0** 이었다. 차이는 터미널 pane
+(로그인 줄의 시각·tty, 강제가 echo 한 임시 경로)과 상태바(메모리·CPU)에서 나온다.
+
 ### `/tmp` 픽스처 잔재를 거둔다 (로컬 위생)
 
 session host 픽스처는 `/tmp/maru-<이름>-<pid>` 를 만들고 그 안에 daemon 을 띄운다. daemon 이 owner lock·

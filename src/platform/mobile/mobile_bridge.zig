@@ -2295,7 +2295,10 @@ fn sendInput(core: *terminal.core.TerminalCore, bytes: []const u8) void {
     // 모든 입력 경로가 지나는 한 곳이라, 조각마다 갈고리를 달면 언젠가 한 곳을 빠뜨린다.
     reconnect_notice = false;
     if (input_sink == 0) {
-        core.write(bytes) catch setLastError("core_write_input");
+        // **출력 스트림 상태를 밟지 않고** 끼워 넣는다 — 로컬 모드에서는 사용자 입력이 셸 출력과
+        // 같은 코어로 들어가므로 `write` 가 아니라 `writeInterleaved` 다(규칙과 근거의 단일 출처는
+        // 그 함수의 주석). 판정자 "재현: 출력이 글자 중간에서 끊겨도 그 사이에 친 키는 안 사라진다".
+        core.writeInterleaved(bytes) catch setLastError("core_write_input");
         return;
     }
     if (input_out_len + bytes.len > input_out.len) {

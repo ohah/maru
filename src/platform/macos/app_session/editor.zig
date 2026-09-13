@@ -14988,6 +14988,24 @@ test "CFL7 마커 줄에만 밴드가 깔린다 — 어느 쪽도 편들지 않�
         if (i >= bands.len) break;
         try testing.expectEqual(w, bands[i]);
     }
+
+    // ⚠️ **제품의 밴드 «넘기는 한 줄»은 여기서 못 잰다**(적대적 검증 9회차 실측). 밴드는 quad 이고,
+    // `appendPaneFrame` 이 돌려주는 DrawList 는 **글자 셀**이라 그 프레임에 quad 가 0 개다
+    // (`ov=0` 으로 확인). 컴포넌트가 밴드를 그리는 것은 Lab 골든이 붙들고, 표가 맞는 것은 위 단언이
+    // 붙들지만, **그 둘을 잇는 `conflictBands(term)` 한 줄**은 자동 검증이 없다 — PR 한계에 적었다.
+
+    // **diff3 의 `|||||||` 줄도 마커다.** 두 쪽 픽스처만 쓰면 그 줄을 빼먹는 변이가 살아남는다
+    // (적대적 검증 8회차 실측) — 마커는 넷이고 그중 하나는 이 픽스처에 아예 없다.
+    var d3 = try PaneFixture.init(allocator);
+    defer d3.deinit(allocator);
+    const t3 = try undoFixture(&d3, allocator, "d3.txt", "<<<<<<< HEAD\nours\n||||||| abc1234\nbase\n=======\ntheirs\n>>>>>>> t\n");
+    ensureConflicts(d3.session, t3);
+    const b3 = t3.rt.editor_conflict_bands;
+    const want3 = [_]chrome_editor.frame.RowBand{ .conflict_marker, .none, .conflict_marker, .none, .conflict_marker, .none, .conflict_marker };
+    // 문서 끝 개행이 빈 줄 하나를 더 만든다 — 앞 일곱만 보고, 나머지는 안 칠해졌는지 본다.
+    try testing.expect(b3.len >= want3.len);
+    for (want3, 0..) |w, i| try testing.expectEqual(w, b3[i]);
+    for (b3[want3.len..]) |extra| try testing.expectEqual(chrome_editor.frame.RowBand.none, extra);
 }
 
 test "CFL8 마커를 남긴 채 저장하면 «말한다» — 막지는 않는다 (제품 경계)" {
@@ -15001,6 +15019,24 @@ test "CFL8 마커를 남긴 채 저장하면 «말한다» — 막지는 않는�
     // **저장은 된다** — 반쯤 고치다 멈추는 것은 정당한 중간 상태다. 막아야 하는 것은 «모른 채» 두는 일이다.
     try testing.expect(saveDocument(fx.session, term));
     try testing.expect(std.mem.startsWith(u8, &fx.session.notice_message_buf, maru.i18n.t(.editor_conflict_markers_remain)));
+
+    // **접어서 안 보여도 말한다.** 알림이 「보이는 줄」을 보면 접는 순간 조용해지는데, 마커는 접혀
+    // 있을 뿐 **파일에는 그대로**다 — 그 상태로 커밋하는 것이 이 알림이 막으려는 바로 그 사고다
+    // (적대적 검증 10회차 실측: 그 변이가 살아남았다).
+    {
+        var numbers = [_]?u32{ 1, 7 };
+        var visible = [_][]const u8{ term.rt.editor_lines[0], term.rt.editor_lines[6] };
+        const saved_lines = term.rt.editor_visible_lines;
+        term.rt.editor_visible_numbers = &numbers;
+        term.rt.editor_visible_lines = &visible;
+        defer {
+            term.rt.editor_visible_numbers = &.{};
+            term.rt.editor_visible_lines = saved_lines;
+        }
+        @memset(&fx.session.notice_message_buf, 0);
+        try testing.expect(saveDocument(fx.session, term));
+        try testing.expect(std.mem.startsWith(u8, &fx.session.notice_message_buf, maru.i18n.t(.editor_conflict_markers_remain)));
+    }
 
     // **고친 뒤에는 조용하다** — 늘 말하면 그 문구가 무의미해진다.
     try testing.expect(acceptConflict(fx.session, term, 0, .current));
@@ -15120,7 +15156,9 @@ test "CFL11 고를 수 «없는» 자리에서는 안 고친다 — 읽기 전�
     try testing.expectEqual(before, term.rt.editor_doc.?.file.content.len);
     term.rt.editor_doc.?.file.read_only = false;
 
-    // **없는 구간 번호**도 안 고친다(늦은 클릭이 그 상태를 만든다).
+    // **없는 구간 번호**도 안 고친다(늦은 클릭이 그 상태를 만든다). **바로 한 칸 넘는 값**으로 본다 —
+    // 99 처럼 멀리 있는 값은 상한을 느슨하게 바꾼 변이도 그대로 걸러 낸다(적대적 검증 8회차).
+    try testing.expect(!acceptConflict(fx.session, term, term.rt.editor_conflicts.len, .current));
     try testing.expect(!acceptConflict(fx.session, term, 99, .current));
     try testing.expectEqual(before, term.rt.editor_doc.?.file.content.len);
 
@@ -15155,6 +15193,18 @@ test "CFL12 이미 있는 커서를 «안 뺏는다» — 누르는 것은 CodeL
     // 구간 머리로 옮겨졌다면 커서를 뺏은 것이다.
     try testing.expect(after != region_start);
     try testing.expect(after > region_start);
+
+    // **커서가 «없을» 때는 그 구간 머리에 놓는다** — 문서 처음으로 보내면 고친 자리에서 화면이
+    // 떠나고, 사용자는 「눌렀더니 위로 튀었다」를 본다.
+    var fresh = try PaneFixture.init(allocator);
+    defer fresh.deinit(allocator);
+    const t2 = try undoFixture(&fresh, allocator, "c2.txt", conflict_fixture);
+    ensureConflicts(fresh.session, t2);
+    const head = t2.rt.editor_doc.?.file.lines.line(t2.rt.editor_conflicts[0].start).?.start;
+    try testing.expect(head > 0); // 공허 방지 — 구간이 첫 줄이면 0 과 구별이 안 된다
+    t2.rt.editor_selection = null;
+    try testing.expect(acceptConflict(fresh.session, t2, 0, .current));
+    try testing.expectEqual(head, t2.rt.editor_selection.?.start());
 }
 
 test "CFL14 한쪽이 «빈» 충돌 — 고르면 그쪽이 통째로 사라진다" {
@@ -15212,7 +15262,9 @@ test "CFL15 구간 머리가 «안 보이면» 고르기를 안 세운다 — �
         term.rt.editor_visible_lines = saved_lines;
     }
 
-    dropConflicts(fx.session, term);
+    // **여기서 일부러 안 버린다.** 버리고 부르면 「성한가」만으로 다시 훑으므로 **축 검사가 하는 일이
+    // 없다** — 적대적 검증 7회차에서 그 검사를 지운 변이가 그래서 살아남았다. 축만 갈아 끼우고 바로
+    // 부르면, 다시 훑게 만드는 것은 **축 길이 비교뿐**이다.
     ensureConflicts(fx.session, term);
     var widget_rows: usize = 0;
     for (term.rt.editor_conflict_widgets) |w| {
@@ -15222,12 +15274,14 @@ test "CFL15 구간 머리가 «안 보이면» 고르기를 안 세운다 — �
     try testing.expectEqual(@as(usize, 0), widget_rows);
     // 동작 구간도 없다 — 표만 비우고 구간을 남기면 클릭이 죽은 자리를 가리킨다.
     try testing.expectEqual(@as(usize, 0), term.rt.editor_conflict_actions.len);
+    // **밴드 표도 «보이는 줄» 축이다.** 문서 줄 수로 잡으면 접힌 문서에서 축이 갈려 엉뚱한 줄이
+    // 칠해진다(위젯 표와 같은 규율 — 둘이 다른 축이면 강조와 고르기가 서로 다른 줄을 가리킨다).
+    try testing.expectEqual(editorLines(term).len, term.rt.editor_conflict_bands.len);
 
     // **보이면 선다**(반대쪽) — 이 한 줄이 없으면 「늘 안 세운다」로 갈려도 초록이다.
     var all_numbers = [_]?u32{ 1, 2, 3, 4, 5, 6, 7 };
     term.rt.editor_visible_numbers = &all_numbers;
     term.rt.editor_visible_lines = term.rt.editor_lines;
-    dropConflicts(fx.session, term);
     ensureConflicts(fx.session, term);
     var seen: usize = 0;
     for (term.rt.editor_conflict_widgets) |w| {
@@ -15308,6 +15362,35 @@ test "CFL17 «진짜 마우스»로 눌러 고친다 — 본문 선택보다 먼
     try testing.expectEqualStrings("fn greet() {\n  return \"theirs\";\n}\n", term.rt.editor_doc.?.file.content);
     // **선택이 시작되지 않았다** — 고르기가 먼저 가져갔다는 뜻이다(순서가 뒤집히면 드래그가 시작된다).
     try testing.expect(!fx.session.mouse_drag_selecting);
+}
+
+test "CFL18 편집기가 «아닌» 것과 «빈» 문서에는 표를 안 잡는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    // ⑴ **터미널 Term** — 편집기가 아니다. 문서도 줄 배열도 없는데 표를 만들려 들면 그 자리에서
+    //    엉뚱한 것을 읽는다.
+    try pane_ops.newTermInActivePane(fx.session);
+    const shell = pane_ops.activePane(fx.session).activeTerm();
+    try testing.expect(shell.kind != .editor);
+    ensureConflicts(fx.session, shell);
+    try testing.expectEqual(@as(usize, 0), shell.rt.editor_conflicts.len);
+    try testing.expectEqual(@as(usize, 0), shell.rt.editor_conflict_widgets.len);
+    try testing.expectEqual(@as(usize, 0), shell.rt.editor_conflict_bands.len);
+
+    // ⑵ **빈 파일** — 줄 배열이 비었다. 표를 잡으면 길이 0 짜리 할당이 문서마다 생기고, 무엇보다
+    //    「없는 줄」을 훑는 코드가 돈다.
+    const empty = try undoFixture(&fx, allocator, "empty.txt", "");
+    ensureConflicts(fx.session, empty);
+    try testing.expectEqual(@as(usize, 0), empty.rt.editor_conflicts.len);
+    try testing.expectEqual(@as(usize, 0), empty.rt.editor_conflict_widgets.len);
+    try testing.expectEqual(@as(usize, 0), empty.rt.editor_conflict_actions.len);
+    // 저장해도 조용하다 — 빈 문서에 「마커가 남았다」고 말하면 그 문구가 무의미해진다.
+    @memset(&fx.session.notice_message_buf, 0);
+    _ = saveDocument(fx.session, empty);
+    try testing.expectEqual(@as(u8, 0), fx.session.notice_message_buf[0]);
 }
 
 test "CFL9 «진짜 git 이 낸» 파일 — 두 스타일 그대로 (재현 2026-09-13)" {

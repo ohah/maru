@@ -322,6 +322,65 @@ test "닫히지 않은 것과 가름 없는 것은 «구간이 아니다»" {
 
     try testing.expect(!hasUnresolved(&open_only));
     try testing.expect(!hasUnresolved(&no_sep));
+    // **빈 문서는 «없다»** — 새로 만든 파일마다 경고가 뜨면 그 문구가 무의미해진다.
+    try testing.expect(!hasUnresolved(&.{}));
+    var none: [2]Region = undefined;
+    try testing.expectEqual(@as(usize, 0), scan(&.{}, &none).len);
+}
+
+test "이름 잇기: 여백이 들어가고, 자리가 모자라면 «안 쓴다»" {
+    const names = [3][]const u8{ "aa", "bb", "cc" };
+    const cols = struct {
+        fn f(t: []const u8) u32 {
+            return @intCast(t.len); // 이 판정자는 ASCII 만 쓴다 — 열 규칙은 호출자가 준다
+        }
+    }.f;
+    var spans: [3]ActionSpan = undefined;
+    var buf: [32]u8 = undefined;
+    const written = writeActions(names, &buf, cols, &spans).?;
+    try testing.expectEqualStrings("aa" ++ action_gap ++ "bb" ++ action_gap ++ "cc", written);
+    // 구간은 **닫힌-열린**이고 여백을 어느 쪽도 안 가져간다.
+    try testing.expectEqual(@as(u32, 0), spans[0].from);
+    try testing.expectEqual(@as(u32, 2), spans[0].to);
+    try testing.expectEqual(@as(u32, 2 + action_gap.len), spans[1].from);
+    try testing.expectEqual(@as(u32, @intCast(written.len)), spans[2].to);
+
+    // **자리가 모자라면 한 바이트도 안 쓴다.** 호출자 중 하나(Chrome Lab)는 **고정 버퍼**를 주므로,
+    // 이름이 길어지는 날 이 검사가 유일한 방어다 — 없으면 그 버퍼를 넘겨 쓴다.
+    var tiny: [4]u8 = undefined;
+    try testing.expectEqual(@as(?[]u8, null), writeActions(names, &tiny, cols, &spans));
+}
+
+test "상태 기계: 한 구간을 낸 뒤에는 «처음부터» 다시 센다" {
+    // 구간을 낸 뒤 상태를 안 비우면, 뒤따르는 `=======`·`>>>>>>>` 가 **옛 시작**과 짝지어져
+    // 두 번째 「구간」이 선다 — 그 범위는 앞 구간의 머리부터라, 고르면 이미 고친 자리까지 지운다.
+    const trailing = [_][]const u8{
+        "<<<<<<< HEAD", "a", "=======", "b", ">>>>>>> t",
+        "=======", "c", ">>>>>>> t", // 시작 없이 떠 있는 꼬리
+    };
+    var buf: [4]Region = undefined;
+    const found = scan(&trailing, &buf);
+    try testing.expectEqual(@as(usize, 1), found.len);
+    try testing.expectEqual(@as(u32, 4), found[0].end);
+}
+
+test "상태 기계: 가름은 «첫 번째»가 이긴다" {
+    // 구간 안에 `=======` 가 둘이면(손으로 고치다 생긴다) 경계는 **앞엣것**이다. 뒤엣것으로 덮으면
+    // 「현재 것」이 남의 줄을 데려오고 「들어온 것」이 줄어든다.
+    const two_seps = [_][]const u8{ "<<<<<<< HEAD", "a", "=======", "b", "=======", "c", ">>>>>>> t" };
+    var buf: [4]Region = undefined;
+    const found = scan(&two_seps, &buf);
+    try testing.expectEqual(@as(usize, 1), found.len);
+    try testing.expectEqual(@as(u32, 2), found[0].separator);
+    try testing.expectEqual(@as(u32, 2), found[0].ours().to);
+}
+
+test "상태 기계: 가름 없이 닫히면 그 후보를 «버린다»" {
+    // 버리지 않으면 뒤따르는 `=======`·`>>>>>>>` 가 그 시작과 짝지어져, **닫히지 않은 쓰레기**까지
+    // 한 구간으로 묶인다 — 고르면 그 위쪽 멀쩡한 줄이 사라진다.
+    const junk = [_][]const u8{ "<<<<<<< HEAD", "a", ">>>>>>> t", "=======", "b", ">>>>>>> t" };
+    var buf: [4]Region = undefined;
+    try testing.expectEqual(@as(usize, 0), scan(&junk, &buf).len);
 }
 
 test "구간이 여럿이고, 상한에 걸리면 거기서 멈춘다" {

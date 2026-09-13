@@ -521,15 +521,29 @@ pub fn createTerm(
             be = rb.backend();
             const pooled = app_session_mod.app_remote_host_pool != null;
             const legacy_client = if (!pooled) app_session_mod.app_remote_client else null;
-            if (pooled and app_session_mod.app_remote_host_pool.?.get(reconnect_host) == null)
+            if (pooled and app_session_mod.app_remote_host_pool.?.get(reconnect_host) == null) {
+                app_session_mod.AppSession.noteAttachFail("pool_host_missing", null);
                 return error.PersistentRuntimeUnavailable;
+            }
             var rid: [32]u8 = undefined;
             @memcpy(&rid, reconnect_id[0..32]);
             const attached = if (pooled)
-                rb.attachTermOnHost(reconnect_host, id, rid, size) catch |err| return classifyAttachError(err)
+                rb.attachTermOnHost(reconnect_host, id, rid, size) catch |err| {
+                    app_session_mod.AppSession.noteAttachOutcome(
+                        session_host.remote_runtime.RemoteRuntime.last_attach_outcome,
+                    );
+                    app_session_mod.AppSession.noteAttachFail("attach_on_host", err);
+                    return classifyAttachError(err);
+                }
             else blk: {
-                if (reconnect_host != legacy_client.?.host_id) return error.PersistentRuntimeUnavailable;
-                break :blk rb.attachTerm(id, rid, size) catch |err| return classifyAttachError(err);
+                if (reconnect_host != legacy_client.?.host_id) {
+                    app_session_mod.AppSession.noteAttachFail("legacy_host_mismatch", null);
+                    return error.PersistentRuntimeUnavailable;
+                }
+                break :blk rb.attachTerm(id, rid, size) catch |err| {
+                    app_session_mod.AppSession.noteAttachFail("attach_legacy", err);
+                    return classifyAttachError(err);
+                };
             };
             reconnected = true;
             // host는 두 번째 controller를 거절하지 않고 **조용히 observer로 강등**한다(§9). attach는 성공으로

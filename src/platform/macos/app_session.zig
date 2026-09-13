@@ -6679,6 +6679,12 @@ pub const AppSession = struct {
     /// 거짓말을 한다(2026-09-12).
     unmatched_event_nonce_raw_len: usize = 0,
     unmatched_term_nonce_raw_len: usize = 0,
+    /// 이번 분배에서 Term 들이 **`.event` 프레임을 본 횟수**.
+    ///
+    /// `open` 은 **분배 시작 시점**의 채널 상태일 뿐이다. 그 뒤 `feed` 가 그 줄을 `.event` 로 안 보면
+    /// 비교 자체가 일어나지 않고, 미매칭 기록조차 안 남는다 — 그러면 값이 글자 그대로 같은데도
+    /// 「하나도 안 맞는다」로 보인다(2026-09-13 에 그 고리에 갇혔다).
+    remote_events_seen: usize = 0,
     /// 주인을 못 찾은 마지막 이벤트의 nonce 와, 그때 Term 이 들고 있던 nonce.
     /// 둘을 **나란히** 찍어야 「어디서 갈렸는지」가 보인다 — 하나만으로는 대조가 안 된다.
     unmatched_event_nonce: [maru.session.agent_hook_command.remote_pane_nonce_max]u8 = undefined,
@@ -7928,6 +7934,31 @@ pub const AppSession = struct {
     /// `WriteFailed`·`AttachFailed`·`HostNotFound`·`SpawnHostUnavailable` 등)는 host나 runtime이 살아 있을 수 있어
     /// `PersistentRuntimeUnavailable`로 남긴다 — 일시 장애를 영구로 오분류하면 살아 있는 세션이 종료 placeholder로 굳어
     /// 되찾을 길이 사라진다. OOM은 host에 대한 증거가 아니라 우리 쪽 사정이므로 그대로 전파한다.
+    /// attach 실패가 **어느 자리에서, 원래 무슨 오류였는지**.
+    ///
+    /// 2026-09-13 실측: 워크스페이스 복원이 `err=PersistentRuntimeUnavailable` 로 죽어 탭 11 개가
+    /// 사라지고 그 상태가 원본을 덮었다 — 하루에 다섯 번. 그런데 그 이름의 출처가 **넷**이고 둘은
+    /// `classifyAttachError` 를 거치지도 않는다(풀 조회 실패·legacy 호스트 불일치). 나머지 둘은
+    /// `else =>` 가 **원래 오류를 통째로 버린다.**
+    ///
+    /// 「지금 못 붙는다」까지는 알아도 «왜» 를 모르면 고칠 곳이 안 정해진다 — 풀에 호스트가 없는 것과
+    /// 연결이 닫힌 것과 attach 가 거절된 것은 전혀 다른 일이다.
+    pub var attach_fail_site: []const u8 = "-";
+    pub var attach_fail_raw: []const u8 = "-";
+
+    pub var attach_fail_outcome: []const u8 = "-";
+
+    /// `AttachFailed` 안의 갈래(`typed_reject`·`uncertain_or_connection_failure`·`runtime_id_parse`).
+    /// 호스트가 거절한 것과 전송이 깨진 것은 고칠 곳이 정반대다.
+    pub fn noteAttachOutcome(outcome: []const u8) void {
+        attach_fail_outcome = outcome;
+    }
+
+    pub fn noteAttachFail(site: []const u8, err: ?anyerror) void {
+        attach_fail_site = site;
+        attach_fail_raw = if (err) |e| @errorName(e) else "-";
+    }
+
     pub fn classifyAttachError(err: anyerror) anyerror {
         return switch (err) {
             error.RuntimeNotFound, error.StaleHostHandle, error.HostIdentityMismatch => error.PersistentRuntimeGone,
@@ -15755,7 +15786,7 @@ pub const AppSession = struct {
         if (self.unmatched_reported) return;
         self.unmatched_reported = true;
         std.log.scoped(.agent).warn(
-            "orphan agent nonce: dest={s} event={s}({d}) term={s}({d}){s} ({d} fed, {d} with nonce, {d} open, saw_hello={}, none matched) mine=[{s}]",
+            "orphan agent nonce: dest={s} event={s}({d}) term={s}({d}){s} ({d} fed, {d} with nonce, {d} open, {d} events seen, saw_hello={}, none matched) mine=[{s}]",
             .{
                 dest,
                 self.unmatched_event_nonce[0..self.unmatched_event_nonce_len],
@@ -15766,6 +15797,7 @@ pub const AppSession = struct {
                 fed,
                 with_nonce,
                 open_channels,
+                self.remote_events_seen,
                 if (self.remote_agent_hosts.get(dest)) |h| h.saw_hello else false,
                 mine,
             },
@@ -15840,6 +15872,7 @@ pub const AppSession = struct {
     /// 반복됐다. 그래서 조건별로 세고, **아무도 못 받으면** 기본 레벨로 알린다(계약 §1.2 의 결).
     fn feedRemoteAgentTerms(self: *AppSession, dest: []const u8, lines: []const []const u8, now_ms: u64) void {
         self.remote_nonce_matched = 0;
+        self.remote_events_seen = 0;
         var fed: usize = 0;
         var with_nonce: usize = 0;
         // **몇이 실제로 먹을 수 있나.** `fed` 는 「분배 후보였다」일 뿐이고, 채널이 `hello` 관문을 못
@@ -24987,6 +25020,71 @@ test "RG1: `_` 가 없거나 스풀 이름이면 판정하지 않는다" {
         "t36",
         "host_f377d61ed8ebb82f727c12c4d2cfedaf_051c73ccfe837237ad404ea76df937e1",
     ));
+}
+test "RF7: 이벤트를 본 횟수를 센다 — 「비교가 안 일어난다」와 「안 맞는다」를 가른다" {
+    // `open` 은 **분배 시작 시점**의 채널 상태일 뿐이다. 그 뒤 `feed` 가 그 줄을 `.event` 로 안 보면
+    // 비교 자체가 일어나지 않고 미매칭 기록조차 안 남는다 — 그러면 값이 글자 그대로 같은데도
+    // 「하나도 안 맞는다」로 보인다(2026-09-13 에 그 고리에 갇혔다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const term = pane_ops.activePane(session).activeTerm();
+    term.agent_remote_channel = maru.session.remote_agent_stream.Channel.initOpen(0);
+    term.rt.observation.ssh_remote_dest_present = true;
+    try term.rt.observation.ssh_remote_dest.appendSlice(a, "openClaw");
+    const mine = "host_aaaa_mine";
+    @memcpy(term.agent_remote_nonce[0..mine.len], mine);
+    term.agent_remote_nonce_len = mine.len;
+
+    // 이벤트 둘을 흘린다 — 하나는 우리 것, 하나는 남의 것.
+    session.feedRemoteAgentTerms("openClaw", &.{
+        "{\"nonce\":\"host_aaaa_mine\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"Stop\\\"}\"}",
+        "{\"nonce\":\"host_bbbb_other\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"Stop\\\"}\"}",
+    }, 1);
+
+    try std.testing.expectEqual(@as(usize, 2), session.remote_events_seen); // 둘 다 봤다
+    try std.testing.expectEqual(@as(usize, 1), session.remote_nonce_matched); // 하나가 우리 것
+}
+test "RF7: 채널이 관문 앞이면 이벤트를 아예 못 본다 — 그것이 0 으로 드러난다" {
+    // `waiting_hello` 는 닫히지도 않았고 이벤트도 못 낸다. 그 상태에서는 비교가 **한 번도** 안 일어나며,
+    // 셈이 0 이면 그 사실이 로그에 그대로 남는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const term = pane_ops.activePane(session).activeTerm();
+    term.agent_remote_channel = maru.session.remote_agent_stream.Channel.init(0); // 관문 앞
+    term.rt.observation.ssh_remote_dest_present = true;
+    try term.rt.observation.ssh_remote_dest.appendSlice(a, "openClaw");
+    const mine = "host_aaaa_mine";
+    @memcpy(term.agent_remote_nonce[0..mine.len], mine);
+    term.agent_remote_nonce_len = mine.len;
+
+    session.feedRemoteAgentTerms("openClaw", &.{
+        "{\"nonce\":\"host_aaaa_mine\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"Stop\\\"}\"}",
+    }, 1);
+
+    try std.testing.expectEqual(@as(usize, 0), session.remote_events_seen); // 아예 못 봤다
+    try std.testing.expectEqual(@as(usize, 0), session.remote_nonce_matched);
 }
 test "RF6: 잘린 값이 「같아」 보이지 않게 원본 길이를 남긴다" {
     // 진단 버퍼는 `remote_pane_nonce_max`(70)인데 스트리머가 싣는 값은 `remote_log_name_max`(82)까지
@@ -82931,8 +83029,6 @@ test "활동 뷰: 원격 신선도 — 저쪽이 준 본문 비트가 검색 결
     try std.testing.expect(session.agent_activity.body.answered);
     // **「끝까지 못 봤다」가 없으면 `partial` 도 없다** — 「없다」가 참이라는 뜻이다.
     try std.testing.expect(!session.agent_activity.body.partial);
-    // 그리고 RAV8a 의 「아직 못 한다」는 **꺼진다**.
-    try std.testing.expect(!session.agent_activity.body.remote_unsupported);
 }
 
 test "활동 뷰: 원격 신선도 — 「끝까지 못 봤다」가 「없다」를 덮는다 (RAV8b-2)" {

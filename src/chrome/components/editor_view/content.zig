@@ -28,8 +28,25 @@ const tokens = chrome.tokens;
 /// **시각 행 인덱스를 담지 않는다.** 랩이 켜지면 이 줄이 시각 행 몇 개가 될지는 전개해서 나눠 봐야
 /// 알 수 있으므로(`visual_map` 참고) 호출자가 미리 정할 수 없다. 배치는 `build`가 정해 `visual_out`에
 /// 돌려주고 gutter가 그것을 따른다.
+/// 줄 **위**에 서는 행 하나(S1.5 — docs/editor-merge-conflicts.md §5).
+///
+/// **문서에 없는 글자다.** 문서 버퍼에는 아무 일도 일어나지 않고, 이 행이 차지하는 것은 **화면 행
+/// 하나**뿐이다 — 그래서 byte offset 매핑이 안 흔들린다(계약이 이 구조를 고른 이유).
+///
+/// **일반 위젯 API 가 아니다.** 지금 소비자는 병합 충돌 마커 하나이고(S2), 그 하나를 세우기 전에
+/// 일반형을 정하면 **쓰이지 않는 축**이 계약에 들어간다. 필요한 것은 「무엇을 어디에 그리나」뿐이다.
+pub const Widget = struct {
+    /// 그 행에 그릴 글자. 비면 행만 차지하고 아무것도 안 그린다(자리는 그대로 든다).
+    text: []const u8,
+    /// 본문 **몇 열**에서 시작하나. 마커 줄과 나란히 세우고 싶으면 그 줄의 들여쓰기를 준다.
+    col: u32 = 0,
+};
+
 pub const Row = struct {
     bytes: []const u8,
+    /// 이 줄 **위**에 세울 행(없으면 `null`). 줄마다 **최대 하나**다 — 여럿이 필요해지면 그때
+    /// 배열로 넓힌다(지금 넓히면 세로 계산이 「0 또는 1」이라는 단순함을 잃는다).
+    widget: ?Widget = null,
     /// **이 줄의 색 구간**(§5.3 구문 강조 1층). 비어 있으면 줄 전체가 본문색이다 —
     /// grammar가 없거나 파싱이 실패했을 때가 그렇고, 그것이 §5의 *"무색"*이다.
     ///
@@ -247,7 +264,11 @@ pub fn build(
         // 글자를 지나야 거기에 닿는다 — 예산에서 빼면 화면 아래쪽이 조용히 빈다(코드 리뷰가
         // 실측으로 잡았다: 5조각 줄에 `first_piece=2`, 3행 뷰포트에서 조각 3·4가 사라지고 다음
         // 논리 줄이 올라왔다).
+        // **위젯 행도 건너뛸 수 있는 행이다**(S1.5). 뷰포트 맨 위가 그 줄 중간이면 `first_piece` 가
+        // 위젯을 이미 지났을 수 있다 — 아래 `widget_skipped` 가 그것을 가른다.
+        const widget_rows: u32 = if (row.widget != null) 1 else 0;
         const skip_hint: usize = if (line_idx == 0) props.first_piece else 0;
+        const widget_skipped: u32 = @min(@as(u32, @intCast(skip_hint)), widget_rows);
         const budget_cols: usize = if (props.wrap)
             (skip_hint + rows_left) * @as(usize, view_cols)
         else
@@ -275,12 +296,64 @@ pub fn build(
         // 상태**다 — `RowIndex` 주석 자체가 "무효화를 호출자가 판단한다"고 적었고, 뷰 폭·탭 폭·랩
         // 토글이 바뀌면 살아남은 스크롤 위치가 곧 그 값이 된다. assert는 "절대 일어나면 안 되는
         // 것"에 쓰는 도구이지, 복구 가능한 낡은 입력에 쓰는 것이 아니다.
-        const skip: u32 = if (line_idx == 0 and props.first_piece != 0) blk: {
+        // **위젯이 이미 먹은 몫을 뺀다**(S1.5) — `first_piece` 는 위젯을 포함해 세므로, 글자 조각에
+        // 그대로 쓰면 한 조각을 더 건너뛴다.
+        const piece_skip_want: u32 = if (line_idx == 0) props.first_piece -| widget_skipped else 0;
+        const skip: u32 = if (line_idx == 0 and piece_skip_want != 0) blk: {
             var probe = visual_map.pieces(expanded, view_cols, props.wrap);
             var have: u32 = 0;
             while (probe.next()) |_| have += 1;
-            break :blk if (props.first_piece >= have) 0 else props.first_piece;
+            break :blk if (piece_skip_want >= have) 0 else piece_skip_want;
         } else 0;
+
+        // ── 위젯 행(S1.5). **글자 조각보다 먼저 선다** — 그 줄 «위»가 이 행의 정의다.
+        //
+        // **`first_piece` 는 이 행까지 포함해 센다.** 그래야 세로 축의 다른 계산(`rowCount`·스크롤
+        // 상한)과 같은 단위가 된다 — 한쪽만 위젯을 세면 문서 끝에서 그만큼 못 내려간다.
+        if (widget_rows == 1 and widget_skipped == 0 and visual_row < visual_out.len) {
+            const w = row.widget.?;
+            visual_out[visual_row] = .{
+                .line = @intCast(line_idx),
+                // **`piece` 는 글자 조각의 축이다.** 위젯은 그 축에 안 들어가므로 0 을 두고,
+                // 「줄 번호를 그리는가」는 `kind` 가 가른다(`showsLineNumber`).
+                .piece = 0,
+                .kind = .widget,
+            };
+            defer visual_row += 1;
+            if (w.text.len > 0 and run_used < runs.len and op_count < out.len) {
+                const run_start = run_used;
+                // **색 구간도 caret 도 없다** — 문서 줄이 아니므로 줄 수 있는 것이 없다.
+                //
+                // 그래서 `w.col`(시작 열)은 **지금 안 읽힌다** — `writeRuns` 가 색·caret 이 둘 다
+                // 비면 「한 run」 빠른 길로 빠진다(실측 2026-09-13: 이 값을 0 으로 바꾼 변이가
+                // 어떤 판정자도 못 깨웠다). 그래도 **맞는 값을 넘긴다** — 위젯에 색이 생기는 날
+                // 여기가 조용히 틀리는 자리가 되고, 그때는 0 이 곧 결함이다.
+                run_used += writeRuns(w.text, w.col, &.{}, &.{}, runs[run_used..]);
+                out[op_count] = .{
+                    .text = .{
+                        .origin = .{
+                            // **열은 본문 폭 안으로 묶는다** — 호출자가 준 값이므로 상한이 없고,
+                            // 곱하면 i32 를 넘겨 overflow 로 죽는다. 넘치는 값은 화면 밖이니 끝에 세운다.
+                            .x = props.origin_px.x +
+                                @as(i32, props.layout.content.start) * @as(i32, props.cell_w_px) +
+                                @as(i32, @intCast(@min(w.col, view_cols))) * @as(i32, props.cell_w_px),
+                            .y = props.origin_px.y + @as(i32, visual_row) * @as(i32, props.cell_h_px),
+                        },
+                        .runs = runs[run_start..run_used],
+                        .role = text_role,
+                        .max_cols = view_cols,
+                        .font_px = props.font_px,
+                        .line_height_px = props.cell_h_px,
+                        .cell_w_px = props.cell_w_px,
+                    },
+                };
+                op_count += 1;
+            }
+        }
+        // **여기에 「자리가 찼다」 가드를 두지 않는다**(적대적 검증 2회차 실측): 지워도 어떤
+        // 판정자도 안 빨개졌고, 이유는 무게를 지는 가드가 **둘 다 그 뒤에 있기** 때문이다 —
+        // 조각 루프 안의 `visual_row >= visual_out.len` 과 다음 줄로 넘어갈 때의 루프 머리 검사.
+        // 못 죽이는 가드를 남기면 「여기서 지킨다」고 거짓말하는 코드가 된다.
 
         var it = visual_map.pieces(expanded, view_cols, props.wrap);
         var piece_idx: u32 = 0;
@@ -441,8 +514,12 @@ pub fn build(
 /// 64 KiB면 전개 6만 열까지 덮는다. 그보다 긴 줄은 여전히 절단되지만 `RowCount.truncated`가 알린다.
 pub const count_scratch_bytes: usize = 64 * 1024;
 
-pub fn rowCount(bytes: []const u8, tab_width: u16, view_cols: u16, wrap: bool, scratch: []u8) RowCount {
-    if (!wrap or view_cols == 0) return .{ .rows = 1 };
+/// **인자가 하나 늘었다**(S1.5): 그 줄에 붙은 **위젯 행 수**(0 또는 1). 세로 축을 쓰는 자리가
+/// 여럿이고(총 행 수·스크롤 상한·막대 위치·점진 계수) **한 곳만 위젯을 안 세면 문서 끝에서 그만큼
+/// 못 내려간다** — 화면에서 바로 안 보이는 종류의 어긋남이라, 기본값을 주지 않고 **모든 호출자가
+/// 고르게** 한다(안 고르면 컴파일이 깨진다).
+pub fn rowCount(bytes: []const u8, tab_width: u16, view_cols: u16, wrap: bool, widget_rows: u32, scratch: []u8) RowCount {
+    if (!wrap or view_cols == 0) return .{ .rows = 1 + widget_rows };
 
     // **전개가 원본과 같으면 저장소를 쓰지 않는다.** 탭도 §3.8 표기도 없으면 `expandTabs`가 만들
     // 텍스트가 원본 그대로이므로 그것을 그대로 센다 — `expandTabs`의 원본 대여 길은 `isAsciiOnly`를
@@ -455,14 +532,14 @@ pub fn rowCount(bytes: []const u8, tab_width: u16, view_cols: u16, wrap: bool, s
         var plain = visual_map.pieces(bytes, view_cols, wrap);
         var m: u32 = 0;
         while (plain.next()) |_| m += 1;
-        return .{ .rows = @max(m, 1) };
+        return .{ .rows = @max(m, 1) + widget_rows };
     }
 
     const r = expandTabs(bytes, tab_width, scratch, .{ .count = std.math.maxInt(u32) });
     var it = visual_map.pieces(r.text, view_cols, wrap);
     var n: u32 = 0;
     while (it.next()) |_| n += 1;
-    return .{ .rows = n, .truncated = r.truncated };
+    return .{ .rows = n + widget_rows, .truncated = r.truncated };
 }
 
 /// `rowCount`의 결과. **절단 여부를 함께 돌려준다** — 이 모듈의 다른 곳과 같은 규율이다
@@ -1335,7 +1412,7 @@ test "rowCount는 실제로 그리는 조각 수와 언제나 같다" {
                 props.tab_width = tab;
                 const w = build(props, &ops, &out, &runs, &vrows);
 
-                const rc = rowCount(line, tab, cols, true, &scratch);
+                const rc = rowCount(line, tab, cols, true, 0, &scratch);
                 // 저장소가 모자라 어느 쪽이든 절단됐으면 비교 대상이 아니다 — 그건 §3.8 축소이고
                 // 아래 별도 테스트가 본다.
                 if (w.truncated_rows == 0 and !rc.truncated) {
@@ -1483,7 +1560,7 @@ test "rowCount: 65535열을 넘는 줄도 끝까지 센다 — u16 상한에 걸
     // "긴 줄 아래를 볼 방법이 없다"가 그대로 되살아나는 자리다.
     const line = "0123456789" ** 8000; // 80,000칸
     var scratch: [131072]u8 = undefined;
-    const r = rowCount(line, 4, 12, true, &scratch);
+    const r = rowCount(line, 4, 12, true, 0, &scratch);
     try testing.expect(!r.truncated);
     try testing.expectEqual(@as(u32, 80000 / 12 + 1), r.rows); // 6667행 — u16 상한(5462)이 아니다
 }
@@ -1493,21 +1570,21 @@ test "rowCount: 저장소가 모자라면 절단을 보고한다 — 조용히 �
     // 이 값이 없으면 스크롤바가 문서보다 짧게 그려지는데 왜인지 알 길이 없다.
     const line = "\t" ++ ("0123456789" ** 200);
     var tiny: [64]u8 = undefined;
-    const r = rowCount(line, 4, 12, true, &tiny);
+    const r = rowCount(line, 4, 12, true, 0, &tiny);
     try testing.expect(r.truncated);
 
     var big: [8192]u8 = undefined;
-    const full = rowCount(line, 4, 12, true, &big);
+    const full = rowCount(line, 4, 12, true, 0, &big);
     try testing.expect(!full.truncated);
     try testing.expect(full.rows > r.rows); // 절단된 쪽이 실제로 짧다
 }
 
 test "rowCount: 랩이 꺼지면 언제나 한 행이다" {
     var scratch: [64]u8 = undefined;
-    try testing.expectEqual(@as(u32, 1), rowCount("0123456789" ** 10, 4, 20, false, &scratch).rows);
-    try testing.expectEqual(@as(u32, 1), rowCount("", 4, 20, false, &scratch).rows);
+    try testing.expectEqual(@as(u32, 1), rowCount("0123456789" ** 10, 4, 20, false, 0, &scratch).rows);
+    try testing.expectEqual(@as(u32, 1), rowCount("", 4, 20, false, 0, &scratch).rows);
     // 뷰 폭이 0이면 접을 수 없다 — 0으로 나누거나 무한히 도는 대신 한 행으로 둔다.
-    try testing.expectEqual(@as(u32, 1), rowCount("긴 줄", 4, 0, true, &scratch).rows);
+    try testing.expectEqual(@as(u32, 1), rowCount("긴 줄", 4, 0, true, 0, &scratch).rows);
 }
 
 test "어떤 시작 열·폭 조합에서도 창 폭을 넘지 않는다" {
@@ -2192,8 +2269,8 @@ test "긴 비ASCII 줄도 저장소와 무관하게 같은 조각 수를 준다 
     const big = try std.testing.allocator.alloc(u8, 4 << 20);
     defer std.testing.allocator.free(big);
 
-    const r_small = rowCount(a, 4, 92, true, &small);
-    const r_big = rowCount(a, 4, 92, true, big);
+    const r_small = rowCount(a, 4, 92, true, 0, &small);
+    const r_big = rowCount(a, 4, 92, true, 0, big);
     // 고치기 전: 8KB → 60행, 4MB → 1,305행(21배 차이). 지금은 저장소를 안 쓴다.
     try std.testing.expectEqual(r_big.rows, r_small.rows);
     try std.testing.expect(!r_small.truncated);
@@ -2214,12 +2291,12 @@ test "탭이 든 긴 줄도 행 수가 절단되지 않는다" {
 
     const big = try a.alloc(u8, 1 << 20);
     defer a.free(big);
-    const want = rowCount(line, 4, 80, true, big);
+    const want = rowCount(line, 4, 80, true, 0, big);
     try std.testing.expect(!want.truncated); // 기준 자체가 절단됐으면 판정이 공허하다
 
     const scratch = try a.alloc(u8, count_scratch_bytes);
     defer a.free(scratch);
-    const got = rowCount(line, 4, 80, true, scratch);
+    const got = rowCount(line, 4, 80, true, 0, scratch);
     try std.testing.expect(!got.truncated);
     try std.testing.expectEqual(want.rows, got.rows);
     try std.testing.expect(got.rows > 200); // 8 KiB였다면 103행이다

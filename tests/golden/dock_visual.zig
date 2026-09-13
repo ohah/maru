@@ -874,6 +874,27 @@ const cases = [_]Case{
         .rect = .{ .x = 360, .y = 172, .w = 120, .h = 36 },
     },
     .{
+        // **인라인 위젯 행**(S1.5 — docs/editor-merge-conflicts.md §5). 이 조각은 혼자서는 소비자가
+        // 없으므로(마커를 읽어 위젯을 만드는 것은 S2) **이 crop 이 그 행의 유일한 시각 증거**다.
+        //
+        // gutter 열만 자른다: 번호가 `1 · (빈 행) · 2 · 3 · 4 · (빈 행) · 5 · 6` 으로 나와야 한다.
+        // 두 가지가 한 그림에 든다 — 위젯 행에 **번호가 없다**는 것과, 그래서 아래 글자 행의 번호가
+        // **건너뛰지 않는다**는 것. 「없는 줄에 번호를 붙이면 거짓이다」가 비교 본문이 같은 자리에
+        // 적어 둔 문장이고, 그 규칙을 위젯 행이 그대로 탄다.
+        .name = "editor-widget-row-gutter",
+        .capture = "editor-widget-row.ppm",
+        .contract = "위젯 행에는 줄 번호가 없고, 그 아래 글자 행의 번호는 건너뛰지 않는다",
+        .rect = .{ .x = 0, .y = 0, .w = 110, .h = 136 },
+    },
+    .{
+        // 같은 캡처의 **들여쓴 위젯**. `Widget.col` 이 실제로 먹는지가 여기서만 보인다 — 픽스처의
+        // 위젯 둘이 다 열 0 이면 그 필드를 지워도 골든이 같다(픽스처가 개념을 갈라야 한다).
+        .name = "editor-widget-row-indent",
+        .capture = "editor-widget-row.ppm",
+        .contract = "위젯 글자가 `col` 이 가리키는 본문 열에서 시작한다(열 0 에 붙지 않는다)",
+        .rect = .{ .x = 100, .y = 82, .w = 380, .h = 18 },
+    },
+    .{
         .name = "editor-right-edge-wide-glyph",
         .capture = "editor-gutter.ppm",
         .contract = "오른쪽 경계에 2칸 글자가 걸치면 통째로 뺀다(반쪽을 그리지 않는다)",

@@ -162,7 +162,10 @@ const inventory = [_]Entry{
     // 34: 구문 파싱이 상한 안에 안 끝났을 때의 **panic 문구**. 표시 문자열이 아니라 하네스
     // 진단이다(§7 "표시가 아니면") — 사람이 읽는 화면이 아니라 캡처를 만들다 죽는 자리다.
     // 조용히 빠지면 색 없는 그림이 골든이 되므로 문구는 원인을 그대로 말해야 한다.
-    .{ .path = "src/platform/macos/chrome/lab.zig", .count = 34 },
+    // 36: 34 + **인라인 위젯 행 픽스처 둘**(S1.5). 표시 문자열이 아니라 **Lab 픽스처**다 — 제품이
+    // 이 글자를 내는 일이 없고(위젯을 만드는 것은 S2 이고 그쪽은 `i18n` 키를 쓴다), 골든이 그
+    // 글자를 그대로 굳혀 「위젯 글자가 그 열에 선다」를 증언한다.
+    .{ .path = "src/platform/macos/chrome/lab.zig", .count = 36 },
     // 2 → 3: `editor_typescript` 캡처 픽스처의 한국어 주석 한 줄. **표시 문자열이 아니라 그려질
     // 내용**이다 — 캡처가 한글 폭까지 잡도록 일부러 넣었다(같은 파일의 다른 둘도 같은 부류다).
     .{ .path = "src/platform/macos/chrome_lab_smoke.zig", .count = 3 },
@@ -274,7 +277,7 @@ fn countSource(allocator: std.mem.Allocator, source: [:0]const u8) !usize {
 
 /// 헤더가 말하는 총계. **코드가 검증한다** — 손으로 적은 숫자는 원장이 움직일 때 조용히 어긋난다
 /// (실제로 152 로 적혀 있다가 182 와 30 차이가 났다).
-const header_total = 228; // +2: 편집기 판정자의 큰 문서 픽스처(한글 섞인 코드·JSON — 위 등재 주석)
+const header_total = 230; // +2: 편집기 판정자의 큰 문서 픽스처 · +2: 인라인 위젯 행 Lab 픽스처(S1.5)
 const header_config_total = 54;
 
 comptime {

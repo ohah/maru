@@ -142,6 +142,19 @@ pub fn pieces(text: []const u8, view_cols: u16, wrap: bool) Pieces {
 /// **`content`가 채우고 `gutter`가 읽는다.** 랩이 켜지면 시각 행과 논리 줄이 1:1이 아니므로 둘이
 /// 각자 세면 번호가 본문과 어긋난다 — 본문을 나눈 쪽이 답을 내고 gutter가 그것을 따른다.
 pub const VisualRow = struct {
+    /// 이 행이 **문서 줄의 글자**인가, 그 줄에 붙은 **위젯**인가
+    /// (S1.5 — docs/editor-merge-conflicts.md §5).
+    ///
+    /// **`line` 을 옵셔널로 만들지 않은 이유**가 이 열거값이다. 위젯 행도 자기가 붙는 **앵커 줄**을
+    /// 들기 때문에, 「행 → 줄」을 읽는 자리(스크롤·검색 표식·접힘 판정)는 계속 유효한 값을 받는다 —
+    /// `line` 을 옵셔널로 바꿨다면 그 자리 전부가 **결정 지점**이 됐을 것이다.
+    pub const Kind = enum {
+        /// 문서 줄의 조각. 지금까지의 모든 행이다.
+        text,
+        /// 그 줄 **위**에 서는 행. 문서에 없는 글자이고, caret 도 선택도 여기 오지 않는다.
+        widget,
+    };
+
     /// 뷰포트 첫 줄로부터 몇 번째 논리 줄인가(0-based).
     ///
     /// **u16이 아니다.** 호출자가 넘기는 줄 수에 계약상 상한이 없어(뷰포트 컬링은 관례이지 강제가
@@ -186,8 +199,22 @@ pub const VisualRow = struct {
     /// 실측한 26.4%는 걸음이 **머물지 않고 지나간** 것 때문이었지 시작 열 때문이 아니었다.
     start_byte_col: u32 = 0,
 
+    /// 이 행이 무엇인가(위 `Kind`). 기본은 지금까지의 동작이다.
+    kind: Kind = .text,
+
     /// 이 행에 줄 번호를 그리는가. **랩된 줄의 두 번째 이후에는 비운다**(§4) — 안 그러면 같은
     /// 번호가 연달아 보인다(VSCode 관례).
+    ///
+    /// **위젯 행에도 비운다**(S1.5). 그 행은 문서 줄이 아니므로 번호를 붙이면 **없는 줄에 번호를
+    /// 붙이는** 것이고(비교 본문이 짝 맞춤 빈 행에 번호를 안 붙이는 것과 같은 판단), 붙이면 같은
+    /// 번호가 두 행에 연달아 보인다.
+    ///
+    /// **규칙이 여기 하나뿐인 것이 이 조각을 작게 만들었다** — gutter 는 번호와 접힘 표식 **둘 다**
+    /// 이 술어만 보므로, 위젯 행이 생겨도 그쪽은 한 줄도 안 고쳐진다.
+    pub fn showsLineNumber(self: VisualRow) bool {
+        return self.kind == .text and self.piece == 0;
+    }
+
     /// **줄 배열을 인덱싱할 절대 자리.** `line` 은 뷰포트 첫 줄로부터의 **상대** 값인데 `lines`·
     /// `carets`·`row_marks` 는 문서 처음부터의 **절대** 배열이라, 그 둘을 잇는 덧셈이 소비처마다
     /// 손으로 적혀 있었다 — 다섯 자리 중 **하나가 그 덧셈을 빠뜨려** 스크롤된 화면에서 caret 이
@@ -197,10 +224,6 @@ pub const VisualRow = struct {
     /// 보이고, 빠뜨린 자리는 `v.line` 을 그대로 쓴 모양으로 눈에 띈다.
     pub fn docIndex(self: VisualRow, first_line: usize) usize {
         return first_line + self.line;
-    }
-
-    pub fn showsLineNumber(self: VisualRow) bool {
-        return self.piece == 0;
     }
 };
 

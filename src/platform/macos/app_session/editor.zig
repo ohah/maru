@@ -1787,6 +1787,9 @@ fn piecesOfLine(term: *Term, line: usize, content_cols: u16) u32 {
         term.rt.editor_tab_width, // 렌더와 같은 값(단일 출처) — 갈리면 화면과 스크롤이 어긋난다
         content_cols,
         true,
+        // **위젯 행은 아직 이 경로에 없다**(S1.5). 생산자가 붙는 것은 S2 이고, 그때 여기도 같은
+        // 표(`line_widgets`)를 봐야 한다 — 안 보면 위젯이 있는 줄에서 스크롤과 화면이 갈린다.
+        0,
         &scratch,
     );
     return @max(c.rows, 1);
@@ -11603,7 +11606,7 @@ test "탭이 든 긴 줄이 랩에서 끝까지 그려지고 닿는다" {
     const cols = visibleCols(fx.session, body, fx.term, false);
     const big = try allocator.alloc(u8, 1 << 20);
     defer allocator.free(big);
-    const want = chrome_editor.content.rowCount(long, chrome_editor.frame.default_tab_width, cols, true, big);
+    const want = chrome_editor.content.rowCount(long, chrome_editor.frame.default_tab_width, cols, true, 0, big);
     try testing.expect(!want.truncated); // 기준이 절단됐으면 판정이 공허하다
     try testing.expect(want.rows > 100); // 8 KiB 시절 값(103행)보다 확실히 크다
     try testing.expectEqual(@as(usize, want.rows), fx.term.rt.editor_total_visual_rows);

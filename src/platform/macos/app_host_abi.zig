@@ -3274,7 +3274,30 @@ pub export fn maru_macos_app_session_apply_workspace_window(
     var parsed = maru.session.workspace.parse(app_session.allocator, tp[0..text_len]) catch return @intFromEnum(Status.invalid_config);
     defer parsed.deinit(); // apply가 cwd 슬라이스를 spawn에 다 쓴 뒤 arena 해제(안전)
     if (window_index >= parsed.workspace.windows.len) return @intFromEnum(Status.invalid_config);
-    app_session.applyWorkspaceWindow(parsed.workspace.windows[window_index]) catch return @intFromEnum(Status.create_failed);
+    app_session.applyWorkspaceWindow(parsed.workspace.windows[window_index]) catch |err| {
+        // **`create_failed` 하나가 열일곱을 접는다.** 2026-09-13 실측: 저장 파일에 창 둘(탭 11 + 탭 1)이
+        // 온전하고 host 에 세션 23 개가 살아 있는데도 두 창이 모두 `status=4` 로 거절돼, 앱이 기본
+        // `/bin/zsh` 한 창으로 뜨고 그 상태가 원본을 덮었다 — 하루에 다섯 번.
+        //
+        // 자리 이름을 붙여 여기까지 왔다(#3644 가 주 창의 침묵을 없앴다). 그런데 그 다음이 또 하나로
+        // 뭉쳐 있다: 도크 복원·파일트리 루트 검증·탭 생성·용량 확보 어느 것이 죽었는지 알 수 없다.
+        // 고칠 곳이 전부 다르다.
+        //
+        // 오류 이름만 싣는다 — `Status` 를 늘리면 ABI 계약이 바뀌고 Swift 쪽 전수가 흔들린다.
+        // **한 겹 더 있다.** `PersistentRuntimeUnavailable` 은 네 자리에서 나오고 그중 둘은
+        // 원래 오류를 통째로 버린다 — 풀에 호스트가 없는 것과 연결이 닫힌 것은 고칠 곳이 다르다.
+        std.log.scoped(.app).warn(
+            "workspace apply failed: window_index={d} err={s} attach_site={s} attach_raw={s} attach_outcome={s}",
+            .{
+                window_index,
+                @errorName(err),
+                AppSession.attach_fail_site,
+                AppSession.attach_fail_raw,
+                AppSession.attach_fail_outcome,
+            },
+        );
+        return @intFromEnum(Status.create_failed);
+    };
     return @intFromEnum(Status.ok);
 }
 

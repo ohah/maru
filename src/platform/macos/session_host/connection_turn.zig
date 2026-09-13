@@ -201,6 +201,16 @@ const ResyncSweepBlock = struct {
 /// 수십 줄이 된다 — 오늘 로그의 92 % 가 진단이었던 일을 되풀이하지 않는다(#3605).
 var last_sweep_block: ?ResyncSweepBlock = null;
 
+/// `collectOutput` 이 접힌 자리와 **원래 오류**를 남긴다. 닫기 직전 한 번뿐이라 소음이 아니다.
+fn noteCollectFailure() void {
+    if (builtin.is_test) return;
+    const last = server.Connection.lastCollectFailure();
+    host_log.line(
+        "session host collect failed: site={s} err={s}",
+        .{ last.site, last.err },
+    );
+}
+
 fn noteResyncSweepBlocked(now: ResyncSweepBlock) void {
     if (builtin.is_test) return;
     if (last_sweep_block) |prev| if (std.meta.eql(prev, now)) return;
@@ -798,6 +808,11 @@ pub const Client = struct {
                     return;
                 },
                 error.OutOfMemory => {
+                    // **한 겹 더 있다.** `site=tick_collect_oom` 까지 오면 「출력을 모으다 접혔다」
+                    // 는 알지만, 그 안에서 스물넷이 다시 `OutOfMemory` 하나로 접힌다. 진짜 할당
+                    // 실패와 원격 ops 오류가 같은 이름으로 나오므로 `resource_exhausted` 가
+                    // 「메모리가 모자랐다」는 뜻이 아닐 수 있다 — 닫기 «전» 에 그 자리를 남긴다.
+                    noteCollectFailure();
                     self.beginCloseAt("tick_collect_oom", .resource_exhausted);
                     return;
                 },

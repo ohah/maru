@@ -299,6 +299,15 @@ pub const KittyImageNumber = struct {
 ///
 /// **격자 크기를 여기 보관하는 이유**: placeholder 셀은 자기 타일 좌표만 갖고 전체 격자 크기를 모른다.
 /// 타일 픽셀 크기(= 이미지 크기 / 격자)를 알려면 이 값이 필요하다.
+/// Unicode placeholder 의 base 코드포인트(kitty graphics protocol "Unicode placeholders").
+/// 이 셀이 화면에 찍혀 있는 자리가 곧 virtual placement(`U=1`)가 그려질 자리다.
+///
+/// **코어와 렌더러가 같은 값을 봐야 한다.** 렌더러는 이 셀을 이미지 타일로 환산하고(해독은
+/// 렌더러 몫이다 — 전경색 24비트 + 결합문자 셋), 코어는 「지금 화면에 placeholder 가 있기는 한가」만
+/// 묻는다(애니메이션을 돌릴지 판단하려고). 값이 갈리면 코어는 없다고 보고 멈추는데 렌더러는
+/// 그리고 있는, 조용한 정지가 난다.
+pub const unicode_placeholder_codepoint: u21 = 0x10EEEE;
+
 pub const KittyVirtualPlacement = struct {
     image_id: u32,
     placement_id: u32,

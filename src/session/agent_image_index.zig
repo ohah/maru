@@ -336,6 +336,25 @@ pub const Chain = struct {
         return if (p.len == 0) null else p;
     }
 
+    /// 두 체인이 **같은 파일들을 같은 번호로** 드나(§21.2 ②).
+    ///
+    /// 🔥 **머리만 보면 모자란다.** 이어읽기는 「부모는 안 자란다」에 기대 부모 히트를 **통째로
+    /// 재사용**하는데, 그 전제가 깨지는 길은 세션이 바뀌는 것만이 아니다 — **부모가 지워지면**
+    /// 체인이 짧아지고, 재사용한 히트의 `file_index` 가 가리킬 자리가 없어진다.
+    ///
+    /// 머리만 대조하는 판은 「머리가 같으면 부모도 같다」는 **Codex 체인 규칙에 기댄 추론**이었고,
+    /// 코드가 그 전제를 어디에도 안 적었다. 전수 대조는 그 전제가 **필요 없게** 만든다 — 그리고
+    /// 체인은 최대 셋이라(`max_chain`) 비용이 없다.
+    pub fn sameFiles(self: *const Chain, other: *const Chain) bool {
+        if (self.len != other.len) return false;
+        for (0..self.len) |i| {
+            const a = self.files[i].path();
+            const b = other.files[i].path();
+            if (!std.mem.eql(u8, a, b)) return false;
+        }
+        return true;
+    }
+
     /// 뒤에 잇는다. 이미 있는 경로면 **더하지 않는다** — 부모가 자기 자신을 가리키는 기록이 오면
     /// 같은 파일을 두 번 훑고 이미지가 두 배로 뜬다.
     pub fn append(self: *Chain, value: []const u8) bool {
@@ -3078,6 +3097,41 @@ test "이어읽기 자국: 미결 호출이 있으면 그 줄까지 되돌린다
     try testing.expectEqual(@as(u64, text.items.len), scanner.consumed);
     // 그런데 `toolu_open` 은 아직 결말이 없다 — 자국은 그 줄로 당겨진다.
     try testing.expectEqual(open_at, scanner.resumeOffset(hits.items));
+}
+
+test "체인 대조: 머리가 같아도 «부모가 지워지면» 다른 체인이다 (계획 §30)" {
+    // 🔥 이어읽기가 물러나는 조건 ②(§21.2)다. 머리만 대조하던 판은 이 넷 중 **첫 줄만** 잡았다 —
+    // 그러면 부모를 잃은 체인에서 부모 히트를 그대로 재사용하고, 그 `file_index` 가 가리킬 자리가
+    // 없어진다.
+    var full: Chain = .{};
+    try testing.expect(full.append("/home/u/head.jsonl"));
+    try testing.expect(full.append("/home/u/parent.jsonl"));
+
+    var same: Chain = .{};
+    try testing.expect(same.append("/home/u/head.jsonl"));
+    try testing.expect(same.append("/home/u/parent.jsonl"));
+    try testing.expect(full.sameFiles(&same)); // ① 같으면 같다
+
+    var head_only: Chain = .{};
+    try testing.expect(head_only.append("/home/u/head.jsonl"));
+    // ② **머리는 같은데 부모가 없다** — 예전 판이 놓치던 바로 그 모양이다.
+    try testing.expect(!full.sameFiles(&head_only));
+    try testing.expect(!head_only.sameFiles(&full));
+
+    var other_parent: Chain = .{};
+    try testing.expect(other_parent.append("/home/u/head.jsonl"));
+    try testing.expect(other_parent.append("/home/u/other.jsonl"));
+    try testing.expect(!full.sameFiles(&other_parent)); // ③ 부모가 바뀌었다
+
+    var other_head: Chain = .{};
+    try testing.expect(other_head.append("/home/u/x.jsonl"));
+    try testing.expect(other_head.append("/home/u/parent.jsonl"));
+    try testing.expect(!full.sameFiles(&other_head)); // ④ 세션이 바뀌었다(예전 판도 잡던 것)
+
+    // ⑤ 빈 체인끼리는 같다 — 「둘 다 없다」는 갈림이 아니다.
+    const empty_a: Chain = .{};
+    const empty_b: Chain = .{};
+    try testing.expect(empty_a.sameFiles(&empty_b));
 }
 
 test "본문이 «text 없는 배열»이어도 결말은 붙는다 (계획 §29)" {

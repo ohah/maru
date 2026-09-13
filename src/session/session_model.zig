@@ -136,6 +136,12 @@ pub fn Model(comptime Rt: type) type {
             agent_state_rule: []const u8 = "",
             /// 훅이 연 턴의 일련번호. `turn_key` 가 바뀔 때 올린다 — C2 의 연속 셈을 언제 버릴지의 유일한
             /// 입력이고, 안 올리면 C2 가 한 번 성공한 뒤 다음 턴을 즉시 접는다(§1.6-⑵-a).
+            /// 훅 줄이 **provider 를 실제로 말해 준 적이 있나**.
+            ///
+            /// 원격에서는 훅이 더 확실한 소스라 그것이 오면 화면·프로세스 판정을 멈춘다. 그런데 그 멈춤을
+            /// 「채널이 열렸나」로 재면, **훅이 영영 안 오는 동안에도** 판정이 멈춘 채로 있다 — 아이콘이
+            /// 옛 provider 색으로 굳거나 아예 안 선다(2026-09-13 실측). 그래서 「받은 적이 있나」로 잰다.
+            agent_kind_from_hook: bool = false,
             agent_hook_turn_seq: u64 = 0,
             agent_stabilizer: agent_observer.Stabilizer = .{},
             /// observer가 마지막으로 읽은 TerminalCore write sequence와 마지막 PTY activity 시각(ms, awake clock).

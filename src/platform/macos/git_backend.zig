@@ -99,6 +99,17 @@ pub const max_output_bytes: usize = 16 << 20;
 ///
 /// 실측(2026-09-01): 없는 명령은 **127**, ssh 전송 실패는 **255** 로 갈린다. `git` 자신은 그 둘을
 /// 안 쓴다(fatal 은 128, 거절은 1) — 그래서 원격에서만 그 두 값이 우리 이야기다.
+/// 읽기 오류를 **화면이 쓰는 사유**로 바꾼다. 규칙이 한 자리여야 하는 이유는, 사본이 갈리면 한쪽만
+/// 새 사유를 배우기 때문이다 — 이 저장소가 반복해서 당한 모양이다(원격 SCM §2.2 ⑷ 의 PATH 처방이
+/// 세 곳에 흩어져 셋 다 틀렸던 그 일). 목록·히스토리·커밋 파일 목록이 **같은 함수**를 부른다.
+pub fn readFailureFor(err: anyerror) ReadFailure {
+    return switch (err) {
+        error.RemoteGitMissing => .remote_git_missing,
+        error.RemoteTransportFailed => .remote_transport,
+        else => .generic,
+    };
+}
+
 pub const ReadFailure = enum {
     /// git 이 돌았고 우리가 그 실패를 딱히 분류하지 못한다(로컬의 기본값이기도 하다).
     generic,
@@ -331,6 +342,9 @@ pub const LogResult = struct {
     /// 상한에서 잘렸나. **조용히 자르지 않는다** — 목록 끝에 그 사실을 적어야 사용자가 "더 없다"와
     /// "더 못 읽었다"를 구별한다(목록 읽기가 같은 규율을 갖는다).
     truncated: bool = false,
+    /// **왜 못 읽었나**(RS7d). `ok = false` 일 때만 뜻이 있다 — 목록 읽기(`Result.failure`)와 같은
+    /// 타입·같은 규칙(`readFailureFor`)이다.
+    failure: ReadFailure = .generic,
 
     pub fn deinit(self: *LogResult, allocator: std.mem.Allocator) void {
         allocator.free(self.repo);
@@ -354,6 +368,8 @@ pub const CommitFilesResult = struct {
     text: []u8 = &.{},
     /// 상한에서 잘렸나(위와 같은 규율).
     truncated: bool = false,
+    /// **왜 못 읽었나**(RS7d) — 위와 같은 타입·같은 규칙.
+    failure: ReadFailure = .generic,
 
     pub fn deinit(self: *CommitFilesResult, allocator: std.mem.Allocator) void {
         allocator.free(self.oid);
@@ -1244,9 +1260,9 @@ fn logWorker(job: *Job) void {
         result.text = out.bytes;
         result.truncated = out.truncated;
         result.ok = true;
-    } else |_| {
-        // **왜 실패했는지는 아직 안 나른다** — `LogResult` 를 넓히는 것은 RS7d 의 일이다(§18.5).
-        // 그때까지 원격 실패는 목록 읽기 이전과 같은 「읽지 못함」 하나로 뭉쳐 온다.
+    } else |err| {
+        // **왜 실패했는지 싣는다**(RS7d — §18.5). 목록 읽기와 **같은 함수**로 바꾼다.
+        result.failure = readFailureFor(err);
     }
     state.allocator.free(job.git_exe);
     state.allocator.free(job.repo);
@@ -1286,7 +1302,9 @@ fn commitFilesWorker(job: *Job) void {
         result.text = out.bytes;
         result.truncated = out.truncated;
         result.ok = true;
-    } else |_| {}
+    } else |err| {
+        result.failure = readFailureFor(err); // RS7d — 같은 규칙, 같은 함수
+    }
     state.allocator.free(job.git_exe);
     state.allocator.free(job.repo);
     if (job.snapshot_tree.len > 0) state.allocator.free(job.snapshot_tree);
@@ -1665,11 +1683,7 @@ fn worker(job: *Job) void {
                 ok = false;
                 // **왜 실패했는지 싣는다.** 「읽지 못함」 하나로 뭉개면 사용자는 원격에 git 을 깔아야
                 // 하는지, 연결을 다시 붙여야 하는지 알 수 없다.
-                failure = switch (err) {
-                    error.RemoteGitMissing => .remote_git_missing,
-                    error.RemoteTransportFailed => .remote_transport,
-                    else => .generic,
-                };
+                failure = readFailureFor(err);
             }
         }
     }
@@ -2517,6 +2531,16 @@ test "status 한 벌이 띄우는 프로세스 수 — 소비자 없는 읽기�
     inline for (optional_reads ++ required_reads) |pair| {
         try testing.expect(@hasField(Result, pair[1]));
     }
+}
+
+test "읽기 실패 사유는 한 규칙에서 나온다 (RS7d)" {
+    // 목록·히스토리·커밋 파일 목록이 **같은 함수**를 부른다. 사본이 갈리면 한쪽만 새 사유를 배우고,
+    // 그 화면만 「읽지 못했습니다」로 뭉개진다 — 이 저장소가 반복해서 당한 모양이다.
+    try testing.expectEqual(ReadFailure.remote_git_missing, readFailureFor(error.RemoteGitMissing));
+    try testing.expectEqual(ReadFailure.remote_transport, readFailureFor(error.RemoteTransportFailed));
+    // **분류 못 하는 것은 분류하지 않는다** — git 이 한 말(128·1)을 우리가 다시 해석하면 안 된다.
+    try testing.expectEqual(ReadFailure.generic, readFailureFor(error.GitFailed));
+    try testing.expectEqual(ReadFailure.generic, readFailureFor(error.OutOfMemory));
 }
 
 test "제출 없이 열고 닫아도 안전하다(수명 계약)" {

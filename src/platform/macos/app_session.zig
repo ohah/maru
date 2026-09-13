@@ -1683,6 +1683,21 @@ const TermRuntime = struct {
     handle: app.TermRuntimeHandle = 0,
     pump: app.RuntimeEventPump = undefined,
     live_initialized: bool = false,
+    /// 이 runtime 에 **마지막으로 보낸** 셀 픽셀 메트릭. 0 = 아직 안 보냄.
+    ///
+    /// 셀 메트릭은 코어가 `CSI 14t`·`CSI 16t` 에 답하는 **단일 출처**이고, 0 이면 코어는 **침묵한다**
+    /// (`parser.zig` `reportWindowOps` — 「0 을 보고하면 앱이 그 값으로 나눠 기하가 통째로 깨진다」).
+    /// in-process 는 렌더 tick 이 `active_surface.core.setCellMetrics` 로 매번 주입하므로 늘 최신인데,
+    /// **원격 runtime 은 그 코어가 로컬 거울**이라 호스트의 진짜 코어에는 닿지 않는다. 그래서 폰트·DPI 가
+    /// 바뀌기 전까지 호스트 코어의 메트릭이 0 으로 남는다.
+    ///
+    /// 2026-09-13 실측: 세션호스트로 `terminal-browser` pane 을 열면 `CSI 16t` 가 무응답이고 winsize 픽셀도
+    /// 0 이라 캔버스 해상도가 어긋나 **화면이 너무 크게** 그려졌다. in-process 로 같은 것을 열면 정상이었다.
+    ///
+    /// 매 tick RPC 를 보낼 수는 없으므로 **바뀔 때만** 보낸다 — 이 값이 그 판단의 기준이다. 생성 직후에는
+    /// 0 이라 자동으로 한 번 나가고, 폰트·DPI·모니터 이동도 같은 규칙 하나로 덮인다.
+    last_sent_cell_width_px: u32 = 0,
+    last_sent_cell_height_px: u32 = 0,
     // workspace restore staging에서 **기존** host runtime에 attach한 Term. publish 전 rollback은 이 runtime을 종료하면
     // 안 되므로 destroyTerm이 detach-only로 회수한다. applyWorkspaceWindow가 commit point를 넘으면 false로 바꿔 이후
     // 사용자 명시 close는 정상 terminate 의미를 가진다.
@@ -7759,6 +7774,39 @@ pub const AppSession = struct {
         command: maru.session.core_command.CoreCommand,
     ) !void {
         try self.backendFor(term).enqueueCoreCommand(term.rt.handle, command, self.io);
+    }
+
+    /// **원격 runtime 의 host 코어에 셀 메트릭을 맞춘다 — 바뀔 때만.**
+    ///
+    /// 렌더 tick 은 `active_surface.core.setCellMetrics` 로 매번 주입하지만, 원격일 때 그 `core` 는
+    /// `remote_screen` 이 만든 **로컬 거울**이다. `CSI 14t`·`CSI 16t` 에 답하고 PTY winsize 를 쥔 진짜
+    /// 코어는 host 에 있어 그 주입이 닿지 않는다. 닿지 않으면 host 코어의 메트릭은 0 이고, 0 이면
+    /// `reportWindowOps` 가 **답하지 않는다** — 「0 을 보고하면 앱이 그 값으로 나눠 기하가 통째로 깨진다」.
+    ///
+    /// 2026-09-13 실측: 세션호스트로 `terminal-browser` pane 을 열면 `CSI 16t` 무응답 + winsize 픽셀 0 이라
+    /// 캔버스가 **너무 크게** 그려졌다. in-process 는 같은 것이 정상이었고, 차이는 오직 「어느 코어에
+    /// 주입되는가」였다.
+    ///
+    /// 매 tick RPC 를 보낼 수는 없으므로 runtime 마다 마지막으로 보낸 값을 기억해 **다를 때만** 보낸다.
+    /// 새로 만든 runtime 은 기억값이 0 이라 자동으로 한 번 나가고, 폰트·DPI·모니터 이동도 같은 규칙이 덮는다.
+    /// host 쪽 `PtySession.setCellPixels` 에도 같은 값 가드가 있어 중복이 도착해도 `TIOCSWINSZ` 는 안 나간다.
+    fn syncRemoteCellMetrics(self: *AppSession) void {
+        if (self.cell_width_px == 0 or self.cell_height_px == 0) return; // 아직 모르는 값을 보내지 않는다
+        for (self.tabs.items) |tab| {
+            for (tab.panes.items) |pane| {
+                for (pane.terms.items) |term| {
+                    if (term.kind != .terminal or !term.rt.live_initialized) continue;
+                    if (term.rt.last_sent_cell_width_px == self.cell_width_px and
+                        term.rt.last_sent_cell_height_px == self.cell_height_px) continue;
+                    self.enqueueCoreCommandForTerm(term, .{ .set_cell_metrics = .{
+                        .width = self.cell_width_px,
+                        .height = self.cell_height_px,
+                    } }) catch continue; // 못 보냈으면 기억값을 안 올려 다음 tick 에 다시 시도한다
+                    term.rt.last_sent_cell_width_px = self.cell_width_px;
+                    term.rt.last_sent_cell_height_px = self.cell_height_px;
+                }
+            }
+        }
     }
 
     pub fn enqueueCoreCommandForSurface(
@@ -20317,6 +20365,10 @@ pub const AppSession = struct {
                     active_surface.lockCore(self.io);
                     defer active_surface.unlockCore(self.io);
                     // kitty 자동 크기 이미지의 커서 advance용 셀 메트릭을 활성 surface 코어에 주입한다(매 tick 최신).
+                    //
+                    // **원격 runtime 에는 이 주입이 닿지 않는다.** 여기의 `core` 는 원격일 때 `remote_screen` 이
+                    // 만든 **로컬 거울**이고, `CSI 14t`·`CSI 16t` 에 답하는 진짜 코어는 host 에 있다. 그래서
+                    // 아래에서 host 로도 보낸다 — 매 tick RPC 는 못 보내므로 **바뀔 때만**(§syncRemoteCellMetrics).
                     active_surface.core.setCellMetrics(self.cell_width_px, self.cell_height_px);
                     // OSC 10/11 색 질의 응답용 theme 전경/배경 RGB도 주입(코어는 Color.default 추상만 알아 실제 색 필요).
                     active_surface.core.setDefaultColors(self.appearance.theme.foreground, self.appearance.theme.background);
@@ -20344,6 +20396,9 @@ pub const AppSession = struct {
                         }
                     }
                 }
+                // **락 밖**에서 host 로 보낸다. 위 주입은 원격일 때 로컬 거울에만 닿으므로 진짜 코어가
+                // 있는 host 에도 맞춰야 한다 — 바뀔 때만 나가고, 코어 락을 쥔 채 RPC 를 걸지 않는다.
+                self.syncRemoteCellMetrics();
                 // F2-1 배경 이미지(window.background-image): 풀-윈도 pass-0 GpuImage를 kitty 채널 앞에 끼운다
                 // (렌더러 변경 없이 텍스처 캐시·image quad 인프라 재사용). pass 0이라 (pass,z) 정렬 partition을
                 // 유지하려 kg_images **앞**에 prepend한다(below-text 먼저·above-text 뒤 split 불변).

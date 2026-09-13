@@ -5994,6 +5994,25 @@ pub fn build(b: *std.Build) void {
     collect_fail_step.dependOn(&run_collect_fail.step);
     boundary_step.dependOn(&run_collect_fail.step);
 
+    // 원격 runtime 의 host 코어에도 셀 메트릭이 닿는가. 안 닿으면 CSI 16t 가 침묵해 화면이 커진다.
+    const remote_cell_metrics_step = b.step(
+        "test-remote-cell-metrics-sync",
+        "Remote runtimes receive cell metrics on change, outside the core lock",
+    );
+    const remote_cell_metrics_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/remote_cell_metrics_sync_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_remote_cell_metrics = b.addRunArtifact(remote_cell_metrics_tests);
+    run_remote_cell_metrics.addArg("--maru-expect-tests=1");
+    run_remote_cell_metrics.addArg("--maru-expect-passed=1");
+    run_remote_cell_metrics.setCwd(b.path("."));
+    remote_cell_metrics_step.dependOn(&run_remote_cell_metrics.step);
+    boundary_step.dependOn(&run_remote_cell_metrics.step);
+
     // 자리별 다이제스트 진단이 «한 세션 안에» 나오는가. 5 시간 주기라 한 번도 안 나왔다.
     const digest_site_period_step = b.step(
         "test-digest-site-diag-period",

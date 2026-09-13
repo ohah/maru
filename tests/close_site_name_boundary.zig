@@ -64,7 +64,15 @@ test "닫힘은 사유와 함께 어느 줄이었는지 남긴다" {
     // ① 이름을 **먼저** 두고 닫는다. `beginClose` 는 첫 호출이 이기므로, 이름을 뒤에 두면 사유는
     //    첫 호출 것이고 이름은 나중 것이 되어 **짝이 어긋난다** — 그게 오늘 주소 풀이가 막힌 것과
     //    똑같은 종류의 거짓이다.
-    const at_fn = std.mem.indexOf(u8, turn, "fn beginCloseAt(") orelse return error.NamedCloseMissing;
+    //
+    //    **이름을 «저장하는» 함수를 찾아서 잰다.** 함수 이름을 잠그면 위임 구조로 바뀔 때 의도가
+    //    지켜지는데도 빨개진다 — 실제로 그랬다(2026-09-14: `beginCloseAt` 이 오류까지 싣는
+    //    `beginCloseAtErr` 로 위임하자 가드가 그쪽으로 옮겨갔다). 의도는 「이름을 저장하는 곳이
+    //    첫-호출 가드 뒤에 있고 상태 변경보다 앞」이다.
+    const store = "self.close_site = site;";
+    const store_at = std.mem.indexOf(u8, turn, store) orelse return error.SiteNotStored;
+    const at_fn = std.mem.lastIndexOf(u8, turn[0..store_at], "noinline fn ") orelse
+        return error.NamedCloseMissing;
     const at_end = std.mem.indexOfPos(u8, turn, at_fn, "\n    }\n") orelse turn.len;
     const body = turn[at_fn..at_end];
     const guard = std.mem.indexOf(u8, body, "if (self.isClosing()) return;") orelse
@@ -104,7 +112,10 @@ test "닫힘은 사유와 함께 어느 줄이었는지 남긴다" {
         std.debug.print("invalidateSubscriptionOutput 에 이름 없는 닫기가 남았다\n", .{});
         return error.AnonymousCloseInInvalidate;
     }
-    try std.testing.expect(countAll(inv, "self.beginCloseAt(") == 4);
+    //    **변형을 포함해 센다.** `beginCloseAt(` 만 세면 오류까지 싣는 `beginCloseAtErr(` 로 바꿀 때
+    //    의도가 지켜지는데도 0 으로 세어 빨개진다(2026-09-14 에 실제로 그랬다). 의도는 「넷 다
+    //    이름을 남긴다」이지 특정 함수 이름이 아니다.
+    try std.testing.expect(countAll(inv, "self.beginCloseAt") == 4);
 
     // ④ **로그가 그 이름을 싣는다.** 저장만 하고 안 찍으면 사람에게는 없는 것과 같다.
     try std.testing.expect(std.mem.indexOf(u8, owner, "site={s}") != null);

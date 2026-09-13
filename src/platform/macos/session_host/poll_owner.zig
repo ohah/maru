@@ -461,17 +461,21 @@ pub const Owner = struct {
         // **어느 줄이 닫았는가.** 사유는 `socket_error` 29 곳·`resource_exhausted` 18 곳이 공유하고,
         // 주소는 사람이 풀어야 하는데 2026-09-13 에 그 풀이가 어긋나 막혔다. 이름이 그 자리를 끝낸다.
         var site: []const u8 = "-";
+        // **이름만으로 못 좁히는 자리가 있다.** `invalidate_purge_tracker` 는 `Stale`(트래커 신원)과
+        // `PartialFrame`(소켓에 절반 쓰인 청크)으로 실패하는데 고칠 곳이 정반대다.
+        var close_err: []const u8 = "-";
         if (self.clients[index]) |client| {
             why = if (client.closeReason()) |r| @tagName(r) else "open";
             why_ra = client.closeReturnAddress();
             site = client.closeSite();
+            close_err = client.closeError();
         }
         // 슬라이드가 있어야 앱이 다시 뜬 뒤에도 `atos -o <바이너리> -l <slide> <why_ra>` 로 풀린다.
         // 근거는 `client.zig` 의 `logPoisonCallSite` 주석과 같다.
         const slide: usize = @intCast(std.c._dyld_get_image_vmaddr_slide(0));
         host_log.line(
-            "session host closed client connection: slot={d} reason={s} why={s} site={s} why_ra=0x{x} slide=0x{x} pending_out={d} clients={d}",
-            .{ index, @tagName(reason), why, site, why_ra, slide, self.producer_remaining[index], self.activeCount() },
+            "session host closed client connection: slot={d} reason={s} why={s} site={s} err={s} why_ra=0x{x} slide=0x{x} pending_out={d} clients={d}",
+            .{ index, @tagName(reason), why, site, close_err, why_ra, slide, self.producer_remaining[index], self.activeCount() },
         );
     }
 

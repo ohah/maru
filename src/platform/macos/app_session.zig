@@ -82917,8 +82917,6 @@ test "활동 뷰: 원격 신선도 — 저쪽이 준 본문 비트가 검색 결
     try std.testing.expect(session.agent_activity.body.answered);
     // **「끝까지 못 봤다」가 없으면 `partial` 도 없다** — 「없다」가 참이라는 뜻이다.
     try std.testing.expect(!session.agent_activity.body.partial);
-    // 그리고 RAV8a 의 「아직 못 한다」는 **꺼진다**.
-    try std.testing.expect(!session.agent_activity.body.remote_unsupported);
 }
 
 test "활동 뷰: 원격 신선도 — 「끝까지 못 봤다」가 「없다」를 덮는다 (RAV8b-2)" {

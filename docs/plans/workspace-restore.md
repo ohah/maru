@@ -67,6 +67,16 @@ R5 는 **정상 종료 시점 한 번**만 저장한다(`saveWorkspace()` 호출
 | **R7-2 구동 + 완료 보고** | ABI `maru_macos_workspace_checkpoint_{arm,tick,quit_requested,capture_completed,write_completed,mark_*}` 와 Swift 의 effect 루프. 저장은 `captureWorkspaceSnapshot(useTerminationKeyWindow:publishedOnly:)` 가 하고, 성패가 `capture_completed`/`write_completed` 로 coordinator 에 되돌아간다 — 걱정했던 「`Void` 라 성패를 못 넘긴다」는 해소돼 있다. |
 | **R7-3 디바운스 주기** | `arm` 이 `debounce_ns = 500ms`, `retry_initial_ns = 1s`, `retry_max_ns = 30s` 로 정한다. |
 
+**✅ R7-4 실제 강제 종료 복원 gate — 구현·로컬 통과(2026-09-13).** 격리된 `HOME`·session-host root에서 실제 AppKit 앱과
+host-backed runtime 3개를 사용한다. 첫 실행은 2 Window·3 workspace의 incremental checkpoint가 원자적으로
+commit됐다는 제품 영수증을 받은 뒤 **GUI PID만** `SIGKILL`한다. host PID·runtime ID·PTY child PID는 죽이지
+않는다. 두 번째 실행은 같은 checkpoint에서 2 Window·3 workspace를 복원하고 세 runtime 모두에 재접속한 뒤,
+host PID·runtime ID·child PID 불변, 강제 종료 전후 출력·scrollback 보존, replacement spawn 0을 구조화 artifact로
+증명한다(`zig build macos-session-host-r7-integration-smoke`). 하네스는 테스트가 만든 exact PID·socket·manifest만 정리하며 사용자의 기본 HOME/session-host
+namespace를 열거하거나 삭제하지 않는다. 구조화 artifact는 세 actual `host_id/runtime_id/host_pid/child_pid` 행과
+topology, historical·detached output, scrollback, replacement spawn 0을 남긴다. PR CI의
+`keep-alive recovered session macOS` job에도 같은 task를 연결했다.
+
 신호는 `AppSession.workspaceChanged(kind)` 하나로 들어가고, `kind` 가 무엇이 바뀌었는지 구분한다
 (`topology`/`selection`/`ordering`/`appearance`/`dock`/`naming`/`scm_base`/`runtime_binding`/`persisted_surface`/
 `explorer_roots`). 호출부는 **manifest 에 보이는 transaction 의 성공 꼬리에서만** 부른다 — 진행 중에 부르면

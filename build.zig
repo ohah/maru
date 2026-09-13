@@ -2812,6 +2812,43 @@ pub fn build(b: *std.Build) void {
         session_host_cr6c_assert.step.dependOn(&run_session_host_cr6c_appkit.step);
         session_host_cr6c_appkit_step.dependOn(&session_host_cr6c_assert.step);
 
+        const session_host_r7_integration_step = b.step(
+            "macos-session-host-r7-integration-smoke",
+            "Run actual AppKit incremental checkpoint, GUI SIGKILL, and exact three-runtime restore smoke",
+        );
+        const session_host_r7_fixture = b.addSystemCommand(&.{
+            "sh", "-eu", "-c",
+            "root=zig-out/maru-macos-app/session-host-r7-home; " ++
+                "rm -rf \"$root\"; mkdir -p \"$root/Library/Application Support/maru\" \"$root/.config/maru\"; " ++
+                "printf '%s\\n' 'session.keep-alive-after-quit = true' > \"$root/.config/maru/config\"",
+        });
+        session_host_r7_fixture.setCwd(b.path("."));
+        const run_session_host_r7_integration = b.addRunArtifact(session_host_cr6c_appkit_harness);
+        run_session_host_r7_integration.setCwd(b.path("."));
+        run_session_host_r7_integration.setEnvironmentVariable(
+            "MARU_SESSION_HOST_CR6C_APP_EXE",
+            b.pathFromRoot("zig-out/Maru.app/Contents/MacOS/maru-macos-app"),
+        );
+        run_session_host_r7_integration.setEnvironmentVariable(
+            "MARU_SESSION_HOST_CR6C_PRODUCT_EXE",
+            b.pathFromRoot("zig-out/Maru.app/Contents/MacOS/maru"),
+        );
+        run_session_host_r7_integration.setEnvironmentVariable("MARU_SESSION_HOST_R7_INTEGRATION_SMOKE", "1");
+        run_session_host_r7_integration.setEnvironmentVariable(
+            "MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT",
+            b.pathFromRoot("zig-out/maru-macos-app/session-host-r7-home"),
+        );
+        isolateMacosProductTest(b, run_session_host_r7_integration, b.pathFromRoot("zig-out/maru-macos-app/session-host-r7-home"), "r7");
+        run_session_host_r7_integration.setEnvironmentVariable(
+            "MARU_CONFIG",
+            b.pathFromRoot("zig-out/maru-macos-app/session-host-r7-home/.config/maru/config"),
+        );
+        run_session_host_r7_integration.setEnvironmentVariable("MARU_WEB_APP_ROOT", b.pathFromRoot("web/dist"));
+        run_session_host_r7_integration.step.dependOn(&macos_app_bundle.step);
+        run_session_host_r7_integration.step.dependOn(&file_panel_web_build.step);
+        run_session_host_r7_integration.step.dependOn(&session_host_r7_fixture.step);
+        session_host_r7_integration_step.dependOn(&run_session_host_r7_integration.step);
+
         const signed_candidate_app = b.option(
             []const u8,
             "session-host-signed-candidate-app",
@@ -18991,7 +19028,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"P4 C3"},
         });
         const run_checkpoint_product_boundary_tests = b.addRunArtifact(checkpoint_product_boundary_tests);
-        run_checkpoint_product_boundary_tests.addArg("--maru-expect-tests=2");
+        run_checkpoint_product_boundary_tests.addArg("--maru-expect-tests=3");
         run_checkpoint_product_boundary_tests.setCwd(b.path("."));
         workspace_checkpoint_product_step.dependOn(&run_checkpoint_product_boundary_tests.step);
         if (checkpoint_product_optimize == .Debug) boundary_step.dependOn(&run_checkpoint_product_boundary_tests.step);

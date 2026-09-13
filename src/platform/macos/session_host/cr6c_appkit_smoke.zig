@@ -128,6 +128,207 @@ const RuntimeProcessIdentity = struct {
     child_pid: i32,
 };
 
+const r7_runtime_count = 3;
+
+fn runR7Integration(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    app_path: [:0]const u8,
+    product_path: [:0]const u8,
+) !void {
+    const artifact_raw = std.c.getenv("MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT") orelse
+        return error.MissingArtifactRoot;
+    const artifact_root = std.mem.span(artifact_raw);
+    if (artifact_root.len == 0 or artifact_root[0] != '/') return error.InvalidArtifactRoot;
+    const isolated_raw = std.c.getenv(short_endpoint.root_override_env) orelse
+        return error.MissingSessionHostRoot;
+    const isolated_root: [:0]const u8 = std.mem.span(isolated_raw);
+    try short_endpoint.prepareCurrentUserNamespace();
+    var base_buf: [256]u8 = undefined;
+    const base = try short_endpoint.currentUserRootPathIn(&base_buf);
+    var dir_buf: [192]u8 = undefined;
+    const session_dir = try discovery.sessionHostDirPath(&dir_buf, base);
+    const host_id = (@as(u128, @intCast(std.c.getpid())) << 64) | 0xA700_0000_0000_0001;
+    var socket_buf: [160]u8 = undefined;
+    const socket = try short_endpoint.socketPathUnder(&socket_buf, isolated_root, host_id);
+    const dir_z = try allocator.dupeZ(u8, session_dir);
+    defer allocator.free(dir_z);
+    const socket_z = try allocator.dupeZ(u8, socket);
+    defer allocator.free(socket_z);
+    var host_buf: [33]u8 = undefined;
+    const host_text = try std.fmt.bufPrintZ(&host_buf, "{x:0>32}", .{host_id});
+
+    var artifacts_owned = true;
+    defer if (artifacts_owned) {
+        _ = cleanupExactHostArtifacts(io, session_dir, socket, host_id);
+        _ = cleanupR7IsolatedRoot(session_dir, isolated_root);
+    };
+
+    const daemon_pid = std.c.fork();
+    if (daemon_pid < 0) return error.ForkFailed;
+    if (daemon_pid == 0) {
+        _ = std.c.setsid();
+        const argv = [_:null]?[*:0]const u8{
+            product_path.ptr, "__session-host", dir_z.ptr, socket_z.ptr, host_text.ptr,
+        };
+        _ = std.c.execve(product_path.ptr, &argv, @ptrCast(std.c.environ));
+        std.c._exit(127);
+    }
+    var daemon_owned = true;
+    defer if (daemon_owned) terminateAndReap(daemon_pid);
+
+    var admin: ?client_mod.Client = null;
+    for (0..250) |_| {
+        admin = client_mod.Client.connect(allocator, socket, .gui) catch null;
+        if (admin != null) break;
+        _ = usleep(20 * 1000);
+    }
+    if (admin == null) return error.DaemonNotReady;
+    defer if (admin) |*client| client.deinit();
+
+    var runtime_ids: [r7_runtime_count][32]u8 = undefined;
+    for (0..r7_runtime_count) |index| {
+        const params = try std.fmt.allocPrint(
+            allocator,
+            "{{\"argv\":[\"/bin/sh\",\"-c\",\"i=0; while [ $i -lt 48 ]; do printf 'R7-{d}-HISTORY-%02d\\n' \\\"$i\\\"; i=$((i+1)); done; exec /bin/cat\"],\"cols\":80,\"rows\":24}}",
+            .{index},
+        );
+        defer allocator.free(params);
+        const response = try admin.?.call("runtime.spawn", params);
+        defer allocator.free(response);
+        runtime_ids[index] = client_mod.extractRuntimeId(response) orelse return error.RuntimeIdMissing;
+    }
+    admin.?.deinit();
+    admin = null;
+
+    try waitR7Controllers(allocator, socket, &runtime_ids, false);
+    var identities_before: [r7_runtime_count]RuntimeProcessIdentity = undefined;
+    for (&runtime_ids, 0..) |*runtime_id, index| {
+        identities_before[index] = try queryRuntimeProcessIdentity(allocator, socket, runtime_id);
+    }
+
+    const workspace_path = try std.fmt.allocPrint(allocator, "{s}/Library/Application Support/maru/workspace.v1", .{artifact_root});
+    defer allocator.free(workspace_path);
+    const workspace = try std.fmt.allocPrint(
+        allocator,
+        "maru.workspace.v1\n" ++
+            "window tabs=2 active-tab=1\n" ++
+            "tab panes=1 active-pane=0 custom-name=\"R7-A\"\n" ++
+            "tree-node leaf pane=0\npane surfaces=1 active-term=0 custom-name=\"\"\n" ++
+            "surface custom-name=\"\" title=\"R7-A\" cwd=\"/tmp\" command=\"/bin/cat\" runtime-handle=\"{s}:{s}\" cols=80 rows=24\n" ++
+            "tab panes=1 active-pane=0 custom-name=\"R7-B\"\n" ++
+            "tree-node leaf pane=0\npane surfaces=1 active-term=0 custom-name=\"\"\n" ++
+            "surface custom-name=\"\" title=\"R7-B\" cwd=\"/tmp\" command=\"/bin/cat\" runtime-handle=\"{s}:{s}\" cols=80 rows=24\n" ++
+            "window tabs=1 active-tab=0 active-window=1\n" ++
+            "tab panes=1 active-pane=0 custom-name=\"R7-C\"\n" ++
+            "tree-node leaf pane=0\npane surfaces=1 active-term=0 custom-name=\"\"\n" ++
+            "surface custom-name=\"\" title=\"R7-C\" cwd=\"/tmp\" command=\"/bin/cat\" runtime-handle=\"{s}:{s}\" cols=80 rows=24\n",
+        .{ host_text, &runtime_ids[0], host_text, &runtime_ids[1], host_text, &runtime_ids[2] },
+    );
+    defer allocator.free(workspace);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = workspace_path, .data = workspace });
+
+    const receipt_path = try std.fmt.allocPrintSentinel(
+        allocator,
+        "{s}/Library/Application Support/maru/r7-checkpoint.receipt",
+        .{artifact_root},
+        0,
+    );
+    defer allocator.free(receipt_path);
+    const quit_path = try std.fmt.allocPrintSentinel(
+        allocator,
+        "{s}/Library/Application Support/maru/r7-quit.trigger",
+        .{artifact_root},
+        0,
+    );
+    defer allocator.free(quit_path);
+    _ = std.c.unlink(receipt_path.ptr);
+    _ = std.c.unlink(quit_path.ptr);
+    if (setenv("MARU_SESSION_HOST_R7_CHECKPOINT_SMOKE", "maru-test-only-v1", 1) != 0 or
+        setenv("MARU_SESSION_HOST_R7_CHECKPOINT_PHASE", "checkpoint", 1) != 0)
+        return error.EnvironmentFailed;
+
+    const first_app = try launchR7App(app_path);
+    var first_app_owned = true;
+    defer if (first_app_owned) terminateAndReap(first_app);
+    try waitR7Leaf(receipt_path, first_app, 30_000);
+    const checkpoint_generation_before = try validateR7Receipt(allocator, io, receipt_path);
+    try validateR7Workspace(allocator, io, workspace_path, host_text, &runtime_ids);
+    try waitR7Controllers(allocator, socket, &runtime_ids, true);
+    try killR7App(first_app);
+    first_app_owned = false;
+    try waitR7Controllers(allocator, socket, &runtime_ids, false);
+
+    for (&runtime_ids, 0..) |*runtime_id, index| {
+        try sendR7DetachedOutput(allocator, socket, runtime_id, index);
+    }
+    try waitR7Controllers(allocator, socket, &runtime_ids, false);
+    _ = std.c.unlink(receipt_path.ptr);
+    if (setenv("MARU_SESSION_HOST_R7_CHECKPOINT_PHASE", "restore", 1) != 0)
+        return error.EnvironmentFailed;
+    const second_app = try launchR7App(app_path);
+    var second_app_owned = true;
+    defer if (second_app_owned) terminateAndReap(second_app);
+    try waitR7Leaf(receipt_path, second_app, 30_000);
+    const checkpoint_generation_after = try validateR7Receipt(allocator, io, receipt_path);
+    try waitR7Controllers(allocator, socket, &runtime_ids, true);
+    try validateR7Inventory(allocator, socket, &runtime_ids);
+    try validateR7Workspace(allocator, io, workspace_path, host_text, &runtime_ids);
+
+    for (&runtime_ids, 0..) |*runtime_id, index| {
+        const after = try queryRuntimeProcessIdentity(allocator, socket, runtime_id);
+        if (after.host_pid != identities_before[index].host_pid or
+            after.child_pid != identities_before[index].child_pid)
+            return error.RuntimeProcessIdentityDrift;
+        var historical: [32]u8 = undefined;
+        const historical_marker = try std.fmt.bufPrint(&historical, "R7-{d}-HISTORY-47", .{index});
+        if (!try r7ScreenContains(allocator, socket, runtime_id, historical_marker))
+            return error.HistoricalOutputMissing;
+        var detached: [32]u8 = undefined;
+        const detached_marker = try std.fmt.bufPrint(&detached, "R7-AFTER-KILL-{d}", .{index});
+        if (!try r7ScreenContains(allocator, socket, runtime_id, detached_marker))
+            return error.DetachedOutputMissing;
+    }
+
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = quit_path, .data = "quit\n" });
+    try waitForExactExit(second_app, 30_000);
+    second_app_owned = false;
+    try waitR7Controllers(allocator, socket, &runtime_ids, false);
+    terminateAndReap(daemon_pid);
+    daemon_owned = false;
+    if (!cleanupExactHostArtifacts(io, session_dir, socket, host_id))
+        return error.HostArtifactCleanupFailed;
+    if (!cleanupR7IsolatedRoot(session_dir, isolated_root))
+        return error.IsolatedRootCleanupFailed;
+    artifacts_owned = false;
+
+    const artifact_path = try std.fmt.allocPrint(allocator, "{s}/r7-integration.json", .{artifact_root});
+    defer allocator.free(artifact_path);
+    const artifact = try std.fmt.allocPrint(
+        allocator,
+        "{{\"schema\":\"maru.session-host-r7-integration.v1\",\"topology\":{{\"windows\":2,\"workspaces\":3}}," ++
+            "\"checkpoint_generation_before\":{d},\"checkpoint_generation_after\":{d},\"identity\":[" ++
+            "{{\"host_id\":\"{s}\",\"runtime_id\":\"{s}\",\"host_pid\":{d},\"child_pid\":{d}}}," ++
+            "{{\"host_id\":\"{s}\",\"runtime_id\":\"{s}\",\"host_pid\":{d},\"child_pid\":{d}}}," ++
+            "{{\"host_id\":\"{s}\",\"runtime_id\":\"{s}\",\"host_pid\":{d},\"child_pid\":{d}}}]," ++
+            "\"runtime_count\":3,\"same_host_pid\":true,\"all_child_pids_preserved\":true," ++
+            "\"historical_output_preserved\":true,\"scrollback_preserved\":true," ++
+            "\"detached_output_preserved\":true,\"replacement_spawn_count\":0," ++
+            "\"cleanup_complete\":true,\"result\":\"passed\"}}\n",
+        .{
+            checkpoint_generation_before,  checkpoint_generation_after,
+            host_text,                     &runtime_ids[0],
+            identities_before[0].host_pid, identities_before[0].child_pid,
+            host_text,                     &runtime_ids[1],
+            identities_before[1].host_pid, identities_before[1].child_pid,
+            host_text,                     &runtime_ids[2],
+            identities_before[2].host_pid, identities_before[2].child_pid,
+        },
+    );
+    defer allocator.free(artifact);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = artifact_path, .data = artifact });
+}
+
 const AutoReconnectFault = struct {
     trigger_path: [:0]const u8,
     output_path: [:0]const u8,
@@ -283,6 +484,9 @@ pub fn main(init: std.process.Init) !void {
     if (product_path.len == 0 or product_path[0] != '/') return error.InvalidProductExecutable;
     const product_path_z = try allocator.dupeZ(u8, product_path);
     defer allocator.free(product_path_z);
+    if (std.c.getenv("MARU_SESSION_HOST_R7_INTEGRATION_SMOKE") != null) {
+        return runR7Integration(allocator, io, app_path_z, product_path_z);
+    }
     const signed_candidate_before = if (signed_app_quit) |config| blk: {
         if (!upgrade_limits.canonicalReleaseTestUuid(config.test_uuid))
             return error.InvalidTestUuid;
@@ -716,6 +920,198 @@ pub fn main(init: std.process.Init) !void {
             },
         });
     }
+}
+
+fn launchR7App(app_path: [:0]const u8) !c_int {
+    const pid = std.c.fork();
+    if (pid < 0) return error.ForkFailed;
+    if (pid == 0) {
+        const argv = [_:null]?[*:0]const u8{app_path.ptr};
+        _ = std.c.execve(app_path.ptr, &argv, @ptrCast(std.c.environ));
+        std.c._exit(127);
+    }
+    return pid;
+}
+
+fn waitR7Leaf(path: [:0]const u8, app_pid: c_int, timeout_ms: usize) !void {
+    var elapsed: usize = 0;
+    while (elapsed < timeout_ms) : (elapsed += 10) {
+        if (access(path.ptr, 0) == 0) return;
+        if (std.c.kill(app_pid, @enumFromInt(0)) != 0) return error.AppExitedBeforeCheckpoint;
+        _ = usleep(10 * 1000);
+    }
+    return error.CheckpointReceiptTimedOut;
+}
+
+fn killR7App(pid: c_int) !void {
+    if (std.c.kill(pid, std.posix.SIG.KILL) != 0) return error.AppKillFailed;
+    var status: c_int = 0;
+    while (std.c.waitpid(pid, &status, 0) < 0) {
+        if (std.posix.errno(-1) != .INTR) return error.WaitFailed;
+    }
+    const unsigned: u32 = @bitCast(status);
+    if (!std.c.W.IFSIGNALED(unsigned) or std.c.W.TERMSIG(unsigned) != std.posix.SIG.KILL)
+        return error.UnexpectedAppKillStatus;
+}
+
+fn waitR7Controllers(
+    allocator: std.mem.Allocator,
+    socket: [:0]const u8,
+    runtime_ids: *const [r7_runtime_count][32]u8,
+    expected: bool,
+) !void {
+    for (0..500) |_| {
+        var client = client_mod.Client.connect(allocator, socket, .gui) catch {
+            _ = usleep(10 * 1000);
+            continue;
+        };
+        var matched = true;
+        for (runtime_ids) |runtime_id| {
+            var params_buf: [80]u8 = undefined;
+            const params = try std.fmt.bufPrint(&params_buf, "{{\"runtime_id\":\"{s}\"}}", .{&runtime_id});
+            const response = client.call("runtime.get", params) catch {
+                matched = false;
+                break;
+            };
+            defer allocator.free(response);
+            const controller = std.mem.indexOf(u8, response, "\"has_controller\":true") != null;
+            if (controller != expected) {
+                matched = false;
+                break;
+            }
+        }
+        client.deinit();
+        if (matched) return;
+        _ = usleep(10 * 1000);
+    }
+    return error.ControllerStateTimedOut;
+}
+
+fn sendR7DetachedOutput(
+    allocator: std.mem.Allocator,
+    socket: [:0]const u8,
+    runtime_id: *const [32]u8,
+    index: usize,
+) !void {
+    var client = try client_mod.Client.connect(allocator, socket, .gui);
+    defer client.deinit();
+    var attach_buf: [128]u8 = undefined;
+    const attach_params = try std.fmt.bufPrint(
+        &attach_buf,
+        "{{\"runtime_id\":\"{s}\",\"mode\":\"controller\"}}",
+        .{runtime_id},
+    );
+    const response = try client.call("runtime.attach", attach_params);
+    defer allocator.free(response);
+    const stream_id = client_mod.extractU64Field(response, "\"stream_id\":") orelse
+        return error.RuntimeAttachFailed;
+    const snapshot = try client.readSnapshot(stream_id);
+    allocator.free(snapshot);
+    var input_buf: [40]u8 = undefined;
+    const input = try std.fmt.bufPrint(&input_buf, "R7-AFTER-KILL-{d}\n", .{index});
+    try client.sendInput(stream_id, input);
+    _ = usleep(100 * 1000);
+    // Closing this short-lived controller is the exact abrupt-client boundary under test. Do not
+    // issue a correlated detach RPC while an echoed delta can be in flight on the same stream.
+}
+
+fn validateR7Inventory(
+    allocator: std.mem.Allocator,
+    socket: [:0]const u8,
+    runtime_ids: *const [r7_runtime_count][32]u8,
+) !void {
+    var client = try client_mod.Client.connect(allocator, socket, .gui);
+    defer client.deinit();
+    const inventory = try client.call(
+        "runtime.inventory",
+        "{\"cursor\":\"\",\"limit\":256,\"membership_generation\":0}",
+    );
+    defer allocator.free(inventory);
+    if (std.mem.indexOf(u8, inventory, "\"total\":3") == null)
+        return error.ReplacementRuntimeSpawned;
+    for (runtime_ids) |runtime_id| {
+        if (std.mem.count(u8, inventory, &runtime_id) != 1)
+            return error.RuntimeInventoryMismatch;
+    }
+}
+
+fn validateR7Receipt(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    path: []const u8,
+) !u64 {
+    const receipt = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(4096));
+    defer allocator.free(receipt);
+    const prefix = "schema=maru.session-host-r7-checkpoint.v1\ngeneration=";
+    if (!std.mem.startsWith(u8, receipt, prefix)) return error.InvalidCheckpointReceipt;
+    const generation_text = std.mem.trim(u8, receipt[prefix.len..], "\r\n");
+    const generation = std.fmt.parseInt(u64, generation_text, 10) catch
+        return error.InvalidCheckpointReceipt;
+    if (generation == 0) return error.InvalidCheckpointReceipt;
+    return generation;
+}
+
+fn validateR7Workspace(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    path: []const u8,
+    host_id: []const u8,
+    runtime_ids: *const [r7_runtime_count][32]u8,
+) !void {
+    const workspace = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1024 * 1024));
+    defer allocator.free(workspace);
+    if (std.mem.count(u8, workspace, "\nwindow ") != 2 or
+        std.mem.count(u8, workspace, "\ntab ") != 3 or
+        std.mem.count(u8, workspace, "\nsurface ") != 3)
+        return error.WorkspaceTopologyMismatch;
+    for (runtime_ids) |runtime_id| {
+        var handle_buf: [66]u8 = undefined;
+        const handle = try std.fmt.bufPrint(&handle_buf, "{s}:{s}", .{ host_id, &runtime_id });
+        if (std.mem.count(u8, workspace, handle) != 1)
+            return error.WorkspaceRuntimeBindingMismatch;
+    }
+}
+
+fn r7ScreenContains(
+    allocator: std.mem.Allocator,
+    socket: [:0]const u8,
+    runtime_id: *const [32]u8,
+    marker: []const u8,
+) !bool {
+    var client = try client_mod.Client.connect(allocator, socket, .gui);
+    defer client.deinit();
+    var attach_buf: [128]u8 = undefined;
+    const attach_params = try std.fmt.bufPrint(
+        &attach_buf,
+        "{{\"runtime_id\":\"{s}\",\"mode\":\"observer\"}}",
+        .{runtime_id},
+    );
+    const response = try client.call("runtime.attach", attach_params);
+    defer allocator.free(response);
+    const stream_id = client_mod.extractU64Field(response, "\"stream_id\":") orelse
+        return error.RuntimeAttachFailed;
+    const snapshot = try client.readSnapshot(stream_id);
+    defer allocator.free(snapshot);
+    var assembler = @import("maru").session.screen_assembler.ScreenAssembler.initForCodec(
+        allocator,
+        client.screen_codec_version,
+    );
+    defer assembler.deinit();
+    try assembler.applySnapshot(snapshot);
+    var row_buf: [8192]u8 = undefined;
+    for (0..assembler.rowCount()) |row_index| {
+        var used: usize = 0;
+        for (assembler.rowRuns(@intCast(row_index))) |run| {
+            for (0..run.count) |_| {
+                if (used + run.grapheme.len > row_buf.len) break;
+                @memcpy(row_buf[used .. used + run.grapheme.len], run.grapheme);
+                used += run.grapheme.len;
+            }
+        }
+        if (std.mem.indexOf(u8, row_buf[0..used], marker) != null)
+            return assembler.scrollback_len > 0;
+    }
+    return false;
 }
 
 fn queryRuntimeProcessIdentity(
@@ -1351,6 +1747,21 @@ fn cleanupExactHostArtifacts(
     return access(socket.ptr, 0) != 0 and
         access(host_dir.ptr, 0) != 0 and
         access(log_path.ptr, 0) != 0;
+}
+
+fn cleanupR7IsolatedRoot(session_dir: [:0]const u8, isolated_root: [:0]const u8) bool {
+    var hosts_buf: [768]u8 = undefined;
+    const hosts = std.fmt.bufPrintZ(&hosts_buf, "{s}/hosts", .{session_dir}) catch return false;
+    var incidents_buf: [768]u8 = undefined;
+    const incidents = std.fmt.bufPrintZ(&incidents_buf, "{s}/incidents", .{session_dir}) catch return false;
+    var socket_dir_buf: [96]u8 = undefined;
+    const socket_dir = short_endpoint.socketDirPathUnder(&socket_dir_buf, isolated_root) catch return false;
+    _ = std.c.rmdir(hosts.ptr);
+    _ = std.c.rmdir(incidents.ptr);
+    _ = std.c.rmdir(session_dir.ptr);
+    _ = std.c.rmdir(socket_dir.ptr);
+    _ = std.c.rmdir(isolated_root.ptr);
+    return access(isolated_root.ptr, 0) != 0;
 }
 
 test "signed app Quit evidence is canonical and contains only durable observations" {

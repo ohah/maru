@@ -3890,6 +3890,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// background checkpoint has committed.  The external harness may kill the process solely
     /// on timeout; a passing row must leave through the normal final-checkpoint state machine.
     private var sessionHostR1TombstoneQuitRequested = false
+    private var sessionHostR7CheckpointQuitRequested = false
     private var workspaceCheckpointFailureNotice: UInt32 = UInt32(MARU_WORKSPACE_CHECKPOINT_NOTICE_NONE)
     private var workspaceCheckpointActiveWindow: ObjectIdentifier?
     private var workspaceCheckpointFrames: [ObjectIdentifier: NSRect] = [:]
@@ -4178,6 +4179,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
     private var isSessionHostR1TombstoneSmokeMode: Bool {
         ProcessInfo.processInfo.environment["MARU_SESSION_HOST_R1_TOMBSTONE_SMOKE"] == "maru-test-only-v1"
+    }
+    private var isSessionHostR7CheckpointSmokeMode: Bool {
+        ProcessInfo.processInfo.environment["MARU_SESSION_HOST_R7_CHECKPOINT_SMOKE"] == "maru-test-only-v1"
     }
     private var isSessionHostC4QuitCancelSmokeMode: Bool {
         ProcessInfo.processInfo.environment["MARU_SESSION_HOST_C4_QUIT_CANCEL_SMOKE"] == "maru-test-only-v1"
@@ -4593,6 +4597,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         let recoverySmoke = isSessionHostRecoverySmokeMode
         let r2aCheckpointSmoke = isSessionHostR2aCheckpointSmokeMode
         let r1TombstoneSmoke = isSessionHostR1TombstoneSmokeMode
+        let r7CheckpointSmoke = isSessionHostR7CheckpointSmokeMode
         let preparedWorkspace = ((smokeMode && !recoverySmoke && !r2aCheckpointSmoke) || restoreDisabled) ? nil : loadWorkspaceText()
         let preparedWorkspaceWindowCount = preparedWorkspace.map { text -> Int64 in
             let bytes = Array(text.utf8)
@@ -4686,7 +4691,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // generated checkpoint, rather than the input fixture, the authority for the second launch.
         // The exact test-only token prevents an arbitrary environment value from changing product
         // persistence behavior.
-        let checkpointInitialDirty = (preparedWorkspaceWindowCount ?? 0) <= 0 || r1TombstoneSmoke
+        let checkpointInitialDirty = (preparedWorkspaceWindowCount ?? 0) <= 0 || r1TombstoneSmoke || r7CheckpointSmoke
         armWorkspaceCheckpoint(initialDirty: checkpointInitialDirty)
         if isSessionHostC4QuitCancelSmokeMode {
             // The harness makes the existing checkpoint user-immutable. This seam only requests the
@@ -12047,6 +12052,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     private func driveWorkspaceCheckpoint() {
         guard workspaceCheckpointArmed else { return }
+        driveSessionHostR7QuitTrigger()
         // 복원이 불완전한 실행은 **워크스페이스 파일에 아무것도 쓰지 않는다.** 화면에 일부만 복원된
         // 상태를 커밋하면 저장 파일에서 나머지가 영구히 사라진다.
         //
@@ -12188,6 +12194,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                         }
                         if committed {
                             self.setWorkspaceCheckpointFailure(UInt32(MARU_WORKSPACE_CHECKPOINT_NOTICE_NONE))
+                            self.writeSessionHostR7CheckpointReceipt(generation: generation)
                         }
                         self.handleWorkspaceCheckpointEffect(next, snapshot: nil)
                         if committed,
@@ -12212,6 +12219,42 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 finishFinalWorkspaceCheckpoint()
             }
         }
+    }
+
+    /// Test-only observation seam for the R7 forced-termination product harness. The receipt is
+    /// emitted only after the ordinary atomic workspace publisher reports COMMITTED; it neither
+    /// selects the checkpoint destination nor changes capture, retry, or application lifetime.
+    private func writeSessionHostR7CheckpointReceipt(generation: UInt64) {
+        guard isSessionHostR7CheckpointSmokeMode,
+              let workspaceURL = workspaceFileURL else { return }
+        let url = workspaceURL.deletingLastPathComponent().appendingPathComponent("r7-checkpoint.receipt")
+        let body = "schema=maru.session-host-r7-checkpoint.v1\ngeneration=\(generation)\n"
+        do {
+            try Data(body.utf8).write(to: url, options: .atomic)
+        } catch {
+            fputs("workspace checkpoint: R7 receipt write failed\n", stderr)
+            return
+        }
+    }
+
+    /// Keeps the R7 harness's observation and lifetime controls separate: the harness first sees
+    /// all three live controller attachments, then creates this one-shot leaf. Only the exact test
+    /// token and restore phase can turn that leaf into the ordinary AppKit Quit transaction.
+    private func driveSessionHostR7QuitTrigger() {
+        guard isSessionHostR7CheckpointSmokeMode,
+              ProcessInfo.processInfo.environment["MARU_SESSION_HOST_R7_CHECKPOINT_PHASE"] == "restore",
+              !sessionHostR7CheckpointQuitRequested,
+              let workspaceURL = workspaceFileURL else { return }
+        let url = workspaceURL.deletingLastPathComponent().appendingPathComponent("r7-quit.trigger")
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        do {
+            try FileManager.default.removeItem(at: url)
+        } catch {
+            return
+        }
+        sessionHostR7CheckpointQuitRequested = true
+        bypassQuitConfirm = true
+        NSApp.terminate(nil)
     }
 
     private func beginFinalWorkspaceCheckpoint(surface: TerminalSurface?, deferredAppKitQuit: Bool) {

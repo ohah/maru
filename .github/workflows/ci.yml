@@ -582,8 +582,8 @@ jobs:
     # 실측 **2분 14초**로 macOS 잡 중 가장 싸다(slow observer 1m46s, bundled CLI 7m09s, Debug 8m01s,
     # file explorer 14m04s) — 병렬이라 wall-clock 영향도 사실상 없다.
     #
-    # 복구 스모크는 **정상 종료 → 재실행 → 재접속**을, R1 스모크는 ended checkpoint를 두 번 게시한 뒤의
-    # **SIGKILL → 재실행**을 덮는다. live runtime이 있는 최신 멀티 윈도우 checkpoint 강제 종료 복원(R7)·
+    # 복구 스모크는 **정상 종료 → 재실행 → 재접속**을, R1 스모크는 ended checkpoint의 반복 게시를,
+    # R7 스모크는 live runtime 3개의 최신 2-window checkpoint 뒤 **GUI SIGKILL → 재실행**을 덮는다.
     # GUI 부재 중 알림(OS 배너)은 여전히 덮지 않는다.
     if: ${{ github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') }}
     runs-on: macos-15
@@ -612,6 +612,10 @@ jobs:
       # 띄운다. 두 실행 모두 셸 child 0이어야 하므로 unit의 restoreSpawn sentinel보다 강한 제품 경계다.
       - name: durable tombstone 다회 재실행 스모크
         run: mise run macos-session-host-r1-tombstone-smoke
+      # 원자적 incremental checkpoint commit 뒤 첫 GUI만 SIGKILL한다. 두 번째 실제 AppKit 실행에서
+      # 2 Window·3 workspace, exact host/runtime/child PID, scrollback, GUI 부재 중 출력을 검증한다.
+      - name: 최신 멀티 창 checkpoint 강제 종료 복원 스모크
+        run: mise run macos-session-host-r7-integration-smoke
       # 실제 AppKit terminateLater 경로에서 final checkpoint 성공과 권한 실패를 모두 실행한다.
       # 성공은 앱 종료, 실패는 앱과 이전 완전본 보존이며 각 reply가 exact once여야 한다.
       - name: checkpoint Quit 성공·취소 스모크

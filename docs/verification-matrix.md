@@ -44,8 +44,11 @@
 > **오래 「CI 에서 못 돈다」고 적혀 있었으나 시도한 적이 없는 가정이었다** — 재 보니 러너에 WindowServer 가
 > 있고 통과한다(2분 14초, macOS 잡 중 최저). 후자는 ended manifest를 제품 checkpoint 생성본으로 두 번
 > 재실행하고 각 실행이 실제 AppKit Quit/final checkpoint를 거쳐 exit 0 한 뒤 exact tombstone을 확인한다. timeout
-> `SIGKILL`은 실패 정리에만 쓰인다. ⚠️ 덮지 않는 것: live runtime이
-> 있는 최신 멀티 윈도우 checkpoint의 강제 종료 복원(R7), GUI 부재 중 알림(OS 배너), Developer ID artifact.
+> `SIGKILL`은 일반 smoke의 실패 정리에만 쓰인다. R7 전용 제품 gate에서는 원자적 incremental checkpoint
+> commit 영수증 뒤 첫 GUI PID만 의도적으로 `SIGKILL`하고, 두 번째 실제 AppKit 실행이 2 Window·3 workspace와
+> 세 live runtime의 host/runtime/child identity·출력·scrollback을 replacement spawn 없이 복원하는지 검증한다.
+> R7 전용 gate는 로컬 통과했고 PR의 `keep-alive recovered session macOS` job에 연결돼 있다.
+> ⚠️ 아직 덮지 않는 것: GUI 부재 중 알림(OS 배너), Developer ID artifact.
 
 > Developer ID tombstone 경로는 `release.yml`의 `session host tombstone product` job까지 배선됐다. exact-attempt
 > DMG를 read-only mount하고 그 안의 `Maru.app`만 두 번 정상 Quit시켜 canonical

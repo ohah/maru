@@ -12,18 +12,36 @@ const Budget = struct {
     }
 };
 
+// **이 게이트는 배포와 같은 모드(ReleaseFast)로 돈다.** 2026-09-13 이전에는 `-Doptimize` 없이
+// 불려 Debug 로 돌았고, 그때의 반복 수·예산·아래 주석들이 전부 Debug 기준이었다. 같은 기계에서
+// 두 모드를 돌려 보면 항목에 따라 3~256배 갈린다(scrollback_rewrap 1951ms vs 8ms). 그래서:
+//
+//   - Debug 수치는 예산의 최대 97% 를 써 러너가 붐빌 때 **제품과 무관하게** 실패했고,
+//   - 릴리스 수치는 예산의 0.2~5% 라 배포 빌드가 몇 배 느려져도 **조용히 통과**했다.
+//
+// 모드를 옮긴 뒤(#3659) 반복 수를 올려 CI 릴리스 측정이 100~700ms 대에 오게 했다 — 그보다 작으면
+// 러너 잡음에 묻혀 회귀를 못 본다. 예산은 그 값의 약 3배로, 3배 이상 회귀를 잡으면서 러너 변동을
+// 흡수한다. **로컬 값으로 CI 예산을 정하지 않는다**(아래 core_find_scrollback 주석의 교훈) —
+// 이 값들은 CI 실측(ubuntu-latest, ReleaseFast)을 근거로 한다.
+//
+// **규칙: CI 사용률 30% 언저리.** 처음 로컬에서 외삽한 예산으로 CI 를 돌렸더니 render_build_scrolled
+// 가 45%, drawlist 40%, snapshot_serialize 39% 로 나왔다(로컬↔CI 비율이 항목마다 1.8~3.4배로
+// 흩어진다 — 역시 로컬로는 못 정한다). 그 셋만 CI 실측 x3.3 으로 올렸다. 40% 를 넘으면 러너가
+// 붐빌 때 제품과 무관하게 실패하므로, 새 항목을 더하거나 반복 수를 바꾸면 **CI 수치로** 다시 맞춘다.
+//
+// 모드가 다시 어긋나지 않게 `tests/perf_gate_mode_boundary.zig` 가 배포 모드와 짝을 맞춰 잠근다.
 const budgets = struct {
-    const core_large_output_ns = 2 * std.time.ns_per_s;
+    const core_large_output_ns = 800 * std.time.ns_per_ms;
     // CI runner(ubuntu-latest)는 로컬보다 느리고 부하 변동이 커 1s budget을 간헐 초과했다(5000회 → budget
     // 1s면 회당 0.2ms 상한이라 여유가 없음). 다른 벤치와 같은 2s(회당 0.4ms 상한)로 둬 CI 변동을 흡수하되
     // 구조 회귀(2배+)는 잡는다 — perf는 머신 의존이라 budget 여유가 원칙(opt-in/required 양쪽).
-    const core_resize_loop_ns = 2 * std.time.ns_per_s;
-    const snapshot_serialize_ns = 1 * std.time.ns_per_s;
+    const core_resize_loop_ns = 1500 * std.time.ns_per_ms;
+    const snapshot_serialize_ns = 1000 * std.time.ns_per_ms; // CI 312ms = 39% 였다 → 31%
     // 재-wrap은 "resize 후 처음 과거를 보는 순간" 1회 비용이다(지연 마크). 50회 예산 2s는 회당
     // 40ms를 상한으로 고정한다. 실측(2026-08, cap 1000행)은 **빌드 모드마다 두 자릿수 배 다르므로**
     // 모드를 함께 적는다: 제품 빌드(ReleaseFast, macOS)는 회당 **0.16ms**라 사용자 체감이 없고,
-    // 이 게이트가 실제로 도는 CI Debug(ubuntu-latest)는 회당 ~10.5ms로 예산의 26%(12 run max 기준
-    // 30%)를 쓴다. 같은 Debug라도 macOS 로컬은 회당 ~38ms다.
+    // **이 게이트는 이제 ReleaseFast 로 돈다**(2026-09-13). 그 전에는 CI Debug 로 돌아 회당 ~10.5ms =
+    // 예산의 26% 였다 — 아래 Debug 수치들은 그 시절의 기록이고, 지금 게이트가 재는 값이 아니다.
     //
     // 위 "회당 ~30ms"는 원래 빌드 모드 표기 없이 적혀 있었다. 그 값이 어느 모드였는지 확인하려고
     // 스크롤백 저장 구조 개선 직전 커밋(ff76af1c^ = d8700899)에서 같은 벤치를 돌려 봤더니 Debug
@@ -40,7 +58,7 @@ const budgets = struct {
     // 반대 방향이다. 행마다 free+alloc하고 페이지를 pool로 회수/재할당하는 경로라 allocator 차이가
     // 의심되지만 확증하지 않았다. Maru는 macOS-first인데 이 게이트는 Linux에서만 도므로, 제품
     // 플랫폼의 Debug 비용은 CI가 보는 값보다 크다는 사실만 기록해 둔다(원인 규명은 별건).
-    const scrollback_rewrap_ns = 2 * std.time.ns_per_s;
+    const scrollback_rewrap_ns = 1200 * std.time.ns_per_ms;
     // 스크롤백 Find(findMatches)는 검색어 키 입력마다, 그리고 Find가 열린 채 출력이 있는 매 tick마다
     // core lock 아래에서 스크롤백 전체를 재스캔한다(app_session/find.zig `recomputeFind`,
     // app_session.zig의 tick 재검색). 인덱스도 결과 캐시도 없는 구조라 비용이 스크롤백 깊이에 선형인지가
@@ -51,31 +69,32 @@ const budgets = struct {
     // 57ms로 14% 차 — 스캔이 비용을 지배한다). 기본 1000행은 잡음에 묻혀 회귀 감지력이 없으므로
     // 5,000행으로 재고, needle은 매치가 다수 나오는 것을 골라 결과 append 경로까지 함께 덮는다.
     //
-    // 반복 수는 **CI 실측**으로 정했다. 이 게이트는 ubuntu-latest에서만 도는데 로컬 macOS보다 2.45배
-    // 느리다(같은 Debug 빌드). 처음엔 로컬 Debug 989ms=예산 50%를 근거로 40회로 뒀다가 CI에서
+    // 반복 수는 **CI 실측**으로 정한다(이 규율은 모드가 바뀌어도 그대로다). 아래 숫자들은 Debug 시절
+    // 기록이다 — ubuntu-latest 가 로컬 macOS 보다 2.45배 느렸다(같은 Debug 빌드). 처음엔 로컬 Debug 989ms=예산 50%를 근거로 40회로 뒀다가 CI에서
     // 2450ms로 **실패**했다 — 로컬 값으로 CI 예산을 정하면 안 된다는 뜻이다(항목별 로컬↔CI 비율이
     // 0.27~2.45배로 흩어져 다른 항목에서 외삽할 수도 없다). 20회·5,000행(총 스캔량 1/4)으로 줄여
     // 로컬 Debug 247ms → CI 예상 ~605ms = 예산의 30%가 된다. 여기에 CI 부하 변동(같은 코드로 12 run
     // max/avg ~1.2)을 얹은 max ~726ms = 36%로, 다른 항목의 실측 대역(max 기준 18~44%)과 같다.
     // 남은 여유가 감지 배율 ~2.75배라 구조 회귀(선형이 깨지는 제곱화, 셀당 여분 할당)를 잡는다.
-    const core_find_scrollback_ns = 2 * std.time.ns_per_s;
+    const core_find_scrollback_ns = 1200 * std.time.ns_per_ms;
     // kitty 이미지 파이프라인(buildGpuImages + planImageUploads)은 이미지가 있는 동안 매 frame 돈다.
     // 측정(2026-06): 최악(200 placement × 50 image)에서도 회당 ~0.87ms = 30Hz(33ms) 예산의 ~2.6%라
     // 캐시화(#10)가 불필요하다고 결론. 이 게이트는 그 비용이 조용히 회귀하지 않게 1000회 2s(회당 2ms
-    // 상한 — findImage O(placements×images)가 더 나빠지거나 sort/alloc 구조가 퇴화하면 잡는다)로 고정.
-    const kitty_image_pipeline_ns = 2 * std.time.ns_per_s;
+    // 상한)로 고정했었다. ReleaseFast 로 옮기며 75,000회로 올렸다 — 1,000회는 릴리스에서 4ms 라
+    // 잡음에 묻혔다. findImage O(placements×images) 퇴화나 sort/alloc 구조 회귀를 잡는다.
+    const kitty_image_pipeline_ns = 2000 * std.time.ns_per_ms;
     // I/O–렌더 스레딩(docs/io-render-threading.md §5): 렌더는 core_mutex를 잡은 채
     // renderSnapshot()+buildDrawList()로 dirty 셀을 DrawList로 복사한 뒤 언락한다(host.zig). 이
-    // 구간이 길면 그동안 I/O 스레드(코어 write)가 대기하므로, 그 락-보유 비용의 상한을 잰다. 200회
-    // 2s = 회당 10ms 상한(반복 수 근거는 measureRenderBuildDrawList 주석 — CI Debug 러너 여유;
+    // 구간이 길면 그동안 I/O 스레드(코어 write)가 대기하므로, 그 락-보유 비용의 상한을 잰다. 1,000회
+    // 1.5s = 회당 1.5ms 상한(200회 2s 는 Debug 시절 값이었다;
     // ReleaseFast 실측은 회당 ~0.12ms로 30Hz tick 대비 충분히 작다). 구조 회귀(셀당 비용 증가·여분
     // 할당)는 잡는다. perf는 머신 의존이라 budget 여유가 원칙(다른 벤치와 동일한 2s).
-    const render_build_drawlist_ns = 2 * std.time.ns_per_s;
-    const render_build_scrolled_ns = 2 * std.time.ns_per_s;
+    const render_build_drawlist_ns = 2000 * std.time.ns_per_ms; // CI 601ms = 40% 였다 → 30%
+    const render_build_scrolled_ns = 2200 * std.time.ns_per_ms; // CI 677ms = 45% 였다 → 31%
     // I/O–렌더 스레딩 Phase 3(docs/plans/io-render-threading.md §9.7): 메인발 코어 mutate를 I/O 스레드로 위임하는
     // CoreCommandQueue 1건 라운드트립(enqueue→pop→free) 비용 — 위임 latency의 바닥(락+append/pop+dupe).
     // UI 이벤트 빈도(스크롤·마우스 60~120Hz)에서 무시 가능해야 한다. 100k회 2s=회당 20µs 상한(구조 회귀만 잡는 여유).
-    const core_command_queue_ns = 2 * std.time.ns_per_s;
+    const core_command_queue_ns = 500 * std.time.ns_per_ms;
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -146,7 +165,7 @@ fn measureResizeLoop(allocator: std.mem.Allocator, io: std.Io) !Budget {
     defer core.deinit();
 
     // 창 크기 변경은 split, font size 변경, workspace 복구에서 자주 일어나므로 별도 예산으로 본다.
-    const iterations = 5_000;
+    const iterations = 40_000;
     const start = now(io);
     for (0..iterations) |iteration| {
         const cols: u16 = @intCast(20 + (iteration % 120));
@@ -187,7 +206,7 @@ fn measureScrollbackRewrap(allocator: std.mem.Allocator, io: std.Io) !Budget {
         try core.write(writer.buffered());
     }
 
-    const iterations = 50;
+    const iterations = 1_000;
     const start = now(io);
     for (0..iterations) |iteration| {
         const cols: u16 = @intCast(40 + (iteration % 100));
@@ -237,7 +256,7 @@ fn measureFindScrollback(allocator: std.mem.Allocator, io: std.Io) !Budget {
     // needle "source-1"은 line_no가 1로 시작하는 줄에 걸린다 — 1·10~19·100~199·1000~1999의 1,111줄
     // (실측)이 매치돼 스캔뿐 아니라 결과 append 경로도 함께 덮는다(논리 줄 안에서 비겹침이라 줄당 1개).
     // 스크롤백 0~4999가 cap에 정확히 들어가 eviction은 없고, 활성 화면(5000~5023)은 needle과 안 겹친다.
-    const iterations = 20;
+    const iterations = 160;
     const start = now(io);
     for (0..iterations) |_| try core.findMatches(allocator, "source-1", &matches);
     const elapsed = now(io) - start;
@@ -267,7 +286,7 @@ fn measureSnapshotSerialization(allocator: std.mem.Allocator, io: std.Io) !Budge
         try core.write(writer.buffered());
     }
 
-    const iterations = 200;
+    const iterations = 4_000;
     const start = now(io);
     for (0..iterations) |_| {
         const rendered = try maru.observability.snapshot.renderTerminalSnapshot(allocator, core.snapshot());
@@ -302,7 +321,7 @@ fn measureKittyImagePipeline(allocator: std.mem.Allocator, io: std.Io) !Budget {
     var uploaded: std.AutoHashMapUnmanaged(u32, u64) = .empty;
     defer uploaded.deinit(allocator);
 
-    const iterations = 1_000;
+    const iterations = 75_000;
     const start = now(io);
     for (0..iterations) |_| {
         // unicode placeholder(U=1) 채널은 이 측정의 대상이 아니다 — 빈 슬라이스면 그 경로를 건너뛴다.
@@ -344,7 +363,7 @@ fn measureRenderBuildDrawList(allocator: std.mem.Allocator, io: std.Io) !Budget 
     // 반복은 200회로 둔다 — `mise run perf`는 기본 Debug고, 가장 느린 게이트인 CI 러너(ubuntu)는
     // 이 셀-복사 루프에서 회당 ~4ms라 500회면 budget(2s)을 아슬하게 넘긴다(실측 2039ms). 200회면
     // CI ~0.8s로 다른 벤치와 같은 ~2.5x 여유고, ReleaseFast(회당 ~0.12ms)에서도 200 표본이면 안정적이다.
-    const iterations = 200;
+    const iterations = 1_000;
     const start = now(io);
     for (0..iterations) |_| {
         var list = try maru.renderer.buildDrawList(allocator, core.renderSnapshot());
@@ -384,7 +403,7 @@ fn measureRenderBuildScrolled(allocator: std.mem.Allocator, io: std.Io) !Budget 
     core.scrollViewport(45); // 화면 절반 위로
     _ = core.renderSnapshot(); // 첫 합성으로 viewport_cells 할당(이후엔 memcpy만) — 워밍업
 
-    const iterations = 200; // render_build_drawlist와 동일한 이유(CI budget 여유)
+    const iterations = 1_200; // render_build_drawlist와 동일한 이유(CI budget 여유)
     const start = now(io);
     for (0..iterations) |_| {
         var list = try maru.renderer.buildDrawList(allocator, core.renderSnapshot());
@@ -410,7 +429,7 @@ fn measureCoreCommandQueue(allocator: std.mem.Allocator, io: std.Io) !Budget {
     var queue = try maru.app.CoreCommandQueue.init(io, allocator, 64);
     defer queue.deinit();
 
-    const iterations = 100_000;
+    const iterations = 10_000_000;
     const start = now(io);
     for (0..iterations) |i| {
         try queue.enqueueBlocking(.{ .scroll = @intCast(i) });

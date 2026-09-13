@@ -46,7 +46,7 @@ macOS 로컬 shell 1개 surface
 - [네이티브 편집기 구현 계획](plans/native-editor.md) — [여러 뷰 축 실측·선례 원장](plans/native-editor-multi-view.md)(같은 파일 두 곳 보기·병합 편집기·Split in Group)
 - [에디터 Surface 단계 계획](plans/editor-surface.md)
 - [소스 컨트롤 도크 2판 단계 계획](plans/scm-dock.md)
-- [원격 SCM 단계 계획(RS1~RS4 — 원격 저장소 읽기·쓰기)](plans/remote-scm.md)
+- [원격 SCM 단계 계획(RS1~RS7 — 원격 저장소 읽기·쓰기·히스토리)](plans/remote-scm.md)
 - [원격 감시 단계 계획(RW1~RW5 — 저쪽에서 바뀌면 도크가 안다)](plans/remote-watch.md)
 - [원격 파일 트리 단계 계획(RF1~RF6 — 원격 pane 의 폴더를 트리에 그린다)](plans/remote-file-tree.md) — **설계 초안, 사용자 결정 다섯이 열려 있다**
 - [파일 탐색기 트리 컴포넌트 이관 단계 계획](plans/file-tree-component.md)

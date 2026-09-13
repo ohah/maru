@@ -858,13 +858,6 @@ pub const BodySearch = struct {
     answered: bool = false,
     /// 열지 못한 파일이 있었다.
     partial: bool = false,
-    /// 🔥 **원격이라 아직 못 한다**(RAV8a). 「본문에 그 말이 없다」와 **다른 사실**이다 — 조용히
-    /// 0 건을 내면 사용자는 전자로 읽는데 실제로는 **묻지도 않았다**(계약 §2.2).
-    ///
-    /// 이 축의 워커는 `chain` 을 통째로 받아 `Dir.cwd().openFile` 로 여는데, 원격 경로를 그렇게
-    /// 열면 **같은 모양의 홈 경로가 이쪽에도 있을 때 남의 대화를 읽는다**(계약 §2.1). 저쪽에서
-    /// 검색하는 것은 RAV8b 의 일이다.
-    remote_unsupported: bool = false,
     read_bytes: u64 = 0,
     search_ns: u64 = 0,
 
@@ -882,7 +875,6 @@ pub const BodySearch = struct {
         self.resubmit = false;
         self.answered = false;
         self.partial = false;
-        self.remote_unsupported = false;
         self.read_bytes = 0;
         self.search_ns = 0;
     }
@@ -3880,11 +3872,10 @@ pub fn noticeText(self: *const AppSession, buf: []u8) []const u8 {
     //
     // ⚠️ 2 회차가 이 분기를 넣었는데 자리가 `n == 0` **뒤**였다. 주석은 「개수보다 먼저다」라고
     // 적혀 있었으니 **주석이 거짓**이었고, 고치려던 혼동이 0 건일 때 고스란히 남아 있었다.
-    // 🔥 **「아직 못 한다」가 「다 못 봤다」보다도 먼저다**(RAV8a). 원격에서는 본문을 **묻지도
-    // 않았다** — 조용히 0 건을 내면 사용자는 「그 말이 본문에 없다」로 읽고 검색을 그만둔다.
-    const body_remote = self.agent_activity.body.remote_unsupported and
-        self.agent_activity.body.appliesTo(self.agent_activity.queryText());
-    if (body_remote) return maru.i18n.t(.agent_activity_body_remote_unsupported);
+    // 🔥 **RAV8a 의 「아직 로컬 세션만 됩니다」는 여기 없다.** RAV8b 가 저쪽에서 찾게 만든 뒤로
+    // 그 갈래는 **어떤 경로로도 참이 될 수 없다** — 낡은 헬퍼는 `--search` 에 `exit_unsupported` 로
+    // 죽어 아래 `partial` 로 오고, 그 전에 `versionMatches` 가 판을 대조해 갈아 끼운다.
+    // 세우는 자리가 없는 조건을 남겨 두면 다음 사람이 **그 경로가 산다고 읽는다**(계획 §30).
     const body_partial = self.agent_activity.body.partial and
         self.agent_activity.body.appliesTo(self.agent_activity.queryText());
     if (body_partial) return maru.i18n.t(.agent_activity_body_partial);
@@ -4198,7 +4189,11 @@ pub fn mergeResumedInto(self: *AppSession, result: *scan_backend.Result) bool {
     // 그 답을 **버리게** 한다 — 「틀린 목록을 보여 주는 것보다 한 번 더 훑는 편이 낫다」(§21.2).
     if (result.partial) return false;
     // **체인이 갈렸으면 앞 목록은 남의 세션 것이다**(§21.2 ②).
-    if (!std.mem.eql(u8, result.remote_chain.head(), self.agent_activity.chain.head())) return false;
+    //
+    // 🔥 **경로 «전부»를 본다**(계획 §30). 머리만 대조하던 판은 세션이 바뀐 것만 잡고 **부모가
+    // 지워진 것**은 못 봤다 — 그때 재사용한 부모 히트의 `file_index` 가 가리킬 자리가 없어진다.
+    // §19.5.1 ①이 「체인 줄은 훑지 않아도 언제나 전부」로 정해 뒀으므로 **재료는 이미 온다**.
+    if (!result.remote_chain.sameFiles(&self.agent_activity.chain)) return false;
 
     const prior_hits = self.agent_activity.all_hits.items;
     const prior_labels = self.agent_activity.all_labels.items;
@@ -4313,7 +4308,6 @@ pub fn applyRemoteBodyMatches(self: *AppSession, result: *const scan_backend.Res
     std.mem.sort(body_backend.Match, body.matches.items, {}, body_backend.lessThan);
     body.answered = true;
     body.partial = truncated;
-    body.remote_unsupported = false;
 }
 
 /// 원격 스캔이 낸 **자국 둘**을 받아 둔다. **판정자가 직접 부르는 제품 함수**다 — 부수효과를 겨눈

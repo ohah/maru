@@ -7999,44 +7999,34 @@ fn dropConflicts(self: *AppSession, term: *Term) void {
 /// 위젯 행의 한 이름과 그 열 구간(이름 짓기 전에는 익명 struct 라 함수 경계를 못 넘었다).
 const ConflictLabelSpan = struct { choice: AppSession.ConflictChoice, from: u32, to: u32 };
 
-/// 세 이름 사이의 구분. **번역하지 않는다** — 문장이 아니라 구두점이고, 언어마다 달라질 것이 없다.
-const conflict_action_gap = "   ";
+/// 열을 세는 규칙을 중립에 빌려 준다 — **렌더가 쓰는 그 함수**여야 누르는 자리가 글자와 안 갈린다.
+fn conflictColsOf(text: []const u8) u32 {
+    return chrome_editor.content.columnsOf(text);
+}
 
-/// 위젯 행에 그릴 세 이름과 그 **열 구간**을 만든다. 글자와 구간이 **한 함수에서 함께** 나오는 것이
-/// 계약이다 — 그리는 쪽과 누르는 쪽이 각자 재면 폰트·언어가 바뀌는 날 조용히 갈리고, 그러면
-/// 「현재 것」을 눌렀는데 「둘 다」가 일어난다.
-fn buildConflictLabel(
-    self: *AppSession,
-    out_spans: *[3]ConflictLabelSpan,
-) ?[]u8 {
-    const names = [_][]const u8{
-        maru.i18n.t(.editor_conflict_accept_current),
-        maru.i18n.t(.editor_conflict_accept_incoming),
-        maru.i18n.t(.editor_conflict_accept_both),
-    };
+/// 위젯 행에 그릴 세 이름과 그 **열 구간**을 만든다.
+///
+/// **잇는 규칙은 중립이 소유한다**(`conflict.writeActions`) — 여백 하나까지 제품과 Lab 이 같은 값을
+/// 써야 캡처가 제품을 예고한다. 적대적 검증 4회차에서 여백을 0 으로 만든 변이가 살아남았는데,
+/// 이유가 **Lab 이 자기 여백을 들고 있었기** 때문이다(골든이 제품의 값을 안 봤다).
+fn buildConflictLabel(self: *AppSession, out_spans: *[3]ConflictLabelSpan) ?[]u8 {
+    // **이름도 중립이 소유한다** — 순서가 곧 뜻이라(현재 것 → 들어온 것 → 둘 다) Lab 과 제품이
+    // 같은 목록을 써야 골든이 그 뒤바뀜을 본다.
+    const names = maru.session.editor.conflict.actionNames();
     const choices = [_]AppSession.ConflictChoice{ .current, .incoming, .both };
-    var total: usize = 0;
+    var total: usize = maru.session.editor.conflict.action_gap.len * 2;
     for (names) |n| total += n.len;
-    total += conflict_action_gap.len * (names.len - 1);
-
     const buf = self.allocator.alloc(u8, total) catch return null;
-    var w: usize = 0;
-    var col: u32 = 0;
-    for (names, choices, 0..) |name, choice, i| {
-        if (i > 0) {
-            @memcpy(buf[w..][0..conflict_action_gap.len], conflict_action_gap);
-            w += conflict_action_gap.len;
-            col += chrome_editor.content.columnsOf(conflict_action_gap);
-        }
-        const from = col;
-        @memcpy(buf[w..][0..name.len], name);
-        w += name.len;
-        // **열은 렌더가 쓰는 그 함수로 센다**(`content.columnsOf`) — byte 길이로 세면 한글에서
-        // 두 배로 어긋나 누르는 자리가 글자와 갈린다.
-        col += chrome_editor.content.columnsOf(name);
-        out_spans[i] = .{ .choice = choice, .from = from, .to = col };
+
+    var spans: [3]maru.session.editor.conflict.ActionSpan = undefined;
+    const written = maru.session.editor.conflict.writeActions(names, buf, conflictColsOf, &spans) orelse {
+        self.allocator.free(buf);
+        return null;
+    };
+    for (spans, choices, 0..) |sp, choice, i| {
+        out_spans[i] = .{ .choice = choice, .from = sp.from, .to = sp.to };
     }
-    return buf;
+    return @constCast(written);
 }
 
 /// 충돌 구간을 훑고 **보이는 줄** 축의 위젯 표와 동작 구간 표를 만든다
@@ -14765,6 +14755,9 @@ test "CFL1 충돌 파일을 열면 구간을 «인식하고» 그 줄 위에 고
     // **열 0 에서 시작한다** — Lab 픽스처는 들여쓴 값을 쓰므로 골든이 이 값을 안 지킨다. 제품의
     // 열이 밀리면 그리는 자리와 `from_col` 이 갈려 누르는 자리가 어긋난다.
     try testing.expectEqual(@as(u32, 0), widgets[at.?].?.col);
+    // **글자가 라벨 그 자체다** — 빈 글이면 줄만 서고 누를 이름이 없다.
+    try testing.expectEqualStrings(term.rt.editor_conflict_label, widgets[at.?].?.text);
+    try testing.expect(term.rt.editor_conflict_label.len > 0);
 
     // 동작 구간은 셋이고 **열이 겹치지 않는다** — 겹치면 한 클릭이 두 동작이 된다.
     const spans = term.rt.editor_conflict_actions;
@@ -14777,6 +14770,14 @@ test "CFL1 충돌 파일을 열면 구간을 «인식하고» 그 줄 위에 고
     try testing.expect(spans[0].from_col < spans[0].to_col); // 폭이 0 이면 못 누른다
 
     try testing.expectEqual(@as(u32, 0), spans[0].from_col); // 첫 이름은 줄 머리에서 시작한다
+
+    // **읽는 이름과 일어나는 일이 같다.** 이름 목록의 순서를 바꾸면 「들어온 것 채택」이라 적힌 자리를
+    // 눌렀는데 현재 것이 남는다 — 구간만 보는 판정자는 그 뒤바뀜을 못 본다(적대적 검증 5회차).
+    const names = maru.session.editor.conflict.actionNames();
+    try testing.expect(std.mem.startsWith(u8, term.rt.editor_conflict_label, names[0]));
+    try testing.expect(std.mem.endsWith(u8, term.rt.editor_conflict_label, names[2]));
+    try testing.expectEqualStrings(maru.i18n.t(.editor_conflict_accept_current), names[0]);
+    try testing.expectEqualStrings(maru.i18n.t(.editor_conflict_accept_incoming), names[1]);
 
     // **구간이 글자의 «열» 을 덮는다** — 끝 구간의 끝이 라벨 전체의 열 폭과 같아야 한다.
     //
@@ -14935,6 +14936,32 @@ test "CFL6 이름 «사이»와 글자 행은 고르기가 아니다 — 한 클
     if (spans[1].from_col > spans[0].to_col) {
         try testing.expectEqual(@as(?AppSession.ConflictActionSpan, null), conflictActionAtPoint(term, xOf(geom, spans[0].to_col), y));
     }
+
+    // ⑵-b **본문 왼쪽 밖**(gutter)·**위**·**아래**는 어느 것도 아니다. 가드를 지우면 gutter 클릭이
+    //     첫 이름이 되고, 본문 위 클릭이 첫 행이 되며, 그린 것 밖이 마지막 행으로 읽힌다.
+    try testing.expectEqual(@as(?AppSession.ConflictActionSpan, null), conflictActionAtPoint(term, @floatFromInt(geom.body_x - 4), y));
+    try testing.expectEqual(@as(?AppSession.ConflictActionSpan, null), conflictActionAtPoint(term, xOf(geom, spans[0].from_col + 1), @floatFromInt(geom.body_y - 8)));
+    // **위쪽 가드는 「행 0 이 위젯일 때」라야 관측된다.** 이 픽스처는 행 0 이 글자 줄이라, 음수를 0 으로
+    // 묶는 변이도 그 줄에서 `null` 을 내 **가려진다**(적대적 검증 5회차 실측). 구간이 문서 첫 줄인
+    // 픽스처를 따로 세워 그 자리를 연다.
+    {
+        var top_fx = try PaneFixture.init(allocator);
+        defer top_fx.deinit(allocator);
+        const top_term = try undoFixture(&top_fx, allocator, "top.txt", "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> t\n");
+        top_term.rt.editor_wrap = false;
+        var top_drawn = appendPaneFrame(top_fx.session, top_fx.leaf_rect, top_term) orelse return error.NoFrame;
+        top_drawn.dl.deinit(allocator);
+        // 공허 방지 — 행 0 이 정말 위젯이어야 이 단언이 무언가를 본다.
+        try testing.expect(top_term.rt.editor_hit_rows_len > 0);
+        try testing.expect(top_term.rt.editor_hit_rows[0].kind == .widget);
+        const tg = top_term.rt.editor_hit_geom;
+        const tx: f64 = @floatFromInt(tg.body_x + @as(i32, @intCast(tg.content_left_px)) + @as(i32, @intCast(tg.cell_w_px)));
+        try testing.expectEqual(@as(?AppSession.ConflictActionSpan, null), conflictActionAtPoint(top_term, tx, @floatFromInt(tg.body_y - 8)));
+        // 같은 x 로 **행 0 안쪽**을 누르면 맞는다(반대쪽 — 없으면 「늘 null」로 갈려도 초록이다).
+        try testing.expect(conflictActionAtPoint(top_term, tx, @floatFromInt(tg.body_y + @as(i32, @intCast(tg.cell_h_px / 2)))) != null);
+    }
+    const far_below: f64 = @floatFromInt(geom.body_y + @as(i32, @intCast((term.rt.editor_hit_rows_len + 3) * geom.cell_h_px)));
+    try testing.expectEqual(@as(?AppSession.ConflictActionSpan, null), conflictActionAtPoint(term, xOf(geom, spans[0].from_col + 1), far_below));
 
     // ⑶ **글자 행**은 고르기가 아니다 — 본문을 누르면 커서가 서야지 문서가 바뀌면 안 된다.
     const text_y: f64 = @floatFromInt(geom.body_y + @as(i32, @intCast((widget_row + 1) * geom.cell_h_px)) + @as(i32, @intCast(geom.cell_h_px / 2)));
@@ -15246,6 +15273,41 @@ test "CFL16 «스크롤한» 화면에서도 누른 자리가 맞는다 — 상�
         @floatFromInt(geom.body_y + @as(i32, @intCast(row * geom.cell_h_px)) + @as(i32, @intCast(geom.cell_h_px / 2))),
     ) orelse return error.NoHit;
     try testing.expectEqual(AppSession.ConflictChoice.both, hit.choice);
+}
+
+test "CFL17 «진짜 마우스»로 눌러 고친다 — 본문 선택보다 먼저 가져간다 (제품 경계)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    // **`acceptConflictAtPoint` 를 직접 부르면 그 위 층이 죽어 있어도 초록이다** — 배선을 아예
+    // 빼 버린 변이가 적대적 검증 5회차에서 살아남았다. 여기서는 창의 마우스 입구로 들어간다.
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "c.txt", conflict_fixture);
+    term.rt.editor_wrap = false;
+    fx.session.surface_initialized = true;
+    // **창 크기를 준다.** 픽스처는 렌더 상태만 세우므로 `termRect()` 가 0×0 이고, 그러면 라우터가
+    // 아무 pane 도 못 맞혀 이 판정자가 보려는 경로로 안 간다(같은 이유를 스크롤 라우팅 판정자가
+    // 이미 적어 두었다).
+    fx.session.backing_width_px = 1200;
+    fx.session.backing_height_px = 800;
+    // **마우스 라우터가 쓰는 그 사각으로 그린다.** 픽스처의 `leaf_rect` 로 그리면 히트 기하가 라우터가
+    // 계산하는 자리와 달라, 이 판정자가 「좌표가 안 맞는다」만 확인하게 된다.
+    const leaf = activeLeafRectForTest(fx.session) orelse return error.SkipZigTest;
+    var drawn = appendPaneFrame(fx.session, leaf, term) orelse return error.NoFrame;
+    drawn.dl.deinit(allocator);
+
+    const spans = term.rt.editor_conflict_actions;
+    const sp = spans[1]; // 「들어온 것 채택」
+    const row = widgetScreenRowForTest(term, sp.visible_line) orelse return error.NoWidgetRow;
+    const geom = term.rt.editor_hit_geom;
+    const mid_col = sp.from_col + (sp.to_col - sp.from_col) / 2;
+    const x: f64 = @floatFromInt(geom.body_x + @as(i32, @intCast(geom.content_left_px)) + @as(i32, @intCast(mid_col * geom.cell_w_px)) + @as(i32, @intCast(geom.cell_w_px / 2)));
+    const y: f64 = @floatFromInt(geom.body_y + @as(i32, @intCast(row * geom.cell_h_px)) + @as(i32, @intCast(geom.cell_h_px / 2)));
+
+    fx.session.mouse(1, x, y, 0, 0); // 왼쪽 버튼 down — 제품 경로 그대로
+    try testing.expectEqualStrings("fn greet() {\n  return \"theirs\";\n}\n", term.rt.editor_doc.?.file.content);
+    // **선택이 시작되지 않았다** — 고르기가 먼저 가져갔다는 뜻이다(순서가 뒤집히면 드래그가 시작된다).
+    try testing.expect(!fx.session.mouse_drag_selecting);
 }
 
 test "CFL9 «진짜 git 이 낸» 파일 — 두 스타일 그대로 (재현 2026-09-13)" {
@@ -24152,6 +24214,19 @@ test "ES20 화면 맨 윗줄도 칠해진다 — 한 줄 어긋남을 잡는다"
 
 /// 활성 pane 본문 안의 한 점(창 좌표). **고정 좌표를 찍으면 안 된다** — 사이드바 폭·pane 바 높이가
 /// 레이아웃에서 오므로 손으로 적은 값은 chrome 위로 떨어지거나 pane 밖이 된다(실제로 그랬다).
+/// 판정자 전용: **마우스 라우터가 쓰는** 활성 pane 의 leaf 사각. 그리는 쪽과 누르는 쪽이 같은
+/// 사각을 봐야 좌표가 맞는다(`bodyPointInActivePane` 과 같은 계산을 쓴다).
+fn activeLeafRectForTest(session: *AppSession) ?maru.session.SplitRect {
+    var rects: std.ArrayList(app_session_mod.PaneTree.LeafRect) = .empty;
+    defer rects.deinit(session.allocator);
+    tab_ops.activeTabLeafRects(session, session.allocator, session.termRect(), &rects) catch return null;
+    const active = pane_ops.activePane(session);
+    for (rects.items) |lr| {
+        if (lr.leaf == active) return lr.rect;
+    }
+    return null;
+}
+
 fn bodyPointInActivePane(session: *AppSession) ?struct { x: f64, y: f64 } {
     var rects: std.ArrayList(app_session_mod.PaneTree.LeafRect) = .empty;
     defer rects.deinit(session.allocator);

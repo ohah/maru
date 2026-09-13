@@ -526,24 +526,17 @@ var editor_conflict_widgets = [_]?chrome.components.editor_view.content.Widget{ 
 var conflict_label_buf: [192]u8 = undefined;
 
 fn fillConflictLabel() []const u8 {
-    const names = [_][]const u8{
-        maru.i18n.t(.editor_conflict_accept_current),
-        maru.i18n.t(.editor_conflict_accept_incoming),
-        maru.i18n.t(.editor_conflict_accept_both),
-    };
-    var w: usize = 0;
-    for (names, 0..) |name, i| {
-        if (i > 0) {
-            const gap = "   ";
-            if (w + gap.len > conflict_label_buf.len) break;
-            @memcpy(conflict_label_buf[w..][0..gap.len], gap);
-            w += gap.len;
+    const names = maru.session.editor.conflict.actionNames();
+    var spans: [3]maru.session.editor.conflict.ActionSpan = undefined;
+    const colsOf = struct {
+        fn f(text: []const u8) u32 {
+            return chrome.components.editor_view.content.columnsOf(text);
         }
-        if (w + name.len > conflict_label_buf.len) break;
-        @memcpy(conflict_label_buf[w..][0..name.len], name);
-        w += name.len;
-    }
-    return conflict_label_buf[0..w];
+    }.f;
+    // **잇는 규칙은 제품과 같은 함수다** — 이름 사이 여백 하나까지(`conflict.action_gap`). Lab 이
+    // 자기 여백을 들고 있으면 골든이 **제품의 자리**를 안 본다(적대적 검증 4회차에서 여백을 0 으로
+    // 만든 변이가 그 때문에 살아남았다).
+    return maru.session.editor.conflict.writeActions(names, &conflict_label_buf, colsOf, &spans) orelse "";
 }
 
 const editor_fixture_lines = [_][]const u8{

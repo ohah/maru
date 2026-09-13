@@ -19,6 +19,7 @@
 //! 그것을 모르면 base 를 «현재 것»의 일부로 읽어 「현재 것 채택」이 **엉뚱한 것을 남긴다**.
 
 const std = @import("std");
+const i18n = @import("../../i18n.zig"); // 표시 문자열 단일 출처
 
 /// 마커 한 종류. 값은 그 줄이 무엇을 **여는가**다.
 pub const Marker = enum {
@@ -52,8 +53,13 @@ pub const marker_len: usize = 7;
 ///   이 저장소 자신의 `git_backend.zig` 에 `"<<<<<<<"` 를 담은 테스트 단언이 있다.
 /// - **정확히 일곱**: 여덟 개짜리 구분선(`========`)은 흔한 주석 장식이다. 그것을 가름으로 읽으면
 ///   장식이 든 파일이 통째로 충돌 구간이 된다.
-/// - **뒤는 공백이나 줄 끝**: `<<<<<<<abc` 같은 것은 git 이 안 낸다. git 은 라벨 앞에 공백을 둔다
+/// - **뒤는 공백이나 줄 끝**: `<<<<<<<abc` 같은 것은 git 이 안 낸다. git 은 라벨 앞에 **공백**을 둔다
 ///   (`<<<<<<< HEAD`). `=======` 만 라벨이 없어 줄 끝으로 끝난다.
+///
+/// **탭은 안 받는다.** 처음에는 공백과 함께 받았는데 **git 이 탭을 내는 경우가 없고**(위 인용),
+/// 받아 주면 그만큼 「마커가 아닌 줄을 마커로 읽을」 여지만 넓어진다 — 일곱 자 규칙을 둔 것과 같은
+/// 이유다. 적대적 검증 4회차가 그 관용을 **아무 판정자도 안 지킨다**고 드러냈고(지워도 초록이었다),
+/// 근거 없는 관용은 지운다.
 pub fn markerOf(line: []const u8) ?Marker {
     if (line.len < marker_len) return null;
     const kind: Marker = switch (line[0]) {
@@ -70,7 +76,7 @@ pub fn markerOf(line: []const u8) ?Marker {
     if (line.len == marker_len) return kind; // 줄 끝 — `=======` 가 이 모양이다
     // **여덟 번째가 같은 글자면 마커가 아니다**(장식 줄). 공백이어야 라벨이 붙은 git 의 모양이다.
     return switch (line[marker_len]) {
-        ' ', '\t' => kind,
+        ' ' => kind,
         else => null,
     };
 }
@@ -160,6 +166,60 @@ pub fn scan(lines: []const []const u8, out: []Region) []Region {
     return out[0..n];
 }
 
+/// 위젯 행에 그릴 세 이름 사이의 **여백**. 번역하지 않는다 — 문장이 아니라 자리다.
+pub const action_gap = "   ";
+
+/// 위젯 행의 세 이름을 **계약 순서**로 낸다: 현재 것 → 들어온 것 → 둘 다.
+///
+/// **순서가 곧 뜻이다.** 호출자는 이 순서로 `Choice` 를 짝지으므로, 여기서 두 이름을 바꾸면
+/// **읽은 것과 다른 일이 일어난다**(「들어온 것 채택」이라 적힌 자리를 눌렀는데 현재 것이 남는다).
+/// 제품과 Lab 이 **같은 이 함수**를 쓰는 이유이기도 하다 — Lab 이 자기 순서를 들고 있으면 골든이
+/// 그 뒤바뀜을 못 본다(적대적 검증 5회차 실측).
+pub fn actionNames() [3][]const u8 {
+    return .{
+        i18n.t(.editor_conflict_accept_current),
+        i18n.t(.editor_conflict_accept_incoming),
+        i18n.t(.editor_conflict_accept_both),
+    };
+}
+
+/// 한 이름이 차지하는 열 `[from, to)`.
+pub const ActionSpan = struct { from: u32, to: u32 };
+
+/// 세 이름을 이어 `out` 에 쓰고 **각 이름의 열 구간**을 함께 낸다. 자리가 모자라면 `null`.
+///
+/// **글자와 구간이 한 함수에서 나오는 것이 계약이다** — 그리는 쪽과 누르는 쪽이 각자 재면 폰트·언어가
+/// 바뀌는 날 갈리고, 그러면 「현재 것」을 눌렀는데 「둘 다」가 일어난다.
+///
+/// **열을 세는 함수를 호출자가 준다**(`colsOf`). 이 모듈은 화면을 모르고, 렌더가 쓰는 그 규칙이
+/// chrome 에 있기 때문이다 — 여기서 byte 길이로 세면 한글에서 누르는 자리가 글자와 갈린다.
+pub fn writeActions(
+    names: [3][]const u8,
+    out: []u8,
+    colsOf: *const fn ([]const u8) u32,
+    out_spans: *[3]ActionSpan,
+) ?[]u8 {
+    var total: usize = action_gap.len * 2;
+    for (names) |n| total += n.len;
+    if (out.len < total) return null;
+
+    var w: usize = 0;
+    var col: u32 = 0;
+    for (names, 0..) |name, i| {
+        if (i > 0) {
+            @memcpy(out[w..][0..action_gap.len], action_gap);
+            w += action_gap.len;
+            col += colsOf(action_gap);
+        }
+        const from = col;
+        @memcpy(out[w..][0..name.len], name);
+        w += name.len;
+        col += colsOf(name);
+        out_spans[i] = .{ .from = from, .to = col };
+    }
+    return out[0..w];
+}
+
 /// 문서에 충돌 마커가 **하나라도 남아 있는가**. 저장할 때 알릴지 정하는 자리가 쓴다(§5 S2).
 ///
 /// **`scan` 과 같은 판정을 쓴다** — 여기서 「`<<<<<<<` 가 보이면 남았다」로 따로 재면, 닫히지 않은
@@ -187,6 +247,8 @@ test "마커는 줄 머리에서만, 정확히 일곱 자, 뒤는 공백이나 �
     try testing.expectEqual(@as(?Marker, null), markerOf("const marker = \"<<<<<<<\";"));
     // 라벨이 공백 없이 붙은 것은 git 이 안 낸다.
     try testing.expectEqual(@as(?Marker, null), markerOf("<<<<<<<HEAD"));
+    // **탭도 안 받는다** — git 은 공백만 쓴다(위 머리말). 받아 주면 마커가 아닌 줄을 읽을 여지가 는다.
+    try testing.expectEqual(@as(?Marker, null), markerOf("<<<<<<<\tHEAD"));
     // 섞인 글자도 아니다.
     try testing.expectEqual(@as(?Marker, null), markerOf("<<<<<<= HEAD"));
     try testing.expectEqual(@as(?Marker, null), markerOf(""));

@@ -48,6 +48,15 @@ test "P4 C3c 경계는 main capture immutable bytes serial C2 writer를 고정�
     try std.testing.expect(std.mem.indexOf(u8, build, "^final_frame_ended=true$") != null);
     try std.testing.expect(std.mem.indexOf(u8, build, "^terminal_input_events=0$") != null);
     try std.testing.expect(std.mem.indexOf(u8, build, "stat -f '%i'") != null);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, swift, "MARU_SESSION_HOST_R7_CHECKPOINT_SMOKE\"] == \"maru-test-only-v1\""));
+    try std.testing.expect(std.mem.indexOf(u8, swift, "writeSessionHostR7CheckpointReceipt(generation:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, swift, "r1TombstoneSmoke || r7CheckpointSmoke") != null);
+    try std.testing.expect(std.mem.indexOf(u8, swift, "MARU_SESSION_HOST_R7_CHECKPOINT_PHASE") != null);
+    try std.testing.expect(std.mem.indexOf(u8, swift, "sessionHostR7CheckpointQuitRequested") != null);
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, swift, "MARU_SESSION_HOST_R7_CHECKPOINT_RECEIPT"));
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, swift, "MARU_SESSION_HOST_R7_QUIT_TRIGGER"));
+    try std.testing.expect(std.mem.indexOf(u8, swift, "appendingPathComponent(\"r7-checkpoint.receipt\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, swift, "appendingPathComponent(\"r7-quit.trigger\")") != null);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, swift, "MARU_SESSION_HOST_C4_QUIT_CANCEL_SMOKE\"] == \"maru-test-only-v1\""));
     try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, swift, "MARU_SESSION_HOST_C4_QUIT_CANCEL_MARKER"));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, swift, "RunLoop.main.perform(inModes: [.common])"));
@@ -76,6 +85,11 @@ test "P4 C3c 경계는 main capture immutable bytes serial C2 writer를 고정�
     try std.testing.expect(std.mem.indexOf(u8, writer, "captureWorkspaceSnapshot") == null);
     try std.testing.expect(std.mem.indexOf(u8, writer, "serialize_workspace") == null);
     try std.testing.expect(std.mem.indexOf(u8, writer, "windows") == null);
+    const committed = std.mem.indexOf(u8, writer, "if committed {") orelse
+        return error.MissingCommittedCheckpointBranch;
+    const r7_receipt = std.mem.indexOf(u8, writer, "writeSessionHostR7CheckpointReceipt(generation: generation)") orelse
+        return error.MissingR7CheckpointReceipt;
+    try std.testing.expect(committed < r7_receipt);
 
     for ([_][]const u8{
         "workspaceCheckpointPublished = false",
@@ -103,4 +117,59 @@ test "P4 C3c 경계는 main capture immutable bytes serial C2 writer를 고정�
     try std.testing.expect(preflight < global_arm);
     try std.testing.expect(global_arm < publish);
     try std.testing.expect(publish < enable);
+}
+
+test "P4 C3 R7 actual AppKit gate는 격리된 2-window 3-runtime 강제 종료 복원을 고정한다" {
+    const allocator = std.testing.allocator;
+    const build = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "build.zig", allocator, .limited(2 * 1024 * 1024));
+    defer allocator.free(build);
+    const mise = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, ".mise.toml", allocator, .limited(256 * 1024));
+    defer allocator.free(mise);
+    const ci = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, ".github/workflows/ci.yml", allocator, .limited(512 * 1024));
+    defer allocator.free(ci);
+    const harness = try std.Io.Dir.cwd().readFileAlloc(
+        std.testing.io,
+        "src/platform/macos/session_host/cr6c_appkit_smoke.zig",
+        allocator,
+        .limited(2 * 1024 * 1024),
+    );
+    defer allocator.free(harness);
+
+    for ([_][]const u8{
+        "macos-session-host-r7-integration-smoke",
+        "MARU_SESSION_HOST_R7_INTEGRATION_SMOKE",
+        "session-host-r7-home",
+        "isolateMacosProductTest(b, run_session_host_r7_integration",
+    }) |needle| try std.testing.expect(std.mem.indexOf(u8, build, needle) != null);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, mise, "[tasks.macos-session-host-r7-integration-smoke]"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, ci, "run: mise run macos-session-host-r7-integration-smoke"));
+    for ([_][]const u8{
+        "const r7_runtime_count = 3;",
+        "window tabs=2 active-tab=1",
+        "window tabs=1 active-tab=0 active-window=1",
+        "try killR7App(first_app);",
+        "defer if (first_app_owned) terminateAndReap(first_app);",
+        "defer if (second_app_owned) terminateAndReap(second_app);",
+        "try waitR7Controllers(allocator, socket, &runtime_ids, true);",
+        "same_host_pid\\\":true",
+        "replacement_spawn_count\\\":0",
+        "checkpoint_generation_before\\\":{d}",
+        "cleanup_complete\\\":true",
+        "error.IsolatedRootCleanupFailed",
+        "cleanupExactHostArtifacts(io, session_dir, socket, host_id)",
+    }) |needle| try std.testing.expect(std.mem.indexOf(u8, harness, needle) != null);
+    const cleanup = std.mem.indexOf(u8, harness, "if (!cleanupExactHostArtifacts(io, session_dir, socket, host_id))") orelse
+        return error.MissingR7Cleanup;
+    const passed_artifact = std.mem.indexOf(u8, harness, "\\\"result\\\":\\\"passed\\\"") orelse
+        return error.MissingR7PassedArtifact;
+    try std.testing.expect(cleanup < passed_artifact);
+    const kill_start = std.mem.indexOf(u8, harness, "fn killR7App(pid: c_int) !void {") orelse
+        return error.MissingR7KillBoundary;
+    const kill_end = std.mem.indexOfPos(u8, harness, kill_start, "\nfn waitR7Controllers(") orelse
+        return error.MissingR7KillBoundaryEnd;
+    const kill_boundary = harness[kill_start..kill_end];
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, kill_boundary, "std.c.kill(pid, std.posix.SIG.KILL)"));
+    try std.testing.expect(std.mem.indexOf(u8, kill_boundary, "std.c.W.IFSIGNALED") != null);
+    try std.testing.expect(std.mem.indexOf(u8, kill_boundary, "std.c.W.TERMSIG") != null);
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, harness, "deleteTree(io, artifact_root"));
 }

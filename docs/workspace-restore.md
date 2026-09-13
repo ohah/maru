@@ -379,14 +379,17 @@ live PTY fd·child pid·WKWebView process handle·JS heap snapshot은 여전히 
 저장 모델(앞 절 직렬화 모델에 필드 추가, 빈 문자열 = 이름 없음):
 
 ```text
-tab ... custom-name="<workspace custom_name>" pinned=<0|1> background-color=<0xRRGGBB 10진> accent-color=<0xRRGGBB 10진> group-start="<그룹 이름>" group-collapsed=<0|1> group-depth=<n> group-color=<0xRRGGBB 10진> local-pinned=1 top-level=1
+tab ... custom-name="<workspace custom_name>" pinned=<0|1> background-color=<0xRRGGBB 10진> accent-color=<0xRRGGBB 10진> group-start="<그룹 이름>" group-collapsed=<0|1> group-depth=<n> group-color=<0xRRGGBB 10진> local-pinned=1 top-level=1 agents-collapsed=0
                                                  # 워크스페이스 custom_name + 위치 고정(pinned) + 카드 배경 tint + 좌측 accent 막대색
                                                  # + 사이드바 그룹 시작 마커(group-start=이 탭부터 그 이름의 그룹 시작·위치 파생 소속,
                                                  #   null이면 키 생략=그룹 아님) + 접힘 상태(group-collapsed) — docs/sidebar-groups.md
                                                  # + 중첩 그룹 깊이(group-depth — 기본 1이면 키 생략, SG5-3) + 그룹 공통 색(group-color —
                                                  #   0이면 키 생략, SG5-2) + 그룹-로컬 pin(local-pinned — false면 키 생략, §13) +
-                                                 #   서브파티션 마커(top-level — false면 키 생략, §14). 기본값 키 생략은 옛 파일과의
-                                                 #   round-trip 고정점 유지 목적(additive·key-addressed)
+                                                 #   서브파티션 마커(top-level — false면 키 생략, §14) + 카드 하위 Term 목록 접힘
+                                                 #   (agents-collapsed — docs/sidebar-agent-list.md §4. 그룹 접힘과 다른 축이라
+                                                 #   group-start 유무와 무관. **이 키만 기본값이 접힘**이라 생략 방향이 반대다:
+                                                 #   접힘이면 키 생략, 펼침이면 =0 명시. 키 없는 옛 줄 = 접힘). 기본값 키 생략은
+                                                 #   옛 파일과의 round-trip 고정점 유지 목적(additive·key-addressed)
 pane ... custom-name="<pane custom_name>"        # pane custom_name (자동 출처 없음)
 surface custom-name="<term custom_name>" title="<auto OSC title>" cwd=... ...
                                                  # surface는 custom_name(사용자)과 title(자동) 둘 다 저장

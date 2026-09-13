@@ -9734,7 +9734,7 @@ pub const AppSession = struct {
     // 우클릭)가 같은 세션 메서드를 부른다(rename 패턴). 접힘/이름/마커 상태는 workspace.v1 캡처로 영속(정상 종료 saveWorkspace).
 
     /// 표시 slot의 **에이전트 목록 토글** 클릭 → 그 워크스페이스의 `agents_collapsed` 토글 → 재투영·재빌드.
-    /// 그룹 헤더 토글과 같은 규율이되 상태는 영속하지 않는다(§4 — 에이전트 구성은 실행마다 달라진다).
+    /// 그룹 헤더 토글과 같은 규율이고 **상태도 같이 영속한다**(§4 — workspace.v1 `agents-collapsed`, 정상 종료 캡처).
     fn toggleAgentsCollapsedAt(self: *AppSession, slot: usize) void {
         if (slot >= self.sidebar_rows.items.len) return;
         const t = switch (self.sidebar_rows.items[slot]) {
@@ -51645,9 +51645,10 @@ test "applyWorkspaceWindow: 모델 적용 → 캡처 round-trip(탭/split/Term �
     const panes1 = [_]maru.session.workspace.Pane{.{ .active_term = 1, .surfaces = &sc }};
     const tree1 = [_]maru.session.workspace.TreeNode{.{ .leaf = 0 }};
     // 탭0에 그룹 시작 마커(위치 파생 — docs/sidebar-groups.md): "frontend" 그룹 시작·접힘. 탭1은 마커 없음(null).
+    // 탭1엔 카드 하위 Term 목록 접힘(docs/sidebar-agent-list.md §4) — 그룹 접힘과 다른 축이라 마커 없는 탭에도 실린다.
     const tabs = [_]maru.session.workspace.Tab{
         .{ .active_pane = 1, .group_start = "frontend", .group_collapsed = true, .tree = &tree0, .panes = &panes0 },
-        .{ .active_pane = 0, .tree = &tree1, .panes = &panes1 },
+        .{ .active_pane = 0, .agents_collapsed = true, .tree = &tree1, .panes = &panes1 },
     };
     try workspace_ops.applyWorkspaceWindow(session, .{ .active_tab = 1, .tabs = &tabs });
 
@@ -51655,6 +51656,9 @@ test "applyWorkspaceWindow: 모델 적용 → 캡처 round-trip(탭/split/Term �
     try std.testing.expectEqualStrings("frontend", session.tabs.items[0].group_start.?);
     try std.testing.expectEqual(true, session.tabs.items[0].group_collapsed);
     try std.testing.expectEqual(@as(?[]const u8, null), session.tabs.items[1].group_start);
+    // 목록 접힘도 라이브로 복원된다(탭1만 접힘) — 저장값이 없는 탭0은 기본 펼침.
+    try std.testing.expectEqual(false, session.tabs.items[0].agents_collapsed);
+    try std.testing.expectEqual(true, session.tabs.items[1].agents_collapsed);
 
     // 캡처해 구조·active 인덱스가 모델과 일치하는지(cwd는 OSC-side라 round-trip 안 함 — 구조만).
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -51678,6 +51682,65 @@ test "applyWorkspaceWindow: 모델 적용 → 캡처 round-trip(탭/split/Term �
     try std.testing.expectEqualStrings("frontend", cap.tabs[0].group_start.?);
     try std.testing.expectEqual(true, cap.tabs[0].group_collapsed);
     try std.testing.expectEqual(@as(?[]const u8, null), cap.tabs[1].group_start);
+    // 목록 접힘 캡처 round-trip(라이브 → 모델) — 탭1만 접힘. 탭1엔 Term이 2개라 토글 행이 실제로 생기는 구성이다.
+    try std.testing.expectEqual(false, cap.tabs[0].agents_collapsed);
+    try std.testing.expectEqual(true, cap.tabs[1].agents_collapsed);
+}
+
+test "하위버전 파일에는 접힘 의도가 없다 — agents-collapsed 없는 줄은 목록을 접은 채로 세운다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 PTY spawn(cwd /tmp)
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    // 이 필드를 모르던 버전이 쓴 줄(agents-collapsed 키 없음). Term 2개라 토글 행이 실제로 생기는 구성이다
+    // (에이전트 0 + Term 2개 — docs/sidebar-agent-list.md §1). 파서 기본값이 아니라 **화면 행**까지 확인한다.
+    const text =
+        "maru.workspace.v1\n" ++
+        "window tabs=1 active-tab=0\n" ++
+        "tab panes=1 active-pane=0 custom-name=\"legacy\" pinned=0 background-color=0 accent-color=0\n" ++
+        "tree-node leaf pane=0\n" ++
+        "pane surfaces=2 active-term=0 custom-name=\"\"\n" ++
+        "surface custom-name=\"\" title=\"\" cwd=\"/tmp\" command=\"\" cols=40 rows=12\n" ++
+        "surface custom-name=\"\" title=\"\" cwd=\"/tmp\" command=\"\" cols=40 rows=12\n";
+    var parsed = try maru.session.workspace.parse(allocator, text);
+    defer parsed.deinit();
+    try workspace_ops.applyWorkspaceWindow(session, parsed.workspace.windows[0]);
+    sidebar_ops.rebuildSidebar(session) catch {};
+
+    try std.testing.expectEqual(true, session.tabs.items[0].agents_collapsed);
+
+    // 토글 행은 접힌 채로 있고(개수는 Term 2), 하위 Term 행은 **하나도 없다**.
+    var toggle_collapsed: ?bool = null;
+    var agent_rows: usize = 0;
+    for (session.sidebar_rows.items) |r| switch (r) {
+        .agent_toggle => |t| toggle_collapsed = t.collapsed,
+        .agent => agent_rows += 1,
+        else => {},
+    };
+    try std.testing.expectEqual(@as(?bool, true), toggle_collapsed);
+    try std.testing.expectEqual(@as(usize, 0), agent_rows);
+
+    // 펼치면(사용자 의도) 행이 나오고, 그 의도는 캡처에 `=0`으로 실린다 — 다음 실행이 펼친 채로 연다.
+    session.tabs.items[0].agents_collapsed = false;
+    sidebar_ops.rebuildSidebar(session) catch {};
+    var expanded_rows: usize = 0;
+    for (session.sidebar_rows.items) |r| switch (r) {
+        .agent => expanded_rows += 1,
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 2), expanded_rows);
+    const written = try workspace_ops.serializeWorkspaceWindow(session, false, null);
+    try std.testing.expect(std.mem.indexOf(u8, written, "agents-collapsed=0") != null);
 }
 
 test "legacy provider workspace fields are ignored across multi-window parse apply and write-new" {

@@ -7742,11 +7742,21 @@ test "kitty graphics replies (K5): query validates without storing, quiet levels
     // 식별자(i=)가 없으면 어느 명령의 응답인지 못 가리므로 보내지 않는다(명세).
     try core.write("\x1b_Ga=t,f=32,s=2,v=2;AAAA\x1b\\");
     try std.testing.expectEqualStrings("", core.pendingResponse());
-    // delete는 성공을 보고하고, 아직 미지원인 타깃(d=x 열 지정)은 ENOTSUPP다.
+    // delete 는 성공을 보고한다.
     try core.write("\x1b_Ga=d,d=I,i=7\x1b\\");
     try std.testing.expectEqualStrings("\x1b_Gi=7;OK\x1b\\", core.pendingResponse());
     core.clearResponse();
+    // `d=x`(열 지정)는 이제 **구현돼 있다** — 열 값이 빠졌으면 EINVAL 이다(명세의 셀 좌표는 1-based 라
+    // 0/미지정을 좌표로 읽으면 엉뚱한 열을 지운다). 예전에는 이 자리가 ENOTSUPP 였다.
     try core.write("\x1b_Ga=d,d=x,i=8\x1b\\");
+    try std.testing.expectEqualStrings("\x1b_Gi=8;EINVAL:bad graphics command\x1b\\", core.pendingResponse());
+    core.clearResponse();
+    // 열을 주면 성공한다(지울 placement 가 없어도 성공이다 — 명세는 「없으면 실패」라 하지 않는다).
+    try core.write("\x1b_Ga=d,d=x,x=1,i=8\x1b\\");
+    try std.testing.expectEqualStrings("\x1b_Gi=8;OK\x1b\\", core.pendingResponse());
+    core.clearResponse();
+    // 명세에 없는 타깃은 그대로 ENOTSUPP 다(이 자리의 뜻이 사라지지 않게 함께 둔다).
+    try core.write("\x1b_Ga=d,d=w,i=8\x1b\\");
     try std.testing.expectEqualStrings("\x1b_Gi=8;ENOTSUPP:unsupported graphics feature\x1b\\", core.pendingResponse());
 }
 
@@ -10807,6 +10817,151 @@ test "kitty 애니메이션: 다른 화면에 등록된 U=1 은 전진하지 않
 
     try core.write("\x1b[?1049l");
     try std.testing.expect(core.advanceAnimations(40)); // 돌아오면 이어 돈다
+}
+
+// kitty delete 타깃 여섯(`p`/`q`/`r`/`x`/`y`/`f`). 명세 문장을 그대로 겨눈다:
+//   p: "placements that intersect a specific cell, the cell is specified using the x and y keys"
+//   q: "... a specific cell having a specific z-index ... using the x, y and z keys"
+//   r: "all images whose id is >= the value of the x key and <= the value of the y"
+//   x: "placements that intersect the specified column"   y: "... the specified row"
+//   f: "Delete animation frames."
+// **좌표는 1-based 다** — 명세가 "x=1, y=1 is the top left cell" 이라고 못박는다. 0 을 0-based 로
+// 읽으면 엉뚱한 셀을 지우므로 0 은 거부한다(조용한 오작동보다 거부가 낫다).
+fn seedDeleteFixture(core: *TerminalCore) !void {
+    var b64: [64]u8 = undefined;
+    var seq: [200]u8 = undefined;
+    const px = [_]u8{ 5, 6, 7, 255 } ** 4;
+    const enc = std.base64.standard.Encoder.encode(&b64, &px);
+    // 이미지 1·2·3 을 만들고 각각 (행,열) = (1,1) (1,5) (3,1) 에 1x1 로 건다.
+    for ([_]struct { id: u32, row: u16, col: u16, z: i32 }{
+        .{ .id = 1, .row = 1, .col = 1, .z = 0 },
+        .{ .id = 2, .row = 1, .col = 5, .z = 7 },
+        .{ .id = 3, .row = 3, .col = 1, .z = 0 },
+    }) |spec| {
+        try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i={d},q=2;{s}\x1b\\", .{ spec.id, enc }));
+        try core.write(try std.fmt.bufPrint(&seq, "\x1b[{d};{d}H", .{ spec.row, spec.col }));
+        try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=p,i={d},c=1,r=1,z={d},q=2\x1b\\", .{ spec.id, spec.z }));
+    }
+    try std.testing.expectEqual(@as(usize, 3), core.kitty_placements.items.len);
+}
+
+test "kitty delete: d=p/q 는 그 셀(과 z-index)을 덮는 placement 만 지운다 (1-based)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 8 });
+    defer core.deinit();
+    core.setCellMetrics(10, 20);
+    try seedDeleteFixture(&core);
+
+    // (1,1) 셀 — 이미지 1 만 걸린다.
+    try core.write("\x1b_Ga=d,d=p,x=1,y=1,i=1,q=2\x1b\\");
+    try std.testing.expectEqual(@as(usize, 2), core.kitty_placements.items.len);
+    for (core.kitty_placements.items) |p| try std.testing.expect(p.image_id != 1);
+    // 소문자는 **이미지를 남긴다** — placement 만 지운다.
+    try std.testing.expect(core.kitty_images.map.get(1) != null);
+
+    // (1,5) 셀에 z=0 을 요구하면 아무것도 안 지운다(그 자리의 placement 는 z=7).
+    try core.write("\x1b_Ga=d,d=q,x=5,y=1,z=0,i=2,q=2\x1b\\");
+    try std.testing.expectEqual(@as(usize, 2), core.kitty_placements.items.len);
+    // z 를 맞추면 지운다.
+    try core.write("\x1b_Ga=d,d=q,x=5,y=1,z=7,i=2,q=2\x1b\\");
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_placements.items.len);
+
+    // **0 은 좌표가 아니다** — 1-based 규약을 어긴 명령은 거부한다.
+    core.clearResponse();
+    try core.write("\x1b_Ga=d,d=p,x=0,y=1,i=3,q=0\x1b\\");
+    try std.testing.expect(std.mem.indexOf(u8, core.pendingResponse(), "EINVAL") != null);
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_placements.items.len); // 아무것도 안 지웠다
+}
+
+test "kitty delete: d=x/y 는 그 열/행을 덮는 placement 를 지운다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 8 });
+    defer core.deinit();
+    core.setCellMetrics(10, 20);
+    try seedDeleteFixture(&core);
+
+    // 1 열 — (1,1) 과 (3,1) 둘이 걸린다. (1,5) 는 남는다.
+    try core.write("\x1b_Ga=d,d=x,x=1,i=1,q=2\x1b\\");
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_placements.items.len);
+    try std.testing.expectEqual(@as(u32, 2), core.kitty_placements.items[0].image_id);
+
+    // 남은 것은 1 행이다 — 행으로 지우면 사라진다. 대문자면 이미지까지 free.
+    try core.write("\x1b_Ga=d,d=Y,y=1,i=2,q=2\x1b\\");
+    try std.testing.expectEqual(@as(usize, 0), core.kitty_placements.items.len);
+    try std.testing.expect(core.kitty_images.map.get(2) == null); // 대문자 = 이미지도 free
+}
+
+test "kitty delete: d=r 은 id 범위의 이미지를 지운다 (화면에 없어도)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 8 });
+    defer core.deinit();
+    core.setCellMetrics(10, 20);
+    try seedDeleteFixture(&core);
+    // 화면에 안 걸린 이미지도 하나 만든다 — `d=r` 의 대상은 placement 가 아니라 **이미지**다.
+    var b64: [64]u8 = undefined;
+    var seq: [200]u8 = undefined;
+    const px = [_]u8{ 9, 9, 9, 255 } ** 4;
+    const enc = std.base64.standard.Encoder.encode(&b64, &px);
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=9,q=2;{s}\x1b\\", .{enc}));
+    // **범위 위쪽에도 placement 를 둔다.** 안 두면 「상한을 안 본다」는 결함이 이 판정자를 그냥
+    // 통과한다 — 위쪽에 지울 것이 없어서 결과가 같아진다(돌연변이로 확인하고 보강했다).
+    try core.write("\x1b[5;1H");
+    try core.write("\x1b_Ga=p,i=9,c=1,r=1,q=2\x1b\\");
+    try std.testing.expectEqual(@as(usize, 4), core.kitty_images.map.count());
+    try std.testing.expectEqual(@as(usize, 4), core.kitty_placements.items.len);
+
+    // id 2..3 — 이미지 2,3 의 placement 가 걷히고(소문자라 데이터는 남는다) 1,9 는 그대로.
+    try core.write("\x1b_Ga=d,d=r,x=2,y=3,i=1,q=2\x1b\\");
+    try std.testing.expectEqual(@as(usize, 2), core.kitty_placements.items.len); // 1 과 9 가 남는다
+    var saw_one = false;
+    var saw_nine = false;
+    for (core.kitty_placements.items) |p| {
+        if (p.image_id == 1) saw_one = true;
+        if (p.image_id == 9) saw_nine = true;
+    }
+    try std.testing.expect(saw_one); // 범위 **아래**는 산다
+    try std.testing.expect(saw_nine); // 범위 **위**도 산다 — 상한을 안 보면 여기서 걸린다
+    try std.testing.expectEqual(@as(usize, 4), core.kitty_images.map.count()); // 소문자 = 데이터 유지
+
+    // 대문자면 그 범위의 **이미지 데이터**까지 간다. 화면에 없던 9 도 범위에 들면 사라진다.
+    try core.write("\x1b_Ga=d,d=R,x=3,y=9,i=1,q=2\x1b\\");
+    try std.testing.expect(core.kitty_images.map.get(9) == null);
+    try std.testing.expect(core.kitty_images.map.get(3) == null);
+    try std.testing.expect(core.kitty_images.map.get(1) != null); // 범위 밖은 산다
+
+    // 거꾸로 된 범위는 거부한다(hi < lo).
+    core.clearResponse();
+    try core.write("\x1b_Ga=d,d=r,x=9,y=2,i=1,q=0\x1b\\");
+    try std.testing.expect(std.mem.indexOf(u8, core.pendingResponse(), "EINVAL") != null);
+}
+
+test "kitty delete: d=f 는 프레임만 놓아주고 이미지는 남긴다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 8 });
+    defer core.deinit();
+    core.setCellMetrics(10, 20);
+    var b64: [64]u8 = undefined;
+    var seq: [200]u8 = undefined;
+    const px = [_]u8{ 3, 3, 3, 255 } ** 4;
+    const enc = std.base64.standard.Encoder.encode(&b64, &px);
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+    try core.write("\x1b_Ga=p,i=1,c=1,r=1,q=2\x1b\\");
+    try core.write("\x1b_Ga=a,i=1,s=3,v=0,q=2\x1b\\");
+    try std.testing.expectEqual(@as(u32, 2), core.kitty_images.map.get(1).?.frameCount());
+    try std.testing.expect(core.advanceAnimations(40)); // 돌고 있다(양성 대조)
+    const bytes_with_frames = core.kitty_images.total_bytes;
+
+    try core.write("\x1b_Ga=d,d=f,i=1,q=2\x1b\\");
+    const img = core.kitty_images.map.get(1).?;
+    try std.testing.expectEqual(@as(u32, 1), img.frameCount()); // 프레임만 갔다
+    try std.testing.expectEqual(@as(u32, 1), img.current_frame); // 보이는 것은 루트로 복귀
+    try std.testing.expect(img.anim_state == .stopped);
+    try std.testing.expect(core.kitty_images.map.get(1) != null); // **이미지는 남는다**
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_placements.items.len); // placement 도 남는다
+    try std.testing.expect(core.kitty_images.total_bytes < bytes_with_frames); // 총량 회계에서 빠졌다
+    try std.testing.expect(!core.advanceAnimations(40)); // 더 안 돈다
+
+    // 없는 이미지는 ENOENT, i= 가 없으면 EINVAL.
+    core.clearResponse();
+    try core.write("\x1b_Ga=d,d=f,i=77,q=0\x1b\\");
+    try std.testing.expect(std.mem.indexOf(u8, core.pendingResponse(), "ENOENT") != null);
 }
 
 test "kitty 애니메이션: 루트를 다시 전송하면 프레임도 함께 놓아준다 (적대적 검증)" {

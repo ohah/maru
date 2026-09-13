@@ -129,9 +129,15 @@ restore의 단일 출처는 [Workspace Restore 전략](workspace-restore.md)이�
 - live PTY fd·child pid·WKWebView process handle·JS heap snapshot은 계속 저장하지 않는다(기존 정책 유지).
 - 현재 복원 시 live surface는 새 generation으로 생성된다. persistent-session P4 이후 terminal Term만 Maru
   `runtime_handle`이 살아 있을 때 재연결하며, provider session resume/fork는 시도하지 않는다.
-- 하위 호환은 없으므로 옛 저장 파일은 workspace-restore.md의 "조용한 기본 창 폴백"을 따른다.
+- `active-window`는 옵션 additive 필드라 옛 저장 파일도 정상 로드한다. 손상되었거나 형식이 맞지 않는 파일만
+  workspace-restore.md의 "조용한 기본 창 폴백"을 따른다. 옛 reader는 새 필드를 skip하므로 downgrade 뒤에도 읽을 수
+  있지만, 다시 저장하면 알지 못하는 옵션 필드가 보존된다고 주장하지 않는다.
 
 ## 8. 구현 순서
+
+이 절은 M0~M6의 분해와 당시 판단을 보존하는 **구현 이력**이다. 단계 내부의 `아직`·`불가능`·`후속` 표현은
+그 단계 착수 시점의 상태이며 현재 상태 판정에 사용하지 않는다. 현재 구현 상태는 §8A.0과
+[실제 구현 계획](implementation-plan.md), [검증 매트릭스](verification-matrix.md)를 따른다.
 
 이 기능은 full drag UX부터 만들지 않는다. 먼저 command path와 순수 모델을 고정한다.
 

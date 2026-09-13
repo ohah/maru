@@ -80,11 +80,11 @@ workspace restore와 persistent-session attach는 서로 대체하지 않는다.
 
 | 상태 | 시작 동작 |
 | --- | --- |
-| 같은 `host_id/runtime_id`가 살아 있음 | 새 shell을 spawn하지 않고 기존 runtime attach (**구현**) |
-| host가 runtime 부재를 긍정 응답하거나 dead owner lease로 host 종료를 검증함 | 자동 fresh spawn 금지. **그 Term만 종료 placeholder로 두고 나머지 surface·split·탭은 정상 복원한다(첫 복원 구현)**. 영구 부재(`PersistentRuntimeGone`)로 분류된 경우에만이며 placeholder는 마지막 제목·위치와 `⏎` 안내를 화면에 남긴다 |
+| 같은 `host_id/runtime_id`가 살아 있음 | 새 shell을 spawn하지 않고 기존 runtime에 attach |
+| host가 runtime 부재를 긍정 응답하거나 dead owner lease로 host 종료를 검증함 | 자동 fresh spawn 금지. **그 Term만 종료 placeholder로 두고 나머지 surface·split·탭은 정상 복원한다.** 영구 부재(`PersistentRuntimeGone`)로 분류된 경우에만이며 placeholder는 마지막 제목·위치와 `⏎` 안내를 화면에 남긴다 |
 | endpoint 미발견·지원 범위 밖 protocol·timeout | runtime이 살아 있을 수 있으므로 unavailable로 fail-close. ended로 저장하거나 새 shell로 위장하지 않음 |
 | host 종료·재부팅이 긍정적으로 검증됨 | 기존 handle은 ended. 사용자가 새 shell을 열 수는 있지만 동일 session continuation 아님 |
-| host에만 runtime이 남음 | 삭제하지 않음. `Recovered Sessions` 노출은 P4 계획 |
+| host에만 runtime이 남음 | 삭제하지 않음. primary Window의 `Recovered Sessions`에 노출하고 사용자의 explicit adopt만 허용 |
 
 현재 `maru.workspace.v1`의 terminal `runtime-handle`은 구현됐다. writer는
 `<host-id>:<runtime-id>`를 함께 쓰고 reader는 길이·lowercase hex·구분자를 fail-closed 검증한다. 옛
@@ -224,8 +224,11 @@ surface custom-name="" title="ended" cwd="/repo" command="/bin/zsh" cols=100 row
 
 ### 멀티윈도우 저장·이동·동시 쓰기
 
-> **P4 목표 계약:** 현재 구현은 정상 종료 시 모든 일반 Window를 한 번에 checkpoint하고, 실패 시 마지막 완전본을
-> 보존한다. 아래 dirty debounce incremental checkpoint와 이동 transaction은 아직 구현되지 않았다.
+> 모든 일반 Window의 committed mutation은 app-global generation으로 합쳐 dirty debounce incremental checkpoint에
+> 게시한다. 실패하면 마지막 완전본을 보존하고 capped retry를 유지한다. cross-window Workspace 이동은 source/target
+> tree가 함께 commit된 뒤 checkpoint generation을 정확히 한 번 올린다. 현재 검증 상태는
+> [검증 매트릭스](verification-matrix.md)의 `영속 터미널 세션 호스트·외부 attach`와
+> `윈도우와 surface 이동성(detach/reattach)` 행이 소유한다.
 
 - 기존 한 header 아래 `window` block N개가 모든 OS Window를 저장한다. 각 Window가 같은 host connection을 공유하지만 layout은
   계속 자기 `tab`/`pane`/`surface` block에 인라인으로 저장한다.

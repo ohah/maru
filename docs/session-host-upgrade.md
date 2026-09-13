@@ -5,14 +5,11 @@
 [영속 터미널 세션 호스트](persistent-session-host.md), workspace의 `runtime-handle` 저장은
 [Workspace Restore](workspace-restore.md), 화면 전송 codec은 `maru.screen-stream` 계약을 따른다.
 
-> **상태: U0 inventory, U1 codec, U2 quiesce 핵심, U3 exec/rollback fixture, U4 typed adapter 기반과
-> U5 제품 daemon controller·preflight·pathname exec·target/rollback restore activation을 연결했다.
-> caller가 frozen N-1/current라고 증명한 signed executable의 non-empty PTY 성공 경로를 실행할 opt-in E2E
-> 하네스는 구현했지만, 저장소에는
-> 서명된 두 release artifact가 없어 아직 통과 증거를 만들지 못했다. 1개·최대치 근처 multi-runtime 제품 restore와
-> precommit·postcommit 전 구간 failure injection 하네스는 구현됐지만, frozen release로 실행한 증거와 실제 앱
-> 재실행 화면의 업그레이드 결과 notice 및 장시간 soak가 없으므로
-> U5 완료는 주장하지 않는다.**
+> 현재 구현·검증 상태는 [검증 매트릭스](verification-matrix.md)의 session-host upgrade 행과
+> [실제 구현 계획](implementation-plan.md)이 소유한다. 이 문서 §11의 단계별 `후속`·`아직` 문장은 각 slice가
+> 작성될 당시 그 slice 하나로 주장할 수 없던 범위를 보존하는 구현 이력이지 현재 전체 상태가 아니다.
+> 저장소에 provisioned frozen N-1/current 서명 release artifact가 없으므로, 실제 서명 artifact를 사용한
+> multi-runtime migration·앱 재실행 notice·장시간 soak는 계속 외부 release gate로 남는다.
 > **앱 재실행 orchestration은 연결됐다** — GUI는 시작할 때 같은 build의 host가 없으면, build_id만 다른 살아 있는
 > host를 찾아 자동으로 exec 교체를 시도한다(`host_connect.tryUpgradeExistingHost`). 이 시도는 **best-effort**다:
 > 후보가 없거나 capability 미광고·prepare 거부·재연결 실패면 조용히 기존 spawn 경로로 떨어져 새 host를 띄운다.
@@ -519,6 +516,10 @@ authority/publish 단계면 upgrade admission도 old/new connection generation�
 - SSH에서 실행한 `maru attach`도 동일 UID observer/controller다. 붙어 있으면 upgrade를 미루고 연결을 강제로 끊지 않는다.
 
 ## 11. 단계와 종료 gate
+
+이 절은 단계별 계약과 구현 당시의 검증 근거를 보존하는 **구현 이력 부록**이다. 각 slice의 `후속`·`아직`·
+`완료하지 않는다`는 표현은 그 slice의 비범위를 기록하며 현재 프로젝트 상태의 단일 출처가 아니다. 현재 판정은
+[실제 구현 계획](implementation-plan.md)과 [검증 매트릭스](verification-matrix.md)만 갱신한다.
 
 ### U0 — 소유 필드 inventory와 문서
 

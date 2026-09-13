@@ -950,13 +950,9 @@ fn projectHistory(self: *AppSession, arena: std.mem.Allocator) ?Projection {
     if (count == 0) {
         // 셋을 구별한다: 아직 못 읽음 · 읽었지만 커밋 없음 · 읽기 실패.
         //
-        // **원격이 그 앞에 하나 더 온다**(RS7-0 — [계획](../../../../docs/plans/remote-scm.md) §18.1).
-        // 가드가 읽기를 막으므로 `scm_log_repo` 가 영영 `null` 이고, 그대로 두면 목록이 **영영
-        // 「읽는 중…」**이라 사용자는 느린 것으로 읽는다 — §2.3 의 「지원하지 않는 동작은 이유를
-        // 말한다」가 이 자리에도 걸린다. **RS7b 가 실제로 읽게 되면 이 가지를 지운다.**
-        items[n] = .{ .notice = if (git_ops.scmTargetIsRemote(self))
-            maru.i18n.t(.scm_log_remote_unsupported)
-        else if (self.scm_log_failed)
+        // **원격도 같은 셋으로 답한다**(RS7b). 히스토리를 저쪽 기계에서 읽게 됐으므로 「아직 못 읽는다」
+        // 라는 네 번째 상태가 없어졌다 — RS7-0 이 두었던 그 가지를 여기서 지웠다.
+        items[n] = .{ .notice = if (self.scm_log_failed)
             maru.i18n.t(.scm_log_read_failed)
         else if (self.scm_log_repo == null)
             maru.i18n.t(.scm_loading)
@@ -2326,27 +2322,80 @@ pub fn selectScmTab(self: *AppSession, tab: component.types.Tab) void {
 pub fn pumpScmLog(self: *AppSession) void {
     if (self.dock.view != .source_control or !dock_ops.dockVisible(self)) return;
     if (self.scm_tab != .history) return;
-    // **원격 목록을 보는 동안 로컬 git 으로 커밋 목록을 읽지 않는다**(RS7-0 — [계획](../../../../docs/plans/remote-scm.md) §18.1).
-    // `git_repo` 에 든 것이 원격 경로라, 이쪽 기계에 우연히 같은 경로가 있으면 **남의 저장소 커밋**이
-    // 원격 히스토리로 뜬다 — `pumpCommitFiles` 와 같은 줄이다.
-    //
-    // ⚠️ 이 줄은 RS2 적대적 검증 1회차가 「막았다」고 적어 둔 셋 중 **실제로는 안 들어간** 자리다
-    // (계획 §5 의 정정). 원격 히스토리 자체는 RS7b 가 연다 — 그때 이 줄이 원격 라우팅으로 바뀐다.
-    if (git_ops.scmTargetIsRemote(self)) return;
     if (self.scm_log_inflight != 0) return;
     const repo = self.git_repo orelse return; // 저장소를 못 잡았으면 읽을 것도 없다
     // 이미 **그 저장소를 그 상한으로** 읽어 뒀으면 다시 읽지 않는다.
     if (self.scm_log_repo) |current| {
         if (std.mem.eql(u8, current, repo) and !self.scm_log_failed and self.scm_log_text.len > 0) return;
     }
+
+    // **목록이 원격이면 그 기계에서 읽는다**(RS7b — [계획](../../../../docs/plans/remote-scm.md) §18.3).
+    //
+    // 대상은 **목록을 읽을 때 박아 둔 쌍**(`git_repo_dest`)이다. 여기서 `remoteScmTarget` 을 새로
+    // 물으면 그 사이 pane 이 바뀌었을 때 **목록과 다른 기계**의 커밋을 싣는다 — §2.3 이 브랜치 줄에
+    // 대해 정한 것과 같은 판단이다.
+    var ctl_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var remote: ?maru.session.git_command.Remote = null;
+    if (self.git_repo_dest) |dest| {
+        // ⚠️ **소켓이 없으면 보내지 않고 실패로 적는다 — 로컬로 떨어지지 않는다**(§5 6회차가 diff 에서
+        // 겪은 사고다: `null` 을 로컬로 읽어 원격 경로를 이쪽 git 에 줬다). 실패로 적어야 그 탭이
+        // 「읽는 중…」에 갇히지 않고 이유를 낸다.
+        const ctl = git_ops.remoteControlSocketFor(self, dest, &ctl_buf) orelse {
+            markScmLogFailed(self, repo, dest);
+            return;
+        };
+        remote = .{ .dest = dest, .control_path = ctl };
+    }
+
+    // ⚠️ **원격이면 로컬 git 을 찾지 않는다**(RS2 적대적 검증 5회차 — `git_ops.submitGitRead` 와 같은
+    // 규율). `buildRemote` 가 `argv[0]` 을 버리고 `remote_git_exe` 로 바꾸므로 로컬 경로는 어차피 안
+    // 실리는데, 여기서 `locate` 를 요구하면 **로컬에 git 이 없는 사용자가 원격 히스토리를 통째로 못
+    // 읽는다.**
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const git_exe = git_backend_mod.locate(&exe_buf) orelse return;
+    const git_exe = if (remote != null)
+        maru.session.git_command.remote_git_exe
+    else
+        git_backend_mod.locate(&exe_buf) orelse return;
     if (self.git_backend == null) {
         self.git_backend = git_backend_mod.Backend.init(self.io) catch return;
     }
     self.scm_log_seq += 1;
-    if (!self.git_backend.?.submitLog(git_exe, repo, self.scm_log_limit, self.scm_log_seq)) return;
+    if (!self.git_backend.?.submitLog(git_exe, repo, self.scm_log_limit, self.scm_log_seq, remote)) return;
     self.scm_log_inflight = self.scm_log_seq;
+    // **이 목록이 어느 기계의 것인지 지금 박는다**(도착할 때가 아니라 — `scm_log_dest` 주석).
+    rememberScmLogDest(self, if (remote) |r| r.dest else null);
+}
+
+/// 읽기를 **걸지 않고** 실패로 적는다(RS7b). 소켓이 없을 때뿐이다 — 그때는 보낼 곳이 없고, 그래도
+/// 화면은 「읽는 중…」이 아니라 이유를 내야 한다.
+fn markScmLogFailed(self: *AppSession, repo: []const u8, dest: ?[]const u8) void {
+    // 멱등이어야 한다 — 매 tick 도는 경로라, 같은 상태를 반복해서 다시 쓰면 렌더를 계속 깨운다.
+    if (self.scm_log_failed) {
+        if (self.scm_log_repo) |current| if (std.mem.eql(u8, current, repo)) return;
+    }
+    const repo_copy = self.allocator.dupe(u8, repo) catch return;
+    if (self.scm_log_repo) |old| self.allocator.free(old);
+    self.scm_log_repo = repo_copy;
+    if (self.scm_log_text.len > 0) self.allocator.free(self.scm_log_text);
+    self.scm_log_text = &.{};
+    self.scm_log_failed = true;
+    self.scm_log_truncated = false;
+    rememberScmLogDest(self, dest);
+    self.metal_dirty = true;
+}
+
+/// 커밋 목록을 읽은 **기계**를 기억한다(null = 로컬). `rememberGitRepoDest` 와 같은 규율이다.
+fn rememberScmLogDest(self: *AppSession, dest: ?[]const u8) void {
+    const want = dest orelse {
+        if (self.scm_log_dest) |old| self.allocator.free(old);
+        self.scm_log_dest = null;
+        return;
+    };
+    if (self.scm_log_dest) |current| {
+        if (std.mem.eql(u8, current, want)) return;
+        self.allocator.free(current);
+    }
+    self.scm_log_dest = self.allocator.dupe(u8, want) catch null;
 }
 
 /// 도착한 커밋 목록을 싣는다. **경로로 맞춘다** — 저장소가 그 사이에 바뀌면 남의 커밋이 된다.
@@ -2379,18 +2428,20 @@ pub fn drainScmLog(self: *AppSession) void {
 pub fn dropScmLogIfRepoChanged(self: *AppSession) void {
     const repo = self.git_repo orelse "";
     const current = self.scm_log_repo orelse return;
-    // ⚠️ **호스트가 바뀌어도 버린다**(RS7-0 — [계획](../../../../docs/plans/remote-scm.md) §18.1,
-    // 적대적 검증 2026-09-13 3회차). 아래 비교는 **경로로만** 하는데, 로컬 `/srv/app` → 원격 `/srv/app`
-    // 처럼 경로가 같고 기계만 바뀌는 전환에서는 「안 바뀌었다」를 낸다 — 그러면 **로컬에서 읽은 커밋
-    // 목록이 원격 히스토리로 그대로 남는다.** §5 2회차가 안내 줄에서 겪은 것과 같은 형태이고, 가드
-    // (`pumpScmLog`)만으로는 안 닫힌다: 가드는 새로 읽는 것을 막을 뿐 **이미 선 목록**을 안 건드린다.
-    //
-    // 조건이 「원격이면」 하나로 끝나는 근거: RS7-0 뒤로 원격일 때는 읽지 않으므로 화면에 선 목록은
-    // **언제나 로컬에서 읽은 것**이다. RS7b 가 원격을 실제로 읽게 되면 이 조건은 `(host, path)` 쌍
-    // 비교로 바뀐다.
-    if (!git_ops.scmTargetIsRemote(self) and std.mem.eql(u8, current, repo)) return;
+    // ⚠️ **`(host, path)` 쌍으로 판정한다**(RS7b — [계획](../../../../docs/plans/remote-scm.md) §18.3).
+    // 경로만 보면 로컬 `/srv/app` → 원격 `/srv/app` 처럼 **경로가 같고 기계만 바뀌는** 전환을 「안
+    // 바뀌었다」로 읽어, 로컬에서 읽은 커밋이 원격 히스토리로 그대로 남는다 — §5 2회차가 안내 줄에서
+    // 겪은 것과 같은 형태다. `rememberGitRepoDest` 가 그때 배운 것을 이 축에도 적용한다.
+    const dest_same = blk: {
+        const want = self.git_repo_dest orelse break :blk self.scm_log_dest == null;
+        const have = self.scm_log_dest orelse break :blk false;
+        break :blk std.mem.eql(u8, have, want);
+    };
+    if (dest_same and std.mem.eql(u8, current, repo)) return;
     self.allocator.free(current);
     self.scm_log_repo = null;
+    // **짝을 함께 놓는다** — 한쪽만 남으면 다음 판정이 「같은 기계」를 거짓으로 말한다(§2.1 의 쌍 규율).
+    rememberScmLogDest(self, null);
     if (self.scm_log_text.len > 0) self.allocator.free(self.scm_log_text);
     self.scm_log_text = &.{};
     self.scm_log_limit = app_session_mod.scm_log_limit_initial;
@@ -4022,6 +4073,9 @@ pub fn seedScmLogForTest(self: *AppSession, repo: []const u8, text: []const u8) 
     self.scm_log_text = text_copy;
     self.scm_log_failed = false;
     self.scm_log_truncated = false;
+    // **로컬에서 읽은 목록으로 심는다** — 짝(`scm_log_dest`)을 안 놓으면 다음 판정이 「같은 기계」를
+    // 거짓으로 말한다(RS7b 의 쌍 규율). 원격 목록을 심고 싶으면 그때 인자를 늘린다.
+    rememberScmLogDest(self, null);
 }
 
 /// 판정자용: 머리 줄 요약을 직접 심는다(성공 항목). 진짜 저장소 없이 「캐시에 남의 기계 값이 있다」를

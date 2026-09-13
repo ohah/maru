@@ -135,7 +135,7 @@ OSC 7 은 host authority 를 버리고 경로만 남기고, 커널 조회는 로
 | **RS6** | 원격 cwd 판정을 표시 축과 **한 함수**로 합친다(`git_ops.remoteCwd`) · 훅 cwd 를 `(host, path)` 로 굳힌다 | ✅ 2026-09-05 — §17 |
 | **RS7-0** | tick 읽기 둘(`pumpScmLog`·`pumpTurnSummaries`)에 빠진 원격 가드 · 이미 선 목록을 호스트 전환에서 버린다 · 그 자리가 「읽는 중…」으로 안 남게 한다(§18.1) | ✅ 2026-09-13 |
 | **RS7a** | `git_log.format_spec` 을 `%x1f`/`%x1e` 표기로 — 원격 토큰에서 제어문자를 없앤다(§2.2 ⑵ · §18.2) | ✅ 2026-09-13 |
-| **RS7b** | `submitLog` 에 `Remote` — 히스토리 목록을 그 기계에서 읽는다(§18.3) | 미착수 |
+| **RS7b** | `submitLog` 에 `Remote` — 히스토리 목록을 그 기계에서 읽는다 · 목록 신원을 `(host, path)` 쌍으로(§18.3) | ✅ 2026-09-13 |
 | **RS7c** | `submitCommitFiles` 에 `Remote` — 펼친 커밋의 파일 목록도 같은 축으로(§18.4) | 미착수 |
 | **RS7d** | 히스토리 실패를 이름으로 말한다 — §10.1 이 만든 `RemoteGitMissing`·`RemoteTransportFailed` 재사용(§18.5) | 미착수 |
 
@@ -1033,6 +1033,19 @@ i18n 키. 남기면 히스토리가 원격에서 영영 안 뜬다. `pumpTurnSum
    `buildRemote` 가 `argv[0]` 을 버리므로 `git_command.remote_git_exe` 를 넘기고, `locate` 를 요구하면
    **로컬에 git 이 없는 사용자가 원격 히스토리를 통째로 못 읽는다.** 지금 `pumpScmLog` 는
    `locate(&exe_buf) orelse return` 이라 정확히 그 상태다.
+
+**RS7b 가 실물 하네스에서 확인한 것**(2026-09-13). `zig build test-remote-scm` 에 판정자를 하나 더했다 —
+`runOn` 이 낸 바이트에 `field_sep`·`record_sep` 가 그대로 있고, `git_log.iterate` 가 커밋을 세우고,
+`submitLog` 배선도 같은 값을 낸다.
+
+⚠️ **그 넷만으로는 「원격이다」가 증명되지 않는다.** 하네스의 원격은 loopback 이라 `repo` 가 **이쪽에도
+있는 경로**여서, 로컬 git 이 답해도 똑같이 초록이다. 그래서 **대조군**을 함께 건다: 소켓을 죽은 것으로
+바꾸면 원격 경로는 `RemoteTransportFailed` 로 갈리고 로컬로 새고 있으면 **여전히 성공한다.** 같은
+대조군을 `submitLog` 에도 걸어 job 이 두 축을 쌍으로 나르는지 본다.
+
+그리고 그 스텝은 **판정자 개수를 상한이 아니라 정수로** 고정한다(`--maru-expect-tests`·
+`--maru-expect-passed`). 판정자를 더하면 그 숫자도 함께 올려야 하고, 하네스가 조용히 안 서면
+「건너뛴 것」이 「통과」로 세어지지 않는다.
 
 ### 18.4 펼친 커밋의 파일 목록도 같은 축이다 (RS7c)
 

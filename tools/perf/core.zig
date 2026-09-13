@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const maru = @import("maru");
 
 const Budget = struct {
@@ -115,6 +116,22 @@ pub fn main(init: std.process.Init) !void {
     var stdout_buffer: [4096]u8 = undefined;
     var stdout_file_writer: std.Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
     const stdout = &stdout_file_writer.interface;
+
+    // **모드를 스스로 지킨다.** 이 하네스는 `-Doptimize` 없이 불리면 Debug 로 돌고, 그 수치는
+    // 배포와 3~256배 갈린다(같은 기계 실측). 호출자(.mise.toml·CI)에 맡기면 한 줄만 지워도 다시
+    // 그 상태가 되므로, **여기서** 거절한다. CR6e 기준선 하네스가 산출물의 `build_mode` 를
+    // 검증기로 확인하는 것과 같은 결이다 — 재는 쪽이 자기 조건을 증명한다.
+    if (builtin.mode == .Debug) {
+        try stdout.writeAll(
+            \\maru.perf.v1
+            \\error=debug_build
+            \\  성능 예산은 배포와 같은 최적화 모드에서만 뜻이 있다(같은 하네스가 Debug 에서 3~256배 느리다).
+            \\  이렇게 부른다: zig build perf -Doptimize=ReleaseFast   (또는 mise run perf)
+            \\
+        );
+        try stdout.flush();
+        return error.PerfHarnessNeedsReleaseBuild;
+    }
 
     // 성능 측정은 실행 중인 머신 상태에 영향을 받기 때문에 기본 check에는 넣지 않는다.
     // 대신 큰 구조 변경 전후에 opt-in으로 실행해서 느린 구조가 조용히 들어오지 않게 한다.
@@ -463,6 +480,10 @@ fn renderReport(allocator: std.mem.Allocator, results: []const Budget) ![]u8 {
     errdefer output.deinit();
 
     try output.writer.writeAll("maru.perf.v1\n");
+    // 산출물이 **어느 모드에서 나왔는지** 스스로 말한다. 이게 없으면 tests/artifacts/perf/core.txt
+    // 를 나중에 읽는 사람이 그 숫자의 전제를 알 수 없다(이 게이트가 Debug 로 돌던 시절의 수치가
+    // 그래서 제품 성능으로 오독됐다).
+    try output.writer.print("build_mode={s}\n", .{@tagName(builtin.mode)});
     for (results) |result| {
         try output.writer.print(
             "name={s} elapsed_ms={d} budget_ms={d} units={d} status={s}\n",

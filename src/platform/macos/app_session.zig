@@ -71038,6 +71038,46 @@ test "히스토리: 실패도 답이다 — 매 tick 다시 묻지 않는다 (�
     try std.testing.expect(session.scm_log_seq != before_invalidate);
 }
 
+test "히스토리 탭은 «이 커밋을 어느 기계에서 읽었나»를 말한다 (적대적 검증)" {
+    // **결함**(2026-09-14). RS7 이 이 탭을 원격으로 열었는데, 정작 그 사실을 말할 자리가 없었다 —
+    // 브랜치 줄은 `branch` 가 빈 이 탭에 안 서고, 화면 아래 폴더줄은 **터미널이 서 있는 곳**이라
+    // 다른 질문에 답한다(계약 §2.3 이 그 둘을 일부러 가른다). 경로만 보면 로컬 `/srv/app` 과 원격
+    // `/srv/app` 이 같은 값이라, 라벨이 없으면 사용자는 **구별할 방법이 없다.**
+    //
+    // 값의 출처가 `scm_log_dest` 인 것도 이 판정자가 문다 — `git_repo_dest` 를 적으면 pane 을 옮기고
+    // 아직 못 읽은 사이에 **화면의 커밋과 다른 호스트**를 말한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    session.scm_tab = .history;
+
+    // 기계 **A** 에서 읽은 커밋 목록이 서 있다.
+    scm_dock_ops.seedScmLogForTest(
+        session,
+        "/srv/app",
+        "aaaa1111\x1f\x1fAmy\x1f1\x1f\x1fA 의 커밋\x1e",
+        "user@build-a",
+    );
+    // 그 사이 pane 이 **B** 로 옮겨 목록 대상만 바뀌었다(아직 다시 못 읽었다).
+    git_ops.rememberGitRepo(session, "/srv/app");
+    git_ops.rememberGitRepoDest(session, "user@build-b");
+
+    const projection = scm_dock_ops.projectTabForTest(session, arena_state.allocator()) orelse
+        return error.NoProjection;
+    // **화면의 커밋을 낸 기계**를 적는다 — 「지금 대상」이 아니라.
+    try std.testing.expectEqualStrings("user@build-a", projection.remote_host);
+
+    // 로컬에서 읽은 목록이면 아무것도 안 적는다 — 그 줄이 통째로 안 서고 화면이 그대로다.
+    scm_dock_ops.seedScmLogForTest(session, "/srv/app", "aaaa1111\x1f\x1fAmy\x1f1\x1f\x1f로컬\x1e", null);
+    const local = scm_dock_ops.projectTabForTest(session, arena_state.allocator()) orelse
+        return error.NoProjection;
+    try std.testing.expectEqual(@as(usize, 0), local.remote_host.len);
+}
+
 test "히스토리 재시도는 «왜 실패했나»가 정한다 (누적 적대적 검증)" {
     // 「실패도 답이다」를 그대로 두면 **연결 탓 실패도** 새로고침 전까지 갇힌다 — ControlMaster 가 다시
     // 서서 멀쩡해진 뒤에도 화면은 「연결이 끊겼다」다. 반대로 전부 다시 물으면 unborn 처럼 **영구적인**

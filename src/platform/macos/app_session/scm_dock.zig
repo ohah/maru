@@ -2445,7 +2445,6 @@ pub fn drainScmLog(self: *AppSession) void {
 /// 저장소가 바뀌었으면 히스토리 원문을 버린다. **남의 커밋을 그리는 것보다 빈 화면이 낫다.**
 pub fn dropScmLogIfRepoChanged(self: *AppSession) void {
     const repo = self.git_repo orelse "";
-    const current = self.scm_log_repo orelse return;
     // ⚠️ **`(host, path)` 쌍으로 판정한다**(RS7b — [계획](../../../../docs/plans/remote-scm.md) §18.3).
     // 경로만 보면 로컬 `/srv/app` → 원격 `/srv/app` 처럼 **경로가 같고 기계만 바뀌는** 전환을 「안
     // 바뀌었다」로 읽어, 로컬에서 읽은 커밋이 원격 히스토리로 그대로 남는다 — §5 2회차가 안내 줄에서
@@ -2455,8 +2454,18 @@ pub fn dropScmLogIfRepoChanged(self: *AppSession) void {
         const have = self.scm_log_dest orelse break :blk false;
         break :blk std.mem.eql(u8, have, want);
     };
-    if (dest_same and std.mem.eql(u8, current, repo)) return;
-    self.allocator.free(current);
+    // ⚠️ **표식이 없어도 원문은 화면에 남아 있다**(누적 적대적 검증 2026-09-13 1회차). 「다시 읽어라」
+    // 표식(`더 보기` · 쓰기 뒤 `invalidateScmLog`)은 `scm_log_repo` **만** 지우고 원문은 남긴다 —
+    // 화면이 깜빡이지 않게 하려는 것이다. 그 상태에서 기계가 갈리면 옛 코드는 `orelse return` 으로
+    // 그냥 나가 **남의 기계 커밋이 새 호스트의 머리 줄 아래 그대로 남았다**(선택·펼침·그 파일 목록까지).
+    // 표식이 아니라 **원문이 있는가**로 판정한다.
+    if (self.scm_log_repo) |current| {
+        if (dest_same and std.mem.eql(u8, current, repo)) return;
+    } else {
+        // 멱등: 버릴 원문이 없으면 아무것도 안 한다(매 tick 도는 경로다).
+        if (dest_same or self.scm_log_text.len == 0) return;
+    }
+    if (self.scm_log_repo) |current| self.allocator.free(current);
     self.scm_log_repo = null;
     // **짝을 함께 놓는다** — 한쪽만 남으면 다음 판정이 「같은 기계」를 거짓으로 말한다(§2.1 의 쌍 규율).
     rememberScmLogDest(self, null);
@@ -4133,7 +4142,7 @@ pub fn seedExpandedForTest(self: *AppSession, commit: ?[]const u8, turn: ?[]cons
 /// 판정자용: 커밋 목록을 직접 심는다. 진짜 저장소 없이 「화면에 이미 선 목록이 있다」를 세울 방법이
 /// 이것뿐이다 — 그 상태가 **호스트 전환에서 남는가**(RS7-0)를 보려면 목록이 먼저 서 있어야 한다.
 /// 소유는 세션이 진다(`deinit` 가 둘 다 푼다).
-pub fn seedScmLogForTest(self: *AppSession, repo: []const u8, text: []const u8) void {
+pub fn seedScmLogForTest(self: *AppSession, repo: []const u8, text: []const u8, dest: ?[]const u8) void {
     const repo_copy = self.allocator.dupe(u8, repo) catch return;
     const text_copy = self.allocator.dupe(u8, text) catch {
         self.allocator.free(repo_copy);
@@ -4145,9 +4154,9 @@ pub fn seedScmLogForTest(self: *AppSession, repo: []const u8, text: []const u8) 
     self.scm_log_text = text_copy;
     self.scm_log_failed = false;
     self.scm_log_truncated = false;
-    // **로컬에서 읽은 목록으로 심는다** — 짝(`scm_log_dest`)을 안 놓으면 다음 판정이 「같은 기계」를
-    // 거짓으로 말한다(RS7b 의 쌍 규율). 원격 목록을 심고 싶으면 그때 인자를 늘린다.
-    rememberScmLogDest(self, null);
+    // **짝을 함께 심는다** — `scm_log_dest` 를 안 놓으면 다음 판정이 「같은 기계」를 거짓으로 말한다
+    // (RS7b 의 쌍 규율). `null` 이면 로컬에서 읽은 목록이다.
+    rememberScmLogDest(self, dest);
 }
 
 /// 판정자용: 머리 줄 요약을 직접 심는다(성공 항목). 진짜 저장소 없이 「캐시에 남의 기계 값이 있다」를

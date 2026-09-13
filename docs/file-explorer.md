@@ -350,6 +350,11 @@ thumb이 셀 경계로 스냅해 목록과 어긋난다.
   세션 상태를 묻지 않는다. 원격 트리는 이 질의를 **아예 안 건다**(로컬 git 에 원격 경로를 대는 일이라
   [원격 파일 트리](plans/remote-file-tree.md) §2.4 가 그렇게 정했다).
 
+  ⚠️ **답도 그 틀로 되돌린다.** `check-ignore` 의 출력은 저장소 루트 기준 상대경로라, 절대경로로
+  되돌리려면 **물을 때 쓴 루트**가 있어야 한다. 그 루트는 답(`IgnoreResult.repo`)이 직접 들고 오고
+  소비자가 다시 고르지 않는다 — 나가는 자리와 돌아오는 자리가 갈리면 한쪽이 낡아, 상대경로가 엉뚱한
+  루트에 붙는다(흐림이 안 서거나 남의 행이 흐려진다). 틀 없이 온 답은 **버린다**.
+
   거절되거나 실패하면 그 화면은 **판정 없이 남는다** — 모르면 흐리게 하지 않는다.
 - **선택과 키보드 포커스(ABI v127)**: 트리는 row index가 아니라 `절대 경로 + row kind` identity로 transient selection을 소유한다. scan 완료·접기·FSEvents rebuild로 row index가 바뀌어도 같은 row가 남으면 선택을 복원하고, 사라지면 가장 가까운 조작 가능한 조상/이웃으로 결정적으로 이동한다. 클릭 또는 `focus_file_tree`가 Zig의 단일 `FocusOwner`를 `.file_tree { restore_surface: ?surface_id }`로 바꾸고 Metal view를 first responder로 만든다. 현재 구현의 기본 `⌘⇧E`는 이 action에 연결되어 있으며, FP9에서 §3.4의 `toggle_file_panel_focus`로 기본 chord만 이전한다. surface id는 앱 전역 비재사용이라 generation token을 겸하며 Esc 때 entry와 native WKWebView 존재를 다시 검증한다. `file_tree_focus`는 이 union의 파생 getter일 뿐 별도 mutable boolean이 아니다. 선택과 keyboard focus는 workspace에 저장하지 않는다. 포커스 중 선택은 theme accent 배경과 WCAG 4.5 이상 대비가 나는 파생 전경을 marker·이름·dirty/conflict 표시 전체에 적용하고, 포커스 밖에서는 dim으로 그린다. active 파일 표시는 별도 marker로 유지한다.
 

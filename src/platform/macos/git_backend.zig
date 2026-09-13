@@ -303,10 +303,21 @@ pub const IgnoreResult = struct {
     request_id: u64,
     ok: bool = false,
     text: []u8 = &.{},
+    /// **이 답을 어느 저장소에 물었나**(owned). `check-ignore` 의 출력은 그 저장소 루트 기준 **상대경로**라,
+    /// 절대경로로 되돌리려면 그 루트가 있어야 한다.
+    ///
+    /// ⚠️ **물을 때의 저장소를 답이 직접 들고 온다 — 소비자가 다시 고르지 않는다.** 예전에는 드레인이
+    /// `gitRepoRoot` 로 루트를 **다시** 골랐는데, 그 값은 도크가 기억하는 저장소라 **묻던 저장소와 다를 수
+    /// 있다**(탐색기가 터미널과 다른 저장소를 볼 때·원격 SCM 목록을 본 뒤). 그러면 답이 **엉뚱한
+    /// 절대경로**에 붙어, 흐림이 안 서거나 남의 행이 흐려진다. 나가는 자리와 돌아오는 자리가 갈리면
+    /// 한쪽이 낡는다 — 답이 자기 질문의 틀을 들고 오게 한다.
+    repo: []u8 = &.{},
 
     pub fn deinit(self: *IgnoreResult, allocator: std.mem.Allocator) void {
         allocator.free(self.text);
+        allocator.free(self.repo);
         self.text = &.{};
+        self.repo = &.{};
     }
 };
 
@@ -816,6 +827,23 @@ pub const Backend = struct {
     }
 
     /// 완료된 `check-ignore` 결과의 소유권을 넘긴다(없으면 null).
+    /// 판정자용: `check-ignore` 답을 **직접 심는다**. 실제 git 을 안 띄우고 「답이 어느 틀로 도착했나」를
+    /// 세울 방법이 이것뿐이다 — 그 틀이 소비자에서 다시 골라지지 않는지가 이 자리의 계약이다.
+    /// 소유는 결과가 진다(`deinit` 가 둘 다 푼다).
+    pub fn pushIgnoreResultForTest(self: *Backend, repo: []const u8, text: []const u8) bool {
+        const state = self.state orelse return false;
+        const repo_copy = state.allocator.dupe(u8, repo) catch return false;
+        const text_copy = state.allocator.dupe(u8, text) catch {
+            state.allocator.free(repo_copy);
+            return false;
+        };
+        state.mutex.lockUncancelable(state.io);
+        defer state.mutex.unlock(state.io);
+        if (state.ignore_result) |*old| old.deinit(state.allocator);
+        state.ignore_result = .{ .request_id = 0, .ok = true, .text = text_copy, .repo = repo_copy };
+        return true;
+    }
+
     pub fn takeIgnoreResult(self: *Backend) ?IgnoreResult {
         const state = self.state orelse return null;
         state.mutex.lockUncancelable(state.io);
@@ -1326,6 +1354,9 @@ fn commitFilesWorker(job: *Job) void {
 fn ignoreWorker(job: *Job) void {
     const state = job.state;
     var result: IgnoreResult = .{ .request_id = job.request_id };
+    // **물은 저장소를 답에 싣는다**(`IgnoreResult.repo` 주석). 못 실으면 빈 슬라이스이고, 소비자는
+    // 그 답을 **버린다** — 틀을 모르는 상대경로를 절대경로로 만들 방법이 없다.
+    result.repo = state.allocator.dupe(u8, job.repo) catch &.{};
     // `run` 은 kind 하나로 argv 를 만드는 경로라, 경로가 붙는 이 명령만 argv 를 직접 조립해 넘긴다.
     var argv_buf: [git_command.max_argv][]const u8 = undefined;
     const argv = git_command.buildCheckIgnore(job.git_exe, job.repo, job.ignore_paths, &argv_buf);

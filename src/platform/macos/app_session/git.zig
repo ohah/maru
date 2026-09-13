@@ -1246,15 +1246,20 @@ pub fn drainIgnoreResults(self: *AppSession) void {
         var res = taken;
         defer res.deinit(git_backend_mod.worker_allocator);
         if (!res.ok) continue;
+        // ⚠️ **틀은 답이 들고 온 것을 쓴다 — 여기서 다시 고르지 않는다**(`IgnoreResult.repo` 주석).
+        // 예전에는 `gitRepoRoot` 로 루트를 다시 골랐는데, 그 값은 **도크가 기억하는 저장소**라 물을
+        // 때 쓴 저장소와 다를 수 있다(탐색기가 터미널과 다른 저장소를 볼 때·원격 SCM 목록을 본 뒤).
+        // 그러면 상대경로가 **엉뚱한 루트**에 붙어 흐림이 안 서거나 남의 행이 흐려진다.
+        if (res.repo.len == 0) continue; // 틀을 모르면 그 답은 버린다(모르면 흐리게 하지 않는다)
         // 물었던 경로를 먼저 지우고(이번 답이 권위다), 무시된 것만 다시 세운다.
         for (self.git_ignore_query_paths.items) |rel| {
             var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
-            if (joinRepoPath(self, rel, &abs_buf)) |abs| self.file_tree.markIgnored(abs, false);
+            if (joinRepoPath(res.repo, rel, &abs_buf)) |abs| self.file_tree.markIgnored(abs, false);
         }
         var it = git_status.iterateIgnored(res.text);
         while (it.next()) |rel| {
             var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
-            if (joinRepoPath(self, rel, &abs_buf)) |abs| self.file_tree.markIgnored(abs, true);
+            if (joinRepoPath(res.repo, rel, &abs_buf)) |abs| self.file_tree.markIgnored(abs, true);
         }
         self.file_tree_rows_dirty = true;
         self.metal_dirty = true;
@@ -1262,9 +1267,11 @@ pub fn drainIgnoreResults(self: *AppSession) void {
 }
 
 /// 저장소 루트 기준 상대경로를 트리가 쓰는 절대경로로 되돌린다.
-fn joinRepoPath(self: *AppSession, rel: []const u8, buf: []u8) ?[]const u8 {
-    var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const repo = gitRepoRoot(self, &repo_buf) orelse return null;
+///
+/// **루트를 인자로 받는다** — 세션에서 다시 고르면 「물을 때」와 「답이 올 때」가 갈려, 한쪽이 낡는
+/// 순간 답이 엉뚱한 자리에 붙는다(`IgnoreResult.repo` 주석).
+fn joinRepoPath(repo: []const u8, rel: []const u8, buf: []u8) ?[]const u8 {
+    if (repo.len == 0 or rel.len == 0) return null;
     if (repo.len + 1 + rel.len > buf.len) return null;
     @memcpy(buf[0..repo.len], repo);
     buf[repo.len] = '/';

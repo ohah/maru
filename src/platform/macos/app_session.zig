@@ -70642,7 +70642,7 @@ test "원격 목록을 보는 동안 로컬 저장소에 손이 가지 않는다
     // **이미 선 목록은 «경로가 같아도» 기계가 다르면 버린다**(RS7b — `(host, path)` 쌍).
     // 경로만 보면 로컬 `/srv/app` → 원격 `/srv/app` 전환을 「안 바뀌었다」로 읽어, **로컬에서 읽은
     // 커밋이 원격 히스토리로 그대로 남는다**(§5 2회차가 안내 줄에서 겪은 것과 같은 형태).
-    scm_dock_ops.seedScmLogForTest(session, "/srv/app", "aaaa1111\x1f\x1fAmy\x1f1\x1f\x1f로컬 커밋\x1e");
+    scm_dock_ops.seedScmLogForTest(session, "/srv/app", "aaaa1111\x1f\x1fAmy\x1f1\x1f\x1f로컬 커밋\x1e", null);
     try std.testing.expect(session.scm_log_repo != null); // 전제: 로컬에서 읽은 목록이 서 있다
     try std.testing.expect(session.scm_log_dest == null); //        그리고 그것은 로컬의 것이다
     scm_dock_ops.dropScmLogIfRepoChanged(session);
@@ -70718,6 +70718,97 @@ test "탐색기의 .gitignore 흐림은 «방금 읽은 그 디렉터리»의 �
     const after_ask = session.git_ignore_request_id;
     git_ops.requestIgnoredForPaths(session, "/", &entries);
     try std.testing.expectEqual(after_ask, session.git_ignore_request_id);
+}
+
+test "탐색기 무시 표시는 «물을 때의 저장소»에 붙는다 — 도크가 기억한 것이 아니라" {
+    // **누적 적대적 검증에서 나온 결함**(2026-09-13). 질의는 「방금 읽은 디렉터리」의 저장소로 나가는데
+    // (`requestIgnoredForPaths`), 답을 절대경로로 되돌리는 쪽(`drainIgnoreResults`)은 `gitRepoRoot` 로
+    // 루트를 **다시** 골랐다. 그 값은 **도크가 기억하는 저장소**라 물을 때와 다를 수 있다 — 탐색기가
+    // 터미널과 다른 저장소를 볼 때, 그리고 원격 SCM 목록을 본 뒤가 그렇다. 그러면 상대경로가 엉뚱한
+    // 루트에 붙어 **흐림이 안 서거나 남의 행이 흐려진다.**
+    //
+    // 나가는 자리와 돌아오는 자리가 갈리면 한쪽이 낡는다 — 답이 자기 질문의 틀을 들고 오게 고쳤다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    session.git_backend = try git_backend_mod.Backend.init(session.io);
+
+    // 탐색기는 **A** 를 보고 있다.
+    try session.file_tree.replaceExplicitRoots(&.{"/repo-A"});
+    try session.file_tree.applySnapshot("/repo-A", &.{
+        .{ .name = "keep.txt", .kind = .file },
+        .{ .name = "ignored.txt", .kind = .file },
+    });
+
+    // 도크가 기억하는 저장소는 **B** 다. 옛 코드는 이 값으로 답을 되돌렸다.
+    git_ops.rememberGitRepo(session, "/repo-B");
+
+    // `check-ignore -z` 는 NUL 로 끊은 **상대경로**를 낸다 — 그 틀이 A 임을 답이 들고 온다.
+    try std.testing.expect(session.git_backend.?.pushIgnoreResultForTest("/repo-A", "ignored.txt\x00"));
+    git_ops.drainIgnoreResults(session);
+
+    var rows: std.ArrayList(file_tree.Row) = .empty;
+    defer rows.deinit(allocator);
+    try session.file_tree.buildRows(allocator, &.{}, &rows);
+
+    var saw_ignored = false;
+    var saw_keep = false;
+    for (rows.items) |row| {
+        const path = file_tree.rowPath(row) orelse continue;
+        if (std.mem.eql(u8, path, "/repo-A/ignored.txt")) {
+            saw_ignored = true;
+            // 옛 코드는 `/repo-B/ignored.txt` 를 찍어 이 행에 **아무것도 안 붙였다.**
+            try std.testing.expect(file_tree.rowIgnored(row));
+        }
+        if (std.mem.eql(u8, path, "/repo-A/keep.txt")) {
+            saw_keep = true;
+            try std.testing.expect(!file_tree.rowIgnored(row)); // 안 물어본 것은 흐리게 하지 않는다
+        }
+    }
+    try std.testing.expect(saw_ignored); // 전제: 그 행이 화면에 있다
+    try std.testing.expect(saw_keep);
+}
+
+test "«다시 읽어라» 표식만 남은 목록도 기계가 갈리면 버린다 (누적 적대적 검증)" {
+    // **합류 결함**(2026-09-13). 두 축이 각자는 맞는데 겹치는 순간 깨졌다:
+    //
+    //   ⑴ `더 보기`·쓰기 뒤 재읽기는 `scm_log_repo`(표식)**만** 지우고 **원문은 남긴다** — 다시 읽는
+    //      동안 화면이 깜빡이지 않게 하려는 오래된 규율이다.
+    //   ⑵ RS7b 는 「기계가 갈리면 버린다」를 그 **표식**에 걸었다(`orelse return`).
+    //
+    // 그래서 ⑴ 의 상태에서 pane 을 옮기면 판정이 **아예 안 돌고**, 남의 기계 커밋이 새 호스트의 머리 줄
+    // 아래 그대로 남는다(선택·펼침·그 파일 목록까지). 표식이 아니라 **원문이 있는가**로 판정한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    // 기계 **A** 에서 읽은 목록이 서 있고, 커밋 하나를 펼쳐 뒀다.
+    git_ops.rememberGitRepo(session, "/srv/app");
+    git_ops.rememberGitRepoDest(session, "user@build-a");
+    scm_dock_ops.seedScmLogForTest(session, "/srv/app", "aaaa1111\x1f\x1fAmy\x1f1\x1f\x1fA 의 커밋\x1e", "user@build-a");
+    scm_dock_ops.seedExpandedForTest(session, "aaaa1111", null);
+
+    // **커밋을 하나 했다** — 표식만 지우고 원문은 남긴다(`invalidateScmLog` 의 계약 그대로).
+    scm_dock_ops.invalidateScmLog(session);
+    try std.testing.expect(session.scm_log_repo == null); // 표식이 없다
+    try std.testing.expect(session.scm_log_text.len > 0); // 그런데 원문은 화면에 있다
+
+    // 그 상태에서 **경로가 같은 다른 기계**로 옮긴다.
+    git_ops.rememberGitRepoDest(session, "user@build-b");
+
+    scm_dock_ops.dropScmLogIfRepoChanged(session);
+    try std.testing.expectEqual(@as(usize, 0), session.scm_log_text.len); // A 의 커밋이 남지 않았다
+    try std.testing.expect(session.scm_log_dest == null); // 짝도 함께 놓았다
+    try std.testing.expect(session.scm_expanded_commit == null); // 펼침도 버렸다
+
+    // **멱등** — 버릴 것이 없으면 아무 일도 안 한다(매 tick 도는 경로다).
+    session.metal_dirty = false;
+    scm_dock_ops.dropScmLogIfRepoChanged(session);
+    try std.testing.expect(!session.metal_dirty);
 }
 
 test "원격 pane 의 «돌고 있나» 는 낡은 관측을 믿지 않는다 (RS4c 적대적 검증 2회차)" {

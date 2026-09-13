@@ -2564,9 +2564,6 @@ fn dropCommitFiles(self: *AppSession) void {
 /// 공짜로 띄우는 일이다(§6 비용 규율, 히스토리 목록과 같은 판단).
 pub fn pumpCommitFiles(self: *AppSession) void {
     if (self.dock.view != .source_control or !dock_ops.dockVisible(self)) return;
-    // **원격 목록을 보는 동안 로컬 git 으로 파일 목록을 읽지 않는다**(RS2 적대적 검증 1회차) —
-    // `git_repo` 에 든 것이 원격 경로라, 로컬에 같은 경로가 있으면 남의 저장소를 읽어 그 화면에 싣는다.
-    if (git_ops.scmTargetIsRemote(self)) return;
     if (self.scm_commit_files_inflight != 0) return;
     // 두 탭이 **같은 슬롯**을 쓴다(한 번에 하나만 펼친다). 무엇을 읽을지는 지금 보고 있는 탭이 정한다.
     const key: []const u8 = switch (self.scm_tab) {
@@ -2578,19 +2575,64 @@ pub fn pumpCommitFiles(self: *AppSession) void {
         if (std.mem.eql(u8, current, key)) return; // 이미 그것을 읽어 뒀다(실패도 답이다)
     }
     const repo = self.git_repo orelse return;
+
+    // **커밋 쪽만 원격으로 간다**(RS7c — [계획](../../../../docs/plans/remote-scm.md) §18.4).
+    //
+    // 두 탭이 같은 슬롯을 쓰지만 **축이 다르다**: 커밋의 파일 목록은 히스토리(RS7b)의 일부이고,
+    // 턴의 파일 목록은 `captureTurnSnapshot` 이 찍은 **로컬 tree** 를 읽는다 — 그 스냅샷은 원격에서
+    // 아예 안 돌므로(RS7-0), 원격에서 턴을 읽으려 들면 저쪽에 없는 tree 를 묻는 꼴이다. 턴 축은
+    // RS7 의 범위가 아니므로 여기서는 **그 탭만** 막는다.
+    var ctl_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var remote: ?maru.session.git_command.Remote = null;
+    if (self.git_repo_dest) |dest| {
+        if (self.scm_tab != .history) {
+            // **턴 축은 원격으로 안 간다 — 그래도 조용히 두지는 않는다**(적대적 검증 5회차). 읽기를
+            // 안 걸고 그냥 돌아가면 펼친 그 줄이 **영영 「읽는 중…」**이다. 링은 로컬 세션에서 이미 차
+            // 있을 수 있어(RS7-0 이 `pumpTurnSummaries` 에서 막은 그 상태) 실제로 펼쳐질 수 있다.
+            markCommitFilesFailed(self, key);
+            return;
+        }
+        // 소켓이 없으면 **보내지 않고 실패로 적는다** — 로컬로 떨어지지 않는다(§5 6회차).
+        const ctl = git_ops.remoteControlSocketFor(self, dest, &ctl_buf) orelse {
+            markCommitFilesFailed(self, key);
+            return;
+        };
+        remote = .{ .dest = dest, .control_path = ctl };
+    }
+
+    // **원격이면 로컬 git 을 찾지 않는다**(`pumpScmLog` 와 같은 규율 — `buildRemote` 가 `argv[0]` 을 버린다).
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const git_exe = git_backend_mod.locate(&exe_buf) orelse return;
+    const git_exe = if (remote != null)
+        maru.session.git_command.remote_git_exe
+    else
+        git_backend_mod.locate(&exe_buf) orelse return;
     if (self.git_backend == null) {
         self.git_backend = git_backend_mod.Backend.init(self.io) catch return;
     }
     self.scm_commit_files_seq += 1;
     const submitted = switch (self.scm_tab) {
-        .history => self.git_backend.?.submitCommitFiles(git_exe, repo, key, self.scm_commit_files_seq),
+        .history => self.git_backend.?.submitCommitFiles(git_exe, repo, key, self.scm_commit_files_seq, remote),
         .agent => self.git_backend.?.submitTurnFiles(git_exe, repo, key, self.scm_commit_files_seq),
         .changes => false,
     };
     if (!submitted) return;
     self.scm_commit_files_inflight = self.scm_commit_files_seq;
+}
+
+/// 파일 목록 읽기를 **걸지 않고** 실패로 적는다(RS7c). 소켓이 없을 때뿐이다 — 조용히 무동작으로 두면
+/// 사용자는 커밋을 눌렀는데 아무 일도 안 일어나는 것만 본다(`markScmLogFailed` 와 같은 판단).
+fn markCommitFilesFailed(self: *AppSession, key: []const u8) void {
+    if (self.scm_commit_files_failed) {
+        if (self.scm_commit_files_oid) |current| if (std.mem.eql(u8, current, key)) return; // 멱등
+    }
+    const key_copy = self.allocator.dupe(u8, key) catch return;
+    if (self.scm_commit_files_oid) |old| self.allocator.free(old);
+    self.scm_commit_files_oid = key_copy;
+    if (self.scm_commit_files_text.len > 0) self.allocator.free(self.scm_commit_files_text);
+    self.scm_commit_files_text = &.{};
+    self.scm_commit_files_failed = true;
+    self.scm_commit_files_truncated = false;
+    self.metal_dirty = true;
 }
 
 /// 턴 줄의 요약(`N개 파일`)을 **한 번에 하나씩** 채운다.
@@ -4056,6 +4098,15 @@ pub fn forgetRepoStatus(self: *AppSession) void {
     // 돌고 있는 답도 버린다 — 그 답은 **옛 기계**의 것이라 새 목록에 실리면 안 된다.
     self.scm_repo_status_inflight = 0;
     self.metal_dirty = true;
+}
+
+/// 판정자용: 「이 커밋(또는 턴)을 펼쳐 뒀다」를 직접 세운다. 제품 경로는 목록 행 클릭이라, 저장소
+/// 없이 그 상태를 만들 방법이 이것뿐이다. 소유는 세션이 진다(`deinit` 가 푼다).
+pub fn seedExpandedForTest(self: *AppSession, commit: ?[]const u8, turn: ?[]const u8) void {
+    if (self.scm_expanded_commit) |old| self.allocator.free(old);
+    self.scm_expanded_commit = if (commit) |c| (self.allocator.dupe(u8, c) catch null) else null;
+    if (self.scm_expanded_turn) |old| self.allocator.free(old);
+    self.scm_expanded_turn = if (turn) |t| (self.allocator.dupe(u8, t) catch null) else null;
 }
 
 /// 판정자용: 커밋 목록을 직접 심는다. 진짜 저장소 없이 「화면에 이미 선 목록이 있다」를 세울 방법이

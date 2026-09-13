@@ -70527,8 +70527,25 @@ test "원격 목록을 보는 동안 로컬 저장소에 손이 가지 않는다
     try std.testing.expect(!session.metal_dirty);
     try std.testing.expectEqual(@as(u64, 0), session.scm_log_seq);
 
+    // **펼친 커밋의 파일 목록도 같은 규율이다**(RS7c). 소켓이 없으면 **보내지 않고 실패로 적는다** —
+    // 조용히 무동작으로 두면 사용자는 커밋을 눌렀는데 아무 일도 안 일어나는 것만 본다.
+    scm_dock_ops.seedExpandedForTest(session, "aaaa1111", null);
     scm_dock_ops.pumpCommitFiles(session);
+    try std.testing.expectEqual(@as(u64, 0), session.scm_commit_files_seq); // 로컬 git 으로 안 떨어졌다
     try std.testing.expect(session.scm_commit_files_inflight == 0);
+    try std.testing.expect(session.scm_commit_files_failed); // 조용한 무동작이 아니다
+
+    // **턴 축은 원격으로 아예 안 간다**(RS7c §18.4). 그 키가 가리키는 tree 는 `captureTurnSnapshot` 이
+    // **로컬에** 찍은 것이라 저쪽 기계에는 그 object 가 없다 — 보내면 「없는 것을 묻는」 실패가 된다.
+    // **그래도 조용히 두지는 않는다**(적대적 검증 5회차): 그냥 돌아가면 펼친 그 줄이 영영 「읽는 중…」이다.
+    session.scm_commit_files_failed = false;
+    scm_dock_ops.seedExpandedForTest(session, null, "aaaa1111 bbbb2222");
+    session.scm_tab = .agent;
+    scm_dock_ops.pumpCommitFiles(session);
+    try std.testing.expectEqual(@as(u64, 0), session.scm_commit_files_seq); // 저쪽에 없는 tree 를 묻지 않는다
+    try std.testing.expect(session.scm_commit_files_failed); // 그리고 그 사실을 화면에 남긴다
+    scm_dock_ops.seedExpandedForTest(session, null, null);
+    session.scm_tab = .history;
 
     // **그리고 그 자리가 「읽는 중…」으로 남지 않는다**(계획 §2.3 — 지원하지 않으면 이유를 말한다).
     {

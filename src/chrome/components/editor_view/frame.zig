@@ -263,7 +263,21 @@ pub const CurrentMatch = struct { line: u32, start: u32 };
 
 /// 비교 본문에서 한 줄이 무엇인가. **`none`은 색을 칠하지 않는다** — context와, 짝을 맞추려 넣은 빈
 /// 행이 여기 든다(빈 행에 색을 칠하면 "그 자리에 무언가 있다"고 말하게 된다).
-pub const RowBand = enum { none, added, removed };
+pub const RowBand = enum {
+    none,
+    added,
+    removed,
+    /// **병합 충돌 마커 줄**(S2 — docs/editor-merge-conflicts.md §5). `<<<<<<<`·`|||||||`·`=======`·
+    /// `>>>>>>>` 그 줄들만이고 **본문 두 쪽은 안 칠한다**.
+    ///
+    /// **어느 쪽도 편들지 않는다.** 「현재 것」을 초록, 「들어온 것」을 빨강으로 칠하면 그것은 이미
+    /// 답을 말하는 것이다 — 들어온 쪽은 지워질 것이 아니라 **고를 후보**다. 칠하는 것은 「지워야 할
+    /// 기계 장치」인 마커 줄뿐이고, 색은 위험 계열이다.
+    ///
+    /// **구문 강조와 안 겹친다**(§7 ③ 의 답): 이 층은 **배경**이고 구문 색은 **전경**이라 구간 안의
+    /// 코드가 그대로 읽힌다. 색 층을 새로 만들지 않은 이유이기도 하다.
+    conflict_marker,
+};
 
 /// 줄 배경의 세기. **알파로 얹는다** — 배경색을 가정하면 한쪽 테마에서 글자가 안 읽힌다
 /// (CM6 `diff-theme.ts`가 같은 이유로 16%를 썼다. 여기 값은 그 관측을 옮긴 것이다).
@@ -808,6 +822,7 @@ fn paintBands(props: Props, layout: geometry.Layout, visual: []const visual_map.
             .none => continue,
             .added => .diff_added_bg,
             .removed => .diff_removed_bg,
+            .conflict_marker => .danger_bg,
         };
         const y = props.rect.y + @as(i32, @intCast(i * props.cell_h_px));
         out[n] = .{ .quad = .{

@@ -22,6 +22,10 @@ const geometry = @import("geometry.zig"); // 본문 열 수 — 가로 막대가
 
 /// 한 쪽이 그릴 것.
 pub const Side = struct {
+    /// 그 열의 줄마다 **위 위젯 행**(S1.5·S2 — 충돌 구간 머리의 「고르기」 줄). `lines` 와 같은 축이고
+    /// 짧은 배열·`null` 항목을 허용한다. 비교 뷰는 안 쓴다(읽기 전용이라 고를 것이 없다).
+    widgets: []const ?frame.content.Widget = &.{},
+
     /// 그 열의 행마다 **선택 범위**(§4.1g). 단일 편집기와 비교 뷰가 **둘 다** 쓴다 — 비교는
     /// 좌우가 각자 자기 것을 넘긴다(한 번에 한 열만 고르므로 한쪽은 `null`이다).
     selection_marks: ?[]const []const frame.Mark = null,
@@ -275,6 +279,7 @@ pub fn buildSide(
         .search_marker_current = side.search_marker_current,
         .search_current = side.search_current,
         .row_bands = side.bands,
+        .line_widgets = side.widgets,
         .row_marks = side.marks,
         .visible_rows = m.visible_rows,
         .wrap = shared.wrap,

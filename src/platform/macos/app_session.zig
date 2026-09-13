@@ -8014,6 +8014,22 @@ pub const AppSession = struct {
     ///
     /// 「지금 못 붙는다」까지는 알아도 «왜» 를 모르면 고칠 곳이 안 정해진다 — 풀에 호스트가 없는 것과
     /// 연결이 닫힌 것과 attach 가 거절된 것은 전혀 다른 일이다.
+    /// `ensureRestoreHostAdapter` 가 **어디서** 포기했는가. 그 함수는 `.unavailable` 을 **아홉 곳**에서
+    /// 돌려주는데 전부 익명이라, 로그에는 `attach_site=-`(attach 를 시도조차 못 함)만 남았다.
+    ///
+    /// 2026-09-13 실측: 워크스페이스 복원이 매번 `err=PersistentRuntimeUnavailable attach_site=-` 로
+    /// 죽었다. 풀 문제인지·프로토콜인지·연결 실패인지 **물어볼 수가 없어** 하루 종일 엉뚱한 곳을 팠다.
+    /// 오늘 같은 병을 여섯 번 고쳤는데(`collect_fail_site`·close `site=`·`digest site`) 여기만 남아 있었다.
+    pub var restore_host_site: []const u8 = "-";
+    /// 그 실패의 **원래 reason**. 특히 연결 실패는 `host_gone` 이 아니면 reason 을 **버리고** 접는다 —
+    /// 죽은 host 가 왜 `host_gone` 으로 안 갈렸는지가 그래서 안 보였다.
+    pub var restore_host_reason: []const u8 = "-";
+
+    pub fn noteRestoreHost(site: []const u8, reason: []const u8) void {
+        restore_host_site = site;
+        restore_host_reason = reason;
+    }
+
     pub var attach_fail_site: []const u8 = "-";
     pub var attach_fail_raw: []const u8 = "-";
 
@@ -8325,18 +8341,26 @@ pub const AppSession = struct {
         return self.ensureRestoreHostAdapterAtBase(base, wanted_host_id);
     }
 
+    /// 호스트 어댑터 확보 실패에 **이름을 남기고** `.unavailable` 을 돌려준다. 이름 없이 반환하던
+    /// 아홉 자리가 전부 `attach_site=-` 로 보여 원인을 물을 수 없었다(2026-09-13).
+    fn restoreHostUnavailable(site: []const u8, reason: []const u8) RestoreHostOutcome {
+        AppSession.noteRestoreHost(site, reason);
+        return .unavailable;
+    }
+
     /// Restore와 CR6 launch collector가 같은 exact base를 계속 사용하게 하는 owner leaf다. discovery와 adapter
     /// publication 사이에 전역 경로를 다시 추측하면 다른 registry의 동명 host를 결속할 수 있어 base를 값으로 넘긴다.
     fn ensureRestoreHostAdapterAtBase(self: *AppSession, base: []const u8, wanted_host_id: u128) RestoreHostOutcome {
-        self.ensureProcessIncidentOwner() catch return .unavailable;
+        AppSession.noteRestoreHost("-", "-");
+        self.ensureProcessIncidentOwner() catch |err| return AppSession.restoreHostUnavailable("incident_owner", @errorName(err));
         if (builtin.is_test and app_incident_testing.stop_after_bootstrap) return .ready;
-        self.ensureReconnectProductCoordinator(base) catch return .unavailable;
+        self.ensureReconnectProductCoordinator(base) catch |err| return AppSession.restoreHostUnavailable("reconnect_coordinator", @errorName(err));
         if (app_remote_host_pool) |*pool| if (pool.get(wanted_host_id) != null) return .ready;
         // 같은 창의 Term 여러 개가 같은 죽은 host를 가리키는 것이 §7의 정상 케이스다(예: 12개 Term = 12번 복원).
         // 성공만 pool이 캐시하므로 host_gone을 기억하지 않으면 surface마다 connectExactWithBackoff(10회 × 20ms
         // usleep ≈ 200ms)를 **메인 스레드에서** 되풀이해, 창이 한 번도 그려지기 전에 수 초간 멈춘다(code-review).
         if (wanted_host_id != 0 and wanted_host_id == self.restore_gone_host_id) return .host_gone;
-        if (session_host.protocol.version_major < 2) return .unavailable;
+        if (session_host.protocol.version_major < 2) return AppSession.restoreHostUnavailable("protocol_major_lt2", "-");
 
         const alloc = std.heap.smp_allocator;
         var connected = switch (session_host.host_connect.connectExistingHost(
@@ -8348,7 +8372,7 @@ pub const AppSession = struct {
             // host_gone만 영구로 올린다. 나머지 reason(일시 연결 실패·incompatible_version·denied 등)은 host가
             // 살아 있을 수 있으므로 unavailable로 남겨 caller가 fail-closed하게 둔다.
             .failed => |reason| {
-                if (reason != .host_gone) return .unavailable;
+                if (reason != .host_gone) return AppSession.restoreHostUnavailable("connect_failed", @tagName(reason));
                 self.restore_gone_host_id = wanted_host_id; // negative memo(위 주석) — 남은 surface는 즉시 답한다.
                 return .host_gone;
             },
@@ -8356,13 +8380,13 @@ pub const AppSession = struct {
         const adapter = alloc.create(RemoteSessionAdapter) catch {
             self.logRestoreAdapterInitFailure(error.OutOfMemory);
             connected.deinit();
-            return .unavailable;
+            return AppSession.restoreHostUnavailable("adapter_alloc", "OutOfMemory");
         };
         RemoteSessionAdapter.initializeProcessRuntime() catch |err| {
             self.logRestoreAdapterInitFailure(err);
             connected.deinit();
             alloc.destroy(adapter);
-            return .unavailable;
+            return AppSession.restoreHostUnavailable("process_runtime_init", "-");
         };
         const created_pool = app_remote_host_pool == null;
         if (created_pool)
@@ -8377,9 +8401,9 @@ pub const AppSession = struct {
             switch (err) {
                 error.UnsupportedProtocol, error.IdentityExhausted, error.OutOfMemory => {
                     self.logRestoreAdapterInitFailure(err);
-                    return .unavailable;
+                    return AppSession.restoreHostUnavailable("publish_adapter", @errorName(err));
                 },
-                error.PublicationBusy, error.AdapterGenerationExhausted, error.DuplicateHost, error.InvalidDestination => return .unavailable,
+                error.PublicationBusy, error.AdapterGenerationExhausted, error.DuplicateHost, error.InvalidDestination => |e| return AppSession.restoreHostUnavailable("publish_adapter_typed", @errorName(e)),
                 else => {
                     self.markHostConnectFailedError(.adapter, err);
                     @panic("session-host restore adapter ownership invariant violated");
@@ -8398,7 +8422,7 @@ pub const AppSession = struct {
                 self.runtime,
             );
             if (!claimInstalledRemoteBackend(created_pool, wanted_host_id)) {
-                return .unavailable;
+                return AppSession.restoreHostUnavailable("claim_backend", "-");
             }
             // 새 GUI process의 backend 기본값(false)을 이전 daemon runtime에 재사용하면 사용자 설정 true가 새 Term을
             // 만들 때까지 사라진다. attachTermOnHost가 map publication 전에 이 현재값을 보내도록 먼저 초기화한다.

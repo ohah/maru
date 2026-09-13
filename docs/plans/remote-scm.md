@@ -134,7 +134,7 @@ OSC 7 은 host authority 를 버리고 경로만 남기고, 커널 조회는 로
 | **RS4c** | fetch: **활성 pane 에 명령을 넣는다**(실행은 사용자) — §6.3 · 죽은 진입점 가드 제거 | ✅ 2026-09-01 |
 | **RS6** | 원격 cwd 판정을 표시 축과 **한 함수**로 합친다(`git_ops.remoteCwd`) · 훅 cwd 를 `(host, path)` 로 굳힌다 | ✅ 2026-09-05 — §17 |
 | **RS7-0** | tick 읽기 둘(`pumpScmLog`·`pumpTurnSummaries`)에 빠진 원격 가드 · 이미 선 목록을 호스트 전환에서 버린다 · 그 자리가 「읽는 중…」으로 안 남게 한다(§18.1) | ✅ 2026-09-13 |
-| **RS7a** | `git_log.format_spec` 을 `%x1f`/`%x1e` 표기로 — 원격 토큰에서 제어문자를 없앤다(§2.2 ⑵ · §18.2) | 미착수 |
+| **RS7a** | `git_log.format_spec` 을 `%x1f`/`%x1e` 표기로 — 원격 토큰에서 제어문자를 없앤다(§2.2 ⑵ · §18.2) | ✅ 2026-09-13 |
 | **RS7b** | `submitLog` 에 `Remote` — 히스토리 목록을 그 기계에서 읽는다(§18.3) | 미착수 |
 | **RS7c** | `submitCommitFiles` 에 `Remote` — 펼친 커밋의 파일 목록도 같은 축으로(§18.4) | 미착수 |
 | **RS7d** | 히스토리 실패를 이름으로 말한다 — §10.1 이 만든 `RemoteGitMissing`·`RemoteTransportFailed` 재사용(§18.5) | 미착수 |

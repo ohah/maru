@@ -26,7 +26,14 @@ pub const record_sep: u8 = 0x1E;
 ///   같은 화면에서 다른 상대시각 표기(파일 목록 등)와 규칙이 갈린다.
 /// - `%D` ref 이름들(`HEAD -> main, origin/main, tag: v1`). `%d`와 달리 괄호·색이 없다.
 /// - `%s` 제목 한 줄.
-pub const format_spec = "%H\x1f%P\x1f%an\x1f%at\x1f%D\x1f%s\x1e";
+/// ⚠️ **구분자를 `%xXX` 로 적는다 — 날 바이트로 적지 않는다**(RS7a — [계획](../../docs/plans/remote-scm.md)
+/// §2.2 ⑵ · §18.2). `%x1f` 는 git 이 **출력에** 그 바이트를 내므로 결과는 아래 `field_sep` 와 같고,
+/// 달라지는 것은 **우리가 만드는 argv 토큰**이다: 날 바이트로 적으면 그 토큰이 원격 전송 계약의
+/// 「제어문자가 든 토큰은 거부」에 걸려(`remote_shell.tokenIsSafe`) `git log` 가 원격으로 **영영 못
+/// 나간다.** 필요한 바이트는 **받는 쪽이 만들게** 한다.
+///
+/// 실측(git 2.50.1): `--format='%H%x1f%an%x1e'` 의 출력이 `… 037 o h a h 036` 로 날 바이트 표기와 같다.
+pub const format_spec = "%H%x1f%P%x1f%an%x1f%at%x1f%D%x1f%s%x1e";
 
 /// 커밋 한 줄. **문자열은 입력 버퍼를 빌린다**(할당 없음) — 호출자가 그 바이트를 들고 있는 동안 유효하다.
 pub const Commit = struct {
@@ -167,6 +174,29 @@ pub fn refs(decoration: []const u8) RefIterator {
 }
 
 const testing = std.testing;
+
+test "구분자 표기는 파싱 상수와 같은 바이트를 낸다 (RS7a)" {
+    // **두 철자가 같은 값을 가리키게 묶는다.** 명령은 `%x1f`(git 이 출력에 그 바이트를 낸다)로 적고
+    // 파서는 `field_sep`(0x1F)로 자른다 — 표기가 다르니 한쪽만 고쳐도 컴파일러가 안 잡는다. 그러면
+    // 필드가 통째로 밀려 목록이 조용히 비거나 제목 자리에 작성자가 뜬다.
+    //
+    // 그리고 **날 바이트로 되돌아가는 것도 여기서 막는다** — 그 순간 이 명령은 원격으로 못 나간다
+    // ([계획](../../docs/plans/remote-scm.md) §18.2, `git_command` 의 토큰 전수 판정자와 짝이다).
+    var field_buf: [8]u8 = undefined;
+    var record_buf: [8]u8 = undefined;
+    const field_tok = try std.fmt.bufPrint(&field_buf, "%x{x:0>2}", .{field_sep});
+    const record_tok = try std.fmt.bufPrint(&record_buf, "%x{x:0>2}", .{record_sep});
+    try std.testing.expectEqualStrings("%x1f", field_tok);
+    try std.testing.expectEqualStrings("%x1e", record_tok);
+
+    // 필드 여섯을 다섯 구분자가 잇고, 레코드는 하나로 끝난다.
+    try std.testing.expectEqual(@as(usize, 5), std.mem.count(u8, format_spec, field_tok));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, format_spec, record_tok));
+    try std.testing.expect(std.mem.endsWith(u8, format_spec, record_tok));
+
+    // **철자에 제어문자가 한 바이트도 없다.**
+    for (format_spec) |c| try std.testing.expect(c >= 0x20 and c != 0x7f);
+}
 
 test "형식 그대로의 출력을 커밋 행으로 쪼갠다(실측 형식)" {
     const text = "abc123def456\x1fparent1\x1f홍길동\x1f1755400000\x1fHEAD -> main, origin/main\x1f첫 커밋\x1e" ++

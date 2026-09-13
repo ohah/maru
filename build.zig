@@ -5877,6 +5877,82 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    // collectOutput 이 «어느 자리에서» 접혔는가. 스물넷이 OutOfMemory 하나로 뭉쳐 있었다.
+    const collect_fail_step = b.step(
+        "test-collect-failure-site",
+        "A folded collectOutput failure records which site and the original error",
+    );
+    const collect_fail_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/collect_failure_site_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_collect_fail = b.addRunArtifact(collect_fail_tests);
+    run_collect_fail.addArg("--maru-expect-tests=1");
+    run_collect_fail.addArg("--maru-expect-passed=1");
+    run_collect_fail.setCwd(b.path("."));
+    collect_fail_step.dependOn(&run_collect_fail.step);
+    boundary_step.dependOn(&run_collect_fail.step);
+
+    // 워크스페이스 복원이 «어느 창 블록에서» 실패했는가. 주 창 실패가 조용해 원인이 안 보였다.
+    const ws_restore_log_step = b.step(
+        "test-workspace-restore-block-log",
+        "A failed workspace restore records which window block failed and why",
+    );
+    const ws_restore_log_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/workspace_restore_block_log_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_ws_restore_log = b.addRunArtifact(ws_restore_log_tests);
+    run_ws_restore_log.addArg("--maru-expect-tests=1");
+    run_ws_restore_log.addArg("--maru-expect-passed=1");
+    run_ws_restore_log.setCwd(b.path("."));
+    ws_restore_log_step.dependOn(&run_ws_restore_log.step);
+    boundary_step.dependOn(&run_ws_restore_log.step);
+
+    // 창 적용이 «무슨 오류로» 죽었는가. create_failed 하나가 열일곱을 접고 있었다.
+    const ws_apply_err_step = b.step(
+        "test-workspace-apply-error",
+        "A failed workspace window apply records the original error, not just create_failed",
+    );
+    const ws_apply_err_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/workspace_apply_error_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_ws_apply_err = b.addRunArtifact(ws_apply_err_tests);
+    run_ws_apply_err.addArg("--maru-expect-tests=1");
+    run_ws_apply_err.addArg("--maru-expect-passed=1");
+    run_ws_apply_err.setCwd(b.path("."));
+    ws_apply_err_step.dependOn(&run_ws_apply_err.step);
+    boundary_step.dependOn(&run_ws_apply_err.step);
+
+    // 복원이 실패한 실행이 저장 파일을 덮지 않는가. 하루에 다섯 번 탭 11 개를 잃었다.
+    const ws_no_clobber_step = b.step(
+        "test-workspace-incomplete-no-clobber",
+        "A run whose restore failed must not commit its degraded snapshot over the file",
+    );
+    const ws_no_clobber_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/workspace_incomplete_restore_no_clobber_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_ws_no_clobber = b.addRunArtifact(ws_no_clobber_tests);
+    run_ws_no_clobber.addArg("--maru-expect-tests=1");
+    run_ws_no_clobber.addArg("--maru-expect-passed=1");
+    run_ws_no_clobber.setCwd(b.path("."));
+    ws_no_clobber_step.dependOn(&run_ws_no_clobber.step);
+    boundary_step.dependOn(&run_ws_no_clobber.step);
+
     // 재동기화 sweep 이 «무엇에» 막혔는가. 여섯 갈래가 전부 조용히 빠져, 멈춤과 정상이 같아 보였다.
     const sweep_blocker_step = b.step(
         "test-resync-sweep-blocker",

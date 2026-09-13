@@ -4161,12 +4161,26 @@ pub const RemoteRuntime = struct {
 
     /// spawn/attachExisting 공통(§10 attach 순서): controller attach(stream_id) → 첫 snapshot 조립 → 원격-backed Surface.
     /// `self.runtime_id_hex`가 이미 채워져 있어야 한다(spawn=runtime.spawn 응답, attachExisting=저장된 값).
+    /// `AttachFailed` 가 **무엇이었는지**. 그 이름은 함수 주석이 적었듯 「원인을 단정할 수 없으면」 쓰는
+    /// 바구니라, 호스트가 **명시적으로 거절한 것**과 **전송이 깨진 것**이 같은 이름으로 나온다 — 고칠 곳이
+    /// 정반대다(앞은 호스트 판정, 뒤는 연결 수명).
+    ///
+    /// 2026-09-13 실측: 워크스페이스 복원이 `attach_raw=AttachFailed` 로 죽어 탭 11 개가 사라지고 그 상태가
+    /// 원본을 덮었다. 여섯 겹을 이름으로 열어 왔는데 마지막이 또 뭉쳐 있었다.
+    ///
+    /// 거절 «이유 문구» 는 아직 못 꺼낸다 — `borrowAccepted` 는 accepted 만 주고 `.typed_reject` 수명을
+    /// 읽는 접근자가 없다. 그것은 별건이고, 우선 **어느 갈래인지**부터 가른다.
+    pub var last_attach_outcome: []const u8 = "-";
+
     fn attachAndAssemble(self: *RemoteRuntime, surface_id: u64, size: terminal.Size) anyerror!void {
+        last_attach_outcome = "-";
         self.currentGeneration().frame_summary_ready = false;
         self.currentGeneration().frame_summary = .{};
         // 2. runtime.attach(controller) — stream_id + snapshot 순서(§10).
-        const runtime_id = std.fmt.parseInt(u128, &self.runtime_id_hex, 16) catch
+        const runtime_id = std.fmt.parseInt(u128, &self.runtime_id_hex, 16) catch {
+            last_attach_outcome = "runtime_id_parse";
             return error.AttachFailed;
+        };
         var legacy_response: ?[]u8 = null;
         defer if (legacy_response) |bytes| self.allocator.free(bytes);
         var generation_accepted: ?generation_contract.CorrelatedExecutedCall = null;
@@ -4190,10 +4204,12 @@ pub const RemoteRuntime = struct {
             const correlated = switch (result) {
                 .accepted => |value| value,
                 .typed_reject => {
+                    last_attach_outcome = "typed_reject";
                     _ = self.currentGeneration().attachment.generation.finishResponse(adapter);
                     return error.AttachFailed;
                 },
                 .uncertain_or_connection_failure => {
+                    last_attach_outcome = "uncertain_or_connection_failure";
                     _ = self.currentGeneration().attachment.generation.finishResponse(adapter);
                     return error.AttachFailed;
                 },

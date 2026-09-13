@@ -657,9 +657,8 @@ duplicate key는 마지막 syntactic occurrence의 valid/invalid가 outcome을 �
   것을 검증하고, B manifest가 exact predecessor로 지목하지 않은 release로의 downgrade round-trip은 지원하지 않는다. 이 provenance와 two-release gate
   없이 기본값을 바꾸지 않는다.
 - restore 중 saved Window 하나라도 host/runtime 불일치나 attach 실패로 apply되지 않으면 default shell 창을 성공한 복원으로
-  남기지 않고 teardown하고 `restore incomplete`를 세운다. 다음 종료 checkpoint는 마지막 완전 manifest를
-  `workspace.v1.bak`으로 한 번 보존한 뒤 현재 모델을 정상 저장한다. 실제 capture/serialize/write 실패만 write 0으로
-  이전 완전본을 그대로 유지한다([Workspace Restore](workspace-restore.md)의 "checkpoint 보호"가 단일 출처).
+  남기지 않고 teardown하고 `restore incomplete`를 세운다. 그 래치가 선 실행이 저장 파일을 어떻게 다루는지는
+  [Workspace Restore](workspace-restore.md)의 「checkpoint 보호」가 단일 출처다 — 여기에 결론을 복제하지 않는다.
 
 ## 6. 종료와 detach 의미
 
@@ -6192,8 +6191,7 @@ orphan-tab/ended-slot publication까지 구현됐다. canonical GUI connection�
 처리하는 제품 scheduling/process fixture는 T0b2b에서 구현됐다. 실제 제품 process에서 기존 checkpoint file이
 변하지 않는지는 P4 R2a 제품 E2E가 관측한다. 일시 실패로 분류된 누락 runtime은 종전처럼 해당 Window apply를
 실패시키며, 추가 Window는 teardown하고 primary는 명시적인 새 default-shell fallback으로 전환한다. 이
-`restore incomplete` 실행은 종료 시 마지막 완전본을 `.bak`으로 한 번 보존한 뒤 현재 모델을 저장한다. capture/serialize/
-write 자체가 실패한 경우에만 write 0으로 이전 완전본을 유지한다.
+`restore incomplete` 실행이 저장 파일을 어떻게 다루는지는 [workspace-restore.md](workspace-restore.md) 「checkpoint 보호」가 단일 출처다 — 이 문서는 그 결론을 복제하지 않는다.
 
 ### 접속 실패 행렬
 
@@ -6201,7 +6199,7 @@ write 자체가 실패한 경우에만 write 0으로 이전 완전본을 유지�
 
 host/host_id/runtime 불일치는 **분류에 따라 갈린다**(아래 표). 영구 부재는 그 Term만 per-Term ended placeholder로 두고
 창 apply를 성공시키며, 일시 실패는 종전처럼 해당 Window apply 실패로 fail-close한다(additional Window는 teardown,
-primary는 notice가 보이는 명시적 default-shell fallback + `restore incomplete`; 종료 시 `.bak` 1회 보존 후 현재 모델 저장).
+primary는 notice가 보이는 명시적 default-shell fallback + `restore incomplete`; 그 실행의 저장 처리는 [workspace-restore.md](workspace-restore.md) 「checkpoint 보호」가 단일 출처).
 orphan recovery entry(`Recovered Sessions`)의 primary-only 표시와 실제 row 채택은 각각 CR6a-2/CR6b 계약을 따른다.
 
 **실패 원인 분류.** ended placeholder는 "이 handle이 **다시는** 붙을 수 없다"가 참일 때만 세울 수 있으므로,
@@ -6222,6 +6220,31 @@ orphan recovery entry(`Recovered Sessions`)의 primary-only 표시와 실제 row
 | 소켓 끊김·타임아웃·`controller_busy`·`unauthorized`·`queue_invalidated`·미지 error code | `PersistentRuntimeUnavailable` | runtime이 살아 있을 수 있다 |
 | handle 형식 손상(길이·대소문자·구분자) | `InvalidPersistentRuntimeIdentity` | 존재하는 손상은 숨기지 않는다 |
 
+**호스트가 자기 사정으로 끊을 때의 규칙(미구현 — 아래는 정책이고 현재 코드는 어긴다).** 위 표의 "소켓 끊김"은 원인을
+묻지 않는다. 그런데 그 끊김이 **호스트 자신의 판단**일 수 있고, 그때 지켜야 할 것이 둘이다.
+
+1. **자기 쪽 cap 초과로 공유 연결을 죽이지 않는다.** 아래 "cap 초과는 typed protocol error를 응답한 뒤 connection을
+   닫는다"는 **상대가 보낸 입력**이 클 때의 규칙이다. 한 runtime의 attach snapshot이 `max_viewport_snapshot`(16 MiB)을
+   넘는 것은 **상대의 잘못이 아니다** — 그 runtime이 그만큼 그렸을 뿐이다. 그 연결은 다른 runtime들이 함께 쓰므로,
+   그 attach 하나만 typed error로 거절하고 연결과 나머지 subscription은 유지해야 한다.
+2. **close 사유를 상대에게 돌려 적지 않는다.** `peer_requested`는 peer가 실제로 close를 요청했을 때만 쓴다. 호스트가
+   스스로 내린 판단을 그 이름으로 기록하면 **로그가 거짓말을 하고**, 사고 조사가 잘못된 쪽을 파게 된다.
+
+**2026-09-13 실측 — 이 둘을 어겨서 일어난 일.** `terminal-browser-pane` runtime 하나의 snapshot이 16 MiB를 넘었다.
+`server.zig`는 typed error 없이 `self.state = .closed; return .close`로 **연결 전체**를 끊었고, `connection_turn.zig`는
+그것을 `beginClose(.peer_requested)`로 기록했다. 결과:
+
+- 그 탭 하나가 아니라 **그 연결에 딸린 창 전부**가 apply 실패했다(창 2·탭 12 전멸).
+- 앱은 `connection_eof`를 읽고, 호스트 로그는 `why=peer_requested`를 남겼다 — **양쪽이 서로를 가리켰다.**
+  `pending_out=6`(보낼 것이 6개 남았는데 "상대가 요청")이 유일한 이상 신호였다.
+- 실패한 복원 상태가 종료 저장에서 원본을 덮어 7421 B → 341 B가 됐다(그 손실 자체는 막았다 —
+  [workspace-restore.md](workspace-restore.md) "checkpoint 보호").
+
+`server.zig`의 `return .close`는 **29곳**이고 사유가 제각각이다(프로토콜 버전 불일치, 잘못된 frame kind, 중복 hello,
+`request_id=0`, snapshot 초과, `stream_id` 불일치, nonce 재사용). 전부 `peer_requested` 하나로 접힌다. 1979행에는
+`producer contract violation, not a peer request error`라는 주석이 **이미** 있다 — 거짓이라는 건 알려져 있었고 이름만
+그대로였다. 각 close에 사유 이름을 붙이는 것이 선결 조건이다.
+
 현재 코드는 probe를 `absent|indeterminate`로, owner lease를 `free|held|unknown`으로 구분해 위 표의 긍정 증거 요건을
 구현했다. durable tombstone은 이 분류를 재사용하며 미확정 상태를 영구 부재로 넓히지 않는다.
 
@@ -6239,9 +6262,9 @@ handle을 보존하고 `Recovered Sessions`가 runtime을 다시 보여 주더�
 창에서 새로 live→ended가 된 수를 `dropped`에 합산한다.
 이미 `runtime-state="ended"`로 들어온 후속 relaunch는 완전히 표현된 상태라 dropped 0이다.
 
-**그 신호의 귀결은 "저장 차단"이 아니라 "마지막 완전본 백업 후 저장"이다**(v144에서 변경 — [workspace-restore.md](workspace-restore.md)
-"checkpoint 보호"가 단일 출처). 무기한 차단은 stale 파일을 고정시켜 다음 실행이 같은 drop을 재생산하는 자기영속 루프가
-되고, 그동안 사용자의 새 레이아웃이 매 종료마다 사라진다.
+**그 신호를 받은 실행이 저장 파일을 어떻게 다루는지는 [workspace-restore.md](workspace-restore.md) 「checkpoint 보호」가 단일 출처다.** 이 문서는 그 결론을
+복제하지 않는다 — 예전에 복제해 둔 탓에 정책이 바뀌었을 때 한쪽만 고쳐져 **두 문서가 서로 다른 정책을 말한 적이 있다**
+(2026-09-13). 이 문서가 지는 책임은 여기까지다: 오분류 대비로 `dropped` 신호를 **한 번** 세운다.
 
 **P4 R1 durable tombstone 구현.** capture는 placeholder의 마지막 handle과 `runtime-state="ended"`를 함께 보존하고,
 reader는 이 상태를 host 경계보다 먼저 placeholder로 만든다. Enter 없는 두 번째 이후 relaunch에서도 자동 spawn하지
@@ -6944,7 +6967,9 @@ request_id:u64 | stream_id:u64 | payload_len:u32
 - `stream_id=0`은 비-stream RPC, attach 성공 뒤 server가 발급한 nonzero ID는 해당 runtime subscription에만 쓴다.
 - 현재 MRSH v2의 flags 어휘는 `end_stream=1`, `optional=2`다. 모르는 required kind/flag는 protocol error로 connection만 닫고 runtime은
   유지한다. `optional` unknown frame은 payload length만큼 안전하게 skip한다.
-- control JSON payload hard cap은 256 KiB, binary chunk는 1 MiB, 한 viewport snapshot은 16 MiB다. scrollback은 1 MiB 이하
+- control JSON payload hard cap은 256 KiB, binary chunk는 1 MiB, 한 viewport snapshot은 16 MiB다. 이 16 MiB를
+  **호스트 자신의 snapshot이** 넘는 경우는 아래 "cap 초과" 규칙이 아니라 §7 "호스트가 자기 사정으로 끊을 때의 규칙"을 따른다
+  — 상대 잘못이 아니므로 공유 연결을 죽이지 않는다. scrollback은 1 MiB 이하
   page query로만 제공하고 한 frame/응답에 전 history를 싣지 않는다. client별 queued delta가 8 MiB를 넘으면 그 client queue만
   버리고 `snapshot.invalidated`를 보내며 PTY reader와 다른 client는 계속 진행한다.
 - header/payload partial read/write는 정상 입력이다. bad magic, length overflow, cap 초과, truncated EOF, invalid UTF-8 control,
@@ -7835,8 +7860,8 @@ foreground process, SSH destination의 owned 값은 비어 있어야 한다. 그
   - **C3c capture와 publication:** AppKit은 마지막 active normal Window와 live-resize 종료 frame을 포함한 전체 Window snapshot을 메인
     스레드에서 캡처·semantic validation하고, 독립 소유 immutable bytes만 단일 background C2 writer에 넘긴다.
     completion은 메인 스레드에서 exact C1 request에 정산한다. capture/write 실패는 모든 일반 창 상태표시줄에
-    성공 commit 전까지 지속한다. restore incomplete 실행은 background overwrite를 막고
-    C4 final checkpoint가 secure `.bak` 보존 뒤 게시한다. 시작값은 debounce 500ms, retry 1s→30s이며 1·10·100 runtime 성능 gate 전에는
+    성공 commit 전까지 지속한다. restore incomplete 실행이 background/최종 저장을 어디까지 하는지는
+    [Workspace Restore](workspace-restore.md)의 「checkpoint 보호」가 단일 출처다. 시작값은 debounce 500ms, retry 1s→30s이며 1·10·100 runtime 성능 gate 전에는
     영구 성능 계약으로 확정하지 않는다.
   - **C4 AppKit terminate handshake:** 사용자 Quit 승인 뒤 AppKit의 `.terminateLater` 보류를 유지한 채 C1
     `quitRequested`로 mutation 세대를 동기화하고 final capture를 즉시 시작한다. 보류 중 새 persisted mutation은
@@ -7847,9 +7872,12 @@ foreground process, SSH destination의 owned 값은 비어 있어야 한다. 그
   - final capture·validation·write·secure backup 중 하나라도 실패하면 C1 `cancel_quit`가 final 보류를 풀고,
     host는 accepted app-quit latch를 취소한 뒤 deferred AppKit request에 `NSApp.reply(false)`를 정확히 한 번 보낸다.
     기존 complete `workspace.v1`은 유지되고 상태표시줄 실패 notice와 dirty retry 상태가 남는다. restore-incomplete
-    실행은 background overwrite를 계속 막되 final writer가 현재 UID의 regular source를 no-follow로 열고
-    `workspace.v1.bak`을 `O_EXCL|O_NOFOLLOW`, mode `0600`으로 한 번만 만든 뒤 canonical manifest를 게시한다.
-    기존 `.bak`은 current UID regular `0600`일 때만 보존하며 symlink/non-regular/wrong-mode는 Quit을 취소한다.
+    실행이 final 저장까지 가는지 여부는 [Workspace Restore](workspace-restore.md)의 「checkpoint 보호」가 단일
+    출처다 — 여기에 결론을 복제하지 않는다. 백업을 **실제로 뜨는 경우의 안전 계약**만 이 문서가 소유한다: final
+    writer는 현재 UID의 regular source를 no-follow로 열고 `workspace.v1.bak`을 `O_EXCL|O_NOFOLLOW`, mode `0600`으로
+    한 번만 만든다. 기존 `.bak`은 current UID regular `0600`일 때만 보존하며 symlink/non-regular/wrong-mode는 Quit을
+    취소한다. `O_EXCL`이라 기존 `.bak`이 있으면 새로 뜨지 않는다는 점이 곧 「복원이 성공했을 때 `.bak`을 해제해야
+    한다」는 미구현 항목의 근거다(단일 출처의 「해소 방향」).
     명시적 `Quit and End All Sessions`는 runtime admin shutdown 완료 뒤에도 같은 final checkpoint를 시도하지만,
     실패 시 orphan runtime을 남기지 않도록 종료를 계속하는 유일한 예외다.
     실제 AppKit 제품 gate는 먼저 쓰기 가능한 격리 Application Support에서 `NSApplication.terminate`를 호출해

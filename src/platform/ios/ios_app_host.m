@@ -1033,7 +1033,7 @@ static NSString *MaruClusterString(const unsigned int *cps, unsigned int n) {
         // **합성이 먼저다**(renderer 계약). 박스·블록·브라유는 폰트로 구우면 셀에 안 맞아
         // 끊긴다 — 합성은 셀을 가장자리까지 채운다. 0 이면 합성 대상이 아니라 폰트로 간다.
         // 합성 대상(박스·블록·브라유)은 전부 단일 코드포인트라 base 만 넘긴다.
-        if (maru_mobile_synthesize(cps[0], cell, CW) != 0) {
+        if (maru_mobile_synthesize(cps[0], cell, CW, (unsigned long)(CW * CH)) != 0) {
             [_glyphTex replaceRegion:MTLRegionMake2D(col * CW, row * CH, CW, CH) mipmapLevel:0
                            withBytes:cell bytesPerRow:CW];
             maru_mobile_atlas_add(cps, ncp, style, col, row, CW / 2);

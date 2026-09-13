@@ -256,10 +256,36 @@ test "합성 대상은 잉크를 내고 보통 글자는 0" {
     var cell: [24 * 32]u8 = undefined;
     // 박스 가로·모서리·블록·브라유
     for ([_]u32{ 0x2500, 0x250C, 0x2588, 0x28FF }) |cp| {
-        try std.testing.expect(bridge.maru_mobile_synthesize(cp, &cell, 24) > 0);
+        try std.testing.expect(bridge.maru_mobile_synthesize(cp, &cell, 24, cell.len) > 0);
     }
     // 보통 글자는 합성 대상이 아니다 — 플랫폼이 폰트로 굽는다
-    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_synthesize('W', &cell, 24));
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_synthesize('W', &cell, 24, cell.len));
+}
+
+// **host 버퍼를 넘겨 쓰지 않는다.** `out` 은 raw 포인터라 Zig 경계 검사가 없고, 셀 크기는 host 가
+// 바꾸는 **런타임 전역**이다 — 더 작은 셀을 전제로 잡아 둔 버퍼에 큰 셀을 쓰면 남의 메모리를 덮는다.
+// 조용한 메모리 오염은 원인을 못 짚는 실패를 만든다(2026-09-13 CI 가 그 부류였다). 그래서 용량을
+// **묻고**, 안 맞으면 이름을 남기고 0 으로 물러난다.
+test "합성은 host 버퍼 용량을 넘기면 이름을 남기고 물러난다" {
+    var cell: [24 * 32]u8 = undefined;
+    defer bridge.maru_mobile_atlas_geometry(24, 32); // 전역이라 되돌린다
+    bridge.maru_mobile_clear_error();
+
+    // 기하가 커지면 같은 버퍼가 더 이상 한 셀을 못 담는다 — 예전에는 그대로 썼다.
+    bridge.maru_mobile_atlas_geometry(48, 64);
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_synthesize(0x2500, &cell, 24, cell.len));
+    try std.testing.expectEqualStrings("synth_out_too_small", std.mem.span(bridge.maru_mobile_last_error()));
+    bridge.maru_mobile_clear_error();
+
+    // stride 가 한 행보다 좁아도 안 쓴다 — 행이 넘쳐 다음 행을 침범한다(같은 버퍼 안이라도 틀린 그림).
+    bridge.maru_mobile_atlas_geometry(24, 32);
+    try std.testing.expectEqual(@as(u32, 0), bridge.maru_mobile_synthesize(0x2500, &cell, 4, cell.len));
+    try std.testing.expectEqualStrings("synth_stride_too_small", std.mem.span(bridge.maru_mobile_last_error()));
+    bridge.maru_mobile_clear_error();
+
+    // 맞는 용량이면 그대로 그린다(막는 것이 목적이지 못 그리게 하는 것이 아니다).
+    try std.testing.expect(bridge.maru_mobile_synthesize(0x2500, &cell, 24, cell.len) > 0);
+    try std.testing.expectEqualStrings("", std.mem.span(bridge.maru_mobile_last_error()));
 }
 
 // 키는 **코어의 인코더**를 타야 한다. host 가 바이트를 손으로 적으면 DECCKM·수정자·kitty

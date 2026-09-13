@@ -24,6 +24,11 @@ const Budget = struct {
 // 흡수한다. **로컬 값으로 CI 예산을 정하지 않는다**(아래 core_find_scrollback 주석의 교훈) —
 // 이 값들은 CI 실측(ubuntu-latest, ReleaseFast)을 근거로 한다.
 //
+// **규칙: CI 사용률 30% 언저리.** 처음 로컬에서 외삽한 예산으로 CI 를 돌렸더니 render_build_scrolled
+// 가 45%, drawlist 40%, snapshot_serialize 39% 로 나왔다(로컬↔CI 비율이 항목마다 1.8~3.4배로
+// 흩어진다 — 역시 로컬로는 못 정한다). 그 셋만 CI 실측 x3.3 으로 올렸다. 40% 를 넘으면 러너가
+// 붐빌 때 제품과 무관하게 실패하므로, 새 항목을 더하거나 반복 수를 바꾸면 **CI 수치로** 다시 맞춘다.
+//
 // 모드가 다시 어긋나지 않게 `tests/perf_gate_mode_boundary.zig` 가 배포 모드와 짝을 맞춰 잠근다.
 const budgets = struct {
     const core_large_output_ns = 800 * std.time.ns_per_ms;
@@ -31,7 +36,7 @@ const budgets = struct {
     // 1s면 회당 0.2ms 상한이라 여유가 없음). 다른 벤치와 같은 2s(회당 0.4ms 상한)로 둬 CI 변동을 흡수하되
     // 구조 회귀(2배+)는 잡는다 — perf는 머신 의존이라 budget 여유가 원칙(opt-in/required 양쪽).
     const core_resize_loop_ns = 1500 * std.time.ns_per_ms;
-    const snapshot_serialize_ns = 800 * std.time.ns_per_ms;
+    const snapshot_serialize_ns = 1000 * std.time.ns_per_ms; // CI 312ms = 39% 였다 → 31%
     // 재-wrap은 "resize 후 처음 과거를 보는 순간" 1회 비용이다(지연 마크). 50회 예산 2s는 회당
     // 40ms를 상한으로 고정한다. 실측(2026-08, cap 1000행)은 **빌드 모드마다 두 자릿수 배 다르므로**
     // 모드를 함께 적는다: 제품 빌드(ReleaseFast, macOS)는 회당 **0.16ms**라 사용자 체감이 없고,
@@ -84,8 +89,8 @@ const budgets = struct {
     // 1.5s = 회당 1.5ms 상한(200회 2s 는 Debug 시절 값이었다;
     // ReleaseFast 실측은 회당 ~0.12ms로 30Hz tick 대비 충분히 작다). 구조 회귀(셀당 비용 증가·여분
     // 할당)는 잡는다. perf는 머신 의존이라 budget 여유가 원칙(다른 벤치와 동일한 2s).
-    const render_build_drawlist_ns = 1500 * std.time.ns_per_ms;
-    const render_build_scrolled_ns = 1500 * std.time.ns_per_ms;
+    const render_build_drawlist_ns = 2000 * std.time.ns_per_ms; // CI 601ms = 40% 였다 → 30%
+    const render_build_scrolled_ns = 2200 * std.time.ns_per_ms; // CI 677ms = 45% 였다 → 31%
     // I/O–렌더 스레딩 Phase 3(docs/plans/io-render-threading.md §9.7): 메인발 코어 mutate를 I/O 스레드로 위임하는
     // CoreCommandQueue 1건 라운드트립(enqueue→pop→free) 비용 — 위임 latency의 바닥(락+append/pop+dupe).
     // UI 이벤트 빈도(스크롤·마우스 60~120Hz)에서 무시 가능해야 한다. 100k회 2s=회당 20µs 상한(구조 회귀만 잡는 여유).

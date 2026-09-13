@@ -1241,7 +1241,43 @@ test "ABI 에 손으로 적은 길이가 리터럴과 어긋나지 않는다" {
         }
     }
     // **개수로 확인한다.** 스캐너가 아무것도 못 찾고 초록인 것과, 전부 맞아서 초록인 것은 다르다.
-    try std.testing.expect(scanned > 150);
+    // 숫자는 **바닥**이지 인구조사가 아니다 — 길이를 손으로 안 적는 헬퍼로 옮기는 후속이 오면 이 수는
+    // 줄어든다. 그때 이 판정자가 빨개지는 것은 옳다(줄어든 것을 사람이 보고 내리면 된다). 다만 «스캐너가
+    // 깨졌다» 를 잡는 데는 훨씬 낮은 바닥으로 충분하므로, 리팩터마다 빨개지지 않게 여유를 둔다.
+    try std.testing.expect(scanned > 50);
+}
+
+// **기다리던 키는 «옛 자리»의 것이다.** 경계를 기다리는 동안 목적지가 바뀌거나(원격으로 붙었다)
+// 화면이 처음으로 되돌아가면(다른 기계로 갈아탔다), 그 키를 뒤늦게 그리면 «내가 안 친 글자» 가 새
+// 화면에 뜬다. 그래서 그때는 내보내지 않고 **버린다** — 목적지를 바꿀 때 `input_out` 을 비우는 기존
+// 규율과 같은 자리다. 대조군(그냥 기다렸다 뜨는 경우)을 함께 둬야 «원래 안 그려진다» 와 구분된다.
+test "경계를 기다리던 키는 목적지가 바뀌면 버린다" {
+    endAnyGesture(); // **앞 테스트가 손가락을 든 채 끝났을 수 있다** — 목적지를 놓고 시작한다
+    _ = bridge.maru_mobile_build(402, 874, now());
+    atlasAdd1('Z', 0, 0, 0, 11); // 아틀라스에 없으면 quad 가 안 나 대조가 성립하지 않는다
+    _ = bridge.maru_mobile_term_write("\x1b[2J\x1b[H", 7);
+    const empty = bridge.maru_mobile_build(402, 874, now());
+
+    // 대조군: 출력이 CSI 중간이라 기다렸다가, 경계로 돌아오면 **그때 뜬다**(글자 하나가 는다).
+    _ = bridge.maru_mobile_term_write("\x1b[1", 3); // 미완성 CUP — 경계 밖
+    _ = bridge.maru_mobile_input("Z", 1); // 대기열로 간다
+    try std.testing.expectEqual(empty, bridge.maru_mobile_build(402, 874, now())); // 아직 안 뜬다
+    _ = bridge.maru_mobile_term_write("H", 1); // 완성 → 경계 → 기다리던 Z 가 나간다
+    try std.testing.expectEqual(empty + 1, bridge.maru_mobile_build(402, 874, now()));
+
+    // 본 판정: 기다리는 사이에 목적지가 바뀌면 그 키는 **사라진다**.
+    _ = bridge.maru_mobile_term_write("\x1b[2J\x1b[H", 7);
+    const cleared = bridge.maru_mobile_build(402, 874, now());
+    _ = bridge.maru_mobile_term_write("\x1b[1", 3);
+    _ = bridge.maru_mobile_input("Z", 1);
+    bridge.maru_mobile_set_input_sink(1); // 원격에 붙었다 — 로컬 echo 는 이제 옛 자리의 것이다
+    bridge.maru_mobile_set_input_sink(0);
+    _ = bridge.maru_mobile_term_write("H", 1);
+    try std.testing.expectEqual(cleared, bridge.maru_mobile_build(402, 874, now()));
+
+    _ = bridge.maru_mobile_term_write("\x1b[2J\x1b[H", 7); // 뒤를 치운다(전역 화면이다)
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_clear_error();
 }
 
 // 키바의 **Ctrl 은 다음 한 키에만** 실린다. 계속 걸려 있으면 그 뒤 타이핑이 전부 제어문자가

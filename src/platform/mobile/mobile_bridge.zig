@@ -597,6 +597,9 @@ fn resetTerminalForNewMachine() void {
         // (`ESC c` — 화면·스크롤백·선택·모드·pen 이 한꺼번에 처음으로 간다), 그 길로 보내면
         // 원격이 스스로 보냈을 때와 **같은 자리**를 지난다 — 리셋 규칙이 두 벌이 되지 않는다.
         core.write("\x1bc") catch setLastError("term_reset_failed");
+        // **기다리던 echo 도 버린다.** 옛 기계에 치던 키가 새 화면에 늦게 그려지면 «내가 안 친 글자»
+        // 가 뜬다 — 목적지를 바꿀 때 `input_out` 을 비우는 것과 같은 규율이다(아래 set_input_sink).
+        echo_pending_len = 0;
     }
     // **반 줄쯤 남아 있던 스크롤도 버린다.** 남기면 새 세션의 첫 프레임이 옛 손짓의 나머지만큼
     // 밀린 채 시작한다. 화면을 되돌리는 것은 위가 했다 — 여기는 «손짓의 잔재» 다.
@@ -2286,15 +2289,24 @@ var input_out: [4096]u8 = undefined;
 var input_out_len: usize = 0;
 
 /// **경계를 기다리는 로컬 echo 바이트.** 출력이 시퀀스/글자 중간인 동안 친 키를 여기 들고 있다가
-/// 출력이 경계로 돌아오면 내보낸다(`flushEchoAtBoundary`). 키 하나는 길어야 몇 바이트(화살표
-/// `ESC [ A` = 3)이고 출력이 중간에 머무는 구간은 chunk 하나 길이라, 그 사이에 사람이 칠 수 있는 양의
-/// 몇 배로 잡는다. **대기열은 코어가 아니라 여기 산다** — 경계를 기다리는 정책은 로컬 모드(모바일)의
-/// 것이고, 코어에 두면 모든 Term 의 `TerminalCore` 가 이 자리를 들고 다닌다.
-var echo_pending: [64]u8 = undefined;
+/// 출력이 경계로 돌아오면 내보낸다(`flushEchoAtBoundary`).
+///
+/// 크기는 **원격 목적지(`input_out`)와 같게** 잡는다. 이 자리를 지나는 것은 키 하나만이 아니다 —
+/// 붙여넣기·IME 확정 한 뭉치도 같은 `sendInput` 을 지난다(§«모든 입력 경로가 여기를 지난다»). 키
+/// 길이(몇 바이트)로 잡으면 **로컬 모드에서만** 붙여넣기가 잘리는 비대칭이 생긴다.
+///
+/// **대기열은 코어가 아니라 여기 산다** — 경계를 기다리는 정책은 로컬 모드(모바일)의 것이고,
+/// 코어에 두면 모든 Term 의 `TerminalCore` 가 이 자리를 들고 다닌다.
+var echo_pending: [input_out.len]u8 = undefined;
 var echo_pending_len: usize = 0;
 
 /// 경계가 아니라 지금 못 쓰는 echo 를 쌓는다. **넘치면 조용히 자르지 않는다**(§5) — 이름을 남기고
 /// 버린다. 반쪽만 쓰면 키 하나가 깨진 조각으로 화면에 남는다.
+///
+/// **굶을 수 있다**: 출력이 시퀀스 중간에서 영영 안 끝나면(원격이 그 자리에서 멈췄다) 기다리던 키는
+/// 화면에 안 뜬다. 시간으로 억지 flush 를 하면 바로 그 «서로를 밟는» 자리로 돌아가므로 하지 않는다 —
+/// 그 상태는 출력 스트림 자체가 멈춘 것이고, 키는 목적지(원격)로는 이미 나갔다. 목적지가 바뀌거나
+/// 화면이 처음으로 돌아가면 대기열은 **버린다**(set_input_sink·resetTerminalForNewMachine).
 fn queueEcho(bytes: []const u8) void {
     if (echo_pending_len + bytes.len > echo_pending.len) {
         setLastError("echo_backlog_full");
@@ -2368,6 +2380,9 @@ pub export fn maru_mobile_set_input_sink(sink: u32) void {
     // **바꾸면 비운다.** 옛 목적지로 가려던 바이트가 새 목적지로 새어 나가면, 로컬에서 친
     // 글자가 원격에 뒤늦게 실행된다.
     input_out_len = 0;
+    // 경계를 기다리던 로컬 echo 도 같은 이유로 버린다 — 목적지가 바뀐 뒤에 화면에 뜨면 그 글자는
+    // 이제 «어디로도 안 간 글자» 다.
+    echo_pending_len = 0;
 }
 
 pub export fn maru_mobile_input_sink() u32 {

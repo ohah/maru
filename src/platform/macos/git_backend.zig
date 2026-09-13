@@ -959,13 +959,25 @@ pub const Backend = struct {
 
     /// 그 커밋이 바꾼 파일 목록을 읽는다(P4b). `oid`는 hex 검증을 거친 값이어야 한다 — argv 조립이
     /// 다시 검증하지만, 여기서도 임의 문자열을 그대로 넘기지 않는 것이 규율이다.
-    pub fn submitCommitFiles(self: *Backend, git_exe: []const u8, repo: []const u8, oid: []const u8, request_id: u64) bool {
-        return self.submitFileList(git_exe, repo, .commit_files, oid, request_id);
+    ///
+    /// `remote` 가 있으면 **저쪽 기계에서** 읽는다(RS7c — [계획](../../../docs/plans/remote-scm.md) §18.4).
+    pub fn submitCommitFiles(
+        self: *Backend,
+        git_exe: []const u8,
+        repo: []const u8,
+        oid: []const u8,
+        request_id: u64,
+        remote: ?git_command.Remote,
+    ) bool {
+        return self.submitFileList(git_exe, repo, .commit_files, oid, request_id, remote);
     }
 
     /// 턴 하나가 바꾼 파일 목록(P5). 키는 `<treeA> <treeB>`이고 **둘 다 hex여야 한다**.
+    ///
+    /// **원격 축이 없다**(RS7c §18.4). 이 키가 가리키는 tree 는 `captureTurnSnapshot` 이 **로컬에** 찍은
+    /// 것이라, 저쪽 기계에는 그 object 가 없다 — 호출자가 그 탭을 원격에서 막는다.
     pub fn submitTurnFiles(self: *Backend, git_exe: []const u8, repo: []const u8, pair: []const u8, request_id: u64) bool {
-        return self.submitFileList(git_exe, repo, .turn_name_status, pair, request_id);
+        return self.submitFileList(git_exe, repo, .turn_name_status, pair, request_id, null);
     }
 
     /// 펼친 항목 하나의 파일 목록을 읽는다(커밋·턴 공용).
@@ -976,6 +988,7 @@ pub const Backend = struct {
         kind: git_command.Kind,
         key: []const u8,
         request_id: u64,
+        remote: ?git_command.Remote,
     ) bool {
         // **rev 자리에 넣어도 되는 값인지 여기서 막는다**(§6 심층 방어). blob spec 둘은 같은 술어로
         // 이미 걸러지지만, 이 명령들은 rev를 그대로 인자로 실으므로 그 검사가 여기 없으면 유일한 구멍이 된다.
@@ -995,6 +1008,11 @@ pub const Backend = struct {
         job.git_exe = state.allocator.dupe(u8, git_exe) catch return self.releaseCommitFilesJob(job);
         job.repo = state.allocator.dupe(u8, repo) catch return self.releaseCommitFilesJob(job);
         job.snapshot_tree = state.allocator.dupe(u8, key) catch return self.releaseCommitFilesJob(job);
+        // **원격 두 축은 쌍으로 든다**(하나만 들면 `remoteTarget()` 이 로컬로 읽는다).
+        if (remote) |r| {
+            job.remote_dest = state.allocator.dupe(u8, r.dest) catch return self.releaseCommitFilesJob(job);
+            job.remote_ctl = state.allocator.dupe(u8, r.control_path) catch return self.releaseCommitFilesJob(job);
+        }
         const thread = std.Thread.spawn(.{}, commitFilesWorker, .{job}) catch return self.releaseCommitFilesJob(job);
         thread.detach();
         return true;
@@ -1005,6 +1023,7 @@ pub const Backend = struct {
         state.allocator.free(job.git_exe);
         state.allocator.free(job.repo);
         if (job.snapshot_tree.len > 0) state.allocator.free(job.snapshot_tree);
+        job.freeRemote(state.allocator); // 원격 두 축도 여기서 푼다(RS7c)
         state.allocator.destroy(job);
         return self.abandonCommitFiles();
     }
@@ -1262,7 +1281,8 @@ fn commitFilesWorker(job: *Job) void {
     var result: CommitFilesResult = .{ .request_id = job.request_id };
     // 커밋 OID는 `snapshot_tree` 자리를 빌린다 — 그 필드는 "이 작업이 읽을 rev"라는 같은 뜻이다.
     result.oid = state.allocator.dupe(u8, job.snapshot_tree) catch &.{};
-    if (runWithArg(state.allocator, job.file_list_kind, job.git_exe, job.repo, job.snapshot_tree)) |out| {
+    // **원격 인지 러너를 쓴다**(RS7c). 턴 축은 호출자가 막으므로 여기 오는 원격은 커밋뿐이다.
+    if (runOn(state.allocator, job.remoteTarget(), job.file_list_kind, job.git_exe, job.repo, job.snapshot_tree)) |out| {
         result.text = out.bytes;
         result.truncated = out.truncated;
         result.ok = true;
@@ -1270,6 +1290,7 @@ fn commitFilesWorker(job: *Job) void {
     state.allocator.free(job.git_exe);
     state.allocator.free(job.repo);
     if (job.snapshot_tree.len > 0) state.allocator.free(job.snapshot_tree);
+    job.freeRemote(state.allocator);
     state.allocator.destroy(job);
 
     state.mutex.lockUncancelable(state.io);
@@ -3386,8 +3407,8 @@ test "commit_files 읽기는 hex가 아닌 rev를 거절한다 (P4b 적대적 �
     const allocator = std.testing.allocator;
     var backend = try Backend.init(fixture_io);
     defer backend.deinit();
-    try std.testing.expect(!backend.submitCommitFiles("/usr/bin/git", "/repo", "--upload-pack=evil", 1));
-    try std.testing.expect(!backend.submitCommitFiles("/usr/bin/git", "/repo", "HEAD", 2));
+    try std.testing.expect(!backend.submitCommitFiles("/usr/bin/git", "/repo", "--upload-pack=evil", 1, null));
+    try std.testing.expect(!backend.submitCommitFiles("/usr/bin/git", "/repo", "HEAD", 2, null));
     _ = allocator;
 }
 
@@ -3625,6 +3646,57 @@ test "원격 히스토리: 커밋 목록이 저쪽 기계에서 오고 구분자
         _ = std.c.nanosleep(&ts, null);
     }
     return error.RemoteLogDeadSocketNeverCompleted;
+}
+
+test "원격 커밋의 파일 목록도 저쪽 기계에서 온다 (RS7c)" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const hx = remoteScmHarness() orelse return error.SkipZigTest;
+    const remote: git_command.Remote = .{ .dest = hx.dest, .control_path = hx.ctl };
+
+    // 읽을 커밋은 **그 저장소가 실제로 가진 것**이어야 한다 — 손으로 적은 oid 는 「없는 커밋」 실패와
+    // 구별이 안 된다. 히스토리 목록(RS7b)이 내는 첫 커밋을 그대로 쓴다.
+    const log_out = try runOn(allocator, remote, .log, git_command.remote_git_exe, hx.repo, "1");
+    defer allocator.free(log_out.bytes);
+    var it = maru.session.git_log.iterate(log_out.bytes);
+    const head = it.next() orelse return error.RemoteLogParsedNoCommit;
+
+    var backend = try Backend.init(std.Io.Threaded.global_single_threaded.io());
+    defer backend.deinit();
+    try std.testing.expect(backend.submitCommitFiles(git_command.remote_git_exe, hx.repo, head.oid, 51, remote));
+    var spins: usize = 0;
+    while (spins < 1000) : (spins += 1) {
+        if (backend.takeCommitFilesResult()) |taken| {
+            var result = taken;
+            defer result.deinit(worker_allocator);
+            try std.testing.expectEqual(@as(u64, 51), result.request_id);
+            try std.testing.expect(result.ok);
+            try std.testing.expectEqualStrings(head.oid, result.oid);
+            // `--raw` 줄은 `:` 로 시작한다 — 「무언가 왔다」가 아니라 **그 형식이 왔다**를 본다.
+            try std.testing.expect(std.mem.indexOfScalar(u8, result.text, ':') != null);
+            break;
+        }
+        var ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+        _ = std.c.nanosleep(&ts, null);
+    } else return error.RemoteCommitFilesNeverCompleted;
+
+    // **대조군** — 하네스 원격이 loopback 이라 위만으로는 「원격이다」가 증명되지 않는다(RS7b 와 같은
+    // 이유). 소켓을 죽이면 원격 경로는 실패하고, 로컬로 새고 있으면 **여전히 성공한다.**
+    const dead: git_command.Remote = .{ .dest = hx.dest, .control_path = "/nonexistent/sock" };
+    try std.testing.expect(backend.submitCommitFiles(git_command.remote_git_exe, hx.repo, head.oid, 52, dead));
+    spins = 0;
+    while (spins < 1000) : (spins += 1) {
+        if (backend.takeCommitFilesResult()) |taken| {
+            var result = taken;
+            defer result.deinit(worker_allocator);
+            try std.testing.expectEqual(@as(u64, 52), result.request_id);
+            try std.testing.expect(!result.ok);
+            return;
+        }
+        var ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+        _ = std.c.nanosleep(&ts, null);
+    }
+    return error.RemoteCommitFilesDeadSocketNeverCompleted;
 }
 
 test "원격 읽기 실패: git 이 없는 것과 연결이 끊긴 것을 가른다 (RS4 §2.2 ⑺)" {

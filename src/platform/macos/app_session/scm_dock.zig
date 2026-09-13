@@ -2339,6 +2339,37 @@ pub fn selectScmTab(self: *AppSession, tab: component.types.Tab) void {
     self.metal_dirty = true;
 }
 
+/// 실패한 히스토리 읽기를 **지금** 다시 걸 것인가. 순수 판정이라 단위로 짚는다 — 머리 줄 요약의
+/// `shouldReadRepoStatus` 와 같은 결이고 간격도 같다.
+///
+/// 「실패도 답이다」는 그대로다(매 tick 다시 묻지 않는다). 다만 **왜 실패했나가 재시도를 정한다**:
+///
+/// - `generic` — git 이 한 말이다(첫 커밋 전 저장소의 exit 128 이 그 대표). 그 상태는 **영구적**이라
+///   다시 물어도 같은 답이고, 프레임마다 프로세스를 띄우는 값만 치른다. 다시 읽는 길은 저장소·기계
+///   전환 · `더 보기` · 쓰기 뒤 재읽기 · 사용자의 새로고침이다.
+/// - `remote_git_missing`·`remote_transport` — **연결의 사실**이라 저절로 바뀔 수 있다(ControlMaster 가
+///   다시 서면 그 순간 읽힌다). 그때 화면이 「연결이 끊겼다」에 갇혀 있으면 사용자는 **멀쩡해진 상태에서**
+///   새로고침을 눌러야 한다. 그래서 쉬었다 간다.
+///
+/// 성공한 읽기는 다시 걸지 않는다 — 그것이 「이미 읽어 뒀다」의 뜻이다.
+pub fn shouldRetryScmLog(
+    failed: bool,
+    failure: git_backend_mod.ReadFailure,
+    read_ns: i128,
+    now: i128,
+) bool {
+    if (!failed) return false;
+    return switch (failure) {
+        .generic => false,
+        .remote_git_missing, .remote_transport => now - read_ns >= scm_log_retry_ns,
+    };
+}
+
+/// 연결 탓 실패를 다시 물어보기까지 쉬는 시간. 머리 줄 요약(`repo_status_retry_ns`)과 **같은 값**을
+/// 쓰되 상수를 공유하지는 않는다 — 두 읽기의 비용과 화면이 달라, 한쪽을 조정할 때 다른 쪽이 끌려가면
+/// 안 된다.
+const scm_log_retry_ns: i128 = 5 * std.time.ns_per_s;
+
 /// 이 저장소가 **첫 커밋 전**인가. 목록 읽기(`status --branch`)가 이미 답을 갖고 있으므로 히스토리가
 /// 따로 묻지 않는다 — 한 번 더 물으면 원격에서는 왕복이 하나 더 는다.
 ///
@@ -2371,7 +2402,10 @@ pub fn pumpScmLog(self: *AppSession) void {
     // **다시 읽는 길은 그대로다**: 저장소·기계가 바뀌면 `dropScmLogIfRepoChanged` 가 버리고,
     // `더 보기` 와 쓰기 뒤 재읽기는 표식을 지우며, 사용자는 새로고침을 누른다.
     if (self.scm_log_repo) |current| {
-        if (std.mem.eql(u8, current, repo)) return;
+        if (std.mem.eql(u8, current, repo)) {
+            const now = std.Io.Clock.awake.now(self.io).nanoseconds;
+            if (!shouldRetryScmLog(self.scm_log_failed, self.scm_log_failure, self.scm_log_read_ns, now)) return;
+        }
     }
 
     // **목록이 원격이면 그 기계에서 읽는다**(RS7b — [계획](../../../../docs/plans/remote-scm.md) §18.3).
@@ -2414,6 +2448,9 @@ pub fn pumpScmLog(self: *AppSession) void {
 /// 읽기를 **걸지 않고** 실패로 적는다(RS7b). 소켓이 없을 때뿐이다 — 그때는 보낼 곳이 없고, 그래도
 /// 화면은 「읽는 중…」이 아니라 이유를 내야 한다.
 fn markScmLogFailed(self: *AppSession, repo: []const u8, dest: ?[]const u8) void {
+    // **언제 그렇게 됐는지는 매번 새로 적는다** — 이 값이 재시도 간격의 기준이라, 멱등 가지에서
+    // 빼먹으면 첫 5 초가 지난 뒤 매 tick 다시 소켓을 확인하게 된다.
+    self.scm_log_read_ns = std.Io.Clock.awake.now(self.io).nanoseconds;
     // 멱등이어야 한다 — 매 tick 도는 경로라, 같은 상태를 반복해서 다시 쓰면 렌더를 계속 깨운다.
     if (self.scm_log_failed) {
         if (self.scm_log_repo) |current| if (std.mem.eql(u8, current, repo)) return;
@@ -2458,6 +2495,7 @@ pub fn drainScmLog(self: *AppSession) void {
     // 실패하는데, 그건 오류가 아니라 "커밋이 없다"이고 화면 문구가 그렇게 갈린다.
     self.scm_log_failed = !taken.ok;
     self.scm_log_failure = taken.failure; // **왜 못 읽었나**(RS7d) — 문구가 그 값으로 갈린다
+    self.scm_log_read_ns = std.Io.Clock.awake.now(self.io).nanoseconds; // 재시도 간격의 기준
     self.scm_log_truncated = taken.truncated;
     const text_copy = self.allocator.dupe(u8, taken.text) catch return;
     const repo_copy = self.allocator.dupe(u8, taken.repo) catch {

@@ -17758,31 +17758,74 @@ test "MAXC2 폭 캐시를 못 잡아도 상한이 «0 으로 안 간다» — �
     // 둘을 한 화면에서 보여 줬다). 메모리가 모자란 상황에서 **화면이 튀는 것**은 저하가 아니라 결함이다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const backing = testing.allocator;
+    const source = "root\n\tconst x = \"0123456789012345678901234567890123456789\";\n\tconst y = 1;\nend\n";
     var checked: usize = 0;
 
     // **어느 할당이 실패해야 이 자리에 닿는지 모른다** — 그래서 차례로 실패시키며 훑는다(이 파일의
     // 다른 실패-경로 판정자들이 쓰는 그 방식이다).
     //
-    // **훑는 폭이 「기회를 늘리는 값」이 아니라 「어긋남을 견디는 여유」다**(실측 2026-09-12). 이 판정자가
-    // CI 에서 `FailurePathNotReached` 로 한 번 빨개졌고, 같은 작업을 다시 돌리니 통과했다 — 재현이
-    // 안 되는 실패였다. 재 보니 **200 단계를 훑어도 닿는 step 은 정확히 하나**(내 기계에서 14)다.
-    // 즉 폭을 늘려도 적중 수는 안 늘고, 늘어나는 것은 **그 하나가 어디로 밀려도 잡히는 범위**뿐이다.
-    // 준비 단계(`PaneFixture.init`·`appendPaneFrame`)의 할당 수는 환경에 따라 흔들리므로 40 은
-    // 그 하나가 창 밖으로 나가기에 충분히 좁았다. 비용은 헛도는 반복이라 싸다.
-    var step: usize = 0;
-    while (step < 200) : (step += 1) {
+    // **훑는 폭을 숫자로 고르지 않는다 — 편집이 몇 번 할당하는지 먼저 센다.**
+    //
+    // 예전에는 고정 폭(40 → 200)이었고, 그 폭은 「전부 덮는다」는 보장이 아니라 **「어긋남을 견디는
+    // 여유」**였다. 닿는 step 은 정확히 하나인데 그 하나의 위치가 준비 단계(`PaneFixture.init`·
+    // `appendPaneFrame`)의 할당 수에 따라 밀리기 때문이다. 그래서 기계가 바뀌면 창 밖으로 나갔고,
+    // CI 에서 `FailurePathNotReached` 로 **두 번**(2026-09-12·2026-09-13) 빨개졌다 — 같은 코드가 다른
+    // 기계에서는 통과하는, 쫓을 수 없는 실패다.
+    //
+    // 세어서 그만큼만 훑으면 쫓을 것이 없다: 편집이 `n` 번 할당하면 `0..n` 을 훑는 것이 **그 편집의
+    // 모든 할당을 정확히 한 번씩** 실패시키는 것이다. 폭이 기계를 따라 저절로 움직인다.
+    const edit_allocations = blk: {
         var fa = std.testing.FailingAllocator.init(backing, .{});
         const alloc = fa.allocator();
-        var fx = PaneFixture.init(alloc) catch continue;
+        var fx = try PaneFixture.init(alloc);
         defer fx.deinit(alloc);
-        const term = undoFixture(&fx, alloc, "maxc2.zig", "root\n\tconst x = \"0123456789012345678901234567890123456789\";\n\tconst y = 1;\nend\n") catch continue;
+        const term = try undoFixture(&fx, alloc, "maxc2.zig", source);
         term.rt.editor_wrap = false;
-        var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse continue;
+        var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.FixtureFrameMissing;
+        drawn.dl.deinit(alloc);
+        ensureLineCols(fx.session, term);
+        ensureMaxCols(term, false);
+        const before_edit = fa.allocations;
+        breakUndoGroup(term);
+        term.rt.editor_selection = editor_selection.Selection.at(0);
+        _ = insertText(fx.session, term, "\n");
+        break :blk fa.allocations - before_edit;
+    };
+
+    // **건너뛴 이유를 센다.** `checked == 0` 만 남기면 「범위가 좁았나」와 「준비가 한 번도 안 됐나」가
+    // 구분되지 않는다 — 실제로 CI 가 그 둘 중 무엇이었는지 알 수 없어 조사가 막혔다(2026-09-14).
+    var skipped_fixture: usize = 0;
+    var skipped_frame: usize = 0;
+    var skipped_not_ready: usize = 0;
+    var skipped_cache_survived: usize = 0;
+    var skipped_lines_gone: usize = 0;
+
+    var step: usize = 0;
+    while (step <= edit_allocations) : (step += 1) {
+        var fa = std.testing.FailingAllocator.init(backing, .{});
+        const alloc = fa.allocator();
+        var fx = PaneFixture.init(alloc) catch {
+            skipped_fixture += 1;
+            continue;
+        };
+        defer fx.deinit(alloc);
+        const term = undoFixture(&fx, alloc, "maxc2.zig", source) catch {
+            skipped_fixture += 1;
+            continue;
+        };
+        term.rt.editor_wrap = false;
+        var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse {
+            skipped_frame += 1;
+            continue;
+        };
         drawn.dl.deinit(alloc);
         ensureLineCols(fx.session, term);
         ensureMaxCols(term, false);
         const before = term.rt.editor_max_cols;
-        if (before == 0 or !lineColsFresh(term)) continue; // 준비가 안 됐다 — 다음 step
+        if (before == 0 or !lineColsFresh(term)) { // 준비가 안 됐다 — 다음 step
+            skipped_not_ready += 1;
+            continue;
+        }
 
         // **여기부터 할당이 실패한다.** 편집이 폭 캐시를 못 잡으면 그것을 버리고(`applyLineColsPatch`
         // 가 `false`) 상한은 근사로 간다.
@@ -17791,8 +17834,14 @@ test "MAXC2 폭 캐시를 못 잡아도 상한이 «0 으로 안 간다» — �
         term.rt.editor_selection = editor_selection.Selection.at(0);
         _ = insertText(fx.session, term, "\n"); // 줄 수가 바뀌는 편집 — 새 버퍼가 필요하다
 
-        if (lineColsFresh(term)) continue; // 이 step 은 그 할당을 안 건드렸다
-        if (term.rt.editor_lines.len == 0) continue; // 줄 배열까지 못 잡은 판 — 다른 저하 경로다
+        if (lineColsFresh(term)) { // 이 step 은 그 할당을 안 건드렸다
+            skipped_cache_survived += 1;
+            continue;
+        }
+        if (term.rt.editor_lines.len == 0) { // 줄 배열까지 못 잡은 판 — 다른 저하 경로다
+            skipped_lines_gone += 1;
+            continue;
+        }
         checked += 1;
 
         // **캐시가 없는데도 상한이 0 이 아니다.**
@@ -17802,8 +17851,13 @@ test "MAXC2 폭 캐시를 못 잡아도 상한이 «0 으로 안 간다» — �
     }
 
     // **픽스처 공허 방지** — 한 번도 그 상태에 못 닿았다면 이 판정자는 아무것도 안 본 것이다.
+    // 이제 범위는 편집의 할당 수 전부라, 여기 닿았다는 것은 **범위가 좁아서가 아니라** 그 편집이
+    // 폭 캐시를 아예 안 잡았다는 뜻이다(경로가 바뀌었다). 그러니 「늘려라」가 아니라 **센 수를 보여 준다**.
     if (checked == 0) {
-        std.debug.print("MAXC2: 폭 캐시 할당 실패 상태에 한 번도 못 닿았다 — 훑는 범위를 늘려야 한다\n", .{});
+        std.debug.print(
+            "MAXC2: {d} step 을 훑고도 못 닿았다 — 건너뛴 이유: 픽스처 {d} · 프레임 {d} · 준비 안 됨 {d} · 캐시 살아남음 {d} · 줄 배열도 실패 {d}\n",
+            .{ edit_allocations + 1, skipped_fixture, skipped_frame, skipped_not_ready, skipped_cache_survived, skipped_lines_gone },
+        );
         return error.FailurePathNotReached;
     }
 }

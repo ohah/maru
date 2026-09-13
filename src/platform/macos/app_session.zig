@@ -2916,7 +2916,17 @@ var diag_obs_tick: u32 = 0;
 /// 추세를 주고, 내역은 1 분마다면 「어느 자리가 큰가」를 판단하기에 충분하다.
 ///
 /// 2026-09-12 실측: 이 진단이 로그의 61 % 를 차지해 시작 시점 증거를 회전으로 밀어냈다.
-const digest_site_interval_ticks: u32 = 3600;
+///
+/// **단위는 «호출» 이지 틱이 아니다.** `logDigestSiteDiag` 는 `logObservationEventDiag` 의 게이트를
+/// 통과한 뒤에 불리므로 `notify_diag_interval_ticks`(300 틱 ≈ 5 초)마다 한 번 호출된다. 이름이
+/// `_ticks` 였고 값이 3600 이라 「3600 틱 = 1 분」으로 읽혔지만 실제 주기는
+/// `3600 × 300 = 1,080,000` 틱 ≈ **5 시간**이었다 — 위 주석이 말한 「1 분마다」와 300 배 어긋났다.
+///
+/// 2026-09-13 실측: 그래서 이 줄이 **로그에 한 번도 안 나왔다.** 앱은 하루에도 여러 번 재시작하고
+/// 카운터는 프로세스마다 0 부터라 3600 에 도달한 적이 없다. 「BLAKE3 가 CPU 를 태운다」까지는 알면서
+/// **어느 자리인지** 를 못 물어본 이유가 이것이다 — 답을 줄 계측이 5 시간마다 말하게 돼 있었다.
+/// 이름에 단위를 박아 다음 사람이 같은 계산을 하지 않게 한다.
+const digest_site_interval_calls: u32 = 12; // × 5 초 = 1 분 (위 주석의 의도)
 var diag_site_tick: u32 = 0;
 /// 알림 RPC 장부도 같은 이유로 전역이다 — `app_remote_backend` 가 프로세스 하나뿐이라 세션마다 두면
 /// 창 수만큼 같은 줄이 찍힌다.
@@ -18602,8 +18612,11 @@ pub const AppSession = struct {
     fn logDigestSiteDiag() void {
         // 자체 게이트를 둔다. 총량(`observation cost`)은 5 초마다 한 줄로 추세를 주고, 자리별 내역은
         // **한 번에 네 줄**이라 같은 주기로 찍으면 로그의 대부분을 차지한다(실측 61 %).
+        //
+        // 이 카운터는 **호출** 을 센다 — 이 함수는 위 게이트를 통과한 뒤에만 불리므로 한 번 증가가
+        // `notify_diag_interval_ticks` 틱이다. 틱으로 착각하면 주기가 그 배수만큼 길어진다.
         diag_site_tick +%= 1;
-        if (diag_site_tick % digest_site_interval_ticks != 0) return;
+        if (diag_site_tick % digest_site_interval_calls != 0) return;
         const rb = session_host.remote_runtime.RemoteRuntime;
         var now: [rb.digest_site_count]rb.DigestSiteSample = undefined;
         rb.digestSiteSamples(&now);

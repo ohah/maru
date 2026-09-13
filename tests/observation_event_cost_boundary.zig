@@ -152,24 +152,43 @@ test "관측 이벤트 비용 계측: 단일 지점에서 원자적으로 세고
     //    **값이 아니라 관계를 고정한다.** 처음엔 `= 3600;` 을 통째로 잠갔는데, 30 초로 «조정» 하는 것도
     //    빨개졌다(적대적 검증 Z1) — 의도는 「총량보다 드물다」이지 특정 숫자가 아니다. 오늘 이 실수를
     //    네 번 했다.
-    const site_iv = parseConst(session, "const digest_site_interval_ticks: u32 = ") orelse
-        return error.SiteIntervalMissing;
+    //
+    //    ⚠️ **단위를 맞춰 비교한다.** 예전엔 두 상수를 그대로 비교했는데, 자리별 게이트는 **호출**을
+    //    세고 총량 게이트는 **틱**을 센다 — 자리별 함수가 총량 게이트를 통과한 뒤에만 불리기 때문이다.
+    //    단위가 다른 둘을 비교하니 `3600 > 300` 이 「드물다」로 통과했고, 실효 주기는
+    //    `3600 × 300 = 1,080,000` 틱 ≈ **5 시간**이었다. 그 줄은 로그에 한 번도 안 나왔고, 판정자는
+    //    내내 초록이었다 — **판정자가 버그를 보증한 것이다**(2026-09-13).
+    //
+    //    상수 «이름»도 잠그지 않는다. 이름에 단위를 박는 수정(`_ticks` → `_calls`)이 이 판정자에
+    //    막혔다 — 오늘 여섯 번째다. 게이트 식에서 쓰는 식별자를 **읽어서** 찾는다.
+    const site_fn_at = std.mem.indexOf(u8, session, "fn logDigestSiteDiag() void {") orelse
+        return error.SiteDiagMissing;
+    const gate_head = "diag_site_tick % ";
+    const gh = std.mem.indexOfPos(u8, session, site_fn_at, gate_head) orelse
+        return error.SiteGateMissing;
+    const id_start = gh + gate_head.len;
+    var id_end = id_start;
+    while (id_end < session.len and (std.ascii.isAlphanumeric(session[id_end]) or session[id_end] == '_')) id_end += 1;
+    const site_iv_name = session[id_start..id_end];
+    var name_buf: [128]u8 = undefined;
+    const site_needle = try std.fmt.bufPrint(&name_buf, "const {s}: u32 = ", .{site_iv_name});
+    const site_iv = parseConst(session, site_needle) orelse return error.SiteIntervalMissing;
     const total_iv = parseConst(session, "const notify_diag_interval_ticks: u32 = ") orelse
         return error.TotalIntervalMissing;
-    if (site_iv <= total_iv) {
+    // 자리별 진단의 **실효 주기(틱)** = 자기 게이트(호출) × 바깥 게이트(틱/호출).
+    const site_effective_ticks = site_iv * total_iv;
+    if (site_effective_ticks <= total_iv) {
         std.debug.print(
-            "자리별 간격 {d} 이 총량 간격 {d} 이하 — 네 줄짜리가 같은 주기면 로그를 덮는다\n",
-            .{ site_iv, total_iv },
+            "자리별 실효주기 {d} 틱이 총량 {d} 틱 이하 — 네 줄짜리가 같은 주기면 로그를 덮는다\n",
+            .{ site_effective_ticks, total_iv },
         );
         return error.SiteIntervalNotRarer;
     }
 
     // ⑤ 게이트는 **표본을 읽기 전에** 있어야 한다. 뒤에 두면 매 틱 읽고 버려 비용만 남는다(Z5).
-    const fn_at = std.mem.indexOf(u8, session, "fn logDigestSiteDiag() void {") orelse
-        return error.SiteDiagMissing;
-    // 게이트는 **자기 틱**을 세야 한다. 총량의 틱을 쓰면 같은 주기로 돌아 드물게 찍는 의미가 사라진다(Z2).
-    const gate_at = std.mem.indexOfPos(u8, session, fn_at, "diag_site_tick % digest_site_interval_ticks != 0") orelse
-        return error.SiteGateMissing;
+    const fn_at = site_fn_at;
+    // 게이트는 **자기 카운터**를 세야 한다. 총량의 것을 쓰면 같은 주기로 돌아 드물게 찍는 의미가 사라진다(Z2).
+    const gate_at = gh;
     const sample_at = std.mem.indexOfPos(u8, session, fn_at, "digestSiteSamples(") orelse
         return error.SiteSampleMissing;
     try std.testing.expect(gate_at < sample_at);

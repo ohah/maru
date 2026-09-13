@@ -1415,6 +1415,14 @@ test "WID7 위젯이 마지막 자리를 써도 안 넘치고, 빈 위젯은 op 
     try std.testing.expect(w.visual_rows <= 2); // 예산을 안 넘겼다
     try std.testing.expect(bufs.visual_rows[0].kind == .widget);
 
+    // **화면이 한 행뿐일 때**가 진짜 경계다. 위젯이 그 **마지막 한 자리**를 가져가는 유일한
+    // 상태이고, 「자리가 남아 있나」를 한 칸 보수적으로 재면 위젯이 **통째로 사라진다**
+    // (적대적 검증 5회차에서 그 변이가 살아남았다 — 두 행짜리 픽스처로는 안 보인다).
+    props.visible_rows = 1;
+    const one = build(props, bufs.scratch());
+    try std.testing.expectEqual(@as(usize, 1), one.visual_rows);
+    try std.testing.expect(bufs.visual_rows[0].kind == .widget);
+
     // **빈 위젯은 자리는 들되 글자는 안 낸다.** 빈 run 을 렌더로 보내면 어느 경로도 확실히
     // 통과하지 못한다(`Writer.icon` 이 같은 이유를 적어 둔 자리).
     var props2 = testProps(&lines, false);
@@ -1511,6 +1519,12 @@ test "WID10 위젯의 `piece` 는 0 이고, 글자는 본문 폭에서 잘리고
     const w = build(props, bufs.scratch());
     try std.testing.expect(bufs.visual_rows[0].kind == .widget);
     try std.testing.expectEqual(@as(u32, 0), bufs.visual_rows[0].piece);
+    // **열·byte 축도 0 이다.** 지금은 아무도 안 읽지만(칠하기 넷과 히트테스트가 `kind` 로 먼저
+    // 건너뛴다) 값이 정의돼 있어야 한다 — 어느 날 누가 읽기 시작하면 그때 「앵커 줄의 어딘가」를
+    // 가리키는 쓰레기 값이 조용히 자리를 정한다. 못 박아 두면 그 변경이 여기서 먼저 빨개진다.
+    try std.testing.expectEqual(@as(u32, 0), bufs.visual_rows[0].start_col);
+    try std.testing.expectEqual(@as(u32, 0), bufs.visual_rows[0].start_byte);
+    try std.testing.expectEqual(@as(u32, 0), bufs.visual_rows[0].start_byte_col);
 
     // ⑵ **건너뛰기는 첫 줄에만 적용된다.** `first_piece` 는 「화면 맨 위 줄의 몇 번째 행부터」이지
     //    모든 줄에 거는 값이 아니다 — 줄마다 걸면 아래 줄들의 위젯이 통째로 사라진다.
@@ -1559,6 +1573,23 @@ test "WID4 위젯 표가 갈리면 캐시를 다시 센다 — 옛 접두합은 
 
     // 캐시를 그대로 썼다면 총 행 수가 안 변한다 — 그 상태는 **조용히** 틀린다(막대 길이만 어긋난다).
     try std.testing.expectEqual(before.total_visual_rows + 1, after.total_visual_rows);
+    // **키의 두 축을 따로 갈라 본다.** 위 확인은 빈 표(`&.{}`) → 세 칸 표라 **주소와 길이가 함께**
+    // 바뀐다 — 그래서 한쪽만 보는 키도 통과한다(적대적 검증 4회차에서 그 변이 둘이 살아남았다).
+    //
+    // ⑴ **주소는 같고 길이만** 바뀐다: 같은 배열의 더 짧은 슬라이스. 마지막 줄의 위젯이 빠진다.
+    const three = [_]?content.Widget{ .{ .text = "w" }, .{ .text = "w" }, .{ .text = "w" } };
+    props.line_widgets = three[0..3];
+    const all_three = build(props, bufs.scratch());
+    props.line_widgets = three[0..2];
+    const only_two = build(props, bufs.scratch());
+    try std.testing.expectEqual(all_three.total_visual_rows - 1, only_two.total_visual_rows);
+
+    // ⑵ **길이는 같고 주소만** 바뀐다: 같은 크기의 다른 배열(하나는 위젯이 없다).
+    const none_three = [_]?content.Widget{ null, null, null };
+    props.line_widgets = none_three[0..3];
+    const none_built = build(props, bufs.scratch());
+    try std.testing.expectEqual(all_three.total_visual_rows - 3, none_built.total_visual_rows);
+
     // 그리고 **랩이 꺼져 있어도** 점진 계수는 이제 저하다(한 줄 = 한 행이 아니다).
     cache.filled = true;
     cache.filled_upto = 1;

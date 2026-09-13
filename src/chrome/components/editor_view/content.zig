@@ -323,6 +323,11 @@ pub fn build(
             if (w.text.len > 0 and run_used < runs.len and op_count < out.len) {
                 const run_start = run_used;
                 // **색 구간도 caret 도 없다** — 문서 줄이 아니므로 줄 수 있는 것이 없다.
+                //
+                // 그래서 `w.col`(시작 열)은 **지금 안 읽힌다** — `writeRuns` 가 색·caret 이 둘 다
+                // 비면 「한 run」 빠른 길로 빠진다(실측 2026-09-13: 이 값을 0 으로 바꾼 변이가
+                // 어떤 판정자도 못 깨웠다). 그래도 **맞는 값을 넘긴다** — 위젯에 색이 생기는 날
+                // 여기가 조용히 틀리는 자리가 되고, 그때는 0 이 곧 결함이다.
                 run_used += writeRuns(w.text, w.col, &.{}, &.{}, runs[run_used..]);
                 out[op_count] = .{
                     .text = .{

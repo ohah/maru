@@ -5877,6 +5877,25 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    // 워크스페이스 복원이 «어느 창 블록에서» 실패했는가. 주 창 실패가 조용해 원인이 안 보였다.
+    const ws_restore_log_step = b.step(
+        "test-workspace-restore-block-log",
+        "A failed workspace restore records which window block failed and why",
+    );
+    const ws_restore_log_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/workspace_restore_block_log_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_ws_restore_log = b.addRunArtifact(ws_restore_log_tests);
+    run_ws_restore_log.addArg("--maru-expect-tests=1");
+    run_ws_restore_log.addArg("--maru-expect-passed=1");
+    run_ws_restore_log.setCwd(b.path("."));
+    ws_restore_log_step.dependOn(&run_ws_restore_log.step);
+    boundary_step.dependOn(&run_ws_restore_log.step);
+
     // 재동기화 sweep 이 «무엇에» 막혔는가. 여섯 갈래가 전부 조용히 빠져, 멈춤과 정상이 같아 보였다.
     const sweep_blocker_step = b.step(
         "test-resync-sweep-blocker",

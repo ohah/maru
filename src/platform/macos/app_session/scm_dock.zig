@@ -1078,6 +1078,16 @@ fn projectHistory(self: *AppSession, arena: std.mem.Allocator) ?Projection {
         .items = items[0..n],
         .scroll = scroll,
         .branch = "",
+        // ⚠️ **이 목록을 어느 기계에서 읽었나**(계약 §2.3 — 적대적 검증 2026-09-14). RS7 이 이 탭을
+        // 원격으로 열면서, 정작 「지금 보는 커밋이 어느 기계의 것인가」를 말할 자리가 없었다: 브랜치
+        // 줄은 `branch` 가 빈 이 탭에 안 서고, 폴더줄은 **터미널이 서 있는 곳**이라 다른 질문에 답한다.
+        // 경로만 보면 로컬 `/srv/app` 과 원격 `/srv/app` 이 같은 값이므로, 그 라벨이 없으면 사용자는
+        // 구별할 방법이 없다 — §1 의 사고가 이름만 바꿔 돌아오는 자리다.
+        //
+        // **`git_repo_dest` 가 아니라 `scm_log_dest` 다.** 앞엣것은 «지금 목록을 읽은 기계» 이고
+        // 뒤엣것은 «이 커밋 목록을 읽은 기계» 다(RS7b). 둘이 갈리는 구간(pane 을 옮겼는데 아직 다시
+        // 못 읽은 사이)에 앞엣것을 적으면 **화면의 커밋과 다른 호스트**를 말하게 된다.
+        .remote_host = self.scm_log_dest orelse "",
         .ahead = 0,
         .behind = 0,
         .has_ab = false,

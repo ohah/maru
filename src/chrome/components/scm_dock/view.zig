@@ -341,7 +341,9 @@ pub fn view(
     writer.container_clip = null;
 
     // ── 브랜치 줄(목록 아래 고정). 저장소를 못 잡았으면 높이가 0이라 아무것도 그리지 않는다.
-    if (props.branch.len > 0) {
+    // **호스트만 있어도 그린다**(적대적 검증 2026-09-14 — `build.zig` 의 같은 판정). 히스토리 탭은
+    // `branch` 가 비는데, 그 탭이 원격을 보고 있으면 「어느 기계인가」를 말할 자리가 여기뿐이다.
+    if (props.branch.len > 0 or props.remote_host.len > 0) {
         if (frame.tree.find(build.NodeIds.branch)) |index| {
             const rect = frame.tree.entries[index];
             try writer.icon(rect, @floatFromInt(m.inset_x), branch_icon, m.icon_extent, .muted_fg);
@@ -446,7 +448,10 @@ pub fn view(
                     name_x = host_end + @as(f32, @floatFromInt(m.gap));
                 }
             }
-            try writer.lineWithin(rect, name_x, branch_end - @as(f32, @floatFromInt(m.gap)), props.branch, .surface_fg, .control, true);
+            // 이름이 빈 탭(히스토리)에서는 **호스트만 남는다** — 빈 글을 그리라고 보내지 않는다.
+            if (props.branch.len > 0) {
+                try writer.lineWithin(rect, name_x, branch_end - @as(f32, @floatFromInt(m.gap)), props.branch, .surface_fg, .control, true);
+            }
             // **아직 보내지 않은 것이 있으면 점**(§3.5). 개수는 안 적는다 — 위 `↑`/`↓`는 **기본 브랜치**
             // 기준이라, 기준이 다른 숫자를 그 옆에 놓으면 어느 쪽이 무엇인지 읽을 수 없다.
             //

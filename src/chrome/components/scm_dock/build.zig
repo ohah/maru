@@ -610,14 +610,21 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
         .cursor = if (props.remote_menu_enabled) .press else .arrow,
         .overflow = .clip,
     }, &.{});
+    // **호스트만 있어도 이 줄은 선다**(적대적 검증 2026-09-14). 히스토리 탭은 `branch` 를 일부러 비우는데
+    // (쓰기 컨트롤은 변경 사항 탭에만 둔다), RS7 이 그 탭을 **원격으로** 열면서 「지금 보는 커밋이 어느
+    // 기계의 것인가」를 말할 자리가 통째로 사라졌다 — 계약 §2.3 이 바로 그 사고를 막으려고 세운 줄이다.
+    //
+    // **자식은 그대로 `branch` 로 가른다** — 호스트만 서는 줄에 `가져오기` 칩이 따라오면 그 탭에 없던
+    // 컨트롤이 생긴다(§3.5.3 이 일부러 뺀 것이다).
+    const branch_row_stands = props.branch.len > 0 or props.remote_host.len > 0;
     top[3] = tree.card(.{
         .id = NodeIds.branch,
-        .style = .{ .height = .{ .px = if (props.branch.len == 0) 0 else @floatFromInt(m.branch_h) } },
+        .style = .{ .height = .{ .px = if (!branch_row_stands) 0 else @floatFromInt(m.branch_h) } },
         .direction = .row,
         .justify = .end,
         .align_items = .center,
         .variant = .surface,
-        .paint = if (props.branch.len == 0) .{} else .{ .background = .surface_bg, .border = .divider, .corner_radii_px = .{ 0, 0, 0, 0 }, .border_widths_px = .{ 1, 0, 0, 0 }, .shadow = .none },
+        .paint = if (!branch_row_stands) .{} else .{ .background = .surface_bg, .border = .divider, .corner_radii_px = .{ 0, 0, 0, 0 }, .border_widths_px = .{ 1, 0, 0, 0 }, .shadow = .none },
         .overflow = .clip,
     }, if (props.branch.len == 0) &.{} else fetch_slot);
 
@@ -1376,6 +1383,46 @@ test "요약 줄을 끄면 자리도 없다(히스토리 탭 위에 빈 띠가 �
     const on_content = on.tree.entries[on.tree.find(NodeIds.content) orelse return error.MissingContent];
     const off_content = off.tree.entries[off.tree.find(NodeIds.content) orelse return error.MissingContent];
     try testing.expectEqual(on_content.rect.height + on_summary.rect.height, off_content.rect.height);
+}
+
+test "호스트만 있어도 브랜치 줄은 선다 — 그런데 «가져오기»는 따라오지 않는다" {
+    // **결함**(적대적 검증 2026-09-14). 히스토리 탭은 `branch` 를 일부러 비우는데, 그 판정이 **줄의
+    // 높이**까지 쥐고 있어서 RS7 이 그 탭을 원격으로 연 뒤에도 「어느 기계인가」를 적을 자리가 없었다
+    // (계약 §2.3 이 바로 그 사고를 막으려고 세운 줄이다).
+    //
+    // 그렇다고 줄을 통째로 되살리면 **그 탭에 없던 컨트롤**(`가져오기` 칩)이 따라온다 — §3.5.3 이 일부러
+    // 뺀 것이다. 그래서 **높이는 «둘 중 하나라도 있으면»**, **자식은 «이름이 있을 때만»** 으로 가른다.
+    var none_storage: Storage = .{};
+    const none = try buildTest(.{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 400 },
+        .items = &.{},
+    }, &none_storage);
+    const none_rect = none.tree.entries[none.tree.find(NodeIds.branch) orelse return error.MissingBranch].rect;
+    try testing.expectEqual(@as(f32, 0), none_rect.height); // 둘 다 없으면 자리도 없다
+
+    var host_storage: Storage = .{};
+    const host_only = try buildTest(.{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 400 },
+        .items = &.{},
+        .remote_host = "user@build-a",
+        .fetch = .{ .enabled = true },
+    }, &host_storage);
+    const host_rect = host_only.tree.entries[host_only.tree.find(NodeIds.branch) orelse return error.MissingBranch].rect;
+    try testing.expect(host_rect.height > 0); // 호스트만 있어도 선다
+    // **칩은 안 따라온다** — `fetch.enabled` 를 켜 두고도 그렇다는 것이 이 단언의 요점이다.
+    try testing.expect(host_only.tree.find(NodeIds.fetch) == null);
+
+    var both_storage: Storage = .{};
+    const both = try buildTest(.{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 400 },
+        .items = &.{},
+        .branch = "main",
+        .remote_host = "user@build-a",
+        .fetch = .{ .enabled = true },
+    }, &both_storage);
+    const both_rect = both.tree.entries[both.tree.find(NodeIds.branch) orelse return error.MissingBranch].rect;
+    try testing.expectEqual(host_rect.height, both_rect.height); // 높이는 같다
+    try testing.expect(both.tree.find(NodeIds.fetch) != null); // 이름이 있으면 칩도 선다
 }
 
 test "글자 뷰포트는 목록 사각형이고, 스크롤로 밀린 첫 행은 그 위로 나간다" {

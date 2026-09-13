@@ -952,12 +952,19 @@ fn projectHistory(self: *AppSession, arena: std.mem.Allocator) ?Projection {
         //
         // **원격도 같은 셋으로 답한다**(RS7b). 히스토리를 저쪽 기계에서 읽게 됐으므로 「아직 못 읽는다」
         // 라는 네 번째 상태가 없어졌다 — RS7-0 이 두었던 그 가지를 여기서 지웠다.
-        items[n] = .{ .notice = if (self.scm_log_failed)
-            maru.i18n.t(.scm_log_read_failed)
-        else if (self.scm_log_repo == null)
-            maru.i18n.t(.scm_loading)
-        else
-            maru.i18n.t(.scm_no_commits) };
+        items[n] = .{
+            .notice = if (self.scm_log_failed)
+                // **읽기 실패는 이유를 말한다**(RS7d — §18.5). 목록 읽기의 `scmEmptyNotice` 와 **같은 표**다.
+                switch (self.scm_log_failure) {
+                    .remote_git_missing => maru.i18n.t(.scm_remote_git_missing),
+                    .remote_transport => maru.i18n.t(.scm_remote_transport_failed),
+                    .generic => maru.i18n.t(.scm_log_read_failed),
+                }
+            else if (self.scm_log_repo == null)
+                maru.i18n.t(.scm_loading)
+            else
+                maru.i18n.t(.scm_no_commits),
+        };
         n += 1;
     }
     var it = maru.session.git_log.iterate(self.scm_log_text);
@@ -992,10 +999,17 @@ fn projectHistory(self: *AppSession, arena: std.mem.Allocator) ?Projection {
         // 펼친 커밋의 파일 줄. 원문이 아직 없으면 **그 사실**을 한 줄로 말한다.
         if (!filesLoadedFor(self, commit.oid) or self.scm_commit_files_failed) {
             if (n < items.len) {
-                items[n] = .{ .notice = if (self.scm_commit_files_failed and filesLoadedFor(self, commit.oid))
-                    maru.i18n.t(.scm_commit_files_failed)
-                else
-                    maru.i18n.t(.scm_loading) };
+                items[n] = .{
+                    .notice = if (self.scm_commit_files_failed and filesLoadedFor(self, commit.oid))
+                        // **이유를 말한다**(RS7d) — 히스토리 빈 안내와 **같은 표**다.
+                        switch (self.scm_commit_files_failure) {
+                            .remote_git_missing => maru.i18n.t(.scm_remote_git_missing),
+                            .remote_transport => maru.i18n.t(.scm_remote_transport_failed),
+                            .generic => maru.i18n.t(.scm_commit_files_failed),
+                        }
+                    else
+                        maru.i18n.t(.scm_loading),
+                };
                 n += 1;
             }
             continue;
@@ -2379,6 +2393,9 @@ fn markScmLogFailed(self: *AppSession, repo: []const u8, dest: ?[]const u8) void
     if (self.scm_log_text.len > 0) self.allocator.free(self.scm_log_text);
     self.scm_log_text = &.{};
     self.scm_log_failed = true;
+    // **소켓이 없다 = 거기까지 못 갔다**(RS7d). 저장소 이야기가 아니라 연결 이야기이므로 그 사유를
+    // 쓴다 — 사용자가 할 일은 「연결을 다시 붙인다」다.
+    self.scm_log_failure = .remote_transport;
     self.scm_log_truncated = false;
     rememberScmLogDest(self, dest);
     self.metal_dirty = true;
@@ -2409,6 +2426,7 @@ pub fn drainScmLog(self: *AppSession) void {
     // **실패도 기록한다**(그 탭이 영영 "읽는 중"으로 남지 않게). 첫 커밋 전 저장소는 `git log`가
     // 실패하는데, 그건 오류가 아니라 "커밋이 없다"이고 화면 문구가 그렇게 갈린다.
     self.scm_log_failed = !taken.ok;
+    self.scm_log_failure = taken.failure; // **왜 못 읽었나**(RS7d) — 문구가 그 값으로 갈린다
     self.scm_log_truncated = taken.truncated;
     const text_copy = self.allocator.dupe(u8, taken.text) catch return;
     const repo_copy = self.allocator.dupe(u8, taken.repo) catch {
@@ -2631,6 +2649,8 @@ fn markCommitFilesFailed(self: *AppSession, key: []const u8) void {
     if (self.scm_commit_files_text.len > 0) self.allocator.free(self.scm_commit_files_text);
     self.scm_commit_files_text = &.{};
     self.scm_commit_files_failed = true;
+    // 소켓이 없으면 「거기까지 못 갔다」이고(RS7d), 턴 축이면 분류할 사유가 없다(`generic`).
+    self.scm_commit_files_failure = if (self.scm_tab == .history) .remote_transport else .generic;
     self.scm_commit_files_truncated = false;
     self.metal_dirty = true;
 }
@@ -2731,6 +2751,7 @@ pub fn drainCommitFiles(self: *AppSession) void {
     self.scm_commit_files_inflight = 0;
     self.metal_dirty = true;
     self.scm_commit_files_failed = !taken.ok;
+    self.scm_commit_files_failure = taken.failure; // RS7d
     self.scm_commit_files_truncated = taken.truncated;
     const text_copy = self.allocator.dupe(u8, taken.text) catch return;
     const oid_copy = self.allocator.dupe(u8, taken.oid) catch {

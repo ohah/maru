@@ -7934,6 +7934,31 @@ pub const AppSession = struct {
     /// `WriteFailed`·`AttachFailed`·`HostNotFound`·`SpawnHostUnavailable` 등)는 host나 runtime이 살아 있을 수 있어
     /// `PersistentRuntimeUnavailable`로 남긴다 — 일시 장애를 영구로 오분류하면 살아 있는 세션이 종료 placeholder로 굳어
     /// 되찾을 길이 사라진다. OOM은 host에 대한 증거가 아니라 우리 쪽 사정이므로 그대로 전파한다.
+    /// attach 실패가 **어느 자리에서, 원래 무슨 오류였는지**.
+    ///
+    /// 2026-09-13 실측: 워크스페이스 복원이 `err=PersistentRuntimeUnavailable` 로 죽어 탭 11 개가
+    /// 사라지고 그 상태가 원본을 덮었다 — 하루에 다섯 번. 그런데 그 이름의 출처가 **넷**이고 둘은
+    /// `classifyAttachError` 를 거치지도 않는다(풀 조회 실패·legacy 호스트 불일치). 나머지 둘은
+    /// `else =>` 가 **원래 오류를 통째로 버린다.**
+    ///
+    /// 「지금 못 붙는다」까지는 알아도 «왜» 를 모르면 고칠 곳이 안 정해진다 — 풀에 호스트가 없는 것과
+    /// 연결이 닫힌 것과 attach 가 거절된 것은 전혀 다른 일이다.
+    pub var attach_fail_site: []const u8 = "-";
+    pub var attach_fail_raw: []const u8 = "-";
+
+    pub var attach_fail_outcome: []const u8 = "-";
+
+    /// `AttachFailed` 안의 갈래(`typed_reject`·`uncertain_or_connection_failure`·`runtime_id_parse`).
+    /// 호스트가 거절한 것과 전송이 깨진 것은 고칠 곳이 정반대다.
+    pub fn noteAttachOutcome(outcome: []const u8) void {
+        attach_fail_outcome = outcome;
+    }
+
+    pub fn noteAttachFail(site: []const u8, err: ?anyerror) void {
+        attach_fail_site = site;
+        attach_fail_raw = if (err) |e| @errorName(e) else "-";
+    }
+
     pub fn classifyAttachError(err: anyerror) anyerror {
         return switch (err) {
             error.RuntimeNotFound, error.StaleHostHandle, error.HostIdentityMismatch => error.PersistentRuntimeGone,

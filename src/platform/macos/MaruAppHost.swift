@@ -5898,12 +5898,23 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// checkpoint 보존을 결정하게 한다(파싱은 됐어도 attach/spawn 실패 등).
     @discardableResult
     private func applyWorkspaceWindow(_ text: String, _ index: Int) -> Bool {
-        guard let session = appSession else { return false }
+        // **왜 실패했는지 남긴다.** 이 함수는 실패를 `false` 하나로만 말했고, 호출자는 블록 1 이상만
+        // 로그를 찍었다 — 그래서 **주 창(블록 0) 실패는 완전히 조용했다.** 2026-09-13 실측: 저장
+        // 파일에 창 둘(탭 11 + 탭 1)이 온전했고 host 에도 세션 23 개가 살아 있었는데, 앱은 기본
+        // `/bin/zsh` 한 창으로 떴고 그 상태가 파일을 덮었다. 로그에는 블록 1 실패 한 줄뿐이라 주 창이
+        // 왜 안 왔는지 알 길이 없었다.
+        guard let session = appSession else {
+            fputs("maru: workspace apply failed block=\(index) at=no_session\n", stderr)
+            return false
+        }
         let bytes = Array(text.utf8)
         let status = bytes.withUnsafeBufferPointer { buf in
             maru_macos_app_session_apply_workspace_window(session, buf.baseAddress, buf.count, index)
         }
-        guard status == Self.statusOK else { return false }
+        guard status == Self.statusOK else {
+            fputs("maru: workspace apply failed block=\(index) at=apply status=\(status)\n", stderr)
+            return false
+        }
         // 복원은 손상된 파일 패널 entry·그 결과로 비워진 dock 그룹·접근 불가 explorer root를 **버리면서도 성공을
         // 반환**한다. 그 사실을 모르면 다음 Quit의 자동 checkpoint가 버려진 상태를 파일에 커밋해 사용자가 도크 배치와
         // explorer root를 영구히 잃는다. apply가 성공했어도 버린 것이 있으면 이번 실행의 저장을 막아 마지막 완전본을
@@ -6012,6 +6023,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         var primaryApplied = false
         withSurface(primary) { primaryApplied = applyWorkspaceWindow(text, 0) }
         if !primaryApplied {
+            // **블록 1 이상과 같은 모양으로 남긴다.** 이 비대칭 자체가 결함이었다 — 추가 창 실패는
+            // 보이는데 주 창 실패는 안 보여, 「복원이 왜 안 되나」가 로그에서 통째로 사라졌다.
+            fputs("maru: workspace restore failed to apply window block=0 of \(count)\n", stderr)
             workspaceRestoreIncomplete = true
             // deferred primary에는 fallback surface도 없다. 실패한 staged attach를 Zig가 rollback한 뒤 이 빈 세션을
             // 폐기하고 명시적인 default-shell 세션을 새로 만들어 사용자에게 usable 창을 남긴다.
@@ -12029,15 +12043,19 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     private func driveWorkspaceCheckpoint() {
         guard workspaceCheckpointArmed else { return }
-        // 복원이 불완전한 실행에서는 **평상시 저장을 하지 않는다.** 화면에 일부만 복원된 상태를 그대로
-        // 커밋하면 저장 파일에서 나머지가 영구히 사라진다. 대신 종료 저장(`workspaceFinalQuitPending`)은
-        // 통과시키고, 그 경로가 아래 `preservePrevious` 로 마지막 완전본을 `workspace.v1.bak` 에 남긴 뒤
-        // 쓴다 — 이 둘이 한 쌍이다(ec5a6cf3 "gate quit on final checkpoint").
+        // 복원이 불완전한 실행은 **워크스페이스 파일에 아무것도 쓰지 않는다.** 화면에 일부만 복원된
+        // 상태를 커밋하면 저장 파일에서 나머지가 영구히 사라진다.
+        //
+        // 종료 저장에는 예외가 있었다(`|| workspaceFinalQuitPending`). 근거는 「그 경로가
+        // `preservePrevious` 로 마지막 완전본을 `.bak` 에 남긴다」였는데, `ensureBackup` 은 `O_EXCL`
+        // 이라 **이미 있으면 아무것도 안 한다** — 실제 `.bak` 은 7 월 25 일에서 멈춰 있었다. 쌍이
+        // 깨져 있었으므로 예외의 근거가 없다. 종료 경로는 이제
+        // `beginFinalWorkspaceCheckpoint` 가 저장 자체를 건너뛴다.
         //
         // 저장이 왜 안 됐는지는 지금까지 어디에도 남지 않아 "체크포인트 저장 실패" 한 문장만 보였다.
         // tick 마다 불리므로 사유가 바뀔 때만 찍는다.
-        guard !workspaceRestoreIncomplete || workspaceFinalQuitPending else {
-            logWorkspaceCheckpointDiagnosticOnce("skipped: restore_incomplete latch is set (final-quit save still runs)")
+        guard !workspaceRestoreIncomplete else {
+            logWorkspaceCheckpointDiagnosticOnce("skipped: restore_incomplete latch is set")
             return
         }
         var effect = MaruWorkspaceCheckpointEffect()
@@ -12183,6 +12201,29 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private func beginFinalWorkspaceCheckpoint(surface: TerminalSurface?, deferredAppKitQuit: Bool) {
         guard !workspaceFinalQuitPending else { return }
         guard workspaceCheckpointArmed, !windows.isEmpty else {
+            bypassQuitConfirm = true
+            if deferredAppKitQuit {
+                quitConfirmPending = false
+                NSApp.reply(toApplicationShouldTerminate: true)
+            } else { NSApp.terminate(nil) }
+            return
+        }
+        // 복원이 **실패한** 실행은 종료 저장도 하지 않는다. 위 `MARU_NO_WORKSPACE_RESTORE` 규칙은
+        // 복원을 «끈» 경우만 덮는데, 실패한 복원이 남기는 상태는 그것과 똑같은 「기본 단일 창」이다 —
+        // 그걸 커밋하면 사용자가 보존하려던 멀티 창 레이아웃이 사라진다. 결과가 같으면 규칙도 같아야 한다.
+        //
+        // 2026-09-13 실측: 저장 파일에 창 둘(탭 11 + 탭 1)이 온전하고 host 에 세션 23 개가 살아
+        // 있는데도 attach 가 매번 실패해(`connection_eof` → `uncertain`) 기본 셸 한 창으로 떴고,
+        // 종료 저장이 7421 B 를 341 B 로 덮었다. **하루에 다섯 번.**
+        //
+        // 판단은 반드시 **여기**, 저장을 시작하기 전에 해야 한다. `captureWorkspaceSnapshot` 이
+        // `nil` 을 돌려주면 상태 기계는 그것을 「캡처 실패」로 읽고 `CANCEL_QUIT` 을 내며,
+        // `allowsFailure=false` 인 keep-alive 종료는 **취소된다** — 앱이 영영 안 닫힌다(실측).
+        // 「안 쓰기로 한 것」과 「쓰지 못한 것」은 다른 사건이므로 다른 자리에서 말해야 한다.
+        //
+        // 세션은 host 에 멀쩡히 살아 있다. 지도를 지울 이유가 없다.
+        guard !workspaceRestoreIncomplete else {
+            fputs("workspace checkpoint: final-quit save skipped — restore was incomplete, keeping the file\n", stderr)
             bypassQuitConfirm = true
             if deferredAppKitQuit {
                 quitConfirmPending = false

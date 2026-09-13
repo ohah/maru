@@ -6069,6 +6069,9 @@ pub const AppSession = struct {
     /// 같은 타입이고, 세 사유는 사용자가 할 일이 각각 다르다(원격에 git 을 깐다 · 연결을 다시 붙인다 ·
     /// 저장소를 본다).
     scm_log_failure: git_backend_mod.ReadFailure = .generic,
+    /// 그 답이 **언제** 왔나(monotonic ns). 실패한 읽기를 쉬었다 다시 거는 판정에만 쓴다 — 머리 줄
+    /// 요약(`RepoStatusEntry.read_ns`)이 쓰는 것과 같은 축이다.
+    scm_log_read_ns: i128 = 0,
     /// 그 출력이 상한에서 잘렸나. **조용히 자르지 않는다**(목록 읽기와 같은 규율).
     scm_log_truncated: bool = false,
     /// 히스토리에서 고른 커밋의 **OID**(P4). 파일 행 강조와 다른 축이라 값을 따로 든다.
@@ -70913,10 +70916,44 @@ test "히스토리: 실패도 답이다 — 매 tick 다시 묻지 않는다 (�
     // 옛 코드는 부를 때마다 하나씩 올랐다 — 프레임마다 프로세스 하나다.
     try std.testing.expectEqual(before, session.scm_log_seq);
 
-    // **다시 읽는 길은 그대로다** — 표식을 지우면(`더 보기` · 쓰기 뒤 재읽기) 다음 tick 이 묻는다.
-    scm_dock_ops.invalidateScmLog(session);
+    // **연결 탓 실패는 다르다** — 저절로 나아질 수 있으므로 쉬었다 다시 묻는다. 펌프가 그 판정을
+    // 실제로 거치는지 본다(순수 술어는 자기 판정자가 따로 문다).
+    session.scm_log_failure = .remote_transport;
+    session.scm_log_read_ns = 0; // 아주 오래전에 온 답이다
     scm_dock_ops.pumpScmLog(session);
     try std.testing.expect(session.scm_log_seq != before);
+    session.scm_log_failure = .generic;
+
+    // **다시 읽는 길은 그대로다** — 표식을 지우면(`더 보기` · 쓰기 뒤 재읽기) 다음 tick 이 묻는다.
+    const before_invalidate = session.scm_log_seq;
+    scm_dock_ops.invalidateScmLog(session);
+    scm_dock_ops.pumpScmLog(session);
+    try std.testing.expect(session.scm_log_seq != before_invalidate);
+}
+
+test "히스토리 재시도는 «왜 실패했나»가 정한다 (누적 적대적 검증)" {
+    // 「실패도 답이다」를 그대로 두면 **연결 탓 실패도** 새로고침 전까지 갇힌다 — ControlMaster 가 다시
+    // 서서 멀쩡해진 뒤에도 화면은 「연결이 끊겼다」다. 반대로 전부 다시 물으면 unborn 처럼 **영구적인**
+    // 실패가 프레임마다 프로세스를 띄운다(원격이면 ssh 왕복).
+    //
+    // 그래서 사유가 정한다. 순수 판정이라 여기서 단위로 짚는다 — 머리 줄 요약의 `shouldReadRepoStatus`
+    // 와 같은 결이다.
+    const retry = scm_dock_ops.shouldRetryScmLog;
+    const second = std.time.ns_per_s;
+
+    // 성공한 읽기는 다시 걸지 않는다 — 그것이 「이미 읽어 뒀다」의 뜻이다.
+    try std.testing.expect(!retry(false, .generic, 0, 100 * second));
+    try std.testing.expect(!retry(false, .remote_transport, 0, 100 * second));
+
+    // git 이 한 말은 **영구적**이다(unborn 의 exit 128 이 그 대표) — 아무리 기다려도 다시 안 묻는다.
+    try std.testing.expect(!retry(true, .generic, 0, 100 * second));
+
+    // 연결의 사실은 저절로 바뀔 수 있다 — 쉬었다 간다.
+    try std.testing.expect(!retry(true, .remote_transport, 0, 4 * second)); // 아직 이르다
+    try std.testing.expect(retry(true, .remote_transport, 0, 5 * second)); // 경계에서 연다
+    try std.testing.expect(retry(true, .remote_git_missing, 0, 60 * second));
+    // **기준은 「답이 온 때」다** — 방금 실패했으면 아직 쉰다.
+    try std.testing.expect(!retry(true, .remote_transport, 100 * second, 101 * second));
 }
 
 test "히스토리: 첫 커밋 전 저장소는 «없다»고 말한다 — «못 읽었다»가 아니라 (누적 적대적 검증)" {

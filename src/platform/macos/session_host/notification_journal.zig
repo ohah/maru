@@ -280,7 +280,7 @@ pub const Journal = struct {
             };
             if (!pending.*) return .already_acknowledged;
             pending.* = false;
-            self.reclaimAcknowledgedPrefix();
+            self.reclaimAcknowledged();
             return .acknowledged;
         }
         return .not_found;
@@ -452,9 +452,33 @@ pub const Journal = struct {
         return out;
     }
 
-    fn reclaimAcknowledgedPrefix(self: *Journal) void {
-        while (self.rows.items.len > 0 and !self.rows.items[0].pending_gui and !self.rows.items[0].pending_os) {
-            var removed = self.rows.orderedRemove(0);
+    /// 완료된 행을 **전부** 회수한다 — 맨 앞부터 연속된 것만이 아니다.
+    ///
+    /// **접두만 회수하면 저널이 자기가 쓴 것을 못 읽는다.** `encodeHandoff` 는 행마다
+    /// `flags = pending_gui | (pending_os << 1)` 을 쓰고, `restoreHandoff` 는 `flags == 0` 을
+    /// `error.FlagsEmpty` 로 **거부한다**. 그러니 양쪽 다 완료된 행이 목록에 남아 있으면 그대로
+    /// 직렬화돼 후계자가 복원을 통째로 거부한다.
+    ///
+    /// 그 상태는 예외가 아니라 **정상 동작에서 생긴다.** OS 전달이 실패하면 250 ms → 8 s 로
+    /// 물러나며 재시도하고(`notification_os_delivery.zig`), 그동안 그 행은 `pending_os` 로 남는다.
+    /// handoff 계약도 「`pending_os` 는 직렬화된 저널에서 권위를 유지해 중단된 전달이 성공 ack 없이
+    /// 재시도된다」로 그렇게 정한다. 그 8 초 창 안에 **뒤 알림이 양쪽 다 완료되면** 접두 회수는
+    /// 그 행에 닿지 못하고 `flags = 0` 고아가 남는다.
+    ///
+    /// 2026-09-13 실사고: 업그레이드의 `activate` 가 `FlagsEmpty` 로 실패하고 `rollback=none` 이라
+    /// 옛 host 가 죽으면서 **런타임 23 개가 사라졌다.** 세션 호스트의 존재 이유가 셸을 살려 두는
+    /// 것인데, 알림 저널 한 줄이 그것을 무너뜨렸다.
+    ///
+    /// 행 수는 `limits.max_events` 로 묶여 있어 전체 훑기 비용은 접두 훑기와 같은 차수다.
+    fn reclaimAcknowledged(self: *Journal) void {
+        var index: usize = 0;
+        while (index < self.rows.items.len) {
+            const row = &self.rows.items[index];
+            if (row.pending_gui or row.pending_os) {
+                index += 1;
+                continue;
+            }
+            var removed = self.rows.orderedRemove(index);
             self.resident_bytes -= removed.residentBytes();
             removed.deinit(self.allocator);
         }
@@ -548,6 +572,89 @@ test "P4 N1 stable identity is monotonic and independent from runtime" {
     try std.testing.expectError(error.EventIdExhausted, journal.admit(11, 13, "d", "four", "blocked"));
     try std.testing.expectEqual(before_count, journal.count());
     try std.testing.expectEqual(std.math.maxInt(u64), journal.last_event_id);
+}
+
+test "순서와 다르게 완료돼도 handoff 가 왕복한다 — flags=0 행이 남지 않는다" {
+    // 2026-09-13 실사고의 회귀 판정자. 수정 전에는 이 구성이 `error.FlagsEmpty` 를 냈고,
+    // 업그레이드의 `activate` 가 그걸로 실패해 `rollback=none` 인 채 host 가 죽으면서
+    // **런타임 23 개가 사라졌다.**
+    var journal: Journal = undefined;
+    try journal.initInPlace(std.testing.allocator, test_host, test_limits);
+    defer journal.deinit() catch unreachable;
+
+    const first = try journal.admit(7, 10, "a", "one", "left");
+    const second = try journal.admit(8, 11, "b", "two", "right");
+
+    // **뒤 행만** 양쪽 소비자가 완료한다. 앞 행이 `pending_os` 로 남는 것은 예외가 아니다 —
+    // OS 전달 실패는 250 ms → 8 s 로 물러나며 재시도하고, handoff 계약이 그 pending 을
+    // 권위로 유지하라고 정한다. 그 창 안에 뒤 알림이 완료되는 일은 정상 동작에서 생긴다.
+    try std.testing.expectEqual(AckResult.acknowledged, journal.ack(second, .gui));
+    try std.testing.expectEqual(AckResult.acknowledged, journal.ack(second, .os));
+    try std.testing.expectEqual(AckResult.acknowledged, journal.ack(first, .gui));
+
+    // ① 완료된 행은 **접두가 아니어도** 즉시 회수된다. 남아 있으면 `flags = 0` 으로 직렬화된다.
+    try std.testing.expectEqual(@as(usize, 1), journal.count());
+    try std.testing.expectEqual(first.event_id, journal.oldestPending(.os).?.key.event_id);
+
+    // ② 그래서 handoff 가 왕복한다. 예전에는 여기서 `error.FlagsEmpty` 가 나 복원이 통째로 거부됐다.
+    const bytes = try journal.encodeHandoff(std.testing.allocator, 0);
+    defer std.testing.allocator.free(bytes);
+    var successor: Journal = undefined;
+    try successor.initInPlace(std.testing.allocator, test_host, test_limits);
+    defer successor.deinit() catch unreachable;
+    _ = try successor.restoreHandoff(bytes);
+
+    // ③ 살아남은 행의 **전달 상태가 보존**된다 — 재시도가 이어져야 하므로 pending_os 는 참이어야 한다.
+    try std.testing.expectEqual(@as(usize, 1), successor.count());
+    const restored = successor.oldestPending(.os) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(first.event_id, restored.key.event_id);
+    try std.testing.expect(successor.oldestPending(.gui) == null);
+}
+
+test "불변식: 어떤 ack 순서에서도 flags=0 행이 남지 않는다 (handoff 가 늘 왕복한다)" {
+    // 앞 판정자는 «시나리오 하나»만 본다. 여기서는 세 행에 대한 **완료 순서 전수**(2×3! 조합 중
+    // 소비자 순서까지 섞은 것)를 돌려 불변식 자체를 잰다 — 완료된 행은 위치와 무관하게 사라져야 하고,
+    // 그래야 `encodeHandoff` 가 `flags = 0` 을 쓸 일이 없다.
+    var limits = test_limits;
+    limits.max_events = 8;
+    limits.max_resident_bytes = 512;
+
+    const orders = [_][6]u8{
+        // (행 인덱스, 소비자) 쌍 여섯 개의 순열 일부 — 뒤 행이 먼저 완료되는 경우를 포함한다.
+        .{ 0, 1, 2, 3, 4, 5 },
+        .{ 5, 4, 3, 2, 1, 0 },
+        .{ 2, 3, 0, 1, 4, 5 },
+        .{ 4, 5, 0, 1, 2, 3 },
+        .{ 1, 3, 5, 0, 2, 4 },
+        .{ 3, 0, 5, 2, 1, 4 },
+    };
+    for (orders) |order| {
+        var journal: Journal = undefined;
+        try journal.initInPlace(std.testing.allocator, test_host, limits);
+        defer journal.deinit() catch unreachable;
+        var keys: [3]Key = undefined;
+        for (0..3) |i| keys[i] = try journal.admit(@intCast(i + 1), 100 + i, "t", "b", "l");
+
+        for (order) |step| {
+            const row_index = step / 2;
+            const consumer: Consumer = if (step % 2 == 0) .gui else .os;
+            _ = journal.ack(keys[row_index], consumer);
+
+            // **매 단계마다** 왕복이 성립해야 한다 — 업그레이드는 아무 때나 일어난다.
+            const bytes = try journal.encodeHandoff(std.testing.allocator, 0);
+            defer std.testing.allocator.free(bytes);
+            var successor: Journal = undefined;
+            try successor.initInPlace(std.testing.allocator, test_host, limits);
+            defer successor.deinit() catch unreachable;
+            _ = successor.restoreHandoff(bytes) catch |err| {
+                std.debug.print("ack 순서 {any} 의 단계 {d} 에서 handoff 가 깨졌다: {s}\n", .{ order, step, @errorName(err) });
+                return err;
+            };
+            try std.testing.expectEqual(journal.count(), successor.count());
+        }
+        // 전부 완료됐으면 저널은 비어 있어야 한다.
+        try std.testing.expectEqual(@as(usize, 0), journal.count());
+    }
 }
 
 test "P4 N1 dual delivery ack is isolated and exact once" {

@@ -55548,6 +55548,40 @@ test "관측 tail 상한은 여러 행 composer의 프롬프트 마커를 계속
     }
 }
 
+test "PA1: 탭 라벨 색은 활성 Term 을 따른다 — 배경에서 도는 것이 이기지 않는다" {
+    // 탭 라벨의 점은 「이 자리에서 무엇이 도는가」를 말한다. 예전에는 running 인 다른 Term 이 먼저
+    // 이겨서, 활성이 claude 인데 배경의 codex 가 돌면 **초록 점**이 떴다 — 사용자가 보는 것과 다른
+    // 색이다(2026-09-14 보고: 「가장 바쁜 것이 이기는 게 아니라 해당 pane 을 따라야 한다」).
+    //
+    // **사이드바 워크스페이스 행은 반대다**(바로 아래 판정자) — 거기서는 「무언가 돌고 있다」가 찾는
+    // 사실이라 가장 바쁜 것이 맞다. 두 질문이 다르고, 그래서 함수도 둘이다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionTwoTerms(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    const tab = tab_ops.activeTab(session);
+    const pane = tab.activePane();
+    const background = pane.terms.items[0];
+    const active = tab.activeTerm();
+
+    active.agent_kind = .claude;
+    active.agent_state = .idle;
+    background.agent_kind = .codex;
+    background.agent_state = .running;
+
+    // **활성이 이긴다** — 배경이 돌고 있어도.
+    try std.testing.expectEqual(AgentKind.claude, pane_ops.paneAgentKind(pane));
+
+    // 활성이 에이전트가 아닐 때만 배경을 본다 — pane 이 「무언가 돌고 있다」는 것은 알려야 한다.
+    active.agent_kind = .none;
+    try std.testing.expectEqual(AgentKind.codex, pane_ops.paneAgentKind(pane));
+
+    // 배경도 안 돌면 아무것도 아니다.
+    background.agent_state = .idle;
+    try std.testing.expectEqual(AgentKind.none, pane_ops.paneAgentKind(pane));
+}
 test "agent representative prioritizes blocked over running over active idle" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;

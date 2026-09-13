@@ -1555,10 +1555,21 @@ pub fn mergePaneIntoWorkspace(self: *AppSession, pane: *Pane, target_index: usiz
     self.metal_dirty = true;
 }
 
-/// pane 라벨(탭바) 색의 대표 에이전트 종류 — running Term 우선, 없으면 활성 Term kind.
+/// pane 라벨(탭바) 색의 대표 에이전트 종류 — **활성 Term 우선**, 그것이 에이전트가 아닐 때만 running Term.
+///
+/// **보고 있는 것을 따른다.** 탭 라벨의 점은 「이 자리에서 무엇이 도는가」를 말한다. 예전에는 running 인
+/// 다른 Term 이 먼저 이겨서, 활성 Term 이 claude 인데 배경의 codex 가 돌고 있으면 **초록 점**이 떴다 —
+/// 사용자가 보는 것과 다른 색이다(2026-09-14 보고: 「가장 바쁜 것이 이기는 게 아니라 해당 pane 을 따라야
+/// 한다」).
+///
+/// 사이드바의 **워크스페이스 행**은 반대다 — 거기서는 「이 워크스페이스에 무언가 돌고 있다」가 찾는
+/// 사실이라 가장 바쁜 것이 맞고, 그것은 `tabAgentRepresentative` 가 따로 한다. 두 질문이 다르다.
 pub fn paneAgentKind(pane: *Pane) AgentKind {
+    const active = pane.activeTerm();
+    if (active.agent_kind != .none) return active.agent_kind;
+    // 활성이 에이전트가 아닐 때만 다른 Term 을 본다 — pane 이 **「무언가 돌고 있다」**는 것은 알려야 한다.
     for (pane.terms.items) |t| if (t.agent_state == .running and t.agent_kind != .none) return t.agent_kind;
-    return pane.activeTerm().agent_kind;
+    return .none;
 }
 
 /// 한 panel을 teardown하고 heap 해제한다 — 담긴 모든 Term을 destroyTerm한 뒤 terms 리스트·Pane을 해제.

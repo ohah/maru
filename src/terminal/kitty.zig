@@ -344,6 +344,10 @@ fn deleteImageIdRange(self: *TerminalCore, lo: u32, hi: u32, free_image: bool) v
 /// 두면 `advanceAnimations` 가 매 tick 그 이미지를 헛돈다(frameCount()<2 로 걸러지긴 하지만,
 /// 「재생 중」이라는 관측 가능한 상태가 거짓이 된다).
 fn dropAnimationFrames(self: *TerminalCore, img: *KittyImage) void {
+    // **프레임이 없으면 아무 일도 하지 않는다.** generation 은 렌더러의 텍스처 재업로드 키이자 원격
+    // blob 재전송 키다 — 픽셀이 그대로인데 올리면 468 KiB 짜리 이미지가 통째로 다시 나간다(실측으로
+    // 같은 부류를 한 번 잡았다: 안 움직인 이미지의 generation 상승). 「지울 프레임이 없었다」도 성공이다.
+    if (img.frames.len == 0) return;
     for (img.frames) |f| {
         self.kitty_images.total_bytes -|= f.data.len; // 총량 회계에서 뺀다(프레임도 한도에 든다)
         self.allocator.free(f.data);
@@ -933,6 +937,10 @@ fn deletePlacementsWhere(
     ctx: anytype,
     pred: fn (self: *const TerminalCore, p: StoredPlacement, ctx: @TypeOf(ctx)) bool,
 ) void {
+    // 지울 것을 **먼저 다 걷고** 나서 free 를 판단한다. 지우는 도중에 free 하면 「아직 안 본
+    // placement 가 같은 이미지를 참조하는지」를 알 수 없다.
+    var doomed: std.ArrayListUnmanaged(u32) = .empty;
+    defer doomed.deinit(self.allocator);
     var i: usize = 0;
     while (i < self.kitty_placements.items.len) {
         const p = self.kitty_placements.items[i];
@@ -941,12 +949,27 @@ fn deletePlacementsWhere(
             continue;
         }
         _ = self.kitty_placements.orderedRemove(i);
-        if (free_image) {
-            removeVirtualPlacements(self, p.image_id, 0);
-            self.kitty_images.remove(self.allocator, p.image_id);
-            forgetImageNumberFor(self, p.image_id);
-        }
+        if (free_image) doomed.append(self.allocator, p.image_id) catch {};
     }
+    for (doomed.items) |image_id| freeImageIfUnreferenced(self, image_id);
+}
+
+/// 대문자 delete 의 free 는 **조건부**다 — 명세: "The uppercase variants will delete the image data
+/// as well, **provided that the image is not referenced elsewhere**".
+///
+/// 셀·축 기반 타깃(`c`/`p`/`q`/`x`/`y`)은 그 이미지의 placement 중 **일부만** 지운다. 그런데 예전에는
+/// 지운 그 자리에서 이미지를 무조건 free 해서, 같은 이미지를 두 자리에 건 앱이 한 자리를 대문자로
+/// 지우면 **나머지 자리까지 안 보이게** 됐다(실측: placement 1 개가 남았는데 이미지 데이터는 사라짐).
+/// 그러면 소문자/대문자를 가른 이유(데이터를 남겨 재전송 없이 다시 보여준다)도 함께 깨진다.
+fn freeImageIfUnreferenced(self: *TerminalCore, image_id: u32) void {
+    for (self.kitty_placements.items) |p| {
+        if (p.image_id == image_id) return; // 다른 자리가 아직 쓴다 — 데이터는 남긴다
+    }
+    for (self.kitty_virtual_placements.items) |v| {
+        if (v.image_id == image_id) return; // U=1 격자도 참조다
+    }
+    self.kitty_images.remove(self.allocator, image_id);
+    forgetImageNumberFor(self, image_id);
 }
 
 /// 명세의 셀 좌표는 **1-based** 다("x=1, y=1 is the top left cell"). 0 이나 미지정(0)은 좌표가
@@ -978,22 +1001,12 @@ fn axisPredicate(self: *const TerminalCore, p: StoredPlacement, t: AxisTarget) b
 /// 사용처였던 이미지 데이터까지 free 한다. 가상 placement(U=1)는 셀 좌표에 앵커가 없다 — 화면
 /// 텍스트의 placeholder 가 위치를 정한다 — 그래서 커서 판정 대상이 아니다.
 fn deleteAtCursor(self: *TerminalCore, free_image: bool) void {
-    const abs_row = self.screen.sb.count + self.screen.cursor.row;
-    const col = self.screen.cursor.col;
-    var i: usize = 0;
-    while (i < self.kitty_placements.items.len) {
-        const p = self.kitty_placements.items[i];
-        if (!placementCoversCell(self, p, abs_row, col)) {
-            i += 1;
-            continue;
-        }
-        _ = self.kitty_placements.orderedRemove(i);
-        if (free_image) {
-            removeVirtualPlacements(self, p.image_id, 0);
-            self.kitty_images.remove(self.allocator, p.image_id);
-            forgetImageNumberFor(self, p.image_id);
-        }
-    }
+    // 셀 기반 타깃(`p`/`q`)과 **같은 몸통**을 쓴다 — 조건부 free 규약도 함께 따른다(위 주석).
+    deletePlacementsWhere(self, free_image, CellTarget{
+        .abs_row = self.screen.sb.count + self.screen.cursor.row,
+        .col = self.screen.cursor.col,
+        .z = null,
+    }, cellPredicate);
 }
 
 /// relative placement 의 부모를 찾는다 — 일반 placement 를 먼저, 없으면 virtual 을 본다.

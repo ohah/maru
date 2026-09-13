@@ -10932,6 +10932,79 @@ test "kitty delete: d=r 은 id 범위의 이미지를 지운다 (화면에 없�
     try std.testing.expect(std.mem.indexOf(u8, core.pendingResponse(), "EINVAL") != null);
 }
 
+// **대문자 delete 의 free 는 조건부다** — 명세: "The uppercase variants will delete the image data
+// as well, **provided that the image is not referenced elsewhere**".
+//
+// 적대적 검증에서 실측한 결함: 같은 이미지를 두 자리에 걸고 한 자리를 `d=P` 로 지우면 placement 는
+// 하나 남는데 **이미지 데이터가 사라졌다**. 남은 자리도 그릴 것이 없어 안 보이고, 소문자/대문자를
+// 가른 이유(데이터를 남겨 재전송 없이 다시 보여준다)도 깨진다. 셀·축 기반 타깃 전부에 해당한다.
+test "kitty delete: 대문자여도 다른 자리가 쓰는 이미지는 free 하지 않는다 (적대적 검증)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 8 });
+    defer core.deinit();
+    core.setCellMetrics(10, 20);
+    var b64: [64]u8 = undefined;
+    var seq: [200]u8 = undefined;
+    const px = [_]u8{ 4, 4, 4, 255 } ** 4;
+    const enc = std.base64.standard.Encoder.encode(&b64, &px);
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+    try core.write("\x1b[1;1H");
+    try core.write("\x1b_Ga=p,i=1,p=1,c=1,r=1,q=2\x1b\\");
+    try core.write("\x1b[3;1H");
+    try core.write("\x1b_Ga=p,i=1,p=2,c=1,r=1,q=2\x1b\\"); // 같은 이미지, 다른 자리
+
+    // 한 자리만 대문자로 지운다 — 다른 자리가 아직 쓰므로 **데이터는 남아야** 한다.
+    try core.write("\x1b_Ga=d,d=P,x=1,y=1,i=1,q=2\x1b\\");
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_placements.items.len);
+    try std.testing.expect(core.kitty_images.map.get(1) != null); // ← 결함이면 여기서 빨개진다
+
+    // 마지막 자리를 지우면 그때 free 한다.
+    try core.write("\x1b_Ga=d,d=Y,y=3,i=1,q=2\x1b\\");
+    try std.testing.expectEqual(@as(usize, 0), core.kitty_placements.items.len);
+    try std.testing.expect(core.kitty_images.map.get(1) == null);
+}
+
+// 커서 타깃(`d=C`)도 같은 규약을 따라야 한다 — 셀 기반이라 일부만 지우는 것은 마찬가지다.
+// (이 결함은 `d=C` 에 **먼저** 있었고 새 타깃들이 그대로 물려받을 뻔했다.)
+test "kitty delete: d=C 도 다른 자리가 쓰는 이미지는 free 하지 않는다 (적대적 검증)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 8 });
+    defer core.deinit();
+    core.setCellMetrics(10, 20);
+    var b64: [64]u8 = undefined;
+    var seq: [200]u8 = undefined;
+    const px = [_]u8{ 4, 4, 4, 255 } ** 4;
+    const enc = std.base64.standard.Encoder.encode(&b64, &px);
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+    try core.write("\x1b[1;1H");
+    try core.write("\x1b_Ga=p,i=1,p=1,c=1,r=1,q=2\x1b\\");
+    try core.write("\x1b[3;1H");
+    try core.write("\x1b_Ga=p,i=1,p=2,c=1,r=1,q=2\x1b\\");
+
+    try core.write("\x1b[1;1H"); // 커서를 첫 자리로
+    try core.write("\x1b_Ga=d,d=C,i=1,q=2\x1b\\");
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_placements.items.len);
+    try std.testing.expect(core.kitty_images.map.get(1) != null);
+}
+
+// 가상 배치(U=1)도 **참조**다 — 격자가 남아 있으면 placeholder 셀이 그 이미지를 그릴 수 있다.
+test "kitty delete: U=1 격자가 남아 있으면 대문자여도 이미지를 남긴다 (적대적 검증)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 8 });
+    defer core.deinit();
+    core.setCellMetrics(10, 20);
+    var b64: [64]u8 = undefined;
+    var seq: [200]u8 = undefined;
+    const px = [_]u8{ 4, 4, 4, 255 } ** 4;
+    const enc = std.base64.standard.Encoder.encode(&b64, &px);
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+    try core.write("\x1b_Ga=p,i=1,p=9,U=1,c=2,r=2,q=2\x1b\\"); // 가상 격자
+    try core.write("\x1b[1;1H");
+    try core.write("\x1b_Ga=p,i=1,p=1,c=1,r=1,q=2\x1b\\"); // 일반 배치
+
+    try core.write("\x1b_Ga=d,d=P,x=1,y=1,i=1,q=2\x1b\\");
+    try std.testing.expectEqual(@as(usize, 0), core.kitty_placements.items.len);
+    try std.testing.expect(core.kitty_images.map.get(1) != null); // 격자가 아직 참조한다
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_virtual_placements.items.len);
+}
+
 test "kitty delete: d=f 는 프레임만 놓아주고 이미지는 남긴다" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 8 });
     defer core.deinit();
@@ -10962,6 +11035,13 @@ test "kitty delete: d=f 는 프레임만 놓아주고 이미지는 남긴다" {
     core.clearResponse();
     try core.write("\x1b_Ga=d,d=f,i=77,q=0\x1b\\");
     try std.testing.expect(std.mem.indexOf(u8, core.pendingResponse(), "ENOENT") != null);
+
+    // **프레임이 없는 이미지에 걸면 generation 이 오르면 안 된다.** generation 은 텍스처 재업로드이자
+    // 원격 blob 재전송 키다 — 픽셀이 그대로인데 올리면 이미지가 통째로 다시 나간다(적대적 검증 실측:
+    // 2 → 3 으로 헛되이 올랐다).
+    const gen_quiet = core.kitty_images.map.get(1).?.generation;
+    try core.write("\x1b_Ga=d,d=f,i=1,q=2\x1b\\"); // 이미 프레임이 없다
+    try std.testing.expectEqual(gen_quiet, core.kitty_images.map.get(1).?.generation);
 }
 
 test "kitty 애니메이션: 루트를 다시 전송하면 프레임도 함께 놓아준다 (적대적 검증)" {

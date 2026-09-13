@@ -891,7 +891,18 @@ pub const Backend = struct {
 
     /// 히스토리 목록을 건다(P4). 하나가 돌고 있거나 결과가 안 걷혔으면 거절한다 — 탭을 빠르게
     /// 오가도 프로세스는 하나다.
-    pub fn submitLog(self: *Backend, git_exe: []const u8, repo: []const u8, limit: u32, request_id: u64) bool {
+    ///
+    /// `remote` 가 있으면 **저쪽 기계에서** 읽는다(RS7b — [계획](../../../docs/plans/remote-scm.md) §18.3).
+    /// 목록 읽기(`submit`)·머리 줄(`submitRepoStatus`)과 **같은 모양**이다: 두 축을 쌍으로 들고,
+    /// 감싸는 일은 `runOn` 한 자리가 한다.
+    pub fn submitLog(
+        self: *Backend,
+        git_exe: []const u8,
+        repo: []const u8,
+        limit: u32,
+        request_id: u64,
+        remote: ?git_command.Remote,
+    ) bool {
         const state = self.state orelse return false;
         state.mutex.lockUncancelable(state.io);
         if (state.shutting_down or state.log_inflight > 0 or state.log_result != null) {
@@ -906,6 +917,12 @@ pub const Backend = struct {
         job.* = .{ .state = state, .git_exe = &.{}, .repo = &.{}, .request_id = request_id, .limit = limit };
         job.git_exe = state.allocator.dupe(u8, git_exe) catch return self.releaseLogJob(job);
         job.repo = state.allocator.dupe(u8, repo) catch return self.releaseLogJob(job);
+        // **원격 두 축은 쌍으로 든다** — 하나만 들면 `remoteTarget()` 이 로컬로 읽어 원격 경로를
+        // 이쪽 git 에 준다(목록 읽기·머리 줄 job 이 같은 규율을 진다).
+        if (remote) |r| {
+            job.remote_dest = state.allocator.dupe(u8, r.dest) catch return self.releaseLogJob(job);
+            job.remote_ctl = state.allocator.dupe(u8, r.control_path) catch return self.releaseLogJob(job);
+        }
         const thread = std.Thread.spawn(.{}, logWorker, .{job}) catch return self.releaseLogJob(job);
         thread.detach();
         return true;
@@ -915,6 +932,9 @@ pub const Backend = struct {
         const state = job.state;
         state.allocator.free(job.git_exe);
         state.allocator.free(job.repo);
+        // **원격 두 축도 여기서 푼다**(RS7b). 제출이 실패하는 경로마다 새면 탭을 오갈 때마다 조금씩
+        // 쌓인다 — `releaseRepoStatusJob` 이 같은 이유로 `freeRemote` 를 부른다.
+        job.freeRemote(state.allocator);
         state.allocator.destroy(job);
         return self.abandonLog();
     }
@@ -1200,13 +1220,18 @@ fn logWorker(job: *Job) void {
     result.repo = state.allocator.dupe(u8, job.repo) catch &.{};
     var limit_buf: [16]u8 = undefined;
     const limit_arg = std.fmt.bufPrint(&limit_buf, "{d}", .{job.limit}) catch "200";
-    if (runWithArg(state.allocator, .log, job.git_exe, job.repo, limit_arg)) |out| {
+    // **원격 인지 러너를 쓴다**(RS7b). `runWithArg` 였을 때는 로컬 git 이 원격 경로에 돌았다.
+    if (runOn(state.allocator, job.remoteTarget(), .log, job.git_exe, job.repo, limit_arg)) |out| {
         result.text = out.bytes;
         result.truncated = out.truncated;
         result.ok = true;
-    } else |_| {}
+    } else |_| {
+        // **왜 실패했는지는 아직 안 나른다** — `LogResult` 를 넓히는 것은 RS7d 의 일이다(§18.5).
+        // 그때까지 원격 실패는 목록 읽기 이전과 같은 「읽지 못함」 하나로 뭉쳐 온다.
+    }
     state.allocator.free(job.git_exe);
     state.allocator.free(job.repo);
+    job.freeRemote(state.allocator);
     state.allocator.destroy(job);
 
     state.mutex.lockUncancelable(state.io);
@@ -3528,6 +3553,78 @@ test "원격 커밋: 512 KiB 메시지가 stdin 으로 가고, hook 이 stderr �
     defer allocator.free(head.bytes);
     try std.testing.expect(std.mem.startsWith(u8, head.bytes, "RS4b-STDIN"));
     try std.testing.expect(head.bytes.len >= big.len - 2); // 잘리지 않았다
+}
+
+test "원격 히스토리: 커밋 목록이 저쪽 기계에서 오고 구분자가 그대로 도착한다 (RS7b)" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const hx = remoteScmHarness() orelse return error.SkipZigTest;
+    const remote: git_command.Remote = .{ .dest = hx.dest, .control_path = hx.ctl };
+
+    // ⑴ **wire 부터 본다.** 여기가 RS7a 이전에 원리적으로 막혀 있던 자리다 — `--format=` 토큰에 날
+    //    바이트가 있으면 `buildRemote` 가 명령을 아예 안 만들어 `error.GitFailed` 다. 그러니 이 한 줄이
+    //    통과한다는 사실 자체가 「토큰이 인쇄 가능해졌다」의 실물 증거다.
+    const out = try runOn(allocator, remote, .log, git_command.remote_git_exe, hx.repo, "5");
+    defer allocator.free(out.bytes);
+    try std.testing.expect(out.bytes.len > 0);
+
+    // ⑵ **구분자가 그대로 도착했나.** `%x1f` 는 git 이 **출력에** 그 바이트를 낸다 — 링크를 건너오며
+    //    바뀌지 않았는지(개행 변환·인코딩)를 바이트로 확인한다.
+    try std.testing.expect(std.mem.indexOfScalar(u8, out.bytes, maru.session.git_log.field_sep) != null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, out.bytes, maru.session.git_log.record_sep) != null);
+
+    // ⑶ **파서가 실제로 커밋을 세운다.** 「바이트가 왔다」와 「목록이 선다」는 다른 사실이다.
+    var it = maru.session.git_log.iterate(out.bytes);
+    const first = it.next() orelse return error.RemoteLogParsedNoCommit;
+    try std.testing.expect(first.oid.len >= 7);
+    try std.testing.expect(first.author.len > 0);
+
+    // ⑷ **`submitLog` 배선도 같은 값을 낸다.** 위는 러너까지고, 이것은 job 이 원격 두 축을 쌍으로
+    //    들고 worker 까지 나르는지를 본다(하나만 들면 `remoteTarget()` 이 로컬로 읽는다).
+    var backend = try Backend.init(std.Io.Threaded.global_single_threaded.io());
+    defer backend.deinit();
+    try std.testing.expect(backend.submitLog(git_command.remote_git_exe, hx.repo, 5, 41, remote));
+    var spins: usize = 0;
+    while (spins < 1000) : (spins += 1) {
+        if (backend.takeLogResult()) |taken| {
+            var result = taken;
+            defer result.deinit(worker_allocator);
+            try std.testing.expectEqual(@as(u64, 41), result.request_id);
+            try std.testing.expect(result.ok);
+            try std.testing.expectEqualStrings(hx.repo, result.repo);
+            try std.testing.expect(std.mem.indexOfScalar(u8, result.text, maru.session.git_log.record_sep) != null);
+            break;
+        }
+        var ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+        _ = std.c.nanosleep(&ts, null);
+    } else return error.RemoteLogNeverCompleted;
+
+    // ⑸ **대조군 — 정말 링크를 탔는가.** 이 하네스의 원격은 loopback 이라 `hx.repo` 가 **이쪽에도
+    //    있는 경로**다. 그래서 위 넷은 「로컬 git 이 답했다」로도 전부 통과한다 — 그 자체로는 원격을
+    //    증명하지 못한다. 소켓을 죽은 것으로 바꾸면 갈린다: 원격 경로면 전송이 실패하고, 로컬로
+    //    새고 있으면 **여전히 성공한다.**
+    const dead: git_command.Remote = .{ .dest = hx.dest, .control_path = "/nonexistent/sock" };
+    try std.testing.expectError(
+        error.RemoteTransportFailed,
+        runOn(allocator, dead, .log, git_command.remote_git_exe, hx.repo, "5"),
+    );
+
+    // 같은 대조군을 **`submitLog` 배선에도** 건다. job 이 두 축을 안 나르면 `remoteTarget()` 이 null 이라
+    // 로컬로 돌아 `ok = true` 가 된다 — 그때 이 단언이 잡는다.
+    try std.testing.expect(backend.submitLog(git_command.remote_git_exe, hx.repo, 5, 42, dead));
+    spins = 0;
+    while (spins < 1000) : (spins += 1) {
+        if (backend.takeLogResult()) |taken| {
+            var result = taken;
+            defer result.deinit(worker_allocator);
+            try std.testing.expectEqual(@as(u64, 42), result.request_id);
+            try std.testing.expect(!result.ok); // 죽은 소켓으로는 못 읽는다
+            return;
+        }
+        var ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+        _ = std.c.nanosleep(&ts, null);
+    }
+    return error.RemoteLogDeadSocketNeverCompleted;
 }
 
 test "원격 읽기 실패: git 이 없는 것과 연결이 끊긴 것을 가른다 (RS4 §2.2 ⑺)" {

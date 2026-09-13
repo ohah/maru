@@ -6027,6 +6027,13 @@ pub const AppSession = struct {
     scm_log_text: []u8 = &.{},
     /// 그 원문이 어느 저장소의 것인가. 저장소가 바뀌면 버린다 — 남의 커밋을 그리면 안 된다.
     scm_log_repo: ?[]u8 = null,
+    /// 그 원문을 **어느 기계에서** 읽었나(null = 로컬). `git_repo_dest` 와 **같은 규율**이다
+    /// (RS7b — [계획](../../../docs/plans/remote-scm.md) §18.3): 저장소 신원은 `(host, path)` 쌍이므로
+    /// 경로만 보면 로컬 `/srv/app` → 원격 `/srv/app` 전환에서 **로컬 커밋이 원격 히스토리로 남는다.**
+    ///
+    /// **읽기를 걸 때 박는다**(도착할 때가 아니라). 도착 시점에 «지금 활성» 을 다시 물으면 그 사이
+    /// pane 이 바뀌었을 때 남의 기계 이름이 붙는다 — `scm_turn_summary_session` 과 같은 판단이다.
+    scm_log_dest: ?[]u8 = null,
     /// 지금 실은 커밋 수 상한. `더 보기`가 이 값을 올린다.
     scm_log_limit: u32 = scm_log_limit_initial,
     scm_log_inflight: u64 = 0,
@@ -22880,6 +22887,7 @@ pub const AppSession = struct {
         if (self.scm_commit_focus_repo) |path| self.allocator.free(path); // 편집 중인 상자의 저장소
         if (self.scm_selected_repo) |path| self.allocator.free(path); // 강조된 행의 저장소(②d)
         if (self.scm_log_repo) |path| self.allocator.free(path); // 히스토리 원문의 저장소(P4)
+        if (self.scm_log_dest) |dest| self.allocator.free(dest); // 그 원문을 읽은 기계(RS7b)
         if (self.scm_expanded_commit) |oid| self.allocator.free(oid); // 펼친 커밋(P4b)
         if (self.scm_selected_commit) |oid| self.allocator.free(oid); // 고른 커밋(P4)
         if (self.scm_expanded_turn) |key| self.allocator.free(key); // 펼친 턴(P5)
@@ -70496,51 +70504,59 @@ test "원격 목록을 보는 동안 로컬 저장소에 손이 가지 않는다
     try std.testing.expect(session.scm_write_error != null);
     try std.testing.expectEqualStrings(maru.i18n.t(.scm_remote_read_only), session.scm_write_error.?);
 
-    // ⑶ **자동 경로도 안 돈다.** 인텐트를 안 거치고 tick 이 굴리는 셋이다.
+    // ⑶ **자동 경로도 로컬에 손대지 않는다.** 인텐트를 안 거치고 tick 이 굴리는 것들이다.
     //
     // ⚠️ **판정자를 RS7-0 에서 고쳤다**(계획 §18.1). 옛 단언은 `scm_log_repo == null` 이었는데 그 필드는
     // `pumpScmLog` 가 아니라 **`drainScmLog` 가** 세운다 — 읽기를 걸어도 초록이었다. 게다가 이 세션의
     // `scm_tab` 이 기본값(`.changes`)이라 그 펌프는 첫 줄에서 빠져나가 **아무것도 시험하지 않았다.**
     // 그래서 ⑴ 탭을 실제로 세우고 ⑵ 「읽기를 걸었는가」를 나르는 값(`scm_log_seq`)을 본다. 그 값은
-    // 제출 **직전**에 오르므로 백엔드가 `shutting_down` 으로 거절해도 움직인다 — 판정 대상이
-    // 「백엔드가 받았나」가 아니라 「우리가 걸려고 했나」라서 이 축이 맞다.
+    // 제출 **직전**에 오르므로 백엔드가 `shutting_down` 으로 거절해도 움직인다.
+    //
+    // **RS7b 뒤로 「안 읽는다」의 뜻이 바뀌었다.** 히스토리는 이제 원격으로 나간다 — 다만 이 세션에는
+    // control socket 이 없으므로 §5 6회차의 규율대로 **보내지 않고 실패로 적는다**(로컬 폴백 금지).
+    // 그래서 `scm_log_seq` 는 그대로 0 이고, 화면은 이유를 낸다.
     session.scm_tab = .history;
     scm_dock_ops.pumpScmLog(session);
-    try std.testing.expectEqual(@as(u64, 0), session.scm_log_seq); // 로컬 히스토리를 읽으려 들지 않았다
-    try std.testing.expect(session.scm_log_repo == null);
+    try std.testing.expectEqual(@as(u64, 0), session.scm_log_seq); // 로컬 git 으로 떨어지지 않았다
+    try std.testing.expect(session.scm_log_failed); // 조용한 무동작이 아니다
+    try std.testing.expect(session.scm_log_dest != null); // 그 실패가 **어느 기계의** 것인지도 적었다
+
+    // **멱등이다** — 매 tick 도는 경로라, 같은 상태를 반복해 다시 쓰면 렌더를 계속 깨운다.
+    session.metal_dirty = false;
+    scm_dock_ops.pumpScmLog(session);
+    try std.testing.expect(!session.metal_dirty);
+    try std.testing.expectEqual(@as(u64, 0), session.scm_log_seq);
 
     scm_dock_ops.pumpCommitFiles(session);
     try std.testing.expect(session.scm_commit_files_inflight == 0);
 
-    // **가드는 「새로 읽는 것」만 막는다 — 이미 선 목록은 따로 버려야 한다**(적대적 검증 3회차).
-    // `dropScmLogIfRepoChanged` 의 비교는 **경로로만** 하는데, 로컬 `/srv/app` → 원격 `/srv/app` 처럼
-    // 경로가 같고 기계만 바뀌는 전환에서는 「안 바뀌었다」를 낸다 — 그러면 **로컬에서 읽은 커밋이
-    // 원격 히스토리로 그대로 남는다**(§5 2회차가 안내 줄에서 겪은 것과 같은 형태).
-    scm_dock_ops.seedScmLogForTest(session, "/srv/app", "aaaa1111\x1f\x1fAmy\x1f1\x1f\x1f로컬 커밋\x1e");
-    try std.testing.expect(session.scm_log_repo != null); // 전제: 목록이 서 있다
-    scm_dock_ops.dropScmLogIfRepoChanged(session);
-    try std.testing.expect(session.scm_log_repo == null);
-    try std.testing.expectEqual(@as(usize, 0), session.scm_log_text.len);
-
     // **그리고 그 자리가 「읽는 중…」으로 남지 않는다**(계획 §2.3 — 지원하지 않으면 이유를 말한다).
-    // 가드가 읽기를 막으므로 `scm_log_repo` 는 영영 null 이고, 그대로 두면 사용자는 느린 것으로 읽는다.
     {
         var arena_state = std.heap.ArenaAllocator.init(allocator);
         defer arena_state.deinit();
-        session.scm_tab = .history;
         const projection = scm_dock_ops.projectTabForTest(session, arena_state.allocator()) orelse
             return error.NoProjection;
-        var saw_remote_notice = false;
+        var saw_failed_notice = false;
         for (projection.items) |item| switch (item) {
             .notice => |text| {
-                if (std.mem.eql(u8, text, maru.i18n.t(.scm_log_remote_unsupported))) saw_remote_notice = true;
+                if (std.mem.eql(u8, text, maru.i18n.t(.scm_log_read_failed))) saw_failed_notice = true;
                 // 「읽는 중…」이 이 화면에 서면 안 된다 — 그것이 바로 이 판정자가 막는 거짓말이다.
                 try std.testing.expect(!std.mem.eql(u8, text, maru.i18n.t(.scm_loading)));
             },
             else => {},
         };
-        try std.testing.expect(saw_remote_notice);
+        try std.testing.expect(saw_failed_notice);
     }
+
+    // **이미 선 목록은 «경로가 같아도» 기계가 다르면 버린다**(RS7b — `(host, path)` 쌍).
+    // 경로만 보면 로컬 `/srv/app` → 원격 `/srv/app` 전환을 「안 바뀌었다」로 읽어, **로컬에서 읽은
+    // 커밋이 원격 히스토리로 그대로 남는다**(§5 2회차가 안내 줄에서 겪은 것과 같은 형태).
+    scm_dock_ops.seedScmLogForTest(session, "/srv/app", "aaaa1111\x1f\x1fAmy\x1f1\x1f\x1f로컬 커밋\x1e");
+    try std.testing.expect(session.scm_log_repo != null); // 전제: 로컬에서 읽은 목록이 서 있다
+    try std.testing.expect(session.scm_log_dest == null); //        그리고 그것은 로컬의 것이다
+    scm_dock_ops.dropScmLogIfRepoChanged(session);
+    try std.testing.expect(session.scm_log_repo == null);
+    try std.testing.expectEqual(@as(usize, 0), session.scm_log_text.len);
 
     // **에이전트 탭의 턴 요약도 같은 구멍이었다**(적대적 검증 5회차 — 계획 §18.1). 링을 채우는
     // `captureTurnSnapshot` 은 원격에서 안 돌지만 **링은 로컬 세션에서 이미 차 있을 수 있고**, 그

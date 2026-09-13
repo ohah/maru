@@ -2,7 +2,7 @@
 
 이 문서는 Maru에서 "느려짐"의 원인을 어디서, 어떤 도구로 측정해 좁히는지를 정한다. 성능 회귀 여부(통과/실패)는 [성능 예산](performance-budget.md)이 단일 출처이고, 이 문서는 그 예산이 깨졌을 때 "어디가 왜 느린지"를 국소화하는 계측과 프로파일러 연동을 다룬다.
 
-이 문서는 전체 방향(런타임 계측 + 외부 프로파일러, macOS 우선 + Windows/Linux 확장)을 먼저 적고, 아직 구현하지 않은 영역은 "현재 상태"와 "의도적 비범위"에서 명시한다.
+이 문서는 런타임 계측과 외부 프로파일러의 계약을 정의한다. 구현 범위와 검증 상태는 [검증 매트릭스](verification-matrix.md)가 소유한다.
 
 ## 한 줄 정의
 
@@ -122,18 +122,12 @@ Windows/Linux 호스트가 생기기 전에는 네이티브 백엔드를 구현�
 
 이 설계는 공개 플랫폼 문서와 공개 도구 명세에서 유도한다: Apple `os_signpost`/Instruments 문서, Tracy 공개 문서, Zig `std.time`, Perfetto/Chrome trace event 포맷. 레퍼런스 터미널(Ghostty 등)은 "같은 공개 도구·접근을 쓰는지"를 확인하는 동작/접근 비교에만 사용하고, 레퍼런스의 코드 표현(자료구조 레이아웃, 함수 분해, 매크로 구성)은 옮기지 않는다.
 
-## 현재 상태
+## 코드 경계
 
-| 항목 | 상태 | 위치 |
-| --- | --- | --- |
-| `DebugSnapshot` 직렬화 | 구현 | `src/observability/snapshot.zig` |
-| 성능 예산 harness(in-process timing) | 구현 | `tools/perf/core.zig` |
-| 빠른/긴 스트레스 | 구현 | `tests/stress` |
-| zone/span 계측 API | 미구현 | — |
-| Perfetto/Chrome trace 산출물 | 미구현 | — |
-| os_signpost → Instruments | 미구현 | — |
-| Tracy 백엔드 | 미구현 | — |
-| 메모리/RSS 샘플링 | 미구현 | — |
+- 화면 스냅샷의 실제 타입은 `RenderSnapshot`이며 `src/observability/snapshot.zig`가 직렬화·파싱을 맡는다. `DebugSnapshot`은 사용하지 않는 옛 개념명이다.
+- `src/observability/replay.zig`의 `replayTrace`가 `maru.trace.v1`을 화면 상태로 재적용한다.
+- in-process timing harness는 `tools/perf/core.zig`, 빠른·긴 스트레스 실행은 `tests/stress`가 맡는다.
+- zone/span API, Perfetto/Chrome trace export, `os_signpost`, Tracy, 메모리/RSS sampler는 이 계약 밖의 별도 계측 이니셔티브다. 도입 여부와 진행은 구현 계획 및 [검증 매트릭스](verification-matrix.md)에서만 추적한다.
 
 ## 의도적 비범위 (지금 하지 않는 것)
 

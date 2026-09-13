@@ -102,7 +102,7 @@ Maru는 자식 셸 env에 **`TERM_PROGRAM=maru`** 를 주입한다(부모가 남
 
 Maru는 OSC 9/777을 직접 파싱해(`core.zig`) 네이티브 알림으로 띄우므로, **앱이 보내기만 하면 뜬다** — 바뀐 것은 "앱이 자동으로 보내기로 결정하는가"뿐이다. 이 값은 `TERM`(터미널 capability)과 별개다: `TERM`은 `config.term`으로 사용자가 바꿀 수 있지만 `TERM_PROGRAM`은 신원이라 고정이다.
 
-**현재 상태 — 기본값 `xterm-maru`로 전환됨**: 자체 terminfo 항목 `terminfo/maru.terminfo`(primary
+**기본 계약**: 기본값은 `xterm-maru`다. 자체 terminfo 항목 `terminfo/maru.terminfo`(primary
 `xterm-maru`, alias `maru`)를 바이너리에 embed해, 자식 셸마다 자기 캐시에 자동 컴파일하고 `TERMINFO`로
 가리킨다(위 본문). `use=xterm-256color` 토대에, maru가 실제 지원하는 캡만 정직하게 더한다: 동기화 출력
 (`Sync`, 2026), truecolor(`Tc`), bracketed paste(`BE`/`BD`, 2004), OSC 52 클립보드 set(`Ms` — write=allow),

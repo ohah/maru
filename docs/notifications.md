@@ -89,7 +89,7 @@ OSC 알림 제목에는 **발신 위치**(워크스페이스=탭, Term=surface/p
 
 알림을 클릭하면 그 알림을 보낸 터미널의 **창 + 탭 + split panel + 가로탭(Term)까지** 정확히 포커스한다.
 
-- **host-backed 식별자(P4 계획)**: GUI 유무와 관계없이 `userInfo`에
+- **host-backed 식별자**: GUI 유무와 관계없이 `userInfo`에
   `{host_id,runtime_id,event_id}`를 필수로 싣는다. GUI가 살아 있으면
   `{app_instance_epoch,token,surface_id}`를 fast-path hint로 추가한다. epoch가 현재 launch와 같고 surface의
   runtime handle도 일치할 때만 즉시 활성화하며, 아니면 stable handle로 attach해 manifest binding을 찾고 없으면
@@ -268,22 +268,22 @@ PausedPaste는 session-host 문서의 1 MiB/item·runtime 1개·app 8 MiB·10분
   활성화 순서(`activateSurfaceById`), 히스토리 모델·정렬·상대시간 포맷과 chrome을 소유한다. Swift는
   `UNUserNotificationCenter` 표시/권한/delegate, 창 활성화(`makeKeyAndOrderFront`/`NSApp.activate`),
   legacy `userInfo` 정수 `wt`/`sid`, 전면 표시 스타일(`willPresent`)만 담당하고 정책은 결정하지 않는다.
-- **host-backed 경로 — 이 계약 밖**(별도 이니셔티브: [영속 터미널 세션 호스트](persistent-session-host.md)의 P4가 소유하고, 진행은 [검증 매트릭스](verification-matrix.md)가 적는다): 배포물의 `maru-sessiond`는 별도 unsigned helper가 아니라 **서명된 Maru 실행 파일의
+- **host-backed 경로**: 배포물의 `maru-sessiond`는 별도 unsigned helper가 아니라 **서명된 Maru 실행 파일의
   숨김 subcommand**다. 이 process 안의 macOS platform adapter가 host-owned bounded journal을 읽고
   `UNUserNotificationCenter`에 직접 게시한다. 별도 MRSH client/connection이나 GUI `AppSession`을 만들지 않는다.
   stable route는 `userInfo`의 `hid`(32-hex host ID), `rid`(32-hex runtime ID), `eid`(u64 decimal/`NSNumber`)에
   항상 싣고, GUI-live fast hint가 있을 때만 `ae`(app epoch), `wt`, `sid`를 추가한다.
-- **cold route — 같은 별도 이니셔티브**: App delegate는 Zig `AppRuntime`/`AppSession`이 아직 없을 수 있는 notification response에서
+- **cold route**: App delegate는 Zig `AppRuntime`/`AppSession`이 아직 없을 수 있는 notification response에서
   `{hid,rid,eid}`를 앱 전역 pending route로 보관한다. manifest load와 host attach가 준비된 뒤
   `activate_runtime_notification` AppRuntime entry point로 정확히 한 번 넘겨 canonical binding 또는
-  `Recovered Sessions`를 연다. ABI 번호와 C 서명은 구현 slice N3에서 정하고 Zig/Swift cross-check로 고정한다.
+  `Recovered Sessions`를 연다. ABI 번호와 C 서명은 Zig/Swift cross-check로 고정한다.
   permission 요청/거부 시 시스템 설정 열기는 계속 GUI 설정 경계가 소유하며, daemon adapter는 현재 권한을 존중하고
   거부를 session 실패가 아닌 degraded notification 상태로 기록한다.
 - **현재 ABI**: `app_host_abi.h`의 `MARU_MACOS_APP_HOST_ABI_VERSION` 매크로(+ `app_session.zig` `abi_version` 상수, Zig
   크로스체크가 동기 강제)가 ABI 버전의 단일 출처다. 현재 형태의 알림 함수는 **v76에서 확정**됐다 — `pending_notification`
   (v52 도입 원형에 v76에서 `surface_id` out 추가; `foreground` out 포함) + `activate_surface(session, surface_id) → found`(v76 신설). **v92**에서 세팅 GUI 알림 토글을
   macOS 권한 요청으로 잇는 `take_notification_authorization_request` 1회성 신호를 추가했다. 인앱 알림 센터는 chrome
-  오버레이라 추가 ABI가 없다. 이 문단의 ABI는 현재 GUI-local 경로이고 P4 cold-route ABI를 이미 구현했다는 뜻이 아니다.
+  오버레이라 추가 ABI가 없다. host-backed cold route의 검증 상태와 provisioned 배포 gate는 [검증 매트릭스](verification-matrix.md)가 소유한다.
 
 ## 5. 검증
 

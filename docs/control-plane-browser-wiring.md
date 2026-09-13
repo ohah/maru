@@ -1,19 +1,21 @@
 # 세션 컨트롤 플레인 — `browser.*` 라이브 배선 (§9.2~§9.3)
 
-헤드리스 제어 코어를 실제 WKWebView에 잇는 남은 슬라이스와 5e 상세 설계다.
+헤드리스 제어 코어를 실제 WKWebView에 잇는 계약과 그 결정을 만든 구현 이력이다.
+
+> **구현 이력 안내:** §9.2~§9.3의 날짜·완료·당시 gap·슬라이스 표기는 구현 당시의 순서와 판단 근거를 보존하는 연대기이며 현재 진행 상태가 아니다. 현재 구현 범위와 남은 gate는 [검증 매트릭스](verification-matrix.md)가 소유한다.
 
 > **절 번호는 파일을 넘어 이어진다.** 본문이 `§8.1`처럼 절만 가리키면 아래에서 소유 파일을 찾는다 — §1~§3·§5~§7·§10·§13~§15 [control-plane.md](control-plane.md) · §4 [transport·프로토콜](control-plane-protocol.md) · §8 [보안](control-plane-security.md) · §9.1·§9.6 [browser.\* 코어와 CLI](control-plane-browser.md) · §9.2~§9.3 [라이브 배선](control-plane-browser-wiring.md) · §9.4 [프로토콜 리뷰](control-plane-browser-review.md) · §9.5 [지속 세션·이벤트·대용량 결과](control-plane-browser-session.md) · §11~§12·§16 [구현 Phase와 검증](control-plane-implementation.md)
 
-### 9.2 라이브 end-to-end 에이전트 제어 — 남은 슬라이스 (설계, doc-first)
+### 9.2 라이브 end-to-end 에이전트 제어 — 구현 이력
 
 **목표**: 외부/에이전트가 컨트롤 소켓으로 보낸 `browser.navigate`/`executeScript`가 **실제 인앱 WKWebView surface(7f 팝업 adopt 포함)를 움직이고 결과를 응답으로 받는** 라이브 경로. 이것이 [web-panel.md] §13의 "host-mediated 브라우저 MCP"(Safari MCP tool 표면을 자체 미러링 — 임베드 WKWebView는 `safaridriver`가 안 잡으므로) 의 실체다. maru는 **일반 브라우저 UX(사용자 브라우징) + 에이전트 제어**를 동시에 주는 게 목표고(7f adopt가 팝업까지 addressable하게 만든 전제), 엔진 피벗(CEF, §13) 없이 WKWebView에서 성립한다.
 
-**현재 상태(드리프트 게이트 실측 — 2026-07-11, 코드 인용)**:
+**출발 스냅샷(2026-07-11, 당시 코드 인용)**:
 - **5a 완료(L2 순수)**: `src/session/control_browser.zig` — `BrowserMethod` **3개**(navigate/getUrl/executeScript, `:50`) 스키마·파서·직렬화 + `dispatchBrowser`(`:231`)가 parse→`browser` authz(`:265`, 존재검사 이전 균일 unauthorized)→surface 검증(`kind==.web`, `:283`)까지 수행. 헤드리스 테스트 있음.
 - **5d 완료(L4)**: `MaruAppHost.swift` `enum BrowserControl`(`:715`) — navigate/currentUrl/executeScript 실 WKWebView API. **fixture 스모크로만 구동**(컨트롤 플레인 아님).
 - **capability 순수 코어**: `control_capability.zig`에 `ScopeClass.browser`(`:58`)·`issueForFd`/`resolve`/`lookupByNonce`(`:204`·`:226`·`:240`) 정의 — **라이브 호출자 0**.
 
-**라이브 e2e를 막는 gap(4 + 보조 2)**:
+**당시 라이브 e2e를 막던 gap(4 + 보조 2)**:
 1. **라우팅 미배선** — 라이브 경로(`control_socket.zig` `serveReadOnly`·`app_host_abi.zig` `buildControlResponse` `:1807`)가 `dispatchReadOnly`만 부른다. write-class인 `browser.*`는 read-only 라우터가 받아 `method_not_found`로 접어 `dispatchBrowser`에 **도달조차 못 한다**. → **통합 dispatch 분기**(read-only vs write/browser)가 필요.
 2. **capability 발급·resolve 미배선(1e 라이브)** — 라이브 서버는 `scope=.self`(metadata:self) 하드코딩(`control_dispatch.zig:56`)이고 auth 프레임 nonce→`CapabilityStore.resolve`→`Capability` 배선이 없다. `dispatchBrowser`가 요구하는 `caller_cap: ?Capability`(`control_browser.zig:1577`)를 채울 라이브 경로가 없어, 라우팅만 이어도 **항상 `unauthorized`**. → **1e가 browser뿐 아니라 write/lifecycle 라이브 auth의 공통 선행**.
 3. **async marshal 부재** — 메인 drain(`app_host_abi.zig`)은 pending pop→동기 `dispatchReadOnly`→**즉시 resolve**(한 tick 완결). `PendingRequest.resolve`(`control_server.zig`)는 1회 동기 rendezvous라, `evaluateJavaScript` completion·navigation didFinish 같은 **지연 콜백 결과를 pending으로 되돌리는** 경로가 없다. → **deferred resolve**(요청을 in-flight로 두고 콜백에서 나중에 resolve) 확장 필요.

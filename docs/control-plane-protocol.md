@@ -1,5 +1,7 @@
 # 세션 컨트롤 플레인 — transport·프로토콜 (§4)
 
+> **구현 이력 안내:** §4.4의 5f-5 단계명·완료·후속·구현 상태 표기는 bulk 전송 계약이 형성된 순서를 보존하는 연대기이며 현재 진행 상태가 아니다. 현재 검증 범위와 남은 gate는 [검증 매트릭스](verification-matrix.md)가 소유한다.
+
 핸드셰이크·버전·네임스페이스, 다중 인스턴스 발견, 프레이밍 견고성, bulk payload 전송 계약이다.
 
 > **절 번호는 파일을 넘어 이어진다.** 본문이 `§8.1`처럼 절만 가리키면 아래에서 소유 파일을 찾는다 — §1~§3·§5~§7·§10·§13~§15 [control-plane.md](control-plane.md) · §4 [transport·프로토콜](control-plane-protocol.md) · §8 [보안](control-plane-security.md) · §9.1·§9.6 [browser.\* 코어와 CLI](control-plane-browser.md) · §9.2~§9.3 [라이브 배선](control-plane-browser-wiring.md) · §9.4 [프로토콜 리뷰](control-plane-browser-review.md) · §9.5 [지속 세션·이벤트·대용량 결과](control-plane-browser-session.md) · §11~§12·§16 [구현 Phase와 검증](control-plane-implementation.md)

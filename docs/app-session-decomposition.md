@@ -2,6 +2,8 @@
 
 > L4 macOS 어댑터의 거대 단일 파일(`src/platform/macos/app_session.zig`)을 목적별 파일로 가르는 **실행 플랜**이다. 위상 골격의 단일 출처는 [레이어링과 이식성](layering-and-portability.md)이고, 분해 패턴의 검증된 선례는 [terminal core 분해](terminal-core-decomposition.md)다(`core.zig` 9962→6166, 방향 A, 누적 `/code-review max` 정확성 버그 0). 이 문서는 그 패턴을 `app_session`에 적용하는 단계·선결을 담는다.
 
+> **구현 이력 안내:** 이 문서는 분해 작업이 진행된 순서와 당시 측정·결정·완료·보류를 보존하는 연대기다. 현재 구조 계약은 [레이어링과 이식성](layering-and-portability.md), 현재 진행 상태는 [검증 매트릭스](verification-matrix.md)가 소유한다.
+
 ## 1. 배경 (측정 — 2026-08-08)
 
 `src/platform/macos/app_session.zig`는 **72,317줄·`AppSession` 단일 struct**다. 실측 구성:

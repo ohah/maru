@@ -1,5 +1,7 @@
 # 세션 컨트롤 플레인 — 지속 세션·이벤트·대용량 결과 (§9.5)
 
+> **구현 이력 안내:** 이 문서에서 5f 단계명과 함께 쓰는 완료·후속·구현 상태 표기는 지속 browser 세션 계약이 형성된 순서를 보존하는 연대기이며 현재 진행 상태가 아니다. 현재 범위와 남은 gate는 [검증 매트릭스](verification-matrix.md)가 소유한다.
+
 5f-0 구현 설계 — §9.4 감사가 드러낸 문제를 지속 세션, 이벤트 구독, 대용량 결과 전송으로 푼다.
 
 > **절 번호는 파일을 넘어 이어진다.** 본문이 `§8.1`처럼 절만 가리키면 아래에서 소유 파일을 찾는다 — §1~§3·§5~§7·§10·§13~§15 [control-plane.md](control-plane.md) · §4 [transport·프로토콜](control-plane-protocol.md) · §8 [보안](control-plane-security.md) · §9.1·§9.6 [browser.\* 코어와 CLI](control-plane-browser.md) · §9.2~§9.3 [라이브 배선](control-plane-browser-wiring.md) · §9.4 [프로토콜 리뷰](control-plane-browser-review.md) · §9.5 [지속 세션·이벤트·대용량 결과](control-plane-browser-session.md) · §11~§12·§16 [구현 Phase와 검증](control-plane-implementation.md)

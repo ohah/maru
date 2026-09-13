@@ -2767,6 +2767,24 @@ pub fn agentFlagUtf8() []const u8 {
     return "\u{25CF}";
 }
 
+/// 탭마다 **그 탭의 kind** 로 `●` 를 칠한다 — 셀에 나타나는 순서가 곧 탭 순서다.
+///
+/// `recolorAgentFlagCells` 는 **모든 `●` 를 한 색으로** 칠한다. 그것은 pane 라벨처럼 점이 하나인 자리에는
+/// 맞지만, **Term 탭 바**처럼 점이 여럿인 자리에서는 한 pane 에 claude 와 codex 가 섞이면 **한쪽이 남의
+/// 색**으로 뜬다(2026-09-14 사용자 보고: 「가장 바쁜 것이 이기는 게 아니라 해당 pane 을 따라야 한다」).
+///
+/// `kinds` 가 모자라면 남는 `●` 는 **그대로 둔다** — 색을 잘못 칠하느니 안 칠하는 게 낫다.
+pub fn recolorAgentFlagCellsPerTab(cells: anytype, kinds: []const AgentKind) void {
+    var seen: usize = 0;
+    for (cells) |*c| {
+        if (c.codepoint != agent_running_flag) continue;
+        defer seen += 1;
+        if (seen >= kinds.len) continue;
+        const brand = agentBrandColor(kinds[seen]) orelse continue;
+        c.style.foreground = .{ .rgb = brand };
+    }
+}
+
 pub fn recolorAgentFlagCells(cells: anytype, kind: AgentKind) void {
     const brand = agentBrandColor(kind) orelse return;
     for (cells) |*c| {

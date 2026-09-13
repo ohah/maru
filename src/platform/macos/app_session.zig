@@ -19976,13 +19976,26 @@ pub const AppSession = struct {
                         for (marker_titles.items) |l| self.allocator.free(l);
                         marker_titles.deinit(self.allocator);
                     }
+                    // **각 `●` 의 색은 그 탭의 Term 이 정한다.** 예전에는 pane 대표색 하나로 통일해서,
+                    // 한 pane 에 claude 와 codex 가 섞이면 한쪽이 **남의 색**으로 떴다(2026-09-14 보고).
+                    var flag_kinds: std.ArrayList(AgentKind) = .empty;
+                    defer flag_kinds.deinit(self.allocator);
+                    {
+                        var ti: usize = 0;
+                        for (pane_ops.paneTermOrder(self, lr.leaf)) |term| {
+                            if (ti >= titles.items.len) break; // titles 가 OOM 으로 짧아졌으면 거기까지만
+                            if (tab_ops.tabTitleRunningMarker(titles.items[ti]))
+                                flag_kinds.append(self.allocator, term.agent_kind) catch {};
+                            ti += 1;
+                        }
+                    }
                     for (titles.items) |t| {
                         const marker = if (tab_ops.tabTitleRunningMarker(t)) agent_ops.agentFlagUtf8() else "";
                         marker_titles.append(self.allocator, self.allocator.dupe(u8, marker) catch continue) catch {};
                     }
                     const dl = coretext_frame_builder.buildPaneTabBarDrawList(self.allocator, marker_titles.items, @intCast(bar_cols), tab_fg, close_tab, pane_ops.paneActiveTermIndex(self, lr.leaf), active_tab_fg, self.buildChromeTokens().space.tab_width_cols, lr.leaf.tab_scroll_cols, null) catch continue;
-                    // running Term 탭 플래그 ● → 브랜드색(pane 대표 kind). 탭마다 종류가 다를 수 있으나 혼재는 드물어 pane 대표색으로 통일.
-                    if (pane_ops.paneHasRunningAgent(lr.leaf)) agent_ops.recolorAgentFlagCells(dl.cells, pane_ops.paneAgentKind(lr.leaf));
+                    // running Term 탭 플래그 ● → **탭마다 그 Term 의 브랜드색**(위 `flag_kinds`).
+                    agent_ops.recolorAgentFlagCellsPerTab(dl.cells, flag_kinds.items);
                     self.collectShaped(&collected, dl, pane_frame_builder, .{ .pane = .{ .origin_x = pb.tabs.x, .origin_y = text_origin_y, .colors = tabbar_colors } });
                     pane_ops.appendPaneTabTitles(self, &tab_title_batch, lr.leaf, pb, titles.items, editing_tab, pb.full);
 
@@ -55595,6 +55608,29 @@ test "관측 tail 상한은 여러 행 composer의 프롬프트 마커를 계속
     }
 }
 
+test "PT1: 탭마다 그 Term 의 색으로 ● 를 칠한다 — 한 pane 에 섞여도 남의 색이 안 뜬다" {
+    // 예전에는 **모든 `●` 를 pane 대표색 하나로** 칠했다(주석도 「혼재는 드물어 통일」이라 적혀 있었다).
+    // 그래서 한 pane 에 claude 와 codex 가 섞이면 한쪽이 **남의 색**으로 떴다 — 2026-09-14 사용자 보고:
+    // 「가장 바쁜 것이 이기는 게 아니라 해당 pane 을 따라야 한다」.
+    const Fg = union(enum) { rgb: maru.color.Rgb, default: void };
+    const Cell = struct { codepoint: u21, style: struct { foreground: Fg } };
+    const flag = agent_running_flag;
+    var cells = [_]Cell{
+        .{ .codepoint = flag, .style = .{ .foreground = .default } },
+        .{ .codepoint = 'a', .style = .{ .foreground = .default } },
+        .{ .codepoint = flag, .style = .{ .foreground = .default } },
+        .{ .codepoint = flag, .style = .{ .foreground = .default } },
+    };
+    agent_ops.recolorAgentFlagCellsPerTab(&cells, &.{ .claude, .codex });
+
+    const claude = agent_ops.agentBrandColor(.claude).?;
+    const codex = agent_ops.agentBrandColor(.codex).?;
+    try std.testing.expectEqual(claude, cells[0].style.foreground.rgb); // 첫 탭
+    try std.testing.expect(cells[1].style.foreground == .default); // ● 아닌 셀은 안 건드린다
+    try std.testing.expectEqual(codex, cells[2].style.foreground.rgb); // 둘째 탭
+    // **모자라면 그대로 둔다** — 색을 잘못 칠하느니 안 칠하는 게 낫다.
+    try std.testing.expect(cells[3].style.foreground == .default);
+}
 test "agent representative prioritizes blocked over running over active idle" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;

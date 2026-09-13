@@ -314,6 +314,12 @@ pub const KittyVirtualPlacement = struct {
     columns: u32, // c: 격자 열 수
     rows: u32, // r: 격자 행 수
     z: i32 = 0,
+    /// **이 등록이 속한 화면.** 정규 placement 와 같은 이유다(`StoredPlacement.on_alt`) — 다만
+    /// 이쪽은 «위치» 가 아니라 «격자(c x r)» 가 화면에 귀속된다. 화면을 안 가리면 alt 의 TUI 가
+    /// 같은 (image_id, placement_id) 로 등록하는 것만으로 **primary 의 격자를 덮어쓰고**, alt 를
+    /// 떠나도 안 돌아온다(실측: primary 2x2 등록 → alt 에서 10x10 등록 → 복귀 뒤에도 10x10).
+    /// 그러면 primary 의 placeholder 셀들이 남의 격자로 타일을 떠서 엉뚱한 크기로 그려진다.
+    on_alt: bool = false,
 };
 
 /// kitty 이미지 placement의 source crop(UV용)과 목적지 픽셀 크기(quad/커서 advance용). buildGpuImages

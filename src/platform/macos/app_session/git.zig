@@ -732,7 +732,11 @@ pub fn rememberGitRepo(self: *AppSession, repo: []const u8) void {
 ///
 /// 읽기에 실패하거나 형식이 아니면 `<repo>/.git`으로 되돌린다 — 일반 저장소가 그 답이고, 워크트리에서
 /// 실패하면 예전과 같은(갱신 없는) 상태일 뿐 **틀린 디렉터리를 감시하지는 않는다**.
-fn gitWatchTarget(self: *AppSession, repo: []const u8, buf: []u8) []const u8 {
+/// 그 저장소에서 **실제로 감시할 경로**. 링크된 워크트리는 `<repo>/.git` 이 디렉터리가 아니라
+/// 실제 gitdir(`<메인>/.git/worktrees/<이름>`)를 가리키는 **파일**이라, HEAD·index 가 사는 자리는
+/// 거기다. 판정자도 이 함수를 단일 출처로 쓴다 — 기대값을 손으로 조립하면 **워크트리에서만**
+/// 어긋나서, 그 체크아웃에서 일하는 사람에게 매번 가짜 빨강을 만든다(실측 2026-09-13).
+pub fn gitWatchTarget(self: *AppSession, repo: []const u8, buf: []u8) []const u8 {
     var dot_git_buf: [std.fs.max_path_bytes]u8 = undefined;
     const dot_git = std.fmt.bufPrint(&dot_git_buf, "{s}/.git", .{repo}) catch return repo;
     // 디렉터리면 읽기가 실패한다 — 그게 일반 저장소이고, 폴백이 곧 정답이다.

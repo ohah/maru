@@ -71427,9 +71427,19 @@ test "소스 컨트롤: 활성 터미널이 다른 저장소로 옮겨 가면 �
     try std.testing.expect(!session.git_failed);
     try std.testing.expect(session.scm_selected_row == null);
     try std.testing.expectEqualStrings(repo, session.git_repo.?);
+    // **기대값을 손으로 조립하지 않는다.** 링크된 워크트리에서는 `<repo>/.git` 이 디렉터리가 아니라
+    // 실제 gitdir 를 가리키는 파일이라, 그 조립은 **워크트리 체크아웃에서만** 어긋난다(그 자리에서
+    // 일하는 사람에게 매번 가짜 빨강이었다). 「어느 저장소를 감시하는가」가 이 판정자의 주제이므로
+    // 철자는 제품과 같은 출처(`gitWatchTarget`)에 묻는다.
     var want_watch: [std.fs.max_path_bytes]u8 = undefined;
-    const watch = try std.fmt.bufPrint(&want_watch, "{s}/.git", .{repo});
-    try std.testing.expectEqualStrings(watch, session.peekFileTreeWatchRoot().?);
+    const watch = git_ops.gitWatchTarget(session, repo, &want_watch);
+    const live_watch = session.peekFileTreeWatchRoot().?;
+    try std.testing.expectEqualStrings(watch, live_watch);
+    // 같은 출처를 둘이 부르면 «둘 다 틀려도 초록» 이라, **파일 시스템에 직접** 묻는 증거를 하나 둔다 —
+    // 감시하는 자리에는 `HEAD` 가 있다(일반 저장소든 워크트리든 그것이 git 디렉터리라는 뜻이다).
+    var head_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const head_path = try std.fmt.bufPrint(&head_buf, "{s}/HEAD", .{live_watch});
+    _ = std.Io.Dir.cwd().statFile(session.io, head_path, .{}) catch return error.WatchRootIsNotAGitDir;
 
     // **같은 저장소면 아무것도 하지 않는다.** 매 tick 도는 경로라 여기서 무효화가 반복되면 목록이 영영 안 뜬다.
     if (session.takeFileTreeWatchRoot()) |taken| allocator.free(taken);

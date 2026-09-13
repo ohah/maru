@@ -969,7 +969,8 @@ RS1~RS6 은 목록(status)·diff·쓰기·fetch·워크트리 행을 원격으�
 2. **막고 나면 그 탭이 영영 「읽는 중…」이다.** 빈 안내는 `scm_log_repo == null` 을 「아직 못 읽음」
    으로 읽는데, 가드가 읽기를 막으니 그 값이 영영 null 이다. 사용자에게는 느린 것으로 보인다 —
    §2.3 의 「지원하지 않는 동작은 이유를 말한다」가 이 자리에도 걸린다. 그래서 원격 가지를 하나 앞에
-   두고 `scm_log_remote_unsupported` 를 낸다. **RS7b 가 그 가지와 문구를 함께 지운다.**
+   두고 `scm_log_remote_unsupported` 를 낸다. **RS7b 가 그 가지와 문구를 함께 지웠다 — 그 키는 지금
+   코드에 없다**(찾아도 안 나오는 것이 맞다).
 
 ### 18.2 벽은 배선이 아니라 **우리가 만든 토큰**이었다 (RS7a)
 
@@ -1019,7 +1020,7 @@ $ git log -n 1 --format='%H%x1f%an%x1e' | od -c
 
 **RS7-0 이 둔 세 자리를 함께 걷는다** — ⑴ `pumpScmLog` 의 가드, ⑵ `dropScmLogIfRepoChanged` 의
 「원격이면 버린다」(→ `(host, path)` 쌍 비교로), ⑶ 빈 안내의 `scm_log_remote_unsupported` 가지와 그
-i18n 키. 남기면 히스토리가 원격에서 영영 안 뜬다. `pumpTurnSummaries` 의 가드만 남는다.
+i18n 키(**표에서 삭제했다 — 지금 코드에 없다**). 남기면 히스토리가 원격에서 영영 안 뜬다. `pumpTurnSummaries` 의 가드만 남는다.
 
 호출자(`pumpScmLog`)가 지는 것은 셋이다.
 

@@ -1070,6 +1070,40 @@ test "키바 탭이 키를 내고, 밖은 안 먹는다" {
     try std.testing.expectEqualStrings("", std.mem.span(bridge.maru_mobile_last_error()));
 }
 
+// **출력이 글자 중간에서 끊긴 사이에 친 키가 사라졌다**(CI flake 2026-09-13, `check` 잡).
+//
+// PTY read 경계는 멀티바이트 글자를 쪼갠다 — 그건 정상이고 코어가 꼬리를 들고 다음 chunk 를
+// 기다린다(`parser.zig` storePendingUtf8). 그런데 로컬 모드(`input_sink == 0`)에서는 **사용자 입력도
+// 같은 코어**로 들어가므로, 그 사이에 낀 Esc 한 바이트가 앞 글자의 «이어지는 바이트»로 먹혀
+// `InvalidUtf8` 이 된다 — 키는 사라지고 `core_write_input` 만 남는다. 출력 스트림과 입력 스트림이
+// 한 상태기계를 나눠 쓰는 데서 오는 결함이라, 고치는 자리는 **끼워 넣는 쪽**(sendInput)이다.
+//
+// 이 판정자가 CI 에서만 빨갛던 것을 자리에 고정한다: 꼬리를 손으로 만들어 두고 키를 누른다.
+test "재현: 출력이 글자 중간에서 끊겨도 그 사이에 친 키는 안 사라진다" {
+    endAnyGesture(); // **앞 테스트가 손가락을 든 채 끝났을 수 있다** — 목적지를 놓고 시작한다
+    _ = bridge.maru_mobile_build(402, 874, now());
+    _ = bridge.maru_mobile_term_write("\x1b[2J\x1b[H", 7);
+    bridge.maru_mobile_clear_error();
+
+    // '가'(EA B0 80) 의 앞 두 바이트만 도착했다 — 나머지는 다음 chunk 에 온다.
+    _ = bridge.maru_mobile_term_write("\xea\xb0", 2);
+    try std.testing.expectEqualStrings("", std.mem.span(bridge.maru_mobile_last_error())); // 여기까진 정상이다
+
+    // 그 사이에 사용자가 Esc 를 누른다(키바 첫 칸).
+    const esc = keyCenter(0);
+    const before = bridge.maru_mobile_input("", 0);
+    try std.testing.expectEqual(@as(u32, 1), keybarTap(esc.x, esc.y));
+    const after = bridge.maru_mobile_input("", 0);
+    try std.testing.expectEqual(@as(u32, 1), after - before); // 키는 host 로 나간다(이건 전부터 됐다)
+    try std.testing.expectEqualStrings("", std.mem.span(bridge.maru_mobile_last_error())); // 코어가 키를 먹고 깨지지 않는다
+
+    // **꼬리는 살아 있어야 한다.** 남은 바이트가 오면 글자가 온전히 서고, 잃은 것이 없다 —
+    // 꼬리를 그냥 버리는 고침이었다면 이 `\x80` 이 미아 continuation 이 되어 오류로 남는다.
+    _ = bridge.maru_mobile_term_write("\x80", 1);
+    try std.testing.expectEqualStrings("", std.mem.span(bridge.maru_mobile_last_error()));
+    _ = bridge.maru_mobile_build(402, 874, now());
+}
+
 // 키바의 **Ctrl 은 다음 한 키에만** 실린다. 계속 걸려 있으면 그 뒤 타이핑이 전부 제어문자가
 // 되고, 소프트 키보드로 친 글자에 안 실리면 키바를 만든 이유가 없다(그게 실제 쓰임이다).
 test "Ctrl 은 소프트 키보드 글자에 실리고 한 번만 듣는다" {

@@ -42,9 +42,9 @@ test "Session default G1 provenance boundary keeps one parser and the exact G2 c
     // Keep the default and the locally-runnable versus provisioned-release boundary aligned
     // across the two normative documents so a closed slice cannot return to the backlog.
     try std.testing.expectEqual(@as(usize, 0), count(persistent, "현재 판정(2026-09-11 코드·gate 대조)"));
-    try expectOne(plan, "현재 판정(2026-09-11 코드·gate 대조)");
-    try expectOne(plan, "P1~P5의 일반 제품 경로와 ad-hoc gate는 완료했지만");
-    try expectOne(verification, "P1~P5의 일반 제품 경로와 ad-hoc gate는 완료. P4 Notification Center transaction의 R3 workflow");
+    try expectOne(plan, "현재 판정(2026-09-13 코드·gate 대조)");
+    try expectOne(plan, "P1~P5의 일반 제품 경로와 ad-hoc gate, N3-R3 protected");
+    try expectOne(verification, "P1~P5의 일반 제품 경로와 ad-hoc gate 및 P4 Notification Center transaction의 R3 workflow는 완료");
     try std.testing.expectEqual(@as(usize, 0), count(persistent, "상태: P3 core 구현, P4/P5 미완료"));
     try std.testing.expectEqual(@as(usize, 0), count(persistent, "default `false` opt-in 제품 계약"));
     try std.testing.expectEqual(@as(usize, 0), count(verification, "설정은 아직 기본 `false`다"));

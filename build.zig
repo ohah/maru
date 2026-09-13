@@ -15467,6 +15467,10 @@ pub fn build(b: *std.Build) void {
         "test-session-host-release-adapter-tombstone-evidence",
         "Validate canonical signed durable-tombstone evidence",
     );
+    const session_host_release_adapter_tombstone_workflow_record_step = b.step(
+        "test-session-host-release-adapter-tombstone-workflow-record",
+        "Validate protected durable-tombstone workflow verdicts",
+    );
     const session_host_release_adapter_github_current_release_authority_step = b.step(
         "test-session-host-release-adapter-github-current-release-authority",
         "Run current GitHub release authority composition tests",
@@ -17219,6 +17223,14 @@ pub fn build(b: *std.Build) void {
             session_host_release_adapter_tombstone_evidence_step.dependOn(&run_tombstone_runner_boundary_tests.step);
             test_step.dependOn(&run_tombstone_runner_boundary_tests.step);
             if (composition_optimize == .Debug) macos_only_test_step.dependOn(&run_tombstone_runner_boundary_tests.step);
+            const tombstone_workflow_record_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_tombstone_workflow_record.zig"), .target = target, .optimize = composition_optimize, .imports = &.{ .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_tombstone_evidence", .module = tombstone_evidence_mod } } });
+            const tombstone_workflow_record_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_tombstone_workflow_record.zig"), .target = target, .optimize = composition_optimize, .imports = &.{ .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_tombstone_evidence", .module = tombstone_evidence_mod }, .{ .name = "release_adapter_tombstone_workflow_record", .module = tombstone_workflow_record_mod } } }) });
+            const run_tombstone_workflow_record_tests = b.addRunArtifact(tombstone_workflow_record_tests);
+            run_tombstone_workflow_record_tests.addArg("--maru-expect-tests=2");
+            run_tombstone_workflow_record_tests.setCwd(b.path("."));
+            session_host_release_adapter_tombstone_workflow_record_step.dependOn(&run_tombstone_workflow_record_tests.step);
+            test_step.dependOn(&run_tombstone_workflow_record_tests.step);
+            if (composition_optimize == .Debug) macos_only_test_step.dependOn(&run_tombstone_workflow_record_tests.step);
             const notification_workflow_verifier_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_notification_workflow_verifier.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_files", .module = files_mod }, .{ .name = "release_evidence", .module = nc_evidence_mod }, .{ .name = "release_adapter_notification_workflow_record", .module = notification_workflow_record_mod }, .{ .name = "release_adapter_github_current_authority", .module = current_authority_mod }, .{ .name = "release_adapter_github_attestation", .module = artifact_attestation_mod }, .{ .name = "release_adapter_github_cli_authority", .module = cli_mod }, .{ .name = "release_adapter_deadline", .module = deadline_mod }, .{ .name = "release_adapter_attestation_bundle_contract", .module = attestation_bundle_contract_mod } } });
             const notification_workflow_verifier_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_notification_workflow_verifier.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_evidence", .module = nc_evidence_mod }, .{ .name = "release_adapter_notification_workflow_record", .module = notification_workflow_record_mod }, .{ .name = "release_adapter_notification_workflow_verifier", .module = notification_workflow_verifier_mod } } }) });
             const run_notification_workflow_verifier_tests = b.addRunArtifact(notification_workflow_verifier_tests);
@@ -18267,7 +18279,7 @@ pub fn build(b: *std.Build) void {
             session_host_release_adapter_github_tag_chain_transport_step.dependOn(&run_tag_tests.step);
             const current_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_github_current_authority.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_github_current_authority", .module = current_authority_mod } } }) });
             const run_current_tests = b.addRunArtifact(current_tests);
-            run_current_tests.addArg("--maru-expect-tests=6");
+            run_current_tests.addArg("--maru-expect-tests=7");
             run_current_tests.setCwd(b.path("."));
             session_host_release_adapter_github_current_authority_step.dependOn(&run_current_tests.step);
             const current_release_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_github_current_release_authority.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_manifest", .module = manifest_mod }, .{ .name = "release_adapter_context", .module = context_mod }, .{ .name = "release_adapter_github_current_release_authority", .module = current_release_authority_mod } } }) });

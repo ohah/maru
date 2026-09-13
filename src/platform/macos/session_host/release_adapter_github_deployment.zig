@@ -15,7 +15,7 @@ pub const max_collection_entries: usize = 100;
 const max_policy_value_bytes: usize = 255;
 const max_policy_key_bytes: usize = 4 * (2 + max_policy_value_bytes);
 
-pub const Profile = enum { release, notification_product };
+pub const Profile = enum { release, notification_product, tombstone_product };
 pub const Phase = enum { executing, completed };
 
 const Policy = struct {
@@ -37,6 +37,13 @@ const notification_product_policy: Policy = .{
     .environment_name = "Session host product",
     .workflow_name = contract.release_workflow_name,
     .job_name = "session host notification product",
+};
+
+const tombstone_product_policy: Policy = .{
+    .repository_name = contract.repository_name,
+    .environment_name = "Session host product",
+    .workflow_name = contract.release_workflow_name,
+    .job_name = "session host tombstone product",
 };
 
 const StrictU64 = struct {
@@ -461,6 +468,7 @@ fn policyFor(profile: Profile) Policy {
     return switch (profile) {
         .release => release_policy,
         .notification_product => notification_product_policy,
+        .tombstone_product => tombstone_product_policy,
     };
 }
 

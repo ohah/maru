@@ -1197,8 +1197,10 @@ pub export fn maru_mobile_term_write(ptr: [*]const u8, len: usize) usize {
     });
     core.write(ptr[0..len]) catch {
         setLastError("term_write_failed");
+        flushEchoAtBoundary(core); // 실패로 끝났어도 경계면 기다리던 키는 내보낸다
         return term_written;
     };
+    flushEchoAtBoundary(core); // 이 chunk 로 출력이 경계로 돌아왔으면 기다리던 echo 가 여기서 나간다
     // 셸 이벤트(OSC 133 등)는 모바일이 아직 안 쓴다 — 쌓아 두면 자라기만 한다.
     if (core.shellEvents().len > 0) core.clearShellEvents();
     term_written += len;
@@ -2283,6 +2285,48 @@ var input_sink: u32 = 0;
 var input_out: [4096]u8 = undefined;
 var input_out_len: usize = 0;
 
+/// **경계를 기다리는 로컬 echo 바이트.** 출력이 시퀀스/글자 중간인 동안 친 키를 여기 들고 있다가
+/// 출력이 경계로 돌아오면 내보낸다(`flushEchoAtBoundary`). 키 하나는 길어야 몇 바이트(화살표
+/// `ESC [ A` = 3)이고 출력이 중간에 머무는 구간은 chunk 하나 길이라, 그 사이에 사람이 칠 수 있는 양의
+/// 몇 배로 잡는다. **대기열은 코어가 아니라 여기 산다** — 경계를 기다리는 정책은 로컬 모드(모바일)의
+/// 것이고, 코어에 두면 모든 Term 의 `TerminalCore` 가 이 자리를 들고 다닌다.
+var echo_pending: [64]u8 = undefined;
+var echo_pending_len: usize = 0;
+
+/// 경계가 아니라 지금 못 쓰는 echo 를 쌓는다. **넘치면 조용히 자르지 않는다**(§5) — 이름을 남기고
+/// 버린다. 반쪽만 쓰면 키 하나가 깨진 조각으로 화면에 남는다.
+fn queueEcho(bytes: []const u8) void {
+    if (echo_pending_len + bytes.len > echo_pending.len) {
+        setLastError("echo_backlog_full");
+        return;
+    }
+    @memcpy(echo_pending[echo_pending_len..][0..bytes.len], bytes);
+    echo_pending_len += bytes.len;
+}
+
+/// 출력이 경계로 돌아왔으면 기다리던 echo 를 내보낸다. **출력이 코어로 들어가는 모든 자리**가 이걸
+/// 부른다 — 한 곳을 빠뜨리면 그 경로로 들어온 출력 뒤에서만 키가 늦게 뜬다.
+/// **먼저 비우고 쓴다**(쓰다가 다시 들어와도 같은 바이트를 두 번 안 쓰게).
+fn flushEchoAtBoundary(core: *terminal.core.TerminalCore) void {
+    if (echo_pending_len == 0 or !core.atStreamBoundary()) return;
+    var buf: [echo_pending.len]u8 = undefined;
+    const len = echo_pending_len;
+    @memcpy(buf[0..len], echo_pending[0..len]);
+    echo_pending_len = 0;
+    core.writeInterleaved(buf[0..len]) catch setLastError("core_write_input");
+}
+
+/// **판정자 전용**: 코어가 지금 경계에 있는가(코어가 아직 없으면 true — 밟을 상태가 없다).
+///
+/// 「앞선 판정자가 코어를 시퀀스/글자 중간에 두고 끝났다」를 **그 자리에서 이름으로** 드러내려고
+/// 둔다. 2026-09-13 CI 는 그 상태를 `core_write_input` 이라는 **결과**로만 보여 줘서, 무엇이 그
+/// 상태를 만들었는지 알 수 없었다(로컬·Linux 어디서도 재현되지 않았다). 다시 나면 이 단언이 먼저
+/// 깨져 원인 쪽을 가리킨다.
+pub fn coreAtStreamBoundaryForTest() bool {
+    const core = &(term_core orelse return true);
+    return core.atStreamBoundary();
+}
+
 /// 확정된 입력 한 조각. **모든 입력 경로가 여기를 지난다** — 조각마다 목적지를 따로 정하면
 /// 언젠가 한 곳을 빠뜨리고, 그 경로만 원격에 안 간다.
 fn sendInput(core: *terminal.core.TerminalCore, bytes: []const u8) void {
@@ -2295,9 +2339,15 @@ fn sendInput(core: *terminal.core.TerminalCore, bytes: []const u8) void {
     // 모든 입력 경로가 지나는 한 곳이라, 조각마다 갈고리를 달면 언젠가 한 곳을 빠뜨린다.
     reconnect_notice = false;
     if (input_sink == 0) {
-        // **출력 스트림 상태를 밟지 않고** 끼워 넣는다 — 로컬 모드에서는 사용자 입력이 셸 출력과
-        // 같은 코어로 들어가므로 `write` 가 아니라 `writeInterleaved` 다(규칙과 근거의 단일 출처는
-        // 그 함수의 주석). 판정자 "재현: 출력이 글자 중간에서 끊겨도 그 사이에 친 키는 안 사라진다".
+        // **경계에서만 끼워 넣는다.** 로컬 모드에서는 사용자 입력이 셸 출력과 **같은 코어**로 들어가는데,
+        // 코어의 상태기계는 한 스트림을 가정한다(근거와 두 실측 형태는 `TerminalCore.writeInterleaved`
+        // 주석이 단일 출처). 출력이 시퀀스/글자 중간이면 지금 쓰면 안 되므로 **대기열에 들고 있다가**
+        // 출력이 경계로 돌아올 때 내보낸다(`flushEchoAtBoundary`) — 늦게 그려지는 대신 잃는 것이 없다.
+        // 판정자: "재현: 출력이 글자 중간에서 끊겨도 그 사이에 친 키는 안 사라진다".
+        if (!core.atStreamBoundary()) {
+            queueEcho(bytes);
+            return;
+        }
         core.writeInterleaved(bytes) catch setLastError("core_write_input");
         return;
     }
@@ -3804,6 +3854,7 @@ fn pushTerminal(rect: anytype, tk: anytype) void {
         // 버리면 **세션의 첫 출력이 통째로 사라진다** — 배너·프롬프트가 그 자리다.
         if (pre_core_len > 0) {
             term_core.?.write(pre_core[0..pre_core_len]) catch setLastError("core_write_pre");
+            flushEchoAtBoundary(&term_core.?); // 코어가 막 섰다 — 경계면 기다리던 echo 를 내보낸다
             pre_core_len = 0;
         }
     }

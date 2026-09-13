@@ -326,7 +326,7 @@ test "조합 문자열은 화면에만 뜨고 코어를 안 더럽힌다" {
 
     // **UTF-8 경계에서 자른다.** 한글이 반토막 나면 그리는 쪽이 문자열을 통째로 버려
     // 조합이 화면에서 사라진다 — 3바이트 글자를 2바이트만 준다.
-    bridge.maru_mobile_set_preedit("한", 2);
+    bridge.maru_mobile_set_preedit("한", 2); // len-mismatch-intentional: 반토막을 일부러 준다
     const truncated = bridge.maru_mobile_build(402, 874, now());
     try std.testing.expect(truncated > 0); // 화면이 안 죽는다
     bridge.maru_mobile_set_preedit("", 0);
@@ -894,7 +894,7 @@ test "재현: 커서가 숨으면 아무 데나 두드려도 키보드가 올라
     bridge.maru_mobile_pointer(2, 0, far.x, far.y, now());
     try std.testing.expectEqual(@as(u32, 1), bridge.maru_mobile_take_keyboard_raise());
 
-    _ = bridge.maru_mobile_term_write("\x1b[?25h", 8); // 되돌린다
+    _ = bridge.maru_mobile_term_write("\x1b[?25h", 6); // 되돌린다(6바이트 — 길이를 크게 적으면 인접 메모리를 먹는다)
     endAnyGesture();
     bridge.maru_mobile_clear_error();
 }
@@ -1056,6 +1056,10 @@ test "키바 탭이 키를 내고, 밖은 안 먹는다" {
     endAnyGesture(); // **앞 테스트가 손가락을 든 채 끝났을 수 있다** — 목적지를 놓고 시작한다
     _ = bridge.maru_mobile_build(402, 874, now());
     bridge.maru_mobile_clear_error();
+    // **전제를 이름으로 세운다**(2026-09-13 CI). 이 자리가 `core_write_input` 으로 한 번 빨갰는데,
+    // 그 오류는 «코어가 경계 밖이었다» 는 **결과**만 보여 줘 원인을 못 짚었다. 전제가 깨지면 이제
+    // 여기서 먼저 멈춘다 — 앞선 판정자가 코어를 시퀀스/글자 중간에 두고 끝났다는 뜻이다.
+    try std.testing.expect(bridge.coreAtStreamBoundaryForTest());
 
     // 키바가 서기 전(build 전)에는 아무것도 안 먹어야 한다 — 위에서 build 했으므로 여기서는
     // "본문 한가운데" 로 확인한다.
@@ -1102,6 +1106,116 @@ test "재현: 출력이 글자 중간에서 끊겨도 그 사이에 친 키는 �
     _ = bridge.maru_mobile_term_write("\x80", 1);
     try std.testing.expectEqualStrings("", std.mem.span(bridge.maru_mobile_last_error()));
     _ = bridge.maru_mobile_build(402, 874, now());
+}
+
+// **한계였던 자리**(2026-09-14). 첫 고침은 출력이 escape 시퀀스 중간인데 echo 에도 ESC 가 있으면
+// 누적 버퍼가 덮였을까 봐 출력 상태를 안 되돌리고 ground 로 뒀다 — 출력 시퀀스 하나를 잃었다.
+// 지금은 경계가 아니면 **아예 안 끼워 넣고** 기다리므로 그 한계가 없다. 잃는 것이 없다는 것을
+// 「파라미터가 살아 있다 + 기다리던 키가 늦게라도 뜬다」 둘로 고정한다.
+test "출력이 시퀀스 중간이면 키는 기다렸다 뜬다 — 출력 파라미터도 안 잃는다" {
+    endAnyGesture(); // **앞 테스트가 손가락을 든 채 끝났을 수 있다** — 목적지를 놓고 시작한다
+    _ = bridge.maru_mobile_build(402, 874, now());
+    _ = bridge.maru_mobile_term_write("\x1b[2J\x1b[H", 7);
+    bridge.maru_mobile_clear_error();
+
+    // 출력이 `ESC [ 1 ; 3 1` 까지 왔다(bold + 빨강) — 최종 바이트 'm' 은 다음 chunk 에 온다.
+    _ = bridge.maru_mobile_term_write("\x1b[1;31", 6);
+
+    // 그 사이에 PgUp(ESC [ 5 ~)을 누른다 — **ESC 를 품은 키**라, 예전 고침이면 여기서 출력의
+    // csi_params 가 덮였다. 번호가 아니라 라벨로 찾는다(배열이 바뀌면 조용히 다른 키가 눌린다).
+    const up = keyCenter(bridge.keybarIndexOf("pgup") orelse return error.TestUnexpectedResult);
+    const before = bridge.maru_mobile_input("", 0);
+    try std.testing.expectEqual(@as(u32, 1), keybarTap(up.x, up.y));
+    try std.testing.expect(bridge.maru_mobile_input("", 0) > before); // host 로는 바로 나간다
+    try std.testing.expectEqualStrings("", std.mem.span(bridge.maru_mobile_last_error()));
+
+    // 최종 바이트가 오면 출력 시퀀스가 **원래 파라미터로** 끝난다 — 이어 찍는 글자가 bold 다.
+    _ = bridge.maru_mobile_term_write("mZ", 2);
+    try std.testing.expectEqualStrings("", std.mem.span(bridge.maru_mobile_last_error()));
+
+    // **뒤를 치운다.** pen(bold+빨강)은 코어의 전역 상태라, 안 되돌리면 뒤 판정자의 글리프 style 이
+    // 달라져 quad 수가 어긋난다(실측으로 셋이 빨개졌다 — 이 파일은 코어 하나를 나눠 쓴다).
+    _ = bridge.maru_mobile_term_write("\x1b[0m\x1b[2J\x1b[H", 11);
+    _ = bridge.maru_mobile_build(402, 874, now());
+    bridge.maru_mobile_clear_error();
+}
+
+// **손으로 적은 길이를 전수로 지킨다**(2026-09-14 — 이 파일이 CI 를 한 번 태운 자리다).
+//
+// ABI 는 `ptr[0..len]` 로 읽는다. 길이가 리터럴보다 **크면 인접 `.rodata` 를 읽어 파서에 먹이고**,
+// 작으면 시퀀스가 잘려 파서가 중간 상태로 남는다. 둘 다 조용하다 — 그리고 인접 바이트는 **빌드마다
+// 다르다**. 실제로 DECTCEM 을 되돌리는 6바이트 시퀀스에 길이를 8 로 적은 자리가 두 바이트를 더 먹었고, macOS 에서는
+// 그것이 ESC 라 파서가 `.escape` 로 남았을 뿐이지만 Linux CI 에서는 **UTF-8 선두 바이트**여서 코어가
+// 미완성 글자 꼬리를 들었고, 그 뒤 판정자의 Esc 키가 그 꼬리에 먹혀 `core_write_input` 으로 빨개졌다.
+// 로컬에서 재현이 안 됐던 이유가 그것이다(같은 소스, 다른 인접 바이트).
+//
+// 그래서 숫자를 사람이 세는 자리를 **기계가 다시 센다**. 일부러 어긋나게 주는 자리(절단 판정자)는
+// 같은 줄에 `len-mismatch-intentional` 을 적는다 — 예외를 코드 밖 목록에 두면 그 목록이 낡는다.
+test "ABI 에 손으로 적은 길이가 리터럴과 어긋나지 않는다" {
+    const src = @embedFile("mobile_bridge_contract.zig");
+    var scanned: usize = 0;
+    var i: usize = 0;
+    while (std.mem.indexOfPos(u8, src, i, "maru_mobile_")) |call| {
+        i = call + "maru_mobile_".len;
+        const open = std.mem.indexOfScalarPos(u8, src, i, '(') orelse break;
+        if (std.mem.indexOfAny(u8, src[i..open], " \n;=)") != null) continue; // 이름 뒤 바로 `(` 인 호출만
+        if (open + 1 >= src.len or src[open + 1] != '"') continue; // 리터럴 인자만
+        var p = open + 2;
+        var bytes: usize = 0;
+        const lit_ok = while (p < src.len) {
+            switch (src[p]) {
+                '"' => break true,
+                '\n' => break false, // 줄을 넘기면 리터럴이 아니다
+                '\\' => {
+                    p += 1;
+                    if (p >= src.len) break false;
+                    switch (src[p]) {
+                        'x' => {
+                            bytes += 1;
+                            p += 3;
+                        },
+                        'u' => {
+                            const close = std.mem.indexOfScalarPos(u8, src, p, '}') orelse break false;
+                            const cp = std.fmt.parseInt(u21, src[p + 2 .. close], 16) catch break false;
+                            bytes += std.unicode.utf8CodepointSequenceLength(cp) catch break false;
+                            p = close + 1;
+                        },
+                        else => {
+                            bytes += 1;
+                            p += 1;
+                        },
+                    }
+                },
+                else => {
+                    bytes += 1;
+                    p += 1;
+                },
+            }
+        } else false;
+        if (!lit_ok) continue;
+        // `", <숫자>)` 만 본다 — 길이가 식이면(`buf.len` 등) 사람이 안 센 것이라 대상이 아니다.
+        if (p + 2 >= src.len or src[p + 1] != ',') continue;
+        var q = p + 2;
+        while (q < src.len and src[q] == ' ') q += 1;
+        var num: usize = 0;
+        const digits = q;
+        while (q < src.len and src[q] >= '0' and src[q] <= '9') : (q += 1) num = num * 10 + (src[q] - '0');
+        if (q == digits) continue;
+
+        const line_end = std.mem.indexOfScalarPos(u8, src, q, '\n') orelse src.len;
+        const intentional = std.mem.indexOf(u8, src[q..line_end], "len-mismatch-intentional") != null;
+        scanned += 1;
+        if (num != bytes and !intentional) {
+            const line_no = std.mem.count(u8, src[0..call], "\n") + 1;
+            std.debug.print(
+                "\n손으로 적은 길이가 리터럴과 다르다 — {d}행: 적힌 길이={d} 실제={d}\n",
+                .{ line_no, num, bytes },
+            );
+            return error.LengthLiteralMismatch;
+        }
+    }
+    // **개수로 확인한다.** 스캐너가 아무것도 못 찾고 초록인 것과, 전부 맞아서 초록인 것은 다르다.
+    try std.testing.expect(scanned > 150);
 }
 
 // 키바의 **Ctrl 은 다음 한 키에만** 실린다. 계속 걸려 있으면 그 뒤 타이핑이 전부 제어문자가
@@ -1311,7 +1425,7 @@ test "여러 줄에 걸쳐 선택된다" {
     _ = bridge.maru_mobile_build(402, 874, now());
     // 개행은 Enter(CR)라 줄이 안 넘어간다(§3.1) — 출력 쪽 경로로 세 줄을 만든다.
     _ = bridge.maru_mobile_input("\x1b[2J\x1b[H", 7);
-    _ = bridge.maru_mobile_input("alpha bravo\x1b[2;1Hcharlie delta\x1b[3;1Hecho foxtrot", 47);
+    _ = bridge.maru_mobile_input("alpha bravo\x1b[2;1Hcharlie delta\x1b[3;1Hecho foxtrot", 48);
     const plain = bridge.maru_mobile_build(402, 874, now());
 
     // 첫 줄에서 잡아 셋째 줄까지 끈다.
@@ -1377,7 +1491,7 @@ test "출력이 밀어 올려도 선택은 그 글자를 따라간다" {
     // **SU(`CSI S`)로는 안 된다.** 코어가 "전체 화면 LF 스크롤만 절대 좌표가 내용을 따라간다,
     // 그 외 재배치는 해제한다" 고 정해 뒀다(`invalidateSelection` 주석). 선택이 살아남는 유일한
     // 경우로 밀어야 이 계약을 실제로 재는 것이 된다.
-    _ = bridge.maru_mobile_input("\x1b[999;1H\x1bD", 11);
+    _ = bridge.maru_mobile_input("\x1b[999;1H\x1bD", 10);
 
     // **행 번호가 줄었어야 한다** = 하이라이트가 글자를 따라 위로 갔다.
     //
@@ -3883,7 +3997,7 @@ test "못 쓰는 색은 안 들어간다" {
     bridge.maru_mobile_pointer(0, 1, 200, ty, now());
     bridge.maru_mobile_pointer(2, 1, 200, ty, now());
     bridge.maru_mobile_clear_error();
-    _ = bridge.maru_mobile_input("빨강\n", 8); // 색이 아닌 값 + 확정
+    _ = bridge.maru_mobile_input("빨강\n", 7); // 색이 아닌 값 + 확정
     try std.testing.expectEqualStrings("settings_color_parse", std.mem.span(bridge.maru_mobile_last_error()));
     bridge.maru_mobile_clear_error();
     // **파일에 나갈 것이 없어야 한다** — 값이 안 바뀌었으므로.

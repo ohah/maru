@@ -1418,40 +1418,37 @@ pub const TerminalCore = struct {
         return parser.feed(self, bytes);
     }
 
-    /// **다른 스트림의 바이트를 출력 스트림 상태를 밟지 않고 끼워 넣는다**(로컬 echo 입력).
+    /// 출력 스트림이 **경계**에 있는가 — 시퀀스 중간도, 글자 중간도 아닌가.
     ///
-    /// `write` 는 «셸이 보낸 출력»이라는 **한 스트림**을 가정한다 — 그래서 상태가 write 호출을 가로질러
-    /// 이어진다(PTY read 경계로 쪼개진 시퀀스를 잇는 것이 목적이다, §write 상태기계). 그런데 모바일
-    /// 로컬 모드처럼 **사용자 입력을 같은 코어에 echo** 하면 두 스트림이 한 상태기계를 나눠 쓰게 되고,
-    /// 서로의 중간 상태를 밟는다. 실측된 두 형태(2026-09-13 CI flake):
+    /// `write` 는 «셸이 보낸 출력»이라는 **한 스트림**을 가정한다: 상태(`parser`·`utf8_tail`)가 write 호출을
+    /// 가로질러 이어지는 것이 설계다(PTY read 경계로 쪼개진 시퀀스를 잇는 것이 목적 — §write 상태기계).
+    /// 그래서 **다른 스트림**의 바이트(로컬 echo 입력 같은)를 같은 코어에 끼워 넣으려는 쪽은 먼저 여기에
+    /// 물어야 한다. 경계가 아닐 때 끼워 넣으면 둘이 서로를 밟는다(`writeInterleaved` 주석의 두 형태).
+    pub fn atStreamBoundary(self: *const TerminalCore) bool {
+        return self.parser == .ground and self.utf8_tail_len == 0;
+    }
+
+    /// **다른 스트림의 바이트를 경계에서 끼워 넣는다**(로컬 echo 입력).
+    ///
+    /// 한 코어에 두 스트림이 들어오면 서로의 중간 상태를 밟는다. 실측된 두 형태(2026-09-13 CI):
     ///
     ///  1. 출력이 멀티바이트 글자 중간에서 끊긴 채(`utf8_tail_len != 0`) 사용자가 Esc 를 누르면, 그
-    ///     한 바이트가 앞 글자의 «이어지는 바이트»로 먹혀 `error.InvalidUtf8` 이 된다 — **키가 사라진다**.
-    ///  2. 거꾸로, echo 한 lone ESC 가 파서를 `.escape` 로 **남겨 두면** 바로 다음 출력 바이트가 그
-    ///     시퀀스의 일부로 먹힌다 — **출력이 사라진다**.
+    ///     한 바이트가 앞 글자의 «이어지는 바이트»로 먹혀 `error.InvalidUtf8` — **키가 사라진다**.
+    ///  2. 거꾸로, echo 한 lone ESC 가 파서를 `.escape` 로 **남기면** 다음 출력 바이트가 그 시퀀스의
+    ///     일부로 먹힌다 — **출력이 사라진다**.
     ///
-    /// 그래서 이 함수는 ⑴ 꼬리를 들어내고 ground 에서 시작해 끼워 넣은 바이트를 **제 스트림으로** 읽고,
-    /// ⑵ 끝나면 출력 스트림이 들고 있던 것을 되놓는다. 다음 출력 chunk 가 오면 글자는 온전히 완성된다.
+    /// ⑴ 은 부르는 쪽이 `atStreamBoundary` 로 막는다(경계가 아니면 기다렸다 부른다 — 대기열은 그 정책을
+    /// 가진 층이 소유한다. 모바일은 `mobile_bridge.sendInput`). ⑵ 는 여기서 막는다: 끼워 넣은 바이트가
+    /// 남긴 미완성 조각(lone ESC·반쪽 글자)을 **버린다**. 키 하나는 온전한 조각이라 이어질 바이트가 없고,
+    /// 남기면 다음 출력이 먹힌다. 누적 버퍼(csi_params·osc_buffer·apc_buffer)는 다음 시퀀스 진입이 각자
+    /// 리셋하므로(`parser.handleEscapeByte`) 자리(`parser`·꼬리)만 되돌리면 충분하다.
     ///
-    /// **한계**: 출력이 escape 시퀀스 중간(`.csi` 등)인데 끼워 넣는 바이트에도 ESC 가 있으면, 누적
-    /// 버퍼(csi_params·osc_buffer)가 이미 덮였을 수 있어 그 상태는 되돌리지 않고 ground 로 둔다 —
-    /// 되돌리면 남의 파라미터로 출력 시퀀스를 마저 실행하게 된다. 그 경우 출력 시퀀스 하나를 잃는다.
+    /// 경계가 아닐 때 부르면 **debug 에서 panic** 이다 — 조용히 망가뜨리느니 부른 자리를 드러낸다.
     pub fn writeInterleaved(self: *TerminalCore, bytes: []const u8) !void {
-        const saved_tail = self.utf8_tail;
-        const saved_tail_len = self.utf8_tail_len;
-        const saved_parser = self.parser;
-        self.utf8_tail_len = 0;
-        self.parser = .ground;
+        std.debug.assert(self.atStreamBoundary());
         defer {
-            // 꼬리: 끼워 넣은 쪽이 **제 꼬리**를 남겼으면 그쪽이 더 최근이라 안 덮는다.
-            if (saved_tail_len != 0 and self.utf8_tail_len == 0) {
-                self.utf8_tail = saved_tail;
-                self.utf8_tail_len = saved_tail_len;
-            }
-            // 파서: 끼워 넣은 바이트에 ESC 가 없었으면 누적 버퍼를 못 건드렸으므로 출력 상태를 그대로
-            // 되놓는다. ESC 가 있었으면(위 한계) ground 로 둔다 — 미완성 echo 시퀀스를 남기지 않는 것이
-            // 이 함수의 요점이다(형태 ⑵).
-            self.parser = if (std.mem.indexOfScalar(u8, bytes, 0x1b) == null) saved_parser else .ground;
+            self.parser = .ground;
+            self.utf8_tail_len = 0;
         }
         return self.write(bytes);
     }
@@ -11074,40 +11071,44 @@ test "kitty 애니메이션: 안 움직인 이미지의 generation 은 안 올�
 // **두 스트림이 한 상태기계를 나눠 쓰면 서로의 중간 상태를 밟는다**(writeInterleaved, 2026-09-13 CI flake).
 // 로컬 echo 가 셸 출력과 같은 코어로 들어가는 모바일 로컬 모드에서 실제로 났다 — 여기서는 그 두 형태를
 // 코어 수준에서 고정한다(모바일 판정자는 같은 성질을 브리지 경계에서 다시 본다).
-test "writeInterleaved: 끼워 넣은 키가 출력의 미완성 글자를 먹지 않는다" {
+test "writeInterleaved: 끼워 넣은 키의 미완성 조각을 다음 출력에 물려주지 않는다" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 6 });
     defer core.deinit();
 
-    // 출력이 '가'(EA B0 80) 의 두 바이트에서 끊겼다 — PTY read 경계라 정상이고, 코어가 꼬리를 든다.
-    try core.write("\xea\xb0");
-    try std.testing.expectEqual(@as(usize, 2), core.utf8_tail_len);
-
-    // 그 사이에 사용자가 Esc 를 누른다. `write` 였다면 이 바이트가 «이어지는 바이트»로 먹혀
-    // error.InvalidUtf8 이 되고 키가 사라진다 — 그게 형태 ⑴ 이다.
+    // 경계에서 사용자가 Esc 를 누른다(키 하나는 온전한 조각이라 이어질 바이트가 없다).
     try core.writeInterleaved("\x1b");
-    try std.testing.expectEqual(@as(usize, 2), core.utf8_tail_len); // 꼬리는 살아 있다
-    try std.testing.expect(core.parser == .ground); // 형태 ⑵: lone ESC 를 안 남긴다
+    // `write` 였다면 파서가 `.escape` 로 남아 **다음 출력 바이트를 먹는다** — 그게 형태 ⑵ 다.
+    try std.testing.expect(core.atStreamBoundary());
 
-    // 남은 바이트가 오면 글자가 **온전히** 선다 — 잃은 것이 없다.
-    try core.write("\x80");
-    try std.testing.expectEqual(@as(usize, 0), core.utf8_tail_len);
-    try std.testing.expectEqual(@as(u21, '가'), core.screen.cells[0].codepoint); // 온전히 섰다
+    // 그래서 바로 뒤 출력이 온전히 그려진다.
+    try core.write("A");
+    try std.testing.expectEqual(@as(u21, 'A'), core.screen.cells[0].codepoint);
+
+    // 반쪽 글자를 끼워 넣어도 마찬가지다 — 꼬리를 남기면 다음 출력의 첫 바이트가 먹힌다.
+    try core.writeInterleaved("\xea\xb0");
+    try std.testing.expect(core.atStreamBoundary());
+    try core.write("B");
+    try std.testing.expectEqual(@as(u21, 'B'), core.screen.cells[1].codepoint);
 }
 
-test "writeInterleaved: 평문 echo 는 출력의 시퀀스 상태를 그대로 되놓는다" {
+test "atStreamBoundary: 출력이 시퀀스·글자 중간이면 끼워 넣을 자리가 아니다" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 6 });
     defer core.deinit();
+    try std.testing.expect(core.atStreamBoundary()); // 갓 선 코어는 경계다
 
-    // 출력이 CSI 중간에서 끊겼다(파라미터까지 읽은 상태) — 다음 chunk 에 최종 바이트가 온다.
+    // 시퀀스 중간(CSI 파라미터까지 읽음) — 여기서 'a' 를 끼워 넣으면 **최종 바이트로 먹혀** 엉뚱한
+    // 명령이 된다. 그래서 부르는 쪽이 기다린다(대기열은 그 정책을 가진 층이 소유 — mobile_bridge).
     try core.write("\x1b[3");
-    try std.testing.expect(core.parser != .ground);
+    try std.testing.expect(!core.atStreamBoundary());
 
-    // ESC 없는 평문 echo 는 누적 버퍼를 못 건드리므로 상태를 되놓는다.
-    try core.writeInterleaved("a");
-    try std.testing.expect(core.parser != .ground);
-
-    // 이어지는 최종 바이트가 오면 출력 시퀀스가 **원래 파라미터로** 끝난다(CSI 3 m = italic).
+    // 최종 바이트가 오면 출력 시퀀스가 **원래 파라미터로** 끝나고(CSI 3 m = italic) 다시 경계다.
     try core.write("m");
-    try std.testing.expect(core.parser == .ground);
     try std.testing.expect(core.screen.pen.italic);
+    try std.testing.expect(core.atStreamBoundary());
+
+    // 글자 중간도 경계가 아니다(멀티바이트가 chunk 경계에서 쪼개진 자리).
+    try core.write("\xea\xb0");
+    try std.testing.expect(!core.atStreamBoundary());
+    try core.write("\x80");
+    try std.testing.expect(core.atStreamBoundary());
 }

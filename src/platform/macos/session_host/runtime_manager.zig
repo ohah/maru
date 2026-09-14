@@ -388,6 +388,25 @@ pub const RuntimeManager = struct {
     anim_last_ns: u64 = 0,
     anim_ticks: u64 = 0,
     anim_advances: u64 = 0,
+
+    // ── 화면 스트림 계측 (§이미지 대역폭) ──────────────────────────────────────────────
+    //
+    // **항상 켜 둔다.** 방출마다 포화 덧셈 세 번이라 제품 경로에 실질 비용이 없고, 끄면 정작
+    // 사용자가 느리다고 말하는 순간에 숫자가 없다(`screen_metrics_enabled` 는 판정자용 opt-in 이라
+    // 라이브 호스트에서는 꺼져 있다 — 그걸로는 못 잰다).
+    //
+    // **왜 이미지를 따로 세나.** 호스트→앱 스트림은 **디코드된 픽셀**을 나른다(`screen_snapshot.zig`
+    // §이미지 방출). `generation` 이 바뀌면 blob 전체가 다시 나가므로, 이미지를 계속 다시 그리는
+    // 프로그램(터미널 브라우저 등)에서는 PTY 로 들어온 바이트보다 **훨씬 큰** 양이 소켓을 지난다.
+    // 그 증폭이 실제로 얼마인지는 전체 바이트만 봐서는 안 보인다.
+    screen_sent_bytes: u64 = 0,
+    screen_image_bytes: u64 = 0,
+    screen_sends: u64 = 0,
+    /// 직전 덤프 시각·값 — 한 줄에 **증분(=초당 속도)** 을 함께 내기 위해 갖는다. 누적만 내면
+    /// 읽는 사람이 두 줄을 빼야 하고, 로그가 잘리면 그마저 못 한다.
+    metrics_last_ns: u64 = 0,
+    metrics_last_sent_bytes: u64 = 0,
+    metrics_last_image_bytes: u64 = 0,
     metadata_sampler_visits: u64 = 0,
     metadata_sampler_changes: u64 = 0,
     metadata_sampler_failures: u64 = 0,
@@ -467,6 +486,12 @@ pub const RuntimeManager = struct {
         self.anim_last_ns = 0;
         self.anim_ticks = 0;
         self.anim_advances = 0;
+        self.screen_sent_bytes = 0;
+        self.screen_image_bytes = 0;
+        self.screen_sends = 0;
+        self.metrics_last_ns = 0;
+        self.metrics_last_sent_bytes = 0;
+        self.metrics_last_image_bytes = 0;
         self.metadata_sampler_visits = 0;
         self.metadata_sampler_changes = 0;
         self.metadata_sampler_failures = 0;
@@ -2253,9 +2278,110 @@ pub const RuntimeManager = struct {
         }
     }
 
+    /// 화면 한 번 방출을 계측에 더한다. 포화 덧셈 셋뿐이라 제품 경로 비용이 없다.
+    fn noteScreenSend(self: *RuntimeManager, sent_bytes: usize, image_bytes: u64) void {
+        self.screen_sends +|= 1;
+        self.screen_sent_bytes +|= sent_bytes;
+        self.screen_image_bytes +|= image_bytes;
+    }
+
+    /// 호스트 프로세스 자신의 메모리 발자국. 못 읽으면 0 — 진단이 제품 경로를 바꾸지 않는다.
+    /// **FFI 를 다시 선언하지 않는다** — `pty.selfResourceSample` 이 이미 그 자리를 갖고 있고,
+    /// 거기엔 레이아웃 드리프트를 잡는 comptime 단언이 붙어 있다(`pty/macos.zig`).
+    /// `phys_footprint` 를 쓴다 — macOS 가 메모리 압박을 판단할 때 보는 값이 그것이다.
+    fn footprintBytes() u64 {
+        const sample = maru.pty.selfResourceSample() orelse return 0;
+        return sample.footprint_bytes;
+    }
+
+    /// 이미지 저장소 점유·evict 를 모든 runtime 에서 합산한다. **core lock 아래에서만** 읽는다 —
+    /// reader 스레드가 같은 core 를 쓴다.
+    fn sampleImageStores(self: *RuntimeManager) struct { bytes: u64, evictions: u64, runtimes: u32 } {
+        var total: u64 = 0;
+        var evicts: u64 = 0;
+        var n: u32 = 0;
+        var it = self.host_registry.entries.iterator();
+        while (it.next()) |entry| {
+            const slot = entry.value_ptr.*.runtime orelse continue;
+            const surface = self.backend_impl.surfaceFor(@intFromPtr(slot)) orelse continue;
+            surface.lockCore(self.io);
+            defer surface.unlockCore(self.io);
+            total +|= surface.core.kitty_images.total_bytes;
+            evicts +|= surface.core.kitty_images.evictions;
+            n += 1;
+        }
+        return .{ .bytes = total, .evictions = evicts, .runtimes = n };
+    }
+
+    /// 한 번의 덤프가 실을 값. **결정과 출력을 가른다** — `host_log.line` 은 테스트에서 no-op 이라
+    /// 그대로 두면 주기 게이트·증분 계산·침묵 규칙을 아무도 못 잰다.
+    pub const MetricsLine = struct {
+        runtimes: u32,
+        sends: u64,
+        sent_bytes: u64,
+        image_bytes: u64,
+        sent_bps: u64,
+        image_bps: u64,
+        store_bytes: u64,
+        evictions: u64,
+    };
+
+    /// 이번 tick 에 덤프할 것이 있으면 그 값을, 없으면 `null` 을 준다.
+    ///
+    /// 규칙 셋: ⑴ 첫 tick 은 기준만 세운다(애니메이션 baseline 과 같다) ⑵ 5 초가 안 지났으면 안 낸다
+    /// ⑶ **조용한 구간은 안 낸다** — 아무것도 안 흐르는데 5 초마다 줄을 쌓으면 로그가 신호를 잃는다.
+    ///
+    /// `image_bytes` 가 `sent_bytes` 의 대부분이면 병목은 **이미지 blob**(대역폭)이고, `evictions` 가
+    /// 오르면 320MB 한도가 실제로 걸리는 것(용량)이다 — 원인이 달라 처방도 다르다.
+    fn takeMetricsLine(self: *RuntimeManager, now_ns: u64) ?MetricsLine {
+        const period_ns: u64 = 5 * std.time.ns_per_s;
+        if (self.metrics_last_ns == 0) {
+            self.metrics_last_ns = now_ns;
+            return null;
+        }
+        if (now_ns <= self.metrics_last_ns or now_ns - self.metrics_last_ns < period_ns) return null;
+        const elapsed_ms = (now_ns - self.metrics_last_ns) / std.time.ns_per_ms;
+        self.metrics_last_ns = now_ns;
+
+        const d_sent = self.screen_sent_bytes -| self.metrics_last_sent_bytes;
+        const d_img = self.screen_image_bytes -| self.metrics_last_image_bytes;
+        self.metrics_last_sent_bytes = self.screen_sent_bytes;
+        self.metrics_last_image_bytes = self.screen_image_bytes;
+
+        const store = self.sampleImageStores();
+        if (d_sent == 0 and store.bytes == 0) return null; // 조용한 구간
+        return .{
+            .runtimes = store.runtimes,
+            .sends = self.screen_sends,
+            .sent_bytes = self.screen_sent_bytes,
+            .image_bytes = self.screen_image_bytes,
+            .sent_bps = if (elapsed_ms == 0) 0 else d_sent * 1000 / elapsed_ms,
+            .image_bps = if (elapsed_ms == 0) 0 else d_img * 1000 / elapsed_ms,
+            .store_bytes = store.bytes,
+            .evictions = store.evictions,
+        };
+    }
+
+    /// 덤프 한 줄을 host 로그에 남긴다. 누적과 **증분(초당)** 을 함께 낸다 — 읽는 사람이 두 줄을
+    /// 빼지 않아도 속도가 보이고, 로그가 잘려도 남은 한 줄로 판단할 수 있다.
+    /// 한 줄이 `host_log` 의 고정 버퍼(256 B)를 넘으면 `bufPrint` 가 실패하고 그 줄은 **통째로
+    /// 사라진다**(`catch return`). 즉 숫자가 커지는 바로 그 순간에 진단이 없어진다.
+    /// 실측 최악값은 243 B(모든 필드가 u64 최대) — 여유가 13 B 뿐이라 필드를 하나만 더해도 넘는다.
+    /// 그 경계를 comptime 이 아니라 판정자가 지킨다(`계측 한 줄은 host_log 버퍼를 안 넘는다`).
+    pub const metrics_line_worst_case_bytes: usize = 243;
+
+    fn reportMetrics(self: *RuntimeManager, now_ns: u64) void {
+        const line = self.takeMetricsLine(now_ns) orelse return;
+        host_log.line(
+            "maru-metrics rt={d} sends={d} sent={d} img={d} sent_bps={d} img_bps={d} store={d} evict={d} rss={d}",
+            .{ line.runtimes, line.sends, line.sent_bytes, line.image_bytes, line.sent_bps, line.image_bps, line.store_bytes, line.evictions, footprintBytes() },
+        );
+    }
+
     fn advanceAnimationsOp(ctx: *anyopaque, now_ns: u64) void {
         const self: *RuntimeManager = @ptrCast(@alignCast(ctx));
         self.advanceAnimations(now_ns);
+        self.reportMetrics(now_ns); // 같은 벽시계를 쓴다 — 타이머를 둘로 만들지 않는다.
     }
 
     fn sampleMetadataSourcesOp(ctx: *anyopaque, now_ns: u64) void {
@@ -2388,12 +2514,19 @@ pub const RuntimeManager = struct {
         }
         surface.lockCore(self.io);
         defer surface.unlockCore(self.io);
+        var image_bytes: u64 = 0;
+        // **계측 싱크를 초기화 리터럴 안에 끼워 넣지 않는다.** frontier 구성 형태는 CR4a 경계
+        // 판정자가 **문자열로 세므로**, 필드를 그 안에 더하면 계약이 조용히 깨진다(실측: 3→2 로
+        // 빨개졌다). 리터럴은 그대로 두고 싱크만 뒤에 붙인다.
+        var snapshot_opts: screen_snapshot.ProjectOptions = .{ .generation = generation, .sequence = sequence };
+        snapshot_opts.image_bytes_out = &image_bytes;
         const bytes = try screen_snapshot.projectSnapshotBounded(
             allocator,
             &surface.core,
-            .{ .generation = generation, .sequence = sequence },
+            snapshot_opts,
             protocol.max_viewport_snapshot,
         );
+        self.noteScreenSend(bytes.len, image_bytes);
         if (self.screen_metrics_enabled) self.screen_owned_allocations +|= 1;
         return .{ .bytes = bytes, .frontier = .{ .generation = generation, .sequence = sequence } };
     }
@@ -2406,7 +2539,10 @@ pub const RuntimeManager = struct {
         const handle = self.handleFor(runtime_id) orelse return error.RuntimeNotFound;
         const surface = self.backend_impl.surfaceFor(handle) orelse return error.RuntimeNotFound;
         const generation = if (self.host_registry.get(runtime_id)) |e| e.resize_generation else 0;
-        const opts = screen_snapshot.ProjectOptions{ .generation = generation, .sequence = sequence };
+        var image_bytes: u64 = 0;
+        // 위 `snapshotOp` 과 같은 이유로 리터럴을 그대로 두고 싱크만 뒤에 붙인다(CR4a 경계 판정자).
+        var opts = screen_snapshot.ProjectOptions{ .generation = generation, .sequence = sequence };
+        opts.image_bytes_out = &image_bytes;
         if (self.screen_metrics_enabled) {
             self.screen_delta_calls +|= 1;
             self.screen_core_lock_acquisitions +|= 1;
@@ -2432,6 +2568,7 @@ pub const RuntimeManager = struct {
                 );
                 errdefer allocator.free(snap);
                 const send = allocator.dupe(u8, snap) catch return error.OutOfMemory;
+                self.noteScreenSend(send.len, image_bytes);
                 if (self.screen_metrics_enabled) self.screen_owned_allocations +|= 2;
                 return .{
                     .send = send,
@@ -2442,6 +2579,7 @@ pub const RuntimeManager = struct {
             },
             else => return e,
         };
+        self.noteScreenSend(result.delta.len, image_bytes);
         if (self.screen_metrics_enabled) self.screen_owned_allocations +|= 2;
         return .{
             .send = result.delta,
@@ -5458,4 +5596,84 @@ test "runtime manager: 애니메이션 전진은 시계 역행 tick 을 버리�
     advance(ops.ctx, 2_560 * std.time.ns_per_ms);
     try std.testing.expectEqual(@as(u32, 3), testFrameOf(surface, std.testing.io));
     try std.testing.expectEqual(@as(u64, 2), mgr.anim_advances);
+}
+
+test "runtime manager: 계측 덤프는 5초 주기·증분·조용한 구간 셋을 지킨다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer host_registry.deinit();
+    var mgr: RuntimeManager = undefined;
+    mgr.init(allocator, std.testing.io, &host_registry, null);
+    defer mgr.deinit();
+
+    const s = std.time.ns_per_s;
+    // ① 첫 tick 은 기준만 세운다 — 값이 없는데 줄을 내면 그 줄이 거짓말이다.
+    try std.testing.expect(mgr.takeMetricsLine(10 * s) == null);
+
+    // ② 주기 전에는 안 낸다. 바이트가 흘렀어도 마찬가지다(로그가 tick 마다 쌓이면 못 읽는다).
+    mgr.noteScreenSend(1000, 900);
+    try std.testing.expect(mgr.takeMetricsLine(12 * s) == null);
+
+    // ③ 5 초가 지나면 낸다. **증분이 초당으로 환산돼야** 두 줄을 빼지 않고도 속도가 보인다.
+    const first = mgr.takeMetricsLine(16 * s) orelse return error.NoLine;
+    try std.testing.expectEqual(@as(u64, 1000), first.sent_bytes);
+    try std.testing.expectEqual(@as(u64, 900), first.image_bytes);
+    try std.testing.expectEqual(@as(u64, 1), first.sends);
+    // 6 초 동안 1000 B → 166 B/s.
+    try std.testing.expectEqual(@as(u64, 166), first.sent_bps);
+    try std.testing.expectEqual(@as(u64, 150), first.image_bps);
+
+    // ④ **조용한 구간은 안 낸다** — 누적은 그대로인데 증분이 0 이고 저장소도 비었다.
+    try std.testing.expect(mgr.takeMetricsLine(22 * s) == null);
+
+    // ⑤ 다시 흐르면 **증분만** 센다(누적을 다시 세면 속도가 부풀어 보인다).
+    mgr.noteScreenSend(4000, 4000);
+    const second = mgr.takeMetricsLine(27 * s) orelse return error.NoLine;
+    try std.testing.expectEqual(@as(u64, 5000), second.sent_bytes); // 누적은 1000+4000
+    try std.testing.expectEqual(@as(u64, 800), second.sent_bps); // 증분 4000 / 5 초
+    try std.testing.expectEqual(@as(u64, 2), second.sends);
+
+    // ⑥ 시계 역행은 버린다(애니메이션 전진과 같은 규칙).
+    try std.testing.expect(mgr.takeMetricsLine(20 * s) == null);
+}
+
+test "runtime manager: 계측은 이미지가 실제로 흐르는 runtime 을 집어낸다" {
+    // 위 판정자는 계수기만 흔든다 — 그것만으로는 「제품 경로가 이 계수기를 실제로 부르는가」를
+    // 모른다(계수기를 아무도 안 불러도 통과한다). 여기서는 **진짜 delta 를 방출**시켜 잰다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer host_registry.deinit();
+    var mgr: RuntimeManager = undefined;
+    mgr.init(allocator, std.testing.io, &host_registry, null);
+    defer mgr.deinit();
+
+    const ops = mgr.runtimeOps();
+    const rid = try ops.spawn(ops.ctx, .{ .argv = &.{"/bin/cat"}, .cwd = null, .cols = 24, .rows = 6 });
+    defer ops.terminate(ops.ctx, rid);
+
+    const before_sent = mgr.screen_sent_bytes;
+    const snap = try ops.snapshot(ops.ctx, rid, 1, allocator);
+    defer allocator.free(snap.bytes);
+    // 제품 경로(snapshotOp)가 계측을 부른다 — 안 부르면 여기가 그대로다.
+    try std.testing.expect(mgr.screen_sent_bytes > before_sent);
+    try std.testing.expectEqual(@as(u64, 1), mgr.screen_sends);
+    // 이미지가 없는 화면이므로 이미지 분량은 0 이다(전체 바이트를 잘못 세고 있지 않다).
+    try std.testing.expectEqual(@as(u64, 0), mgr.screen_image_bytes);
+}
+
+test "runtime manager: 계측 한 줄은 host_log 버퍼를 안 넘는다" {
+    // **줄이 잘리면 사라진다.** `host_log.line` 은 `bufPrint` 실패를 조용히 버리므로, 숫자가 커진
+    // 바로 그 순간에 진단이 없어진다 — 가장 필요한 때에 없어지는 계측이다.
+    // 모든 필드를 u64 최대로 찍어 그 최악값이 버퍼 안인지 여기서 고정한다.
+    var buf: [512]u8 = undefined;
+    const max: u64 = std.math.maxInt(u64);
+    const text = try std.fmt.bufPrint(
+        &buf,
+        "maru-metrics rt={d} sends={d} sent={d} img={d} sent_bps={d} img_bps={d} store={d} evict={d} rss={d}\n",
+        .{ std.math.maxInt(u32), max, max, max, max, max, max, max, max },
+    );
+    try std.testing.expectEqual(RuntimeManager.metrics_line_worst_case_bytes, text.len);
+    try std.testing.expect(text.len <= 256); // host_log.line 의 고정 버퍼
 }

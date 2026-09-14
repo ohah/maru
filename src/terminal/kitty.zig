@@ -212,6 +212,10 @@ pub const KittyImageStorage = struct {
     /// 않는다**(같은 image_id가 비운 뒤 재전송돼도 새 generation을 받아 렌더러 캐시가 stale을
     /// 재사용하지 않게). u64라 현실적으로 wrap 없음.
     gen_counter: u64 = 0,
+    /// **evict 가 몇 번 돌았나**(계측 전용, 단조 증가). 화면에 있던 이미지가 한도에 밀려 빠졌다가
+    /// 다시 실리면 사용자에게는 **깜빡임**으로 보인다 — 그 증상이 「한도가 낮아서」인지 다른
+    /// 이유인지는 이 숫자 없이는 못 가른다. 코어는 I/O 를 안 하므로 세기만 하고, 읽는 것은 바깥이다.
+    evictions: u64 = 0,
     /// 한 세션이 kitty graphics 이미지로 잡을 수 있는 메모리 상한 — maru가 정한 실용 값이다(kitty
     /// 명세는 상한을 규정하지 않으므로 과대/악의적 전송 폭주를 막는 방어선으로 둔다). 대형 이미지
     /// 수십~수백 장을 담되 무한 누적을 차단하는 선에서 320MB로 잡았다. 한도 초과 시 evict(K4b)로
@@ -629,6 +633,7 @@ fn evictKittyImagesFor(self: *TerminalCore, needed: usize, exclude_id: u32) void
         const sz = if (self.kitty_images.map.get(victim)) |im| im.data.len else 0;
         removePlacementsForImage(self, victim); // 안전망(victim은 unused라 보통 placement 없음)
         self.kitty_images.remove(self.allocator, victim);
+        self.kitty_images.evictions +|= 1;
         freed += sz;
     }
 }

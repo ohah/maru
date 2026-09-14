@@ -67,6 +67,12 @@ pub const ProjectOptions = struct {
     sequence: u64 = 0,
     default_fg: u32 = 0xFFFFFF,
     default_bg: u32 = 0x000000,
+    /// **이미지 blob 이 이 투영에서 몇 바이트를 차지했는지** 적어 둘 자리(선택, 계측 전용).
+    ///
+    /// 왜 여기냐 — 스트림을 나중에 다시 훑어 세면 방출과 계측이 **두 번 순회**가 되고, 레코드
+    /// 모양이 바뀔 때 한쪽만 따라가 조용히 어긋난다. 방출하는 그 자리에서 더한다.
+    /// `null` 이면 아무 일도 안 한다(기본).
+    image_bytes_out: ?*u64 = null,
 };
 
 /// Projection-only bounded builder. It keeps amortized growth, but clamps the next capacity to the
@@ -190,7 +196,7 @@ pub fn projectSnapshot(allocator: std.mem.Allocator, core: *terminal.TerminalCor
     // 이미지 방출(#1 원격 이미지 전송, I2): blob(디코드 픽셀, ≤max_image_blob 청크) + placement(뷰포트 상대). renderSnapshot이
     // 이미 buildImageViews 픽셀과 뷰포트 상대 placement를 줬다 — client는 이 두 record로 이미지를 in-process와 동일하게 렌더한다
     // (렌더러가 image_id/generation으로 GPU 텍스처 캐시). delta에서의 이미지 dedup/방출은 후속(I4) — 지금은 full snapshot만 싣는다.
-    for (snap.images) |img| try appendImageBlobRecords(allocator, &stream, opts.generation, img);
+    for (snap.images) |img| try appendImageBlobRecords(allocator, &stream, opts.generation, img, opts.image_bytes_out);
     for (snap.placements) |p| try appendImagePlacementRecord(allocator, &stream, opts.generation, p);
     for (snap.virtual_placements) |vp| try appendImageVirtualRecord(allocator, &stream, opts.generation, vp);
     try appendPromptMarks(allocator, &stream, opts.generation, snap, true); // OSC 133 prompt 마크(있을 때만).
@@ -225,7 +231,13 @@ fn stampRecordSequence(bytes: []u8, sequence: u64) screen_stream.DecodeError!voi
 
 /// 한 이미지의 디코드 픽셀을 per-record cap(≤max_image_blob) 청크로 나눠 image_blob 레코드로 방출한다. 빈 픽셀도 메타
 /// 전달용 1개는 낸다. 메타(image_id/generation/w/h/bpp)는 자기서술 위해 매 청크 반복한다(재조립은 소비자 몫, §ImageBlob).
-fn appendImageBlobRecords(allocator: std.mem.Allocator, stream: *std.ArrayListUnmanaged(u8), generation: u64, img: terminal.KittyImageView) screen_stream.DecodeError!void {
+fn appendImageBlobRecords(
+    allocator: std.mem.Allocator,
+    stream: *std.ArrayListUnmanaged(u8),
+    generation: u64,
+    img: terminal.KittyImageView,
+    image_bytes_out: ?*u64,
+) screen_stream.DecodeError!void {
     const cap = screen_stream.max_image_blob;
     const total = img.pixels.len;
     const chunk_count: u32 = if (total == 0) 1 else @intCast((total + cap - 1) / cap);
@@ -243,6 +255,7 @@ fn appendImageBlobRecords(allocator: std.mem.Allocator, stream: *std.ArrayListUn
         });
         defer allocator.free(rec);
         try appendProjectedRecord(stream, allocator, rec);
+        if (image_bytes_out) |out| out.* +|= rec.len;
         off = end;
     }
 }
@@ -730,7 +743,7 @@ pub fn computeDelta(allocator: std.mem.Allocator, prev_bytes: []const u8, core: 
         // (뷰포트 밖·다른 화면·placeholder 없음 → `kittyImageVisibleInViewport` 가 막는다).
         // host 가 원격 기계로 가면 이 계약 위에 그대로 둘 수 없다 — 프레임을 미리 보내고 인덱스만
         // 나르는 레코드가 먼저다(docs/persistent-session-host.md §12).
-        if (!have) try appendImageBlobRecords(allocator, &delta, opts.generation, img); // client가 없는/바뀐 이미지만.
+        if (!have) try appendImageBlobRecords(allocator, &delta, opts.generation, img, opts.image_bytes_out); // client가 없는/바뀐 이미지만.
     }
     // 리뷰 #12: prev에 있었으나 현재 없는 이미지 = host storage에서 evict/delete됨 → image_remove로 client도 회수(무한증가 방지).
     {
@@ -1527,6 +1540,39 @@ test "screen delta: generation 이 바뀐 이미지는 blob 전체가 다시 실
     // 그래서 원격 애니메이션은 이 계약 위에 **그대로 얹을 수 없다** — 프레임을 미리 보내고 「지금 몇 번
     // 프레임」만 나르는 레코드가 먼저 필요하다. 이 판정자는 그 전제(지금은 통째로 실린다)를 고정한다.
     try std.testing.expect(res.delta.len >= px.len);
+
+    // **계측이 그 양을 실제로 집어낸다.** 「delta 가 크다」만 재면 그 안에서 이미지가 몇 바이트인지
+    // 모른다 — 라이브에서 「느리다」를 들었을 때 대역폭인지 다른 것인지 가르려면 그 분해가 필요하다.
+    // 여기서 `image_bytes_out` 이 blob 분량을 정확히 집는지 고정한다.
+    var image_bytes: u64 = 0;
+    var res2 = try computeDelta(allocator, base, &core, .{ .generation = 3, .image_bytes_out = &image_bytes });
+    defer res2.deinit(allocator);
+    try std.testing.expect(image_bytes >= px.len); // 픽셀 전량이 계측에 잡힌다
+    try std.testing.expect(image_bytes <= res2.delta.len); // delta 를 넘지 않는다
+    // **그리고 delta 의 대부분이 이미지다** — 이 워크로드에서 병목이 어디인지 판정자가 말한다.
+    try std.testing.expect(image_bytes * 2 > res2.delta.len);
+
+    // **음성 대조**: 싱크를 안 주면 아무 일도 안 일어난다(기본 경로에 비용이 없다).
+    var res3 = try computeDelta(allocator, base, &core, .{ .generation = 4 });
+    defer res3.deinit(allocator);
+    try std.testing.expect(res3.delta.len >= px.len);
+}
+
+test "screen 계측: 이미지가 없으면 image_bytes 는 0 이다 (공허하지 않은지)" {
+    // 위 판정자가 「언제나 참」이 아님을 보인다 — 이미지가 없는 화면에서는 0 이어야 한다.
+    // 이게 없으면 `image_bytes_out` 이 delta 전체 길이를 세도 그 판정자가 통과한다.
+    const allocator = std.testing.allocator;
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 20, .rows = 6 });
+    defer core.deinit();
+    try core.write("hello");
+    const base = try projectSnapshot(allocator, &core, .{ .generation = 1 });
+    defer allocator.free(base);
+    try core.write(" world");
+    var image_bytes: u64 = 0;
+    var res = try computeDelta(allocator, base, &core, .{ .generation = 2, .image_bytes_out = &image_bytes });
+    defer res.deinit(allocator);
+    try std.testing.expect(res.delta.len > 0); // delta 는 있는데
+    try std.testing.expectEqual(@as(u64, 0), image_bytes); // 이미지 분량은 0 이다
 }
 
 // **attach 이후에 등록된 U=1 격자가 client 에 닿는가.**

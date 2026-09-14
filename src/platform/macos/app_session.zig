@@ -15028,9 +15028,14 @@ pub const AppSession = struct {
         const term = pane_ops.activePane(self).activeTerm();
         if (term.kind != .terminal or term.surface.id != open.surface_id) return; // 다른 pane을 보는 중
         // **앵커 재검증**(§3) — TUI가 그 자리를 덮어도 통보가 없으므로 매 프레임 확인하고 조용히 닫는다.
+        //
+        // ⚠️ **`viewport` 로 본다.** 한 판에서는 `cursor_block` 이었는데, 전송된 마커는 커서 블록 **밖**이라
+        // 매번 「앵커가 사라졌다」로 판정돼 **열리자마자 다음 tick 에 닫혔다**(사용자 제보 — 「전송 후는
+        // 여전히 안 된다」). 여는 쪽은 뷰포트 전체를 보는데 재검증만 좁게 보면 둘이 어긋난다.
+        // **규율**: 여는 스캔과 유지하는 스캔은 **같은 범위**여야 한다.
         var hits: std.ArrayList(maru.session.agent_image_markers.Hit) = .empty;
         defer hits.deinit(self.allocator);
-        self.collectMarkerHits(term, .cursor_block, &hits) catch return;
+        self.collectMarkerHits(term, .viewport, &hits) catch return;
         if (!marker_preview_ops.stillAnchored(open.*, hits.items)) {
             self.closeMarkerPreview();
             return;

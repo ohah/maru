@@ -126,6 +126,12 @@ pub const DiffBase = enum {
     /// 병합 커밋은 **첫 부모 기준**이다(`commit_files`가 같은 기준으로 목록을 낸다) — 목록과 본문이
     /// 다른 기준을 쓰면 목록에 있는 파일이 본문에서 "변경 없음"으로 보인다.
     commit,
+    /// 병합 충돌의 **세 판**(S3a — docs/editor-merge-conflicts.md §5): `:1:`·`:2:`·`:3:`.
+    ///
+    /// **`conflict` 와 다른 기준이다.** 그쪽은 「무엇이 충돌했나」를 보여 주려고 `HEAD ↔ 작업트리`
+    /// 를 여는 **2-way** 이고(index 에 stage 0 이 없어 그럴 수밖에 없다), 이쪽은 그 stage 1·2·3 을
+    /// **직접** 읽는다 — 3-way 가 그 셋을 나란히 놓으려면 필요한 값이다.
+    merge_stages,
     /// 에이전트 타임라인의 **완료된 턴 하나**: `스냅샷[K+1] ↔ 스냅샷[K]`(P5). 양쪽 다 tree라
     /// 작업트리가 어떻게 바뀌든 그 비교는 고정된다 — `turn`(마지막 스냅샷 ↔ 작업트리)과 **다른 기준**이다.
     turn_range,
@@ -143,6 +149,9 @@ pub const DiffBase = enum {
             .conflict => i18n.t(.dock_conflict),
             .commit => i18n.t(.dock_commit),
             .turn_range => i18n.t(.dock_turn),
+            // **`3-way` 는 그대로 둔다** — git·VS Code·JetBrains 가 공통으로 쓰는 낱말이라 옮기면
+            // 그 관례와 끊긴다. 뒤의 보통명사만 옮긴다(`3-way 병합`).
+            .merge_stages => i18n.t(.dock_merge_stages),
         };
     }
 };
@@ -513,4 +522,19 @@ test "슬롯 순서: forSlot 과 slot 이 서로의 역이다" {
     }
     // 칸 수를 넘으면 없다.
     try std.testing.expectEqual(@as(?View, null), View.forSlot(seen.len));
+}
+
+test "비교 기준마다 탭 라벨이 «다르다» — 같은 파일의 여럿을 탭에서 가른다" {
+    // 파일 이름만으로는 같은 파일의 다른 비교를 구분할 수 없다(`MM` 은 둘, 편집기 탭까지 셋, 여기에
+    // 3-way 가 붙으면 넷이다). 라벨이 겹치면 **탭 줄만 보고는 무엇을 보는지 모른다**.
+    const all = [_]DiffBase{ .staged, .unstaged, .untracked, .conflict, .commit, .turn_range, .merge_stages };
+    for (all, 0..) |a, i| {
+        try std.testing.expect(a.label().len > 0);
+        for (all[i + 1 ..]) |b| {
+            if (std.mem.eql(u8, a.label(), b.label())) {
+                std.debug.print("라벨이 겹친다: {s}\n", .{a.label()});
+                return error.TestUnexpectedResult;
+            }
+        }
+    }
 }

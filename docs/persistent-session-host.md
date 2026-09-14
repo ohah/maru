@@ -6264,6 +6264,20 @@ orphan recovery entry(`Recovered Sessions`)의 primary-only 표시와 실제 row
 프로토콜에 도입하기 전까지 이 경로에서 만들지 않는다. initial attach snapshot cap 초과는 connection close가 아니라
 그 request의 `payload_too_large` 응답이며, attach rollback 뒤 기존 sibling subscription과 ready state가 그대로 남아야 한다.
 
+**2026-09-14 — 그 규칙이 한 경로에서 도달 불가였다(수정됨).** 위 처리는 `ops.snapshot`이 **돌려준 바이트**가
+`max_viewport_snapshot`을 넘을 때를 본다. 그런데 투영은 상한 할당자 아래에서 돌고, `appendProjectedRecord`가
+스트림 총합이 16 MiB를 넘으면 **바이트를 돌려주기 전에** 실패한다 — 그래서 그 줄에 영영 닿지 못했다.
+게다가 그 실패를 `error.OutOfMemory`로 적고 있어 host가 자원 문제로 읽고 **공유 연결 전체**를 끊었다.
+
+실측: `terminal-browser` pane 하나가 웹 페이지를 이미지로 그려 투영이 16 MiB를 넘었고, 세션 19개가 전부
+attach하지 못해 앱이 in-process로 폴백했다. host 로그는 `site=attach_snapshot err=OutOfMemory`였지만
+시스템 여유 메모리는 51%, host RSS는 93 MB였다 — **할당은 하나도 실패하지 않았다**(계측:
+`refused=0 parent_fail=0`). 같은 뿌리의 2026-09-13 사고(창 2·탭 12 전멸)가 이 경로로 재발한 것이다.
+
+지금은 그 상한 초과가 `error.SnapshotTooLarge`라는 **자기 이름**으로 나오고, attach는 그 요청만
+`payload_too_large`로 거절해 나머지 subscription과 연결을 유지한다. 「상한 초과」와 「진짜 할당 실패」는
+서로 다른 오류이며, 후자만 연결을 닫는다.
+
 현재 코드는 probe를 `absent|indeterminate`로, owner lease를 `free|held|unknown`으로 구분해 위 표의 긍정 증거 요건을
 구현했다. durable tombstone은 이 분류를 재사용하며 미확정 상태를 영구 부재로 넓히지 않는다.
 

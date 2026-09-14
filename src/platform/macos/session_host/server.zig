@@ -2062,6 +2062,15 @@ pub const Connection = struct {
                 prepared_transferred = true;
             }
             self.rollbackAttach(stream);
+            // **상한 초과는 그 attach 하나만 거절한다.** 이 연결은 여러 runtime 이 함께 쓰므로
+            // 화면 하나가 크다고 끊으면 나머지가 전부 같이 죽는다 — 2026-09-14 에 실제로
+            // 19 개 중 18 개가 그렇게 안 붙었고, 앱은 in-process 로 폴백해 복원이 비었다.
+            //
+            // 바로 아래 `snap_bytes.len > max_viewport_snapshot` 가 같은 정책을 이미 적고 있는데,
+            // **그 줄에 도달할 수가 없었다** — 상한 할당자가 바이트를 돌려주기 전에 실패하기
+            // 때문이다. #3694 의 「돌려받은 바이트」 검사만으로는 이 경로가 안 막혔다.
+            // persistent-session-host.md 「자기 쪽 cap 초과로 공유 연결을 죽이지 않는다」.
+            if (err == error.SnapshotTooLarge) return self.replyError(request_id, .payload_too_large);
             self.state = .closed;
             return .{ .close = .atErr("attach_snapshot", @errorName(err), .internal_error) };
         };
@@ -5154,6 +5163,9 @@ pub const FakeRuntimeOps = struct {
     delta_probe: ?*const fn (*anyopaque) void = null,
     snapshot_fail_count: usize = 0,
     snapshot_permanent_failure: bool = false,
+    /// 상한 할당자가 거절한 실패(`projectSnapshotBounded` 의 `SnapshotTooLarge`). 진짜
+    /// `OutOfMemory` 와 **다른 자리로 가야 한다** — 전자는 그 attach 만, 후자는 연결을 닫는다.
+    snapshot_too_large: bool = false,
     snapshot_calls: usize = 0,
     observation_fail_count: usize = 0,
     observation_calls: usize = 0,
@@ -5244,6 +5256,7 @@ pub const FakeRuntimeOps = struct {
         self.snapshot_sequence_seen = sequence;
         self.snapshot_calls += 1;
         if (self.runtime_missing or self.snapshot_missing) return error.RuntimeNotFound;
+        if (self.snapshot_too_large) return error.SnapshotTooLarge;
         if (self.snapshot_permanent_failure) return error.OutOfMemory;
         if (self.snapshot_fail_count != 0) {
             self.snapshot_fail_count -= 1;
@@ -6376,6 +6389,90 @@ test "server: JSON escape expansion below the encoded control cap still publishe
     try testing.expectEqual(@as(usize, 2), frames.len);
     try testing.expect(frames[0].payload.len <= protocol.max_control_json);
     try testing.expectEqual(protocol.Kind.snapshot_chunk, frames[1].header.kind);
+}
+
+test "server: 상한이 거절한 attach 는 그 요청만 죽고 공유 연결과 형제 stream 은 산다" {
+    // 2026-09-14 실측이 만든 판정자. host 가 `site=attach_snapshot err=OutOfMemory` 로 **연결
+    // 전체**를 끊어 세션 19 개가 전부 안 붙었다. 시스템 여유 메모리는 51% 였다 — 진짜 부족이
+    // 아니라 화면 하나가 16 MiB 상한을 넘은 것이었고, 상한 할당자의 `null` 이 그 둘을 뭉갰다.
+    //
+    // 바로 위 판정자(`cap plus one`)는 **돌려받은 바이트**가 클 때를 재고, 이 판정자는 바이트를
+    // 아예 못 돌려받는 경로를 잰다. 그 경로가 안 막혀 있었다.
+    const allocator = testing.allocator;
+    var registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+    _ = try registry.register(0xAA, 80, 24);
+    _ = try registry.register(0xBB, 80, 24);
+
+    var fake: FakeRuntimeOps = .{};
+    var subscriptions = subscription_identity.Table.init(allocator);
+    defer subscriptions.deinit();
+    const connection_key = connection_slot.ConnectionKey{
+        .monotonic_id = 1,
+        .slot_generation = 1,
+    };
+    var conn = Connection.initProduct(allocator, 1, &registry, connection_key, &subscriptions);
+    defer conn.deinit();
+    conn.runtime_ops = fake.ops();
+    {
+        const hello = try feedJson(&conn, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2}");
+        if (hello.frame) |frame| frame.deinit(allocator);
+    }
+
+    // 형제 하나를 먼저 붙여 둔다 — 「나머지가 산다」를 재려면 나머지가 있어야 한다.
+    const sibling = try feedExpectFrames(
+        &conn,
+        .request,
+        2,
+        "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}",
+    );
+    defer {
+        for (sibling) |frame| frame.deinit(allocator);
+        allocator.free(sibling);
+    }
+    try testing.expectEqual(@as(usize, 1), conn.attachmentCount());
+
+    // 상한이 거절한다.
+    fake.snapshot_too_large = true;
+    const refused = try feedJson(
+        &conn,
+        .request,
+        3,
+        "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"bb\",\"mode\":\"observer\"}}",
+    );
+    defer if (refused.frame) |frame| frame.deinit(allocator);
+
+    // ① 닫지 않는다. 이 한 줄이 세션 18 개의 운명이다.
+    try testing.expectEqualStrings("reply", refused.action);
+    try testing.expectEqual(Connection.State.ready, conn.state);
+
+    // ② 그 요청에는 typed error 로 답한다(진짜 자원 문제가 아니라 「크다」이므로).
+    try testing.expect(refused.frame != null);
+    try testing.expectEqual(protocol.Kind.response, refused.frame.?.header.kind);
+    try testing.expectEqual(@as(u64, 3), refused.frame.?.header.request_id);
+    try testing.expect(std.mem.indexOf(u8, refused.frame.?.payload, "payload_too_large") != null);
+
+    // ③ 실패한 attach 는 권위를 남기지 않고, 형제는 그대로다.
+    try testing.expectEqual(@as(usize, 1), conn.attachmentCount());
+    try testing.expect(subscriptions.resolveLocal(.{ .connection = connection_key, .stream_id = 2 }) == null);
+    try testing.expect(subscriptions.resolveLocal(.{ .connection = connection_key, .stream_id = 1 }) != null);
+
+    // ④ **진짜 `OutOfMemory` 는 여전히 닫는다.** 둘을 가른 것이 이 수정의 요점이라,
+    //    한쪽만 재면 「전부 살려 준다」로 바뀌어도 초록이다.
+    fake.snapshot_too_large = false;
+    fake.snapshot_permanent_failure = true;
+    const fatal = try feedJson(
+        &conn,
+        .request,
+        4,
+        "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"bb\",\"mode\":\"observer\"}}",
+    );
+    defer if (fatal.frame) |frame| frame.deinit(allocator);
+    try testing.expectEqualStrings("close", fatal.action);
+    try testing.expectEqual(CloseReason.internal_error, fatal.close_reason.?);
+    try testing.expectEqualStrings("attach_snapshot", fatal.close_site.?);
+    try testing.expectEqualStrings("OutOfMemory", fatal.close_error.?);
+    try testing.expectEqual(Connection.State.closed, conn.state);
 }
 
 test "server: initial attach accepts exact viewport snapshot cap and rejects cap plus one before chunking" {

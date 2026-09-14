@@ -2527,12 +2527,34 @@ pub const RuntimeManager = struct {
         // 빨개졌다). 리터럴은 그대로 두고 싱크만 뒤에 붙인다.
         var snapshot_opts: screen_snapshot.ProjectOptions = .{ .generation = generation, .sequence = sequence };
         snapshot_opts.image_bytes_out = &image_bytes;
-        const bytes = try screen_snapshot.projectSnapshotBounded(
+        var projection_diag: screen_snapshot.Diagnostics = .{};
+        const bytes = screen_snapshot.projectSnapshotBoundedDiag(
             allocator,
             &surface.core,
             snapshot_opts,
             protocol.max_viewport_snapshot,
-        );
+            &projection_diag,
+        ) catch |err| {
+            // **«얼마나 큰 요청이었나»를 남긴다.** 오류 이름만으로는 「화면이 크다」와 「시스템이
+            // 못 준다」가 안 갈린다 — 2026-09-14 에 런타임 하나가 attach 를 못 해 세션 19 개가
+            // 전부 안 붙었는데, `err=OutOfMemory` 하나로는 소거법 말고 길이 없었다.
+            // `refused`(상한이 거절) 는 화면이 큰 것이고, `parent_fail`(부모가 거절) 은
+            // 그 크기를 시스템이 못 준 것이다. `peak` 는 실패 직전까지 자란 크기다.
+            host_log.line(
+                "session host snapshot projection failed: runtime={x} err={s} refused={d} parent_fail={d} peak={d} max={d} cols={d} rows={d}",
+                .{
+                    runtime_id,
+                    @errorName(err),
+                    projection_diag.refused_len,
+                    projection_diag.parent_fail_len,
+                    projection_diag.peak_len,
+                    protocol.max_viewport_snapshot,
+                    surface.core.size.cols,
+                    surface.core.size.rows,
+                },
+            );
+            return err;
+        };
         self.noteScreenProjection(bytes.len, image_bytes);
         if (self.screen_metrics_enabled) self.screen_owned_allocations +|= 1;
         return .{ .bytes = bytes, .frontier = .{ .generation = generation, .sequence = sequence } };

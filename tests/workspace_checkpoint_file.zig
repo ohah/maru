@@ -343,3 +343,277 @@ test "P4 C4 loose backup permissions are tightened instead of failing the publis
     const backup_stat = try tmp.dir.statFile(std.testing.io, "workspace.v1.bak", .{});
     try std.testing.expectEqual(@as(u32, 0o600), @as(u32, @intCast(backup_stat.permissions.toMode() & 0o777)));
 }
+
+const ReleaseFakeBackend = struct {
+    const Error = error{Injected};
+
+    fail_index: ?usize = null,
+    call_index: usize = 0,
+    present: bool = true,
+    valid: bool = true,
+    parent_open: bool = false,
+    backup_open: bool = false,
+    unlinked: bool = false,
+    phases: [2]checkpoint_file.testing.BackupPhase = undefined,
+    phase_count: usize = 0,
+
+    fn step(self: *ReleaseFakeBackend) Error!void {
+        self.call_index += 1;
+        if (self.fail_index == self.call_index) return error.Injected;
+    }
+
+    pub fn openParent(self: *ReleaseFakeBackend) Error!void {
+        try self.step();
+        self.parent_open = true;
+    }
+
+    pub fn closeParent(self: *ReleaseFakeBackend) void {
+        self.parent_open = false;
+    }
+
+    pub fn openBackup(self: *ReleaseFakeBackend) Error!bool {
+        try self.step();
+        self.backup_open = self.present;
+        return self.present;
+    }
+
+    pub fn closeBackup(self: *ReleaseFakeBackend) void {
+        self.backup_open = false;
+    }
+
+    pub fn validateBackup(self: *ReleaseFakeBackend) Error!void {
+        try self.step();
+        if (!self.valid) return error.Injected;
+    }
+
+    pub fn unlinkBackup(self: *ReleaseFakeBackend) Error!void {
+        try self.step();
+        self.unlinked = true;
+    }
+
+    pub fn notify(self: *ReleaseFakeBackend, phase: checkpoint_file.testing.BackupPhase) void {
+        self.phases[self.phase_count] = phase;
+        self.phase_count += 1;
+    }
+};
+
+test "P4 C5 R7-5 every fallible backup release phase preserves ownership and ordering" {
+    var successful: ReleaseFakeBackend = .{};
+    try std.testing.expectEqual(checkpoint_file.Result.committed, checkpoint_file.testing.releaseBackupUsingForTest(&successful));
+    try std.testing.expectEqual(@as(usize, 4), successful.call_index);
+    try std.testing.expect(successful.unlinked);
+    try std.testing.expect(!successful.parent_open and !successful.backup_open);
+    try std.testing.expectEqualSlices(
+        checkpoint_file.testing.BackupPhase,
+        &.{ .validated, .unlinked },
+        successful.phases[0..successful.phase_count],
+    );
+
+    for (1..successful.call_index + 1) |fail_index| {
+        var backend: ReleaseFakeBackend = .{ .fail_index = fail_index };
+        const expected: checkpoint_file.Result = if (fail_index == 1) .open_parent_failed else .backup_failed;
+        try std.testing.expectEqual(expected, checkpoint_file.testing.releaseBackupUsingForTest(&backend));
+        try std.testing.expect(!backend.unlinked);
+        try std.testing.expect(!backend.parent_open and !backend.backup_open);
+        try std.testing.expect(backend.phase_count <= 1);
+    }
+
+    var missing: ReleaseFakeBackend = .{ .present = false };
+    try std.testing.expectEqual(checkpoint_file.Result.committed, checkpoint_file.testing.releaseBackupUsingForTest(&missing));
+    try std.testing.expectEqual(@as(usize, 2), missing.call_index);
+    try std.testing.expectEqual(@as(usize, 0), missing.phase_count);
+    try std.testing.expect(!missing.unlinked and !missing.parent_open and !missing.backup_open);
+
+    var foreign: ReleaseFakeBackend = .{ .valid = false };
+    try std.testing.expectEqual(checkpoint_file.Result.backup_failed, checkpoint_file.testing.releaseBackupUsingForTest(&foreign));
+    try std.testing.expect(!foreign.unlinked and !foreign.parent_open and !foreign.backup_open);
+}
+
+test "P4 C5 R7-5 successful restore releases stale backup and next publication rearms once" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "workspace.v1", .data = "restored-complete" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "workspace.v1.bak", .data = "stale" });
+    var parent_buf: [std.fs.max_path_bytes:0]u8 = undefined;
+    const parent = try tempParentPath(&tmp, &parent_buf);
+
+    try std.testing.expectEqual(checkpoint_file.Result.committed, checkpoint_file.releaseBackup(parent));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "workspace.v1.bak", .{}));
+    // 없음은 이미 re-arm된 정상 상태라 반복 성공한다.
+    try std.testing.expectEqual(checkpoint_file.Result.committed, checkpoint_file.releaseBackup(parent));
+
+    try std.testing.expectEqual(checkpoint_file.Result.committed, checkpoint_file.publish(parent, "first-change"));
+    var read_buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("restored-complete", try readLeaf(&tmp, "workspace.v1.bak", &read_buf));
+    try std.testing.expectEqualStrings("first-change", try readLeaf(&tmp, "workspace.v1", &read_buf));
+    try std.testing.expectEqual(checkpoint_file.Result.committed, checkpoint_file.publish(parent, "second-change"));
+    try std.testing.expectEqualStrings("restored-complete", try readLeaf(&tmp, "workspace.v1.bak", &read_buf));
+}
+
+test "P4 C5 R7-5 release refuses symlink and non-regular backup without touching targets" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "victim", .data = "untouched" });
+    try tmp.dir.symLink(std.testing.io, "victim", "workspace.v1.bak", .{});
+    var parent_buf: [std.fs.max_path_bytes:0]u8 = undefined;
+    const parent = try tempParentPath(&tmp, &parent_buf);
+    var read_buf: [64]u8 = undefined;
+
+    try std.testing.expectEqual(checkpoint_file.Result.backup_failed, checkpoint_file.releaseBackup(parent));
+    try std.testing.expectEqualStrings("untouched", try readLeaf(&tmp, "victim", &read_buf));
+    try tmp.dir.deleteFile(std.testing.io, "workspace.v1.bak");
+    try tmp.dir.createDir(std.testing.io, "workspace.v1.bak", .default_dir);
+    try std.testing.expectEqual(checkpoint_file.Result.backup_failed, checkpoint_file.releaseBackup(parent));
+    _ = try tmp.dir.statFile(std.testing.io, "workspace.v1.bak", .{});
+}
+
+test "P4 C5 R7-5 release owner predicate rejects foreign uid and non-regular mode" {
+    const uid = std.c.getuid();
+    try std.testing.expect(checkpoint_file.testing.ownedRegularForTest(std.c.S.IFREG | 0o600, uid, uid));
+    try std.testing.expect(!checkpoint_file.testing.ownedRegularForTest(std.c.S.IFREG | 0o600, uid +% 1, uid));
+    try std.testing.expect(!checkpoint_file.testing.ownedRegularForTest(std.c.S.IFDIR | 0o700, uid, uid));
+}
+
+const BackupPause = struct {
+    ready_fd: std.c.fd_t,
+    release_fd: std.c.fd_t,
+    phase: checkpoint_file.testing.BackupPhase,
+};
+
+fn pauseBackupAt(context: ?*anyopaque, phase: checkpoint_file.testing.BackupPhase) void {
+    const pause: *BackupPause = @ptrCast(@alignCast(context.?));
+    if (phase != pause.phase) return;
+    const byte = [_]u8{1};
+    _ = std.c.write(pause.ready_fd, &byte, byte.len);
+    var release: [1]u8 = undefined;
+    _ = std.c.read(pause.release_fd, &release, release.len);
+}
+
+fn crashBackupReleaseAt(parent: [:0]const u8, phase: checkpoint_file.testing.BackupPhase) !void {
+    var ready: [2]std.c.fd_t = undefined;
+    var release: [2]std.c.fd_t = undefined;
+    if (std.c.pipe(&ready) != 0 or std.c.pipe(&release) != 0) return error.PipeFailed;
+    const child = std.c.fork();
+    if (child < 0) return error.ForkFailed;
+    if (child == 0) {
+        _ = std.c.close(ready[0]);
+        _ = std.c.close(release[1]);
+        var pause: BackupPause = .{ .ready_fd = ready[1], .release_fd = release[0], .phase = phase };
+        const result = checkpoint_file.testing.releaseBackupObservedForTest(parent, .{
+            .context = &pause,
+            .callback = pauseBackupAt,
+        });
+        std.c._exit(if (result == .committed) 0 else 3);
+    }
+    _ = std.c.close(ready[1]);
+    _ = std.c.close(release[0]);
+    defer _ = std.c.close(ready[0]);
+    defer _ = std.c.close(release[1]);
+    try waitOne(ready[0]);
+    if (std.c.kill(child, std.c.SIG.KILL) != 0) return error.KillFailed;
+    var status: c_int = undefined;
+    if (std.c.waitpid(child, &status, 0) != child) return error.WaitFailed;
+    const unsigned: c_uint = @bitCast(status);
+    if (!std.c.W.IFSIGNALED(unsigned) or std.c.W.TERMSIG(unsigned) != std.c.SIG.KILL)
+        return error.ChildWasNotKilledAtBackupRelease;
+}
+
+test "P4 C5 R7-5 SIGKILL before backup unlink preserves canonical and backup" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "workspace.v1", .data = "canonical" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "workspace.v1.bak", .data = "backup" });
+    var parent_buf: [std.fs.max_path_bytes:0]u8 = undefined;
+    const parent = try tempParentPath(&tmp, &parent_buf);
+    try crashBackupReleaseAt(parent, .validated);
+    var read_buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("canonical", try readLeaf(&tmp, "workspace.v1", &read_buf));
+    try std.testing.expectEqualStrings("backup", try readLeaf(&tmp, "workspace.v1.bak", &read_buf));
+}
+
+test "P4 C5 R7-5 SIGKILL after backup unlink preserves canonical and next publication rearms" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "workspace.v1", .data = "canonical" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "workspace.v1.bak", .data = "stale" });
+    var parent_buf: [std.fs.max_path_bytes:0]u8 = undefined;
+    const parent = try tempParentPath(&tmp, &parent_buf);
+    try crashBackupReleaseAt(parent, .unlinked);
+    var read_buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("canonical", try readLeaf(&tmp, "workspace.v1", &read_buf));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "workspace.v1.bak", .{}));
+    try std.testing.expectEqual(checkpoint_file.Result.committed, checkpoint_file.publish(parent, "next"));
+    try std.testing.expectEqualStrings("canonical", try readLeaf(&tmp, "workspace.v1.bak", &read_buf));
+    try std.testing.expectEqualStrings("next", try readLeaf(&tmp, "workspace.v1", &read_buf));
+}
+
+const ArmPause = struct {
+    ready_fd: std.c.fd_t,
+    release_fd: std.c.fd_t,
+    phase: checkpoint_file.testing.ArmPhase,
+};
+
+fn pauseArmAt(context: ?*anyopaque, phase: checkpoint_file.testing.ArmPhase) void {
+    const pause: *ArmPause = @ptrCast(@alignCast(context.?));
+    if (phase != pause.phase) return;
+    const byte = [_]u8{1};
+    _ = std.c.write(pause.ready_fd, &byte, byte.len);
+    var release: [1]u8 = undefined;
+    _ = std.c.read(pause.release_fd, &release, release.len);
+}
+
+fn crashBackupArmAt(parent: [:0]const u8, phase: checkpoint_file.testing.ArmPhase) !void {
+    var ready: [2]std.c.fd_t = undefined;
+    var release: [2]std.c.fd_t = undefined;
+    if (std.c.pipe(&ready) != 0 or std.c.pipe(&release) != 0) return error.PipeFailed;
+    const child = std.c.fork();
+    if (child < 0) return error.ForkFailed;
+    if (child == 0) {
+        _ = std.c.close(ready[0]);
+        _ = std.c.close(release[1]);
+        var pause: ArmPause = .{ .ready_fd = ready[1], .release_fd = release[0], .phase = phase };
+        const result = checkpoint_file.testing.ensureBackupObservedForTest(parent, .{
+            .context = &pause,
+            .callback = pauseArmAt,
+        });
+        std.c._exit(if (result == .committed) 0 else 3);
+    }
+    _ = std.c.close(ready[1]);
+    _ = std.c.close(release[0]);
+    defer _ = std.c.close(ready[0]);
+    defer _ = std.c.close(release[1]);
+    try waitOne(ready[0]);
+    if (std.c.kill(child, std.c.SIG.KILL) != 0) return error.KillFailed;
+    var status: c_int = undefined;
+    if (std.c.waitpid(child, &status, 0) != child) return error.WaitFailed;
+    const unsigned: c_uint = @bitCast(status);
+    if (!std.c.W.IFSIGNALED(unsigned) or std.c.W.TERMSIG(unsigned) != std.c.SIG.KILL)
+        return error.ChildWasNotKilledAtBackupArm;
+}
+
+test "P4 C5 R7-5 backup arm crash ordinals never expose a partial final backup" {
+    for ([_]checkpoint_file.testing.ArmPhase{ .temp_closed, .published }) |phase| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "workspace.v1", .data = "canonical-complete" });
+        var parent_buf: [std.fs.max_path_bytes:0]u8 = undefined;
+        const parent = try tempParentPath(&tmp, &parent_buf);
+        try crashBackupArmAt(parent, phase);
+
+        var read_buf: [64]u8 = undefined;
+        try std.testing.expectEqualStrings("canonical-complete", try readLeaf(&tmp, "workspace.v1", &read_buf));
+        if (phase == .temp_closed) {
+            try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "workspace.v1.bak", .{}));
+            _ = try tmp.dir.statFile(std.testing.io, ".workspace.v1.bak.tmp", .{});
+        } else {
+            try std.testing.expectEqualStrings("canonical-complete", try readLeaf(&tmp, "workspace.v1.bak", &read_buf));
+            try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, ".workspace.v1.bak.tmp", .{}));
+        }
+
+        // 다음 제품 publication이 stale temp를 회수하거나 기존 published backup을 보존한 뒤 정상 완료한다.
+        try std.testing.expectEqual(checkpoint_file.Result.committed, checkpoint_file.publish(parent, "next-complete"));
+        try std.testing.expectEqualStrings("canonical-complete", try readLeaf(&tmp, "workspace.v1.bak", &read_buf));
+        try std.testing.expectEqualStrings("next-complete", try readLeaf(&tmp, "workspace.v1", &read_buf));
+        try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, ".workspace.v1.bak.tmp", .{}));
+    }
+}

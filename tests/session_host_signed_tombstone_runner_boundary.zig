@@ -22,6 +22,8 @@ test "runner requires normal Quit zero recovery activity immutable candidate and
         "test \"$dmg_sha\" = \"$dmg_sha_before\"",
         "test \"$exe_sha\" = \"$exe_sha_before\"",
         "/usr/bin/codesign --verify --strict --deep \"$app\"",
+        "/usr/bin/cmp -s \"$before_checkpoint\" \"$checkpoint.bak\"",
+        "test ! -e \"$support/.workspace.v1.bak.tmp\"",
         "set -C",
     }) |needle| try std.testing.expect(std.mem.indexOf(u8, source, needle) != null);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "kill -KILL"));

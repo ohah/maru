@@ -8,6 +8,9 @@ const std = @import("std");
 const c = std.c;
 const posix = std.posix;
 
+extern "c" fn renameatx_np(from_fd: c_int, from: [*:0]const u8, to_fd: c_int, to: [*:0]const u8, flags: c_uint) c_int;
+const rename_excl: c_uint = 0x00000004;
+
 const final_leaf: [:0]const u8 = "workspace.v1";
 const temp_leaf: [:0]const u8 = ".workspace.v1.tmp";
 
@@ -64,6 +67,11 @@ fn publishUsing(backend: anytype, snapshot: []const u8) Result {
 /// `parent_path`는 C3가 canonical workspace URL의 parent에서 만든 NUL-terminated path다. File leaf는 caller가
 /// 고를 수 없고 위 고정 두 이름만 쓴다.
 pub fn publish(parent_path: [:0]const u8, snapshot: []const u8) Result {
+    // 정상 background/final publication 모두 같은 create-once baseline을 잡는다. 성공 restore가 stale
+    // `.bak`을 해제한 뒤 이 공용 leaf의 첫 호출이 현재 완전본을 다시 보존하므로 re-arm cycle이 닫힌다.
+    // 후속 호출은 `O_EXCL` 때문에 첫 baseline을 밀어내지 않는다.
+    if (snapshot.len == 0) return .invalid_snapshot;
+    if (ensureBackup(parent_path) != .committed) return .backup_failed;
     return publishObserved(parent_path, snapshot, .{});
 }
 
@@ -148,6 +156,108 @@ fn snapshotAside(parent_path: [:0]const u8) Result {
 }
 
 const backup_leaf: [:0]const u8 = "workspace.v1.bak";
+const backup_temp_leaf: [:0]const u8 = ".workspace.v1.bak.tmp";
+
+const BackupReleasePhase = enum(u8) { validated, unlinked };
+
+const BackupReleaseObserver = struct {
+    context: ?*anyopaque = null,
+    callback: ?*const fn (?*anyopaque, BackupReleasePhase) void = null,
+
+    fn notify(self: BackupReleaseObserver, phase: BackupReleasePhase) void {
+        if (self.callback) |callback| callback(self.context, phase);
+    }
+};
+
+const BackupArmPhase = enum(u8) { temp_closed, published };
+
+const BackupArmObserver = struct {
+    context: ?*anyopaque = null,
+    callback: ?*const fn (?*anyopaque, BackupArmPhase) void = null,
+
+    fn notify(self: BackupArmObserver, phase: BackupArmPhase) void {
+        if (self.callback) |callback| callback(self.context, phase);
+    }
+};
+
+fn ownedRegular(mode: c.mode_t, owner_uid: c.uid_t, current_uid: c.uid_t) bool {
+    return posix.S.ISREG(mode) and owner_uid == current_uid;
+}
+
+fn releaseBackupUsing(backend: anytype) Result {
+    backend.openParent() catch return .open_parent_failed;
+    defer backend.closeParent();
+    const present = backend.openBackup() catch return .backup_failed;
+    if (!present) return .committed;
+    defer backend.closeBackup();
+    backend.validateBackup() catch return .backup_failed;
+    backend.notify(.validated);
+    backend.unlinkBackup() catch return .backup_failed;
+    backend.notify(.unlinked);
+    return .committed;
+}
+
+const BackupReleasePosixBackend = struct {
+    parent_path: [:0]const u8,
+    observer: BackupReleaseObserver,
+    parent_fd: c.fd_t = -1,
+    backup_fd: c.fd_t = -1,
+    backup_stat: posix.Stat = undefined,
+    backup_valid: bool = false,
+
+    fn openParent(self: *BackupReleasePosixBackend) !void {
+        const fd = c.open(self.parent_path.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .DIRECTORY = true, .NOFOLLOW = true }, @as(c.mode_t, 0));
+        if (fd < 0) return error.OpenParentFailed;
+        errdefer _ = c.close(fd);
+        var st: posix.Stat = undefined;
+        if (c.fstat(fd, &st) != 0 or !posix.S.ISDIR(st.mode) or st.uid != c.getuid() or st.mode & 0o022 != 0)
+            return error.OpenParentFailed;
+        self.parent_fd = fd;
+    }
+
+    fn closeParent(self: *BackupReleasePosixBackend) void {
+        if (self.parent_fd >= 0) _ = c.close(self.parent_fd);
+        self.parent_fd = -1;
+    }
+
+    fn openBackup(self: *BackupReleasePosixBackend) !bool {
+        self.backup_fd = c.openat(self.parent_fd, backup_leaf.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true }, @as(c.mode_t, 0));
+        if (self.backup_fd >= 0) return true;
+        if (posix.errno(-1) == .NOENT) return false;
+        return error.OpenBackupFailed;
+    }
+
+    fn closeBackup(self: *BackupReleasePosixBackend) void {
+        if (self.backup_fd >= 0) _ = c.close(self.backup_fd);
+        self.backup_fd = -1;
+        self.backup_valid = false;
+    }
+
+    fn validateBackup(self: *BackupReleasePosixBackend) !void {
+        if (c.fstat(self.backup_fd, &self.backup_stat) != 0 or
+            !ownedRegular(self.backup_stat.mode, self.backup_stat.uid, c.getuid()))
+            return error.InvalidBackup;
+        self.backup_valid = true;
+    }
+
+    fn unlinkBackup(self: *BackupReleasePosixBackend) !void {
+        if (!self.backup_valid) return error.InvalidBackup;
+        var named: posix.Stat = undefined;
+        if (c.fstatat(self.parent_fd, backup_leaf.ptr, &named, posix.AT.SYMLINK_NOFOLLOW) != 0) {
+            if (posix.errno(-1) == .NOENT) return;
+            return error.BackupDrift;
+        }
+        if (!ownedRegular(named.mode, named.uid, c.getuid()) or
+            named.dev != self.backup_stat.dev or named.ino != self.backup_stat.ino)
+            return error.BackupDrift;
+        if (c.unlinkat(self.parent_fd, backup_leaf.ptr, 0) == 0 or posix.errno(-1) == .NOENT) return;
+        return error.UnlinkBackupFailed;
+    }
+
+    fn notify(self: *BackupReleasePosixBackend, phase: BackupReleasePhase) void {
+        self.observer.notify(phase);
+    }
+};
 
 /// 복원이 **완전히 성공한** 실행에서 `workspace.v1.bak` 을 해제해 백업 불변식을 다시 무장한다.
 ///
@@ -161,32 +271,38 @@ const backup_leaf: [:0]const u8 = "workspace.v1.bak";
 ///
 /// 없으면 성공이다(`ENOENT`). 지울 것이 없다는 뜻이고, 그것이 곧 무장된 상태다.
 pub fn releaseBackup(parent_path: [:0]const u8) Result {
-    const parent_fd = c.open(parent_path.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .DIRECTORY = true, .NOFOLLOW = true }, @as(c.mode_t, 0));
-    if (parent_fd < 0) return .open_parent_failed;
-    defer _ = c.close(parent_fd);
-    var parent_stat: posix.Stat = undefined;
-    if (c.fstat(parent_fd, &parent_stat) != 0 or !posix.S.ISDIR(parent_stat.mode) or parent_stat.uid != c.getuid())
-        return .open_parent_failed;
-    // `ensureBackup` 과 **같은 안전 계약**으로 연다 — 현재 UID 의 regular file 이 아니면 건드리지 않는다.
-    // 남의 것이나 symlink 를 지우는 편이 낡은 `.bak` 을 남기는 것보다 훨씬 나쁘다.
-    const fd = c.openat(parent_fd, backup_leaf.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true }, @as(c.mode_t, 0));
-    if (fd < 0) return if (posix.errno(-1) == .NOENT) .committed else .backup_failed;
-    var st: posix.Stat = undefined;
-    const ok = c.fstat(fd, &st) == 0 and posix.S.ISREG(st.mode) and st.uid == c.getuid();
-    _ = c.close(fd);
-    if (!ok) return .backup_failed;
-    if (c.unlinkat(parent_fd, backup_leaf.ptr, 0) != 0)
-        return if (posix.errno(-1) == .NOENT) .committed else .backup_failed;
-    return .committed;
+    return releaseBackupObserved(parent_path, .{});
+}
+
+fn releaseBackupObserved(parent_path: [:0]const u8, observer: BackupReleaseObserver) Result {
+    var backend: BackupReleasePosixBackend = .{ .parent_path = parent_path, .observer = observer };
+    return releaseBackupUsing(&backend);
 }
 
 fn ensureBackup(parent_path: [:0]const u8) Result {
+    return ensureBackupObserved(parent_path, .{});
+}
+
+fn ensureBackupObserved(parent_path: [:0]const u8, observer: BackupArmObserver) Result {
     const parent_fd = c.open(parent_path.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .DIRECTORY = true, .NOFOLLOW = true }, @as(c.mode_t, 0));
     if (parent_fd < 0) return .backup_failed;
     defer _ = c.close(parent_fd);
     var parent_stat: posix.Stat = undefined;
-    if (c.fstat(parent_fd, &parent_stat) != 0 or !posix.S.ISDIR(parent_stat.mode) or parent_stat.uid != c.getuid())
+    if (c.fstat(parent_fd, &parent_stat) != 0 or !posix.S.ISDIR(parent_stat.mode) or
+        parent_stat.uid != c.getuid() or parent_stat.mode & 0o022 != 0)
         return .backup_failed;
+
+    // 이미 게시된 backup은 먼저 검증하고 그대로 둔다. create-once가 첫 baseline을 지키는 경계다.
+    const existing_fd = c.openat(parent_fd, backup_leaf.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true }, @as(c.mode_t, 0));
+    if (existing_fd >= 0) {
+        defer _ = c.close(existing_fd);
+        var existing_stat: posix.Stat = undefined;
+        if (c.fstat(existing_fd, &existing_stat) != 0 or !posix.S.ISREG(existing_stat.mode) or
+            existing_stat.uid != c.getuid()) return .backup_failed;
+        if (existing_stat.mode & 0o777 != 0o600 and c.fchmod(existing_fd, 0o600) != 0) return .backup_failed;
+        return .committed;
+    }
+    if (posix.errno(-1) != .NOENT) return .backup_failed;
 
     const source_fd = c.openat(parent_fd, final_leaf.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true }, @as(c.mode_t, 0));
     if (source_fd < 0) return if (posix.errno(-1) == .NOENT) .committed else .backup_failed;
@@ -195,40 +311,19 @@ fn ensureBackup(parent_path: [:0]const u8) Result {
     if (c.fstat(source_fd, &source_stat) != 0 or !posix.S.ISREG(source_stat.mode) or source_stat.uid != c.getuid())
         return .backup_failed;
 
-    var backup_fd = c.openat(parent_fd, backup_leaf.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .CLOEXEC = true, .NOFOLLOW = true }, @as(c.mode_t, 0o600));
-    if (backup_fd < 0) {
-        if (posix.errno(-1) != .EXIST) return .backup_failed;
-        const existing_fd = c.openat(parent_fd, backup_leaf.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true }, @as(c.mode_t, 0));
-        if (existing_fd < 0) return .backup_failed;
-        defer _ = c.close(existing_fd);
-        var existing_stat: posix.Stat = undefined;
-        if (c.fstat(existing_fd, &existing_stat) != 0 or !posix.S.ISREG(existing_stat.mode) or
-            existing_stat.uid != c.getuid()) return .backup_failed;
-        // 권한이 느슨하면 **거절하지 않고 조인다.** 우리가 소유한 정규 파일이고(위 두 검사), 새로 만드는
-        // 경로도 바로 아래에서 `fchmod(0o600)` 으로 같은 값을 강제한다 — 기존 파일만 거절할 이유가 없다.
-        //
-        // 거절하면 어떻게 되는지 실측했다(2026-08-27): `.bak` 이 `0644` 로 남아 있어 `ensureBackup` 이
-        // `.backup_failed` 를 냈고, `publishFinal` 이 그걸 **쓰기 전체의 실패**로 옮겨 checkpoint 가
-        // `notice=2`(write failed)로 끝났다. keep-alive 종료는 저장 실패를 허용하지 않으므로 **앱이 닫히지
-        // 않았다** — 파일 권한 한 비트가 사용자를 종료할 수 없는 상태에 가둔 셈이다. `chmod 600` 을 준 즉시
-        // 저장이 성공했고(3211→4719 bytes) 종료도 통과했다.
-        //
-        // 범위는 정확히 여기까지다. `ensureBackup` 은 `publishFinal` 에서만 불리므로 **평상시 저장(`publish`)은
-        // 이 권한과 무관하다**. 같은 기간 workspace.v1 이 갱신되지 않은 것은 `restore_incomplete` 동안 평상시
-        // 저장을 건너뛰는 **설계된 동작** 탓이고, 이 비트가 막은 것은 final-quit 저장 하나다. 두 원인을 뭉치면
-        // 다음 사람이 엉뚱한 곳을 판다.
-        //
-        // `0644` 가 애초에 어떻게 생겼는지는 아직 모른다 — 아래 생성 경로는 항상 `fchmod(0o600)` 을 준다.
-        if (existing_stat.mode & 0o777 != 0o600 and c.fchmod(existing_fd, 0o600) != 0) return .backup_failed;
-        return .committed;
-    }
-    var keep_backup = false;
+    // 죽은 이전 writer의 unpublished temp는 canonical/backup이 아니므로 안전하게 회수한다.
+    if (c.unlinkat(parent_fd, backup_temp_leaf.ptr, 0) != 0 and posix.errno(-1) != .NOENT)
+        return .backup_failed;
+    var backup_fd = c.openat(parent_fd, backup_temp_leaf.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .CLOEXEC = true, .NOFOLLOW = true }, @as(c.mode_t, 0o600));
+    if (backup_fd < 0) return .backup_failed;
+    var keep_temp = true;
     defer {
         if (backup_fd >= 0) _ = c.close(backup_fd);
-        if (!keep_backup) _ = c.unlinkat(parent_fd, backup_leaf.ptr, 0);
+        if (keep_temp) _ = c.unlinkat(parent_fd, backup_temp_leaf.ptr, 0);
     }
     if (c.fchmod(backup_fd, 0o600) != 0) return .backup_failed;
     var buffer: [16 * 1024]u8 = undefined;
+    var copied: i64 = 0;
     while (true) {
         const read_count = c.read(source_fd, &buffer, buffer.len);
         if (read_count < 0) {
@@ -247,14 +342,45 @@ fn ensureBackup(parent_path: [:0]const u8) Result {
             if (written == 0) return .backup_failed;
             offset += @intCast(written);
         }
+        copied += read_count;
     }
+    if (copied != source_stat.size) return .backup_failed;
     var backup_stat: posix.Stat = undefined;
     if (c.fstat(backup_fd, &backup_stat) != 0 or !posix.S.ISREG(backup_stat.mode) or
-        backup_stat.uid != c.getuid() or backup_stat.mode & 0o777 != 0o600) return .backup_failed;
+        backup_stat.uid != c.getuid() or backup_stat.mode & 0o777 != 0o600 or backup_stat.size != source_stat.size)
+        return .backup_failed;
     const closing_fd = backup_fd;
     backup_fd = -1;
     if (c.close(closing_fd) != 0) return .backup_failed;
-    keep_backup = true;
+    observer.notify(.temp_closed);
+    if (renameatx_np(parent_fd, backup_temp_leaf.ptr, parent_fd, backup_leaf.ptr, rename_excl) != 0) {
+        if (posix.errno(-1) != .EXIST) return .backup_failed;
+        const raced_fd = c.openat(parent_fd, backup_leaf.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true }, @as(c.mode_t, 0));
+        if (raced_fd < 0) return .backup_failed;
+        defer _ = c.close(raced_fd);
+        var existing_stat: posix.Stat = undefined;
+        if (c.fstat(raced_fd, &existing_stat) != 0 or !posix.S.ISREG(existing_stat.mode) or
+            existing_stat.uid != c.getuid()) return .backup_failed;
+        // 권한이 느슨하면 **거절하지 않고 조인다.** 우리가 소유한 정규 파일이고(위 두 검사), 새로 만드는
+        // 경로도 바로 아래에서 `fchmod(0o600)` 으로 같은 값을 강제한다 — 기존 파일만 거절할 이유가 없다.
+        //
+        // 거절하면 어떻게 되는지 실측했다(2026-08-27): `.bak` 이 `0644` 로 남아 있어 `ensureBackup` 이
+        // `.backup_failed` 를 냈고, `publishFinal` 이 그걸 **쓰기 전체의 실패**로 옮겨 checkpoint 가
+        // `notice=2`(write failed)로 끝났다. keep-alive 종료는 저장 실패를 허용하지 않으므로 **앱이 닫히지
+        // 않았다** — 파일 권한 한 비트가 사용자를 종료할 수 없는 상태에 가둔 셈이다. `chmod 600` 을 준 즉시
+        // 저장이 성공했고(3211→4719 bytes) 종료도 통과했다.
+        //
+        // 범위는 정확히 여기까지다. 정상 background/final publication은 모두 이 create-once 경로를 타지만,
+        // `restore_incomplete` 실행은 상위 정책에서 두 publication을 모두 건너뛴다. 따라서 그 실행에서
+        // workspace.v1 이 갱신되지 않는 것은 이 권한 보정이 아니라 설계된 write-block 탓이다.
+        //
+        // `0644` 가 애초에 어떻게 생겼는지는 아직 모른다 — 아래 생성 경로는 항상 `fchmod(0o600)` 을 준다.
+        if (existing_stat.mode & 0o777 != 0o600 and c.fchmod(raced_fd, 0o600) != 0) return .backup_failed;
+        // 경쟁자가 완전한 final backup을 먼저 게시했다. 이 writer의 unpublished temp는 defer가 회수한다.
+        return .committed;
+    }
+    keep_temp = false;
+    observer.notify(.published);
     return .committed;
 }
 
@@ -268,6 +394,10 @@ fn publishObserved(parent_path: [:0]const u8, snapshot: []const u8, observer: Pu
 pub const testing = if (@import("builtin").is_test) struct {
     pub const Phase = PublishPhase;
     pub const Observer = PublishObserver;
+    pub const BackupPhase = BackupReleasePhase;
+    pub const BackupObserver = BackupReleaseObserver;
+    pub const ArmPhase = BackupArmPhase;
+    pub const ArmObserver = BackupArmObserver;
 
     pub fn publishUsingForTest(backend: anytype, snapshot: []const u8) Result {
         return publishUsing(backend, snapshot);
@@ -275,6 +405,22 @@ pub const testing = if (@import("builtin").is_test) struct {
 
     pub fn publishObservedForTest(parent_path: [:0]const u8, snapshot: []const u8, observer: Observer) Result {
         return publishObserved(parent_path, snapshot, observer);
+    }
+
+    pub fn releaseBackupObservedForTest(parent_path: [:0]const u8, observer: BackupObserver) Result {
+        return releaseBackupObserved(parent_path, observer);
+    }
+
+    pub fn releaseBackupUsingForTest(backend: anytype) Result {
+        return releaseBackupUsing(backend);
+    }
+
+    pub fn ownedRegularForTest(mode: c.mode_t, owner_uid: c.uid_t, current_uid: c.uid_t) bool {
+        return ownedRegular(mode, owner_uid, current_uid);
+    }
+
+    pub fn ensureBackupObservedForTest(parent_path: [:0]const u8, observer: ArmObserver) Result {
+        return ensureBackupObserved(parent_path, observer);
     }
 } else struct {};
 

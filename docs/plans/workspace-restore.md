@@ -77,6 +77,27 @@ namespace를 열거하거나 삭제하지 않는다. 구조화 artifact는 세 a
 topology, historical·detached output, scrollback, replacement spawn 0을 남긴다. PR CI의
 `keep-alive recovered session macOS` job에도 같은 task를 연결했다.
 
+### R7-5 checkpoint backup re-arm
+
+**✅ 구현·검증 완료(2026-09-14).** 불완전 복원 실행은 background/final publication을 계속 차단한다. 부분 모델을 canonical
+`workspace.v1`으로 승격하지 않는 안전 정책은 바꾸지 않는다. 빠진 것은 정상 실행의 backup cycle이다.
+
+1. 실제 workspace가 완전히 복원된 뒤에만 stale `workspace.v1.bak`을 해제한다. 파일 없음은 이미 무장된
+   상태라 성공이고, 현재 UID의 regular file이 아닌 symlink·directory·foreign-owner leaf는 보존하며 실패한다.
+2. 해제 뒤 첫 정상 background/final publication은 canonical `workspace.v1`을 create-once `.bak`으로 먼저
+   보존하고 새 snapshot을 원자 교체한다. 같은 실행의 후속 publication은 첫 backup을 밀어내지 않는다.
+3. release 전·후 process crash에서 canonical 원본 또는 backup 중 적어도 하나의 완전본이 남아야 한다.
+   다음 publication은 release 완료 상태에서 fresh backup을 다시 만들 수 있어야 한다.
+4. 제품 파일 gate는 없음·성공·재실행, symlink·non-regular·foreign owner, fallible release phase와 release
+   전·후 및 backup temp 게시 전·후 `SIGKILL` ordinal을 검증한다. Swift/source boundary gate는 성공 restore에서만 release하고 모든 정상
+   publication이 backup-preserving leaf를 타며 restore-incomplete 가드는 우회하지 못함을 고정한다.
+
+완료 증거는 Debug·ReleaseFast 17개 runtime과 source boundary를 실행하는
+`zig build test-workspace-checkpoint-file-adapter`, 제품 cycle boundary인 `zig build test-workspace-backup-rearm`,
+`zig build check-boundaries`, `mise run macos-app-host-swift-check`다. backup 생성은 고정
+`.workspace.v1.bak.tmp`에 완전 복사·검증한 뒤 `RENAME_EXCL`로만 게시하므로 생성 중 crash가 잘린 final `.bak`을
+남기지 않는다.
+
 신호는 `AppSession.workspaceChanged(kind)` 하나로 들어가고, `kind` 가 무엇이 바뀌었는지 구분한다
 (`topology`/`selection`/`ordering`/`appearance`/`dock`/`naming`/`scm_base`/`runtime_binding`/`persisted_surface`/
 `explorer_roots`). 호출부는 **manifest 에 보이는 transaction 의 성공 꼬리에서만** 부른다 — 진행 중에 부르면

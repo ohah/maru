@@ -7878,18 +7878,19 @@ foreground process, SSH destination의 owned 값은 비어 있어야 한다. 그
     기존 complete `workspace.v1`은 유지되고 상태표시줄 실패 notice와 dirty retry 상태가 남는다. restore-incomplete
     실행이 final 저장까지 가는지 여부는 [Workspace Restore](workspace-restore.md)의 「checkpoint 보호」가 단일
     출처다 — 여기에 결론을 복제하지 않는다. 백업을 **실제로 뜨는 경우의 안전 계약**만 이 문서가 소유한다: final
-    writer는 현재 UID의 regular source를 no-follow로 열고 `workspace.v1.bak`을 `O_EXCL|O_NOFOLLOW`, mode `0600`으로
-    한 번만 만든다. 기존 `.bak`은 current UID regular file이어야 하며 mode가 더 넓으면 `0600`으로 축소한 뒤
-    보존한다. symlink/non-regular/다른 UID 또는 권한 축소 실패는 Quit을 취소한다. `O_EXCL`이라 기존 `.bak`이
-    있으면 새로 뜨지 않는다는 점이 곧 「복원이 성공했을 때 `.bak`을 해제하고 다음 실패에 다시 무장해야 한다」는
-    별도 개선 계약의 근거다. 채택·검증 상태는 [검증 매트릭스](verification-matrix.md)의
+    writer는 현재 UID의 regular source를 no-follow로 열어 고정 `.workspace.v1.bak.tmp`에 완전히 복사·검증한 뒤
+    `RENAME_EXCL`로 mode `0600`의 `workspace.v1.bak`을 한 번만 게시한다. 기존 `.bak`은 current UID regular
+    file이어야 하며 mode가 더 넓으면 `0600`으로 축소한 뒤 보존한다. symlink/non-regular/다른 UID 또는 권한 축소
+    실패는 Quit을 취소한다. 완전한 복원 성공은 stale `.bak`을 secure parent와 held inode identity 재검증 뒤
+    해제하고, 다음 정상 publication이 새 backup을 다시 무장한다. 채택·검증 상태는 [검증 매트릭스](verification-matrix.md)의
     `Workspace restore checkpoint backup re-arm` 행이 소유한다.
     명시적 `Quit and End All Sessions`는 runtime admin shutdown 완료 뒤에도 같은 final checkpoint를 시도하지만,
     실패 시 orphan runtime을 남기지 않도록 종료를 계속하는 유일한 예외다.
     실제 AppKit 제품 gate는 먼저 쓰기 가능한 격리 Application Support에서 `NSApplication.terminate`를 호출해
-    `final-quit finished` exact once, 앱의 정상 종료, checkpoint inode 교체와 canonical header, 고정 temp/backup 부재를
+    `final-quit finished` exact once, 앱의 정상 종료, checkpoint inode 교체와 canonical header, 교체 전 완전본과 같은
+    backup 및 고정 temp 부재를
     검증한다. 이어 별도 격리 완전본에 user-immutable flag를 걸고 같은 종료 요청을 보낸다. final C2 publication이
-    실패한 뒤 앱 PID가 살아 있고, 기존 완전본 bytes와 lease inode가 불변이며, 고정 temp/backup이 없고, 로그가
+    실패한 뒤 앱 PID가 살아 있고, 기존 완전본 bytes와 lease inode가 불변이며, 같은 bytes의 backup과 고정 temp 부재가 보존되고, 로그가
     `final-quit cancelled`를 exact once 남겨야 한다.
     writer 완료는 일반 main-dispatch queue가 아니라 main run loop의 `.common` mode로 돌려보낸다.
     `terminateLater` 뒤 `NSApplication.terminate`가 도는 중첩 AppKit loop는 timer/event는 처리하지만 main-dispatch

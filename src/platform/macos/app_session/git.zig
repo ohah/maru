@@ -1334,9 +1334,35 @@ pub fn retryPendingIgnore(self: *AppSession) void {
     if (self.git_ignore_retry_dirs.items.len == 0) return;
     var backend = &(self.git_backend orelse return);
     if (backend.ignoreBusy()) return;
+    const dir = self.git_ignore_retry_dirs.items[0];
+
+    // 그 사이 탐색기가 다른 곳을 보게 됐으면 **버린다** — 화면에 없는 경로를 영원히 다시 걸 이유가 없다.
+    if (!dirIsUnderSomeRoot(self, dir)) return dropFirstIgnoreRetry(self);
+
+    // ⚠️ **성공한 뒤에만 목록에서 뺀다**(적대적 검증 15 회차). 처음에는 먼저 빼고 걸었는데, 그러면
+    // 거는 데 실패한 순간 그 디렉터리가 **또 잊힌다** — 14 회차에 고친 바로 그 모양이 한 층 위에서
+    // 되살아난 것이었다.
+    self.file_tree.requeueScan(dir) catch return; // 다음 tick 이 다시 건다
+    // ⚠️ **그리고 성공 반환은 「줄에 들어갔다」가 아니다**(`hasScanRequest` 주석). 스캔 줄이 꽉 차면
+    // 세부 요청을 전부 버리고 root 만 다시 예약한 뒤 성공으로 돌아온다 — 그때 이 디렉터리는 안 들어갔다.
+    if (!self.file_tree.hasScanRequest(dir)) return; // 목록에 남겨 둔다
+    dropFirstIgnoreRetry(self);
+}
+
+fn dropFirstIgnoreRetry(self: *AppSession) void {
     const dir = self.git_ignore_retry_dirs.orderedRemove(0);
-    defer self.allocator.free(dir);
-    self.file_tree.requeueScan(dir) catch {};
+    self.allocator.free(dir);
+}
+
+/// 그 디렉터리가 지금 탐색기가 보는 어느 root 아래에 있나. 루트 자신도 포함이다.
+fn dirIsUnderSomeRoot(self: *AppSession, dir: []const u8) bool {
+    var i: usize = 0;
+    while (i < self.file_tree.rootCount()) : (i += 1) {
+        const root = self.file_tree.rootAt(i) orelse continue;
+        if (std.mem.eql(u8, root, dir)) return true;
+        if (path_shape.relativeUnderRoot(dir, root) != null) return true;
+    }
+    return false;
 }
 
 /// `check-ignore` 결과를 트리에 반영한다. 무시된 것으로 돌아온 경로만 표시하고, 이번 배치에서 물었던

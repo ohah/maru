@@ -1608,10 +1608,10 @@ pub fn build(b: *std.Build) void {
         .filters = &.{"MRG"},
     });
     const run_macos_editor_merge_tests = b.addRunArtifact(macos_editor_merge_tests);
-    // 20 = MRG1~15 열다섯 + 각 모듈이 자동 생성하는 `test_0` 다섯(필터와 무관하게 늘 컴파일된다).
-    run_macos_editor_merge_tests.addArg("--maru-expect-tests=20");
+    // 24 = MRG1~19 열아홉 + 각 모듈이 자동 생성하는 `test_0` 다섯(필터와 무관하게 늘 컴파일된다).
+    run_macos_editor_merge_tests.addArg("--maru-expect-tests=24");
     // ⚠️ **그리고 실제로 돌았는가** — MRG2 이후는 macOS 가 아니면 `SkipZigTest` 다.
-    run_macos_editor_merge_tests.addArg("--maru-expect-passed=20");
+    run_macos_editor_merge_tests.addArg("--maru-expect-passed=24");
     run_macos_editor_merge_tests.setCwd(b.path("."));
     b.step(
         "test-editor-merge",

@@ -365,4 +365,20 @@ test "MPN5 저장소는 «넷» 으로 갈리고 자투리는 마지막이 가�
     }
     try testing.expectEqual(s.ops.len, covered); // 자투리(10 % 4 = 2)까지 전부 쓰인다
     try testing.expectEqual(@as(usize, 4), splitScratch(s, 3).ops.len);
+
+    // **아홉 배열이 «전부» 갈려야 한다.** `ops` 만 재면 나머지를 안 가른 변이가 산다 — 글자 버퍼
+    // (`text_bytes`)를 공유하면 **앞 pane 의 글자가 뒤 pane 것으로 덮인다**(적대적 13회차 Y9 실측).
+    // 여기서는 「pane 마다 다른 조각을 받는가」를 배열 이름마다 확인한다.
+    const p0 = splitScratch(s, 0);
+    const p1 = splitScratch(s, 1);
+    try testing.expect(p0.text_bytes.ptr != p1.text_bytes.ptr);
+    try testing.expect(p0.runs.ptr != p1.runs.ptr);
+    try testing.expect(p0.content_rows.ptr != p1.content_rows.ptr);
+    try testing.expect(p0.visual_rows.ptr != p1.visual_rows.ptr);
+    try testing.expect(p0.gutter_rows.ptr != p1.gutter_rows.ptr);
+    try testing.expect(p0.row_counts.ptr != p1.row_counts.ptr);
+    try testing.expect(p0.count_scratch.ptr != p1.count_scratch.ptr);
+    try testing.expect(p0.caret_cols.ptr != p1.caret_cols.ptr);
+    // 그리고 **길이도 전체가 아니다**(안 가르면 조각마다 전체 길이가 온다).
+    try testing.expect(p0.text_bytes.len < s.text_bytes.len);
 }

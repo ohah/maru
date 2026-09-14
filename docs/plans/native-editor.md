@@ -374,8 +374,9 @@
     옮긴다"*와 *"바꾸기 · 두 번째 입력 필드"* — 을 함께 닫았다. 앞의 것이 뒤의 것의 선행이다:
     바꾸기는 **지금 고른 그 범위**를 고치는 연산이라 selection이 매치를 가리키고 있어야 한다.
     (구현: `selectFindMatch` — 매치를 **범위로** 골라 `editor_selection`에 넣고 멀티커서를
-    정리한 뒤 `breakUndoGroup`까지 한다. 단일 출처는
-    [visual-mapping §5.1](../native-editor-visual-mapping.md)의 구현 상태 표다.)
+    정리한 뒤 `breakUndoGroup`까지 한다. 이 계획이 현재 진행 상태를 소유하고,
+    [visual-mapping §5.1](../native-editor-visual-mapping.md)은 당시 구현 이력과 현재 시각 매핑 계약만 보존한다.
+    현재 검증 상태와 gate는 [검증 매트릭스](../verification-matrix.md)가 소유한다.)
     - **`⌘F`는 한 줄 그대로다.** `⌥⌘F`가 바꾸기 줄을 연다(macOS 관례). 늘 두 줄이면 평범한
       찾기에서도 오버레이가 본문을 더 가리고, 매치를 화면 가운데 두는 계산이 함께 흔들린다.
     - **전부 바꾸기는 한 번의 편집이다.** 되돌리기 하나(§3.3)라는 계약이 목적이지만, 하나씩

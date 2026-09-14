@@ -127,7 +127,7 @@ Windows/Linux 호스트가 생기기 전에는 네이티브 백엔드를 구현�
 - 화면 스냅샷의 실제 타입은 `RenderSnapshot`이며 `src/observability/snapshot.zig`가 직렬화·파싱을 맡는다. `DebugSnapshot`은 사용하지 않는 옛 개념명이다.
 - `src/observability/replay.zig`의 `replayTrace`가 `maru.trace.v1`을 화면 상태로 재적용한다.
 - in-process timing harness는 `tools/perf/core.zig`, 빠른·긴 스트레스 실행은 `tests/stress`가 맡는다.
-- zone/span API, Perfetto/Chrome trace export, `os_signpost`, Tracy, 메모리/RSS sampler는 이 계약 밖의 별도 계측 이니셔티브다. 도입 여부와 진행은 구현 계획 및 [검증 매트릭스](verification-matrix.md)에서만 추적한다.
+- zone/span API, Perfetto/Chrome trace export, `os_signpost`, Tracy, 메모리/RSS sampler는 이 계약 밖의 별도 계측 이니셔티브다. 아직 채택된 구현 계획은 없으며, 착수 결정 시 `docs/plans/`에 계획을 만들고 [실제 구현 계획](implementation-plan.md)에 등재한다. 현재 검증 범위와 gate는 [검증 매트릭스](verification-matrix.md)가 소유한다.
 
 ## 의도적 비범위 (지금 하지 않는 것)
 

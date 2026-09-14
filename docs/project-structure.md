@@ -64,7 +64,7 @@ src/
   i18n.zig              UI 표시 문자열의 언어별 테이블·조회·런타임 보간(i18n.md 계약). 문자열이 platform에 갇히지 않게 하는 자리라 chrome·session·config·platform이 모두 import한다
   shutdown_wire_contract.zig  종료 backend와 앱 조합 계층이 함께 쓰는 포인터 없는 wire 권위 값
 
-    app_session/        app_session.zig에서 목적별로 떼어낸 그룹 구현(docs/app-session-decomposition.md §4.1 F 시리즈).
+    app_session/        app_session.zig에서 목적별로 떼어낸 그룹 구현(docs/plans/app-session-decomposition.md §4.1 F 시리즈).
                         find.zig(⌘F orchestration — E1. 스크롤백과 **편집기 문서** 둘 다 배선한다.
                         어느 쪽을 검색할지는 활성 Term이 정하고, 편집기 쪽 일치 계산은 L2 session/editor/find.zig다), agent_dock.zig(에이전트 세션 기록 도크 —
                         아카이브 스캔·필터·스크롤·인라인 상세, F1+F3 병합), file_panel.zig(파일 탐색기·파일
@@ -107,14 +107,14 @@ src/
                         **다만 허브가 이미 얇아졌다는 뜻은 아니다** — 분해는 진행 중이고(72,317줄에서 출발),
                         F 시리즈가 옮긴 것은 그룹 본문뿐이다. test 900여 개는 판정자가 그룹 밖 표면에 훨씬 넓게
                         닿아 동반 이동 시 pub화가 6배로 늘기 때문에 **의도적으로 허브에 남겼다**(아래 항목).
-                        현재 줄 수와 남은 단계는 docs/app-session-decomposition.md가 단일 출처다.
+                        현재 줄 수와 남은 단계는 docs/plans/app-session-decomposition.md가 단일 출처다.
                         그룹끼리 서로를 부를 때는 `app_session.zig`의 재수출을 거치지 않고 **직접
                         `@import`**한다 — 허브를 경유하면 허브의 pub 표면만 늘어난다(F6에서 정리).
                         **분해로 떼어낸 이 17개(find + F1~F16 + debug_fixtures)는 독립 모듈이 아니라 한
                         모듈(`AppSession`)의 조각이다** — 필드를 공유하므로 서로를 부르고, 2026-08-10 실측으로
                         양방향 쌍이 39개였다(43% 밀도). 순환은 결함이 아니라 이 구조의 성질이고, 얻은 것은
                         모듈 경계가 아니라 **탐색성**이다
-                        (docs/app-session-decomposition.md "그룹 파일 17개는 독립 모듈이 아니다").
+                        (docs/plans/app-session-decomposition.md "그룹 파일 17개는 독립 모듈이 아니다").
                         **분해로 떼어낸 파일의 test는 그룹으로 옮기지 않는다** — 판정자가 그룹 밖 표면에 훨씬 넓게 닿아
                         동반 이동 시 pub화가 6배로 늘어난다(같은 문서 §2-c-3 실측). 위 세 예외(editor·editor_diff·
                         scm_dock)는 분해 산물이 아니므로 이 규칙 밖이다.

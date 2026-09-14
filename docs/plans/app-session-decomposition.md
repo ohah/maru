@@ -1,8 +1,8 @@
 # app_session.zig 분해 — 실행 플랜
 
-> L4 macOS 어댑터의 거대 단일 파일(`src/platform/macos/app_session.zig`)을 목적별 파일로 가르는 **실행 플랜**이다. 위상 골격의 단일 출처는 [레이어링과 이식성](layering-and-portability.md)이고, 분해 패턴의 검증된 선례는 [terminal core 분해](terminal-core-decomposition.md)다(`core.zig` 9962→6166, 방향 A, 누적 `/code-review max` 정확성 버그 0). 이 문서는 그 패턴을 `app_session`에 적용하는 단계·선결을 담는다.
+> L4 macOS 어댑터의 거대 단일 파일(`src/platform/macos/app_session.zig`)을 목적별 파일로 가르는 **실행 플랜**이다. 위상 골격의 단일 출처는 [레이어링과 이식성](../layering-and-portability.md)이고, 분해 패턴의 검증된 선례는 [terminal core 분해](../terminal-core-decomposition.md)다(`core.zig` 9962→6166, 방향 A, 누적 `/code-review max` 정확성 버그 0). 이 문서는 그 패턴을 `app_session`에 적용하는 단계·선결을 담는다.
 
-> **구현 이력 안내:** 이 문서는 분해 작업이 진행된 순서와 당시 측정·결정·완료·보류를 보존하는 연대기다. 현재 구조 계약은 [레이어링과 이식성](layering-and-portability.md), 현재 진행 상태는 [검증 매트릭스](verification-matrix.md)가 소유한다.
+> **소유권:** 이 문서는 분해의 구현 계획·진행 상태와 당시 측정·결정·완료·보류 이력을 소유한다. 현재 구조 계약은 [레이어링과 이식성](../layering-and-portability.md), 현재 검증 상태와 gate는 [검증 매트릭스](../verification-matrix.md)가 소유한다.
 
 ## 1. 배경 (측정 — 2026-08-08)
 
@@ -100,7 +100,7 @@
 
      사전 추정으로는 이 결론을 얻을 수 없었다 — 호출 패턴을 정규식으로 세면 receiver 형태(`session.`·`s.`·`dst.`)와 간접 호출을 놓쳐 3개로 나왔다. **두 방식을 다 실행해 컴파일러가 요구하는 pub 개수를 센 뒤에야 갈렸다.** 다음 그룹도 같은 방식으로 확인한다([[roadmap-docs-stale-verify-with-code]]).
 
-     **그리고 이것이 이 저장소의 일관된 방식이다.** 선례인 [terminal core 분해](terminal-core-decomposition.md) §1.7이 같은 결론을 이미 적어 두었다 — *"테스트는 core.zig에 남아 public API로 동작을 보존한다 … 테스트는 facade를 검증하므로 core.zig에 둔다"*. 실제 배치도 그렇다: `core.zig` test 358개인데 갈라져 나간 `parser.zig`·`osc.zig`·`kitty.zig`·`types.zig`는 **0개**, `screen.zig`·`selection.zig`는 1개씩이다. 즉 **기존 파일을 분해할 때는 test를 원본에 남기고**(동작-보존 그물 유지), **새 파일을 처음 작성할 때만 그 파일에 test를 쓴다**(`session_host/*`가 그 경우). F 시리즈는 전자다. 원래 이 항목의 "동반 이동" 지침만 그 선례와 어긋나 있었다.
+     **그리고 이것이 이 저장소의 일관된 방식이다.** 선례인 [terminal core 분해](../terminal-core-decomposition.md) §1.7이 같은 결론을 이미 적어 두었다 — *"테스트는 core.zig에 남아 public API로 동작을 보존한다 … 테스트는 facade를 검증하므로 core.zig에 둔다"*. 실제 배치도 그렇다: `core.zig` test 358개인데 갈라져 나간 `parser.zig`·`osc.zig`·`kitty.zig`·`types.zig`는 **0개**, `screen.zig`·`selection.zig`는 1개씩이다. 즉 **기존 파일을 분해할 때는 test를 원본에 남기고**(동작-보존 그물 유지), **새 파일을 처음 작성할 때만 그 파일에 test를 쓴다**(`session_host/*`가 그 경우). F 시리즈는 전자다. 원래 이 항목의 "동반 이동" 지침만 그 선례와 어긋나 있었다.
 
      남는 문제: 파일 스코프 test 헬퍼 63개가 전부 non-pub이고 그룹을 횡단한다(`initSmokeSessionSized` 184회). test가 잔류하면 이 문제는 **당장은 터지지 않지만**, 그룹 파일이 자체 test를 갖게 되는 날 다시 온다. 공용 헬퍼 소유처는 그때 정한다.
 
@@ -129,7 +129,7 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 >
 > (b)는 분해 여부를 **이식 기여** 하나로 판정했다. 그 기준에서는 순수分이 `layout_math`뿐이라 "일단락"이 정확한 결론이었다. 그러나 그 뒤 파일이 35,134 → 72,317줄로 커지면서, **이식과 무관한 비용이 실측으로 드러났다**:
 >
-> - **다른 기능의 설계 상한을 밀어 올렸다.** [editor-surface-tooling.md](editor-surface-tooling.md) §6이 파일 뷰어의 바이트 상한을 1 MiB → 8 MiB로 올린 직접 원인이 이 파일이다("이 저장소의 `app_session.zig`가 4.0 MB(60,965줄)라 못 열렸다"). 즉 한 파일의 크기가 이미 제품 다른 축의 결정을 바꿨다.
+> - **다른 기능의 설계 상한을 밀어 올렸다.** [editor-surface-tooling.md](../editor-surface-tooling.md) §6이 파일 뷰어의 바이트 상한을 1 MiB → 8 MiB로 올린 직접 원인이 이 파일이다("이 저장소의 `app_session.zig`가 4.0 MB(60,965줄)라 못 열렸다"). 즉 한 파일의 크기가 이미 제품 다른 축의 결정을 바꿨다.
 > - **한 번에 볼 수 없다.** 72,317줄은 사람도 에이전트도 통독 대상이 아니다(2,000줄 단위로 36회). 한 그룹의 버그를 고치려 무관한 그룹을 계속 지나치고, 도메인 하나를 파악하는 데 파일 전체가 후보가 된다.
 > - **(b) 자신의 ROI 판정이 뒤집혔다.** §6 "그룹당 100~400줄이라 감소폭이 작다"는 20,183줄 시점 관측이다. 실측 그룹은 수백~4,000줄이고, 동반 test까지 합치면 그 2배다.
 >
@@ -202,7 +202,7 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 > tree가 panel을 직접 부르지 않고 `?FilePanelOpenRequest` 같은 의도를
 > 반환해 호출자가 소비하게 바꾸면 한 방향이 되고, 그때 두 파일로 나눌 수 있다. 다만 그건 8개 지점의
 > **부수효과 순서**를 건드리는 구조 변경이라 이 시리즈의 "동작 변경 0" 범위 밖이다. 순서는 [terminal core
-> 분해](terminal-core-decomposition.md) §2의 선례를 따른다 — 그 문서도 "연산 추출 우선, 구조 변경(Screen
+> 분해](../terminal-core-decomposition.md) §2의 선례를 따른다 — 그 문서도 "연산 추출 우선, 구조 변경(Screen
 > struct fold)은 별도 initiative"를 택했고 이유가 같다("고위험 단일 도약"을 피한다). 분리 후에는 같은 변경이
 > 3,840줄 파일 안에서 일어나 리뷰 범위가 73,000줄에서 그만큼 좁아진다.
 
@@ -317,7 +317,7 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 > return @min(clearance_px / self.cell_width_px + collapsed_toggle_gap_cells + collapsed_badge_max_cells, ...);
 > ```
 >
-> [레이어링과 이식성](layering-and-portability.md)의 "창 chrome 분해"가 이미 정했다 — **신호등만 남기는
+> [레이어링과 이식성](../layering-and-portability.md)의 "창 chrome 분해"가 이미 정했다 — **신호등만 남기는
 > 창 스타일 inset은 L4 macOS 전용**이고 헤더 레이아웃만 L3 chrome이다. 실제로 `src/chrome/` 전체에
 > `traffic_light`이라는 말이 **한 번도 없다**. 배지 col은 "신호등 오른쪽 여백부터"라는 macOS 창 chrome에
 > 종속된 값이라 **L4에 있는 것이 맞다.**
@@ -702,7 +702,7 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 
   > **허브 소함수 추출(2026-08-09 완료).** `handleKeyEvent` 401→340, `mouse` 978→794, `tick` 1,484→1,367(각 추출 시점 기준). 뺀 것은 **이미 거기 있던 경계**뿐이다 — 21회 반복되던 key-down 종결부(`settleKeyEventSummary`·`keyConsumedByApp`·`keyIgnored`), 저자가 구분선으로 표시해 둔 제스처 라우팅 9블록(`routeActivePointerGesture`), 계측 변수 흐름 밖의 독립 단계 셋(`settleDeferredPointerInput`·`runFramePreHousekeeping`·`collectFindViewSpans`). **파일 총 줄 수는 ±0**(같은 파일 안 이동)이고 pub 표면·test 위치·import 경계는 불변이며, `imports.zig`의 external source digest만 갱신했다. 3라운드 적대적 검증에서 역-인라인 정규화 diff로 동작 동등성을 확인했다(blocker·major 0).
   >
-  > **`cell_colors`에서 멈춘 이유**는 락이 아니다(처음엔 그렇게 적었으나 검증에서 반증됐다 — 그 블록의 락은 `if` 블록 안에 갇혀 있고 `unlockCore`가 블록 마지막 문장이라 `defer`와 등가이며, 같은 작업에서 뺀 `collectFindViewSpans`가 정확히 그 모양이다). 실제 이유는 둘이다: ⑴ ROI가 낮다(42줄 대부분이 struct 리터럴, 빼도 tick −2.9%), ⑵ [io-render-threading.md](io-render-threading.md) **P4-3**이 `cell_colors`(F)·활성 build(G)·kitty(I)·sticky(J)를 투영 tick의 **단일 lock 스코프로 수렴**시키는 것을 목표로 잡고 있어, 지금 F를 별 함수로 빼면 그 통합이 함수 경계를 넘어야 한다. 같은 이유로 **이미 뺀 `collectFindViewSpans`(E)가 P4-3의 전제를 흔든다** — 그 문서 §12.2 행 E와 P4-3에 새 함수 경계를 등재해 두었다.
+  > **`cell_colors`에서 멈춘 이유**는 락이 아니다(처음엔 그렇게 적었으나 검증에서 반증됐다 — 그 블록의 락은 `if` 블록 안에 갇혀 있고 `unlockCore`가 블록 마지막 문장이라 `defer`와 등가이며, 같은 작업에서 뺀 `collectFindViewSpans`가 정확히 그 모양이다). 실제 이유는 둘이다: ⑴ ROI가 낮다(42줄 대부분이 struct 리터럴, 빼도 tick −2.9%), ⑵ [io-render-threading.md](../io-render-threading.md) **P4-3**이 `cell_colors`(F)·활성 build(G)·kitty(I)·sticky(J)를 투영 tick의 **단일 lock 스코프로 수렴**시키는 것을 목표로 잡고 있어, 지금 F를 별 함수로 빼면 그 통합이 함수 경계를 넘어야 한다. 같은 이유로 **이미 뺀 `collectFindViewSpans`(E)가 P4-3의 전제를 흔든다** — 그 문서 §12.2 행 E와 P4-3에 새 함수 경계를 등재해 두었다.
 - **파일 수 증가**: 그룹 10개 + 동반 test가 새 파일로 늘어난다. 총 읽을 양이 주는 게 아니라 **무관한 것까지 읽는 비용**이 주는 것이므로, 그룹 경계가 도메인과 어긋나면 이득이 사라진다. 그래서 각 단계 착수 시 응집도를 코드로 재검증한다(§4.1).
 - **ROI**: (b) 시점의 "그룹당 100~400줄이라 감소폭이 작다"는 20,183줄 시점 관측이라 **폐기**한다. F 시리즈 실측은 그룹당 570~4,090줄(메서드) + 동반 test로 그 2배다. 누적으로 `app_session.zig`가 그룹 facade + 허브만 남는 게 종착.
 
@@ -712,9 +712,9 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 
 | 문서 | 소유하는 축 | 이 문서와의 관계 |
 |---|---|---|
-| [chrome-strategy.md](chrome-strategy.md) · [metal-ui-layout.md](plans/metal-ui-layout.md) §8 ML6 | chrome 컴포넌트의 **형태**(rect 직접 계산 + 짝 `hitTest` → `chrome/ui/` typed tree 이주) | app_session 축소는 그 이주의 **부수효과**다. 무엇을 언제 얼마나 줄일지는 이 문서가 정한다 |
-| [layering-and-portability.md](layering-and-portability.md) §3.3 | L1~L3 **이식** 위상 | L4 내부 분해는 위상 밖이라 이 문서로 위임(원래부터 그렇게 서술) |
-| [app-layer-decomposition.md](app-layer-decomposition.md) | `src/app`(L4 공통 런타임)의 분해 | 대상 파일이 다르다 |
+| [chrome-strategy.md](../chrome-strategy.md) · [metal-ui-layout.md](metal-ui-layout.md) §8 ML6 | chrome 컴포넌트의 **형태**(rect 직접 계산 + 짝 `hitTest` → `chrome/ui/` typed tree 이주) | app_session 축소는 그 이주의 **부수효과**다. 무엇을 언제 얼마나 줄일지는 이 문서가 정한다 |
+| [layering-and-portability.md](../layering-and-portability.md) §3.3 | L1~L3 **이식** 위상 | L4 내부 분해는 위상 밖이라 이 문서로 위임(원래부터 그렇게 서술) |
+| [app-layer-decomposition.md](../app-layer-decomposition.md) | `src/app`(L4 공통 런타임)의 분해 | 대상 파일이 다르다 |
 
 ### 두 경로는 배타적이지 않다
 

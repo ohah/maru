@@ -474,7 +474,7 @@ batch와 재부팅 전후 표본을 모으기 전에는 상한을 정하지 않�
 
 ## Micro-slice 성능 운영
 
-세션 컨트롤 플레인과 웹 패널 구현은 [control-plane-implementation.md](control-plane-implementation.md) §11의 micro-slice 단위로 진행한다. 각 slice가 hot path를 건드리면 PR 본문에 다음을 남긴다.
+세션 컨트롤 플레인과 웹 패널 구현은 [plans/control-plane.md](plans/control-plane.md) §11의 micro-slice 단위로 진행한다. 각 slice가 hot path를 건드리면 PR 본문에 다음을 남긴다.
 
 - 어떤 경로가 새로 반복 호출되는가(frame tick, PTY pump, socket dispatch, WebView bridge, zntc watch 등).
 - 새 allocation/copy/lock/thread hop/I/O가 bounded인지, 어떤 테스트나 artifact로 확인했는가.

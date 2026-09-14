@@ -15172,8 +15172,11 @@ pub const AppSession = struct {
         const by: f32 = @floatFromInt(place.box.y);
         const bw: f32 = @floatFromInt(place.box.w);
         const bh: f32 = @floatFromInt(place.box.h);
-        self.appendSolidQuad(bx, by, bw, bh, border, 2);
-        self.appendSolidQuad(bx + b, by + b, bw - 2 * b, bh - 2 * b, bg, 2);
+        // **layer 1(over)** — 셀 **전체 위**다. 처음에 2(bottom = 탭 밴드)를 골랐는데 그것은 터미널 셀
+        // **아래**라, quad 는 불투명한데 그 위에 터미널 글자가 그려져 「배경이 투명하다」로 보였다
+        // (사용자 제보 2026-09-14). 떠 있는 팝업은 모달과 같은 층이어야 한다.
+        self.appendSolidQuad(bx, by, bw, bh, border, 1);
+        self.appendSolidQuad(bx + b, by + b, bw - 2 * b, bh - 2 * b, bg, 1);
     }
 
     /// 열린 프리뷰의 자리 — 그리는 쪽과 안내를 얹는 쪽이 **같은 계산**을 쓰게 하는 단일 출처다.

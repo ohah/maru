@@ -71038,6 +71038,45 @@ test "히스토리: 실패도 답이다 — 매 tick 다시 묻지 않는다 (�
     try std.testing.expect(session.scm_log_seq != before_invalidate);
 }
 
+test "연결이 끊긴 원격 pane 은 «저장소를 확인할 수 없다»가 아니라 연결을 말한다" {
+    // **결함**(적대적 검증 2026-09-14, 실물 캡처로 발견). `ControlPersist` 만료·네트워크 끊김으로
+    // control socket 이 사라지면 도크가 「저장소를 확인할 수 없습니다」 하나로 접힌다 — 그 문구는
+    // **폴더를 가리키므로** 사용자는 경로를 의심하며 시간을 쓴다. 사실은 연결 이야기다.
+    //
+    // §2.2 ⑸ 는 「소켓이 없으면 원격 SCM 은 꺼진 채로 **그 사실을 말한다**」고 정해 뒀고, 그 약속이
+    // 이 자리에서 안 지켜지고 있었다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+
+    // 로컬 pane 에서는 그 술어가 거짓이다 — 연결과 무관한 「모른다」까지 이 문구로 덮으면 안 된다.
+    try std.testing.expect(!git_ops.activeRemoteHasNoControlSocketForTest(session));
+
+    // **`maru ssh` 진입 통지**로 원격으로 민다. 이 세션에는 control socket 이 없다(하니스가 아니다).
+    const term = pane_ops.activePane(session).activeTerm();
+    try term.surface.core.write("\x1b]5379;ssh;user@build-box\x07");
+    try std.testing.expect(git_ops.activeRemoteHasNoControlSocketForTest(session));
+
+    var probe: [std.fs.max_path_bytes]u8 = undefined;
+    // 전제: 그 pane 은 「모른다」로 떨어진다(원격이라 1 순위가 비고 가드가 2 순위를 막는다).
+    try std.testing.expectEqual(
+        git_ops.RepoTarget.unknown,
+        std.meta.activeTag(git_ops.gitRepoTarget(session, &probe)),
+    );
+    // **그리고 그 「모른다」의 이유를 말한다.**
+    try std.testing.expectEqualStrings(
+        maru.i18n.t(.scm_remote_transport_failed),
+        git_ops.scmEmptyNotice(session, &probe),
+    );
+
+    // ssh 를 빠져나오면 그 문구도 따라 사라진다 — 래치가 아니다.
+    try term.surface.core.write("\x1b]5379;ssh-end\x07");
+    try std.testing.expect(!git_ops.activeRemoteHasNoControlSocketForTest(session));
+}
+
 test "에이전트 탭은 원격에서 «아직 안 된다»고 말한다 — 로컬 턴을 그 자리에 두지 않는다" {
     // **사용자 결정 2026-09-14.** 턴 링은 **에이전트 세션**의 것이지 저장소의 것이 아니라, 원격 pane 으로
     // 옮겨도 **로컬 세션의 턴이 그대로 남는다.** 그 줄들은 원격 커밋 목록 옆에서 「이 기계의 기록」으로
@@ -71739,7 +71778,16 @@ test "소스 컨트롤: 저장소 아닌 폴더로 옮기면 옛 목록을 버�
     // **`.unknown`은 "저장소가 아니다"와 다른 사실이고 문구도 달라야 한다.** 둘을 한 문구로 뭉개면, 저장소 안에
     // 서 있는데 물어볼 곳만 없는 상태(원격 세션·diff 열람 중)에서 뷰가 없는 사실을 단정한다 — 2026-08-13에
     // 로컬 세션이 원격으로 오판됐을 때 이 문구가 진짜 원인을 가린 그 결함이다.
-    try std.testing.expectEqualStrings(maru.i18n.t(.git_repo_unknown), git_ops.scmEmptyNotice(session, &target_buf));
+    //
+    // ⚠️ **이 자리의 문구가 2026-09-14 에 더 좁아졌다.** 이 단계는 ⑵ 에서 `maru ssh` 진입 통지를 보낸 뒤라
+    // **원격 pane 이고, 이 세션에는 control socket 이 없다** — 그러면 「모른다」의 이유가 **연결**이므로
+    // 그렇게 말한다(§2.2 ⑸ — 소켓이 없으면 그 사실을 말한다). 소켓이 살아 있는 원격 pane 은 여전히
+    // `git_repo_unknown` 이고, 그 갈림은 전용 판정자가 문다(「연결이 끊긴 원격 pane 은 …」).
+    //
+    // **이 단계가 지키던 것은 그대로다**: `.unknown` 을 `.none`(「git 저장소가 아닙니다」)으로 뭉개지 않는다.
+    const unknown_notice = git_ops.scmEmptyNotice(session, &target_buf);
+    try std.testing.expectEqualStrings(maru.i18n.t(.scm_remote_transport_failed), unknown_notice);
+    try std.testing.expect(!std.mem.eql(u8, unknown_notice, maru.i18n.t(.git_not_a_repo)));
     git_ops.followActiveTerminalRepo(session);
     try std.testing.expect(session.git_result != null);
 }

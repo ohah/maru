@@ -1318,6 +1318,33 @@ fn activePaneIsRemote(self: *AppSession) bool {
     return app_session_mod.termCwdIsRemote(term);
 }
 
+/// 활성 pane 이 **원격인데 그 기계로 가는 길이 없다** — control socket 이 없다.
+///
+/// **왜 이 구별이 필요한가**(적대적 검증 2026-09-14). `ControlPersist` 가 만료되거나 네트워크가 끊기면
+/// 도크는 「저장소를 확인할 수 없습니다」 하나로 접힌다. 그 문구는 **저장소를 가리키므로** 사용자는
+/// 폴더를 의심하며 시간을 쓰는데, 사실은 **연결 이야기**다. §2.2 ⑸ 는 「소켓이 없으면 원격 SCM 은
+/// 꺼진 채로 **그 사실을 말한다**」고 정해 뒀고, 그 약속이 이 자리에서 안 지켜지고 있었다.
+///
+/// **`.unknown` 전부를 이 문구로 덮지 않는다.** 파일 Term·웹 Term 처럼 «물어볼 곳이 없다» 인 경우는
+/// 연결과 무관하므로 옛 문구가 맞다 — 그래서 소켓을 **직접 확인**하고, 원격이 아니면 곧바로 거짓이다.
+fn activeRemoteHasNoControlSocket(self: *AppSession) bool {
+    if (builtin.os.tag != .macos) return false;
+    if (!self.surface_initialized or self.tabs.items.len == 0) return false;
+    const term = pane_ops.activePane(self).activeTerm();
+    if (term.kind != .terminal) return false;
+    term_ops.refreshTermObservation(self, term, false, false);
+    if (!term.rt.observation.ssh_remote_dest_present) return false;
+    const dest = term.rt.observation.ssh_remote_dest.items;
+    if (dest.len == 0) return false;
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    return remoteControlSocketFor(self, dest, &buf) == null;
+}
+
+/// 판정자용: 위 술어를 그대로 묻는다(제품 경로가 쓰는 그 함수다).
+pub fn activeRemoteHasNoControlSocketForTest(self: *AppSession) bool {
+    return activeRemoteHasNoControlSocket(self);
+}
+
 pub fn gitRepoTarget(self: *AppSession, buf: []u8) RepoTarget {
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     if (activeTerminalCwd(self, &cwd_buf)) |cwd| {
@@ -1391,7 +1418,13 @@ pub fn scmEmptyNotice(self: *AppSession, probe: []u8) []const u8 {
     if (self.git_missing and !scmTargetIsRemote(self)) return maru.i18n.t(.git_not_installed);
     return switch (gitRepoTarget(self, probe)) {
         .none => noticeNotARepo(),
-        .unknown => noticeRepoUnknown(),
+        // **「모른다」의 이유가 연결이면 그렇게 말한다**(적대적 검증 2026-09-14 — §2.2 ⑸).
+        // 「저장소를 확인할 수 없습니다」는 폴더를 가리키는 문구라, `ControlPersist` 가 만료된 사용자는
+        // 엉뚱한 곳을 뒤진다. 소켓이 없다는 것은 **저장소 이야기가 아니라 연결 이야기**다.
+        .unknown => if (activeRemoteHasNoControlSocket(self))
+            maru.i18n.t(.scm_remote_transport_failed)
+        else
+            noticeRepoUnknown(),
         // **읽기 실패는 이유를 말한다**(RS4 §2.2 ⑺). 셋은 사용자가 할 일이 각각 다르다:
         // 원격에 git 을 깐다 · 연결을 다시 붙인다 · (그 밖) 저장소를 본다.
         .repo => if (self.git_failed) switch (self.git_failure) {

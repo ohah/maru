@@ -398,6 +398,12 @@ thumb이 셀 경계로 스냅해 목록과 어긋난다.
   항목을 24 개로 잡은 것도 그래서다: 버퍼가 자라며 realloc 해야 댕글링이 드러나고, 옛 배치 상한(=10)을
   넘겨야 「512 로 키운 것」이 함께 증명된다.
 
+  ⚠️ **실-git 판정자는 자기 저장소에서 «사용자의 전역 무시 목록»을 끊는다**(`core.excludesFile` 을 빈
+  값으로 박는다). `GIT_CONFIG_NOSYSTEM` 은 `/etc/gitconfig` 만 막고 `~/.gitconfig` 는 안 막는데,
+  **제품에게는 그것이 맞다** — 사용자의 git 이 실제로 그렇게 무시하므로 화면도 그래야 한다. 판정자는
+  반대다: 기계마다 답이 달라지면 그 초록이 아무것도 뜻하지 않는다. 실측(적대적 검증 13 회차)으로
+  전역에 `*.zig` 한 줄을 넣자 실-git 판정자 여럿이 함께 빨개졌다.
+
   덤으로 한 번에 묻는 개수가 **10 → 512** 가 됐다. 예전 상한은 argv 여유 칸 수였고, 그래서 항목이
   열한 개가 넘는 디렉터리는 나머지를 **아예 안 물었다**.
 - **선택과 키보드 포커스(ABI v127)**: 트리는 row index가 아니라 `절대 경로 + row kind` identity로 transient selection을 소유한다. scan 완료·접기·FSEvents rebuild로 row index가 바뀌어도 같은 row가 남으면 선택을 복원하고, 사라지면 가장 가까운 조작 가능한 조상/이웃으로 결정적으로 이동한다. 클릭 또는 `focus_file_tree`가 Zig의 단일 `FocusOwner`를 `.file_tree { restore_surface: ?surface_id }`로 바꾸고 Metal view를 first responder로 만든다. 현재 구현의 기본 `⌘⇧E`는 이 action에 연결되어 있으며, FP9에서 §3.4의 `toggle_file_panel_focus`로 기본 chord만 이전한다. surface id는 앱 전역 비재사용이라 generation token을 겸하며 Esc 때 entry와 native WKWebView 존재를 다시 검증한다. `file_tree_focus`는 이 union의 파생 getter일 뿐 별도 mutable boolean이 아니다. 선택과 keyboard focus는 workspace에 저장하지 않는다. 포커스 중 선택은 theme accent 배경과 WCAG 4.5 이상 대비가 나는 파생 전경을 marker·이름·dirty/conflict 표시 전체에 적용하고, 포커스 밖에서는 dim으로 그린다. active 파일 표시는 별도 marker로 유지한다.

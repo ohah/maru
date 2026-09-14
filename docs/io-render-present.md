@@ -19,7 +19,7 @@
 | 옵션 | 작업량 | 효과 | 비용/리스크 |
 |---|---|---|---|
 | **A. 설정형 timer** (`render.frame-rate`) | 완료 | 기본 60Hz로 지연 33→16ms, 30/120Hz opt-in | vsync 비정렬 judder(맥놀이), 실제 모니터 주사율 자동 추적 없음, higher Hz는 **idle wakeup 증가(배터리)** |
-| **B. CVDisplayLink가 메인 tick을 깨움** | focused PR | vsync 정렬(judder 0)·주사율 적응(120Hz)·idle/blur 시 stop(배터리 절약) | per-vsync 메인 hop coalesce 필요, 모달/라이브리사이즈 런루프 응답성, 생명주기 엣지 |
+| **B. CVDisplayLink가 메인 tick을 깨움** | focused PR | vsync 정렬(judder 0)·주사율 적응(120Hz)·idle/blur 시 stop(배터리 절약) | per-vsync 메인 hop coalesce 필요, 모달/라이브리사이즈 런루프 응답성, 생명주기 엣지. **⚠️ tick 이 예산을 넘는 상황은 B 로 안 고쳐진다** — vsync 에 맞춰 깨워도 그 시각에 프레임이 준비돼 있지 않다. 2026-09-14 실측 기각 기록은 §10.6 |
 | **C. 렌더 스레드에서 직접 present** | rework | B + **대량 출력 중 메인 응답성 분리** | Metal present를 @MainActor 밖으로 + drawable 리사이즈 동기화(코어 thread-safety는 Phase 1–3로 이미 충족이 유일한 위안) |
 
 호버 "즉시 리드로우"는 별도 레버지만 **A/B와 중복**이 크다(호버는 이미 generation bump로 그려짐 — cadence만 지연). 하더라도 **상태 변화 시 dirty 플래그만**(동기 draw는 이중 present·타이밍 위험이라 지양).
@@ -33,6 +33,8 @@
 
 ### 10.4 결정 자세 (현재)
 
+**먼저 tick 이 예산 안에 드는지 본다**(§10.6) — cadence 결정은 그 다음이다. tick 이 16.7ms 를 넘고 있으면 아래 어떤 선택지도 체감을 바꾸지 못한다.
+
 **기본/권장값은 60Hz.** 30Hz는 저전력/낮은 wakeup 우선 옵션, 120Hz는 ProMotion/고주사율에서 체감 반응성을 우선할 때의 opt-in 상한이다. 144/240Hz는 현재 `NSTimer` 구조에서 vsync 정렬 없이 wakeup만 늘 가능성이 커 열지 않는다. ProMotion 수준 진짜 매끄러움과 모니터별 자동 적응을 원하면 **B(CVDisplayLink)를 doc-first 설계 후** 착수 — C(렌더 스레드)는 *대량 출력 중 메인 응답성*까지 필요해질 때.
 
 ### 10.5 애니메이션 cadence가 tick throughput에 묶임 (스피너 지연 진단)
@@ -45,9 +47,100 @@
 
 **SECONDARY 원인 — cadence가 tick throughput에 묶임(스피너는 수정됨)**: 애니메이션이 **tick 카운트**로 진행하면 cadence가 §10.2의 **단일 전역 `NSTimer`**가 목표 Hz로 tick을 발사한다는 전제에 의존한다. 그런데 `NSTimer`는 이전 핸들러가 도는 동안 다음 발사가 밀리므로 **한 tick이 무거우면 실효 tick rate가 목표 Hz 아래로 떨어진다** → tick-카운트 애니메이션이 그만큼 느려진다(freeze는 아님 — PRIMARY 수정 후엔 멈추지 않고 느려지는 잔여 효과). 무겁게 만드는 것: **탭 전환**(새 활성 surface 전체 grid CoreText reshape), **SSH 포커스**(활성 surface 매 tick 재빌드 + `syncAutoTitles`가 매 tick **모든 코어** lock + `sync_view` 활성 코어 lock이 바쁜 리더와 `core_mutex` 경합). **수정**: `advanceAgentSpinner`가 위상을 tick 카운트가 아니라 **wall-clock 경과**(`agent_spin_last_ns` 이후 실경과 ms, `std.Io.Clock.awake`)로 진행한다 — tick rate가 떨어져도 위상이 실시간을 따라가고, stall(무거운 tick으로 tick이 밀린 뒤) 후엔 경과분만큼 여러 프레임을 한 번에 catch-up한다(drift 없이 나머지 보존). 스피너는 이제 tick rate와 무관하게 매끄럽다(잔여 hitch는 tick이 실제로 present를 못 하는 순간뿐 — 그건 §10.2 옵션 B/C 영역). 커서/텍스트 blink도 **같은 이유로 wall-clock으로 이주했다(완료)** — 옛 틱-카운트는 ms를 *설정* `render.frame-rate` 기준으로 환산해, 실효 tick rate가 그보다 낮으면(실측 ~17Hz vs 설정 60Hz) 500ms 반주기가 1.7초가 돼 깜빡임이 3배 넘게 느려졌다("커서가 너무 느리다" 제보의 원인). 이제 `blink_phase_ns` baseline + 경과분 catch-up으로 tick rate와 무관하게 설정 속도를 지킨다(스피너와 동일 모델). 게이트가 전역 합이 아니라 활성 surface 출력인 이유는 위 PRIMARY 항목의 "두 번째 피해자" 참고.
 
-**실측 계측(`.frametime` 스코프)**: `MARU_DEBUG=1`이면 `logFrameTime`이 tick의 wall-clock을 단계별(pre·**titles**=syncAutoTitles 전체 코어 lock·**drain**=리더 PTY pump·mid·**project**=활성 surface build+투영)로 분해해, 느린 tick(총>8ms)은 즉시 `SLOW` 한 줄, 약 1초 창마다 **실효 rate·mean/max·단계 비중**을 요약한다(SECONDARY 요인 실측). 게이트는 `diag.zig` 단일 출처(`.sync`와 동형, release 비용 0). **초기 실측(controlled smoke, 단일 surface)**: 전체 grid build tick ≈ **13ms, `project` 단계가 지배**(12.9/13.0) — 탭 전환 reshape가 한 프레임 hiccup임을 확인.
+**실측 계측(`.frametime` 스코프)**: `MARU_DEBUG=1`이면 `logFrameTime`이 tick의 wall-clock을 단계별(pre·**titles**=syncAutoTitles 전체 코어 lock·**drain**=리더 PTY pump·mid·**project**=활성 surface build+투영)로 분해해, 느린 tick(총>8ms)은 즉시 `SLOW` 한 줄, 약 1초 창마다 **실효 rate·mean/max·단계 비중**을 요약한다(SECONDARY 요인 실측). 게이트는 `diag.zig` 단일 출처(`.sync`와 동형, release 비용 0). **초기 실측(controlled smoke, 단일 surface)**: 전체 grid build tick ≈ **13ms, `project` 단계가 지배**(12.9/13.0) — 탭 전환 reshape가 한 프레임 hiccup임을 확인. **이 단계 분해는 §10.6에서 더 잘게 쪼개졌다**(project → grid/chrome/place/assemble, assemble → 이미지 4단계, chrome → 카드/상태바/헤더) — 아래 절이 그 트리와 실측의 단일 출처다.
 
-**SECONDARY 픽스 상태**: (A) 스피너를 **wall-clock 경과** 기반으로 전환 — **완료**(`advanceAgentSpinner`, 위 참조). (B) tick당 비용 축소 — **후속**: `syncAutoTitles`를 매 tick 전체 코어 lock 대신 사이드바에 보이는 Term/변화 시만, 리더 lock 보유 축소, 탭 전환 reshape 결과 캐시. (C) 근본은 §10.2 옵션 B(CVDisplayLink)/C(렌더 스레드 present)로 cadence를 tick throughput에서 분리 — **후속**. (B)(C)는 스피너 외 chrome/present 매끄러움과 tick 자체 응답성을 더 개선하나, 사용자가 보고한 스피너 지연은 PRIMARY(굶김) + (A)(wall-clock)로 해소된다.
+**SECONDARY 픽스 상태**: (A) 스피너를 **wall-clock 경과** 기반으로 전환 — **완료**(`advanceAgentSpinner`, 위 참조). (B) tick당 비용 축소 — **후속**: `syncAutoTitles`를 매 tick 전체 코어 lock 대신 사이드바에 보이는 Term/변화 시만, 리더 lock 보유 축소, 탭 전환 reshape 결과 캐시. (C) 근본은 §10.2 옵션 B(CVDisplayLink)/C(렌더 스레드 present)로 cadence를 tick throughput에서 분리 — **후속**. ⚠️ **이 «근본» 판단은 축을 하나 빠뜨린다**: tick 자체가 예산을 넘으면 cadence를 vsync 에 붙여도 낼 프레임이 없다. 2026-09-14 진단(§10.6)에서 옵션 B 가설은 실측으로 기각됐고, 실제 해법은 **tick 비용을 줄이는 것**이었다. (B)(C)는 스피너 외 chrome/present 매끄러움과 tick 자체 응답성을 더 개선하나, 사용자가 보고한 스피너 지연은 PRIMARY(굶김) + (A)(wall-clock)로 해소된다.
+
+### 10.6 kitty graphics 화면의 프레임 비용 — 터미널 브라우저 진단 (2026-09-14)
+
+**증상(사용자 관찰)**: 터미널 브라우저(kitty graphics 로 웹을 그리는 TUI)를 띄우면 **스크롤하거나 클릭했을 때 화면 반응이 느리다**. 화면이 뜨는 것 자체는 문제가 없고 **동작할 때**만 느리다. 같은 기기의 Ghostty 는 부드럽다.
+
+**결론 먼저**: 원인은 present cadence 가 아니라 **한 tick 이 예산을 넘는 것**이었다. 그리고 그 비용의 주인은 「이미지 렌더링」이 아니라 **매 프레임 수 MB 를 새로 할당하는 두 번의 픽셀 복사 + 빈 칸까지 전부 CoreText 에 넘기는 shaping** 이었다. 세 곳을 고쳐 **최저 실효 rate 45.4 → 58.6Hz, 예산 초과 tick 91.6 → 11.8회**(각 5회 반복, 부하 통제)가 됐다.
+
+#### 기각된 가설 (전부 실측으로)
+
+| 가설 | 기각 근거 |
+|---|---|
+| **§10.2 옵션 B(CVDisplayLink) 부재가 원인** | 사용자 화면이 75Hz 라 `render.frame-rate = 75` 로 주파수를 맞춰도 체감 동일. cadence 를 vsync 에 붙여도 **tick 이 25ms 면 낼 프레임이 없다** |
+| 주사율 불일치(60 vs 75Hz) 맥놀이 | 위와 같음 |
+| Debug 빌드라서 | ReleaseSafe 로도 느림. (다만 Debug 는 실제로 **15배** 느리다 — 아래 참고) |
+| `MARU_DEBUG` 로깅이 측정을 만든 것 | trim 켠 쪽이 로그를 23% **더** 뿜고도 빨랐다 |
+| 이미지 배치(`buildGpuImages`)가 비싸다 | 실측 **0.0ms** |
+| `replace` 3.5ms 는 셀 배열 생성 | 셀 생성 **0.0ms**. dupe + 미계측 구간이었다 |
+
+**참고 — 빌드 모드별 이미지 경로 비용**(캡처한 실제 프레임, 760×486 RGBA):
+
+| 단계 | Debug | ReleaseSafe | ReleaseFast |
+|---|---|---|---|
+| base64 디코드 | 0.34ms | 0.01ms | 0.01ms |
+| zlib inflate | 4.04ms | 0.40ms | 0.32ms |
+| 업로드 memcpy | 0.73ms | 0.04ms | 0.00ms |
+
+`mise run macos-app`(=`zig build macos-app`)은 `standardOptimizeOption` 기본이라 **Debug** 다. 성능을 재려면 반드시 `-Doptimize=` 를 준다.
+
+#### 부하의 실체 (PTY 캡처)
+
+터미널 브라우저가 보내는 것은 `a=T, f=32, o=z, t=d` — **RGBA 원본을 zlib 로 압축한 direct transmit** 이다. 1920×1080 창에서 프레임당 **5.6MB**(압축 후 수십 KB)이고, 스크롤 중 4.7~7.3 img/s 가 들어온다. 즉 **초당 25~40MB 의 픽셀**이 코어→렌더 경로를 지난다.
+
+> 이미지 감지는 `TERM_PROGRAM` 이 아니라 **`a=q` APC 질의**로 한다. maru 는 0.1ms 안에 `ESC_Gi=<id>;OK ESC\` 로 답하므로(한도 500ms), `TERM_PROGRAM=maru` 정직 선언([터미널 호환성/보안 정책](terminal-compatibility-policy.md))이 이미지 경로를 막지 않는다 — `pty/macos.zig` 의 위장 철회 주석이 예측한 그대로다.
+
+#### 계측 확장 (`.frametime`)
+
+§10.5 의 5단계를 트리로 쪼갰다. 모두 `ft_on`(=`MARU_DEBUG`) 게이트라 release 는 진입하지 않는다.
+
+```
+tick ─ pre · titles · drain · mid · project
+                                    ├─ grid    활성 본문 CoreText 수집
+                                    ├─ chrome  사이드바·상태바·헤더·오버레이
+                                    │          └ 카드 / 상태바 / 헤더~pane직전
+                                    ├─ place   placeMultiPane(atlas)
+                                    └─ assemble
+                                       ├─ 이미지앞 · buildGpuImages
+                                       ├─ 픽셀복사 (planImageUploads)
+                                       ├─ 조립
+                                       └─ replace (셀 / 병합 / dupe)
+```
+
+렌더러(`metal_frame`)에는 시계가 없으므로(`std.Io` 는 platform 소유) **platform 이 `diag_now` 함수 포인터를 꽂는다**. 미주입이면 모든 계측이 0 이다.
+
+**창 크기 재현**: 기본 창(960×600)에서는 이 증상이 **재현되지 않는다**(계속 61Hz). 진단 전용 `MARU_FT_WINDOW_SIZE=WxH` 로 실환경 크기를 줘야 한다 — 셀 수와 이미지 크기가 함께 커져야 비용이 드러나기 때문이다. 이 함정 때문에 조사 초반을 통째로 헛짚었다.
+
+#### 실측 (1920×1080, 브라우저 스크롤, ReleaseSafe)
+
+```
+현행:      tick mean 6.20ms, 최저 45.4Hz, SLOW 91.6회/40초
+           assemble 40~59%  ≫  shape 38~52%
+
+수정 후:   tick mean 1.59ms, 최저 58.6Hz, SLOW 11.8회/40초
+           shape 65~84% (chrome 36~54% + grid 26~49%)  ≫  assemble 2~10%
+```
+
+#### 수정 셋 (현재 전부 실험 플래그 뒤 — 제품 아님)
+
+1. **줄 끝 빈 칸 trim**(`draw_list.experiment_trim_blank`) — 행 오른쪽의 «그릴 것 없는» 구간을 CoreText 에 안 넘긴다. 브라우저 화면은 본문이 통째로 이미지라 셀의 99% 가 빈 칸인데 전부 shaping 하고 있었다. **베이스**: Ghostty `font/shaper/run.zig` `RunIterator.next` 의 첫 동작(`Trim the right side of a row that might be empty`) — 같은 착상이고 코드는 maru 자체다. grid 26~57% → 9~15%.
+2. **`replace` 이미지 버퍼 capacity 재사용**(`metal_frame.experiment_reuse_image_pixels`) — 길이가 아니라 **capacity** 로 재사용을 판정한다. 길이 일치를 요구하면 generation dedup 때문에 길이가 0 ↔ 5.6MB 로 번갈아 와 **적중률이 22%** 였다(실측). capacity 판정으로 99%. dupe 1.8 → 0.1ms.
+3. **`planImageUploadsReusing`** — 픽셀을 매 프레임 새 힙 버퍼로 만들지 않고 AppSession 이 든 방에 덮어쓴다. 2.7 → 0.1ms.
+
+**같은 크기 순수 memcpy 벤치가 실제보다 18배 빨랐다** — 비용의 주인이 복사가 아니라 **재할당**임을 그 차이가 가리켰고, 그래서 「복사를 없애기」가 아니라 「방을 유지하기」가 해법이 됐다.
+
+**소유권 규칙**: 2·3 은 「길이 ≠ 할당 크기」와 「비소유 슬라이스」라는 상태를 새로 만든다. free 는 반드시 `cap` 크기로 하고(`image_pixels_cap`·`kitty_pixels_cap`), 재사용 버퍼를 free/교체하는 경로(bg 이미지 합성·갤러리 `appendGpuImages`)는 **실제로 픽셀을 건드리기 직전에** owned 사본으로 승격한다. 승격을 호출부에 무조건 두면 갤러리가 닫힌 프레임에서도 5.6MB 를 헛복사해 **최적화가 없애려던 비용을 그대로 되살린다**(실측 1.9ms — 실제로 한 번 그렇게 만들었고 계측이 잡았다).
+
+#### A/B 5회 (부하 4.7~4.8 img/s 로 통제, 겹침 없음)
+
+| | base | opt |
+|---|---|---|
+| SLOW | 97, 86, 95, 87, 93 | **14, 14, 15, 11, 5** |
+| 최대 mean | 5.84~6.87ms | **1.35~1.84ms** |
+| 최저 rate | 43.9~49.0Hz | **57.8~59.0Hz** |
+
+#### 남은 것 / 한계 (정직)
+
+- **병목이 chrome shaping 으로 이동했다**(36~54%, 이제 grid 보다 크다). 사이드바·탭바는 거의 안 바뀌는 텍스트라 **run 단위 shaping 캐시**의 최적 대상이다 — Ghostty `font/shaper/Cache.zig` 가 같은 벽을 만나 도입한 것이고, 그 주석은 shaping 이 자기 기계에서 **프레임 시간의 96%** 였다고 적는다. 키를 **위치 독립**(run 시작 기준 상대 cluster)으로 잡는 것이 핵심이다 — 절대 위치를 넣으면 스크롤마다 전량 미스가 된다.
+- **trim 은 알려진 회귀가 있다**: 빈 셀 경로(`metal_frame` 의 `draw_cells` 루프)가 DrawList 를 돌기 때문에, 줄 끝 빈 칸을 빼면 **선택·검색 하이라이트가 그 칸에 안 그려진다**(테스트로 실증: 8칸 → 0칸). 커서는 overlay 경로라 무사하고, **그 차이가 곧 해법을 가리킨다** — 선택 배경도 커서처럼 격자 기반 overlay 로 분리해야 한다.
+- **창을 여는 프레임에 chrome 콜드 스타트 ~24ms** 가 세션당 1회 있다(카드 3.8 + 상태바 8.4 + 헤더~pane직전 11). 스크롤 증상과는 **다른 현상**이고 데워지면 사라진다.
+- 재현은 브라우저를 pty 로 몰아 만든 **합성 스크롤**이다. 실제 트랙패드 관성 스크롤은 더 조밀하다.
+- 셋 다 실험 플래그 뒤에 있고 기본은 꺼짐이다. 제품 승격은 위 회귀와 소유권 규칙의 회귀 테스트를 갖춘 뒤다.
+
 
 ## 11. chrome(사이드바 스피너) 독립 present — sync(2026) 게이트에서 분리 (구현)
 

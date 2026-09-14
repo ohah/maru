@@ -11164,7 +11164,10 @@ test "kitty APC 무작위 fuzz: 어떤 조합에도 죽지 않고 ground 로 돌
     const px16 = "AAAAAAAAAAAAAAAAAAAAAA=="; // 16B = 2x2 RGBA — 유효 전송의 payload
     const actions = [_]u8{ 't', 'T', 'q', 'p', 'd', 'f', 'a', 'c', 'x' };
     const keys = [_]u8{ 'f', 's', 'v', 'i', 'I', 'm', 'o', 'p', 'x', 'y', 'w', 'h', 'X', 'Y', 'c', 'r', 'z', 'C', 'd', 'P', 'Q', 'H', 'V', 'q', 't', 'U' };
-    const values = [_][]const u8{ "0", "1", "2", "3", "24", "32", "100", "4294967295", "2147483647", "-2147483648", "-1", "999999", "d", "f", "z", "a", "", "x1y", "00000000000000000000" };
+    // **delete 타깃 글자를 값 목록에 넣는다.** 안 넣으면 `d=p/q/r/x/y` 가 한 번도 안 만들어져
+    // 그 코드가 fuzz 를 통과한 적이 없는데도 초록이다(실측으로 그 상태였다 — 타깃 여섯을 더한
+    // 뒤에도 생성기는 옛 값만 뽑고 있었다). 대문자도 넣어 조건부 free 경로까지 밟게 한다.
+    const values = [_][]const u8{ "0", "1", "2", "3", "24", "32", "100", "4294967295", "2147483647", "-2147483648", "-1", "999999", "d", "f", "z", "a", "p", "q", "r", "x", "y", "c", "n", "i", "P", "Q", "R", "X", "Y", "Z", "C", "N", "I", "A", "F", "", "x1y", "00000000000000000000" };
     // 더 깊은 곳을 밟게 payload 를 넓힌다 — 큰 프레임(4x4=64B), RGB(3B/px), 잘린 base64.
     const px64 = "A" ** 84 ++ "=="; // 64B 근처 — 4x4 RGBA
     const px12 = "AAAAAAAAAAAAAAAA"; // 12B — 2x2 RGB(f=24)
@@ -11186,6 +11189,9 @@ test "kitty APC 무작위 fuzz: 어떤 조합에도 죽지 않고 ground 로 돌
     var max_bytes_seen: usize = 0;
     var saw_frames = false;
     var saw_running = false;
+    // **새 delete 타깃을 실제로 밟았는지 센다.** 「4000 개를 먹였다」와 「그 코드가 돌았다」는
+    // 다르다 — 값 목록에 타깃 글자가 없으면 생성기가 그 갈래를 영영 안 만든다(실측으로 그랬다).
+    var saw_new_delete = false;
     var n: usize = 0;
     while (n < 4000) : (n += 1) {
         if (n % 200 == 0) for (seed_cmds) |c| try core.write(c); // 지워졌으면 다시 심는다
@@ -11229,6 +11235,12 @@ test "kitty APC 무작위 fuzz: 어떤 조합에도 죽지 않고 ground 로 돌
             try seq.appendSlice(std.testing.allocator, payloads[rnd.intRangeLessThan(usize, 0, payloads.len)]);
         }
         try seq.appendSlice(std.testing.allocator, "\x1b\\");
+        // 이 명령이 새 delete 타깃을 실제로 실행했는가(값 목록에 그 글자가 있어야 만들어진다).
+        if (std.mem.indexOf(u8, seq.items, "a=d") != null) {
+            for ([_][]const u8{ "d=p", "d=q", "d=r", "d=x", "d=y", "d=P", "d=Q", "d=R", "d=X", "d=Y" }) |t| {
+                if (std.mem.indexOf(u8, seq.items, t) != null) saw_new_delete = true;
+            }
+        }
         try core.write(seq.items);
         // chunked 전송(m=1)도 가끔 섞는다 — 이어붙이기 상태 기계를 흔든다.
         if (rnd.intRangeAtMost(u8, 0, 9) == 0) {
@@ -11255,6 +11267,9 @@ test "kitty APC 무작위 fuzz: 어떤 조합에도 죽지 않고 ground 로 돌
     try std.testing.expect(max_bytes_seen * 2 >= core.kitty_images.limit);
     try std.testing.expect(saw_frames);
     try std.testing.expect(saw_running);
+    // 새 delete 타깃(p/q/r/x/y 와 대문자)이 한 번이라도 실행됐는가 — 값 목록에서 그 글자가 빠지면
+    // 여기서 걸린다. 자원 단언과 같은 규율이다(밟지 않은 코드는 지켜지지 않는다).
+    try std.testing.expect(saw_new_delete);
 
     // 파서가 ground 로 돌아와 평범한 텍스트를 정상으로 받는다 — 여기가 깨지면 화면이 통째로 죽는다.
     try core.write("\x1b[2J\x1b[Hok");

@@ -44663,9 +44663,16 @@ test "right-click opens context menu on a rename target; clicking Rename starts 
     try std.testing.expect(session.chrome_host.context_menu.open);
     try std.testing.expect(session.rename == null);
 
-    // ② 메뉴 항목(Rename, 행 0)을 좌클릭 → 메뉴 닫힘 + term0 rename 시작. anchor = 우클릭 px(작아서 clamp 없음).
-    const mx: f64 = @floatFromInt(session.chrome_host.context_menu.anchor_x + 1);
-    const my: f64 = @floatFromInt(session.chrome_host.context_menu.anchor_y + 1);
+    // ② 메뉴 항목(Rename, 행 0)을 좌클릭 → 메뉴 닫힘 + term0 rename 시작.
+    //
+    // ⚠️ **앵커가 아니라 「뜬 자리」를 물어야 한다**(적대적 A51). 예전에는 `anchor_x + 1` 을 찍으며
+    // 「작아서 clamp 없음」이라고 적었는데, 팝업이 가장자리에서 한 셀 떨어지게 되자(edge_gap 네 방향)
+    // 그 전제가 깨져 **메뉴 밖을 눌렀다.** 「누른 자리」와 「뜬 자리」는 clamp 가 끼면 다른 값이다.
+    const menu_items = settings_ops.contextMenuItems(session);
+    const menu_props = chrome.props.ChromeProps{ .metrics = session.buildCellMetrics() };
+    const menu_rect = chrome.components.context_menu.menuRect(&session.chrome_host.context_menu, menu_items, menu_props).?;
+    const mx: f64 = @floatFromInt(menu_rect.x + 1);
+    const my: f64 = @floatFromInt(menu_rect.y + 1);
     session.mouse(1, mx, my, 0, 0);
     try std.testing.expect(!session.chrome_host.context_menu.open);
     try std.testing.expect(term_ops.renamingTerm(session, term0));

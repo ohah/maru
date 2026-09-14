@@ -145,7 +145,10 @@ pub fn handle(k: input.InputEvent.KeyEvent, state: *State) Action {
 /// 메뉴 박스 rect(px) — anchor에서 시작하되 화면(backing) 우/하단을 넘으면 당겨 안에 들게 clamp한다. 폭 = 최대 항목
 /// 표시폭(EAW) + 좌우 패딩, 높이 = 항목수 × cell. **view·itemAt 단일 출처**라 "보이는 항목 == 클릭되는 항목". 항목
 /// 0이거나 cell 0이면 null.
-fn menuRect(state: *const State, items: []const []const u8, p: props.ChromeProps) ?draw.Rect {
+/// **`pub` 인 이유**: `view`·`itemAt` 의 공유 출처이자, 판정자가 「보이는 자리」를 물을 유일한 길이다.
+/// 앵커 좌표로 메뉴 안을 찍던 판정자가 edge_gap 이 생기자 **메뉴 밖을 눌렀다**(적대적 A51) — 「누른
+/// 자리」와 「뜬 자리」는 clamp 가 끼면 다른 값이므로, 뜬 자리를 물어야 한다.
+pub fn menuRect(state: *const State, items: []const []const u8, p: props.ChromeProps) ?draw.Rect {
     if (items.len == 0) return null;
     const m = p.metrics;
     const cw = @max(m.cell_width_px, 1);

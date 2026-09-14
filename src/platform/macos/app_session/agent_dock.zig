@@ -1904,7 +1904,7 @@ pub fn agentSessionDockSwitcherSmokeProbe(self: *const AppSession) AgentSessionA
     const bar = dock_ops.dockGeometry(self).view_bar;
     const slot = dock_view_bar.slotRect(
         .{ .x = bar.x, .y = bar.y, .w = bar.w, .h = bar.h },
-        self.cell_width_px,
+        self.dockViewBarGrid(),
         2,
     ) orelse return .{};
     if (slot.w == 0 or slot.h == 0) return .{};

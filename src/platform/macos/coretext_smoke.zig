@@ -639,6 +639,9 @@ fn buildDockViewBarFixtureDrawList(allocator: std.mem.Allocator) !renderer.DrawL
         .{ .rgb = .{ .r = 0xE6, .g = 0xE9, .b = 0xF2 } },
         .{ .rgb = .{ .r = 0x8A, .g = 0x92, .b = 0xA6 } },
         &actions,
+        // 이 픽스처는 **격자 덤프**가 관심사라 셀 파생(토큰 없음) 4칸을 그대로 쓴다 — 덤프의 열 수가
+        // 테마 pt 에 흔들리면 눈으로 대조하던 자리가 매번 바뀐다.
+        maru.chrome.components.dock_view_bar.Grid.init(8, 0),
     );
 }
 

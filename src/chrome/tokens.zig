@@ -342,6 +342,20 @@ pub const Spacing = struct {
     // 셀 한 행(`paneBarBgCell`)이라 셀에서 떨어진 높이를 주면 배경이 위쪽만 칠해진다. 그 경로에서는 폰트
     // 파생이 결함이 아니라 요구사항이다. 어느 쪽이든 **두 바가 같은 식을 쓰므로 정렬은 유지된다**.
     bar_height_pt: u16 = 0,
+
+    /// 도크 뷰 스위처 슬롯 하나의 **논리 폭**(pt). 0이면 셀 파생(`dock_view_bar.default_slot_cols` 칸).
+    ///
+    /// **왜 필요한가**: 슬롯 폭이 `4 × 터미널 셀폭`으로 고정이던 시절, 폰트를 키우면 요구 폭만 커지고 도크
+    /// 폭(pt 고정)은 그대로라 어느 순간 스위처가 **통째로 사라졌다**(실측 2026-09-15: font 24pt에서 요구 224px
+    /// > 바 180px → `slotRect` null → 도크 뷰를 아예 못 바꿈. 배율과 무관하게 재현). `bar_height_pt`가 바 높이를
+    /// 터미널 폰트에서 떼어낸 것과 **같은 결함·같은 해법**이고, 그때 폭만 안 옮겨져 절반이 남아 있었다.
+    ///
+    /// **셀 수를 없애지는 않는다.** 아이콘은 셀 격자에 그려지므로(`buildDockViewBarDrawList`가 열 번호로 놓는다)
+    /// 슬롯도 셀 배수여야 그린 자리와 눌리는 자리가 안 갈린다. 그래서 이 pt를 **셀 수로 환산**해 쓴다 —
+    /// 바뀌는 것은 "몇 칸인가"이고, 격자 계약은 그대로다.
+    ///
+    /// **tui=0(셀 파생)은 의도다** — `bar_height_pt`와 같은 이유(셀 격자 정렬이 tui의 정체성).
+    dock_view_slot_width_pt: u16 = 0,
 };
 
 /// 테두리/선 토큰. tui는 ~2px 띠(reserved-kind). rich에서 radius 등을 추가한다.
@@ -541,6 +555,10 @@ pub const Tokens = struct {
         // 이제 터미널 탭 바도 함께 본다(두 바의 아래 경계선 정렬). 고정이므로 terminal 폰트를 바꿔도 두 바가
         // 함께 제자리에 있고, 도크 rect가 폰트에 흔들리지 않는다(`font-scale-rects` fixture).
         tk.space.bar_height_pt = 40;
+        // SLOT-W: rich 뷰 스위처 슬롯 32pt 고정. 이 값은 **기존 외형을 보존하도록** 골랐다 — 기본 폰트(14pt)에서
+        // 1×·2× 모두 환산 결과가 4칸이라 이 커밋 전과 픽셀이 같다(실측). 큰 폰트에서만 칸 수가 줄어 스위처가
+        // 살아난다: 24pt/1× 2칸(112px ≤ 180px), 24pt/2× 2칸(232px ≤ 360px).
+        tk.space.dock_view_slot_width_pt = 32;
         // KH-5: rich 키캡도 tui와 같은 keycapBg(패널 대비 — 명암 기준)를 쓴다. tui()가 이미 keycap_bg를 그렇게 깔았으므로
         // rich는 override하지 않는다(별도 처리 불필요 — light·dark 모두 또렷). 셀-그리드라 키캡은 fill(셀 배경)이고 둥근
         // GPU quad는 글리프에 가려 못 쓴다(shortcut_hints.view 주석).

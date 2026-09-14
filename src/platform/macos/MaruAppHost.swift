@@ -5152,9 +5152,19 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 크기는 보존하되, fixture만 1920×1200 pt로 열어 button text/card와 오른쪽 세션 도크의 실제
         // typography·row divider를 PR에서 충분한 해상도로 검토할 수 있게 한다. 좁은 960×600 frame에서
         // 잘려 보이지 않게 한다. backing scale은 기존 제품 resize path가 그대로 정한다.
+        // [진단 전용] 사용자 실환경 창 크기를 재현하려고 `MARU_FT_WINDOW_SIZE=WxH`(pt)로 초기 크기를 덮는다.
+        // 960×600 기본은 사용자가 실제로 쓰는 창보다 훨씬 작아, 그 창에서 잰 프레임 비용이 실환경을 대표하지
+        // 못한다(셀 수·이미지 크기가 둘 다 다르다). 미설정이면 기존 동작 그대로다.
+        let ftWindowOverride: NSSize? = {
+            guard let raw = ProcessInfo.processInfo.environment["MARU_FT_WINDOW_SIZE"] else { return nil }
+            let parts = raw.lowercased().split(separator: "x")
+            guard parts.count == 2, let w = Double(parts[0]), let h = Double(parts[1]),
+                  w >= 200, h >= 200, w <= 8000, h <= 8000 else { return nil }
+            return NSSize(width: w, height: h)
+        }()
         let initialContentSize = isAgentSessionArchiveSmokeMode
             ? NSSize(width: 1920, height: 1200)
-            : NSSize(width: 960, height: 600)
+            : (ftWindowOverride ?? NSSize(width: 960, height: 600))
         let window = NSWindow(
             contentRect: NSRect(origin: .zero, size: initialContentSize),
             styleMask: [.titled, .closable, .resizable, .miniaturizable],

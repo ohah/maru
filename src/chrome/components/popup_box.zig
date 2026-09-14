@@ -57,17 +57,24 @@ pub fn place(box_w: u32, box_h: u32, pl: Placement, p: props.ChromeProps) ?Resul
     const cw = @max(m.cell_width_px, 1);
     const ch = @max(m.cell_height_px, 1);
     const ws = props.workspaceRect(m);
-    if (ws.w < cw or ws.h < ch) return null;
+    // ⚠️ **양쪽에서 한 셀씩 뺀다 — 그래서 두 셀이 필요하다**(적대적 A32). 한 셀만 보던 가드로는
+    // `ws.w` 가 `cw`~`2*cw` 일 때 `left_bound > right_bound` 로 **경계가 역전**되고, 아래 clamp 가
+    // 서로를 밀어내다 마지막에 적용되는 좌/상이 이겨 상자가 **반대쪽으로 넘친다.**
+    //
+    // **곱하지 않고 뺀다** — `2 * cw` 는 u32 곱이라 손상된 메트릭에서 오버플로로 **패닉**한다
+    // (`pxToCell` 이 「거대한 finite 좌표가 trap 하던 것을 막는다」고 세운 규율과 같은 축 · A35).
+    if (ws.w < cw or ws.w - cw < cw) return null;
+    if (ws.h < ch or ws.h - ch < ch) return null;
 
     // **네 방향 모두 한 셀 띄운다**(2026-09-14 · 사용자 결정). 처음에는 우·하만 띄웠는데, 그것은
     // `context_menu` 가 제보로 고칠 때의 **실측 사례가 우단이었기** 때문이지 좌·상이 달라서가 아니다.
     // 한쪽만 띄우면 같은 팝업이 어느 가장자리에 닿느냐에 따라 **테가 있다 없다** 해서 더 이상하다.
     const right_bound: i32 = @as(i32, @intCast(ws.x + ws.w)) - @as(i32, @intCast(cw));
     const bottom_bound: i32 = @as(i32, @intCast(ws.y + ws.h)) - @as(i32, @intCast(ch));
-    const top_bound: i32 = @as(i32, @intCast(ws.y)) + @as(i32, @intCast(ch));
+    const top_bound: i32 = @as(i32, @intCast(ws.y)) +| @as(i32, @intCast(ch));
     // 좌단은 사이드바 오른쪽으로 — 팝업은 터미널 영역 오버레이라 사이드바 chrome 위로 겹치지 않게 한다.
     // 단 앵커가 workspace 아래(상태바)면 그 규칙을 쓰지 않는다(위 `anchor_below_workspace` 주석).
-    const left_bound: i32 = @as(i32, @intCast(if (pl.anchor_below_workspace) 0 else ws.x)) + @as(i32, @intCast(cw));
+    const left_bound: i32 = @as(i32, @intCast(if (pl.anchor_below_workspace) 0 else ws.x)) +| @as(i32, @intCast(cw));
 
     const bw: i32 = @intCast(box_w);
     const bh: i32 = @intCast(box_h);
@@ -90,6 +97,8 @@ pub fn place(box_w: u32, box_h: u32, pl: Placement, p: props.ChromeProps) ?Resul
             y = bottom_bound - bh;
         }
     }
+    // **좌·상이 마지막이라 이긴다.** 상자가 workspace 보다 크면 어느 쪽이든 넘치는데, 그때 **시작
+    // 모서리를 보이게** 두는 쪽이 낫다 — 목록이라면 첫 항목이, 그림이라면 좌상단이 보인다(A34).
     if (y < top_bound) y = top_bound;
 
     var x: i32 = pl.anchor.x;
@@ -203,4 +212,28 @@ test "CSP1 popup_box: 네 방향 모두 한 셀을 띄운다 — 가장자리마
         return error.TestUnexpectedResult;
     try testing.expectEqual(@as(i32, 1000 - 8 - 100), br.rect.x);
     try testing.expectEqual(@as(i32, 600 - 16 - 100), br.rect.y);
+}
+
+test "CSP1 popup_box: workspace 가 두 셀보다 좁으면 null — 양쪽 gap 이 경계를 뒤집는다(A32)" {
+    // cw=8·ch=16 이므로 가로 16·세로 32 미만은 자리를 못 만든다.
+    try testing.expect(place(10, 10, .{ .anchor = .{ .x = 0, .y = 0, .w = 0, .h = 0 } }, metricsOf(12, 600)) == null);
+    try testing.expect(place(10, 10, .{ .anchor = .{ .x = 0, .y = 0, .w = 0, .h = 0 } }, metricsOf(1000, 20)) == null);
+    // 딱 두 셀이면 자리가 0 이지만 경계는 안 뒤집힌다 — 열린다.
+    try testing.expect(place(1, 1, .{ .anchor = .{ .x = 0, .y = 0, .w = 0, .h = 0 } }, metricsOf(16, 32)) != null);
+}
+
+test "CSP1 popup_box: 상자가 workspace 보다 크면 좌·상이 이긴다 — 시작 모서리를 보인다(A34)" {
+    const p = metricsOf(1000, 600);
+    const r = place(2000, 1000, .{ .anchor = .{ .x = 500, .y = 300, .w = 0, .h = 0 } }, p) orelse
+        return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(i32, 8), r.rect.x); // left_bound
+    try testing.expectEqual(@as(i32, 16), r.rect.y); // top_bound
+}
+
+test "CSP1 popup_box: 손상된 메트릭에 안 터진다 — 곱하지 않고 뺀다(A35)" {
+    var p = metricsOf(1000, 600);
+    p.metrics.cell_width_px = std.math.maxInt(u32);
+    p.metrics.cell_height_px = std.math.maxInt(u32);
+    // 예전 가드(`2 * cw`)는 여기서 u32 곱 오버플로로 죽었다. 지금은 조용히 null 이다.
+    try testing.expect(place(10, 10, .{ .anchor = .{ .x = 0, .y = 0, .w = 0, .h = 0 } }, p) == null);
 }

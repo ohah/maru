@@ -3211,8 +3211,13 @@ pub fn appendGpuImages(
         return;
     }
 
-    // 여기서부터는 pixels 를 free/교체하는 경로다 — 비소유면 지금 승격한다.
-    self.promoteKgPixelsOwned(pixels, pixels_owned);
+    // 여기서부터는 pixels 를 free/교체하는 경로다 — 비소유면 지금 승격한다. 실패(OOM)면 위 「안 그리고
+    // 나가는 길」과 같은 표시를 남기고 이번 프레임을 건너뛴다 — 재사용 버퍼를 든 채 내려가면 남의 방을 free 한다.
+    if (!self.promoteKgPixelsOwned(pixels, pixels_owned)) {
+        self.agent_activity.markAllNeedUpload();
+        self.agent_activity.markOpenNeedUpload();
+        return;
+    }
 
     const area = gridArea(self);
     const m = gridMetrics(self);

@@ -445,6 +445,10 @@ pub const RenderSnapshot = struct {
     // 투영한다. blink는 추적만 하고 깜빡임 타이머는 아직 렌더하지 않는다.
     cursor_shape: CursorShape = .block,
     cursor_blink: bool = true,
+    /// DECSCNM(CSI ?5h) 화면 반전. 렌더러가 색을 스왑하는 것은 `CellColors.screen_reverse` 가 하지만,
+    /// DrawList 빌더도 알아야 한다 — 반전 화면에서는 **빈 칸도 전경색 quad 로 칠해야** 하므로 줄끝
+    /// trim 을 끈다(자르면 그 칸이 clear color 로 비쳐, split 의 비활성 반전 pane 오른쪽이 정상 배경으로 남는다).
+    reverse_screen: bool = false,
     cells: []const Cell = &.{},
     // grapheme cluster 본체 store(TerminalCore.grapheme_store.items, id-1 인덱싱) — cells의
     // grapheme_id가 가리킨다. zero-copy(코어 store 슬라이스를 빌려줌). 비어 있으면 cluster 셀이

@@ -1914,11 +1914,14 @@ pub const MetalFrameBuffer = struct {
         }
         const t_dupe0 = diagNow();
         var new_image_pixels_cap = self.image_pixels_cap;
-        const new_image_pixels = if (reuse_image_pixels) blk: {
-            const buf = self.image_pixels.ptr[0..image_pixels.len];
-            @memcpy(buf, image_pixels);
-            break :blk buf;
-        } else blk: {
+        // 재사용이면 **아직 덮어쓰지 않는다** — 슬라이스만 잡아 두고, 뒤따르는 fallible 단계(live_ids dupe·
+        // 글리프 병합)가 전부 성공한 뒤 free 직전에 복사한다. 여기서 바로 덮어쓰면 뒤 단계가 실패했을 때
+        // 옛 `image_uploads` 가 새 바이트를 가리킨 채 남고, 렌더러가 매 draw 마다 그 uploads 를 재업로드하므로
+        // 다음 redraw 가 옛 이미지 id 에 이번 프레임 픽셀을 올린다(/code-review 가 잡았다). 옛 dupe 경로가
+        // 지키던 「replace 는 성공하거나 아무것도 안 바꾼다」를 재사용에서도 지킨다.
+        const new_image_pixels = if (reuse_image_pixels)
+            self.image_pixels.ptr[0..image_pixels.len]
+        else blk: {
             const fresh = try allocator.dupe(u8, image_pixels);
             new_image_pixels_cap = fresh.len;
             break :blk fresh;
@@ -1942,6 +1945,8 @@ pub const MetalFrameBuffer = struct {
         allocator.free(self.gpu_glyphs);
         allocator.free(self.gpu_images);
         allocator.free(self.image_uploads);
+        // 여기부터는 실패할 것이 없다 — 재사용 버퍼를 이제 덮어쓴다(위 주석: 원자성).
+        if (reuse_image_pixels) @memcpy(new_image_pixels, image_pixels);
         if (!reuse_image_pixels) allocator.free(self.image_pixels.ptr[0..self.image_pixels_cap]); // 재사용이면 같은 버퍼다
         allocator.free(self.live_image_ids);
         allocator.free(self.uploads);
@@ -4064,4 +4069,41 @@ test "[적대] 하이라이트 격자 pass: draw_cells 가 덮은 칸을 두 번
         if (c.background == want) painted += 1;
     }
     try std.testing.expectEqual(@as(usize, 10), painted); // 열 0~9 가 빠짐없이 한 번씩
+}
+
+test "[적대] replace 원자성: 재사용 경로에서 뒤 단계가 OOM 이어도 image_pixels 는 옛 프레임 그대로다" {
+    // /code-review 가 잡은 결함. 재사용 경로가 image_pixels 를 **먼저** 덮어쓰고 뒤에 fallible dupe 가 있으면,
+    // 실패 시 옛 image_uploads 가 새 바이트를 가리킨다 — 렌더러가 매 draw 마다 uploads 를 재업로드하므로
+    // 다음 redraw 가 옛 id 에 엉뚱한 픽셀을 올린다. 모든 할당 지점에서 한 번씩 OOM 을 주입해 「실패하면
+    // 옛 것 그대로, 성공하면 새 것」 둘 중 하나만 일어남을 고정한다.
+    const atlas_config: renderer.GlyphAtlasConfig = .{ .atlas_width_px = 1024, .atlas_height_px = 1024 };
+    const colors: CellColors = .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } };
+    const first = [_]u8{0xA1} ** 128;
+    const second = [_]u8{0xB2} ** 128; // 같은 길이 → capacity 재사용 경로
+    const live = [_]u32{ 7, 8, 9 }; // live_ids dupe 가 재사용 경로의 memcpy 앞에 있던 fallible 단계
+
+    var fail_index: usize = 0;
+    var saw_failure = false;
+    while (fail_index < 64) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        const alloc = failing.allocator();
+
+        var buf: MetalFrameBuffer = .{};
+        defer buf.deinit(std.testing.allocator); // 실패 시도와 무관하게 늘 온전히 돌려준다
+
+        // 첫 프레임은 실패 없이 채운다(fail_index 가 아직 안 왔거나, 왔으면 이 회차는 건너뛴다).
+        buf.replace(alloc, &.{}, atlas_config, 8, 16, null, null, colors, &.{}, &.{}, null, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &first, &live) catch continue;
+        try std.testing.expectEqualSlices(u8, &first, buf.image_pixels);
+
+        // 둘째 프레임: 어느 할당에서 실패하든 image_pixels 는 first 그대로여야 한다.
+        if (buf.replace(alloc, &.{}, atlas_config, 8, 16, null, null, colors, &.{}, &.{}, null, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &second, &live)) |_| {
+            try std.testing.expectEqualSlices(u8, &second, buf.image_pixels); // 성공했으면 새 것
+            if (saw_failure) break; // 실패 지점을 하나라도 지난 뒤 성공까지 봤으면 충분하다
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            try std.testing.expectEqualSlices(u8, &first, buf.image_pixels); // ← 여기가 결함이 있던 자리
+            saw_failure = true;
+        }
+    }
+    try std.testing.expect(saw_failure); // 주입이 실제로 한 번은 재사용 경로 안에서 터졌어야 한다
 }

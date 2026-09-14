@@ -2095,6 +2095,7 @@ pub fn snapshot(self: *const TerminalCore) types.RenderSnapshot {
         .ambiguous_wide = self.ambiguous_wide,
         .cursor_shape = self.cursor_shape,
         .cursor_blink = self.cursor_blink,
+        .reverse_screen = self.reverse_screen,
         .cells = self.screen.cells,
         .graphemes = self.grapheme_store.items, // cluster 본체 store를 zero-copy로 빌려준다(id로 참조)
         .prompt_marks = self.screen.prompt_marks, // 활성 화면 행 태그를 그대로 빌려준다(zero-copy)

@@ -14942,7 +14942,7 @@ pub const AppSession = struct {
             const surface_id = term.surface.id;
             var visible: std.ArrayList(u32) = .empty;
             defer visible.deinit(self.allocator);
-            self.collectMarkerNumbers(term, .cursor_block, &visible) catch return;
+            self.collectMarkerNumbers(term, .viewport, &visible) catch return;
             const owned = self.allocator.dupe(u8, path) catch return;
             // 바이트는 안 든다 — 디코드가 경로로 읽는다. 예산(§4.2)도 그만큼 덜 문다.
             marker_preview_ops.onImagePasted(&self.marker_preview, self.allocator, surface_id, visible.items, &.{}, owned) catch {
@@ -14971,7 +14971,7 @@ pub const AppSession = struct {
         const surface_id = term.surface.id;
         var visible: std.ArrayList(u32) = .empty;
         defer visible.deinit(self.allocator);
-        self.collectMarkerNumbers(term, .cursor_block, &visible) catch return;
+        self.collectMarkerNumbers(term, .viewport, &visible) catch return;
         const png = self.allocator.dupe(u8, bytes) catch return;
         const path = self.allocator.dupe(u8, temp_path) catch {
             self.allocator.free(png);
@@ -14991,14 +14991,22 @@ pub const AppSession = struct {
         if (term.kind != .terminal) return false;
         // **뷰포트 전부를 후보로 본다.** 전송된 마커는 커서 위(대화 영역)로 올라가므로 커서 블록만
         // 보면 영영 못 찾는다(사용자 제보 2026-09-14 — 「채팅창에 올라간 건 안 열린다」).
-        // 어느 소스로 풀지는 **범위가 가른다**(§4.2): 커서 블록 안이면 스테이징, 밖이면 인덱스.
         var hits: std.ArrayList(maru.session.agent_image_markers.Hit) = .empty;
         defer hits.deinit(self.allocator);
         self.collectMarkerHits(term, .viewport, &hits) catch return false;
         // `CellHit.row`는 **이미 뷰포트 행**이고 마커 스캔도 뷰포트 행으로 답한다 — 변환이 없다.
         const m = maru.session.agent_image_markers.hitAt(hits.items, cell.row, cell.col) orelse return false;
-        if (!self.markerIsInCursorBlock(term, m)) return self.toggleSentMarkerPreview(surface_id, m);
-        if (self.marker_preview.slots.items.len == 0) return false;
+        // ⚠️ **소스는 「어디에 있나」가 아니라 「누가 답할 수 있나」로 고른다.**
+        //
+        // 한 판에서는 범위(커서 블록 안/밖)로 갈랐는데 그것이 **회귀를 냈다**(사용자 제보): 커서
+        // 블록 스캔은 스크롤된 뷰포트에서 **빈 목록**이라(§3.3) 전송 전 마커까지 인덱스로 보내졌고,
+        // 인덱스는 **갤러리 도크를 연 적이 있어야** 채워지므로(`refreshForFocus`) 아무것도 안 열렸다.
+        // 범위는 같은 번호가 두 곳에 있을 때의 **동점 규칙**이지 게이트가 아니다.
+        //
+        // 그래서 **스테이징을 먼저 묻는다.** 거기 있으면 이번 실행에 우리가 직접 실어 둔 것이라
+        // 가장 확실하고, 전송된 뒤에도 `sent` 로 남아 있다(§4.2 A11). 없을 때만 인덱스로 간다.
+        const staged_known = if (self.marker_preview.stagingFor(surface_id)) |st| st.lookup(m.n) != null else false;
+        if (!staged_known) return self.toggleSentMarkerPreview(surface_id, m);
         const next = marker_preview_ops.toggle(&self.marker_preview, self.marker_preview_open, surface_id, m);
         const changed = (next == null) != (self.marker_preview_open == null) or
             (next != null and self.marker_preview_open != null and next.?.n != self.marker_preview_open.?.n);
@@ -15100,14 +15108,6 @@ pub const AppSession = struct {
         marker_preview_ops.appendGpuImage(open, self.allocator, place, images, uploads, pixels, live_ids);
     }
 
-    /// 이 마커가 **입력창(커서 블록)** 안인가. 아니면 이미 전송된 것이다(§4.2 범위 규칙).
-    fn markerIsInCursorBlock(self: *AppSession, term: *Term, m: maru.session.agent_image_markers.Hit) bool {
-        var block: std.ArrayList(maru.session.agent_image_markers.Hit) = .empty;
-        defer block.deinit(self.allocator);
-        self.collectMarkerHits(term, .cursor_block, &block) catch return false;
-        return maru.session.agent_image_markers.hitAt(block.items, m.row, m.start_col) != null;
-    }
-
     /// **전송된** 마커를 토글한다 — 픽셀은 갤러리 인덱스(트랜스크립트)에서 온다(§4.4).
     ///
     /// 인덱스가 그 N을 모르면 **열지 않는다**. 화면에 글자로 쓰인 `[Image #N]`과 구분할 방법이 그것뿐이고
@@ -15119,7 +15119,12 @@ pub const AppSession = struct {
                 return true;
             }
         }
-        const found = self.findSentMarkerHit(m.n) orelse return false;
+        const found = self.findSentMarkerHit(m.n) orelse {
+            // 인덱스가 아직 없다 — 갤러리 도크를 한 번도 안 열었으면 비어 있다(`refreshForFocus`).
+            // **이번 클릭은 조용히 실패**하되 스캔을 걸어 다음 번엔 답할 수 있게 한다.
+            agent_activity_ops.refresh(self, false);
+            return false;
+        };
         if (self.marker_preview_open) |*o| o.deinit(self.allocator);
         self.marker_preview_open = .{
             .surface_id = surface_id,
@@ -15243,11 +15248,15 @@ pub const AppSession = struct {
         const surface_id = term.surface.id;
         var visible: std.ArrayList(u32) = .empty;
         defer visible.deinit(self.allocator);
-        self.collectMarkerNumbers(term, .cursor_block, &visible) catch return;
+        self.collectMarkerNumbers(term, .viewport, &visible) catch return;
         marker_preview_ops.observe(&self.marker_preview, self.allocator, surface_id, visible.items) catch {};
     }
 
-    /// 그 term의 화면에서 마커 N을 모은다. **락 아래에서** 읽는다 — 스냅샷이 코어 메모리를 alias한다
+    /// 그 term의 화면에서 마커 N을 모은다.
+    ///
+    /// ⚠️ **관찰은 `viewport` 로 넓게 본다.** 한 판에서는 `cursor_block` 을 썼는데, 그 스코프는 스크롤된
+    /// 뷰포트에서 **빈 목록**이라(§3.3) 새 N 을 못 보고 그 장이 영영 안 묶였다. 관찰은 「새로 나타난 것」
+    /// 차분이라 범위가 넓어도 정확하다 — 오히려 스크롤·원격에 강하다. **락 아래에서** 읽는다 — 스냅샷이 코어 메모리를 alias한다
     /// (hover 경로가 `lockCore`를 잡는 것과 같은 규율).
     fn collectMarkerNumbers(
         self: *AppSession,

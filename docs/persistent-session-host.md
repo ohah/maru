@@ -7275,6 +7275,54 @@ CLI exit code와 사용자 문구는 이 typed error를 한 곳에서 매핑하�
 
 ## 12. screen snapshot과 관측 가능성
 
+### 12.0 이미지 대역폭 계측 — 호스트 로그 `maru-metrics` (2026-09-14)
+
+**왜 붙였나.** *"세션 많이 열어놓으면 세션호스트모드에서 터미널 브라우저가 뜨더라도 느리다"* 는
+관측에 답하려는데, **pane 별 스트림 바이트를 세는 것이 하나도 없었다**. 기존 `screen_metrics_enabled`
+계수기는 판정자용 opt-in 이라(`enableScreenMetrics` 가 registry 가 비었을 때만 켜진다) 라이브 호스트
+에서는 꺼져 있다 — 그걸로는 못 잰다.
+
+**무엇이 의심되나.** `image_blob` 은 **디코드된 raw 픽셀**을 나르고(위 레코드 정의), `generation` 이
+바뀐 이미지는 delta 가 **blob 전체를 다시 싣는다**. 이미지를 계속 다시 그리는 프로그램
+(터미널 브라우저 등)에서는 PTY 로 들어온 바이트보다 훨씬 큰 양이 소켓을 지난다:
+
+| 960×600 화면 이미지 한 장 | 바이트 | |
+| --- | ---: | --- |
+| PTY 로 들어온 것(`f=100` PNG) | 34,980 | 실측 |
+| 호스트→앱 소켓으로 나가는 것(디코드 픽셀) | 2,304,000 | **66배** |
+
+그런데 이것이 **실제 병목인지는 재야 안다**. 용량(320MB 한도에 걸려 evict 가 도는 것)이나 메모리
+압박은 원인도 처방도 다르다.
+
+**무엇을 재나.** 5 초마다 호스트 로그에 한 줄:
+
+```
+maru-metrics rt=3 sends=1482 sent=91238400 img=88104960 sent_bps=18247680 img_bps=17620992 store=7340032 evict=0 rss=412778496
+```
+
+| 읽는 법 | 뜻 |
+| --- | --- |
+| `img` 이 `sent` 의 대부분 | **대역폭** — 병목이 이미지 blob 이다 |
+| `evict` 가 오른다 | **용량** — 320MB 한도가 실제로 걸린다(화면 이미지가 빠졌다 다시 실려 깜빡인다) |
+| `rss` 가 세션 수 따라 오른다 | **메모리 압박** — 이미지 예산은 `TerminalCore` 마다이고 앱 전역 상한이 없다 |
+
+누적과 **증분(초당)** 을 한 줄에 함께 낸다 — 읽는 사람이 두 줄을 빼지 않아도 속도가 보이고, 로그가
+잘려도 남은 한 줄로 판단할 수 있다. 조용한 구간은 적지 않는다(로그가 신호를 잃지 않게).
+
+**설계 규율 셋.**
+
+- **항상 켠다.** 방출당 포화 덧셈 셋이라 제품 경로에 실질 비용이 없다. 끄면 정작 사용자가 느리다고
+  말하는 순간에 숫자가 없다.
+- **방출하는 그 자리에서 센다**(`ProjectOptions.image_bytes_out`). 스트림을 나중에 다시 훑어 세면
+  순회가 두 번이 되고, 레코드 모양이 바뀔 때 한쪽만 따라가 조용히 어긋난다.
+- **결정과 출력을 가른다**(`takeMetricsLine` ↔ `reportMetrics`). `host_log.line` 은 테스트에서
+  no-op 이라, 합치면 주기 게이트·증분 계산·침묵 규칙을 아무도 못 잰다.
+
+**읽는 법**: `tail -f ~/.cache/maru/session-host/host-*.log | grep maru-metrics`.
+헤드리스 스크린샷 하네스(`MARU_SCREENSHOT`)는 **세션 호스트를 안 띄우므로** 이 줄이 안 나온다 —
+실제 앱을 쓰는 중에 쌓인다.
+
+
 현재 `RenderSnapshot`은 renderer용 in-process view이고 `maru.snapshot.v3`은 debug/replay용 부분 직렬화다. 둘 중 하나를
 그대로 IPC 안정 ABI라고 선언하지 않는다. `snapshot_chunk`/`delta_chunk` payload는 native struct memory dump가 아니라 다음
 current는 `maru.screen-stream.v2`, capability-tagged frozen N-1은 `maru.screen-stream.v1` record codec을 쓴다.

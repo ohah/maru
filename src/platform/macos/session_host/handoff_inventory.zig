@@ -301,6 +301,11 @@ pub const kitty_image_storage_groups = [_]Group{
     },
     .{
         .disposition = .reconstructed,
+        .fields = &.{"evictions"},
+        .why = "diagnostic counter only; resetting at the exec boundary loses no invariant and the host log line carries both the running total and the per-window delta",
+    },
+    .{
+        .disposition = .reconstructed,
         .fields = &.{"map"},
         .why = "hash buckets are rebuilt from exhaustive image records after aggregate byte validation",
     },
@@ -721,6 +726,14 @@ pub const runtime_manager_groups = [_]Group{
             "anim_last_ns",
             "anim_ticks",
             "anim_advances",
+            // 화면 스트림 계측. exec 뒤 0 에서 시작해도 불변식이 없다 — 로그 한 줄이 누적과
+            // 증분을 함께 실으므로 재시작 경계가 읽는 사람에게 보인다(`reportMetrics`).
+            "screen_sent_bytes",
+            "screen_image_bytes",
+            "screen_sends",
+            "metrics_last_ns",
+            "metrics_last_sent_bytes",
+            "metrics_last_image_bytes",
             "metadata_sampler_visits",
             "metadata_sampler_changes",
             "metadata_sampler_failures",

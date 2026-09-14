@@ -1244,6 +1244,42 @@ fn compositeRect(
     }
 }
 
+/// `a=f` + `f=100` — 프레임으로 온 PNG 를 풀어 **루트의 bpp 로 맞춘** 픽셀을 돌려준다.
+///
+/// 디코더는 언제나 RGBA 를 내므로 루트가 RGB(`f=24` 로 만들어진 이미지)면 알파를 떨궈야 한다.
+/// 그 변환을 여기서 한 번에 하고, `compositeRect` 에는 이미 맞춰진 버퍼만 넘긴다 — 합성 루프가
+/// 픽셀 형식을 또 분기하면 raw 프레임과 규칙이 갈린다.
+fn decodePngFrame(
+    self: *TerminalCore,
+    compression: u8,
+    payload: []const u8,
+    want_bpp: u8,
+) error{ OutOfMemory, TooBig, Invalid }!struct { width: u32, height: u32, pixels: []u8 } {
+    const png_bytes = try decodePngPayload(self, compression, payload);
+    defer self.allocator.free(png_bytes);
+    const decoded = png.decode(self.allocator, png_bytes) catch |e| return switch (e) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.Invalid,
+    };
+    if (want_bpp == decoded.bpp) return .{ .width = decoded.width, .height = decoded.height, .pixels = decoded.data };
+
+    // 여기 오는 경우는 루트가 RGB(bpp 3)일 때뿐이다 — 디코더는 언제나 4 를 내고, 4 는 위에서 걸렀다.
+    // 명시해 두는 이유는 bpp 집합이 언젠가 넓어지면 **조용히 틀린 stride 로 복사하기** 때문이다.
+    if (want_bpp != 3) {
+        self.allocator.free(decoded.data);
+        return error.Invalid;
+    }
+    // RGBA → RGB: 알파를 떨군다(RGB 버퍼에 합성한다는 것이 곧 그 뜻이다).
+    defer self.allocator.free(decoded.data);
+    const px = @as(usize, decoded.width) * @as(usize, decoded.height);
+    const out = self.allocator.alloc(u8, px * want_bpp) catch return error.OutOfMemory;
+    var i: usize = 0;
+    while (i < px) : (i += 1) {
+        @memcpy(out[i * want_bpp ..][0..3], decoded.data[i * 4 ..][0..3]);
+    }
+    return .{ .width = decoded.width, .height = decoded.height, .pixels = out };
+}
+
 /// `a=f` — 프레임을 전송한다.
 ///
 /// 키: `r`=대상 프레임 번호(0/미지정이면 **새 프레임을 덧붙인다**), `c`=합성 베이스 프레임(없으면 배경),
@@ -1252,29 +1288,47 @@ fn compositeRect(
 /// 프레임 자체는 언제나 이미지 전체 크기다.
 fn kittyTransmitFrame(self: *TerminalCore, cmd: KittyGraphicsCommand, payload: []const u8) KittyStatus {
     if (cmd.medium != 'd') return .enotsupp; // 파일·공유메모리 매체는 transmit 과 같은 이유로 거부
-    if (cmd.format == 100) return .enotsupp; // PNG 프레임은 후속(루트 이미지는 지원)
     if (cmd.image_id == 0) return .einval;
     const img = self.kitty_images.map.getPtr(cmd.image_id) orelse return .enoent;
     const bpp: u8 = switch (cmd.format) {
         24 => 3,
         32 => 4,
+        // **PNG 프레임은 루트의 픽셀 형식을 따른다.** 디코더는 언제나 RGBA 를 내지만, 합성 대상은
+        // 루트 프레임 버퍼라 그쪽 bpp 로 맞춰야 한다(RGB 루트면 알파를 떨군다 — `compositeRect` 가
+        // `bpp < 4` 를 덮어쓰기로 다루는 것과 같은 뜻이다). 거절하지 않는 이유는 「RGB 루트 + PNG
+        // 프레임」이 명세상 합법인 조합이기 때문이다.
+        100 => img.bpp,
         else => return .einval,
     };
     if (bpp != img.bpp) return .einval; // 프레임은 루트와 같은 픽셀 형식이어야 합성이 성립한다
-    const rect_w = if (cmd.width == 0) img.width else cmd.width;
-    const rect_h = if (cmd.height == 0) img.height else cmd.height;
-    if (rect_w == 0 or rect_h == 0) return .einval;
-    const rect_px = std.math.mul(usize, rect_w, rect_h) catch return .einval;
-    const expected = std.math.mul(usize, rect_px, bpp) catch return .einval;
     const frame_bytes = img.data.len;
 
     // 프레임 수 상한 — `a=f` 만 반복하는 스트림이 메모리를 무한히 먹지 못하게 한다(총량 한계와 같은 결).
     if (cmd.rows == 0 and img.frames.len >= max_animation_frames) return .enomem;
 
-    const src = decodeDirectPixels(self, cmd.compression, payload, expected) catch |e| return switch (e) {
-        error.OutOfMemory => .enomem,
-        else => .einval,
-    };
+    // **PNG 는 자기 치수를 말한다** — 루트 전송과 같은 규칙이라 `s`/`v` 를 안 본다.
+    var rect_w: u32 = undefined;
+    var rect_h: u32 = undefined;
+    var src: []u8 = undefined;
+    if (cmd.format == 100) {
+        const decoded = decodePngFrame(self, cmd.compression, payload, bpp) catch |e| return switch (e) {
+            error.OutOfMemory, error.TooBig => .enomem,
+            else => .einval,
+        };
+        rect_w = decoded.width;
+        rect_h = decoded.height;
+        src = decoded.pixels;
+    } else {
+        rect_w = if (cmd.width == 0) img.width else cmd.width;
+        rect_h = if (cmd.height == 0) img.height else cmd.height;
+        if (rect_w == 0 or rect_h == 0) return .einval;
+        const rect_px = std.math.mul(usize, rect_w, rect_h) catch return .einval;
+        const expected = std.math.mul(usize, rect_px, bpp) catch return .einval;
+        src = decodeDirectPixels(self, cmd.compression, payload, expected) catch |e| return switch (e) {
+            error.OutOfMemory => .enomem,
+            else => .einval,
+        };
+    }
     defer self.allocator.free(src);
 
     // 대상 프레임 버퍼를 만든다: 베이스 프레임 복사, 없으면 `Y` 배경색으로 채운다.
@@ -1587,15 +1641,53 @@ fn kittyTransmit(self: *TerminalCore, cmd: KittyGraphicsCommand, payload: []cons
 /// PNG가 자기기술하므로 s/v control은 안 본다. **전 color type·bit depth·인터레이스**를 받고 출력은
 /// 언제나 RGBA 8-bit 다(malformed·과대 치수는 graceful 거부 — png.zig). PNG에 추가 압축(o=z)은 미지원(PNG는 이미 압축됨, 실사용 없음). 베이스: kitty graphics
 /// protocol(f=100) + PNG 명세.
-fn kittyTransmitPng(self: *TerminalCore, cmd: KittyGraphicsCommand, payload: []const u8, store: bool) KittyStatus {
-    if (cmd.compression != 0) return .enotsupp; // PNG + 추가 압축은 미지원(rare)
+/// base64 payload 를 **PNG 파일 바이트**로 되돌린다. `o=z` 면 한 겹 더 푼다.
+///
+/// **명세는 압축을 포맷과 무관하게 허용한다** — *"You can specify compression for any format."* 그래서
+/// PNG 에도 `o=z` 가 올 수 있다(이중 압축이라 쓸모는 적지만, 전송을 일괄 압축하는 클라이언트가 그렇게
+/// 보낸다). 픽셀 경로(`decodeDirectPixels`)와 갈라 두는 이유는 **바운드의 근거가 다르기 때문**이다 —
+/// 저쪽은 `w*h*bpp` 라는 정확한 길이를 알지만, 여기서 나오는 것은 길이를 모르는 PNG 파일이다.
+fn decodePngPayload(
+    self: *TerminalCore,
+    compression: u8,
+    payload: []const u8,
+) error{ OutOfMemory, TooBig, Invalid }![]u8 {
     const dec = std.base64.standard.Decoder;
-    const decoded_len = dec.calcSizeForSlice(payload) catch return .einval;
-    if (decoded_len == 0) return .einval;
-    const png_bytes = self.allocator.alloc(u8, decoded_len) catch return .enomem;
+    const decoded_len = dec.calcSizeForSlice(payload) catch return error.Invalid;
+    if (decoded_len == 0) return error.Invalid;
+    const raw = self.allocator.alloc(u8, decoded_len) catch return error.OutOfMemory;
+    // **`errdefer` 를 쓰지 않는다.** 아래에서 `raw` 를 `defer` 로도 풀어야 하는 갈래가 있어, 둘을
+    // 같이 두면 inflate 실패 경로에서 **이중 해제**가 된다(실측: 판정자가 SIGABRT 로 잡았다).
+    // 소유권이 갈리는 자리라 손으로 적는 편이 안전하다.
+    dec.decode(raw, payload) catch {
+        self.allocator.free(raw);
+        return error.Invalid;
+    };
+    if (compression == 0) return raw; // 소유권을 호출자에게 넘긴다
+    defer self.allocator.free(raw); // 여기부터는 `raw` 가 중간 산물이다
+    if (compression != 'z') return error.Invalid;
+    return png.inflateBounded(self.allocator, raw, max_compressed_png_bytes) catch |e| switch (e) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.Unsupported => error.TooBig, // 상한 초과
+        else => error.Invalid,
+    };
+}
+
+/// `o=z` 로 온 PNG 가 풀렸을 때의 **파일 크기 상한**.
+///
+/// 픽셀이 아니라 **PNG 파일**의 상한이다. 320MB 픽셀 한계는 `png.zig` 가 헤더를 읽고 따로 건다 —
+/// 여기서 막는 것은 그 검사에 닿기도 전에 메모리를 먹는 zlib bomb 이다. 64MiB 는 실사용 PNG 로는
+/// 터무니없이 크고(4K RGBA 무압축 PNG 가 ~33MB), bomb 으로는 충분히 작다.
+pub const max_compressed_png_bytes: usize = 64 << 20;
+
+fn kittyTransmitPng(self: *TerminalCore, cmd: KittyGraphicsCommand, payload: []const u8, store: bool) KittyStatus {
+    const png_bytes = decodePngPayload(self, cmd.compression, payload) catch |e| return switch (e) {
+        error.OutOfMemory => .enomem,
+        error.TooBig => .enomem, // 상한을 넘은 zlib — 앱이 줄이거나 포기할 수 있게 enomem 으로
+        else => .einval,
+    };
     defer self.allocator.free(png_bytes); // PNG 파일 바이트는 디코드 후 불필요
-    dec.decode(png_bytes, payload) catch return .einval;
-    const img = png.decode(self.allocator, png_bytes) catch return .einval; // 미지원/malformed는 graceful 거부
+    const img = png.decode(self.allocator, png_bytes) catch return .einval; // malformed는 graceful 거부
     if (!store) { // query: 디코드까지 되면 받을 수 있다 — 픽셀은 버린다
         self.allocator.free(img.data);
         return .ok;

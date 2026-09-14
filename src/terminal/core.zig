@@ -11,6 +11,7 @@ const parser = @import("parser.zig"); // VT 파서(write feed + escape/CSI/OSC/D
 const screen = @import("screen.zig"); // 화면 storage + 활성 화면 연산(grid·cursor·scroll·print·resize·snapshot) — 목적별 분리
 const selection = @import("selection.zig"); // 선택/검색/URL(화면을 읽는 상위 레이어) — 목적별 분리
 const kitty = @import("kitty.zig"); // kitty graphics 본체(transmit·display·delete·view) — 목적별 분리
+const terminal_png = @import("png.zig"); // PNG 디코드 — 판정자가 그 PeakAllocator 를 함께 쓴다
 const input_report = @import("input_report.zig"); // 입력/이벤트 → host 바이트 인코딩(키·paste·focus·mouse) — 목적별 분리
 // kitty graphics 저장 struct는 kitty.zig 소유(self-contained — Scrollback 선례). core는 별칭으로 필드 타입을 둔다.
 const KittyGraphicsCommand = kitty.KittyGraphicsCommand;
@@ -8714,20 +8715,78 @@ test "kitty graphics PNG: 청크로 쪼개 온 PNG 도 한 장으로 붙는다 (
     try std.testing.expectEqualSlices(u8, whole.data, img.data);
 }
 
-test "kitty graphics PNG: PNG + o=z 는 ENOTSUPP 다 (PNG 가 이미 zlib 을 품는다)" {
-    // 코드가 `cmd.compression != 0` 으로 거절하는데 **아무도 재고 있지 않았다**. 조용히 `.ok` 를
-    // 돌려주면 앱은 받아들여진 줄 알고 다음 이미지를 같은 형식으로 계속 보낸다.
+test "kitty graphics PNG: o=z 로 한 겹 더 감싼 PNG 도 푼다 (명세: 압축은 포맷과 무관하다)" {
+    // 명세가 못 박는다 — *"You can specify compression for **any format**."* PNG 는 이미 zlib 을
+    // 품으므로 이중 압축이지만, **전송을 일괄 압축하는 클라이언트**가 실제로 그렇게 보낸다.
+    // 예전 maru 는 `ENOTSUPP` 로 거절했다(그건 우리 한계였지 명세가 아니었다).
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 10 });
     defer core.deinit();
     core.clearResponse();
-    try core.write("\x1b_Ga=t,f=100,o=z,i=1;iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAAAAABX3VL4AAAADklEQVR4nGNgcGBo+A8AAwUBwE4zW+kAAAAASUVORK5CYII=\x1b\\");
-    try std.testing.expectEqualStrings("\x1b_Gi=1;ENOTSUPP:unsupported graphics feature\x1b\\", core.pendingResponse());
-    try std.testing.expect(!core.kitty_images.map.contains(1));
+
+    // 위 「palette·grayscale…」 판정자의 팔레트 PNG 를 zlib 으로 한 번 더 감싼 것이다.
+    try core.write("\x1b_Ga=t,f=100,o=z,i=1;eNrrDPBz5+WS4mJgYOD19HAJAtJMIMzBDCRdM/6KASm2AJ8Q1/9Axn+GS+3vC4EMHk8Xx5CKW8kJCSxOQB4Ds+g8iT9AcQZPVz+XdU4JTQDaCxNQ\x1b\\");
+    try std.testing.expectEqualStrings("\x1b_Gi=1;OK\x1b\\", core.pendingResponse());
     core.clearResponse();
 
-    // **양성 대조**: `o=z` 를 뺀 같은 PNG 는 받는다 — 거절이 `f=100` 을 통째로 막은 게 아니다.
-    try core.write("\x1b_Ga=t,f=100,i=2;iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAAAAABX3VL4AAAADklEQVR4nGNgcGBo+A8AAwUBwE4zW+kAAAAASUVORK5CYII=\x1b\\");
-    try std.testing.expectEqualStrings("\x1b_Gi=2;OK\x1b\\", core.pendingResponse());
+    // **압축을 벗긴 결과가 같은 PNG 여야 한다** — 「저장됐다」만 보면 엉뚱한 바이트를 풀어도 통과한다.
+    const zipped = core.kitty_images.map.get(1) orelse return error.ZlibPngRejected;
+    try std.testing.expectEqualSlices(u8, &.{
+        255, 0,   0, 255, 0,   255, 0, 255,
+        0,   255, 0, 255, 255, 0,   0, 255,
+    }, zipped.data);
+
+    // **음성 대조**: `o=z` 인데 zlib 이 아니면 거절한다 — 「압축 키를 그냥 무시」가 아니다.
+    try core.write("\x1b_Ga=t,f=100,o=z,i=2;iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAAAAABX3VL4AAAADklEQVR4nGNgcGBo+A8AAwUBwE4zW+kAAAAASUVORK5CYII=\x1b\\");
+    try std.testing.expect(!core.kitty_images.map.contains(2));
+    core.clearResponse();
+
+    // **알 수 없는 압축 키**(`o=q` 따위)는 거절이다. 파서는 `o` 값을 검증 없이 그대로 넘기므로
+    // 이 거절은 여기서만 난다. **유효한 zlib 을 실어** 보내는 것이 핵심이다 — 쓰레기를 실으면
+    // 「모르는 키라서」와 「풀리지 않아서」가 같은 답을 내 판정이 공허해진다(적대적 검증에서 그랬다).
+    try core.write("\x1b_Ga=t,f=100,o=q,i=3;eNrrDPBz5+WS4mJgYOD19HAJAtJMIMzBDCRdM/6KASm2AJ8Q1/9Axn+GS+3vC4EMHk8Xx5CKW8kJCSxOQB4Ds+g8iT9AcQZPVz+XdU4JTQDaCxNQ\x1b\\");
+    try std.testing.expect(!core.kitty_images.map.contains(3));
+}
+
+test "kitty graphics PNG: o=z 는 zlib bomb 을 상한에서 끊는다 (푼 크기를 모르는 자리)" {
+    // 픽셀 경로는 `w*h*bpp` 라는 **정확한 길이**가 곧 bomb 바운드였다. PNG 는 푼 것이 또 PNG 파일이라
+    // 길이를 모른다 — 그래서 바운드가 **상한**으로 바뀌었고, 그 상한이 실제로 동작하는지 잰다.
+    // **결과가 아니라 동작을 잰다.** 상한을 무한대로 바꾼 변이가 살아남았었다 — 70 MiB 를 다 풀어도
+    // 그건 PNG 가 아니라 결국 거절되므로 「저장 안 됨」은 똑같았다. 요청된 가장 큰 할당을 기록해
+    // **상한 근처에서 끊겼는지**를 본다.
+    var peak: terminal_png.PeakAllocator = .{ .inner = std.testing.allocator };
+    var core = try TerminalCore.init(peak.allocator(), .{ .cols = 20, .rows = 10 });
+    defer core.deinit();
+
+    // 70 MiB 의 0 을 zlib 으로 압축한다(상한 64 MiB 를 넘긴다). 압축본은 70 KB 남짓이다.
+    const raw_buf = try std.testing.allocator.alloc(u8, 256 * 1024);
+    defer std.testing.allocator.free(raw_buf);
+    var out: std.Io.Writer = .fixed(raw_buf);
+    var comp_storage: [std.compress.flate.max_window_len * 2]u8 = undefined;
+    var comp = try std.compress.flate.Compress.init(&out, &comp_storage, .zlib, .default);
+    const zeros = [_]u8{0} ** 4096;
+    var written: usize = 0;
+    while (written < 70 << 20) : (written += zeros.len) try comp.writer.writeAll(&zeros);
+    try comp.finish();
+    const bomb = out.buffered();
+
+    const b64 = try std.testing.allocator.alloc(u8, std.base64.standard.Encoder.calcSize(bomb.len));
+    defer std.testing.allocator.free(b64);
+    _ = std.base64.standard.Encoder.encode(b64, bomb);
+    const seq = try std.fmt.allocPrint(std.testing.allocator, "\x1b_Ga=t,f=100,o=z,i=1;{s}\x1b\\", .{b64});
+    defer std.testing.allocator.free(seq);
+    try core.write(seq);
+
+    // 저장도 안 되고, 총량 회계도 안 늘고, **죽지도 않는다**.
+    try std.testing.expect(!core.kitty_images.map.contains(1));
+    try std.testing.expectEqual(@as(usize, 0), core.kitty_images.total_bytes);
+    // 그리고 **70 MiB 를 잡지 않았다**. inflate 는 64 KiB 조각으로 늘리므로 상한(64 MiB) 근처에서
+    // 멈추면 가장 큰 단일 요청이 그보다 훨씬 작다. 넉넉히 봐도 8 MiB 를 넘을 이유가 없다.
+    // 그리고 **상한보다 한 바이트도 더 잡지 않았다**. 상한이 「이만큼까지만 쓴다」는 약속이므로
+    // 용량까지 거기 묶여 있어야 한다(실측: 정확히 67,108,864 B = 64 MiB).
+    try std.testing.expect(peak.peak <= kitty.max_compressed_png_bytes);
+
+    // **양성 대조**: 상한 아래의 정상 `o=z` PNG 는 받는다 — 상한이 `o=z` 를 통째로 막은 게 아니다.
+    try core.write("\x1b_Ga=t,f=100,o=z,i=2;eNrrDPBz5+WS4mJgYOD19HAJAtJMIMzBDCRdM/6KASm2AJ8Q1/9Axn+GS+3vC4EMHk8Xx5CKW8kJCSxOQB4Ds+g8iT9AcQZPVz+XdU4JTQDaCxNQ\x1b\\");
     try std.testing.expect(core.kitty_images.map.contains(2));
 }
 
@@ -8803,6 +8862,58 @@ test "kitty graphics PNG: 바이트를 흔든 PNG 무더기 — 죽지도 새지
             }
         }
     }
+
+    // ── 새 경로 둘도 같은 무더기를 지난다 ─────────────────────────────────────────────
+    //
+    // `o=z` 와 프레임(`a=f`)은 **각각 새 할당 경로**를 연다(압축 해제 버퍼, RGBA→RGB 변환 버퍼).
+    // 위 루프는 루트 전송만 흔들어서 그 둘이 퍼즈를 안 지났다 — 손상 입력에서 새거나 죽는지는
+    // 그 경로에서 따로 물어야 한다.
+    var zlib_rejected: usize = 0;
+    var frame_rejected: usize = 0;
+    {
+        // 팔레트 PNG 를 zlib 으로 감싼 것(위 `o=z` 판정자와 같은 바이트).
+        const zipped = "eNrrDPBz5+WS4mJgYOD19HAJAtJMIMzBDCRdM/6KASm2AJ8Q1/9Axn+GS+3vC4EMHk8Xx5CKW8kJCSxOQB4Ds+g8iT9AcQZPVz+XdU4JTQDaCxNQ";
+        // 2x2 전부 파랑 RGBA PNG(프레임용).
+        const frame_png = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFUlEQVR4nGNkYPj/n4GBgYEJRIAwAB0ZAgKxZ5H2AAAAAElFTkSuQmCC";
+        const root_px = [_]u8{ 1, 2, 3, 255 } ** 4;
+        var root_b64: [64]u8 = undefined;
+        const root_enc = std.base64.standard.Encoder.encode(&root_b64, &root_px);
+
+        for ([_][]const u8{ zipped, frame_png }, 0..) |seed, which| {
+            for (0..60) |round| {
+                var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 10 });
+                defer core.deinit();
+                try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=9,q=2;{s}\x1b\\", .{root_enc}));
+
+                @memcpy(payload[0..seed.len], seed);
+                var len = seed.len;
+                switch (round % 3) {
+                    0 => payload[8 + rand.uintLessThan(usize, len - 8)] = "ABCZaz09+/"[rand.uintLessThan(usize, 10)],
+                    1 => len = 8 + 4 * (1 + rand.uintLessThan(usize, (len - 8) / 4)),
+                    else => payload[rand.uintLessThan(usize, 16)] = "ABCZaz09+/"[rand.uintLessThan(usize, 10)],
+                }
+
+                if (which == 0) {
+                    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=100,o=z,i=7,q=2;{s}\x1b\\", .{payload[0..len]}));
+                    if (core.kitty_images.map.get(7)) |img| {
+                        try std.testing.expectEqual(@as(u64, @as(u64, img.width) * img.height * img.bpp), @as(u64, img.data.len));
+                    } else zlib_rejected += 1;
+                } else {
+                    const before = core.kitty_images.map.get(9).?.frameCount();
+                    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=100,i=9,q=2;{s}\x1b\\", .{payload[0..len]}));
+                    const after = core.kitty_images.map.get(9).?.frameCount();
+                    // 프레임은 **들어가거나 안 들어가거나** 다 — 반쯤 들어간 상태가 없어야 한다.
+                    try std.testing.expect(after == before or after == before + 1);
+                    if (after == before) frame_rejected += 1;
+                    // 들어갔다면 버퍼는 언제나 루트 크기다.
+                    if (after > before) try std.testing.expectEqual(@as(usize, 16), core.kitty_images.map.get(9).?.framePixels(after).len);
+                }
+            }
+        }
+    }
+    // 두 갈래 모두 **거절을 실제로 겪어야** 한다 — 전부 통과했다면 변이가 무력했다는 뜻이다.
+    try std.testing.expect(zlib_rejected > 0);
+    try std.testing.expect(frame_rejected > 0);
 
     // **커버리지 단언**: 무더기가 전부 거절만 하거나 전부 통과만 했다면 이 판정자는 아무것도 안 잰다.
     try std.testing.expect(stored_any);
@@ -10575,30 +10686,126 @@ test "kitty 애니메이션: 프레임 전환이 렌더 뷰까지 도달한다 �
     try std.testing.expectEqual(v0[0].height, v1[0].height);
 }
 
-test "kitty 애니메이션: PNG 프레임은 ENOTSUPP 다 (문서가 약속했는데 판정자가 없었다)" {
+test "kitty 애니메이션: PNG 프레임 — 치수는 PNG 가 말하고, 매체 거부는 그대로다" {
+    // 명세: *"Transferring animation frame data is very similar to Transferring pixel data above"* —
+    // 프레임도 **같은 escape code** 를 쓰므로 `f=100` 이 합법이다. #3505 가 「PNG 프레임은 ENOTSUPP」
+    // 이라고 적었던 것은 우리 한계였지 명세가 아니었다.
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
     defer core.deinit();
     var b64: [64]u8 = undefined;
-    var seq: [200]u8 = undefined;
-    const px = [_]u8{ 1, 2, 3, 255 } ** 4;
+    var seq: [400]u8 = undefined;
+    const px = [_]u8{ 1, 2, 3, 255 } ** 4; // 2x2 RGBA 루트
     const enc = std.base64.standard.Encoder.encode(&b64, &px);
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
     core.clearResponse();
 
-    // #3505 가 「PNG 프레임은 ENOTSUPP(루트 이미지는 지원)」이라고 적어 두고 재지 않았다.
-    // 조용히 `.ok` 를 돌려주게 되면 앱은 프레임이 들어간 줄 알고 애니메이션을 켠다.
-    try core.write("\x1b_Ga=f,f=100,i=1;AAAA\x1b\\");
-    try std.testing.expectEqualStrings("\x1b_Gi=1;ENOTSUPP:unsupported graphics feature\x1b\\", core.pendingResponse());
+    // **2x2 전부 파랑인 PNG 를 프레임으로**. `s`/`v` 를 안 준다 — PNG 가 자기 치수를 말한다.
+    try core.write("\x1b_Ga=f,f=100,i=1;iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFUlEQVR4nGNkYPj/n4GBgYEJRIAwAB0ZAgKxZ5H2AAAAAElFTkSuQmCC\x1b\\");
+    try std.testing.expectEqualStrings("\x1b_Gi=1;OK\x1b\\", core.pendingResponse());
     core.clearResponse();
-    // 전송 매체도 같다 — 프레임 경로가 루트와 같은 거부를 한다.
+    const img = core.kitty_images.map.get(1).?;
+    try std.testing.expectEqual(@as(u32, 2), img.frameCount());
+    try std.testing.expectEqualSlices(u8, &([_]u8{ 0, 0, 255, 255 } ** 4), img.framePixels(2));
+
+    // **부분 사각형도 된다** — 1x1 초록을 (1,1) 에 얹는다. PNG 치수가 곧 전송 사각형이다.
+    try core.write("\x1b_Ga=f,f=100,i=1,c=2,x=1,y=1,X=1;iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNg+M/wHwAEAQH/cetH5QAAAABJRU5ErkJggg==\x1b\\");
+    try std.testing.expectEqualStrings("\x1b_Gi=1;OK\x1b\\", core.pendingResponse());
+    core.clearResponse();
+    try std.testing.expectEqual(@as(u32, 3), core.kitty_images.map.get(1).?.frameCount());
+    try std.testing.expectEqualSlices(u8, &.{
+        0, 0, 255, 255, 0, 0, 255, 255, // 베이스(프레임 2)가 그대로
+        0, 0, 255, 255, 0, 255, 0, 255, // (1,1) 만 초록
+    }, core.kitty_images.map.get(1).?.framePixels(3));
+
+    // **`s`/`v` 가 PNG 보다 «작다»고 거짓말해도 PNG 가 이긴다.** 작은 쪽으로 거짓말하는 갈래를
+    // 골라야 한다 — 큰 쪽은 `compositeRect` 의 경계 검사가 알아서 잘라 내 두 동작이 같아진다
+    // (적대적 검증: 「s/v 에서 치수를 가져가게」 변이가 그 때문에 살아남았다).
+    try core.write("\x1b_Ga=f,f=100,i=1,s=1,v=1;iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFUlEQVR4nGNkYPj/n4GBgYEJRIAwAB0ZAgKxZ5H2AAAAAElFTkSuQmCC\x1b\\");
+    try std.testing.expectEqualStrings("\x1b_Gi=1;OK\x1b\\", core.pendingResponse());
+    core.clearResponse();
+    // s=1,v=1 을 믿었다면 (0,0) 한 칸만 파랗다. PNG 를 믿으면 네 칸 전부다.
+    try std.testing.expectEqualSlices(u8, &([_]u8{ 0, 0, 255, 255 } ** 4), core.kitty_images.map.get(1).?.framePixels(4));
+
+    // **PNG 프레임 + o=z** — 두 기능의 조합. 각각 되는 것으로는 이 갈래가 안 증명된다.
+    try core.write("\x1b_Ga=f,f=100,o=z,i=1;eNrrDPBz5+WS4mJgYOD19HAJAtJMIMzBBiSLtvGqAClRTxfHkIo5ySkJP/7PbwQCTpcGAwZZSSamjekTvwEVMHi6+rmsc0poAgBkmRMd\x1b\\");
+    try std.testing.expectEqualStrings("\x1b_Gi=1;OK\x1b\\", core.pendingResponse());
+    core.clearResponse();
+    try std.testing.expectEqual(@as(u32, 5), core.kitty_images.map.get(1).?.frameCount());
+    try std.testing.expectEqualSlices(u8, &([_]u8{ 0, 0, 255, 255 } ** 4), core.kitty_images.map.get(1).?.framePixels(5));
+
+    // **매체 거부는 그대로다** — `t=f` 는 프레임 경로에서도 루트와 같은 답을 한다.
     try core.write("\x1b_Ga=f,f=32,s=2,v=2,t=f,i=1;AAAA\x1b\\");
     try std.testing.expectEqualStrings("\x1b_Gi=1;ENOTSUPP:unsupported graphics feature\x1b\\", core.pendingResponse());
     core.clearResponse();
 
-    // **양성 대조**: raw 프레임은 받아들인다 — 거부가 `a=f` 를 통째로 막은 게 아님을 증명한다.
-    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=1;{s}\x1b\\", .{enc}));
+    // **`r=` 로 기존 프레임을 PNG 로 갈아치운다.** 덧붙이기만 판정하면 교체 경로가 통째로 빈다.
+    try core.write("\x1b_Ga=f,f=100,i=1,r=2;iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFUlEQVR4nGP8/5/hPwMDAwMTiABhAC8HAwF4A8AMAAAAAElFTkSuQmCC\x1b\\");
     try std.testing.expectEqualStrings("\x1b_Gi=1;OK\x1b\\", core.pendingResponse());
-    try std.testing.expectEqual(@as(u32, 2), core.kitty_images.map.get(1).?.frameCount());
+    core.clearResponse();
+    // 프레임 수는 그대로고(교체지 추가가 아니다) 2번 프레임만 노래진다.
+    try std.testing.expectEqual(@as(u32, 5), core.kitty_images.map.get(1).?.frameCount());
+    try std.testing.expectEqualSlices(u8, &([_]u8{ 255, 255, 0, 255 } ** 4), core.kitty_images.map.get(1).?.framePixels(2));
+
+    // **깨진 PNG 프레임은 graceful 거부** — 프레임 수가 안 늘어야 한다(반쯤 들어간 프레임이 없다).
+    try core.write("\x1b_Ga=f,f=100,i=1;AAAAAAAAAAAA\x1b\\");
+    try std.testing.expectEqualStrings("\x1b_Gi=1;EINVAL:bad graphics command\x1b\\", core.pendingResponse());
+    try std.testing.expectEqual(@as(u32, 5), core.kitty_images.map.get(1).?.frameCount());
+}
+
+test "kitty 애니메이션: PNG 프레임이 루트보다 크거나 터무니없어도 안전하다 (경계)" {
+    // **PNG 는 자기 치수를 말한다** — 그래서 루트보다 큰 프레임이 그대로 들어올 수 있다. 합성은
+    // 루트 버퍼에 하므로 넘치는 쪽이 잘려야 하고, 터무니없는 헤더는 디코드 전에 거절돼야 한다.
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    var b64: [64]u8 = undefined;
+    var seq: [400]u8 = undefined;
+    const px = [_]u8{ 1, 2, 3, 255 } ** 4; // 2x2 RGBA 루트
+    const enc = std.base64.standard.Encoder.encode(&b64, &px);
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+    core.clearResponse();
+
+    // ① **4x4 노랑**을 2x2 루트에 얹는다 — 넘치는 두 행·두 열은 잘리고 네 칸만 노래진다.
+    try core.write("\x1b_Ga=f,f=100,i=1;iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAYAAACp8Z5+AAAAFUlEQVR4nGP8/5/hPwMSYELmECcAAMWPAwXvzyA5AAAAAElFTkSuQmCC\x1b\\");
+    try std.testing.expectEqualStrings("\x1b_Gi=1;OK\x1b\\", core.pendingResponse());
+    core.clearResponse();
+    const img = core.kitty_images.map.get(1).?;
+    try std.testing.expectEqual(@as(u32, 2), img.frameCount());
+    // 프레임 버퍼는 **언제나 루트 크기**다 — 큰 PNG 가 버퍼를 늘리지 않는다.
+    try std.testing.expectEqual(@as(usize, 16), img.framePixels(2).len);
+    try std.testing.expectEqualSlices(u8, &([_]u8{ 255, 255, 0, 255 } ** 4), img.framePixels(2));
+
+    // ② **1x1 을 (3,3)** 에 얹는다 — 루트 밖이라 아무것도 안 바뀌어야 한다(패닉도 없어야 한다).
+    try core.write("\x1b_Ga=f,f=100,i=1,c=2,x=3,y=3,X=1;iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==\x1b\\");
+    try std.testing.expectEqualStrings("\x1b_Gi=1;OK\x1b\\", core.pendingResponse());
+    core.clearResponse();
+    try std.testing.expectEqualSlices(u8, &([_]u8{ 255, 255, 0, 255 } ** 4), core.kitty_images.map.get(1).?.framePixels(3));
+
+    // ③ **65535×65535 라고 말하는 68 바이트 헤더** — 프레임 경로도 할당 전에 거절한다.
+    try core.write("\x1b_Ga=f,f=100,i=1;iVBORw0KGgoAAAANSUhEUgAA//8AAP//CAYAAAC2BdlQAAAAC0lEQVR42mNgQAUAABAAAaoZ+IIAAAAASUVORK5CYII=\x1b\\");
+    try std.testing.expectEqualStrings("\x1b_Gi=1;EINVAL:bad graphics command\x1b\\", core.pendingResponse());
+    try std.testing.expectEqual(@as(u32, 3), core.kitty_images.map.get(1).?.frameCount()); // 안 늘었다
+}
+
+test "kitty 애니메이션: RGB 루트에 PNG 프레임 — 알파를 떨구고 합성한다" {
+    // PNG 디코더는 **언제나 RGBA** 를 낸다. 루트가 `f=24` 로 만들어졌으면 bpp 3 이라, 거절하지 않고
+    // 루트 형식으로 맞춰야 한다 — 「RGB 루트 + PNG 프레임」은 명세상 합법인 조합이다.
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    var b64: [64]u8 = undefined;
+    var seq: [200]u8 = undefined;
+    const px = [_]u8{ 9, 9, 9 } ** 4; // 2x2 RGB 루트
+    const enc = std.base64.standard.Encoder.encode(&b64, &px);
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=24,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+    core.clearResponse();
+    try std.testing.expectEqual(@as(u8, 3), core.kitty_images.map.get(1).?.bpp);
+
+    // 2x2 전부 파랑 **RGBA** PNG 를 프레임으로 얹는다 → RGB 로 내려와야 한다.
+    try core.write("\x1b_Ga=f,f=100,i=1;iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFUlEQVR4nGNkYPj/n4GBgYEJRIAwAB0ZAgKxZ5H2AAAAAElFTkSuQmCC\x1b\\");
+    try std.testing.expectEqualStrings("\x1b_Gi=1;OK\x1b\\", core.pendingResponse());
+    const img = core.kitty_images.map.get(1).?;
+    try std.testing.expectEqual(@as(u32, 2), img.frameCount());
+    // 12 바이트(2×2×3)이고 알파가 섞여 들어가지 않았다 — 4바이트 stride 로 복사하면 여기가 깨진다.
+    try std.testing.expectEqualSlices(u8, &([_]u8{ 0, 0, 255 } ** 4), img.framePixels(2));
 }
 
 test "kitty 애니메이션: 합성 네 경로 — x/y 오프셋·알파 블렌드·베이스 프레임·Y 배경색 (적대적 검증)" {

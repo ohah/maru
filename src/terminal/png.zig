@@ -73,6 +73,40 @@ fn statusError(st: png_codec.Status) Error {
     };
 }
 
+/// zlib 스트림을 **상한 안에서** inflate한다 — 푼 크기를 미리 모를 때 쓴다.
+///
+/// **왜 `inflateExact` 로는 안 되나.** 그쪽은 길이를 알 때(픽셀 = w×h×bpp)의 규칙이고, 그 길이 자체가
+/// zlib bomb 의 바운드였다. PNG(`f=100` + `o=z`)는 **푼 것이 또 PNG 파일**이라 길이를 미리 모른다.
+/// 그래서 바운드를 길이가 아니라 **상한**으로 옮기고, 상한을 넘기면 그 자리에서 거절한다.
+///
+/// **빈 결과를 여기서 거절하지 않는다.** 호출자(PNG 디코더)가 빈 바이트를 이미 malformed 로 다루므로,
+/// 같은 정책을 두 곳에 두면 어느 쪽을 지워도 판정자가 안 움직인다(적대적 검증에서 그 변이가 살아남았다).
+pub fn inflateBounded(allocator: std.mem.Allocator, compressed: []const u8, limit: usize) Error![]u8 {
+    var in: std.Io.Reader = .fixed(compressed);
+    var window: [std.compress.flate.max_window_len]u8 = undefined;
+    var decomp = std.compress.flate.Decompress.init(&in, .zlib, &window);
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+    var chunk: [64 * 1024]u8 = undefined;
+    while (true) {
+        const n = decomp.reader.readSliceShort(&chunk) catch return error.Malformed;
+        if (n == 0) break;
+        const want = out.items.len + n;
+        if (want > limit) return error.Unsupported; // 상한 초과 — bomb 방어
+
+        // **용량도 상한을 넘지 않게 잡는다.** 그냥 `appendSlice` 하면 ArrayList 가 1.5배씩 늘려
+        // 상한보다 **더 많이** 잡는다(실측: 64 MiB 상한에서 최대 요청이 69,697,664 B 였다).
+        // 상한은 「이만큼까지만 메모리를 쓴다」는 약속이므로 용량 쪽도 같이 묶어야 말이 맞는다.
+        if (out.capacity < want) {
+            const grow = @min(limit, @max(want, out.capacity +| out.capacity / 2 +| 8));
+            out.ensureTotalCapacityPrecise(allocator, grow) catch return error.OutOfMemory;
+        }
+        out.appendSliceAssumeCapacity(chunk[0..n]);
+    }
+    return out.toOwnedSlice(allocator) catch error.OutOfMemory;
+}
+
 /// zlib 스트림을 정확히 expected 바이트로 inflate한다(더/덜이면 malformed). 메모리는 expected로 바운드.
 /// kitty graphics의 zlib(o=z) 픽셀 경로(`kitty.zig`)가 쓴다. 정확히 expected로 풀려야 하고,
 /// 부족하면(short)·더 풀리면(over-long) malformed로 거부해 zlib bomb를 expected 바이트로 바운드한다.
@@ -100,11 +134,14 @@ pub fn inflateExact(allocator: std.mem.Allocator, compressed: []const u8, expect
 
 /// 요청된 **가장 큰 단일 할당**을 기록하는 래퍼. 「거절이 할당보다 앞선다」를 결과가 아니라
 /// 동작으로 재기 위해 필요하다 — 결과만 보면 17 GB 를 잡아 놓고 실패해도 똑같이 초록이다.
-const PeakAllocator = struct {
+///
+/// **판정자 전용이고 한 벌만 둔다.** `core.zig` 의 zlib bomb 판정자도 같은 질문을 하므로 여기서
+/// 가져다 쓴다 — 두 벌이면 한쪽만 고쳐져 같은 함정에 다시 빠진다.
+pub const PeakAllocator = struct {
     inner: std.mem.Allocator,
     peak: usize = 0,
 
-    fn allocator(self: *PeakAllocator) std.mem.Allocator {
+    pub fn allocator(self: *PeakAllocator) std.mem.Allocator {
         return .{ .ptr = self, .vtable = &.{
             .alloc = alloc,
             .resize = resize,

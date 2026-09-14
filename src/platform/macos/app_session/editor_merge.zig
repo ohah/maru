@@ -174,6 +174,9 @@ pub fn deliver(self: *AppSession, term: *Term, result: *git_backend_mod.DiffResu
     state.truncated = result.truncated;
     // **줄로 쪼개는 것도 도착의 일부다** — 화면이 그릴 축이 없으면 「왔다」가 아니다. 못 쪼개면
     // 실패로 남긴다(반쪽으로 준비됐다고 하면 빈 pane 셋이 뜬다).
+    // 정직하게: 「이미 쪼개 뒀으면 건너뛴다」로 바꾼 변이는 **등가**다(적대적 10회차 V8 실측) —
+    // 바로 위 `freeStages` 가 줄 배열을 먼저 비우므로 그 조건이 언제나 참이다. 조건을 두지 않는
+    // 이유가 그것이다: 두면 **읽는 사람이 그 순서를 다시 따라가야** 한다.
     splitAll(self, state) catch {
         state.failed = true;
         return true;
@@ -887,6 +890,14 @@ test "MRG16 세 판은 «상태가 든 allocator» 로 놓인다 — 도착에�
     };
     try testing.expect(deliver(session, term, &next));
     try testing.expectEqualStrings("B2", term.rt.editor_merge.?.base);
+    // **줄도 새 것이어야 한다.** 바이트만 갈고 줄을 그대로 두면 화면이 **옛 판**을 그리고, 더 나쁘게는
+    // 놓인 바이트를 가리킨다(줄은 바이트를 빌린다).
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_merge.?.base_lines.len);
+    try testing.expectEqualStrings("B2", term.rt.editor_merge.?.base_lines[0]);
+    // **세 판이 «각자» 바이트에서 쪼개진다.** 조상만 보면 `ours` 자리에 `theirs` 를 쪼개는 변이가
+    // 산다(적대적 6회차 R5 실측) — 화면에는 「현재 것」 자리에 「들어온 것」이 뜨는 결함이다.
+    try testing.expectEqualStrings("O2", term.rt.editor_merge.?.ours_lines[0]);
+    try testing.expectEqualStrings("T2", term.rt.editor_merge.?.theirs_lines[0]);
 
     // ⑵ **문서를 놓으면 판도 놓는다.** 여기서 빠뜨린 `free` 가 있으면 `testing.allocator` 가 빨개진다.
     clear(session, term);
@@ -1058,4 +1069,30 @@ test "MRG19 탭 스트립의 «그려질 셀» 에 병합 기준이 실린다 (�
             .{ ko_strip, strip, plain_strip },
         );
     }
+}
+
+test "MRG20 쪼갠 줄은 «바이트와 한 단위» 로 산다 — 비우면 둘 다 없다" {
+    // 줄 배열은 바이트를 **빌린다**. 바이트를 먼저 놓으면 놓인 메모리를 가리키는 배열이 남고, 그
+    // 사이에 그리는 프레임이 있으면 해제된 메모리를 읽는다(적대적 6회차 R2 가 그 순서를 뒤집었다).
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const session = try smokeSession(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    const opened = try pane_ops.openFileTermInActivePane(session, "/tmp/maru-test-merge-lines.txt", .text);
+    const term = opened.term;
+    term.rt.editor_merge = .{ .request_id = 51 };
+    var r = try fakeResult(51, "B\n", "O\n", "T\n");
+    defer r.deinit(git_backend_mod.worker_allocator);
+    try testing.expect(deliver(session, term, &r));
+
+    const st = term.rt.editor_merge orelse return error.MissingMergeState;
+    // **줄이 실제로 바이트를 가리킨다**(복사가 아니다) — 그래야 「한 단위」라는 말이 참이다.
+    try testing.expectEqual(@intFromPtr(st.base.ptr), @intFromPtr(st.base_lines[0].ptr));
+    try testing.expectEqual(@intFromPtr(st.ours.ptr), @intFromPtr(st.ours_lines[0].ptr));
+    try testing.expectEqual(@intFromPtr(st.theirs.ptr), @intFromPtr(st.theirs_lines[0].ptr));
+
+    clear(session, term);
+    try testing.expect(term.rt.editor_merge == null);
 }

@@ -260,14 +260,27 @@ Chrome Lab 시나리오 `editor-conflict` + 골든 둘이 이것을 든다. **La
 **판정자 안에서** 러너를 직접 부른다(`zig build test-merge-stages-e2e`). 이 하네스가 없던 동안
 워커의 세 판 배선은 **통째로 무판정**이었다.
 
-#### S3b. pane 넷 화면
+#### S3b. pane 넷 화면 — **새 `merge` Term 위에**(§7 ④, 2026-09-14)
 
-- **pane 넷**: Incoming(theirs) · Current(ours) · **Result(편집 가능)** · Base(선택).
-- 출처는 §3 의 세 stage 이고 **Result 는 작업트리 파일**이다 — 저장이 곧 해결이다.
-- **비교 뷰 기계를 재활용하지 않는다.** [multi-view §3·§4](plans/native-editor-multi-view.md)가
-  실측했듯 비교 뷰는 세로를 **일부러 공유**하고(§3.5) 이쪽은 정반대다. 그 문서가 Split in Group 에
-  대해 적은 비용(뷰 상태 약 35개 + 입력 라우팅 약 50곳)이 여기에도 걸린다.
-- **base 가 없으면 Base pane 을 비우고 2-way 로 저하한다**(§3) — 그 판정은 **S3a 가 이미 낸다**.
+- **pane 넷**: Current(`:2:`) · Result(**편집 가능**) · Incoming(`:3:`) · Base(`:1:`, 선택).
+- 출처는 §3 의 세 stage 이고(**S3a 가 이미 읽어 온다**) **Result 는 작업트리 파일**이다 — 저장이 곧 해결이다.
+- **base 가 없으면 Base pane 을 비우고 2-way 로 저하한다**(§3) — 그 판정도 **S3a 가 이미 낸다**
+  (`conflict.StageSet.degradesToTwoWay()`).
+- **비교 뷰 기계를 재활용하지 않는다**(§7 ④ 의 답이 그것이다). 비교 뷰는 좌우가 세로를 **일부러**
+  공유하는데(§3.5) 3-way 는 정반대다.
+
+**다시 조각으로 가른다.** 화면 넷을 한 번에 세우면 「Term 이 서지도 않았는데 그림을 그리는」 상태가
+길게 남는다.
+
+| 조각 | 내용 | 화면이 달라지나 |
+| --- | --- | --- |
+| **S3b-1** | `SurfaceKind.merge` 를 **세운다** — Term 을 만들고·닫고·재개한다. 그림은 아직 편집기 하나(Result) | 조금(새 Term 이 뜬다) |
+| **S3b-2** | pane 넷 **배치와 그리기**(읽기 전용 셋 + Result) | **그렇다** |
+| **S3b-3** | Result 편집·저장 = 해결. S2 의 「고르기」를 pane 에서 부른다 | **그렇다** |
+
+**S3b-1 이 먼저인 이유**: 종류를 더하는 일은 wire·스냅샷·재개까지 걸리는데(위 ④ 의 ⚠️), 그 배선이
+서기 전에는 pane 을 그려도 **다음에 열면 사라진다**. 그리고 그 조각은 **혼자서도 쓸모가 있다** —
+충돌 파일을 여는 전용 Term 이 생기고, 그 안은 지금의 편집기 그대로다(S1·S2 가 이미 선 자리).
 
 **S2 는 S1.5 가 선 뒤에 착수한다** — 동작을 놓을 행이 없으면 인식만 해 놓고 부를 길이 없다.
 
@@ -295,8 +308,34 @@ Chrome Lab 시나리오 `editor-conflict` + 골든 둘이 이것을 든다. **La
    S2 앞에 선다(§5).
 3. ~~**마커 강조를 구문 강조와 어떻게 섞을까**~~ — **답했다(2026-09-13)**: 겹치지 않는다. 강조는
    **배경 밴드**이고 구문 색은 **전경**이다. 그리고 칠하는 것은 **마커 줄뿐**이다(§5 S2).
-4. **3-way 를 어느 표면에 둘까**: 새 Term 종류인가, 비교 Term 의 다른 모드인가.
-5. **파일이 여럿 충돌했을 때의 이동**: 「다음 충돌 파일」이 필요한가.
+4. ~~**3-way 를 어느 표면에 둘까**~~ — **답했다(2026-09-14)**: **새 Term 종류**다(사용자 결정).
+   `SurfaceKind` 에 `merge` 를 더한다 — **비교 뷰는 손대지 않는다.**
+
+   **왜 그쪽인가.** 비교 뷰를 pane N 개로 일반화하면 좌우를 필드 이름에 하드코딩한 자리
+   (`_left`/`_right` 짝 13 개)가 전부 배열이 되고, [multi-view §3](plans/native-editor-multi-view.md)
+   가 잰 **뷰 상태 약 35 개 + 입력 라우팅 약 50 곳**이 그대로 걸린다. 게다가 비교 뷰는 좌우가 세로를
+   **일부러 공유**하는데(§3.5) 3-way 는 정반대라, 같은 기계에 두면 그 규칙이 모드마다 갈린다 —
+   **이미 서 있는 기능이 같이 흔들린다.**
+
+   **종류를 더하는 것 자체는 싸다 — 재 봤다**(2026-09-14). `SurfaceKind` 에 값을 하나 넣고 컴파일러가
+   거절하는 자리를 전부 채웠더니 **8 줄 · 4 파일**이었고, 그 상태로 `zig build check-targets` 와
+   **macOS 앱 호스트**(`macos-app-host-abi-lib`)가 **둘 다 통과**했다:
+
+   | 파일 | 무엇 |
+   | --- | --- |
+   | `session/control_surface.zig` | 열거값 · `SurfaceDetail` union arm · switch 둘 |
+   | `app/live_pty.zig` | `LiveSurface` union arm · switch 하나 |
+   | `app/in_process_term_backend.zig` | switch 하나 |
+   | `platform/macos/app_session/editor.zig` | switch 하나 |
+
+   ⚠️ **컴파일만 쟀다.** `SurfaceKind` 는 **wire 에도 실리는 닫힌 열거**라
+   ([control-plane.md](control-plane.md) — `surface.kind = terminal | web | editor`), 그 문서와 스냅샷
+   계약도 같이 바뀌어야 한다. 그것은 컴파일러가 안 잡아 준다.
+
+   **`EditorMeta` 를 그대로 쓴다.** 병합 표면이 여는 것도 **로컬 파일 하나**이고 신뢰 경계도 같다 —
+   web 의 축(`url`·`trust`·`loading`)을 복사하지 않는 이유를 control-plane 이 이미 적어 두었다.
+5. **파일이 여럿 충돌했을 때의 이동**: 「다음 충돌 파일」이 필요한가. **아직 열려 있다** — S3b 를
+   세운 뒤에 답한다(그 전에는 「이동」이 무엇 사이의 이동인지가 안 정해진다).
 
 ## 8. 함께 갱신할 문서
 
@@ -306,3 +345,4 @@ Chrome Lab 시나리오 `editor-conflict` + 골든 둘이 이것을 든다. **La
 | [plans/native-editor.md](plans/native-editor.md) | 「3-way 병합 편집기」 행이 이 문서를 가리키게 |
 | [key-input-and-shortcuts.md](key-input-and-shortcuts.md)·[configuration-input.md](configuration-input.md) | S2 의 동작에 chord 를 줄 때 |
 | [status-bar.md](status-bar.md) | 「마커가 남아 있다」를 상태바에 둘 때(S2) |
+| [control-plane.md](control-plane.md) | `surface.kind` 에 `merge` 를 더할 때(S3b-1) — **그 열거의 소유자다** |

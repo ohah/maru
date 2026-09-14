@@ -85,6 +85,18 @@ pub const RuntimeSpawnParams = struct {
     pane_id: ?u64 = null,
     cols: u16,
     rows: u16,
+    /// 셀 픽셀 크기. PTY winsize 의 `ws_xpixel`/`ws_ypixel` 을 **spawn 시점부터** 채운다.
+    ///
+    /// **왜 spawn 에 실어야 하나.** 이미지 프로토콜을 쓰는 자식(terminal-browser 류)은 뜨자마자 크기를
+    /// 묻는다. 표준 경로가 `ws_xpixel / ws_col` 인데 0 이면 못 쓰고, 다음으로 `CSI 14t` 를 묻는다.
+    /// 그런데 host 코어의 셀 메트릭이 0 이면 코어는 **의도적으로 침묵**하고(0 을 답하면 기하가 통째로
+    /// 깨진다), 자식은 짧은 제한시간 뒤 기본값으로 굳는다 — 실측 2026-09-14: 2560px pane 에서 브라우저
+    /// 뷰포트가 1083px 로 굳어 확대·가로스크롤·좁은 레이아웃이 한꺼번에 났다.
+    ///
+    /// 뒤늦게 `set_cell_metrics` 를 보내도 소용없다. 자식은 **시작할 때 한 번만** 묻는다.
+    /// 0 이면 «모른다» 로 두고 기존 동작 그대로다(옛 client 는 이 필드를 안 보낸다).
+    cell_width_px: u32 = 0,
+    cell_height_px: u32 = 0,
     initial_config: ?core_command_wire.Command.RuntimeConfig = null,
     initial_notification: ?NotificationConfigSnapshot = null,
 };
@@ -1708,6 +1720,9 @@ pub const Connection = struct {
             (intField(p, "rows") orelse 24);
         if (!reg.gridSizeAllowed(cols, rows))
             return self.replyError(request_id, .invalid_request);
+        // 옛 client 는 이 둘을 안 보낸다 — 없으면 0(모른다)이라 기존 동작 그대로다.
+        const cell_width_px: u32 = @intCast(intField(p, "cell_width_px") orelse 0);
+        const cell_height_px: u32 = @intCast(intField(p, "cell_height_px") orelse 0);
         const initial_config: ?core_command_wire.Command.RuntimeConfig = if (p.get("runtime_config")) |value|
             switch (value) {
                 .null => null,
@@ -1737,6 +1752,8 @@ pub const Connection = struct {
             .shell_integration_dir = zdotdir,
             .ssh_integration_bin = ssh_integration_bin,
             .pane_id = pane_id,
+            .cell_width_px = cell_width_px,
+            .cell_height_px = cell_height_px,
             .cols = cols,
             .rows = rows,
             .initial_config = initial_config,

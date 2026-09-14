@@ -901,6 +901,7 @@ pub fn drainGitStatus(self: *AppSession) void {
         }
     }
     drainIgnoreResults(self); // 탐색기 무시 표시 — 같은 tick 에서 걷어 rows 를 한 번만 다시 만든다
+    retryPendingIgnore(self); // 자리가 차서 거절됐던 디렉터리를 하나 다시 건다(드레인 **뒤**라야 자리가 비어 있다)
     var backend = &(self.git_backend orelse return);
     // 턴 스냅샷 결과를 링에 넣는다. 같은 tree가 연달아 오면 링이 스스로 무시한다(빈 비교 방지 — §6.1).
     while (backend.takeBranchesResult()) |taken| {
@@ -1272,8 +1273,43 @@ pub fn requestIgnoredForPaths(self: *AppSession, dir_path: []const u8, entries: 
     }
     if (self.git_ignore_query_paths.items.len == 0) return;
     self.git_ignore_request_id +%= 1;
-    // 거절되면(이미 하나가 돌고 있음) 그냥 넘어간다 — 다음 스캔이 다시 묻는다.
-    _ = self.git_backend.?.submitCheckIgnore(git_exe, repo, self.git_ignore_query_paths.items, self.git_ignore_request_id);
+    // **거절되면 그 디렉터리를 적어 둔다**(`git_ignore_retry_dirs` 주석). 옛 코드는 「다음 스캔이 다시
+    // 묻는다」며 그냥 넘어갔는데, 이 질의를 부르는 자리는 스캔 결과 드레인 하나뿐이라 **다시 스캔할
+    // 이유가 없으면 영영 안 묻는다.**
+    if (!self.git_backend.?.submitCheckIgnore(git_exe, repo, self.git_ignore_query_paths.items, self.git_ignore_request_id)) {
+        rememberIgnoreRetry(self, dir_path);
+    }
+}
+
+/// 재시도 목록 상한. 넘으면 **더 넣지 않는다** — 못 들어간 디렉터리는 판정 없이 남을 뿐이고
+/// (모르면 흐리게 하지 않는다), 사용자가 다시 펼치면 그때 스캔이 또 묻는다.
+const max_ignore_retry_dirs = 64;
+
+fn rememberIgnoreRetry(self: *AppSession, dir_path: []const u8) void {
+    for (self.git_ignore_retry_dirs.items) |d| {
+        if (std.mem.eql(u8, d, dir_path)) return; // 같은 디렉터리를 두 번 줄 세우지 않는다
+    }
+    if (self.git_ignore_retry_dirs.items.len >= max_ignore_retry_dirs) return;
+    const owned = self.allocator.dupe(u8, dir_path) catch return;
+    self.git_ignore_retry_dirs.append(self.allocator, owned) catch {
+        self.allocator.free(owned);
+        return;
+    };
+}
+
+/// 거절됐던 디렉터리 **하나**를 다시 스캔하게 건다. 스캔이 끝나면 그 드레인이 흐림을 다시 묻는다 —
+/// 여기서 직접 묻지 않는 이유는 **그 디렉터리의 항목 목록이 스캔에만 있기** 때문이다(트리는 화면용
+/// 행만 들고 있고, 접힌 하위의 목록은 없다).
+///
+/// **백엔드가 한가할 때만** 건다. 아니면 다시 거절당해 스캔만 도는 헛바퀴가 된다.
+/// 한 tick 에 하나씩 — 한꺼번에 걸면 그중 하나만 통과하고 나머지가 또 줄을 선다.
+pub fn retryPendingIgnore(self: *AppSession) void {
+    if (self.git_ignore_retry_dirs.items.len == 0) return;
+    var backend = &(self.git_backend orelse return);
+    if (backend.ignoreBusy()) return;
+    const dir = self.git_ignore_retry_dirs.orderedRemove(0);
+    defer self.allocator.free(dir);
+    self.file_tree.requeueScan(dir) catch {};
 }
 
 /// `check-ignore` 결과를 트리에 반영한다. 무시된 것으로 돌아온 경로만 표시하고, 이번 배치에서 물었던

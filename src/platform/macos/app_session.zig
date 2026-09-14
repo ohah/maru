@@ -5940,6 +5940,15 @@ pub const AppSession = struct {
     /// 그래서 **오프셋으로 모으고**(`git_ignore_query_spans`) 버퍼가 확정된 **뒤에** 슬라이스를 만든다.
     git_ignore_query_spans: std.ArrayList(struct { off: usize, len: usize }) = .empty,
     git_ignore_query_paths: std.ArrayList([]const u8) = .empty,
+    /// 흐림 질의가 **거절된** 디렉터리들(owned 절대경로). 백엔드는 `check-ignore` 자리가 하나라
+    /// 도는 작업이 있으면 새 요청을 거절하는데, 이 질의를 부르는 자리는 **스캔 결과 드레인 하나뿐**이라
+    /// 거절되면 그걸로 끝이었다 — 폴더를 펼쳐 하위가 한꺼번에 스캔되면 **첫 하나만 묻고 나머지는 영영
+    /// 안 묻는다**(어떤 폴더는 흐려지고 어떤 폴더는 안 흐려진다). 옛 주석의 「다음 스캔이 다시
+    /// 묻는다」는 다시 스캔할 이유가 없으면 **일어나지 않는 일**이다(적대적 검증 14 회차).
+    ///
+    /// tick 이 백엔드가 한가해졌을 때 하나씩 다시 건다(`retryPendingIgnore`) — 「재요청은 tick 이
+    /// 소유한다」는 이 파일의 오래된 규율이고, diff 재요청이 같은 자리에 있다.
+    git_ignore_retry_dirs: std.ArrayList([]u8) = .empty,
     git_ignore_request_id: u64 = 0,
     file_tree_entry_inputs: std.ArrayList(file_tree.EntryInput) = .empty,
     file_tree_open_states: std.ArrayList(file_tree.OpenState) = .empty,
@@ -23045,6 +23054,8 @@ pub const AppSession = struct {
             self.git_ignore_query_buf.deinit(self.allocator);
             self.git_ignore_query_spans.deinit(self.allocator);
             self.git_ignore_query_paths.deinit(self.allocator);
+            for (self.git_ignore_retry_dirs.items) |d| self.allocator.free(d);
+            self.git_ignore_retry_dirs.deinit(self.allocator);
             self.file_tree_entry_inputs.deinit(self.allocator);
             self.file_tree_open_states.deinit(self.allocator);
             if (self.file_tree_followed_cwd) |p| { // ET-CWD: 마지막으로 따라간 cwd(owned)
@@ -71152,6 +71163,77 @@ test "흐림은 «진짜 git 으로 물어 화면까지» 닿는다 — 제품 �
     // **전제도 센다** — 행이 안 서면 위 두 단언이 통째로 공허하다(허용된 자리 N 개를 센다).
     try std.testing.expectEqual(@as(usize, spans.len / 2), dim);
     try std.testing.expectEqual(@as(usize, spans.len / 2), lit);
+}
+
+test "자리가 차서 거절된 흐림 질의는 잊히지 않는다" {
+    // **적대적 검증 14 회차(2026-09-14).** 백엔드는 `check-ignore` 자리가 **하나**라 도는 작업이
+    // 있으면 새 요청을 거절한다. 그런데 이 질의를 부르는 자리는 **스캔 결과 드레인 하나뿐**이다 —
+    // 거절되면 옛 코드는 「다음 스캔이 다시 묻는다」며 그냥 넘어갔다.
+    //
+    // **그 «다음 스캔» 은 오지 않는다.** 다시 스캔할 이유(파일 변경·접었다 펴기·새로 고침)가 없으면
+    // 그 디렉터리는 영영 안 물어본 채로 남는다. 폴더를 펼쳐 하위가 한꺼번에 스캔되면 **첫 하나만
+    // 묻고 나머지는 전부 잃는다** — 사용자에게는 「어떤 폴더는 흐려지고 어떤 폴더는 안 흐려진다」로
+    // 보이고, 어느 쪽이 될지는 스캔이 도착한 순서에 달렸다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const repo_len = tmp.dir.realPath(io, &repo_buf) catch return error.SkipZigTest;
+    const repo = repo_buf[0..repo_len];
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const git_exe = git_backend_mod.locate(&exe_buf) orelse return error.SkipZigTest;
+    if (!git_backend_mod.initRepoForTest(allocator, git_exe, repo)) return error.SkipZigTest;
+    try tmp.dir.createDirPath(io, "sub");
+
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    session.git_backend = try git_backend_mod.Backend.init(session.io);
+
+    var sub_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const sub = try std.fmt.bufPrint(&sub_buf, "{s}/sub", .{repo});
+    try session.file_tree.replaceExplicitRoots(&.{repo});
+    try session.file_tree.applySnapshot(repo, &.{.{ .name = "sub", .kind = .directory }});
+
+    const entries = [_]struct { name: []const u8 }{.{ .name = "x.txt" }};
+
+    // ⑴ 첫 디렉터리 — 요청이 나간다(그리고 자리를 차지한다).
+    git_ops.requestIgnoredForPaths(session, repo, &entries);
+    const after_first = session.git_ignore_request_id;
+
+    // ⑵ 자리가 찬 동안 두 번째 디렉터리가 스캔돼 온다. 요청은 **거절**된다.
+    git_ops.requestIgnoredForPaths(session, sub, &entries);
+    try std.testing.expect(session.git_ignore_request_id != after_first); // 물으려고는 했다
+
+    // **옛 코드는 여기서 아무것도 안 남겼다.** 그 디렉터리는 영영 안 물어본 채로 남는다.
+    try std.testing.expectEqual(@as(usize, 1), session.git_ignore_retry_dirs.items.len);
+    try std.testing.expectEqualStrings(sub, session.git_ignore_retry_dirs.items[0]);
+
+    // ⑶ 자리가 빌 때까지는 **안 건다** — 걸어 봐야 또 거절이고 스캔만 돈다.
+    // 앞선 스캔 요청들을 비워 둔다(전제) — `takeScanRequest` 는 **소유권을 준다**.
+    while (session.file_tree.takeScanRequest()) |queued| allocator.free(queued);
+    git_ops.retryPendingIgnore(session);
+    try std.testing.expectEqual(@as(usize, 1), session.git_ignore_retry_dirs.items.len);
+
+    // ⑷ 답이 오면 자리가 빈다 — 그때 tick 이 그 디렉터리를 다시 건다.
+    var spins: usize = 0;
+    while (spins < 1000 and !session.git_ignore_answered) : (spins += 1) {
+        git_ops.drainIgnoreResults(session);
+        if (session.git_ignore_answered) break;
+        var ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+        _ = std.c.nanosleep(&ts, null);
+    }
+    try std.testing.expect(session.git_ignore_answered);
+
+    git_ops.retryPendingIgnore(session);
+    try std.testing.expectEqual(@as(usize, 0), session.git_ignore_retry_dirs.items.len);
+    // **다시 스캔하라고 걸렸나** — 그 스캔의 드레인이 흐림을 다시 묻는다.
+    const requeued = session.file_tree.takeScanRequest() orelse return error.IgnoreRetryNeverQueued;
+    defer allocator.free(requeued);
+    try std.testing.expectEqualStrings(sub, requeued);
 }
 
 test "앞 디렉터리의 답이 뒤 디렉터리의 흐림을 지우지 않는다" {

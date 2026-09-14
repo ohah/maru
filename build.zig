@@ -3775,6 +3775,24 @@ pub fn build(b: *std.Build) void {
     run_file_tree_model_tests.addArg("--maru-expect-tests=24"); // 이름 있는 셋 + 이 그래프의 이름 없는 test 블록들(필터와 무관하게 컴파일된다)
     b.step("test-file-tree-model", "Run the pure file tree model unit tests only (RF5a filter)").dependOn(&run_file_tree_model_tests.step);
 
+    // 터미널 마커 이미지 프리뷰의 **순수 코어**만(MP1) — 스테이징 맵·관찰·화면 마커 스캐너.
+    // `file_tree_model` 과 같은 이유로 모듈 루트를 못 세운다(`../terminal.zig` 가 모듈 경로 밖이다).
+    // 그래서 maru 그래프에 필터를 건다. `test` 전체에는 매달지 않는다 — 그쪽이 이미 같은 판정자를 돌린다.
+    const marker_preview_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/maru.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "shutdown_wire_contract", .module = shutdown_wire_contract_mod }},
+        }),
+        .filters = &.{"MP1"},
+    });
+    marker_preview_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
+    const run_marker_preview_tests = b.addRunArtifact(marker_preview_tests);
+    run_marker_preview_tests.addArg("--maru-expect-tests=40"); // MP1 이름 있는 19 + 이 그래프의 이름 없는 test 블록들(필터와 무관하게 컴파일된다)
+    b.step("test-marker-preview", "Run the terminal image-marker preview core judges only (MP1 filter)").dependOn(&run_marker_preview_tests.step);
+
     // 병합 충돌 **stage 규칙**만(S3a). `git_command` 의 지정자 판정자가 `test-editor` 그래프에
     // **없어서**(실측) 그 이름만 돌리면 변이가 전부 「살아남음」으로 나온다 — 그렇다고 `test` 전체를
     // 돌리면 한 변이에 6 분이 들고, 무관한 concurrent flake 가 「죽음」으로 세어진다(실측).

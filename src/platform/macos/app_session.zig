@@ -14888,6 +14888,10 @@ pub const AppSession = struct {
         // own. Do not let a stale/misordered native caller paste a filesystem path into a web/file
         // surface merely because it bypassed the structural route gate.
         if (active_term.kind != .terminal) return;
+        // **드롭한 이미지도 프리뷰 스테이징에 건다**(§4.2). 드래그는 `drop_image`가 아니라 이 길로 오므로
+        // 여기 안 걸면 「마커는 뜨는데 프리뷰만 안 열린다」가 된다(사용자 제보 2026-09-14).
+        // 원격이어도 **로컬 원본이 그대로 있으므로** 그 경로로 디코드한다 — 업로드되는 것은 사본이다.
+        self.stageDroppedImagePaths(active_term, paths_nul);
         // in-process는 큐/RPC가 필요 없다. host-backed만 managed connection의 비동기 freshness barrier를 탄다.
         if (active_term.surface.remote == null) {
             self.pasteTextTo(target_id, paths_nul, true);
@@ -14913,16 +14917,52 @@ pub const AppSession = struct {
         if (pane_ops.activePane(self).activeTerm().rt.ended_placeholder) return true;
         const active_term = pane_ops.activePane(self).activeTerm();
         if (active_term.kind != .terminal) return false;
+        // **바이트가 우리를 거치는 유일한 자리**라 로컬·원격 가리지 않고 프리뷰 스테이징에 실어 둔다(§4.2).
+        // 원격이어도 그 임시 PNG는 **이쪽 기기에 있다** — 업로드되는 것은 사본이므로 디코드는 로컬에서 된다.
+        // 실패는 삼킨다: 프리뷰가 안 되는 것이 붙여넣기를 막을 이유가 아니다.
+        self.stageMarkerPreviewImage(active_term, temp_path, bytes);
         if (active_term.surface.remote == null) {
             // **로컬은 여기서 consume하지 않는다** — Swift가 임시 PNG 경로를 bracketed paste로 보내야
-            // TUI가 `[Image #N]`으로 바꾼다(§4.1). 다만 그 바이트가 우리를 거치는 **유일한 자리**가
-            // 여기이므로, 지나가는 길에 프리뷰 스테이징에 실어 둔다(§4.2). 실패는 삼킨다 —
-            // 프리뷰가 안 되는 것이 붙여넣기를 막을 이유가 아니다.
-            self.stageMarkerPreviewImage(active_term, temp_path, bytes);
+            // TUI가 `[Image #N]`으로 바꾼다(§4.1).
             return false;
         }
         self.enqueueUserActionImage(active_term, term_ops.activeSurface(self).id, temp_path, bytes);
         return true;
+    }
+
+    /// 드롭된 파일들 중 **이미지**를 프리뷰 스테이징에 건다(§4.2).
+    ///
+    /// 클립보드 경로와 달리 바이트가 없다 — 대신 **그 파일이 이미 로컬에 있으므로** 경로만 들면 된다.
+    /// 원격 세션이어도 마찬가지다: 업로드되는 것은 사본이고 원본은 이쪽 기기에 남는다.
+    fn stageDroppedImagePaths(self: *AppSession, term: *Term, paths_nul: []const u8) void {
+        var it = std.mem.splitScalar(u8, paths_nul, 0);
+        while (it.next()) |path| {
+            if (path.len == 0) continue;
+            if (!isImagePath(path)) continue;
+            const surface_id = term.surface.id;
+            var visible: std.ArrayList(u32) = .empty;
+            defer visible.deinit(self.allocator);
+            self.collectMarkerNumbers(term, .cursor_block, &visible) catch return;
+            const owned = self.allocator.dupe(u8, path) catch return;
+            // 바이트는 안 든다 — 디코드가 경로로 읽는다. 예산(§4.2)도 그만큼 덜 문다.
+            marker_preview_ops.onImagePasted(&self.marker_preview, self.allocator, surface_id, visible.items, &.{}, owned) catch {
+                self.allocator.free(owned);
+            };
+        }
+    }
+
+    /// 확장자로 이미지를 가른다. **내용을 열어 보지 않는다** — 드롭마다 파일을 여는 비용을 물 이유가
+    /// 없고, 틀려도 디코드가 조용히 실패할 뿐이다(`failed`).
+    fn isImagePath(path: []const u8) bool {
+        const dot = std.mem.lastIndexOfScalar(u8, path, '.') orelse return false;
+        const ext = path[dot + 1 ..];
+        if (ext.len == 0 or ext.len > 5) return false;
+        var buf: [5]u8 = undefined;
+        const lower = std.ascii.lowerString(buf[0..ext.len], ext);
+        for ([_][]const u8{ "png", "jpg", "jpeg", "gif", "webp", "heic", "tiff", "bmp" }) |known| {
+            if (std.mem.eql(u8, lower, known)) return true;
+        }
+        return false;
     }
 
     /// 붙여넣은 PNG를 마커 프리뷰 스테이징에 건다(§4.2). **paste가 나가기 전에** 불려야 한다 —

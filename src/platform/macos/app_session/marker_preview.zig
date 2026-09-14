@@ -387,3 +387,22 @@ test "MP1 배선: 앵커가 덮이면 재검증이 실패한다 — 조용히 �
     const other_n = [_]markers_mod.Hit{.{ .row = 3, .start_col = 2, .end_col = 12, .n = 2 }};
     try testing.expect(!stillAnchored(open, &other_n));
 }
+
+test "MP1 배선: 바이트 없이 **경로만** 든 항목도 찾아진다 — 드롭 경로가 그 모양이다" {
+    var st: State = .{};
+    defer st.deinit(testing.allocator);
+    const path = try dup("/tmp/shot.png");
+    try onImagePasted(&st, testing.allocator, 7, &.{}, &.{}, path);
+    try observe(&st, testing.allocator, 7, &.{1});
+    const e = st.stagingFor(7).?.lookup(1) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 0), e.png.len); // 바이트는 안 든다
+    try testing.expectEqualStrings("/tmp/shot.png", e.path); // 디코드는 이 경로로 건다
+}
+
+test "MP1 배선: 경로만 든 항목은 예산을 거의 안 문다 — 드롭은 원본을 복사하지 않는다" {
+    var st: State = .{};
+    defer st.deinit(testing.allocator);
+    try onImagePasted(&st, testing.allocator, 7, &.{}, &.{}, try dup("/tmp/a.png"));
+    try observe(&st, testing.allocator, 7, &.{1});
+    try testing.expectEqual(@as(usize, 0), st.stagingFor(7).?.bytes);
+}

@@ -5983,9 +5983,12 @@ WindowServer, exact frontmost PID가 없으면 pass/skip이 아니라 `not_provi
 대체하지 않는다. v2a 생산자는 첫 물리 key 전에 `before-ime`, 첫 `setMarkedText` callback 뒤 다음 key 전에
 `first-marked` 제품 PPM을 찍고 `maru.session-host-cr6d-ime-pixel.v1` receipt를 atomic no-overwrite로 게시한다.
 별도 `maru-session-host-cr6d-pixel-verify`가 strict schema, exact P6, runtime/surface/세대/좌표와 cursor 두 cell 밖
-변화 0을 다시 판정한다. 생산자·판정기는 구현됐지만 실제 제품 green은 잠금 해제된 전면 AppKit 회차가 남았다.
-2026-09-14 잠긴 회차는 frontmost PID가 `loginwindow`여서 source 전환·HID 게시·capture 전에
-`global-keyboard-focus`로 RED였으며 v2a 통과로 세지 않는다. v2b 생산자와 판정자는 아직 구현 전이다.
+변화 0을 다시 판정한다. 2026-09-14 잠금 해제된 제품 회차는 exact frontmost Maru PID에서 recovery stage 2,
+input stage 4, historical/IME/clipboard 각 1, marked callback 8, insert callback 2로 끝났다. 같은 runtime
+`d72cd830ea22e4cc6dce537383522941`·surface 1에서 frame generation 4→5, cursor·`firstRect` `(668,798,8,18)`을
+결속한 두 960×600 PPM을 별도 판정기가 통과해 v2a를 green으로 닫았다. 그 전 잠긴 회차는 frontmost PID가
+`loginwindow`여서 source 전환·HID 게시·capture 전에 `global-keyboard-focus`로 RED였으며 통과 증거에 포함하지
+않는다. v2b 생산자와 판정자는 아직 구현 전이다.
 
 **CR6e-a1 stalled peer·transport baseline artifact 계약:** 자동 reconnect 제품 설정은 아직 배선하지 않는다. CR4의 제품
 `connectExistingHostUntil`/deadline-aware hello 경계에 harness-owned user-only Unix socket과 exact manifest를 제공한다.
@@ -7735,8 +7738,8 @@ P3-e도 슬라이스로 나눈다(제품 통합이라 크다).
     source/destination admission과 queue-transfer preflight의 2-phase abort-before-commit/detach 원자성,
     runtime-owned direct-key FIFO의 socket backpressure 보존과 async scroll barrier wire ordering은
     단위 또는 controlled host-backed 테스트로 검증한다. capability 없는 frozen N-1 fixture의 host 재접속은 자동화됐고, pane/Term/tab 및
-    모든 비-terminal input owner 전환의 개별 제품 E2E, 실제 AppKit run-loop의 stalled-socket deadline 계측, 실제 macOS 입력기의 후보창·자모별
-    픽셀 갱신은 아직 수동/후속 gate다. socketpair backpressure는 AppKit 경계의 일반 key가 64 KiB FIFO에
+    모든 비-terminal input owner 전환의 개별 제품 E2E와 실제 macOS 입력기의 OS-owned 후보창 픽셀은 아직
+    수동/후속 gate다. 실제 AppKit 조합 preedit 픽셀은 CR6d-v2a 제품 gate로 완료됐다. socketpair backpressure는 AppKit 경계의 일반 key가 64 KiB FIFO에
     소유된 뒤 막힌 connection/encode OOM에서도 유실되지 않는지, exact-cap/cap+1 의미론,
     `기존 input → scroll → 새 input → mouse RPC` 순서, request write hard-error connection invalidation,
     lifecycle request의 fail-always allocator OOM→EOF cleanup fallback을 자동 검증한다.

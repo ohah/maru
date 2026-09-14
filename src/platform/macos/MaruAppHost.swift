@@ -10459,8 +10459,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         ]
         guard JSONSerialization.isValidJSONObject(object),
               let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) else { return false }
+        // Foundation traps when `.atomic` and `.withoutOverwriting` are combined. Publish a
+        // completed same-directory inode with link(2) instead: the hard-link creation is atomic,
+        // refuses an existing target, and never exposes the temporary pathname to the verifier.
+        let temporary = root.appendingPathComponent(".session-host-cr6d-ime-pixel-receipt.\(UUID().uuidString).tmp")
+        defer { try? FileManager.default.removeItem(at: temporary) }
         do {
-            try data.write(to: target, options: [.atomic, .withoutOverwriting])
+            try data.write(to: temporary, options: .withoutOverwriting)
+            try FileManager.default.linkItem(at: temporary, to: target)
             return true
         } catch {
             return false

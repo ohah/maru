@@ -15057,71 +15057,84 @@ pub const AppSession = struct {
         live_ids: *std.ArrayList(u32),
     ) void {
         const open = &(self.marker_preview_open orelse return);
-        if (open.pixels.len == 0) {
-            open.uploaded = false; // 아직 안 풀렸다 — 「안 그리고 나가는 길」이라 표시를 되돌린다(§5)
-            return;
-        }
         const term = pane_ops.activePane(self).activeTerm();
         if (term.surface.id != open.surface_id) {
             open.uploaded = false; // 다른 pane을 보는 중이라 이 프레임엔 안 실린다
             return;
         }
-        const anchor_rect = self.markerAnchorRect(term, open.*) orelse {
+        const place = self.markerPreviewPlacement(term, open.*) orelse {
             open.uploaded = false;
             return;
         };
-        const p = chrome.props.ChromeProps{ .metrics = self.buildCellMetrics() };
-        const place = chrome.components.image_preview.place(anchor_rect, open.width, open.height, p) orelse {
-            open.uploaded = false;
-            return;
-        };
+        // **테두리를 여기서 그린다 — 이미지와 같은 프레임 자리다.** 예전에는 chrome draws 조립부에서
+        // 넣었는데, `gpu_quads` 는 **매 프레임 비워지는데 그 조립부는 매 프레임 돌지 않는다**. 그래서
+        // 테두리가 유지되지 않았다 — Cmd 를 누르면 단축키 힌트 때문에 chrome 이 다시 조립돼 살아나고,
+        // 떼면 그 프레임부터 quad 가 비어 사라졌다(사용자 제보 2026-09-14).
+        // **규율**: 매 프레임 있어야 하는 것은 매 프레임 도는 자리에서 넣는다 — 이미지(`gpu_images`)가
+        // 이미 그 자리를 쓰고 있었고, 테두리만 다른 생명주기에 얹은 것이 어긋남의 원인이었다.
+        self.appendMarkerPreviewFrameQuads(place);
+        if (open.pixels.len == 0) {
+            open.uploaded = false; // 아직 안 풀렸다 — 「안 그리고 나가는 길」이라 표시를 되돌린다(§5)
+            return; // 테두리(자리)는 이미 그렸다
+        }
         marker_preview_ops.appendGpuImage(open, self.allocator, place, images, uploads, pixels, live_ids);
     }
 
-    /// 열린 프리뷰의 **테두리와 실패 안내**를 chrome ops에 싣는다. 픽셀은 `gpu_images`가 따로 싣는다
-    /// (갤러리 §5.4 분업). 문구는 여기서 i18n에서 고른다 — 컴포넌트는 `ui.language`를 모른다.
-    pub fn collectMarkerPreviewDraws(
-        self: *AppSession,
-        arena: std.mem.Allocator,
-        out: *std.ArrayList(chrome.draw.ChromeDraw),
-    ) !void {
-        const open = self.marker_preview_open orelse return;
-        const term = pane_ops.activePane(self).activeTerm();
-        if (term.surface.id != open.surface_id) return;
-        const anchor_rect = self.markerAnchorRect(term, open) orelse return;
-        const p = chrome.props.ChromeProps{ .metrics = self.buildCellMetrics() };
-        // 아직 못 푼 동안에도 **자리는 잡아 둔다** — 클릭했는데 아무것도 안 뜨면 「먹혔나」로 읽힌다.
-        // 크기를 모르면 한 줄짜리 안내 상자로 둔다.
-        const w: u32 = if (open.width > 0) open.width else 24 * @max(p.metrics.cell_width_px, 1);
-        const h: u32 = if (open.height > 0) open.height else @max(p.metrics.cell_height_px, 1);
-        const place = chrome.components.image_preview.place(anchor_rect, w, h, p) orelse return;
-        const notice: ?[]const u8 = if (open.failed)
-            maru.i18n.t(.app_marker_preview_undecodable)
-        else if (open.pixels.len == 0)
-            "" // 디코드 중 — 빈 상자만(글자를 깜빡이면 더 산만하다)
-        else
-            null;
-        // **테두리는 GPU quad 로 직접 그린다.** chrome `Op` 는 셀 격자로 lowering 되는데, 프리뷰는
-        // 셀에 안 맞는 픽셀 사각형이라 1 px 테두리가 격자에서 사라졌다(사용자 제보 — 「팝업인 줄
-        // 모르겠다」). 갤러리가 「chrome 이 테두리, gpu_images 가 픽셀」로 나눈 분업은 **도크 안의
-        // 셀 격자**에서 성립하는 것이고, 터미널 위 임의 좌표에는 그대로 오지 않는다.
+    /// 프리뷰의 배경·테두리 quad 두 장. 바깥을 테두리 색으로 채우고 안쪽을 배경색으로 덮어 테를 만든다
+    /// (quad 하나가 `border_widths` 를 안 받는 경로라 — 셰이더 분기를 늘리지 않는다).
+    fn appendMarkerPreviewFrameQuads(self: *AppSession, place: chrome.components.image_preview.Placement) void {
         const tk = self.buildChromeTokens();
         const border = packOpaqueRgb(tk.palette.get(.focus_accent));
         const bg = self.chromeQuadBg(packOpaqueRgb(tk.palette.get(.surface_bg)));
         const b: f32 = @floatFromInt(chrome.components.image_preview.border_px);
         const bx: f32 = @floatFromInt(place.box.x);
         const by: f32 = @floatFromInt(place.box.y);
-        const bwf: f32 = @floatFromInt(place.box.w);
-        const bhf: f32 = @floatFromInt(place.box.h);
-        // 바깥 테두리 색으로 상자를 채우고 그 안을 배경색으로 덮으면 테가 남는다(quad 하나가
-        // border_widths 를 안 받는 경로라 두 장으로 만든다 — 셰이더 분기를 늘리지 않는다).
-        self.appendSolidQuad(bx, by, bwf, bhf, border, 2);
-        self.appendSolidQuad(bx + b, by + b, bwf - 2 * b, bhf - 2 * b, bg, 2);
-        // 문구가 있으면 그것만 chrome 으로 얹는다(글자는 셀 격자가 맞는 도메인이다).
-        const text = notice orelse return;
-        if (text.len == 0) return;
+        const bw: f32 = @floatFromInt(place.box.w);
+        const bh: f32 = @floatFromInt(place.box.h);
+        self.appendSolidQuad(bx, by, bw, bh, border, 2);
+        self.appendSolidQuad(bx + b, by + b, bw - 2 * b, bh - 2 * b, bg, 2);
+    }
+
+    /// 열린 프리뷰의 자리 — 그리는 쪽과 안내를 얹는 쪽이 **같은 계산**을 쓰게 하는 단일 출처다.
+    fn markerPreviewPlacement(
+        self: *AppSession,
+        term: *Term,
+        open: marker_preview_ops.Open,
+    ) ?chrome.components.image_preview.Placement {
+        const anchor_rect = self.markerAnchorRect(term, open) orelse return null;
+        const p = chrome.props.ChromeProps{ .metrics = self.buildCellMetrics() };
+        // 아직 못 푼 동안에도 **자리는 잡아 둔다** — 클릭했는데 아무것도 안 뜨면 「먹혔나」로 읽힌다.
+        const w: u32 = if (open.width > 0) open.width else 24 * @max(p.metrics.cell_width_px, 1);
+        const h: u32 = if (open.height > 0) open.height else @max(p.metrics.cell_height_px, 1);
+        return chrome.components.image_preview.place(anchor_rect, w, h, p);
+    }
+
+    /// 열린 프리뷰의 **테두리와 실패 안내**를 chrome ops에 싣는다. 픽셀은 `gpu_images`가 따로 싣는다
+    /// (갤러리 §5.4 분업). 문구는 여기서 i18n에서 고른다 — 컴포넌트는 `ui.language`를 모른다.
+    /// 열린 프리뷰의 **실패 안내 글자**만 chrome ops 에 싣는다. 배경·테두리는 `appendMarkerPreviewFrameQuads`
+    /// 가 프레임 조립에서 그린다 — 이 조립부는 **매 프레임 돌지 않아** quad 를 넣으면 유지되지 않는다
+    /// (위 주석의 사고). 글자는 chrome draws 의 생명주기를 따르므로 여기 남는다.
+    pub fn collectMarkerPreviewDraws(
+        self: *AppSession,
+        arena: std.mem.Allocator,
+        out: *std.ArrayList(chrome.draw.ChromeDraw),
+    ) !void {
+        const open = self.marker_preview_open orelse return;
+        if (!open.failed) return; // 안내가 필요한 경우는 「못 풀었다」 하나뿐이다
+        const term = pane_ops.activePane(self).activeTerm();
+        if (term.surface.id != open.surface_id) return;
+        const place = self.markerPreviewPlacement(term, open) orelse return;
+        const p = chrome.props.ChromeProps{ .metrics = self.buildCellMetrics() };
+        const tk = self.buildChromeTokens();
         var ops: std.ArrayList(chrome.draw.Op) = .empty;
-        try chrome.components.image_preview.view(place, text, p, &tk, arena, &ops);
+        try chrome.components.image_preview.view(
+            place,
+            maru.i18n.t(.app_marker_preview_undecodable),
+            p,
+            &tk,
+            arena,
+            &ops,
+        );
         if (ops.items.len > 0) try out.append(arena, .{
             .layer = chrome.components.image_preview.layer,
             .ops = ops.items,

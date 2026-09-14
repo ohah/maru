@@ -351,7 +351,7 @@ pub fn dockActionAt(self: *const AppSession, x_px: f64, y_px: f64) ?usize {
     if (!layout_math.pointInRect(x_px, y_px, bar)) return null;
     return dock_view_bar.actionAtPoint(
         .{ .x = bar.x, .y = bar.y, .w = bar.w, .h = bar.h },
-        self.cell_width_px,
+        self.dockViewBarGrid(),
         actions.len,
         @intFromFloat(x_px),
         @intFromFloat(y_px),
@@ -366,7 +366,7 @@ pub fn dockViewSlotAt(self: *const AppSession, x_px: f64, y_px: f64) ?usize {
     if (!layout_math.pointInRect(x_px, y_px, bar)) return null;
     return dock_view_bar.slotAtPoint(
         .{ .x = bar.x, .y = bar.y, .w = bar.w, .h = bar.h },
-        self.cell_width_px,
+        self.dockViewBarGrid(),
         @intFromFloat(x_px),
         @intFromFloat(y_px),
     );

@@ -1026,11 +1026,18 @@ pub fn buildDockViewBarDrawList(
     /// codepoint 만 받는다(뷰 슬롯이 chrome 기하를 그대로 쓰는 것과 같은 결). 자리는 `dock_view_bar.actionRect`
     /// 가 계산한 것과 **같은 셀 수**라, 그린 자리와 눌리는 자리가 갈라지지 않는다.
     action_glyphs: []const u21,
+    /// 슬롯 칸 수. **상수가 아니라 호출자가 준다** — hit-test 와 같은 `dock_view_bar.Grid` 에서 나와야
+    /// 그린 자리와 눌리는 자리가 안 갈린다(그 칸 수는 테마 pt 토큰에서 환산된다).
+    grid: dock_view_bar.Grid,
 ) !renderer.DrawList {
     var cells: std.ArrayList(renderer.DrawCell) = .empty;
     errdefer cells.deinit(allocator);
-    const slot_cols: u16 = @intCast(dock_view_bar.slot_cols);
-    for (0..dock_view_bar.slot_count) |index| {
+    const slot_cols: u16 = @intCast(grid.slot_cols);
+    // 아이콘 시작 열도 **격자가 정한다** — 상수로 두면 좁은 슬롯에서 이웃을 침범한다(dock_view_bar 주석).
+    const icon_offset: u16 = @intCast(grid.iconOffsetCols());
+    // 셀 폭을 아직 못 받았으면 칸 수가 0이다. 그대로 두면 네 아이콘이 **같은 열에 겹쳐** 그려진다
+    // (`index * 0 + offset` 이 전부 같은 값). 동작 쪽은 `actionStartCol` 이 이미 null 로 막는다.
+    for (0..if (slot_cols == 0) 0 else dock_view_bar.slot_count) |index| {
         // **아이콘도 뷰가 정한다.** 예전에는 여기 `{ .folder, .git, .code }` 배열이 있었는데, 그것은
         // 슬롯 순서를 적어 둔 **세 번째 자리**였다(enum·`slot_count`에 이어). 배열은 뷰를 하나 더해도
         // 컴파일러가 아무 말을 안 하므로, 칸은 늘고 아이콘은 셋만 그려져 **마지막 칸이 빈다**.
@@ -1039,7 +1046,7 @@ pub fn buildDockViewBarDrawList(
         // 아이콘은 슬롯 안 좌측 여백 뒤에 **2칸으로** 놓는다. 합성 아이콘은 슬롯 크기에 맞춰 스케일되므로
         // (icon_glyph.fillCoverage: side = min(w, h)) 2칸이면 1칸일 때보다 또렷하고 크다 — 사이드바 에이전트
         // 아이콘이 같은 이유로 이미 `width = 2`다. 슬롯이 화면 밖이면 그리지 않는다.
-        const col: u16 = @as(u16, @intCast(index)) *| slot_cols +| @as(u16, @intCast(dock_view_bar.icon_col_offset));
+        const col: u16 = @as(u16, @intCast(index)) *| slot_cols +| icon_offset;
         if (col +| @as(u16, @intCast(dock_view_bar.icon_cols)) > cols) break;
         const cp = file_tree_icon.codepointFromRaw(@intFromEnum(kind)) orelse continue;
         try cells.append(allocator, .{
@@ -1053,11 +1060,10 @@ pub fn buildDockViewBarDrawList(
     }
     // 동작 버튼의 시작 열은 **chrome 기하가 준다**(hit-test 가 쓰는 것과 같은 함수). 뷰 슬롯과 겹치는
     // 폭이면 null 이라 하나도 그리지 않는다 — 좁은 도크에서 뷰 전환을 먼저 지키는 정책이 그 함수 하나에만 있다.
-    if (dock_view_bar.actionStartCol(cols, action_glyphs.len)) |start_col| {
+    if (dock_view_bar.actionStartCol(cols, grid, action_glyphs.len)) |start_col| {
         const actions_start: u16 = @intCast(start_col);
         for (action_glyphs, 0..) |cp, index| {
-            const col: u16 = actions_start +| @as(u16, @intCast(index)) *| slot_cols +|
-                @as(u16, @intCast(dock_view_bar.icon_col_offset));
+            const col: u16 = actions_start +| @as(u16, @intCast(index)) *| slot_cols +| icon_offset;
             if (col +| @as(u16, @intCast(dock_view_bar.icon_cols)) > cols) break;
             try cells.append(allocator, .{
                 .row = @max(rows, 1) / 2,
@@ -1366,9 +1372,11 @@ test "좁으면 검색 줄도 안 낸다 — 아이콘 줄과 같은 문턱" {
 test "뷰 바는 슬롯 수만큼 아이콘을 내고, 갤러리 칸은 image 아이콘이다 (IG1)" {
     const allocator = std.testing.allocator;
     const c: terminal.Color = .{ .rgb = .{ .r = 1, .g = 1, .b = 1 } };
+    // 격자는 hit-test 와 같은 자리에서 온다. 여기서는 셀 파생(토큰 없음 = tui)으로 잡는다.
+    const grid = dock_view_bar.Grid.init(8, 0);
     // 슬롯이 전부 들어가는 폭. 좁으면 아이콘을 안 그리므로 문턱을 넘겨 준다.
-    const cols: u16 = @intCast(dock_view_bar.slot_cols * dock_view_bar.slot_count);
-    var list = try buildDockViewBarDrawList(allocator, cols, 1, 0, c, c, &.{});
+    const cols: u16 = @intCast(grid.slot_cols * dock_view_bar.slot_count);
+    var list = try buildDockViewBarDrawList(allocator, cols, 1, 0, c, c, &.{}, grid);
     defer list.deinit(allocator);
 
     // **개수가 슬롯 수와 같아야 한다** — 예전처럼 아이콘을 배열로 적어 두면 뷰를 더했을 때
@@ -1382,9 +1390,9 @@ test "뷰 바는 슬롯 수만큼 아이콘을 내고, 갤러리 칸은 image �
 
     // 각 아이콘은 자기 슬롯 안에 있다(그린 자리와 눌리는 자리가 갈라지지 않는다).
     for (list.cells, 0..) |cell, i| {
-        const slot_start: u16 = @intCast(i * dock_view_bar.slot_cols);
+        const slot_start: u16 = @intCast(i * grid.slot_cols);
         try std.testing.expect(cell.col >= slot_start);
-        try std.testing.expect(cell.col < slot_start + dock_view_bar.slot_cols);
+        try std.testing.expect(cell.col < slot_start + @as(u16, @intCast(grid.slot_cols)));
     }
 }
 

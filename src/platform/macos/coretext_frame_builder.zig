@@ -680,18 +680,21 @@ test "도크 뷰 바: 동작 glyph 는 오른쪽 끝 슬롯에 그려지고 좁�
     const muted: terminal.Color = .{ .rgb = .{ .r = 4, .g = 5, .b = 6 } };
     const actions = [_]u21{ maru.icons.codepointFit(.reset, .tight), maru.icons.codepoint(.collapse_all) };
 
+    // 격자는 hit-test 와 같은 자리에서 온다. 여기서는 셀 파생(토큰 없음)이라 옛 4칸 그대로다.
+    const grid = dock_view_bar.Grid.init(8, 0);
+
     // 넉넉한 폭: 뷰 셋 + 동작 둘.
     {
-        var dl = try buildDockViewBarDrawList(allocator, 24, 1, 0, active, muted, &actions);
+        var dl = try buildDockViewBarDrawList(allocator, 24, 1, 0, active, muted, &actions, grid);
         defer dl.deinit(allocator);
         try std.testing.expectEqual(dock_view_bar.slot_count + actions.len, dl.cells.len);
         // 자리는 chrome 기하가 정한다 — 렌더가 자기 산수를 하면 hit-test 와 갈린다.
-        const start = dock_view_bar.actionStartCol(24, actions.len).?;
+        const start = dock_view_bar.actionStartCol(24, grid, actions.len).?;
         for (actions, 0..) |cp, index| {
             const cell = dl.cells[dock_view_bar.slot_count + index];
             try std.testing.expectEqual(cp, cell.codepoint);
             try std.testing.expectEqual(
-                @as(u16, @intCast(start + dock_view_bar.slot_cols * index + dock_view_bar.icon_col_offset)),
+                @as(u16, @intCast(start + grid.slot_cols * index + grid.iconOffsetCols())),
                 cell.col,
             );
             // 미등록 PUA 면 폰트 폴백으로 떨어져 **빈칸으로 보인다**.
@@ -701,21 +704,21 @@ test "도크 뷰 바: 동작 glyph 는 오른쪽 끝 슬롯에 그려지고 좁�
 
     // 좁은 폭(뷰 3슬롯 + 동작 2슬롯 = 20칸에 한 칸 모자람): 동작만 사라지고 뷰는 남는다.
     {
-        var dl = try buildDockViewBarDrawList(allocator, 19, 1, 0, active, muted, &actions);
+        var dl = try buildDockViewBarDrawList(allocator, 19, 1, 0, active, muted, &actions, grid);
         defer dl.deinit(allocator);
         try std.testing.expectEqual(dock_view_bar.slot_count, dl.cells.len);
     }
 
     // 동작이 없는 뷰는 예전과 **한 셀도 다르지 않다**(회귀 방지).
     {
-        var with_none = try buildDockViewBarDrawList(allocator, 24, 1, 0, active, muted, &.{});
+        var with_none = try buildDockViewBarDrawList(allocator, 24, 1, 0, active, muted, &.{}, grid);
         defer with_none.deinit(allocator);
         try std.testing.expectEqual(dock_view_bar.slot_count, with_none.cells.len);
     }
 }
 
 test "도크 뷰 바: 슬롯 3개가 모두 그려진다" {
-    var dl = try buildDockViewBarDrawList(std.testing.allocator, 24, 1, 0, .{ .rgb = .{ .r = 1, .g = 2, .b = 3 } }, .{ .rgb = .{ .r = 4, .g = 5, .b = 6 } }, &.{});
+    var dl = try buildDockViewBarDrawList(std.testing.allocator, 24, 1, 0, .{ .rgb = .{ .r = 1, .g = 2, .b = 3 } }, .{ .rgb = .{ .r = 4, .g = 5, .b = 6 } }, &.{}, dock_view_bar.Grid.init(8, 0));
     defer dl.deinit(std.testing.allocator);
     var count: usize = 0;
     for (dl.cells) |c| {

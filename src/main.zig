@@ -4822,6 +4822,14 @@ const ScmDockInputs = struct {
 ///
 /// **칸 기하는 중립이 소유한다**(`dock_view_bar.slotRect`) — 여기서 다시 나누면 그린 자리와 눌리는
 /// 자리의 주인이 둘이 된다.
+/// Windows 경로의 도크 뷰 바 격자. **scale 은 이 파일의 `dock_layout.compute` 와 같은 1000 고정**이다 —
+/// 여기만 다른 값을 쓰면 그린 자리와 기하가 갈린다. 이 경로가 DPI 를 다루게 되면 두 자리를 함께 옮긴다.
+fn winDockViewBarGrid(tk: *const maru.chrome.Tokens, cell_w: u32) maru.chrome.components.dock_view_bar.Grid {
+    const pt = tk.space.dock_view_slot_width_pt;
+    const slot_px = if (pt > 0) maru.session.layout_math.ptToPx(pt, 1000) else 0;
+    return maru.chrome.components.dock_view_bar.Grid.init(cell_w, slot_px);
+}
+
 fn appendViewBarCells(
     allocator: std.mem.Allocator,
     out: *std.ArrayList(d3d11_cells.Cell),
@@ -4844,9 +4852,10 @@ fn appendViewBarCells(
     const bar = geom.view_bar;
     if (bar.w == 0 or bar.h == 0) return;
     const bar_rect = maru.chrome.components.dock_view_bar.Rect{ .x = bar.x, .y = bar.y, .w = bar.w, .h = bar.h };
+    const grid = winDockViewBarGrid(tk, cell_w);
     var i: usize = 0;
     while (i < maru.chrome.components.dock_view_bar.slot_count) : (i += 1) {
-        const r = maru.chrome.components.dock_view_bar.slotRect(bar_rect, cell_w, i) orelse continue;
+        const r = maru.chrome.components.dock_view_bar.slotRect(bar_rect, grid, i) orelse continue;
         const active = i == view.slot();
         try out.append(allocator, d3d11_cells.solidCell(
             @floatFromInt(r.x),
@@ -4878,6 +4887,7 @@ fn appendViewBarCells(
         colorOf(tk, .surface_fg),
         colorOf(tk, .muted_fg),
         &.{},
+        grid,
     ) catch return;
     const frame = renderer_state.buildFrameFromDrawListWithRasterizer(allocator, list, builder.shaper, builder.rasterizer) catch {
         var l = list;
@@ -6928,7 +6938,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // 세면 "전환했다" 가 헛일이어도 초록이라, **셀 지문**을 견준다.
         if (smoke and spins == 150 and geom.view_bar.w != 0) {
             const bar = maru.chrome.components.dock_view_bar.Rect{ .x = geom.view_bar.x, .y = geom.view_bar.y, .w = geom.view_bar.w, .h = geom.view_bar.h };
-            if (maru.chrome.components.dock_view_bar.slotRect(bar, cell_w, 1)) |r| {
+            if (maru.chrome.components.dock_view_bar.slotRect(bar, winDockViewBarGrid(&chrome_tokens, cell_w), 1)) |r| {
                 view_judgeable = true;
                 dock_digest_before_switch = d3d11_cells.cellsDigest(dock_cells.items);
                 dock_cells_before_switch = dock_cells.items.len;
@@ -6945,7 +6955,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // 깨졌다" 는 다른 사실이다.
         if (smoke and spins == 260 and geom.view_bar.w != 0) {
             const bar3 = maru.chrome.components.dock_view_bar.Rect{ .x = geom.view_bar.x, .y = geom.view_bar.y, .w = geom.view_bar.w, .h = geom.view_bar.h };
-            if (maru.chrome.components.dock_view_bar.slotRect(bar3, cell_w, 2)) |r3| {
+            if (maru.chrome.components.dock_view_bar.slotRect(bar3, winDockViewBarGrid(&chrome_tokens, cell_w), 2)) |r3| {
                 agent_judgeable = true;
                 agent_slot_x = r3.x + r3.w / 2;
                 agent_slot_y = r3.y + r3.h / 2;
@@ -7103,7 +7113,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // 뷰에서만 뜬다(SCM·에이전트는 자기 컴포넌트가 스크롤을 소유한다).
         if (smoke and spins == 655) {
             const bar3 = geom.view_bar;
-            if (maru.chrome.components.dock_view_bar.slotRect(.{ .x = bar3.x, .y = bar3.y, .w = bar3.w, .h = bar3.h }, cell_w, 0)) |r0| {
+            if (maru.chrome.components.dock_view_bar.slotRect(.{ .x = bar3.x, .y = bar3.y, .w = bar3.w, .h = bar3.h }, winDockViewBarGrid(&chrome_tokens, cell_w), 0)) |r0| {
                 const vx: i32 = @intCast(r0.x + r0.w / 2);
                 const vy: i32 = @intCast(r0.y + r0.h / 2);
                 window.postSyntheticMouse(.left_down, vx, vy);
@@ -7197,7 +7207,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // 새로 시작해**, 다음 다시 짓기가 무엇을 잘랐는지 읽는다.
         if (smoke and spins == 1059 and geom.view_bar.w != 0) {
             const bar_c = maru.chrome.components.dock_view_bar.Rect{ .x = geom.view_bar.x, .y = geom.view_bar.y, .w = geom.view_bar.w, .h = geom.view_bar.h };
-            if (maru.chrome.components.dock_view_bar.slotRect(bar_c, cell_w, 2)) |rc| {
+            if (maru.chrome.components.dock_view_bar.slotRect(bar_c, winDockViewBarGrid(&chrome_tokens, cell_w), 2)) |rc| {
                 const cx2: i32 = @intCast(rc.x + rc.w / 2);
                 const cy2: i32 = @intCast(rc.y + rc.h / 2);
                 window.postSyntheticMouse(.left_down, cx2, cy2);
@@ -7642,7 +7652,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             akey_off_blurred = agent_scroll.offset_y_px;
             akey_focus_blurred = dock_key_focus;
             const bar_a = maru.chrome.components.dock_view_bar.Rect{ .x = geom.view_bar.x, .y = geom.view_bar.y, .w = geom.view_bar.w, .h = geom.view_bar.h };
-            if (maru.chrome.components.dock_view_bar.slotRect(bar_a, cell_w, 2)) |ra| {
+            if (maru.chrome.components.dock_view_bar.slotRect(bar_a, winDockViewBarGrid(&chrome_tokens, cell_w), 2)) |ra| {
                 window.postSyntheticMouse(.left_down, @intCast(ra.x + ra.w / 2), @intCast(ra.y + ra.h / 2));
                 window.postSyntheticMouse(.left_up, @intCast(ra.x + ra.w / 2), @intCast(ra.y + ra.h / 2));
             }
@@ -7672,7 +7682,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // 입력이 그 문자열 하나다). 디스크는 안 만진다.
         if (smoke and spins == 1130 and geom.view_bar.w != 0) {
             const bar_s = maru.chrome.components.dock_view_bar.Rect{ .x = geom.view_bar.x, .y = geom.view_bar.y, .w = geom.view_bar.w, .h = geom.view_bar.h };
-            if (maru.chrome.components.dock_view_bar.slotRect(bar_s, cell_w, 1)) |rs| {
+            if (maru.chrome.components.dock_view_bar.slotRect(bar_s, winDockViewBarGrid(&chrome_tokens, cell_w), 1)) |rs| {
                 window.postSyntheticMouse(.left_down, @intCast(rs.x + rs.w / 2), @intCast(rs.y + rs.h / 2));
                 window.postSyntheticMouse(.left_up, @intCast(rs.x + rs.w / 2), @intCast(rs.y + rs.h / 2));
             }
@@ -8094,7 +8104,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         if (smoke and spins == 712 and agent_built != null) {
             // 에이전트 뷰로 되돌린다(앞 판정들이 탐색기로 바꿔 놨다).
             const bar4 = geom.view_bar;
-            if (maru.chrome.components.dock_view_bar.slotRect(.{ .x = bar4.x, .y = bar4.y, .w = bar4.w, .h = bar4.h }, cell_w, 2)) |r2| {
+            if (maru.chrome.components.dock_view_bar.slotRect(.{ .x = bar4.x, .y = bar4.y, .w = bar4.w, .h = bar4.h }, winDockViewBarGrid(&chrome_tokens, cell_w), 2)) |r2| {
                 const vx: i32 = @intCast(r2.x + r2.w / 2);
                 const vy: i32 = @intCast(r2.y + r2.h / 2);
                 window.postSyntheticMouse(.left_down, vx, vy);
@@ -8135,7 +8145,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // 줄이 화면에 없어 이 판정이 영영 `unjudgeable` 이다(실측으로 그렇게 한 번 비었다).
         if (smoke and spins == 768 and geom.view_bar.w != 0) {
             const bar0 = maru.chrome.components.dock_view_bar.Rect{ .x = geom.view_bar.x, .y = geom.view_bar.y, .w = geom.view_bar.w, .h = geom.view_bar.h };
-            if (maru.chrome.components.dock_view_bar.slotRect(bar0, cell_w, 0)) |r0| {
+            if (maru.chrome.components.dock_view_bar.slotRect(bar0, winDockViewBarGrid(&chrome_tokens, cell_w), 0)) |r0| {
                 const ex: i32 = @intCast(r0.x + r0.w / 2);
                 const ey: i32 = @intCast(r0.y + r0.h / 2);
                 window.postSyntheticMouse(.left_down, ex, ey);
@@ -8413,7 +8423,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // 그래서 여기서 ⑴ 탐색기로 되돌리고 ⑵ 그 파일을 다시 열고 ⑶ 막대를 끈다.
         if (smoke and spins == 972) {
             const vbar = geom.view_bar;
-            if (maru.chrome.components.dock_view_bar.slotRect(.{ .x = vbar.x, .y = vbar.y, .w = vbar.w, .h = vbar.h }, cell_w, 0)) |r0| {
+            if (maru.chrome.components.dock_view_bar.slotRect(.{ .x = vbar.x, .y = vbar.y, .w = vbar.w, .h = vbar.h }, winDockViewBarGrid(&chrome_tokens, cell_w), 0)) |r0| {
                 const vx: i32 = @intCast(r0.x + r0.w / 2);
                 const vy: i32 = @intCast(r0.y + r0.h / 2);
                 window.postSyntheticMouse(.left_down, vx, vy);
@@ -8999,7 +9009,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // **탐색기가 아니라 에이전트 뷰여야 한다** — 그 검색 줄은 그 뷰에만 있다.
         if (smoke and spins == 836 and geom.view_bar.w != 0) {
             const bar_a = maru.chrome.components.dock_view_bar.Rect{ .x = geom.view_bar.x, .y = geom.view_bar.y, .w = geom.view_bar.w, .h = geom.view_bar.h };
-            if (maru.chrome.components.dock_view_bar.slotRect(bar_a, cell_w, 2)) |ra| {
+            if (maru.chrome.components.dock_view_bar.slotRect(bar_a, winDockViewBarGrid(&chrome_tokens, cell_w), 2)) |ra| {
                 const ax2: i32 = @intCast(ra.x + ra.w / 2);
                 const ay2: i32 = @intCast(ra.y + ra.h / 2);
                 window.postSyntheticMouse(.left_down, ax2, ay2);
@@ -10536,7 +10546,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                             .h = geom.view_bar.h,
                         };
                         if (m.x_px >= 0 and m.y_px >= 0) {
-                            if (maru.chrome.components.dock_view_bar.slotAtPoint(bar, cell_w, @intCast(m.x_px), @intCast(m.y_px))) |slot| {
+                            if (maru.chrome.components.dock_view_bar.slotAtPoint(bar, winDockViewBarGrid(&chrome_tokens, cell_w), @intCast(m.x_px), @intCast(m.y_px))) |slot| {
                                 if (maru.session.dock_panel.View.forSlot(slot)) |next_view| if (next_view != dock_view) {
                                     dock_view = next_view;
                                     view_switches += 1;

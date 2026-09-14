@@ -7348,6 +7348,20 @@ pub const AppSession = struct {
         return self.cell_height_px +| (2 * @as(u32, space.tab_bar_pad_y_px));
     }
 
+    /// 도크 뷰 바가 쓰는 셀 격자. **슬롯 칸 수의 단일 출처** — 렌더(열 번호)·hover·클릭·smoke probe가 모두
+    /// 이 하나를 지나야 그린 자리와 눌리는 자리가 안 갈린다.
+    ///
+    /// 칸 수를 chrome 토큰(`space.dock_view_slot_width_pt`)에서 환산하는 이유는 `chromeBarHeightPx`와 같다 —
+    /// 고정 칸 수는 슬롯의 물리적 폭을 **터미널 폰트에** 묶고, 폰트를 키우면 스위처가 통째로 사라졌다.
+    pub fn dockViewBarGrid(self: *const AppSession) chrome.components.dock_view_bar.Grid {
+        const space = self.buildChromeTokens().space;
+        const slot_width_px = if (space.dock_view_slot_width_pt > 0)
+            layout_math.ptToPx(space.dock_view_slot_width_pt, self.scale_milli)
+        else
+            0;
+        return chrome.components.dock_view_bar.Grid.init(self.cell_width_px, slot_width_px);
+    }
+
     /// chrome 바(탭 바·파일 헤더 밴드·주소 밴드) 안에서 텍스트 한 줄이 시작하는 세로 오프셋(바 상단 기준).
     ///
     /// **`tab_bar_pad_y_px`를 그대로 쓰면 안 된다** — 바 높이가 chrome token(`bar_height_pt`)에서 나오는
@@ -20381,7 +20395,7 @@ pub const AppSession = struct {
                     // 호버를 **먼저** 깔고 활성을 그 위에 얹는다 — 활성 슬롯을 호버해도 활성 표시가 유지된다.
                     if (self.dock_view_hovered_slot) |hovered| {
                         if (hovered != dock_ops.dockViewSlotIndex(self)) {
-                            if (dock_view_bar.slotRect(bar_rect, self.cell_width_px, hovered)) |slot| {
+                            if (dock_view_bar.slotRect(bar_rect, self.dockViewBarGrid(), hovered)) |slot| {
                                 self.appendBarBgQuad(
                                     .{ .x = slot.x, .y = slot.y, .w = slot.w, .h = slot.h },
                                     self.chromeQuadBg(sidebar_ops.sidebarHoverBg(self)),
@@ -20389,7 +20403,7 @@ pub const AppSession = struct {
                             }
                         }
                     }
-                    if (dock_view_bar.slotRect(bar_rect, self.cell_width_px, dock_ops.dockViewSlotIndex(self))) |slot| {
+                    if (dock_view_bar.slotRect(bar_rect, self.dockViewBarGrid(), dock_ops.dockViewSlotIndex(self))) |slot| {
                         self.appendBarBgQuad(
                             .{ .x = slot.x, .y = slot.y, .w = slot.w, .h = slot.h },
                             self.chromeQuadBg(sidebar_ops.sidebarActiveBg(self)),
@@ -20399,7 +20413,7 @@ pub const AppSession = struct {
                     if (self.dock_action_hovered_slot) |hovered| {
                         if (dock_view_bar.actionRect(
                             bar_rect,
-                            self.cell_width_px,
+                            self.dockViewBarGrid(),
                             dock_ops.dockActions(self).len,
                             hovered,
                         )) |slot| {
@@ -20816,6 +20830,7 @@ pub const AppSession = struct {
                                 dock_active_fg,
                                 dock_fg,
                                 dock_ops.dockActionGlyphs(self, &action_glyph_buf),
+                                self.dockViewBarGrid(),
                             )) |bdl| {
                                 self.collectShaped(&collected, bdl, pane_frame_builder, .{
                                     .pane = .{
@@ -37432,19 +37447,21 @@ test "도크 뷰 스위처: 호버는 슬롯 위에서만 포인터가 바뀐다
     // 슬롯 위=클릭 가능(pointingHand), 바 안 여백=화살표. 렌더 강조와 커서가 같은 판정을 쓰는지 함께 본다.
     const bar = chrome.components.dock_view_bar.Rect{ .x = 100, .y = 40, .w = 200, .h = 24 };
     const cw: u32 = 10;
-    try std.testing.expectEqual(@as(usize, 0), chrome.components.dock_view_bar.slotAtPoint(bar, cw, 110, 50).?);
-    try std.testing.expectEqual(@as(usize, 2), chrome.components.dock_view_bar.slotAtPoint(bar, cw, 190, 50).?);
+    // 격자는 hit-test 와 렌더가 공유하는 자리에서 온다. 여기서는 셀 파생(토큰 없음)으로 잡아 옛 값을 지킨다.
+    const cg = chrome.components.dock_view_bar.Grid.init(cw, 0);
+    try std.testing.expectEqual(@as(usize, 0), chrome.components.dock_view_bar.slotAtPoint(bar, cg, 110, 50).?);
+    try std.testing.expectEqual(@as(usize, 2), chrome.components.dock_view_bar.slotAtPoint(bar, cg, 190, 50).?);
     // **폭을 `slot_count` 에서 유도한다.** 여기 숫자를 적어 두면 뷰를 하나 더할 때 이 test 가 계약이 아니라
     // 옛 슬롯 수를 지킨다 — 실제로 3→4 에서 그렇게 깨졌다(x=230 이 여백에서 슬롯 안으로 바뀌었다).
     const bar_mod = chrome.components.dock_view_bar;
-    const slots_px: u32 = @intCast(bar_mod.slot_cols * cw * bar_mod.slot_count);
+    const slots_px: u32 = @intCast(cg.slot_cols * cw * bar_mod.slot_count);
     // 마지막 슬롯 **안**은 그 index 다.
     try std.testing.expectEqual(
         @as(usize, bar_mod.slot_count - 1),
-        bar_mod.slotAtPoint(bar, cw, bar.x + slots_px - 1, 50).?,
+        bar_mod.slotAtPoint(bar, cg, bar.x + slots_px - 1, 50).?,
     );
     // 슬롯이 끝나면 그 뒤는 여백이라 null(커서도 default 가 된다).
-    try std.testing.expect(bar_mod.slotAtPoint(bar, cw, bar.x + slots_px, 50) == null);
+    try std.testing.expect(bar_mod.slotAtPoint(bar, cg, bar.x + slots_px, 50) == null);
 }
 
 test "도크 뷰 스위처: 슬롯 index 대응과 포커스 되돌림" {
@@ -79853,7 +79870,7 @@ test "탐색기 헤더 동작: 오른쪽 끝 버튼이 전체 접기·새로 고
     const collapse_index = for (actions, 0..) |a, i| {
         if (a == .collapse_all) break i;
     } else return error.MissingCollapseAction;
-    const slot = dock_view_bar.actionRect(bar, session.cell_width_px, actions.len, collapse_index) orelse
+    const slot = dock_view_bar.actionRect(bar, session.dockViewBarGrid(), actions.len, collapse_index) orelse
         return error.SkipZigTest; // 도크가 좁아 동작을 안 그리는 형상
     const cx: f64 = @floatFromInt(slot.x + slot.w / 2);
     const cy: f64 = @floatFromInt(slot.y + slot.h / 2);
@@ -79872,7 +79889,7 @@ test "탐색기 헤더 동작: 오른쪽 끝 버튼이 전체 접기·새로 고
     const refresh_index = for (actions, 0..) |a, i| {
         if (a == .refresh) break i;
     } else return error.MissingRefreshAction;
-    const rslot = dock_view_bar.actionRect(bar, session.cell_width_px, actions.len, refresh_index).?;
+    const rslot = dock_view_bar.actionRect(bar, session.dockViewBarGrid(), actions.len, refresh_index).?;
     session.mouse(1, @floatFromInt(rslot.x + rslot.w / 2), @floatFromInt(rslot.y + rslot.h / 2), 0, 0);
     const queued = session.file_tree.takeScanRequest() orelse return error.MissingScanRequest;
     defer allocator.free(queued);

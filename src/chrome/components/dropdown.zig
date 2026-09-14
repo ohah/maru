@@ -10,6 +10,7 @@ const std = @import("std");
 const draw = @import("../draw.zig");
 const tokens = @import("../tokens.zig");
 const props = @import("../props.zig");
+const popup_box = @import("popup_box.zig"); // 앵커 팝업 기하 공유 프리미티브(§5.4)
 const input = @import("../input.zig");
 const overlay_input = @import("overlay_input.zig"); // displayCols(EAW) 단일 출처 — 팝업 항목 폭 측정에 재사용
 
@@ -128,17 +129,17 @@ fn popupRect(anchor: draw.Rect, items: []const []const u8, p: props.ChromeProps)
     }
     const box_w = @max((max_cols + 2) * cw, anchor.w); // 최소 앵커 control 폭
     const box_h = @as(u32, @intCast(items.len)) * ch;
-    var x = anchor.x;
-    var y = anchor.y + @as(i32, @intCast(anchor.h)); // control 아래로 드롭
-    const workspace = props.workspaceRect(m);
-    const bw_px: i32 = @intCast(workspace.x + workspace.w);
-    const bh_px: i32 = @intCast(workspace.y + workspace.h);
-    if (x + @as(i32, @intCast(box_w)) > bw_px) x = bw_px - @as(i32, @intCast(box_w)); // 우단 넘으면 왼쪽으로
-    if (y + @as(i32, @intCast(box_h)) > bh_px) y = bh_px - @as(i32, @intCast(box_h)); // 하단 넘으면 위로(당겨 fit)
-    const sidebar: i32 = @intCast(workspace.x);
-    if (x < sidebar) x = sidebar; // 사이드바 chrome 위로 안 겹치게
-    if (y < @as(i32, @intCast(workspace.y))) y = @intCast(workspace.y);
-    return .{ .x = x, .y = y, .w = box_w, .h = box_h };
+    // 자리는 **공유 프리미티브**가 정한다(`popup_box` · chrome-strategy.md §5.4). 예전에는 같은 clamp 를
+    // 여기 복사해 뒀는데 그 복사본이 **낡아 있었다**: `context_menu` 가 사용자 제보로 얻은 「가장자리에
+    // 딱 붙이지 않는다」(edge_gap 한 셀)가 이쪽에는 없어 우단·하단에서 테두리가 창 경계에 먹혔다.
+    //
+    // 세로는 `below_clamp` 다 — 드롭다운은 **뒤집지 않는다**. 목록이 control 위로 올라가면 그 위의
+    // 다른 행을 덮어 「저 행의 목록인가」로 읽힌다.
+    const placed = popup_box.place(box_w, box_h, .{
+        .anchor = anchor,
+        .vertical = .below_clamp,
+    }, p) orelse return null;
+    return placed.rect;
 }
 
 /// 마우스 px가 팝업 박스 안의 어느 항목 행인지([0, item_count)). 박스 밖이면 null(호출자가 close). viewPopup과 같은

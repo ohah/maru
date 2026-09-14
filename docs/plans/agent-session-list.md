@@ -347,7 +347,7 @@ ready 뒤 `resume`·`로그 보기`는 각각 pointer와 `⌘↵`·`⌘L`을 **�
 Codex action fixture와 별도로, Claude fixture는 직속 `~/.claude/projects/<project>/<session>.jsonl` 하나만
 격리 HOME에 두고 assistant `message.model`을 포함한다. 이 scenario는 scanner가 nested `subagents`가 아닌 직속
 Claude transcript를 고르고, parser의 model metadata가 세 줄 카드의 model line으로 투영되며, 명시적 재개가
-`claude --resume <session-id>`의 provider-native argv로 향하는 것을 함께 고정한다. summary에는 모델명·세션 id·경로·원문을
+`claude --resume <session-id> --permission-mode <기록된 모드>`의 provider-native argv로 향하는 것을 함께 고정한다. summary에는 모델명·세션 id·경로·원문을
 남기지 않고 fake-exec verdict만 남긴다. stale replace와 multi-state capture는 동일 command의 별도 scenario다.
 
 이 fixture는 일반 controlled-smoke의 80×24 zero-backing 시작을 재사용하지 않는다. 첫 paint 전에 실제
@@ -366,8 +366,11 @@ titlebar launcher와 dock slot만 관측하도록 한다.
   ready frame을 기다린다. 이 gate와 fixture input은 일반 앱, 일반 refresh, 실제 provider log에서 완전히 비활성이다.
 - resume과 reveal은 각각 pointer·keyboard의 clean process scenario를 하나씩 가져야 한다. resume 두 scenario는
   fake `codex`/`claude` executable이 남긴 provider-kind·argument count·argument position verdict가 같고
-  `codex resume <synthetic-id>` 또는 `claude --resume <synthetic-id>` 외의 shell wrapper·prompt text·추가 인자가
-  없음을 확인한다. reveal 두 scenario도 allow/reject count와 source-identity verdict가 같아야 한다. 실제 provider
+  `codex resume <synthetic-id> --ask-for-approval <v> --sandbox <v>` 또는
+  `claude --resume <synthetic-id> --permission-mode <v>` 외의 shell wrapper·prompt text·추가 인자가 없음을
+  확인한다. **모드 플래그는 선택적으로 받지 않는다** — fixture transcript가 그 모드를 적고 있으므로, 플래그가
+  빠진 argv도 통과시키면 "기록된 권한 모드를 그대로 되살린다"([agent-session-list.md §5](../agent-session-list.md))가
+  깨져도 verdict가 초록이 된다. reveal 두 scenario도 allow/reject count와 source-identity verdict가 같아야 한다. 실제 provider
   binary, 계정, 네트워크, 사용자 이력은 실행하지 않는다.
 - **exact-live는 현재 미구현/차단 상태다.** 2026-08-03 macOS POC에서 일반 PTY child의
   `KERN_PROCARGS2` 조회가 argv-only payload(29 bytes)를 돌려 provider가 tool child에 둔

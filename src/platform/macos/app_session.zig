@@ -18076,8 +18076,8 @@ pub const AppSession = struct {
                     // 폴더"라는 같은 질문을 GUI와 다른 능력으로 답하게 된다(docs/editor-surface-dock.md §3.5가
                     // 단일 출처). 그 어긋남이 실제로 두 갈래로 났다:
                     //
-                    //  · **OSC 7이 없는 경우** — 셸 통합 없는 bash/fish, 그리고 프롬프트를 한 번도 그리지 않는
-                    //    재개 Term(`zsh -l -i -c "exec <provider> --resume"`). 화면에는 폴더가 보이는데
+                    //  · **OSC 7이 없는 경우** — 셸 통합 없는 bash/fish, 그리고 provider가 도는 동안 프롬프트를
+                    //    그리지 않는 재개 Term(`zsh -l -i -c "<provider argv…>; exec <shell> -l -i"`). 화면에는 폴더가 보이는데
                     //    `maru sessions list`만 `cwd`를 생략했다. 축은 커널 조회로 답한다.
                     //  · **maru ssh 세션** — OSC 5379로 목적지가 잡혔는데 원격 셸이 OSC 7을 안 보내면 관측에는
                     //    **ssh 이전의 로컬 경로**가 남아 있다. GUI는 그걸 감추는데(축이 null) collector만 그
@@ -36285,9 +36285,10 @@ test "사이드바 세션 행: 관측 cwd가 있으면 폴더·브랜치 줄이 
 // 내려가는데(docs/editor-surface-dock.md §3.5), 사이드바의 `sidebarHasCwd`·`termGitBranch`는 관측만 봤다.
 //
 // 그 비대칭이 언제 보이는가가 핵심이었다. 재개(에이전트 세션 기록 → 이어하기)는 셸을
-// `zsh -l -i -c "exec claude --resume <id>"`로 띄우는데(agent.zig의 `resumeAgentSessionInNewTerm`),
-// `-c`는 프롬프트를 한 번도 그리지 않아 `_maru_osc7` precmd 훅이 돌지 않는다(실측: `.zshrc`는 source되고
-// 훅 등록도 되지만 precmd는 안 돈다) — 그 Term은 평생 OSC 7을 한 번도 못 받는다. 프롬프트를 거쳐 provider를
+// `zsh -l -i -c "claude --resume <id> …; exec <shell> -l -i"`로 띄우는데(agent.zig의
+// `resumeAgentSessionInNewTerm`), provider가 화면을 쥐고 있는 동안은 프롬프트가 안 그려져 `_maru_osc7`
+// precmd 훅이 돌지 않는다(실측: `.zshrc`는 source되고 훅 등록도 되지만 precmd는 안 돈다) — 그 구간 내내
+// 이 Term은 OSC 7을 한 번도 못 받는다. 프롬프트를 거쳐 provider를
 // 띄운 보통 탭은 이미 한 번 보고했으므로 값이 남아 있다. 그래서 증상이 **재개에서만** 보였다.
 // (claude·codex가 RIS로 그 값을 지운다는 옛 설명은 실측과 다르다 — 2026-08-12 pty 캡처에서 두 provider 모두
 // RIS를 보내지 않는다. 지우는 쪽이 아니라 **애초에 안 받는 쪽**이 원인이다.)
@@ -58758,28 +58759,33 @@ test "선택 해제 전이: 리포팅 클릭·휠·타이핑·Esc가 ⌘A 선택
 // 프로세스의 PATH에서만** 찾기 때문이었다(GUI 앱의 PATH에는 ~/.local/bin이나 버전 매니저 shim이 없다).
 // 이제 사용자 로그인 셸에 `-l -i -c "exec …"`를 넘긴다. 그 명령 문자열 조립을 순수 함수로 고정한다 —
 // 인용이 틀리면 세션 id나 경로가 셸 명령으로 재해석될 수 있다.
-test "resume 셸 명령: exec 접두와 토큰별 작은따옴표 인용" {
+test "resume 셸 명령: provider 는 exec 하지 않고, 끝나면 로그인 셸이 남는다" {
     const a = std.testing.allocator;
 
-    const claude = try agent_ops.buildResumeShellCommand(a, &.{ "claude", "--resume", "0c803aaf-505b-4c7a" });
+    // provider 에 `exec` 를 붙이지 않는 것이 요점이다. 붙이면 provider 를 끝내는 순간 그 Term 의
+    // 자식이 사라져 **탭이 통째로 닫힌다**(마지막 Term 이었으면 pane 까지). 뒤이은 `exec <셸>` 은
+    // 중간 프로세스를 남기지 않으면서 그 자리에 프롬프트를 세운다.
+    const claude = try agent_ops.buildResumeShellCommand(a, &.{ "claude", "--resume", "0c803aaf-505b-4c7a" }, "/bin/zsh");
     defer a.free(claude);
-    try std.testing.expectEqualStrings("exec 'claude' '--resume' '0c803aaf-505b-4c7a'", claude);
+    try std.testing.expectEqualStrings("'claude' '--resume' '0c803aaf-505b-4c7a'; exec '/bin/zsh' -l -i", claude);
 
-    const codex = try agent_ops.buildResumeShellCommand(a, &.{ "codex", "resume", "019fc0e4-5594" });
+    // 권한 모드 플래그도 같은 인용 규칙을 지난다(argv 조립 자체는 agent_session_archive.resumeArgv 소유).
+    const codex = try agent_ops.buildResumeShellCommand(a, &.{ "codex", "resume", "019fc0e4-5594", "--sandbox", "danger-full-access" }, "/bin/bash");
     defer a.free(codex);
-    try std.testing.expectEqualStrings("exec 'codex' 'resume' '019fc0e4-5594'", codex);
+    try std.testing.expectEqualStrings("'codex' 'resume' '019fc0e4-5594' '--sandbox' 'danger-full-access'; exec '/bin/bash' -l -i", codex);
 
     // 작은따옴표가 든 토큰은 따옴표를 닫고 이어 붙이는 형태로 감싼다 — 따옴표를 닫고 명령을
     // 이어 쓰는 주입을 막는다. 세션 id는 UUID라 실제로 이런 값이 오지 않지만, 인용 메커니즘이
     // 값에 의존하지 않는다는 것을 고정한다.
-    const tricky = try agent_ops.buildResumeShellCommand(a, &.{ "claude", "x'y" });
+    const tricky = try agent_ops.buildResumeShellCommand(a, &.{ "claude", "x'y" }, "/bin/zsh");
     defer a.free(tricky);
-    try std.testing.expectEqualStrings("exec 'claude' 'x'\\''y'", tricky);
+    try std.testing.expectEqualStrings("'claude' 'x'\\''y'; exec '/bin/zsh' -l -i", tricky);
 
-    // 공백·메타문자도 따옴표 안에서는 확장되지 않는다.
-    const spaced = try agent_ops.buildResumeShellCommand(a, &.{ "my provider", "$HOME && ls" });
+    // 공백·메타문자도 따옴표 안에서는 확장되지 않는다. **셸 경로도 같은 인용을 지난다** — config 가
+    // 정하는 값이라 공백이 든 경로가 올 수 있고, 인용을 빼면 그 경로가 토큰 둘로 갈라진다.
+    const spaced = try agent_ops.buildResumeShellCommand(a, &.{ "my provider", "$HOME && ls" }, "/opt/my shell/zsh");
     defer a.free(spaced);
-    try std.testing.expectEqualStrings("exec 'my provider' '$HOME && ls'", spaced);
+    try std.testing.expectEqualStrings("'my provider' '$HOME && ls'; exec '/opt/my shell/zsh' -l -i", spaced);
 }
 
 test "urlModifierHeld: config url-click-modifier가 mods 비트와 매칭 (F1-5)" {

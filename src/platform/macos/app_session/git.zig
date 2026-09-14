@@ -1127,8 +1127,9 @@ pub fn activeTerminalCwd(self: *AppSession, buf: *[std.fs.max_path_bytes]u8) ?[]
 ///
 /// **왜 Term 단위가 필요한가**: 사이드바는 활성 Term 하나가 아니라 **모든 탭의 모든 Term**에 대해 폴더·브랜치
 /// 줄을 그린다(docs/sidebar-agent-list.md §2.1). 예전에는 사이드바만 이 2단 규칙 밖에 있어 관측(OSC 7)만 봤고,
-/// 그래서 OSC 7이 없는 Term — 셸 통합이 없는 bash/fish, 그리고 `zsh -l -i -c "exec <provider> --resume"`로
-/// 띄워 프롬프트를 한 번도 그리지 않는 **재개 Term** — 에서는 소스 컨트롤 뷰가 저장소를 멀쩡히 찾는 동안
+/// 그래서 OSC 7이 없는 Term — 셸 통합이 없는 bash/fish, 그리고
+/// `zsh -l -i -c "<provider argv…>; exec <shell> -l -i"`로 띄워 provider가 도는 동안 프롬프트를 그리지 않는
+/// **재개 Term** — 에서는 소스 컨트롤 뷰가 저장소를 멀쩡히 찾는 동안
 /// 사이드바만 "cwd 없음"으로 폴더줄·브랜치줄을 통째로 지웠다. 축이 하나여야 두 뷰가 같은 곳을 본다
 /// (`followActiveTerminalRepo`·`followActiveTerminalCwd`가 같은 이유로 이미 이 함수를 공유한다).
 pub fn termCwd(self: *AppSession, term: *Term, buf: *[std.fs.max_path_bytes]u8) ?[]const u8 {

@@ -1256,7 +1256,12 @@ pub fn requestIgnoredForPaths(self: *AppSession, dir_path: []const u8, entries: 
     const git_exe = git_backend_mod.locate(&exe_buf) orelse return;
 
     // 상대경로 조각을 한 버퍼에 이어 담고 슬라이스만 넘긴다(항목마다 할당하지 않는다).
+    //
+    // ⚠️ **모으는 동안에는 오프셋만 담는다**(`git_ignore_query_spans` 주석). 버퍼가 항목마다 자라므로,
+    // 여기서 슬라이스를 담으면 realloc 한 번에 앞엣것들이 전부 댕글링이 되고 **그 바이트가 그대로
+    // 자식의 stdin 으로 나간다.**
     self.git_ignore_query_buf.clearRetainingCapacity();
+    self.git_ignore_query_spans.clearRetainingCapacity();
     self.git_ignore_query_paths.clearRetainingCapacity();
     for (entries) |entry| {
         if (self.git_ignore_query_paths.items.len >= git_command.check_ignore_batch) break;
@@ -1281,7 +1286,16 @@ pub fn requestIgnoredForPaths(self: *AppSession, dir_path: []const u8, entries: 
             self.git_ignore_query_buf.shrinkRetainingCapacity(start);
             continue;
         }
-        self.git_ignore_query_paths.append(self.allocator, rel) catch break;
+        // `rel` 은 `abs` 의 꼬리다 — 그 자리를 **버퍼 기준 오프셋**으로 적어 둔다.
+        const rel_off = start + (abs.len - rel.len);
+        self.git_ignore_query_spans.append(self.allocator, .{ .off = rel_off, .len = rel.len }) catch break;
+    }
+    // **버퍼가 확정된 뒤에** 슬라이스를 만든다.
+    for (self.git_ignore_query_spans.items) |span| {
+        self.git_ignore_query_paths.append(
+            self.allocator,
+            self.git_ignore_query_buf.items[span.off..][0..span.len],
+        ) catch break;
     }
     if (self.git_ignore_query_paths.items.len == 0) return;
     self.git_ignore_request_id +%= 1;

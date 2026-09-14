@@ -159,8 +159,14 @@ pub fn buildDrawListWithUnfocused(
                     // isWideRenderSymbol이 다음 빈 셀을 흡수(2칸 렌더)하면 그 셀은 emit하지 않는다 — 행마다 리셋.
                     var skip_one = false;
                     // 줄 오른쪽의 그릴 것 없는 구간을 잘라낸다(위 isTrimmableBlank 주석).
+                    //
+                    // **DECSCNM(화면 반전)이면 자르지 않는다.** 반전 화면의 빈 칸은 「그릴 것 없는 칸」이 아니다 —
+                    // 렌더러가 전경색 quad 로 칠해야 반전이 보인다(`packBackground` 의 `style.reverse != screen_reverse`).
+                    // 단일 pane 에서는 clear color 도 전경색이라 자르는 게 안 드러나지만, split 의 **비활성** 반전
+                    // pane 은 clear color 가 활성 pane 기준이라 잘린 칸이 정상 배경으로 비친다(/code-review 가 잡았다).
+                    // 반전은 드물고 켜진 동안만 trim 을 포기하는 것이라 절감 손실은 없다.
                     var row_cols = col_count;
-                    while (row_cols > 0) : (row_cols -= 1) {
+                    while (!snapshot.reverse_screen and row_cols > 0) : (row_cols -= 1) {
                         const last = snapshot.cells[index(snapshot.size, row, row_cols - 1)];
                         if (last.continuation) continue;
                         if (!isTrimmableBlank(last.codepoint, last.grapheme_id, last.style)) break;
@@ -771,4 +777,36 @@ test "[적대] 줄끝 trim: 16칸 줄에 글자 둘이면 두 칸만 남는다" 
     try std.testing.expectEqual(@as(usize, 2), dl.cells.len);
     try std.testing.expectEqual(@as(u21, 'h'), dl.cells[0].codepoint);
     try std.testing.expectEqual(@as(u21, 'i'), dl.cells[1].codepoint);
+}
+
+test "[적대] 줄끝 trim: DECSCNM(CSI ?5h) 반전 화면에서는 빈 칸을 자르지 않는다" {
+    // /code-review 가 잡은 회귀. 반전 화면의 빈 칸은 렌더러가 **전경색 quad** 로 칠해야 반전이 보이는데,
+    // trim 이 그 칸을 빼면 quad 가 없어 clear color 가 비친다 — split 의 비활성 반전 pane 은 clear color 가
+    // 활성 pane 기준이라 오른쪽·빈 줄이 정상 배경으로 남는다. 반전이 켜지면 trim 이 통째로 꺼져야 한다.
+    var core = try terminal.TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 2 });
+    defer core.deinit();
+    try core.write("AB");
+
+    // 반전 전: 'A','B' 두 칸만(줄끝 trim, 둘째 줄은 통째로 빈 줄).
+    {
+        var dl = try buildDrawList(std.testing.allocator, core.snapshot());
+        defer dl.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 2), dl.cells.len);
+    }
+    // 반전 후: 두 줄 × 8칸 = 16칸 전부 실려야 한다(옛 동작 그대로).
+    try core.write("\x1b[?5h");
+    try std.testing.expect(core.reverseScreen());
+    {
+        var dl = try buildDrawList(std.testing.allocator, core.snapshot());
+        defer dl.deinit(std.testing.allocator);
+        try std.testing.expect(dl.dirty != null);
+        try std.testing.expectEqual(@as(usize, 16), dl.cells.len);
+    }
+    // 반전을 끄면 다시 잘린다.
+    try core.write("\x1b[?5l");
+    {
+        var dl = try buildDrawList(std.testing.allocator, core.snapshot());
+        defer dl.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 2), dl.cells.len);
+    }
 }

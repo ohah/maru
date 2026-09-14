@@ -1081,8 +1081,15 @@ test "remote screen: build exposes kitty images + placements from the assembler 
 fn expectSnapshotParity(local_core: *const terminal.TerminalCore, local: terminal.RenderSnapshot, remote: terminal.RenderSnapshot) !void {
     // ── comptime 필드 커버리지: RenderSnapshot 새 필드는 반드시 아래 둘 중 하나로 분류돼야 한다 ──
     const compared = [_][]const u8{ "size", "cursor", "cursor_shape", "viewport_scrolled", "viewport_scrolled_known", "ambiguous_wide", "cells", "graphemes", "placements", "virtual_placements", "images", "prompt_marks", "links", "scrollback_len", "view_offset", "dirty" };
-    const dropped = [_][]const u8{ "cursor_blink", "last_command_exit" };
+    // `reverse_screen`(DECSCNM): 원격 screen stream 은 아직 화면 반전을 나르지 않는다 — handoff(exec 이관, tag 80)
+    // 에만 있다. 그래서 원격 mirror 의 snapshot 에서는 늘 false 이고, 이 필드가 게이트하는 줄끝 trim 도 원격에서는
+    // 늘 켜진다. 원격 DECSCNM 이 안 보이는 것은 이 필드 이전부터의 한계이지 이 필드가 만든 드롭이 아니다. screen
+    // stream 이 반전을 싣게 되면 `compared` 로 옮기고 `projectSnapshot` 이 채운다.
+    const dropped = [_][]const u8{ "cursor_blink", "last_command_exit", "reverse_screen" };
     comptime {
+        // 필드 × (compared + dropped) 의 문자열 비교가 기본 한도(1000)에 정확히 걸려 있었다 — 필드 하나를
+        // 더하자 넘쳤다. 필드가 더 늘어도 이 표가 계속 강제되게 넉넉히 준다.
+        @setEvalBranchQuota(4000);
         for (@typeInfo(terminal.RenderSnapshot).@"struct".fields) |f| {
             var classified = false;
             for (compared) |c| {

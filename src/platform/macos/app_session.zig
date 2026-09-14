@@ -15212,8 +15212,9 @@ pub const AppSession = struct {
             open.uploaded = false; // 아직 안 풀렸다 — 「안 그리고 나가는 길」이라 표시를 되돌린다(§5)
             return; // 테두리(자리)는 이미 그렸다
         }
-        // 여기서부터 pixels 를 free/교체한다 — 비소유면 지금 승격한다(위 pixels_owned 주석).
-        self.promoteKgPixelsOwned(pixels, pixels_owned);
+        // 여기서부터 pixels 를 free/교체한다 — 비소유면 지금 승격한다(위 pixels_owned 주석). 실패(OOM)면 이번
+        // 프레임엔 미리보기를 안 싣는다(`uploaded` 가 안 올라가 다음 프레임에 다시 온다).
+        if (!self.promoteKgPixelsOwned(pixels, pixels_owned)) return;
         marker_preview_ops.appendGpuImage(open, self.allocator, place, images, uploads, pixels, live_ids);
     }
 
@@ -21305,8 +21306,12 @@ pub const AppSession = struct {
                                 .pixels_offset = kg_pixels.len, // 합친 픽셀 버퍼 끝에 bg 픽셀을 잇는다
                                 .pixels_len = self.bg_image_pixels.len,
                             };
-                            self.promoteKgPixelsOwned(&kg_pixels, &kg_pixels_owned); // 아래가 옛 버퍼를 free 한다
-                            const new_uploads = self.allocator.alloc(metal_frame.GpuImageUpload, kg_uploads.len + 1) catch null;
+                            // 아래가 옛 버퍼를 free 하므로 먼저 승격한다. 실패(OOM)면 이번 프레임 bg 를 생략한다 —
+                            // 재사용 버퍼를 든 채 아래로 내려가면 남의 방을 free 하게 된다(다음 프레임 재시도).
+                            const new_uploads: ?[]metal_frame.GpuImageUpload = if (self.promoteKgPixelsOwned(&kg_pixels, &kg_pixels_owned))
+                                self.allocator.alloc(metal_frame.GpuImageUpload, kg_uploads.len + 1) catch null
+                            else
+                                null;
                             const new_pixels = std.mem.concat(self.allocator, u8, &.{ kg_pixels, self.bg_image_pixels }) catch null;
                             if (new_uploads != null and new_pixels != null) {
                                 @memcpy(new_uploads.?[0..kg_uploads.len], kg_uploads);
@@ -22195,18 +22200,22 @@ pub const AppSession = struct {
     /// 그 페인만 skip(기존 per-pane `catch continue/null`과 동형), append 실패면 pane.deinit.
     /// 재사용 버퍼를 가리키던 `kg_pixels` 를 **owned 사본으로 승격**한다. 뒤따르는 경로가 옛 버퍼를 free 하고
     /// 새 것으로 바꾸는 규칙이라, 재사용 버퍼(AppSession 소유)를 그대로 넘기면 남의 것을 free 하게 된다.
-    /// 이미 owned 면 아무것도 안 한다. 승격이 실패하면(OOM) 그대로 두는데, 그 경우 호출부가 이번 프레임
-    /// 이미지를 포기할 뿐 해제 규칙은 깨지지 않는다(여전히 non-owned 라 free 되지 않는다).
-    pub fn promoteKgPixelsOwned(self: *AppSession, pixels: *[]u8, owned: *bool) void {
-        if (owned.*) return;
+    /// 이미 owned 면 아무것도 안 한다.
+    ///
+    /// **반환값을 반드시 본다.** false 는 OOM 으로 사본을 못 만든 것이고, 그때 `pixels` 는 여전히 재사용
+    /// 버퍼를 가리킨다 — 호출자가 그대로 free/교체하면 남의 방을 잘못된 크기로 해제하고 deinit 이 이중
+    /// free 한다(/code-review 가 잡았다). 실패면 호출자는 이번 프레임의 추가 이미지를 **건너뛴다**.
+    pub fn promoteKgPixelsOwned(self: *AppSession, pixels: *[]u8, owned: *bool) bool {
+        if (owned.*) return true;
         if (pixels.len == 0) {
             pixels.* = &.{};
             owned.* = true;
-            return;
+            return true;
         }
-        const copy = self.allocator.dupe(u8, pixels.*) catch return;
+        const copy = self.allocator.dupe(u8, pixels.*) catch return false;
         pixels.* = copy;
         owned.* = true;
+        return true;
     }
 
     pub fn collectShaped(self: *AppSession, collected: *std.ArrayList(CollectedPane), dl: renderer.DrawList, builder: coretext_frame_builder.CoreTextFrameBuilder, dest: CollectDest) void {
@@ -81435,7 +81444,7 @@ test "[적대] 재사용 버퍼 소유권: 비소유 픽셀을 갤러리에 넘�
     {
         var pixels: []u8 = session.kitty_pixels_buf[0..32];
         var owned = false;
-        session.promoteKgPixelsOwned(&pixels, &owned);
+        try std.testing.expect(session.promoteKgPixelsOwned(&pixels, &owned)); // 성공을 알린다
         defer if (owned) allocator.free(pixels);
         try std.testing.expect(owned);
         try std.testing.expect(pixels.ptr != room.ptr); // 사본이다
@@ -81448,7 +81457,7 @@ test "[적대] 재사용 버퍼 소유권: 비소유 픽셀을 갤러리에 넘�
         const mine = try allocator.alloc(u8, 8);
         var pixels: []u8 = mine;
         var owned = true;
-        session.promoteKgPixelsOwned(&pixels, &owned);
+        try std.testing.expect(session.promoteKgPixelsOwned(&pixels, &owned)); // 성공을 알린다
         defer allocator.free(pixels);
         try std.testing.expect(pixels.ptr == mine.ptr);
     }
@@ -81456,7 +81465,7 @@ test "[적대] 재사용 버퍼 소유권: 비소유 픽셀을 갤러리에 넘�
     {
         var pixels: []u8 = &.{};
         var owned = false;
-        session.promoteKgPixelsOwned(&pixels, &owned);
+        try std.testing.expect(session.promoteKgPixelsOwned(&pixels, &owned)); // 성공을 알린다
         try std.testing.expect(owned);
         try std.testing.expectEqual(@as(usize, 0), pixels.len);
     }

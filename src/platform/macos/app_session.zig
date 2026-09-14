@@ -44283,21 +44283,35 @@ test "cursor blink: 백그라운드 Term이 계속 출력해도 활성 커서 �
     // 자식이 `read`에서 살아남아 reap/UAF가 없다([[controlled-smoke-child-exit-reap-uaf]] 규율).
     // 위상은 wall-clock 기준이라 tick 수로는 안 넘어간다 — baseline을 매번 한 반주기 과거로 밀어, 백그라운드 출력이
     // 흐르는 **동안에도** 위상이 진행되는지(=리셋에 굶지 않는지) 본다. 수정 전이면 매 tick resetCursorBlink가
-    // baseline을 0으로 되돌리고 blink_visible을 true로 고정해 아래 토글이 한 번도 안 일어난다.
-    var toggles: u32 = 0;
-    var last = session.blink_visible;
+    // baseline을 0으로 되돌리고 blink_visible을 true로 고정해 위상이 한 번도 안 나간다.
+    //
+    // **세는 것은 「보이는 뒤집힘」이 아니라 「소비한 반주기」다**(2026-09-14 정정). 제품은 밀린 만큼 한 번에
+    // catch-up 하고 **홀수일 때만** 뒤집는다(위 tick 의 `@mod(steps, 2)`) — 실시간을 따라가려면 그래야 한다.
+    // 그래서 반복 사이에 반주기가 하나 더 흐르면 `steps = 2` 가 되어 **안 뒤집히고**, 뒤집힘을 세던 옛 판정자는
+    // 기계가 바쁠 때 `expected 3, found 2` 로 빨개졌다(CI 실측). 그건 제품 결함이 아니라 **판정자가 잘못된 것을
+    // 세고 있었던 것**이다. 소비한 반주기 수는 부하와 무관하게 「우리가 넣은 것 + 흐른 것」이라 ≥ 1 이 보장된다.
+    const interval_ns: i128 = @as(i128, @max(session.appearance.cursor.blink_interval_ms, 1)) * std.time.ns_per_ms;
+    const start_visible = session.blink_visible;
+    var total_steps: i128 = 0;
     var i: u32 = 0;
     while (i < 3) : (i += 1) {
         session.pasteTextTo(bg_id, "x", false);
         testAdvanceBlinkHalves(session, 1);
+        const before_phase = session.blink_phase_ns;
         _ = try session.tick();
-        if (session.blink_visible != last) {
-            toggles += 1;
-            last = session.blink_visible;
-        }
+
+        const delta = session.blink_phase_ns - before_phase;
+        // ★ baseline 이 **소비분만큼만** 전진했다 = 리셋이 아니다. 리셋이면 `now_ns` 로 갈아치워져
+        //   반주기의 배수가 아니다(그 차이가 이 판정자가 지키는 회귀다).
+        try std.testing.expectEqual(@as(i128, 0), @mod(delta, interval_ns));
+        const steps = @divTrunc(delta, interval_ns);
+        // ★ 활성 커서 위상은 백그라운드 출력과 무관하게 **매번** 나갔다(굶지 않았다).
+        try std.testing.expect(steps >= 1);
+        total_steps += steps;
     }
-    // ★ 활성 커서 위상은 백그라운드 출력과 무관하게 세 번 다 진행했어야 한다.
-    try std.testing.expectEqual(@as(u32, 3), toggles);
+    // ★ 보이는 상태는 소비한 반주기의 홀짝과 일치한다 — 위상과 화면이 갈리지 않는다.
+    const expect_visible = if (@mod(total_steps, 2) == 1) !start_visible else start_visible;
+    try std.testing.expectEqual(expect_visible, session.blink_visible);
 }
 
 // ── 회귀: 탭 전환 시 mid-sync·완성 프레임 없는(esu==0) surface는 미완성 프레임을 안 그리고 hold한다 ──────

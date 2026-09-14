@@ -14989,12 +14989,16 @@ pub const AppSession = struct {
     /// 아니므로 클릭을 먹지 않고 링크 경로로 흘려보낸다.
     fn toggleMarkerPreviewAt(self: *AppSession, term: *Term, surface_id: u64, cell: maru.session.layout_math.CellHit) bool {
         if (term.kind != .terminal) return false;
-        if (self.marker_preview.slots.items.len == 0) return false;
+        // **뷰포트 전부를 후보로 본다.** 전송된 마커는 커서 위(대화 영역)로 올라가므로 커서 블록만
+        // 보면 영영 못 찾는다(사용자 제보 2026-09-14 — 「채팅창에 올라간 건 안 열린다」).
+        // 어느 소스로 풀지는 **범위가 가른다**(§4.2): 커서 블록 안이면 스테이징, 밖이면 인덱스.
         var hits: std.ArrayList(maru.session.agent_image_markers.Hit) = .empty;
         defer hits.deinit(self.allocator);
-        self.collectMarkerHits(term, .cursor_block, &hits) catch return false;
+        self.collectMarkerHits(term, .viewport, &hits) catch return false;
         // `CellHit.row`는 **이미 뷰포트 행**이고 마커 스캔도 뷰포트 행으로 답한다 — 변환이 없다.
         const m = maru.session.agent_image_markers.hitAt(hits.items, cell.row, cell.col) orelse return false;
+        if (!self.markerIsInCursorBlock(term, m)) return self.toggleSentMarkerPreview(surface_id, m);
+        if (self.marker_preview.slots.items.len == 0) return false;
         const next = marker_preview_ops.toggle(&self.marker_preview, self.marker_preview_open, surface_id, m);
         const changed = (next == null) != (self.marker_preview_open == null) or
             (next != null and self.marker_preview_open != null and next.?.n != self.marker_preview_open.?.n);
@@ -15024,27 +15028,43 @@ pub const AppSession = struct {
             return;
         }
         if (open.pixels.len > 0 or open.failed) return;
+        if (open.submitted) return;
         // 디코드를 **한 번만** 건다. 결과는 `agent_activity_decode_backend` 의 take 루프가 가져간다.
-        if (!open.submitted) {
-            const s = self.marker_preview.stagingFor(open.surface_id) orelse return;
-            const e = s.lookup(open.n) orelse return;
-            if (e.path.len == 0) {
-                open.failed = true; // 원격은 로컬 파일이 없다(P3)
+        const backend = &(self.agent_activity_decode_backend orelse return);
+        // 목표 변은 workspace 절반이면 충분하다(§2.3) — 원본을 통째로 올릴 이유가 없다.
+        const target: u32 = @max(256, self.backing_width_px / 2);
+        if (open.sent_hit_index) |hit_index| {
+            // **전송된 것** — 트랜스크립트 안의 base64 구간을 푼다(갤러리와 같은 잡).
+            const indexed = self.agent_activity.hits.items;
+            if (hit_index >= indexed.len) {
+                open.failed = true; // 인덱스가 다시 만들어져 자리가 밀렸다
                 return;
             }
-            const backend = &(self.agent_activity_decode_backend orelse return);
-            const size = std.Io.Dir.cwd().statFile(self.io, e.path, .{}) catch {
+            const h = indexed[hit_index];
+            const path = self.agent_activity.chain.get(h.file_index) orelse {
                 open.failed = true;
                 return;
             };
-            const len: u32 = std.math.cast(u32, size.size) orelse {
-                open.failed = true;
-                return;
-            };
-            // 목표 변은 workspace 절반이면 충분하다(§2.3) — 원본을 통째로 올릴 이유가 없다.
-            const target: u32 = @max(256, self.backing_width_px / 2);
-            if (backend.submitRawFile(e.path, len, target, marker_preview_decode_key) != null) open.submitted = true;
+            if (backend.submit(path, h.data_offset, h.data_len, target, marker_preview_decode_key, null) != null)
+                open.submitted = true;
+            return;
         }
+        // **전송 전** — maru 가 저장한 그 파일을 그대로 푼다(base64 단계가 없다).
+        const st = self.marker_preview.stagingFor(open.surface_id) orelse return;
+        const e = st.lookup(open.n) orelse return;
+        if (e.path.len == 0) {
+            open.failed = true;
+            return;
+        }
+        const size = std.Io.Dir.cwd().statFile(self.io, e.path, .{}) catch {
+            open.failed = true;
+            return;
+        };
+        const len: u32 = std.math.cast(u32, size.size) orelse {
+            open.failed = true;
+            return;
+        };
+        if (backend.submitRawFile(e.path, len, target, marker_preview_decode_key) != null) open.submitted = true;
     }
 
     /// 열린 프리뷰를 프레임에 싣는다. 자리는 `image_preview.place`가, 픽셀 채널은 갤러리와 같은
@@ -15078,6 +15098,54 @@ pub const AppSession = struct {
             return; // 테두리(자리)는 이미 그렸다
         }
         marker_preview_ops.appendGpuImage(open, self.allocator, place, images, uploads, pixels, live_ids);
+    }
+
+    /// 이 마커가 **입력창(커서 블록)** 안인가. 아니면 이미 전송된 것이다(§4.2 범위 규칙).
+    fn markerIsInCursorBlock(self: *AppSession, term: *Term, m: maru.session.agent_image_markers.Hit) bool {
+        var block: std.ArrayList(maru.session.agent_image_markers.Hit) = .empty;
+        defer block.deinit(self.allocator);
+        self.collectMarkerHits(term, .cursor_block, &block) catch return false;
+        return maru.session.agent_image_markers.hitAt(block.items, m.row, m.start_col) != null;
+    }
+
+    /// **전송된** 마커를 토글한다 — 픽셀은 갤러리 인덱스(트랜스크립트)에서 온다(§4.4).
+    ///
+    /// 인덱스가 그 N을 모르면 **열지 않는다**. 화면에 글자로 쓰인 `[Image #N]`과 구분할 방법이 그것뿐이고
+    /// (§3.1), 틀린 그림을 자신 있게 띄우는 것보다 안 뜨는 편이 낫다.
+    fn toggleSentMarkerPreview(self: *AppSession, surface_id: u64, m: maru.session.agent_image_markers.Hit) bool {
+        if (self.marker_preview_open) |c| {
+            if (c.surface_id == surface_id and c.n == m.n and c.row == m.row and c.start_col == m.start_col) {
+                self.closeMarkerPreview();
+                return true;
+            }
+        }
+        const found = self.findSentMarkerHit(m.n) orelse return false;
+        if (self.marker_preview_open) |*o| o.deinit(self.allocator);
+        self.marker_preview_open = .{
+            .surface_id = surface_id,
+            .n = m.n,
+            .row = m.row,
+            .start_col = m.start_col,
+            .end_col = m.end_col,
+            .sent_hit_index = found,
+        };
+        self.metal_dirty = true;
+        return true;
+    }
+
+    /// 갤러리 인덱스에서 그 마커 번호의 이미지를 찾는다. **최근 것이 이긴다** — Codex는 N이 메시지
+    /// 안에서만 유일해 같은 번호가 여럿일 수 있는데(§4.3), 화면에서 누른 것은 대개 최근 대화다.
+    fn findSentMarkerHit(self: *AppSession, n: u32) ?usize {
+        if (n == 0) return null;
+        const hits = self.agent_activity.hits.items;
+        var i = hits.len;
+        while (i > 0) {
+            i -= 1;
+            const h = hits[i];
+            if (!h.kind.isImage()) continue;
+            if (h.marker_n == n) return i;
+        }
+        return null;
     }
 
     /// 프리뷰의 배경·테두리 quad 두 장. 바깥을 테두리 색으로 채우고 안쪽을 배경색으로 덮어 테를 만든다

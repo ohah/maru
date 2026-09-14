@@ -127,6 +127,12 @@ pub const Hit = struct {
     mime: Mime,
     /// 활동 축(계약 §2.1의 필터). 이미지는 `none` 이다.
     activity: Activity = .none,
+    /// 화면에 찍힌 `[Image #N]`의 **N**(0 = 못 찾음). 전송된 마커를 눌렀을 때 이 이미지를 찾는 키다
+    /// (docs/agent-image-marker-preview.md §4.4).
+    ///
+    /// **이미지를 찾은 줄에서만 긁는다.** 마커 스캔을 모든 줄에 돌리면 스캐너가 느려지는데(실측
+    /// 467 MB/s), 이미지가 있는 줄은 전체의 극소수라(3,226장 대 수백만 줄) 그 줄만 보면 비용이 없다.
+    marker_n: u32 = 0,
     /// 도구 이름의 자리 — **줄 시작으로부터의 상대 오프셋**이다(`line_offset` 을 더하면 파일 절대).
     /// 절대값을 담지 않는 이유는 크기다: 이름은 언제나 같은 줄 안이므로 u32 로 충분하고, `Hit` 이
     /// 12,200개까지 가므로(계약 §4.2) 8 바이트를 아낀다. 이미지는 둘 다 0 이다.
@@ -563,6 +569,49 @@ pub fn scanLine(
     // 사이에 끼면 그 접기가 남의 항목을 셈에 넣는다.
     try scanClaudeToolUses(allocator, line, line_offset, out);
     try scanCodexToolCalls(allocator, line, line_offset, out);
+    assignMarkerNumbers(line, out.items[before..]);
+}
+
+/// 이 줄의 `[Image #N]` 번호를 **이미지 Hit 에 순서대로** 배정한다.
+///
+/// 한 줄(= 한 메시지 레코드)에 이미지가 여럿이면 마커도 그 순서로 나온다. 같은 번호가 여러 번
+/// 나타나는 것은 provider 상용구다 — Codex 는 `<image name=[Image #1] …>` 래퍼와 끝의 `[Image #1]`
+/// 로 **두 번** 적는다(실측 0.154.0). 그래서 **중복은 접고 처음 나온 순서**만 쓴다.
+///
+/// 개수가 안 맞으면 앞에서부터 맞추고 남는 것은 0으로 둔다 — 억지로 채우면 남의 번호가 붙는다.
+fn assignMarkerNumbers(line: []const u8, hits: []Hit) void {
+    if (hits.len == 0) return;
+    var seen: [8]u32 = undefined;
+    var n_count: usize = 0;
+    var i: usize = 0;
+    while (n_count < seen.len) {
+        const at = std.mem.indexOfPos(u8, line, i, "[Image #") orelse break;
+        var j = at + "[Image #".len;
+        var value: u32 = 0;
+        var digits: usize = 0;
+        while (j < line.len and line[j] >= '0' and line[j] <= '9') : (j += 1) {
+            digits += 1;
+            if (digits > 6) break;
+            value = value * 10 + (line[j] - '0');
+        }
+        i = j;
+        if (digits == 0 or digits > 6 or j >= line.len or line[j] != ']') continue;
+        var dup = false;
+        for (seen[0..n_count]) |v| {
+            if (v == value) dup = true;
+        }
+        if (dup) continue;
+        seen[n_count] = value;
+        n_count += 1;
+    }
+    if (n_count == 0) return;
+    var next: usize = 0;
+    for (hits) |*h| {
+        if (!h.kind.isImage()) continue;
+        if (next >= n_count) break;
+        h.marker_n = seen[next];
+        next += 1;
+    }
 }
 
 /// `compacted` 레코드인가. **줄 앞부분만** 본다.
@@ -4661,4 +4710,51 @@ test "펼침 대상: 한 줄에 호출이 둘이면 **각자 제 명령**을 가
     // 그리고 id 도 각자 것이다(같은 규율의 다른 축 — 링크가 남의 결과를 집지 않는 근거다).
     try testing.expectEqualStrings("toolu_E1", line[out.items[0].id_rel..][0.."toolu_E1".len]);
     try testing.expectEqualStrings("toolu_E2", line[out.items[1].id_rel..][0.."toolu_E2".len]);
+}
+
+test "MP1 인덱스: 이미지 Hit 에 마커 번호가 붙는다 — Codex 래퍼는 중복이라 한 번만 센다" {
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(testing.allocator);
+    // 실측 Codex 0.154.0 모양: 래퍼와 끝에 같은 번호가 두 번 나온다.
+    const line =
+        \\{"payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<image name=[Image #3] path=\\"/tmp/a.png\\">"},{"type":"input_image","image_url":"data:image/png;base64,AAAA"},{"type":"input_text","text":"[Image #3]"}]}}
+    ;
+    try scanLine(testing.allocator, line, 0, &out);
+    var images: usize = 0;
+    for (out.items) |h| {
+        if (!h.kind.isImage()) continue;
+        images += 1;
+        try testing.expectEqual(@as(u32, 3), h.marker_n);
+    }
+    try testing.expectEqual(@as(usize, 1), images);
+}
+
+test "MP1 인덱스: 마커가 없으면 0 으로 남는다 — 억지로 채우지 않는다" {
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(testing.allocator);
+    const line =
+        \\{"type":"user","message":{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}]}}
+    ;
+    try scanLine(testing.allocator, line, 0, &out);
+    for (out.items) |h| {
+        if (!h.kind.isImage()) continue;
+        try testing.expectEqual(@as(u32, 0), h.marker_n);
+    }
+}
+
+test "MP1 인덱스: 한 줄에 이미지가 둘이면 마커도 순서대로 붙는다" {
+    var out: std.ArrayList(Hit) = .empty;
+    defer out.deinit(testing.allocator);
+    const line =
+        \\{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Image #1] [Image #2] 둘 다 보세요"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"BBBB"}}]}}
+    ;
+    try scanLine(testing.allocator, line, 0, &out);
+    var ns: std.ArrayList(u32) = .empty;
+    defer ns.deinit(testing.allocator);
+    for (out.items) |h| {
+        if (h.kind.isImage()) try ns.append(testing.allocator, h.marker_n);
+    }
+    try testing.expectEqual(@as(usize, 2), ns.items.len);
+    try testing.expectEqual(@as(u32, 1), ns.items[0]);
+    try testing.expectEqual(@as(u32, 2), ns.items[1]);
 }

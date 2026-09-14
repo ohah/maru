@@ -212,7 +212,16 @@ comptime {
         "line_offset", "data_offset", "data_len",   "kind",   "mime",    "activity",
         "name_rel",    "name_len",    "id_rel",     "id_len", "cmd_rel", "input_rel",
         "time_rel",    "file_index",  "fold_owner", "result",
-    }, &.{});
+    }, &.{
+        // `marker_n` — 화면의 `[Image #N]` 을 이 이미지에 잇는 키(MP1). **아직 안 싣는다.**
+        // 원격에서 그 값을 쓰는 소비자가 없기 때문이다: 마커 프리뷰의 전송 후 경로는 **로컬 P2** 이고,
+        // 원격판은 P3 이다(docs/agent-image-marker-preview.md §11). 지금 실으면 판을 올리고 파서를
+        // 고치는 비용을 **쓰지 않을 값**에 치른다.
+        //
+        // ⚠️ **P3 에서 이 줄을 지우고 `carried` 로 옮긴다.** 그때 `wire_version`·`header_line`·
+        // `record_fields`·판별 표를 함께 올려야 한다(바로 위 comptime 가드가 강제한다).
+        "marker_n",
+    });
 
     assertCovered(index.ResultSummary, &.{
         "found", "failed", "lines", "image", "image_offset", "image_len", "image_file", "body",

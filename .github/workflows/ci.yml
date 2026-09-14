@@ -468,6 +468,63 @@ jobs:
             .zig-cache
             ~/.cache/zig
           key: zig-v2-${{ runner.os }}-file-explorer-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
+  agent-session-archive-macos:
+    name: agent session archive macOS
+    needs: changes
+    # **왜 새 잡인가.** 이 스모크는 2026-09-15 까지 `mise` 태스크로만 있었고 CI 어디에서도 안 돌았다.
+    # 그 사이 `font-scale-rects` 24pt 조합이 `timeout_enterAgentSessions` 로 죽어 `set -e` 로 멈췄고,
+    # 뒤따르는 시나리오 넷(`reveal-recheck-pointer` · `claude-resume-pointer` 포함)이 **아무도 안 돌리는
+    # 상태**로 남아 있었다 — 그 중 하나는 직전 PR 이 붙인 재개 argv 판정자였다. 손으로 돌려야만 보이는
+    # 게이트는 결국 안 돌고, 안 도는 게이트는 없는 것과 같다.
+    #
+    # **기존 잡에 스텝으로 얹지 않는다.** 앱 번들을 이미 만드는 `keep-alive` 잡에 붙이면 +40초로 가장
+    # 싸지만, 그러면 이 영역 회귀가 「keep-alive 가 빨갛다」로 보고된다. 그 오인은 이 저장소가 이미
+    # 겪었다(도크 골든이 "file explorer" 이름으로 보고돼 플래키로 오해받았다). 잡 이름이 곧 귀책이다.
+    #
+    # **wall-clock 은 안 늘어난다.** macOS 잡은 병렬이고 임계경로는 `file explorer`(실측 15분 41초)다.
+    # 이 잡은 번들 빌드 + 스모크 40.5초(실측, 웜 캐시 로컬)로 그 그늘에 들어간다.
+    if: ${{ github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') }}
+    runs-on: macos-15
+    # keep-alive 잡과 같은 20분. 그쪽이 같은 번들 빌드에 스모크 다섯을 돌고 실측 4분 58초이므로
+    # 여유가 충분하다. hang 은 계속 유한하게 닫는다.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        with:
+          version: 2026.2.7
+          sha256: f8becf318705e1bd91227ed0efee4f9fd988d1d5c66bb48e996f030792a0d3b7 # macos-arm64 binary
+          cache_save: false
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            .zig-cache
+            ~/.cache/zig
+          key: zig-v2-${{ runner.os }}-agent-session-archive-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
+          restore-keys: |
+            zig-v2-${{ runner.os }}-agent-session-archive-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-
+            zig-v2-${{ runner.os }}-agent-session-archive-
+      # 앱 번들 빌드가 `web:build` 를 타므로 웹 의존성이 먼저 있어야 한다(keep-alive 잡과 같은 이유·같은 명령).
+      - name: 웹 의존성 설치
+        run: bun install --cwd web --frozen-lockfile
+      # 격리 HOME 의 cold AppKit 프로세스 15개가 synthetic·redacted JSONL 만 읽는다 — 실제 provider
+      # 바이너리·계정·네트워크·사용자 이력에는 닿지 않는다(docs/plans/agent-session-list.md AS4-c).
+      # 판정은 fake provider 가 남긴 verdict 와 rect JSON 이고 summary 에 원문·세션 id·경로는 안 남는다.
+      - name: 에이전트 세션 기록 도크 스모크
+        run: mise run macos-agent-session-archive-smoke
+      # 실패하면 **어느 시나리오가 어디서 멈췄는지**가 summary 에 있다(`..._stage` · `..._failure`).
+      # 캡처 PPM 도 함께 올린다 — 시각 계약이 깨진 경우 그림 없이는 원인을 못 가른다.
+      - name: Upload agent session archive smoke artifacts
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: maru-agent-session-archive-smoke
+          path: zig-out/maru-agent-session-archive-smoke
+          if-no-files-found: warn
+          retention-days: 14
+
   session-host-macos-debug:
     name: session host macOS (Debug)
     needs: changes

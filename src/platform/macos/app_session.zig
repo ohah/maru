@@ -15054,7 +15054,7 @@ pub const AppSession = struct {
             return;
         }
         if (open.pixels.len > 0 or open.failed) return;
-        if (open.submitted) return;
+        if (open.decode_generation != 0) return;
         // 디코드를 **한 번만** 건다. 결과는 `agent_activity_decode_backend` 의 take 루프가 가져간다.
         const backend = &(self.agent_activity_decode_backend orelse return);
         // 목표 변은 workspace 절반이면 충분하다(§2.3) — 원본을 통째로 올릴 이유가 없다.
@@ -15077,8 +15077,8 @@ pub const AppSession = struct {
                 open.failed = true;
                 return;
             };
-            if (backend.submit(path, h.data_offset, h.data_len, target, marker_preview_decode_key, null) != null)
-                open.submitted = true;
+            if (backend.submit(path, h.data_offset, h.data_len, target, marker_preview_decode_key, null)) |gen|
+                open.decode_generation = gen;
             return;
         }
         // **전송 전** — maru 가 저장한 그 파일을 그대로 푼다(base64 단계가 없다).
@@ -15096,7 +15096,7 @@ pub const AppSession = struct {
             open.failed = true;
             return;
         };
-        if (backend.submitRawFile(e.path, len, target, marker_preview_decode_key) != null) open.submitted = true;
+        if (backend.submitRawFile(e.path, len, target, marker_preview_decode_key)) |gen| open.decode_generation = gen;
     }
 
     /// 열린 프리뷰를 프레임에 싣는다. 자리는 `image_preview.place`가, 픽셀 채널은 갤러리와 같은
@@ -15310,7 +15310,7 @@ pub const AppSession = struct {
     }
 
     /// 프리뷰를 닫는 **단일 자리** — 픽셀을 놓고 회수 표시를 세운다(§5).
-    fn closeMarkerPreview(self: *AppSession) void {
+    pub fn closeMarkerPreview(self: *AppSession) void {
         if (self.marker_preview_open) |*o| o.deinit(self.allocator);
         self.marker_preview_open = null;
         self.metal_dirty = true;

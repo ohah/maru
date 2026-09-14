@@ -679,6 +679,13 @@ fn destroyTermWithAbandonBackend(
     abandon_backend: ?*app_session_mod.session_host.remote_term_backend.RemoteTermBackend,
 ) void {
     const surface_id = term.surface.id;
+    // **마커 프리뷰의 스테이징과 열린 프리뷰를 거둔다**(계약 §4.2 A18). 안 거두면 죽은 surface 의
+    // PNG 바이트가 세션 끝까지 남고, 열린 프리뷰는 다시 활성이 될 수 없는 pane 을 가리킨 채 픽셀을
+    // 든다. 닫는 자리에서 텍스처 회수 표시도 함께 선다(`closeMarkerPreview`).
+    if (self.marker_preview_open) |o| {
+        if (o.surface_id == surface_id) self.closeMarkerPreview();
+    }
+    self.marker_preview.dropSurface(self.allocator, surface_id);
     // 탭 드래그 preview는 `*Term`을 **프레임 간 캐시**하는 유일한 자리라, 다른 Term 포인터 보유 상태
     // (rename·context_menu_target)와 같은 barrier가 여기 필요하다. `cancelPointerGestureForTermRemoval`은
     // `pane.terms`에서 빼는 경로만 덮는데, **in-place 교체**(respawnEndedPlaceholder·rebuildFileTermSurface)는

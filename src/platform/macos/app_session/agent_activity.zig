@@ -1701,6 +1701,9 @@ fn harvestOne(self: *AppSession) bool {
     // 이 갈림이 없으면 프리뷰 픽셀이 격자 타일 자리에 붙는다.
     if (r.hit_index == app_session_mod.marker_preview_decode_key) {
         if (self.marker_preview_open) |*open| {
+            // **generation 이 맞을 때만 받는다.** 워커는 취소를 모르므로, 닫고 다른 마커를 연 뒤에도
+            // 옛 요청의 결과가 도착한다 — 그것을 그대로 넣으면 **남의 그림**이 붙는다(적대적 A29).
+            if (open.decode_generation != r.generation) return true;
             if (r.pixels.len == 0) {
                 open.failed = true; // 못 풀었다 — 다시 걸지 않는다
             } else {

@@ -126,7 +126,7 @@ wire에서 `kind`는 `"editor"` 문자열이고 detail은 `EditorMeta`다 — **
 | §9.2~§9.3 | [라이브 배선](control-plane-browser-wiring.md) | 실제 WKWebView 연결 슬라이스 |
 | §9.4 | [프로토콜 리뷰](control-plane-browser-review.md) | 5f 선행 감사 |
 | §9.5 | [지속 세션·이벤트·대용량 결과](control-plane-browser-session.md) | 5f-0 구현 설계 |
-| §11~§12 · §16 | [구현 Phase와 검증](control-plane-implementation.md) | Phase 순서·착수 분배·검증 전략·코드 위치 |
+| §11~§12 · §16 | [구현 Phase와 검증](plans/control-plane.md) | Phase 순서·착수 분배·검증 전략·코드 위치 |
 
 ## 4a. 원격 축 — 폰이 붙는 길 (사용자 확정 2026-08-20)
 

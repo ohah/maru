@@ -81,6 +81,10 @@ pub const Entry = struct {
     phase: Phase = .staged,
     /// PNG 바이트. 이 모듈이 소유한다(`deinit`이 푼다).
     png: []u8,
+    /// 그 PNG가 놓인 임시 파일(`$TMPDIR/maru-paste/<UUID>.png`). **디코드는 이 경로로 건다** —
+    /// 워커가 파일을 읽는 기존 길을 그대로 쓰면 바이트를 스레드 경계 너머로 빌려주지 않아도 된다.
+    /// 비어 있을 수 있다(원격은 로컬 파일이 없다 — P3).
+    path: []u8 = &.{},
     /// 오래된 것부터 거두기 위한 순번(단조 증가). 시계를 쓰지 않는다 — 순서만 필요하다.
     seq: u64,
 };
@@ -101,7 +105,7 @@ pub const Staging = struct {
     pub const default_budget_bytes: usize = 64 * 1024 * 1024;
 
     pub fn deinit(self: *Staging, allocator: std.mem.Allocator) void {
-        for (self.entries.items) |e| allocator.free(e.png);
+        for (self.entries.items) |e| freeEntry(allocator, e);
         self.entries.deinit(allocator);
         self.* = .{};
     }
@@ -110,17 +114,18 @@ pub const Staging = struct {
     ///
     /// 같은 N이 이미 있으면 **새 것으로 갈아치운다** — provider가 번호를 재사용하는 경우(Codex가 입력창을
     /// 비운 뒤 다시 `#1`부터)가 그 길이고, 옛 항목은 이미 `sent`라 화면에 없다.
-    pub fn put(self: *Staging, allocator: std.mem.Allocator, n: u32, png: []u8) !void {
+    pub fn put(self: *Staging, allocator: std.mem.Allocator, n: u32, png: []u8, path: []u8) !void {
         if (self.indexOf(n)) |i| {
             const old = self.entries.items[i];
             self.bytes -= old.png.len;
-            allocator.free(old.png);
+            freeEntry(allocator, old);
             _ = self.entries.orderedRemove(i);
         }
         try self.entries.append(allocator, .{
             .n = n,
             .phase = .staged,
             .png = png,
+            .path = path,
             .seq = self.next_seq,
         });
         self.next_seq += 1;
@@ -139,7 +144,7 @@ pub const Staging = struct {
             }
             const i = victim orelse break; // 전부 staged면 더 거둘 것이 없다
             self.bytes -= self.entries.items[i].png.len;
-            allocator.free(self.entries.items[i].png);
+            freeEntry(allocator, self.entries.items[i]);
             _ = self.entries.orderedRemove(i);
         }
     }
@@ -168,10 +173,15 @@ pub const Staging = struct {
     pub fn release(self: *Staging, allocator: std.mem.Allocator, n: u32) void {
         const i = self.indexOf(n) orelse return;
         self.bytes -= self.entries.items[i].png.len;
-        allocator.free(self.entries.items[i].png);
+        freeEntry(allocator, self.entries.items[i]);
         _ = self.entries.orderedRemove(i);
     }
 };
+
+fn freeEntry(allocator: std.mem.Allocator, e: Entry) void {
+    allocator.free(e.png);
+    if (e.path.len > 0) allocator.free(e.path);
+}
 
 fn containsN(haystack: []const u32, n: u32) bool {
     for (haystack) |x| if (x == n) return true;
@@ -253,7 +263,7 @@ fn dupPng(bytes: []const u8) ![]u8 {
 test "MP1 스테이징: 관찰한 N으로 찾는다. 기록에 없는 N은 열지 않는다 (§3.1)" {
     var s: Staging = .{};
     defer s.deinit(testing.allocator);
-    try s.put(testing.allocator, 1, try dupPng("A"));
+    try s.put(testing.allocator, 1, try dupPng("A"), &.{});
     try testing.expect(s.lookup(1) != null);
     try testing.expect(s.lookup(2) == null); // 화면에 글자로 쓰인 `[Image #2]` 는 우리 것이 아니다
 }
@@ -261,9 +271,9 @@ test "MP1 스테이징: 관찰한 N으로 찾는다. 기록에 없는 N은 열�
 test "MP1 스테이징: 빈 번호가 재사용되지 않아 `#1 #3` 이 와도 각자 맞는다 (§4.3 실측)" {
     var s: Staging = .{};
     defer s.deinit(testing.allocator);
-    try s.put(testing.allocator, 1, try dupPng("A"));
-    try s.put(testing.allocator, 2, try dupPng("B"));
-    try s.put(testing.allocator, 3, try dupPng("C"));
+    try s.put(testing.allocator, 1, try dupPng("A"), &.{});
+    try s.put(testing.allocator, 2, try dupPng("B"), &.{});
+    try s.put(testing.allocator, 3, try dupPng("C"), &.{});
     // `#2` 를 지우고 다시 붙인 상태 — 화면에는 `#1 #3` 만 보인다.
     s.syncVisible(&.{ 1, 3 });
     try testing.expectEqualStrings("A", s.lookup(1).?.png);
@@ -275,7 +285,7 @@ test "MP1 스테이징: 빈 번호가 재사용되지 않아 `#1 #3` 이 와도 
 test "MP1 스테이징: 전송으로 마커가 사라져도 픽셀을 든다 — 인덱스가 받기 전까지 (§4.2 A11)" {
     var s: Staging = .{};
     defer s.deinit(testing.allocator);
-    try s.put(testing.allocator, 1, try dupPng("A"));
+    try s.put(testing.allocator, 1, try dupPng("A"), &.{});
     s.syncVisible(&.{}); // Enter 로 보냈다(= C-u 로 비웠다와 화면상 같다)
     const e = s.lookup(1) orelse return error.TestUnexpectedResult;
     try testing.expectEqual(Phase.sent, e.phase);
@@ -287,10 +297,10 @@ test "MP1 스테이징: 전송으로 마커가 사라져도 픽셀을 든다 —
 test "MP1 스테이징: 예산은 바이트로 묶고 `staged` 는 거두지 않는다" {
     var s: Staging = .{ .budget_bytes = 8 };
     defer s.deinit(testing.allocator);
-    try s.put(testing.allocator, 1, try dupPng("AAAA"));
-    try s.put(testing.allocator, 2, try dupPng("BBBB"));
+    try s.put(testing.allocator, 1, try dupPng("AAAA"), &.{});
+    try s.put(testing.allocator, 2, try dupPng("BBBB"), &.{});
     s.syncVisible(&.{2}); // #1 은 sent, #2 는 화면에 보인다
-    try s.put(testing.allocator, 3, try dupPng("CCCC")); // 예산 초과 → 오래된 sent(#1)를 놓는다
+    try s.put(testing.allocator, 3, try dupPng("CCCC"), &.{}); // 예산 초과 → 오래된 sent(#1)를 놓는다
     try testing.expect(s.lookup(1) == null);
     try testing.expect(s.lookup(2) != null); // staged 는 살아남는다
     try testing.expect(s.lookup(3) != null);
@@ -299,8 +309,8 @@ test "MP1 스테이징: 예산은 바이트로 묶고 `staged` 는 거두지 않
 test "MP1 스테이징: 전부 staged 면 예산을 넘겨도 거두지 않는다 — 눈앞의 마커가 안 열리면 안 된다" {
     var s: Staging = .{ .budget_bytes = 4 };
     defer s.deinit(testing.allocator);
-    try s.put(testing.allocator, 1, try dupPng("AAAA"));
-    try s.put(testing.allocator, 2, try dupPng("BBBB"));
+    try s.put(testing.allocator, 1, try dupPng("AAAA"), &.{});
+    try s.put(testing.allocator, 2, try dupPng("BBBB"), &.{});
     try testing.expect(s.lookup(1) != null);
     try testing.expect(s.lookup(2) != null);
 }
@@ -308,9 +318,9 @@ test "MP1 스테이징: 전부 staged 면 예산을 넘겨도 거두지 않는�
 test "MP1 스테이징: 같은 N 이 다시 오면 갈아치운다 (Codex 가 입력창을 비운 뒤 다시 #1)" {
     var s: Staging = .{};
     defer s.deinit(testing.allocator);
-    try s.put(testing.allocator, 1, try dupPng("OLD"));
+    try s.put(testing.allocator, 1, try dupPng("OLD"), &.{});
     s.syncVisible(&.{});
-    try s.put(testing.allocator, 1, try dupPng("NEW"));
+    try s.put(testing.allocator, 1, try dupPng("NEW"), &.{});
     try testing.expectEqualStrings("NEW", s.lookup(1).?.png);
     try testing.expectEqual(@as(usize, 3), s.bytes); // 옛 것이 남아 있지 않다
 }

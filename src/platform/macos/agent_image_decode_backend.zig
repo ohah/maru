@@ -130,6 +130,10 @@ const Job = struct {
     generation: u64,
     /// 원격이면 그 목적지(RAV6). **null 이 로컬이다** — 이 하나가 워커의 갈림을 정한다.
     remote: ?OwnedRemote = null,
+    /// 그 구간이 base64 인가. 트랜스크립트 JSONL 의 이미지는 참이고, **붙여넣기 임시 PNG 는 거짓**이다
+    /// (마커 프리뷰 MP1 — `$TMPDIR/maru-paste/<UUID>.png` 는 raw 파일이다). 거짓이면 디코드 한 단계를
+    /// 건너뛴다. 나머지(상한 맞추기·서브샘플·픽셀 소유)는 **완전히 같은 길**을 쓴다.
+    base64: bool = true,
 };
 
 /// job 이 **소유하는** 원격 목적지 사본. 세션이 먼저 죽어도 워커가 안전하게 읽는다.
@@ -178,6 +182,7 @@ pub const Backend = struct {
     /// **null 이 로컬이다.**
     pub const RemoteTarget = struct { ctl: []const u8, dest: []const u8 };
 
+    /// 트랜스크립트 안의 **base64 구간**을 푼다(갤러리 경로).
     pub fn submit(
         self: *Backend,
         path: []const u8,
@@ -186,6 +191,31 @@ pub const Backend = struct {
         target_side: u32,
         hit_index: usize,
         remote: ?RemoteTarget,
+    ) ?u64 {
+        return self.submitInner(path, data_offset, data_len, target_side, hit_index, remote, true);
+    }
+
+    /// **raw 이미지 파일**을 통째로 푼다(마커 프리뷰 MP1 — 붙여넣기 임시 PNG).
+    /// base64 단계만 건너뛰고 상한·서브샘플·픽셀 소유는 갤러리와 같은 길이다.
+    pub fn submitRawFile(
+        self: *Backend,
+        path: []const u8,
+        file_len: u32,
+        target_side: u32,
+        key: usize,
+    ) ?u64 {
+        return self.submitInner(path, 0, file_len, target_side, key, null, false);
+    }
+
+    fn submitInner(
+        self: *Backend,
+        path: []const u8,
+        data_offset: u64,
+        data_len: u32,
+        target_side: u32,
+        hit_index: usize,
+        remote: ?RemoteTarget,
+        base64: bool,
     ) ?u64 {
         const state = self.state;
         if (state.shutting_down.load(.acquire)) return null;
@@ -248,6 +278,7 @@ pub const Backend = struct {
             .generation = generation,
             .slot = slot.?,
             .remote = owned_remote,
+            .base64 = base64,
         };
         _ = state.refs.fetchAdd(1, .monotonic);
         const thread = std.Thread.spawn(.{}, worker, .{job}) catch {
@@ -355,11 +386,17 @@ fn worker(job: *Job) void {
         };
         defer state.allocator.free(b64);
 
-        const dec = std.base64.standard.Decoder;
-        const raw_len = dec.calcSizeForSlice(b64) catch break :decode;
-        const raw = state.allocator.alloc(u8, raw_len) catch break :decode;
-        defer state.allocator.free(raw);
-        dec.decode(raw, b64) catch break :decode;
+        // raw 파일(붙여넣기 임시 PNG)은 디코드 없이 그대로가 이미지 바이트다.
+        var owned_raw: ?[]u8 = null;
+        defer if (owned_raw) |r| state.allocator.free(r);
+        const raw: []const u8 = if (job.base64) blk: {
+            const dec = std.base64.standard.Decoder;
+            const raw_len = dec.calcSizeForSlice(b64) catch break :decode;
+            const buf = state.allocator.alloc(u8, raw_len) catch break :decode;
+            owned_raw = buf;
+            dec.decode(buf, b64) catch break :decode;
+            break :blk buf;
+        } else b64;
 
         const size = image_decode.probeSize(raw) catch break :decode;
         // **상한을 못 맞추면 안 푼다.** 억지로 올리면 텍스처 생성에서 프로세스가 abort 한다(계약 §5.3).

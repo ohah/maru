@@ -71609,7 +71609,7 @@ test "탐색기의 .gitignore 흐림은 «방금 읽은 그 디렉터리»의 �
 
 test "탐색기 무시 표시는 «물을 때의 저장소»에 붙는다 — 도크가 기억한 것이 아니라" {
     // **누적 적대적 검증에서 나온 결함**(2026-09-13). 질의는 「방금 읽은 디렉터리」의 저장소로 나가는데
-    // (`requestIgnoredForPaths`), 답을 절대경로로 되돌리는 쪽(`drainIgnoreResults`)은 `gitRepoRoot` 로
+    // (`pumpIgnoreQueries`), 답을 절대경로로 되돌리는 쪽(`drainIgnoreResults`)은 `gitRepoRoot` 로
     // 루트를 **다시** 골랐다. 그 값은 **도크가 기억하는 저장소**라 물을 때와 다를 수 있다 — 탐색기가
     // 터미널과 다른 저장소를 볼 때, 그리고 원격 SCM 목록을 본 뒤가 그렇다. 그러면 상대경로가 엉뚱한
     // 루트에 붙어 **흐림이 안 서거나 남의 행이 흐려진다.**
@@ -71672,7 +71672,7 @@ test "흐림은 «진짜 git 으로 물어 화면까지» 닿는다 — 제품 �
     //   ⑵ 경로 슬라이스가 **자라는 버퍼**를 가리켜 자식 stdin 으로 쓰레기가 나갔다(exit 128).
     // 두 번 다 게이트는 **초록**이었다. 있던 판정자들이 argv 의 «모양»과 주입된 답만 봤기 때문이다.
     //
-    // 그래서 제품이 실제로 부르는 층에서 **끝까지** 태운다: 진짜 저장소 → `requestIgnoredForPaths`
+    // 그래서 제품이 실제로 부르는 층에서 **끝까지** 태운다: 진짜 저장소 → `noteIgnoredScan`
     // → 진짜 `check-ignore` → `drainIgnoreResults` → **행 투영**. 위 둘은 이 판정자에 걸린다.
     //
     // ⚠️ **항목을 많이 만든다.** 버퍼가 자라며 realloc 하는 것이 ⑵ 의 조건이고, 옛 배치 상한(=10)을
@@ -71844,6 +71844,14 @@ test "한 배치에 안 들어가는 디렉터리도 «커서로 이어» 끝까
 
     // ⑷ 그동안 디스크를 다시 읽지 않았다.
     try std.testing.expectEqual(scans_before, session.file_tree.scanRequestCount());
+
+    // ⑸ **새 스캔은 커서를 0 으로 되돌린다.** 커서는 순번이라, 목록이 갈린 뒤에도 옛 순번을 들고
+    //    있으면 엉뚱한 자리를 묻는다 — 같은 신호(`noteIgnoredScan`)가 그 자리를 리셋하는 것이 계약이다.
+    git_ops.noteIgnoredScan(session, repo);
+    try std.testing.expectEqual(@as(usize, 1), session.git_ignore_pending.items.len);
+    try std.testing.expectEqual(@as(usize, 0), session.git_ignore_pending.items[0].next);
+    // 그래서 이번 배치는 **처음부터**다.
+    try std.testing.expect(std.mem.endsWith(u8, session.git_ignore_query_paths.items[0], "f00000.txt"));
 }
 
 test "자리가 차서 거절된 배치는 «같은 커서로» 다시 나간다 — 디스크를 다시 읽지 않고" {
@@ -72076,7 +72084,7 @@ test "앞 디렉터리의 답이 뒤 디렉터리의 흐림을 지우지 않는�
     try std.testing.expect(ignoredForTest(session, "/repo/a.txt"));
     try std.testing.expect(ignoredForTest(session, "/repo/b.txt"));
 
-    // ⑵ **거절된 요청이 버퍼만 덮어 놓은 상태**를 만든다 — 제품에서 `requestIgnoredForPaths` 가
+    // ⑵ **거절된 요청이 버퍼만 덮어 놓은 상태**를 만든다 — 제품에서 배치를 담는 자리가
     //    `submitCheckIgnore` 거절 직전까지 한 일 그대로다.
     session.git_ignore_query_paths.clearRetainingCapacity();
     try session.git_ignore_query_paths.append(allocator, "b.txt");

@@ -10400,6 +10400,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
               x.rounded(.towardZero) == x, y.rounded(.towardZero) == y,
               w.rounded(.towardZero) == w, h.rounded(.towardZero) == h,
               let window = view.window else { return nil }
+        // The outer state-machine probe authenticated the binding before capture. The capture
+        // itself performs a product render tick, so authenticate the same environment identity
+        // against RemoteTermBackend again afterwards before publishing its receipt.
+        var postCaptureProbe = MaruAppHostSessionHostInputSmokeProbe()
+        guard let session = surface.appSession,
+              maru_macos_app_session_input_smoke_probe(session, &postCaptureProbe) == Self.statusOK,
+              postCaptureProbe.active_remote != 0 else { return nil }
         let scale = window.backingScaleFactor
         let local = NSRect(
             x: x / scale,

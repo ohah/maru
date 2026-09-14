@@ -542,6 +542,10 @@ pub fn dockLauncherSmokeProbe(self: *const AppSession) AgentSessionArchiveSmokeP
 /// `취소 → 재요청 → 취소`가 반복된다 — 취소 시 `agent_session_archive_completed_ns`가 갱신되지 않아
 /// TTL 가드도 걸리지 않기 때문이다.
 pub fn onDockViewPresented(self: *AppSession, view: dock_panel.View) void {
+    // 탐색기로 들어오면 `.gitignore` 흐림 질의가 나갈 백엔드를 세운다. **`setDockView` 가 아니라
+    // 여기인 이유**는 그쪽이 «같은 뷰면 되돌아가기» 라, 창이 이미 탐색기인 채로 복원되면 안 서기
+    // 때문이다. 왜 질의 자리가 아니라 진입 자리인지는 `ensureIgnoreBackend` 주석에 있다.
+    if (view == .explorer and dockVisible(self)) git_ops.ensureIgnoreBackend(self);
     if (!agent_dock.shouldRefreshArchiveOnPresent(dockVisible(self), view)) return;
     agent_dock.refreshAgentSessionArchive(self, false);
 }

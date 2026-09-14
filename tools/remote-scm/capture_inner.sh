@@ -100,7 +100,16 @@ env -u CLAUDE_CODE_CHILD_SESSION \
 }
 # **앱 로그를 남긴다.** 격리 HOME 은 지워지므로, 캡처가 이상할 때 뒤늦게 볼 것이 없어진다 —
 # 「그림이 틀렸다」를 진단할 유일한 실마리다(적대적 검증에서 실제로 그 로그가 없어 헤맸다).
-cp "$CAP_HOME/app.log" "${OUT%.png}.log" 2>/dev/null || true
+#
+# ⚠️ **로그는 두 갈래다.** 여기 리다이렉트한 것은 stdout/stderr 이고 거기엔 종료 시 상태 덤프만 온다.
+# `std.log` 는 앱이 자기 logFn 으로 `<HOME>/.cache/maru/app.log` 에 쓴다(`app_host_abi.zig`).
+# 그 파일을 안 챙겨서 적대적 검증 8 회차에 「계측을 넣었는데 한 줄도 안 나온다」로 한참 헤맸다 —
+# 실은 나오고 있었고 **지워지는 HOME 과 함께 사라지고 있었다.** 둘을 한 파일로 잇는다.
+{
+	cat "$CAP_HOME/app.log" 2>/dev/null || true
+	echo "=== std.log (<HOME>/.cache/maru/app.log) ==="
+	cat "$CAP_HOME/.cache/maru/app.log" 2>/dev/null || true
+} > "${OUT%.png}.log" 2>/dev/null || true
 [ -s "$SHOT" ] || { echo "capture: 스크린샷이 안 나왔다" >&2; tail -20 "$CAP_HOME/app.log" >&2; exit 1; }
 
 # **PPM 도 남긴다.** 골든 게이트는 PPM 을 읽는다(`tests/support/ppm.zig` 가 P6 만 안다) — 사람은

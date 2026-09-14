@@ -1374,12 +1374,20 @@ fn ignoreWorker(job: *Job) void {
     result.repo = state.allocator.dupe(u8, job.repo) catch &.{};
     // `run` 은 kind 하나로 argv 를 만드는 경로라, 경로가 붙는 이 명령만 argv 를 직접 조립해 넘긴다.
     var argv_buf: [git_command.max_argv][]const u8 = undefined;
-    const argv = git_command.buildCheckIgnore(job.git_exe, job.repo, job.ignore_paths, &argv_buf);
-    if (runArgv(state.allocator, argv)) |out| {
-        result.text = out.bytes;
-        // **exit code 1 은 "무시된 것이 없음"이다**(git 계약) — 실패가 아니다. `runArgv` 가 그 구분을 준다.
-        result.ok = true;
-    } else |_| {}
+    const argv = git_command.buildCheckIgnore(job.git_exe, job.repo, &argv_buf);
+    // 경로는 **stdin** 으로 간다(`-z` 는 `--stdin` 과만 성립한다 — `git_command` 의 kind 주석).
+    const payload_buf: []u8 = state.allocator.alloc(u8, git_command.max_check_ignore_stdin_bytes) catch &.{};
+    defer if (payload_buf.len > 0) state.allocator.free(payload_buf);
+    const payload = git_command.checkIgnoreStdin(job.ignore_paths, payload_buf);
+    if (payload.len > 0) {
+        // **exit 1 은 「무시된 것이 없음」이다**(git 계약) — 실패가 아니라 **빈 답**이다. 그 구분을
+        // 여기서 명시적으로 요구한다: 예전 주석은 「`runArgv` 가 그 구분을 준다」고 적었지만 그쪽은
+        // `exit_code != 0` 을 전부 `GitFailed` 로 접고 있었다(적대적 검증 2026-09-14).
+        if (runArgvCheckIgnore(state.allocator, argv, payload)) |out| {
+            result.text = out.bytes;
+            result.ok = true;
+        } else |_| {}
+    }
 
     state.mutex.lockUncancelable(state.io);
     if (state.ignore_result) |*old| old.deinit(state.allocator);
@@ -1699,7 +1707,7 @@ fn worktreeSideOn(allocator: std.mem.Allocator, job: *Job, rel_path: []const u8)
     // **이 읽기도 원격이다**(적대적 검증 1회차). `runOn` 만 배선하고 여기를 빼면, 소켓이 죽어 diff 가
     // 안 열려도 화면은 「읽지 못함」만 말한다 — 목록은 「연결이 끊겼다」라고 말하는데 diff 는 딴소리를
     // 하는 셈이라, 사용자는 둘 중 무엇을 믿을지 알 수 없다.
-    const out = runArgvWithEnv(allocator, argv, null, true) catch |err| return mapRemoteExitError(err);
+    const out = runArgvWithEnv(allocator, argv, null, true, null, false) catch |err| return mapRemoteExitError(err);
     // ⚠️ **잘림을 원격 상한으로 다시 판정한다**(RS3a 적대적 검증 3회차). `runArgvWithEnv` 는 로컬 상한
     // (`max_output_bytes`, 16 MiB)으로만 보는데 원격은 그 전에 `head -c` 로 **4 MiB 에서 잘린다** —
     // 그대로 두면 잘린 파일이 `truncated = false` 로 와서 **온전한 파일처럼** 화면에 뜬다(뷰어는 잘린
@@ -1841,13 +1849,13 @@ fn runOn(
 ) !Output {
     var argv_buf: [git_command.max_argv][]const u8 = undefined;
     const local = git_command.build(kind, git_exe, repo, arg, &argv_buf);
-    const target = remote orelse return runArgvWithEnv(allocator, local, null, false);
+    const target = remote orelse return runArgvWithEnv(allocator, local, null, false, null, false);
     var remote_buf: [git_command.max_argv][]const u8 = undefined;
     var cmd_buf: [git_command.max_remote_command_bytes]u8 = undefined;
     const argv = git_command.buildRemote(local, target, &remote_buf, &cmd_buf) orelse return error.GitFailed;
     // **원격에서만 종료 코드를 이야기로 바꾼다.** 로컬 git 이 127·255 를 내는 일은 없고, 낸다면 그것은
     // git 이 한 말이라 우리가 다시 해석하면 안 된다.
-    return runArgvWithEnv(allocator, argv, null, true) catch |err| return mapRemoteExitError(err);
+    return runArgvWithEnv(allocator, argv, null, true, null, false) catch |err| return mapRemoteExitError(err);
 }
 
 /// `index_file`이 있으면 `GIT_INDEX_FILE`로 걸어 **그 index에만** 쓰게 한다(턴 스냅샷). 진짜 index를 안 건드리는
@@ -1862,14 +1870,22 @@ fn runWithEnv(
 ) !Output {
     var argv_buf: [git_command.max_argv][]const u8 = undefined;
     const argv_slices = git_command.build(kind, git_exe, repo, arg, &argv_buf);
-    return runArgvWithEnv(allocator, argv_slices, index_file, false);
+    return runArgvWithEnv(allocator, argv_slices, index_file, false, null, false);
 }
 
 /// **argv 를 직접 받는 진입점.** `check-ignore` 는 경로가 argv 뒤에 붙어 kind 하나로 만들 수 없어
 /// (`git_command.buildCheckIgnore`) 이 자리를 쓴다. 아래 본문은 원래 `runWithEnv` 의 것 그대로다 —
 /// 실행 방식(fork+exec+pipe·환경 덮어쓰기·exit code 해석)을 두 벌로 만들지 않기 위해 갈랐다.
 fn runArgv(allocator: std.mem.Allocator, argv_slices: []const []const u8) !Output {
-    return runArgvWithEnv(allocator, argv_slices, null, false);
+    return runArgvWithEnv(allocator, argv_slices, null, false, null, false);
+}
+
+/// `check-ignore` 전용 진입점 — 경로를 stdin 으로 보내고, **exit 1 을 빈 답으로 받는다.**
+///
+/// 그 둘을 한 함수로 묶는 이유: 둘 다 **이 명령 하나의 계약**이라 다른 읽기에 새면 안 된다.
+/// exit 1 을 일반 읽기에 열어 주면 「git 이 거부했다」가 조용히 빈 목록으로 보인다.
+fn runArgvCheckIgnore(allocator: std.mem.Allocator, argv_slices: []const []const u8, stdin_bytes: []const u8) !Output {
+    return runArgvWithEnv(allocator, argv_slices, null, false, stdin_bytes, true);
 }
 
 fn runArgvWithEnv(
@@ -1883,6 +1899,11 @@ fn runArgvWithEnv(
     /// 「로컬 git 을 못 띄웠다」이고, 화면에 「원격에 git 을 깔라」고 적으면 사용자는 엉뚱한 기계를
     /// 손본다. 그래서 로컬은 예전처럼 `GitFailed` 하나로 둔다(적대적 검증 1회차).
     remote_exit_codes: bool,
+    /// 자식 stdin 으로 보낼 바이트(없으면 `/dev/null`). `check-ignore --stdin` 만 쓴다.
+    stdin_bytes: ?[]const u8,
+    /// **exit 1 을 「빈 답」으로 받을지.** `check-ignore` 만 참이다 — 그 명령은 「무시된 것이 없음」을
+    /// 1 로 말한다(git 계약). 다른 읽기에 열어 주면 거부가 빈 목록으로 보인다.
+    empty_on_exit_1: bool,
 ) !Output {
     // **Windows 는 `CreateProcessW` + 익명 파이프로 간다.** 아래 POSIX 갈래는 `fork`/`execve` 를 쓰는데
     // Windows 에는 없다(`std.c.fork` 가 그 타깃에서 `void` 라 분석되는 순간 컴파일이 깨진다). `comptime`
@@ -1891,7 +1912,7 @@ fn runArgvWithEnv(
     // **POSIX 갈래는 한 줄도 안 건드린다.** 돌아가는 검증된 경로를 옮기지 않는 것이 이 배선의 전제다 —
     // 옮기면 검증할 수 없는 코드로 검증된 코드를 바꾸는 일이 된다(Windows 호스트에서는 POSIX 테스트를
     // 못 돌린다).
-    if (comptime builtin.os.tag == .windows) return runArgvWithEnvWindows(allocator, argv_slices, index_file, remote_exit_codes);
+    if (comptime builtin.os.tag == .windows) return runArgvWithEnvWindows(allocator, argv_slices, index_file, remote_exit_codes, stdin_bytes, empty_on_exit_1);
 
     // **posix fork+exec+pipe로 띄운다**(update_check.zig·ssh_upload.zig와 같은 결). `std.process.run`은 0.16에서
     // io 기반인데 앱 Io가 `init_single_threaded`(할당기 없음·동시성 미지원)라 그 자리에서 OutOfMemory로 실패한다 —
@@ -1947,7 +1968,7 @@ fn runArgvWithEnv(
     // 읽기는 **stdout만** 받는다. stderr에는 경로·사용자·저장소 정보가 섞이므로 파이프로 받지 않고 /dev/null로
     // 버린다(docs/editor-surface-tooling.md §6 — raw로 흘리지 않는다). 실패 여부는 종료 코드로 충분하다.
     // 쓰기는 정반대라(§5 — 가공해서 보여 준다) `spawnCapture`가 그 축을 인자로 받는다.
-    const spawned = try spawnCapture(allocator, &argv, env_ptrs.items.ptr, .stdout_only, null);
+    const spawned = try spawnCapture(allocator, &argv, env_ptrs.items.ptr, .stdout_only, stdin_bytes);
     defer allocator.free(spawned.stderr_bytes); // 읽기 경로에서는 항상 빈 슬라이스다
     errdefer allocator.free(spawned.stdout_bytes);
     // 상한에 걸렸는지는 길이로 판정한다 — 잘렸으면 목록 끝에 그 사실을 표시한다(조용히 일부만 보여 주지 않는다).
@@ -1964,7 +1985,13 @@ fn runArgvWithEnv(
             if (spawned.exit_code == 127) return error.ExitCommandNotFound;
             if (spawned.exit_code == 255) return error.ExitTransportFailed;
         }
-        if (spawned.exit_code != 0) return error.GitFailed;
+        // **`check-ignore` 의 1 은 실패가 아니다**(위 인자 주석) — 「물어본 것 중 무시된 것이 없다」이고,
+        // 그때 stdout 은 비어 있다. 그 구분이 없으면 무시 항목이 하나도 없는 디렉터리마다 답이 통째로
+        // 버려져 「아직 안 물어본 상태」와 구별되지 않는다.
+        //
+        // **상한 갈래 안이 맞는 자리다**: 잘린 읽기의 종료 코드는 우리가 만든 것이라(위 주석) 거기서
+        // 1 을 보고 「무시된 것이 없다」고 단정하면, 실은 **답이 잘린** 것을 빈 답이라고 말하게 된다.
+        if (!(spawned.exit_code == 1 and empty_on_exit_1) and spawned.exit_code != 0) return error.GitFailed;
     }
     return .{ .bytes = spawned.stdout_bytes, .truncated = capped };
 }
@@ -1982,7 +2009,14 @@ fn runArgvWithEnvWindows(
     index_file: ?[]const u8,
     /// POSIX 갈래와 같은 뜻 — 원격 명령일 때만 127·255 를 이름 있는 오류로 올린다.
     remote_exit_codes: bool,
+    /// ⚠️ **이 갈래는 아직 stdin 을 안 보낸다.** 캡처 러너(`win32_process`)에 그 배관이 없다.
+    /// 값이 오면 **명령을 만들지 않고 실패로 돌려준다** — `--stdin` 을 준 채 아무것도 안 보내면
+    /// git 이 빈 입력을 읽고 「무시된 것 없음」을 내므로, 조용히 **틀린 답**이 된다.
+    stdin_bytes: ?[]const u8,
+    /// POSIX 갈래와 같은 뜻 — `check-ignore` 의 exit 1 을 빈 답으로 받는다.
+    empty_on_exit_1: bool,
 ) !Output {
+    if (stdin_bytes != null) return error.GitFailed;
     // 캡처 러너는 **배럴을 통해** 온다. 상대 경로(`../windows/…`)로 가져오면 모듈 루트가
     // `platform/macos` 안인 아티팩트(`macos-chrome-lab-smoke` 등)에서 **모듈 밖**이 되어 macOS 빌드가
     // 깨진다 — 함수 안으로 옮겨도 소용없다. `@import` 는 파일 단위로 먼저 해석되기 때문이다(실측으로
@@ -2024,6 +2058,7 @@ fn runArgvWithEnvWindows(
         if (result.exit_code == 127) return error.ExitCommandNotFound;
         if (result.exit_code == 255) return error.ExitTransportFailed;
     }
+    if (result.exit_code == 1 and empty_on_exit_1) return .{ .bytes = result.bytes, .truncated = false };
     if (result.exit_code != 0) return error.GitFailed;
     return .{ .bytes = result.bytes, .truncated = result.truncated };
 }
@@ -3923,6 +3958,102 @@ test "원격 쓰기: 원격 라우팅이 떨어져도 상대경로 git 을 실�
     try std.testing.expectEqual(@as(c_int, 255), out.exit_code);
 }
 
+test "check-ignore 는 진짜 git 을 통과한다 — 무시된 것, 없는 것, 개행이 든 이름" {
+    // ⚠️ **모양만 보는 판정자로는 12 일을 못 잡았다.** 예전 argv 는
+    // `git -C <repo> … check-ignore -z <경로들>` 이었는데, git 은 그 조합을
+    // `fatal: -z only makes sense with --stdin` 으로 **거절한다**(exit 128). 그래서 `.gitignore`
+    // 흐림은 화면에서 **한 번도 뜬 적이 없었고**, argv 토큰을 세는 판정자들은 전부 초록이었다.
+    //
+    // 그러니 이 판정자는 **실제로 돌린다.** 세 가지를 한 번에 문다:
+    //   ⑴ 무시된 것이 있으면 그 경로들이 NUL 로 끊겨 온다.
+    //   ⑵ 무시된 것이 **하나도 없으면** git 은 **exit 1** 이다 — 그것은 실패가 아니라 **빈 답**이고,
+    //      실패로 접으면 「안 물어본 상태」와 구별되지 않아 흐림이 영영 안 선다.
+    //   ⑶ 이름에 **개행**이 들어 있어도 답이 갈라지지 않는다 — `-z` 를 쓰는 이유가 그것이고,
+    //      `--stdin` 없이는 그 `-z` 를 못 쓴다.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const repo_len = tmp.dir.realPath(io, &repo_buf) catch return error.SkipZigTest;
+    const repo = repo_buf[0..repo_len];
+
+    // 저장소를 만든다. git 이 없으면 이 판정자는 성립하지 않는다.
+    {
+        var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const git_exe = locate(&exe_buf) orelse return error.SkipZigTest;
+        const out = runArgvWithEnv(allocator, &.{ git_exe, "-C", repo, "init", "-q" }, null, false, null, false) catch return error.SkipZigTest;
+        allocator.free(out.bytes);
+    }
+
+    // `.gitignore` 와 항목들. **개행이 든 이름**이 ⑶ 의 자리다.
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const ignore_path = try std.fmt.bufPrint(&path_buf, "{s}/.gitignore", .{repo});
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = ignore_path, .data = "build/\n*.tmp\n" });
+
+    // **항목이 실제로 있어야 한다.** `build/` 는 «디렉터리일 때만» 맞는 패턴이라, 그 자리가 비어
+    // 있으면 git 은 무시로 안 친다 — 탐색기가 묻는 것은 늘 «방금 읽어 본 실제 항목»이므로 여기서도
+    // 같은 조건을 만든다(이 함정에 한 번 걸려 판정자가 빨갰다).
+    try tmp.dir.createDirPath(io, "build");
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.tmp", .data = "" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "keep.zig", .data = "" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "odd\nname.tmp", .data = "" });
+
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const git_exe = locate(&exe_buf) orelse return error.SkipZigTest;
+    var argv_buf: [git_command.max_argv][]const u8 = undefined;
+    const argv = git_command.buildCheckIgnore(git_exe, repo, &argv_buf);
+    var payload_buf: [4096]u8 = undefined;
+
+    // ⑴ 무시된 것이 섞여 있다.
+    {
+        const paths = [_][]const u8{ "build", "keep.zig", "a.tmp" };
+        const payload = git_command.checkIgnoreStdin(&paths, &payload_buf);
+        const out = try runArgvCheckIgnore(allocator, argv, payload);
+        defer allocator.free(out.bytes);
+        var saw_build = false;
+        var saw_tmp = false;
+        var saw_keep = false;
+        var it = std.mem.splitScalar(u8, out.bytes, 0);
+        while (it.next()) |one| {
+            if (one.len == 0) continue;
+            if (std.mem.eql(u8, one, "build")) saw_build = true;
+            if (std.mem.eql(u8, one, "a.tmp")) saw_tmp = true;
+            if (std.mem.eql(u8, one, "keep.zig")) saw_keep = true;
+        }
+        try std.testing.expect(saw_build);
+        try std.testing.expect(saw_tmp);
+        try std.testing.expect(!saw_keep); // 안 무시된 것은 답에 없다
+    }
+
+    // ⑵ 하나도 안 무시된 배치 — git 은 **1** 로 끝난다. 그래도 `ok` 여야 한다.
+    {
+        const paths = [_][]const u8{ "keep.zig", ".gitignore" };
+        const payload = git_command.checkIgnoreStdin(&paths, &payload_buf);
+        const out = try runArgvCheckIgnore(allocator, argv, payload);
+        defer allocator.free(out.bytes);
+        try std.testing.expectEqual(@as(usize, 0), out.bytes.len); // 빈 답이지 실패가 아니다
+    }
+
+    // ⑶ 개행이 든 이름. `-z` 가 없으면 이 한 줄이 **두 줄**로 읽힌다.
+    {
+        const paths = [_][]const u8{"odd\nname.tmp"};
+        const payload = git_command.checkIgnoreStdin(&paths, &payload_buf);
+        const out = try runArgvCheckIgnore(allocator, argv, payload);
+        defer allocator.free(out.bytes);
+        var count: usize = 0;
+        var it = std.mem.splitScalar(u8, out.bytes, 0);
+        while (it.next()) |one| {
+            if (one.len == 0) continue;
+            count += 1;
+            try std.testing.expectEqualStrings("odd\nname.tmp", one); // 통째로 한 답이다
+        }
+        try std.testing.expectEqual(@as(usize, 1), count);
+    }
+}
+
 /// 원격 SCM 판정자가 쓰는 **실물 SSH 하네스**. `tools/remote-scm/ssh_harness.sh` 가 env 로 준다.
 ///
 /// ⚠️ **없으면 건너뛴다 — 없는 것을 있다고 치고 통과시키지 않는다.** 개발자 기계에서 손으로 돌릴 때는
@@ -3996,7 +4127,7 @@ test "원격 커밋: 512 KiB 메시지가 stdin 으로 가고, hook 이 stderr �
     try std.testing.expect(out.stderr_bytes.len > 64 * 1024); // hook 이 실제로 쏟았다(겹침이 일어났다)
 
     // **바이트가 그대로 도착했나.** 원격이 loopback 이라 그 저장소를 직접 읽어 대조할 수 있다.
-    const head = try runArgvWithEnv(allocator, &.{ "/usr/bin/git", "-C", hx.repo, "log", "-1", "--format=%B" }, null, false);
+    const head = try runArgvWithEnv(allocator, &.{ "/usr/bin/git", "-C", hx.repo, "log", "-1", "--format=%B" }, null, false, null, false);
     defer allocator.free(head.bytes);
     try std.testing.expect(std.mem.startsWith(u8, head.bytes, "RS4b-STDIN"));
     try std.testing.expect(head.bytes.len >= big.len - 2); // 잘리지 않았다
@@ -4148,7 +4279,7 @@ test "원격 읽기 실패: git 이 없는 것과 연결이 끊긴 것을 가른
         &argv_buf,
         "'sh' '-c' 'exit 127'",
     ).?;
-    try std.testing.expectError(error.ExitCommandNotFound, runArgvWithEnv(allocator, missing, null, true));
+    try std.testing.expectError(error.ExitCommandNotFound, runArgvWithEnv(allocator, missing, null, true, null, false));
     // 그리고 `runOn` 이 그것을 **이야기로 바꾼다** — 두 조각을 따로 세야 「원격을 못 만든다」는 사정이
     // 규칙 자체를 안 보는 핑계가 되지 않는다.
     try std.testing.expectEqual(@as(anyerror, error.RemoteGitMissing), mapRemoteExitError(error.ExitCommandNotFound));
@@ -4161,12 +4292,12 @@ test "원격 읽기 실패: git 이 없는 것과 연결이 끊긴 것을 가른
     //    화면에 「원격에 git 을 깔라」고 적으면 사용자는 **엉뚱한 기계**를 손본다.
     try std.testing.expectError(
         error.GitFailed,
-        runArgvWithEnv(allocator, &.{"/definitely/not/a/binary"}, null, false),
+        runArgvWithEnv(allocator, &.{"/definitely/not/a/binary"}, null, false, null, false),
     );
     // 같은 명령을 **원격 해석으로** 부르면 그때는 이름이 붙는다 — 갈리는 것은 그 스위치 하나다.
     try std.testing.expectError(
         error.ExitCommandNotFound,
-        runArgvWithEnv(allocator, &.{"/definitely/not/a/binary"}, null, true),
+        runArgvWithEnv(allocator, &.{"/definitely/not/a/binary"}, null, true, null, false),
     );
 
     // ⑶ **원격 파일 읽기(diff 오른쪽)도 같은 이름을 받는다**(적대적 검증 1회차). `runOn` 만 배선하면
@@ -4178,7 +4309,7 @@ test "원격 읽기 실패: git 이 없는 것과 연결이 끊긴 것을 가른
         const fr = git_command.buildRemoteFileRead("/etc/hosts", dead, &fr_buf, &fr_cmd).?;
         try std.testing.expectError(
             error.ExitTransportFailed,
-            runArgvWithEnv(allocator, fr, null, true),
+            runArgvWithEnv(allocator, fr, null, true, null, false),
         );
     }
 

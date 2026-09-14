@@ -70,6 +70,7 @@ renderer, storage, platform interop는 VT 명세처럼 하나의 공개 표준�
 | libvterm | MIT | `brew install libvterm` (또는 배포판 패키지) | ✅ CI 강제(매 푸시/PR) + 로컬 opt-in (`mise run oracle-ext`) |
 | Ghostty `libghostty-vt` | MIT | `git clone --depth 1 https://github.com/ghostty-org/ghostty.git references/ghostty` 후 `mise exec zig@0.15.2 -- zig build -Demit-lib-vt=true` | ✅ 로컬 opt-in만 (`mise run oracle-ghostty`, 무거운 빌드라 CI 제외). golden 화면 비교. reflow 비교 경로(shim `maru_ghostty_dump_resize`)도 있으나, Maru가 커서 줄 reflow를 생략(xterm.js식)해 libghostty-vt와 분기하므로 현재 skip — 커서 없는 줄 reflow 검증으로 확장 시 재활성화. Ghostty의 셸 통합(OSC 133 semantic_prompt) reflow 처리도 동작 참고함 |
 | Alacritty `alacritty_terminal` | Apache-2.0 | `tests/oracle/alacritty-dumper`에서 `cargo build --release` (Rust 툴체인) | ✅ CI 강제(매 푸시/PR) + 로컬 opt-in (`mise run oracle-alacritty`) |
+| kitty(클라이언트) | GPL-3.0 — **소스 금지, 와이어만** | `brew install --cask kitty` (2026-09-14 설치됨, `/Applications/kitty.app/Contents/MacOS/kitten`) | 📡 **바이트 관측 전용.** `kitten icat` 을 PTY 하네스 안에서 돌려 **그 프로그램이 실제로 보내는 escape** 를 뜬다 — 위 "허용한다"의 *"reference terminal을 실행해 escape 처리 결과를 비교"* 에 해당한다. **소스는 읽지 않는다**(copyleft). kitty graphics 매체 전송 실측이 이 방법으로 나왔다 — [터미널 입력·프로토콜 계획](plans/terminal-input-and-protocols.md) §전송 매체 |
 | xterm.js | MIT | `git clone --depth 1 https://github.com/xtermjs/xterm.js.git references/xterm.js` | 📖 동작/코드 레퍼런스(headless oracle 아님). resize reflow에서 **커서가 있는 줄을 건드리지 않는**(`reflowCursorLine=false`) 방식을 참고했다(셸이 SIGWINCH로 그 줄을 다시 그림). 동작 비교만 — 코드 미복사 |
 
 ## 기능 동작 레퍼런스 (터미널 코어 밖 — clean-room, 코드 미복사)

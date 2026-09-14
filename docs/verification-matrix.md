@@ -602,9 +602,10 @@ Session host IME 시각 증거는 현재 `CR6d-v2a 제품 preedit 픽셀`과 `CR
 `firstRect` screen rect를 한 receipt에 결속한다. v2b는 실제 Apple Korean IME 후보 목록과 anchor의 화면 관계를
 OS capture로 증명한다. v2a는 v2b를 대신하지 않으며, v2b의 Screen Recording 권한·잠금 해제 WindowServer·exact
 frontmost PID 부재는 `not_provisioned`다. v2a의 첫-key 전/첫-marked 뒤 one-shot capture 생산자,
-strict JSON receipt와 별도 PPM 판정 실행 파일은 구현됐고 순수 판정·Swift type-check·경계 gate를 통과했다. 다만
-실제 제품 통과는 잠금 해제된 WindowServer에서 exact Maru PID가 frontmost인 회차가 아직 없어 환경 의존 검증
-대기다(2026-09-14 회차는 frontmost `loginwindow`라 `global-keyboard-focus` RED, capture/receipt 0). v2b는 구현 전이다.
+strict JSON receipt와 별도 PPM 판정 실행 파일은 구현됐고 순수 판정·Swift type-check·경계 gate를 통과했다.
+2026-09-14 잠금 해제된 exact-frontmost Maru 제품 회차도 recovery 2/input 4, historical·IME·clipboard 각 1,
+marked 8/insert 2, 동일 runtime·surface와 generation 4→5를 결속한 두 960×600 PPM의 독립 판정까지 green이다.
+그 전 잠긴 회차는 frontmost `loginwindow`라 `global-keyboard-focus` RED였고 통과 증거에서 제외했다. v2b는 구현 전이다.
 
 renderer capability의 현재 검증 계약은 `editor_epoch`를 포함한 `RendererCapability` 6-field 공용 alias이며, epoch를 포함한 어느 필드든 stale이면 fragment 재사용·DOM 높이 변경이 0이어야 한다.
 

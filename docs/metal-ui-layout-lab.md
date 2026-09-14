@@ -89,6 +89,14 @@ flowchart TD
   reveal, filesystem, provider 실행을 절대 호출하지 않는다.
 - macOS Metal Lab smoke는 drawable readback PPM, PR 첨부용 PNG, machine-readable
   summary를 `zig-out/maru-macos-chrome-lab/<scenario>.{ppm,png,json}`에 남긴다.
+  ⚠️ **Lab의 lowering은 `.quad`만 내린다 — `.fill`은 그림에 안 나온다.** 컴포넌트가 행 배경·선택
+  강조를 `.fill`로 내면 그 캡처에는 **글자만** 남는다(제품은 `metal_lowering`이 `.fill`을 셀 배경으로
+  칠한다). 그래서 Lab 골든이 고정할 수 있는 것은 **글자의 자리와 존재**이고, 「상자가 얼마나 넓은가」
+  「어느 행이 강조됐는가」는 **물을 수 없다** — 2026-09-15에 드롭다운 시나리오를 세우며 뮤테이션으로
+  실측했다(`@max(box_w, anchor.w)`를 지워도, 선택 행을 옮겨도 골든이 **통과한다**). **랩의 한계이지
+  제품 결함이 아니므로** 그 계약은 컴포넌트 판정자가 지킨다. 새 시나리오의 계약 문구를 적을 때
+  **그림이 답할 수 있는 것만** 적는다.
+
   **summary의 `viewport_backing_px`는 그 장면이 실제로 쓴 창 크기다**(`viewportFor`) —
   전역 기본값이 아니다. 2026-09-15까지는 전역 상수를 그대로 찍어, 1200px로 그린
   `editor-merge-panes`의 JSON이 480이라 적혀 있었다(같은 파일의 `readback.width`와 어긋난

@@ -6058,6 +6058,26 @@ pub fn build(b: *std.Build) void {
     atlas_lookup_cost_step.dependOn(&run_atlas_lookup_cost.step);
     boundary_step.dependOn(&run_atlas_lookup_cost.step);
 
+    // 새 터미널 spawn 이 셀 픽셀을 실어 보내는가. 안 실으면 ws_xpixel 이 0 이고, 뜨자마자 크기를 읽는
+    // 자식(이미지 TUI)이 기본값으로 굳는다 — 뒤늦게 보내도 자식은 다시 묻지 않는다.
+    const spawn_cell_px_step = b.step(
+        "test-spawn-cell-pixels",
+        "Spawning a terminal carries cell pixel size so the child can read it immediately",
+    );
+    const spawn_cell_px_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/spawn_cell_pixels_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_spawn_cell_px = b.addRunArtifact(spawn_cell_px_tests);
+    run_spawn_cell_px.addArg("--maru-expect-tests=1");
+    run_spawn_cell_px.addArg("--maru-expect-passed=1");
+    run_spawn_cell_px.setCwd(b.path("."));
+    spawn_cell_px_step.dependOn(&run_spawn_cell_px.step);
+    boundary_step.dependOn(&run_spawn_cell_px.step);
+
     // 호스트 어댑터 확보 실패가 «어디서·왜» 였는지 남기는가. 아홉 자리가 익명이라 attach_site=- 만 보였다.
     const restore_host_site_step = b.step(
         "test-restore-host-site",

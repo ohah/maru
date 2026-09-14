@@ -2894,6 +2894,10 @@ pub const RuntimeManager = struct {
                 .hook_instance = hook_instance,
                 .hook_pane = hook_pane,
                 .size = size,
+                // spawn 시점에 winsize 픽셀 필드를 채운다 — 뜨자마자 크기를 읽는 자식(이미지 TUI)이
+                // 첫 프레임을 맞게 그리려면 이 값이 **그때** 있어야 한다.
+                .cell_width_px = params.cell_width_px,
+                .cell_height_px = params.cell_height_px,
             },
             .size = size,
             .queue_capacity = default_queue_capacity,

@@ -8823,6 +8823,9 @@ fn buildSpawnParams(
         .pane_id = pane_id,
         .cols = size.cols,
         .rows = size.rows,
+        // 셀 픽셀을 spawn 에 싣는다 — 0 이면 «모른다» 로 host 가 기존 동작을 한다.
+        .cell_width_px = request.cell_width_px,
+        .cell_height_px = request.cell_height_px,
         .runtime_config = if (initial_config) |config| coreConfigToSpawnWire(config) else null,
         .notification_config = notification,
     }) catch return error.OutOfMemory;
@@ -8884,6 +8887,9 @@ test "remote runtime: spawn wire preserves extended SpawnRequest fields" {
         .shell_integration = .{ .assets_dir = "/tmp/maru-zdotdir" },
         .ssh_integration_bin = "/Applications/Maru.app/Contents/MacOS/maru",
         .pane_id = 0x1234,
+        // 이미지 프로토콜 자식이 **뜨자마자** 읽는 값이라 spawn 에 실려야 한다(ws_xpixel/ws_ypixel).
+        .cell_width_px = 9,
+        .cell_height_px = 18,
     };
     var palette: [16]?terminal.Rgb = .{null} ** 16;
     palette[0] = .{ .r = 0x11, .g = 0x22, .b = 0x33 };
@@ -8916,6 +8922,12 @@ test "remote runtime: spawn wire preserves extended SpawnRequest fields" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"foreground\":11189196") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"cell_width\":9,\"cell_height\":18") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"max_scrollback\"") == null); // host decoder와 다른 내부 필드명 누출 금지.
+    // **spawn 에 셀 픽셀이 실린다.** 이것이 host 에서 PTY winsize 의 `ws_xpixel`/`ws_ypixel` 이 되고,
+    // 뜨자마자 크기를 읽는 자식(이미지 TUI)이 첫 프레임을 맞게 그리는 유일한 이른 경로다. 빠지면 자식은
+    // `CSI 14t` 로 넘어가는데, 그때 host 코어의 셀 메트릭은 아직 0 이라 코어가 침묵하고 자식은 기본값으로
+    // 굳는다 — 뒤늦게 `set_cell_metrics` 를 보내도 자식은 다시 묻지 않는다(실측 2026-09-14).
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"cell_width_px\":9") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"cell_height_px\":18") != null);
 }
 
 fn seedMetadataTestObservation(

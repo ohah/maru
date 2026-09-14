@@ -428,6 +428,17 @@ pub fn createTerm(
     const id = self.surface_ids.next(); // 앱 전역 allocator에서 발급. surface_id·pty_id 동일 값(서로 다른 네임스페이스라 무방), 재사용 안 함
     var req = request;
     req.pane_id = id; // 컨트롤 플레인 self selector는 계속 surface.id
+    // 셀 픽셀을 **여기서** 싣는다. `spawnRequest` 는 자유 함수라 세션의 셀 메트릭에 닿지 못하고, 그 호출부가
+    // 다섯 곳이라 거기서 채우면 새 호출부가 조용히 0 을 보낸다 — 두 spawn(원격·in-process 폴백)이 모두
+    // 지나는 이 길목 하나에서 채워 빠뜨릴 자리를 없앤다.
+    //
+    // **왜 spawn 시점이어야 하나.** 이미지 프로토콜을 쓰는 자식은 뜨자마자 크기를 묻는다. `ws_xpixel/ws_col`
+    // 이 0 이면 `CSI 14t` 로 넘어가는데, host 코어의 셀 메트릭이 0 이면 코어는 **의도적으로 침묵**하고
+    // (0 을 답하면 기하가 통째로 깨진다) 자식은 짧은 제한시간 뒤 기본값으로 굳는다. 뒤늦게 보내도 소용없다 —
+    // 자식은 **시작할 때 한 번만** 묻는다(실측 2026-09-14: 2560px pane 에서 브라우저 뷰포트가 1083px 로 굳어
+    // 확대·가로스크롤·좁은 레이아웃이 한꺼번에 났고, 리사이즈해도 안 풀렸다).
+    req.cell_width_px = self.cell_width_px;
+    req.cell_height_px = self.cell_height_px;
     // 훅 로그 경로의 두 칸(docs/agent-hooks.md §4). 인스턴스 칸은 `surface.id` 가 **프로세스마다 1 부터**라
     // maru 를 두 개 띄우면 두 인스턴스의 첫 pane 이 같은 파일 이름을 갖는 문제를 가른다. pane 칸은
     // control-plane selector(`MARU_PANE_ID`)와 **갈라진 변수**다 — 같은 값(surface.id)을 싣지만 의미가 다르고,

@@ -15435,15 +15435,16 @@ pub const AppSession = struct {
         // codex 도 우리가 깐다: 신뢰 항목까지 원격 `maru` 가 직접 쓰므로(로컬과 같은 순수 판정)
         // 그 기계에서 사용자가 TUI 를 눌러야 하는 일이 없다 — 원격 세션에는 그 TUI 를 볼 사람이 없으니
         // 그것이 곧 「훅이 영영 안 돈다」였다.
+        // ⚠️ **둘 다 「지금만」인 실패다** — 명령 조립은 할당, spawn 은 fork/exec·fd 예산이다. 예전에는
+        // 굳혀서(`stopped`) 그 목적지가 **그 Term 들이 전부 사라질 때까지** 죽었다. 계획 §RA5-b 가 정한
+        // 「두 실패를 가른다」를 여기도 지킨다 — #3374 가 `controlSocketPath` 쪽만 고치고 남긴 자리다.
         const cmd = ah.remoteShellCommandAll(self.allocator, .install, hc.remote_log_dir_rel) catch {
-            host.install_done = true;
-            host.stopped = true;
+            self.scheduleStreamerRetry(ctx.dest, host, "원격 훅 설치 명령을 못 만들었다");
             return;
         };
         defer self.allocator.free(cmd);
         const st = ssh_upload.spawnRemoteCommand(self.allocator, ctx.ctl, ctx.dest, cmd) catch {
-            host.install_done = true;
-            host.stopped = true;
+            self.scheduleStreamerRetry(ctx.dest, host, "원격 훅 설치를 못 띄웠다");
             return;
         };
         setNonBlockingFd(st.out_fd);
@@ -15672,6 +15673,35 @@ pub const AppSession = struct {
         if (host.stopped) return;
         // 설치가 아직이면 그것부터 훑는다 — 끝나면 그 안에서 스트리머가 뜬다.
         if (!host.install_done) {
+            // **설치를 못 띄웠으면 다시 띄운다.** `spawnRemoteHookInstall` 은 `ctx`(dest + **ctl**)를 받는데
+            // 이 경로에는 `ctl` 이 없어 `HOME` 에서 다시 만든다 — 그 배선이 없어서 #3374 가 이 자리를
+            // 남겼었다. 예약이 없거나 아직 때가 아니면 그대로 기다린다.
+            if (host.install == null) {
+                if (host.retry_at_ms == 0 or now_ms < host.retry_at_ms) return;
+                host.retry_at_ms = 0; // 예약을 먼저 지운다 — 아래에서 굳히면 매 tick 다시 오면 안 된다
+                const home = std.c.getenv("HOME") orelse {
+                    std.log.scoped(.agent).warn("HOME 이 없어 원격 훅 설치를 다시 못 띄운다 dest={s}", .{dest});
+                    host.stopped = true;
+                    return;
+                };
+                const ctl = maru.cli.ssh.controlSocketPath(self.allocator, std.mem.span(home), dest) catch |err| {
+                    if (controlPathErrorIsPermanent(err)) {
+                        std.log.scoped(.agent).warn("control socket 경로가 규격을 넘는다 — 원격 배지는 안 선다 dest={s}", .{dest});
+                        host.stopped = true;
+                        return;
+                    }
+                    self.scheduleStreamerRetry(dest, host, "control socket 경로를 못 만들었다");
+                    return;
+                };
+                defer self.allocator.free(ctl);
+                const dest_buf = self.allocator.dupe(u8, dest) catch {
+                    self.scheduleStreamerRetry(dest, host, "목적지 이름을 못 담았다");
+                    return;
+                };
+                defer self.allocator.free(dest_buf);
+                self.spawnRemoteHookInstall(host, .{ .dest = dest_buf, .ctl = ctl });
+                return;
+            }
             self.pumpRemoteHookInstall(dest, host, now_ms);
             return;
         }
@@ -24802,6 +24832,44 @@ test "RS1: 규격을 넘는 경로는 제품 경로에서도 굳는다 — 헬�
     // 「영원히」쪽이므로 **굳고**, 재시도 예산은 안 쓴다.
     try std.testing.expect(host.stopped);
     try std.testing.expectEqual(@as(u8, 0), host.retries);
+}
+test "RS2: 예약이 없으면 설치를 다시 안 띄운다 — 매 tick ssh 를 띄우면 접속 폭주다" {
+    // 설치 실패를 **굳히지 않고**(`stopped`) 백오프 재시도로 바꿨다(#3374 가 `controlSocketPath` 쪽만
+    // 고치고 남긴 자리). 그러면 **폭주를 막는 가드**가 그만큼 중요해진다 — 예약이 없거나 아직 때가
+    // 아니면 그대로 기다려야지, 매 tick `ssh` 를 띄우면 그것이 `stopped` 의 원래 목적이던 접속 폭주다.
+    //
+    // ⚠️ **실 프로세스를 안 띄우는 쪽으로 잰다.** 실패 경로를 직접 태우면 판정자가 `ssh` 를 띄우고,
+    // 그것이 CI 에서 다른 스모크와 부딪친다(§⒞ 축).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    var host: AppSession.RemoteAgentHost = .{};
+    defer host.pending.deinit(a);
+    defer host.install_out.deinit(a);
+    defer host.cursors.deinit(a);
+    host.install_done = false; // 설치가 아직이고
+    host.install = null; // 띄운 것도 없고
+    host.retry_at_ms = 0; // 예약도 없다
+
+    session.drainRemoteAgentHost("openClaw", &host, 1_000);
+    try std.testing.expect(host.install == null); // 안 띄웠다
+    try std.testing.expectEqual(@as(u8, 0), host.retries); // 예산도 안 썼다
+
+    // 예약이 있어도 **때가 아니면** 안 띄운다.
+    host.retry_at_ms = 9_999;
+    session.drainRemoteAgentHost("openClaw", &host, 1_000);
+    try std.testing.expect(host.install == null);
+    try std.testing.expectEqual(@as(u64, 9_999), host.retry_at_ms); // 예약을 지우지도 않았다
 }
 test "RS1: control socket 경로 실패는 두 갈래다 — 길이는 영원, 할당은 지금만" {
     // 계획 §RA5-b 는 「두 실패를 반드시 가른다」고 정했다(`hello` 실패는 영구, EOF 는 재시도). 그런데

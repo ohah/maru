@@ -182,8 +182,12 @@ pub const Open = struct {
     pixels: []u8 = &.{},
     width: u32 = 0,
     height: u32 = 0,
-    /// 디코드를 이미 걸었나 — 매 프레임 다시 걸지 않기 위한 빗장.
-    submitted: bool = false,
+    /// 건 디코드의 generation(0 = 안 걸었다).
+    ///
+    /// ⚠️ **빗장만으로는 부족하다.** 예전에는 `submitted: bool` 하나였는데, 그러면 A 마커를 열어
+    /// 디코드를 걸고 → 닫고 → B 마커를 열었을 때 **A 의 결과가 B 에 붙는다**(워커는 취소를 모른다).
+    /// 갤러리가 `op.decoding == r.generation` 으로 가르는 것과 같은 이유다.
+    decode_generation: u64 = 0,
     /// 못 풀었다 — 다시 걸지 않는다(같은 파일은 다음에도 안 풀린다).
     failed: bool = false,
     /// **이 텍스처를 올렸나.** ⚠️ 프리뷰가 사라지는 **모든** 길에서 거짓으로 되돌려야 한다
@@ -415,4 +419,33 @@ test "MP1 배선: 경로만 든 항목은 예산을 거의 안 문다 — 드롭
     try onImagePasted(&st, testing.allocator, 7, &.{}, &.{}, try dup("/tmp/a.png"));
     try observe(&st, testing.allocator, 7, &.{1});
     try testing.expectEqual(@as(usize, 0), st.stagingFor(7).?.bytes);
+}
+
+test "MP1 배선: 닫고 다른 마커를 열면 옛 디코드 generation 이 안 맞는다 (A29)" {
+    var st: State = .{};
+    defer st.deinit(testing.allocator);
+    try onImagePasted(&st, testing.allocator, 7, &.{}, try dup("A"), &.{});
+    try observe(&st, testing.allocator, 7, &.{1});
+    try onImagePasted(&st, testing.allocator, 7, &.{1}, try dup("B"), &.{});
+    try observe(&st, testing.allocator, 7, &.{ 1, 2 });
+
+    const h1: markers_mod.Hit = .{ .row = 3, .start_col = 2, .end_col = 12, .n = 1 };
+    const h2: markers_mod.Hit = .{ .row = 3, .start_col = 13, .end_col = 23, .n = 2 };
+    var open = toggle(&st, null, 7, h1) orelse return error.TestUnexpectedResult;
+    open.decode_generation = 11; // #1 의 디코드를 걸었다
+    const next = toggle(&st, open, 7, h2) orelse return error.TestUnexpectedResult;
+    // 다른 마커로 옮겼으면 generation 이 비어 있다 — 옛 결과(11)가 도착해도 받지 않는다.
+    try testing.expectEqual(@as(u64, 0), next.decode_generation);
+    try testing.expectEqual(@as(u32, 2), next.n);
+}
+
+test "MP1 배선: surface 가 죽으면 그 스테이징이 남지 않는다 (A30 — 제품 경로가 부르는 함수)" {
+    var st: State = .{};
+    defer st.deinit(testing.allocator);
+    try onImagePasted(&st, testing.allocator, 7, &.{}, try dup("A"), try dup("/tmp/a.png"));
+    try observe(&st, testing.allocator, 7, &.{1});
+    try onImagePasted(&st, testing.allocator, 9, &.{}, try dup("B"), &.{});
+    st.dropSurface(testing.allocator, 7);
+    try testing.expect(st.stagingFor(7) == null);
+    try testing.expectEqual(@as(usize, 1), st.pending.items.len); // 9 번 것은 안 건드린다
 }

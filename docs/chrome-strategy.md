@@ -217,6 +217,10 @@ pub fn handle(k: InputEvent.KeyEvent, state: *State) ?Action;                   
 
 **edge_gap은 네 방향 모두다**(2026-09-14 · 사용자 결정). 처음에는 우·하만 띄웠는데 그것은 `context_menu`가 제보로 고칠 때의 **실측 사례가 우단이었기** 때문이지 좌·상이 달라서가 아니었다. 한쪽만 띄우면 같은 팝업이 어느 가장자리에 닿느냐에 따라 **테가 있다 없다** 해서 더 이상하다.
 
+**그 네 방향을 보는 그림은 둘이다**(2026-09-15). 한 캡처로는 못 본다 — 앵커가 한 자리면 그 자리가 닿는 두 변만 clamp 가 걸리기 때문이다. `context-menu-send-longest-row`(앵커 24,24 · 480px)가 **좌·상**을, `context-menu-bottom-right-gap`(앵커를 뷰포트에서 계산 · 1200px)이 **우·하**를 증언한다. 실측으로 겹치지 않는 것을 확인했다: 좌·상 gap 을 없애는 뮤테이션은 우하단 시나리오의 bbox 를 **한 픽셀도** 안 바꿨고, 우·하 gap 을 없애는 뮤테이션은 좌상단 캡처가 아니라 **이쪽만** 빨갛게 했다(2,022 px · 4,530 px).
+
+⚠️ **우·하는 오랫동안 그림이 없었다.** 네 방향으로 넓힌 뒤에도 캡처가 전부 앵커 (24, 24) 라 `right_bound`·`bottom_bound` 는 판정자만 지키고 있었다 — 그 둘이 뒤바뀌거나 한쪽이 0 이 되어도 골든은 조용했다. 넓은 창(1200px)을 쓰는 것도 계약의 일부다: 480px 에서 한 셀은 폭의 1.7% 라 **틈이 과장돼 읽히고**, 「넓은 창에서 어색한가」를 사람 기억으로만 답하게 된다.
+
 박스 기하(폭 clamp·중앙배치·soft-lock 가드·배경 quad/테두리·콘텐츠 셀 좌표)는 `chrome/components/modal_box.zig` **공유 프리미티브**가 단일 출처로 제공한다 — notice(줄 텍스트), confirm(메시지+버튼), 향후 모달이 `layout`/`frame`/`text`/`fillCells`/`centerX`/`rowY`로 재사용한다(각 컴포넌트는 콘텐츠 구성만 소유). 폭은 `overlay_input.displayCols`(EAW 표시폭, placeText와 동일 규약)로 재 한글/CJK가 안 잘린다. 전역 모달·palette의 `ChromeProps.workspace`는 `dock_layout.Geometry.workspace`, 즉 사이드바·titlebar strip만 제외하고 terminal·divider·파일 도크를 모두 포함한 작업영역이다. 도크가 열려도 terminal-only `termRect`로 중앙을 계산하지 않으며 right/bottom 전환에서 같은 전체 작업영역 중심을 유지한다. find처럼 특정 surface에 귀속된 오버레이만 기존 `active_pane` 앵커를 쓴다.
 
 `CellMetrics.workspace_present`는 실제 zero-size 작업영역과 옛 호출자의 미지정 값을 구분한다. production `buildCellMetrics`는 크기와 무관하게 이를 true로 투영하고, 권위 workspace의 폭이나 높이가 0이면 modal/palette는 legacy backing으로 되돌아가지 않고 그 frame을 생략한다.

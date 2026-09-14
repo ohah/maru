@@ -89,6 +89,12 @@ flowchart TD
   reveal, filesystem, provider 실행을 절대 호출하지 않는다.
 - macOS Metal Lab smoke는 drawable readback PPM, PR 첨부용 PNG, machine-readable
   summary를 `zig-out/maru-macos-chrome-lab/<scenario>.{ppm,png,json}`에 남긴다.
+  **summary의 `viewport_backing_px`는 그 장면이 실제로 쓴 창 크기다**(`viewportFor`) —
+  전역 기본값이 아니다. 2026-09-15까지는 전역 상수를 그대로 찍어, 1200px로 그린
+  `editor-merge-panes`의 JSON이 480이라 적혀 있었다(같은 파일의 `readback.width`와 어긋난
+  채로). **산출물이 자기 조건을 틀리게 말하면 그것을 읽는 사람도 판정자도 같이 속는다** —
+  `perf` 하네스가 「재는 쪽이 자기 조건을 증명한다」를 세운 것과 같은 축이라, 순수 판정자가
+  480이 아닌 값으로 그 자리를 못 박는다.
   PPM은 lossless pixel oracle이고 PNG는 같은 readback bytes에서 만들며, PR 본문에서
   인라인으로 읽을 수 있는 capture다. exact golden이 가능한 shape/clip/background
   영역은 pixel diff로, font raster가 달라질 수 있는 text 영역은 mask와 rect/readback

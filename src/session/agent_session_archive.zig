@@ -18,6 +18,111 @@ pub const Provider = enum {
     }
 };
 
+/// 재개할 때 **원래 세션의 권한 모드를 그대로 되살리기 위해** transcript 에서 읽어 두는 provider-native 값.
+///
+/// 중립 3단계로 뭉개지 않는다. Claude 는 축이 하나(`permissionMode`)고 Codex 는 둘(승인 정책 · 샌드박스)이라,
+/// 뭉개면 되살린 세션이 원래와 **다른 권한**으로 뜬다 — 그게 이 값이 존재하는 이유 자체를 없앤다.
+///
+/// 모르는 철자는 `.unknown` 으로 떨어뜨리고 플래그를 **안 붙인다**. transcript 문자열을 그대로 argv 로
+/// 흘리면 ① provider 가 철자를 바꾸는 날 재개가 통째로 실패하고 ② transcript 텍스트가 명령 인자가 되어
+/// [agent-session-list.md §5](../../docs/agent-session-list.md) 의 "parse 한 내용은 실행 인자로 절대 넣지
+/// 않는다" 가 깨진다. 여기서 enum 으로 받으면 argv 에 나가는 것은 **이 모듈의 리터럴**뿐이다.
+pub const Permission = union(enum) {
+    /// transcript 가 모드를 한 번도 말하지 않았다(옛 파일 · 손상 · 해당 줄이 잘림). provider 기본값으로 연다.
+    unknown,
+    claude: ClaudeMode,
+    codex: CodexPolicy,
+};
+
+/// Claude Code `--permission-mode` 의 값. 필드 이름을 **CLI 철자 그대로** 둔다 — transcript 가 적는 철자와
+/// CLI 가 받는 철자가 같아서(실측 2026-09-14), 사이에 번역표를 두면 쓸모 없이 그 표만 낡는다.
+pub const ClaudeMode = enum {
+    default,
+    acceptEdits,
+    auto,
+    bypassPermissions,
+    manual,
+    dontAsk,
+    plan,
+
+    pub fn fromTranscript(text: []const u8) ?ClaudeMode {
+        return std.meta.stringToEnum(ClaudeMode, text);
+    }
+
+    /// `--permission-mode` 에 실을 값. `default` 만 `null` 이다 — provider 기본값이라 붙일 이유가 없고,
+    /// `claude --help` 의 choices 목록에도 없다(현재 판은 받아 주지만, 문서에 없는 관용에 기대면 그게
+    /// 사라지는 날 재개가 죽는다). 붙이지 않는 쪽이 같은 결과이면서 약속에만 기댄다.
+    pub fn flagValue(self: ClaudeMode) ?[]const u8 {
+        return switch (self) {
+            .default => null,
+            .acceptEdits => "acceptEdits",
+            .auto => "auto",
+            .bypassPermissions => "bypassPermissions",
+            .manual => "manual",
+            .dontAsk => "dontAsk",
+            .plan => "plan",
+        };
+    }
+};
+
+/// Codex rollout 의 `turn_context` 가 매 턴 싣는 두 축. 한쪽만 읽힐 수 있으므로 각각 optional 이다 —
+/// 못 읽은 축에 기본값을 **채워 넣으면** 그 순간 "기록된 모드를 그대로" 가 거짓이 된다.
+pub const CodexPolicy = struct {
+    approval: ?CodexApproval = null,
+    sandbox: ?CodexSandbox = null,
+};
+
+/// `codex --ask-for-approval` 의 값. rollout 은 하이픈(`on-request`)으로 적고 Zig enum 은 하이픈을 못 써서
+/// 양방향 표가 불가피하다. 아래 왕복 테스트가 두 방향이 갈리는 것을 막는다.
+pub const CodexApproval = enum {
+    untrusted,
+    on_failure,
+    on_request,
+    never,
+
+    pub fn fromTranscript(text: []const u8) ?CodexApproval {
+        if (std.mem.eql(u8, text, "untrusted")) return .untrusted;
+        if (std.mem.eql(u8, text, "on-failure")) return .on_failure;
+        if (std.mem.eql(u8, text, "on-request")) return .on_request;
+        if (std.mem.eql(u8, text, "never")) return .never;
+        return null;
+    }
+
+    pub fn flagValue(self: CodexApproval) []const u8 {
+        return switch (self) {
+            .untrusted => "untrusted",
+            .on_failure => "on-failure",
+            .on_request => "on-request",
+            .never => "never",
+        };
+    }
+};
+
+/// `codex --sandbox` 의 값. rollout 은 `sandbox_policy.type` 에 같은 철자를 적는다.
+///
+/// `workspace_write` 의 하위 설정(쓰기 가능 root 목록 · 네트워크 허용)까지는 되살리지 못한다 — CLI 플래그
+/// 하나로 표현되지 않고 config 파일 축이다. 그 한계는 docs 가 소유한다.
+pub const CodexSandbox = enum {
+    read_only,
+    workspace_write,
+    danger_full_access,
+
+    pub fn fromTranscript(text: []const u8) ?CodexSandbox {
+        if (std.mem.eql(u8, text, "read-only")) return .read_only;
+        if (std.mem.eql(u8, text, "workspace-write")) return .workspace_write;
+        if (std.mem.eql(u8, text, "danger-full-access")) return .danger_full_access;
+        return null;
+    }
+
+    pub fn flagValue(self: CodexSandbox) []const u8 {
+        return switch (self) {
+            .read_only => "read-only",
+            .workspace_write => "workspace-write",
+            .danger_full_access => "danger-full-access",
+        };
+    }
+};
+
 pub const max_title_bytes: usize = 120;
 pub const max_summary_bytes: usize = 240;
 pub const max_cwd_bytes: usize = 1024;
@@ -43,6 +148,10 @@ pub const Parsed = struct {
     /// mtime은 대화 외의 이유(복사·도구의 메타 갱신·백업 복원)로도 밀린다. 실측(2026-08-08, 로컬 이력
     /// 362개)에서 mtime으로 정렬하면 257개(70%)가 제자리가 아니었고 Claude 쪽 최대 차이는 144시간이었다.
     last_activity_ns: i96 = 0,
+    /// 이 세션이 **마지막으로 돌던 권한 모드**. 재개 argv 가 이것을 그대로 되살린다(`resumeArgv`).
+    /// 세션 도중에 모드가 바뀔 수 있으므로(실측: 한 파일 안에 `default`·`plan`·`bypassPermissions` 가
+    /// 섞인다) "마지막에 본 값"이 규칙이다 — 재개는 그 다음 턴을 잇는 것이지 첫 턴을 잇는 것이 아니다.
+    permission: Permission = .unknown,
 
     pub fn deinit(self: *Parsed, allocator: std.mem.Allocator) void {
         allocator.free(self.session_id);
@@ -59,6 +168,7 @@ pub const Parsed = struct {
         // 한다 — 캐시 히트와 부분 진행 발행이 모두 이 clone을 지나므로, 빠뜨리면 그 값만 조용히 0이
         // 된다. 아래 "clone은 모든 필드를 보존한다" 테스트가 comptime으로 전 필드를 훑어 막는다.
         out.last_activity_ns = self.last_activity_ns;
+        out.permission = self.permission;
         return out;
     }
 };
@@ -105,6 +215,9 @@ pub const Parser = struct {
     /// 시간 순이라는 보장이 없고(요약·메타 줄이 뒤에 붙는 형식이 있다), "마지막 활동"은 순서가 아니라
     /// 시각으로 정해야 한다.
     last_activity_ns: i96 = 0,
+    /// **마지막에 본** 권한 모드(`Parsed.permission` 참조). 최댓값이 아니라 마지막 값인 것이
+    /// `last_activity_ns` 와 다른 점이다 — 모드에는 순서 말고 비교할 축이 없다.
+    permission: Permission = .unknown,
 
     pub fn init(allocator: std.mem.Allocator, provider: Provider) Parser {
         return .{ .allocator = allocator, .provider = provider };
@@ -150,6 +263,12 @@ pub const Parser = struct {
         if (string(obj.get("custom-title")) orelse string(obj.get("customTitle")) orelse string(obj.get("title"))) |value| {
             if (value.len > 0) self.title = copyInto(&self.title_buf, value);
         }
+        // 권한 모드는 **user 줄에만** 실린다. 그래서 키가 없는 줄은 값을 건드리지 않고, 키가 있는데
+        // 모르는 철자면 `.unknown` 으로 **되돌린다** — 옛 값을 남기면 provider 가 이름을 바꾼 뒤
+        // "그때 그 모드"라며 낡은 권한으로 재개하게 된다. 모르면 안 쓰는 쪽이 안전한 방향이다.
+        if (string(obj.get("permissionMode"))) |value| {
+            self.permission = if (ClaudeMode.fromTranscript(value)) |mode| .{ .claude = mode } else .unknown;
+        }
         const kind = string(obj.get("type")) orelse "";
         if (std.mem.eql(u8, kind, "ai-title")) {
             if (string(obj.get("aiTitle")) orelse string(obj.get("title")) orelse nestedString(obj, "message", "text")) |value| {
@@ -192,6 +311,15 @@ pub const Parser = struct {
         if (std.mem.eql(u8, kind, "turn_context")) {
             if (payload) |p| {
                 if (string(p.get("model"))) |value| self.model = copyInto(&self.model_buf, value);
+                // 두 축을 **이 줄에서 함께** 읽어 통째로 교체한다. 축을 따로 누적하면 승인 정책은 이번
+                // 턴 것이고 샌드박스는 지난 턴 것인 조합이 생길 수 있는데, 그런 턴은 실재하지 않았다.
+                self.permission = .{ .codex = .{
+                    .approval = if (string(p.get("approval_policy"))) |value| CodexApproval.fromTranscript(value) else null,
+                    .sandbox = if (object(p.get("sandbox_policy"))) |sandbox|
+                        if (string(sandbox.get("type"))) |value| CodexSandbox.fromTranscript(value) else null
+                    else
+                        null,
+                } };
             }
             return;
         }
@@ -218,6 +346,7 @@ pub const Parser = struct {
         const summary = if (self.last_user.len > 0) self.last_user else self.last_assistant;
         var parsed = try duplicateParsed(self.allocator, .claude, self.session_id, display_title, summary, self.cwd, false, self.model, self.count, true);
         parsed.last_activity_ns = self.last_activity_ns;
+        parsed.permission = self.permission;
         return parsed;
     }
 
@@ -227,9 +356,61 @@ pub const Parser = struct {
         const summary = if (self.last_user.len > 0) self.last_user else self.last_assistant;
         var parsed = try duplicateParsed(self.allocator, .codex, self.session_id, title, summary, self.cwd, false, self.model, self.count, true);
         parsed.last_activity_ns = self.last_activity_ns;
+        parsed.permission = self.permission;
         return parsed;
     }
 };
+
+/// 재개 argv 가 가질 수 있는 최대 토큰 수 — `codex resume <id> --ask-for-approval <v> --sandbox <v>` 가 7 로
+/// 가장 길다. 버퍼 크기를 호출자가 직접 세지 않게 여기가 소유한다.
+pub const max_resume_argv: usize = 7;
+
+/// 이 세션을 **원래 권한 모드 그대로** 재개하는 provider-native argv 를 만든다.
+///
+/// 할당하지 않는다 — 호출자가 준 버퍼를 채우고 그 앞부분을 돌려준다. 그래서 실패 경로가 없고, 토큰은
+/// 전부 이 모듈의 정적 리터럴이거나 `parsed` 가 소유한 session id 뿐이다(§5: parse 한 내용은 실행 인자로
+/// 넣지 않는다 — session id 만이 예외이고 그건 provider 가 우리에게 준 식별자다).
+///
+/// 모드를 모르면(`.unknown`) 플래그를 **안 붙인다**. 그러면 provider 자신의 기본값으로 열리는데, 이는
+/// 이 기능이 생기기 전의 동작과 같다 — 새 정보가 없을 때 옛 동작으로 떨어지는 것이 안전한 방향이다.
+pub fn resumeArgv(parsed: *const Parsed, out: *[max_resume_argv][]const u8) [][]const u8 {
+    var n: usize = 0;
+    switch (parsed.provider) {
+        .claude => {
+            out[0] = "claude";
+            out[1] = "--resume";
+            out[2] = parsed.session_id;
+            n = 3;
+            if (parsed.permission == .claude) {
+                if (parsed.permission.claude.flagValue()) |value| {
+                    out[n] = "--permission-mode";
+                    out[n + 1] = value;
+                    n += 2;
+                }
+            }
+        },
+        .codex => {
+            out[0] = "codex";
+            out[1] = "resume";
+            out[2] = parsed.session_id;
+            n = 3;
+            if (parsed.permission == .codex) {
+                const policy = parsed.permission.codex;
+                if (policy.approval) |approval| {
+                    out[n] = "--ask-for-approval";
+                    out[n + 1] = approval.flagValue();
+                    n += 2;
+                }
+                if (policy.sandbox) |sandbox| {
+                    out[n] = "--sandbox";
+                    out[n + 1] = sandbox.flagValue();
+                    n += 2;
+                }
+            }
+        },
+    }
+    return out[0..n];
+}
 
 /// RFC 3339 UTC 시각(`YYYY-MM-DDTHH:MM:SS[.fff]Z`)을 Unix epoch 나노초로 바꾼다. 형태가 조금이라도
 /// 다르면 **추측하지 않고** null을 돌려 호출자가 mtime으로 폴백하게 한다 — 틀린 시각으로 정렬하느니
@@ -570,6 +751,9 @@ test "clone은 Parsed의 모든 필드를 보존한다" {
     var origin = try duplicateParsed(a, .codex, "s-1", "제목", "요약", "/repo", true, "gpt-x", 42, true);
     defer origin.deinit(a);
     origin.last_activity_ns = 1_234_567_890_123_456_789;
+    // 기본값(.unknown)으로 두면 clone 이 이 필드를 안 옮겨도 테스트가 통과한다 — 감시하려는 것이
+    // "옮겼는가"이므로 **기본값이 아닌 값**을 넣어야 한다.
+    origin.permission = .{ .codex = .{ .approval = .never, .sandbox = .danger_full_access } };
 
     var copy = try origin.clone(a);
     defer copy.deinit(a);
@@ -706,4 +890,136 @@ test "Claude title prefers explicit title then latest user summary" {
     try std.testing.expectEqualStrings("명시 제목", parsed.title);
     try std.testing.expectEqualStrings("마지막 요청", parsed.summary);
     try std.testing.expectEqualStrings("claude-test", parsed.model);
+}
+
+// 재개가 되살려야 하는 것은 세션 id 만이 아니다 — 권한 모드가 안 따라오면 `--dangerously-skip-permissions`
+// 로 돌던 세션이 매 명령마다 묻는 세션으로 되살아난다(반대로도 마찬가지고, 그쪽이 더 위험하다).
+// 아래 테스트들은 transcript 에서 그 모드를 읽는 규칙과, 그것이 argv 로 나가는 형태를 고정한다.
+
+test "Claude 권한 모드: 마지막 턴의 값이 이기고 argv 에 실린다" {
+    const a = std.testing.allocator;
+    const jsonl =
+        \\{"sessionId":"c-1","cwd":"/repo","type":"user","permissionMode":"default","message":{"role":"user","text":"첫 요청"}}
+        \\{"sessionId":"c-1","type":"assistant","message":{"role":"assistant","text":"답"}}
+        \\{"sessionId":"c-1","type":"user","permissionMode":"bypassPermissions","message":{"role":"user","text":"두 번째 요청"}}
+    ;
+    var parsed = (try parse(a, .claude, jsonl)).?;
+    defer parsed.deinit(a);
+    try std.testing.expectEqual(Permission{ .claude = .bypassPermissions }, parsed.permission);
+
+    var buf: [max_resume_argv][]const u8 = undefined;
+    const argv = resumeArgv(&parsed, &buf);
+    try std.testing.expectEqual(@as(usize, 5), argv.len);
+    try std.testing.expectEqualStrings("claude", argv[0]);
+    try std.testing.expectEqualStrings("--resume", argv[1]);
+    try std.testing.expectEqualStrings("c-1", argv[2]);
+    try std.testing.expectEqualStrings("--permission-mode", argv[3]);
+    try std.testing.expectEqualStrings("bypassPermissions", argv[4]);
+}
+
+test "Claude 권한 모드: default 는 플래그를 안 붙이고, 모르는 철자는 옛 값을 지운다" {
+    const a = std.testing.allocator;
+
+    // `default` 는 provider 기본값이라 붙일 이유가 없다. `claude --help` 의 choices 에도 없다.
+    const plain =
+        \\{"sessionId":"c-2","type":"user","permissionMode":"default","message":{"role":"user","text":"요청"}}
+    ;
+    var parsed = (try parse(a, .claude, plain)).?;
+    defer parsed.deinit(a);
+    var buf: [max_resume_argv][]const u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 3), resumeArgv(&parsed, &buf).len);
+
+    // provider 가 새 철자를 도입하면 우리는 그 세션의 모드를 **모르는 것**이다. 앞 줄에서 본 옛 값을
+    // 남기면 "그때 그 모드" 라며 틀린 권한으로 재개한다.
+    const renamed =
+        \\{"sessionId":"c-3","type":"user","permissionMode":"bypassPermissions","message":{"role":"user","text":"하나"}}
+        \\{"sessionId":"c-3","type":"user","permissionMode":"someFutureMode","message":{"role":"user","text":"둘"}}
+    ;
+    var future = (try parse(a, .claude, renamed)).?;
+    defer future.deinit(a);
+    try std.testing.expectEqual(Permission.unknown, future.permission);
+    try std.testing.expectEqual(@as(usize, 3), resumeArgv(&future, &buf).len);
+}
+
+test "Codex 권한 모드: turn_context 의 두 축을 함께 읽어 argv 에 싣는다" {
+    const a = std.testing.allocator;
+    const jsonl =
+        \\{"type":"session_meta","payload":{"id":"x-1","cwd":"/repo","thread_source":"user"}}
+        \\{"type":"turn_context","payload":{"model":"gpt-x","approval_policy":"on-request","sandbox_policy":{"type":"workspace-write"}}}
+        \\{"type":"event_msg","payload":{"type":"user_message","message":"요청"}}
+        \\{"type":"turn_context","payload":{"model":"gpt-x","approval_policy":"never","sandbox_policy":{"type":"danger-full-access"}}}
+    ;
+    var parsed = (try parse(a, .codex, jsonl)).?;
+    defer parsed.deinit(a);
+    try std.testing.expectEqual(
+        Permission{ .codex = .{ .approval = .never, .sandbox = .danger_full_access } },
+        parsed.permission,
+    );
+
+    var buf: [max_resume_argv][]const u8 = undefined;
+    const argv = resumeArgv(&parsed, &buf);
+    try std.testing.expectEqual(@as(usize, 7), argv.len);
+    try std.testing.expectEqualStrings("codex", argv[0]);
+    try std.testing.expectEqualStrings("resume", argv[1]);
+    try std.testing.expectEqualStrings("x-1", argv[2]);
+    try std.testing.expectEqualStrings("--ask-for-approval", argv[3]);
+    try std.testing.expectEqualStrings("never", argv[4]);
+    try std.testing.expectEqualStrings("--sandbox", argv[5]);
+    try std.testing.expectEqualStrings("danger-full-access", argv[6]);
+}
+
+test "Codex 권한 모드: 못 읽은 축은 채워 넣지 않는다" {
+    const a = std.testing.allocator;
+    // 샌드박스만 적힌 턴. 승인 정책에 기본값을 끼워 넣으면 그 순간 "기록된 대로" 가 거짓이 된다.
+    const jsonl =
+        \\{"type":"session_meta","payload":{"id":"x-2","cwd":"/repo","thread_source":"user"}}
+        \\{"type":"turn_context","payload":{"sandbox_policy":{"type":"read-only"}}}
+        \\{"type":"event_msg","payload":{"type":"user_message","message":"요청"}}
+    ;
+    var parsed = (try parse(a, .codex, jsonl)).?;
+    defer parsed.deinit(a);
+    try std.testing.expectEqual(
+        Permission{ .codex = .{ .approval = null, .sandbox = .read_only } },
+        parsed.permission,
+    );
+
+    var buf: [max_resume_argv][]const u8 = undefined;
+    const argv = resumeArgv(&parsed, &buf);
+    try std.testing.expectEqual(@as(usize, 5), argv.len);
+    try std.testing.expectEqualStrings("--sandbox", argv[3]);
+    try std.testing.expectEqualStrings("read-only", argv[4]);
+}
+
+test "권한 모드 표: 모든 값이 왕복하고, 재개 argv 상한을 넘지 않는다" {
+    // rollout 철자(하이픈)와 Zig enum 이름(밑줄)이 달라 표가 양방향으로 둘이다. 한쪽만 고치면 그 값만
+    // 조용히 재개에서 빠진다 — **허용된 자리 전부**를 세어서 두 방향이 갈리는 것을 막는다.
+    inline for (@typeInfo(CodexApproval).@"enum".fields) |field| {
+        const value: CodexApproval = @enumFromInt(field.value);
+        try std.testing.expectEqual(value, CodexApproval.fromTranscript(value.flagValue()).?);
+    }
+    inline for (@typeInfo(CodexSandbox).@"enum".fields) |field| {
+        const value: CodexSandbox = @enumFromInt(field.value);
+        try std.testing.expectEqual(value, CodexSandbox.fromTranscript(value.flagValue()).?);
+    }
+    // Claude 는 transcript 철자와 CLI 철자가 같으므로 왕복이 enum 이름 자체와 맞는지까지 본다.
+    inline for (@typeInfo(ClaudeMode).@"enum".fields) |field| {
+        const value: ClaudeMode = @enumFromInt(field.value);
+        try std.testing.expectEqual(value, ClaudeMode.fromTranscript(field.name).?);
+        if (value.flagValue()) |flag| try std.testing.expectEqualStrings(field.name, flag);
+    }
+
+    // 상한은 "가장 긴 조합" 에서 실제로 재 본다. 상수만 크게 적어 두면 버퍼가 넘칠 때까지 아무도 모른다.
+    var parsed: Parsed = .{
+        .provider = .codex,
+        .session_id = @constCast("x"),
+        .title = @constCast(""),
+        .summary = @constCast(""),
+        .cwd = @constCast(""),
+        .model = @constCast(""),
+        .message_count = 0,
+        .verified_user = true,
+        .permission = .{ .codex = .{ .approval = .never, .sandbox = .danger_full_access } },
+    };
+    var buf: [max_resume_argv][]const u8 = undefined;
+    try std.testing.expectEqual(max_resume_argv, resumeArgv(&parsed, &buf).len);
 }

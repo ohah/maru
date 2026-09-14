@@ -228,9 +228,11 @@ diff와 턴 스냅샷이 대상 저장소로 쓰는 것이고, 화면에서 지�
 2. **커널 조회**(`proc_pidinfo(PROC_PIDVNODEPATHINFO)`). OSC 7이 **빈 경우가 드물지
    않아서** 필요하다. 실측된 경우가 셋이다(2026-08-12).
    - maru의 셸 통합은 **zsh 전용**이라 bash/fish는 아예 안 보낸다.
-   - **재개 Term은 평생 한 번도 안 보낸다.** 에이전트 세션 기록의 이어하기는 셸을
-     `zsh -l -i -c "exec <provider> --resume <id>"`로 띄우는데, `-c`는 프롬프트를 한 번도 그리지 않아
-     `_maru_osc7` precmd 훅이 돌지 않는다(`.zshrc`는 source되고 훅 등록도 되지만 precmd는 안 돈다).
+   - **재개 Term은 provider가 도는 동안 안 보낸다.** 에이전트 세션 기록의 이어하기는 셸을
+     `zsh -l -i -c "<provider argv…>; exec <shell> -l -i"`로 띄우는데, provider가 화면을 쥐고 있는 동안은
+     프롬프트가 그려지지 않아 `_maru_osc7` precmd 훅이 돌지 않는다(`.zshrc`는 source되고 훅 등록도 되지만
+     precmd는 안 돈다). provider가 끝나 뒤이은 셸이 프롬프트를 그리면 그때부터는 보낸다 — 그러니 이
+     갈래는 **영구가 아니라 구간**이고, 그 구간에도 폴더줄이 비지 않으려면 커널 조회가 필요하다.
    - `TerminalCore.fullReset`이 RIS(`ESC c`)에 보고된 cwd를 지운다. **다만 claude·codex는 RIS를 보내지 않는다** —
      pty 캡처상 둘 다 alt screen(`CSI ?1049h`)+`ED 2`로 화면만 지운다. 예전 판에 그 둘을 이 항목의 예로 든 것은
      실측과 다르다. 이 갈래는 실제로 RIS를 보내는 프로그램에만 해당한다.

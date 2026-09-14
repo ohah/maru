@@ -48,6 +48,7 @@ const Tab = app_session_mod.Tab;
 const Term = app_session_mod.Term;
 const WorkspaceSession = AppSession.WorkspaceSession;
 const agent_session_archive_backend = app_session_mod.agent_session_archive_backend;
+const agent_session_archive = maru.session.agent_session_archive;
 const git_backend_mod = app_session_mod.git_backend_mod;
 const is_macos = app_session_mod.is_macos;
 const pane_ops = @import("pane.zig");
@@ -465,8 +466,9 @@ pub fn captureTurnSnapshot(self: *AppSession, surface_id: u64, facts: TurnFacts,
     if (title.len > 0) @memcpy(self.turn_snapshot_title[0..title.len], title);
 }
 
-/// Archive에서 고른 provider-native session을 새 terminal 탭으로 재개한다. transcript를 셸에 paste하거나
-/// `sh -c`로 조립하지 않고, `/usr/bin/env`와 provider argv를 분리해 직접 exec 한다.
+/// Archive에서 고른 provider-native session을 새 terminal 탭으로 재개한다. transcript를 터미널에 paste하지
+/// 않고, 사용자 로그인 셸에 **인용된 provider argv 한 줄**을 넘긴다(조립은 `buildResumeShellCommand`).
+/// 그 argv는 세션 id뿐 아니라 **기록된 권한 모드**까지 싣는다 — 규칙은 OS-중립 층의 `resumeArgv`가 소유한다.
 pub fn resumeAgentSessionInNewTerm(self: *AppSession, record: *const agent_session_archive_backend.Record) !void {
     const pane = pane_ops.activePane(self);
     const size = layout_math.gridFromRectPx(self.cell_width_px, self.cell_height_px, self.active_pane_rect.w, self.active_pane_rect.h);
@@ -479,10 +481,10 @@ pub fn resumeAgentSessionInNewTerm(self: *AppSession, record: *const agent_sessi
     // OSC 133을 영영 보내지 않는다.
     var req = spawnRequest(cfg, self.loaded_config.config.term, self.loaded_config.config.shell, self.loaded_config.config.env, self.shellIntegrationZdotdir(), self.new_tab_ssh_bin);
     const provider_command: []const u8 = record.parsed.provider.label();
-    const args = switch (record.parsed.provider) {
-        .claude => [_][]const u8{ "claude", "--resume", record.parsed.session_id },
-        .codex => [_][]const u8{ "codex", "resume", record.parsed.session_id },
-    };
+    // argv 조립은 **OS 중립 층**이 소유한다. 여기서 조립하면 "기록된 권한 모드를 그대로 되살린다" 는
+    // 규칙이 macOS 파일에만 살아, 다른 플랫폼이 재개를 붙일 때 조용히 빠진다.
+    var argv_buf: [agent_session_archive.max_resume_argv][]const u8 = undefined;
+    const args = agent_session_archive.resumeArgv(&record.parsed, &argv_buf);
     // The isolated AppKit fixture supplies one absolute fake executable so it can prove the
     // provider-native argv without starting a real account session or depending on the build
     // runner's inherited PATH.  That seam stays a direct exec with no shell wrapper.
@@ -507,12 +509,12 @@ pub fn resumeAgentSessionInNewTerm(self: *AppSession, record: *const agent_sessi
         // 바로 그 실패**(Dock에서 PATH 못 찾음)로 되돌아가는 것이고, 경로가 둘이 되어 유지보수만
         // 는다. 셸이 이 인자를 못 받으면 그 셸이 에러를 내고 PTY 화면에 그대로 뜬다 — 조용히
         // 실패하지 않으므로 사용자가 원인을 본다.
-        shell_command = try buildResumeShellCommand(self.allocator, &args);
-        req.command = resolveConfiguredShell(self.loaded_config.config.shell.command);
+        const shell = resolveConfiguredShell(self.loaded_config.config.shell.command);
+        shell_command = try buildResumeShellCommand(self.allocator, args, shell);
+        req.command = shell;
         // `-i`가 필요하다: PATH를 `.zshrc`에 두는 환경이 흔하고 zsh는 `-l`만으로는 그 파일을 읽지
         // 않는다. 일반 새 탭은 이미 대화형 로그인 셸이므로 이 경로가 오히려 나머지 탭과 동작을
-        // 일치시킨다. `exec`로 중간 셸을 남기지 않아 실행 중 판정(foreground process group 열거)도
-        // 그대로 성립한다.
+        // 일치시킨다.
         req.args = &[_][]const u8{ "-l", "-i", "-c", shell_command.? };
         req.login = true;
     }
@@ -2864,19 +2866,34 @@ pub fn classifyAgentProcesses(processes: []const maru.pty.types.ForegroundProces
 /// 이나 셸을 종료시키는 shell.args는 못 막아, 그 경우 여전히 세션이 끝나 유일 창이면 앱이 종료된다 — 그건 별개의
 /// 루트커즈("시작 시 유일 surface 즉시 사망 → 앱 종료" lifecycle)로, 후속 과제다(project-rules.md §루트커즈). 반환
 /// 슬라이스는 `command`(config arena) 또는 environ/정적 리터럴을 가리켜 caller가 소유/해제하지 않는다(spawn 시 dupeZ 복사).
-/// `exec <provider> <args…>` 문자열을 만든다. 각 토큰을 작은따옴표로 감싸 셸이 어떤 확장도 하지
-/// 않게 한다(메커니즘 단일 출처: `maru.pty.types.appendSingleQuoted`).
+/// 재개 탭이 로그인 셸에 넘길 명령 문자열 — `<provider argv…>; exec '<shell>' -l -i`.
 ///
-/// `exec`를 붙이는 이유: 중간 셸이 남지 않아 프로세스 트리가 직접 exec일 때와 같아지고, 실행 중
-/// 판정(foreground process group 열거)이 그대로 성립한다. 호출자가 반환 슬라이스를 free한다.
-pub fn buildResumeShellCommand(allocator: std.mem.Allocator, argv: []const []const u8) ![]u8 {
+/// 셸 경로를 포함해 각 토큰을 작은따옴표로 감싸 셸이 어떤 확장도 하지 않게 한다(메커니즘 단일 출처:
+/// `maru.pty.types.appendSingleQuoted`). 호출자가 반환 슬라이스를 free한다.
+///
+/// **provider 를 `exec` 하지 않는다.** 예전에는 `exec <provider …>` 한 줄이었는데, 그러면 셸이 provider 로
+/// 통째로 갈아치워져 **provider 를 끝내는 순간 그 Term 의 자식이 사라진다** — 탭이 닫히고, 그 pane 의
+/// 마지막 Term 이었으면 pane 까지 닫힌다. 일반 탭에서 에이전트를 끝내면 셸 프롬프트로 돌아오는데
+/// 재개 탭만 창이 사라지는, 설명할 수 없는 차이였다. 같은 이유로 provider 를 **못 찾았을 때의 에러도
+/// 못 읽었다**(exec 실패 → 셸 종료 → 탭이 즉시 닫힘).
+///
+/// 대신 provider 를 자식으로 돌리고, 끝나면 뒤이어 대화형 로그인 셸을 `exec` 한다. 실측(2026-09-14)으로
+/// 두 가지를 확인했다: ① provider 가 도는 동안 터미널 foreground pgid 는 **provider 자신**이라
+/// `foregroundProcessNames` 기반 실행 중 판정이 그대로 성립하고, ② provider 가 끝난 뒤의 셸은 프롬프트를
+/// 그리므로 셸 통합 훅이 돌아 **OSC 7 을 보낸다** — 재개 탭이 폴더·브랜치를 못 말하던 한계도 함께 없어진다.
+/// 뒤이은 셸은 `exec` 라 중간 프로세스를 남기지 않는다.
+///
+/// `;` 이지 `&&` 가 아니다 — provider 가 실패로 끝나도 사용자는 그 화면과 프롬프트를 봐야 한다.
+pub fn buildResumeShellCommand(allocator: std.mem.Allocator, argv: []const []const u8, shell: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
-    try out.appendSlice(allocator, "exec");
-    for (argv) |token| {
-        try out.append(allocator, ' ');
+    for (argv, 0..) |token, index| {
+        if (index > 0) try out.append(allocator, ' ');
         try maru.pty.types.appendSingleQuoted(allocator, &out, token);
     }
+    try out.appendSlice(allocator, "; exec ");
+    try maru.pty.types.appendSingleQuoted(allocator, &out, shell);
+    try out.appendSlice(allocator, " -l -i");
     return try out.toOwnedSlice(allocator);
 }
 

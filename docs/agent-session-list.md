@@ -258,23 +258,49 @@ search/scope가 부분 snapshot을 완전한 결과처럼 보이게 해서는 �
   물려받는 PATH에는 `~/.local/bin`이나 버전 매니저 shim이 없다(실측 2026-08-08: `launchctl getenv PATH`
   미설정, `env -i … zsh -lc 'command -v claude'` 실패, `-lic`는 성공). 터미널에서 띄웠을 때만 우연히
   동작하던 것이라 재현이 갈렸다.
-  - 셸을 `-l -i -c "exec <provider> --resume <id>"` 형태로 부른다. `-i`가 필요한 이유는 PATH를
+  - 셸을 `-l -i -c "<provider argv…>; exec <shell> -l -i"` 형태로 부른다. `-i`가 필요한 이유는 PATH를
     `.zshrc`에 두는 환경이 흔하고 zsh는 `-l`만으로는 그 파일을 읽지 않기 때문이다. 일반 새 탭은 이미
     대화형 로그인 셸이므로 이 경로가 오히려 나머지 탭과 동작을 일치시킨다.
+  - **provider를 `exec`하지 않는다.** 예전에는 `exec <provider …>` 한 줄이라 셸이 provider로 통째로
+    갈아치워졌고, 그래서 **provider를 끝내는 순간 그 Term의 자식이 사라져 탭이 닫혔다**(그 pane의 마지막
+    Term이었으면 pane까지). 일반 탭에서 에이전트를 끝내면 프롬프트로 돌아오는데 재개 탭만 창이 사라지는
+    차이였고, 같은 이유로 provider를 못 찾았을 때의 에러도 읽을 수 없었다(exec 실패 → 셸 종료 → 즉시
+    닫힘). 이제 provider를 자식으로 돌리고 끝나면 뒤이어 대화형 로그인 셸을 `exec`한다 — 중간 프로세스는
+    남지 않는다. `;`이지 `&&`가 아니다: provider가 실패로 끝나도 그 화면과 프롬프트를 봐야 한다.
   - **셸 종류로 분기하지 않는다.** 분기해 직접 exec으로 폴백해 봐야 그건 이 계약이 고치는 바로 그
     실패(GUI 실행에서 PATH를 못 찾음)로 되돌아가는 것이고, 경로가 둘이 되어 유지보수만 는다. 셸이
     이 인자를 못 받으면 그 셸이 에러를 내고 PTY 화면에 뜨므로 실패가 조용하지 않다.
   - ZDOTDIR은 새 탭과 **같은 지점**(`shellIntegrationZdotdir`)에서 얻는다. 그 함수는 캐시의 `.zshenv`가
     사라졌으면 다시 써 주는 자가 복구를 한다 — 보관 필드를 직접 읽으면 캐시가 비워진 뒤 재개 탭만 셸
     통합이 통째로 빠진다.
-  - **이 형태의 Term은 OSC 7을 한 번도 보내지 않는다.** `-c`는 프롬프트를 그리지 않으므로 통합의
+  - **provider가 도는 동안 이 Term은 OSC 7을 보내지 않는다.** 프롬프트를 그리지 않으므로 통합의
     `_maru_osc7` precmd 훅이 돌지 않는다(`.zshrc`는 source되고 훅 등록도 되지만 precmd는 안 돈다 — 실측
-    2026-08-12). 그래서 이 Term의 폴더·브랜치·저장소는 전부 **커널 cwd 폴백**에 의존한다
+    2026-08-12). 그 구간의 폴더·브랜치·저장소는 전부 **커널 cwd 폴백**에 의존한다
     ([editor-surface-dock.md §3.5](editor-surface-dock.md)). 사이드바가 그 폴백 밖에 있던 2026-08-12 전까지
-    재개 탭에서만 카드·행의 폴더줄과 브랜치줄이 사라졌다.
+    재개 탭에서만 카드·행의 폴더줄과 브랜치줄이 사라졌다. provider가 끝난 뒤의 셸은 프롬프트를 그리므로
+    그때부터는 OSC 7이 나온다(실측 2026-09-14) — 위의 `exec` 제거가 이 구멍의 절반도 함께 닫았다.
   - 명령 문자열에 들어가는 각 인자는 예외 없이 single-quote escape한다. **cwd는 명령 문자열에 넣지
     않고 spawn request의 작업 디렉터리로만 전달한다.** parse한 prompt는 실행 인자로 절대 넣지 않는다.
   - session id/provider는 UI text나 log에서 명령으로 재해석되지 않는다.
+- resume은 그 세션이 **마지막으로 돌던 권한 모드를 그대로 되살린다**. 모드가 안 따라오면 매 명령을
+  승인 없이 돌던 세션이 매번 묻는 세션으로 되살아나고, 반대로 제한된 세션이 넓은 권한으로 살아난다 —
+  **후자가 더 위험하므로** 둘 다 "기록된 대로"가 답이다. 사용자가 그 버튼을 누른 것 외의 확인은 묻지
+  않는다(§2의 명시 action 경계 그대로).
+  - 근거는 transcript 자신이다. Claude는 user 줄마다 `permissionMode`를, Codex는 `turn_context`마다
+    `approval_policy`와 `sandbox_policy.type`을 적는다(실측 2026-09-14: 로컬 이력에서 각각
+    `bypassPermissions` 20,641 · `auto` 17 · `plan` 7 · `default` 3, 그리고 `never` 49,456 · `on-request` 144 ·
+    `untrusted` 1 / `danger-full-access` 42,149 · `workspace-write` 119 · `read-only` 12).
+  - **마지막에 본 값이 이긴다.** 한 파일 안에서 모드가 바뀌므로(위 분포가 그 증거다) 재개가 이어야 할
+    것은 첫 턴이 아니라 마지막 턴이다.
+  - 모르는 철자는 `.unknown`으로 떨어뜨리고 **플래그를 안 붙인다**. 그러면 provider 기본값으로 열리는데,
+    이는 이 계약이 생기기 전의 동작과 같다 — 새 정보가 없을 때 옛 동작으로 떨어지는 쪽이 안전하다.
+    앞 줄에서 본 옛 값을 남기지도 않는다: 그러면 "그때 그 모드"라며 낡은 권한으로 재개한다.
+  - argv에 나가는 것은 **enum에서 나온 우리 리터럴**이지 transcript 문자열이 아니다. 문자열을 그대로
+    흘리면 위의 "parse한 내용은 실행 인자로 넣지 않는다"가 깨지고, provider가 철자를 바꾸는 날 재개가
+    통째로 실패한다. 매핑은 OS-중립 층(`session/agent_session_archive.zig`의 `resumeArgv`)이 소유한다 —
+    macOS 파일에서 조립하면 다른 플랫폼이 재개를 붙일 때 이 규칙이 조용히 빠진다.
+  - **되살리지 못하는 것**: Codex `workspace-write`의 하위 설정(쓰기 가능 root 목록·네트워크 허용)은 CLI
+    플래그 하나로 표현되지 않아 config 축으로 남는다. 샌드박스 종류까지만 충실하다.
 - metrics는 candidate/verified/partial/rejected 개수와 scan duration/bytes만 남긴다. title·요약·cwd·session id는 observability event의 payload가 될 수 없다.
 
 ## 7. 설계 검토 기록 — 적대적 5회
@@ -284,7 +310,7 @@ search/scope가 부분 snapshot을 완전한 결과처럼 보이게 해서는 �
 | A1 | live 목록을 archive로 오인 | 열린 Term cache만 쓰면 앱 밖/과거 세션과 screenshot UX를 만들 수 없음 | §1의 두 authority와 별도 scanner/snapshot |
 | A2 | Codex worker 오염 | 같은 날짜 계층에 subagent가 섞이고 legacy record는 판별 불가 | §3 verified-user만 표시, legacy unknown 기본 제외 |
 | A3 | 성능·UI freeze | 500개의 큰 JSONL을 main tick에서 전량 parse하면 입력/렌더가 멎음 | §4 worker, streaming, 4,096/128MiB/512MiB cap, partial truthfulness |
-| A4 | 클릭이 명령 실행 | 행 선택/유사 mtime mapping이 잘못된 session에 입력·resume할 수 있음 | §2 row click은 detail만, 명시 ▶/resume만 new Term/exact provider+id/argv-only |
+| A4 | 클릭이 명령 실행 | 행 선택/유사 mtime mapping이 잘못된 session에 입력·resume할 수 있음 | §2 row click은 detail만, 명시 ▶/resume만 new Term/exact provider+id+기록된 권한 모드/argv-only |
 | A5 | 개인정보·TOCTOU | 기록 제목·prompt가 trace에 새고 symlink 교체 파일을 읽을 수 있음 | §5 redaction/no-follow/fstat recheck/metadata-only metrics |
 
 ## 8. 설계 누락 탐색 — 5회

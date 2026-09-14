@@ -3038,6 +3038,45 @@ pub fn build(b: *std.Build) void {
         run_session_host_cr6d_boundary_tests.addArg("--maru-expect-tests=1");
         run_session_host_cr6d_boundary_tests.setCwd(b.path("."));
         run_session_host_cr6d_appkit.step.dependOn(&run_session_host_cr6d_boundary_tests.step);
+        const session_host_cr6d_pixel_verify_mod = b.createModule(.{
+            .root_source_file = b.path("tools/session-host/cr6d_pixel_verify.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+        });
+        session_host_cr6d_pixel_verify_mod.addImport("cr6d_pixel", b.createModule(.{
+            .root_source_file = b.path("tests/support/session_host_cr6d_pixel.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+        }));
+        const session_host_cr6d_pixel_verify = b.addExecutable(.{
+            .name = "maru-session-host-cr6d-pixel-verify",
+            .root_module = session_host_cr6d_pixel_verify_mod,
+        });
+        const session_host_cr6d_pixel_verify_test_mod = b.createModule(.{
+            .root_source_file = b.path("tools/session-host/cr6d_pixel_verify.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+        });
+        session_host_cr6d_pixel_verify_test_mod.addImport("cr6d_pixel", b.createModule(.{
+            .root_source_file = b.path("tests/support/session_host_cr6d_pixel.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+        }));
+        const session_host_cr6d_pixel_verify_tests = addProjectTest(b, .{
+            .root_module = session_host_cr6d_pixel_verify_test_mod,
+        });
+        const run_session_host_cr6d_pixel_verify_tests = b.addRunArtifact(session_host_cr6d_pixel_verify_tests);
+        run_session_host_cr6d_pixel_verify_tests.addArg("--maru-expect-tests=2");
+        run_session_host_cr6d_pixel_verify_tests.setCwd(b.path("."));
+        macos_only_test_step.dependOn(&run_session_host_cr6d_pixel_verify_tests.step);
+        const run_session_host_cr6d_pixel_verify = b.addRunArtifact(session_host_cr6d_pixel_verify);
+        run_session_host_cr6d_pixel_verify.setCwd(b.path("."));
+        run_session_host_cr6d_pixel_verify.addArgs(&.{
+            "zig-out/maru-macos-app/session-host-cr6d-home/session-host-cr6d-ime-pixel-receipt.json",
+            "zig-out/maru-macos-app/session-host-cr6d-home/captures/session-host-recovery-before-ime.ppm",
+            "zig-out/maru-macos-app/session-host-cr6d-home/captures/session-host-recovery-first-marked.ppm",
+        });
+        run_session_host_cr6d_pixel_verify.step.dependOn(&run_session_host_cr6d_appkit.step);
         const session_host_cr6d_assert = b.addSystemCommand(&.{
             "sh", "-eu", "-c",
             "summary=zig-out/maru-macos-app/app.summary.txt; " ++
@@ -3059,6 +3098,7 @@ pub fn build(b: *std.Build) void {
         });
         session_host_cr6d_assert.setCwd(b.path("."));
         session_host_cr6d_assert.step.dependOn(&run_session_host_cr6d_appkit.step);
+        session_host_cr6d_assert.step.dependOn(&run_session_host_cr6d_pixel_verify.step);
         session_host_cr6d_appkit_step.dependOn(&session_host_cr6d_assert.step);
 
         const session_host_cr6e_recovery_step = b.step(

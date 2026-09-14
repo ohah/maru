@@ -157,6 +157,49 @@ test "CR6d 경계는 exact recovered screen probe와 actual AppKit input smoke�
     inline for (.{ "std.fs.", "std.process.", "std.c.", "@cImport(", "MaruAppHost" }) |forbidden| {
         try std.testing.expectEqual(@as(usize, 0), count(pixel_validator, forbidden));
     }
+
+    // v2a 제품 producer는 첫 물리 key보다 먼저 baseline을 찍고, 첫 marked callback 뒤 다음
+    // key를 보내기 전에 marked frame을 찍는다. 두 프레임의 identity/geometry는 별도 strict
+    // receipt로 봉인하고 순수 validator executable이 실제 PPM과 함께 소비해야 한다.
+    inline for (.{
+        "captureSessionHostInputPixelFrame(\"before-ime\"",
+        "captureSessionHostInputPixelFrame(\"first-marked\"",
+        "session-host-cr6d-ime-pixel-receipt.json",
+    }) |producer_contract| try std.testing.expectEqual(@as(usize, 1), count(swift, producer_contract));
+    try std.testing.expect(count(swift, "sessionHostInputPixelPhase") >= 4);
+    try std.testing.expectEqual(@as(usize, 2), count(swift, "writeSessionHostInputPixelReceipt"));
+    const pixel_capture = between(
+        swift,
+        "private func captureSessionHostInputPixelFrame(",
+        "private func writeSessionHostInputPixelReceipt()",
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), count(pixel_capture, "withSurface(surface)"));
+    try std.testing.expectEqual(@as(usize, 1), count(pixel_capture, "cursorPx = imeCursorRectPx()"));
+    try std.testing.expectEqual(@as(usize, 1), count(pixel_capture, "reportedFirstRect = view.firstRect("));
+    const input_smoke = between(
+        swift,
+        "private func maybeRunSessionHostInputContinuitySmoke()",
+        "private func dispatchSessionHostInputKey(",
+    ) orelse return error.TestUnexpectedResult;
+    const ime_case = between(input_smoke, "        case 3:", "        case 2:") orelse
+        return error.TestUnexpectedResult;
+    const before_capture_at = std.mem.indexOf(u8, ime_case, "captureSessionHostInputPixelFrame(\"before-ime\"") orelse
+        return error.TestUnexpectedResult;
+    const marked_wait_at = std.mem.indexOf(u8, ime_case, "sessionHostInputPixelPhase == 1") orelse
+        return error.TestUnexpectedResult;
+    const marked_capture_at = std.mem.indexOf(u8, ime_case, "captureSessionHostInputPixelFrame(\"first-marked\"") orelse
+        return error.TestUnexpectedResult;
+    const physical_key_at = std.mem.indexOf(u8, ime_case, "dispatchSessionHostInputPhysicalKey(") orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(before_capture_at < marked_wait_at);
+    try std.testing.expect(marked_wait_at < marked_capture_at);
+    try std.testing.expect(marked_capture_at < physical_key_at);
+    try std.testing.expectEqual(@as(usize, 1), count(gate, "const session_host_cr6d_pixel_verify ="));
+    try std.testing.expectEqual(@as(usize, 1), count(
+        gate,
+        "run_session_host_cr6d_pixel_verify_tests.addArg(\"--maru-expect-tests=2\");",
+    ));
+    try std.testing.expectEqual(@as(usize, 1), count(gate, "session-host-cr6d-ime-pixel-receipt.json"));
 }
 
 fn read(allocator: std.mem.Allocator, path: []const u8) ![]u8 {

@@ -439,8 +439,7 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         return []
     }
 
-    // 입력기 후보창 위치. 아직 커서 셀 좌표를 노출하지 않아 view 좌하단 기준으로 둔다(후보창이
-    // 창 근처에 뜨는 정도 — 커서 위치 정밀 배치는 preedit 렌더와 함께 다음 단계).
+    // 입력기 후보창 위치. Zig가 내보낸 커서 셀을 view→window→screen으로 변환한다.
     func firstRect(forCharacterRange range: NSRange, actualRange: NSRangePointer?) -> NSRect {
         guard let window else { return .zero }
         // Zig가 커서 셀 사각형을 backing px(좌상단 원점)로 준다. view points(y-flip) -> window
@@ -4170,6 +4169,23 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var sessionHostInputSmokeOriginalPasteboard: [[NSPasteboard.PasteboardType: Data]]?
     private var sessionHostInputSmokePasteboardPrepared = false
     private var sessionHostInputSmokePasteboardRestored = false
+    private struct SessionHostInputPixelSnapshot {
+        struct PixelRect {
+            let x: UInt32
+            let y: UInt32
+            let w: UInt32
+            let h: UInt32
+        }
+        let runtimeId: String
+        let surfaceId: UInt64
+        let frameGeneration: UInt64
+        let cursor: PixelRect
+        let cursorScreen: CGRect
+        let firstRect: CGRect
+    }
+    private var sessionHostInputPixelPhase: UInt32 = 0
+    private var sessionHostInputPixelBefore: SessionHostInputPixelSnapshot?
+    private var sessionHostInputPixelMarked: SessionHostInputPixelSnapshot?
     private var launchSummaryWritten = false
     private var isSessionHostRecoverySmokeMode: Bool {
         smokeMode && ProcessInfo.processInfo.environment["MARU_SESSION_HOST_CR6C_APPKIT_SMOKE"] == "1"
@@ -10351,6 +10367,96 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             failSessionHostInputSmoke("marked-overflow")
         } else {
             sessionHostInputSmokeMarkedCallbacks += 1
+            if sessionHostInputPixelPhase == 1 {
+                // The next owner turn must capture this first marked frame before a second
+                // physical key can mutate the composition again.
+                sessionHostInputPixelPhase = 2
+            }
+        }
+    }
+
+    private func captureSessionHostInputPixelFrame(
+        _ label: String,
+        surface: TerminalSurface,
+        view: MaruMetalTerminalView
+    ) -> SessionHostInputPixelSnapshot? {
+        guard let runtimeId = ProcessInfo.processInfo.environment["MARU_SESSION_HOST_CR6C_RUNTIME_ID"] else { return nil }
+        let runtimeBytes = Array(runtimeId.utf8)
+        var cursorPx: (Double, Double, Double, Double)?
+        var reportedFirstRect = NSRect.zero
+        withSurface(surface) {
+            cursorPx = imeCursorRectPx()
+            reportedFirstRect = view.firstRect(forCharacterRange: NSRange(), actualRange: nil)
+        }
+        guard runtimeBytes.count == 32,
+              runtimeBytes.contains(where: { $0 != 48 }),
+              runtimeBytes.allSatisfy({ ($0 >= 48 && $0 <= 57) || ($0 >= 97 && $0 <= 102) }),
+              captureSessionHostRecoverySmokeFrame(label, in: surface),
+              let (x, y, w, h) = cursorPx,
+              x.isFinite, y.isFinite, w.isFinite, h.isFinite,
+              x >= 0, y >= 0, w > 0, h > 0,
+              x <= Double(UInt32.max), y <= Double(UInt32.max),
+              w <= Double(UInt32.max), h <= Double(UInt32.max),
+              x.rounded(.towardZero) == x, y.rounded(.towardZero) == y,
+              w.rounded(.towardZero) == w, h.rounded(.towardZero) == h,
+              let window = view.window else { return nil }
+        let scale = window.backingScaleFactor
+        let local = NSRect(
+            x: x / scale,
+            y: view.bounds.height - (y / scale) - (h / scale),
+            width: w / scale,
+            height: h / scale
+        )
+        let cursorScreen = window.convertToScreen(view.convert(local, to: nil))
+        let summary = surface.latestFrameSummary
+        guard summary.surface_id != 0, surface.lastDrawnGeneration != 0 else { return nil }
+        return .init(
+            runtimeId: runtimeId,
+            surfaceId: summary.surface_id,
+            frameGeneration: surface.lastDrawnGeneration,
+            cursor: .init(x: UInt32(x), y: UInt32(y), w: UInt32(w), h: UInt32(h)),
+            cursorScreen: cursorScreen,
+            firstRect: reportedFirstRect
+        )
+    }
+
+    private func writeSessionHostInputPixelReceipt() -> Bool {
+        guard let before = sessionHostInputPixelBefore, let marked = sessionHostInputPixelMarked,
+              let rawRoot = ProcessInfo.processInfo.environment["MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT"] else { return false }
+        let root = URL(fileURLWithPath: rawRoot).standardizedFileURL
+        guard root.lastPathComponent == "session-host-cr6d-home",
+              root.deletingLastPathComponent().lastPathComponent == "maru-macos-app" else { return false }
+        let target = root.appendingPathComponent("session-host-cr6d-ime-pixel-receipt.json").standardizedFileURL
+        guard target.deletingLastPathComponent() == root,
+              !FileManager.default.fileExists(atPath: target.path) else { return false }
+        func rect(_ value: CGRect) -> [String: Double] {
+            ["x": value.origin.x, "y": value.origin.y, "w": value.size.width, "h": value.size.height]
+        }
+        func pixelRect(_ value: SessionHostInputPixelSnapshot.PixelRect) -> [String: UInt32] {
+            ["x": value.x, "y": value.y, "w": value.w, "h": value.h]
+        }
+        func snapshot(_ value: SessionHostInputPixelSnapshot) -> [String: Any] {
+            [
+                "runtime_id": value.runtimeId,
+                "surface_id": value.surfaceId,
+                "frame_generation": value.frameGeneration,
+                "cursor": pixelRect(value.cursor),
+                "cursor_screen": rect(value.cursorScreen),
+                "first_rect": rect(value.firstRect),
+            ]
+        }
+        let object: [String: Any] = [
+            "schema": "maru.session-host-cr6d-ime-pixel.v1",
+            "before": snapshot(before),
+            "marked": snapshot(marked),
+        ]
+        guard JSONSerialization.isValidJSONObject(object),
+              let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) else { return false }
+        do {
+            try data.write(to: target, options: [.atomic, .withoutOverwriting])
+            return true
+        } catch {
+            return false
         }
     }
 
@@ -10500,6 +10606,33 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 _ = NSRunningApplication.current.activate(options: [.activateAllWindows])
                 view.window?.makeKeyAndOrderFront(nil)
                 retrySessionHostInputSmoke("global-keyboard-focus-drift")
+                return
+            }
+            if sessionHostInputPixelPhase == 0 {
+                guard let snapshot = captureSessionHostInputPixelFrame("before-ime", surface: surface, view: view) else {
+                    failSessionHostInputSmoke("ime-pixel-before")
+                    return
+                }
+                sessionHostInputPixelBefore = snapshot
+                sessionHostInputPixelPhase = 1
+                return
+            }
+            if sessionHostInputPixelPhase == 1, sessionHostInputSmokeKeyIndex > 0 {
+                // The first physical key has been posted, but AppKit has not delivered its first
+                // marked callback yet. Do not post the second key into the uncaptured frame.
+                return
+            }
+            if sessionHostInputPixelPhase == 2 {
+                guard let snapshot = captureSessionHostInputPixelFrame("first-marked", surface: surface, view: view) else {
+                    failSessionHostInputSmoke("ime-pixel-marked")
+                    return
+                }
+                sessionHostInputPixelMarked = snapshot
+                guard writeSessionHostInputPixelReceipt() else {
+                    failSessionHostInputSmoke("ime-pixel-receipt")
+                    return
+                }
+                sessionHostInputPixelPhase = 3
                 return
             }
             if sessionHostInputSmokeKeyIndex < keys.count {

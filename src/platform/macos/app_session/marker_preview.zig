@@ -168,6 +168,9 @@ pub const Open = struct {
     row: u16,
     start_col: u16,
     end_col: u16,
+    /// **전송된** 마커면 갤러리 인덱스의 몇 번째 이미지인가(§4.4). null 이면 전송 전(스테이징) 것이다.
+    /// 디코드 소스가 이 값으로 갈린다 — 인덱스는 트랜스크립트 안의 base64 구간이고, 스테이징은 파일이다.
+    sent_hit_index: ?usize = null,
     /// 디코드 결과(RGBA8). 비어 있으면 아직 안 풀렸거나 못 풀었다.
     pixels: []u8 = &.{},
     width: u32 = 0,

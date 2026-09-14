@@ -917,7 +917,7 @@ pub fn drainGitStatus(self: *AppSession) void {
         }
     }
     drainIgnoreResults(self); // 탐색기 무시 표시 — 같은 tick 에서 걷어 rows 를 한 번만 다시 만든다
-    retryPendingIgnore(self); // 자리가 차서 거절됐던 디렉터리를 하나 다시 건다(드레인 **뒤**라야 자리가 비어 있다)
+    pumpIgnoreQueries(self); // 줄에 선 디렉터리에 다음 배치를 보낸다(드레인 **뒤**라야 자리가 비어 있다)
     var backend = &(self.git_backend orelse return);
     // 턴 스냅샷 결과를 링에 넣는다. 같은 tree가 연달아 오면 링이 스스로 무시한다(빈 비교 방지 — §6.1).
     while (backend.takeBranchesResult()) |taken| {
@@ -1207,14 +1207,6 @@ pub fn termCwdForDisplay(self: *AppSession, term: *Term, buf: *[std.fs.max_path_
 /// 셋 다 실패하면 null이고 뷰는 빈 안내를 낸다.
 ///
 /// **"없다"와 "모른다"를 구별해야 하는 호출자는 `gitRepoTarget`을 쓴다.** 이 함수는 둘을 같은 null로 뭉갠다.
-/// 방금 읽은 디렉터리의 항목들이 git 무시 대상인지 묻는다(파일 탐색기 흐리게 표시).
-///
-/// **경로는 저장소 루트 기준 상대경로**로 넘긴다 — `git -C <repo> check-ignore` 가 그렇게 해석하고,
-/// 절대경로를 주면 저장소 밖 경로로 취급돼 조용히 답이 비는 경우가 있다.
-///
-/// 한 번에 `check_ignore_batch` 개까지만 묻는다. 그보다 많은 디렉터리는 **첫 배치만** 판정이
-/// 서고 나머지는 판정 없이 남는다 — 흐리게 하지 않는 쪽이라 틀린 표시가 되지는 않는다. 배치를 여러 번
-/// 돌리는 것은 후속(요청 큐가 필요하다).
 /// 그 경로가 **무시 규칙 파일**인가 — 바뀌면 이미 받아 둔 흐림 판정이 전부 낡는다.
 ///
 /// `.gitignore` 는 어느 디렉터리에나 있을 수 있고 그 아래 전체에 걸리므로 **이름으로** 판정한다.
@@ -1242,161 +1234,105 @@ pub fn ensureIgnoreBackend(self: *AppSession) void {
     self.git_backend = git_backend_mod.Backend.init(self.io) catch return;
 }
 
-pub fn requestIgnoredForPaths(self: *AppSession, dir_path: []const u8, entries: anytype) void {
-    // ⚠️ **탐색기를 보고 있을 때만 묻는다 — 안 볼 때는 «적어 둔다»**(적대적 검증 20 회차).
-    //
-    // 이 드레인은 뷰와 무관하게 매 tick 돈다. 그래서 게이트가 없으면 소스 컨트롤 탭에 있거나 도크를
-    // 닫아 둔 동안에도 디렉터리 스캔마다 git 프로세스가 뜬다 — 아무도 안 보는 화면의 흐림을 위해서다
-    // (19 회차가 재시도에 대해 한 말이 여기 그대로 남아 있었다).
-    //
-    // **그리고 반대쪽에 결함이 있었다**: 백엔드는 탐색기 진입에서만 생기므로, 도크를 소스 컨트롤로
-    // 두고 쓰다가 탐색기로 들어오면 트리는 이미 다 읽혀 있고 새 스캔이 없어 **아무도 묻지 않는다.**
-    // 흐림이 영영 안 뜬다. 적어 두면 들어올 때 tick 이 그 디렉터리를 다시 걸고(`retryPendingIgnore` —
-    // 그쪽 가시성 게이트가 이 자리를 지킨다), 그 스캔의 드레인이 그때 묻는다.
-    if (!dock_ops.dockVisible(self) or self.dock.view != .explorer or self.git_backend == null) {
-        return rememberIgnoreRetry(self, dir_path);
+/// 그 디렉터리를 **다시 물어야 한다**고 적어 둔다(커서를 0 으로). 스캔이 끝났을 때 불린다.
+///
+/// ⚠️ **여기서 목록을 받지 않는다.** 물어볼 자식은 트리가 소유하고(방금 `applySnapshot` 이 넣어 준
+/// 그것), 이 함수는 「그 디렉터리가 새로 읽혔다」는 **신호**만 받는다. 출처를 트리 하나로 두는 근거는
+/// docs/file-explorer.md §4 — 이어 묻기·거절 후 재시도·안 볼 때 미루기가 전부 커서 하나로 접힌다.
+///
+/// 같은 디렉터리가 이미 줄에 있으면 **커서를 0 으로 되돌린다**: 새 스캔은 그 목록을 통째로 갈아엎으므로
+/// 옛 순번은 뜻이 없다(슬라이스 수명과 순번이 함께 리셋되는 자리가 여기 하나다).
+pub fn noteIgnoredScan(self: *AppSession, dir_path: []const u8) void {
+    for (self.git_ignore_pending.items) |*pending| {
+        if (std.mem.eql(u8, pending.dir, dir_path)) {
+            pending.next = 0;
+            return pumpIgnoreQueries(self);
+        }
     }
-    // ⚠️ **저장소는 «방금 읽은 그 디렉터리»에서 나온다 — 도크가 기억하는 것이 아니다.**
+    if (self.git_ignore_pending.items.len >= max_ignore_pending) return;
+    const owned = self.allocator.dupe(u8, dir_path) catch return;
+    self.git_ignore_pending.append(self.allocator, .{ .dir = owned, .next = 0 }) catch {
+        self.allocator.free(owned);
+        return;
+    };
+    pumpIgnoreQueries(self);
+}
+
+/// 줄에 세워 둘 디렉터리 수. 넘으면 **더 넣지 않는다** — 못 들어간 디렉터리는 판정 없이 남을 뿐이고
+/// (모르면 흐리게 하지 않는다), 접었다 펴면 그 스캔이 다시 신호를 준다.
+const max_ignore_pending = 256;
+
+/// 줄에 선 디렉터리 하나에 **다음 배치**를 보낸다. tick 이 부른다.
+///
+/// ⚠️ **탐색기를 보고 있을 때만 나간다.** 흐림은 그 뷰에서만 쓰이므로, 다른 뷰이거나 도크가 닫혀 있으면
+/// 커서만 남기고 아무 프로세스도 안 띄운다 — 목록 읽기를 `dock.view == .source_control` 로 거는 것과
+/// 같은 규율이다. 돌아오면 **그 자리에서** 이어 묻는다(재스캔 없음).
+///
+/// **한 tick 에 한 배치다.** 백엔드는 `check-ignore` 자리가 하나라 더 보내 봐야 거절이고, 거절을
+/// 되살리는 길이 다시 필요해진다.
+pub fn pumpIgnoreQueries(self: *AppSession) void {
+    if (self.git_ignore_pending.items.len == 0) return;
+    if (!dock_ops.dockVisible(self) or self.dock.view != .explorer) return;
+    var backend = &(self.git_backend orelse return);
+    if (backend.ignoreBusy()) return;
+
+    const pending = &self.git_ignore_pending.items[0];
+    const total = self.file_tree.childCountOf(pending.dir);
+    // 트리가 그 디렉터리를 모르거나(부모가 사라짐·신원 어긋남) 다 물었으면 줄에서 뺀다.
+    if (pending.next >= total) return dropFirstIgnorePending(self);
+
+    // ⚠️ **저장소는 «그 디렉터리»에서 나온다 — 도크가 기억하는 것이 아니다.**
     //
     // 예전에는 `gitRepoRoot` 를 썼는데 그 함수의 2 순위는 **도크가 직전에 목록을 읽은 저장소**
     // (`git_repo`)다. 그 값은 원격일 수 있고(원격 SCM), 원격이 아니어도 탐색기가 보는 것과 **다른
     // 저장소**일 수 있다 — 그러면 아래 `relativeUnderRoot` 가 전부 null 을 내 **질의가 통째로 사라진다.**
     // 사용자에게는 「어느 순간부터 `.gitignore` 흐림이 안 된다」로만 보이고, 화면 어디에도 그 사실이 없다.
     //
-    // 답이 **인자 안에 있는데** 세션 상태를 물은 것이 결함의 모양이었다. `dir_path` 를 걸어 올라가면
-    // 그 항목들을 실제로 소유한 저장소가 나오고, 그러면 **원격 경로가 여기로 샐 길 자체가 없다**
-    // (원격 탐색기는 이 함수를 아예 안 부른다 — `updateFileTree` 의 원격 갈래 주석).
-    //
     // **캐시(`repoRootForCached`)를 안 쓴다**: 그쪽은 터미널 cwd 하나를 키로 드는 한 칸짜리라, 여기서
-    // 다른 경로로 부르면 매번 서로를 밀어낸다. 이 경로는 프레임마다가 아니라 **디렉터리를 읽을 때만**
-    // 돌고 바로 뒤에서 git 프로세스를 띄우므로, walk-up 의 `access(2)` 여덟 번은 그 비용에 묻힌다.
+    // 다른 경로로 부르면 매번 서로를 밀어낸다. 이 경로는 프레임마다가 아니라 **배치마다** 돌고 바로
+    // 뒤에서 git 프로세스를 띄우므로, walk-up 의 `access(2)` 여덟 번은 그 비용에 묻힌다.
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const repo = AppSession.repoRootFor(dir_path, &repo_buf) orelse return; // 저장소가 아니면 물어볼 것이 없다
+    const repo = AppSession.repoRootFor(pending.dir, &repo_buf) orelse return dropFirstIgnorePending(self);
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
     const git_exe = git_backend_mod.locate(&exe_buf) orelse return;
 
-    // 상대경로 조각을 한 버퍼에 이어 담고 슬라이스만 넘긴다(항목마다 할당하지 않는다).
-    //
-    // ⚠️ **모으는 동안에는 오프셋만 담는다**(`git_ignore_query_spans` 주석). 버퍼가 항목마다 자라므로,
-    // 여기서 슬라이스를 담으면 realloc 한 번에 앞엣것들이 전부 댕글링이 되고 **그 바이트가 그대로
-    // 자식의 stdin 으로 나간다.**
-    self.git_ignore_query_buf.clearRetainingCapacity();
-    self.git_ignore_query_spans.clearRetainingCapacity();
+    // 자식 절대경로를 **트리에서 그대로 빌린다** — 복사하지 않는다. 이 tick 안에서만 쓰고 백엔드가
+    // 제출 때 자기 사본을 뜬다(`submitCheckIgnore`). 예전에는 이름을 한 버퍼에 이어 붙였는데, 그
+    // 버퍼가 항목마다 자라 앞서 담은 슬라이스가 **전부 댕글링**이 되고 그 바이트가 자식 stdin 으로
+    // 나갔다(적대적 검증 8 회차). 빌려 쓰면 그 함정 자체가 없다.
+    var child_buf: [git_command.check_ignore_batch][]const u8 = undefined;
+    const got = self.file_tree.childPathsFrom(pending.dir, pending.next, &child_buf);
+    if (got == 0) return dropFirstIgnorePending(self);
+
     self.git_ignore_query_paths.clearRetainingCapacity();
-    for (entries) |entry| {
-        if (self.git_ignore_query_paths.items.len >= git_command.check_ignore_batch) break;
-        const start = self.git_ignore_query_buf.items.len;
-        self.git_ignore_query_buf.appendSlice(self.allocator, dir_path) catch break;
-        self.git_ignore_query_buf.append(self.allocator, '/') catch break;
-        self.git_ignore_query_buf.appendSlice(self.allocator, entry.name) catch break;
-        const abs = self.git_ignore_query_buf.items[start..];
-        // 저장소 루트 접두를 떼어 상대경로로 만든다. 밖이면 건너뛴다(그 항목은 판정 없이 남는다).
+    var consumed: usize = 0;
+    for (child_buf[0..got]) |abs| {
+        // 저장소 루트 접두를 떼어 상대경로로 만든다. 밖이면 **건너뛰되 소비한 것으로 센다** —
+        // 안 그러면 커서가 그 자리에 멈춰 같은 배치를 영원히 다시 보낸다.
         //
         // **`startsWith` 만으로는 부족하다** — 그것은 `/a/proj` 를 `/a/project/x` 의 루트로 통과시켜
-        // `rel = "ect/x"` 라는 쓰레기를 만든다. `abs` 는 파일 트리의 `dir_path`, `repo` 는 터미널 cwd 에서
-        // 거슬러 올라간 값이라 **서로 다른 출처**이고 형제 접두가 실제로 가능하다. 그 경로가
-        // `check-ignore` 로 가면 판정이 어긋나 `.gitignore` 된 항목이 흐려지지 않는다.
-        // 경계 검사와 후행 구분자 처리를 함께 갖는 `path_shape.relativeUnderRoot` 가 단일 출처다
-        // (계약 §5.2 ⒝ — 문서가 "두 곳" 이라 한 것은 `root.len + 1` 철자만 센 것이었다).
-        const rel = path_shape.relativeUnderRoot(abs, repo) orelse {
-            self.git_ignore_query_buf.shrinkRetainingCapacity(start);
-            continue;
-        };
-        if (rel.len == 0) {
-            self.git_ignore_query_buf.shrinkRetainingCapacity(start);
-            continue;
-        }
-        // `rel` 은 `abs` 의 꼬리다 — 그 자리를 **버퍼 기준 오프셋**으로 적어 둔다.
-        const rel_off = start + (abs.len - rel.len);
-        self.git_ignore_query_spans.append(self.allocator, .{ .off = rel_off, .len = rel.len }) catch break;
+        // `rel = "ect/x"` 라는 쓰레기를 만든다. 경계 검사와 후행 구분자 처리를 함께 갖는
+        // `path_shape.relativeUnderRoot` 가 단일 출처다.
+        consumed += 1;
+        const rel = path_shape.relativeUnderRoot(abs, repo) orelse continue;
+        if (rel.len == 0) continue;
+        self.git_ignore_query_paths.append(self.allocator, rel) catch break;
     }
-    // **버퍼가 확정된 뒤에** 슬라이스를 만든다.
-    for (self.git_ignore_query_spans.items) |span| {
-        self.git_ignore_query_paths.append(
-            self.allocator,
-            self.git_ignore_query_buf.items[span.off..][0..span.len],
-        ) catch break;
-    }
-    if (self.git_ignore_query_paths.items.len == 0) return;
-    // ⚠️ **이 번호를 답과 대조하지 않는다 — 그리고 그것이 의도다.** 다른 읽기는 `result.request_id` 를
-    // in-flight 와 맞춰 낡은 답을 버리는데(`drainGitStatus`), 여기서는 그 대조가 **할 일이 없다**:
-    // 백엔드가 `check-ignore` 자리를 하나만 두고 **걷어가지 않은 답이 있으면 새 요청을 거절**하므로,
-    // 존재할 수 있는 답은 언제나 마지막으로 보낸 그것 하나다. 게다가 이 답의 틀은 번호가 아니라
-    // **답이 들고 오는 `repo` 와 `asked`** 다 — 대조를 더해도 막을 것이 없고, 「무엇을 막는지 아무도
-    // 모르는 조건」만 남는다(적대적 검증 16 회차 — 소비처를 찾다가 이 자리를 다시 봤다).
-    //
-    // 번호 자체는 **관측점**으로 남긴다: 판정자가 「물으려고는 했나」를 이 값의 증가로 본다.
-    self.git_ignore_request_id +%= 1;
-    // **거절되면 그 디렉터리를 적어 둔다**(`git_ignore_retry_dirs` 주석). 옛 코드는 「다음 스캔이 다시
-    // 묻는다」며 그냥 넘어갔는데, 이 질의를 부르는 자리는 스캔 결과 드레인 하나뿐이라 **다시 스캔할
-    // 이유가 없으면 영영 안 묻는다.**
-    if (!self.git_backend.?.submitCheckIgnore(git_exe, repo, self.git_ignore_query_paths.items, self.git_ignore_request_id)) {
-        rememberIgnoreRetry(self, dir_path);
-    }
-}
-
-/// 재시도 목록 상한. 넘으면 **더 넣지 않는다** — 못 들어간 디렉터리는 판정 없이 남을 뿐이고
-/// (모르면 흐리게 하지 않는다), 사용자가 다시 펼치면 그때 스캔이 또 묻는다.
-const max_ignore_retry_dirs = 64;
-
-fn rememberIgnoreRetry(self: *AppSession, dir_path: []const u8) void {
-    for (self.git_ignore_retry_dirs.items) |d| {
-        if (std.mem.eql(u8, d, dir_path)) return; // 같은 디렉터리를 두 번 줄 세우지 않는다
-    }
-    if (self.git_ignore_retry_dirs.items.len >= max_ignore_retry_dirs) return;
-    const owned = self.allocator.dupe(u8, dir_path) catch return;
-    self.git_ignore_retry_dirs.append(self.allocator, owned) catch {
-        self.allocator.free(owned);
+    if (self.git_ignore_query_paths.items.len == 0) {
+        pending.next += consumed; // 물을 것이 하나도 없던 구간도 지나간다
         return;
-    };
-}
-
-/// 거절됐던 디렉터리 **하나**를 다시 스캔하게 건다. 스캔이 끝나면 그 드레인이 흐림을 다시 묻는다 —
-/// 여기서 직접 묻지 않는 이유는 **그 디렉터리의 항목 목록이 스캔에만 있기** 때문이다(트리는 화면용
-/// 행만 들고 있고, 접힌 하위의 목록은 없다).
-///
-/// **백엔드가 한가할 때만** 건다. 아니면 다시 거절당해 스캔만 도는 헛바퀴가 된다.
-/// 한 tick 에 하나씩 — 한꺼번에 걸면 그중 하나만 통과하고 나머지가 또 줄을 선다.
-pub fn retryPendingIgnore(self: *AppSession) void {
-    if (self.git_ignore_retry_dirs.items.len == 0) return;
-    // ⚠️ **탐색기를 보고 있을 때만 다시 건다**(적대적 검증 19 회차). 이 재시도는 **디스크 스캔**을
-    // 거는 일이고, 흐림은 탐색기 뷰에서만 쓰인다 — 사용자가 소스 컨트롤 탭에 있거나 도크를 닫아 둔
-    // 동안에도 매 tick 걸면 **아무도 안 보는 화면을 위해 FS I/O 를 돈다.**
-    //
-    // 바로 위 `drainGitStatus` 가 목록 읽기를 `dock.view == .source_control` 로 거는 것과 **같은
-    // 규율**이다. 목록은 그대로 남아 있으므로, 돌아오면 그 다음 tick 이 이어서 건다.
-    if (!dock_ops.dockVisible(self) or self.dock.view != .explorer) return;
-    var backend = &(self.git_backend orelse return);
-    if (backend.ignoreBusy()) return;
-    const dir = self.git_ignore_retry_dirs.items[0];
-
-    // 그 사이 탐색기가 다른 곳을 보게 됐으면 **버린다** — 화면에 없는 경로를 영원히 다시 걸 이유가 없다.
-    if (!dirIsUnderSomeRoot(self, dir)) return dropFirstIgnoreRetry(self);
-
-    // ⚠️ **성공한 뒤에만 목록에서 뺀다**(적대적 검증 15 회차). 처음에는 먼저 빼고 걸었는데, 그러면
-    // 거는 데 실패한 순간 그 디렉터리가 **또 잊힌다** — 14 회차에 고친 바로 그 모양이 한 층 위에서
-    // 되살아난 것이었다.
-    self.file_tree.requeueScan(dir) catch return; // 다음 tick 이 다시 건다
-    // ⚠️ **그리고 성공 반환은 「줄에 들어갔다」가 아니다**(`hasScanRequest` 주석). 스캔 줄이 꽉 차면
-    // 세부 요청을 전부 버리고 root 만 다시 예약한 뒤 성공으로 돌아온다 — 그때 이 디렉터리는 안 들어갔다.
-    if (!self.file_tree.hasScanRequest(dir)) return; // 목록에 남겨 둔다
-    dropFirstIgnoreRetry(self);
-}
-
-fn dropFirstIgnoreRetry(self: *AppSession) void {
-    const dir = self.git_ignore_retry_dirs.orderedRemove(0);
-    self.allocator.free(dir);
-}
-
-/// 그 디렉터리가 지금 탐색기가 보는 어느 root 아래에 있나. 루트 자신도 포함이다.
-fn dirIsUnderSomeRoot(self: *AppSession, dir: []const u8) bool {
-    var i: usize = 0;
-    while (i < self.file_tree.rootCount()) : (i += 1) {
-        const root = self.file_tree.rootAt(i) orelse continue;
-        if (std.mem.eql(u8, root, dir)) return true;
-        if (path_shape.relativeUnderRoot(dir, root) != null) return true;
     }
-    return false;
+    self.git_ignore_request_id +%= 1;
+    // 거절되면(자리가 차 있음) **커서를 그대로 둔다** — 다음 tick 이 같은 배치를 다시 보낸다.
+    // 목록이 트리에 있으므로 디스크를 다시 읽을 일이 없다.
+    if (!backend.submitCheckIgnore(git_exe, repo, self.git_ignore_query_paths.items, self.git_ignore_request_id)) return;
+    pending.next += consumed;
+    if (pending.next >= total) dropFirstIgnorePending(self);
+}
+
+fn dropFirstIgnorePending(self: *AppSession) void {
+    const pending = self.git_ignore_pending.orderedRemove(0);
+    self.allocator.free(pending.dir);
 }
 
 /// `check-ignore` 결과를 트리에 반영한다. 무시된 것으로 돌아온 경로만 표시하고, 이번 배치에서 물었던

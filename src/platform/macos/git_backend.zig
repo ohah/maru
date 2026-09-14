@@ -822,7 +822,24 @@ pub const Backend = struct {
         // 그 슬라이스는 **할당한 것과 길이가 다르다** — 뒤에서 `free` 하는 자리들(`releaseIgnoreJob`·
         // `IgnoreResult.deinit`)이 배열 크기를 슬라이스 길이로 읽으므로 **엉뚱한 크기로 반납**한다.
         // 하나라도 못 담으면 통째로 물리고 이 tick 은 안 묻는다 — 다음 스캔이 다시 묻는다.
-        const owned = state.allocator.alloc([]u8, @min(paths.len, git_command.check_ignore_batch)) catch return self.releaseIgnoreJob(job);
+        // ⚠️ **여기서 «보낼 만큼만» 담는다.** 예전에는 개수 상한만 보고 전부 담았는데, 실제로 나가는
+        // 것은 stdin 페이로드라 **바이트 상한에서 잘린다** — 그러면 `asked` 에는 보낸 적 없는 경로가
+        // 섞이고, 드레인이 그 행들의 표시를 지운다(아무도 안 물어봤는데 흐림이 풀린다). 경로가 길고
+        // 항목이 많은 **깊은 디렉터리**에서 실제로 닿는다(512 × 128 B 면 넘는다).
+        //
+        // 「물어본 것」과 「보낸 것」이 갈리면 한쪽이 낡는다 — 여기서 하나로 만든다(적대적 검증 16 회차).
+        const take = blk: {
+            var budget: usize = 0;
+            var n: usize = 0;
+            while (n < @min(paths.len, git_command.check_ignore_batch)) : (n += 1) {
+                const next = budget + paths[n].len + 1;
+                if (next > git_command.max_check_ignore_stdin_bytes) break;
+                budget = next;
+            }
+            break :blk n;
+        };
+        if (take == 0) return self.releaseIgnoreJob(job);
+        const owned = state.allocator.alloc([]u8, take) catch return self.releaseIgnoreJob(job);
         var filled: usize = 0;
         for (paths[0..owned.len]) |path| {
             owned[filled] = state.allocator.dupe(u8, path) catch break;
@@ -1433,9 +1450,13 @@ fn ignoreWorker(job: *Job) void {
     // **필요한 만큼만 잡는다.** 처음에는 상한(64 KiB)을 통째로 잡았는데, 이 워커는 **디렉터리를 읽을
     // 때마다** 돈다 — 실제 페이로드는 항목 수에 비례해 보통 수백 바이트다(이 저장소 루트에서 199).
     // 상한은 「여기서 끊는다」는 **정책**이지 「여기까지 잡아 둔다」가 아니다.
+    //
+    // 그리고 이 크기는 **자르지 않는다** — 담을 때 이미 바이트 상한을 지켰으므로(`submitCheckIgnore`)
+    // `job.ignore_paths` 는 통째로 들어간다. 여기서 다시 `@min` 을 걸면 「보낸 것」과 「물어본 것」이
+    // 갈리는 자리가 되살아난다.
     var want: usize = 0;
     for (job.ignore_paths) |path| want += path.len + 1;
-    const payload_buf: []u8 = state.allocator.alloc(u8, @min(want, git_command.max_check_ignore_stdin_bytes)) catch &.{};
+    const payload_buf: []u8 = state.allocator.alloc(u8, want) catch &.{};
     defer if (payload_buf.len > 0) state.allocator.free(payload_buf);
     const payload = git_command.checkIgnoreStdin(job.ignore_paths, payload_buf);
     if (payload.len > 0) {
@@ -4034,6 +4055,73 @@ test "원격 쓰기: 원격 라우팅이 떨어져도 상대경로 git 을 실�
     defer allocator.free(out.stderr_bytes);
     // 소켓이 없으니 ssh 가 **자기 실패**로 끝난다 — git 이 한 말이 아니다(5회차와 같은 축).
     try std.testing.expectEqual(@as(c_int, 255), out.exit_code);
+}
+
+test "바이트 상한에 걸려 못 보낸 경로는 «물어본 목록»에도 없다" {
+    // **적대적 검증 16 회차(2026-09-14).** 개수 상한(512)만 보고 전부 담았는데, 실제로 나가는 것은
+    // stdin 페이로드라 **바이트 상한(64 KiB)에서 잘린다.** 그러면 `asked` 에는 **보낸 적 없는
+    // 경로**가 섞이고, 드레인이 그 행들의 표시를 지운다 — 아무도 안 물어봤는데 흐림이 풀린다.
+    //
+    // 경로가 길고 항목이 많은 **깊은 디렉터리**에서 실제로 닿는다: 512 × 128 B 면 이미 넘는다.
+    // 「물어본 것」과 「보낸 것」이 갈리면 한쪽이 낡는다 — 담는 자리에서 하나로 만들었고, 여기서 센다.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const repo_len = tmp.dir.realPath(io, &repo_buf) catch return error.SkipZigTest;
+    const repo = repo_buf[0..repo_len];
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const git_exe = locate(&exe_buf) orelse return error.SkipZigTest;
+    if (!initRepoForTest(allocator, git_exe, repo)) return error.SkipZigTest;
+
+    // 경로 하나가 200 B — 512 개면 약 102 KiB 라 64 KiB 상한을 확실히 넘는다.
+    const one_len: usize = 200;
+    var names: std.ArrayList(u8) = .empty;
+    defer names.deinit(allocator);
+    var paths: std.ArrayList([]const u8) = .empty;
+    defer paths.deinit(allocator);
+    var i: usize = 0;
+    while (i < git_command.check_ignore_batch) : (i += 1) {
+        const off = names.items.len;
+        var one: [256]u8 = undefined;
+        @memset(one[0..one_len], 'p');
+        _ = try std.fmt.bufPrint(one[0..8], "{d:0>8}", .{i}); // 서로 다른 이름
+        try names.appendSlice(allocator, one[0..one_len]);
+        try paths.append(allocator, names.items[off..][0..one_len]);
+    }
+    // **모으는 동안 자란 버퍼**라 슬라이스가 밀렸다 — 오프셋으로 다시 만든다(그 함정은 8 회차에서 봤다).
+    for (paths.items, 0..) |*slot, n| slot.* = names.items[n * one_len ..][0..one_len];
+
+    var backend = try Backend.init(io);
+    defer backend.deinit();
+    try std.testing.expect(backend.submitCheckIgnore(git_exe, repo, paths.items, 11));
+
+    var taken: ?IgnoreResult = null;
+    var spins: usize = 0;
+    while (spins < 1000) : (spins += 1) {
+        taken = backend.takeIgnoreResult();
+        if (taken != null) break;
+        var ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+        _ = std.c.nanosleep(&ts, null);
+    }
+    var res = taken orelse return error.IgnoreReadNeverCompleted;
+    defer res.deinit(worker_allocator);
+
+    try std.testing.expect(res.ok); // 잘렸어도 **명령 자체는 성공**해야 한다
+    // ⑴ 전부는 못 갔다 — 전제(이 판정자가 상한에 실제로 닿았나).
+    try std.testing.expect(res.asked.len < paths.items.len);
+    // ⑵ 그리고 **간 것과 같다**: 물어본 목록의 바이트 합이 상한 안이다.
+    var sent: usize = 0;
+    for (res.asked) |a| sent += a.len + 1;
+    try std.testing.expect(sent <= git_command.max_check_ignore_stdin_bytes);
+    // ⑶ 한 칸 더 넣었으면 넘었을 것 — 「덜 보냈다」가 아니라 「담을 수 있는 만큼 보냈다」.
+    try std.testing.expect(sent + one_len + 1 > git_command.max_check_ignore_stdin_bytes);
+    // ⑷ 내용이 앞에서부터 그대로다.
+    try std.testing.expectEqualStrings(paths.items[0], res.asked[0]);
+    try std.testing.expectEqualStrings(paths.items[res.asked.len - 1], res.asked[res.asked.len - 1]);
 }
 
 test "check-ignore 답은 «물어본 목록»을 통째로 들고 온다 — 실제 백엔드로" {

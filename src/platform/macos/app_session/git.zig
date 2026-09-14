@@ -1215,6 +1215,15 @@ pub fn termCwdForDisplay(self: *AppSession, term: *Term, buf: *[std.fs.max_path_
 /// 서고 나머지는 판정 없이 남는다 — 흐리게 하지 않는 쪽이라 틀린 표시가 되지는 않는다. 배치를 여러 번
 /// 돌리는 것은 후속(요청 큐가 필요하다).
 pub fn requestIgnoredForPaths(self: *AppSession, dir_path: []const u8, entries: anytype) void {
+    // ⚠️ **백엔드가 없으면 여기서 만들지 않는다 — 그리고 그래서 탐색기 단독으로는 흐림이 안 뜬다.**
+    //
+    // 이 백엔드를 **만드는 자리가 전부 소스 컨트롤 경로**다(목록 읽기·히스토리·머리 줄). 그래서 도크를
+    // 탐색기로만 쓰는 동안에는 영영 null 이고 이 줄에서 되돌아간다 — 질의를 만드는 코드는 멀쩡한데
+    // 첫 줄에서 끝난다(적대적 검증 2026-09-14, 실물 캡처로 확인).
+    //
+    // **여기서 만들어 봤다가 되돌렸다**: 그러면 파일 트리 드레인이 git 프로세스를 띄우는 경로가 되어,
+    // 그 전까지 이 길을 안 타던 판정자들이 실제 `check-ignore` 를 부르며 **죽었다**(shard abort 134).
+    // 백엔드 수명을 탐색기 축까지 넓히는 것은 그 축의 결정이라 **여기서 임의로 하지 않는다.**
     if (self.git_backend == null) return;
     // ⚠️ **저장소는 «방금 읽은 그 디렉터리»에서 나온다 — 도크가 기억하는 것이 아니다.**
     //
@@ -1282,6 +1291,9 @@ pub fn drainIgnoreResults(self: *AppSession) void {
         // 때 쓴 저장소와 다를 수 있다(탐색기가 터미널과 다른 저장소를 볼 때·원격 SCM 목록을 본 뒤).
         // 그러면 상대경로가 **엉뚱한 루트**에 붙어 흐림이 안 서거나 남의 행이 흐려진다.
         if (res.repo.len == 0) continue; // 틀을 모르면 그 답은 버린다(모르면 흐리게 하지 않는다)
+        // **답이 왔다** — 이제 흐림을 그려도 되는 상태다(`git_ignore_answered` 주석). 이 자리가
+        // 「물어봤나」의 유일한 출처다: 거절·실패는 여기 못 오므로 그때는 여전히 거짓이다.
+        self.git_ignore_answered = true;
         // 물었던 경로를 먼저 지우고(이번 답이 권위다), 무시된 것만 다시 세운다.
         for (self.git_ignore_query_paths.items) |rel| {
             var abs_buf: [std.fs.max_path_bytes]u8 = undefined;

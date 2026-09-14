@@ -6125,6 +6125,10 @@ pub const AppSession = struct {
     /// 그 답이 **언제** 왔나(monotonic ns). 실패한 읽기를 쉬었다 다시 거는 판정에만 쓴다 — 머리 줄
     /// 요약(`RepoStatusEntry.read_ns`)이 쓰는 것과 같은 축이다.
     scm_log_read_ns: i128 = 0,
+    /// **`check-ignore` 답을 한 번이라도 받았나**(탐색기 흐림의 「물어봤나」). 그 전에는 소스 컨트롤
+    /// 목록 결과(`git_result`)를 대리로 썼는데, 그것은 **다른 축**이라 탐색기만 쓰는 동안 흐림이 영영
+    /// 안 떴다(적대적 검증 2026-09-14). 답이 온 적이 없으면 거짓 — 「모르면 흐리게 하지 않는다」.
+    git_ignore_answered: bool = false,
     /// 그 출력이 상한에서 잘렸나. **조용히 자르지 않는다**(목록 읽기와 같은 규율).
     scm_log_truncated: bool = false,
     /// 히스토리에서 고른 커밋의 **OID**(P4). 파일 행 강조와 다른 축이라 값을 따로 든다.
@@ -71617,6 +71621,14 @@ test "탐색기 무시 표시는 «물을 때의 저장소»에 붙는다 — �
     }
     try std.testing.expect(saw_ignored); // 전제: 그 행이 화면에 있다
     try std.testing.expect(saw_keep);
+
+    // ⚠️ **그리고 그 표시가 화면까지 닿아야 한다**(적대적 검증 2026-09-14 — 실물 캡처로 발견).
+    // 도크 투영은 「물어봤나」를 **소스 컨트롤 목록 결과**(`git_result`)로 대리하고 있었다. 그 값은
+    // 다른 축이라 **탐색기만 쓰는 동안 영영 `null`** 이고, 답이 와 있어도 흐림이 한 번도 안 떴다.
+    try std.testing.expect(session.git_ignore_answered); // 드레인이 그 사실을 적었다
+    try std.testing.expect(session.git_result == null); // 소스 컨트롤 목록은 읽은 적이 없다
+    // 옛 코드는 여기서 `git_result != null` 을 봤고, 그 값이 `null` 이라 **모든 행이 흐림 없음**이었다.
+    try std.testing.expect(file_tree_dock_ops.ignoredKnownForTest(session));
 }
 
 test "«다시 읽어라» 표식만 남은 목록도 기계가 갈리면 버린다 (누적 적대적 검증)" {

@@ -10342,7 +10342,12 @@ pub const AppSession = struct {
         // 지금 내용이 보이는 디렉터리를 전부 다시 읽게 한다(`invalidateExpanded`). 사용자가 규칙 파일을
         // 고치는 일은 드물고, 그 범위는 **펼친 것**으로 유계다(그 함수 주석의 근거 그대로).
         // 중첩 `.gitignore` 도 같은 이름이라 같은 갈래를 탄다.
-        if (git_ops.isIgnoreRuleFile(changed_path)) {
+        // ⚠️ **무시된 디렉터리 «안» 의 규칙 파일은 건너뛴다**(적대적 검증 18 회차). git 은 무시된
+        // 디렉터리로 내려가지 않으므로 그 아래의 `.gitignore` 는 화면의 판정을 하나도 못 바꾼다
+        // (`hasIgnoredAncestor` 주석의 실측). 이 저장소만 해도 `.gitignore` 가 68 개인데 그중
+        // 대부분이 `zig-pkg/` 안에 있고 그 디렉터리는 무시된다 — `zig build` 한 번이 전체 재스캔을
+        // 수십 번 부를 뻔했다.
+        if (git_ops.isIgnoreRuleFile(changed_path) and !self.file_tree.hasIgnoredAncestor(changed_path)) {
             _ = self.file_tree.invalidateExpanded() catch false;
         } else {
             self.file_tree.invalidatePath(changed_path) catch {};
@@ -71953,6 +71958,22 @@ test "`.gitignore` 가 바뀌면 «펼쳐 둔 하위까지» 다시 읽는다" {
     // ⑶ 중첩 규칙 파일도 같은 갈래다 — 이름으로 판정하므로 어느 깊이에 있든 같다.
     var nested_buf: [std.fs.max_path_bytes]u8 = undefined;
     const nested = try std.fmt.bufPrint(&nested_buf, "{s}/.gitignore", .{sub});
+    session.fileTreeChanged(nested);
+    try std.testing.expect(session.file_tree.hasScanRequest(repo));
+    try std.testing.expect(session.file_tree.hasScanRequest(sub));
+    while (session.file_tree.takeScanRequest()) |queued| allocator.free(queued);
+
+    // ⑷ **그런데 무시된 디렉터리 «안» 의 규칙 파일은 건너뛴다**(적대적 검증 18 회차 — 비용 축).
+    //    git 은 무시된 디렉터리로 안 내려가므로 그 아래 규칙은 화면의 답을 하나도 못 바꾼다. 그걸
+    //    모르면 이 저장소의 `zig-pkg/` 하나만으로 `zig build` 한 번이 전체 재스캔을 수십 번 부른다.
+    session.file_tree.markIgnored(sub, true);
+    session.fileTreeChanged(nested);
+    try std.testing.expect(!session.file_tree.hasScanRequest(repo)); // 전체 재스캔이 아니다
+    try std.testing.expect(session.file_tree.hasScanRequest(sub)); //  그 자리만 — 보통 파일과 같은 길
+    while (session.file_tree.takeScanRequest()) |queued| allocator.free(queued);
+
+    // ⑸ 그 표시를 되돌리면 다시 전체를 읽는다 — 「한 번 건너뛰면 영영 안 본다」가 아니다.
+    session.file_tree.markIgnored(sub, false);
     session.fileTreeChanged(nested);
     try std.testing.expect(session.file_tree.hasScanRequest(repo));
     try std.testing.expect(session.file_tree.hasScanRequest(sub));

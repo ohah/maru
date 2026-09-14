@@ -1119,6 +1119,27 @@ pub const Tree = struct {
         return false;
     }
 
+    /// 그 경로의 **조상 중 무시된 디렉터리**가 있나(경로 자신은 안 본다).
+    ///
+    /// git 은 **무시된 디렉터리로 내려가지 않는다** — 그 아래의 `.gitignore` 는 `!` 되살리기 규칙을
+    /// 써도 답을 못 바꾼다(실측 2026-09-14: `vendor/` 를 무시한 저장소에서 `vendor/pkg/.gitignore` 에
+    /// `!keep.txt` 를 넣어도 `keep.txt` 는 여전히 무시됨). 그래서 그런 규칙 파일이 바뀌어도 화면의
+    /// 판정은 하나도 안 바뀐다 — 그것을 알면 **전체 재스캔을 안 해도 된다.**
+    ///
+    /// **아직 안 물어본 조상은 「무시 아님」으로 본다.** 모르면 다시 읽는 쪽으로 기울어야 틀린 화면이
+    /// 남지 않는다(비용은 그쪽이 크지만, 잘못 말하는 것보다 낫다).
+    pub fn hasIgnoredAncestor(self: *Tree, path: []const u8) bool {
+        var cursor = path;
+        while (std.fs.path.dirname(cursor)) |parent| {
+            if (parent.len <= 1) return false;
+            if (self.findNode(parent)) |node| {
+                if (node.ignored) return true;
+            }
+            cursor = parent;
+        }
+        return false;
+    }
+
     pub fn buildRows(self: *const Tree, allocator: std.mem.Allocator, open: []const OpenState, out: *std.ArrayList(Row)) !void {
         out.clearRetainingCapacity();
         if (self.roots.items.len == 0) {

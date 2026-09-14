@@ -1896,16 +1896,24 @@ fn runArgvWithEnv(
     const spawned = try spawnCapture(allocator, &argv, env_ptrs.items.ptr, .stdout_only, null);
     defer allocator.free(spawned.stderr_bytes); // 읽기 경로에서는 항상 빈 슬라이스다
     errdefer allocator.free(spawned.stdout_bytes);
-    // **127·255 는 이름을 붙여 올린다**(RS4 §2.2 ⑺). 그 둘은 「git 이 거부했다」가 아니라 각각
-    // 「명령을 못 찾았다」·「거기까지 못 갔다」다. 로컬 호출자는 이 오류를 안 보는데(로컬 git 은 그
-    // 값을 안 쓴다) `runOn` 이 원격일 때만 이야기로 바꾼다.
-    if (remote_exit_codes) {
-        if (spawned.exit_code == 127) return error.ExitCommandNotFound;
-        if (spawned.exit_code == 255) return error.ExitTransportFailed;
-    }
-    if (spawned.exit_code != 0) return error.GitFailed;
     // 상한에 걸렸는지는 길이로 판정한다 — 잘렸으면 목록 끝에 그 사실을 표시한다(조용히 일부만 보여 주지 않는다).
-    return .{ .bytes = spawned.stdout_bytes, .truncated = spawned.stdout_bytes.len >= max_output_bytes };
+    const capped = spawned.stdout_bytes.len >= max_output_bytes;
+    // ⚠️ **상한에서 끊었으면 종료 코드는 «우리가» 만든 것이다.** `readAllFd` 는 상한에서 읽기를 멈추고
+    // 자식을 EPIPE 로 끊는데(그것이 이 파일의 의도다), 그러면 자식은 신호로 죽어 `reapPid` 가 -1 을
+    // 준다. 그 값을 실패로 읽으면 **방금 받아 둔 잘린 내용을 통째로 버린다** — 게다가 자식이 우리보다
+    // 먼저 다 써 버리면 0 이라, 같은 파일이 **운에 따라** 열리거나 안 열렸다(실측 2026-09-14: 상한을
+    // 넘는 blob 을 읽는 판정자가 10 회 중 1 회 빨갰고, 그때 세 판 중 둘이 0 바이트로 왔다).
+    if (!capped) {
+        // **127·255 는 이름을 붙여 올린다**(RS4 §2.2 ⑺). 그 둘은 「git 이 거부했다」가 아니라 각각
+        // 「명령을 못 찾았다」·「거기까지 못 갔다」다. 로컬 호출자는 이 오류를 안 보는데(로컬 git 은 그
+        // 값을 안 쓴다) `runOn` 이 원격일 때만 이야기로 바꾼다 — 상한에 닿은 읽기에는 해당이 없다.
+        if (remote_exit_codes) {
+            if (spawned.exit_code == 127) return error.ExitCommandNotFound;
+            if (spawned.exit_code == 255) return error.ExitTransportFailed;
+        }
+        if (spawned.exit_code != 0) return error.GitFailed;
+    }
+    return .{ .bytes = spawned.stdout_bytes, .truncated = capped };
 }
 
 /// `runArgvWithEnv` 의 Windows 갈래. **POSIX 갈래와 같은 계약을 지킨다** — 읽기라 stdout 만 받고,

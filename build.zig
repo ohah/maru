@@ -2646,9 +2646,13 @@ pub fn build(b: *std.Build) void {
                 "/usr/bin/grep -Eq '^output_events=0$' \"$summary\"; " ++
                 "/usr/bin/grep -Eq '^terminal_input_events=0$' \"$summary\"; " ++
                 "/usr/bin/grep -Eq 'runtime-handle=\"1234567890abcdef1234567890abcdef:fedcba0987654321fedcba0987654321\" runtime-state=\"ended\"' \"$checkpoint\"; " ++
-                "test ! -e \"$checkpoint.bak\"; test ! -e \"$root/Library/Application Support/maru/.workspace.v1.tmp\"; " ++
+                "test -f \"$checkpoint.bak\"; test ! -e \"$root/Library/Application Support/maru/.workspace.v1.bak.tmp\"; " ++
+                "test ! -e \"$root/Library/Application Support/maru/.workspace.v1.tmp\"; " ++
                 "}; " ++
-                "run_once; cp \"$checkpoint\" \"$root/after-first.v1\"; run_once; " ++
+                "cp \"$checkpoint\" \"$root/before-first.v1\"; run_once; " ++
+                "cmp -s \"$root/before-first.v1\" \"$checkpoint.bak\"; " ++
+                "cp \"$checkpoint\" \"$root/after-first.v1\"; run_once; " ++
+                "cmp -s \"$root/after-first.v1\" \"$checkpoint.bak\"; " ++
                 "cmp -s \"$root/after-first.v1\" \"$checkpoint\"",
         });
         run_session_host_r1_tombstone.setCwd(b.path("."));
@@ -2695,7 +2699,8 @@ pub fn build(b: *std.Build) void {
         const run_session_host_c4_quit_cancel = b.addSystemCommand(&.{
             "sh", "-eu", "-c",
             "success_root=\"$PWD/zig-out/maru-macos-app/session-host-c4-success-home\"; success_session_root=\"/tmp/maru-product-c4-success-$$\"; success_parent=\"$success_root/Library/Application Support/maru\"; " ++
-                "success_checkpoint=\"$success_parent/workspace.v1\"; success_log=\"$success_root/app.stderr\"; " ++
+                "success_checkpoint=\"$success_parent/workspace.v1\"; success_log=\"$success_root/app.stderr\"; success_before=\"$success_root/before-final.v1\"; " ++
+                "cp \"$success_checkpoint\" \"$success_before\"; " ++
                 "success_inode=$(/usr/bin/stat -f '%i' \"$success_checkpoint\"); " ++
                 "HOME=\"$success_root\" CFFIXED_USER_HOME=\"$success_root\" MARU_SESSION_HOST_ROOT=\"$success_session_root\" ./zig-out/Maru.app/Contents/MacOS/maru-macos-app 2>\"$success_log\" & success_pid=$!; " ++
                 // **실패하면 앱 stderr 를 뱉는다.** 이 스모크는 앱 로그를 파일로 받아 놓고 `sh -eu` 로
@@ -2712,7 +2717,7 @@ pub fn build(b: *std.Build) void {
                 "test \"$(/usr/bin/grep -c 'workspace checkpoint: final-quit cancelled' \"$success_log\" || true)\" -eq 0; " ++
                 "test \"$(/usr/bin/stat -f '%i' \"$success_checkpoint\")\" != \"$success_inode\"; " ++
                 "/usr/bin/grep -Eq '^maru\\.workspace\\.v1$' \"$success_checkpoint\"; " ++
-                "test ! -e \"$success_checkpoint.bak\"; test ! -e \"$success_parent/.workspace.v1.tmp\"; " ++
+                "cmp -s \"$success_before\" \"$success_checkpoint.bak\"; test ! -e \"$success_parent/.workspace.v1.bak.tmp\"; test ! -e \"$success_parent/.workspace.v1.tmp\"; " ++
                 "root=zig-out/maru-macos-app/session-host-c4-home; session_root=\"/tmp/maru-product-c4-failure-$$\"; parent=\"$root/Library/Application Support/maru\"; " ++
                 "checkpoint=\"$parent/workspace.v1\"; lease=\"$parent/workspace.v1.lock\"; log=\"$root/app.stderr\"; " ++
                 "checkpoint_inode=$(/usr/bin/stat -f '%i' \"$checkpoint\"); lease_inode=$(/usr/bin/stat -f '%i' \"$lease\"); " ++
@@ -2729,7 +2734,8 @@ pub fn build(b: *std.Build) void {
                 "cmp -s tests/fixtures/session-host/ended-runtime-workspace.v1 \"$checkpoint\"; " ++
                 "test \"$(/usr/bin/stat -f '%i' \"$checkpoint\")\" = \"$checkpoint_inode\"; " ++
                 "test \"$(/usr/bin/stat -f '%i' \"$lease\")\" = \"$lease_inode\"; " ++
-                "test ! -e \"$checkpoint.bak\"; test ! -e \"$parent/.workspace.v1.tmp\"; " ++
+                "cmp -s tests/fixtures/session-host/ended-runtime-workspace.v1 \"$checkpoint.bak\"; " ++
+                "test ! -e \"$parent/.workspace.v1.bak.tmp\"; test ! -e \"$parent/.workspace.v1.tmp\"; " ++
                 "kill -KILL \"$pid\"; wait \"$pid\" 2>/dev/null || true; chflags nouchg \"$checkpoint\"; trap - EXIT",
         });
         run_session_host_c4_quit_cancel.setCwd(b.path("."));
@@ -19286,7 +19292,7 @@ pub fn build(b: *std.Build) void {
                 .filters = &.{"P4 C"},
             });
             const run_checkpoint_file_tests = b.addRunArtifact(checkpoint_file_tests);
-            run_checkpoint_file_tests.addArg("--maru-expect-tests=10");
+            run_checkpoint_file_tests.addArg("--maru-expect-tests=17");
             run_checkpoint_file_tests.setCwd(b.path("."));
             workspace_checkpoint_file_step.dependOn(&run_checkpoint_file_tests.step);
             test_step.dependOn(&run_checkpoint_file_tests.step);

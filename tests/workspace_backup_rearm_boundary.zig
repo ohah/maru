@@ -16,8 +16,9 @@
 //! ## 이 판정자가 재는 것
 //!
 //! 해제가 **복원 성공 쪽에만** 걸리는지, 그리고 `ensureBackup` 과 **같은 안전 계약**(현재 UID 의
-//! regular file, `NOFOLLOW`)으로 지우는지를 잰다. 남의 것이나 symlink 를 지우는 편이 낡은 `.bak` 을
-//! 남기는 것보다 훨씬 나쁘다.
+//! regular file, `NOFOLLOW`)으로 지우는지를 잰다. 이어지는 모든 정상 publication이 create-once backup을
+//! 다시 잡아 해제와 보존이 실제 한 cycle인지도 고정한다. 남의 것이나 symlink 를 지우는 편이 낡은
+//! `.bak` 을 남기는 것보다 훨씬 나쁘다.
 
 const std = @import("std");
 
@@ -40,19 +41,30 @@ test "복원이 성공하면 .bak 을 해제한다 — 안전 계약을 지키�
     defer a.free(abi);
 
     // ① 해제 구현이 있다.
-    const fn_at = std.mem.indexOf(u8, impl, "pub fn releaseBackup(") orelse {
+    _ = std.mem.indexOf(u8, impl, "pub fn releaseBackup(") orelse {
         std.debug.print("`.bak` 해제 경로가 없다 — 첫 사본이 영구히 눌러앉는다\n", .{});
         return error.NoBackupRelease;
     };
-    const fn_end = std.mem.indexOfPos(u8, impl, fn_at, "\nfn ") orelse impl.len;
-    const body = impl[fn_at..fn_end];
+    const backend_at = std.mem.indexOf(u8, impl, "const BackupReleasePosixBackend = struct") orelse
+        return error.ReleaseBackendMissing;
+    const backend_end = std.mem.indexOfPos(u8, impl, backend_at, "\n/// 복원이 **완전히 성공한**") orelse
+        return error.ReleaseBackendEndMissing;
+    const body = impl[backend_at..backend_end];
 
     // ② **`ensureBackup` 과 같은 안전 계약.** symlink·남의 파일을 지우면 낡은 `.bak` 보다 나쁘다.
     if (std.mem.indexOf(u8, body, "NOFOLLOW = true") == null) {
         std.debug.print("해제가 symlink 를 따라갈 수 있다 — ensureBackup 과 같은 계약이어야 한다\n", .{});
         return error.ReleaseFollowsSymlink;
     }
-    if (std.mem.indexOf(u8, body, "getuid()") == null or std.mem.indexOf(u8, body, "ISREG") == null) {
+    const predicate_at = std.mem.indexOf(u8, impl, "fn ownedRegular(") orelse return error.OwnerPredicateMissing;
+    const predicate_end = std.mem.indexOfPos(u8, impl, predicate_at, "\nfn releaseBackupUsing") orelse
+        return error.OwnerPredicateEndMissing;
+    const predicate = impl[predicate_at..predicate_end];
+    if (std.mem.indexOf(u8, body, "getuid()") == null or
+        std.mem.indexOf(u8, body, "ownedRegular(") == null or
+        std.mem.indexOf(u8, predicate, "ISREG") == null or
+        std.mem.indexOf(u8, predicate, "owner_uid == current_uid") == null)
+    {
         std.debug.print("해제가 소유자·regular 여부를 확인하지 않는다\n", .{});
         return error.ReleaseSkipsOwnerCheck;
     }
@@ -97,14 +109,35 @@ test "복원이 성공하면 .bak 을 해제한다 — 안전 계약을 지키�
     // ⑦ **`ensureBackup` 을 지운 게 아니다.** 보존 경로는 그대로 있어야 한다 — 해제는 그 짝이지 대체가 아니다.
     //    `EXCL` 은 그 함수 **본문 안**에서 찾는다. 파일 전체에서 찾으면 다른 자리가 대신 만족시켜
     //    보존이 사라져도 초록이다(적대적 검증 M6 가 그렇게 살아남았다).
-    const ensure_at = std.mem.indexOf(u8, impl, "fn ensureBackup(") orelse {
+    const ensure_at = std.mem.indexOf(u8, impl, "fn ensureBackupObserved(") orelse {
         std.debug.print("보존 경로(`ensureBackup`)가 사라졌다 — 해제는 그 짝이지 대체가 아니다\n", .{});
         return error.EnsureBackupRemoved;
     };
-    const ensure_end = std.mem.indexOfPos(u8, impl, ensure_at, "\nfn ") orelse impl.len;
+    const ensure_end = std.mem.indexOfPos(u8, impl, ensure_at, "\nfn publishObserved") orelse impl.len;
     const ensure_body = impl[ensure_at..ensure_end];
     if (std.mem.indexOf(u8, ensure_body, "EXCL = true") == null) {
         std.debug.print("보존이 create-once 가 아니다 — 연속 실패가 첫 사본을 밀어낸다\n", .{});
         return error.BackupNotCreateOnce;
+    }
+    if (std.mem.indexOf(u8, impl, "const backup_temp_leaf: [:0]const u8 = \".workspace.v1.bak.tmp\"") == null or
+        std.mem.indexOf(u8, ensure_body, "backup_temp_leaf") == null or
+        std.mem.indexOf(u8, ensure_body, "renameatx_np") == null or
+        std.mem.indexOf(u8, ensure_body, "rename_excl") == null)
+    {
+        std.debug.print("backup이 temp 검증 뒤 exclusive rename으로 게시되지 않는다\n", .{});
+        return error.BackupPublicationNotAtomic;
+    }
+
+    // ⑧ 해제 뒤의 **첫 정상 publication**이 보존 leaf를 타야 cycle이 닫힌다. Swift의 background/final
+    //    분기를 억지로 합치면 final-only timestamp 사본이 매 tick 쌓인다. 대신 두 분기가 공유하는 제품
+    //    `publish` leaf 자체가 create-once backup을 선행해야 한다.
+    const publish_at = std.mem.indexOf(u8, impl, "pub fn publish(parent_path:") orelse
+        return error.PublishMissing;
+    const publish_end = std.mem.indexOfPos(u8, impl, publish_at, "\n}\n\n/// Restore-incomplete") orelse
+        return error.PublishEndMissing;
+    const publish_body = impl[publish_at..publish_end];
+    if (std.mem.indexOf(u8, publish_body, "ensureBackup(parent_path)") == null) {
+        std.debug.print("공용 publication leaf가 backup을 다시 무장하지 않는다 — release 뒤 cycle이 비어 있다\n", .{});
+        return error.NormalPublicationDoesNotRearmBackup;
     }
 }

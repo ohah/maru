@@ -46,6 +46,8 @@ iteration=0
 run_once() {
     iteration=$((iteration + 1))
     summary="$root/app-summary-$iteration.txt"
+    before_checkpoint="$root/checkpoint-before-$iteration.v1"
+    /bin/cp "$checkpoint" "$before_checkpoint"
     before=$(/usr/bin/stat -f '%i' "$checkpoint")
     HOME="$root" CFFIXED_USER_HOME="$root" MARU_SESSION_HOST_ROOT="$root/session-host" \
       MARU_CONFIG="$root/.config/maru/config" \
@@ -69,7 +71,8 @@ run_once() {
     /usr/bin/grep -Eq '^session_host_recovery_smoke_inventory_runtimes=0$' "$summary"
     /usr/bin/grep -Eq '^session_host_recovery_smoke_target_activation_dispatched=false$' "$summary"
     /usr/bin/grep -Fq "runtime-handle=\"$handle\" runtime-state=\"ended\"" "$checkpoint"
-    test ! -e "$checkpoint.bak"
+    /usr/bin/cmp -s "$before_checkpoint" "$checkpoint.bak"
+    test ! -e "$support/.workspace.v1.bak.tmp"
     test ! -e "$support/.workspace.v1.tmp"
 }
 

@@ -22,9 +22,13 @@ test "P4 C2 경계는 macOS file adapter와 fixed sibling leaves만 연다" {
     for ([_][]const u8{
         "workspace.v1",
         ".workspace.v1.tmp",
+        "workspace.v1.bak",
+        ".workspace.v1.bak.tmp",
         ".NOFOLLOW = true",
         ".EXCL = true",
         "renameat",
+        "renameatx_np",
+        "rename_excl",
         "0o600",
     }) |required| try std.testing.expect(std.mem.count(u8, source, required) >= 1);
     try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, coordinator, "workspace_checkpoint_file"));

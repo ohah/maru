@@ -901,6 +901,17 @@ pub const Backend = struct {
         return true;
     }
 
+    /// `check-ignore` 자리가 차 있나 — 도는 작업이 있거나, 아직 아무도 안 걷어간 답이 있으면 참.
+    ///
+    /// **거절된 질의를 다시 걸 때가 언제인지**를 tick 이 이 값으로 정한다. 없으면 tick 이 매번 다시
+    /// 걸어 보고 매번 거절당해, 스캔만 계속 도는 헛바퀴가 된다.
+    pub fn ignoreBusy(self: *Backend) bool {
+        const state = self.state orelse return false;
+        state.mutex.lockUncancelable(state.io);
+        defer state.mutex.unlock(state.io);
+        return state.ignore_inflight > 0 or state.ignore_result != null;
+    }
+
     pub fn takeIgnoreResult(self: *Backend) ?IgnoreResult {
         const state = self.state orelse return null;
         state.mutex.lockUncancelable(state.io);

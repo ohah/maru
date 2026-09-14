@@ -5974,6 +5974,14 @@ original source로 복원하고 marked text를 비운 뒤 CR6c와 같은 실제 
 drift, marker 0/2+, stale historical replay, 직접 ABI input 호출은 실패다. 이 gate는 IME·clipboard 연속성을 닫지만
 stalled socket/backoff, 장시간 soak와 성능 예산은 이 CR6d 계약 밖이며 CR6e가 소유한다.
 
+**CR6d-v2 시각 증거 계약:** v2a는 같은 recovered Term의 첫 한글 물리 key 직전과 첫 marked callback 반영 뒤
+제품 Metal 프레임을 캡처하고, 같은 runtime·surface의 cursor rect, `firstRect` screen rect와 관심 영역 픽셀 변화를
+하나의 receipt에 결속한다. 이는 Maru-owned preedit 픽셀과 후보 anchor까지의 증거다. OS-owned 후보 목록은 앱의
+Metal capture에 포함되지 않으므로 v2a green을 후보창 픽셀 완료로 세지 않는다. v2b만 실제 Apple Korean IME 후보
+목록을 연 뒤 OS-owned window와 anchor의 screen-space 관계를 캡처한다. Screen Recording 권한, 잠금 해제된
+WindowServer, exact frontmost PID가 없으면 pass/skip이 아니라 `not_provisioned` artifact이며 v2a나 좌표 비교로
+대체하지 않는다.
+
 **CR6e-a1 stalled peer·transport baseline artifact 계약:** 자동 reconnect 제품 설정은 아직 배선하지 않는다. CR4의 제품
 `connectExistingHostUntil`/deadline-aware hello 경계에 harness-owned user-only Unix socket과 exact manifest를 제공한다.
 peer는 `(1)` accept 뒤 hello frame을 읽고 reply를 영구 보류하는 read stall과 `(2)` connect가 transient로 실패하는

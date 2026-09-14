@@ -21,6 +21,8 @@ const markers_mod = maru.session.agent_image_markers;
 pub const Pending = struct {
     surface_id: u64,
     png: []u8,
+    /// 임시 PNG 파일 경로(디코드가 이것으로 건다).
+    path: []u8 = &.{},
     /// 붙여넣기 직전 화면의 N 집합(관찰의 기준선).
     observation: staging_mod.Observation = .{},
     /// 이 tick 수를 넘기면 포기한다. **42 ms 근처로 조이지 않는다**(§4.2) — 이 값은 로컬·tmux의 것이고
@@ -32,6 +34,7 @@ pub const Pending = struct {
 
     fn deinit(self: *Pending, allocator: std.mem.Allocator) void {
         allocator.free(self.png);
+        if (self.path.len > 0) allocator.free(self.path);
         self.observation.deinit(allocator);
         self.* = undefined;
     }
@@ -102,8 +105,9 @@ pub fn onImagePasted(
     surface_id: u64,
     visible_now: []const u32,
     png: []u8,
+    path: []u8,
 ) !void {
-    var p: Pending = .{ .surface_id = surface_id, .png = png };
+    var p: Pending = .{ .surface_id = surface_id, .png = png, .path = path };
     errdefer p.deinit(allocator);
     try p.observation.arm(allocator, visible_now);
     try state.pending.append(allocator, p);
@@ -136,8 +140,9 @@ pub fn observe(
             const n = fresh.items[0];
             const slot = try state.slotFor(allocator, surface_id);
             var done = state.pending.orderedRemove(i);
-            try slot.staging.put(allocator, n, done.png); // png 소유권 이전
+            try slot.staging.put(allocator, n, done.png, done.path); // png·path 소유권 이전
             done.png = &.{};
+            done.path = &.{};
             done.observation.deinit(allocator);
             continue; // 같은 인덱스에 다음 항목이 왔다
         }
@@ -203,7 +208,7 @@ fn dup(bytes: []const u8) ![]u8 {
 test "MP1 배선: 붙여넣고 마커가 뜨면 그 N 에 묶인다" {
     var st: State = .{};
     defer st.deinit(testing.allocator);
-    try onImagePasted(&st, testing.allocator, 7, &.{}, try dup("PNG"));
+    try onImagePasted(&st, testing.allocator, 7, &.{}, try dup("PNG"), &.{});
     try observe(&st, testing.allocator, 7, &.{1});
     const s = st.stagingFor(7) orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings("PNG", s.lookup(1).?.png);
@@ -213,7 +218,7 @@ test "MP1 배선: 붙여넣고 마커가 뜨면 그 N 에 묶인다" {
 test "MP1 배선: 기준선에 이미 있던 N 은 새것이 아니다 — Claude 가 #3 으로 건너뛰어도 맞는다" {
     var st: State = .{};
     defer st.deinit(testing.allocator);
-    try onImagePasted(&st, testing.allocator, 7, &.{1}, try dup("B"));
+    try onImagePasted(&st, testing.allocator, 7, &.{1}, try dup("B"), &.{});
     try observe(&st, testing.allocator, 7, &.{ 1, 3 });
     const s = st.stagingFor(7) orelse return error.TestUnexpectedResult;
     try testing.expect(s.lookup(1) == null); // 기준선의 #1 은 남의 것
@@ -223,7 +228,7 @@ test "MP1 배선: 기준선에 이미 있던 N 은 새것이 아니다 — Claud
 test "MP1 배선: 창 안에 마커가 안 나타나면 조용히 버린다" {
     var st: State = .{};
     defer st.deinit(testing.allocator);
-    try onImagePasted(&st, testing.allocator, 7, &.{}, try dup("X"));
+    try onImagePasted(&st, testing.allocator, 7, &.{}, try dup("X"), &.{});
     st.pending.items[0].ticks_left = 2;
     for (0..4) |_| try observe(&st, testing.allocator, 7, &.{});
     try testing.expectEqual(@as(usize, 0), st.pending.items.len);
@@ -233,7 +238,7 @@ test "MP1 배선: 창 안에 마커가 안 나타나면 조용히 버린다" {
 test "MP1 배선: 다른 surface 의 화면은 남의 대기를 건드리지 않는다" {
     var st: State = .{};
     defer st.deinit(testing.allocator);
-    try onImagePasted(&st, testing.allocator, 7, &.{}, try dup("A"));
+    try onImagePasted(&st, testing.allocator, 7, &.{}, try dup("A"), &.{});
     try observe(&st, testing.allocator, 9, &.{1}); // 9번 pane 에 마커가 떴다
     try testing.expectEqual(@as(usize, 1), st.pending.items.len); // 7번 대기는 그대로
     try testing.expect(st.stagingFor(9) == null);
@@ -242,9 +247,9 @@ test "MP1 배선: 다른 surface 의 화면은 남의 대기를 건드리지 않
 test "MP1 배선: 두 pane 의 #1 이 서로를 덮지 않는다 (§4.2 surface 스코프)" {
     var st: State = .{};
     defer st.deinit(testing.allocator);
-    try onImagePasted(&st, testing.allocator, 7, &.{}, try dup("SEVEN"));
+    try onImagePasted(&st, testing.allocator, 7, &.{}, try dup("SEVEN"), &.{});
     try observe(&st, testing.allocator, 7, &.{1});
-    try onImagePasted(&st, testing.allocator, 9, &.{}, try dup("NINE"));
+    try onImagePasted(&st, testing.allocator, 9, &.{}, try dup("NINE"), &.{});
     try observe(&st, testing.allocator, 9, &.{1});
     try testing.expectEqualStrings("SEVEN", st.stagingFor(7).?.lookup(1).?.png);
     try testing.expectEqualStrings("NINE", st.stagingFor(9).?.lookup(1).?.png);
@@ -253,9 +258,9 @@ test "MP1 배선: 두 pane 의 #1 이 서로를 덮지 않는다 (§4.2 surface 
 test "MP1 배선: surface 가 죽으면 스테이징과 대기가 함께 간다" {
     var st: State = .{};
     defer st.deinit(testing.allocator);
-    try onImagePasted(&st, testing.allocator, 7, &.{}, try dup("A"));
+    try onImagePasted(&st, testing.allocator, 7, &.{}, try dup("A"), &.{});
     try observe(&st, testing.allocator, 7, &.{1});
-    try onImagePasted(&st, testing.allocator, 7, &.{1}, try dup("B")); // 아직 대기 중
+    try onImagePasted(&st, testing.allocator, 7, &.{1}, try dup("B"), &.{}); // 아직 대기 중
     st.dropSurface(testing.allocator, 7);
     try testing.expect(st.stagingFor(7) == null);
     try testing.expectEqual(@as(usize, 0), st.pending.items.len);
@@ -264,7 +269,7 @@ test "MP1 배선: surface 가 죽으면 스테이징과 대기가 함께 간다"
 test "MP1 배선: 토글 — 같은 마커를 다시 누르면 닫힌다" {
     var st: State = .{};
     defer st.deinit(testing.allocator);
-    try onImagePasted(&st, testing.allocator, 7, &.{}, try dup("A"));
+    try onImagePasted(&st, testing.allocator, 7, &.{}, try dup("A"), &.{});
     try observe(&st, testing.allocator, 7, &.{1});
     const hit: markers_mod.Hit = .{ .row = 3, .start_col = 2, .end_col = 12, .n = 1 };
     const opened = toggle(&st, null, 7, hit) orelse return error.TestUnexpectedResult;
@@ -275,7 +280,7 @@ test "MP1 배선: 토글 — 같은 마커를 다시 누르면 닫힌다" {
 test "MP1 배선: 기록에 없는 N 은 안 열린다 — 화면에 글자로 쓰인 마커(§3.1)" {
     var st: State = .{};
     defer st.deinit(testing.allocator);
-    try onImagePasted(&st, testing.allocator, 7, &.{}, try dup("A"));
+    try onImagePasted(&st, testing.allocator, 7, &.{}, try dup("A"), &.{});
     try observe(&st, testing.allocator, 7, &.{1});
     const stranger: markers_mod.Hit = .{ .row = 3, .start_col = 2, .end_col = 13, .n = 42 };
     try testing.expect(toggle(&st, null, 7, stranger) == null);

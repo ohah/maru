@@ -14912,7 +14912,7 @@ pub const AppSession = struct {
             // TUI가 `[Image #N]`으로 바꾼다(§4.1). 다만 그 바이트가 우리를 거치는 **유일한 자리**가
             // 여기이므로, 지나가는 길에 프리뷰 스테이징에 실어 둔다(§4.2). 실패는 삼킨다 —
             // 프리뷰가 안 되는 것이 붙여넣기를 막을 이유가 아니다.
-            self.stageMarkerPreviewImage(active_term, bytes);
+            self.stageMarkerPreviewImage(active_term, temp_path, bytes);
             return false;
         }
         self.enqueueUserActionImage(active_term, term_ops.activeSurface(self).id, temp_path, bytes);
@@ -14921,14 +14921,19 @@ pub const AppSession = struct {
 
     /// 붙여넣은 PNG를 마커 프리뷰 스테이징에 건다(§4.2). **paste가 나가기 전에** 불려야 한다 —
     /// 관찰 기준선이 마커가 뜬 뒤에 찍히면 그 마커가 「새로 나타난 것」이 아니게 되어 영영 안 묶인다.
-    fn stageMarkerPreviewImage(self: *AppSession, term: *Term, bytes: []const u8) void {
+    fn stageMarkerPreviewImage(self: *AppSession, term: *Term, temp_path: []const u8, bytes: []const u8) void {
         const surface_id = term.surface.id;
         var visible: std.ArrayList(u32) = .empty;
         defer visible.deinit(self.allocator);
         self.collectMarkerNumbers(term, .cursor_block, &visible) catch return;
         const png = self.allocator.dupe(u8, bytes) catch return;
-        marker_preview_ops.onImagePasted(&self.marker_preview, self.allocator, surface_id, visible.items, png) catch {
+        const path = self.allocator.dupe(u8, temp_path) catch {
             self.allocator.free(png);
+            return;
+        };
+        marker_preview_ops.onImagePasted(&self.marker_preview, self.allocator, surface_id, visible.items, png, path) catch {
+            self.allocator.free(png);
+            self.allocator.free(path);
         };
     }
 

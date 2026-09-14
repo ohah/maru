@@ -210,25 +210,29 @@ test "glyph frame prepares atlas slots and upload plan" {
     var frame = try prepareGlyphFrame(std.testing.allocator, glyph_runs, &atlas);
     defer frame.deinit(std.testing.allocator);
 
-    try std.testing.expectEqual(@as(usize, 4), frame.glyphs.len);
-    try std.testing.expectEqual(@as(usize, 4), frame.stats.glyph_count);
+    // 줄끝 trim 이후 빈 칸은 DrawList 에 안 실린다 — 옛 기대값(4·2)은 공백 셀까지 센 것이었다.
+    // 이제 'A' 두 글자뿐이라 glyph 2개가 같은 atlas slot 하나를 공유한다(upload 1 · reuse 1).
+    try std.testing.expectEqual(@as(usize, 2), frame.glyphs.len);
+    try std.testing.expectEqual(@as(usize, 2), frame.stats.glyph_count);
     try std.testing.expectEqual(frame.glyphs[0].slot.id, frame.glyphs[1].slot.id);
-    try std.testing.expectEqual(@as(usize, 2), frame.stats.upload_count);
-    try std.testing.expectEqual(@as(usize, 2), frame.stats.reused_count);
-    try std.testing.expectEqual(@as(usize, 2), frame.uploads.len);
+    try std.testing.expectEqual(@as(usize, 1), frame.stats.upload_count);
+    try std.testing.expectEqual(@as(usize, 1), frame.stats.reused_count);
+    try std.testing.expectEqual(@as(usize, 1), frame.uploads.len);
     try std.testing.expect(frame.stats.upload_bytes > 0);
-    try std.testing.expectEqual(@as(usize, 2), atlas.stats.hits);
-    try std.testing.expectEqual(@as(usize, 2), atlas.stats.misses);
+    try std.testing.expectEqual(@as(usize, 1), atlas.stats.hits);
+    try std.testing.expectEqual(@as(usize, 1), atlas.stats.misses);
 
     // upload 항목은 자기 PreparedGlyph를 glyph_index로 가리켜야 backend가 업로드한
-    // bitmap을 올바른 glyph/slot에 매핑할 수 있다. "AA  "에서 첫 'A'(0)와 첫
-    // space(2)만 miss이고, 그 index의 PreparedGlyph slot과 upload slot이 같아야 한다.
+    // bitmap을 올바른 glyph/slot에 매핑할 수 있다. 줄끝 trim 이후 이 줄은 "AA" 뿐이라 miss 는
+    // 첫 'A'(0) 하나고(둘째 A 는 같은 slot 재사용), 그 index 의 PreparedGlyph slot 과 upload slot 이
+    // 같아야 한다. 옛 기대의 두 번째 upload(공백, index 2)는 그 셀이 사라져 없다.
     try std.testing.expectEqual(@as(usize, 0), frame.uploads[0].glyph_index);
-    try std.testing.expectEqual(@as(usize, 2), frame.uploads[1].glyph_index);
     try std.testing.expectEqual(
         frame.glyphs[frame.uploads[0].glyph_index].slot.id,
         frame.uploads[0].slot.id,
     );
+    // 두 glyph 가 한 slot 을 공유한다는 것도 함께 못 박는다(위 upload 1 · reuse 1 의 귀결).
+    try std.testing.expectEqual(frame.glyphs[0].slot.id, frame.glyphs[1].slot.id);
 }
 
 test "glyph frame preserves overlays for draw-time effects" {

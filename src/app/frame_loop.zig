@@ -553,6 +553,11 @@ test "frame builder locks via FrameLoop.io, not pump.queue.io (PR3 crash regress
     var pump = runtime_pump.RuntimeEventPump.init(allocator, &queue, &runtime);
     var renderer_state = renderer.RendererState.init(allocator, .{});
     defer renderer_state.deinit();
+    // 화면에 글자 하나를 둔다. 줄끝 trim 이후 **빈 화면은 DrawList 셀이 0개**라 glyph 도 0 이고,
+    // 그러면 아래 prepared() 가 「락이 성공했는가」와 무관하게 false 가 된다 — 이 테스트가 보려는 것은
+    // 락 경로이므로 프레임이 실제로 만들어질 재료를 준다.
+    try surfaces[0].core.write("X");
+
     // FrameLoop.io엔 valid io, pump.queue.io엔 undefined(쓰면 크래시) — 둘을 갈라 어느 io로 락하는지 본다.
     var loop = FrameLoop.init(allocator, &app_window, &runtime, &pump, &renderer_state, std.testing.io);
     pump.queue.io = undefined;

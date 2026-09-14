@@ -245,8 +245,9 @@ test "renderer state builds glyph frame and reuses atlas across frames" {
     defer first.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(types.Backend.metal, first.backend);
-    try std.testing.expectEqual(@as(usize, 3), first.draw_list.cells.len);
-    try std.testing.expectEqual(@as(usize, 3), first.glyph_frame.stats.glyph_count);
+    // 'A' 한 글자뿐이다 — 뒤 빈 칸은 줄끝 trim 이 DrawList 에서 뺀다(옛 기대값 3 은 열 수였다).
+    try std.testing.expectEqual(@as(usize, 1), first.draw_list.cells.len);
+    try std.testing.expectEqual(@as(usize, 1), first.glyph_frame.stats.glyph_count);
     try std.testing.expect(first.glyph_quad_frame.stats.ready());
     try std.testing.expect(first.glyph_raster_frame.stats.ready());
     try std.testing.expect(first.glyph_frame.stats.upload_count > 0);
@@ -259,13 +260,13 @@ test "renderer state builds glyph frame and reuses atlas across frames" {
     var second = try state.buildFrame(std.testing.allocator, core.snapshot(), glyph_layout.FakeFontBackend{});
     defer second.deinit(std.testing.allocator);
 
-    try std.testing.expectEqual(@as(usize, 3), second.glyph_frame.stats.glyph_count);
+    try std.testing.expectEqual(@as(usize, 1), second.glyph_frame.stats.glyph_count); // 'A' 하나(줄끝 trim)
     try std.testing.expectEqual(second.glyph_frame.stats.glyph_count, second.glyph_quad_frame.stats.glyph_count);
     try std.testing.expect(second.glyph_quad_frame.stats.ready());
     try std.testing.expect(second.glyph_raster_frame.stats.ready());
     try std.testing.expectEqual(@as(usize, 0), second.glyph_frame.stats.upload_count);
     try std.testing.expectEqual(@as(usize, 0), second.glyph_raster_frame.stats.upload_count);
-    try std.testing.expectEqual(@as(usize, 3), second.glyph_frame.stats.reused_count);
+    try std.testing.expectEqual(@as(usize, 1), second.glyph_frame.stats.reused_count); // 'A' 하나가 첫 프레임 slot 재사용
     try std.testing.expect(state.atlas.stats.hits > 0);
 }
 

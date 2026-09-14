@@ -20037,9 +20037,6 @@ pub const AppSession = struct {
             return self.last_summary;
         }
         const ft_on = diag_gate.maruDebugEnabled();
-        // [실험 계측] 줄 끝 빈 셀 trim 을 같은 빌드에서 A/B 하려고 env 로 켠다(기본 꺼짐 = 동작 불변).
-        renderer.draw_list.experiment_trim_blank = diag_gate.trimBlankExperimentEnabled();
-        metal_frame.experiment_reuse_image_pixels = diag_gate.reuseImagePixelsExperimentEnabled();
         if (ft_on) {
             // 렌더러 내부 계측을 이 프레임 것만 보게 매 tick 0 으로 되돌린다(프레임 스냅샷).
             diag_metal_io = self.io;
@@ -21327,17 +21324,11 @@ pub const AppSession = struct {
                         }
                         if (kg_images.len > 0) {
                             if (ft_on and ft_img1 == ft_start) ft_img1 = std.Io.Clock.awake.now(self.io).nanoseconds; // buildGpuImages 끝 = 업로드 계획 시작
-                            if (metal_frame.experiment_reuse_image_pixels) {
-                                // 재사용 경로: 픽셀은 AppSession 버퍼에 쌓고(할당 0), uploads 만 새로 만든다.
-                                if (metal_frame.planImageUploadsReusing(self.allocator, kg_images, snap.images, &self.kitty_uploaded, &self.kitty_pixels_buf, &self.kitty_pixels_cap)) |plan| {
-                                    kg_uploads = plan.uploads;
-                                    kg_pixels = plan.pixels;
-                                    kg_pixels_owned = false;
-                                    if (ft_on) ft_img2 = std.Io.Clock.awake.now(self.io).nanoseconds; // 재사용 경로도 같은 마크를 세운다
-                                } else |_| {}
-                            } else if (metal_frame.planImageUploads(self.allocator, kg_images, snap.images, &self.kitty_uploaded)) |plan| {
+                            // 픽셀은 AppSession 버퍼에 쌓는다(할당 0) — uploads 만 새로 만든다.
+                            if (metal_frame.planImageUploads(self.allocator, kg_images, snap.images, &self.kitty_uploaded, &self.kitty_pixels_buf, &self.kitty_pixels_cap)) |plan| {
                                 kg_uploads = plan.uploads;
                                 kg_pixels = plan.pixels;
+                                kg_pixels_owned = false;
                                 if (ft_on) ft_img2 = std.Io.Clock.awake.now(self.io).nanoseconds; // 업로드 계획(픽셀 복사) 끝
                             } else |_| {}
                         }
@@ -81471,6 +81462,88 @@ test "이미지 갤러리: 타일이 프레임 이미지 채널까지 간다 (IG
     try std.testing.expectEqual(@as(usize, 1), images2.len); // 그리기는 계속한다
     try std.testing.expectEqual(@as(usize, 0), uploads2.len); // 업로드는 한 번뿐이다
     try std.testing.expectEqual(@as(usize, 0), pixels2.len);
+}
+
+test "[적대] 재사용 버퍼 소유권: 비소유 픽셀을 갤러리에 넘겨도 AppSession 의 방은 free 되지 않는다" {
+    // 무엇을 깨뜨리려 하는가: kitty 픽셀은 프레임마다 AppSession 재사용 버퍼(kitty_pixels_buf)를 가리키는데,
+    // 갤러리 `appendGpuImages` 는 `pixels.*` 를 **free 하고 교체**한다. 승격이 빠지면 남의 방을 free 한다 —
+    // testing.allocator 가 이중 free/누수를 잡으므로 이 테스트의 통과 자체가 그 불변식의 증거다.
+    // 갤러리 테스트 10 곳은 전부 owned=true 를 넘겨 이 경로를 한 번도 안 밟았다(그래서 따로 둔다).
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 20,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // AppSession 소유의 재사용 방을 하나 만든다(제품에서는 planImageUploads 가 채운다).
+    const room = try allocator.alloc(u8, 64);
+    @memset(room, 0x5A);
+    session.kitty_pixels_buf = room;
+    session.kitty_pixels_cap = room.len;
+
+    // ① 승격 자체: 비소유 → 사본. 원본 방은 그대로다.
+    {
+        var pixels: []u8 = session.kitty_pixels_buf[0..32];
+        var owned = false;
+        session.promoteKgPixelsOwned(&pixels, &owned);
+        defer if (owned) allocator.free(pixels);
+        try std.testing.expect(owned);
+        try std.testing.expect(pixels.ptr != room.ptr); // 사본이다
+        try std.testing.expectEqual(@as(usize, 32), pixels.len);
+        try std.testing.expectEqual(@as(u8, 0x5A), pixels[31]);
+        try std.testing.expectEqual(room.ptr, session.kitty_pixels_buf.ptr); // 방은 건드리지 않았다
+    }
+    // ② 이미 owned 면 무동작 — 포인터가 그대로여야 이중 사본을 안 만든다.
+    {
+        const mine = try allocator.alloc(u8, 8);
+        var pixels: []u8 = mine;
+        var owned = true;
+        session.promoteKgPixelsOwned(&pixels, &owned);
+        defer allocator.free(pixels);
+        try std.testing.expect(pixels.ptr == mine.ptr);
+    }
+    // ③ 비소유·빈 슬라이스 — 승격은 하되 할당은 안 한다(free 규칙만 owned 로 넘어간다).
+    {
+        var pixels: []u8 = &.{};
+        var owned = false;
+        session.promoteKgPixelsOwned(&pixels, &owned);
+        try std.testing.expect(owned);
+        try std.testing.expectEqual(@as(usize, 0), pixels.len);
+    }
+    // ④ 마커 미리보기가 **닫혀 있으면** 승격하지 않는다 — 닫힌 프레임마다 수 MB 를 헛복사하면 안 된다.
+    {
+        var images: []maru.renderer.metal_frame.GpuImage = &.{};
+        var uploads: []maru.renderer.metal_frame.GpuImageUpload = &.{};
+        var pixels: []u8 = session.kitty_pixels_buf[0..16];
+        var owned = false;
+        var live: std.ArrayList(u32) = .empty;
+        defer live.deinit(allocator);
+        try std.testing.expect(session.marker_preview_open == null);
+        session.appendMarkerPreviewImage(&images, &uploads, &pixels, &owned, &live);
+        try std.testing.expect(!owned); // 조기 반환 — 승격 없음
+        try std.testing.expect(pixels.ptr == room.ptr);
+    }
+    // ⑤ 갤러리가 **닫혀 있으면** 마찬가지로 승격하지 않는다(위 ④와 같은 규칙, 다른 소비자).
+    {
+        var images: []maru.renderer.metal_frame.GpuImage = &.{};
+        var uploads: []maru.renderer.metal_frame.GpuImageUpload = &.{};
+        var pixels: []u8 = session.kitty_pixels_buf[0..16];
+        var owned = false;
+        var live: std.ArrayList(u32) = .empty;
+        defer live.deinit(allocator);
+        agent_activity_ops.appendGpuImages(session, &images, &uploads, &pixels, &owned, &live);
+        try std.testing.expect(!owned);
+        try std.testing.expect(pixels.ptr == room.ptr);
+    }
+    // deinit 이 방을 cap 크기로 돌려준다 — 위 어느 경로도 그 방을 free 하지 않았어야 여기서 이중 free 가 없다.
 }
 
 test "이미지 갤러리: 격자에 다 안 들어가면 「몇 장 중 몇 장」으로 말한다 (IG3-c3)" {

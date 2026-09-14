@@ -346,10 +346,13 @@ test "glyph raster frame builds contiguous upload bytes for glyph frame misses" 
 }
 
 test "glyph raster frame records zero-ink uploads without failing the frame" {
-    var frame = try buildTestGlyphFrame(std.testing.allocator, "A", 2);
+    // **공백을 줄 «중간»에 둔다.** 줄 끝 공백은 trim 이 DrawList 에서 빼므로(draw_list.isTrimmableBlank)
+    // 옛 입력 "A"(cols=2)로는 zero-ink glyph 가 아예 안 생겨 이 테스트가 아무것도 검증하지 못한다.
+    // 중간 공백은 trim 대상이 아니라 그대로 실려, fake path 의 공백 upload 경로를 계속 탄다.
+    var frame = try buildTestGlyphFrame(std.testing.allocator, "A B", 3);
     defer frame.deinit(std.testing.allocator);
 
-    // 두 번째 cell은 공백이다. 현재 fake path에서는 공백도 atlas miss/upload 후보가 될 수
+    // 가운데 cell은 공백이다. 현재 fake path에서는 공백도 atlas miss/upload 후보가 될 수
     // 있으므로, zero-ink upload를 실패로 보지 말고 진단값으로만 남긴다.
     var raster = try buildGlyphRasterFrame(std.testing.allocator, frame, .{
         .texture_size = .{ .width_px = 1024, .height_px = 1024 },
@@ -357,8 +360,8 @@ test "glyph raster frame records zero-ink uploads without failing the frame" {
     defer raster.deinit(std.testing.allocator);
 
     try std.testing.expect(raster.stats.ready());
-    try std.testing.expectEqual(@as(usize, 2), raster.stats.upload_count);
-    try std.testing.expectEqual(@as(usize, 1), raster.stats.zero_ink_uploads);
+    try std.testing.expectEqual(@as(usize, 3), raster.stats.upload_count); // A · 공백 · B
+    try std.testing.expectEqual(@as(usize, 1), raster.stats.zero_ink_uploads); // 가운데 공백
     try std.testing.expect(raster.stats.non_clear_pixels > 0);
 }
 

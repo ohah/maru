@@ -2,22 +2,23 @@ const std = @import("std");
 const terminal = @import("../terminal.zig");
 const width = @import("../width.zig");
 
-/// [실험 계측 — A/B 전용] 줄 끝의 «그릴 것이 없는» 셀을 DrawList 에서 빼 본다.
+/// 줄 오른쪽의 «그릴 것이 없는» 구간은 DrawList 에 싣지 않는다.
 ///
-/// 왜 있는가: 터미널 브라우저처럼 본문이 통째로 kitty 이미지인 화면은 텍스트 셀이 사실상 비어 있는데,
-/// 지금은 행×열 전부를 CoreText 셰이퍼에 넘겨 «빈 칸을 셰이핑하는» 비용을 낸다(실측: 11842셀 빈 화면에
-/// grid 3.3ms). Ghostty 는 run 이터레이터 첫 단계에서 행 오른쪽 빈 구간을 잘라 그 비용을 아예 안 낸다.
+/// 왜: 터미널 브라우저처럼 본문이 통째로 kitty 이미지인 화면은 텍스트 셀이 사실상 비어 있는데, 한때
+/// 행×열 전부를 CoreText 셰이퍼에 넘겨 **빈 칸을 셰이핑하는** 비용을 냈다(실측: 11842셀 빈 화면에
+/// grid 3.3ms). 베이스는 Ghostty `font/shaper/run.zig` `RunIterator.next` 의 첫 동작 —
+/// `Trim the right side of a row that might be empty` — 이고 코드는 maru 자체다.
 ///
-/// 이 플래그는 그 절감의 크기를 **같은 빌드에서 A/B 로 재기 위한 것**이고 기본은 꺼짐이라 동작이 바뀌지
-/// 않는다. 제품으로 승격하려면 배경·선택·커서 회귀를 따로 막아야 한다(아래 isTrimmableBlank 주석).
-pub var experiment_trim_blank: bool = false;
-
+/// 하이라이트는 이 trim 에 안 깨진다: 선택·검색 배경은 `metal_frame` 의 **격자 기반 pass** 가 칠하므로
+/// DrawList 에 그 칸이 있든 없든 결과가 같다(한때 이 trim 이 줄 끝 선택을 지웠고, 그 회귀가 하이라이트를
+/// 격자로 옮긴 계기였다). 경위는 docs/io-render-present.md §10.6.
 /// 줄 끝 trim 후보인가 — «이 셀은 그려도 화면에 아무것도 안 남는가»를 보수적으로 판정한다.
 ///
 /// 보수적인 이유: DrawCell 은 글리프만이 아니라 **셀 배경**도 낳는다. 그래서 배경이 기본이 아니거나
 /// (reverse 로 전경이 배경이 되는 경우 포함) 장식선이 붙은 셀은 빼면 화면이 깨진다. 선택 영역·검색
 /// 하이라이트·커서는 이 단계 **뒤에** CellColors/overlay 로 얹히므로, 이 실험 플래그를 제품으로 올릴
-/// 때는 그 셋이 빈 셀 위에 놓이는 경우를 별도로 살려야 한다(지금은 A/B 측정 전용이라 미처리).
+/// 선택·검색·커서는 이 단계 **뒤에** 얹히므로 여기서 볼 필요가 없다 — 앞의 둘은 격자 pass 가, 커서는
+/// overlay 가 각각 자기 경로로 칠한다.
 fn isTrimmableBlank(codepoint: u21, grapheme_id: u32, style: terminal.Style) bool {
     if (!(codepoint == 0 or codepoint == ' ')) return false;
     if (grapheme_id != 0) return false;
@@ -157,14 +158,12 @@ pub fn buildDrawListWithUnfocused(
                 for (start_row..end_row + 1) |row| {
                     // isWideRenderSymbol이 다음 빈 셀을 흡수(2칸 렌더)하면 그 셀은 emit하지 않는다 — 행마다 리셋.
                     var skip_one = false;
-                    // [실험] 줄 오른쪽의 그릴 것 없는 구간을 잘라낸다(기본 꺼짐 — experiment_trim_blank 주석).
+                    // 줄 오른쪽의 그릴 것 없는 구간을 잘라낸다(위 isTrimmableBlank 주석).
                     var row_cols = col_count;
-                    if (experiment_trim_blank) {
-                        while (row_cols > 0) : (row_cols -= 1) {
-                            const last = snapshot.cells[index(snapshot.size, row, row_cols - 1)];
-                            if (last.continuation) continue;
-                            if (!isTrimmableBlank(last.codepoint, last.grapheme_id, last.style)) break;
-                        }
+                    while (row_cols > 0) : (row_cols -= 1) {
+                        const last = snapshot.cells[index(snapshot.size, row, row_cols - 1)];
+                        if (last.continuation) continue;
+                        if (!isTrimmableBlank(last.codepoint, last.grapheme_id, last.style)) break;
                     }
                     for (0..row_cols) |col| {
                         if (skip_one) {
@@ -310,7 +309,9 @@ test "draw list emits drawable cells from dirty rows only" {
     defer draw_list.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(u16, 4), draw_list.size.cols);
-    try std.testing.expectEqual(@as(usize, 4), draw_list.cells.len);
+    // 셀은 'A' 하나뿐이다 — 뒤 3칸은 그릴 것이 없어 줄끝 trim이 잘라낸다(isTrimmableBlank).
+    // 그 칸에 선택·검색이 걸려도 하이라이트는 metal_frame 의 격자 pass 가 칠하므로 화면은 온전하다.
+    try std.testing.expectEqual(@as(usize, 1), draw_list.cells.len);
     try std.testing.expectEqual(@as(u16, 0), draw_list.cells[0].row);
     try std.testing.expectEqual(@as(u16, 0), draw_list.cells[0].col);
     try std.testing.expectEqual(@as(u21, 'A'), draw_list.cells[0].codepoint);
@@ -431,7 +432,9 @@ test "draw list keeps wide glyph metadata and skips continuation cells" {
     var draw_list = try buildDrawList(std.testing.allocator, core.snapshot());
     defer draw_list.deinit(std.testing.allocator);
 
-    try std.testing.expectEqual(@as(usize, 4), draw_list.cells.len);
+    // A·한·B 셋. 옛 기대값 4는 'B' 뒤 빈칸 하나를 포함한 것이었는데, 줄끝 trim 이 그것을 잘라낸다.
+    // wide glyph 계약(continuation 을 안 낸다)은 그대로다 — 아래 col/width 단언이 그것을 고정한다.
+    try std.testing.expectEqual(@as(usize, 3), draw_list.cells.len);
     try std.testing.expectEqual(@as(u16, 1), draw_list.cells[1].col);
     try std.testing.expectEqual(@as(u21, '한'), draw_list.cells[1].codepoint);
     try std.testing.expectEqual(@as(u2, 2), draw_list.cells[1].width);
@@ -538,7 +541,9 @@ test "draw list suppresses cursor overlay when its row is outside the dirty rang
     var draw_list = try buildDrawList(std.testing.allocator, snapshot);
     defer draw_list.deinit(std.testing.allocator);
 
-    try std.testing.expectEqual(@as(usize, 2), draw_list.cells.len);
+    // 두 칸 다 빈 셀이라 줄끝 trim 이 잘라낸다 — 이 테스트가 고정하려는 것은 **커서 overlay 억제**이고
+    // (아래 overlays.len==0), 셀 수는 그 계약과 무관하다.
+    try std.testing.expectEqual(@as(usize, 0), draw_list.cells.len);
     try std.testing.expectEqual(@as(usize, 0), draw_list.overlays.len);
 }
 
@@ -655,20 +660,16 @@ test "G1 double underline: SGR 21 sets underline_double and emits underline + do
 }
 
 // ============================================================================
-// [적대적 검증] experiment_trim_blank 의 안전/회귀 주장을 «깨뜨리려고» 쓴 테스트들.
+// [적대적 검증] 줄끝 trim 의 안전 주장을 «깨뜨리려고» 쓴 테스트들.
 //
 // 주장을 확인하는 테스트가 아니라 **반증을 시도하는** 테스트다. 통과하면 그 주장이 살아남은 것이고,
-// 실패하면 주장이 틀린 것이다. trim 을 제품으로 승격할 때 이 파일이 그 판정의 단일 출처가 된다.
-// 각 테스트는 끝에서 플래그를 반드시 끈다 — 전역이라 켜진 채 새면 이웃 테스트가 조용히 오염된다.
+// 실패하면 주장이 틀린 것이다. 커서·배경·장식이 잘리지 않는다는 계약의 단일 출처가 이 파일이다.
 // ============================================================================
 
-test "[적대] trim: 커서가 줄 끝 빈 칸에 있어도 cursor overlay 가 사라지지 않는다" {
+test "[적대] 줄끝 trim: 커서가 줄 끝 빈 칸에 있어도 cursor overlay 가 사라지지 않는다" {
     var core = try terminal.TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 2 });
     defer core.deinit();
     try core.write("AB"); // 커서는 col=2 — 그 뒤 18칸이 전부 빈 칸이라 trim 대상이다
-
-    experiment_trim_blank = true;
-    defer experiment_trim_blank = false;
 
     var dl = try buildDrawList(std.testing.allocator, core.snapshot());
     defer dl.deinit(std.testing.allocator);
@@ -691,14 +692,11 @@ test "[적대] trim: 커서가 줄 끝 빈 칸에 있어도 cursor overlay 가 �
     try std.testing.expect(found_cursor);
 }
 
-test "[적대] trim: 배경색이 있는 빈 칸은 잘리지 않는다" {
+test "[적대] 줄끝 trim: 배경색이 있는 빈 칸은 잘리지 않는다" {
     var core = try terminal.TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 1 });
     defer core.deinit();
     // 빨간 배경으로 공백 세 칸을 칠한다 — 글자는 없지만 화면에는 색이 남아야 한다.
     try core.write("\x1b[41m   \x1b[0m");
-
-    experiment_trim_blank = true;
-    defer experiment_trim_blank = false;
 
     var dl = try buildDrawList(std.testing.allocator, core.snapshot());
     defer dl.deinit(std.testing.allocator);
@@ -710,7 +708,7 @@ test "[적대] trim: 배경색이 있는 빈 칸은 잘리지 않는다" {
     try std.testing.expectEqual(@as(usize, 3), colored);
 }
 
-test "[적대] trim: 밑줄·취소선·윗줄·reverse 가 붙은 빈 칸은 잘리지 않는다" {
+test "[적대] 줄끝 trim: 밑줄·취소선·윗줄·reverse 가 붙은 빈 칸은 잘리지 않는다" {
     const cases = [_][]const u8{
         "\x1b[4m \x1b[0m", // underline
         "\x1b[9m \x1b[0m", // strikethrough
@@ -722,9 +720,6 @@ test "[적대] trim: 밑줄·취소선·윗줄·reverse 가 붙은 빈 칸은 �
         defer core.deinit();
         try core.write(seq);
 
-        experiment_trim_blank = true;
-        defer experiment_trim_blank = false;
-
         var dl = try buildDrawList(std.testing.allocator, core.snapshot());
         defer dl.deinit(std.testing.allocator);
 
@@ -734,36 +729,26 @@ test "[적대] trim: 밑줄·취소선·윗줄·reverse 가 붙은 빈 칸은 �
     }
 }
 
-test "[적대] trim: 글자로 꽉 찬 줄은 결과가 trim OFF 와 완전히 같다" {
+test "[적대] 줄끝 trim: 글자로 꽉 찬 줄은 한 칸도 잘리지 않는다" {
+    // trim 이 「자를 것이 없을 때 아무것도 안 자른다」를 고정한다. 마지막 칸까지 글자인 줄에서 한 칸이라도
+    // 사라지면 화면 오른쪽 끝 글자가 통째로 빠진다.
     var core = try terminal.TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 1 });
     defer core.deinit();
-    try core.write("ABCDEFGH"); // 마지막 칸까지 글자 — 자를 것이 없다
+    try core.write("ABCDEFGH");
 
-    experiment_trim_blank = false;
-    var off = try buildDrawList(std.testing.allocator, core.snapshot());
-    defer off.deinit(std.testing.allocator);
+    var dl = try buildDrawList(std.testing.allocator, core.snapshot());
+    defer dl.deinit(std.testing.allocator);
 
-    experiment_trim_blank = true;
-    defer experiment_trim_blank = false;
-    var on = try buildDrawList(std.testing.allocator, core.snapshot());
-    defer on.deinit(std.testing.allocator);
-
-    try std.testing.expectEqual(off.cells.len, on.cells.len);
-    for (off.cells, on.cells) |a, b| {
-        try std.testing.expectEqual(a.row, b.row);
-        try std.testing.expectEqual(a.col, b.col);
-        try std.testing.expectEqual(a.codepoint, b.codepoint);
-        try std.testing.expectEqual(a.width, b.width);
-    }
+    try std.testing.expectEqual(@as(usize, 8), dl.cells.len);
+    try std.testing.expectEqual(@as(u21, 'A'), dl.cells[0].codepoint);
+    try std.testing.expectEqual(@as(u21, 'H'), dl.cells[7].codepoint);
+    try std.testing.expectEqual(@as(u16, 7), dl.cells[7].col);
 }
 
-test "[적대] trim: 줄 중간 빈 칸은 자르지 않는다(오른쪽 끝만)" {
+test "[적대] 줄끝 trim: 줄 중간 빈 칸은 자르지 않는다(오른쪽 끝만)" {
     var core = try terminal.TerminalCore.init(std.testing.allocator, .{ .cols = 12, .rows = 1 });
     defer core.deinit();
     try core.write("A    B"); // 가운데 공백 4칸은 남고, B 뒤 6칸만 잘려야 한다
-
-    experiment_trim_blank = true;
-    defer experiment_trim_blank = false;
 
     var dl = try buildDrawList(std.testing.allocator, core.snapshot());
     defer dl.deinit(std.testing.allocator);
@@ -773,22 +758,17 @@ test "[적대] trim: 줄 중간 빈 칸은 자르지 않는다(오른쪽 끝만)
     try std.testing.expectEqual(@as(u21, 'B'), dl.cells[5].codepoint);
 }
 
-test "[적대] trim: 줄 끝 빈 칸이 cells 에서 빠진다 — 선택 하이라이트 회귀의 근거" {
+test "[적대] 줄끝 trim: 16칸 줄에 글자 둘이면 두 칸만 남는다" {
+    // 절감의 크기를 그대로 고정한다 — 14칸이 CoreText 셰이퍼에 안 간다. 이 칸들에 선택·검색이 걸려도
+    // 하이라이트는 `metal_frame` 의 격자 pass 가 칠하므로 화면은 온전하다(그쪽 적대적 테스트가 고정).
     var core = try terminal.TerminalCore.init(std.testing.allocator, .{ .cols = 16, .rows = 1 });
     defer core.deinit();
     try core.write("hi");
 
-    experiment_trim_blank = false;
-    var off = try buildDrawList(std.testing.allocator, core.snapshot());
-    defer off.deinit(std.testing.allocator);
+    var dl = try buildDrawList(std.testing.allocator, core.snapshot());
+    defer dl.deinit(std.testing.allocator);
 
-    experiment_trim_blank = true;
-    defer experiment_trim_blank = false;
-    var on = try buildDrawList(std.testing.allocator, core.snapshot());
-    defer on.deinit(std.testing.allocator);
-
-    // trim OFF 는 16칸 전부, ON 은 2칸. 그 차이(14칸)가 곧 «선택/검색 배경을 칠할 대상이 사라진 칸» 수다.
-    // metal_frame 의 빈 셀 경로가 이 cells 를 돌기 때문에, 이 칸들은 하이라이트를 받을 수 없다.
-    try std.testing.expectEqual(@as(usize, 16), off.cells.len);
-    try std.testing.expectEqual(@as(usize, 2), on.cells.len);
+    try std.testing.expectEqual(@as(usize, 2), dl.cells.len);
+    try std.testing.expectEqual(@as(u21, 'h'), dl.cells[0].codepoint);
+    try std.testing.expectEqual(@as(u21, 'i'), dl.cells[1].codepoint);
 }

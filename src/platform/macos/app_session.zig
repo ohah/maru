@@ -104,6 +104,9 @@ pub const agent_dock = @import("app_session/agent_dock.zig");
 pub const scm_dock_ops = @import("app_session/scm_dock.zig");
 pub const agent_activity_ops = @import("app_session/agent_activity.zig");
 pub const marker_preview_ops = @import("app_session/marker_preview.zig"); // MP1: 터미널 `[Image #N]` 프리뷰의 surface별 스테이징·관찰
+/// 마커 프리뷰의 디코드 결과를 갤러리 것과 가르는 키. `Result.hit_index`가 그대로 실려 오므로
+/// 갤러리 인덱스가 절대 쓰지 않을 값을 쓴다 — 겹치면 프리뷰 픽셀이 갤러리 타일에 붙는다.
+pub const marker_preview_decode_key: usize = std.math.maxInt(usize);
 const agent_image_scan_backend = @import("agent_image_scan_backend.zig"); // IG1-e: 갤러리 스캔 워커
 const agent_body_search_backend = @import("agent_body_search_backend.zig"); // BS1: 본문 검색 워커
 const agent_image_decode_backend = @import("agent_image_decode_backend.zig"); // IG3-d: 갤러리 디코드 워커 // IG1: 이미지 갤러리 도크 뷰(docs/agent-image-gallery.md)
@@ -5916,6 +5919,9 @@ pub const AppSession = struct {
     /// 전용**이고 갤러리와 달리 **세션에 하나가 아니다** — N의 네임스페이스가 에이전트 프로세스별이라
     /// 세션에 맵 하나를 두면 두 pane의 `#1`이 같은 칸을 다툰다.
     marker_preview: marker_preview_ops.State = .{},
+    /// 열려 있는 마커 프리뷰(한 번에 하나 — 계약 §2.2). 닫는 **모든** 길에서 `uploaded`를 되돌려야
+    /// 다음에 열 때 빈 자리가 안 나온다(§5).
+    marker_preview_open: ?marker_preview_ops.Open = null,
     /// 갤러리 스캔 워커(계약 §4.1.1). init 실패는 «갤러리만 안 됨» 으로 접는다 — 세션 전체를
     /// 못 열 이유가 아니다. null 이면 `refresh` 가 조용히 물러난다.
     agent_activity_backend: ?agent_image_scan_backend.Backend = null,
@@ -14937,6 +14943,125 @@ pub const AppSession = struct {
         };
     }
 
+    /// Cmd+클릭이 마커 위였나 — 맞으면 프리뷰를 토글하고 참을 돌린다(클릭 소비).
+    ///
+    /// **기록에 없는 N이면 아무 일도 안 한다**(§3.1) — 화면에 글자로 쓰인 `[Image #1]`은 우리 것이
+    /// 아니므로 클릭을 먹지 않고 링크 경로로 흘려보낸다.
+    fn toggleMarkerPreviewAt(self: *AppSession, term: *Term, surface_id: u64, cell: maru.session.layout_math.CellHit) bool {
+        if (term.kind != .terminal) return false;
+        if (self.marker_preview.slots.items.len == 0) return false;
+        var hits: std.ArrayList(maru.session.agent_image_markers.Hit) = .empty;
+        defer hits.deinit(self.allocator);
+        self.collectMarkerHits(term, .cursor_block, &hits) catch return false;
+        // `CellHit.row`는 **이미 뷰포트 행**이고 마커 스캔도 뷰포트 행으로 답한다 — 변환이 없다.
+        const m = maru.session.agent_image_markers.hitAt(hits.items, cell.row, cell.col) orelse return false;
+        const next = marker_preview_ops.toggle(&self.marker_preview, self.marker_preview_open, surface_id, m);
+        const changed = (next == null) != (self.marker_preview_open == null) or
+            (next != null and self.marker_preview_open != null and next.?.n != self.marker_preview_open.?.n);
+        if (!changed) return next != null or self.marker_preview_open != null;
+        // **닫는 길에서 텍스처 회수 표시를 세운다**(§5). 안 세우면 다시 열 때 그 한 장이 빈다.
+        if (self.marker_preview_open) |*o| o.deinit(self.allocator);
+        self.marker_preview_open = next;
+        self.metal_dirty = true;
+        return next != null;
+    }
+
+    /// 열린 프리뷰의 앵커를 재검증하고 디코드를 편다 — tick마다.
+    fn pumpMarkerPreviewOpen(self: *AppSession) void {
+        const open = &(self.marker_preview_open orelse return);
+        if (!self.surface_initialized or self.tabs.items.len == 0) {
+            self.closeMarkerPreview();
+            return;
+        }
+        const term = pane_ops.activePane(self).activeTerm();
+        if (term.kind != .terminal or term.surface.id != open.surface_id) return; // 다른 pane을 보는 중
+        // **앵커 재검증**(§3) — TUI가 그 자리를 덮어도 통보가 없으므로 매 프레임 확인하고 조용히 닫는다.
+        var hits: std.ArrayList(maru.session.agent_image_markers.Hit) = .empty;
+        defer hits.deinit(self.allocator);
+        self.collectMarkerHits(term, .cursor_block, &hits) catch return;
+        if (!marker_preview_ops.stillAnchored(open.*, hits.items)) {
+            self.closeMarkerPreview();
+            return;
+        }
+        if (open.pixels.len > 0 or open.failed) return;
+        // 디코드를 **한 번만** 건다. 결과는 `agent_activity_decode_backend` 의 take 루프가 가져간다.
+        if (!open.submitted) {
+            const s = self.marker_preview.stagingFor(open.surface_id) orelse return;
+            const e = s.lookup(open.n) orelse return;
+            if (e.path.len == 0) {
+                open.failed = true; // 원격은 로컬 파일이 없다(P3)
+                return;
+            }
+            const backend = &(self.agent_activity_decode_backend orelse return);
+            const size = std.Io.Dir.cwd().statFile(self.io, e.path, .{}) catch {
+                open.failed = true;
+                return;
+            };
+            const len: u32 = std.math.cast(u32, size.size) orelse {
+                open.failed = true;
+                return;
+            };
+            // 목표 변은 workspace 절반이면 충분하다(§2.3) — 원본을 통째로 올릴 이유가 없다.
+            const target: u32 = @max(256, self.backing_width_px / 2);
+            if (backend.submitRawFile(e.path, len, target, marker_preview_decode_key) != null) open.submitted = true;
+        }
+    }
+
+    /// 열린 프리뷰를 프레임에 싣는다. 자리는 `image_preview.place`가, 픽셀 채널은 갤러리와 같은
+    /// `gpu_images`가 소유한다(§2.1·§2.3).
+    fn appendMarkerPreviewImage(
+        self: *AppSession,
+        images: *[]renderer.metal_frame.GpuImage,
+        uploads: *[]renderer.metal_frame.GpuImageUpload,
+        pixels: *[]u8,
+        live_ids: *std.ArrayList(u32),
+    ) void {
+        const open = &(self.marker_preview_open orelse return);
+        if (open.pixels.len == 0) {
+            open.uploaded = false; // 아직 안 풀렸다 — 「안 그리고 나가는 길」이라 표시를 되돌린다(§5)
+            return;
+        }
+        const term = pane_ops.activePane(self).activeTerm();
+        if (term.surface.id != open.surface_id) {
+            open.uploaded = false; // 다른 pane을 보는 중이라 이 프레임엔 안 실린다
+            return;
+        }
+        const anchor_rect = self.markerAnchorRect(term, open.*) orelse {
+            open.uploaded = false;
+            return;
+        };
+        const p = chrome.props.ChromeProps{ .metrics = self.buildCellMetrics() };
+        const place = chrome.components.image_preview.place(anchor_rect, open.width, open.height, p) orelse {
+            open.uploaded = false;
+            return;
+        };
+        marker_preview_ops.appendGpuImage(open, self.allocator, place, images, uploads, pixels, live_ids);
+    }
+
+    /// 마커 span의 화면 사각형(px) — 셀 → px 변환은 여기서 한다(배치 모듈은 px만 안다).
+    fn markerAnchorRect(self: *AppSession, term: *Term, open: marker_preview_ops.Open) ?chrome.draw.Rect {
+        // 활성 pane 본문 rect — 프리뷰는 활성 pane에서만 그린다(호출자가 surface_id를 이미 확인했다).
+        _ = term;
+        const rect = pane_ops.paneTermRect(self, self.termRect());
+        const m = self.buildCellMetrics();
+        const cw = @max(m.cell_width_px, 1);
+        const ch = @max(m.cell_height_px, 1);
+        const cols = open.end_col -| open.start_col;
+        return .{
+            .x = @as(i32, @intCast(rect.x)) + @as(i32, open.start_col) * @as(i32, @intCast(cw)),
+            .y = @as(i32, @intCast(rect.y)) + @as(i32, open.row) * @as(i32, @intCast(ch)),
+            .w = @as(u32, cols) * cw,
+            .h = ch,
+        };
+    }
+
+    /// 프리뷰를 닫는 **단일 자리** — 픽셀을 놓고 회수 표시를 세운다(§5).
+    fn closeMarkerPreview(self: *AppSession) void {
+        if (self.marker_preview_open) |*o| o.deinit(self.allocator);
+        self.marker_preview_open = null;
+        self.metal_dirty = true;
+    }
+
     /// tick마다 마커 프리뷰 상태를 화면에 맞춘다(§4.2). 대기 중인 붙여넣기가 없고 스테이징도 비어
     /// 있으면 **화면을 읽지 않는다** — 관찰이 걸리지 않은 세션에 비용을 물리지 않는다.
     fn pollMarkerPreview(self: *AppSession) void {
@@ -17173,6 +17298,10 @@ pub const AppSession = struct {
         // 링크로 오인돼 탭 전환을 삼킨다(hover는 그 영역에서 밑줄을 지우므로 비대칭까지 생긴다).
         const hit = pane_ops.paneTargetAt(self, x_px, y_px) orelse return &.{};
         const cell = pane_ops.paneCellAtExact(self, hit.surface, hit.rect, x_px, y_px) orelse return &.{};
+        // **마커가 먼저다**(계약 §2.2). 마커 판정은 문자열이라 `stat` 없이 끝나고, 링크는 존재 검증까지
+        // 가므로 순서를 뒤집으면 헛 `stat`이 붙는다. 마커를 소비했으면 빈 슬라이스를 돌려 Swift가
+        // 아무것도 열지 않게 한다 — 클릭은 우리가 먹었다.
+        if (self.toggleMarkerPreviewAt(hit.term, hit.surface.id, cell)) return &.{};
         if (self.url_buffer.len > 0) {
             self.allocator.free(self.url_buffer);
             self.url_buffer = &.{};
@@ -19343,6 +19472,7 @@ pub const AppSession = struct {
         // 활성 term 하나만 본다 — 비활성 pane의 화면은 이 tick에 바뀌지 않았거나, 바뀌었어도 그 pane이
         // 활성이 될 때 따라잡는다(관찰 창이 2초라 충분하다).
         self.pollMarkerPreview();
+        self.pumpMarkerPreviewOpen();
         self.advancePendingAppQuitShutdown();
         // end-all target이 source-zero와 ready_remove까지 도달해 종료 승인을 게시한 frame은 더 이상
         // remote maintenance나 Term drain을 실행하지 않는다. 같은 frame의 후속 접근은 deinit이 소유할
@@ -20644,6 +20774,7 @@ pub const AppSession = struct {
                 // (예약 id·live 집합·generation 1회 업로드). 렌더러를 고치지 않고 kitty graphics 의
                 // 텍스처 캐시·image quad 인프라를 그대로 재사용한다. 갤러리 뷰가 아니면 즉시 돌아온다.
                 agent_activity_ops.appendGpuImages(self, &kg_images, &kg_uploads, &kg_pixels, &kg_live_ids);
+                self.appendMarkerPreviewImage(&kg_images, &kg_uploads, &kg_pixels, &kg_live_ids);
                 agent_activity_ops.appendHoverQuad(self); // 갤러리 호버 판(이미지보다 뒤 layer)
                 notification_ops.appendBellFlashQuad(self); // 시각 벨(bell.visual): flash 중이면 전경색 반투명 full-screen quad를 맨 위에(F2-4)
                 if (self.metal_buffer.replace(self.allocator, pane_frames.items, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, sidebar_frame, sidebar_header_frame, sidebar_colors, pane_chrome.items, pane_overlay.items, overlay_frame, floating_pf, drag_overlay_cells.items, self.gpu_quads.items, self.gpu_shadows.items, self.gpu_glyphs.items, kg_images, kg_uploads, kg_pixels, kg_live_ids.items)) |_| {
@@ -22932,6 +23063,8 @@ pub const AppSession = struct {
         // 여기 말고 푸는 자리가 없다(상한 `max_hits_per_file` 4,096개 × `Hit`이라 한 창에 100 KB 급이다).
         self.agent_activity.deinit(self.allocator);
         // 마커 프리뷰 스테이징도 힙이다 — PNG 바이트를 들고 있어 안 풀면 장당 수 MB가 샌다.
+        if (self.marker_preview_open) |*o| o.deinit(self.allocator);
+        self.marker_preview_open = null;
         self.marker_preview.deinit(self.allocator);
         // **워커를 거두고 나간다.** 스캔·디코드 둘 다 `deinit` 이 취소를 걸고 스레드를 join 한다 —
         // 떼어 놓으면 그 스레드가 든 할당(경로 사본)이 세션보다 오래 살아 누수로 보고된다

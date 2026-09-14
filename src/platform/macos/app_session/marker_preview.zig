@@ -13,6 +13,8 @@ const std = @import("std");
 const maru = @import("maru");
 const staging_mod = maru.session.agent_image_staging;
 const markers_mod = maru.session.agent_image_markers;
+const chrome = maru.chrome;
+const metal_frame = maru.renderer.metal_frame;
 
 /// 붙여넣기 한 번이 관찰을 기다리는 동안의 자리.
 ///
@@ -166,7 +168,30 @@ pub const Open = struct {
     row: u16,
     start_col: u16,
     end_col: u16,
+    /// 디코드 결과(RGBA8). 비어 있으면 아직 안 풀렸거나 못 풀었다.
+    pixels: []u8 = &.{},
+    width: u32 = 0,
+    height: u32 = 0,
+    /// 디코드를 이미 걸었나 — 매 프레임 다시 걸지 않기 위한 빗장.
+    submitted: bool = false,
+    /// 못 풀었다 — 다시 걸지 않는다(같은 파일은 다음에도 안 풀린다).
+    failed: bool = false,
+    /// **이 텍스처를 올렸나.** ⚠️ 프리뷰가 사라지는 **모든** 길에서 거짓으로 되돌려야 한다
+    /// (§5 · 갤러리 §5.4). `live_image_ids`에서 한 프레임 빠진 텍스처는 회수되는데 이 값이 참으로
+    /// 남으면 다음에 그릴 때 업로드 없이 id만 실려 **그 한 장이 빈다** — 갤러리의 「도크 접기」가
+    /// 정확히 그 결함이었고, 토글은 그 길 자체다.
+    uploaded: bool = false,
+
+    pub fn deinit(self: *Open, allocator: std.mem.Allocator) void {
+        allocator.free(self.pixels);
+        self.* = undefined;
+    }
 };
+
+/// 프리뷰 전용 `image_id`. 갤러리가 `0xFFF0_0000`부터 격자(`+n`)와 크게 보기(`+0x10000`)를 쓰므로
+/// **겹치지 않는 자리**를 잡는다(§5 A12) — 같은 id를 쓰면 도크와 프리뷰가 동시에 열렸을 때 서로의
+/// 텍스처를 덮고, 증상이 「가끔 다른 그림이 뜬다」라 원인을 못 찾는다.
+pub const preview_image_id: u32 = 0xFFF2_0000;
 
 /// 마커를 눌렀다 — 열려 있으면 닫고, 아니면 연다. 기록에 없는 N이면 **열지 않는다**(§3.1).
 ///
@@ -197,6 +222,73 @@ pub fn toggle(
 pub fn stillAnchored(open: Open, hits: []const markers_mod.Hit) bool {
     const h = markers_mod.hitAt(hits, open.row, open.start_col) orelse return false;
     return h.n == open.n and h.end_col == open.end_col;
+}
+
+/// 열린 프리뷰 한 장을 프레임에 싣는다 — 갤러리의 `appendGpuImages`와 **같은 채널**(§2.1).
+///
+/// ⚠️ **안 그리고 나가는 길에서는 `uploaded`를 반드시 되돌린다**(§5). `live_ids`에서 한 프레임 빠진
+/// 텍스처는 회수되는데 그 표시가 참으로 남으면 다음에 업로드 없이 id만 실려 **그 한 장이 빈다**.
+pub fn appendGpuImage(
+    open: *Open,
+    allocator: std.mem.Allocator,
+    place: chrome.components.image_preview.Placement,
+    images: *[]metal_frame.GpuImage,
+    uploads: *[]metal_frame.GpuImageUpload,
+    pixels: *[]u8,
+    live_ids: *std.ArrayList(u32),
+) void {
+    if (open.pixels.len == 0 or open.width == 0 or open.height == 0) {
+        open.uploaded = false;
+        return;
+    }
+    const id = preview_image_id;
+    const img: metal_frame.GpuImage = .{
+        .image_id = id,
+        .dest_x = @floatFromInt(place.image.x),
+        .dest_y = @floatFromInt(place.image.y),
+        .dest_w = @floatFromInt(place.image.w),
+        .dest_h = @floatFromInt(place.image.h),
+        .origin_x = 0,
+        .origin_y = 0,
+        .src_u0 = 0,
+        .src_v0 = 0,
+        .src_u1 = 1,
+        .src_v1 = 1,
+        .z = 0,
+        .pass = 2, // above_text — 텍스트 앞에 떠야 가리는 것이 보인다(§2.1)
+    };
+    live_ids.append(allocator, id) catch {};
+
+    const merged = allocator.alloc(metal_frame.GpuImage, images.len + 1) catch {
+        open.uploaded = false;
+        return;
+    };
+    @memcpy(merged[0..images.len], images.*);
+    merged[images.len] = img;
+    allocator.free(images.*);
+    images.* = merged;
+
+    if (open.uploaded) return;
+    const merged_uploads = allocator.alloc(metal_frame.GpuImageUpload, uploads.len + 1) catch return;
+    const merged_pixels = std.mem.concat(allocator, u8, &.{ pixels.*, open.pixels }) catch {
+        allocator.free(merged_uploads);
+        return;
+    };
+    @memcpy(merged_uploads[0..uploads.len], uploads.*);
+    merged_uploads[uploads.len] = .{
+        .image_id = id,
+        .width = open.width,
+        .height = open.height,
+        .bpp = 4,
+        .generation = 1,
+        .pixels_offset = pixels.len,
+        .pixels_len = open.pixels.len,
+    };
+    allocator.free(uploads.*);
+    allocator.free(pixels.*);
+    uploads.* = merged_uploads;
+    pixels.* = merged_pixels;
+    open.uploaded = true;
 }
 
 const testing = std.testing;

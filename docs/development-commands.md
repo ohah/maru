@@ -758,7 +758,12 @@ PNG 캡처 없이 PR 이 올라갔다. 설비는 이미 있었고(원격 하니�
 zig build macos-app-bundle                                   # 앱이 먼저 있어야 한다
 sh tools/remote-scm/capture.sh /tmp/rs7.png                  # 히스토리 목록
 sh tools/remote-scm/capture.sh /tmp/rs7-x.png MARU_FORCE_SCM_COMMIT_EXPAND=0   # 커밋을 펼친 화면
+sh tools/remote-scm/capture.sh /tmp/rs7-a.png MARU_FORCE_SCM_TAB=agent         # 에이전트 탭
 ```
+
+⚠️ **이 스크립트는 빌드를 안 한다.** 코드를 고치고 곧바로 부르면 **옛 바이너리가 그린 그림**이 나오므로,
+소스가 앱보다 나중이면 **거절한다**(그 전에는 성공으로 끝나 「고침이 제품에 안 보인다」로 헤맸다).
+앱 로그는 `<출력>.log` 로 남는다 — 격리 HOME 은 지워지므로 그림이 이상할 때 볼 것이 그것뿐이다.
 
 `tools/remote-scm/ssh_harness.sh` 를 **그대로 재사용한다** — sshd·키·원격 저장소를 두 벌로 만들지
 않는다. 뒤에 붙이는 `KEY=VALUE` 는 앱 env 를 덮으므로 탭(`MARU_FORCE_SCM_TAB`)·펼침·지연

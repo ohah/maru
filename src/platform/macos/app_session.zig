@@ -71038,6 +71038,61 @@ test "히스토리: 실패도 답이다 — 매 tick 다시 묻지 않는다 (�
     try std.testing.expect(session.scm_log_seq != before_invalidate);
 }
 
+test "에이전트 탭은 원격에서 «아직 안 된다»고 말한다 — 로컬 턴을 그 자리에 두지 않는다" {
+    // **사용자 결정 2026-09-14.** 턴 링은 **에이전트 세션**의 것이지 저장소의 것이 아니라, 원격 pane 으로
+    // 옮겨도 **로컬 세션의 턴이 그대로 남는다.** 그 줄들은 원격 커밋 목록 옆에서 「이 기계의 기록」으로
+    // 읽히고, RS7-0 이 읽기를 막아 둔 탓에 개수(`N개 파일`)도 영영 안 차고 눌러도 이유 없이 실패한다 —
+    // 세 어긋남이 한 화면에 겹친다. 반쪽으로 보여 주느니 한 줄로 말한다(계약 §2.3).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+
+    // **링을 실제로 채운다** — 비워 두면 「원격이라 안 보인다」와 「원래 없다」를 못 가른다.
+    const ring = testTurnRing(session);
+    ring.push(.{ .tree = "aaaa1111", .surface_id = 1, .captured_s = 100, .agent_kind = 1 });
+    ring.push(.{ .tree = "bbbb2222", .surface_id = 1, .captured_s = 200, .agent_kind = 1 });
+    session.scm_tab = .agent;
+
+    // ⑴ 로컬에서는 그 턴이 보인다(전제 — 이 판정자가 뒤집는 것이 그 답이다).
+    {
+        const local = scm_dock_ops.projectTabForTest(session, arena_state.allocator()) orelse
+            return error.NoProjection;
+        var turn_rows: usize = 0;
+        for (local.items) |item| switch (item) {
+            .turn => turn_rows += 1,
+            else => {},
+        };
+        try std.testing.expect(turn_rows > 0);
+    }
+
+    // ⑵ 원격이면 **줄이 하나도 없고** 이유가 선다.
+    git_ops.rememberGitRepo(session, "/srv/app");
+    git_ops.rememberGitRepoDest(session, "user@build-box");
+    try std.testing.expect(git_ops.scmTargetIsRemote(session));
+
+    const remote = scm_dock_ops.projectTabForTest(session, arena_state.allocator()) orelse
+        return error.NoProjection;
+    var turn_rows: usize = 0;
+    var saw_reason = false;
+    for (remote.items) |item| switch (item) {
+        .turn => turn_rows += 1,
+        .notice => |text| {
+            if (std.mem.eql(u8, text, maru.i18n.t(.scm_turns_remote_unsupported))) saw_reason = true;
+            // 로컬 링의 사정을 말하지 않는다 — 훅을 깔라는 말이 **저쪽 기계**에 대한 것으로 읽힌다.
+            try std.testing.expect(!std.mem.eql(u8, text, maru.i18n.t(.scm_turns_need_hooks)));
+            try std.testing.expect(!std.mem.eql(u8, text, maru.i18n.t(.scm_no_turns)));
+        },
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 0), turn_rows);
+    try std.testing.expect(saw_reason);
+}
+
 test "히스토리 탭은 «이 커밋을 어느 기계에서 읽었나»를 말한다 (적대적 검증)" {
     // **결함**(2026-09-14). RS7 이 이 탭을 원격으로 열었는데, 정작 그 사실을 말할 자리가 없었다 —
     // 브랜치 줄은 `branch` 가 빈 이 탭에 안 서고, 화면 아래 폴더줄은 **터미널이 서 있는 곳**이라

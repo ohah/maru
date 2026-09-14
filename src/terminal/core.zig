@@ -11189,6 +11189,94 @@ test "kitty delete: d=A 는 보이는 것만 지우고 참조 없는 이미지�
     try std.testing.expect(core.kitty_images.map.get(2) == null); // 참조가 사라졌다 → free
 }
 
+// **자리로 겨누는 delete 는 화면을 넘지 않는다.** #3631/#3677 이 배치·격자를 화면에 귀속시켰는데
+// delete 가 그 격리를 뚫고 있었다 — 실측(적대적 검증): alt 에서 보낸 `d=a`·`d=c`·`d=x`·`d=p` 가
+// **넷 다 primary 의 배치를 지웠다**. vim 안의 TUI 가 자기 이미지를 정리하는 것만으로 셸 화면의
+// 이미지가 사라진다.
+//
+// 자리는 화면마다 **좌표계가 다르다**(anchor_row 는 그 화면의 절대 행이고 alt 엔 스크롤백이 없다).
+// kitty 는 화면마다 graphics 상태가 따로라 구조적으로 이 문제가 없다.
+test "kitty delete: alt 에서 보낸 자리 기반 delete 는 primary 배치를 건드리지 않는다 (적대적 검증)" {
+    var b64: [64]u8 = undefined;
+    var seq: [200]u8 = undefined;
+    const px = [_]u8{ 8, 8, 8, 255 } ** 4;
+    const enc = std.base64.standard.Encoder.encode(&b64, &px);
+    for ([_][]const u8{
+        "a=d,d=a,q=2",
+        "a=d,d=c,q=2",
+        "a=d,d=x,x=1,q=2",
+        "a=d,d=y,y=1,q=2",
+        "a=d,d=p,x=1,y=1,q=2",
+        "a=d,d=z,z=0,q=2",
+    }) |cmd| {
+        var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 6 });
+        defer core.deinit();
+        core.setCellMetrics(10, 20);
+        try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+        try core.write("\x1b[1;1H");
+        try core.write("\x1b_Ga=p,i=1,p=1,c=1,r=1,q=2\x1b\\"); // primary 에 건다
+
+        try core.write("\x1b[?1049h"); // vim 이 들어온다
+        try core.write("\x1b[1;1H");
+        try core.write(try std.fmt.bufPrint(&seq, "\x1b_G{s}\x1b\\", .{cmd})); // alt 에서 delete
+        try core.write("\x1b[?1049l"); // vim 종료
+
+        // primary 로 돌아오면 그 배치가 **그대로** 있어야 한다.
+        try std.testing.expectEqual(@as(usize, 1), core.buildPlacementViews(core.screen.sb.count).len);
+    }
+}
+
+// 같은 명령을 **그 화면에서** 보내면 당연히 지워진다 — 위 판정자가 「아무것도 안 지운다」로
+// 공허해지지 않게 양성 대조를 같은 자리에 둔다.
+test "kitty delete: 같은 화면에서 보낸 자리 기반 delete 는 정상 동작한다 (양성 대조)" {
+    var b64: [64]u8 = undefined;
+    var seq: [200]u8 = undefined;
+    const px = [_]u8{ 8, 8, 8, 255 } ** 4;
+    const enc = std.base64.standard.Encoder.encode(&b64, &px);
+    for ([_][]const u8{
+        "a=d,d=a,q=2",
+        "a=d,d=c,q=2",
+        "a=d,d=x,x=1,q=2",
+        "a=d,d=y,y=1,q=2",
+        "a=d,d=p,x=1,y=1,q=2",
+        "a=d,d=z,z=0,q=2",
+    }) |cmd| {
+        var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 6 });
+        defer core.deinit();
+        core.setCellMetrics(10, 20);
+        try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+        try core.write("\x1b[1;1H");
+        try core.write("\x1b_Ga=p,i=1,p=1,c=1,r=1,q=2\x1b\\");
+        try core.write("\x1b[1;1H"); // 커서를 그 자리로(d=c 용)
+        try core.write(try std.fmt.bufPrint(&seq, "\x1b_G{s}\x1b\\", .{cmd}));
+        try std.testing.expectEqual(@as(usize, 0), core.kitty_placements.items.len);
+    }
+}
+
+// alt 안에서 건 배치는 alt 의 delete 로 지워진다(그 화면의 일이다).
+test "kitty delete: alt 에서 건 배치는 alt 의 delete 가 지운다 (적대적 검증)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 6 });
+    defer core.deinit();
+    core.setCellMetrics(10, 20);
+    var b64: [64]u8 = undefined;
+    var seq: [200]u8 = undefined;
+    const px = [_]u8{ 8, 8, 8, 255 } ** 4;
+    const enc = std.base64.standard.Encoder.encode(&b64, &px);
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+    try core.write("\x1b[1;1H");
+    try core.write("\x1b_Ga=p,i=1,p=1,c=1,r=1,q=2\x1b\\"); // primary
+
+    try core.write("\x1b[?1049h");
+    try core.write("\x1b[2;1H");
+    try core.write("\x1b_Ga=p,i=1,p=2,c=1,r=1,q=2\x1b\\"); // alt 에도 하나
+    try std.testing.expectEqual(@as(usize, 1), core.buildPlacementViews(core.screen.sb.count).len);
+    try core.write("\x1b_Ga=d,d=a,q=2\x1b\\"); // alt 의 것만 지운다
+    try std.testing.expectEqual(@as(usize, 0), core.buildPlacementViews(core.screen.sb.count).len);
+
+    try core.write("\x1b[?1049l");
+    try std.testing.expectEqual(@as(usize, 1), core.buildPlacementViews(core.screen.sb.count).len); // primary 는 산다
+}
+
 test "kitty delete: d=f 는 프레임만 놓아주고 이미지는 남긴다" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 8 });
     defer core.deinit();

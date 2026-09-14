@@ -12,6 +12,8 @@ const std = @import("std");
 const draw = @import("../draw.zig");
 const props = @import("../props.zig");
 const popup_box = @import("popup_box.zig"); // 앵커 팝업 기하 공유 프리미티브(§5.4)
+const tokens = @import("../tokens.zig");
+const overlay_input = @import("overlay_input.zig"); // displayCols(EAW 표시폭) 단일 출처
 
 /// 프리뷰가 차지할 자리. `image`는 그림이 들어갈 안쪽 사각형(테두리 제외)이다.
 pub const Placement = struct {
@@ -86,6 +88,49 @@ pub fn place(
         .scale = scale,
         .flipped_up = placed.flipped_up,
     };
+}
+
+/// 이 상자가 그리는 레이어. **pane 오버레이**다 — 모달이 아니므로 입력을 막지 않는다(§2.2에서
+/// hover가 아니라 명시 제스처를 고른 것과 같은 결: 프리뷰는 터미널을 잠그지 않는다).
+pub const layer = draw.Layer.pane_overlay;
+
+/// 프리뷰 상자의 **테두리와 배경**을 그린다. 그림 픽셀은 `gpu_images`가 따로 싣는다(갤러리 §5.4 분업) —
+/// 여기서 그리는 것은 그 픽셀이 놓일 자리의 테두리뿐이다.
+///
+/// `notice`가 있으면 그림 대신 그 문구를 가운데에 적는다(디코드 실패 — §2.3). 문구는 **호출자가 i18n에서
+/// 골라 넘긴다**: 컴포넌트는 `ui.language`를 모르고, 그래야 번역이 두 군데로 흩어지지 않는다.
+pub fn view(
+    pl: Placement,
+    notice: ?[]const u8,
+    p: props.ChromeProps,
+    tk: *const tokens.Tokens,
+    arena: std.mem.Allocator,
+    out: *std.ArrayList(draw.Op),
+) !void {
+    _ = tk;
+    const r = p.shape.corner_radius_px;
+    const bw = p.shape.border_width_px;
+    try out.append(arena, .{ .quad = .{
+        .rect = pl.box,
+        .fill_role = .surface_bg,
+        .corner_radii = .{ r, r, r, r },
+        .border_widths = .{ bw, bw, bw, bw },
+        .border_role = .focus_accent,
+    } });
+    const text = notice orelse return;
+    const cw = @max(p.metrics.cell_width_px, 1);
+    const ch = @max(p.metrics.cell_height_px, 1);
+    const cols = overlay_input.displayCols(text);
+    const text_w = cols * cw;
+    const x = pl.box.x + @divTrunc(@as(i32, @intCast(pl.box.w)) - @as(i32, @intCast(text_w)), 2);
+    const y = pl.box.y + @divTrunc(@as(i32, @intCast(pl.box.h)) - @as(i32, @intCast(ch)), 2);
+    const runs = try arena.alloc(draw.Run, 1);
+    runs[0] = .{ .text = text };
+    try out.append(arena, .{ .text = .{
+        .origin = .{ .x = x, .y = y },
+        .runs = runs,
+        .role = .muted_fg,
+    } });
 }
 
 const testing = std.testing;
@@ -170,4 +215,23 @@ test "MP1 배치: 그림 사각형이 상자 안에 있다 — 테두리·패딩
     try testing.expect(pl.image.y > pl.box.y);
     try testing.expect(pl.image.x + @as(i32, @intCast(pl.image.w)) < pl.box.x + @as(i32, @intCast(pl.box.w)));
     try testing.expect(pl.image.y + @as(i32, @intCast(pl.image.h)) < pl.box.y + @as(i32, @intCast(pl.box.h)));
+}
+
+test "MP1 view: 테두리 상자를 그리고, 안내가 있으면 가운데에 적는다" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const p = metricsOf(1000, 800);
+    const pl = place(.{ .x = 100, .y = 100, .w = 80, .h = 16 }, 200, 150, p) orelse return error.TestUnexpectedResult;
+    const Rgb = @import("../../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+
+    var ops: std.ArrayList(draw.Op) = .empty;
+    try view(pl, null, p, &tk, arena, &ops);
+    try testing.expectEqual(@as(usize, 1), ops.items.len); // 상자만
+
+    var ops2: std.ArrayList(draw.Op) = .empty;
+    try view(pl, "열 수 없습니다", p, &tk, arena, &ops2);
+    try testing.expectEqual(@as(usize, 2), ops2.items.len); // 상자 + 문구
+    try testing.expect(ops2.items[1].text.origin.x > pl.box.x);
 }

@@ -127,7 +127,9 @@ fn popupRect(anchor: draw.Rect, items: []const []const u8, p: props.ChromeProps)
         const w = overlay_input.displayCols(it);
         if (w > max_cols) max_cols = w;
     }
-    const box_w = @max((max_cols + 2) * cw, anchor.w); // 최소 앵커 control 폭
+    // **넓은 도메인에서 곱하고 좁힌다**(적대적 A46 — `context_menu` 와 같은 자리다).
+    const wide: u64 = @as(u64, max_cols + 2) * @as(u64, cw);
+    const box_w = @max(@as(u32, @intCast(@min(wide, @as(u64, std.math.maxInt(u32))))), anchor.w); // 최소 앵커 control 폭
     const box_h = @as(u32, @intCast(items.len)) * ch;
     // 자리는 **공유 프리미티브**가 정한다(`popup_box` · chrome-strategy.md §5.4). 예전에는 같은 clamp 를
     // 여기 복사해 뒀는데 그 복사본이 **낡아 있었다**: `context_menu` 가 사용자 제보로 얻은 「가장자리에

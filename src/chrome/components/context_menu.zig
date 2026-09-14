@@ -157,14 +157,21 @@ fn menuRect(state: *const State, items: []const []const u8, p: props.ChromeProps
     }
     // 체크 열은 **모든 줄 앞에** 붙으므로 가장 긴 줄에 더한다 — 안 더하면 그 줄이 우측 패딩을
     // 먹고 테두리에 닿는다(`itemAt` 도 이 rect 를 쓰므로 히트 영역까지 어긋난다).
-    const box_w = (max_cols + state.markCols() + 2) * cw; // 좌우 1칸 패딩
+    // **넓은 도메인에서 곱하고 좁힌다**(A46). `(cols) * cw` 는 u32 곱이라 라벨이 극단적으로 길면
+    // 오버플로로 터진다 — 폭은 어차피 workspace 로 clamp 되므로 포화시켜도 결과가 같다.
+    const box_w_wide: u64 = @as(u64, max_cols + state.markCols() + 2) * @as(u64, cw); // 좌우 1칸 패딩
+    const box_w: u32 = @intCast(@min(box_w_wide, @as(u64, std.math.maxInt(u32))));
     const box_h = @as(u32, @intCast(items.len)) * ch;
     // 자리는 **공유 프리미티브**가 정한다(`popup_box`) — 우클릭 메뉴·드롭다운·이미지 프리뷰가 같은
     // clamp 를 각자 복사해 갖고 있던 것을 한 곳으로 모았다(docs/chrome-strategy.md §5.4).
     // 상태바 앵커 특례도 그쪽 플래그가 든다: 상태바는 창 전폭이고 workspace **밖**이라, 왼쪽 항목을
     // `workspace.x` 로 밀면 누른 자리와 뜬 자리가 화면 절반만큼 떨어진다(사용자 제보).
     const workspace = props.workspaceRect(m);
-    const anchored_below_workspace = state.anchor_y >= @as(i32, @intCast(workspace.y + workspace.h));
+    // **i64 로 비교한다**(적대적 A45). `workspace.y + workspace.h` 는 u32 덧셈이라 오버플로가 나고,
+    // `@intCast` 는 i32 를 넘는 값에서 **패닉**한다. `popup_box` 안쪽을 i64 로 옮기면서 **호출자를
+    // 안 봤던** 자리다 — 프리미티브를 안전하게 만들어도 그 앞에서 터지면 소용없다.
+    const ws_bottom: i64 = @as(i64, workspace.y) + @as(i64, workspace.h);
+    const anchored_below_workspace = @as(i64, state.anchor_y) >= ws_bottom;
     const placed = popup_box.place(box_w, box_h, .{
         .anchor = .{ .x = state.anchor_x, .y = state.anchor_y, .w = 0, .h = 0 },
         .vertical = .at_anchor,
@@ -482,4 +489,31 @@ test "체크 열은 상자 폭에 들어가고, 전부 꺼짐은 열 없음과 �
     // `show` 는 열을 없앤다(다음 메뉴로 새지 않게) — 그 뒤 호출부가 다시 세우는 것이 규약이다.
     checked.show(10, 10, items.len);
     try std.testing.expectEqual(@as(?u64, null), checked.checked_mask);
+}
+
+test "context_menu menuRect: 손상된 workspace·거대한 라벨에 안 터진다 (적대적 A45·A46)" {
+    const Rgb = @import("../../color.zig").Rgb;
+    _ = Rgb;
+    var p = props.ChromeProps{ .metrics = .{
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .sidebar_width_px = 0,
+        .backing_width_px = 1000,
+        .backing_height_px = 600,
+        .workspace_present = true,
+        .workspace_x_px = 0,
+        .workspace_y_px = std.math.maxInt(u32) - 4, // y + h 가 u32 를 넘는다
+        .workspace_width_px = 1000,
+        .workspace_height_px = 600,
+    } };
+    var state: State = .{};
+    const items = [_][]const u8{"a"};
+    state.show(10, 10, items.len);
+    // 예전에는 `workspace.y + workspace.h` 덧셈과 `@intCast` 에서 죽었다. 지금은 값을 내거나 null 이다.
+    _ = menuRect(&state, &items, p);
+
+    // 라벨이 극단적으로 길어도 폭 곱셈이 안 터진다.
+    p.metrics.workspace_y_px = 0;
+    p.metrics.cell_width_px = std.math.maxInt(u16);
+    _ = menuRect(&state, &items, p);
 }

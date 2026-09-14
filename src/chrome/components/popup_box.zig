@@ -23,6 +23,10 @@ pub const Vertical = enum {
     below_flip_up,
     /// 앵커 **아래에** 둔다. 안 들어가면 **당긴다**(뒤집지 않는다 — 설정 드롭다운).
     ///
+    /// ⚠️ **점 앵커(`h = 0`)에 `gap_px = 0` 이면 `at_anchor` 와 수학적으로 같다**(A44). 그래도 둘을
+    /// 남기는 것은 **의도가 다르기** 때문이다 — `at_anchor` 는 「누른 자리」, 이쪽은 「무엇 아래」다.
+    /// 앵커에 두께가 생기는 순간 갈라진다.
+    ///
     /// 드롭다운이 뒤집히지 않는 이유는 **control 과의 관계가 뒤바뀌면 어느 값을 고르는 목록인지
     /// 흐려지기** 때문이다. 목록이 control 위로 올라가면 그 위의 다른 행을 덮어 「저 행의 목록인가」로
     /// 읽힌다. 프리뷰는 앵커가 마커 한 줄이라 그 혼동이 없어 뒤집어도 된다.
@@ -31,6 +35,10 @@ pub const Vertical = enum {
 
 pub const Placement = struct {
     /// 앵커 사각형. 점 앵커(우클릭)면 `w`/`h`가 0이다.
+    ///
+    /// ⚠️ **`w` 는 쓰지 않는다**(A43). 가로는 앵커의 **왼쪽 모서리**에만 맞추고 폭은 보지 않는다 —
+    /// 「앵커만큼은 넓게」가 필요하면 그것은 **상자 크기**의 일이라 호출자가 `box_w` 에 반영한다
+    /// (`dropdown` 이 `@max(…, anchor.w)` 로 그렇게 한다).
     anchor: draw.Rect,
     vertical: Vertical = .at_anchor,
     /// 앵커와 상자 사이 간격(px). `below_flip_up`에서 마커·control을 가리지 않게 띄운다.
@@ -47,6 +55,9 @@ pub const Placement = struct {
 pub const Result = struct {
     rect: draw.Rect,
     /// 앵커 위로 뒤집혔나(`below_flip_up`에서만 참이 될 수 있다).
+    ///
+    /// **제품 소비자가 없다 — 판정자 전용이다**(A42). 뒤집기는 `rect.y` 에 이미 반영돼 있으므로
+    /// 그리는 쪽은 이 값을 볼 이유가 없고, 「뒤집었는가」를 밖에서 확인할 수단은 이것뿐이다.
     flipped_up: bool = false,
 };
 

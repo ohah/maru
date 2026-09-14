@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const glyph_layout = @import("glyph_layout.zig");
 
 pub const AtlasSlotId = u32;
@@ -68,14 +69,40 @@ pub const AtlasStats = struct {
     upload_bytes: usize = 0,
 };
 
-const AtlasEntry = struct {
-    slot: AtlasSlot,
+/// 캐시 키의 해시·동등성을 한자리에 둔다. `std.hash.autoHash` 는 **포인터가 있으면 comptime 에
+/// 막는다** — `GlyphCacheKey` 에 슬라이스가 끼어드는 날 조용히 틀리는 대신 빌드가 선다.
+///
+/// `probe_count` 는 **테스트에서만** 는다(`builtin.is_test` 는 comptime 상수라 제품 빌드에서
+/// 사라진다). 이것이 있어야 「조회 비용이 캐시 크기에 비례하지 않는다」를 시간 재기 없이 —
+/// 즉 CI 에서 흔들리지 않게 — 판정할 수 있다. 선형 탐색으로 되돌리면 이 수가 항목 수만큼
+/// 뛰거나(맥락을 거치면) 0 이 된다(안 거치면). 어느 쪽이든 판정자가 빨개진다.
+pub var probe_count: usize = 0;
+
+const KeyContext = struct {
+    pub fn hash(_: KeyContext, key: glyph_layout.GlyphCacheKey) u32 {
+        var hasher = std.hash.Wyhash.init(0);
+        std.hash.autoHash(&hasher, key);
+        return @truncate(hasher.final());
+    }
+
+    pub fn eql(_: KeyContext, a: glyph_layout.GlyphCacheKey, b: glyph_layout.GlyphCacheKey, _: usize) bool {
+        if (builtin.is_test) probe_count += 1;
+        return std.meta.eql(a, b);
+    }
 };
 
 pub const GlyphAtlas = struct {
     allocator: std.mem.Allocator,
     config: GlyphAtlasConfig,
-    entries: std.ArrayList(AtlasEntry) = .empty,
+    /// 캐시 본체. **삽입 순서를 지키는 해시맵**이라 조회가 O(1)이면서 FIFO 축출(가장 오래된 것
+    /// 먼저)이 그대로 성립한다. 선형 배열이면 조회가 항목 수에 비례해 커지는데, 이 조회는 글리프
+    /// 하나마다·페인마다·프레임마다 일어나 그 비용이 프레임 시간에 그대로 실린다.
+    ///
+    /// 키 동등성·해시를 **자동 도출**에 맡긴다: `GlyphCacheKey`는 슬라이스·포인터·union이 없는
+    /// plain value 타입이라 구조적 동등성이 정확하고, 키에 필드가 추가돼도 비교를 손으로 갱신할
+    /// 필요가 없다("다른 bitmap을 같은 slot에 재사용"하는 누락을 막는다). 나중에 키에 포인터가
+    /// 들어가면 자동 해시가 **comptime에 막는다** — 조용히 틀리지 않는다.
+    entries: std.ArrayHashMapUnmanaged(glyph_layout.GlyphCacheKey, AtlasSlot, KeyContext, true) = .empty,
     stats: AtlasStats = .{},
     next_slot_id: AtlasSlotId = 1,
     generation: u32 = 0,
@@ -123,15 +150,16 @@ pub const GlyphAtlas = struct {
             };
         }
 
-        if (self.entries.items.len >= self.config.max_slots) {
-            const removed = self.entries.orderedRemove(0);
-            evicted = removed.slot;
+        if (self.entries.count() >= self.config.max_slots) {
+            // 삽입 순서 맵이라 index 0 이 가장 오래된 항목이다 — 기존 FIFO 축출과 같다.
+            evicted = self.entries.values()[0];
+            self.entries.orderedRemoveAt(0);
             self.stats.evictions += 1;
         }
 
         self.place_invalidated = false;
         const slot = self.makeSlot(glyph);
-        try self.entries.append(self.allocator, .{ .slot = slot });
+        try self.entries.put(self.allocator, slot.key, slot);
         self.stats.upload_bytes += slot.upload_bytes;
 
         return .{
@@ -148,7 +176,7 @@ pub const GlyphAtlas = struct {
         // 폰트 크기나 scale 변경은 기존 atlas 좌표를 안전하게 재사용할 수 없다는 뜻이다.
         // 그래서 삭제 개수와 이유를 domain event처럼 돌려줘 future debug artifact가
         // "왜 전체 redraw/upload가 생겼는지"를 설명할 수 있게 한다.
-        const removed = self.entries.items.len;
+        const removed = self.entries.count();
         self.entries.clearRetainingCapacity();
         self.stats.invalidations += 1;
         self.generation += 1;
@@ -163,17 +191,11 @@ pub const GlyphAtlas = struct {
     }
 
     pub fn entryCount(self: *const GlyphAtlas) usize {
-        return self.entries.items.len;
+        return self.entries.count();
     }
 
     fn findSlot(self: *const GlyphAtlas, key: glyph_layout.GlyphCacheKey) ?AtlasSlot {
-        for (self.entries.items) |entry| {
-            // GlyphCacheKey는 raster에 영향을 주는 필드만 담는 plain value 타입이라(슬라이스·
-            // 포인터·union 없음) std.meta.eql이 정확한 구조적 동등성이다. 키에 필드가 추가돼도
-            // 손으로 비교를 갱신할 필요가 없어 "다른 bitmap을 같은 slot에 재사용"하는 누락을 막는다.
-            if (std.meta.eql(entry.slot.key, key)) return entry.slot;
-        }
-        return null;
+        return self.entries.get(key);
     }
 
     fn makeSlot(self: *GlyphAtlas, glyph: glyph_layout.GlyphRun) AtlasSlot {

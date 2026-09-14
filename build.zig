@@ -6036,6 +6036,28 @@ pub fn build(b: *std.Build) void {
     close_error_step.dependOn(&run_close_error.step);
     boundary_step.dependOn(&run_close_error.step);
 
+    // 글리프 캐시 조회가 캐시 크기에 비례하지 않는가. 이 조회는 글리프 하나마다·페인마다·
+    // 프레임마다 돈다 — 실측 2026-09-14: 선형 탐색일 때 앱 CPU 의 17.7% 가 그 루프 하나였다.
+    // 시간이 아니라 **키 비교 횟수**를 재므로 CI 부하에 흔들리지 않는다.
+    const atlas_lookup_cost_step = b.step(
+        "test-atlas-lookup-cost",
+        "Glyph cache lookup cost does not grow with the number of cached glyphs",
+    );
+    const atlas_lookup_cost_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/glyph_atlas_lookup_cost_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        }),
+    });
+    const run_atlas_lookup_cost = b.addRunArtifact(atlas_lookup_cost_tests);
+    run_atlas_lookup_cost.addArg("--maru-expect-tests=1");
+    run_atlas_lookup_cost.addArg("--maru-expect-passed=1");
+    run_atlas_lookup_cost.setCwd(b.path("."));
+    atlas_lookup_cost_step.dependOn(&run_atlas_lookup_cost.step);
+    boundary_step.dependOn(&run_atlas_lookup_cost.step);
+
     // 호스트 어댑터 확보 실패가 «어디서·왜» 였는지 남기는가. 아홉 자리가 익명이라 attach_site=- 만 보였다.
     const restore_host_site_step = b.step(
         "test-restore-host-site",

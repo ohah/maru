@@ -15,6 +15,7 @@ pub const Error = error{
     UnsupportedFormat,
     MalformedHeader,
     TruncatedPixels,
+    TrailingPixels,
     CropOutOfBounds,
     SizeMismatch,
 };
@@ -51,6 +52,23 @@ pub const Diff = struct {
 
 /// P6(binary RGB) PPM만 읽는다. 스모크가 그 포맷으로만 쓰므로 P3(ASCII)까지 지원해 표면을 넓히지 않는다.
 pub fn decodeP6(allocator: std.mem.Allocator, bytes: []const u8) (Error || error{OutOfMemory})!Image {
+    return (try decodeP6WithEnd(allocator, bytes)).image;
+}
+
+/// 증거 artifact는 픽셀 뒤의 숨은 payload도 거부한다. 기존 골든 reader의 관대한 입력 계약을
+/// 바꾸지 않고, 보안 경계가 필요한 consumer만 exact 변형을 명시적으로 고른다.
+pub fn decodeP6Exact(allocator: std.mem.Allocator, bytes: []const u8) (Error || error{OutOfMemory})!Image {
+    const decoded = try decodeP6WithEnd(allocator, bytes);
+    if (decoded.end != bytes.len) {
+        allocator.free(decoded.image.pixels);
+        return Error.TrailingPixels;
+    }
+    return decoded.image;
+}
+
+const Decoded = struct { image: Image, end: usize };
+
+fn decodeP6WithEnd(allocator: std.mem.Allocator, bytes: []const u8) (Error || error{OutOfMemory})!Decoded {
     if (bytes.len < 2 or bytes[0] != 'P' or bytes[1] != '6') return Error.UnsupportedFormat;
     var cursor: usize = 2;
     const width = try readHeaderValue(bytes, &cursor);
@@ -60,11 +78,12 @@ pub fn decodeP6(allocator: std.mem.Allocator, bytes: []const u8) (Error || error
     // maxval 뒤 **정확히 한 바이트**의 공백만 헤더에 속한다(PPM 규약). 그 다음부터 픽셀이다.
     if (cursor >= bytes.len or !isPpmSpace(bytes[cursor])) return Error.MalformedHeader;
     cursor += 1;
-    const needed = @as(usize, width) * @as(usize, height) * 3;
+    const pixel_count = std.math.mul(usize, @as(usize, width), @as(usize, height)) catch return Error.MalformedHeader;
+    const needed = std.math.mul(usize, pixel_count, 3) catch return Error.MalformedHeader;
     if (bytes.len - cursor < needed) return Error.TruncatedPixels;
     const pixels = try allocator.alloc(u8, needed);
     @memcpy(pixels, bytes[cursor..][0..needed]);
-    return .{ .width = width, .height = height, .pixels = pixels };
+    return .{ .image = .{ .width = width, .height = height, .pixels = pixels }, .end = cursor + needed };
 }
 
 /// 관심 영역만 잘라 새 이미지를 만든다. 골든은 이 결과를 저장한다.
@@ -130,6 +149,8 @@ test "decodeP6 reads a minimal image and rejects malformed input" {
     try std.testing.expectError(Error.UnsupportedFormat, decodeP6(allocator, "P3\n1 1\n255\n\x00\x00\x00"));
     try std.testing.expectError(Error.TruncatedPixels, decodeP6(allocator, "P6\n2 1\n255\n\xff\x00"));
     try std.testing.expectError(Error.UnsupportedFormat, decodeP6(allocator, "P6\n1 1\n65535\n\x00\x00\x00"));
+    try std.testing.expectError(Error.TrailingPixels, decodeP6Exact(allocator, source ++ "hidden"));
+    try std.testing.expectError(Error.MalformedHeader, decodeP6Exact(allocator, "P6\n4294967295 4294967295\n255\n"));
 }
 
 test "crop keeps the requested window and refuses to read outside it" {

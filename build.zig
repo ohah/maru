@@ -4097,6 +4097,24 @@ pub fn build(b: *std.Build) void {
     const ppm_golden_step = b.step("test-ppm-golden", "Run the visual golden image comparison core tests");
     ppm_golden_step.dependOn(&run_ppm_golden_tests.step);
 
+    // CR6d-v2a의 실제 AppKit 캡처 판정은 화면을 만드는 제품 경로와 분리된 순수 소비자다.
+    // 캡처가 없어도 malformed/identity/geometry/관심영역 실패를 모든 플랫폼에서 재검증한다.
+    const session_host_cr6d_pixel_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/session_host_cr6d_pixel.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_session_host_cr6d_pixel_tests = b.addRunArtifact(session_host_cr6d_pixel_tests);
+    run_session_host_cr6d_pixel_tests.addArg("--maru-expect-tests=8");
+    test_step.dependOn(&run_session_host_cr6d_pixel_tests.step);
+    const session_host_cr6d_pixel_step = b.step(
+        "test-session-host-cr6d-pixel-validator",
+        "Validate CR6d-v2a preedit pixel evidence receipts",
+    );
+    session_host_cr6d_pixel_step.dependOn(&run_session_host_cr6d_pixel_tests.step);
+
     // 실제 AppKit+Metal 캡처의 관심 영역을 커밋된 골든과 비교한다. 캡처가 없으면 skip하므로 스모크를
     // 돌리지 않은 환경/플랫폼에서도 무해하다(그 사실을 출력해 "게이트가 돌았다"는 착각을 막는다).
     const ppm_mod = b.addModule("ppm", .{

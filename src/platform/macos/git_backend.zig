@@ -1418,7 +1418,13 @@ fn ignoreWorker(job: *Job) void {
     var argv_buf: [git_command.max_argv][]const u8 = undefined;
     const argv = git_command.buildCheckIgnore(job.git_exe, job.repo, &argv_buf);
     // 경로는 **stdin** 으로 간다(`-z` 는 `--stdin` 과만 성립한다 — `git_command` 의 kind 주석).
-    const payload_buf: []u8 = state.allocator.alloc(u8, git_command.max_check_ignore_stdin_bytes) catch &.{};
+    //
+    // **필요한 만큼만 잡는다.** 처음에는 상한(64 KiB)을 통째로 잡았는데, 이 워커는 **디렉터리를 읽을
+    // 때마다** 돈다 — 실제 페이로드는 항목 수에 비례해 보통 수백 바이트다(이 저장소 루트에서 199).
+    // 상한은 「여기서 끊는다」는 **정책**이지 「여기까지 잡아 둔다」가 아니다.
+    var want: usize = 0;
+    for (job.ignore_paths) |path| want += path.len + 1;
+    const payload_buf: []u8 = state.allocator.alloc(u8, @min(want, git_command.max_check_ignore_stdin_bytes)) catch &.{};
     defer if (payload_buf.len > 0) state.allocator.free(payload_buf);
     const payload = git_command.checkIgnoreStdin(job.ignore_paths, payload_buf);
     if (payload.len > 0) {
@@ -3429,6 +3435,9 @@ const WriteFixture = struct {
         try self.plainGit(allocator, &.{ "init", "-q" });
         try self.plainGit(allocator, &.{ "config", "user.email", "t@example.com" });
         try self.plainGit(allocator, &.{ "config", "user.name", "t" });
+        // **사용자의 전역 무시 목록도 끊는다**(`initRepoForTest` 주석 — 같은 이유). 실측으로
+        // 전역 `core.excludesFile` 하나가 이 파일의 쓰기 판정자 넷을 함께 빨갛게 만들었다.
+        try self.plainGit(allocator, &.{ "config", "core.excludesFile", "" });
         return self;
     }
 
@@ -4037,10 +4046,7 @@ test "check-ignore 답은 «물어본 목록»을 통째로 들고 온다 — �
 
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
     const git_exe = locate(&exe_buf) orelse return error.SkipZigTest;
-    {
-        const out = runArgvWithEnv(allocator, &.{ git_exe, "-C", repo, "init", "-q" }, null, false, null, false) catch return error.SkipZigTest;
-        allocator.free(out.bytes);
-    }
+    if (!initRepoForTest(allocator, git_exe, repo)) return error.SkipZigTest;
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const ignore_path = try std.fmt.bufPrint(&path_buf, "{s}/.gitignore", .{repo});
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = ignore_path, .data = "*.tmp\n" });
@@ -4145,10 +4151,9 @@ test "check-ignore 는 진짜 git 을 통과한다 — 무시된 것, 없는 것
 
     // 저장소를 만든다. git 이 없으면 이 판정자는 성립하지 않는다.
     {
-        var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const git_exe = locate(&exe_buf) orelse return error.SkipZigTest;
-        const out = runArgvWithEnv(allocator, &.{ git_exe, "-C", repo, "init", "-q" }, null, false, null, false) catch return error.SkipZigTest;
-        allocator.free(out.bytes);
+        var exe_buf0: [std.fs.max_path_bytes]u8 = undefined;
+        const git_exe0 = locate(&exe_buf0) orelse return error.SkipZigTest;
+        if (!initRepoForTest(allocator, git_exe0, repo)) return error.SkipZigTest;
     }
 
     // `.gitignore` 와 항목들. **개행이 든 이름**이 ⑶ 의 자리다.
@@ -4224,9 +4229,17 @@ test "check-ignore 는 진짜 git 을 통과한다 — 무시된 것, 없는 것
 /// 통과시키면 그 초록은 아무것도 뜻하지 않는다.
 /// 판정자용: 임시 디렉터리에 저장소 하나를 세운다. **큐를 거치지 않고** 바로 돌린다 — 이 파일 밖의
 /// 판정자가 `runArgvWithEnv` 를 못 부르므로(비공개) 여기 한 줄로 열어 둔다.
+///
+/// ⚠️ **사용자의 전역 무시 목록을 끊는다**(`core.excludesFile` 을 빈 값으로 박는다).
+/// `GIT_CONFIG_NOSYSTEM` 은 `/etc/gitconfig` 만 막고 **`~/.gitconfig` 는 안 막는다** — 제품에게는
+/// 그것이 맞지만(사용자의 git 이 실제로 그렇게 무시한다) 판정자에게는 **기계마다 답이 달라진다**는
+/// 뜻이다. 실측(적대적 검증 13 회차): 전역에 `*.zig` 를 넣으면 이 파일의 실-git 판정자들이 무더기로
+/// 빨개진다. 저장소 로컬 값이 전역을 이기므로 여기서 끊는다(`WriteFixture.init` 과 같은 규율).
 pub fn initRepoForTest(allocator: std.mem.Allocator, git_exe: []const u8, repo: []const u8) bool {
-    const out = runArgvWithEnv(allocator, &.{ git_exe, "-C", repo, "init", "-q" }, null, false, null, false) catch return false;
-    allocator.free(out.bytes);
+    const init_out = runArgvWithEnv(allocator, &.{ git_exe, "-C", repo, "init", "-q" }, null, false, null, false) catch return false;
+    allocator.free(init_out.bytes);
+    const cfg = runArgvWithEnv(allocator, &.{ git_exe, "-C", repo, "config", "core.excludesFile", "" }, null, false, null, false) catch return false;
+    allocator.free(cfg.bytes);
     return true;
 }
 

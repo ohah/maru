@@ -2847,6 +2847,12 @@ provisioned Developer ID·Notification Center 등 아래의 외부 release gate 
   server 제품 타입 테스트로 고정한다. 응답 없이 닫는 server action은 `protocol_error | resource_exhausted | internal_error`
   payload를 필수로 가지며 connection turn이 이를 전수 매핑한다. generic server close를 `peer_requested`로 접는 배선이
   없고 close enum/payload가 사라지지 않는지는 `test-close-site-name` source boundary가 검증한다.
+- **투영 상한 초과와 할당 실패의 분리: 구현.** `screen_snapshot`의 스트림 상한(16 MiB)과 상한 할당자가
+  거절한 실패는 `error.SnapshotTooLarge`로 나오고, 진짜 `OutOfMemory`와 갈린다. attach는 전자면 그 요청만
+  `payload_too_large`로 거절하고 공유 연결·형제 stream을 유지하며, 후자면 기존대로 닫는다.
+  `test-snapshot-cap-refusal`이 두 갈래와 **실패 바이트 수 계측**(`refused`/`parent_fail`/`peak` — `alloc`뿐
+  아니라 `resize`·`remap` 성장까지)을 고정하고, `test-session-host-attach-isolation`이 「그 요청만 죽고
+  연결과 형제는 산다 / 진짜 OutOfMemory는 여전히 닫는다」를 함께 고정한다.
 - **server close 자리 이름: 구현.** server의 닫기 30 자리(`protocol_error` 16 · `internal_error` 13 ·
   `resource_exhausted` 1)가 각자 고유한 `Close.site`와 원인 오류 이름을 싣고, connection turn이 그 둘을
   `beginCloseAtErr`로 그대로 옮겨 host 로그의 `site=`·`err=`까지 도달한다. `Close.site`에 기본값이 없어

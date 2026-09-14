@@ -5464,17 +5464,49 @@ pub fn build(b: *std.Build) void {
                 "first non-hello frame closes the connection",
                 "every invalid RuntimeOps metadata class closes",
                 "initial attach accepts exact viewport snapshot cap",
+                "상한이 거절한 attach 는 그 요청만 죽고",
                 "product attach reserves retained budget before snapshot projection",
             },
         });
         const run_attach_isolation_tests = b.addRunArtifact(attach_isolation_tests);
-        run_attach_isolation_tests.addArg("--maru-expect-tests=4");
-        run_attach_isolation_tests.addArg("--maru-expect-passed=4");
+        run_attach_isolation_tests.addArg("--maru-expect-tests=5");
+        run_attach_isolation_tests.addArg("--maru-expect-passed=5");
         session_host_attach_isolation_step.dependOn(&run_attach_isolation_tests.step);
         if (attach_isolation_optimize == optimize)
             session_host_step.dependOn(&run_attach_isolation_tests.step);
     }
     boundary_step.dependOn(session_host_attach_isolation_step);
+
+    // 상한이 거절한 투영과 진짜 메모리 부족이 **갈리는가.** 위 attach-isolation 은 server 가 그 둘을
+    // 다르게 다루는지 재는데, 그 테스트는 `FakeRuntimeOps` 가 오류를 직접 돌려주므로 실제
+    // `AllocationCap` 을 한 번도 안 지난다 — 갈림 자체가 깨져도 초록이었다(2026-09-14 돌연변이로
+    // 확인). 그래서 투영 쪽을 따로 잰다.
+    const snapshot_cap_refusal_step = b.step(
+        "test-snapshot-cap-refusal",
+        "A projection refused by the ceiling is distinguishable from real allocator exhaustion",
+    );
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cap_refusal_optimize| {
+        const cap_refusal_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/screen_snapshot.zig"),
+                .target = target,
+                .optimize = cap_refusal_optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{
+                "bounded projector uses a transparent exact allocation ceiling",
+                "상한이 거절한 투영은 진짜 메모리 부족과",
+            },
+        });
+        const run_cap_refusal_tests = b.addRunArtifact(cap_refusal_tests);
+        run_cap_refusal_tests.addArg("--maru-expect-tests=2");
+        run_cap_refusal_tests.addArg("--maru-expect-passed=2");
+        snapshot_cap_refusal_step.dependOn(&run_cap_refusal_tests.step);
+        if (cap_refusal_optimize == optimize)
+            session_host_step.dependOn(&run_cap_refusal_tests.step);
+    }
+    boundary_step.dependOn(snapshot_cap_refusal_step);
+
     const session_host_handoff_exhaustive_step = b.step(
         "test-session-host-handoff-exhaustive",
         "Verify every stable handoff core field with valid non-default canonical round trips",

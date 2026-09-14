@@ -78,15 +78,25 @@ pub const ProjectOptions = struct {
 /// Projection-only bounded builder. It keeps amortized growth, but clamps the next capacity to the
 /// codec ceiling instead of asking the allocator for a geometric capacity above it. This avoids
 /// both near-cap O(N²) exact reallocations and unconditional 16 MiB preallocation on small deltas.
+/// 투영이 낼 수 있는 오류. `DecodeError` 에 **상한 초과**를 더한다.
+///
+/// 2026-09-14 실측: 런타임 하나가 attach 를 못 해 세션 19 개가 전부 안 붙었다. host 는
+/// `err=OutOfMemory` 를 남겼지만 계측을 넣어 보니 `refused=0 parent_fail=0 peak=1 MB` —
+/// **할당은 하나도 실패하지 않았다.** 아래 상한 검사가 할당자를 거치기도 전에
+/// `OutOfMemory` 를 직접 돌려주고 있었고, 그 거짓 이름 때문에 host 가 「자원이 없다」로 읽어
+/// **공유 연결 전체**를 끊었다. 이름을 갈라 「그 화면이 크다」로 말하게 한다.
+pub const ProjectError = screen_stream.DecodeError || error{SnapshotTooLarge};
+
 fn appendProjectedRecord(
     stream: *std.ArrayListUnmanaged(u8),
     allocator: std.mem.Allocator,
     record: []const u8,
-) screen_stream.DecodeError!void {
+) ProjectError!void {
     if (record.len > std.math.maxInt(u32)) return error.LengthOverflow;
     const total = std.math.add(usize, stream.items.len, 4 + record.len) catch
         return error.LengthOverflow;
-    if (total > screen_stream.max_record_stream_bytes) return error.OutOfMemory;
+    // **할당 실패가 아니다.** 레코드 하나가(대개 이미지 픽셀 블롭) 스트림 상한을 넘은 것이다.
+    if (total > screen_stream.max_record_stream_bytes) return error.SnapshotTooLarge;
     if (stream.capacity < total) {
         const geometric = stream.capacity +| stream.capacity / 2 +| 8;
         const target = @min(
@@ -109,6 +119,22 @@ fn appendProjectedRecord(
 const AllocationCap = struct {
     parent: std.mem.Allocator,
     max: usize,
+    /// **상한이 거절했는가.** allocator vtable 은 `null`(또는 `false`) 하나만 돌려줄 수 있어,
+    /// 호출자에게는 「상한 초과」와 「진짜 메모리 부족」이 똑같은 `error.OutOfMemory` 로 보인다.
+    ///
+    /// 2026-09-14 실측: host 가 `site=attach_snapshot err=OutOfMemory` 로 연결을 끊었는데
+    /// 시스템 여유 메모리는 51%, host RSS 는 93 MB 였다. 진짜 부족이 아니라 **화면 하나가
+    /// 16 MiB 상한을 넘은 것**이었고, 그 뭉개짐 때문에 그 attach 하나가 아니라 **공유 연결
+    /// 전체**가 끊겨 세션 19 개가 전부 안 붙었다. 여기 남겨 둘을 가른다.
+    refused: bool = false,
+    /// **거절당한 요청의 바이트 수.** 오류 이름만으로는 「크다」와 「시스템이 못 준다」가 안 갈린다 —
+    /// 2026-09-14 에 그 둘을 소거법으로만 좁히다 세 번 틀렸다. 숫자가 있으면 한 번에 갈린다.
+    last_refused_len: usize = 0,
+    /// **부모가 거절한 요청의 바이트 수.** 상한이 통과시켰는데도 실패한 크기다. 이 값이 작으면
+    /// 시스템 압박이고, 상한에 가까우면 그 화면이 실제로 큰 것이다.
+    last_parent_fail_len: usize = 0,
+    /// 성공한 요청 중 가장 큰 것. 실패 직전까지 얼마나 자랐는지 보여 준다.
+    peak_len: usize = 0,
 
     fn allocator(self: *AllocationCap) std.mem.Allocator {
         return .{ .ptr = self, .vtable = &.{
@@ -121,20 +147,45 @@ const AllocationCap = struct {
 
     fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
         const self: *AllocationCap = @ptrCast(@alignCast(ctx));
-        if (len > self.max) return null;
-        return self.parent.vtable.alloc(self.parent.ptr, len, alignment, ret_addr);
+        if (len > self.max) {
+            self.refused = true;
+            self.last_refused_len = len;
+            return null;
+        }
+        const got = self.parent.vtable.alloc(self.parent.ptr, len, alignment, ret_addr);
+        if (got == null) self.last_parent_fail_len = len else if (len > self.peak_len) {
+            self.peak_len = len;
+        }
+        return got;
     }
 
     fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
         const self: *AllocationCap = @ptrCast(@alignCast(ctx));
-        if (new_len > self.max) return false;
-        return self.parent.vtable.resize(self.parent.ptr, memory, alignment, new_len, ret_addr);
+        if (new_len > self.max) {
+            self.refused = true;
+            self.last_refused_len = new_len;
+            return false;
+        }
+        const ok = self.parent.vtable.resize(self.parent.ptr, memory, alignment, new_len, ret_addr);
+        // **제자리 성장도 «큰 크기» 다.** 이것을 안 세면 버퍼가 `remap` 으로 16 MiB 까지 자라도
+        // `peak` 은 처음 `alloc` 값에 머문다 — 2026-09-14 에 실제로 1 MB 로 보고돼, 「작은데 왜
+        // 상한을 넘지」로 한참 헤맸다. 성장 경로를 빠뜨린 계측은 사람을 틀린 데로 보낸다.
+        if (ok and new_len > self.peak_len) self.peak_len = new_len;
+        return ok;
     }
 
     fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
         const self: *AllocationCap = @ptrCast(@alignCast(ctx));
-        if (new_len > self.max) return null;
-        return self.parent.vtable.remap(self.parent.ptr, memory, alignment, new_len, ret_addr);
+        if (new_len > self.max) {
+            self.refused = true;
+            self.last_refused_len = new_len;
+            return null;
+        }
+        const got = self.parent.vtable.remap(self.parent.ptr, memory, alignment, new_len, ret_addr);
+        if (got == null) self.last_parent_fail_len = new_len else if (new_len > self.peak_len) {
+            self.peak_len = new_len;
+        }
+        return got;
     }
 
     fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
@@ -143,16 +194,56 @@ const AllocationCap = struct {
     }
 };
 
+/// `projectSnapshotBounded` 가 낼 수 있는 오류. `DecodeError` 에 **상한 초과**를 더한다 —
+/// 그 둘은 호출자가 완전히 다르게 다뤄야 한다. 상한 초과는 「이 runtime 의 화면이 크다」라서
+/// 그 요청 하나만 typed error 로 거절하면 되고, 진짜 `OutOfMemory` 는 host 자원 문제다.
+pub const BoundedProjectError = screen_stream.DecodeError || error{SnapshotTooLarge};
+
 /// Same projection contract with an allocation-time ceiling. The returned slice can be freed with
 /// `allocator`, not the adapter, because AllocationCap is transparent.
+///
+/// **상한이 거절한 실패는 `SnapshotTooLarge` 로 낸다.** 앞 판은 그것을 `OutOfMemory` 로 흘려보냈고,
+/// 그래서 attach 가 「메모리가 없다」로 읽혀 공유 연결을 끊었다(2026-09-14).
 pub fn projectSnapshotBounded(
     allocator: std.mem.Allocator,
     core: *terminal.TerminalCore,
     opts: ProjectOptions,
     max_allocation: usize,
-) screen_stream.DecodeError![]u8 {
+) BoundedProjectError![]u8 {
+    var unused: Diagnostics = .{};
+    return projectSnapshotBoundedDiag(allocator, core, opts, max_allocation, &unused);
+}
+
+/// 실패가 **얼마나 큰 요청**이었는지 밖으로 내는 판. 호출자가 그 숫자를 로그에 실어야
+/// 다음 재현이 「크다」와 「시스템이 못 준다」를 스스로 말한다.
+pub const Diagnostics = struct {
+    /// 상한이 거절한 바이트(0 = 그런 일 없음).
+    refused_len: usize = 0,
+    /// 부모 할당자가 거절한 바이트(0 = 그런 일 없음).
+    parent_fail_len: usize = 0,
+    /// 성공한 요청 중 최대 바이트. 실패 직전까지의 성장 흔적이다.
+    peak_len: usize = 0,
+};
+
+pub fn projectSnapshotBoundedDiag(
+    allocator: std.mem.Allocator,
+    core: *terminal.TerminalCore,
+    opts: ProjectOptions,
+    max_allocation: usize,
+    diag: *Diagnostics,
+) BoundedProjectError![]u8 {
     var capped = AllocationCap{ .parent = allocator, .max = max_allocation };
-    return projectSnapshot(capped.allocator(), core, opts);
+    defer diag.* = .{
+        .refused_len = capped.last_refused_len,
+        .parent_fail_len = capped.last_parent_fail_len,
+        .peak_len = capped.peak_len,
+    };
+    return projectSnapshot(capped.allocator(), core, opts) catch |err| switch (err) {
+        // 할당자 쪽 상한이 거절한 경우. 스트림 상한(`appendProjectedRecord`)은 이미
+        // `SnapshotTooLarge` 로 와서 아래 `else` 로 그대로 지나간다.
+        error.OutOfMemory => if (capped.refused) error.SnapshotTooLarge else error.OutOfMemory,
+        else => err,
+    };
 }
 
 /// 현재 화면을 length-prefixed 레코드 스트림(screen_meta + row*)으로 투영한다(caller 소유 바이트). client는 이 바이트를
@@ -160,7 +251,7 @@ pub fn projectSnapshotBounded(
 /// `renderSnapshot`(뷰포트 인지 — view_offset>0이면 스크롤백 윈도 합성)을 쓴다 = in-process 렌더와 같은 화면(#6a 원격
 /// 스크롤백: host가 스크롤 명령을 자기 core에 적용하면 그 뷰포트가 client에 투영된다). core를 mutate(viewport 합성 lazy
 /// 할당)하므로 `*`(non-const) — caller가 core lock 아래 부른다(단일 mutator).
-pub fn projectSnapshot(allocator: std.mem.Allocator, core: *terminal.TerminalCore, opts: ProjectOptions) screen_stream.DecodeError![]u8 {
+pub fn projectSnapshot(allocator: std.mem.Allocator, core: *terminal.TerminalCore, opts: ProjectOptions) ProjectError![]u8 {
     const snap = core.renderSnapshot();
     const palette = core.paletteOverride();
 
@@ -215,7 +306,7 @@ pub fn projectSnapshot(allocator: std.mem.Allocator, core: *terminal.TerminalCor
 
 /// Projection helpers intentionally keep generation-focused signatures. The batch owner stamps the
 /// bounded stream once so one atomic output batch cannot contain multiple frontier values.
-fn stampRecordSequence(bytes: []u8, sequence: u64) screen_stream.DecodeError!void {
+fn stampRecordSequence(bytes: []u8, sequence: u64) ProjectError!void {
     var offset: usize = 0;
     while (offset < bytes.len) {
         if (bytes.len - offset < 4) return error.Truncated;
@@ -237,7 +328,7 @@ fn appendImageBlobRecords(
     generation: u64,
     img: terminal.KittyImageView,
     image_bytes_out: ?*u64,
-) screen_stream.DecodeError!void {
+) ProjectError!void {
     const cap = screen_stream.max_image_blob;
     const total = img.pixels.len;
     const chunk_count: u32 = if (total == 0) 1 else @intCast((total + cap - 1) / cap);
@@ -264,7 +355,7 @@ fn appendImageBlobRecords(
 /// image_id/generation만 읽어 dedup) client로 가지 않으며, resync는 projectSnapshot으로 core에서 재투영한다. 그러므로 base엔
 /// **픽셀을 싣지 않는다**(pixel_len=0) — 매 ~20ms tick마다 수 MiB 픽셀을 재인코딩하던 낭비를 없앤다. 픽셀 전달은 delta(변경분)와
 /// projectSnapshot(attach/resync)이 맡는다.
-fn appendImageBaseMeta(allocator: std.mem.Allocator, stream: *std.ArrayListUnmanaged(u8), generation: u64, img: terminal.KittyImageView) screen_stream.DecodeError!void {
+fn appendImageBaseMeta(allocator: std.mem.Allocator, stream: *std.ArrayListUnmanaged(u8), generation: u64, img: terminal.KittyImageView) ProjectError!void {
     const rec = try screen_stream.encodeImageBlob(allocator, .{ .kind = .image_blob, .generation = generation }, .{
         .image_id = img.image_id,
         .generation = img.generation,
@@ -280,7 +371,7 @@ fn appendImageBaseMeta(allocator: std.mem.Allocator, stream: *std.ArrayListUnman
 /// delta용 placement 방출: full-set 교체라 **clear 센티넬(image_place, image_id=0)** 뒤에 현재 placement 전체를 image_place로
 /// 싣는다. client(applyDelta)는 센티넬에 placement_list를 비우고 이후 image_place를 append한다 — 집합이 비게 바뀐 경우도
 /// 센티넬만으로 표현된다. snapshot-band `image_placement`(kind 3)와 달리 delta-band `image_place`(kind 15)를 쓴다.
-fn appendImagePlaceDelta(allocator: std.mem.Allocator, stream: *std.ArrayListUnmanaged(u8), generation: u64, placements: []const terminal.KittyPlacement) screen_stream.DecodeError!void {
+fn appendImagePlaceDelta(allocator: std.mem.Allocator, stream: *std.ArrayListUnmanaged(u8), generation: u64, placements: []const terminal.KittyPlacement) ProjectError!void {
     const clear = try screen_stream.encodeImagePlacement(allocator, .{ .kind = .image_place, .generation = generation }, .{ .image_id = 0, .row = 0, .col = 0 });
     defer allocator.free(clear);
     try appendProjectedRecord(stream, allocator, clear);
@@ -318,7 +409,7 @@ fn appendImageVirtualDelta(
     stream: *std.ArrayListUnmanaged(u8),
     generation: u64,
     vps: []const terminal.KittyVirtualPlacement,
-) screen_stream.DecodeError!void {
+) ProjectError!void {
     const clear = try screen_stream.encodeImageVirtual(allocator, .{ .kind = .image_virtual, .generation = generation }, .{
         .image_id = 0,
         .placement_id = 0,
@@ -352,7 +443,7 @@ fn placementsChanged(prev: []const screen_stream.ImagePlacement, cur: []const te
 }
 
 /// core의 뷰포트 상대 kitty placement를 image_placement 레코드로 방출한다(필드 1:1 — crop/offset/columns/rows 보존).
-fn appendImageVirtualRecord(allocator: std.mem.Allocator, stream: *std.ArrayListUnmanaged(u8), generation: u64, vp: terminal.KittyVirtualPlacement) screen_stream.DecodeError!void {
+fn appendImageVirtualRecord(allocator: std.mem.Allocator, stream: *std.ArrayListUnmanaged(u8), generation: u64, vp: terminal.KittyVirtualPlacement) ProjectError!void {
     const rec = try screen_stream.encodeImageVirtual(allocator, .{ .kind = .image_virtual, .generation = generation }, .{
         .image_id = vp.image_id,
         .placement_id = vp.placement_id,
@@ -364,7 +455,7 @@ fn appendImageVirtualRecord(allocator: std.mem.Allocator, stream: *std.ArrayList
     try appendProjectedRecord(stream, allocator, rec);
 }
 
-fn appendImagePlacementRecord(allocator: std.mem.Allocator, stream: *std.ArrayListUnmanaged(u8), generation: u64, p: terminal.KittyPlacement) screen_stream.DecodeError!void {
+fn appendImagePlacementRecord(allocator: std.mem.Allocator, stream: *std.ArrayListUnmanaged(u8), generation: u64, p: terminal.KittyPlacement) ProjectError!void {
     const rec = try screen_stream.encodeImagePlacement(allocator, .{ .kind = .image_placement, .generation = generation }, .{
         .image_id = p.image_id,
         .placement_id = p.placement_id,
@@ -387,7 +478,7 @@ fn appendImagePlacementRecord(allocator: std.mem.Allocator, stream: *std.ArrayLi
 /// 행별 OSC 133 semantic prompt(분류+종료코드)를 prompt_marks record로 방출한다(#1 이후 prompt_marks 패리티). `skip_if_none`이면
 /// 마크가 전혀 없을 때(전 행 unknown+exit null) 생략한다 — snapshot은 common case 무비용, delta는 clear 전달 위해 skip_if_none=false.
 /// dense(행당 1개, positional)라 full-replace다. renderSnapshot이 뷰포트 상대 prompt_marks(길이=rows)를 이미 줬다.
-fn appendPromptMarks(allocator: std.mem.Allocator, stream: *std.ArrayListUnmanaged(u8), generation: u64, snap: terminal.RenderSnapshot, skip_if_none: bool) screen_stream.DecodeError!void {
+fn appendPromptMarks(allocator: std.mem.Allocator, stream: *std.ArrayListUnmanaged(u8), generation: u64, snap: terminal.RenderSnapshot, skip_if_none: bool) ProjectError!void {
     if (snap.prompt_marks.len == 0) return; // core는 항상 length-rows지만 방어.
     if (skip_if_none) {
         var any = false;
@@ -418,7 +509,7 @@ fn appendLinkSpans(
     generation: u64,
     links: []const terminal.ViewportLink,
     skip_if_none: bool,
-) screen_stream.DecodeError!void {
+) ProjectError!void {
     if (skip_if_none and links.len == 0) return;
     const spans = allocator.alloc(screen_stream.LinkSpanWire, links.len) catch return error.OutOfMemory;
     defer allocator.free(spans);
@@ -505,7 +596,7 @@ fn buildRowRuns(
     snap: terminal.RenderSnapshot,
     palette: *const [256]?terminal.Rgb,
     row: u16,
-) screen_stream.DecodeError!RowRuns {
+) ProjectError!RowRuns {
     const cols = snap.size.cols;
     var tmp: std.ArrayListUnmanaged(RunTmp) = .empty;
     defer tmp.deinit(allocator);
@@ -564,7 +655,7 @@ fn appendRowRecord(
     opts: ProjectOptions,
     row: u16,
     stream: *std.ArrayListUnmanaged(u8),
-) screen_stream.DecodeError!void {
+) ProjectError!void {
     const rr = try buildRowRuns(allocator, snap, palette, row);
     defer rr.deinit(allocator);
     const rec = try screen_stream.encodeRow(allocator, .{ .kind = .row, .generation = opts.generation }, .{ .row_index = row, .runs = rr.runs });
@@ -587,7 +678,7 @@ fn cursorsEqual(a: screen_stream.Cursor, b: screen_stream.Cursor) bool {
     return a.col == b.col and a.row == b.row and a.visible == b.visible and a.shape == b.shape;
 }
 
-pub const DeltaError = screen_stream.DecodeError || error{
+pub const DeltaError = ProjectError || error{
     /// grid 크기나 alt-screen이 바뀌어 delta로 표현할 수 없다 — caller가 fresh snapshot을 보내야 한다(§9). delta는
     /// 같은 grid 위 증분(set_runs/cursor/modes)만 담는다.
     SnapshotRequired,
@@ -819,7 +910,7 @@ pub fn computeDelta(allocator: std.mem.Allocator, prev_bytes: []const u8, core: 
 }
 
 /// 셀의 표시 grapheme을 UTF-8로 만든다(base codepoint + grapheme_store cluster 본체). 빈 셀(codepoint 0)은 공백.
-fn encodeCellGrapheme(cur: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, cell: terminal.Cell, graphemes: []const []const u21) screen_stream.DecodeError!void {
+fn encodeCellGrapheme(cur: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, cell: terminal.Cell, graphemes: []const []const u21) ProjectError!void {
     cur.clearRetainingCapacity();
     const base_cp: u21 = if (cell.codepoint == 0) ' ' else cell.codepoint;
     try appendUtf8(cur, allocator, base_cp);
@@ -828,7 +919,7 @@ fn encodeCellGrapheme(cur: *std.ArrayListUnmanaged(u8), allocator: std.mem.Alloc
     }
 }
 
-fn appendUtf8(cur: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, cp: u21) screen_stream.DecodeError!void {
+fn appendUtf8(cur: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, cp: u21) ProjectError!void {
     var buf: [4]u8 = undefined;
     const n = std.unicode.utf8Encode(cp, &buf) catch {
         cur.appendSlice(allocator, "\u{FFFD}") catch return error.OutOfMemory; // surrogate 등 잘못된 코드포인트 → U+FFFD
@@ -1498,6 +1589,143 @@ test "bounded projector uses a transparent exact allocation ceiling" {
     );
     defer allocator.free(exact);
     try std.testing.expectEqualSlices(u8, expected, exact);
+}
+
+/// 테스트 전용 부모 allocator. 한 블록을 계속 돌려주어 `resize`·`remap` 이 **반드시** 성립하게
+/// 만든다. 실제 allocator 는 크기에 따라 제자리 확장을 거절할 수 있어, 성장 갈래를 확정적으로
+/// 지나가게 하려면 이렇게 고정해야 한다.
+const FixedBlockParent = struct {
+    block: []u8,
+
+    fn allocator(self: *FixedBlockParent) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = fpAlloc,
+            .resize = fpResize,
+            .remap = fpRemap,
+            .free = fpFree,
+        } };
+    }
+
+    fn fpAlloc(ctx: *anyopaque, len: usize, _: std.mem.Alignment, _: usize) ?[*]u8 {
+        const self: *FixedBlockParent = @ptrCast(@alignCast(ctx));
+        return if (len <= self.block.len) self.block.ptr else null;
+    }
+    fn fpResize(ctx: *anyopaque, _: []u8, _: std.mem.Alignment, new_len: usize, _: usize) bool {
+        const self: *FixedBlockParent = @ptrCast(@alignCast(ctx));
+        return new_len <= self.block.len;
+    }
+    fn fpRemap(ctx: *anyopaque, _: []u8, _: std.mem.Alignment, new_len: usize, _: usize) ?[*]u8 {
+        const self: *FixedBlockParent = @ptrCast(@alignCast(ctx));
+        return if (new_len <= self.block.len) self.block.ptr else null;
+    }
+    fn fpFree(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize) void {}
+};
+
+test "상한이 거절한 투영은 진짜 메모리 부족과 다른 오류로 나온다" {
+    // 2026-09-14 실측이 만든 판정자. allocator vtable 은 `null` 하나만 돌려줄 수 있어 「16 MiB
+    // 상한 초과」가 호출자에게 `OutOfMemory` 로 보였고, host 는 그것을 자원 문제로 읽어 **공유
+    // 연결 전체**를 끊었다 — 세션 19 개가 전부 안 붙었고 시스템 여유 메모리는 51% 였다.
+    //
+    // 재는 것은 「둘이 갈린다」이다. 한쪽만 재면 갈림이 사라져도 초록이다.
+    const allocator = std.testing.allocator;
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 4, .rows = 1 });
+    defer core.deinit();
+    try core.write("ABCD");
+
+    // ① 상한이 거절하면 `SnapshotTooLarge` 다. 1 바이트짜리 천장은 어떤 화면도 못 담는다.
+    try std.testing.expectError(
+        error.SnapshotTooLarge,
+        projectSnapshotBounded(allocator, &core, .{ .generation = 1 }, 1),
+    );
+
+    // ①-b **거절당한 «바이트 수»가 밖으로 나온다.** 오류 이름만 나오면 다음 재현이 또
+    //      소거법으로 돌아간다 — 숫자가 있어야 「크다」와 「시스템이 못 준다」가 갈린다.
+    var diag: Diagnostics = .{};
+    try std.testing.expectError(
+        error.SnapshotTooLarge,
+        projectSnapshotBoundedDiag(allocator, &core, .{ .generation = 1 }, 1, &diag),
+    );
+    try std.testing.expect(diag.refused_len > 1);
+    try std.testing.expectEqual(@as(usize, 0), diag.parent_fail_len);
+
+    // **제자리 성장도 `peak` 에 잡힌다.** `alloc` 만 세면 `remap`·`resize` 로 자란 버퍼가 안 보이고,
+    // 16 MiB 까지 자란 스트림이 «1 MB» 로 보고된다 — 2026-09-14 에 실제로 그렇게 보고돼, 「작은데
+    // 왜 상한을 넘지」로 한참 헤맸다.
+    //
+    // **성장 경로를 직접 겨눈다.** 실제 투영으로 재려 하면 작은 화면은 첫 `alloc` 만으로 끝나
+    // 이 갈래를 안 지난다(그 판을 돌연변이로 확인했더니 초록이었다). 그래서 부모를 고정해
+    // `resize`·`remap` 이 반드시 일어나게 만든다.
+    {
+        const backing = try allocator.alloc(u8, 1 << 16);
+        defer allocator.free(backing);
+        var parent: FixedBlockParent = .{ .block = backing };
+        var cap: AllocationCap = .{ .parent = parent.allocator(), .max = 1 << 20 };
+        const capped = cap.allocator();
+
+        const first = try capped.alloc(u8, 64);
+        try std.testing.expectEqual(@as(usize, 64), cap.peak_len);
+
+        // 제자리 확장(resize) — peak 이 따라와야 한다.
+        try std.testing.expect(capped.rawResize(first[0..64], .fromByteUnits(1), 4096, @returnAddress()));
+        try std.testing.expectEqual(@as(usize, 4096), cap.peak_len);
+
+        // 재배치(remap) — 역시 따라와야 한다. `first` 는 아직 길이 64 짜리 슬라이스이므로
+        // 확장된 실제 길이로 다시 만들어 넘긴다(부모가 같은 블록을 돌려주는 고정 블록이다).
+        const grown_slice = first.ptr[0..4096];
+        _ = capped.rawRemap(grown_slice, .fromByteUnits(1), 16384, @returnAddress()) orelse
+            return error.TestUnexpectedResult;
+        try std.testing.expectEqual(@as(usize, 16384), cap.peak_len);
+    }
+
+    // ②-b 부모가 거절하면 그쪽 숫자가 찬다.
+    var starved_diag: Diagnostics = .{};
+    var starved_probe = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(
+        error.OutOfMemory,
+        projectSnapshotBoundedDiag(
+            starved_probe.allocator(),
+            &core,
+            .{ .generation = 1 },
+            screen_stream.max_record_stream_bytes,
+            &starved_diag,
+        ),
+    );
+    try std.testing.expect(starved_diag.parent_fail_len > 0);
+    try std.testing.expectEqual(@as(usize, 0), starved_diag.refused_len);
+
+    // ③ **스트림 상한 초과도 `SnapshotTooLarge` 다.** 이 갈래가 실제 사고의 원인이었다 —
+    //    `appendProjectedRecord` 의 상한 검사는 할당자를 거치기 «전» 에 돌아가므로
+    //    AllocationCap 이 아예 못 본다. 그래서 refused=0·parent_fail=0 인데 OutOfMemory 가
+    //    나왔고, host 가 자원 문제로 읽어 세션 19 개의 공유 연결을 끊었다(2026-09-14).
+    //    상한을 **실제로** 넘겨 재지 않으면 이 갈래는 안 지나간다.
+    {
+        var stream: std.ArrayListUnmanaged(u8) = .empty;
+        defer stream.deinit(allocator);
+        const oversized = try allocator.alloc(u8, screen_stream.max_record_stream_bytes + 1);
+        defer allocator.free(oversized);
+        try std.testing.expectError(
+            error.SnapshotTooLarge,
+            appendProjectedRecord(&stream, allocator, oversized),
+        );
+        // 상한 **이하** 는 그대로 들어간다 — 검사가 전부를 막아 버리면 그것도 회귀다.
+        const fits = try allocator.alloc(u8, 1024);
+        defer allocator.free(fits);
+        try appendProjectedRecord(&stream, allocator, fits);
+        try std.testing.expectEqual(@as(usize, 4 + fits.len), stream.items.len);
+    }
+
+    // ② **진짜 부족은 여전히 `OutOfMemory` 다.** 천장은 넉넉히 두고 부모 allocator 를 굶긴다 —
+    //    그래야 「상한이 거절한 것이 아니다」가 참이고, 두 갈래가 실제로 갈린다.
+    var starved = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(
+        error.OutOfMemory,
+        projectSnapshotBounded(
+            starved.allocator(),
+            &core,
+            .{ .generation = 1 },
+            screen_stream.max_record_stream_bytes,
+        ),
+    );
 }
 
 test "screen delta: generation 이 바뀐 이미지는 blob 전체가 다시 실린다 (대역폭 계약)" {

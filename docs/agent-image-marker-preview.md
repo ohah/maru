@@ -542,9 +542,28 @@ terminfo가 다르면 달라질 여지가 있다. **사람이 maru 앞에서 확
 
 | 단계 | 내용 | 선행 조건 |
 | --- | --- | --- |
-| **P1** | 전송 전 스테이징 프리뷰(로컬) — 스테이징 목록, 마커 스캔, Cmd+클릭 토글, 반응형 배치, 텍스처 회수 표시 | 없음. maru가 이미 가진 것만 쓴다 |
+| **P1** ✅ | 전송 전 스테이징 프리뷰(로컬) — 스테이징 목록, 마커 스캔, Cmd+클릭 토글, 반응형 배치, 텍스처 회수 표시, 테두리·i18n | 없음. maru가 이미 가진 것만 쓴다 |
 | **P2** | 전송 후 프리뷰 — 갤러리 인덱스 조회, 「도크에서 보기」 점프 | **§9 M2 결정**(Codex 메시지 구분) |
 | **P3** | 원격 — 스테이징 바이트 경유, host 마커 span, **host 관찰 경로**(§6 A16), 픽셀 pull | RAV 스택 |
 
 P1이 독립적인 것이 이 순서의 요점이다 — 트랜스크립트·훅·인덱스에 의존하지 않으므로 provider의 번호 규칙이
 바뀌어도 §4.2의 순서 대응이 그대로 선다.
+
+### 11.1 P1 구현 현황 (2026-09-14)
+
+| 조각 | 자리 |
+| --- | --- |
+| `N → PNG` 맵·관찰·상태 전이 | `session/agent_image_staging.zig` |
+| 화면 마커 스캔(셀 열까지) | `session/agent_image_markers.zig` |
+| 팝오버 자리·크기·테두리 | `chrome/components/image_preview.zig` (+ 공유 기하 `popup_box.zig`) |
+| surface별 스테이징·관찰·토글 | `platform/macos/app_session/marker_preview.zig` |
+| 붙여넣기 훅·클릭 토글·디코드 펌프·GPU 이미지 | `platform/macos/app_session.zig` |
+| raw 파일 디코드 잡 | `platform/macos/agent_image_decode_backend.zig` (`submitRawFile`) |
+
+판정자: `zig build test-marker-preview` 66개(MP1·CSP1 + `context_menu` 회귀),
+`app_session.marker_preview` 9개. i18n 게이트(고아 키 포함) 통과.
+
+⚠️ **화면에서 눈으로 본 적이 없다.** 이 작업 환경은 GUI 세션이 아니라(§10.1) 창·키보드·화면 캡처가
+없어 붙여넣기 자체를 못 한다. 확인된 것은 여기까지다 — 앱이 **크래시 없이 프레임을 조립한다**
+(`visible_ui=true`·`metal_frames_drawn=3`·`app_session_status=0`, 크래시 흔적 0). **실제로 그림이 뜨는지는
+사람이 봐야 한다.**

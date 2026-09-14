@@ -1087,17 +1087,13 @@ fn buildEditorMergeFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
     const base_lines = [_][]const u8{ "fn greet() void {", "    const msg = \"base\";", "    log(msg);", "}" };
     const ours_lines = [_][]const u8{ "fn greet() void {", "    const msg = \"ours\";", "    log(msg);", "}" };
     const theirs_lines = [_][]const u8{ "fn greet() void {", "    const msg = \"theirs\";", "    log(msg);", "}" };
-    // Result 는 **작업트리 파일**이라 충돌 표시가 그대로 들어 있다(저장이 곧 해결이다).
-    const result_lines = [_][]const u8{
-        "fn greet() void {",
-        "<<<<<<< HEAD",
-        "    const msg = \"ours\";",
-        "=======",
-        "    const msg = \"theirs\";",
-        ">>>>>>> topic",
-        "    log(msg);",
-        "}",
-    };
+    // Result 는 **작업트리 파일**이라 충돌 표시가 그대로 들어 있다(저장이 곧 해결이다). 인라인 시나리오
+    // (`editor-conflict`)와 **같은 줄**을 쓴다 — 그래야 위젯·밴드 표를 **제품 파서로** 만드는 그
+    // 함수를 그대로 부를 수 있다(손으로 적은 표는 파서가 죽어도 그림이 예쁘다).
+    //
+    // **S3b-3a 전에는 이 시나리오에 위젯 행이 없었다** — 컴포넌트에 받을 자리가 없어서였고, 그것이
+    // 곧 제품에서도 pane 넷이 뜨는 순간 「고르기」 줄이 사라진 이유였다.
+    fillConflictTables();
 
     var content_rows: [512]editor_view.content.Row = undefined;
     var visual_rows: [512]chrome.ui.visual_map.VisualRow = undefined;
@@ -1110,7 +1106,7 @@ fn buildEditorMergeFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
         .rect = editor_view.frame.contentRect(.{ .x = 0, .y = 0, .w = viewport_w, .h = viewport_h }),
         .background_rect = .{ .x = 0, .y = 0, .w = viewport_w, .h = viewport_h }, // 배경은 뷰 전체(§4.1b)
         .current = .{ .lines = &ours_lines },
-        .result = .{ .lines = &result_lines },
+        .result = .{ .lines = &editor_conflict_lines, .widgets = &editor_conflict_widgets, .bands = &editor_conflict_bands },
         .incoming = .{ .lines = &theirs_lines },
         .base = .{ .lines = &base_lines },
         .cell_w_px = scenario.cell_w_px,

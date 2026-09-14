@@ -317,7 +317,8 @@ test "fake glyph layout maps primary and fallback fonts" {
     var glyphs = try buildGlyphRunList(std.testing.allocator, list, .{}, FakeFontBackend{});
     defer glyphs.deinit(std.testing.allocator);
 
-    try std.testing.expectEqual(@as(usize, 5), glyphs.glyphs.len);
+    // 줄끝 trim 이후 빈 칸은 DrawList 에 안 실린다 — 아래 수치는 «글자 수»이지 «열 수»가 아니다.
+    try std.testing.expectEqual(@as(usize, 3), glyphs.glyphs.len);
     try std.testing.expectEqual(@as(FontId, 1), glyphs.glyphs[0].font_id);
     try std.testing.expect(!glyphs.glyphs[0].fallback);
     try std.testing.expectEqual(@as(u21, '한'), glyphs.glyphs[1].codepoint);

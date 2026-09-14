@@ -352,6 +352,12 @@ fn measureKittyImagePipeline(allocator: std.mem.Allocator, io: std.Io) !Budget {
     const size: maru.terminal.Size = .{ .cols = 200, .rows = 50 };
     var uploaded: std.AutoHashMapUnmanaged(u32, u64) = .empty;
     defer uploaded.deinit(allocator);
+    // 픽셀 버퍼는 제품과 같이 **프레임을 넘어 재사용**한다(AppSession 의 kitty_pixels_buf/cap 과 같은 모양).
+    // 매 프레임 새로 할당하던 옛 경로가 1920×1080 실측에서 프레임당 2.7ms 였고, 그것을 없앤 것이 이
+    // 파이프라인의 현재 동작이므로 벤치도 그 경로를 재야 예산이 제품을 대표한다(docs §10.6).
+    var pixels_buf: []u8 = &.{};
+    var pixels_cap: usize = 0;
+    defer if (pixels_cap > 0) allocator.free(pixels_buf.ptr[0..pixels_cap]);
 
     const iterations = 75_000;
     const start = now(io);
@@ -359,9 +365,8 @@ fn measureKittyImagePipeline(allocator: std.mem.Allocator, io: std.Io) !Budget {
         // unicode placeholder(U=1) 채널은 이 측정의 대상이 아니다 — 빈 슬라이스면 그 경로를 건너뛴다.
         const gpu = try maru.renderer.metal_frame.buildGpuImages(allocator, &placements, &images, size, 8, 16, &.{}, &.{}, &.{});
         defer allocator.free(gpu);
-        const plan = try maru.renderer.metal_frame.planImageUploads(allocator, gpu, &images, &uploaded);
-        allocator.free(plan.uploads);
-        allocator.free(plan.pixels);
+        const plan = try maru.renderer.metal_frame.planImageUploads(allocator, gpu, &images, &uploaded, &pixels_buf, &pixels_cap);
+        allocator.free(plan.uploads); // pixels 는 재사용 버퍼를 가리키는 비소유 슬라이스라 free 하지 않는다
         uploaded.clearRetainingCapacity(); // frame당 첫 업로드(dedup 미스)까지 포함해 상한을 본다
     }
     const elapsed = now(io) - start;

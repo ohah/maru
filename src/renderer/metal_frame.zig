@@ -13,18 +13,14 @@ const terminal = @import("../terminal.zig");
 const color = @import("../color.zig");
 const icons = @import("../icons.zig"); // 등록 chrome 아이콘 이름↔PUA codepoint(생성물)
 
-/// [실험 계측 — A/B 전용] 이미지 픽셀 버퍼를 매 프레임 새로 할당하지 않고 **재사용**한다.
+/// **이미지 픽셀은 버퍼를 재사용한다.** kitty graphics 로 그리는 화면(터미널 브라우저)은 프레임마다 같은
+/// 크기의 이미지를 보내는데, 한때 한 프레임이 그 픽셀을 **두 번** 새 힙 버퍼로 옮겼다 — `planImageUploads`
+/// 가 한 번, 이 파일의 `replace` 가 `allocator.dupe` 로 또 한 번. 1920×1080 실측에서 각각 2.8ms·1.8ms 로
+/// tick 의 절반을 먹었다. 같은 크기 순수 memcpy 벤치가 18배 빨랐으므로 비용의 주인은 복사가 아니라 **매
+/// 프레임 수 MB 재할당**이었고, 그래서 둘 다 「방을 유지하고 덮어쓰기」로 바꿨다.
 ///
-/// 왜 있는가: kitty graphics 로 그리는 화면(터미널 브라우저)은 프레임마다 같은 크기의 이미지를 보낸다.
-/// 그런데 한 프레임이 그 픽셀을 **두 번** 새 힙 버퍼로 옮긴다 — `planImageUploads` 가 한 번, 이 파일의
-/// `replace` 가 `allocator.dupe` 로 또 한 번. 1920×1080 창 실측에서 전자가 2.8ms, replace 전체가 3.5ms 로
-/// 둘이 tick 의 절반을 먹었다. 같은 크기 순수 memcpy 벤치는 18배 빨랐으므로, 비용의 대부분은 복사가 아니라
-/// **매 프레임 수 MB 재할당**이다.
-///
-/// 이 플래그는 그중 `replace` 쪽 재할당만 없앤다(크기가 같을 때 기존 버퍼에 덮어쓴다). 기본 꺼짐이라 동작
-/// 불변이고, 제품으로 올리려면 `planImageUploads` 쪽 할당도 같이 없애야 절반이 아니라 전부가 사라진다.
-pub var experiment_reuse_image_pixels: bool = false;
-
+/// 판정은 길이가 아니라 **capacity** 로 한다 — generation dedup 때문에 길이가 0 ↔ 수 MB 로 번갈아 오므로,
+/// 길이 일치를 요구하면 실측 적중률이 22% 였다(capacity 판정은 99%). 경위는 docs/io-render-present.md §10.6.
 /// [진단 전용] 렌더러 레이어에는 시계가 없다(platform 이 `std.Io` 를 소유한다). `replace` 안을 단계별로
 /// 재려면 그 시계가 필요하므로, platform 이 MARU_DEBUG 일 때만 «지금 몇 ns 인가» 함수를 여기 꽂는다.
 /// 미주입(null)이면 모든 계측이 0 이라 release 경로는 분기 하나 값이다.
@@ -1324,13 +1320,13 @@ pub const ImageUploadPlan = struct { uploads: []GpuImageUpload, pixels: []u8 };
 /// generation 상태(호출자가 frame 간 보관) — 여기서 갱신해 같은 frame 중복·다음 frame 재전송을 막는다.
 /// generation이 같으면 렌더러 텍스처 캐시가 최신이라 픽셀을 다시 보내지 않는다(이미지당 개별 텍스처·
 /// upload-once). 베이스: docs "kitty graphics K2 렌더 설계"(K2a generation). 소유 슬라이스 반환.
-/// `planImageUploads` 의 **재사용 판**. 픽셀을 매 프레임 새 힙 버퍼로 만들지 않고, 호출자가 들고 있는
-/// 버퍼(`buf`/`cap`)에 덮어쓴다. 실측에서 이 할당이 1920×1080 창 기준 프레임당 2.7ms 였고, 같은 크기의
-/// 순수 memcpy 는 그 1/18 이었다 — 비용의 주인이 복사가 아니라 **재할당**이라 방만 유지하면 사라진다.
+/// **픽셀은 호출자가 든 버퍼(`buf`/`cap`)에 덮어쓴다** — 매 프레임 새 힙 버퍼로 만들지 않는다. 실측에서
+/// 그 할당이 1920×1080 창 기준 프레임당 2.7ms 였고 같은 크기 순수 memcpy 는 그 1/18 이었다 — 비용의
+/// 주인이 복사가 아니라 **재할당**이라, 방만 유지하면 사라진다(docs/io-render-present.md §10.6).
 ///
 /// 반환하는 `pixels` 는 그 버퍼를 가리키는 **비소유 슬라이스**다(호출자가 free 하면 안 된다). `uploads` 만
 /// 새로 할당해 돌려준다. 길이는 프레임마다 0 ↔ 수 MB 로 요동쳐도 `cap` 은 줄지 않는다.
-pub fn planImageUploadsReusing(
+pub fn planImageUploads(
     allocator: std.mem.Allocator,
     gpu_images: []const GpuImage,
     images: []const terminal.KittyImageView,
@@ -1379,41 +1375,6 @@ pub fn planImageUploadsReusing(
         try uploaded.put(allocator, gi.image_id, img.generation);
     }
     return .{ .uploads = try uploads.toOwnedSlice(allocator), .pixels = buf.ptr[0..used] };
-}
-
-pub fn planImageUploads(
-    allocator: std.mem.Allocator,
-    gpu_images: []const GpuImage,
-    images: []const terminal.KittyImageView,
-    uploaded: *std.AutoHashMapUnmanaged(u32, u64),
-) !ImageUploadPlan {
-    var uploads: std.ArrayList(GpuImageUpload) = .empty;
-    errdefer uploads.deinit(allocator);
-    var pixels: std.ArrayList(u8) = .empty;
-    errdefer pixels.deinit(allocator);
-
-    for (gpu_images) |gi| {
-        const img = findImage(images, gi.image_id) orelse continue; // 픽셀 없는 placement는 건너뜀
-        if (uploaded.get(gi.image_id)) |g| {
-            if (g == img.generation) continue; // 캐시가 이미 최신 generation
-        }
-        const offset = pixels.items.len;
-        try pixels.appendSlice(allocator, img.pixels);
-        diag_plan_bytes += img.pixels.len;
-        diag_plan_images += 1;
-        try uploads.append(allocator, .{
-            .image_id = img.image_id,
-            .width = img.width,
-            .height = img.height,
-            .bpp = img.bpp,
-            .generation = img.generation,
-            .pixels_offset = offset,
-            .pixels_len = img.pixels.len,
-        });
-        // 상태 갱신 — 같은 frame에서 같은 id를 다시 만나면 위 generation 체크로 dedup된다.
-        try uploaded.put(allocator, gi.image_id, img.generation);
-    }
-    return .{ .uploads = try uploads.toOwnedSlice(allocator), .pixels = try pixels.toOwnedSlice(allocator) };
 }
 
 pub const MetalFrame = extern struct {
@@ -1947,7 +1908,7 @@ pub const MetalFrameBuffer = struct {
         // 재사용했으면 아래 free 대상에서 빼야 한다(같은 버퍼를 free 하면 다음 프레임이 해제된 메모리를 그린다).
         // **길이가 아니라 capacity 로 판정한다.** 길이 일치를 요구하면 0 ↔ 5.6MB 로 번갈아 오는 실제 패턴에서
         // 적중률이 22% 밖에 안 나왔다(실측). 이미 그만한 방을 들고 있으면 덮어쓰기만 하면 된다.
-        const reuse_image_pixels = experiment_reuse_image_pixels and self.image_pixels_cap >= image_pixels.len;
+        const reuse_image_pixels = self.image_pixels_cap >= image_pixels.len;
         if (image_pixels.len > 0) {
             if (reuse_image_pixels) diag_reuse_hit += 1 else diag_reuse_miss += 1;
         }
@@ -3259,11 +3220,11 @@ test "planImageUploads: 신규는 업로드+상태 기록, 같은 generation은 
     const images = [_]terminal.KittyImageView{.{ .image_id = 7, .width = 2, .height = 2, .bpp = 4, .generation = 5, .pixels = &px }};
     const gpu = [_]GpuImage{.{ .image_id = 7, .dest_x = 0, .dest_y = 0, .dest_w = 10, .dest_h = 10, .src_u0 = 0, .src_v0 = 0, .src_u1 = 1, .src_v1 = 1, .z = 0, .pass = 2 }};
 
-    const plan1 = try planImageUploads(alloc, &gpu, &images, &uploaded);
-    defer {
-        alloc.free(plan1.uploads);
-        alloc.free(plan1.pixels);
-    }
+    var buf: []u8 = &.{};
+    var cap: usize = 0;
+    defer if (cap > 0) alloc.free(buf.ptr[0..cap]);
+    const plan1 = try planImageUploads(alloc, &gpu, &images, &uploaded, &buf, &cap);
+    defer alloc.free(plan1.uploads);
     try std.testing.expectEqual(@as(usize, 1), plan1.uploads.len);
     try std.testing.expectEqual(@as(u32, 7), plan1.uploads[0].image_id);
     try std.testing.expectEqual(@as(u64, 5), plan1.uploads[0].generation);
@@ -3273,11 +3234,8 @@ test "planImageUploads: 신규는 업로드+상태 기록, 같은 generation은 
     try std.testing.expectEqual(@as(u64, 5), uploaded.get(7).?);
 
     // 같은 generation → 캐시 최신이라 업로드 없음.
-    const plan2 = try planImageUploads(alloc, &gpu, &images, &uploaded);
-    defer {
-        alloc.free(plan2.uploads);
-        alloc.free(plan2.pixels);
-    }
+    const plan2 = try planImageUploads(alloc, &gpu, &images, &uploaded, &buf, &cap);
+    defer alloc.free(plan2.uploads);
     try std.testing.expectEqual(@as(usize, 0), plan2.uploads.len);
     try std.testing.expectEqual(@as(usize, 0), plan2.pixels.len);
 }
@@ -3293,11 +3251,11 @@ test "planImageUploads: generation 바뀌면 재업로드, 같은 frame 중복 i
         .{ .image_id = 7, .dest_x = 0, .dest_y = 0, .dest_w = 10, .dest_h = 10, .src_u0 = 0, .src_v0 = 0, .src_u1 = 1, .src_v1 = 1, .z = 0, .pass = 2 },
         .{ .image_id = 7, .dest_x = 20, .dest_y = 0, .dest_w = 10, .dest_h = 10, .src_u0 = 0, .src_v0 = 0, .src_u1 = 1, .src_v1 = 1, .z = 1, .pass = 2 },
     };
-    const plan = try planImageUploads(alloc, &gpu, &images, &uploaded);
-    defer {
-        alloc.free(plan.uploads);
-        alloc.free(plan.pixels);
-    }
+    var buf: []u8 = &.{};
+    var cap: usize = 0;
+    defer if (cap > 0) alloc.free(buf.ptr[0..cap]);
+    const plan = try planImageUploads(alloc, &gpu, &images, &uploaded, &buf, &cap);
+    defer alloc.free(plan.uploads);
     try std.testing.expectEqual(@as(usize, 1), plan.uploads.len); // 중복 id는 한 번만
     try std.testing.expectEqual(@as(u64, 6), plan.uploads[0].generation);
     try std.testing.expectEqual(@as(u64, 6), uploaded.get(7).?);
@@ -3317,11 +3275,11 @@ test "planImageUploads: 두 이미지의 pixels_offset/len이 각 구간을 가�
         .{ .image_id = 1, .dest_x = 0, .dest_y = 0, .dest_w = 1, .dest_h = 1, .src_u0 = 0, .src_v0 = 0, .src_u1 = 1, .src_v1 = 1, .z = 0, .pass = 2 },
         .{ .image_id = 2, .dest_x = 0, .dest_y = 0, .dest_w = 1, .dest_h = 1, .src_u0 = 0, .src_v0 = 0, .src_u1 = 1, .src_v1 = 1, .z = 0, .pass = 2 },
     };
-    const plan = try planImageUploads(alloc, &gpu, &images, &uploaded);
-    defer {
-        alloc.free(plan.uploads);
-        alloc.free(plan.pixels);
-    }
+    var buf: []u8 = &.{};
+    var cap: usize = 0;
+    defer if (cap > 0) alloc.free(buf.ptr[0..cap]);
+    const plan = try planImageUploads(alloc, &gpu, &images, &uploaded, &buf, &cap);
+    defer alloc.free(plan.uploads);
     try std.testing.expectEqual(@as(usize, 2), plan.uploads.len);
     try std.testing.expectEqual(@as(usize, 28), plan.pixels.len); // 12 + 16
     try std.testing.expectEqual(@as(usize, 0), plan.uploads[0].pixels_offset);
@@ -3836,7 +3794,7 @@ test "[적대] 선택 하이라이트는 draw_cells 에 없는 칸도 칠한다 
 // 시도한다 — testing.allocator 가 누수·잘못된 크기 free 를 잡으므로, 통과 자체가 증거다.
 // ============================================================================
 
-test "[적대] planImageUploadsReusing: 길이가 0 ↔ 큰 값으로 요동쳐도 버퍼 방은 줄지 않는다" {
+test "[적대] planImageUploads 재사용: 길이가 0 ↔ 큰 값으로 요동쳐도 버퍼 방은 줄지 않는다" {
     const alloc = std.testing.allocator;
     var uploaded: std.AutoHashMapUnmanaged(u32, u64) = .{};
     defer uploaded.deinit(alloc);
@@ -3849,7 +3807,7 @@ test "[적대] planImageUploadsReusing: 길이가 0 ↔ 큰 값으로 요동쳐�
     const gpu = [_]GpuImage{.{ .image_id = 3, .dest_x = 0, .dest_y = 0, .dest_w = 4, .dest_h = 4, .src_u0 = 0, .src_v0 = 0, .src_u1 = 1, .src_v1 = 1, .z = 0, .pass = 2 }};
 
     // 1프레임: 신규 → 64바이트를 싣고 방도 64가 된다.
-    const p1 = try planImageUploadsReusing(alloc, &gpu, &images, &uploaded, &buf, &cap);
+    const p1 = try planImageUploads(alloc, &gpu, &images, &uploaded, &buf, &cap);
     defer alloc.free(p1.uploads);
     try std.testing.expectEqual(@as(usize, 64), p1.pixels.len);
     try std.testing.expectEqual(@as(usize, 64), cap);
@@ -3857,7 +3815,7 @@ test "[적대] planImageUploadsReusing: 길이가 0 ↔ 큰 값으로 요동쳐�
 
     // 2프레임: 같은 generation → dedup 으로 0바이트. **방은 그대로여야 한다**(여기가 옛 길이-일치 판정이
     // 적중률 22%로 무너졌던 지점이다).
-    const p2 = try planImageUploadsReusing(alloc, &gpu, &images, &uploaded, &buf, &cap);
+    const p2 = try planImageUploads(alloc, &gpu, &images, &uploaded, &buf, &cap);
     defer alloc.free(p2.uploads);
     try std.testing.expectEqual(@as(usize, 0), p2.pixels.len);
     try std.testing.expectEqual(@as(usize, 64), cap);
@@ -3865,7 +3823,7 @@ test "[적대] planImageUploadsReusing: 길이가 0 ↔ 큰 값으로 요동쳐�
     // 3프레임: generation 이 오르면 다시 64바이트 — 재할당 없이 같은 방을 쓴다.
     const buf_ptr_before = buf.ptr;
     images[0].generation = 2;
-    const p3 = try planImageUploadsReusing(alloc, &gpu, &images, &uploaded, &buf, &cap);
+    const p3 = try planImageUploads(alloc, &gpu, &images, &uploaded, &buf, &cap);
     defer alloc.free(p3.uploads);
     try std.testing.expectEqual(@as(usize, 64), p3.pixels.len);
     try std.testing.expectEqual(@as(usize, 64), cap);
@@ -3873,7 +3831,7 @@ test "[적대] planImageUploadsReusing: 길이가 0 ↔ 큰 값으로 요동쳐�
     try std.testing.expectEqual(@as(u8, 0xCD), p3.pixels[63]);
 }
 
-test "[적대] planImageUploadsReusing: 더 큰 이미지가 오면 방을 늘리고 내용이 정확하다" {
+test "[적대] planImageUploads 재사용: 더 큰 이미지가 오면 방을 늘리고 내용이 정확하다" {
     const alloc = std.testing.allocator;
     var uploaded: std.AutoHashMapUnmanaged(u32, u64) = .{};
     defer uploaded.deinit(alloc);
@@ -3886,12 +3844,12 @@ test "[적대] planImageUploadsReusing: 더 큰 이미지가 오면 방을 늘�
     const gpu = [_]GpuImage{.{ .image_id = 9, .dest_x = 0, .dest_y = 0, .dest_w = 2, .dest_h = 2, .src_u0 = 0, .src_v0 = 0, .src_u1 = 1, .src_v1 = 1, .z = 0, .pass = 2 }};
 
     var img_small = [_]terminal.KittyImageView{.{ .image_id = 9, .width = 2, .height = 2, .bpp = 4, .generation = 1, .pixels = &small }};
-    const p1 = try planImageUploadsReusing(alloc, &gpu, &img_small, &uploaded, &buf, &cap);
+    const p1 = try planImageUploads(alloc, &gpu, &img_small, &uploaded, &buf, &cap);
     defer alloc.free(p1.uploads);
     try std.testing.expectEqual(@as(usize, 16), cap);
 
     var img_big = [_]terminal.KittyImageView{.{ .image_id = 9, .width = 8, .height = 8, .bpp = 4, .generation = 2, .pixels = &big }};
-    const p2 = try planImageUploadsReusing(alloc, &gpu, &img_big, &uploaded, &buf, &cap);
+    const p2 = try planImageUploads(alloc, &gpu, &img_big, &uploaded, &buf, &cap);
     defer alloc.free(p2.uploads);
     try std.testing.expectEqual(@as(usize, 256), p2.pixels.len);
     try std.testing.expect(cap >= 256);
@@ -3901,7 +3859,7 @@ test "[적대] planImageUploadsReusing: 더 큰 이미지가 오면 방을 늘�
     try std.testing.expectEqual(@as(usize, 256), p2.uploads[0].pixels_len);
 }
 
-test "[적대] planImageUploadsReusing: 두 이미지의 offset/len 이 한 버퍼 안에서 정확히 나뉜다" {
+test "[적대] planImageUploads 재사용: 두 이미지의 offset/len 이 한 버퍼 안에서 정확히 나뉜다" {
     const alloc = std.testing.allocator;
     var uploaded: std.AutoHashMapUnmanaged(u32, u64) = .{};
     defer uploaded.deinit(alloc);
@@ -3920,7 +3878,7 @@ test "[적대] planImageUploadsReusing: 두 이미지의 offset/len 이 한 버�
         .{ .image_id = 2, .dest_x = 0, .dest_y = 0, .dest_w = 4, .dest_h = 2, .src_u0 = 0, .src_v0 = 0, .src_u1 = 1, .src_v1 = 1, .z = 0, .pass = 2 },
     };
 
-    const plan = try planImageUploadsReusing(alloc, &gpu, &images, &uploaded, &buf, &cap);
+    const plan = try planImageUploads(alloc, &gpu, &images, &uploaded, &buf, &cap);
     defer alloc.free(plan.uploads);
     try std.testing.expectEqual(@as(usize, 2), plan.uploads.len);
     try std.testing.expectEqual(@as(usize, 48), plan.pixels.len);
@@ -3932,34 +3890,29 @@ test "[적대] planImageUploadsReusing: 두 이미지의 offset/len 이 한 버�
     try std.testing.expectEqual(@as(u8, 0xBB), plan.pixels[16]);
 }
 
-test "[적대] planImageUploadsReusing: 결과가 기존 planImageUploads 와 바이트까지 같다" {
-    // 재사용 판이 «빠른 대신 다른 것을 만들지» 않는지 — 같은 입력에 같은 uploads·pixels 를 내야 한다.
+test "[적대] planImageUploads 재사용: 실린 픽셀이 입력과 바이트까지 같다" {
+    // 재사용 버퍼에 쌓는 경로가 「빠른 대신 다른 것을 싣지」 않는지 — 알려진 입력에 알려진 출력을 못 박는다.
+    // (한때 옛 비-재사용 판과 결과를 대조했으나, 그 판이 사라져 절대값 단언으로 바꿨다.)
     const alloc = std.testing.allocator;
     const px = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 } ** 4;
     const images = [_]terminal.KittyImageView{.{ .image_id = 5, .width = 4, .height = 2, .bpp = 4, .generation = 3, .pixels = &px }};
     const gpu = [_]GpuImage{.{ .image_id = 5, .dest_x = 0, .dest_y = 0, .dest_w = 4, .dest_h = 2, .src_u0 = 0, .src_v0 = 0, .src_u1 = 1, .src_v1 = 1, .z = 0, .pass = 2 }};
 
-    var up_a: std.AutoHashMapUnmanaged(u32, u64) = .{};
-    defer up_a.deinit(alloc);
-    const old = try planImageUploads(alloc, &gpu, &images, &up_a);
-    defer {
-        alloc.free(old.uploads);
-        alloc.free(old.pixels);
-    }
-
-    var up_b: std.AutoHashMapUnmanaged(u32, u64) = .{};
-    defer up_b.deinit(alloc);
+    var uploaded: std.AutoHashMapUnmanaged(u32, u64) = .{};
+    defer uploaded.deinit(alloc);
     var buf: []u8 = &.{};
     var cap: usize = 0;
     defer if (cap > 0) alloc.free(buf.ptr[0..cap]);
-    const new = try planImageUploadsReusing(alloc, &gpu, &images, &up_b, &buf, &cap);
-    defer alloc.free(new.uploads);
 
-    try std.testing.expectEqual(old.uploads.len, new.uploads.len);
-    try std.testing.expectEqualSlices(u8, old.pixels, new.pixels);
-    try std.testing.expectEqual(old.uploads[0].pixels_offset, new.uploads[0].pixels_offset);
-    try std.testing.expectEqual(old.uploads[0].pixels_len, new.uploads[0].pixels_len);
-    try std.testing.expectEqual(old.uploads[0].generation, new.uploads[0].generation);
+    const plan = try planImageUploads(alloc, &gpu, &images, &uploaded, &buf, &cap);
+    defer alloc.free(plan.uploads);
+
+    try std.testing.expectEqual(@as(usize, 1), plan.uploads.len);
+    try std.testing.expectEqualSlices(u8, &px, plan.pixels);
+    try std.testing.expectEqual(@as(usize, 0), plan.uploads[0].pixels_offset);
+    try std.testing.expectEqual(@as(usize, px.len), plan.uploads[0].pixels_len);
+    try std.testing.expectEqual(@as(u64, 3), plan.uploads[0].generation);
+    try std.testing.expectEqual(@as(u64, 3), uploaded.get(5).?);
 }
 
 test "[적대] replace 이미지 버퍼 재사용: 길이가 요동쳐도 방을 유지하고 free 크기를 틀리지 않는다" {
@@ -3973,10 +3926,7 @@ test "[적대] replace 이미지 버퍼 재사용: 길이가 요동쳐도 방을
     const big = [_]u8{0xEE} ** 512;
     const small = [_]u8{0x77} ** 64;
 
-    for ([_]bool{ false, true }) |reuse_on| {
-        experiment_reuse_image_pixels = reuse_on;
-        defer experiment_reuse_image_pixels = false;
-
+    {
         var buf: MetalFrameBuffer = .{};
         defer buf.deinit(allocator);
 
@@ -3989,12 +3939,12 @@ test "[적대] replace 이미지 버퍼 재사용: 길이가 요동쳐도 방을
         try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, colors, &.{}, &.{}, null, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &small, &.{});
         try std.testing.expectEqual(@as(usize, 64), buf.image_pixels.len);
         try std.testing.expectEqual(@as(u8, 0x77), buf.image_pixels[63]);
-        if (reuse_on) try std.testing.expectEqual(@as(usize, 512), buf.image_pixels_cap);
+        try std.testing.expectEqual(@as(usize, 512), buf.image_pixels_cap);
 
         // (3) 이미지 없음(0바이트) → 길이 0. 방은 유지된다.
         try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, colors, &.{}, &.{}, null, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
         try std.testing.expectEqual(@as(usize, 0), buf.image_pixels.len);
-        if (reuse_on) try std.testing.expectEqual(@as(usize, 512), buf.image_pixels_cap);
+        try std.testing.expectEqual(@as(usize, 512), buf.image_pixels_cap);
 
         // (4) 다시 큰 이미지 → 방을 재사용하고 내용이 온전하다(옛 0x77 이 남으면 안 된다).
         try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, colors, &.{}, &.{}, null, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &big, &.{});
@@ -4004,25 +3954,24 @@ test "[적대] replace 이미지 버퍼 재사용: 길이가 요동쳐도 방을
     }
 }
 
-test "[적대] replace 이미지 버퍼 재사용: 켠 결과와 끈 결과가 바이트까지 같다" {
-    // 「빠른 대신 다른 것을 그리지」 않는지 — 같은 입력에 같은 image_pixels 를 내야 한다.
+test "[적대] replace 이미지 버퍼 재사용: 방을 재사용해도 내용이 입력과 바이트까지 같다" {
+    // 「빠른 대신 다른 것을 그리지」 않는지 — 재사용 프레임의 image_pixels 가 입력과 정확히 같아야 한다.
+    // 첫 프레임은 새 할당, 둘째 프레임이 그 방을 재사용하는 경로다.
     const allocator = std.testing.allocator;
     const atlas_config: renderer.GlyphAtlasConfig = .{ .atlas_width_px = 1024, .atlas_height_px = 1024 };
     const colors: CellColors = .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } };
-    const px = [_]u8{ 3, 1, 4, 1, 5, 9, 2, 6 } ** 8;
+    const first = [_]u8{ 3, 1, 4, 1, 5, 9, 2, 6 } ** 8;
+    const second = [_]u8{ 2, 7, 1, 8, 2, 8, 1, 8 } ** 8;
 
-    var off_buf: MetalFrameBuffer = .{};
-    defer off_buf.deinit(allocator);
-    experiment_reuse_image_pixels = false;
-    try off_buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, colors, &.{}, &.{}, null, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &px, &.{});
+    var buf: MetalFrameBuffer = .{};
+    defer buf.deinit(allocator);
+    try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, colors, &.{}, &.{}, null, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &first, &.{});
+    try std.testing.expectEqualSlices(u8, &first, buf.image_pixels);
 
-    var on_buf: MetalFrameBuffer = .{};
-    defer on_buf.deinit(allocator);
-    experiment_reuse_image_pixels = true;
-    defer experiment_reuse_image_pixels = false;
-    try on_buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, colors, &.{}, &.{}, null, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &px, &.{});
-
-    try std.testing.expectEqualSlices(u8, off_buf.image_pixels, on_buf.image_pixels);
+    const ptr_before = buf.image_pixels.ptr;
+    try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, colors, &.{}, &.{}, null, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &second, &.{});
+    try std.testing.expectEqualSlices(u8, &second, buf.image_pixels); // 옛 바이트가 남으면 실패
+    try std.testing.expect(buf.image_pixels.ptr == ptr_before); // 같은 방을 썼다
 }
 
 test "[적대] 하이라이트 격자 pass: 선택·검색이 없으면 셀이 한 개도 안 늘어난다" {

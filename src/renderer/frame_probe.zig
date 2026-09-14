@@ -121,10 +121,11 @@ test "render frame stats extracts frame metadata and derives prepared" {
     try std.testing.expectEqual(types.Backend.metal, stats.backend);
     try std.testing.expectEqual(@as(u16, 4), stats.surface_cols);
     try std.testing.expectEqual(@as(u16, 1), stats.surface_rows);
-    try std.testing.expectEqual(@as(usize, 4), stats.draw_cells);
-    try std.testing.expectEqual(@as(usize, 4), stats.glyph_count);
-    try std.testing.expectEqual(@as(usize, 4), stats.glyph_quad_count);
-    try std.testing.expectEqual(@as(usize, 4), stats.glyph_uv_count);
+    // 줄끝 trim 이후 빈 칸은 DrawList 에 안 실린다 — 아래 수치는 «글자 수»이지 «열 수»가 아니다.
+    try std.testing.expectEqual(@as(usize, 2), stats.draw_cells);
+    try std.testing.expectEqual(@as(usize, 2), stats.glyph_count);
+    try std.testing.expectEqual(@as(usize, 2), stats.glyph_quad_count);
+    try std.testing.expectEqual(@as(usize, 2), stats.glyph_uv_count);
     try std.testing.expect(stats.glyph_uv_ready);
     try std.testing.expectEqual(stats.upload_count, stats.glyph_raster_upload_count);
     try std.testing.expectEqual(@as(usize, 0), stats.glyph_raster_skipped_count);

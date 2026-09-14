@@ -187,10 +187,9 @@ zig build test > /tmp/t.log 2>&1;  mise run test-verdict /tmp/t.log
   `MARU_DEBUG=1 ./zig-out/Maru.app/Contents/MacOS/maru-macos-app > /tmp/maru.out 2>&1`
   - ⚠️ **성능을 잴 때는 반드시 `-Doptimize=`를 준다.** `zig build macos-app`은 `standardOptimizeOption` 기본이라
     **Debug**이고, 이미지 경로 실측에서 ReleaseFast보다 **15배** 느렸다(§10.6 표).
-  - 진단 전용 env 셋(전부 기본 꺼짐, 동작 불변):
-    `MARU_FT_WINDOW_SIZE=WxH`(초기 창 크기 pt — 기본 960×600에서는 큰 창에서만 드러나는 프레임 비용이 **재현되지
-    않는다**), `MARU_FT_TRIM_BLANK=1`(줄 끝 빈 칸 shaping 제외 — 선택 하이라이트 회귀 있음),
-    `MARU_FT_REUSE_IMG=1`(kitty 이미지 픽셀 버퍼 재사용). 각각이 무엇을 재려고 있는지는 §10.6이 소유한다.
+  - 진단 전용 env: `MARU_FT_WINDOW_SIZE=WxH`(초기 창 크기 pt). 기본 960×600에서는 큰 창에서만 드러나는
+    프레임 비용이 **재현되지 않는다** — 실환경 크기를 줘야 한다. (줄끝 trim·이미지 버퍼 재사용은 2026-09-14
+    제품 동작으로 승격돼 스위치가 없다 — §10.6.)
 - macOS visible window smoke 실행: `mise run macos-window-smoke` (창이 너무 빨리 닫히면 `MARU_WINDOW_SMOKE_MS`로 노출 시간을 ms 단위로 늘려 수동 확인한다. 기본 1500ms, 상한 600000ms)
 - macOS window smoke 계약 테스트: `mise run test-macos-window-smoke`
 - macOS Metal 제품 atlas shader sampling smoke 실행: `mise run macos-metal-smoke` (창이 너무 빨리 닫히면 `MARU_METAL_SMOKE_MS`로 노출 시간을 ms 단위로 늘려 수동 확인한다. 기본 1500ms, 상한 600000ms)

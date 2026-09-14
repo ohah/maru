@@ -278,6 +278,10 @@ pub const ScenarioId = enum {
     /// 남는다: 스크롤한 뒤 밴드가 **그 줄**에 붙는지(표를 뷰포트 기준으로 읽으면 어긋난다), 두 열이
     /// 같은 행에서 시작하는지, 그리고 막대가 문서 중간 자리에 서는지.
     editor_diff_scrolled,
+    /// S3b-2 — 3-way 병합 pane 넷. **제품과 같은 함수**(`merge_frame.build`)를 부른다.
+    editor_merge_panes,
+    /// S3b-2 — 폭이 모자라 **접힌** 배치(Result + Base). 접는 규칙도 골든이 든다.
+    editor_merge_narrow,
 };
 
 /// sticky 시나리오인가. 그룹이 둘 이상이어야 "다음 헤더가 밀어낸다"를 만들 수 있다.
@@ -371,6 +375,7 @@ pub fn buildFrame(
         .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper => buildContextMenuFrame(scenario, tokens, buffers),
         .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_selection, .editor_find, .editor_caret_bar, .editor_caret_block, .editor_caret_underline => buildEditorGutterFrame(scenario, buffers),
         .editor_diff, .editor_diff_scrolled, .editor_diff_selection => buildEditorDiffFrame(scenario, buffers),
+        .editor_merge_panes, .editor_merge_narrow => buildEditorMergeFrame(scenario, buffers),
         // 위 early return이 처리한다 — 여기 오면 분기가 갈린 것이다.
         .sidebar_status_strip => unreachable,
         .empty,
@@ -1034,6 +1039,75 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
     };
 }
 
+/// S3b-2 — 3-way 병합 pane 넷. **제품과 같은 함수를 부른다**(`merge_frame.build`) — 조합을 Lab 이
+/// 따로 들면 캡처가 제품을 예고하지 못한다(비교 뷰가 같은 이유로 같은 자리에 섰다).
+///
+/// **fixture 가 네 축을 갈라야 한다**: 세 판의 내용이 서로 달라야 「어느 pane 이 어느 판인가」가
+/// 캡처에서 보이고, 조상이 있어야 아래 띠가 선다. 셋이 같으면 배치를 아무렇게나 바꿔도 그림이
+/// 똑같다.
+fn buildEditorMergeFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
+    const editor_view = chrome.components.editor_view;
+    const viewport_w: u32 = @intFromFloat(scenario.viewport_px.width);
+    const viewport_h: u32 = @intFromFloat(scenario.viewport_px.height);
+
+    // 같은 함수의 세 판 + 작업트리 Result. **한 줄씩 다르게** 둔다 — 같은 줄만 있으면 pane 이
+    // 뒤바뀌어도 캡처가 같다.
+    const base_lines = [_][]const u8{ "fn greet() void {", "    const msg = \"base\";", "    log(msg);", "}" };
+    const ours_lines = [_][]const u8{ "fn greet() void {", "    const msg = \"ours\";", "    log(msg);", "}" };
+    const theirs_lines = [_][]const u8{ "fn greet() void {", "    const msg = \"theirs\";", "    log(msg);", "}" };
+    // Result 는 **작업트리 파일**이라 충돌 표시가 그대로 들어 있다(저장이 곧 해결이다).
+    const result_lines = [_][]const u8{
+        "fn greet() void {",
+        "<<<<<<< HEAD",
+        "    const msg = \"ours\";",
+        "=======",
+        "    const msg = \"theirs\";",
+        ">>>>>>> topic",
+        "    log(msg);",
+        "}",
+    };
+
+    var content_rows: [512]editor_view.content.Row = undefined;
+    var visual_rows: [512]chrome.ui.visual_map.VisualRow = undefined;
+    var gutter_rows: [512]editor_view.gutter.Row = undefined;
+    var row_counts: [4096]u32 = undefined;
+    var count_scratch: [editor_view.content.count_scratch_bytes]u8 = undefined;
+    var caret_cols: [256]u32 = undefined;
+
+    const w = editor_view.merge_frame.build(.{
+        .rect = editor_view.frame.contentRect(.{ .x = 0, .y = 0, .w = viewport_w, .h = viewport_h }),
+        .background_rect = .{ .x = 0, .y = 0, .w = viewport_w, .h = viewport_h }, // 배경은 뷰 전체(§4.1b)
+        .current = .{ .lines = &ours_lines },
+        .result = .{ .lines = &result_lines },
+        .incoming = .{ .lines = &theirs_lines },
+        .base = .{ .lines = &base_lines },
+        .cell_w_px = scenario.cell_w_px,
+        .cell_h_px = scenario.cell_h_px,
+        .font_px = scenario.font_px,
+        .tab_width = lab_tab_width,
+        .wrap = false,
+        // 비교 골든과 같은 판단 — caret 시나리오가 아닌 골든까지 커서를 켜면 깜빡임 축을 떠안는다.
+        .caret_visible = false,
+        .caret_shape = .bar,
+    }, .{
+        .ops = buffers.ops,
+        .text_bytes = buffers.text_bytes,
+        .runs = buffers.text_runs,
+        .content_rows = &content_rows,
+        .visual_rows = &visual_rows,
+        .gutter_rows = &gutter_rows,
+        .row_counts = &row_counts,
+        .count_scratch = &count_scratch,
+        .caret_cols = &caret_cols,
+    });
+
+    return .{
+        // 아직 hit-test 대상이 없다(입력은 Result 만 받고 그 경로는 제품이 든다). 빈 트리를 낸다.
+        .tree = .{ .entries = buffers.entries[0..0], .generation = 0 },
+        .draws = .{ .layer = .sidebar, .ops = buffers.ops[0..w.ops] },
+    };
+}
+
 /// N1.5 c — 나란한 비교 한 프레임. **제품과 같은 함수를 부른다**(`diff_frame.build`) — 조합을 Lab이
 /// 따로 들면 캡처가 제품을 예고하지 못한다(편집기 배경 층에서 실제로 그 상태가 됐었다).
 fn buildEditorDiffFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
@@ -1255,7 +1329,7 @@ fn buildDockFrame(
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
             .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
             // editor_gutter는 buildEditorGutterFrame이 처리한다 — 도크 목록을 타지 않는다.
-            .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper, .scm_rows, .scm_history, .scm_row_hover, .scm_conflict_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_selection, .editor_find, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_diff, .editor_diff_scrolled, .editor_diff_selection => unreachable,
+            .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper, .scm_rows, .scm_history, .scm_row_hover, .scm_conflict_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_selection, .editor_find, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_diff, .editor_diff_scrolled, .editor_diff_selection, .editor_merge_panes, .editor_merge_narrow => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{

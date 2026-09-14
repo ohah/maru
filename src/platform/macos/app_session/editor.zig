@@ -181,6 +181,10 @@ pub const PaneFrame = struct {
     /// 비교 뷰 오른쪽 열의 짝(단일 편집기는 `null`).
     right_scrollbar: ?chrome.ui.scroll_area.ScrollbarGeometry = null,
     right_horizontal_scrollbar: ?chrome_editor.scrollbar.HorizontalGeometry = null,
+    /// 병합 모드(S3b-2)에서 **pane 넷이 실제로 놓인 자리**(pane 상대 좌표). 히트테스트가 이 값을
+    /// 그대로 읽어 「Result 밖 클릭」을 가른다 — 배치를 두 번 계산하면 보이는 자리와 누르는 자리가
+    /// 갈린다.
+    merge_layout: ?chrome_editor.merge_frame.Layout = null,
 };
 
 /// 편집기 프레임에 필요한 호출자 소유 저장소. 한 프레임 안에서만 유효하다.
@@ -192,6 +196,57 @@ pub const FrameScratch = chrome_editor.frame.Scratch;
 /// 한 열이 쓸 자리에서 나오는 값들은 **컴포넌트가 소유한다**(`diff_frame.sideMetrics`) — 제품과
 /// Chrome Lab이 같은 값을 써야 캡처가 제품을 예고한다.
 const diff_frame = chrome_editor.diff_frame;
+
+/// 병합 모드 pane 넷(S3b-2). **조합은 컴포넌트가 소유한다**(`merge_frame`) — 제품과 Chrome Lab 이
+/// 같은 함수를 불러야 캡처가 제품을 예고한다.
+///
+/// 스크롤 값은 **Result 의 것**을 싣는다. 이 Term 이 소유한 문서가 그것이고, 세 판은 각자 세로를
+/// 갖되(계약 §5 S3b-2) 그 세로를 굴리는 입력은 아직 없다(S3b-3).
+fn buildMergePaneOps(
+    self: *AppSession,
+    term: *Term,
+    st: editor_merge_ops.State,
+    result_lines: []const []const u8,
+    wrap: bool,
+    pane_rect: chrome_draw.Rect,
+    scratch: FrameScratch,
+) PaneFrame {
+    const w = chrome_editor.merge_frame.build(.{
+        .rect = pane_rect,
+        .current = .{ .lines = st.ours_lines },
+        .result = .{
+            .lines = result_lines,
+            .line_colors = syntaxColors(self, term),
+            .first_line = term.rt.editor_first_line,
+            .first_piece = effectiveFirstPiece(wrap, term),
+            .first_col = effectiveFirstCol(wrap, term, false),
+            .content_max_cols = maxColsForRender(self, term, false),
+            .carets = buildCaretRows(self, term),
+        },
+        .incoming = .{ .lines = st.theirs_lines },
+        // **`null` 이면 조상이 «없다»** — 빈 조상은 어엿한 조상이라 띠가 선다(그 판정은 S3a 의
+        // `StageSet` 이 소유한다. 여기서 길이로 다시 재면 그 규칙의 주인이 둘이 된다).
+        .base = if (st.stages.has_base) chrome_editor.merge_frame.Pane{ .lines = st.base_lines } else null,
+        .cell_w_px = @intCast(self.cell_width_px),
+        .cell_h_px = @intCast(self.cell_height_px),
+        .font_px = @intCast(self.cell_height_px),
+        .tab_width = term.rt.editor_tab_width,
+        .wrap = wrap,
+        .caret_visible = self.blink_visible,
+        .caret_shape = caretShape(self),
+    }, scratch);
+    return .{
+        .ops = scratch.ops[0..w.ops],
+        .ops_len = w.ops,
+        .visual_rows = w.result_visual_rows,
+        .total_visual_rows = @intCast(w.result_visual_rows),
+        // **상한은 아직 Result 의 행 수로 근사한다.** 정확한 값은 `frame.build` 가 열마다 내는데,
+        // 이 조각의 입력은 Result 하나만 굴리므로 그 하나만 싣는다(S3b-3 에서 pane 별로 갈린다).
+        .max_top_line = term.rt.editor_max_top_line,
+        .max_top_piece = term.rt.editor_max_top_piece,
+        .merge_layout = w.layout,
+    };
+}
 
 /// pane 사각과 셀 크기로 편집기 op을 만든다. 반환값은 `scratch.ops[0..ops_len]`이 유효하다는 뜻이다.
 /// 보이는 줄의 **구문 강조 색**(§5.3 1층). 없으면 무색이다.
@@ -604,9 +659,32 @@ pub fn conflictActionAtPoint(term: *Term, x_px: f64, y_px: f64) ?AppSession.Conf
     return null;
 }
 
+/// pane 상대 사각을 **창 절대**로 옮긴다(`base` 는 그 pane 의 본문 사각 — 창 좌표다).
+fn offsetRect(r: chrome_draw.Rect, base: maru.session.SplitRect) chrome_draw.Rect {
+    return .{ .x = r.x + @as(i32, @intCast(base.x)), .y = r.y + @as(i32, @intCast(base.y)), .w = r.w, .h = r.h };
+}
+
+/// 포인터(**창 절대 px**)가 그 사각 안인가. 병합 모드의 「Result 밖 클릭」 판정이 쓴다.
+///
+/// **`editor_hit_geom` 과 같은 축을 쓴다** — 그 값이 body 원점을 pane 상대로 들고 있고, `merge_frame`
+/// 의 배치도 pane 상대다. 축이 갈리면 「보이는 자리」와 「누르는 자리」가 어긋난다.
+fn insideRect(rect: chrome_draw.Rect, x_px: f64, y_px: f64) bool {
+    if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return false;
+    const x: i64 = @intFromFloat(@floor(x_px));
+    const y: i64 = @intFromFloat(@floor(y_px));
+    return x >= rect.x and x < rect.x + @as(i64, @intCast(rect.w)) and
+        y >= rect.y and y < rect.y + @as(i64, @intCast(rect.h));
+}
+
 pub fn hitTestBody(term: *Term, x_px: f64, y_px: f64) ?usize {
     if (term.kind != .editor) return null;
     if (term.rt.editor_diff != null) return null; // 비교 뷰는 범위 밖
+    // **병합 모드에서는 Result pane 만 입력을 받는다**(계약 §5 S3b-2). 이 가드가 없으면 Base pane 을
+    // 눌렀을 때 **Result 문서의 caret 이 움직인다** — 좌표가 같은 Term 의 하나뿐인 히트 기하를
+    // 그대로 지나기 때문이다. 그 pane 들의 caret·선택은 S3b-3 이다.
+    if (term.rt.editor_merge_layout) |lay| {
+        if (!insideRect(lay.result, x_px, y_px)) return null;
+    }
     const rows_len = term.rt.editor_hit_rows_len;
     if (rows_len == 0) return null;
 
@@ -1341,6 +1419,17 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
             @intCast(self.cell_height_px),
             scratch,
         );
+    } else if (term.rt.editor_merge) |st| blk: {
+        // **판이 아직 안 왔거나 못 읽었으면 한 줄로 말한다** — 조용한 빈 화면을 남기지 않는 것이
+        // §7 의 요구이고, 비교 뷰가 네 상태를 말하는 그 규율이다.
+        if (!st.ready) {
+            status_line[0] = if (st.failed)
+                maru.i18n.t(.diff_read_failed)
+            else
+                maru.i18n.t(.diff_loading);
+            break :blk buildPaneOps(status_line[0..1], null, null, 1, 0, 0, 0, null, null, null, null, null, @as([]const u32, &.{}), null, &.{}, &.{}, null, &.{}, null, false, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
+        }
+        break :blk buildMergePaneOps(self, term, st, draw_lines, wrap, pane_rect, scratch);
     } else blk: {
         // **가로로 민 만큼 전개가 앞을 다시 걷지 않게 한다**(§4.1c). 안 밀었으면 `buildLineSeeks` 가
         // 곧바로 0 을 내므로 이 배열은 비고, 그때 렌더는 예전과 **같은 길**로 간다.
@@ -1350,6 +1439,18 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
         break :blk buildPaneOps(draw_lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), fc, maxColsForRender(self, term, false), row_cache, buildSelectionMarks(self, term), find_marks, find_current, marker_lines, marker_current, syntaxColors(self, term), seek_buf[0..seek_n], buildCaretRows(self, term), conflictWidgets(self, term), conflictBands(term), self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
     };
     if (pf.ops_len == 0) return null;
+    // **배치를 싣는다**(병합 모드가 아니면 지운다 — 옛 배치가 남으면 평범한 편집기에서 클릭이
+    // 「Result 밖」으로 거부된다).
+    // **창 절대 좌표로 옮겨 싣는다.** `merge_frame` 이 내는 자리는 pane **상대**이고(컴포넌트가
+    // 창을 모른다), 클릭은 **창 좌표**로 온다 — 축이 다른 둘을 그대로 비교하면 「Result 안」 판정이
+    // 우연히 겹치는 만큼만 맞는다(적대적 1회차에서 그 상태였다: 가드를 통째로 지운 변이가 살아남았고,
+    // 판정자도 같은 축 착오를 하고 있어 초록이었다).
+    term.rt.editor_merge_layout = if (pf.merge_layout) |lay| chrome_editor.merge_frame.Layout{
+        .current = if (lay.current) |r| offsetRect(r, rect) else null,
+        .result = offsetRect(lay.result, rect),
+        .incoming = if (lay.incoming) |r| offsetRect(r, rect) else null,
+        .base = if (lay.base) |r| offsetRect(r, rect) else null,
+    } else null;
     // **그린 행들을 Term에 남긴다**(§4.1g ②). `visual_rows`는 이 함수의 스택이라 반환과 함께
     // 사라지는데, 클릭은 렌더 **다음에** 오므로 그때 읽을 것이 있어야 한다 — 바로 아래 스크롤 값들을
     // 싣는 것과 같은 자리·같은 이유다(*"접힘을 아는 것은 렌더뿐"*).
@@ -8622,6 +8723,33 @@ fn drawnHasCodepoint(dl: renderer.DrawList, cp: u21) bool {
     return false;
 }
 
+/// 창 절대 사각을 pane 상대로 되돌린다(판정자 전용 — `offsetRect` 의 역).
+fn unoffsetRect(r: chrome_draw.Rect, base: maru.session.SplitRect) chrome_draw.Rect {
+    return .{ .x = r.x - @as(i32, @intCast(base.x)), .y = r.y - @as(i32, @intCast(base.y)), .w = r.w, .h = r.h };
+}
+
+/// 그 글자가 **그 pane 안에** 그려졌나(pane 사각은 창 절대 좌표). 병합 판정자가 「어느 판이 어느
+/// 자리에」를 재는 데 쓴다 — 화면에 있다는 것만으로는 판을 맞바꾼 변이가 산다.
+fn paneHasCodepoint(dl: renderer.DrawList, rect: chrome_draw.Rect, cp: u21) bool {
+    // DrawList 는 **셀 격자**라 픽셀 사각을 셀 범위로 옮긴다. 셀 폭·높이는 픽스처가 고정한 값이다.
+    //
+    // **시작 모서리에 한 셀을 눅인다.** pane 의 y 는 셀 배수가 아닐 수 있어(아래 띠는 높이 몫에서
+    // 나온다) 첫 행이 경계에 걸친다 — 눅이지 않으면 그 행의 글자를 「밖」으로 읽는다.
+    const cw: i64 = 8;
+    const chh: i64 = 16;
+    const col_lo = @divFloor(@as(i64, rect.x), cw);
+    const col_hi = @divFloor(@as(i64, rect.x) + @as(i64, @intCast(rect.w)), cw);
+    const row_lo = @divFloor(@as(i64, rect.y), chh) - 1;
+    const row_hi = @divFloor(@as(i64, rect.y) + @as(i64, @intCast(rect.h)), chh);
+    for (dl.cells) |c| {
+        if (c.codepoint != cp) continue;
+        const col: i64 = c.col;
+        const row: i64 = c.row;
+        if (col >= col_lo and col < col_hi and row >= row_lo and row < row_hi) return true;
+    }
+    return false;
+}
+
 test "IME5 후보창은 조합 글자 아래에 선다 — pane 구석이 아니라 (N3)" {
     // 편집기 Term은 코어가 sentinel이라 `imeCursorRect`의 터미널 갈래를 못 쓴다. 그대로 두면
     // **pane 좌상단**으로 떨어지는데, 한글은 후보창을 보며 고르는 입력이라 그 어긋남이 곧바로 걸린다.
@@ -8788,6 +8916,173 @@ test "IME7 이어 치는 한글: 조합 글자는 방금 확정한 글자 뒤에
     const na = col_na orelse return error.PreeditNotDrawn;
     // 조합 글자는 확정 글자 **뒤**에 서야 한다. 한글은 EAW wide라 두 칸을 차지한다.
     try testing.expectEqual(ga + 2, na);
+}
+
+test "MPN6 병합 Term 은 pane 넷을 그리고 «배치를 싣는다» (제품 경계)" {
+    // 배치를 안 실으면 히트테스트가 「Result 밖」을 못 가른다 — 그 규칙이 통째로 무판정이 된다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = fx.term;
+
+    // 세 판을 실은 병합 Term 으로 만든다(읽기는 S3a 가, 배선은 S3b-1 이 이미 잰다).
+    term.rt.editor_merge = .{
+        .stage_allocator = allocator,
+        .ready = true,
+        .stages = .{ .has_base = true, .has_ours = true, .has_theirs = true },
+        // **세 판의 글자가 서로 갈려야 한다.** 「어느 pane 에 무엇이」를 재려면 그 글자가 문서
+        // (`const a = 1;` …)에도, 다른 판에도 없어야 한다 — `o`·`h` 로 쟀다가 둘 다 `const` 에
+        // 있어서 판을 맞바꾼 변이가 살아남았다(적대적 1회차 L10).
+        .base = try allocator.dupe(u8, "ZZZ\n"),
+        .ours = try allocator.dupe(u8, "QQQ\n"),
+        .theirs = try allocator.dupe(u8, "WWW\n"),
+        .line_allocator = allocator,
+        .base_lines = try allocator.dupe([]const u8, &.{"ZZZ\n"}),
+        .ours_lines = try allocator.dupe([]const u8, &.{"QQQ\n"}),
+        .theirs_lines = try allocator.dupe([]const u8, &.{"WWW\n"}),
+    };
+    defer editor_merge_ops.clear(fx.session, term);
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    defer drawn.dl.deinit(allocator);
+
+    const lay = term.rt.editor_merge_layout orelse return error.MissingMergeLayout;
+    // 800px 폭이면 세 열이 선다(최소치 셋보다 넓다).
+    try testing.expect(lay.isThreeUp());
+    try testing.expect(lay.base != null);
+    // **세 판이 실제로 화면에 있다** — 배치만 맞고 글자가 없으면 빈 열 셋이다.
+    try testing.expect(drawnHasCodepoint(drawn.dl, 'Q')); // current(ours)
+    try testing.expect(drawnHasCodepoint(drawn.dl, 'W')); // incoming(theirs)
+    try testing.expect(drawnHasCodepoint(drawn.dl, 'Z')); // base
+    // **자리도 갈린다** — 글자만 보면 세 판을 맞바꿔도 셋 다 화면에 있다.
+    //
+    // 배치는 **창 절대**이고 그린 셀은 **pane 상대**다(컴포넌트가 창을 모른다) — 본문 사각 원점을
+    // 빼서 같은 축으로 옮긴다. 이 변환이 곧 제품이 반대 방향으로 하는 그 계산이다.
+    const body = editorBodyRect(fx.session, fx.leaf_rect, term);
+    try testing.expect(paneHasCodepoint(drawn.dl, unoffsetRect(lay.current.?, body), 'Q'));
+    try testing.expect(paneHasCodepoint(drawn.dl, unoffsetRect(lay.incoming.?, body), 'W'));
+    try testing.expect(paneHasCodepoint(drawn.dl, unoffsetRect(lay.base.?, body), 'Z'));
+    // **조상이 «빈 파일» 이어도 띠가 선다** — 길이로 가르면 그 충돌의 Base 가 사라진다.
+    allocator.free(term.rt.editor_merge.?.base_lines); // 갈아 끼우기 전에 놓는다
+    term.rt.editor_merge.?.base_lines = &.{};
+    // **바이트까지 비운다** — 줄 배열만 비우면 「길이로 가르는」 변이가 바이트를 보고 살아남는다
+    // (적대적 1회차 L9 실측). 빈 조상도 어엿한 조상이고, 그 판정은 `stages` 가 소유한다.
+    allocator.free(term.rt.editor_merge.?.base);
+    term.rt.editor_merge.?.base = &.{};
+    var empty_base = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    defer empty_base.dl.deinit(allocator);
+    try testing.expect(term.rt.editor_merge_layout.?.base != null);
+
+    // **Result 는 «이 Term 의 문서» 를 그 상태 그대로 그린다**(적대적 2회차 M7~M9 — 셋 다 무판정이었다).
+    //
+    // ⑴ **세로 위치**는 여기서 못 잰다 — 정직하게 적는다. 이 픽스처의 문서가 **세 줄**이라 어떤
+    //    pane 높이에서도 화면에 다 들어가고, 렌더 전에 도는 `clampScrollToGeometry` 가 위치를 0 으로
+    //    되돌린다(그래서 `first_line` 을 0 으로 박은 변이가 살아남는다 — 적대적 2회차 M9).
+    //    긴 문서를 여는 픽스처가 생기면 그때 이 자리에 단언이 선다.
+    //
+    //    **caret 도 같다**(M7): 이 층의 DrawList 는 셀 배열이고 `.bar` caret 은 quad 라 셀에 안
+    //    남는다. 단일 편집기는 그 축을 **골든**(`editor-caret-*`)이 든다 — 병합 pane 의 caret 은
+    //    S3b-3(입력이 pane 마다 갈리는 조각)에서 그 골든과 같은 방식으로 세운다.
+
+    // ⑵ **구문 색**: Result 에 색이 붙는다. 색을 안 넘기면 문서가 무채색으로 그려지는데, 세 판은
+    //    원래 무채색이라 그 차이를 다른 pane 에서는 못 잰다.
+    var colored = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    defer colored.dl.deinit(allocator);
+    // **글자 셀만 본다.** 처음에는 모든 셀의 색을 셌는데, gutter 의 **번호**가 이미 본문과 다른
+    // 색이라 구문색을 통째로 뺀 변이가 그대로 통과했다(적대적 2회차 M8 — 허수 판정자였다).
+    // 숫자를 빼면 남는 것은 본문 글자이고, 색이 없으면 그 글자들은 **한 가지 색**이다.
+    var letter_color: ?@TypeOf(colored.dl.cells[0].style.foreground) = null;
+    var letters_differ = false;
+    for (colored.dl.cells) |c| {
+        if (c.codepoint < 'a' or c.codepoint > 'z') continue; // 번호(숫자)·기호를 뺀다
+        if (letter_color) |prev| {
+            if (!std.meta.eql(prev, c.style.foreground)) {
+                letters_differ = true;
+                break;
+            }
+        } else letter_color = c.style.foreground;
+    }
+    // `const a = 1;` 은 keyword 와 식별자가 갈리므로 **두 색 이상**이어야 한다.
+    try testing.expect(letters_differ);
+
+    // **대조군: 병합이 아니면 배치가 지워진다.** 안 지우면 평범한 편집기에서 클릭이 거부된다.
+    editor_merge_ops.clear(fx.session, term);
+    var plain = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    defer plain.dl.deinit(allocator);
+    try testing.expect(term.rt.editor_merge_layout == null);
+}
+
+test "MPN7 Result «밖» 클릭은 아무 일도 안 한다 (제품 경계)" {
+    // 이 가드가 없으면 Base pane 을 눌렀을 때 **Result 문서의 caret 이 움직인다** — 같은 Term 의
+    // 히트 기하가 하나뿐이라 좌표가 그대로 지나간다(계약 §5 S3b-2).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = fx.term;
+    term.rt.editor_merge = .{
+        .stage_allocator = allocator,
+        .ready = true,
+        .stages = .{ .has_base = true, .has_ours = true, .has_theirs = true },
+        .base = try allocator.dupe(u8, "base\n"),
+        .ours = try allocator.dupe(u8, "ours\n"),
+        .theirs = try allocator.dupe(u8, "theirs\n"),
+        .line_allocator = allocator,
+        .base_lines = try allocator.dupe([]const u8, &.{"base\n"}),
+        .ours_lines = try allocator.dupe([]const u8, &.{"ours\n"}),
+        .theirs_lines = try allocator.dupe([]const u8, &.{"theirs\n"}),
+    };
+    defer editor_merge_ops.clear(fx.session, term);
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    defer drawn.dl.deinit(allocator);
+    const lay = term.rt.editor_merge_layout orelse return error.MissingMergeLayout;
+    const cur = lay.current orelse return error.MissingCurrentPane;
+    // **축을 못박는다**: 실린 배치는 «창 절대»여야 한다. pane 상대로 실으면 클릭 좌표와 축이 갈려
+    // 「Result 안」 판정이 우연히 겹치는 만큼만 맞는다(적대적 1회차 L11 이 그 자리였다).
+    const body = editorBodyRect(fx.session, fx.leaf_rect, term);
+    try testing.expect(lay.result.x >= @as(i32, @intCast(body.x)));
+    try testing.expect(cur.x >= @as(i32, @intCast(body.x)));
+
+    // 좌표는 **창 절대**다 — 배치도 절대로 실린다(축이 갈리면 이 판정자가 우연히 통과한다).
+    // **Result 안**: 글자가 잡힌다(대조군 — 없으면 「늘 null」로 갈려도 초록이다).
+    const inside_x: f64 = @floatFromInt(lay.result.x + @as(i32, @intCast(lay.result.w / 2)));
+    const inside_y: f64 = @floatFromInt(lay.result.y + 8);
+    try testing.expect(hitTestBody(term, inside_x, inside_y) != null);
+
+    // **Current pane 안**(= Result 밖): 아무 일도 안 한다.
+    const outside_x: f64 = @floatFromInt(cur.x + @as(i32, @intCast(cur.w / 2)));
+    try testing.expect(hitTestBody(term, outside_x, inside_y) == null);
+
+    // **Base 띠 안**도 같다.
+    const base = lay.base orelse return error.MissingBasePane;
+    const base_y: f64 = @floatFromInt(base.y + 8);
+    try testing.expect(hitTestBody(term, inside_x, base_y) == null);
+}
+
+test "MPN8 판이 아직 안 왔으면 «한 줄로 말한다» — 조용한 빈 화면을 남기지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = fx.term;
+    term.rt.editor_merge = .{ .request_id = 7 }; // 아직 안 왔다
+    defer editor_merge_ops.clear(fx.session, term);
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    defer drawn.dl.deinit(allocator);
+    // **배치는 안 선다** — pane 넷을 그리지 않았으므로 「Result 밖」 판정도 없다.
+    try testing.expect(term.rt.editor_merge_layout == null);
+    // 그리고 화면에 **무언가 글자가** 있다(빈 화면이 아니다).
+    var has_text = false;
+    for (drawn.dl.cells) |c| {
+        if (c.codepoint > ' ') {
+            has_text = true;
+            break;
+        }
+    }
+    try testing.expect(has_text);
 }
 
 const PaneFixture = struct {

@@ -2211,6 +2211,13 @@ const TermRuntime = struct {
     /// 술어가 제품 코드에만 80 곳이고 전부 `==` 비교라, 종류를 나누면 컴파일러가 **한 곳도** 안
     /// 알려 준다. 비교 뷰가 `editor_diff` 로 같은 자리에 선 것과 같은 모양이다.
     editor_merge: ?editor_merge_ops.State = null,
+    /// 병합 모드에서 **pane 넷이 지난 프레임에 놓인 자리**(pane 상대). 히트테스트가 이것을 읽어
+    /// 「Result 밖 클릭」을 가른다 — 없으면 Base pane 을 눌렀을 때 Result 문서의 caret 이 움직인다
+    /// (같은 Term 의 히트테스트가 통째로 하나이기 때문이다 — 계약 §5 S3b-2).
+    ///
+    /// **렌더가 싣는다**(`editor_hit_geom` 과 같은 자리·같은 이유): 배치를 아는 것은 렌더뿐이고,
+    /// 클릭은 렌더 **다음에** 온다.
+    editor_merge_layout: ?chrome.components.editor_view.merge_frame.Layout = null,
     /// 이 뷰의 랩 override. `null`이면 config(`editor.wrap`)를 따르고, 값이 있으면 그것이 이긴다.
     ///
     /// **뷰별로 두는 이유**: 랩은 "이 문서를 지금 어떻게 볼까"라 문서가 아니라 뷰의 상태다(VSCode의

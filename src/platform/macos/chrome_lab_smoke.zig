@@ -23,6 +23,18 @@ const renderer = maru.renderer;
 
 const artifact_dir = "zig-out/maru-macos-chrome-lab";
 const viewport = chrome.ui.layout.UiSize{ .width = 480, .height = 720 };
+
+/// 이 장면이 쓸 창 크기. **기본은 공통값이고, 넓혀야만 보이는 배치만 예외다.**
+///
+/// 3-way pane 넷(S3b-2)은 폭이 모자라면 **접히는 것이 규칙**이다(Result 만 남는다). 기본 480px 은
+/// 그 규칙이 접는 폭이라, 그대로 찍으면 **세 열 배치가 골든에 아예 안 들어온다** — 규칙을 캡처에
+/// 맞추는 대신 캡처를 넓힌다. 접히는 쪽은 `editor-merge-narrow` 가 기본 폭으로 따로 찍는다.
+fn viewportFor(id: lab.ScenarioId) chrome.ui.layout.UiSize {
+    return switch (id) {
+        .editor_merge_panes => .{ .width = 1200, .height = 720 },
+        else => viewport,
+    };
+}
 /// Lab 기본 셀 크기. 기존 시나리오·골든이 전부 이 값을 전제로 잡혀 있다.
 const cell_width_px: u32 = 8;
 const cell_height_px: u32 = 16;
@@ -99,6 +111,8 @@ fn labQuadLayer(id: lab.ScenarioId) u32 {
         .editor_diff_selection,
         .editor_diff,
         .editor_diff_scrolled,
+        .editor_merge_panes,
+        .editor_merge_narrow,
         => editor_ops.background_layer,
         else => chrome_draw_lowering.layers.bottom,
     };
@@ -356,7 +370,7 @@ pub fn main(init: std.process.Init) !void {
     const sidebar_header_px: u32 = 60; // 제품 사이드바 헤더(검색 줄 + 아이콘 줄)에 해당하는 자리
     const sidebar_scissor_top_px: u32 = if (scenario_id == .sidebar_status_strip) sidebar_header_px else 0;
     const sidebar_scissor_bottom_px: u32 = if (scenario_id == .sidebar_status_strip)
-        @as(u32, @intFromFloat(viewport.height)) - status_bar_height_px
+        @as(u32, @intFromFloat(viewportFor(scenario_id).height)) - status_bar_height_px
     else
         0;
     // strip 색은 **제품의 파생 규칙**을 따른다 — `config/theme.zig`의 "sidebar_background는 배경 +24
@@ -402,9 +416,10 @@ pub fn main(init: std.process.Init) !void {
 
     // **도크는 상태바 위에서 끝난다.** 제품에서 도크 높이는 창 높이에서 상태바를 뺀 값이고, Lab 이
     // 프레임 전체를 주면 그 경계가 그림에 아예 없어 "목록이 상태바를 덮는가"를 물을 수 없다.
+    const scene_viewport = viewportFor(scenario_id);
     const component_viewport = chrome.ui.layout.UiSize{
-        .width = viewport.width,
-        .height = viewport.height - @as(f32, @floatFromInt(status_bar_height_px)),
+        .width = scene_viewport.width,
+        .height = scene_viewport.height - @as(f32, @floatFromInt(status_bar_height_px)),
     };
     const frame = try lab.buildFrame(.{
         .id = scenario_id,
@@ -480,7 +495,7 @@ pub fn main(init: std.process.Init) !void {
         try gpu_quads.append(allocator, .{
             .x = 0,
             .y = 0,
-            .w = viewport.width,
+            .w = viewportFor(scenario_id).width,
             .h = @floatFromInt(tree_band_h),
             .corner_radii = .{ 0, 0, 0, 0 },
             .border_widths = .{ 0, 0, 0, 0 },
@@ -506,8 +521,8 @@ pub fn main(init: std.process.Init) !void {
         const bar_bg: u32 = 0xFF00_0000 | (lift(base.r, 40) << 16) | (lift(base.g, 40) << 8) | lift(base.b, 40);
         try gpu_quads.append(allocator, .{
             .x = 0,
-            .y = viewport.height - @as(f32, @floatFromInt(status_bar_height_px)),
-            .w = viewport.width,
+            .y = viewportFor(scenario_id).height - @as(f32, @floatFromInt(status_bar_height_px)),
+            .w = viewportFor(scenario_id).width,
             .h = @floatFromInt(status_bar_height_px),
             .corner_radii = .{ 0, 0, 0, 0 },
             .border_widths = .{ 0, 0, 0, 0 },
@@ -524,7 +539,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (scenario_id == .sidebar_status_strip) {
-        const floor_px = viewport.height - @as(f32, @floatFromInt(status_bar_height_px));
+        const floor_px = viewportFor(scenario_id).height - @as(f32, @floatFromInt(status_bar_height_px));
         const band_top = floor_px - 40.0;
         // 밴드 색은 strip보다 한 단계 더 밝게 — 배경·strip·밴드가 세 톤으로 갈려야 골든이 경계를 본다.
         const base = tokens.palette.get(.surface_bg);
@@ -598,8 +613,10 @@ pub fn main(init: std.process.Init) !void {
         if (!chrome_draw_lowering.isBelowText(q.layer)) quad_layer_ok = false;
     }
     const cell = cellSizeFor(scenario_id);
-    const cols: u16 = @intFromFloat(viewport.width / @as(f32, @floatFromInt(cell.w)));
-    const rows: u16 = @intFromFloat(viewport.height / @as(f32, @floatFromInt(cell.h)));
+    // **격자도 장면 뷰포트에서 파생한다** — 전역값을 쓰면 넓힌 장면의 오른쪽이 그림 밖으로 잘린다
+    // (세 열 배치가 480px 그림에 왼쪽 한 열만 남아 찍혔다 — 실측 2026-09-14).
+    const cols: u16 = @intFromFloat(viewportFor(scenario_id).width / @as(f32, @floatFromInt(cell.w)));
+    const rows: u16 = @intFromFloat(viewportFor(scenario_id).height / @as(f32, @floatFromInt(cell.h)));
     var lab_config: config.Config = .{};
     lab_config.font.family = font_variant.family();
     const appearance = try config.resolveAppearance(lab_config);
@@ -746,7 +763,7 @@ pub fn main(init: std.process.Init) !void {
         const rect = (switch (scenario_id) {
             .scm_rows, .scm_history, .scm_row_hover, .scm_conflict_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_small_font, .scm_blocker, .dock_over_status_bar => chrome.components.scm_dock.build.scrollTextViewport(frame.tree),
             .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome => chrome.components.file_tree.build.scrollTextViewport(frame.tree),
-            .empty, .loading, .retained_list, .font_specimen, .partial_scroll, .partial_group_scroll, .scrollbar, .sticky_at_rest, .sticky_pinned, .sticky_pushed, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .sort_toggle_hover, .sort_toggle_pressed, .sidebar_status_strip, .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .context_menu_checked, .context_menu_send, .context_menu_send_helper, .context_menu_unchecked, .editor_real_file, .editor_typescript, .editor_selection, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_find, .editor_diff_selection, .editor_diff, .editor_diff_scrolled => chrome.components.session_dock.build.scrollTextViewport(frame.tree),
+            .empty, .loading, .retained_list, .font_specimen, .partial_scroll, .partial_group_scroll, .scrollbar, .sticky_at_rest, .sticky_pinned, .sticky_pushed, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .sort_toggle_hover, .sort_toggle_pressed, .sidebar_status_strip, .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .context_menu_checked, .context_menu_send, .context_menu_send_helper, .context_menu_unchecked, .editor_real_file, .editor_typescript, .editor_selection, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_find, .editor_diff_selection, .editor_diff, .editor_diff_scrolled, .editor_merge_panes, .editor_merge_narrow => chrome.components.session_dock.build.scrollTextViewport(frame.tree),
         }) orelse break :blk null;
         break :blk .{
             .x = @intFromFloat(@max(rect.x, 0)),
@@ -804,8 +821,8 @@ pub fn main(init: std.process.Init) !void {
         .png_written = 0,
     };
     bridge.maru_macos_chrome_lab_smoke_render(
-        viewport.width,
-        viewport.height,
+        @intFromFloat(viewportFor(scenario_id).width),
+        @intFromFloat(viewportFor(scenario_id).height),
         ppm_path,
         png_path,
         // 격자는 아이콘 셀 목록의 격자다(뷰포트에서 파생). measured 프레임의 size는 placement
@@ -850,7 +867,10 @@ pub fn main(init: std.process.Init) !void {
     const valid_png = if (png_bytes) |bytes| bytes.len >= 8 and std.mem.eql(u8, bytes[0..8], "\x89PNG\r\n\x1a\n") else false;
     const native_ok = native.status == 0 and native.renderer_created != 0 and native.atlas_ready != 0 and
         native.draw_submitted != 0 and native.ppm_written != 0 and native.png_written != 0;
-    const pixel_ok = ppm.width == viewport.width and ppm.height == viewport.height and ppm.non_background_pixels > 0;
+    // **장면이 정한 크기와 같아야 한다** — 전역값으로 재면 넓힌 장면이 「크기가 다르다」로 실패한다.
+    const want_w: u32 = @intFromFloat(viewportFor(scenario_id).width);
+    const want_h: u32 = @intFromFloat(viewportFor(scenario_id).height);
+    const pixel_ok = ppm.width == want_w and ppm.height == want_h and ppm.non_background_pixels > 0;
     // "이 캡처에 텍스트가 있었나"는 **두 패스 합**이다. measured record가 라벨을, 아이콘 셀이 등록
     // SVG/PUA glyph를 대표한다 — 한쪽만 보면 아이콘만 있는 시나리오가 "텍스트 없음"으로 오인된다.
     const has_text = measured.records.len > 0 or metal_fixture.cells.len > 0;
@@ -995,6 +1015,8 @@ fn scenarioFromEnvValue(raw: []const u8) ?lab.ScenarioId {
     if (std.mem.eql(u8, raw, "editor-caret-underline")) return .editor_caret_underline;
     if (std.mem.eql(u8, raw, "editor-diff-selection")) return .editor_diff_selection;
     if (std.mem.eql(u8, raw, "editor-diff")) return .editor_diff;
+    if (std.mem.eql(u8, raw, "editor-merge-panes")) return .editor_merge_panes;
+    if (std.mem.eql(u8, raw, "editor-merge-narrow")) return .editor_merge_narrow;
     if (std.mem.eql(u8, raw, "editor-diff-scrolled")) return .editor_diff_scrolled;
     if (std.mem.eql(u8, raw, "scm-rows")) return .scm_rows;
     if (std.mem.eql(u8, raw, "scm-history")) return .scm_history;
@@ -1077,6 +1099,8 @@ fn artifactName(id: lab.ScenarioId) []const u8 {
         .editor_caret_underline => "editor-caret-underline",
         .editor_diff_selection => "editor-diff-selection",
         .editor_diff => "editor-diff",
+        .editor_merge_panes => "editor-merge-panes",
+        .editor_merge_narrow => "editor-merge-narrow",
         .editor_diff_scrolled => "editor-diff-scrolled",
     };
 }

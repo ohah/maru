@@ -15,6 +15,7 @@ const std = @import("std");
 const maru = @import("maru");
 
 const conflict = maru.session.editor.conflict;
+const diff_state = maru.session.editor.diff_state;
 const dock_panel = maru.session.dock_panel;
 const git_command = maru.session.git_command;
 const app_session_mod = @import("../app_session.zig");
@@ -55,6 +56,16 @@ pub const State = struct {
     ready: bool = false,
     /// 읽지 못했다(충돌이 아니거나 git 이 없거나 요청을 못 걸었다).
     failed: bool = false,
+    /// 세 판을 **줄로 쪼갠 것**(화면이 그리는 축). 바이트를 빌리므로 그 바이트보다 오래 살 수
+    /// 없다 — `freeStages` 가 둘을 **한 단위로** 놓는다. 배열 자체는 세션 allocator 것이다.
+    ///
+    /// **여기서 한 번만 쪼갠다.** 매 프레임 쪼개면 큰 파일에서 프레임이 죽고(비교 뷰가 같은 이유로
+    /// 같은 자리에 든다), 무엇보다 그 결과를 빌리는 행들이 프레임마다 다른 메모리를 가리킨다.
+    base_lines: []const []const u8 = &.{},
+    ours_lines: []const []const u8 = &.{},
+    theirs_lines: []const []const u8 = &.{},
+    /// 위 세 배열을 잡은 allocator(= 세션 것). 바이트 쪽과 **주인이 다르다**.
+    line_allocator: ?std.mem.Allocator = null,
     /// 세 판 바이트를 **누구의 것으로 놓을까**. 워커에게서 넘겨받으므로 제품에서는 늘 워커 것이다.
     ///
     /// **상태가 스스로 기억하는 이유**: 자리마다 손으로 적으면 한 곳만 틀려도 heap 이 깨지고, 더
@@ -161,6 +172,12 @@ pub fn deliver(self: *AppSession, term: *Term, result: *git_backend_mod.DiffResu
     state.theirs = result.modified;
     state.stages = result.stages;
     state.truncated = result.truncated;
+    // **줄로 쪼개는 것도 도착의 일부다** — 화면이 그릴 축이 없으면 「왔다」가 아니다. 못 쪼개면
+    // 실패로 남긴다(반쪽으로 준비됐다고 하면 빈 pane 셋이 뜬다).
+    splitAll(self, state) catch {
+        state.failed = true;
+        return true;
+    };
     state.ready = true;
     // **실패 표시를 지운다.** 안 지우면 한 번 실패한 Term 은 판이 와도 「못 읽었다」를 띄운 채 남는다.
     state.failed = false;
@@ -181,7 +198,30 @@ pub fn clear(self: *AppSession, term: *Term) void {
     term.rt.editor_merge = null;
 }
 
+/// 세 판을 **줄로** 쪼갠다(화면 축). 바이트를 빌리므로 바이트와 한 단위로 산다.
+fn splitAll(self: *AppSession, state: *State) !void {
+    freeLines(state);
+    state.line_allocator = self.allocator;
+    state.base_lines = try diff_state.splitLines(self.allocator, state.base);
+    state.ours_lines = try diff_state.splitLines(self.allocator, state.ours);
+    state.theirs_lines = try diff_state.splitLines(self.allocator, state.theirs);
+}
+
+fn freeLines(state: *State) void {
+    const a = state.line_allocator orelse return;
+    if (state.base_lines.len > 0) a.free(state.base_lines);
+    if (state.ours_lines.len > 0) a.free(state.ours_lines);
+    if (state.theirs_lines.len > 0) a.free(state.theirs_lines);
+    state.base_lines = &.{};
+    state.ours_lines = &.{};
+    state.theirs_lines = &.{};
+    state.line_allocator = null;
+}
+
 fn freeStages(state: *State) void {
+    // **줄이 바이트를 빌린다** — 바이트를 놓기 전에 줄부터 놓는다. 순서를 뒤집으면 놓은 바이트를
+    // 가리키는 배열이 잠깐 남고, 그 사이에 그리는 프레임이 있으면 해제된 메모리를 읽는다.
+    freeLines(state);
     if (state.base.len > 0) state.stage_allocator.free(state.base);
     if (state.ours.len > 0) state.stage_allocator.free(state.ours);
     if (state.theirs.len > 0) state.stage_allocator.free(state.theirs);

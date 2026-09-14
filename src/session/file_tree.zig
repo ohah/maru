@@ -903,6 +903,22 @@ pub const Tree = struct {
         try self.enqueueScan(path);
     }
 
+    /// 스캔 대기 줄의 길이. 상한(`scan_queue_capacity`)에 닿았는지를 **판정자가** 볼 수 있어야 한다 —
+    /// 그 자리에서 `enqueueScan` 이 세부 요청을 버리고 root 만 다시 예약하는 갈래로 접히기 때문이다.
+    pub fn scanRequestCount(self: *const Tree) usize {
+        return self.scan_requests.items.len;
+    }
+
+    /// 그 경로가 **지금 스캔 대기 줄에 있나.**
+    ///
+    /// ⚠️ **`requeueScan` 의 성공 반환은 「줄에 들어갔다」를 뜻하지 않는다** — 줄이 꽉 차면 세부 요청을
+    /// 전부 버리고 root 만 다시 예약한 뒤 **성공으로** 돌아온다(위 overflow recovery). 그 경로가 꼭
+    /// 다시 스캔돼야 하는 호출자는 이 값으로 확인하고, 아니면 자기 줄에 남겨 둬야 한다.
+    pub fn hasScanRequest(self: *const Tree, path: []const u8) bool {
+        for (self.scan_requests.items) |queued| if (std.mem.eql(u8, queued, path)) return true;
+        return false;
+    }
+
     /// 반환 slice 소유권은 호출자에게 이동한다. L4는 background scan 작업에 복사 없이 넘기고 완료 뒤 free한다.
     pub fn takeScanRequest(self: *Tree) ?[]u8 {
         if (self.scan_requests.items.len == 0) return null;

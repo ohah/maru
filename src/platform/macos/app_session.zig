@@ -71236,6 +71236,69 @@ test "자리가 차서 거절된 흐림 질의는 잊히지 않는다" {
     try std.testing.expectEqualStrings(sub, requeued);
 }
 
+test "다시 걸지 못한 디렉터리는 «목록에 남는다» — 스캔 줄이 꽉 차도" {
+    // **적대적 검증 15 회차(2026-09-14).** 14 회차가 「거절된 질의를 잊지 않는다」를 세웠는데, 그
+    // 재시도 자체가 **같은 모양으로 다시 졌다**: 목록에서 **먼저 빼고** 스캔을 걸었기 때문에, 거는 데
+    // 실패하면 그 디렉터리가 또 사라졌다.
+    //
+    // 그리고 실패는 오류로만 오지 않는다 — `requeueScan` 은 스캔 줄이 꽉 차면 **세부 요청을 전부 버리고
+    // root 만 다시 예약한 뒤 «성공»으로 돌아온다.** 그 성공을 「들어갔다」로 읽으면 디렉터리는 안
+    // 들어갔는데 목록에서는 빠진다. **가장 조용한 형태의 유실**이다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const repo_len = tmp.dir.realPath(io, &repo_buf) catch return error.SkipZigTest;
+    const repo = repo_buf[0..repo_len];
+
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    session.git_backend = try git_backend_mod.Backend.init(session.io);
+
+    try session.file_tree.replaceExplicitRoots(&.{repo});
+    var sub_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const sub = try std.fmt.bufPrint(&sub_buf, "{s}/sub", .{repo});
+
+    // 재시도 목록에 하나 올려 둔다(거절됐던 디렉터리의 모양).
+    try session.git_ignore_retry_dirs.append(allocator, try allocator.dupe(u8, sub));
+
+    // **스캔 줄을 상한«까지만» 채운다.** 한 칸이라도 더 넣으면 줄이 스스로 접혀(overflow recovery)
+    // 다시 비므로, 「꽉 찬 줄」은 정확히 이 길이에서만 성립한다 — 첫 판이 그냥 상한만큼 넣었다가
+    // 도중에 접혀 **전제가 무너진 채** 초록을 볼 뻔했다.
+    var i: usize = 0;
+    while (session.file_tree.scanRequestCount() < file_tree.scan_queue_capacity) : (i += 1) {
+        var one: [64]u8 = undefined;
+        const p = try std.fmt.bufPrint(&one, "/filler/{d}", .{i});
+        try session.file_tree.requeueScan(p);
+        if (i > file_tree.scan_queue_capacity * 4) return error.ScanQueueNeverFilled;
+    }
+    try std.testing.expectEqual(file_tree.scan_queue_capacity, session.file_tree.scanRequestCount());
+    try std.testing.expect(!session.file_tree.hasScanRequest(sub)); // 전제: 아직 줄에 없다
+
+    git_ops.retryPendingIgnore(session);
+
+    // **옛 코드는 여기서 목록이 비었다** — 걸지도 못했는데 잊었다.
+    try std.testing.expectEqual(@as(usize, 1), session.git_ignore_retry_dirs.items.len);
+    try std.testing.expectEqualStrings(sub, session.git_ignore_retry_dirs.items[0]);
+
+    // 줄이 비면 그때는 들어간다 — 「영영 안 건다」가 아니라 「될 때까지 들고 있다」임을 센다.
+    while (session.file_tree.takeScanRequest()) |queued| allocator.free(queued);
+    git_ops.retryPendingIgnore(session);
+    try std.testing.expectEqual(@as(usize, 0), session.git_ignore_retry_dirs.items.len);
+    try std.testing.expect(session.file_tree.hasScanRequest(sub));
+
+    // **탐색기가 다른 곳을 보게 되면 버린다** — 화면에 없는 경로를 영원히 들고 있지 않는다.
+    while (session.file_tree.takeScanRequest()) |queued| allocator.free(queued);
+    try session.git_ignore_retry_dirs.append(allocator, try allocator.dupe(u8, "/somewhere/else/sub"));
+    git_ops.retryPendingIgnore(session);
+    try std.testing.expectEqual(@as(usize, 0), session.git_ignore_retry_dirs.items.len);
+    try std.testing.expect(!session.file_tree.hasScanRequest("/somewhere/else/sub"));
+}
+
 test "앞 디렉터리의 답이 뒤 디렉터리의 흐림을 지우지 않는다" {
     // **적대적 검증 10 회차(2026-09-14).** 「답이 자기 질문의 틀을 들고 온다」를 `repo` 에만 적용하고
     // **물어본 목록**에는 안 했다. 그 목록은 세션 버퍼(`git_ignore_query_paths`)인데, 디렉터리를 읽을

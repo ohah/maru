@@ -15038,6 +15038,38 @@ pub const AppSession = struct {
         marker_preview_ops.appendGpuImage(open, self.allocator, place, images, uploads, pixels, live_ids);
     }
 
+    /// 열린 프리뷰의 **테두리와 실패 안내**를 chrome ops에 싣는다. 픽셀은 `gpu_images`가 따로 싣는다
+    /// (갤러리 §5.4 분업). 문구는 여기서 i18n에서 고른다 — 컴포넌트는 `ui.language`를 모른다.
+    pub fn collectMarkerPreviewDraws(
+        self: *AppSession,
+        arena: std.mem.Allocator,
+        out: *std.ArrayList(chrome.draw.ChromeDraw),
+    ) !void {
+        const open = self.marker_preview_open orelse return;
+        const term = pane_ops.activePane(self).activeTerm();
+        if (term.surface.id != open.surface_id) return;
+        const anchor_rect = self.markerAnchorRect(term, open) orelse return;
+        const p = chrome.props.ChromeProps{ .metrics = self.buildCellMetrics() };
+        // 아직 못 푼 동안에도 **자리는 잡아 둔다** — 클릭했는데 아무것도 안 뜨면 「먹혔나」로 읽힌다.
+        // 크기를 모르면 한 줄짜리 안내 상자로 둔다.
+        const w: u32 = if (open.width > 0) open.width else 24 * @max(p.metrics.cell_width_px, 1);
+        const h: u32 = if (open.height > 0) open.height else @max(p.metrics.cell_height_px, 1);
+        const place = chrome.components.image_preview.place(anchor_rect, w, h, p) orelse return;
+        const notice: ?[]const u8 = if (open.failed)
+            maru.i18n.t(.app_marker_preview_undecodable)
+        else if (open.pixels.len == 0)
+            "" // 디코드 중 — 빈 상자만(글자를 깜빡이면 더 산만하다)
+        else
+            null;
+        var ops: std.ArrayList(chrome.draw.Op) = .empty;
+        const tk = self.buildChromeTokens();
+        try chrome.components.image_preview.view(place, notice, p, &tk, arena, &ops);
+        if (ops.items.len > 0) try out.append(arena, .{
+            .layer = chrome.components.image_preview.layer,
+            .ops = ops.items,
+        });
+    }
+
     /// 마커 span의 화면 사각형(px) — 셀 → px 변환은 여기서 한다(배치 모듈은 px만 안다).
     fn markerAnchorRect(self: *AppSession, term: *Term, open: marker_preview_ops.Open) ?chrome.draw.Rect {
         // 활성 pane 본문 rect — 프리뷰는 활성 pane에서만 그린다(호출자가 surface_id를 이미 확인했다).
@@ -22819,6 +22851,8 @@ pub const AppSession = struct {
         if (self.chrome_host.context_menu.open) {
             try self.chrome_host.collectContextMenuDraws(settings_ops.contextMenuItems(self), props, &tokens, arena, &draws); // 항목 라벨 주입(platform 소유, 동적)
         }
+        // 마커 이미지 프리뷰의 테두리·안내(픽셀은 gpu_images가 따로 싣는다 — 갤러리 §5.4 분업).
+        try self.collectMarkerPreviewDraws(arena, &draws);
         // **리셋은 설정보다 앞이다.** 처음에 세팅 리셋 옆에 뒀다가 방금 넣은 값을 그 자리에서 지워
         // 막대가 화면에서 사라졌다(실측) — 세팅은 설정이 리셋 뒤라 살아남았고 알림만 순서가 반대였다.
         self.notif_scroll_view = null; // 알림이 닫히면 막대도 없다 — 남기면 stale 막대가 뜬다

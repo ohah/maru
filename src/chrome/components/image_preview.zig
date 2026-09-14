@@ -11,6 +11,7 @@
 const std = @import("std");
 const draw = @import("../draw.zig");
 const props = @import("../props.zig");
+const popup_box = @import("popup_box.zig"); // 앵커 팝업 기하 공유 프리미티브(§5.4)
 
 /// 프리뷰가 차지할 자리. `image`는 그림이 들어갈 안쪽 사각형(테두리 제외)이다.
 pub const Placement = struct {
@@ -51,9 +52,6 @@ pub fn place(
 
     const chrome_w = 2 * (border_px + padding_px);
     const chrome_h = 2 * (border_px + padding_px);
-    const edge_gap: u32 = @max(m.cell_width_px, 1);
-    const edge_gap_y: u32 = @max(m.cell_height_px, 1);
-
     // 쓸 수 있는 최대 그림 크기 — workspace의 절반에서 테두리를 뺀다. 절반 규칙(§2.3)은 **pane이 아니라
     // workspace 기준**이라, 좁은 pane에 있는 마커도 읽을 수 있는 프리뷰를 얻는다.
     const avail_w = (ws.w / 2) -| chrome_w;
@@ -71,37 +69,22 @@ pub fn place(
     const box_w = draw_w + chrome_w;
     const box_h = draw_h + chrome_h;
 
-    const left_bound: i32 = @intCast(ws.x + edge_gap);
-    const right_bound: i32 = @as(i32, @intCast(ws.x + ws.w)) - @as(i32, @intCast(edge_gap));
-    const top_bound: i32 = @intCast(ws.y + edge_gap_y);
-    const bottom_bound: i32 = @as(i32, @intCast(ws.y + ws.h)) - @as(i32, @intCast(edge_gap_y));
-
-    // 세로: 마커 **아래**가 기본, 안 들어가면 위로 뒤집는다. 둘 다 안 되면 아래에 두고 clamp한다 —
-    // 화면이 상자보다 작을 때 위로 뒤집으면 마커까지 덮어 «무엇을 눌렀는지»가 사라진다.
-    var flipped = false;
-    var y: i32 = anchor.y + @as(i32, @intCast(anchor.h + anchor_gap_px));
-    if (y + @as(i32, @intCast(box_h)) > bottom_bound) {
-        const up = anchor.y - @as(i32, @intCast(box_h + anchor_gap_px));
-        if (up >= top_bound) {
-            y = up;
-            flipped = true;
-        } else {
-            y = bottom_bound - @as(i32, @intCast(box_h));
-        }
-    }
-    if (y < top_bound) y = top_bound;
-
-    // 가로: 마커 왼쪽에 맞추되 workspace 안으로 민다(context_menu와 같은 규율 — 가장자리에 딱 붙이지 않는다).
-    var x: i32 = anchor.x;
-    if (x + @as(i32, @intCast(box_w)) > right_bound) x = right_bound - @as(i32, @intCast(box_w));
-    if (x < left_bound) x = left_bound;
+    // 자리는 **공유 프리미티브**가 정한다(`popup_box`) — 우클릭 메뉴와 같은 clamp 를 쓴다(§5.4).
+    // 세로는 `below_flip_up`: 입력창이 화면 하단이라 **위로 뒤집히는 쪽이 실전의 기본 경로**다.
+    const placed = popup_box.place(box_w, box_h, .{
+        .anchor = anchor,
+        .vertical = .below_flip_up,
+        .gap_px = anchor_gap_px,
+    }, p) orelse return null;
+    const x = placed.rect.x;
+    const y = placed.rect.y;
 
     const inner: i32 = @intCast(border_px + padding_px);
     return .{
-        .box = .{ .x = x, .y = y, .w = box_w, .h = box_h },
+        .box = placed.rect,
         .image = .{ .x = x + inner, .y = y + inner, .w = draw_w, .h = draw_h },
         .scale = scale,
-        .flipped_up = flipped,
+        .flipped_up = placed.flipped_up,
     };
 }
 

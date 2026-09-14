@@ -45,6 +45,7 @@ pub const components = struct {
     pub const text_field = @import("chrome/components/text_field.zig");
     pub const text_area = @import("chrome/components/text_area.zig"); // 멀티라인 세로 축(커밋 메시지 상자 — text-field-editor.md §12) // 주소창 omnibox 인라인 편집(caret·선택·마우스) — docs/text-field-editor.md
     pub const modal_box = @import("chrome/components/modal_box.zig"); // notice·confirm 공유 박스 레이아웃/렌더(컴포넌트 아님)
+    pub const popup_box = @import("chrome/components/popup_box.zig"); // **앵커에 붙는** 팝업의 공유 기하(컴포넌트 아님) — modal_box 의 앵커판
     pub const notice = @import("chrome/components/notice.zig");
     pub const confirm = @import("chrome/components/confirm.zig"); // 예/아니오 확인 모달(닫기 전 실행 중 명령 확인)
     pub const find = @import("chrome/components/find.zig");

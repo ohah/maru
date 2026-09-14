@@ -1155,7 +1155,12 @@ pub const Client = struct {
                 self.pending_upgrade = accepted.attempt_id;
                 self.close_after_flush = .upgrade_completed;
             },
-            .close => |reason| self.beginClose(switch (reason) {
+            // 상위(`server.Connection`)가 판정한 닫기를 옮긴다. **여기서 이름을 짓지 않는다** —
+            // 사유가 같은 자리가 `server.zig` 안에만 서른이라, 옮기는 쪽이 붙일 수 있는 이름은
+            // 전부 `dispatch` 하나뿐이다. 2026-09-14 에 `site=-` 를 `why_ra` 로 풀었더니 정확히
+            // 그 하나(`Client.dispatch + 7488`)가 나왔고, 거기서 더 못 좁혔다. 자리 이름은
+            // **판정한 쪽**이 실어 보내고 이 줄은 그대로 통과시킨다.
+            .close => |close| self.beginCloseAtErr(close.site, close.err, switch (close.reason) {
                 .protocol_error => .protocol_error,
                 .resource_exhausted => .resource_exhausted,
                 .internal_error => .internal_error,

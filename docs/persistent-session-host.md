@@ -6256,7 +6256,10 @@ orphan recovery entry(`Recovered Sessions`)의 primary-only 표시와 실제 row
   [workspace-restore.md](workspace-restore.md) "checkpoint 보호").
 
 구현 계약은 `server.Action.close`가 원인을 payload로 운반하고 socket adapter가 이를 손실 없이
-`connection_turn.CloseReason`으로 옮기는 것이다. peer frame 위반은 `protocol_error`, host의 bounded resource 거부는
+`connection_turn.CloseReason`으로 옮기는 것이다. **payload는 사유만이 아니라 «어느 자리가 닫기로
+판정했는지»(`Close.site`)와 그 판정을 만든 오류 이름(`Close.err`)까지 함께 운반한다** — 사유 하나로는
+못 좁히기 때문이다(`server.zig` 안에서만 `protocol_error` 16 자리, `internal_error` 13 자리가 같은 값으로
+나온다). `Close.site`에는 기본값이 없어, 새로 생기는 닫기가 이름 없이 나가면 컴파일되지 않는다. peer frame 위반은 `protocol_error`, host의 bounded resource 거부는
 `resource_exhausted`, runtime/producer 불변식 위반은 `internal_error`다. `peer_requested`는 실제 peer close 요청을
 프로토콜에 도입하기 전까지 이 경로에서 만들지 않는다. initial attach snapshot cap 초과는 connection close가 아니라
 그 request의 `payload_too_large` 응답이며, attach rollback 뒤 기존 sibling subscription과 ready state가 그대로 남아야 한다.

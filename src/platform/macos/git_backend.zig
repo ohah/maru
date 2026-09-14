@@ -817,18 +817,24 @@ pub const Backend = struct {
         job.git_exe = state.allocator.dupe(u8, git_exe) catch return self.releaseIgnoreJob(job);
         job.repo = state.allocator.dupe(u8, repo) catch return self.releaseIgnoreJob(job);
         // 경로는 호출자 문자열 수명에 매이지 않게 복사한다(다른 job 필드와 같은 규율).
+        //
+        // ⚠️ **부분 복사를 남기지 않는다.** 예전에는 중간에 실패하면 `owned[0..filled]` 를 실었는데,
+        // 그 슬라이스는 **할당한 것과 길이가 다르다** — 뒤에서 `free` 하는 자리들(`releaseIgnoreJob`·
+        // `IgnoreResult.deinit`)이 배열 크기를 슬라이스 길이로 읽으므로 **엉뚱한 크기로 반납**한다.
+        // 하나라도 못 담으면 통째로 물리고 이 tick 은 안 묻는다 — 다음 스캔이 다시 묻는다.
         const owned = state.allocator.alloc([]u8, @min(paths.len, git_command.check_ignore_batch)) catch return self.releaseIgnoreJob(job);
         var filled: usize = 0;
         for (paths[0..owned.len]) |path| {
             owned[filled] = state.allocator.dupe(u8, path) catch break;
             filled += 1;
         }
-        job.ignore_paths = owned[0..filled];
-        if (filled == 0) {
-            state.allocator.free(owned);
+        if (filled < owned.len) {
+            for (owned[0..filled]) |p| state.allocator.free(p);
+            state.allocator.free(owned); // **할당한 그 슬라이스 그대로** 반납한다
             job.ignore_paths = &.{};
             return self.releaseIgnoreJob(job);
         }
+        job.ignore_paths = owned;
         const thread = std.Thread.spawn(.{}, ignoreWorker, .{job}) catch return self.releaseIgnoreJob(job);
         thread.detach();
         return true;
@@ -4008,6 +4014,72 @@ test "원격 쓰기: 원격 라우팅이 떨어져도 상대경로 git 을 실�
     defer allocator.free(out.stderr_bytes);
     // 소켓이 없으니 ssh 가 **자기 실패**로 끝난다 — git 이 한 말이 아니다(5회차와 같은 축).
     try std.testing.expectEqual(@as(c_int, 255), out.exit_code);
+}
+
+test "check-ignore 답은 «물어본 목록»을 통째로 들고 온다 — 실제 백엔드로" {
+    // **적대적 검증 11 회차(2026-09-14).** 10 회차가 `IgnoreResult.asked` 를 더하면서 소유권이
+    // job → result 로 **넘어가는** 길이 생겼다. 그 길을 앱 층 판정자(주입)로만 덮어 두면, 실제
+    // worker 가 무엇을 싣는지는 아무도 안 본다.
+    //
+    // 여기서 무는 것 셋:
+    //   ⑴ 물어본 **전부**가 답에 실린다(부분이면 안 물어본 행의 표시가 안 지워진다).
+    //   ⑵ 순서·내용이 그대로다.
+    //   ⑶ **소유권이 진짜 넘어왔다** — job 이 이미 죽은 뒤에 읽어도 살아 있는 바이트다.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const repo_len = tmp.dir.realPath(io, &repo_buf) catch return error.SkipZigTest;
+    const repo = repo_buf[0..repo_len];
+
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const git_exe = locate(&exe_buf) orelse return error.SkipZigTest;
+    {
+        const out = runArgvWithEnv(allocator, &.{ git_exe, "-C", repo, "init", "-q" }, null, false, null, false) catch return error.SkipZigTest;
+        allocator.free(out.bytes);
+    }
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const ignore_path = try std.fmt.bufPrint(&path_buf, "{s}/.gitignore", .{repo});
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = ignore_path, .data = "*.tmp\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.tmp", .data = "" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "keep.zig", .data = "" });
+
+    var backend = try Backend.init(io);
+    defer backend.deinit();
+
+    // **호출자 버퍼는 곧 사라진다** — 제품에서도 그렇다(`git_ignore_query_buf` 는 매 스캔 비워진다).
+    // 답이 그 메모리를 가리키고 있으면 여기서 드러난다.
+    var scratch: [64]u8 = undefined;
+    @memcpy(scratch[0..5], "a.tmp");
+    @memcpy(scratch[5..13], "keep.zig");
+    const asked_in = [_][]const u8{ scratch[0..5], scratch[5..13] };
+    try std.testing.expect(backend.submitCheckIgnore(git_exe, repo, &asked_in, 7));
+    @memset(&scratch, 0xAA); // 호출자 버퍼를 뭉갠다
+
+    // **안 오면 실패다 — 건너뛰지 않는다.** 첫 판이 `SkipZigTest` 였는데, 그러면 이 판정자는 조용히
+    // 공허해진다(실측: 초록인데 skip 수만 하나 늘었다). 10 초는 `waitForDiff` 와 같은 선이다.
+    var taken: ?IgnoreResult = null;
+    var spins: usize = 0;
+    while (spins < 1000) : (spins += 1) {
+        taken = backend.takeIgnoreResult();
+        if (taken != null) break;
+        var ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+        _ = std.c.nanosleep(&ts, null);
+    }
+    var res = taken orelse return error.IgnoreReadNeverCompleted;
+    defer res.deinit(worker_allocator);
+
+    try std.testing.expect(res.ok);
+    try std.testing.expectEqual(@as(u64, 7), res.request_id);
+    // ⑴⑵ 물어본 전부가, 순서 그대로.
+    try std.testing.expectEqual(@as(usize, 2), res.asked.len);
+    try std.testing.expectEqualStrings("a.tmp", res.asked[0]);
+    try std.testing.expectEqualStrings("keep.zig", res.asked[1]);
+    // ⑶ 답 본문은 무시된 것만.
+    try std.testing.expectEqualStrings("a.tmp\x00", res.text);
 }
 
 test "runOn 은 check-ignore 를 실어 나르지 않는다 — 빈 stdin 은 «틀린 성공»이다" {

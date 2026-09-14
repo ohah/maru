@@ -248,8 +248,12 @@ pub const ScenarioId = enum {
     context_menu_bottom_right,
     /// **설정 드롭다운이 펼쳐진 모습.** 이 컴포넌트에는 Lab 시나리오가 **하나도 없었다** — 같은
     /// `popup_box.place` 를 쓰면서도 세로 정책이 `context_menu` 와 **다른데**(아래 참조) 그 차이를
-    /// 보는 그림이 없었다. 여기서 재는 것은 「목록이 control 아래에 서는가」와 「상자가 control 보다
-    /// 좁아지지 않는가」(`@max(box_w, anchor.w)`)다.
+    /// 보는 그림이 없었다. 여기서 재는 것은 「목록이 control 아래에 차례로 서는가」다.
+    ///
+    /// ⚠️ **상자 폭은 못 본다.** Lab 은 `.fill` 을 안 내려 행 배경이 안 그려지고, 폭은 배경으로만
+    /// 보인다(적대 2회차에서 `@max(box_w, anchor.w)` 를 지워도 골든이 통과하는 것을 확인했다).
+    /// control 을 목록보다 넓게 잡아 두는 것은 그 계약을 **재려는 것이 아니라** 앵커에 두께를 주어
+    /// 아래 `below_clamp` 시나리오와 같은 조건을 쓰기 위해서다.
     dropdown_open,
     /// 같은 드롭다운을 **창 아래쪽**에서 펼친 것. `below_clamp` 의 본체다 — 아래 공간이 모자라면
     /// **위로 뒤집지 않고 당긴다.** 뒤집으면 목록이 control 위의 다른 행을 덮어 「저 행의 목록인가」로
@@ -1529,8 +1533,8 @@ fn buildDropdownFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers:
     };
 
     // control(앵커)은 **두께가 있다** — 그것이 `below_clamp` 와 `at_anchor` 를 가르는 조건이다
-    // (점 앵커에서는 둘이 같다 · `popup_box` A44). 폭을 목록보다 **넓게** 잡아 「상자가 control 보다
-    // 좁아지지 않는가」(`@max(box_w, anchor.w)`)도 같은 그림에 든다.
+    // (점 앵커에서는 둘이 같다 · `popup_box` A44). 폭을 목록보다 넓게 잡는 것은 제품의 축소 control
+    // 을 닮게 하기 위해서다 — **폭 계약을 재는 것이 아니다**(위 `ScenarioId` 주석의 ⚠️).
     const ctrl_w: u32 = cw * 18;
     const anchor_y: i32 = if (scenario.id == .dropdown_bottom_clamp)
         // 아래 공간이 목록 높이에 **모자라도록** 둔다 — 그래야 clamp 가 실제로 걸린다. 한 줄만
@@ -1546,7 +1550,13 @@ fn buildDropdownFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers:
     };
 
     var state: chrome.components.dropdown.State = .{};
-    state.show(items.len, 1); // 현재값 = 둘째 항목(첫 줄이면 기본값과 구별이 안 된다)
+    // 현재값 = 둘째 항목(첫 줄이면 기본값과 구별이 안 된다). 이 값은 **control 라벨**로 그림에 든다.
+    //
+    // ⚠️ **선택 강조 자체는 이 캡처가 답하지 못한다**(적대 7회차 실측). 강조는 `.fill` op 인데 Lab 의
+    // lowering 은 `.quad` 만 내린다 — control 라벨을 고정한 채 `selected` 만 옮기는 뮤테이션을 넣으면
+    // 골든이 **그대로 통과한다.** 처음엔 `selected` 를 통째로 바꿔 재고 「잡는다」고 읽을 뻔했는데,
+    // 그때 잡힌 것은 강조가 아니라 **라벨 글자**였다. 강조는 컴포넌트 판정자가 지킨다.
+    state.show(items.len, 1);
 
     const p: chrome.props.ChromeProps = .{ .metrics = .{
         .cell_width_px = cw,

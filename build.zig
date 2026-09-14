@@ -7949,6 +7949,30 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "maru", .module = maru_mod }},
         }),
     });
+    const session_host_cross_uid_step = b.step(
+        "test-session-host-cross-uid-macos",
+        "Verify the kernel-reported peer UID gate with an actual root client process",
+    );
+    if (macos_host_tests) {
+        const session_host_cross_uid_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"socket server: kernel credentials reject an actual root peer before fd admission"},
+        });
+        const run_session_host_cross_uid_tests = b.addSystemCommand(&.{
+            "/usr/bin/env",
+            "MARU_SESSION_HOST_REAL_CROSS_UID=1",
+        });
+        run_session_host_cross_uid_tests.addArtifactArg(session_host_cross_uid_tests);
+        run_session_host_cross_uid_tests.expectExitCode(0);
+        run_session_host_cross_uid_tests.setCwd(b.path("."));
+        session_host_cross_uid_step.dependOn(&run_session_host_cross_uid_tests.step);
+    }
     // `/usr/bin/env`가 build cache의 실제 `maru` artifact 경로를 test process에만 주입하고 test binary를 exec한다.
     // install step을 거치지 않으므로 `zig build test* --prefix ...`가 사용자 설치 경로를 쓰거나 덮어쓰지 않는다.
     const run_session_host_tests = b.addSystemCommand(&.{"/usr/bin/env"});

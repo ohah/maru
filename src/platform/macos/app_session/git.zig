@@ -1322,6 +1322,13 @@ fn rememberIgnoreRetry(self: *AppSession, dir_path: []const u8) void {
 /// 한 tick 에 하나씩 — 한꺼번에 걸면 그중 하나만 통과하고 나머지가 또 줄을 선다.
 pub fn retryPendingIgnore(self: *AppSession) void {
     if (self.git_ignore_retry_dirs.items.len == 0) return;
+    // ⚠️ **탐색기를 보고 있을 때만 다시 건다**(적대적 검증 19 회차). 이 재시도는 **디스크 스캔**을
+    // 거는 일이고, 흐림은 탐색기 뷰에서만 쓰인다 — 사용자가 소스 컨트롤 탭에 있거나 도크를 닫아 둔
+    // 동안에도 매 tick 걸면 **아무도 안 보는 화면을 위해 FS I/O 를 돈다.**
+    //
+    // 바로 위 `drainGitStatus` 가 목록 읽기를 `dock.view == .source_control` 로 거는 것과 **같은
+    // 규율**이다. 목록은 그대로 남아 있으므로, 돌아오면 그 다음 tick 이 이어서 건다.
+    if (!dock_ops.dockVisible(self) or self.dock.view != .explorer) return;
     var backend = &(self.git_backend orelse return);
     if (backend.ignoreBusy()) return;
     const dir = self.git_ignore_retry_dirs.items[0];

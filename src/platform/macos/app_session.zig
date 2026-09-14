@@ -71211,6 +71211,9 @@ test "자리가 차서 거절된 흐림 질의는 잊히지 않는다" {
     defer allocator.destroy(session);
     defer session.deinit();
     session.git_backend = try git_backend_mod.Backend.init(session.io);
+    session.dock.presented = true; // 전제: 탐색기를 보고 있다(19 회차)
+    session.dock.collapsed = false;
+    session.dock.view = .explorer;
 
     var sub_buf: [std.fs.max_path_bytes]u8 = undefined;
     const sub = try std.fmt.bufPrint(&sub_buf, "{s}/sub", .{repo});
@@ -71277,6 +71280,10 @@ test "다시 걸지 못한 디렉터리는 «목록에 남는다» — 스캔 �
     defer allocator.destroy(session);
     defer session.deinit();
     session.git_backend = try git_backend_mod.Backend.init(session.io);
+    // **전제: 탐색기를 보고 있다.** 재시도는 디스크 스캔을 거는 일이라 그때만 돈다(19 회차).
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.view = .explorer;
 
     try session.file_tree.replaceExplicitRoots(&.{repo});
     var sub_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -71389,6 +71396,73 @@ test "`.gitignore` 가 바뀌면 «펼쳐 둔 하위까지» 다시 읽는다" {
     session.fileTreeChanged(nested);
     try std.testing.expect(session.file_tree.hasScanRequest(repo));
     try std.testing.expect(session.file_tree.hasScanRequest(sub));
+}
+
+test "흐림 재시도는 «탐색기를 보고 있을 때만» 디스크를 건드린다 — 그리고 한 tick 에 하나" {
+    // **적대적 검증 19 회차(2026-09-14).** 재시도는 **디스크 스캔**을 거는 일인데, 흐림은 탐색기
+    // 뷰에서만 쓰인다. 그런데 그 자리가 뷰를 안 보고 있었다 — 사용자가 소스 컨트롤 탭에 있거나 도크를
+    // 닫아 둔 동안에도 매 tick 스캔이 나갔다. **아무도 안 보는 화면을 위한 FS I/O** 다.
+    //
+    // 바로 위 `drainGitStatus` 가 목록 읽기를 `dock.view == .source_control` 로 거는 것과 같은 규율이다.
+    //
+    // 함께 센다: **한 tick 에 하나**. 한꺼번에 걸면 그중 하나만 통과하고 나머지가 또 줄을 선다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const repo_len = tmp.dir.realPath(io, &repo_buf) catch return error.SkipZigTest;
+    const repo = repo_buf[0..repo_len];
+
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    session.git_backend = try git_backend_mod.Backend.init(session.io);
+    try session.file_tree.replaceExplicitRoots(&.{repo});
+    while (session.file_tree.takeScanRequest()) |queued| allocator.free(queued);
+
+    var a_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var b_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_a = try std.fmt.bufPrint(&a_buf, "{s}/a", .{repo});
+    const dir_b = try std.fmt.bufPrint(&b_buf, "{s}/b", .{repo});
+    try session.git_ignore_retry_dirs.append(allocator, try allocator.dupe(u8, dir_a));
+    try session.git_ignore_retry_dirs.append(allocator, try allocator.dupe(u8, dir_b));
+
+    // ⑴ **도크가 닫혀 있으면 아무것도 안 한다.**
+    session.dock.presented = false;
+    git_ops.retryPendingIgnore(session);
+    try std.testing.expectEqual(@as(usize, 0), session.file_tree.scanRequestCount());
+    try std.testing.expectEqual(@as(usize, 2), session.git_ignore_retry_dirs.items.len); // 잊지도 않는다
+
+    // ⑵ **열려 있어도 다른 뷰면 안 한다** — 흐림은 탐색기에서만 쓰인다.
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.view = .source_control;
+    git_ops.retryPendingIgnore(session);
+    try std.testing.expectEqual(@as(usize, 0), session.file_tree.scanRequestCount());
+    try std.testing.expectEqual(@as(usize, 2), session.git_ignore_retry_dirs.items.len);
+
+    // ⑶ 접혀 있어도 안 한다.
+    session.dock.collapsed = true;
+    git_ops.retryPendingIgnore(session);
+    try std.testing.expectEqual(@as(usize, 0), session.file_tree.scanRequestCount());
+
+    // ⑷ **탐색기를 보고 있으면 한다 — 한 tick 에 «하나».**
+    session.dock.collapsed = false;
+    session.dock.view = .explorer;
+    git_ops.retryPendingIgnore(session);
+    try std.testing.expectEqual(@as(usize, 1), session.file_tree.scanRequestCount());
+    try std.testing.expectEqual(@as(usize, 1), session.git_ignore_retry_dirs.items.len);
+    try std.testing.expect(session.file_tree.hasScanRequest(dir_a));
+    try std.testing.expect(!session.file_tree.hasScanRequest(dir_b));
+
+    // ⑸ 다음 tick 이 나머지를 이어 건다 — 「하나만 걸고 끝」이 아니다.
+    git_ops.retryPendingIgnore(session);
+    try std.testing.expectEqual(@as(usize, 2), session.file_tree.scanRequestCount());
+    try std.testing.expectEqual(@as(usize, 0), session.git_ignore_retry_dirs.items.len);
+    while (session.file_tree.takeScanRequest()) |queued| allocator.free(queued);
 }
 
 test "앞 디렉터리의 답이 뒤 디렉터리의 흐림을 지우지 않는다" {

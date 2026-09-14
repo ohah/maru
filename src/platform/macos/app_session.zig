@@ -3,6 +3,7 @@ const debug_fixtures = @import("app_session/debug_fixtures.zig");
 /// N1: 네이티브 편집기의 platform 쪽(파일 읽기·권한). L2는 OS를 모르므로 여기서 읽어 넘긴다.
 const editor_ops = @import("app_session/editor.zig");
 pub const editor_diff_ops = @import("app_session/editor_diff.zig");
+pub const editor_merge_ops = @import("app_session/editor_merge.zig");
 const term_ops = @import("app_session/term.zig");
 const git_ops = @import("app_session/git.zig");
 const agent_ops = @import("app_session/agent.zig");
@@ -2204,6 +2205,12 @@ const TermRuntime = struct {
     /// N1.5 diff Term(`kind == .editor` + entry가 비교)의 상태. **행은 줄 배열을, 줄 배열은 entry의
     /// 두 쪽 버퍼를 빌린다** — 그래서 내용이 갈리기 전에 `editor_diff_ops.invalidate`가 불려야 한다.
     editor_diff: ?editor_diff_ops.State = null,
+    /// S3b-1 병합 모드(`kind == .editor` + 이 값)의 상태 — `:1:`·`:2:`·`:3:` 세 판.
+    ///
+    /// **`kind` 를 안 나눈 이유**는 계약 §7 ④ 에 있다: 「이 Term 이 편집기 문서를 들고 있나」를 묻는
+    /// 술어가 제품 코드에만 80 곳이고 전부 `==` 비교라, 종류를 나누면 컴파일러가 **한 곳도** 안
+    /// 알려 준다. 비교 뷰가 `editor_diff` 로 같은 자리에 선 것과 같은 모양이다.
+    editor_merge: ?editor_merge_ops.State = null,
     /// 이 뷰의 랩 override. `null`이면 config(`editor.wrap`)를 따르고, 값이 있으면 그것이 이긴다.
     ///
     /// **뷰별로 두는 이유**: 랩은 "이 문서를 지금 어떻게 볼까"라 문서가 아니라 뷰의 상태다(VSCode의
@@ -21324,6 +21331,18 @@ pub const AppSession = struct {
         // **이 함수가 사용자가 보는 라벨의 단일 자리다.** 처음에는 컨트롤 플레인 DTO에만 붙였는데,
         // 탭 바는 이 경로를 타므로 **화면에는 점이 안 나왔다**(적대적 검증 2026-08-26 — 이 슬라이스에서
         // 배선이 끊긴 것을 세 번째로 잡았다).
+        // **병합 모드는 기준을 뒤에 적는다**(S3b-1) — 비교 Term 이 `이름 · 기준`을 쓰는 그 자리다.
+        // 같은 파일의 비교·편집기·병합이 한 줄에 나란히 설 수 있어, 이름만으로는 무엇을 보는지 모른다.
+        //
+        // **저장 표식과 «함께» 붙는다.** 병합 Term 은 고치는 중인 문서라 dirty 가 흔한데, 한쪽만
+        // 나오면 「고치는 중」이나 「무엇을 고치는 중」 하나가 사라진다.
+        if (editor_merge_ops.isMerge(term)) {
+            const key = editor_merge_ops.labelKey(term) orelse .dock_merge_stages;
+            if (editor_ops.isDirty(term)) {
+                return std.fmt.allocPrint(allocator, "{s} {s} · {s}", .{ editor_dirty_marker, base, maru.i18n.t(key) });
+            }
+            return std.fmt.allocPrint(allocator, "{s} · {s}", .{ base, maru.i18n.t(key) });
+        }
         if (editor_ops.isDirty(term)) {
             return std.fmt.allocPrint(allocator, "{s} {s}", .{ editor_dirty_marker, base });
         }

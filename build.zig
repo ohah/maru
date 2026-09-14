@@ -1652,6 +1652,23 @@ pub fn build(b: *std.Build) void {
     );
     macos_terminal_gate_step.dependOn(&run_macos_terminal_gate_tests.step);
 
+    // **3-way 병합 모드**(S3b-1 — docs/editor-merge-conflicts.md §5 S3b). 전체 ABI suite 는 샤드로
+    // 도는 무거운 스텝이라 전용 step 을 둔다(위와 같은 이유 — 빠른 되먹임 + 무관한 flake 분리).
+    const macos_editor_merge_tests = addProjectTest(b, .{
+        .root_module = macos_app_host_abi_tests.root_module,
+        .filters = &.{"MRG"},
+    });
+    const run_macos_editor_merge_tests = b.addRunArtifact(macos_editor_merge_tests);
+    // 20 = MRG1~15 열다섯 + 각 모듈이 자동 생성하는 `test_0` 다섯(필터와 무관하게 늘 컴파일된다).
+    run_macos_editor_merge_tests.addArg("--maru-expect-tests=20");
+    // ⚠️ **그리고 실제로 돌았는가** — MRG2 이후는 macOS 가 아니면 `SkipZigTest` 다.
+    run_macos_editor_merge_tests.addArg("--maru-expect-passed=20");
+    run_macos_editor_merge_tests.setCwd(b.path("."));
+    b.step(
+        "test-editor-merge",
+        "Run the 3-way merge mode judges (S3b-1)",
+    ).dependOn(&run_macos_editor_merge_tests.step);
+
     // 파일 탐색기 제품-path 성능 gate는 app_host_abi 모듈의 실제 AppSession glue를 쓰되
     // 해당 테스트 하나만 컴파일·실행한다. 전체 ABI suite에 결합하면 무관한 socket/WebKit
     // 회귀나 flaky test가 탐색기 artifact의 신호를 가리므로 전용 step으로 분리한다.

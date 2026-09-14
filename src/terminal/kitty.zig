@@ -969,7 +969,16 @@ fn deletePlacementsWhere(
     var i: usize = 0;
     while (i < self.kitty_placements.items.len) {
         const p = self.kitty_placements.items[i];
-        if (!pred(self, p, ctx)) {
+        // **다른 화면의 배치는 건드리지 않는다.** 이 몸통을 쓰는 타깃(`a`/`c`/`p`/`q`/`x`/`y`/`z`)은
+        // 전부 **자리**로 겨눈다 — 그런데 자리는 화면마다 다른 좌표계다(`anchor_row` 는 그 화면의
+        // 절대 행이고 alt 는 스크롤백이 없다). 걸러 주지 않으면 alt 의 TUI 가 보낸 delete 가 셸
+        // 화면의 이미지를 지운다(실측: `d=a`·`d=c`·`d=x`·`d=p` 넷 다 primary 배치를 지웠다).
+        // kitty 는 화면마다 graphics 상태가 따로라 구조적으로 이 문제가 없고, maru 는 한 목록에
+        // 화면 표식(`on_alt`, #3631)을 달아 두었으니 여기서 그 표식을 본다.
+        //
+        // id 로 겨누는 타깃(`i`/`n`/`r`)은 이 몸통을 쓰지 않는다 — 그쪽은 **이미지**가 대상이고
+        // 이미지는 화면이 아니라 세션에 속한다(같은 이미지를 두 화면에서 쓸 수 있다).
+        if (p.on_alt != self.alt_active or !pred(self, p, ctx)) {
             i += 1;
             continue;
         }

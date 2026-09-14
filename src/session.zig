@@ -87,6 +87,7 @@ pub const image_scale = @import("session/image_scale.zig"); // IG3: 텍스처 �
 pub const image_view = @import("session/image_view.zig"); // IG4: 크게 보기의 팬·줌 순수 계산(연속 좌표라 격자와 나눈다)
 pub const agent_image_context = @import("session/agent_image_context.zig"); // IG5: 「이 이미지가 무엇이었는지」 한 줄(직전 줄 하나만 본다 — 실측 100%)
 pub const agent_image_staging = @import("session/agent_image_staging.zig"); // MP1: 붙여넣은 이미지의 전송 전 스테이징(N→PNG 관찰 맵) — 터미널 마커 프리뷰
+pub const agent_image_markers = @import("session/agent_image_markers.zig"); // MP1: 화면에서 `[Image #N]` 후보를 셀 열과 함께 긁는다(커서 블록 스코프)
 pub const agent_statusline = @import("session/agent_statusline.zig"); // claude 상태줄 훅(§7.2.2 — 옵션 보강)
 pub const agent_hook_command = @import("session/agent_hook_command.zig"); // provider 훅 인라인 커맨드(docs/agent-hooks.md §4.1, 순수)
 pub const agent_hook_event = @import("session/agent_hook_event.zig"); // 훅 이벤트 로그 파서·tail 커서(§4, 순수)

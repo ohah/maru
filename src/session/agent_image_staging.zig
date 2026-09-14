@@ -214,7 +214,7 @@ pub const Observation = struct {
 
 const testing = std.testing;
 
-test "마커 스캔: 한 줄에 나란히 온 것을 모두 찾는다 (실측 `❯ [Image #1] [Image #2]`)" {
+test "MP1 마커 스캔: 한 줄에 나란히 온 것을 모두 찾는다 (실측 `❯ [Image #1] [Image #2]`)" {
     var out: std.ArrayList(Marker) = .empty;
     defer out.deinit(testing.allocator);
     try scanLine("\u{276F} [Image #1] [Image #2]", &out, testing.allocator);
@@ -223,7 +223,7 @@ test "마커 스캔: 한 줄에 나란히 온 것을 모두 찾는다 (실측 `�
     try testing.expectEqual(@as(u32, 2), out.items[1].n);
 }
 
-test "마커 스캔: 문장 뒤에 와도 찾는다 — 맨 앞으로 가정하면 놓친다(실측 `… 안 맞음 [Image #36]`)" {
+test "MP1 마커 스캔: 문장 뒤에 와도 찾는다 — 맨 앞으로 가정하면 놓친다(실측 `… 안 맞음 [Image #36]`)" {
     var out: std.ArrayList(Marker) = .empty;
     defer out.deinit(testing.allocator);
     try scanLine("왼쪽 워크스페이스는 맞는데 상단 pane은 안 맞음 [Image #36]", &out, testing.allocator);
@@ -231,7 +231,7 @@ test "마커 스캔: 문장 뒤에 와도 찾는다 — 맨 앞으로 가정하�
     try testing.expectEqual(@as(u32, 36), out.items[0].n);
 }
 
-test "마커 스캔: 숫자가 아니거나 `]` 가 없으면 마커가 아니다" {
+test "MP1 마커 스캔: 숫자가 아니거나 `]` 가 없으면 마커가 아니다" {
     var out: std.ArrayList(Marker) = .empty;
     defer out.deinit(testing.allocator);
     try scanLine("[Image #abc] [Image #12 [Image #] [Image #7]", &out, testing.allocator);
@@ -239,7 +239,7 @@ test "마커 스캔: 숫자가 아니거나 `]` 가 없으면 마커가 아니�
     try testing.expectEqual(@as(u32, 7), out.items[0].n);
 }
 
-test "마커 스캔: 자릿수가 과하면 본문으로 본다" {
+test "MP1 마커 스캔: 자릿수가 과하면 본문으로 본다" {
     var out: std.ArrayList(Marker) = .empty;
     defer out.deinit(testing.allocator);
     try scanLine("[Image #1234567]", &out, testing.allocator);
@@ -250,7 +250,7 @@ fn dupPng(bytes: []const u8) ![]u8 {
     return try testing.allocator.dupe(u8, bytes);
 }
 
-test "스테이징: 관찰한 N으로 찾는다. 기록에 없는 N은 열지 않는다 (§3.1)" {
+test "MP1 스테이징: 관찰한 N으로 찾는다. 기록에 없는 N은 열지 않는다 (§3.1)" {
     var s: Staging = .{};
     defer s.deinit(testing.allocator);
     try s.put(testing.allocator, 1, try dupPng("A"));
@@ -258,7 +258,7 @@ test "스테이징: 관찰한 N으로 찾는다. 기록에 없는 N은 열지 �
     try testing.expect(s.lookup(2) == null); // 화면에 글자로 쓰인 `[Image #2]` 는 우리 것이 아니다
 }
 
-test "스테이징: 빈 번호가 재사용되지 않아 `#1 #3` 이 와도 각자 맞는다 (§4.3 실측)" {
+test "MP1 스테이징: 빈 번호가 재사용되지 않아 `#1 #3` 이 와도 각자 맞는다 (§4.3 실측)" {
     var s: Staging = .{};
     defer s.deinit(testing.allocator);
     try s.put(testing.allocator, 1, try dupPng("A"));
@@ -272,7 +272,7 @@ test "스테이징: 빈 번호가 재사용되지 않아 `#1 #3` 이 와도 각�
     try testing.expectEqual(Phase.sent, s.lookup(2).?.phase);
 }
 
-test "스테이징: 전송으로 마커가 사라져도 픽셀을 든다 — 인덱스가 받기 전까지 (§4.2 A11)" {
+test "MP1 스테이징: 전송으로 마커가 사라져도 픽셀을 든다 — 인덱스가 받기 전까지 (§4.2 A11)" {
     var s: Staging = .{};
     defer s.deinit(testing.allocator);
     try s.put(testing.allocator, 1, try dupPng("A"));
@@ -284,7 +284,7 @@ test "스테이징: 전송으로 마커가 사라져도 픽셀을 든다 — 인
     try testing.expect(s.lookup(1) == null);
 }
 
-test "스테이징: 예산은 바이트로 묶고 `staged` 는 거두지 않는다" {
+test "MP1 스테이징: 예산은 바이트로 묶고 `staged` 는 거두지 않는다" {
     var s: Staging = .{ .budget_bytes = 8 };
     defer s.deinit(testing.allocator);
     try s.put(testing.allocator, 1, try dupPng("AAAA"));
@@ -296,7 +296,7 @@ test "스테이징: 예산은 바이트로 묶고 `staged` 는 거두지 않는�
     try testing.expect(s.lookup(3) != null);
 }
 
-test "스테이징: 전부 staged 면 예산을 넘겨도 거두지 않는다 — 눈앞의 마커가 안 열리면 안 된다" {
+test "MP1 스테이징: 전부 staged 면 예산을 넘겨도 거두지 않는다 — 눈앞의 마커가 안 열리면 안 된다" {
     var s: Staging = .{ .budget_bytes = 4 };
     defer s.deinit(testing.allocator);
     try s.put(testing.allocator, 1, try dupPng("AAAA"));
@@ -305,7 +305,7 @@ test "스테이징: 전부 staged 면 예산을 넘겨도 거두지 않는다 �
     try testing.expect(s.lookup(2) != null);
 }
 
-test "스테이징: 같은 N 이 다시 오면 갈아치운다 (Codex 가 입력창을 비운 뒤 다시 #1)" {
+test "MP1 스테이징: 같은 N 이 다시 오면 갈아치운다 (Codex 가 입력창을 비운 뒤 다시 #1)" {
     var s: Staging = .{};
     defer s.deinit(testing.allocator);
     try s.put(testing.allocator, 1, try dupPng("OLD"));
@@ -315,7 +315,7 @@ test "스테이징: 같은 N 이 다시 오면 갈아치운다 (Codex 가 입력
     try testing.expectEqual(@as(usize, 3), s.bytes); // 옛 것이 남아 있지 않다
 }
 
-test "관찰: 새로 나타난 N만 고른다 — Claude 가 #3 으로 건너뛰어도 맞는다" {
+test "MP1 관찰: 새로 나타난 N만 고른다 — Claude 가 #3 으로 건너뛰어도 맞는다" {
     var o: Observation = .{};
     defer o.deinit(testing.allocator);
     try o.arm(testing.allocator, &.{1});
@@ -326,7 +326,7 @@ test "관찰: 새로 나타난 N만 고른다 — Claude 가 #3 으로 건너뛰
     try testing.expectEqual(@as(u32, 3), fresh.items[0]);
 }
 
-test "관찰: 연속 붙여넣기로 둘이 한꺼번에 나타나면 오름차순으로 준다 (§10 실측)" {
+test "MP1 관찰: 연속 붙여넣기로 둘이 한꺼번에 나타나면 오름차순으로 준다 (§10 실측)" {
     var o: Observation = .{};
     defer o.deinit(testing.allocator);
     try o.arm(testing.allocator, &.{1});
@@ -338,7 +338,7 @@ test "관찰: 연속 붙여넣기로 둘이 한꺼번에 나타나면 오름차�
     try testing.expectEqual(@as(u32, 3), fresh.items[1]);
 }
 
-test "관찰: 아무것도 안 나타나면 빈 목록 — 그 장은 기록하지 않는다(조용한 실패)" {
+test "MP1 관찰: 아무것도 안 나타나면 빈 목록 — 그 장은 기록하지 않는다(조용한 실패)" {
     var o: Observation = .{};
     defer o.deinit(testing.allocator);
     try o.arm(testing.allocator, &.{ 1, 2 });

@@ -2025,6 +2025,10 @@ pub fn clampScrollToGeometry(self: *AppSession, term: *Term, leaf_rect: maru.ses
     // **지난 프레임의 배치를 쓴다.** 이 함수는 그리기 **전에** 도는데 이번 배치는 아직 없다. 첫
     // 프레임에는 배치가 없어 pane 전체로 재고(오늘과 같다), 두 번째부터 제 폭으로 잰다 — 위치는
     // 스크롤 입력이 올 때마다 다시 묶이므로 한 프레임 늦는 것은 화면에 남지 않는다.
+    // 정직하게: 여기서 `x`·`y` 는 **안 쓰인다**(아래가 `body.h` 와 `visibleCols(body)` 만 읽는다) —
+    // 그래서 그 둘을 흔든 변이는 등가다(적대적 11회차 W3 실측). 그래도 온전한 사각을 만드는 이유는
+    // 이 값이 `SplitRect` 이고, 반쪽짜리 사각을 넘기면 **다음 소비자가 생기는 날** 조용히 틀리기
+    // 때문이다 — 히트 쪽(`storeHitRows`)이 같은 사각에서 원점을 실제로 읽는다.
     const body: maru.session.SplitRect = if (term.rt.editor_merge_layout) |lay| .{
         .x = @intCast(@max(lay.result.x, 0)),
         .y = @intCast(@max(lay.result.y, 0)),
@@ -9060,11 +9064,36 @@ test "MPN7 Result «밖» 클릭은 아무 일도 안 한다 (제품 경계)" {
     defer drawn.dl.deinit(allocator);
     const lay = term.rt.editor_merge_layout orelse return error.MissingMergeLayout;
     const cur = lay.current orelse return error.MissingCurrentPane;
+    _ = &cur;
     // **축을 못박는다**: 실린 배치는 «창 절대»여야 한다. pane 상대로 실으면 클릭 좌표와 축이 갈려
     // 「Result 안」 판정이 우연히 겹치는 만큼만 맞는다(적대적 1회차 L11 이 그 자리였다).
+    //
+    // **그리고 pane 본문 «안» 에 있어야 한다.** 「≥ body.x」만 보면 두 번 옮기거나(A8) 한쪽만
+    // 옮긴(A9) 변이가 산다 — 판정자가 제품이 든 값으로 클릭 좌표를 만들어 **함께 밀리기** 때문이다
+    // (적대적 15회차 실측). 안팎을 재면 그 셋이 전부 걸린다.
     const body = editorBodyRect(fx.session, fx.leaf_rect, term);
-    try testing.expect(lay.result.x >= @as(i32, @intCast(body.x)));
-    try testing.expect(cur.x >= @as(i32, @intCast(body.x)));
+    const bx: i32 = @intCast(body.x);
+    const by: i32 = @intCast(body.y);
+    const bw: i32 = @intCast(body.w);
+    const bh: i32 = @intCast(body.h);
+    for ([_]?chrome_draw.Rect{ lay.result, lay.current, lay.incoming, lay.base }) |maybe| {
+        const r = maybe orelse continue;
+        try testing.expect(r.x >= bx and r.x + @as(i32, @intCast(r.w)) <= bx + bw);
+        try testing.expect(r.y >= by and r.y + @as(i32, @intCast(r.h)) <= by + bh);
+    }
+    // **본문을 «정확히» 덮는다.** 「안에 있나」만 보면 작은 이중 이동이 그대로 통과한다 — 두 번
+    // 옮긴 변이가 그렇게 살아남았다(적대적 16회차 B5 실측). 컴포넌트는 `{0,0,w,h}` 안에 배치를
+    // 내므로, 한 번만 옮겼다면 **왼쪽 끝은 본문 왼쪽이고 오른쪽 끝은 본문 오른쪽**이다.
+    try testing.expectEqual(bx, lay.current.?.x);
+    try testing.expectEqual(by, lay.current.?.y);
+    try testing.expectEqual(bx + bw, lay.incoming.?.x + @as(i32, @intCast(lay.incoming.?.w)));
+    try testing.expectEqual(bx, lay.base.?.x);
+    try testing.expectEqual(by + bh, lay.base.?.y + @as(i32, @intCast(lay.base.?.h)));
+    // **가운데도 묶는다.** 양 끝만 재면 **Result 하나만** 두 번 옮긴 변이가 그대로 통과한다
+    // (적대적 17회차 C1 실측) — 세 열이 «이어 붙는가»를 보면 가운데가 고정된다.
+    try testing.expectEqual(lay.current.?.x + @as(i32, @intCast(lay.current.?.w)), lay.result.x);
+    try testing.expectEqual(lay.result.x + @as(i32, @intCast(lay.result.w)), lay.incoming.?.x);
+    try testing.expectEqual(by, lay.result.y);
 
     // 좌표는 **창 절대**다 — 배치도 절대로 실린다(축이 갈리면 이 판정자가 우연히 통과한다).
     // **Result 안**: 글자가 잡힌다(대조군 — 없으면 「늘 null」로 갈려도 초록이다).
@@ -9106,10 +9135,18 @@ test "MPN10 Result pane 은 «이 Term 의 값» 으로 그려진다 — 탭 폭
     // 탭 하나와 긴 줄을 든 문서로 바꿔 연다 — 픽스처의 기본 문서(짧은 세 줄)로는 이 축들이 안 보인다.
     var dir = testing.tmpDir(.{});
     defer dir.cleanup();
-    try dir.dir.writeFile(testing.io, .{
-        .sub_path = "wide.txt",
-        .data = "\tXY\nabcdefghijklmnopqrstuvwxyz0123456789\n",
-    });
+    // **세로로도 넘쳐야 한다** — 짧은 문서는 어떤 pane 높이에서도 화면에 다 들어가고, 그러면
+    // `clampScrollToGeometry` 가 세로 위치를 0 으로 되돌려 **조각 축이 통째로 닫힌다**(실측).
+    var doc_buf: [4096]u8 = undefined;
+    var doc_len: usize = 0;
+    const head = "\tXY\nabcdefghijklmnopqrstuvwxyz0123456789\n";
+    @memcpy(doc_buf[0..head.len], head);
+    doc_len = head.len;
+    for (0..80) |i| {
+        const line = try std.fmt.bufPrint(doc_buf[doc_len..], "filler {d:0>3}\n", .{i});
+        doc_len += line.len;
+    }
+    try dir.dir.writeFile(testing.io, .{ .sub_path = "wide.txt", .data = doc_buf[0..doc_len] });
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try dir.dir.realPath(testing.io, &root_buf)];
     const path = try std.fs.path.join(allocator, &.{ root, "wide.txt" });
@@ -9170,6 +9207,23 @@ test "MPN10 Result pane 은 «이 Term 의 값» 으로 그려진다 — 탭 폭
     try testing.expect(wide_term.rt.editor_hit_rows_len > rows_nowrap);
     wide_term.rt.editor_wrap = false;
 
+    // ⑸ **랩된 줄의 «조각»**: 랩을 켜고 긴 줄 위에서 조각을 하나 내리면 **첫 글자가 사라진다**
+    //    (조각을 0 으로 박은 변이는 화면이 그대로다 — 적대적 11회차 W7).
+    wide_term.rt.editor_wrap = true;
+    wide_term.rt.editor_first_line = 1; // 긴 줄(두 번째 줄)로 내려간다
+    var piece0 = appendPaneFrame(fx.session, fx.leaf_rect, wide_term) orelse return error.EditorPaneDidNotDraw;
+    defer piece0.dl.deinit(allocator);
+    const a_piece0 = drawnColOf(piece0.dl, 'a');
+    wide_term.rt.editor_first_piece = 1;
+    var piece1 = appendPaneFrame(fx.session, fx.leaf_rect, wide_term) orelse return error.EditorPaneDidNotDraw;
+    defer piece1.dl.deinit(allocator);
+    const a_piece1 = drawnColOf(piece1.dl, 'a');
+    try testing.expect(a_piece0 != null); // 조각 0 에서는 첫 글자가 보인다(대조군)
+    try testing.expect(a_piece1 == null); // 한 조각 내리면 사라진다
+    wide_term.rt.editor_first_piece = 0;
+    wide_term.rt.editor_first_line = 0;
+    wide_term.rt.editor_wrap = false;
+
     // ⑶ **행 수는 Result 의 것이다** — Base 는 한 줄, Result 는 두 줄이다. Base 것을 실으면
     //    클릭이 닿는 행이 한 줄로 줄어든다.
     var rows = appendPaneFrame(fx.session, fx.leaf_rect, wide_term) orelse return error.EditorPaneDidNotDraw;
@@ -9227,8 +9281,11 @@ test "MPN9 Result «안» 의 클릭이 그 자리 글자를 가리킨다 (제�
     // **본문 원점에서 잰다** — pane 원점에서 재면 inset(4px = 반 칸)만큼 왼쪽이라 한 칸 어긋난다.
     // 그 원점이 Result 로 옮겨졌는지가 이 판정자의 요점이므로, 원점 자체를 제품에서 읽는다.
     const mg = term.rt.editor_hit_geom;
-    // **원점이 실제로 Result 로 옮겨졌다** — 안 옮겨지면 아래 비교가 우연히 맞을 수도 있다.
-    try testing.expect(@as(i64, mg.body_x) >= @as(i64, lay.result.x));
+    // **원점이 «정확히» Result + inset 이다.** 「≥」로만 보면 원점을 몇 픽셀 민 변이가 산다 —
+    // 클릭 좌표를 그 원점에서 만들기 때문에 **함께 밀려** 같은 답이 나온다(적대적 15회차 A7).
+    const inset: i32 = @intCast(chrome_editor.frame.content_inset_px);
+    try testing.expectEqual(lay.result.x + inset, mg.body_x);
+    try testing.expectEqual(lay.result.y + inset, mg.body_y);
     const merge_off = hitTestBody(
         term,
         @as(f64, @floatFromInt(mg.body_x)) + dx,

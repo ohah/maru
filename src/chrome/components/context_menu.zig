@@ -494,18 +494,20 @@ test "체크 열은 상자 폭에 들어가고, 전부 꺼짐은 열 없음과 �
 test "context_menu menuRect: 손상된 workspace·거대한 라벨에 안 터진다 (적대적 A45·A46)" {
     const Rgb = @import("../../color.zig").Rgb;
     _ = Rgb;
-    var p = props.ChromeProps{ .metrics = .{
-        .cell_width_px = 8,
-        .cell_height_px = 16,
-        .sidebar_width_px = 0,
-        .backing_width_px = 1000,
-        .backing_height_px = 600,
-        .workspace_present = true,
-        .workspace_x_px = 0,
-        .workspace_y_px = std.math.maxInt(u32) - 4, // y + h 가 u32 를 넘는다
-        .workspace_width_px = 1000,
-        .workspace_height_px = 600,
-    } };
+    var p = props.ChromeProps{
+        .metrics = .{
+            .cell_width_px = 8,
+            .cell_height_px = 16,
+            .sidebar_width_px = 0,
+            .backing_width_px = 1000,
+            .backing_height_px = 600,
+            .workspace_present = true,
+            .workspace_x_px = 0,
+            .workspace_y_px = std.math.maxInt(u32) - 4, // y + h 가 u32 를 넘는다
+            .workspace_width_px = 1000,
+            .workspace_height_px = 600,
+        },
+    };
     var state: State = .{};
     const items = [_][]const u8{"a"};
     state.show(10, 10, items.len);

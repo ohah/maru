@@ -103,6 +103,7 @@ const find_ops = @import("app_session/find.zig");
 pub const agent_dock = @import("app_session/agent_dock.zig");
 pub const scm_dock_ops = @import("app_session/scm_dock.zig");
 pub const agent_activity_ops = @import("app_session/agent_activity.zig");
+pub const marker_preview_ops = @import("app_session/marker_preview.zig"); // MP1: 터미널 `[Image #N]` 프리뷰의 surface별 스테이징·관찰
 const agent_image_scan_backend = @import("agent_image_scan_backend.zig"); // IG1-e: 갤러리 스캔 워커
 const agent_body_search_backend = @import("agent_body_search_backend.zig"); // BS1: 본문 검색 워커
 const agent_image_decode_backend = @import("agent_image_decode_backend.zig"); // IG3-d: 갤러리 디코드 워커 // IG1: 이미지 갤러리 도크 뷰(docs/agent-image-gallery.md)
@@ -5911,6 +5912,10 @@ pub const AppSession = struct {
     /// 이미지 갤러리 도크 뷰의 인덱스(docs/agent-image-gallery.md). **메모리 전용**이라 앱을 끄면
     /// 사라진다 — 계약 §4.5 가 디스크에 아무것도 남기지 않기로 한 결과다.
     agent_activity: agent_activity_ops.State = .{},
+    /// 터미널 마커 프리뷰의 surface별 스테이징(docs/agent-image-marker-preview.md §4.2). **메모리
+    /// 전용**이고 갤러리와 달리 **세션에 하나가 아니다** — N의 네임스페이스가 에이전트 프로세스별이라
+    /// 세션에 맵 하나를 두면 두 pane의 `#1`이 같은 칸을 다툰다.
+    marker_preview: marker_preview_ops.State = .{},
     /// 갤러리 스캔 워커(계약 §4.1.1). init 실패는 «갤러리만 안 됨» 으로 접는다 — 세션 전체를
     /// 못 열 이유가 아니다. null 이면 `refresh` 가 조용히 물러난다.
     agent_activity_backend: ?agent_image_scan_backend.Backend = null,
@@ -14901,9 +14906,70 @@ pub const AppSession = struct {
         // (위 "구조 owner에서는 no-op도 consumed" 규율과 같은 이유). 되살리기는 ⏎만이다.
         if (pane_ops.activePane(self).activeTerm().rt.ended_placeholder) return true;
         const active_term = pane_ops.activePane(self).activeTerm();
-        if (active_term.kind != .terminal or active_term.surface.remote == null) return false;
+        if (active_term.kind != .terminal) return false;
+        if (active_term.surface.remote == null) {
+            // **로컬은 여기서 consume하지 않는다** — Swift가 임시 PNG 경로를 bracketed paste로 보내야
+            // TUI가 `[Image #N]`으로 바꾼다(§4.1). 다만 그 바이트가 우리를 거치는 **유일한 자리**가
+            // 여기이므로, 지나가는 길에 프리뷰 스테이징에 실어 둔다(§4.2). 실패는 삼킨다 —
+            // 프리뷰가 안 되는 것이 붙여넣기를 막을 이유가 아니다.
+            self.stageMarkerPreviewImage(active_term, bytes);
+            return false;
+        }
         self.enqueueUserActionImage(active_term, term_ops.activeSurface(self).id, temp_path, bytes);
         return true;
+    }
+
+    /// 붙여넣은 PNG를 마커 프리뷰 스테이징에 건다(§4.2). **paste가 나가기 전에** 불려야 한다 —
+    /// 관찰 기준선이 마커가 뜬 뒤에 찍히면 그 마커가 「새로 나타난 것」이 아니게 되어 영영 안 묶인다.
+    fn stageMarkerPreviewImage(self: *AppSession, term: *Term, bytes: []const u8) void {
+        const surface_id = term.surface.id;
+        var visible: std.ArrayList(u32) = .empty;
+        defer visible.deinit(self.allocator);
+        self.collectMarkerNumbers(term, .cursor_block, &visible) catch return;
+        const png = self.allocator.dupe(u8, bytes) catch return;
+        marker_preview_ops.onImagePasted(&self.marker_preview, self.allocator, surface_id, visible.items, png) catch {
+            self.allocator.free(png);
+        };
+    }
+
+    /// tick마다 마커 프리뷰 상태를 화면에 맞춘다(§4.2). 대기 중인 붙여넣기가 없고 스테이징도 비어
+    /// 있으면 **화면을 읽지 않는다** — 관찰이 걸리지 않은 세션에 비용을 물리지 않는다.
+    fn pollMarkerPreview(self: *AppSession) void {
+        if (self.marker_preview.pending.items.len == 0 and self.marker_preview.slots.items.len == 0) return;
+        if (!self.surface_initialized or self.tabs.items.len == 0) return;
+        const term = pane_ops.activePane(self).activeTerm();
+        if (term.kind != .terminal or term.rt.ended_placeholder) return;
+        const surface_id = term.surface.id;
+        var visible: std.ArrayList(u32) = .empty;
+        defer visible.deinit(self.allocator);
+        self.collectMarkerNumbers(term, .cursor_block, &visible) catch return;
+        marker_preview_ops.observe(&self.marker_preview, self.allocator, surface_id, visible.items) catch {};
+    }
+
+    /// 그 term의 화면에서 마커 N을 모은다. **락 아래에서** 읽는다 — 스냅샷이 코어 메모리를 alias한다
+    /// (hover 경로가 `lockCore`를 잡는 것과 같은 규율).
+    fn collectMarkerNumbers(
+        self: *AppSession,
+        term: *Term,
+        scope: maru.session.agent_image_markers.Scope,
+        out: *std.ArrayList(u32),
+    ) !void {
+        var hits: std.ArrayList(maru.session.agent_image_markers.Hit) = .empty;
+        defer hits.deinit(self.allocator);
+        try self.collectMarkerHits(term, scope, &hits);
+        try maru.session.agent_image_markers.numbersOf(self.allocator, hits.items, out);
+    }
+
+    /// 그 term의 화면에서 마커를 셀 열까지 함께 모은다.
+    fn collectMarkerHits(
+        self: *AppSession,
+        term: *Term,
+        scope: maru.session.agent_image_markers.Scope,
+        out: *std.ArrayList(maru.session.agent_image_markers.Hit),
+    ) !void {
+        term.surface.lockCore(self.io);
+        defer term.surface.unlockCore(self.io);
+        try maru.session.agent_image_markers.scan(self.allocator, term.surface.renderSnapshot(), scope, out);
     }
 
     fn nextUserActionId(self: *AppSession) u64 {
@@ -19268,6 +19334,10 @@ pub const AppSession = struct {
         // 갤러리 스캔 워커의 완료본을 수확한다(계약 §4.1.1). **여기가 유일한 수확 지점이라**,
         // 안 부르면 워커가 1.68 GB 를 다 훑고도 화면이 영영 안 바뀐다. 결과가 없으면 즉시 돌아온다.
         agent_activity_ops.poll(self);
+        // 마커 프리뷰: 붙여넣은 PNG에 **새로 나타난 N**을 묶고, 화면에서 사라진 것을 `sent`로 옮긴다(§4.2).
+        // 활성 term 하나만 본다 — 비활성 pane의 화면은 이 tick에 바뀌지 않았거나, 바뀌었어도 그 pane이
+        // 활성이 될 때 따라잡는다(관찰 창이 2초라 충분하다).
+        self.pollMarkerPreview();
         self.advancePendingAppQuitShutdown();
         // end-all target이 source-zero와 ready_remove까지 도달해 종료 승인을 게시한 frame은 더 이상
         // remote maintenance나 Term drain을 실행하지 않는다. 같은 frame의 후속 접근은 deinit이 소유할
@@ -22856,6 +22926,8 @@ pub const AppSession = struct {
         // 갤러리 인덱스도 힙이다 — `Source`는 고정 배열이지만 `hits`는 아니다. 뷰를 열어 둔 채 창을 닫으면
         // 여기 말고 푸는 자리가 없다(상한 `max_hits_per_file` 4,096개 × `Hit`이라 한 창에 100 KB 급이다).
         self.agent_activity.deinit(self.allocator);
+        // 마커 프리뷰 스테이징도 힙이다 — PNG 바이트를 들고 있어 안 풀면 장당 수 MB가 샌다.
+        self.marker_preview.deinit(self.allocator);
         // **워커를 거두고 나간다.** 스캔·디코드 둘 다 `deinit` 이 취소를 걸고 스레드를 join 한다 —
         // 떼어 놓으면 그 스레드가 든 할당(경로 사본)이 세션보다 오래 살아 누수로 보고된다
         // (`agent_image_scan_backend` 의 `worker_thread` 주석이 그 사고를 적고 있다).

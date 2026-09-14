@@ -597,6 +597,12 @@ GitHub `CI` workflow는 `mise run check`와 외부 오라클 실행 후 `tests/a
 - `환경 의존`: 외부 바이너리, SSH 서버, macOS window server, GPU driver, font stack처럼 실행 환경에 따라 결과가 달라질 수 있다.
 - `시스템 한계에 가까움`: 순수 headless 테스트만으로는 실제 화면이나 하드웨어 동작을 완전히 증명하기 어렵다. 대신 내부 snapshot, screenshot, 수동 산출물을 함께 남긴다.
 
+Session host IME 시각 증거는 현재 `CR6d-v2a 제품 preedit 픽셀`과 `CR6d-v2b OS 후보창 픽셀` 두 행으로
+분리해 추적한다. v2a는 기존 recovered Term의 조합 전/첫 marked callback 뒤 제품 Metal PPM, cursor rect와
+`firstRect` screen rect를 한 receipt에 결속한다. v2b는 실제 Apple Korean IME 후보 목록과 anchor의 화면 관계를
+OS capture로 증명한다. v2a는 v2b를 대신하지 않으며, v2b의 Screen Recording 권한·잠금 해제 WindowServer·exact
+frontmost PID 부재는 `not_provisioned`다. 현재 두 행 모두 구현 전이다.
+
 renderer capability의 현재 검증 계약은 `editor_epoch`를 포함한 `RendererCapability` 6-field 공용 alias이며, epoch를 포함한 어느 필드든 stale이면 fragment 재사용·DOM 높이 변경이 0이어야 한다.
 
 ### C3-3b2a·b2b 세부 gate

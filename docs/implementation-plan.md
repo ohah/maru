@@ -1279,7 +1279,15 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    남기고 정상·실패·종료에서 복원하며, 앱 강제 종료 뒤에는 부모의 별도 restore helper가 같은 record를 소비한다.
    복원은 current가 selected와 같을 때만 original을 다시 선택해 사용자 중간 변경을 덮지 않는다. view-local
    `NSTextInputContext`, marked text와 first-responder state도 종료 전에 정산하고 current source exact original과 restore
-   record 소멸을 executable oracle로 고정한다. CR6e는 세 gate로 나눈다. **CR6e-a1 transport baseline**은 제품 deadline-aware
+   record 소멸을 executable oracle로 고정한다. **CR6d-v2a 조합 픽셀 증거**는 같은 복구 view에서 첫 물리 한글 key 전과
+   첫 `setMarkedText` 반영 뒤의 실제 제품 CAMetalLayer 프레임을 one-shot PPM으로 각각 캡처한다. 두 capture는 같은
+   runtime·surface·cursor rect와 `firstRect(forCharacterRange:)` 반환 rect를 구조화 receipt에 결속하고, cursor 관심 영역의
+   픽셀이 달라졌으며 marked frame의 비배경 bounding box가 cursor cell에서 시작하는지를 판정한다. callback 횟수나 좌표
+   단위 테스트만으로 픽셀 통과를 대신하지 않는다. 이 행은 Maru가 그린 preedit와 입력기 anchor를 증명하지만 OS가 별도
+   window로 그리는 후보 목록 자체를 캡처했다고 주장하지 않는다. **CR6d-v2b 후보창 픽셀 증거**는 실제 Apple Korean IME
+   후보 목록을 연 뒤 OS-owned window와 anchor의 screen-space 관계를 캡처하는 별도 opt-in gate다. Screen Recording 권한,
+   잠금 해제된 WindowServer, 전면 앱이 없으면 `not_provisioned`로 실패하며 v2a나 좌표 비교로 대체하지 않는다.
+   CR6e는 세 gate로 나눈다. **CR6e-a1 transport baseline**은 제품 deadline-aware
    exact-host issuer에 실제 Unix peer의 accept 후 hello 무응답과 transient connect backoff를 주입하고, absolute deadline,
    attempt/wait 수, elapsed, fd/RSS를 strict-schema raw artifact로 남긴다. **CR6e-a2 recovery baseline**은 반복 CR6c
    recovery의 launch→row→click→remote-visible→Quit 구간과 runtime/authority/cleanup을 별도 strict-schema raw artifact로

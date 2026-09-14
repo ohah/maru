@@ -355,7 +355,24 @@ thumb이 셀 경계로 스냅해 목록과 어긋난다.
   소비자가 다시 고르지 않는다 — 나가는 자리와 돌아오는 자리가 갈리면 한쪽이 낡아, 상대경로가 엉뚱한
   루트에 붙는다(흐림이 안 서거나 남의 행이 흐려진다). 틀 없이 온 답은 **버린다**.
 
+  ⚠️ **「물어봤나」는 그 답으로만 판정한다**(`git_ignore_answered`). 예전에는 **소스 컨트롤 목록 결과**
+  (`git_result`)를 대리로 썼는데 그것은 다른 축이다 — 목록 읽기는 도크가 **소스 컨트롤 뷰일 때만**
+  돌아서, 탐색기만 쓰는 동안에는 영영 `null` 이고 답이 와 있어도 흐림이 안 떴다.
+
   거절되거나 실패하면 그 화면은 **판정 없이 남는다** — 모르면 흐리게 하지 않는다.
+
+  ⚠️ **2026-09-14 실측: 탐색기 단독으로는 이 흐림이 아직 안 뜬다.** 실물 캡처(도크를 탐색기로 열고 이
+  저장소의 트리를 찍음)에서 `zig-out`·`.zig-cache`·`zig-pkg` 가 `docs`·`src` 와 **같은 색**이었다
+  (피크 RGB 동일). 원인은 **둘**이고 하나만 닫혔다:
+
+  1. 판정이 다른 축을 대리로 썼다 → 위에서 고쳤다.
+  2. **git 백엔드를 만드는 자리가 전부 소스 컨트롤 경로**라, 탐색기만 쓰는 동안에는 질의가
+     `requestIgnoredForPaths` 첫 줄에서 되돌아간다. **여기서 만들어 봤다가 되돌렸다** — 그러면 파일
+     트리 드레인이 git 프로세스를 띄우는 경로가 되어 그 길을 안 타던 판정자들이 실제 `check-ignore` 를
+     부르며 죽었다. 백엔드 수명을 탐색기 축까지 넓히는 것은 **그 축의 결정**이라 임의로 하지 않았다.
+
+  즉 소스 컨트롤 뷰를 한 번이라도 연 창에서는 흐림이 서고, 탐색기만 쓴 창에서는 안 선다. 다시 여는
+  사람은 **2번부터** 시작하라.
 - **선택과 키보드 포커스(ABI v127)**: 트리는 row index가 아니라 `절대 경로 + row kind` identity로 transient selection을 소유한다. scan 완료·접기·FSEvents rebuild로 row index가 바뀌어도 같은 row가 남으면 선택을 복원하고, 사라지면 가장 가까운 조작 가능한 조상/이웃으로 결정적으로 이동한다. 클릭 또는 `focus_file_tree`가 Zig의 단일 `FocusOwner`를 `.file_tree { restore_surface: ?surface_id }`로 바꾸고 Metal view를 first responder로 만든다. 현재 구현의 기본 `⌘⇧E`는 이 action에 연결되어 있으며, FP9에서 §3.4의 `toggle_file_panel_focus`로 기본 chord만 이전한다. surface id는 앱 전역 비재사용이라 generation token을 겸하며 Esc 때 entry와 native WKWebView 존재를 다시 검증한다. `file_tree_focus`는 이 union의 파생 getter일 뿐 별도 mutable boolean이 아니다. 선택과 keyboard focus는 workspace에 저장하지 않는다. 포커스 중 선택은 theme accent 배경과 WCAG 4.5 이상 대비가 나는 파생 전경을 marker·이름·dirty/conflict 표시 전체에 적용하고, 포커스 밖에서는 dim으로 그린다. active 파일 표시는 별도 marker로 유지한다.
 
   ⚠️ **그래서 트리를 통째로 갈아끼우는 자리도 선택을 지우지 않는다**(2026-08-27 사용자 보고 — "열면 맨 위로

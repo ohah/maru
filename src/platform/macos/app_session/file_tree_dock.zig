@@ -123,6 +123,12 @@ const Prepared = struct {
     text_w: u32,
 };
 
+/// 판정자용: 투영이 「무시 여부를 물어봤나」로 무엇을 보는지 그대로 묻는다. 기하 없이 그 판정만
+/// 짚을 수 있어야 한다 — 그 자리가 **다른 축을 대리로 쓰다** 흐림을 통째로 죽였기 때문이다.
+pub fn ignoredKnownForTest(self: *const AppSession) bool {
+    return self.git_ignore_answered;
+}
+
 /// 투영 → props → build. **그리기와 히트 tree 발행이 같은 입력을 쓰게 하는 자리**다 — 둘이 각자
 /// props 를 만들면 그 순간 화면과 판정이 갈린다.
 fn prepare(self: *AppSession, arena: std.mem.Allocator) ?Prepared {
@@ -140,9 +146,17 @@ fn prepare(self: *AppSession, arena: std.mem.Allocator) ?Prepared {
     const rows_src = self.file_tree_rows.items[start..end];
 
     const rows = arena.alloc(component.types.Row, rows_src.len) catch return null;
-    // 무시 여부는 저장소를 물어봤을 때만 뜻이 있다 — 안 물어본 상태에서 흐리게 그리면 "모르는 것"이
-    // "무시됨"으로 보인다(docs/file-explorer.md의 `ignored_fg` 규율과 같은 판정을 그대로 쓴다).
-    const ignored_known = self.git_result != null;
+    // 무시 여부는 **물어봤을 때만** 뜻이 있다 — 안 물어본 상태에서 흐리게 그리면 "모르는 것"이
+    // "무시됨"으로 보인다(docs/file-explorer.md의 `ignored_fg` 규율).
+    //
+    // ⚠️ **그 「물어봤나」를 `git_result`(소스 컨트롤 목록)로 대리하고 있었다**(적대적 검증 2026-09-14 —
+    // 실물 캡처로 발견). 그 값은 **다른 축**이다: 목록 읽기는 도크가 **소스 컨트롤 뷰일 때만** 도므로,
+    // 탐색기만 쓰는 동안에는 영영 `null` 이고 **흐림이 한 번도 안 뜬다.** 정작 질의는 디렉터리를 읽을
+    // 때마다 나가고 답도 오고 있었다 — 값이 화면에 닿는 자리에서 **다른 질문**에 걸려 있었다.
+    //
+    // 이제 그 답 자체를 묻는다(`git_ignore_answered`). 질의가 거절되거나 git 이 없으면 여전히 거짓이라
+    // 「모르면 흐리게 하지 않는다」는 그대로다.
+    const ignored_known = self.git_ignore_answered;
     // 선택은 **신원 기반**이다(`selectedFileTreeRow`) — 비동기 재빌드로 행이 밀려도 같은 항목을 가리킨다.
     const selected_index = file_panel_ops.selectedFileTreeRow(self);
     // 이름 변경 중이면 그 행의 라벨을 편집 중인 글자로 바꾼다.

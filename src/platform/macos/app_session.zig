@@ -15058,7 +15058,7 @@ pub const AppSession = struct {
         // 그래서 **스테이징을 먼저 묻는다.** 거기 있으면 이번 실행에 우리가 직접 실어 둔 것이라
         // 가장 확실하고, 전송된 뒤에도 `sent` 로 남아 있다(§4.2 A11). 없을 때만 인덱스로 간다.
         const staged_known = if (self.marker_preview.stagingFor(surface_id)) |st| st.lookup(m.n) != null else false;
-        if (!staged_known) return self.toggleSentMarkerPreview(surface_id, m, hits.items);
+        if (!staged_known) return self.toggleSentMarkerPreview(surface_id, m, hits.items, self.viewportScrolled(term));
         const next = marker_preview_ops.toggle(&self.marker_preview, self.marker_preview_open, surface_id, m);
         const changed = (next == null) != (self.marker_preview_open == null) or
             (next != null and self.marker_preview_open != null and next.?.n != self.marker_preview_open.?.n);
@@ -15171,6 +15171,18 @@ pub const AppSession = struct {
         marker_preview_ops.appendGpuImage(open, self.allocator, place, images, uploads, pixels, live_ids);
     }
 
+    /// 그 term 의 화면이 **스크롤돼 있나**(= 지금 보이는 것이 live bottom 이 아니다).
+    ///
+    /// 원격이면 host 가 그 사실을 협상 못 했을 수 있다(`viewport_scrolled_known`) — 그때는
+    /// **스크롤된 것으로 친다**(fail-closed). 모르면서 안 잘렸다고 가정하면 A31 이 되살아난다.
+    fn viewportScrolled(self: *AppSession, term: *Term) bool {
+        term.surface.lockCore(self.io);
+        defer term.surface.unlockCore(self.io);
+        const snap = term.surface.renderSnapshot();
+        if (!snap.viewport_scrolled_known) return true;
+        return snap.viewport_scrolled;
+    }
+
     /// **전송된** 마커를 토글한다 — 픽셀은 갤러리 인덱스(트랜스크립트)에서 온다(§4.4).
     ///
     /// 인덱스가 그 N을 모르면 **열지 않는다**. 화면에 글자로 쓰인 `[Image #N]`과 구분할 방법이 그것뿐이고
@@ -15180,6 +15192,7 @@ pub const AppSession = struct {
         surface_id: u64,
         m: maru.session.agent_image_markers.Hit,
         screen_hits: []const maru.session.agent_image_markers.Hit,
+        scrolled: bool,
     ) bool {
         if (self.marker_preview_open) |c| {
             if (c.surface_id == surface_id and c.n == m.n and c.row == m.row and c.start_col == m.start_col) {
@@ -15187,7 +15200,7 @@ pub const AppSession = struct {
                 return true;
             }
         }
-        const found = self.findSentMarkerHit(m, screen_hits) orelse {
+        const found = self.findSentMarkerHit(m, screen_hits, scrolled) orelse {
             // 인덱스가 아직 없다 — 갤러리 도크를 한 번도 안 열었으면 비어 있다(`refreshForFocus`).
             // **이번 클릭은 조용히 실패**하되 스캔을 걸어 다음 번엔 답할 수 있게 한다.
             agent_activity_ops.refresh(self, false);
@@ -15215,6 +15228,7 @@ pub const AppSession = struct {
         self: *AppSession,
         m: maru.session.agent_image_markers.Hit,
         screen_hits: []const maru.session.agent_image_markers.Hit,
+        scrolled: bool,
     ) ?usize {
         if (m.n == 0) return null;
         // **화면에서 뒤에서 몇 번째인가**를 세어 인덱스에서도 같은 순번을 고른다.
@@ -15223,9 +15237,14 @@ pub const AppSession = struct {
         // (§4.3) 대화가 길면 `#1` 이 수십 개이고, 화면 **위쪽**(오래된) 마커를 눌러도 최근 것이 열린다.
         // §3.1 이 「틀린 이미지를 자신 있게 보여주는 것이 아무것도 안 보여주는 것보다 나쁘다」고 한 그것이다.
         //
-        // 화면의 마커도 인덱스의 이미지도 **시간순**이라, 뒤에서부터 세면 화면 밖(스크롤 위)에 더 있어도
-        // 최근 쪽은 정확히 맞는다. **§4.2 가 금한 「순서로 세기」와는 다른 축이다** — 그쪽은 빈 번호를
-        // 건너뛰는 스테이징 순번이었고, 이것은 같은 번호의 **발생 순서**다.
+        // 화면의 마커도 인덱스의 이미지도 **시간순**이라, 뒤에서부터 세면 맞는다.
+        // **§4.2 가 금한 「순서로 세기」와는 다른 축이다** — 그쪽은 빈 번호를 건너뛰는 스테이징
+        // 순번이었고, 이것은 같은 번호의 **발생 순서**다.
+        //
+        // ⚠️ **다만 화면이 스크롤돼 «최근 쪽»이 잘려 나가면 이 셈이 무너진다**(적대적 A31). 위로
+        // 스크롤해 오래된 마커만 보이는 상태에서 그것을 누르면 `from_end = 0` 이 되어 인덱스의
+        // **가장 최근** 것을 집는다 — A21 이 고치려던 그 결함이 그대로 되살아난다.
+        // 그래서 아래 `ambiguous` 게이트가 있다.
         var from_end: usize = 0;
         var seen_click = false;
         var i = screen_hits.len;
@@ -15242,6 +15261,16 @@ pub const AppSession = struct {
         if (!seen_click) return null;
 
         const hits = self.agent_activity.hits.items;
+        // 같은 번호가 인덱스에 **하나뿐이면** 셈이 필요 없다 — 스크롤 여부와 무관하게 그것이 답이다.
+        // Claude 는 N 이 프로세스 누적이라(§4.3) 대개 이 길로 간다.
+        var same_n: usize = 0;
+        for (hits) |h| {
+            if (h.kind.isImage() and h.marker_n == m.n) same_n += 1;
+        }
+        if (same_n == 0) return null;
+        // 여럿인데 화면이 잘려 있으면 **열지 않는다.** 틀린 그림을 자신 있게 띄우는 것보다 낫다(§3.1).
+        if (same_n > 1 and scrolled) return null;
+
         var skipped: usize = 0;
         var j = hits.len;
         while (j > 0) {

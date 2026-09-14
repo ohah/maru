@@ -8,6 +8,14 @@ shift
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
 APP=$ROOT/zig-out/Maru.app/Contents/MacOS/maru-macos-app
 [ -x "$APP" ] || { echo "capture: 앱 번들이 없다 — 먼저 'zig build macos-app-bundle'" >&2; exit 1; }
+# ⚠️ **소스보다 낡은 앱으로 찍지 않는다**(적대적 검증 2026-09-14). 이 스크립트는 빌드를 안 하므로,
+# 코드를 고치고 곧바로 부르면 **옛 바이너리가 그린 그림**이 나온다 — 그리고 성공으로 끝난다. 실제로
+# 그 그림을 보고 「고침이 제품에 안 보인다」로 한참 헤맸다. 골든 게이트가 같은 판정을 갖고 있지만
+# 그것은 **비교할 때**의 이야기고, 사람이 캡처만 부르는 길에는 아무 말도 없었다.
+if [ -n "$(find "$ROOT/src" "$ROOT/build.zig" -newer "$APP" -print -quit 2>/dev/null)" ]; then
+	echo "capture: 앱이 소스보다 낡았다 — 먼저 'zig build macos-app-bundle'" >&2
+	exit 1
+fi
 : "${MARU_REMOTE_SCM_DEST:?하니스를 거치지 않았다}"
 : "${MARU_REMOTE_SCM_CTL:?}"
 : "${MARU_REMOTE_SCM_REPO:?}"
@@ -24,7 +32,14 @@ trap 'rm -rf "$CAP_HOME"' EXIT INT TERM
 # 「영속 세션 host 업데이트 결과: …」가 **모달 토스트로 도크를 덮는다**. 앱을 방금 빌드했을 때 정확히
 # 그 상태가 되므로, 캡처 직전에 빌드하는 이 하니스에서는 **자주** 덮인다 — 골든이 그 자리에서 흔들렸다
 # (적대적 검증 2026-09-14). 이 캡처가 보려는 것은 도크이고 원격 SCM 은 host 축과 무관하다.
-printf 'session.keep-alive-after-quit = false\n' > "$CAP_HOME/.config/maru/config"
+{
+	printf 'session.keep-alive-after-quit = false\n'
+	# ⚠️ **조용한 셸을 박는다.** 원격 강제는 OSC 를 **셸에 타이핑해서** 보내는데, 사용자의 rc 가 말을 걸면
+	# (oh-my-zsh 의 `Would you like to update? [Y/n]` 이 그랬다) 그 프롬프트가 **첫 글자를 먹는다** —
+	# `printf` 가 `rintf` 가 되어 OSC 가 영영 안 가고, 캡처는 **로컬 화면**을 찍고도 성공으로 끝난다
+	# (적대적 검증 2026-09-14 에서 실제로 그 그림이 나왔다). 격리 HOME 만으로는 안 막힌다.
+	printf 'shell.command = /bin/sh\n'
+} > "$CAP_HOME/.config/maru/config"
 
 CTL_WANT=$(zig run "$ROOT/tools/remote-scm/ctl_path.zig" -- "$CAP_HOME" "$MARU_REMOTE_SCM_DEST" 2>&1 | tail -1)
 case "$CTL_WANT" in
@@ -83,6 +98,9 @@ env -u CLAUDE_CODE_CHILD_SESSION \
 	tail -20 "$CAP_HOME/app.log" >&2
 	exit 1
 }
+# **앱 로그를 남긴다.** 격리 HOME 은 지워지므로, 캡처가 이상할 때 뒤늦게 볼 것이 없어진다 —
+# 「그림이 틀렸다」를 진단할 유일한 실마리다(적대적 검증에서 실제로 그 로그가 없어 헤맸다).
+cp "$CAP_HOME/app.log" "${OUT%.png}.log" 2>/dev/null || true
 [ -s "$SHOT" ] || { echo "capture: 스크린샷이 안 나왔다" >&2; tail -20 "$CAP_HOME/app.log" >&2; exit 1; }
 
 # **PPM 도 남긴다.** 골든 게이트는 PPM 을 읽는다(`tests/support/ppm.zig` 가 P6 만 안다) — 사람은

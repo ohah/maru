@@ -573,14 +573,25 @@ fn projectAgentTurns(self: *AppSession, arena: std.mem.Allocator) ?Projection {
     const m = component.types.DockMetrics.resolve(scmDockScaleMilli(self));
     const now_s: i64 = @intCast(@divFloor(std.Io.Clock.real.now(self.io).nanoseconds, std.time.ns_per_s));
 
+    // ⚠️ **원격 목록을 보는 동안에는 이 탭이 «아직 안 된다»고 말한다**(사용자 결정 2026-09-14).
+    //
+    // 링은 **에이전트 세션**의 것이지 저장소의 것이 아니라, 원격 pane 으로 옮겨도 **로컬 세션의 턴이
+    // 그대로 남는다.** 그 줄들은 원격 커밋 목록 옆에서 「이 기계의 기록」으로 읽히고, RS7-0 이 읽기를
+    // 막아 둔 탓에 개수(`N개 파일`)도 영영 안 차고 눌러도 이유 없이 실패한다 — **세 가지 어긋남이
+    // 한 화면에 겹친다.**
+    //
+    // 반쪽으로 보여 주느니 **한 줄로 말한다**: 계약 §2.3 의 「원격에서 아직 지원하지 않는 동작은 이유를
+    // 말한다」가 이 자리에도 걸린다. 턴 축을 원격으로 여는 것은 `agent-turn-changes` 의 일이다.
+    const remote = git_ops.scmTargetIsRemote(self);
+
     var rows_buf: [maru.session.turn_snapshot.capacity]maru.session.turn_snapshot.Ring.TimelineRow = undefined;
     // **한 번만 조회한다** — 행과 «놓친 턴» 이 같은 링을 보므로 두 번 물으면 같은 답을 두 번 계산한다.
-    const active_ring = activeTurnRing(self);
+    const active_ring = if (remote) null else activeTurnRing(self);
     const rows = if (active_ring) |ring| ring.timeline(&rows_buf) else &[_]maru.session.turn_snapshot.Ring.TimelineRow{};
 
     // 펼친 턴의 파일 줄도 목록에 든다(커밋과 같은 규율·같은 슬롯).
     var file_rows: usize = 0;
-    if (self.scm_expanded_turn != null) {
+    if (!remote and self.scm_expanded_turn != null) {
         var files = maru.session.git_status.iterateCommitFiles(self.scm_commit_files_text);
         while (files.next()) |_| file_rows += 1;
         if (file_rows == 0) file_rows = 1; // 읽는 중·실패·빈 턴을 한 줄로 말한다
@@ -596,7 +607,8 @@ fn projectAgentTurns(self: *AppSession, arena: std.mem.Allocator) ?Projection {
     const missed_rows: usize = if (missed > 0) 1 else 0;
     // **밀려난 기록도 목록이 비어 있든 아니든 말한다** — 바로 위와 같은 이유다. 링이 다시 섰으면 그 링이
     // 그 사실을 들고 있고(`history_evicted`), 아직 안 돌아왔으면 맵의 자취가 답한다.
-    const evicted = if (active_ring) |ring| ring.history_evicted else activeTurnRingEvicted(self);
+    // 원격이면 **로컬 링의 사정을 말하지 않는다** — 「밀려났다」는 이 화면의 사실이 아니다.
+    const evicted = if (remote) false else if (active_ring) |ring| ring.history_evicted else activeTurnRingEvicted(self);
     // 목록이 비면 **아래 «빈 이유» 가 이 말을 대신한다** — 같은 사실을 두 줄로 내지 않는다.
     const evicted_rows: usize = if (evicted and rows.len > 0) 1 else 0;
     // 히스토리 탭과 같은 이유로 동작 결과 줄을 남긴다(P6 — 쓰기는 변경 사항 탭에서 걸지만 **결과는 탭을
@@ -631,12 +643,18 @@ fn projectAgentTurns(self: *AppSession, arena: std.mem.Allocator) ?Projection {
         //
         // **밀려난 것도 «없다» 가 아니다**(적대적 검증 5회차). 맵 상한을 넘겨 그 세션이 버려졌으면 기록은
         // 있었는데 사라진 것이라, 같은 문구로 말하면 화면이 없던 일로 만든다.
-        items[n] = .{ .notice = if (agentPresentWithoutIdentity(self))
-            maru.i18n.t(.scm_turns_need_hooks)
-        else if (evicted)
-            maru.i18n.t(.scm_turns_evicted)
-        else
-            maru.i18n.t(.scm_no_turns) };
+        items[n] = .{
+            .notice = if (remote)
+                // **원격이 맨 앞이다** — 아래 셋은 전부 «로컬 링이 왜 비었나» 라서, 원격에서는 물음 자체가
+                // 다르다(훅을 깔라는 말이 저쪽 기계에 대한 것으로 읽히면 사용자는 엉뚱한 일을 한다).
+                maru.i18n.t(.scm_turns_remote_unsupported)
+            else if (agentPresentWithoutIdentity(self))
+                maru.i18n.t(.scm_turns_need_hooks)
+            else if (evicted)
+                maru.i18n.t(.scm_turns_evicted)
+            else
+                maru.i18n.t(.scm_no_turns),
+        };
         n += 1;
     }
 

@@ -15106,7 +15106,24 @@ pub const AppSession = struct {
                 open.failed = true;
                 return;
             };
-            if (backend.submit(path, h.data_offset, h.data_len, target, marker_preview_decode_key, null)) |gen|
+            // **원격이면 그 구간을 저쪽에서 당겨온다**(P3 · RAV6). 저쪽 오프셋을 이쪽 `openFile` 에
+            // 넘기면 같은 모양의 로컬 경로가 열려 **남의 그림**이 뜬다 — 갤러리가 §13.6 N1 에서
+            // 잡은 그 사고이고, 여기서도 같은 규율을 진다.
+            //
+            // 목적지는 **활성 Term 의 관측**에서 온다(업로드·SCM·갤러리 스캔과 같은 출처 — 두 벌을
+            // 만들지 않는다). 원격인데 못 얻으면 **안 건다**: 로컬로 떨어뜨리면 위 사고가 난다.
+            var remote_ctx: ?@TypeOf(self.remoteUploadContextFor(term).?) = null;
+            defer if (remote_ctx) |ctx| ctx.deinit(self.allocator);
+            var remote: ?agent_image_decode_backend.Backend.RemoteTarget = null;
+            if (self.agent_activity.source_remote) {
+                remote_ctx = self.remoteUploadContextFor(term);
+                const ctx = remote_ctx orelse {
+                    open.failed = true;
+                    return;
+                };
+                remote = .{ .ctl = ctx.ctl, .dest = ctx.dest };
+            }
+            if (backend.submit(path, h.data_offset, h.data_len, target, marker_preview_decode_key, remote)) |gen|
                 open.decode_generation = gen;
             return;
         }

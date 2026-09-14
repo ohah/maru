@@ -15163,7 +15163,10 @@ pub const AppSession = struct {
     fn appendMarkerPreviewFrameQuads(self: *AppSession, place: chrome.components.image_preview.Placement) void {
         const tk = self.buildChromeTokens();
         const border = packOpaqueRgb(tk.palette.get(.focus_accent));
-        const bg = self.chromeQuadBg(packOpaqueRgb(tk.palette.get(.surface_bg)));
+        // **불투명하게 둔다.** 사이드바 같은 chrome 은 `chromeQuadBg` 로 `window.opacity` 를 함께 먹어
+        // 창이 반투명하면 같이 비쳐야 맞지만, 팝업은 **떠 있는 것**이라 뒤가 비치면 그림이 배경 글자와
+        // 섞여 읽히지 않는다(사용자 제보 2026-09-14). 그래서 창 투명도를 따르지 않는다.
+        const bg = packOpaqueRgb(tk.palette.get(.surface_bg));
         const b: f32 = @floatFromInt(chrome.components.image_preview.border_px);
         const bx: f32 = @floatFromInt(place.box.x);
         const by: f32 = @floatFromInt(place.box.y);

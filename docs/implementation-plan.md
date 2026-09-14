@@ -1500,7 +1500,9 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    [검증 매트릭스](verification-matrix.md)의 `Workspace restore checkpoint backup re-arm` 행대로 구현·검증 완료했다.
    따라서 현재 문서에 열린 세션 호스트 비릴리스 기능 구현 항목은 없다.
    capability 없는 N-1 host의 lifecycle polling/fallback과 실제 AppKit 입력기 후보창·조합 픽셀 검증도 일반
-   current-current 제품 경로의 완료 주장과 분리한다. 앞 항목은 호환 확장이고 뒤 항목은 환경 의존 검증 gap이다.
+   current-current 제품 경로의 완료 주장과 분리한다. 앞 항목은 호환 확장이다. 조합 픽셀 v2a의 제품
+   capture/receipt/독립 판정 배선은 구현됐지만 잠금 해제된 exact-frontmost AppKit green이 남았고, OS 후보창 v2b는
+   생산자부터 구현 전인 환경 의존 검증 gap이다.
    실제 다른 UID process 거부는 passwordless sudo가 있는 macOS gate에서 root client가 owner-only socket을 통과한 뒤
    kernel peer credential로 admission 전에 거부되는 제품 스모크를 구현·실측했다.
    G3은 출하 뒤 기본값을 다시 바꿀 때만

@@ -1697,6 +1697,25 @@ fn harvestOne(self: *AppSession) bool {
     var r = backend.take() orelse return false;
     defer r.deinit(self.allocator); // 아래에서 소유를 옮기면 pixels 를 비워 둔다
 
+    // **마커 프리뷰 것은 갤러리 인덱스와 섞이지 않는다** — 같은 워커를 쓰지만 키가 다르다(MP1).
+    // 이 갈림이 없으면 프리뷰 픽셀이 격자 타일 자리에 붙는다.
+    if (r.hit_index == app_session_mod.marker_preview_decode_key) {
+        if (self.marker_preview_open) |*open| {
+            if (r.pixels.len == 0) {
+                open.failed = true; // 못 풀었다 — 다시 걸지 않는다
+            } else {
+                self.allocator.free(open.pixels);
+                open.pixels = r.pixels;
+                open.width = r.width;
+                open.height = r.height;
+                open.uploaded = false; // 새 픽셀이라 다시 올려야 한다(§5)
+                r.pixels = &.{}; // 소유 이동
+                self.metal_dirty = true;
+            }
+        }
+        return true;
+    }
+
     // **크게 보기 것이 먼저다.** 두 요청은 같은 워커를 쓰므로 generation 으로 가른다.
     if (self.agent_activity.open) |*op| {
         if (op.decoding != 0 and r.generation == op.decoding) {

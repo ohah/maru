@@ -916,13 +916,13 @@ test "꼬리 count 가 어긋나면 거부한다 — 중간 유실을 잡는다"
 test "판이 다르면 즉시 거부한다 — 앞판도 뒷판도" {
     // **뒷판**(우리보다 새 헬퍼).
     {
-        var p = Parser.init("maru-rav 5\nX 0\n");
+        var p = Parser.init("maru-rav 6\nX 0\n");
         try testing.expectError(ParseError.UnsupportedVersion, p.next());
     }
     // 🔥 **앞판**(옛 헬퍼가 아직 깔려 있는 실제 경우 — 이 스택이 판 1 → 2 → 3 으로 올렸다). 여기서
     // 안 걸리면 `S` 줄의 자리가 밀린 값을 읽어 **자국이 엉뚱한 수**가 되고, 이어읽기가 안 읽은 구간을
     // 「이미 봤다」로 친다.
-    for ([_][]const u8{ "maru-rav 1\nX 0\n", "maru-rav 2\nX 0\n", "maru-rav 3\nX 0\n" }) |bytes| {
+    for ([_][]const u8{ "maru-rav 1\nX 0\n", "maru-rav 2\nX 0\n", "maru-rav 3\nX 0\n", "maru-rav 4\nX 0\n" }) |bytes| {
         var p = Parser.init(bytes);
         try testing.expectError(ParseError.UnsupportedVersion, p.next());
     }
@@ -1007,12 +1007,16 @@ fn firstRecord(bytes: []const u8) !Record {
 }
 
 /// 자리 번호(0 부터) — `appendRecord` 의 순서와 같아야 한다.
+///
+/// ⚠️ **필드를 중간에 끼우면 그 뒤가 전부 밀린다.** 판 5(MP1)가 `activity` 뒤에 `marker_n` 을
+/// 넣으면서 아래 셋이 +1 됐다 — 안 고치면 오염 줄이 **엉뚱한 칸**을 건드려 판정자가 「다른 오류」로
+/// 죽는다(실제로 CI 가 넷을 잡았다).
 const f_kind: usize = 4;
-const f_result_flags: usize = 15;
-const f_source: usize = 22;
+const f_result_flags: usize = 16;
+const f_source: usize = 23;
 /// 판 4 가 `source` 와 라벨 길이 **사이**에 「본문에 걸렸다」를 끼웠다(RAV8b).
-const f_body_matched: usize = 23;
-const f_label_len: usize = 24;
+const f_body_matched: usize = 24;
+const f_label_len: usize = 25;
 
 test "필드 수가 계약과 맞다 — 판정자의 오염 줄이 자리를 안 밀리게" {
     var buf: [1024]u8 = undefined;

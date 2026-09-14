@@ -1353,7 +1353,7 @@ pub const Config = struct {
     render_frame_rate: u32 = render_frame_rate_default,
     /// 터미널 배경 이미지 파일 경로(PNG). 비면(기본) 배경 이미지 없음(현행). 설정하면 그 PNG를 디코드해 창 전체를
     /// 덮는 배경으로 셀 뒤에 그린다(aspect-fill — 종횡비 유지 cover). default 배경 셀(빈 영역)이 투명이라 이미지가
-    /// 비치고, 명시 배경색 셀·텍스트는 그 위에 그려진다. **PNG 8-bit truecolor만**(maru 내장 디코더 — JPEG 등은 후속).
+    /// 비치고, 명시 배경색 셀·텍스트는 그 위에 그려진다. **PNG 전 변종**(wuffs — JPEG 등 다른 포맷은 후속).
     /// 경로는 `~` 확장·상대경로 미지원(절대경로 권장). 못 읽거나 디코드 실패면 배경 없음(조용히 폴백). loader가
     /// `window.background-image` 키로 파싱. (docs/configuration.md·settings-page.md F2-1)
     window_background_image: []const u8 = "",

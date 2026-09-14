@@ -4,8 +4,8 @@
 //! 새로 만들면 build.zig 의 **29곳**에 붙여야 하고 그 목록이 곧 드리프트 자리가 된다. 여기서는 함수
 //! 선언만 두고 프레임워크 링크는 최종 앱이 한다(이 라이브러리는 static 이라 링크를 안 한다).
 //!
-//! **왜 `terminal/png.zig` 를 안 쓰나.** 그것은 kitty graphics 용 **이식 가능 코어**라 8-bit truecolor PNG
-//! 만 받는다(실측 코퍼스의 97.8%). 뷰어는 platform 에 살므로 그 제약이 없고, ImageIO 는 **62종**을
+//! **왜 `terminal/png.zig` 를 안 쓰나.** 그것은 kitty graphics 용 **이식 가능 코어**라 PNG 만
+//! 받는다(실측 코퍼스의 97.8%). 뷰어는 platform 에 살므로 그 제약이 없고, ImageIO 는 **62종**을
 //! 디코드한다 — jpeg(1.9%)·webp·heic·avif 까지 공짜다. WebKit 도 같은 ImageIO 를 쓰므로 네이티브가
 //! 웹뷰보다 커버리지가 좁아지지 않는다.
 //!

@@ -84,6 +84,10 @@
             .url = "https://github.com/fwcd/tree-sitter-kotlin/archive/refs/tags/0.3.8.tar.gz",
             .hash = "N-V-__8AAJDidQH49dvfObVZZawejaO4XMsuHJtV-esBrGJc",
         },
+        .wuffs = .{
+            .url = "https://github.com/google/wuffs/archive/refs/tags/v0.4.0-alpha.10.tar.gz",
+            .hash = "N-V-__8AABIA4AF2JRGKJvP_rNz61IYJiWeHLsermvYzO6cR",
+        },
     },
     .paths = .{
         "build.zig",

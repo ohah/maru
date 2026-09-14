@@ -95,6 +95,46 @@ fn linkSessionHostNotificationCompileStub(b: *std.Build, compile: *std.Build.Ste
     });
 }
 
+/// `src/maru.zig` 루트 모듈에 PNG 코덱(wuffs)을 매단다.
+///
+/// **maru 루트 모듈을 세우는 자리는 전부 이걸 불러야 한다.** PNG 디코드는 코어 기능이고
+/// (kitty `f=100` · `window.background-image`), 한 자리가 빠지면 그 타깃에서 링크가 깨진다.
+/// `tests/png_codec_wiring.zig` 가 `build.zig` 안의 자리 수를 세어 누락을 잡는다.
+///
+/// **C 를 `maru` 모듈에 직접 안 매단다** — 같은 모듈에 붙는 ObjC 어댑터들이 wuffs 셰임 헤더를
+/// 보게 되기 때문이다(`src/terminal/wuffs_cshim/README.md`). 전용 모듈로 갈라 include 경로가
+/// `png_wuffs.c` 하나에만 닿게 한다.
+fn attachPngCodec(b: *std.Build, maru: *std.Build.Module) void {
+    const codec = b.createModule(.{
+        .root_source_file = b.path("src/terminal/png_codec.zig"),
+        .target = maru.resolved_target,
+        .optimize = maru.optimize,
+        .pic = maru.pic,
+    });
+    if (b.lazyDependency("wuffs", .{})) |dep| {
+        // 셰임이 시스템 헤더보다 **먼저** 검색돼야 한다 — wasm32-freestanding 에는 libc 가 없고,
+        // 타깃마다 다른 헤더를 보면 wasm 에서만 터지는 결함이 생긴다(그 빌드가 제일 늦게 돈다).
+        codec.addIncludePath(b.path("src/terminal/wuffs_cshim"));
+        codec.addIncludePath(dep.path("release/c"));
+        codec.addCSourceFile(.{
+            .file = b.path("src/terminal/png_wuffs.c"),
+            .flags = &.{
+                "-std=c11",
+                // 제3자 C 를 우리 UBSan 정책으로 재단하지 않는다(tree-sitter 배선과 같은 결).
+                "-fno-sanitize=undefined",
+                // **wuffs 전체가 한 파일이다.** 아래 둘이 안 쓰는 가지를 컴파일 단계에서 끊는다
+                // (실측 `-O2`: object 1,096,368 → 410,480 B).
+                //  · STATIC_FUNCTIONS: 안 쓰는 코덱·헬퍼가 내부 링크가 돼 죽은 코드로 걷힌다.
+                //  · DST_PIXEL_FORMAT 허용 목록: 우리는 RGBA_NONPREMUL 하나만 요청한다.
+                "-DWUFFS_CONFIG__STATIC_FUNCTIONS",
+                "-DWUFFS_CONFIG__DST_PIXEL_FORMAT__ENABLE_ALLOWLIST",
+                "-DWUFFS_CONFIG__DST_PIXEL_FORMAT__ALLOW_RGBA_NONPREMUL",
+            },
+        });
+    }
+    maru.addImport("png_codec", codec);
+}
+
 pub fn build(b: *std.Build) void {
     // 🔥 **macOS 전용 게이트의 집계 — 선언이 «첫 사용보다 앞»이어야 한다**(계획 §28).
     //
@@ -167,6 +207,10 @@ pub fn build(b: *std.Build) void {
     // 않는다(그 목록은 upstream이 바꾼다).
     // **번들에 넣을 라이선스 전문**(third-party-licenses.md — *"컴파일 산출물이 들어가므로
     // 라이선스 전문을 앱 리소스에 동봉한다"*). 코어와 grammar가 exe에 링크되므로 의무가 생겼다.
+    // **wuffs 도 컴파일 산출물이 배포물에 들어간다** — PNG 디코더가 exe·wasm 양쪽에 링크된다.
+    // `LICENSE` 한 파일에 MIT·Apache-2.0 전문이 둘 다 들어 있어 그것만 동봉하면 의무가 끝난다.
+    const wuffs_license: ?std.Build.LazyPath =
+        if (b.lazyDependency("wuffs", .{})) |dep| dep.path("LICENSE") else null;
     var ts_core_license: ?std.Build.LazyPath = null;
     const GrammarLicense = struct { dep: []const u8, file: []const u8, path: std.Build.LazyPath };
     var grammar_licenses: std.ArrayList(GrammarLicense) = .empty;
@@ -303,6 +347,7 @@ pub fn build(b: *std.Build) void {
     // terminfo 소스는 src/ 밖(terminfo/maru.terminfo — tools/·docs가 공유하는 단일 출처)이라 @embedFile이
     // 직접 못 읽는다. 빌드 import로 등록해 cli/ssh.zig가 @embedFile("maru_terminfo")로 바이너리에 심는다
     // (maru ssh 자기완결성 — 로컬 설치 없이 원격 전파). 파일을 옮기지 않아 참조 중복이 없다.
+    attachPngCodec(b, maru_mod);
     maru_mod.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
 
     // docs/configuration.md도 src/ 밖이라 @embedFile이 직접 못 읽는다. config 스키마 doc-drift 가드(CS-3,
@@ -450,6 +495,7 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
                 .pic = if (mt.pic) true else null,
             });
+            attachPngCodec(b, mobile_maru_mod);
             const lib = b.addLibrary(.{
                 .name = mt.lib_name,
                 .linkage = .static,
@@ -480,6 +526,7 @@ pub fn build(b: *std.Build) void {
             .target = wasm_target,
             .optimize = .ReleaseSmall,
         });
+        attachPngCodec(b, wasm_maru_mod);
         const wasm = b.addExecutable(.{
             .name = "maru-vt",
             .root_module = b.createModule(.{
@@ -1203,6 +1250,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
             .imports = &.{.{ .name = "shutdown_wire_contract", .module = shutdown_wire_contract_mod }},
         });
+        attachPngCodec(b, cross_mod);
         cross_mod.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
         cross_mod.addAnonymousImport("config_doc_md", .{ .root_source_file = b.path("docs/configuration.md") });
         const cross_tests = addProjectTest(b, .{ .root_module = cross_mod });
@@ -1224,6 +1272,9 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
             .imports = &.{.{ .name = "shutdown_wire_contract", .module = shutdown_wire_contract_mod }},
         });
+        // `maru.zig` 는 아니지만 **같은 그래프를 자기 루트로 다시 세운다** — 그래서 PNG 코덱도
+        // 여기 있어야 `@import("png_codec")` 이 풀린다(실측: 안 주면 세 타깃이 다 빨개진다).
+        attachPngCodec(b, surface_mod);
         surface_mod.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
         surface_mod.addAnonymousImport("config_doc_md", .{ .root_source_file = b.path("docs/configuration.md") });
         const surface_tests = addProjectTest(b, .{ .root_module = surface_mod });
@@ -2179,6 +2230,11 @@ pub fn build(b: *std.Build) void {
         );
         notification_release_helper_binary = notification_release_helper_bin;
         const notification_helper_arg = grammar_licenses.items.len + 3;
+        const wuffs_license_arg = grammar_licenses.items.len + 4;
+        const wuffs_license_cp = b.fmt(
+            "cp \"${{{d}}}\" zig-out/Maru.app/Contents/Resources/Licenses/wuffs-LICENSE; ",
+            .{wuffs_license_arg},
+        );
         const notification_helper_cp = b.fmt(
             "cp \"${{{d}}}\" zig-out/Maru.app/Contents/Helpers/maru-session-host-notification-center-helper; ",
             .{notification_helper_arg},
@@ -2186,7 +2242,7 @@ pub fn build(b: *std.Build) void {
 
         const macos_app_bundle = b.addSystemCommand(&.{
             "sh", "-eu", "-c",
-            b.fmt("{s}{s}{s}{s}{s}{s}", .{
+            b.fmt("{s}{s}{s}{s}{s}{s}{s}", .{
                 // ⑴ 번들 앞부분(정적)
                 // set -e로 어느 단계든 실패하면 즉시 멈춘다. 폰트가 없는 clean checkout에서 glob이
                 // 빈 채 cp가 조용히 실패하지 않도록, 번들 전에 .ttf 존재를 명시적으로 확인하고 명확한
@@ -2225,9 +2281,10 @@ pub fn build(b: *std.Build) void {
                 // ⑵ grammar 라이선스 복사 — **표에서 만든다**($3부터 순서대로). 손으로 적으면 언어를
                 //    늘릴 때 여기만 빠지고, 그 누락은 아무 테스트도 안 깨뜨린다.
                 notification_helper_cp,
+                wuffs_license_cp,
                 grammar_license_cp,
                 // ⑶ 확인 목록도 같은 표에서 — 복사와 검사가 갈리면 검사가 헛돈다.
-                "for lic in tree-sitter-LICENSE ",
+                "for lic in tree-sitter-LICENSE wuffs-LICENSE ",
                 grammar_license_names,
                 // ⑷ 나머지(정적)
                 "; do " ++
@@ -2283,6 +2340,9 @@ pub fn build(b: *std.Build) void {
         if (grammar_licenses.items.len == 0) @panic("no grammar LICENSE collected");
         for (grammar_licenses.items) |lic| macos_app_bundle.addFileArg(lic.path);
         macos_app_bundle.addFileArg(notification_release_helper_bin);
+        // **`$<grammar+4>`** — 위 `wuffs_license_arg` 와 같은 자리여야 한다. 없으면 조용히 빼지
+        // 않고 죽는다(재배포 의무는 빠뜨려도 아무 테스트가 안 깨지는 부류다 — 폰트·tree-sitter 와 같다).
+        macos_app_bundle.addFileArg(wuffs_license orelse @panic("wuffs LICENSE missing"));
         macos_app_bundle.setCwd(b.path("."));
         macos_app_bundle.step.dependOn(&macos_app_compile.step);
         macos_app_bundle.step.dependOn(remote_watch_step); // 번들이 싣는 것을 먼저 만든다(RW2b)
@@ -3692,6 +3752,7 @@ pub fn build(b: *std.Build) void {
         }),
         .filters = &.{"RF5a"},
     });
+    attachPngCodec(b, file_tree_model_tests.root_module);
     file_tree_model_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
     const run_file_tree_model_tests = b.addRunArtifact(file_tree_model_tests);
     run_file_tree_model_tests.addArg("--maru-expect-tests=24"); // 이름 있는 셋 + 이 그래프의 이름 없는 test 블록들(필터와 무관하게 컴파일된다)
@@ -3710,6 +3771,7 @@ pub fn build(b: *std.Build) void {
         }),
         .filters = &.{ "병합 충돌의 세 판은", "stage 셋", "spec 버퍼가 모자라면", "비교 기준마다 탭 라벨이" },
     });
+    attachPngCodec(b, merge_stage_tests.root_module);
     merge_stage_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
     const run_merge_stage_tests = b.addRunArtifact(merge_stage_tests);
     b.step("test-merge-stages", "Run the merge-stage (S3a) judges only").dependOn(&run_merge_stage_tests.step);
@@ -3754,6 +3816,7 @@ pub fn build(b: *std.Build) void {
         }),
         .filters = &.{ "충돌 행은 스테이지가 아니라", "충돌과 평범한 변경이 섞인 섹션", "행: 스테이지·언스테이지·충돌" },
     });
+    attachPngCodec(b, scm_row_model_tests.root_module);
     scm_row_model_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
     const run_scm_row_model_tests = b.addRunArtifact(scm_row_model_tests);
     b.step("test-scm-row-model", "Run the SCM row-action model judges only (S1 filter)").dependOn(&run_scm_row_model_tests.step);
@@ -3769,6 +3832,7 @@ pub fn build(b: *std.Build) void {
         }),
         .filters = &.{"RF6a wire"},
     });
+    attachPngCodec(b, remote_mutation_wire_tests.root_module);
     remote_mutation_wire_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
     const run_remote_mutation_wire_tests = b.addRunArtifact(remote_mutation_wire_tests);
     run_remote_mutation_wire_tests.addArg("--maru-expect-tests=25"); // 이름 있는 넷 + 이름 없는 블록들
@@ -5103,6 +5167,17 @@ pub fn build(b: *std.Build) void {
     run_perf_gate_mode_boundary_tests.addArg("--maru-expect-tests=2");
     run_perf_gate_mode_boundary_tests.setCwd(b.path("."));
     boundary_step.dependOn(&run_perf_gate_mode_boundary_tests.step);
+    const png_codec_wiring_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/png_codec_wiring.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_png_codec_wiring_tests = b.addRunArtifact(png_codec_wiring_tests);
+    run_png_codec_wiring_tests.addArg("--maru-expect-tests=2");
+    run_png_codec_wiring_tests.setCwd(b.path("."));
+    boundary_step.dependOn(&run_png_codec_wiring_tests.step);
     const session_host_cr6f_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_cr6f_boundary.zig"),
@@ -19334,6 +19409,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = checkpoint_product_optimize,
         });
+        attachPngCodec(b, checkpoint_product_maru_mod);
         const checkpoint_product_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("tests/workspace_checkpoint_product.zig"),

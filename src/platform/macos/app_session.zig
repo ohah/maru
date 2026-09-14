@@ -15101,9 +15101,27 @@ pub const AppSession = struct {
             "" // 디코드 중 — 빈 상자만(글자를 깜빡이면 더 산만하다)
         else
             null;
-        var ops: std.ArrayList(chrome.draw.Op) = .empty;
+        // **테두리는 GPU quad 로 직접 그린다.** chrome `Op` 는 셀 격자로 lowering 되는데, 프리뷰는
+        // 셀에 안 맞는 픽셀 사각형이라 1 px 테두리가 격자에서 사라졌다(사용자 제보 — 「팝업인 줄
+        // 모르겠다」). 갤러리가 「chrome 이 테두리, gpu_images 가 픽셀」로 나눈 분업은 **도크 안의
+        // 셀 격자**에서 성립하는 것이고, 터미널 위 임의 좌표에는 그대로 오지 않는다.
         const tk = self.buildChromeTokens();
-        try chrome.components.image_preview.view(place, notice, p, &tk, arena, &ops);
+        const border = packOpaqueRgb(tk.palette.get(.focus_accent));
+        const bg = self.chromeQuadBg(packOpaqueRgb(tk.palette.get(.surface_bg)));
+        const b: f32 = @floatFromInt(chrome.components.image_preview.border_px);
+        const bx: f32 = @floatFromInt(place.box.x);
+        const by: f32 = @floatFromInt(place.box.y);
+        const bwf: f32 = @floatFromInt(place.box.w);
+        const bhf: f32 = @floatFromInt(place.box.h);
+        // 바깥 테두리 색으로 상자를 채우고 그 안을 배경색으로 덮으면 테가 남는다(quad 하나가
+        // border_widths 를 안 받는 경로라 두 장으로 만든다 — 셰이더 분기를 늘리지 않는다).
+        self.appendSolidQuad(bx, by, bwf, bhf, border, 2);
+        self.appendSolidQuad(bx + b, by + b, bwf - 2 * b, bhf - 2 * b, bg, 2);
+        // 문구가 있으면 그것만 chrome 으로 얹는다(글자는 셀 격자가 맞는 도메인이다).
+        const text = notice orelse return;
+        if (text.len == 0) return;
+        var ops: std.ArrayList(chrome.draw.Op) = .empty;
+        try chrome.components.image_preview.view(place, text, p, &tk, arena, &ops);
         if (ops.items.len > 0) try out.append(arena, .{
             .layer = chrome.components.image_preview.layer,
             .ops = ops.items,

@@ -246,6 +246,19 @@ pub const ScenarioId = enum {
     /// 앵커를 모서리 **밖**이 아니라 안쪽 가까이 두는 이유: 밖이면 `anchored_below_workspace` 갈래로
     /// 빠져 다른 계약을 재게 된다. 여기서 재려는 것은 평범한 clamp 다.
     context_menu_bottom_right,
+    /// **설정 드롭다운이 펼쳐진 모습.** 이 컴포넌트에는 Lab 시나리오가 **하나도 없었다** — 같은
+    /// `popup_box.place` 를 쓰면서도 세로 정책이 `context_menu` 와 **다른데**(아래 참조) 그 차이를
+    /// 보는 그림이 없었다. 여기서 재는 것은 「목록이 control 아래에 서는가」와 「상자가 control 보다
+    /// 좁아지지 않는가」(`@max(box_w, anchor.w)`)다.
+    dropdown_open,
+    /// 같은 드롭다운을 **창 아래쪽**에서 펼친 것. `below_clamp` 의 본체다 — 아래 공간이 모자라면
+    /// **위로 뒤집지 않고 당긴다.** 뒤집으면 목록이 control 위의 다른 행을 덮어 「저 행의 목록인가」로
+    /// 읽히기 때문이다(chrome-strategy.md §5.4).
+    ///
+    /// ⚠️ **`at_anchor` 와 갈리는 유일한 자리다.** 점 앵커에서는 두 정책이 수학적으로 같아
+    /// (`popup_box` A44) 평범한 캡처로는 구분되지 않는다 — 앵커에 **두께가 있고**(control 한 줄)
+    /// 아래가 모자랄 때만 다르다. 그래서 이 시나리오가 없으면 `below_clamp` 는 그림으로 증명되지 않는다.
+    dropdown_bottom_clamp,
     /// N1 §3.5 — **디스크에서 읽은 파일이 화면에 뜬다.** 앞의 편집기 시나리오들은 전부 소스에 박은
     /// 배열을 그리므로, `openPath`가 실제로 무엇을 돌려주는지는 증명하지 않는다. 여기서는 호출자가
     /// 파일을 써서 `openPath`로 읽고 그 줄들을 그대로 넘긴다(`Scenario.lines`).
@@ -387,6 +400,7 @@ pub fn buildFrame(
         .scm_history => buildScmHistoryFrame(scenario, tokens, buffers),
         .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome => buildFileTreeFrame(scenario, tokens, buffers),
         .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper, .context_menu_bottom_right => buildContextMenuFrame(scenario, tokens, buffers),
+        .dropdown_open, .dropdown_bottom_clamp => buildDropdownFrame(scenario, tokens, buffers),
         .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_selection, .editor_find, .editor_caret_bar, .editor_caret_block, .editor_caret_underline => buildEditorGutterFrame(scenario, buffers),
         .editor_diff, .editor_diff_scrolled, .editor_diff_selection => buildEditorDiffFrame(scenario, buffers),
         .editor_merge_panes, .editor_merge_narrow => buildEditorMergeFrame(scenario, buffers),
@@ -1343,7 +1357,7 @@ fn buildDockFrame(
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
             .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
             // editor_gutter는 buildEditorGutterFrame이 처리한다 — 도크 목록을 타지 않는다.
-            .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper, .context_menu_bottom_right, .scm_rows, .scm_history, .scm_row_hover, .scm_conflict_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_selection, .editor_find, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_diff, .editor_diff_scrolled, .editor_diff_selection, .editor_merge_panes, .editor_merge_narrow => unreachable,
+            .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper, .context_menu_bottom_right, .dropdown_open, .dropdown_bottom_clamp, .scm_rows, .scm_history, .scm_row_hover, .scm_conflict_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_selection, .editor_find, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_diff, .editor_diff_scrolled, .editor_diff_selection, .editor_merge_panes, .editor_merge_narrow => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{
@@ -1487,6 +1501,70 @@ fn buildContextMenuFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffe
         // 메뉴는 자기 hit-test 를 `itemAt` 으로 한다(트리를 안 쓴다) — 빈 트리를 낸다.
         .tree = .{ .entries = buffers.entries[0..0], .generation = 0 },
         .draws = .{ .layer = chrome.components.context_menu.layer, .ops = ops.items },
+    };
+}
+
+/// 펼쳐진 설정 드롭다운 한 프레임. **제품과 같은 `dropdown.view` + `dropdown.viewPopup` 을 부른다** —
+/// 조합(어느 항목이 몇 개인가·control 이 어디인가)만 Lab 이 쥐고, 자리와 폭 계산은 제품 코드가 한다.
+///
+/// 항목은 **실제 config enum 의 tagName** 에서 comptime 으로 뽑는다. 리터럴을 새로 지으면 캡처 폭이
+/// 제품과 갈리고(컨텍스트 메뉴 빌더가 i18n 키를 읽는 것과 같은 이유), 항목이 늘거나 줄면 이 그림도
+/// 따라 바뀌어야 맞다.
+fn buildDropdownFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers: FrameBuffers) !Frame {
+    // 오버레이는 op 를 arena 에 append 한다 — 없으면 빈 프레임이다(컨텍스트 메뉴 빌더와 같은 관례).
+    const arena = buffers.arena orelse return .{
+        .tree = .{ .entries = buffers.entries[0..0], .generation = 0 },
+        .draws = .{ .layer = .sidebar, .ops = buffers.ops[0..0] },
+    };
+    const cw = scenario.cell_w_px;
+    const ch = scenario.cell_h_px;
+
+    const Position = maru.config.theme.QuickTerminalPosition;
+    const items: []const []const u8 = comptime blk: {
+        const names = std.meta.fieldNames(Position);
+        var out: [names.len][]const u8 = undefined;
+        for (names, 0..) |n, i| out[i] = n;
+        const frozen = out;
+        break :blk &frozen;
+    };
+
+    // control(앵커)은 **두께가 있다** — 그것이 `below_clamp` 와 `at_anchor` 를 가르는 조건이다
+    // (점 앵커에서는 둘이 같다 · `popup_box` A44). 폭을 목록보다 **넓게** 잡아 「상자가 control 보다
+    // 좁아지지 않는가」(`@max(box_w, anchor.w)`)도 같은 그림에 든다.
+    const ctrl_w: u32 = cw * 18;
+    const anchor_y: i32 = if (scenario.id == .dropdown_bottom_clamp)
+        // 아래 공간이 목록 높이에 **모자라도록** 둔다 — 그래야 clamp 가 실제로 걸린다. 한 줄만
+        // 남기면(높이 - 2칸) 목록 다섯 줄이 들어갈 자리가 없다.
+        @as(i32, @intFromFloat(scenario.viewport_px.height)) - @as(i32, @intCast(ch)) * 2
+    else
+        @as(i32, @intCast(ch)) * 4;
+    const anchor: chrome.draw.Rect = .{
+        .x = @intCast(cw * 8),
+        .y = anchor_y,
+        .w = ctrl_w,
+        .h = ch,
+    };
+
+    var state: chrome.components.dropdown.State = .{};
+    state.show(items.len, 1); // 현재값 = 둘째 항목(첫 줄이면 기본값과 구별이 안 된다)
+
+    const p: chrome.props.ChromeProps = .{ .metrics = .{
+        .cell_width_px = cw,
+        .cell_height_px = ch,
+        .sidebar_width_px = 0,
+        .backing_width_px = @intFromFloat(scenario.viewport_px.width),
+        .backing_height_px = @intFromFloat(scenario.viewport_px.height),
+    } };
+
+    var ops: std.ArrayList(chrome.draw.Op) = .empty;
+    // control 먼저(닫힌 모습), 그 위에 목록 — 제품 순서(`settings.view` 가 폼을 그린 뒤 팝업을 얹는다)다.
+    try chrome.components.dropdown.view(anchor, items[state.selected], tokens, arena, &ops);
+    try chrome.components.dropdown.viewPopup(&state, anchor, items, p, tokens, arena, &ops);
+
+    return .{
+        // 팝업도 자기 hit-test 를 `itemAt` 으로 한다 — 빈 트리를 낸다(컨텍스트 메뉴와 같다).
+        .tree = .{ .entries = buffers.entries[0..0], .generation = 0 },
+        .draws = .{ .layer = chrome.components.dropdown.layer, .ops = ops.items },
     };
 }
 

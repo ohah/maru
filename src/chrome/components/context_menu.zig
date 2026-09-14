@@ -8,6 +8,7 @@ const std = @import("std");
 const draw = @import("../draw.zig");
 const tokens = @import("../tokens.zig");
 const props = @import("../props.zig");
+const popup_box = @import("popup_box.zig"); // 앵커 팝업 기하 공유 프리미티브(§5.4)
 const input = @import("../input.zig");
 const overlay_input = @import("overlay_input.zig"); // displayCols(EAW) 단일 출처 — 항목 폭 측정에 재사용
 
@@ -158,35 +159,19 @@ fn menuRect(state: *const State, items: []const []const u8, p: props.ChromeProps
     // 먹고 테두리에 닿는다(`itemAt` 도 이 rect 를 쓰므로 히트 영역까지 어긋난다).
     const box_w = (max_cols + state.markCols() + 2) * cw; // 좌우 1칸 패딩
     const box_h = @as(u32, @intCast(items.len)) * ch;
-    var x = state.anchor_x;
-    var y = state.anchor_y;
+    // 자리는 **공유 프리미티브**가 정한다(`popup_box`) — 우클릭 메뉴·드롭다운·이미지 프리뷰가 같은
+    // clamp 를 각자 복사해 갖고 있던 것을 한 곳으로 모았다(docs/chrome-strategy.md §5.4).
+    // 상태바 앵커 특례도 그쪽 플래그가 든다: 상태바는 창 전폭이고 workspace **밖**이라, 왼쪽 항목을
+    // `workspace.x` 로 밀면 누른 자리와 뜬 자리가 화면 절반만큼 떨어진다(사용자 제보).
     const workspace = props.workspaceRect(m);
-    const bw_px: i32 = @intCast(workspace.x + workspace.w);
-    const bh_px: i32 = @intCast(workspace.y + workspace.h);
-    // 가장자리에 **딱 붙이지 않는다.** 붙이면 그쪽 테두리가 창 경계와 겹쳐 안 보이고, 반대쪽만 둥근 모서리가
-    // 보여 잘린 것처럼 읽힌다(상태바 우측 항목에 앵커한 팝오버에서 실측 — anchor 820 + box 384 > 960이라
-    // 우단에 정확히 붙었다). 한 칸이면 테두리가 드러나기에 충분하다.
-    const edge_gap: i32 = @intCast(cw);
-    if (x + @as(i32, @intCast(box_w)) > bw_px - edge_gap) x = bw_px - edge_gap - @as(i32, @intCast(box_w)); // 우단
-    // 세로도 같은 이유로 띄운다. 상태바 항목에 앵커하면 상자 아래끝이 **작업영역 바닥 = 상태바 위**에
-    // 정확히 붙는데, 그러면 둘이 맞닿아 상태바 글자가 상자에 먹힌 것처럼 보인다(실측 캡처).
-    const edge_gap_y: i32 = @intCast(ch);
-    if (y + @as(i32, @intCast(box_h)) > bh_px - edge_gap_y) y = bh_px - edge_gap_y - @as(i32, @intCast(box_h));
-    // 좌단은 사이드바 오른쪽으로 — 메뉴는 터미널 영역 오버레이라 사이드바 chrome 위로 겹치지 않게 한다(좁은 창에서
-    // anchor가 작거나 box가 클 때). 사이드바 슬롯 우클릭이면 anchor가 사이드바 안이라 메뉴가 그 오른쪽 가장자리에 붙는다.
-    //
-    // **단 앵커가 상태바면 이 규칙을 적용하지 않는다.** 상태바는 창 전폭 띠이고 workspace **밖**에 산다
-    // (docs/status-bar.md §1) — 왼쪽 항목(브랜치·경로)은 사이드바 chrome이 아닌데도 x 범위만 보면 사이드바
-    // 안으로 판정된다. 그대로 밀면 누른 자리(x≈16)와 뜬 자리(사이드바 우단, 실측 ~700px)가 화면 절반만큼
-    // 떨어진다(사용자 제보). 그 항목 위에는 덮을 사이드바 chrome이 애초에 없다 — 상태바가 사이드바 아래를
-    // 지나가고 있기 때문이다.
-    //
-    // 판정은 **세로 clamp가 이미 쓰는 경계**를 그대로 쓴다(`workspace.y + workspace.h` = 상태바 top).
-    // 한 기능 안에서 "상태바인가"를 두 방식으로 묻지 않는다.
-    const anchored_below_workspace = state.anchor_y >= bh_px;
-    const left_bound: i32 = if (anchored_below_workspace) edge_gap else @intCast(workspace.x);
-    if (x < left_bound) x = left_bound;
-    if (y < @as(i32, @intCast(workspace.y))) y = @intCast(workspace.y);
+    const anchored_below_workspace = state.anchor_y >= @as(i32, @intCast(workspace.y + workspace.h));
+    const placed = popup_box.place(box_w, box_h, .{
+        .anchor = .{ .x = state.anchor_x, .y = state.anchor_y, .w = 0, .h = 0 },
+        .vertical = .at_anchor,
+        .anchor_below_workspace = anchored_below_workspace,
+    }, p) orelse return null;
+    const x = placed.rect.x;
+    const y = placed.rect.y;
     return .{ .x = x, .y = y, .w = box_w, .h = box_h };
 }
 

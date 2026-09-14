@@ -728,11 +728,11 @@ pub const runtime_manager_groups = [_]Group{
             "anim_advances",
             // 화면 스트림 계측. exec 뒤 0 에서 시작해도 불변식이 없다 — 로그 한 줄이 누적과
             // 증분을 함께 실으므로 재시작 경계가 읽는 사람에게 보인다(`reportMetrics`).
-            "screen_sent_bytes",
+            "screen_made_bytes",
             "screen_image_bytes",
             "screen_sends",
             "metrics_last_ns",
-            "metrics_last_sent_bytes",
+            "metrics_last_made_bytes",
             "metrics_last_image_bytes",
             "metadata_sampler_visits",
             "metadata_sampler_changes",

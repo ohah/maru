@@ -274,13 +274,14 @@ Chrome Lab 시나리오 `editor-conflict` + 골든 둘이 이것을 든다. **La
 
 | 조각 | 내용 | 화면이 달라지나 |
 | --- | --- | --- |
-| **S3b-1** | `SurfaceKind.merge` 를 **세운다** — Term 을 만들고·닫고·재개한다. 그림은 아직 편집기 하나(Result) | 조금(새 Term 이 뜬다) |
+| **S3b-1** | **병합 모드를 세운다** — 충돌 행이 `rt.editor_merge` 를 든 편집기 Term 을 열고·닫는다. 세 판은 S3a 가 읽어 싣는다. 그림은 아직 편집기 하나(Result) | 조금(탭 라벨이 갈린다) |
 | **S3b-2** | pane 넷 **배치와 그리기**(읽기 전용 셋 + Result) | **그렇다** |
 | **S3b-3** | Result 편집·저장 = 해결. S2 의 「고르기」를 pane 에서 부른다 | **그렇다** |
 
-**S3b-1 이 먼저인 이유**: 종류를 더하는 일은 wire·스냅샷·재개까지 걸리는데(위 ④ 의 ⚠️), 그 배선이
-서기 전에는 pane 을 그려도 **다음에 열면 사라진다**. 그리고 그 조각은 **혼자서도 쓸모가 있다** —
-충돌 파일을 여는 전용 Term 이 생기고, 그 안은 지금의 편집기 그대로다(S1·S2 가 이미 선 자리).
+**S3b-1 이 먼저인 이유**: pane 을 그리려면 **그릴 것을 든 Term** 이 먼저 있어야 한다 — 세 판을
+누가 들고, 언제 버리고, 탭이 무엇이라 부르는지가 정해지기 전에 배치부터 하면 그 답들이 그리는
+코드 안으로 숨는다. 그리고 그 조각은 **혼자서도 쓸모가 있다** — 충돌 파일을 여는 전용 모드가
+생기고, 그 안은 지금의 편집기 그대로다(S1·S2 가 이미 선 자리).
 
 **S2 는 S1.5 가 선 뒤에 착수한다** — 동작을 놓을 행이 없으면 인식만 해 놓고 부를 길이 없다.
 
@@ -308,32 +309,35 @@ Chrome Lab 시나리오 `editor-conflict` + 골든 둘이 이것을 든다. **La
    S2 앞에 선다(§5).
 3. ~~**마커 강조를 구문 강조와 어떻게 섞을까**~~ — **답했다(2026-09-13)**: 겹치지 않는다. 강조는
    **배경 밴드**이고 구문 색은 **전경**이다. 그리고 칠하는 것은 **마커 줄뿐**이다(§5 S2).
-4. ~~**3-way 를 어느 표면에 둘까**~~ — **답했다(2026-09-14)**: **새 Term 종류**다(사용자 결정).
-   `SurfaceKind` 에 `merge` 를 더한다 — **비교 뷰는 손대지 않는다.**
+4. ~~**3-way 를 어느 표면에 둘까**~~ — **답했다(2026-09-14)**: **비교 뷰를 재활용하지 않는다**
+   (사용자 결정). 3-way 는 자기 Term 이고, 그 Term 은 **편집기 Term 의 «모드»** 다 —
+   `kind == .editor` + `rt.editor_merge != null`.
 
-   **왜 그쪽인가.** 비교 뷰를 pane N 개로 일반화하면 좌우를 필드 이름에 하드코딩한 자리
+   **왜 비교 뷰가 아닌가.** 비교 뷰를 pane N 개로 일반화하면 좌우를 필드 이름에 하드코딩한 자리
    (`_left`/`_right` 짝 13 개)가 전부 배열이 되고, [multi-view §3](plans/native-editor-multi-view.md)
    가 잰 **뷰 상태 약 35 개 + 입력 라우팅 약 50 곳**이 그대로 걸린다. 게다가 비교 뷰는 좌우가 세로를
    **일부러 공유**하는데(§3.5) 3-way 는 정반대라, 같은 기계에 두면 그 규칙이 모드마다 갈린다 —
    **이미 서 있는 기능이 같이 흔들린다.**
 
-   **종류를 더하는 것 자체는 싸다 — 재 봤다**(2026-09-14). `SurfaceKind` 에 값을 하나 넣고 컴파일러가
-   거절하는 자리를 전부 채웠더니 **8 줄 · 4 파일**이었고, 그 상태로 `zig build check-targets` 와
-   **macOS 앱 호스트**(`macos-app-host-abi-lib`)가 **둘 다 통과**했다:
+   **왜 새 `SurfaceKind` 가 아닌가 — 수치를 고쳐 적는다(2026-09-14).** 처음에는 「종류를 더하는 값은
+   싸다」고 적었다. `SurfaceKind` 에 값을 하나 넣고 **컴파일러가 거절하는 자리**를 전부 채우면
+   **8 줄 · 4 파일**이고 `check-targets` 와 macOS 앱 호스트가 둘 다 통과한다 — 그것은 **사실이지만
+   절반이다.** 컴파일러가 **안 잡는** 자리가 따로 있다:
 
-   | 파일 | 무엇 |
-   | --- | --- |
-   | `session/control_surface.zig` | 열거값 · `SurfaceDetail` union arm · switch 둘 |
-   | `app/live_pty.zig` | `LiveSurface` union arm · switch 하나 |
-   | `app/in_process_term_backend.zig` | switch 하나 |
-   | `platform/macos/app_session/editor.zig` | switch 하나 |
+   > `kind == .editor` / `kind != .editor` 술어가 **제품 코드 80 곳**이다(실측 2026-09-14).
+   > 전부 같은 질문을 한다 — 「이 Term 이 편집기 문서를 들고 있나」. 종류를 나누면 그 80 곳이
+   > 각각 「merge 도 해당되나」를 답해야 하고, `==` 비교라 **컴파일러가 한 곳도 안 알려 준다.**
 
-   ⚠️ **컴파일만 쟀다.** `SurfaceKind` 는 **wire 에도 실리는 닫힌 열거**라
-   ([control-plane.md](control-plane.md) — `surface.kind = terminal | web | editor`), 그 문서와 스냅샷
-   계약도 같이 바뀌어야 한다. 그것은 컴파일러가 안 잡아 준다.
+   **이 저장소에 이미 선례가 있다**: **비교 뷰도 종류가 아니다**(`kind == .editor` +
+   `rt.editor_diff != null`). 그래서 그 80 개 술어를 **한 줄도 안 건드리고** 섰고, 입력·찾기·저장·
+   teardown 이 전부 그대로 돌았다. 3-way 도 같은 자리에 선다.
 
-   **`EditorMeta` 를 그대로 쓴다.** 병합 표면이 여는 것도 **로컬 파일 하나**이고 신뢰 경계도 같다 —
-   web 의 축(`url`·`trust`·`loading`)을 복사하지 않는 이유를 control-plane 이 이미 적어 두었다.
+   **대가(정직하게)**: 컨트롤 플레인 wire 에서 이 표면은 계속 `kind = "editor"` 다
+   ([control-plane.md](control-plane.md)). 외부 소비자가 「이건 병합 표면이다」를 구별해야 할 이유가
+   **실제로 생기면** 그때 종류로 승격하고, 그 시점에 위 80 곳을 **단일 소유 술어**(예:
+   `hasEditorDocument()`)로 바꾼다. 그 이유가 없는 동안 열거를 넓히는 것은 **값을 안 주고 비용만
+   치르는 일**이다.
+
 5. **파일이 여럿 충돌했을 때의 이동**: 「다음 충돌 파일」이 필요한가. **아직 열려 있다** — S3b 를
    세운 뒤에 답한다(그 전에는 「이동」이 무엇 사이의 이동인지가 안 정해진다).
 
@@ -345,4 +349,4 @@ Chrome Lab 시나리오 `editor-conflict` + 골든 둘이 이것을 든다. **La
 | [plans/native-editor.md](plans/native-editor.md) | 「3-way 병합 편집기」 행이 이 문서를 가리키게 |
 | [key-input-and-shortcuts.md](key-input-and-shortcuts.md)·[configuration-input.md](configuration-input.md) | S2 의 동작에 chord 를 줄 때 |
 | [status-bar.md](status-bar.md) | 「마커가 남아 있다」를 상태바에 둘 때(S2) |
-| [control-plane.md](control-plane.md) | `surface.kind` 에 `merge` 를 더할 때(S3b-1) — **그 열거의 소유자다** |
+| [control-plane.md](control-plane.md) | 병합 표면을 **종류로 승격**할 때(④ 의 「대가」) — 그 열거의 소유자다. **지금은 안 바꾼다** |

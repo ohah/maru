@@ -15184,7 +15184,7 @@ pub const AppSession = struct {
         // 떼면 그 프레임부터 quad 가 비어 사라졌다(사용자 제보 2026-09-14).
         // **규율**: 매 프레임 있어야 하는 것은 매 프레임 도는 자리에서 넣는다 — 이미지(`gpu_images`)가
         // 이미 그 자리를 쓰고 있었고, 테두리만 다른 생명주기에 얹은 것이 어긋남의 원인이었다.
-        self.appendMarkerPreviewFrameQuads(place);
+        self.appendMarkerPreviewFrameQuads(place, open.sent_hit_index != null);
         if (open.pixels.len == 0) {
             open.uploaded = false; // 아직 안 풀렸다 — 「안 그리고 나가는 길」이라 표시를 되돌린다(§5)
             return; // 테두리(자리)는 이미 그렸다
@@ -15307,7 +15307,13 @@ pub const AppSession = struct {
 
     /// 프리뷰의 배경·테두리 quad 두 장. 바깥을 테두리 색으로 채우고 안쪽을 배경색으로 덮어 테를 만든다
     /// (quad 하나가 `border_widths` 를 안 받는 경로라 — 셰이더 분기를 늘리지 않는다).
-    fn appendMarkerPreviewFrameQuads(self: *AppSession, place: chrome.components.image_preview.Placement) void {
+    fn appendMarkerPreviewFrameQuads(
+        self: *AppSession,
+        place: chrome.components.image_preview.Placement,
+        /// 「도크에서 보기」가 가능한가 — 전송된 마커에만 자리가 있다(§2.3). 참일 때만 모서리 표식을
+        /// 그린다. 없는 길을 알리는 표식은 **거짓말**이고, 눌러도 아무 일이 없으면 고장으로 읽힌다.
+        dock_jump: bool,
+    ) void {
         const tk = self.buildChromeTokens();
         const border = packOpaqueRgb(tk.palette.get(.focus_accent));
         // **불투명하게 둔다.** 사이드바 같은 chrome 은 `chromeQuadBg` 로 `window.opacity` 를 함께 먹어
@@ -15333,6 +15339,38 @@ pub const AppSession = struct {
         self.appendSolidQuad(bx, by + bh - b, bw, b, border, 1); // 아래
         self.appendSolidQuad(bx, by + b, b, bh - 2 * b, border, 1); // 왼쪽
         self.appendSolidQuad(bx + bw - b, by + b, b, bh - 2 * b, border, 1); // 오른쪽
+        // **우하단 모서리 표식** — 「여기 눌러 도크에서 볼 것이 있다」. 테두리와 같은 색·이어진
+        // 덩어리라 「모서리가 두껍다」로 읽힌다(흔한 모서리 접힘 관용구). 글자를 못 쓰는 이유는
+        // `image_preview.dock_jump_mark_px` 주석에 있다 — `gpu_glyphs` 는 이 자리에서 못 채운다.
+        if (dock_jump) {
+            const mark: f32 = @floatFromInt(chrome.components.image_preview.dock_jump_mark_px);
+            // 자리 판정은 `image_preview.dockMarkFits` 가 한다(순수 — 적대 6회차에 뺐다).
+            if (chrome.components.image_preview.dockMarkFits(place.box.w, place.box.h)) {
+                self.appendSolidQuad(bx + bw - b - mark, by + bh - b - mark, mark, mark, border, 1);
+            }
+        }
+    }
+
+    /// 「도크에서 보기」 — 프리뷰 상자를 누르면 갤러리의 크게 보기로 간다(§2.3).
+    ///
+    /// **판정은 `image_preview.dockJumpTarget` 이 한다**(순수). 여기는 배선만이다 — 도크를 열고,
+    /// 그 자리를 크게 열고, 프리뷰를 닫는다. 셋이 이어져 있어 부수효과로 남으면 「어느 조건에서
+    /// 점프하는가」를 판정자가 물을 수 없으므로 조건을 저쪽에 두었다.
+    fn markerPreviewDockJumpAt(self: *AppSession, x_px: f64, y_px: f64) bool {
+        const open = self.marker_preview_open orelse return false;
+        if (!self.surface_initialized or self.tabs.items.len == 0) return false;
+        const term = pane_ops.activePane(self).activeTerm();
+        if (term.kind != .terminal or term.surface.id != open.surface_id) return false;
+        const place = self.markerPreviewPlacement(term, open) orelse return false;
+        const hit_index = chrome.components.image_preview.dockJumpTarget(open.sent_hit_index, place.box, x_px, y_px) orelse return false;
+        // **도크를 연다** — 접혀 있거나 다른 뷰를 보고 있을 수 있다. `enterDockView` 만 부르면 뷰만
+        // 바뀌고 화면에는 아무 변화가 없다(접힌 채로 남는다).
+        dock_ops.openDockTo(self, .agent_activity);
+        agent_activity_ops.openAt(self, hit_index);
+        // 프리뷰는 닫는다 — 같은 그림이 도크에서 더 크게 떠 있는데 위에 겹쳐 둘 이유가 없다.
+        self.closeMarkerPreview();
+        self.metal_dirty = true;
+        return true;
     }
 
     /// 열린 프리뷰의 자리 — 그리는 쪽과 안내를 얹는 쪽이 **같은 계산**을 쓰게 하는 단일 출처다.
@@ -17686,6 +17724,9 @@ pub const AppSession = struct {
         // browser web Term이면 빈 sentinel core라 항상 빈 결과였다(사용자 제보). 사이드바/터미널 밖이면 null.
         // 셀 변환은 **clamp 없는** paneCellAtExact를 쓴다 — 탭 바·divider·여백 좌표가 첫 행 셀로 접히면 그 위 클릭이
         // 링크로 오인돼 탭 전환을 삼킨다(hover는 그 영역에서 밑줄을 지우므로 비대칭까지 생긴다).
+        // **떠 있는 프리뷰가 먼저다.** 프리뷰는 pane 위에 겹쳐 있으므로 pane hit 로 내려보내면
+        // 그 아래 셀의 마커 토글이 먼저 먹고 상자 클릭이 영영 안 온다. `paneTargetAt` **앞**이다.
+        if (self.markerPreviewDockJumpAt(x_px, y_px)) return &.{};
         const hit = pane_ops.paneTargetAt(self, x_px, y_px) orelse return &.{};
         const cell = pane_ops.paneCellAtExact(self, hit.surface, hit.rect, x_px, y_px) orelse return &.{};
         // **마커가 먼저다**(계약 §2.2). 마커 판정은 문자열이라 `stat` 없이 끝나고, 링크는 존재 검증까지

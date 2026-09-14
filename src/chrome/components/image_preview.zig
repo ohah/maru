@@ -144,6 +144,51 @@ pub fn view(
     } });
 }
 
+/// 「도크에서 보기」 과녁 판정 — 이 클릭이 갤러리 크게 보기로 점프하는가, 그렇다면 몇 번째인가.
+///
+/// `sent_hit_index` 는 **전송된** 마커면 갤러리 인덱스의 순번이고, 전송 전(스테이징)이면 null 이다.
+///
+/// ⚠️ **전송 전에는 점프가 없다**(agent-image-marker-preview.md §2.3). 아직 트랜스크립트에 없어
+/// 자리가 존재하지 않는다 — 갤러리의 소스는 트랜스크립트뿐이라는 계약(§3.1)을 이 기능이 깨지
+/// 않는다. 그 갈래가 없으면 「빈 갤러리로 점프」라는 더 나쁜 화면이 나온다.
+///
+/// **상자 전체가 과녁이다.** 모서리 표식만 누르게 하면 3 px 테두리 안쪽 12 px 사각형을 맞혀야
+/// 하는데 그 정밀도를 요구할 이유가 없다 — 표식은 **있다는 것을 알리는 것**이지 과녁이 아니다.
+///
+/// 비유한 좌표·빈 상자 가드는 `dropdown.hitTest` 와 같은 자리다(포인터 좌표는 플랫폼발 f64 다).
+pub fn dockJumpTarget(sent_hit_index: ?usize, box: draw.Rect, x_px: f64, y_px: f64) ?usize {
+    const hit_index = sent_hit_index orelse return null;
+    if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return null;
+    if (box.w == 0 or box.h == 0) return null;
+    const x0: f64 = @floatFromInt(box.x);
+    const y0: f64 = @floatFromInt(box.y);
+    const w: f64 = @floatFromInt(box.w);
+    const h: f64 = @floatFromInt(box.h);
+    if (x_px < x0 or x_px >= x0 + w or y_px < y0 or y_px >= y0 + h) return null;
+    return hit_index;
+}
+
+/// 「도크에서 보기」 모서리 표식의 한 변(px). 테두리 두께의 배수라 테두리와 **이어진 덩어리**로
+/// 읽힌다 — 흔한 「모서리 접힘 = 더 볼 것이 있다」 관용구다.
+///
+/// ⚠️ **글자를 쓸 수 없어 표식이다.** 라벨을 넣으려면 `gpu_glyphs` 에 실어야 하는데 그것은 **매
+/// 프레임 비워지고 chrome draws 조립부가 채우며, 그 조립부는 매 프레임 돌지 않는다** — 테두리가
+/// 「Cmd 를 떼면 사라지던」 바로 그 결함의 원인이다(§11.3). 이 화면이 매 프레임 낼 수 있는 것은
+/// quad 뿐이고, 표식은 **그 제약의 결과이지 디자인 선택이 아니다.**
+pub const dock_jump_mark_px: u32 = border_px * 4;
+
+/// 이 상자에 모서리 표식을 그릴 자리가 있는가.
+///
+/// **없으면 안 그린다.** 표식이 테두리를 먹으면 액자가 뭉개져 「팝업이라는 신호」(`border_px` 주석)
+/// 자체가 약해진다 — 작은 그림에서는 표식보다 액자가 중요하다.
+///
+/// ⚠️ **배선에 `if` 로 묻어 두면 아무도 못 본다**(적대 6회차에 뺐다). 조건이 순수하면 판정자가
+/// 「어느 크기에서 갈리는가」를 값으로 물을 수 있다.
+pub fn dockMarkFits(box_w: u32, box_h: u32) bool {
+    const need = 2 * border_px + dock_jump_mark_px;
+    return box_w > need and box_h > need;
+}
+
 const testing = std.testing;
 
 fn metricsOf(ws_w: u32, ws_h: u32) props.ChromeProps {
@@ -159,6 +204,49 @@ fn metricsOf(ws_w: u32, ws_h: u32) props.ChromeProps {
         .workspace_width_px = ws_w,
         .workspace_height_px = ws_h,
     } };
+}
+
+test "MP1 도크 점프: 표식은 자리가 있을 때만 — 작은 상자에서는 액자가 이긴다" {
+    // 필요 크기 = 테두리 양쪽(3+3) + 표식 한 변(12) = 18. **넘어야** 그린다(같으면 테두리에 닿는다).
+    try std.testing.expect(!dockMarkFits(18, 100));
+    try std.testing.expect(!dockMarkFits(100, 18));
+    try std.testing.expect(dockMarkFits(19, 19));
+    try std.testing.expect(!dockMarkFits(0, 0));
+}
+
+test "MP1 도크 점프: 전송된 프리뷰의 상자 안을 누르면 그 hit_index 를 낸다" {
+    const box: draw.Rect = .{ .x = 100, .y = 200, .w = 300, .h = 150 };
+    try std.testing.expectEqual(@as(?usize, 4), dockJumpTarget(4, box, 100, 200)); // 좌상 모서리 포함
+    try std.testing.expectEqual(@as(?usize, 4), dockJumpTarget(4, box, 250, 275)); // 한가운데
+    try std.testing.expectEqual(@as(?usize, 4), dockJumpTarget(4, box, 399, 349)); // 우하 마지막 픽셀
+}
+
+test "MP1 도크 점프: 전송 «전» 은 점프가 없다 — 트랜스크립트에 자리가 없다" {
+    const box: draw.Rect = .{ .x = 100, .y = 200, .w = 300, .h = 150 };
+    try std.testing.expectEqual(@as(?usize, null), dockJumpTarget(null, box, 250, 275));
+}
+
+test "MP1 도크 점프: 상자 «밖» 은 답하지 않는다 — 네 변을 다 민다" {
+    const box: draw.Rect = .{ .x = 100, .y = 200, .w = 300, .h = 150 };
+    try std.testing.expectEqual(@as(?usize, null), dockJumpTarget(0, box, 99, 275)); // 왼쪽 한 픽셀 밖
+    try std.testing.expectEqual(@as(?usize, null), dockJumpTarget(0, box, 400, 275)); // 오른쪽 경계(반열림)
+    try std.testing.expectEqual(@as(?usize, null), dockJumpTarget(0, box, 250, 199)); // 위
+    try std.testing.expectEqual(@as(?usize, null), dockJumpTarget(0, box, 250, 350)); // 아래 경계(반열림)
+}
+
+test "MP1 도크 점프: 비유한 좌표와 빈 상자는 답하지 않는다" {
+    const box: draw.Rect = .{ .x = 100, .y = 200, .w = 300, .h = 150 };
+    try std.testing.expectEqual(@as(?usize, null), dockJumpTarget(2, box, std.math.nan(f64), 275));
+    try std.testing.expectEqual(@as(?usize, null), dockJumpTarget(2, box, 250, std.math.inf(f64)));
+    const empty: draw.Rect = .{ .x = 100, .y = 200, .w = 0, .h = 150 };
+    try std.testing.expectEqual(@as(?usize, null), dockJumpTarget(2, empty, 100, 275));
+}
+
+test "MP1 도크 점프: hit_index 0 도 «있다» 로 답한다 — optional 을 0 으로 접지 않는다" {
+    // 첫 이미지가 0 번이다. `?usize` 를 `usize` 로 접고 0 을 「없음」으로 쓰면 **첫 장만 점프가
+    // 안 되는** 결함이 되고, 그건 화면에서 「가끔 안 된다」로 보인다.
+    const box: draw.Rect = .{ .x = 0, .y = 0, .w = 10, .h = 10 };
+    try std.testing.expectEqual(@as(?usize, 0), dockJumpTarget(0, box, 5, 5));
 }
 
 test "MP1 배치: workspace 절반을 넘지 않게 줄인다" {

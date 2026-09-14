@@ -1216,9 +1216,19 @@ pub fn ensureIgnoreBackend(self: *AppSession) void {
 }
 
 pub fn requestIgnoredForPaths(self: *AppSession, dir_path: []const u8, entries: anytype) void {
-    // **백엔드는 여기서 만들지 않는다** — 이 함수는 스캔 결과가 올 때마다 도는 드레인 경로다.
-    // 만드는 자리는 탐색기 **뷰 진입**(`ensureIgnoreBackend`)이고, 그 주석에 이유가 있다.
-    if (self.git_backend == null) return;
+    // ⚠️ **탐색기를 보고 있을 때만 묻는다 — 안 볼 때는 «적어 둔다»**(적대적 검증 20 회차).
+    //
+    // 이 드레인은 뷰와 무관하게 매 tick 돈다. 그래서 게이트가 없으면 소스 컨트롤 탭에 있거나 도크를
+    // 닫아 둔 동안에도 디렉터리 스캔마다 git 프로세스가 뜬다 — 아무도 안 보는 화면의 흐림을 위해서다
+    // (19 회차가 재시도에 대해 한 말이 여기 그대로 남아 있었다).
+    //
+    // **그리고 반대쪽에 결함이 있었다**: 백엔드는 탐색기 진입에서만 생기므로, 도크를 소스 컨트롤로
+    // 두고 쓰다가 탐색기로 들어오면 트리는 이미 다 읽혀 있고 새 스캔이 없어 **아무도 묻지 않는다.**
+    // 흐림이 영영 안 뜬다. 적어 두면 들어올 때 tick 이 그 디렉터리를 다시 걸고(`retryPendingIgnore` —
+    // 그쪽 가시성 게이트가 이 자리를 지킨다), 그 스캔의 드레인이 그때 묻는다.
+    if (!dock_ops.dockVisible(self) or self.dock.view != .explorer or self.git_backend == null) {
+        return rememberIgnoreRetry(self, dir_path);
+    }
     // ⚠️ **저장소는 «방금 읽은 그 디렉터리»에서 나온다 — 도크가 기억하는 것이 아니다.**
     //
     // 예전에는 `gitRepoRoot` 를 썼는데 그 함수의 2 순위는 **도크가 직전에 목록을 읽은 저장소**

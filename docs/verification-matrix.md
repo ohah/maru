@@ -2847,6 +2847,12 @@ provisioned Developer ID·Notification Center 등 아래의 외부 release gate 
   server 제품 타입 테스트로 고정한다. 응답 없이 닫는 server action은 `protocol_error | resource_exhausted | internal_error`
   payload를 필수로 가지며 connection turn이 이를 전수 매핑한다. generic server close를 `peer_requested`로 접는 배선이
   없고 close enum/payload가 사라지지 않는지는 `test-close-site-name` source boundary가 검증한다.
+- **server close 자리 이름: 구현.** server의 닫기 30 자리(`protocol_error` 16 · `internal_error` 13 ·
+  `resource_exhausted` 1)가 각자 고유한 `Close.site`와 원인 오류 이름을 싣고, connection turn이 그 둘을
+  `beginCloseAtErr`로 그대로 옮겨 host 로그의 `site=`·`err=`까지 도달한다. `Close.site`에 기본값이 없어
+  익명 닫기는 컴파일되지 않으며, 기본값이 다시 붙는 것과 두 자리가 같은 이름을 쓰는 것은
+  `test-close-site-name`이 막는다. 이름이 action까지 살아 오는 것은 `test-session-host-attach-isolation`이
+  `attach_initial_observation`·`attach_base_reservation`·`hello_not_first`로 고정한다.
 - **P4 E2 runtime-shared observation cache: 구현(E2a·E2b·E2c artifact/cap gate).** E1은 위 `CR6f output-wake`와 같은 순서 항목이다.
   E2a의 `runtime_observation_cache.Cache`는 canonical bytes와 checked-monotonic change token을 소유하고, 동일 bytes의
   allocation/token 증가 0, changed prepare→exact-token commit, stale prepared 거부, OOM·token overflow 때 이전 bytes/token

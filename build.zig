@@ -6465,8 +6465,8 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_close_site = b.addRunArtifact(close_site_tests);
-    run_close_site.addArg("--maru-expect-tests=2");
-    run_close_site.addArg("--maru-expect-passed=2");
+    run_close_site.addArg("--maru-expect-tests=3");
+    run_close_site.addArg("--maru-expect-passed=3");
     run_close_site.setCwd(b.path("."));
     close_site_step.dependOn(&run_close_site.step);
     boundary_step.dependOn(&run_close_site.step);

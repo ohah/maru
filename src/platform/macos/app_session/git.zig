@@ -1188,6 +1188,15 @@ pub fn termCwdForDisplay(self: *AppSession, term: *Term, buf: *[std.fs.max_path_
 /// 한 번에 `check_ignore_batch` 개까지만 묻는다. 그보다 많은 디렉터리는 **첫 배치만** 판정이
 /// 서고 나머지는 판정 없이 남는다 — 흐리게 하지 않는 쪽이라 틀린 표시가 되지는 않는다. 배치를 여러 번
 /// 돌리는 것은 후속(요청 큐가 필요하다).
+/// 그 경로가 **무시 규칙 파일**인가 — 바뀌면 이미 받아 둔 흐림 판정이 전부 낡는다.
+///
+/// `.gitignore` 는 어느 디렉터리에나 있을 수 있고 그 아래 전체에 걸리므로 **이름으로** 판정한다.
+/// `.git/info/exclude` 는 여기서 안 본다 — `.git` 안쪽은 위에서 이미 git 신호로 갈라져 나간다.
+/// 전역 `core.excludesFile` 은 우리가 감시하는 나무 밖이라 이 경로로는 오지 않는다.
+pub fn isIgnoreRuleFile(changed_path: []const u8) bool {
+    return std.mem.eql(u8, std.fs.path.basename(changed_path), ".gitignore");
+}
+
 /// 탐색기 뷰로 **들어올 때** git 백엔드를 세운다 — `.gitignore` 흐림 질의가 나갈 곳을 만든다.
 ///
 /// **왜 여기인가.** 흐림 질의(`requestIgnoredForPaths`)는 디렉터리 스캔 결과가 도착할 때마다 도는

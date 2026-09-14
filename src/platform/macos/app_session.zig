@@ -10301,7 +10301,21 @@ pub const AppSession = struct {
             git_ops.refreshGitStatus(self);
             return;
         }
-        self.file_tree.invalidatePath(changed_path) catch {};
+        // ⚠️ **`.gitignore` 는 «그 디렉터리의 파일» 이 아니라 «모든 답을 바꾸는 규칙» 이다**
+        // (적대적 검증 17 회차). `invalidatePath` 는 그 경로를 담은 **가장 깊은 펼친 디렉터리 하나**만
+        // 다시 읽는데, 규칙 한 줄은 **이미 읽어 둔 다른 디렉터리 전부**의 판정을 바꾼다.
+        //
+        // 그래서 `web/dist/` 를 규칙에 더해도 펼쳐 둔 `web/` 은 그대로 밝고, 규칙을 지워도 흐림이 그대로
+        // 남는다 — 접었다 펴기 전까지. 「모르면 흐리게 하지 않는다」가 아니라 **틀린 것을 계속 말한다.**
+        //
+        // 지금 내용이 보이는 디렉터리를 전부 다시 읽게 한다(`invalidateExpanded`). 사용자가 규칙 파일을
+        // 고치는 일은 드물고, 그 범위는 **펼친 것**으로 유계다(그 함수 주석의 근거 그대로).
+        // 중첩 `.gitignore` 도 같은 이름이라 같은 갈래를 탄다.
+        if (git_ops.isIgnoreRuleFile(changed_path)) {
+            _ = self.file_tree.invalidateExpanded() catch false;
+        } else {
+            self.file_tree.invalidatePath(changed_path) catch {};
+        }
         // 작업트리 파일이 바뀌어도 git 상태가 바뀐다(수정·삭제) — 목록을 보고 있으면 같이 다시 읽는다.
         git_ops.refreshGitStatus(self);
         const coarse = self.file_tree.containsRootPath(changed_path);
@@ -71297,6 +71311,63 @@ test "다시 걸지 못한 디렉터리는 «목록에 남는다» — 스캔 �
     git_ops.retryPendingIgnore(session);
     try std.testing.expectEqual(@as(usize, 0), session.git_ignore_retry_dirs.items.len);
     try std.testing.expect(!session.file_tree.hasScanRequest("/somewhere/else/sub"));
+}
+
+test "`.gitignore` 가 바뀌면 «펼쳐 둔 하위까지» 다시 읽는다" {
+    // **적대적 검증 17 회차(2026-09-14).** 흐림 판정의 입력은 셋이다 — 디렉터리 목록, 저장소, 그리고
+    // **규칙 파일**. 앞의 둘이 바뀌면 다시 읽는 길이 있는데, **규칙 파일에는 없었다.**
+    //
+    // `invalidatePath` 는 그 경로를 담은 **가장 깊은 펼친 디렉터리 하나**만 다시 읽는다. 그래서
+    // `<root>/.gitignore` 를 고치면 root 만 다시 읽히고, 펼쳐 둔 `sub/` 의 흐림은 **그대로 낡는다**:
+    // 규칙을 더해도 안 흐려지고, 지워도 흐린 채로 남는다. 접었다 펴기 전까지 **틀린 것을 계속 말한다.**
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const repo_len = tmp.dir.realPath(io, &repo_buf) catch return error.SkipZigTest;
+    const repo = repo_buf[0..repo_len];
+
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    session.file_tree_initialized = true;
+
+    var sub_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const sub = try std.fmt.bufPrint(&sub_buf, "{s}/sub", .{repo});
+    var rule_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const rule = try std.fmt.bufPrint(&rule_buf, "{s}/.gitignore", .{repo});
+
+    try session.file_tree.replaceExplicitRoots(&.{repo});
+    try session.file_tree.applySnapshot(repo, &.{.{ .name = "sub", .kind = .directory }});
+    _ = try session.file_tree.toggleDirectory(sub); // 하위를 **펼쳐 둔다**
+    try session.file_tree.applySnapshot(sub, &.{.{ .name = "out.bin", .kind = .file }});
+    while (session.file_tree.takeScanRequest()) |queued| allocator.free(queued); // 줄을 비워 두고 시작
+
+    // ⑴ **보통 파일**이 바뀌면 그 자리만 다시 읽는다 — 대조군(전부 다시 읽는 코드로 바뀌어도 초록이
+    //    되지 않게, 「여기서는 하위가 안 걸린다」를 함께 센다).
+    var other_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const other = try std.fmt.bufPrint(&other_buf, "{s}/out.bin", .{sub});
+    session.fileTreeChanged(other);
+    try std.testing.expect(session.file_tree.hasScanRequest(sub));
+    try std.testing.expect(!session.file_tree.hasScanRequest(repo));
+    while (session.file_tree.takeScanRequest()) |queued| allocator.free(queued);
+
+    // ⑵ **규칙 파일**이 바뀌면 펼쳐 둔 것 전부가 줄을 선다.
+    session.fileTreeChanged(rule);
+    try std.testing.expect(session.file_tree.hasScanRequest(repo));
+    // **옛 코드는 여기가 거짓이었다** — root 만 다시 읽고 `sub/` 의 흐림은 낡은 채로 남았다.
+    try std.testing.expect(session.file_tree.hasScanRequest(sub));
+    while (session.file_tree.takeScanRequest()) |queued| allocator.free(queued);
+
+    // ⑶ 중첩 규칙 파일도 같은 갈래다 — 이름으로 판정하므로 어느 깊이에 있든 같다.
+    var nested_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const nested = try std.fmt.bufPrint(&nested_buf, "{s}/.gitignore", .{sub});
+    session.fileTreeChanged(nested);
+    try std.testing.expect(session.file_tree.hasScanRequest(repo));
+    try std.testing.expect(session.file_tree.hasScanRequest(sub));
 }
 
 test "앞 디렉터리의 답이 뒤 디렉터리의 흐림을 지우지 않는다" {

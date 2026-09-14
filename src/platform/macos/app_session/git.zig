@@ -1211,19 +1211,30 @@ pub fn termCwdForDisplay(self: *AppSession, term: *Term, buf: *[std.fs.max_path_
 /// **경로는 저장소 루트 기준 상대경로**로 넘긴다 — `git -C <repo> check-ignore` 가 그렇게 해석하고,
 /// 절대경로를 주면 저장소 밖 경로로 취급돼 조용히 답이 비는 경우가 있다.
 ///
-/// 한 번에 `check_ignore_batch` 개까지만 묻는다(argv 한도). 그보다 많은 디렉터리는 **첫 배치만** 판정이
+/// 한 번에 `check_ignore_batch` 개까지만 묻는다. 그보다 많은 디렉터리는 **첫 배치만** 판정이
 /// 서고 나머지는 판정 없이 남는다 — 흐리게 하지 않는 쪽이라 틀린 표시가 되지는 않는다. 배치를 여러 번
 /// 돌리는 것은 후속(요청 큐가 필요하다).
+/// 탐색기 뷰로 **들어올 때** git 백엔드를 세운다 — `.gitignore` 흐림 질의가 나갈 곳을 만든다.
+///
+/// **왜 여기인가.** 흐림 질의(`requestIgnoredForPaths`)는 디렉터리 스캔 결과가 도착할 때마다 도는
+/// **드레인 경로**다. 거기서 백엔드를 만들면 파일 트리를 훑기만 하던 판정자 수십 개가 갑자기 실제
+/// `check-ignore` 프로세스를 띄우게 되고, 실제로 그렇게 해 봤다가 **샤드가 죽었다**(exit 134).
+///
+/// 그래서 **뷰 진입**에 붙인다 — `setDockView` 가 소스 컨트롤에 들어올 때 `refreshGitStatus` 를
+/// 부르는 것과 **같은 자리·같은 규율**이고(§3.5 갱신 시점 ①), 폴링이 아니라 한 번이다.
+/// `onDockViewPresented` 는 뷰가 바뀌지 않아도 불리므로, 창이 **이미 탐색기인 채로 복원된** 경우에도
+/// 선다(`setDockView` 는 같은 뷰면 첫 줄에서 되돌아간다).
+///
+/// 실패는 조용히 넘어간다 — 흐림은 **부가 정보**라, 백엔드를 못 세웠다고 탐색기가 안 뜰 이유가 없다.
+/// 그러면 `ignoredKnown` 이 거짓으로 남아 「모르면 흐리게 하지 않는다」가 그대로 지켜진다.
+pub fn ensureIgnoreBackend(self: *AppSession) void {
+    if (self.git_backend != null) return;
+    self.git_backend = git_backend_mod.Backend.init(self.io) catch return;
+}
+
 pub fn requestIgnoredForPaths(self: *AppSession, dir_path: []const u8, entries: anytype) void {
-    // ⚠️ **백엔드가 없으면 여기서 만들지 않는다 — 그리고 그래서 탐색기 단독으로는 흐림이 안 뜬다.**
-    //
-    // 이 백엔드를 **만드는 자리가 전부 소스 컨트롤 경로**다(목록 읽기·히스토리·머리 줄). 그래서 도크를
-    // 탐색기로만 쓰는 동안에는 영영 null 이고 이 줄에서 되돌아간다 — 질의를 만드는 코드는 멀쩡한데
-    // 첫 줄에서 끝난다(적대적 검증 2026-09-14, 실물 캡처로 확인).
-    //
-    // **여기서 만들어 봤다가 되돌렸다**: 그러면 파일 트리 드레인이 git 프로세스를 띄우는 경로가 되어,
-    // 그 전까지 이 길을 안 타던 판정자들이 실제 `check-ignore` 를 부르며 **죽었다**(shard abort 134).
-    // 백엔드 수명을 탐색기 축까지 넓히는 것은 그 축의 결정이라 **여기서 임의로 하지 않는다.**
+    // **백엔드는 여기서 만들지 않는다** — 이 함수는 스캔 결과가 올 때마다 도는 드레인 경로다.
+    // 만드는 자리는 탐색기 **뷰 진입**(`ensureIgnoreBackend`)이고, 그 주석에 이유가 있다.
     if (self.git_backend == null) return;
     // ⚠️ **저장소는 «방금 읽은 그 디렉터리»에서 나온다 — 도크가 기억하는 것이 아니다.**
     //

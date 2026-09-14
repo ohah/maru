@@ -361,18 +361,31 @@ thumb이 셀 경계로 스냅해 목록과 어긋난다.
 
   거절되거나 실패하면 그 화면은 **판정 없이 남는다** — 모르면 흐리게 하지 않는다.
 
-  ⚠️ **2026-09-14 실측: 탐색기 단독으로는 이 흐림이 아직 안 뜬다.** 실물 캡처(도크를 탐색기로 열고 이
-  저장소의 트리를 찍음)에서 `zig-out`·`.zig-cache`·`zig-pkg` 가 `docs`·`src` 와 **같은 색**이었다
-  (피크 RGB 동일). 원인은 **둘**이고 하나만 닫혔다:
+  ⚠️ **이 흐림은 오래 안 떴다 — 원인이 셋이었고 2026-09-14 에 다 닫혔다.** 실물 캡처(도크를 탐색기로
+  열고 이 저장소의 트리를 찍음)에서 `zig-out`·`.zig-cache`·`zig-pkg` 가 `docs`·`src` 와 **같은
+  색**이었다(피크 RGB 동일). 셋 다 각자는 「맞는 코드」로 보였고 판정자 전부가 초록이었다.
 
-  1. 판정이 다른 축을 대리로 썼다 → 위에서 고쳤다.
-  2. **git 백엔드를 만드는 자리가 전부 소스 컨트롤 경로**라, 탐색기만 쓰는 동안에는 질의가
-     `requestIgnoredForPaths` 첫 줄에서 되돌아간다. **여기서 만들어 봤다가 되돌렸다** — 그러면 파일
-     트리 드레인이 git 프로세스를 띄우는 경로가 되어 그 길을 안 타던 판정자들이 실제 `check-ignore` 를
-     부르며 죽었다. 백엔드 수명을 탐색기 축까지 넓히는 것은 **그 축의 결정**이라 임의로 하지 않았다.
+  1. **판정이 다른 축을 대리로 물었다** — 위 `git_ignore_answered` 조항이 그 자리다.
+  2. **백엔드를 만드는 자리가 사용자 행동 쪽에 없었다.** 만드는 자리가 전부 소스 컨트롤 경로라,
+     탐색기만 쓰는 동안에는 질의가 `requestIgnoredForPaths` 첫 줄에서 되돌아갔다. 이제 **탐색기 뷰
+     진입**(`ensureIgnoreBackend`, `onDockViewPresented`)이 세운다 — 소스 컨트롤이 진입에서
+     `refreshGitStatus` 를 부르는 것과 **같은 자리·같은 규율**이다. ⚠️ 질의 자리(드레인)에 붙이면 파일
+     트리를 훑기만 하던 판정자 수십 개가 git 프로세스를 띄워 **샤드가 죽는다**(실측, exit 134).
+     그리고 `setDockView` 가 아니라 `onDockViewPresented` 인 이유는 앞쪽이 「같은 뷰면 되돌아가기」라
+     **이미 탐색기인 채로 복원된 창**에서는 안 서기 때문이다.
+  3. **명령 자체가 git 에게 거절당하고 있었다.** argv 가
+     `git -C <repo> … check-ignore -z <경로들>` 이었는데 git 은 그 조합을
+     `fatal: -z only makes sense with --stdin` 으로 **128** 을 내고 끝낸다. 경로는 이제 `--stdin` 으로
+     NUL 로 끊어 보낸다(`git_command.checkIgnoreStdin`). **그리고 `exit 1` 은 실패가 아니다** —
+     「물어본 것 중 무시된 것이 없다」이고, 그것을 실패로 접으면 무시 항목이 없는 디렉터리마다 답이
+     통째로 버려져 「아직 안 물어본 상태」와 구별되지 않는다.
 
-  즉 소스 컨트롤 뷰를 한 번이라도 연 창에서는 흐림이 서고, 탐색기만 쓴 창에서는 안 선다. 다시 여는
-  사람은 **2번부터** 시작하라.
+  ⚠️ **판정자를 「모양」에서 「실물」로 옮겼다.** 3번은 argv 토큰을 세는 판정자로는 영영 안 잡힌다 —
+  git 이 그 조합을 받아 주는지는 **실제로 돌려야만** 알 수 있다. 그래서 임시 저장소에 진짜
+  `check-ignore` 를 돌리는 판정자가 무시된 것·**없는 것(exit 1)**·개행이 든 이름 셋을 문다.
+
+  덤으로 한 번에 묻는 개수가 **10 → 512** 가 됐다. 예전 상한은 argv 여유 칸 수였고, 그래서 항목이
+  열한 개가 넘는 디렉터리는 나머지를 **아예 안 물었다**.
 - **선택과 키보드 포커스(ABI v127)**: 트리는 row index가 아니라 `절대 경로 + row kind` identity로 transient selection을 소유한다. scan 완료·접기·FSEvents rebuild로 row index가 바뀌어도 같은 row가 남으면 선택을 복원하고, 사라지면 가장 가까운 조작 가능한 조상/이웃으로 결정적으로 이동한다. 클릭 또는 `focus_file_tree`가 Zig의 단일 `FocusOwner`를 `.file_tree { restore_surface: ?surface_id }`로 바꾸고 Metal view를 first responder로 만든다. 현재 구현의 기본 `⌘⇧E`는 이 action에 연결되어 있으며, FP9에서 §3.4의 `toggle_file_panel_focus`로 기본 chord만 이전한다. surface id는 앱 전역 비재사용이라 generation token을 겸하며 Esc 때 entry와 native WKWebView 존재를 다시 검증한다. `file_tree_focus`는 이 union의 파생 getter일 뿐 별도 mutable boolean이 아니다. 선택과 keyboard focus는 workspace에 저장하지 않는다. 포커스 중 선택은 theme accent 배경과 WCAG 4.5 이상 대비가 나는 파생 전경을 marker·이름·dirty/conflict 표시 전체에 적용하고, 포커스 밖에서는 dim으로 그린다. active 파일 표시는 별도 marker로 유지한다.
 
   ⚠️ **그래서 트리를 통째로 갈아끼우는 자리도 선택을 지우지 않는다**(2026-08-27 사용자 보고 — "열면 맨 위로

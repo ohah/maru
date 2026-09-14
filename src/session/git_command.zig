@@ -490,21 +490,37 @@ pub const env_overrides = [_]struct { name: []const u8, value: []const u8 }{
 /// `git_exe`와 `repo`를 받아 argv를 `buf`에 채우고 그 슬라이스를 돌려준다. 할당하지 않는다.
 /// `git_exe`는 호출자가 **절대 경로로 해석해 둔** 실행 파일이다 — PATH 탐색을 이 모듈이 하지 않는 이유는
 /// PATH hijack을 막는 책임이 "무엇을 실행할지 고르는" 쪽(L4)에 있어서다(§6).
-/// `check-ignore` 한 번에 넘길 수 있는 경로 개수. `build` 가 만드는 고정 접두(exe·-C·repo·config
-/// 덮어쓰기·서브커맨드·-z)를 뺀 나머지다. 호출자는 이 크기로 끊어 여러 번 부른다.
-pub const check_ignore_batch: usize = blk: {
-    var buf: [max_argv][]const u8 = undefined;
-    const prefix = build(.check_ignore, "git", "/", null, &buf);
-    break :blk max_argv - prefix.len;
-};
+/// `check-ignore` 한 번에 물어볼 경로 개수.
+///
+/// **예전에는 argv 여유 칸 수였고, 그 값이 10 이었다** — 항목이 열한 개인 디렉터리부터는 나머지를
+/// 아예 안 물었다는 뜻이다. 이제 경로는 `--stdin` 으로 가므로 argv 와 무관하고, 상한은 한 번에
+/// 만드는 **stdin 페이로드 크기**가 정한다(`max_check_ignore_stdin_bytes`). 여기 개수는 그 위에
+/// 얹는 안전판이다 — 아주 큰 디렉터리에서 한 배치가 메모리를 크게 잡지 않게 한다.
+pub const check_ignore_batch: usize = 512;
 
-/// `check-ignore` argv — 고정 접두 뒤에 경로들을 붙인다. `paths.len` 은 `check_ignore_batch` 이하여야
-/// 한다(넘으면 잘라 낸다 — argv 를 넘겨 exec 이 실패하는 것보다 덜 그린 편이 낫다).
-pub fn buildCheckIgnore(git_exe: []const u8, repo: []const u8, paths: []const []const u8, buf: *[max_argv][]const u8) []const []const u8 {
-    const prefix = build(.check_ignore, git_exe, repo, null, buf);
-    var n = prefix.len;
-    for (paths[0..@min(paths.len, check_ignore_batch)]) |path| {
-        buf[n] = path;
+/// `--stdin` 으로 보낼 페이로드 상한. 넘으면 **거기서 끊는다** — 끊긴 배치는 못 물은 항목이
+/// 판정 없이 남을 뿐이고(모르면 흐리게 하지 않는다), 다음 스캔이 다시 묻는다.
+pub const max_check_ignore_stdin_bytes: usize = 64 * 1024;
+
+/// `check-ignore` argv. **경로는 여기 안 붙는다** — `-z` 는 `--stdin` 과만 성립하므로(위 kind 주석)
+/// 경로는 `checkIgnoreStdin` 이 만든 NUL 구분 페이로드로 간다.
+pub fn buildCheckIgnore(git_exe: []const u8, repo: []const u8, buf: *[max_argv][]const u8) []const []const u8 {
+    return build(.check_ignore, git_exe, repo, null, buf);
+}
+
+/// `check-ignore --stdin -z` 에 넘길 페이로드를 `buf` 에 만든다 — 경로를 **NUL 로 끊어** 잇는다.
+/// 들어가지 못한 경로가 있으면 그만큼 짧은 슬라이스를 돌려준다(자르되 거짓말하지 않는다).
+///
+/// **NUL 을 품은 경로는 애초에 없다**(POSIX 경로 규약) — 그래서 이 구분자가 안전하다. 개행은 있을
+/// 수 있고, 바로 그래서 `-z` 를 쓴다.
+pub fn checkIgnoreStdin(paths: []const []const u8, buf: []u8) []const u8 {
+    var n: usize = 0;
+    for (paths) |path| {
+        if (path.len == 0) continue;
+        if (n + path.len + 1 > buf.len) break;
+        @memcpy(buf[n..][0..path.len], path);
+        n += path.len;
+        buf[n] = 0;
         n += 1;
     }
     return buf[0..n];
@@ -705,7 +721,16 @@ pub fn build(kind: Kind, git_exe: []const u8, repo: []const u8, arg: ?[]const u8
             // `-z`: 출력이 NUL 구분 — 경로에 개행이 들어갈 수 있다.
             buf[n] = "-z";
             n += 1;
-            // 경로는 `buildCheckIgnore` 가 이어 붙인다(이 자리는 고정 접두만 만든다).
+            // ⚠️ **`--stdin` 이 빠지면 이 명령은 실행되지 않는다.** git 은
+            // `fatal: -z only makes sense with --stdin` 으로 **128** 을 내고 끝난다 — 경로를 argv 에
+            // 실은 채 `-z` 만 붙였던 예전 모양이 정확히 그랬고, 그래서 `.gitignore` 흐림은 제품에서
+            // **한 번도 뜬 적이 없었다**(적대적 검증 2026-09-14, 실물 캡처로 발견).
+            //
+            // 판정자가 argv 의 «모양» 만 봐서 12 일을 못 잡았다 — git 이 그 조합을 받아 주는지는
+            // 실제로 돌려야만 알 수 있고, 이제 `git_backend` 의 실-git 판정자가 그것을 문다.
+            buf[n] = "--stdin";
+            n += 1;
+            // 경로는 argv 가 아니라 **stdin** 으로 간다(`checkIgnoreStdin`).
         },
         .status => {
             buf[n] = "status";
@@ -933,10 +958,10 @@ test "원격으로 나가는 토큰에는 제어문자가 없다 — 명령 종�
         }
     }
 
-    // `check-ignore` 는 kind 하나로 못 만들어 전용 빌더를 쓴다(경로가 argv 뒤에 붙는다) — 그래서
-    // 위 루프가 **원리적으로 못 보는** 자리다. 같은 규율을 여기서도 센다.
+    // `check-ignore` 는 kind 하나로 못 만들어 전용 빌더를 쓴다 — 그래서 위 루프가 **원리적으로 못 보는**
+    // 자리다. 같은 규율을 여기서도 센다(경로는 argv 가 아니라 stdin 으로 가므로 접두만 센다).
     var ignore_buf: [max_argv][]const u8 = undefined;
-    const ignore_argv = buildCheckIgnore("/usr/bin/git", "/repo", &.{ "a.txt", "dir/b.txt" }, &ignore_buf);
+    const ignore_argv = buildCheckIgnore("/usr/bin/git", "/repo", &ignore_buf);
     for (ignore_argv) |token| try testing.expect(remoteTokenIsSafe(token));
 }
 
@@ -1420,32 +1445,54 @@ test "turn_name_status: 두 tree를 각각의 인자로 넘긴다" {
     try testing.expect(saw_raw and saw_numstat);
 }
 
-// `check-ignore` 는 경로를 **인자로** 받는다(이 backend 의 실행 경로가 stdout 만 읽으므로 `--stdin` 을
-// 쓰지 않는다 — 위 `check_ignore` 주석). 그래서 한 번에 넘길 수 있는 개수가 argv 한도에 묶이고, 그
-// 개수를 상수로 노출해 호출자가 끊어 부른다. 여기서 고정하는 것은 ⑴ 접두가 그대로이고 ⑵ 경로가 그 뒤에
-// 순서대로 붙으며 ⑶ 배치 크기를 넘겨도 argv 를 넘지 않는다는 것이다.
-test "check-ignore argv: 고정 접두 뒤에 경로가 붙고 배치 한도를 넘지 않는다" {
+// `check-ignore` 는 경로를 **stdin 으로** 받는다. 이 판정자는 예전에 정반대를 못 박고 있었다 —
+// 「경로는 argv 로 간다」를 토큰 순서까지 세면서 고정했고, 주석은 「`--stdin` 을 쓰지 않는다」를
+// 근거까지 붙여 굳혀 놨다. **그 모양은 git 이 아예 실행하지 않는 모양이었다**
+// (`fatal: -z only makes sense with --stdin`, exit 128) — 즉 이 초록은 「제품이 돈다」가 아니라
+// 「우리가 틀린 모양을 정확히 만든다」였다.
+//
+// ⚠️ 그래서 **모양만 세는 판정자는 여기까지**다. 「git 이 받아 주는가」는 `git_backend` 의 실-git
+// 판정자가 문다(적대적 검증 2026-09-14 — 그 결함이 12 일을 살아남은 이유가 이 비대칭이었다).
+test "check-ignore argv: 접두가 `-z --stdin` 으로 끝나고 경로는 argv 에 없다" {
     var buf: [max_argv][]const u8 = undefined;
-    const paths = [_][]const u8{ "node_modules", "src/main.zig", "build/out" };
-    const argv = buildCheckIgnore("git", "/repo", &paths, &buf);
+    const argv = buildCheckIgnore("git", "/repo", &buf);
 
     try std.testing.expectEqualStrings("git", argv[0]);
     try std.testing.expectEqualStrings("-C", argv[1]);
     try std.testing.expectEqualStrings("/repo", argv[2]);
-    // 서브커맨드와 -z 가 접두 끝에 있고, 그 뒤가 경로다.
-    try std.testing.expectEqualStrings("check-ignore", argv[argv.len - 5]);
-    try std.testing.expectEqualStrings("-z", argv[argv.len - 4]);
-    try std.testing.expectEqualStrings("node_modules", argv[argv.len - 3]);
-    try std.testing.expectEqualStrings("src/main.zig", argv[argv.len - 2]);
-    try std.testing.expectEqualStrings("build/out", argv[argv.len - 1]);
+    try std.testing.expectEqualStrings("check-ignore", argv[argv.len - 3]);
+    try std.testing.expectEqualStrings("-z", argv[argv.len - 2]);
+    // **이 한 줄이 결함을 막는다.** `-z` 는 `--stdin` 없이는 성립하지 않는다.
+    try std.testing.expectEqualStrings("--stdin", argv[argv.len - 1]);
+    try std.testing.expect(argv.len <= max_argv);
+}
 
-    // 배치 한도를 넘겨 주면 잘라 낸다 — argv 를 넘겨 exec 이 실패하는 것보다 덜 그린 편이 낫다.
-    var many: [max_argv * 2][]const u8 = undefined;
-    for (&many) |*m| m.* = "x";
-    const clamped = buildCheckIgnore("git", "/repo", &many, &buf);
-    try std.testing.expect(clamped.len <= max_argv);
-    try std.testing.expectEqual(check_ignore_batch, clamped.len - (clamped.len - check_ignore_batch));
+test "check-ignore stdin: 경로를 NUL 로 끊어 잇고, 넘치면 거기서 멈춘다" {
+    var buf: [64]u8 = undefined;
+
+    {
+        const paths = [_][]const u8{ "node_modules", "src/main.zig" };
+        const payload = checkIgnoreStdin(&paths, &buf);
+        try std.testing.expectEqualStrings("node_modules\x00src/main.zig\x00", payload);
+    }
+
+    // 개행이 든 이름도 **한 답**이다 — `-z` 를 쓰는 이유가 이것이다.
+    {
+        const paths = [_][]const u8{"odd\nname"};
+        const payload = checkIgnoreStdin(&paths, &buf);
+        try std.testing.expectEqualStrings("odd\nname\x00", payload);
+    }
+
+    // 버퍼를 넘기면 **들어간 것까지만** 돌려준다 — 반쪽 경로를 보내면 git 이 다른 것을 판정한다.
+    {
+        var tiny: [8]u8 = undefined;
+        const paths = [_][]const u8{ "abc", "defghijk" };
+        const payload = checkIgnoreStdin(&paths, &tiny);
+        try std.testing.expectEqualStrings("abc\x00", payload);
+    }
+
     try std.testing.expect(check_ignore_batch > 0);
+    try std.testing.expect(max_check_ignore_stdin_bytes > 0);
 }
 
 // ── 원격 argv (RS1) ───────────────────────────────────────────────────────────

@@ -71631,6 +71631,39 @@ test "탐색기 무시 표시는 «물을 때의 저장소»에 붙는다 — �
     try std.testing.expect(file_tree_dock_ops.ignoredKnownForTest(session));
 }
 
+test "탐색기로 들어오면 흐림을 물을 곳이 생긴다 — 이미 탐색기인 창에서도" {
+    // **적대적 검증 8 회차(2026-09-14)에서 뒤집힌 판정.** 바로 앞 회차에 「git 백엔드를 만드는 자리가
+    // 전부 소스 컨트롤 경로라 어쩔 수 없다」고 적었는데 **틀렸다** — 상태바 브랜치 클릭
+    // (`requestBranchMenu`)이 이미 비-SCM 경로에서 만들고 있고, 그 주석이 이 문제와 한 글자도 다르지
+    // 않다(「도크를 한 번도 안 연 사용자에겐 클릭이 아무 일도 안 한다」).
+    //
+    // 갈림은 「SCM 이냐 아니냐」가 아니라 **「사용자 행동이냐 드레인이냐」**였다. 드레인에 붙이면
+    // 판정자 수십 개가 프로세스를 띄워 샤드가 죽고, 진입에 붙이면 소스 컨트롤과 같은 규율이 된다.
+    //
+    // 그리고 **`setDockView` 가 아니라 `onDockViewPresented`** 다. 앞쪽은 「같은 뷰면 되돌아가기」라,
+    // 워크스페이스가 **이미 탐색기인 채로 복원된** 창에서는 영영 안 선다 — 이 판정자가 무는 자리다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    // 복원된 창의 모양: 도크가 이미 탐색기다. 그런데 백엔드는 없다.
+    session.dock.view = .explorer;
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    try std.testing.expect(session.git_backend == null);
+
+    // 사용자가 탐색기를 연다 — 뷰는 안 바뀐다.
+    dock_ops.openDockTo(session, .explorer);
+
+    // 옛 코드는 여기서 여전히 `null` 이라 흐림 질의가 첫 줄에서 되돌아갔다.
+    try std.testing.expect(session.git_backend != null);
+    // 아직 **묻지는 않았다** — 질의는 스캔 결과가 올 때 나간다. 「모르면 흐리게 하지 않는다」는 그대로다.
+    try std.testing.expect(!session.git_ignore_answered);
+    try std.testing.expect(!file_tree_dock_ops.ignoredKnownForTest(session));
+}
+
 test "«다시 읽어라» 표식만 남은 목록도 기계가 갈리면 버린다 (누적 적대적 검증)" {
     // **합류 결함**(2026-09-13). 두 축이 각자는 맞는데 겹치는 순간 깨졌다:
     //

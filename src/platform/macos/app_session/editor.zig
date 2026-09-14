@@ -1108,7 +1108,16 @@ fn storeHitRows(self: *AppSession, term: *Term, leaf_rect: maru.session.SplitRec
 
     // **기하도 같은 순간에 굳힌다**(`editor_hit_geom` doc). ①(픽셀 → 행·열)과 ④(행 폭)가 클릭
     // 시점에 다시 계산하면 행 배열과 다른 프레임의 값이 된다.
-    const body_outer = editorBodyRect(self, leaf_rect, term);
+    // **병합 모드에서는 Result pane 이 본문이다**(S3b-2). pane 전체 본문으로 재면 Result 가 밀린
+    // 만큼 열이 통째로 어긋나, 클릭이 **엉뚱한 글자**를 가리킨다 — 실측(2026-09-14): 평범한
+    // 편집기에서 6 을 가리키는 지점이 병합 모드에서 12(줄 끝)로 잡혔다. S3b-2 는 「Result 밖이면
+    // 무시」만 세웠고 **안쪽 변환**은 이 자리가 소유한다(`MPN9` 가 그 자리를 잡았다).
+    const body_outer: maru.session.SplitRect = if (term.rt.editor_merge_layout) |lay| .{
+        .x = @intCast(@max(lay.result.x, 0)),
+        .y = @intCast(@max(lay.result.y, 0)),
+        .w = lay.result.w,
+        .h = lay.result.h,
+    } else editorBodyRect(self, leaf_rect, term);
     const inset = chrome_editor.frame.content_inset_px;
     const inner_w = body_outer.w -| inset * 2;
     const inner_h = body_outer.h -| inset * 2;
@@ -2009,7 +2018,19 @@ pub fn clampScrollToGeometry(self: *AppSession, term: *Term, leaf_rect: maru.ses
     if (term.kind != .editor) return;
     const lines = editorLines(term);
     if (lines.len == 0) return;
-    const body = editorBodyRect(self, leaf_rect, term);
+    // **병합 모드에서는 Result pane 이 본문이다**(S3b-2 — 히트 기하와 같은 규율). pane 전체로 재면
+    // 좁아진 Result 에서 **넘치는 줄을 「안 넘친다」로 보고** 가로 위치를 0 으로 되돌린다 — 그러면
+    // 그 pane 은 가로로 아예 못 굴린다(실측 2026-09-14: `first_col` 을 세워도 화면이 그대로였다).
+    //
+    // **지난 프레임의 배치를 쓴다.** 이 함수는 그리기 **전에** 도는데 이번 배치는 아직 없다. 첫
+    // 프레임에는 배치가 없어 pane 전체로 재고(오늘과 같다), 두 번째부터 제 폭으로 잰다 — 위치는
+    // 스크롤 입력이 올 때마다 다시 묶이므로 한 프레임 늦는 것은 화면에 남지 않는다.
+    const body: maru.session.SplitRect = if (term.rt.editor_merge_layout) |lay| .{
+        .x = @intCast(@max(lay.result.x, 0)),
+        .y = @intCast(@max(lay.result.y, 0)),
+        .w = lay.result.w,
+        .h = lay.result.h,
+    } else editorBodyRect(self, leaf_rect, term);
     const inner_h = body.h -| chrome_editor.frame.content_inset_px * 2;
     const visible_rows: usize = @max(inner_h / @max(self.cell_height_px, 1), 1);
 
@@ -9059,6 +9080,164 @@ test "MPN7 Result «밖» 클릭은 아무 일도 안 한다 (제품 경계)" {
     const base = lay.base orelse return error.MissingBasePane;
     const base_y: f64 = @floatFromInt(base.y + 8);
     try testing.expect(hitTestBody(term, inside_x, base_y) == null);
+
+    // **Incoming pane(오른쪽)도 같다** — 왼쪽(Current)만 재면 가드가 반쪽이어도 초록이다.
+    // 오른쪽은 특히 위험하다: 가드가 없으면 Result 기하의 «먼 오른쪽 열»로 읽혀 줄 끝으로 clamp 되어
+    // **null 이 아닌 답**이 나온다(왼쪽은 gutter 로 떨어져 자연히 null 이라 그 차이가 안 보인다).
+    const inc = lay.incoming orelse return error.MissingIncomingPane;
+    const inc_x: f64 = @floatFromInt(inc.x + @as(i32, @intCast(inc.w / 2)));
+    try testing.expect(hitTestBody(term, inc_x, inside_y) == null);
+}
+
+/// 판정자 전용: 그 코드포인트가 그려진 **열**(없으면 null). 병합 pane 의 값 전달을 «차이»로 재는 데 쓴다.
+fn drawnColOf(dl: renderer.DrawList, cp: u21) ?u16 {
+    for (dl.cells) |c| if (c.codepoint == cp) return c.col;
+    return null;
+}
+
+test "MPN10 Result pane 은 «이 Term 의 값» 으로 그려진다 — 탭 폭·가로 위치·랩·행 수" {
+    // **적대적 8회차가 여기를 통째로 비워 두고 있었다**(생존 8/10): 탭 폭을 8 로 박거나 랩을 켜거나
+    // 가로 위치를 0 으로 고정해도 아무도 안 깨어났다. 절대 열 산술을 판정자가 재현하면 제품과 같이
+    // 틀리므로, **값을 바꿨을 때 화면이 실제로 달라지는가**로 잰다(차이 판정).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    // 탭 하나와 긴 줄을 든 문서로 바꿔 연다 — 픽스처의 기본 문서(짧은 세 줄)로는 이 축들이 안 보인다.
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    try dir.dir.writeFile(testing.io, .{
+        .sub_path = "wide.txt",
+        .data = "\tXY\nabcdefghijklmnopqrstuvwxyz0123456789\n",
+    });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(testing.io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "wide.txt" });
+    defer allocator.free(path);
+    const wide_term = try openPathInActivePane(fx.session, path);
+
+    wide_term.rt.editor_merge = .{
+        .stage_allocator = allocator,
+        .ready = true,
+        .stages = .{ .has_base = true, .has_ours = true, .has_theirs = true },
+        .base = try allocator.dupe(u8, "ZZZ\n"),
+        .ours = try allocator.dupe(u8, "QQQ\n"),
+        .theirs = try allocator.dupe(u8, "WWW\n"),
+        .line_allocator = allocator,
+        .base_lines = try allocator.dupe([]const u8, &.{"ZZZ\n"}),
+        .ours_lines = try allocator.dupe([]const u8, &.{"QQQ\n"}),
+        .theirs_lines = try allocator.dupe([]const u8, &.{"WWW\n"}),
+    };
+    defer editor_merge_ops.clear(fx.session, wide_term);
+
+    // ⑴ **탭 폭**: 3 과 9 에서 `X` 가 선 열이 달라야 한다(탭 폭을 박은 변이는 둘이 같다).
+    wide_term.rt.editor_tab_width = 3;
+    var t3 = appendPaneFrame(fx.session, fx.leaf_rect, wide_term) orelse return error.EditorPaneDidNotDraw;
+    defer t3.dl.deinit(allocator);
+    const col3 = drawnColOf(t3.dl, 'X') orelse return error.MissingTabbedGlyph;
+    wide_term.rt.editor_tab_width = 9;
+    var t9 = appendPaneFrame(fx.session, fx.leaf_rect, wide_term) orelse return error.EditorPaneDidNotDraw;
+    defer t9.dl.deinit(allocator);
+    const col9 = drawnColOf(t9.dl, 'X') orelse return error.MissingTabbedGlyph;
+    try testing.expect(col9 > col3);
+    wide_term.rt.editor_tab_width = 3;
+
+    // ⑵ **가로 위치**: 오른쪽으로 밀면 긴 줄의 첫 글자가 바뀐다(0 으로 박은 변이는 안 바뀐다).
+    //
+    // **랩을 꺼야 보인다** — 랩이 켜져 있으면 넘칠 것이 없어 가로 위치가 늘 0 이다(제품 규칙).
+    // 이 한 줄이 없으면 위 단언이 「늘 안 바뀐다」로 통과해 아무것도 증언하지 못한다.
+    wide_term.rt.editor_wrap = false;
+    var c0 = appendPaneFrame(fx.session, fx.leaf_rect, wide_term) orelse return error.EditorPaneDidNotDraw;
+    defer c0.dl.deinit(allocator);
+    const a_at_zero = drawnColOf(c0.dl, 'a');
+    wide_term.rt.editor_first_col = 5;
+    var c5 = appendPaneFrame(fx.session, fx.leaf_rect, wide_term) orelse return error.EditorPaneDidNotDraw;
+    defer c5.dl.deinit(allocator);
+    const a_at_five = drawnColOf(c5.dl, 'a');
+    // **얼마나 밀리는지는 안 가정한다**(상한·캐시가 관여한다) — 「밀면 달라진다」만 잰다.
+    try testing.expect(a_at_zero != null);
+    const moved = if (a_at_five) |c5c| c5c != a_at_zero.? else true;
+    try testing.expect(moved);
+    wide_term.rt.editor_first_col = 0;
+
+    // ⑷ **랩**: 켜면 긴 줄이 접혀 **시각 행이 늘어난다**(랩을 박은 변이는 둘이 같다).
+    var nowrap = appendPaneFrame(fx.session, fx.leaf_rect, wide_term) orelse return error.EditorPaneDidNotDraw;
+    defer nowrap.dl.deinit(allocator);
+    const rows_nowrap = wide_term.rt.editor_hit_rows_len;
+    wide_term.rt.editor_wrap = true;
+    var wrapped = appendPaneFrame(fx.session, fx.leaf_rect, wide_term) orelse return error.EditorPaneDidNotDraw;
+    defer wrapped.dl.deinit(allocator);
+    try testing.expect(wide_term.rt.editor_hit_rows_len > rows_nowrap);
+    wide_term.rt.editor_wrap = false;
+
+    // ⑶ **행 수는 Result 의 것이다** — Base 는 한 줄, Result 는 두 줄이다. Base 것을 실으면
+    //    클릭이 닿는 행이 한 줄로 줄어든다.
+    var rows = appendPaneFrame(fx.session, fx.leaf_rect, wide_term) orelse return error.EditorPaneDidNotDraw;
+    defer rows.dl.deinit(allocator);
+    try testing.expect(wide_term.rt.editor_hit_rows_len >= 2);
+}
+
+test "MPN9 Result «안» 의 클릭이 그 자리 글자를 가리킨다 (제품 경계)" {
+    // **S3b-2 는 Result «밖» 만 걸렀다.** 안쪽 좌표 변환은 손대지 않았는데, 히트 기하
+    // (`editor_hit_geom`)는 여전히 **pane 전체 본문**에서 나오고 Result 는 가운데로 밀려 있다.
+    // 그 둘이 어긋나면 클릭이 **엉뚱한 글자**를 가리킨다 — 「밖이면 무시」만으로는 안 걸린다.
+    //
+    // **열 계산을 여기서 재현하지 않는다**(그 규칙은 `chrome_editor.hit` 이 소유한다). 대신
+    // **같은 상대 지점**을 평범한 편집기와 병합 모드에서 각각 눌러 **같은 글자**가 나오는지 본다 —
+    // 산술을 베끼면 판정자가 제품과 같이 틀린다(실제로 처음에 그렇게 써서 대조군부터 빗나갔다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = fx.term;
+    const cw: f64 = @floatFromInt(fx.session.cell_width_px);
+    const ch: f64 = @floatFromInt(fx.session.cell_height_px);
+
+    // ⑴ 평범한 편집기에서 첫 줄의 어느 한 지점을 누른다.
+    var plain = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    defer plain.dl.deinit(allocator);
+    const geom = term.rt.editor_hit_geom;
+    const dx = @as(f64, @floatFromInt(geom.content_left_px)) + cw * 5.5; // 본문 왼쪽에서 다섯 칸 남짓
+    const dy = ch * 0.5;
+    const plain_off = hitTestBody(
+        term,
+        @as(f64, @floatFromInt(geom.body_x)) + dx,
+        @as(f64, @floatFromInt(geom.body_y)) + dy,
+    ) orelse return error.PlainHitMissed;
+    // 픽스처 문서는 `const a = 1;` 이라 첫 줄 안이다(줄 끝으로 튀지 않았다).
+    try testing.expect(plain_off < 12);
+
+    // ⑵ 병합 모드에서 **Result pane 의 같은 상대 지점**을 누른다.
+    term.rt.editor_merge = .{
+        .stage_allocator = allocator,
+        .ready = true,
+        .stages = .{ .has_base = true, .has_ours = true, .has_theirs = true },
+        .base = try allocator.dupe(u8, "ZZZ\n"),
+        .ours = try allocator.dupe(u8, "QQQ\n"),
+        .theirs = try allocator.dupe(u8, "WWW\n"),
+        .line_allocator = allocator,
+        .base_lines = try allocator.dupe([]const u8, &.{"ZZZ\n"}),
+        .ours_lines = try allocator.dupe([]const u8, &.{"QQQ\n"}),
+        .theirs_lines = try allocator.dupe([]const u8, &.{"WWW\n"}),
+    };
+    defer editor_merge_ops.clear(fx.session, term);
+    var merged = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    defer merged.dl.deinit(allocator);
+    const lay = term.rt.editor_merge_layout orelse return error.MissingMergeLayout;
+    // **본문 원점에서 잰다** — pane 원점에서 재면 inset(4px = 반 칸)만큼 왼쪽이라 한 칸 어긋난다.
+    // 그 원점이 Result 로 옮겨졌는지가 이 판정자의 요점이므로, 원점 자체를 제품에서 읽는다.
+    const mg = term.rt.editor_hit_geom;
+    // **원점이 실제로 Result 로 옮겨졌다** — 안 옮겨지면 아래 비교가 우연히 맞을 수도 있다.
+    try testing.expect(@as(i64, mg.body_x) >= @as(i64, lay.result.x));
+    const merge_off = hitTestBody(
+        term,
+        @as(f64, @floatFromInt(mg.body_x)) + dx,
+        @as(f64, @floatFromInt(mg.body_y)) + dy,
+    ) orelse return error.MergeHitMissed;
+
+    // **같은 글자를 가리켜야 한다.** 어긋나면 고르기 버튼도 엉뚱한 자리에서 잡힌다(S2 의 위젯 행은
+    // Result 문서 위에 서므로 같은 기하를 탄다).
+    try testing.expectEqual(plain_off, merge_off);
 }
 
 test "MPN8 판이 아직 안 왔으면 «한 줄로 말한다» — 조용한 빈 화면을 남기지 않는다" {

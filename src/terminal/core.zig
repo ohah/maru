@@ -11005,6 +11005,74 @@ test "kitty delete: U=1 격자가 남아 있으면 대문자여도 이미지를 
     try std.testing.expectEqual(@as(usize, 1), core.kitty_virtual_placements.items.len);
 }
 
+// 명세: `d=z`/`d=Z` 는 "Delete all placements that have **the specified z-index**".
+// 적대적 검증 실측: 같은 이미지를 z=5·z=9 에 걸고 `d=Z,z=5` 를 보내면 **둘 다** 사라졌다 —
+// 대문자 경로가 `removePlacementsForImage` 로 그 이미지의 배치를 전부 지웠기 때문이다.
+test "kitty delete: d=Z 는 그 z-index 의 배치만 지운다 (적대적 검증)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 8 });
+    defer core.deinit();
+    core.setCellMetrics(10, 20);
+    var b64: [64]u8 = undefined;
+    var seq: [200]u8 = undefined;
+    const px = [_]u8{ 2, 2, 2, 255 } ** 4;
+    const enc = std.base64.standard.Encoder.encode(&b64, &px);
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+    try core.write("\x1b[1;1H");
+    try core.write("\x1b_Ga=p,i=1,p=1,c=1,r=1,z=5,q=2\x1b\\");
+    try core.write("\x1b[3;1H");
+    try core.write("\x1b_Ga=p,i=1,p=2,c=1,r=1,z=9,q=2\x1b\\"); // 같은 이미지, 다른 z
+
+    try core.write("\x1b_Ga=d,d=Z,z=5,i=1,q=2\x1b\\");
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_placements.items.len); // z=9 는 산다
+    try std.testing.expectEqual(@as(i32, 9), core.kitty_placements.items[0].z);
+    try std.testing.expect(core.kitty_images.map.get(1) != null); // 아직 참조가 있다 → free 안 함
+
+    try core.write("\x1b_Ga=d,d=Z,z=9,i=1,q=2\x1b\\");
+    try std.testing.expectEqual(@as(usize, 0), core.kitty_placements.items.len);
+    try std.testing.expect(core.kitty_images.map.get(1) == null); // 마지막 참조가 갔다 → free
+}
+
+// 명세: `d=i`/`d=n` 에 `p=` 를 주면 "**only the placement** with the specified image id and
+// placement id will be deleted". 대문자는 그 위에 조건부 free 를 더할 뿐인데, 예전에는 `p` 를
+// 무시하고 그 이미지의 배치를 전부 지웠다(실측: p=1 만 지우랬는데 둘 다 사라졌다).
+test "kitty delete: d=I/d=N 에 p= 를 주면 그 배치 하나만 지운다 (적대적 검증)" {
+    var b64: [64]u8 = undefined;
+    var seq: [200]u8 = undefined;
+    const px = [_]u8{ 2, 2, 2, 255 } ** 4;
+    const enc = std.base64.standard.Encoder.encode(&b64, &px);
+    for ([_]bool{ false, true }) |by_number| {
+        var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 8 });
+        defer core.deinit();
+        core.setCellMetrics(10, 20);
+        // **번호 갈래는 `i=` 를 주면 안 된다** — 번호 배정은 id 를 안 준 전송에서만 일어난다.
+        // (처음엔 둘 다 줬다가 「지울 것이 없다」로 조용히 통과해 픽스처가 헛돌았다.)
+        if (by_number) {
+            try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,I=4,q=2;{s}\x1b\\", .{enc}));
+        } else {
+            try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+        }
+        var id: u32 = 1;
+        if (by_number) {
+            var it = core.kitty_images.map.keyIterator();
+            id = it.next().?.*;
+        }
+        try core.write("\x1b[1;1H");
+        try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=p,i={d},p=1,c=1,r=1,q=2\x1b\\", .{id}));
+        try core.write("\x1b[3;1H");
+        try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=p,i={d},p=2,c=1,r=1,q=2\x1b\\", .{id}));
+        try std.testing.expectEqual(@as(usize, 2), core.kitty_placements.items.len); // 픽스처가 실제로 둘을 만들었다
+
+        const del = if (by_number)
+            try std.fmt.bufPrint(&seq, "\x1b_Ga=d,d=N,I=4,p=1,q=2\x1b\\", .{})
+        else
+            try std.fmt.bufPrint(&seq, "\x1b_Ga=d,d=I,i=1,p=1,q=2\x1b\\", .{});
+        try core.write(del);
+        try std.testing.expectEqual(@as(usize, 1), core.kitty_placements.items.len); // p=2 는 산다
+        try std.testing.expectEqual(@as(u32, 2), core.kitty_placements.items[0].placement_id);
+        try std.testing.expect(core.kitty_images.map.get(id) != null); // 그 배치가 아직 쓴다
+    }
+}
+
 test "kitty delete: d=f 는 프레임만 놓아주고 이미지는 남긴다" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 8 });
     defer core.deinit();

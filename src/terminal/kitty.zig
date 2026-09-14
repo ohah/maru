@@ -627,21 +627,17 @@ fn pickKittyEvictionVictim(self: *TerminalCore, exclude_id: u32) ?u32 {
 
 /// z-index가 target과 같은 placement를 제거한다. free_images면 그 placement가 가리키던 이미지도 free하고
 /// (그 이미지의 다른 placement까지 제거해 orphan을 막는다). placement 수가 작아 재시작 비용은 무시할 만하다.
+/// `d=z`/`d=Z` — 명세: "Delete all placements that have **the specified z-index**".
+///
+/// 예전에는 대문자일 때 `removePlacementsForImage` 로 **그 이미지의 배치를 전부** 지웠다. 실측:
+/// 같은 이미지를 z=5 와 z=9 에 걸고 `d=Z,z=5` 를 보내면 **둘 다** 사라졌다. 명세가 말하는 것은
+/// z 가 일치하는 것뿐이고, 데이터 free 는 "provided that the image is not referenced elsewhere" 다.
 fn deleteByZ(self: *TerminalCore, target_z: i32, free_images: bool) void {
-    var i: usize = 0;
-    while (i < self.kitty_placements.items.len) {
-        const p = self.kitty_placements.items[i];
-        if (p.z == target_z) {
-            if (free_images) {
-                const id = p.image_id;
-                self.kitty_images.remove(self.allocator, id);
-                removePlacementsForImage(self, id); // 그 이미지의 모든 placement 제거(배열 변형)
-                i = 0; // 배열이 바뀌었으니 처음부터 다시 스캔
-            } else {
-                _ = self.kitty_placements.orderedRemove(i);
-            }
-        } else i += 1;
-    }
+    deletePlacementsWhere(self, free_images, target_z, zPredicate);
+}
+
+fn zPredicate(_: *const TerminalCore, p: StoredPlacement, target_z: i32) bool {
+    return p.z == target_z;
 }
 
 // ── orchestrator(parser dispatchApc 진입점 + transmit/display/delete dispatch) ─────────────────────
@@ -1072,7 +1068,15 @@ fn kittyDelete(self: *TerminalCore, cmd: KittyGraphicsCommand) KittyStatus {
         },
         'i' => { // image_id로(+ 선택적 placement_id)
             if (cmd.image_id == 0) return .einval;
-            if (free_image) { // 이미지 + 그 이미지의 모든 placement 제거
+            if (free_image and cmd.placement_id != 0) {
+                // 명세: "If you specify a `p` key for the placement id as well, then **only the
+                // placement** with the specified image id and placement id will be deleted."
+                // 대문자는 그 위에 「참조가 없으면 데이터도 free」를 더할 뿐이다 — 예전에는 `p` 를
+                // 무시하고 그 이미지의 배치를 전부 지웠다(실측: p=1 만 지우랬는데 둘 다 사라졌다).
+                removeOnePlacement(self, cmd.image_id, cmd.placement_id);
+                removeVirtualPlacements(self, cmd.image_id, cmd.placement_id);
+                freeImageIfUnreferenced(self, cmd.image_id);
+            } else if (free_image) { // 이미지 + 그 이미지의 모든 placement 제거
                 removePlacementsForImage(self, cmd.image_id);
                 removeVirtualPlacements(self, cmd.image_id, 0);
                 self.kitty_images.remove(self.allocator, cmd.image_id);
@@ -1090,7 +1094,11 @@ fn kittyDelete(self: *TerminalCore, cmd: KittyGraphicsCommand) KittyStatus {
             if (cmd.image_number == 0) return .einval;
             const image_id = cmd.image_id; // execKittyGraphics 가 조회해 둔다(없는 번호면 0)
             if (image_id == 0) return .ok; // 배정된 적 없는 번호 — 지울 것이 없다(성공)
-            if (free_image) {
+            if (free_image and cmd.placement_id != 0) {
+                removeOnePlacement(self, image_id, cmd.placement_id); // `d=i` 와 같은 규약(명세 문장도 같다)
+                removeVirtualPlacements(self, image_id, cmd.placement_id);
+                freeImageIfUnreferenced(self, image_id);
+            } else if (free_image) {
                 removePlacementsForImage(self, image_id);
                 removeVirtualPlacements(self, image_id, 0);
                 self.kitty_images.remove(self.allocator, image_id);

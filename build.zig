@@ -3788,6 +3788,7 @@ pub fn build(b: *std.Build) void {
         }),
         .filters = &.{ "MP1", "CSP1", "context_menu" },
     });
+    attachPngCodec(b, marker_preview_tests.root_module); // maru 루트를 세우는 자리는 전부 이걸 부른다(위 주석)
     marker_preview_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
     const run_marker_preview_tests = b.addRunArtifact(marker_preview_tests);
     run_marker_preview_tests.addArg("--maru-expect-tests=69"); // MP1 31 + CSP1(popup_box) 7 + context_menu 회귀 10 + 이름 없는 블록 + 이 그래프의 이름 없는 test 블록들(필터와 무관하게 컴파일된다)

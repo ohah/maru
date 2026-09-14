@@ -107,6 +107,10 @@ pub const marker_preview_ops = @import("app_session/marker_preview.zig"); // MP1
 /// 마커 프리뷰의 디코드 결과를 갤러리 것과 가르는 키. `Result.hit_index`가 그대로 실려 오므로
 /// 갤러리 인덱스가 절대 쓰지 않을 값을 쓴다 — 겹치면 프리뷰 픽셀이 갤러리 타일에 붙는다.
 pub const marker_preview_decode_key: usize = std.math.maxInt(usize);
+
+/// 붙여넣기를 기다리지 **않을** 때 마커 관찰을 돌리는 주기(tick). 60 Hz 기준 0.5 초다.
+/// 그 사이에 하는 일은 `staged` → `sent` 전이와 인덱스 인계뿐이라 늦어도 기능이 안 깨진다.
+const idle_marker_scan_ticks: u32 = 30;
 const agent_image_scan_backend = @import("agent_image_scan_backend.zig"); // IG1-e: 갤러리 스캔 워커
 const agent_body_search_backend = @import("agent_body_search_backend.zig"); // BS1: 본문 검색 워커
 const agent_image_decode_backend = @import("agent_image_decode_backend.zig"); // IG3-d: 갤러리 디코드 워커 // IG1: 이미지 갤러리 도크 뷰(docs/agent-image-gallery.md)
@@ -5922,6 +5926,8 @@ pub const AppSession = struct {
     /// 열려 있는 마커 프리뷰(한 번에 하나 — 계약 §2.2). 닫는 **모든** 길에서 `uploaded`를 되돌려야
     /// 다음에 열 때 빈 자리가 안 나온다(§5).
     marker_preview_open: ?marker_preview_ops.Open = null,
+    /// 기다릴 것이 없을 때 관찰을 **드물게** 돌리기 위한 tick 카운터(위 `pollMarkerPreview` 주석).
+    marker_preview_idle_tick: u32 = 0,
     /// 갤러리 스캔 워커(계약 §4.1.1). init 실패는 «갤러리만 안 됨» 으로 접는다 — 세션 전체를
     /// 못 열 이유가 아니다. null 이면 `refresh` 가 조용히 물러난다.
     agent_activity_backend: ?agent_image_scan_backend.Backend = null,
@@ -15006,7 +15012,7 @@ pub const AppSession = struct {
         // 그래서 **스테이징을 먼저 묻는다.** 거기 있으면 이번 실행에 우리가 직접 실어 둔 것이라
         // 가장 확실하고, 전송된 뒤에도 `sent` 로 남아 있다(§4.2 A11). 없을 때만 인덱스로 간다.
         const staged_known = if (self.marker_preview.stagingFor(surface_id)) |st| st.lookup(m.n) != null else false;
-        if (!staged_known) return self.toggleSentMarkerPreview(surface_id, m);
+        if (!staged_known) return self.toggleSentMarkerPreview(surface_id, m, hits.items);
         const next = marker_preview_ops.toggle(&self.marker_preview, self.marker_preview_open, surface_id, m);
         const changed = (next == null) != (self.marker_preview_open == null) or
             (next != null and self.marker_preview_open != null and next.?.n != self.marker_preview_open.?.n);
@@ -15054,6 +15060,12 @@ pub const AppSession = struct {
                 return;
             }
             const h = indexed[hit_index];
+            // **그 자리가 여전히 같은 이미지인가.** 인덱스가 다시 만들어지면 배열 인덱스는 남의 것을
+            // 가리킬 수 있다 — 내용 키가 어긋나면 **틀린 그림 대신 못 연다**로 접는다.
+            if (h.file_index != open.sent_file_index or h.data_offset != open.sent_data_offset) {
+                open.failed = true;
+                return;
+            }
             const path = self.agent_activity.chain.get(h.file_index) orelse {
                 open.failed = true;
                 return;
@@ -15117,19 +15129,25 @@ pub const AppSession = struct {
     ///
     /// 인덱스가 그 N을 모르면 **열지 않는다**. 화면에 글자로 쓰인 `[Image #N]`과 구분할 방법이 그것뿐이고
     /// (§3.1), 틀린 그림을 자신 있게 띄우는 것보다 안 뜨는 편이 낫다.
-    fn toggleSentMarkerPreview(self: *AppSession, surface_id: u64, m: maru.session.agent_image_markers.Hit) bool {
+    fn toggleSentMarkerPreview(
+        self: *AppSession,
+        surface_id: u64,
+        m: maru.session.agent_image_markers.Hit,
+        screen_hits: []const maru.session.agent_image_markers.Hit,
+    ) bool {
         if (self.marker_preview_open) |c| {
             if (c.surface_id == surface_id and c.n == m.n and c.row == m.row and c.start_col == m.start_col) {
                 self.closeMarkerPreview();
                 return true;
             }
         }
-        const found = self.findSentMarkerHit(m.n) orelse {
+        const found = self.findSentMarkerHit(m, screen_hits) orelse {
             // 인덱스가 아직 없다 — 갤러리 도크를 한 번도 안 열었으면 비어 있다(`refreshForFocus`).
             // **이번 클릭은 조용히 실패**하되 스캔을 걸어 다음 번엔 답할 수 있게 한다.
             agent_activity_ops.refresh(self, false);
             return false;
         };
+        const h = self.agent_activity.hits.items[found];
         if (self.marker_preview_open) |*o| o.deinit(self.allocator);
         self.marker_preview_open = .{
             .surface_id = surface_id,
@@ -15138,6 +15156,8 @@ pub const AppSession = struct {
             .start_col = m.start_col,
             .end_col = m.end_col,
             .sent_hit_index = found,
+            .sent_file_index = h.file_index,
+            .sent_data_offset = h.data_offset,
         };
         self.metal_dirty = true;
         return true;
@@ -15145,15 +15165,46 @@ pub const AppSession = struct {
 
     /// 갤러리 인덱스에서 그 마커 번호의 이미지를 찾는다. **최근 것이 이긴다** — Codex는 N이 메시지
     /// 안에서만 유일해 같은 번호가 여럿일 수 있는데(§4.3), 화면에서 누른 것은 대개 최근 대화다.
-    fn findSentMarkerHit(self: *AppSession, n: u32) ?usize {
-        if (n == 0) return null;
-        const hits = self.agent_activity.hits.items;
-        var i = hits.len;
+    fn findSentMarkerHit(
+        self: *AppSession,
+        m: maru.session.agent_image_markers.Hit,
+        screen_hits: []const maru.session.agent_image_markers.Hit,
+    ) ?usize {
+        if (m.n == 0) return null;
+        // **화면에서 뒤에서 몇 번째인가**를 세어 인덱스에서도 같은 순번을 고른다.
+        //
+        // 그냥 「가장 최근 것」을 고르면 Codex 에서 틀린 그림이 뜬다 — N 이 메시지마다 1 로 돌아가므로
+        // (§4.3) 대화가 길면 `#1` 이 수십 개이고, 화면 **위쪽**(오래된) 마커를 눌러도 최근 것이 열린다.
+        // §3.1 이 「틀린 이미지를 자신 있게 보여주는 것이 아무것도 안 보여주는 것보다 나쁘다」고 한 그것이다.
+        //
+        // 화면의 마커도 인덱스의 이미지도 **시간순**이라, 뒤에서부터 세면 화면 밖(스크롤 위)에 더 있어도
+        // 최근 쪽은 정확히 맞는다. **§4.2 가 금한 「순서로 세기」와는 다른 축이다** — 그쪽은 빈 번호를
+        // 건너뛰는 스테이징 순번이었고, 이것은 같은 번호의 **발생 순서**다.
+        var from_end: usize = 0;
+        var seen_click = false;
+        var i = screen_hits.len;
         while (i > 0) {
             i -= 1;
-            const h = hits[i];
+            const sh = screen_hits[i];
+            if (sh.n != m.n) continue;
+            if (sh.row == m.row and sh.start_col == m.start_col) {
+                seen_click = true;
+                break;
+            }
+            from_end += 1;
+        }
+        if (!seen_click) return null;
+
+        const hits = self.agent_activity.hits.items;
+        var skipped: usize = 0;
+        var j = hits.len;
+        while (j > 0) {
+            j -= 1;
+            const h = hits[j];
             if (!h.kind.isImage()) continue;
-            if (h.marker_n == n) return i;
+            if (h.marker_n != m.n) continue;
+            if (skipped == from_end) return j;
+            skipped += 1;
         }
         return null;
     }
@@ -15262,6 +15313,18 @@ pub const AppSession = struct {
     /// 있으면 **화면을 읽지 않는다** — 관찰이 걸리지 않은 세션에 비용을 물리지 않는다.
     fn pollMarkerPreview(self: *AppSession) void {
         if (self.marker_preview.pending.items.len == 0 and self.marker_preview.slots.items.len == 0) return;
+        // ⚠️ **매 tick 화면을 풀지 않는다.** 이 함수는 뷰포트 전체를 UTF-8 로 풀고 마커를 훑는데,
+        // 60 Hz 로 돌면 셀 수천 개를 초당 수십 번 변환한다 — §3.2 가 「스캔은 수식키를 누른 동안에만」
+        // 이라고 세운 규율을 관찰 폴링만 비껴가고 있었다(적대적 3회차).
+        //
+        // 붙여넣기를 기다리는 동안(`pending`)은 매 tick 봐야 한다 — 마커는 42 ms 안에 뜬다(§10).
+        // 기다릴 것이 없으면 `syncVisible`(전송 감지)만 남는데 그것은 늦어도 기능이 안 깨지므로
+        // **드물게** 본다. 픽셀은 `sent` 로 옮겨도 계속 들고 있기 때문이다(§4.2 A11).
+        const waiting = self.marker_preview.pending.items.len > 0;
+        if (!waiting) {
+            self.marker_preview_idle_tick +%= 1;
+            if (self.marker_preview_idle_tick % idle_marker_scan_ticks != 0) return;
+        }
         if (!self.surface_initialized or self.tabs.items.len == 0) return;
         const term = pane_ops.activePane(self).activeTerm();
         if (term.kind != .terminal or term.rt.ended_placeholder) return;
@@ -15270,6 +15333,37 @@ pub const AppSession = struct {
         defer visible.deinit(self.allocator);
         self.collectMarkerNumbers(term, .viewport, &visible) catch return;
         marker_preview_ops.observe(&self.marker_preview, self.allocator, surface_id, visible.items) catch {};
+        self.releaseIndexedStaging(surface_id);
+    }
+
+    /// 인덱스가 같은 이미지를 받았으면 스테이징은 픽셀을 **놓는다**(§4.4).
+    ///
+    /// 안 놓으면 같은 그림이 두 곳에 산다 — 상한(§4.2)이 언젠가 거두지만 그때까지 스크린샷 한 장이
+    /// 수 MB 씩 중복이다. 설계는 처음부터 `indexed` 로 넘기라고 적었는데 배선이 빠져 있었다.
+    fn releaseIndexedStaging(self: *AppSession, surface_id: u64) void {
+        const st = self.marker_preview.stagingFor(surface_id) orelse return;
+        if (st.entries.items.len == 0) return;
+        var i = st.entries.items.len;
+        while (i > 0) {
+            i -= 1;
+            const e = st.entries.items[i];
+            if (e.phase != .sent) continue; // 아직 입력창에 있으면 인덱스가 알 리 없다
+            if (!self.indexHasMarker(e.n)) continue;
+            // 열려 있는 프리뷰가 이 항목을 보고 있으면 그대로 둔다 — 그리는 중에 픽셀을 빼면 빈다.
+            if (self.marker_preview_open) |o| {
+                if (o.sent_hit_index == null and o.n == e.n and o.surface_id == surface_id) continue;
+            }
+            st.release(self.allocator, e.n);
+        }
+    }
+
+    /// 인덱스가 그 마커 번호의 이미지를 들고 있나.
+    fn indexHasMarker(self: *AppSession, n: u32) bool {
+        if (n == 0) return false;
+        for (self.agent_activity.hits.items) |h| {
+            if (h.kind.isImage() and h.marker_n == n) return true;
+        }
+        return false;
     }
 
     /// 그 term의 화면에서 마커 N을 모은다.

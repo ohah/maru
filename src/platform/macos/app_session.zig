@@ -71639,6 +71639,109 @@ test "탐색기 무시 표시는 «물을 때의 저장소»에 붙는다 — �
     try std.testing.expect(file_tree_dock_ops.ignoredKnownForTest(session));
 }
 
+test "흐림은 «진짜 git 으로 물어 화면까지» 닿는다 — 제품 경로 end-to-end" {
+    // **적대적 검증 12 회차(2026-09-14).** 이 기능은 이 한 브랜치 안에서만 **두 번 조용히 죽었다**:
+    //   ⑴ argv 가 `check-ignore -z <경로들>` 이라 git 이 아예 거절했다(exit 128).
+    //   ⑵ 경로 슬라이스가 **자라는 버퍼**를 가리켜 자식 stdin 으로 쓰레기가 나갔다(exit 128).
+    // 두 번 다 게이트는 **초록**이었다. 있던 판정자들이 argv 의 «모양»과 주입된 답만 봤기 때문이다.
+    //
+    // 그래서 제품이 실제로 부르는 층에서 **끝까지** 태운다: 진짜 저장소 → `requestIgnoredForPaths`
+    // → 진짜 `check-ignore` → `drainIgnoreResults` → **행 투영**. 위 둘은 이 판정자에 걸린다.
+    //
+    // ⚠️ **항목을 많이 만든다.** 버퍼가 자라며 realloc 하는 것이 ⑵ 의 조건이고, 옛 배치 상한(=10)을
+    // 넘겨야 「512 로 키운 것」도 함께 증명된다. 이름을 길게 잡아 첫 몇 항목에서 이미 realloc 이 난다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const repo_len = tmp.dir.realPath(io, &repo_buf) catch return error.SkipZigTest;
+    const repo = repo_buf[0..repo_len];
+
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const git_exe = git_backend_mod.locate(&exe_buf) orelse return error.SkipZigTest;
+    // `git init` 은 백엔드 큐를 거치지 않고 바로 띄운다 — 이 판정자가 보려는 것은 그 뒤다.
+    if (!git_backend_mod.initRepoForTest(allocator, git_exe, repo)) return error.SkipZigTest;
+
+    var name_store: std.ArrayList(u8) = .empty;
+    defer name_store.deinit(allocator);
+    var entries: std.ArrayList(struct { name: []const u8 }) = .empty;
+    defer entries.deinit(allocator);
+    var inputs: std.ArrayList(file_tree.EntryInput) = .empty;
+    defer inputs.deinit(allocator);
+
+    // 24 개: 짝수는 `*.tmp`(무시됨), 홀수는 `.zig`(추적 대상). 이름은 길게 — realloc 을 부른다.
+    var spans: [24]struct { off: usize, len: usize } = undefined;
+    var i: usize = 0;
+    while (i < spans.len) : (i += 1) {
+        const off = name_store.items.len;
+        var one: [128]u8 = undefined;
+        const printed = try std.fmt.bufPrint(
+            &one,
+            "a-rather-long-entry-name-so-the-buffer-grows-{d:0>3}.{s}",
+            .{ i, if (i % 2 == 0) "tmp" else "zig" },
+        );
+        try name_store.appendSlice(allocator, printed);
+        spans[i] = .{ .off = off, .len = name_store.items.len - off };
+    }
+    for (spans) |sp| {
+        const name = name_store.items[sp.off..][0..sp.len];
+        try entries.append(allocator, .{ .name = name });
+        try inputs.append(allocator, .{ .name = name, .kind = .file });
+    }
+
+    var ignore_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = try std.fmt.bufPrint(&ignore_path_buf, "{s}/.gitignore", .{repo}),
+        .data = "*.tmp\n",
+    });
+
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    session.git_backend = try git_backend_mod.Backend.init(session.io);
+
+    try session.file_tree.replaceExplicitRoots(&.{repo});
+    try session.file_tree.applySnapshot(repo, inputs.items);
+
+    // **제품 경로 그대로** 묻는다.
+    git_ops.requestIgnoredForPaths(session, repo, entries.items);
+    try std.testing.expectEqual(@as(usize, spans.len), session.git_ignore_query_paths.items.len);
+
+    // 답을 기다린다 — 안 오면 **실패**다(11 회차: 건너뛰면 판정자가 공허해진다).
+    var spins: usize = 0;
+    while (spins < 1000 and !session.git_ignore_answered) : (spins += 1) {
+        git_ops.drainIgnoreResults(session);
+        if (session.git_ignore_answered) break;
+        var ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+        _ = std.c.nanosleep(&ts, null);
+    }
+    try std.testing.expect(session.git_ignore_answered);
+    try std.testing.expect(file_tree_dock_ops.ignoredKnownForTest(session));
+
+    // **화면까지 닿았나** — 짝수만 흐리고 홀수는 아니다.
+    var rows: std.ArrayList(file_tree.Row) = .empty;
+    defer rows.deinit(allocator);
+    try session.file_tree.buildRows(allocator, &.{}, &rows);
+    var dim: usize = 0;
+    var lit: usize = 0;
+    for (rows.items) |row| {
+        const path = file_tree.rowPath(row) orelse continue;
+        if (std.mem.endsWith(u8, path, ".tmp")) {
+            try std.testing.expect(file_tree.rowIgnored(row));
+            dim += 1;
+        } else if (std.mem.endsWith(u8, path, ".zig")) {
+            try std.testing.expect(!file_tree.rowIgnored(row));
+            lit += 1;
+        }
+    }
+    // **전제도 센다** — 행이 안 서면 위 두 단언이 통째로 공허하다(허용된 자리 N 개를 센다).
+    try std.testing.expectEqual(@as(usize, spans.len / 2), dim);
+    try std.testing.expectEqual(@as(usize, spans.len / 2), lit);
+}
+
 test "앞 디렉터리의 답이 뒤 디렉터리의 흐림을 지우지 않는다" {
     // **적대적 검증 10 회차(2026-09-14).** 「답이 자기 질문의 틀을 들고 온다」를 `repo` 에만 적용하고
     // **물어본 목록**에는 안 했다. 그 목록은 세션 버퍼(`git_ignore_query_paths`)인데, 디렉터리를 읽을

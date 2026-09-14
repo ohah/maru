@@ -391,6 +391,13 @@ thumb이 셀 경계로 스냅해 목록과 어긋난다.
   git 이 그 조합을 받아 주는지는 **실제로 돌려야만** 알 수 있다. 그래서 임시 저장소에 진짜
   `check-ignore` 를 돌리는 판정자가 무시된 것·**없는 것(exit 1)**·개행이 든 이름 셋을 문다.
 
+  그리고 그 위에 **제품 경로 end-to-end 판정자**가 하나 선다 — 진짜 저장소에 항목 24 개를 두고
+  `requestIgnoredForPaths` → 진짜 `check-ignore` → `drainIgnoreResults` → **행 투영**까지 태워,
+  절반만 흐린지 **양쪽 개수를 센다**. 이 기능은 한 브랜치 안에서 두 번 조용히 죽었고 두 번 다 게이트가
+  초록이었다 — 그 둘(`--stdin` 누락·경로 슬라이스 댕글링)은 이 판정자에 **실측으로** 걸린다(변이 검사).
+  항목을 24 개로 잡은 것도 그래서다: 버퍼가 자라며 realloc 해야 댕글링이 드러나고, 옛 배치 상한(=10)을
+  넘겨야 「512 로 키운 것」이 함께 증명된다.
+
   덤으로 한 번에 묻는 개수가 **10 → 512** 가 됐다. 예전 상한은 argv 여유 칸 수였고, 그래서 항목이
   열한 개가 넘는 디렉터리는 나머지를 **아예 안 물었다**.
 - **선택과 키보드 포커스(ABI v127)**: 트리는 row index가 아니라 `절대 경로 + row kind` identity로 transient selection을 소유한다. scan 완료·접기·FSEvents rebuild로 row index가 바뀌어도 같은 row가 남으면 선택을 복원하고, 사라지면 가장 가까운 조작 가능한 조상/이웃으로 결정적으로 이동한다. 클릭 또는 `focus_file_tree`가 Zig의 단일 `FocusOwner`를 `.file_tree { restore_surface: ?surface_id }`로 바꾸고 Metal view를 first responder로 만든다. 현재 구현의 기본 `⌘⇧E`는 이 action에 연결되어 있으며, FP9에서 §3.4의 `toggle_file_panel_focus`로 기본 chord만 이전한다. surface id는 앱 전역 비재사용이라 generation token을 겸하며 Esc 때 entry와 native WKWebView 존재를 다시 검증한다. `file_tree_focus`는 이 union의 파생 getter일 뿐 별도 mutable boolean이 아니다. 선택과 keyboard focus는 workspace에 저장하지 않는다. 포커스 중 선택은 theme accent 배경과 WCAG 4.5 이상 대비가 나는 파생 전경을 marker·이름·dirty/conflict 표시 전체에 적용하고, 포커스 밖에서는 dim으로 그린다. active 파일 표시는 별도 marker로 유지한다.

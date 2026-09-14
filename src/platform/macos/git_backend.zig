@@ -4222,6 +4222,14 @@ test "check-ignore 는 진짜 git 을 통과한다 — 무시된 것, 없는 것
 /// ⚠️ **없으면 건너뛴다 — 없는 것을 있다고 치고 통과시키지 않는다.** 개발자 기계에서 손으로 돌릴 때는
 /// 그 스크립트를 거치지 않으면 이 판정자들이 조용히 안 돈다. 그것이 맞다: 원격 판정을 **가짜 대상**으로
 /// 통과시키면 그 초록은 아무것도 뜻하지 않는다.
+/// 판정자용: 임시 디렉터리에 저장소 하나를 세운다. **큐를 거치지 않고** 바로 돌린다 — 이 파일 밖의
+/// 판정자가 `runArgvWithEnv` 를 못 부르므로(비공개) 여기 한 줄로 열어 둔다.
+pub fn initRepoForTest(allocator: std.mem.Allocator, git_exe: []const u8, repo: []const u8) bool {
+    const out = runArgvWithEnv(allocator, &.{ git_exe, "-C", repo, "init", "-q" }, null, false, null, false) catch return false;
+    allocator.free(out.bytes);
+    return true;
+}
+
 fn remoteScmHarness() ?struct { dest: []const u8, ctl: []const u8, repo: []const u8 } {
     const dest_z = std.c.getenv("MARU_REMOTE_SCM_DEST") orelse return null;
     const ctl_z = std.c.getenv("MARU_REMOTE_SCM_CTL") orelse return null;

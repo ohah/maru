@@ -763,6 +763,25 @@ const cases = [_]Case{
         .contract = "좌우 두 열이 같은 행을 같은 높이에 세우고 번호는 각자 문서의 것이다",
         .rect = .{ .x = 0, .y = 0, .w = 480, .h = 128 },
     },
+    // S3b-2 §5 — **3-way pane 넷의 배치**. 세 열이 겹치지도 비지도 않고, 각 pane 이 자기 gutter 를
+    // 달고, 아래 Base 띠가 선다. 배치 산술은 단위 판정자(`MPN1~5`)가 잡지만 **gutter 폭·열 경계·
+    // 띠 높이가 화면에서 어떻게 보이는가**는 여기서만 보인다.
+    //
+    // 가운데가 Result 인 것이 그림으로 확인된다 — 충돌 표시(`<<<<<<<`)가 든 쪽이 작업트리 파일이다.
+    .{
+        .name = "editor-merge-four-panes",
+        .capture = "editor-merge-panes.ppm",
+        .contract = "세 열(Current·Result·Incoming)이 나란히 서고 아래에 Base 띠가 붙는다",
+        .rect = .{ .x = 0, .y = 0, .w = 1200, .h = 140 },
+    },
+    // **접히는 쪽도 든다.** 규칙(`Result > Current·Incoming > Base`)이 화면에서 어떻게 보이는지
+    // 그림이 없으면, 접기를 통째로 지워도 넓은 골든만 보고는 아무도 모른다.
+    .{
+        .name = "editor-merge-narrow-collapses",
+        .capture = "editor-merge-narrow.ppm",
+        .contract = "폭이 모자라면 세 열이 접히고 Result 하나만 남는다(Base 띠는 그대로)",
+        .rect = .{ .x = 0, .y = 0, .w = 480, .h = 140 },
+    },
     .{
         .name = "editor-real-file-from-disk",
         .capture = "editor-real-file.ppm",

@@ -283,6 +283,14 @@ fn inAnySpan(spans: []const terminal.SelectionSpan, row: u16, col: u16) bool {
     return false;
 }
 
+/// 선택·검색 하이라이트가 이 프레임에서 최대 몇 칸을 칠할 수 있는가(예약 용량). 하나도 없으면 0 이라
+/// pass 자체를 건너뛴다 — 하이라이트가 없는 평상시 프레임은 격자를 훑지도 않는다.
+fn highlightBudget(colors: CellColors, size: terminal.Size) usize {
+    const has_any = colors.selection != null or colors.current_match != null or colors.search_matches.len > 0;
+    if (!has_any) return 0;
+    return @as(usize, size.rows) * @as(usize, size.cols);
+}
+
 /// (row,col)의 하이라이트 배경색(없으면 null). 우선순위: 현재 검색 매치 > 다른 검색 매치 > 선택. 셀 자체
 /// 배경(BCE/SGR)은 여기서 안 본다 — 호출자가 null이면 packBackground로 폴백한다. selection·search·cursor
 /// 같은 배경 칠 결정을 한 곳에 모아 glyph/빈-셀 두 경로가 같은 규칙을 쓰게 한다(중복 제거).
@@ -528,7 +536,58 @@ pub fn buildNativeCellsSplit(
     // underline overlay는 셀당 밑줄 1개를 추가로 낸다(커서 overlay 예산과 별개) — overlays.len을
     // 한 번 더 더해 두 pass(2.6 밑줄 + 3 커서)가 같은 예산을 다투지 않게 한다. hollow 커서는 한 overlay가
     // 4변(상·하·좌·우) cell을 내므로 overlay당 최악 4 cell로 예산을 잡는다(block 2 + 여유 — 과할당은 작다).
-    try cells.ensureTotalCapacity(allocator, frame.glyphs.len + draw_cells.len + 4 * frame.overlays.len + hover_cells);
+    // 0) 선택·검색 하이라이트 배경은 **격자 기반**이라 예산도 그 범위로 잡는다(아래 0) 참조).
+    const highlight_cells: usize = highlightBudget(colors, frame.size);
+    try cells.ensureTotalCapacity(allocator, frame.glyphs.len + draw_cells.len + 4 * frame.overlays.len + hover_cells + highlight_cells);
+
+    // 0) **선택·검색 하이라이트 배경 — 격자 기반(커서와 같은 부류).**
+    //
+    //    왜 여기 있는가: 하이라이트는 「격자 위에 덧칠하는 것」이지 **셀의 속성이 아니다**. 그런데 오래도록
+    //    아래 2) 의 빈-셀 경로가 `draw_cells`(=DrawList)를 돌며 칠해 왔고, 그래서 **DrawList 에 없는 칸은
+    //    하이라이트를 못 받았다**. 평소에는 DrawList 가 행×열 전부를 담아 티가 안 났지만, 줄 끝 빈 칸을
+    //    빼는 최적화(`draw_list.experiment_trim_blank`)를 켜자 **줄 끝 선택이 통째로 사라졌다**(적대적
+    //    테스트가 8칸 → 0칸으로 실증). 커서는 같은 처지가 아니었는데, 커서만 overlay 경로였기 때문이다 —
+    //    그 차이가 곧 이 pass 의 근거다.
+    //
+    //    순서가 맨 앞인 이유: 뒤따르는 glyph/빈-셀 경로가 같은 칸을 **같은 색으로** 다시 칠하므로(둘 다
+    //    `highlightBg` 를 본다) 덮여도 결과가 같고, 기본 배경 셀은 A=0 이라 아예 덮지 않는다. 즉 중복은
+    //    무해하고, 앞에 두는 것만으로 「빠진 칸」이 메워진다.
+    if (highlight_cells > 0) {
+        // 아래 2) 가 이미 칠하는 칸은 건너뛴다 — 안 그러면 선택 범위만큼 셀이 두 배로 불어난다(실측으로
+        // 8 → 16). DrawList 는 행마다 왼쪽부터 연속이고 trim 은 **오른쪽만** 자르므로, 행별 「덮인 열 수」
+        // 하나면 충분하다. 행 수만큼의 작은 배열이라 프레임당 비용도 무시할 만하다.
+        const covered = try allocator.alloc(u16, frame.size.rows);
+        defer allocator.free(covered);
+        @memset(covered, 0);
+        for (draw_cells) |dc| {
+            if (dc.row >= frame.size.rows) continue;
+            const upto = @as(u16, dc.col) +| 1;
+            if (upto > covered[dc.row]) covered[dc.row] = upto;
+        }
+        var hl_row: u16 = 0;
+        while (hl_row < frame.size.rows) : (hl_row += 1) {
+            var hl_col: u16 = covered[hl_row]; // 덮인 구간 다음부터
+            while (hl_col < frame.size.cols) : (hl_col += 1) {
+                const hl = highlightBg(colors, hl_row, hl_col) orelse continue;
+                cells.appendAssumeCapacity(.{
+                    .row = hl_row,
+                    .col = hl_col,
+                    .width = 1,
+                    .codepoint = ' ',
+                    .slot_id = 0,
+                    .atlas_x_px = 0,
+                    .atlas_y_px = 0,
+                    .atlas_width_px = 0,
+                    .atlas_height_px = 0,
+                    .u0 = -1,
+                    .v0 = -1,
+                    .u1 = -1,
+                    .v1 = -1,
+                    .background = 0xFF00_0000 | packRgb(hl),
+                });
+            }
+        }
+    }
 
     // 1) ink가 있는 glyph cell. 전경색 + (있으면) 배경색을 같이 싣는다. blank cell도
     //    GlyphQuadFrame에 들어올 수 있으므로 그릴 게 없는 space는 여기서 제외하고, 배경이
@@ -3720,13 +3779,12 @@ test "unicode placeholder: 세 번째 diacritic 이 image_id 의 최상위 바�
     try std.testing.expectEqual(id, out[0].image_id);
 }
 
-test "[적대] trim 회귀 실증: 선택이 걸린 줄 끝 빈 칸이 draw_cells 에서 빠지면 선택 배경이 사라진다" {
-    // 무엇을 증명하는가: 빈 셀 경로가 **draw_cells 를 돈다**는 사실의 귀결. draw_list 의
-    // experiment_trim_blank 가 줄 끝 빈 칸을 빼면, 그 칸은 여기 루프에 아예 안 들어오므로
-    // 선택/검색 하이라이트를 받을 수 없다. trim 을 제품으로 올리기 전에 반드시 풀어야 할 회귀다.
+test "[적대] 선택 하이라이트는 draw_cells 에 없는 칸도 칠한다 — trim 과 무관하게" {
+    // 무엇을 고정하는가: 하이라이트 배경이 **격자 기반**이라는 계약. 한때 빈 셀 경로(`draw_cells` 루프)만
+    // 칠해서, 줄 끝 빈 칸을 빼는 trim 을 켜면 선택이 통째로 사라졌다(이 테스트가 8칸 → 0칸으로 잡았다).
+    // 지금은 0) pass 가 격자를 훑으므로 draw_cells 에 그 칸이 있든 없든 결과가 같아야 한다.
     //
-    // 커서가 같은 처지가 **아닌** 이유는 커서가 draw_cells 가 아니라 overlay 경로로 그려지기 때문이고,
-    // 그 차이가 곧 이 회귀의 해법(선택도 overlay 처럼 격자 기반으로 분리)을 가리킨다.
+    // 커서가 처음부터 멀쩡했던 이유(overlay 경로)가 이 해법의 근거였다 — 하이라이트도 같은 부류다.
     const alloc = std.testing.allocator;
     const size: terminal.Size = .{ .cols = 8, .rows = 1 };
     const sel_bg: color.Rgb = .{ .r = 0x22, .g = 0x44, .b = 0xff };
@@ -3766,10 +3824,10 @@ test "[적대] trim 회귀 실증: 선택이 걸린 줄 끝 빈 칸이 draw_cell
         if (c.background == want) on_painted += 1;
     }
 
-    // trim OFF: 선택된 8칸이 전부 선택색으로 칠해진다.
+    // draw_cells 가 8칸을 담든(trim OFF) 하나도 안 담든(trim ON) **똑같이 8칸**이 칠해져야 한다.
+    // 중복도 없어야 한다 — 격자 pass 는 draw_cells 가 덮은 구간 다음부터만 칠한다.
     try std.testing.expectEqual(@as(usize, 8), off_painted);
-    // trim ON: 한 칸도 안 칠해진다 — 화면에서는 「줄을 선택했는데 아무 색도 안 보임」이 된다.
-    try std.testing.expectEqual(@as(usize, 0), on_painted);
+    try std.testing.expectEqual(@as(usize, 8), on_painted);
 }
 
 // ============================================================================
@@ -3965,4 +4023,96 @@ test "[적대] replace 이미지 버퍼 재사용: 켠 결과와 끈 결과가 �
     try on_buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, colors, &.{}, &.{}, null, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &px, &.{});
 
     try std.testing.expectEqualSlices(u8, off_buf.image_pixels, on_buf.image_pixels);
+}
+
+test "[적대] 하이라이트 격자 pass: 선택·검색이 없으면 셀이 한 개도 안 늘어난다" {
+    // 평상시 프레임(하이라이트 없음)에 이 pass 가 비용을 얹으면 안 된다 — `highlightBudget` 이 0 이면
+    // 격자를 훑지도 않는다.
+    //
+    // 기대가 0 인 이유: 기본 배경의 빈 칸은 **원래도 셀을 안 만든다**(clear color 가 그 자리를 칠하므로
+    // 그릴 것이 없다). 즉 하이라이트가 없으면 이 pass 가 있으나 없으나 결과가 빈 배열이어야 한다 —
+    // 한 칸이라도 나오면 평상시 프레임에 없던 셀을 얹고 있다는 뜻이다.
+    const alloc = std.testing.allocator;
+    const size: terminal.Size = .{ .cols = 8, .rows = 2 };
+    const frame: renderer.GlyphQuadFrame = .{ .size = size, .cursor = .{}, .dirty = null, .glyphs = &.{}, .overlays = &.{}, .stats = .{} };
+    const colors: CellColors = .{ .default_fg = .{ .r = 0xcc, .g = 0xcc, .b = 0xcc } }; // selection/search 전부 null
+
+    var cells3: [3]renderer.DrawCell = undefined;
+    for (&cells3, 0..) |*c, i| c.* = .{ .row = 0, .col = @intCast(i), .codepoint = ' ' };
+    const out = try buildNativeCellsFromGlyphQuads(alloc, frame, &cells3, colors);
+    defer alloc.free(out);
+    try std.testing.expectEqual(@as(usize, 0), out.len);
+}
+
+test "[적대] 하이라이트 격자 pass: 검색 매치도 빈 칸에서 살아난다" {
+    // 선택만 고치고 검색을 빠뜨리면 ⌘F 매치가 줄 끝에서 사라진다 — 둘 다 같은 highlightBg 를 타는지 고정.
+    const alloc = std.testing.allocator;
+    const size: terminal.Size = .{ .cols = 6, .rows = 1 };
+    const frame: renderer.GlyphQuadFrame = .{ .size = size, .cursor = .{}, .dirty = null, .glyphs = &.{}, .overlays = &.{}, .stats = .{} };
+    const match_bg: color.Rgb = .{ .r = 0x99, .g = 0x77, .b = 0x22 };
+    const spans = [_]terminal.SelectionSpan{.{ .start = .{ .row = 0, .col = 2 }, .end = .{ .row = 0, .col = 5 } }};
+    const colors: CellColors = .{
+        .default_fg = .{ .r = 0xcc, .g = 0xcc, .b = 0xcc },
+        .search_match_bg = match_bg,
+        .search_matches = &spans,
+    };
+
+    // draw_cells 가 비어 있어도(= trim 이 전부 잘라낸 줄) 매치 4칸이 칠해져야 한다.
+    const out = try buildNativeCellsFromGlyphQuads(alloc, frame, &.{}, colors);
+    defer alloc.free(out);
+    const want = 0xFF00_0000 | (@as(u32, match_bg.r) << 16) | (@as(u32, match_bg.g) << 8) | @as(u32, match_bg.b);
+    var painted: usize = 0;
+    for (out) |c| {
+        if (c.background == want) painted += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 4), painted);
+}
+
+test "[적대] 하이라이트 격자 pass: 블록(직사각형) 선택도 빈 칸에서 살아난다" {
+    const alloc = std.testing.allocator;
+    const size: terminal.Size = .{ .cols = 6, .rows = 3 };
+    const frame: renderer.GlyphQuadFrame = .{ .size = size, .cursor = .{}, .dirty = null, .glyphs = &.{}, .overlays = &.{}, .stats = .{} };
+    const sel_bg: color.Rgb = .{ .r = 0x22, .g = 0x44, .b = 0xff };
+    const colors: CellColors = .{
+        .default_fg = .{ .r = 0xcc, .g = 0xcc, .b = 0xcc },
+        .selection_bg = sel_bg,
+        // 블록: 세 행 모두 [1,3] 열 → 3×3 = 9칸
+        .selection = .{ .start = .{ .row = 0, .col = 1 }, .end = .{ .row = 2, .col = 3 }, .block = true },
+    };
+    const out = try buildNativeCellsFromGlyphQuads(alloc, frame, &.{}, colors);
+    defer alloc.free(out);
+    const want = 0xFF00_0000 | (@as(u32, sel_bg.r) << 16) | (@as(u32, sel_bg.g) << 8) | @as(u32, sel_bg.b);
+    var painted: usize = 0;
+    for (out) |c| {
+        if (c.background == want) painted += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 9), painted);
+}
+
+test "[적대] 하이라이트 격자 pass: draw_cells 가 덮은 칸을 두 번 칠하지 않는다" {
+    // 중복을 허용하면 선택 범위만큼 셀이 두 배가 된다(실측 8 → 16). 격자 pass 는 행별로 draw_cells 가
+    // 덮은 열 다음부터만 칠해야 한다. 셀 총수로 그것을 고정한다.
+    const alloc = std.testing.allocator;
+    const size: terminal.Size = .{ .cols = 10, .rows = 1 };
+    const frame: renderer.GlyphQuadFrame = .{ .size = size, .cursor = .{}, .dirty = null, .glyphs = &.{}, .overlays = &.{}, .stats = .{} };
+    const sel_bg: color.Rgb = .{ .r = 0x22, .g = 0x44, .b = 0xff };
+    const colors: CellColors = .{
+        .default_fg = .{ .r = 0xcc, .g = 0xcc, .b = 0xcc },
+        .selection_bg = sel_bg,
+        .selection = .{ .start = .{ .row = 0, .col = 0 }, .end = .{ .row = 0, .col = 9 } }, // 10칸 전부 선택
+    };
+    // draw_cells 는 앞 4칸만(= trim 이 뒤 6칸을 잘라낸 줄).
+    var four: [4]renderer.DrawCell = undefined;
+    for (&four, 0..) |*c, i| c.* = .{ .row = 0, .col = @intCast(i), .codepoint = ' ' };
+
+    const out = try buildNativeCellsFromGlyphQuads(alloc, frame, &four, colors);
+    defer alloc.free(out);
+    // 격자 pass 6칸(col 4~9) + draw_cells 4칸 = 10. 중복이면 14가 된다.
+    try std.testing.expectEqual(@as(usize, 10), out.len);
+    const want = 0xFF00_0000 | (@as(u32, sel_bg.r) << 16) | (@as(u32, sel_bg.g) << 8) | @as(u32, sel_bg.b);
+    var painted: usize = 0;
+    for (out) |c| {
+        if (c.background == want) painted += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 10), painted); // 열 0~9 가 빠짐없이 한 번씩
 }

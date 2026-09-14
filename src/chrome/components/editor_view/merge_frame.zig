@@ -38,6 +38,14 @@ pub const Pane = struct {
     content_max_cols: ?u32 = null,
     /// 이 pane 에 caret 이 서나. **Result 만 든다**(이 조각에서 입력을 받는 유일한 pane).
     carets: ?[]const []const u32 = null,
+    /// 줄마다 **위 위젯 행**(S1.5·S2 — 충돌 구간 머리의 「고르기」 줄). `lines` 와 같은 축이고 짧은
+    /// 배열·`null` 항목을 허용한다. **Result 만 든다** — 고르기는 작업트리 문서에서 일어난다.
+    ///
+    /// **이 필드가 없던 동안 pane 넷이 뜨는 순간 S2 의 해결 UI 가 사라졌다**(S3b-3a 실측). 컴포넌트가
+    /// 받을 자리가 없으면 제품이 넘길 수도 없다.
+    widgets: []const ?content.Widget = &.{},
+    /// 행마다 **배경 밴드**(S2 — 마커 줄의 강조). `lines` 와 같은 축.
+    bands: ?[]const frame.RowBand = null,
 };
 
 /// pane 넷이 실제로 놓인 자리. **`null` 은 「안 그렸다」**이고, 그 자리는 이웃이 가져간다.
@@ -191,6 +199,8 @@ fn buildPane(pane: Pane, props: Props, rect: draw.Rect, background: ?draw.Rect, 
         .total_lines = pane.lines.len,
         .content_max_cols = pane.content_max_cols,
         .carets = pane.carets,
+        .line_widgets = pane.widgets,
+        .row_bands = pane.bands,
         .caret_visible = props.caret_visible and pane.carets != null,
         .caret_shape = props.caret_shape,
         .visible_rows = m.visible_rows,

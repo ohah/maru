@@ -318,6 +318,35 @@ pub fn dropAltScreenPlacements(self: *TerminalCore) void {
     }
 }
 
+/// `d=a`/`d=A` — 명세: "Delete all placements **visible on screen**".
+///
+/// **두 가지를 지킨다.**
+///
+/// ⑴ **화면에 보이는 것만.** maru 의 placement 는 절대 행에 앵커돼 스크롤백에 남고, 위로 스크롤하면
+///    다시 보인다. 예전에는 `d=a` 가 목록을 통째로 비워서, 어떤 프로그램이 「내 이미지 치워」를 보내면
+///    **사용자가 스크롤해서 볼 수 있던 과거 이미지까지** 사라졌다.
+///
+/// ⑵ **가상 배치(U=1)는 대상이 아니다.** kitty 원본이 `clear_all_filter_func` 에서
+///    `if (ref->is_virtual_ref) return false;` 로 빼고, Ghostty 도 "Virtual placements are never
+///    selected by visible deletes per the protocol" 로 같은 규칙이다. 코어가 placeholder 셀 위치를
+///    모르므로 「보이는가」를 물을 수도 없다 — 두 구현이 같은 답을 갖고 있으니 그대로 따른다.
+///
+/// 활성 화면은 절대 행 `[sb.count, sb.count + rows)` 다. 앵커가 그 안이면 **계산 없이** 보이는 것이고
+/// (Ghostty 의 최적화 힌트와 같다), 스크롤백에 있을 때만 셀 span 을 구해 아래 끝이 걸치는지 본다.
+fn deleteVisiblePlacements(self: *TerminalCore, free_image: bool) void {
+    deletePlacementsWhere(self, free_image, {}, visiblePredicate);
+}
+
+fn visiblePredicate(self: *const TerminalCore, p: StoredPlacement, _: void) bool {
+    const top = self.screen.sb.count; // 활성 화면의 첫 절대 행
+    const bottom = top + self.size.rows; // 그 다음 행(반열림)
+    if (p.anchor_row >= bottom) return false; // 아직 화면 아래 — 있을 수 없지만 방어
+    if (p.anchor_row >= top) return true; // 앵커가 활성 영역 안 → 계산 없이 보인다
+    // 앵커가 스크롤백에 있다 — 아래 끝이 활성 영역에 걸치면 여전히 보인다.
+    const span = placementCellSpan(self, p);
+    return p.anchor_row + span.rows > top;
+}
+
 /// `d=r`/`d=R` — id 가 [lo, hi] 인 **이미지**를 지운다. 소문자면 그 이미지들의 placement 만 거두고
 /// 대문자면 이미지 데이터까지 free 한다. 다른 타깃과 달리 **대상이 placement 가 아니라 이미지**라
 /// (명세: "Delete all images whose id is ...") 화면에 안 걸린 이미지도 걸린다.
@@ -1058,14 +1087,7 @@ fn kittyDelete(self: *TerminalCore, cmd: KittyGraphicsCommand) KittyStatus {
     const free_image = (c >= 'A' and c <= 'Z'); // 대문자면 이미지 데이터도 free
     const target = if (free_image) c - 'A' + 'a' else c; // 소문자로 정규화
     switch (target) {
-        'a' => { // 전체
-            self.kitty_placements.clearRetainingCapacity();
-            self.kitty_virtual_placements.clearRetainingCapacity();
-            if (free_image) {
-                self.kitty_images.clear(self.allocator);
-                self.kitty_image_numbers.clearRetainingCapacity(); // 번호 배정도 함께(이미지가 없으면 무의미)
-            }
-        },
+        'a' => deleteVisiblePlacements(self, free_image), // 명세: "placements **visible on screen**"
         'i' => { // image_id로(+ 선택적 placement_id)
             if (cmd.image_id == 0) return .einval;
             if (free_image and cmd.placement_id != 0) {

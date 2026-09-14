@@ -8584,10 +8584,21 @@ test "kitty graphics delete: d=a(전체 placement만)·d=A(이미지까지) (K4a
     try std.testing.expectEqual(@as(usize, 0), core.kitty_placements.items.len);
     try std.testing.expectEqual(@as(usize, 2), core.kitty_images.map.count()); // 이미지 유지
 
-    // d=A(대문자) — placement + 이미지 데이터까지 전부 free.
+    // d=A(대문자) — 보이는 placement 를 지우고, **그 배치가 마지막 참조였던** 이미지만 free 한다.
+    //
+    // **배치가 하나도 없는 이미지(i=2)는 그대로 남는다.** `d=a` 의 대상은 명세상 「화면에 보이는
+    // placement」이고, 이미지에는 placement 를 통해서만 닿기 때문이다 — kitty 도 ref 를 훑고
+    // (`clear_all_filter_func`), Ghostty 도 visible placement 를 훑는다. 전송만 하고 안 띄운
+    // 이미지를 지우려면 id 로 겨눈다(`d=I,i=2`). 예전에는 여기서 저장소를 통째로 비웠다.
     try core.write("\x1b_Ga=p,i=1\x1b\\");
     try core.write("\x1b_Ga=d,d=A\x1b\\");
     try std.testing.expectEqual(@as(usize, 0), core.kitty_placements.items.len);
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_images.map.count()); // i=2 는 배치가 없어 안 걸린다
+    try std.testing.expect(core.kitty_images.map.get(1) == null); // 마지막 참조가 간 i=1 은 free
+    try std.testing.expect(core.kitty_images.map.get(2) != null);
+
+    // id 로 겨누면 배치 없는 이미지도 지운다 — 그쪽이 그 일을 하는 타깃이다.
+    try core.write("\x1b_Ga=d,d=I,i=2\x1b\\");
     try std.testing.expectEqual(@as(usize, 0), core.kitty_images.map.count());
 }
 
@@ -11071,6 +11082,111 @@ test "kitty delete: d=I/d=N 에 p= 를 주면 그 배치 하나만 지운다 (�
         try std.testing.expectEqual(@as(u32, 2), core.kitty_placements.items[0].placement_id);
         try std.testing.expect(core.kitty_images.map.get(id) != null); // 그 배치가 아직 쓴다
     }
+}
+
+// 명세: `d=a`/`d=A` 는 "Delete all placements **visible on screen**".
+//
+// 두 레퍼런스가 같은 규칙을 쓴다(2026-09-14 원본 확인): kitty 는 `clear_all_filter_func` 에서
+// `if (ref->is_virtual_ref) return false;` 로 가상 배치를 빼고, Ghostty 는 `.all` 을
+// `deleteVisiblePlacements`("Delete only non-virtual placements that intersect the active screen")
+// 로 보낸다. maru 는 목록을 **통째로 비우고** 있었다 — 스크롤백으로 밀려난 이미지까지 지웠다.
+test "kitty delete: d=a 는 화면에 보이는 배치만 지운다 (스크롤백은 남긴다)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 5 });
+    defer core.deinit();
+    core.setCellMetrics(10, 20);
+    var b64: [64]u8 = undefined;
+    var seq: [200]u8 = undefined;
+    const px = [_]u8{ 6, 6, 6, 255 } ** 4;
+    const enc = std.base64.standard.Encoder.encode(&b64, &px);
+
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+    try core.write("\x1b_Ga=p,i=1,p=1,c=1,r=1,q=2\x1b\\"); // 지금 화면에 건다
+    for (0..30) |_| try core.write("scroll\r\n"); // 스크롤백으로 밀어낸다
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=2,q=2;{s}\x1b\\", .{enc}));
+    try core.write("\x1b_Ga=p,i=2,p=1,c=1,r=1,q=2\x1b\\"); // 이건 화면 안
+    try std.testing.expectEqual(@as(usize, 2), core.kitty_placements.items.len);
+    // 픽스처가 실제로 「밖」과 「안」을 만들었는지 먼저 증명한다(안 그러면 아래가 헛통과한다).
+    const top = core.screen.sb.count;
+    try std.testing.expect(core.kitty_placements.items[0].anchor_row + 1 <= top); // 1 은 화면 밖
+    try std.testing.expect(core.kitty_placements.items[1].anchor_row >= top); // 2 는 화면 안
+
+    try core.write("\x1b_Ga=d,d=a,q=2\x1b\\");
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_placements.items.len); // 하나만 갔다
+    try std.testing.expectEqual(@as(u32, 1), core.kitty_placements.items[0].image_id); // 스크롤백 것이 산다
+}
+
+// **앵커는 스크롤백인데 아래 끝이 화면에 걸치는** 큰 이미지도 「보이는」 것이다. Ghostty 가 같은
+// 자리를 짚는다: "Only compute their extent when the anchor is already in history and the bottom
+// edge may still intersect the active area."
+//
+// 이 판정자가 없으면 「스크롤백이면 무조건 안 보인다」로 줄여도 아무도 모른다 — 실측으로 그
+// 돌연변이가 살아남는 것을 보고 추가했다(앞 판정자의 배치는 1 셀짜리라 그 축을 안 밟는다).
+test "kitty delete: d=a 는 스크롤백에 걸친 큰 이미지도 지운다 (아래 끝이 화면에 닿으면)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 5 });
+    defer core.deinit();
+    core.setCellMetrics(10, 20);
+    var b64: [64]u8 = undefined;
+    var seq: [200]u8 = undefined;
+    const px = [_]u8{ 6, 6, 6, 255 } ** 4;
+    const enc = std.base64.standard.Encoder.encode(&b64, &px);
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+    try core.write("\x1b[1;1H");
+    try core.write("\x1b_Ga=p,i=1,p=1,c=1,r=10,q=2\x1b\\"); // **10 줄짜리** 배치
+    for (0..8) |_| try core.write("line\r\n"); // 앵커를 화면 위로 밀어낸다
+
+    const top = core.screen.sb.count;
+    const p0 = core.kitty_placements.items[0];
+    // 픽스처가 그 축을 실제로 만들었는지 먼저 증명한다 — 앵커는 위, 아래 끝은 화면 안.
+    try std.testing.expect(p0.anchor_row < top);
+    try std.testing.expect(p0.anchor_row + 10 > top);
+
+    try core.write("\x1b_Ga=d,d=a,q=2\x1b\\");
+    try std.testing.expectEqual(@as(usize, 0), core.kitty_placements.items.len); // 걸쳐 있으니 지워진다
+}
+
+// 가상 배치(U=1)는 `d=a` 의 대상이 아니다 — 두 레퍼런스가 같다. 코어는 placeholder 셀 위치를
+// 모르므로 「보이는가」를 물을 수조차 없고, 그래서 규칙이 플래그 하나로 끝난다.
+test "kitty delete: d=a/d=A 는 U=1 격자를 건드리지 않는다 (kitty·Ghostty 동일)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 5 });
+    defer core.deinit();
+    core.setCellMetrics(10, 20);
+    var b64: [64]u8 = undefined;
+    var seq: [200]u8 = undefined;
+    const px = [_]u8{ 6, 6, 6, 255 } ** 4;
+    const enc = std.base64.standard.Encoder.encode(&b64, &px);
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+    try core.write("\x1b_Ga=p,i=1,p=9,U=1,c=2,r=2,q=2\x1b\\"); // 가상 격자
+    try core.write("\x1b_Ga=p,i=1,p=1,c=1,r=1,q=2\x1b\\"); // 일반 배치(화면 안)
+
+    try core.write("\x1b_Ga=d,d=A,q=2\x1b\\"); // **대문자**로 전부 지운다
+    try std.testing.expectEqual(@as(usize, 0), core.kitty_placements.items.len); // 일반은 갔다
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_virtual_placements.items.len); // 격자는 남는다
+    // 격자가 아직 그 이미지를 참조하므로 **데이터도 남는다**(대문자 free 는 조건부다).
+    try std.testing.expect(core.kitty_images.map.get(1) != null);
+}
+
+// 대문자 `d=A` 는 보이는 배치를 지우고, **참조가 사라진 이미지만** free 한다.
+test "kitty delete: d=A 는 보이는 것만 지우고 참조 없는 이미지만 free 한다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 5 });
+    defer core.deinit();
+    core.setCellMetrics(10, 20);
+    var b64: [64]u8 = undefined;
+    var seq: [200]u8 = undefined;
+    const px = [_]u8{ 6, 6, 6, 255 } ** 4;
+    const enc = std.base64.standard.Encoder.encode(&b64, &px);
+    // 이미지 1: 스크롤백에 한 자리 + 화면에 한 자리 → 화면 것만 지워지고 데이터는 남아야 한다.
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
+    try core.write("\x1b_Ga=p,i=1,p=1,c=1,r=1,q=2\x1b\\");
+    for (0..30) |_| try core.write("scroll\r\n");
+    try core.write("\x1b_Ga=p,i=1,p=2,c=1,r=1,q=2\x1b\\");
+    // 이미지 2: 화면에만 → 지워지고 데이터도 간다.
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=2,q=2;{s}\x1b\\", .{enc}));
+    try core.write("\x1b_Ga=p,i=2,p=1,c=1,r=1,q=2\x1b\\");
+
+    try core.write("\x1b_Ga=d,d=A,q=2\x1b\\");
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_placements.items.len); // 스크롤백 것만 남는다
+    try std.testing.expect(core.kitty_images.map.get(1) != null); // 아직 참조가 있다
+    try std.testing.expect(core.kitty_images.map.get(2) == null); // 참조가 사라졌다 → free
 }
 
 test "kitty delete: d=f 는 프레임만 놓아주고 이미지는 남긴다" {

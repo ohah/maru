@@ -1847,6 +1847,12 @@ fn runOn(
     repo: []const u8,
     arg: ?[]const u8,
 ) !Output {
+    // ⚠️ **`check-ignore` 는 이 길로 못 간다.** 그 명령은 경로를 **stdin** 으로 받는데 이 경로는
+    // stdin 을 `/dev/null` 로 묶는다 — 그러면 원격 git 이 **빈 입력**을 읽고 「무시된 것이 없다」를
+    // 정상 답으로 내놓는다. 실패가 아니라 **조용히 틀린 답**이고, 화면에는 「이 저장소엔 무시된 것이
+    // 없다」로 보인다. 지금은 부르는 자리가 없지만(원격 탐색기는 흐림을 안 묻는다) 여기 kind 는
+    // 런타임 값이라 **더해지는 순간 그 모양이 성립한다.**
+    if (kind == .check_ignore) return error.CheckIgnoreNeedsStdin;
     var argv_buf: [git_command.max_argv][]const u8 = undefined;
     const local = git_command.build(kind, git_exe, repo, arg, &argv_buf);
     const target = remote orelse return runArgvWithEnv(allocator, local, null, false, null, false);
@@ -3956,6 +3962,45 @@ test "원격 쓰기: 원격 라우팅이 떨어져도 상대경로 git 을 실�
     defer allocator.free(out.stderr_bytes);
     // 소켓이 없으니 ssh 가 **자기 실패**로 끝난다 — git 이 한 말이 아니다(5회차와 같은 축).
     try std.testing.expectEqual(@as(c_int, 255), out.exit_code);
+}
+
+test "runOn 은 check-ignore 를 실어 나르지 않는다 — 빈 stdin 은 «틀린 성공»이다" {
+    // **적대적 검증 9 회차.** 8 회차가 `check-ignore` 를 `--stdin` 으로 옮기면서 **새 표면**을 만들었다:
+    // 경로가 argv 에 없으므로, 이 명령을 stdin 없이 돌리면 실패하지 않고 **빈 입력을 읽고 성공한다.**
+    // 그 답은 「무시된 것이 없다」이고, 「저장소를 못 읽었다」와 달리 화면에 아무 경고도 안 남긴다.
+    //
+    // `runOn` 은 `kind` 를 **런타임 값**으로 받으므로 컴파일러가 이것을 막아 주지 않는다 — 지금
+    // 부르는 자리가 없다는 사실은 «다음 사람이 안 부른다»를 뜻하지 않는다.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+
+    // 로컬로도, 원격으로도 안 된다 — 둘 다 stdin 을 안 싣는 같은 경로다.
+    // **전용 오류로 받는다.** `GitFailed` 로 두면 이 판정자가 공허해진다 — 게이트를 지워도 git 이
+    // 빈 stdin 으로 exit 1 을 내 같은 오류가 나오기 때문이다(실측으로 확인하고 갈랐다).
+    try std.testing.expectError(
+        error.CheckIgnoreNeedsStdin,
+        runOn(allocator, null, .check_ignore, "/usr/bin/git", "/repo", null),
+    );
+    try std.testing.expectError(
+        error.CheckIgnoreNeedsStdin,
+        runOn(
+            allocator,
+            .{ .dest = "u@nowhere.invalid", .control_path = "/nonexistent/sock" },
+            .check_ignore,
+            git_command.remote_git_exe,
+            "/repo",
+            null,
+        ),
+    );
+
+    // **대조군**: 다른 kind 는 이 자리에서 막히지 않는다(여기서 막히면 위 단언이 공허해진다).
+    // 저장소가 아닌 경로라 git 이 거절하지만, 그것은 **git 이 한 말**이라 다른 오류로 온다.
+    const other = runOn(allocator, null, .status, "/usr/bin/git", "/nonexistent-repo-xyz", null);
+    if (other) |out| {
+        allocator.free(out.bytes);
+    } else |err| {
+        try std.testing.expect(err == error.GitFailed); // 도달은 했다 — 위 게이트가 아니라 git 의 답이다
+    }
 }
 
 test "check-ignore 는 진짜 git 을 통과한다 — 무시된 것, 없는 것, 개행이 든 이름" {

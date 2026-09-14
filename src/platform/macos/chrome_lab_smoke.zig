@@ -890,7 +890,7 @@ pub fn main(init: std.process.Init) !void {
     const requires_text = scenario_id != .sidebar_status_strip;
     const text_ok = !requires_text or (text_rasterized and rich_text_rasterized and rich_text_matches_artifact);
     const success = native_ok and pixel_ok and valid_png and text_ok and quad_layer_ok;
-    const summary = try renderSummary(allocator, scenario_name, font_variant, font_postscript_name, ppm_path, png_path, native, ppm, valid_png, gpu_quads.items.len, quad_layer, quad_layer_below_text, metal_fixture.cells.len, text_rasterized, rich_glyphs.items.len, rich_text_rasterized, rich_text_matches_artifact, font_usage, success);
+    const summary = try renderSummary(allocator, scenario_name, scene_viewport, font_variant, font_postscript_name, ppm_path, png_path, native, ppm, valid_png, gpu_quads.items.len, quad_layer, quad_layer_below_text, metal_fixture.cells.len, text_rasterized, rich_glyphs.items.len, rich_text_rasterized, rich_text_matches_artifact, font_usage, success);
     defer allocator.free(summary);
     try artifact_io.writeText(io, json_path, summary);
 
@@ -1211,6 +1211,12 @@ fn probePpm(bytes: []const u8) !PpmProbe {
 fn renderSummary(
     allocator: std.mem.Allocator,
     scenario_name: []const u8,
+    /// **이 장면이 실제로 쓴 창 크기**(`viewportFor`). 전에는 전역 `viewport` 상수를 그대로 찍어
+    /// 넓은 시나리오의 산출물이 **거짓말했다** — `editor-merge-panes` 는 1200px 로 그려 놓고
+    /// `viewport_backing_px` 에 480 을 적었고(`readback.width` 와 어긋난 채 남아 있었다),
+    /// `context-menu-bottom-right` 를 더하며 두 번째 사례가 되어서야 드러났다. 산출물이 자기
+    /// 조건을 틀리게 말하면 그것을 읽는 사람도 판정자도 같이 속는다.
+    scene_viewport: chrome.ui.layout.UiSize,
     font_variant: FontVariant,
     font_postscript_name: []const u8,
     ppm_path: []const u8,
@@ -1248,8 +1254,8 @@ fn renderSummary(
         font_variant.family(),
         font_postscript_name,
         font_variant.assetPath(),
-        viewport.width,
-        viewport.height,
+        scene_viewport.width,
+        scene_viewport.height,
         ppm_path,
         png_path,
         native.status,
@@ -1347,7 +1353,7 @@ test "Chrome Lab PPM probe rejects background-only and malformed readbacks" {
 }
 
 test "Chrome Lab summary records component text rasterization and artifact paths" {
-    const summary = try renderSummary(std.testing.allocator, "retained-list", .jetbrains_mono, "JetBrainsMono-Regular", "artifact.ppm", "artifact.png", .{
+    const summary = try renderSummary(std.testing.allocator, "retained-list", viewport, .jetbrains_mono, "JetBrainsMono-Regular", "artifact.ppm", "artifact.png", .{
         .status = 0,
         .renderer_created = 1,
         .atlas_ready = 1,
@@ -1371,4 +1377,26 @@ test "Chrome Lab summary records component text rasterization and artifact paths
     try std.testing.expect(std.mem.indexOf(u8, summary, "\"postscript_name\": \"JetBrainsMono-Regular\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "\"ppm\": \"artifact.ppm\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "\"success\": true") != null);
+}
+
+test "Chrome Lab summary: 넓은 장면의 창 크기를 그 장면 값으로 적는다 — 전역 상수를 찍지 않는다" {
+    // **산출물이 자기 조건을 틀리게 말하던 자리다.** `viewport_backing_px` 가 전역 `viewport`(480)
+    // 를 그대로 찍어, 1200px 로 그린 `editor-merge-panes` 의 JSON 이 480 이라고 적혀 있었다 —
+    // 같은 파일의 `readback.width` 와 어긋난 채로. 넓은 시나리오가 둘이 되어서야 드러났다.
+    //
+    // 480 이 아닌 값을 주고 **그 값이 나오는지** 본다. `viewport` 와 같은 값을 쓰면 회귀해도
+    // 통과하므로 여기서는 반드시 다른 크기여야 한다.
+    const wide: chrome.ui.layout.UiSize = .{ .width = 1200, .height = 720 };
+    const summary = try renderSummary(std.testing.allocator, "context-menu-bottom-right", wide, .jetbrains_mono, "JetBrainsMono-Regular", "a.ppm", "a.png", .{
+        .status = 0,
+        .renderer_created = 1,
+        .atlas_ready = 1,
+        .draw_submitted = 1,
+        .ppm_written = 1,
+        .png_written = 1,
+    }, .{ .width = 1200, .height = 720, .non_background_pixels = 1 }, true, 1, chrome_draw_lowering.layers.bottom, true, 0, true, 15, true, true, .{ .primary_glyphs = 6, .fallback_glyphs = 9, .distinct_font_faces = 2 }, true);
+    defer std.testing.allocator.free(summary);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "\"viewport_backing_px\": { \"width\": 1200, \"height\": 720 }") != null);
+    // **readback 과 어긋나지 않는다** — 둘이 갈리는 것이 그 결함의 겉모습이었다.
+    try std.testing.expect(std.mem.indexOf(u8, summary, "\"width\": 1200, \"height\": 720, \"non_background_pixels\"") != null);
 }

@@ -1218,9 +1218,9 @@ pub fn isIgnoreRuleFile(changed_path: []const u8) bool {
 
 /// 탐색기 뷰로 **들어올 때** git 백엔드를 세운다 — `.gitignore` 흐림 질의가 나갈 곳을 만든다.
 ///
-/// **왜 여기인가.** 흐림 질의(`requestIgnoredForPaths`)는 디렉터리 스캔 결과가 도착할 때마다 도는
-/// **드레인 경로**다. 거기서 백엔드를 만들면 파일 트리를 훑기만 하던 판정자 수십 개가 갑자기 실제
-/// `check-ignore` 프로세스를 띄우게 되고, 실제로 그렇게 해 봤다가 **샤드가 죽었다**(exit 134).
+/// **왜 여기인가.** 흐림 질의(`pumpIgnoreQueries`)는 tick 마다 도는 **드레인 경로**다. 거기서
+/// 백엔드를 만들면 파일 트리를 훑기만 하던 판정자 수십 개가 갑자기 실제 `check-ignore` 프로세스를
+/// 띄우게 되고, 실제로 그렇게 해 봤다가 **샤드가 죽었다**(exit 134).
 ///
 /// 그래서 **뷰 진입**에 붙인다 — `setDockView` 가 소스 컨트롤에 들어올 때 `refreshGitStatus` 를
 /// 부르는 것과 **같은 자리·같은 규율**이고(§3.5 갱신 시점 ①), 폴링이 아니라 한 번이다.
@@ -1354,10 +1354,9 @@ pub fn drainIgnoreResults(self: *AppSession) void {
         // 물었던 경로를 먼저 지우고(이번 답이 권위다), 무시된 것만 다시 세운다.
         //
         // ⚠️ **그 목록도 답이 들고 온 것을 쓴다**(`IgnoreResult.asked`). 세션 버퍼
-        // (`git_ignore_query_paths`)는 디렉터리를 읽을 때마다 비워지고 덮이는데, 백엔드는 답이 하나
-        // 걸려 있는 동안 새 요청을 **거절**한다 — 그래서 「A 를 물어 둔 채 B 를 스캔」하면 버퍼는 B 것이
-        // 되고 요청은 안 나간다. 그 상태에서 A 의 답이 오면 **B 의 행들이 지워져**, 아무도 안 물어본
-        // 행의 흐림이 통째로 풀린다(트리를 펼치면 형제들이 밝아진다 — 적대적 검증 10 회차).
+        // (`git_ignore_query_paths`)는 **배치마다** 비워지고 덮이는데 백엔드는 답이 하나 걸려 있는 동안
+        // 새 요청을 **거절**한다 — 「A 를 물어 둔 채 B 를 담」으면 버퍼는 B 것이 되고, 뒤늦게 온 A 의
+        // 답이 **B 의 행들을 지운다**(아무도 안 물어본 행의 흐림이 풀린다 — 적대적 검증 10 회차).
         for (res.asked) |rel| {
             var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
             if (joinRepoPath(res.repo, rel, &abs_buf)) |abs| self.file_tree.markIgnored(abs, false);

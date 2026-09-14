@@ -7461,6 +7461,37 @@ test "파일 트리 셀 투영은 공유 모듈이 소유하고 Windows 만 쓴�
     try std.testing.expectEqual(@as(usize, 0), countOccurrences(app_session, "buildFileTreeDrawList("));
 }
 
+// MP1 — **떠 있는 프리뷰의 클릭이 pane hit 보다 먼저 온다.**
+//
+// 프리뷰는 pane **위에** 겹쳐 있다. 그래서 클릭을 `paneTargetAt` 으로 먼저 내려보내면 그 아래 셀의
+// 마커 토글이 먼저 먹고 **상자 클릭이 영영 안 온다** — 화면에서는 「도크에서 보기가 가끔 안 된다」
+// 로 보이고, 프리뷰가 마커 위에 떠 있을 때만 재현된다.
+//
+// 순수 판정자(`image_preview.dockJumpTarget`)는 **이 순서를 못 본다** — 조건이 맞아도 호출이 안
+// 오면 답할 기회가 없다. 그래서 자리를 여기서 센다(적대 4회차).
+//
+// ⚠️ **두 줄이 붙어 있는 것까지 요구한다.** 사이에 무언가 들어가면 이 게이트가 실패하는데, 그건
+// 사람이 「그것이 프리뷰보다 먼저여도 되는가」를 판단해야 한다는 뜻이다 — 순서가 곧 계약인 자리라
+// 조용히 지나가는 편보다 낫다.
+test "MP1 경계: 떠 있는 프리뷰의 도크 점프가 pane hit 보다 먼저 온다" {
+    const allocator = std.testing.allocator;
+    const app_session = try readZigFileZ(allocator, "src/platform/macos/app_session.zig");
+    defer allocator.free(app_session);
+
+    // 호출은 **한 자리**다 — 둘이 되면 어느 쪽이 먼저인지가 다시 불분명해진다.
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(app_session, "self.markerPreviewDockJumpAt(x_px, y_px)"));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(
+        app_session,
+        "if (self.markerPreviewDockJumpAt(x_px, y_px)) return &.{};\n        const hit = pane_ops.paneTargetAt(self, x_px, y_px)",
+    ));
+
+    // **도크를 «연다» — 뷰만 바꾸지 않는다.** `enterDockView` 는 접힌 도크를 그대로 두므로 점프해도
+    // 화면에 아무 변화가 없다(뷰는 바뀌었는데 안 보인다 — 「눌렀는데 아무 일도 없다」로 읽힌다).
+    // `openDockTo` 가 presented·collapsed 를 함께 세우고 pane 을 다시 잰다(적대 8회차).
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(app_session, "dock_ops.openDockTo(self, .agent_activity)"));
+    try std.testing.expectEqual(@as(usize, 0), countOccurrences(app_session, "dock_ops.enterDockView(self, .agent_activity)"));
+}
+
 /// Zig **코드**에 플랫폼 접근성 어휘가 있으면 그 낱말을 돌려준다. 없으면 null.
 ///
 /// **주석은 안 본다.** 이 경계가 막으려는 것은 "Zig 가 플랫폼 타입을 만지는 것"이지 "문서가 계약을

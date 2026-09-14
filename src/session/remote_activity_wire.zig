@@ -95,8 +95,8 @@ pub const max_chain = index.max_chain;
 /// 최대의 3 배로 잡는다(로컬 `readCodexParentId` 와 같은 값·같은 근거).
 pub const codex_meta_window_bytes: usize = 64 * 1024;
 
-pub const wire_version: u32 = 4;
-pub const header_line = "maru-rav 4";
+pub const wire_version: u32 = 5;
+pub const header_line = "maru-rav 5";
 
 /// 한 wire 가 실을 수 있는 활동·이미지 수. 스캐너의 상한들이 이 값을 정한다 — 그보다 큰 수를
 /// 주장하는 wire 는 저쪽이 오염됐다는 뜻이라 파서가 거기서 멈춘다.
@@ -170,14 +170,14 @@ pub const ScanFlags = struct {
 
 /// `A ` 뒤에 오는 **10 진 필드의 수**(라벨 길이 칸 포함, 라벨 바이트 제외). 판정자가 오염된 줄을
 /// 손으로 만들 때 쓰고, 값이 틀리면 「필드 수」 판정자가 먼저 죽는다.
-pub const record_fields: usize = 25;
+pub const record_fields: usize = 26;
 
 // **필드 수를 바꾸면 판도 올려야 한다**(적대적 E1). 안 올리면 옛 파서가 새 줄에서 자리가 밀린 값을
 // 읽는데, 대개는 `Malformed` 로 걸리지만 **보장이 없다** — 새 필드 값이 우연히 라벨 길이로 말이
 // 되면 그만큼을 라벨로 읽고 지나간다. 머리말 대조가 그 갈림을 막는 유일한 수단이므로, 여기서 둘을
 // 묶어 **한쪽만 고치면 컴파일이 깨지게** 한다.
 comptime {
-    const expected_fields_for_version = [_]usize{ 0, 24, 24, 24, 25 }; // [판] = 필드 수
+    const expected_fields_for_version = [_]usize{ 0, 24, 24, 24, 25, 26 }; // [판] = 필드 수
     if (wire_version >= expected_fields_for_version.len or
         expected_fields_for_version[wire_version] != record_fields)
     {
@@ -212,16 +212,8 @@ comptime {
         "line_offset", "data_offset", "data_len",   "kind",   "mime",    "activity",
         "name_rel",    "name_len",    "id_rel",     "id_len", "cmd_rel", "input_rel",
         "time_rel",    "file_index",  "fold_owner", "result",
-    }, &.{
-        // `marker_n` — 화면의 `[Image #N]` 을 이 이미지에 잇는 키(MP1). **아직 안 싣는다.**
-        // 원격에서 그 값을 쓰는 소비자가 없기 때문이다: 마커 프리뷰의 전송 후 경로는 **로컬 P2** 이고,
-        // 원격판은 P3 이다(docs/agent-image-marker-preview.md §11). 지금 실으면 판을 올리고 파서를
-        // 고치는 비용을 **쓰지 않을 값**에 치른다.
-        //
-        // ⚠️ **P3 에서 이 줄을 지우고 `carried` 로 옮긴다.** 그때 `wire_version`·`header_line`·
-        // `record_fields`·판별 표를 함께 올려야 한다(바로 위 comptime 가드가 강제한다).
-        "marker_n",
-    });
+        "marker_n", // 판 5(MP1) — 원격 전송 후 프리뷰가 쓴다
+    }, &.{});
 
     assertCovered(index.ResultSummary, &.{
         "found", "failed", "lines", "image", "image_offset", "image_len", "image_file", "body",
@@ -401,6 +393,9 @@ pub fn appendRecord(out: []u8, at: usize, rec: Record) ?usize {
     n = appendField(out, n, @intFromEnum(h.kind)) orelse return null;
     n = appendField(out, n, @intFromEnum(h.mime)) orelse return null;
     n = appendField(out, n, @intFromEnum(h.activity)) orelse return null;
+    // 판 5(MP1) — 화면의 `[Image #N]` 을 이 이미지에 잇는 키. 원격 **전송 후** 프리뷰가 이것으로 찾는다
+    // (docs/agent-image-marker-preview.md §4.4).
+    n = appendField(out, n, h.marker_n) orelse return null;
     n = appendField(out, n, h.name_rel) orelse return null;
     n = appendField(out, n, h.name_len) orelse return null;
     n = appendField(out, n, h.id_rel) orelse return null;
@@ -656,6 +651,7 @@ pub const Parser = struct {
         h.kind = try self.takeEnum(index.Kind);
         h.mime = try self.takeEnum(index.Mime);
         h.activity = try self.takeEnum(index.Activity);
+        h.marker_n = try self.takeInt(u32); // 판 5(MP1)
         h.name_rel = try self.takeInt(u32);
         h.name_len = try self.takeInt(u16);
         h.id_rel = try self.takeInt(u32);

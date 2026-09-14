@@ -16,8 +16,14 @@ const props = @import("../props.zig");
 pub const Vertical = enum {
     /// 앵커 **위치에서** 시작한다(우클릭 메뉴 — 누른 자리에 좌상단을 둔다). 아래로 넘치면 당긴다.
     at_anchor,
-    /// 앵커 **아래에** 둔다. 안 들어가면 **위로 뒤집고**, 그것도 안 되면 당긴다(이미지 프리뷰·드롭다운).
+    /// 앵커 **아래에** 둔다. 안 들어가면 **위로 뒤집고**, 그것도 안 되면 당긴다(이미지 프리뷰).
     below_flip_up,
+    /// 앵커 **아래에** 둔다. 안 들어가면 **당긴다**(뒤집지 않는다 — 설정 드롭다운).
+    ///
+    /// 드롭다운이 뒤집히지 않는 이유는 **control 과의 관계가 뒤바뀌면 어느 값을 고르는 목록인지
+    /// 흐려지기** 때문이다. 목록이 control 위로 올라가면 그 위의 다른 행을 덮어 「저 행의 목록인가」로
+    /// 읽힌다. 프리뷰는 앵커가 마커 한 줄이라 그 혼동이 없어 뒤집어도 된다.
+    below_clamp,
 };
 
 pub const Placement = struct {
@@ -53,12 +59,15 @@ pub fn place(box_w: u32, box_h: u32, pl: Placement, p: props.ChromeProps) ?Resul
     const ws = props.workspaceRect(m);
     if (ws.w < cw or ws.h < ch) return null;
 
+    // **네 방향 모두 한 셀 띄운다**(2026-09-14 · 사용자 결정). 처음에는 우·하만 띄웠는데, 그것은
+    // `context_menu` 가 제보로 고칠 때의 **실측 사례가 우단이었기** 때문이지 좌·상이 달라서가 아니다.
+    // 한쪽만 띄우면 같은 팝업이 어느 가장자리에 닿느냐에 따라 **테가 있다 없다** 해서 더 이상하다.
     const right_bound: i32 = @as(i32, @intCast(ws.x + ws.w)) - @as(i32, @intCast(cw));
     const bottom_bound: i32 = @as(i32, @intCast(ws.y + ws.h)) - @as(i32, @intCast(ch));
-    const top_bound: i32 = @intCast(ws.y);
+    const top_bound: i32 = @as(i32, @intCast(ws.y)) + @as(i32, @intCast(ch));
     // 좌단은 사이드바 오른쪽으로 — 팝업은 터미널 영역 오버레이라 사이드바 chrome 위로 겹치지 않게 한다.
     // 단 앵커가 workspace 아래(상태바)면 그 규칙을 쓰지 않는다(위 `anchor_below_workspace` 주석).
-    const left_bound: i32 = if (pl.anchor_below_workspace) @intCast(cw) else @intCast(ws.x);
+    const left_bound: i32 = @as(i32, @intCast(if (pl.anchor_below_workspace) 0 else ws.x)) + @as(i32, @intCast(cw));
 
     const bw: i32 = @intCast(box_w);
     const bh: i32 = @intCast(box_h);
@@ -66,7 +75,7 @@ pub fn place(box_w: u32, box_h: u32, pl: Placement, p: props.ChromeProps) ?Resul
     var flipped = false;
     var y: i32 = switch (pl.vertical) {
         .at_anchor => pl.anchor.y,
-        .below_flip_up => pl.anchor.y + @as(i32, @intCast(pl.anchor.h)) + @as(i32, @intCast(pl.gap_px)),
+        .below_flip_up, .below_clamp => pl.anchor.y + @as(i32, @intCast(pl.anchor.h)) + @as(i32, @intCast(pl.gap_px)),
     };
     if (y + bh > bottom_bound) {
         if (pl.vertical == .below_flip_up) {
@@ -121,7 +130,7 @@ test "CSP1 popup_box: 좌단을 사이드바 오른쪽으로 민다" {
     p.metrics.workspace_width_px = 800;
     const r = place(400, 100, .{ .anchor = .{ .x = 10, .y = 50, .w = 0, .h = 0 } }, p) orelse
         return error.TestUnexpectedResult;
-    try testing.expectEqual(@as(i32, 200), r.rect.x);
+    try testing.expectEqual(@as(i32, 200 + 8), r.rect.x); // 사이드바 오른쪽 + edge_gap(한 셀)
 }
 
 test "CSP1 popup_box: 상태바 앵커는 사이드바로 밀지 않는다 — 누른 자리에 뜬다" {
@@ -170,4 +179,28 @@ test "CSP1 popup_box: 위로도 아래로도 안 들어가면 당기고 마커�
 test "CSP1 popup_box: workspace 가 한 셀보다 좁으면 null" {
     const p = metricsOf(4, 4);
     try testing.expect(place(10, 10, .{ .anchor = .{ .x = 0, .y = 0, .w = 0, .h = 0 } }, p) == null);
+}
+
+test "CSP1 popup_box: below_clamp 는 아래가 모자라도 뒤집지 않고 당긴다(드롭다운)" {
+    const p = metricsOf(1000, 600);
+    const r = place(200, 200, .{
+        .anchor = .{ .x = 100, .y = 540, .w = 80, .h = 16 },
+        .vertical = .below_clamp,
+    }, p) orelse return error.TestUnexpectedResult;
+    try testing.expect(!r.flipped_up); // 같은 자리에서 below_flip_up 은 뒤집는다
+    try testing.expectEqual(@as(i32, 600 - 16 - 200), r.rect.y);
+}
+
+test "CSP1 popup_box: 네 방향 모두 한 셀을 띄운다 — 가장자리마다 테가 있다 없다 하지 않는다" {
+    const p = metricsOf(1000, 600); // cw=8 · ch=16
+    // 좌·상으로 밀어붙이는 앵커.
+    const tl = place(100, 100, .{ .anchor = .{ .x = -50, .y = -50, .w = 0, .h = 0 } }, p) orelse
+        return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(i32, 8), tl.rect.x);
+    try testing.expectEqual(@as(i32, 16), tl.rect.y);
+    // 우·하로 밀어붙이는 앵커.
+    const br = place(100, 100, .{ .anchor = .{ .x = 990, .y = 590, .w = 0, .h = 0 } }, p) orelse
+        return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(i32, 1000 - 8 - 100), br.rect.x);
+    try testing.expectEqual(@as(i32, 600 - 16 - 100), br.rect.y);
 }

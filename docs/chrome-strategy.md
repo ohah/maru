@@ -211,7 +211,11 @@ pub fn handle(k: InputEvent.KeyEvent, state: *State) ?Action;                   
 
 **앵커에 붙는 팝업**의 기하는 `chrome/components/popup_box.zig`가 소유한다 — `modal_box`가 **중앙** 모달에 하는 일의 앵커판이다. 우클릭 메뉴·설정 드롭다운·터미널 마커 이미지 프리뷰가 전부 "앵커에서 시작해 workspace 안으로 당긴다"는 **같은 계산**을 각자 복사해 갖고 있었고, 세 번째 복사본이 생기려던 2026-09-14에 뽑았다(사용자 지적). `place(box_w, box_h, .{ anchor, vertical, gap_px, anchor_below_workspace }, props)`가 rect와 `flipped_up`을 준다. 세로 정책은 둘이다 — `at_anchor`(누른 자리에 좌상단, 넘치면 당김 — 우클릭 메뉴)와 `below_flip_up`(앵커 아래, 안 들어가면 **위로 뒤집기** — 이미지 프리뷰·드롭다운). `anchor_below_workspace`는 상태바 앵커 특례를 든다: 상태바는 창 전폭이고 workspace **밖**이라 좌단을 `workspace.x`로 밀면 누른 자리와 뜬 자리가 화면 절반만큼 떨어진다(사용자 제보로 고쳐진 자리). 배경·테두리·콘텐츠는 각 컴포넌트가 그린다 — 앵커 팝업은 콘텐츠 모양이 제각각이라 공유할 것이 기하뿐이다.
 
-⚠️ **복사본이 낡는다는 것이 이미 증명됐다.** `context_menu`는 사용자 제보로 「가장자리에 딱 붙이지 않는다」(edge_gap 한 셀)를 얻었는데, 같은 계산을 복사해 간 `dropdown.popupRect`에는 **그 수정이 없다** — 지금도 workspace 경계에 정확히 붙는다. `context_menu`는 프리미티브로 이관했고(판정자 10개 전부 통과, 상태바 특례 포함), `dropdown` 이관은 **시각 동작이 바뀌는 변경**이라 별도로 다룬다.
+⚠️ **복사본이 낡는다는 것이 이미 증명됐다.** `context_menu`는 사용자 제보로 「가장자리에 딱 붙이지 않는다」(edge_gap 한 셀)를 얻었는데, 같은 계산을 복사해 간 `dropdown.popupRect`에는 **그 수정이 없었다** — workspace 경계에 정확히 붙어 테두리가 창 가장자리에 먹혔다. 두 소비자 모두 프리미티브로 **이관을 마쳤다**(2026-09-14): `context_menu`는 판정자 10개, `dropdown`은 6개가 그대로 통과한다.
+
+세로 정책이 셋인 이유도 이 이관이 정했다 — `at_anchor`(누른 자리·넘치면 당김 — 우클릭 메뉴), `below_flip_up`(앵커 아래·안 되면 위로 뒤집기 — 이미지 프리뷰), `below_clamp`(앵커 아래·**뒤집지 않고** 당김 — 드롭다운). 드롭다운이 안 뒤집히는 이유는 목록이 control 위로 올라가면 **그 위의 다른 행을 덮어** 「저 행의 목록인가」로 읽히기 때문이다.
+
+**edge_gap은 네 방향 모두다**(2026-09-14 · 사용자 결정). 처음에는 우·하만 띄웠는데 그것은 `context_menu`가 제보로 고칠 때의 **실측 사례가 우단이었기** 때문이지 좌·상이 달라서가 아니었다. 한쪽만 띄우면 같은 팝업이 어느 가장자리에 닿느냐에 따라 **테가 있다 없다** 해서 더 이상하다.
 
 박스 기하(폭 clamp·중앙배치·soft-lock 가드·배경 quad/테두리·콘텐츠 셀 좌표)는 `chrome/components/modal_box.zig` **공유 프리미티브**가 단일 출처로 제공한다 — notice(줄 텍스트), confirm(메시지+버튼), 향후 모달이 `layout`/`frame`/`text`/`fillCells`/`centerX`/`rowY`로 재사용한다(각 컴포넌트는 콘텐츠 구성만 소유). 폭은 `overlay_input.displayCols`(EAW 표시폭, placeText와 동일 규약)로 재 한글/CJK가 안 잘린다. 전역 모달·palette의 `ChromeProps.workspace`는 `dock_layout.Geometry.workspace`, 즉 사이드바·titlebar strip만 제외하고 terminal·divider·파일 도크를 모두 포함한 작업영역이다. 도크가 열려도 terminal-only `termRect`로 중앙을 계산하지 않으며 right/bottom 전환에서 같은 전체 작업영역 중심을 유지한다. find처럼 특정 surface에 귀속된 오버레이만 기존 `active_pane` 앵커를 쓴다.
 

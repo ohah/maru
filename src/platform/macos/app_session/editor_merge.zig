@@ -24,6 +24,7 @@ const git_backend_mod = @import("../git_backend.zig");
 const git_ops = @import("git.zig");
 const pane_ops = @import("pane.zig");
 const tab_ops = @import("tab.zig");
+const coretext_frame_builder = @import("../coretext_frame_builder.zig");
 const testing = std.testing;
 
 /// 병합 모드 Term 하나가 드는 것.
@@ -54,6 +55,13 @@ pub const State = struct {
     ready: bool = false,
     /// 읽지 못했다(충돌이 아니거나 git 이 없거나 요청을 못 걸었다).
     failed: bool = false,
+    /// 세 판 바이트를 **누구의 것으로 놓을까**. 워커에게서 넘겨받으므로 제품에서는 늘 워커 것이다.
+    ///
+    /// **상태가 스스로 기억하는 이유**: 자리마다 손으로 적으면 한 곳만 틀려도 heap 이 깨지고, 더
+    /// 나쁘게는 **누수를 아예 못 잰다** — 워커 allocator(`smp_allocator`)에는 검출이 없어서, 해제를
+    /// 통째로 지운 변이 둘이 그 구멍으로 살아남았다(적대적 7회차 B1·B8 실측). 상태가 들고 있으면
+    /// 판정자가 검출되는 allocator 를 꽂아 그 변이를 죽일 수 있다.
+    stage_allocator: std.mem.Allocator = git_backend_mod.worker_allocator,
 
     /// 조상이 없어 2-way 로 저하하나. **판정을 여기서 다시 적지 않는다** — 중립이 소유한다.
     pub fn degradesToTwoWay(self: State) bool {
@@ -154,6 +162,8 @@ pub fn deliver(self: *AppSession, term: *Term, result: *git_backend_mod.DiffResu
     state.stages = result.stages;
     state.truncated = result.truncated;
     state.ready = true;
+    // **실패 표시를 지운다.** 안 지우면 한 번 실패한 Term 은 판이 와도 「못 읽었다」를 띄운 채 남는다.
+    state.failed = false;
     result.base = &.{};
     result.original = &.{};
     result.modified = &.{};
@@ -172,9 +182,9 @@ pub fn clear(self: *AppSession, term: *Term) void {
 }
 
 fn freeStages(state: *State) void {
-    if (state.base.len > 0) git_backend_mod.worker_allocator.free(state.base);
-    if (state.ours.len > 0) git_backend_mod.worker_allocator.free(state.ours);
-    if (state.theirs.len > 0) git_backend_mod.worker_allocator.free(state.theirs);
+    if (state.base.len > 0) state.stage_allocator.free(state.base);
+    if (state.ours.len > 0) state.stage_allocator.free(state.ours);
+    if (state.theirs.len > 0) state.stage_allocator.free(state.theirs);
     // ⚠️ **오늘 이 네 줄은 관측되지 않는다**(적대적 3회차 Y9 실측 — 등가). 부르는 곳이 둘뿐이고
     // 둘 다 곧바로 덮거나(`deliver`) 상태를 통째로 버린다(`clear`). 그래도 남겨 두는 이유는
     // 「비운다」가 이 함수의 **이름이 약속한 일**이기 때문이다 — 세 번째 호출자가 생기는 날 이
@@ -288,6 +298,7 @@ test "MRG2 세 판이 도착하면 소유가 «넘어온다» — 그리고 Term
 
     const state = term.rt.editor_merge orelse return error.MissingMergeState;
     try testing.expect(state.ready);
+    try testing.expect(!state.failed); // 성공이 실패 표시를 지운다
     try testing.expectEqualStrings("BASE", state.base);
     try testing.expectEqualStrings("OURS", state.ours);
     try testing.expectEqualStrings("THEIRS", state.theirs);
@@ -417,6 +428,11 @@ test "MRG6 경로를 못 들면 병합 모드를 «안» 세운다 — 반쪽으
     const state = term.rt.editor_merge orelse return error.MissingMergeState;
     try testing.expectEqualStrings("/tmp/maru-merge-repo", state.repo);
     try testing.expectEqualStrings("f.txt", state.rel_path);
+    // **저장소가 비어도** 요청을 안 건다(경로만 보면 이 축이 통째로 빈다 — 적대적 7회차 B5).
+    begin(session, term, "", "f.txt");
+    try testing.expect(term.rt.editor_merge.?.failed);
+    try testing.expectEqual(@as(u64, 0), term.rt.editor_merge.?.request_id);
+
     // 빈 경로로 다시 세우면 **요청을 안 걸고 실패로 남는다**(조용히 도는 요청이 없다).
     begin(session, term, "/tmp/maru-merge-repo", "");
     const empty = term.rt.editor_merge orelse return error.MissingMergeState;
@@ -487,10 +503,13 @@ test "MRG7 충돌 행으로 연 편집기는 «병합 모드» 로 선다 (제�
     if (term.rt.editor_doc) |*doc| doc.saved_hash = saved_hash ^ 1;
     const dirty_label = try session.diffAwareLabel(allocator, term);
     defer allocator.free(dirty_label);
-    try testing.expect(std.mem.indexOf(u8, dirty_label, maru.i18n.t(.dock_merge_stages)) != null);
-    try testing.expect(std.mem.indexOf(u8, dirty_label, "conflict.txt") != null);
-    // 표식이 실제로 붙었다 — 이 단언이 없으면 dirty 를 못 세운 채 위 둘만 보고 초록이다.
-    try testing.expect(!std.mem.eql(u8, dirty_label, label));
+    // **자리까지 못박는다** — 표식이 뒤로 가도 「둘 다 들어 있나」로는 안 갈린다(적대적 6회차 A8).
+    const want_dirty = try std.fmt.allocPrint(allocator, "{s} conflict.txt · {s}", .{
+        app_session_mod.editor_dirty_marker,
+        maru.i18n.t(.dock_merge_stages),
+    });
+    defer allocator.free(want_dirty);
+    try testing.expectEqualStrings(want_dirty, dirty_label);
     if (term.rt.editor_doc) |*doc| doc.saved_hash = saved_hash;
 
     // ⑸ **대조군: 충돌이 «아닌» 행으로 연 편집기는 병합 모드가 아니다.** 이것이 없으면 「모든 파일이
@@ -791,4 +810,212 @@ test "MRG15 되살리기는 «다른 탭» 의 병합 Term 도 본다" {
     // 첫 탭만 훑으면 두 번째 워크스페이스의 병합은 영영 안 걸린다.
     try testing.expect(session.git_request_seq > before);
     clear(session, term);
+}
+
+test "MRG16 세 판은 «상태가 든 allocator» 로 놓인다 — 도착에도 teardown 에도" {
+    // **이 판정자가 없으면 해제를 통째로 지운 변이가 산다.** 제품의 세 판은 워커 allocator
+    // (`smp_allocator`)에서 오는데 그쪽은 누수 검출이 없어서, 「안 놓는다」가 아무 데서도 안 보였다
+    // (적대적 7회차 B1·B8 실측 — 둘 다 살아남았다). 상태가 allocator 를 들고 있으므로 여기서
+    // **검출되는 것**을 꽂는다. 그리고 `freeStages` 를 직접 부르지 않고 **제품 함수 둘**
+    // (`deliver`·`clear`)을 지나게 한다 — 함수만 재면 그 함수를 «부르지 않는» 변이가 산다.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const session = try smokeSession(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    const opened = try pane_ops.openFileTermInActivePane(session, "/tmp/maru-test-merge-own.txt", .text);
+    const term = opened.term;
+    term.rt.editor_merge = .{
+        .stage_allocator = allocator,
+        .request_id = 5,
+        .base = try allocator.dupe(u8, "B1"),
+        .ours = try allocator.dupe(u8, "O1"),
+        .theirs = try allocator.dupe(u8, "T1"),
+        .stages = .{ .has_base = true, .has_ours = true, .has_theirs = true },
+        .ready = true,
+    };
+
+    // ⑴ **새 판이 도착하면 옛 판을 놓는다.** 안 놓으면 파일을 다시 읽을 때마다 세 조각이 샌다.
+    var next: git_backend_mod.DiffResult = .{
+        .base = try allocator.dupe(u8, "B2"),
+        .original = try allocator.dupe(u8, "O2"),
+        .modified = try allocator.dupe(u8, "T2"),
+        .stages = .{ .has_base = true, .has_ours = true, .has_theirs = true },
+        .ok = true,
+        .request_id = 5,
+    };
+    try testing.expect(deliver(session, term, &next));
+    try testing.expectEqualStrings("B2", term.rt.editor_merge.?.base);
+
+    // ⑵ **문서를 놓으면 판도 놓는다.** 여기서 빠뜨린 `free` 가 있으면 `testing.allocator` 가 빨개진다.
+    clear(session, term);
+    try testing.expect(term.rt.editor_merge == null);
+}
+
+test "MRG17 읽기에 실패해도 «이미 든 판» 은 안 버린다" {
+    // 실패했다고 화면을 비우면, 잠깐 끊긴 git 호출 하나에 **보고 있던 세 판이 사라진다**. 실패는
+    // 표시로 말하고 내용은 그대로 둔다 — 그래야 「다시 읽는 중」이 「아무것도 없음」이 되지 않는다.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const session = try smokeSession(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    const opened = try pane_ops.openFileTermInActivePane(session, "/tmp/maru-test-merge-keep.txt", .text);
+    const term = opened.term;
+    term.rt.editor_merge = .{ .request_id = 41 };
+    var good = try fakeResult(41, "BASE", "OURS", "THEIRS");
+    defer good.deinit(git_backend_mod.worker_allocator);
+    try testing.expect(deliver(session, term, &good));
+
+    term.rt.editor_merge.?.request_id = 42;
+    var bad: git_backend_mod.DiffResult = .{ .ok = false, .request_id = 42 };
+    try testing.expect(deliver(session, term, &bad));
+    const state = term.rt.editor_merge orelse return error.MissingMergeState;
+    try testing.expect(state.failed);
+    // **판은 그대로다.**
+    try testing.expectEqualStrings("BASE", state.base);
+    try testing.expectEqualStrings("OURS", state.ours);
+    try testing.expectEqualStrings("THEIRS", state.theirs);
+    try testing.expect(state.stages.has_base);
+
+    // **그리고 성공이 오면 실패 표시가 «지워진다».** 안 지우면 판이 와도 「못 읽었다」가 남는다
+    // (적대적 7회차 D10 — 이 축이 통째로 없었다).
+    term.rt.editor_merge.?.request_id = 43;
+    var again = try fakeResult(43, "B2", "O2", "T2");
+    defer again.deinit(git_backend_mod.worker_allocator);
+    try testing.expect(deliver(session, term, &again));
+    try testing.expect(!term.rt.editor_merge.?.failed);
+    try testing.expect(term.rt.editor_merge.?.ready);
+    clear(session, term);
+}
+
+test "MRG18 되살리기는 «다른 pane» 의 병합 Term 도 본다" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const session = try smokeSession(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    session.git_backend = try git_backend_mod.Backend.init(session.io);
+
+    // 탭 하나 안에서 pane 을 **둘**로 가른다 — 첫 pane 만 훑는 순회는 여기서 걸린다.
+    try pane_ops.splitActivePane(session, .vertical);
+    const tab = tab_ops.activeTab(session);
+    try testing.expect(tab.panes.items.len >= 2); // 픽스처가 실제로 갈랐다
+
+    const opened = try pane_ops.openFileTermInActivePane(session, "/tmp/maru-test-merge-pane2.txt", .text);
+    const term = opened.term;
+    term.rt.editor_merge = .{
+        .repo = try allocator.dupe(u8, "/tmp/maru-merge-repo"),
+        .rel_path = try allocator.dupe(u8, "f.txt"),
+    };
+    const before = session.git_request_seq;
+    git_ops.drainGitStatus(session);
+    try testing.expect(session.git_request_seq > before);
+    clear(session, term);
+}
+
+/// 판정자 전용: 탭 스트립의 **그려질 셀**을 한 줄 글자로 뜬다(빈 칸은 공백).
+///
+/// **왜 셀까지 가나.** 라벨 문자열만 비교하면 「그 글자가 탭 줄에 실제로 실리는가」는 무판정이다 —
+/// 이 저장소는 그 구멍으로 한 번 데었다(저장 표식을 컨트롤 플레인에만 붙여 **화면에는 점이 안
+/// 나왔던** 일, `diffAwareLabel` 주석). 탭 바는 Chrome Lab 이 그리는 컴포넌트가 아니라 PNG 캡처가
+/// 없으므로, **그려질 셀을 글자로 뜨는 것**이 이 표면에서 얻을 수 있는 가장 화면에 가까운 증거다.
+fn renderTabStrip(allocator: std.mem.Allocator, titles: []const []const u8, cols: u16, out: []u8) ![]const u8 {
+    var dl = try coretext_frame_builder.buildPaneTabBarDrawList(
+        allocator,
+        titles,
+        cols,
+        .{ .rgb = .{ .r = 0xCC, .g = 0xCC, .b = 0xCC } },
+        true, // 닫기 ✕ 고정 표시(제품과 같은 값)
+        0, // 활성 탭
+        .{ .rgb = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF } },
+        0, // 균등분할
+        0, // 스크롤 없음
+        null, // rename 중 아님
+    );
+    defer dl.deinit(allocator);
+    @memset(out, ' ');
+    var end: usize = 0;
+    for (dl.cells) |cell| {
+        if (cell.col >= cols) continue;
+        var buf: [4]u8 = undefined;
+        const n = std.unicode.utf8Encode(cell.codepoint, &buf) catch continue;
+        // 한 칸에 한 글자만 뜬다(멀티바이트는 그 칸에 겹쳐 적지 않고 뒤로 민다) — 눈으로 읽을
+        // 증거를 만드는 것이 목적이라 열 정렬보다 **글자가 실렸는가**가 중요하다.
+        if (end + n > out.len) break;
+        @memcpy(out[end..][0..n], buf[0..n]);
+        end += n;
+    }
+    return out[0..end];
+}
+
+test "MRG19 탭 스트립의 «그려질 셀» 에 병합 기준이 실린다 (화면 증거)" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "conflict.txt",
+        .data = "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> topic\n",
+    });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const repo = root_buf[0..try tmp.dir.realPath(testing.io, &root_buf)];
+
+    const session = try smokeSession(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    session.git_backend = try git_backend_mod.Backend.init(session.io);
+    session.git_backend.?.state.?.shutting_down = true;
+
+    git_ops.openEditorForScmRow(session, repo, .{
+        .section = .changes,
+        .path = "conflict.txt",
+        .letter = 'U',
+        .action = .resolve,
+        .conflicted = true,
+    });
+    const term = pane_ops.activePane(session).activeTerm();
+    try testing.expect(isMerge(term));
+
+    // 탭 바가 부르는 그 함수로 라벨을 만든다(`diffAwareLabel` — 사용자가 보는 제목의 단일 자리).
+    const label = try session.diffAwareLabel(allocator, term);
+    defer allocator.free(label);
+    var strip_buf: [512]u8 = undefined;
+    const strip = try renderTabStrip(allocator, &.{label}, 40, &strip_buf);
+
+    // **셀에 실렸다.**
+    try testing.expect(std.mem.indexOf(u8, strip, maru.i18n.t(.dock_merge_stages)) != null);
+    try testing.expect(std.mem.indexOf(u8, strip, "conflict.txt") != null);
+
+    // **대조군**: 병합이 아닌 Term 의 탭 줄에는 그 기준이 «없다» — 없으면 이 판정자는 「탭 줄에는
+    // 늘 그 글자가 있다」로 갈려도 초록이다.
+    const plain_label = try allocator.dupe(u8, "conflict.txt");
+    defer allocator.free(plain_label);
+    var plain_buf: [512]u8 = undefined;
+    const plain_strip = try renderTabStrip(allocator, &.{plain_label}, 40, &plain_buf);
+    try testing.expect(std.mem.indexOf(u8, plain_strip, maru.i18n.t(.dock_merge_stages)) == null);
+
+    // **언어를 갈라서도 잰다.** 이 저장소는 「영어로만 돌아 열-대-바이트 변이가 살아남은」 일을
+    // 겪었다 — 한글은 한 글자가 두 칸이라 탭 폭 계산이 갈린다.
+    const prev_lang = maru.i18n.lang();
+    defer maru.i18n.setLang(prev_lang);
+    maru.i18n.setLang(.ko);
+    const ko_label = try session.diffAwareLabel(allocator, term);
+    defer allocator.free(ko_label);
+    var ko_buf: [512]u8 = undefined;
+    const ko_strip = try renderTabStrip(allocator, &.{ko_label}, 40, &ko_buf);
+    try testing.expect(std.mem.indexOf(u8, ko_strip, maru.i18n.t(.dock_merge_stages)) != null);
+    // **두 언어가 실제로 다르다** — 같으면 위 단언이 「언어와 무관한 글자」를 보고 있다는 뜻이다.
+    try testing.expect(!std.mem.eql(u8, ko_strip, strip));
+
+    // 사람이 읽을 증거를 남긴다(PR 에 붙인다) — `MARU_DUMP_TAB_STRIP=1` 일 때만.
+    if (std.c.getenv("MARU_DUMP_TAB_STRIP") != null) {
+        std.debug.print(
+            "\n[탭 스트립 · 병합 ko] |{s}|\n[탭 스트립 · 병합 en] |{s}|\n[탭 스트립 · 평범   ] |{s}|\n",
+            .{ ko_strip, strip, plain_strip },
+        );
+    }
 }

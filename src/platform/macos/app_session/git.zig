@@ -908,6 +908,9 @@ pub fn drainGitStatus(self: *AppSession) void {
                 for (pane.terms.items) |term| {
                     const state = term.rt.editor_merge orelse continue;
                     if (state.ready or state.failed or state.request_id != 0) continue;
+                    // **`begin` 이 아니라 `request` 다.** `begin` 은 먼저 `clear` 로 경로를 놓고 그
+                    // **놓은 경로에서** 다시 복사하므로 use-after-free 다 — 여기 상태가 이미 자기
+                    // 쌍을 들고 있으니 다시 잡을 이유도 없다(적대적 10회차 E5 가 그 자리였다).
                     editor_merge_ops.request(self, term);
                 }
             }
@@ -992,6 +995,10 @@ pub fn drainGitStatus(self: *AppSession) void {
         // **병합 판이 먼저다**(S3b-1). 그쪽은 entry 가 아니라 Term 의 상태로 짝을 맞춘다 — 병합
         // Term 의 entry 는 작업트리 파일(`.text`)이라 아래 `.diff` 대조에 절대 안 걸린다.
         if (editor_merge_ops.route(self, &diff_result)) {
+            // 정직하게: 이 해제를 지운 변이는 **아무 판정자도 안 깨운다**(적대적 6회차 A2 — 등가).
+            // 남는 바이트가 워커 allocator(`smp_allocator`) 것이고 그쪽에는 누수 검출이 없기 때문이다.
+            // 병합 **상태**가 든 판은 그 구멍을 `State.stage_allocator` 로 메웠지만(`MRG16`), 여기
+            // 넘겨받은 결과 껍데기는 diff 배관과 같은 자리라 같은 한계를 그대로 진다.
             diff_result.deinit(git_backend_mod.worker_allocator);
             self.metal_dirty = true;
             continue;

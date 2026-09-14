@@ -5478,7 +5478,7 @@ pub const AppSession = struct {
     bg_image_pixels: []u8 = &.{},
     bg_image_width: u32 = 0,
     bg_image_height: u32 = 0,
-    bg_image_bpp: u32 = 4, // 3(RGB)/4(RGBA)
+    bg_image_bpp: u32 = 4, // 언제나 4(RGBA) — png.zig 가 색 종류를 흡수한다
     bg_image_path_cache: []u8 = &.{}, // 마지막 디코드한 config 경로(변화 감지 — 매 frame 재디코드 방지)
     bg_image_generation: u64 = 0, // 경로가 바뀌어 재디코드할 때마다 증가 — 렌더러 텍스처 재업로드 트리거
     bg_image_uploaded_gen: u64 = 0, // 마지막으로 업로드 채널에 실은 generation(같으면 재업로드 안 함)
@@ -21136,7 +21136,7 @@ pub const AppSession = struct {
         const bytes = std.Io.Dir.cwd().readFileAlloc(self.io, path, self.allocator, .limited(1 << 26)) catch return;
         defer self.allocator.free(bytes);
         const img = terminal.png.decode(self.allocator, bytes) catch return;
-        // decode 성공: img.data(owned)를 그대로 인수받는다(복사 없음). bpp는 3(RGB)/4(RGBA).
+        // decode 성공: img.data(owned)를 그대로 인수받는다(복사 없음). bpp는 언제나 4(RGBA).
         self.bg_image_pixels = img.data;
         self.bg_image_width = img.width;
         self.bg_image_height = img.height;

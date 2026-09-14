@@ -1584,8 +1584,8 @@ fn kittyTransmit(self: *TerminalCore, cmd: KittyGraphicsCommand, payload: []cons
 }
 
 /// kitty graphics transmit PNG(f=100): base64 디코드 후 PNG 디코더로 RGB/RGBA 픽셀을 푼다. 치수·bpp는
-/// PNG가 자기기술하므로 s/v control은 안 본다. 8-bit truecolor만 지원(미지원 변종·malformed는 graceful
-/// 거부 — png.zig). PNG에 추가 압축(o=z)은 미지원(PNG는 이미 압축됨, 실사용 없음). 베이스: kitty graphics
+/// PNG가 자기기술하므로 s/v control은 안 본다. **전 color type·bit depth·인터레이스**를 받고 출력은
+/// 언제나 RGBA 8-bit 다(malformed·과대 치수는 graceful 거부 — png.zig). PNG에 추가 압축(o=z)은 미지원(PNG는 이미 압축됨, 실사용 없음). 베이스: kitty graphics
 /// protocol(f=100) + PNG 명세.
 fn kittyTransmitPng(self: *TerminalCore, cmd: KittyGraphicsCommand, payload: []const u8, store: bool) KittyStatus {
     if (cmd.compression != 0) return .enotsupp; // PNG + 추가 압축은 미지원(rare)

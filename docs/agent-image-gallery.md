@@ -421,7 +421,7 @@ env 폴백의 한계를 명시한다: 에이전트가 자식을 한 번도 띄�
 
 ### 5.1 ImageIO로 디코드한다
 
-`terminal/png.zig`는 kitty graphics용 **이식 가능 코어**이고 8-bit truecolor PNG만 받는다. 뷰어는 `platform/macos`에 살므로 그 제약이 없다. macOS **ImageIO가 62종**을 디코드한다(실측: png·jpeg·webp·heic·heif·avif·gif·tiff·bmp·ico·jpeg-xl 등). WebKit도 같은 ImageIO를 쓰므로 **네이티브가 웹뷰보다 커버리지가 좁지 않다.**
+`terminal/png.zig`는 kitty graphics용 **이식 가능 코어**이고 PNG만 받는다(변종은 전부 받는다 — wuffs). 뷰어는 `platform/macos`에 살므로 포맷 제약이 없다. macOS **ImageIO가 62종**을 디코드한다(실측: png·jpeg·webp·heic·heif·avif·gif·tiff·bmp·ico·jpeg-xl 등). WebKit도 같은 ImageIO를 쓰므로 **네이티브가 웹뷰보다 커버리지가 좁지 않다.**
 
 실제 코퍼스는 PNG 98.2% / JPEG 1.9%이고 JPEG 74장 중 EXIF는 **0장**이라 방향 회전 처리가 필요 없다.
 

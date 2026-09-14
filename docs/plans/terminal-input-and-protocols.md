@@ -35,7 +35,7 @@
     - **OSC 5522(kitty 클립보드) — 낮음**: OSC 52(범용 표준)를 이미 지원하고 프로그램이 폴백하므로 실기능 공백이 아니다. 스트리밍 싱크(아래) 위에서 청크가 거의 공짜로 따라오는 **부산물**로 취급.
     - **OSC 66(텍스트 사이징) — 진짜 후보(큰 렌더러 작업)**: 글자를 셀 배수/분수로 그리는 렌더 기능이라 파싱이 아니라 **fixed-cell 렌더러 확장**(kitty graphics급)이 본체다. 착수 시 파서를 **번호-인식 + 스트리밍 싱크**로 전환하는 트리거로 삼는다(단일 트리거 — [terminal-compatibility-policy.md §OSC52 "장기 방향"](../terminal-compatibility-policy.md) 단일 출처). ⚠️ 이 리팩터링 대부분은 **사용자에게 안 보이는 유지보수·미래 대비**다(피크 메모리·파서 내부 불가시) — UX 명분으로 팔지 않는다. 사용자에게 실제 나은 건 이미 구현한 "가시적 상한"(무음 폐기 제거)뿐이다.
   - **OSC 52 클립보드 버퍼(#1201/#1204/후속) — 완료**: 고정 2048 OSC 버퍼가 한 문단(base64 >2KB) 복사를 통째로 버리던 루트커즈를 동적 버퍼로 수정(#1201), 대용량 회수 갭 5건(clipboard_write/osc_buffer 반납·OOM storm·접두 latch·공허 테스트) 수정(#1204), **상한 초과를 notice로 표면화**해 무음 실패 제거(후속). Ghostty와 같은 구조(2048 고정 + 클립보드만 동적 + 오버플로 discard)에 **상한·즉시 반납·가시적 실패로 앞선다**(Ghostty는 상한 없음·무음 폐기). 스트리밍 싱크는 위 OSC 66 트리거로 이연.
-  - **kitty graphics protocol(APC, #528/#530/#531 + K1)**: ① 파서+command 토대(`ESC _ G ...` 수집 + control `k=v` 파싱, #528) ② 이미지 디코드+저장(transmit RGBA/RGB base64→`KittyImageStorage`, 같은 id 교체·320MB 총량 한계·`a=d` delete·RIS 비움, #530; 치수 곱 오버플로 crash fix #531) ③ **K1 placement(코어)**: display(`a=p`/`a=T`)를 현재 커서 셀에 placement로 걸어 `(image_id, placement_id)`로 저장(같은 키 교체)하고 `RenderSnapshot.placements`로 노출까지 완료. **베이스**: kitty graphics protocol display data(`p`/`x`/`y`/`w`/`h`/`X`/`Y`/`c`/`r`/`z`/`C` 키). **의사결정**: (1) anchor는 **절대 행**(스크롤백 0..sb_count-1, 이어서 활성 화면)이라 selection/find와 같은 좌표계로 스크롤·eviction과 함께 움직인다(`shiftPlacementsForEviction`이 eviction마다 보정, 화면 밖이면 제거 — `shiftSelectionForEviction`과 동형). (2) **셀 단위 크기(span)는 코어가 계산하지 않는다** — 코어는 셀 픽셀 크기를 모르므로(`Size`는 rows/cols, 마우스 1016도 platform이 픽셀을 주입) source rect(픽셀)와 명시 `c`/`r`만 담고, 픽셀→셀 환산·클립은 셀 메트릭을 가진 **렌더러(K2) 책임**이다(마우스 1016 경계와 정합). `RenderSnapshot.placements`의 `row`는 뷰포트 상대 i32(화면 위로 벗어난 앵커는 음수 — 렌더러가 span으로 가시성/클립 판정). (3) 커서 이동 정책(`C`): 기본은 이미지 아래로 내리되 행 수(`r`)가 명시됐을 때만(자동 크기는 span 미상이라 미이동 — K1 한계), 화면 끝 초과는 스크롤 없이 마지막 행 clamp. (4) placement 상한(`max_kitty_placements`=1024)으로 placement_id 폭주 차단(이미지 320MB·APC 버퍼 한계와 같은 결의 방어선). **검증**: 생성·모든 display 키 파싱·뷰포트 매핑·`a=T` 합성·없는 이미지/`i=0` graceful·같은 키 교체·다른 p 별개·커서 이동(C/r/clamp)·delete가 이미지+placement 동시 제거·RIS 비움·eviction anchor 보정/제거·위 스크롤 시 뷰포트 row 환산을 결정적 unit으로 단언. K1은 화면 렌더 없이 노출까지다. ④ **K2 렌더(완료)**: GpuImage 환산 + per-image 텍스처 + Metal 파이프라인 + ABI v48 — 아래 "kitty graphics K2 렌더" 절. ⑤ **K3 디코드 확장(완료)**: K3a chunked(`m=1`)(여러 APC 누적·480MB 상한·RIS 폐기), K3b zlib(`o=z`)(`std.compress.flate(.zlib)` inflate, zlib bomb 바운드), K3c PNG(`f=100`) — `src/terminal/png.zig` clean-room 디코더로 **8-bit truecolor(color type 2 RGB·6 RGBA, non-interlaced)** 만 디코드(청크 파싱·IDAT zlib inflate·스캔라인 필터 None/Sub/Up/Average/Paeth), grayscale(0/4)·palette(3)·16-bit·Adam7은 graceful 거부. **풀 PNG(전 color type·16-bit)는 라이브러리 벤더링 백로그** — 아래 "kitty graphics PNG 백로그" 절. ⑥ **K4 저장 관리**: K4a 세분화된 delete(`a=d` + `d=` 타깃) **완료** — 기본 `d='a'`(전체), 소문자=placement만/대문자=이미지 데이터까지 free, `a/A`(전체)·`i/I`(image_id[+placement_id])·`z/Z`(z-index)·**`n/N`(이미지 번호 `I=`)**·**`c/C`(커서를 덮는 placement)** 지원, **`d=a` 는 「화면에 보이는 배치」만 지운다**(2026-09-14): 명세가 "Delete all placements **visible on screen**" 이고, 두 레퍼런스 원본이 같은 규칙이다 — kitty 는 `clear_all_filter_func` 에서 `if (ref->is_virtual_ref) return false;` 로 가상 배치를 빼고, Ghostty 는 `.all` 을 `deleteVisiblePlacements`("Delete only non-virtual placements that intersect the active screen")로 보낸다. 예전 maru 는 목록을 통째로 비워서 **스크롤백으로 밀려난 이미지까지** 지웠다(프로그램이 화면을 정리할 때마다 사용자의 과거 이미지가 깎였다). 앵커가 활성 영역 안이면 계산 없이 「보인다」이고, 스크롤백에 있을 때만 셀 span 으로 아래 끝이 걸치는지 본다(Ghostty 의 최적화 힌트와 같다). **가상 배치(U=1)는 대상이 아니다** — 코어는 placeholder 셀 위치를 모르므로 「보이는가」를 물을 수조차 없고, 두 레퍼런스가 같은 답을 갖고 있다. 대문자 `d=A` 는 그 위에 조건부 free 를 더할 뿐이라 **배치가 하나도 없는 이미지는 안 걸린다**(그건 `d=I,i=` 가 하는 일이다).
+  - **kitty graphics protocol(APC, #528/#530/#531 + K1)**: ① 파서+command 토대(`ESC _ G ...` 수집 + control `k=v` 파싱, #528) ② 이미지 디코드+저장(transmit RGBA/RGB base64→`KittyImageStorage`, 같은 id 교체·320MB 총량 한계·`a=d` delete·RIS 비움, #530; 치수 곱 오버플로 crash fix #531) ③ **K1 placement(코어)**: display(`a=p`/`a=T`)를 현재 커서 셀에 placement로 걸어 `(image_id, placement_id)`로 저장(같은 키 교체)하고 `RenderSnapshot.placements`로 노출까지 완료. **베이스**: kitty graphics protocol display data(`p`/`x`/`y`/`w`/`h`/`X`/`Y`/`c`/`r`/`z`/`C` 키). **의사결정**: (1) anchor는 **절대 행**(스크롤백 0..sb_count-1, 이어서 활성 화면)이라 selection/find와 같은 좌표계로 스크롤·eviction과 함께 움직인다(`shiftPlacementsForEviction`이 eviction마다 보정, 화면 밖이면 제거 — `shiftSelectionForEviction`과 동형). (2) **셀 단위 크기(span)는 코어가 계산하지 않는다** — 코어는 셀 픽셀 크기를 모르므로(`Size`는 rows/cols, 마우스 1016도 platform이 픽셀을 주입) source rect(픽셀)와 명시 `c`/`r`만 담고, 픽셀→셀 환산·클립은 셀 메트릭을 가진 **렌더러(K2) 책임**이다(마우스 1016 경계와 정합). `RenderSnapshot.placements`의 `row`는 뷰포트 상대 i32(화면 위로 벗어난 앵커는 음수 — 렌더러가 span으로 가시성/클립 판정). (3) 커서 이동 정책(`C`): 기본은 이미지 아래로 내리되 행 수(`r`)가 명시됐을 때만(자동 크기는 span 미상이라 미이동 — K1 한계), 화면 끝 초과는 스크롤 없이 마지막 행 clamp. (4) placement 상한(`max_kitty_placements`=1024)으로 placement_id 폭주 차단(이미지 320MB·APC 버퍼 한계와 같은 결의 방어선). **검증**: 생성·모든 display 키 파싱·뷰포트 매핑·`a=T` 합성·없는 이미지/`i=0` graceful·같은 키 교체·다른 p 별개·커서 이동(C/r/clamp)·delete가 이미지+placement 동시 제거·RIS 비움·eviction anchor 보정/제거·위 스크롤 시 뷰포트 row 환산을 결정적 unit으로 단언. K1은 화면 렌더 없이 노출까지다. ④ **K2 렌더(완료)**: GpuImage 환산 + per-image 텍스처 + Metal 파이프라인 + ABI v48 — 아래 "kitty graphics K2 렌더" 절. ⑤ **K3 디코드 확장(완료)**: K3a chunked(`m=1`)(여러 APC 누적·480MB 상한·RIS 폐기), K3b zlib(`o=z`)(`std.compress.flate(.zlib)` inflate, zlib bomb 바운드), K3c PNG(`f=100`) — **전 color type·bit depth·인터레이스**를 디코드한다(palette·grayscale·truecolor, 1/2/4/8/16-bit, tRNS, Adam7). 출력은 언제나 RGBA 8-bit. 디코드는 **wuffs**(lazy dep) 가 하고 `src/terminal/png.zig` 는 총량 회계·버퍼 소유·에러 환산만 한다 — 아래 "kitty graphics PNG" 절. 프레임 PNG(`a=f`+`f=100`)와 PNG+`o=z` 는 아직 `ENOTSUPP` 다. ⑥ **K4 저장 관리**: K4a 세분화된 delete(`a=d` + `d=` 타깃) **완료** — 기본 `d='a'`(전체), 소문자=placement만/대문자=이미지 데이터까지 free, `a/A`(전체)·`i/I`(image_id[+placement_id])·`z/Z`(z-index)·**`n/N`(이미지 번호 `I=`)**·**`c/C`(커서를 덮는 placement)** 지원, **`d=a` 는 「화면에 보이는 배치」만 지운다**(2026-09-14): 명세가 "Delete all placements **visible on screen**" 이고, 두 레퍼런스 원본이 같은 규칙이다 — kitty 는 `clear_all_filter_func` 에서 `if (ref->is_virtual_ref) return false;` 로 가상 배치를 빼고, Ghostty 는 `.all` 을 `deleteVisiblePlacements`("Delete only non-virtual placements that intersect the active screen")로 보낸다. 예전 maru 는 목록을 통째로 비워서 **스크롤백으로 밀려난 이미지까지** 지웠다(프로그램이 화면을 정리할 때마다 사용자의 과거 이미지가 깎였다). 앵커가 활성 영역 안이면 계산 없이 「보인다」이고, 스크롤백에 있을 때만 셀 span 으로 아래 끝이 걸치는지 본다(Ghostty 의 최적화 힌트와 같다). **가상 배치(U=1)는 대상이 아니다** — 코어는 placeholder 셀 위치를 모르므로 「보이는가」를 물을 수조차 없고, 두 레퍼런스가 같은 답을 갖고 있다. 대문자 `d=A` 는 그 위에 조건부 free 를 더할 뿐이라 **배치가 하나도 없는 이미지는 안 걸린다**(그건 `d=I,i=` 가 하는 일이다).
 
 **자리로 겨누는 delete 는 화면을 넘지 않는다**(2026-09-14 적대적 검증): `a`/`c`/`p`/`q`/`x`/`y`/`z` 는 전부 **자리**로 겨누는데, 자리는 화면마다 좌표계가 다르다(`anchor_row` 는 그 화면의 절대 행이고 alt 엔 스크롤백이 없다). 걸러 주지 않아 **alt 의 TUI 가 보낸 delete 가 셸 화면의 이미지를 지우고 있었다**(실측: 넷 다 primary 배치를 지웠다 — #3631/#3677 이 세운 화면 격리를 delete 가 뚫었다). 공유 몸통(`deletePlacementsWhere`)에서 `on_alt` 를 본다. kitty 는 화면마다 graphics 상태가 따로라 구조적으로 이 문제가 없다. **id 로 겨누는 타깃(`i`/`n`/`r`)은 그대로 세션 전역**이다 — 그쪽 대상은 이미지이고 이미지는 화면이 아니라 세션에 속한다.
 
@@ -142,14 +142,67 @@ kitty graphics의 unicode placeholder(`U=1`)는 이제 **파싱해 virtual place
 깨졌다. 지금은 (1) 셋째 diacritic을 읽고, (2) 배정 천장을 `core.kitty_auto_id_top`(0x00FF_FFFE)로
 낮춰 셋째를 안 쓰는 앱까지 동작하게 한다 — 둘 다 판정자로 고정했다.
 
-## kitty graphics PNG 백로그 (고민 거리 — 미결정)
+## kitty graphics PNG — 전 변종 지원 (해결, 2026-09-14)
 
-K3c는 `f=100` PNG를 **8-bit truecolor(RGB/RGBA, non-interlaced)** 만 maru 자체 디코더(`png.zig`)로 처리하고, 나머지 변종은 graceful 거부한다. "풀 PNG(전 color type·16-bit·인터레이스)"로 넓힐지는 **미결정 백로그**다.
+`f=100` PNG 는 이제 **전 color type·bit depth·인터레이스**를 받는다: palette(3, tRNS 포함)·
+grayscale(0/4)·truecolor(2/6), bit depth 1/2/4/8/16, Adam7. 출력은 **언제나 RGBA 8-bit** 라
+코어에 색 종류 분기가 없다. 디코드는 **wuffs** 가 하고 `png.zig` 는 총량 회계·버퍼 소유·에러
+환산만 한다.
 
-- **현황 조사(2026-06-16)**: Ghostty는 PNG를 손으로 안 짜고 **wuffs(벤더링 C 라이브러리, lazy dep)** 로 디코드한다(`references/ghostty` 확인). wuffs는 PNG·JPEG·전 color type·bit depth·인터레이스를 덮는 방대한 메모리-안전 코덱이다. 즉 "Ghostty 수준 풀 PNG"는 손코덱으로 재현하기엔 비현실적.
-- **직접 짜기 리스크**: 신뢰 불가 바이너리 파싱의 메모리 안전(OOB/overflow), 스캔라인 필터 재구성 버그, 미지원 변종 조용한 실패, 인터레이스/16-bit 추가 복잡도. (그래서 풀 범위는 손코덱 비권장.)
-- **선택지(결정 시)**: (A) stb_image(단일 헤더 C) 또는 wuffs 벤더링 — 풀 PNG 즉시, 의존성 1개(현재 maru는 std+OS 프레임워크만이라 정책·이식성[Linux/Win/web] 영향 합의 필요). (B) 손코덱 점진 확장(palette→grayscale→16-bit) — 의존성 0, 코드/테스트 부담↑. (C) 현행 유지(8-bit truecolor + graceful 거부).
-- **현재 결정(사용자 합의)**: C — 8-bit truecolor만, 풀 PNG는 실제 필요(미지원 PNG를 보내는 워크플로 발생) 시 A/B를 그때 합의해 진행.
+### 어떻게 여기까지 왔나
+
+- **예전(K3c)**: 8-bit truecolor(RGB/RGBA, non-interlaced)만 자체 clean-room 디코더로 풀고 나머지는
+  `error.Unsupported` 로 거절했다. 사용자에게 보이는 증상은 **이미지가 그냥 안 뜨는 것**이었다.
+- **현황 조사(2026-06-16)**: Ghostty 는 PNG 를 손으로 안 짜고 wuffs(벤더링 C 라이브러리, lazy dep)로
+  디코드한다. kitty 는 libpng 를 쓴다. 즉 "풀 PNG 를 손코덱으로" 는 어느 레퍼런스도 안 간 길이다.
+- **결정(2026-09-14, 사용자 논의)**: wuffs 를 lazy dependency 로 받는다. 판단의 축은 크기가 아니라
+  **신뢰 경계**였다 — 이 코드가 다루는 것은 PTY·원격이 보내는 바이너리이고, 손코덱은 그 안전을
+  앞으로 계속 우리가 지키겠다는 약속이다. 크기는 한 번 내는 비용이다.
+
+### 무엇을 얼마나 치렀나 (실측)
+
+| 자리 | 전 | 후 |
+| --- | --- | --- |
+| `packages/core/wasm/maru-vt.wasm` (brotli) | 53,112 B | 88,388 B (+66%) |
+| 같은 것 (raw) | 160,619 B | 238,278 B |
+| 같은 것 (gzip) | 62,249 B | 101,737 B |
+| `png_wuffs.c` object (`-O2`, 네이티브) | — | 410,480 B |
+
+크기를 이만큼에서 멈춘 것은 컴파일 플래그 둘이다(둘 다 `build.zig` 의 `attachPngCodec` 에 있다).
+wuffs 는 **전 코덱이 한 파일**(3.6 MB C)이라 그냥 컴파일하면 안 쓰는 것까지 다 들어온다.
+
+- `WUFFS_CONFIG__STATIC_FUNCTIONS` — 모든 함수가 내부 링크가 돼 안 쓰는 코덱이 죽은 코드로 걷힌다.
+- `WUFFS_CONFIG__DST_PIXEL_FORMAT__ENABLE_ALLOWLIST` + `..._ALLOW_RGBA_NONPREMUL` — 우리가 요청하는
+  출력 포맷 하나만 남긴다. 이 둘로 object 가 **1,096,368 → 410,480 B** 로 줄었다(실측, `-O2`).
+
+### 배선에서 걸렸던 자리들
+
+- **libc 할당자가 필요 없다.** 디코더 구조체(실측 44,632 B — 스택에 두기엔 크다)까지 **Zig 가**
+  할당해 넘긴다. 그래서 `calloc`/`free` 가 링크에 안 남고 wasm32-freestanding 이 선다. wuffs 의
+  `..._alloc()` 편의 생성자들이 유일한 호출처인데, 이름을 스텁으로 바꿔치기해 그 가지를 컴파일
+  시점에 끊었다(`png_wuffs.c`) — 최적화 모드에 따라 심볼이 살아남고 죽는 것을 막는다.
+- **`<stdlib.h>`·`<string.h>` 셰임**(`src/terminal/wuffs_cshim/`). freestanding 에는 libc 헤더가
+  없다. 셰임은 **모든 타깃이 함께** 쓴다 — 타깃마다 다른 헤더를 보면 wasm 에서만 터지는 결함이
+  생기고, 그 빌드가 CI 에서 제일 늦게 돈다.
+- **C 를 `maru` 모듈에 직접 안 매단다.** 같은 모듈에 붙는 ObjC 어댑터들이 셰임 헤더를 보게 된다.
+  전용 모듈(`png_codec.zig`)로 갈라 include 경로가 `png_wuffs.c` 하나에만 닿게 했다.
+- **maru 루트 모듈을 세우는 자리가 열이다**(`src/maru.zig` 아홉 + `src/cross_target_surface.zig`).
+  그 수는 **늘어난다** — 이 트랙 도중에도 다른 PR 이 하나를 더했고, 판정자가 그것을 잡았다.
+  한 자리라도 빼먹으면 그 타깃만 링크가 깨진다 — 실측으로 `check-targets` 세 타깃이 다 빨개졌다.
+  `tests/png_codec_wiring.zig` 가 그 자리 수를 센다.
+
+### 거절선은 그대로다
+
+- **머리를 먼저 읽고 총량 한계(320MB)를 넘으면 버퍼를 잡기 전에 거절한다.** 68 바이트짜리 PNG 가
+  65535×65535 RGBA 라고 말하면 픽셀로는 17.2 GB 다. `png.zig` 의 판정자가 **결과가 아니라 동작을**
+  잰다 — 요청된 가장 큰 할당을 기록해 45 KB(디코더 구조체) 넘게 안 잡는지 본다. 결과만 보는 판정자는
+  「17 GB 를 요청해 실패했다」도 초록으로 읽는다(적대적 검증에서 실제로 그랬다).
+- malformed·잘린 PNG 는 graceful 거부다(저장 안 됨, panic 없음).
+
+### 아직 아닌 것
+
+- **프레임 PNG**(`a=f` + `f=100`)는 여전히 `ENOTSUPP` 다. 루트 이미지만 PNG 를 받는다.
+- **PNG + `o=z`**(PNG 바이트에 zlib 을 한 번 더)도 `ENOTSUPP` 다 — PNG 가 이미 zlib 을 품는다.
 
 ## kitty graphics 전송 매체 백로그 — `t=f`/`t=t`/`t=s` (보류, 근거 실측 2026-09-14)
 

@@ -8154,7 +8154,7 @@ test "kitty graphics transmit: 크기 불일치·PNG·zlib는 저장 안 함, RI
     // 과대 치수(s/v=u32max)는 곱이 usize를 넘어 — panic 없이 거부한다(code review 발견).
     try core.write("\x1b_Ga=t,f=32,s=4294967295,v=4294967295,i=8;AAAA\x1b\\");
     try std.testing.expect(!core.kitty_images.map.contains(8));
-    // PNG(f=100)·zlib(o=z)은 후속이라 저장 안 함.
+    // `AAAA` 는 PNG 도 zlib 도 아니다 — 둘 다 지원하지만 malformed 는 거부한다.
     try core.write("\x1b_Ga=t,f=100,s=2,v=2,i=2;AAAA\x1b\\");
     try std.testing.expect(!core.kitty_images.map.contains(2));
     try core.write("\x1b_Ga=t,f=32,s=2,v=2,i=3,o=z;AAAA\x1b\\");
@@ -8517,7 +8517,10 @@ test "kitty graphics zlib: 큰 이미지(back-reference 포함) inflate (K3b)" {
     try std.testing.expectEqual(@as(u8, 249), img.data[255]); // 마지막 바이트까지 정확
 }
 
-// --- kitty graphics K3c: PNG 디코드(f=100, 8-bit truecolor) ---
+// --- kitty graphics K3c: PNG 디코드(f=100) ---
+//
+// **전 color type·bit depth·인터레이스를 받는다**(wuffs, #PNG-wuffs). 예전에는 8-bit truecolor 만
+// 풀고 나머지는 거절했다 — 아래 판정자들이 그 거절을 **지금은 반대로** 잰다.
 
 test "kitty graphics PNG(f=100): RGBA/RGB 디코드 저장(s/v 없이) (K3c)" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
@@ -8533,20 +8536,21 @@ test "kitty graphics PNG(f=100): RGBA/RGB 디코드 저장(s/v 없이) (K3c)" {
     try std.testing.expectEqual(@as(u8, 255), a.data[0]); // 첫 픽셀 R
     try std.testing.expectEqual(@as(u8, 64), a.data[15]); // 마지막 픽셀 A
 
-    // 3x2 RGB PNG(color type 2).
+    // 3x2 RGB PNG(color type 2). **알파 없는 PNG 도 RGBA 로 나온다** — 코어에 색 종류 분기가 없다.
     try core.write("\x1b_Ga=t,f=100,i=2;iVBORw0KGgoAAAANSUhEUgAAAAMAAAACCAIAAAASFvFNAAAAE0lEQVR4nGPkEpGDAJaoqCgICwAY2AK4OdDUoAAAAABJRU5ErkJggg==\x1b\\");
     const b = core.kitty_images.map.get(2).?;
     try std.testing.expectEqual(@as(u32, 3), b.width);
-    try std.testing.expectEqual(@as(u8, 3), b.bpp);
-    try std.testing.expectEqual(@as(usize, 18), b.data.len);
-    try std.testing.expectEqual(@as(u8, 10), b.data[0]);
-    try std.testing.expectEqual(@as(u8, 180), b.data[17]);
+    try std.testing.expectEqual(@as(u8, 4), b.bpp);
+    try std.testing.expectEqual(@as(usize, 24), b.data.len);
+    // 첫 픽셀 (10,20,30) + 불투명, 마지막 픽셀 (160,170,180) + 불투명.
+    try std.testing.expectEqualSlices(u8, &.{ 10, 20, 30, 255 }, b.data[0..4]);
+    try std.testing.expectEqualSlices(u8, &.{ 160, 170, 180, 255 }, b.data[20..24]);
 }
 
-test "kitty graphics PNG: 필터 다양한 그라데이션 디코드 + 미지원/깨진 PNG graceful 거부 (K3c)" {
+test "kitty graphics PNG: 필터 다양한 그라데이션 디코드 + 깨진 PNG graceful 거부 (K3c)" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 10 });
     defer core.deinit();
-    // 16x16 RGBA 그라데이션 — PIL 적응 필터(Sub/Up/Average/Paeth)를 거쳐 unfilter 전 경로를 실증.
+    // 16x16 RGBA 그라데이션 — PIL 이 행마다 다른 필터(Sub/Up/Average/Paeth)를 고르므로 필터 복원 경로를 다 지난다.
     try core.write("\x1b_Ga=t,f=100,i=3;iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAXUlEQVR4nKXMRw6AMBAEwTEMOf7/syD5ALKcdteH6mM7AM8NwIq+cGb8B50Jw0GvxnhAFaYHgxjzg1GE5cFUxfpgLqJssGRRPliTqBtsEeoHe8A4OD4Ng9NrHFx4ARfXB/WGjsh8AAAAAElFTkSuQmCC\x1b\\");
     try std.testing.expect(core.kitty_images.map.contains(3));
     const g = core.kitty_images.map.get(3).?;
@@ -8556,12 +8560,262 @@ test "kitty graphics PNG: 필터 다양한 그라데이션 디코드 + 미지원
     try std.testing.expectEqual(@as(u8, 0), g.data[0]);
     try std.testing.expectEqual(@as(u8, 255), g.data[1023]); // 마지막 바이트까지 정확
 
-    // grayscale(color type 0)은 미지원 변종 → graceful 거부(저장 안 됨, panic 없음).
-    try core.write("\x1b_Ga=t,f=100,i=4;iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAAAAABX3VL4AAAADklEQVR4nGNgcGBo+A8AAwUBwE4zW+kAAAAASUVORK5CYII=\x1b\\");
-    try std.testing.expect(!core.kitty_images.map.contains(4));
-    // 깨진 PNG(서명 틀림)도 graceful 거부.
+    // 깨진 PNG(서명 틀림)는 graceful 거부(저장 안 됨, panic 없음).
     try core.write("\x1b_Ga=t,f=100,i=5;AAAAAAAAAAAA\x1b\\");
     try std.testing.expect(!core.kitty_images.map.contains(5));
+    // **잘린 PNG** — 머리는 멀쩡하고 IDAT 이 중간에 끊긴다. 치수를 읽는 데까지는 성공하므로
+    // 「서명만 본다」로는 안 걸리는 갈래다.
+    try core.write("\x1b_Ga=t,f=100,i=6;iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAF0lEQVR4nGP4z8Dwn+E/QwMTI5hm\x1b\\");
+    try std.testing.expect(!core.kitty_images.map.contains(6));
+}
+
+test "kitty graphics PNG: 머리만 거대한 PNG 는 할당 전에 거절한다 (320MB 총량 회계)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+
+    // 68 바이트짜리 PNG 인데 IHDR 이 65535×65535 RGBA 라고 말한다 — 픽셀로 풀면 **17.2 GB** 다.
+    // 디코더에 그냥 넘기면 그 크기를 할당하려 든다. 우리 쪽 계약은 「머리를 먼저 읽고, 총량 한계를
+    // 넘으면 **버퍼를 잡기 전에** 거절한다」이고 이 판정자가 그 순서를 잰다.
+    // (`std.testing.allocator` 는 17 GB 요청을 실패로 돌려주므로, 거절이 없으면 여기서 터진다.)
+    try core.write("\x1b_Ga=t,f=100,i=1;iVBORw0KGgoAAAANSUhEUgAA//8AAP//CAYAAAC2BdlQAAAAC0lEQVR42mNgQAUAABAAAaoZ+IIAAAAASUVORK5CYII=\x1b\\");
+    try std.testing.expect(!core.kitty_images.map.contains(1));
+    try std.testing.expectEqual(@as(usize, 0), core.kitty_images.total_bytes);
+
+    // **양성 대조**: 같은 경로로 들어온 작은 PNG 는 저장된다 — 거절이 `f=100` 을 통째로 막은 게 아니다.
+    try core.write("\x1b_Ga=t,f=100,i=2;iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAAAAABX3VL4AAAADklEQVR4nGNgcGBo+A8AAwUBwE4zW+kAAAAASUVORK5CYII=\x1b\\");
+    try std.testing.expect(core.kitty_images.map.contains(2));
+    try std.testing.expectEqual(@as(usize, 16), core.kitty_images.total_bytes);
+}
+
+test "kitty graphics PNG: palette·grayscale·16-bit·Adam7 전부 RGBA 로 나온다 (wuffs)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 10 });
+    defer core.deinit();
+
+    // ① palette(color type 3, 8-bit 인덱스) — 빨강/초록 체크. 인덱스가 색으로 풀려야 한다.
+    try core.write("\x1b_Ga=t,f=100,i=1;iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAMAAABFaP0WAAAABlBMVEX/AAAA/wDSh+9xAAAADElEQVR42mNgYARCAAAMAAMVnhj8AAAAAElFTkSuQmCC\x1b\\");
+    const pal = core.kitty_images.map.get(1) orelse return error.PaletteRejected;
+    try std.testing.expectEqual(@as(u8, 4), pal.bpp);
+    try std.testing.expectEqualSlices(u8, &.{
+        255, 0,   0, 255, 0,   255, 0, 255,
+        0,   255, 0, 255, 255, 0,   0, 255,
+    }, pal.data);
+
+    // ② palette + tRNS — **투명 팔레트 항목**. 알파가 실제로 0 이어야 한다(단순 팔레트 확장으로는
+    // 안 걸리는 갈래다: tRNS 를 무시하면 전부 255 가 된다).
+    try core.write("\x1b_Ga=t,f=100,i=2;iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAMAAABFaP0WAAAABlBMVEX/AAAAAP9sof2OAAAAAnRSTlP/AOW3MEoAAAAMSURBVHjaY2BgBEIAAAwAAxWeGPwAAAAASUVORK5CYII=\x1b\\");
+    const trns = core.kitty_images.map.get(2) orelse return error.TrnsRejected;
+    try std.testing.expectEqualSlices(u8, &.{
+        255, 0, 0,   255, 0,   0, 255, 0,
+        0,   0, 255, 0,   255, 0, 0,   255,
+    }, trns.data);
+
+    // ③ bit depth 1(팔레트) — 한 바이트에 픽셀 여덟이 들어가는 하위비트 경로.
+    try core.write("\x1b_Ga=t,f=100,i=3;iVBORw0KGgoAAAANSUhEUgAAAAIAAAACAQMAAABIeJ9nAAAABlBMVEUAAAD///+l2Z/dAAAADElEQVR42mNwYGgAAAFEAMEEh8/6AAAAAElFTkSuQmCC\x1b\\");
+    const one_bit = core.kitty_images.map.get(3) orelse return error.OneBitRejected;
+    try std.testing.expectEqualSlices(u8, &.{
+        0,   0,   0,   255, 255, 255, 255, 255,
+        255, 255, 255, 255, 0,   0,   0,   255,
+    }, one_bit.data);
+
+    // ④ grayscale(color type 0) — 예전에는 이 자리가 `error.Unsupported` 였다.
+    try core.write("\x1b_Ga=t,f=100,i=4;iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAAAAABX3VL4AAAADklEQVR4nGNgcGBo+A8AAwUBwE4zW+kAAAAASUVORK5CYII=\x1b\\");
+    const gray = core.kitty_images.map.get(4) orelse return error.GrayRejected;
+    try std.testing.expectEqualSlices(u8, &.{
+        0,   0,   0,   255, 64,  64,  64,  255,
+        128, 128, 128, 255, 255, 255, 255, 255,
+    }, gray.data);
+
+    // ⑤ grayscale + alpha(color type 4) — 회색이 세 채널로 퍼지고 알파가 살아야 한다.
+    try core.write("\x1b_Ga=t,f=100,i=5;iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAQAAADYv8WvAAAAEklEQVR4nGPk+s/VyCDnoMEAAA06AhzPXEOYAAAAAElFTkSuQmCC\x1b\\");
+    const gray_alpha = core.kitty_images.map.get(5) orelse return error.GrayAlphaRejected;
+    try std.testing.expectEqualSlices(u8, &.{
+        10, 10, 10, 255, 20, 20, 20, 128,
+        30, 30, 30, 64,  40, 40, 40, 0,
+    }, gray_alpha.data);
+
+    // ⑥ bit depth 16(RGB) — 채널당 두 바이트가 8-bit 로 내려와야 한다(0x1234 → 0x12).
+    try core.write("\x1b_Ga=t,f=100,i=6;iVBORw0KGgoAAAANSUhEUgAAAAIAAAACEAIAAACtREYwAAAAF0lEQVR42mP4/58BDGA0kCFkElYxaw8AZtkIZUK2WhYAAAAASUVORK5CYII=\x1b\\");
+    const rgb16 = core.kitty_images.map.get(6) orelse return error.Rgb16Rejected;
+    try std.testing.expectEqual(@as(usize, 16), rgb16.data.len); // 2x2x4 — 16-bit 가 그대로 새지 않는다
+    try std.testing.expectEqualSlices(u8, &.{
+        255, 0, 0,   255, 0,    255,  0,    255,
+        0,   0, 255, 255, 0x12, 0x56, 0x9a, 255,
+    }, rgb16.data);
+
+    // ⑦ Adam7 인터레이스 — 일곱 패스가 한 장으로 합쳐져야 한다. 옛 디코더는 여기서 거절했다.
+    try core.write("\x1b_Ga=t,f=100,i=7;iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAYAAADED76LAAAAHklEQVR4nGNkYGD4r8AgwIALszAoCDAwMODGw0MBAFtIBs14+C6HAAAAAElFTkSuQmCC\x1b\\");
+    const inter = core.kitty_images.map.get(7) orelse return error.InterlaceRejected;
+    try std.testing.expectEqual(@as(u32, 8), inter.width);
+    try std.testing.expectEqual(@as(usize, 256), inter.data.len);
+    // 픽셀 (x,y) = (x*32%256, y*32%256, (x+y)*16%256, 255). 인터레이스를 한 패스만 풀면
+    // 여기 어딘가가 0 으로 남는다 — 네 모서리와 한가운데를 본다.
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 255 }, inter.data[0..4]); // (0,0)
+    try std.testing.expectEqualSlices(u8, &.{ 0xe0, 0, 0x70, 255 }, inter.data[28..32]); // (7,0)
+    try std.testing.expectEqualSlices(u8, &.{ 0x80, 0x80, 0x80, 255 }, inter.data[(4 * 8 + 4) * 4 ..][0..4]); // (4,4)
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0xe0, 0x70, 255 }, inter.data[(7 * 8) * 4 ..][0..4]); // (0,7)
+    try std.testing.expectEqualSlices(u8, &.{ 0xe0, 0xe0, 0xe0, 255 }, inter.data[252..256]); // (7,7)
+}
+
+test "kitty graphics PNG: s/v 가 거짓말을 해도 PNG 가 말하는 치수를 쓴다 + 같은 id 교체가 회계를 맞춘다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 10 });
+    defer core.deinit();
+
+    // **PNG 는 자기 치수를 스스로 말한다.** 그래서 `s`/`v` 는 무시해야 하는데, 기존 판정자는
+    // 「s/v 없이 보낸 경우」만 봤다 — 코드가 그 값을 쓰기 시작해도 아무도 못 잡는 자리였다.
+    // 여기서는 **틀린 값을 일부러 실어** 보내고 PNG 쪽이 이기는지 본다.
+    try core.write("\x1b_Ga=t,f=100,i=1,s=99,v=77;iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAMAAABFaP0WAAAABlBMVEX/AAAA/wDSh+9xAAAADElEQVR42mNgYARCAAAMAAMVnhj8AAAAAElFTkSuQmCC\x1b\\");
+    const img = core.kitty_images.map.get(1) orelse return error.PngWithBogusSizeRejected;
+    try std.testing.expectEqual(@as(u32, 2), img.width);
+    try std.testing.expectEqual(@as(u32, 2), img.height);
+    try std.testing.expectEqual(@as(usize, 16), img.data.len);
+    try std.testing.expectEqual(@as(usize, 16), core.kitty_images.total_bytes);
+
+    // **같은 id 를 raw 로 교체**한다. PNG 가 남긴 바이트가 회계에서 빠지고 새것만 남아야 한다 —
+    // 안 빠지면 총량이 서서히 부풀어 320MB 한계가 엉뚱한 때에 걸린다.
+    const raw = [_]u8{7} ** 36; // 3x3 RGBA
+    var b64: [64]u8 = undefined;
+    var seq: [160]u8 = undefined;
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=3,v=3,i=1;{s}\x1b\\", .{std.base64.standard.Encoder.encode(&b64, &raw)}));
+    const replaced = core.kitty_images.map.get(1) orelse return error.ReplaceRejected;
+    try std.testing.expectEqual(@as(u32, 3), replaced.width);
+    try std.testing.expectEqual(@as(usize, 36), replaced.data.len);
+    try std.testing.expectEqual(@as(usize, 36), core.kitty_images.total_bytes); // 16 이 남아 있으면 52 다
+
+    // **반대 방향도 본다** — raw 를 PNG 로 교체. RGB PNG 는 이제 RGBA 로 나오므로(bpp 3→4)
+    // 회계가 그 확장을 반영해야 한다: 3x2 RGB PNG → 24 바이트.
+    try core.write("\x1b_Ga=t,f=100,i=1;iVBORw0KGgoAAAANSUhEUgAAAAMAAAACCAIAAAASFvFNAAAAE0lEQVR4nGPkEpGDAJaoqCgICwAY2AK4OdDUoAAAAABJRU5ErkJggg==\x1b\\");
+    const back = core.kitty_images.map.get(1) orelse return error.PngReplaceRejected;
+    try std.testing.expectEqual(@as(u8, 4), back.bpp);
+    try std.testing.expectEqual(@as(usize, 24), back.data.len);
+    try std.testing.expectEqual(@as(usize, 24), core.kitty_images.total_bytes);
+}
+
+test "kitty graphics PNG: 청크로 쪼개 온 PNG 도 한 장으로 붙는다 (m=1 + f=100)" {
+    // **이게 실제 이미지가 늘 지나는 길이다.** kitty 명세는 이스케이프 하나를 4096 바이트로 묶으므로
+    // 조금만 큰 PNG 도 `m=1` 로 쪼개져 온다. 그런데 판정자는 `f=32` 청크만 보고 있었다 — 「PNG 를 푼다」와
+    // 「청크를 붙인다」가 각각 초록인데 **조합에서만** 깨질 수 있는 자리다(실측으로 그 구멍이 있었다).
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 10 });
+    defer core.deinit();
+
+    try core.write("\x1b_Ga=t,f=100,i=1,m=1;iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAXUlEQVR4nKXMRw6AMBA\x1b\\");
+    try std.testing.expect(!core.kitty_images.map.contains(1)); // 아직 미완성 — 저장되면 안 된다
+    try core.write("\x1b_Gm=1;EwTEMOf7/syD5ALKcdteH6mM7AM8NwIq+cGb8B50Jw0GvxnhAFaYHgxjzg1GE5cFUxf\x1b\\");
+    try std.testing.expect(!core.kitty_images.map.contains(1));
+    try core.write("\x1b_Gm=0;pgLqJssGRRPliTqBtsEeoHe8A4OD4Ng9NrHFx4ARfXB/WGjsh8AAAAAElFTkSuQmCC\x1b\\");
+
+    const img = core.kitty_images.map.get(1) orelse return error.ChunkedPngRejected;
+    try std.testing.expectEqual(@as(u32, 16), img.width);
+    try std.testing.expectEqual(@as(u32, 16), img.height);
+    try std.testing.expectEqual(@as(usize, 1024), img.data.len);
+    // **한 APC 로 보낸 같은 PNG 와 바이트가 같아야 한다** — 「저장은 됐다」로는 이어붙이기 순서가
+    // 뒤집힌 것을 못 잡는다.
+    try core.write("\x1b_Ga=t,f=100,i=2;iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAXUlEQVR4nKXMRw6AMBAEwTEMOf7/syD5ALKcdteH6mM7AM8NwIq+cGb8B50Jw0GvxnhAFaYHgxjzg1GE5cFUxfpgLqJssGRRPliTqBtsEeoHe8A4OD4Ng9NrHFx4ARfXB/WGjsh8AAAAAElFTkSuQmCC\x1b\\");
+    const whole = core.kitty_images.map.get(2) orelse return error.WholePngRejected;
+    try std.testing.expectEqualSlices(u8, whole.data, img.data);
+}
+
+test "kitty graphics PNG: PNG + o=z 는 ENOTSUPP 다 (PNG 가 이미 zlib 을 품는다)" {
+    // 코드가 `cmd.compression != 0` 으로 거절하는데 **아무도 재고 있지 않았다**. 조용히 `.ok` 를
+    // 돌려주면 앱은 받아들여진 줄 알고 다음 이미지를 같은 형식으로 계속 보낸다.
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 10 });
+    defer core.deinit();
+    core.clearResponse();
+    try core.write("\x1b_Ga=t,f=100,o=z,i=1;iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAAAAABX3VL4AAAADklEQVR4nGNgcGBo+A8AAwUBwE4zW+kAAAAASUVORK5CYII=\x1b\\");
+    try std.testing.expectEqualStrings("\x1b_Gi=1;ENOTSUPP:unsupported graphics feature\x1b\\", core.pendingResponse());
+    try std.testing.expect(!core.kitty_images.map.contains(1));
+    core.clearResponse();
+
+    // **양성 대조**: `o=z` 를 뺀 같은 PNG 는 받는다 — 거절이 `f=100` 을 통째로 막은 게 아니다.
+    try core.write("\x1b_Ga=t,f=100,i=2;iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAAAAABX3VL4AAAADklEQVR4nGNgcGBo+A8AAwUBwE4zW+kAAAAASUVORK5CYII=\x1b\\");
+    try std.testing.expectEqualStrings("\x1b_Gi=2;OK\x1b\\", core.pendingResponse());
+    try std.testing.expect(core.kitty_images.map.contains(2));
+}
+
+test "kitty graphics PNG: 바이트를 흔든 PNG 무더기 — 죽지도 새지도 않고, 들어간 것은 자기기술과 맞는다" {
+    // **왜 이 판정자인가.** 변종별 픽셀 값 판정자는 «멀쩡한» PNG 만 본다. 실제로 들어오는 것은
+    // PTY·원격이 보낸 바이트이고, 거기엔 잘린 것·청크 길이가 어긋난 것·필터 바이트가 뒤집힌 것이
+    // 섞인다. 그 무더기를 흘려 ⑴ 패닉 없음 ⑵ 누수 없음(`std.testing.allocator` 가 잡는다)
+    // ⑶ **저장된 것은 `data.len == w*h*bpp` 로 자기기술과 맞음**을 잰다. ⑶ 이 없으면 렌더러가
+    // 어긋난 stride 로 텍스처를 올린다(그 결함은 화면에서만 보인다).
+    const seeds = [_][]const u8{
+        "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAMAAABFaP0WAAAABlBMVEX/AAAA/wDSh+9xAAAADElEQVR42mNgYARCAAAMAAMVnhj8AAAAAElFTkSuQmCC", // palette
+        "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAMAAABFaP0WAAAABlBMVEX/AAAAAP9sof2OAAAAAnRSTlP/AOW3MEoAAAAMSURBVHjaY2BgBEIAAAwAAxWeGPwAAAAASUVORK5CYII=", // palette+tRNS
+        "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACAQMAAABIeJ9nAAAABlBMVEUAAAD///+l2Z/dAAAADElEQVR42mNwYGgAAAFEAMEEh8/6AAAAAElFTkSuQmCC", // 1-bit
+        "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAAAAABX3VL4AAAADklEQVR4nGNgcGBo+A8AAwUBwE4zW+kAAAAASUVORK5CYII=", // grayscale
+        "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAQAAADYv8WvAAAAEklEQVR4nGPk+s/VyCDnoMEAAA06AhzPXEOYAAAAAElFTkSuQmCC", // gray+alpha
+        "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACEAIAAACtREYwAAAAF0lEQVR42mP4/58BDGA0kCFkElYxaw8AZtkIZUK2WhYAAAAASUVORK5CYII=", // 16-bit
+        "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAYAAADED76LAAAAHklEQVR4nGNkYGD4r8AgwIALszAoCDAwMODGw0MBAFtIBs14+C6HAAAAAElFTkSuQmCC", // Adam7
+        "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAXUlEQVR4nKXMRw6AMBAEwTEMOf7/syD5ALKcdteH6mM7AM8NwIq+cGb8B50Jw0GvxnhAFaYHgxjzg1GE5cFUxfpgLqJssGRRPliTqBtsEeoHe8A4OD4Ng9NrHFx4ARfXB/WGjsh8AAAAAElFTkSuQmCC", // 16x16 그라데이션
+        "iVBORw0KGgoAAAANSUhEUgAA//8AAP//CAYAAAC2BdlQAAAAC0lEQVR42mNgQAUAABAAAaoZ+IIAAAAASUVORK5CYII=", // 65535x65535 머리
+    };
+
+    var prng = std.Random.DefaultPrng.init(0x50_4e_47_00); // 결정적이어야 재현된다
+    const rand = prng.random();
+    var payload: [512]u8 = undefined;
+    var seq: [700]u8 = undefined;
+    var stored_any = false;
+    var rejected_any = false;
+    // **커버리지를 세분해서 센다.** 「하나라도 저장됐다」는 원본 아홉 장만으로도 참이 된다 —
+    // 그러면 변이 갈래가 통째로 비어 있어도 초록이다(적대적 검증 4회차에서 그 약함을 봤다).
+    var mutated_stored: usize = 0; // 손댄 입력이 **성공**한 횟수
+    var mutated_rejected: usize = 0; // 손댄 입력이 거절된 횟수
+    var widths_seen: [4]bool = @splat(false); // 2·3·8·16 — 변종이 골고루 지나는가
+
+    for (seeds) |seed| {
+        for (0..40) |round| {
+            var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 10 });
+            defer core.deinit();
+
+            @memcpy(payload[0..seed.len], seed);
+            var len = seed.len;
+            switch (round % 4) {
+                // ① base64 문자 하나 갈아치우기 — 디코드 후 바이트 하나가 달라진다.
+                0 => payload[8 + rand.uintLessThan(usize, len - 8)] = "ABCZaz09+/"[rand.uintLessThan(usize, 10)],
+                // ② 뒤를 자른다(4의 배수로 — base64 자체는 유효하게 둬서 PNG 파서까지 닿게 한다).
+                1 => len = 8 + 4 * (1 + rand.uintLessThan(usize, (len - 8) / 4)),
+                // ③ 앞쪽(서명·IHDR) 을 집중해서 흔든다.
+                2 => payload[rand.uintLessThan(usize, 24)] = "ABCZaz09+/"[rand.uintLessThan(usize, 10)],
+                // ④ 손대지 않은 원본 — **양성 대조**: 무더기 안에 성공하는 것이 있어야 한다.
+                else => {},
+            }
+
+            try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=100,i=7,q=2;{s}\x1b\\", .{payload[0..len]}));
+
+            const touched = round % 4 != 3; // ④ 만 원본이다
+            if (core.kitty_images.map.get(7)) |img| {
+                stored_any = true;
+                if (touched) mutated_stored += 1;
+                switch (img.width) {
+                    2 => widths_seen[0] = true,
+                    3 => widths_seen[1] = true,
+                    8 => widths_seen[2] = true,
+                    16 => widths_seen[3] = true,
+                    else => {},
+                }
+                // 자기기술 정합: 저장된 바이트 수가 치수×bpp 와 같아야 한다.
+                const expect_len = @as(u64, img.width) * @as(u64, img.height) * img.bpp;
+                try std.testing.expectEqual(expect_len, @as(u64, img.data.len));
+                try std.testing.expectEqual(@as(u8, 4), img.bpp);
+                try std.testing.expect(img.width > 0 and img.height > 0);
+            } else {
+                rejected_any = true;
+                if (touched) mutated_rejected += 1;
+            }
+        }
+    }
+
+    // **커버리지 단언**: 무더기가 전부 거절만 하거나 전부 통과만 했다면 이 판정자는 아무것도 안 잰다.
+    try std.testing.expect(stored_any);
+    try std.testing.expect(rejected_any);
+    // 손댄 입력이 **양쪽으로** 갈라져야 한다 — 한쪽만이면 변이가 무의미하거나 전부 파괴적이라는 뜻이다.
+    try std.testing.expect(mutated_stored > 0);
+    try std.testing.expect(mutated_rejected > 0);
+    // 서로 다른 치수가 최소 셋 — 씨앗 아홉 장이 실제로 다 지났는지 본다(하나만 도는 것을 막는다).
+    var distinct: usize = 0;
+    for (widths_seen) |w| {
+        if (w) distinct += 1;
+    }
+    try std.testing.expect(distinct >= 3);
 }
 
 // --- kitty graphics K4a: 세분화된 delete(a=d, d= 타깃) ---

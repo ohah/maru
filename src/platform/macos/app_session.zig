@@ -38480,6 +38480,17 @@ fn e4d3FileEquals(io: std.Io, allocator: std.mem.Allocator, path: []const u8, ex
 // P3-e4d-3은 ssh_upload primitive가 아니라 공개 AppSession 사용자 동작의 끝까지를 닫는다. 실제 host PTY가
 // OSC 5379를 출력하고, managed connection의 freshness barrier가 그 관측을 확정한 뒤에만 localhost
 // ControlMaster upload가 시작된다. 원격 바이트와 **동작을 시작한 surface 화면**의 경로를 둘 다 본다.
+// **OSC 왕복은 이 판정자들에서 가장 느린 일이다 — 시한도 그만큼 준다.**
+//
+// 아래 셋은 `\x1b]5379;ssh;…` 를 보낸 뒤 **실 ssh 왕복**이 끝나기를 기다린다 — 런타임 spawn ·
+// ControlMaster 연결 · 원격 셸 기동이 그 안에 다 들어 있다. 그런데 시한은 6초(300×20ms)였고,
+// 바로 옆에서 **로컬 notice 한 줄**을 기다리는 자리는 10초(500)였다. 가장 느린 일에 가장 짧은
+// 시한이 붙어 있었다.
+//
+// CI 에서 `MetadataNotObserved` 로 **두 번**(2026-09-14 01:21 · 03:02) 빨개졌다. 둘 다 문서만
+// 바꾼 커밋 위였다 — 코드가 아니라 **기계가 느렸다**는 뜻이다. 그래서 이웃과 같은 10초로 맞춘다.
+const e4d_metadata_wait_ticks = 500;
+
 test "P3-e4d-3 actual host-backed file and image uploads reach original surface" {
     if (!is_macos) return error.SkipZigTest;
     const dest_raw = std.c.getenv("MARU_P5D_UPLOAD_DEST") orelse return error.SkipZigTest;
@@ -38617,7 +38628,7 @@ test "P3-e4d-3 actual host-backed file and image uploads reach original surface"
     defer allocator.free(osc);
     try session.runtime.writeInput(term.surface.id, .{ .bytes = osc });
     var observed = false;
-    for (0..300) |_| {
+    for (0..e4d_metadata_wait_ticks) |_| {
         _ = try session.tick();
         session.backendFor(term).readObservation(term.rt.handle, allocator, &term.rt.observation, false) catch {};
         observed = term.rt.observation.availability == .current and
@@ -38626,7 +38637,19 @@ test "P3-e4d-3 actual host-backed file and image uploads reach original surface"
         if (observed) break;
         _ = usleep(20 * 1000);
     }
-    try std.testing.expect(observed);
+    if (!observed) {
+        std.debug.print(
+            "E4D3: {d}초 동안 원격 dest 가 안 보였다 — availability {s} · dest 있음 {} · 지금 «{s}» · 기다린 «{s}»\n",
+            .{
+                e4d_metadata_wait_ticks * 20 / 1000,
+                @tagName(term.rt.observation.availability),
+                term.rt.observation.ssh_remote_dest_present,
+                term.rt.observation.ssh_remote_dest.items,
+                dest,
+            },
+        );
+        return error.MetadataNotObserved;
+    }
     try std.testing.expect(!app_remote_backend.?.attachedAsObserver(term.rt.handle));
 
     failure_stage = "file-upload";
@@ -38695,7 +38718,7 @@ test "P3-e4d-3 actual host-backed file and image uploads reach original surface"
     defer allocator.free(failure_osc);
     try session.runtime.writeInput(term.surface.id, .{ .bytes = failure_osc });
     var failure_dest_observed = false;
-    for (0..300) |_| {
+    for (0..e4d_metadata_wait_ticks) |_| {
         _ = try session.tick();
         session.backendFor(term).readObservation(term.rt.handle, allocator, &term.rt.observation, false) catch {};
         failure_dest_observed = term.rt.observation.availability == .current and
@@ -38704,7 +38727,19 @@ test "P3-e4d-3 actual host-backed file and image uploads reach original surface"
         if (failure_dest_observed) break;
         _ = usleep(20 * 1000);
     }
-    try std.testing.expect(failure_dest_observed);
+    if (!failure_dest_observed) {
+        std.debug.print(
+            "E4D3: {d}초 동안 실패용 dest 가 안 보였다 — availability {s} · dest 있음 {} · 지금 «{s}» · 기다린 «{s}»\n",
+            .{
+                e4d_metadata_wait_ticks * 20 / 1000,
+                @tagName(term.rt.observation.availability),
+                term.rt.observation.ssh_remote_dest_present,
+                term.rt.observation.ssh_remote_dest.items,
+                failure_dest,
+            },
+        );
+        return error.MetadataNotObserved;
+    }
     const input_events_before_failure = session.total_terminal_input_events;
     const failure_bytes = "P3-e4d-3-must-not-upload";
     try std.testing.expect(session.handleDroppedImage("/not-used/p5d-failure.png", failure_bytes));
@@ -38759,12 +38794,33 @@ fn e4d4SpawnDetachedRuntime(
     defer allocator.free(osc);
     try runtime.sendInput(osc);
     var observed = false;
-    for (0..300) |_| {
-        observed = try runtime.pumpDelta() == .metadata;
+    // PumpResult 종류별로 센다 — 실패했을 때 «무엇을 봤는지» 말하려고. 폭도 이름도 enum 에서
+    // 끌어오므로, 종류가 늘어도 조용히 어긋나지 않는다.
+    const Pump = @TypeOf(runtime).PumpResult;
+    var seen = [_]usize{0} ** @typeInfo(Pump).@"enum".fields.len;
+    for (0..e4d_metadata_wait_ticks) |_| {
+        const delta = try runtime.pumpDelta();
+        seen[@intFromEnum(delta)] += 1;
+        observed = delta == .metadata;
         if (observed) break;
         _ = usleep(20 * 1000);
     }
-    if (!observed) return error.MetadataNotObserved;
+    if (!observed) {
+        // **말없이 죽지 않는다.** 예전에는 `MetadataNotObserved` 한 줄이 전부라, 시한이 모자랐는지
+        // 델타가 아예 안 왔는지 구분할 수 없었다 — CI 가 빨개져도 쫓을 것이 없었다(2026-09-14).
+        std.debug.print(
+            "E4D4: {d}초 동안 원격 메타데이터가 안 왔다 — dest «{s}» · 본 델타: idle {d} · event_pending {d} · screen {d} · ended {d}\n",
+            .{
+                e4d_metadata_wait_ticks * 20 / 1000,
+                dest,
+                seen[@intFromEnum(Pump.idle)],
+                seen[@intFromEnum(Pump.event_pending)],
+                seen[@intFromEnum(Pump.screen)],
+                seen[@intFromEnum(Pump.ended)],
+            },
+        );
+        return error.MetadataNotObserved;
+    }
     const runtime_id_hex = runtime.runtimeIdHex();
     const runtime_id = try std.fmt.parseInt(u128, &runtime_id_hex, 16);
     runtime.detachClientSide();

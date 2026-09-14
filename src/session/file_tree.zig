@@ -903,6 +903,32 @@ pub const Tree = struct {
         try self.enqueueScan(path);
     }
 
+    /// 그 디렉터리의 자식 **절대경로**를 `start` 순번부터 `out` 에 채운다. 채운 개수를 돌려준다.
+    ///
+    /// ⚠️ **슬라이스는 트리 소유다** — 다음 스냅샷이 그 자리를 갈아엎으므로, 호출자는 이 tick 안에서
+    /// 쓰고 버려야 한다(복사해 두면 「트리가 아는 것」과 갈린다).
+    ///
+    /// 흐림 질의가 이 자리를 쓴다: 물어볼 목록의 출처를 **트리 하나로** 두면 배치를 이어 물을 때
+    /// 목록을 따로 보관할 필요가 없고, 거절돼도 다시 스캔하지 않아도 된다(docs/file-explorer.md §4).
+    pub fn childPathsFrom(self: *Tree, dir: []const u8, start: usize, out: [][]const u8) usize {
+        const node = self.findNode(dir) orelse return 0;
+        if (start >= node.children.items.len) return 0;
+        var n: usize = 0;
+        for (node.children.items[start..]) |*child| {
+            if (n >= out.len) break;
+            out[n] = child.path;
+            n += 1;
+        }
+        return n;
+    }
+
+    /// 그 디렉터리의 자식 수. 트리가 그 디렉터리를 모르면 0 이다 — **「자식이 없다」와 같은 값**인 것이
+    /// 의도다: 둘 다 「물어볼 것이 없다」이고, 호출자가 그 둘을 갈라 할 일이 없다.
+    pub fn childCountOf(self: *Tree, dir: []const u8) usize {
+        const node = self.findNode(dir) orelse return 0;
+        return node.children.items.len;
+    }
+
     /// 스캔 대기 줄의 길이. 상한(`scan_queue_capacity`)에 닿았는지를 **판정자가** 볼 수 있어야 한다 —
     /// 그 자리에서 `enqueueScan` 이 세부 요청을 버리고 root 만 다시 예약하는 갈래로 접히기 때문이다.
     pub fn scanRequestCount(self: *const Tree) usize {

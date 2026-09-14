@@ -312,12 +312,24 @@ pub const IgnoreResult = struct {
     /// 절대경로**에 붙어, 흐림이 안 서거나 남의 행이 흐려진다. 나가는 자리와 돌아오는 자리가 갈리면
     /// 한쪽이 낡는다 — 답이 자기 질문의 틀을 들고 오게 한다.
     repo: []u8 = &.{},
+    /// **이 답이 무엇을 물었나**(owned). 출력에는 «무시된 것»만 오므로, 무시가 풀린 항목의 표시를
+    /// 지우려면 «물어본 전체»가 필요하다.
+    ///
+    /// ⚠️ **위 `repo` 와 같은 이유로 답이 들고 온다 — 세션의 버퍼를 다시 읽지 않는다.** 그 버퍼
+    /// (`git_ignore_query_paths`)는 디렉터리를 읽을 때마다 **비워지고 덮인다.** 그런데 백엔드는 답이
+    /// 하나 걸려 있는 동안 새 요청을 **거절**하므로, 「A 를 물어 둔 채 B 를 스캔」하면 버퍼는 B 것이
+    /// 되고 요청은 안 나간다. 그 상태에서 A 의 답이 도착하면 드레인이 **B 의 행들을 지운다** —
+    /// 아무도 B 를 물어본 적이 없는데 그 흐림이 통째로 풀린다(트리를 펼치면 형제들이 밝아진다).
+    asked: []const []u8 = &.{},
 
     pub fn deinit(self: *IgnoreResult, allocator: std.mem.Allocator) void {
         allocator.free(self.text);
         allocator.free(self.repo);
+        for (self.asked) |a| allocator.free(a);
+        if (self.asked.len > 0) allocator.free(self.asked);
         self.text = &.{};
         self.repo = &.{};
+        self.asked = &.{};
     }
 };
 
@@ -845,17 +857,41 @@ pub const Backend = struct {
     /// 판정자용: `check-ignore` 답을 **직접 심는다**. 실제 git 을 안 띄우고 「답이 어느 틀로 도착했나」를
     /// 세울 방법이 이것뿐이다 — 그 틀이 소비자에서 다시 골라지지 않는지가 이 자리의 계약이다.
     /// 소유는 결과가 진다(`deinit` 가 둘 다 푼다).
-    pub fn pushIgnoreResultForTest(self: *Backend, repo: []const u8, text: []const u8) bool {
+    pub fn pushIgnoreResultForTest(self: *Backend, repo: []const u8, asked: []const []const u8, text: []const u8) bool {
         const state = self.state orelse return false;
         const repo_copy = state.allocator.dupe(u8, repo) catch return false;
         const text_copy = state.allocator.dupe(u8, text) catch {
             state.allocator.free(repo_copy);
             return false;
         };
+        var result: IgnoreResult = .{ .request_id = 0, .ok = true, .text = text_copy, .repo = repo_copy };
+        if (asked.len > 0) {
+            const owned = state.allocator.alloc([]u8, asked.len) catch {
+                result.deinit(state.allocator);
+                return false;
+            };
+            var filled: usize = 0;
+            for (asked) |a| {
+                owned[filled] = state.allocator.dupe(u8, a) catch break;
+                filled += 1;
+            }
+            // **부분 목록은 안 싣는다** — 못 담긴 행의 표시가 안 지워져 무시가 풀린 항목이 흐린 채로
+            // 남는다. 여기까지 왔으면 그냥 실패다(판정자용 주입이라 재시도가 없다).
+            //
+            // 정리는 **손으로** 한다: `owned` 는 `asked.len` 으로 잡았으므로 `owned[0..filled]` 를
+            // 넘기면 원래 슬라이스가 아니다.
+            if (filled < asked.len) {
+                for (owned[0..filled]) |a| state.allocator.free(a);
+                state.allocator.free(owned);
+                result.deinit(state.allocator);
+                return false;
+            }
+            result.asked = owned;
+        }
         state.mutex.lockUncancelable(state.io);
         defer state.mutex.unlock(state.io);
         if (state.ignore_result) |*old| old.deinit(state.allocator);
-        state.ignore_result = .{ .request_id = 0, .ok = true, .text = text_copy, .repo = repo_copy };
+        state.ignore_result = result;
         return true;
     }
 
@@ -1389,6 +1425,10 @@ fn ignoreWorker(job: *Job) void {
         } else |_| {}
     }
 
+    // **물어본 목록을 답에 싣는다**(`IgnoreResult.asked` 주석). job 의 소유권을 그대로 넘긴다.
+    result.asked = job.ignore_paths;
+    job.ignore_paths = &.{};
+
     state.mutex.lockUncancelable(state.io);
     if (state.ignore_result) |*old| old.deinit(state.allocator);
     state.ignore_result = result;
@@ -1397,8 +1437,8 @@ fn ignoreWorker(job: *Job) void {
 
     state.allocator.free(job.git_exe);
     state.allocator.free(job.repo);
-    for (job.ignore_paths) |p| state.allocator.free(p);
-    if (job.ignore_paths.len > 0) state.allocator.free(job.ignore_paths);
+    // **경로는 안 버린다 — 답에 실어 보냈다**(`IgnoreResult.asked`). 소유권이 result 로 넘어갔으므로
+    // 여기서 풀면 소비자가 해제된 메모리를 읽는다.
     state.allocator.destroy(job);
     state.release();
 }

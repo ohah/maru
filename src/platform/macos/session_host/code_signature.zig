@@ -108,9 +108,12 @@ test "code signature uses the shared bounded child runner" {
         "-c",
         "printf ok",
     };
+    // **예산은 넉넉히.** 실제 자식을 띄우는 왕복이라 기계가 바쁘면 1 초를 넘긴다(실측 최악 3.0 s —
+    // tests/session_host_bounded_process.zig 의 `run_budget_ns` 주석이 단일 출처다). 이 판정자의 주제는
+    // 「공용 러너를 쓴다」이지 속도가 아니다.
     try std.testing.expectEqualStrings(
         "ok",
-        try bounded_process.runCapture(std.testing.io, shell, &success, &output, std.time.ns_per_s),
+        try bounded_process.runCapture(std.testing.io, shell, &success, &output, 10 * std.time.ns_per_s),
     );
 
     const hangs_after_eof = [_:null]?[*:0]const u8{
@@ -125,5 +128,7 @@ test "code signature uses the shared bounded child runner" {
     );
     const elapsed = std.Io.Clock.awake.now(std.testing.io).nanoseconds - start;
     try std.testing.expect(elapsed >= 30 * std.time.ns_per_ms);
-    try std.testing.expect(elapsed < std.time.ns_per_s);
+    // 자식은 `sleep 10` 이다 — 그 절반 안에 끝났으면 그를 기다린 것이 아니다. 1 초는 위 실측(3.0 s)보다
+    // 작아서 증명이 아니라 기계 속도 측정이었다.
+    try std.testing.expect(elapsed < 5 * std.time.ns_per_s);
 }

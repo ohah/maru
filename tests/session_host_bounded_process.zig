@@ -11,12 +11,32 @@ const posix = std.posix;
 
 const shell: [:0]const u8 = "/bin/sh";
 
+/// 「끝까지 돈다」를 재는 판정자들의 예산.
+///
+/// 여기서 도는 것은 **실제 자식 프로세스**(`fork + exec /bin/sh + 파이프 + wait`)다. 그 왕복 비용은
+/// 기계가 바쁘면 크게 튄다 — 실측(2026-09-14, 같은 모듈을 쓰는 판정자를 8중 병렬로): 중앙값 2.7 s ·
+/// 최대 **3.0 s**. 그래서 1 초는 **한가할 때만** 넉넉한 값이고, 넘기면 `TimedOut` 이 「자식이 틀렸다」
+/// 처럼 읽힌다(그 뭉갬이 CI 를 한 번 태웠다 — PR #3687).
+///
+/// 이 판정자들의 주제는 **무엇을 잡아 오는가**이지 얼마나 빨리가 아니므로 시간 축을 뺀다. 정상 경로는
+/// 예산을 기다리지 않으므로 큰 값의 평소 비용은 0 이다.
+///
+/// **시간 계약은 이 상수가 아니라 타임아웃 전용 판정자들이 잰다** — 그쪽은 예산을 ms 로 직접 준다.
+const run_budget_ns: i128 = 10 * std.time.ns_per_s;
+
+/// 「예산이 끝나면 **곧바로** 포기한다」를 재는 상한.
+///
+/// 그 판정자들의 자식은 `sleep 10` 을 띄운 뒤 파이프를 놓지 않는다 — 즉 **그를 기다렸다면 10 초**가
+/// 걸린다. 상한은 그 절반으로 둔다: 위 실측(최악 3.0 s)을 견디면서도 「손자를 기다리지 않았다」를
+/// 그대로 증명한다. 예전 값 1 초는 그 실측보다 작아서, 증명이 아니라 **기계 속도 측정**이었다.
+const gave_up_before_ns: i128 = 5 * std.time.ns_per_s;
+
 test "bounded process captures merged stdout and stderr at the exact byte cap" {
     var output: [4]u8 = undefined;
     const argv = [_:null]?[*:0]const u8{ shell.ptr, "-c", "printf ab; printf cd >&2" };
     try std.testing.expectEqualStrings(
         "abcd",
-        try process.runCapture(std.testing.io, shell, &argv, &output, std.time.ns_per_s),
+        try process.runCapture(std.testing.io, shell, &argv, &output, run_budget_ns),
     );
 }
 
@@ -32,7 +52,7 @@ test "bounded process stdout-only capture never admits stderr into protocol byte
             &argv,
             &environment,
             &output,
-            std.time.ns_per_s,
+            run_budget_ns,
         ),
     );
 }
@@ -42,7 +62,7 @@ test "bounded process rejects cap plus one without publishing a prefix" {
     const argv = [_:null]?[*:0]const u8{ shell.ptr, "-c", "printf abcde" };
     try std.testing.expectError(
         error.OutputTooLarge,
-        process.runCapture(std.testing.io, shell, &argv, &output, std.time.ns_per_s),
+        process.runCapture(std.testing.io, shell, &argv, &output, run_budget_ns),
     );
 }
 
@@ -52,29 +72,29 @@ test "bounded process rejects nonzero and signaled terminal status" {
     const relative_argv = [_:null]?[*:0]const u8{relative.ptr};
     try std.testing.expectError(
         error.InvalidExecutable,
-        process.runCapture(std.testing.io, relative, &relative_argv, &output, std.time.ns_per_s),
+        process.runCapture(std.testing.io, relative, &relative_argv, &output, run_budget_ns),
     );
     const missing: [:0]const u8 = "/definitely/missing/maru-bounded-process";
     const missing_argv = [_:null]?[*:0]const u8{missing.ptr};
     try std.testing.expectError(
         error.ChildFailed,
-        process.runCapture(std.testing.io, missing, &missing_argv, &output, std.time.ns_per_s),
+        process.runCapture(std.testing.io, missing, &missing_argv, &output, run_budget_ns),
     );
     const empty_output: [0]u8 = .{};
     const valid_argv = [_:null]?[*:0]const u8{shell.ptr};
     try std.testing.expectError(
         error.InvalidBudget,
-        process.runCapture(std.testing.io, shell, &valid_argv, &empty_output, std.time.ns_per_s),
+        process.runCapture(std.testing.io, shell, &valid_argv, &empty_output, run_budget_ns),
     );
     const nonzero = [_:null]?[*:0]const u8{ shell.ptr, "-c", "exit 7" };
     try std.testing.expectError(
         error.ChildFailed,
-        process.runCapture(std.testing.io, shell, &nonzero, &output, std.time.ns_per_s),
+        process.runCapture(std.testing.io, shell, &nonzero, &output, run_budget_ns),
     );
     const signaled = [_:null]?[*:0]const u8{ shell.ptr, "-c", "kill -TERM $$" };
     try std.testing.expectError(
         error.ChildFailed,
-        process.runCapture(std.testing.io, shell, &signaled, &output, std.time.ns_per_s),
+        process.runCapture(std.testing.io, shell, &signaled, &output, run_budget_ns),
     );
 }
 
@@ -92,7 +112,7 @@ test "bounded process timeout kills a descendant that retains the capture pipe" 
     );
     const elapsed = std.Io.Clock.awake.now(std.testing.io).nanoseconds - start;
     try std.testing.expect(elapsed >= 50 * std.time.ns_per_ms);
-    try std.testing.expect(elapsed < std.time.ns_per_s);
+    try std.testing.expect(elapsed < gave_up_before_ns);
 }
 
 test "bounded process can replace inherited environment exactly" {
@@ -107,7 +127,7 @@ test "bounded process can replace inherited environment exactly" {
             &argv,
             &environment,
             &output,
-            std.time.ns_per_s,
+            run_budget_ns,
         ),
     );
 }
@@ -128,7 +148,7 @@ test "bounded process closes ambient descriptors when no inheritance is requeste
     var output: [16]u8 = undefined;
     try std.testing.expectEqualStrings(
         "closed",
-        try process.runCaptureEnvironment(std.testing.io, shell, &argv, &environment, &output, std.time.ns_per_s),
+        try process.runCaptureEnvironment(std.testing.io, shell, &argv, &environment, &output, run_budget_ns),
     );
 }
 
@@ -161,7 +181,7 @@ test "bounded process binds one directory as child cwd without mutating parent a
     var output: [32]u8 = undefined;
     try std.testing.expectEqualStrings(
         "payload|closed",
-        try process.runCaptureEnvironmentStdoutDirectory(std.testing.io, shell, &argv, &environment, directory_fd, &output, std.time.ns_per_s),
+        try process.runCaptureEnvironmentStdoutDirectory(std.testing.io, shell, &argv, &environment, directory_fd, &output, run_budget_ns),
     );
     const flags_after = c.fcntl(directory_fd, c.F.GETFD, @as(c_int, 0));
     var stat_after: std.posix.Stat = undefined;
@@ -169,17 +189,17 @@ test "bounded process binds one directory as child cwd without mutating parent a
     try std.testing.expect(stat_after.dev == stat_before.dev and stat_after.ino == stat_before.ino);
     try std.testing.expectError(
         error.InvalidDirectoryFd,
-        process.runCaptureEnvironmentStdoutDirectory(std.testing.io, shell, &argv, &environment, 0, &output, std.time.ns_per_s),
+        process.runCaptureEnvironmentStdoutDirectory(std.testing.io, shell, &argv, &environment, 0, &output, run_budget_ns),
     );
     const closed_fd = c.dup(directory_fd);
     try std.testing.expect(closed_fd >= 3 and c.close(closed_fd) == 0);
     try std.testing.expectError(
         error.InvalidDirectoryFd,
-        process.runCaptureEnvironmentStdoutDirectory(std.testing.io, shell, &argv, &environment, closed_fd, &output, std.time.ns_per_s),
+        process.runCaptureEnvironmentStdoutDirectory(std.testing.io, shell, &argv, &environment, closed_fd, &output, run_budget_ns),
     );
     try std.testing.expectError(
         error.InvalidDirectoryFd,
-        process.runCaptureEnvironmentStdoutDirectory(std.testing.io, shell, &argv, &environment, ambient_fd, &output, std.time.ns_per_s),
+        process.runCaptureEnvironmentStdoutDirectory(std.testing.io, shell, &argv, &environment, ambient_fd, &output, run_budget_ns),
     );
 }
 
@@ -208,12 +228,12 @@ test "bounded process executes a leaf from the held directory after pathname anc
     var output: [16]u8 = undefined;
     try std.testing.expectEqualStrings(
         "held-image",
-        try process.runCaptureEnvironmentStdoutHeldExecutable(std.testing.io, relative, &argv, &environment, directory_fd, &output, std.time.ns_per_s),
+        try process.runCaptureEnvironmentStdoutHeldExecutable(std.testing.io, relative, &argv, &environment, directory_fd, &output, run_budget_ns),
     );
     const invalid: [:0]const u8 = "./nested/probe";
     try std.testing.expectError(
         error.InvalidExecutable,
-        process.runCaptureEnvironmentStdoutHeldExecutable(std.testing.io, invalid, &argv, &environment, directory_fd, &output, std.time.ns_per_s),
+        process.runCaptureEnvironmentStdoutHeldExecutable(std.testing.io, invalid, &argv, &environment, directory_fd, &output, run_budget_ns),
     );
 }
 
@@ -231,17 +251,17 @@ test "bounded process streams one held regular fd as exact child stdin" {
     var output: [32]u8 = undefined;
     try std.testing.expectEqualStrings(
         "held-body|done",
-        try process.runCaptureEnvironmentStdoutInputFd(std.testing.io, shell, &argv, &environment, body_fd, &output, std.time.ns_per_s),
+        try process.runCaptureEnvironmentStdoutInputFd(std.testing.io, shell, &argv, &environment, body_fd, &output, run_budget_ns),
     );
     try std.testing.expectError(
         error.InvalidInputFd,
-        process.runCaptureEnvironmentStdoutInputFd(std.testing.io, shell, &argv, &environment, 0, &output, std.time.ns_per_s),
+        process.runCaptureEnvironmentStdoutInputFd(std.testing.io, shell, &argv, &environment, 0, &output, run_budget_ns),
     );
     try std.testing.expectError(
         error.InvalidInputFd,
         // ⚠️ **디렉터리 fd 다** — 일반 파일이 아니라는 것이 이 단언의 요지다.
         // `std.Io.Dir` 의 필드는 `.fd` 가 아니라 `.handle` 이다(`Handle = std.posix.fd_t`).
-        process.runCaptureEnvironmentStdoutInputFd(std.testing.io, shell, &argv, &environment, tmp.dir.handle, &output, std.time.ns_per_s),
+        process.runCaptureEnvironmentStdoutInputFd(std.testing.io, shell, &argv, &environment, tmp.dir.handle, &output, run_budget_ns),
     );
 }
 
@@ -283,7 +303,7 @@ test "bounded process keeps the child status when a low descriptor limit opens t
     while (attempt < 300) : (attempt += 1) {
         try std.testing.expectError(
             error.ChildFailed,
-            process.runCapture(std.testing.io, missing, &argv, &output, std.time.ns_per_s),
+            process.runCapture(std.testing.io, missing, &argv, &output, run_budget_ns),
         );
     }
 }
@@ -295,8 +315,8 @@ test "bounded inherited pipe reads a receipt before terminating a still-live GUI
     var child: process.InheritedPipeChild = .{};
     try process.spawnEnvironmentInheritedPipe(shell, &argv, &environment, &child);
     var output: [16]u8 = undefined;
-    try std.testing.expectEqualStrings("receipt", try child.readReceipt(std.testing.io, &output, std.time.ns_per_s));
-    try std.testing.expectError(error.InvalidOwner, child.readReceipt(std.testing.io, &output, std.time.ns_per_s));
+    try std.testing.expectEqualStrings("receipt", try child.readReceipt(std.testing.io, &output, run_budget_ns));
+    try std.testing.expectError(error.InvalidOwner, child.readReceipt(std.testing.io, &output, run_budget_ns));
     try child.terminate();
     try std.testing.expectEqual(before, try countOpenFds());
 }
@@ -308,14 +328,14 @@ test "bounded inherited pipe preserves cleanup authority after timeout and overf
     try process.spawnEnvironmentInheritedPipe(shell, &timeout_argv, &environment, &timeout_child);
     var output: [4]u8 = undefined;
     try std.testing.expectError(error.TimedOut, timeout_child.readReceipt(std.testing.io, &output, 50 * std.time.ns_per_ms));
-    try std.testing.expectError(error.InvalidOwner, timeout_child.readReceipt(std.testing.io, &output, std.time.ns_per_s));
+    try std.testing.expectError(error.InvalidOwner, timeout_child.readReceipt(std.testing.io, &output, run_budget_ns));
     try timeout_child.terminate();
 
     const overflow_argv = [_:null]?[*:0]const u8{ shell.ptr, "-c", "printf abcde >&3" };
     var overflow_child: process.InheritedPipeChild = .{};
     try process.spawnEnvironmentInheritedPipe(shell, &overflow_argv, &environment, &overflow_child);
-    try std.testing.expectError(error.OutputTooLarge, overflow_child.readReceipt(std.testing.io, &output, std.time.ns_per_s));
-    try std.testing.expectError(error.InvalidOwner, overflow_child.readReceipt(std.testing.io, &output, std.time.ns_per_s));
+    try std.testing.expectError(error.OutputTooLarge, overflow_child.readReceipt(std.testing.io, &output, run_budget_ns));
+    try std.testing.expectError(error.InvalidOwner, overflow_child.readReceipt(std.testing.io, &output, run_budget_ns));
     try overflow_child.terminate();
 }
 
@@ -339,8 +359,8 @@ test "bounded inherited pipe rejects copied owners and closes every ambient desc
     try process.spawnEnvironmentInheritedPipe(shell, &argv, &environment, &child);
     var copied = child;
     var output: [8]u8 = undefined;
-    try std.testing.expectError(error.InvalidOwner, copied.readReceipt(std.testing.io, &output, std.time.ns_per_s));
-    try std.testing.expectEqualStrings("closed", try child.readReceipt(std.testing.io, &output, std.time.ns_per_s));
+    try std.testing.expectError(error.InvalidOwner, copied.readReceipt(std.testing.io, &output, run_budget_ns));
+    try std.testing.expectEqualStrings("closed", try child.readReceipt(std.testing.io, &output, run_budget_ns));
     try child.terminate();
     try std.testing.expectError(error.InvalidOwner, copied.terminate());
 }
@@ -356,9 +376,9 @@ test "bounded inherited socket exchanges framed receipt and cleanup before grace
     var child: process.InheritedSocketChild = .{};
     try process.spawnEnvironmentInheritedSocket(shell, &argv, &environment, &child);
     var output: [16]u8 = undefined;
-    try std.testing.expectEqualStrings("receipt", try child.readFrame(std.testing.io, &output, std.time.ns_per_s));
-    try child.writeFrame(std.testing.io, "cleanup\n", std.time.ns_per_s);
-    try child.waitSuccess(std.testing.io, std.time.ns_per_s);
+    try std.testing.expectEqualStrings("receipt", try child.readFrame(std.testing.io, &output, run_budget_ns));
+    try child.writeFrame(std.testing.io, "cleanup\n", run_budget_ns);
+    try child.waitSuccess(std.testing.io, run_budget_ns);
     try std.testing.expectEqual(before, try countOpenFds());
 }
 
@@ -374,8 +394,8 @@ test "bounded inherited socket rejects copied owner and retains cleanup after ho
     try process.spawnEnvironmentInheritedSocket(shell, &argv, &environment, &child);
     var copied = child;
     var output: [4]u8 = undefined;
-    try std.testing.expectError(error.InvalidOwner, copied.readFrame(std.testing.io, &output, std.time.ns_per_s));
-    try std.testing.expectError(error.OutputTooLarge, child.readFrame(std.testing.io, &output, std.time.ns_per_s));
+    try std.testing.expectError(error.InvalidOwner, copied.readFrame(std.testing.io, &output, run_budget_ns));
+    try std.testing.expectError(error.OutputTooLarge, child.readFrame(std.testing.io, &output, run_budget_ns));
     try child.terminate();
     try std.testing.expectError(error.InvalidOwner, copied.terminate());
     try std.testing.expectEqual(before, try countOpenFds());
@@ -393,7 +413,7 @@ test "bounded observation separates stdout and stderr and preserves nonzero exit
         &environment,
         &stdout,
         &stderr,
-        std.time.ns_per_s,
+        run_budget_ns,
     );
     try std.testing.expectEqual(process.Termination{ .exited = 21 }, result.termination);
     try std.testing.expectEqualStrings("out", result.stdout);
@@ -417,7 +437,7 @@ test "bounded observation drains both pipes under concurrent backpressure" {
         &environment,
         &stdout,
         &stderr,
-        5 * std.time.ns_per_s,
+        5 * run_budget_ns,
     );
     try std.testing.expectEqual(process.Termination{ .exited = 0 }, result.termination);
     try std.testing.expectEqual(byte_count, result.stdout.len);
@@ -438,7 +458,7 @@ test "bounded observation preserves signal and child-side exec failure" {
         &environment,
         &stdout,
         &stderr,
-        std.time.ns_per_s,
+        run_budget_ns,
     );
     try std.testing.expectEqual(process.Termination{ .signal = @intFromEnum(c.SIG.TERM) }, signal_result.termination);
     try std.testing.expectEqual(@as(usize, 0), signal_result.stdout.len);
@@ -453,7 +473,7 @@ test "bounded observation preserves signal and child-side exec failure" {
         &environment,
         &stdout,
         &stderr,
-        std.time.ns_per_s,
+        run_budget_ns,
     );
     try std.testing.expectEqual(process.Termination{ .exited = 126 }, exec_result.termination);
 }
@@ -470,7 +490,7 @@ test "bounded observation rejects either stream cap plus one" {
         &environment,
         &stdout,
         &stderr,
-        std.time.ns_per_s,
+        run_budget_ns,
     ));
     const stderr_overflow = [_:null]?[*:0]const u8{ shell.ptr, "-c", "printf abcde >&2" };
     try std.testing.expectError(error.OutputTooLarge, process.runObserveEnvironment(
@@ -480,7 +500,7 @@ test "bounded observation rejects either stream cap plus one" {
         &environment,
         &stdout,
         &stderr,
-        std.time.ns_per_s,
+        run_budget_ns,
     ));
 }
 
@@ -505,7 +525,7 @@ test "bounded observation timeout kills descendants retaining either pipe" {
     ));
     const elapsed = std.Io.Clock.awake.now(std.testing.io).nanoseconds - start;
     try std.testing.expect(elapsed >= 50 * std.time.ns_per_ms);
-    try std.testing.expect(elapsed < std.time.ns_per_s);
+    try std.testing.expect(elapsed < gave_up_before_ns);
 }
 
 test "bounded observation replaces environment and closes ambient descriptors" {
@@ -527,7 +547,7 @@ test "bounded observation replaces environment and closes ambient descriptors" {
     };
     var stdout: [32]u8 = undefined;
     var stderr: [16]u8 = undefined;
-    const result = try process.runObserveEnvironment(std.testing.io, shell, &argv, &environment, &stdout, &stderr, std.time.ns_per_s);
+    const result = try process.runObserveEnvironment(std.testing.io, shell, &argv, &environment, &stdout, &stderr, run_budget_ns);
     try std.testing.expectEqualStrings("present|unset", result.stdout);
     try std.testing.expectEqualStrings("closed", result.stderr);
 }
@@ -549,7 +569,7 @@ test "bounded observation rejects aliased buffers and repeated runs leak no desc
         &alias_environment,
         aliased[0..8],
         aliased[4..12],
-        std.time.ns_per_s,
+        run_budget_ns,
     ));
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "must-not-exist", .{}));
     const empty: [0]u8 = .{};
@@ -560,7 +580,7 @@ test "bounded observation rejects aliased buffers and repeated runs leak no desc
         &alias_environment,
         &empty,
         aliased[0..8],
-        std.time.ns_per_s,
+        run_budget_ns,
     ));
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "must-not-exist", .{}));
 
@@ -570,7 +590,7 @@ test "bounded observation rejects aliased buffers and repeated runs leak no desc
     const environment = [_:null]?[*:0]const u8{};
     const argv = [_:null]?[*:0]const u8{ shell.ptr, "-c", "printf ok; printf err >&2" };
     for (0..20) |_| {
-        const result = try process.runObserveEnvironment(std.testing.io, shell, &argv, &environment, &stdout, &stderr, std.time.ns_per_s);
+        const result = try process.runObserveEnvironment(std.testing.io, shell, &argv, &environment, &stdout, &stderr, run_budget_ns);
         try std.testing.expectEqualStrings("ok", result.stdout);
         try std.testing.expectEqualStrings("err", result.stderr);
     }

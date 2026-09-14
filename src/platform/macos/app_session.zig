@@ -15172,11 +15172,20 @@ pub const AppSession = struct {
         const by: f32 = @floatFromInt(place.box.y);
         const bw: f32 = @floatFromInt(place.box.w);
         const bh: f32 = @floatFromInt(place.box.h);
-        // **layer 1(over)** — 셀 **전체 위**다. 처음에 2(bottom = 탭 밴드)를 골랐는데 그것은 터미널 셀
-        // **아래**라, quad 는 불투명한데 그 위에 터미널 글자가 그려져 「배경이 투명하다」로 보였다
-        // (사용자 제보 2026-09-14). 떠 있는 팝업은 모달과 같은 층이어야 한다.
-        self.appendSolidQuad(bx, by, bw, bh, border, 1);
-        self.appendSolidQuad(bx + b, by + b, bw - 2 * b, bh - 2 * b, bg, 1);
+        _ = bg;
+        // **테두리 네 변만 그린다 — 안쪽은 비운다.**
+        //
+        // 상자를 통째로 칠하고 안쪽을 배경색으로 덮는 방식은 쓸 수 없다. 렌더 순서가
+        // `bottom quad(2) → 셀 → 이미지(pass>=2) → under(0)·over(1) quad` 라서 **셀보다 위이면서
+        // 이미지보다 아래인 자리가 없기** 때문이다 — layer 2 면 터미널 글자가 배경 위로 올라오고,
+        // layer 0·1 이면 배경이 그림을 덮는다(둘 다 사용자 제보로 확인했다).
+        //
+        // 네 변 스트립은 그림 가장자리 `border_px` 만 덮으므로 **액자**로 읽힌다. layer 1(over)이라
+        // 터미널 글자에도, 그림에도 가려지지 않는다.
+        self.appendSolidQuad(bx, by, bw, b, border, 1); // 위
+        self.appendSolidQuad(bx, by + bh - b, bw, b, border, 1); // 아래
+        self.appendSolidQuad(bx, by + b, b, bh - 2 * b, border, 1); // 왼쪽
+        self.appendSolidQuad(bx + bw - b, by + b, b, bh - 2 * b, border, 1); // 오른쪽
     }
 
     /// 열린 프리뷰의 자리 — 그리는 쪽과 안내를 얹는 쪽이 **같은 계산**을 쓰게 하는 단일 출처다.

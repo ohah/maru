@@ -8431,8 +8431,9 @@ release workflow/runner 준비 PR은 component fixture를 이유로 제품 gate�
     race에서 `EAGAIN`은 정상 yield한다. `EINTR`은 bounded하게 재시도하고 fd 고갈만 cadence backoff 대상으로 둔다.
     same-login-UID gate를 통과하기 전에는 `Client`/reactor admission이 0임을 real socket +
     credential-provider seam fixture로 검증한다. 기본 자동 gate는 실제 same-UID socket과 credential-provider seam의
-    other-UID rejection을 포함한다.
-    일반 CI에서 실제 다른 UID를 만들 수 없으므로 real other-UID process는 provisioned-runner gate로 정직하게 남긴다.
+    other-UID rejection을 포함한다. 실제 macOS 제품 gate는 root client가 owner-only 경로를 통과하게 한 뒤 커널
+    `getpeereid` 결과로 fd admission 전에 거부되는지 확인한다. 검증 상태와 실행 명령은
+    [검증 매트릭스](verification-matrix.md)의 `P5a1a accept hardening` 행이 소유한다.
   - **P5a1b — one-shot admin policy (구현):** 기존 32-slot pool 안에서 hidden `admin` hello role의 동시 lease를 정확히
     하나만 허용한다. hard-reserved 33번째 fd나 별도 listener는 두지 않으며 이미 연결된 GUI를 밀어내지 않는다.
     pre-hello peer는 10초 handshake deadline과 전역 cap을 그대로 적용받는다. `client_kind`는 same-UID 인증 뒤의

@@ -597,6 +597,10 @@ jobs:
           version: 2026.2.7
           sha256: f8becf318705e1bd91227ed0efee4f9fd988d1d5c66bb48e996f030792a0d3b7 # macos-arm64 binary
           cache_save: false
+      # 소켓의 0700/0600 권한만 확인하면 getpeereid 하드 게이트가 죽어도 초록이다. passwordless sudo의
+      # 실제 root client는 파일 권한을 통과한 뒤 커널 peer UID에서 거부되어야 한다.
+      - name: 실제 타 UID peer 거부 스모크
+        run: zig build test-session-host-cross-uid-macos
       # 앱 번들 빌드가 `web:build` 를 타므로 웹 의존성이 먼저 있어야 한다 — 이걸 빠뜨린 첫 시도가
       # `unresolved_import` 로 죽었다(AppKit 과 무관한 실패였다). 기존 web job 과 같은 명령을 쓴다.
       - name: 웹 의존성 설치

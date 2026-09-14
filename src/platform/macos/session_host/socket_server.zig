@@ -539,6 +539,95 @@ test "socket server: injected other UID is rejected before fd admission" {
     try testing.expectEqual(@as(isize, 0), c.read(client_fd, &byte, byte.len));
 }
 
+test "socket server: kernel credentials reject an actual root peer before fd admission" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const enabled = std.c.getenv("MARU_SESSION_HOST_REAL_CROSS_UID") orelse
+        return error.SkipZigTest;
+    if (!std.mem.eql(u8, std.mem.span(enabled), "1")) return error.SkipZigTest;
+    // This gate must exercise a genuinely different kernel identity. Running the whole test as
+    // root would turn it into another same-UID sample and silently erase the evidence we need.
+    if (c.geteuid() == 0) return error.CrossUidPreconditionFailed;
+
+    const allocator = testing.allocator;
+    var dir_template = "/tmp/maru-sh-real-other-uid-XXXXXX".*;
+    const dir_path: [:0]const u8 = std.mem.span(
+        mkdtemp(&dir_template) orelse return error.CrossUidTempRootFailed,
+    );
+    var socket_buf: [320]u8 = undefined;
+    const socket_path = try std.fmt.bufPrintZ(
+        &socket_buf,
+        "{s}/control.sock",
+        .{dir_path},
+    );
+    var registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+    var srv = try SocketServer.bind(allocator, dir_path, socket_path, 1, &registry);
+    defer {
+        srv.deinit();
+        _ = c.rmdir(dir_path.ptr);
+    }
+
+    // Root can traverse the owner-only directory and open the 0600 socket, so a successful denial
+    // proves the getpeereid hard gate rather than merely proving filesystem permissions. `nc`
+    // exits successfully only after the server closes the denied connection.
+    const argv = [_][]const u8{
+        "/usr/bin/sudo", "-n", "-u", "root", "/usr/bin/nc", "-U", socket_path,
+    };
+    var child = try std.process.spawn(testing.io, .{
+        .argv = &argv,
+        .stdin = .close,
+        .stdout = .close,
+        .stderr = .inherit,
+        .pgid = 0,
+    });
+    errdefer terminateAndReapCrossUidChild(&child);
+
+    var denied = false;
+    var attempts: usize = 0;
+    while (attempts < 5_000) : (attempts += 1) {
+        switch (srv.acceptOneResult()) {
+            .would_block => _ = usleep(1_000),
+            .denied => {
+                denied = true;
+                break;
+            },
+            else => return error.CrossUidAdmissionInvariantFailed,
+        }
+    }
+    if (!denied) return error.CrossUidAcceptTimedOut;
+    try expectCrossUidChildSuccess(&child);
+}
+
+extern "c" fn usleep(usec: c_uint) c_int;
+extern "c" fn mkdtemp(template: [*:0]u8) ?[*:0]u8;
+
+fn expectCrossUidChildSuccess(child: *std.process.Child) !void {
+    const pid = child.id orelse return error.CrossUidChildMissing;
+    var status: c_int = undefined;
+    var attempts: usize = 0;
+    while (attempts < 5_000) : (attempts += 1) {
+        const waited = c.waitpid(pid, &status, c.W.NOHANG);
+        if (waited == pid) {
+            child.id = null;
+            const unsigned: u32 = @bitCast(status);
+            if (!c.W.IFEXITED(unsigned) or c.W.EXITSTATUS(unsigned) != 0)
+                return error.CrossUidChildFailed;
+            return;
+        }
+        if (waited < 0 and posix.errno(waited) != .INTR) return error.CrossUidChildWaitFailed;
+        _ = usleep(1_000);
+    }
+    return error.CrossUidChildTimedOut;
+}
+
+fn terminateAndReapCrossUidChild(child: *std.process.Child) void {
+    const pid = child.id orelse return;
+    _ = c.kill(-pid, posix.SIG.KILL);
+    var status: c_int = undefined;
+    while (c.waitpid(pid, &status, 0) < 0 and posix.errno(-1) == .INTR) {}
+    child.id = null;
+}
+
 /// 조정 한 건의 결과. caller 가 이것을 받아 구독자에게 `runtime.resized` 를 알린다.
 pub const ViewportReconciled = struct {
     runtime_id: u128,

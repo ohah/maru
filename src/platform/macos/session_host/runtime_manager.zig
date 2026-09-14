@@ -399,13 +399,19 @@ pub const RuntimeManager = struct {
     // §이미지 방출). `generation` 이 바뀌면 blob 전체가 다시 나가므로, 이미지를 계속 다시 그리는
     // 프로그램(터미널 브라우저 등)에서는 PTY 로 들어온 바이트보다 **훨씬 큰** 양이 소켓을 지난다.
     // 그 증폭이 실제로 얼마인지는 전체 바이트만 봐서는 안 보인다.
-    screen_sent_bytes: u64 = 0,
+    /// **「만든」 바이트다 — 「나간」 바이트가 아니다.** 세는 자리는 투영 직후(`snapshotOp`·`deltaOp`)이고,
+    /// 그 뒤에 폐기되는 길이 둘 있다(`server.zig` 의 `delta_oversize`·`collectFail("delta")`). 소켓에
+    /// **넘긴** 것도 아니다 — 클라이언트가 느리면 큐에 쌓인다(host 로그의 `pending_out`).
+    ///
+    /// 그래도 이 자리에서 세는 이유는 **호스트가 실제로 한 일**이 진단의 대상이기 때문이다. 다만
+    /// 이름이 `sent` 이면 읽는 사람이 「소켓이 포화됐다」로 읽는다 — 그건 이 계측이 막으려던 오진이다.
+    screen_made_bytes: u64 = 0,
     screen_image_bytes: u64 = 0,
     screen_sends: u64 = 0,
     /// 직전 덤프 시각·값 — 한 줄에 **증분(=초당 속도)** 을 함께 내기 위해 갖는다. 누적만 내면
     /// 읽는 사람이 두 줄을 빼야 하고, 로그가 잘리면 그마저 못 한다.
     metrics_last_ns: u64 = 0,
-    metrics_last_sent_bytes: u64 = 0,
+    metrics_last_made_bytes: u64 = 0,
     metrics_last_image_bytes: u64 = 0,
     metadata_sampler_visits: u64 = 0,
     metadata_sampler_changes: u64 = 0,
@@ -486,11 +492,11 @@ pub const RuntimeManager = struct {
         self.anim_last_ns = 0;
         self.anim_ticks = 0;
         self.anim_advances = 0;
-        self.screen_sent_bytes = 0;
+        self.screen_made_bytes = 0;
         self.screen_image_bytes = 0;
         self.screen_sends = 0;
         self.metrics_last_ns = 0;
-        self.metrics_last_sent_bytes = 0;
+        self.metrics_last_made_bytes = 0;
         self.metrics_last_image_bytes = 0;
         self.metadata_sampler_visits = 0;
         self.metadata_sampler_changes = 0;
@@ -2279,9 +2285,9 @@ pub const RuntimeManager = struct {
     }
 
     /// 화면 한 번 방출을 계측에 더한다. 포화 덧셈 셋뿐이라 제품 경로 비용이 없다.
-    fn noteScreenSend(self: *RuntimeManager, sent_bytes: usize, image_bytes: u64) void {
+    fn noteScreenProjection(self: *RuntimeManager, made_bytes: usize, image_bytes: u64) void {
         self.screen_sends +|= 1;
-        self.screen_sent_bytes +|= sent_bytes;
+        self.screen_made_bytes +|= made_bytes;
         self.screen_image_bytes +|= image_bytes;
     }
 
@@ -2317,10 +2323,11 @@ pub const RuntimeManager = struct {
     /// 그대로 두면 주기 게이트·증분 계산·침묵 규칙을 아무도 못 잰다.
     pub const MetricsLine = struct {
         runtimes: u32,
+        /// 투영을 몇 번 했나(스냅샷 + delta).
         sends: u64,
-        sent_bytes: u64,
+        made_bytes: u64,
         image_bytes: u64,
-        sent_bps: u64,
+        made_bps: u64,
         image_bps: u64,
         store_bytes: u64,
         evictions: u64,
@@ -2343,9 +2350,9 @@ pub const RuntimeManager = struct {
         const elapsed_ms = (now_ns - self.metrics_last_ns) / std.time.ns_per_ms;
         self.metrics_last_ns = now_ns;
 
-        const d_sent = self.screen_sent_bytes -| self.metrics_last_sent_bytes;
+        const d_sent = self.screen_made_bytes -| self.metrics_last_made_bytes;
         const d_img = self.screen_image_bytes -| self.metrics_last_image_bytes;
-        self.metrics_last_sent_bytes = self.screen_sent_bytes;
+        self.metrics_last_made_bytes = self.screen_made_bytes;
         self.metrics_last_image_bytes = self.screen_image_bytes;
 
         const store = self.sampleImageStores();
@@ -2353,9 +2360,9 @@ pub const RuntimeManager = struct {
         return .{
             .runtimes = store.runtimes,
             .sends = self.screen_sends,
-            .sent_bytes = self.screen_sent_bytes,
+            .made_bytes = self.screen_made_bytes,
             .image_bytes = self.screen_image_bytes,
-            .sent_bps = if (elapsed_ms == 0) 0 else d_sent * 1000 / elapsed_ms,
+            .made_bps = if (elapsed_ms == 0) 0 else d_sent * 1000 / elapsed_ms,
             .image_bps = if (elapsed_ms == 0) 0 else d_img * 1000 / elapsed_ms,
             .store_bytes = store.bytes,
             .evictions = store.evictions,
@@ -2373,8 +2380,8 @@ pub const RuntimeManager = struct {
     fn reportMetrics(self: *RuntimeManager, now_ns: u64) void {
         const line = self.takeMetricsLine(now_ns) orelse return;
         host_log.line(
-            "maru-metrics rt={d} sends={d} sent={d} img={d} sent_bps={d} img_bps={d} store={d} evict={d} rss={d}",
-            .{ line.runtimes, line.sends, line.sent_bytes, line.image_bytes, line.sent_bps, line.image_bps, line.store_bytes, line.evictions, footprintBytes() },
+            "maru-metrics rt={d} sends={d} made={d} img={d} made_bps={d} img_bps={d} store={d} evict={d} rss={d}",
+            .{ line.runtimes, line.sends, line.made_bytes, line.image_bytes, line.made_bps, line.image_bps, line.store_bytes, line.evictions, footprintBytes() },
         );
     }
 
@@ -2526,7 +2533,7 @@ pub const RuntimeManager = struct {
             snapshot_opts,
             protocol.max_viewport_snapshot,
         );
-        self.noteScreenSend(bytes.len, image_bytes);
+        self.noteScreenProjection(bytes.len, image_bytes);
         if (self.screen_metrics_enabled) self.screen_owned_allocations +|= 1;
         return .{ .bytes = bytes, .frontier = .{ .generation = generation, .sequence = sequence } };
     }
@@ -2568,7 +2575,7 @@ pub const RuntimeManager = struct {
                 );
                 errdefer allocator.free(snap);
                 const send = allocator.dupe(u8, snap) catch return error.OutOfMemory;
-                self.noteScreenSend(send.len, image_bytes);
+                self.noteScreenProjection(send.len, image_bytes);
                 if (self.screen_metrics_enabled) self.screen_owned_allocations +|= 2;
                 return .{
                     .send = send,
@@ -2579,7 +2586,7 @@ pub const RuntimeManager = struct {
             },
             else => return e,
         };
-        self.noteScreenSend(result.delta.len, image_bytes);
+        self.noteScreenProjection(result.delta.len, image_bytes);
         if (self.screen_metrics_enabled) self.screen_owned_allocations +|= 2;
         return .{
             .send = result.delta,
@@ -5612,26 +5619,26 @@ test "runtime manager: 계측 덤프는 5초 주기·증분·조용한 구간 �
     try std.testing.expect(mgr.takeMetricsLine(10 * s) == null);
 
     // ② 주기 전에는 안 낸다. 바이트가 흘렀어도 마찬가지다(로그가 tick 마다 쌓이면 못 읽는다).
-    mgr.noteScreenSend(1000, 900);
+    mgr.noteScreenProjection(1000, 900);
     try std.testing.expect(mgr.takeMetricsLine(12 * s) == null);
 
     // ③ 5 초가 지나면 낸다. **증분이 초당으로 환산돼야** 두 줄을 빼지 않고도 속도가 보인다.
     const first = mgr.takeMetricsLine(16 * s) orelse return error.NoLine;
-    try std.testing.expectEqual(@as(u64, 1000), first.sent_bytes);
+    try std.testing.expectEqual(@as(u64, 1000), first.made_bytes);
     try std.testing.expectEqual(@as(u64, 900), first.image_bytes);
     try std.testing.expectEqual(@as(u64, 1), first.sends);
     // 6 초 동안 1000 B → 166 B/s.
-    try std.testing.expectEqual(@as(u64, 166), first.sent_bps);
+    try std.testing.expectEqual(@as(u64, 166), first.made_bps);
     try std.testing.expectEqual(@as(u64, 150), first.image_bps);
 
     // ④ **조용한 구간은 안 낸다** — 누적은 그대로인데 증분이 0 이고 저장소도 비었다.
     try std.testing.expect(mgr.takeMetricsLine(22 * s) == null);
 
     // ⑤ 다시 흐르면 **증분만** 센다(누적을 다시 세면 속도가 부풀어 보인다).
-    mgr.noteScreenSend(4000, 4000);
+    mgr.noteScreenProjection(4000, 4000);
     const second = mgr.takeMetricsLine(27 * s) orelse return error.NoLine;
-    try std.testing.expectEqual(@as(u64, 5000), second.sent_bytes); // 누적은 1000+4000
-    try std.testing.expectEqual(@as(u64, 800), second.sent_bps); // 증분 4000 / 5 초
+    try std.testing.expectEqual(@as(u64, 5000), second.made_bytes); // 누적은 1000+4000
+    try std.testing.expectEqual(@as(u64, 800), second.made_bps); // 증분 4000 / 5 초
     try std.testing.expectEqual(@as(u64, 2), second.sends);
 
     // ⑥ 시계 역행은 버린다(애니메이션 전진과 같은 규칙).
@@ -5653,11 +5660,11 @@ test "runtime manager: 계측은 이미지가 실제로 흐르는 runtime 을 �
     const rid = try ops.spawn(ops.ctx, .{ .argv = &.{"/bin/cat"}, .cwd = null, .cols = 24, .rows = 6 });
     defer ops.terminate(ops.ctx, rid);
 
-    const before_sent = mgr.screen_sent_bytes;
+    const before_sent = mgr.screen_made_bytes;
     const snap = try ops.snapshot(ops.ctx, rid, 1, allocator);
     defer allocator.free(snap.bytes);
     // 제품 경로(snapshotOp)가 계측을 부른다 — 안 부르면 여기가 그대로다.
-    try std.testing.expect(mgr.screen_sent_bytes > before_sent);
+    try std.testing.expect(mgr.screen_made_bytes > before_sent);
     try std.testing.expectEqual(@as(u64, 1), mgr.screen_sends);
     // 이미지가 없는 화면이므로 이미지 분량은 0 이다(전체 바이트를 잘못 세고 있지 않다).
     try std.testing.expectEqual(@as(u64, 0), mgr.screen_image_bytes);
@@ -5671,9 +5678,32 @@ test "runtime manager: 계측 한 줄은 host_log 버퍼를 안 넘는다" {
     const max: u64 = std.math.maxInt(u64);
     const text = try std.fmt.bufPrint(
         &buf,
-        "maru-metrics rt={d} sends={d} sent={d} img={d} sent_bps={d} img_bps={d} store={d} evict={d} rss={d}\n",
+        "maru-metrics rt={d} sends={d} made={d} img={d} made_bps={d} img_bps={d} store={d} evict={d} rss={d}\n",
         .{ std.math.maxInt(u32), max, max, max, max, max, max, max, max },
     );
     try std.testing.expectEqual(RuntimeManager.metrics_line_worst_case_bytes, text.len);
     try std.testing.expect(text.len <= 256); // host_log.line 의 고정 버퍼
+}
+
+test "runtime manager: 계측은 «만든» 바이트를 센다 — 폐기돼도 센다" {
+    // **이름이 계약이다.** `made` 는 호스트가 투영한 양이고, 그 뒤 전송 계층이 폐기하거나 큐에
+    // 쌓아 두는 것과 무관하다(`server.zig` 의 `delta_oversize` 가 그런 자리다). 이 판정자는 그
+    // 의미를 고정한다 — 누가 「나간 바이트」로 바꿔 읽고 전송 성공 시에만 세게 만들면 여기서 걸린다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer host_registry.deinit();
+    var mgr: RuntimeManager = undefined;
+    mgr.init(allocator, std.testing.io, &host_registry, null);
+    defer mgr.deinit();
+
+    const ops = mgr.runtimeOps();
+    const rid = try ops.spawn(ops.ctx, .{ .argv = &.{"/bin/cat"}, .cwd = null, .cols = 24, .rows = 6 });
+    defer ops.terminate(ops.ctx, rid);
+
+    // 투영만 하고 **아무 데도 안 보낸다** — 전송 계층을 통과시키지 않는다.
+    const snap = try ops.snapshot(ops.ctx, rid, 1, allocator);
+    allocator.free(snap.bytes); // 곧바로 버린다(= 폐기된 셈)
+    try std.testing.expect(mgr.screen_made_bytes > 0); // 그래도 세어져 있어야 한다
+    try std.testing.expectEqual(@as(u64, 1), mgr.screen_sends);
 }

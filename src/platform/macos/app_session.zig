@@ -1523,8 +1523,24 @@ const sync_diag = std.log.scoped(.sync);
 // 줄이려 느린 tick(총>frametime_slow_ns)은 즉시 한 줄, 약 1초 창마다 실효 rate·mean/max·단계 비중을 요약한다.
 // 게이트는 diag.zig 단일 출처(관측 가능성 원칙, sync_diag와 동형).
 const frametime_diag = std.log.scoped(.frametime);
+
+/// 렌더러(metal_frame)에 꽂아 줄 진단용 시계. `std.Io` 는 platform 이 소유하므로 렌더러가 직접 못 읽는다.
+/// MARU_DEBUG 일 때 tick 이 자기 io 를 여기 걸어 두고, 아래 함수 포인터를 metal_frame 에 주입한다.
+var diag_metal_io: ?std.Io = null;
+
+fn diagMetalNow() i128 {
+    const io = diag_metal_io orelse return 0;
+    return std.Io.Clock.awake.now(io).nanoseconds;
+}
 // 느린 tick 즉시 로그 임계 — 8ms(60Hz 프레임 16.6ms의 절반). 이보다 오래 걸린 tick은 다음 NSTimer 발사를 밀어 rate를 떨군다.
 const frametime_slow_ns: i128 = 8 * std.time.ns_per_ms;
+
+/// `CollectDest` tag 수. 이름표와 순서가 tag 선언과 1:1이어야 하므로 아래 배열이 단일 출처다.
+const ft_collect_slots: usize = 10;
+const ft_collect_names = [ft_collect_slots][]const u8{
+    "sidebar",  "sb_header", "sb_search", "overlay", "pane",
+    "dock_tgl", "statusbar", "floating",  "sticky",  "active",
+};
 // 레이아웃 resize 진단 logger. 표시 grid는 항상 맞춰지지만 runtime(PTY winsize·원격 host) 전달이 거부되면 그
 // Term의 자식 프로세스만 옛 winsize를 믿는다 — "이 pane의 TUI만 어긋난다"의 원인을 남긴다. 카운터
 // (`resize_delivery_failures`)와 같은 도메인 데이터를 헤드리스 테스트가 읽는다(관측 가능성 원칙).
@@ -6913,6 +6929,22 @@ pub const AppSession = struct {
     ft_sum_titles: i128 = 0,
     ft_sum_drain: i128 = 0,
     ft_sum_project: i128 = 0,
+    // project 3분할 누적(shape=CoreText 수집 · place=atlas 배치+분배 · assemble=조립·투영).
+    ft_sum_shape: i128 = 0,
+    ft_sum_grid: i128 = 0,
+    ft_sum_chrome: i128 = 0,
+    // chrome 을 «어느 chrome 요소인가»로 더 가른다(CollectDest tag 별, 이 tick 한정 — 매 tick 리셋).
+    // 창을 처음 열 때 chrome 이 25ms 를 쓰는 프레임이 세션당 한 번 관측돼, 그 한 프레임의 범인을
+    // 지목하려고 둔다. tick 누적이 아니라 **프레임 스냅샷**이라 SLOW 한 줄이 곧 그 프레임의 내역이다.
+    /// [실험] kitty 이미지 픽셀을 담는 재사용 버퍼. 매 프레임 수 MB 를 새로 할당하지 않으려고 **방을 들고
+    /// 있는다**(`replace` 쪽 `image_pixels_cap` 과 같은 기법). 길이는 프레임마다 0 ↔ 수 MB 로 요동치지만
+    /// 할당은 유지된다. 소유는 AppSession 이고 deinit 이 cap 크기로 돌려준다.
+    kitty_pixels_buf: []u8 = &.{},
+    kitty_pixels_cap: usize = 0,
+    ft_collect_ns: [ft_collect_slots]i128 = .{0} ** ft_collect_slots,
+    ft_collect_n: [ft_collect_slots]u32 = .{0} ** ft_collect_slots,
+    ft_sum_place: i128 = 0,
+    ft_sum_assemble: i128 = 0,
     ft_max_total: i128 = 0,
 
     /// 단축키 힌트 홀드 상태머신(순수 — keyhint_hold.zig, 헤드리스 테스트). 단일 출처: flagsChanged 이벤트 스트림이
@@ -15152,6 +15184,11 @@ pub const AppSession = struct {
         images: *[]renderer.metal_frame.GpuImage,
         uploads: *[]renderer.metal_frame.GpuImageUpload,
         pixels: *[]u8,
+        /// `pixels` 가 호출자 소유인지. kitty 픽셀은 프레임마다 AppSession 재사용 버퍼를 가리킬 수 있는데,
+        /// 아래 `marker_preview_ops.appendGpuImage` 는 `pixels.*` 를 **free 하고 교체**한다 — 그대로 넘기면
+        /// 남의 버퍼를 해제한다. 그래서 **실제로 건드리기 직전에** owned 사본으로 승격한다(조기 반환
+        /// 경로는 승격하지 않는다 — 미리보기가 닫힌 프레임에서 수 MB 를 헛복사하지 않기 위해서다).
+        pixels_owned: *bool,
         live_ids: *std.ArrayList(u32),
     ) void {
         const open = &(self.marker_preview_open orelse return);
@@ -15175,6 +15212,8 @@ pub const AppSession = struct {
             open.uploaded = false; // 아직 안 풀렸다 — 「안 그리고 나가는 길」이라 표시를 되돌린다(§5)
             return; // 테두리(자리)는 이미 그렸다
         }
+        // 여기서부터 pixels 를 free/교체한다 — 비소유면 지금 승격한다(위 pixels_owned 주석).
+        self.promoteKgPixelsOwned(pixels, pixels_owned);
         marker_preview_ops.appendGpuImage(open, self.allocator, place, images, uploads, pixels, live_ids);
     }
 
@@ -19457,18 +19496,84 @@ pub const AppSession = struct {
     /// PTY pump)·mid(bookkeeping+sync_view lock)·project(활성 surface CoreText build+투영). tick당 5회 clock read(debug만).
     /// (a) 느린 tick(총>frametime_slow_ns)은 즉시 SLOW 한 줄, (b) 약 1초 창마다 실효 rate·mean/max·단계 비중을 요약한다.
     /// 호출부가 ft_on(maruDebugEnabled)으로 게이트하므로 release는 진입 안 함(비용 0).
-    fn logFrameTime(self: *AppSession, t_start: i128, t_pre: i128, t_titles: i128, t_drain: i128, t_project: i128) void {
+    fn logFrameTime(self: *AppSession, t_start: i128, t_pre: i128, t_titles: i128, t_drain: i128, t_project: i128, t_shape: i128, t_place: i128, t_grid: i128, t_cprep: i128, t_csb: i128, t_s1: i128, t_s2: i128, t_img0: i128, t_img1: i128, t_img2: i128, t_rep: i128) void {
         const t_end = std.Io.Clock.awake.now(self.io).nanoseconds;
         const total = t_end - t_start;
         const d_titles = t_titles - t_pre;
         const d_drain = t_drain - t_titles;
         const d_project = t_end - t_project;
+        // project 3분할. 주 경로가 아니면 두 마크가 ft_start 그대로라 음수가 나올 수 있으므로 0으로 접는다
+        // (그 tick 은 shape/place/assemble 을 안 가른 것이지 0ms 가 걸린 것이 아니다 — 아래 합계 비중에서 빠진다).
+        const split_ok = t_shape >= t_project and t_place >= t_shape;
+        const d_shape = if (split_ok) t_shape - t_project else 0;
+        // grid 는 project~shape 사이에 있어야 의미가 있다(비-macOS·폴백 경로는 마크가 안 서므로 0으로 접는다).
+        const grid_ok = split_ok and t_grid >= t_project and t_shape >= t_grid;
+        const d_grid = if (grid_ok) t_grid - t_project else 0;
+        const d_chrome = if (grid_ok) t_shape - t_grid else 0;
+        // chrome 3분할. 마크가 안 선 프레임(폴백 경로)은 0 으로 접는다.
+        const c_ok = grid_ok and t_cprep >= t_grid and t_csb >= t_cprep and t_shape >= t_csb;
+        const d_cprep = if (c_ok) t_cprep - t_grid else 0;
+        const d_csb = if (c_ok) t_csb - t_cprep else 0;
+        const d_cpane = if (c_ok) t_shape - t_csb else 0;
+        const s_ok = c_ok and t_s1 >= t_cprep and t_s2 >= t_s1 and t_csb >= t_s2;
+        const d_card = if (s_ok) t_s1 - t_cprep else 0;
+        const d_status = if (s_ok) t_s2 - t_s1 else 0;
+        const d_head = if (s_ok) t_csb - t_s2 else 0;
+        // assemble 분해: buildGpuImages(배치) · 픽셀복사(planImageUploads) · 조립 · replace(Metal 버퍼 교체).
+        const i_ok = split_ok and t_img0 >= t_place and t_img1 >= t_img0;
+        // place 직후 ~ 이미지 처리 시작 전(pane_frames 조립·코어 스냅샷 읽기 등). 픽셀복사·replace 를 0 으로
+        // 만들고 나니 assemble 의 거의 전부가 여기였다 — 그래서 로그에 되살린다.
+        const d_pre_img = if (i_ok) t_img0 - t_place else 0;
+        const d_build_img = if (i_ok) t_img1 - t_img0 else 0;
+        const p_ok = i_ok and t_img2 >= t_img1;
+        const d_plan_img = if (p_ok) t_img2 - t_img1 else 0;
+        // 「조립·투영」을 다시 둘로: 프레임 조립(배경 이미지·pane 정리 등)과 replace(Metal 버퍼 교체).
+        const r_ok = p_ok and t_rep >= t_img2;
+        const d_build_rest = if (r_ok) t_rep - t_img2 else 0;
+        const d_replace = if (r_ok) t_end - t_rep else 0;
+        const d_place = if (split_ok) t_place - t_shape else 0;
+        const d_assemble = if (split_ok) t_end - t_place else 0;
         // (a) 느린 tick 즉시 로그 — 어느 단계가 지배했는지 한눈에.
         if (total > frametime_slow_ns) {
-            frametime_diag.info("SLOW total={d:.1}ms pre={d:.1} titles={d:.1} drain={d:.1} mid={d:.1} project={d:.1}", .{
+            frametime_diag.info("SLOW total={d:.1}ms pre={d:.1} titles={d:.1} drain={d:.1} mid={d:.1} project={d:.1} [shape={d:.1}(grid={d:.1} chrome={d:.1}) place={d:.1} assemble={d:.1}]", .{
                 nsToMs(total),   nsToMs(t_pre - t_start),     nsToMs(d_titles),
                 nsToMs(d_drain), nsToMs(t_project - t_drain), nsToMs(d_project),
+                nsToMs(d_shape), nsToMs(d_grid),              nsToMs(d_chrome),
+                nsToMs(d_place), nsToMs(d_assemble),
             });
+            // chrome 이 지배한 SLOW 프레임이면 «어느 chrome 조각인가»를 같은 줄 뒤에 붙인다. 0.5ms 넘는
+            // 것만 —  창 하나에 chrome collect 가 수십 번 일어나므로 전부 찍으면 줄이 읽히지 않는다.
+            if (d_assemble > std.time.ns_per_ms and i_ok) {
+                frametime_diag.info("  └ assemble={d:.1}ms = 이미지앞 {d:.1} + buildGpuImages {d:.1} + 픽셀복사 {d:.1}({d:.1}MB/{d}장) + 조립 {d:.1} + replace {d:.1}(셀 {d:.1} + 병합 {d:.1} + dupe {d:.1}) | 재사용 hit={d} miss={d}", .{
+                    nsToMs(d_assemble),
+                    nsToMs(d_pre_img),
+                    nsToMs(d_build_img),
+                    nsToMs(d_plan_img),
+                    @as(f64, @floatFromInt(metal_frame.diag_plan_bytes)) / (1024.0 * 1024.0),
+                    metal_frame.diag_plan_images,
+                    nsToMs(d_build_rest),
+                    nsToMs(d_replace),
+                    nsToMs(metal_frame.diag_replace_cells_ns),
+                    nsToMs(metal_frame.diag_replace_merge_ns),
+                    nsToMs(metal_frame.diag_replace_dupe_ns),
+                    metal_frame.diag_reuse_hit,
+                    metal_frame.diag_reuse_miss,
+                });
+            }
+            if (d_chrome > std.time.ns_per_ms) {
+                var buf: [320]u8 = undefined;
+                var used: usize = 0;
+                for (self.ft_collect_ns, self.ft_collect_n, ft_collect_names) |ns, n, name| {
+                    if (ns < std.time.ns_per_ms / 2) continue;
+                    const part = std.fmt.bufPrint(buf[used..], " {s}={d:.1}({d})", .{ name, nsToMs(ns), n }) catch break;
+                    used += part.len;
+                }
+                frametime_diag.info("  └ chrome={d:.1}ms = prep {d:.1} + sb계 {d:.1}(카드 {d:.1} + 상태바 {d:.1} + 헤더 {d:.1}) + pane계 {d:.1} | shaping:{s}", .{
+                    nsToMs(d_chrome), nsToMs(d_cprep),  nsToMs(d_csb),
+                    nsToMs(d_card),   nsToMs(d_status), nsToMs(d_head),
+                    nsToMs(d_cpane),  buf[0..used],
+                });
+            }
         }
         // (b) 1초 창 누적 — 실효 rate와 단계 비중(지속적 지배 요인).
         if (self.ft_window_start == 0) self.ft_window_start = t_start;
@@ -19477,11 +19582,16 @@ pub const AppSession = struct {
         self.ft_sum_titles += d_titles;
         self.ft_sum_drain += d_drain;
         self.ft_sum_project += d_project;
+        self.ft_sum_shape += d_shape;
+        self.ft_sum_grid += d_grid;
+        self.ft_sum_chrome += d_chrome;
+        self.ft_sum_place += d_place;
+        self.ft_sum_assemble += d_assemble;
         if (total > self.ft_max_total) self.ft_max_total = total;
         const window = t_end - self.ft_window_start;
         if (window >= std.time.ns_per_s) {
             const rate = @as(f64, @floatFromInt(self.ft_ticks)) * @as(f64, @floatFromInt(std.time.ns_per_s)) / @as(f64, @floatFromInt(window));
-            frametime_diag.info("window={d:.2}s ticks={d} rate={d:.1}Hz total(ms) mean={d:.2} max={d:.1} | titles={d:.0}% drain={d:.0}% project={d:.0}%", .{
+            frametime_diag.info("window={d:.2}s ticks={d} rate={d:.1}Hz total(ms) mean={d:.2} max={d:.1} | titles={d:.0}% drain={d:.0}% project={d:.0}% [shape={d:.0}%(grid={d:.0}% chrome={d:.0}%) place={d:.0}% assemble={d:.0}%]", .{
                 @as(f64, @floatFromInt(window)) / @as(f64, @floatFromInt(std.time.ns_per_s)),
                 self.ft_ticks,
                 rate,
@@ -19490,6 +19600,11 @@ pub const AppSession = struct {
                 nsPct(self.ft_sum_titles, self.ft_sum_total),
                 nsPct(self.ft_sum_drain, self.ft_sum_total),
                 nsPct(self.ft_sum_project, self.ft_sum_total),
+                nsPct(self.ft_sum_shape, self.ft_sum_total),
+                nsPct(self.ft_sum_grid, self.ft_sum_total),
+                nsPct(self.ft_sum_chrome, self.ft_sum_total),
+                nsPct(self.ft_sum_place, self.ft_sum_total),
+                nsPct(self.ft_sum_assemble, self.ft_sum_total),
             });
             self.ft_window_start = 0;
             self.ft_ticks = 0;
@@ -19497,6 +19612,11 @@ pub const AppSession = struct {
             self.ft_sum_titles = 0;
             self.ft_sum_drain = 0;
             self.ft_sum_project = 0;
+            self.ft_sum_shape = 0;
+            self.ft_sum_grid = 0;
+            self.ft_sum_chrome = 0;
+            self.ft_sum_place = 0;
+            self.ft_sum_assemble = 0;
             self.ft_max_total = 0;
         }
     }
@@ -19862,12 +19982,56 @@ pub const AppSession = struct {
             return self.last_summary;
         }
         const ft_on = diag_gate.maruDebugEnabled();
+        // [실험 계측] 줄 끝 빈 셀 trim 을 같은 빌드에서 A/B 하려고 env 로 켠다(기본 꺼짐 = 동작 불변).
+        renderer.draw_list.experiment_trim_blank = diag_gate.trimBlankExperimentEnabled();
+        metal_frame.experiment_reuse_image_pixels = diag_gate.reuseImagePixelsExperimentEnabled();
+        if (ft_on) {
+            // 렌더러 내부 계측을 이 프레임 것만 보게 매 tick 0 으로 되돌린다(프레임 스냅샷).
+            diag_metal_io = self.io;
+            metal_frame.diag_now = diagMetalNow;
+            metal_frame.diag_replace_cells_ns = 0;
+            metal_frame.diag_replace_merge_ns = 0;
+            metal_frame.diag_replace_dupe_ns = 0;
+            metal_frame.diag_plan_bytes = 0;
+            metal_frame.diag_plan_images = 0;
+        }
+        if (ft_on) {
+            self.ft_collect_ns = .{0} ** ft_collect_slots;
+            self.ft_collect_n = .{0} ** ft_collect_slots;
+        }
         const ft_start: i128 = if (ft_on) std.Io.Clock.awake.now(self.io).nanoseconds else 0;
         var ft_pre: i128 = ft_start;
         var ft_titles: i128 = ft_start;
         var ft_drain: i128 = ft_start;
         var ft_project: i128 = ft_start;
-        defer if (ft_on) self.logFrameTime(ft_start, ft_pre, ft_titles, ft_drain, ft_project);
+        // project 안을 셋으로 가른다 — kitty graphics(터미널 브라우저)처럼 이미지가 매 프레임 새로 오는
+        // 부하에서 project 가 tick 의 90% 를 넘길 때, 그 안의 어디가 지배하는지 로그만으로 갈리게 한다.
+        //   shape = CoreText 수집(활성 grid + chrome DrawList) · place = placeMultiPane(atlas 배치+분배)
+        //   assemble = 그 뒤 RenderFrame 조립·이미지 업로드 계획·투영
+        // 주 경로(멀티 페인 통합 수집) 밖의 폴백 place 호출은 마크하지 않는다 — 그 tick 은 place=0 으로 보인다.
+        var ft_shape: i128 = ft_start;
+        var ft_place: i128 = ft_start;
+        // shape 를 다시 둘로 가른다 — 활성 터미널 본문(grid)과 chrome(사이드바·탭바·상태바·오버레이) 중
+        // 어느 쪽이 재-shaping 비용의 주인인지 가리려면 이 경계가 필요하다. 터미널 브라우저처럼 본문이
+        // 통째로 이미지인 화면에서는 본문 셀이 거의 비어 있는데도 shape 가 지배적이라, 둘을 안 가르면
+        // 「본문 텍스트가 비싸다」는 틀린 결론으로 샌다.
+        var ft_grid: i128 = ft_start;
+        // chrome 을 다시 셋으로: prep(cell_colors·find 등 준비) · sb(사이드바 계열) · pane(pane 루프 이후).
+        // 창을 처음 열 때 chrome 24.8ms 중 collectShaped 합이 12.1ms 뿐이라 «shaping 이 아닌 12.7ms» 가
+        // 어디인지 지목하려고 둔다.
+        var ft_cprep: i128 = ft_start;
+        var ft_csb: i128 = ft_start;
+        // sb계 26.5ms 중 collectShaped 합이 14.8ms 뿐이라, 남는 11.7ms(=DrawList 생성)의 주인을 가른다.
+        var ft_s1: i128 = ft_start; // 사이드바 카드(타이틀) 끝
+        var ft_s2: i128 = ft_start; // 상태표시줄 끝
+        // assemble 을 셋으로: img(kitty 이미지 배치+업로드 계획) · rest(RenderFrame 조립·투영).
+        // 큰 창(1920×1080)에서 assemble 이 tick 의 49~67% 를 먹는데, 그게 이미지 픽셀 취급 비용인지
+        // 프레임 조립 비용인지 가르지 않으면 고칠 곳을 못 정한다.
+        var ft_img0: i128 = ft_start;
+        var ft_img1: i128 = ft_start;
+        var ft_img2: i128 = ft_start; // planImageUploads(픽셀 복사) 끝
+        var ft_rep: i128 = ft_start; // metal_buffer.replace 직전 — 「조립」과 「투영(replace)」을 가른다
+        defer if (ft_on) self.logFrameTime(ft_start, ft_pre, ft_titles, ft_drain, ft_project, ft_shape, ft_place, ft_grid, ft_cprep, ft_csb, ft_s1, ft_s2, ft_img0, ft_img1, ft_img2, ft_rep);
         // [M3d-2a-i 결함[0]] 빈 source(0탭): mergeSessionInto/moveWorkspaceToSession가 마지막 워크스페이스를 옮겨
         // 창을 비우면 활성 surface가 없다 — 아래 readActiveSnapshot·투영·요약이 모두 activeSurface()(=app_window.active().?)를
         // deref하므로 0탭에서 null unwrap 패닉한다. 이 창은 이미 ended_seen이 latch됐고(§1.6) Swift가 다음 tick의
@@ -20104,6 +20268,7 @@ pub const AppSession = struct {
                     // 이 프레임이 실제로 그린 스크롤 위치(shapeOnlyBuild가 같은 락 아래 캡처). null=빌드 실패.
                     if (active_shaped) |sp| rendered_view_offset = sp.view_offset;
                 }
+                if (ft_on) ft_grid = std.Io.Clock.awake.now(self.io).nanoseconds; // grid(활성 본문 shape) 끝 = chrome 수집 시작
             } else {
                 tick_result = try self.frame_loop.tickAfterDrain(drain_summary, renderer.FakeFontBackend{});
                 // 비-macOS(단일 leaf·fake backend)는 활성 멀티 페인 통합을 쓰지 않는다. active_*는 macOS 통합 경로
@@ -20180,6 +20345,7 @@ pub const AppSession = struct {
             // 같은 frame_builder/renderer_state(atlas)를 써서 제목 glyph도 같은 slot을 재사용한다. 실패는
             // 무시하고 제목 없이 밴드만 그린다(세션을 죽이지 않음). 짧은 제목이라 매 frame 재-shape해도
             // 싸고, atlas dedup이 새 glyph만 업로드한다.
+            if (ft_on) ft_cprep = std.Io.Clock.awake.now(self.io).nanoseconds; // chrome prep 끝 = 사이드바 계열 시작
             var sidebar_frame: ?renderer.RenderFrame = null;
             defer if (sidebar_frame) |*sf| sf.deinit(self.allocator);
             if (builtin.os.tag == .macos) {
@@ -20194,7 +20360,9 @@ pub const AppSession = struct {
             // 상태표시줄 항목(SB1-S3b) — 같은 통합 수집에 합류시켜 한 atlas 세대를 쓴다(사이드바·도크와 동형).
             if (builtin.os.tag == .macos) {
                 const sb_colors: metal_frame.CellColors = .{ .default_fg = self.appearance.theme.foreground };
+                if (ft_on) ft_s1 = std.Io.Clock.awake.now(self.io).nanoseconds; // 사이드바 카드 끝 = 상태바 시작
                 self.collectStatusBarItems(&collected, pane_ops.paneFrameBuilder(self), sb_colors);
+                if (ft_on) ft_s2 = std.Io.Clock.awake.now(self.io).nanoseconds; // 상태바 끝 = 헤더/검색 시작
             }
             var sidebar_header_frame: ?renderer.RenderFrame = null;
             defer if (sidebar_header_frame) |*hf| hf.deinit(self.allocator);
@@ -20513,6 +20681,7 @@ pub const AppSession = struct {
                 //    기하·layer·lowering 판정은 `editor_ops.appendPaneFrame`이 소유한다 — 여기 인라인으로
                 //    두면 tick 전체를 돌리지 않고는 검사할 수 없어, 배경 layer가 뒤집혀 본문이 통째로
                 //    사라져도 테스트가 초록이었다(실제로 그랬다). 여기서는 셀 배치만 한다.
+                if (ft_on and ft_csb == ft_start) ft_csb = std.Io.Clock.awake.now(self.io).nanoseconds; // 사이드바·오버레이 끝 = pane 루프 시작
                 for (leaf_rects.items) |lr| {
                     const drawn = editor_ops.appendPaneFrame(self, lr.rect, lr.leaf.activeTerm()) orelse continue;
                     self.collectShaped(&collected, drawn.dl, pane_frame_builder, .{ .pane = .{
@@ -20983,7 +21152,9 @@ pub const AppSession = struct {
                 // 수집된 모든 페인(sidebar/header/overlay/grip/label/탭바/비활성/floating + 활성)을 한 번에 placeMultiPane으로
                 // 배치+분배한다 — cross-pane 정합(한 atlas 세대). 활성은 active_result로 받아 아래에서 pane_frames 맨 뒤(커서
                 // suffix·floating 맨 위 직전)에 넣는다.
+                if (ft_on) ft_shape = std.Io.Clock.awake.now(self.io).nanoseconds; // shape(CoreText 수집) 끝 = place 시작
                 self.placeAndDistribute(&collected, &pane_frames, &built_frames, &sidebar_frame, &sidebar_header_frame, &overlay_frame, &floating_pf, &sticky_pf, &active_result);
+                if (ft_on) ft_place = std.Io.Clock.awake.now(self.io).nanoseconds; // place(atlas 배치+분배) 끝 = assemble 시작
             }
             // 활성 terminal frame 성공 여부를 확정한다. macOS에서 surface가 있는데 active_result==null이면 활성
             // shapeOnly/place가 실패한 것(드문 OOM) — 기존 build-실패와 동형으로 이 frame을 통째로 포기해야 한다(chrome만
@@ -21055,10 +21226,14 @@ pub const AppSession = struct {
                 var kg_images: []metal_frame.GpuImage = &.{};
                 var kg_uploads: []metal_frame.GpuImageUpload = &.{};
                 var kg_pixels: []u8 = &.{};
+                // 재사용 버퍼를 쓰는 프레임에서는 kg_pixels 가 AppSession 소유라 **여기서 free 하면 안 된다**.
+                // 아래 bg 합성·갤러리 경로는 옛 버퍼를 free 하고 새 것으로 바꾸므로, 그 직전에 owned 사본으로
+                // 승격해 두 경로가 기존 규칙대로 돌게 한다(드문 경로라 승격 비용은 무시 가능).
+                var kg_pixels_owned = true;
                 var kg_live_ids: std.ArrayList(u32) = .empty;
                 defer self.allocator.free(kg_images);
                 defer self.allocator.free(kg_uploads);
-                defer self.allocator.free(kg_pixels);
+                defer if (kg_pixels_owned) self.allocator.free(kg_pixels);
                 defer kg_live_ids.deinit(self.allocator);
                 // [4e-2, §6] 활성 Term이 web이면 kitty 이미지 경로를 건너뛴다(sentinel엔 placement 없음) — terminal이면
                 // activeTerminalSurface()=activeSurface()라 옛 `if (self.surface_initialized)`와 byte-identical.
@@ -21088,15 +21263,26 @@ pub const AppSession = struct {
                     // 건너뛰었다 — 헤드리스 판정자는 `buildGpuImages` 를 직접 불러 이 가드를 안 밟는다(적대적
                     // 검증 R2 가 화면 캡처로 잡았다: 이미지 대신 placeholder tofu 가 격자로 찍혔다).
                     if (needsKittyImagePass(snap)) {
+                        if (ft_on) ft_img0 = std.Io.Clock.awake.now(self.io).nanoseconds; // 이미지 처리 시작
                         kg_images = metal_frame.buildGpuImages(self.allocator, snap.placements, snap.images, snap.size, self.cell_width_px, self.cell_height_px, snap.cells, snap.graphemes, snap.virtual_placements) catch &.{};
                         for (kg_images) |*gi| {
                             gi.origin_x = active_origin_x;
                             gi.origin_y = active_origin_y;
                         }
                         if (kg_images.len > 0) {
-                            if (metal_frame.planImageUploads(self.allocator, kg_images, snap.images, &self.kitty_uploaded)) |plan| {
+                            if (ft_on and ft_img1 == ft_start) ft_img1 = std.Io.Clock.awake.now(self.io).nanoseconds; // buildGpuImages 끝 = 업로드 계획 시작
+                            if (metal_frame.experiment_reuse_image_pixels) {
+                                // 재사용 경로: 픽셀은 AppSession 버퍼에 쌓고(할당 0), uploads 만 새로 만든다.
+                                if (metal_frame.planImageUploadsReusing(self.allocator, kg_images, snap.images, &self.kitty_uploaded, &self.kitty_pixels_buf, &self.kitty_pixels_cap)) |plan| {
+                                    kg_uploads = plan.uploads;
+                                    kg_pixels = plan.pixels;
+                                    kg_pixels_owned = false;
+                                    if (ft_on) ft_img2 = std.Io.Clock.awake.now(self.io).nanoseconds; // 재사용 경로도 같은 마크를 세운다
+                                } else |_| {}
+                            } else if (metal_frame.planImageUploads(self.allocator, kg_images, snap.images, &self.kitty_uploaded)) |plan| {
                                 kg_uploads = plan.uploads;
                                 kg_pixels = plan.pixels;
+                                if (ft_on) ft_img2 = std.Io.Clock.awake.now(self.io).nanoseconds; // 업로드 계획(픽셀 복사) 끝
                             } else |_| {}
                         }
                     }
@@ -21128,6 +21314,7 @@ pub const AppSession = struct {
                                 .pixels_offset = kg_pixels.len, // 합친 픽셀 버퍼 끝에 bg 픽셀을 잇는다
                                 .pixels_len = self.bg_image_pixels.len,
                             };
+                            self.promoteKgPixelsOwned(&kg_pixels, &kg_pixels_owned); // 아래가 옛 버퍼를 free 한다
                             const new_uploads = self.allocator.alloc(metal_frame.GpuImageUpload, kg_uploads.len + 1) catch null;
                             const new_pixels = std.mem.concat(self.allocator, u8, &.{ kg_pixels, self.bg_image_pixels }) catch null;
                             if (new_uploads != null and new_pixels != null) {
@@ -21149,10 +21336,15 @@ pub const AppSession = struct {
                 // IG3-c2 이미지 갤러리 타일: 배경 이미지와 **같은 패턴**으로 프레임 이미지 채널에 얹는다
                 // (예약 id·live 집합·generation 1회 업로드). 렌더러를 고치지 않고 kitty graphics 의
                 // 텍스처 캐시·image quad 인프라를 그대로 재사용한다. 갤러리 뷰가 아니면 즉시 돌아온다.
-                agent_activity_ops.appendGpuImages(self, &kg_images, &kg_uploads, &kg_pixels, &kg_live_ids);
-                self.appendMarkerPreviewImage(&kg_images, &kg_uploads, &kg_pixels, &kg_live_ids);
+                // 승격은 **각 소비자 안에서 실제로 픽셀을 건드리기 직전에** 한다. 여기서 무조건 하면 갤러리도
+                // 마커 미리보기도 닫혀 있어 아무것도 안 싣는 프레임에서까지 수 MB 를 복사한다(실측 1.9ms —
+                // 이 최적화가 없애려던 비용을 그대로 되살렸다). 둘 다 `pixels.*` 를 free 하고 교체하는 경로라
+                // 재사용 버퍼를 그대로 넘기면 **남의 것을 free** 한다.
+                agent_activity_ops.appendGpuImages(self, &kg_images, &kg_uploads, &kg_pixels, &kg_pixels_owned, &kg_live_ids);
+                self.appendMarkerPreviewImage(&kg_images, &kg_uploads, &kg_pixels, &kg_pixels_owned, &kg_live_ids);
                 agent_activity_ops.appendHoverQuad(self); // 갤러리 호버 판(이미지보다 뒤 layer)
                 notification_ops.appendBellFlashQuad(self); // 시각 벨(bell.visual): flash 중이면 전경색 반투명 full-screen quad를 맨 위에(F2-4)
+                if (ft_on) ft_rep = std.Io.Clock.awake.now(self.io).nanoseconds; // 조립 끝 = replace(투영) 시작
                 if (self.metal_buffer.replace(self.allocator, pane_frames.items, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, sidebar_frame, sidebar_header_frame, sidebar_colors, pane_chrome.items, pane_overlay.items, overlay_frame, floating_pf, drag_overlay_cells.items, self.gpu_quads.items, self.gpu_shadows.items, self.gpu_glyphs.items, kg_images, kg_uploads, kg_pixels, kg_live_ids.items)) |_| {
                     // **스탬프는 replace 성공과 한 트랜잭션이다.** 실패(OOM)면 버퍼가 옛 셀을 그대로 들고 있으므로
                     // 기하만 새 값으로 올리면 이 함수가 없애려는 바로 그 불일치(옛 pitch 셀 + 새 헤더 높이)를 만든다.
@@ -22010,7 +22202,33 @@ pub const AppSession = struct {
 
     /// DrawList(소유권 이전)를 shapeOnly로 만들어 collected에 추가한다. shapeOnly 실패면 dl은 shapeOnly가 정리하고
     /// 그 페인만 skip(기존 per-pane `catch continue/null`과 동형), append 실패면 pane.deinit.
+    /// 재사용 버퍼를 가리키던 `kg_pixels` 를 **owned 사본으로 승격**한다. 뒤따르는 경로가 옛 버퍼를 free 하고
+    /// 새 것으로 바꾸는 규칙이라, 재사용 버퍼(AppSession 소유)를 그대로 넘기면 남의 것을 free 하게 된다.
+    /// 이미 owned 면 아무것도 안 한다. 승격이 실패하면(OOM) 그대로 두는데, 그 경우 호출부가 이번 프레임
+    /// 이미지를 포기할 뿐 해제 규칙은 깨지지 않는다(여전히 non-owned 라 free 되지 않는다).
+    pub fn promoteKgPixelsOwned(self: *AppSession, pixels: *[]u8, owned: *bool) void {
+        if (owned.*) return;
+        if (pixels.len == 0) {
+            pixels.* = &.{};
+            owned.* = true;
+            return;
+        }
+        const copy = self.allocator.dupe(u8, pixels.*) catch return;
+        pixels.* = copy;
+        owned.* = true;
+    }
+
     pub fn collectShaped(self: *AppSession, collected: *std.ArrayList(CollectedPane), dl: renderer.DrawList, builder: coretext_frame_builder.CoreTextFrameBuilder, dest: CollectDest) void {
+        // [계측] 이 chrome 조각이 이 프레임에서 쓴 시간. shapeOnly 가 실패해 일찍 빠져나가도 세도록 defer 다.
+        const ft_on = diag_gate.maruDebugEnabled();
+        const ft_t0: i128 = if (ft_on) std.Io.Clock.awake.now(self.io).nanoseconds else 0;
+        defer if (ft_on) {
+            const slot = @intFromEnum(std.meta.activeTag(dest));
+            if (slot < ft_collect_slots) {
+                self.ft_collect_ns[slot] += std.Io.Clock.awake.now(self.io).nanoseconds - ft_t0;
+                self.ft_collect_n[slot] += 1;
+            }
+        };
         const pane = builder.shapeOnly(self.allocator, dl, &self.renderer_state.font_registry) catch return;
         // 헤더 아이콘(gear·plus·bell·sidebar_collapse — 등록 PUA)은 .m이 hscale 1.7로 quad를 키워 셀보다 ~1.7칸 넓게 그린다. 셀 크기로 굽고 GPU에서
         // 확대하면 anti-alias가 번져 흐리므로(slot-stretch; partial-alpha 비율 ≈0.69 — coretext_smoke 측정 test), atlas
@@ -23728,6 +23946,8 @@ pub const AppSession = struct {
         self.gpu_shadows.deinit(self.allocator);
         self.gpu_glyphs.deinit(self.allocator);
         self.kitty_uploaded.deinit(self.allocator);
+        // 재사용 버퍼는 **할당받은 크기로** 돌려준다(길이는 마지막 프레임 사용량일 뿐이라 다르다).
+        if (self.kitty_pixels_cap > 0) self.allocator.free(self.kitty_pixels_buf.ptr[0..self.kitty_pixels_cap]);
         // F2-1 배경 이미지 디코드 캐시 — owned 픽셀·경로 문자열(빈 경로면 empty라 무해).
         if (self.bg_image_pixels.len > 0) self.allocator.free(self.bg_image_pixels);
         self.allocator.free(self.bg_image_path_cache);
@@ -81157,7 +81377,8 @@ test "이미지 갤러리: 타일이 프레임 이미지 채널까지 간다 (IG
     // 「처음 그리는 프레임」과 같은 상태로 되돌린다. 타일을 버리면 디코드를 다시 기다려야 하므로
     // **업로드 표시만** 되돌린다 — 이 단계가 보려는 것은 디코드가 아니라 **무엇이 채널에 실리는가**다.
     session.agent_activity.tiles.items[0].uploaded = false;
-    agent_activity_ops.appendGpuImages(session, &images, &uploads, &pixels, &live);
+    var pixels_owned = true; // 이 테스트의 픽셀 버퍼는 테스트 소유다(재사용 버퍼가 아니다)
+    agent_activity_ops.appendGpuImages(session, &images, &uploads, &pixels, &pixels_owned, &live);
 
     try std.testing.expectEqual(@as(usize, 1), images.len);
     try std.testing.expectEqual(@as(usize, 1), uploads.len);
@@ -81187,7 +81408,8 @@ test "이미지 갤러리: 타일이 프레임 이미지 채널까지 간다 (IG
         allocator.free(pixels2);
         live2.deinit(allocator);
     }
-    agent_activity_ops.appendGpuImages(session, &images2, &uploads2, &pixels2, &live2);
+    var pixels2_owned = true; // 이 테스트의 픽셀 버퍼는 테스트 소유다(재사용 버퍼가 아니다)
+    agent_activity_ops.appendGpuImages(session, &images2, &uploads2, &pixels2, &pixels2_owned, &live2);
     try std.testing.expectEqual(@as(usize, 1), images2.len); // 그리기는 계속한다
     try std.testing.expectEqual(@as(usize, 0), uploads2.len); // 업로드는 한 번뿐이다
     try std.testing.expectEqual(@as(usize, 0), pixels2.len);
@@ -81276,7 +81498,8 @@ test "이미지 갤러리: 격자에 다 안 들어가면 「몇 장 중 몇 장
         allocator.free(pixels);
         live.deinit(allocator);
     }
-    agent_activity_ops.appendGpuImages(session, &images, &uploads, &pixels, &live);
+    var pixels_owned = true; // 이 테스트의 픽셀 버퍼는 테스트 소유다(재사용 버퍼가 아니다)
+    agent_activity_ops.appendGpuImages(session, &images, &uploads, &pixels, &pixels_owned, &live);
     try std.testing.expectEqual(l.overflow, session.agent_activity.overflow);
 
     var buf: [64]u8 = undefined;
@@ -81571,7 +81794,8 @@ test "이미지 갤러리: 칸을 누르면 크게 열리고 Esc 로 닫힌다 (
     // 「처음 그리는 프레임」과 같은 상태로 되돌린다 — 위 spin 이 도는 동안 제품 tick 이 이미 올렸다
     // (IG3-c2 가 같은 이유로 같은 되돌림을 한다). 여기서 보려는 것은 **무엇이 채널에 실리는가**다.
     session.agent_activity.open.?.uploaded = false;
-    agent_activity_ops.appendGpuImages(session, &images, &uploads, &pixels, &live);
+    var pixels_owned = true; // 이 테스트의 픽셀 버퍼는 테스트 소유다(재사용 버퍼가 아니다)
+    agent_activity_ops.appendGpuImages(session, &images, &uploads, &pixels, &pixels_owned, &live);
     try std.testing.expectEqual(@as(usize, 1), images.len);
     try std.testing.expectEqual(agent_activity_ops.activity_open_image_id, images[0].image_id);
     try std.testing.expectEqual(@as(usize, 1), uploads.len);
@@ -81618,7 +81842,8 @@ test "이미지 갤러리: 칸을 누르면 크게 열리고 Esc 로 닫힌다 (
         allocator.free(pixels2);
         live2.deinit(allocator);
     }
-    agent_activity_ops.appendGpuImages(session, &images2, &uploads2, &pixels2, &live2);
+    var pixels2_owned = true; // 이 테스트의 픽셀 버퍼는 테스트 소유다(재사용 버퍼가 아니다)
+    agent_activity_ops.appendGpuImages(session, &images2, &uploads2, &pixels2, &pixels2_owned, &live2);
     try std.testing.expectEqual(@as(usize, 1), images2.len);
     try std.testing.expectEqual(agent_activity_ops.activity_image_id_base, images2[0].image_id);
     // **업로드가 함께 실린다** — 텍스처가 evict 됐으므로 id 만 실으면 아무것도 안 그려진다.
@@ -84306,7 +84531,8 @@ test "활동 뷰: 줄 목록일 때 격자 그림을 싣지 않는다 — 그리
         allocator.free(pixels);
         live.deinit(allocator);
     }
-    agent_activity_ops.appendGpuImages(session, &images, &uploads, &pixels, &live);
+    var pixels_owned = true; // 이 테스트의 픽셀 버퍼는 테스트 소유다(재사용 버퍼가 아니다)
+    agent_activity_ops.appendGpuImages(session, &images, &uploads, &pixels, &pixels_owned, &live);
     try std.testing.expectEqual(@as(usize, 0), images.len); // 그림은 하나도 안 실린다
     try std.testing.expectEqual(@as(usize, 0), live.items.len);
     // 안 그리고 나갔으므로 「다시 올려야 함」으로 바뀌어 있다.
@@ -84339,7 +84565,8 @@ test "활동 뷰: 줄 목록일 때 격자 그림을 싣지 않는다 — 그리
         allocator.free(pixels2);
         live2.deinit(allocator);
     }
-    agent_activity_ops.appendGpuImages(session, &images2, &uploads2, &pixels2, &live2);
+    var pixels2_owned = true; // 이 테스트의 픽셀 버퍼는 테스트 소유다(재사용 버퍼가 아니다)
+    agent_activity_ops.appendGpuImages(session, &images2, &uploads2, &pixels2, &pixels2_owned, &live2);
     try std.testing.expectEqual(@as(usize, 1), images2.len);
     try std.testing.expectEqual(@as(usize, 1), uploads2.len);
     try std.testing.expect(pixels2.len > 0);
@@ -84428,7 +84655,8 @@ test "이미지 갤러리: 크게 본 채 도크를 접었다 펴도 그림이 �
         allocator.free(pixels);
         live.deinit(allocator);
     }
-    agent_activity_ops.appendGpuImages(session, &images, &uploads, &pixels, &live);
+    var pixels_owned = true; // 이 테스트의 픽셀 버퍼는 테스트 소유다(재사용 버퍼가 아니다)
+    agent_activity_ops.appendGpuImages(session, &images, &uploads, &pixels, &pixels_owned, &live);
     try std.testing.expectEqual(@as(usize, 1), images.len);
     try std.testing.expectEqual(agent_activity_ops.activity_open_image_id, images[0].image_id);
     try std.testing.expect(session.agent_activity.open.?.uploaded);
@@ -84446,7 +84674,8 @@ test "이미지 갤러리: 크게 본 채 도크를 접었다 펴도 그림이 �
         allocator.free(pixels_hidden);
         live_hidden.deinit(allocator);
     }
-    agent_activity_ops.appendGpuImages(session, &images_hidden, &uploads_hidden, &pixels_hidden, &live_hidden);
+    var pixels_hidden_owned = true; // 이 테스트의 픽셀 버퍼는 테스트 소유다(재사용 버퍼가 아니다)
+    agent_activity_ops.appendGpuImages(session, &images_hidden, &uploads_hidden, &pixels_hidden, &pixels_hidden_owned, &live_hidden);
     try std.testing.expectEqual(@as(usize, 0), images_hidden.len);
     try std.testing.expectEqual(@as(usize, 0), live_hidden.items.len); // 안 실렸다 = 텍스처가 거둬진다
     try std.testing.expect(session.agent_activity.open != null); // 접기는 크게 보기를 닫지 않는다
@@ -84465,7 +84694,8 @@ test "이미지 갤러리: 크게 본 채 도크를 접었다 펴도 그림이 �
         allocator.free(pixels2);
         live2.deinit(allocator);
     }
-    agent_activity_ops.appendGpuImages(session, &images2, &uploads2, &pixels2, &live2);
+    var pixels2_owned = true; // 이 테스트의 픽셀 버퍼는 테스트 소유다(재사용 버퍼가 아니다)
+    agent_activity_ops.appendGpuImages(session, &images2, &uploads2, &pixels2, &pixels2_owned, &live2);
     try std.testing.expectEqual(@as(usize, 1), images2.len);
     try std.testing.expectEqual(agent_activity_ops.activity_open_image_id, images2[0].image_id);
     try std.testing.expectEqual(@as(usize, 1), uploads2.len);

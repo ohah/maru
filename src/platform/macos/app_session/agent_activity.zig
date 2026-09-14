@@ -3183,6 +3183,10 @@ pub fn appendGpuImages(
     images: *[]metal_frame.GpuImage,
     uploads: *[]metal_frame.GpuImageUpload,
     pixels: *[]u8,
+    /// `pixels` 가 호출자 소유인지. 재사용 버퍼(AppSession 소유)를 가리키는 동안에는 free/교체가 금지라
+    /// **실제로 픽셀을 건드리기 직전에** owned 사본으로 승격한다. 조기 반환 경로는 승격하지 않는다 —
+    /// 갤러리가 닫힌 프레임에서 수 MB 를 헛복사하지 않기 위해서다(실측 1.9ms 회귀를 만든 자리).
+    pixels_owned: *bool,
     live_ids: *std.ArrayList(u32),
 ) void {
     if (!builtin.target.os.tag.isDarwin()) return;
@@ -3206,6 +3210,9 @@ pub fn appendGpuImages(
         self.agent_activity.markOpenNeedUpload();
         return;
     }
+
+    // 여기서부터는 pixels 를 free/교체하는 경로다 — 비소유면 지금 승격한다.
+    self.promoteKgPixelsOwned(pixels, pixels_owned);
 
     const area = gridArea(self);
     const m = gridMetrics(self);

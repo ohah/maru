@@ -207,7 +207,7 @@ mutate를 비동기 위임하면 적용이 다음 reader 턴으로 밀려 **한 
   scrolled snapshot은 `visible=false`여도 live row/col을 보존한다. capability 없는 구 MRSH v2 host는 visible cursor가
   해당 snapshot의 live bottom을 증명할 때만 그 anchor를 사용하며, hidden/ambiguous snapshot은 neutral origin으로
   fail-closed한다. visible 증거는 snapshot마다 다시 계산하고 상태에 latch하지 않는다.
-- **기존 스냅샷 메커니즘**: `TerminalCore.renderSnapshot()`(`core.zig:1375`)은 `cells`/`graphemes`/`prompt_marks`/`images`를 **zero-copy alias**로 반환(바닥) 또는 소유 `viewport_cells`에 합성(스크롤) → **반드시 lock 아래에서 `buildDrawListWithUnfocused`(`draw_list.zig:93`)로 즉시 owned DrawList 딥카피**. 통합 후에도 이 규율 유지. 단일 통합 스냅샷은 **없다** — A·D·F·J가 DrawList 밖에서 별도 lock으로 읽는 게 통합 대상.
+- **기존 스냅샷 메커니즘**: `TerminalCore.renderSnapshot()`(`core.zig:1375`)은 `cells`/`graphemes`/`prompt_marks`/`images`를 **zero-copy alias**로 반환(바닥) 또는 소유 `viewport_cells`에 합성(스크롤) → **반드시 lock 아래에서 `buildDrawListWithUnfocused`(`draw_list.zig`)로 즉시 owned DrawList 딥카피**. 통합 후에도 이 규율 유지. 단일 통합 스냅샷은 **없다** — A·D·F·J가 DrawList 밖에서 별도 lock으로 읽는 게 통합 대상.
 
 ### 12.3 목표
 

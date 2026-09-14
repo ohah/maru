@@ -1272,6 +1272,14 @@ pub fn requestIgnoredForPaths(self: *AppSession, dir_path: []const u8, entries: 
         ) catch break;
     }
     if (self.git_ignore_query_paths.items.len == 0) return;
+    // ⚠️ **이 번호를 답과 대조하지 않는다 — 그리고 그것이 의도다.** 다른 읽기는 `result.request_id` 를
+    // in-flight 와 맞춰 낡은 답을 버리는데(`drainGitStatus`), 여기서는 그 대조가 **할 일이 없다**:
+    // 백엔드가 `check-ignore` 자리를 하나만 두고 **걷어가지 않은 답이 있으면 새 요청을 거절**하므로,
+    // 존재할 수 있는 답은 언제나 마지막으로 보낸 그것 하나다. 게다가 이 답의 틀은 번호가 아니라
+    // **답이 들고 오는 `repo` 와 `asked`** 다 — 대조를 더해도 막을 것이 없고, 「무엇을 막는지 아무도
+    // 모르는 조건」만 남는다(적대적 검증 16 회차 — 소비처를 찾다가 이 자리를 다시 봤다).
+    //
+    // 번호 자체는 **관측점**으로 남긴다: 판정자가 「물으려고는 했나」를 이 값의 증가로 본다.
     self.git_ignore_request_id +%= 1;
     // **거절되면 그 디렉터리를 적어 둔다**(`git_ignore_retry_dirs` 주석). 옛 코드는 「다음 스캔이 다시
     // 묻는다」며 그냥 넘어갔는데, 이 질의를 부르는 자리는 스캔 결과 드레인 하나뿐이라 **다시 스캔할

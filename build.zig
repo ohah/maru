@@ -20835,6 +20835,17 @@ pub fn build(b: *std.Build) void {
     const perf_step = b.step("perf", "Run local performance budget harness");
     perf_step.dependOn(&run_perf.step);
 
+    // **`check` 가 perf 하네스를 컴파일까지만 건다.** 실행(`perf`)은 예산을 재느라 수십 초라 `check` 에 못
+    // 넣지만, 컴파일은 몇 초다. 안 걸면 `tools/perf/core.zig` 가 부르는 제품 함수의 시그니처가 바뀌어도
+    // `mise run check` 가 초록이다 — 실제로 그랬다(2026-09-14: `planImageUploads` 에 인자 둘을 더한 PR 이
+    // 로컬 `check` 를 전부 통과하고 CI 의 `core performance budget` 에서 컴파일 에러로 깨졌다). `check-macos-
+    // app-host` 가 앱 호스트를 `check` 에 넣은 것과 같은 축의 구멍이다. 실행 없이 컴파일만 하려고
+    // `perf_exe.step` 에 직접 건다(설치도 안 한다 — 산출물이 목적이 아니라 «컴파일이 되는가» 가 목적이다).
+    // **`-Doptimize=ReleaseFast` 로 불러야 한다**(`.mise.toml` 의 `check-perf-compile` 이 그렇게 한다): 하네스
+    // main 의 Debug 거부가 comptime 분기라 Debug 에서는 벤치 코드가 dead code 가 되어 분석되지 않는다.
+    const perf_compile_step = b.step("perf-compile", "Compile the performance budget harness without running it");
+    perf_compile_step.dependOn(&perf_exe.step);
+
     // 셰이핑 run 분포 조사 도구(예산 게이트가 아니라 measure-first용). 지금 native 셰이퍼는 셀마다
     // CTLine을 만드는데, 연속 run 하나로 묶으면 호출이 몇 배 줄어드는지를 실제 출력으로 재서 묶기
     // 작업의 기대 이득을 추정이 아닌 실측으로 확정한다.

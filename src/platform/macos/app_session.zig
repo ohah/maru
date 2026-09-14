@@ -5932,6 +5932,13 @@ pub const AppSession = struct {
     /// `check-ignore` 질의용 재사용 버퍼(경로 바이트와 그 슬라이스). 스캔마다 새 ArrayList 를 만들지
     /// 않으려는 자리이고, 다음 질의가 덮어쓴다 — 결과 반영이 같은 tick 안에서 끝나므로 안전하다.
     git_ignore_query_buf: std.ArrayList(u8) = .empty,
+    /// ⚠️ **버퍼가 자라는 동안에는 슬라이스를 담지 않는다.** 이 목록은 `git_ignore_query_buf` 안을
+    /// 가리키는데, 그 버퍼는 항목마다 `appendSlice` 로 자란다 — realloc 이 한 번이라도 일어나면 앞서
+    /// 담아 둔 슬라이스가 **전부 댕글링**이고, 그 바이트가 그대로 자식 프로세스의 stdin 으로 나간다
+    /// (실측 2026-09-14: 페이로드가 포인터 쓰레기였고 git 이 128 로 끝났다).
+    ///
+    /// 그래서 **오프셋으로 모으고**(`git_ignore_query_spans`) 버퍼가 확정된 **뒤에** 슬라이스를 만든다.
+    git_ignore_query_spans: std.ArrayList(struct { off: usize, len: usize }) = .empty,
     git_ignore_query_paths: std.ArrayList([]const u8) = .empty,
     git_ignore_request_id: u64 = 0,
     file_tree_entry_inputs: std.ArrayList(file_tree.EntryInput) = .empty,
@@ -23036,6 +23043,7 @@ pub const AppSession = struct {
             self.remote_explorer.deinit(self.allocator);
             self.file_tree_rows.deinit(self.allocator);
             self.git_ignore_query_buf.deinit(self.allocator);
+            self.git_ignore_query_spans.deinit(self.allocator);
             self.git_ignore_query_paths.deinit(self.allocator);
             self.file_tree_entry_inputs.deinit(self.allocator);
             self.file_tree_open_states.deinit(self.allocator);

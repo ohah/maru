@@ -25,6 +25,7 @@ const term_ops = @import("term.zig");
 const find_ops = @import("find.zig");
 const scroll_ops = @import("scroll.zig");
 const editor_diff_ops = @import("editor_diff.zig");
+const editor_merge_ops = @import("editor_merge.zig");
 const workspace_ops = @import("workspace.zig");
 const chrome = maru.chrome;
 const chrome_draw = maru.chrome.draw;
@@ -8562,6 +8563,9 @@ pub fn toggleWrap(self: *AppSession) bool {
 /// 편집기 Term이 소유한 것을 놓는다. `destroyTerm`이 kind로 분기해 부른다.
 pub fn releaseEditorTerm(self: *AppSession, term: *Term) void {
     editor_diff_ops.release(self, term); // N1.5 diff 행·줄 배열(entry 버퍼를 빌린다)
+    // S3b-1 병합 판(`:1:`·`:2:`·`:3:`)도 **문서와 같은 단위로** 놓는다 — 그 판은 이 문서를 고치려고
+    // 읽은 것이라 문서보다 오래 살 이유가 없다. 안 놓으면 워커 allocator 쪽에 세 조각이 남는다.
+    editor_merge_ops.clear(self, term);
     if (term.rt.editor_doc) |*d| d.deinit(self.allocator);
     term.rt.editor_doc = null;
     // **구문 트리도 문서와 함께 죽는다.** tree-sitter의 파서·트리는 자기 `malloc`에서 오므로

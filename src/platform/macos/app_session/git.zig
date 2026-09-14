@@ -30,6 +30,7 @@ const ssh_upload = @import("../ssh_upload.zig"); // 원격 감시자 spawn(RW3)
 const remote_watch_mod = @import("../remote_watch.zig"); // 감시 채널 상태·줄 파싱(RW3)
 const pane_ops = @import("pane.zig");
 const editor_diff_ops = @import("editor_diff.zig");
+const editor_merge_ops = @import("editor_merge.zig");
 const settings_ops = @import("settings.zig");
 const tab_ops = @import("tab.zig");
 const Term = app_session_mod.Term;
@@ -899,6 +900,18 @@ pub fn drainGitStatus(self: *AppSession) void {
             if (entry.kind != .diff or entry.diff_ready or entry.diff_failed) continue;
             if (entry.diff_request_id == 0) self.requestDiffContent(entry);
         }
+        // **병합 판도 같은 규율로 되살린다**(S3b-1). 슬롯이 차 있으면 `submitDiff` 가 false 를 주고
+        // 번호가 0 으로 남는데, 그것을 다시 거는 자리가 없으면 그 Term 은 **영영 빈 채로** 남는다
+        // (적대적 4회차에서 드러났다 — 비교 쪽에는 이 자리가 있었고 병합 쪽에만 없었다).
+        for (self.tabs.items) |tab| {
+            for (tab.panes.items) |pane| {
+                for (pane.terms.items) |term| {
+                    const state = term.rt.editor_merge orelse continue;
+                    if (state.ready or state.failed or state.request_id != 0) continue;
+                    editor_merge_ops.request(self, term);
+                }
+            }
+        }
     }
     drainIgnoreResults(self); // 탐색기 무시 표시 — 같은 tick 에서 걷어 rows 를 한 번만 다시 만든다
     var backend = &(self.git_backend orelse return);
@@ -976,6 +989,13 @@ pub fn drainGitStatus(self: *AppSession) void {
     // diff 본문 결과를 그 entry로 흘린다. request_id로 짝을 맞춰 **늦게 온 옛 결과가 새 내용을 덮지 않게** 한다.
     while (backend.takeDiffResult()) |taken| {
         var diff_result = taken;
+        // **병합 판이 먼저다**(S3b-1). 그쪽은 entry 가 아니라 Term 의 상태로 짝을 맞춘다 — 병합
+        // Term 의 entry 는 작업트리 파일(`.text`)이라 아래 `.diff` 대조에 절대 안 걸린다.
+        if (editor_merge_ops.route(self, &diff_result)) {
+            diff_result.deinit(git_backend_mod.worker_allocator);
+            self.metal_dirty = true;
+            continue;
+        }
         outer: for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
@@ -1689,7 +1709,25 @@ pub fn openEditorForScmRow(self: *AppSession, repo_override: ?[]const u8, row: s
     // **둘을 가른다**(§3.8 규율 — 저하는 말한다). 여기 오는 `.unsupported`는 위에서 이미 걸러졌으므로
     // 남는 것은 "열지 못했다"뿐이지만, 갈래를 지워 두면 분류가 바뀌는 날 조용히 아무 말도 안 하게 된다.
     switch (file_panel_ops.openFilePanelPathAs(self, abs, .text)) {
-        .opened => {},
+        // **연 Term 을 병합 모드로 세운다**(S3b-1). 화면은 아직 편집기 하나지만, 세 판을 이 시점에
+        // 걸어 둬야 pane 넷(S3b-2)이 그릴 것을 들고 선다 — 그리기 전에 «누가 들고 언제 버리나»가
+        // 정해져야 그 답이 그리는 코드 안으로 숨지 않는다(계약 §5 S3b).
+        .opened => {
+            const term = pane_ops.activePane(self).activeTerm();
+            // **방금 연 그 Term 인지 확인한다.** 이미 열려 있던 Term 을 활성화한 경우에도 같은
+            // 경로이므로 모드를 다시 세우는 것이 맞다 — 다른 파일이면 세우지 않는다.
+            const entry = term.file_entry orelse return;
+            // 정직하게: 이 대조는 **오늘 관측되지 않는다**(적대적 4·5회차 — 등가). 바로 위에서
+            // `.opened` 를 받았으면 활성 Term 이 그 파일이기 때문이다. 그래도 두는 이유는 이 줄이
+            // 없으면 여는 쪽이 「다른 pane 을 활성으로 둔다」로 바뀌는 날 **남의 Term 이 병합 모드로
+            // 표시**되고, 그 사고는 화면에서만 드러나기 때문이다.
+            if (!std.mem.eql(u8, entry.path, abs)) return;
+            // **충돌 행일 때만 병합 모드다.** 이 함수는 오늘 `.resolve` 동작에서만 불리지만, 그
+            // 사실은 **호출자 쪽 사정**이다 — 여기서 안 가르면 이 길이 하나 더 생기는 날 평범한
+            // 파일이 병합 Term 으로 열린다(판정자 `MRG7` 의 대조군이 그 자리를 잡았다).
+            if (!row.conflicted) return;
+            editor_merge_ops.begin(self, term, repo, row.path);
+        },
         .unsupported => self.showNoticeKey(.git_conflict_not_editable),
         .failed => self.showNoticeKey(.git_conflict_open_failed),
     }

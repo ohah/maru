@@ -3182,6 +3182,12 @@ fn writeFileAt(dir: []const u8, name: []const u8, content: []const u8) !void {
 /// argv를 돌려 성공(exit 0)이면 true. 출력은 버린다(테스트 픽스처 준비용).
 pub const testRunQuiet = runQuiet;
 pub const testWriteFile = writeFileAt;
+/// **판정자 전용 하네스를 이 파일 밖으로 연다.** 병합 모드(S3b-1)의 끝에서 끝까지 판정자는 **진짜
+/// 충돌 저장소**가 있어야 「어느 기준으로 무엇을 읽었나」를 잴 수 있는데, 그 저장소를 만드는 어휘는
+/// 여기에만 있다(제품의 git 쓰기 어휘는 `init`·`merge` 를 일부러 안 갖는다). 위 둘과 같은 규율이다.
+pub const testMakeStageRepo = makeStageRepo;
+pub const testTmpRepoPath = tmpRepoPath;
+pub const TestStageFixture = StageFixture;
 
 fn runQuiet(argv: []const []const u8) bool {
     var store: [8][:0]u8 = undefined;

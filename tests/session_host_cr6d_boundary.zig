@@ -176,6 +176,8 @@ test "CR6d 경계는 exact recovered screen probe와 actual AppKit input smoke�
     try std.testing.expectEqual(@as(usize, 1), count(pixel_capture, "withSurface(surface)"));
     try std.testing.expectEqual(@as(usize, 1), count(pixel_capture, "cursorPx = imeCursorRectPx()"));
     try std.testing.expectEqual(@as(usize, 1), count(pixel_capture, "reportedFirstRect = view.firstRect("));
+    try std.testing.expectEqual(@as(usize, 1), count(pixel_capture, "var postCaptureProbe = MaruAppHostSessionHostInputSmokeProbe()"));
+    try std.testing.expectEqual(@as(usize, 1), count(pixel_capture, "postCaptureProbe.active_remote != 0"));
     const input_smoke = between(
         swift,
         "private func maybeRunSessionHostInputContinuitySmoke()",

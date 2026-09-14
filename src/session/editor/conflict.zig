@@ -220,6 +220,35 @@ pub fn writeActions(
     return out[0..w];
 }
 
+/// 충돌 중인 파일의 **세 판 중 무엇을 읽었나**(S3a — docs/editor-merge-conflicts.md §5).
+///
+/// **규칙을 여기 두는 이유**: 「열 수 있나」와 「2-way 로 저하하나」는 git 을 안 돌려도 답할 수 있는
+/// 순수 판정이고, 워커 안에 두면 **실제 충돌 저장소 없이는 못 잰다**. 이 저장소에는 충돌 저장소를
+/// 만드는 하네스가 없다(쓰기 명령 어휘가 `init`·`merge` 를 일부러 안 갖는다) — 그러면 그 규칙이
+/// 영영 무판정으로 남는다.
+pub const StageSet = struct {
+    /// `:1:` — 공통 조상. **add/add 충돌에는 없다**(양쪽이 같은 경로를 새로 만들었다).
+    has_base: bool = false,
+    /// `:2:` — 현재 브랜치(ours).
+    has_ours: bool = false,
+    /// `:3:` — 합쳐 오는 브랜치(theirs).
+    has_theirs: bool = false,
+
+    /// 이 충돌을 **열 수 있나**. 한쪽이라도 있으면 보여 줄 것이 있다.
+    ///
+    /// **조상은 이 판정에 안 든다.** 조상만 있고 두 쪽이 다 없는 것은 「양쪽이 지웠다」인데, 그러면
+    /// 고를 내용이 없다 — 3-way 를 열어 봐야 빈 pane 셋이다.
+    pub fn openable(self: StageSet) bool {
+        return self.has_ours or self.has_theirs;
+    }
+
+    /// **조상이 없어 2-way 로 저하하나**(§5 S3a). 「내용이 비었다」가 아니라 「판이 없다」이다 —
+    /// 빈 조상 파일은 어엿한 조상이고, 길이로 가르면 그것이 없음으로 읽힌다.
+    pub fn degradesToTwoWay(self: StageSet) bool {
+        return !self.has_base;
+    }
+};
+
 /// 문서에 충돌 마커가 **하나라도 남아 있는가**. 저장할 때 알릴지 정하는 자리가 쓴다(§5 S2).
 ///
 /// **`scan` 과 같은 판정을 쓴다** — 여기서 「`<<<<<<<` 가 보이면 남았다」로 따로 재면, 닫히지 않은
@@ -326,6 +355,32 @@ test "닫히지 않은 것과 가름 없는 것은 «구간이 아니다»" {
     try testing.expect(!hasUnresolved(&.{}));
     var none: [2]Region = undefined;
     try testing.expectEqual(@as(usize, 0), scan(&.{}, &none).len);
+}
+
+test "stage 셋: 열 수 있나 · 2-way 로 저하하나 (여덟 가지 전부)" {
+    // **여덟 가지를 다 적는다** — 「흔한 셋」만 보면 add/add(조상 없음)나 「양쪽이 지웠다」처럼
+    // 드문 조합에서 판정이 뒤집혀도 안 보인다. 조합이 여덟뿐이라 전부 적는 것이 가장 싸다.
+    const Case = struct { b: bool, o: bool, t: bool, openable: bool, two_way: bool };
+    const cases = [_]Case{
+        .{ .b = false, .o = false, .t = false, .openable = false, .two_way = true }, // 아무것도 없다
+        .{ .b = true, .o = false, .t = false, .openable = false, .two_way = false }, // 양쪽이 지웠다 — 고를 것이 없다
+        .{ .b = false, .o = true, .t = false, .openable = true, .two_way = true }, // 들어온 쪽이 지웠다(+add/add 꼴)
+        .{ .b = false, .o = false, .t = true, .openable = true, .two_way = true },
+        .{ .b = true, .o = true, .t = false, .openable = true, .two_way = false }, // 들어온 쪽이 지웠다
+        .{ .b = true, .o = false, .t = true, .openable = true, .two_way = false }, // 내 쪽이 지웠다
+        .{ .b = false, .o = true, .t = true, .openable = true, .two_way = true }, // **add/add** — 조상이 없다
+        .{ .b = true, .o = true, .t = true, .openable = true, .two_way = false }, // 평범한 3-way
+    };
+    for (cases) |c| {
+        const set: StageSet = .{ .has_base = c.b, .has_ours = c.o, .has_theirs = c.t };
+        try testing.expectEqual(c.openable, set.openable());
+        try testing.expectEqual(c.two_way, set.degradesToTwoWay());
+    }
+
+    // **빈 조상과 «없는 조상»은 다르다.** 길이로 가르면 빈 파일이 조상이던 충돌이 근거 없이
+    // 2-way 로 저하한다 — 그래서 판정이 내용이 아니라 **있었나**를 본다.
+    const empty_base: StageSet = .{ .has_base = true, .has_ours = true, .has_theirs = true };
+    try testing.expect(!empty_base.degradesToTwoWay());
 }
 
 test "이름 잇기: 여백이 들어가고, 자리가 모자라면 «안 쓴다»" {

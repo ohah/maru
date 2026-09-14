@@ -3651,6 +3651,50 @@ pub fn build(b: *std.Build) void {
     run_file_tree_model_tests.addArg("--maru-expect-tests=24"); // 이름 있는 셋 + 이 그래프의 이름 없는 test 블록들(필터와 무관하게 컴파일된다)
     b.step("test-file-tree-model", "Run the pure file tree model unit tests only (RF5a filter)").dependOn(&run_file_tree_model_tests.step);
 
+    // 병합 충돌 **stage 규칙**만(S3a). `git_command` 의 지정자 판정자가 `test-editor` 그래프에
+    // **없어서**(실측) 그 이름만 돌리면 변이가 전부 「살아남음」으로 나온다 — 그렇다고 `test` 전체를
+    // 돌리면 한 변이에 6 분이 들고, 무관한 concurrent flake 가 「죽음」으로 세어진다(실측).
+    const merge_stage_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/maru.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "shutdown_wire_contract", .module = shutdown_wire_contract_mod }},
+        }),
+        .filters = &.{ "병합 충돌의 세 판은", "stage 셋", "spec 버퍼가 모자라면", "비교 기준마다 탭 라벨이" },
+    });
+    merge_stage_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
+    const run_merge_stage_tests = b.addRunArtifact(merge_stage_tests);
+    b.step("test-merge-stages", "Run the merge-stage (S3a) judges only").dependOn(&run_merge_stage_tests.step);
+
+    // 병합 stage 의 **끝에서 끝까지**(S3a). 위 스텝은 지정자·라벨 같은 **중립 규칙**만 본다 — 「어느
+    // 판이 어느 자리에 실리나」는 **진짜 충돌 저장소**가 있어야 보이고, 그 저장소를 만드는 하네스는
+    // `git_backend.zig` 안에 있다(제품의 쓰기 어휘는 `init`·`merge` 를 일부러 안 갖는다).
+    //
+    // 이 스텝이 없던 동안 워커 갈래가 **통째로 무판정**이었다(적대적 검증 2회차: 조상을 현재 것 자리에
+    // 싣는 변이 따위 여섯이 전부 살아남았다).
+    const merge_stage_e2e_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/git_backend.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "maru", .module = maru_mod },
+                .{ .name = "syntax", .module = syntax_mod },
+            },
+        }),
+        .filters = &.{"S3a end-to-end"},
+    });
+    const run_merge_stage_e2e = b.addRunArtifact(merge_stage_e2e_tests);
+    run_merge_stage_e2e.setCwd(b.path(".")); // 임시 저장소를 `.zig-cache` 밑에 만든다
+    run_merge_stage_e2e.addArg("--maru-expect-tests=6");
+    // ⚠️ **그리고 실제로 돌았는가.** 이 판정자들은 git 이 없으면 `SkipZigTest` 로 나간다 — 컴파일 수만
+    // 세면 하네스가 조용히 안 서도 초록이다(이 저장소가 가장 나쁘다고 적어 둔 실패 모드).
+    run_merge_stage_e2e.addArg("--maru-expect-passed=6");
+    b.step("test-merge-stages-e2e", "Run the merge-stage (S3a) end-to-end judges on a real conflicted repo").dependOn(&run_merge_stage_e2e.step);
+
     // 소스 컨트롤 **행 동작 규칙**만(S1 — 충돌 행은 스테이지가 아니라 해결이다). 같은 이유로 maru
     // 그래프에 필터를 건다: 이 판정자들은 `test-editor` 그래프에 **없어서**(실측 2026-09-12) 그 이름만
     // 돌리던 적대적 검증이 `scm_view`·`git_write_command` 변이를 전부 「살아남음」으로 읽었다.

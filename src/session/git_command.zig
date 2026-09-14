@@ -285,6 +285,12 @@ pub fn blobSpec(side: BlobSide, repo_relative_path: []const u8, buf: []u8) ?[]co
     const prefix = switch (side) {
         .head => "HEAD:",
         .index => ":",
+        // **병합 충돌의 세 판**(S3a — docs/editor-merge-conflicts.md §5). `git-merge(1)` 의
+        // "HOW CONFLICTS ARE PRESENTED" 가 정한 번호이고, `gitrevisions(7)` 이 `:<n>:<path>` 를
+        // 그 판을 가리키는 지정자로 적어 둔다.
+        .stage_base => ":1:",
+        .stage_ours => ":2:",
+        .stage_theirs => ":3:",
     };
     if (prefix.len + repo_relative_path.len > buf.len) return null; // 자른 경로로 다른 파일을 읽지 않는다
     @memcpy(buf[0..prefix.len], prefix);
@@ -297,6 +303,19 @@ pub const BlobSide = enum {
     head,
     /// index(스테이지 영역)의 내용. `index ↔ worktree` 비교의 왼쪽이자 `HEAD ↔ index`의 오른쪽이다.
     index,
+
+    // ── 병합 충돌 중의 세 판(S3a). **충돌 중에만 존재한다** — 평상시 index 에는 stage 0 하나뿐이고,
+    // 충돌이 나면 그 자리에 1·2·3 이 들어선다(그래서 `:<경로>` 가 못 읽힌다 — 비교 뷰가 충돌 행을
+    // `HEAD ↔ 작업트리` 로 여는 이유가 그것이다).
+    //
+    // **번호를 리터럴로 둔다.** 임의 문자열이 rev 자리에 못 오므로, 커밋 blob 이 hex 만 받게 막아 둔
+    // 방어를 여기서는 **구조적으로** 얻는다.
+    /// `:1:` — 공통 조상. **add/add 충돌에는 없다**(양쪽이 새로 만든 파일이라 조상이 없다).
+    stage_base,
+    /// `:2:` — 현재 브랜치(ours).
+    stage_ours,
+    /// `:3:` — 합쳐 오는 브랜치(theirs).
+    stage_theirs,
 };
 
 /// 임의 커밋의 blob 지정자(`<hex>:<path>`). "브랜치에 COMMIT 됨"의 왼쪽(merge-base)을 읽을 때 쓴다.
@@ -1054,6 +1073,31 @@ test "show_blob은 옵션으로 해석될 수 없는 spec만 넘기고 textconv�
 
     var index_buf: [256]u8 = undefined;
     try testing.expectEqualStrings(":src/main.zig", blobSpec(.index, "src/main.zig", &index_buf).?);
+}
+
+test "병합 충돌의 세 판은 `:1:`·`:2:`·`:3:` 이다 (S3a)" {
+    // **번호가 뜻을 정한다**(`git-merge(1)` "HOW CONFLICTS ARE PRESENTED"): 1 = 공통 조상,
+    // 2 = 현재 브랜치, 3 = 합쳐 오는 브랜치. 뒤바뀌면 「현재 것」 pane 에 남의 브랜치가 뜬다.
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings(":1:src/main.zig", blobSpec(.stage_base, "src/main.zig", &buf).?);
+    try testing.expectEqualStrings(":2:src/main.zig", blobSpec(.stage_ours, "src/main.zig", &buf).?);
+    try testing.expectEqualStrings(":3:src/main.zig", blobSpec(.stage_theirs, "src/main.zig", &buf).?);
+
+    // **평상시의 index(`:`)와 갈린다** — 충돌 중에는 stage 0 이 없어 그 지정자가 안 읽힌다.
+    try testing.expect(!std.mem.eql(u8, blobSpec(.index, "a.txt", &buf).?, ":1:a.txt"));
+
+    // 자리가 모자라면 **자르지 않는다**(다른 파일을 읽지 않게 — 위 판정자와 같은 규율).
+    //
+    // **딱 한 칸 모자라게 준다.** 넉넉히 모자란 버퍼(6 바이트)로 재면 검사에 **여유를 더한 변이**도
+    // 그대로 걸러 내 살아남는다(적대적 검증 1회차 실측) — 경계는 경계에서만 보인다.
+    const spec_len = ":2:src/main.zig".len;
+    var exact: [spec_len]u8 = undefined;
+    try testing.expect(blobSpec(.stage_ours, "src/main.zig", &exact) != null); // 딱 맞으면 쓴다
+    var one_short: [spec_len - 1]u8 = undefined;
+    try testing.expect(blobSpec(.stage_ours, "src/main.zig", &one_short) == null);
+
+    // **`-` 로 시작하는 경로도 옵션이 되지 않는다** — 접두가 `:n:` 이라 구조적으로 막힌다.
+    try testing.expectEqualStrings(":2:-rf/evil.txt", blobSpec(.stage_ours, "-rf/evil.txt", &buf).?);
 }
 
 test "spec 버퍼가 모자라면 자르지 않고 실패한다(다른 파일을 읽지 않게)" {

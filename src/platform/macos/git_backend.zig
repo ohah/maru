@@ -419,8 +419,22 @@ pub const SnapshotResult = struct {
 
 /// diff 본문 두 쪽. 목록 결과(`Result`)와 슬롯을 나눠 갖는다 — 목록 갱신과 본문 열기가 서로를 취소하지 않게.
 pub const DiffResult = struct {
+    /// 왼쪽. `.merge_stages` 에서는 **현재 것**(`:2:` — ours)이다.
     original: []u8 = &.{},
+    /// 오른쪽. `.merge_stages` 에서는 **들어온 것**(`:3:` — theirs)이다.
     modified: []u8 = &.{},
+    /// **공통 조상**(`:1:`) — `.merge_stages` 에서만 찬다(S3a).
+    ///
+    /// **빈 것과 «없는 것»이 다르다**: add/add 충돌은 조상이 아예 없고(양쪽이 새로 만들었다),
+    /// 조상이 **빈 파일**인 경우도 있다. 그 둘을 길이로 가르면 빈 조상이 「없음」으로 읽혀 3-way 가
+    /// 근거 없이 2-way 로 저하한다 — 그래서 `has_base` 를 따로 든다.
+    base: []u8 = &.{},
+    /// 세 판 중 **무엇을 읽었나**(S3a). 「열 수 있나」·「2-way 로 저하하나」는 이 값이 답한다.
+    ///
+    /// **불리언으로 풀어 두지 않는다.** 예전에는 `has_base` 하나만 실었는데, 그 값을 만드는 자리가
+    /// 워커와 여기 **둘**이 되어 한쪽을 「내용이 비었나」로 바꿔도 아무 판정자가 안 깨어났다
+    /// (적대적 검증 1회차). 판정을 소유한 타입을 그대로 실으면 그 두 번째 자리가 아예 없다.
+    stages: maru.session.editor.conflict.StageSet = .{},
     ok: bool = false,
     /// 한쪽이라도 상한에서 잘렸다. **잘린 내용을 온전한 파일처럼 보여 주지 않기 위해** 호출자가 이 사실을 쓴다.
     truncated: bool = false,
@@ -429,6 +443,7 @@ pub const DiffResult = struct {
     pub fn deinit(self: *DiffResult, allocator: std.mem.Allocator) void {
         allocator.free(self.original);
         allocator.free(self.modified);
+        allocator.free(self.base);
         self.* = .{};
     }
 };
@@ -1488,12 +1503,51 @@ fn diffWorker(job: *Job) void {
         return;
     }
 
+    if (target.base == .merge_stages) {
+        // **충돌 중의 세 판**(S3a). 평상시 index 에는 stage 0 하나뿐이고 충돌이 나면 그 자리에
+        // 1·2·3 이 들어선다 — 그래서 이 갈래만 `:<n>:` 을 읽는다.
+        //
+        // **조상이 없는 것은 정상이다**(add/add — 양쪽이 같은 경로를 새로 만들었다). 루트 커밋의
+        // 부모 blob 을 「왼쪽이 없다」로 읽는 것과 같은 판단이고, 실패로 접으면 그 충돌을 아예 못 연다.
+        var stages: maru.session.editor.conflict.StageSet = .{};
+        // **세 판을 한 자리에서 읽는다.** 갈래를 셋으로 풀어 두면 「잘렸다」를 옮기는 자리도 셋이 되고,
+        // 그중 하나만 지운 변이는 **나머지 둘이 덮어 준다** — 픽스처가 세 판을 다 넘겨도 안 죽는다
+        // (적대적 검증 3회차 W3·W3b 실측). 자리를 하나로 모으면 그 변이가 존재할 곳이 없다.
+        const reads = [_]struct {
+            side: git_command.BlobSide,
+            dst: *[]u8,
+            seen: *bool,
+        }{
+            // **내용이 비어도 조상은 조상이다** — 「읽혔나」는 길이가 아니라 이 자리가 답한다.
+            .{ .side = .stage_base, .dst = &result.base, .seen = &stages.has_base },
+            .{ .side = .stage_ours, .dst = &result.original, .seen = &stages.has_ours },
+            .{ .side = .stage_theirs, .dst = &result.modified, .seen = &stages.has_theirs },
+        };
+        for (reads) |read| {
+            if (blobSide(state.allocator, job, read.side)) |out| {
+                read.dst.* = out.bytes;
+                read.seen.* = true;
+                if (out.truncated) truncated = true;
+            } else |_| {}
+        }
+        // **판정은 중립이 소유한다**(`conflict.StageSet`) — 여기서 손으로 풀어 적으면 규칙을 쓰는 자리가
+        // 둘이 되고, 한쪽만 바꾼 변이가 산다(적대적 검증 1회차 실측).
+        result.stages = stages;
+        // **조상이 없어도 연다**(`openable()`): add/add 충돌은 `:1:` 이 아예 없다. 여기에
+        // `and stages.has_base` 를 더하면 그 충돌을 아예 못 열게 되고, 그 갈림은 실제 add/add 저장소가
+        // 있어야만 보인다 — 그 하네스가 `makeStageRepo(.add_add)` 다(적대적 검증 3회차에서 사살).
+        result.ok = stages.openable();
+        result.truncated = truncated;
+        finishDiff(state, job, target, result);
+        return;
+    }
+
     if (target.base != .untracked) {
         // 충돌은 왼쪽이 HEAD다 — index엔 stage 0이 없어 `:<경로>`가 실패한다(실측).
         const side: git_command.BlobSide = switch (target.base) {
             .staged, .conflict => .head,
             // `.commit`·`.turn_range`는 위에서 이미 돌려보냈다 — 여기 오면 그 자체가 버그다.
-            .unstaged, .untracked, .commit, .turn_range => .index,
+            .unstaged, .untracked, .commit, .turn_range, .merge_stages => .index,
         };
         if (blobSide(state.allocator, job, side)) |out| {
             result.original = out.bytes;
@@ -1901,12 +1955,11 @@ fn runArgvWithEnv(
     // ⚠️ **상한에서 끊었으면 종료 코드는 «우리가» 만든 것이다.** `readAllFd` 는 상한에서 읽기를 멈추고
     // 자식을 EPIPE 로 끊는데(그것이 이 파일의 의도다), 그러면 자식은 신호로 죽어 `reapPid` 가 -1 을
     // 준다. 그 값을 실패로 읽으면 **방금 받아 둔 잘린 내용을 통째로 버린다** — 게다가 자식이 우리보다
-    // 먼저 다 써 버리면 0 이라, 같은 파일이 **운에 따라** 열리거나 안 열렸다(실측 2026-09-14: 상한을
-    // 넘는 blob 을 읽는 판정자가 10 회 중 1 회 빨갰고, 그때 세 판 중 둘이 0 바이트로 왔다).
+    // 먼저 다 써 버리면 0 이라, 같은 파일이 **운에 따라** 열리거나 안 열렸다(실측 2026-09-14: 16 MiB
+    // 판을 읽는 판정자가 10 회 중 1 회 빨갰고, 그때 세 판 중 둘이 0 바이트로 왔다).
     if (!capped) {
         // **127·255 는 이름을 붙여 올린다**(RS4 §2.2 ⑺). 그 둘은 「git 이 거부했다」가 아니라 각각
-        // 「명령을 못 찾았다」·「거기까지 못 갔다」다. 로컬 호출자는 이 오류를 안 보는데(로컬 git 은 그
-        // 값을 안 쓴다) `runOn` 이 원격일 때만 이야기로 바꾼다 — 상한에 닿은 읽기에는 해당이 없다.
+        // 「명령을 못 찾았다」·「거기까지 못 갔다」다 — 상한에 닿은 읽기에는 해당이 없다.
         if (remote_exit_codes) {
             if (spawned.exit_code == 127) return error.ExitCommandNotFound;
             if (spawned.exit_code == 255) return error.ExitTransportFailed;
@@ -2683,6 +2736,316 @@ test "diff 본문을 기준별로 읽는다(end-to-end)" {
     var missing_result = missing;
     defer missing_result.deinit(worker_allocator);
     try testing.expect(!missing_result.ok);
+}
+
+/// 판정자 전용: **세 판이 든 충돌 저장소**를 만든다(성공하면 true).
+///
+/// 이 파일에 이미 있는 `makeConflictRepo` 는 **내용 충돌 하나**만 만든다. 여기서는 축이 하나 더 있다:
+/// `add_add` 가 참이면 양쪽이 **같은 경로를 새로** 만들어 **공통 조상이 없는** 충돌이 된다 — 그때
+/// index 에는 `:1:` 이 아예 안 실린다(실제 git 으로 확인했다).
+///
+/// 이 하네스가 없던 동안 워커의 세 판 배선이 **통째로 무판정**이었다(적대적 검증 2회차: 조상을 현재
+/// 것 자리에 싣는 변이, 안전 경로 검사를 지운 변이 따위가 여섯이 살아남았다).
+/// 세 판 픽스처의 **축**. 조상이 어떤 모양인가로 갈린다 — 이 셋이 `StageSet` 의 세 갈래를 각각 연다.
+const StageFixture = enum {
+    /// 흔한 내용 충돌 — 세 판이 다 있다.
+    content,
+    /// 양쪽이 같은 경로를 **새로** 만들었다 — `:1:` 이 아예 없다(실측: `ls-files -u` 에 2·3 만 뜬다).
+    add_add,
+    /// 조상이 **빈 파일**이다 — `:1:` 은 있고 내용이 0 바이트다(실측: 빈 blob `e69de29`).
+    /// 「없는 것」과 「빈 것」을 길이로 가르면 이 경우가 2-way 로 잘못 저하한다.
+    empty_base,
+};
+
+fn makeStageRepo(exe: []const u8, repo: []const u8, fixture: StageFixture) bool {
+    const steps = [_][]const []const u8{
+        &.{ exe, "init", "-q", "-b", "main", repo },
+        &.{ exe, "-C", repo, "config", "user.email", "t@t" },
+        &.{ exe, "-C", repo, "config", "user.name", "t" },
+    };
+    for (steps) |argv| {
+        if (!runQuiet(argv)) return false;
+    }
+
+    switch (fixture) {
+        .add_add => {
+            // 씨앗만 공통이고 `f.txt` 는 양쪽에서 **새로** 생긴다 — 조상이 없다.
+            writeFileAt(repo, "seed.txt", "seed\n") catch return false;
+            if (!runQuiet(&.{ exe, "-C", repo, "add", "seed.txt" })) return false;
+            if (!runQuiet(&.{ exe, "-C", repo, "commit", "-qm", "seed" })) return false;
+            if (!runQuiet(&.{ exe, "-C", repo, "checkout", "-q", "-b", "other" })) return false;
+            writeFileAt(repo, "f.txt", "theirs only\n") catch return false;
+        },
+        .content, .empty_base => {
+            writeFileAt(repo, "f.txt", if (fixture == .empty_base) "" else "BASE\n") catch return false;
+            if (!runQuiet(&.{ exe, "-C", repo, "add", "f.txt" })) return false;
+            if (!runQuiet(&.{ exe, "-C", repo, "commit", "-qm", "base" })) return false;
+            if (!runQuiet(&.{ exe, "-C", repo, "checkout", "-q", "-b", "other" })) return false;
+            writeFileAt(repo, "f.txt", "THEIRS\n") catch return false;
+        },
+    }
+    if (!runQuiet(&.{ exe, "-C", repo, "add", "f.txt" })) return false;
+    if (!runQuiet(&.{ exe, "-C", repo, "commit", "-qm", "theirs" })) return false;
+    if (!runQuiet(&.{ exe, "-C", repo, "checkout", "-q", "main" })) return false;
+    writeFileAt(repo, "f.txt", "OURS\n") catch return false;
+    if (!runQuiet(&.{ exe, "-C", repo, "add", "f.txt" })) return false;
+    if (!runQuiet(&.{ exe, "-C", repo, "commit", "-qm", "ours" })) return false;
+    // 이 merge 는 **실패해야** 충돌 상태가 된다 — 성공하면 이 픽스처의 전제가 깨진 것이다.
+    return !runQuiet(&.{ exe, "-C", repo, "merge", "other" });
+}
+
+/// 판정자 전용: `.zig-cache` 밑 임시 저장소 경로. `std.testing.tmpDir` 는 0.16 에서 realpath 를 안 주므로
+/// (이 파일의 앞선 판정자가 이미 그렇게 적어 두었다) 경로를 직접 만든다.
+fn tmpRepoPath(buf: []u8, name: []const u8) ?[]const u8 {
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_ptr = std.c.getcwd(&cwd_buf, cwd_buf.len) orelse return null;
+    const cwd = std.mem.span(@as([*:0]u8, @ptrCast(cwd_ptr)));
+    return std.fmt.bufPrint(buf, "{s}/.zig-cache/{s}", .{ cwd, name }) catch null;
+}
+
+test "진짜 충돌에서 세 판을 읽는다 — :1:·:2:·:3: (S3a end-to-end)" {
+    // **성공 경로다.** 아래 실패 판정자는 세 판이 **다 없을** 때만 보므로, 「어느 판이 어느 자리에 실리나」가
+    // 통째로 무판정이었다(적대적 검증 2회차에서 여섯이 살아남았다).
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const exe = locate(&exe_buf) orelse return error.SkipZigTest;
+
+    var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const repo = tmpRepoPath(&repo_buf, "tmp-merge-stages") orelse return error.SkipZigTest;
+    var rm_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const rm_path = std.fmt.bufPrintZ(&rm_buf, "{s}", .{repo}) catch return error.SkipZigTest;
+    _ = runQuiet(&.{ "/bin/rm", "-rf", rm_path });
+    defer _ = runQuiet(&.{ "/bin/rm", "-rf", rm_path });
+    if (!makeStageRepo(exe, repo, .content)) return error.SkipZigTest;
+
+    var backend = try Backend.init(std.Io.Threaded.global_single_threaded.io());
+    defer backend.deinit();
+    try testing.expect(backend.submitDiff(exe, repo, "f.txt", "", "", "", .merge_stages, 11, null, ""));
+    var result = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
+    defer result.deinit(worker_allocator);
+
+    try testing.expect(result.ok);
+    // **자리가 뜻이다**: `:1:` 조상 · `:2:` 현재 것 · `:3:` 들어온 것. 뒤바뀌면 pane 이 남의 것을 띄운다.
+    try testing.expect(result.stages.has_base);
+    try testing.expect(result.stages.has_ours);
+    try testing.expect(result.stages.has_theirs);
+    try testing.expectEqualStrings("BASE\n", result.base);
+    try testing.expectEqualStrings("OURS\n", result.original);
+    try testing.expectEqualStrings("THEIRS\n", result.modified);
+    try testing.expect(!result.stages.degradesToTwoWay());
+    try testing.expect(!result.truncated);
+    try testing.expectEqual(@as(u64, 11), result.request_id);
+
+    // **rename 의 옛 경로는 stage 에 안 쓴다.** 왼쪽이 HEAD 인 기준에서는 옛 경로로 읽어야 blob 이
+    // 잡히지만(그쪽 규칙이다), 충돌 stage 는 **지금 경로**에 실린다 — 옛 경로로 읽으면 세 판이 전부
+    // 안 잡혀 충돌을 못 연다. 여기서는 index 에 없는 옛 경로를 일부러 실어 그 갈림을 드러낸다.
+    try testing.expect(backend.submitDiff(exe, repo, "f.txt", "gone.txt", "", "", .merge_stages, 15, null, ""));
+    var renamed = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
+    defer renamed.deinit(worker_allocator);
+    try testing.expect(renamed.ok);
+    try testing.expectEqualStrings("OURS\n", renamed.original);
+    try testing.expectEqualStrings("BASE\n", renamed.base);
+
+    // **저장소 밖으로 나가는 경로는 결과로 실패한다.**
+    //
+    // 정직하게: 이 판정자는 `repo_path.isSafeRelative` 가 **도는지**는 못 가른다 — 실측(2026-09-14)에서
+    // git 자신이 먼저 거절한다(`git show :1:../f.txt` → `fatal: '../f.txt' is outside repository`,
+    // `:1:a/../f.txt` → `does not exist`). 즉 그 방어를 지운 변이는 이 갈래에서 **등가**다. 방어는
+    // 그대로 둔다(git 이 거절하는 것에 기대는 것보다 우리가 안 보내는 편이 낫다). 여기서 재는 것은
+    // 「깨끗하게 실패하고 결과가 **한 번** 도착한다」 — 그것이 화면을 「여는 중」에서 풀어 준다.
+    try testing.expect(backend.submitDiff(exe, repo, "../escape.txt", "", "", "", .merge_stages, 12, null, ""));
+    var escaped = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
+    defer escaped.deinit(worker_allocator);
+    try testing.expect(!escaped.ok);
+    try testing.expectEqual(@as(usize, 0), escaped.base.len);
+}
+
+test "조상이 «빈 파일»이어도 3-way 다 — 길이로 가르지 않는다 (S3a end-to-end)" {
+    // `:1:` 이 **없는 것**(add/add)과 **비어 있는 것**은 다르다. 길이로 가르면 빈 조상이 「없음」으로
+    // 읽혀 3-way 가 근거 없이 2-way 로 저하한다 — 실측으로 stage 1 은 빈 blob(`e69de29`)으로 실린다.
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const exe = locate(&exe_buf) orelse return error.SkipZigTest;
+
+    var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const repo = tmpRepoPath(&repo_buf, "tmp-merge-stages-empty") orelse return error.SkipZigTest;
+    var rm_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const rm_path = std.fmt.bufPrintZ(&rm_buf, "{s}", .{repo}) catch return error.SkipZigTest;
+    _ = runQuiet(&.{ "/bin/rm", "-rf", rm_path });
+    defer _ = runQuiet(&.{ "/bin/rm", "-rf", rm_path });
+    if (!makeStageRepo(exe, repo, .empty_base)) return error.SkipZigTest;
+
+    var backend = try Backend.init(std.Io.Threaded.global_single_threaded.io());
+    defer backend.deinit();
+    try testing.expect(backend.submitDiff(exe, repo, "f.txt", "", "", "", .merge_stages, 16, null, ""));
+    var result = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
+    defer result.deinit(worker_allocator);
+
+    try testing.expect(result.ok);
+    try testing.expectEqual(@as(usize, 0), result.base.len); // 내용은 비었고
+    try testing.expect(result.stages.has_base); // **그래도 조상은 있다**
+    try testing.expect(!result.stages.degradesToTwoWay()); // 그러므로 3-way 를 유지한다
+}
+
+test "상한을 넘는 판은 «잘린 채로» 도착한다 (S3a end-to-end)" {
+    // 상한(16 MiB)을 넘는 판은 **잘라서 싣고 잘렸다고 말한다**. 잘림 표시를 안 싣는 변이는 화면이
+    // 「이게 전부」라고 거짓말하게 만드는데, 상한을 넘는 픽스처가 없으면 그 변이가 산다(적대적 검증
+    // 2회차 W3·W10 — 둘 다 살아남았다).
+    //
+    // **대조군은 바로 위 판정자다**(작은 저장소 → `truncated == false`). 여기만 있으면 `truncated` 를
+    // 항상 참으로 두는 변이가 산다.
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const exe = locate(&exe_buf) orelse return error.SkipZigTest;
+
+    var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const repo = tmpRepoPath(&repo_buf, "tmp-merge-stages-big") orelse return error.SkipZigTest;
+    var rm_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const rm_path = std.fmt.bufPrintZ(&rm_buf, "{s}", .{repo}) catch return error.SkipZigTest;
+    _ = runQuiet(&.{ "/bin/rm", "-rf", rm_path });
+    defer _ = runQuiet(&.{ "/bin/rm", "-rf", rm_path });
+
+    // 한 줄짜리 거대 파일이다 — 줄이 하나뿐이라 git 의 병합은 세 판을 **통째로** 충돌로 보고,
+    // 16 MiB 를 줄 단위로 훑는 비용이 들지 않는다.
+    // **여유가 파이프 버퍼보다 훨씬 커야 한다.** 상한에 「딱 몇 바이트」만 더한 파일로 재면, 우리가
+    // 읽기를 멈추는 순간 git 이 **이미 다 쓰고 끝나 있을 수** 있어 종료 코드가 0 으로 온다 — 그러면
+    // 이 판정자가 **10 회 중 9 회만** 빨간, 재는 쪽이 흔들리는 자가 된다(실측 2026-09-14). 1 MiB 를
+    // 더해 두면 파이프 버퍼(64 KiB)에 다 안 들어가 자식이 반드시 write 에서 살아 있다.
+    const big = testing.allocator.alloc(u8, max_output_bytes + (1 << 20)) catch return error.SkipZigTest;
+    defer testing.allocator.free(big);
+    @memset(big, 'a');
+    big[big.len - 1] = '\n';
+    // **앞머리를 다르게 둔다** — 잘림은 꼬리를 먹으므로, 뒤에 두면 어느 판인지 확인할 수 없다.
+    if (!makeBigStageRepo(exe, repo, big)) return error.SkipZigTest;
+
+    var backend = try Backend.init(std.Io.Threaded.global_single_threaded.io());
+    defer backend.deinit();
+    try testing.expect(backend.submitDiff(exe, repo, "f.txt", "", "", "", .merge_stages, 14, null, ""));
+    var result = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
+    defer result.deinit(worker_allocator);
+
+    try testing.expect(result.ok);
+    try testing.expect(result.truncated); // ← W3·W10 이 여기서 죽는다
+    // **상한은 «메모리 한계»다** — 넘겨 받으면 잘렸다고 말해도 소용없다(그만큼 들고 있는 것이 문제다).
+    try testing.expect(result.base.len <= max_output_bytes);
+    try testing.expect(result.original.len <= max_output_bytes);
+    try testing.expect(result.modified.len <= max_output_bytes);
+    // 잘려도 **자리는 지킨다**: 앞머리가 곧 어느 판인지의 증거다.
+    try testing.expect(std.mem.startsWith(u8, result.base, "BASE"));
+    try testing.expect(std.mem.startsWith(u8, result.original, "OURS"));
+    try testing.expect(std.mem.startsWith(u8, result.modified, "THRS"));
+}
+
+/// 위 판정자 전용: 세 판이 **전부 상한을 넘는** 충돌 저장소. `big` 은 호출자가 쥔 스크래치다(16 MiB 를
+/// 세 번 따로 잡지 않는다) — 앞 4 바이트만 갈아 끼워 세 판을 만든다.
+fn makeBigStageRepo(exe: []const u8, repo: []const u8, big: []u8) bool {
+    const steps = [_][]const []const u8{
+        &.{ exe, "init", "-q", "-b", "main", repo },
+        &.{ exe, "-C", repo, "config", "user.email", "t@t" },
+        &.{ exe, "-C", repo, "config", "user.name", "t" },
+    };
+    for (steps) |argv| {
+        if (!runQuiet(argv)) return false;
+    }
+    const write = struct {
+        fn f(dir: []const u8, buf: []u8, tag: []const u8) bool {
+            @memcpy(buf[0..4], tag);
+            writeFileAt(dir, "f.txt", buf) catch return false;
+            return true;
+        }
+    }.f;
+
+    if (!write(repo, big, "BASE")) return false;
+    if (!runQuiet(&.{ exe, "-C", repo, "add", "f.txt" })) return false;
+    if (!runQuiet(&.{ exe, "-C", repo, "commit", "-qm", "base" })) return false;
+    if (!runQuiet(&.{ exe, "-C", repo, "checkout", "-q", "-b", "other" })) return false;
+    if (!write(repo, big, "THRS")) return false;
+    if (!runQuiet(&.{ exe, "-C", repo, "commit", "-qam", "theirs" })) return false;
+    if (!runQuiet(&.{ exe, "-C", repo, "checkout", "-q", "main" })) return false;
+    if (!write(repo, big, "OURS")) return false;
+    if (!runQuiet(&.{ exe, "-C", repo, "commit", "-qam", "ours" })) return false;
+    return !runQuiet(&.{ exe, "-C", repo, "merge", "other" });
+}
+
+test "add/add 충돌에는 조상이 «없다» — 2-way 로 저하한다 (S3a end-to-end)" {
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const exe = locate(&exe_buf) orelse return error.SkipZigTest;
+
+    var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const repo = tmpRepoPath(&repo_buf, "tmp-merge-stages-addadd") orelse return error.SkipZigTest;
+    var rm_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const rm_path = std.fmt.bufPrintZ(&rm_buf, "{s}", .{repo}) catch return error.SkipZigTest;
+    _ = runQuiet(&.{ "/bin/rm", "-rf", rm_path });
+    defer _ = runQuiet(&.{ "/bin/rm", "-rf", rm_path });
+    if (!makeStageRepo(exe, repo, .add_add)) return error.SkipZigTest;
+
+    var backend = try Backend.init(std.Io.Threaded.global_single_threaded.io());
+    defer backend.deinit();
+    try testing.expect(backend.submitDiff(exe, repo, "f.txt", "", "", "", .merge_stages, 13, null, ""));
+    var result = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
+    defer result.deinit(worker_allocator);
+
+    // **조상이 없어도 «연다».** 실패로 접으면 add/add 충돌은 아예 못 고친다 — 이것이 `openable()` 의 값이다.
+    try testing.expect(result.ok);
+    try testing.expect(!result.stages.has_base);
+    try testing.expect(result.stages.has_ours);
+    try testing.expect(result.stages.has_theirs);
+    try testing.expect(result.stages.degradesToTwoWay());
+    try testing.expectEqual(@as(usize, 0), result.base.len);
+    try testing.expectEqualStrings("OURS\n", result.original);
+    try testing.expectEqualStrings("theirs only\n", result.modified);
+}
+
+test "충돌이 «아닌» 파일에 3-way 를 걸면 깨끗하게 실패한다 (S3a end-to-end)" {
+    // **성공 경로는 여기서 못 잰다** — 충돌 중인 저장소가 있어야 하고, 이 저장소에는 그것을 만드는
+    // 하네스가 없다(쓰기 명령 어휘가 `init`·`merge` 를 **일부러** 안 갖는다 — 닫힌 어휘가 그 모듈의
+    // 계약이다). 그 대신 성공 경로는 실제 `git merge` 로 손 확인했고 PR 에 적었다.
+    //
+    // **여기서 재는 것은 실패의 «모양»이다**: 평상시 index 에는 stage 0 하나뿐이라 `:1:`·`:2:`·`:3:`
+    // 이 전부 없다. 그때 in-flight 가 풀리고 결과가 **한 번** 도착해야 화면이 「여는 중」에 안 갇힌다
+    // (같은 규율을 「없는 경로」 판정자가 이미 적어 두었다).
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const exe = locate(&exe_buf) orelse return error.SkipZigTest;
+    var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_ptr = std.c.getcwd(&repo_buf, repo_buf.len) orelse return error.NoCwd;
+    const repo = std.mem.span(@as([*:0]u8, @ptrCast(cwd_ptr)));
+
+    var backend = try Backend.init(std.Io.Threaded.global_single_threaded.io());
+    defer backend.deinit();
+
+    try testing.expect(backend.submitDiff(exe, repo, "build.zig", "", "", "", .merge_stages, 7, null, ""));
+    const got = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
+    var result = got;
+    defer result.deinit(worker_allocator);
+    // 충돌이 아니므로 세 판이 다 없다 — **실패를 결과로 싣는다**(크래시도, 영영 pending 도 아니다).
+    try testing.expect(!result.ok);
+    try testing.expect(!result.stages.has_base);
+    try testing.expect(result.stages.degradesToTwoWay()); // 조상이 없으니 2-way 다
+    try testing.expectEqual(@as(usize, 0), result.original.len);
+    try testing.expectEqual(@as(usize, 0), result.modified.len);
+    try testing.expectEqual(@as(usize, 0), result.base.len);
+    try testing.expectEqual(@as(u64, 7), result.request_id);
+
+    // **다음 요청을 받는다** — in-flight 가 풀렸다는 뜻이다(안 풀리면 그 자리에서 화면이 멈춘다).
+    try testing.expect(backend.submitDiff(exe, repo, "build.zig", "", "", "", .staged, 8, null, ""));
+    var next = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
+    defer next.deinit(worker_allocator);
+    try testing.expect(next.ok);
+}
+
+test "DiffResult 는 세 판을 «전부» 놓는다 — 누수 (S3a end-to-end 그래프)" {
+    // **backend 의 end-to-end 판정자는 `worker_allocator` 를 쓴다** — 누수 검사가 없다. 그래서 조상
+    // 바이트를 안 놓는 변이가 그쪽에서는 살아남는다(적대적 검증 1회차). 여기서는 `testing.allocator`
+    // 로 잡아 놓게 해서, 빠뜨린 `free` 가 곧 빨간 줄이 되게 한다.
+    const allocator = testing.allocator;
+    var result: DiffResult = .{
+        .original = try allocator.dupe(u8, "ours"),
+        .modified = try allocator.dupe(u8, "theirs"),
+        .base = try allocator.dupe(u8, "base"),
+        .stages = .{ .has_base = true, .has_ours = true, .has_theirs = true },
+        .ok = true,
+    };
+    result.deinit(allocator);
+    // 비운 뒤에는 판정도 초기값이다 — 남아 있으면 다음 요청이 옛 저하 판정을 물려받는다.
+    try testing.expect(!result.stages.has_base);
+    try testing.expectEqual(@as(usize, 0), result.base.len);
 }
 
 fn waitForDiff(backend: *Backend) ?DiffResult {

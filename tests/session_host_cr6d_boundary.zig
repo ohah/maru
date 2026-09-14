@@ -21,6 +21,10 @@ test "CR6d 경계는 exact recovered screen probe와 actual AppKit input smoke�
     defer allocator.free(input_source_policy);
     const input_source_restore = try read(allocator, "src/platform/macos/SessionHostInputSourceRestore.swift");
     defer allocator.free(input_source_restore);
+    const pixel_test = try read(allocator, "tests/session_host_cr6d_pixel.zig");
+    defer allocator.free(pixel_test);
+    const pixel_validator = try read(allocator, "tests/support/session_host_cr6d_pixel.zig");
+    defer allocator.free(pixel_validator);
 
     // ABI 178 retains the read-only record. The record exposes four scalar observations and no
     // input handle, runtime pointer, or action token that Swift could use to bypass NSEvent.
@@ -140,6 +144,19 @@ test "CR6d 경계는 exact recovered screen probe와 actual AppKit input smoke�
     try std.testing.expectEqual(@as(usize, 1), count(gate, "session_host_input_smoke_source_record_cleared=true"));
     try std.testing.expectEqual(@as(usize, 1), count(gate, "MARU_SESSION_HOST_CR6D_INPUT_SOURCE_RESTORE_EXE"));
     try std.testing.expectEqual(@as(usize, 1), count(gate, "run_session_host_cr6d_boundary_tests.addArg(\"--maru-expect-tests=1\");"));
+
+    // v2a의 판정자는 기본 test graph에 고정된 순수 consumer다. 실제 AppKit producer가 붙기 전에도
+    // identity/세대/anchor/PPM digest와 관심 영역 계약이 사라지거나 파일 I/O를 직접 열 수 없다.
+    try std.testing.expectEqual(@as(usize, 1), count(build, "\"test-session-host-cr6d-pixel-validator\""));
+    try std.testing.expectEqual(@as(usize, 1), count(build, "run_session_host_cr6d_pixel_tests.addArg(\"--maru-expect-tests=8\");"));
+    try std.testing.expectEqual(@as(usize, 1), count(build, "test_step.dependOn(&run_session_host_cr6d_pixel_tests.step);"));
+    try std.testing.expectEqual(@as(usize, 1), count(pixel_test, "checkAllAllocationFailures"));
+    inline for (.{ "before_digest", "marked_digest", "runtime_id", "surface_id", "first_rect" }) |field| {
+        try std.testing.expect(count(pixel_validator, field) > 0);
+    }
+    inline for (.{ "std.fs.", "std.process.", "std.c.", "@cImport(", "MaruAppHost" }) |forbidden| {
+        try std.testing.expectEqual(@as(usize, 0), count(pixel_validator, forbidden));
+    }
 }
 
 fn read(allocator: std.mem.Allocator, path: []const u8) ![]u8 {

@@ -1293,7 +1293,13 @@ pub fn drainIgnoreResults(self: *AppSession) void {
         // 「물어봤나」의 유일한 출처다: 거절·실패는 여기 못 오므로 그때는 여전히 거짓이다.
         self.git_ignore_answered = true;
         // 물었던 경로를 먼저 지우고(이번 답이 권위다), 무시된 것만 다시 세운다.
-        for (self.git_ignore_query_paths.items) |rel| {
+        //
+        // ⚠️ **그 목록도 답이 들고 온 것을 쓴다**(`IgnoreResult.asked`). 세션 버퍼
+        // (`git_ignore_query_paths`)는 디렉터리를 읽을 때마다 비워지고 덮이는데, 백엔드는 답이 하나
+        // 걸려 있는 동안 새 요청을 **거절**한다 — 그래서 「A 를 물어 둔 채 B 를 스캔」하면 버퍼는 B 것이
+        // 되고 요청은 안 나간다. 그 상태에서 A 의 답이 오면 **B 의 행들이 지워져**, 아무도 안 물어본
+        // 행의 흐림이 통째로 풀린다(트리를 펼치면 형제들이 밝아진다 — 적대적 검증 10 회차).
+        for (res.asked) |rel| {
             var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
             if (joinRepoPath(res.repo, rel, &abs_buf)) |abs| self.file_tree.markIgnored(abs, false);
         }

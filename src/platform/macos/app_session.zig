@@ -71018,7 +71018,7 @@ test "탐색기 무시 표시는 «물을 때의 저장소»에 붙는다 — �
     git_ops.rememberGitRepo(session, "/repo-B");
 
     // `check-ignore -z` 는 NUL 로 끊은 **상대경로**를 낸다 — 그 틀이 A 임을 답이 들고 온다.
-    try std.testing.expect(session.git_backend.?.pushIgnoreResultForTest("/repo-A", "ignored.txt\x00"));
+    try std.testing.expect(session.git_backend.?.pushIgnoreResultForTest("/repo-A", &.{ "ignored.txt", "keep.txt" }, "ignored.txt\x00"));
     git_ops.drainIgnoreResults(session);
 
     var rows: std.ArrayList(file_tree.Row) = .empty;
@@ -71049,6 +71049,70 @@ test "탐색기 무시 표시는 «물을 때의 저장소»에 붙는다 — �
     try std.testing.expect(session.git_result == null); // 소스 컨트롤 목록은 읽은 적이 없다
     // 옛 코드는 여기서 `git_result != null` 을 봤고, 그 값이 `null` 이라 **모든 행이 흐림 없음**이었다.
     try std.testing.expect(file_tree_dock_ops.ignoredKnownForTest(session));
+}
+
+test "앞 디렉터리의 답이 뒤 디렉터리의 흐림을 지우지 않는다" {
+    // **적대적 검증 10 회차(2026-09-14).** 「답이 자기 질문의 틀을 들고 온다」를 `repo` 에만 적용하고
+    // **물어본 목록**에는 안 했다. 그 목록은 세션 버퍼(`git_ignore_query_paths`)인데, 디렉터리를 읽을
+    // 때마다 **비워지고 덮인다.**
+    //
+    // 그런데 백엔드는 답이 하나 걸려 있는 동안 새 요청을 **거절**한다(`submitCheckIgnore`). 그래서:
+    //   ⑴ A 를 물어 둔다 — 요청이 나갔고 버퍼는 A 것.
+    //   ⑵ 답이 오기 전에 B 가 스캔된다 — 버퍼가 **B 것으로 덮이고**, 요청은 거절돼 안 나간다.
+    //   ⑶ A 의 답이 도착한다 — 드레인이 버퍼(=B)를 「물어본 것」으로 읽고 **B 의 행들을 지운다.**
+    //
+    // 사용자에게는 **트리를 펼치면 형제들의 흐림이 풀리는** 것으로 보인다. 아무도 B 를 물어본 적이
+    // 없는데 그 판정이 사라진다 — 「모르면 흐리게 하지 않는다」가 아니라 **알던 것을 잊는다.**
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    session.git_backend = try git_backend_mod.Backend.init(session.io);
+
+    try session.file_tree.replaceExplicitRoots(&.{"/repo"});
+    try session.file_tree.applySnapshot("/repo", &.{
+        .{ .name = "a.txt", .kind = .file },
+        .{ .name = "b.txt", .kind = .file },
+    });
+
+    // ⑴ 둘 다 무시됨으로 판정받아 흐려져 있다.
+    try std.testing.expect(session.git_backend.?.pushIgnoreResultForTest(
+        "/repo",
+        &.{ "a.txt", "b.txt" },
+        "a.txt\x00b.txt\x00",
+    ));
+    git_ops.drainIgnoreResults(session);
+    try std.testing.expect(ignoredForTest(session, "/repo/a.txt"));
+    try std.testing.expect(ignoredForTest(session, "/repo/b.txt"));
+
+    // ⑵ **거절된 요청이 버퍼만 덮어 놓은 상태**를 만든다 — 제품에서 `requestIgnoredForPaths` 가
+    //    `submitCheckIgnore` 거절 직전까지 한 일 그대로다.
+    session.git_ignore_query_paths.clearRetainingCapacity();
+    try session.git_ignore_query_paths.append(allocator, "b.txt");
+
+    // ⑶ **앞 요청(a.txt 만 물었다)의 답**이 도착한다.
+    try std.testing.expect(session.git_backend.?.pushIgnoreResultForTest(
+        "/repo",
+        &.{"a.txt"},
+        "a.txt\x00",
+    ));
+    git_ops.drainIgnoreResults(session);
+
+    try std.testing.expect(ignoredForTest(session, "/repo/a.txt")); // 물어봤고 무시됨 — 그대로
+    // **옛 코드는 여기서 거짓이었다**: 버퍼(=b.txt)를 「물어본 것」으로 읽고 지웠다.
+    try std.testing.expect(ignoredForTest(session, "/repo/b.txt"));
+}
+
+fn ignoredForTest(session: *AppSession, want: []const u8) bool {
+    var rows: std.ArrayList(file_tree.Row) = .empty;
+    defer rows.deinit(std.testing.allocator);
+    session.file_tree.buildRows(std.testing.allocator, &.{}, &rows) catch return false;
+    for (rows.items) |row| {
+        const path = file_tree.rowPath(row) orelse continue;
+        if (std.mem.eql(u8, path, want)) return file_tree.rowIgnored(row);
+    }
+    return false;
 }
 
 test "탐색기로 들어오면 흐림을 물을 곳이 생긴다 — 이미 탐색기인 창에서도" {

@@ -110,6 +110,17 @@ const cases = [_]Case{
     .{ .name = "agent-remote-unsupported", .rect = dock_column },
 };
 
+// ⚠️ **여기 없는 장 하나 — 「연결이 끊긴 원격 pane」**(적대적 검증 2026-09-14).
+//
+// `ControlPersist` 만료·네트워크 끊김에서 사용자가 실제로 보는 화면이라 값어치가 큰데, **캡처가
+// 결정적이지 않다.** 원격 강제는 OSC 를 셸에 타이핑해 보내고 2 초마다 다시 시도하므로, 화면이
+// 「로컬 → (통지 도착) → 연결 끊김」으로 **넘어가는 도중**에 찍힐 수 있다. 실측(같은 명령 3 회):
+// 두 장은 0 픽셀로 같았고 한 장이 63 픽셀 달랐다.
+//
+// 그래서 **넣지 않는다** — 가끔 빨개지는 장 하나가 게이트 전체의 신뢰를 깎는다. 그 화면의 계약은
+// 대신 순수 판정자가 문다(`연결이 끊긴 원격 pane 은 …`, `app_session.zig`). 넣으려면 먼저 강제 통지가
+// **언제 도착했는지**를 캡처가 알 수 있어야 한다(지금은 알 방법이 없다).
+
 test "원격 SCM 도크 열이 골든과 같다" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;

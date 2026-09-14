@@ -101,6 +101,19 @@ run = "zig build test-macos-app-host-abi"
 description = "Build the Zig static library exported to the Swift macOS app host"
 run = "zig build macos-app-host-abi-lib"
 
+[tasks.check-perf-compile]
+# `check` 가 거는 얼굴. perf 하네스(`tools/perf/core.zig`)를 **컴파일만** 한다 — 실행은 `perf` 태스크가
+# 예산을 재느라 수십 초라 `check` 에 못 넣지만, 컴파일은 몇 초다. 안 걸면 하네스가 부르는 제품 함수의
+# 시그니처가 바뀌어도 로컬 `check` 가 초록이고 CI 의 `core performance budget` 에서야 깨진다(실측
+# 2026-09-14). `check-macos-app-host` 와 같은 축의 구멍이다. 모든 OS 에서 컴파일된다(maru 모듈만 쓴다).
+#
+# **반드시 ReleaseFast 로 컴파일한다.** 하네스 `main` 이 `if (builtin.mode == .Debug) return error` 로 시작하는데
+# 그것은 comptime 분기라, Debug 에서는 그 뒤의 벤치 코드가 통째로 dead code 가 되어 **Zig 가 분석조차 하지
+# 않는다** — 존재하지 않는 함수를 불러도 컴파일이 된다(실측: 이 태스크를 처음 Debug 로 만들고 일부러 깨뜨렸더니
+# 초록이었다). CI 의 `core performance budget` 이 같은 결함을 잡은 것도 ReleaseFast 였기 때문이다.
+description = "Compile the performance budget harness (ReleaseFast) without running it"
+run = "zig build perf-compile -Doptimize=ReleaseFast"
+
 [tasks.check-macos-app-host]
 # `check` 가 거는 얼굴. macOS 에서는 앱 호스트를 실제로 컴파일하고, 다른 OS 에서는 **왜 건너뛰는지 찍고**
 # 통과한다. 조용한 skip 이 아니다 — 로그에 한 줄이 남아야 "돌았다"와 "못 돈다"를 구분할 수 있다.
@@ -431,7 +444,7 @@ description = "Check format, tests, boundaries, config docs, doc links, and buil
 # `struct {}` 로 스텁하므로, 앱 호스트는 Linux 에서 빌드가 **불가능**하다. CI 의 check job 은 ubuntu 라
 # `macos-app-host-abi-lib` 를 직접 걸면 항상 빨갛다(2026-08-28 PR #2803 에서 실측했다 — 로컬 macOS 는
 # 초록이었고 CI 만 8개 컴파일 오류로 죽었다). 그래서 OS 로 갈라지는 `check-macos-app-host` 를 건다.
-depends = ["fmt-check", "test", "e2e", "oracle", "stress", "check-boundaries", "check-targets", "check-config-docs", "check-doc-links", "check-doc-line-refs", "check-mobile-contract", "check-wasm-sync", "check-macos-app-host", "check-task-split", "build"]
+depends = ["fmt-check", "test", "e2e", "oracle", "stress", "check-boundaries", "check-targets", "check-config-docs", "check-doc-links", "check-doc-line-refs", "check-mobile-contract", "check-wasm-sync", "check-macos-app-host", "check-perf-compile", "check-task-split", "build"]
 
 # CI 의 `check` 잡이 도는 것 — `check` 에서 `check-boundaries` 만 뺀 집합이다.
 #
@@ -448,7 +461,7 @@ run = ["sh tools/ci/check-task-split.test.sh", "sh tools/ci/check-task-split.sh"
 
 [tasks.check-without-boundaries]
 description = "CI: everything in `check` except check-boundaries (which runs in its own job)"
-depends = ["fmt-check", "test", "e2e", "oracle", "stress", "check-targets", "check-config-docs", "check-doc-links", "check-doc-line-refs", "check-mobile-contract", "check-wasm-sync", "check-macos-app-host", "check-task-split", "build"]
+depends = ["fmt-check", "test", "e2e", "oracle", "stress", "check-targets", "check-config-docs", "check-doc-links", "check-doc-line-refs", "check-mobile-contract", "check-wasm-sync", "check-macos-app-host", "check-perf-compile", "check-task-split", "build"]
 
 [tasks."packages:check"]
 # npm 라이브러리 게이트. Zig `check`와 분리된 opt-in 경로다(web:check와 같은 구조) —

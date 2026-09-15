@@ -15989,8 +15989,9 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
     const expected_runtime_size: usize = switch (builtin.os.tag) {
         .macos => switch (builtin.mode) {
             // 값은 **실측이다** — Debug 와 ReleaseFast 의 델타가 서로 다를 수 있어(필드가 기존 패딩에
-            // 들어가면 안 커진다) 한쪽 델타를 다른 쪽에 옮겨 적으면 틀린다.
-            .Debug => 11664,
+            // 들어가면 안 커진다) 한쪽 델타를 다른 쪽에 옮겨 적으면 틀린다. `TerminalCore.handoff`
+            // (atomic u32 둘, 2026-09-15)가 그 예다: Debug 는 +16, ReleaseFast 는 기존 패딩에 들어가 +0.
+            .Debug => 11680,
             .ReleaseFast => 11616,
             else => unreachable,
         },
@@ -16006,7 +16007,7 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
     };
     const expected_runtime_remainder: usize = switch (builtin.os.tag) {
         .macos => switch (builtin.mode) {
-            .Debug => 8928,
+            .Debug => 8944,
             .ReleaseFast => 8880,
             else => unreachable,
         },
@@ -19590,8 +19591,9 @@ test "CR2a RemoteGeneration field inventory는 generation owner 열두 개만 �
     const expected_runtime_size: usize = switch (builtin.os.tag) {
         .macos => switch (builtin.mode) {
             // 값은 **실측이다** — Debug 와 ReleaseFast 의 델타가 서로 다를 수 있어(필드가 기존 패딩에
-            // 들어가면 안 커진다) 한쪽 델타를 다른 쪽에 옮겨 적으면 틀린다.
-            .Debug => 11664,
+            // 들어가면 안 커진다) 한쪽 델타를 다른 쪽에 옮겨 적으면 틀린다. `TerminalCore.handoff`
+            // (atomic u32 둘, 2026-09-15)가 그 예다: Debug 는 +16, ReleaseFast 는 기존 패딩에 들어가 +0.
+            .Debug => 11680,
             .ReleaseFast => 11616,
             else => unreachable,
         },

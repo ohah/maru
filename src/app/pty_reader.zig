@@ -744,6 +744,9 @@ pub const PtyReader = struct {
         }
         core.owner_dbg.unlock(mutex, self.io);
         if (diag_on) diagRecordHold(t0, t1, std.Io.Clock.awake.now(self.io).nanoseconds, bytes.len);
+        // 청크 경계: 메인이 락을 요구 중이면 차례를 넘긴다. 이 루프는 pty 청크(~1KB)마다 재잠금하고 사이에
+        // 잠들지 않아, 양보 없이는 불공정 mutex 아래 메인이 보유(~0.13ms)의 수십 배를 기다린다(plans §13).
+        core.handoff.yieldToDemand(self.io);
     }
 
     pub fn init(
@@ -1060,6 +1063,7 @@ pub const PtyReader = struct {
                         core.clearResponse(); // 드롭(상한 초과)해도 코어 측 응답 버퍼는 항상 비운다
                     }
                     core.owner_dbg.unlock(mutex, self.io);
+                    core.handoff.yieldToDemand(self.io); // 명령 루프도 재잠금 루프다 — 같은 양보
                     cq.logApply(entry); // MARU_DEBUG면 enqueue→apply 지연 로깅
                     applied = true;
                 }

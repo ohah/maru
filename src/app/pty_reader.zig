@@ -777,9 +777,9 @@ pub const PtyReader = struct {
         if (self.kitty_jobs.items.len == 0) return;
         defer self.kitty_jobs.clearRetainingCapacity();
         for (self.kitty_jobs.items) |*job| {
-            const decoded = terminal.kitty.decodeKittyJob(job, core.allocator); // 락 밖 — payload·옛 이미지 free 포함
+            const decoded = terminal.kitty.decodeKittyJob(job, core.allocator); // 락 밖 — payload free 포함
             core.owner_dbg.lock(mutex, self.io);
-            terminal.kitty.completeKittyTransmit(core, job.*, decoded);
+            terminal.kitty.completeKittyTransmit(core, job, decoded);
             const reply = core.pendingResponse();
             if (reply.len > 0) {
                 appendResponseBounded(self.allocator, out_buf, out_head.*, reply);
@@ -787,6 +787,7 @@ pub const PtyReader = struct {
             }
             core.owner_dbg.unlock(mutex, self.io);
             core.handoff.yieldToDemand(self.io);
+            if (job.old_image) |*o| o.freeAll(core.allocator); // 설치가 밀어낸 옛 픽셀 — 락 밖에서 free
         }
     }
 

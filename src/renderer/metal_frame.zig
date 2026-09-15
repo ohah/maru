@@ -39,6 +39,9 @@ pub var diag_plan_images: u32 = 0;
 /// `replace` 의 이미지 픽셀 버퍼 재사용이 실제로 적중한 횟수/빗나간 횟수.
 pub var diag_reuse_hit: u32 = 0;
 pub var diag_reuse_miss: u32 = 0;
+/// placement 가 가리키는 이미지가 view 에 없어 그 자리를 비운 횟수(프레임 누적). 0 이 아니면 «이미지가 한 프레임 사라짐」 —
+/// 2026-09-15 pending 경로가 만든 플리커의 직접 신호. 항상 센다(증가 하나).
+pub var diag_placement_without_image: u32 = 0;
 
 inline fn diagNow() i128 {
     const f = diag_now orelse return 0;
@@ -1079,6 +1082,7 @@ pub fn buildGpuImages(
         // 첫 번째 조용한 자리다. 여기서 세지 않으면 이 placement 는 뒤 단계에 아예 안 닿아 아무도 못 센다.
         const img = findImage(images, p.image_id) orelse {
             image_reconciliation.recordPlacementWithoutBlob();
+            diag_placement_without_image += 1; // .frametime 1초 요약 `빈자리=` — pending 경로가 만든 플리커의 직접 신호(§13.8)
             continue;
         };
         if (img.width == 0 or img.height == 0) continue;

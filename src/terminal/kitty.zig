@@ -1739,8 +1739,9 @@ pub const KittyPendingJob = struct {
     generation: u64,
     expected: usize,
     bpp: u8,
-    /// 같은 id 교체로 map 에서 밀려난 옛 이미지. 그 순간부터 아무도 참조하지 않으니(메인은 락 아래에서
-    /// 픽셀을 자기 버퍼로 복사해 나온다) 락 밖에서 `freeAll` 한다 — ReleaseSafe 에서 1.56ms 였던 free.
+    /// 완료가 밀어낸 옛 이미지(`completeKittyTransmit` 이 채운다). 같은 id 재전송은 **완료 시점까지 옛 픽셀을
+    /// 그대로 보여 주고**(m=0 에서 map 에서 빼면 디코드 동안 한 프레임이 비어 깜빡인다 — 2026-09-15 사용자 보고),
+    /// 설치 순간에 교체된 옛 것을 여기에 실어 리더가 unlock 뒤 `freeAll` 한다(ReleaseSafe 에서 1.56ms 였던 free).
     old_image: ?KittyImage = null,
 };
 
@@ -1757,39 +1758,37 @@ fn deferKittyTransmit(self: *TerminalCore, cmd: KittyGraphicsCommand, payload: [
     if (payload.len == 0) return .einval;
     if (expected > self.kitty_images.limit) return .enomem; // 한 장이 전체 한도 초과 — 디코드해 볼 것도 없다
     const owned = self.allocator.dupe(u8, payload) catch return .enomem;
-    // 같은 id 는 교체 — 옛 것을 map 에서 빼 job 에 실어 보내고(락 밖 free), 자리엔 pending 엔트리를 둔다.
-    var old_image: ?KittyImage = null;
-    if (self.kitty_images.map.fetchRemove(cmd.image_id)) |old| {
-        self.kitty_images.total_bytes -= old.value.totalBytes();
-        old_image = old.value;
-    }
     self.kitty_images.gen_counter += 1;
     const generation = self.kitty_images.gen_counter;
-    self.kitty_images.map.put(self.allocator, cmd.image_id, .{
-        .id = cmd.image_id,
-        .width = cmd.width,
-        .height = cmd.height,
-        .bpp = bpp,
-        .data = &.{}, // pending — isPending()
-        .generation = generation,
-    }) catch {
-        self.allocator.free(owned);
-        if (old_image) |*o| o.freeAll(self.allocator);
-        removePlacementsForImage(self, cmd.image_id); // 옛 이미지도 사라졌으니 그 placement 는 고아다
-        return .enomem;
-    };
+    // 같은 id 재전송이면 옛 엔트리를 **그대로 둔다** — 디코드가 끝날 때까지 옛 픽셀이 계속 그려진다(브라우저는
+    // 매 프레임 같은 id 로 재전송하므로, 여기서 빼면 프레임마다 한 번 빈 화면이 스쳐 깜빡인다). 새 id 면 빈
+    // pending 엔트리를 만들어 a=T 의 placement 가 붙을 자리를 준다(보여 줄 옛 것이 없으니 비어도 깜빡임이 아니다).
+    const created_pending = !self.kitty_images.map.contains(cmd.image_id);
+    if (created_pending) {
+        self.kitty_images.map.put(self.allocator, cmd.image_id, .{
+            .id = cmd.image_id,
+            .width = cmd.width,
+            .height = cmd.height,
+            .bpp = bpp,
+            .data = &.{}, // pending — isPending()
+            .generation = generation,
+        }) catch {
+            self.allocator.free(owned);
+            return .enomem;
+        };
+    }
     self.kitty_pending_jobs.append(self.allocator, .{
         .cmd = cmd,
         .payload = owned,
         .generation = generation,
         .expected = expected,
         .bpp = bpp,
-        .old_image = old_image,
     }) catch {
         self.allocator.free(owned);
-        if (old_image) |*o| o.freeAll(self.allocator);
-        _ = self.kitty_images.map.remove(cmd.image_id);
-        removePlacementsForImage(self, cmd.image_id);
+        if (created_pending) {
+            _ = self.kitty_images.map.remove(cmd.image_id);
+            removePlacementsForImage(self, cmd.image_id);
+        }
         return .enomem;
     };
     return .deferred;
@@ -1808,8 +1807,6 @@ pub fn decodeKittyJob(job: *KittyPendingJob, alloc: std.mem.Allocator) KittyDeco
     defer {
         alloc.free(job.payload);
         job.payload = &.{};
-        if (job.old_image) |*o| o.freeAll(alloc);
-        job.old_image = null;
     }
     const dec = std.base64.standard.Decoder;
     const decoded_len = dec.calcSizeForSlice(job.payload) catch return .invalid;
@@ -1841,38 +1838,51 @@ pub fn decodeKittyJob(job: *KittyPendingJob, alloc: std.mem.Allocator) KittyDeco
     }
 }
 
-/// 재잠금 뒤: 디코드 결과를 pending 엔트리에 설치하고 **응답**한다. 엔트리가 없거나(삭제·RIS) 세대가 다르면
-/// (같은 id 재전송이 먼저 자리를 갈아치움) 픽셀만 버린다 — 응답은 그래도 디코드 결과대로 한다(앱은 `i=` 로
-/// 짝을 맞추고, 자기 재전송으로 옛 것을 밀어낸 건 앱의 선택이다). 한도·evict 는 여기서 실 크기로 판정한다.
-pub fn completeKittyTransmit(self: *TerminalCore, job: KittyPendingJob, decoded: KittyDecoded) void {
+/// 재잠금 뒤: 디코드 결과를 설치하고 **응답**한다. 설치 조건은 «엔트리가 있고 그 세대가 이 job 보다 새롭지
+/// 않다」 — 삭제·RIS(엔트리 없음)나 그 뒤 인라인 재전송(더 새 세대)이 있었으면 픽셀만 버린다. 같은 청크의
+/// 재전송 둘은 리더가 순서대로 완료하므로 나중 것이 자연히 이긴다. 응답은 그래도 디코드 결과대로 한다(앱은
+/// `i=` 로 짝을 맞추고, 자기 재전송으로 옛 것을 밀어낸 건 앱의 선택이다). 한도·evict 는 여기서 실 크기로.
+/// **교체된 옛 이미지는 `job.old_image` 에 실어 돌려준다** — 호출자가 unlock 뒤 `freeAll` 한다(락 아래 free 회피).
+pub fn completeKittyTransmit(self: *TerminalCore, job: *KittyPendingJob, decoded: KittyDecoded) void {
+    job.old_image = null;
     const status: KittyStatus = switch (decoded) {
         .invalid => blk: {
-            dropPendingKittyEntry(self, job);
+            dropPendingKittyEntry(self, job.*);
             break :blk .einval;
         },
         .oom => blk: {
-            dropPendingKittyEntry(self, job);
+            dropPendingKittyEntry(self, job.*);
             break :blk .enomem;
         },
         .pixels => |pixels| blk: {
             const entry = self.kitty_images.map.getPtr(job.cmd.image_id);
-            const live = entry != null and entry.?.generation == job.generation and entry.?.isPending();
+            const live = entry != null and entry.?.generation <= job.generation;
             if (!live) {
-                self.allocator.free(pixels); // 교체·삭제로 자리가 사라졌다 — 픽셀은 갈 곳이 없다
+                self.allocator.free(pixels); // 삭제·RIS·더 새 전송 — 픽셀은 갈 곳이 없다
                 break :blk .ok;
             }
-            const after = self.kitty_images.total_bytes + pixels.len;
+            const existing = entry.?.totalBytes();
+            const after = self.kitty_images.total_bytes - existing + pixels.len;
             if (after > self.kitty_images.limit) {
                 evictKittyImagesFor(self, after - self.kitty_images.limit, job.cmd.image_id);
             }
-            if (self.kitty_images.total_bytes + pixels.len > self.kitty_images.limit) {
+            if (self.kitty_images.total_bytes - existing + pixels.len > self.kitty_images.limit) {
                 self.allocator.free(pixels);
-                dropPendingKittyEntry(self, job);
+                dropPendingKittyEntry(self, job.*); // pending(새 id)이면 걷고, 옛 이미지가 있으면 그대로 둔다
                 break :blk .enomem;
             }
             // evict 가 map 을 바꿨을 수 있어 포인터를 다시 잡는다(exclude 라 이 엔트리는 남아 있다).
             const e = self.kitty_images.map.getPtr(job.cmd.image_id).?;
-            e.data = pixels;
+            if (!e.isPending()) job.old_image = e.*; // 옛 픽셀(+프레임)은 호출자가 락 밖에서 free
+            self.kitty_images.total_bytes -= existing;
+            e.* = .{
+                .id = job.cmd.image_id,
+                .width = job.cmd.width,
+                .height = job.cmd.height,
+                .bpp = job.bpp,
+                .data = pixels,
+                .generation = job.generation,
+            };
             self.kitty_images.total_bytes += pixels.len;
             break :blk .ok;
         },
@@ -1880,10 +1890,11 @@ pub fn completeKittyTransmit(self: *TerminalCore, job: KittyPendingJob, decoded:
     kittyReply(self, job.cmd, status);
 }
 
-/// 디코드 실패·한도 초과 — pending 엔트리(세대 일치 시)와 그 placement 를 걷는다.
+/// 디코드 실패·한도 초과 — **빈 pending 엔트리**(새 id)면 그 엔트리와 placement 를 걷는다. 옛 이미지가 있던
+/// 같은 id 재전송이면 옛 것을 그대로 둔다(실패한 전송이 화면을 지우지 않는다).
 fn dropPendingKittyEntry(self: *TerminalCore, job: KittyPendingJob) void {
     const entry = self.kitty_images.map.get(job.cmd.image_id) orelse return;
-    if (entry.generation != job.generation or !entry.isPending()) return; // 이미 다른 전송의 자리다
+    if (!entry.isPending() or entry.generation > job.generation) return;
     self.kitty_images.remove(self.allocator, job.cmd.image_id); // pending 이라 free 할 픽셀은 없다
     removePlacementsForImage(self, job.cmd.image_id);
 }
@@ -1900,7 +1911,8 @@ fn flushPendingKittyImage(self: *TerminalCore, image_id: u32) void {
         }
         var job = self.kitty_pending_jobs.orderedRemove(i);
         const decoded = decodeKittyJob(&job, self.allocator);
-        completeKittyTransmit(self, job, decoded);
+        completeKittyTransmit(self, &job, decoded);
+        if (job.old_image) |*o| o.freeAll(self.allocator); // 인라인 경로는 락을 쥔 채라 여기서 free
         // 같은 id 의 job 이 여럿일 수 있다(완료 전 재전송) — 순서대로 전부 흘려보낸다(세대가 걸러 준다).
     }
 }

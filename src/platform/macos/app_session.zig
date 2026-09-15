@@ -6958,6 +6958,7 @@ pub const AppSession = struct {
     ft_sum_place: i128 = 0,
     ft_win_img_bytes: usize = 0, // 이 1초 창에 GPU 로 올린 이미지 픽셀 바이트(planImageUploads 합) — 이미지가 실제로 흐르는지의 양성 신호
     ft_win_img_count: u32 = 0,
+    ft_win_img_missing: u32 = 0, // placement 는 있는데 이미지 view 가 없던 횟수(플리커 신호)
     ft_win_lock_count: u32 = 0, // lockCore 쪽 독립 카운터의 창 합 — unlockCore 쪽 히스토그램과 같아야 방법이 맞다
     ft_sum_assemble: i128 = 0,
     ft_max_total: i128 = 0,
@@ -19764,12 +19765,14 @@ pub const AppSession = struct {
         self.ft_sum_assemble += d_assemble;
         self.ft_win_lock_count += maru.session.surface.diag_lock_count;
         self.ft_win_img_bytes += metal_frame.diag_plan_bytes;
+        self.ft_win_img_missing += metal_frame.diag_placement_without_image;
+        metal_frame.diag_placement_without_image = 0;
         self.ft_win_img_count += metal_frame.diag_plan_images;
         if (total > self.ft_max_total) self.ft_max_total = total;
         const window = t_end - self.ft_window_start;
         if (window >= std.time.ns_per_s) {
             const rate = @as(f64, @floatFromInt(self.ft_ticks)) * @as(f64, @floatFromInt(std.time.ns_per_s)) / @as(f64, @floatFromInt(window));
-            frametime_diag.info("window={d:.2}s ticks={d} rate={d:.1}Hz total(ms) mean={d:.2} max={d:.1} | titles={d:.0}% drain={d:.0}% project={d:.0}% [shape={d:.0}%(grid={d:.0}% chrome={d:.0}%) place={d:.0}% assemble={d:.0}%] img={d}/{d:.1}MB", .{
+            frametime_diag.info("window={d:.2}s ticks={d} rate={d:.1}Hz total(ms) mean={d:.2} max={d:.1} | titles={d:.0}% drain={d:.0}% project={d:.0}% [shape={d:.0}%(grid={d:.0}% chrome={d:.0}%) place={d:.0}% assemble={d:.0}%] img={d}/{d:.1}MB 빈자리={d}", .{
                 @as(f64, @floatFromInt(window)) / @as(f64, @floatFromInt(std.time.ns_per_s)),
                 self.ft_ticks,
                 rate,
@@ -19785,6 +19788,7 @@ pub const AppSession = struct {
                 nsPct(self.ft_sum_assemble, self.ft_sum_total),
                 self.ft_win_img_count,
                 @as(f64, @floatFromInt(self.ft_win_img_bytes)) / (1024.0 * 1024.0),
+                self.ft_win_img_missing,
             });
             const window_ticks = self.ft_ticks; // 아래 lock sites 의 «tick당» 분모 — 리셋 전에 잡아 둔다
             self.ft_window_start = 0;
@@ -19799,6 +19803,7 @@ pub const AppSession = struct {
             self.ft_sum_place = 0;
             self.ft_win_img_bytes = 0;
             self.ft_win_img_count = 0;
+            self.ft_win_img_missing = 0;
             // [P4-3] 이 창의 호출 지점별 잠금 히스토그램 — 횟수 내림차순 상위 12. 오프셋은 `atos -o <bin> -l 0x100000000
             // $((lockCore 링크 주소 + 오프셋))` 로 심볼화한다(줄 번호는 dsymutil 로 dSYM 을 만든 뒤). tick 밖(이벤트
             // 핸들러·호스트 ABI 폴) 잠금은 `밖` 표시. 히스토그램(unlockCore 집계)과 lockCore 카운터가 같아야 방법이 맞다.

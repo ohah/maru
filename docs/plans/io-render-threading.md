@@ -427,9 +427,10 @@ unlock · yieldToDemand                            job.decode(core.allocator):  
 ```
 
 - **pending 표현**: `KittyImage.data.len == 0`(`isPending()`). 정상 이미지는 `w·h·bpp > 0` 이라 0 바이트일 수 없다. 새 필드가 아니라서 exec handoff 코덱·인벤토리를 안 건드린다 — 대신 **pause 경계에 pending 이 없어야** 한다(아래 불변식).
+- **같은 id 재전송은 옛 픽셀을 완료까지 그대로 보여 준다**(정정 2026-09-15, 사용자 보고 «빨라졌는데 플리커가 심하다」). 첫 구현은 m=0 에서 옛 이미지를 map 에서 빼고 빈 pending 을 두어, 디코드 사이의 tick 이 그 placement 를 **빈 채로** 그렸다 — 브라우저는 매 프레임 같은 id 로 재전송하므로 프레임마다 깜빡였다(하네스는 로그만 보고 화면을 안 봐서 못 잡았다). 지금은 옛 엔트리를 두고 job 만 쌓으며, 완료가 «엔트리 세대 ≤ job 세대」 면 교체하고 밀려난 옛 이미지를 `job.old_image` 로 돌려줘 리더가 락 밖에서 free 한다. 빈 pending 엔트리는 **새 id 의 첫 전송**에만 생긴다(보여 줄 옛 것이 없으니 비어도 깜빡임이 아니다). 실패(EINVAL/ENOMEM)는 옛 이미지를 지우지 않는다.
 - **렌더**: `buildImageViews` 가 pending 을 건너뛴다 → 그 placement 는 그 프레임에 안 그려지고 다음 tick 에 뜬다(최대 1프레임).
 - **같은 write 안의 종속 명령**(`a=f/a/c`): 루트가 pending 이면 그 job 을 **인라인으로** 끝내고 진행한다(`flushPendingKittyImage`). icat·timg 는 「전송 뒤 곧바로 프레임」을 한 청크에 보내므로 EINVAL 로 돌리면 프레임이 사라진다(runtime_manager 애니메이션 판정자가 잡았다). 리더가 이미 가져간 job 은 그 조각의 `applyToCore` 끝에서 완료되므로 다음 write 가 시작될 땐 pending 이 없다.
-- **세대(generation)**: pending 삽입 시 `gen_counter` 로 배정. 완료 시 세대가 다르면(같은 id 재전송이 먼저 pending 을 갈아치움) 설치하지 않는다 — 옛 픽셀이 새 자리를 덮는 ABA 방지(Ghostty `PendingImage.generation` 과 같은 뜻).
+- **세대(generation)**: job 마다 `gen_counter` 로 배정. 완료 시 설치 조건은 «엔트리가 있고 엔트리 세대 ≤ job 세대」 — 삭제·RIS(엔트리 없음)나 그 뒤의 인라인 재전송(더 새 세대)이면 픽셀을 버린다. 같은 청크의 재전송 둘은 리더가 순서대로 완료하므로 나중 것이 자연히 남는다(ABA 방지의 뜻은 Ghostty `PendingImage.generation` 과 같다).
 - **응답 순서**: transmit 의 OK/EINVAL 은 같은 청크의 뒤 명령 응답보다 **늦게** 나갈 수 있다. kitty 명세의 응답은 `i=` 로 짝을 맞추므로 순서는 계약이 아니다. 응답 본문은 **디코드 결과**를 말한다(설치 여부가 아니라) — 앱이 자기 재전송으로 옛 것을 밀어냈어도 옛 전송이 유효했으면 OK 다.
 - **한도(320MB)·evict**: pending 은 0 바이트로 센다. 실 크기 판정과 evict 는 완료 시 락 아래에서(오늘 `storeKittyImage` 와 같은 규칙). 실패면 엔트리+placement 제거, ENOMEM.
 - **옛 이미지 free**: 같은 id 교체로 밀려난 옛 `KittyImage` 는 job 이 들고 나가 락 밖에서 `freeAll`(ReleaseSafe 1.56ms 였던 것). 그 순간 map 에는 없으니 아무도 참조하지 않는다 — 메인은 락 아래에서 픽셀을 자기 버퍼로 **복사**해 나온다(§10.6 재사용 버퍼).

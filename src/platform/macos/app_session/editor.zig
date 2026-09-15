@@ -378,6 +378,66 @@ pub fn navigateTo(self: *AppSession, target: NavTarget) NavError!void {
     placeCaretAndReveal(self, term, offset);
 }
 
+/// 이 문서에 충돌 구간이 있나(S5 — 헤더 밴드의 `↑`·`↓` 가 서는 조건). **표를 다시 훑고** 답한다 — 낡은 표로
+/// 답하면 방금 고른 구간이 사라진 뒤에도 버튼이 남는다.
+pub fn hasConflictRegions(self: *AppSession, term: *Term) bool {
+    return conflictRegionCount(self, term) > 0;
+}
+
+/// 활성 pane 의 활성 Term 에서 `gotoConflict`(키 경로 — `F7`/`⇧F7`).
+pub fn gotoConflictActive(self: *AppSession, which: maru.session.dock_layout.ConflictNav) bool {
+    const pane = pane_ops.activePane(self);
+    if (pane.terms.items.len == 0) return false;
+    return gotoConflict(self, pane.activeTerm(), which);
+}
+
+/// 다음/이전 충돌 구간으로 caret 을 옮긴다(S5 — docs/editor-merge-conflicts.md §5). 「다음」은 caret 줄 **뒤**의 첫
+/// 구간, 없으면 첫 구간으로 감김; 「이전」은 caret 줄 앞의 마지막 구간, 없으면 마지막 구간. caret 은 구간 머리
+/// (`<<<<<<<` 줄 시작)에 서고 `navigateTo` 가 드러낸다(되돌아가기 표식까지 — §5.2 의 그 경로). 구간이 없으면
+/// 아무 일도 안 한다. 판에 초점이 있어도 Result 로 돌아온다(selection 이 서는 순간 초점이 Result 다 — S3b-3b).
+pub fn gotoConflict(self: *AppSession, term: *Term, which: maru.session.dock_layout.ConflictNav) bool {
+    if (term.kind != .editor) return false;
+    const doc = term.rt.editor_doc orelse return false;
+    ensureConflicts(self, term);
+    const regions = term.rt.editor_conflicts;
+    if (regions.len == 0) return false;
+    // 기준은 caret 이 선 **줄**이다 — 같은 구간 머리에 서 있으면 「다음」은 그 다음 구간이어야 한다.
+    // 판에 초점이 있으면(Result 의 selection 은 비어 있다) 판 caret 의 Result 짝 줄이 그 기준이다.
+    const cur_line: ?u32 = if (term.rt.editor_selection) |sel|
+        @intCast(doc.file.lines.lineAt(@min(sel.focus, doc.file.content.len)))
+    else
+        editor_merge_ops.paneCaretResultLine(term);
+    var pick: ?usize = null;
+    switch (which) {
+        .next => {
+            for (regions, 0..) |r, i| {
+                if (cur_line == null or r.start > cur_line.?) {
+                    pick = i;
+                    break;
+                }
+            }
+            if (pick == null) pick = 0; // 감김
+        },
+        .prev => {
+            var i: usize = regions.len;
+            while (i > 0) : (i -= 1) {
+                const r = regions[i - 1];
+                if (cur_line == null or r.start < cur_line.?) {
+                    pick = i - 1;
+                    break;
+                }
+            }
+            if (pick == null) pick = regions.len - 1; // 감김
+        },
+    }
+    const target = regions[pick.?];
+    const line = doc.file.lines.line(target.start) orelse return false;
+    // 판 caret 은 지우지 않는다 — Result 에 selection 이 서면 저절로 잠든다(`focusedSide` 의 규칙). 그래서 판 caret 을
+    // 되살리는 변이가 사는 것이 정상이다(S5 적대적 3회차 C11).
+    navigateTo(self, .{ .offset = line.start }) catch return false;
+    return true;
+}
+
 /// caret 을 놓고 그 자리를 드러낸다 — 위 ⑷⑸에 해당한다. **`revealPrimaryCaretRows` 가 펴기까지
 /// 한다**(그 함수가 `revealFoldedLine` 을 먼저 부른다) — 여기서 또 펴면 같은 일을 두 번 한다.
 fn placeCaretAndReveal(self: *AppSession, term: *Term, offset: usize) void {
@@ -10104,6 +10164,260 @@ test "MPN18 접힘 판정과 그리기는 «같은 사각»을 본다 — 경계
         if (v.kind == .widget) has_widget = true;
     }
     try testing.expect(has_widget);
+}
+
+test "MPN19 헤더 밴드의 ↓·↑ 와 F7/⇧F7 이 다음/이전 충돌 구간으로 간다 — 감기고, 구간이 없으면 칸도 없다 (제품 경계, S5)" {
+    // S5(계약 §5): 자리는 파일 헤더 밴드의 컨트롤 영역(`headerCellLayoutWith` — 렌더와 클릭이 같은 표), 이동은
+    // `navigateTo`. 클릭은 **제품의 마우스 라우터**(`session.mouse`)로, 키는 `handleKeyEvent` 로 넣는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+
+    // 구간 셋: 5·20·40 줄에서 시작(각 5 줄). 앞뒤로 평범한 줄.
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var starts: [3]u32 = undefined;
+    var line: u32 = 0;
+    for (0..3) |k| {
+        const pad: u32 = if (k == 0) 5 else 10;
+        for (0..pad) |_| {
+            try buf.appendSlice(allocator, "plain\n");
+            line += 1;
+        }
+        starts[k] = line;
+        try buf.appendSlice(allocator, "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> topic\n");
+        line += 5;
+    }
+    for (0..30) |_| try buf.appendSlice(allocator, "tail\n");
+    // **파일 도크의 길로 연다**(`openFilePanelPathAs` — SCM 충돌 행이 병합 Term 을 여는 그 함수). 헤더 밴드는
+    // `file_entry` 가 있는 Term 에만 서므로 편집기 전용 열기(`openPathInActivePane`)로는 밴드가 없다.
+    try dir.dir.writeFile(testing.io, .{ .sub_path = "nav.txt", .data = buf.items });
+    var nav_root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const nav_root = nav_root_buf[0..try dir.dir.realPath(testing.io, &nav_root_buf)];
+    const nav_path = try std.fs.path.join(allocator, &.{ nav_root, "nav.txt" });
+    defer allocator.free(nav_path);
+    switch (file_panel_ops.openFilePanelPathAs(fx.session, nav_path, .text)) {
+        .opened => {},
+        else => return error.OpenFailed,
+    }
+    const term = pane_ops.activePane(fx.session).activeTerm();
+    try testing.expect(term.file_entry != null);
+    term.rt.editor_merge = .{
+        .stage_allocator = allocator,
+        .ready = true,
+        .stages = .{ .has_base = true, .has_ours = true, .has_theirs = true },
+        // 세 판은 Result 와 줄 수가 같게 — 굴러간 뒤에도 판에 보이는 행이 남아야 ⑸ 에서 판을 누를 수 있다.
+        .base = try allocator.dupe(u8, buf.items),
+        .ours = try allocator.dupe(u8, buf.items),
+        .theirs = try allocator.dupe(u8, buf.items),
+        .line_allocator = allocator,
+    };
+    {
+        const st = &term.rt.editor_merge.?;
+        st.base_lines = try maru.session.editor.merge_map.splitLikeEditor(allocator, st.base);
+        st.ours_lines = try maru.session.editor.merge_map.splitLikeEditor(allocator, st.ours);
+        st.theirs_lines = try maru.session.editor.merge_map.splitLikeEditor(allocator, st.theirs);
+    }
+    defer editor_merge_ops.clear(fx.session, term);
+
+    // **창 크기를 주고 라우터가 쓰는 그 사각으로 그린다**(스크롤·고르기 라우팅 판정자와 같은 이유 — `termRect()` 가
+    // 0×0 이면 라우터가 아무 pane 도 못 맞힌다).
+    term.rt.editor_wrap = false;
+    fx.session.surface_initialized = true;
+    fx.session.backing_width_px = 1200;
+    fx.session.backing_height_px = 800;
+    // ⑴ **밴드에 ↑↓ 가 선다** — 제품이 밴드를 그리는 그 함수에 제품이 넘기는 그 플래그로. 구간이 있으니 참이다.
+    try testing.expect(hasConflictRegions(fx.session, term));
+    const leaf = activeLeafRectForTest(fx.session) orelse return error.SkipZigTest;
+    var d0 = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+    defer d0.dl.deinit(allocator);
+    const band = pane_ops.fileHeaderBandForPaneLookup(fx.session, pane_ops.activePane(fx.session)) orelse return error.NoBand;
+    const cols: u16 = @intCast(band.band.w / fx.session.cell_width_px);
+    // **제품의 밴드 함수**(`fileHeaderBandDrawList` — 프레임이 부르는 그것)로 그린다. 빌더를 직접 부르면
+    // 호출 자리의 플래그가 `true` 로 굳어도 초록이다. `↓` 는 next 칸, `↑` 는 prev 칸 — 자리까지 잰다(둘을
+    // 바꿔 그리면 「둘 다 있다」로는 안 잡힌다).
+    var hdl = app_session_mod.fileHeaderBandDrawList(fx.session, band, cols) orelse return error.NoBandDrawList;
+    defer hdl.deinit(allocator);
+    const hl = maru.session.dock_layout.headerCellLayoutWith(cols, band.entry.dirty, band.entry.external_change, true) orelse return error.NoHeaderLayout;
+    var saw_down = false;
+    var saw_up = false;
+    for (hdl.cells) |c| {
+        if (c.codepoint == 0x2193) {
+            saw_down = true;
+            try testing.expectEqual(hl.conflict_next_col.?, c.col);
+        }
+        if (c.codepoint == 0x2191) {
+            saw_up = true;
+            try testing.expectEqual(hl.conflict_prev_col.?, c.col);
+        }
+    }
+    try testing.expect(saw_down and saw_up);
+    // 밴드 함수가 **entry 의 상태**를 그대로 넘긴다 — `●`(수정) 이 서면 `↓`·`↑` 는 그만큼 왼쪽으로 물러난다
+    // (2회차 B16: 뽑아낸 함수가 `dirty` 자리에 `false` 를 넘겨도 초록이었다).
+    band.entry.dirty = true;
+    defer band.entry.dirty = false;
+    {
+        var ddl = app_session_mod.fileHeaderBandDrawList(fx.session, band, cols) orelse return error.NoBandDrawList;
+        defer ddl.deinit(allocator);
+        const dl_hl = maru.session.dock_layout.headerCellLayoutWith(cols, true, band.entry.external_change, true) orelse return error.NoHeaderLayout;
+        try testing.expect(dl_hl.conflict_next_col.? < hl.conflict_next_col.?);
+        var saw_dirty = false;
+        var down_col: ?u16 = null;
+        for (ddl.cells) |c| {
+            if (c.codepoint == 0x25CF) saw_dirty = true;
+            if (c.codepoint == 0x2193) down_col = c.col;
+        }
+        try testing.expect(saw_dirty);
+        try testing.expectEqual(dl_hl.conflict_next_col.?, down_col.?);
+    }
+    band.entry.dirty = false;
+
+    // ⑵ **↓ 를 제품 마우스 라우터로 누른다** → caret 이 첫 구간 머리(5 줄) 로. 다시 → 둘째(20). 셋째 → 감겨 첫째.
+    //    클릭 rect 는 **그 글리프의 칸**이어야 한다(rect 만 한 칸 밀려도 렌더·클릭이 같은 rect 를 보니 초록이었다).
+    const next_rect = maru.session.dock_layout.headerConflictNavRect(band.band, fx.session.cell_width_px, band.entry.dirty, band.entry.external_change, .next) orelse return error.NoNextCell;
+    try testing.expectEqual(band.band.x + @as(u32, hl.conflict_next_col.?) * fx.session.cell_width_px, next_rect.x);
+    try testing.expectEqual(fx.session.cell_width_px, next_rect.w);
+    const nx = @as(f64, @floatFromInt(next_rect.x)) + @as(f64, @floatFromInt(next_rect.w)) / 2.0;
+    const ny = @as(f64, @floatFromInt(next_rect.y)) + @as(f64, @floatFromInt(next_rect.h)) / 2.0;
+    // 문서는 **매번 새로 읽는다**(`term.rt.editor_doc`) — 편집(⑷ʹ)이 문서 값을 바꾸므로 복사해 두면 옛 줄 표로 잰다.
+    const lineOf = struct {
+        fn f(t: *Term, off: usize) u32 {
+            return @intCast(t.rt.editor_doc.?.file.lines.lineAt(off));
+        }
+    }.f;
+    fx.session.mouse(1, nx, ny, 0, 0);
+    try testing.expectEqual(starts[0], lineOf(term, term.rt.editor_selection.?.focus));
+    // 구간 **머리**(`<<<<<<<` 줄의 첫 byte)에 선다 — 줄만 재면 한 byte 옆에 놓는 변이가 산다.
+    try testing.expectEqual(term.rt.editor_doc.?.file.lines.line(starts[0]).?.start, term.rt.editor_selection.?.focus);
+    fx.session.mouse(1, nx, ny, 0, 0);
+    try testing.expectEqual(starts[1], lineOf(term, term.rt.editor_selection.?.focus));
+    fx.session.mouse(1, nx, ny, 0, 0);
+    try testing.expectEqual(starts[2], lineOf(term, term.rt.editor_selection.?.focus));
+    fx.session.mouse(1, nx, ny, 0, 0);
+    try testing.expectEqual(starts[0], lineOf(term, term.rt.editor_selection.?.focus)); // 감김
+    // 화면에도 들어왔다 — 첫 줄이 caret 줄을 넘지 않는다.
+    var d1 = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+    defer d1.dl.deinit(allocator);
+    try testing.expect(term.rt.editor_first_line <= starts[0]);
+
+    // ⑶ **↑** → 마지막 구간으로 감김(첫째에서), 다시 → 둘째.
+    const prev_rect = maru.session.dock_layout.headerConflictNavRect(band.band, fx.session.cell_width_px, band.entry.dirty, band.entry.external_change, .prev) orelse return error.NoPrevCell;
+    try testing.expectEqual(band.band.x + @as(u32, hl.conflict_prev_col.?) * fx.session.cell_width_px, prev_rect.x);
+    const px = @as(f64, @floatFromInt(prev_rect.x)) + @as(f64, @floatFromInt(prev_rect.w)) / 2.0;
+    fx.session.mouse(1, px, ny, 0, 0);
+    try testing.expectEqual(starts[2], lineOf(term, term.rt.editor_selection.?.focus));
+    fx.session.mouse(1, px, ny, 0, 0);
+    try testing.expectEqual(starts[1], lineOf(term, term.rt.editor_selection.?.focus));
+
+    // ⑷ **F7 / ⇧F7** 도 같은 곳으로 — 제품 키 입구. 둘째에서 F7 → 셋째, ⇧F7 → 둘째. 그리고 앱이 소비한다.
+    const consumed_before = fx.session.total_app_key_events;
+    _ = try fx.session.handleKeyEvent(.{ .key = .{ .function = 7 } });
+    try testing.expectEqual(starts[2], lineOf(term, term.rt.editor_selection.?.focus));
+    _ = try fx.session.handleKeyEvent(.{ .key = .{ .function = 7 }, .modifiers = .{ .shift = true } });
+    try testing.expectEqual(starts[1], lineOf(term, term.rt.editor_selection.?.focus));
+    try testing.expectEqual(consumed_before + 2, fx.session.total_app_key_events);
+    // **되돌아가기 표식까지 지난다**(`navigateTo` 의 그 경로) — 되돌아가면 ⇧F7 직전 자리(셋째 구간)다.
+    try testing.expect(navigateBack(fx.session));
+    try testing.expectEqual(starts[2], lineOf(term, term.rt.editor_selection.?.focus));
+    _ = try fx.session.handleKeyEvent(.{ .key = .{ .function = 7 }, .modifiers = .{ .shift = true } });
+    try testing.expectEqual(starts[1], lineOf(term, term.rt.editor_selection.?.focus));
+    // caret 줄이 화면 안에 있다(`navigateTo` 가 드러낸다) — 창이 커서 안 굴렀을 수도 있으니 「보인다」만 잰다.
+    var d2 = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+    defer d2.dl.deinit(allocator);
+    try testing.expect(term.rt.editor_first_line <= starts[1]);
+    try testing.expect(starts[1] < term.rt.editor_first_line + term.rt.editor_hit_rows_len);
+
+    // ⑷ʹ **편집 직후, 프레임 없이 F7** — 문서 맨 앞에 줄 하나를 넣으면(구간 표는 버려진다) 구간 머리가 한 줄
+    //    내려간다. 이동이 표를 **스스로 세우지** 않으면 빈 표를 보고 무동작이거나 옛 줄로 간다(3회차 C6).
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, term, "top\n"));
+    _ = try fx.session.handleKeyEvent(.{ .key = .{ .function = 7 } });
+    try testing.expectEqual(starts[0] + 1, lineOf(term, term.rt.editor_selection.?.focus));
+    // 되돌린다 — 아래 단계는 원래 줄 번호로 잰다(caret 은 다시 둘째 구간 머리에).
+    try testing.expect(undoEdit(fx.session, term));
+    try testing.expectEqual(@as(usize, buf.items.len), term.rt.editor_doc.?.file.content.len);
+    term.rt.editor_selection = editor_selection.Selection.at(term.rt.editor_doc.?.file.lines.line(starts[1]).?.start);
+    // 편집이 히트 기하를 버렸다 — 아래 판 클릭은 **그린 뒤**의 기하로 잰다(제품도 프레임마다 다시 세운다).
+    var d3 = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+    defer d3.dl.deinit(allocator);
+
+    // ⑸ **판에 초점이 있어도 Result 로 돌아온다 — 기준은 판 caret 의 Result 짝 줄**: Current 의 「둘째 구간
+    //    본문 줄」(starts[1]+2; 세 판이 Result 와 같은 글이라 짝은 같은 번호)을 눌러 초점을 옮긴 뒤 F7 →
+    //    Result 에 selection 이 **셋째** 구간 머리로 선다. 판 caret 을 무시하면(Result selection 이 비었으니)
+    //    첫 구간(5)으로 튄다 — 그 변이가 여기서 죽는다.
+    const lay = term.rt.editor_merge_layout orelse return error.MissingMergeLayout;
+    const cur = lay.current.?;
+    const cw: f64 = @floatFromInt(fx.session.cell_width_px);
+    const chh: f64 = @floatFromInt(fx.session.cell_height_px);
+    const pane_target: u32 = starts[1] + 2;
+    const pa = term.rt.editor_merge.?.ours_hit;
+    var pane_row: ?usize = null;
+    for (pa.hit_rows[0..pa.hit_rows_len], 0..) |v, r| {
+        if (v.kind != .widget and pa.hit_lines[r] == pane_target) {
+            pane_row = r;
+            break;
+        }
+    }
+    const prow = pane_row orelse return error.PaneTargetRowNotVisible; // 전제: 둘째 구간이 판에 보인다
+    const pcx = @as(f64, @floatFromInt(cur.x)) + @as(f64, @floatFromInt(pa.content_left_px)) + cw * 0.5;
+    const pcy = @as(f64, @floatFromInt(cur.y)) + chh * (@as(f64, @floatFromInt(prow)) + 0.5);
+    try testing.expect(editor_merge_ops.placePaneCaret(fx.session, term, pcx, pcy));
+    try testing.expect(editor_merge_ops.focusedSide(term) != null);
+    try testing.expectEqual(pane_target, editor_merge_ops.paneCaretResultLine(term).?);
+    _ = try fx.session.handleKeyEvent(.{ .key = .{ .function = 7 } });
+    try testing.expect(editor_merge_ops.focusedSide(term) == null);
+    try testing.expectEqual(starts[2], lineOf(term, term.rt.editor_selection.?.focus));
+
+    // ⑹ **구간이 없으면 칸도 없고 키는 무동작이다** — 마커 없는 문서.
+    try dir.dir.writeFile(testing.io, .{ .sub_path = "plain.txt", .data = "a\nb\nc\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(testing.io, &root_buf)];
+    const plain_path = try std.fs.path.join(allocator, &.{ root, "plain.txt" });
+    defer allocator.free(plain_path);
+    switch (file_panel_ops.openFilePanelPathAs(fx.session, plain_path, .text)) {
+        .opened => {},
+        else => return error.OpenFailed,
+    }
+    const plain = pane_ops.activePane(fx.session).activeTerm();
+    try testing.expect(plain != term);
+    try testing.expect(!hasConflictRegions(fx.session, plain));
+    const pband = pane_ops.fileHeaderBandForPaneLookup(fx.session, pane_ops.activePane(fx.session)) orelse return error.NoBand;
+    try testing.expect(pband.term == plain);
+    var pdl = app_session_mod.fileHeaderBandDrawList(fx.session, pband, cols) orelse return error.NoBandDrawList;
+    defer pdl.deinit(allocator);
+    for (pdl.cells) |c| try testing.expect(c.codepoint != 0x2193 and c.codepoint != 0x2191);
+    plain.rt.editor_selection = editor_selection.Selection.at(2);
+    const merge_focus_before = term.rt.editor_selection.?.focus;
+    _ = try fx.session.handleKeyEvent(.{ .key = .{ .function = 7 } });
+    try testing.expectEqual(@as(usize, 2), plain.rt.editor_selection.?.focus); // 그대로
+    // 같은 pane 의 **다른 탭**(병합 Term)도 안 움직인다 — 활성 Term 이 대상이지 첫 탭이 아니다.
+    try testing.expectEqual(merge_focus_before, term.rt.editor_selection.?.focus);
+
+    // ⑺ **구간이 없으면 그 자리는 다시 mode 선택기의 것이다** — markdown(마커 없음)의 밴드에서 「↓ 가 섰을 칸」을
+    //    누르면 `소스` 슬롯 클릭이다(nav 없는 표에서 그 칸은 마지막 슬롯 안). 라우터가 구간 유무를 안 보고 nav rect 부터
+    //    맞히면 그 클릭을 삼킨다(적대적 1회차 A10 — 유일한 생존 변이). markdown 은 편집기 Term 이 아니라 구간이 «있는»
+    //    markdown 은 닿을 수 없다 — 그래서 여기서는 없는 쪽만 잰다(있는 쪽의 표 일치는 `dock_layout` 판정자가 든다).
+    try dir.dir.writeFile(testing.io, .{ .sub_path = "plain.md", .data = "# a\n\nb\n" });
+    const md_path = try std.fs.path.join(allocator, &.{ root, "plain.md" });
+    defer allocator.free(md_path);
+    switch (file_panel_ops.openFilePanelPathAs(fx.session, md_path, .markdown)) {
+        .opened => {},
+        else => return error.OpenFailed,
+    }
+    const md_band = pane_ops.fileHeaderBandForPaneLookup(fx.session, pane_ops.activePane(fx.session)) orelse return error.NoBand;
+    try testing.expect(md_band.entry.kind == .markdown);
+    try testing.expect(!hasConflictRegions(fx.session, md_band.term));
+    try testing.expect(md_band.entry.mode != .source_edit);
+    const phantom = maru.session.dock_layout.headerConflictNavRect(md_band.band, fx.session.cell_width_px, md_band.entry.dirty, md_band.entry.external_change, .next) orelse return error.NoNextCell;
+    const gx = @as(f64, @floatFromInt(phantom.x)) + @as(f64, @floatFromInt(phantom.w)) / 2.0;
+    const gy = @as(f64, @floatFromInt(phantom.y)) + @as(f64, @floatFromInt(phantom.h)) / 2.0;
+    // 전제: 그 칸은 nav 없는 표에서 `소스` 슬롯 안이다.
+    try testing.expectEqual(@as(?maru.session.dock_panel.Mode, .source_edit), maru.session.dock_layout.headerModeAt(md_band.band, fx.session.cell_width_px, .markdown, md_band.entry.dirty, md_band.entry.external_change, false, gx, gy));
+    fx.session.mouse(1, gx, gy, 0, 0);
+    try testing.expectEqual(maru.session.dock_panel.Mode.source_edit, md_band.entry.mode);
 }
 
 test "MPN12 세 판이 Result 를 «따라» 굴러간다 — 대응표로, 그리고 문서가 바뀌면 표가 새로 선다 (제품 경계)" {

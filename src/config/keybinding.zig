@@ -263,6 +263,11 @@ pub const EditorContextBinding = struct {
 pub const editor_context_bindings = [_]EditorContextBinding{
     // 랩은 **뷰 속성**이라 비교 뷰에서도 뜻이 있다 — `toggleWrap` 이 `kind` 만 보고 비교를 안 거절한다.
     .{ .chord = .{ .modifiers = .{ .option = true }, .key = .{ .char = 'Z' } }, .action = .toggle_editor_wrap, .needs_editable = false }, // Opt+Z
+    // 다음/이전 충돌 구간(S5). 기능키가 이 컨텍스트에 처음 들어왔다 — 근거는 key-input-and-shortcuts.md 「편집기 Term 컨텍스트」.
+    // `needs_editable` 는 비교 뷰에서만 읽히고 비교 뷰의 문서에는 충돌 구간이 안 서므로 어느 값이든 무동작이다 —
+    // `true` 변이가 사는 것이 정상이다(S5 적대적 2회차 B6). `false` 인 것은 뜻이다: 구간 사이를 오가는 것은 편집이 아니다.
+    .{ .chord = .{ .modifiers = .{}, .key = .{ .function = 7 } }, .action = .next_conflict, .needs_editable = false }, // F7
+    .{ .chord = .{ .modifiers = .{ .shift = true }, .key = .{ .function = 7 } }, .action = .prev_conflict, .needs_editable = false }, // Shift+F7
     .{ .chord = .{ .modifiers = .{ .option = true, .shift = true }, .key = .arrow_down }, .action = .duplicate_lines, .needs_editable = true }, // Shift+Opt+Down
     .{ .chord = .{ .modifiers = .{ .option = true }, .key = .arrow_up }, .action = .move_lines_up, .needs_editable = true }, // Opt+Up
     .{ .chord = .{ .modifiers = .{ .option = true }, .key = .arrow_down }, .action = .move_lines_down, .needs_editable = true }, // Opt+Down
@@ -1171,10 +1176,13 @@ test "ETX4 편집기 컨텍스트 기본키가 전역 표를 안 오염시킨다
     }
     try std.testing.expectEqual(@as(usize, 0), global_option_only);
 
-    // **컨텍스트 표의 항목은 둘 중 하나여야 한다**(§편집기 Term 컨텍스트):
+    // **컨텍스트 표의 항목은 셋 중 하나여야 한다**(§편집기 Term 컨텍스트):
     //   ⑴ `⌘` 없는 `⌥` — 전역에 못 넣는 부류라 여기 있는 것이 유일한 자리다.
     //   ⑵ **전역과 겹치되 근거가 적힌 예외** — 그 근거는 그 절의 「전역 chord 를 편집기가 가져가는
     //      경우」가 소유한다(다른 문서의 확정·판정 기준 · 대가의 대체 경로 · 레퍼런스 세 줄).
+    //   ⑶ **`⌘`·`⌃`·`⌥` 없는 기능키**(2026-09-15, `F7`·`⇧F7`) — 터미널에서는 `CSI 18~` 로 나가는 키라
+    //      전역에 두면 그것을 뺏지만, 편집기 Term 에는 PTY 가 없다. 그 chord 가 **전역 표에 없어야**
+    //      한다(있으면 ⑵ 의 근거가 필요하다) — 그 절의 「`F7`·`⇧F7`」 문단이 전수 대조를 든다.
     // **아무 근거 없이 `⌘`·`⌃` 조합을 여기 넣으면 이 판정자가 막는다** — 그렇게 늘면 편집기가
     // 전역 chord 를 조용히 가로채기 시작한다. **목록을 여기 적는 것이 그 관문**이다: 예외를 늘리려면
     // 이 판정자를 고쳐야 하고, 고치는 사람은 그 절에 근거를 적게 된다.
@@ -1185,9 +1193,17 @@ test "ETX4 편집기 컨텍스트 기본키가 전역 표를 안 오염시킨다
         .{ .key = .arrow_down, .action = .add_cursor_below }, // ⌥⌘↓ — §3.2b
     };
     var exceptions: usize = 0;
+    var bare_function_keys: usize = 0;
     for (editor_context_bindings) |b| {
         const option_only = b.chord.modifiers.option and !b.chord.modifiers.command and !b.chord.modifiers.control;
         if (option_only) continue;
+        const bare_function = b.chord.key == .function and !b.chord.modifiers.option and !b.chord.modifiers.command and !b.chord.modifiers.control;
+        if (bare_function) {
+            bare_function_keys += 1;
+            // ⑶ 은 전역과 안 겹친다 — 겹치면 그것은 ⑵ 라서 아래 목록에 근거와 함께 서야 한다.
+            for (default_app_bindings) |g| try std.testing.expect(!g.chord.eql(b.chord));
+            continue;
+        }
         exceptions += 1;
         // **`⌘` 는 반드시 끼고 `⌃` 는 안 낀다** — `⌘` 가 없으면 터미널 Meta 를, `⌃` 는 제어문자를 뺏는다.
         try std.testing.expect(b.chord.modifiers.command and !b.chord.modifiers.control);
@@ -1200,6 +1216,7 @@ test "ETX4 편집기 컨텍스트 기본키가 전역 표를 안 오염시킨다
         try std.testing.expect(b.needs_editable);
     }
     try std.testing.expectEqual(allowed.len, exceptions);
+    try std.testing.expectEqual(@as(usize, 2), bare_function_keys); // F7 · ⇧F7 — 늘리려면 그 절에 전수 대조를 적는다
     try std.testing.expect(editor_context_bindings.len > 0);
 
     // **`⌘D` 는 전역 표에서 안 없어진다** — 터미널·브라우저·파일 Term 이 그것으로 화면을 나눈다.

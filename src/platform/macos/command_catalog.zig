@@ -101,6 +101,8 @@ pub const entries = [_]Entry{
     .{ .action = .transform_to_uppercase, .key = "transform_to_uppercase", .title = "Editor: Transform to Uppercase" },
     .{ .action = .transform_to_lowercase, .key = "transform_to_lowercase", .title = "Editor: Transform to Lowercase" },
     .{ .action = .toggle_editor_wrap, .key = "toggle_editor_wrap", .title = "Editor: Toggle Word Wrap" },
+    .{ .action = .next_conflict, .key = "next_conflict", .title = "Editor: Go to Next Conflict" },
+    .{ .action = .prev_conflict, .key = "prev_conflict", .title = "Editor: Go to Previous Conflict" },
     .{ .action = .copy_editor_selection, .key = "copy_editor_selection", .title = "Editor: Copy Selection" },
     .{ .action = .add_next_occurrence, .key = "add_next_occurrence", .title = "Editor: Add Next Occurrence" },
     .{ .action = .jump_to_bracket, .key = "jump_to_bracket", .title = "Editor: Go to Bracket" },

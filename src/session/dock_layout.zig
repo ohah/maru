@@ -90,7 +90,14 @@ pub const HeaderCellLayout = struct {
     mode_end: u16,
     dirty_col: ?u16,
     conflict_col: ?u16,
+    /// 다음/이전 충돌 구간 버튼(S5 — docs/editor-merge-conflicts.md §5). 문서에 충돌 구간이 있을 때만 예약되고,
+    /// `●`·`!` 보다 **왼쪽**에 서서 폭이 모자라면 이 둘부터 접힌다. 각 글리프 1 칸 + 간격 1 칸.
+    conflict_next_col: ?u16 = null,
+    conflict_prev_col: ?u16 = null,
 };
+
+/// 헤더의 다음/이전 충돌 버튼 중 어느 것인가.
+pub const ConflictNav = enum { next, prev };
 
 pub const HeaderModeDescriptor = struct {
     mode: dock_panel.Mode,
@@ -155,6 +162,12 @@ pub fn headerModeCellRange(layout: HeaderCellLayout, kind: dock_panel.EntryKind,
 /// Header render/background/hit-test가 공유하는 cell 권위. 각 status는 glyph 1칸+간격 1칸을 우측에서
 /// 예약하며 mode rect는 status 시작 전까지만 끝난다. mode 슬롯 분할은 `headerModeCellRange`가 kind별로 한다.
 pub fn headerCellLayout(cols: u16, dirty: bool, external_change: bool) ?HeaderCellLayout {
+    return headerCellLayoutWith(cols, dirty, external_change, false);
+}
+
+/// `conflict_nav` 가 참이면 `↑`·`↓`(이전/다음 충돌 구간) 두 status 를 더 예약한다(S5). 규칙은 같다 — 2 셀씩, 오른쪽에서
+/// 왼쪽으로 `!`·`●` 뒤에 놓이고, 자리가 모자라면 이 둘부터 빠진다(둘은 함께 서거나 함께 빠진다).
+pub fn headerCellLayoutWith(cols: u16, dirty: bool, external_change: bool, conflict_nav: bool) ?HeaderCellLayout {
     if (cols < 6) return null;
     const control_cols: u16 = @intCast(@min(header_control_cols, cols));
     const control_start = cols - control_cols;
@@ -164,10 +177,20 @@ pub fn headerCellLayout(cols: u16, dirty: bool, external_change: bool) ?HeaderCe
     if (show_conflict) status_count += 1;
     const show_dirty = dirty and available >= 6 + (status_count + 1) * 2;
     if (show_dirty) status_count += 1;
+    const show_nav = conflict_nav and available >= 6 + (status_count + 2) * 2;
+    if (show_nav) status_count += 2;
     const mode_end = cols - status_count * 2;
     var cursor = mode_end;
     var dirty_col: ?u16 = null;
     var conflict_col: ?u16 = null;
+    var next_col: ?u16 = null;
+    var prev_col: ?u16 = null;
+    if (show_nav) {
+        prev_col = cursor;
+        cursor += 2;
+        next_col = cursor;
+        cursor += 2;
+    }
     if (show_conflict) {
         conflict_col = cursor;
         cursor += 2;
@@ -178,7 +201,22 @@ pub fn headerCellLayout(cols: u16, dirty: bool, external_change: bool) ?HeaderCe
         .mode_end = mode_end,
         .dirty_col = dirty_col,
         .conflict_col = conflict_col,
+        .conflict_next_col = next_col,
+        .conflict_prev_col = prev_col,
     };
+}
+
+/// 다음/이전 충돌 버튼 한 칸의 rect(S5). 없으면(구간 없음·폭 부족) `null`. 렌더가 그 칸에 글리프를 두고 클릭이 이
+/// rect 를 본다 — 같은 표(`headerCellLayoutWith`)에서 나온다.
+pub fn headerConflictNavRect(header: Rect, cell_width_px: u32, dirty: bool, external_change: bool, which: ConflictNav) ?Rect {
+    if (cell_width_px == 0) return null;
+    const cols: u16 = @intCast(header.w / cell_width_px);
+    const layout = headerCellLayoutWith(cols, dirty, external_change, true) orelse return null;
+    const col = (switch (which) {
+        .next => layout.conflict_next_col,
+        .prev => layout.conflict_prev_col,
+    }) orelse return null;
+    return .{ .x = header.x + @as(u32, col) * cell_width_px, .y = header.y, .w = cell_width_px, .h = header.h };
 }
 
 /// FP16: 헤더 밴드는 도크가 아니라 **파일 Term**이 소유한다. 그래서 이 함수군은 `Geometry` 대신 호출자가
@@ -193,10 +231,17 @@ pub fn headerControlRect(header: Rect, cell_width_px: u32) ?Rect {
 /// 헤더 mode 선택지 한 칸의 rect(markdown `읽기|라이브|소스`·svg `읽기|소스`). 전체 control을 토글 버튼 하나로
 /// 취급하지 않고 보이는 구간과 클릭되는 구간이 같은 rect를 공유한다. 모드 선택기가 없는 kind(html·text)는 null.
 pub fn headerModeRect(header: Rect, cell_width_px: u32, kind: dock_panel.EntryKind, mode: dock_panel.Mode, dirty: bool, external_change: bool) ?Rect {
+    return headerModeRectWith(header, cell_width_px, kind, mode, dirty, external_change, false);
+}
+
+/// `conflict_nav` 까지 받는 판 — 렌더(`buildFilePanelHeaderDrawList`)가 `headerCellLayoutWith` 로 슬롯을 그리므로 클릭·호버도
+/// **같은 플래그**로 재야 「그려진 것 = 클릭되는 것」이다(S5 적대적 1회차: 마커 든 markdown 에서 슬롯이 왼쪽으로 4 칸
+/// 줄어 그려지는데 히트는 옛 표를 읽어 경계가 어긋났다).
+pub fn headerModeRectWith(header: Rect, cell_width_px: u32, kind: dock_panel.EntryKind, mode: dock_panel.Mode, dirty: bool, external_change: bool, conflict_nav: bool) ?Rect {
     if (modesForKind(kind).len == 0) return null;
     const control = headerControlRect(header, cell_width_px) orelse return null;
     const cols: u16 = @intCast(header.w / cell_width_px);
-    const layout = headerCellLayout(cols, dirty, external_change) orelse return null;
+    const layout = headerCellLayoutWith(cols, dirty, external_change, conflict_nav) orelse return null;
     const range = headerModeCellRange(layout, kind, mode) orelse return null;
     const start_col = range.start;
     const end_col = range.end;
@@ -204,9 +249,9 @@ pub fn headerModeRect(header: Rect, cell_width_px: u32, kind: dock_panel.EntryKi
     return .{ .x = header.x + @as(u32, start_col) * cell_width_px, .y = control.y, .w = @as(u32, end_col - start_col) * cell_width_px, .h = control.h };
 }
 
-pub fn headerModeAt(header: Rect, cell_width_px: u32, kind: dock_panel.EntryKind, dirty: bool, external_change: bool, x_px: f64, y_px: f64) ?dock_panel.Mode {
+pub fn headerModeAt(header: Rect, cell_width_px: u32, kind: dock_panel.EntryKind, dirty: bool, external_change: bool, conflict_nav: bool, x_px: f64, y_px: f64) ?dock_panel.Mode {
     for (modesForKind(kind)) |descriptor| {
-        if (headerModeRect(header, cell_width_px, kind, descriptor.mode, dirty, external_change)) |r| if (layout_math.pointInRect(x_px, y_px, r)) return descriptor.mode;
+        if (headerModeRectWith(header, cell_width_px, kind, descriptor.mode, dirty, external_change, conflict_nav)) |r| if (layout_math.pointInRect(x_px, y_px, r)) return descriptor.mode;
     }
     return null;
 }
@@ -662,10 +707,10 @@ test "파일 헤더 밴드 control rect는 우측 정렬되고 좁은 밴드에�
     try std.testing.expectEqual(read.x + read.w, rich.x);
     try std.testing.expectEqual(rich.x + rich.w, edit.x);
     try std.testing.expectEqual(control.x + control.w, edit.x + edit.w);
-    try std.testing.expectEqual(@as(?dock_panel.Mode, .read), headerModeAt(header, 10, .markdown, false, false, @floatFromInt(read.x + 1), @floatFromInt(read.y + 1)));
-    try std.testing.expectEqual(@as(?dock_panel.Mode, .rich), headerModeAt(header, 10, .markdown, false, false, @floatFromInt(rich.x + 1), @floatFromInt(rich.y + 1)));
-    try std.testing.expectEqual(@as(?dock_panel.Mode, .source_edit), headerModeAt(header, 10, .markdown, false, false, @floatFromInt(edit.x + 1), @floatFromInt(edit.y + 1)));
-    try std.testing.expectEqual(@as(?dock_panel.Mode, null), headerModeAt(header, 10, .html, false, false, @floatFromInt(edit.x + 1), @floatFromInt(edit.y + 1)));
+    try std.testing.expectEqual(@as(?dock_panel.Mode, .read), headerModeAt(header, 10, .markdown, false, false, false, @floatFromInt(read.x + 1), @floatFromInt(read.y + 1)));
+    try std.testing.expectEqual(@as(?dock_panel.Mode, .rich), headerModeAt(header, 10, .markdown, false, false, false, @floatFromInt(rich.x + 1), @floatFromInt(rich.y + 1)));
+    try std.testing.expectEqual(@as(?dock_panel.Mode, .source_edit), headerModeAt(header, 10, .markdown, false, false, false, @floatFromInt(edit.x + 1), @floatFromInt(edit.y + 1)));
+    try std.testing.expectEqual(@as(?dock_panel.Mode, null), headerModeAt(header, 10, .html, false, false, false, @floatFromInt(edit.x + 1), @floatFromInt(edit.y + 1)));
 
     inline for (.{ false, true }) |dirty| inline for (.{ false, true }) |external| {
         const read_mode = headerModeRect(header, 10, .markdown, .read, dirty, external).?;
@@ -678,13 +723,57 @@ test "파일 헤더 밴드 control rect는 우측 정렬되고 좁은 밴드에�
         try std.testing.expectEqual(header.x + @as(u32, cells.mode_end) * 10, source.x + source.w); // 마지막=mode_end
         if (dirty) {
             const status = headerDirtyRect(header, 10, external).?;
-            try std.testing.expect(headerModeAt(header, 10, .markdown, dirty, external, @floatFromInt(status.x + 1), @floatFromInt(status.y + 1)) == null);
+            try std.testing.expect(headerModeAt(header, 10, .markdown, dirty, external, false, @floatFromInt(status.x + 1), @floatFromInt(status.y + 1)) == null);
         }
         if (external) {
             const status = headerConflictRect(header, 10, dirty).?;
-            try std.testing.expect(headerModeAt(header, 10, .markdown, dirty, external, @floatFromInt(status.x + 1), @floatFromInt(status.y + 1)) == null);
+            try std.testing.expect(headerModeAt(header, 10, .markdown, dirty, external, false, @floatFromInt(status.x + 1), @floatFromInt(status.y + 1)) == null);
         }
     };
+}
+
+test "헤더 충돌 이동 버튼 둘은 `!`·`●` 왼쪽에 2셀씩 서고, 폭이 모자라면 둘부터 함께 빠진다 (S5)" {
+    // 넉넉한 폭: … ↑ ↓ ! ● (오른쪽 끝이 ●).
+    const wide = headerCellLayoutWith(19, true, true, true).?;
+    try std.testing.expectEqual(@as(u16, 11), wide.mode_end); // 4 status × 2
+    try std.testing.expectEqual(@as(?u16, 11), wide.conflict_prev_col);
+    try std.testing.expectEqual(@as(?u16, 13), wide.conflict_next_col);
+    try std.testing.expectEqual(@as(?u16, 15), wide.conflict_col);
+    try std.testing.expectEqual(@as(?u16, 17), wide.dirty_col);
+    // 구간이 없으면 예약이 없다 — 옛 표와 같다.
+    const none = headerCellLayoutWith(19, true, true, false).?;
+    try std.testing.expectEqual(@as(?u16, null), none.conflict_next_col);
+    try std.testing.expectEqual(headerCellLayout(19, true, true).?.mode_end, none.mode_end);
+    // 폭이 모자라면(`!`·`●` 뒤 두 칸이 안 남으면) 둘이 **함께** 빠지고 `!`·`●` 는 그대로다.
+    const tight = headerCellLayoutWith(12, true, true, true).?;
+    try std.testing.expectEqual(@as(?u16, null), tight.conflict_next_col);
+    try std.testing.expectEqual(@as(?u16, null), tight.conflict_prev_col);
+    try std.testing.expectEqual(@as(?u16, 8), tight.conflict_col);
+    try std.testing.expectEqual(@as(?u16, 10), tight.dirty_col);
+    // rect 도 같은 표에서: 다음 버튼은 next_col 칸 하나.
+    const header: Rect = .{ .x = 100, .y = 20, .w = 190, .h = 16 };
+    const next = headerConflictNavRect(header, 10, true, true, .next).?;
+    try std.testing.expectEqual(@as(u32, 230), next.x);
+    try std.testing.expectEqual(@as(u32, 10), next.w);
+    const prev = headerConflictNavRect(header, 10, true, true, .prev).?;
+    try std.testing.expectEqual(@as(u32, 210), prev.x);
+    try std.testing.expect(headerConflictNavRect(.{ .x = 0, .y = 0, .w = 120, .h = 16 }, 10, true, true, .next) == null);
+    // **mode 슬롯도 같은 표를 읽는다** — nav 가 서면 슬롯의 끝(`mode_end`)이 4 칸 당겨지므로 nav 없는 표로 재면
+    // 슬롯 경계가 어긋난다(적대적 1회차에서 잡힌 실제 결함). 30 칸·status 없음: nav 없이 mode 폭 22(control 8..30),
+    // nav 있으면 18(8..26) — `rich` 슬롯이 15..22 → 14..20 로 옮겨간다.
+    const md: Rect = .{ .x = 0, .y = 0, .w = 300, .h = 16 };
+    const rich_plain = headerModeRectWith(md, 10, .markdown, .rich, false, false, false).?;
+    const rich_nav = headerModeRectWith(md, 10, .markdown, .rich, false, false, true).?;
+    try std.testing.expect(rich_nav.x < rich_plain.x);
+    try std.testing.expect(rich_nav.x + rich_nav.w < rich_plain.x + rich_plain.w);
+    const edit_nav = headerModeRectWith(md, 10, .markdown, .source_edit, false, false, true).?;
+    const nav_prev = headerConflictNavRect(md, 10, false, false, .prev).?;
+    try std.testing.expectEqual(nav_prev.x, edit_nav.x + edit_nav.w); // 슬롯 끝 바로 다음이 ↑ 칸
+    // `headerModeAt` 도 플래그를 따른다: nav 표의 `rich` 첫 픽셀은 nav 없는 표에서는 `read` 다.
+    try std.testing.expectEqual(@as(?dock_panel.Mode, .rich), headerModeAt(md, 10, .markdown, false, false, true, @floatFromInt(rich_nav.x + 1), 1));
+    try std.testing.expectEqual(@as(?dock_panel.Mode, .read), headerModeAt(md, 10, .markdown, false, false, false, @floatFromInt(rich_nav.x + 1), 1));
+    // nav 없는 표에서 슬롯이던 자리(↑ 칸)는 nav 표에서는 슬롯이 아니다.
+    try std.testing.expectEqual(@as(?dock_panel.Mode, null), headerModeAt(md, 10, .markdown, false, false, true, @floatFromInt(nav_prev.x + 1), 1));
 }
 
 test "헤더 mode 슬롯은 kind별로 나뉜다 (markdown thirds, svg halves) before status" {

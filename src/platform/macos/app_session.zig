@@ -2569,6 +2569,27 @@ pub const BandLabel = struct {
     spans: []maru.cell_text.ColSpan,
 };
 
+/// 파일 헤더 밴드 한 줄의 DrawList — 프레임이 그리는 그 호출(라벨·마디·상태 셀·S5 의 `↑`·`↓` 플래그까지 한
+/// 자리). 판정자가 **이 함수**를 불러야 「제품이 넘기는 그 플래그」를 잰다(빌더를 직접 부르면 호출 자리의
+/// 인자가 틀려도 초록이다). 실패하면 `null`(프레임은 그 줄을 건너뛴다).
+pub fn fileHeaderBandDrawList(self: *AppSession, band: AppSession.FileHeaderBand, cols: u16) ?renderer.DrawList {
+    const band_text = bandLabelFor(self, band.term, band.entry);
+    return coretext_frame_builder.buildFilePanelHeaderDrawList(
+        self.allocator,
+        band_text.text,
+        band_text.bounds,
+        band_text.spans,
+        band.entry.kind,
+        band.entry.mode,
+        band.entry.dirty,
+        band.entry.external_change,
+        cols,
+        .{ .rgb = self.mutedForeground() },
+        .{ .rgb = self.appearance.theme.sidebar_foreground },
+        editor_ops.hasConflictRegions(self, band.term), // S5 — 구간이 있을 때만 ↑↓
+    ) catch null;
+}
+
 pub fn bandLabelFor(self: *AppSession, term: *Term, entry: *const dock_panel.Entry) BandLabel {
     // **순서가 규칙이다.** `headerBreadcrumb` 이 그 프레임의 마디 경계를 **채우는** 쪽이므로
     // (`editor_syntax.breadcrumb` 이 `crumb_bounds` 를 비우고 다시 담는다), 경계를 **먼저** 뜨면
@@ -10325,6 +10346,8 @@ pub const AppSession = struct {
                 };
             },
             .toggle_editor_wrap => _ = editor_ops.toggleWrap(self), // 편집기가 아니면 무동작
+            .next_conflict => _ = editor_ops.gotoConflictActive(self, .next), // S5 — 구간이 없으면 무동작
+            .prev_conflict => _ = editor_ops.gotoConflictActive(self, .prev),
             // 접기/펼치기 — 편집기가 아니거나 접을 것이 없으면 무동작(비교 뷰도 거절한다. §4.1f).
             // 비교 뷰면 그쪽을 먼저 본다 — 축이 달라 함수가 갈린다(§4.1g "비교 뷰").
             .copy_editor_selection => _ = editor_ops.copyDiffSelection(self) or editor_ops.copySelection(self),
@@ -14072,7 +14095,23 @@ pub const AppSession = struct {
                                     }
                                 }
                             }
-                            if (dock_layout.headerModeAt(band.band, self.cell_width_px, entry.kind, entry.dirty, entry.external_change, x_px, y_px)) |mode| {
+                            // 다음/이전 충돌 구간 버튼(S5) — 구간이 있을 때만 그 칸이 있다. mode 선택기보다 **먼저** 본다(둘은
+                            // 같은 표에서 서로 다른 칸이라 순서가 결과를 바꾸진 않지만, 표가 겹치는 날 이 순서가 방어다).
+                            if (editor_ops.hasConflictRegions(self, band.term)) {
+                                const nav: ?dock_layout.ConflictNav = if (dock_layout.headerConflictNavRect(band.band, self.cell_width_px, entry.dirty, entry.external_change, .next)) |r| (if (layout_math.pointInRect(x_px, y_px, r)) dock_layout.ConflictNav.next else null) else null;
+                                const nav2: ?dock_layout.ConflictNav = nav orelse (if (dock_layout.headerConflictNavRect(band.band, self.cell_width_px, entry.dirty, entry.external_change, .prev)) |r| (if (layout_math.pointInRect(x_px, y_px, r)) dock_layout.ConflictNav.prev else null) else null);
+                                if (nav2) |which| {
+                                    _ = editor_ops.gotoConflict(self, band.term, which);
+                                    self.drag_autoscroll = 0;
+                                    self.mouse_drag_selecting = false;
+                                    self.metal_dirty = true;
+                                    return;
+                                }
+                            }
+                            // mode 선택기도 **렌더와 같은 표**(nav 플래그 포함)로 잰다. 오늘은 mode 선택기가 있는 kind(markdown·svg)가
+                            // 편집기 Term 이 아니라 구간이 함께 설 일이 없다 — 여기 `false` 를 넘기는 변이가 사는 것이 정상이다
+                            // (S5 적대적 2회차 B10·B11). 표 자체의 일치는 `dock_layout` 판정자가 든다.
+                            if (dock_layout.headerModeAt(band.band, self.cell_width_px, entry.kind, entry.dirty, entry.external_change, editor_ops.hasConflictRegions(self, band.term), x_px, y_px)) |mode| {
                                 file_panel_ops.setFilePanelMode(self, entry, mode);
                             } else if (editor_ops.crumbSegmentAt(self, pane_ops.activePane(self).activeTerm(), band.band, x_px, y_px)) |sym_idx| {
                                 // **모드 선택기 뒤에 본다**(§7.5) — 두 대상이 같은 한 줄에 있다.
@@ -21259,13 +21298,14 @@ pub const AppSession = struct {
                         // 드러나야 "눌리는 곳"임을 알 수 있다 — nav 버튼 호버와 같은 색(sidebarHoverBg)·같은 규율.
                         if (self.hovered_file_header_mode) |hovered| {
                             if (hovered.surface_id == band.entry.surface_id) {
-                                if (dock_layout.headerModeRect(
+                                if (dock_layout.headerModeRectWith(
                                     band.band,
                                     self.cell_width_px,
                                     band.entry.kind,
                                     hovered.mode,
                                     band.entry.dirty,
                                     band.entry.external_change,
+                                    editor_ops.hasConflictRegions(self, band.term), // 렌더와 같은 표(S5)
                                 )) |slot| self.appendBarBgQuad(slot, self.chromeQuadBg(sidebar_ops.sidebarHoverBg(self)));
                             }
                         }
@@ -21286,23 +21326,7 @@ pub const AppSession = struct {
                         // 중복이지만 심볼은 다른 데 없다).
                         // **마디 열 범위를 이 프레임에 굳힌다**(§7.5) — 그리는 것과 재는 것이 같은
                         // `plan` 을 타므로 「그려진 것 = 클릭되는 것」이다.
-                        const band_text = bandLabelFor(self, band.term, band.entry);
-                        const band_label = band_text.text;
-                        const seg_bounds = band_text.bounds;
-                        const seg_spans = band_text.spans;
-                        const header_dl = coretext_frame_builder.buildFilePanelHeaderDrawList(
-                            self.allocator,
-                            band_label,
-                            seg_bounds,
-                            seg_spans,
-                            band.entry.kind,
-                            band.entry.mode,
-                            band.entry.dirty,
-                            band.entry.external_change,
-                            cols,
-                            .{ .rgb = self.mutedForeground() },
-                            .{ .rgb = self.appearance.theme.sidebar_foreground },
-                        ) catch null;
+                        const header_dl = fileHeaderBandDrawList(self, band, cols);
                         if (header_dl) |list| self.collectShaped(&collected, list, pane_frame_builder, .{ .pane = .{
                             .origin_x = band.band.x,
                             .origin_y = band.band.y + self.chromeBarTextOffsetY(band.band.h),
@@ -22196,6 +22220,7 @@ pub const AppSession = struct {
                     band.entry.kind,
                     band.entry.dirty,
                     band.entry.external_change,
+                    editor_ops.hasConflictRegions(self, band.term), // 렌더와 같은 표(S5)
                     x_px,
                     y_px,
                 ) orelse return null; // 밴드 안이지만 breadcrumb·status 자리

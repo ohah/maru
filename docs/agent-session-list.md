@@ -301,6 +301,24 @@ search/scope가 부분 snapshot을 완전한 결과처럼 보이게 해서는 �
     macOS 파일에서 조립하면 다른 플랫폼이 재개를 붙일 때 이 규칙이 조용히 빠진다.
   - **되살리지 못하는 것**: Codex `workspace-write`의 하위 설정(쓰기 가능 root 목록·네트워크 허용)은 CLI
     플래그 하나로 표현되지 않아 config 축으로 남는다. 샌드박스 종류까지만 충실하다.
+- resume은 **모델도 그대로 되살린다**. 두 provider 다 플래그가 있다(`claude --model <이름|별칭>`,
+  `codex resume <id> --model <MODEL>`). 안 실으면 Opus로 돌던 세션을 이어할 때 기본 모델로 조용히
+  떨어진다 — 권한 모드와 같은 이유로 "기록된 대로"가 답이다.
+  - 근거도 같은 자리다. Claude는 assistant 줄의 `message.model`, Codex는 `turn_context`의 `model`이며
+    **마지막에 본 값이 이긴다**(세션 도중 모델을 바꿀 수 있다).
+  - **모델 값은 거른다.** Claude Code는 합성 assistant 줄에 `"model":"<synthetic>"`를 적는다(실측
+    2026-09-15, 사용자 이력 최근 60일 200개 파일에서 67건). 마지막 값이 이기는 규칙이라 안 거르면 그
+    값이 카드 모델 줄에도 뜨고 `--model '<synthetic>'`로 재개까지 간다. 그래서 파서가 **토큰 모양이
+    아닌 값을 아예 기록하지 않는다**(`isResumableModel`: `[A-Za-z0-9._-]`, 1~64바이트). 표시와 재개가
+    같은 필드를 쓰므로 거르는 자리도 하나다.
+  - 상한 64바이트는 **잘린 값이 플래그로 나가는 것**을 막는다. 표시용 사본은 120바이트에서 자르는데,
+    잘린 모델 이름은 표시로는 견딜 만해도 argv로는 틀린 값이다.
+  - 못 읽었으면 플래그를 **안 붙인다**. provider 기본 모델로 열리고, 이는 이 계약이 생기기 전의 동작과
+    같다 — 권한 모드의 `.unknown`과 같은 규율이다.
+  - **되살리지 못하는 것**: 기록된 모델 id가 지금은 없어진 이름일 수 있다(실측: 사용자 Codex 이력에
+    `maru-nonexistent-model-xyz` 6건). 그때는 provider가 스스로 거절하고, **재개가 끝나도 터미널이
+    남으므로** 사용자가 그 오류를 읽고 바로 다시 친다. 우리가 미리 목록을 들고 검사하지는 않는다 —
+    모델 목록은 provider의 것이고, 우리가 흉내 내면 새 모델이 나올 때마다 우리 쪽이 먼저 틀린다.
 - metrics는 candidate/verified/partial/rejected 개수와 scan duration/bytes만 남긴다. title·요약·cwd·session id는 observability event의 payload가 될 수 없다.
 
 ## 7. 설계 검토 기록 — 적대적 5회

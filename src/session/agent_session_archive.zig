@@ -123,6 +123,30 @@ pub const CodexSandbox = enum {
     }
 };
 
+/// 재개 argv 에 실을 수 있는 **모델 토큰**의 최대 길이. 실측된 값은 `claude-opus-5`(13)·`gpt-5.6-sol`(11)·
+/// 별칭 `opus`(4) 수준이고, 이 선은 그보다 넉넉하면서 `model_buf`(= `max_title_bytes`) 안에 들어와
+/// **잘린 값이 플래그로 나가는 일이 없게** 한다.
+pub const max_model_bytes: usize = 64;
+
+/// 이 텍스트가 provider 에 그대로 넘길 수 있는 모델 토큰인가.
+///
+/// **거를 것이 실재한다.** Claude Code 는 합성 assistant 줄에 `"model":"<synthetic>"` 를 적는다(사용자
+/// 이력 표본 2026-09-15, 최근 60일 200개 파일에서 67건). 모델은 "마지막에 본 값"이 이기므로 그런 줄이
+/// 마지막이면 그 값이 카드에도 뜨고 `--model '<synthetic>'` 로 재개까지 간다. 표시와 재개가 같은 필드를
+/// 쓰므로 **거르는 자리도 하나**다 — 파서가 아예 기록하지 않는다.
+///
+/// 허용 문자는 실측된 모델 id 가 쓰는 것뿐이다(`gpt-5.6-sol` 의 `.` 포함). 새 provider 가 다른 모양을
+/// 쓰기 시작하면 여기서 조용히 빠지는 게 아니라 `model` 이 비어 재개가 **기본 모델**로 가고, 카드에도
+/// 모델 줄이 안 뜬다 — 눈에 보이는 실패다.
+pub fn isResumableModel(text: []const u8) bool {
+    if (text.len == 0 or text.len > max_model_bytes) return false;
+    for (text) |byte| switch (byte) {
+        'a'...'z', 'A'...'Z', '0'...'9', '.', '_', '-' => {},
+        else => return false,
+    };
+    return true;
+}
+
 pub const max_title_bytes: usize = 120;
 pub const max_summary_bytes: usize = 240;
 pub const max_cwd_bytes: usize = 1024;
@@ -278,8 +302,11 @@ pub const Parser = struct {
         const message = object(obj.get("message"));
         // Current Claude Code writes the invoked model on assistant
         // `message.model`; a top-level model is only a compatibility fallback.
-        if ((if (message) |m| string(m.get("model")) else null) orelse string(obj.get("model"))) |value|
-            self.model = copyInto(&self.model_buf, value);
+        // 토큰 모양이 아닌 값은 **기록하지 않는다** — `<synthetic>` 이 실재하고, 마지막에 본 값이 이기므로
+        // 안 거르면 카드와 재개 argv 에 그대로 실린다(`isResumableModel`).
+        if ((if (message) |m| string(m.get("model")) else null) orelse string(obj.get("model"))) |value| {
+            if (isResumableModel(value)) self.model = copyInto(&self.model_buf, value);
+        }
         const role = if (message) |m| string(m.get("role")) orelse "" else string(obj.get("role")) orelse "";
         const text = if (message) |m| string(m.get("text")) orelse contentText(m) else string(obj.get("text"));
         if (text) |value| {
@@ -310,7 +337,9 @@ pub const Parser = struct {
         }
         if (std.mem.eql(u8, kind, "turn_context")) {
             if (payload) |p| {
-                if (string(p.get("model"))) |value| self.model = copyInto(&self.model_buf, value);
+                if (string(p.get("model"))) |value| {
+                    if (isResumableModel(value)) self.model = copyInto(&self.model_buf, value);
+                }
                 // 두 축을 **이 줄에서 함께** 읽어 통째로 교체한다. 축을 따로 누적하면 승인 정책은 이번
                 // 턴 것이고 샌드박스는 지난 턴 것인 조합이 생길 수 있는데, 그런 턴은 실재하지 않았다.
                 self.permission = .{ .codex = .{
@@ -363,7 +392,7 @@ pub const Parser = struct {
 
 /// 재개 argv 가 가질 수 있는 최대 토큰 수 — `codex resume <id> --ask-for-approval <v> --sandbox <v>` 가 7 로
 /// 가장 길다. 버퍼 크기를 호출자가 직접 세지 않게 여기가 소유한다.
-pub const max_resume_argv: usize = 7;
+pub const max_resume_argv: usize = 9;
 
 /// 이 세션을 **원래 권한 모드 그대로** 재개하는 provider-native argv 를 만든다.
 ///
@@ -373,6 +402,13 @@ pub const max_resume_argv: usize = 7;
 ///
 /// 모드를 모르면(`.unknown`) 플래그를 **안 붙인다**. 그러면 provider 자신의 기본값으로 열리는데, 이는
 /// 이 기능이 생기기 전의 동작과 같다 — 새 정보가 없을 때 옛 동작으로 떨어지는 것이 안전한 방향이다.
+/// 모델도 함께 싣는다 — 두 provider 다 `--model` 을 받는다(`claude --model <name|alias>`,
+/// `codex resume <id> --model <MODEL>`). 안 실으면 Opus 로 돌던 세션을 이어할 때 기본 모델로 떨어진다.
+/// `parsed.model` 은 파서가 `isResumableModel` 을 통과시킨 값만 담으므로 여기서 다시 재지 않는다.
+///
+/// 기록된 모델이 지금은 없는 id 일 수 있다(실측: 사용자 Codex 이력에 `maru-nonexistent-model-xyz`).
+/// 그 경우 provider 가 스스로 거절하고, **재개가 끝나도 터미널은 남으므로** 사용자가 그 오류를 보고
+/// 바로 다시 친다 — 조용히 사라지지 않는다.
 pub fn resumeArgv(parsed: *const Parsed, out: *[max_resume_argv][]const u8) [][]const u8 {
     var n: usize = 0;
     switch (parsed.provider) {
@@ -387,6 +423,11 @@ pub fn resumeArgv(parsed: *const Parsed, out: *[max_resume_argv][]const u8) [][]
                     out[n + 1] = value;
                     n += 2;
                 }
+            }
+            if (parsed.model.len > 0) {
+                out[n] = "--model";
+                out[n + 1] = parsed.model;
+                n += 2;
             }
         },
         .codex => {
@@ -406,6 +447,11 @@ pub fn resumeArgv(parsed: *const Parsed, out: *[max_resume_argv][]const u8) [][]
                     out[n + 1] = sandbox.flagValue();
                     n += 2;
                 }
+            }
+            if (parsed.model.len > 0) {
+                out[n] = "--model";
+                out[n + 1] = parsed.model;
+                n += 2;
             }
         },
     }
@@ -941,6 +987,76 @@ test "Claude 권한 모드: default 는 플래그를 안 붙이고, 모르는 �
     try std.testing.expectEqual(@as(usize, 3), resumeArgv(&future, &buf).len);
 }
 
+// 재개는 모델도 되살린다. 안 그러면 Opus 로 돌던 세션을 이어할 때 기본 모델로 조용히 떨어진다.
+// 아래 셋이 ⑴ 무엇을 모델로 인정하는지 ⑵ 그것이 표시와 argv 양쪽에 같은 값으로 가는지를 고정한다.
+
+test "모델 토큰: 허용되는 바이트는 «정확히» 65 개다" {
+    // 「금지된 모양이 없다」로 재면 갈아입을 때마다 샌다. 허용된 자리를 **세어** 못 박는다.
+    var allowed: usize = 0;
+    var byte: u8 = 0;
+    while (true) : (byte += 1) {
+        if (isResumableModel(&[_]u8{byte})) allowed += 1;
+        if (byte == 255) break;
+    }
+    try std.testing.expectEqual(@as(usize, 26 + 26 + 10 + 3), allowed);
+
+    // 실측된 모델 id 들은 전부 통과한다(별칭 포함).
+    for ([_][]const u8{ "claude-opus-5", "claude-fable-5-1", "opus", "gpt-5.6-sol", "gpt-6-astra" }) |value|
+        try std.testing.expect(isResumableModel(value));
+
+    // 길이 경계: 상한까지는 통과하고 한 바이트만 넘어도 떨어진다. 그래야 잘린 값이 플래그로 안 나간다.
+    const at_limit = [_]u8{'a'} ** max_model_bytes;
+    const over_limit = [_]u8{'a'} ** (max_model_bytes + 1);
+    try std.testing.expect(isResumableModel(&at_limit));
+    try std.testing.expect(!isResumableModel(&over_limit));
+    try std.testing.expect(!isResumableModel(""));
+}
+
+test "Claude 모델: <synthetic> 은 기록하지 않고 마지막 «진짜» 모델이 남는다" {
+    const a = std.testing.allocator;
+    // 실재하는 모양이다 — 사용자 이력 표본(2026-09-15, 최근 60일 200개 파일)에서 67건.
+    // 마지막에 본 값이 이기는 규칙이라, 안 거르면 이 줄 때문에 카드와 argv 가 둘 다 오염된다.
+    const jsonl =
+        \\{"sessionId":"c-m","cwd":"/repo","type":"user","permissionMode":"plan","message":{"role":"user","text":"요청"}}
+        \\{"sessionId":"c-m","type":"assistant","message":{"role":"assistant","model":"claude-opus-5","text":"답"}}
+        \\{"sessionId":"c-m","type":"assistant","message":{"role":"assistant","model":"<synthetic>","text":"합성"}}
+    ;
+    var parsed = (try parse(a, .claude, jsonl)).?;
+    defer parsed.deinit(a);
+    try std.testing.expectEqualStrings("claude-opus-5", parsed.model);
+
+    var buf: [max_resume_argv][]const u8 = undefined;
+    const argv = resumeArgv(&parsed, &buf);
+    try std.testing.expectEqual(@as(usize, 7), argv.len);
+    try std.testing.expectEqualStrings("--permission-mode", argv[3]);
+    try std.testing.expectEqualStrings("plan", argv[4]);
+    try std.testing.expectEqualStrings("--model", argv[5]);
+    try std.testing.expectEqualStrings("claude-opus-5", argv[6]);
+}
+
+test "모델을 못 읽었으면 플래그를 안 붙인다 — 기본 모델로 가는 것이 맞다" {
+    const a = std.testing.allocator;
+    // 모델 줄이 아예 없는 transcript(옛 기록·요약만 남은 파일)와, 토큰 모양이 아닌 값만 있는 경우.
+    const none =
+        \\{"sessionId":"c-n","type":"user","message":{"role":"user","text":"요청"}}
+    ;
+    var parsed = (try parse(a, .claude, none)).?;
+    defer parsed.deinit(a);
+    try std.testing.expectEqualStrings("", parsed.model);
+    var buf: [max_resume_argv][]const u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 3), resumeArgv(&parsed, &buf).len);
+
+    const only_synthetic =
+        \\{"type":"session_meta","payload":{"id":"x-n","cwd":"/repo","thread_source":"user"}}
+        \\{"type":"turn_context","payload":{"model":"gpt 5 with space"}}
+        \\{"type":"event_msg","payload":{"type":"user_message","message":"요청"}}
+    ;
+    var codex = (try parse(a, .codex, only_synthetic)).?;
+    defer codex.deinit(a);
+    try std.testing.expectEqualStrings("", codex.model);
+    try std.testing.expectEqual(@as(usize, 3), resumeArgv(&codex, &buf).len);
+}
+
 test "Codex 권한 모드: turn_context 의 두 축을 함께 읽어 argv 에 싣는다" {
     const a = std.testing.allocator;
     const jsonl =
@@ -958,7 +1074,7 @@ test "Codex 권한 모드: turn_context 의 두 축을 함께 읽어 argv 에 �
 
     var buf: [max_resume_argv][]const u8 = undefined;
     const argv = resumeArgv(&parsed, &buf);
-    try std.testing.expectEqual(@as(usize, 7), argv.len);
+    try std.testing.expectEqual(@as(usize, 9), argv.len);
     try std.testing.expectEqualStrings("codex", argv[0]);
     try std.testing.expectEqualStrings("resume", argv[1]);
     try std.testing.expectEqualStrings("x-1", argv[2]);
@@ -1015,7 +1131,7 @@ test "권한 모드 표: 모든 값이 왕복하고, 재개 argv 상한을 넘�
         .title = @constCast(""),
         .summary = @constCast(""),
         .cwd = @constCast(""),
-        .model = @constCast(""),
+        .model = @constCast("gpt-5.6-sol"),
         .message_count = 0,
         .verified_user = true,
         .permission = .{ .codex = .{ .approval = .never, .sandbox = .danger_full_access } },

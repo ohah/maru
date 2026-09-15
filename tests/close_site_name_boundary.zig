@@ -88,6 +88,7 @@ test "닫힘은 사유와 함께 어느 줄이었는지 남긴다" {
     const sites = [_][]const u8{
         "\"invalidate_slot_lookup\"",
         "\"invalidate_purge_tracker\"",
+        "\"invalidate_notice_take\"",
         "\"invalidate_notice_build\"",
         "\"invalidate_notice_adopt\"",
         "\"tick_begin_dispatch\"",
@@ -102,20 +103,20 @@ test "닫힘은 사유와 함께 어느 줄이었는지 남긴다" {
         }
     }
 
-    // ③ `invalidateSubscriptionOutput` 안에 **이름 없는 닫기가 남지 않는다.** 넷 중 하나만 익명이어도
+    // ③ invalidation 회수·발행 구간에 **이름 없는 닫기가 남지 않는다.** 하나라도 익명이면
     //    그 경로는 다시 사유 둘로 뭉친다(2026-09-13 에 실제로 그랬다).
     const inv_at = std.mem.indexOf(u8, turn, "fn invalidateSubscriptionOutput(") orelse
         return error.InvalidateMissing;
-    const inv_end = std.mem.indexOfPos(u8, turn, inv_at, "\n    }\n") orelse turn.len;
+    const inv_end = std.mem.indexOfPos(u8, turn, inv_at, "\n    fn dispatch(") orelse turn.len;
     const inv = turn[inv_at..inv_end];
     if (countAll(inv, "self.beginClose(") != 0) {
         std.debug.print("invalidateSubscriptionOutput 에 이름 없는 닫기가 남았다\n", .{});
         return error.AnonymousCloseInInvalidate;
     }
     //    **변형을 포함해 센다.** `beginCloseAt(` 만 세면 오류까지 싣는 `beginCloseAtErr(` 로 바꿀 때
-    //    의도가 지켜지는데도 0 으로 세어 빨개진다(2026-09-14 에 실제로 그랬다). 의도는 「넷 다
+    //    의도가 지켜지는데도 0 으로 세어 빨개진다(2026-09-14 에 실제로 그랬다). 의도는 「다섯 다
     //    이름을 남긴다」이지 특정 함수 이름이 아니다.
-    try std.testing.expect(countAll(inv, "self.beginCloseAt") == 4);
+    try std.testing.expect(countAll(inv, "self.beginCloseAt") == 5);
 
     // ④ **로그가 그 이름을 싣는다.** 저장만 하고 안 찍으면 사람에게는 없는 것과 같다.
     try std.testing.expect(std.mem.indexOf(u8, owner, "site={s}") != null);

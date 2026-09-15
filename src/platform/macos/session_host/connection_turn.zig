@@ -1101,8 +1101,8 @@ pub const Client = struct {
     fn publishCompletedPressureInvalidations(self: *Client, slot: *slot_mod.Slot) void {
         var iterator = self.trackers.iterator();
         while (iterator.next()) |entry| {
-            const ready = slot.takePressureInvalidationNotice(entry.value_ptr.*) catch
-                return self.beginClose(.socket_error);
+            const ready = slot.takePressureInvalidationNotice(entry.value_ptr.*) catch |err|
+                return self.beginCloseAtErr("invalidate_notice_take", @errorName(err), .socket_error);
             if (ready) {
                 self.publishSubscriptionInvalidation(entry.key_ptr.*);
                 if (self.isClosing()) return;

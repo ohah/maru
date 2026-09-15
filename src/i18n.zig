@@ -777,6 +777,9 @@ const Table = struct {
     git_read_failed: [:0]const u8,
     scm_repo_unread: [:0]const u8,
     scm_nothing_to_stage: [:0]const u8,
+    /// S4b — 「모두 스테이지」가 마커가 남은 충돌 파일을 비켜 갔다 / 목록이 잘려 비켜 갈 수 없었다.
+    scm_stage_all_skipped_conflicts: [:0]const u8,
+    scm_stage_all_blocked_truncated: [:0]const u8,
     scm_git_spawn_failed: [:0]const u8,
     scm_git_command_failed: [:0]const u8,
     /// 원격 명령이 **git 에 닿지 못했다**(ssh 가 255 로 끝났다). git 이 한 말이 아니므로 그 stderr 를
@@ -1322,6 +1325,8 @@ const en: Table = .{
     .git_read_failed = "Failed to read from git",
     .scm_repo_unread = "That repository has not been read yet",
     .scm_nothing_to_stage = "There is nothing to stage",
+    .scm_stage_all_skipped_conflicts = "Files with conflict markers were left unstaged",
+    .scm_stage_all_blocked_truncated = "The list is truncated, so conflicts cannot be skipped — stage files individually",
     .scm_git_spawn_failed = "Could not run git",
     .scm_git_command_failed = "The git command failed",
     .scm_remote_transport_failed = "Lost the connection to the remote — the command did not reach git",
@@ -1991,6 +1996,8 @@ const ko: Table = .{
     .git_read_failed = "git 읽기에 실패했습니다",
     .scm_repo_unread = "그 저장소를 아직 읽지 못했습니다",
     .scm_nothing_to_stage = "스테이지할 변경이 없습니다",
+    .scm_stage_all_skipped_conflicts = "충돌 표시가 남은 파일은 두었습니다",
+    .scm_stage_all_blocked_truncated = "목록이 잘려 충돌을 비켜 갈 수 없습니다 — 파일을 하나씩 스테이지하세요",
     .scm_git_spawn_failed = "git을 실행하지 못했습니다",
     .scm_git_command_failed = "git 명령이 실패했습니다",
     .scm_need_commit_message = "커밋 메시지를 입력하세요",

@@ -366,6 +366,47 @@ fn rowAction(entry: git_status.Entry, section: Section, conflict_markers: ?[]con
     };
 }
 
+/// 「모두 스테이지」가 무엇을 걸어야 하나(S4b — docs/editor-merge-conflicts.md §5).
+pub const StageAllPlan = union(enum) {
+    /// 미해결 충돌이 없다 — 지금처럼 `add -A --`(화면 밖 파일까지).
+    all,
+    /// 미해결 충돌이 있다 — `out[0..n]` 의 경로만 `add -- <경로…>`. `skipped` 는 비켜 간 충돌 파일 수(알림용).
+    paths: struct { n: usize, skipped: usize },
+    /// 미해결 충돌이 있는데 status 가 잘려 전부를 알 수 없다 — 거절하고 이유를 말한다.
+    blocked_truncated,
+    /// 미해결 충돌이 있는데 경로가 `out` 에 다 안 든다 — 같은 이유로 거절한다.
+    blocked_too_many,
+    /// 스테이지할 것이 없다.
+    nothing,
+};
+
+/// **status 전문**에서 「변경 사항」의 스테이지 가능한 경로를 모은다 — 화면에 안 보이는 파일까지, 그것이
+/// 「모두」의 뜻이다. `.stage` 행만 든다(해결된 충돌 행 포함); 마커가 남았거나 판정 못 한 충돌 행은 빠진다.
+pub fn planStageAll(status_text: []const u8, conflict_markers: ?[]const u8, truncated: bool, out: [][]const u8) StageAllPlan {
+    var n: usize = 0;
+    var skipped: usize = 0;
+    var overflow = false;
+    var it = git_status.iterate(status_text);
+    while (it.next()) |entry| {
+        if (!belongs(entry, .changes)) continue;
+        switch (rowAction(entry, .changes, conflict_markers)) {
+            .stage => {
+                if (n < out.len) {
+                    out[n] = entry.path;
+                    n += 1;
+                } else overflow = true;
+            },
+            .resolve => skipped += 1,
+            .unstage, .none => {},
+        }
+    }
+    if (n == 0 and !overflow) return .nothing;
+    if (skipped == 0) return .all;
+    if (truncated) return .blocked_truncated;
+    if (overflow) return .blocked_too_many;
+    return .{ .paths = .{ .n = n, .skipped = skipped } };
+}
+
 /// NUL 로 끊긴 경로 목록에 `path` 가 **정확히** 있나(`git grep -l -z` 출력). 접두 일치가 아니다 — `a.txt` 가
 /// `a.txt.orig` 에 걸리면 안 된다.
 fn listContains(list: []const u8, path: []const u8) bool {
@@ -552,6 +593,35 @@ test "마커가 없어진 충돌 행에는 `+` 가 돌아온다 — 판정이 �
     const status2 = "# branch.head main\nu UU N... 100644 100644 100644 100644 aaa bbb ccc f.txt.orig\n";
     const rev = buildWithMarkers(status2, "f.txt\x00", "", "", "", .{false} ** section_count, .{true} ** section_count, false, &out, &scratch);
     try testing.expectEqual(RowAction.stage, rev.rows[1].file.action);
+}
+
+test "모두 스테이지의 계획 — 미해결 충돌이 있으면 경로로, 없으면 -A, 잘렸으면 거절 (S4b)" {
+    // `add -A` 는 unmerged 를 pathspec 제외와 무관하게 스테이지한다(실측) — 그래서 미해결이 있을 때만 경로를 센다.
+    var out: [8][]const u8 = undefined;
+    // 변경 사항: g.txt(수정) · n.txt(추적 안 됨) · f.txt(충돌) · h.txt(충돌). 스테이지 그룹의 s.txt 는 대상이 아니다.
+    const status = "# branch.head main\n1 .M N... 100644 100644 100644 aaa bbb g.txt\n? n.txt\nu UU N... 100644 100644 100644 100644 aaa bbb ccc f.txt\nu UU N... 100644 100644 100644 100644 aaa bbb ccc h.txt\n1 A. N... 000000 100644 100644 000 111 s.txt\n";
+    // ⑴ 판정 없음 → 충돌 둘 다 미해결 → 경로 계획: g.txt·n.txt 만, 비켜 간 것 둘.
+    const p1 = planStageAll(status, null, false, &out);
+    try testing.expectEqual(@as(usize, 2), p1.paths.n);
+    try testing.expectEqual(@as(usize, 2), p1.paths.skipped);
+    try testing.expectEqualStrings("g.txt", out[0]);
+    try testing.expectEqualStrings("n.txt", out[1]);
+    // ⑵ f.txt 만 마커가 남았다 → h.txt(해결됨)는 경로에 든다, 비켜 간 것 하나.
+    const p2 = planStageAll(status, "f.txt\x00", false, &out);
+    try testing.expectEqual(@as(usize, 3), p2.paths.n);
+    try testing.expectEqual(@as(usize, 1), p2.paths.skipped);
+    try testing.expectEqualStrings("h.txt", out[2]);
+    // ⑶ 전부 해결(빈 목록) → `-A`.
+    try testing.expectEqual(StageAllPlan.all, planStageAll(status, "", false, &out));
+    // ⑷ 미해결이 있는데 잘렸으면 거절 — 해결됐으면 잘려도 `-A` 다(경로가 필요 없다).
+    try testing.expectEqual(StageAllPlan.blocked_truncated, planStageAll(status, null, true, &out));
+    try testing.expectEqual(StageAllPlan.all, planStageAll(status, "", true, &out));
+    // ⑸ 스테이지할 것이 없으면(충돌만, 미해결) `.nothing` — 「모두」가 걸 것이 없다.
+    const only_conflicts = "# branch.head main\nu UU N... 100644 100644 100644 100644 aaa bbb ccc f.txt\n";
+    try testing.expectEqual(StageAllPlan.nothing, planStageAll(only_conflicts, null, false, &out));
+    // ⑹ 경로가 다 안 들면 거절 — 반쪽만 올리고 «모두» 라 하지 않는다.
+    var tiny: [1][]const u8 = undefined;
+    try testing.expectEqual(StageAllPlan.blocked_too_many, planStageAll(status, null, false, &tiny));
 }
 
 test "충돌과 평범한 변경이 섞인 섹션 — 머리 줄은 `+`, 충돌 행만 «해결»" {

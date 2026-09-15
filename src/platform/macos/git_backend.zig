@@ -3574,6 +3574,18 @@ pub const testWriteFile = writeFileAt;
 /// 충돌 저장소**가 있어야 「어느 기준으로 무엇을 읽었나」를 잴 수 있는데, 그 저장소를 만드는 어휘는
 /// 여기에만 있다(제품의 git 쓰기 어휘는 `init`·`merge` 를 일부러 안 갖는다). 위 둘과 같은 규율이다.
 pub const testMakeStageRepo = makeStageRepo;
+pub const testWriteFileAt = writeFileAt;
+
+/// 판정자용 — 그 저장소의 `status --porcelain=v2` 원문(끝 NUL 없이). 실패하면 `null`.
+pub fn testGitStatusLines(exe: []const u8, repo: []const u8, out: []u8) ?[]const u8 {
+    var argv_buf: [git_command.max_argv][]const u8 = undefined;
+    const argv = git_command.build(.status, exe, repo, null, &argv_buf);
+    const o = runArgv(std.heap.page_allocator, argv) catch return null;
+    defer std.heap.page_allocator.free(o.bytes);
+    const n = @min(o.bytes.len, out.len);
+    @memcpy(out[0..n], o.bytes[0..n]);
+    return out[0..n];
+}
 pub const testTmpRepoPath = tmpRepoPath;
 pub const TestStageFixture = StageFixture;
 

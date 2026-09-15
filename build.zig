@@ -1663,9 +1663,9 @@ pub fn build(b: *std.Build) void {
     //
     // **MPN1~5(배치 산술)는 여기 안 든다** — 그쪽은 `maru` 모듈(chrome 컴포넌트)에 있고 Zig 는
     // **별도 모듈의 test 를 안 모은다**. 그 다섯은 `zig build test-editor` 가 돌린다(실측).
-    run_macos_editor_merge_tests.addArg("--maru-expect-tests=38");
+    run_macos_editor_merge_tests.addArg("--maru-expect-tests=39");
     // ⚠️ **그리고 실제로 돌았는가** — MRG2 이후는 macOS 가 아니면 `SkipZigTest` 다.
-    run_macos_editor_merge_tests.addArg("--maru-expect-passed=38");
+    run_macos_editor_merge_tests.addArg("--maru-expect-passed=39");
     run_macos_editor_merge_tests.setCwd(b.path("."));
     b.step(
         "test-editor-merge",
@@ -3904,7 +3904,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
             .imports = &.{.{ .name = "shutdown_wire_contract", .module = shutdown_wire_contract_mod }},
         }),
-        .filters = &.{ "충돌 행은 스테이지가 아니라", "충돌과 평범한 변경이 섞인 섹션", "행: 스테이지·언스테이지·충돌", "마커가 없어진 충돌 행에는", "conflict-markers argv" },
+        .filters = &.{ "충돌 행은 스테이지가 아니라", "충돌과 평범한 변경이 섞인 섹션", "행: 스테이지·언스테이지·충돌", "마커가 없어진 충돌 행에는", "conflict-markers argv", "모두 스테이지의 계획" },
     });
     attachPngCodec(b, scm_row_model_tests.root_module);
     scm_row_model_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });

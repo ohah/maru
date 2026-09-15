@@ -6002,6 +6002,43 @@ input stage 4, historical/IME/clipboard 각 1, marked callback 8, insert callbac
 `loginwindow`여서 source 전환·HID 게시·capture 전에 `global-keyboard-focus`로 RED였으며 통과 증거에 포함하지
 않는다. v2b 생산자와 판정자는 아직 구현 전이다.
 
+v2b는 곧바로 owner 이름을 하드코딩하지 않는다. **v2b0 window-authority 관측**이 먼저 Screen Recording preflight를
+source 전환·HID 게시보다 앞에서 통과한 뒤, 후보 요청 직전/직후 `SCShareableContent`/window-server inventory의 차집합을
+만든다. producer는 후보처럼 보이는 행을 선필터하지 않고 각 시점의 전체 on-screen inventory를 pure reducer에 넘긴다.
+snapshot은 최대 256 window이며 cap+1은 일부를 버려 통과하지 않고 `failed`다. diagnostic은 reducer가 고른 새 on-screen
+window의 ID, owner PID·bundle ID, Apple code-signing validity·signing identifier,
+layer, bounds, 선택된 TIS source ID만 허용하고
+window title·후보 문자열·전체 화면 이미지는 금지한다. Maru PID, baseline window ID, off-screen/zero-area window는 제외하며,
+후보 요청 전에는 없고 요청 뒤 생기며 Escape 뒤 사라지는 open→close를 같은 anchor에서 최소 5회 반복해 Apple-signed
+owner identity와 신규/소멸 window가 매회 일치해야 한다. 각 반복 동안 PTY input, committed text와 base screen generation은
+변하지 않아야 한다. 남은 exact 한
+owner identity가 실제 Apple Korean IME와 결속된다는 증거가 없으면 이름 substring이나 근접 좌표로 pass하지
+않는다. 이는 Core Graphics가 window ID·bounds·owner 정보를 제공하고 bounds를 주 화면 좌상단 원점의 screen space로
+정의한다는 공개 계약을 사용한다([CGWindowListCopyWindowInfo](https://developer.apple.com/documentation/coregraphics/cgwindowlistcopywindowinfo(_:_:)),
+[kCGWindowBounds](https://developer.apple.com/documentation/coregraphics/kcgwindowbounds)).
+
+**v2b1 제품 gate**는 v2b0에서 고정한 exact owner identity와 새 window ID를 같은 실행에서 재검증하고 그 window 하나만
+캡처한다. ScreenCaptureKit의 `SCWindow`가 window ID·owning application·layer·frame을 제공하고 단일 window filter를 지원하는
+공개 계약을 사용한다([SCWindow](https://developer.apple.com/documentation/screencapturekit/scwindow),
+[desktopIndependentWindow](https://developer.apple.com/documentation/screencapturekit/sccontentfilter/init(desktopindependentwindow:))).
+캡처 직전·직후 동일 window ID/PID와 Apple code-signing identity를 다시 검증한다. receipt는 v2a와 같은 runtime/surface,
+candidate window ID/owner identity/bounds, `firstRect`, capture digest와 capture-complete
+상태를 결속한다. AppKit `firstRect`와 Quartz bounds는 원점 규약이 다르므로 직접 비교하지 않는다. display ID,
+`NSScreen.frame`, `CGDisplayBounds`, backing scale을 함께 싣고 pure converter 하나가 Quartz 좌상단 원점으로 정규화하며,
+음수 origin·좌우/상하 multi-display·scale 1/2 fixture가 같은 변환을 검증한다. candidate bounds는 같은 display에서 v2b0의
+5회 관측이 정한 위/아래 placement별 anchor band에 있어야 하고, 화면 가장자리의 정상적인 위쪽 flip을 허용한다. 관측 전에
+임의 pixel 거리 상한을 만들지 않는다. 판정 뒤에는
+candidate window 부재, original input source, exact first responder와 restore record 소멸을 확인한다. 전체 화면 diff,
+owner-name substring, title, AX 텍스트, 좌표 근접만으로 pass하는 경로는 금지한다. pure inventory reducer/coordinate
+converter의 RED test가 duplicate, baseline persistence, unsigned/non-Apple owner, PID/signing drift, close 부재, screen mutation과
+좌표 변환 오류를 먼저 거부한 뒤에만 제품 producer를 연결한다. macOS 11 제품 하한은 유지하고
+ScreenCaptureKit 부재는 opt-in gate의 `not_provisioned`이지 제품 기능 fallback이 아니다.
+v2b0 artifact는 exact 5개 open/close row만 가진 16 KiB 이하
+`maru.session-host-cr6d-ime-candidate-observation.v1`, v2b1 receipt는 단일 candidate만 가진
+`maru.session-host-cr6d-ime-candidate-pixel.v1` canonical JSON이며 둘 다 absent target에 배타 게시한다. permission,
+WindowServer, API availability 부재는 `not_provisioned`; owner/lifecycle/identity/geometry/capture/cleanup 불일치는 `failed`다.
+둘을 pass나 skip으로 정규화하지 않는다.
+
 **CR6e-a1 stalled peer·transport baseline artifact 계약:** 자동 reconnect 제품 설정은 아직 배선하지 않는다. CR4의 제품
 `connectExistingHostUntil`/deadline-aware hello 경계에 harness-owned user-only Unix socket과 exact manifest를 제공한다.
 peer는 `(1)` accept 뒤 hello frame을 읽고 reply를 영구 보류하는 read stall과 `(2)` connect가 transient로 실패하는

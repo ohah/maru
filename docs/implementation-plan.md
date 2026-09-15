@@ -1287,7 +1287,34 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    단위 테스트만으로 픽셀 통과를 대신하지 않는다. 이 행은 Maru가 그린 preedit와 입력기 anchor를 증명하지만 OS가 별도
    window로 그리는 후보 목록 자체를 캡처했다고 주장하지 않는다. **CR6d-v2b 후보창 픽셀 증거**는 실제 Apple Korean IME
    후보 목록을 연 뒤 OS-owned window와 anchor의 screen-space 관계를 캡처하는 별도 opt-in gate다. Screen Recording 권한,
-   잠금 해제된 WindowServer, 전면 앱이 없으면 `not_provisioned`로 실패하며 v2a나 좌표 비교로 대체하지 않는다.
+   잠금 해제된 WindowServer, 전면 앱이 없으면 `not_provisioned`로 실패하며 v2a나 좌표 비교로 대체하지 않는다. v2b는
+   **v2b0 window-authority 관측 → v2b1 제품 gate** 두 merge slice로 닫는다. v2b0은 source 전환이나 HID 게시 전에
+   `CGPreflightScreenCaptureAccess()`를 확인하고, 같은 recovered view에서 후보 요청 직전/직후의 on-screen window inventory를
+   수집한다. producer는 후보처럼 보이는 행을 선필터하지 않고 각 시점의 전체 on-screen inventory를 reducer에 넘긴다.
+   snapshot은 최대 256 window이며 cap+1은 일부를 버리지 않고 `failed`다. 새 window의 `CGWindowID`, owner PID·bundle ID,
+   Apple code-signing validity·signing identifier, layer,
+   screen-space bounds와 선택된 TIS source ID만 redacted
+   diagnostic에 싣고 window title·후보 문자열·전체 화면 픽셀은 싣지 않는다. Maru PID의 창, baseline에 있던 창, off-screen·
+   zero-area 창은 후보 권위가 될 수 없다. 후보 요청 전에는 없고 요청 뒤 생기며 Escape 뒤 사라지는 open→close를 같은
+   anchor에서 최소 5회 반복해 Apple-signed owner identity와 신규/소멸 window가 모두 일치해야 한다. 이 동안 PTY input,
+   committed text와 base screen generation은 변하지 않아야 한다. 관측 결과가 Apple Korean IME의 실제 owner identity를
+   하나로 좁히지 못하면 allowlist를
+   추측하지 않고 v2b0을 RED로 유지한다. AppKit `firstRect`와 Quartz window bounds를 직접 비교하지 않는다. display ID,
+   `NSScreen.frame`, `CGDisplayBounds`, backing scale을 receipt에 싣고 하나의 pure coordinate converter가 Quartz 좌상단 원점으로
+   정규화한다. 음수 origin·좌우/상하 multi-display·scale 1/2를 fixture로 닫는다. v2b1은 v2b0에서 고정한 exact owner identity와 새 window ID를 다시
+   검증한 뒤 그 window만 캡처하고, 캡처 직전·직후 같은 window ID/PID/signing identity를 다시 확인한다. 같은 receipt에
+   v2a의 exact runtime·surface, `firstRect`, candidate bounds, capture digest를
+   결속한다. 후보 bounds는 같은 display 안에서 v2b0 반복 관측으로 정한 위/아래 placement별 anchor band 안이어야 하며,
+   화면 가장자리에서 OS가 위로 뒤집는 배치를 실패로 오인하지 않는다. 임의 거리 상한은 구현 전에 정하지 않는다. 후보 window
+   소멸과 입력 source/first responder 복원까지 성공해야 pass다. 전체 화면 전후 pixel diff, owner-name substring, 창 제목,
+   AX 텍스트나 좌표만으로 후보창을 골라서는 안 된다. v2b0은 exact 5개 open/close row만 가진 16 KiB 이하
+   `maru.session-host-cr6d-ime-candidate-observation.v1`, v2b1은 단일 candidate만 가진
+   `maru.session-host-cr6d-ime-candidate-pixel.v1` canonical JSON을 absent target에 배타 게시한다. permission/WindowServer/API
+   부재는 `not_provisioned`, owner·lifecycle·identity·geometry·capture·cleanup 불일치는 `failed`이며 어느 쪽도 pass/skip으로
+   축소하지 않는다. pure inventory reducer와 coordinate converter를 RED test로 먼저
+   만들고 duplicate/new-but-persistent/unsigned·non-Apple/PID·signing drift, close 부재, screen mutation을 모두 거부한 뒤
+   제품 producer를 연결한다. macOS 11 제품 하한은 바꾸지 않고 gate의 ScreenCaptureKit 사용은 availability 검사를 거친
+   opt-in 경로로 격리한다.
    CR6e는 세 gate로 나눈다. **CR6e-a1 transport baseline**은 제품 deadline-aware
    exact-host issuer에 실제 Unix peer의 accept 후 hello 무응답과 transient connect backoff를 주입하고, absolute deadline,
    attempt/wait 수, elapsed, fd/RSS를 strict-schema raw artifact로 남긴다. **CR6e-a2 recovery baseline**은 반복 CR6c

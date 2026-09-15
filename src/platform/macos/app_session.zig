@@ -45,6 +45,7 @@ pub const file_tree = maru.session.file_tree;
 pub const file_tree_navigation = maru.session.file_tree_navigation;
 pub const dock_view_bar = chrome.components.dock_view_bar;
 pub const git_backend_mod = @import("git_backend.zig");
+const turn_index_cache = @import("turn_index_cache.zig"); // 턴 스냅샷 임시 index 의 수명(창 닫힘에 삭제·오래된 형제 스윕)
 pub const git_write_command = maru.session.git_write_command; // 쓰기 argv·안전 술어(읽기와 환경·플래그가 갈린다)
 pub const scm_view = maru.session.scm_view;
 pub const file_panel_bridge = maru.session.file_panel_bridge;
@@ -765,6 +766,41 @@ test "archive scope refresh detects same-pane cwd changes but ignores repeated o
 // (`build.zig`), hit-test는 `if (!action.enabled) return false`로 그냥 무시한다(`interaction.zig`). 즉 칩은
 // 평소와 똑같이 보이는데 **눌러도 아무 일이 없다.** 그래서 published props의 `workspace_scope_enabled`까지
 // 끝까지 확인한다 — 중간 상태(cwd를 안다)만 보면 "보이는데 안 눌리는" 그 상태를 놓친다.
+// 임시 index 의 **수명** — 단위 판정자(`turn_index_cache.zig`)는 「지우는 함수가 지운다」를, 배선 판정자
+// (`tests/turn_index_cache_wiring.zig`)는 「`deinit` 이 그것을 부른다」를 본다. 여기는 그 둘을 **진짜 세션**
+// 으로 잇는다: 이름을 짓는 자리(`turnIndexPath`)가 만든 경로에 파일을 놓고 창을 닫으면 없어야 한다.
+// git 은 안 부른다(워커가 만든 것처럼 파일만 놓는다) — 보는 것은 닫힘 경로 하나다.
+test "창을 닫으면 그 창의 임시 index 파일이 사라진다 — 실제 AppSession" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var env_guard = try workspace_ops.ProviderEnvGuard.capture(a);
+    defer env_guard.restore();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    try tmp.dir.createDirPath(io, "home");
+    const home = try std.fmt.allocPrintSentinel(a, "{s}/home", .{root}, 0);
+    defer a.free(home);
+    try std.testing.expectEqual(@as(c_int, 0), setenv("HOME", home.ptr, 1));
+
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    // ⚠️ 경로는 **세션 소유**라 `deinit` 이 푼다 — 복사해 두지 않고 그 슬라이스로 뒤를 보면 해제된 메모리를
+    // 읽어 «없음» 이 나오고, 지우기를 떼도 초록이다(돌연변이 검증에서 실제로 살아남았다).
+    const path = try a.dupe(u8, session.turnIndexPath() orelse return error.TestUnexpectedResult);
+    defer a.free(path);
+    // 경로는 우리 HOME 아래다 — 아니면 아래 «사라짐» 이 남의 파일을 지운 것일 수 있다.
+    try std.testing.expect(std.mem.startsWith(u8, path, home));
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = "DIRC" });
+    try std.Io.Dir.cwd().access(io, path, .{});
+    session.deinit();
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, path, .{}));
+    // 형제는 남는다 — 지우기가 파일 하나이지 디렉터리가 아니라는 부정 대조.
+    try std.Io.Dir.cwd().access(io, std.fs.path.dirname(path).?, .{});
+}
+
 test "아카이브 범위 칩: OSC 7이 없어도 커널 폴백으로 눌리는 칩이 된다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const a = std.testing.allocator;
@@ -7213,9 +7249,10 @@ pub const AppSession = struct {
         const home: []const u8 = if (std.c.getenv("HOME")) |h| std.mem.span(h) else "";
         if (home.len == 0) return null;
         // 창마다 다른 파일을 쓴다 — 같은 파일을 두 창이 동시에 쓰면 한쪽 스냅샷이 다른 쪽 작업트리를 담는다.
-        // 세션 포인터를 이름에 쓴다(창 수명 동안 유일하고, 종료 시 그 파일은 다음 실행에서 재사용되거나 남아도
-        // 무해하다 — read-tree가 매번 덮어쓴다).
-        const path = std.fmt.allocPrint(self.allocator, "{s}/.cache/maru/turn-index-{d}", .{ home, @intFromPtr(self) }) catch return null;
+        // 세션 포인터를 이름에 쓴다(창 수명 동안 유일하다). **수명은 `turn_index_cache` 가 든다**: 주소는
+        // 실행마다 달라 다음 실행이 재사용하지 않으므로 창이 닫힐 때 `deinit` 이 지우고, 크래시로 남은 것은
+        // 스냅샷 워커의 스윕이 거둔다(2026-09-15 실측 6,123 개가 지우는 자리 없이 쌓여 있었다).
+        const path = std.fmt.allocPrint(self.allocator, "{s}/.cache/maru/" ++ turn_index_cache.prefix ++ "{d}", .{ home, @intFromPtr(self) }) catch return null;
         // 디렉터리는 미리 만들어 둔다(없으면 git이 index를 못 쓴다).
         var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
         if (std.fmt.bufPrintZ(&dir_buf, "{s}/.cache/maru", .{home})) |dir| {
@@ -23904,7 +23941,11 @@ pub const AppSession = struct {
         self.git_repo_dest = null;
         if (self.git_repo_remote_root) |root| self.allocator.free(root);
         self.git_repo_remote_root = null;
-        if (self.turn_index_path) |path| self.allocator.free(path);
+        if (self.turn_index_path) |path| {
+            // 파일도 지운다 — 이름이 이 창의 주소라 다음 실행에서 아무도 안 쓴다. 지우기가 풀기보다 앞이다.
+            turn_index_cache.removeIndexFile(self.io, path);
+            self.allocator.free(path);
+        }
         self.turn_index_path = null;
         // 그림자 사본은 힙이다 — 링(고정 배열)과 달리 여기서 반드시 푼다.
         self.turn_captures.deinit(self.allocator);

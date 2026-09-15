@@ -18,6 +18,7 @@ const git_locate = maru.session.git_locate;
 const dock_panel = maru.session.dock_panel;
 const repo_path = maru.session.repo_path;
 const safe_open = @import("safe_open.zig");
+const turn_index_cache = @import("turn_index_cache.zig"); // 임시 index 의 수명 — 워커가 오래된 형제를 프로세스당 한 번 쓸어 낸다
 
 /// **이 backend가 쓰는 유일한 allocator.** State·job·argv·결과 버퍼가 전부 여기서 나온다.
 ///
@@ -1320,6 +1321,9 @@ const SnapshotJob = struct {
 fn snapshotWorker(job: *SnapshotJob) void {
     const state = job.state;
     var result: SnapshotResult = .{ .surface_id = job.surface_id };
+    // 오래된 형제 index(크래시로 남은 다른 창의 것)를 프로세스당 한 번 거둔다 — 메인이 아니라 여기인 이유는
+    // 수천 개를 `stat` 하는 비용이 프레임에 들어가면 안 되기 때문이다. 쓰기 **앞**이라 방금 쓴 파일은 후보가 아니다.
+    _ = turn_index_cache.sweepStaleSiblingsOnce(state.io, job.index_file);
     if (takeTurnSnapshot(state.allocator, job.git_exe, job.repo, job.index_file)) |tree| {
         result.tree = tree;
     } else |_| {}

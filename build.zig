@@ -5279,6 +5279,18 @@ pub fn build(b: *std.Build) void {
     run_std_environ_view_wiring_tests.addArg("--maru-expect-tests=2");
     run_std_environ_view_wiring_tests.setCwd(b.path("."));
     boundary_step.dependOn(&run_std_environ_view_wiring_tests.step);
+    // 턴 스냅샷 임시 index 를 **거두는** 자리가 제품에 걸려 있는가(창 닫기·스냅샷 워커·이름 접두).
+    const turn_index_cache_wiring_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/turn_index_cache_wiring.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_turn_index_cache_wiring_tests = b.addRunArtifact(turn_index_cache_wiring_tests);
+    run_turn_index_cache_wiring_tests.addArg("--maru-expect-tests=3");
+    run_turn_index_cache_wiring_tests.setCwd(b.path("."));
+    boundary_step.dependOn(&run_turn_index_cache_wiring_tests.step);
     const debug_trace_alloc_wiring_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/debug_trace_alloc_wiring.zig"),

@@ -58,6 +58,11 @@ fn sliceHasNullEntry(slice: [:null]const ?[*:0]const u8) bool {
 
 test "unsetenv 만 하면 std 의 조각 끝에 null 이 생기고, 갱신하면 사라진다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
+    // 먼저 조각을 **현재** `environ` 배열에 맞춘다. std 가 시작 때 붙잡은 것은 커널이 준 원본인데, 이 프로세스에서
+    // 누가 먼저 `setenv` 를 했으면 libc 는 자기 사본으로 갈아탄 뒤라 원본은 더 이상 안 건드린다 — 그러면 아래
+    // 부정 대조가 «null 이 안 생긴다» 로 어긋난다(단독 실행에서 실제로 그랬다). 결함의 본질은 「libc 가 고치는
+    // 배열과 std 가 보는 조각이 같은 길이로 어긋난다」이므로, 같은 배열을 보게 맞춰 놓고 시작해야 순서와 무관하다.
+    refreshStdDebugView();
     const before = stdDebugViewSlice() orelse return error.SkipZigTest;
     if (before.len == 0) return error.SkipZigTest;
 
@@ -93,6 +98,7 @@ test "unsetenv 만 하면 std 의 조각 끝에 null 이 생기고, 갱신하면
 
 test "unsetenvKeepingStdView 는 변수를 실제로 지우고 조각도 함께 갱신한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
+    refreshStdDebugView(); // 위 테스트와 같은 이유 — 순서와 무관하게 현재 배열에서 시작한다.
     const before = stdDebugViewSlice() orelse return error.SkipZigTest;
     if (before.len == 0) return error.SkipZigTest;
     const first = before[0] orelse return error.SkipZigTest;
@@ -111,6 +117,37 @@ test "unsetenvKeepingStdView 는 변수를 실제로 지우고 조각도 함께 
     const before_len = before.len;
     unsetenvKeepingStdView(name.ptr);
     try std.testing.expect(std.c.getenv(name.ptr) == null);
+    const fresh = stdDebugViewSlice() orelse return error.SkipZigTest;
+    try std.testing.expectEqual(before_len - 1, fresh.len);
+    try std.testing.expect(!sliceHasNullEntry(fresh));
+}
+
+test "앞서 setenv 로 libc 가 사본으로 갈아탄 뒤에도 같은 대조가 선다 — 단독 실행에서 어긋났던 그 조건" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    // libc 를 먼저 사본 상태로 만든다(새 이름 추가). 이 뒤로 std 의 원본 조각과 libc 배열은 다른 메모리다.
+    try std.testing.expectEqual(@as(c_int, 0), setenv("MARU_STD_ENVIRON_VIEW_PRIME", "1", 1));
+    defer _ = unsetenv("MARU_STD_ENVIRON_VIEW_PRIME");
+    refreshStdDebugView();
+    const before = stdDebugViewSlice() orelse return error.SkipZigTest;
+    if (before.len == 0) return error.SkipZigTest;
+    const first = before[0] orelse return error.SkipZigTest;
+    const pair = std.mem.span(first);
+    const eq = std.mem.indexOfScalar(u8, pair, '=') orelse return error.SkipZigTest;
+    var name_buf: [512]u8 = undefined;
+    var value_buf: [4096]u8 = undefined;
+    if (eq >= name_buf.len or pair.len - eq - 1 >= value_buf.len) return error.SkipZigTest;
+    const name = try std.fmt.bufPrintZ(&name_buf, "{s}", .{pair[0..eq]});
+    const value = try std.fmt.bufPrintZ(&value_buf, "{s}", .{pair[eq + 1 ..]});
+    defer {
+        _ = setenv(name.ptr, value.ptr, 1);
+        refreshStdDebugView();
+    }
+    const before_len = before.len;
+    _ = unsetenv(name.ptr);
+    const stale = stdDebugViewSlice() orelse return error.SkipZigTest;
+    try std.testing.expectEqual(before_len, stale.len);
+    try std.testing.expect(sliceHasNullEntry(stale));
+    refreshStdDebugView();
     const fresh = stdDebugViewSlice() orelse return error.SkipZigTest;
     try std.testing.expectEqual(before_len - 1, fresh.len);
     try std.testing.expect(!sliceHasNullEntry(fresh));

@@ -9104,6 +9104,7 @@ pub fn build(b: *std.Build) void {
             .optimize = cr2c_optimize,
             .link_libc = true,
         });
+        attachPngCodec(b, cr2c_app_module);
         cr2c_app_module.addAnonymousImport(
             "maru_terminfo",
             .{ .root_source_file = b.path("terminfo/maru.terminfo") },
@@ -9164,6 +9165,7 @@ pub fn build(b: *std.Build) void {
             .optimize = cr2d1_optimize,
             .link_libc = true,
         });
+        attachPngCodec(b, cr2d1_app_module);
         cr2d1_app_module.addAnonymousImport(
             "maru_terminfo",
             .{ .root_source_file = b.path("terminfo/maru.terminfo") },
@@ -11474,6 +11476,7 @@ pub fn build(b: *std.Build) void {
             .optimize = b3_optimize,
             .link_libc = true,
         });
+        attachPngCodec(b, event_c3_3b2b0_observation_module);
         event_c3_3b2b0_observation_module.addAnonymousImport(
             "maru_terminfo",
             .{ .root_source_file = b.path("terminfo/maru.terminfo") },

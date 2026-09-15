@@ -5,7 +5,8 @@
 //! 늦게 도는 이름이라, 발견이 가장 비싼 순간에 온다(`build.zig` 의 tree-sitter 주석이 같은 사고를
 //! 적어 두고 있다: "wasm·mobile 빌드가 같은 root 를 쓰므로 거기 C 를 매달면 그 둘이 깨진다").
 //!
-//! 그래서 **자리 수를 센다**: `b.path("src/maru.zig")` 가 나오는 만큼 `attachPngCodec(b, ...)` 도
+//! 그래서 **자리 수를 센다**: 같은 그래프를 독립 루트로 세우는 `src/maru.zig`,
+//! `src/cross_target_surface.zig`, `src/app.zig`가 나오는 만큼 `attachPngCodec(b, ...)`도
 //! 나와야 한다. 새 타깃을 더하면서 배선을 잊으면 여기서 먼저 걸린다.
 const std = @import("std");
 
@@ -34,10 +35,12 @@ test "PNG 코덱 배선: maru 루트 모듈 자리마다 attachPngCodec 이 있�
     const text = try readBuildZig(std.testing.allocator);
     defer std.testing.allocator.free(text);
 
-    // **루트가 둘이다.** `cross_target_surface.zig` 는 `maru.zig` 가 아니지만 같은 그래프를 자기
-    // 루트로 다시 세운다 — 실측으로 그 자리를 빼먹어 `check-targets` 세 타깃이 다 빨개졌다.
+    // **루트 파일 종류가 셋이다.** `cross_target_surface.zig`와 `app.zig`는 `maru.zig`가 아니지만
+    // 같은 그래프를 자기 루트로 다시 세운다. app 루트를 세던 세 focused gate에서 이 inventory가
+    // 빠져 실제로 `no module named 'png_codec'`가 났다.
     const roots = countOutsideComments(text, "b.path(\"src/maru.zig\")") +
-        countOutsideComments(text, "b.path(\"src/cross_target_surface.zig\")");
+        countOutsideComments(text, "b.path(\"src/cross_target_surface.zig\")") +
+        countOutsideComments(text, "b.path(\"src/app.zig\")");
     const attaches = countOutsideComments(text, "attachPngCodec(b,");
 
     // **양성 대조**: 둘 다 실제로 있어야 한다. 0 == 0 으로 공허하게 통과하면 이름을 바꾼 날

@@ -6042,6 +6042,16 @@ v2b0 artifact는 exact 5개 open/close row만 가진 16 KiB 이하
 WindowServer, API availability 부재는 `not_provisioned`; owner/lifecycle/identity/geometry/capture/cleanup 불일치는 `failed`다.
 둘을 pass나 skip으로 정규화하지 않는다.
 
+**v2b0b 소유 경계:** AppKit 제품 process는 별도 Swift 파일의 opt-in producer에서 title을 읽지 않은
+`before/opened/closed` 전체 inventory 5묶음을 메모리에만 보존한다. source 전환·HID 게시 전 Screen Recording
+preflight가 실패하면 inventory 수집과 시스템 mutation은 모두 0이다. 다섯 묶음이 완성되면 Swift는 bounded JSON bytes와
+caller가 이미 고정한 absent output pathname을 단 한 번의 동기식 C ABI로 Zig에 빌려준다. Zig entrypoint가 byte/schema/window
+수 상한을 먼저 검증하고 이 문서의 pure reducer·series validator를 직접 호출한 뒤, 성공한 exact 5-row canonical artifact를
+same-directory temporary inode→`link(2)`로 배타 게시한다. Swift가 후보를 선별하거나 판정을 복제하는 경로, 전체 inventory
+중간 파일, 장수명 helper/daemon, ABI 재시도와 부분 artifact는 금지한다. ABI는 `passed`와 typed
+`not_provisioned`/`failed`만 반환하며 raw inventory와 다른 앱의 bundle/signing/bounds는 process 종료 전에 메모리에서만
+소멸한다. 이 경계는 v2b0b 관측 증거만 닫고 v2b1 pixel capture 완료를 뜻하지 않는다.
+
 **CR6e-a1 stalled peer·transport baseline artifact 계약:** 자동 reconnect 제품 설정은 아직 배선하지 않는다. CR4의 제품
 `connectExistingHostUntil`/deadline-aware hello 경계에 harness-owned user-only Unix socket과 exact manifest를 제공한다.
 peer는 `(1)` accept 뒤 hello frame을 읽고 reply를 영구 보류하는 read stall과 `(2)` connect가 transient로 실패하는

@@ -12256,7 +12256,8 @@ fn kittyDeferDrain(core: *TerminalCore) !usize {
     try kitty.takePendingKittyJobs(core, &jobs, std.testing.allocator);
     for (jobs.items) |*job| {
         const decoded = kitty.decodeKittyJob(job, core.allocator);
-        kitty.completeKittyTransmit(core, job.*, decoded);
+        kitty.completeKittyTransmit(core, job, decoded);
+        if (job.old_image) |*o| o.freeAll(core.allocator);
     }
     return jobs.items.len;
 }
@@ -12293,7 +12294,53 @@ test "kitty 락 밖 디코드: m=0 은 pending 엔트리·job 만 만들고, 완
     }
 }
 
-test "kitty 락 밖 디코드 [적대]: 완료 전 같은 id 재전송 — 첫 job 은 설치되지 않고(세대 불일치) 둘째만 남는다" {
+test "kitty 락 밖 디코드 [적대·깜빡임]: 같은 id 재전송 동안 옛 이미지가 view 에 그대로 있고, 완료가 교체한다" {
+    // 2026-09-15 사용자 보고 «빨라졌는데 플리커가 심하다」: 처음 구현은 m=0 에서 옛 이미지를 map 에서 빼고
+    // 빈 pending 을 두어, 디코드 사이 tick 이 그 placement 를 빈 채로 그렸다. 브라우저는 매 프레임 같은 id 로
+    // 재전송하므로 프레임마다 깜빡였다. 이 판정자는 «재전송 pending 동안 view 에 옛 픽셀이 남는다」 를 못 박는다.
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    core.kitty_defer_decode = true;
+    const b64 = try kittyDeferTestPayload(std.testing.allocator, true);
+    defer std.testing.allocator.free(b64);
+    const seq1 = try std.fmt.allocPrint(std.testing.allocator, "\x1b_Ga=T,f=32,s=2,v=2,i=7,o=z;{s}\x1b\\", .{b64});
+    defer std.testing.allocator.free(seq1);
+    try core.write(seq1);
+    _ = try kittyDeferDrain(&core);
+    core.clearResponse();
+    const first = core.kitty_images.map.get(7).?;
+    try std.testing.expect(!first.isPending());
+    try std.testing.expectEqual(@as(usize, 1), core.buildImageViews().len);
+    // 재전송(다른 치수) — 완료 전: 옛 이미지가 그대로 view 에 있다(깜빡임 없음), job 은 대기 중.
+    const seq2 = try std.fmt.allocPrint(std.testing.allocator, "\x1b_Ga=T,f=32,s=1,v=4,i=7,o=z;{s}\x1b\\", .{b64});
+    defer std.testing.allocator.free(seq2);
+    try core.write(seq2);
+    const during = core.kitty_images.map.get(7).?;
+    try std.testing.expect(!during.isPending());
+    try std.testing.expectEqual(first.generation, during.generation);
+    try std.testing.expectEqual(@as(u32, 2), during.width);
+    try std.testing.expectEqual(@as(usize, 1), core.buildImageViews().len);
+    try std.testing.expectEqual(first.data.ptr, core.buildImageViews()[0].pixels.ptr);
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_pending_jobs.items.len);
+    try std.testing.expectEqual(@as(usize, 16), core.kitty_images.total_bytes);
+    // 완료: 새 픽셀·새 치수·새 세대로 교체, 옛 것은 job.old_image 로 나가 락 밖에서 free 된다(누수는 testing.allocator 가 잡는다).
+    var jobs: std.ArrayListUnmanaged(kitty.KittyPendingJob) = .empty;
+    defer jobs.deinit(std.testing.allocator);
+    try kitty.takePendingKittyJobs(&core, &jobs, std.testing.allocator);
+    const decoded = kitty.decodeKittyJob(&jobs.items[0], core.allocator);
+    kitty.completeKittyTransmit(&core, &jobs.items[0], decoded);
+    try std.testing.expect(jobs.items[0].old_image != null);
+    try std.testing.expectEqual(first.data.ptr, jobs.items[0].old_image.?.data.ptr);
+    jobs.items[0].old_image.?.freeAll(core.allocator);
+    const done = core.kitty_images.map.get(7).?;
+    try std.testing.expect(done.generation > first.generation);
+    try std.testing.expectEqual(@as(u32, 1), done.width);
+    try std.testing.expectEqual(@as(usize, 16), core.kitty_images.total_bytes);
+    try std.testing.expectEqual(@as(usize, 1), core.buildImageViews().len);
+    try std.testing.expectEqualStrings("\x1b_Gi=7;OK\x1b\\", core.pendingResponse());
+}
+
+test "kitty 락 밖 디코드 [적대]: 완료 전 같은 id 재전송 둘 — 순서대로 완료해 나중 것이 남는다" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
     defer core.deinit();
     core.kitty_defer_decode = true;
@@ -12304,19 +12351,12 @@ test "kitty 락 밖 디코드 [적대]: 완료 전 같은 id 재전송 — 첫 j
     const seq2 = try std.fmt.allocPrint(std.testing.allocator, "\x1b_Ga=t,f=32,s=1,v=4,i=7,o=z;{s}\x1b\\", .{b64});
     defer std.testing.allocator.free(seq2);
     try core.write(seq1);
-    const gen1 = core.kitty_images.map.get(7).?.generation;
-    try core.write(seq2); // 같은 id, 다른 치수 — pending 이 갈아치워진다(옛 pending 은 free 할 픽셀이 없다)
-    const gen2 = core.kitty_images.map.get(7).?.generation;
-    try std.testing.expect(gen2 != gen1);
-    try std.testing.expectEqual(@as(u32, 1), core.kitty_images.map.get(7).?.width);
+    try core.write(seq2); // 새 id 의 빈 pending 하나에 job 둘
     try std.testing.expectEqual(@as(usize, 2), core.kitty_pending_jobs.items.len);
     try std.testing.expectEqual(@as(usize, 2), try kittyDeferDrain(&core));
-    // 둘째 것이 설치됐고(치수 1×4), 총량은 한 장분(16)뿐 — 첫 픽셀은 버려졌다(누수는 testing.allocator 가 잡는다).
     const done = core.kitty_images.map.get(7).?;
-    try std.testing.expectEqual(gen2, done.generation);
-    try std.testing.expectEqual(@as(u32, 1), done.width);
+    try std.testing.expectEqual(@as(u32, 1), done.width); // 둘째(1×4)가 남았다
     try std.testing.expectEqual(@as(usize, 16), core.kitty_images.total_bytes);
-    // 응답은 둘 다 디코드 결과대로 OK 다(앱은 i= 로 짝을 맞춘다).
     try std.testing.expectEqualStrings("\x1b_Gi=7;OK\x1b\\\x1b_Gi=7;OK\x1b\\", core.pendingResponse());
 }
 
@@ -12366,7 +12406,7 @@ test "kitty 락 밖 디코드 [적대]: 잘못된 payload·길이 불일치는 E
     try std.testing.expectEqualStrings("\x1b_Gi=8;EINVAL:bad graphics command\x1b\\", core.pendingResponse());
 }
 
-test "kitty 락 밖 디코드 [적대]: 한도는 완료 시 실 크기로 판정한다 — 초과면 ENOMEM, 옛 이미지는 락 밖 free 로 넘어간다" {
+test "kitty 락 밖 디코드 [적대]: 한도는 완료 시 실 크기로 판정한다 — 초과면 ENOMEM 이고 옛 이미지는 그대로 남는다" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
     defer core.deinit();
     core.kitty_defer_decode = true;
@@ -12379,16 +12419,24 @@ test "kitty 락 밖 디코드 [적대]: 한도는 완료 시 실 크기로 판�
     _ = try kittyDeferDrain(&core);
     core.clearResponse();
     try std.testing.expectEqual(@as(usize, 16), core.kitty_images.total_bytes);
-    // 같은 id 재전송: 옛 16B 는 map 에서 빠져 job 에 실린다(총량 0) — 락 밖 free 의 모양.
+    // 같은 id 재전송: 옛 16B 는 완료까지 map 에 그대로(총량 16 유지).
     try core.write(seq);
-    try std.testing.expectEqual(@as(usize, 0), core.kitty_images.total_bytes);
-    try std.testing.expect(core.kitty_pending_jobs.items[0].old_image != null);
-    // 한도를 15B 로 줄이면 완료가 ENOMEM — 엔트리는 걷히고 총량은 0 그대로.
+    try std.testing.expectEqual(@as(usize, 16), core.kitty_images.total_bytes);
+    // 한도를 15B 로 줄이면 완료가 ENOMEM — 옛 이미지는 남고 총량도 16 그대로(실패한 전송이 화면을 지우지 않는다).
     core.kitty_images.limit = 15;
     _ = try kittyDeferDrain(&core);
-    try std.testing.expect(!core.kitty_images.map.contains(7));
-    try std.testing.expectEqual(@as(usize, 0), core.kitty_images.total_bytes);
+    try std.testing.expect(core.kitty_images.map.contains(7));
+    try std.testing.expect(!core.kitty_images.map.get(7).?.isPending());
+    try std.testing.expectEqual(@as(usize, 16), core.kitty_images.total_bytes);
     try std.testing.expectEqualStrings("\x1b_Gi=7;ENOMEM:image storage full\x1b\\", core.pendingResponse());
+    core.clearResponse();
+    // 새 id 는 빈 pending 이라 ENOMEM 이면 걷힌다.
+    const seq8 = try std.fmt.allocPrint(std.testing.allocator, "\x1b_Ga=T,f=32,s=2,v=2,i=8;{s}\x1b\\", .{b64});
+    defer std.testing.allocator.free(seq8);
+    try core.write(seq8);
+    _ = try kittyDeferDrain(&core);
+    try std.testing.expect(!core.kitty_images.map.contains(8));
+    try std.testing.expectEqual(@as(usize, 0), core.kitty_placements.items.len);
 }
 
 test "kitty 락 밖 디코드: 같은 write 안의 프레임(a=f)·재생(a=a)은 pending 루트를 인라인으로 끝내고 진행한다" {

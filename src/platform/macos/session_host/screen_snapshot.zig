@@ -287,7 +287,7 @@ pub fn projectSnapshot(allocator: std.mem.Allocator, core: *terminal.TerminalCor
     // 이미지 방출(#1 원격 이미지 전송, I2): blob(디코드 픽셀, ≤max_image_blob 청크) + placement(뷰포트 상대). renderSnapshot이
     // 이미 buildImageViews 픽셀과 뷰포트 상대 placement를 줬다 — client는 이 두 record로 이미지를 in-process와 동일하게 렌더한다
     // (렌더러가 image_id/generation으로 GPU 텍스처 캐시). delta에서의 이미지 dedup/방출은 후속(I4) — 지금은 full snapshot만 싣는다.
-    for (snap.images) |img| try appendImageBlobRecords(allocator, &stream, opts.generation, img, opts.image_bytes_out);
+    try appendVisibleImageBlobs(allocator, &stream, opts.generation, core, snap.images, opts.image_bytes_out, null);
     for (snap.placements) |p| try appendImagePlacementRecord(allocator, &stream, opts.generation, p);
     for (snap.virtual_placements) |vp| try appendImageVirtualRecord(allocator, &stream, opts.generation, vp);
     try appendPromptMarks(allocator, &stream, opts.generation, snap, true); // OSC 133 prompt 마크(있을 때만).
@@ -317,6 +317,66 @@ fn stampRecordSequence(bytes: []u8, sequence: u64) ProjectError!void {
         if (record_end > bytes.len) return error.Truncated;
         std.mem.writeInt(u64, bytes[record_start + 12 ..][0..8], sequence, .big);
         offset = record_end;
+    }
+}
+
+/// 이미지 픽셀이 스트림 상한을 다 먹지 못하게 남겨 두는 자리. 이미지 뒤에도 placement·prompt·link
+/// 레코드가 붙는데, 이미지가 천장까지 차지하면 **그 화면이 그려질 자리**를 잃는다.
+const image_budget_reserve: usize = 256 * 1024;
+
+comptime {
+    // 예비분이 상한을 먹으면 **이미지가 조용히 하나도 안 실린다** — 화면은 건너므로 판정자도 초록이고,
+    // 「이미지가 안 뜬다」로만 보여 원인을 찾기 어렵다. 상한이 줄어드는 변경에서 여기가 먼저 시끄럽게
+    // 죽는다. 4배는 임의가 아니라 「예비분이 예산의 주인공이 되면 안 된다」는 뜻이다.
+    if (image_budget_reserve * 4 >= screen_stream.max_record_stream_bytes)
+        @compileError("image budget reserve must stay a small fraction of the record stream ceiling");
+}
+
+/// 이 이미지가 스트림에서 차지할 바이트(청크 헤더 포함 근사·상계). 청크마다 레코드 헤더와 자기서술
+/// 메타가 반복되므로 픽셀 길이만으로는 모자란다 — 넘치게 잡아야 방어선이 뚫리지 않는다.
+fn projectedBlobSize(pixels_len: usize) usize {
+    const cap = screen_stream.max_image_blob;
+    const chunks = if (pixels_len == 0) 1 else (pixels_len + cap - 1) / cap;
+    return pixels_len +| chunks *| 128;
+}
+
+/// **투영에 실을 이미지를 고른다.** 둘을 거른다.
+///
+/// ① **화면에 안 보이는 이미지**(placeholder 셀도 placement 도 그 이미지를 가리키지 않는 상태). 코어의
+///    이미지 저장 한도는 320 MB 이고 투영 스트림 상한은 16 MiB 다 — **서로를 모르는 두 숫자**라, 코어가
+///    「저장해도 된다」고 본 상태를 투영이 통째로 거절할 수 있다. 그러면 이미지만이 아니라 **그 화면
+///    전체**가 못 건넌다(attach·resync 가 이 경로다). 클라이언트가 그릴 수 없는 픽셀을 그 예산으로
+///    나르는 것은 어느 쪽으로도 이득이 없다.
+///
+/// ② 보이더라도 **남은 예산을 넘는 이미지**. 한 장이 상한을 넘는 화면(큰 창·고해상도)에서는 ①만으로는
+///    여전히 화면이 막힌다. 이미지 때문에 화면 갱신이 멈추면 안 된다 — 이미지를 포기하고 화면을 보낸다.
+///    빠진 이미지는 다음 투영에서 `have=false` 로 다시 후보가 된다(delta 경로).
+///
+/// 실측(2026-09-15): tmux 안 terminal-browser pane 하나가 `s=1003,v=2183` RGBA(프레임당 8.75 MB)를 그려,
+/// **두 장째에** `SnapshotTooLarge` 로 그 화면이 통째로 막혔다. 화면에는 이미지 없는 placeholder 셀만
+/// 남아 박스 문자로 덮였다(그 박스 자체는 `draw_list` 가 고친 다른 결함이다).
+///
+/// **알려진 한계**: ②가 걸리는 경계에서 **어느 장이 빠지는지는 결정적이지 않다** — `snap.images` 는
+/// 저장소 해시 순서라 프레임마다 같다는 보장이 없다. 「보이는 이미지들의 합이 16 MiB 를 넘는」 화면은
+/// 그 자체가 극단이고 그때도 화면은 건너므로 지금은 순서를 정하지 않는다. 이 경계가 실제로 아프면
+/// (한 장은 뜨고 한 장은 깜빡이는 화면) 그때 결정적 우선순위를 정한다 — 추측으로 고르지 않는다.
+fn appendVisibleImageBlobs(
+    allocator: std.mem.Allocator,
+    stream: *std.ArrayListUnmanaged(u8),
+    generation: u64,
+    core: *terminal.TerminalCore,
+    images: []const terminal.KittyImageView,
+    image_bytes_out: ?*u64,
+    already_sent: ?*const std.AutoHashMapUnmanaged(u32, u64),
+) ProjectError!void {
+    for (images) |img| {
+        if (already_sent) |sent| {
+            if (sent.get(img.image_id)) |g| if (g == img.generation) continue; // client가 이미 가진 판
+        }
+        if (!core.kittyImageVisibleInViewport(img.image_id)) continue; // ①
+        const ceiling = screen_stream.max_record_stream_bytes -| image_budget_reserve;
+        if (stream.items.len +| projectedBlobSize(img.pixels.len) > ceiling) continue; // ②
+        try appendImageBlobRecords(allocator, stream, generation, img, image_bytes_out);
     }
 }
 
@@ -822,20 +882,20 @@ pub fn computeDelta(allocator: std.mem.Allocator, prev_bytes: []const u8, core: 
     for (snap.images) |img| try appendImageBaseMeta(allocator, &snapshot, opts.generation, img); // 리뷰 #11: base엔 픽셀 없이 메타만.
     for (snap.placements) |p| try appendImagePlacementRecord(allocator, &snapshot, opts.generation, p);
     for (snap.virtual_placements) |vp| try appendImageVirtualRecord(allocator, &snapshot, opts.generation, vp);
-    for (snap.images) |img| {
-        const have = if (prev_image_gens.get(img.image_id)) |g| g == img.generation else false;
-        // ⚠️ **여기가 애니메이션의 대역폭 병목이다.** kitty 애니메이션은 프레임이 넘어갈 때마다
-        // `generation` 을 올리므로 이 조건이 **매 프레임 참**이 되어 이미지 blob 전체가 다시 나간다
-        // (실측: 64x64 RGBA 한 프레임에 16,441 바이트 — `screen delta: generation 이 바뀐 이미지는
-        // blob 전체가 다시 실린다` 판정자가 그 숫자를 고정한다).
-        //
-        // host tick 이 `advanceAnimations` 를 부른다(#3623). 지금 감당할 수 있는 이유는 host 와 app 이
-        // 같은 기계의 유닉스 소켓으로 붙어 있고, **안 보이는 애니메이션은 아예 안 돌기** 때문이다
-        // (뷰포트 밖·다른 화면·placeholder 없음 → `kittyImageVisibleInViewport` 가 막는다).
-        // host 가 원격 기계로 가면 이 계약 위에 그대로 둘 수 없다 — 프레임을 미리 보내고 인덱스만
-        // 나르는 레코드가 먼저다(docs/persistent-session-host.md §12).
-        if (!have) try appendImageBlobRecords(allocator, &delta, opts.generation, img, opts.image_bytes_out); // client가 없는/바뀐 이미지만.
-    }
+    // ⚠️ **여기가 애니메이션의 대역폭 병목이다.** kitty 애니메이션은 프레임이 넘어갈 때마다
+    // `generation` 을 올리므로 「client 가 가진 판과 다르다」가 **매 프레임 참**이 되어 이미지 blob
+    // 전체가 다시 나간다(실측: 64x64 RGBA 한 프레임에 16,441 바이트 — `screen delta: generation 이
+    // 바뀐 이미지는 blob 전체가 다시 실린다` 판정자가 그 숫자를 고정한다).
+    //
+    // host tick 이 `advanceAnimations` 를 부른다(#3623). 지금 감당할 수 있는 이유는 host 와 app 이
+    // 같은 기계의 유닉스 소켓으로 붙어 있고, **안 보이는 애니메이션은 아예 안 돌기** 때문이다
+    // (뷰포트 밖·다른 화면·placeholder 없음 → `kittyImageVisibleInViewport` 가 막는다).
+    // host 가 원격 기계로 가면 이 계약 위에 그대로 둘 수 없다 — 프레임을 미리 보내고 인덱스만
+    // 나르는 레코드가 먼저다(docs/persistent-session-host.md §12).
+    //
+    // 그 가시성 판정을 **투영도 함께 쓴다**(`appendVisibleImageBlobs` §① — 안 그러면 그리지도 못할
+    // 픽셀이 16 MiB 예산을 먹고 화면이 통째로 막힌다).
+    try appendVisibleImageBlobs(allocator, &delta, opts.generation, core, snap.images, opts.image_bytes_out, &prev_image_gens);
     // 리뷰 #12: prev에 있었으나 현재 없는 이미지 = host storage에서 evict/delete됨 → image_remove로 client도 회수(무한증가 방지).
     {
         var it = prev_image_gens.keyIterator();
@@ -1961,7 +2021,12 @@ test "screen delta: attach 뒤 움직인 모든 축이 delta 로 client 에 닿�
                 for (0..20) |_| try core.write("line\r\n");
                 core.view_offset = 3;
             },
-            .image_pixels => try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=9,q=2;{s}\x1b\\", .{b64s})),
+            // **표시까지 한다(`a=T`).** 투영은 화면이 실제로 가리키는 이미지의 픽셀만 싣는다 —
+            // 그리지도 못할 픽셀이 16 MiB 예산을 먹으면 그 화면이 통째로 막히기 때문이다(2026-09-15,
+            // docs/persistent-session-host.md). 그래서 `a=t`(전송만)로는 이 축이 움직이지 않는다.
+            // 대가는 **표시 시점까지의 지연**이다: 미리 올려 둔 이미지는 `a=p` 가 오는 프레임에 비로소
+            // 실린다(그때 `prev_image_gens` 에 없으므로 후보가 된다).
+            .image_pixels => try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=T,f=32,s=2,v=2,i=9,c=1,r=1,q=2;{s}\x1b\\", .{b64s})),
             .placement => try core.write("\x1b_Ga=p,i=4,c=1,r=1,q=2\x1b\\"),
             .virtual_placement => try core.write("\x1b_Ga=p,i=4,U=1,c=1,r=1,q=2\x1b\\"),
             .prompt => try core.write("\x1b]133;A\x1b\\prompt"),
@@ -2004,4 +2069,324 @@ test "screen delta: attach 뒤 움직인 모든 축이 delta 로 client 에 닿�
             .image_gone => try std.testing.expect(asm_.imageById(4) == null),
         }
     }
+}
+
+test "TBPROBE 원격 왕복: unicode placeholder 화면이 투영·조립을 건너 타일 quad 로 나온다" {
+    // **계측용 판정자**(2026-09-15). 로컬 경로(파서→코어→렌더)는 초록인데 tmux 안 terminal-browser
+    // 화면이 박스 문자로 깨졌다 — 그 pane 은 session host 경유라 투영·조립을 한 번 더 건넌다.
+    // 이미지·격자·placeholder 셀(전경색 RGB + 결합문자) 중 **무엇이 그 다리를 못 건너는지**를 센다.
+    const metal_frame = maru.renderer.metal_frame;
+    const remote_screen = @import("remote_screen.zig");
+    const allocator = std.testing.allocator;
+
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 8, .rows = 3 });
+    defer core.deinit();
+
+    const grid_cols: u32 = 4;
+    const grid_rows: u32 = 2;
+    const img_w: usize = 32;
+    const img_h: usize = 16;
+    const image_id: u32 = 87364; // 실측 캡처의 i= 값. 0x015544 → 전경색 rgb(1, 85, 68).
+
+    const rgba = try allocator.alloc(u8, img_w * img_h * 4);
+    defer allocator.free(rgba);
+    for (rgba, 0..) |*b, i| b.* = @intCast(i % 251);
+    const b64 = try allocator.alloc(u8, std.base64.standard.Encoder.calcSize(rgba.len));
+    defer allocator.free(b64);
+    _ = std.base64.standard.Encoder.encode(b64, rgba);
+
+    var head: [192]u8 = undefined;
+    try core.write(try std.fmt.bufPrint(
+        &head,
+        "\x1b_Ga=T,f=32,s={d},v={d},t=d,i={d},U=1,c={d},r={d},q=2;",
+        .{ img_w, img_h, image_id, grid_cols, grid_rows },
+    ));
+    try core.write(b64);
+    try core.write("\x1b\\");
+
+    // placeholder 셀 — 전경색 RGB 에 id 하위 24비트, 결합문자에 타일 좌표(한 행 4칸).
+    try core.write("\x1b[38;2;1;85;68m");
+    var utf8: [8]u8 = undefined;
+    const diacritics = [_]u21{ 0x0305, 0x030D, 0x030E, 0x0310 }; // 표의 0..3 — 명세가 정한 데이터다
+    var tile_col: usize = 0;
+    while (tile_col < grid_cols) : (tile_col += 1) {
+        var n = try std.unicode.utf8Encode(terminal.unicode_placeholder_codepoint, &utf8);
+        try core.write(utf8[0..n]);
+        n = try std.unicode.utf8Encode(diacritics[0], &utf8); // 타일 행 0
+        try core.write(utf8[0..n]);
+        n = try std.unicode.utf8Encode(diacritics[tile_col], &utf8);
+        try core.write(utf8[0..n]);
+    }
+
+    // 로컬 쪽은 이미 초록임을 이 자리에서 다시 확인한다 — 왕복이 깨졌을 때 「애초에 없었다」와
+    // 「건너다 잃었다」가 구분되어야 한다(공허 통과 방지).
+    try std.testing.expect(core.kitty_images.map.contains(image_id));
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_virtual_placements.items.len);
+
+    const bytes = try projectSnapshot(allocator, &core, .{ .generation = 1 });
+    defer allocator.free(bytes);
+
+    var asm_ = screen_assembler.ScreenAssembler.init(allocator);
+    defer asm_.deinit();
+    try asm_.applySnapshot(bytes);
+
+    // ① 이미지 픽셀이 건넜는가.
+    try std.testing.expect(asm_.imageById(image_id) != null);
+    // ② 격자 정의(U=1)가 건넜는가 — 없으면 타일 크기를 못 정해 렌더가 통째로 건너뛴다.
+    try std.testing.expectEqual(@as(usize, 1), asm_.imageVirtualPlacements().len);
+
+    // ③ placeholder 셀이 전경색 RGB 와 결합문자를 지킨 채 건넜는가.
+    var grid = try remote_screen.build(allocator, &asm_);
+    defer grid.deinit();
+    const snapshot = grid.renderSnapshot();
+    try std.testing.expectEqual(terminal.unicode_placeholder_codepoint, snapshot.cells[0].codepoint);
+    switch (snapshot.cells[0].style.foreground) {
+        .rgb => |v| try std.testing.expectEqual([3]u8{ 1, 85, 68 }, [3]u8{ v.r, v.g, v.b }),
+        else => return error.ForegroundNotRgb,
+    }
+    try std.testing.expect(snapshot.cells[0].grapheme_id != 0);
+
+    // ④ 그래서 화면에 이미지가 뜨는가.
+    const out = try metal_frame.buildGpuImages(
+        allocator,
+        snapshot.placements,
+        snapshot.images,
+        snapshot.size,
+        10,
+        20,
+        snapshot.cells,
+        snapshot.graphemes,
+        snapshot.virtual_placements,
+    );
+    defer allocator.free(out);
+    try std.testing.expect(out.len > 0);
+    try std.testing.expectEqual(image_id, out[0].image_id);
+}
+
+test "TBPROBE 가시성: 화면이 안 가리키는 이미지는 예산이 남아돌아도 안 싣는다" {
+    // **회귀 판정**(2026-09-15). 아래 「규모」 판정자와 **일부러 갈라 둔다** — 그쪽은 실측 크기라
+    // 가시성 필터를 지워도 **예산 검사가 대신 막아** 초록이었다(돌연변이로 확인). 두 방어선이
+    // 겹치는 구간에서는 어느 쪽이 일하는지 구분되지 않으므로, 여기서는 **예산이 남아도는 크기**로
+    // 재서 가시성 필터만 시험한다.
+    //
+    // 이 판정자가 처음 빨갛게 드러낸 것은 필터가 아니라 **판정 자체의 성김**이었다: 코어의
+    // `kittyImageVisibleInViewport` 가 「placeholder 셀이 하나라도 있는가」만 보고 어느 이미지인지는
+    // 안 물어서, 아무도 안 가리키는 장까지 「보인다」가 됐다.
+    const allocator = std.testing.allocator;
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 20, .rows = 4 });
+    defer core.deinit();
+
+    const img_w: usize = 256;
+    const img_h: usize = 256; // 256 KiB — 두 장이어도 예산(약 15.75 MiB)에 한참 못 미친다
+    const rgba = try allocator.alloc(u8, img_w * img_h * 4);
+    defer allocator.free(rgba);
+    @memset(rgba, 0x33);
+    const b64 = try allocator.alloc(u8, std.base64.standard.Encoder.calcSize(rgba.len));
+    defer allocator.free(b64);
+    _ = std.base64.standard.Encoder.encode(b64, rgba);
+
+    var head: [192]u8 = undefined;
+    for ([_]u8{ '1', '2' }) |id_char| {
+        try core.write(try std.fmt.bufPrint(
+            &head,
+            "\x1b_Ga=T,f=32,s={d},v={d},t=d,i={c},U=1,c=20,r=4,q=2;",
+            .{ img_w, img_h, id_char },
+        ));
+        try core.write(b64);
+        try core.write("\x1b\\");
+    }
+    try std.testing.expectEqual(@as(usize, 2), core.kitty_images.map.count());
+
+    // 화면은 1번만 가리킨다 — 전경색 rgb(0,0,1).
+    try core.write("\x1b[38;2;0;0;1m");
+    var utf8: [8]u8 = undefined;
+    var n = try std.unicode.utf8Encode(terminal.unicode_placeholder_codepoint, &utf8);
+    try core.write(utf8[0..n]);
+    n = try std.unicode.utf8Encode(0x0305, &utf8);
+    try core.write(utf8[0..n]);
+    n = try std.unicode.utf8Encode(0x0305, &utf8);
+    try core.write(utf8[0..n]);
+    try std.testing.expect(core.kittyImageVisibleInViewport(1));
+    try std.testing.expect(!core.kittyImageVisibleInViewport(2)); // 성긴 판정이면 여기서 빨개진다
+
+    var image_bytes: u64 = 0;
+    const bytes = try projectSnapshot(allocator, &core, .{ .generation = 1, .image_bytes_out = &image_bytes });
+    defer allocator.free(bytes);
+    // 예산은 남아돈다 — 그런데도 한 장치만 실렸다면 그것을 막은 것은 **가시성 판정뿐**이다.
+    try std.testing.expect(bytes.len < screen_stream.max_record_stream_bytes / 2);
+    try std.testing.expect(image_bytes < 2 * img_w * img_h * 4);
+
+    var asm_ = screen_assembler.ScreenAssembler.init(allocator);
+    defer asm_.deinit();
+    try asm_.applySnapshot(bytes);
+    try std.testing.expect(asm_.imageById(1) != null);
+    try std.testing.expect(asm_.imageById(2) == null);
+}
+
+test "TBPROBE 규모: 실측 크기 두 장이어도 화면은 건넌다(예전에는 통째로 막혔다)" {
+    // **회귀 판정**(2026-09-15). 실측 캡처의 크기 그대로 잰다 — terminal-browser pane 하나가
+    // `s=1003,v=2183` RGBA 를 보낸다(프레임당 8.75 MB). 코어 저장 한도는 320 MB, 투영 스트림 상한은
+    // 16 MiB 로 **서로를 모르는 두 숫자**라, 예전에는 코어가 보관한 둘째 장이 투영을 통째로
+    // 거절시켰다(`SnapshotTooLarge`). 그러면 이미지만이 아니라 **그 화면 전체**가 못 건넌다.
+    //
+    // 고친 뒤 계약: 화면이 가리키지 않는 이미지는 애초에 싣지 않는다. 그래서 두 장째에도 화면은 건너고,
+    // **보이는 한 장만** 건넌다.
+    const allocator = std.testing.allocator;
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 59, .rows = 59 });
+    defer core.deinit();
+
+    const img_w: usize = 1003; // 실측 s=
+    const img_h: usize = 2183; // 실측 v=
+    const rgba = try allocator.alloc(u8, img_w * img_h * 4);
+    defer allocator.free(rgba);
+    @memset(rgba, 0x7F);
+    const b64 = try allocator.alloc(u8, std.base64.standard.Encoder.calcSize(rgba.len));
+    defer allocator.free(b64);
+    _ = std.base64.standard.Encoder.encode(b64, rgba);
+
+    var head: [192]u8 = undefined;
+    for ([_]u8{ '1', '2' }) |id_char| {
+        try core.write(try std.fmt.bufPrint(
+            &head,
+            "\x1b_Ga=T,f=32,s={d},v={d},t=d,i={c},U=1,c=59,r=59,q=2;",
+            .{ img_w, img_h, id_char },
+        ));
+        try core.write(b64);
+        try core.write("\x1b\\");
+    }
+    try std.testing.expectEqual(@as(usize, 2), core.kitty_images.map.count()); // 코어는 둘 다 보관한다
+
+    // 화면은 **1번만** 가리킨다 — 전경색 rgb(0,0,1) = image_id 1.
+    try core.write("\x1b[38;2;0;0;1m");
+    var utf8: [8]u8 = undefined;
+    var n = try std.unicode.utf8Encode(terminal.unicode_placeholder_codepoint, &utf8);
+    try core.write(utf8[0..n]);
+    n = try std.unicode.utf8Encode(0x0305, &utf8); // 타일 행 0
+    try core.write(utf8[0..n]);
+    n = try std.unicode.utf8Encode(0x0305, &utf8); // 타일 열 0
+    try core.write(utf8[0..n]);
+
+    var image_bytes: u64 = 0;
+    const bytes = try projectSnapshot(allocator, &core, .{ .generation = 1, .image_bytes_out = &image_bytes });
+    defer allocator.free(bytes);
+
+    // 한 장치(8.75 MB)는 실렸고 두 장치(17.5 MB)는 아니다 — 예산을 숫자로 고정한다.
+    try std.testing.expect(image_bytes > 8 * 1024 * 1024);
+    try std.testing.expect(image_bytes < 16 * 1024 * 1024);
+
+    var asm_ = screen_assembler.ScreenAssembler.init(allocator);
+    defer asm_.deinit();
+    try asm_.applySnapshot(bytes);
+    try std.testing.expect(asm_.imageById(1) != null); // 화면이 가리키는 장은 건넜다
+    try std.testing.expect(asm_.imageById(2) == null); // 아무도 안 가리키는 장은 안 건넜다
+}
+
+test "TBPROBE 예산: 한 장이 상한을 넘어도 화면은 건넌다 — 이미지를 포기하지 화면을 버리지 않는다" {
+    // **회귀 판정**(2026-09-15). 위 판정자는 「안 보이는 장을 거른다」만 잰다 — 그것만으로는 **보이는
+    // 한 장이 혼자 상한을 넘는** 화면(큰 창·고해상도)에서 여전히 투영 전체가 거절된다.
+    //
+    // 규칙은 문서가 이미 정한 것과 같은 결이다(persistent-session-host.md «자기 쪽 cap 초과로 공유
+    // 연결을 죽이지 않는다»): 이미지가 예산을 넘으면 **이미지를 포기하고 화면을 보낸다.** 화면이
+    // 멈추는 것이 더 나쁜 오답이다 — 그 pane 은 갱신을 통째로 잃는다.
+    const allocator = std.testing.allocator;
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 20, .rows = 4 });
+    defer core.deinit();
+
+    const side: usize = 2048; // 2048x2048 RGBA = 16.78 MB — 혼자서 16 MiB 상한을 넘는다
+    const rgba = try allocator.alloc(u8, side * side * 4);
+    defer allocator.free(rgba);
+    @memset(rgba, 0x11);
+    const b64 = try allocator.alloc(u8, std.base64.standard.Encoder.calcSize(rgba.len));
+    defer allocator.free(b64);
+    _ = std.base64.standard.Encoder.encode(b64, rgba);
+
+    var head: [192]u8 = undefined;
+    try core.write(try std.fmt.bufPrint(
+        &head,
+        "\x1b_Ga=T,f=32,s={d},v={d},t=d,i=9,U=1,c=20,r=4,q=2;",
+        .{ side, side },
+    ));
+    try core.write(b64);
+    try core.write("\x1b\\");
+    try std.testing.expect(core.kitty_images.map.contains(9)); // 코어는 받아 뒀다(코어 한도는 320 MB)
+
+    // 화면이 그 이미지를 **가리킨다** — 가시성 필터로는 안 걸러지는 경우다.
+    try core.write("\x1b[38;2;0;0;9m");
+    var utf8: [8]u8 = undefined;
+    var n = try std.unicode.utf8Encode(terminal.unicode_placeholder_codepoint, &utf8);
+    try core.write(utf8[0..n]);
+    n = try std.unicode.utf8Encode(0x0305, &utf8);
+    try core.write(utf8[0..n]);
+    n = try std.unicode.utf8Encode(0x0305, &utf8);
+    try core.write(utf8[0..n]);
+    try std.testing.expect(core.kittyImageVisibleInViewport(9)); // 보이는 이미지가 맞다
+
+    // 화면은 건넌다(예전에는 여기서 `SnapshotTooLarge` 로 통째로 막혔다).
+    const bytes = try projectSnapshot(allocator, &core, .{ .generation = 1 });
+    defer allocator.free(bytes);
+
+    var asm_ = screen_assembler.ScreenAssembler.init(allocator);
+    defer asm_.deinit();
+    try asm_.applySnapshot(bytes);
+    try std.testing.expectEqual(@as(usize, 1), asm_.imageVirtualPlacements().len); // 격자는 건넜다
+    try std.testing.expect(asm_.imageById(9) == null); // 픽셀만 포기했다
+}
+
+test "TBPROBE 실물: 캡처한 terminal-browser 출력이 quad 로 그려지고 텍스트로 새지 않는다" {
+    // **실물 검증**(2026-09-15). 위 판정자는 실측과 «같은 형식»을 합성해 먹인다. 이 판정자는 살아 있는
+    // maru 안 tmux pane 에서 `tmux pipe-pane` 으로 **실제로 받아 적은 바이트**를 먹인다(tmux passthrough 는
+    // 벗겨 둔 것 — 터미널이 실제로 보는 형태). 경로는 env 로 받고, 없으면 건너뛴다: 캡처는 사람이 브라우저를
+    // 띄워야 만들어지므로 CI 가 가질 수 없다. 그래서 이것은 **CI 그물이 아니라 재현 하네스**다 —
+    // 합성 판정자들이 그물 역할을 진다.
+    const allocator = std.testing.allocator;
+    // env 는 libc `getenv` 로 읽는다 — 이 저장소의 다른 하네스(`MARU_FUZZ_SEED`)와 같은 방식이고,
+    // Zig 0.16 은 `std.process.getEnvVarOwned`/`std.posix.getenv` 를 이 그래프에 안 내준다.
+    const path_z = std.c.getenv("MARU_TBPROBE_CAPTURE") orelse return;
+    const path = std.mem.span(path_z);
+
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(64 * 1024 * 1024));
+    defer allocator.free(bytes);
+
+    var core_state = try terminal.TerminalCore.init(allocator, .{ .cols = 135, .rows = 47 });
+    defer core_state.deinit();
+    core_state.setCellMetrics(10, 20);
+    try core_state.write(bytes);
+
+    const snapshot = core_state.renderSnapshot();
+
+    // ① 화면이 placeholder 로 덮였는가 — 캡처가 실제로 그 축을 만들었다는 증거(공허 통과 방지).
+    var placeholder_cells: usize = 0;
+    for (snapshot.cells) |cell| {
+        if (cell.codepoint == terminal.unicode_placeholder_codepoint) placeholder_cells += 1;
+    }
+    try std.testing.expect(placeholder_cells > 100);
+
+    // ② 이미지와 격자가 코어에 있는가.
+    try std.testing.expect(snapshot.images.len > 0);
+    try std.testing.expect(snapshot.virtual_placements.len > 0);
+
+    // ③ 그 셀들이 타일 quad 로 바뀌는가 — 여기까지 와야 화면에 그림이 뜬다.
+    const out = try maru.renderer.metal_frame.buildGpuImages(
+        allocator,
+        snapshot.placements,
+        snapshot.images,
+        snapshot.size,
+        10,
+        20,
+        snapshot.cells,
+        snapshot.graphemes,
+        snapshot.virtual_placements,
+    );
+    defer allocator.free(out);
+    try std.testing.expect(out.len > 0);
+
+    // ④ **그리고 그 셀이 텍스트로는 새지 않는가.** 이것이 사용자가 본 증상(박스 문자로 덮인 화면)의 자리다.
+    var dl = try maru.renderer.draw_list.buildDrawList(allocator, snapshot);
+    defer dl.deinit(allocator);
+    var leaked: usize = 0;
+    for (dl.cells) |c| {
+        if (c.codepoint == terminal.unicode_placeholder_codepoint) leaked += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 0), leaked);
 }

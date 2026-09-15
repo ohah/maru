@@ -3815,6 +3815,39 @@ pub fn build(b: *std.Build) void {
     const run_merge_stage_tests = b.addRunArtifact(merge_stage_tests);
     b.step("test-merge-stages", "Run the merge-stage (S3a) judges only").dependOn(&run_merge_stage_tests.step);
 
+    // kitty unicode placeholder 의 **끝에서 끝까지**(TBPROBE). 기존 placeholder 판정자는 셀·격자를 손으로
+    // 세워 렌더 함수만 재므로 파서→코어→렌더 이음매가 비어 있다. tmux 안 terminal-browser 증상이 그
+    // 이음매에서 났고, 그 경로만 빨리 돌려야 반복이 가능해서 필터 스텝을 따로 둔다.
+    const placeholder_e2e_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/maru.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "shutdown_wire_contract", .module = shutdown_wire_contract_mod }},
+        }),
+        .filters = &.{"TBPROBE"},
+    });
+    attachPngCodec(b, placeholder_e2e_tests.root_module);
+    placeholder_e2e_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
+    const run_placeholder_e2e_tests = b.addRunArtifact(placeholder_e2e_tests);
+    const placeholder_e2e_step = b.step("test-placeholder-e2e", "Run the kitty unicode placeholder end-to-end judges only (TBPROBE filter)");
+    placeholder_e2e_step.dependOn(&run_placeholder_e2e_tests.step);
+
+    // 같은 축의 **원격 왕복**(투영→조립→렌더). 로컬 그래프(`src/maru.zig`)에는 session_host 투영이
+    // 없어서 위 스텝이 그 다리를 못 본다 — 루트를 바꿔 한 번 더 돈다.
+    const placeholder_remote_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/screen_snapshot.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        }),
+        .filters = &.{"TBPROBE"},
+    });
+    const run_placeholder_remote_tests = b.addRunArtifact(placeholder_remote_tests);
+    placeholder_e2e_step.dependOn(&run_placeholder_remote_tests.step);
+
     // 병합 stage 의 **끝에서 끝까지**(S3a). 위 스텝은 지정자·라벨 같은 **중립 규칙**만 본다 — 「어느
     // 판이 어느 자리에 실리나」는 **진짜 충돌 저장소**가 있어야 보이고, 그 저장소를 만드는 하네스는
     // `git_backend.zig` 안에 있다(제품의 쓰기 어휘는 `init`·`merge` 를 일부러 안 갖는다).

@@ -8756,8 +8756,15 @@ release workflow/runner 준비 PR은 component fixture를 이유로 제품 gate�
     단순 short write 진행만으로는 victim 자격을 주지 않고, 그 뒤 owner poll에서 `POLLOUT` 부재 또는 `EAGAIN`을
     실제로 관측한 connection만 stalled victim 후보가 된다. `POLLOUT` readiness 또는 write progress가 다시
     관측되면 victim 선택 전에 이 stall 증거를 지운다.
-    같은 connection 안의 sibling stream은 FIFO head-of-line을 공유하므로 cross-connection isolation처럼 주장하지 않는다.
-    이 gate는 다음 둘로 나누며 둘 다 green이기 전에는 P5b2b/P5b2 전체를 구현 완료로 표시하지 않는다.
+    같은 connection 안의 sibling stream은 FIFO head-of-line을 공유하므로 **이미 시작한 wire frame이나 screen batch를
+    잘라 즉시 격리할 수는 없다.** 그러나 그것이 screen pressure를 곧바로 connection failure로 넓혀도 된다는 뜻은
+    아니다. producer가 admission한 screen batch는 마지막 frame의 `end_stream`까지 이미 완성·검증돼 있고 ordinary
+    queue는 stream별 8 MiB soft cap과 partial-write deadline으로 유계다. pressure가 **이미 전송을 시작한 batch**를
+    만났으면 target의 새 screen admission을 닫고 그 batch 전체만 `end_stream`까지 drain한 뒤 invalidate한다.
+    frame 하나만 마치고 같은 batch의 나머지 frame을 purge하면 client `ScreenInbox.partial_batch`에 종단 없는 prefix가
+    남고, 그 사이 `snapshot.invalidated` event 자체가 protocol error가 되므로 금지한다. deadline 만료, queue에서
+    검증된 target `end_stream`을 찾지 못함, frame 분류 손상은 기존 connection fail-close다.
+    이 gate는 다음 셋으로 나누며 셋 다 green이기 전에는 P5b2b/P5b2 전체를 구현 완료로 표시하지 않는다.
     - **P5b2b1 — product poll accounting/isolation:** 실제 `SocketServer`+`poll_owner.Owner`에 controller,
       slow observer, healthy observer를 서로 다른 fd로 붙인다. zero-prefix pressure의 stream-only invalidation과
       exactly-one notice, ACK 전 projector 0, ACK 뒤 1초 backoff 경계와 atomic resync를 검증한다. 별도
@@ -8862,6 +8869,32 @@ release workflow/runner 준비 PR은 component fixture를 이유로 제품 gate�
         cleanup을 담는다. 전용 validator는 unknown/duplicate/missing key, 음수/overflow, raw sample 0/과다,
         summary 재계산 불일치, 순서 위반, cap 위반, final ledger nonzero와 cleanup false를 fail-close한다. 실행 전
         stale artifact를 지우고 성공 cleanup 뒤 임시 파일을 atomic rename한다.
+    - **P5b2b3 — same-connection partial-batch pressure isolation (계획):** screen pressure invalidation에서만
+      `valid → drain_current_batch → invalidated → resync_pending → resync_draining → valid` 상태를 추가한다.
+      `drain_current_batch` 진입은 이미 prefix가 전송된 target batch의 남은 queue가 같은 tracker의 완전한 MRSH frame
+      연속이고 유일한 `end_stream`으로 끝나는지 mutation 전에 검사한 경우에만 허용한다. 그 상태에서는 target의 새
+      screen batch와 새 retained/prepared base를 만들지 않고, 이미 admission된 현재 batch만 기존 write deadline 안에서
+      보낸다. `end_stream`의 마지막 byte를 소비한 owner turn에서 뒤에 남은 target offset-zero screen batch를 purge하고
+      retained/prepared base를 반환한 뒤 `snapshot.invalidated`를 control reserve에 정확히 한 번 넣는다. sibling
+      stream/control의 기존 FIFO 순서는 보존하며 current batch 전송 전에는 앞지를 수 있다고 주장하지 않는다.
+      deadline 만료, target batch 종단 부재·중복, 분류/stream/tracker 불일치는 connection fail-close한다. detach,
+      runtime-ended, protocol violation처럼 screen pressure가 아닌 lifecycle/무결성 경로의 기존 partial fail-close는
+      이 단계에서 바꾸지 않는다.
+
+      첫 gate는 실제 `connection_turn.Client` 하나에 target과 sibling 두 stream을 붙이고 target의 multi-frame batch
+      첫 frame을 `consumeWritten`으로 부분 진행한 뒤 다음 producer batch가 soft cap을 넘게 한다. 기존
+      `pressure after a written screen prefix fail closes` 판정은 connection 생존, target 새 admission 0,
+      `end_stream` 전 invalidation notice 0, batch 종단 뒤 notice 1, sibling frame byte/FIFO 보존, retained/prepared/queue
+      exact 회수와 resync 완료를 기대하도록 교체한다. peer `Client`/`ScreenInbox`까지 wire를 먹여 완성된 옛 target
+      batch 뒤 invalidation이 target의 pending batch/recovery만 정리하고 sibling batch를 온전히 적용하는지 검증한다.
+      malformed/no-end/timeout 돌연변이는 기존 fail-close를 유지해야 한다.
+
+      두 번째 gate는 기존 macOS `setTinySocketBuffers` 패턴과 실제 `SocketServer`+`poll_owner.Owner`를 재사용한다.
+      같은 GUI fd에 두 runtime stream을 attach하고 target에서 커널 short write와 후속 `EAGAIN`/`POLLOUT` 부재를 실제
+      관측한 뒤 pressure를 만든다. peer가 다시 읽으면 target의 기존 batch와 invalidation/resync가 framing·batch 경계를
+      지켜 수렴하고, sibling marker와 새 `host.info`가 같은 connection에서 왕복하며 client/attachment/subscription과
+      모든 queue/base/global ledger가 teardown 뒤 0인지 Debug·ReleaseFast에서 고정한다. 실제 short write를 관측하지
+      못한 실행은 성공으로 세지 않는다. terminal-browser 수동 재현은 이 자동 gate를 대체하지 않는다.
 - **P5b3 — controller/observer reactor**: observer/takeover protocol과 controller 전환을 hidden harness로 완성한다.
   아직 public `maru attach`/help를 열지 않으며 다음 계약을 모두 만족해야 구현 완료다.
   - `runtime.attach(mode=observer|controller)`는 새 subscription을 만든다. 이미 붙은 observer가 제어권을 요구할 때는

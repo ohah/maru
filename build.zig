@@ -5206,6 +5206,17 @@ pub fn build(b: *std.Build) void {
     run_perf_gate_mode_boundary_tests.addArg("--maru-expect-tests=2");
     run_perf_gate_mode_boundary_tests.setCwd(b.path("."));
     boundary_step.dependOn(&run_perf_gate_mode_boundary_tests.step);
+    const debug_trace_alloc_wiring_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/debug_trace_alloc_wiring.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_debug_trace_alloc_wiring_tests = b.addRunArtifact(debug_trace_alloc_wiring_tests);
+    run_debug_trace_alloc_wiring_tests.addArg("--maru-expect-tests=2");
+    run_debug_trace_alloc_wiring_tests.setCwd(b.path("."));
+    boundary_step.dependOn(&run_debug_trace_alloc_wiring_tests.step);
     const png_codec_wiring_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/png_codec_wiring.zig"),

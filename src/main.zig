@@ -69,6 +69,19 @@ const session_host_attach_cli = if (builtin.os.tag == .macos)
 else
     struct {};
 
+/// **std 의 스택 트레이스 포획 할당자를 루트에서 덮는다**(`std/debug.zig` 의 `getDebugInfoAllocator`).
+///
+/// std 기본값은 `page_allocator` 위의 전역 아레나라 `free` 를 무시하는데, DWARF 언와인더는 포획마다
+/// 컬럼 버퍼를 새로 잡고 놓는다. 그래서 포획 한 번마다 한 벌씩 쌓이고, Debug 빌드의 `init.gpa`
+/// (`DebugAllocator`)는 **할당·해제마다** 포획하므로 세션 host 의 메모리가 단조 증가했다 —
+/// 같은 부하에서 Debug 525 MB(+3 MB/s) 대 ReleaseFast 7.5 MB(평평). 근거와 실측은
+/// `src/debug_trace_alloc.zig` 머리말에 있다.
+///
+/// **상대 경로로 가져오지 않는다** — 같은 파일이 배럴로도 들어와 "file exists in modules" 로 막힌다.
+pub const debug = struct {
+    pub const getDebugInfoAllocator = maru.debug_trace_alloc.allocator;
+};
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
 

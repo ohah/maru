@@ -7455,6 +7455,57 @@ TUI와 tmux import adapter는 선택적 후속이다.
 green을 만든 뒤 stress/실제 앱 gate를 붙인다. 이미 구현되어 red를 먼저 만들 수 없는 platform wiring은 같은 PR에서 재현 fixture가
 기존 코드에 실패하는 것을 확인한 commit 또는 CI log를 PR 본문에 남긴다. 수동 확인만 남은 phase를 완료로 표시하지 않는다.
 
+### 12.1 호스트 메모리 폭증의 정체 — Debug 빌드의 스택 트레이스 포획 (2026-09-14)
+
+§12.0 계측을 붙이고 라이브 호스트를 재 봤더니, 한 pane 이 480×300 PNG 를 8 fps 로 그리는 동안
+`img` 가 스트림의 **99.5%**(`made_bps` 4.4 MB/s)였는데 **RSS 가 초당 3.2 MB 씩 단조 증가**했다
+(3 분에 617 MB). `evict=0`, `store` 는 576,000 고정 — 즉 **이미지 저장소는 안 늘었다**.
+클라이언트를 떼면 증가가 즉시 멈췄다.
+
+**할당자를 래핑해도 안 잡혔다.** `runSessionHostDaemon` 에 넘기는 할당자를 통째로 감싸 문턱 0
+으로 전수 추적해도 live 는 1.3 MB 로 안정이었다. `vmmap` 은 `VM_ALLOCATE` 685 MB / 50 영역을
+가리켰고, 영역 크기가 496K→752K→1136K→…→97.2M 의 **×1.5 사다리로 전부 상주**했다.
+
+**`mmap` 인터포저로 스택을 떴다.** 답은 이미지 경로가 아니라 **할당자 자신**이었다:
+
+```
+AllocationCap.alloc → DebugAllocator → captureCurrentStackTrace
+  → SelfInfo.MachO.unwindFrame → Dwarf.SelfUnwinder.computeRules
+  → Unwind.VirtualMachine.Column ArrayList → ArenaAllocator.alloc → PageAllocator.map → mmap
+```
+
+같은 로그에 `MUNMAP` 은 **한 건도 없었다**. 두 겹이 겹쳐 있다.
+
+1. Debug 빌드에서 `std.process.Init.gpa` 는 `DebugAllocator` 이고(`std/start.zig` 의
+   `use_debug_allocator`), 그것은 **할당·해제마다** 6 프레임을 포획한다(`stack_trace_frames`).
+2. 그 포획이 쓰는 `std.debug.getDebugInfoAllocator()` 는 `page_allocator` 위의 **전역 아레나**다.
+   아레나의 `free` 는 **마지막 할당일 때만** 되감는다. host 는 스레드 여럿이 같은 아레나를 동시에
+   쓰므로 해제는 딱 맞는 LIFO 가 아니고, 그래서 포획 한 번마다 한 벌씩 그대로 쌓인다.
+
+**대조(같은 픽스처·같은 `made_bps` 4.47 MB/s·같은 `store`·`evict=0`).** 부하가 같다는 것을 계측
+줄로 먼저 보인 뒤에 비교했다 — 안 그러면 「도는 호스트 대 노는 호스트」를 비교하는 셈이 된다.
+
+| 빌드 | host RSS | 추세 | `VM_ALLOCATE` | host CPU |
+| --- | ---: | --- | ---: | ---: |
+| Debug (고치기 전) | 525 MB | +15 MB / 5 s | 685 MB / 50 영역 | ~50% |
+| ReleaseFast | 7.5 MB | 평평 | 20 KB / 2 영역 | 1.1% |
+| Debug (고친 뒤) | 19.5 MB | 평평 | 4.8 MB / 47 영역 | ~50% |
+
+**고침.** std 가 `root.debug.getDebugInfoAllocator` 로 이 자리를 열어 뒀다. `src/main.zig` 가
+`pub const debug` 로 `src/debug_trace_alloc.zig` 를 잇고, 그 모듈은 **되돌려받는**
+`smp_allocator` 를 준다(전역 아레나와 달리 스레드 안전하기도 하다). 이 할당자를 쓰는 자리들은
+이미 `deinit`/`free` 를 짝맞춰 부르므로 아레나여야 할 이유가 없었다 — 아레나는 편의였다.
+
+판정자는 둘이다. `src/debug_trace_alloc.zig` 가 **「어긋난 순서로 놓아도 되돌려받는가」**를 행동으로
+묻고(아레나를 부정 대조로 같이 돌린다), `tests/debug_trace_alloc_wiring.zig` 가 **「그게 std 에
+꽂혀 있는가」**를 본다. 후자가 없으면 `pub const debug` 를 지워도 전부 초록인 채 누수만 돌아온다.
+
+첫 판정자는 단순 왕복(잡았다 바로 놓기)으로 썼다가 **공허했다** — 그 경우엔 아레나도 되감아
+`distinct=1` 이 나온다. 실제 기전이 「어긋난 해제」임을 재고 나서야 부정 대조가 섰다.
+
+**CPU 는 아직 그대로다.** 고침은 누수만 없앴고, Debug 의 포획 비용(50% 대 1%)은 남아 있다.
+일상 개발에서 host 를 여러 개 띄우면 그 자체로 느리다 — 「느리다」의 절반은 빌드 모드다.
+
 ### P0 — 문서 결정
 
 - 이 문서, workspace restore, session-host upgrade, configuration, verification matrix를 정합화한다.

@@ -607,13 +607,16 @@ strict JSON receipt와 별도 PPM 판정 실행 파일은 구현됐고 순수 �
 2026-09-14 잠금 해제된 exact-frontmost Maru 제품 회차도 recovery 2/input 4, historical·IME·clipboard 각 1,
 marked 8/insert 2, 동일 runtime·surface와 generation 4→5를 결속한 두 960×600 PPM의 독립 판정까지 green이다.
 그 전 잠긴 회차는 frontmost `loginwindow`라 `global-keyboard-focus` RED였고 통과 증거에서 제외했다. v2b0a pure inventory
-reducer/coordinate converter와 Debug·ReleaseFast 8+8 focused gate는 구현됐지만 제품 caller는 0이다. WindowServer 전체
-inventory producer·preflight·canonical observation artifact의 v2b0b와 v2b1 단일-window capture/판정자는 구현 전이다.
+reducer/coordinate converter와 Debug·ReleaseFast 8+8 focused gate는 구현됐다. v2b0b의 WindowServer 전체 inventory
+producer·Screen Recording preflight·exact-once Zig ABI·canonical observation artifact도 구현되어 focused gate 10+10,
+Swift typecheck, app build, ABI와 전체 boundary gate를 통과했다. 현재 v2b0b 실제 회차는 다시 frontmost `loginwindow`에서
+source/HID mutation 전 `global-keyboard-focus`로 멈췄으므로, 잠금 해제된 exact-frontmost 제품 회차와 artifact 실재 검증
+전에는 green이 아니다. v2b1 단일-window capture/판정자는 구현 전이다.
 v2b0b는 별도 Swift opt-in producer가 title 없는 전체 inventory 5 triplet을 메모리에만 보존하고, exact-once 동기식 C ABI로
 bounded JSON과 사전 고정한 absent target을 Zig에 빌려준다. Zig entrypoint 하나가 schema/window/byte cap, 기존 pure
 reducer·series validator와 same-directory inode→`link(2)` canonical 배타 게시를 소유한다. raw inventory 중간 파일,
 Swift-side 후보 판정, 장수명 child, ABI 재시도·부분 artifact는 허용하지 않는다. preflight 실패는 source/HID mutation 0인
-`not_provisioned`이며 이 행의 green은 v2b1 pixel gate를 닫지 않는다.
+`not_provisioned`이며 Zig ABI 자체는 `passed`/`failed`만 반환한다. 이 행의 green은 v2b1 pixel gate를 닫지 않는다.
 v2b0은 Screen Recording preflight를 source/HID mutation보다 먼저 수행하고 후보 요청 전후 전체 on-screen window inventory
 snapshot(시점당 최대 256, cap+1은 drop 없이 실패)을 pure reducer에 넘긴다. reducer의 차집합에서
 title·후보 문자열·pixel을 제외한 ID/owner PID·bundle ID/Apple signing validity·signing identifier/layer/bounds/TIS source ID만

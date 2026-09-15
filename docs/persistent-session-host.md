@@ -6000,9 +6000,11 @@ input stage 4, historical/IME/clipboard 각 1, marked callback 8, insert callbac
 `d72cd830ea22e4cc6dce537383522941`·surface 1에서 frame generation 4→5, cursor·`firstRect` `(668,798,8,18)`을
 결속한 두 960×600 PPM을 별도 판정기가 통과해 v2a를 green으로 닫았다. 그 전 잠긴 회차는 frontmost PID가
 `loginwindow`여서 source 전환·HID 게시·capture 전에 `global-keyboard-focus`로 RED였으며 통과 증거에 포함하지
-않는다. v2b0a pure inventory reducer/coordinate converter와 Debug·ReleaseFast 8+8 focused gate는 구현됐으나 제품 caller는
-0이다. WindowServer 전체 inventory producer·preflight·canonical observation artifact의 v2b0b와 v2b1 단일-window capture/
-판정자는 아직 구현 전이다.
+않는다. v2b0a pure inventory reducer/coordinate converter와 Debug·ReleaseFast 8+8 focused gate는 구현됐다. v2b0b의
+WindowServer 전체 inventory producer·Screen Recording preflight·exact-once Zig ABI·canonical observation artifact도 구현되어
+focused gate 10+10, Swift typecheck, app build, ABI와 전체 boundary gate를 통과했다. 다만 현재 실측 회차는 전면 process가
+`loginwindow`인 잠금 상태에서 source/HID mutation 전 `global-keyboard-focus`로 멈췄으므로, 잠금 해제된 exact-frontmost 제품
+회차와 artifact 실재 검증 전에는 v2b0b를 green으로 닫지 않는다. v2b1 단일-window capture/판정자는 아직 구현 전이다.
 
 v2b는 곧바로 owner 이름을 하드코딩하지 않는다. **v2b0 window-authority 관측**이 먼저 Screen Recording preflight를
 source 전환·HID 게시보다 앞에서 통과한 뒤, 후보 요청 직전/직후 `SCShareableContent`/window-server inventory의 차집합을
@@ -6048,9 +6050,10 @@ preflight가 실패하면 inventory 수집과 시스템 mutation은 모두 0이�
 caller가 이미 고정한 absent output pathname을 단 한 번의 동기식 C ABI로 Zig에 빌려준다. Zig entrypoint가 byte/schema/window
 수 상한을 먼저 검증하고 이 문서의 pure reducer·series validator를 직접 호출한 뒤, 성공한 exact 5-row canonical artifact를
 same-directory temporary inode→`link(2)`로 배타 게시한다. Swift가 후보를 선별하거나 판정을 복제하는 경로, 전체 inventory
-중간 파일, 장수명 helper/daemon, ABI 재시도와 부분 artifact는 금지한다. ABI는 `passed`와 typed
-`not_provisioned`/`failed`만 반환하며 raw inventory와 다른 앱의 bundle/signing/bounds는 process 종료 전에 메모리에서만
-소멸한다. 이 경계는 v2b0b 관측 증거만 닫고 v2b1 pixel capture 완료를 뜻하지 않는다.
+중간 파일, 장수명 helper/daemon, ABI 재시도와 부분 artifact는 금지한다. raw inventory와 다른 앱의 bundle/signing/bounds는
+process 종료 전에 메모리에서만 소멸한다. Zig ABI는 `passed`/`failed`만 반환하고, preflight에서 ABI를 호출하지 않는
+`not_provisioned`는 AppKit smoke 상태가 소유한다. 이 경계는 v2b0b 관측 증거만 닫고 v2b1 pixel capture 완료를 뜻하지
+않는다.
 
 **CR6e-a1 stalled peer·transport baseline artifact 계약:** 자동 reconnect 제품 설정은 아직 배선하지 않는다. CR4의 제품
 `connectExistingHostUntil`/deadline-aware hello 경계에 harness-owned user-only Unix socket과 exact manifest를 제공한다.

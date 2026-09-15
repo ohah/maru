@@ -1320,7 +1320,8 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    `before/opened/closed` 5묶음을 메모리에만 모으고, 완성 뒤 한 번만 bounded JSON+고정된 absent output pathname을
    동기식 Zig C ABI에 빌려준다. Zig가 schema/window/byte cap을 선검증하고 기존 pure reducer·series validator와 canonical
    writer를 직접 소유한다. raw inventory 중간 파일, Swift 선택 규칙 복제, 장수명 helper, ABI retry/부분 publication은 0이다.
-   Screen Recording preflight 실패는 source/HID mutation 전에 typed `not_provisioned`로 끝나며, v2b0b green은 v2b1 단일-window
+   Screen Recording preflight 실패는 ABI 호출과 source/HID mutation 0인 AppKit smoke의 typed `not_provisioned`로 끝나며,
+   Zig ABI 자체는 `passed`/`failed`만 반환한다. v2b0b green은 v2b1 단일-window
    pixel capture를 완료로 승격하지 않는다.
    CR6e는 세 gate로 나눈다. **CR6e-a1 transport baseline**은 제품 deadline-aware
    exact-host issuer에 실제 Unix peer의 accept 후 hello 무응답과 transient connect backoff를 주입하고, absolute deadline,
@@ -1537,9 +1538,12 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    capability 없는 N-1 host의 lifecycle polling/fallback과 실제 AppKit 입력기 후보창·조합 픽셀 검증도 일반
    current-current 제품 경로의 완료 주장과 분리한다. 앞 항목은 호환 확장이다. 조합 픽셀 v2a는 제품
    capture/receipt/독립 판정 배선과 잠금 해제된 exact-frontmost AppKit 실측까지 green이다. OS 후보창 v2b는
-   v2b0a pure inventory reducer/coordinate converter와 Debug·ReleaseFast 8+8 focused gate까지 구현됐지만 제품 caller는 0이다.
-   WindowServer 전체 inventory producer·preflight·canonical artifact를 잇는 v2b0b와 단일-window capture v2b1은 구현 전인
-   환경 의존 검증 gap이며 다음 비릴리스 후속이다.
+   v2b0a pure inventory reducer/coordinate converter와 Debug·ReleaseFast 8+8 focused gate를 구현했다. v2b0b의 WindowServer
+   전체 inventory producer·Screen Recording preflight·exact-once Zig ABI·canonical artifact도 구현되어 focused gate 10+10,
+   Swift typecheck, app build, ABI와 전체 boundary gate를 통과했다. 현재 실측은 전면 process가 `loginwindow`인 잠금 상태에서
+   source/HID mutation 전 `global-keyboard-focus`로 멈췄으므로, 잠금 해제된 exact-frontmost 제품 회차와 artifact 실재
+   검증 전에는 v2b0b 완료를 주장하지 않는다. 단일-window capture v2b1은 구현 전인 환경 의존 검증 gap이며 다음 비릴리스
+   후속이다.
    실제 다른 UID process 거부는 passwordless sudo가 있는 macOS gate에서 root client가 owner-only socket을 통과한 뒤
    kernel peer credential로 admission 전에 거부되는 제품 스모크를 구현·실측했다.
    G3은 출하 뒤 기본값을 다시 바꿀 때만

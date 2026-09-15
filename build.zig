@@ -1045,6 +1045,7 @@ pub fn build(b: *std.Build) void {
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/MaruAppSchemeHandler.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/AgentSessionArchiveSmokeDriver.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/SessionHostInputSourcePolicy.swift"));
+        macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/SessionHostIMECandidateObservation.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/NotificationReleaseScenarioReceipt.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/NotificationReleaseAppScenario.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/NotificationExactCleanup.swift"));
@@ -1913,6 +1914,7 @@ pub fn build(b: *std.Build) void {
         macos_app_compile.addFileArg(b.path("src/platform/macos/MaruAppSchemeHandler.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/AgentSessionArchiveSmokeDriver.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/SessionHostInputSourcePolicy.swift"));
+        macos_app_compile.addFileArg(b.path("src/platform/macos/SessionHostIMECandidateObservation.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/NotificationReleaseScenarioReceipt.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/NotificationReleaseAppScenario.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/NotificationExactCleanup.swift"));
@@ -3112,10 +3114,10 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .optimize = optimize,
             }),
-            .filters = &.{"CR6d 경계는"},
+            .filters = &.{"CR6d"},
         });
         const run_session_host_cr6d_boundary_tests = b.addRunArtifact(session_host_cr6d_boundary_tests);
-        run_session_host_cr6d_boundary_tests.addArg("--maru-expect-tests=1");
+        run_session_host_cr6d_boundary_tests.addArg("--maru-expect-tests=2");
         run_session_host_cr6d_boundary_tests.setCwd(b.path("."));
         run_session_host_cr6d_appkit.step.dependOn(&run_session_host_cr6d_boundary_tests.step);
         const session_host_cr6d_pixel_verify_mod = b.createModule(.{
@@ -3160,7 +3162,10 @@ pub fn build(b: *std.Build) void {
         const session_host_cr6d_assert = b.addSystemCommand(&.{
             "sh", "-eu", "-c",
             "summary=zig-out/maru-macos-app/app.summary.txt; " ++
+                "candidate=zig-out/maru-macos-app/session-host-cr6d-home/session-host-cr6d-ime-candidate-observation.json; " ++
                 "test -f \"$summary\"; " ++
+                "test -f \"$candidate\"; " ++
+                "/usr/bin/grep -Eq '\"schema\":\"maru.session-host-cr6d-ime-candidate-observation.v1\"' \"$candidate\"; " ++
                 "/usr/bin/grep -Eq '^session_host_recovery_smoke_stage=2$' \"$summary\"; " ++
                 "/usr/bin/grep -Eq '^session_host_input_smoke_stage=4$' \"$summary\"; " ++
                 "/usr/bin/grep -Eq '^session_host_input_smoke_historical_count=1$' \"$summary\"; " ++
@@ -4320,7 +4325,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_session_host_cr6d_candidate_debug = b.addRunArtifact(session_host_cr6d_candidate_debug);
-    run_session_host_cr6d_candidate_debug.addArg("--maru-expect-tests=8");
+    run_session_host_cr6d_candidate_debug.addArg("--maru-expect-tests=10");
     const session_host_cr6d_candidate_release = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/session_host/ime_candidate_evidence.zig"),
@@ -4329,7 +4334,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_session_host_cr6d_candidate_release = b.addRunArtifact(session_host_cr6d_candidate_release);
-    run_session_host_cr6d_candidate_release.addArg("--maru-expect-tests=8");
+    run_session_host_cr6d_candidate_release.addArg("--maru-expect-tests=10");
     test_step.dependOn(&run_session_host_cr6d_candidate_debug.step);
     test_step.dependOn(&run_session_host_cr6d_candidate_release.step);
     const session_host_cr6d_candidate_step = b.step(
@@ -5214,10 +5219,10 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         }),
-        .filters = &.{"CR6d 경계는"},
+        .filters = &.{"CR6d"},
     });
     const run_session_host_cr6d_global_boundary_tests = b.addRunArtifact(session_host_cr6d_global_boundary_tests);
-    run_session_host_cr6d_global_boundary_tests.addArg("--maru-expect-tests=1");
+    run_session_host_cr6d_global_boundary_tests.addArg("--maru-expect-tests=2");
     run_session_host_cr6d_global_boundary_tests.setCwd(b.path("."));
     boundary_step.dependOn(&run_session_host_cr6d_global_boundary_tests.step);
     const session_host_cr6e_boundary_tests = addProjectTest(b, .{

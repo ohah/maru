@@ -4,6 +4,7 @@ const builtin = @import("builtin");
 const maru = @import("maru");
 const session_mod = @import("app_session.zig");
 const session_host = @import("session_host.zig");
+const ime_candidate_evidence = @import("session_host/ime_candidate_evidence.zig");
 const keycode = @import("keycode.zig");
 const keyhint_hold = maru.session.keyhint_hold; // OS-중립 홀드 gesture 정책(session L2 — session/keyhint_hold.zig)
 const command_catalog = @import("command_catalog.zig");
@@ -76,6 +77,11 @@ pub const SessionDefaultFalseObservation = enum(u32) {
     resolved_true = c.MARU_SESSION_DEFAULT_FALSE_OBSERVATION_RESOLVED_TRUE,
     explicit_override = c.MARU_SESSION_DEFAULT_FALSE_OBSERVATION_EXPLICIT_OVERRIDE,
     config_present = c.MARU_SESSION_DEFAULT_FALSE_OBSERVATION_CONFIG_PRESENT,
+};
+
+pub const IMECandidateObservationResult = enum(u32) {
+    passed = c.MaruAppHostIMECandidateObservationPassed,
+    failed = c.MaruAppHostIMECandidateObservationFailed,
 };
 
 const LeaseSlot = if (builtin.os.tag == .macos)
@@ -158,8 +164,8 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
     try std.testing.expectEqualStrings("maru build: mtime=unknown pid=42", buildIdentityLine(&buf, null, 42));
 }
 
-test "ABI v184 notification release end-all and cold route values match the C header" {
-    try std.testing.expectEqual(@as(u32, 184), abi_version);
+test "ABI v185 notification release end-all and cold route values match the C header" {
+    try std.testing.expectEqual(@as(u32, 185), abi_version);
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @intFromEnum(AppInstanceLeaseResult.acquired));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_HELD), @intFromEnum(AppInstanceLeaseResult.held));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_UNSAFE), @intFromEnum(AppInstanceLeaseResult.unsafe));
@@ -1308,6 +1314,8 @@ pub const SessionHostInputSmokeProbe = extern struct {
     historical_count: u32,
     ime_count: u32,
     clipboard_count: u32,
+    terminal_input_bytes: u64,
+    base_screen_generation: u64,
 };
 
 /// CR6c 전용 read-only AppKit smoke projection. 이미 발행된 row rect와 aggregate
@@ -1363,8 +1371,69 @@ pub export fn maru_macos_app_session_input_smoke_probe(
         .historical_count = probe.historical_count,
         .ime_count = probe.ime_count,
         .clipboard_count = probe.clipboard_count,
+        .terminal_input_bytes = probe.terminal_input_bytes,
+        .base_screen_generation = probe.base_screen_generation,
     };
     return @intFromEnum(Status.ok);
+}
+
+/// CR6d-v2b0b의 exact-once 판정/게시 leaf. Swift는 complete raw transcript를 동기 호출 동안만
+/// 빌려주며 선택 규칙이나 artifact writer를 소유하지 않는다.
+pub export fn maru_macos_session_host_ime_candidate_observation_publish(
+    transcript_ptr: ?[*]const u8,
+    transcript_len: usize,
+    output_path_ptr: ?[*]const u8,
+    output_path_len: usize,
+) u32 {
+    const transcript = transcript_ptr orelse return @intFromEnum(IMECandidateObservationResult.failed);
+    const output = output_path_ptr orelse return @intFromEnum(IMECandidateObservationResult.failed);
+    if (transcript_len == 0 or transcript_len > ime_candidate_evidence.max_transcript_bytes or
+        output_path_len == 0 or output_path_len >= std.fs.max_path_bytes)
+        return @intFromEnum(IMECandidateObservationResult.failed);
+    const output_bytes = output[0..output_path_len];
+    if (std.mem.indexOfScalar(u8, output_bytes, 0) != null)
+        return @intFromEnum(IMECandidateObservationResult.failed);
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    @memcpy(path_buf[0..output_path_len], output_bytes);
+    path_buf[output_path_len] = 0;
+    ime_candidate_evidence.publishObservation(
+        allocator,
+        transcript[0..transcript_len],
+        path_buf[0..output_path_len :0],
+    ) catch return @intFromEnum(IMECandidateObservationResult.failed);
+    return @intFromEnum(IMECandidateObservationResult.passed);
+}
+
+test "CR6d-v2b0b observation ABI rejects invalid borrows and publishes no partial artifact" {
+    try std.testing.expectEqual(@as(u32, c.MaruAppHostIMECandidateObservationPassed), @intFromEnum(IMECandidateObservationResult.passed));
+    try std.testing.expectEqual(@as(u32, c.MaruAppHostIMECandidateObservationFailed), @intFromEnum(IMECandidateObservationResult.failed));
+    try std.testing.expectEqual(@as(u32, c.MaruAppHostIMECandidateObservationFailed), maru_macos_session_host_ime_candidate_observation_publish(null, 1, null, 1));
+
+    const transcript = "{}";
+    try std.testing.expectEqual(@as(u32, c.MaruAppHostIMECandidateObservationFailed), maru_macos_session_host_ime_candidate_observation_publish(
+        transcript.ptr,
+        ime_candidate_evidence.max_transcript_bytes + 1,
+        "unused".ptr,
+        "unused".len,
+    ));
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const output_path = try std.fs.path.join(
+        std.testing.allocator,
+        &.{ ".zig-cache/tmp", &tmp.sub_path, "candidate.json" },
+    );
+    defer std.testing.allocator.free(output_path);
+    try std.testing.expectEqual(@as(u32, c.MaruAppHostIMECandidateObservationFailed), maru_macos_session_host_ime_candidate_observation_publish(
+        transcript.ptr,
+        transcript.len,
+        output_path.ptr,
+        output_path.len,
+    ));
+    try std.testing.expectError(
+        error.FileNotFound,
+        tmp.dir.access(std.testing.io, "candidate.json", .{}),
+    );
 }
 
 /// Reads the published divider grab band and this drag's coalescing instrumentation for the

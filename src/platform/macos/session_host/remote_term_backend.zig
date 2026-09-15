@@ -4351,6 +4351,12 @@ pub const RemoteTermBackend = struct {
         return entry.runtime.runtimeIdHex();
     }
 
+    /// CR6d 관측이 같은 published screen generation을 결속하기 위한 read-only projection.
+    pub fn screenGenerationFor(self: *RemoteTermBackend, handle: RuntimeHandle) ?u64 {
+        const entry = self.runtimes.get(handle) orelse return null;
+        return entry.runtime.generation_owner.currentGeneration() catch null;
+    }
+
     pub fn runtimeHostId(self: *RemoteTermBackend, handle: RuntimeHandle) ?u128 {
         const entry = self.runtimes.get(handle) orelse return null;
         return entry.host_id;

@@ -26,17 +26,17 @@ test "CR6d 경계는 exact recovered screen probe와 actual AppKit input smoke�
     const pixel_validator = try read(allocator, "tests/support/session_host_cr6d_pixel.zig");
     defer allocator.free(pixel_validator);
 
-    // ABI 178 retains the read-only record. The record exposes four scalar observations and no
+    // The read-only record exposes five scalar observations and no
     // input handle, runtime pointer, or action token that Swift could use to bypass NSEvent.
-    try std.testing.expectEqual(@as(usize, 1), count(app, "pub const abi_version: u32 = 184;"));
-    try std.testing.expectEqual(@as(usize, 1), count(abi, "expectEqual(@as(u32, 184), abi_version)"));
-    try std.testing.expectEqual(@as(usize, 1), count(header, "#define MARU_MACOS_APP_HOST_ABI_VERSION 184u"));
+    try std.testing.expectEqual(@as(usize, 1), count(app, "pub const abi_version: u32 = 185;"));
+    try std.testing.expectEqual(@as(usize, 1), count(abi, "expectEqual(@as(u32, 185), abi_version)"));
+    try std.testing.expectEqual(@as(usize, 1), count(header, "#define MARU_MACOS_APP_HOST_ABI_VERSION 185u"));
     const probe_record = between(
         abi,
         "pub const SessionHostInputSmokeProbe = extern struct {",
         "pub export fn maru_macos_app_session_recovered_session_smoke_probe(",
     ) orelse return error.TestUnexpectedResult;
-    inline for (.{ "active_remote: u32", "historical_count: u32", "ime_count: u32", "clipboard_count: u32" }) |field| {
+    inline for (.{ "active_remote: u32", "historical_count: u32", "ime_count: u32", "clipboard_count: u32", "terminal_input_bytes: u64", "base_screen_generation: u64" }) |field| {
         try std.testing.expectEqual(@as(usize, 1), count(probe_record, field));
     }
     try std.testing.expectEqual(@as(usize, 0), count(probe_record, "*"));
@@ -143,7 +143,8 @@ test "CR6d 경계는 exact recovered screen probe와 actual AppKit input smoke�
     try std.testing.expectEqual(@as(usize, 1), count(gate, "session_host_input_smoke_post_event_access=true"));
     try std.testing.expectEqual(@as(usize, 1), count(gate, "session_host_input_smoke_source_record_cleared=true"));
     try std.testing.expectEqual(@as(usize, 1), count(gate, "MARU_SESSION_HOST_CR6D_INPUT_SOURCE_RESTORE_EXE"));
-    try std.testing.expectEqual(@as(usize, 1), count(gate, "run_session_host_cr6d_boundary_tests.addArg(\"--maru-expect-tests=1\");"));
+    try std.testing.expectEqual(@as(usize, 1), count(gate, "run_session_host_cr6d_boundary_tests.addArg(\"--maru-expect-tests=2\");"));
+    try std.testing.expectEqual(@as(usize, 1), count(build, "run_session_host_cr6d_global_boundary_tests.addArg(\"--maru-expect-tests=2\");"));
 
     // v2a의 판정자는 기본 test graph에 고정된 순수 consumer다. 실제 AppKit producer가 붙기 전에도
     // identity/세대/anchor/PPM digest와 관심 영역 계약이 사라지거나 파일 I/O를 직접 열 수 없다.
@@ -202,6 +203,49 @@ test "CR6d 경계는 exact recovered screen probe와 actual AppKit input smoke�
         "run_session_host_cr6d_pixel_verify_tests.addArg(\"--maru-expect-tests=2\");",
     ));
     try std.testing.expectEqual(@as(usize, 1), count(gate, "session-host-cr6d-ime-pixel-receipt.json"));
+}
+
+test "CR6d v2b0b는 preflight 뒤 전체 inventory를 Zig 판정자에 exact once 넘긴다" {
+    const allocator = std.testing.allocator;
+    const build = try read(allocator, "build.zig");
+    defer allocator.free(build);
+    const swift = try read(allocator, "src/platform/macos/MaruAppHost.swift");
+    defer allocator.free(swift);
+    const producer = try read(allocator, "src/platform/macos/SessionHostIMECandidateObservation.swift");
+    defer allocator.free(producer);
+    const abi = try read(allocator, "src/platform/macos/app_host_abi.zig");
+    defer allocator.free(abi);
+    const header = try read(allocator, "src/platform/macos/app_host_abi.h");
+    defer allocator.free(header);
+
+    try std.testing.expectEqual(@as(usize, 2), count(build, "SessionHostIMECandidateObservation.swift"));
+    try std.testing.expectEqual(@as(usize, 1), count(header, "maru_macos_session_host_ime_candidate_observation_publish("));
+    try std.testing.expectEqual(@as(usize, 1), count(abi, "pub export fn maru_macos_session_host_ime_candidate_observation_publish("));
+    try std.testing.expectEqual(@as(usize, 1), count(swift, "CGPreflightScreenCaptureAccess()"));
+    const input_smoke = between(
+        swift,
+        "private func maybeRunSessionHostInputContinuitySmoke()",
+        "private func dispatchSessionHostInputKey(",
+    ) orelse return error.TestUnexpectedResult;
+    const input_case = between(input_smoke, "        case 1:", "        case 3:") orelse
+        return error.TestUnexpectedResult;
+    const permission_at = std.mem.indexOf(u8, input_case, "CGPreflightScreenCaptureAccess()") orelse
+        return error.TestUnexpectedResult;
+    const source_at = std.mem.indexOf(u8, input_case, "guard prepareSessionHostInputSmokeInputSource() else") orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(permission_at < source_at);
+
+    inline for (.{ "kCGWindowNumber", "kCGWindowOwnerPID", "kCGWindowLayer", "kCGWindowBounds" }) |field| {
+        try std.testing.expectEqual(@as(usize, 1), count(producer, field));
+    }
+    inline for (.{ "kCGWindowName", "window title", "candidate text" }) |forbidden| {
+        try std.testing.expectEqual(@as(usize, 0), count(producer, forbidden));
+    }
+    try std.testing.expectEqual(@as(usize, 1), count(producer, "CGWindowListCopyWindowInfo("));
+    try std.testing.expectEqual(@as(usize, 1), count(producer, "maru_macos_session_host_ime_candidate_observation_publish("));
+    try std.testing.expectEqual(@as(usize, 1), count(producer, "requiredObservationCount = 5"));
+    try std.testing.expectEqual(@as(usize, 1), count(producer, "maximumWindowCount = 256"));
+    try std.testing.expectEqual(@as(usize, 0), count(producer, ".write(to:"));
 }
 
 fn read(allocator: std.mem.Allocator, path: []const u8) ![]u8 {

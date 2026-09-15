@@ -4,11 +4,11 @@
 //! ready manifest, poll owner까지 구성했는지만 말하며 upgrade/restore handoff fd와 섞이지 않는다.
 
 const std = @import("std");
+const std_environ_view = @import("std_environ_view.zig");
 const c = std.c;
 const posix = std.posix;
 
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 extern "c" fn getpeereid(fd: c.fd_t, euid: *posix.uid_t, egid: *posix.gid_t) c_int;
 
 pub const env_name: [:0]const u8 = "MARU_SESSION_HOST_STARTUP_FD";
@@ -42,7 +42,9 @@ pub const Notifier = struct {
 
     pub fn fromEnvironment() NotifierError!Notifier {
         const raw = c.getenv(env_name.ptr) orelse return .{ .fd = null };
-        defer _ = unsetenv(env_name.ptr);
+        // 지우기만 하면 std 의 debug Io 가 붙잡은 환경 조각이 stale 이 되어 다음 `std.log` 가 프로세스를
+        // 죽인다(`std_environ_view` 머리말). 지우기와 갱신을 한 번에 하는 경로만 쓴다.
+        defer std_environ_view.unsetenvKeepingStdView(env_name.ptr);
         const text = std.mem.span(raw);
         const parsed = std.fmt.parseInt(i64, text, 10) catch return error.InvalidChannel;
         if (parsed < 3 or parsed > std.math.maxInt(c_int)) return error.InvalidChannel;

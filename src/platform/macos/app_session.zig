@@ -780,13 +780,19 @@ test "창을 닫으면 그 창의 임시 index 파일이 사라진다 — 실제
     defer env_guard.restore();
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
-    try tmp.dir.createDirPath(io, "home");
+    // `turnIndexPath` 의 `mkdir` 은 한 단계(`.cache/maru`)만 만든다 — 제품에서는 terminfo 캐시가 `.cache` 를
+    // 먼저 만들어 두지만 이 픽스처 HOME 은 비어 있으므로 여기서 만든다(집계 실행에서 실제로 `FileNotFound` 였다).
+    try tmp.dir.createDirPath(io, "home/.cache/maru");
     const home = try std.fmt.allocPrintSentinel(a, "{s}/home", .{root}, 0);
     defer a.free(home);
     try std.testing.expectEqual(@as(c_int, 0), setenv("HOME", home.ptr, 1));
 
     const session = try initSmokeSessionSized(a);
     defer a.destroy(session);
+    // 판정이 `deinit` 앞에서 죽으면 세션이 살아남아 같은 프로세스의 뒤 판정자들이 연쇄로 빨개진다
+    // (`live_app_sessions` 게이트) — 그래서 실패 경로에서도 닫는다.
+    var closed = false;
+    errdefer if (!closed) session.deinit();
     // ⚠️ 경로는 **세션 소유**라 `deinit` 이 푼다 — 복사해 두지 않고 그 슬라이스로 뒤를 보면 해제된 메모리를
     // 읽어 «없음» 이 나오고, 지우기를 떼도 초록이다(돌연변이 검증에서 실제로 살아남았다).
     const path = try a.dupe(u8, session.turnIndexPath() orelse return error.TestUnexpectedResult);
@@ -796,6 +802,7 @@ test "창을 닫으면 그 창의 임시 index 파일이 사라진다 — 실제
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = "DIRC" });
     try std.Io.Dir.cwd().access(io, path, .{});
     session.deinit();
+    closed = true;
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, path, .{}));
     // 형제는 남는다 — 지우기가 파일 하나이지 디렉터리가 아니라는 부정 대조.
     try std.Io.Dir.cwd().access(io, std.fs.path.dirname(path).?, .{});

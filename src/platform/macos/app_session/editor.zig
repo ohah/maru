@@ -3569,16 +3569,24 @@ pub fn setEditorPreedit(self: *AppSession, term: *Term, bytes: []const u8) void 
         term.rt.editor_preedit = &.{};
         return;
     }
-    // **selection 이 없으면 조합도 없다**(§11, 2026-09-15). 조합의 자리는 caret 이고, caret 이 없는
-    // 문서(갓 연 문서 · 병합 모드에서 판에 초점이 간 Result)에는 확정도 갈 곳이 없어 `insertText` 가
-    // 무효다 — 그 상태에서 조합만 받아 `0` 에 그리면 **caret 은 판에 있는데 조합 글자가 Result 첫 줄에
-    // 뜬다**(실측). 확정과 같은 규칙으로 거절한다: 조합 중이던 것이 있으면 그것도 내린다.
-    if (term.rt.editor_preedit.len == 0 and term.rt.editor_selection == null) return;
+    // **커서가 없으면 조합도 없다**(§11, 2026-09-15). 조합의 자리는 caret 이고, caret 이 없는 문서(갓 연
+    // 문서 · 병합 모드에서 판에 초점이 간 Result)에는 확정도 갈 곳이 없어 `insertText` 가 무효다 — 그
+    // 상태에서 조합만 받아 `0` 에 그리면 **caret 은 판에 있는데 조합 글자가 Result 첫 줄에 뜬다**(실측).
+    // 확정과 **같은 술어**(`selections().count()` — primary 가 없으면 여분이 있어도 0 이다)로 거절한다.
+    // 조합 **중**에도 같다(적대적 3회차 C5): 커서가 사라졌으면 갱신을 받지 않고 보이던 것도 내린다 — 안
+    // 그러면 판으로 초점이 옮겨 간 뒤에도 Result 에 조합이 남는다.
+    var cursors = selections(term);
+    if (cursors.count() == 0) {
+        if (term.rt.editor_preedit.len > 0) self.allocator.free(term.rt.editor_preedit);
+        term.rt.editor_preedit = &.{};
+        return;
+    }
     // **새 값을 먼저 복사한다.** OOM이면 보이던 조합 상태가 그대로 남는다 — 터미널 오버레이의
     // `replace`가 같은 순서를 쓴다(사라지는 것보다 낡은 것이 낫다).
     const next = self.allocator.dupe(u8, bytes) catch return;
     if (term.rt.editor_preedit.len == 0) {
-        // 조합의 **시작**이다 — 이 자리에 확정 텍스트가 온다.
+        // 조합의 **시작**이다 — 이 자리에 확정 텍스트가 온다. 범위 선택이면 그 **시작**(확정이 선택을
+        // 대체하는 자리 — 끝이 아니다). `count() > 0` 이면 primary 가 있다.
         term.rt.editor_preedit_at = term.rt.editor_selection.?.start();
     }
     if (term.rt.editor_preedit.len > 0) self.allocator.free(term.rt.editor_preedit);
@@ -9973,6 +9981,18 @@ test "MPN17 판에 초점이 있으면 조합(IME)도 Result 에 안 그려진�
     try testing.expectEqual(editor_merge_ops.MergeSide.current, editor_merge_ops.focusedSide(term).?);
     try testing.expect(std.mem.indexOf(u8, term.rt.editor_doc.?.file.content, "\xed\x95\x9c") == null);
 
+    // ⑵′ **조합 중에 초점이 판으로 가면 조합은 내려간다** — Result 에 selection 을 두고 조합을 시작한 뒤 판을
+    //    누르면(placePaneCaret 이 selection 을 비운다) 다음 갱신은 거절되고 보이던 것도 사라진다(3회차 C5).
+    try testing.expect(beginBodySelection(fx.session, pane_ops.activePane(fx.session), rx, ry, 0));
+    setEditorPreedit(fx.session, term, "\xed\x95\x9c");
+    try testing.expect(term.rt.editor_preedit.len > 0);
+    try testing.expect(editor_merge_ops.placePaneCaret(fx.session, term, cx, cy));
+    setEditorPreedit(fx.session, term, "\xed\x95\x9c\xea\xb8\x80"); // 갱신 "한글"
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_preedit.len);
+    var d2b = appendPaneFrame(fx.session, wide, term) orelse return error.EditorPaneDidNotDraw;
+    defer d2b.dl.deinit(allocator);
+    try testing.expect(!drawnHasCodepoint(d2b.dl, 0xD55C));
+
     // ⑶ 갓 연 문서(아직 안 누른 문서)도 같다 — 병합 모드가 아니어도 selection 이 없으면 조합이 없다.
     try dir.dir.writeFile(testing.io, .{ .sub_path = "fresh.txt", .data = "abc\n" });
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -9983,6 +10003,21 @@ test "MPN17 판에 초점이 있으면 조합(IME)도 Result 에 안 그려진�
     try testing.expect(fresh.rt.editor_selection == null); // 전제
     setEditorPreedit(fx.session, fresh, "\xed\x95\x9c");
     try testing.expectEqual(@as(usize, 0), fresh.rt.editor_preedit.len);
+
+    // ⑷ **여분 커서만 있으면(primary 없이) 조합도 확정도 없다** — `selections().count()` 는 primary 가 없으면
+    //    0 이다. 적대적 2회차 B5 를 「구멍」으로 읽었다가 이 단언에서 뒤집혔다: 확정이 안 되니 조합 거절이 맞다.
+    fresh.rt.editor_extra_selections = try allocator.dupe(editor_selection.Selection, &.{editor_selection.Selection.at(2)});
+    setEditorPreedit(fx.session, fresh, "\xed\x95\x9c");
+    try testing.expectEqual(@as(usize, 0), fresh.rt.editor_preedit.len);
+    try testing.expect(!insertText(fx.session, fresh, "x")); // 확정도 같은 술어로 안 된다
+    try testing.expectEqualStrings("abc\n", fresh.rt.editor_doc.?.file.content);
+    clearExtraSelections(fx.session, fresh);
+
+    // ⑸ **범위 선택 중의 조합 자리는 선택의 시작**이다 — 확정이 선택을 대체하는 자리(2회차 B2: 끝으로 잡아도 초록이었다).
+    fresh.rt.editor_selection = .{ .anchor_start = 1, .anchor_end = 3, .focus = 3 };
+    setEditorPreedit(fx.session, fresh, "\xed\x95\x9c");
+    try testing.expectEqual(@as(usize, 1), fresh.rt.editor_preedit_at);
+    setEditorPreedit(fx.session, fresh, "");
 }
 
 test "MPN12 세 판이 Result 를 «따라» 굴러간다 — 대응표로, 그리고 문서가 바뀌면 표가 새로 선다 (제품 경계)" {

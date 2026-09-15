@@ -317,6 +317,9 @@ pub const ScenarioId = enum {
     /// 맨 위에 자기만의 줄 셋을 더 가져 **같은 글자가 다른 번호로** 같은 높이에 선다. 첫 화면만 찍으면
     /// 「따라 굴리기」는 통째로 무판정이다 — 안 따라가도 맨 위는 똑같다.
     editor_merge_scrolled,
+    /// S3b-3b — **판에 caret 이 선 상태.** Current 의 둘째 줄 안에 caret(bar)이 서고 Result 에는 없다 —
+    /// 초점은 하나다. caret 은 quad 라 텍스트 DrawList 판정자가 못 보므로 이 골든이 그 자리를 든다.
+    editor_merge_caret,
 };
 
 /// sticky 시나리오인가. 그룹이 둘 이상이어야 "다음 헤더가 밀어낸다"를 만들 수 있다.
@@ -411,7 +414,7 @@ pub fn buildFrame(
         .dropdown_open, .dropdown_bottom_clamp => buildDropdownFrame(scenario, tokens, buffers),
         .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_selection, .editor_find, .editor_caret_bar, .editor_caret_block, .editor_caret_underline => buildEditorGutterFrame(scenario, buffers),
         .editor_diff, .editor_diff_scrolled, .editor_diff_selection => buildEditorDiffFrame(scenario, buffers),
-        .editor_merge_panes, .editor_merge_narrow => buildEditorMergeFrame(scenario, buffers),
+        .editor_merge_panes, .editor_merge_narrow, .editor_merge_caret => buildEditorMergeFrame(scenario, buffers),
         .editor_merge_scrolled => buildEditorMergeScrolledFrame(scenario, buffers),
         // 위 early return이 처리한다 — 여기 오면 분기가 갈린 것이다.
         .sidebar_status_strip => unreachable,
@@ -1091,6 +1094,10 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
 /// **fixture 가 네 축을 갈라야 한다**: 세 판의 내용이 서로 달라야 「어느 pane 이 어느 판인가」가
 /// 캡처에서 보이고, 조상이 있어야 아래 띠가 선다. 셋이 같으면 배치를 아무렇게나 바꿔도 그림이
 /// 똑같다.
+/// S3b-3b 골든의 caret 자리 — Current 의 줄마다 caret byte 들(둘째 줄에만 하나).
+const merge_caret_byte = [_]u32{16};
+const merge_caret_rows = [_][]const u32{ &.{}, &merge_caret_byte, &.{}, &.{} };
+
 fn buildEditorMergeFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
     const editor_view = chrome.components.editor_view;
     const viewport_w: u32 = @intFromFloat(scenario.viewport_px.width);
@@ -1128,7 +1135,8 @@ fn buildEditorMergeFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
     const w = editor_view.merge_frame.build(.{
         .rect = rect,
         .background_rect = .{ .x = 0, .y = 0, .w = viewport_w, .h = viewport_h }, // 배경은 뷰 전체(§4.1b)
-        .current = .{ .lines = &ours_lines, .widgets = &cur_widgets },
+        // S3b-3b: caret 장면은 Current 둘째 줄(`    const msg = "ours";`)의 `"` 앞(byte 16)에 caret 을 둔다.
+        .current = .{ .lines = &ours_lines, .widgets = &cur_widgets, .carets = if (scenario.id == .editor_merge_caret) &merge_caret_rows else null },
         .result = .{ .lines = &editor_conflict_lines, .widgets = if (collapsed) &editor_conflict_widgets else &.{}, .bands = &editor_conflict_bands },
         .incoming = .{ .lines = &theirs_lines, .widgets = &inc_widgets },
         .base = .{ .lines = &base_lines },
@@ -1138,7 +1146,7 @@ fn buildEditorMergeFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
         .tab_width = lab_tab_width,
         .wrap = false,
         // 비교 골든과 같은 판단 — caret 시나리오가 아닌 골든까지 커서를 켜면 깜빡임 축을 떠안는다.
-        .caret_visible = false,
+        .caret_visible = scenario.id == .editor_merge_caret,
         .caret_shape = .bar,
     }, .{
         .ops = buffers.ops,
@@ -1528,7 +1536,7 @@ fn buildDockFrame(
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
             .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
             // editor_gutter는 buildEditorGutterFrame이 처리한다 — 도크 목록을 타지 않는다.
-            .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper, .context_menu_bottom_right, .dropdown_open, .dropdown_bottom_clamp, .scm_rows, .scm_history, .scm_row_hover, .scm_conflict_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_selection, .editor_find, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_diff, .editor_diff_scrolled, .editor_diff_selection, .editor_merge_panes, .editor_merge_narrow, .editor_merge_scrolled => unreachable,
+            .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper, .context_menu_bottom_right, .dropdown_open, .dropdown_bottom_clamp, .scm_rows, .scm_history, .scm_row_hover, .scm_conflict_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_selection, .editor_find, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_diff, .editor_diff_scrolled, .editor_diff_selection, .editor_merge_panes, .editor_merge_narrow, .editor_merge_scrolled, .editor_merge_caret => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{

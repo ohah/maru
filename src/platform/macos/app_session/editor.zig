@@ -171,8 +171,10 @@ pub const PaneFrame = struct {
     /// 굳힐 때 읽는다(`visual_rows` 는 Result 의 것이다).
     merge_current_visual_rows: usize = 0,
     merge_incoming_visual_rows: usize = 0,
+    merge_base_visual_rows: usize = 0,
     merge_current_top: usize = 0,
     merge_incoming_top: usize = 0,
+    merge_base_top: usize = 0,
     /// **문서 전체**의 시각 행 수(랩 포함). 렌더만 접힘을 아므로, 스크롤 입력이 쓰도록 함께 낸다.
     total_visual_rows: u32,
     /// 스크롤 **상한** `(줄, 조각)` — 같은 이유로 함께 낸다(§4.1d).
@@ -224,7 +226,7 @@ fn buildMergePaneOps(
     // **충돌 구간을 먼저 훑고**(Result 의 위젯·밴드 표) 그 위에 판의 고르기 줄을 세운다(S3b-3c) —
     // 판의 표는 구간 × 대응표에서 나오므로 둘 다 이 개정에 맞아야 한다.
     const result_widgets_all = conflictWidgets(self, term);
-    editor_merge_ops.ensurePaneActions(self, term);
+    editor_merge_ops.ensurePaneHit(self, term);
     const st_now = term.rt.editor_merge.?; // `ensureMaps` 가 표를 채웠으므로 다시 읽는다
     const result_top: u32 = @intCast(@min(term.rt.editor_first_line, std.math.maxInt(u32)));
     const follow = struct {
@@ -235,6 +237,7 @@ fn buildMergePaneOps(
     }.f;
     const current_top = follow(st_now.map_ours, result_top);
     const incoming_top = follow(st_now.map_theirs, result_top);
+    const base_top = follow(st_now.map_base, result_top);
     // **Result 의 고르기 줄은 판이 접혔을 때만**(계약 §5 S3b-3c — VS Code 의 Result 에는 Accept 가
     // 없다). 세 열이 서 있으면 같은 동작이 판에 있고, 두 자리에 두면 잘리는 「둘 다…」가 그대로 남는다.
     // 배치는 **그리기 전에** 같은 순수 함수로 안다(`merge_frame.layout`) — 그려 본 뒤에 알면 늦다.
@@ -242,7 +245,9 @@ fn buildMergePaneOps(
     const collapsed = pre.current == null;
     const w = chrome_editor.merge_frame.build(.{
         .rect = pane_rect,
-        .current = .{ .lines = st.ours_lines, .first_line = current_top, .widgets = st_now.ours_actions.widgets },
+        // **caret 은 초점 판 하나에만**(S3b-3b) — 초점이 아니면 `null`(caret 없음). Result 는 selection 이
+        // 없을 때 `buildCaretRows` 가 `null` 을 내므로 화면의 caret 은 늘 하나다.
+        .current = .{ .lines = st.ours_lines, .first_line = current_top, .widgets = st_now.ours_hit.widgets, .carets = editor_merge_ops.buildPaneCarets(self, term, .current) },
         .result = .{
             .lines = result_lines,
             .line_colors = syntaxColors(self, term),
@@ -256,10 +261,13 @@ fn buildMergePaneOps(
             .widgets = if (collapsed) result_widgets_all else &.{},
             .bands = conflictBands(term),
         },
-        .incoming = .{ .lines = st.theirs_lines, .first_line = incoming_top, .widgets = st_now.theirs_actions.widgets },
+        .incoming = .{ .lines = st.theirs_lines, .first_line = incoming_top, .widgets = st_now.theirs_hit.widgets, .carets = editor_merge_ops.buildPaneCarets(self, term, .incoming) },
         // **`null` 이면 조상이 «없다»** — 빈 조상은 어엿한 조상이라 띠가 선다(그 판정은 S3a 의
         // `StageSet` 이 소유한다. 여기서 길이로 다시 재면 그 규칙의 주인이 둘이 된다).
-        .base = if (st.stages.has_base) chrome_editor.merge_frame.Pane{ .lines = st.base_lines, .first_line = follow(st_now.map_base, result_top) } else null,
+        // ⚠️ **관측 불가**(적대적 2회차 B1): 여기 `.base` 를 `.current` 로 바꿔도 판정자가 못 잡는다 — caret 은
+        // quad 라 텍스트 DrawList 에 안 남고(S2 의 밴드와 같은 공백), Lab 은 자기 props 를 만들어 이 배선을 안
+        // 지난다. `buildPaneCarets` 자체는 MPN15 가 재고, 이 한 줄은 눈으로 본다.
+        .base = if (st.stages.has_base) chrome_editor.merge_frame.Pane{ .lines = st.base_lines, .first_line = base_top, .carets = editor_merge_ops.buildPaneCarets(self, term, .base) } else null,
         .cell_w_px = @intCast(self.cell_width_px),
         .cell_h_px = @intCast(self.cell_height_px),
         .font_px = @intCast(self.cell_height_px),
@@ -274,13 +282,16 @@ fn buildMergePaneOps(
         .visual_rows = w.result_visual_rows,
         .merge_current_visual_rows = w.current_visual_rows,
         .merge_incoming_visual_rows = w.incoming_visual_rows,
+        .merge_base_visual_rows = w.base_visual_rows,
         .merge_current_top = current_top,
         .merge_incoming_top = incoming_top,
-        .total_visual_rows = @intCast(w.result_visual_rows),
-        // **상한은 아직 Result 의 행 수로 근사한다.** 정확한 값은 `frame.build` 가 열마다 내는데,
-        // 이 조각의 입력은 Result 하나만 굴리므로 그 하나만 싣는다(S3b-3 에서 pane 별로 갈린다).
-        .max_top_line = term.rt.editor_max_top_line,
-        .max_top_piece = term.rt.editor_max_top_piece,
+        .merge_base_top = base_top,
+        .total_visual_rows = w.result_total_visual_rows,
+        // **상한은 Result 의 것이다** — `frame.build` 가 Result 열에 낸 값을 `merge_frame` 이 넘긴다.
+        // S3b-3b 전에는 여기 낡은 `rt` 값을 그대로 실어 병합 모드의 Result 가 **위로 묶여 있었다**
+        // (`clampScrollToGeometry` 가 0 으로 자른다 — 역방향 굴리기 판정자 MPN16 이 잡았다).
+        .max_top_line = w.result_max_top_line,
+        .max_top_piece = w.result_max_top_piece,
         .merge_layout = w.layout,
     };
 }
@@ -1534,6 +1545,8 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
         const inc_part = chrome_editor.merge_frame.splitScratch(scratch, 2);
         editor_merge_ops.storePaneHits(self, term, .current, cur_part.visual_rows[0..@min(pf.merge_current_visual_rows, cur_part.visual_rows.len)], pf.merge_current_top);
         editor_merge_ops.storePaneHits(self, term, .incoming, inc_part.visual_rows[0..@min(pf.merge_incoming_visual_rows, inc_part.visual_rows.len)], pf.merge_incoming_top);
+        const base_part = chrome_editor.merge_frame.splitScratch(scratch, 3);
+        editor_merge_ops.storePaneHits(self, term, .base, base_part.visual_rows[0..@min(pf.merge_base_visual_rows, base_part.visual_rows.len)], pf.merge_base_top);
     } else {
         storeHitRows(self, term, leaf_rect, visual_rows[0..@min(pf.visual_rows, visual_rows.len)]);
     }
@@ -2631,12 +2644,12 @@ const ProductColumnMap = struct {
         );
     }
 
-    fn map(self: *const ProductColumnMap) editor_motion.ColumnMap {
+    pub fn map(self: *const ProductColumnMap) editor_motion.ColumnMap {
         return .{ .ctx = self, .columnOf = columnOf, .offsetOf = offsetOf };
     }
 };
 
-fn productColumnMap(term: *Term) ProductColumnMap {
+pub fn productColumnMap(term: *Term) ProductColumnMap {
     return .{ .tab_width = term.rt.editor_tab_width };
 }
 
@@ -4521,7 +4534,7 @@ fn revealDiffCaretColumn(self: *AppSession, term: *Term, side: DiffSide, text: [
 /// **`.lf` + `len + 1` 은 같은 값이다**(변이 1·5회차 C27 이 살아남아 확인했다) — `contentEnd()` 가
 /// 줄바꿈 byte 를 빼므로 둘 다 `text.len` 을 준다. 원리상 구분할 수 없어 판정자를 세우지 않는다.
 /// **한 byte 짧아지는 쪽**(`.lf` + `len`)은 다른 답이고, 그것은 DCARET5 가 잡는다(C27b).
-fn rowLine(text: []const u8) maru.session.editor.line_index.Line {
+pub fn rowLine(text: []const u8) maru.session.editor.line_index.Line {
     return .{ .start = 0, .end_with_ending = text.len, .ending = .none };
 }
 
@@ -9345,8 +9358,8 @@ fn distinctCodepoint(name: []const u8, corpus: []const u8) !u21 {
     return error.NoDistinctCodepoint;
 }
 
-/// 판의 위젯 행에서 `choice` 의 한가운데(창 절대 px). 판의 행 표·기하(`PaneActions`)로 잰다.
-fn paneActionPoint(pa: editor_merge_ops.PaneActions, choice: AppSession.ConflictChoice, cw: f64, chh: f64) ?struct { x: f64, y: f64 } {
+/// 판의 위젯 행에서 `choice` 의 한가운데(창 절대 px). 판의 행 표·기하(`PaneHit`)로 잰다.
+fn paneActionPoint(pa: editor_merge_ops.PaneHit, choice: AppSession.ConflictChoice, cw: f64, chh: f64) ?struct { x: f64, y: f64 } {
     var row: ?usize = null;
     for (pa.hit_rows[0..pa.hit_rows_len], 0..) |v, r| {
         if (v.kind == .widget) {
@@ -9442,7 +9455,7 @@ test "MPN11 고르기 줄은 «판» 에 서고 Result 에는 접혔을 때만 �
 
     // ⑵ **Current 의 「현재 것 채택」을 누르면 실제로 고른다.** 판의 행 표·기하로 그 자리를 잰다.
     const st = term.rt.editor_merge.?;
-    const p_cur = paneActionPoint(st.ours_actions, .current, cw, chh) orelse return error.NoCurrentAction;
+    const p_cur = paneActionPoint(st.ours_hit, .current, cw, chh) orelse return error.NoCurrentAction;
     const hit = editor_merge_ops.paneActionAtPoint(term, p_cur.x, p_cur.y) orelse return error.ActionNotHit;
     try testing.expectEqual(AppSession.ConflictChoice.current, hit.choice);
     try testing.expect(conflictActionAtPoint(term, p_cur.x, p_cur.y) == null); // Result 의 것이 아니다
@@ -9462,7 +9475,7 @@ test "MPN11 고르기 줄은 «판» 에 서고 Result 에는 접혔을 때만 �
     defer editor_merge_ops.clear(fx.session, term3);
     var drawn3 = appendPaneFrame(fx.session, wide, term3) orelse return error.EditorPaneDidNotDraw;
     defer drawn3.dl.deinit(allocator);
-    const p_both = paneActionPoint(term3.rt.editor_merge.?.theirs_actions, .both_incoming_first, cw, chh) orelse return error.NoBothAction;
+    const p_both = paneActionPoint(term3.rt.editor_merge.?.theirs_hit, .both_incoming_first, cw, chh) orelse return error.NoBothAction;
     try testing.expect(acceptConflictAtPoint(fx.session, pane_ops.activePane(fx.session), p_both.x, p_both.y));
     try testing.expect(std.mem.indexOf(u8, term3.rt.editor_doc.?.file.content, "head\ntheirs line\nours line\ntail\n") != null);
 
@@ -9472,7 +9485,7 @@ test "MPN11 고르기 줄은 «판» 에 서고 Result 에는 접혔을 때만 �
     ro.rt.editor_doc.?.file.read_only = true;
     var drawn_ro = appendPaneFrame(fx.session, wide, ro) orelse return error.EditorPaneDidNotDraw;
     defer drawn_ro.dl.deinit(allocator);
-    const p_ro = paneActionPoint(ro.rt.editor_merge.?.ours_actions, .current, cw, chh) orelse return error.NoCurrentAction;
+    const p_ro = paneActionPoint(ro.rt.editor_merge.?.ours_hit, .current, cw, chh) orelse return error.NoCurrentAction;
     try testing.expect(editor_merge_ops.paneActionAtPoint(ro, p_ro.x, p_ro.y) != null); // 버튼은 보인다
     try testing.expect(!acceptConflictAtPoint(fx.session, pane_ops.activePane(fx.session), p_ro.x, p_ro.y));
     try testing.expect(std.mem.indexOf(u8, ro.rt.editor_doc.?.file.content, "<<<<<<<") != null);
@@ -9483,7 +9496,7 @@ test "MPN11 고르기 줄은 «판» 에 서고 Result 에는 접혔을 때만 �
     var drawn5 = appendPaneFrame(fx.session, wide, term5) orelse return error.EditorPaneDidNotDraw;
     defer drawn5.dl.deinit(allocator);
     const lay5 = term5.rt.editor_merge_layout orelse return error.MissingMergeLayout;
-    const p5 = paneActionPoint(term5.rt.editor_merge.?.ours_actions, .current, cw, chh) orelse return error.NoCurrentAction;
+    const p5 = paneActionPoint(term5.rt.editor_merge.?.ours_hit, .current, cw, chh) orelse return error.NoCurrentAction;
     const in_result_x = p5.x - @as(f64, @floatFromInt(lay5.current.?.x)) + @as(f64, @floatFromInt(lay5.result.x));
     try testing.expect(conflictActionAtPoint(term5, in_result_x, p5.y) == null);
     try testing.expect(!acceptConflictAtPoint(fx.session, pane_ops.activePane(fx.session), in_result_x, p5.y));
@@ -9564,24 +9577,24 @@ test "MPN11 고르기 줄은 «판» 에 서고 Result 에는 접혔을 때만 �
         try testing.expectEqual(@as(?i64, 16), paneCodepointRow(drawn7.dl, cur7, cur_cp));
         try testing.expectEqual(@as(?i64, 15), paneCodepointRow(drawn7.dl, inc7, inc_cp));
         const st7 = term7.rt.editor_merge.?;
-        try testing.expectEqual(@as(usize, 46), st7.ours_actions.first_line); // 전제: Result 의 45 와 다르다
-        try testing.expectEqual(@as(usize, 45), st7.theirs_actions.first_line);
+        try testing.expectEqual(@as(usize, 46), st7.ours_hit.first_line); // 전제: Result 의 45 와 다르다
+        try testing.expectEqual(@as(usize, 45), st7.theirs_hit.first_line);
 
         const widgetRow = struct {
-            fn f(pa: editor_merge_ops.PaneActions) ?usize {
+            fn f(pa: editor_merge_ops.PaneHit) ?usize {
                 for (pa.hit_rows[0..pa.hit_rows_len], 0..) |v, r| if (v.kind == .widget) return r;
                 return null;
             }
         }.f;
         const firstSpan = struct {
-            fn f(pa: editor_merge_ops.PaneActions, choice: AppSession.ConflictChoice) ?AppSession.ConflictActionSpan {
+            fn f(pa: editor_merge_ops.PaneHit, choice: AppSession.ConflictChoice) ?AppSession.ConflictActionSpan {
                 for (pa.spans) |sp| if (sp.choice == choice) return sp;
                 return null;
             }
         }.f;
         // Current 의 「현재 것 채택」 — 히트만 본다(고르지는 않는다). 판의 첫 줄(46)로 옮겨야 맞는 자리다.
         {
-            const pa = st7.ours_actions;
+            const pa = st7.ours_hit;
             const r = widgetRow(pa) orelse return error.CurrentWidgetRowMissing;
             const sp = firstSpan(pa, .current) orelse return error.NoCurrentAction;
             const x = @as(f64, @floatFromInt(pa.body_x)) + @as(f64, @floatFromInt(pa.content_left_px)) + cw * (@as(f64, @floatFromInt(sp.from_col + sp.to_col)) / 2.0);
@@ -9592,7 +9605,7 @@ test "MPN11 고르기 줄은 «판» 에 서고 Result 에는 접혔을 때만 �
         // Incoming 의 「들어온 것 채택」 — 경계 픽셀. **원점은 제품의 `body_x/y` 가 아니라 배치의 판 사각 +
         // `content_inset_px` 에서 센다** — 제품 값에서 뽑으면 inset 을 빠뜨린 변이가 클릭 좌표도 같이 밀어
         // 초록이다(적대적 5회차 E1·E4 가 그렇게 살았다). gutter 폭만 제품 것을 빌린다(MPN14 가 따로 잰다).
-        const pa = st7.theirs_actions;
+        const pa = st7.theirs_hit;
         const ir = widgetRow(pa) orelse return error.IncomingWidgetRowMissing;
         const first = firstSpan(pa, .incoming) orelse return error.NoIncomingAction;
         try testing.expectEqual(@as(u32, 0), first.from_col); // 전제: 첫 이름은 0 열에서 시작한다
@@ -9617,7 +9630,7 @@ test "MPN11 고르기 줄은 «판» 에 서고 Result 에는 접혔을 때만 �
         term7.rt.editor_first_line = 61 - n_rows;
         var drawn8 = appendPaneFrame(fx.session, wide, term7) orelse return error.EditorPaneDidNotDraw;
         defer drawn8.dl.deinit(allocator);
-        const pa8 = term7.rt.editor_merge.?.theirs_actions;
+        const pa8 = term7.rt.editor_merge.?.theirs_hit;
         const y8 = @as(f64, @floatFromInt(inc_rect.y)) + inset + chh * (@as(f64, @floatFromInt(n_rows - 1)) + 0.5);
         const x8 = left + cw * 0.5;
         _ = pa8;
@@ -9667,7 +9680,7 @@ test "MPN14 판의 gutter 폭은 «그 판의» 줄 수에서 나온다 — 여�
     defer editor_merge_ops.clear(fx.session, term);
     var drawn = appendPaneFrame(fx.session, wide, term) orelse return error.EditorPaneDidNotDraw;
     defer drawn.dl.deinit(allocator);
-    const pa = term.rt.editor_merge.?.ours_actions;
+    const pa = term.rt.editor_merge.?.ours_hit;
     // 전제: 두 gutter 가 실제로 다르다 — 같으면 이 판정자는 아무것도 못 가른다.
     try testing.expect(pa.content_left_px < term.rt.editor_hit_geom.content_left_px);
     var row: ?usize = null;
@@ -9682,6 +9695,232 @@ test "MPN14 판의 gutter 폭은 «그 판의» 줄 수에서 나온다 — 여�
     const y = @as(f64, @floatFromInt(lay.current.?.y)) + inset + chh * (@as(f64, @floatFromInt(r)) + 0.5);
     const hit = editor_merge_ops.paneActionAtPoint(term, x0, y) orelse return error.ActionNotHitAtColumnZero;
     try testing.expectEqual(AppSession.ConflictChoice.current, hit.choice);
+}
+
+/// S3b-3b 픽스처 — prefix 60 줄 + 충돌 + 꼬리 40 줄. ours 는 맨 위에 자기만의 줄(`EXTRA`)이 있어
+/// Current 의 줄 = Result 의 줄 + 1 (대응표가 항등이 아니다 — 역방향 굴리기가 그 차이를 지나야 한다).
+fn mergeCaretFixture(fx: *PaneFixture, dir: *std.testing.TmpDir, name: []const u8, allocator: std.mem.Allocator) !*Term {
+    var rbuf: std.ArrayList(u8) = .empty;
+    defer rbuf.deinit(allocator);
+    var obuf: std.ArrayList(u8) = .empty;
+    defer obuf.deinit(allocator);
+    var tbuf: std.ArrayList(u8) = .empty;
+    defer tbuf.deinit(allocator);
+    try obuf.appendSlice(allocator, "EXTRA\n");
+    for (0..60) |k| {
+        const l = try std.fmt.allocPrint(allocator, "prefix {d:0>2} abcdef\n", .{k});
+        defer allocator.free(l);
+        try rbuf.appendSlice(allocator, l);
+        try obuf.appendSlice(allocator, l);
+        try tbuf.appendSlice(allocator, l);
+    }
+    try rbuf.appendSlice(allocator, "<<<<<<< HEAD\nours line\n=======\ntheirs line\n>>>>>>> topic\n");
+    try obuf.appendSlice(allocator, "ours line\n");
+    try tbuf.appendSlice(allocator, "theirs line\n");
+    for (0..40) |k| {
+        const l = try std.fmt.allocPrint(allocator, "tail {d:0>2}\n", .{k});
+        defer allocator.free(l);
+        try rbuf.appendSlice(allocator, l);
+        try obuf.appendSlice(allocator, l);
+        try tbuf.appendSlice(allocator, l);
+    }
+    return mpn11OpenWith(fx, dir, name, allocator, rbuf.items, tbuf.items, obuf.items, tbuf.items);
+}
+
+test "MPN15 판을 누르면 caret 이 그 판 그 자리에 서고 Result 의 selection 이 사라진다 — 키는 판에서 움직이고 글자는 Result 에 안 들어간다 (제품 경계)" {
+    // S3b-3b(계약 §5). **초점 = 판 caret + Result selection 없음.** 그 정의 덕에 Result 의 편집 경로
+    // 33 곳에 술어를 안 끼워도 「caret 은 Current 에, 글자는 Result 에」가 생기지 않는다 — 여기서 그
+    // 약속을 제품 입구(`handleKeyEvent`·`insertText`)로 잰다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    const cw: f64 = @floatFromInt(fx.session.cell_width_px);
+    const chh: f64 = @floatFromInt(fx.session.cell_height_px);
+    const wide: maru.session.SplitRect = .{ .x = fx.leaf_rect.x, .y = fx.leaf_rect.y, .w = 1200, .h = fx.leaf_rect.h };
+    const term = try mergeCaretFixture(&fx, &dir, "k.txt", allocator);
+    defer editor_merge_ops.clear(fx.session, term);
+    var d0 = appendPaneFrame(fx.session, wide, term) orelse return error.EditorPaneDidNotDraw;
+    defer d0.dl.deinit(allocator);
+    const lay = term.rt.editor_merge_layout orelse return error.MissingMergeLayout;
+    const inset: f64 = @floatFromInt(chrome_editor.frame.content_inset_px);
+
+    // ⑴ 대조군: Result 본문을 눌러 selection 을 세운다 — 그러면 판 caret 은 없다(초점은 Result).
+    const rg = term.rt.editor_hit_geom;
+    const rx = @as(f64, @floatFromInt(rg.body_x)) + @as(f64, @floatFromInt(rg.content_left_px)) + cw * 2.5;
+    const ry = @as(f64, @floatFromInt(rg.body_y)) + chh * 0.5;
+    try testing.expect(beginBodySelection(fx.session, pane_ops.activePane(fx.session), rx, ry, 0));
+    try testing.expect(term.rt.editor_selection != null);
+    try testing.expect(editor_merge_ops.focusedSide(term) == null);
+    try testing.expect(!editor_merge_ops.placePaneCaret(fx.session, term, rx, ry)); // Result 는 판이 아니다
+
+    // ⑵ Current 의 2 행(= ours 2 줄 `prefix 01 abcdef`) 3 열을 누른다 → caret 이 거기 서고 Result 의 selection 은 없다.
+    //    **여분 커서도 함께 사라진다** — 남으면 primary 가 없어도 `insertText` 가 그 자리로 Result 를 고친다
+    //    (적대적 1회차 A3 가 그 구멍을 열었다).
+    term.rt.editor_extra_selections = try allocator.dupe(editor_selection.Selection, &.{editor_selection.Selection.at(5)});
+    const cur = lay.current.?;
+    // 셀의 **왼쪽 반**을 누른다(3.25) — 오른쪽 반은 다음 경계로 반올림된다(단일 편집기와 같은 규칙).
+    const cx = @as(f64, @floatFromInt(cur.x)) + inset + @as(f64, @floatFromInt(term.rt.editor_merge.?.ours_hit.content_left_px)) + cw * 3.25;
+    const cy = @as(f64, @floatFromInt(cur.y)) + inset + chh * 2.5;
+    try testing.expect(editor_merge_ops.placePaneCaret(fx.session, term, cx, cy));
+    try testing.expect(term.rt.editor_selection == null);
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_extra_selections.len);
+    try testing.expectEqual(editor_merge_ops.MergeSide.current, editor_merge_ops.focusedSide(term).?);
+    const c0 = term.rt.editor_merge.?.pane_caret orelse return error.NoPaneCaret;
+    try testing.expectEqual(@as(usize, 2), c0.sel.focus.row);
+    try testing.expectEqual(@as(usize, 3), c0.sel.focus.byte);
+    // 렌더가 읽는 표: Current 에만, 그 줄에 그 byte. Result 는 selection 이 없어 caret 이 없다.
+    const rows_cur = editor_merge_ops.buildPaneCarets(fx.session, term, .current) orelse return error.NoCaretRows;
+    try testing.expectEqual(@as(usize, 1), rows_cur[2].len);
+    try testing.expectEqual(@as(u32, 3), rows_cur[2][0]);
+    try testing.expect(editor_merge_ops.buildPaneCarets(fx.session, term, .incoming) == null);
+    try testing.expect(editor_merge_ops.buildPaneCarets(fx.session, term, .base) == null);
+    try testing.expect(buildCaretRows(fx.session, term) == null);
+
+    // ⑶ 글자를 쳐도 Result 는 그대로다 — selection 이 없으니 편집 경로가 아무 일도 안 한다.
+    const before = try allocator.dupe(u8, term.rt.editor_doc.?.file.content);
+    defer allocator.free(before);
+    try testing.expect(!insertText(fx.session, term, "x"));
+    try testing.expectEqualStrings(before, term.rt.editor_doc.?.file.content);
+
+    // ⑷ 키는 판에서 움직인다 — 제품 입구로. ↓ 한 번, → 한 번, End, ⌘↑.
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_down });
+    try testing.expectEqual(@as(usize, 3), term.rt.editor_merge.?.pane_caret.?.sel.focus.row);
+    try testing.expectEqual(@as(usize, 3), term.rt.editor_merge.?.pane_caret.?.sel.focus.byte); // 목표 열 유지
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_right });
+    try testing.expectEqual(@as(usize, 4), term.rt.editor_merge.?.pane_caret.?.sel.focus.byte);
+    _ = try fx.session.handleKeyEvent(.{ .key = .end });
+    try testing.expectEqual(term.rt.editor_merge.?.ours_lines[3].len, term.rt.editor_merge.?.pane_caret.?.sel.focus.byte);
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_up, .modifiers = .{ .command = true } });
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_merge.?.pane_caret.?.sel.focus.row);
+    // ↓ · Home · ← → 줄 머리에서 ← 는 **윗줄 끝**으로 간다(단일 편집기·비교 뷰와 같은 규칙).
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_down });
+    _ = try fx.session.handleKeyEvent(.{ .key = .home });
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_merge.?.pane_caret.?.sel.focus.byte);
+    const consumed_before = fx.session.total_app_key_events;
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_left });
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_merge.?.pane_caret.?.sel.focus.row);
+    try testing.expectEqual(term.rt.editor_merge.?.ours_lines[0].len, term.rt.editor_merge.?.pane_caret.?.sel.focus.byte);
+    // 그리고 그 키는 **앱이 소비했다** — 안 소비하면 Result 의 이동 갈래로 흘러 (selection 이 없어) 죽은 키가 된다.
+    try testing.expectEqual(consumed_before + 1, fx.session.total_app_key_events);
+    try testing.expectEqualStrings(before, term.rt.editor_doc.?.file.content); // 이동은 편집이 아니다
+
+    // ⑸ Incoming 을 누르면 초점이 옮겨 간다 — Current 의 표는 비고 Incoming 의 표가 찬다.
+    const inc = lay.incoming.?;
+    const ix = @as(f64, @floatFromInt(inc.x)) + inset + @as(f64, @floatFromInt(term.rt.editor_merge.?.theirs_hit.content_left_px)) + cw * 0.5;
+    const iy = @as(f64, @floatFromInt(inc.y)) + inset + chh * 1.5;
+    try testing.expect(editor_merge_ops.placePaneCaret(fx.session, term, ix, iy));
+    try testing.expectEqual(editor_merge_ops.MergeSide.incoming, editor_merge_ops.focusedSide(term).?);
+    try testing.expect(editor_merge_ops.buildPaneCarets(fx.session, term, .current) == null);
+    try testing.expect(editor_merge_ops.buildPaneCarets(fx.session, term, .incoming) != null);
+    // Base 도 판이다.
+    const bas = lay.base.?;
+    const bx = @as(f64, @floatFromInt(bas.x)) + inset + @as(f64, @floatFromInt(term.rt.editor_merge.?.base_hit.content_left_px)) + cw * 0.5;
+    const by = @as(f64, @floatFromInt(bas.y)) + inset + chh * 0.5;
+    try testing.expect(editor_merge_ops.placePaneCaret(fx.session, term, bx, by));
+    try testing.expectEqual(editor_merge_ops.MergeSide.base, editor_merge_ops.focusedSide(term).?);
+
+    // ⑹′ 판에 초점이 있는 채로 Result 에 여분 커서가 생기면(⌥클릭) 초점은 Result 다 — 글자가 갈 곳이 생겼다.
+    term.rt.editor_extra_selections = try allocator.dupe(editor_selection.Selection, &.{editor_selection.Selection.at(5)});
+    try testing.expect(editor_merge_ops.focusedSide(term) == null);
+    clearExtraSelections(fx.session, term);
+    try testing.expectEqual(editor_merge_ops.MergeSide.base, editor_merge_ops.focusedSide(term).?);
+
+    // ⑹ Result 를 다시 누르면 판 caret 은 잠든다 — 표가 비고, 키는 Result 의 caret 을 움직인다.
+    try testing.expect(beginBodySelection(fx.session, pane_ops.activePane(fx.session), rx, ry, 0));
+    try testing.expect(editor_merge_ops.focusedSide(term) == null);
+    try testing.expect(editor_merge_ops.buildPaneCarets(fx.session, term, .base) == null);
+    const sel_before = term.rt.editor_selection.?.focus;
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_right });
+    try testing.expect(term.rt.editor_selection.?.focus != sel_before);
+}
+
+test "MPN16 판의 caret 이 화면 밖으로 나가면 Result 가 굴러 따라온다 — 대응표의 역방향 (제품 경계)" {
+    // 판은 스스로 못 굴러간다(S3b-M). caret 이 아래로 나가면 `toResult` 로 Result 의 첫 줄을 잡고, 다음
+    // 프레임의 따라 굴리기가 판을 데려온다. ours 는 Result 보다 한 줄 앞서 있어(`EXTRA`) 항등이 아니다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    const cw: f64 = @floatFromInt(fx.session.cell_width_px);
+    const chh: f64 = @floatFromInt(fx.session.cell_height_px);
+    const wide: maru.session.SplitRect = .{ .x = fx.leaf_rect.x, .y = fx.leaf_rect.y, .w = 1200, .h = fx.leaf_rect.h };
+    const term = try mergeCaretFixture(&fx, &dir, "s.txt", allocator);
+    defer editor_merge_ops.clear(fx.session, term);
+    var d0 = appendPaneFrame(fx.session, wide, term) orelse return error.EditorPaneDidNotDraw;
+    defer d0.dl.deinit(allocator);
+    // **전제: 병합 모드에도 스크롤 상한이 있다.** S3b-2~3c 는 여기 낡은 `rt` 값(0)을 실어 Result 가 위로
+    // 묶여 있었다 — 휠도, 이 조각의 역방향 굴리기도 `clampScrollToGeometry` 에서 0 으로 잘렸다.
+    try testing.expect(term.rt.editor_max_top_line > 0);
+    // 그리고 그 상한은 **Result 의 것**이다(Current 는 한 줄 더 길다): 줄바꿈·위젯이 없으니 줄 수 − 보이는 행 수.
+    try testing.expectEqual(term.rt.editor_lines.len - term.rt.editor_hit_rows_len, term.rt.editor_max_top_line);
+    const lay = term.rt.editor_merge_layout orelse return error.MissingMergeLayout;
+    const inset: f64 = @floatFromInt(chrome_editor.frame.content_inset_px);
+    const cur = lay.current.?;
+    const cx = @as(f64, @floatFromInt(cur.x)) + inset + @as(f64, @floatFromInt(term.rt.editor_merge.?.ours_hit.content_left_px)) + cw * 0.5;
+    const cy = @as(f64, @floatFromInt(cur.y)) + inset + chh * 0.5;
+    try testing.expect(editor_merge_ops.placePaneCaret(fx.session, term, cx, cy));
+    const rows = term.rt.editor_merge.?.ours_hit.hit_rows_len;
+    try testing.expect(rows >= 5);
+
+    // ↓ 를 행 수 + 3 번 — 매번 한 프레임을 그려 판의 첫 줄·행 표가 갱신되게 한다(제품에서도 키 사이에 프레임이 있다).
+    var i: usize = 0;
+    while (i < rows + 3) : (i += 1) {
+        _ = try fx.session.handleKeyEvent(.{ .key = .arrow_down });
+        var d = appendPaneFrame(fx.session, wide, term) orelse return error.EditorPaneDidNotDraw;
+        d.dl.deinit(allocator);
+    }
+    const st = term.rt.editor_merge.?;
+    const caret_row = st.pane_caret.?.sel.focus.row;
+    try testing.expectEqual(rows + 3, caret_row);
+    // Result 가 굴렀다(0 이 아니다) — 그리고 caret 이 Current 의 화면 안에 있다.
+    try testing.expect(term.rt.editor_first_line > 0);
+    try testing.expect(caret_row >= st.ours_hit.first_line);
+    try testing.expect(caret_row < st.ours_hit.first_line + st.ours_hit.hit_rows_len);
+    // 그리고 **마지막 행**이다 — ↓ 한 줄에 화면이 한 페이지 튀지 않는다(적대적 1회차 A10).
+    try testing.expectEqual(st.ours_hit.first_line + st.ours_hit.hit_rows_len - 1, caret_row);
+    // 그리고 caret 행 표도 그 줄에 서 있다(렌더가 보는 것).
+    const crows = editor_merge_ops.buildPaneCarets(fx.session, term, .current) orelse return error.NoCaretRows;
+    try testing.expectEqual(@as(usize, 1), crows[caret_row].len);
+
+    // ↑ 를 행 수 번 → 위로 나간다 → caret 은 **첫 행**에 선다(아래로 나갈 때의 마지막 행과 대칭).
+    var j: usize = 0;
+    while (j < rows) : (j += 1) {
+        _ = try fx.session.handleKeyEvent(.{ .key = .arrow_up });
+        var d = appendPaneFrame(fx.session, wide, term) orelse return error.EditorPaneDidNotDraw;
+        d.dl.deinit(allocator);
+    }
+    {
+        const st_up = term.rt.editor_merge.?;
+        const r = st_up.pane_caret.?.sel.focus.row;
+        try testing.expectEqual(@as(usize, 3), r); // rows+3 − rows
+        try testing.expectEqual(st_up.ours_hit.first_line, r); // 첫 행
+    }
+    // 다시 아래로 나가 마지막 행에 세워 둔다(아래 클릭 단언이 굴린 상태를 전제한다).
+    var k: usize = 0;
+    while (k < rows) : (k += 1) {
+        _ = try fx.session.handleKeyEvent(.{ .key = .arrow_down });
+        var d = appendPaneFrame(fx.session, wide, term) orelse return error.EditorPaneDidNotDraw;
+        d.dl.deinit(allocator);
+    }
+
+    // **굴린 뒤의 클릭**은 그 판의 첫 줄을 더해야 맞는 줄이다(행 → 줄 표). 판의 0 행을 누르면 caret 은
+    // `first_line` 줄에 선다 — 0 줄이 아니다.
+    const first_after = st.ours_hit.first_line;
+    try testing.expect(first_after > 0);
+    try testing.expect(editor_merge_ops.placePaneCaret(fx.session, term, cx, cy));
+    try testing.expectEqual(first_after, term.rt.editor_merge.?.pane_caret.?.sel.focus.row);
+
+    // ⌘↑ 로 맨 위 → Result 도 맨 위로 돌아온다.
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_up, .modifiers = .{ .command = true } });
+    var d2 = appendPaneFrame(fx.session, wide, term) orelse return error.EditorPaneDidNotDraw;
+    defer d2.dl.deinit(allocator);
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_first_line);
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_merge.?.pane_caret.?.sel.focus.row);
 }
 
 test "MPN12 세 판이 Result 를 «따라» 굴러간다 — 대응표로, 그리고 문서가 바뀌면 표가 새로 선다 (제품 경계)" {

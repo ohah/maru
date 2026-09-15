@@ -28,6 +28,8 @@ const tab_ops = @import("tab.zig");
 const coretext_frame_builder = @import("../coretext_frame_builder.zig");
 const chrome = maru.chrome;
 const chrome_editor = maru.chrome.components.editor_view;
+const editor_ops = @import("editor.zig");
+const editor_motion = maru.session.editor.motion;
 const testing = std.testing;
 
 /// 병합 모드 Term 하나가 드는 것.
@@ -79,9 +81,12 @@ pub const State = struct {
     map_revision: ?u64 = null,
     /// **판의 고르기 줄**(S3b-3c) — Current·Incoming 각각. 표와 충돌 구간에서 만들므로 표와 같은
     /// 개정에 매이고(`actions_revision`), `freeMaps` 가 함께 놓는다.
-    ours_actions: PaneActions = .{},
-    theirs_actions: PaneActions = .{},
+    ours_hit: PaneHit = .{},
+    theirs_hit: PaneHit = .{},
+    base_hit: PaneHit = .{},
     actions_revision: ?u64 = null,
+    /// 판의 caret(S3b-3b). **초점은 이것만으로 정해지지 않는다** — `focusedSide` 를 보라.
+    pane_caret: ?PaneCaret = null,
     /// 세 판 바이트를 **누구의 것으로 놓을까**. 워커에게서 넘겨받으므로 제품에서는 늘 워커 것이다.
     ///
     /// **상태가 스스로 기억하는 이유**: 자리마다 손으로 적으면 한 곳만 틀려도 heap 이 깨지고, 더
@@ -102,8 +107,8 @@ pub const State = struct {
 /// **그 프레임이 그린 것**이고 Result 의 `editor_hit_rows`·`editor_hit_geom` 과 같은 이유로 렌더가
 /// 굳힌다 — 판은 gutter 폭이 각자 다르고 줄바꿈이 켜지면 행↔줄이 1:1 이 아니라, Result 의 것으로
 /// 대신 재면 누르는 자리가 밀린다(#3728·#3741 과 같은 뿌리 — 계약 §5 S3b-3c 공격 ③).
-pub const PaneActions = struct {
-    /// 판의 줄마다 위젯(없으면 `null`). 길이 = 그 판의 줄 수.
+pub const PaneHit = struct {
+    /// 판의 줄마다 위젯(없으면 `null`). 길이 = 그 판의 줄 수. **Base 판은 늘 비어 있다**(고르기가 없다).
     widgets: []?chrome_editor.content.Widget = &.{},
     /// 이름 하나가 차지하는 열 구간과 그것이 가리키는 구간·선택. `visible_line` 은 **판의 줄** 이다.
     spans: []AppSession.ConflictActionSpan = &.{},
@@ -111,12 +116,28 @@ pub const PaneActions = struct {
     label: []u8 = &.{},
     /// 그 프레임이 이 판에 그린 행들. 배열은 한 번 잡으면 줄이지 않는다(`rows_len` 이 유효 구간).
     hit_rows: []chrome_editor.visual_map.VisualRow = &.{},
+    /// 행 → 판의 줄(접힘이 없으니 `v.line + first_line`). `hit.bodyPoint` 가 행 배열과 같은 축으로 읽는다.
+    hit_lines: []u32 = &.{},
     hit_rows_len: usize = 0,
-    /// 그 프레임의 판 기하 — 본문 원점(창 절대 px)과 본문 왼쪽(gutter 폭), 그리고 판의 첫 줄.
+    /// 그 프레임의 판 기하 — 본문 원점(창 절대 px)과 본문 왼쪽(gutter 폭)·폭, 그리고 판의 첫 줄.
     body_x: i32 = 0,
     body_y: i32 = 0,
     content_left_px: u32 = 0,
+    content_width: u16 = 0,
     first_line: usize = 0,
+    /// caret 행 표(S3b-3b) — 줄마다 그 줄의 caret byte 들. 초점 판만 채운다.
+    caret_rows: [][]const u32 = &.{},
+    caret_byte: [1]u32 = .{0},
+};
+
+/// 세 판 중 하나(S3b-3b). `conflict.PaneSide` 는 고르기가 있는 둘만 알고, caret 은 Base 에도 선다.
+pub const MergeSide = enum { current, incoming, base };
+
+/// 판의 caret(S3b-3b) — **자리는 `RowSelection.focus` 하나다**(비교 뷰와 같은 판단: caret 을 따로 들면
+/// 선택과 두 출처가 된다). 선택은 이 조각에 없어 anchor 는 늘 focus 와 같다.
+pub const PaneCaret = struct {
+    side: MergeSide,
+    sel: maru.session.editor.selection.RowSelection,
 };
 
 /// 이 Term 이 병합 모드인가. **`kind` 로는 못 가른다**(병합 Term 도 `.editor` 다) — 그것이 §7 ④ 의
@@ -279,7 +300,7 @@ pub fn ensureMaps(self: *AppSession, term: *Term) void {
 /// **자리는 대응표의 «짝»이다**(`anchorOnSide` — 계약 §5 S3b-3c 공격 ①·②): 구간의 그 쪽 본문 첫 줄의
 /// 짝 위, 본문이 비었으면 구간 다음 줄의 짝 위, 그것도 없으면 그 구간은 판에 줄이 없다(Result 줄이
 /// 남는다). 표가 없는 판(too_large)도 마찬가지다.
-pub fn ensurePaneActions(self: *AppSession, term: *Term) void {
+pub fn ensurePaneHit(self: *AppSession, term: *Term) void {
     const state = &(term.rt.editor_merge orelse return);
     if (!state.ready) return;
     const rev = state.map_revision orelse return; // 표가 아직 없다 — 줄도 없다
@@ -291,13 +312,13 @@ pub fn ensurePaneActions(self: *AppSession, term: *Term) void {
     state.actions_revision = rev;
     const regions = term.rt.editor_conflicts;
     if (regions.len == 0) return;
-    buildPaneActions(self, &state.ours_actions, .current, state.map_ours, state.ours_lines.len, regions);
-    buildPaneActions(self, &state.theirs_actions, .incoming, state.map_theirs, state.theirs_lines.len, regions);
+    buildPaneHit(self, &state.ours_hit, .current, state.map_ours, state.ours_lines.len, regions);
+    buildPaneHit(self, &state.theirs_hit, .incoming, state.map_theirs, state.theirs_lines.len, regions);
 }
 
-fn buildPaneActions(
+fn buildPaneHit(
     self: *AppSession,
-    pa: *PaneActions,
+    pa: *PaneHit,
     side: conflict.PaneSide,
     map: ?merge_map.Map,
     line_count: usize,
@@ -358,16 +379,14 @@ fn buildPaneActions(
 
 /// 그 프레임이 판에 그린 행들과 기하를 굳힌다(S3b-3c 공격 ③ — Result 의 `storeHitRows` 와 같은 이유·
 /// 같은 순간). 배열은 한 번 잡으면 줄이지 않는다.
-pub fn storePaneHits(self: *AppSession, term: *Term, side: conflict.PaneSide, rows: []const chrome_editor.visual_map.VisualRow, first_line: usize) void {
+pub fn storePaneHits(self: *AppSession, term: *Term, side: MergeSide, rows: []const chrome_editor.visual_map.VisualRow, first_line: usize) void {
     const state = &(term.rt.editor_merge orelse return);
     const lay = term.rt.editor_merge_layout orelse return;
-    const pa = switch (side) {
-        .current => &state.ours_actions,
-        .incoming => &state.theirs_actions,
-    };
+    const pa = paneHitOf(state, side);
     const rect = (switch (side) {
         .current => lay.current,
         .incoming => lay.incoming,
+        .base => lay.base,
     }) orelse {
         // 접힌 판은 클릭을 받지 않는다. **등가 변이**(적대적 3회차 C6): 이 비움을 지워도 답이 같다 —
         // `paneActionAtPoint` 가 사각이 `null` 인 판을 아예 안 본다. 그래도 비우는 이유는 낡은 행 표를
@@ -380,25 +399,235 @@ pub fn storePaneHits(self: *AppSession, term: *Term, side: conflict.PaneSide, ro
             pa.hit_rows_len = 0;
             return;
         };
+        const grown_lines = self.allocator.alloc(u32, rows.len) catch {
+            self.allocator.free(grown);
+            pa.hit_rows_len = 0;
+            return;
+        };
         if (pa.hit_rows.len > 0) self.allocator.free(pa.hit_rows);
+        if (pa.hit_lines.len > 0) self.allocator.free(pa.hit_lines);
         pa.hit_rows = grown;
+        pa.hit_lines = grown_lines;
     }
     @memcpy(pa.hit_rows[0..rows.len], rows);
+    // 행 → 줄. 판에는 접힘이 없어 상대 행에 첫 줄을 더한 것이 곧 줄이다(Result 의 `storeHitRows` 와 같은 축).
+    for (rows, 0..) |v, i| pa.hit_lines[i] = @intCast(@min(@as(usize, v.line) + first_line, std.math.maxInt(u32)));
     pa.hit_rows_len = rows.len;
     pa.first_line = first_line;
     // **기하는 그 판의 것으로** — gutter 폭은 그 판의 줄 수에서 나온다(Result 와 자릿수가 다를 수 있다).
     const inset = chrome_editor.frame.content_inset_px;
     const inner_w = rect.w -| inset * 2;
     const inner_h = rect.h -| inset * 2;
-    const lines_len = switch (side) {
-        .current => state.ours_lines.len,
-        .incoming => state.theirs_lines.len,
-    };
+    const lines_len = sideLines(state, side).len;
     const m = chrome_editor.diff_frame.sideMetrics(inner_w, inner_h, @intCast(self.cell_width_px), @intCast(self.cell_height_px));
     const geom = chrome_editor.geometry.compute(m.total_cols, lines_len, .{});
     pa.body_x = rect.x + @as(i32, @intCast(inset));
     pa.body_y = rect.y + @as(i32, @intCast(inset));
     pa.content_left_px = @as(u32, geom.contentLeft()) * @as(u32, self.cell_width_px);
+    pa.content_width = geom.content.width;
+}
+
+fn paneHitOf(state: *State, side: MergeSide) *PaneHit {
+    return switch (side) {
+        .current => &state.ours_hit,
+        .incoming => &state.theirs_hit,
+        .base => &state.base_hit,
+    };
+}
+
+pub fn sideLines(state: *const State, side: MergeSide) []const []const u8 {
+    return switch (side) {
+        .current => state.ours_lines,
+        .incoming => state.theirs_lines,
+        .base => state.base_lines,
+    };
+}
+
+fn sideMap(state: *const State, side: MergeSide) ?merge_map.Map {
+    return switch (side) {
+        .current => state.map_ours,
+        .incoming => state.map_theirs,
+        .base => state.map_base,
+    };
+}
+
+/// **초점 판**(S3b-3b — 계약 §5 S3b-3b): 판 caret 이 있고 **Result 의 selection 이 없을 때만** 그 판이다.
+/// Result 를 누르거나 검색·이동이 Result 에 selection 을 세우면 판 caret 은 저절로 잠든다 — 그래서
+/// Result 의 편집 경로 33 곳에 술어를 끼우지 않아도 「caret 은 판에, 글자는 Result 에」가 생기지 않는다
+/// (selection 이 없으면 그 경로들은 이미 아무 일도 안 한다).
+pub fn focusedSide(term: *const Term) ?MergeSide {
+    const state = term.rt.editor_merge orelse return null;
+    const c = state.pane_caret orelse return null;
+    if (term.rt.editor_selection != null) return null;
+    // **여분 커서도 selection 이다** — primary 가 없어도 여분이 남아 있으면 `insertText` 가 그 자리로
+    // Result 를 고친다(적대적 1회차 A3: 판 클릭이 여분을 안 지워도 초록이었다 — 픽스처에 여분이 없었다).
+    if (term.rt.editor_extra_selections.len > 0) return null;
+    return c.side;
+}
+
+/// 판 본문의 한 점(창 절대 px)이 가리키는 자리. 그 판의 행 표·기하로 중립의 `hit.bodyPoint` 를 지난다.
+pub const PanePoint = struct { side: MergeSide, line: u32, byte: u32 };
+pub fn hitTestPaneBody(term: *const Term, x_px: f64, y_px: f64) ?PanePoint {
+    const state = term.rt.editor_merge orelse return null;
+    const lay = term.rt.editor_merge_layout orelse return null;
+    if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return null;
+    inline for (.{ .{ lay.current, state.ours_hit, MergeSide.current }, .{ lay.incoming, state.theirs_hit, MergeSide.incoming }, .{ lay.base, state.base_hit, MergeSide.base } }) |c| {
+        const rect: ?chrome.draw.Rect = c[0];
+        const pa: PaneHit = c[1];
+        if (rect) |r| if (insideRect(r, x_px, y_px)) {
+            const n = pa.hit_rows_len;
+            if (n == 0) return null;
+            const lines = sideLines(&state, c[2]);
+            const p = chrome_editor.hit.bodyPoint(.{
+                .body_x = pa.body_x,
+                .body_y = pa.body_y,
+                .content_left_px = pa.content_left_px,
+                .content_width = pa.content_width,
+                .cell_w_px = term.rt.editor_hit_geom.cell_w_px,
+                .cell_h_px = term.rt.editor_hit_geom.cell_h_px,
+                .tab_width = term.rt.editor_hit_geom.tab_width,
+            }, pa.hit_rows[0..n], pa.hit_lines[0..n], lines, x_px, y_px) orelse return null;
+            if (p.line >= lines.len) return null;
+            return .{ .side = c[2], .line = @intCast(p.line), .byte = @intCast(@min(p.byte_in_line, lines[p.line].len)) };
+        };
+    }
+    return null;
+}
+
+/// 판을 눌러 caret 을 놓는다(S3b-3b). **Result 의 selection 을 비운다** — 그것이 초점이다(`focusedSide`).
+pub fn placePaneCaret(self: *AppSession, term: *Term, x_px: f64, y_px: f64) bool {
+    const p = hitTestPaneBody(term, x_px, y_px) orelse return false;
+    const state = &(term.rt.editor_merge orelse return false);
+    state.pane_caret = .{ .side = p.side, .sel = maru.session.editor.selection.RowSelection.at(.{ .row = p.line, .byte = p.byte }) };
+    term.rt.editor_selection = null;
+    if (term.rt.editor_extra_selections.len > 0) {
+        self.allocator.free(term.rt.editor_extra_selections);
+        term.rt.editor_extra_selections = &.{};
+    }
+    self.metal_dirty = true;
+    return true;
+}
+
+/// 초점 판의 caret 을 옮긴다 — 비교 뷰의 `diffMove` 와 같은 `(행, byte)` 축의 이동 일습. 편집은 없다.
+/// 화면 밖으로 나가면 **Result 를 굴린다**(`toResult`) — 판은 스스로 못 굴러간다(S3b-M).
+pub fn paneMove(self: *AppSession, term: *Term, how: editor_ops.Motion, extend: bool) bool {
+    const side = focusedSide(term) orelse return false;
+    const state = &(term.rt.editor_merge orelse return false);
+    const texts = sideLines(state, side);
+    if (texts.len == 0) return false;
+    const c = &state.pane_caret.?;
+    const RowPos = maru.session.editor.selection.RowPos;
+    var sel = c.sel;
+    const cur_row = @min(sel.focus.row, texts.len - 1);
+    const cur_byte = @min(sel.focus.byte, texts[cur_row].len);
+    const pa = paneHitOf(state, side);
+    const rows: usize = @max(pa.hit_rows_len, 1);
+
+    var pcm = editor_ops.productColumnMap(term);
+    const map = pcm.map();
+    const keeps_goal = switch (how) {
+        .line_up, .line_down, .page_up, .page_down => true,
+        else => false,
+    };
+    if (keeps_goal and sel.goal == .none) {
+        sel.goal = editor_motion.goalAt(texts[cur_row], editor_ops.rowLine(texts[cur_row]), cur_byte, map);
+    }
+    const next: RowPos = switch (how) {
+        .char_left => if (cur_byte > 0)
+            .{ .row = cur_row, .byte = editor_motion.prevCharBoundary(texts[cur_row], cur_byte) }
+        else if (cur_row > 0)
+            .{ .row = cur_row - 1, .byte = texts[cur_row - 1].len }
+        else
+            .{ .row = 0, .byte = 0 },
+        .char_right => if (cur_byte < texts[cur_row].len)
+            .{ .row = cur_row, .byte = editor_motion.nextCharBoundary(texts[cur_row], cur_byte) }
+        else if (cur_row + 1 < texts.len)
+            .{ .row = cur_row + 1, .byte = 0 }
+        else
+            .{ .row = cur_row, .byte = cur_byte },
+        .word_left => if (cur_byte > 0)
+            .{ .row = cur_row, .byte = editor_motion.wordLeft(texts[cur_row], cur_byte) }
+        else if (cur_row > 0)
+            .{ .row = cur_row - 1, .byte = texts[cur_row - 1].len }
+        else
+            .{ .row = 0, .byte = 0 },
+        .word_right => if (cur_byte < texts[cur_row].len)
+            .{ .row = cur_row, .byte = editor_motion.wordRight(texts[cur_row], cur_byte) }
+        else if (cur_row + 1 < texts.len)
+            .{ .row = cur_row + 1, .byte = 0 }
+        else
+            .{ .row = cur_row, .byte = cur_byte },
+        .line_start => .{ .row = cur_row, .byte = editor_motion.lineStartSmart(texts[cur_row], editor_ops.rowLine(texts[cur_row]), cur_byte) },
+        .line_end => .{ .row = cur_row, .byte = texts[cur_row].len },
+        .line_up, .line_down, .page_up, .page_down => blk: {
+            const step: usize = if (how == .line_up or how == .line_down) 1 else rows;
+            const up = (how == .line_up or how == .page_up);
+            const row = if (up) cur_row -| step else @min(cur_row + step, texts.len - 1);
+            break :blk .{ .row = row, .byte = editor_motion.offsetForGoal(texts[row], editor_ops.rowLine(texts[row]), sel.goal, map) };
+        },
+        .doc_start => .{ .row = 0, .byte = 0 },
+        .doc_end => .{ .row = texts.len - 1, .byte = texts[texts.len - 1].len },
+        .bracket_match => return false,
+    };
+    if (!keeps_goal) sel.clearGoal();
+    // **선택은 이 조각에 없다** — `extend` 는 받되 늘리지 않는다(계약: 드래그·Shift 선택은 뺐다).
+    _ = extend;
+    const goal = sel.goal;
+    sel = maru.session.editor.selection.RowSelection.at(next);
+    sel.goal = goal;
+    c.sel = sel;
+    scrollResultForPaneCaret(term, side, next.row);
+    self.metal_dirty = true;
+    return true;
+}
+
+/// caret 이 판의 화면 밖이면 Result 를 굴려 따라오게 한다. 판의 첫 줄·행 수는 **마지막 프레임**의 것이다
+/// (다음 프레임의 따라 굴리기가 `toSide` 로 새 첫 줄을 낸다).
+fn scrollResultForPaneCaret(term: *Term, side: MergeSide, row: usize) void {
+    const state = &(term.rt.editor_merge orelse return);
+    const pa = paneHitOf(state, side);
+    const rows = pa.hit_rows_len;
+    if (rows == 0) return;
+    const m = sideMap(state, side) orelse return;
+    const first = pa.first_line;
+    // 짝이 없고 앞 짝도 없으면(판 맨 위의 판만의 줄) Result 의 맨 위다 — `null` 로 두면 ⌘↑ 가 안 올라간다.
+    const result_line = m.toResult(@intCast(@min(row, std.math.maxInt(u32)))) orelse 0;
+    // 위로 나가면 caret 이 **첫 행**, 아래로 나가면 **마지막 행**에 서게 한다 — ↓ 한 줄에 화면이 한 페이지
+    // 튀지 않는다(적대적 1회차 A10: 「보인다」만 재면 맨 위 행으로 튀어도 초록이었다).
+    const want: ?usize = if (row < first)
+        result_line
+    else if (row >= first + rows)
+        @as(usize, result_line) -| (rows - 1)
+    else
+        null;
+    const target = want orelse return;
+    const clamped = @min(target, term.rt.editor_max_top_line);
+    if (clamped != term.rt.editor_first_line) {
+        term.rt.editor_first_line = clamped;
+        term.rt.editor_first_piece = 0;
+    }
+}
+
+/// 렌더가 읽는 caret 행 표(S3b-3b) — 초점 판만 채우고, 나머지는 `null`(caret 없음).
+pub fn buildPaneCarets(self: *AppSession, term: *Term, side: MergeSide) ?[]const []const u32 {
+    const focused = focusedSide(term) orelse return null;
+    if (focused != side) return null;
+    const state = &(term.rt.editor_merge orelse return null);
+    const texts = sideLines(state, side);
+    if (texts.len == 0) return null;
+    const c = state.pane_caret.?;
+    if (c.sel.focus.row >= texts.len) return null;
+    const pa = paneHitOf(state, side);
+    if (pa.caret_rows.len < texts.len) {
+        const grown = self.allocator.alloc([]const u32, texts.len) catch return null;
+        if (pa.caret_rows.len > 0) self.allocator.free(pa.caret_rows);
+        pa.caret_rows = grown;
+    }
+    const rows = pa.caret_rows[0..texts.len];
+    for (rows) |*r| r.* = &.{};
+    pa.caret_byte[0] = @intCast(@min(c.sel.focus.byte, texts[c.sel.focus.row].len));
+    rows[c.sel.focus.row] = pa.caret_byte[0..1];
+    return rows;
 }
 
 /// 판의 고르기 줄에서 **한 이름**을 눌렀나(창 절대 px). Result 의 `conflictActionAtPoint` 와 같은 모양이되
@@ -409,9 +638,9 @@ pub fn paneActionAtPoint(term: *Term, x_px: f64, y_px: f64) ?AppSession.Conflict
     if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return null;
     const cw: f64 = @floatFromInt(@max(term.rt.editor_hit_geom.cell_w_px, 1));
     const ch: f64 = @floatFromInt(@max(term.rt.editor_hit_geom.cell_h_px, 1));
-    inline for (.{ .{ lay.current, state.ours_actions }, .{ lay.incoming, state.theirs_actions } }) |c| {
+    inline for (.{ .{ lay.current, state.ours_hit }, .{ lay.incoming, state.theirs_hit } }) |c| {
         const rect: ?chrome.draw.Rect = c[0];
-        const pa: PaneActions = c[1];
+        const pa: PaneHit = c[1];
         if (rect) |r| if (insideRect(r, x_px, y_px)) {
             if (pa.hit_rows_len == 0 or pa.spans.len == 0) return null;
             const rel_y = y_px - @as(f64, @floatFromInt(pa.body_y));
@@ -441,7 +670,7 @@ fn insideRect(rect: chrome.draw.Rect, x_px: f64, y_px: f64) bool {
         y >= rect.y and y < rect.y + @as(i64, @intCast(rect.h));
 }
 
-fn freePaneActions(self: *AppSession, pa: *PaneActions) void {
+fn freePaneHit(self: *AppSession, pa: *PaneHit) void {
     if (pa.widgets.len > 0) self.allocator.free(pa.widgets);
     if (pa.spans.len > 0) self.allocator.free(pa.spans);
     if (pa.label.len > 0) self.allocator.free(pa.label);
@@ -453,15 +682,19 @@ fn freePaneActions(self: *AppSession, pa: *PaneActions) void {
 /// 판의 고르기 줄을 놓는다. **행 표는 남긴다** — 그것은 개정이 아니라 프레임에 매이고, 다음 프레임이
 /// 덮어 쓴다(`clear` 만 `freePaneHits` 로 함께 놓는다).
 fn freeActions(self: *AppSession, state: *State) void {
-    freePaneActions(self, &state.ours_actions);
-    freePaneActions(self, &state.theirs_actions);
+    freePaneHit(self, &state.ours_hit);
+    freePaneHit(self, &state.theirs_hit);
     state.actions_revision = null;
 }
 
 fn freePaneHits(self: *AppSession, state: *State) void {
-    inline for (.{ &state.ours_actions, &state.theirs_actions }) |pa| {
+    inline for (.{ &state.ours_hit, &state.theirs_hit, &state.base_hit }) |pa| {
         if (pa.hit_rows.len > 0) self.allocator.free(pa.hit_rows);
+        if (pa.hit_lines.len > 0) self.allocator.free(pa.hit_lines);
+        if (pa.caret_rows.len > 0) self.allocator.free(pa.caret_rows);
         pa.hit_rows = &.{};
+        pa.hit_lines = &.{};
+        pa.caret_rows = &.{};
         pa.hit_rows_len = 0;
     }
 }

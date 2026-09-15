@@ -12,6 +12,8 @@
 - **legacy centred symbol**(◧ U+25E7·⚙ U+2699 — **터미널 콘텐츠 전용**) → ink-center. 래스터의 `center_symbol`은 이 **두 codepoint만** 매칭한다. maru 헤더 아이콘은 2026-08 이후 등록 PUA라 이 역할이 아니라 합성(synthesized) 경로다.
 - **synthesized**(box/block/powerline/braille/legacy + **등록 chrome 아이콘**(maru PUA) — `glyph_id==0`) → zig 렌더러가 절차적으로 그린다(slot=셀폭, 타일링). 이 경로(rasterize-glyph) 자체에 **안 온다** — chrome 아이콘은 `maru_is_synthesized_glyph`로 분류돼 합성되므로 header-icon 게이트가 아니다.
 
+- **kitty unicode placeholder**(U+10EEEE) → **글리프가 아니다 — 그리지 않는다.** 그 셀의 codepoint·전경색·결합문자는 「어느 이미지의 어느 타일을 여기 놓아라」는 **좌표**이고(kitty graphics protocol, "Unicode placeholders"), 그림은 이미지 패스가 `snapshot.cells`를 직접 읽어 타일 quad로 만든다. 그래서 `draw_list`가 그 셀을 셰이퍼에 넘기기 전에 **공백으로 바꾸고 결합문자도 싣지 않는다**(배경색은 그 칸의 칠이라 남긴다). 안 그러면 폰트에 없는 U+10EEEE가 tofu 박스로 찍혀 **이미지가 늦거나 유실될 때 화면이 통째로 쓰레기가 된다** — 실측(2026-09-15): tmux 안 terminal-browser의 이미지가 원격 투영 상한에 막히자 그 pane 전체가 박스 문자로 덮였다. 「이미지가 못 오는 것」과 「그 자리에 쓰레기를 그리는 것」은 다른 결함이고, 이 역할 규칙이 뒤엣것을 막는다.
+
 핵심: **텍스트는 어떤 폰트에서도 스케일/ink-center되지 않는다(correctness by construction).** 셀에 맞춤(fit) 또는 중앙정렬(center)은 역할로 명시된 비-텍스트 글리프에만 적용한다.
 
 ## 배경: 왜 역할 기반인가 (해결한 버그)

@@ -116,6 +116,21 @@ pub fn formatLine(buf: []u8, d: Snapshot) ![]const u8 {
 /// 어림했다가 판정자가 256 을 보여 줬다(접두 89 B + u64 최대 20 자리 × 7 + 구분자).
 pub const line_worst_case_bytes: usize = 256;
 
+/// 정상 흐름 요약 — **손실 유무와 무관하게 5 초마다** 찍는 짧은 줄. 「이 줄이 없다」가 곧 「계측이 안 돈다」로
+/// 읽히게 하려는 것이다. 적대적 검증에서 정확히 그 함정에 빠졌다 — 손실을 일으켰는데 경고줄이 0 이라
+/// 「손실 없음」인 줄 알았더니 실제로는 앱이 죽어 틱 자체가 안 돌고 있었다. 손실 칸은 여기 없다 — 그건
+/// `formatLine` 의 경고줄이 따로 든다.
+pub fn formatFlowLine(buf: []u8, d: Snapshot) ![]const u8 {
+    return std.fmt.bufPrint(
+        buf,
+        "image flow: complete={d} uploaded={d} skip_same_gen={d}",
+        .{ d.received_complete, d.uploaded, d.upload_skipped_same_generation },
+    );
+}
+
+/// `formatFlowLine` 의 가장 긴 줄. **실측값** — 어림(101)을 넣고 판정자가 106 을 보여 줬다.
+pub const flow_line_worst_case_bytes: usize = 106;
+
 test "정상 흐름(받고·올리고·캐시 적중)은 loss 가 아니다 — 부정 대조" {
     const before = snapshot();
     recordReceivedComplete();
@@ -133,6 +148,21 @@ test "사라짐 네 칸은 각각 loss 다 — 하나라도 빠지면 그 칸은
         record();
         try std.testing.expect(snapshot().delta(before).anyLoss());
     }
+}
+
+test "흐름 줄의 가장 긴 길이는 실측값과 같다" {
+    var buf: [256]u8 = undefined;
+    const max: Snapshot = .{
+        .received_complete = std.math.maxInt(u64),
+        .dropped_no_head = 0,
+        .dropped_order = 0,
+        .dropped_oom = 0,
+        .placement_without_blob = 0,
+        .uploaded = std.math.maxInt(u64),
+        .upload_skipped_same_generation = std.math.maxInt(u64),
+    };
+    const line = try formatFlowLine(&buf, max);
+    try std.testing.expectEqual(flow_line_worst_case_bytes, line.len);
 }
 
 test "가장 긴 줄의 길이는 실측값과 같다" {

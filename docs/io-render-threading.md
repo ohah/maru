@@ -11,7 +11,7 @@
 |---|---|---|
 | §1~§7 | 이 문서 | 동기·현재 모델·목표 모델·시퀀싱·리스크·테스트 전략·비목표 |
 | §10 · §11 | [present cadence](io-render-present.md) | 프레임 페이싱 결정, chrome 독립 present와 sync(2026) 게이트 분리 |
-| §8 · §9 · §12 | [Phase 2~4 계획](plans/io-render-threading.md) | 단일 writer I/O 스레드, 코어 mutate 위임, 렌더 read 스냅샷 통합 |
+| §8 · §9 · §12 · §13 | [Phase 2~4 계획](plans/io-render-threading.md) | 단일 writer I/O 스레드, 코어 mutate 위임, 렌더 read 스냅샷 통합, 코어 락 양보(기아 방지) |
 
 ## 1. 동기 (증명된 결함)
 
@@ -56,6 +56,7 @@
 
 **동기화 핵심**:
 - **per-surface mutex**가 `TerminalCore` 접근을 보호한다(write는 I/O 스레드, snapshot은 렌더 스레드). 락은 **양쪽 모두 짧게**만 잡는다: I/O는 `core.write` 동안, 렌더는 `renderSnapshot`+`buildDrawList`(dirty cell 복사) 동안. shaping·atlas·GPU는 락 밖 DrawList 복사본에서 한다.
+- **짧은 보유 ≠ 짧은 대기 — 락은 불공정하다**(2026-09-15 실측으로 추가): `std.Io.Mutex`는 3상태 futex 락이라 풀고 바로 다시 잡는 스레드가 잠든 대기자를 이긴다. I/O가 청크(~1KB, 보유 ~0.13ms)마다 재잠금하는 폭포에서 렌더는 1회 잠금에 보유의 **60~110배**(중앙 7~14ms·최대 20~36ms)를 기다렸다. 그래서 «짧게 잡는다»만으로는 부족하고 **I/O가 청크 경계마다 대기자에게 차례를 넘긴다**(`CoreHandoff` — [Phase 2~4 계획 §13](plans/io-render-threading.md)). 보유를 더 잘게 쪼개는 건 재잠금 빈도만 늘려 **역효과**다.
 - **zero-copy snapshot race 해소**: 현재 snapshot이 코어 메모리를 alias하므로, 렌더는 락을 잡은 채 `buildDrawList`까지 끝내 **복사를 완료**한 뒤 언락한다(`buildDrawList`는 이미 dirty cell을 새 `DrawCell` 리스트로 복사 — 그 구간만 락). 락 밖에서 코어 메모리를 가리키는 슬라이스를 들고 있지 않는다.
 - **질의 응답 write가 I/O 스레드로 이동** → 렌더·출력 혼잡과 무관하게 즉시(ms) 나간다. 결함의 직접 해소.
 - **PTY write 단일화**: 입력 write가 두 곳(키보드/paste=메인, 응답=I/O)에서 일어나므로, `PtySession`에 **write mutex**를 두거나 모든 입력을 I/O 스레드 큐로 위임해 직렬화한다(부분 write·인터리브 방지).
@@ -77,10 +78,10 @@
 ## 5. 리스크 & 미해결 (정직)
 
 - **lifecycle/close가 가장 위험**: 현재 close는 reader가 `readEvent`에 잡힌 채 self-pipe wake로 깨우는 delicate한 순서다([PTY 운영 모델] §session close). I/O 스레드가 코어까지 소유하면 "코어 mutate 중 close"가 새 race surface다. 락 + closing 플래그로 막고, core.deinit을 reader join 뒤로 강제한다. [[devsession-undefined-test-field-trap]]식 UB를 경계 테스트로 잡는다.
-- **lock 보유 시간(측정 완료 — 더블버퍼 불필요)**: 렌더가 `buildDrawList`까지 락을 잡으면 그동안 I/O가 대기한다. **실측**(`tools/perf` `render_build_drawlist`, ReleaseFast, 300×90=27,000셀 full-dirty + 전 셀 underline의 락-보유 최악): 회당 **~0.12ms**(200회 24ms). 기본 60Hz tick(16.7ms)의 **~0.72%**라 I/O 대기로 무시 가능 — 원결함(4.2초)은 blocking **write**였지 복사가 아니었으므로 이 복사가 그걸 되살리지 않는다. 따라서 **더블버퍼 스냅샷은 불필요**(현 단일 스냅샷 유지). `render_build_drawlist` perf 게이트(200회/2s, `mise run perf`)가 가장 느린 CI 러너(회당 ~4ms)에서도 ~2.5x 여유로 통과하며 셀당 비용·여분 할당 회귀를 잡는다.
+- **lock 보유 시간(측정 완료 — 더블버퍼 불필요)**: 렌더가 `buildDrawList`까지 락을 잡으면 그동안 I/O가 대기한다. **실측**(`tools/perf` `render_build_drawlist`, ReleaseFast, 300×90=27,000셀 full-dirty + 전 셀 underline의 락-보유 최악): 회당 **~0.12ms**(200회 24ms). 기본 60Hz tick(16.7ms)의 **~0.72%**라 I/O 대기로 무시 가능 — 원결함(4.2초)은 blocking **write**였지 복사가 아니었으므로 이 복사가 그걸 되살리지 않는다. 따라서 **더블버퍼 스냅샷은 불필요**(현 단일 스냅샷 유지). **이 결론의 한계(2026-09-15 정정)**: 여기서 잰 것은 렌더→I/O 방향의 *보유*뿐이고, I/O→렌더 방향의 *대기*는 재지 않았다. 그 방향은 보유가 0.13ms여도 대기가 수십 ms였다(불공정 락 기아, §3 항목·[계획 §13](plans/io-render-threading.md)). 더블버퍼가 불필요하다는 결론 자체는 유지된다 — 문제는 임계 구역의 길이가 아니라 차례였고, 더블버퍼는 차례를 바꾸지 않는다. `render_build_drawlist` perf 게이트(200회/2s, `mise run perf`)가 가장 느린 CI 러너(회당 ~4ms)에서도 ~2.5x 여유로 통과하며 셀당 비용·여분 할당 회귀를 잡는다.
 - **scroll 합성(측정 완료)**: `renderSnapshot`은 스크롤 시 `viewport_cells`를 lazy 할당·합성한다(첫 프레임 1회 할당, 이후 rows×cols memcpy). 이 경로도 렌더 스레드가 락 안에서 하므로, I/O 스레드의 write와 같은 락으로 안전. **실측**(`render_build_scrolled`, 같은 300×90 스크롤 뷰): 회당 **~0.10ms**(200회 19ms) — 바닥 full-dirty 최악보다도 작아(스크롤 콘텐츠가 sparse) 상한에 안 든다. 할당은 첫 프레임 1회뿐이라 정상-상태 락-보유엔 안 들어간다.
 - **multi-surface 비용**: 탭/split마다 I/O 스레드 1개(이미 reader 스레드 N개 존재 — 새 스레드 증가 아님). 스레드 수는 reader와 동일하게 유지.
-- **backpressure 의미 변화**: 큐가 바이트 운반에서 신호로 바뀌면, 기존 bounded-queue backpressure([PTY 운영 모델] §backpressure)를 I/O 스레드가 직접 처리(읽은 즉시 core.write)로 대체. "출력 안 버림" 계약은 유지하되 메커니즘이 read→write 직결로 단순해진다.
+- **backpressure 의미 변화**: 큐가 바이트 운반에서 신호로 바뀌면, 기존 bounded-queue backpressure([PTY 운영 모델] §backpressure)를 I/O 스레드가 직접 처리(읽은 즉시 core.write)로 대체. "출력 안 버림" 계약은 유지하되 메커니즘이 read→write 직결로 단순해진다. **주의**: «읽은 즉시»는 pty가 주는 단위(macOS ~1KB)마다 lock/unlock이라는 뜻이다 — 이 빈도가 §3의 불공정 락 기아를 만든다. 청크를 더 잘게 나누지 말 것(Ghostty는 gather 단계가 64KB로 모은다 — 빈도 자체를 줄이는 별도 축, §13 범위 밖).
 - **테스트 결정성**: 스레드 경합이 늘면 deterministic command 테스트가 흔들릴 수 있다([PTY 운영 모델] §왜 reader thread). 락·신호 계약을 단위 테스트로 고정하고, headless 경로는 동기 drain 옵션을 유지(테스트는 단일 스레드로 코어 검증 가능하게).
 
 ## 6. 테스트 전략 (검증 가능성)

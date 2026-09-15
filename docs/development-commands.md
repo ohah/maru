@@ -190,6 +190,10 @@ zig build test > /tmp/t.log 2>&1;  mise run test-verdict /tmp/t.log
   - 진단 전용 env: `MARU_FT_WINDOW_SIZE=WxH`(초기 창 크기 pt). 기본 960×600에서는 큰 창에서만 드러나는
     프레임 비용이 **재현되지 않는다** — 실환경 크기를 줘야 한다. (줄끝 trim·이미지 버퍼 재사용은 2026-09-14
     제품 동작으로 승격돼 스위치가 없다 — §10.6.)
+  - **락 경합 두 방향**: SLOW 줄 아래 `└ lockCore 대기 합/최대/횟수`(메인이 코어 락을 기다린 시간)와
+    `└ 리더 core.write 보유 합/최대/청크 | 리더 락대기`(I/O 스레드가 쥔·기다린 시간)가 따로 찍힌다. **보유가
+    짧은데 대기가 길면** 잠금 길이가 아니라 차례(불공정 락 기아) 문제다 — 청크를 더 쪼개지 말 것.
+    읽는 법과 실측은 [Phase 2~4 계획 §13](plans/io-render-threading.md).
 - macOS visible window smoke 실행: `mise run macos-window-smoke` (창이 너무 빨리 닫히면 `MARU_WINDOW_SMOKE_MS`로 노출 시간을 ms 단위로 늘려 수동 확인한다. 기본 1500ms, 상한 600000ms)
 - macOS window smoke 계약 테스트: `mise run test-macos-window-smoke`
 - macOS Metal 제품 atlas shader sampling smoke 실행: `mise run macos-metal-smoke` (창이 너무 빨리 닫히면 `MARU_METAL_SMOKE_MS`로 노출 시간을 ms 단위로 늘려 수동 확인한다. 기본 1500ms, 상한 600000ms)

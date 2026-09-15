@@ -47,6 +47,17 @@ pub const CoreHandoff = struct {
     /// 그 요구자가 잡았다 놓을 때까지(또는 타임아웃) 잔다 — 불공정 mutex 가 스스로는 절대 안 하는 차례
     /// 넘기기다. 요구자가 없으면 load 1회로 끝난다.
     pub fn yieldToDemand(self: *CoreHandoff, io: std.Io) void {
+        self.yieldToDemandFor(io, handoff_timeout_ns);
+    }
+
+    /// 같은 일을 하되 **기다릴 상한을 받는다.** 제품은 위의 `yieldToDemand` 로 상수를 넘기고, 이 갈래는
+    /// 판정자가 쓴다.
+    ///
+    /// **왜 인자로 뺐나.** 「요구자가 없으면 안 잔다」를 시간으로 증명하려면 「잤을 때」와 「안 잤을 때」를
+    /// 갈라야 하는데, 상수 상한이 1 ms 라 그 신호가 **스케줄러 잡음보다 작다**(스레드 하나가 밀리면 수~수십
+    /// ms 다). 상한을 크게 잡으면 「잤다」가 초 단위가 되어 잡음과 자릿수가 갈린다 — 선을 옮기는 것이
+    /// 아니라 **신호를 키우는** 것이다(docs/performance-budget.md §원칙: 둘이 겹치면 벽시계를 쓰지 않는다).
+    pub fn yieldToDemandFor(self: *CoreHandoff, io: std.Io, timeout_ns: i64) void {
         if (self.demand.load(.monotonic) == 0) return;
         // 세대를 먼저 읽고 요구를 다시 확인한다: 그 사이 요구자가 잡았다 놓았으면 세대가 이미 달라
         // futexWait 가 즉시 돌아온다(잠들지 않는다). 순서를 바꾸면 «놓은 뒤의 세대»를 들고 잠들어
@@ -54,7 +65,7 @@ pub const CoreHandoff = struct {
         const gen = self.handoff_gen.load(.monotonic);
         if (self.demand.load(.monotonic) == 0) return;
         io.futexWaitTimeout(u32, &self.handoff_gen.raw, gen, .{ .duration = .{
-            .raw = .fromNanoseconds(handoff_timeout_ns),
+            .raw = .fromNanoseconds(timeout_ns),
             .clock = .awake,
         } }) catch {};
     }
@@ -69,13 +80,22 @@ pub const CoreHandoff = struct {
 /// 계약 값이며, 이것이 이 기법이 실제로 사는지를 재는 자리다 — 시간이 아니라 차례를 센다.
 const max_lost_acquisitions: u32 = 16;
 
-test "CoreHandoff: 요구자 없으면 yieldToDemand 는 즉시 돌아온다 (load 1회 경로)" {
+/// 「잠들었다」를 **초 단위로** 만들어 스케줄러 잡음과 자릿수를 가르는 판정용 상한.
+///
+/// 제품 상한(1 ms)으로 재면 「잤다 = 1 ms」인데 스레드 하나가 밀리는 잡음이 그보다 크다 — 선을 어디에
+/// 둬도 동전 던지기다. 상한을 5 초로 주면 「잤다」가 5 초라, 아래 선(1 초)은 잡음보다 세 자릿수 위이면서
+/// 「잤다」보다 다섯 배 아래다.
+const probe_timeout_ns: i64 = 5 * std.time.ns_per_s;
+const probe_slept_line_ns: i128 = 1 * std.time.ns_per_s;
+
+test "CoreHandoff: 요구자 없으면 yieldToDemand 는 «잠들지 않는다» (load 1회 경로)" {
     var h: CoreHandoff = .{};
     const t0 = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
-    h.yieldToDemand(std.testing.io);
+    h.yieldToDemandFor(std.testing.io, probe_timeout_ns);
     const dt = std.Io.Clock.awake.now(std.testing.io).nanoseconds - t0;
-    // 타임아웃(1ms)의 절반 안에 — 잠들었다면 1ms 를 다 채웠을 것이다.
-    try std.testing.expect(dt < CoreHandoff.handoff_timeout_ns / 2);
+    // 잠들었다면 5 초를 채웠을 것이다. 1 초는 그 사이를 가른다 — 제품 상한(1 ms)으로 재면 이 선이
+    // 스케줄러 잡음 안에 들어가 판정이 아니라 동전 던지기가 된다.
+    try std.testing.expect(dt < probe_slept_line_ns);
     try std.testing.expect(!h.hasDemand());
 }
 
@@ -92,7 +112,7 @@ test "CoreHandoff: 요구자가 있고 signal 이 안 오면 타임아웃 안에
     try std.testing.expect(h.hasDemand());
 }
 
-test "CoreHandoff: [적대] yield 도중 요구자가 놓으면(signal) 세대가 올라가 있고 타임아웃 전에 깬다" {
+test "CoreHandoff: [적대] yield 도중 요구자가 놓으면(signal) 세대가 올라가 있다" {
     var h: CoreHandoff = .{};
     h.demandBegin(); // 요구자 있음 → yield 가 잠든다
     const Worker = struct {
@@ -104,14 +124,15 @@ test "CoreHandoff: [적대] yield 도중 요구자가 놓으면(signal) 세대�
     };
     const gen0 = h.handoff_gen.load(.monotonic);
     const t = try std.Thread.spawn(.{}, Worker.run, .{ &h, std.testing.io });
-    const t0 = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
     h.yieldToDemand(std.testing.io);
-    const dt = std.Io.Clock.awake.now(std.testing.io).nanoseconds - t0;
     t.join();
-    // signal 이 왔다는 사실(세대 증가)은 결정적으로, «타임아웃 전에 깼다»는 상한으로만 본다(스케줄러 잡음).
+    // **판정은 세대 증가다** — 그것이 「signal 이 왔다」는 사실이고 결정적이다.
+    //
+    // 예전에는 `dt < timeout * 10`(10 ms) 도 함께 봤다. 그 선은 **아무것도 가르지 못한다**: 깬 경우가
+    // 200 µs, 못 깨고 타임아웃을 채운 경우가 1 ms 라 **둘 다 10 ms 아래**다. 재는 값이 판정에 쓰이지
+    // 않으면 남은 것은 기계 부하에 빨개질 여지뿐이라 재는 것 자체를 걷었다(전수 조사 2026-09-15).
     try std.testing.expect(h.handoff_gen.load(.monotonic) != gen0);
     try std.testing.expect(!h.hasDemand());
-    try std.testing.expect(dt < CoreHandoff.handoff_timeout_ns * 10);
 }
 
 test "CoreHandoff: [적대] 뜨거운 재잠금 루프 상대로 요구자가 «차례를 뺏기지 않는다»" {

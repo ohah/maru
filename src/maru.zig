@@ -52,6 +52,7 @@ pub const chrome_theme = @import("chrome_theme.zig"); // 해석된 테마 → ch
 pub const syntax_colors = @import("syntax_colors.zig"); // 캡처 이름 → chrome 색 역할. chrome 이 session 을 못 봐서 어느 쪽에도 못 산다
 pub const os_env = @import("os_env.zig"); // 환경변수를 UTF-8 로 읽는다 — Windows 의 ANSI `getenv` 를 피한다
 pub const hazard = @import("hazard.zig"); // §3.8 적대적 입력 판정 — 순수 유니코드(width.zig와 동격, chrome도 쓴다)
+pub const debug_trace_alloc = @import("debug_trace_alloc.zig"); // std 스택 트레이스 포획이 쓰는 할당자 — 기본 전역 아레나가 포획마다 새므로 루트에서 덮는다(main.zig 가 `pub const debug` 로 잇는다)
 pub const display_width = @import("display_width.zig"); // §4.2 편집기 표시 폭 — 열 계산(L3)과 셀 배치(L4)의 단일 출처
 pub const icons = @import("icons.zig"); // 등록 chrome 아이콘의 semantic 이름↔PUA codepoint(생성물) — 레이어 무관 중립 leaf(chrome·renderer·platform 공용)
 pub const i18n = @import("i18n.zig"); // UI 표시 문자열의 언어별 테이블·조회·보간 — 레이어 무관 중립 leaf(docs/i18n.md 계약, chrome·session·config·platform 공용)

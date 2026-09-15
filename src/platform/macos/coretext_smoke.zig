@@ -2292,3 +2292,68 @@ test "run 캐시 [적대·퍼즈]: 시드 난수로 만든 200 줄(ASCII·합자
     const st = cache_hooks.stats();
     try std.testing.expect(st.hits >= 100); // 200 줄 중 대부분이 재호출에서 적중해야 한다(커서 run 은 키가 달라 일부 미스)
 }
+
+test "[진단·probe] CTLine 비용: 합자 vs 폴백 캐스케이드 (MARU_PROBE_CTLINE=1 일 때만)" {
+    // 재측정용 프로브 — 결과는 stderr 로(present §10.9). 같은 길이(~120셀) 줄을 종류별로 30회 셰이핑해 run 당 CTLine ns
+    // 의 중앙값을 낸다. 판정이 없어 평소엔 건너뛴다. **미설치 폰트는 시스템 폰트로 대체되어 수치가 무의미**하니 설치된
+    // 폰트만 넣을 것(2026-09-15 실측 기기: JetBrains Mono·Menlo·Apple SD Gothic Neo).
+    if (std.c.getenv("MARU_PROBE_CTLINE") == null) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    coretext_bridge.maru_macos_coretext_shape_cache_set_enabled(0);
+    defer coretext_bridge.maru_macos_coretext_shape_cache_set_enabled(1);
+    const Case = struct { name: []const u8, family: []const u8, fallback: []const u8, text: []const u8, ligatures: bool = true };
+    const ascii = "const value = compute(alpha, beta) orelse return error.Invalid; // plain ascii comment here, nothing special at all";
+    const mixed = "const value = compute(alpha, beta) orelse return error.Invalid; // 한글 주석이 섞인 줄이다 여기 폴백이 돈다 정말로";
+    const hangul = "한글만으로 이루어진 긴 줄이다 폴백 캐스케이드가 이 줄 전체에 걸쳐 돌아간다 그리고 글리프도 다르다 마지막";
+    const emoji = "const value = compute(alpha, beta) orelse return error.Invalid; // ✅ 🎉 ⚡ 🔥 emoji in the comment ✅ 🎉";
+    const boxes = "┌──────────────┬──────────────┐ │ box drawing │ line here    │ └──────────────┴──────────────┘";
+    const cases = [_]Case{
+        .{ .name = "ascii/JetBrains", .family = "JetBrains Mono", .fallback = "", .text = ascii },
+        .{ .name = "mixed/JetBrains(폴백=시스템)", .family = "JetBrains Mono", .fallback = "", .text = mixed },
+        .{ .name = "hangul/JetBrains(폴백=시스템)", .family = "JetBrains Mono", .fallback = "", .text = hangul },
+        .{ .name = "mixed/JetBrains+fallback=AppleSDGothic", .family = "JetBrains Mono", .fallback = "Apple SD Gothic Neo", .text = mixed },
+        .{ .name = "mixed/AppleSDGothic(한글 보유 주폰트)", .family = "Apple SD Gothic Neo", .fallback = "", .text = mixed },
+        .{ .name = "ascii/AppleSDGothic", .family = "Apple SD Gothic Neo", .fallback = "", .text = ascii },
+        .{ .name = "emoji/JetBrains", .family = "JetBrains Mono", .fallback = "", .text = emoji },
+        .{ .name = "boxes/JetBrains", .family = "JetBrains Mono", .fallback = "", .text = boxes },
+        .{ .name = "ascii/Menlo", .family = "Menlo", .fallback = "", .text = ascii },
+        .{ .name = "mixed/Menlo", .family = "Menlo", .fallback = "", .text = mixed },
+        .{ .name = "ascii/JetBrains liga=off", .family = "JetBrains Mono", .fallback = "", .text = ascii, .ligatures = false },
+        .{ .name = "mixed/JetBrains liga=off", .family = "JetBrains Mono", .fallback = "", .text = mixed, .ligatures = false },
+        .{ .name = "hangul/JetBrains liga=off", .family = "JetBrains Mono", .fallback = "", .text = hangul, .ligatures = false },
+    };
+    std.debug.print("\n", .{});
+    for (cases) |c| {
+        var appearance = try config.resolveAppearance(.{ .font = .{ .family = c.family, .fallback = c.fallback } });
+        appearance.font.ligatures = c.ligatures;
+        const shaper = coretext_shaper.CoreTextDrawListShaper{ .appearance = appearance, .shape_draw_list = maru_macos_coretext_shape_draw_list };
+        var registry = renderer.FontIdentityRegistry.init(allocator);
+        defer registry.deinit();
+        var line_ns: [30]u64 = undefined;
+        var emit_ns: [30]u64 = undefined;
+        var runs_total: u64 = 0;
+        var i: usize = 0;
+        while (i < 30) : (i += 1) {
+            var core = try terminal.TerminalCore.init(allocator, .{ .cols = 160, .rows = 2 });
+            defer core.deinit();
+            core.clearDirty();
+            try core.write(c.text);
+            var dl = try renderer.buildDrawList(allocator, core.snapshot());
+            defer dl.deinit(allocator);
+            var shaped = try shaper.shape(allocator, dl, &registry);
+            shaped.deinit(allocator);
+            var p: u64 = 0;
+            var l: u64 = 0;
+            var e: u64 = 0;
+            var f: u64 = 0;
+            var r: u64 = 0;
+            coretext_bridge.maru_macos_coretext_shape_diag_stats(&p, &l, &e, &f, &r);
+            line_ns[i] = l;
+            emit_ns[i] = e;
+            runs_total += r;
+        }
+        std.mem.sort(u64, &line_ns, {}, std.sort.asc(u64));
+        std.mem.sort(u64, &emit_ns, {}, std.sort.asc(u64));
+        std.debug.print("{s:<44} CTLine 중앙 {d:>6}µs (최소 {d:>5}) 방출 중앙 {d:>5}µs | run/호출 {d:.1}\n", .{ c.name, line_ns[15] / 1000, line_ns[0] / 1000, emit_ns[15] / 1000, @as(f64, @floatFromInt(runs_total)) / 30.0 });
+    }
+}

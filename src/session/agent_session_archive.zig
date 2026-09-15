@@ -1012,6 +1012,29 @@ test "모델 토큰: 허용되는 바이트는 «정확히» 65 개다" {
     try std.testing.expect(!isResumableModel(""));
 }
 
+test "모델 상한은 표시용 절단선 «안»이라야 한다 — 잘린 이름이 플래그로 나가면 안 된다" {
+    const a = std.testing.allocator;
+    // `Parsed.model` 은 표시용 사본이라 `max_title_bytes` 에서 잘린다. 그 선보다 긴 모델을 허용하면
+    // **조용히 잘린 이름**이 `--model` 로 나간다 — 표시로는 견딜 만해도 argv 로는 틀린 값이다.
+    // 그래서 상한까지의 모델이 파싱 왕복에서 **한 바이트도 안 변하는 것**을 제품 경로로 못 박는다.
+    // (`max_model_bytes` 를 `max_title_bytes` 위로 올리면 여기서 깨진다.)
+    const token = [_]u8{'m'} ** max_model_bytes;
+    const jsonl = try std.fmt.allocPrint(
+        a,
+        "{{\"sessionId\":\"c-len\",\"type\":\"assistant\",\"message\":{{\"role\":\"assistant\",\"model\":\"{s}\",\"text\":\"답\"}}}}",
+        .{token},
+    );
+    defer a.free(jsonl);
+    var parsed = (try parse(a, .claude, jsonl)).?;
+    defer parsed.deinit(a);
+    try std.testing.expectEqualStrings(&token, parsed.model);
+
+    var buf: [max_resume_argv][]const u8 = undefined;
+    const argv = resumeArgv(&parsed, &buf);
+    try std.testing.expectEqualStrings("--model", argv[argv.len - 2]);
+    try std.testing.expectEqualStrings(&token, argv[argv.len - 1]);
+}
+
 test "Claude 모델: <synthetic> 은 기록하지 않고 마지막 «진짜» 모델이 남는다" {
     const a = std.testing.allocator;
     // 실재하는 모양이다 — 사용자 이력 표본(2026-09-15, 최근 60일 200개 파일)에서 67건.

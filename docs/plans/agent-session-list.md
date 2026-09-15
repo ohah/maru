@@ -354,6 +354,14 @@ Claude transcript를 고르고, parser의 model metadata가 세 줄 카드의 mo
 Metal view의 backing metric을 session에 전달해, probe가 존재하지 않는 가상 좌표가 아니라 사용자도 누를 수 있는
 titlebar launcher와 dock slot만 관측하도록 한다.
 
+그 backing metric이 **기계마다 다르면 안 된다**. AppKit은 기본으로 창을 화면 안으로 줄이므로 fixture가 여는
+1920×1200 pt는 작은 화면에서 조용히 잘리고, 그러면 같은 코드가 화면 크기에 따라 다른 답을 낸다 — 실측(2026-09-15)으로
+로컬은 터미널 135열로 열려 통과했는데 GitHub macOS 러너는 38열로 잘려 확장 detail이 설 자리가 없었고
+`timeout_observeLoading`으로 죽었다. 그래서 fixture 창만 `constrainFrameRect`를 무시한다(`MaruUnconstrainedFixtureWindow`).
+제품 창은 이 클래스를 쓰지 않으므로 "타이틀바를 화면에 남긴다" 규칙은 그대로다. 그리고 요청값이 아니라 **실제로 열린**
+content 크기를 `agent_session_archive_smoke_content_size`로 summary에 남긴다 — 이 값이 기계마다 같아야 판정이
+기계 독립이라고 말할 수 있고, 다르면 `surface_cols` 같은 계수기를 역추적하지 않고 바로 안다.
+
 - fixture는 실제 archive scanner와 detail worker를 통해 목록→inline expanded card를 연다. `AppSession` private method를
   직접 호출하거나 provider transcript를 terminal에 write하는 우회는 금지한다. Swift는 `MaruMetalTerminalView`가
   평소 쓰는 mouse/key ABI 경로로만 down/up 및 `⌘↵`/`⌘L`을 보낸다.

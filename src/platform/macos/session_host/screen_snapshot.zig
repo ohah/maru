@@ -287,9 +287,15 @@ pub fn projectSnapshot(allocator: std.mem.Allocator, core: *terminal.TerminalCor
     // 이미지 방출(#1 원격 이미지 전송, I2): blob(디코드 픽셀, ≤max_image_blob 청크) + placement(뷰포트 상대). renderSnapshot이
     // 이미 buildImageViews 픽셀과 뷰포트 상대 placement를 줬다 — client는 이 두 record로 이미지를 in-process와 동일하게 렌더한다
     // (렌더러가 image_id/generation으로 GPU 텍스처 캐시). delta에서의 이미지 dedup/방출은 후속(I4) — 지금은 full snapshot만 싣는다.
-    try appendVisibleImageBlobs(allocator, &stream, opts.generation, core, snap.images, opts.image_bytes_out, null);
-    for (snap.placements) |p| try appendImagePlacementRecord(allocator, &stream, opts.generation, p);
-    for (snap.virtual_placements) |vp| try appendImageVirtualRecord(allocator, &stream, opts.generation, vp);
+    var drawable: DrawableImages = .{};
+    defer drawable.deinit(allocator);
+    try appendVisibleImageBlobs(allocator, &stream, opts.generation, core, snap.images, opts.image_bytes_out, null, &drawable);
+    // **픽셀을 안 실은 이미지의 placement 도 안 싣는다**(`DrawableImages` 머리말). 그리지도 못할 자리를
+    // 알려 주는 것은 클라이언트에게도, 그것을 세는 계측에게도 거짓이다.
+    for (snap.placements) |p| if (drawable.contains(p.image_id))
+        try appendImagePlacementRecord(allocator, &stream, opts.generation, p);
+    for (snap.virtual_placements) |vp| if (drawable.contains(vp.image_id))
+        try appendImageVirtualRecord(allocator, &stream, opts.generation, vp);
     try appendPromptMarks(allocator, &stream, opts.generation, snap, true); // OSC 133 prompt 마크(있을 때만).
     // 뷰포트 링크(있을 때만) — client가 Cmd+hover 밑줄을 그릴 유일한 근거다(client core는 빈 placeholder).
     var links: std.ArrayList(terminal.ViewportLink) = .empty;
@@ -360,6 +366,33 @@ fn projectedBlobSize(pixels_len: usize) usize {
 /// 저장소 해시 순서라 프레임마다 같다는 보장이 없다. 「보이는 이미지들의 합이 16 MiB 를 넘는」 화면은
 /// 그 자체가 극단이고 그때도 화면은 건너므로 지금은 순서를 정하지 않는다. 이 경계가 실제로 아프면
 /// (한 장은 뜨고 한 장은 깜빡이는 화면) 그때 결정적 우선순위를 정한다 — 추측으로 고르지 않는다.
+/// **클라이언트가 그릴 수 있는 이미지 id 들.** placement 는 이 목록에 있는 것만 싣는다.
+///
+/// 픽셀을 안 실은 이미지의 placement 만 보내면 클라이언트는 「그려야 하는데 픽셀이 없는」 상태가 된다.
+/// 화면은 그래도 멀쩡하다 — 렌더가 그 quad 를 그릴 수 없으니 넘어간다. **그런데 계측이 못 속는다**:
+/// `buildGpuImages` 는 `findImage(...) orelse { recordPlacementWithoutBlob(); continue; }` 를 CPU cull
+/// **앞에** 두고(이미지가 없으면 dest 크기를 몰라 cull 을 못 한다), 그 카운터가 「전송이 떨어졌다」를
+/// 세는 자리다. 미투영이 거기 섞이면 그 숫자가 **「떨어짐」과 「의도적으로 안 보냄」을 못 가른다**
+/// (2026-09-15, `image reconciliation` 계측을 넣은 쪽에서 지적받았다).
+///
+/// 그래서 픽셀과 placement 를 **같이** 뺀다. 「그릴 수 있는가」가 둘의 단일 기준이다.
+const DrawableImages = struct {
+    ids: std.ArrayListUnmanaged(u32) = .empty,
+
+    fn deinit(self: *DrawableImages, allocator: std.mem.Allocator) void {
+        self.ids.deinit(allocator);
+    }
+
+    fn add(self: *DrawableImages, allocator: std.mem.Allocator, id: u32) ProjectError!void {
+        self.ids.append(allocator, id) catch return error.OutOfMemory;
+    }
+
+    /// 이미지 수는 한 자릿수가 보통이라 선형으로 찾는다(해시는 그 크기에서 오히려 느리다).
+    fn contains(self: *const DrawableImages, id: u32) bool {
+        return std.mem.indexOfScalar(u32, self.ids.items, id) != null;
+    }
+};
+
 fn appendVisibleImageBlobs(
     allocator: std.mem.Allocator,
     stream: *std.ArrayListUnmanaged(u8),
@@ -368,15 +401,22 @@ fn appendVisibleImageBlobs(
     images: []const terminal.KittyImageView,
     image_bytes_out: ?*u64,
     already_sent: ?*const std.AutoHashMapUnmanaged(u32, u64),
+    drawable: *DrawableImages,
 ) ProjectError!void {
     for (images) |img| {
         if (already_sent) |sent| {
-            if (sent.get(img.image_id)) |g| if (g == img.generation) continue; // client가 이미 가진 판
+            if (sent.get(img.image_id)) |g| if (g == img.generation) {
+                // **client 가 이미 가진 판.** 픽셀을 안 보내는 이유가 「없어서」가 아니라 「이미 줬으니까」다 —
+                // 여기서 placement 까지 빼면 **멀쩡히 뜨던 이미지가 사라진다.** 그릴 수 있는 쪽에 넣는다.
+                try drawable.add(allocator, img.image_id);
+                continue;
+            };
         }
-        if (!core.kittyImageVisibleInViewport(img.image_id)) continue; // ①
+        if (!core.kittyImageVisibleInViewport(img.image_id)) continue; // ① 화면이 안 가리킨다
         const ceiling = screen_stream.max_record_stream_bytes -| image_budget_reserve;
-        if (stream.items.len +| projectedBlobSize(img.pixels.len) > ceiling) continue; // ②
+        if (stream.items.len +| projectedBlobSize(img.pixels.len) > ceiling) continue; // ② 예산 밖
         try appendImageBlobRecords(allocator, stream, generation, img, image_bytes_out);
+        try drawable.add(allocator, img.image_id);
     }
 }
 
@@ -879,9 +919,7 @@ pub fn computeDelta(allocator: std.mem.Allocator, prev_bytes: []const u8, core: 
 
     // 이미지: snapshot(base)엔 현재 전체를 싣고(projectSnapshot과 동형 — 재접속/resync가 이 base로 이미지 복원), delta엔
     // client가 없는 것만 싣는다(#1 I4b). blob은 prev generation과 다른 이미지만, placement는 집합이 바뀌었을 때 clear+set.
-    for (snap.images) |img| try appendImageBaseMeta(allocator, &snapshot, opts.generation, img); // 리뷰 #11: base엔 픽셀 없이 메타만.
-    for (snap.placements) |p| try appendImagePlacementRecord(allocator, &snapshot, opts.generation, p);
-    for (snap.virtual_placements) |vp| try appendImageVirtualRecord(allocator, &snapshot, opts.generation, vp);
+    // (base 대역은 아래 blob 방출이 `drawable` 을 채운 뒤에 쓴다 — 순서가 뜻을 만든다.)
     // ⚠️ **여기가 애니메이션의 대역폭 병목이다.** kitty 애니메이션은 프레임이 넘어갈 때마다
     // `generation` 을 올리므로 「client 가 가진 판과 다르다」가 **매 프레임 참**이 되어 이미지 blob
     // 전체가 다시 나간다(실측: 64x64 RGBA 한 프레임에 16,441 바이트 — `screen delta: generation 이
@@ -895,7 +933,23 @@ pub fn computeDelta(allocator: std.mem.Allocator, prev_bytes: []const u8, core: 
     //
     // 그 가시성 판정을 **투영도 함께 쓴다**(`appendVisibleImageBlobs` §① — 안 그러면 그리지도 못할
     // 픽셀이 16 MiB 예산을 먹고 화면이 통째로 막힌다).
-    try appendVisibleImageBlobs(allocator, &delta, opts.generation, core, snap.images, opts.image_bytes_out, &prev_image_gens);
+    var drawable: DrawableImages = .{};
+    defer drawable.deinit(allocator);
+    try appendVisibleImageBlobs(allocator, &delta, opts.generation, core, snap.images, opts.image_bytes_out, &prev_image_gens, &drawable);
+
+    // **base 대역은 그릴 수 있는 것만 싣는다.** base 의 메타(`appendImageBaseMeta`)는 픽셀이 없지만
+    // 「client 가 이 generation 을 가졌다」는 **기록**이다 — 다음 delta 가 그것을 보고 재전송을 건너뛴다.
+    // 그래서 픽셀을 안 실은 이미지의 메타를 남기면 **그 기록이 거짓말이 된다**: client 는 픽셀이 없는데
+    // 다음 프레임은 「이미 줬다」고 판단해 영영 안 보낸다(2026-09-15 적대적 검증에서 잡혔다 —
+    // 필터가 통째로 무력해지는 자리였고, 판정자가 처음엔 그 갈래를 못 봤다).
+    //
+    // 그래서 blob 방출 **뒤에** 쓴다 — `drawable` 이 채워진 다음이라야 같은 기준으로 거를 수 있다.
+    for (snap.images) |img| if (drawable.contains(img.image_id))
+        try appendImageBaseMeta(allocator, &snapshot, opts.generation, img);
+    for (snap.placements) |p| if (drawable.contains(p.image_id))
+        try appendImagePlacementRecord(allocator, &snapshot, opts.generation, p);
+    for (snap.virtual_placements) |vp| if (drawable.contains(vp.image_id))
+        try appendImageVirtualRecord(allocator, &snapshot, opts.generation, vp);
     // 리뷰 #12: prev에 있었으나 현재 없는 이미지 = host storage에서 evict/delete됨 → image_remove로 client도 회수(무한증가 방지).
     {
         var it = prev_image_gens.keyIterator();
@@ -912,11 +966,25 @@ pub fn computeDelta(allocator: std.mem.Allocator, prev_bytes: []const u8, core: 
             }
         }
     }
-    if (placementsChanged(prev_placements.items, snap.placements)) {
-        try appendImagePlaceDelta(allocator, &delta, opts.generation, snap.placements);
+    // **픽셀을 안 실은 이미지의 placement 도 안 싣는다**(`DrawableImages` 머리말).
+    //
+    // delta 의 placement 는 **full-set 교체**라(clear 센티넬 + 전체) 「바뀌었는가」 비교도 **거른 목록끼리**
+    // 해야 한다 — `prev_*` 는 이전에 **보낸** 것을 파싱한 값이므로, 한쪽만 거르면 매 프레임 「바뀌었다」가
+    // 되어 full-set 이 계속 나간다.
+    var drawable_placements: std.ArrayListUnmanaged(terminal.KittyPlacement) = .empty;
+    defer drawable_placements.deinit(allocator);
+    for (snap.placements) |p| if (drawable.contains(p.image_id))
+        drawable_placements.append(allocator, p) catch return error.OutOfMemory;
+    var drawable_virtuals: std.ArrayListUnmanaged(terminal.KittyVirtualPlacement) = .empty;
+    defer drawable_virtuals.deinit(allocator);
+    for (snap.virtual_placements) |vp| if (drawable.contains(vp.image_id))
+        drawable_virtuals.append(allocator, vp) catch return error.OutOfMemory;
+
+    if (placementsChanged(prev_placements.items, drawable_placements.items)) {
+        try appendImagePlaceDelta(allocator, &delta, opts.generation, drawable_placements.items);
     }
-    if (virtualsChanged(prev_virtuals.items, snap.virtual_placements)) {
-        try appendImageVirtualDelta(allocator, &delta, opts.generation, snap.virtual_placements);
+    if (virtualsChanged(prev_virtuals.items, drawable_virtuals.items)) {
+        try appendImageVirtualDelta(allocator, &delta, opts.generation, drawable_virtuals.items);
     }
     // prompt_marks: snapshot(base)엔 있을 때만, delta엔 바뀌었을 때만(clear 전달 위해 skip_if_none=false로 full-replace).
     try appendPromptMarks(allocator, &snapshot, opts.generation, snap, true);
@@ -1150,6 +1218,12 @@ test "screen snapshot: U=1 virtual placement 가 host 스트림에 실린다(그
     const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
     var seq: [128]u8 = undefined;
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=T,f=32,s=2,v=2,i=7,U=1,c=4,r=2,z=-1,q=2;{s}\x1b\\", .{b64s}));
+    // **placeholder 셀을 함께 찍는다.** 투영은 「화면이 가리키는 이미지」만 싣는다(2026-09-15) —
+    // 격자만 등록하고 셀이 없으면 그릴 자리가 없으므로 안 싣는 것이 맞다. 실제 tmux 경유
+    // terminal-browser 는 전송과 placeholder 셀을 **같은 프레임에** 보내므로, 픽스처도 그 형태여야
+    // 이 판정자가 지키려는 사고(격자를 못 받아 타일 크기를 못 정함)를 실제로 겨눈다.
+    // 전경색 rgb(0,0,7) = image_id 7, 결합문자 둘 = 타일 (0,0).
+    try core.write("\x1b[38;2;0;0;7m\u{10EEEE}\u{0305}\u{0305}");
 
     const bytes = try projectSnapshot(allocator, &core, .{ .generation = 3 });
     defer allocator.free(bytes);
@@ -2028,7 +2102,13 @@ test "screen delta: attach 뒤 움직인 모든 축이 delta 로 client 에 닿�
             // 실린다(그때 `prev_image_gens` 에 없으므로 후보가 된다).
             .image_pixels => try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=T,f=32,s=2,v=2,i=9,c=1,r=1,q=2;{s}\x1b\\", .{b64s})),
             .placement => try core.write("\x1b_Ga=p,i=4,c=1,r=1,q=2\x1b\\"),
-            .virtual_placement => try core.write("\x1b_Ga=p,i=4,U=1,c=1,r=1,q=2\x1b\\"),
+            // 격자와 **placeholder 셀을 함께** 찍는다 — 투영은 화면이 가리키는 이미지만 싣는다(2026-09-15).
+            // 격자만 등록하면 그릴 자리가 없어 이 축이 안 움직인다(실제 앱도 둘을 같이 보낸다).
+            // 전경색 rgb(0,0,4) = image_id 4, 결합문자 둘 = 타일 (0,0).
+            .virtual_placement => {
+                try core.write("\x1b_Ga=p,i=4,U=1,c=1,r=1,q=2\x1b\\");
+                try core.write("\x1b[38;2;0;0;4m\u{10EEEE}\u{0305}\u{0305}");
+            },
             .prompt => try core.write("\x1b]133;A\x1b\\prompt"),
             .link => try core.write("see https://example.com/x here"),
             .image_gone => try core.write("\x1b_Ga=d,d=I,i=4,q=2\x1b\\"),
@@ -2328,8 +2408,11 @@ test "TBPROBE 예산: 한 장이 상한을 넘어도 화면은 건넌다 — 이
     var asm_ = screen_assembler.ScreenAssembler.init(allocator);
     defer asm_.deinit();
     try asm_.applySnapshot(bytes);
-    try std.testing.expectEqual(@as(usize, 1), asm_.imageVirtualPlacements().len); // 격자는 건넜다
-    try std.testing.expect(asm_.imageById(9) == null); // 픽셀만 포기했다
+    try std.testing.expect(asm_.imageById(9) == null); // 픽셀을 포기했고
+    // **격자도 함께 포기한다**(2026-09-15 에 바뀐 계약). 앞 판은 격자만 보냈는데, 그러면 클라이언트가
+    // 「그려야 하는데 픽셀이 없는」 상태가 되고 그것을 세는 계측이 「떨어짐」과 「의도적 미투영」을
+    // 못 가른다(`DrawableImages` 머리말). 픽셀과 placement 는 **같이** 빠진다.
+    try std.testing.expectEqual(@as(usize, 0), asm_.imageVirtualPlacements().len);
 }
 
 test "TBPROBE 실물: 캡처한 terminal-browser 출력이 quad 로 그려지고 텍스트로 새지 않는다" {
@@ -2389,4 +2472,189 @@ test "TBPROBE 실물: 캡처한 terminal-browser 출력이 quad 로 그려지고
         if (c.codepoint == terminal.unicode_placeholder_codepoint) leaked += 1;
     }
     try std.testing.expectEqual(@as(usize, 0), leaked);
+}
+
+test "TBPROBE 정합 ①: 화면이 안 가리키는 이미지는 픽셀도 placement 도 안 싣는다" {
+    // **회귀 판정**(2026-09-15). 앞 판은 픽셀만 빼고 placement 는 그대로 실었다. 화면은 그래도 멀쩡했지만
+    // (렌더가 그릴 수 없으니 넘어간다) **계측이 못 속았다** — `buildGpuImages` 의
+    // `findImage(...) orelse { recordPlacementWithoutBlob(); continue; }` 가 CPU cull **앞에** 있어서,
+    // 그 카운터가 「전송이 떨어졌다」와 「의도적으로 안 보냈다」를 못 가르게 됐다.
+    const allocator = std.testing.allocator;
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 20, .rows = 4 });
+    defer core.deinit();
+    core.setCellMetrics(10, 20);
+
+    var b64: [64]u8 = undefined;
+    const rgba = [_]u8{ 9, 9, 9, 255 } ** 4;
+    const encoded = std.base64.standard.Encoder.encode(&b64, &rgba);
+    var seq: [192]u8 = undefined;
+    // 두 장을 전송한다 — 1 은 표시(`a=T`)하고 2 는 **격자만 등록**해 화면이 안 가리키게 둔다.
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=T,f=32,s=2,v=2,i=1,c=2,r=1,q=2;{s}\x1b\\", .{encoded}));
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=2,q=2;{s}\x1b\\", .{encoded}));
+    try core.write("\x1b_Ga=p,i=2,U=1,c=2,r=1,q=2\x1b\\"); // virtual 격자만 — placeholder 셀은 안 찍는다
+    try std.testing.expect(core.kittyImageVisibleInViewport(1));
+    try std.testing.expect(!core.kittyImageVisibleInViewport(2));
+
+    const bytes = try projectSnapshot(allocator, &core, .{ .generation = 1 });
+    defer allocator.free(bytes);
+    var asm_ = screen_assembler.ScreenAssembler.init(allocator);
+    defer asm_.deinit();
+    try asm_.applySnapshot(bytes);
+
+    try std.testing.expect(asm_.imageById(1) != null); // 보이는 장은 픽셀이 건넜다
+    try std.testing.expect(asm_.imageById(2) == null); // 안 보이는 장은 안 건넜다
+
+    // **그리고 그 장의 placement 도 안 건넜다** — 이 줄이 이 판정자의 못이다.
+    for (asm_.imagePlacements()) |p| try std.testing.expect(p.image_id != 2);
+    for (asm_.imageVirtualPlacements()) |vp| try std.testing.expect(vp.image_id != 2);
+    // 보이는 장의 placement 는 그대로 있다(같이 빼 버리면 화면이 빈다).
+    var saw_one = false;
+    for (asm_.imagePlacements()) |p| {
+        if (p.image_id == 1) saw_one = true;
+    }
+    try std.testing.expect(saw_one);
+}
+
+test "TBPROBE 정합 ③: client 가 이미 가진 판은 픽셀을 안 보내도 placement 를 지킨다" {
+    // **회귀 판정**(2026-09-15). 픽셀을 안 싣는 이유가 셋인데 **하나는 성격이 다르다.**
+    // ①화면이 안 가리킴·②예산 초과는 「클라이언트가 그릴 수 없다」라 placement 도 빼야 하지만,
+    // ③「이미 줬으니까」는 **그릴 수 있다**. 여기서 placement 까지 빼면 **멀쩡히 뜨던 이미지가 사라진다** —
+    // 셋을 한 덩어리로 다루면 그게 진짜 회귀이므로 갈래를 따로 못 박는다.
+    const allocator = std.testing.allocator;
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 20, .rows = 4 });
+    defer core.deinit();
+    core.setCellMetrics(10, 20);
+
+    var b64: [64]u8 = undefined;
+    const rgba = [_]u8{ 7, 7, 7, 255 } ** 4;
+    const encoded = std.base64.standard.Encoder.encode(&b64, &rgba);
+    var seq: [192]u8 = undefined;
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=T,f=32,s=2,v=2,i=5,c=2,r=1,q=2;{s}\x1b\\", .{encoded}));
+
+    // 1) 첫 투영 — 픽셀과 placement 가 함께 간다.
+    const first = try projectSnapshot(allocator, &core, .{ .generation = 1 });
+    defer allocator.free(first);
+    var asm_ = screen_assembler.ScreenAssembler.init(allocator);
+    defer asm_.deinit();
+    try asm_.applySnapshot(first);
+    try std.testing.expect(asm_.imageById(5) != null);
+
+    // 2) 화면 글자만 바꾼다 — 이미지는 그대로다. 그래서 delta 는 픽셀을 **다시 보내지 않는다**.
+    try core.write("hello");
+    var res = try computeDelta(allocator, first, &core, .{ .generation = 1, .sequence = 1 });
+    defer res.deinit(allocator);
+    try std.testing.expect(!try deltaHasKind(res.delta, .image_blob)); // 픽셀 재전송 없음(이미 가졌다)
+
+    // 3) **그런데 placement 는 사라지면 안 된다.** delta 를 적용해도 그 이미지가 계속 그려져야 한다.
+    try asm_.applyDelta(res.delta);
+    try std.testing.expect(asm_.imageById(5) != null); // 픽셀은 여전히 client 가 쥐고 있다
+    var still_placed = false;
+    for (asm_.imagePlacements()) |p| {
+        if (p.image_id == 5) still_placed = true;
+    }
+    try std.testing.expect(still_placed);
+}
+
+test "TBPROBE 정합 ②: 거른 집합끼리 비교한다 — 안 그러면 full-set 이 매 프레임 나간다" {
+    // **회귀 판정**(2026-09-15). delta 의 placement 는 **full-set 교체**다(clear 센티넬 + 전체).
+    // 「바뀌었는가」 비교의 두 쪽이 서로 다른 기준이면 **매 프레임 「바뀌었다」**가 되어, 조용한 화면에도
+    // 그 목록이 계속 나간다. `prev_*` 는 이전에 **보낸** 것을 파싱한 값이므로 — 즉 이미 거른 목록이므로 —
+    // 현재 쪽도 **거른 목록**으로 비교해야 짝이 맞는다.
+    //
+    // 이 판정자가 없으면 그 어긋남이 **조용하다**: 화면은 멀쩡하고(같은 목록을 다시 보낼 뿐) 판정자도
+    // 초록이며, 늘어난 바이트만 로그에 남는다.
+    const allocator = std.testing.allocator;
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 20, .rows = 4 });
+    defer core.deinit();
+    core.setCellMetrics(10, 20);
+
+    var b64: [64]u8 = undefined;
+    const rgba = [_]u8{ 3, 3, 3, 255 } ** 4;
+    const encoded = std.base64.standard.Encoder.encode(&b64, &rgba);
+    var seq: [192]u8 = undefined;
+    // **둘 다 일반 placement 로 만든다.** 안 보이는 쪽을 virtual 격자로 두면 거른 목록이 **비어서**
+    // 어긋남이 겉으로 안 드러난다(빈 목록도 clear 센티넬 하나는 나가므로 양쪽 결과가 같아진다) —
+    // 실측으로 그 픽스처가 돌연변이를 못 잡았다. 거른 목록이 **비지 않아야** 차이가 보인다.
+    //
+    // 2 를 먼저 놓고 스크롤로 **뷰포트 위로 밀어낸다** — placement 는 남지만 화면에는 안 걸린다.
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=T,f=32,s=2,v=2,i=2,c=2,r=1,q=2;{s}\x1b\\", .{encoded}));
+    for (0..6) |_| try core.write("\r\n");
+    try std.testing.expect(!core.kittyImageVisibleInViewport(2)); // 밀려나 안 보인다
+    // 1 은 지금 화면에 놓는다 — 거른 목록에 **남는 쪽**이다.
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=T,f=32,s=2,v=2,i=1,c=2,r=1,q=2;{s}\x1b\\", .{encoded}));
+    try std.testing.expect(core.kittyImageVisibleInViewport(1));
+
+    const base = try projectSnapshot(allocator, &core, .{ .generation = 1 });
+    defer allocator.free(base);
+    // 1) 첫 delta — 집합이 서기 때문에 place 가 나갈 수 있다(여기서는 그 여부를 묻지 않는다).
+    var first = try computeDelta(allocator, base, &core, .{ .generation = 1, .sequence = 1 });
+    defer first.deinit(allocator);
+
+    // 2) **이미지는 그대로 두고 글자만 바꾼다.** placement 집합은 안 바뀌었으므로 다시 나가면 안 된다.
+    try core.write("hello");
+    var second = try computeDelta(allocator, first.snapshot, &core, .{ .generation = 1, .sequence = 2 });
+    defer second.deinit(allocator);
+    try std.testing.expect(try deltaHasKind(second.delta, .set_runs)); // 글자는 실제로 바뀌었다(공허 통과 방지)
+    try std.testing.expect(!try deltaHasKind(second.delta, .image_place));
+    try std.testing.expect(!try deltaHasKind(second.delta, .image_virtual));
+
+    // 3) 한 번 더 — 어긋남은 **매 프레임** 나타나므로 두 번째 무변화에서도 조용해야 한다.
+    try core.write("!");
+    var third = try computeDelta(allocator, second.snapshot, &core, .{ .generation = 1, .sequence = 3 });
+    defer third.deinit(allocator);
+    try std.testing.expect(!try deltaHasKind(third.delta, .image_place));
+    try std.testing.expect(!try deltaHasKind(third.delta, .image_virtual));
+}
+
+test "TBPROBE 정합 ④: 한 번 보낸 이미지는 안 보이게 돼도 다시 안 보낸다" {
+    // **회귀 판정**(2026-09-15, 적대적 검증). 「안 보이면 안 싣는다」가 스크롤과 만나면 위험한 모양이
+    // 될 수 있었다 — 이미지가 뷰포트를 들락날락할 때마다 픽셀을 다시 보내면, 터미널 브라우저처럼
+    // 한 장이 8.75 MB 인 화면에서 **스크롤이 곧 대역폭 폭발**이 된다.
+    //
+    // 그렇게 되지 않는 이유는 **검사 순서**다: `appendVisibleImageBlobs` 가 「client 가 이미 가진 판」을
+    // **가시성보다 먼저** 보고, 그때 `drawable` 에 넣는다. 그래서 한 번 건넌 이미지는 안 보이게 돼도
+    // 기록이 유지되고 재전송 후보가 되지 않는다. 그 순서가 뒤집히면 이 판정자가 빨개진다.
+    const allocator = std.testing.allocator;
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 20, .rows = 4 });
+    defer core.deinit();
+    core.setCellMetrics(10, 20);
+
+    var b64: [64]u8 = undefined;
+    const rgba = [_]u8{ 6, 6, 6, 255 } ** 4;
+    const encoded = std.base64.standard.Encoder.encode(&b64, &rgba);
+    var seq: [192]u8 = undefined;
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=T,f=32,s=2,v=2,i=1,c=2,r=1,q=2;{s}\x1b\\", .{encoded}));
+    try std.testing.expect(core.kittyImageVisibleInViewport(1));
+
+    // 1) 보이는 동안 픽셀이 건넌다.
+    const base = try projectSnapshot(allocator, &core, .{ .generation = 1 });
+    defer allocator.free(base);
+    var asm_ = screen_assembler.ScreenAssembler.init(allocator);
+    defer asm_.deinit();
+    try asm_.applySnapshot(base);
+    try std.testing.expect(asm_.imageById(1) != null);
+
+    // 2) **스크롤로 밀어낸다** — 이제 화면이 그 이미지를 안 가리킨다.
+    for (0..6) |_| try core.write("\r\n");
+    try std.testing.expect(!core.kittyImageVisibleInViewport(1));
+
+    // 3) 그래도 픽셀을 **다시 보내지 않는다**(client 가 이미 쥐고 있다).
+    var res = try computeDelta(allocator, base, &core, .{ .generation = 1, .sequence = 1 });
+    defer res.deinit(allocator);
+    try std.testing.expect(!try deltaHasKind(res.delta, .image_blob));
+
+    // 4) 그리고 그 이미지는 client 에서 사라지지도 않는다 — 회수(`image_remove`)는 코어에서 실제로
+    //    없어졌을 때만이다. 안 보이는 것과 없어진 것은 다르다.
+    try std.testing.expect(!try deltaHasKind(res.delta, .image_remove));
+    try asm_.applyDelta(res.delta);
+    try std.testing.expect(asm_.imageById(1) != null);
+
+    // 5) **다시 보이게 해도 재전송이 없다.** 재전송은 「안 보이는 동안 기록이 지워졌는가」로 갈리므로
+    //    그 다음 프레임까지 봐야 한다 — 3) 만 재면 「그 프레임에 안 보내는 것」만 확인하고 끝난다
+    //    (적대적 검증에서 실제로 그 구멍을 밟았다: 검사 순서를 뒤집어도 3) 은 초록이었다).
+    core.view_offset = 6; // 스크롤백을 되짚어 그 이미지가 다시 뷰포트에 걸린다
+    try std.testing.expect(core.kittyImageVisibleInViewport(1));
+    var back = try computeDelta(allocator, res.snapshot, &core, .{ .generation = 1, .sequence = 2 });
+    defer back.deinit(allocator);
+    try std.testing.expect(!try deltaHasKind(back.delta, .image_blob));
 }

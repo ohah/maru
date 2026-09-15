@@ -587,7 +587,7 @@ fn fillConflictLabel() []const u8 {
     // **잇는 규칙은 제품과 같은 함수다** — 이름 사이 여백 하나까지(`conflict.action_gap`). Lab 이
     // 자기 여백을 들고 있으면 골든이 **제품의 자리**를 안 본다(적대적 검증 4회차에서 여백을 0 으로
     // 만든 변이가 그 때문에 살아남았다).
-    return maru.session.editor.conflict.writeActions(names, &conflict_label_buf, colsOf, &spans) orelse "";
+    return maru.session.editor.conflict.writeActions(&names, &conflict_label_buf, colsOf, &spans) orelse "";
 }
 
 const editor_fixture_lines = [_][]const u8{
@@ -1108,6 +1108,15 @@ fn buildEditorMergeFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
     // **S3b-3a 전에는 이 시나리오에 위젯 행이 없었다** — 컴포넌트에 받을 자리가 없어서였고, 그것이
     // 곧 제품에서도 pane 넷이 뜨는 순간 「고르기」 줄이 사라진 이유였다.
     fillConflictTables();
+    // **판의 고르기 줄**(S3b-3c) — 그리고 Result 의 줄은 **판이 접혔을 때만**(제품과 같은 순수 함수
+    // `merge_frame.layout` 으로 미리 안다). 넓은 장면에서 Result 에 세 버튼이 남아 있으면 제품이
+    // 그 규칙을 잃어도 골든이 못 본다.
+    var cur_widgets: [ours_lines.len]?editor_view.content.Widget = undefined;
+    var inc_widgets: [theirs_lines.len]?editor_view.content.Widget = undefined;
+    fillPaneActionTable(.current, &ours_lines, &editor_conflict_lines, &cur_widgets, &merge_pane_label_cur);
+    fillPaneActionTable(.incoming, &theirs_lines, &editor_conflict_lines, &inc_widgets, &merge_pane_label_inc);
+    const rect = editor_view.frame.contentRect(.{ .x = 0, .y = 0, .w = viewport_w, .h = viewport_h });
+    const collapsed = editor_view.merge_frame.layout(rect, scenario.cell_w_px, scenario.cell_h_px, true).current == null;
 
     var content_rows: [512]editor_view.content.Row = undefined;
     var visual_rows: [512]chrome.ui.visual_map.VisualRow = undefined;
@@ -1117,11 +1126,11 @@ fn buildEditorMergeFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
     var caret_cols: [256]u32 = undefined;
 
     const w = editor_view.merge_frame.build(.{
-        .rect = editor_view.frame.contentRect(.{ .x = 0, .y = 0, .w = viewport_w, .h = viewport_h }),
+        .rect = rect,
         .background_rect = .{ .x = 0, .y = 0, .w = viewport_w, .h = viewport_h }, // 배경은 뷰 전체(§4.1b)
-        .current = .{ .lines = &ours_lines },
-        .result = .{ .lines = &editor_conflict_lines, .widgets = &editor_conflict_widgets, .bands = &editor_conflict_bands },
-        .incoming = .{ .lines = &theirs_lines },
+        .current = .{ .lines = &ours_lines, .widgets = &cur_widgets },
+        .result = .{ .lines = &editor_conflict_lines, .widgets = if (collapsed) &editor_conflict_widgets else &.{}, .bands = &editor_conflict_bands },
+        .incoming = .{ .lines = &theirs_lines, .widgets = &inc_widgets },
         .base = .{ .lines = &base_lines },
         .cell_w_px = scenario.cell_w_px,
         .cell_h_px = scenario.cell_h_px,
@@ -1149,6 +1158,43 @@ fn buildEditorMergeFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
         .draws = .{ .layer = .sidebar, .ops = buffers.ops[0..w.ops] },
     };
 }
+
+/// S3b-3c — **판의 고르기 줄**을 제품과 같은 조각으로 만든다: 구간은 `conflict.scan`, 자리는 대응표의
+/// «짝»(`merge_map.anchorOnSide`), 글자는 `paneActionNames` + `writeActions`. 손으로 「1 줄 위」라 적으면
+/// 앵커 규칙이 죽어도 그림이 예쁘다.
+fn fillPaneActionTable(
+    side: maru.session.editor.conflict.PaneSide,
+    side_lines: []const []const u8,
+    result_lines: []const []const u8,
+    widgets: []?chrome.components.editor_view.content.Widget,
+    label_buf: []u8,
+) void {
+    for (widgets) |*w| w.* = null;
+    var regions: [8]maru.session.editor.conflict.Region = undefined;
+    const found = maru.session.editor.conflict.scan(result_lines, &regions);
+    const names = maru.session.editor.conflict.paneActionNames(side);
+    var spans: [2]maru.session.editor.conflict.ActionSpan = undefined;
+    const colsOf = struct {
+        fn f(text: []const u8) u32 {
+            return chrome.components.editor_view.content.columnsOf(text);
+        }
+    }.f;
+    const label = maru.session.editor.conflict.writeActions(&names, label_buf, colsOf, &spans) orelse return;
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    var m = (maru.session.editor.merge_map.build(arena.allocator(), side_lines, result_lines) catch return) orelse return;
+    defer m.deinit(arena.allocator());
+    for (found) |r| {
+        const from: u32, const to: u32 = switch (side) {
+            .current => .{ r.ours().from, r.ours().to },
+            .incoming => .{ r.theirs().from, r.theirs().to },
+        };
+        const anchor = m.anchorOnSide(from, to, r.end + 1) orelse continue;
+        if (anchor < widgets.len) widgets[anchor] = .{ .text = label, .col = 0 };
+    }
+}
+var merge_pane_label_cur: [192]u8 = undefined;
+var merge_pane_label_inc: [192]u8 = undefined;
 
 /// S3b-M — **굴린 병합 픽스처.** 같은 함수 위아래로 `step_NN();` 열두 줄씩 두어 굴릴 거리를 만든다.
 /// Current 는 맨 위에 자기만의 줄 셋(`// ours-only`)이 더 있다 — 그래서 대응표가 항등이 아니고,
@@ -1201,6 +1247,12 @@ fn buildEditorMergeScrolledFrame(scenario: Scenario, buffers: FrameBuffers) !Fra
     const viewport_w: u32 = @intFromFloat(scenario.viewport_px.width);
     const viewport_h: u32 = @intFromFloat(scenario.viewport_px.height);
     fillConflictTablesFor(&merge_scrolled_result, &merge_scrolled_bands, &merge_scrolled_widgets);
+    var cur_widgets: [merge_scrolled_ours.len]?editor_view.content.Widget = undefined;
+    var inc_widgets: [merge_scrolled_theirs.len]?editor_view.content.Widget = undefined;
+    fillPaneActionTable(.current, &merge_scrolled_ours, &merge_scrolled_result, &cur_widgets, &merge_pane_label_cur);
+    fillPaneActionTable(.incoming, &merge_scrolled_theirs, &merge_scrolled_result, &inc_widgets, &merge_pane_label_inc);
+    const rect = editor_view.frame.contentRect(.{ .x = 0, .y = 0, .w = viewport_w, .h = viewport_h });
+    const collapsed = editor_view.merge_frame.layout(rect, scenario.cell_w_px, scenario.cell_h_px, true).current == null;
 
     // 표는 Lab 의 할당자로 잠깐 세운다 — 프레임을 만들고 곧 놓는다.
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -1224,11 +1276,11 @@ fn buildEditorMergeScrolledFrame(scenario: Scenario, buffers: FrameBuffers) !Fra
     var caret_cols: [256]u32 = undefined;
 
     const w = editor_view.merge_frame.build(.{
-        .rect = editor_view.frame.contentRect(.{ .x = 0, .y = 0, .w = viewport_w, .h = viewport_h }),
+        .rect = rect,
         .background_rect = .{ .x = 0, .y = 0, .w = viewport_w, .h = viewport_h },
-        .current = .{ .lines = &merge_scrolled_ours, .first_line = current_top },
-        .result = .{ .lines = &merge_scrolled_result, .first_line = merge_scrolled_result_top, .widgets = &merge_scrolled_widgets, .bands = &merge_scrolled_bands },
-        .incoming = .{ .lines = &merge_scrolled_theirs, .first_line = incoming_top },
+        .current = .{ .lines = &merge_scrolled_ours, .first_line = current_top, .widgets = &cur_widgets },
+        .result = .{ .lines = &merge_scrolled_result, .first_line = merge_scrolled_result_top, .widgets = if (collapsed) &merge_scrolled_widgets else &.{}, .bands = &merge_scrolled_bands },
+        .incoming = .{ .lines = &merge_scrolled_theirs, .first_line = incoming_top, .widgets = &inc_widgets },
         .base = .{ .lines = &merge_scrolled_base, .first_line = base_top },
         .cell_w_px = scenario.cell_w_px,
         .cell_h_px = scenario.cell_h_px,

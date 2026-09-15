@@ -1314,6 +1314,14 @@ pub const RemoteTermBackend = struct {
     close_operation_owner: close_authority.CloseOperationOwner = .{},
     close_sweep: close_contract.CloseSweep = .inactive,
     event_pump_cursor: usize = 0,
+    /// **live 가 아니라 건너뛴 런타임이 오래 지속되는지** 센다.
+    ///
+    /// 재접속 창에서 몇 프레임 건너뛰는 것은 정상이라 매번 남기면 시끄럽다. 그런데 교체본이 끝내
+    /// 안 오면 그 pane 은 **아무 말 없이 갱신을 멈춘다** — 크래시는 스택이라도 남겼지만 이쪽은 아무
+    /// 것도 안 남아 「왜 이 탭만 안 움직이지」가 된다. 그래서 같은 런타임이 계속 걸릴 때만 한 줄 남긴다.
+    not_live_skip_handle: RuntimeHandle = 0,
+    not_live_skip_ticks: u32 = 0,
+    not_live_skip_reported: bool = false,
     singleton_owner: RemoteBackendSingletonOwner = .{},
     host_reconnect_job: ?*HostReconnectJob = null,
     host_reconnect_preparing: bool = false,
@@ -1893,6 +1901,23 @@ pub const RemoteTermBackend = struct {
         try job.abort(self);
         self.host_reconnect_job = null;
         self.allocator.destroy(job);
+    }
+
+    /// 건너뜀이 **몇 프레임 이어지면** 이상으로 보는가. 프레임 주기가 ~20 ms 라 300 이면 약 6 초다 —
+    /// 재접속 한 바퀴(전이 8 단계)보다 넉넉히 길어 정상 창에서는 안 걸린다.
+    pub const not_live_skip_warn_ticks: u32 = 300;
+
+    fn logNotLiveSkipStuck(handle: RuntimeHandle, ticks: u32) void {
+        if (builtin.is_test) return;
+        std.log.warn(
+            "runtime attachment not live for {d} ticks: runtime_handle={x} — this pane stopped updating",
+            .{ ticks, handle },
+        );
+    }
+
+    fn logNotLiveSkipCleared(handle: RuntimeHandle, ticks: u32) void {
+        if (builtin.is_test) return;
+        std.log.info("runtime attachment live again after {d} ticks: runtime_handle={x}", .{ ticks, handle });
     }
 
     /// 재접속 job 이 **연결까지는 갔다**는 사실을 남긴다. `via` 는 새로 connect 했는지, 이미 잡아 둔
@@ -3329,6 +3354,26 @@ pub const RemoteTermBackend = struct {
 
     /// AppSession frame이 모든 Term pump를 부르기 전에 원격 owner를 최대 16개만 선택한다.
     /// 각 Term pump는 여기서 준비한 summary를 소비하므로 같은 frame의 Busy owner를 다시 실행하지 않는다.
+    /// 같은 런타임이 **몇 프레임째** live 가 아닌지 세고, 오래가면 한 줄 남긴다.
+    ///
+    /// 재접속 창의 짧은 건너뜀은 정상이라 안 남긴다 — 매 프레임 찍으면 그 줄이 쓸모를 잃는다.
+    /// 상한을 넘겨 한 번 남긴 뒤에는 **회복할 때까지 다시 안 남긴다**(`noteIdleTurn` 과 같은 규칙:
+    /// 정지가 이어지는 동안은 조용하고 전이 순간에만 남는다). 회복도 한 줄 남겨야 「그래서 풀렸나」를
+    /// 로그만으로 답할 수 있다.
+    fn noteNotLiveSkip(self: *RemoteTermBackend, skipped_handle: RuntimeHandle) void {
+        if (skipped_handle == 0 or skipped_handle != self.not_live_skip_handle) {
+            if (self.not_live_skip_reported) logNotLiveSkipCleared(self.not_live_skip_handle, self.not_live_skip_ticks);
+            self.not_live_skip_handle = skipped_handle;
+            self.not_live_skip_ticks = if (skipped_handle == 0) 0 else 1;
+            self.not_live_skip_reported = false;
+            return;
+        }
+        self.not_live_skip_ticks +|= 1;
+        if (self.not_live_skip_reported or self.not_live_skip_ticks < not_live_skip_warn_ticks) return;
+        self.not_live_skip_reported = true;
+        logNotLiveSkipStuck(skipped_handle, self.not_live_skip_ticks);
+    }
+
     pub fn maintenanceEventTick(self: *RemoteTermBackend) void {
         var pending_iterator = self.runtimes.iterator();
         while (pending_iterator.next()) |row| {
@@ -3337,17 +3382,22 @@ pub const RemoteTermBackend = struct {
         }
         var handles: [max_remote_backend_runtimes]RuntimeHandle = undefined;
         var handle_count: usize = 0;
+        var skipped_handle: RuntimeHandle = 0;
         var iterator = self.runtimes.iterator();
         while (iterator.next()) |row| {
             // **attachment 가 live 가 아닌 런타임은 이 프레임에서 건너뛴다.** 재접속은 여러 프레임에
             // 걸친 상태 기계라, 은퇴를 준비한 attachment 가 아직 `backend.runtimes` 에 남은 창이 있다.
             // 그 창에서 펌프하면 payload 접근이 abort 한다 — 판정 출처는 `GenerationAttachment.isLive`
             // 하나다(여기서 lifecycle 을 다시 보지 않는 이유).
-            if (!RemoteRuntime.backend_api.attachmentLive(row.value_ptr.runtime)) continue;
+            if (!RemoteRuntime.backend_api.attachmentLive(row.value_ptr.runtime)) {
+                if (skipped_handle == 0) skipped_handle = row.key_ptr.*;
+                continue;
+            }
             RemoteRuntime.backend_api.prepareFrameSummary(row.value_ptr.runtime);
             handles[handle_count] = row.key_ptr.*;
             handle_count += 1;
         }
+        self.noteNotLiveSkip(skipped_handle);
         if (handle_count == 0) {
             self.event_pump_cursor = 0;
             return;
@@ -5984,8 +6034,32 @@ test "재접속 은퇴 창: 유지보수 틱은 live 가 아닌 attachment 를 �
     backend_value.maintenanceEventTick();
     try testing.expectEqual(@as(usize, 0), B4PumpProbe.count);
 
+    // **짧은 건너뜀은 조용해야 한다.** 재접속 창은 몇 프레임이면 지나가고, 그때마다 경고를 남기면
+    // 그 줄이 쓸모를 잃는다. 상한 직전까지는 보고하지 않는다.
+    try testing.expect(!backend_value.not_live_skip_reported);
+    while (backend_value.not_live_skip_ticks < RemoteTermBackend.not_live_skip_warn_ticks - 1) {
+        remote_runtime.testing_api.generation(&runtime).frame_summary_ready = false;
+        backend_value.maintenanceEventTick();
+    }
+    try testing.expect(!backend_value.not_live_skip_reported);
+
+    // **오래가면 남긴다.** 아무 말 없이 멈춘 pane 을 로그로 찾을 수 있어야 한다.
+    remote_runtime.testing_api.generation(&runtime).frame_summary_ready = false;
+    backend_value.maintenanceEventTick();
+    try testing.expect(backend_value.not_live_skip_reported);
+    try testing.expectEqual(@as(RuntimeHandle, 1), backend_value.not_live_skip_handle);
+
     // 은퇴를 되돌려 평소 해체 경로로 돌려놓는다 — 준비 상태로 두면 teardown 불변식이 걸린다.
     try attachment.abortHostRetirement(adapter, @intFromPtr(&backend_value), 1);
+
+    // **회복하면 풀린다.** 안 풀면 한 번 걸린 런타임이 영원히 「멈춰 있다」로 남는다.
+    try testing.expect(attachment.isLive());
+    B4PumpProbe.reset();
+    remote_runtime.testing_api.generation(&runtime).frame_summary_ready = false;
+    backend_value.maintenanceEventTick();
+    try testing.expect(!backend_value.not_live_skip_reported);
+    try testing.expectEqual(@as(u32, 0), backend_value.not_live_skip_ticks);
+    try testing.expect(B4PumpProbe.count > 0);
 }
 
 test "CR6e-c3 main owner adopts only the exact bound worker candidate" {

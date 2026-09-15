@@ -255,7 +255,13 @@ pub const GlobalBudget = struct {
 
 pub const QueueClass = enum { screen, control };
 pub const EnqueueError = error{ ScreenInvalidated, SlotLimit, GlobalLimit, ChunkLimit, OutOfMemory };
-pub const ScreenState = enum { valid, invalidated, resync_pending, resync_draining };
+pub const ScreenState = enum {
+    valid,
+    drain_current_batch,
+    invalidated,
+    resync_pending,
+    resync_draining,
+};
 
 pub const ScreenTracker = struct {
     state: ScreenState = .valid,
@@ -266,6 +272,7 @@ pub const ScreenTracker = struct {
     base_update_prepared: bool = false,
     last_resync_attempt_ns: ?u64 = null,
     global_pressure_retry_after_ns: u64 = 0,
+    pressure_notice_pending: bool = false,
 };
 
 pub const resync_retry_backoff_ns: u64 = std.time.ns_per_s;
@@ -292,6 +299,8 @@ const Chunk = struct {
     offset: usize = 0,
     class: QueueClass,
     screen_tracker_index: ?usize = null,
+    /// Screen batches are wire-atomic through the frame carrying `end_stream`.
+    screen_batch_end: bool = false,
 };
 
 pub const Slot = struct {
@@ -398,6 +407,7 @@ pub const Slot = struct {
         const tracker = entry.tracker.?;
         if (tracker.resident_bytes != 0 or tracker.retained_base_bytes != 0 or
             tracker.prepared_base_bytes != 0 or tracker.base_update_prepared or
+            tracker.pressure_notice_pending or tracker.state == .drain_current_batch or
             tracker.state == .resync_pending or tracker.state == .resync_draining)
             return error.Busy;
         entry.tracker = null;
@@ -435,21 +445,65 @@ pub const Slot = struct {
         entry.tracker.?.state = .invalidated;
     }
 
+    pub const PressureInvalidation = enum { immediate, drain_current_batch };
+
+    /// An offset-zero batch can be discarded immediately. Once the kernel accepted a prefix,
+    /// preserve the peer's batch grammar through its exact end marker and invalidate afterwards.
+    pub fn beginPressureInvalidation(
+        self: *Slot,
+        key: ScreenTrackerKey,
+    ) error{ Stale, PartialFrame }!PressureInvalidation {
+        const entry = try self.trackerEntry(key);
+        if (!(try self.trackerHasWrittenPrefix(key))) {
+            try self.purgeScreenTracker(key);
+            entry.tracker.?.state = .invalidated;
+            return .immediate;
+        }
+        var found_end = false;
+        for (0..self.chunk_len) |logical| {
+            const index = (self.chunk_head + logical) % max_chunks_per_slot;
+            const chunk = self.chunks[index];
+            if (chunk.class != .screen or chunk.screen_tracker_index.? != key.index)
+                return error.PartialFrame;
+            if (chunk.screen_batch_end) {
+                found_end = true;
+                break;
+            }
+        }
+        if (!found_end) return error.PartialFrame;
+        entry.tracker.?.state = .drain_current_batch;
+        return .drain_current_batch;
+    }
+
+    pub fn takePressureInvalidationNotice(
+        self: *Slot,
+        key: ScreenTrackerKey,
+    ) error{Stale}!bool {
+        const tracker = (try self.trackerEntry(key)).tracker.?;
+        if (!tracker.pressure_notice_pending) return false;
+        tracker.pressure_notice_pending = false;
+        return true;
+    }
+
     fn purgeScreenTracker(
         self: *Slot,
         key: ScreenTrackerKey,
     ) error{ Stale, PartialFrame }!void {
         _ = try self.trackerEntry(key);
+        return self.purgeScreenTrackerIndex(key.index);
+    }
+
+    fn purgeScreenTrackerIndex(self: *Slot, tracker_index: usize) error{PartialFrame}!void {
         const purges_head = if (self.chunk_len == 0) false else blk: {
             const head = self.chunks[self.chunk_head];
             break :blk head.class == .screen and
-                head.screen_tracker_index.? == key.index;
+                head.screen_tracker_index.? == tracker_index;
         };
         for (0..self.chunk_len) |logical| {
             const index = (self.chunk_head + logical) % max_chunks_per_slot;
             const chunk = self.chunks[index];
             if (chunk.class == .screen and
-                chunk.screen_tracker_index.? == key.index and chunk.offset != 0)
+                chunk.screen_tracker_index.? == tracker_index and chunk.offset != 0)
                 return error.PartialFrame;
         }
         const old_len = self.chunk_len;
@@ -457,7 +511,7 @@ pub const Slot = struct {
         for (0..old_len) |logical| {
             const index = (self.chunk_head + logical) % max_chunks_per_slot;
             const chunk = self.chunks[index];
-            if (chunk.class != .screen or chunk.screen_tracker_index.? != key.index) {
+            if (chunk.class != .screen or chunk.screen_tracker_index.? != tracker_index) {
                 const dst = (self.chunk_head + kept) % max_chunks_per_slot;
                 if (dst != index) self.chunks[dst] = chunk;
                 kept += 1;
@@ -467,7 +521,7 @@ pub const Slot = struct {
             const charge = chargeFor(chunk.bytes.len);
             self.pending_bytes -= remaining;
             self.resident_bytes -= charge;
-            self.screen_trackers[key.index].tracker.?.resident_bytes -= charge;
+            self.screen_trackers[tracker_index].tracker.?.resident_bytes -= charge;
             self.global.releaseScreen(charge);
             self.allocator.free(chunk.bytes);
         }
@@ -476,7 +530,7 @@ pub const Slot = struct {
         // Purging it changes queue-head identity, so the following control notice/sibling frame must
         // receive a fresh absolute/progress deadline on its own first write attempt.
         if (purges_head) self.clearPartial(.write);
-        const tracker = self.screen_trackers[key.index].tracker.?;
+        const tracker = self.screen_trackers[tracker_index].tracker.?;
         if (tracker.resident_bytes == 0 and tracker.state == .resync_draining) {
             tracker.state = .valid;
             tracker.last_resync_attempt_ns = null;
@@ -526,7 +580,8 @@ pub const Slot = struct {
         amount: usize,
     ) error{ Stale, Busy, InvalidAmount, SlotLimit, GlobalLimit, Exhausted }!BaseReservation {
         const tracker = (try self.trackerEntry(key)).tracker.?;
-        if (tracker.base_update_prepared) return error.Busy;
+        if (tracker.base_update_prepared or tracker.state == .drain_current_batch)
+            return error.Busy;
         if (amount == 0 or amount > base_update_max_bytes) return error.InvalidAmount;
         const next_base = std.math.add(usize, self.base_resident_bytes, amount) catch
             return error.SlotLimit;
@@ -697,10 +752,22 @@ pub const Slot = struct {
     ) (EnqueueError || error{Stale})!void {
         const tracker = (try self.trackerEntry(key)).tracker.?;
         if (tracker.state != .valid) return error.ScreenInvalidated;
-        return self.enqueue(.screen, key.index, bytes, screen_soft_bytes) catch |err| {
+        return self.enqueueScreenChunk(key, bytes, true) catch |err| {
             if (err != error.GlobalLimit) tracker.state = .invalidated;
             return err;
         };
+    }
+
+    fn enqueueScreenChunk(
+        self: *Slot,
+        key: ScreenTrackerKey,
+        bytes: []const u8,
+        batch_end: bool,
+    ) (EnqueueError || error{Stale})!void {
+        _ = try self.trackerEntry(key);
+        try self.enqueue(.screen, key.index, bytes, screen_soft_bytes);
+        const tail = (self.chunk_head + self.chunk_len - 1) % max_chunks_per_slot;
+        self.chunks[tail].screen_batch_end = batch_end;
     }
 
     pub fn enqueueControl(self: *Slot, bytes: []const u8) EnqueueError!void {
@@ -752,12 +819,13 @@ pub const Slot = struct {
         }
         if (!self.global.reserveScreen(total)) return error.GlobalLimit;
         errdefer self.global.releaseScreen(total);
-        for (chunks) |bytes| {
+        for (chunks, 0..) |bytes, index| {
             const tail = (self.chunk_head + self.chunk_len) % max_chunks_per_slot;
             self.chunks[tail] = .{
                 .bytes = bytes,
                 .class = .screen,
                 .screen_tracker_index = key.index,
+                .screen_batch_end = index + 1 == chunks.len,
             };
             self.chunk_len += 1;
             self.pending_bytes += bytes.len;
@@ -877,14 +945,21 @@ pub const Slot = struct {
             if (first.offset == first.bytes.len) {
                 const owned = first.bytes;
                 const class = first.class;
+                const tracker_index = first.screen_tracker_index;
+                const completed_screen_batch = first.screen_batch_end;
                 const charge = chargeFor(first.bytes.len);
                 self.allocator.free(owned);
                 self.chunk_head = (self.chunk_head + 1) % max_chunks_per_slot;
                 self.chunk_len -= 1;
                 self.resident_bytes -= charge;
                 if (class == .screen) {
-                    const tracker = self.screen_trackers[first.screen_tracker_index.?].tracker.?;
+                    const tracker = self.screen_trackers[tracker_index.?].tracker.?;
                     tracker.resident_bytes -= charge;
+                    if (completed_screen_batch and tracker.state == .drain_current_batch) {
+                        self.purgeScreenTrackerIndex(tracker_index.?) catch unreachable;
+                        tracker.state = .invalidated;
+                        tracker.pressure_notice_pending = true;
+                    }
                     if (tracker.resident_bytes == 0 and tracker.state == .resync_draining) {
                         tracker.state = .valid;
                         tracker.last_resync_attempt_ns = null;
@@ -915,9 +990,11 @@ pub const Slot = struct {
             self.rollbackTail(added);
             tracker.state = .invalidated;
         }
-        for (chunks) |bytes| {
+        for (chunks, 0..) |bytes, index| {
             if (bytes.len == 0) return error.ScreenInvalidated;
             try self.enqueue(.screen, key.index, bytes, resync_batch_bytes);
+            const tail = (self.chunk_head + self.chunk_len - 1) % max_chunks_per_slot;
+            self.chunks[tail].screen_batch_end = index + 1 == chunks.len;
             added += 1;
         }
         tracker.state = .resync_draining;
@@ -949,9 +1026,11 @@ pub const Slot = struct {
             for (chunks[added..]) |bytes| self.allocator.free(bytes);
             tracker.state = .invalidated;
         }
-        for (chunks) |bytes| {
+        for (chunks, 0..) |bytes, index| {
             if (bytes.len == 0) return error.ScreenInvalidated;
             try self.enqueueOwned(.screen, key.index, bytes, resync_batch_bytes);
+            const tail = (self.chunk_head + self.chunk_len - 1) % max_chunks_per_slot;
+            self.chunks[tail].screen_batch_end = index + 1 == chunks.len;
             added += 1;
         }
         tracker.state = .resync_draining;
@@ -2584,6 +2663,30 @@ test "connection slot partial deadline advances only on progress" {
     slot.notePartial(.write, 100 + partial_deadline_ns, true);
     try std.testing.expect(slot.partialExpired(.read, 100 + partial_absolute_deadline_ns));
     try std.testing.expect(!slot.partialExpired(.write, 100 + partial_deadline_ns));
+}
+
+test "P5b2b3 partial pressure without a batch end remains fail close" {
+    var global: GlobalBudget = .{};
+    var slot = try Slot.init(
+        std.testing.allocator,
+        &global,
+        .{ .monotonic_id = 1, .slot_generation = 1 },
+    );
+    defer slot.deinit();
+    const tracker = try slot.createScreenTracker();
+    const frames = [_][]u8{
+        try std.testing.allocator.dupe(u8, "partial"),
+        try std.testing.allocator.dupe(u8, "missing-end"),
+    };
+    try slot.enqueueOwnedScreenBatch(tracker, &frames);
+    const tail = (slot.chunk_head + slot.chunk_len - 1) % max_chunks_per_slot;
+    slot.chunks[tail].screen_batch_end = false;
+    try slot.consumeWritten(1);
+    try slot.invalidateScreen(tracker);
+    try std.testing.expectError(
+        error.PartialFrame,
+        slot.beginPressureInvalidation(tracker),
+    );
 }
 
 test "purging an unsent screen head resets its inherited write deadline" {

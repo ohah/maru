@@ -8269,6 +8269,36 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "maru", .module = maru_mod }},
         }),
     });
+    const session_host_p5b2b3_step = b.step(
+        "test-session-host-p5b2b3",
+        "Verify same-connection partial screen-batch pressure isolation",
+    );
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |p5b2b3_optimize| {
+        const p5b2b3_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/connection_turn.zig"),
+                .target = target,
+                .optimize = p5b2b3_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"P5b2b3"},
+        });
+        const run_p5b2b3_tests = b.addRunArtifact(p5b2b3_tests);
+        run_p5b2b3_tests.addArg("--maru-expect-tests=2");
+        session_host_p5b2b3_step.dependOn(&run_p5b2b3_tests.step);
+        const p5b2b3_slot_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/connection_slot.zig"),
+                .target = target,
+                .optimize = p5b2b3_optimize,
+            }),
+            .filters = &.{"P5b2b3"},
+        });
+        const run_p5b2b3_slot_tests = b.addRunArtifact(p5b2b3_slot_tests);
+        run_p5b2b3_slot_tests.addArg("--maru-expect-tests=1");
+        session_host_p5b2b3_step.dependOn(&run_p5b2b3_slot_tests.step);
+    }
     const session_host_cross_uid_step = b.step(
         "test-session-host-cross-uid-macos",
         "Verify the kernel-reported peer UID gate with an actual root client process",

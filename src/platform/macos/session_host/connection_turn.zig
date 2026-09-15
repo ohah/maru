@@ -719,6 +719,8 @@ pub const Client = struct {
             self.last_activity_ns = now_ns;
             const completed_chunk = written == pending.bytes.len;
             slot.consumeWritten(written) catch return self.failPendingUpgrade(.socket_error);
+            self.publishCompletedPressureInvalidations(slot);
+            if (self.isClosing()) return;
             _ = budget.allowWrite(written, @intFromBool(completed_chunk));
             if (!completed_chunk) {
                 slot.notePartial(.write, now_ns, true);
@@ -792,7 +794,7 @@ pub const Client = struct {
             self.connection.markResyncDeliveryPurged(stream);
             tracker_state = .invalidated;
         }
-        if (tracker_state == .resync_draining) return;
+        if (tracker_state == .resync_draining or tracker_state == .drain_current_batch) return;
         if (tracker_state == .invalidated) {
             if (!resync_pending) return;
             if (!(slot.canAttemptResync(tracker) catch
@@ -1090,8 +1092,28 @@ pub const Client = struct {
     ) void {
         const slot = self.reactor.get(self.admission) catch |err|
             return self.beginCloseAtErr("invalidate_slot_lookup", @errorName(err), .socket_error);
-        slot.invalidateAndPurgeScreenTracker(tracker) catch |err|
+        const outcome = slot.beginPressureInvalidation(tracker) catch |err|
             return self.beginCloseAtErr("invalidate_purge_tracker", @errorName(err), .socket_error);
+        if (outcome == .drain_current_batch) return;
+        self.publishSubscriptionInvalidation(stream);
+    }
+
+    fn publishCompletedPressureInvalidations(self: *Client, slot: *slot_mod.Slot) void {
+        var iterator = self.trackers.iterator();
+        while (iterator.next()) |entry| {
+            const ready = slot.takePressureInvalidationNotice(entry.value_ptr.*) catch
+                return self.beginClose(.socket_error);
+            if (ready) {
+                self.publishSubscriptionInvalidation(entry.key_ptr.*);
+                if (self.isClosing()) return;
+            }
+        }
+    }
+
+    fn publishSubscriptionInvalidation(
+        self: *Client,
+        stream: subscription_identity.LocalStreamId,
+    ) void {
         self.connection.markSubscriptionOutputInvalidated(stream);
         const notice = self.connection.snapshotInvalidatedFrame(stream) catch |err|
             return self.beginCloseAtErr("invalidate_notice_build", @errorName(err), .resource_exhausted);
@@ -3546,7 +3568,7 @@ test "failed recovery backoff does not pin round robin ahead of healthy siblings
     );
 }
 
-test "pressure after a written screen prefix fail closes instead of splicing the wire" {
+test "P5b2b3 pressure drains a written screen batch before target-only invalidation" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const testing = std.testing;
     var fds: [2]c_int = undefined;
@@ -3555,6 +3577,7 @@ test "pressure after a written screen prefix fail closes instead of splicing the
     var registry_value = registry.TerminalRuntimeRegistry.init(testing.allocator);
     defer registry_value.deinit();
     _ = try registry_value.register(0xAA, 80, 24);
+    _ = try registry_value.register(0xBB, 80, 24);
     var subscriptions = subscription_identity.Table.init(testing.allocator);
     defer subscriptions.deinit();
     const reactor = try slot_mod.ReactorCore.create(testing.allocator);
@@ -3570,7 +3593,12 @@ test "pressure after a written screen prefix fail closes instead of splicing the
         .{ .runtime_ops = runtime_ops.ops() },
     );
     defer client.destroy();
-    try sendTestFrame(fds[1], .hello, 1, test_hello);
+    try sendTestFrame(
+        fds[1],
+        .hello,
+        1,
+        "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\"}",
+    );
     client.readReady(1);
     try sendTestFrame(
         fds[1],
@@ -3579,17 +3607,76 @@ test "pressure after a written screen prefix fail closes instead of splicing the
         "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}",
     );
     client.readReady(2);
+    try sendTestFrame(
+        fds[1],
+        .request,
+        3,
+        "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"bb\",\"mode\":\"observer\"}}",
+    );
+    client.readReady(3);
     const slot = try reactor.get(client.admission);
     try slot.consumeWritten(slot.pending_bytes);
     const tracker = client.trackers.get(1).?;
-    try slot.enqueueScreen(tracker, "written-prefix");
+    var sibling_stream: subscription_identity.LocalStreamId = 0;
+    var tracker_iterator = client.trackers.iterator();
+    while (tracker_iterator.next()) |entry| {
+        if (entry.key_ptr.* != 1) {
+            sibling_stream = entry.key_ptr.*;
+            break;
+        }
+    }
+    try testing.expect(sibling_stream != 0);
+    const sibling_tracker = client.trackers.get(sibling_stream).?;
+    const tiny: c_int = 1024;
+    try testing.expectEqual(@as(c_int, 0), c.setsockopt(
+        fds[0],
+        posix.SOL.SOCKET,
+        posix.SO.SNDBUF,
+        @ptrCast(&tiny),
+        @sizeOf(c_int),
+    ));
+    try testing.expectEqual(@as(c_int, 0), c.setsockopt(
+        fds[1],
+        posix.SOL.SOCKET,
+        posix.SO.RCVBUF,
+        @ptrCast(&tiny),
+        @sizeOf(c_int),
+    ));
+    const first_payload = try testing.allocator.alloc(u8, protocol.max_binary_chunk);
+    defer testing.allocator.free(first_payload);
+    @memset(first_payload, 'p');
+    const first = try framing.encodeFrame(
+        testing.allocator,
+        .{ .kind = .delta_chunk, .stream_id = 1 },
+        first_payload,
+    );
+    const last = try framing.encodeFrame(
+        testing.allocator,
+        .{ .kind = .delta_chunk, .stream_id = 1, .flags = protocol.Flags.end_stream },
+        "written-suffix",
+    );
+    const current_batch = try testing.allocator.alloc([]u8, 2);
+    current_batch[0] = first;
+    current_batch[1] = last;
+    try testing.expect(client.adoptSubscriptionTurn(1, current_batch));
     try testing.expectEqual(slot_mod.QueueClass.screen, slot.firstPending().?.class);
-    try slot.consumeWritten(1);
+    client.writeReady(4);
+    try testing.expect(try slot.trackerHasWrittenPrefix(tracker));
+    client.writeReady(5);
+    try testing.expect(slot.writeStallObserved());
+
+    const sibling_batch = try testing.allocator.alloc([]u8, 1);
+    sibling_batch[0] = try framing.encodeFrame(
+        testing.allocator,
+        .{ .kind = .delta_chunk, .stream_id = sibling_stream, .flags = protocol.Flags.end_stream },
+        "SIBLING-MARKER",
+    );
+    try testing.expect(client.adoptSubscriptionTurn(sibling_stream, sibling_batch));
 
     const megabyte = try testing.allocator.alloc(u8, protocol.max_binary_chunk);
     defer testing.allocator.free(megabyte);
     @memset(megabyte, 'q');
-    for (0..7) |_| try slot.enqueueScreen(tracker, megabyte);
+    for (0..6) |_| try slot.enqueueScreen(tracker, megabyte);
     const batch = try testing.allocator.alloc([]u8, 1);
     batch[0] = try framing.encodeFrame(
         testing.allocator,
@@ -3597,7 +3684,78 @@ test "pressure after a written screen prefix fail closes instead of splicing the
         megabyte,
     );
     try testing.expect(!client.adoptSubscriptionTurn(1, batch));
-    try testing.expect(client.isClosing());
+    try testing.expect(!client.isClosing());
+    try testing.expectEqual(
+        slot_mod.ScreenState.drain_current_batch,
+        try slot.screenState(tracker),
+    );
+    try testing.expectError(error.Busy, slot.reserveBaseUpdate(tracker, 16));
+    var received: std.ArrayListUnmanaged(u8) = .empty;
+    defer received.deinit(testing.allocator);
+    var recv_buf: [64 * 1024]u8 = undefined;
+    for (0..4096) |turn| {
+        while (true) {
+            const rc = c.recv(fds[1], &recv_buf, recv_buf.len, posix.MSG.DONTWAIT);
+            if (rc < 0 and posix.errno(rc) == .AGAIN) break;
+            try testing.expect(rc > 0);
+            try received.appendSlice(testing.allocator, recv_buf[0..@intCast(rc)]);
+        }
+        client.writeReady(6 + turn);
+        if (try slot.screenState(tracker) == .invalidated and !client.wantsWrite()) break;
+    }
+    while (true) {
+        const rc = c.recv(fds[1], &recv_buf, recv_buf.len, posix.MSG.DONTWAIT);
+        if (rc < 0 and posix.errno(rc) == .AGAIN) break;
+        try testing.expect(rc > 0);
+        try received.appendSlice(testing.allocator, recv_buf[0..@intCast(rc)]);
+    }
+    try testing.expect(!client.isClosing());
+    try testing.expectEqual(slot_mod.ScreenState.invalidated, try slot.screenState(tracker));
+    try testing.expectEqual(slot_mod.ScreenState.valid, try slot.screenState(sibling_tracker));
+    var parser = framing.FrameParser.init(testing.allocator);
+    defer parser.deinit();
+    try parser.push(received.items);
+    var target_frames: usize = 0;
+    var target_ended = false;
+    var sibling_seen = false;
+    var notice_seen = false;
+    while (try parser.next()) |frame| {
+        defer frame.deinit(testing.allocator);
+        if (frame.header.stream_id == 1 and frame.header.kind == .delta_chunk) {
+            try testing.expect(!target_ended);
+            target_frames += 1;
+            if (protocol.Flags.hasEndStream(frame.header.flags)) {
+                try testing.expectEqualStrings("written-suffix", frame.payload);
+                target_ended = true;
+            }
+        } else if (frame.header.stream_id == sibling_stream) {
+            try testing.expect(target_ended);
+            try testing.expectEqualStrings("SIBLING-MARKER", frame.payload);
+            sibling_seen = true;
+        } else if (frame.header.kind == .event and
+            std.mem.indexOf(u8, frame.payload, "snapshot.invalidated") != null)
+        {
+            try testing.expect(target_ended);
+            try testing.expect(!notice_seen);
+            notice_seen = true;
+        }
+    }
+    try testing.expectEqual(@as(usize, 2), target_frames);
+    try testing.expect(target_ended and sibling_seen and notice_seen);
+
+    try sendTestFrame(fds[1], .request, 4, "{\"method\":\"host.info\"}");
+    client.readReady(5000);
+    client.writeReady(5001);
+    var info_bytes: [4096]u8 = undefined;
+    const info_len = c.recv(fds[1], &info_bytes, info_bytes.len, 0);
+    try testing.expect(info_len > 0);
+    var info_parser = framing.FrameParser.init(testing.allocator);
+    defer info_parser.deinit();
+    try info_parser.push(info_bytes[0..@intCast(info_len)]);
+    const info = (try info_parser.next()) orelse return error.TestUnexpectedResult;
+    defer info.deinit(testing.allocator);
+    try testing.expectEqual(@as(u64, 4), info.header.request_id);
+    try testing.expect(std.mem.indexOf(u8, info.payload, "host_id") != null);
 }
 
 test "subscription batch preflight rejects cross-stream mixed and unterminated output" {

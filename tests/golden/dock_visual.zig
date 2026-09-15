@@ -852,6 +852,14 @@ const cases = [_]Case{
     // S3b-M §5 — **따라 굴리기.** Result 를 10 줄 내리면 세 판이 대응표로 따라간다: 같은 글자
     // (`step_10();`)가 세 열의 첫 행에 서고, Current 만 gutter 번호가 **14** 다(맨 위에 자기만의 줄
     // 셋). 번호가 같고 글자가 다르면 「번호로 굴린」 것이고, 세 판이 1 부터면 안 따라간 것이다.
+    // S3b-3b §5 — **판의 caret.** Current 둘째 줄 `"ours"` 의 `"` 앞에 bar caret 이 서고, Result 에는
+    // 없다(초점은 하나). caret 은 quad 라 텍스트 DrawList 로는 못 재고 여기서만 보인다.
+    .{
+        .name = "editor-merge-pane-caret",
+        .capture = "editor-merge-caret.ppm",
+        .contract = "초점 판(Current)에만 caret 이 서고 Result 에는 caret 이 없다",
+        .rect = .{ .x = 0, .y = 0, .w = 1200, .h = 140 },
+    },
     .{
         .name = "editor-merge-follow-scroll",
         .capture = "editor-merge-scrolled.ppm",

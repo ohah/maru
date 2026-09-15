@@ -180,6 +180,12 @@ pub const Written = struct {
     result_visual_rows: usize = 0,
     incoming_visual_rows: usize = 0,
     base_visual_rows: usize = 0,
+    /// Result 의 **스크롤 상한**(줄, 조각) — `frame.build` 가 열마다 내는 그 값 중 Result 의 것. 입력이
+    /// 이것으로 clamp 한다(§4.1d). **S3b-2 부터 S3b-3b 까지 이 값이 안 나가 병합 모드의 Result 가
+    /// 위로 묶여 있었다**(플랫폼이 낡은 `rt` 값을 그대로 실었다 — S3b-3b 의 역방향 굴리기 판정자가 잡았다).
+    result_max_top_line: usize = 0,
+    result_max_top_piece: u32 = 0,
+    result_total_visual_rows: u32 = 0,
 };
 
 fn buildPane(pane: Pane, props: Props, rect: draw.Rect, background: ?draw.Rect, scratch: frame.Scratch) frame.Written {
@@ -201,6 +207,8 @@ fn buildPane(pane: Pane, props: Props, rect: draw.Rect, background: ?draw.Rect, 
         .carets = pane.carets,
         .line_widgets = pane.widgets,
         .row_bands = pane.bands,
+        // **등가 변이**(S3b-3b 적대적 2회차 B10): `and pane.carets != null` 을 지워도 답이 같다 — 표가 `null`
+        // 이면 `frame.build` 가 그릴 caret 이 없다. 남기는 이유는 「초점 판 하나에만」을 이 줄이 말하기 때문이다.
         .caret_visible = props.caret_visible and pane.carets != null,
         .caret_shape = props.caret_shape,
         .visible_rows = m.visible_rows,
@@ -248,6 +256,11 @@ pub fn build(props: Props, scratch: frame.Scratch) Written {
         };
         const w = buildPane(pane, props, rect, bg, part);
         slot.rows.* = w.visual_rows;
+        if (i == 1) {
+            out.result_max_top_line = w.max_top_line;
+            out.result_max_top_piece = w.max_top_piece;
+            out.result_total_visual_rows = w.total_visual_rows;
+        }
         const moved = @min(w.ops, scratch.ops.len -| written);
         if (moved > 0 and part.ops.ptr != scratch.ops[written..].ptr) {
             std.mem.copyForwards(draw.Op, scratch.ops[written..][0..moved], part.ops[0..moved]);

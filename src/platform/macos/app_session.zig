@@ -12661,6 +12661,26 @@ pub const AppSession = struct {
                         if (editor_ops.diffSwitchSide(self, active)) return input_ops.keyConsumedByApp(self);
                     }
                 }
+                // **병합 판에 초점이 있으면 그 판의 caret 이 움직인다**(S3b-3b — 계약 §5). 표는 비교 뷰와
+                // 같다. 편집 키는 아래 갈래로 흘러가되 Result 의 selection 이 없어 아무 일도 안 한다 —
+                // 그것이 초점의 정의다(`editor_merge_ops.focusedSide`).
+                if (ed == .editor and !is_diff and editor_merge_ops.focusedSide(active) != null) {
+                    const m = key_event.modifiers;
+                    const motion: ?editor_ops.Motion = switch (key_event.key) {
+                        .arrow_left => if (m.option) .word_left else if (m.command) .line_start else .char_left,
+                        .arrow_right => if (m.option) .word_right else if (m.command) .line_end else .char_right,
+                        .arrow_up => if (m.command) .doc_start else .line_up,
+                        .arrow_down => if (m.command) .doc_end else .line_down,
+                        .home => if (m.command) .doc_start else .line_start,
+                        .end => if (m.command) .doc_end else .line_end,
+                        .page_up => .page_up,
+                        .page_down => .page_down,
+                        else => null,
+                    };
+                    if (motion) |how| {
+                        if (editor_merge_ops.paneMove(self, active, how, m.shift)) return input_ops.keyConsumedByApp(self);
+                    }
+                }
                 if (ed == .editor and !is_diff) {
                     // 수정자로 단위가 갈린다 — macOS 관례 그대로다: **⌥**는 낱말, **⌘**는 줄/문서,
                     // 맨몸은 문자/줄. **Shift**는 단위를 바꾸지 않고 **선택을 늘린다**.
@@ -14070,6 +14090,15 @@ pub const AppSession = struct {
                         _ = pane_ops.focusPaneByPtr(self, pane);
                         self.drag_autoscroll = 0;
                         self.mouse_drag_selecting = false; // 터미널 선택이 아니다 — 소유자가 다르다
+                        return;
+                    }
+                    // ⓒ' 병합 **판** 본문 클릭 → 그 판에 caret 을 놓는다(S3b-3b). Result 본문(위)이 먼저
+                    //    거절한 뒤라 사각이 겹칠 일이 없다 — 그래서 이 둘의 순서는 **등가**다(적대적 2회차 B9).
+                    //    끌기는 없다 — 이 조각에 선택이 없다.
+                    if (editor_merge_ops.placePaneCaret(self, pane.activeTerm(), x_px, y_px)) {
+                        _ = pane_ops.focusPaneByPtr(self, pane);
+                        self.drag_autoscroll = 0;
+                        self.mouse_drag_selecting = false;
                         return;
                     }
                     if (pane != pane_ops.activePane(self) and pane_ops.focusPaneByPtr(self, pane)) {

@@ -49,6 +49,8 @@ pub const RenderSnapshot = types.RenderSnapshot;
 pub const KittyPlacement = types.KittyPlacement;
 pub const KittyVirtualPlacement = types.KittyVirtualPlacement;
 pub const unicode_placeholder_codepoint = types.unicode_placeholder_codepoint;
+/// kitty unicode placeholder 셀 해독(표·규칙)의 단일 출처 — 코어 가시성 판정과 렌더가 함께 쓴다.
+pub const kitty_placeholder = @import("terminal/kitty_placeholder.zig");
 pub const KittyImageView = types.KittyImageView;
 pub const PlacementGeometry = types.PlacementGeometry;
 pub const PreeditOverlay = preedit.Overlay;

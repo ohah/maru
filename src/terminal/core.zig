@@ -1643,6 +1643,15 @@ pub const TerminalCore = struct {
         return kitty.buildImageViews(self);
     }
 
+    /// 이 이미지가 **지금 뷰포트에 보이는가**. 본문: kitty.kittyImageVisibleInViewport(facade).
+    ///
+    /// 애니메이션 전진이 쓰던 판정을 **원격 투영도 함께 쓴다** — `buildImageViews` 는 저장된 이미지를
+    /// 전부 노출하는데(로컬 렌더는 같은 메모리라 비용이 없다), 원격은 그것을 바이트로 나른다. 그리지도
+    /// 못할 픽셀이 16 MiB 스트림 예산을 먹으면 **그 화면 전체**가 못 건넌다.
+    pub fn kittyImageVisibleInViewport(self: *TerminalCore, image_id: u32) bool {
+        return kitty.kittyImageVisibleInViewport(self, image_id);
+    }
+
     /// OSC 7로 셸이 보고한 현재 cwd(percent-decode된 경로). 한 번도 안 받았으면 빈 슬라이스.
     /// 창 제목 등 platform layer가 읽는다(facade를 통해 노출).
     pub fn currentCwd(self: *const TerminalCore) []const u8 {
@@ -7913,6 +7922,31 @@ test "kitty relative placement(P/Q/H/V): 부모 기준으로 놓이고 부모와
     try std.testing.expectEqual(@as(usize, 0), core.kitty_placements.items.len);
 }
 
+test "TBPROBE 가시성: virtual 격자가 있어도 일반 placement 로 보이면 보이는 것이다" {
+    // **회귀 판정**(2026-09-15, 적대적 18회차). 가시성 판정이 id 까지 보게 엄격해지면서 생긴 구멍이다.
+    // 한 이미지는 virtual 격자(`a=p,U=1`)와 일반 placement(`a=p`)를 **둘 다** 가질 수 있는데, virtual
+    // 분기가 먼저 답을 내고 끝내면 **일반 placement 로 화면에 떠 있는 이미지가 「안 보인다」**가 된다.
+    // 그 판정은 원격 투영이 픽셀을 실을지 정하므로, 틀리면 그 이미지가 화면에서 사라진다.
+    const allocator = std.testing.allocator;
+    var core = try TerminalCore.init(allocator, .{ .cols = 8, .rows = 4 });
+    defer core.deinit();
+
+    // 2x2 RGBA 한 장을 보내고 **일반 placement** 로 커서 자리에 놓는다(U= 없음).
+    var b64: [64]u8 = undefined;
+    const rgba = [_]u8{ 7, 7, 7, 255 } ** 4;
+    const encoded = std.base64.standard.Encoder.encode(&b64, &rgba);
+    var seq: [192]u8 = undefined;
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=T,f=32,s=2,v=2,i=5,q=2;{s}\x1b\\", .{encoded}));
+    try core.write("\x1b_Ga=p,i=5,p=1,q=2\x1b\\");
+    try std.testing.expect(core.kittyImageVisibleInViewport(5)); // 일반 placement 로 보인다
+
+    // 같은 이미지에 virtual 격자를 **추가로** 만든다. 화면에는 그 격자를 가리키는 placeholder 셀이 없다.
+    try core.write("\x1b_Ga=p,i=5,p=2,U=1,c=2,r=2,q=2\x1b\\");
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_virtual_placements.items.len);
+    // 격자가 생겼다고 해서 **이미 보이던 것이 안 보이게 되면 안 된다.**
+    try std.testing.expect(core.kittyImageVisibleInViewport(5));
+}
+
 test "kitty U=1 unicode placeholder: virtual placement만 등록하고 커서 자리에 그리지 않는다" {
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 6 });
     defer core.deinit();
@@ -11218,8 +11252,13 @@ test "kitty 애니메이션: placeholder 셀이 없는 화면에서는 U=1 애�
     // placeholder 를 찍는다(전경색 RGB 하위 24비트 = image_id, 결합문자는 렌더러가 읽는다).
     // **첫 셀에 찍지 않는다.** 홈 자리에 두면 「화면을 훑는다」가 「첫 칸만 본다」로 줄어들어도
     // 판정자가 통과한다(적대적 검증 6회차 돌연변이 V4 가 실제로 그렇게 살아남았다). 마지막 행에 찍는다.
-    try core.write("\x1b[4;8H\x1b[38;2;0;0;1m");
-    screen.writeCodepoint(&core, types.unicode_placeholder_codepoint);
+    //
+    // **결합문자까지 찍는다.** placeholder 셀은 base 만으로는 좌표가 아니다 — 렌더러는 결합문자가
+    // 없으면 그 셀을 placeholder 로 치지 않고 **그리지 않는다**. 예전에는 코어의 가시성 판정이
+    // 「base codepoint 가 있는가」만 봐서 **렌더가 안 그리는 셀을 「보인다」고 했다**(2026-09-15에
+    // 그 성김이 원격 투영 예산을 먹는 결함으로 드러났다). 이제 둘이 같은 해독을 쓰므로 픽스처도
+    // 실제 앱이 보내는 형태여야 한다.
+    try core.write("\x1b[4;8H\x1b[38;2;0;0;1m\u{10EEEE}\u{0305}\u{0305}");
     try std.testing.expect(core.advanceAnimations(40)); // 이제 돈다
 
     // alt 화면은 자기 버퍼라 placeholder 가 없다 — 멈춰야 한다.
@@ -11291,9 +11330,9 @@ test "kitty 애니메이션: 다른 화면에 등록된 U=1 은 전진하지 않
     try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=1,q=2;{s}\x1b\\", .{enc}));
     try core.write("\x1b_Ga=p,i=1,U=1,c=2,r=2,q=2\x1b\\");
     try core.write("\x1b_Ga=a,i=1,s=3,v=0,q=2\x1b\\");
-    // primary 에 placeholder 를 찍으면 돈다(양성 대조).
-    try core.write("\x1b[3;1H\x1b[38;2;0;0;1m");
-    screen.writeCodepoint(&core, types.unicode_placeholder_codepoint);
+    // primary 에 placeholder 를 찍으면 돈다(양성 대조). 결합문자까지 찍는 이유는 위 판정자의 주석과 같다 —
+    // 코어의 가시성 판정과 렌더가 **같은 해독**을 쓰므로, 좌표 없는 base 만으로는 그릴 자리가 아니다.
+    try core.write("\x1b[3;1H\x1b[38;2;0;0;1m\u{10EEEE}\u{0305}\u{0305}");
     try std.testing.expect(core.advanceAnimations(40));
 
     // alt 에는 그 등록도 placeholder 도 없다 — 멈춰야 한다.

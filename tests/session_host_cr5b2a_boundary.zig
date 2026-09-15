@@ -61,9 +61,11 @@ test "CR5b-2a 경계는 all-runtime prepare와 reverse abort만 열고 shared re
         // pre-commit mutation-zero assertions in the actual three-runtime fixture.
         .{ .identifier = "hostWideRetirementPreparedExact", .backend_count = 7, .runtime_count = 5 },
         .{ .identifier = "abortHostWideRetirement", .backend_count = 3, .runtime_count = 3 },
-        .{ .identifier = "prepareHostRetirement", .runtime_count = 1, .attachment_count = 1 },
+        // 재접속 은퇴 창 회귀(`remote_term_backend`)가 attachment 를 직접 은퇴로 밀어 두고 펌프가
+        // 그것을 고르지 않는지 본다 — 그래서 backend 쪽에 prepare/abort 한 쌍이 각각 하나씩 더 있다.
+        .{ .identifier = "prepareHostRetirement", .backend_count = 1, .runtime_count = 1, .attachment_count = 1 },
         .{ .identifier = "hostRetirementPreparedExact", .runtime_count = 1, .attachment_count = 3 },
-        .{ .identifier = "abortHostRetirement", .runtime_count = 2, .attachment_count = 1 },
+        .{ .identifier = "abortHostRetirement", .backend_count = 1, .runtime_count = 2, .attachment_count = 1 },
         // One additional screen-local caller is the regression proving that a prepared receipt
         // releases the writer gate before the next AppKit frame can read the surface.
         .{ .identifier = "prepareUnavailableFromLive", .runtime_count = 1, .screen_count = 2 },

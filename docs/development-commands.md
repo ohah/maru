@@ -194,7 +194,8 @@ zig build test > /tmp/t.log 2>&1;  mise run test-verdict /tmp/t.log
     `└ 리더 core.write 보유 합/최대/청크 | 리더 락대기`(I/O 스레드가 쥔·기다린 시간)가 따로 찍힌다. **보유가
     짧은데 대기가 길면** 잠금 길이가 아니라 차례(불공정 락 기아) 문제다 — 청크를 더 쪼개지 말 것.
     `└ kitty transmit(락 아래) 합 = base64 + inflate + store + display`는 이미지 마지막 청크가 락 아래에서
-    쓴 시간(§13.7 — 보유가 긴 쪽). 셋 다 SLOW 와 무관하게 1ms 를 넘으면 찍힌다.
+    쓴 시간(§13.7 — 보유가 긴 쪽). 셋 다 SLOW 와 무관하게 1ms 를 넘으면 찍힌다. 1초 요약 끝의 `img=장수/MB`
+    는 그 창에 GPU 로 올린 이미지(§13.8) — SLOW 가 0 이라도 이미지가 실제로 흐르는지 보는 양성 신호다.
     읽는 법과 실측은 [Phase 2~4 계획 §13](plans/io-render-threading.md).
 - macOS visible window smoke 실행: `mise run macos-window-smoke` (창이 너무 빨리 닫히면 `MARU_WINDOW_SMOKE_MS`로 노출 시간을 ms 단위로 늘려 수동 확인한다. 기본 1500ms, 상한 600000ms)
 - macOS window smoke 계약 테스트: `mise run test-macos-window-smoke`

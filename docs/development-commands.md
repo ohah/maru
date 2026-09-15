@@ -202,6 +202,7 @@ zig build test > /tmp/t.log 2>&1;  mise run test-verdict /tmp/t.log
     SLOW 줄의 `횟수=` 는 tick 시작에 0 이 되므로 tick 사이의 호스트 ABI 폴 2회를 **뺀** 값이다.
     `└ grid=` 줄과 1초 창 `shape:` 줄은 활성 grid shaping 의 단계(native[폰트/조립/CTLine/방출]·records·build)와 run
     반복률 시뮬레이션(직전/최근64 프레임) — run 캐시가 그 워크로드에서 얼마나 적중할지의 추정([present cadence §10.7](io-render-present.md)).
+    같은 줄 끝의 `캐시 적중 h/n 항목 e KB` 는 실제 run 캐시(§10.8)의 창 델타와 상주 크기다.
   - 진단 전용 env: `MARU_FT_SPLIT=N` — 열두 번째 tick 에 활성 pane 을 N 개로 가로 split 한다(각 pane 이 같은
     `MARU_INTERACTIVE_SHELL` 페이로드를 돈다). 멀티 pane 이 tick 예산에 미치는 영향을 재현한다(§10.7·§10.8 실측).
     읽는 법과 실측은 [Phase 2~4 계획 §13](plans/io-render-threading.md).

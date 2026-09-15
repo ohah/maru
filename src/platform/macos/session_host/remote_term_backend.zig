@@ -1903,8 +1903,11 @@ pub const RemoteTermBackend = struct {
         self.allocator.destroy(job);
     }
 
-    /// 건너뜀이 **몇 프레임 이어지면** 이상으로 보는가. 프레임 주기가 ~20 ms 라 300 이면 약 6 초다 —
-    /// 재접속 한 바퀴(전이 8 단계)보다 넉넉히 길어 정상 창에서는 안 걸린다.
+    /// 건너뜀이 **몇 틱 이어지면** 이상으로 보는가.
+    ///
+    /// 틱은 AppKit 타이머가 프레임마다 부르므로 **초로 환산하지 않는다** — 프레임률에 달렸고 앱이
+    /// 놀 때는 더 느려진다. 기준은 시간이 아니라 전이 수다: 재접속 한 바퀴는 전이 8 단계이고 각 단계는
+    /// 틱 하나를 쓰므로, 300 이면 정상 재접속보다 훨씬 길어 그 창에서는 안 걸린다.
     pub const not_live_skip_warn_ticks: u32 = 300;
 
     fn logNotLiveSkipStuck(handle: RuntimeHandle, ticks: u32) void {
@@ -3360,18 +3363,25 @@ pub const RemoteTermBackend = struct {
     /// 상한을 넘겨 한 번 남긴 뒤에는 **회복할 때까지 다시 안 남긴다**(`noteIdleTurn` 과 같은 규칙:
     /// 정지가 이어지는 동안은 조용하고 전이 순간에만 남는다). 회복도 한 줄 남겨야 「그래서 풀렸나」를
     /// 로그만으로 답할 수 있다.
-    fn noteNotLiveSkip(self: *RemoteTermBackend, skipped_handle: RuntimeHandle) void {
-        if (skipped_handle == 0 or skipped_handle != self.not_live_skip_handle) {
-            if (self.not_live_skip_reported) logNotLiveSkipCleared(self.not_live_skip_handle, self.not_live_skip_ticks);
-            self.not_live_skip_handle = skipped_handle;
-            self.not_live_skip_ticks = if (skipped_handle == 0) 0 else 1;
-            self.not_live_skip_reported = false;
+    fn noteNotLiveSkip(
+        self: *RemoteTermBackend,
+        skipped_min: RuntimeHandle,
+        tracked_still_skipped: bool,
+    ) void {
+        // 쫓던 런타임이 **여전히** 건너뛰어지고 있으면 계속 센다 — 그 사이 다른 런타임이 같이 걸리든
+        // 말든 상관없다. 이래야 여러 개가 걸린 상황에서도 하나가 붙박이로 멈춘 것을 잡아낸다.
+        if (tracked_still_skipped) {
+            self.not_live_skip_ticks +|= 1;
+            if (self.not_live_skip_reported or self.not_live_skip_ticks < not_live_skip_warn_ticks) return;
+            self.not_live_skip_reported = true;
+            logNotLiveSkipStuck(self.not_live_skip_handle, self.not_live_skip_ticks);
             return;
         }
-        self.not_live_skip_ticks +|= 1;
-        if (self.not_live_skip_reported or self.not_live_skip_ticks < not_live_skip_warn_ticks) return;
-        self.not_live_skip_reported = true;
-        logNotLiveSkipStuck(skipped_handle, self.not_live_skip_ticks);
+        if (self.not_live_skip_reported)
+            logNotLiveSkipCleared(self.not_live_skip_handle, self.not_live_skip_ticks);
+        self.not_live_skip_handle = skipped_min;
+        self.not_live_skip_ticks = if (skipped_min == 0) 0 else 1;
+        self.not_live_skip_reported = false;
     }
 
     pub fn maintenanceEventTick(self: *RemoteTermBackend) void {
@@ -3382,7 +3392,8 @@ pub const RemoteTermBackend = struct {
         }
         var handles: [max_remote_backend_runtimes]RuntimeHandle = undefined;
         var handle_count: usize = 0;
-        var skipped_handle: RuntimeHandle = 0;
+        var skipped_min: RuntimeHandle = 0;
+        var tracked_still_skipped = false;
         var iterator = self.runtimes.iterator();
         while (iterator.next()) |row| {
             // **attachment 가 live 가 아닌 런타임은 이 프레임에서 건너뛴다.** 재접속은 여러 프레임에
@@ -3390,14 +3401,18 @@ pub const RemoteTermBackend = struct {
             // 그 창에서 펌프하면 payload 접근이 abort 한다 — 판정 출처는 `GenerationAttachment.isLive`
             // 하나다(여기서 lifecycle 을 다시 보지 않는 이유).
             if (!RemoteRuntime.backend_api.attachmentLive(row.value_ptr.runtime)) {
-                if (skipped_handle == 0) skipped_handle = row.key_ptr.*;
+                // **가장 작은 handle 을 고른다.** `runtimes` 는 `AutoHashMap` 이라 반복 순서가 규정돼
+                // 있지 않다 — 「처음 걸린 것」을 쓰면 건너뛴 런타임이 둘 이상일 때 매 틱 대상이 바뀌어
+                // 연속 계수가 리셋되고 경고가 영영 안 뜬다.
+                if (skipped_min == 0 or row.key_ptr.* < skipped_min) skipped_min = row.key_ptr.*;
+                if (row.key_ptr.* == self.not_live_skip_handle) tracked_still_skipped = true;
                 continue;
             }
             RemoteRuntime.backend_api.prepareFrameSummary(row.value_ptr.runtime);
             handles[handle_count] = row.key_ptr.*;
             handle_count += 1;
         }
-        self.noteNotLiveSkip(skipped_handle);
+        self.noteNotLiveSkip(skipped_min, tracked_still_skipped);
         if (handle_count == 0) {
             self.event_pump_cursor = 0;
             return;
@@ -6033,6 +6048,28 @@ test "재접속 은퇴 창: 유지보수 틱은 live 가 아닌 attachment 를 �
     remote_runtime.testing_api.generation(&runtime).frame_summary_ready = false;
     backend_value.maintenanceEventTick();
     try testing.expectEqual(@as(usize, 0), B4PumpProbe.count);
+
+    // **건너뛴 것이 둘 이상이어도 계수가 리셋되면 안 된다.** `runtimes` 는 `AutoHashMap` 이라 반복
+    // 순서가 규정돼 있지 않다 — 「처음 걸린 것」을 쫓으면 대상이 매 틱 바뀌어 경고가 영영 안 뜬다.
+    // 같은 런타임을 두 handle 로 넣어 그 상황을 만든다(둘 다 은퇴 상태라 둘 다 건너뛰어진다).
+    try backend_value.runtimes.put(testing.allocator, 2, .{
+        .runtime = &runtime,
+        .host_id = 91,
+        .host_adapter_generation = adapter_generation,
+        .runtime_generation = 1,
+    });
+    backend_value.not_live_skip_handle = 0;
+    backend_value.not_live_skip_ticks = 0;
+    for (0..8) |_| {
+        remote_runtime.testing_api.generation(&runtime).frame_summary_ready = false;
+        backend_value.maintenanceEventTick();
+    }
+    try testing.expectEqual(@as(RuntimeHandle, 1), backend_value.not_live_skip_handle);
+    try testing.expectEqual(@as(u32, 8), backend_value.not_live_skip_ticks);
+    _ = backend_value.runtimes.remove(2);
+    backend_value.not_live_skip_handle = 1;
+    backend_value.not_live_skip_ticks = 1;
+    backend_value.not_live_skip_reported = false;
 
     // **짧은 건너뜀은 조용해야 한다.** 재접속 창은 몇 프레임이면 지나가고, 그때마다 경고를 남기면
     // 그 줄이 쓸모를 잃는다. 상한 직전까지는 보고하지 않는다.

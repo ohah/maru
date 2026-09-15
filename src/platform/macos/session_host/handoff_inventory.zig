@@ -217,6 +217,7 @@ pub const terminal_core_groups = [_]Group{
             "allocator",
             "owner_dbg",
             "handoff", // 스케줄링 힌트(요구 카운터·세대) — exec 뒤엔 스레드가 새로 생기니 0 부터
+            "kitty_defer_decode", // 리더가 다시 붙으며(setProcessing) 켠다
             "dirty",
             "link_ids",
             "grapheme_ids",
@@ -234,8 +235,8 @@ pub const terminal_core_groups = [_]Group{
     },
     .{
         .disposition = .must_be_empty,
-        .fields = &.{"response"},
-        .why = "U2 must flush the core reply into the PTY before the reader reaches its handoff safe point",
+        .fields = &.{ "response", "kitty_pending_jobs" },
+        .why = "U2 must flush the core reply into the PTY before the reader reaches its handoff safe point; deferred kitty decode jobs are drained in the same reader iteration (§13.8) so none may remain",
     },
 };
 
@@ -475,7 +476,7 @@ pub const pty_reader_groups = [_]Group{
     },
     .{
         .disposition = .must_be_empty,
-        .fields = &.{ "thread", "transfer_out", "transfer_out_head", "sync_held_len", "sync_held_since_ns" },
+        .fields = &.{ "thread", "transfer_out", "transfer_out_head", "sync_held_len", "sync_held_since_ns", "kitty_jobs" },
         .why = "U2 non-destructive pause joins the old thread and proves its owned response transfer buffer is empty before encode; the sync(2026) frame hold is flushed at the same safe point so held bytes are never dropped across the handoff",
     },
 };

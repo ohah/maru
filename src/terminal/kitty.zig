@@ -95,11 +95,14 @@ pub const KittyStatus = enum {
     enoent, // 참조한 이미지가 없다(display)
     enotsupp, // maru가 구현하지 않은 기능(전송 매체·애니메이션)
     enomem, // 저장 실패(한 장이 한도 초과, evict로도 자리 부족)
+    /// 응답을 **아직 못 한다** — 디코드를 리더가 락 밖에서 하고 `completeKittyTransmit` 이 답한다(§13.8).
+    /// `kittyReply` 는 이 값을 침묵으로 다룬다. 표시 문자열이 없다.
+    deferred,
 
     /// 응답 본문. 에러는 `<코드>:<사람이 읽는 짧은 이유>` 형식이다(kitty 명세).
     pub fn text(self: KittyStatus) []const u8 {
         return switch (self) {
-            .ok => "OK",
+            .ok, .deferred => "OK", // deferred 는 kittyReply 가 걸러 여기 오지 않는다 — switch 완전성용
             .einval => "EINVAL:bad graphics command",
             .enoent => "ENOENT:no such image",
             .enotsupp => "ENOTSUPP:unsupported graphics feature",
@@ -182,6 +185,13 @@ pub const KittyImage = struct {
     loops_left: u32 = 0,
     /// 현재 프레임에 머문 시간(ms). `advanceAnimations` 가 쌓고 gap 을 넘으면 다음으로 넘긴다.
     elapsed_ms: u64 = 0,
+
+    /// 픽셀이 아직 없다 — 마지막 청크는 받았지만 리더가 락 밖에서 디코드 중이다(§13.8). 정상 이미지는
+    /// `w·h·bpp > 0` 이라 0 바이트일 수 없으므로 길이 0 이 곧 pending 이다(새 필드가 아니라 handoff
+    /// 코덱을 안 건드린다 — 대신 pause 경계에 pending 이 없다는 불변식을 리더가 지킨다).
+    pub fn isPending(self: KittyImage) bool {
+        return self.data.len == 0;
+    }
 
     /// 프레임 개수(루트 포함).
     pub fn frameCount(self: KittyImage) u32 {
@@ -598,7 +608,9 @@ pub fn buildImageViews(self: *TerminalCore) []const types.KittyImageView {
     }
     var i: usize = 0;
     var it = self.kitty_images.map.valueIterator();
-    while (it.next()) |img| : (i += 1) {
+    while (it.next()) |img| {
+        if (img.isPending()) continue; // 픽셀이 아직 없다 — 이 프레임엔 그 placement 를 안 그린다(§13.8)
+        defer i += 1;
         self.image_views[i] = .{
             .image_id = img.id,
             .width = img.width,
@@ -726,20 +738,34 @@ pub fn execKittyGraphics(self: *TerminalCore, cmd_in: KittyGraphicsCommand, payl
         'T' => blk: { // transmit + display(한 command로 저장 후 placement까지)
             const t0: i128 = if (diag_now) |now| now() else 0;
             const transmitted = kittyTransmit(self, cmd, payload, true);
-            if (transmitted != .ok) break :blk transmitted; // 저장이 실패했으면 display는 무의미
+            if (transmitted != .ok and transmitted != .deferred) break :blk transmitted; // 저장이 실패했으면 display는 무의미
             const t1: i128 = if (diag_now) |now| now() else 0;
-            const r = kittyDisplay(self, cmd);
+            // deferred 여도 placement 는 지금 만든다(치수는 cmd 가 안다) — 픽셀이 오면 그 자리에 뜬다. display 가
+            // 실패하면(부모 없음 등) 그 실패를 즉시 답하고, 성공이면 응답은 완료 시점으로 미룬다.
+            const displayed = kittyDisplay(self, cmd);
             if (diag_now) |now| {
                 const t2 = now();
                 diagFinishTransmit(t0, t2, t2 - t1, payload.len);
             }
-            break :blk r;
+            break :blk if (transmitted == .deferred and displayed == .ok) .deferred else displayed;
         },
         'p' => kittyDisplay(self, cmd), // 기존 이미지를 placement로 표시
         'd' => kittyDelete(self, cmd), // delete: d= 타깃에 따라 placement(소문자)/이미지까지(대문자) 제거
-        'f' => kittyTransmitFrame(self, cmd, payload), // 애니메이션 프레임 전송
-        'a' => kittyAnimate(self, cmd), // 애니메이션 제어(재생/정지/반복/현재 프레임/gap)
-        'c' => kittyCompose(self, cmd), // 프레임 합성
+        // 프레임·합성·재생은 루트 픽셀이 있어야 한다. 같은 core.write 안에서 방금 m=0 이 pending 으로 남긴
+        // 이미지면(job 이 아직 코어 큐에 있다) 여기서 인라인으로 끝내고 진행한다 — 앱이 「전송 뒤 곧바로
+        // 프레임」을 한 청크에 보내는 것이 보통이라(icat·timg 의 GIF), 이걸 EINVAL 로 돌려주면 프레임이 사라진다.
+        'f' => blk: {
+            flushPendingKittyImage(self, cmd.image_id);
+            break :blk kittyTransmitFrame(self, cmd, payload);
+        },
+        'a' => blk: {
+            flushPendingKittyImage(self, cmd.image_id);
+            break :blk kittyAnimate(self, cmd);
+        },
+        'c' => blk: {
+            flushPendingKittyImage(self, cmd.image_id);
+            break :blk kittyCompose(self, cmd);
+        },
         else => .enotsupp, // 그 밖의 action 은 명세에 없다 — 침묵 대신 명시 거부
     };
     kittyReply(self, cmd, status);
@@ -755,6 +781,7 @@ pub fn execKittyGraphics(self: *TerminalCore, cmd_in: KittyGraphicsCommand, payl
 /// 그래서 앱들은 maru를 "이미지 못 그리는 터미널"로 판정해 왔다. kitty·Ghostty가 같은 자리에서
 /// 답하고 앱들이 그 응답을 전제로 만들어졌으므로, 표준 동작을 따르는 것이 맞다.
 fn kittyReply(self: *TerminalCore, cmd: KittyGraphicsCommand, status: KittyStatus) void {
+    if (status == .deferred) return; // 디코드가 락 밖에서 끝난 뒤 completeKittyTransmit 이 답한다(§13.8)
     if (cmd.image_id == 0 and cmd.image_number == 0) return; // 식별자(i= 또는 I=) 없는 명령엔 응답하지 않는다(명세)
     if (cmd.quiet >= 2) return; // q=2: 전부 침묵
     if (cmd.quiet == 1 and status == .ok) return; // q=1: 실패만 보고
@@ -1336,6 +1363,7 @@ fn kittyTransmitFrame(self: *TerminalCore, cmd: KittyGraphicsCommand, payload: [
         else => return .einval,
     };
     if (bpp != img.bpp) return .einval; // 프레임은 루트와 같은 픽셀 형식이어야 합성이 성립한다
+    if (img.isPending()) return .einval; // 루트 픽셀이 아직 없다(락 밖 디코드 중) — 합성할 바탕이 없다
     const frame_bytes = img.data.len;
 
     // 프레임 수 상한 — `a=f` 만 반복하는 스트림이 메모리를 무한히 먹지 못하게 한다(총량 한계와 같은 결).
@@ -1664,6 +1692,7 @@ fn kittyTransmit(self: *TerminalCore, cmd: KittyGraphicsCommand, payload: []cons
     // 거부한다(graceful). 안 그러면 Debug/ReleaseSafe에서 panic, ReleaseFast에선 wrap된다(code review).
     const wh = std.math.mul(usize, cmd.width, cmd.height) catch return .einval;
     const expected = std.math.mul(usize, wh, bpp) catch return .einval;
+    if (store and self.kitty_defer_decode) return deferKittyTransmit(self, cmd, payload, bpp, expected);
 
     const data = decodeDirectPixels(self, cmd.compression, payload, expected) catch |e| return switch (e) {
         error.OutOfMemory => .enomem,
@@ -1683,6 +1712,192 @@ fn kittyTransmit(self: *TerminalCore, cmd: KittyGraphicsCommand, payload: []cons
     });
     if (diag_now) |now| diag_last_transmit.store_ns = now() - ts;
     return if (stored) .ok else .enomem;
+}
+
+// ── 락 밖 디코드(§13.8) — 코어는 자리만 잡고, 리더가 unlock 뒤 풀어 재잠금 후 설치한다 ──────────────
+
+/// 리더가 락 밖에서 처리할 전송 하나. `payload`·`old_image` 는 `core.allocator` 소유 — `decodeKittyJob` 이
+/// 락 밖에서 free 한다. `generation` 은 pending 엔트리의 세대 — 완료 시 일치해야 설치한다(같은 id 재전송이
+/// 먼저 자리를 갈아치웠으면 옛 픽셀이 새 자리를 덮지 않게, Ghostty `PendingImage.generation` 과 같은 뜻).
+pub const KittyPendingJob = struct {
+    cmd: KittyGraphicsCommand,
+    payload: []u8,
+    generation: u64,
+    expected: usize,
+    bpp: u8,
+    /// 같은 id 교체로 map 에서 밀려난 옛 이미지. 그 순간부터 아무도 참조하지 않으니(메인은 락 아래에서
+    /// 픽셀을 자기 버퍼로 복사해 나온다) 락 밖에서 `freeAll` 한다 — ReleaseSafe 에서 1.56ms 였던 free.
+    old_image: ?KittyImage = null,
+};
+
+/// 락 밖 디코드 결과. 응답은 **디코드 결과**를 말한다 — 설치 여부(교체·삭제로 무효)는 별개다.
+pub const KittyDecoded = union(enum) {
+    pixels: []u8,
+    invalid,
+    oom,
+};
+
+/// m=0 에서 pending 엔트리를 만들고 job 을 큐에 넣는다. 락 아래에서 하는 일은 검증·복사(payload 수백 KB)·
+/// map 갱신뿐 — 픽셀 수에 비례하는 일은 없다.
+fn deferKittyTransmit(self: *TerminalCore, cmd: KittyGraphicsCommand, payload: []const u8, bpp: u8, expected: usize) KittyStatus {
+    if (payload.len == 0) return .einval;
+    if (expected > self.kitty_images.limit) return .enomem; // 한 장이 전체 한도 초과 — 디코드해 볼 것도 없다
+    const owned = self.allocator.dupe(u8, payload) catch return .enomem;
+    // 같은 id 는 교체 — 옛 것을 map 에서 빼 job 에 실어 보내고(락 밖 free), 자리엔 pending 엔트리를 둔다.
+    var old_image: ?KittyImage = null;
+    if (self.kitty_images.map.fetchRemove(cmd.image_id)) |old| {
+        self.kitty_images.total_bytes -= old.value.totalBytes();
+        old_image = old.value;
+    }
+    self.kitty_images.gen_counter += 1;
+    const generation = self.kitty_images.gen_counter;
+    self.kitty_images.map.put(self.allocator, cmd.image_id, .{
+        .id = cmd.image_id,
+        .width = cmd.width,
+        .height = cmd.height,
+        .bpp = bpp,
+        .data = &.{}, // pending — isPending()
+        .generation = generation,
+    }) catch {
+        self.allocator.free(owned);
+        if (old_image) |*o| o.freeAll(self.allocator);
+        removePlacementsForImage(self, cmd.image_id); // 옛 이미지도 사라졌으니 그 placement 는 고아다
+        return .enomem;
+    };
+    self.kitty_pending_jobs.append(self.allocator, .{
+        .cmd = cmd,
+        .payload = owned,
+        .generation = generation,
+        .expected = expected,
+        .bpp = bpp,
+        .old_image = old_image,
+    }) catch {
+        self.allocator.free(owned);
+        if (old_image) |*o| o.freeAll(self.allocator);
+        _ = self.kitty_images.map.remove(cmd.image_id);
+        removePlacementsForImage(self, cmd.image_id);
+        return .enomem;
+    };
+    return .deferred;
+}
+
+/// 리더가 **락 아래에서** 쌓인 job 을 자기 목록으로 옮긴다(포인터 이동뿐). 옮긴 뒤 코어 목록은 빈다.
+pub fn takePendingKittyJobs(self: *TerminalCore, into: *std.ArrayListUnmanaged(KittyPendingJob), alloc: std.mem.Allocator) error{OutOfMemory}!void {
+    if (self.kitty_pending_jobs.items.len == 0) return;
+    try into.appendSlice(alloc, self.kitty_pending_jobs.items);
+    self.kitty_pending_jobs.clearRetainingCapacity();
+}
+
+/// 락 **밖**에서: base64 → (zlib) → 픽셀. job 의 payload·옛 이미지를 여기서 free 한다(둘 다 `alloc` 소유).
+/// 코어를 만지지 않는다 — `self` 없이 순수 함수다.
+pub fn decodeKittyJob(job: *KittyPendingJob, alloc: std.mem.Allocator) KittyDecoded {
+    defer {
+        alloc.free(job.payload);
+        job.payload = &.{};
+        if (job.old_image) |*o| o.freeAll(alloc);
+        job.old_image = null;
+    }
+    const dec = std.base64.standard.Decoder;
+    const decoded_len = dec.calcSizeForSlice(job.payload) catch return .invalid;
+    if (decoded_len == 0) return .invalid;
+    if (job.cmd.compression == 0 and decoded_len != job.expected) return .invalid;
+    const raw = alloc.alloc(u8, decoded_len) catch return .oom;
+    dec.decode(raw, job.payload) catch {
+        alloc.free(raw);
+        return .invalid;
+    };
+    switch (job.cmd.compression) {
+        0 => return .{ .pixels = raw },
+        'z' => {
+            defer alloc.free(raw);
+            const out = png.inflateExact(alloc, raw, job.expected) catch |e| return switch (e) {
+                error.OutOfMemory => .oom,
+                else => .invalid,
+            };
+            if (out.len != job.expected) {
+                alloc.free(out);
+                return .invalid;
+            }
+            return .{ .pixels = out };
+        },
+        else => {
+            alloc.free(raw);
+            return .invalid;
+        },
+    }
+}
+
+/// 재잠금 뒤: 디코드 결과를 pending 엔트리에 설치하고 **응답**한다. 엔트리가 없거나(삭제·RIS) 세대가 다르면
+/// (같은 id 재전송이 먼저 자리를 갈아치움) 픽셀만 버린다 — 응답은 그래도 디코드 결과대로 한다(앱은 `i=` 로
+/// 짝을 맞추고, 자기 재전송으로 옛 것을 밀어낸 건 앱의 선택이다). 한도·evict 는 여기서 실 크기로 판정한다.
+pub fn completeKittyTransmit(self: *TerminalCore, job: KittyPendingJob, decoded: KittyDecoded) void {
+    const status: KittyStatus = switch (decoded) {
+        .invalid => blk: {
+            dropPendingKittyEntry(self, job);
+            break :blk .einval;
+        },
+        .oom => blk: {
+            dropPendingKittyEntry(self, job);
+            break :blk .enomem;
+        },
+        .pixels => |pixels| blk: {
+            const entry = self.kitty_images.map.getPtr(job.cmd.image_id);
+            const live = entry != null and entry.?.generation == job.generation and entry.?.isPending();
+            if (!live) {
+                self.allocator.free(pixels); // 교체·삭제로 자리가 사라졌다 — 픽셀은 갈 곳이 없다
+                break :blk .ok;
+            }
+            const after = self.kitty_images.total_bytes + pixels.len;
+            if (after > self.kitty_images.limit) {
+                evictKittyImagesFor(self, after - self.kitty_images.limit, job.cmd.image_id);
+            }
+            if (self.kitty_images.total_bytes + pixels.len > self.kitty_images.limit) {
+                self.allocator.free(pixels);
+                dropPendingKittyEntry(self, job);
+                break :blk .enomem;
+            }
+            // evict 가 map 을 바꿨을 수 있어 포인터를 다시 잡는다(exclude 라 이 엔트리는 남아 있다).
+            const e = self.kitty_images.map.getPtr(job.cmd.image_id).?;
+            e.data = pixels;
+            self.kitty_images.total_bytes += pixels.len;
+            break :blk .ok;
+        },
+    };
+    kittyReply(self, job.cmd, status);
+}
+
+/// 디코드 실패·한도 초과 — pending 엔트리(세대 일치 시)와 그 placement 를 걷는다.
+fn dropPendingKittyEntry(self: *TerminalCore, job: KittyPendingJob) void {
+    const entry = self.kitty_images.map.get(job.cmd.image_id) orelse return;
+    if (entry.generation != job.generation or !entry.isPending()) return; // 이미 다른 전송의 자리다
+    self.kitty_images.remove(self.allocator, job.cmd.image_id); // pending 이라 free 할 픽셀은 없다
+    removePlacementsForImage(self, job.cmd.image_id);
+}
+
+/// 이 id 의 pending 이미지를 **지금 인라인으로** 끝낸다 — job 이 아직 코어 큐에 있을 때만 가능하다(같은
+/// `core.write` 안). 리더가 이미 가져간 job 은 그 조각의 `applyToCore` 끝에서 완료되므로 다음 `core.write`
+/// 가 시작될 땐 pending 이 없다 — 그래서 여기서 못 찾는 pending 은 있을 수 없고, 있어도 그냥 둔다.
+fn flushPendingKittyImage(self: *TerminalCore, image_id: u32) void {
+    var i: usize = 0;
+    while (i < self.kitty_pending_jobs.items.len) {
+        if (self.kitty_pending_jobs.items[i].cmd.image_id != image_id) {
+            i += 1;
+            continue;
+        }
+        var job = self.kitty_pending_jobs.orderedRemove(i);
+        const decoded = decodeKittyJob(&job, self.allocator);
+        completeKittyTransmit(self, job, decoded);
+        // 같은 id 의 job 이 여럿일 수 있다(완료 전 재전송) — 순서대로 전부 흘려보낸다(세대가 걸러 준다).
+    }
+}
+
+/// 코어 소유 job 목록을 비운다(RIS·deinit — 리더가 가져가지 않은 채 남은 것). 락 아래.
+pub fn discardPendingKittyJobs(self: *TerminalCore) void {
+    for (self.kitty_pending_jobs.items) |*job| {
+        self.allocator.free(job.payload);
+        if (job.old_image) |*o| o.freeAll(self.allocator);
+    }
+    self.kitty_pending_jobs.clearRetainingCapacity();
 }
 
 /// 진단 마무리 — 합계·display 를 적고 세대를 올린다(메인이 «이 tick 안에 전송이 있었나»를 세대로 안다).

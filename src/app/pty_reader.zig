@@ -575,6 +575,9 @@ pub const PtyReader = struct {
     // 바이트만 큐에 넣는다(3b-1: 주입만, 동작 불변). 코어 write는 self.session으로 응답을 되쓴다.
     core: ?*terminal.TerminalCore = null,
     core_mutex: ?*std.Io.Mutex = null,
+    /// 락 밖에서 디코드할 kitty 전송(§13.8). `applyToCore` 가 락 아래에서 코어 큐를 여기로 옮기고,
+    /// `drainKittyJobs` 가 같은 iteration 안에 다 처리한다 — pause 경계에 남지 않는다.
+    kitty_jobs: std.ArrayListUnmanaged(terminal.kitty.KittyPendingJob) = .empty,
     io: std.Io = undefined,
     // 단일 writer(docs/plans/io-render-threading.md §8 P2-3b): processing 경로에서 메인 입력(키/paste/스크롤)이
     // 이 큐로 들어오면 runProcessing이 같은 poll 루프에서 drain해 PTY로 write한다 — 메인은 직접 안 쓴다.
@@ -736,17 +739,55 @@ pub const PtyReader = struct {
         const t0: i128 = if (diag_on) std.Io.Clock.awake.now(self.io).nanoseconds else 0;
         core.owner_dbg.lock(mutex, self.io);
         const t1: i128 = if (diag_on) std.Io.Clock.awake.now(self.io).nanoseconds else 0;
+        // 이 호출이 만드는 이미지 job 은 아래 drainKittyJobs 가 책임진다 — 그래서 **이 호출 동안만** 디코드를
+        // 미룬다(§13.8). 다른 호출자(메인이 lockCore 아래 core.write 하는 테스트·경로)는 인라인이라 pending 을
+        // 남기지 않는다.
+        core.kitty_defer_decode = true;
         core.write(bytes) catch {}; // best-effort(파서 OOM 등은 그 청크 드롭)
+        core.kitty_defer_decode = false;
         const reply = core.pendingResponse();
         if (reply.len > 0) {
             appendResponseBounded(self.allocator, out_buf, out_head.*, reply);
             core.clearResponse();
         }
+        // 이 청크가 만든 락 밖 디코드 job 을 가져온다(포인터 이동). OOM 이면 코어 큐에 남겨 두고 다음
+        // 청크에서 다시 시도한다 — pending 엔트리는 그동안 그리지 않을 뿐이다.
+        terminal.kitty.takePendingKittyJobs(core, &self.kitty_jobs, self.allocator) catch {};
         core.owner_dbg.unlock(mutex, self.io);
         if (diag_on) diagRecordHold(t0, t1, std.Io.Clock.awake.now(self.io).nanoseconds, bytes.len);
         // 청크 경계: 메인이 락을 요구 중이면 차례를 넘긴다. 이 루프는 pty 청크(~1KB)마다 재잠금하고 사이에
         // 잠들지 않아, 양보 없이는 불공정 mutex 아래 메인이 보유(~0.13ms)의 수십 배를 기다린다(plans §13).
         core.handoff.yieldToDemand(self.io);
+        // 이 청크가 남긴 이미지 job 을 지금 끝낸다(락 밖 디코드 → 재잠금 설치). 다음 applyToCore 가 시작될 때
+        // pending 이미지가 없도록 — 같은 applySyncFramed 안의 뒷 조각이 그 이미지에 프레임을 얹을 수 있다.
+        self.drainKittyJobs(core, mutex, out_buf, out_head);
+    }
+
+    /// 락 **밖**에서 디코드하고 재잠금해 설치·응답한다(docs/plans/io-render-threading.md §13.8). `applyToCore` 가
+    /// 조각마다 끝에 부른다 — 렌더 신호는 그 뒤라 완료된 픽셀이 같은 신호로 투영된다.
+    /// job 마다 lock 1회: 설치는 포인터 대입이라 보유는 µs 다. 디코드 5.6MB(3~5ms)는 이 스레드 것이고
+    /// 메인은 무관하다.
+    fn drainKittyJobs(
+        self: *PtyReader,
+        core: *terminal.TerminalCore,
+        mutex: *std.Io.Mutex,
+        out_buf: *std.ArrayList(u8),
+        out_head: *usize,
+    ) void {
+        if (self.kitty_jobs.items.len == 0) return;
+        defer self.kitty_jobs.clearRetainingCapacity();
+        for (self.kitty_jobs.items) |*job| {
+            const decoded = terminal.kitty.decodeKittyJob(job, core.allocator); // 락 밖 — payload·옛 이미지 free 포함
+            core.owner_dbg.lock(mutex, self.io);
+            terminal.kitty.completeKittyTransmit(core, job.*, decoded);
+            const reply = core.pendingResponse();
+            if (reply.len > 0) {
+                appendResponseBounded(self.allocator, out_buf, out_head.*, reply);
+                core.clearResponse();
+            }
+            core.owner_dbg.unlock(mutex, self.io);
+            core.handoff.yieldToDemand(self.io);
+        }
     }
 
     pub fn init(
@@ -850,6 +891,15 @@ pub const PtyReader = struct {
         if (self.sync_held_buf) |buf| self.allocator.free(buf);
         self.sync_held_buf = null;
         self.sync_held_len = 0;
+        // 정상 경로에선 비어 있다(drainKittyJobs 가 같은 iteration 에 다 처리). 스레드가 도중에 끝난 경우의 잔여만
+        // 여기서 free 한다 — payload·옛 이미지는 core.allocator 소유라 그쪽으로 돌려준다.
+        if (self.core) |core| {
+            for (self.kitty_jobs.items) |*job| {
+                core.allocator.free(job.payload);
+                if (job.old_image) |*o| o.freeAll(core.allocator);
+            }
+        }
+        self.kitty_jobs.deinit(self.allocator);
     }
 
     pub fn join(self: *PtyReader) void {
@@ -953,8 +1003,10 @@ pub const PtyReader = struct {
         if (self.command_queue) |cq| if (!cq.emptyAndOpen()) return false;
         const core = self.core orelse return false;
         const mutex = self.core_mutex orelse return false;
+        if (self.kitty_jobs.items.len != 0) return false; // 락 밖 디코드가 남아 있으면 handoff 불가(§13.8 불변식)
         core.owner_dbg.lock(mutex, self.io);
         defer core.owner_dbg.unlock(mutex, self.io);
+        if (core.kitty_pending_jobs.items.len != 0) return false;
         return core.pendingResponse().len == 0;
     }
 
@@ -1163,7 +1215,7 @@ pub const PtyReader = struct {
                         // 꼬리는 코어에 안 넣고 들고 있다가 다음 청크와 이어 붙인다. 그래야 메인이 30Hz 로
                         // 읽는 격자가 **언제나 완성 프레임**이다 — 없으면 청크가 프레임 한가운데서 끝나
                         // 그리다 만 화면이 그대로 투영된다(실측 18/18 tick).
-                        self.applySyncFramed(core, mutex, readbuf[0..n], out_buf, out_head);
+                        self.applySyncFramed(core, mutex, readbuf[0..n], out_buf, out_head); // 조각마다 이미지 job 까지 끝낸다(§13.8)
                         // 메인에 "출력 발생" 신호(빈 bytes): output_events를 올려 렌더 트리거. **비블로킹**(tryPush)으로
                         // 보낸다 — 큐가 차면 드롭한다. 근거: (1) 빈 신호라 데이터 손실 없음 — 렌더는 코어 최신 상태를
                         // 읽고, 큐에 이미 신호가 있어 catch-up 렌더가 일어난다(드롭=렌더 coalescing). (2) pushBlocking이면

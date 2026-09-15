@@ -6952,6 +6952,8 @@ pub const AppSession = struct {
     ft_kitty_gen: u32 = 0, // tick 시작 시점의 kitty transmit 세대 — 끝에서 달라졌으면 이 tick 안에 전송이 있었다
     ft_collect_n: [ft_collect_slots]u32 = .{0} ** ft_collect_slots,
     ft_sum_place: i128 = 0,
+    ft_win_img_bytes: usize = 0, // 이 1초 창에 GPU 로 올린 이미지 픽셀 바이트(planImageUploads 합) — 이미지가 실제로 흐르는지의 양성 신호
+    ft_win_img_count: u32 = 0,
     ft_sum_assemble: i128 = 0,
     ft_max_total: i128 = 0,
 
@@ -19727,11 +19729,13 @@ pub const AppSession = struct {
         self.ft_sum_chrome += d_chrome;
         self.ft_sum_place += d_place;
         self.ft_sum_assemble += d_assemble;
+        self.ft_win_img_bytes += metal_frame.diag_plan_bytes;
+        self.ft_win_img_count += metal_frame.diag_plan_images;
         if (total > self.ft_max_total) self.ft_max_total = total;
         const window = t_end - self.ft_window_start;
         if (window >= std.time.ns_per_s) {
             const rate = @as(f64, @floatFromInt(self.ft_ticks)) * @as(f64, @floatFromInt(std.time.ns_per_s)) / @as(f64, @floatFromInt(window));
-            frametime_diag.info("window={d:.2}s ticks={d} rate={d:.1}Hz total(ms) mean={d:.2} max={d:.1} | titles={d:.0}% drain={d:.0}% project={d:.0}% [shape={d:.0}%(grid={d:.0}% chrome={d:.0}%) place={d:.0}% assemble={d:.0}%]", .{
+            frametime_diag.info("window={d:.2}s ticks={d} rate={d:.1}Hz total(ms) mean={d:.2} max={d:.1} | titles={d:.0}% drain={d:.0}% project={d:.0}% [shape={d:.0}%(grid={d:.0}% chrome={d:.0}%) place={d:.0}% assemble={d:.0}%] img={d}/{d:.1}MB", .{
                 @as(f64, @floatFromInt(window)) / @as(f64, @floatFromInt(std.time.ns_per_s)),
                 self.ft_ticks,
                 rate,
@@ -19745,6 +19749,8 @@ pub const AppSession = struct {
                 nsPct(self.ft_sum_chrome, self.ft_sum_total),
                 nsPct(self.ft_sum_place, self.ft_sum_total),
                 nsPct(self.ft_sum_assemble, self.ft_sum_total),
+                self.ft_win_img_count,
+                @as(f64, @floatFromInt(self.ft_win_img_bytes)) / (1024.0 * 1024.0),
             });
             self.ft_window_start = 0;
             self.ft_ticks = 0;
@@ -19756,6 +19762,8 @@ pub const AppSession = struct {
             self.ft_sum_grid = 0;
             self.ft_sum_chrome = 0;
             self.ft_sum_place = 0;
+            self.ft_win_img_bytes = 0;
+            self.ft_win_img_count = 0;
             self.ft_sum_assemble = 0;
             self.ft_max_total = 0;
         }

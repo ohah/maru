@@ -529,6 +529,23 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     }
 }
 
+/// 화면 크기에 **제약받지 않는** fixture 전용 창.
+///
+/// AppKit 은 기본으로 창을 화면 안으로 줄인다(`constrainFrameRect`). 그래서 아카이브 fixture 가 요청하는
+/// 1920×1200 pt 가 **러너 화면이 작으면 조용히 잘리고**, 판정 결과가 「그 기계의 화면 크기」에 달리게 된다.
+/// 실측(2026-09-15, PR #3743): 로컬 Mac Studio 는 터미널 135열로 열려 통과했는데 GitHub macOS 러너는 38열로
+/// 잘려 확장 detail 이 설 자리가 없어 `timeout_observeLoading` 으로 죽었다 — 같은 코드, 다른 화면, 다른 답이다.
+///
+/// 제약을 빼면 창이 화면 밖으로 나갈 수 있지만 **이 fixture 에는 무해하다**: 판정과 캡처는 Metal 레이어에서
+/// 읽으며 창이 눈에 보이는지와 무관하고, fixture 는 스스로 끝나고 종료한다. 제품 창은 이 클래스를 쓰지 않으므로
+/// 사용자 창의 "타이틀바를 화면에 남긴다" 규칙(`clampFrameToVisibleScreens`)은 그대로다.
+@MainActor
+final class MaruUnconstrainedFixtureWindow: NSWindow {
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
+        return frameRect
+    }
+}
+
 // MARK: - Phase 4b-2: 모달 오버레이 Metal 뷰 (컨테이너 맨 위, 투명)
 //
 // 터미널 레이어 위에 합성되는 **별도 물리 CAMetalLayer**. isOpaque=false·평소 clear(투명)라 아래 터미널
@@ -3880,6 +3897,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // 컬렉션에서 view/key 창으로 고른다. quick terminal이 별도(특수) surface다. 아래 계산 프로퍼티들은
     // 기존 세션별 메서드가 코드 변경 없이 "활성 surface"의 상태를 읽고 쓰게 하는 forwarder다(상태만 분리).
     private var windows: [TerminalSurface] = []
+    /// 아카이브 fixture 창이 **실제로 연** content 크기(pt, "WxH"). 빈 문자열이면 fixture 가 아니거나
+    /// 드라이버가 한 번도 안 돌았다는 뜻이다.
+    private var agentSessionArchiveSmokeContentSize: String = ""
     // restore 중 어느 saved Window라도 apply하지 못했으면 이번 실행의 default/fallback 창으로 마지막 완전
     // checkpoint를 덮지 않는다. 사용자가 새로 저장할 명시 UX가 생기기 전에는 데이터 보존을 우선한다.
     private var workspaceRestoreIncomplete = false
@@ -5165,7 +5185,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         let initialContentSize = isAgentSessionArchiveSmokeMode
             ? NSSize(width: 1920, height: 1200)
             : (ftWindowOverride ?? NSSize(width: 960, height: 600))
-        let window = NSWindow(
+        // fixture 는 화면 제약을 받지 않는 창을 쓴다 — 위 1920×1200 이 러너 화면에 따라 잘리면
+        // 판정이 기계마다 달라진다(`MaruUnconstrainedFixtureWindow` 주석의 실측).
+        let windowClass: NSWindow.Type = isAgentSessionArchiveSmokeMode
+            ? MaruUnconstrainedFixtureWindow.self
+            : NSWindow.self
+        let window = windowClass.init(
             contentRect: NSRect(origin: .zero, size: initialContentSize),
             styleMask: [.titled, .closable, .resizable, .miniaturizable],
             backing: .buffered,
@@ -11158,6 +11183,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 _ = self.renderTick()
             }
         }
+        // **창이 살아 있는 지금** 실제 크기를 적어 둔다. summary 는 창을 정리한 뒤에 쓰이므로 그때
+        // 물으면 늘 빈 값이다(실측: 15개 시나리오 전부 빈 문자열이었다). 요청값이 아니라 결과를 남기는
+        // 것이 요점이다 — AppKit 이 화면에 맞춰 줄이면 판정이 기계마다 달라지는데, 크기가 없으면
+        // "왜 여기서 멈췄나" 를 계수기로 역추적해야 한다(PR #3743 에서 `surface_cols` 135↔38 대조로 겨우 찾았다).
+        let archiveContentSize = window.contentLayoutRect.size
+        agentSessionArchiveSmokeContentSize = "\(Int(archiveContentSize.width.rounded()))x\(Int(archiveContentSize.height.rounded()))"
         agentSessionArchiveSmokeTerminalInvariant = driver.terminalInvariantSatisfied
         agentSessionArchiveSmokeScrollDispatched = driver.scrollDispatched
         agentSessionArchiveSmokeAnchorBeforePresent = driver.anchorBeforePresent
@@ -12771,6 +12802,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         session_host_input_smoke_failure=\(sessionHostInputSmokeFailure)
         agent_session_archive_smoke_stage=\(archiveSmokeStage)
         agent_session_archive_smoke_failure=\(archiveSmokeFailure)
+        agent_session_archive_smoke_content_size=\(agentSessionArchiveSmokeContentSize)
         agent_session_archive_smoke_scenario=\(archiveSmokeScenario)
         agent_session_archive_smoke_fake_resume_verdict=\(archiveSmokeFakeResumeVerdict())
         agent_session_archive_smoke_reveal_allowed_count=\(agentSessionArchiveSmokeRevealAllowedCount)

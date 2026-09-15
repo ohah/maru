@@ -750,18 +750,29 @@ pub const Client = struct {
             self.finalizePendingUpgrade();
             return;
         }
+        // `partial_timeout` 은 이 함수 안에서만 **네 자리**가 쓰고, 넷의 고칠 곳이 전부 다르다.
+        // 2026-09-15 실측: host 로그 88 개에 이 사유가 126 번 있었는데 전부 `site=-` 였고,
+        // `why_ra` 로도 못 갈랐다 — 최적화가 네 자리를 뭉개 줄번호가 `defer` 와
+        // `producer_sweep_cursor %` 를 가리켰다. 그래서 숫자 126 은 **사고인지 정상 회수인지조차
+        // 말하지 못한다**. 자리 이름을 붙여 그 126 을 읽을 수 있게 만든다.
         if (!self.connection.handshakeComplete() and
             elapsedAtLeast(self.created_ns, now_ns, handshake_deadline_ns))
-            return self.beginClose(.partial_timeout);
+            return self.beginCloseAt("tick_handshake_deadline", .partial_timeout);
         if (self.admin_request_deadline_at_ns) |deadline|
-            if (now_ns >= deadline) return self.beginClose(.partial_timeout);
+            if (now_ns >= deadline) return self.beginCloseAt("tick_admin_request_deadline", .partial_timeout);
+        // 이 하나만 **정상 회수**다 — 구독이 0 이고 쓸 것도 없는 연결을 거둔다. 나머지 셋과 한
+        // 이름으로 묶이면 「사고가 126 번」으로 읽힌다.
         if (self.connection.handshakeComplete() and
             self.connection.attachmentCount() == 0 and
             !self.wantsWrite() and
             elapsedAtLeast(self.last_activity_ns, now_ns, unattached_idle_deadline_ns))
-            return self.beginClose(.partial_timeout);
-        if (slot.partialExpired(.read, now_ns) or slot.partialExpired(.write, now_ns))
-            return self.failPendingUpgrade(.partial_timeout);
+            return self.beginCloseAt("tick_unattached_idle", .partial_timeout);
+        // read 와 write 도 가른다. write 정체는 **client 가 안 빼간다**(배압)이고 read 정체는
+        // **client 가 안 보낸다**로, 의심할 쪽이 서로 반대다.
+        if (slot.partialExpired(.write, now_ns))
+            return self.failPendingUpgradeAt("tick_partial_write_stalled", .partial_timeout);
+        if (slot.partialExpired(.read, now_ns))
+            return self.failPendingUpgradeAt("tick_partial_read_stalled", .partial_timeout);
         if (self.close_after_flush != null) return;
         var lease = if (self.admission_gate) |gate| gate.tryEnter() orelse return else null;
         defer if (lease) |*held| held.release();
@@ -1575,6 +1586,11 @@ pub const Client = struct {
     }
 
     fn failPendingUpgrade(self: *Client, reason: CloseReason) void {
+        self.failPendingUpgradeAt("-", reason);
+    }
+
+    /// 대기 중인 업그레이드를 접고 **자리 이름을 남기며** 닫는다.
+    fn failPendingUpgradeAt(self: *Client, site: []const u8, reason: CloseReason) void {
         if (self.pending_upgrade) |attempt_id| {
             if (self.upgrade_ops) |ops| ops.cancel_unaccepted(ops.ctx, attempt_id);
             self.pending_upgrade = null;
@@ -1583,7 +1599,7 @@ pub const Client = struct {
             self.admission_gate.?.cancelClose();
             self.upgrade_gate_closed = false;
         }
-        self.beginClose(reason);
+        self.beginCloseAt(site, reason);
     }
 
     fn finalizePendingUpgrade(self: *Client) void {
@@ -4089,4 +4105,117 @@ test "socketpair read partial clock resets at the next frame boundary" {
     );
     try testing.expect(!slot.partialExpired(.read, 30 * std.time.ns_per_s - 1));
     try testing.expect(slot.partialExpired(.read, 30 * std.time.ns_per_s));
+}
+
+// 2026-09-15 실측이 세운 판정자다. host 로그 88 개에 `why=partial_timeout` 이 126 번 있었는데
+// 전부 `site=-` 여서 **사고인지 정상 회수인지조차** 가릴 수 없었다. `why_ra` 도 소용이 없었다 —
+// 최적화가 네 자리를 뭉개 줄번호가 `defer` 와 `producer_sweep_cursor %` 를 가리켰다.
+// 그러므로 「이름이 다르다」가 아니라 **「네 갈래를 실제로 몰아넣고 각각 제 이름이 나온다」** 를 센다.
+test "tick tells its four partial_timeout sites apart by name" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const testing = std.testing;
+
+    const Fixture = struct {
+        fds: [2]c_int = undefined,
+        registry_value: registry.TerminalRuntimeRegistry,
+        subscriptions: subscription_identity.Table,
+        reactor: *slot_mod.ReactorCore,
+        client: *Client,
+
+        fn open(id: u64) !@This() {
+            var fds: [2]c_int = undefined;
+            if (c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds) != 0)
+                return error.TestUnexpectedResult;
+            var self: @This() = .{
+                .fds = fds,
+                .registry_value = registry.TerminalRuntimeRegistry.init(testing.allocator),
+                .subscriptions = subscription_identity.Table.init(testing.allocator),
+                .reactor = try slot_mod.ReactorCore.create(testing.allocator),
+                .client = undefined,
+            };
+            self.client = try Client.create(
+                testing.allocator,
+                fds[0],
+                self.reactor,
+                id,
+                &self.registry_value,
+                &self.subscriptions,
+                .{ .now_ns = 100 },
+            );
+            return self;
+        }
+
+        /// hello 를 흘려 넣어 핸드셰이크를 끝낸다 — 그래야 첫 갈래(핸드셰이크 데드라인)가
+        /// 뒤 세 갈래를 가로채지 않는다.
+        fn shakeHands(self: *@This()) !void {
+            try sendTestFrame(
+                self.fds[1],
+                .hello,
+                1,
+                "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\"}",
+            );
+            self.client.readReady(100);
+            self.client.writeReady(100);
+            _ = drainNonblocking(self.fds[1]);
+            try testing.expect(self.client.connection.handshakeComplete());
+        }
+
+        fn close(self: *@This()) void {
+            self.client.destroy();
+            self.reactor.destroy();
+            self.subscriptions.deinit();
+            self.registry_value.deinit();
+            _ = c.close(self.fds[1]);
+        }
+    };
+
+    // ① 핸드셰이크를 끝내지 않은 채 데드라인을 넘긴다.
+    {
+        var fx = try Fixture.open(901);
+        defer fx.close();
+        fx.client.tick(100 + handshake_deadline_ns);
+        try testing.expect(fx.client.isClosing());
+        try testing.expectEqual(CloseReason.partial_timeout, fx.client.closeReason().?);
+        try testing.expectEqualStrings("tick_handshake_deadline", fx.client.closeSite());
+    }
+
+    // ② 구독이 0 인 연결을 유휴로 거둔다 — 넷 중 **이것만 정상**이다.
+    {
+        var fx = try Fixture.open(902);
+        defer fx.close();
+        try fx.shakeHands();
+        try testing.expectEqual(@as(usize, 0), fx.client.connection.attachmentCount());
+        fx.client.tick(100 + unattached_idle_deadline_ns);
+        try testing.expect(fx.client.isClosing());
+        try testing.expectEqual(CloseReason.partial_timeout, fx.client.closeReason().?);
+        try testing.expectEqualStrings("tick_unattached_idle", fx.client.closeSite());
+    }
+
+    // ③ 쓰기가 정체한다 — client 가 안 빼간다(배압). 유휴(30 s) 보다 **먼저** 걸려야 한다.
+    {
+        var fx = try Fixture.open(903);
+        defer fx.close();
+        try fx.shakeHands();
+        const slot = try fx.reactor.get(fx.client.admission);
+        slot.clearPartial(.read);
+        slot.notePartial(.write, 100, false);
+        fx.client.tick(100 + slot_mod.partial_deadline_ns);
+        try testing.expect(fx.client.isClosing());
+        try testing.expectEqual(CloseReason.partial_timeout, fx.client.closeReason().?);
+        try testing.expectEqualStrings("tick_partial_write_stalled", fx.client.closeSite());
+    }
+
+    // ④ 읽기가 정체한다 — client 가 안 보낸다. ③ 과 의심할 쪽이 정반대라 이름이 달라야 한다.
+    {
+        var fx = try Fixture.open(904);
+        defer fx.close();
+        try fx.shakeHands();
+        const slot = try fx.reactor.get(fx.client.admission);
+        slot.clearPartial(.write);
+        slot.notePartial(.read, 100, false);
+        fx.client.tick(100 + slot_mod.partial_deadline_ns);
+        try testing.expect(fx.client.isClosing());
+        try testing.expectEqual(CloseReason.partial_timeout, fx.client.closeReason().?);
+        try testing.expectEqualStrings("tick_partial_read_stalled", fx.client.closeSite());
+    }
 }

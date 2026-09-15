@@ -156,3 +156,83 @@ test "collectOutput 이 접히면 어느 자리였는지와 원래 오류를 남
     try std.testing.expect(std.mem.indexOf(u8, log, "site={s}") != null);
     try std.testing.expect(std.mem.indexOf(u8, log, "err={s}") != null);
 }
+
+// `tick` 안의 `partial_timeout` 이 **익명으로 닫지 않는다.**
+//
+// ## 무엇이 있었나
+//
+// 2026-09-15 실측 — host 로그 88 개에 `why=partial_timeout` 이 **126 번** 있었다. 전부 `site=-` 라
+// 넷 중 무엇인지 알 수 없었고, `why_ra` 로도 못 갈랐다: 최적화가 네 자리를 뭉개 줄번호가 `defer`
+// (745) 와 `producer_sweep_cursor %` (775) 를 가리켰다. 그래서 그 126 은 **사고인지 정상 회수인지조차**
+// 말하지 못했다 — 넷 중 `unattached_idle` 하나는 구독 0 인 연결을 거두는 **정상**이다.
+//
+// 순수 판정자는 네 갈래를 직접 몰아넣어 이름을 확인한다. 그런데 **다섯째 자리가 익명으로 새로
+// 생기는 것**은 못 본다 — 그것은 이 축에서 센다. 이름 없는 자리가 하나만 남아도 그날의 로그는
+// 다시 「126 번, 무엇인지 모름」이 된다.
+test "tick 의 partial_timeout 은 자리 이름 없이 닫지 않는다" {
+    const a = std.testing.allocator;
+    const turn_raw = try read(a, turn_path);
+    defer a.free(turn_raw);
+    const turn = try stripComments(a, turn_raw);
+    defer a.free(turn);
+
+    const fn_at = std.mem.indexOf(u8, turn, "pub fn tick(self: *Client, now_ns: u64) void {") orelse
+        return error.TickMissing;
+    const fn_end = std.mem.indexOfPos(u8, turn, fn_at, "\n    pub fn ") orelse turn.len;
+    const body = turn[fn_at..fn_end];
+
+    var names: std.ArrayList([]const u8) = .empty;
+    defer names.deinit(a);
+
+    var it = std.mem.splitScalar(u8, body, '\n');
+    while (it.next()) |line| {
+        if (std.mem.indexOf(u8, line, ".partial_timeout") == null) continue;
+        // ① **익명으로 닫는 길이 없다.** `beginClose`/`failPendingUpgrade` 는 이름을 안 싣는다.
+        const call_at = std.mem.indexOf(u8, line, "At(\"") orelse {
+            std.debug.print("이름 없이 닫는 자리가 남았다: {s}\n", .{std.mem.trim(u8, line, " \t")});
+            return error.AnonymousPartialTimeout;
+        };
+        const name_start = call_at + "At(\"".len;
+        const name_end = std.mem.indexOfPos(u8, line, name_start, "\"") orelse
+            return error.MalformedSite;
+        try names.append(a, line[name_start..name_end]);
+    }
+
+    // ② **자리가 넷 이상 남아 있다.** 하나로 합치면 그 로그는 다시 못 읽는 숫자가 된다.
+    if (names.items.len < 4) {
+        std.debug.print("이름 붙은 자리가 {d} 곳뿐이다 — 넷이 갈리던 자리다\n", .{names.items.len});
+        return error.TooFewPartialTimeoutSites;
+    }
+
+    // ③ **이름이 서로 다르다.** 같은 이름 둘은 안 붙인 것과 같다.
+    for (names.items, 0..) |lhs, i| {
+        for (names.items[i + 1 ..]) |rhs| {
+            if (std.mem.eql(u8, lhs, rhs)) {
+                std.debug.print("같은 이름이 두 자리에 있다: «{s}»\n", .{lhs});
+                return error.DuplicateSiteName;
+            }
+        }
+    }
+
+    // ④ **정상 회수가 제 이름을 갖는다.** 넷 중 이것만 사고가 아니다 — 이 이름이 사라지면
+    //    「사고가 126 번」으로 읽히는 그 오독이 그대로 돌아온다.
+    {
+        var found = false;
+        for (names.items) |name| {
+            if (std.mem.indexOf(u8, name, "unattached_idle") != null) found = true;
+        }
+        if (!found) return error.IdleReclaimUnnamed;
+    }
+
+    // ⑤ **읽기 정체와 쓰기 정체가 한 이름에 뭉치지 않는다.** write 정체는 client 가 안 빼간다
+    //    (배압)이고 read 정체는 client 가 안 보낸다 — 의심할 쪽이 정반대다.
+    {
+        var read_seen = false;
+        var write_seen = false;
+        for (names.items) |name| {
+            if (std.mem.indexOf(u8, name, "partial_read") != null) read_seen = true;
+            if (std.mem.indexOf(u8, name, "partial_write") != null) write_seen = true;
+        }
+        if (!read_seen or !write_seen) return error.StallDirectionsMerged;
+    }
+}

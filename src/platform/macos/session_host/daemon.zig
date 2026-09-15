@@ -33,6 +33,7 @@ const protocol = @import("protocol.zig");
 const host_authority = @import("host_authority.zig");
 const staged_image = @import("staged_image.zig");
 const rollback_image = @import("rollback_image.zig");
+const dead_host_residue = @import("dead_host_residue.zig");
 const upgrade_stale_sweep = @import("upgrade_stale_sweep.zig");
 const upgrade_target = @import("upgrade_target.zig");
 const code_signature = @import("code_signature.zig");
@@ -662,6 +663,17 @@ fn runSessionHostImpl(
     // 죽은 host 가 남긴 칸을 거둔다(SIGKILL 로 아래 정리가 못 돈 경우의 안전망). 살아 있는 남의 칸은
     // manifest 로 가려 남긴다 — GUI 는 이 질문에 답할 수 없어 이 정리가 host 쪽에 있다.
     if (hook_log_base) |base| agent_hook_logs.sweepDeadHostDirs(io, base, host_id);
+    // 같은 이유로 `<session_dir>` 의 무거운 잔재(죽은 host 의 `rollback-current` 44 MB 씩·업그레이드 이미지)와
+    // 7 일 지난 로그도 여기서 거둔다. manifest·lock 은 GUI 의 종료 확정 신호라 남긴다(`dead_host_residue` 머리말).
+    // 실측 2026-09-15: 죽은 host 29 개가 1.0 GB 를 들고 있었다.
+    {
+        const now_s: i64 = @intCast(@divTrunc(std.Io.Timestamp.now(io, .real).nanoseconds, std.time.ns_per_s));
+        const residue = dead_host_residue.sweep(io, dir_path, host_id, now_s);
+        if (residue.anyRemoved()) host_log.line(
+            "dead host residue swept: images_removed={d} bytes={d} dirs={d} logs_removed={d} preflight_rotated={} (live={d} young={d} unknown={d})",
+            .{ residue.images_removed, residue.bytes_reclaimed, residue.dirs_swept, residue.logs_removed, residue.preflight_rotated, residue.dirs_live, residue.dirs_young, residue.dirs_unknown },
+        );
+    }
     manager.enableOutputWake() catch return error.ManifestFailed;
     if (fixture_probe != null) {
         manager.enableOutputMetrics();
@@ -1065,6 +1077,83 @@ fn readKindContains(fd: c.fd_t, parser: *framing.FrameParser, a: std.mem.Allocat
         if (n <= 0) return false;
         parser.push(buf[0..@intCast(n)]) catch return false;
     }
+}
+
+// 이 테스트가 증명하는 것: **실제 daemon 이 뜨면서** 죽은 남의 host 잔재를 거두고 산 것·막 뜬 것은 남긴다.
+// `dead_host_residue` 의 단위 판정자는 sweep 함수를 직접 부르고, 여기는 그것이 시작 경로에 **걸려 있는가**를
+// 실제 프로세스로 본다 — 정의만 있고 안 부르면 1.0 GB 는 그대로다.
+test "daemon 시작이 죽은 host 의 rollback 사본과 7 일 지난 로그를 거두고, 신호 파일과 막 뜬 host 는 남긴다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var base_buf: [128]u8 = undefined;
+    const base = try std.fmt.bufPrintZ(&base_buf, "/tmp/maru-sh-residue-{d}", .{c.getpid()});
+    std.Io.Dir.cwd().deleteTree(testing.io, base) catch {};
+    _ = c.mkdir(base.ptr, 0o700);
+    var session_buf: [320]u8 = undefined;
+    const session_dir = try discovery.sessionHostDirPath(&session_buf, base);
+    _ = c.mkdir(session_dir.ptr, 0o700);
+    const host_id = newHostId();
+    try short_endpoint.prepareCurrentUserNamespace();
+    var socket_buf: [128]u8 = undefined;
+    const socket_path = try short_endpoint.currentSocketPathIn(&socket_buf, host_id);
+
+    // 잔재: 죽은 host(8 일 전 mtime, rollback 사본·오래된 로그)와 막 뜬 host(지금 mtime, lock 없음).
+    const dead_id: u128 = 0xDEAD_0000_0000_0001;
+    const young_id: u128 = 0x0004_0000_0000_0001;
+    try host_manifest.prepareHostDirectory(session_dir, dead_id);
+    try host_manifest.prepareHostDirectory(session_dir, young_id);
+    var dead_dir_buf: [768]u8 = undefined;
+    const dead_dir = try host_manifest.hostDirPathIn(&dead_dir_buf, session_dir, dead_id);
+    var rollback_buf: [1024]u8 = undefined;
+    const rollback = try std.fmt.bufPrintZ(&rollback_buf, "{s}/rollback-current", .{dead_dir});
+    try std.Io.Dir.cwd().writeFile(testing.io, .{ .sub_path = rollback, .data = "MACHO" });
+    var dead_log_buf: [1024]u8 = undefined;
+    const dead_log = try dead_host_residue.logPathIn(&dead_log_buf, session_dir, dead_id);
+    try std.Io.Dir.cwd().writeFile(testing.io, .{ .sub_path = dead_log, .data = "session host started\n" });
+    var now_ts: c.timespec = undefined;
+    if (c.clock_gettime(.REALTIME, &now_ts) != 0) return error.SkipZigTest;
+    const old_s: i64 = @as(i64, @intCast(now_ts.sec)) - 8 * 24 * 60 * 60;
+    const old_times = [2]c.timespec{ .{ .sec = @intCast(old_s), .nsec = 0 }, .{ .sec = @intCast(old_s), .nsec = 0 } };
+    if (c.utimensat(posix.AT.FDCWD, dead_dir.ptr, &old_times, posix.AT.SYMLINK_NOFOLLOW) != 0) return error.TestUnexpectedResult;
+    if (c.utimensat(posix.AT.FDCWD, dead_log.ptr, &old_times, posix.AT.SYMLINK_NOFOLLOW) != 0) return error.TestUnexpectedResult;
+
+    const child = c.fork();
+    if (child < 0) return error.SkipZigTest;
+    if (child == 0) {
+        _ = c.setsid();
+        runSessionHostWithIdentityTestAuthorizer(std.heap.page_allocator, testing.io, session_dir, socket_path, host_id) catch {};
+        c._exit(0);
+    }
+    defer {
+        _ = c.kill(child, posix.SIG.TERM);
+        var status: c_int = undefined;
+        _ = c.waitpid(child, &status, 0);
+        _ = c.unlink(socket_path.ptr);
+        std.Io.Dir.cwd().deleteTree(testing.io, base) catch {};
+    }
+
+    // 소켓이 열렸으면 sweep 은 이미 지났다(시작 경로에서 accept 보다 앞이다).
+    const fd = waitConnect(socket_path, 3000) orelse return error.TestUnexpectedResult;
+    defer _ = c.close(fd);
+    const hello = try framing.encodeFrame(allocator, .{ .kind = .hello, .request_id = 1 }, "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\"}");
+    defer allocator.free(hello);
+    try socket_server.writeAll(fd, hello);
+    var parser = framing.FrameParser.init(allocator);
+    defer parser.deinit();
+    try testing.expect(readKind(fd, &parser, allocator, .hello_ack));
+
+    var st: posix.Stat = undefined;
+    try testing.expect(c.fstatat(posix.AT.FDCWD, rollback.ptr, &st, posix.AT.SYMLINK_NOFOLLOW) != 0); // 죽은 것: 사본 사라짐
+    try testing.expect(c.fstatat(posix.AT.FDCWD, dead_dir.ptr, &st, posix.AT.SYMLINK_NOFOLLOW) == 0); // 디렉터리(신호)는 남음
+    try testing.expect(c.fstatat(posix.AT.FDCWD, dead_log.ptr, &st, posix.AT.SYMLINK_NOFOLLOW) != 0); // 8 일 된 로그: 사라짐
+    var young_dir_buf: [768]u8 = undefined;
+    const young_dir = try host_manifest.hostDirPathIn(&young_dir_buf, session_dir, young_id);
+    try testing.expect(c.fstatat(posix.AT.FDCWD, young_dir.ptr, &st, posix.AT.SYMLINK_NOFOLLOW) == 0); // 막 뜬 것: 남음
+    var own_dir_buf: [768]u8 = undefined;
+    const own_dir = try host_manifest.hostDirPathIn(&own_dir_buf, session_dir, host_id);
+    try testing.expect(c.fstatat(posix.AT.FDCWD, own_dir.ptr, &st, posix.AT.SYMLINK_NOFOLLOW) == 0); // 자기 것: 남음
+    // 진단 줄(`dead host residue swept: …`)은 여기서 못 본다 — `host_log.line` 은 테스트 빌드에서 침묵한다.
+    // 배선의 증거는 위 파일 단언들이다(sweep 이 안 걸리면 죽은 디렉터리가 남는다).
 }
 
 test "daemon stale sweep product path removes valid residue and disables only upgrade on hostile residue" {

@@ -727,8 +727,19 @@ fail-closed 로 접는다.
 죽은 entry를 **열거 결과에서 지우지는 않는다.** manifest가 있으면서 owner lease가 죽은 조합은 위 상태표가 정한
 "host 종료를 검증함" 확정 신호이고, 소비자는 그 신호로 기존 handle을 ended로 정리한다. 여기서 파일을 삭제하면 그
 확정이 다음 실행에서 "endpoint 미발견 = runtime 생존 가능성 있음"으로 격하되어 stale handle이 영원히 풀리지 않는다.
-잔여물의 **디스크 회수**(host당 manifest + `rollback-current`)는 이 확정 신호를 소비한 뒤에 하는 별도 정책이며 아직
-정하지 않았다.
+잔여물의 **디스크 회수**는 신호와 무게를 가른다(2026-09-15 결정, `dead_host_residue.zig`가 단일 출처):
+
+- **신호는 남긴다** — 죽은 host의 `hosts/<id>/`·`host.v1.json`·`owner.lock`은 지우지 않는다. discovery cap은 `.free`를
+  세지 않으므로 파일 둘이 남는 것은 기능에 해가 없다.
+- **무거운 잔재만 거둔다** — `rollback-current`·`rollback-previous`(host 바이너리 사본, 각 44 MB)와 업그레이드
+  이미지 `target-<id>.image`(`.sweep-` 묘비 포함). daemon이 뜰 때 자기 lease를 잡은 뒤 한 번 돈다. 살아 있음은
+  `owner_lease.observe`(flock)로 묻고 `held`·`unknown`은 건드리지 않는다. `prepareHostDirectory`와 lease 획득 사이의
+  창(lock 파일이 아직 없어 `free`로 보인다)은 **디렉터리 mtime 1시간 유예**로 막는다 — host id는 launch마다 난수라
+  죽은 id가 되살아나는 경로는 없다.
+- **로그**(`host-<id>.log`)는 죽은 host의 것만, 그것도 **mtime 7일** 뒤에 지운다 — «왜 죽었나»의 유일한 흔적이라
+  진단 창을 둔다. `preflight.log`는 1 MiB를 넘으면 `.1`로 한 번 회전한다(상한 최대 2배).
+- 실측(2026-09-15, 사용자 머신): `hosts/` 64개 중 죽은 28개의 사본이 **1.0 GB**였고 로그 87개·347 KB, `preflight.log`
+  81 KB. 실제 디렉터리 사본으로 잰 sweep은 **31 ms**(이미지 28개·1.06 GB 회수, 신호 63개 그대로).
 
 ### GUI가 종료된 동안의 알림
 

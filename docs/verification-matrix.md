@@ -607,6 +607,23 @@ strict JSON receipt와 별도 PPM 판정 실행 파일은 구현됐고 순수 �
 2026-09-14 잠금 해제된 exact-frontmost Maru 제품 회차도 recovery 2/input 4, historical·IME·clipboard 각 1,
 marked 8/insert 2, 동일 runtime·surface와 generation 4→5를 결속한 두 960×600 PPM의 독립 판정까지 green이다.
 그 전 잠긴 회차는 frontmost `loginwindow`라 `global-keyboard-focus` RED였고 통과 증거에서 제외했다. v2b는 구현 전이다.
+v2b0은 Screen Recording preflight를 source/HID mutation보다 먼저 수행하고 후보 요청 전후 전체 on-screen window inventory
+snapshot(시점당 최대 256, cap+1은 drop 없이 실패)을 pure reducer에 넘긴다. reducer의 차집합에서
+title·후보 문자열·pixel을 제외한 ID/owner PID·bundle ID/Apple signing validity·signing identifier/layer/bounds/TIS source ID만
+기록한다. Maru·기존·off-screen·zero-area window를 제외하고 후보 요청 전 부재→요청 뒤 생성→Escape 뒤 소멸을 같은 anchor에서
+최소 5회 반복한다. Apple-signed owner identity와 신규/소멸 window가 매회 일치하지 않거나 PTY input·committed text·base screen
+generation이 변하면 RED다. AppKit/Quartz 좌표는 display ID·두 display bounds·scale transcript를 받는 pure converter
+하나로 Quartz 좌상단 원점에 정규화하고 음수 origin·좌우/상하 multi-display·scale 1/2 fixture로 닫는다. v2b1은 그 identity와 새 window
+ID를 캡처 직전·직후 PID/signing identity와 함께 재검증해 단일 OS window capture를 만들고, v2a runtime/surface/`firstRect`, candidate bounds와 digest를 strict receipt로
+결속한다. 후보가 다른 display이거나 v2b0이 관측한 위/아래 placement별 anchor band 밖이면 실패하되 화면 가장자리의 정상
+flip은 허용한다. 임의 거리 상한은 관측 전에 정하지 않는다. window 소멸·input source·first responder·restore
+record 정산까지 gate에 포함한다. pure RED gate는 producer 선필터·inventory cap+1, duplicate/new-but-persistent/
+unsigned·non-Apple/PID·signing drift/close 부재/screen mutation과 multi-display 좌표 변이를 먼저 거부한다. 전체 화면 diff,
+owner-name substring, title/AX text, 좌표만의
+판정은 완료 증거가 아니다.
+v2b0은 exact 5-row·16 KiB 이하 `maru.session-host-cr6d-ime-candidate-observation.v1`, v2b1은 single-candidate
+`maru.session-host-cr6d-ime-candidate-pixel.v1`을 absent target에 배타 게시한다. permission/WindowServer/API 부재의
+`not_provisioned`와 owner/lifecycle/identity/geometry/capture/cleanup `failed`를 구분하며 둘 다 pass/skip으로 세지 않는다.
 
 renderer capability의 현재 검증 계약은 `editor_epoch`를 포함한 `RendererCapability` 6-field 공용 alias이며, epoch를 포함한 어느 필드든 stale이면 fragment 재사용·DOM 높이 변경이 0이어야 한다.
 
@@ -3130,14 +3147,15 @@ provisioned Developer ID·Notification Center 등 아래의 외부 release gate 
 - **자동 검증:** `zig build test-session-host-config-provenance`가 Debug·ReleaseFast에서 config aggregate의 미설정,
   valid→invalid, invalid→valid, generic/current-OS 양방향 순서와 foreign-OS
   무관성을 검증한다. 실제 파일 경계는 missing/readable/directory-unreadable/정확히 1 MiB readable/1 MiB+1 oversize를
-  검증한다. G1은 기존 `default=false`와 forgiving load 동작을 유지하며 파일 write·notice·bootstrap을 실행하지 않는다.
+  검증한다. G1은 현재 built-in `default=true`와 forgiving load 동작을 유지하며 파일 write·notice·bootstrap을 실행하지 않는다.
 - G1의 parser/file fixture를 G2의 실제 bootstrap·Reset 성공/실패·경합 증거로 대체해 해석하지 않는다.
 
 ### Session default G2 explicit override retention
 
 - **상태: 구현, focused/product gate green.** L0 lease 뒤 AppKit/첫 AppSession 전 app-global owner가 G1의 resolved bool과 두
-  provenance를 exact once scalar snapshot으로 만들고 모든 Window가 공유한다. release A default `false`와 absent profile은
-  그대로이며 G2 bootstrap은 파일 write/notice 0이다.
+  provenance를 exact once scalar snapshot으로 만들고 모든 Window가 공유한다. 현재 제품은 built-in `true`와 absent profile을
+  그대로 사용하며 G2 bootstrap은 파일 write/notice 0이다. 아래 G3에서 말하는 release A `default=false`는 현재 release가
+  아니라, 출하 뒤 다시 default-on migration을 승인할 경우에만 만드는 미래 predecessor profile이다.
 - **Reset gate:** whole Reset은 `absent`에는 keep-alive 줄을 만들지 않고 `explicit_valid`/`explicit_invalid`에는 Reset 전
   live bool을 기본값과 같아도 canonical explicit override로 atomic replace한다. row Reset/Backspace는 값·snapshot·dirty/remove
   queue·파일 mutation 0이고 전용 수동 변경 notice만 낸다. write 실패는 부분 파일 0이다.
@@ -3147,7 +3165,8 @@ provisioned Developer ID·Notification Center 등 아래의 외부 release gate 
   `lease → G2 bootstrap → duplicate reject → AppKit/AppSession`과 loser의 bootstrap 전 exit/config·workspace·cache mutation 0,
   `SIGKILL` 뒤 successor 재획득/bootstrap을 검증한다. G1 parser fixture나 in-process owner 단위만으로 제품 순서를 완료
   처리하지 않는다.
-- **범위 밖:** absent explicit `true` materialization, persistent retry notice, default `true` 전환과 frozen A rollback은 G3 백로그다.
+- **범위 밖:** 미래 G3 predecessor에서의 absent explicit `true` materialization, persistent retry notice, default `true` 전환과
+  frozen A rollback은 G3 백로그다. 현재 첫 릴리스 전 `default=true`에는 이 migration을 소급 적용하지 않는다.
 
 ### Session default G3 frozen-release migration
 

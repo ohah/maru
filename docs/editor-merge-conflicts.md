@@ -426,6 +426,9 @@ Result 위 줄에는 Accept 가 **없고** 상태 라벨·「Remove X」·「Res
   caret 이 안 보일 수 있다.
 - **여분 커서도 selection 이다**(구현 중 발견): primary 가 없어도 Result 에 멀티커서가 남아 있으면
   글자가 그리로 간다. 판 클릭이 여분도 지우고, 초점 술어는 「여분 없음」까지 요구한다.
+- **조합(IME)도 같은 규칙이다**(후보 목록을 공격하다 발견, 2026-09-15): 판에 초점이 있을 때 한글을 치면
+  확정은 무효인데 **조합 글자가 Result 첫 줄(offset 0)에 그려졌다** — 조합 자리를 `selection orelse 0`
+  으로 잡았기 때문. selection 이 없으면 조합을 안 받는다([native-editor](native-editor.md) §11).
 - **히트 기반 시설은 S3b-3c 의 것을 쓴다**(`PaneHit` — 행 표·원점·gutter 폭·첫 줄) + 행→줄 표.
   중립의 `hit.bodyPoint` 가 그대로 판의 자리를 푼다.
 - **최소의 경계**: 클릭으로 놓기 + 비교 뷰와 같은 이동 일습(화살표·⌥·⌘·Home/End·Page — 표가 같아

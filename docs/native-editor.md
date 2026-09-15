@@ -171,6 +171,11 @@
     `setMarkedText`가 오기 때문이다([document-model](native-editor-document-model.md) §"매 글자를
     즉시 확정한다"의 실측 순서). 그러므로 자리는 **caret을 다시 읽어서가 아니라 확정 편집이
     정한 결과로** 갱신한다.
+  - **selection 이 없으면 조합도 없다(2026-09-15).** 조합의 자리는 caret 이고, caret 이 없는 문서(갓
+    열어 아직 안 누른 문서, 병합 모드에서 세 판 중 하나에 초점이 간 Result — [병합 충돌 해결](editor-merge-conflicts.md)
+    S3b-3b)에는 확정도 갈 곳이 없어 `insertText` 가 무효다. 그 상태에서 조합만 받아 `0` 에 그리면
+    **caret 은 판에 있는데 조합 글자가 Result 첫 줄에 뜬다**(실측 — 옛 `orelse 0` 이 그랬다). 조합을
+    안 받는다: 문서는 확정과 같은 규칙으로 조합을 거절한다.
 - **IME가 최대 리스크다.** 현행 `NSTextInputClient` 구현은 터미널용이라 **중간 caret 조합을 지원하지 않는다** — `insertText`/`setMarkedText`가 `replacementRange`를 쓰지 않고, `markedRange()`는 `location`이 0 고정, `selectedRange()`는 항상 빈 `NSRange`다. 코드 편집은 중간 편집이 본질이므로 이 셋을 실제 위치로 바꿔야 한다. 그런데 **현행 값들은 임의가 아니라 실측 근거를 갖는다** — `markedRange()`가 `NSNotFound`가 아니라 빈 `NSRange`인 이유는 입력기가 "marked 교체 미지원"으로 보수적 동작을 해 한국어 조합의 마지막 자모에서 Backspace가 자모 삭제 대신 확정으로 처리됐기 때문이다(코드 주석에 재현 경로가 기록돼 있다). 확장은 그 사례를 회귀시키지 않아야 하고, firstResponder·IME는 헤드리스로 검증되지 않으므로 GUI 손 테스트가 유일 안전망이다.
 - **멀티 커서 × IME — primary만 조합하고 확정 시 복제한다(확정).** `NSTextInputClient`는 marked range를 **하나만** 표현하므로(`markedRange()`가 단일 `NSRange`), 조합 중에는 primary selection 한 곳에서만 preedit를 받고 그린다. 입력기가 확정(`insertText`)하면 그 결과를 **나머지 커서 전부에 같은 편집으로 복제**하며, 그 전체가 undo 하나다(§3.3). 기각한 대안: 모든 커서에 preedit를 동시에 그리는 방식은 입력기가 아는 상태(한 곳)와 화면(N곳)이 갈려 backspace·재변환에서 어긋나고, 조합 중 커서를 일시로 하나로 줄이는 방식은 조합이 끝나면 커서가 사라진 것처럼 보인다. **최종 결과는 세 방식이 같으므로**(확정 텍스트가 N곳에 들어간다) 가장 단순하고 상태가 갈리지 않는 것을 택한다. GUI 실측은 이 결정을 **검증**하는 것이지 고르는 것이 아니다.
 - **터미널 IME 무회귀.** 위 확장은 터미널이 쓰는 바로 그 `NSTextInputClient` 경로를 건드린다. [text-field-editor.md](text-field-editor.md) §2.3이 같은 지점을 "두 개의 벽" 중 하나로 이미 식별했고, [web-panel.md](web-panel.md) §4가 IME 코드를 "가장 깨지기 쉬운" 영역으로 다룬 전례가 있다. 터미널 입력 회귀는 제품 전체 회귀다.

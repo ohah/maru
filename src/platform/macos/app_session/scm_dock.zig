@@ -3247,22 +3247,46 @@ pub fn clearScmPending(self: *AppSession) void {
 
 /// 섹션 헤더의 일괄 `+`/`−`. **방향은 host가 지금 상태로 다시 정한다**(intent가 방향을 싣지 않는 이유 —
 /// published tree와 host 상태가 어긋날 수 있다).
-/// 그 저장소의 **모든 변경**을 스테이지한다(②c). `git add -A`라 경로를 싣지 않는다 — 화면에 안 보이는
-/// 파일(10행 상한에 걸린 것)까지 드는 것이 "모두"의 뜻이다.
+/// 그 저장소의 **모든 변경**을 스테이지한다(②c). 평소에는 `git add -A`라 경로를 싣지 않는다 — 화면에 안
+/// 보이는 파일(10행 상한에 걸린 것)까지 드는 것이 "모두"의 뜻이다. **마커가 남은 충돌 파일이 있으면 경로로**
+/// (S4b): `add -A` 는 unmerged 를 pathspec 제외와 무관하게 스테이지하므로, 그때만 status 전문에서 스테이지
+/// 가능한 경로를 모아 `add -- <경로…>` 를 건다. 계획은 중립(`scm_view.planStageAll`)이 세운다.
 fn submitStageAllFor(self: *AppSession, repo: []const u8) void {
     var rows_buf: [scm_row_capacity]scm_view.Row = undefined;
     var scratch: [std.fs.max_path_bytes]u8 = undefined;
-    const model = modelForRepo(self, repo, &rows_buf, &scratch) orelse {
+    if (modelForRepo(self, repo, &rows_buf, &scratch) == null) {
         // **감추지 않고 이유를 말한다** — 버튼은 꺼진 색이지만 눌리기는 한다.
         setScmWriteNotice(self, maru.i18n.t(.scm_repo_unread));
         return;
-    };
-    if (!hasUnstaged(model.rows)) {
-        setScmWriteNotice(self, maru.i18n.t(.scm_nothing_to_stage));
-        return;
     }
-    _ = submitWrite(self, repo, .stage_all, &.{});
+    submitStageAllPlanned(self, repo);
 }
+
+/// 「모두 스테이지」의 실제 걸기(S4b) — 저장소 머리 줄과 「변경 사항」 머리 줄이 같은 길을 쓴다.
+fn submitStageAllPlanned(self: *AppSession, repo: []const u8) void {
+    // status 전문과 마커 판정: 활성 저장소는 읽기 결과에서, 비활성은 status 만(판정 없음 → 충돌 전부 미해결).
+    const is_current = if (self.git_repo) |cur| std.mem.eql(u8, cur, repo) else false;
+    const status: []const u8, const markers: ?[]const u8, const truncated: bool = if (is_current) blk: {
+        const r = self.git_result orelse return;
+        break :blk .{ r.status, if (r.conflict_scan_ok) r.conflict_markers else null, r.truncated };
+    } else .{ repoStatusTextFor(self, repo) orelse return, null, false };
+    var paths_buf: [stage_all_max_paths][]const u8 = undefined;
+    const plan = scm_view.planStageAll(status, markers, truncated, &paths_buf);
+    self.scm_last_stage_all_plan = std.meta.activeTag(plan);
+    switch (plan) {
+        .nothing => setScmWriteNotice(self, maru.i18n.t(.scm_nothing_to_stage)),
+        .all => _ = submitWrite(self, repo, .stage_all, &.{}),
+        .paths => |p| {
+            // **비켜 간 파일은 말한다** — 실패가 아니라 «다 하지 않았다» 이고, 그것도 사실이다.
+            if (submitWrite(self, repo, .stage, paths_buf[0..p.n])) setScmWriteNotice(self, maru.i18n.t(.scm_stage_all_skipped_conflicts));
+        },
+        .blocked_truncated, .blocked_too_many => setScmWriteNotice(self, maru.i18n.t(.scm_stage_all_blocked_truncated)),
+    }
+}
+
+/// 경로 계획이 한 번에 들 수 있는 경로 수. 백엔드가 `max_batch_paths` 씩 다시 자르므로 여기 상한은 스택
+/// 버퍼의 것이다 — 넘치면 `blocked_too_many` 로 거절한다(반쪽을 «모두» 라 하지 않는다).
+const stage_all_max_paths: usize = 1024;
 
 /// 스테이지할 것이 남아 있나(= `변경 사항` 그룹에 파일이 있나). **충돌 행은 세지 않는다** — `git add`가
 /// 충돌을 "해결됨"으로 표시하므로 그 행은 일괄 대상이 아니다(모델이 이미 `.none`으로 준다).
@@ -3285,6 +3309,11 @@ fn submitSectionWrite(self: *AppSession, ref: component.ids.SectionRef) void {
         .staged => scm_view.Section.staged,
         .changes => scm_view.Section.changes,
     };
+    // 「변경 사항」의 「모두 스테이지」는 저장소 머리 줄과 **같은 길**(S4b — 마커가 남은 충돌을 비켜 간다).
+    if (target == .changes) {
+        submitStageAllPlanned(self, repo);
+        return;
+    }
     const kind = git_write_command.kindForSection(target, model.head.unborn);
     // `_all` 변종은 경로를 받지 않는다. **그래서 화면에 안 보이는 파일까지 든다** — 그것이 "모두"의 뜻이고,
     // 10행 상한에 걸려 접힌 파일도 사용자가 기대하는 대상이다.
@@ -3324,6 +3353,9 @@ fn submitWrite(self: *AppSession, repo: []const u8, kind: git_write_command.Kind
         self.git_backend = git_backend_mod.Backend.init(self.io) catch return false;
     }
     self.scm_write_seq += 1;
+    // **판정자용 기록**(S4b): 무엇을 걸었는지 — 종류와 경로 수. 백엔드 큐를 들여다보지 않고 이 경계를 잰다.
+    self.scm_last_write_kind = kind;
+    self.scm_last_write_path_count = paths.len;
     if (!self.git_backend.?.submitWrite(git_exe, repo, kind, paths, null, self.scm_write_seq, remote)) return false;
     self.scm_write_inflight = self.scm_write_seq;
     rememberWriteRepo(self, repo, if (remote) |r| r.dest else null);
@@ -4055,6 +4087,14 @@ fn finishCommit(self: *AppSession, ok: bool) void {
 
 /// 테스트가 그 자리에 문구를 심는 유일한 통로. 제품 경로와 **같은 함수**를 태워, 지우는 규칙(저장소가
 /// 바뀌면 사라진다)을 테스트가 자기만의 대입으로 우회하지 않게 한다.
+pub fn submitStageAllForTest(self: *AppSession, repo: []const u8) void {
+    submitStageAllFor(self, repo);
+}
+
+pub fn submitSectionWriteForTest(self: *AppSession, ref: component.ids.SectionRef) void {
+    submitSectionWrite(self, ref);
+}
+
 pub fn setScmWriteNoticeForTest(self: *AppSession, text: []const u8) void {
     setScmWriteNotice(self, text);
 }

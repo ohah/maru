@@ -1703,3 +1703,97 @@ test "MRG22 목록 모델은 백엔드의 마커 판정을 «판정했을 때만
     if (session.git_result) |*r| r.deinit(wa);
     session.git_result = null;
 }
+
+test "MRG23 「모두 스테이지」는 마커가 남은 충돌 파일을 비켜 간다 — 진짜 저장소에서 g.txt 만 올라가고 f.txt 는 UU 다 (S4b end-to-end)" {
+    // `add -A` 는 unmerged 를 pathspec 제외와 무관하게 스테이지한다(실측). 그래서 미해결 충돌이 있으면 경로로
+    // 건다 — 계획은 중립(`planStageAll`)이 세우고, 여기서는 **제품의 두 입구**(저장소 머리 줄·「변경 사항」 머리
+    // 줄)가 그 계획을 실제 git 에 실어 보내는지, 그리고 그 결과 index 가 어떻게 되는지를 잰다.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const exe = git_backend_mod.locate(&exe_buf) orelse return error.SkipZigTest;
+    var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const repo = git_backend_mod.testTmpRepoPath(&repo_buf, "tmp-stage-all-skip") orelse return error.SkipZigTest;
+    var rm_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const rm_path = std.fmt.bufPrintZ(&rm_buf, "{s}", .{repo}) catch return error.SkipZigTest;
+    _ = git_backend_mod.testRunQuiet(&.{ "/bin/rm", "-rf", rm_path });
+    defer _ = git_backend_mod.testRunQuiet(&.{ "/bin/rm", "-rf", rm_path });
+    if (!git_backend_mod.testMakeStageRepo(exe, repo, .content)) return error.SkipZigTest;
+    // 충돌 옆에 평범한 변경 하나(g.txt, 추적 안 됨) — 이것이 버튼을 켜고, 이것만 올라가야 한다.
+    try git_backend_mod.testWriteFileAt(repo, "g.txt", "plain\n");
+
+    const session = try smokeSession(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    session.git_repo = try allocator.dupe(u8, repo);
+    // 목록 결과는 **판정함 + f.txt 에 마커 남음** — 백엔드가 실제로 내는 모양 그대로(S4 e2e 가 그 모양을 잰다).
+    const wa = git_backend_mod.worker_allocator;
+    session.git_result = .{
+        .status = try wa.dupe(u8, "# branch.head main\nu UU N... 100644 100644 100644 100644 aaa bbb ccc f.txt\n? g.txt\n"),
+        .conflict_markers = try wa.dupe(u8, "f.txt\x00"),
+        .conflict_scan_ok = true,
+        .ok = true,
+    };
+    defer {
+        if (session.git_result) |*r| r.deinit(wa);
+        session.git_result = null;
+    }
+
+    // ⑴ 저장소 머리 줄의 「모두 스테이지」 → 계획은 «경로», 건 쓰기는 `.stage` 경로 하나, 알림은 「두었습니다」.
+    app_session_mod.scm_dock_ops.submitStageAllForTest(session, repo);
+    try testing.expectEqual(std.meta.Tag(maru.session.scm_view.StageAllPlan).paths, session.scm_last_stage_all_plan.?);
+    try testing.expectEqual(maru.session.git_write_command.Kind.stage, session.scm_last_write_kind.?);
+    try testing.expectEqual(@as(usize, 1), session.scm_last_write_path_count);
+    try testing.expect(session.scm_write_error != null);
+    try testing.expectEqualStrings(maru.i18n.t(.scm_stage_all_skipped_conflicts), session.scm_write_error.?);
+    // 쓰기가 끝나기를 기다린다(제품이 tick 마다 하는 배수).
+    var spins: usize = 0;
+    while (spins < 600 and session.scm_write_inflight != 0) : (spins += 1) {
+        app_session_mod.scm_dock_ops.drainScmWrite(session);
+        var ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+        _ = std.c.nanosleep(&ts, null);
+    }
+    try testing.expectEqual(@as(u64, 0), session.scm_write_inflight);
+    // **index 의 사실**: g.txt 는 올라갔고(`A.`), f.txt 는 여전히 `UU` 다 — `git status` 원문으로 읽는다.
+    var status_out: [std.fs.max_path_bytes]u8 = undefined;
+    const st = git_backend_mod.testGitStatusLines(exe, repo, &status_out) orelse return error.StatusFailed;
+    try testing.expect(std.mem.indexOf(u8, st, "u UU") != null); // f.txt 는 그대로 충돌
+    try testing.expect(std.mem.indexOf(u8, st, "1 A. ") != null); // g.txt 는 올라갔다
+
+    // ⑵ 「변경 사항」 머리 줄도 같은 길이다 — 이번엔 판정 못 함(모든 충돌이 미해결) + 올릴 것 없음 → «없음» 알림.
+    if (session.git_result) |*r| r.deinit(wa);
+    session.git_result = .{
+        .status = try wa.dupe(u8, "# branch.head main\nu UU N... 100644 100644 100644 100644 aaa bbb ccc f.txt\n"),
+        .conflict_scan_ok = false,
+        .ok = true,
+    };
+    const seq_before = session.scm_write_seq;
+    app_session_mod.scm_dock_ops.submitSectionWriteForTest(session, .{ .repo_index = 0, .section = .changes });
+    try testing.expectEqual(std.meta.Tag(maru.session.scm_view.StageAllPlan).nothing, session.scm_last_stage_all_plan.?);
+    try testing.expectEqual(seq_before, session.scm_write_seq); // 아무것도 안 걸었다
+    try testing.expectEqualStrings(maru.i18n.t(.scm_nothing_to_stage), session.scm_write_error.?);
+
+    // ⑶ 미해결 충돌 + 평범한 변경인데 **목록이 잘렸다** → 거절하고 이유를 말한다(반쪽을 «모두» 라 하지 않는다).
+    //    잘림은 읽기 결과의 플래그에서 온다 — 안 넘기면 잘린 목록의 앞쪽만 올라간다(적대적 1회차 A11).
+    if (session.git_result) |*r| r.deinit(wa);
+    session.git_result = .{
+        .status = try wa.dupe(u8, "# branch.head main\nu UU N... 100644 100644 100644 100644 aaa bbb ccc f.txt\n? g.txt\n"),
+        .conflict_markers = try wa.dupe(u8, "f.txt\x00"), // 미해결이라야 경로 계획이 필요하고, 그래야 잘림이 문제다
+        .conflict_scan_ok = true,
+        .truncated = true,
+        .ok = true,
+    };
+    const seq_before3 = session.scm_write_seq;
+    app_session_mod.scm_dock_ops.submitStageAllForTest(session, repo);
+    try testing.expectEqual(std.meta.Tag(maru.session.scm_view.StageAllPlan).blocked_truncated, session.scm_last_stage_all_plan.?);
+    try testing.expectEqual(seq_before3, session.scm_write_seq);
+    try testing.expectEqualStrings(maru.i18n.t(.scm_stage_all_blocked_truncated), session.scm_write_error.?);
+
+    // ⑷ **비활성 저장소**는 마커 판정이 없다(S4 한계) → 그 충돌 행은 전부 미해결로 본다. 충돌만 있는 목록이면
+    //    «없음» 이지 «전부 해결 → -A» 가 아니다(적대적 2회차 B7: 빈 목록을 넘겨 «전부 해결» 로 읽은 변이가 살았다).
+    app_session_mod.scm_dock_ops.seedRepoStatusForTest(session, "/other/repo", "main", "# branch.head main\nu UU N... 100644 100644 100644 100644 aaa bbb ccc f.txt\n");
+    const seq_before4 = session.scm_write_seq;
+    app_session_mod.scm_dock_ops.submitStageAllForTest(session, "/other/repo");
+    try testing.expectEqual(std.meta.Tag(maru.session.scm_view.StageAllPlan).nothing, session.scm_last_stage_all_plan.?);
+    try testing.expectEqual(seq_before4, session.scm_write_seq);
+}

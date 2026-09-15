@@ -6208,6 +6208,10 @@ pub const AppSession = struct {
     /// 목록 읽기를 걸지 않고, 새 쓰기도 받지 않는다.
     scm_write_inflight: u64 = 0,
     scm_write_seq: u64 = 0,
+    /// 마지막으로 건 쓰기의 종류·경로 수와 「모두 스테이지」의 계획(S4b 판정자용 — 백엔드 큐를 안 들여다본다).
+    scm_last_write_kind: ?maru.session.git_write_command.Kind = null,
+    scm_last_write_path_count: usize = 0,
+    scm_last_stage_all_plan: ?std.meta.Tag(maru.session.scm_view.StageAllPlan) = null,
     /// 마지막 쓰기가 실패했을 때 화면에 낼 사유(redact·절단 후, 세션 allocator 소유). §5 — 실패는 사실대로.
     scm_write_error: ?[]u8 = null,
     /// 그 사유가 **어느 저장소 것인가**(세션 allocator 소유, `null` = 저장소에 안 매인 것).

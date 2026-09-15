@@ -3569,12 +3569,17 @@ pub fn setEditorPreedit(self: *AppSession, term: *Term, bytes: []const u8) void 
         term.rt.editor_preedit = &.{};
         return;
     }
+    // **selection 이 없으면 조합도 없다**(§11, 2026-09-15). 조합의 자리는 caret 이고, caret 이 없는
+    // 문서(갓 연 문서 · 병합 모드에서 판에 초점이 간 Result)에는 확정도 갈 곳이 없어 `insertText` 가
+    // 무효다 — 그 상태에서 조합만 받아 `0` 에 그리면 **caret 은 판에 있는데 조합 글자가 Result 첫 줄에
+    // 뜬다**(실측). 확정과 같은 규칙으로 거절한다: 조합 중이던 것이 있으면 그것도 내린다.
+    if (term.rt.editor_preedit.len == 0 and term.rt.editor_selection == null) return;
     // **새 값을 먼저 복사한다.** OOM이면 보이던 조합 상태가 그대로 남는다 — 터미널 오버레이의
     // `replace`가 같은 순서를 쓴다(사라지는 것보다 낡은 것이 낫다).
     const next = self.allocator.dupe(u8, bytes) catch return;
     if (term.rt.editor_preedit.len == 0) {
         // 조합의 **시작**이다 — 이 자리에 확정 텍스트가 온다.
-        term.rt.editor_preedit_at = if (term.rt.editor_selection) |sel| sel.start() else 0;
+        term.rt.editor_preedit_at = term.rt.editor_selection.?.start();
     }
     if (term.rt.editor_preedit.len > 0) self.allocator.free(term.rt.editor_preedit);
     term.rt.editor_preedit = next;
@@ -9921,6 +9926,63 @@ test "MPN16 판의 caret 이 화면 밖으로 나가면 Result 가 굴러 따라
     defer d2.dl.deinit(allocator);
     try testing.expectEqual(@as(usize, 0), term.rt.editor_first_line);
     try testing.expectEqual(@as(usize, 0), term.rt.editor_merge.?.pane_caret.?.sel.focus.row);
+}
+
+test "MPN17 판에 초점이 있으면 조합(IME)도 Result 에 안 그려진다 — selection 없는 문서는 조합을 거절한다 (제품 경계)" {
+    // 후보 목록을 공격하다 발견(2026-09-15): S3b-3b 는 확정(`insertText`)만 쟀고 조합(`setEditorPreedit`)은
+    // `selection orelse 0` 으로 자리를 잡아 **caret 은 Current 에, 조합 글자는 Result 첫 줄에** 떴다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    const cw: f64 = @floatFromInt(fx.session.cell_width_px);
+    const chh: f64 = @floatFromInt(fx.session.cell_height_px);
+    const wide: maru.session.SplitRect = .{ .x = fx.leaf_rect.x, .y = fx.leaf_rect.y, .w = 1200, .h = fx.leaf_rect.h };
+    const term = try mergeCaretFixture(&fx, &dir, "ime.txt", allocator);
+    defer editor_merge_ops.clear(fx.session, term);
+    var d0 = appendPaneFrame(fx.session, wide, term) orelse return error.EditorPaneDidNotDraw;
+    defer d0.dl.deinit(allocator);
+    const lay = term.rt.editor_merge_layout orelse return error.MissingMergeLayout;
+    const inset: f64 = @floatFromInt(chrome_editor.frame.content_inset_px);
+
+    // ⑴ 대조군: Result 에 selection 이 있으면 조합이 Result 에 그려진다(IME1 과 같은 규칙).
+    const rg = term.rt.editor_hit_geom;
+    const rx = @as(f64, @floatFromInt(rg.body_x)) + @as(f64, @floatFromInt(rg.content_left_px)) + cw * 0.5;
+    const ry = @as(f64, @floatFromInt(rg.body_y)) + chh * 0.5;
+    try testing.expect(beginBodySelection(fx.session, pane_ops.activePane(fx.session), rx, ry, 0));
+    setEditorPreedit(fx.session, term, "\xed\x95\x9c"); // "한"
+    var d1 = appendPaneFrame(fx.session, wide, term) orelse return error.EditorPaneDidNotDraw;
+    defer d1.dl.deinit(allocator);
+    try testing.expect(drawnHasCodepoint(d1.dl, 0xD55C));
+    setEditorPreedit(fx.session, term, ""); // 조합 끝
+
+    // ⑵ Current 를 눌러 초점을 옮긴 뒤 조합을 시작하면 **아무 데도 안 그려진다** — Result 첫 줄에도.
+    const cur = lay.current.?;
+    const cx = @as(f64, @floatFromInt(cur.x)) + inset + @as(f64, @floatFromInt(term.rt.editor_merge.?.ours_hit.content_left_px)) + cw * 0.5;
+    const cy = @as(f64, @floatFromInt(cur.y)) + inset + chh * 1.5;
+    try testing.expect(editor_merge_ops.placePaneCaret(fx.session, term, cx, cy));
+    try testing.expect(editor_merge_ops.focusedSide(term) != null);
+    setEditorPreedit(fx.session, term, "\xed\x95\x9c");
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_preedit.len); // 받지 않았다
+    var d2 = appendPaneFrame(fx.session, wide, term) orelse return error.EditorPaneDidNotDraw;
+    defer d2.dl.deinit(allocator);
+    try testing.expect(!drawnHasCodepoint(d2.dl, 0xD55C));
+    // 판 caret 은 그대로 판에 있고, 문서도 그대로다.
+    try testing.expectEqual(editor_merge_ops.MergeSide.current, editor_merge_ops.focusedSide(term).?);
+    try testing.expect(std.mem.indexOf(u8, term.rt.editor_doc.?.file.content, "\xed\x95\x9c") == null);
+
+    // ⑶ 갓 연 문서(아직 안 누른 문서)도 같다 — 병합 모드가 아니어도 selection 이 없으면 조합이 없다.
+    try dir.dir.writeFile(testing.io, .{ .sub_path = "fresh.txt", .data = "abc\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(testing.io, &root_buf)];
+    const fresh_path = try std.fs.path.join(allocator, &.{ root, "fresh.txt" });
+    defer allocator.free(fresh_path);
+    const fresh = try openPathInActivePane(fx.session, fresh_path);
+    try testing.expect(fresh.rt.editor_selection == null); // 전제
+    setEditorPreedit(fx.session, fresh, "\xed\x95\x9c");
+    try testing.expectEqual(@as(usize, 0), fresh.rt.editor_preedit.len);
 }
 
 test "MPN12 세 판이 Result 를 «따라» 굴러간다 — 대응표로, 그리고 문서가 바뀌면 표가 새로 선다 (제품 경계)" {

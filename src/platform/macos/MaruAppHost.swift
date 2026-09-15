@@ -23,6 +23,44 @@ private func archiveSmokeRenderScale(_ window: NSWindow?) -> CGFloat {
     return CGFloat(milli) / 1_000.0
 }
 
+/// fixture 가 쓰는 **합성 정밀 휠 이벤트**를 만든다. `windowPoint` 는 창 좌표(원점 좌하단)다.
+///
+/// AppKit 에는 휠 `NSEvent` 생성 API 가 없어 `CGEvent` 를 거쳐야 하는데, 그 `location` 은 **주 디스플레이 기준
+/// 전역 좌표(원점 좌상단, y 아래로)** 다. 창 좌표를 그대로 넣으면 `NSEvent(cgEvent:)` 가 `주화면높이 - y` 로
+/// 뒤집어 돌려주므로 **휠이 떨어지는 자리가 그 기계의 주 화면 높이에 달린다.**
+///
+/// 실측(2026-09-15, PR #3743): 아카이브 카드 중심은 창 좌표 y=831(뷰 픽셀 369)인데 주 화면이 1080 인 로컬에서는
+/// `locationInWindow.y` 가 249 로 와 뷰 픽셀 951 에 떨어졌다 — 582 픽셀 어긋났는데도 그 자리가 **우연히** 도크
+/// 안이라 통과했다. 주 화면이 낮은 GitHub 러너에서는 창 밖이라 도크가 휠을 아예 못 받았고
+/// (`session_dock_wheel_target` 불성립) 목록이 안 움직여 스크롤 앵커가 영영 윗변을 못 걸쳤다. 포인터 쪽이
+/// 멀쩡했던 건 그쪽은 `NSEvent.mouseEvent(... windowNumber:)` 로 창 좌표를 그대로 쓰기 때문이다.
+///
+/// 그래서 **되돌아올 값이 창 좌표가 되도록** 넣고, 그 왕복이 성립했는지 여기서 단언한다. 어긋나도 호출자에게는
+/// 「보냈다」로만 보이므로, 단언이 없으면 다음 사람도 엉뚱한 자리에 떨어진 휠을 성공으로 읽는다. 이 이벤트는
+/// 시스템에 post 하지 않고 곧바로 뷰의 `scrollWheel(with:)` 로 넘기므로 전역 좌표가 물리적으로 어디를 가리키는지는
+/// 의미가 없다.
+///
+/// **합성 자리는 여기 하나다.** 아카이브 fixture 와 세션 호스트 복구 fixture 가 각자 만들던 시절, 위 결함은 둘 다에
+/// 있었고 한쪽만 고치면 나머지가 조용히 낡는다.
+private func makeFixturePreciseScrollEvent(windowPoint: NSPoint, deltaY: Int32) -> NSEvent? {
+    guard let source = CGEventSource(stateID: .hidSystemState),
+          let event = CGEvent(
+            scrollWheelEvent2Source: source,
+            units: .pixel,
+            wheelCount: 1,
+            wheel1: deltaY,
+            wheel2: 0,
+            wheel3: 0
+          )
+    else { return nil }
+    let flipHeight = CGDisplayBounds(CGMainDisplayID()).height
+    event.location = CGPoint(x: windowPoint.x, y: flipHeight - windowPoint.y)
+    guard let nsEvent = NSEvent(cgEvent: event) else { return nil }
+    let delivered = nsEvent.locationInWindow
+    guard abs(delivered.x - windowPoint.x) < 0.5, abs(delivered.y - windowPoint.y) < 0.5 else { return nil }
+    return nsEvent
+}
+
 private let browserResultCopyCallback: @convention(c) (
     UnsafeMutableRawPointer?, UInt64, UInt64, UnsafeMutablePointer<UInt8>?, Int
 ) -> Int64 = { context, transferId, offset, destination, capacity in
@@ -3900,6 +3938,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// 아카이브 fixture 창이 **실제로 연** content 크기(pt, "WxH"). 빈 문자열이면 fixture 가 아니거나
     /// 드라이버가 한 번도 안 돌았다는 뜻이다.
     private var agentSessionArchiveSmokeContentSize: String = ""
+    /// 아카이브 fixture 의 휠이 **실제로 떨어진** 창 좌표("XxY"). 빈 문자열이면 이 시나리오가 스크롤을
+    /// 안 한다는 뜻이다. 좌표가 기계마다 달라지던 결함을 값으로 드러낸다(`dispatchArchiveSmokePreciseScroll`).
+    private var agentSessionArchiveSmokeScrollPoint: String = ""
     // restore 중 어느 saved Window라도 apply하지 못했으면 이번 실행의 default/fallback 창으로 마지막 완전
     // checkpoint를 덮지 않는다. 사용자가 새로 저장할 명시 UX가 생기기 전에는 데이터 보존을 우선한다.
     private var workspaceRestoreIncomplete = false
@@ -10156,20 +10197,16 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         downward: Bool
     ) -> Bool {
         let scale = window.backingScaleFactor
-        guard scale > 0, let source = CGEventSource(stateID: .hidSystemState),
-              let event = CGEvent(
-                scrollWheelEvent2Source: source,
-                units: .pixel,
-                wheelCount: 1,
-                wheel1: downward ? -96 : 96,
-                wheel2: 0,
-                wheel3: 0
-              ) else { return false }
+        guard scale > 0 else { return false }
         let x = CGFloat(probe.row_x_px) + CGFloat(probe.row_width_px) / 2
         let y = max(CGFloat(1), min(view.bounds.height * scale - 1, view.bounds.height * scale / 2))
         let local = NSPoint(x: x / scale, y: view.bounds.height - y / scale)
-        event.location = view.convert(local, to: nil)
-        guard let nsEvent = NSEvent(cgEvent: event) else { return false }
+        // 합성 규칙(전역 좌표 뒤집기와 그 왕복 단언)은 `makeFixturePreciseScrollEvent` 가 소유한다 — 이 자리도
+        // 같은 결함을 갖고 있었고, 각자 만들던 동안에는 한쪽을 고쳐도 나머지가 조용히 낡았다.
+        guard let nsEvent = makeFixturePreciseScrollEvent(
+            windowPoint: view.convert(local, to: nil),
+            deltaY: downward ? -96 : 96
+        ) else { return false }
         view.scrollWheel(with: nsEvent)
         return true
     }
@@ -11434,18 +11471,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         let backingY = CGFloat(probe.y_px + probe.height_px / 2)
         let local = NSPoint(x: backingX / scale, y: view.bounds.height - (backingY / scale))
         let location = view.convert(local, to: nil)
-        guard let source = CGEventSource(stateID: .hidSystemState),
-              let event = CGEvent(
-                scrollWheelEvent2Source: source,
-                units: .pixel,
-                wheelCount: 1,
-                wheel1: -96,
-                wheel2: 0,
-                wheel3: 0
-              )
-        else { return false }
-        event.location = location
-        guard let nsEvent = NSEvent(cgEvent: event) else { return false }
+        // 합성 규칙(전역 좌표 뒤집기와 그 왕복 단언)은 `makeFixturePreciseScrollEvent` 가 소유한다.
+        guard let nsEvent = makeFixturePreciseScrollEvent(windowPoint: location, deltaY: -96) else { return false }
+        agentSessionArchiveSmokeScrollPoint = "\(Int(location.x.rounded()))x\(Int(location.y.rounded()))"
         view.scrollWheel(with: nsEvent)
         return true
     }
@@ -12803,6 +12831,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         agent_session_archive_smoke_stage=\(archiveSmokeStage)
         agent_session_archive_smoke_failure=\(archiveSmokeFailure)
         agent_session_archive_smoke_content_size=\(agentSessionArchiveSmokeContentSize)
+        agent_session_archive_smoke_scroll_point=\(agentSessionArchiveSmokeScrollPoint)
         agent_session_archive_smoke_scenario=\(archiveSmokeScenario)
         agent_session_archive_smoke_fake_resume_verdict=\(archiveSmokeFakeResumeVerdict())
         agent_session_archive_smoke_reveal_allowed_count=\(agentSessionArchiveSmokeRevealAllowedCount)

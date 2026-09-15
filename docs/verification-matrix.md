@@ -1916,7 +1916,8 @@ provisioned Developer ID·Notification Center 등 아래의 외부 release gate 
   runtime size golden이 이를 고정한다. generation mutation이 없는 decision은 이 gate에서 `retain`으로만 분류하며,
   mutation seal·authority/retry/close effect의 실제 제품 결속과 외부 ingress는 e3가 소유한다. e3a1은 actual
   empty-screen candidate→publish→retiring→reclaim allocator ledger의 structural base allocation 1개,
-  CR6d typed event-payload allocator와 CR5b-2a retirement preparation owner, `--stream` 화면 byte sink 반영 뒤 Debug 3,536바이트/ReleaseFast 3,520바이트, abort baseline 복원, 두 reconnect 뒤 heap current 1개와 teardown
+  CR6d typed event-payload allocator와 CR5b-2a retirement preparation owner, `--stream` 화면 byte sink를 포함한
+  `RemoteGeneration`의 구성별 실제 크기는 `remote_runtime.zig`의 `expected_generation_size` 골든을 단일 출처로 삼고, abort baseline 복원, 두 reconnect 뒤 heap current 1개와 teardown
   final-zero를 runtime 2개+boundary 1개로 고정한다. 가변 screen/metadata를 포함하지 않는 lower bound이므로
   e3a2의 actual bounded-workload ReleaseFast child raw RSS evidence와 기존 host base SSOT를 결합한다. generation
   1개의 최대 구조적 charge는 `base_update_max_bytes`(16 MiB screen+256 KiB metadata), fixed inventory는 mutation

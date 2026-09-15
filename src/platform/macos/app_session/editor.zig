@@ -211,9 +211,21 @@ fn buildMergePaneOps(
     pane_rect: chrome_draw.Rect,
     scratch: FrameScratch,
 ) PaneFrame {
+    // **세 판이 Result 를 따라 굴러간다**(S3b-M 첫 소비자). Result 의 첫 줄을 대응표로 옮겨 각
+    // 판의 첫 줄을 정한다. 표가 없으면(아직 안 만들었거나 조상이 없다) 0 — 옮기지 않는 것이
+    // 반쪽 표로 옮기는 것보다 정직하다.
+    editor_merge_ops.ensureMaps(self, term);
+    const st_now = term.rt.editor_merge.?; // `ensureMaps` 가 표를 채웠으므로 다시 읽는다
+    const result_top: u32 = @intCast(@min(term.rt.editor_first_line, std.math.maxInt(u32)));
+    const follow = struct {
+        fn f(map: ?maru.session.editor.merge_map.Map, top: u32) usize {
+            const m = map orelse return 0;
+            return m.toSide(top) orelse 0;
+        }
+    }.f;
     const w = chrome_editor.merge_frame.build(.{
         .rect = pane_rect,
-        .current = .{ .lines = st.ours_lines },
+        .current = .{ .lines = st.ours_lines, .first_line = follow(st_now.map_ours, result_top) },
         .result = .{
             .lines = result_lines,
             .line_colors = syntaxColors(self, term),
@@ -227,10 +239,10 @@ fn buildMergePaneOps(
             .widgets = conflictWidgets(self, term),
             .bands = conflictBands(term),
         },
-        .incoming = .{ .lines = st.theirs_lines },
+        .incoming = .{ .lines = st.theirs_lines, .first_line = follow(st_now.map_theirs, result_top) },
         // **`null` 이면 조상이 «없다»** — 빈 조상은 어엿한 조상이라 띠가 선다(그 판정은 S3a 의
         // `StageSet` 이 소유한다. 여기서 길이로 다시 재면 그 규칙의 주인이 둘이 된다).
-        .base = if (st.stages.has_base) chrome_editor.merge_frame.Pane{ .lines = st.base_lines } else null,
+        .base = if (st.stages.has_base) chrome_editor.merge_frame.Pane{ .lines = st.base_lines, .first_line = follow(st_now.map_base, result_top) } else null,
         .cell_w_px = @intCast(self.cell_width_px),
         .cell_h_px = @intCast(self.cell_height_px),
         .font_px = @intCast(self.cell_height_px),
@@ -8796,6 +8808,25 @@ fn paneHasCodepoint(dl: renderer.DrawList, rect: chrome_draw.Rect, cp: u21) bool
     return false;
 }
 
+/// `paneHasCodepoint` 의 **행 버전** — 그 글자가 pane 의 몇째 행에 있나(pane 위 경계 셀부터 0).
+/// 「보이나」만 재면 「몇 줄 어긋났나」가 무판정이다(적대적 3회차: 번호 그대로 굴린 변이·반대 방향 표·
+/// theirs 표로 굴린 변이가 전부 살았다 — 글자는 보였고 자리만 틀렸다).
+fn paneCodepointRow(dl: renderer.DrawList, rect: chrome_draw.Rect, cp: u21) ?i64 {
+    const cw: i64 = 8;
+    const chh: i64 = 16;
+    const col_lo = @divFloor(@as(i64, rect.x), cw);
+    const col_hi = @divFloor(@as(i64, rect.x) + @as(i64, @intCast(rect.w)), cw);
+    const row_lo = @divFloor(@as(i64, rect.y), chh);
+    const row_hi = @divFloor(@as(i64, rect.y) + @as(i64, @intCast(rect.h)), chh);
+    for (dl.cells) |c| {
+        if (c.codepoint != cp) continue;
+        const col: i64 = c.col;
+        const row: i64 = c.row;
+        if (col >= col_lo and col < col_hi and row >= row_lo and row < row_hi) return row - row_lo;
+    }
+    return null;
+}
+
 test "IME5 후보창은 조합 글자 아래에 선다 — pane 구석이 아니라 (N3)" {
     // 편집기 Term은 코어가 sentinel이라 `imeCursorRect`의 터미널 갈래를 못 쓴다. 그대로 두면
     // **pane 좌상단**으로 떨어지는데, 한글은 후보창을 보며 고르는 입력이라 그 어긋남이 곧바로 걸린다.
@@ -9408,6 +9439,180 @@ test "MPN11 병합 pane 에도 S2 의 «고르기» 줄이 서고, Result 안 �
     try testing.expect(conflictActionAtPoint(term2, outside_x, y) == null);
     try testing.expect(!acceptConflictAtPoint(fx.session, pane_ops.activePane(fx.session), outside_x, y));
     try testing.expect(std.mem.indexOf(u8, term2.rt.editor_doc.?.file.content, "<<<<<<<") != null); // 그대로다
+}
+
+test "MPN12 세 판이 Result 를 «따라» 굴러간다 — 대응표로, 그리고 문서가 바뀌면 표가 새로 선다 (제품 경계)" {
+    // S3b-M 의 첫 소비자. 세 판은 아직 입력을 안 받으므로 Result 가 굴러가면 대응표로 따라가야
+    // 같은 내용이 같은 높이에 선다 — 안 따라가면 Result 를 100 줄 내려도 세 판은 맨 위에 그대로다.
+    //
+    // **글자의 «행»을 잰다**(`paneCodepointRow`). 「보이나」만 재면 번호 그대로 굴린 변이·반대 방향
+    // 표·이웃 판의 표로 굴린 변이가 전부 산다 — 글자는 보이고 자리만 틀리므로(적대적 3회차).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    // Result: 80 줄 `line NNN`. 0 줄에만 `#`, 10 줄에만 `@` — 어느 줄이 어느 행에 섰는지 그 둘로 읽는다.
+    // ours: 맨 위에 `EXTRA`(=`X`) 한 줄이 더 있다(→ ours 줄 = Result 줄 + 1).
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var doc_buf: [4096]u8 = undefined;
+    var doc_len: usize = 0;
+    for (0..80) |k| {
+        const tag: []const u8 = if (k == 0) " #" else if (k == 10) " @" else "";
+        const l = try std.fmt.bufPrint(doc_buf[doc_len..], "line {d:0>3}{s}\n", .{ k, tag });
+        doc_len += l.len;
+    }
+    try dir.dir.writeFile(testing.io, .{ .sub_path = "r.txt", .data = doc_buf[0..doc_len] });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(testing.io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "r.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+
+    var ours_buf: [4096]u8 = undefined;
+    const ours_bytes = try std.fmt.bufPrint(&ours_buf, "EXTRA\n{s}", .{doc_buf[0..doc_len]});
+    term.rt.editor_merge = .{
+        .stage_allocator = allocator,
+        .ready = true,
+        .stages = .{ .has_base = true, .has_ours = true, .has_theirs = true },
+        .base = try allocator.dupe(u8, doc_buf[0..doc_len]),
+        .ours = try allocator.dupe(u8, ours_bytes),
+        .theirs = try allocator.dupe(u8, doc_buf[0..doc_len]),
+        .line_allocator = allocator,
+    };
+    defer editor_merge_ops.clear(fx.session, term);
+    // 줄 배열은 제품이 쪼개는 그 함수로. **`deliver` 경로(`splitAll`)는 `MRG21` 이 따로 잰다** — 여기서
+    // 직접 쪼개면 그 경로가 비교 뷰의 `splitLines` 로 돌아가도 초록이다(적대적 2회차 B8 이 그 자리).
+    {
+        const st = &term.rt.editor_merge.?;
+        st.base_lines = try maru.session.editor.merge_map.splitLikeEditor(allocator, st.base);
+        st.ours_lines = try maru.session.editor.merge_map.splitLikeEditor(allocator, st.ours);
+        st.theirs_lines = try maru.session.editor.merge_map.splitLikeEditor(allocator, st.theirs);
+    }
+    term.rt.editor_wrap = false;
+
+    // ⑴ 맨 위(대조군): Incoming·Base 는 `#` 이 0 행. Current 는 **1 행** — 위에 `EXTRA` 가 선다(짝의
+    //    머리 규칙: Result 0 ↔ ours 1 이지만 그 바로 위의 ours 만의 줄 무리가 함께 온다).
+    var top = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    defer top.dl.deinit(allocator);
+    const lay = term.rt.editor_merge_layout orelse return error.MissingMergeLayout;
+    const body = editorBodyRect(fx.session, fx.leaf_rect, term);
+    const cur = unoffsetRect(lay.current.?, body);
+    const inc = unoffsetRect(lay.incoming.?, body);
+    const bas = unoffsetRect(lay.base.?, body);
+    try testing.expectEqual(@as(?i64, 0), paneCodepointRow(top.dl, cur, 'X'));
+    try testing.expectEqual(@as(?i64, 1), paneCodepointRow(top.dl, cur, '#'));
+    try testing.expectEqual(@as(?i64, 0), paneCodepointRow(top.dl, inc, '#'));
+    try testing.expectEqual(@as(?i64, 0), paneCodepointRow(top.dl, bas, '#'));
+    const st0 = term.rt.editor_merge.?;
+    const rev_before = st0.map_revision orelse return error.MapNotBuilt;
+    const rows_before = st0.map_ours.?.rows.left.ptr;
+
+    // ⑵ Result 를 10 줄 내리면 세 판 모두 `@`(Result 10 줄의 짝)가 **0 행**이고 `#`·`X` 는 화면 밖이다.
+    //    Current 는 11 줄부터(대응표), Incoming·Base 는 10 줄부터(항등).
+    term.rt.editor_first_line = 10;
+    var down = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    defer down.dl.deinit(allocator);
+    try testing.expectEqual(@as(?i64, 0), paneCodepointRow(down.dl, cur, '@'));
+    try testing.expectEqual(@as(?i64, 0), paneCodepointRow(down.dl, inc, '@'));
+    try testing.expectEqual(@as(?i64, 0), paneCodepointRow(down.dl, bas, '@'));
+    try testing.expect(!paneHasCodepoint(down.dl, cur, 'X'));
+    try testing.expect(!paneHasCodepoint(down.dl, cur, '#'));
+    try testing.expect(!paneHasCodepoint(down.dl, inc, '#'));
+    try testing.expect(!paneHasCodepoint(down.dl, bas, '#'));
+    // 표 자체도 그렇게 말한다 — 화면과 모델이 같은 답이어야 한다.
+    const st1 = term.rt.editor_merge.?;
+    try testing.expectEqual(@as(?u32, 11), st1.map_ours.?.toSide(10));
+    try testing.expectEqual(@as(?u32, 10), st1.map_theirs.?.toSide(10)); // theirs 는 항등
+    try testing.expectEqual(@as(?u32, 10), st1.map_base.?.toSide(10));
+    // **편집이 없었으니 표는 그대로다** — 매 프레임 다시 세우면 프레임마다 diff 를 한 번 더 돈다
+    // (적대적 2회차 B2: 누수는 없어 조용했다).
+    try testing.expectEqual(rev_before, st1.map_revision.?);
+    try testing.expect(st1.map_ours.?.rows.left.ptr == rows_before);
+
+    // ⑶ **문서가 바뀌면 표가 새로 선다.** Result 맨 앞에 줄 하나를 넣으면 이제 Result 줄 = ours 줄
+    //    이 되어(둘 다 앞에 한 줄), 같은 10 은 10 으로 간다. 옛 표로 옮기면 11 로 가서 한 줄 어긋난다.
+    term.rt.editor_first_line = 0;
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, term, "INSERTED\n"));
+    term.rt.editor_first_line = 10;
+    var again = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    defer again.dl.deinit(allocator);
+    const st2 = term.rt.editor_merge.?;
+    try testing.expect(st2.map_revision.? != rev_before);
+    try testing.expectEqual(@as(?u32, 10), st2.map_ours.?.toSide(10));
+    // 화면도: Result 10 줄은 이제 옛 9 줄(`line 009`)이고 `@` 는 11 줄 → 세 판 모두 `@` 가 **1 행**.
+    try testing.expectEqual(@as(?i64, 1), paneCodepointRow(again.dl, cur, '@'));
+    try testing.expectEqual(@as(?i64, 1), paneCodepointRow(again.dl, inc, '@'));
+    try testing.expectEqual(@as(?i64, 1), paneCodepointRow(again.dl, bas, '@'));
+}
+
+test "MPN13 표가 «없으면» 옮기지 않는다 — 전면 재작성(too_large)에서 그 판은 0 줄에 선다 (제품 경계)" {
+    // 계약 §5 S3b-M: 실패는 «표 없음» 이고 표가 없으면 소비자는 옮기지 않는다 — 반쪽 표로 옮기는 것보다
+    // 정직하다. 닿는 길은 `diff.compute` 의 `too_large`(예산에서 역산한 D 를 넘는 전면 재작성)다.
+    // **Result 번호로 굴리는 변이가 살았다**(적대적 4회차 D15 — 사인이 무관한 시그널 판정자였다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    // Result: 4,000 줄 `aaaa`/`bbbb` 번갈아(10 줄에만 `@`). ours: 같은 수의 `cccc`/`dddd`(0 줄에만 `#`) —
+    // 한 줄도 안 겹쳐 D 가 예산을 넘는다(`diff.zig` 의 「상한이 실제로 메모리를 막는다」와 같은 모양).
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    const n = 4000;
+    var result_text: std.ArrayList(u8) = .empty;
+    defer result_text.deinit(allocator);
+    var ours_text: std.ArrayList(u8) = .empty;
+    defer ours_text.deinit(allocator);
+    for (0..n) |i| {
+        try result_text.appendSlice(allocator, if (i % 2 == 0) "aaaa" else "bbbb");
+        if (i == 10) try result_text.appendSlice(allocator, " @");
+        try result_text.append(allocator, '\n');
+        try ours_text.appendSlice(allocator, if (i % 2 == 0) "cccc" else "dddd");
+        if (i == 0) try ours_text.appendSlice(allocator, " #");
+        try ours_text.append(allocator, '\n');
+    }
+    try dir.dir.writeFile(testing.io, .{ .sub_path = "big.txt", .data = result_text.items });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(testing.io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "big.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+
+    term.rt.editor_merge = .{
+        .stage_allocator = allocator,
+        .ready = true,
+        .stages = .{ .has_base = true, .has_ours = true, .has_theirs = true },
+        .base = try allocator.dupe(u8, result_text.items),
+        .ours = try allocator.dupe(u8, ours_text.items),
+        .theirs = try allocator.dupe(u8, result_text.items),
+        .line_allocator = allocator,
+    };
+    defer editor_merge_ops.clear(fx.session, term);
+    {
+        const st = &term.rt.editor_merge.?;
+        st.base_lines = try maru.session.editor.merge_map.splitLikeEditor(allocator, st.base);
+        st.ours_lines = try maru.session.editor.merge_map.splitLikeEditor(allocator, st.ours);
+        st.theirs_lines = try maru.session.editor.merge_map.splitLikeEditor(allocator, st.theirs);
+    }
+    term.rt.editor_wrap = false;
+
+    term.rt.editor_first_line = 10;
+    var down = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    defer down.dl.deinit(allocator);
+    const st = term.rt.editor_merge.?;
+    try testing.expect(st.map_ours == null); // 표가 없다 — 그것이 전제
+    try testing.expect(st.map_theirs != null); // 이웃 표는 있다(대조군: 항등)
+    const lay = term.rt.editor_merge_layout orelse return error.MissingMergeLayout;
+    const body = editorBodyRect(fx.session, fx.leaf_rect, term);
+    const cur = unoffsetRect(lay.current.?, body);
+    const inc = unoffsetRect(lay.incoming.?, body);
+    // Current 는 **0 줄**에 선다(`#` 이 0 행). Result 번호로 굴렸다면 10 줄부터라 `#` 은 화면 밖이다.
+    try testing.expectEqual(@as(?i64, 0), paneCodepointRow(down.dl, cur, '#'));
+    // 이웃은 여전히 따라간다 — 한 판의 실패가 다른 판을 멈추지 않는다.
+    try testing.expectEqual(@as(?i64, 0), paneCodepointRow(down.dl, inc, '@'));
 }
 
 test "MPN9 Result «안» 의 클릭이 그 자리 글자를 가리킨다 (제품 경계)" {

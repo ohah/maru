@@ -844,6 +844,15 @@ const cases = [_]Case{
         .contract = "폭이 모자라면 세 열이 접히고 Result 하나만 남는다(Base 띠는 그대로)",
         .rect = .{ .x = 0, .y = 0, .w = 480, .h = 140 },
     },
+    // S3b-M §5 — **따라 굴리기.** Result 를 10 줄 내리면 세 판이 대응표로 따라간다: 같은 글자
+    // (`step_10();`)가 세 열의 첫 행에 서고, Current 만 gutter 번호가 **14** 다(맨 위에 자기만의 줄
+    // 셋). 번호가 같고 글자가 다르면 「번호로 굴린」 것이고, 세 판이 1 부터면 안 따라간 것이다.
+    .{
+        .name = "editor-merge-follow-scroll",
+        .capture = "editor-merge-scrolled.ppm",
+        .contract = "Result 를 굴리면 세 판이 대응표로 따라가 같은 글자가 같은 높이에 선다 — 번호는 각자의 것",
+        .rect = .{ .x = 0, .y = 0, .w = 1200, .h = 140 },
+    },
     .{
         .name = "editor-real-file-from-disk",
         .capture = "editor-real-file.ppm",

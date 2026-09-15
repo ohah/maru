@@ -12,7 +12,7 @@ const renderer = @import("../renderer.zig");
 const terminal = @import("../terminal.zig");
 const color = @import("../color.zig");
 const icons = @import("../icons.zig"); // 등록 chrome 아이콘 이름↔PUA codepoint(생성물)
-const image_reconciliation = @import("../image_reconciliation.zig"); // placement 는 있는데 blob 이 없는 프레임을 센다
+const image_reconciliation = @import("../image_reconciliation.zig"); // placement 는 있는데 blob 이 없는 프레임을 센다(buildGpuImages 에서)
 
 /// **이미지 픽셀은 버퍼를 재사용한다.** kitty graphics 로 그리는 화면(터미널 브라우저)은 프레임마다 같은
 /// 크기의 이미지를 보내는데, 한때 한 프레임이 그 픽셀을 **두 번** 새 힙 버퍼로 옮겼다 — `planImageUploads`
@@ -1075,8 +1075,12 @@ pub fn buildGpuImages(
     const view_h: f32 = @as(f32, @floatFromInt(size.rows)) * ch;
 
     for (placements) |p| {
-        // 이미지를 image_id로 찾는다(텍스처 크기·존재 확인). 없으면 그릴 게 없다.
-        const img = findImage(images, p.image_id) orelse continue;
+        // 이미지를 image_id로 찾는다(텍스처 크기·존재 확인). 없으면 그릴 게 없다 — 그리고 그것이 «안 뜸» 의
+        // 첫 번째 조용한 자리다. 여기서 세지 않으면 이 placement 는 뒤 단계에 아예 안 닿아 아무도 못 센다.
+        const img = findImage(images, p.image_id) orelse {
+            image_reconciliation.recordPlacementWithoutBlob();
+            continue;
+        };
         if (img.width == 0 or img.height == 0) continue;
         const tex_w: f32 = @floatFromInt(img.width);
         const tex_h: f32 = @floatFromInt(img.height);
@@ -1165,6 +1169,7 @@ fn appendPlaceholderQuads(
                 continue;
             };
             const img = findImage(images, first.image_id) orelse {
+                image_reconciliation.recordPlacementWithoutBlob(); // 가상 배치(U=1)도 같은 자리다.
                 col += 1;
                 continue;
             };
@@ -1281,10 +1286,8 @@ pub fn planImageUploads(
 
     var used: usize = 0;
     for (gpu_images) |gi| {
-        const img = findImage(images, gi.image_id) orelse {
-            image_reconciliation.recordPlacementWithoutBlob(); // placement 는 왔는데 blob 이 없다 — «안 뜸» 의 후보 자리.
-            continue;
-        };
+        // blob 없는 placement 는 buildGpuImages 가 이미 걸러 여기 안 온다(거기서 센다). 방어만 남긴다.
+        const img = findImage(images, gi.image_id) orelse continue;
         if (uploaded.get(gi.image_id)) |g| {
             if (g == img.generation) {
                 image_reconciliation.recordUploadSkippedSameGeneration();
@@ -3179,49 +3182,57 @@ test "planImageUploads: 신규는 업로드+상태 기록, 같은 generation은 
     try std.testing.expectEqual(@as(usize, 0), plan2.pixels.len);
 }
 
-test "planImageUploads: placement 만 있고 blob 이 없으면 대조 계수가 오르고, 업로드·캐시 적중도 각각 센다" {
+test "buildGpuImages: blob 없는 placement 는 여기서 걸러지고 그 자리에서 센다 — 제품이 실제로 타는 경로" {
+    const alloc = std.testing.allocator;
+    const recon = image_reconciliation;
+    const px = [_]u8{0xAB} ** 16;
+    const images = [_]terminal.KittyImageView{.{ .image_id = 7, .width = 2, .height = 2, .bpp = 4, .generation = 5, .pixels = &px }};
+    // 7 은 blob 이 있고 9 는 없다. 라이브 양성 대조에서 드러난 자리 — planImageUploads 는 9 를 아예 못 본다.
+    const placements = [_]terminal.KittyPlacement{
+        .{ .image_id = 7, .placement_id = 1, .row = 0, .col = 0, .columns = 2, .rows = 1 },
+        .{ .image_id = 9, .placement_id = 2, .row = 0, .col = 3, .columns = 2, .rows = 1 },
+    };
+    const b0 = recon.snapshot();
+    const out = try buildGpuImages(alloc, &placements, &images, .{ .cols = 10, .rows = 6 }, 10, 20, &.{}, &.{}, &.{});
+    defer alloc.free(out);
+    const d = recon.snapshot().delta(b0);
+    try std.testing.expectEqual(@as(usize, 1), out.len); // 9 는 안 나온다
+    try std.testing.expectEqual(@as(u64, 1), d.placement_without_blob);
+    try std.testing.expect(d.anyLoss());
+
+    // **부정 대조**: blob 이 다 있으면 손실 0.
+    const b1 = recon.snapshot();
+    const out2 = try buildGpuImages(alloc, placements[0..1], &images, .{ .cols = 10, .rows = 6 }, 10, 20, &.{}, &.{}, &.{});
+    defer alloc.free(out2);
+    try std.testing.expect(!recon.snapshot().delta(b1).anyLoss());
+}
+
+test "planImageUploads: 업로드와 캐시 적중을 각각 세고, 크기 계산 루프는 세지 않는다" {
     const alloc = std.testing.allocator;
     const recon = image_reconciliation;
     var uploaded: std.AutoHashMapUnmanaged(u32, u64) = .{};
     defer uploaded.deinit(alloc);
     const px = [_]u8{0xAB} ** 16;
     const images = [_]terminal.KittyImageView{.{ .image_id = 7, .width = 2, .height = 2, .bpp = 4, .generation = 5, .pixels = &px }};
-    // placement 둘: 7 은 blob 이 있고, 9 는 없다.
-    const gpu = [_]GpuImage{
-        .{ .image_id = 7, .dest_x = 0, .dest_y = 0, .dest_w = 10, .dest_h = 10, .src_u0 = 0, .src_v0 = 0, .src_u1 = 1, .src_v1 = 1, .z = 0, .pass = 2 },
-        .{ .image_id = 9, .dest_x = 0, .dest_y = 0, .dest_w = 10, .dest_h = 10, .src_u0 = 0, .src_v0 = 0, .src_u1 = 1, .src_v1 = 1, .z = 0, .pass = 2 },
-    };
+    const gpu = [_]GpuImage{.{ .image_id = 7, .dest_x = 0, .dest_y = 0, .dest_w = 10, .dest_h = 10, .src_u0 = 0, .src_v0 = 0, .src_u1 = 1, .src_v1 = 1, .z = 0, .pass = 2 }};
     var buf: []u8 = &.{};
     var cap: usize = 0;
     defer if (cap > 0) alloc.free(buf.ptr[0..cap]);
 
-    // 첫 프레임: 7 은 업로드, 9 는 blob 없음 → placement_without_blob 1, uploaded 1. 크기 계산 루프는 세지 않는다(두 번 세면 안 된다).
     const b0 = recon.snapshot();
     const plan1 = try planImageUploads(alloc, &gpu, &images, &uploaded, &buf, &cap);
     defer alloc.free(plan1.uploads);
     const d1 = recon.snapshot().delta(b0);
-    try std.testing.expectEqual(@as(usize, 1), plan1.uploads.len);
-    try std.testing.expectEqual(@as(u64, 1), d1.placement_without_blob);
-    try std.testing.expectEqual(@as(u64, 1), d1.uploaded);
+    try std.testing.expectEqual(@as(u64, 1), d1.uploaded); // 두 루프 중 한 번만
     try std.testing.expectEqual(@as(u64, 0), d1.upload_skipped_same_generation);
-    try std.testing.expect(d1.anyLoss());
+    try std.testing.expect(!d1.anyLoss());
 
-    // 둘째 프레임: 7 은 캐시 적중(skip), 9 는 여전히 없음 → skip 1, 손실 1 더.
     const b1 = recon.snapshot();
     const plan2 = try planImageUploads(alloc, &gpu, &images, &uploaded, &buf, &cap);
     defer alloc.free(plan2.uploads);
     const d2 = recon.snapshot().delta(b1);
-    try std.testing.expectEqual(@as(usize, 0), plan2.uploads.len);
     try std.testing.expectEqual(@as(u64, 1), d2.upload_skipped_same_generation);
     try std.testing.expectEqual(@as(u64, 0), d2.uploaded);
-    try std.testing.expectEqual(@as(u64, 1), d2.placement_without_blob);
-
-    // **부정 대조**: blob 이 다 있으면 손실 0.
-    const only7 = gpu[0..1];
-    const b2 = recon.snapshot();
-    const plan3 = try planImageUploads(alloc, only7, &images, &uploaded, &buf, &cap);
-    defer alloc.free(plan3.uploads);
-    try std.testing.expect(!recon.snapshot().delta(b2).anyLoss());
 }
 
 test "planImageUploads: generation 바뀌면 재업로드, 같은 frame 중복 id는 한 번만" {

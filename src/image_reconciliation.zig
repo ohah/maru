@@ -27,11 +27,15 @@ pub const Counters = struct {
     dropped_order: std.atomic.Value(u64) = .init(0),
     /// 메모리 부족으로 못 받은 이미지.
     dropped_oom: std.atomic.Value(u64) = .init(0),
-    /// placement 가 가리키는 image_id 의 blob 이 없어 안 그린 횟수(프레임마다 센다).
+    /// placement 가 가리키는 image_id 의 blob 이 없어 안 그린 횟수. **프레임마다 배치마다** 센다 — 5 초 델타가
+    /// 300 이면 이미지 300 개가 사라진 게 아니라, 배치 하나가 5 초 내내 매 프레임 못 그려졌다는 뜻일 수 있다.
+    /// 「얼마나」가 아니라 「어느 칸에서」를 답하는 계수다.
     placement_without_blob: std.atomic.Value(u64) = .init(0),
-    /// GPU 에 실제로 올린 이미지 수.
+    /// GPU 에 실제로 올린 이미지 수(프레임 안에서 같은 image_id 는 한 번).
     uploaded: std.atomic.Value(u64) = .init(0),
-    /// 같은 generation 이라 업로드를 건너뛴 횟수(정상 캐시 적중).
+    /// 같은 generation 이라 업로드를 건너뛴 quad 수. **프레임 간 캐시 적중과 같은 프레임 안의 중복 quad 가
+    /// 섞인다**(업로드 장부가 같은 프레임 안에서도 갱신되므로 두 번째 quad 부터 여기로 온다). 정상 흐름의
+    /// 모양을 남기는 참고값이지 손실이 아니다.
     upload_skipped_same_generation: std.atomic.Value(u64) = .init(0),
 };
 

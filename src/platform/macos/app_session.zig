@@ -255,7 +255,7 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // Zig 가 짝지어지면 배치를 추측하는 대신 ABI 가드에서 실패해야 한다(166 이 같은 이유로 올라갔다).
 // 171: P4 C3 adds the app-global workspace checkpoint effect, mutation forwarding, secure
 // background publication, and persistent status-bar failure projection ABI.
-// 170: CR6d actual-AppKit input continuity smoke adds a read-only four-counter probe for the
+// 170: CR6d actual-AppKit input continuity smoke adds a read-only probe for the
 // exact recovered runtime. The export carries no input/action authority, but Swift allocates the
 // new C record, so an old host/new Zig pairing must fail the ABI guard instead of guessing layout.
 // 178: c3c actual-AppKit gate가 reconnect worker/receipt/CR5/admission/resident owner의 read-only
@@ -272,7 +272,10 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // daemon/runtime 종료가 끝나기 전에 app process가 성공 종료하지 못하게 하는 provisioned release 진입점이다.
 // 184: provisioned Notification Center child obtains a two-phase continuity proof from the exact
 // attached remote Term and takes the resulting canonical second socket frame through new ABI leaves.
-pub const abi_version: u32 = 184;
+// 185: CR6d-v2b0b extends the read-only input probe with terminal byte/screen generation counters
+// and adds one synchronous transcript-to-canonical-evidence leaf. Raw inventories are borrowed
+// only for the call; Zig owns reduction and absent-target publication.
+pub const abi_version: u32 = 185;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -4492,6 +4495,8 @@ pub const AppSession = struct {
         historical_count: u32 = 0,
         ime_count: u32 = 0,
         clipboard_count: u32 = 0,
+        terminal_input_bytes: u64 = 0,
+        base_screen_generation: u64 = 0,
     };
 
     pub fn sessionHostInputSmokeProbe(self: *AppSession) SessionHostInputSmokeProbe {
@@ -4531,6 +4536,8 @@ pub const AppSession = struct {
                 std.mem.count(u8, recent, "CR6D-CLIPBOARD-ONCE"),
                 std.math.maxInt(u32),
             )),
+            .terminal_input_bytes = self.total_terminal_input_bytes,
+            .base_screen_generation = remote.screenGenerationFor(term.rt.handle) orelse return .{},
         };
     }
 

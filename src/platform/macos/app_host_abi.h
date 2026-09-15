@@ -9,7 +9,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 184u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 185u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -841,10 +841,23 @@ typedef struct MaruAppHostSessionHostInputSmokeProbe {
     uint32_t historical_count;
     uint32_t ime_count;
     uint32_t clipboard_count;
+    uint64_t terminal_input_bytes;
+    uint64_t base_screen_generation;
 } MaruAppHostSessionHostInputSmokeProbe;
 int32_t maru_macos_app_session_input_smoke_probe(
     MaruAppHostSession *session,
     MaruAppHostSessionHostInputSmokeProbe *out_probe
+);
+/* CR6d-v2b0b: complete in-memory inventory transcript를 Zig reducer가 판정해 absent target에 게시한다. */
+typedef enum MaruAppHostIMECandidateObservationResult {
+    MaruAppHostIMECandidateObservationPassed = 0,
+    MaruAppHostIMECandidateObservationFailed = 1,
+} MaruAppHostIMECandidateObservationResult;
+uint32_t maru_macos_session_host_ime_candidate_observation_publish(
+    const uint8_t *transcript,
+    size_t transcript_len,
+    const char *output_path,
+    size_t output_path_len
 );
 /* cross-window workspace 이동(M3d-2a) 결과 — status(ok/move_failed/null_out) + 소스 창이 비어 닫아야 하는지
    (§8A.2) + 이동한 surface 수(§8A.3). Swift(M3d-2b)가 source_window_closed=1이면 NSWindow를 닫는다(판정은 Zig,

@@ -4247,6 +4247,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var sessionHostInputPixelPhase: UInt32 = 0
     private var sessionHostInputPixelBefore: SessionHostInputPixelSnapshot?
     private var sessionHostInputPixelMarked: SessionHostInputPixelSnapshot?
+    private var sessionHostCandidateObservation: SessionHostIMECandidateObservation?
+    private var sessionHostCandidateBefore: SessionHostIMECandidateObservation.Snapshot?
+    private var sessionHostCandidateOpened: SessionHostIMECandidateObservation.Snapshot?
+    private var sessionHostCandidatePhase: UInt32 = 0
+    private var sessionHostCandidateWaitTicks: UInt32 = 0
     private var launchSummaryWritten = false
     private var isSessionHostRecoverySmokeMode: Bool {
         smokeMode && ProcessInfo.processInfo.environment["MARU_SESSION_HOST_CR6C_APPKIT_SMOKE"] == "1"
@@ -10654,6 +10659,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 return
             }
             sessionHostInputSmokePostEventAccess = true
+            // Window inventory and later single-window capture are privileged independently of
+            // HID posting. Refuse before changing the global input source so a missing Screen
+            // Recording grant cannot leave any system mutation behind.
+            guard CGPreflightScreenCaptureAccess() else {
+                failSessionHostInputSmoke("screen-recording-not-provisioned")
+                return
+            }
+            sessionHostCandidateObservation = SessionHostIMECandidateObservation()
             guard prepareSessionHostInputSmokeInputSource() else {
                 failSessionHostInputSmoke("global-input-source")
                 return
@@ -10747,6 +10760,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 failSessionHostInputSmoke("ime-callback")
                 return
             }
+            guard runSessionHostCandidateObservation(
+                probe: probe, surface: surface, view: view
+            ) else { return }
             guard restoreSessionHostInputSmokeViewSource() else {
                 failSessionHostInputSmoke("input-source-restore")
                 return
@@ -10789,7 +10805,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     private func dispatchSessionHostInputPhysicalKey(
         keyCode: UInt16,
-        view: MaruMetalTerminalView
+        view: MaruMetalTerminalView,
+        flags: CGEventFlags = []
     ) -> Bool {
         guard view.window?.firstResponder === view else { return false }
         guard let source = CGEventSource(stateID: .hidSystemState) else { return false }
@@ -10798,11 +10815,95 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         ), let up = CGEvent(
             keyboardEventSource: source, virtualKey: CGKeyCode(keyCode), keyDown: false
         ) else { return false }
+        down.flags = flags
+        up.flags = flags
         // Process-targeted or AppKit-created events bypass TSM. Posting at the HID tap is the
         // public route that makes the selected system input source produce marked/insert callbacks.
         down.post(tap: .cghidEventTap)
         up.post(tap: .cghidEventTap)
         return true
+    }
+
+    /// Apple Korean IME의 공개 Option-Return 후보 요청과 Escape 취소를 다섯 번 반복한다.
+    /// 각 WindowServer snapshot 사이에 run-loop turn을 두어 open/close lifecycle을 실제로 관측한다.
+    private func runSessionHostCandidateObservation(
+        probe: MaruAppHostSessionHostInputSmokeProbe,
+        surface: TerminalSurface,
+        view: MaruMetalTerminalView
+    ) -> Bool {
+        guard let observation = sessionHostCandidateObservation,
+              let context = view.inputContext,
+              context.selectedKeyboardInputSource == SessionHostInputSourcePolicy.korean2SetSourceID else {
+            failSessionHostInputSmoke("candidate-observation-unavailable")
+            return false
+        }
+        let counters = SessionHostIMECandidateObservation.Counters(
+            pty_input_bytes: probe.terminal_input_bytes,
+            committed_text_callbacks: UInt64(sessionHostInputSmokeInsertCallbacks),
+            base_screen_generation: probe.base_screen_generation
+        )
+        let anchor = view.firstRect(forCharacterRange: NSRange(), actualRange: nil)
+        do {
+            if sessionHostCandidateWaitTicks > 0 {
+                sessionHostCandidateWaitTicks -= 1
+                return false
+            }
+            switch sessionHostCandidatePhase {
+            case 0:
+                sessionHostCandidateBefore = try observation.capture(counters: counters, anchor: anchor)
+                guard dispatchSessionHostInputPhysicalKey(
+                    keyCode: 36, view: view, flags: .maskAlternate
+                ) else { throw SessionHostIMECandidateObservation.Failure.windowServerUnavailable }
+                sessionHostCandidatePhase = 1
+                sessionHostCandidateWaitTicks = 3
+            case 1:
+                sessionHostCandidateOpened = try observation.capture(counters: counters, anchor: anchor)
+                guard dispatchSessionHostInputPhysicalKey(keyCode: 53, view: view) else {
+                    throw SessionHostIMECandidateObservation.Failure.windowServerUnavailable
+                }
+                sessionHostCandidatePhase = 2
+                sessionHostCandidateWaitTicks = 3
+            case 2:
+                guard let before = sessionHostCandidateBefore,
+                      let opened = sessionHostCandidateOpened else {
+                    throw SessionHostIMECandidateObservation.Failure.malformedWindow
+                }
+                let closed = try observation.capture(counters: counters, anchor: anchor)
+                try observation.append(before: before, opened: opened, closed: closed)
+                sessionHostCandidateBefore = nil
+                sessionHostCandidateOpened = nil
+                if observation.rows.count < SessionHostIMECandidateObservation.requiredObservationCount {
+                    sessionHostCandidatePhase = 0
+                    sessionHostCandidateWaitTicks = 1
+                    return false
+                }
+                guard let rawRoot = ProcessInfo.processInfo.environment["MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT"] else {
+                    throw SessionHostIMECandidateObservation.Failure.invalidOutput
+                }
+                let root = URL(fileURLWithPath: rawRoot).standardizedFileURL
+                guard root.lastPathComponent == "session-host-cr6d-home",
+                      root.deletingLastPathComponent().lastPathComponent == "maru-macos-app" else {
+                    throw SessionHostIMECandidateObservation.Failure.invalidOutput
+                }
+                let target = root.appendingPathComponent(
+                    "session-host-cr6d-ime-candidate-observation.json", isDirectory: false
+                ).standardizedFileURL
+                guard target.deletingLastPathComponent() == root else {
+                    throw SessionHostIMECandidateObservation.Failure.invalidOutput
+                }
+                try observation.publish(
+                    sourceID: SessionHostInputSourcePolicy.korean2SetSourceID,
+                    outputURL: target
+                )
+                sessionHostCandidatePhase = 3
+                return true
+            default:
+                return true
+            }
+        } catch {
+            failSessionHostInputSmoke("candidate-observation-failed")
+        }
+        return false
     }
 
     private func sessionHostInputSmokeOwnsGlobalKeyboardFocus(view: MaruMetalTerminalView) -> Bool {

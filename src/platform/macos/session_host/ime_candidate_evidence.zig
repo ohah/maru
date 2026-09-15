@@ -7,6 +7,8 @@ const std = @import("std");
 
 pub const max_windows: usize = 256;
 pub const required_observations: usize = 5;
+pub const max_transcript_bytes: usize = 1024 * 1024;
+pub const max_artifact_bytes: usize = 16 * 1024;
 
 pub const Rect = struct {
     x: f64,
@@ -94,6 +96,7 @@ pub const Error = error{
     CandidateGeometryDrift,
     InvalidDisplay,
     AnchorOutsideDisplay,
+    AnchorDrift,
 };
 
 /// Reduces one request/open/Escape-close observation.  Any concurrent new eligible window makes
@@ -154,8 +157,10 @@ pub const DisplayTranscript = struct {
     quartz_bounds: Rect,
 };
 
+pub const ConvertedRect = struct { display_id: u32, rect: Rect };
+
 /// Converts an AppKit bottom-left screen rect to Quartz's main-display top-left coordinate space.
-pub fn appKitToQuartz(anchor: Rect, displays: []const DisplayTranscript) Error!struct { display_id: u32, rect: Rect } {
+pub fn appKitToQuartz(anchor: Rect, displays: []const DisplayTranscript) Error!ConvertedRect {
     if (!anchor.valid()) return error.AnchorOutsideDisplay;
     const point = anchor.midpoint();
     var selected: ?DisplayTranscript = null;
@@ -204,6 +209,138 @@ fn validateReusedWindowIdentity(baseline: []const Window, later: []const Window)
 fn findById(windows: []const Window, id: u32) ?Window {
     for (windows) |window| if (window.id == id) return window;
     return null;
+}
+
+const RawSnapshot = struct {
+    windows: []const Window,
+    counters: Counters,
+    anchor_appkit: Rect,
+    displays: []const DisplayTranscript,
+};
+
+const RawRow = struct {
+    before: RawSnapshot,
+    opened: RawSnapshot,
+    closed: RawSnapshot,
+};
+
+const RawTranscript = struct {
+    schema: []const u8,
+    app_pid: i32,
+    source_id: []const u8,
+    rows: []const RawRow,
+};
+
+const ArtifactRow = struct {
+    window_id: u32,
+    owner_pid: i32,
+    bundle_id: []const u8,
+    signing_id: []const u8,
+    apple_signed: bool,
+    layer: i32,
+    bounds: Rect,
+    counters: Counters,
+    display_id: u32,
+    anchor_quartz: Rect,
+};
+
+const Artifact = struct {
+    schema: []const u8 = "maru.session-host-cr6d-ime-candidate-observation.v1",
+    source_id: []const u8,
+    rows: []const ArtifactRow,
+};
+
+/// Swift lends the complete in-memory transcript once.  Parsing, candidate selection, series
+/// authority and absent-target publication stay in Zig so the producer cannot grow a second
+/// heuristic or leave another application's window inventory on disk.
+pub fn publishObservation(
+    allocator: std.mem.Allocator,
+    transcript_bytes: []const u8,
+    output_path: [:0]const u8,
+) !void {
+    if (transcript_bytes.len == 0 or transcript_bytes.len > max_transcript_bytes)
+        return error.InventoryTooLarge;
+    if (output_path.len == 0 or output_path.len >= std.fs.max_path_bytes)
+        return error.InvalidOutput;
+    var parsed = std.json.parseFromSlice(RawTranscript, allocator, transcript_bytes, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = false,
+        .duplicate_field_behavior = .@"error",
+    }) catch return error.InvalidTranscript;
+    defer parsed.deinit();
+    const raw = parsed.value;
+    if (!std.mem.eql(u8, raw.schema, "maru.session-host-cr6d-ime-candidate-transcript.v1") or
+        raw.source_id.len == 0 or raw.source_id.len > 255 or
+        raw.rows.len != required_observations) return error.InvalidTranscript;
+
+    var candidates: [required_observations]Candidate = undefined;
+    var rows: [required_observations]ArtifactRow = undefined;
+    var series_anchor: ?ConvertedRect = null;
+    for (raw.rows, 0..) |row, index| {
+        const candidate = try reduceTriplet(raw.app_pid, .{
+            .before = row.before.windows,
+            .opened = row.opened.windows,
+            .closed = row.closed.windows,
+            .before_counters = row.before.counters,
+            .opened_counters = row.opened.counters,
+            .closed_counters = row.closed.counters,
+        });
+        candidates[index] = candidate;
+        const before_anchor = try appKitToQuartz(row.before.anchor_appkit, row.before.displays);
+        const opened_anchor = try appKitToQuartz(row.opened.anchor_appkit, row.opened.displays);
+        const closed_anchor = try appKitToQuartz(row.closed.anchor_appkit, row.closed.displays);
+        if (!std.meta.eql(before_anchor, opened_anchor) or !std.meta.eql(before_anchor, closed_anchor))
+            return error.AnchorDrift;
+        if (series_anchor) |prior| {
+            if (!std.meta.eql(prior, before_anchor)) return error.AnchorDrift;
+        } else series_anchor = before_anchor;
+        rows[index] = .{
+            .window_id = candidate.window_id,
+            .owner_pid = candidate.owner.pid,
+            .bundle_id = candidate.owner.bundle_id,
+            .signing_id = candidate.owner.signing_id,
+            .apple_signed = candidate.owner.apple_signed,
+            .layer = candidate.layer,
+            .bounds = candidate.bounds,
+            .counters = row.before.counters,
+            .display_id = before_anchor.display_id,
+            .anchor_quartz = before_anchor.rect,
+        };
+    }
+    _ = try validateSeries(&candidates);
+
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
+    var json: std.json.Stringify = .{ .writer = &output.writer, .options = .{} };
+    try json.write(Artifact{ .source_id = raw.source_id, .rows = &rows });
+    try output.writer.writeByte('\n');
+    if (output.written().len > max_artifact_bytes) return error.ArtifactTooLarge;
+
+    const temporary = try std.fmt.allocPrintSentinel(allocator, "{s}.tmp.{d}", .{ output_path, std.c.getpid() }, 0);
+    defer allocator.free(temporary);
+    defer _ = std.c.unlink(temporary.ptr);
+    const fd = std.c.open(temporary.ptr, .{
+        .ACCMODE = .WRONLY,
+        .CREAT = true,
+        .EXCL = true,
+        .CLOEXEC = true,
+        .NOFOLLOW = true,
+    }, @as(std.c.mode_t, 0o600));
+    if (fd < 0) return error.ArtifactCreateFailed;
+    var open = true;
+    defer if (open) {
+        _ = std.c.close(fd);
+    };
+    var offset: usize = 0;
+    while (offset < output.written().len) {
+        const amount = std.c.write(fd, output.written()[offset..].ptr, output.written().len - offset);
+        if (amount < 0 and std.posix.errno(amount) == .INTR) continue;
+        if (amount <= 0) return error.ArtifactWriteFailed;
+        offset += @intCast(amount);
+    }
+    if (std.c.fsync(fd) != 0 or std.c.close(fd) != 0) return error.ArtifactWriteFailed;
+    open = false;
+    if (std.c.link(temporary.ptr, output_path.ptr) != 0) return error.ArtifactPublishFailed;
 }
 
 const apple_owner: OwnerIdentity = .{
@@ -331,4 +468,82 @@ test "v2b0 coordinate converter handles display above and rejects overlap" {
     duplicate_id.quartz_bounds.x = 2000;
     try std.testing.expectError(error.InvalidDisplay, appKitToQuartz(.{ .x = 10, .y = 910, .w = 1, .h = 1 }, &.{ above, duplicate_id }));
     try std.testing.expectError(error.AnchorOutsideDisplay, appKitToQuartz(.{ .x = std.math.floatMax(f64), .y = 0, .w = std.math.floatMax(f64), .h = 1 }, &.{above}));
+}
+
+test "v2b0b publisher reduces five complete triplets and refuses overwrite" {
+    const testing = std.testing;
+    const displays = [_]DisplayTranscript{.{
+        .id = 1,
+        .appkit_frame = .{ .x = 0, .y = 0, .w = 1440, .h = 900 },
+        .quartz_bounds = .{ .x = 0, .y = 0, .w = 1440, .h = 900 },
+    }};
+    const anchor: Rect = .{ .x = 100, .y = 700, .w = 10, .h = 20 };
+    var candidate_windows: [required_observations][2]Window = undefined;
+    var raw_rows: [required_observations]RawRow = undefined;
+    for (&raw_rows, 0..) |*row, index| {
+        candidate_windows[index] = .{ stable, candidate_fixture };
+        candidate_windows[index][1].id = @intCast(100 + index);
+        row.* = .{
+            .before = .{ .windows = &.{stable}, .counters = counters, .anchor_appkit = anchor, .displays = &displays },
+            .opened = .{ .windows = &candidate_windows[index], .counters = counters, .anchor_appkit = anchor, .displays = &displays },
+            .closed = .{ .windows = &.{stable}, .counters = counters, .anchor_appkit = anchor, .displays = &displays },
+        };
+    }
+    var transcript: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer transcript.deinit();
+    var json: std.json.Stringify = .{ .writer = &transcript.writer, .options = .{} };
+    try json.write(RawTranscript{
+        .schema = "maru.session-host-cr6d-ime-candidate-transcript.v1",
+        .app_pid = 999,
+        .source_id = "com.apple.inputmethod.Korean.2SetKorean",
+        .rows = &raw_rows,
+    });
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(testing.io, &root_buf);
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrintZ(&path_buf, "{s}/observation.json", .{root_buf[0..root_len]});
+    try publishObservation(testing.allocator, transcript.written(), path);
+    const artifact = try tmp.dir.readFileAlloc(testing.io, "observation.json", testing.allocator, .limited(max_artifact_bytes));
+    defer testing.allocator.free(artifact);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, artifact, "maru.session-host-cr6d-ime-candidate-observation.v1"));
+    try testing.expectEqual(required_observations, std.mem.count(u8, artifact, "\"window_id\""));
+    try testing.expectError(error.ArtifactPublishFailed, publishObservation(testing.allocator, transcript.written(), path));
+
+    raw_rows[4].opened.anchor_appkit.x += 1;
+    var drifted: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer drifted.deinit();
+    var drifted_json: std.json.Stringify = .{ .writer = &drifted.writer, .options = .{} };
+    try drifted_json.write(RawTranscript{
+        .schema = "maru.session-host-cr6d-ime-candidate-transcript.v1",
+        .app_pid = 999,
+        .source_id = "com.apple.inputmethod.Korean.2SetKorean",
+        .rows = &raw_rows,
+    });
+    var drift_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const drift_path = try std.fmt.bufPrintZ(&drift_path_buf, "{s}/drift.json", .{root_buf[0..root_len]});
+    try testing.expectError(error.AnchorDrift, publishObservation(testing.allocator, drifted.written(), drift_path));
+}
+
+test "v2b0b publisher rejects unknown schema and transcript cap before publication" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root_buf);
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrintZ(&path_buf, "{s}/absent.json", .{root_buf[0..root_len]});
+    try std.testing.expectError(
+        error.InvalidTranscript,
+        publishObservation(std.testing.allocator, "{\"schema\":\"wrong\"}", path),
+    );
+    const too_large = try std.testing.allocator.alloc(u8, max_transcript_bytes + 1);
+    defer std.testing.allocator.free(too_large);
+    @memset(too_large, 'x');
+    try std.testing.expectError(
+        error.InventoryTooLarge,
+        publishObservation(std.testing.allocator, too_large, path),
+    );
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "absent.json", .{}));
 }

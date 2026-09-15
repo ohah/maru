@@ -11143,16 +11143,42 @@ test "파일 열기가 어디서 할당에 실패해도 새지 않는다 — ini
     const path = try std.fs.path.join(backing, &.{ root, "doc.zig" });
     defer backing.free(path);
 
-    // 실패 지점을 하나씩 뒤로 밀며 연다. 열기 한 번이 쓰는 할당 수보다 넉넉히 돈다.
+    // **훑는 폭을 숫자로 고르지 않는다 — 열기가 몇 번 할당하는지 먼저 센다.**
+    //
+    // 예전에는 고정 24 스텝을 훑고 `failed_steps >= 5` 를 요구했다. 그 둘은 「전부 덮는다」는 보장이
+    // 아니라 **어긋남을 견디는 여유**였고, 열기 경로의 할당 수가 기계를 따라 조금만 달라져도 뒤집혔다 —
+    // 주입이 불가능한 스텝을 만나면 거기서 멈추므로, 실패를 다섯 번 겪기 전에 할당이 동나면 빨개진다.
+    // 실제로 2026-09-06 에 한 번, 2026-09-15 에 한 번 그렇게 죽었다(같은 코드, 다른 기계).
+    //
+    // 세어서 그만큼만 훑으면 쫓을 것이 없다: 열기가 `n` 번 할당하면 `0..n` 이 **그 열기의 모든 할당을
+    // 정확히 한 번씩** 실패시키는 것이고, 폭이 기계를 따라 저절로 움직인다. 같은 규율을 `MAXC2` 가
+    // 먼저 썼다(그 주석이 근거를 들고 있다).
+    const open_allocations = blk: {
+        var probe = std.testing.FailingAllocator.init(backing, .{});
+        const alloc = probe.allocator();
+        const session = try backing.create(AppSession);
+        defer backing.destroy(session);
+        try session.init(std.Io.Threaded.global_single_threaded.io(), alloc, .{
+            .abi_version = app_session_mod.abi_version,
+            .cols = 80,
+            .rows = 24,
+            .queue_capacity = 16,
+            .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+        });
+        defer session.deinit();
+        const before_open = probe.allocations;
+        _ = try openPathInActivePane(session, path);
+        break :blk probe.allocations - before_open;
+    };
+
     var failed_steps: usize = 0;
     var ok_steps: usize = 0;
-    // 실패를 못 주입한 스텝이 나오면 그 뒤는 전부 같은 성공이라 멈춘다(`editor_diff.zig`와 같은 방법).
-    // **측정값이다**(2026-09-06): 24 스텝 중 7 스텝이 실패를 못 주입하고 있었다. 아래 개수 단언은
-    // 그대로 성립한다 — 멈추는 그 스텝이 성공 스텝 하나를 보장한다.
-    var clean_pass = false;
+    // **「주입이 일어난 스텝」과 「열기가 실패한 스텝」은 다르다.** 열기가 할당 실패를 견디고 성공하는
+    // 자리가 있어서, 뒤엣것으로 폭을 판정하면 제품이 견고해질수록 숫자가 줄어 판정이 어긋난다
+    // (실측: 할당 15 개인데 열기 실패는 12 번이었다). 폭을 지키는 것은 **앞엣것**이다.
+    var induced_steps: usize = 0;
     var step: usize = 0;
-    while (step < 24) : (step += 1) {
-        if (clean_pass) break;
+    while (step <= open_allocations) : (step += 1) {
         var failing = std.testing.FailingAllocator.init(backing, .{});
         const alloc = failing.allocator();
 
@@ -11171,21 +11197,32 @@ test "파일 열기가 어디서 할당에 실패해도 새지 않는다 — ini
         failing.fail_index = failing.allocations + step;
         const term = openPathInActivePane(session, path) catch {
             failed_steps += 1;
+            if (failing.has_induced_failure) induced_steps += 1;
             continue;
         };
         // 성공했으면 세션 해체가 그 Term을 정리한다(그 경로도 함께 확인된다).
         try testing.expect(term.rt.editor_path != null);
         ok_steps += 1;
-        // **조기 종료는 성공한 스텝에서만 정한다.** 실패를 주입하지 않았는데 열렸다면 뒤 스텝은 전부 같은 성공이다.
-        // 처음(#3296)엔 이 판정을 `defer` 로 걸어 위 `catch { continue }` 경로에서도 실행됐는데, 그러면 주입과 무관한
-        // 일시적 열기 실패 한 번이 「깨끗한 통과」로 오판되어 루프가 끝나고 `ok_steps == 0` 으로 죽는다 — main run
-        // 2bb4c39ed(2026-09-06, 샤드 0)에서 그렇게 한 번 실패했다. 예전처럼 그런 스텝은 실패로 세고 계속 돈다.
-        if (!failing.has_induced_failure) clean_pass = true;
+        if (failing.has_induced_failure) induced_steps += 1;
+        // **조기 종료를 없앴다.** 폭이 이제 열기의 할당 수 그대로라 「주입이 불가능한 스텝」은 마지막
+        // 하나(`step == open_allocations`)뿐이고, 그 스텝이 곧 아래 `ok_steps >= 1` 을 보장한다.
+        // 예전에는 그 스텝을 만나면 루프를 끊었는데, 그 끊김이 `failed_steps` 를 기계에 묶었다.
     }
-    // **공허해질 수 없게 세어서 단언한다.** 실패를 한 번도 안 겪으면 이 테스트는 아무것도 지키지
-    // 않는다 — 열기가 쓰는 할당 수가 줄어 창을 벗어나도 여기서 걸린다.
-    try testing.expect(failed_steps >= 5);
+    // **공허해질 수 없게 세어서 단언한다.** 앞의 `open_allocations` 개 스텝이 각자 실패를 하나씩
+    // 주입했어야 한다 — 이 값은 기계가 아니라 **제품이 몇 번 할당하는가**만 따른다. 열기가 할당을
+    // 아예 안 하게 되면 `open_allocations == 0` 이라 여기서 걸린다.
+    if (induced_steps != open_allocations) {
+        std.debug.print(
+            "열기 할당 실패 훑기: 할당 {d} · 주입된 스텝 {d} · 열기 실패 {d} · 열기 성공 {d}\n",
+            .{ open_allocations, induced_steps, failed_steps, ok_steps },
+        );
+        return error.AllocationWalkIncomplete;
+    }
+    // 마지막 스텝(`step == open_allocations`)은 겨냥할 할당이 없어 주입 없이 열린다 — 그것이 성공 경로의
+    // 해체까지 함께 확인한다.
     try testing.expect(ok_steps >= 1);
+    // 실패를 **견디기만** 하고 한 번도 못 열리는 일이 없어야 한다(반대편 증거).
+    try testing.expect(failed_steps >= 1);
 }
 
 /// 가로 스크롤 테스트가 함께 쓰는 준비: 랩을 끄고 화면보다 **긴 줄**을 하나 심는다.

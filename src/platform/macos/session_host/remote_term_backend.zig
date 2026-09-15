@@ -3339,6 +3339,11 @@ pub const RemoteTermBackend = struct {
         var handle_count: usize = 0;
         var iterator = self.runtimes.iterator();
         while (iterator.next()) |row| {
+            // **attachment 가 live 가 아닌 런타임은 이 프레임에서 건너뛴다.** 재접속은 여러 프레임에
+            // 걸친 상태 기계라, 은퇴를 준비한 attachment 가 아직 `backend.runtimes` 에 남은 창이 있다.
+            // 그 창에서 펌프하면 payload 접근이 abort 한다 — 판정 출처는 `GenerationAttachment.isLive`
+            // 하나다(여기서 lifecycle 을 다시 보지 않는 이유).
+            if (!RemoteRuntime.backend_api.attachmentLive(row.value_ptr.runtime)) continue;
             RemoteRuntime.backend_api.prepareFrameSummary(row.value_ptr.runtime);
             handles[handle_count] = row.key_ptr.*;
             handle_count += 1;
@@ -5897,6 +5902,90 @@ test "CR5b-1 host job runtime set은 copy membership identity drift와 empty를 
     try testing.expect(empty.pristine());
     try testing.expectEqual(@as(u64, 1), backend_value.next_host_reconnect_job_generation);
     backend_value.host_reconnect_job = null;
+}
+
+test "재접속 은퇴 창: 유지보수 틱은 live 가 아닌 attachment 를 펌프하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try HostAdapter.initializeProcessRuntime();
+
+    var fds: [2]c_int = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    var client: client_mod.Client = .{
+        .allocator = testing.allocator,
+        .fd = fds[0],
+        .host_id = 91,
+        .parser = framing.FrameParser.init(testing.allocator),
+        .attachment_capabilities = .{ .peer_attach_generation = true },
+        .metadata_support = .supported,
+        .compatibility_profile = @import("compatibility.zig").profileForMajor(protocol.version_major).?,
+    };
+    var peer = try std.Thread.spawn(
+        .{},
+        remote_runtime.testing_api.serveSemanticAttachPeers,
+        .{ fds[1], @as(usize, 1) },
+    );
+    var peer_joined = false;
+    defer if (!peer_joined) peer.join();
+
+    var pool = AdapterPool.init(testing.allocator);
+    defer pool.deinit();
+    try testing.expectEqual(@as(u128, 91), try addOwnedClient(&pool, testing.allocator, &client));
+    const adapter = pool.get(91).?;
+    const adapter_generation = pool.adapterGeneration(91).?;
+
+    var backend_value = RemoteTermBackend.initAttachOnlyWithPool(
+        testing.allocator,
+        testing.io,
+        &pool,
+        @ptrFromInt(@alignOf(SurfaceRuntime)),
+    );
+    try backend_value.claimProductSingleton();
+    defer backend_value.deinit();
+
+    var runtime: RemoteRuntime = undefined;
+    try remote_runtime.testing_api.initSemanticRuntimeOnAdapter(
+        &runtime,
+        adapter,
+        testing.allocator,
+        "000000000000000000000000000000c3".*,
+        1,
+    );
+    peer.join();
+    peer_joined = true;
+    defer remote_runtime.testing_api.deinitSemanticRuntimeOnAdapter(&runtime);
+    try backend_value.runtimes.put(testing.allocator, 1, .{
+        .runtime = &runtime,
+        .host_id = 91,
+        .host_adapter_generation = adapter_generation,
+        .runtime_generation = 1,
+    });
+    defer _ = backend_value.runtimes.remove(1);
+
+    const attachment = &remote_runtime.testing_api.generation(&runtime).attachment.generation;
+    B5TestState.event_pump_hook = B4PumpProbe.run;
+    defer B5TestState.event_pump_hook = null;
+
+    // **정상 대조.** attached 인 런타임은 실제로 펌프된다. 이게 없으면 뒤의 0 이 「항상 0」으로 공허해진다.
+    try testing.expect(attachment.isLive());
+    B4PumpProbe.reset();
+    backend_value.maintenanceEventTick();
+    try testing.expect(B4PumpProbe.count > 0);
+
+    // 재접속이 하는 일: attachment 를 은퇴로 민다. **런타임은 `runtimes` 에 그대로 남는다** —
+    // 은퇴 준비는 맵에서 빼지 않는다 — 재접속의 은퇴 준비 단계가 그 자리를 다시 조회한다.
+    try attachment.prepareHostRetirement(adapter, @intFromPtr(&backend_value), 1);
+    try testing.expect(!attachment.isLive());
+    try testing.expect(backend_value.runtimes.get(1) != null);
+
+    // 결함이었던 자리: 그 창에서 펌프하면 payload 접근이 abort 했다(실측: 재접속이 연결까지 간 5회 중 4회
+    // 패닉, 재접속 없는 ~25회는 0회). 이제는 고르지 않는다.
+    B4PumpProbe.reset();
+    remote_runtime.testing_api.generation(&runtime).frame_summary_ready = false;
+    backend_value.maintenanceEventTick();
+    try testing.expectEqual(@as(usize, 0), B4PumpProbe.count);
+
+    // 은퇴를 되돌려 평소 해체 경로로 돌려놓는다 — 준비 상태로 두면 teardown 불변식이 걸린다.
+    try attachment.abortHostRetirement(adapter, @intFromPtr(&backend_value), 1);
 }
 
 test "CR6e-c3 main owner adopts only the exact bound worker candidate" {

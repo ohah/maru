@@ -1878,6 +1878,15 @@ pub const GenerationAttachment = struct {
         ) catch process_seal.fatalIntegrity(.proof_loss);
     }
 
+    /// payload 를 만져도 되는가 — **이 술어가 그 정책의 단일 출처다.**
+    ///
+    /// 같은 조건을 부르는 쪽에서 따로 쓰면(예: 펌프가 "lifecycle == .attached" 를 자체 판정하면)
+    /// 둘이 갈라지는 날 한쪽만 고쳐져 판정자가 공허해진다. 그래서 `payloadMut`/`payloadConst` 의
+    /// 패닉 조건도, 펌프 전 생존 확인도 전부 이것을 부른다.
+    pub fn isLive(self: *const GenerationAttachment) bool {
+        return self.valid() and self.lifecycle == .attached;
+    }
+
     fn valid(self: *const GenerationAttachment) bool {
         return rawLifecycleValid(&self.lifecycle) and
             self.self_addr == @intFromPtr(self) and self.lifecycle != .pristine;
@@ -1891,12 +1900,12 @@ pub const GenerationAttachment = struct {
     }
 
     fn payloadMut(self: *GenerationAttachment) *remote_attachment.RemoteAttachment {
-        if (!self.valid() or self.lifecycle != .attached) @panic("generation attachment is not live");
+        if (!self.isLive()) panicNotLive(self, "payloadMut");
         return if (self.payload) |*payload| payload else @panic("generation attachment payload missing");
     }
 
     fn payloadConst(self: *const GenerationAttachment) *const remote_attachment.RemoteAttachment {
-        if (!self.valid() or self.lifecycle != .attached) @panic("generation attachment is not live");
+        if (!self.isLive()) panicNotLive(self, "payloadConst");
         return if (self.payload) |*payload| payload else @panic("generation attachment payload missing");
     }
 };
@@ -1935,6 +1944,28 @@ pub fn executeRequestWithDecoderOwned(
         attachment.transport.abortPreparedRequest(receipt) catch {};
         return err;
     };
+}
+
+/// 「살아있지 않다」를 **어떤 상태였는지와 함께** 보고한다.
+///
+/// 원래 메시지는 상수 문자열이라, 크래시 로그만으로는 `valid()` 가 걸린 건지 lifecycle 이 `.attached`
+/// 가 아닌 건지, 아니라면 무엇이었는지 가릴 수 없었다. lifecycle 은 **원시 바이트로** 읽는다 —
+/// 손상된 값이면 enum 으로 읽는 것 자체가 불법이다(`rawLifecycleValid` 와 같은 이유).
+fn panicNotLive(self: *const GenerationAttachment, site: []const u8) noreturn {
+    const raw = @as(*const u8, @ptrCast(&self.lifecycle)).*;
+    var buf: [200]u8 = undefined;
+    const msg = std.fmt.bufPrint(
+        &buf,
+        "generation attachment is not live: site={s} lifecycle_raw={d} raw_valid={} addr_match={} payload_present={}",
+        .{
+            site,
+            raw,
+            rawLifecycleValid(&self.lifecycle),
+            self.self_addr == @intFromPtr(self),
+            self.payload != null,
+        },
+    ) catch "generation attachment is not live";
+    @panic(msg);
 }
 
 fn rawLifecycleValid(value: *const Lifecycle) bool {

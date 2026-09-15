@@ -3538,6 +3538,23 @@ pub const RemoteRuntime = struct {
             };
         }
 
+        /// 이 런타임의 attachment 를 지금 만져도 되는가.
+        ///
+        /// **재접속은 여러 프레임에 걸친 상태 기계**다(`remote_term_backend.progressHostReconnectOne`
+        /// 이 한 프레임에 전이 하나만 진행한다). 그 창 동안 attachment 는 `.attached` 를 떠나지만
+        /// 런타임은 `backend.runtimes` 에 그대로 남는다 — 은퇴 준비 단계가 맵에서 빼지 않는다.
+        /// 그 사이에 유지보수 펌프가 그 런타임을 고르면 payload 접근이 abort 한다(실측: 재접속이
+        /// 연결까지 간 5회 중 4회 패닉, 재접속 없는 ~25회는 0회).
+        ///
+        /// 판정은 `GenerationAttachment.isLive` **하나에서만** 나온다 — 여기서 조건을 다시 쓰면
+        /// 패닉 조건과 갈라진다. legacy attachment 는 이 생애주기가 없으므로 항상 live 다.
+        pub fn attachmentLive(runtime: *const RemoteRuntime) bool {
+            return switch (runtime.currentGenerationConst().attachment) {
+                .generation => |*value| value.isLive(),
+                .legacy => true,
+            };
+        }
+
         pub fn frameSummaryReady(runtime: *const RemoteRuntime) bool {
             return runtime.currentGenerationConst().frame_summary_ready;
         }

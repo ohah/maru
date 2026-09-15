@@ -7003,6 +7003,8 @@ pub const AppSession = struct {
     ft_hold_wait_max_ns: u64 = 0,
     ft_hold_bytes: u64 = 0,
     ft_hold_count: u32 = 0,
+    ft_split_done: bool = false, // MARU_FT_SPLIT 훅이 한 번만 돌게
+    ft_tick_no: u32 = 0,
     ft_shape_gen: u32 = 0, // tick 시작 시점의 shape 세대 — 끝에서 달라졌으면 이 tick 이 활성 grid 를 셰이핑했다
     // grid shaping 1초 창 합계(present §10.7 run 캐시 진단): 셀·run·records·적중·단계 시간
     ft_win_sh_frames: u32 = 0,
@@ -19964,14 +19966,22 @@ pub const AppSession = struct {
             }
             if (self.ft_win_sh_frames > 0) {
                 frametime_diag.info("  shape: 프레임 {d} 행 {d} 셀 {d} run {d} 글리프 {d} | 합 {d:.1}ms = native {d:.1}[폰트 {d:.1} + 조립 {d:.1} + CTLine {d:.1} + 방출 {d:.1}] + records {d:.1} + build {d:.1} | run 적중 직전 {d:.0}% 최근64 {d:.0}% (셀 기준 {d:.0}%/{d:.0}%)", .{
-                    self.ft_win_sh_frames,                                  self.ft_win_sh_rows,
-                    self.ft_win_sh_cells,                                   self.ft_win_sh_runs,
-                    self.ft_win_sh_records,                                 nsToMs(self.ft_win_sh_total_ns),
-                    nsToMs(self.ft_win_sh_native_ns),                       nsToMs(@as(i128, self.ft_win_sh_nat_font_ns)),
-                    nsToMs(@as(i128, self.ft_win_sh_nat_prep_ns)),          nsToMs(@as(i128, self.ft_win_sh_nat_line_ns)),
-                    nsToMs(@as(i128, self.ft_win_sh_nat_emit_ns)),          nsToMs(self.ft_win_sh_records_ns),
-                    nsToMs(self.ft_win_sh_build_ns),                        pct(self.ft_win_sh_runs_hit_prev, self.ft_win_sh_runs),
-                    pct(self.ft_win_sh_runs_hit_64, self.ft_win_sh_runs),   pct(self.ft_win_sh_cells_hit_prev, self.ft_win_sh_cells),
+                    self.ft_win_sh_frames,
+                    self.ft_win_sh_rows,
+                    self.ft_win_sh_cells,
+                    self.ft_win_sh_runs,
+                    self.ft_win_sh_records,
+                    nsToMs(self.ft_win_sh_total_ns),
+                    nsToMs(self.ft_win_sh_native_ns),
+                    nsToMs(@as(i128, self.ft_win_sh_nat_font_ns)),
+                    nsToMs(@as(i128, self.ft_win_sh_nat_prep_ns)),
+                    nsToMs(@as(i128, self.ft_win_sh_nat_line_ns)),
+                    nsToMs(@as(i128, self.ft_win_sh_nat_emit_ns)),
+                    nsToMs(self.ft_win_sh_records_ns),
+                    nsToMs(self.ft_win_sh_build_ns),
+                    pct(self.ft_win_sh_runs_hit_prev, self.ft_win_sh_runs),
+                    pct(self.ft_win_sh_runs_hit_64, self.ft_win_sh_runs),
+                    pct(self.ft_win_sh_cells_hit_prev, self.ft_win_sh_cells),
                     pct(self.ft_win_sh_cells_hit_64, self.ft_win_sh_cells),
                 });
                 self.ft_win_sh_nat_font_ns = 0;
@@ -20358,6 +20368,13 @@ pub const AppSession = struct {
             return self.last_summary;
         }
         const ft_on = diag_gate.maruDebugEnabled();
+        // [진단] MARU_FT_SPLIT=N: 열두 번째 tick 에 pane 을 N 개로 — 첫 shell 이 뜬 뒤라야 split 이 새 Term 을 만든다.
+        if (ft_on and self.ft_split_done == false and self.ft_tick_no == 12) {
+            self.ft_split_done = true;
+            var k: u8 = 1;
+            while (k < diag_gate.ftSplitCount()) : (k += 1) pane_ops.splitActivePane(self, .horizontal) catch {};
+        }
+        self.ft_tick_no +%= 1;
         if (ft_on) {
             // 메인 스레드 코어 락 대기(lockCore) 누적 — 이 프레임 것만.
             maru.session.surface.diag_lock_wait_enabled = true;

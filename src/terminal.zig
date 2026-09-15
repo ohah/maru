@@ -1,5 +1,6 @@
 pub const core = @import("terminal/core.zig");
 pub const core_handoff = @import("terminal/core_handoff.zig"); // core_mutex 양보(불공정 락 기아 방지)
+pub const kitty = @import("terminal/kitty.zig"); // kitty graphics(진단 시계 주입 지점 `kitty.diag_now`)
 pub const input = @import("terminal/input.zig");
 pub const types = @import("terminal/types.zig");
 pub const png = @import("terminal/png.zig"); // PNG 디코드(kitty f=100·window.background-image F2-1)

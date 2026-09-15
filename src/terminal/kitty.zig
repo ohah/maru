@@ -17,6 +17,24 @@
 //! docs/plans/terminal-core-decomposition.md §8.
 
 const std = @import("std");
+
+/// [진단] direct transmit(`a=t/T`)이 락 아래에서 쓰는 시간을 단계별로 잰다 — base64 디코드·zlib 해제·
+/// 저장·display. 터미널 레이어엔 시계가 없어 platform 이 `diag_now` 를 주입할 때만 돈다(`metal_frame.diag_now`
+/// 와 같은 기법). 리더가 쓰고 메인이 읽는 진단 값이라 `gen` 을 뒤에 올리고 나머지는 torn read 를 감수한다
+/// (docs/plans/io-render-threading.md §13.7).
+pub var diag_now: ?*const fn () i128 = null;
+pub const DiagTransmit = struct {
+    gen: std.atomic.Value(u32) = .init(0),
+    payload_b64: usize = 0,
+    compressed: usize = 0,
+    pixels: usize = 0,
+    base64_ns: i128 = 0,
+    inflate_ns: i128 = 0,
+    store_ns: i128 = 0,
+    display_ns: i128 = 0,
+    total_ns: i128 = 0,
+};
+pub var diag_last_transmit: DiagTransmit = .{};
 const core = @import("core.zig");
 const types = @import("types.zig");
 const png = @import("png.zig"); // f=100 PNG 디코드 + zlib(o=z) inflateExact
@@ -699,11 +717,23 @@ pub fn execKittyGraphics(self: *TerminalCore, cmd_in: KittyGraphicsCommand, payl
     }
     const status: KittyStatus = switch (cmd.action) {
         'q' => kittyTransmit(self, cmd, payload, false), // query: 검증만(저장 안 함)
-        't' => kittyTransmit(self, cmd, payload, true),
+        't' => blk: {
+            const t0: i128 = if (diag_now) |now| now() else 0;
+            const r = kittyTransmit(self, cmd, payload, true);
+            if (diag_now) |now| diagFinishTransmit(t0, now(), 0, payload.len);
+            break :blk r;
+        },
         'T' => blk: { // transmit + display(한 command로 저장 후 placement까지)
+            const t0: i128 = if (diag_now) |now| now() else 0;
             const transmitted = kittyTransmit(self, cmd, payload, true);
             if (transmitted != .ok) break :blk transmitted; // 저장이 실패했으면 display는 무의미
-            break :blk kittyDisplay(self, cmd);
+            const t1: i128 = if (diag_now) |now| now() else 0;
+            const r = kittyDisplay(self, cmd);
+            if (diag_now) |now| {
+                const t2 = now();
+                diagFinishTransmit(t0, t2, t2 - t1, payload.len);
+            }
+            break :blk r;
         },
         'p' => kittyDisplay(self, cmd), // 기존 이미지를 placement로 표시
         'd' => kittyDelete(self, cmd), // delete: d= 타깃에 따라 placement(소문자)/이미지까지(대문자) 제거
@@ -1585,16 +1615,26 @@ fn decodeDirectPixels(
     const decoded_len = dec.calcSizeForSlice(payload) catch return error.Invalid;
     if (decoded_len == 0) return error.Invalid;
     if (compression == 0 and decoded_len != expected) return error.Invalid;
+    const t0: i128 = if (diag_now) |now| now() else 0;
     const raw = self.allocator.alloc(u8, decoded_len) catch return error.OutOfMemory;
     dec.decode(raw, payload) catch {
         self.allocator.free(raw);
         return error.Invalid;
     };
+    const t1: i128 = if (diag_now) |now| now() else 0;
+    if (diag_now != null) {
+        diag_last_transmit.base64_ns = t1 - t0;
+        diag_last_transmit.compressed = decoded_len;
+        diag_last_transmit.pixels = expected;
+        diag_last_transmit.inflate_ns = 0;
+    }
     const data: []u8 = switch (compression) {
         0 => raw,
         'z' => blk: {
             defer self.allocator.free(raw);
-            break :blk png.inflateExact(self.allocator, raw, expected) catch return error.Invalid;
+            const out = png.inflateExact(self.allocator, raw, expected) catch return error.Invalid;
+            if (diag_now) |now| diag_last_transmit.inflate_ns = now() - t1;
+            break :blk out;
         },
         else => {
             self.allocator.free(raw);
@@ -1633,13 +1673,24 @@ fn kittyTransmit(self: *TerminalCore, cmd: KittyGraphicsCommand, payload: []cons
         self.allocator.free(data);
         return .ok;
     }
-    return if (storeKittyImage(self, .{
+    const ts: i128 = if (diag_now) |now| now() else 0;
+    const stored = storeKittyImage(self, .{
         .id = cmd.image_id,
         .width = cmd.width,
         .height = cmd.height,
         .bpp = bpp,
         .data = data,
-    })) .ok else .enomem;
+    });
+    if (diag_now) |now| diag_last_transmit.store_ns = now() - ts;
+    return if (stored) .ok else .enomem;
+}
+
+/// 진단 마무리 — 합계·display 를 적고 세대를 올린다(메인이 «이 tick 안에 전송이 있었나»를 세대로 안다).
+fn diagFinishTransmit(t0: i128, t_end: i128, display_ns: i128, payload_len: usize) void {
+    diag_last_transmit.total_ns = t_end - t0;
+    diag_last_transmit.display_ns = display_ns;
+    diag_last_transmit.payload_b64 = payload_len;
+    _ = diag_last_transmit.gen.fetchAdd(1, .monotonic);
 }
 
 /// kitty graphics transmit PNG(f=100): base64 디코드 후 PNG 디코더로 RGB/RGBA 픽셀을 푼다. 치수·bpp는

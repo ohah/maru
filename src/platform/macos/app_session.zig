@@ -6949,6 +6949,7 @@ pub const AppSession = struct {
     ft_hold_wait_max_ns: u64 = 0,
     ft_hold_bytes: u64 = 0,
     ft_hold_count: u32 = 0,
+    ft_kitty_gen: u32 = 0, // tick 시작 시점의 kitty transmit 세대 — 끝에서 달라졌으면 이 tick 안에 전송이 있었다
     ft_collect_n: [ft_collect_slots]u32 = .{0} ** ft_collect_slots,
     ft_sum_place: i128 = 0,
     ft_sum_assemble: i128 = 0,
@@ -19649,6 +19650,51 @@ pub const AppSession = struct {
         const d_replace = if (r_ok) t_end - t_rep else 0;
         const d_place = if (split_ok) t_place - t_shape else 0;
         const d_assemble = if (split_ok) t_end - t_place else 0;
+        {
+            // kitty direct transmit 이 이 tick 안에 있었으면 그 단계별 시간 — 리더가 락 아래에서 쓴 시간이다.
+            const kt = &maru.terminal.kitty.diag_last_transmit;
+            // SLOW 와 무관하게 찍는다 — ReleaseFast 에선 전송이 8ms 아래라 SLOW 에 안 걸리는데도 락은 그만큼 잡힌다.
+            if (kt.gen.load(.monotonic) != self.ft_kitty_gen and kt.total_ns > std.time.ns_per_ms) {
+                frametime_diag.info("  └ kitty transmit(락 아래) 합={d:.2}ms = base64 {d:.2} + inflate {d:.2} + store {d:.2} + display {d:.2} | b64 {d}KB → 압축 {d}KB → 픽셀 {d:.1}MB", .{
+                    nsToMs(kt.total_ns),   nsToMs(kt.base64_ns),
+                    nsToMs(kt.inflate_ns), nsToMs(kt.store_ns),
+                    nsToMs(kt.display_ns), kt.payload_b64 / 1024,
+                    kt.compressed / 1024,  @as(f64, @floatFromInt(kt.pixels)) / (1024.0 * 1024.0),
+                });
+            }
+        }
+        // 락 대기가 1ms 를 넘으면 SLOW 와 무관하게 한 줄 — 어느 단계든 그 안에 락 대기가 숨어 있을 수 있고,
+        // ReleaseFast 에선 이미지 전송 보유(3~5ms)가 tick 을 SLOW 로 만들지 않으면서도 메인을 그만큼 세운다.
+        if (maru.session.surface.diag_lock_wait_ns > std.time.ns_per_ms) {
+            frametime_diag.info("  └ lockCore 대기 합={d:.1}ms 최대={d:.1}ms 횟수={d} 최대지점=0x{x}", .{
+                nsToMs(maru.session.surface.diag_lock_wait_ns),
+                nsToMs(maru.session.surface.diag_lock_wait_max_ns),
+                maru.session.surface.diag_lock_count,
+                maru.session.surface.diag_lock_wait_max_site,
+            });
+        }
+        // 리더 쪽 — 이 tick 창의 청크 적용 통계. 보유가 짧은데 메인 대기가 길면 기아(불공정 락), 보유 하나가
+        // 길고 대기가 그만큼이면 그 청크가 락 아래서 무거운 일(예: kitty 이미지 zlib 해제)을 한 것이다.
+        {
+            const pr = maru.app.pty_reader;
+            self.ft_hold_ns = pr.diag_hold_ns.load(.monotonic);
+            self.ft_hold_max_ns = pr.diag_hold_max_ns.load(.monotonic);
+            self.ft_hold_wait_ns = pr.diag_hold_wait_ns.load(.monotonic);
+            self.ft_hold_wait_max_ns = pr.diag_hold_wait_max_ns.load(.monotonic);
+            self.ft_hold_bytes = pr.diag_hold_bytes.load(.monotonic);
+            self.ft_hold_count = pr.diag_hold_count.load(.monotonic);
+        }
+        if (self.ft_hold_count > 0) {
+            frametime_diag.info("  └ 리더 core.write 보유 합={d:.1}ms 최대={d:.2}ms 청크={d}({d}KB, 평균 {d}B) | 리더 락대기 합={d:.1}ms 최대={d:.2}ms", .{
+                nsToMs(@as(i128, self.ft_hold_ns)),
+                nsToMs(@as(i128, self.ft_hold_max_ns)),
+                self.ft_hold_count,
+                self.ft_hold_bytes / 1024,
+                self.ft_hold_bytes / self.ft_hold_count,
+                nsToMs(@as(i128, self.ft_hold_wait_ns)),
+                nsToMs(@as(i128, self.ft_hold_wait_max_ns)),
+            });
+        }
         // (a) 느린 tick 즉시 로그 — 어느 단계가 지배했는지 한눈에.
         if (total > frametime_slow_ns) {
             frametime_diag.info("SLOW total={d:.1}ms pre={d:.1} titles={d:.1} drain={d:.1} mid={d:.1} project={d:.1} [shape={d:.1}(grid={d:.1} chrome={d:.1}) place={d:.1} assemble={d:.1}]", .{
@@ -19659,37 +19705,6 @@ pub const AppSession = struct {
             });
             // chrome 이 지배한 SLOW 프레임이면 «어느 chrome 조각인가»를 같은 줄 뒤에 붙인다. 0.5ms 넘는
             // 것만 —  창 하나에 chrome collect 가 수십 번 일어나므로 전부 찍으면 줄이 읽히지 않는다.
-            // 락 대기가 1ms 를 넘으면 따로 한 줄 — 어느 단계든 그 안에 락 대기가 숨어 있을 수 있다.
-            if (maru.session.surface.diag_lock_wait_ns > std.time.ns_per_ms) {
-                frametime_diag.info("  └ lockCore 대기 합={d:.1}ms 최대={d:.1}ms 횟수={d} 최대지점=0x{x}", .{
-                    nsToMs(maru.session.surface.diag_lock_wait_ns),
-                    nsToMs(maru.session.surface.diag_lock_wait_max_ns),
-                    maru.session.surface.diag_lock_count,
-                    maru.session.surface.diag_lock_wait_max_site,
-                });
-            }
-            // 리더 쪽 — 이 tick 창의 청크 적용 통계. 보유가 짧은데 메인 대기가 길면 기아(불공정 락), 보유 하나가
-            // 길고 대기가 그만큼이면 그 청크가 락 아래서 무거운 일(예: kitty 이미지 zlib 해제)을 한 것이다.
-            {
-                const pr = maru.app.pty_reader;
-                self.ft_hold_ns = pr.diag_hold_ns.load(.monotonic);
-                self.ft_hold_max_ns = pr.diag_hold_max_ns.load(.monotonic);
-                self.ft_hold_wait_ns = pr.diag_hold_wait_ns.load(.monotonic);
-                self.ft_hold_wait_max_ns = pr.diag_hold_wait_max_ns.load(.monotonic);
-                self.ft_hold_bytes = pr.diag_hold_bytes.load(.monotonic);
-                self.ft_hold_count = pr.diag_hold_count.load(.monotonic);
-            }
-            if (self.ft_hold_count > 0) {
-                frametime_diag.info("  └ 리더 core.write 보유 합={d:.1}ms 최대={d:.2}ms 청크={d}({d}KB, 평균 {d}B) | 리더 락대기 합={d:.1}ms 최대={d:.2}ms", .{
-                    nsToMs(@as(i128, self.ft_hold_ns)),
-                    nsToMs(@as(i128, self.ft_hold_max_ns)),
-                    self.ft_hold_count,
-                    self.ft_hold_bytes / 1024,
-                    self.ft_hold_bytes / self.ft_hold_count,
-                    nsToMs(@as(i128, self.ft_hold_wait_ns)),
-                    nsToMs(@as(i128, self.ft_hold_wait_max_ns)),
-                });
-            }
             if (d_assemble > std.time.ns_per_ms and i_ok) {
                 frametime_diag.info("  └ assemble={d:.1}ms = 이미지앞 {d:.1} + buildGpuImages {d:.1} + 픽셀복사 {d:.1}({d:.1}MB/{d}장) + 조립 {d:.1} + replace {d:.1}(셀 {d:.1} + 병합 {d:.1} + dupe {d:.1}) | 재사용 hit={d} miss={d}", .{
                     nsToMs(d_assemble),
@@ -20149,6 +20164,8 @@ pub const AppSession = struct {
             // 렌더러 내부 계측을 이 프레임 것만 보게 매 tick 0 으로 되돌린다(프레임 스냅샷).
             diag_metal_io = self.io;
             metal_frame.diag_now = diagMetalNow;
+            maru.terminal.kitty.diag_now = diagMetalNow; // kitty transmit 단계별(base64/inflate/store/display) — §13.7
+            self.ft_kitty_gen = maru.terminal.kitty.diag_last_transmit.gen.load(.monotonic);
             metal_frame.diag_replace_cells_ns = 0;
             metal_frame.diag_replace_merge_ns = 0;
             metal_frame.diag_replace_dupe_ns = 0;

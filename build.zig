@@ -3848,6 +3848,24 @@ pub fn build(b: *std.Build) void {
     const run_placeholder_remote_tests = b.addRunArtifact(placeholder_remote_tests);
     placeholder_e2e_step.dependOn(&run_placeholder_remote_tests.step);
 
+    // 같은 필터의 **패닉 경로 판정자**(`src/main.zig` 루트). 여기 두는 이유는 그 판정자가 fork 자식을
+    // 띄워 stderr 를 읽기 때문이다 — 반복이 잦은 자리라 전체 `test` 를 기다리지 않게 한다.
+    const placeholder_entry_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "maru", .module = maru_mod },
+                .{ .name = "syntax", .module = syntax_mod },
+                .{ .name = "session_host_build_options", .module = session_host_build_options_mod },
+            },
+        }),
+        .filters = &.{"TBPROBE"},
+    });
+    const run_placeholder_entry_tests = b.addRunArtifact(placeholder_entry_tests);
+    placeholder_e2e_step.dependOn(&run_placeholder_entry_tests.step);
+
     // 병합 stage 의 **끝에서 끝까지**(S3a). 위 스텝은 지정자·라벨 같은 **중립 규칙**만 본다 — 「어느
     // 판이 어느 자리에 실리나」는 **진짜 충돌 저장소**가 있어야 보이고, 그 저장소를 만드는 하네스는
     // `git_backend.zig` 안에 있다(제품의 쓰기 어휘는 `init`·`merge` 를 일부러 안 갖는다).

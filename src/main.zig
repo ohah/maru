@@ -82,6 +82,36 @@ pub const debug = struct {
     pub const getDebugInfoAllocator = maru.debug_trace_alloc.allocator;
 };
 
+/// **패닉 사유를 먼저 fd 2 에 직접 쓴다.**
+///
+/// Zig 기본 패닉 경로는 메시지를 찍기 전에 stderr 를 잠그고, 그 잠금이 **환경변수를 스캔한다**
+/// (`Io.Threaded.initLockedStderr` → `scanEnviron` → `process.Environ.scan`). 그 스캔은
+/// `for (block.slice) |e| { const entry = e.?; }` 라 환경 블록이 비정상이면 **거기서 또 패닉한다**.
+///
+/// 실측(2026-09-15): session host 가 죽었는데 크래시 리포트 스택이
+/// `lockStderr → scanEnviron → unwrapNull` 이었다 — **1차 패닉 사유가 통째로 사라졌다.** 이 저장소는
+/// 그런 프로세스를 일부러 만든다: `maru __session-host` 를 띄우는 one-shot 부모는
+/// **의도적으로 빈 환경**으로 시작한다(아래 `setenv("MARU_SESSION_HOST_ROOT", …)` 주석).
+/// 즉 「사유를 못 찍는 프로세스」가 설계상 존재하고, 하필 그것이 세션을 들고 있는 쪽이다.
+///
+/// 그래서 잠금·버퍼·할당을 **하나도 거치지 않고** 먼저 쓴다. 그 뒤 기본 경로에 넘겨 스택 트레이스를
+/// 시도한다 — 거기서 다시 죽더라도 **사유는 이미 남았다**. 이 순서가 이 핸들러의 전부다.
+fn panicWritingReasonFirst(msg: []const u8, first_trace_addr: ?usize) noreturn {
+    // **POSIX 에서만 먼저 쓴다.** 이 결함은 「빈 환경으로 시작하는 one-shot session-host 부모」라는
+    // macOS 고유 경로에서 나고, Windows 의 stderr 는 fd 가 아니라 `HANDLE` 이라 같은 한 줄로 못 쓴다
+    // (`std.c.write` 의 `fd_t` 가 거기선 `*anyopaque` 다 — 크로스 컴파일 게이트가 잡았다).
+    // Windows 가 같은 사각을 갖게 되면 그때 그 쪽 경로를 더한다. 지금 넣으면 **아무도 못 재는 코드**가 된다.
+    if (builtin.os.tag != .windows) {
+        const prefix = "maru panic: ";
+        _ = std.c.write(2, prefix.ptr, prefix.len);
+        if (msg.len != 0) _ = std.c.write(2, msg.ptr, msg.len);
+        _ = std.c.write(2, "\n", 1);
+    }
+    std.debug.defaultPanic(msg, first_trace_addr);
+}
+
+pub const panic = std.debug.FullPanic(panicWritingReasonFirst);
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
 
@@ -17413,4 +17443,53 @@ fn runSetup(allocator: std.mem.Allocator, git_exe: []const u8, repo: []const u8,
     var out = try maru.win32_process.capture(allocator, argv, repo, .stdout_only, &.{}, &.{}, 64 * 1024);
     defer out.deinit(allocator);
     if (out.exit_code != 0) return error.UnknownCommand;
+}
+
+test "TBPROBE 패닉 사유는 stderr 잠금을 거치기 전에 나온다" {
+    // **회귀 판정**(2026-09-15). Zig 기본 패닉 경로는 메시지를 찍기 전에 stderr 를 잠그고, 그 잠금이
+    // 환경 블록을 스캔한다 — 블록이 비정상이면 **거기서 또 패닉해 1차 사유가 사라진다**. 이 저장소는
+    // 빈 환경으로 시작하는 프로세스를 일부러 만들기 때문에(one-shot session-host 부모) 그 사각이
+    // 실제로 열려 있었다: host 가 죽었는데 크래시 리포트가 `lockStderr → scanEnviron → unwrapNull`
+    // 뿐이라 **왜 죽었는지 끝내 알 수 없었다**.
+    //
+    // **이 판정자가 재는 것과 못 재는 것을 갈라 둔다**(적대적 검증에서 드러났다).
+    //   재는 것: 사유가 `maru panic: ` 접두와 함께 **잠금을 거치기 전에** fd 2 로 나간다.
+    //   못 재는 것: 「환경 블록이 망가진 상태」 자체. 그 블록은 std 가 **프로세스 시작 시 캡처**하며
+    //     `std.c.environ` 을 나중에 바꿔도 그 사본은 안 바뀐다 — 테스트가 그 상태를 만들 길이 없다.
+    //     그래서 아래 environ 파괴는 「그 자리를 지나도 사유가 먼저 나온다」를 보일 뿐, 그것만으로
+    //     회귀를 잡지는 못한다. 접두사 단언이 이 판정자의 못이다(핸들러가 빠지면 그것이 사라진다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fds: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
+    defer _ = std.c.close(fds[0]);
+
+    const pid = std.c.fork();
+    try std.testing.expect(pid >= 0);
+    if (pid == 0) {
+        _ = std.c.close(fds[0]);
+        _ = std.c.dup2(fds[1], 2); // 패닉 출력을 파이프로 돌린다
+        std.c.environ = @ptrFromInt(@alignOf([*:null]?[*:0]u8)); // 환경 블록을 부순다
+        // **핸들러를 직접 부른다** — `@panic` 을 쓰면 root 의 `panic` 선언을 타는데, 테스트 빌드의 root 는
+        // `main.zig` 가 아니라 **커스텀 test runner** 다(`tools/simple_test_runner.zig`). 그래서 여기서
+        // `@panic` 은 이 파일의 핸들러를 안 거친다 — 제품 exe 는 `main.zig` 가 root 라 걸린다(build.zig).
+        // 즉 이 판정자가 재는 것은 **핸들러의 계약**이고, 「root 에 걸려 있는가」는 build.zig 구조가 진다.
+        panicWritingReasonFirst("tbprobe reason survives", null);
+    }
+    _ = std.c.close(fds[1]);
+
+    // 첫 write 들(접두사·사유)만 있으면 된다 — 자식이 스택 트레이스를 찍느라 오래 걸려도 기다리지 않는다.
+    var buf: [512]u8 = undefined;
+    var filled: usize = 0;
+    while (filled < buf.len) {
+        const n = std.c.read(fds[0], buf[filled..].ptr, buf.len - filled);
+        if (n <= 0) break;
+        filled += @intCast(n);
+        if (std.mem.indexOf(u8, buf[0..filled], "tbprobe reason survives") != null) break;
+    }
+    _ = std.c.kill(pid, std.c.SIG.KILL); // 심볼라이즈를 끝까지 기다리지 않는다(초 단위가 걸린다)
+    var status: c_int = 0;
+    _ = std.c.waitpid(pid, &status, 0);
+
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..filled], "maru panic: ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..filled], "tbprobe reason survives") != null);
 }

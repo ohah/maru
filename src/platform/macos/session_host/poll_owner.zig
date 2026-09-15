@@ -1036,6 +1036,48 @@ const subscription_identity = @import("subscription_identity.zig");
 const upgrade = @import("upgrade_coordinator.zig");
 const upgrade_wire = @import("upgrade_wire.zig");
 
+extern "c" fn mkdtemp(template: [*:0]u8) ?[*:0]u8;
+
+/// 판정자용 **짧은** 소켓 루트.
+///
+/// **`std.testing.tmpDir` 을 쓸 수 없다.** 그것은 `.zig-cache/tmp/<랜덤>` 아래에 만드는데, 유닉스 소켓
+/// 주소는 `sockaddr_un.sun_path` 에 들어가야 하고 그 칸은 macOS 에서 **104 바이트**다(OS 한계라 못 늘린다).
+/// 저장소 경로가 조금만 깊어도 그 예산을 넘긴다 — 실측(2026-09-15): 워크트리
+/// `…/.claude/worktrees/work`(62 자)에서 이 파일의 판정자 **19 개**가 전부 `SocketPathTooLong` 으로
+/// 죽었다. 원래 체크아웃과 CI 는 경로가 짧아 통과하므로 **워크트리에서만 빨갛고**, 그 상태가 오래가면
+/// 「빨간 게 정상」이 되어 진짜 실패를 그 안에 묻는다.
+///
+/// 그래서 `/tmp` 에 짧은 루트를 만든다. 이 저장소가 소켓·데몬 판정자에서 이미 쓰는 관례이고
+/// (`client.zig` 의 `/tmp/maru-sh-*`), 새 규약이 아니라 **남은 자리를 그 관례에 맞추는 것**이다.
+///
+/// **pid 대신 `mkdtemp` 를 쓴다.** pid 만 쓰면 ① 한 프로세스의 판정자 23 개가 같은 자리를 다투고
+/// ② 정리에 실패한 디렉터리가 남으면 pid 재사용으로 다음 실행이 남의 자리를 줍는다(이 저장소가
+/// 실제로 겪은 형태다). `mkdtemp` 는 커널이 고유성을 보장한다.
+const ShortSocketRoot = struct {
+    dir_buf: [32]u8 = undefined,
+    socket_buf: [96]u8 = undefined,
+    dir: [:0]const u8 = "",
+    socket: [:0]const u8 = "",
+
+    /// `leaf` 는 소켓 파일 이름이다(예: `"owner.sock"`). 판정자마다 다른 이름을 그대로 유지해
+    /// 실패 로그에서 어느 자리인지 읽히게 한다.
+    fn init(self: *ShortSocketRoot, leaf: []const u8) !void {
+        const template = std.fmt.bufPrintZ(&self.dir_buf, "/tmp/maru-po-XXXXXX", .{}) catch
+            return error.SkipZigTest;
+        if (mkdtemp(template.ptr) == null) return error.SkipZigTest;
+        self.dir = template;
+        self.socket = std.fmt.bufPrintZ(&self.socket_buf, "{s}/{s}", .{ template, leaf }) catch
+            return error.SkipZigTest;
+    }
+
+    /// 소켓 파일과 디렉터리를 거둔다. **남기면 `/tmp` 가 자란다** — 이 저장소가 실측으로
+    /// 32,762 개·47.4 GB 를 쌓은 적이 있다(`tools/clean-tmp-fixtures.sh` 주석).
+    fn deinit(self: *ShortSocketRoot) void {
+        if (self.socket.len != 0) _ = c.unlink(self.socket.ptr);
+        if (self.dir.len != 0) _ = c.rmdir(self.dir.ptr);
+    }
+};
+
 fn connectTestClient(path: [:0]const u8) !c.fd_t {
     const fd = c.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
     if (fd < 0) return error.TestUnexpectedResult;
@@ -1060,20 +1102,11 @@ test "CR4a poll owner는 fork process seal을 listener 접근 전에 거부한�
         else => return err,
     };
 
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir_len = try tmp.dir.realPath(testing.io, &dir_buf);
-    const dir_raw = dir_buf[0..dir_len];
-    const dir_path = try testing.allocator.dupeZ(u8, dir_raw);
-    defer testing.allocator.free(dir_path);
-    const socket_path = try std.fmt.allocPrintSentinel(
-        testing.allocator,
-        "{s}/cr4a-process-seal.sock",
-        .{dir_raw},
-        0,
-    );
-    defer testing.allocator.free(socket_path);
+    var socket_root: ShortSocketRoot = .{};
+    try socket_root.init("cr4a-process-seal.sock");
+    defer socket_root.deinit();
+    const dir_path = socket_root.dir;
+    const socket_path = socket_root.socket;
     var runtime_registry = registry.TerminalRuntimeRegistry.init(testing.allocator);
     defer runtime_registry.deinit();
     var server = try socket_server.SocketServer.bind(
@@ -1470,20 +1503,11 @@ fn admittedKeyExcept(
 
 test "poll owner reclaims one observer offender and preserves controller and healthy producer" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir_len = try tmp.dir.realPath(testing.io, &dir_buf);
-    const dir_raw = dir_buf[0..dir_len];
-    const dir_path = try testing.allocator.dupeZ(u8, dir_raw);
-    defer testing.allocator.free(dir_path);
-    const socket_path = try std.fmt.allocPrintSentinel(
-        testing.allocator,
-        "{s}/global-pressure.sock",
-        .{dir_raw},
-        0,
-    );
-    defer testing.allocator.free(socket_path);
+    var socket_root: ShortSocketRoot = .{};
+    try socket_root.init("global-pressure.sock");
+    defer socket_root.deinit();
+    const dir_path = socket_root.dir;
+    const socket_path = socket_root.socket;
     var runtime_registry = registry.TerminalRuntimeRegistry.init(testing.allocator);
     defer runtime_registry.deinit();
     _ = try runtime_registry.register(0xAA, 80, 24);
@@ -1630,20 +1654,11 @@ test "poll owner reclaims one observer offender and preserves controller and hea
 
 test "poll owner preserves requester and backs off when only partial controllers pin global budget" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir_len = try tmp.dir.realPath(testing.io, &dir_buf);
-    const dir_raw = dir_buf[0..dir_len];
-    const dir_path = try testing.allocator.dupeZ(u8, dir_raw);
-    defer testing.allocator.free(dir_path);
-    const socket_path = try std.fmt.allocPrintSentinel(
-        testing.allocator,
-        "{s}/pressure-backoff.sock",
-        .{dir_raw},
-        0,
-    );
-    defer testing.allocator.free(socket_path);
+    var socket_root: ShortSocketRoot = .{};
+    try socket_root.init("pressure-backoff.sock");
+    defer socket_root.deinit();
+    const dir_path = socket_root.dir;
+    const socket_path = socket_root.socket;
     var runtime_registry = registry.TerminalRuntimeRegistry.init(testing.allocator);
     defer runtime_registry.deinit();
     _ = try runtime_registry.register(0xAA, 80, 24);
@@ -1760,20 +1775,11 @@ test "poll owner preserves requester and backs off when only partial controllers
 
 test "poll owner backs off when one observer reclaim is insufficient for base reservation" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir_len = try tmp.dir.realPath(testing.io, &dir_buf);
-    const dir_raw = dir_buf[0..dir_len];
-    const dir_path = try testing.allocator.dupeZ(u8, dir_raw);
-    defer testing.allocator.free(dir_path);
-    const socket_path = try std.fmt.allocPrintSentinel(
-        testing.allocator,
-        "{s}/insufficient-base-reclaim.sock",
-        .{dir_raw},
-        0,
-    );
-    defer testing.allocator.free(socket_path);
+    var socket_root: ShortSocketRoot = .{};
+    try socket_root.init("insufficient-base-reclaim.sock");
+    defer socket_root.deinit();
+    const dir_path = socket_root.dir;
+    const socket_path = socket_root.socket;
     var runtime_registry = registry.TerminalRuntimeRegistry.init(testing.allocator);
     defer runtime_registry.deinit();
     _ = try runtime_registry.register(0xAA, 80, 24);
@@ -2034,20 +2040,11 @@ test "poll owner backs off when one observer reclaim is insufficient for base re
 
 test "poll owner rolls back a batch when one reclaim is insufficient and retries atomically" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir_len = try tmp.dir.realPath(testing.io, &dir_buf);
-    const dir_raw = dir_buf[0..dir_len];
-    const dir_path = try testing.allocator.dupeZ(u8, dir_raw);
-    defer testing.allocator.free(dir_path);
-    const socket_path = try std.fmt.allocPrintSentinel(
-        testing.allocator,
-        "{s}/insufficient-batch-reclaim.sock",
-        .{dir_raw},
-        0,
-    );
-    defer testing.allocator.free(socket_path);
+    var socket_root: ShortSocketRoot = .{};
+    try socket_root.init("insufficient-batch-reclaim.sock");
+    defer socket_root.deinit();
+    const dir_path = socket_root.dir;
+    const socket_path = socket_root.socket;
     var runtime_registry = registry.TerminalRuntimeRegistry.init(testing.allocator);
     defer runtime_registry.deinit();
     _ = try runtime_registry.register(0xAA, 80, 24);
@@ -2351,20 +2348,11 @@ test "poll owner rolls back a batch when one reclaim is insufficient and retries
 
 test "poll owner closes only the observer whose valid screen frame reached a kernel partial write" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir_len = try tmp.dir.realPath(testing.io, &dir_buf);
-    const dir_raw = dir_buf[0..dir_len];
-    const dir_path = try testing.allocator.dupeZ(u8, dir_raw);
-    defer testing.allocator.free(dir_path);
-    const socket_path = try std.fmt.allocPrintSentinel(
-        testing.allocator,
-        "{s}/actual-partial-pressure.sock",
-        .{dir_raw},
-        0,
-    );
-    defer testing.allocator.free(socket_path);
+    var socket_root: ShortSocketRoot = .{};
+    try socket_root.init("actual-partial-pressure.sock");
+    defer socket_root.deinit();
+    const dir_path = socket_root.dir;
+    const socket_path = socket_root.socket;
     var runtime_registry = registry.TerminalRuntimeRegistry.init(testing.allocator);
     defer runtime_registry.deinit();
     _ = try runtime_registry.register(0xAA, 80, 24);
@@ -2598,20 +2586,11 @@ test "poll owner closes only the observer whose valid screen frame reached a ker
 
 test "poll owner keeps connection-local stream one distinct across live slot reuse" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir_len = try tmp.dir.realPath(testing.io, &dir_buf);
-    const dir_raw = dir_buf[0..dir_len];
-    const dir_path = try testing.allocator.dupeZ(u8, dir_raw);
-    defer testing.allocator.free(dir_path);
-    const socket_path = try std.fmt.allocPrintSentinel(
-        testing.allocator,
-        "{s}/subscriptions.sock",
-        .{dir_raw},
-        0,
-    );
-    defer testing.allocator.free(socket_path);
+    var socket_root: ShortSocketRoot = .{};
+    try socket_root.init("subscriptions.sock");
+    defer socket_root.deinit();
+    const dir_path = socket_root.dir;
+    const socket_path = socket_root.socket;
     var runtime_registry = registry.TerminalRuntimeRegistry.init(testing.allocator);
     defer runtime_registry.deinit();
     _ = try runtime_registry.register(0xAA, 80, 24);
@@ -2753,20 +2732,11 @@ test "poll owner keeps connection-local stream one distinct across live slot reu
 
 test "poll owner atomically transfers controller across local stream one peers" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir_len = try tmp.dir.realPath(testing.io, &dir_buf);
-    const dir_raw = dir_buf[0..dir_len];
-    const dir_path = try testing.allocator.dupeZ(u8, dir_raw);
-    defer testing.allocator.free(dir_path);
-    const socket_path = try std.fmt.allocPrintSentinel(
-        testing.allocator,
-        "{s}/controller-takeover.sock",
-        .{dir_raw},
-        0,
-    );
-    defer testing.allocator.free(socket_path);
+    var socket_root: ShortSocketRoot = .{};
+    try socket_root.init("controller-takeover.sock");
+    defer socket_root.deinit();
+    const dir_path = socket_root.dir;
+    const socket_path = socket_root.socket;
 
     var runtime_registry = registry.TerminalRuntimeRegistry.init(testing.allocator);
     defer runtime_registry.deinit();
@@ -2958,20 +2928,11 @@ test "poll owner atomically transfers controller across local stream one peers" 
 
 test "poll owner takeover admission failure preserves the old controller exactly" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir_len = try tmp.dir.realPath(testing.io, &dir_buf);
-    const dir_raw = dir_buf[0..dir_len];
-    const dir_path = try testing.allocator.dupeZ(u8, dir_raw);
-    defer testing.allocator.free(dir_path);
-    const socket_path = try std.fmt.allocPrintSentinel(
-        testing.allocator,
-        "{s}/controller-takeover-full.sock",
-        .{dir_raw},
-        0,
-    );
-    defer testing.allocator.free(socket_path);
+    var socket_root: ShortSocketRoot = .{};
+    try socket_root.init("controller-takeover-full.sock");
+    defer socket_root.deinit();
+    const dir_path = socket_root.dir;
+    const socket_path = socket_root.socket;
     var runtime_registry = registry.TerminalRuntimeRegistry.init(testing.allocator);
     defer runtime_registry.deinit();
     _ = try runtime_registry.register(0xAA, 80, 24);
@@ -3082,20 +3043,12 @@ test "poll owner controller transition converges across old and requester EOF li
         requester_eof_after_commit,
     };
     inline for (std.meta.tags(Scenario)) |scenario| {
-        var tmp = testing.tmpDir(.{});
-        defer tmp.cleanup();
-        var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const dir_len = try tmp.dir.realPath(testing.io, &dir_buf);
-        const dir_raw = dir_buf[0..dir_len];
-        const dir_path = try testing.allocator.dupeZ(u8, dir_raw);
-        defer testing.allocator.free(dir_path);
-        const socket_path = try std.fmt.allocPrintSentinel(
-            testing.allocator,
-            "{s}/ce{d}.sock",
-            .{ dir_raw, @intFromEnum(scenario) },
-            0,
-        );
-        defer testing.allocator.free(socket_path);
+        var leaf_buf: [64]u8 = undefined;
+        var socket_root: ShortSocketRoot = .{};
+        try socket_root.init(try std.fmt.bufPrint(&leaf_buf, "ce{d}.sock", .{@intFromEnum(scenario)}));
+        defer socket_root.deinit();
+        const dir_path = socket_root.dir;
+        const socket_path = socket_root.socket;
         var runtime_registry = registry.TerminalRuntimeRegistry.init(testing.allocator);
         defer runtime_registry.deinit();
         _ = try runtime_registry.register(0xAA, 80, 24);
@@ -3257,20 +3210,11 @@ test "poll owner controller transition converges across old and requester EOF li
 
 test "poll owner keeps committed controller after partial revocation write and old close" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir_len = try tmp.dir.realPath(testing.io, &dir_buf);
-    const dir_raw = dir_buf[0..dir_len];
-    const dir_path = try testing.allocator.dupeZ(u8, dir_raw);
-    defer testing.allocator.free(dir_path);
-    const socket_path = try std.fmt.allocPrintSentinel(
-        testing.allocator,
-        "{s}/cp.sock",
-        .{dir_raw},
-        0,
-    );
-    defer testing.allocator.free(socket_path);
+    var socket_root: ShortSocketRoot = .{};
+    try socket_root.init("cp.sock");
+    defer socket_root.deinit();
+    const dir_path = socket_root.dir;
+    const socket_path = socket_root.socket;
     var runtime_registry = registry.TerminalRuntimeRegistry.init(testing.allocator);
     defer runtime_registry.deinit();
     _ = try runtime_registry.register(0xAA, 80, 24);
@@ -3376,20 +3320,11 @@ test "poll owner keeps committed controller after partial revocation write and o
 
 test "poll owner publishes changed resize to controller and observer all or none" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir_len = try tmp.dir.realPath(testing.io, &dir_buf);
-    const dir_raw = dir_buf[0..dir_len];
-    const dir_path = try testing.allocator.dupeZ(u8, dir_raw);
-    defer testing.allocator.free(dir_path);
-    const socket_path = try std.fmt.allocPrintSentinel(
-        testing.allocator,
-        "{s}/resize.sock",
-        .{dir_raw},
-        0,
-    );
-    defer testing.allocator.free(socket_path);
+    var socket_root: ShortSocketRoot = .{};
+    try socket_root.init("resize.sock");
+    defer socket_root.deinit();
+    const dir_path = socket_root.dir;
+    const socket_path = socket_root.socket;
     var runtime_registry = registry.TerminalRuntimeRegistry.init(testing.allocator);
     defer runtime_registry.deinit();
     const runtime = try runtime_registry.register(0xAA, 80, 24);
@@ -3511,20 +3446,11 @@ test "poll owner publishes changed resize to controller and observer all or none
 
 test "poll owner rejects a prepared transition after requester slot ABA reuse" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir_len = try tmp.dir.realPath(testing.io, &dir_buf);
-    const dir_raw = dir_buf[0..dir_len];
-    const dir_path = try testing.allocator.dupeZ(u8, dir_raw);
-    defer testing.allocator.free(dir_path);
-    const socket_path = try std.fmt.allocPrintSentinel(
-        testing.allocator,
-        "{s}/ca.sock",
-        .{dir_raw},
-        0,
-    );
-    defer testing.allocator.free(socket_path);
+    var socket_root: ShortSocketRoot = .{};
+    try socket_root.init("ca.sock");
+    defer socket_root.deinit();
+    const dir_path = socket_root.dir;
+    const socket_path = socket_root.socket;
     var runtime_registry = registry.TerminalRuntimeRegistry.init(testing.allocator);
     defer runtime_registry.deinit();
     _ = try runtime_registry.register(0xAA, 80, 24);
@@ -3641,20 +3567,11 @@ test "poll owner rejects a prepared transition after requester slot ABA reuse" {
 
 test "poll owner keeps canonical GUI connection while ephemeral inventory completes" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir_len = try tmp.dir.realPath(testing.io, &dir_buf);
-    const dir_raw = dir_buf[0..dir_len];
-    const dir_path = try testing.allocator.dupeZ(u8, dir_raw);
-    defer testing.allocator.free(dir_path);
-    const socket_path = try std.fmt.allocPrintSentinel(
-        testing.allocator,
-        "{s}/owner.sock",
-        .{dir_raw},
-        0,
-    );
-    defer testing.allocator.free(socket_path);
+    var socket_root: ShortSocketRoot = .{};
+    try socket_root.init("owner.sock");
+    defer socket_root.deinit();
+    const dir_path = socket_root.dir;
+    const socket_path = socket_root.socket;
     var runtime_registry = registry.TerminalRuntimeRegistry.init(testing.allocator);
     defer runtime_registry.deinit();
     var server = try socket_server.SocketServer.bind(
@@ -3728,20 +3645,11 @@ test "poll owner keeps canonical GUI connection while ephemeral inventory comple
 
 test "poll owner admits one one-shot admin without displacing canonical GUI" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir_len = try tmp.dir.realPath(testing.io, &dir_buf);
-    const dir_raw = dir_buf[0..dir_len];
-    const dir_path = try testing.allocator.dupeZ(u8, dir_raw);
-    defer testing.allocator.free(dir_path);
-    const socket_path = try std.fmt.allocPrintSentinel(
-        testing.allocator,
-        "{s}/admin.sock",
-        .{dir_raw},
-        0,
-    );
-    defer testing.allocator.free(socket_path);
+    var socket_root: ShortSocketRoot = .{};
+    try socket_root.init("admin.sock");
+    defer socket_root.deinit();
+    const dir_path = socket_root.dir;
+    const socket_path = socket_root.socket;
     var runtime_registry = registry.TerminalRuntimeRegistry.init(testing.allocator);
     defer runtime_registry.deinit();
     var server = try socket_server.SocketServer.bind(
@@ -3854,20 +3762,11 @@ test "poll owner admits one one-shot admin without displacing canonical GUI" {
 
 test "poll owner drains parser-resident frames past one 64-frame read turn" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir_len = try tmp.dir.realPath(testing.io, &dir_buf);
-    const dir_raw = dir_buf[0..dir_len];
-    const dir_path = try testing.allocator.dupeZ(u8, dir_raw);
-    defer testing.allocator.free(dir_path);
-    const socket_path = try std.fmt.allocPrintSentinel(
-        testing.allocator,
-        "{s}/buffered.sock",
-        .{dir_raw},
-        0,
-    );
-    defer testing.allocator.free(socket_path);
+    var socket_root: ShortSocketRoot = .{};
+    try socket_root.init("buffered.sock");
+    defer socket_root.deinit();
+    const dir_path = socket_root.dir;
+    const socket_path = socket_root.socket;
     var runtime_registry = registry.TerminalRuntimeRegistry.init(testing.allocator);
     defer runtime_registry.deinit();
     var server = try socket_server.SocketServer.bind(
@@ -3894,20 +3793,11 @@ test "poll owner drains parser-resident frames past one 64-frame read turn" {
 
 test "partial sibling cannot block a ready metadata request" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir_len = try tmp.dir.realPath(testing.io, &dir_buf);
-    const dir_raw = dir_buf[0..dir_len];
-    const dir_path = try testing.allocator.dupeZ(u8, dir_raw);
-    defer testing.allocator.free(dir_path);
-    const socket_path = try std.fmt.allocPrintSentinel(
-        testing.allocator,
-        "{s}/partial.sock",
-        .{dir_raw},
-        0,
-    );
-    defer testing.allocator.free(socket_path);
+    var socket_root: ShortSocketRoot = .{};
+    try socket_root.init("partial.sock");
+    defer socket_root.deinit();
+    const dir_path = socket_root.dir;
+    const socket_path = socket_root.socket;
     var runtime_registry = registry.TerminalRuntimeRegistry.init(testing.allocator);
     defer runtime_registry.deinit();
     var server = try socket_server.SocketServer.bind(
@@ -4031,20 +3921,11 @@ test "partial sibling cannot block a ready metadata request" {
 
 test "poll owner closes cap plus one without disturbing 32 admitted clients" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir_len = try tmp.dir.realPath(testing.io, &dir_buf);
-    const dir_raw = dir_buf[0..dir_len];
-    const dir_path = try testing.allocator.dupeZ(u8, dir_raw);
-    defer testing.allocator.free(dir_path);
-    const socket_path = try std.fmt.allocPrintSentinel(
-        testing.allocator,
-        "{s}/cap.sock",
-        .{dir_raw},
-        0,
-    );
-    defer testing.allocator.free(socket_path);
+    var socket_root: ShortSocketRoot = .{};
+    try socket_root.init("cap.sock");
+    defer socket_root.deinit();
+    const dir_path = socket_root.dir;
+    const socket_path = socket_root.socket;
     var runtime_registry = registry.TerminalRuntimeRegistry.init(testing.allocator);
     defer runtime_registry.deinit();
     var server = try socket_server.SocketServer.bind(
@@ -4169,20 +4050,11 @@ const TestUpgradeOwner = struct {
 
 test "poll owner repairs only empty reactor accounting and strictly reopens gate" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir_len = try tmp.dir.realPath(testing.io, &dir_buf);
-    const dir_raw = dir_buf[0..dir_len];
-    const dir_path = try testing.allocator.dupeZ(u8, dir_raw);
-    defer testing.allocator.free(dir_path);
-    const socket_path = try std.fmt.allocPrintSentinel(
-        testing.allocator,
-        "{s}/upgrade-repair.sock",
-        .{dir_raw},
-        0,
-    );
-    defer testing.allocator.free(socket_path);
+    var socket_root: ShortSocketRoot = .{};
+    try socket_root.init("upgrade-repair.sock");
+    defer socket_root.deinit();
+    const dir_path = socket_root.dir;
+    const socket_path = socket_root.socket;
     var runtime_registry = registry.TerminalRuntimeRegistry.init(testing.allocator);
     defer runtime_registry.deinit();
     _ = try runtime_registry.register(0xAA, 80, 24);
@@ -4281,20 +4153,11 @@ test "poll owner repairs only empty reactor accounting and strictly reopens gate
 
 test "poll owner drains every client before publishing typed preclosed upgrade marker" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir_len = try tmp.dir.realPath(testing.io, &dir_buf);
-    const dir_raw = dir_buf[0..dir_len];
-    const dir_path = try testing.allocator.dupeZ(u8, dir_raw);
-    defer testing.allocator.free(dir_path);
-    const socket_path = try std.fmt.allocPrintSentinel(
-        testing.allocator,
-        "{s}/upgrade.sock",
-        .{dir_raw},
-        0,
-    );
-    defer testing.allocator.free(socket_path);
+    var socket_root: ShortSocketRoot = .{};
+    try socket_root.init("upgrade.sock");
+    defer socket_root.deinit();
+    const dir_path = socket_root.dir;
+    const socket_path = socket_root.socket;
     var runtime_registry = registry.TerminalRuntimeRegistry.init(testing.allocator);
     defer runtime_registry.deinit();
     var server = try socket_server.SocketServer.bind(
@@ -4492,20 +4355,11 @@ test "poll owner drains every client before publishing typed preclosed upgrade m
 
 test "failed accepted upgrade reopens admission and preserves frozen sibling input" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir_len = try tmp.dir.realPath(testing.io, &dir_buf);
-    const dir_raw = dir_buf[0..dir_len];
-    const dir_path = try testing.allocator.dupeZ(u8, dir_raw);
-    defer testing.allocator.free(dir_path);
-    const socket_path = try std.fmt.allocPrintSentinel(
-        testing.allocator,
-        "{s}/upgrade-rollback.sock",
-        .{dir_raw},
-        0,
-    );
-    defer testing.allocator.free(socket_path);
+    var socket_root: ShortSocketRoot = .{};
+    try socket_root.init("upgrade-rollback.sock");
+    defer socket_root.deinit();
+    const dir_path = socket_root.dir;
+    const socket_path = socket_root.socket;
     var runtime_registry = registry.TerminalRuntimeRegistry.init(testing.allocator);
     defer runtime_registry.deinit();
     var server = try socket_server.SocketServer.bind(
@@ -4696,20 +4550,11 @@ test "S11-6 선언은 «출력이 없어도» 조정된다 — serve 루프가 �
     // 출력이 없는 세션에서는 폰이 선언해도 영영 안 좁아졌다. 폰은 읽기 전용이라 스스로 출력을
     // 만들 수도 없다(적대적 검증 4회차).
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir_len = try tmp.dir.realPath(testing.io, &dir_buf);
-    const dir_raw = dir_buf[0..dir_len];
-    const dir_path = try testing.allocator.dupeZ(u8, dir_raw);
-    defer testing.allocator.free(dir_path);
-    const socket_path = try std.fmt.allocPrintSentinel(
-        testing.allocator,
-        "{s}/idle.sock",
-        .{dir_raw},
-        0,
-    );
-    defer testing.allocator.free(socket_path);
+    var socket_root: ShortSocketRoot = .{};
+    try socket_root.init("idle.sock");
+    defer socket_root.deinit();
+    const dir_path = socket_root.dir;
+    const socket_path = socket_root.socket;
 
     var runtime_registry = registry.TerminalRuntimeRegistry.init(testing.allocator);
     defer runtime_registry.deinit();
@@ -4788,15 +4633,11 @@ test "S11-6 조정 알림은 client 의 strict decoder 를 통과한다" {
 // 그래서 **poll 회차의 cadence 경계**만이 이 일을 할 수 있고, 이 판정자는 그 한 줄이 사라지는 것을 막는다.
 test "poll owner: 애니메이션 전진은 cadence 경계마다 정확히 한 번 불린다" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir_len = try tmp.dir.realPath(testing.io, &dir_buf);
-    const dir_raw = dir_buf[0..dir_len];
-    const dir_path = try testing.allocator.dupeZ(u8, dir_raw);
-    defer testing.allocator.free(dir_path);
-    const socket_path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/anim.sock", .{dir_raw}, 0);
-    defer testing.allocator.free(socket_path);
+    var socket_root: ShortSocketRoot = .{};
+    try socket_root.init("anim.sock");
+    defer socket_root.deinit();
+    const dir_path = socket_root.dir;
+    const socket_path = socket_root.socket;
     var runtime_registry = registry.TerminalRuntimeRegistry.init(testing.allocator);
     defer runtime_registry.deinit();
     _ = try runtime_registry.register(0xAA, 80, 24);

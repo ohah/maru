@@ -6942,6 +6942,13 @@ pub const AppSession = struct {
     kitty_pixels_buf: []u8 = &.{},
     kitty_pixels_cap: usize = 0,
     ft_collect_ns: [ft_collect_slots]i128 = .{0} ** ft_collect_slots,
+    // 리더 청크 적용 통계(직전 tick 창) — pty_reader diag atomic 을 swap 으로 거둔 값.
+    ft_hold_ns: u64 = 0,
+    ft_hold_max_ns: u64 = 0,
+    ft_hold_wait_ns: u64 = 0,
+    ft_hold_wait_max_ns: u64 = 0,
+    ft_hold_bytes: u64 = 0,
+    ft_hold_count: u32 = 0,
     ft_collect_n: [ft_collect_slots]u32 = .{0} ** ft_collect_slots,
     ft_sum_place: i128 = 0,
     ft_sum_assemble: i128 = 0,
@@ -19599,6 +19606,37 @@ pub const AppSession = struct {
             });
             // chrome 이 지배한 SLOW 프레임이면 «어느 chrome 조각인가»를 같은 줄 뒤에 붙인다. 0.5ms 넘는
             // 것만 —  창 하나에 chrome collect 가 수십 번 일어나므로 전부 찍으면 줄이 읽히지 않는다.
+            // 락 대기가 1ms 를 넘으면 따로 한 줄 — 어느 단계든 그 안에 락 대기가 숨어 있을 수 있다.
+            if (maru.session.surface.diag_lock_wait_ns > std.time.ns_per_ms) {
+                frametime_diag.info("  └ lockCore 대기 합={d:.1}ms 최대={d:.1}ms 횟수={d} 최대지점=0x{x}", .{
+                    nsToMs(maru.session.surface.diag_lock_wait_ns),
+                    nsToMs(maru.session.surface.diag_lock_wait_max_ns),
+                    maru.session.surface.diag_lock_count,
+                    maru.session.surface.diag_lock_wait_max_site,
+                });
+            }
+            // 리더 쪽 — 이 tick 창의 청크 적용 통계. 보유가 짧은데 메인 대기가 길면 기아(불공정 락), 보유 하나가
+            // 길고 대기가 그만큼이면 그 청크가 락 아래서 무거운 일(예: kitty 이미지 zlib 해제)을 한 것이다.
+            {
+                const pr = maru.app.pty_reader;
+                self.ft_hold_ns = pr.diag_hold_ns.load(.monotonic);
+                self.ft_hold_max_ns = pr.diag_hold_max_ns.load(.monotonic);
+                self.ft_hold_wait_ns = pr.diag_hold_wait_ns.load(.monotonic);
+                self.ft_hold_wait_max_ns = pr.diag_hold_wait_max_ns.load(.monotonic);
+                self.ft_hold_bytes = pr.diag_hold_bytes.load(.monotonic);
+                self.ft_hold_count = pr.diag_hold_count.load(.monotonic);
+            }
+            if (self.ft_hold_count > 0) {
+                frametime_diag.info("  └ 리더 core.write 보유 합={d:.1}ms 최대={d:.2}ms 청크={d}({d}KB, 평균 {d}B) | 리더 락대기 합={d:.1}ms 최대={d:.2}ms", .{
+                    nsToMs(@as(i128, self.ft_hold_ns)),
+                    nsToMs(@as(i128, self.ft_hold_max_ns)),
+                    self.ft_hold_count,
+                    self.ft_hold_bytes / 1024,
+                    self.ft_hold_bytes / self.ft_hold_count,
+                    nsToMs(@as(i128, self.ft_hold_wait_ns)),
+                    nsToMs(@as(i128, self.ft_hold_wait_max_ns)),
+                });
+            }
             if (d_assemble > std.time.ns_per_ms and i_ok) {
                 frametime_diag.info("  └ assemble={d:.1}ms = 이미지앞 {d:.1} + buildGpuImages {d:.1} + 픽셀복사 {d:.1}({d:.1}MB/{d}장) + 조립 {d:.1} + replace {d:.1}(셀 {d:.1} + 병합 {d:.1} + dupe {d:.1}) | 재사용 hit={d} miss={d}", .{
                     nsToMs(d_assemble),
@@ -20039,6 +20077,22 @@ pub const AppSession = struct {
         }
         const ft_on = diag_gate.maruDebugEnabled();
         if (ft_on) {
+            // 메인 스레드 코어 락 대기(lockCore) 누적 — 이 프레임 것만.
+            maru.session.surface.diag_lock_wait_enabled = true;
+            maru.session.surface.diag_lock_wait_ns = 0;
+            maru.session.surface.diag_lock_wait_max_ns = 0;
+            maru.session.surface.diag_lock_count = 0;
+            maru.session.surface.diag_lock_wait_max_site = 0;
+            // 리더 쪽(I/O 스레드) 청크당 락 대기/보유 — tick 시작에 0 으로 비우고, 끝(logFrameTime)에서 거둔다.
+            // 그래야 «이 tick 이 기다린 보유»가 같은 SLOW 줄에 붙는다(시작에 거두면 직전 창이 찍혀 사각지대).
+            const pr = maru.app.pty_reader;
+            pr.diag_hold_enabled.store(true, .monotonic);
+            _ = pr.diag_hold_ns.swap(0, .monotonic);
+            _ = pr.diag_hold_max_ns.swap(0, .monotonic);
+            _ = pr.diag_hold_wait_ns.swap(0, .monotonic);
+            _ = pr.diag_hold_wait_max_ns.swap(0, .monotonic);
+            _ = pr.diag_hold_bytes.swap(0, .monotonic);
+            _ = pr.diag_hold_count.swap(0, .monotonic);
             // 렌더러 내부 계측을 이 프레임 것만 보게 매 tick 0 으로 되돌린다(프레임 스냅샷).
             diag_metal_io = self.io;
             metal_frame.diag_now = diagMetalNow;

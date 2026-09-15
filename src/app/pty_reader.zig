@@ -534,6 +534,35 @@ pub const CoreCommandQueue = struct {
     }
 };
 
+/// [진단] 리더 스레드가 청크 하나를 코어에 적용할 때의 락 대기/보유 누적(`applyToCore`). platform 이 MARU_DEBUG 일 때
+/// `diag_hold_enabled` 를 켜고 매 tick `swap(0)` 으로 거둬 SLOW 로그에 싣는다. 스케줄링 힌트가 아니라 관측만이라 monotonic.
+pub var diag_hold_enabled: std.atomic.Value(bool) = .init(false);
+pub var diag_hold_ns: std.atomic.Value(u64) = .init(0);
+pub var diag_hold_max_ns: std.atomic.Value(u64) = .init(0);
+pub var diag_hold_wait_ns: std.atomic.Value(u64) = .init(0);
+pub var diag_hold_wait_max_ns: std.atomic.Value(u64) = .init(0);
+pub var diag_hold_bytes: std.atomic.Value(u64) = .init(0);
+pub var diag_hold_count: std.atomic.Value(u32) = .init(0);
+
+/// 락 요청(t0)→취득(t1)→해제(t2) 한 구간을 누적한다. 명령 적용은 bytes=0 으로 세어 청크 평균에 안 섞인다.
+fn diagRecordHold(t0: i128, t1: i128, t2: i128, bytes: usize) void {
+    const wait: u64 = @intCast(@max(t1 - t0, 0));
+    const hold: u64 = @intCast(@max(t2 - t1, 0));
+    _ = diag_hold_wait_ns.fetchAdd(wait, .monotonic);
+    _ = diag_hold_ns.fetchAdd(hold, .monotonic);
+    _ = diag_hold_bytes.fetchAdd(bytes, .monotonic);
+    _ = diag_hold_count.fetchAdd(1, .monotonic);
+    diagMax(&diag_hold_max_ns, hold);
+    diagMax(&diag_hold_wait_max_ns, wait);
+}
+
+fn diagMax(slot: *std.atomic.Value(u64), v: u64) void {
+    var cur = slot.load(.monotonic);
+    while (v > cur) {
+        cur = slot.cmpxchgWeak(cur, v, .monotonic, .monotonic) orelse return;
+    }
+}
+
 pub const PtyReader = struct {
     allocator: std.mem.Allocator,
     pty_id: runtime_mod.PtyId,
@@ -692,6 +721,8 @@ pub const PtyReader = struct {
     }
 
     /// 코어에 한 조각을 적용하고 그 조각이 만든 응답을 outbound 로 옮긴다(옛 read 단계 본문 그대로).
+    /// [진단] `diag_hold_enabled` 면 이 청크의 락 **대기**(리더가 메인을 기다림)와 **보유**(`core.write` 구간)를
+    /// atomic 누적에 더한다 — 메인 tick 이 0 으로 되돌리고 SLOW 로그에 싣는다. 꺼져 있으면 load 1회 비용.
     fn applyToCore(
         self: *PtyReader,
         core: *terminal.TerminalCore,
@@ -701,7 +732,10 @@ pub const PtyReader = struct {
         out_head: *usize,
     ) void {
         if (bytes.len == 0) return;
+        const diag_on = diag_hold_enabled.load(.monotonic);
+        const t0: i128 = if (diag_on) std.Io.Clock.awake.now(self.io).nanoseconds else 0;
         core.owner_dbg.lock(mutex, self.io);
+        const t1: i128 = if (diag_on) std.Io.Clock.awake.now(self.io).nanoseconds else 0;
         core.write(bytes) catch {}; // best-effort(파서 OOM 등은 그 청크 드롭)
         const reply = core.pendingResponse();
         if (reply.len > 0) {
@@ -709,6 +743,7 @@ pub const PtyReader = struct {
             core.clearResponse();
         }
         core.owner_dbg.unlock(mutex, self.io);
+        if (diag_on) diagRecordHold(t0, t1, std.Io.Clock.awake.now(self.io).nanoseconds, bytes.len);
     }
 
     pub fn init(
@@ -1007,7 +1042,11 @@ pub const PtyReader = struct {
                 const consumed_input = if (self.write_queue) |wq| wq.consumedTotal() else std.math.maxInt(u64);
                 var applied = false;
                 while (cq.popReady(consumed_input)) |entry| {
+                    const diag_on = diag_hold_enabled.load(.monotonic);
+                    const t0: i128 = if (diag_on) std.Io.Clock.awake.now(self.io).nanoseconds else 0;
                     core.owner_dbg.lock(mutex, self.io);
+                    const t1: i128 = if (diag_on) std.Io.Clock.awake.now(self.io).nanoseconds else 0;
+                    defer if (diag_on) diagRecordHold(t0, t1, std.Io.Clock.awake.now(self.io).nanoseconds, 0);
                     const effect = core_command.apply(core, entry.cmd);
                     if (effect.send_form_feed) appendResponseBounded(self.allocator, out_buf, out_head.*, "\x0c");
                     // 셀 픽셀이 바뀌면 PTY winsize의 픽셀 필드(ws_xpixel/ws_ypixel)도 따라가야 한다 — 이미지

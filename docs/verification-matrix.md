@@ -606,14 +606,17 @@ frontmost PID 부재는 `not_provisioned`다. v2a의 첫-key 전/첫-marked 뒤 
 strict JSON receipt와 별도 PPM 판정 실행 파일은 구현됐고 순수 판정·Swift type-check·경계 gate를 통과했다.
 2026-09-14 잠금 해제된 exact-frontmost Maru 제품 회차도 recovery 2/input 4, historical·IME·clipboard 각 1,
 marked 8/insert 2, 동일 runtime·surface와 generation 4→5를 결속한 두 960×600 PPM의 독립 판정까지 green이다.
-그 전 잠긴 회차는 frontmost `loginwindow`라 `global-keyboard-focus` RED였고 통과 증거에서 제외했다. v2b는 구현 전이다.
+그 전 잠긴 회차는 frontmost `loginwindow`라 `global-keyboard-focus` RED였고 통과 증거에서 제외했다. v2b0a pure inventory
+reducer/coordinate converter와 Debug·ReleaseFast 8+8 focused gate는 구현됐지만 제품 caller는 0이다. WindowServer 전체
+inventory producer·preflight·canonical observation artifact의 v2b0b와 v2b1 단일-window capture/판정자는 구현 전이다.
 v2b0은 Screen Recording preflight를 source/HID mutation보다 먼저 수행하고 후보 요청 전후 전체 on-screen window inventory
 snapshot(시점당 최대 256, cap+1은 drop 없이 실패)을 pure reducer에 넘긴다. reducer의 차집합에서
 title·후보 문자열·pixel을 제외한 ID/owner PID·bundle ID/Apple signing validity·signing identifier/layer/bounds/TIS source ID만
 기록한다. Maru·기존·off-screen·zero-area window를 제외하고 후보 요청 전 부재→요청 뒤 생성→Escape 뒤 소멸을 같은 anchor에서
 최소 5회 반복한다. Apple-signed owner identity와 신규/소멸 window가 매회 일치하지 않거나 PTY input·committed text·base screen
-generation이 변하면 RED다. AppKit/Quartz 좌표는 display ID·두 display bounds·scale transcript를 받는 pure converter
-하나로 Quartz 좌상단 원점에 정규화하고 음수 origin·좌우/상하 multi-display·scale 1/2 fixture로 닫는다. v2b1은 그 identity와 새 window
+generation이 변하면 RED다. AppKit/Quartz 좌표는 display ID·두 point-space display bounds를 받고 크기 일치를 확인하는 pure
+converter 하나로 Quartz 좌상단 원점에 정규화한다. backing scale은 무관한 권위 필드로 싣지 않으며 음수 origin·좌우/상하
+multi-display fixture로 닫는다. v2b1은 그 identity와 새 window
 ID를 캡처 직전·직후 PID/signing identity와 함께 재검증해 단일 OS window capture를 만들고, v2a runtime/surface/`firstRect`, candidate bounds와 digest를 strict receipt로
 결속한다. 후보가 다른 display이거나 v2b0이 관측한 위/아래 placement별 anchor band 밖이면 실패하되 화면 가장자리의 정상
 flip은 허용한다. 임의 거리 상한은 관측 전에 정하지 않는다. window 소멸·input source·first responder·restore

@@ -4309,6 +4309,36 @@ pub fn build(b: *std.Build) void {
     );
     session_host_cr6d_pixel_step.dependOn(&run_session_host_cr6d_pixel_tests.step);
 
+    // CR6d-v2b0 window selection and AppKit→Quartz coordinate normalization are pure.  Run both
+    // safety modes before the opt-in WindowServer producer exists so an OS-only green cannot hide
+    // a reducer regression or a producer-side prefilter.
+    const session_host_cr6d_candidate_debug = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/ime_candidate_evidence.zig"),
+            .target = target,
+            .optimize = .Debug,
+        }),
+    });
+    const run_session_host_cr6d_candidate_debug = b.addRunArtifact(session_host_cr6d_candidate_debug);
+    run_session_host_cr6d_candidate_debug.addArg("--maru-expect-tests=8");
+    const session_host_cr6d_candidate_release = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/ime_candidate_evidence.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+        }),
+    });
+    const run_session_host_cr6d_candidate_release = b.addRunArtifact(session_host_cr6d_candidate_release);
+    run_session_host_cr6d_candidate_release.addArg("--maru-expect-tests=8");
+    test_step.dependOn(&run_session_host_cr6d_candidate_debug.step);
+    test_step.dependOn(&run_session_host_cr6d_candidate_release.step);
+    const session_host_cr6d_candidate_step = b.step(
+        "test-session-host-cr6d-ime-candidate-evidence",
+        "Validate CR6d-v2b0 candidate-window inventory and coordinate evidence",
+    );
+    session_host_cr6d_candidate_step.dependOn(&run_session_host_cr6d_candidate_debug.step);
+    session_host_cr6d_candidate_step.dependOn(&run_session_host_cr6d_candidate_release.step);
+
     // 실제 AppKit+Metal 캡처의 관심 영역을 커밋된 골든과 비교한다. 캡처가 없으면 skip하므로 스모크를
     // 돌리지 않은 환경/플랫폼에서도 무해하다(그 사실을 출력해 "게이트가 돌았다"는 착각을 막는다).
     const ppm_mod = b.addModule("ppm", .{

@@ -1300,8 +1300,9 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    committed text와 base screen generation은 변하지 않아야 한다. 관측 결과가 Apple Korean IME의 실제 owner identity를
    하나로 좁히지 못하면 allowlist를
    추측하지 않고 v2b0을 RED로 유지한다. AppKit `firstRect`와 Quartz window bounds를 직접 비교하지 않는다. display ID,
-   `NSScreen.frame`, `CGDisplayBounds`, backing scale을 receipt에 싣고 하나의 pure coordinate converter가 Quartz 좌상단 원점으로
-   정규화한다. 음수 origin·좌우/상하 multi-display·scale 1/2를 fixture로 닫는다. v2b1은 v2b0에서 고정한 exact owner identity와 새 window ID를 다시
+   `NSScreen.frame`, `CGDisplayBounds`를 receipt에 싣고 두 point-space display 크기가 같은지 확인한 뒤 하나의 pure coordinate
+   converter가 Quartz 좌상단 원점으로 정규화한다. backing scale은 이 point-space 변환의 입력이 아니므로 권위 필드로 싣지
+   않는다. 음수 origin·좌우/상하 multi-display를 fixture로 닫는다. v2b1은 v2b0에서 고정한 exact owner identity와 새 window ID를 다시
    검증한 뒤 그 window만 캡처하고, 캡처 직전·직후 같은 window ID/PID/signing identity를 다시 확인한다. 같은 receipt에
    v2a의 exact runtime·surface, `firstRect`, candidate bounds, capture digest를
    결속한다. 후보 bounds는 같은 display 안에서 v2b0 반복 관측으로 정한 위/아래 placement별 anchor band 안이어야 하며,
@@ -1530,7 +1531,9 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    capability 없는 N-1 host의 lifecycle polling/fallback과 실제 AppKit 입력기 후보창·조합 픽셀 검증도 일반
    current-current 제품 경로의 완료 주장과 분리한다. 앞 항목은 호환 확장이다. 조합 픽셀 v2a는 제품
    capture/receipt/독립 판정 배선과 잠금 해제된 exact-frontmost AppKit 실측까지 green이다. OS 후보창 v2b는
-   생산자부터 구현 전인 환경 의존 검증 gap이며 다음 비릴리스 후속이다.
+   v2b0a pure inventory reducer/coordinate converter와 Debug·ReleaseFast 8+8 focused gate까지 구현됐지만 제품 caller는 0이다.
+   WindowServer 전체 inventory producer·preflight·canonical artifact를 잇는 v2b0b와 단일-window capture v2b1은 구현 전인
+   환경 의존 검증 gap이며 다음 비릴리스 후속이다.
    실제 다른 UID process 거부는 passwordless sudo가 있는 macOS gate에서 root client가 owner-only socket을 통과한 뒤
    kernel peer credential로 admission 전에 거부되는 제품 스모크를 구현·실측했다.
    G3은 출하 뒤 기본값을 다시 바꿀 때만

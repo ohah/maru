@@ -65,6 +65,10 @@ pub const CoreHandoff = struct {
     }
 };
 
+/// 요구자가 한 번 대기하는 동안 리더가 **재잠금에 성공해도 되는 횟수**의 상한. 아래 기아 판정자가 쓰는
+/// 계약 값이며, 이것이 이 기법이 실제로 사는지를 재는 자리다 — 시간이 아니라 차례를 센다.
+const max_lost_acquisitions: u32 = 16;
+
 test "CoreHandoff: 요구자 없으면 yieldToDemand 는 즉시 돌아온다 (load 1회 경로)" {
     var h: CoreHandoff = .{};
     const t0 = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
@@ -110,20 +114,32 @@ test "CoreHandoff: [적대] yield 도중 요구자가 놓으면(signal) 세대�
     try std.testing.expect(dt < CoreHandoff.handoff_timeout_ns * 10);
 }
 
-test "CoreHandoff: [적대] 뜨거운 재잠금 루프 상대로 요구자가 유계 시간 안에 락을 얻는다" {
-    // 기아 재현: 리더 역할 스레드가 lock/unlock 을 쉬지 않고 돌린다. 판별 실험(M-series, 3회): 양보 없음
-    // worst 4.1~6.6ms · 양보 있음 0.04~0.30ms. 상한 3ms 는 양보 없음이 넘고 양보 있음의 10배 여유다 —
-    // 스케줄러 잡음으로 흔들리면 상한을 올리기보다 hold 스핀(2000)을 키워 «양보 없음」 쪽을 더 벌린다.
+test "CoreHandoff: [적대] 뜨거운 재잠금 루프 상대로 요구자가 «차례를 뺏기지 않는다»" {
+    // 기아 재현: 리더 역할 스레드가 lock/unlock 을 쉬지 않고 돌린다.
+    //
+    // **판정은 벽시계가 아니라 «리더가 몇 번 더 이겼는가» 다.** 이 계약이 말하는 것은 애초에 시간이
+    // 아니라 차례다 — 불공정 mutex 아래에서 요구자가 대기하는 동안 리더가 몇 번이나 재잠금에
+    // 성공하는가. 그 수는 기계 속도와 무관하고(빠른 기계는 같은 시간에 더 많이 돌 뿐이다) 계약을
+    // 직접 센다.
+    //
+    // 실측(2026-09-15, 같은 기계 3회): **양보 있음 worst 0~1 회 · 양보 없음 worst 1559~2632 회.**
+    // 세 자릿수 차이라 상한 16 은 양보 있음의 16 배 여유이면서 회귀보다 두 자릿수 아래다
+    // (docs/performance-budget.md §원칙 — 「실측의 4~5 배, 회귀 값 아래」).
+    //
+    // **이 판정자는 원래 3ms 벽시계였다.** 그 선은 M-series 실측(양보 없음 4.1~6.6ms · 양보 있음
+    // 0.04~0.30ms)으로 잡혔는데 `check` 잡은 ubuntu 에서 돈다 — 다른 기계 종류에서 잰 선을 쓰는
+    // 구조였고 2026-09-15 CI 에서 무관한 PR 을 빨갛게 만들었다. 시간은 이제 진단으로만 찍는다.
     const io = std.testing.io;
     var mutex: std.Io.Mutex = .init;
     var h: CoreHandoff = .{};
     var stop = std.atomic.Value(bool).init(false);
+    // 리더가 락을 **잡은 횟수**. 요구자가 자기 대기 구간의 증가분을 읽어 「뺏긴 횟수」를 얻는다.
+    var acquisitions = std.atomic.Value(u32).init(0);
     const Reader = struct {
-        fn run(m: *std.Io.Mutex, hh: *CoreHandoff, st: *std.atomic.Value(bool), io_: std.Io) void {
-            var spin: u32 = 0;
+        fn run(m: *std.Io.Mutex, hh: *CoreHandoff, st: *std.atomic.Value(bool), acq: *std.atomic.Value(u32), io_: std.Io) void {
             while (!st.load(.monotonic)) {
                 m.lockUncancelable(io_);
-                spin +%= 1;
+                _ = acq.fetchAdd(1, .monotonic);
                 var busy: u32 = 0;
                 while (busy < 2000) : (busy += 1) std.mem.doNotOptimizeAway(busy);
                 m.unlock(io_);
@@ -131,24 +147,35 @@ test "CoreHandoff: [적대] 뜨거운 재잠금 루프 상대로 요구자가 �
             }
         }
     };
-    const t = try std.Thread.spawn(.{}, Reader.run, .{ &mutex, &h, &stop, io });
+    const t = try std.Thread.spawn(.{}, Reader.run, .{ &mutex, &h, &stop, &acquisitions, io });
     defer {
         stop.store(true, .monotonic);
         t.join();
     }
     std.Io.sleep(io, .fromNanoseconds(std.time.ns_per_ms), .awake) catch {}; // 리더가 루프에 들어가게
-    var worst: i128 = 0;
+    var worst_lost: u32 = 0;
+    var worst_ns: i128 = 0;
     var i: usize = 0;
     while (i < 50) : (i += 1) {
+        // 요구를 올리기 **직전**에 센다. 그 앞의 재잠금은 우리를 뺏은 것이 아니다.
+        const before = acquisitions.load(.monotonic);
         const t0 = std.Io.Clock.awake.now(io).nanoseconds;
         h.demandBegin();
         mutex.lockUncancelable(io);
         h.demandEnd();
+        const lost = acquisitions.load(.monotonic) -% before;
         const w = std.Io.Clock.awake.now(io).nanoseconds - t0;
         mutex.unlock(io);
         h.signalHandoff(io);
-        if (w > worst) worst = w;
+        if (lost > worst_lost) worst_lost = lost;
+        if (w > worst_ns) worst_ns = w;
         std.Io.sleep(io, .fromNanoseconds(100 * std.time.ns_per_us), .awake) catch {};
     }
-    try std.testing.expect(worst < CoreHandoff.handoff_timeout_ns * 3);
+    if (worst_lost > max_lost_acquisitions) {
+        std.debug.print(
+            "CoreHandoff: 요구자가 한 번 대기하는 동안 리더가 {d} 번 더 이겼다(상한 {d}) — 최악 대기 {d:.3} ms\n",
+            .{ worst_lost, max_lost_acquisitions, @as(f64, @floatFromInt(worst_ns)) / 1e6 },
+        );
+        return error.DemandStarved;
+    }
 }

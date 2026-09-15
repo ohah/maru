@@ -174,6 +174,15 @@ test "same-run bundle execution is token-free and uses supplied capture" {
     try std.testing.expectEqual(@as(u64, 333), observed.run_id);
 }
 
+/// **실제 자식을 띄우는** 판정자들이 넘기는 마감. 이 값은 시험 대상이 아니다 — 판정하는 것은 argv·경로·
+/// 토큰 부재이고, 마감은 자식이 영영 안 끝나는 재앙만 막는 선이다.
+///
+/// 예전 값 `1s` 는 그 구분을 놓쳤다. fork+exec 한 번은 실측 ms 단위지만 러너가 붐비면 그 선을 넘어,
+/// **같은 코드가 기계 부하에 따라 다른 답을 냈다**(2026-09-15 CI 에서 `TimedOut` 으로 빨개졌다 — 이 PR 의
+/// diff 와 무관한 자리였다). 마감 자체의 계약(0 은 `InvalidBudget`, 초과는 실패)은 **가짜 실행기**를 쓰는
+/// 판정자들이 결정적으로 보므로, 여기를 키워도 그 판정은 흔들리지 않는다.
+const real_child_budget_ns: i128 = 60 * std.time.ns_per_s;
+
 test "same-run bundle uses exact absolute paths in a real token-free child" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -213,7 +222,7 @@ test "same-run bundle uses exact absolute paths in a real token-free child" {
         bundle_path,
         expected(),
         &output,
-        std.time.ns_per_s,
+        real_child_budget_ns,
     );
     defer observed.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings(subject_name, observed.subject_name);
@@ -332,7 +341,7 @@ test "held-directory artifact verification uses the exact directory vnode in a r
     defer _ = c.close(directory_fd);
     var executor = attestation.BoundedExecutor{ .io = std.testing.io };
     var output: [attestation.max_response_bytes]u8 = undefined;
-    var observed = try attestation.verifyDirectoryWith(&executor, std.testing.allocator, script_path, "secret-token", directory_fd, "./" ++ subject_name, expected(), &output, std.time.ns_per_s);
+    var observed = try attestation.verifyDirectoryWith(&executor, std.testing.allocator, script_path, "secret-token", directory_fd, "./" ++ subject_name, expected(), &output, real_child_budget_ns);
     defer observed.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings(subject_name, observed.subject_name);
 }
@@ -352,7 +361,7 @@ test "artifact attestation rejects token budget and foreign capture" {
 
 test "artifact attestation product execution fails closed on child failure" {
     var output: [attestation.max_response_bytes]u8 = undefined;
-    try std.testing.expectError(error.ChildFailed, attestation.verify(std.testing.io, std.testing.allocator, "/usr/bin/false", "secret-token", "/tmp/Maru.dmg", expected(), &output, std.time.ns_per_s));
+    try std.testing.expectError(error.ChildFailed, attestation.verify(std.testing.io, std.testing.allocator, "/usr/bin/false", "secret-token", "/tmp/Maru.dmg", expected(), &output, real_child_budget_ns));
 }
 
 test "artifact attestation successful parse unwinds every allocation failure" {

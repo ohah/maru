@@ -780,12 +780,18 @@ test "창을 닫으면 그 창의 임시 index 파일이 사라진다 — 실제
     defer env_guard.restore();
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
-    // `turnIndexPath` 의 `mkdir` 은 한 단계(`.cache/maru`)만 만든다 — 제품에서는 terminfo 캐시가 `.cache` 를
-    // 먼저 만들어 두지만 이 픽스처 HOME 은 비어 있으므로 여기서 만든다(집계 실행에서 실제로 `FileNotFound` 였다).
-    try tmp.dir.createDirPath(io, "home/.cache/maru");
+    // HOME 은 **비어 있다** — `turnIndexPath` 가 `.cache/maru` 를 부모까지 만들어야 아래 `writeFile` 이 된다
+    // (한 단계 `mkdir` 이던 때 집계 실행에서 `FileNotFound` 였다; 제품에선 terminfo 캐시가 가려 주고 있었다).
+    try tmp.dir.createDirPath(io, "home");
+    try tmp.dir.createDirPath(io, "xdg-cache");
     const home = try std.fmt.allocPrintSentinel(a, "{s}/home", .{root}, 0);
     defer a.free(home);
+    const xdg_cache = try std.fmt.allocPrintSentinel(a, "{s}/xdg-cache", .{root}, 0);
+    defer a.free(xdg_cache);
     try std.testing.expectEqual(@as(c_int, 0), setenv("HOME", home.ptr, 1));
+    // terminfo 캐시는 `XDG_CACHE_HOME` 이 있으면 그리로 간다 — 없으면 `init` 이 `~/.cache/maru/terminfo` 를
+    // 먼저 만들어 `turnIndexPath` 의 부모 생성이 공허해진다(한 단계 `mkdir` 돌연변이가 단독 실행에서 살아남았다).
+    try std.testing.expectEqual(@as(c_int, 0), setenv("XDG_CACHE_HOME", xdg_cache.ptr, 1));
 
     const session = try initSmokeSessionSized(a);
     defer a.destroy(session);
@@ -799,6 +805,8 @@ test "창을 닫으면 그 창의 임시 index 파일이 사라진다 — 실제
     defer a.free(path);
     // 경로는 우리 HOME 아래다 — 아니면 아래 «사라짐» 이 남의 파일을 지운 것일 수 있다.
     try std.testing.expect(std.mem.startsWith(u8, path, home));
+    // `.cache` 는 `turnIndexPath` 만이 만들었어야 한다(양성 대조 — 위 XDG 우회가 실제로 먹었는지).
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "home/.cache/maru/terminfo", .{}));
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = "DIRC" });
     try std.Io.Dir.cwd().access(io, path, .{});
     session.deinit();
@@ -7261,10 +7269,11 @@ pub const AppSession = struct {
         // 실행마다 달라 다음 실행이 재사용하지 않으므로 창이 닫힐 때 `deinit` 이 지우고, 크래시로 남은 것은
         // 스냅샷 워커의 스윕이 거둔다(2026-09-15 실측 6,123 개가 지우는 자리 없이 쌓여 있었다).
         const path = std.fmt.allocPrint(self.allocator, "{s}/.cache/maru/" ++ turn_index_cache.prefix ++ "{d}", .{ home, @intFromPtr(self) }) catch return null;
-        // 디렉터리는 미리 만들어 둔다(없으면 git이 index를 못 쓴다).
+        // 디렉터리는 미리 만들어 둔다(없으면 git이 index를 못 쓴다). **부모까지** 만든다 — 한 단계 `mkdir` 은
+        // `~/.cache` 가 없는 새 계정에서 조용히 실패해 스냅샷이 영영 안 찍힌다(2026-09-15 픽스처에서 드러남).
         var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-        if (std.fmt.bufPrintZ(&dir_buf, "{s}/.cache/maru", .{home})) |dir| {
-            _ = std.c.mkdir(dir.ptr, 0o700);
+        if (std.fmt.bufPrint(&dir_buf, "{s}/.cache/maru", .{home})) |dir| {
+            std.Io.Dir.cwd().createDirPath(self.io, dir) catch {};
         } else |_| {}
         self.turn_index_path = path;
         return path;

@@ -74,6 +74,8 @@ const PendingAppQuitShutdown = session_host.pending_app_quit_shutdown.PendingApp
 extern "c" fn usleep(usec: c_uint) c_int; // P3-e3 통합 스모크(fork host 대기·pump 폴링)용. libc라 cross-platform 선언.
 pub const coretext_bridge = @import("coretext_smoke_bridge.zig");
 pub const coretext_frame_builder = @import("coretext_frame_builder.zig");
+pub const coretext_shaper = @import("coretext_shaper.zig"); // present §10.7 grid shaping 진단 시계 주입 지점
+const coretext_smoke_bridge = @import("coretext_smoke_bridge.zig"); // present §10.7 native 단계 통계 getter
 pub const file_tree_backend = @import("file_tree_backend.zig");
 const detached_worker_wait = @import("detached_worker_wait.zig");
 pub const file_tree_mutation_backend = @import("file_tree_mutation_backend.zig");
@@ -1590,6 +1592,11 @@ const ft_collect_names = [ft_collect_slots][]const u8{
 // 게이트는 diag.zig 단일 출처.
 const resize_diag = std.log.scoped(.resize);
 pub const diag_gate = @import("diag.zig");
+
+fn pct(part: usize, whole: usize) f64 {
+    if (whole == 0) return 0;
+    return 100.0 * @as(f64, @floatFromInt(part)) / @as(f64, @floatFromInt(whole));
+}
 
 fn nsToMs(ns: i128) f64 {
     return @as(f64, @floatFromInt(ns)) / @as(f64, @floatFromInt(std.time.ns_per_ms));
@@ -6996,6 +7003,25 @@ pub const AppSession = struct {
     ft_hold_wait_max_ns: u64 = 0,
     ft_hold_bytes: u64 = 0,
     ft_hold_count: u32 = 0,
+    ft_shape_gen: u32 = 0, // tick 시작 시점의 shape 세대 — 끝에서 달라졌으면 이 tick 이 활성 grid 를 셰이핑했다
+    // grid shaping 1초 창 합계(present §10.7 run 캐시 진단): 셀·run·records·적중·단계 시간
+    ft_win_sh_frames: u32 = 0,
+    ft_win_sh_cells: usize = 0,
+    ft_win_sh_rows: usize = 0,
+    ft_win_sh_runs: usize = 0,
+    ft_win_sh_records: usize = 0,
+    ft_win_sh_runs_hit_prev: usize = 0,
+    ft_win_sh_runs_hit_64: usize = 0,
+    ft_win_sh_cells_hit_prev: usize = 0,
+    ft_win_sh_cells_hit_64: usize = 0,
+    ft_win_sh_native_ns: i128 = 0,
+    ft_win_sh_nat_font_ns: u64 = 0,
+    ft_win_sh_nat_prep_ns: u64 = 0,
+    ft_win_sh_nat_line_ns: u64 = 0,
+    ft_win_sh_nat_emit_ns: u64 = 0,
+    ft_win_sh_records_ns: i128 = 0,
+    ft_win_sh_build_ns: i128 = 0,
+    ft_win_sh_total_ns: i128 = 0,
     ft_kitty_gen: u32 = 0, // tick 시작 시점의 kitty transmit 세대 — 끝에서 달라졌으면 이 tick 안에 전송이 있었다
     ft_collect_n: [ft_collect_slots]u32 = .{0} ** ft_collect_slots,
     ft_sum_place: i128 = 0,
@@ -19742,6 +19768,24 @@ pub const AppSession = struct {
             self.ft_hold_bytes = pr.diag_hold_bytes.load(.monotonic);
             self.ft_hold_count = pr.diag_hold_count.load(.monotonic);
         }
+        {
+            const sh = &coretext_shaper.diag_last_shape;
+            if (sh.gen != self.ft_shape_gen and d_grid > 2 * std.time.ns_per_ms) {
+                frametime_diag.info("  └ grid={d:.1}ms = shape {d:.2}(native {d:.2}[폰트 {d:.2} + 조립 {d:.2} + CTLine {d:.2} + 방출 {d:.2}, run {d}] + records {d:.2} + build {d:.2}) | 행 {d} 셀 {d} run {d} 글리프 {d} | run 적중 직전 {d}/{d} 최근64 {d}/{d} (셀 기준 {d:.0}%/{d:.0}%) | 시뮬 {d:.2}", .{
+                    nsToMs(d_grid),                    nsToMs(sh.total_ns - sh.sim_ns),
+                    nsToMs(sh.native_shape_ns),        nsToMs(@as(i128, sh.nat_font_ns)),
+                    nsToMs(@as(i128, sh.nat_prep_ns)), nsToMs(@as(i128, sh.nat_line_ns)),
+                    nsToMs(@as(i128, sh.nat_emit_ns)), sh.nat_runs,
+                    nsToMs(sh.records_ns),             nsToMs(sh.build_ns),
+                    sh.rows,                           sh.cells,
+                    sh.runs,                           sh.records,
+                    sh.runs_hit_prev,                  sh.runs,
+                    sh.runs_hit_64,                    sh.runs,
+                    pct(sh.cells_hit_prev, sh.cells),  pct(sh.cells_hit_64, sh.cells),
+                    nsToMs(sh.sim_ns),
+                });
+            }
+        }
         if (self.ft_hold_count > 0) {
             frametime_diag.info("  └ 리더 core.write 보유 합={d:.1}ms 최대={d:.2}ms 청크={d}({d}KB, 평균 {d}B) | 리더 락대기 합={d:.1}ms 최대={d:.2}ms", .{
                 nsToMs(@as(i128, self.ft_hold_ns)),
@@ -19808,6 +19852,28 @@ pub const AppSession = struct {
         self.ft_sum_place += d_place;
         self.ft_sum_assemble += d_assemble;
         self.ft_win_lock_count += maru.session.surface.diag_lock_count;
+        {
+            const sh = &coretext_shaper.diag_last_shape;
+            if (sh.gen != self.ft_shape_gen) {
+                self.ft_win_sh_frames += 1;
+                self.ft_win_sh_cells += sh.cells;
+                self.ft_win_sh_rows += sh.rows;
+                self.ft_win_sh_runs += sh.runs;
+                self.ft_win_sh_records += sh.records;
+                self.ft_win_sh_runs_hit_prev += sh.runs_hit_prev;
+                self.ft_win_sh_runs_hit_64 += sh.runs_hit_64;
+                self.ft_win_sh_cells_hit_prev += sh.cells_hit_prev;
+                self.ft_win_sh_cells_hit_64 += sh.cells_hit_64;
+                self.ft_win_sh_native_ns += sh.native_shape_ns;
+                self.ft_win_sh_nat_font_ns += sh.nat_font_ns;
+                self.ft_win_sh_nat_prep_ns += sh.nat_prep_ns;
+                self.ft_win_sh_nat_line_ns += sh.nat_line_ns;
+                self.ft_win_sh_nat_emit_ns += sh.nat_emit_ns;
+                self.ft_win_sh_records_ns += sh.records_ns;
+                self.ft_win_sh_build_ns += sh.build_ns;
+                self.ft_win_sh_total_ns += sh.total_ns - sh.sim_ns;
+            }
+        }
         self.ft_win_img_bytes += metal_frame.diag_plan_bytes;
         self.ft_win_img_missing += metal_frame.diag_placement_without_image;
         metal_frame.diag_placement_without_image = 0;
@@ -19895,6 +19961,36 @@ pub const AppSession = struct {
                 }
                 maru.session.surface.diagLockSitesReset();
                 self.ft_win_lock_count = 0;
+            }
+            if (self.ft_win_sh_frames > 0) {
+                frametime_diag.info("  shape: 프레임 {d} 행 {d} 셀 {d} run {d} 글리프 {d} | 합 {d:.1}ms = native {d:.1}[폰트 {d:.1} + 조립 {d:.1} + CTLine {d:.1} + 방출 {d:.1}] + records {d:.1} + build {d:.1} | run 적중 직전 {d:.0}% 최근64 {d:.0}% (셀 기준 {d:.0}%/{d:.0}%)", .{
+                    self.ft_win_sh_frames,                                  self.ft_win_sh_rows,
+                    self.ft_win_sh_cells,                                   self.ft_win_sh_runs,
+                    self.ft_win_sh_records,                                 nsToMs(self.ft_win_sh_total_ns),
+                    nsToMs(self.ft_win_sh_native_ns),                       nsToMs(@as(i128, self.ft_win_sh_nat_font_ns)),
+                    nsToMs(@as(i128, self.ft_win_sh_nat_prep_ns)),          nsToMs(@as(i128, self.ft_win_sh_nat_line_ns)),
+                    nsToMs(@as(i128, self.ft_win_sh_nat_emit_ns)),          nsToMs(self.ft_win_sh_records_ns),
+                    nsToMs(self.ft_win_sh_build_ns),                        pct(self.ft_win_sh_runs_hit_prev, self.ft_win_sh_runs),
+                    pct(self.ft_win_sh_runs_hit_64, self.ft_win_sh_runs),   pct(self.ft_win_sh_cells_hit_prev, self.ft_win_sh_cells),
+                    pct(self.ft_win_sh_cells_hit_64, self.ft_win_sh_cells),
+                });
+                self.ft_win_sh_nat_font_ns = 0;
+                self.ft_win_sh_nat_prep_ns = 0;
+                self.ft_win_sh_nat_line_ns = 0;
+                self.ft_win_sh_nat_emit_ns = 0;
+                self.ft_win_sh_frames = 0;
+                self.ft_win_sh_cells = 0;
+                self.ft_win_sh_rows = 0;
+                self.ft_win_sh_runs = 0;
+                self.ft_win_sh_records = 0;
+                self.ft_win_sh_runs_hit_prev = 0;
+                self.ft_win_sh_runs_hit_64 = 0;
+                self.ft_win_sh_cells_hit_prev = 0;
+                self.ft_win_sh_cells_hit_64 = 0;
+                self.ft_win_sh_native_ns = 0;
+                self.ft_win_sh_records_ns = 0;
+                self.ft_win_sh_build_ns = 0;
+                self.ft_win_sh_total_ns = 0;
             }
             self.ft_sum_assemble = 0;
             self.ft_max_total = 0;
@@ -20287,6 +20383,9 @@ pub const AppSession = struct {
             diag_metal_io = self.io;
             metal_frame.diag_now = diagMetalNow;
             maru.terminal.kitty.diag_now = diagMetalNow; // kitty transmit 단계별(base64/inflate/store/display) — §13.7
+            coretext_shaper.diag_now = diagMetalNow; // grid shaping 단계별 + run 반복률 시뮬레이션 — present §10.7
+            coretext_shaper.diag_native_stats = coretext_smoke_bridge.maru_macos_coretext_shape_diag_stats;
+            self.ft_shape_gen = coretext_shaper.diag_last_shape.gen;
             self.ft_kitty_gen = maru.terminal.kitty.diag_last_transmit.gen.load(.monotonic);
             metal_frame.diag_replace_cells_ns = 0;
             metal_frame.diag_replace_merge_ns = 0;
@@ -20563,7 +20662,9 @@ pub const AppSession = struct {
                 // 트리거하지 않고 chrome+빈 본문을 정상 커밋한다(본문은 blank, WKWebView가 4e-3서 채움). terminal이면
                 // shapeOnlyBuild(activeSurface())라 byte-identical.
                 if (term_ops.activeTermIsTerminal(self)) {
+                    coretext_shaper.diag_capture_next = ft_on; // 이 다음 shape 호출이 «활성 grid» — chrome 호출과 가른다(present §10.7)
                     active_shaped = frame_builder.shapeOnlyBuild(self.allocator, &self.app_window, &self.renderer_state.font_registry, self.io) catch null;
+                    coretext_shaper.diag_capture_next = false;
                     // 이 프레임이 실제로 그린 스크롤 위치(shapeOnlyBuild가 같은 락 아래 캡처). null=빌드 실패.
                     if (active_shaped) |sp| rendered_view_offset = sp.view_offset;
                 }

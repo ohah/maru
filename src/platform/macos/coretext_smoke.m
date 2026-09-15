@@ -3,6 +3,29 @@
 #import <Foundation/Foundation.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <mach/mach_time.h>
+
+// [진단·present §10.7] shape_draw_list 한 호출의 단계별 시간(ns) — 마지막 호출 값. 문자열 조립(units·CFString·attributed),
+// CTLine 생성(typesetting), 글리프 방출(CTRunGetGlyphs·record·폰트 이름 복사). Zig 가 매 호출 뒤 읽는다.
+// 진단 전용(hidden) — 앱 호스트 ABI 가 아니다.
+static uint64_t maru_shape_diag_prep_ns = 0;
+static uint64_t maru_shape_diag_line_ns = 0;
+static uint64_t maru_shape_diag_emit_ns = 0;
+static uint64_t maru_shape_diag_font_ns = 0;
+static uint64_t maru_shape_diag_runs = 0;
+static mach_timebase_info_data_t maru_shape_diag_tb = { 0, 0 };
+static inline uint64_t maru_shape_diag_now(void) {
+    if (maru_shape_diag_tb.denom == 0) mach_timebase_info(&maru_shape_diag_tb);
+    return mach_absolute_time() * maru_shape_diag_tb.numer / maru_shape_diag_tb.denom;
+}
+__attribute__((visibility("hidden")))
+void maru_macos_coretext_shape_diag_stats(uint64_t *out_prep_ns, uint64_t *out_line_ns, uint64_t *out_emit_ns, uint64_t *out_font_ns, uint64_t *out_runs) {
+    if (out_prep_ns) *out_prep_ns = maru_shape_diag_prep_ns;
+    if (out_line_ns) *out_line_ns = maru_shape_diag_line_ns;
+    if (out_emit_ns) *out_emit_ns = maru_shape_diag_emit_ns;
+    if (out_font_ns) *out_font_ns = maru_shape_diag_font_ns;
+    if (out_runs) *out_runs = maru_shape_diag_runs;
+}
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1332,6 +1355,12 @@ void maru_macos_coretext_shape_draw_list(
         result->glyph_record_overflow = 0;
         result->missing_glyph_count = 0;
         result->fallback_run_count = 0;
+        maru_shape_diag_prep_ns = 0;
+        maru_shape_diag_line_ns = 0;
+        maru_shape_diag_emit_ns = 0;
+        maru_shape_diag_font_ns = 0;
+        maru_shape_diag_runs = 0;
+        const uint64_t diag_t_font0 = maru_shape_diag_now();
 
         if (cells == NULL && cell_count != 0) {
             result->status = 1;
@@ -1399,6 +1428,7 @@ void maru_macos_coretext_shape_draw_list(
         // 아래 해제 루프(si=1..7)가 **소유하지 않은** primary 를 release 해 over-release 로 죽는다
         // (실측: headless tick 테스트가 signal TRAP — 로컬 CI 게이트가 잡았다). 커서 run 을 처음 만날 때
         // face 슬롯의 폰트를 빌리고 이름만 retain 해 채운다.
+        maru_shape_diag_font_ns = maru_shape_diag_now() - diag_t_font0;
         CTFontRef styled_fonts[8] = { primary_font, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
         CFStringRef styled_names[8] = { primary_name, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
         CFDictionaryRef styled_attrs[8] = { attributes, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
@@ -1414,6 +1444,7 @@ void maru_macos_coretext_shape_draw_list(
         // 것은 `CTRunGetStringIndices` + `unit_cell`(유닛→셀 표)이며, 이 표가 run 셰이핑의 정확성을 지탱한다.
         size_t cell_index = 0;
         while (cell_index < cell_count) {
+            const uint64_t diag_t0 = maru_shape_diag_now();
             // run의 face는 시작 셀이 정한다. run 안의 셀은 아래 연속 조건에서 같은 face만 받아들인다.
             const MaruCoreTextDrawCell first_cell = cells[cell_index];
             const int style_index = maru_style_index_for_cell(first_cell);
@@ -1523,7 +1554,12 @@ void maru_macos_coretext_shape_draw_list(
                 break;
             }
 
+            const uint64_t diag_t1 = maru_shape_diag_now();
+            maru_shape_diag_prep_ns += diag_t1 - diag_t0;
             CTLineRef line = CTLineCreateWithAttributedString(attributed);
+            const uint64_t diag_t2 = maru_shape_diag_now();
+            maru_shape_diag_line_ns += diag_t2 - diag_t1;
+            maru_shape_diag_runs += 1;
             if (line == NULL) {
                 CFRelease(attributed);
                 CFRelease(string);
@@ -1649,6 +1685,7 @@ void maru_macos_coretext_shape_draw_list(
             CFRelease(line);
             CFRelease(attributed);
             CFRelease(string);
+            maru_shape_diag_emit_ns += maru_shape_diag_now() - diag_t2;
 
             if (result->status == 4 || result->status == 5 || result->status == 7) {
                 break;

@@ -200,6 +200,8 @@ zig build test > /tmp/t.log 2>&1;  mise run test-verdict /tmp/t.log
     **어디서 몇 번** 잡는지의 인벤토리(§12.9). 오프셋은 `lockCore` 기준이라 `dsymutil -o x.dSYM <bin>` 뒤
     `atos -o x.dSYM/Contents/Resources/DWARF/<bin> -l 0x100000000 $((lockCore 링크 주소 + 오프셋))` 로 줄 번호까지 푼다.
     SLOW 줄의 `횟수=` 는 tick 시작에 0 이 되므로 tick 사이의 호스트 ABI 폴 2회를 **뺀** 값이다.
+    `└ grid=` 줄과 1초 창 `shape:` 줄은 활성 grid shaping 의 단계(native[폰트/조립/CTLine/방출]·records·build)와 run
+    반복률 시뮬레이션(직전/최근64 프레임) — run 캐시가 그 워크로드에서 얼마나 적중할지의 추정([present cadence §10.7](io-render-present.md)).
     읽는 법과 실측은 [Phase 2~4 계획 §13](plans/io-render-threading.md).
 - macOS visible window smoke 실행: `mise run macos-window-smoke` (창이 너무 빨리 닫히면 `MARU_WINDOW_SMOKE_MS`로 노출 시간을 ms 단위로 늘려 수동 확인한다. 기본 1500ms, 상한 600000ms)
 - macOS window smoke 계약 테스트: `mise run test-macos-window-smoke`

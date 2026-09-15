@@ -84,6 +84,98 @@ pub const ShapeDrawListFn = *const fn (
     glyph_record_capacity: usize,
 ) callconv(.c) void;
 
+/// [진단·grid run 캐시] `shape` 한 번의 단계별 시간과 «run 반복률» 추정. platform 이 `diag_now` 를 주입할 때만
+/// 돈다(`metal_frame.diag_now` 와 같은 기법). 반복률은 캐시를 **만들기 전에** «이 워크로드에서 적중할 것인가»
+/// 를 가리는 시뮬레이션이다 — 행 안의 연속 셀(열 이어짐·같은 face)을 run 으로 보고 위치 무관 해시(codepoint·폭·
+/// style·cluster)를 직전 프레임 집합/최근 64 프레임 집합과 대조한다(docs/io-render-present.md §10.7).
+pub var diag_now: ?*const fn () i128 = null;
+pub const DiagShape = struct {
+    gen: u32 = 0,
+    cells: usize = 0,
+    rows: usize = 0,
+    runs: usize = 0,
+    records: usize = 0,
+    /// run 수 기준 적중(직전 프레임 / 최근 64 프레임) 과 그 run 이 덮는 셀 수 기준 적중.
+    runs_hit_prev: usize = 0,
+    runs_hit_64: usize = 0,
+    cells_hit_prev: usize = 0,
+    cells_hit_64: usize = 0,
+    native_cells_ns: i128 = 0,
+    native_shape_ns: i128 = 0,
+    // native 안 단계(mach 시계): 문자열 조립 / CTLine 생성 / 글리프 방출(+폰트 이름 복사) / 폰트 준비, run 수
+    nat_prep_ns: u64 = 0,
+    nat_line_ns: u64 = 0,
+    nat_emit_ns: u64 = 0,
+    nat_font_ns: u64 = 0,
+    nat_runs: u64 = 0,
+    records_ns: i128 = 0,
+    build_ns: i128 = 0,
+    sim_ns: i128 = 0,
+    total_ns: i128 = 0,
+};
+pub var diag_last_shape: DiagShape = .{};
+/// 같은 shaper 를 chrome 텍스트도 쓰므로 «다음 호출이 활성 grid 다» 를 호출자가 표시한다. 그 호출만 기록·시뮬레이션한다.
+pub var diag_capture_next: bool = false;
+/// native 단계 통계 getter — 네이티브를 링크하는 쪽(app_session)이 `coretext_smoke_bridge` 의 extern 을 꽂는다. 이 파일은
+/// 헤드리스 테스트에서도 컴파일되므로 extern 을 직접 참조하지 않는다(`shape_draw_list` 가 fn 포인터인 것과 같은 이유).
+pub var diag_native_stats: ?*const fn (*u64, *u64, *u64, *u64, *u64) callconv(.c) void = null;
+var diag_frame_no: u32 = 0;
+var diag_seen: std.AutoHashMapUnmanaged(u64, u32) = .empty; // run 해시 → 마지막으로 본 프레임 번호
+var diag_seen_alloc: ?std.mem.Allocator = null;
+
+/// run 반복률 시뮬레이션 — 셀 배열은 행·열 순(DrawList 계약). 캐시 자체가 아니라 «있었다면 몇 %» 를 센다.
+fn diagSimulateRuns(allocator: std.mem.Allocator, cells: []const renderer.DrawCell, pool: []const u32, d: *DiagShape) void {
+    if (diag_seen_alloc == null) diag_seen_alloc = allocator;
+    const alloc = diag_seen_alloc.?;
+    if (diag_seen.count() > 200_000) diag_seen.clearRetainingCapacity(); // 상한 — 진단이 메모리를 먹지 않게
+    diag_frame_no +%= 1;
+    const frame = diag_frame_no;
+    var i: usize = 0;
+    var last_row: ?u16 = null;
+    while (i < cells.len) {
+        const first = cells[i];
+        if (last_row == null or last_row.? != first.row) {
+            d.rows += 1;
+            last_row = first.row;
+        }
+        var h: u64 = 0xcbf29ce484222325;
+        var j = i;
+        var next_col: u32 = first.col;
+        var run_cells: usize = 0;
+        while (j < cells.len) : (j += 1) {
+            const c = cells[j];
+            if (c.row != first.row or c.col != next_col) break;
+            if (c.style.bold != first.style.bold or c.style.italic != first.style.italic) break;
+            const w: u32 = if (c.width == 0) 1 else c.width;
+            next_col += w;
+            run_cells += 1;
+            h = (h ^ c.codepoint) *% 0x100000001b3;
+            h = (h ^ w) *% 0x100000001b3;
+            h = (h ^ (@as(u64, @intFromBool(c.style.bold)) | (@as(u64, @intFromBool(c.style.italic)) << 1))) *% 0x100000001b3;
+            var k: usize = 0;
+            while (k < c.grapheme_count) : (k += 1) {
+                const idx = @as(usize, c.grapheme_offset) + k;
+                if (idx < pool.len) h = (h ^ pool[idx]) *% 0x100000001b3;
+            }
+        }
+        d.runs += 1;
+        if (diag_seen.getPtr(h)) |seen| {
+            if (seen.* == frame -% 1) {
+                d.runs_hit_prev += 1;
+                d.cells_hit_prev += run_cells;
+            }
+            if (frame -% seen.* <= 64) {
+                d.runs_hit_64 += 1;
+                d.cells_hit_64 += run_cells;
+            }
+            seen.* = frame;
+        } else {
+            diag_seen.put(alloc, h, frame) catch {};
+        }
+        i = if (j == i) i + 1 else j;
+    }
+}
+
 pub const CoreTextDrawListShaper = struct {
     pub const name = "coretext_draw_list";
 
@@ -132,6 +224,16 @@ pub const CoreTextDrawListShaper = struct {
             );
         }
 
+        const diag_on = diag_now != null and diag_capture_next;
+        diag_capture_next = false;
+        var d: DiagShape = .{};
+        const t0: i128 = if (diag_now) |now| now() else 0;
+        if (diag_on) {
+            d.cells = list.cells.len;
+            diagSimulateRuns(allocator, list.cells, list.grapheme_pool, &d);
+            d.sim_ns = diag_now.?() - t0;
+        }
+        const t1: i128 = if (diag_now) |now| now() else 0;
         var native_cells: std.ArrayList(NativeDrawCell) = .empty;
         defer native_cells.deinit(allocator);
         try native_cells.ensureTotalCapacity(allocator, list.cells.len);
@@ -154,6 +256,7 @@ pub const CoreTextDrawListShaper = struct {
             .missing_glyph_count = 0,
             .fallback_run_count = 0,
         };
+        const t2: i128 = if (diag_now) |now| now() else 0;
         self.shape_draw_list(
             self.appearance.font.family.ptr,
             self.appearance.font.family.len,
@@ -177,6 +280,7 @@ pub const CoreTextDrawListShaper = struct {
             return error.CoreTextDrawListShapeFailed;
         }
 
+        const t3: i128 = if (diag_now) |now| now() else 0;
         const record_count = @min(@as(usize, @intCast(native.glyph_record_count)), native_records.len);
         var coretext_records: std.ArrayList(coretext_font.CoreTextGlyphRecord) = .empty;
         defer coretext_records.deinit(allocator);
@@ -184,14 +288,28 @@ pub const CoreTextDrawListShaper = struct {
         for (native_records[0..record_count]) |*record| {
             coretext_records.appendAssumeCapacity(try coreTextGlyphRecordFromDrawRecord(record, list.cells));
         }
+        const t4: i128 = if (diag_now) |now| now() else 0;
 
-        return buildGlyphRunListFromCoreTextGlyphs(
+        const built = try buildGlyphRunListFromCoreTextGlyphs(
             allocator,
             coretext_records.items,
             self.layoutConfig(),
             surface,
             font_registry,
         );
+        if (diag_on) {
+            const t5 = diag_now.?();
+            d.records = record_count;
+            if (diag_native_stats) |stats| stats(&d.nat_prep_ns, &d.nat_line_ns, &d.nat_emit_ns, &d.nat_font_ns, &d.nat_runs);
+            d.native_cells_ns = t2 - t1;
+            d.native_shape_ns = t3 - t2;
+            d.records_ns = t4 - t3;
+            d.build_ns = t5 - t4;
+            d.total_ns = t5 - t0;
+            d.gen = diag_last_shape.gen +% 1;
+            diag_last_shape = d;
+        }
+        return built;
     }
 };
 

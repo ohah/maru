@@ -193,11 +193,24 @@ pub fn buildDrawListWithUnfocused(
                             }
                         }
 
+                        // **kitty unicode placeholder 셀은 글자가 아니다** — 그 셀의 codepoint·전경색·결합문자는
+                        // 「어느 이미지의 어느 타일을 여기에 놓아라」는 **좌표**다(kitty graphics protocol,
+                        // "Unicode placeholders"). 텍스트로 넘기면 폰트에 없는 U+10EEEE 가 tofu 박스로 찍혀
+                        // **화면이 통째로 쓰레기가 된다** — 실측(2026-09-15): tmux 안 terminal-browser 의 이미지가
+                        // 원격 투영 상한에 막히자 그 pane 전체가 박스 문자로 덮였다. 이미지가 못 오는 것과
+                        // 「그 자리에 쓰레기를 그리는 것」은 다른 결함이고, 뒤엣것이 이 자리다.
+                        //
+                        // 그림은 이 경로가 아니라 `metal_frame.buildGpuImages` 가 **snapshot.cells 를 직접 읽어**
+                        // 타일 quad 로 만든다 — 그래서 여기서 지워도 이미지는 그대로 뜬다. 배경색은 남긴다
+                        // (셀 배경은 텍스트가 아니라 그 칸의 칠이다).
+                        const placeholder_cell = cell.codepoint == terminal.unicode_placeholder_codepoint;
+
                         // cluster 본체(grapheme_id가 있으면 store에서, 없으면 풀 미사용 → combining 폴백)를
                         // 풀에 적재하고 셀이 [offset, count)로 참조하게 한다. 셰이퍼가 base 뒤에 붙인다.
+                        // placeholder 의 결합문자는 타일 좌표라 셰이퍼에 넘길 이유가 없다(셀 수만큼 헛일이다).
                         var g_offset: u32 = 0;
                         var g_count: u16 = 0;
-                        if (cell.grapheme_id != 0 and cell.grapheme_id <= snapshot.graphemes.len) {
+                        if (!placeholder_cell and cell.grapheme_id != 0 and cell.grapheme_id <= snapshot.graphemes.len) {
                             const cluster = snapshot.graphemes[cell.grapheme_id - 1];
                             g_offset = @intCast(grapheme_pool.items.len);
                             for (cluster) |cp| try grapheme_pool.append(allocator, @as(u32, cp));
@@ -207,7 +220,7 @@ pub fn buildDrawListWithUnfocused(
                         cells.appendAssumeCapacity(.{
                             .row = @intCast(row),
                             .col = @intCast(col),
-                            .codepoint = cell.codepoint,
+                            .codepoint = if (placeholder_cell) ' ' else cell.codepoint,
                             .grapheme_offset = g_offset,
                             .grapheme_count = g_count,
                             .width = render_width,
@@ -809,4 +822,41 @@ test "[적대] 줄끝 trim: DECSCNM(CSI ?5h) 반전 화면에서는 빈 칸을 �
         defer dl.deinit(std.testing.allocator);
         try std.testing.expectEqual(@as(usize, 2), dl.cells.len);
     }
+}
+
+test "TBPROBE kitty unicode placeholder 셀은 텍스트로 새지 않는다 — 글자도 결합문자도 넘기지 않는다" {
+    // **회귀 판정**(2026-09-15). placeholder 셀의 codepoint·전경색·결합문자는 글자가 아니라 「어느
+    // 이미지의 어느 타일을 여기 놓아라」는 좌표다(kitty graphics protocol, "Unicode placeholders").
+    // 그것을 셰이퍼에 넘기면 폰트에 없는 U+10EEEE 가 tofu 박스로 찍혀 화면이 통째로 덮인다 —
+    // 실측(2026-09-15): tmux 안 terminal-browser 의 이미지가 원격 투영 상한에 막히자 그 pane 전체가
+    // 박스 문자로 채워졌다. 이미지가 못 오는 것과 그 자리에 쓰레기를 그리는 것은 **다른 결함**이고,
+    // 이 판정자는 뒤엣것을 지킨다(이미지가 없어도 그 칸은 **빈 칸**이어야 한다).
+    var core = try terminal.TerminalCore.init(std.testing.allocator, .{ .cols = 2, .rows = 1 });
+    defer core.deinit();
+
+    // 전경색 rgb(0,0,7) = image_id 7. 결합문자 둘 = 타일 (0,0). 이미지는 **일부러 안 보낸다** —
+    // 유실 상황에서 화면이 어떻게 되는지가 이 판정자의 대상이다.
+    try core.write("\x1b[38;2;0;0;7m");
+    var utf8: [8]u8 = undefined;
+    var n = try std.unicode.utf8Encode(terminal.unicode_placeholder_codepoint, &utf8);
+    try core.write(utf8[0..n]);
+    n = try std.unicode.utf8Encode(0x0305, &utf8);
+    try core.write(utf8[0..n]);
+    n = try std.unicode.utf8Encode(0x0305, &utf8);
+    try core.write(utf8[0..n]);
+    try std.testing.expectEqual(terminal.unicode_placeholder_codepoint, core.screen.cells[0].codepoint); // 코어는 그대로 보관한다
+    try std.testing.expect(core.screen.cells[0].grapheme_id != 0);
+
+    var dl = try buildDrawList(std.testing.allocator, core.snapshot());
+    defer dl.deinit(std.testing.allocator);
+    var saw_cell = false;
+    for (dl.cells) |c| {
+        if (c.row != 0 or c.col != 0) continue;
+        saw_cell = true;
+        try std.testing.expectEqual(@as(u21, ' '), c.codepoint); // 글자로 새지 않는다
+        try std.testing.expectEqual(@as(u16, 0), c.grapheme_count); // 타일 좌표를 셰이퍼에 넘기지 않는다
+    }
+    try std.testing.expect(saw_cell); // 셀 자체는 나온다 — 배경은 그 칸의 칠이라 남아야 한다
+    // grapheme 풀에도 안 쌓인다 — 전면 이미지면 셀 수만큼 헛일이 된다(59x59 = 3481 셀).
+    try std.testing.expectEqual(@as(usize, 0), dl.grapheme_pool.len);
 }

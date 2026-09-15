@@ -1739,6 +1739,10 @@ pub const KittyPendingJob = struct {
     generation: u64,
     expected: usize,
     bpp: u8,
+    /// 24/32 = direct 픽셀(`decodeDirectPixels` 규칙), 100 = PNG 파일(`png.decode` — 치수는 파일이 말한다).
+    format: u32 = 32,
+    /// `payload` 가 누적 버퍼를 통째로 넘겨받은 것이면 그 할당 길이(free 는 이 길이로). 0 이면 `payload.len` 이 곧 할당 길이.
+    payload_cap: usize = 0,
     /// 완료가 밀어낸 옛 이미지(`completeKittyTransmit` 이 채운다). 같은 id 재전송은 **완료 시점까지 옛 픽셀을
     /// 그대로 보여 주고**(m=0 에서 map 에서 빼면 디코드 동안 한 프레임이 비어 깜빡인다 — 2026-09-15 사용자 보고),
     /// 설치 순간에 교체된 옛 것을 여기에 실어 리더가 unlock 뒤 `freeAll` 한다(ReleaseSafe 에서 1.56ms 였던 free).
@@ -1747,17 +1751,60 @@ pub const KittyPendingJob = struct {
 
 /// 락 밖 디코드 결과. 응답은 **디코드 결과**를 말한다 — 설치 여부(교체·삭제로 무효)는 별개다.
 pub const KittyDecoded = union(enum) {
-    pixels: []u8,
+    pixels: struct { data: []u8, width: u32, height: u32, bpp: u8 },
     invalid,
     oom,
 };
 
+/// base64 payload 의 머리에서 PNG 시그니처 + IHDR 을 엿본다(33 바이트 = base64 44 자). 픽셀 수와 무관한 O(1).
+/// PNG 가 아니거나 치수가 0 이면 null — 호출자가 인라인 경로로 보낸다.
+fn peekPngDims(payload: []const u8) ?struct { width: u32, height: u32 } {
+    if (payload.len < 44) return null;
+    const dec = std.base64.standard.Decoder;
+    var head: [33]u8 = undefined;
+    dec.decode(&head, payload[0..44]) catch return null;
+    if (!std.mem.eql(u8, head[0..8], "\x89PNG\r\n\x1a\n")) return null;
+    if (!std.mem.eql(u8, head[12..16], "IHDR")) return null;
+    const width = std.mem.readInt(u32, head[16..20], .big);
+    const height = std.mem.readInt(u32, head[20..24], .big);
+    if (width == 0 or height == 0) return null;
+    return .{ .width = width, .height = height };
+}
+
+/// PNG(f=100) 의 락 밖 디코드 자리 잡기 — `deferKittyTransmit` 과 같되 치수는 IHDR 에서, bpp 는 디코더 출력(RGBA)으로.
+fn deferKittyTransmitPng(self: *TerminalCore, cmd: KittyGraphicsCommand, payload: []const u8, width: u32, height: u32) KittyStatus {
+    const wh = std.math.mul(usize, width, height) catch return .einval;
+    const expected = std.math.mul(usize, wh, 4) catch return .einval;
+    var cmd_with_dims = cmd;
+    cmd_with_dims.width = width;
+    cmd_with_dims.height = height;
+    return deferKittyTransmitInner(self, cmd_with_dims, payload, 4, expected, 100);
+}
+
 /// m=0 에서 pending 엔트리를 만들고 job 을 큐에 넣는다. 락 아래에서 하는 일은 검증·복사(payload 수백 KB)·
 /// map 갱신뿐 — 픽셀 수에 비례하는 일은 없다.
 fn deferKittyTransmit(self: *TerminalCore, cmd: KittyGraphicsCommand, payload: []const u8, bpp: u8, expected: usize) KittyStatus {
+    return deferKittyTransmitInner(self, cmd, payload, bpp, expected, cmd.format);
+}
+
+fn deferKittyTransmitInner(self: *TerminalCore, cmd: KittyGraphicsCommand, payload: []const u8, bpp: u8, expected: usize, format: u32) KittyStatus {
     if (payload.len == 0) return .einval;
     if (expected > self.kitty_images.limit) return .enomem; // 한 장이 전체 한도 초과 — 디코드해 볼 것도 없다
-    const owned = self.allocator.dupe(u8, payload) catch return .enomem;
+    // payload 가 chunked 누적 버퍼(`kitty_chunk`) 그 자체면 복사하지 않고 **소유권을 옮긴다** — 3.7MB PNG 의 base64 를
+    // 락 아래에서 memcpy 하면 그것만 1.3ms 다(실측). 파서는 뒤에서 `abortKittyChunk` 로 빈 목록을 비울 뿐이다.
+    // 단일 APC(`apc_buffer` 안)면 그 버퍼는 파서가 재사용하므로 복사한다.
+    // payload 가 chunked 누적 버퍼(`kitty_chunk`) 그 자체면 복사하지 않고 **버퍼를 통째로(capacity 그대로) 옮긴다** —
+    // 3.7MB PNG 의 base64 를 락 아래에서 memcpy 하면 그것만 1.3ms 다(실측). `toOwnedSlice` 도 안 쓴다: capacity > len
+    // 이면 정확한 길이로 재할당·복사해 같은 1.3ms 가 든다. job 은 `payload_cap` 길이로 free 한다. 옮긴 뒤 같은
+    // capacity 를 바로 다시 예약한다(할당만 — 안 그러면 다음 이미지의 청크마다 재할당·재복사가 락 아래에서 돈다).
+    // 단일 APC(`apc_buffer` 안)면 그 버퍼는 파서가 재사용하므로 복사한다.
+    var payload_cap: usize = 0;
+    const owned: []u8 = if (payload.ptr == self.kitty_chunk.items.ptr and payload.len == self.kitty_chunk.items.len) blk: {
+        const whole = self.kitty_chunk.allocatedSlice();
+        payload_cap = whole.len;
+        self.kitty_chunk = .empty; // 재예약도 하지 않는다(4MB 할당이 1.3ms) — 완료가 이 버퍼를 되돌려 준다(adopt)
+        break :blk whole[0..payload.len];
+    } else self.allocator.dupe(u8, payload) catch return .enomem;
     self.kitty_images.gen_counter += 1;
     const generation = self.kitty_images.gen_counter;
     // 같은 id 재전송이면 옛 엔트리를 **그대로 둔다** — 디코드가 끝날 때까지 옛 픽셀이 계속 그려진다(브라우저는
@@ -1783,8 +1830,10 @@ fn deferKittyTransmit(self: *TerminalCore, cmd: KittyGraphicsCommand, payload: [
         .generation = generation,
         .expected = expected,
         .bpp = bpp,
+        .format = format,
+        .payload_cap = payload_cap,
     }) catch {
-        self.allocator.free(owned);
+        freeJobPayload(self.allocator, owned, payload_cap);
         if (created_pending) {
             _ = self.kitty_images.map.remove(cmd.image_id);
             removePlacementsForImage(self, cmd.image_id);
@@ -1792,6 +1841,12 @@ fn deferKittyTransmit(self: *TerminalCore, cmd: KittyGraphicsCommand, payload: [
         return .enomem;
     };
     return .deferred;
+}
+
+/// job 의 payload 를 할당 길이로 돌려준다(통째로 옮겨 온 버퍼는 `payload_cap`, 복사본은 `len`).
+pub fn freeJobPayload(alloc: std.mem.Allocator, payload: []u8, payload_cap: usize) void {
+    if (payload.len == 0 and payload_cap == 0) return;
+    alloc.free(if (payload_cap != 0) payload.ptr[0..payload_cap] else payload);
 }
 
 /// 리더가 **락 아래에서** 쌓인 job 을 자기 목록으로 옮긴다(포인터 이동뿐). 옮긴 뒤 코어 목록은 빈다.
@@ -1804,21 +1859,27 @@ pub fn takePendingKittyJobs(self: *TerminalCore, into: *std.ArrayListUnmanaged(K
 /// 락 **밖**에서: base64 → (zlib) → 픽셀. job 의 payload·옛 이미지를 여기서 free 한다(둘 다 `alloc` 소유).
 /// 코어를 만지지 않는다 — `self` 없이 순수 함수다.
 pub fn decodeKittyJob(job: *KittyPendingJob, alloc: std.mem.Allocator) KittyDecoded {
-    defer {
-        alloc.free(job.payload);
-        job.payload = &.{};
-    }
+    // payload 는 여기서 풀지 않는다 — 완료(`completeKittyTransmit`)가 락 아래에서 코어의 누적 버퍼로 되돌리거나 free 한다.
     const dec = std.base64.standard.Decoder;
     const decoded_len = dec.calcSizeForSlice(job.payload) catch return .invalid;
     if (decoded_len == 0) return .invalid;
-    if (job.cmd.compression == 0 and decoded_len != job.expected) return .invalid;
+    if (job.format != 100 and job.cmd.compression == 0 and decoded_len != job.expected) return .invalid;
     const raw = alloc.alloc(u8, decoded_len) catch return .oom;
     dec.decode(raw, job.payload) catch {
         alloc.free(raw);
         return .invalid;
     };
+    if (job.format == 100) {
+        // PNG 파일 → RGBA. 치수는 디코더가 말한다(IHDR 로 잡은 자리와 같아야 정상이지만, 설치는 디코더 값을 믿는다).
+        defer alloc.free(raw);
+        const img = png.decode(alloc, raw) catch |e| return switch (e) {
+            error.OutOfMemory => .oom,
+            else => .invalid,
+        };
+        return .{ .pixels = .{ .data = img.data, .width = img.width, .height = img.height, .bpp = img.bpp } };
+    }
     switch (job.cmd.compression) {
-        0 => return .{ .pixels = raw },
+        0 => return .{ .pixels = .{ .data = raw, .width = job.cmd.width, .height = job.cmd.height, .bpp = job.bpp } },
         'z' => {
             defer alloc.free(raw);
             const out = png.inflateExact(alloc, raw, job.expected) catch |e| return switch (e) {
@@ -1829,7 +1890,7 @@ pub fn decodeKittyJob(job: *KittyPendingJob, alloc: std.mem.Allocator) KittyDeco
                 alloc.free(out);
                 return .invalid;
             }
-            return .{ .pixels = out };
+            return .{ .pixels = .{ .data = out, .width = job.cmd.width, .height = job.cmd.height, .bpp = job.bpp } };
         },
         else => {
             alloc.free(raw);
@@ -1845,6 +1906,15 @@ pub fn decodeKittyJob(job: *KittyPendingJob, alloc: std.mem.Allocator) KittyDeco
 /// **교체된 옛 이미지는 `job.old_image` 에 실어 돌려준다** — 호출자가 unlock 뒤 `freeAll` 한다(락 아래 free 회피).
 pub fn completeKittyTransmit(self: *TerminalCore, job: *KittyPendingJob, decoded: KittyDecoded) void {
     job.old_image = null;
+    // payload 버퍼 되돌리기: 통째로 옮겨 온 누적 버퍼는 코어의 `kitty_chunk` 가 비어 있으면 그대로 다시 쓴다(할당·복사 0).
+    // 다음 이미지의 청크는 이 완료 뒤에야 파싱되므로(리더가 조각마다 job 을 끝낸다) 그 사이 버퍼가 필요한 곳이 없다.
+    if (job.payload_cap != 0 and self.kitty_chunk.capacity == 0) {
+        self.kitty_chunk = .{ .items = job.payload.ptr[0..0], .capacity = job.payload_cap };
+    } else {
+        freeJobPayload(self.allocator, job.payload, job.payload_cap);
+    }
+    job.payload = &.{};
+    job.payload_cap = 0;
     const status: KittyStatus = switch (decoded) {
         .invalid => blk: {
             dropPendingKittyEntry(self, job.*);
@@ -1854,7 +1924,8 @@ pub fn completeKittyTransmit(self: *TerminalCore, job: *KittyPendingJob, decoded
             dropPendingKittyEntry(self, job.*);
             break :blk .enomem;
         },
-        .pixels => |pixels| blk: {
+        .pixels => |px| blk: {
+            const pixels = px.data;
             const entry = self.kitty_images.map.getPtr(job.cmd.image_id);
             const live = entry != null and entry.?.generation <= job.generation;
             if (!live) {
@@ -1877,9 +1948,9 @@ pub fn completeKittyTransmit(self: *TerminalCore, job: *KittyPendingJob, decoded
             self.kitty_images.total_bytes -= existing;
             e.* = .{
                 .id = job.cmd.image_id,
-                .width = job.cmd.width,
-                .height = job.cmd.height,
-                .bpp = job.bpp,
+                .width = px.width,
+                .height = px.height,
+                .bpp = px.bpp,
                 .data = pixels,
                 .generation = job.generation,
             };
@@ -1920,7 +1991,7 @@ fn flushPendingKittyImage(self: *TerminalCore, image_id: u32) void {
 /// 코어 소유 job 목록을 비운다(RIS·deinit — 리더가 가져가지 않은 채 남은 것). 락 아래.
 pub fn discardPendingKittyJobs(self: *TerminalCore) void {
     for (self.kitty_pending_jobs.items) |*job| {
-        self.allocator.free(job.payload);
+        freeJobPayload(self.allocator, job.payload, job.payload_cap);
         if (job.old_image) |*o| o.freeAll(self.allocator);
     }
     self.kitty_pending_jobs.clearRetainingCapacity();
@@ -1978,6 +2049,14 @@ fn decodePngPayload(
 pub const max_compressed_png_bytes: usize = 64 << 20;
 
 fn kittyTransmitPng(self: *TerminalCore, cmd: KittyGraphicsCommand, payload: []const u8, store: bool) KittyStatus {
+    // 락 밖 디코드(§13.8): 치수는 파일 안에 있으니 IHDR 33 바이트만 base64 로 풀어(O(1)) pending 엔트리의 자리를 잡고,
+    // 본 디코드는 리더가 unlock 뒤 한다. `o=z` 로 한 겹 더 압축된 PNG 는 헤더를 못 엿보니 인라인 그대로(드물다).
+    if (store and self.kitty_defer_decode and cmd.compression == 0) {
+        if (peekPngDims(payload)) |dims| {
+            return deferKittyTransmitPng(self, cmd, payload, dims.width, dims.height);
+        }
+        // 헤더가 PNG 가 아니면 인라인 경로가 같은 이유로 EINVAL 을 낸다 — 판정을 한 곳(png.decode)에 둔다.
+    }
     const png_bytes = decodePngPayload(self, cmd.compression, payload) catch |e| return switch (e) {
         error.OutOfMemory => .enomem,
         error.TooBig => .enomem, // 상한을 넘은 zlib — 앱이 줄이거나 포기할 수 있게 enomem 으로

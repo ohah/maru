@@ -347,7 +347,10 @@ ready 뒤 `resume`·`로그 보기`는 각각 pointer와 `⌘↵`·`⌘L`을 **�
 Codex action fixture와 별도로, Claude fixture는 직속 `~/.claude/projects/<project>/<session>.jsonl` 하나만
 격리 HOME에 두고 assistant `message.model`을 포함한다. 이 scenario는 scanner가 nested `subagents`가 아닌 직속
 Claude transcript를 고르고, parser의 model metadata가 세 줄 카드의 model line으로 투영되며, 명시적 재개가
-`claude --resume <session-id> --permission-mode <기록된 모드>`의 provider-native argv로 향하는 것을 함께 고정한다. summary에는 모델명·세션 id·경로·원문을
+`claude --resume <session-id> --permission-mode <기록된 모드> --model <기록된 모델>`의 provider-native argv로
+향하는 것을 함께 고정한다. Codex 쪽 argv(`codex resume <id> --ask-for-approval <v> --sandbox <v> --model <m>`)는
+`resume-pointer`·`resume-keyboard`가 같은 방식으로 고정한다 — 두 fake provider 모두 **정확한 인자 수**를
+요구하므로 어느 한 축이 빠지면 초록이 될 수 없다. summary에는 모델명·세션 id·경로·원문을
 남기지 않고 fake-exec verdict만 남긴다. stale replace와 multi-state capture는 동일 command의 별도 scenario다.
 
 이 fixture는 일반 controlled-smoke의 80×24 zero-backing 시작을 재사용하지 않는다. 첫 paint 전에 실제

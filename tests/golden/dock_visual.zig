@@ -353,7 +353,16 @@ const cases = [_]Case{
         // 화살표가 서면 편집기가 열린다. 두 그림은 **같은 픽셀 자리**를 쓰므로 crop 하나가 둘을 가른다.
         .name = "scm-conflict-hover-resolve",
         .capture = "scm-conflict-hover.ppm",
-        .contract = "충돌 행을 호버하면 `+`가 아니라 「편집기에서 열기」 표식이 상태 문자 `U` 왼쪽에 뜬다",
+        .contract = "마커가 남은 충돌 행을 호버하면 `+`가 아니라 「편집기에서 열기」 표식이 상태 문자 `U` 왼쪽에 뜬다",
+        .rect = .{ .x = 240, .y = 254, .w = 240, .h = 22 },
+    },
+    .{
+        // **마커가 없어진 충돌 행을 호버한 상태**(S4 — docs/editor-merge-conflicts.md §5). 위와 **같은 crop**
+        // 이라 화살표/`+` 로 갈린다: git 은 `add` 전까지 그 파일을 `UU` 로 두므로(옛 계약의 「M 이 된다」는
+        // 틀렸다) `+` 가 없으면 Maru 안에서 병합을 끝낼 길이 없다. 상태 문자는 그대로 `U` 다.
+        .name = "scm-conflict-hover-complete",
+        .capture = "scm-conflict-resolved-hover.ppm",
+        .contract = "마커가 없어진 충돌 행을 호버하면 `+`가 상태 문자 `U` 왼쪽에 뜬다 — add 가 곧 완료다",
         .rect = .{ .x = 240, .y = 254, .w = 240, .h = 22 },
     },
     .{

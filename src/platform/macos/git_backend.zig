@@ -158,12 +158,19 @@ pub const Result = struct {
     failure: ReadFailure = .generic,
     /// 출력이 상한에 걸려 잘렸는가. 목록 끝에 그 사실을 표시한다.
     truncated: bool = false,
+    /// **시작 마커가 남은 충돌 경로들**(S4 — NUL 구분, `git grep -l -z`). 충돌 행이 하나도 없으면 비어
+    /// 있고 `conflict_scan_ok` 가 참이다.
+    conflict_markers: []u8 = &.{},
+    /// 위 판정을 **했는가**. 거짓이면 모든 충돌 행이 「마커 남음」으로 취급된다(`+` 를 아끼는 쪽이 안전하다)
+    /// — 「판정 못 함」과 「전부 해결됨」은 다른 상태라 빈 목록만으로는 가를 수 없다.
+    conflict_scan_ok: bool = false,
     /// 이 결과가 어느 요청의 것인지. 늦게 온 결과가 최신 화면을 덮어쓰지 않게 호출자가 대조한다.
     request_id: u64 = 0,
 
     pub fn deinit(self: *Result, allocator: std.mem.Allocator) void {
         allocator.free(self.repo_root);
         allocator.free(self.status);
+        allocator.free(self.conflict_markers);
         allocator.free(self.numstat_head);
         allocator.free(self.numstat_staged);
         allocator.free(self.numstat_worktree);
@@ -1543,6 +1550,50 @@ const required_reads = .{
     .{ git_command.Kind.numstat_worktree, "numstat_worktree" },
 };
 
+/// 목록의 충돌 경로들에 시작 마커가 남았는지 `git grep` 으로 묻는다(S4). `conflict_markers_batch` 씩 끊어
+/// 돌리고, 한 배치라도 실패하면 **판정 못 함**(`conflict_scan_ok = false`)으로 남긴다 — 반쪽 답으로 `+` 를
+/// 내면 마커가 남은 파일이 스테이지된다.
+fn scanConflictMarkers(allocator: std.mem.Allocator, job: *const Job, result: *Result) void {
+    var paths: [git_command.conflict_markers_batch][]const u8 = undefined;
+    var n: usize = 0;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    var it = maru.session.git_status.iterate(result.status);
+    var any = false;
+    while (it.next()) |entry| {
+        if (!entry.isConflicted()) continue;
+        any = true;
+        paths[n] = entry.path;
+        n += 1;
+        if (n == paths.len) {
+            if (!runMarkersBatch(allocator, job, paths[0..n], &out)) return;
+            n = 0;
+        }
+    }
+    if (n > 0 and !runMarkersBatch(allocator, job, paths[0..n], &out)) return;
+    if (any) result.conflict_markers = out.toOwnedSlice(allocator) catch return;
+    result.conflict_scan_ok = true;
+}
+
+fn runMarkersBatch(allocator: std.mem.Allocator, job: *const Job, paths: []const []const u8, out: *std.ArrayList(u8)) bool {
+    var argv_buf: [git_command.max_argv][]const u8 = undefined;
+    const local = git_command.buildConflictMarkers(job.git_exe, job.repo, paths, &argv_buf) orelse return false;
+    // **exit 1 은 「마커 없음」이다** — `check-ignore` 와 같은 계약이고 이 명령 하나에만 연다.
+    const o = if (job.remoteTarget()) |target| blk: {
+        var remote_buf: [git_command.max_argv][]const u8 = undefined;
+        var cmd_buf: [git_command.max_remote_command_bytes]u8 = undefined;
+        const argv = git_command.buildRemote(local, target, &remote_buf, &cmd_buf) orelse return false;
+        break :blk runArgvWithEnv(allocator, argv, null, true, null, true) catch return false;
+    } else runArgvWithEnv(allocator, local, null, false, null, true) catch return false;
+    defer allocator.free(o.bytes);
+    // ⚠️ **로컬 e2e 로 못 가르는 셋**(S4 적대적 2회차 B7·B8·B9): ① 이 잘림 가드 — 상한이 커서 경로 몇 개로는
+    // 안 잘린다, ② 원격 갈래의 `empty_on_exit_1` — 원격 저장소가 판정자에 없다, ③ 비충돌 행을 grep 에
+    // 넣어도 목록은 충돌 행만 조회하므로 답이 같다(비용만 는다). 셋 다 규칙으로 남긴다.
+    if (o.truncated) return false; // 반쪽 목록으로는 답할 수 없다
+    out.appendSlice(allocator, o.bytes) catch return false;
+    return true;
+}
+
 fn diffWorker(job: *Job) void {
     const state = job.state;
     const target = job.diff.?;
@@ -1864,6 +1915,8 @@ fn worker(job: *Job) void {
             }
         }
     }
+    // **충돌 행의 마커 판정**(S4). 같은 왕복에 얹는다 — 따로 물으면 목록과 판정이 다른 순간의 것이 된다.
+    if (ok) scanConflictMarkers(state.allocator, job, &result);
     result.ok = ok;
     result.failure = failure;
     result.truncated = truncated;
@@ -3265,6 +3318,216 @@ test "충돌 파일도 diff가 열린다(HEAD ↔ 작업트리)" {
     try testing.expect(result.original.len > 0); // HEAD:f.txt — 비어 있으면 전부 추가로 보인다
     // 작업트리에는 충돌 표시가 들어 있다 — 그걸 그대로 보여 주는 것이 이 기준의 목적이다.
     try testing.expect(std.mem.indexOf(u8, result.modified, "<<<<<<<") != null);
+}
+
+test "실제 충돌 저장소: 마커가 남은 동안은 «남음», 지우면 «없음» — 그리고 git 은 여전히 UU 다 (S4 end-to-end)" {
+    // 목록 한 벌에 실린 마커 판정(`git grep -l -z`)이 **진짜 git** 에서 도는지 본다. 판정의 두 갈래(남음/없음)와
+    // 「판정을 했다」 표시, 그리고 이 조각의 전제 — 해결해도 상태 문자가 안 바뀐다 — 를 한 저장소에서 잰다.
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const exe = locate(&exe_buf) orelse return error.SkipZigTest;
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_ptr = std.c.getcwd(&cwd_buf, cwd_buf.len) orelse return error.NoCwd;
+    const cwd = std.mem.span(@as([*:0]u8, @ptrCast(cwd_ptr)));
+    var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const repo = std.fmt.bufPrint(&repo_buf, "{s}/.zig-cache/tmp-conflict-markers", .{cwd}) catch return error.SkipZigTest;
+    var rm_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const rm_path = std.fmt.bufPrintZ(&rm_buf, "{s}", .{repo}) catch return error.SkipZigTest;
+    _ = runQuiet(&.{ "/bin/rm", "-rf", rm_path });
+    defer _ = runQuiet(&.{ "/bin/rm", "-rf", rm_path });
+    if (!makeConflictRepo(exe, repo)) return error.SkipZigTest;
+
+    var backend = try Backend.init(std.Io.Threaded.global_single_threaded.io());
+    defer backend.deinit();
+
+    // ⑴ 마커가 남은 상태: 판정을 했고, f.txt 가 목록에 있다.
+    try testing.expect(backend.submit(exe, repo, "", 1, null));
+    var before = waitForList(&backend) orelse return error.ListNeverCompleted;
+    defer before.deinit(worker_allocator);
+    try testing.expect(before.ok);
+    try testing.expect(before.conflict_scan_ok);
+    try testing.expect(std.mem.indexOf(u8, before.conflict_markers, "f.txt\x00") != null);
+    try testing.expect(std.mem.indexOf(u8, before.status, "u UU") != null);
+
+    // ⑵ 마커를 지우고 저장한다(편집기 밖에서 해결한 것과 같다) → 목록은 비고, 판정은 했고, git 은 여전히 UU 다.
+    //    **여덟 개짜리 `<<<<<<<<` 는 마커가 아니다**(`markerOf` 와 같은 규칙 — 정확히 일곱 자 + 공백/줄 끝).
+    //    패턴에서 `( |$)` 를 떼면 이 줄이 걸려 해결한 파일이 영영 `→` 다(적대적 2회차 B5).
+    try writeFileAt(repo, "f.txt", "<<<<<<<< not a marker\nresolved\n");
+    try testing.expect(backend.submit(exe, repo, "", 2, null));
+    var after = waitForList(&backend) orelse return error.ListNeverCompleted;
+    defer after.deinit(worker_allocator);
+    try testing.expect(after.ok);
+    try testing.expect(after.conflict_scan_ok);
+    try testing.expectEqual(@as(usize, 0), after.conflict_markers.len);
+    try testing.expect(std.mem.indexOf(u8, after.status, "u UU") != null); // 전제: add 전까지 UU
+
+    // ⑶ 그 결과로 모델을 세우면 그 행의 동작이 `+` 다 — 그리고 ⑴ 의 결과로는 `→` 다.
+    var rows: [16]maru.session.scm_view.Row = undefined;
+    var scratch: [512]u8 = undefined;
+    const sc = maru.session.scm_view.section_count;
+    const m_after = maru.session.scm_view.buildWithMarkers(after.status, after.conflict_markers, "", "", "", .{false} ** sc, .{true} ** sc, false, &rows, &scratch);
+    try testing.expectEqual(maru.session.scm_view.RowAction.stage, m_after.rows[1].file.action);
+    const m_before = maru.session.scm_view.buildWithMarkers(before.status, before.conflict_markers, "", "", "", .{false} ** sc, .{true} ** sc, false, &rows, &scratch);
+    try testing.expectEqual(maru.session.scm_view.RowAction.resolve, m_before.rows[1].file.action);
+}
+
+test "실제 충돌 저장소: 배치보다 많은 충돌 파일 — 한 배치도 빠뜨리지 않고, 해결한 것만 빠진다 (S4 end-to-end)" {
+    // `git grep` 은 경로를 `conflict_markers_batch` 개씩 끊어 돌린다. 둘째 배치를 안 돌리거나 꼬리를 흘리면
+    // 그 파일들은 「마커 없음」으로 읽혀 **마커가 남은 파일에 `+` 가 선다** — 이 조각이 막아야 하는 바로 그 사고다.
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const exe = locate(&exe_buf) orelse return error.SkipZigTest;
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_ptr = std.c.getcwd(&cwd_buf, cwd_buf.len) orelse return error.NoCwd;
+    const cwd = std.mem.span(@as([*:0]u8, @ptrCast(cwd_ptr)));
+    var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const repo = std.fmt.bufPrint(&repo_buf, "{s}/.zig-cache/tmp-conflict-markers-many", .{cwd}) catch return error.SkipZigTest;
+    var rm_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const rm_path = std.fmt.bufPrintZ(&rm_buf, "{s}", .{repo}) catch return error.SkipZigTest;
+    _ = runQuiet(&.{ "/bin/rm", "-rf", rm_path });
+    defer _ = runQuiet(&.{ "/bin/rm", "-rf", rm_path });
+    const n = git_command.conflict_markers_batch + 3; // 두 배치 + 꼬리
+    if (!makeManyConflictRepo(exe, repo, n)) return error.SkipZigTest;
+
+    var backend = try Backend.init(std.Io.Threaded.global_single_threaded.io());
+    defer backend.deinit();
+    try testing.expect(backend.submit(exe, repo, "", 1, null));
+    var before = waitForList(&backend) orelse return error.ListNeverCompleted;
+    defer before.deinit(worker_allocator);
+    try testing.expect(before.ok and before.conflict_scan_ok);
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        var name_buf: [32]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buf, "c{d}.txt\x00", .{i});
+        try testing.expect(std.mem.indexOf(u8, before.conflict_markers, name) != null);
+    }
+
+    // 앞 셋과 맨 끝을 해결한다 → 그 넷만 목록에서 빠진다.
+    for ([_]usize{ 0, 1, 2, n - 1 }) |k| {
+        var name_buf: [32]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buf, "c{d}.txt", .{k});
+        try writeFileAt(repo, name, "resolved\n");
+    }
+    try testing.expect(backend.submit(exe, repo, "", 2, null));
+    var after = waitForList(&backend) orelse return error.ListNeverCompleted;
+    defer after.deinit(worker_allocator);
+    try testing.expect(after.ok and after.conflict_scan_ok);
+    i = 0;
+    while (i < n) : (i += 1) {
+        var name_buf: [32]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buf, "c{d}.txt\x00", .{i});
+        const resolved = (i <= 2) or (i == n - 1);
+        try testing.expectEqual(!resolved, std.mem.indexOf(u8, after.conflict_markers, name) != null);
+    }
+}
+
+test "실제 충돌 저장소: grep 이 실패하면 «판정 못 함» — 충돌 행은 전부 → 로 남는다 (S4 end-to-end)" {
+    // 「판정 못 함」과 「전부 해결됨」은 다른 상태다. 배치 하나가 실패했는데 «했다» 고 적으면 빈 목록이
+    // 「전부 해결됨」으로 읽혀 마커가 남은 파일에 `+` 가 선다(적대적 2회차 B2 — 진짜 git 은 안 실패해서
+    // 못 갈렸다). `grep` 만 실패시키고 나머지는 진짜 git 에 위임하는 래퍼로 그 갈래를 연다.
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const exe = locate(&exe_buf) orelse return error.SkipZigTest;
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_ptr = std.c.getcwd(&cwd_buf, cwd_buf.len) orelse return error.NoCwd;
+    const cwd = std.mem.span(@as([*:0]u8, @ptrCast(cwd_ptr)));
+    var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const repo = std.fmt.bufPrint(&repo_buf, "{s}/.zig-cache/tmp-conflict-markers-fail", .{cwd}) catch return error.SkipZigTest;
+    var rm_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const rm_path = std.fmt.bufPrintZ(&rm_buf, "{s}", .{repo}) catch return error.SkipZigTest;
+    _ = runQuiet(&.{ "/bin/rm", "-rf", rm_path });
+    defer _ = runQuiet(&.{ "/bin/rm", "-rf", rm_path });
+    // **배치보다 많은 충돌 파일로** — 첫 배치(꽉 찬 것)의 실패와 꼬리 배치의 실패는 다른 줄이라 둘 다 지나야
+    // 한다(적대적 3회차 C3: 충돌 하나짜리 픽스처는 꼬리 줄만 지났다).
+    if (!makeManyConflictRepo(exe, repo, git_command.conflict_markers_batch + 3)) return error.SkipZigTest;
+
+    // 래퍼: 인자에 `c0.txt` 가 있으면(= **첫 배치**) 2 로 죽고, 아니면 진짜 git 으로 넘긴다 — 꼬리 배치는
+    // 성공하게 두어야 「첫 배치의 실패를 삼키고 꼬리만 보고 «했다»」는 변이가 갈린다(적대적 4회차 D1: 모든
+    // grep 을 죽이면 꼬리 줄이 먼저 실패해 그 변이가 살았다). `-C <repo>`·`-c k=v` 가 앞에 오므로 「첫
+    // 비옵션 인자」로는 못 가른다(실측).
+    var script_buf: [1024]u8 = undefined;
+    const script = try std.fmt.bufPrint(&script_buf,
+        \\#!/bin/sh
+        \\for a in "$@"; do
+        \\  [ "$a" = c0.txt ] && exit 2
+        \\done
+        \\exec "{s}" "$@"
+        \\
+    , .{exe});
+    try writeFileAt(repo, "fake-git.sh", script);
+    var wrapper_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const wrapper = try std.fmt.bufPrintZ(&wrapper_buf, "{s}/fake-git.sh", .{repo});
+    if (std.c.chmod(wrapper.ptr, 0o755) != 0) return error.ChmodFailed;
+
+    var backend = try Backend.init(std.Io.Threaded.global_single_threaded.io());
+    defer backend.deinit();
+    try testing.expect(backend.submit(wrapper, repo, "", 1, null));
+    var r = waitForList(&backend) orelse return error.ListNeverCompleted;
+    defer r.deinit(worker_allocator);
+    try testing.expect(r.ok); // 목록 자체는 섰다 — 판정만 못 했다
+    try testing.expect(!r.conflict_scan_ok);
+    var rows: [16]maru.session.scm_view.Row = undefined;
+    var scratch: [512]u8 = undefined;
+    const sc = maru.session.scm_view.section_count;
+    const m = maru.session.scm_view.buildWithMarkers(r.status, if (r.conflict_scan_ok) r.conflict_markers else null, "", "", "", .{false} ** sc, .{true} ** sc, false, &rows, &scratch);
+    try testing.expectEqual(maru.session.scm_view.RowAction.resolve, m.rows[1].file.action);
+
+    // **꼬리 배치만 실패해도** 같다(적대적 5회차 E2 — 첫 배치만 죽이는 래퍼로는 꼬리 줄이 안 갈렸다).
+    const n = git_command.conflict_markers_batch + 3;
+    var last_buf: [32]u8 = undefined;
+    const last = try std.fmt.bufPrint(&last_buf, "c{d}.txt", .{n - 1});
+    const script2 = try std.fmt.bufPrint(&script_buf,
+        \\#!/bin/sh
+        \\for a in "$@"; do
+        \\  [ "$a" = {s} ] && exit 2
+        \\done
+        \\exec "{s}" "$@"
+        \\
+    , .{ last, exe });
+    try writeFileAt(repo, "fake-git.sh", script2);
+    try testing.expect(backend.submit(wrapper, repo, "", 2, null));
+    var r2 = waitForList(&backend) orelse return error.ListNeverCompleted;
+    defer r2.deinit(worker_allocator);
+    try testing.expect(r2.ok);
+    try testing.expect(!r2.conflict_scan_ok);
+}
+
+/// `n` 개 파일이 전부 충돌한 저장소(S4 배치 판정자용).
+fn makeManyConflictRepo(exe: []const u8, repo: []const u8, n: usize) bool {
+    const steps = [_][]const []const u8{
+        &.{ exe, "init", "-q", "-b", "main", repo },
+        &.{ exe, "-C", repo, "config", "user.email", "t@t" },
+        &.{ exe, "-C", repo, "config", "user.name", "t" },
+    };
+    for (steps) |argv| {
+        if (!runQuiet(argv)) return false;
+    }
+    const Side = enum { base, other, main };
+    inline for (.{ Side.base, Side.other, Side.main }) |side| {
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            var name_buf: [32]u8 = undefined;
+            const name = std.fmt.bufPrint(&name_buf, "c{d}.txt", .{i}) catch return false;
+            const content = switch (side) {
+                .base => "line1\nline2\n",
+                .other => "line1\nOTHER\n",
+                .main => "line1\nMAIN\n",
+            };
+            writeFileAt(repo, name, content) catch return false;
+        }
+        switch (side) {
+            .base => {
+                if (!runQuiet(&.{ exe, "-C", repo, "add", "-A" })) return false;
+                if (!runQuiet(&.{ exe, "-C", repo, "commit", "-qm", "base" })) return false;
+                if (!runQuiet(&.{ exe, "-C", repo, "checkout", "-q", "-b", "other" })) return false;
+            },
+            .other => {
+                if (!runQuiet(&.{ exe, "-C", repo, "commit", "-qam", "other" })) return false;
+                if (!runQuiet(&.{ exe, "-C", repo, "checkout", "-q", "main" })) return false;
+            },
+            .main => {
+                if (!runQuiet(&.{ exe, "-C", repo, "commit", "-qam", "main" })) return false;
+            },
+        }
+    }
+    return !runQuiet(&.{ exe, "-C", repo, "merge", "other" });
 }
 
 /// 임시 디렉터리에 충돌 상태 저장소를 만든다(성공하면 true). git이 없거나 실패하면 false — 그 환경에서는 스킵한다.

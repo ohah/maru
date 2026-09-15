@@ -911,7 +911,7 @@ pub fn build(b: *std.Build) void {
         macos_chrome_lab_smoke.root_module.linkFramework("QuartzCore", .{});
 
         const macos_chrome_lab_smoke_step = b.step("macos-chrome-lab-smoke", "Capture deterministic Chrome Lab scenarios through the product Metal renderer");
-        inline for ([_][]const u8{ "empty", "loading", "retained-list", "font-specimen", "partial-scroll", "partial-group-scroll", "scrollbar", "sticky-at-rest", "sticky-pinned", "sticky-pushed", "detail-loading", "detail-ready", "detail-stale", "detail-unavailable", "sidebar-status-strip", "editor-gutter", "editor-widget-row", "editor-conflict", "editor-scrolled", "editor-font-large", "editor-hazard", "editor-wide-glyph", "editor-wrap", "editor-hscroll", "editor-folded", "editor-wrap-scrolled", "editor-wrap-stale-scroll", "editor-real-file", "editor-typescript", "editor-selection", "editor-find", "editor-caret-bar", "editor-caret-block", "editor-caret-underline", "editor-diff-selection", "editor-diff", "editor-diff-scrolled", "editor-merge-panes", "editor-merge-narrow", "editor-merge-scrolled", "editor-merge-caret", "context-menu-checked", "context-menu-unchecked", "context-menu-send", "context-menu-send-helper", "context-menu-bottom-right", "dropdown-open", "dropdown-bottom-clamp", "scm-rows", "scm-history", "scm-row-hover", "scm-conflict-hover", "scm-repo-hover", "scm-scrolled", "scm-commit-edit", "scm-blocker", "scm-small-font", "dock-over-status-bar", "file-tree-rows", "file-tree-row-hover", "file-tree-scrolled", "file-tree-over-chrome", "sort-toggle-hover", "sort-toggle-pressed" }) |scenario| {
+        inline for ([_][]const u8{ "empty", "loading", "retained-list", "font-specimen", "partial-scroll", "partial-group-scroll", "scrollbar", "sticky-at-rest", "sticky-pinned", "sticky-pushed", "detail-loading", "detail-ready", "detail-stale", "detail-unavailable", "sidebar-status-strip", "editor-gutter", "editor-widget-row", "editor-conflict", "editor-scrolled", "editor-font-large", "editor-hazard", "editor-wide-glyph", "editor-wrap", "editor-hscroll", "editor-folded", "editor-wrap-scrolled", "editor-wrap-stale-scroll", "editor-real-file", "editor-typescript", "editor-selection", "editor-find", "editor-caret-bar", "editor-caret-block", "editor-caret-underline", "editor-diff-selection", "editor-diff", "editor-diff-scrolled", "editor-merge-panes", "editor-merge-narrow", "editor-merge-scrolled", "editor-merge-caret", "context-menu-checked", "context-menu-unchecked", "context-menu-send", "context-menu-send-helper", "context-menu-bottom-right", "dropdown-open", "dropdown-bottom-clamp", "scm-rows", "scm-history", "scm-row-hover", "scm-conflict-hover", "scm-conflict-resolved-hover", "scm-repo-hover", "scm-scrolled", "scm-commit-edit", "scm-blocker", "scm-small-font", "dock-over-status-bar", "file-tree-rows", "file-tree-row-hover", "file-tree-scrolled", "file-tree-over-chrome", "sort-toggle-hover", "sort-toggle-pressed" }) |scenario| {
             const run_chrome_lab = b.addRunArtifact(macos_chrome_lab_smoke);
             run_chrome_lab.setCwd(b.path("."));
             run_chrome_lab.setEnvironmentVariable("MARU_CHROME_LAB_SCENARIO", scenario);
@@ -1663,9 +1663,9 @@ pub fn build(b: *std.Build) void {
     //
     // **MPN1~5(배치 산술)는 여기 안 든다** — 그쪽은 `maru` 모듈(chrome 컴포넌트)에 있고 Zig 는
     // **별도 모듈의 test 를 안 모은다**. 그 다섯은 `zig build test-editor` 가 돌린다(실측).
-    run_macos_editor_merge_tests.addArg("--maru-expect-tests=37");
+    run_macos_editor_merge_tests.addArg("--maru-expect-tests=38");
     // ⚠️ **그리고 실제로 돌았는가** — MRG2 이후는 macOS 가 아니면 `SkipZigTest` 다.
-    run_macos_editor_merge_tests.addArg("--maru-expect-passed=37");
+    run_macos_editor_merge_tests.addArg("--maru-expect-passed=38");
     run_macos_editor_merge_tests.setCwd(b.path("."));
     b.step(
         "test-editor-merge",
@@ -3832,14 +3832,14 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "syntax", .module = syntax_mod },
             },
         }),
-        .filters = &.{"S3a end-to-end"},
+        .filters = &.{ "S3a end-to-end", "S4 end-to-end" },
     });
     const run_merge_stage_e2e = b.addRunArtifact(merge_stage_e2e_tests);
     run_merge_stage_e2e.setCwd(b.path(".")); // 임시 저장소를 `.zig-cache` 밑에 만든다
-    run_merge_stage_e2e.addArg("--maru-expect-tests=6");
+    run_merge_stage_e2e.addArg("--maru-expect-tests=9");
     // ⚠️ **그리고 실제로 돌았는가.** 이 판정자들은 git 이 없으면 `SkipZigTest` 로 나간다 — 컴파일 수만
     // 세면 하네스가 조용히 안 서도 초록이다(이 저장소가 가장 나쁘다고 적어 둔 실패 모드).
-    run_merge_stage_e2e.addArg("--maru-expect-passed=6");
+    run_merge_stage_e2e.addArg("--maru-expect-passed=9");
     b.step("test-merge-stages-e2e", "Run the merge-stage (S3a) end-to-end judges on a real conflicted repo").dependOn(&run_merge_stage_e2e.step);
 
     // 소스 컨트롤 **행 동작 규칙**만(S1 — 충돌 행은 스테이지가 아니라 해결이다). 같은 이유로 maru
@@ -3853,7 +3853,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
             .imports = &.{.{ .name = "shutdown_wire_contract", .module = shutdown_wire_contract_mod }},
         }),
-        .filters = &.{ "충돌 행은 스테이지가 아니라", "충돌과 평범한 변경이 섞인 섹션", "행: 스테이지·언스테이지·충돌" },
+        .filters = &.{ "충돌 행은 스테이지가 아니라", "충돌과 평범한 변경이 섞인 섹션", "행: 스테이지·언스테이지·충돌", "마커가 없어진 충돌 행에는", "conflict-markers argv" },
     });
     attachPngCodec(b, scm_row_model_tests.root_module);
     scm_row_model_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });

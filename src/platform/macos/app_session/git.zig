@@ -1690,8 +1690,10 @@ pub fn buildScmModel(self: *AppSession, out: []scm_view.Row, scratch: []u8) ?scm
     else
         result.numstat_head;
     // **잘림은 모델까지 간다.** 플래그를 여기서 삼키면 화면이 "변경이 없다"와 같은 모습이 되는데 원인은 정반대다.
-    return scm_view.build(
+    // **마커 판정도 모델까지 간다**(S4). 판정을 못 했으면 `null` — 충돌 행은 전부 `→` 다.
+    return scm_view.buildWithMarkers(
         result.status,
+        if (result.conflict_scan_ok) result.conflict_markers else null,
         result.numstat_staged,
         result.numstat_worktree,
         total,

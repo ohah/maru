@@ -35,6 +35,15 @@ pub const Kind = enum {
     /// 읽는다. stdin 파이프를 더하는 것은 저수준 변경이라, 같은 정확도를 argv 배치로 얻는다 —
     /// `checkIgnoreBatch` 가 한 번에 넘길 수 있는 개수를 알려 주고 호출자가 그만큼씩 끊는다.
     check_ignore,
+    /// **충돌 행에 시작 마커가 남았나**(S4 — docs/editor-merge-conflicts.md §5). `grep -l -z -E -e
+    /// '^<<<<<<<( |$)' -- <경로…>` 로 **마커가 남은 경로**를 NUL 구분으로 낸다. exit 1 은 「없음」이다
+    /// (그 해석은 백엔드의 러너가 든다 — `check_ignore` 와 같은 계약). 경로는 argv 뒤에 붙으므로
+    /// `buildConflictMarkers` 가 `conflict_markers_batch` 개씩 끊어 만든다.
+    ///
+    /// **시작 마커 하나만 본다**(보수적) — 편집기의 `conflict.scan` 은 구간을 요구해 더 좁지만, 그
+    /// 차이는 `+` 를 아끼는 쪽으로만 난다. `=======` 를 보지 않는 이유가 그것이다: 마크다운의 setext
+    /// 제목 밑줄이 그 모양이라 그걸 보면 멀쩡한 파일이 영영 「미해결」이다.
+    conflict_markers,
     /// **목록 행의 +N -N** (`HEAD ↔ 작업트리`). 2판은 파일 하나가 한 행이고 그 행의 기본 비교가 HEAD 기준이므로
     /// 증감도 같은 범위여야 한다 — index 기준 숫자를 쓰면 화면의 `+3 -1`과 눌러서 열리는 diff의 줄 수가 다르다
     /// (docs/editor-surface-dock.md §3.5.2). **unborn(첫 커밋 전)에서는 실패한다** — HEAD가 없다. 그건 오류가 아니라
@@ -508,6 +517,32 @@ pub fn buildCheckIgnore(git_exe: []const u8, repo: []const u8, buf: *[max_argv][
     return build(.check_ignore, git_exe, repo, null, buf);
 }
 
+/// 시작 마커의 모양 — `session/editor/conflict.zig` 의 `markerOf` 와 같은 규칙(줄 머리·정확히 일곱 자·뒤는
+/// 공백이나 줄 끝)을 ERE 로 적은 것. `grep -E` 와 원격 셸 인용을 둘 다 지나야 하므로 따옴표·역슬래시가 없다.
+pub const conflict_start_marker_pattern = "^<<<<<<<( |$)";
+
+/// 한 번의 `grep` 에 붙일 경로 수 — `max_argv` 에서 접두(기본 3 + config 덮어쓰기 + `grep -l -z -E -e <패턴> --`
+/// 일곱)를 뺀 나머지다. **손으로 적지 않는다**: 8 로 적었다가 판정자에서 안 들어갔다(접두가 28 이라 6 이
+/// 남는다). 넘치면 `buildConflictMarkers` 가 `null` 을 내므로 호출자는 이만큼씩 끊는다.
+pub const conflict_markers_batch: usize = max_argv - (3 + config_overrides.len + 7);
+comptime {
+    std.debug.assert(conflict_markers_batch >= 1);
+}
+
+/// `grep -l -z -E -e <패턴> -- <경로…>` — 충돌 행들에 시작 마커가 남았나(S4). 경로가 `max_argv` 를 넘으면
+/// `null`(호출자가 `conflict_markers_batch` 씩 끊는다). 빈 경로는 건너뛴다.
+pub fn buildConflictMarkers(git_exe: []const u8, repo: []const u8, paths: []const []const u8, buf: *[max_argv][]const u8) ?[]const []const u8 {
+    const head = build(.conflict_markers, git_exe, repo, null, buf);
+    var n = head.len;
+    for (paths) |path| {
+        if (path.len == 0) continue;
+        if (n >= max_argv) return null;
+        buf[n] = path;
+        n += 1;
+    }
+    return buf[0..n];
+}
+
 /// `check-ignore --stdin -z` 에 넘길 페이로드를 `buf` 에 만든다 — 경로를 **NUL 로 끊어** 잇는다.
 /// 들어가지 못한 경로가 있으면 그만큼 짧은 슬라이스를 돌려준다(자르되 거짓말하지 않는다).
 ///
@@ -731,6 +766,23 @@ pub fn build(kind: Kind, git_exe: []const u8, repo: []const u8, arg: ?[]const u8
             buf[n] = "--stdin";
             n += 1;
             // 경로는 argv 가 아니라 **stdin** 으로 간다(`checkIgnoreStdin`).
+        },
+        .conflict_markers => {
+            buf[n] = "grep";
+            n += 1;
+            buf[n] = "-l"; // 경로만
+            n += 1;
+            buf[n] = "-z"; // NUL 구분 — 경로에 개행이 들어갈 수 있다
+            n += 1;
+            buf[n] = "-E";
+            n += 1;
+            buf[n] = "-e";
+            n += 1;
+            buf[n] = conflict_start_marker_pattern;
+            n += 1;
+            buf[n] = "--";
+            n += 1;
+            // 경로는 `buildConflictMarkers` 가 뒤에 붙인다.
         },
         .status => {
             buf[n] = "status";
@@ -1465,6 +1517,36 @@ test "check-ignore argv: 접두가 `-z --stdin` 으로 끝나고 경로는 argv 
     // **이 한 줄이 결함을 막는다.** `-z` 는 `--stdin` 없이는 성립하지 않는다.
     try std.testing.expectEqualStrings("--stdin", argv[argv.len - 1]);
     try std.testing.expect(argv.len <= max_argv);
+}
+
+test "conflict-markers argv: `grep -l -z -E -e <시작 마커> --` 뒤에 경로가 붙고, 한 배치는 자리에 든다 (S4)" {
+    var buf: [max_argv][]const u8 = undefined;
+    const paths = [_][]const u8{ "a.txt", "", "dir/b.md" };
+    const argv = buildConflictMarkers("git", "/repo", &paths, &buf) orelse return error.DidNotFit;
+    try std.testing.expectEqualStrings("git", argv[0]);
+    try std.testing.expectEqualStrings("-C", argv[1]);
+    try std.testing.expectEqualStrings("/repo", argv[2]);
+    // 경로 둘(빈 것은 건너뛴다)이 맨 뒤, 그 앞이 `--`.
+    try std.testing.expectEqualStrings("dir/b.md", argv[argv.len - 1]);
+    try std.testing.expectEqualStrings("a.txt", argv[argv.len - 2]);
+    try std.testing.expectEqualStrings("--", argv[argv.len - 3]);
+    try std.testing.expectEqualStrings(conflict_start_marker_pattern, argv[argv.len - 4]);
+    try std.testing.expectEqualStrings("-e", argv[argv.len - 5]);
+    try std.testing.expectEqualStrings("-E", argv[argv.len - 6]);
+    try std.testing.expectEqualStrings("-z", argv[argv.len - 7]);
+    try std.testing.expectEqualStrings("-l", argv[argv.len - 8]);
+    try std.testing.expectEqualStrings("grep", argv[argv.len - 9]);
+    // **패턴은 시작 마커만** — `=======` 를 보면 마크다운의 setext 밑줄이 영영 「미해결」이다.
+    try std.testing.expect(std.mem.indexOf(u8, conflict_start_marker_pattern, "=======") == null);
+    try std.testing.expect(std.mem.startsWith(u8, conflict_start_marker_pattern, "^<<<<<<<"));
+    // 한 배치(`conflict_markers_batch`)는 반드시 든다 — 안 들면 호출자가 영영 못 묻는다.
+    var many: [conflict_markers_batch][]const u8 = undefined;
+    for (&many) |*m| m.* = "some/path.txt";
+    try std.testing.expect(buildConflictMarkers("git", "/repo", &many, &buf) != null);
+    // 그리고 상한을 넘기면 `null` 이다(자르되 거짓말하지 않는다).
+    var too_many: [max_argv][]const u8 = undefined;
+    for (&too_many) |*m| m.* = "p";
+    try std.testing.expect(buildConflictMarkers("git", "/repo", &too_many, &buf) == null);
 }
 
 test "check-ignore stdin: 경로를 NUL 로 끊어 잇고, 넘치면 거기서 멈춘다" {

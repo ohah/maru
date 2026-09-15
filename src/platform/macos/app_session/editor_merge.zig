@@ -1670,3 +1670,36 @@ test "MRG21 대응표는 «제품의 쪼개기 경로» 를 지나 선다 — �
     clear(session, term);
     try testing.expect(term.rt.editor_merge == null);
 }
+
+test "MRG22 목록 모델은 백엔드의 마커 판정을 «판정했을 때만» 믿는다 — 못 했으면 충돌 행은 전부 → 다 (S4)" {
+    // 백엔드 결과에는 「마커가 남은 경로들」과 「판정을 했는가」가 따로 실린다. 빈 목록만 보고 `+` 를 내면
+    // 판정 실패(명령 실패·잘림)가 「전부 해결됨」으로 보인다 — 그 자리가 이 플랫폼 층의 한 줄이다.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const session = try smokeSession(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    const wa = git_backend_mod.worker_allocator;
+    const status = "# branch.head main\nu UU N... 100644 100644 100644 100644 aaa bbb ccc f.txt\n";
+    var rows: [16]maru.session.scm_view.Row = undefined;
+    var scratch: [512]u8 = undefined;
+
+    // ⑴ 판정 못 함 + 빈 목록 → `→`.
+    session.git_result = .{ .status = try wa.dupe(u8, status), .ok = true, .conflict_scan_ok = false };
+    const m1 = git_ops.buildScmModel(session, &rows, &scratch) orelse return error.NoModel;
+    try testing.expectEqual(maru.session.scm_view.RowAction.resolve, m1.rows[1].file.action);
+    if (session.git_result) |*r| r.deinit(wa);
+
+    // ⑵ 판정함 + 빈 목록 → `+`(완료).
+    session.git_result = .{ .status = try wa.dupe(u8, status), .ok = true, .conflict_scan_ok = true };
+    const m2 = git_ops.buildScmModel(session, &rows, &scratch) orelse return error.NoModel;
+    try testing.expectEqual(maru.session.scm_view.RowAction.stage, m2.rows[1].file.action);
+    if (session.git_result) |*r| r.deinit(wa);
+
+    // ⑶ 판정함 + f.txt 남음 → `→`.
+    session.git_result = .{ .status = try wa.dupe(u8, status), .conflict_markers = try wa.dupe(u8, "f.txt\x00"), .ok = true, .conflict_scan_ok = true };
+    const m3 = git_ops.buildScmModel(session, &rows, &scratch) orelse return error.NoModel;
+    try testing.expectEqual(maru.session.scm_view.RowAction.resolve, m3.rows[1].file.action);
+    if (session.git_result) |*r| r.deinit(wa);
+    session.git_result = null;
+}

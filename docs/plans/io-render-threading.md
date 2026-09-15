@@ -351,8 +351,29 @@ if (will_project) { active.lockCore(io); defer unlock; renderPrepWrites(); dl = 
 - **청크 크기 축(Ghostty gather 64KB)**: 리더 재잠금 빈도 자체를 1/64로 줄이는 별개 축. 보유가 길어지는(64KB 파싱 ~8ms) 대신 빈도가 준다 — 양보와 함께라면 보유 길이는 메인 1회 대기 상한이 되므로 그때는 청크를 키우면 안 된다. 착수 시 §13 실측과 함께 판단.
 - **하네스 한계**: `cat` 극단 부하 1종, 1920×1080 1종, 3회. 실사용 창 크기·셸 출력에서의 로그는 미확보.
 
-### 13.7 양보 뒤에 남는 것 — kitty 이미지 zlib 해제가 락 아래에 있다 (미해결, 실측 2026-09-15)
+### 13.7 양보 뒤에 남는 것 — kitty 이미지 zlib 해제가 락 아래에 있다 (진단 완료 2026-09-15 · 미착수)
 
-양보 빌드로 터미널 브라우저(1920×1080, kitty `a=T,f=32,o=z` 전체 화면 프레임)를 돌리면 SLOW tick이 프레임마다 하나 남고, 그 tick의 `└ lockCore 대기`가 **1회 5.9~7.1ms**, 같은 창의 `└ 리더 core.write 보유`가 **청크 1개(361~701B)에 7.0~9.7ms**다. 이미지 **마지막 청크**가 `kitty.zig`의 `png.inflateExact`(8MB RGBA zlib 해제)를 `core.write` 안에서, 즉 리더가 `core_mutex`를 쥔 채 돌린다. 이건 §13.2의 기아(짧은 보유·긴 대기)가 아니라 **긴 보유** 그 자체다 — 양보는 대기를 보유 길이까지만 줄인다. 텍스트 폭포에는 없고 이미지 프레임에만 있다(§10.6 «예산 초과 tick 4회/45초»의 정체).
+**증상**: 양보 빌드로 터미널 브라우저(1920×1080 창, kitty `a=T,f=32,o=z` 전체 화면 프레임 4.7장/초)를 돌리면 프레임마다 메인 `lockCore` 대기가 1회 남는다. 이건 §13.2의 기아(짧은 보유·긴 대기)가 아니라 **긴 보유** 그 자체다 — 양보는 대기를 보유 길이까지만 줄인다. 텍스트 폭포에는 없고 이미지 프레임에만 있다(§10.6 «예산 초과 tick 4회/45초»의 정체).
 
-방향(미착수): 해제를 락 밖으로. (a) 코어는 압축 바이트만 받아 두고 리더가 unlock 뒤 해제해 재잠금 후 설치, 또는 (b) `f=100` PNG처럼 업로드 시점(메인 `planImageUploads`)에 lazy 해제 — 어느 쪽이든 «코어가 락 아래에서 O(픽셀) 일을 하지 않는다»는 규칙이 된다. 착수 시 이 절의 수치를 전후 비교 기준으로 쓴다.
+**어디서**: 이미지의 base64 청크는 `core.kitty_chunk`에 쌓이다가 `m=0` 마지막 청크에서 `kittyTransmit` → `decodeDirectPixels`(base64 → `png.inflateExact`) → `storeKittyImage` → `kittyDisplay`가 **한 번의 `core.write` 안에서**, 즉 리더가 `core_mutex`를 쥔 채 돈다. 마지막 청크는 361~701B인데 그 청크의 보유가 프레임 전체 비용이다.
+
+**단계별 실측** (`kitty.diag_now` 주입, `└ kitty transmit(락 아래)` 줄 · 픽셀 1720×846×4 = 5.6MB, 압축 240~390KB · 전체 화면 프레임만):
+
+| 빌드 | 합(락 보유) | base64 | **inflate** | store | display | 그 tick 메인 대기 |
+|---|---|---|---|---|---|---|
+| ReleaseSafe (n=5) | 중앙 7.07 · 최대 8.01ms | 0.16 | **5.24** | 1.56 | 0.00 | 5.9~8.1ms |
+| ReleaseFast (n=17) | 중앙 3.37 · 최대 4.82ms | 0.09 | **3.20** | 0.07 | 0.00 | 1.1~3.0ms |
+
+- **inflate가 90%+** 다(5.6MB를 1.75GB/s로 — std flate 자체는 빠르다; 문제는 그 일이 락 아래라는 위치다).
+- ReleaseSafe의 `store` 1.56ms는 같은 id 교체 시 **옛 5.6MB를 free**하는 비용(안전 검사 할당자) — 이것도 락 아래다. ReleaseFast에선 0.07ms.
+- 메인 대기가 보유보다 짧은 것은 메인의 lock 요청이 보유 **도중** 어딘가에 떨어지기 때문이다(부분 겹침). tick당 26~41회 잠그므로 프레임마다 거의 확실히 한 번은 걸린다.
+- ReleaseFast에서는 tick이 8ms를 안 넘어 SLOW로 잡히지 않지만 메인은 프레임마다 1~3ms를 그냥 선다. 사용자가 릴리즈에서도 느꼈던 «동작할 때만 굼뜸»의 남은 몫이 이것이다.
+
+**Ghostty 대조**: Ghostty도 `stream_handler → kittyGraphics → loadAndAddImage → LoadingImage.complete → decompress`가 `processOutput`의 mutex 아래다 — 같은 보유가 있다. 차이는 렌더 스레드가 UI 스레드가 아니고 프레임당 lock이 1회라, 3ms 보유는 «그 프레임이 3ms 늦는 것»으로 끝나고 입력·UI는 영향이 없다. Maru는 메인이 곧 UI라 그 3~7ms가 입력 지연이 된다. (Ghostty의 `PendingImage`는 libghostty-vt 임베더용이지 자기 앱 경로가 아니다.)
+
+**방향(미착수, 판단 필요)**:
+- **(a) 리더가 락 밖에서 푼다** — `m=0`에서 코어는 압축 바이트와 «pending(기대 길이)»만 저장하고 unlock; 리더가 inflate 한 뒤 다시 lock 해 설치(`complete`)하고 dirty. 보유는 store 수준(0.1ms)으로 떨어지고 inflate 비용은 I/O 스레드에 그대로 남는다(메인 무관). placement는 pending 이미지에도 만들 수 있게 하고 렌더 view는 pending을 건너뛴다(최대 1프레임 늦게 뜸). 옛 이미지 free도 락 밖으로. `f=100` PNG 디코드에도 같은 모양.
+- **(b) 메인이 업로드 시점에 lazy로 푼다** — inflate 3~5ms가 **메인 스레드로** 옮겨진다. 메인이 병목인 지금은 역방향이라 **기각**.
+- **(c) inflate를 더 빠르게** — 이미 1.75GB/s. 2배 빨라져도 락 아래 1.6ms가 남는다. 위치 문제라 기각.
+
+(a)가 «코어는 락 아래에서 O(픽셀) 일을 하지 않는다»는 규칙이 되고, 착수 시 위 표가 전후 비교 기준이다.

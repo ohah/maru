@@ -17582,6 +17582,71 @@ test "R4 awaiting snapshot discards delta and accepts the first fresh snapshot" 
     try testing.expect(!client.unusable);
 }
 
+test "P5b2b3 completed target batch permits later invalidation and preserves sibling inbox" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var client = Client{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+
+    const wires = [_][]u8{
+        try framing.encodeFrame(allocator, .{ .kind = .delta_chunk, .stream_id = 9 }, "old-a"),
+        try framing.encodeFrame(allocator, .{
+            .kind = .delta_chunk,
+            .stream_id = 9,
+            .flags = protocol.Flags.end_stream,
+        }, "old-b"),
+        try framing.encodeFrame(allocator, .{
+            .kind = .delta_chunk,
+            .stream_id = 10,
+            .flags = protocol.Flags.end_stream,
+        }, "sibling"),
+        try framing.encodeFrame(allocator, .{ .kind = .event, .stream_id = 9 }, "{\"event\":\"snapshot.invalidated\"}"),
+    };
+    defer for (wires) |wire| allocator.free(wire);
+    for (wires) |wire| try socket_server.writeAll(fds[1], wire);
+
+    const target = (try client.readStreamBatch(9)).?;
+    defer target.deinit();
+    try testing.expectEqualStrings("old-aold-b", target.bytes);
+    const sibling = (try client.readStreamBatch(10)).?;
+    defer sibling.deinit();
+    try testing.expectEqualStrings("sibling", sibling.bytes);
+    try testing.expect((try client.readStreamBatch(11)) == null);
+    const invalidation = (try client.takeEventForStream(9)).?;
+    defer client.releaseEvent(invalidation);
+    try testing.expectEqualStrings("{\"event\":\"snapshot.invalidated\"}", invalidation.payload);
+    try testing.expect(!client.unusable);
+
+    const target_pending = try allocator.dupe(u8, "target-pending");
+    try client.screen_inbox.pending_batches.append(allocator, .{
+        .is_snapshot = false,
+        .stream_id = 9,
+        .bytes = target_pending,
+        .allocator = allocator,
+    });
+    client.screen_inbox.pending_batch_bytes += target_pending.len;
+    const sibling_pending = try allocator.dupe(u8, "sibling-pending");
+    try client.screen_inbox.pending_batches.append(allocator, .{
+        .is_snapshot = false,
+        .stream_id = 10,
+        .bytes = sibling_pending,
+        .allocator = allocator,
+    });
+    client.screen_inbox.pending_batch_bytes += sibling_pending.len;
+    try client.screen_inbox.invalidateStream(allocator, 9);
+    try testing.expectEqual(screen_inbox.State.needs_resync, client.screenRecoveryState(9));
+    try testing.expectEqual(@as(usize, 1), client.screen_inbox.pending_batches.items.len);
+    try testing.expectEqual(@as(u64, 10), client.screen_inbox.pending_batches.items[0].stream_id);
+}
+
 test "R4 resync frame allocation failure preserves the sticky recovery intent" {
     const allocator = testing.allocator;
     var failing = testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });

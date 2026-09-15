@@ -362,6 +362,15 @@ titlebar launcher와 dock slot만 관측하도록 한다.
 content 크기를 `agent_session_archive_smoke_content_size`로 summary에 남긴다 — 이 값이 기계마다 같아야 판정이
 기계 독립이라고 말할 수 있고, 다르면 `surface_cols` 같은 계수기를 역추적하지 않고 바로 안다.
 
+**합성 입력의 좌표도 같은 성격이다.** 포인터는 `NSEvent.mouseEvent(... windowNumber:)`로 창 좌표를 그대로
+쓰지만, 휠은 AppKit에 생성 API가 없어 `CGEvent`를 거친다 — 그 `location`은 **주 디스플레이 기준 전역 좌표**라
+창 좌표를 그대로 넣으면 `NSEvent(cgEvent:)`가 `주화면높이 - y`로 뒤집는다. 실측(2026-09-15): 카드 중심이
+창 좌표 y=831인데 주 화면 1080인 로컬에서는 249로 와 뷰 픽셀 951에 떨어졌고, 582픽셀 어긋났는데도 그 자리가
+우연히 도크 안이라 통과했다. 주 화면이 낮은 러너에서는 창 밖으로 나가 도크가 휠을 아예 못 받았다
+(`scroll_dispatched=true`인데 목록은 그대로). 그래서 되돌아올 값이 창 좌표가 되도록 넣고, **그 왕복이
+성립했는지를 fixture가 스스로 단언한다** — 어긋나도 「보냈다」로는 기록되므로 단언이 없으면 다음 사람도
+같은 것을 성공으로 읽는다. 떨어진 자리는 `agent_session_archive_smoke_scroll_point`로 남긴다.
+
 - fixture는 실제 archive scanner와 detail worker를 통해 목록→inline expanded card를 연다. `AppSession` private method를
   직접 호출하거나 provider transcript를 terminal에 write하는 우회는 금지한다. Swift는 `MaruMetalTerminalView`가
   평소 쓰는 mouse/key ABI 경로로만 down/up 및 `⌘↵`/`⌘L`을 보낸다.

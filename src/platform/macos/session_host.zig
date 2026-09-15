@@ -154,6 +154,11 @@ pub const daemon = if (builtin.os.tag == .macos)
     @import("session_host/daemon.zig")
 else
     struct {};
+// daemon 이 쓸 범용 할당자 선택(기본 포획 없음, `MARU_ALLOC_TRACES=1` 로 포획). daemon 과 같은 이유로 macOS 전용.
+pub const daemon_allocator = if (builtin.os.tag == .macos)
+    @import("session_host/daemon_allocator.zig")
+else
+    struct {};
 // launcher(detached-helper spawn)도 실 fork/exec/setsid를 써서 macOS에서만 컴파일한다(순수 argv 조립 test도 함께 macOS-gated).
 pub const launcher = if (builtin.os.tag == .macos)
     @import("session_host/launcher.zig")

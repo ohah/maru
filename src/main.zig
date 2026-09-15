@@ -13720,9 +13720,17 @@ fn runAppPtySmoke(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writ
 /// `maru __session-host <session-dir> <socket> <host-id>` — 영속 세션 host 프로세스 본체로 진입한다(P3-d2c/d, §10). 앱 launcher가 detached
 /// spawn한 자식이 이 경로를 탄다. macOS 전용(실 socket/fork). non-macOS에서는 daemon 참조를 comptime으로 배제해
 /// 컴파일을 보존한다. dir은 socket 경로의 parent이고, host는 SIGTERM(프로세스 종료)까지 accept loop를 돈다.
-fn runSessionHostDaemon(io: std.Io, allocator: std.mem.Allocator, args: anytype, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
+fn runSessionHostDaemon(io: std.Io, std_allocator: std.mem.Allocator, args: anytype, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
+    // std 의 `init.gpa` 는 Debug 에서 할당·해제마다 스택을 포획해 host CPU 의 절반을 먹는다. 데몬의 뜨거운
+    // 할당은 전부 아래서 넘기는 할당자를 지나므로 그 한 자리만 바꾼다(`daemon_allocator` 머리말). non-macOS
+    // 분기는 comptime 으로 사라지므로 버리는 표시는 분기 밖에 둔다.
+    _ = std_allocator;
     if (builtin.os.tag == .macos) {
         const session_host = @import("platform/macos/session_host.zig");
+        // 누수 보고는 std 가 아니라 **우리가** `deinit` 해야 나온다 — defer 가 그 자리다.
+        const selected = session_host.daemon_allocator.select(session_host.daemon_allocator.choiceFromEnvironment());
+        defer _ = selected.deinit();
+        const allocator = selected.allocator;
         var raw_args: [session_host_entrypoint.max_invocation_args][]const u8 = undefined;
         var raw_count: usize = 0;
         while (args.next()) |arg| {

@@ -344,6 +344,14 @@ pub const SurfaceRuntime = struct {
                 // escape parsing과 UTF-8 tail buffering은 terminal layer 책임이다.
                 const link = self.linkByPty(output.pty_id) orelse return error.UnknownPty;
                 if (link.surface.process_state == .exited) return error.ProcessExited;
+                // 빈 bytes 는 I/O 스레드가 «출력 있었다 — 다시 그려라» 로 보내는 신호다(pty_reader tryPush). 코어는
+                // 이미 그 스레드가 바꿨으니 여기서 락을 잡고 `core.write("")` 할 일이 없다 — 폭포에서 tick당 16.6회,
+                // 전체 잠금의 60% 가 이 빈 호출이었다(docs/plans/io-render-threading.md §12.9). 상태 전이만 한다.
+                if (output.bytes.len == 0) {
+                    link.surface.process_state = .running;
+                    if (link.trace_recorder) |rec| rec.recordOutput(link.surface_id, output.bytes); // 기록 스트림은 그대로(빈 이벤트도 예전처럼)
+                    return;
+                }
                 // 진단: ESC를 포함한 출력 청크의 제어 시퀀스를 찍는다(zsh가 SIGWINCH 때 보내는
                 // 커서 이동/clear/CPR 질의를 보기 위함). MARU_DEBUG에서만.
                 if (self.debug_input and std.mem.indexOfScalar(u8, output.bytes, 0x1b) != null) {

@@ -216,6 +216,7 @@ pub const terminal_core_groups = [_]Group{
         .fields = &.{
             "allocator",
             "owner_dbg",
+            "handoff", // 스케줄링 힌트(요구 카운터·세대) — exec 뒤엔 스레드가 새로 생기니 0 부터
             "dirty",
             "link_ids",
             "grapheme_ids",

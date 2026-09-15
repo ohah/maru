@@ -118,7 +118,11 @@ pub const Surface = struct {
         if (self.remote) |r| {
             r.vtable.lock(r.ctx, io); // 원격 backing이면 그 소스의 락(render↔delta-apply 직렬화). 로컬 core는 미사용.
         } else {
+            // 요구를 올린 채 잡는다 — 리더가 청크 경계에서 이 요구를 보고 물러나야(yieldToDemand) 불공정
+            // 락에서 메인이 굶지 않는다(core_handoff.zig 머리 주석·plans §13).
+            self.core.handoff.demandBegin();
             self.core.owner_dbg.lock(&self.core_mutex, io);
+            self.core.handoff.demandEnd();
         }
         if (diag_lock_wait_enabled) {
             const w = std.Io.Clock.awake.now(io).nanoseconds - t0;
@@ -137,6 +141,7 @@ pub const Surface = struct {
             return;
         }
         self.core.owner_dbg.unlock(&self.core_mutex, io);
+        self.core.handoff.signalHandoff(io); // 물러나 있던 리더를 깨운다(요구자 없었으면 wake 1회 낭비뿐)
     }
 
     /// 렌더 draw 경로의 **화면 소스 단일 접근점**(SSOT — docs/persistent-session-host.md §8 "중립 screen DTO"). 지금은

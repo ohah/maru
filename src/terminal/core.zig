@@ -19,6 +19,7 @@ const StoredPlacement = kitty.StoredPlacement;
 const KittyImageStorage = kitty.KittyImageStorage;
 const width = @import("../width.zig"); // Unicode 셀 폭은 중립 top-level 유틸로 이동(src/width.zig)
 const CoreOwner = @import("core_owner.zig").CoreOwner; // core_mutex 재진입 추적(디버그 전용 안전망)
+const CoreHandoff = @import("core_handoff.zig").CoreHandoff; // core_mutex 양보(불공정 락 기아 방지)
 
 /// `std.atomic.Value`와 같은 인터페이스의 **비-atomic** 셀. wasm 타깃에서 `ObserverCell`이 이걸로 접힌다.
 /// 오버플로는 `+%`로 감싼다 — 소비자가 `!=`만 보므로(아래) 랩어라운드가 의미를 깨지 않는다.
@@ -222,6 +223,11 @@ pub const TerminalCore = struct {
     // 와 reader가 owner_dbg.lock/unlock으로만 잡아 재진입(self-deadlock)을 lock 전에 panic으로
     // 노출한다. release에선 @sizeOf 0(ABI 영향 없음). 단일 출처: src/terminal/core_owner.zig.
     owner_dbg: CoreOwner = .{},
+    // core_mutex 양보 힌트(docs/plans/io-render-threading.md §13): 메인(Surface.lockCore)이 요구를 올리고,
+    // 리더가 청크 경계마다 yieldToDemand 로 물러난다. owner_dbg 처럼 «락을 쓰는 양쪽이 공유하는 단일
+    // 출처»라 코어에 둔다 — reader 는 Surface 를 모르고 core 만 든다. release 에도 atomic 2워드가 남는다
+    // (owner_dbg 와 달리 제품 동작이다).
+    handoff: CoreHandoff = .{},
     dirty: ?types.DirtyRegion = null,
     utf8_tail: [4]u8 = undefined,
     utf8_tail_len: usize = 0,

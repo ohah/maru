@@ -160,7 +160,7 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    **CR2e-d 완료:** 실제 `RemoteGeneration`을 candidate node final address에서 완성하는 `PreparedReconnect` 제품 owner가
    stable screen writer gate 안에서 slot current와 screen target을 함께 게시하고, old/candidate/current payload를 값으로
    옮기지 않은 채 canonical node 주소에서 exact once 파괴한다. abort/current 보존, copied token과 allocator fail-index도 닫는다.
-   **CR2e-e 진행:** e1은 기존 `RemoteRuntime.generation`의 내부 접근을 단일 current accessor로 모으고,
+   **CR2e-e 완료:** e1은 기존 `RemoteRuntime.generation`의 내부 접근을 단일 current accessor로 모으고,
    `RemoteTermBackend`의 raw generation field 접근과 attachment→generation→runtime `@fieldParentPtr` 역산을 제거한다.
    e2a는 stable shell의 실제 `GenerationSlot`을 제품 runtime의 최초/current 저장소로 활성화하고 최초 inline payload와
    stable screen publication 및 teardown을 결속한다. e2b는 final-address `ReconnectProductExecutor`가 reducer state와
@@ -169,7 +169,8 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    decision inventory를 전수 소비한다. executor의 inline 증가는 runtime당 256바이트, 4,096-runtime 상한에서 1 MiB이며
    runtime size golden으로 고정한다. e3은 다음 세 하위 gate를 순서대로 닫는다. **e3a**는 실제 제품
    `RemoteGeneration` candidate/retiring의 empty-screen structural base lower bound를 allocator ledger로 고정하는
-   **e3a1 완료** (candidate allocation 1개, CR6d typed event-payload allocator와 CR5b-2a retirement preparation owner 반영 뒤 Debug 3,504바이트/ReleaseFast 3,488바이트; abort baseline 복원,
+   **e3a1 완료** (candidate allocation 1개, CR6d typed event-payload allocator와 CR5b-2a retirement preparation owner를 포함한
+   `RemoteGeneration`의 구성별 실제 크기는 `remote_runtime.zig`의 `expected_generation_size` 골든이 단일 출처다; abort baseline 복원,
    두 reconnect 뒤 heap current 1개, teardown final 0)와,
    별도 ReleaseFast process RSS를 측정하고, generation당 구조적 charge 상한
    `base_update_max_bytes = 16 MiB screen + 256 KiB metadata`와 reconnect mutation lease와 같은 64개 fixed

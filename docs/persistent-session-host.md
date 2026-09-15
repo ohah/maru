@@ -880,7 +880,8 @@ raw in-place 재초기화와 whole-runtime 교체는 모두 반려하고, 주소
   inline 증가는 runtime당 256바이트, 4,096-runtime 상한에서 1 MiB이며 runtime size golden으로 고정한다.
   generation mutation이 없는 decision은 이 gate에서 `retain`으로만 분류한다. e3a는 actual product
   candidate/retiring의 empty-screen structural base lower bound를 allocator ledger로 고정하는 e3a1(candidate allocation 1개,
-  CR6d typed event-payload allocator와 CR5b-2a retirement preparation owner 반영 뒤 Debug 3,504바이트/ReleaseFast 3,488바이트, abort baseline 복원, 두 reconnect 뒤 heap current 1개,
+  CR6d typed event-payload allocator와 CR5b-2a retirement preparation owner를 포함한 `RemoteGeneration`의 구성별 실제
+  크기는 `remote_runtime.zig`의 `expected_generation_size` 골든이 단일 출처이며, abort baseline 복원, 두 reconnect 뒤 heap current 1개,
   teardown final 0)과 별도 ReleaseFast process RSS를 측정하는 e3a2를 순서대로 수행한다. e3a2는 host base
   SSOT인 generation당 `base_update_max_bytes = 16 MiB screen + 256 KiB metadata`와 reconnect mutation lease와 같은
   64개 fixed inventory를 검증한다. 둘의 곱인 `max_tracked_bytes`는 구조적 표현 한계이고 app-global 정책 예산은 아니다.

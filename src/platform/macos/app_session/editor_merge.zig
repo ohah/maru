@@ -579,6 +579,18 @@ pub fn paneMove(self: *AppSession, term: *Term, how: editor_ops.Motion, extend: 
     return true;
 }
 
+/// 초점 판 caret 의 **Result 짝 줄**(0-based) — 판에 초점이 있을 때 「caret 줄」이 무엇이냐의 답(S5 의
+/// 다음/이전 충돌이 이것을 기준으로 잰다). 초점 판이 없으면 `null`. 짝이 없으면 맨 위(`toResult` 의 규칙 —
+/// 다음/이전 판정에서 `0` 과 `null` 은 같은 답을 낸다: 둘 다 「첫 구간」·「마지막 구간」. 그 변이가 사는 것이
+/// 정상이다, S5 적대적 2회차 B14).
+pub fn paneCaretResultLine(term: *const Term) ?u32 {
+    const side = focusedSide(term) orelse return null;
+    const state = &(term.rt.editor_merge orelse return null);
+    const m = sideMap(state, side) orelse return null;
+    const row = state.pane_caret.?.sel.focus.row;
+    return m.toResult(@intCast(@min(row, std.math.maxInt(u32)))) orelse 0;
+}
+
 /// caret 이 판의 화면 밖이면 Result 를 굴려 따라오게 한다. 판의 첫 줄·행 수는 **마지막 프레임**의 것이다
 /// (다음 프레임의 따라 굴리기가 `toSide` 로 새 첫 줄을 낸다).
 fn scrollResultForPaneCaret(term: *Term, side: MergeSide, row: usize) void {

@@ -570,13 +570,15 @@ pub fn buildFilePanelHeaderDrawList(
     cols: u16,
     fg: terminal.Color,
     active_fg: terminal.Color,
+    /// 문서에 충돌 구간이 있어 `↑`·`↓`(이전/다음 충돌 구간) 두 칸을 예약하나(S5 — docs/editor-merge-conflicts.md §5).
+    conflict_nav: bool,
 ) !renderer.DrawList {
     var cells: std.ArrayList(renderer.DrawCell) = .empty;
     errdefer cells.deinit(allocator);
     var pool: std.ArrayList(u32) = .empty; // cluster 본체(NFD 자모·결합 문자) — DrawList.grapheme_pool로 넘어간다
     errdefer pool.deinit(allocator);
     if (cols >= 1) {
-        if (dock_layout.headerCellLayout(cols, dirty, external_change)) |header| {
+        if (dock_layout.headerCellLayoutWith(cols, dirty, external_change, conflict_nav)) |header| {
             // **꼬리를 지킨다**(`.tail`) — 넘치면 앞에서 버린다. 그래야 `경로 › 바깥 › 안쪽` 한 줄에서
             // 심볼이 살아남고(native-editor-ui.md §7.5 「체인이 밴드에 선다」), 체인이 없을 때도 상위
             // 디렉터리 대신 **파일 이름**이 남는다.
@@ -619,6 +621,11 @@ pub fn buildFilePanelHeaderDrawList(
                 try cells.append(allocator, .{ .row = 0, .col = col, .codepoint = 0x25CF, .width = 1, .style = .{ .foreground = active_fg } });
             if (header.conflict_col) |col|
                 try cells.append(allocator, .{ .row = 0, .col = col, .codepoint = '!', .width = 1, .style = .{ .foreground = active_fg } });
+            // 다음/이전 충돌 구간(S5) — 같은 표의 칸에 `↑`(U+2191)·`↓`(U+2193). 클릭은 `headerConflictNavRect` 가 같은 칸을 본다.
+            if (header.conflict_prev_col) |col|
+                try cells.append(allocator, .{ .row = 0, .col = col, .codepoint = 0x2191, .width = 1, .style = .{ .foreground = active_fg } });
+            if (header.conflict_next_col) |col|
+                try cells.append(allocator, .{ .row = 0, .col = col, .codepoint = 0x2193, .width = 1, .style = .{ .foreground = active_fg } });
         }
     }
     // pool을 **먼저** 떼어 낸다: 리터럴 안에서 마지막에 평가하면 cells 소유권이 이미 넘어간 뒤라
@@ -2321,7 +2328,7 @@ test "file panel header draws source mode and dirty marker in the reserved contr
     const allocator = std.testing.allocator;
     const dim: terminal.Color = .{ .rgb = .{ .r = 0x70, .g = 0x70, .b = 0x70 } };
     const bright: terminal.Color = .{ .rgb = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF } };
-    var dl = try buildFilePanelHeaderDrawList(allocator, "/tmp/doc.md", &.{}, &.{}, .markdown, .source_edit, true, false, 48, dim, bright);
+    var dl = try buildFilePanelHeaderDrawList(allocator, "/tmp/doc.md", &.{}, &.{}, .markdown, .source_edit, true, false, 48, dim, bright, false);
     defer dl.deinit(allocator);
     try std.testing.expectEqual(@as(u16, 1), dl.size.rows);
     var saw_dirty = false;
@@ -3001,7 +3008,7 @@ test "BAND1 밴드가 좁으면 경로가 먼저 깎이고 심볼이 남는다 (
     const bright: terminal.Color = .{ .rgb = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF } };
     const label = "src/config/theme.zig \u{203A} ThemeConfig \u{203A} parseSyntaxRole";
 
-    var dl = try buildFilePanelHeaderDrawList(allocator, label, &.{}, &.{}, .text, .source_edit, false, false, 30, dim, bright);
+    var dl = try buildFilePanelHeaderDrawList(allocator, label, &.{}, &.{}, .text, .source_edit, false, false, 30, dim, bright, false);
     defer dl.deinit(allocator);
     const layout = dock_layout.headerCellLayout(30, false, false).?;
     const drawn = try bandTextAlloc(allocator, dl, layout.control_start);
@@ -3020,7 +3027,7 @@ test "BAND2 넓으면 경로와 심볼이 함께 보인다 — 좁을 때만 깎
     const bright: terminal.Color = .{ .rgb = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF } };
     const label = "a.zig \u{203A} Widget \u{203A} draw";
 
-    var dl = try buildFilePanelHeaderDrawList(allocator, label, &.{}, &.{}, .text, .source_edit, false, false, 60, dim, bright);
+    var dl = try buildFilePanelHeaderDrawList(allocator, label, &.{}, &.{}, .text, .source_edit, false, false, 60, dim, bright, false);
     defer dl.deinit(allocator);
     const layout = dock_layout.headerCellLayout(60, false, false).?;
     const drawn = try bandTextAlloc(allocator, dl, layout.control_start);

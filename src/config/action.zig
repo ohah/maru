@@ -148,6 +148,10 @@ pub const Action = union(enum) {
     // 조건부로 양보할 자리가 없다(그 컨텍스트는 편집 입력이 붙는 N2의 몫이다). 그때까지는 커맨드 팝업과
     // 사용자 키바인딩으로 쓴다 — 아무 chord도 뺏지 않는다.
     toggle_editor_wrap,
+    /// 파일 안 다음/이전 충돌 구간으로 caret 을 옮긴다(docs/editor-merge-conflicts.md S5). 편집기 컨텍스트 기본키
+    /// `F7`/`⇧F7` — VS Code 병합 편집기에는 키가 없고(버튼만) 비교 편집기의 「다음 차이」 관례를 빌렸다.
+    next_conflict,
+    prev_conflict,
     // 활성 편집기의 들여쓰기 접힘을 전부 접는다/펼친다(visual-mapping §4.1f). **기본 chord가 없다** —
     // VSCode의 `⌘K ⌘0`/`⌘K ⌘J`는 두 벌 chord라 키 계약에 그 개념이 없고, 랩 토글과 같은 이유로
     // 편집기 Term 컨텍스트가 아직 없어 조건부로 양보할 자리도 없다(N2의 몫). 그때까지는 커맨드
@@ -284,6 +288,8 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "duplicate_lines")) return .duplicate_lines;
     if (std.mem.eql(u8, value, "delete_lines")) return .delete_lines;
     if (std.mem.eql(u8, value, "toggle_editor_wrap")) return .toggle_editor_wrap;
+    if (std.mem.eql(u8, value, "next_conflict")) return .next_conflict;
+    if (std.mem.eql(u8, value, "prev_conflict")) return .prev_conflict;
     if (std.mem.eql(u8, value, "copy_editor_selection")) return .copy_editor_selection;
     if (std.mem.eql(u8, value, "add_next_occurrence")) return .add_next_occurrence;
     if (std.mem.eql(u8, value, "jump_to_bracket")) return .jump_to_bracket;

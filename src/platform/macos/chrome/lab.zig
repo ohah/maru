@@ -313,6 +313,10 @@ pub const ScenarioId = enum {
     editor_merge_panes,
     /// S3b-2 — 폭이 모자라 **접힌** 배치(Result + Base). 접는 규칙도 골든이 든다.
     editor_merge_narrow,
+    /// S3b-M — **Result 를 굴린 상태.** 세 판이 **대응표**(`merge_map`)로 따라간다: Current 는
+    /// 맨 위에 자기만의 줄 셋을 더 가져 **같은 글자가 다른 번호로** 같은 높이에 선다. 첫 화면만 찍으면
+    /// 「따라 굴리기」는 통째로 무판정이다 — 안 따라가도 맨 위는 똑같다.
+    editor_merge_scrolled,
 };
 
 /// sticky 시나리오인가. 그룹이 둘 이상이어야 "다음 헤더가 밀어낸다"를 만들 수 있다.
@@ -408,6 +412,7 @@ pub fn buildFrame(
         .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_selection, .editor_find, .editor_caret_bar, .editor_caret_block, .editor_caret_underline => buildEditorGutterFrame(scenario, buffers),
         .editor_diff, .editor_diff_scrolled, .editor_diff_selection => buildEditorDiffFrame(scenario, buffers),
         .editor_merge_panes, .editor_merge_narrow => buildEditorMergeFrame(scenario, buffers),
+        .editor_merge_scrolled => buildEditorMergeScrolledFrame(scenario, buffers),
         // 위 early return이 처리한다 — 여기 오면 분기가 갈린 것이다.
         .sidebar_status_strip => unreachable,
         .empty,
@@ -537,18 +542,27 @@ var editor_conflict_bands: [editor_conflict_lines.len]chrome.components.editor_v
 /// 픽스처 줄에서 구간을 찾아 밴드와 위젯 표를 채운다. **제품과 같은 규칙**을 지나므로, 마커 인식이
 /// 망가지면 이 캡처가 함께 빨개진다.
 fn fillConflictTables() void {
-    @memset(&editor_conflict_bands, .none);
-    for (&editor_conflict_widgets) |*w| w.* = null;
+    fillConflictTablesFor(&editor_conflict_lines, &editor_conflict_bands, &editor_conflict_widgets);
+}
+
+/// 같은 일을 **아무 픽스처**에나 — 굴린 병합 시나리오도 제품 파서로 표를 만든다.
+fn fillConflictTablesFor(
+    lines: []const []const u8,
+    bands: []chrome.components.editor_view.frame.RowBand,
+    widgets: []?chrome.components.editor_view.content.Widget,
+) void {
+    @memset(bands, .none);
+    for (widgets) |*w| w.* = null;
     var regions: [8]maru.session.editor.conflict.Region = undefined;
-    const found = maru.session.editor.conflict.scan(&editor_conflict_lines, &regions);
+    const found = maru.session.editor.conflict.scan(lines, &regions);
     const label = fillConflictLabel();
     for (found) |r| {
         for ([_]?u32{ r.start, r.base, r.separator, r.end }) |maybe| {
             const li = maybe orelse continue;
-            if (li < editor_conflict_bands.len) editor_conflict_bands[li] = .conflict_marker;
+            if (li < bands.len) bands[li] = .conflict_marker;
         }
-        if (r.start < editor_conflict_widgets.len) {
-            editor_conflict_widgets[r.start] = .{ .text = label, .col = 4 };
+        if (r.start < widgets.len) {
+            widgets[r.start] = .{ .text = label, .col = 4 };
         }
     }
 }
@@ -1136,6 +1150,111 @@ fn buildEditorMergeFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
     };
 }
 
+/// S3b-M — **굴린 병합 픽스처.** 같은 함수 위아래로 `step_NN();` 열두 줄씩 두어 굴릴 거리를 만든다.
+/// Current 는 맨 위에 자기만의 줄 셋(`// ours-only`)이 더 있다 — 그래서 대응표가 항등이 아니고,
+/// 따라 굴리기가 「같은 번호」가 아니라 「같은 글자」를 세우는지가 gutter 번호로 드러난다.
+const merge_scrolled_prefix = 12;
+const merge_scrolled_ours_extra = 3;
+fn mergeScrolledLines(comptime extra: usize, comptime middle: []const []const u8) [extra + merge_scrolled_prefix + middle.len + merge_scrolled_prefix][]const u8 {
+    var out: [extra + merge_scrolled_prefix + middle.len + merge_scrolled_prefix][]const u8 = undefined;
+    var n: usize = 0;
+    for (0..extra) |i| {
+        out[n] = std.fmt.comptimePrint("// ours-only {d}", .{i + 1});
+        n += 1;
+    }
+    for (0..merge_scrolled_prefix) |i| {
+        out[n] = std.fmt.comptimePrint("    step_{d:0>2}();", .{i});
+        n += 1;
+    }
+    for (middle) |l| {
+        out[n] = l;
+        n += 1;
+    }
+    for (0..merge_scrolled_prefix) |i| {
+        out[n] = std.fmt.comptimePrint("    step_{d:0>2}();", .{merge_scrolled_prefix + i});
+        n += 1;
+    }
+    return out;
+}
+const merge_scrolled_result = mergeScrolledLines(0, &.{
+    "<<<<<<< HEAD",
+    "    const msg = \"ours\";",
+    "=======",
+    "    const msg = \"theirs\";",
+    ">>>>>>> topic",
+});
+const merge_scrolled_ours = mergeScrolledLines(merge_scrolled_ours_extra, &.{"    const msg = \"ours\";"});
+const merge_scrolled_theirs = mergeScrolledLines(0, &.{"    const msg = \"theirs\";"});
+const merge_scrolled_base = mergeScrolledLines(0, &.{"    const msg = \"base\";"});
+var merge_scrolled_bands: [merge_scrolled_result.len]chrome.components.editor_view.frame.RowBand = undefined;
+var merge_scrolled_widgets: [merge_scrolled_result.len]?chrome.components.editor_view.content.Widget = undefined;
+/// Result 의 첫 줄. 충돌 머리(12 줄) 두 줄 위 — 고르기 줄과 마커가 화면 위쪽에 들어온다.
+const merge_scrolled_result_top: u32 = 10;
+
+/// S3b-M — 굴린 병합 한 프레임. 세 판의 첫 줄은 **제품과 같은 표**(`merge_map`)에서 나온다 — Lab 이
+/// `+3` 을 손으로 적으면 표가 죽어도 그림이 예쁘다. (골든만으로는 그 둘을 못 가른다 — 적대적 3회차
+/// C9 가 손으로 적고도 살아남았다. 표 자체는 `MAP1~6`·`MPN12`·`MRG21` 이 재고, 이 캡처는 **소비자**
+/// 가 표를 쓰는가를 본다.)
+fn buildEditorMergeScrolledFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
+    const editor_view = chrome.components.editor_view;
+    const merge_map = maru.session.editor.merge_map;
+    const viewport_w: u32 = @intFromFloat(scenario.viewport_px.width);
+    const viewport_h: u32 = @intFromFloat(scenario.viewport_px.height);
+    fillConflictTablesFor(&merge_scrolled_result, &merge_scrolled_bands, &merge_scrolled_widgets);
+
+    // 표는 Lab 의 할당자로 잠깐 세운다 — 프레임을 만들고 곧 놓는다.
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const follow = struct {
+        fn f(alloc: std.mem.Allocator, side: []const []const u8, result: []const []const u8, top: u32) !usize {
+            const m = (try merge_map.build(alloc, side, result)) orelse return error.MergeMapMissing;
+            return m.toSide(top) orelse 0;
+        }
+    }.f;
+    const current_top = try follow(a, &merge_scrolled_ours, &merge_scrolled_result, merge_scrolled_result_top);
+    const incoming_top = try follow(a, &merge_scrolled_theirs, &merge_scrolled_result, merge_scrolled_result_top);
+    const base_top = try follow(a, &merge_scrolled_base, &merge_scrolled_result, merge_scrolled_result_top);
+
+    var content_rows: [512]editor_view.content.Row = undefined;
+    var visual_rows: [512]chrome.ui.visual_map.VisualRow = undefined;
+    var gutter_rows: [512]editor_view.gutter.Row = undefined;
+    var row_counts: [4096]u32 = undefined;
+    var count_scratch: [editor_view.content.count_scratch_bytes]u8 = undefined;
+    var caret_cols: [256]u32 = undefined;
+
+    const w = editor_view.merge_frame.build(.{
+        .rect = editor_view.frame.contentRect(.{ .x = 0, .y = 0, .w = viewport_w, .h = viewport_h }),
+        .background_rect = .{ .x = 0, .y = 0, .w = viewport_w, .h = viewport_h },
+        .current = .{ .lines = &merge_scrolled_ours, .first_line = current_top },
+        .result = .{ .lines = &merge_scrolled_result, .first_line = merge_scrolled_result_top, .widgets = &merge_scrolled_widgets, .bands = &merge_scrolled_bands },
+        .incoming = .{ .lines = &merge_scrolled_theirs, .first_line = incoming_top },
+        .base = .{ .lines = &merge_scrolled_base, .first_line = base_top },
+        .cell_w_px = scenario.cell_w_px,
+        .cell_h_px = scenario.cell_h_px,
+        .font_px = scenario.font_px,
+        .tab_width = lab_tab_width,
+        .wrap = false,
+        .caret_visible = false,
+        .caret_shape = .bar,
+    }, .{
+        .ops = buffers.ops,
+        .text_bytes = buffers.text_bytes,
+        .runs = buffers.text_runs,
+        .content_rows = &content_rows,
+        .visual_rows = &visual_rows,
+        .gutter_rows = &gutter_rows,
+        .row_counts = &row_counts,
+        .count_scratch = &count_scratch,
+        .caret_cols = &caret_cols,
+    });
+
+    return .{
+        .tree = .{ .entries = buffers.entries[0..0], .generation = 0 },
+        .draws = .{ .layer = .sidebar, .ops = buffers.ops[0..w.ops] },
+    };
+}
+
 /// N1.5 c — 나란한 비교 한 프레임. **제품과 같은 함수를 부른다**(`diff_frame.build`) — 조합을 Lab이
 /// 따로 들면 캡처가 제품을 예고하지 못한다(편집기 배경 층에서 실제로 그 상태가 됐었다).
 fn buildEditorDiffFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
@@ -1357,7 +1476,7 @@ fn buildDockFrame(
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
             .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
             // editor_gutter는 buildEditorGutterFrame이 처리한다 — 도크 목록을 타지 않는다.
-            .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper, .context_menu_bottom_right, .dropdown_open, .dropdown_bottom_clamp, .scm_rows, .scm_history, .scm_row_hover, .scm_conflict_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_selection, .editor_find, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_diff, .editor_diff_scrolled, .editor_diff_selection, .editor_merge_panes, .editor_merge_narrow => unreachable,
+            .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper, .context_menu_bottom_right, .dropdown_open, .dropdown_bottom_clamp, .scm_rows, .scm_history, .scm_row_hover, .scm_conflict_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_selection, .editor_find, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_diff, .editor_diff_scrolled, .editor_diff_selection, .editor_merge_panes, .editor_merge_narrow, .editor_merge_scrolled => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{

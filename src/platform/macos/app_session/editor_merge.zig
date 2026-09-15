@@ -15,7 +15,7 @@ const std = @import("std");
 const maru = @import("maru");
 
 const conflict = maru.session.editor.conflict;
-const diff_state = maru.session.editor.diff_state;
+const merge_map = maru.session.editor.merge_map;
 const dock_panel = maru.session.dock_panel;
 const git_command = maru.session.git_command;
 const app_session_mod = @import("../app_session.zig");
@@ -66,6 +66,15 @@ pub const State = struct {
     theirs_lines: []const []const u8 = &.{},
     /// 위 세 배열을 잡은 allocator(= 세션 것). 바이트 쪽과 **주인이 다르다**.
     line_allocator: ?std.mem.Allocator = null,
+    /// **대응표 셋**(S3b-M) — `판 ↔ Result`. Result 문서의 줄과 세 판의 줄에서 만든다.
+    ///
+    /// **Result 문서가 바뀌면 낡는다.** 편집·고르기마다 다시 만든다 — 낡은 표로 옮기면 세 판이
+    /// 엉뚱한 줄에 선다. 언제 만들었는지는 `map_revision` 이 기억한다(문서의 `revision` 과 대조).
+    map_ours: ?merge_map.Map = null,
+    map_theirs: ?merge_map.Map = null,
+    map_base: ?merge_map.Map = null,
+    /// 표를 만들 때의 Result 문서 개정 번호. 다르면 표가 낡았다.
+    map_revision: ?u64 = null,
     /// 세 판 바이트를 **누구의 것으로 놓을까**. 워커에게서 넘겨받으므로 제품에서는 늘 워커 것이다.
     ///
     /// **상태가 스스로 기억하는 이유**: 자리마다 손으로 적으면 한 곳만 틀려도 heap 이 깨지고, 더
@@ -166,6 +175,7 @@ pub fn deliver(self: *AppSession, term: *Term, result: *git_backend_mod.DiffResu
         state.failed = true;
         return true;
     }
+    freeMaps(self, state); // 새 판이 오면 옛 표는 옛 줄을 가리킨다
     freeStages(state);
     state.base = result.base;
     state.ours = result.original;
@@ -195,6 +205,7 @@ pub fn deliver(self: *AppSession, term: *Term, result: *git_backend_mod.DiffResu
 /// 그 문서를 고치려고 읽은 것이라 문서보다 오래 살 이유가 없다.
 pub fn clear(self: *AppSession, term: *Term) void {
     const state = &(term.rt.editor_merge orelse return);
+    freeMaps(self, state); // 표는 줄을 빌린다 — 줄보다 먼저 놓는다
     freeStages(state);
     if (state.repo.len > 0) self.allocator.free(state.repo);
     if (state.rel_path.len > 0) self.allocator.free(state.rel_path);
@@ -205,9 +216,40 @@ pub fn clear(self: *AppSession, term: *Term) void {
 fn splitAll(self: *AppSession, state: *State) !void {
     freeLines(state);
     state.line_allocator = self.allocator;
-    state.base_lines = try diff_state.splitLines(self.allocator, state.base);
-    state.ours_lines = try diff_state.splitLines(self.allocator, state.ours);
-    state.theirs_lines = try diff_state.splitLines(self.allocator, state.theirs);
+    // **Result 와 같은 줄 규칙으로**(`merge_map.splitLikeEditor`) — `diff_state.splitLines` 는 줄바꿈을
+    // 붙인 채 잘라 대응표가 거짓 항등이 된다(그 함수의 주석).
+    state.base_lines = try merge_map.splitLikeEditor(self.allocator, state.base);
+    state.ours_lines = try merge_map.splitLikeEditor(self.allocator, state.ours);
+    state.theirs_lines = try merge_map.splitLikeEditor(self.allocator, state.theirs);
+}
+
+/// 대응표 셋을 **지금 Result 문서**에 맞춰 세운다. 이미 그 개정에 맞게 서 있으면 아무 일도 안 한다.
+///
+/// **실패는 «표 없음»이다** — 표가 없으면 소비자는 옮기지 않는다(따라 굴리기는 0 줄로 선다). 반쪽
+/// 표로 옮기는 것보다 안 옮기는 편이 정직하다.
+pub fn ensureMaps(self: *AppSession, term: *Term) void {
+    const state = &(term.rt.editor_merge orelse return);
+    if (!state.ready) return;
+    const doc = term.rt.editor_doc orelse return;
+    const rev = doc.file.revision;
+    if (state.map_revision) |have| if (have == rev) return;
+    freeMaps(self, state);
+    const result_lines = term.rt.editor_lines;
+    state.map_ours = merge_map.build(self.allocator, state.ours_lines, result_lines) catch null;
+    state.map_theirs = merge_map.build(self.allocator, state.theirs_lines, result_lines) catch null;
+    // **조상이 없으면 표도 없다** — 빈 줄 배열과 비교하면 「전부 삭제」라는 거짓 표가 나온다.
+    state.map_base = if (state.stages.has_base) (merge_map.build(self.allocator, state.base_lines, result_lines) catch null) else null;
+    state.map_revision = rev;
+}
+
+fn freeMaps(self: *AppSession, state: *State) void {
+    if (state.map_ours) |*m| m.deinit(self.allocator);
+    if (state.map_theirs) |*m| m.deinit(self.allocator);
+    if (state.map_base) |*m| m.deinit(self.allocator);
+    state.map_ours = null;
+    state.map_theirs = null;
+    state.map_base = null;
+    state.map_revision = null;
 }
 
 fn freeLines(state: *State) void {
@@ -1092,6 +1134,80 @@ test "MRG20 쪼갠 줄은 «바이트와 한 단위» 로 산다 — 비우면 �
     try testing.expectEqual(@intFromPtr(st.base.ptr), @intFromPtr(st.base_lines[0].ptr));
     try testing.expectEqual(@intFromPtr(st.ours.ptr), @intFromPtr(st.ours_lines[0].ptr));
     try testing.expectEqual(@intFromPtr(st.theirs.ptr), @intFromPtr(st.theirs_lines[0].ptr));
+
+    clear(session, term);
+    try testing.expect(term.rt.editor_merge == null);
+}
+
+test "MRG21 대응표는 «제품의 쪼개기 경로» 를 지나 선다 — 준비 전·조상 없음·재전달에서는 없다" {
+    // MPN12 는 줄 배열을 손으로 쪼개 넣는다 — 그래서 `deliver` → `splitAll` 이 비교 뷰의 `splitLines`
+    // (줄바꿈을 붙인 채)로 돌아가도 초록이었다(적대적 2회차 B8). 여기서는 판이 **`deliver` 로** 들어온다.
+    // 같은 회차의 이웃 다섯(준비 전 표·조상 없는 base 표·매 프레임 재생성·재전달 뒤 옛 표·`map_revision`
+    // 잔존)도 전부 이 상태 층의 것이라 한 판정자로 묶는다.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const session = try smokeSession(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    // Result 문서는 **실제 파일**이어야 한다 — `ensureMaps` 는 문서의 개정 번호를 보고, 줄은 편집기가 연 것을 쓴다.
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var doc_buf: [2048]u8 = undefined;
+    var doc_len: usize = 0;
+    for (0..40) |k| {
+        const l = try std.fmt.bufPrint(doc_buf[doc_len..], "line {d:0>3}\n", .{k});
+        doc_len += l.len;
+    }
+    const doc = doc_buf[0..doc_len];
+    try dir.dir.writeFile(testing.io, .{ .sub_path = "r.txt", .data = doc });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(testing.io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "r.txt" });
+    defer allocator.free(path);
+    const opened = try pane_ops.openFileTermInActivePane(session, path, .text);
+    const term = opened.term;
+    try testing.expect(term.rt.editor_doc != null);
+    term.rt.editor_merge = .{ .request_id = 61 };
+
+    // ⑴ 준비 전에는 표가 없다 — 빈 줄 배열과 비교하면 「전부 추가」라는 거짓 표가 선다.
+    ensureMaps(session, term);
+    try testing.expect(term.rt.editor_merge.?.map_ours == null);
+    try testing.expect(term.rt.editor_merge.?.map_revision == null);
+
+    // ⑵ ours 는 맨 위에 `EXTRA` 한 줄이 더 있고 조상은 **없다**. 판이 `deliver` 로 들어온다.
+    var ours_buf: [2048]u8 = undefined;
+    const ours = try std.fmt.bufPrint(&ours_buf, "EXTRA\n{s}", .{doc});
+    var r1 = try fakeResultStages(61, "", ours, doc, .{ .has_base = false, .has_ours = true, .has_theirs = true }, false);
+    defer r1.deinit(git_backend_mod.worker_allocator);
+    try testing.expect(deliver(session, term, &r1));
+    ensureMaps(session, term);
+    const st1 = term.rt.editor_merge.?;
+    const m_ours = st1.map_ours orelse return error.MapNotBuilt;
+    // **줄 규칙이 편집기의 것이라야** Result 10 ↔ ours 11 이다. 줄바꿈을 붙인 채 쪼개면 같은 글자가 전부
+    // «다른 줄» 이 되어 첨자대로 짝지어져 10 ↔ 10 — 항등처럼 보이는 거짓 표다.
+    try testing.expectEqual(@as(?u32, 11), m_ours.toSide(10));
+    try testing.expectEqual(@as(?u32, 10), st1.map_theirs.?.toSide(10));
+    try testing.expect(st1.map_base == null); // 조상이 없으면 그 표도 없다
+    const rev1 = st1.map_revision orelse return error.MapNotBuilt;
+
+    // ⑶ 같은 개정이면 다시 안 세운다 — 같은 표(포인터)가 남는다.
+    ensureMaps(session, term);
+    try testing.expect(term.rt.editor_merge.?.map_ours.?.rows.left.ptr == m_ours.rows.left.ptr);
+    try testing.expectEqual(rev1, term.rt.editor_merge.?.map_revision.?);
+
+    // ⑷ **재전달**(「다시 읽기」가 생기는 날의 경로): 옛 표는 옛 줄을 가리키므로 `deliver` 가 먼저 놓아야
+    //    하고, `map_revision` 도 함께 지워야 다음 `ensureMaps` 가 「같은 개정」이라 믿고 빈 표를 남기지 않는다.
+    term.rt.editor_merge.?.request_id = 62;
+    var r2 = try fakeResult(62, doc, doc, doc);
+    defer r2.deinit(git_backend_mod.worker_allocator);
+    try testing.expect(deliver(session, term, &r2));
+    try testing.expect(term.rt.editor_merge.?.map_ours == null);
+    try testing.expect(term.rt.editor_merge.?.map_revision == null);
+    ensureMaps(session, term);
+    const st2 = term.rt.editor_merge.?;
+    try testing.expectEqual(@as(?u32, 10), st2.map_ours.?.toSide(10)); // 이제 ours 도 항등
+    try testing.expect(st2.map_base != null); // 조상이 왔으니 표도 선다
 
     clear(session, term);
     try testing.expect(term.rt.editor_merge == null);

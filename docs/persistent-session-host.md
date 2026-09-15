@@ -6000,7 +6000,9 @@ input stage 4, historical/IME/clipboard 각 1, marked callback 8, insert callbac
 `d72cd830ea22e4cc6dce537383522941`·surface 1에서 frame generation 4→5, cursor·`firstRect` `(668,798,8,18)`을
 결속한 두 960×600 PPM을 별도 판정기가 통과해 v2a를 green으로 닫았다. 그 전 잠긴 회차는 frontmost PID가
 `loginwindow`여서 source 전환·HID 게시·capture 전에 `global-keyboard-focus`로 RED였으며 통과 증거에 포함하지
-않는다. v2b 생산자와 판정자는 아직 구현 전이다.
+않는다. v2b0a pure inventory reducer/coordinate converter와 Debug·ReleaseFast 8+8 focused gate는 구현됐으나 제품 caller는
+0이다. WindowServer 전체 inventory producer·preflight·canonical observation artifact의 v2b0b와 v2b1 단일-window capture/
+판정자는 아직 구현 전이다.
 
 v2b는 곧바로 owner 이름을 하드코딩하지 않는다. **v2b0 window-authority 관측**이 먼저 Screen Recording preflight를
 source 전환·HID 게시보다 앞에서 통과한 뒤, 후보 요청 직전/직후 `SCShareableContent`/window-server inventory의 차집합을
@@ -6024,8 +6026,9 @@ owner identity가 실제 Apple Korean IME와 결속된다는 증거가 없으면
 캡처 직전·직후 동일 window ID/PID와 Apple code-signing identity를 다시 검증한다. receipt는 v2a와 같은 runtime/surface,
 candidate window ID/owner identity/bounds, `firstRect`, capture digest와 capture-complete
 상태를 결속한다. AppKit `firstRect`와 Quartz bounds는 원점 규약이 다르므로 직접 비교하지 않는다. display ID,
-`NSScreen.frame`, `CGDisplayBounds`, backing scale을 함께 싣고 pure converter 하나가 Quartz 좌상단 원점으로 정규화하며,
-음수 origin·좌우/상하 multi-display·scale 1/2 fixture가 같은 변환을 검증한다. candidate bounds는 같은 display에서 v2b0의
+`NSScreen.frame`, `CGDisplayBounds`를 함께 싣고 두 point-space display 크기가 같은지 확인한 뒤 pure converter 하나가 Quartz
+좌상단 원점으로 정규화한다. backing scale은 이 변환에 기여하지 않으므로 receipt 권위에서 제외한다. 음수 origin·좌우/상하
+multi-display fixture가 같은 변환을 검증한다. candidate bounds는 같은 display에서 v2b0의
 5회 관측이 정한 위/아래 placement별 anchor band에 있어야 하고, 화면 가장자리의 정상적인 위쪽 flip을 허용한다. 관측 전에
 임의 pixel 거리 상한을 만들지 않는다. 판정 뒤에는
 candidate window 부재, original input source, exact first responder와 restore record 소멸을 확인한다. 전체 화면 diff,

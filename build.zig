@@ -8298,6 +8298,32 @@ pub fn build(b: *std.Build) void {
         const run_p5b2b3_slot_tests = b.addRunArtifact(p5b2b3_slot_tests);
         run_p5b2b3_slot_tests.addArg("--maru-expect-tests=1");
         session_host_p5b2b3_step.dependOn(&run_p5b2b3_slot_tests.step);
+        const p5b2b3_owner_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/poll_owner.zig"),
+                .target = target,
+                .optimize = p5b2b3_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"P5b2b3"},
+        });
+        const run_p5b2b3_owner_tests = b.addRunArtifact(p5b2b3_owner_tests);
+        run_p5b2b3_owner_tests.addArg("--maru-expect-tests=3");
+        session_host_p5b2b3_step.dependOn(&run_p5b2b3_owner_tests.step);
+        const p5b2b3_client_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/client.zig"),
+                .target = target,
+                .optimize = p5b2b3_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"P5b2b3"},
+        });
+        const run_p5b2b3_client_tests = b.addRunArtifact(p5b2b3_client_tests);
+        run_p5b2b3_client_tests.addArg("--maru-expect-tests=2");
+        session_host_p5b2b3_step.dependOn(&run_p5b2b3_client_tests.step);
     }
     const session_host_cross_uid_step = b.step(
         "test-session-host-cross-uid-macos",

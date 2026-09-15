@@ -57,7 +57,7 @@ pub const ClientCloseReason = enum {
     peer_broken,
     /// host 자신이 내려간다. 정상.
     host_shutdown,
-    /// 메모리 압박으로 이 연결의 화면 큐를 회수하다 닫았다. 사용자에게는 **갑작스러운 세션 단절**로 보인다.
+    /// 화면 압력 회수가 batch 무결성/수명 오류로 수렴하지 못해 연결까지 닫았다. 정상 pressure는 stream만 복구한다.
     screen_pressure,
     /// 화면을 받아가지 못해 다른 client를 막던 observer를 끊었다.
     observer_offender,
@@ -2346,8 +2346,17 @@ test "poll owner rolls back a batch when one reclaim is insufficient and retries
     try testing.expectEqual(@as(usize, 0), final.prepared_reclaim_bytes);
 }
 
-test "poll owner closes only the observer whose valid screen frame reached a kernel partial write" {
+test "P5b2b3 poll owner preserves same-connection sibling through partial screen pressure" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    _ = process_seal_service.currentReadyIdentity() catch |err| switch (err) {
+        error.NotReady => ready: {
+            const pid = process_seal_service.currentProcessId();
+            const nonce = try process_seal_service.generateProcessNonce();
+            process_seal_service.commitReady(try process_seal_service.prepare(pid, nonce));
+            break :ready try process_seal_service.currentReadyIdentity();
+        },
+        else => return err,
+    };
     var socket_root: ShortSocketRoot = .{};
     try socket_root.init("actual-partial-pressure.sock");
     defer socket_root.deinit();
@@ -2356,6 +2365,7 @@ test "poll owner closes only the observer whose valid screen frame reached a ker
     var runtime_registry = registry.TerminalRuntimeRegistry.init(testing.allocator);
     defer runtime_registry.deinit();
     _ = try runtime_registry.register(0xAA, 80, 24);
+    _ = try runtime_registry.register(0xBB, 80, 24);
     for (0..9) |index| _ = try runtime_registry.register(0x200 + index, 80, 24);
     var server = try socket_server.SocketServer.bind(
         testing.allocator,
@@ -2388,6 +2398,13 @@ test "poll owner closes only the observer whose valid screen frame reached a ker
     const partial = try connectAttachedTestClient(&owner, socket_path, "observer");
     fds[fd_count] = partial.fd;
     fd_count += 1;
+    try sendTestRequest(
+        partial.fd,
+        .request,
+        3,
+        "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"bb\",\"mode\":\"observer\"}}",
+    );
+    try pumpUntilResponse(&owner, partial.fd, "SNAPSHOT-BYTES");
     try setTinySocketBuffers(owner.clients[partial.index].?.fd, partial.fd);
 
     var pin_indices: [9]usize = undefined;
@@ -2421,14 +2438,12 @@ test "poll owner closes only the observer whose valid screen frame reached a ker
     }
 
     const partial_client = owner.clients[partial.index].?;
-    const partial_admission = partial_client.admission;
     const partial_slot = try owner.reactor.get(partial_client.admission);
     const partial_tracker = partial_client.trackers.get(1).?;
     const payload = try testing.allocator.alloc(u8, protocol.max_binary_chunk);
     defer testing.allocator.free(payload);
     @memset(payload, 'S');
-    var first_wire: ?[]u8 = null;
-    defer if (first_wire) |bytes| testing.allocator.free(bytes);
+    var screen_batch: [8][]u8 = undefined;
     for (0..8) |index| {
         const frame_payload = if (index == 0)
             payload
@@ -2439,13 +2454,18 @@ test "poll owner closes only the observer whose valid screen frame reached a ker
             .stream_id = 1,
             .flags = if (index == 7) protocol.Flags.end_stream else 0,
         }, frame_payload);
-        if (index == 0) first_wire = try testing.allocator.dupe(u8, wire);
-        partial_slot.enqueueOwnedScreen(partial_tracker, wire) catch |err| {
-            testing.allocator.free(wire);
-            return err;
-        };
+        screen_batch[index] = wire;
     }
-    const first_len = first_wire.?.len;
+    const first_len = screen_batch[0].len;
+    try partial_slot.enqueueOwnedScreenBatch(partial_tracker, &screen_batch);
+    const sibling_tracker = partial_client.trackers.get(2).?;
+    const sibling_wire = try framing.encodeFrame(testing.allocator, .{
+        .kind = .delta_chunk,
+        .stream_id = 2,
+        .flags = protocol.Flags.end_stream,
+    }, "P5B2B3-SIBLING");
+    const sibling_batch = [_][]u8{sibling_wire};
+    try partial_slot.enqueueOwnedScreenBatch(sibling_tracker, &sibling_batch);
     try testing.expect(first_len > connection_slot.turn_bytes);
     const pending_before = partial_slot.pending_bytes;
     var partial_attempts: usize = 0;
@@ -2470,92 +2490,116 @@ test "poll owner closes only the observer whose valid screen frame reached a ker
     try testing.expect(partial_client.largestScreenPressure() != null);
     try testing.expect(owner.clients[partial.index] != null);
 
-    // Make the peer writable again. The next poll snapshot must clear stale stall eligibility
-    // before another requester's pressure turn can select this connection.
-    const early_received = try testing.allocator.alloc(u8, initial_written);
-    defer testing.allocator.free(early_received);
-    var early_len: usize = 0;
-    var early_attempts: usize = 0;
-    while (early_len < early_received.len and early_attempts < 1000) : (early_attempts += 1) {
-        const rc = c.recv(
-            partial.fd,
-            early_received.ptr + early_len,
-            early_received.len - early_len,
-            posix.MSG.DONTWAIT,
-        );
-        if (rc < 0 and posix.errno(rc) == .AGAIN) continue;
-        if (rc <= 0) return error.TestUnexpectedResult;
-        early_len += @intCast(rc);
-    }
-    try testing.expectEqual(early_received.len, early_len);
-    var ready_attempts: usize = 0;
-    while (partial_slot.writeStallObserved() and ready_attempts < 100) : (ready_attempts += 1)
-        _ = try owner.pollOnce(0);
-    try testing.expect(!partial_slot.writeStallObserved());
-    try testing.expect(partial_client.largestScreenPressure() == null);
-    var restall_attempts: usize = 0;
-    while (!partial_slot.writeStallObserved() and restall_attempts < 100) : (restall_attempts += 1)
-        _ = try owner.pollOnce(0);
-    try testing.expect(partial_slot.writeStallObserved());
-    try testing.expect(partial_client.largestScreenPressure() != null);
-    const written = first_len - partial_slot.firstPending().?.bytes.len;
-    try testing.expect(written > initial_written);
-
     const healthy_client = owner.clients[healthy.index].?;
-    const delta_before = fake_runtime.delta_calls;
     const active_before_reclaim = owner.activeCount();
     owner.producer_remaining[healthy.index] =
         healthy_client.beginProducerSweep(monotonicNow(testing.io));
     var pressure_attempts: usize = 0;
-    while (owner.clients[partial.index] != null and pressure_attempts < 1000) : (pressure_attempts += 1)
+    while (owner.total_pressure_reclaims == 0 and pressure_attempts < 1000) : (pressure_attempts += 1)
         _ = try owner.pollOnce(0);
-    try testing.expect(owner.clients[partial.index] == null);
-    try testing.expectError(error.Stale, owner.reactor.get(partial_admission));
-    try testing.expectEqual(active_before_reclaim - 1, owner.activeCount());
+    try testing.expect(owner.clients[partial.index] != null);
+    try testing.expectEqual(active_before_reclaim, owner.activeCount());
     for (pin_indices) |pin_index| try testing.expect(owner.clients[pin_index] != null);
     try testing.expectEqual(@as(usize, 1), owner.total_pressure_reclaims);
+    try testing.expectEqual(
+        connection_slot.ScreenState.drain_current_batch,
+        try partial_slot.screenState(partial_tracker),
+    );
+    const resumed_receive: c_int = 1024 * 1024;
+    try testing.expectEqual(@as(c_int, 0), c.setsockopt(
+        partial.fd,
+        posix.SOL.SOCKET,
+        posix.SO.RCVBUF,
+        @ptrCast(&resumed_receive),
+        @sizeOf(c_int),
+    ));
 
-    // Drain only after canonical close. Exact incomplete prefix followed by EOF proves reclaim
-    // appended no invalidation suffix that could splice the peer's MRSH stream.
-    const received = try testing.allocator.alloc(u8, written);
-    defer testing.allocator.free(received);
-    @memcpy(received[0..early_len], early_received);
-    var received_len: usize = early_len;
-    var eof_attempts: usize = 0;
-    var saw_eof = false;
-    while (!saw_eof and eof_attempts < 1000) : (eof_attempts += 1) {
-        var extra: [1]u8 = undefined;
-        const target = if (received_len < received.len)
-            received[received_len..]
-        else
-            extra[0..];
-        const rc = c.recv(partial.fd, target.ptr, target.len, posix.MSG.DONTWAIT);
-        if (rc < 0 and posix.errno(rc) == .AGAIN) continue;
-        if (rc < 0) return error.TestUnexpectedResult;
-        if (rc == 0) {
-            saw_eof = true;
-            break;
+    var received: std.ArrayListUnmanaged(u8) = .empty;
+    defer received.deinit(testing.allocator);
+    var recv_buf: [64 * 1024]u8 = undefined;
+    var drain_attempts: usize = 0;
+    while (drain_attempts < 12000) : (drain_attempts += 1) {
+        while (true) {
+            const rc = c.recv(partial.fd, &recv_buf, recv_buf.len, posix.MSG.DONTWAIT);
+            if (rc < 0 and posix.errno(rc) == .AGAIN) break;
+            if (rc <= 0) return error.TestUnexpectedResult;
+            try received.appendSlice(testing.allocator, recv_buf[0..@intCast(rc)]);
         }
-        if (received_len == received.len) return error.TestUnexpectedResult;
-        received_len += @intCast(rc);
+        _ = try owner.pollOnce(5);
+        if (try partial_slot.screenState(partial_tracker) == .invalidated and
+            !partial_client.wantsWrite()) break;
     }
-    try testing.expect(saw_eof);
-    try testing.expectEqual(written, received_len);
-    try testing.expectEqualSlices(u8, first_wire.?[0..written], received);
-    var incomplete_parser = framing.FrameParser.init(testing.allocator);
-    defer incomplete_parser.deinit();
-    try incomplete_parser.push(received);
-    try testing.expect((try incomplete_parser.next()) == null);
+    while (true) {
+        const rc = c.recv(partial.fd, &recv_buf, recv_buf.len, posix.MSG.DONTWAIT);
+        if (rc < 0 and posix.errno(rc) == .AGAIN) break;
+        if (rc <= 0) return error.TestUnexpectedResult;
+        try received.appendSlice(testing.allocator, recv_buf[0..@intCast(rc)]);
+    }
+    try testing.expectEqual(
+        connection_slot.ScreenState.invalidated,
+        try partial_slot.screenState(partial_tracker),
+    );
+    try testing.expectEqual(
+        connection_slot.ScreenState.valid,
+        try partial_slot.screenState(sibling_tracker),
+    );
+    var parser = framing.FrameParser.init(testing.allocator);
+    defer parser.deinit();
+    try parser.push(received.items);
+    var target_frames: usize = 0;
+    var target_ended = false;
+    var sibling_seen = false;
+    var invalidation_seen = false;
+    while (try parser.next()) |frame| {
+        defer frame.deinit(testing.allocator);
+        if (frame.header.stream_id == 1 and frame.header.kind == .delta_chunk) {
+            try testing.expect(!target_ended);
+            target_frames += 1;
+            if (protocol.Flags.hasEndStream(frame.header.flags)) target_ended = true;
+        } else if (frame.header.stream_id == 2 and frame.header.kind == .delta_chunk) {
+            try testing.expect(target_ended);
+            try testing.expectEqualStrings("P5B2B3-SIBLING", frame.payload);
+            sibling_seen = true;
+        } else if (frame.header.kind == .event and
+            std.mem.indexOf(u8, frame.payload, "snapshot.invalidated") != null)
+        {
+            try testing.expect(target_ended);
+            try testing.expect(!invalidation_seen);
+            invalidation_seen = true;
+        }
+    }
+    try testing.expectEqual(@as(usize, 8), target_frames);
+    try testing.expect(target_ended and sibling_seen and invalidation_seen);
+    for (fds[3..fd_count]) |*fd| {
+        _ = c.shutdown(fd.*, c.SHUT.RDWR);
+        _ = c.close(fd.*);
+        fd.* = -1;
+    }
+    var pin_close_attempts: usize = 0;
+    while (pin_close_attempts < 4000) : (pin_close_attempts += 1) {
+        var pins_alive = false;
+        for (pin_indices) |pin_index| pins_alive = pins_alive or owner.clients[pin_index] != null;
+        if (!pins_alive) break;
+        _ = try owner.pollOnce(0);
+    }
+    for (pin_indices) |pin_index| try testing.expect(owner.clients[pin_index] == null);
+    try sendTestStream(partial.fd, .stream_ack, 1, "{\"action\":\"resync\"}");
+    var ack_attempts: usize = 0;
+    while (!partial_client.connection.resyncPending(1) and ack_attempts < 1000) : (ack_attempts += 1)
+        _ = try owner.pollOnce(0);
+    try testing.expect(partial_client.connection.resyncPending(1));
+    const resync_at = monotonicNow(testing.io) +| connection_slot.resync_retry_backoff_ns;
+    owner.producer_remaining[partial.index] = partial_client.beginProducerSweep(resync_at);
+    partial_client.tick(resync_at);
+    try pumpUntilResponse(&owner, partial.fd, "SNAPSHOT-BYTES");
+    try testing.expectEqual(
+        connection_slot.ScreenState.valid,
+        try partial_slot.screenState(partial_tracker),
+    );
+    try sendTestRequest(partial.fd, .request, 4, "{\"method\":\"host.info\"}");
+    try pumpUntilResponse(&owner, partial.fd, "host_id");
 
-    owner.producer_remaining[healthy.index] =
-        healthy_client.beginProducerSweep(monotonicNow(testing.io));
-    try pumpUntilResponse(&owner, healthy.fd, "DELTA-BYTES");
-    try testing.expect(fake_runtime.delta_calls > delta_before);
-    const first_healthy_delta = fake_runtime.delta_calls;
-    owner.producer_remaining[healthy.index] =
-        healthy_client.beginProducerSweep(monotonicNow(testing.io));
-    try pumpUntilResponse(&owner, healthy.fd, "DELTA-BYTES");
-    try testing.expect(fake_runtime.delta_calls > first_healthy_delta);
+    try testing.expect(owner.clients[healthy.index] != null);
     try testing.expect(owner.clients[controller.index] != null);
     try sendTestStream(controller.fd, .input_bytes, 1, "CTRL-AFTER-PARTIAL");
     var input_attempts: usize = 0;

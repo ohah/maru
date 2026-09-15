@@ -418,7 +418,7 @@ pub const Client = struct {
     }
 
     /// The owner selected this connection as the global queued-screen pressure offender.
-    /// Zero-prefix queues become one stream invalidation; partial-prefix queues fail-close.
+    /// Zero-prefix queues invalidate immediately; a partial screen batch drains to its end marker.
     pub fn reclaimScreenPressure(self: *Client, candidate: ScreenPressureCandidate) bool {
         const tracker = self.trackers.get(candidate.stream) orelse return false;
         if (!std.meta.eql(tracker, candidate.tracker)) return false;

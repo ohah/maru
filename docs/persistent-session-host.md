@@ -7648,6 +7648,47 @@ host→app 전송 자체가 없어 셀 것이 없지만, 「줄이 없다」를 
 `imgs=` 개수는 일부러 뺐다 — `ProjectOptions` 에 필드를 더해야 하고 그 자리는 CR4a 경계 판정자가 리터럴을 세는
 곳이라, 앱 쪽 손실 계수만으로 답이 되는 물음에 필요 이상의 위험이다.
 
+### 12.3 `partial_timeout` 126 번은 무엇이었나 — 한 이름에 네 자리 (2026-09-15)
+
+**무엇을 보고 붙였나.** 터미널 브라우저가 터진 뒤 host 로그를 전수로 세었다.
+
+| 종료 사유 | 건수 |
+| --- | ---: |
+| `eof` | 261 |
+| `partial_timeout` | **126** |
+| `socket_error`(전부 `err=PartialFrame`) | 6 |
+
+**그런데 126 은 읽을 수 없는 숫자였다.** 전부 `site=-` 였고, 이 사유는 `Client.tick` 안에서만 **네
+자리**가 쓴다 — 핸드셰이크 데드라인(10 s) · 관리 요청 데드라인 · 구독 0 유휴 회수(30 s) ·
+부분 읽기/쓰기 정체. 넷 중 **유휴 회수 하나는 정상**이므로, 126 을 사고로 읽어도 정상으로 읽어도
+근거가 없다. 실제로 이 숫자를 처음 보고 「`PartialFrame` 보다 21 배 잦은 사고」로 읽었는데 틀린
+독해였다.
+
+**`why_ra` 로도 못 갈랐다.** 슬라이드를 빼고 심볼로 풀었더니 줄번호가 `defer`(745) 와
+`producer_sweep_cursor %`(775) 를 가리켰다 — 최적화가 네 자리를 뭉갠 것이다. 「자리 이름이 없으면
+주소로 풀면 된다」는 §12 의 기존 관례가 **여기서는 안 통한다**는 첫 사례다.
+
+**고친 방식.** 기계는 이미 있었다 — `beginCloseAt(site, reason)` 이 로그의 `site=` 칸을 채우고
+`tick_collect_oom` 같은 자리는 이미 쓰고 있었다. 이 넷만 `beginClose` 로 이름을 안 지었을 뿐이다.
+`failPendingUpgradeAt` 을 갈라 업그레이드 경로도 이름을 싣게 했다.
+
+넷째는 **다시 둘로 갈랐다**:
+
+| 이름 | 뜻 | 의심할 곳 |
+| --- | --- | --- |
+| `tick_partial_write_stalled` | client 가 안 빼간다 | **배압** — 투영·예산 쪽 |
+| `tick_partial_read_stalled` | client 가 안 보낸다 | GUI 쪽 |
+
+검사 순서도 write 를 먼저 둔다. 둘이 함께 정체하면 배압을 읽기로 오진하기 때문이다.
+
+**이 파일이 이미 같은 교훈을 적어 뒀다.** `connection_turn.zig` 의 2026-09-08 주석 —
+「`protocol_error` 와 `resource_exhausted` 와 `partial_timeout` 은 고칠 곳이 완전히 다르다」. 그때
+바깥 enum 은 갈랐는데 **안쪽이 다시 뭉쳐 있었다.** 자리 이름은 한 번 붙이고 끝나는 일이 아니라
+**새 자리가 생길 때마다** 지켜야 하는 불변식이다 — 그래서 순수 판정자 말고
+`collect_failure_site_boundary` 축이 「이름 없는 `.partial_timeout` 닫기가 하나도 없다」를 센다.
+
+**한계.** 이름은 다음 재현부터 붙는다. 이미 쌓인 126 건은 끝내 무엇이었는지 알 수 없다.
+
 ### P0 — 문서 결정
 
 - 이 문서, workspace restore, session-host upgrade, configuration, verification matrix를 정합화한다.

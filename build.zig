@@ -6391,8 +6391,9 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_collect_fail = b.addRunArtifact(collect_fail_tests);
-    run_collect_fail.addArg("--maru-expect-tests=1");
-    run_collect_fail.addArg("--maru-expect-passed=1");
+    // 둘째는 `tick` 의 `partial_timeout` 자리 이름이다 — 2026-09-15 에 126 번이 `site=-` 였다.
+    run_collect_fail.addArg("--maru-expect-tests=2");
+    run_collect_fail.addArg("--maru-expect-passed=2");
     run_collect_fail.setCwd(b.path("."));
     collect_fail_step.dependOn(&run_collect_fail.step);
     boundary_step.dependOn(&run_collect_fail.step);

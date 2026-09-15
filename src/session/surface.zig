@@ -39,6 +39,15 @@ pub const ScreenSource = struct {
 // Surface와 PtySession을 연결하면, workspace restore는 live process handle 없이
 // 복구 가능한 metadata만 저장할 수 있다.
 // 이 타입은 자신이 tab인지 split인지 window인지 모른다. 그 결정은 상위 app/platform layer가 한다.
+/// [진단] `lockCore` 가 메인 스레드에서 락을 기다린 시간의 tick 누적. platform(app_session) 이 MARU_DEBUG 일 때
+/// `diag_lock_wait_enabled` 를 켜고, 매 tick 셋을 0 으로 되돌린 뒤 SLOW 로그에 싣는다. 메인 전용 래퍼라 경쟁 없음.
+pub var diag_lock_wait_enabled: bool = false;
+pub var diag_lock_wait_ns: i128 = 0;
+pub var diag_lock_wait_max_ns: i128 = 0;
+pub var diag_lock_count: u32 = 0;
+/// [진단] 최대 대기가 난 `lockCore` 호출자 주소(`@returnAddress`) — `atos -o <bin> -l <load>` 로 심볼화한다.
+pub var diag_lock_wait_max_site: usize = 0;
+
 pub const Surface = struct {
     id: u64,
     // 자동 제목 — 셸/프로그램이 정하는 값(정적 기본 또는 장차 OSC 0/2). custom_name이 없을 때 표시 폴백.
@@ -100,11 +109,26 @@ pub const Surface = struct {
     /// 디버그 panic으로 노출한다(docs/io-render-threading.md §6-5). reader는 Surface가 없어 같은
     /// owner를 core.owner_dbg.lock으로 직접 공유한다(단일 출처).
     pub fn lockCore(self: *Surface, io: std.Io) void {
+        // [진단] 메인이 이 락을 **기다린** 시간. 텍스트 폭포에서 tick 의 절반이 「shaping 도 아니고 복사도
+        // 아닌」 구간(prep·헤더·pane·mid)에 흩어져 있었는데, 그 구간들의 공통점이 코어 락을 잡는 자리였다 —
+        // I/O 스레드가 core.write 로 락을 쥔 동안 메인이 선 시간이라는 가설을 재려고 둔다. 이 래퍼는 메인
+        // 스레드 전용이라(reader 는 owner_dbg 를 직접 쓴다) 누적에 경쟁이 없다. platform 이 MARU_DEBUG
+        // 일 때만 켜므로 평소엔 분기 하나다.
+        const t0: i128 = if (diag_lock_wait_enabled) std.Io.Clock.awake.now(io).nanoseconds else 0;
         if (self.remote) |r| {
             r.vtable.lock(r.ctx, io); // 원격 backing이면 그 소스의 락(render↔delta-apply 직렬화). 로컬 core는 미사용.
-            return;
+        } else {
+            self.core.owner_dbg.lock(&self.core_mutex, io);
         }
-        self.core.owner_dbg.lock(&self.core_mutex, io);
+        if (diag_lock_wait_enabled) {
+            const w = std.Io.Clock.awake.now(io).nanoseconds - t0;
+            diag_lock_wait_ns += w;
+            diag_lock_count += 1;
+            if (w > diag_lock_wait_max_ns) {
+                diag_lock_wait_max_ns = w;
+                diag_lock_wait_max_site = @returnAddress() -% @intFromPtr(&Surface.lockCore); // ASLR 무관 오프셋
+            }
+        }
     }
 
     pub fn unlockCore(self: *Surface, io: std.Io) void {

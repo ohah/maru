@@ -196,6 +196,10 @@ zig build test > /tmp/t.log 2>&1;  mise run test-verdict /tmp/t.log
     `└ kitty transmit(락 아래) 합 = base64 + inflate + store + display`는 이미지 마지막 청크가 락 아래에서
     쓴 시간(§13.7 — 보유가 긴 쪽). 셋 다 SLOW 와 무관하게 1ms 를 넘으면 찍힌다. 1초 요약 끝의 `img=장수/MB`
     는 그 창에 GPU 로 올린 이미지(§13.8) — SLOW 가 0 이라도 이미지가 실제로 흐르는지 보는 양성 신호다.
+    1초 창마다 `lock sites:` 줄과 상위 12 지점(`0x오프셋 tick|밖 ×횟수 보유 합/최대`)이 붙는다 — 메인이 코어 락을
+    **어디서 몇 번** 잡는지의 인벤토리(§12.9). 오프셋은 `lockCore` 기준이라 `dsymutil -o x.dSYM <bin>` 뒤
+    `atos -o x.dSYM/Contents/Resources/DWARF/<bin> -l 0x100000000 $((lockCore 링크 주소 + 오프셋))` 로 줄 번호까지 푼다.
+    SLOW 줄의 `횟수=` 는 tick 시작에 0 이 되므로 tick 사이의 호스트 ABI 폴 2회를 **뺀** 값이다.
     읽는 법과 실측은 [Phase 2~4 계획 §13](plans/io-render-threading.md).
 - macOS visible window smoke 실행: `mise run macos-window-smoke` (창이 너무 빨리 닫히면 `MARU_WINDOW_SMOKE_MS`로 노출 시간을 ms 단위로 늘려 수동 확인한다. 기본 1500ms, 상한 600000ms)
 - macOS window smoke 계약 테스트: `mise run test-macos-window-smoke`

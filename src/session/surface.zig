@@ -47,6 +47,34 @@ pub var diag_lock_wait_max_ns: i128 = 0;
 pub var diag_lock_count: u32 = 0;
 /// [진단] 최대 대기가 난 `lockCore` 호출자 주소(`@returnAddress`) — `atos -o <bin> -l <load>` 로 심볼화한다.
 pub var diag_lock_wait_max_site: usize = 0;
+/// [진단·P4-3] 호출 지점별 잠금 히스토그램 — `lockCore` 호출자 오프셋을 키로 횟수·보유 합·보유 최대를 센다.
+/// 메인 전용(경쟁 없음). `diag_in_tick` 이 false 인 잠금(이벤트 핸들러 등 tick 밖)은 별도 슬롯군에 센다 —
+/// «tick 당 N회」가 정말 tick 의 것인지 가리려고.
+pub const DiagLockSite = struct { site: usize = 0, count: u32 = 0, hold_ns: i128 = 0, hold_max_ns: i128 = 0, in_tick: bool = true };
+pub const diag_lock_sites_cap = 64;
+pub var diag_lock_sites: [diag_lock_sites_cap]DiagLockSite = [_]DiagLockSite{.{}} ** diag_lock_sites_cap;
+pub var diag_lock_sites_overflow: u32 = 0;
+pub var diag_in_tick: bool = false;
+var diag_cur_site: usize = 0;
+var diag_cur_in_tick: bool = false;
+var diag_cur_t_locked: i128 = 0;
+
+pub fn diagLockSitesReset() void {
+    diag_lock_sites = [_]DiagLockSite{.{}} ** diag_lock_sites_cap;
+    diag_lock_sites_overflow = 0;
+}
+
+fn diagLockSiteSlot(site: usize, in_tick: bool) ?*DiagLockSite {
+    for (&diag_lock_sites) |*e| {
+        if (e.count == 0) {
+            e.* = .{ .site = site, .in_tick = in_tick };
+            return e;
+        }
+        if (e.site == site and e.in_tick == in_tick) return e;
+    }
+    diag_lock_sites_overflow += 1;
+    return null;
+}
 
 pub const Surface = struct {
     id: u64,
@@ -128,10 +156,14 @@ pub const Surface = struct {
             const w = std.Io.Clock.awake.now(io).nanoseconds - t0;
             diag_lock_wait_ns += w;
             diag_lock_count += 1;
+            const site = @returnAddress() -% @intFromPtr(&Surface.lockCore); // ASLR 무관 오프셋
             if (w > diag_lock_wait_max_ns) {
                 diag_lock_wait_max_ns = w;
-                diag_lock_wait_max_site = @returnAddress() -% @intFromPtr(&Surface.lockCore); // ASLR 무관 오프셋
+                diag_lock_wait_max_site = site;
             }
+            diag_cur_site = site;
+            diag_cur_in_tick = diag_in_tick;
+            diag_cur_t_locked = std.Io.Clock.awake.now(io).nanoseconds;
         }
     }
 
@@ -139,6 +171,14 @@ pub const Surface = struct {
         if (self.remote) |r| {
             r.vtable.unlock(r.ctx, io);
             return;
+        }
+        if (diag_lock_wait_enabled) {
+            const held = std.Io.Clock.awake.now(io).nanoseconds - diag_cur_t_locked;
+            if (diagLockSiteSlot(diag_cur_site, diag_cur_in_tick)) |e| {
+                e.count += 1;
+                e.hold_ns += held;
+                if (held > e.hold_max_ns) e.hold_max_ns = held;
+            }
         }
         self.core.owner_dbg.unlock(&self.core_mutex, io);
         self.core.handoff.signalHandoff(io); // 물러나 있던 리더를 깨운다(요구자 없었으면 wake 1회 낭비뿐)

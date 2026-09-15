@@ -6954,6 +6954,7 @@ pub const AppSession = struct {
     ft_sum_place: i128 = 0,
     ft_win_img_bytes: usize = 0, // 이 1초 창에 GPU 로 올린 이미지 픽셀 바이트(planImageUploads 합) — 이미지가 실제로 흐르는지의 양성 신호
     ft_win_img_count: u32 = 0,
+    ft_win_lock_count: u32 = 0, // lockCore 쪽 독립 카운터의 창 합 — unlockCore 쪽 히스토그램과 같아야 방법이 맞다
     ft_sum_assemble: i128 = 0,
     ft_max_total: i128 = 0,
 
@@ -19751,6 +19752,7 @@ pub const AppSession = struct {
         self.ft_sum_chrome += d_chrome;
         self.ft_sum_place += d_place;
         self.ft_sum_assemble += d_assemble;
+        self.ft_win_lock_count += maru.session.surface.diag_lock_count;
         self.ft_win_img_bytes += metal_frame.diag_plan_bytes;
         self.ft_win_img_count += metal_frame.diag_plan_images;
         if (total > self.ft_max_total) self.ft_max_total = total;
@@ -19774,6 +19776,7 @@ pub const AppSession = struct {
                 self.ft_win_img_count,
                 @as(f64, @floatFromInt(self.ft_win_img_bytes)) / (1024.0 * 1024.0),
             });
+            const window_ticks = self.ft_ticks; // 아래 lock sites 의 «tick당» 분모 — 리셋 전에 잡아 둔다
             self.ft_window_start = 0;
             self.ft_ticks = 0;
             self.ft_sum_total = 0;
@@ -19786,6 +19789,54 @@ pub const AppSession = struct {
             self.ft_sum_place = 0;
             self.ft_win_img_bytes = 0;
             self.ft_win_img_count = 0;
+            // [P4-3] 이 창의 호출 지점별 잠금 히스토그램 — 횟수 내림차순 상위 12. 오프셋은 `atos -o <bin> -l 0x100000000
+            // $((lockCore 링크 주소 + 오프셋))` 로 심볼화한다(줄 번호는 dsymutil 로 dSYM 을 만든 뒤). tick 밖(이벤트
+            // 핸들러·호스트 ABI 폴) 잠금은 `밖` 표시. 히스토그램(unlockCore 집계)과 lockCore 카운터가 같아야 방법이 맞다.
+            {
+                const sites = &maru.session.surface.diag_lock_sites;
+                var order: [maru.session.surface.diag_lock_sites_cap]u8 = undefined;
+                var n: usize = 0;
+                for (sites, 0..) |e, i| {
+                    if (e.count == 0) continue;
+                    order[n] = @intCast(i);
+                    n += 1;
+                }
+                var i: usize = 1; // 삽입 정렬(≤64)
+                while (i < n) : (i += 1) {
+                    var j = i;
+                    while (j > 0 and sites[order[j]].count > sites[order[j - 1]].count) : (j -= 1) {
+                        const t = order[j];
+                        order[j] = order[j - 1];
+                        order[j - 1] = t;
+                    }
+                }
+                var total_count: u32 = 0;
+                var total_hold: i128 = 0;
+                for (order[0..n]) |k| {
+                    total_count += sites[k].count;
+                    total_hold += sites[k].hold_ns;
+                }
+                frametime_diag.info("  lock sites: 지점 {d}개 잠금 {d}회(lockCore 카운터 {d}) 보유합 {d:.2}ms (tick당 {d:.1}회) overflow={d}", .{
+                    n,
+                    total_count,
+                    self.ft_win_lock_count,
+                    nsToMs(total_hold),
+                    @as(f64, @floatFromInt(total_count)) / @as(f64, @floatFromInt(@max(window_ticks, 1))),
+                    maru.session.surface.diag_lock_sites_overflow,
+                });
+                for (order[0..@min(n, 12)]) |k| {
+                    const e = sites[k];
+                    frametime_diag.info("    0x{x} {s} ×{d} 보유 합={d:.2}ms 최대={d:.3}ms", .{
+                        e.site,
+                        if (e.in_tick) "tick" else "밖",
+                        e.count,
+                        nsToMs(e.hold_ns),
+                        nsToMs(e.hold_max_ns),
+                    });
+                }
+                maru.session.surface.diagLockSitesReset();
+                self.ft_win_lock_count = 0;
+            }
             self.ft_sum_assemble = 0;
             self.ft_max_total = 0;
         }
@@ -20159,6 +20210,10 @@ pub const AppSession = struct {
             maru.session.surface.diag_lock_wait_max_ns = 0;
             maru.session.surface.diag_lock_count = 0;
             maru.session.surface.diag_lock_wait_max_site = 0;
+            maru.session.surface.diag_in_tick = true;
+        }
+        defer maru.session.surface.diag_in_tick = false; // tick 밖 잠금(이벤트 핸들러)과 가르는 표시
+        if (ft_on) {
             // 리더 쪽(I/O 스레드) 청크당 락 대기/보유 — tick 시작에 0 으로 비우고, 끝(logFrameTime)에서 거둔다.
             // 그래야 «이 tick 이 기다린 보유»가 같은 SLOW 줄에 붙는다(시작에 거두면 직전 창이 찍혀 사각지대).
             const pr = maru.app.pty_reader;

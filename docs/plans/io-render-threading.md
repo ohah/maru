@@ -280,6 +280,31 @@ if (will_project) { active.lockCore(io); defer unlock; renderPrepWrites(); dl = 
 - **atomic 추가**: `title_generation` 필드 하나(core). release 비용 무시 가능.
 - **범위 밖**: (C) **present 분리**(§10.2 B CVDisplayLink/C 렌더 스레드) — 그건 **cadence 층**(무거운 tick이 present를 미는 것)이고, Phase 4는 **contention 층**(tick이 무거워지는 원인)이다. 둘은 상보적이며 Phase 4가 tick을 가볍게 한 뒤 present 분리가 남은 cadence를 잡는 순서가 자연스럽다. sticky row 텍스트 owned 처리(J)의 세부는 P4-2 구현 시 확정.
 
+### 12.9 P4-3 진단 — 호출 지점별 잠금 인벤토리 실측 (2026-09-15) · **판정: 빈 신호 잠금 하나가 60%, 나머지 통합은 보류**
+
+§12.2 인벤토리(«활성 코어 최대 7회»)와 §13.2 실측(tick당 26~41회)이 어긋나 **호출 지점별로** 셌다. `Surface.lockCore` 가 `@returnAddress` 오프셋을 키로 횟수·보유 합·보유 최대를 히스토그램에 넣고(`diag_lock_sites`, unlockCore 집계), 1초 창마다 상위 12개를 찍는다(`lock sites:` 줄). tick 밖 잠금은 `밖` 으로 가른다(`diag_in_tick`). 심볼화: `dsymutil` 로 dSYM 을 만든 뒤 `atos -l 0x100000000 $((lockCore 링크 주소 + 오프셋))`.
+
+**폭포 창(57 tick) 실측 — 수정 전**: 13개 지점 **1582회 = 27.8회/tick**, 보유 합 40.95ms.
+
+| 지점 | 회/tick | 보유 | 무엇 |
+|---|---|---|---|
+| `runtime.applyPtyEvent` (drain 루프, `app_session.zig` drainAvailable) | **16.6** | ≈0 | 리더가 청크마다 보내는 **빈 출력 신호**(bytes.len=0, «다시 그려라»)마다 락을 잡고 `core.write("")` — 코어는 이미 리더가 바꿨으니 **할 일이 없는 잠금** |
+| `coretext_frame_builder.shapeOnlyBuild:100` | 1 | **0.70ms** (max 0.75~1.37) | renderSnapshot + DrawList 복사 — §3 의 그 임계 구역, 유일하게 «일» 이 있는 잠금 |
+| `readActiveSnapshot`(P4-2) · `surfaceClipboardWriteRejected` · `updateScrollbarFade` · `collectFindViewSpans` · cell_colors(palette 복사) · `buildStickyDrawListAndPlacement` · `setCellMetrics` 주입 · `pane.appendScrollbar`(scrollStateOf) · `input.imeComposingActive` | 각 1 | ≈0 (≤2µs) | tick당 한 번씩 값 하나를 읽는 자리들 |
+| `maru_macos_app_session_pending_notification` · `…take_clipboard_read_request` (`app_host_abi.zig`) | 각 1, **tick 밖** | ≈0 | Swift 호스트가 프레임마다 ABI 로 폴링 |
+| `InProcessTermBackend.readObservation` | 0.2 | ≈0 | 에이전트 관찰(≈6 tick 마다) |
+
+**수정(예측 실험)**: `applyPtyEvent` 가 빈 bytes 면 락 없이 상태 전이만 하고 돌아간다(trace 기록 스트림은 그대로). 예측 «27.8 − 16.6 = 11.2/tick, 그 지점 소멸» → 실측 **11.2/tick, 지점 12개, 소멸** — 정확히 일치. 시나리오별 수정 후: 유휴 6.2/tick(tick 안 4 + 호스트 폴 2 + 관찰 0.2), 폭포 11.2, 브라우저 5.2~9.6.
+
+**P4-3 판정**: 남은 11회 중 10회는 보유 ≈0 인 값 읽기고, 양보(§13) 뒤엔 잠금 1회의 비용이 «uncontended lock + unlock 의 futexWake 1회» ≈ 1~2µs 다 — 11회 합쳐 **20~30µs/tick**. 이걸 1~2회로 «통합» 하는 P4-3 은 지금 수치로는 tick 의 0.2% 를 되찾는 일이라 **보류**한다(설계 문서의 «higher-risk, 실기기 검증 필수» 를 감수할 이유가 없다). 유일한 실보유(`shapeOnlyBuild` 0.7ms)는 복사 그 자체라 통합으로 줄지 않는다. §12.2 의 «최대 7회» 는 «tick 안 활성 코어 잠금 지점 수」로는 맞고, 실측 27.8 은 그 위에 «드레인 신호마다 1회」가 얹힌 것이었다 — 그 한 줄이 이번 수정이다.
+
+**진단 방법의 적대적 검증**
+- **예측 실험**: 한 지점을 없애면 총수가 정확히 그만큼 줄어야 한다 → 27.8 → 11.2, 오차 0. 귀속(어느 지점이 몇 번)이 맞다는 가장 강한 확인.
+- **독립 카운터 대조**: 히스토그램(unlockCore 집계)과 `diag_lock_count`(lockCore 집계)를 같은 창에서 비교했더니 **매 창 정확히 2×tick 수만큼** 달랐다(637 vs 523, 57 tick) — lockCore 카운터는 tick 시작에 0 이 되어 **tick 사이**의 호스트 ABI 폴 2회를 버린다. 차이가 «밖」 지점 수와 정확히 같아 두 방법이 서로를 설명한다. 부산물: SLOW 줄의 `횟수=` 는 그 2회를 **뺀** 값이다(문서화).
+- **심볼화 교차 확인**: 오프셋 → 줄 번호가 코드 읽기와 1:1 로 맞았다(drain 루프 ↔ `applyPtyEvent` 의 lock, 각 tick당-1회 지점 ↔ 해당 함수의 `lockCore`). `@returnAddress` 는 인라인된 호출자를 `tick+오프셋` 으로 뭉치지만 dSYM 줄 번호가 이를 푼다.
+- **자기 결함**: 첫 판의 `tick당` 분모가 리셋 뒤의 `ft_ticks`(=0) 를 읽어 «tick당 383회」로 찍혔다 — 창 tick 수를 리셋 전에 잡아 고쳤다. 수치를 읽을 때 «tick당 = 총수/창 tick」 으로 손으로 검산한 것이 잡았다.
+- **정합성**: 보유 합(40ms) ≤ 창의 tick 합(57×9.3ms = 530ms), 7.6% — 렌더 스냅샷 복사 비중으로 그럴듯하다. 폭포 처리 시간(4.24~4.28s)·rate 최저(56.4~59.5Hz)는 수정 전후 잡음 범위 안 — 이 수정은 **횟수**를 줄인 것이지 wall-time 을 크게 되찾는 것이 아니다(양보가 이미 대기를 없앴으므로).
+
 ## 13. 코어 락 양보(handoff) — 불공정 mutex 아래 렌더 기아 방지 (구현 2026-09-15)
 
 > 단일 출처(design + 실측). §12가 메인의 락 **횟수**를 다룬다면, §13은 한 번 잡을 때의 **차례**를 다룬다. 계약 문서 §3 «짧은 보유 ≠ 짧은 대기» 항목과 §5 정정의 근거가 여기 있다.

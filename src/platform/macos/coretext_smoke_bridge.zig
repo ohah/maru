@@ -127,6 +127,15 @@ pub extern fn maru_macos_coretext_chrome_font_cache_stats_for_test(
     out_misses: *u64,
 ) void;
 
+/// [진단·present §10.7] 직전 shape_draw_list 호출의 단계별 ns — 문자열 조립·CTLine 생성·글리프 방출·폰트 준비, run 수. hidden.
+pub extern fn maru_macos_coretext_shape_diag_stats(
+    out_prep_ns: *u64,
+    out_line_ns: *u64,
+    out_emit_ns: *u64,
+    out_font_ns: *u64,
+    out_runs: *u64,
+) void;
+
 pub extern fn maru_macos_coretext_smoke_rasterize_glyph(
     requested_font_family: [*]const u8,
     requested_font_family_len: usize,

@@ -896,7 +896,7 @@ pub const PtyReader = struct {
         // 여기서 free 한다 — payload·옛 이미지는 core.allocator 소유라 그쪽으로 돌려준다.
         if (self.core) |core| {
             for (self.kitty_jobs.items) |*job| {
-                core.allocator.free(job.payload);
+                terminal.kitty.freeJobPayload(core.allocator, job.payload, job.payload_cap);
                 if (job.old_image) |*o| o.freeAll(core.allocator);
             }
         }

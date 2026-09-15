@@ -12556,3 +12556,130 @@ test "kitty 락 밖 디코드 [적대]: job 생성이 OOM 이면 ENOMEM 을 즉�
     }
     try std.testing.expect(saw_enomem >= 1);
 }
+
+/// 테스트용 최소 PNG(RGBA 8-bit, 필터 0, zlib): w×h 를 `seed` 로 채운다. 반환은 base64.
+fn kittyTestPngB64(alloc: std.mem.Allocator, w: u32, h: u32, seed: u8) ![]u8 {
+    var raw: std.ArrayList(u8) = .empty;
+    defer raw.deinit(alloc);
+    var y: u32 = 0;
+    while (y < h) : (y += 1) {
+        try raw.append(alloc, 0); // filter none
+        var x: u32 = 0;
+        while (x < w) : (x += 1) try raw.appendSlice(alloc, &.{ @intCast((x * 40 + seed) & 0xff), @intCast((y * 60) & 0xff), seed, 255 });
+    }
+    var zbuf: [4096]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&zbuf);
+    var comp_storage: [std.compress.flate.max_window_len * 2]u8 = undefined;
+    var comp = try std.compress.flate.Compress.init(&out, &comp_storage, .zlib, .default);
+    try comp.writer.writeAll(raw.items);
+    try comp.finish();
+    const idat = out.buffered();
+    var png_bytes: std.ArrayList(u8) = .empty;
+    defer png_bytes.deinit(alloc);
+    try png_bytes.appendSlice(alloc, "\x89PNG\r\n\x1a\n");
+    const Chunk = struct {
+        fn append(list: *std.ArrayList(u8), a: std.mem.Allocator, tag: []const u8, data: []const u8) !void {
+            var len_be: [4]u8 = undefined;
+            std.mem.writeInt(u32, &len_be, @intCast(data.len), .big);
+            try list.appendSlice(a, &len_be);
+            try list.appendSlice(a, tag);
+            try list.appendSlice(a, data);
+            var crc = std.hash.Crc32.init();
+            crc.update(tag);
+            crc.update(data);
+            var crc_be: [4]u8 = undefined;
+            std.mem.writeInt(u32, &crc_be, crc.final(), .big);
+            try list.appendSlice(a, &crc_be);
+        }
+    };
+    var ihdr: [13]u8 = undefined;
+    std.mem.writeInt(u32, ihdr[0..4], w, .big);
+    std.mem.writeInt(u32, ihdr[4..8], h, .big);
+    ihdr[8] = 8; // bit depth
+    ihdr[9] = 6; // RGBA
+    ihdr[10] = 0;
+    ihdr[11] = 0;
+    ihdr[12] = 0;
+    try Chunk.append(&png_bytes, alloc, "IHDR", &ihdr);
+    try Chunk.append(&png_bytes, alloc, "IDAT", idat);
+    try Chunk.append(&png_bytes, alloc, "IEND", "");
+    const b64 = try alloc.alloc(u8, std.base64.standard.Encoder.calcSize(png_bytes.items.len));
+    _ = std.base64.standard.Encoder.encode(b64, png_bytes.items);
+    return b64;
+}
+
+test "kitty 락 밖 디코드 [PNG]: f=100 은 IHDR 만 락 아래에서 엿보고 pending 을 잡는다 — 완료가 디코더 치수로 설치한다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    core.kitty_defer_decode = true;
+    const b64 = try kittyTestPngB64(std.testing.allocator, 2, 3, 9);
+    defer std.testing.allocator.free(b64);
+    const seq = try std.fmt.allocPrint(std.testing.allocator, "\x1b_Ga=T,f=100,i=7;{s}\x1b\\", .{b64});
+    defer std.testing.allocator.free(seq);
+    try core.write(seq);
+    // 자리: IHDR 치수(2×3)·bpp 4·pending·placement·job(format 100)·응답 없음.
+    const entry = core.kitty_images.map.get(7).?;
+    try std.testing.expect(entry.isPending());
+    try std.testing.expectEqual(@as(u32, 2), entry.width);
+    try std.testing.expectEqual(@as(u32, 3), entry.height);
+    try std.testing.expectEqual(@as(u8, 4), entry.bpp);
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_placements.items.len);
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_pending_jobs.items.len);
+    try std.testing.expectEqual(@as(u32, 100), core.kitty_pending_jobs.items[0].format);
+    try std.testing.expectEqualStrings("", core.pendingResponse());
+    // 완료: 2×3×4 = 24B 설치, 첫 픽셀이 seed 로 채운 값, OK.
+    _ = try kittyDeferDrain(&core);
+    const done = core.kitty_images.map.get(7).?;
+    try std.testing.expect(!done.isPending());
+    try std.testing.expectEqual(@as(usize, 24), done.data.len);
+    try std.testing.expectEqual(@as(u8, 9), done.data[0]); // x=0: (0*40+9)&0xff
+    try std.testing.expectEqual(@as(u8, 255), done.data[3]);
+    try std.testing.expectEqual(@as(usize, 24), core.kitty_images.total_bytes);
+    try std.testing.expectEqual(@as(usize, 1), core.buildImageViews().len);
+    try std.testing.expectEqualStrings("\x1b_Gi=7;OK\x1b\\", core.pendingResponse());
+    core.clearResponse();
+    // 같은 id 재전송(다른 치수 4×1): 완료까지 옛 것이 보이고, 완료가 새 치수로 교체한다(#3765 규칙이 PNG 에도).
+    const b64b = try kittyTestPngB64(std.testing.allocator, 4, 1, 3);
+    defer std.testing.allocator.free(b64b);
+    const seq2 = try std.fmt.allocPrint(std.testing.allocator, "\x1b_Ga=T,f=100,i=7;{s}\x1b\\", .{b64b});
+    defer std.testing.allocator.free(seq2);
+    try core.write(seq2);
+    try std.testing.expectEqual(@as(u32, 2), core.kitty_images.map.get(7).?.width);
+    try std.testing.expectEqual(@as(usize, 1), core.buildImageViews().len);
+    _ = try kittyDeferDrain(&core);
+    try std.testing.expectEqual(@as(u32, 4), core.kitty_images.map.get(7).?.width);
+    try std.testing.expectEqual(@as(usize, 16), core.kitty_images.total_bytes);
+}
+
+test "kitty 락 밖 디코드 [PNG·적대]: o=z 로 한 겹 더 압축된 PNG 와 PNG 가 아닌 f=100 은 인라인으로 간다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    core.kitty_defer_decode = true;
+    // PNG 가 아닌 바이트(f=100): 엿보기가 실패 → 인라인 → EINVAL, job 없음.
+    try core.write("\x1b_Ga=t,f=100,i=8;AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\x1b\\");
+    try std.testing.expectEqual(@as(usize, 0), core.kitty_pending_jobs.items.len);
+    try std.testing.expect(!core.kitty_images.map.contains(8));
+    try std.testing.expectEqualStrings("\x1b_Gi=8;EINVAL:bad graphics command\x1b\\", core.pendingResponse());
+    core.clearResponse();
+    // o=z PNG: 헤더를 못 엿보니 인라인으로 정상 설치(job 없음, 즉시 OK).
+    const b64 = try kittyTestPngB64(std.testing.allocator, 2, 2, 1);
+    defer std.testing.allocator.free(b64);
+    const png_bytes = try std.testing.allocator.alloc(u8, std.base64.standard.Decoder.calcSizeForSlice(b64) catch unreachable);
+    defer std.testing.allocator.free(png_bytes);
+    try std.base64.standard.Decoder.decode(png_bytes, b64);
+    var zbuf: [4096]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&zbuf);
+    var comp_storage: [std.compress.flate.max_window_len * 2]u8 = undefined;
+    var comp = try std.compress.flate.Compress.init(&out, &comp_storage, .zlib, .default);
+    try comp.writer.writeAll(png_bytes);
+    try comp.finish();
+    const zb64 = try std.testing.allocator.alloc(u8, std.base64.standard.Encoder.calcSize(out.buffered().len));
+    defer std.testing.allocator.free(zb64);
+    _ = std.base64.standard.Encoder.encode(zb64, out.buffered());
+    const seq = try std.fmt.allocPrint(std.testing.allocator, "\x1b_Ga=t,f=100,o=z,i=9;{s}\x1b\\", .{zb64});
+    defer std.testing.allocator.free(seq);
+    try core.write(seq);
+    try std.testing.expectEqual(@as(usize, 0), core.kitty_pending_jobs.items.len);
+    try std.testing.expect(!core.kitty_images.map.get(9).?.isPending());
+    try std.testing.expectEqualStrings("\x1b_Gi=9;OK\x1b\\", core.pendingResponse());
+}

@@ -435,7 +435,9 @@ unlock · yieldToDemand                            job.decode(core.allocator):  
 - **한도(320MB)·evict**: pending 은 0 바이트로 센다. 실 크기 판정과 evict 는 완료 시 락 아래에서(오늘 `storeKittyImage` 와 같은 규칙). 실패면 엔트리+placement 제거, ENOMEM.
 - **옛 이미지 free**: 같은 id 교체로 밀려난 옛 `KittyImage` 는 job 이 들고 나가 락 밖에서 `freeAll`(ReleaseSafe 1.56ms 였던 것). 그 순간 map 에는 없으니 아무도 참조하지 않는다 — 메인은 락 아래에서 픽셀을 자기 버퍼로 **복사**해 나온다(§10.6 재사용 버퍼).
 - **켜는 조건**: `TerminalCore.kitty_defer_decode`(기본 false). 리더가 **자기 `core.write` 호출 동안만** true 로 둔다 — 호출 뒤 남는 job 을 곧바로 드레인할 책임자가 켜는 것이다. 메인이 `lockCore` 아래에서 `core.write` 하는 경로(테스트·헤드리스 FrameLoop)는 인라인이라 pending 을 남기지 않는다.
-- **범위**: direct `f=24/32`(압축 유무 무관). `f=100` PNG 는 치수를 디코드해야 알아 placement 를 먼저 만들 수 없다 — 이번엔 인라인 유지(§13.7 표의 PNG 는 없었고, 브라우저는 f=32). `a=q`(query) 도 인라인(1×1 관례).
+- **범위**: direct `f=24/32`(압축 유무 무관) **그리고 `f=100` PNG**(2026-09-15 후속). PNG 는 치수가 파일 안에 있지만 IHDR(시그니처+첫 청크, 33 바이트 = base64 44 자)만 락 아래에서 엿보면 O(1)로 나온다 — 그 치수·bpp 4 로 pending 을 잡고 `png.decode` 는 리더가 락 밖에서 한다(설치는 디코더 치수를 믿는다). `o=z` 로 한 겹 더 압축된 PNG 는 헤더를 못 엿보니 인라인(드물다). `a=q`(query) 도 인라인(1×1 관례).
+  실측(2.9MB PNG 1720×846, 30장): 락 보유 **16~17.5ms → <1ms**, 메인 대기 >1ms 30회 → 0, SLOW 28 → 2(기동 1 + 1).
+- **payload 복사도 락 밖으로**: 마지막 청크에서 payload(3.7MB base64)를 `dupe` 하면 그것만 1.3ms 다. chunked 누적 버퍼(`kitty_chunk`)가 곧 payload 면 버퍼를 **통째로(capacity 그대로)** job 에 옮기고(`toOwnedSlice` 는 capacity>len 이면 재할당·복사라 안 쓴다), 완료가 락 아래에서 그 버퍼를 코어에 **되돌려**(adopt) 다음 이미지가 재사용한다 — 재예약 할당(4MB, 1.3ms)도 없다. 다음 이미지의 청크는 완료 뒤에야 파싱되므로 그 사이 버퍼가 필요한 곳이 없다.
 
 **불변식**
 - 리더는 `applyToCore` **조각마다 끝에서** 그 조각의 job 을 완료한다 → pause/handoff 경계(`pausedStateIsSafe`)에 pending 이미지·job 이 없다(판정에 추가). `kitty_pending_jobs` 는 인벤토리 `must_be_empty`, `kitty_defer_decode` 는 `reconstructed`.

@@ -128,23 +128,53 @@ pub const CodexSandbox = enum {
 /// **잘린 값이 플래그로 나가는 일이 없게** 한다.
 pub const max_model_bytes: usize = 64;
 
-/// 이 텍스트가 provider 에 그대로 넘길 수 있는 모델 토큰인가.
+/// 재개 argv 에 실을 수 있는 **세션 id** 의 최대 길이. 실측은 전부 36 바이트 UUID 다(2026-09-15, Claude 300 ·
+/// Codex 229 표본에서 예외 0). 그보다 넉넉히 잡는 이유는 Codex `resume` 이 UUID 말고 **세션 이름**도 받기
+/// 때문이다 — 지금 우리가 읽는 `session_meta.payload.id` 는 UUID 지만, 그 자리에 이름이 오는 날
+/// 전부를 못 쓰게 만들 이유는 없다. UUID 모양을 강제하지 않는 이유이기도 하다.
+pub const max_session_id_bytes: usize = 128;
+
+/// 이 텍스트를 **provider 플래그의 값으로** 그대로 넘겨도 되는가.
+///
+/// transcript 내용이 실행 인자가 되는 자리는 둘뿐이다(세션 id · 모델). 둘 다 같은 위험을 지므로 규칙도
+/// 하나다 — 규칙이 둘이면 한쪽이 낡는다.
+///
+/// ⑴ **문자 집합**: 실측된 값이 쓰는 것뿐이다(`gpt-5.6-sol` 의 `.`, UUID 의 `-`). 셸 인용은 이미
+///    호출자가 하지만(§6) 인용은 **셸**로부터 지킬 뿐 **provider 의 인자 파서**로부터 지키지 못한다.
+/// ⑵ **첫 글자는 `-` 가 아니다**: `--model '-rf'` 는 셸에 안전하게 도착해도 provider 가 그것을 **플래그로**
+///    읽는다. 값 자리에 오는 토큰이 플래그로 오인되면 우리가 의도한 것과 다른 명령이 선다.
+/// ⑶ **길이 상한**: 호출자가 준다. 표시용 사본이 잘리는 선 아래여야 **잘린 값이 플래그로 나가지 않는다**.
+fn isSafeArgvToken(text: []const u8, max_len: usize) bool {
+    if (text.len == 0 or text.len > max_len) return false;
+    if (text[0] == '-') return false;
+    for (text) |byte| switch (byte) {
+        'a'...'z', 'A'...'Z', '0'...'9', '.', '_', '-' => {},
+        else => return false,
+    };
+    return true;
+}
+
+/// 이 텍스트가 재개 argv 에 실을 수 있는 모델 토큰인가.
 ///
 /// **거를 것이 실재한다.** Claude Code 는 합성 assistant 줄에 `"model":"<synthetic>"` 를 적는다(사용자
 /// 이력 표본 2026-09-15, 최근 60일 200개 파일에서 67건). 모델은 "마지막에 본 값"이 이기므로 그런 줄이
 /// 마지막이면 그 값이 카드에도 뜨고 `--model '<synthetic>'` 로 재개까지 간다. 표시와 재개가 같은 필드를
 /// 쓰므로 **거르는 자리도 하나**다 — 파서가 아예 기록하지 않는다.
 ///
-/// 허용 문자는 실측된 모델 id 가 쓰는 것뿐이다(`gpt-5.6-sol` 의 `.` 포함). 새 provider 가 다른 모양을
-/// 쓰기 시작하면 여기서 조용히 빠지는 게 아니라 `model` 이 비어 재개가 **기본 모델**로 가고, 카드에도
-/// 모델 줄이 안 뜬다 — 눈에 보이는 실패다.
+/// 새 provider 가 다른 모양을 쓰기 시작하면 조용히 빠지는 게 아니라 `model` 이 비어 재개가 **기본 모델**로
+/// 가고 카드에도 모델 줄이 안 뜬다 — 눈에 보이는 실패다.
 pub fn isResumableModel(text: []const u8) bool {
-    if (text.len == 0 or text.len > max_model_bytes) return false;
-    for (text) |byte| switch (byte) {
-        'a'...'z', 'A'...'Z', '0'...'9', '.', '_', '-' => {},
-        else => return false,
-    };
-    return true;
+    return isSafeArgvToken(text, max_model_bytes);
+}
+
+/// 이 텍스트가 재개 argv 에 실을 수 있는 세션 id 인가.
+///
+/// 못 쓰는 id 는 **그 세션을 목록에 넣지 않는** 사유다. 모델과 다른 판단인데, 이유는 그 값이 하는 일이
+/// 다르기 때문이다 — 모델은 없으면 기본값으로 열리지만, **id 는 그 세션을 가리키는 유일한 손잡이**라
+/// 못 쓰면 재개도 exact-live 대조도 성립하지 않는다. 파서는 이미 빈 id 를 같은 이유로 떨어뜨리고
+/// 있었고(`finishClaude`·`finishCodex`), 이것은 그 규율을 "빈 값"에서 "못 가리키는 값"으로 넓힌 것이다.
+pub fn isResumableSessionId(text: []const u8) bool {
+    return isSafeArgvToken(text, max_session_id_bytes);
 }
 
 pub const max_title_bytes: usize = 120;
@@ -370,7 +400,7 @@ pub const Parser = struct {
     }
 
     fn finishClaude(self: *Parser) !?Parsed {
-        if (self.session_id.len == 0) return null;
+        if (!isResumableSessionId(self.session_id)) return null;
         const display_title = if (self.title.len > 0) self.title else if (self.first_user.len > 0) self.first_user else i18n.t(.arch_untitled);
         const summary = if (self.last_user.len > 0) self.last_user else self.last_assistant;
         var parsed = try duplicateParsed(self.allocator, .claude, self.session_id, display_title, summary, self.cwd, false, self.model, self.count, true);
@@ -380,7 +410,7 @@ pub const Parser = struct {
     }
 
     fn finishCodex(self: *Parser) !?Parsed {
-        if (!self.saw_meta or !self.is_user or self.session_id.len == 0) return null;
+        if (!self.saw_meta or !self.is_user or !isResumableSessionId(self.session_id)) return null;
         const title = if (self.first_user.len > 0) self.first_user else i18n.t(.arch_untitled);
         const summary = if (self.last_user.len > 0) self.last_user else self.last_assistant;
         var parsed = try duplicateParsed(self.allocator, .codex, self.session_id, title, summary, self.cwd, false, self.model, self.count, true);
@@ -990,26 +1020,75 @@ test "Claude 권한 모드: default 는 플래그를 안 붙이고, 모르는 �
 // 재개는 모델도 되살린다. 안 그러면 Opus 로 돌던 세션을 이어할 때 기본 모델로 조용히 떨어진다.
 // 아래 셋이 ⑴ 무엇을 모델로 인정하는지 ⑵ 그것이 표시와 argv 양쪽에 같은 값으로 가는지를 고정한다.
 
-test "모델 토큰: 허용되는 바이트는 «정확히» 65 개다" {
+test "argv 토큰 규칙: 첫 자리는 «허용된 64 개», 그 뒤는 65 개다" {
     // 「금지된 모양이 없다」로 재면 갈아입을 때마다 샌다. 허용된 자리를 **세어** 못 박는다.
-    var allowed: usize = 0;
+    // 두 자리를 따로 세는 것이 요점이다 — `-` 는 값 안에서는 쓰이지만(UUID·모델 이름) 맨 앞에 오면
+    // provider 가 플래그로 읽는다.
+    var first: usize = 0;
+    var later: usize = 0;
     var byte: u8 = 0;
     while (true) : (byte += 1) {
-        if (isResumableModel(&[_]u8{byte})) allowed += 1;
+        if (isResumableModel(&[_]u8{byte})) first += 1;
+        if (isResumableModel(&[_]u8{ 'a', byte })) later += 1;
         if (byte == 255) break;
     }
-    try std.testing.expectEqual(@as(usize, 26 + 26 + 10 + 3), allowed);
+    try std.testing.expectEqual(@as(usize, 26 + 26 + 10 + 2), first); // `-` 빠짐
+    try std.testing.expectEqual(@as(usize, 26 + 26 + 10 + 3), later);
+    try std.testing.expect(!isResumableModel("-rf"));
+    try std.testing.expect(!isResumableSessionId("-x"));
 
-    // 실측된 모델 id 들은 전부 통과한다(별칭 포함).
+    // 실측된 값들은 전부 통과한다(모델 별칭·UUID 세션 id 포함).
     for ([_][]const u8{ "claude-opus-5", "claude-fable-5-1", "opus", "gpt-5.6-sol", "gpt-6-astra" }) |value|
         try std.testing.expect(isResumableModel(value));
+    for ([_][]const u8{ "b7078fe1-119e-4bd7-92c3-eee2a477922d", "fixture-codex-session" }) |value|
+        try std.testing.expect(isResumableSessionId(value));
 
-    // 길이 경계: 상한까지는 통과하고 한 바이트만 넘어도 떨어진다. 그래야 잘린 값이 플래그로 안 나간다.
-    const at_limit = [_]u8{'a'} ** max_model_bytes;
-    const over_limit = [_]u8{'a'} ** (max_model_bytes + 1);
-    try std.testing.expect(isResumableModel(&at_limit));
-    try std.testing.expect(!isResumableModel(&over_limit));
+    // 길이 경계는 **자리마다 다르다**. 각자 상한까지는 통과하고 한 바이트만 넘어도 떨어진다 —
+    // 그래야 잘린 값이 플래그로 안 나간다. 상한이 하나로 뭉치면 그 구분이 사라진다.
+    const model_at = [_]u8{'a'} ** max_model_bytes;
+    const model_over = [_]u8{'a'} ** (max_model_bytes + 1);
+    try std.testing.expect(isResumableModel(&model_at));
+    try std.testing.expect(!isResumableModel(&model_over));
+    const id_at = [_]u8{'a'} ** max_session_id_bytes;
+    const id_over = [_]u8{'a'} ** (max_session_id_bytes + 1);
+    try std.testing.expect(isResumableSessionId(&id_at));
+    try std.testing.expect(!isResumableSessionId(&id_over));
+    // 세션 id 상한이 모델 상한보다 넓다는 것도 못 박는다 — 하나로 합치려는 변경이 여기서 걸린다.
+    try std.testing.expect(!isResumableModel(&id_at));
+
     try std.testing.expect(!isResumableModel(""));
+    try std.testing.expect(!isResumableSessionId(""));
+}
+
+test "가리킬 수 없는 세션 id 는 목록에 넣지 않는다 — 두 provider 다" {
+    const a = std.testing.allocator;
+    // `-` 로 시작하는 id 는 `--resume '-x'` 로 나가 provider 가 플래그로 읽는다. 셸 인용은 셸로부터만
+    // 지켜 준다. 빈 id 를 떨어뜨리던 규율을 "못 가리키는 값"까지 넓힌 자리다.
+    const claude_flagish =
+        \\{"sessionId":"-x","cwd":"/repo","type":"user","message":{"role":"user","text":"요청"}}
+    ;
+    try std.testing.expect((try parse(a, .claude, claude_flagish)) == null);
+
+    const codex_flagish =
+        \\{"type":"session_meta","payload":{"id":"--repo","cwd":"/repo","thread_source":"user"}}
+        \\{"type":"event_msg","payload":{"type":"user_message","message":"요청"}}
+    ;
+    try std.testing.expect((try parse(a, .codex, codex_flagish)) == null);
+
+    // 제어문자가 섞인 id 도 마찬가지다. 세션 id 는 표시용 정제(`displayCopy`)를 **안 거치고** 그대로
+    // 복사되므로, 여기서 막지 않으면 어디에도 막는 자리가 없다.
+    const claude_control =
+        \\{"sessionId":"a\u0007b","cwd":"/repo","type":"user","message":{"role":"user","text":"요청"}}
+    ;
+    try std.testing.expect((try parse(a, .claude, claude_control)) == null);
+
+    // 정상 UUID 는 그대로 통과한다 — 이 게이트가 실제 이력을 떨어뜨리지 않는다는 반대편 증거다.
+    const ok =
+        \\{"sessionId":"b7078fe1-119e-4bd7-92c3-eee2a477922d","cwd":"/repo","type":"user","message":{"role":"user","text":"요청"}}
+    ;
+    var parsed = (try parse(a, .claude, ok)).?;
+    defer parsed.deinit(a);
+    try std.testing.expectEqualStrings("b7078fe1-119e-4bd7-92c3-eee2a477922d", parsed.session_id);
 }
 
 test "모델 상한은 표시용 절단선 «안»이라야 한다 — 잘린 이름이 플래그로 나가면 안 된다" {

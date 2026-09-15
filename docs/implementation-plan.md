@@ -1316,6 +1316,12 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    만들고 duplicate/new-but-persistent/unsigned·non-Apple/PID·signing drift, close 부재, screen mutation을 모두 거부한 뒤
    제품 producer를 연결한다. macOS 11 제품 하한은 바꾸지 않고 gate의 ScreenCaptureKit 사용은 availability 검사를 거친
    opt-in 경로로 격리한다.
+   **v2b0b 제품 배선은 doc-first로 다음 경계를 고정한다.** 별도 Swift producer가 title 없는 전체 inventory의
+   `before/opened/closed` 5묶음을 메모리에만 모으고, 완성 뒤 한 번만 bounded JSON+고정된 absent output pathname을
+   동기식 Zig C ABI에 빌려준다. Zig가 schema/window/byte cap을 선검증하고 기존 pure reducer·series validator와 canonical
+   writer를 직접 소유한다. raw inventory 중간 파일, Swift 선택 규칙 복제, 장수명 helper, ABI retry/부분 publication은 0이다.
+   Screen Recording preflight 실패는 source/HID mutation 전에 typed `not_provisioned`로 끝나며, v2b0b green은 v2b1 단일-window
+   pixel capture를 완료로 승격하지 않는다.
    CR6e는 세 gate로 나눈다. **CR6e-a1 transport baseline**은 제품 deadline-aware
    exact-host issuer에 실제 Unix peer의 accept 후 hello 무응답과 transient connect backoff를 주입하고, absolute deadline,
    attempt/wait 수, elapsed, fd/RSS를 strict-schema raw artifact로 남긴다. **CR6e-a2 recovery baseline**은 반복 CR6c

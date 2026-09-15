@@ -2005,3 +2005,290 @@ test "글리프 목표크기 직접 래스터가 1.7× 확대보다 선명하다
     // 폰트 글리프 ◧의 stretch 흐림(≈0.69)과 달리 grip ⠿는 선명화가 불필요함을 못박는다(maru 코드라 폰트 독립).
     try std.testing.expect(m_braille.partialRatio() < 0.1);
 }
+
+// ── grid run 캐시(§10.8) — 구현 방법의 적대적 검증 ─────────────────────────────────────────────────────
+//
+// 캐시는 «CTLine 을 안 만들어도 같은 레코드가 나온다」 는 주장이다. 그래서 검증의 축은 **차등 비교**다: 캐시를 끈
+// 셰이핑(진실)과 켠 셰이핑(첫 호출 미스·둘째 호출 적중)이 글리프 단위로 같아야 하고, 적중 카운터가 실제로 올라야
+// 한다(«같은데 캐시가 안 돈」 것을 가른다). 재기준·설정 변경·해시 충돌·용량 도태를 각각 따로 민다.
+
+const cache_hooks = struct {
+    fn reset() void {
+        coretext_bridge.maru_macos_coretext_shape_cache_reset_for_test();
+    }
+    fn enable(on: bool) void {
+        coretext_bridge.maru_macos_coretext_shape_cache_set_enabled(if (on) 1 else 0);
+    }
+    const Stats = struct { hits: u64, misses: u64, entries: u64, bytes: u64, uncacheable: u64 };
+    fn stats() Stats {
+        var s: Stats = undefined;
+        coretext_bridge.maru_macos_coretext_shape_cache_stats(&s.hits, &s.misses, &s.entries, &s.bytes, &s.uncacheable);
+        return s;
+    }
+};
+
+/// 시나리오 텍스트: 합자·한글(완성형+NFD)·box-drawing·이모지·bold/italic·wide — run 이 갈라지는 조건을 다 밟는다.
+const cache_scenarios = [_][]const u8{
+    "const x = a === b && c !== d -> e;",
+    "한글 문장과 English mixed 텍스트 ──── │ box",
+    "\x1b[1mbold run\x1b[0m then \x1b[3mitalic\x1b[0m and \x1b[1;3mboth\x1b[0m tail",
+    "emoji ✅ 🎉 wide 漢字 and ⚡ fin",
+    "    indented    with    spaces   ",
+    "\xe1\x84\x92\xe1\x85\xa1\xe1\x86\xab NFD-han and 한 NFC-han",
+};
+
+/// 시나리오 하나를 코어에 써서 DrawList 를 만들고 셰이핑한다. 커서는 마지막 글자 뒤(합자 row 에도 한 번 얹힌다).
+fn shapeScenario(
+    allocator: std.mem.Allocator,
+    shaper: coretext_shaper.CoreTextDrawListShaper,
+    registry: *renderer.FontIdentityRegistry,
+    text: []const u8,
+    row: u16,
+    col: u16,
+    cursor_on_text: bool,
+) !renderer.ShapedGlyphRunList {
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 80, .rows = 8 });
+    defer core.deinit();
+    core.clearDirty();
+    var seq_buf: [32]u8 = undefined;
+    try core.write(try std.fmt.bufPrint(&seq_buf, "\x1b[{d};{d}H", .{ row + 1, col + 1 }));
+    try core.write(text);
+    if (cursor_on_text) try core.write(try std.fmt.bufPrint(&seq_buf, "\x1b[{d};{d}H", .{ row + 1, col + 4 }));
+    var dl = try renderer.buildDrawList(allocator, core.snapshot());
+    defer dl.deinit(allocator);
+    return try shaper.shape(allocator, dl, registry);
+}
+
+fn expectSameGlyphs(a: renderer.ShapedGlyphRunList, b: renderer.ShapedGlyphRunList) !void {
+    try std.testing.expectEqual(a.runs.glyphs.len, b.runs.glyphs.len);
+    for (a.runs.glyphs, b.runs.glyphs) |ga, gb| {
+        try std.testing.expectEqual(ga.row, gb.row);
+        try std.testing.expectEqual(ga.col, gb.col);
+        try std.testing.expectEqual(ga.cell_width, gb.cell_width);
+        try std.testing.expectEqual(ga.codepoint, gb.codepoint);
+        try std.testing.expectEqual(ga.font_id, gb.font_id);
+        try std.testing.expectEqual(ga.glyph_id, gb.glyph_id);
+        try std.testing.expectEqual(ga.fallback, gb.fallback);
+        try std.testing.expectEqual(ga.replacement, gb.replacement);
+        try std.testing.expect(std.meta.eql(ga.cache_key, gb.cache_key));
+    }
+    try std.testing.expectEqual(a.color_glyph_count, b.color_glyph_count);
+    try std.testing.expectEqual(a.skipped_count, b.skipped_count);
+}
+
+test "run 캐시 [적대·차등]: 캐시 끔 = 첫 호출(미스) = 둘째 호출(적중) — 글리프 단위로 같고 적중이 실제로 난다" {
+    const allocator = std.testing.allocator;
+    const appearance = try config.resolveAppearance(.{});
+    const shaper = coretext_shaper.CoreTextDrawListShaper{ .appearance = appearance, .shape_draw_list = maru_macos_coretext_shape_draw_list };
+    var registry = renderer.FontIdentityRegistry.init(allocator); // 한 registry — font_id 가 pass 마다 같게
+    defer registry.deinit();
+
+    for (cache_scenarios) |text| {
+        for ([_]bool{ false, true }) |cursor| {
+            cache_hooks.reset();
+            cache_hooks.enable(false);
+            var truth = try shapeScenario(allocator, shaper, &registry, text, 2, 3, cursor);
+            defer truth.deinit(allocator);
+            try std.testing.expect(truth.runs.glyphs.len > 0);
+
+            cache_hooks.enable(true);
+            var first = try shapeScenario(allocator, shaper, &registry, text, 2, 3, cursor);
+            defer first.deinit(allocator);
+            const after_first = cache_hooks.stats();
+            var second = try shapeScenario(allocator, shaper, &registry, text, 2, 3, cursor);
+            defer second.deinit(allocator);
+            const after_second = cache_hooks.stats();
+
+            try expectSameGlyphs(truth, first);
+            try expectSameGlyphs(truth, second);
+            // 첫 호출은 전부 미스, 둘째 호출은 전부 적중이어야 한다(캐시 가능한 run 이 하나 이상).
+            try std.testing.expectEqual(@as(u64, 0), after_first.hits);
+            try std.testing.expect(after_first.misses >= 1);
+            try std.testing.expect(after_second.hits >= after_first.misses);
+            try std.testing.expectEqual(after_first.misses, after_second.misses); // 둘째 호출에 새 미스가 없다
+        }
+    }
+    cache_hooks.enable(true);
+}
+
+test "run 캐시 [적대·재기준]: 같은 내용을 다른 행에 놓으면 적중하고 glyph 는 같고 row 만 다르다 — 열 이동은 앞 공백이 키에 들어 미스지만 정답이다" {
+    const allocator = std.testing.allocator;
+    const appearance = try config.resolveAppearance(.{});
+    const shaper = coretext_shaper.CoreTextDrawListShaper{ .appearance = appearance, .shape_draw_list = maru_macos_coretext_shape_draw_list };
+    var registry = renderer.FontIdentityRegistry.init(allocator);
+    defer registry.deinit();
+    cache_hooks.reset();
+    cache_hooks.enable(true);
+    const text = "scroll me: a === b 한글 ✅ ──";
+    var at_a = try shapeScenario(allocator, shaper, &registry, text, 0, 0, false);
+    defer at_a.deinit(allocator);
+    const s1 = cache_hooks.stats();
+    // 행만 다르다(스크롤) → 적중, row 만 +5.
+    var at_b = try shapeScenario(allocator, shaper, &registry, text, 5, 0, false);
+    defer at_b.deinit(allocator);
+    const s2 = cache_hooks.stats();
+    try std.testing.expect(s2.hits > s1.hits);
+    try std.testing.expectEqual(at_a.runs.glyphs.len, at_b.runs.glyphs.len);
+    for (at_a.runs.glyphs, at_b.runs.glyphs) |ga, gb| {
+        try std.testing.expectEqual(ga.row + 5, gb.row);
+        try std.testing.expectEqual(ga.col, gb.col);
+        try std.testing.expectEqual(ga.glyph_id, gb.glyph_id);
+        try std.testing.expectEqual(ga.font_id, gb.font_id);
+        try std.testing.expectEqual(ga.cell_width, gb.cell_width);
+        try std.testing.expectEqual(ga.codepoint, gb.codepoint);
+    }
+    // 열이 다르면(들여쓰기) 그 행의 run 은 앞 공백 7칸을 **포함**해 키가 달라 미스다 — 의도한 보수성: 앞 공백이 contextual
+    // alternates 의 문맥일 수 있어 키에서 빼지 않는다(§10.8). 미스여도 답은 진실과 같아야 한다.
+    var at_c = try shapeScenario(allocator, shaper, &registry, text, 5, 7, false);
+    defer at_c.deinit(allocator);
+    const s3 = cache_hooks.stats();
+    try std.testing.expectEqual(s2.hits, s3.hits);
+    try std.testing.expect(s3.misses > s2.misses);
+    cache_hooks.enable(false);
+    var truth_c = try shapeScenario(allocator, shaper, &registry, text, 5, 7, false);
+    defer truth_c.deinit(allocator);
+    try expectSameGlyphs(truth_c, at_c);
+    cache_hooks.enable(true);
+    // 같은 들여쓰기로 한 번 더 오면 그건 적중이다.
+    var at_d = try shapeScenario(allocator, shaper, &registry, text, 2, 7, false);
+    defer at_d.deinit(allocator);
+    try std.testing.expect(cache_hooks.stats().hits > s3.hits);
+    for (at_c.runs.glyphs, at_d.runs.glyphs) |gc, gd| {
+        try std.testing.expectEqual(gc.glyph_id, gd.glyph_id);
+        try std.testing.expectEqual(gc.col, gd.col);
+        try std.testing.expectEqual(gc.row, gd.row + 3);
+    }
+}
+
+test "run 캐시 [적대·설정]: 폰트 크기·합자 설정이 바뀌면 적중하지 않는다 (서명이 키에 있다)" {
+    const allocator = std.testing.allocator;
+    var appearance = try config.resolveAppearance(.{});
+    var registry = renderer.FontIdentityRegistry.init(allocator);
+    defer registry.deinit();
+    cache_hooks.reset();
+    cache_hooks.enable(true);
+    const text = "size matters === ->";
+    const shaper_a = coretext_shaper.CoreTextDrawListShaper{ .appearance = appearance, .shape_draw_list = maru_macos_coretext_shape_draw_list };
+    var a = try shapeScenario(allocator, shaper_a, &registry, text, 0, 0, false);
+    defer a.deinit(allocator);
+    appearance.font.size += 2;
+    const shaper_b = coretext_shaper.CoreTextDrawListShaper{ .appearance = appearance, .shape_draw_list = maru_macos_coretext_shape_draw_list };
+    var b = try shapeScenario(allocator, shaper_b, &registry, text, 0, 0, false);
+    defer b.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 0), cache_hooks.stats().hits);
+    appearance.font.ligatures = !appearance.font.ligatures;
+    const shaper_c = coretext_shaper.CoreTextDrawListShaper{ .appearance = appearance, .shape_draw_list = maru_macos_coretext_shape_draw_list };
+    var c = try shapeScenario(allocator, shaper_c, &registry, text, 0, 0, false);
+    defer c.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 0), cache_hooks.stats().hits);
+    // 그리고 각 설정은 다시 부르면 자기 것에 적중한다(서로의 것을 안 준다).
+    var c2 = try shapeScenario(allocator, shaper_c, &registry, text, 0, 0, false);
+    defer c2.deinit(allocator);
+    try std.testing.expect(cache_hooks.stats().hits >= 1);
+    try expectSameGlyphs(c, c2);
+}
+
+test "run 캐시 [적대·충돌]: 해시를 상수로 강제해도 다른 내용에 남의 레코드를 주지 않는다 (전체 비교)" {
+    const allocator = std.testing.allocator;
+    const appearance = try config.resolveAppearance(.{});
+    const shaper = coretext_shaper.CoreTextDrawListShaper{ .appearance = appearance, .shape_draw_list = maru_macos_coretext_shape_draw_list };
+    var registry = renderer.FontIdentityRegistry.init(allocator);
+    defer registry.deinit();
+    cache_hooks.reset();
+    coretext_bridge.maru_macos_coretext_shape_cache_force_hash_for_test(1);
+    defer coretext_bridge.maru_macos_coretext_shape_cache_force_hash_for_test(0);
+    cache_hooks.enable(false);
+    var truth_x = try shapeScenario(allocator, shaper, &registry, "collide-x abc", 0, 0, false);
+    defer truth_x.deinit(allocator);
+    var truth_y = try shapeScenario(allocator, shaper, &registry, "collide-y xyz 한글", 0, 0, false);
+    defer truth_y.deinit(allocator);
+    cache_hooks.enable(true);
+    var x1 = try shapeScenario(allocator, shaper, &registry, "collide-x abc", 0, 0, false);
+    defer x1.deinit(allocator);
+    var y1 = try shapeScenario(allocator, shaper, &registry, "collide-y xyz 한글", 0, 0, false);
+    defer y1.deinit(allocator);
+    var x2 = try shapeScenario(allocator, shaper, &registry, "collide-x abc", 0, 0, false);
+    defer x2.deinit(allocator);
+    try expectSameGlyphs(truth_x, x1);
+    try expectSameGlyphs(truth_y, y1);
+    try expectSameGlyphs(truth_x, x2);
+    try std.testing.expect(cache_hooks.stats().hits >= 1); // 같은 해시 아래서도 자기 것엔 적중한다
+}
+
+test "run 캐시 [적대·용량]: 항목 상한을 훌쩍 넘겨 넣어도 죽지 않고 상한 안에 머물며 결과는 진실과 같다" {
+    const allocator = std.testing.allocator;
+    const appearance = try config.resolveAppearance(.{});
+    const shaper = coretext_shaper.CoreTextDrawListShaper{ .appearance = appearance, .shape_draw_list = maru_macos_coretext_shape_draw_list };
+    var registry = renderer.FontIdentityRegistry.init(allocator);
+    defer registry.deinit();
+    cache_hooks.reset();
+    cache_hooks.enable(true);
+    var buf: [64]u8 = undefined;
+    var i: usize = 0;
+    while (i < 2600) : (i += 1) {
+        const text = try std.fmt.bufPrint(&buf, "distinct line {d} === {d}", .{ i, i * 7 });
+        var s = try shapeScenario(allocator, shaper, &registry, text, 0, 0, false);
+        s.deinit(allocator);
+    }
+    const st = cache_hooks.stats();
+    try std.testing.expect(st.entries <= 2048);
+    try std.testing.expect(st.bytes < 16 * 1024 * 1024);
+    // 도태 뒤에도 답이 맞다: 최근 것은 적중하고, 진실과 같다.
+    const recent = try std.fmt.bufPrint(&buf, "distinct line {d} === {d}", .{ 2599, 2599 * 7 });
+    var hit = try shapeScenario(allocator, shaper, &registry, recent, 3, 0, false);
+    defer hit.deinit(allocator);
+    try std.testing.expect(cache_hooks.stats().hits >= 1);
+    cache_hooks.enable(false);
+    var truth = try shapeScenario(allocator, shaper, &registry, recent, 3, 0, false);
+    defer truth.deinit(allocator);
+    try expectSameGlyphs(truth, hit);
+    cache_hooks.enable(true);
+}
+
+test "run 캐시 [적대·퍼즈]: 시드 난수로 만든 200 줄(ASCII·합자·한글·이모지·box·굵게 섞음)을 캐시 끔/켬/재적중으로 셰이핑해 전부 같다" {
+    const allocator = std.testing.allocator;
+    const appearance = try config.resolveAppearance(.{});
+    const shaper = coretext_shaper.CoreTextDrawListShaper{ .appearance = appearance, .shape_draw_list = maru_macos_coretext_shape_draw_list };
+    var registry = renderer.FontIdentityRegistry.init(allocator);
+    defer registry.deinit();
+    var prng = std.Random.DefaultPrng.init(0x5eed_2026_09_15);
+    const rnd = prng.random();
+    const atoms = [_][]const u8{ "a", "b", "x", " ", " ", "=", "-", ">", "!", "한", "글", "漢", "✅", "─", "│", "\x1b[1m", "\x1b[0m", "\x1b[3m", "\xe1\x84\x92\xe1\x85\xa1\xe1\x86\xab", "  ", "fn", "::" };
+    var line_buf: [512]u8 = undefined;
+    var i: usize = 0;
+    while (i < 200) : (i += 1) {
+        var n: usize = 0;
+        const atoms_n = rnd.intRangeAtMost(usize, 3, 40);
+        var k: usize = 0;
+        while (k < atoms_n) : (k += 1) {
+            const a = atoms[rnd.uintLessThan(usize, atoms.len)];
+            if (n + a.len >= line_buf.len - 8) break;
+            @memcpy(line_buf[n .. n + a.len], a);
+            n += a.len;
+        }
+        @memcpy(line_buf[n .. n + 4], "\x1b[0m");
+        n += 4;
+        const text = line_buf[0..n];
+        const row: u16 = rnd.uintLessThan(u16, 6);
+        const cursor = rnd.boolean();
+        cache_hooks.enable(false);
+        var truth = try shapeScenario(allocator, shaper, &registry, text, row, 0, cursor);
+        defer truth.deinit(allocator);
+        cache_hooks.enable(true);
+        var first = try shapeScenario(allocator, shaper, &registry, text, row, 0, cursor);
+        defer first.deinit(allocator);
+        var again = try shapeScenario(allocator, shaper, &registry, text, (row + 2) % 6, 0, cursor);
+        defer again.deinit(allocator);
+        try expectSameGlyphs(truth, first);
+        // 행이 바뀐 재호출: glyph 는 같고 row 만 다르다.
+        try std.testing.expectEqual(truth.runs.glyphs.len, again.runs.glyphs.len);
+        for (truth.runs.glyphs, again.runs.glyphs) |gt, gg| {
+            try std.testing.expectEqual(gt.glyph_id, gg.glyph_id);
+            try std.testing.expectEqual(gt.font_id, gg.font_id);
+            try std.testing.expectEqual(gt.col, gg.col);
+            try std.testing.expectEqual(gt.cell_width, gg.cell_width);
+        }
+    }
+    const st = cache_hooks.stats();
+    try std.testing.expect(st.hits >= 100); // 200 줄 중 대부분이 재호출에서 적중해야 한다(커서 run 은 키가 달라 일부 미스)
+}

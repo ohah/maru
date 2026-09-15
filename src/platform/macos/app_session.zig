@@ -7021,6 +7021,8 @@ pub const AppSession = struct {
     ft_win_sh_nat_prep_ns: u64 = 0,
     ft_win_sh_nat_line_ns: u64 = 0,
     ft_win_sh_nat_emit_ns: u64 = 0,
+    ft_win_cache_hits0: u64 = 0, // 창 시작 시점의 누적 적중/미스 — 창 델타를 낸다
+    ft_win_cache_misses0: u64 = 0,
     ft_win_sh_records_ns: i128 = 0,
     ft_win_sh_build_ns: i128 = 0,
     ft_win_sh_total_ns: i128 = 0,
@@ -19965,7 +19967,8 @@ pub const AppSession = struct {
                 self.ft_win_lock_count = 0;
             }
             if (self.ft_win_sh_frames > 0) {
-                frametime_diag.info("  shape: 프레임 {d} 행 {d} 셀 {d} run {d} 글리프 {d} | 합 {d:.1}ms = native {d:.1}[폰트 {d:.1} + 조립 {d:.1} + CTLine {d:.1} + 방출 {d:.1}] + records {d:.1} + build {d:.1} | run 적중 직전 {d:.0}% 최근64 {d:.0}% (셀 기준 {d:.0}%/{d:.0}%)", .{
+                const cs = &coretext_shaper.diag_last_shape;
+                frametime_diag.info("  shape: 프레임 {d} 행 {d} 셀 {d} run {d} 글리프 {d} | 합 {d:.1}ms = native {d:.1}[폰트 {d:.1} + 조립 {d:.1} + CTLine {d:.1} + 방출 {d:.1}] + records {d:.1} + build {d:.1} | run 적중 직전 {d:.0}% 최근64 {d:.0}% (셀 기준 {d:.0}%/{d:.0}%) | 캐시 적중 {d}/{d} 항목 {d} {d}KB", .{
                     self.ft_win_sh_frames,
                     self.ft_win_sh_rows,
                     self.ft_win_sh_cells,
@@ -19983,7 +19986,13 @@ pub const AppSession = struct {
                     pct(self.ft_win_sh_runs_hit_64, self.ft_win_sh_runs),
                     pct(self.ft_win_sh_cells_hit_prev, self.ft_win_sh_cells),
                     pct(self.ft_win_sh_cells_hit_64, self.ft_win_sh_cells),
+                    cs.cache_hits - self.ft_win_cache_hits0,
+                    cs.cache_hits + cs.cache_misses - self.ft_win_cache_hits0 - self.ft_win_cache_misses0,
+                    cs.cache_entries,
+                    cs.cache_bytes / 1024,
                 });
+                self.ft_win_cache_hits0 = cs.cache_hits;
+                self.ft_win_cache_misses0 = cs.cache_misses;
                 self.ft_win_sh_nat_font_ns = 0;
                 self.ft_win_sh_nat_prep_ns = 0;
                 self.ft_win_sh_nat_line_ns = 0;
@@ -20402,6 +20411,7 @@ pub const AppSession = struct {
             maru.terminal.kitty.diag_now = diagMetalNow; // kitty transmit 단계별(base64/inflate/store/display) — §13.7
             coretext_shaper.diag_now = diagMetalNow; // grid shaping 단계별 + run 반복률 시뮬레이션 — present §10.7
             coretext_shaper.diag_native_stats = coretext_smoke_bridge.maru_macos_coretext_shape_diag_stats;
+            coretext_shaper.diag_cache_stats = coretext_smoke_bridge.maru_macos_coretext_shape_cache_stats;
             self.ft_shape_gen = coretext_shaper.diag_last_shape.gen;
             self.ft_kitty_gen = maru.terminal.kitty.diag_last_transmit.gen.load(.monotonic);
             metal_frame.diag_replace_cells_ns = 0;

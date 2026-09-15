@@ -1,8 +1,8 @@
 # I/O–렌더 스레딩 Phase 2~4 (§8 · §9 · §12)
 
-단일 writer I/O 스레드(Phase 2), 코어 mutate 위임(Phase 3), 렌더 read 스냅샷 통합(Phase 4)의 구현 순서와 결과다. 목표 모델과 검증 전략은 [I/O–렌더 스레딩 분리 전략](../io-render-threading.md)이 소유한다.
+단일 writer I/O 스레드(Phase 2), 코어 mutate 위임(Phase 3), 렌더 read 스냅샷 통합(Phase 4), 코어 락 양보(§13)의 구현 순서와 결과다. 목표 모델과 검증 전략은 [I/O–렌더 스레딩 분리 전략](../io-render-threading.md)이 소유한다.
 
-> **절 번호는 파일을 넘어 이어진다.** 본문이 `§6`처럼 절만 가리키면 여기서 소유 파일을 찾는다 — §1~§7 [io-render-threading.md](../io-render-threading.md) · §10·§11 [present cadence](../io-render-present.md) · §8·§9·§12 이 문서
+> **절 번호는 파일을 넘어 이어진다.** 본문이 `§6`처럼 절만 가리키면 여기서 소유 파일을 찾는다 — §1~§7 [io-render-threading.md](../io-render-threading.md) · §10·§11 [present cadence](../io-render-present.md) · §8·§9·§12·§13 이 문서
 
 ## 8. Phase 2 — 단일 writer I/O 스레드 (이벤트 루프)
 
@@ -185,6 +185,8 @@ mutate를 비동기 위임하면 적용이 다음 reader 턴으로 밀려 **한 
 
 §10.5는 스피너 지연의 SECONDARY 원인을 "무거운 tick이 단일 NSTimer 실효 rate를 떨군다"로 짚고, 스피너 자체는 wall-clock으로 면역화했다. 그 "무거운 tick"의 큰 몫이 **메인이 tick당 `core_mutex`를 여러 번 잡아 바쁜 리더(firehose 중 청크마다 고빈도 lock/unlock, `pty_reader.zig`의 `core_mutex` 구간)와 경합**하는 것이다. §3의 이상은 "tick당 1 lock"인데, 실제 tick은 활성 코어를 최대 **7회**, 배경 Term을 **N회** 별도로 잡는다(§12.2). §10.5 (B)의 `syncAutoTitles`만 줄이는 건 부분 완화다 — `sync_view`·build·cell_colors가 여전히 매 tick 활성 코어를 잡아 **근본이 아니다**([[roadmap-docs-stale-verify-with-code]]로 코드 실측). Phase 4가 근본 통합이다.
 
+**§12.1 보강(2026-09-15 실측)**: 경합에는 **두 층**이 있고 Phase 4는 그중 하나만 다룬다. (1) **횟수** — 메인이 tick당 잡는 락 수(이 절, Phase 4). 실측 tick당 **26~41회**(위 «최대 7회»는 활성 코어 단일 지점만 센 것으로, pane 루프·find·blink 스캔까지 넣으면 이 수다). (2) **차례** — 한 번 잡을 때 얼마나 기다리는가. `std.Io.Mutex`는 불공정해서 리더가 청크마다 재잠금하는 동안 메인은 보유(0.13ms)의 60~110배(중앙 7~14ms)를 기다렸다. 이 층은 §13이 다룬다. 둘은 곱으로 작용한다(횟수 × 1회 대기) — 어느 하나만으로는 부족하고, 1회 대기를 먼저 없애는 §13이 변경이 작고 독립 측정이 쉬워 **먼저** 간다.
+
 ### 12.2 현재 인벤토리 (코드 실측 2026-07, `app_session.zig`)
 
 `tick()`이 tick당 잡는 `core_mutex` 지점(실행 순서). **§9.1의 "메인 락-아래 유지" 요약보다 팬아웃이 넓다** — 설계는 이 실인벤토리를 기준으로 삼는다.
@@ -277,3 +279,80 @@ if (will_project) { active.lockCore(io); defer unlock; renderPrepWrites(); dl = 
 - **CoreSnapshot 크기**: `[256]Rgb` palette(1KB)를 매 tick 값 복사 — 현재도 `active_palette_copy`로 복사하므로 순증 없음. 나머지 스칼라는 무시 가능.
 - **atomic 추가**: `title_generation` 필드 하나(core). release 비용 무시 가능.
 - **범위 밖**: (C) **present 분리**(§10.2 B CVDisplayLink/C 렌더 스레드) — 그건 **cadence 층**(무거운 tick이 present를 미는 것)이고, Phase 4는 **contention 층**(tick이 무거워지는 원인)이다. 둘은 상보적이며 Phase 4가 tick을 가볍게 한 뒤 present 분리가 남은 cadence를 잡는 순서가 자연스럽다. sticky row 텍스트 owned 처리(J)의 세부는 P4-2 구현 시 확정.
+
+## 13. 코어 락 양보(handoff) — 불공정 mutex 아래 렌더 기아 방지 (구현 2026-09-15)
+
+> 단일 출처(design + 실측). §12가 메인의 락 **횟수**를 다룬다면, §13은 한 번 잡을 때의 **차례**를 다룬다. 계약 문서 §3 «짧은 보유 ≠ 짧은 대기» 항목과 §5 정정의 근거가 여기 있다.
+
+### 13.1 증상과 진단 경로
+
+텍스트 폭포(`cat` 4MB×8, 1920×1080, ReleaseSafe)에서 tick 실효 rate가 60Hz → **11~20Hz**로 떨어지고 SLOW(>8ms) tick이 4초에 54~85회였다. `.frametime` 단계 트리에서는 비용이 `drain`·`mid`·`chrome`·`grid`에 흩어져 보였고 shaping 분해는 비어 있었다 — 흩어진 구간들의 공통점이 **코어 락을 잡는 자리**였다. 그래서 두 방향을 따로 쟀다:
+
+| 계측 | 위치 | 잰 것 |
+|---|---|---|
+| `lockCore` 대기 | `surface.zig` `lockCore`(메인 전용 래퍼) | 메인이 락을 **기다린** 시간 — tick당 합·최대·횟수 |
+| 리더 보유/대기 | `pty_reader.zig` `applyToCore`·명령 적용 | 리더가 락을 **쥔** 시간과 **기다린** 시간 — 청크당 |
+
+둘 다 `MARU_DEBUG=1`에서만 켜지고(꺼지면 리더는 relaxed load 1회, 메인은 bool 분기 1회) SLOW 줄 아래 `└ lockCore 대기 …`·`└ 리더 core.write 보유 …`로 찍힌다.
+
+### 13.2 실측 (기준, 3회)
+
+| | 리더(I/O) | 메인 |
+|---|---|---|
+| 보유 1회 | 평균 **0.124ms** · 최대 **0.32~0.33ms** | — |
+| 대기 1회 | 합 ≤1.4ms/창 (거의 안 기다림) | 중앙 **7.2~14.0ms** · p90 13.7~21.1 · 최대 **19.5~36.4ms** |
+| 빈도 | tty 청크 ~1KB, 창당 140~700회 | tick당 26~41회 |
+
+**메인 1회 대기 ÷ 리더 최대 보유 = 60~110배.** 리더가 오래 쥐는 게 아니다. `std.Io.Mutex`는 3상태(unlocked/locked_once/contended) futex 락이라 `unlock`이 상태를 `unlocked`로 바꾸고 대기자 하나를 깨울 뿐, **깨운 자에게 락을 넘기지 않는다**. 리더는 unlock 직후 다음 청크로 재잠금하고(cmpxchg 한 번), 깨워진 메인은 스케줄링돼 도착했을 때 이미 잠긴 락을 본다 — 다시 잔다. 청크 수십 개가 지나가야 운 좋게 사이에 낀다. Ghostty가 2026-07-09(`d34b54e9b`, "hand off state mutex to avoid starving frames")에 같은 현상을 같은 진단으로 고쳤다.
+
+**대안 설명 배제**: (a) 리더의 다른 보유 구간(명령 적용·pause 판정)도 계측에 포함 — 폭포 중 명령 0건. (b) 메인 외 다른 락 사용자 — 컨트롤 플레인 accept 스레드는 §8.8대로 락을 안 잡고, 세션 호스트 원격 surface는 별도 vtable 락이라 이 경로 밖. (c) 스케줄링 지연만으로는 9ms가 안 나온다(UI 스레드 wake 지연은 ~0.1ms). (d) **판별 실험**(`core_handoff.zig` 4번 테스트의 원형, M-series 3회): 뜨거운 재잠금 루프 상대 요구자 worst — 양보 없음 **4.1~6.6ms**, 양보 있음 **0.04~0.30ms**.
+
+### 13.3 설계 (`src/terminal/core_handoff.zig`)
+
+`TerminalCore.handoff: CoreHandoff` — `owner_dbg`처럼 «락을 쓰는 양쪽이 공유하는 단일 출처»라 코어에 둔다(리더는 Surface를 모르고 `core`만 든다). atomic 2워드(`demand`, `handoff_gen`), release에도 남는 제품 동작이다(`owner_dbg`와 다른 점).
+
+```text
+[메인 Surface.lockCore]           [리더 applyToCore / 명령 적용]
+  handoff.demandBegin()  (+1)       lock; core.write(청크); unlock
+  owner_dbg.lock(mutex)             handoff.yieldToDemand():
+  handoff.demandEnd()    (-1)         demand==0 → return          (평시: load 1회)
+  … 복사 …                            gen=load; demand==0 → return (선독 순서 — 놓은 뒤 세대로 잠들지 않게)
+[메인 Surface.unlockCore]             futexWaitTimeout(&gen, gen, 1ms)
+  owner_dbg.unlock(mutex)           → 다음 청크
+  handoff.signalHandoff() (gen+1, futexWake)
+```
+
+- **ordering 전부 `.monotonic`**: 힌트일 뿐 동기화 경계가 아니다. 데이터는 mutex가 순서를 세우고, 힌트가 늦게 보이면 타임아웃이 staleness를 유계로 만든다.
+- **타임아웃 1ms**: wake 유실·요구자 deschedule에도 리더가 영영 서지 않는 상한. 메인 임계 구역은 복사뿐(§5 실측 0.12ms)이라 넉넉하다. Ghostty와 같은 값.
+- **spurious wake 허용**: 일찍 깨면 리더가 그냥 다음 청크로 간다(무해). 테스트는 하한을 계약으로 삼지 않는다.
+- **원격 surface(`Surface.remote`)는 범위 밖**: 그 락은 세션 호스트 프로세스 쪽 vtable이고 리더도 그 프로세스에 있다. 같은 기아가 거기서도 가능하나 이 절의 실측 대상이 아니다.
+- **exec handoff**: `handoff_inventory.zig`에서 `reconstructed` — 스레드가 새로 생기니 0부터.
+
+### 13.4 실측 (양보 적용, 3회 — 같은 하네스·같은 페이로드)
+
+양보 빌드에서는 **메인 락 대기가 1ms를 넘는 tick이 3회 실행 통틀어 0회**라 `└ lockCore 대기` 줄이 아예 안 찍혔다. 남은 SLOW tick은 전부 `grid` 12~13ms — 전 화면이 새 텍스트로 바뀔 때의 shaping이라 락과 무관한 진짜 일이다(다음 축: grid run 캐시, §10.6 후속).
+
+### 13.5 전후 비교 (같은 소스, 리더의 `yieldToDemand` 두 줄만 켜고 끔 · 각 3회)
+
+| 지표 | 양보 없음(×3) | 양보(×3) |
+|---|---|---|
+| rate 최저 | 24.3 / 14.3 / 12.7 Hz | **55.5 / 54.6 / 57.7 Hz** |
+| SLOW(>8ms) 횟수 (4초 폭포) | 138 / 59 / 61 | **37 / 29 / 32** |
+| 메인 1회 대기 중앙 / p90 / 최대 | 4.0~10.5 / 10.5~21.4 / 18.3~36.3 ms | 1ms 초과 tick **0** |
+| 리더 보유 1회 최대 / 평균 | 0.32~0.33 / 0.123 ms | 0.31~0.41 / 0.123 ms (불변) |
+| 폭포 처리 시간(32MB) | 4.16 / 4.12 / 4.11 s | 4.31 / 4.24 / 4.21 s (**+2~4%**) |
+
+첫 기준 3회(계측만 있는 빌드, §13.2)와 «양보 없음» 3회가 같은 분포라 계측 자체의 영향은 없다. 리더 보유 분포가 전후 동일한 것이 «보유가 아니라 차례였다»의 마지막 확인이다.
+
+### 13.6 트레이드오프 / 한계
+
+- **처리량**: 요구자가 있을 때 리더가 최대 1ms 선다. 메인이 tick당 26~41번 요구하므로 폭포 중 리더는 tick마다 그만큼 양보한다 — 위 표의 처리 시간 차가 그 비용이다. 요구자 없는 평시 비용은 load 1회.
+- **§12(횟수)는 그대로 남는다**: 1회 대기가 보유 수준으로 내려가도 26~41회 × 0.13ms ≈ 3~5ms는 남는다. P4-3(project 블록 통합)이 그걸 1~2회로 줄이는 다음 단계다.
+- **청크 크기 축(Ghostty gather 64KB)**: 리더 재잠금 빈도 자체를 1/64로 줄이는 별개 축. 보유가 길어지는(64KB 파싱 ~8ms) 대신 빈도가 준다 — 양보와 함께라면 보유 길이는 메인 1회 대기 상한이 되므로 그때는 청크를 키우면 안 된다. 착수 시 §13 실측과 함께 판단.
+- **하네스 한계**: `cat` 극단 부하 1종, 1920×1080 1종, 3회. 실사용 창 크기·셸 출력에서의 로그는 미확보.
+
+### 13.7 양보 뒤에 남는 것 — kitty 이미지 zlib 해제가 락 아래에 있다 (미해결, 실측 2026-09-15)
+
+양보 빌드로 터미널 브라우저(1920×1080, kitty `a=T,f=32,o=z` 전체 화면 프레임)를 돌리면 SLOW tick이 프레임마다 하나 남고, 그 tick의 `└ lockCore 대기`가 **1회 5.9~7.1ms**, 같은 창의 `└ 리더 core.write 보유`가 **청크 1개(361~701B)에 7.0~9.7ms**다. 이미지 **마지막 청크**가 `kitty.zig`의 `png.inflateExact`(8MB RGBA zlib 해제)를 `core.write` 안에서, 즉 리더가 `core_mutex`를 쥔 채 돌린다. 이건 §13.2의 기아(짧은 보유·긴 대기)가 아니라 **긴 보유** 그 자체다 — 양보는 대기를 보유 길이까지만 줄인다. 텍스트 폭포에는 없고 이미지 프레임에만 있다(§10.6 «예산 초과 tick 4회/45초»의 정체).
+
+방향(미착수): 해제를 락 밖으로. (a) 코어는 압축 바이트만 받아 두고 리더가 unlock 뒤 해제해 재잠금 후 설치, 또는 (b) `f=100` PNG처럼 업로드 시점(메인 `planImageUploads`)에 lazy 해제 — 어느 쪽이든 «코어가 락 아래에서 O(픽셀) 일을 하지 않는다»는 규칙이 된다. 착수 시 이 절의 수치를 전후 비교 기준으로 쓴다.

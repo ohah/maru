@@ -7545,6 +7545,57 @@ AllocationCap.alloc → DebugAllocator → captureCurrentStackTrace
 **CPU 는 아직 그대로다.** 고침은 누수만 없앴고, Debug 의 포획 비용(50% 대 1%)은 남아 있다.
 일상 개발에서 host 를 여러 개 띄우면 그 자체로 느리다 — 「느리다」의 절반은 빌드 모드다.
 
+### 12.2 이미지가 앱의 어느 칸에서 사라지는지 — `image flow` / `image reconciliation` (2026-09-15)
+
+**왜 붙였나.** *"이미지가 안 뜨기도 한다"* 에 답할 눈이 없었다. host 의 거절 계수기(`kitty` 저장소의 상한·
+evict)는 blob 이 소켓을 지난 뒤를 못 보고, 앱에는 blob 이 **아무 말 없이** 사라지는 자리가 셋 있었다 — 전부
+`return`/`continue` 뿐이었다. 이 증상은 재현되지 않았다(두 번 «재현» 으로 본 것은 전부 픽스처 버그였다). 재현을
+기다리는 대신, 다음에 안 뜨는 순간 로그가 **어느 칸에서** 사라졌는지 답하게 한다.
+
+**어디를 세나.** `src/image_reconciliation.zig` — 레이어 무관 중립 leaf(`width.zig` 와 동격; 조립기 L2 와 렌더러
+L1 이 둘 다 쓰는데 L1 은 L2 를 import 하지 못한다).
+
+| 칸 | 자리 | 계수 |
+| --- | --- | --- |
+| 0 번 청크 없이 온 청크 → 스킵 | `screen_assembler.handleImageBlob` | `drop_no_head` |
+| 청크 순서·개수가 pending 과 어긋남 → 폐기 | 같은 곳 | `drop_order` |
+| 메모리 부족 | 같은 곳 | `drop_oom` |
+| placement 는 왔는데 그 `image_id` 의 blob 이 없음 → 안 그림 | `metal_frame.buildGpuImages` (일반·U=1 가상) | `placement_without_blob` |
+| 완성·업로드·캐시 적중(정상 흐름의 모양) | `putImage` / `planImageUploads` | `complete` `uploaded` `skip_same_gen` |
+
+`placement_without_blob` 은 **프레임마다·배치마다** 센다 — 5 초 델타 300 은 이미지 300 개가 아니라 배치 하나가
+5 초 내내 못 그려진 것일 수 있다. `skip_same_gen` 은 같은 프레임 안의 중복 quad 가 섞인다. 둘 다 「얼마나」가
+아니라 「어느 칸에서」를 답하는 값이다. `planImageUploads` 에는 계수기가 없다 — blob 없는 placement 는
+`buildGpuImages` 가 이미 걸러 거기 안 온다(처음에 거기 뒀다가 라이브 양성 대조에서 0 줄이 나와 옮겼다).
+
+**어떻게 남기나.** 앱의 5 초 진단 틱(`app_session.logImageReconciliationDiag`, `observation cost` 와 같은 자리)이
+델타를 두 겹으로 찍는다.
+
+- `info: image flow: complete=… uploaded=… skip_same_gen=…` — **항상.** 「이 줄이 없다」가 곧 「계측이 안 돈다」로
+  읽히게. 적대적 검증에서 손실을 일으켰는데 경고줄이 0 이라 «손실 없음» 인 줄 알았더니 앱이 죽어 틱 자체가 안
+  돌고 있었다 — 침묵이 신호인 계측은 침묵의 원인을 따로 보여 줘야 한다.
+- `warning: image reconciliation: complete=… drop_no_head=… drop_order=… drop_oom=… placement_without_blob=… uploaded=… skip_same_gen=…` — **사라진 것이 있을 때만.**
+
+비용은 실측 한 줄 410 ns(ReleaseFast)·951 ns(Debug), 5 초마다 1 회. 로그 양은 앱 `app.log` 의 4 MB 상한(넘으면
+비움) 안에서 `observation cost` 와 같은 급이다.
+
+**실측(1600×1000 7 청크, host 가 0 번 청크를 빼먹게 한 임시 프로브).**
+
+| | `complete` / 5 s | `drop_no_head` | `placement_without_blob` | 경고줄 |
+| --- | ---: | ---: | ---: | ---: |
+| 정상 | 52~59 | 0 | 0 | 0 |
+| 손실 | 0 | 12 | 3 | 6 |
+
+정상 경로에서 `placement_without_blob` 이 오르지 않는 근거: host core 는 이미지를 지울 때 placement 도 같은
+연산에서 지우고(`kitty.zig` delete·orphan 정리), `computeDelta` 는 그 변경을 `image_remove` 와 같은 델타에
+clear+set 으로 싣는다. 한 성질은 적어 둔다 — 앱이 청크를 버렸는데 host 의 base 가 «client 가 가졌다» 고
+기억하면 재전송이 없어 이 계수가 그 이미지가 바뀔 때까지 매 프레임 오른다. 진단엔 오히려 좋다.
+
+**한계.** 이 두 줄은 **세션 host 모드에서만** 찍힌다 — 틱이 `app_remote_backend` 가 있을 때만 돈다. 인프로세스는
+host→app 전송 자체가 없어 셀 것이 없지만, 「줄이 없다」를 그 모드에서 계측 부재로 읽으면 안 된다. host 쪽
+`imgs=` 개수는 일부러 뺐다 — `ProjectOptions` 에 필드를 더해야 하고 그 자리는 CR4a 경계 판정자가 리터럴을 세는
+곳이라, 앱 쪽 손실 계수만으로 답이 되는 물음에 필요 이상의 위험이다.
+
 ### P0 — 문서 결정
 
 - 이 문서, workspace restore, session-host upgrade, configuration, verification matrix를 정합화한다.

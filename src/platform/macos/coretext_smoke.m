@@ -667,6 +667,257 @@ static bool maru_append_utf16_scalar(uint32_t codepoint, UniChar *buffer, CFInde
 // CTRunGetGlyphs/StringIndices를 한 번에 읽는 크기. run당 glyph가 이보다 많으면 여러 번 나눠 읽는다.
 #define MARU_SHAPE_RUN_GLYPH_CHUNK 64
 
+// ── grid run 캐시 (docs/io-render-present.md §10.8) ────────────────────────────────────────────────────
+//
+// run(행 안 같은 face 의 연속 셀)의 셰이핑 결과를 **내용 키**로 기억해 `CTLineCreateWithAttributedString`(shaping
+// 의 80~90%, §10.7)을 건너뛴다. 키 = 폰트 설정 서명 + style 슬롯 + 셀 폭 열 + UTF-16 유닛(전체 바이트 비교 —
+// 해시 충돌은 비교가 거른다). 값 = run 시작 셀 기준 **상대형** 레코드 + run 합계. 적중 시 현재 셀 위치로 재기준해
+// 방출한다 — 그래서 같은 줄이 다른 행에 와도 맞는다(스크롤). 폰트 이름은 캐시 소유 표에서 memcpy 한다.
+//
+// 용량: 2048 항목 / 4096 슬롯 open-addressing(선형 탐사 8칸, 자리 없으면 그 8칸 중 가장 오래된 것을 대체).
+// 상한을 넘는 run(유닛 512·셀 128·레코드 256 초과)은 캐시하지 않는다. 메인이 부르지만 os_unfair_lock 아래.
+
+#include <os/lock.h>
+
+#define MARU_SHAPE_CACHE_SLOTS 4096
+#define MARU_SHAPE_CACHE_MAX_ENTRIES 2048
+#define MARU_SHAPE_CACHE_PROBE 8
+#define MARU_SHAPE_CACHE_MAX_RECORDS 256
+#define MARU_SHAPE_CACHE_FONT_NAMES 64
+#define MARU_SHAPE_CACHE_KEY_MAX (16 + MARU_SHAPE_RUN_MAX_CELLS + MARU_SHAPE_RUN_MAX_UNITS * 2)
+
+typedef struct {
+    uint8_t cell_offset;   // run 시작 셀 기준
+    uint8_t reserved;      // 왼쪽 오버항 칸 수(레코드의 `reserved`)
+    uint8_t drawable;
+    uint8_t fallback;
+    uint8_t color_glyph_kind;
+    uint8_t font_index;    // maru_shape_cache_font_names 인덱스
+    uint16_t pad;
+    uint32_t glyph_id;
+} MaruShapeCacheRecord;
+
+typedef struct {
+    uint64_t hash;
+    uint32_t key_len;
+    uint32_t record_count;
+    uint32_t shaped_cells;
+    uint32_t missing;
+    uint32_t fallback_runs;
+    uint32_t last_used;    // clock — 대체 시 가장 오래된 것
+    uint8_t *key;
+    MaruShapeCacheRecord *records;
+} MaruShapeCacheEntry;
+
+static MaruShapeCacheEntry maru_shape_cache[MARU_SHAPE_CACHE_SLOTS];
+static char maru_shape_cache_font_names[MARU_SHAPE_CACHE_FONT_NAMES][128];
+static size_t maru_shape_cache_font_name_count = 0;
+static size_t maru_shape_cache_entry_count = 0;
+static size_t maru_shape_cache_bytes = 0;
+static uint32_t maru_shape_cache_clock = 0;
+static uint64_t maru_shape_cache_hits = 0;
+static uint64_t maru_shape_cache_misses = 0;
+static uint64_t maru_shape_cache_uncacheable = 0;
+static bool maru_shape_cache_enabled = true;
+static bool maru_shape_cache_force_hash = false; // 테스트: 해시를 상수로 — 충돌 경로(전체 비교)를 강제
+static os_unfair_lock maru_shape_cache_lock = OS_UNFAIR_LOCK_INIT;
+
+static uint64_t maru_shape_cache_hash_bytes(const uint8_t *bytes, size_t len) {
+    if (maru_shape_cache_force_hash) return 0x1234;
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (size_t i = 0; i < len; i++) h = (h ^ bytes[i]) * 0x100000001b3ull;
+    return h;
+}
+
+static void maru_shape_cache_entry_free(MaruShapeCacheEntry *e) {
+    if (e->key == NULL && e->records == NULL) return;
+    maru_shape_cache_bytes -= e->key_len + (size_t)e->record_count * sizeof(MaruShapeCacheRecord);
+    free(e->key);
+    free(e->records);
+    memset(e, 0, sizeof(*e));
+    maru_shape_cache_entry_count -= 1;
+}
+
+__attribute__((visibility("hidden")))
+void maru_macos_coretext_shape_cache_reset_for_test(void) {
+    os_unfair_lock_lock(&maru_shape_cache_lock);
+    for (size_t i = 0; i < MARU_SHAPE_CACHE_SLOTS; i++) maru_shape_cache_entry_free(&maru_shape_cache[i]);
+    maru_shape_cache_font_name_count = 0;
+    maru_shape_cache_hits = 0;
+    maru_shape_cache_misses = 0;
+    maru_shape_cache_uncacheable = 0;
+    maru_shape_cache_clock = 0;
+    os_unfair_lock_unlock(&maru_shape_cache_lock);
+}
+
+__attribute__((visibility("hidden")))
+void maru_macos_coretext_shape_cache_set_enabled(uint32_t enabled) {
+    os_unfair_lock_lock(&maru_shape_cache_lock);
+    maru_shape_cache_enabled = enabled != 0;
+    os_unfair_lock_unlock(&maru_shape_cache_lock);
+}
+
+__attribute__((visibility("hidden")))
+void maru_macos_coretext_shape_cache_force_hash_for_test(uint32_t on) {
+    os_unfair_lock_lock(&maru_shape_cache_lock);
+    maru_shape_cache_force_hash = on != 0;
+    os_unfair_lock_unlock(&maru_shape_cache_lock);
+}
+
+__attribute__((visibility("hidden")))
+void maru_macos_coretext_shape_cache_stats(uint64_t *out_hits, uint64_t *out_misses, uint64_t *out_entries, uint64_t *out_bytes, uint64_t *out_uncacheable) {
+    os_unfair_lock_lock(&maru_shape_cache_lock);
+    if (out_hits) *out_hits = maru_shape_cache_hits;
+    if (out_misses) *out_misses = maru_shape_cache_misses;
+    if (out_entries) *out_entries = maru_shape_cache_entry_count;
+    if (out_bytes) *out_bytes = maru_shape_cache_bytes;
+    if (out_uncacheable) *out_uncacheable = maru_shape_cache_uncacheable;
+    os_unfair_lock_unlock(&maru_shape_cache_lock);
+}
+
+// 폰트 설정 서명 — 키의 머리. 같은 shaper 를 grid(모노)와 chrome(UI 폰트)이 번갈아 부르므로 세대 flush 대신 키에 넣는다.
+static uint64_t maru_shape_cache_config_signature(
+    const char *family, size_t family_len, double size,
+    const char *fallback, size_t fallback_len,
+    const char *bold, size_t bold_len,
+    const char *italic, size_t italic_len,
+    uint32_t ligatures
+) {
+    uint64_t h = 0xcbf29ce484222325ull;
+    uint64_t size_bits; memcpy(&size_bits, &size, sizeof(size_bits));
+    const uint8_t *sb = (const uint8_t *)&size_bits;
+    for (size_t i = 0; i < 8; i++) h = (h ^ sb[i]) * 0x100000001b3ull;
+    h = (h ^ (uint8_t)ligatures) * 0x100000001b3ull;
+    const char *parts[4] = { family, fallback, bold, italic };
+    const size_t lens[4] = { family_len, fallback_len, bold_len, italic_len };
+    for (int p = 0; p < 4; p++) {
+        h = (h ^ 0xff) * 0x100000001b3ull; // 구분자 — "ab"+"c" 와 "a"+"bc" 를 가른다
+        for (size_t i = 0; i < lens[p]; i++) h = (h ^ (uint8_t)parts[p][i]) * 0x100000001b3ull;
+    }
+    return h;
+}
+
+// 키 조립: [서명 8B][use_index 1B][셀 수 1B][셀 폭 ×n][유닛 ×unit_len (LE 2B)]. 길이 반환(0 = 캐시 불가).
+static size_t maru_shape_cache_build_key(
+    uint8_t *out, uint64_t signature, int use_index,
+    const MaruCoreTextDrawCell *cells, size_t first, size_t shaped_cell_count,
+    const UniChar *units, CFIndex unit_len
+) {
+    if (shaped_cell_count == 0 || shaped_cell_count > MARU_SHAPE_RUN_MAX_CELLS || unit_len <= 0 || unit_len > MARU_SHAPE_RUN_MAX_UNITS) return 0;
+    size_t n = 0;
+    memcpy(out + n, &signature, 8); n += 8;
+    out[n++] = (uint8_t)use_index;
+    out[n++] = (uint8_t)shaped_cell_count;
+    for (size_t i = 0; i < shaped_cell_count; i++) out[n++] = (uint8_t)cells[first + i].width;
+    for (CFIndex i = 0; i < unit_len; i++) { out[n++] = (uint8_t)(units[i] & 0xff); out[n++] = (uint8_t)(units[i] >> 8); }
+    return n;
+}
+
+static MaruShapeCacheEntry *maru_shape_cache_find(const uint8_t *key, size_t key_len, uint64_t hash) {
+    size_t slot = (size_t)(hash % MARU_SHAPE_CACHE_SLOTS);
+    for (int probe = 0; probe < MARU_SHAPE_CACHE_PROBE; probe++) {
+        MaruShapeCacheEntry *e = &maru_shape_cache[(slot + probe) % MARU_SHAPE_CACHE_SLOTS];
+        // 빈 칸을 만나도 **멈추지 않는다** — 항목 상한에 닿으면 삽입이 창 안의 «가장 오래된 칸」 을 대체하는데 그 칸이
+        // 빈 칸 뒤에 있을 수 있다(적대적 검증 [용량] 이 잡았다: 2048 항목에서 방금 넣은 줄이 안 찾아졌다). 창은 8칸이라
+        // 끝까지 보는 비용이 없다.
+        if (e->key == NULL) continue;
+        if (e->hash == hash && e->key_len == key_len && memcmp(e->key, key, key_len) == 0) return e;
+    }
+    return NULL;
+}
+
+static uint8_t maru_shape_cache_font_index(const char *name) {
+    for (size_t i = 0; i < maru_shape_cache_font_name_count; i++) {
+        if (strncmp(maru_shape_cache_font_names[i], name, 128) == 0) return (uint8_t)i;
+    }
+    if (maru_shape_cache_font_name_count >= MARU_SHAPE_CACHE_FONT_NAMES) return 0xff; // 표가 찼다 — 이 run 은 캐시하지 않는다
+    strlcpy(maru_shape_cache_font_names[maru_shape_cache_font_name_count], name, 128);
+    return (uint8_t)maru_shape_cache_font_name_count++;
+}
+
+// 미스 경로가 방출한 레코드(records[from..to))를 상대형으로 저장한다. 실패(상한·표 포화·OOM)는 조용히 건너뛴다.
+static void maru_shape_cache_insert(
+    const uint8_t *key, size_t key_len, uint64_t hash,
+    const MaruCoreTextDrawGlyphRecord *records, uint32_t from, uint32_t to, size_t first_cell,
+    uint32_t shaped_cells, uint32_t missing, uint32_t fallback_runs
+) {
+    const uint32_t n = to - from;
+    if (n > MARU_SHAPE_CACHE_MAX_RECORDS) { maru_shape_cache_uncacheable += 1; return; }
+    MaruShapeCacheRecord *rel = n == 0 ? NULL : (MaruShapeCacheRecord *)malloc(n * sizeof(MaruShapeCacheRecord));
+    if (n != 0 && rel == NULL) return;
+    for (uint32_t i = 0; i < n; i++) {
+        const MaruCoreTextDrawGlyphRecord *r = &records[from + i];
+        if (r->cell_index < first_cell || r->cell_index - first_cell >= MARU_SHAPE_RUN_MAX_CELLS) { free(rel); maru_shape_cache_uncacheable += 1; return; }
+        const uint8_t font_index = maru_shape_cache_font_index(r->font_name);
+        if (font_index == 0xff) { free(rel); maru_shape_cache_uncacheable += 1; return; }
+        rel[i].cell_offset = (uint8_t)(r->cell_index - first_cell);
+        rel[i].reserved = (uint8_t)r->reserved;
+        rel[i].drawable = (uint8_t)r->drawable;
+        rel[i].fallback = (uint8_t)r->fallback;
+        rel[i].color_glyph_kind = (uint8_t)r->color_glyph_kind;
+        rel[i].font_index = font_index;
+        rel[i].pad = 0;
+        rel[i].glyph_id = r->glyph_id;
+    }
+    uint8_t *key_copy = (uint8_t *)malloc(key_len);
+    if (key_copy == NULL) { free(rel); return; }
+    memcpy(key_copy, key, key_len);
+
+    // 자리: 탐사 범위 안의 빈 칸, 없으면 가장 오래된 칸을 대체. 항목 상한을 넘으면 마찬가지로 대체한다.
+    size_t slot = (size_t)(hash % MARU_SHAPE_CACHE_SLOTS);
+    MaruShapeCacheEntry *victim = NULL;
+    for (int probe = 0; probe < MARU_SHAPE_CACHE_PROBE; probe++) {
+        MaruShapeCacheEntry *e = &maru_shape_cache[(slot + probe) % MARU_SHAPE_CACHE_SLOTS];
+        if (e->key == NULL && maru_shape_cache_entry_count < MARU_SHAPE_CACHE_MAX_ENTRIES) { victim = e; break; }
+        if (e->key != NULL && (victim == NULL || e->last_used < victim->last_used)) victim = e;
+    }
+    if (victim == NULL) { free(rel); free(key_copy); return; }
+    if (victim->key != NULL) maru_shape_cache_entry_free(victim);
+    victim->hash = hash;
+    victim->key_len = (uint32_t)key_len;
+    victim->key = key_copy;
+    victim->record_count = n;
+    victim->records = rel;
+    victim->shaped_cells = shaped_cells;
+    victim->missing = missing;
+    victim->fallback_runs = fallback_runs;
+    victim->last_used = ++maru_shape_cache_clock;
+    maru_shape_cache_entry_count += 1;
+    maru_shape_cache_bytes += key_len + (size_t)n * sizeof(MaruShapeCacheRecord);
+}
+
+// 적중: 상대형을 현재 run 위치로 재기준해 방출한다. row/col/codepoint/cell_width 는 **현재 셀**에서 읽는다.
+// 반환 false = 출력 버퍼 넘침(호출자가 status 7 로 끝낸다).
+static bool maru_shape_cache_emit(
+    const MaruShapeCacheEntry *e, MaruCoreTextDrawListShapeResult *result,
+    MaruCoreTextDrawGlyphRecord *out, size_t out_capacity,
+    const MaruCoreTextDrawCell *cells, size_t first_cell
+) {
+    for (uint32_t i = 0; i < e->record_count; i++) {
+        const MaruShapeCacheRecord *r = &e->records[i];
+        if (out == NULL || result->glyph_record_count >= out_capacity) { result->glyph_record_overflow = 1; return false; }
+        const size_t owner = first_cell + r->cell_offset;
+        const MaruCoreTextDrawCell cell = cells[owner];
+        MaruCoreTextDrawGlyphRecord *o = &out[result->glyph_record_count];
+        o->cell_index = (uint32_t)owner;
+        o->row = cell.row;
+        o->col = cell.col;
+        o->cell_width = cell.width;
+        o->reserved = r->reserved;
+        o->codepoint = cell.codepoint;
+        o->glyph_id = r->glyph_id;
+        o->drawable = r->drawable;
+        o->fallback = r->fallback;
+        o->color_glyph_kind = r->color_glyph_kind;
+        memcpy(o->font_name, maru_shape_cache_font_names[r->font_index], 128);
+        result->glyph_record_count += 1;
+    }
+    result->shaped_cell_count += e->shaped_cells;
+    result->missing_glyph_count += e->missing;
+    result->fallback_run_count += e->fallback_runs;
+    return true;
+}
+
 /// 셀이 쓸 face 인덱스 — (bold?1:0)|(italic?2:0). styled 캐시 인덱스이자 **run 경계 판정의 단일 출처**다.
 /// 같은 face끼리만 한 CTLine으로 묶어야 셰이핑 결과가 셀별로 face를 따로 고르던 때와 같다.
 /// run 을 가르는 키. face(bold/italic)와 **커서 여부**를 함께 담는다 — 커서 칸을 별도 run 으로 떼어야
@@ -1429,6 +1680,10 @@ void maru_macos_coretext_shape_draw_list(
         // (실측: headless tick 테스트가 signal TRAP — 로컬 CI 게이트가 잡았다). 커서 run 을 처음 만날 때
         // face 슬롯의 폰트를 빌리고 이름만 retain 해 채운다.
         maru_shape_diag_font_ns = maru_shape_diag_now() - diag_t_font0;
+        const uint64_t cache_signature = maru_shape_cache_config_signature(
+            requested_font_family, requested_font_family_len, requested_font_size,
+            fallback_families, fallback_families_len, bold_family, bold_family_len,
+            italic_family, italic_family_len, ligatures_enabled);
         CTFontRef styled_fonts[8] = { primary_font, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
         CFStringRef styled_names[8] = { primary_name, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
         CFDictionaryRef styled_attrs[8] = { attributes, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
@@ -1495,6 +1750,7 @@ void maru_macos_coretext_shape_draw_list(
             // 하나도 안 만든다 — 아래에서 이 길이로 잘라 여백을 셰이핑에서 뺀다. 단어 사이 공백은 잘리지 않아
             // run이 끊기지 않는다(호출 수 이득은 그대로).
             CFIndex unit_len_through_last_shaped = 0;
+            size_t cells_through_last_shaped = 0; // 캐시 키의 셀 폭 열 길이(마지막 비공백 셀까지)
             size_t run_end = cell_index;
             bool any_shaped_cell = false;
             while (run_end < cell_count) {
@@ -1517,6 +1773,7 @@ void maru_macos_coretext_shape_draw_list(
                 if (!maru_cell_is_blank(cur)) {
                     any_shaped_cell = true;
                     unit_len_through_last_shaped = unit_len;
+                    cells_through_last_shaped = run_end + 1 - cell_index;
                 }
                 run_end += 1;
             }
@@ -1535,6 +1792,43 @@ void maru_macos_coretext_shape_draw_list(
                 cell_index = run_end;
                 continue;
             }
+
+            // ── run 캐시 조회(§10.8) ── 키가 조립되면(상한 안) 찾아보고, 적중이면 CTLine 없이 방출한다.
+            uint8_t cache_key[MARU_SHAPE_CACHE_KEY_MAX];
+            size_t cache_key_len = 0;
+            uint64_t cache_hash = 0;
+            bool cache_hit = false;
+            if (maru_shape_cache_enabled) {
+                cache_key_len = maru_shape_cache_build_key(cache_key, cache_signature, use_index, cells, cell_index, cells_through_last_shaped, units, unit_len);
+                if (cache_key_len != 0) {
+                    os_unfair_lock_lock(&maru_shape_cache_lock);
+                    cache_hash = maru_shape_cache_hash_bytes(cache_key, cache_key_len);
+                    MaruShapeCacheEntry *hit = maru_shape_cache_find(cache_key, cache_key_len, cache_hash);
+                    if (hit != NULL) {
+                        hit->last_used = ++maru_shape_cache_clock;
+                        maru_shape_cache_hits += 1;
+                        cache_hit = true;
+                        if (!maru_shape_cache_emit(hit, result, glyph_records, glyph_record_capacity, cells, cell_index)) {
+                            result->status = 7;
+                        }
+                    } else {
+                        maru_shape_cache_misses += 1;
+                    }
+                    os_unfair_lock_unlock(&maru_shape_cache_lock);
+                } else {
+                    maru_shape_cache_uncacheable += 1;
+                }
+            }
+            if (cache_hit) {
+                maru_shape_diag_prep_ns += maru_shape_diag_now() - diag_t0;
+                if (result->status == 7) break;
+                cell_index = run_end;
+                continue;
+            }
+            const uint32_t cache_records_from = result->glyph_record_count;
+            const uint32_t cache_missing_before = result->missing_glyph_count;
+            const uint32_t cache_fallback_before = result->fallback_run_count;
+            const uint32_t cache_shaped_before = result->shaped_cell_count;
 
             CFStringRef string = CFStringCreateWithCharacters(kCFAllocatorDefault, units, unit_len);
             if (string == NULL) {
@@ -1686,6 +1980,18 @@ void maru_macos_coretext_shape_draw_list(
             CFRelease(attributed);
             CFRelease(string);
             maru_shape_diag_emit_ns += maru_shape_diag_now() - diag_t2;
+
+            // 미스가 정상적으로 끝났으면(넘침 없음) 이 run 의 방출 결과를 캐시에 넣는다.
+            if (result->status == -1 && cache_key_len != 0 && maru_shape_cache_enabled) {
+                os_unfair_lock_lock(&maru_shape_cache_lock);
+                maru_shape_cache_insert(
+                    cache_key, cache_key_len, cache_hash,
+                    glyph_records, cache_records_from, result->glyph_record_count, cell_index,
+                    result->shaped_cell_count - cache_shaped_before,
+                    result->missing_glyph_count - cache_missing_before,
+                    result->fallback_run_count - cache_fallback_before);
+                os_unfair_lock_unlock(&maru_shape_cache_lock);
+            }
 
             if (result->status == 4 || result->status == 5 || result->status == 7) {
                 break;

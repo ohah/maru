@@ -136,6 +136,18 @@ pub extern fn maru_macos_coretext_shape_diag_stats(
     out_runs: *u64,
 ) void;
 
+/// grid run 캐시(§10.8) 테스트 훅 — hidden. 제품 스위치가 아니다(차등 테스트·충돌 경로 강제·통계).
+pub extern fn maru_macos_coretext_shape_cache_reset_for_test() void;
+pub extern fn maru_macos_coretext_shape_cache_set_enabled(enabled: u32) void;
+pub extern fn maru_macos_coretext_shape_cache_force_hash_for_test(on: u32) void;
+pub extern fn maru_macos_coretext_shape_cache_stats(
+    out_hits: *u64,
+    out_misses: *u64,
+    out_entries: *u64,
+    out_bytes: *u64,
+    out_uncacheable: *u64,
+) void;
+
 pub extern fn maru_macos_coretext_smoke_rasterize_glyph(
     requested_font_family: [*]const u8,
     requested_font_family_len: usize,

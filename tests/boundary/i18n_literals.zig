@@ -197,7 +197,9 @@ const inventory = [_]Entry{
     // 내용**이다 — 캡처가 한글 폭까지 잡도록 일부러 넣었다(같은 파일의 다른 둘도 같은 부류다).
     .{ .path = "src/platform/macos/chrome_lab_smoke.zig", .count = 3 },
     .{ .path = "src/platform/macos/control_server.zig", .count = 1 },
-    .{ .path = "src/platform/macos/coretext_smoke.zig", .count = 9 },
+    // 9 → 11: run 캐시(present §10.8) 적대적 검증의 **셰이핑 픽스처** 둘 — «한글 문장과 English mixed…」 시나리오와
+    // 충돌 판정자의 «collide-y xyz 한글」. 표시가 아니라 셰이퍼에 넣는 입력이다(한글 폴백 run 이 캐시를 통과하는지).
+    .{ .path = "src/platform/macos/coretext_smoke.zig", .count = 11 },
     .{ .path = "src/platform/macos/glyph_text_smoke.zig", .count = 1 },
     .{ .path = "src/platform/macos/metal_smoke.zig", .count = 1 },
     // `@compileError` 두 조각. **표시가 아니라 개발자용 컴파일 진단**이라 번역 대상이 아니다 —
@@ -304,7 +306,7 @@ fn countSource(allocator: std.mem.Allocator, source: [:0]const u8) !usize {
 
 /// 헤더가 말하는 총계. **코드가 검증한다** — 손으로 적은 숫자는 원장이 움직일 때 조용히 어긋난다
 /// (실제로 152 로 적혀 있다가 182 와 30 차이가 났다).
-const header_total = 248; // +2: 편집기 판정자의 큰 문서 픽스처 · +2: 인라인 위젯 행 Lab 픽스처(S1.5) · +1: e4d4 메타데이터 대기 진단 · +2: .frametime 단계 요약(§10.6) · +7: 코어 락 경합 진단(§13·§13.7·§12.9·플리커 신호) · +2: grid shaping 진단(§10.7)
+const header_total = 250; // +2: 편집기 판정자의 큰 문서 픽스처 · +2: 인라인 위젯 행 Lab 픽스처(S1.5) · +1: e4d4 메타데이터 대기 진단 · +2: .frametime 단계 요약(§10.6) · +7: 코어 락 경합 진단(§13·§13.7·§12.9·플리커 신호) · +2: grid shaping 진단(§10.7) · +2: run 캐시 셰이핑 픽스처(§10.8)
 const header_config_total = 54;
 
 comptime {

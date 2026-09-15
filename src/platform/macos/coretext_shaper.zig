@@ -108,6 +108,12 @@ pub const DiagShape = struct {
     nat_emit_ns: u64 = 0,
     nat_font_ns: u64 = 0,
     nat_runs: u64 = 0,
+    // run 캐시 누적 통계(프로세스 수명) — 호출 시점 스냅샷
+    cache_hits: u64 = 0,
+    cache_misses: u64 = 0,
+    cache_entries: u64 = 0,
+    cache_bytes: u64 = 0,
+    cache_uncacheable: u64 = 0,
     records_ns: i128 = 0,
     build_ns: i128 = 0,
     sim_ns: i128 = 0,
@@ -119,6 +125,8 @@ pub var diag_capture_next: bool = false;
 /// native 단계 통계 getter — 네이티브를 링크하는 쪽(app_session)이 `coretext_smoke_bridge` 의 extern 을 꽂는다. 이 파일은
 /// 헤드리스 테스트에서도 컴파일되므로 extern 을 직접 참조하지 않는다(`shape_draw_list` 가 fn 포인터인 것과 같은 이유).
 pub var diag_native_stats: ?*const fn (*u64, *u64, *u64, *u64, *u64) callconv(.c) void = null;
+/// run 캐시 통계 getter(적중·미스·항목·바이트·캐시 불가) — 같은 이유로 fn 포인터 주입.
+pub var diag_cache_stats: ?*const fn (*u64, *u64, *u64, *u64, *u64) callconv(.c) void = null;
 var diag_frame_no: u32 = 0;
 var diag_seen: std.AutoHashMapUnmanaged(u64, u32) = .empty; // run 해시 → 마지막으로 본 프레임 번호
 var diag_seen_alloc: ?std.mem.Allocator = null;
@@ -301,6 +309,7 @@ pub const CoreTextDrawListShaper = struct {
             const t5 = diag_now.?();
             d.records = record_count;
             if (diag_native_stats) |stats| stats(&d.nat_prep_ns, &d.nat_line_ns, &d.nat_emit_ns, &d.nat_font_ns, &d.nat_runs);
+            if (diag_cache_stats) |stats| stats(&d.cache_hits, &d.cache_misses, &d.cache_entries, &d.cache_bytes, &d.cache_uncacheable);
             d.native_cells_ns = t2 - t1;
             d.native_shape_ns = t3 - t2;
             d.records_ns = t4 - t3;

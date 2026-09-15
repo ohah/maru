@@ -20,6 +20,7 @@ const std = @import("std");
 const core = @import("core.zig");
 const types = @import("types.zig");
 const png = @import("png.zig"); // f=100 PNG 디코드 + zlib(o=z) inflateExact
+const kitty_placeholder = @import("kitty_placeholder.zig"); // placeholder 셀 해독의 단일 출처(렌더러와 공유)
 
 const TerminalCore = core.TerminalCore;
 
@@ -458,12 +459,20 @@ pub fn kittyImageHasPlacement(self: *const TerminalCore, image_id: u32) bool {
 ///
 /// 위로 스크롤한 상태(`view_offset > 0`)에서는 **보인다고 본다** — placeholder 가 스크롤백 행에
 /// 있을 수 있는데 활성 grid 만 훑어서는 알 수 없다. 모르면 멈추지 않는다(정지가 더 나쁜 오답이다).
-/// 활성 화면에 Unicode placeholder 셀이 하나라도 있는가. 첫 개에서 끝내므로 보통 몇 셀만 본다.
-/// **어느 이미지인지는 묻지 않는다** — 그 해독은 렌더러 몫이고, 여기서 필요한 것은 「virtual
-/// placement 가 그려질 수 있는 화면인가」뿐이다.
-fn activeScreenHasPlaceholder(self: *const TerminalCore) bool {
+/// 활성 화면의 placeholder 셀 중 **이 이미지**를 가리키는 것이 있는가.
+///
+/// 앞 판은 「placeholder 셀이 하나라도 있는가」만 물었다 — 어느 이미지인지는 렌더러 몫이라며 묻지
+/// 않았다. 애니메이션 전진을 막는 데에는 그것으로 족했지만, **원격 투영이 같은 질문을 쓰면서**
+/// 모자라졌다: 화면에 placeholder 가 하나라도 있으면 저장된 **모든** virtual 이미지가 「보인다」가
+/// 되어, 아무도 안 가리키는 픽셀이 16 MiB 투영 예산을 먹고 그 화면이 통째로 막혔다(실측 2026-09-15).
+///
+/// 이제 해독 규칙(`terminal/kitty_placeholder.zig`)을 **렌더러와 공유**해 id 까지 본다 — 규칙이 한 곳에
+/// 있으므로 「코어는 보인다는데 렌더는 안 그린다」가 생기지 않는다. 첫 개에서 끝내므로 흔한 경우는
+/// 여전히 몇 셀만 본다.
+fn activeScreenShowsImage(self: *const TerminalCore, image_id: u32) bool {
     for (self.screen.cells) |cell| {
-        if (cell.codepoint == types.unicode_placeholder_codepoint) return true;
+        const ref = kitty_placeholder.placeholderAt(cell, self.grapheme_store.items) orelse continue;
+        if (ref.image_id == image_id) return true;
     }
     return false;
 }
@@ -473,7 +482,12 @@ pub fn kittyImageVisibleInViewport(self: *TerminalCore, image_id: u32) bool {
         if (v.image_id != image_id) continue;
         if (v.on_alt != self.alt_active) continue; // 다른 화면의 격자는 지금 그릴 수 없다
         if (self.view_offset > 0) return true; // 스크롤백은 안 훑는다 — 모르면 멈추지 않는다
-        return activeScreenHasPlaceholder(self);
+        if (activeScreenShowsImage(self, image_id)) return true;
+        // **여기서 `return false` 하지 않는다.** 한 이미지가 virtual 격자와 **일반 placement 를 둘 다**
+        // 가질 수 있고(`a=p,U=1` 과 `a=p` 는 서로를 막지 않는다), 그때 화면에 뜨는 것은 일반 placement 다.
+        // 앞 판은 이 분기가 「placeholder 셀이 있기만 하면 참」이라 관대해서 이 갈림이 안 보였는데,
+        // id 까지 보게 엄격해지자 **일반 placement 로 보이는 이미지가 조용히 빠지는** 구멍이 열렸다.
+        break; // 이 이미지의 격자는 확인했다 — 판단은 아래 placement 루프가 잇는다
     }
     const rows: i64 = @intCast(self.size.rows);
     const top_abs: i64 = @intCast(self.screen.sb.count - @min(self.view_offset, self.screen.sb.count));

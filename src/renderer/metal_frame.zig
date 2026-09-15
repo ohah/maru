@@ -1123,87 +1123,13 @@ pub fn buildGpuImages(
     return result;
 }
 
-/// kitty unicode placeholder 의 row/column diacritic 표 — 결합 문자 하나가 곧 0-based 인덱스다.
-/// 베이스: kitty graphics protocol "Unicode placeholders" 가 배포하는 `rowcolumn-diacritics.txt`
-/// (https://sw.kovidgoyal.net/kitty/_downloads/f0a0de9ec8d9ff4456206db8e0814937/rowcolumn-diacritics.txt).
-/// 명세가 정한 **데이터**라 값 자체가 계약이다 — 순서를 바꾸면 좌표가 통째로 어긋난다.
-const row_column_diacritics = [_]u21{
-    0x0305,  0x030D,  0x030E,  0x0310,  0x0312,  0x033D,  0x033E,  0x033F,  0x0346,  0x034A,  0x034B,  0x034C,
-    0x0350,  0x0351,  0x0352,  0x0357,  0x035B,  0x0363,  0x0364,  0x0365,  0x0366,  0x0367,  0x0368,  0x0369,
-    0x036A,  0x036B,  0x036C,  0x036D,  0x036E,  0x036F,  0x0483,  0x0484,  0x0485,  0x0486,  0x0487,  0x0592,
-    0x0593,  0x0594,  0x0595,  0x0597,  0x0598,  0x0599,  0x059C,  0x059D,  0x059E,  0x059F,  0x05A0,  0x05A1,
-    0x05A8,  0x05A9,  0x05AB,  0x05AC,  0x05AF,  0x05C4,  0x0610,  0x0611,  0x0612,  0x0613,  0x0614,  0x0615,
-    0x0616,  0x0617,  0x0657,  0x0658,  0x0659,  0x065A,  0x065B,  0x065D,  0x065E,  0x06D6,  0x06D7,  0x06D8,
-    0x06D9,  0x06DA,  0x06DB,  0x06DC,  0x06DF,  0x06E0,  0x06E1,  0x06E2,  0x06E4,  0x06E7,  0x06E8,  0x06EB,
-    0x06EC,  0x0730,  0x0732,  0x0733,  0x0735,  0x0736,  0x073A,  0x073D,  0x073F,  0x0740,  0x0741,  0x0743,
-    0x0745,  0x0747,  0x0749,  0x074A,  0x07EB,  0x07EC,  0x07ED,  0x07EE,  0x07EF,  0x07F0,  0x07F1,  0x07F3,
-    0x0816,  0x0817,  0x0818,  0x0819,  0x081B,  0x081C,  0x081D,  0x081E,  0x081F,  0x0820,  0x0821,  0x0822,
-    0x0823,  0x0825,  0x0826,  0x0827,  0x0829,  0x082A,  0x082B,  0x082C,  0x082D,  0x0951,  0x0953,  0x0954,
-    0x0F82,  0x0F83,  0x0F86,  0x0F87,  0x135D,  0x135E,  0x135F,  0x17DD,  0x193A,  0x1A17,  0x1A75,  0x1A76,
-    0x1A77,  0x1A78,  0x1A79,  0x1A7A,  0x1A7B,  0x1A7C,  0x1B6B,  0x1B6D,  0x1B6E,  0x1B6F,  0x1B70,  0x1B71,
-    0x1B72,  0x1B73,  0x1CD0,  0x1CD1,  0x1CD2,  0x1CDA,  0x1CDB,  0x1CE0,  0x1DC0,  0x1DC1,  0x1DC3,  0x1DC4,
-    0x1DC5,  0x1DC6,  0x1DC7,  0x1DC8,  0x1DC9,  0x1DCB,  0x1DCC,  0x1DD1,  0x1DD2,  0x1DD3,  0x1DD4,  0x1DD5,
-    0x1DD6,  0x1DD7,  0x1DD8,  0x1DD9,  0x1DDA,  0x1DDB,  0x1DDC,  0x1DDD,  0x1DDE,  0x1DDF,  0x1DE0,  0x1DE1,
-    0x1DE2,  0x1DE3,  0x1DE4,  0x1DE5,  0x1DE6,  0x1DFE,  0x20D0,  0x20D1,  0x20D4,  0x20D5,  0x20D6,  0x20D7,
-    0x20DB,  0x20DC,  0x20E1,  0x20E7,  0x20E9,  0x20F0,  0x2CEF,  0x2CF0,  0x2CF1,  0x2DE0,  0x2DE1,  0x2DE2,
-    0x2DE3,  0x2DE4,  0x2DE5,  0x2DE6,  0x2DE7,  0x2DE8,  0x2DE9,  0x2DEA,  0x2DEB,  0x2DEC,  0x2DED,  0x2DEE,
-    0x2DEF,  0x2DF0,  0x2DF1,  0x2DF2,  0x2DF3,  0x2DF4,  0x2DF5,  0x2DF6,  0x2DF7,  0x2DF8,  0x2DF9,  0x2DFA,
-    0x2DFB,  0x2DFC,  0x2DFD,  0x2DFE,  0x2DFF,  0xA66F,  0xA67C,  0xA67D,  0xA6F0,  0xA6F1,  0xA8E0,  0xA8E1,
-    0xA8E2,  0xA8E3,  0xA8E4,  0xA8E5,  0xA8E6,  0xA8E7,  0xA8E8,  0xA8E9,  0xA8EA,  0xA8EB,  0xA8EC,  0xA8ED,
-    0xA8EE,  0xA8EF,  0xA8F0,  0xA8F1,  0xAAB0,  0xAAB2,  0xAAB3,  0xAAB7,  0xAAB8,  0xAABE,  0xAABF,  0xAAC1,
-    0xFE20,  0xFE21,  0xFE22,  0xFE23,  0xFE24,  0xFE25,  0xFE26,  0x10A0F, 0x10A38, 0x1D185, 0x1D186, 0x1D187,
-    0x1D188, 0x1D189, 0x1D1AA, 0x1D1AB, 0x1D1AC, 0x1D1AD, 0x1D242, 0x1D243, 0x1D244,
-};
-
-/// 결합 문자 → 0-based 인덱스. 표에 없으면 null(그 셀은 placeholder 로 치지 않는다).
-fn diacriticIndex(cp: u21) ?u32 {
-    for (row_column_diacritics, 0..) |d, i| {
-        if (d == cp) return @intCast(i);
-    }
-    return null;
-}
-
-/// kitty unicode placeholder 셀의 base codepoint(U+10EEEE).
-pub const placeholder_codepoint: u21 = terminal.unicode_placeholder_codepoint; // 단일 출처는 코어(terminal/types.zig)
-
-/// 한 placeholder 셀이 가리키는 것 — 어느 이미지의 어느 타일인가.
-const PlaceholderCell = struct {
-    image_id: u32,
-    tile_row: u32,
-    tile_col: u32,
-};
-
-/// 셀 하나를 placeholder 로 해석한다. 아니면 null.
-///
-/// **인코딩**(명세): base 는 U+10EEEE, 뒤따르는 결합 문자 둘이 각각 tile row·column 인덱스이고,
-/// **전경색 RGB 가 image_id 의 하위 24비트**다(`38;2;r;g;b` → r<<16 | g<<8 | b). 열 diacritic 이
-/// 없으면 열 0 으로 본다(명세: 생략 가능). 전경색이 RGB 가 아니면 어느 이미지인지 알 수 없어 건너뛴다.
-///
-/// **셋째 diacritic 은 image_id 의 최상위 바이트**다 — 전경색이 24비트뿐이라 그보다 큰 id 를 실을
-/// 곳이 없어서다(명세: "the most significant byte of the image id"). 안 읽으면 24비트를 넘는 id 가
-/// 통째로 어긋나 **이미지가 아예 안 뜬다**. 이 자리는 `I=`(image number)와 정면으로 얽힌다:
-/// 번호로 배정한 id 는 위에서부터 내려오므로 언제나 24비트를 넘는다.
-fn placeholderAt(cell: terminal.Cell, graphemes: []const []const u21) ?PlaceholderCell {
-    if (cell.codepoint != placeholder_codepoint) return null;
-    const rgb = switch (cell.style.foreground) {
-        .rgb => |v| v,
-        else => return null,
-    };
-    if (cell.grapheme_id == 0 or cell.grapheme_id > graphemes.len) return null;
-    const extras = graphemes[cell.grapheme_id - 1];
-    if (extras.len == 0) return null;
-    const tile_row = diacriticIndex(extras[0]) orelse return null;
-    const tile_col = if (extras.len > 1) (diacriticIndex(extras[1]) orelse 0) else 0;
-    // 셋째 diacritic = 최상위 바이트. 표 인덱스는 297까지 가므로 **바이트 범위를 넘으면 버린다** —
-    // 신뢰 경계 밖 값이라 그대로 shift 하면 id 가 엉뚱해진다.
-    const id_high: u32 = if (extras.len > 2) blk: {
-        const idx = diacriticIndex(extras[2]) orelse break :blk 0;
-        break :blk if (idx <= 0xFF) idx else 0;
-    } else 0;
-    const image_id = (id_high << 24) | (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | @as(u32, rgb.b);
-    if (image_id == 0) return null;
-    return .{ .image_id = image_id, .tile_row = tile_row, .tile_col = tile_col };
-}
+/// kitty placeholder 해독은 **terminal 레이어가 소유한다**(`terminal/kitty_placeholder.zig`) — 코어의
+/// 가시성 판정과 이 렌더 경로가 같은 규칙을 써야 「코어는 보인다는데 렌더는 안 그린다」가 안 생긴다.
+const kitty_placeholder = terminal.kitty_placeholder;
+const row_column_diacritics = kitty_placeholder.row_column_diacritics;
+pub const placeholder_codepoint = kitty_placeholder.placeholder_codepoint;
+const PlaceholderCell = kitty_placeholder.PlaceholderCell;
+const placeholderAt = kitty_placeholder.placeholderAt;
 
 /// placeholder 셀들을 이미지 타일 quad 로 환산해 `out` 에 넣는다.
 ///
@@ -4106,4 +4032,90 @@ test "[적대] replace 원자성: 재사용 경로에서 뒤 단계가 OOM 이�
         }
     }
     try std.testing.expect(saw_failure); // 주입이 실제로 한 번은 재사용 경로 안에서 터졌어야 한다
+}
+
+test "TBPROBE 끝에서 끝까지: terminal-browser 의 chunked U=1 전송이 quad 로 나온다" {
+    // **계측용 판정자**(2026-09-15). 위 placeholder 판정자들은 셀·이미지·격자를 **손으로 세워**
+    // `buildGpuImages` 만 잰다 — 파서에서 렌더까지 잇는 자리는 아무도 안 본다. tmux 안 terminal-browser
+    // 가 화면을 박스 문자로 채우는 증상이 그 이음매에서 났으므로, 실측 캡처와 **같은 형식**(4096 B 청크
+    // chunked 전송 + `U=1` + 전경색 RGB 에 실은 image_id)을 코어에 그대로 먹여 어디서 끊기는지 센다.
+    const allocator = std.testing.allocator;
+    var core_state = try terminal.TerminalCore.init(allocator, .{ .cols = 8, .rows = 3 });
+    defer core_state.deinit();
+
+    const grid_cols: u32 = 4;
+    const grid_rows: u32 = 2;
+    const img_w: usize = 32;
+    const img_h: usize = 16;
+    const image_id: u32 = 87364; // 실측 캡처의 i= 값. 0x015544 → 전경색 rgb(1, 85, 68).
+
+    const rgba = try allocator.alloc(u8, img_w * img_h * 4);
+    defer allocator.free(rgba);
+    for (rgba, 0..) |*b, i| b.* = @intCast(i % 251);
+
+    const b64 = try allocator.alloc(u8, std.base64.standard.Encoder.calcSize(rgba.len));
+    defer allocator.free(b64);
+    _ = std.base64.standard.Encoder.encode(b64, rgba);
+
+    // 실측과 같은 4096 B 청크. 첫 청크만 control 을 싣고 나머지는 payload 만 잇는다.
+    const chunk_size: usize = 4096;
+    var offset: usize = 0;
+    var first = true;
+    while (offset < b64.len) {
+        const end = @min(offset + chunk_size, b64.len);
+        const more: u8 = if (end < b64.len) '1' else '0';
+        var head: [192]u8 = undefined;
+        const control = if (first) try std.fmt.bufPrint(
+            &head,
+            "\x1b_Ga=T,f=32,s={d},v={d},t=d,i={d},U=1,c={d},r={d},q=2,m={c};",
+            .{ img_w, img_h, image_id, grid_cols, grid_rows, more },
+        ) else try std.fmt.bufPrint(&head, "\x1b_Gm={c};", .{more});
+        try core_state.write(control);
+        try core_state.write(b64[offset..end]);
+        try core_state.write("\x1b\\");
+        first = false;
+        offset = end;
+    }
+
+    // ① 코어가 이미지와 격자를 받았는가.
+    try std.testing.expect(core_state.kitty_images.map.contains(image_id));
+    try std.testing.expectEqual(@as(usize, 1), core_state.kitty_virtual_placements.items.len);
+
+    // ② placeholder 셀을 실제 바이트로 찍는다 — 전경색 RGB 에 id 하위 24비트, 결합문자에 타일 좌표.
+    try core_state.write("\x1b[38;2;1;85;68m");
+    var utf8: [8]u8 = undefined;
+    var tile_col: u32 = 0;
+    while (tile_col < grid_cols) : (tile_col += 1) {
+        var n = try std.unicode.utf8Encode(placeholder_codepoint, &utf8);
+        try core_state.write(utf8[0..n]);
+        n = try std.unicode.utf8Encode(row_column_diacritics[0], &utf8); // 타일 행 0
+        try core_state.write(utf8[0..n]);
+        n = try std.unicode.utf8Encode(row_column_diacritics[tile_col], &utf8);
+        try core_state.write(utf8[0..n]);
+    }
+
+    // ③ 그 셀이 코어에 placeholder 로 남았는가(코드포인트·전경색·grapheme).
+    const snapshot = core_state.renderSnapshot();
+    try std.testing.expectEqual(placeholder_codepoint, snapshot.cells[0].codepoint);
+    switch (snapshot.cells[0].style.foreground) {
+        .rgb => |v| try std.testing.expectEqual([3]u8{ 1, 85, 68 }, [3]u8{ v.r, v.g, v.b }),
+        else => return error.ForegroundNotRgb,
+    }
+    try std.testing.expect(snapshot.cells[0].grapheme_id != 0);
+
+    // ④ 렌더가 그 셀을 타일 quad 로 바꾸는가 — 여기까지 와야 화면에 이미지가 뜬다.
+    const out = try buildGpuImages(
+        allocator,
+        snapshot.placements,
+        snapshot.images,
+        snapshot.size,
+        10,
+        20,
+        snapshot.cells,
+        snapshot.graphemes,
+        snapshot.virtual_placements,
+    );
+    defer allocator.free(out);
+    try std.testing.expect(out.len > 0);
+    try std.testing.expectEqual(image_id, out[0].image_id);
 }

@@ -56,8 +56,16 @@ fn sliceHasNullEntry(slice: [:null]const ?[*:0]const u8) bool {
     return false;
 }
 
+/// 판정자 전제: 앞선 테스트가 std 뷰를 결함 상태(길이 안에 null)로 남겨 두지 않았다. 이 모듈의 규칙을 자기
+/// 테스트가 어기면 여기서 걸린다 — 어느 테스트가 먼저 돌든.
+fn expectViewHasNoNull() !void {
+    const s = stdDebugViewSlice() orelse return;
+    try std.testing.expect(!sliceHasNullEntry(s));
+}
+
 test "unsetenv 만 하면 std 의 조각 끝에 null 이 생기고, 갱신하면 사라진다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try expectViewHasNoNull();
     // 먼저 조각을 **현재** `environ` 배열에 맞춘다. std 가 시작 때 붙잡은 것은 커널이 준 원본인데, 이 프로세스에서
     // 누가 먼저 `setenv` 를 했으면 libc 는 자기 사본으로 갈아탄 뒤라 원본은 더 이상 안 건드린다 — 그러면 아래
     // 부정 대조가 «null 이 안 생긴다» 로 어긋난다(단독 실행에서 실제로 그랬다). 결함의 본질은 「libc 가 고치는
@@ -98,6 +106,7 @@ test "unsetenv 만 하면 std 의 조각 끝에 null 이 생기고, 갱신하면
 
 test "unsetenvKeepingStdView 는 변수를 실제로 지우고 조각도 함께 갱신한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try expectViewHasNoNull();
     refreshStdDebugView(); // 위 테스트와 같은 이유 — 순서와 무관하게 현재 배열에서 시작한다.
     const before = stdDebugViewSlice() orelse return error.SkipZigTest;
     if (before.len == 0) return error.SkipZigTest;
@@ -124,9 +133,13 @@ test "unsetenvKeepingStdView 는 변수를 실제로 지우고 조각도 함께 
 
 test "앞서 setenv 로 libc 가 사본으로 갈아탄 뒤에도 같은 대조가 선다 — 단독 실행에서 어긋났던 그 조건" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try expectViewHasNoNull();
     // libc 를 먼저 사본 상태로 만든다(새 이름 추가). 이 뒤로 std 의 원본 조각과 libc 배열은 다른 메모리다.
     try std.testing.expectEqual(@as(c_int, 0), setenv("MARU_STD_ENVIRON_VIEW_PRIME", "1", 1));
-    defer _ = unsetenv("MARU_STD_ENVIRON_VIEW_PRIME");
+    // defer 는 역순이라 이 줄이 **마지막**에 풀린다 — 날것 `unsetenv` 로 두면 아래 defer 의 갱신 뒤에 PRIME 이
+    // 제자리에서 지워져 std 뷰가 결함 상태 그대로 남는다(적대적 검증에서 잡혔다). 이 모듈의 규칙을 자기
+    // 테스트가 어기면 안 된다.
+    defer unsetenvKeepingStdView("MARU_STD_ENVIRON_VIEW_PRIME");
     refreshStdDebugView();
     const before = stdDebugViewSlice() orelse return error.SkipZigTest;
     if (before.len == 0) return error.SkipZigTest;

@@ -1078,6 +1078,12 @@ pub fn buildGpuImages(
         // 이미지를 image_id로 찾는다(텍스처 크기·존재 확인). 없으면 그릴 게 없다.
         const img = findImage(images, p.image_id) orelse continue;
         if (img.width == 0 or img.height == 0) continue;
+        // **픽셀이 아직 없는 이미지는 그리지 않는다.** 크기만 아는 상태가 실제로 존재한다:
+        // 원격 base 대역은 픽셀 없이 메타+placement 를 싣고(`appendImageBaseMeta`), client 는
+        // `applySnapshot` 과 `applyDelta` 를 **따로** 적용하며 그 사이 grid 를 재구축한다 —
+        // 재접속 직후 한 프레임이 그 상태로 그려질 수 있다. 그때 quad 를 만들면 0 바이트 텍스처를
+        // 샘플하게 되고, 그 자리는 **빈 칸이어야 한다**(있지도 않은 그림 대신 아무것도 안 그린다).
+        if (img.pixels.len == 0) continue;
         const tex_w: f32 = @floatFromInt(img.width);
         const tex_h: f32 = @floatFromInt(img.height);
 
@@ -1168,7 +1174,13 @@ fn appendPlaceholderQuads(
                 col += 1;
                 continue;
             };
-            if (img.width == 0 or img.height == 0 or vp.columns == 0 or vp.rows == 0) {
+            // 크기·격자가 없으면 타일을 못 정하고, **픽셀이 없으면 그릴 것이 없다**(위 일반 placement
+            // 경로와 같은 이유 — 원격 base 대역이 픽셀 없는 이미지를 만들 수 있다).
+            // 크기·격자가 없으면 타일을 못 정하고, **픽셀이 없으면 그릴 것이 없다**(위 일반 placement
+            // 경로와 같은 이유 — 원격 base 대역이 픽셀 없는 이미지를 만들 수 있다).
+            if (img.width == 0 or img.height == 0 or vp.columns == 0 or vp.rows == 0 or
+                img.pixels.len == 0)
+            {
                 col += 1;
                 continue;
             }
@@ -3053,10 +3065,18 @@ test "setCellsPaneOrigin stamps the panel pixel origin on every terminal cell" {
     }
 }
 
+/// 판정자용 — 「픽셀이 있다」만 표현한다.
+///
+/// `buildGpuImages` 는 dest 사각형과 source UV 를 **width/height 로** 계산하고 `pixels` 는 **있는지만**
+/// 본다(픽셀 없는 이미지는 그리지 않는다 — 원격 base 대역이 그 상태를 만든다). 그래서 quad 계산을
+/// 재는 판정자에는 길이가 무의미하고, 실제 크기를 채우면 판정자마다 수십 KB 를 잡으면서 읽는 사람에게
+/// 주는 정보는 같다. 「픽셀 유무가 quad 를 가른다」는 별도 판정자가 따로 잰다.
+const test_pixels_present = [_]u8{0};
+
 // --- kitty graphics K2b: placement → GpuImage 환산 ---
 
 test "buildGpuImages: 셀 메트릭으로 dest 사각형 + source 전체 UV + above_text 패스" {
-    const images = [_]terminal.KittyImageView{.{ .image_id = 7, .width = 100, .height = 50, .bpp = 4, .generation = 1, .pixels = &.{} }};
+    const images = [_]terminal.KittyImageView{.{ .image_id = 7, .width = 100, .height = 50, .bpp = 4, .generation = 1, .pixels = &test_pixels_present }};
     const placements = [_]terminal.KittyPlacement{.{ .image_id = 7, .placement_id = 0, .row = 1, .col = 2, .columns = 3, .rows = 2, .z = 0 }};
     const out = try buildGpuImages(std.testing.allocator, &placements, &images, .{ .cols = 10, .rows = 6 }, 10, 20, &.{}, &.{}, &.{});
     defer std.testing.allocator.free(out);
@@ -3074,7 +3094,7 @@ test "buildGpuImages: 셀 메트릭으로 dest 사각형 + source 전체 UV + ab
 }
 
 test "buildGpuImages: 셀 내 오프셋(X/Y) + source rect crop UV 정규화" {
-    const images = [_]terminal.KittyImageView{.{ .image_id = 1, .width = 100, .height = 50, .bpp = 4, .generation = 1, .pixels = &.{} }};
+    const images = [_]terminal.KittyImageView{.{ .image_id = 1, .width = 100, .height = 50, .bpp = 4, .generation = 1, .pixels = &test_pixels_present }};
     const placements = [_]terminal.KittyPlacement{.{
         .image_id = 1,
         .placement_id = 0,
@@ -3102,7 +3122,7 @@ test "buildGpuImages: 셀 내 오프셋(X/Y) + source rect crop UV 정규화" {
 }
 
 test "buildGpuImages: c/r 미지정이면 source 픽셀 크기, w/h=0이면 전체" {
-    const images = [_]terminal.KittyImageView{.{ .image_id = 1, .width = 64, .height = 48, .bpp = 4, .generation = 1, .pixels = &.{} }};
+    const images = [_]terminal.KittyImageView{.{ .image_id = 1, .width = 64, .height = 48, .bpp = 4, .generation = 1, .pixels = &test_pixels_present }};
     const placements = [_]terminal.KittyPlacement{.{ .image_id = 1, .placement_id = 0, .row = 0, .col = 0, .z = 0 }};
     const out = try buildGpuImages(std.testing.allocator, &placements, &images, .{ .cols = 20, .rows = 20 }, 10, 20, &.{}, &.{}, &.{});
     defer std.testing.allocator.free(out);
@@ -3112,7 +3132,7 @@ test "buildGpuImages: c/r 미지정이면 source 픽셀 크기, w/h=0이면 전�
 }
 
 test "buildGpuImages: z-pass 분류와 (pass,z) 정렬" {
-    const images = [_]terminal.KittyImageView{.{ .image_id = 1, .width = 10, .height = 10, .bpp = 4, .generation = 1, .pixels = &.{} }};
+    const images = [_]terminal.KittyImageView{.{ .image_id = 1, .width = 10, .height = 10, .bpp = 4, .generation = 1, .pixels = &test_pixels_present }};
     const big_neg: i32 = @divTrunc(std.math.minInt(i32), 2) - 1; // < bg_limit
     const placements = [_]terminal.KittyPlacement{
         .{ .image_id = 1, .placement_id = 1, .row = 0, .col = 0, .z = 5 }, // above_text
@@ -3128,7 +3148,7 @@ test "buildGpuImages: z-pass 분류와 (pass,z) 정렬" {
 }
 
 test "buildGpuImages: 화면 밖은 cull, 위로 걸친 건 음수 dest_y로 유지, 없는 이미지는 skip" {
-    const images = [_]terminal.KittyImageView{.{ .image_id = 1, .width = 10, .height = 10, .bpp = 4, .generation = 1, .pixels = &.{} }};
+    const images = [_]terminal.KittyImageView{.{ .image_id = 1, .width = 10, .height = 10, .bpp = 4, .generation = 1, .pixels = &test_pixels_present }};
     // (a) 완전히 화면 위(row=-10, 높이 10셀? 여기선 자동크기 10px라 dest_y=-200, +10 <= 0) → cull
     const above = [_]terminal.KittyPlacement{.{ .image_id = 1, .placement_id = 1, .row = -10, .col = 0, .z = 0 }};
     const out_a = try buildGpuImages(std.testing.allocator, &above, &images, .{ .cols = 10, .rows = 6 }, 10, 20, &.{}, &.{}, &.{});
@@ -3664,7 +3684,7 @@ test "ChromeGeometry의 모든 필드가 view()로 나간다 (comptime 커버리
 
 test "unicode placeholder 셀이 이미지 타일 quad 로 환산되고, 행 안에서 런으로 묶인다" {
     // 4x2 격자 이미지(픽셀 40x20 → 타일 10x10), 셀은 10x20 px.
-    const images = [_]terminal.KittyImageView{.{ .image_id = 7, .width = 40, .height = 20, .bpp = 4, .generation = 1, .pixels = &.{} }};
+    const images = [_]terminal.KittyImageView{.{ .image_id = 7, .width = 40, .height = 20, .bpp = 4, .generation = 1, .pixels = &test_pixels_present }};
     const vps = [_]terminal.KittyVirtualPlacement{.{ .image_id = 7, .placement_id = 0, .columns = 4, .rows = 2 }};
     // image_id 7 → 전경색 rgb(0,0,7). grapheme extras = [row diacritic, col diacritic].
     const fg: terminal.Style = .{ .foreground = .{ .rgb = .{ .r = 0, .g = 0, .b = 7 } } };
@@ -3709,7 +3729,7 @@ test "unicode placeholder: 세 번째 diacritic 이 image_id 의 최상위 바�
     // 이 자리는 `I=`(image number) 와 정면으로 얽힌다 — 번호로 배정한 id 는 0xFFFF_FFFE 부터
     // 내려가 언제나 24비트를 넘으므로, 못 읽으면 그 경로 전체가 죽는다.
     const id: u32 = 0x0100_0007; // 최상위 바이트 1, 하위 24비트 7
-    const images = [_]terminal.KittyImageView{.{ .image_id = id, .width = 10, .height = 20, .bpp = 4, .generation = 1, .pixels = &.{} }};
+    const images = [_]terminal.KittyImageView{.{ .image_id = id, .width = 10, .height = 20, .bpp = 4, .generation = 1, .pixels = &test_pixels_present }};
     const vps = [_]terminal.KittyVirtualPlacement{.{ .image_id = id, .placement_id = 0, .columns = 1, .rows = 1 }};
     const fg: terminal.Style = .{ .foreground = .{ .rgb = .{ .r = 0, .g = 0, .b = 7 } } };
     const g0 = [_]u21{ row_column_diacritics[0], row_column_diacritics[0], row_column_diacritics[1] }; // row 0, col 0, id 상위 바이트 1
@@ -4171,4 +4191,54 @@ test "TBPROBE 끝에서 끝까지: terminal-browser 의 chunked U=1 전송이 qu
     defer allocator.free(out);
     try std.testing.expect(out.len > 0);
     try std.testing.expectEqual(image_id, out[0].image_id);
+}
+
+test "TBPROBE 픽셀 없는 이미지에는 quad 를 만들지 않는다 — 두 경로 모두" {
+    // **회귀 판정**(2026-09-15). 「크기는 아는데 픽셀이 아직 없는」 이미지가 실제로 존재한다:
+    // 원격 base 대역은 픽셀 없이 메타+placement 를 싣고(`appendImageBaseMeta`), client 는
+    // `applySnapshot` 과 `applyDelta` 를 **따로** 적용하며 그 사이 grid 를 재구축한다 — 재접속 직후
+    // 한 프레임이 그 상태로 그려질 수 있다. 그때 quad 를 만들면 0 바이트 텍스처를 샘플하게 되고,
+    // 그 자리는 **빈 칸이어야 한다**(있지도 않은 그림 대신 아무것도 안 그린다).
+    //
+    // **양성 대조를 함께 둔다.** 없으면 「애초에 아무것도 안 나오는 픽스처」와 구분되지 않는다 —
+    // 이 저장소가 반복해서 밟은 형태다(부정 판정자는 그 기능이 살아 있음을 같은 자리에서 증명해야 한다).
+    const allocator = std.testing.allocator;
+    const empty = [_]terminal.KittyImageView{
+        .{ .image_id = 7, .width = 40, .height = 20, .bpp = 4, .generation = 1, .pixels = &.{} },
+    };
+    const filled = [_]terminal.KittyImageView{
+        .{ .image_id = 7, .width = 40, .height = 20, .bpp = 4, .generation = 1, .pixels = &test_pixels_present },
+    };
+
+    // ① 일반 placement 경로.
+    const placements = [_]terminal.KittyPlacement{
+        .{ .image_id = 7, .placement_id = 0, .row = 0, .col = 0, .columns = 2, .rows = 1, .z = 0 },
+    };
+    {
+        const out = try buildGpuImages(allocator, &placements, &empty, .{ .cols = 8, .rows = 4 }, 10, 20, &.{}, &.{}, &.{});
+        defer allocator.free(out);
+        try std.testing.expectEqual(@as(usize, 0), out.len); // 픽셀이 없으면 안 그린다
+    }
+    {
+        const out = try buildGpuImages(allocator, &placements, &filled, .{ .cols = 8, .rows = 4 }, 10, 20, &.{}, &.{}, &.{});
+        defer allocator.free(out);
+        try std.testing.expectEqual(@as(usize, 1), out.len); // 양성 대조 — 픽셀이 있으면 그린다
+    }
+
+    // ② unicode placeholder 경로(같은 규칙이어야 한다 — 한쪽만 막으면 다른 쪽으로 샌다).
+    const vps = [_]terminal.KittyVirtualPlacement{.{ .image_id = 7, .placement_id = 0, .columns = 2, .rows = 1 }};
+    const fg: terminal.Style = .{ .foreground = .{ .rgb = .{ .r = 0, .g = 0, .b = 7 } } };
+    const g0 = [_]u21{ row_column_diacritics[0], row_column_diacritics[0] };
+    const graphemes = [_][]const u21{&g0};
+    const cells = [_]terminal.Cell{.{ .codepoint = placeholder_codepoint, .style = fg, .grapheme_id = 1 }};
+    {
+        const out = try buildGpuImages(allocator, &.{}, &empty, .{ .cols = 1, .rows = 1 }, 10, 20, &cells, &graphemes, &vps);
+        defer allocator.free(out);
+        try std.testing.expectEqual(@as(usize, 0), out.len);
+    }
+    {
+        const out = try buildGpuImages(allocator, &.{}, &filled, .{ .cols = 1, .rows = 1 }, 10, 20, &cells, &graphemes, &vps);
+        defer allocator.free(out);
+        try std.testing.expectEqual(@as(usize, 1), out.len); // 양성 대조
+    }
 }

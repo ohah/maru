@@ -152,7 +152,7 @@ const RuntimeAttachment = union(enum) {
     fn allowsMutation(self: *const RuntimeAttachment) bool {
         return switch (self.*) {
             .legacy => |*value| value.allowsMutation(),
-            .generation => |*value| generationAttachmentAttached(value) and value.allowsMutation(),
+            .generation => |*value| value.isLive() and value.allowsMutation(),
         };
     }
 
@@ -163,7 +163,7 @@ const RuntimeAttachment = union(enum) {
         return switch (self.*) {
             .legacy => |*value| value.allowsMutation() and
                 !client.hasBufferedControllerRevokeForStream(value.streamId()),
-            .generation => |*value| generationAttachmentAttached(value) and value.allowsMutation(),
+            .generation => |*value| value.isLive() and value.allowsMutation(),
         };
     }
 
@@ -658,13 +658,6 @@ fn generationAttachmentTerminal(
 ) bool {
     return @as(*const u8, @ptrCast(&attachment.lifecycle)).* ==
         @intFromEnum(generation_attachment_mod.Lifecycle.terminal);
-}
-
-fn generationAttachmentAttached(
-    attachment: *const generation_attachment_mod.GenerationAttachment,
-) bool {
-    return @as(*const u8, @ptrCast(&attachment.lifecycle)).* ==
-        @intFromEnum(generation_attachment_mod.Lifecycle.attached);
 }
 
 const ReconnectGenerationEffect = enum(u8) {

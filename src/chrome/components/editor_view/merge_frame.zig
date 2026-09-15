@@ -188,6 +188,26 @@ pub const Written = struct {
     result_total_visual_rows: u32 = 0,
 };
 
+/// `i` 번째 판(0 Current · 1 Result · 2 Incoming · 3 Base)의 배경 — 자기 사각을 뷰 가장자리(`outer`)와 맞닿은 쪽으로
+/// 넓힌 것. 세 열의 왼쪽 끝·오른쪽 끝·위, Base 띠의 좌우·아래가 그 변이다(Base 가 없으면 세 열의 아래).
+fn backgroundFor(i: usize, rect: draw.Rect, lay: Layout, outer: draw.Rect) draw.Rect {
+    const ox: i32 = outer.x;
+    const oy: i32 = outer.y;
+    const oright: i32 = outer.x + @as(i32, @intCast(outer.w));
+    const obottom: i32 = outer.y + @as(i32, @intCast(outer.h));
+    const right: i32 = rect.x + @as(i32, @intCast(rect.w));
+    const bottom: i32 = rect.y + @as(i32, @intCast(rect.h));
+    const leftmost = (i == 0) or (i == 1 and lay.current == null) or i == 3;
+    const rightmost = (i == 2) or (i == 1 and lay.incoming == null) or i == 3;
+    const top = i != 3;
+    const bottom_edge = (i == 3) or lay.base == null;
+    const x0: i32 = if (leftmost) ox else rect.x;
+    const y0: i32 = if (top) oy else rect.y;
+    const x1: i32 = if (rightmost) oright else right;
+    const y1: i32 = if (bottom_edge) obottom else bottom;
+    return .{ .x = x0, .y = y0, .w = @intCast(@max(x1 - x0, 0)), .h = @intCast(@max(y1 - y0, 0)) };
+}
+
 fn buildPane(pane: Pane, props: Props, rect: draw.Rect, background: ?draw.Rect, scratch: frame.Scratch) frame.Written {
     const probe = diff_frame.sideMetrics(rect.w, rect.h, props.cell_w_px, props.cell_h_px);
     const shows_h_bar = frame.showsHorizontalBar(
@@ -247,13 +267,10 @@ pub fn build(props: Props, scratch: frame.Scratch) Written {
         const pane = slot.pane orelse continue;
         const rect = slot.rect orelse continue;
         const part = splitScratch(scratch, i);
-        // 배경은 **자기 사각만** 칠한다 — 이웃까지 칠하면 나중에 그리는 pane 이 앞 pane 을 덮는다.
-        const bg: draw.Rect = .{
-            .x = rect.x,
-            .y = rect.y,
-            .w = rect.w,
-            .h = if (i == 3) rect.h else @min(rect.h, outer.h),
-        };
+        // 배경은 **자기 사각만** 칠하되, `background_rect`(뷰 전체 — 판 블록은 그 안쪽 여백에 선다) 와 맞닿은
+        // 변은 **그 가장자리까지** 넓힌다. 이웃까지 칠하면 나중에 그리는 pane 이 앞 pane 을 덮고, 넓히지 않으면
+        // 여백 4px 에 pane 배경이 비치는 띠가 남는다(제품이 여백 안쪽 사각을 넘기게 된 뒤 — S3b-2 정정 2026-09-15).
+        const bg = backgroundFor(i, rect, lay, outer);
         const w = buildPane(pane, props, rect, bg, part);
         slot.rows.* = w.visual_rows;
         if (i == 1) {
@@ -274,6 +291,36 @@ pub fn build(props: Props, scratch: frame.Scratch) Written {
 }
 
 const testing = std.testing;
+
+test "MPN0 배경은 판 사각을 뷰 가장자리까지 넓혀 여백을 덮는다 — 판만 칠하면 4px 띠가 남는다" {
+    // 제품은 판 블록을 여백 안쪽 사각으로 넘기고 배경은 뷰 전체(`background_rect`)를 덮어야 한다(§4.1b).
+    const outer: draw.Rect = .{ .x = -4, .y = -4, .w = 1000, .h = 700 };
+    const inner: draw.Rect = .{ .x = 0, .y = 0, .w = 992, .h = 692 };
+    const lay = layout(inner, 8, 16, true);
+    try std.testing.expect(lay.isThreeUp());
+    const cur = backgroundFor(0, lay.current.?, lay, outer);
+    const res = backgroundFor(1, lay.result, lay, outer);
+    const inc = backgroundFor(2, lay.incoming.?, lay, outer);
+    const bas = backgroundFor(3, lay.base.?, lay, outer);
+    // 왼쪽 끝·위는 뷰 가장자리, 오른쪽 끝은 뷰의 오른쪽, Base 는 좌우·아래가 뷰 가장자리.
+    try std.testing.expectEqual(@as(i32, -4), cur.x);
+    try std.testing.expectEqual(@as(i32, -4), cur.y);
+    try std.testing.expectEqual(@as(i32, -4), res.y);
+    try std.testing.expectEqual(@as(i32, 996), inc.x + @as(i32, @intCast(inc.w)));
+    try std.testing.expectEqual(@as(i32, -4), bas.x);
+    try std.testing.expectEqual(@as(i32, 996), bas.x + @as(i32, @intCast(bas.w)));
+    try std.testing.expectEqual(@as(i32, 696), bas.y + @as(i32, @intCast(bas.h)));
+    // 그리고 이웃끼리 겹치지 않는다(나중 판이 앞 판을 덮지 않는다): 가로로 맞닿고 세로로 맞닿는다.
+    try std.testing.expectEqual(cur.x + @as(i32, @intCast(cur.w)), res.x);
+    try std.testing.expectEqual(res.x + @as(i32, @intCast(res.w)), inc.x);
+    try std.testing.expectEqual(cur.y + @as(i32, @intCast(cur.h)), bas.y);
+    // 접혔을 때(Result 만) 좌우 모두 뷰 가장자리, 조상이 없으면 세 열이 아래까지.
+    const narrow = layout(.{ .x = 0, .y = 0, .w = 300, .h = 692 }, 8, 16, false);
+    const only = backgroundFor(1, narrow.result, narrow, .{ .x = -4, .y = -4, .w = 308, .h = 700 });
+    try std.testing.expectEqual(@as(i32, -4), only.x);
+    try std.testing.expectEqual(@as(i32, 304), only.x + @as(i32, @intCast(only.w)));
+    try std.testing.expectEqual(@as(i32, 696), only.y + @as(i32, @intCast(only.h)));
+}
 
 test "MPN1 조상이 없으면 Base 띠가 «사라진다» — 비워 두지 않는다" {
     // 빈 띠는 「읽는 중」과 구별되지 않는다. 그리고 그 판정은 S3a 가 이미 냈으므로 여기서 길이로

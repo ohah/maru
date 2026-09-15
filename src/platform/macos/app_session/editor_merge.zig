@@ -415,14 +415,12 @@ pub fn storePaneHits(self: *AppSession, term: *Term, side: MergeSide, rows: []co
     pa.hit_rows_len = rows.len;
     pa.first_line = first_line;
     // **기하는 그 판의 것으로** — gutter 폭은 그 판의 줄 수에서 나온다(Result 와 자릿수가 다를 수 있다).
-    const inset = chrome_editor.frame.content_inset_px;
-    const inner_w = rect.w -| inset * 2;
-    const inner_h = rect.h -| inset * 2;
+    // 배치 사각은 이미 여백 안쪽(글자 자리)이다 — 판마다 여백을 또 두지 않는다(S3b-2 정정, 2026-09-15).
     const lines_len = sideLines(state, side).len;
-    const m = chrome_editor.diff_frame.sideMetrics(inner_w, inner_h, @intCast(self.cell_width_px), @intCast(self.cell_height_px));
+    const m = chrome_editor.diff_frame.sideMetrics(rect.w, rect.h, @intCast(self.cell_width_px), @intCast(self.cell_height_px));
     const geom = chrome_editor.geometry.compute(m.total_cols, lines_len, .{});
-    pa.body_x = rect.x + @as(i32, @intCast(inset));
-    pa.body_y = rect.y + @as(i32, @intCast(inset));
+    pa.body_x = rect.x;
+    pa.body_y = rect.y;
     pa.content_left_px = @as(u32, geom.contentLeft()) * @as(u32, self.cell_width_px);
     pa.content_width = geom.content.width;
 }

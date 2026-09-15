@@ -377,3 +377,56 @@ if (will_project) { active.lockCore(io); defer unlock; renderPrepWrites(); dl = 
 - **(c) inflate를 더 빠르게** — 이미 1.75GB/s. 2배 빨라져도 락 아래 1.6ms가 남는다. 위치 문제라 기각.
 
 (a)가 «코어는 락 아래에서 O(픽셀) 일을 하지 않는다»는 규칙이 되고, 착수 시 위 표가 전후 비교 기준이다.
+
+### 13.8 (a) 구현 설계 — 리더가 락 밖에서 푼다 (사용자 결정 2026-09-15, doc-first)
+
+**규칙**: 코어는 `core_mutex` 아래에서 **픽셀 수에 비례하는 일을 하지 않는다.** 이미지의 마지막 청크(`m=0`)에서 코어는 검증과 «자리 잡기»만 하고, base64 디코드·zlib 해제는 리더 스레드가 락을 놓은 뒤 한다.
+
+```text
+[리더 applyToCore — 락 아래]                     [리더 — 락 밖]                  [리더 — 재잠금]
+core.write(청크)                                                                  
+  └ m=0: kittyTransmit(defer)                                                     
+      · cmd 검증(medium/id/format/s·v/expected)                                   
+      · pending 엔트리 삽입(data=∅, 세대 g)   ─┐                                   
+        같은 id 옛 이미지는 map 에서 빼서 job 에 │                                   
+      · a=T 면 kittyDisplay (placement 생성)     │                                   
+      · 응답은 **보류**(.deferred)               │                                   
+core.takePendingKittyJobs(→ reader.kitty_jobs) ◄┘                                   
+unlock · yieldToDemand                            job.decode(core.allocator):        lock
+                                                    base64 → inflate → pixels        core.completeKittyTransmit(job, pixels)
+                                                    옛 이미지 freeAll                  · 엔트리 있고 세대 == g 고 pending 이면 설치
+                                                                                       (한도/evict 는 여기서, 실 크기로)
+                                                                                     · 아니면(교체됨·삭제됨) pixels free
+                                                                                     · 응답: 디코드 결과대로(OK/EINVAL/ENOMEM)
+                                                                                    unlock · yieldToDemand → 렌더 신호
+```
+
+- **pending 표현**: `KittyImage.data.len == 0`(`isPending()`). 정상 이미지는 `w·h·bpp > 0` 이라 0 바이트일 수 없다. 새 필드가 아니라서 exec handoff 코덱·인벤토리를 안 건드린다 — 대신 **pause 경계에 pending 이 없어야** 한다(아래 불변식).
+- **렌더**: `buildImageViews` 가 pending 을 건너뛴다 → 그 placement 는 그 프레임에 안 그려지고 다음 tick 에 뜬다(최대 1프레임).
+- **같은 write 안의 종속 명령**(`a=f/a/c`): 루트가 pending 이면 그 job 을 **인라인으로** 끝내고 진행한다(`flushPendingKittyImage`). icat·timg 는 「전송 뒤 곧바로 프레임」을 한 청크에 보내므로 EINVAL 로 돌리면 프레임이 사라진다(runtime_manager 애니메이션 판정자가 잡았다). 리더가 이미 가져간 job 은 그 조각의 `applyToCore` 끝에서 완료되므로 다음 write 가 시작될 땐 pending 이 없다.
+- **세대(generation)**: pending 삽입 시 `gen_counter` 로 배정. 완료 시 세대가 다르면(같은 id 재전송이 먼저 pending 을 갈아치움) 설치하지 않는다 — 옛 픽셀이 새 자리를 덮는 ABA 방지(Ghostty `PendingImage.generation` 과 같은 뜻).
+- **응답 순서**: transmit 의 OK/EINVAL 은 같은 청크의 뒤 명령 응답보다 **늦게** 나갈 수 있다. kitty 명세의 응답은 `i=` 로 짝을 맞추므로 순서는 계약이 아니다. 응답 본문은 **디코드 결과**를 말한다(설치 여부가 아니라) — 앱이 자기 재전송으로 옛 것을 밀어냈어도 옛 전송이 유효했으면 OK 다.
+- **한도(320MB)·evict**: pending 은 0 바이트로 센다. 실 크기 판정과 evict 는 완료 시 락 아래에서(오늘 `storeKittyImage` 와 같은 규칙). 실패면 엔트리+placement 제거, ENOMEM.
+- **옛 이미지 free**: 같은 id 교체로 밀려난 옛 `KittyImage` 는 job 이 들고 나가 락 밖에서 `freeAll`(ReleaseSafe 1.56ms 였던 것). 그 순간 map 에는 없으니 아무도 참조하지 않는다 — 메인은 락 아래에서 픽셀을 자기 버퍼로 **복사**해 나온다(§10.6 재사용 버퍼).
+- **켜는 조건**: `TerminalCore.kitty_defer_decode`(기본 false). 리더가 **자기 `core.write` 호출 동안만** true 로 둔다 — 호출 뒤 남는 job 을 곧바로 드레인할 책임자가 켜는 것이다. 메인이 `lockCore` 아래에서 `core.write` 하는 경로(테스트·헤드리스 FrameLoop)는 인라인이라 pending 을 남기지 않는다.
+- **범위**: direct `f=24/32`(압축 유무 무관). `f=100` PNG 는 치수를 디코드해야 알아 placement 를 먼저 만들 수 없다 — 이번엔 인라인 유지(§13.7 표의 PNG 는 없었고, 브라우저는 f=32). `a=q`(query) 도 인라인(1×1 관례).
+
+**불변식**
+- 리더는 `applyToCore` **조각마다 끝에서** 그 조각의 job 을 완료한다 → pause/handoff 경계(`pausedStateIsSafe`)에 pending 이미지·job 이 없다(판정에 추가). `kitty_pending_jobs` 는 인벤토리 `must_be_empty`, `kitty_defer_decode` 는 `reconstructed`.
+- job 의 payload·옛 이미지는 `core.allocator` 소유 — 리더가 락 밖에서 그 allocator 로 free 한다(allocator 는 스레드 안전).
+- RIS(`fullReset`)·`destroy`: pending 엔트리는 map 과 함께 사라지고, 남은 job 은 완료 시 «엔트리 없음» 으로 픽셀만 버린다.
+
+**테스트(코어, 결정적 — 리더 없이 `kitty_defer_decode = true` 로)**: (1) m=0 뒤 엔트리가 pending·view 에 없음·job 1개 · (2) decode+complete 뒤 설치·view 에 있음·generation 유지·응답 OK · (3) 완료 전 같은 id 재전송 → 첫 job 완료가 설치되지 않고 픽셀 free(세대 불일치) · (4) 완료 전 `a=d,d=I` 삭제 → 설치 안 됨 · (5) 잘못된 payload → EINVAL, 엔트리·placement 제거 · (6) 한도 초과 → ENOMEM · (7) `a=T` 는 placement 가 pending 동안 존재하되 view 는 비어 있음 · (8) RIS 중간 · (9) 같은 write 안 `a=T`+`a=f`+`a=a` → 루트 인라인 완료·프레임 2·응답 3개 순서 · (10) FailingAllocator 로 job 생성 OOM 시 인라인 폴백 없이 ENOMEM 응답. 리더 경로는 기존 `test-pty` hammer 로 회귀만.
+
+**실측 (구현 뒤, 같은 하네스 — 터미널 브라우저 1920×1080, 63프레임/13.4초 버스트)**
+
+| | 전(양보만) | 후(양보 + 락 밖 디코드) |
+|---|---|---|
+| 리더 보유 1회 최대 (Safe) | 7.0~9.7ms | **0.68ms** |
+| 메인 lockCore 대기 >1ms (Safe / Fast) | 프레임마다 1회, 5.9~8.1ms / 1.1~3.0ms | **0회 / 0회** |
+| SLOW tick / 45초 (Safe / Fast) | 12~14 / 1 | **1 / 1** (남은 1은 기동 chrome shaping) |
+| tick max, 버스트 중 (Safe / Fast) | 9~10ms / ~4ms | **2.3~2.8ms / 1.3~1.6ms** |
+| 이미지가 GPU 에 오른 양(1초 창 `img=`) | — | 6~9장/33~50MB 매초 — 파이프라인이 실제로 흐른다 |
+| 텍스트 폭포(회귀 확인) | SLOW 29~37 · rate 최저 54.6~57.7 | SLOW 33 · rate 최저 56.6 (불변) |
+
+`img=` 는 1초 요약에 새로 붙인 양성 신호(`planImageUploads` 가 올린 장수/바이트) — SLOW 가 0 이 되면 assemble 분해 줄이 안 찍혀 «이미지가 안 그려져서 빠른 것 아닌가»를 가릴 수 없었다.

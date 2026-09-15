@@ -37,6 +37,7 @@ pub const win32_draw_host = if (builtin.os.tag == .windows) @import("platform/wi
 // **`src/chrome/` 안에 둬 수 없다** — chrome(L3)은 플랫폼을 import 하지 못하게 경계 게이트가
 // 막는다(docs/layering-and-portability.md §2). 실제로 거기 둬다가 `check-boundaries` 가 섰다.
 pub const text_shaper = @import("text_shaper.zig");
+pub const image_reconciliation = @import("image_reconciliation.zig"); // host↔app 이미지 대조 계수 — 조립기(L2)와 렌더러(L1)가 같이 쓰므로 어느 층에도 못 산다(width.zig 와 동격)
 pub const redact = @import("redact.zig"); // 민감정보 redaction 단일 출처(코드) — env·argv·fixture 공용 중립 leaf
 pub const renderer = @import("renderer.zig");
 pub const session = @import("session.zig");

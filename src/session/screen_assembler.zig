@@ -11,6 +11,7 @@
 //! fresh snapshot(새 generation)으로 base가 교체된다. 그래서 gap이 조용히 화면을 어긋나게 두지 않는다.
 
 const std = @import("std");
+const image_reconciliation = @import("../image_reconciliation.zig");
 const screen_stream = @import("screen_stream.zig");
 
 const Run = screen_stream.Run;
@@ -166,6 +167,7 @@ pub const ScreenAssembler = struct {
         };
         if (gop.found_existing) self.allocator.free(gop.value_ptr.pixels);
         gop.value_ptr.* = .{ .generation = gen, .width = w, .height = h, .bpp = bpp, .pixels = owned_pixels };
+        image_reconciliation.recordReceivedComplete();
     }
 
     /// image_store에서 이미지를 제거하고 픽셀을 free한다(리뷰 #12 — host가 evict/delete한 이미지를 client도 회수). 없으면 no-op.
@@ -187,7 +189,10 @@ pub const ScreenAssembler = struct {
     fn handleImageBlob(self: *ScreenAssembler, header: screen_stream.RecordHeader, body: []const u8) ApplyError!void {
         const blob = try screen_stream.decodeImageBlob(body);
         if (header.chunk_count <= 1) {
-            const owned = self.allocator.dupe(u8, blob.pixels) catch return error.OutOfMemory;
+            const owned = self.allocator.dupe(u8, blob.pixels) catch {
+                image_reconciliation.recordDroppedOom();
+                return error.OutOfMemory;
+            };
             return self.putImage(blob.image_id, blob.generation, blob.width, blob.height, blob.bpp, owned);
         }
         if (header.chunk_index == 0) {
@@ -198,6 +203,7 @@ pub const ScreenAssembler = struct {
             var pend = PendingImage{ .generation = blob.generation, .width = blob.width, .height = blob.height, .bpp = blob.bpp, .next_index = 0, .count = header.chunk_count };
             pend.buf.appendSlice(self.allocator, blob.pixels) catch {
                 pend.buf.deinit(self.allocator);
+                image_reconciliation.recordDroppedOom();
                 return error.OutOfMemory;
             };
             if (pend.buf.items.len > self.reassembleCap(blob.width, blob.height, blob.bpp)) { // 리뷰 #8: 상한 초과면 재조립 폐기.
@@ -207,16 +213,24 @@ pub const ScreenAssembler = struct {
             pend.next_index = 1;
             self.pending_images.put(self.allocator, blob.image_id, pend) catch {
                 pend.buf.deinit(self.allocator);
+                image_reconciliation.recordDroppedOom();
                 return error.OutOfMemory;
             };
         } else {
-            const p = self.pending_images.getPtr(blob.image_id) orelse return; // 0번 없이 온 청크 — 스킵.
+            const p = self.pending_images.getPtr(blob.image_id) orelse {
+                image_reconciliation.recordDroppedNoHead(); // 0번 없이 온 청크 — 스킵. 조용히 버리면 «안 뜸» 을 못 좁힌다.
+                return;
+            };
             if (header.chunk_index != p.next_index or header.chunk_count != p.count) { // 순서/카운트 어긋남 — 폐기.
                 p.buf.deinit(self.allocator);
                 _ = self.pending_images.remove(blob.image_id);
+                image_reconciliation.recordDroppedOrder();
                 return;
             }
-            p.buf.appendSlice(self.allocator, blob.pixels) catch return error.OutOfMemory;
+            p.buf.appendSlice(self.allocator, blob.pixels) catch {
+                image_reconciliation.recordDroppedOom();
+                return error.OutOfMemory;
+            };
             if (p.buf.items.len > self.reassembleCap(blob.width, blob.height, blob.bpp)) { // 리뷰 #8: 상한 초과면 폐기.
                 p.buf.deinit(self.allocator);
                 _ = self.pending_images.remove(blob.image_id);
@@ -227,7 +241,10 @@ pub const ScreenAssembler = struct {
         // 마지막 청크면 커밋(소유권을 image_store로 이전).
         const p = self.pending_images.getPtr(blob.image_id) orelse return;
         if (p.next_index == p.count) {
-            const owned = p.buf.toOwnedSlice(self.allocator) catch return error.OutOfMemory;
+            const owned = p.buf.toOwnedSlice(self.allocator) catch {
+                image_reconciliation.recordDroppedOom();
+                return error.OutOfMemory;
+            };
             _ = self.pending_images.remove(blob.image_id);
             try self.putImage(blob.image_id, blob.generation, blob.width, blob.height, blob.bpp, owned);
         }
@@ -719,6 +736,67 @@ test "screen assembler: multi-chunk image_blob reassembles into one image" {
 
     try testing.expect(asm_.imageById(7) != null);
     try testing.expectEqualSlices(u8, &[_]u8{ 0xA, 0xB, 0xC, 0xD, 0xE, 0xF }, asm_.imageById(7).?.pixels);
+}
+
+test "screen assembler: 사라지는 자리마다 대조 계수가 오른다 — 정상 완성은 loss 가 아니다" {
+    const allocator = testing.allocator;
+    const recon = image_reconciliation;
+
+    // 스트림 하나를 만드는 도우미 — meta 뒤에 주어진 청크들을 차례로 싣는다.
+    const Stream = struct {
+        fn build(alloc: std.mem.Allocator, chunks: []const struct { index: u32, count: u32, px: []const u8 }) ![]u8 {
+            var stream: std.ArrayListUnmanaged(u8) = .empty;
+            errdefer stream.deinit(alloc);
+            const meta_rec = try screen_stream.encodeScreenMeta(alloc, .{ .kind = .screen_meta, .generation = 1 }, .{ .cols = 2, .rows = 1 });
+            defer alloc.free(meta_rec);
+            try screen_stream.appendRecord(&stream, alloc, meta_rec);
+            for (chunks) |c| {
+                const rec = try screen_stream.encodeImageBlob(alloc, .{ .kind = .image_blob, .generation = 1, .chunk_index = c.index, .chunk_count = c.count }, .{ .image_id = 7, .generation = 2, .width = 3, .height = 1, .bpp = 2, .pixels = c.px });
+                defer alloc.free(rec);
+                try screen_stream.appendRecord(&stream, alloc, rec);
+            }
+            return stream.toOwnedSlice(alloc);
+        }
+    };
+
+    // **부정 대조**: 정상 3 청크 완성 → complete 만 오르고 loss 없음. 이게 없으면 「항상 loss」도 통과한다.
+    {
+        const before = recon.snapshot();
+        const stream = try Stream.build(allocator, &.{ .{ .index = 0, .count = 3, .px = &.{ 1, 2 } }, .{ .index = 1, .count = 3, .px = &.{ 3, 4 } }, .{ .index = 2, .count = 3, .px = &.{ 5, 6 } } });
+        defer allocator.free(stream);
+        var asm_ = ScreenAssembler.init(allocator);
+        defer asm_.deinit();
+        try asm_.applySnapshot(stream);
+        const d = recon.snapshot().delta(before);
+        try testing.expectEqual(@as(u64, 1), d.received_complete);
+        try testing.expect(!d.anyLoss());
+    }
+    // 0 번 없이 온 청크 → drop_no_head. 이미지는 완성되지 않는다.
+    {
+        const before = recon.snapshot();
+        const stream = try Stream.build(allocator, &.{.{ .index = 1, .count = 3, .px = &.{ 3, 4 } }});
+        defer allocator.free(stream);
+        var asm_ = ScreenAssembler.init(allocator);
+        defer asm_.deinit();
+        try asm_.applySnapshot(stream);
+        const d = recon.snapshot().delta(before);
+        try testing.expectEqual(@as(u64, 1), d.dropped_no_head);
+        try testing.expectEqual(@as(u64, 0), d.received_complete);
+        try testing.expect(asm_.imageById(7) == null);
+    }
+    // 0 번 뒤에 순서가 어긋난 청크 → drop_order. pending 이 통째로 버려진다.
+    {
+        const before = recon.snapshot();
+        const stream = try Stream.build(allocator, &.{ .{ .index = 0, .count = 3, .px = &.{ 1, 2 } }, .{ .index = 2, .count = 3, .px = &.{ 5, 6 } } });
+        defer allocator.free(stream);
+        var asm_ = ScreenAssembler.init(allocator);
+        defer asm_.deinit();
+        try asm_.applySnapshot(stream);
+        const d = recon.snapshot().delta(before);
+        try testing.expectEqual(@as(u64, 1), d.dropped_order);
+        try testing.expectEqual(@as(u64, 0), d.received_complete);
+        try testing.expect(asm_.imageById(7) == null);
+    }
 }
 
 test "screen assembler: applySnapshot resets prior images and placements" {

@@ -19416,6 +19416,7 @@ pub const AppSession = struct {
         }
         logNotificationRpcDiag(rb);
         logObservationEventDiag();
+        logImageReconciliationDiag();
     }
 
     /// **이벤트당 비용을 줄일 수 있는가** 를 가르는 두 숫자를 주기적으로 한 줄 남긴다.
@@ -19430,6 +19431,27 @@ pub const AppSession = struct {
     ///
     /// `notify_diag_interval_ticks` 마다, 그리고 **이벤트가 있었을 때만** 찍는다 — 조용하면 한 줄도
     /// 안 나오므로 로그가 원인을 덮지 않는다.
+    var diag_image_tick: u32 = 0;
+    var diag_image_last: maru.image_reconciliation.Snapshot = std.mem.zeroes(maru.image_reconciliation.Snapshot);
+
+    /// host 가 보낸 이미지가 앱에서 **어느 칸에서 사라졌는지**를 5 초마다 한 줄 — 단 사라진 것이 있을 때만.
+    ///
+    /// 정상 흐름(받고·올리고·캐시 적중)은 침묵한다. 그래야 이 줄이 뜬 것 자체가 신호가 된다
+    /// (`observation cost` 는 추세용이라 매번 찍지만, 이것은 «사고» 용이다). 델타로 찍으므로 누적값이
+    /// 아니라 이 구간에 사라진 개수다.
+    fn logImageReconciliationDiag() void {
+        diag_image_tick +%= 1;
+        if (diag_image_tick % notify_diag_interval_ticks != 0) return;
+        const now = maru.image_reconciliation.snapshot();
+        const d = now.delta(diag_image_last);
+        diag_image_last = now;
+        if (!d.anyLoss()) return;
+        if (builtin.is_test) return;
+        var buf: [maru.image_reconciliation.line_worst_case_bytes + 1]u8 = undefined;
+        const line = maru.image_reconciliation.formatLine(&buf, d) catch return;
+        std.log.warn("{s}", .{line});
+    }
+
     fn logObservationEventDiag() void {
         diag_obs_tick +%= 1;
         if (diag_obs_tick % notify_diag_interval_ticks != 0) return;

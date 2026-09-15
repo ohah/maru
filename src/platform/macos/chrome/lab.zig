@@ -60,6 +60,10 @@ pub const ScenarioId = enum {
     /// **이 시나리오가 없으면 「충돌 행에 `+`가 섰다」가 골든에 안 잡힌다** — 그 `+`는 누르는 순간
     /// 충돌 표시가 든 파일을 "해결됨"으로 커밋하므로, 화면에서 갈리는 것이 곧 계약이다.
     scm_conflict_hover,
+    /// S4 — **마커가 없어진 충돌 행**을 호버한 상태. 같은 자리에 `+` 가 돌아온다(`git add` 가 곧 완료 —
+    /// docs/editor-merge-conflicts.md §5 S4). 상태 문자는 여전히 `U` 다(git 은 `add` 전까지 `UU`).
+    /// `scm_conflict_hover` 와 **같은 crop** 을 쓰므로 그 둘이 화살표/`+` 로 갈린다.
+    scm_conflict_resolved_hover,
     /// 같은 목록에서 **저장소 머리 줄에 호버**한 상태. 그 줄은 동작 아이콘 자리를 평소에 비워 두지
     /// 않으므로(빈 띠 52px 을 안 남기려고) 호버하는 순간 아이콘과 브랜치·개수 배지가 **같은 자리**를
     /// 다툰다. 옛 답("배경색 quad 로 덮는다")은 chrome quad 가 chrome 글자보다 먼저 그리는 층이라
@@ -407,7 +411,7 @@ pub fn buildFrame(
     };
     return switch (scenario.id) {
         .detail_loading, .detail_ready, .detail_stale, .detail_unavailable => buildDetailFrame(scenario, tokens, buffers),
-        .scm_rows, .scm_row_hover, .scm_conflict_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_small_font, .dock_over_status_bar => buildScmFrame(scenario, tokens, buffers),
+        .scm_rows, .scm_row_hover, .scm_conflict_hover, .scm_conflict_resolved_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_small_font, .dock_over_status_bar => buildScmFrame(scenario, tokens, buffers),
         .scm_history => buildScmHistoryFrame(scenario, tokens, buffers),
         .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome => buildFileTreeFrame(scenario, tokens, buffers),
         .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper, .context_menu_bottom_right => buildContextMenuFrame(scenario, tokens, buffers),
@@ -1536,7 +1540,7 @@ fn buildDockFrame(
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
             .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
             // editor_gutter는 buildEditorGutterFrame이 처리한다 — 도크 목록을 타지 않는다.
-            .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper, .context_menu_bottom_right, .dropdown_open, .dropdown_bottom_clamp, .scm_rows, .scm_history, .scm_row_hover, .scm_conflict_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_selection, .editor_find, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_diff, .editor_diff_scrolled, .editor_diff_selection, .editor_merge_panes, .editor_merge_narrow, .editor_merge_scrolled, .editor_merge_caret => unreachable,
+            .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper, .context_menu_bottom_right, .dropdown_open, .dropdown_bottom_clamp, .scm_rows, .scm_history, .scm_row_hover, .scm_conflict_hover, .scm_conflict_resolved_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_selection, .editor_find, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_diff, .editor_diff_scrolled, .editor_diff_selection, .editor_merge_panes, .editor_merge_narrow, .editor_merge_scrolled, .editor_merge_caret => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{
@@ -1871,7 +1875,8 @@ fn buildScmFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers: Fram
         .{ .file = .{ .model_index = 3, .name = "changed.zig", .dir = "src/chrome/components/", .status = .modified, .letter = 'M', .added = 34, .removed = 7, .has_delta = true, .action = .stage } },
         // 충돌 행에는 **`+`가 없다**(`git add`가 "해결됨"으로 표시하므로) — 그 자리에 오는 것은
         // 「편집기에서 열기」(`.resolve`)다. `scm_conflict_hover`가 그 글리프를 본다.
-        .{ .file = .{ .model_index = 4, .name = "conflict.zig", .dir = "src/", .status = .conflicted, .letter = 'U', .action = .resolve } },
+        // S4: 마커가 없어진 충돌 행은 같은 자리에 `+` 를 든다(상태 문자는 그대로 `U`).
+        .{ .file = .{ .model_index = 4, .name = "conflict.zig", .dir = "src/", .status = .conflicted, .letter = 'U', .action = if (scenario.id == .scm_conflict_resolved_hover) .stage else .resolve } },
         .{ .file = .{ .model_index = 5, .name = "untracked.txt", .dir = "", .status = .added, .letter = 'U', .action = .stage } },
         // 접힌 워크트리 — 자기 줄과 개수만 있고 그 아래 행이 없다(host가 안 넣는다).
         .{ .repo = .{ .index = 1, .name = "wt-review", .branch = "review-wt", .primary = false, .collapsed = true, .count = 2 } },
@@ -1923,7 +1928,7 @@ fn buildScmFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers: Fram
         // **충돌 행**은 그 다음 항목이다(위 `default_items` 순서 — 머리 줄·커밋 줄 둘·섹션·스테이지
         // 행·섹션·변경 행 뒤). 이 시나리오가 증언하는 것은 "충돌 행의 동작이 `+`가 아닌가"이므로
         // `scm_row_hover`와 **다른 행**을 호버해야 한다(같은 행을 호버하면 두 골든이 같아진다).
-        .scm_conflict_hover => .{ .hovered = scm_dock.build.NodeIds.item(7) },
+        .scm_conflict_hover, .scm_conflict_resolved_hover => .{ .hovered = scm_dock.build.NodeIds.item(7) },
         // 머리 줄은 목록의 **첫 항목**이다(②b 에서 커밋 줄 둘이 그 뒤에 온다). 이 시나리오가 증언하는
         // 것은 "동작 아이콘이 브랜치·개수 배지 위에 겹치지 않는가"이고, 그건 머리 줄에서만 보인다.
         .scm_repo_hover => .{ .hovered = scm_dock.build.NodeIds.item(0) },

@@ -138,6 +138,26 @@ pub fn build(
     numstat_staged: []const u8,
     /// `git diff --numstat` — **변경 사항** 행의 증감(`index ↔ 작업트리`).
     numstat_worktree: []const u8,
+    numstat_total: []const u8,
+    collapsed: [section_count]bool,
+    expanded: [section_count]bool,
+    output_truncated: bool,
+    out: []Row,
+    scratch: []u8,
+) Model {
+    // 마커 판정이 없으면 모든 충돌 행이 `→` 다 — 「판정 못 함」은 「전부 해결됨」이 아니다(S4).
+    return buildWithMarkers(status_text, null, numstat_staged, numstat_worktree, numstat_total, collapsed, expanded, output_truncated, out, scratch);
+}
+
+/// 마커가 남은 충돌 경로 목록(NUL 구분, `git grep -l -z`)을 함께 받는 `build`(S4 — docs/editor-merge-conflicts.md §5).
+/// `null` 은 「판정 못 함」이고 그때 충돌 행은 전부 `.resolve` 다; 빈 목록은 「충돌 행에 마커가 하나도 안 남았다」다.
+pub fn buildWithMarkers(
+    status_text: []const u8,
+    conflict_markers: ?[]const u8,
+    /// `git diff --numstat --cached` — **스테이지된 변경** 행의 증감(`HEAD ↔ index`).
+    numstat_staged: []const u8,
+    /// `git diff --numstat` — **변경 사항** 행의 증감(`index ↔ 작업트리`).
+    numstat_worktree: []const u8,
     /// `git diff --numstat HEAD --` — **요약 줄 합계**만 여기서 낸다. 위 둘을 더하면 `MM` 파일이 두 번 세어진다.
     /// unborn(첫 커밋 전)은 HEAD가 없어 이 명령이 실패하므로 호출자가 `--cached` 출력을 대신 준다.
     numstat_total: []const u8,
@@ -183,7 +203,7 @@ pub fn build(
                     .path = entry.path,
                     .orig_path = entry.orig_path,
                     .letter = rowLetter(entry, section),
-                    .action = rowAction(entry, section),
+                    .action = rowAction(entry, section, conflict_markers),
                     .conflicted = entry.isConflicted(),
                     .untracked = entry.isUntracked(),
                     .submodule = entry.submodule,
@@ -321,7 +341,9 @@ fn sectionAction(status_text: []const u8, section: Section) RowAction {
     var it = git_status.iterate(status_text);
     while (it.next()) |entry| {
         if (!belongs(entry, section)) continue;
-        switch (rowAction(entry, section)) {
+        // **마커 판정을 안 넘긴다** — 「모두 스테이지」는 해결된 충돌 행도 세지 않는다(S4). 그 행은 하나씩
+        // 확인하고 누르는 것이 완료이고, 일괄에 섞이면 옆의 미해결 행과 같은 버튼 아래 놓인다.
+        switch (rowAction(entry, section, null)) {
             .stage => return .stage,
             .unstage => return .unstage,
             .resolve, .none => {},
@@ -330,13 +352,29 @@ fn sectionAction(status_text: []const u8, section: Section) RowAction {
     return .none;
 }
 
-fn rowAction(entry: git_status.Entry, section: Section) RowAction {
-    // **충돌은 스테이지 어휘를 안 탄다** — 그 행의 동작은 「편집기에서 해결」이다(S1).
-    if (entry.isConflicted()) return .resolve;
+fn rowAction(entry: git_status.Entry, section: Section, conflict_markers: ?[]const u8) RowAction {
+    // **마커가 남은 충돌은 스테이지 어휘를 안 탄다** — 그 행의 동작은 「편집기에서 해결」이다(S1). 마커가
+    // 없어졌으면 `+` 가 돌아온다(S4): git 은 `add` 전까지 그 파일을 `UU` 로 두므로, 이것이 없으면 Maru 안에서
+    // 병합을 끝낼 길이 없다. 판정이 없으면(`null`) 보수적으로 `→` 다.
+    if (entry.isConflicted()) {
+        const markers = conflict_markers orelse return .resolve;
+        return if (listContains(markers, entry.path)) .resolve else .stage;
+    }
     return switch (section) {
         .staged => .unstage,
         .changes => .stage,
     };
+}
+
+/// NUL 로 끊긴 경로 목록에 `path` 가 **정확히** 있나(`git grep -l -z` 출력). 접두 일치가 아니다 — `a.txt` 가
+/// `a.txt.orig` 에 걸리면 안 된다.
+fn listContains(list: []const u8, path: []const u8) bool {
+    var it = std.mem.splitScalar(u8, list, 0);
+    while (it.next()) |item| {
+        if (item.len == 0) continue;
+        if (std.mem.eql(u8, item, path)) return true;
+    }
+    return false;
 }
 
 /// 행 오른쪽의 상태 문자. **그 행이 선 섹션의 축**을 쓴다 — 같은 파일이 두 행일 때 각각 다른 글자가 나오는 것이
@@ -482,6 +520,38 @@ test "충돌 행은 스테이지가 아니라 «해결»이고 변경 사항에�
     try testing.expect(model.rows[1].file.action != .stage);
     try testing.expect(model.rows[1].file.unknown_delta); // `+0 -0`을 쓰지 않는다
     try testing.expectEqual(@as(u8, 'U'), model.rows[1].file.letter);
+}
+
+test "마커가 없어진 충돌 행에는 `+` 가 돌아온다 — 판정이 없으면 `→`, 접두 일치는 안 된다, 머리 줄은 여전히 세지 않는다 (S4)" {
+    // git 은 `add` 전까지 그 파일을 `UU` 로 둔다(실측) — 「해결하면 M 이 된다」는 옛 전제가 틀렸다. 그래서
+    // 마커 판정이 따로 오고, 그것이 곧 「완료」의 `+` 다(docs/editor-merge-conflicts.md §5 S4).
+    var out: [16]Row = undefined;
+    var scratch: [256]u8 = undefined;
+    const status = "# branch.head main\nu UU N... 100644 100644 100644 100644 aaa bbb ccc f.txt\nu UU N... 100644 100644 100644 100644 aaa bbb ccc g.txt\n";
+    // ⑴ 판정 없음(`null`) → 둘 다 `→`.
+    const none = build(status, "", "", "", .{false} ** section_count, .{true} ** section_count, false, &out, &scratch);
+    try testing.expectEqual(RowAction.resolve, none.rows[1].file.action);
+    try testing.expectEqual(RowAction.resolve, none.rows[2].file.action);
+    // ⑵ f.txt 만 마커가 남았다 → f 는 `→`, g 는 `+`. 둘 다 여전히 충돌 행(`U`, 비교는 HEAD↔작업트리)이다.
+    const markers = "f.txt\x00";
+    const m = buildWithMarkers(status, markers, "", "", "", .{false} ** section_count, .{true} ** section_count, false, &out, &scratch);
+    try testing.expectEqual(RowAction.resolve, m.rows[1].file.action);
+    try testing.expectEqual(RowAction.stage, m.rows[2].file.action);
+    try testing.expect(m.rows[2].file.conflicted);
+    try testing.expectEqual(@as(u8, 'U'), m.rows[2].file.letter);
+    // **머리 줄은 그대로 `.none`이다** — 해결된 행도 「모두 스테이지」에는 안 센다(옆의 미해결 행과 한 버튼 아래 놓인다).
+    try testing.expectEqual(RowAction.none, m.rows[0].section.action);
+    // ⑶ 빈 목록 = 전부 해결 → 둘 다 `+`. 그리고 접두 일치가 아니다: `f.txt.orig` 가 남았다고 `f.txt` 가 `→` 가 되지 않는다.
+    const all = buildWithMarkers(status, "", "", "", "", .{false} ** section_count, .{true} ** section_count, false, &out, &scratch);
+    try testing.expectEqual(RowAction.stage, all.rows[1].file.action);
+    try testing.expectEqual(RowAction.stage, all.rows[2].file.action);
+    const prefix = buildWithMarkers(status, "f.txt.orig\x00", "", "", "", .{false} ** section_count, .{true} ** section_count, false, &out, &scratch);
+    try testing.expectEqual(RowAction.stage, prefix.rows[1].file.action);
+    // **반대 방향도**(적대적 1회차 A2 — 한 방향만 재서 `startsWith(path, item)` 이 살았다): 목록에 `f.txt` 가
+    // 남았다고 `f.txt.orig` 행이 `→` 가 되지 않는다.
+    const status2 = "# branch.head main\nu UU N... 100644 100644 100644 100644 aaa bbb ccc f.txt.orig\n";
+    const rev = buildWithMarkers(status2, "f.txt\x00", "", "", "", .{false} ** section_count, .{true} ** section_count, false, &out, &scratch);
+    try testing.expectEqual(RowAction.stage, rev.rows[1].file.action);
 }
 
 test "충돌과 평범한 변경이 섞인 섹션 — 머리 줄은 `+`, 충돌 행만 «해결»" {

@@ -183,6 +183,30 @@ pub fn actionNames() [3][]const u8 {
     };
 }
 
+/// **판 위 줄**의 두 이름(S3b-3c — VS Code 의 입력 판 「Accept X」·「Accept Combination (X First)」 상당):
+/// 「X 채택」 → 「둘 다 채택 (X 먼저)」. Result 의 세 이름과 마찬가지로 **순서가 곧 뜻**이다.
+pub const PaneSide = enum { current, incoming };
+pub fn paneActionNames(side: PaneSide) [2][]const u8 {
+    return switch (side) {
+        .current => .{ i18n.t(.editor_conflict_accept_current), i18n.t(.editor_conflict_accept_both_current_first) },
+        .incoming => .{ i18n.t(.editor_conflict_accept_incoming), i18n.t(.editor_conflict_accept_both_incoming_first) },
+    };
+}
+
+test "판 위 줄의 이름은 «X 채택» → «둘 다 (X 먼저)» 순이다 — 순서가 곧 뜻이라 뒤집히면 읽은 것과 다른 일이 난다" {
+    // 적대적 검증(S3b-3c 1회차 A9): 두 이름을 뒤집어도 초록이었다 — 판정자가 「그 글자가 판에 있나」만
+    // 봤고 어느 자리인지는 안 봤다. 호출자는 첫째 자리에 `.current`/`.incoming` 을, 둘째에 「둘 다」를 짝짓는다.
+    const cur = paneActionNames(.current);
+    try std.testing.expectEqualStrings(i18n.t(.editor_conflict_accept_current), cur[0]);
+    try std.testing.expectEqualStrings(i18n.t(.editor_conflict_accept_both_current_first), cur[1]);
+    const inc = paneActionNames(.incoming);
+    try std.testing.expectEqualStrings(i18n.t(.editor_conflict_accept_incoming), inc[0]);
+    try std.testing.expectEqualStrings(i18n.t(.editor_conflict_accept_both_incoming_first), inc[1]);
+    // 그리고 Current 와 Incoming 의 이름은 서로 다르다 — 같으면 어느 판을 눌러도 같은 글자가 보인다.
+    try std.testing.expect(!std.mem.eql(u8, cur[0], inc[0]));
+    try std.testing.expect(!std.mem.eql(u8, cur[1], inc[1]));
+}
+
 /// 한 이름이 차지하는 열 `[from, to)`.
 pub const ActionSpan = struct { from: u32, to: u32 };
 
@@ -194,12 +218,14 @@ pub const ActionSpan = struct { from: u32, to: u32 };
 /// **열을 세는 함수를 호출자가 준다**(`colsOf`). 이 모듈은 화면을 모르고, 렌더가 쓰는 그 규칙이
 /// chrome 에 있기 때문이다 — 여기서 byte 길이로 세면 한글에서 누르는 자리가 글자와 갈린다.
 pub fn writeActions(
-    names: [3][]const u8,
+    names: []const []const u8,
     out: []u8,
     colsOf: *const fn ([]const u8) u32,
-    out_spans: *[3]ActionSpan,
+    out_spans: []ActionSpan,
 ) ?[]u8 {
-    var total: usize = action_gap.len * 2;
+    std.debug.assert(out_spans.len == names.len);
+    if (names.len == 0) return null;
+    var total: usize = action_gap.len * (names.len - 1);
     for (names) |n| total += n.len;
     if (out.len < total) return null;
 
@@ -392,7 +418,7 @@ test "이름 잇기: 여백이 들어가고, 자리가 모자라면 «안 쓴다
     }.f;
     var spans: [3]ActionSpan = undefined;
     var buf: [32]u8 = undefined;
-    const written = writeActions(names, &buf, cols, &spans).?;
+    const written = writeActions(&names, &buf, cols, &spans).?;
     try testing.expectEqualStrings("aa" ++ action_gap ++ "bb" ++ action_gap ++ "cc", written);
     // 구간은 **닫힌-열린**이고 여백을 어느 쪽도 안 가져간다.
     try testing.expectEqual(@as(u32, 0), spans[0].from);
@@ -403,7 +429,7 @@ test "이름 잇기: 여백이 들어가고, 자리가 모자라면 «안 쓴다
     // **자리가 모자라면 한 바이트도 안 쓴다.** 호출자 중 하나(Chrome Lab)는 **고정 버퍼**를 주므로,
     // 이름이 길어지는 날 이 검사가 유일한 방어다 — 없으면 그 버퍼를 넘겨 쓴다.
     var tiny: [4]u8 = undefined;
-    try testing.expectEqual(@as(?[]u8, null), writeActions(names, &tiny, cols, &spans));
+    try testing.expectEqual(@as(?[]u8, null), writeActions(&names, &tiny, cols, &spans));
 }
 
 test "상태 기계: 한 구간을 낸 뒤에는 «처음부터» 다시 센다" {

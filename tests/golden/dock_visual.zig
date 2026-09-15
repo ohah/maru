@@ -830,10 +830,15 @@ const cases = [_]Case{
     // 띠 높이가 화면에서 어떻게 보이는가**는 여기서만 보인다.
     //
     // 가운데가 Result 인 것이 그림으로 확인된다 — 충돌 표시(`<<<<<<<`)가 든 쪽이 작업트리 파일이다.
+    //
+    // **고르기 줄은 판에**(S3b-3c — VS Code 의 배치를 마커 모델 위에서): Current 에 「현재 것 채택 ·
+    // 둘 다 (현재 것 먼저)」, Incoming 에 「들어온 것 채택 · 둘 다 (들어온 것 먼저)」가 충돌 본문 줄
+    // **위**에 서고, 세 열이 서 있는 동안 Result 에는 없다. 접힌 쪽(`editor-merge-narrow-collapses`)
+    // 이 Result 의 세 버튼을 든다 — 둘을 같이 봐야 「어디에 있나」 규칙이 그림이 된다.
     .{
         .name = "editor-merge-four-panes",
         .capture = "editor-merge-panes.ppm",
-        .contract = "세 열(Current·Result·Incoming)이 나란히 서고 아래에 Base 띠가 붙는다",
+        .contract = "세 열이 나란히 서고 아래에 Base 띠가 붙는다 — 고르기 줄은 Current·Incoming 에, Result 에는 없다",
         .rect = .{ .x = 0, .y = 0, .w = 1200, .h = 140 },
     },
     // **접히는 쪽도 든다.** 규칙(`Result > Current·Incoming > Base`)이 화면에서 어떻게 보이는지
@@ -841,7 +846,7 @@ const cases = [_]Case{
     .{
         .name = "editor-merge-narrow-collapses",
         .capture = "editor-merge-narrow.ppm",
-        .contract = "폭이 모자라면 세 열이 접히고 Result 하나만 남는다(Base 띠는 그대로)",
+        .contract = "폭이 모자라면 세 열이 접히고 Result 하나만 남는다(Base 띠는 그대로) — 그때는 Result 가 세 버튼을 든다",
         .rect = .{ .x = 0, .y = 0, .w = 480, .h = 140 },
     },
     // S3b-M §5 — **따라 굴리기.** Result 를 10 줄 내리면 세 판이 대응표로 따라간다: 같은 글자

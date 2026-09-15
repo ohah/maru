@@ -1663,9 +1663,9 @@ pub fn build(b: *std.Build) void {
     //
     // **MPN1~5(배치 산술)는 여기 안 든다** — 그쪽은 `maru` 모듈(chrome 컴포넌트)에 있고 Zig 는
     // **별도 모듈의 test 를 안 모은다**. 그 다섯은 `zig build test-editor` 가 돌린다(실측).
-    run_macos_editor_merge_tests.addArg("--maru-expect-tests=34");
+    run_macos_editor_merge_tests.addArg("--maru-expect-tests=35");
     // ⚠️ **그리고 실제로 돌았는가** — MRG2 이후는 macOS 가 아니면 `SkipZigTest` 다.
-    run_macos_editor_merge_tests.addArg("--maru-expect-passed=34");
+    run_macos_editor_merge_tests.addArg("--maru-expect-passed=35");
     run_macos_editor_merge_tests.setCwd(b.path("."));
     b.step(
         "test-editor-merge",

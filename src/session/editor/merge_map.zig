@@ -37,7 +37,33 @@ pub const Map = struct {
     pub fn toResult(self: Map, side_line: u32) ?u32 {
         return project(self.rows.left, self.rows.right, side_line);
     }
+
+    /// Result 의 줄(0-based) → 판의 **정확한 짝**(0-based). 짝이 없으면 `null` — 앞 짝도, 무리 머리도
+    /// 아니다. **위젯의 자리**가 이것을 쓴다(S3b-3c 공격 ②): `toSide` 는 «굴리기 자리»라 짝 위에 붙은
+    /// 판만의 줄 무리 머리로 밀리는데, 고르기 줄은 그 본문 줄 바로 위에 서야 한다.
+    pub fn pairOnSide(self: Map, result_line: u32) ?u32 {
+        return pair(self.rows.right, self.rows.left, result_line);
+    }
+
+    /// S3b-3c 의 앵커 규칙 — 충돌 구간의 **한 쪽 본문** `[from, to)`(Result 축, 0-based)이 판에서 어느
+    /// 줄 위에 서나. 본문 첫 줄의 짝, 본문이 비었으면(우리 쪽이 지운 구간) 구간 **다음 줄** `after` 의
+    /// 짝, 그것도 없으면 `null`(EOF — Result 줄만 남는다). 계약 §5 S3b-3c.
+    pub fn anchorOnSide(self: Map, from: u32, to: u32, after: u32) ?u32 {
+        if (from < to) return self.pairOnSide(from);
+        return self.pairOnSide(after);
+    }
 };
+
+/// `from` 축의 줄이 `to` 축에 갖는 짝. 둘 다 줄이 있는 행이어야 짝이다.
+fn pair(from: []const diff.Row, to: []const diff.Row, line0: u32) ?u32 {
+    const want: u32 = line0 + 1;
+    for (from, 0..) |r, i| {
+        const l = r.line orelse continue;
+        if (l > want) return null;
+        if (l == want) return if (to[i].line) |tl| tl - 1 else null;
+    }
+    return null;
+}
 
 /// `from` 축의 줄을 `to` 축으로 옮긴다. 둘은 같은 길이의 정렬된 행 배열이다.
 fn project(from: []const diff.Row, to: []const diff.Row, line0: u32) ?u32 {
@@ -200,6 +226,25 @@ test "MAP6 짝의 머리 규칙 — 짝 바로 위에 붙은 저쪽만의 무리
     defer m2.deinit(testing.allocator);
     try testing.expectEqual(@as(?u32, 1), m2.toResult(1)); // z → P (무리 머리)
     try testing.expectEqual(@as(?u32, 1), m2.toSide(3)); // z → z (판 쪽엔 무리 없음)
+}
+
+test "MAP7 «짝» 은 앞 짝도 무리 머리도 아니다 — 그리고 앵커 규칙: 본문 첫 줄 · 빈 쪽은 다음 줄 · EOF 는 없음" {
+    // 판:      A  B  x  D  y        ← A·B 는 x 위의 판만의 무리, D 는 판에만
+    // Result:        x     y  Q     ← Q 는 Result 에만
+    const side = [_][]const u8{ "A", "B", "x", "D", "y" };
+    const result = [_][]const u8{ "x", "y", "Q" };
+    var m = (try build(testing.allocator, &side, &result)) orelse return error.NoMap;
+    defer m.deinit(testing.allocator);
+    try testing.expectEqual(@as(?u32, 2), m.pairOnSide(0)); // x → x 자신(무리 머리 A 가 아니다 — toSide 는 0)
+    try testing.expectEqual(@as(?u32, 0), m.toSide(0));
+    try testing.expectEqual(@as(?u32, 4), m.pairOnSide(1)); // y → y
+    try testing.expectEqual(@as(?u32, null), m.pairOnSide(2)); // Q 는 짝이 없다(앞 짝 y 가 아니다)
+    try testing.expectEqual(@as(?u32, null), m.pairOnSide(99)); // 표 밖도 없음
+
+    // 앵커: 구간 본문이 [0,1) 이면 그 첫 줄의 짝. 비었으면([2,2)) 다음 줄(2 = Q, 짝 없음) → null.
+    try testing.expectEqual(@as(?u32, 2), m.anchorOnSide(0, 1, 1));
+    try testing.expectEqual(@as(?u32, 4), m.anchorOnSide(1, 1, 1)); // 빈 쪽 → 다음 줄 y 의 짝
+    try testing.expectEqual(@as(?u32, null), m.anchorOnSide(2, 2, 3)); // EOF 다음은 없다
 }
 
 test "MAP4 맨 앞이 저쪽에 없으면 «앞 짝» 이 없다 — null 이다" {

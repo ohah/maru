@@ -2217,6 +2217,8 @@ fn mergeAwareBodyRect(self: *AppSession, leaf_rect: maru.session.SplitRect, term
     // 빈 열이 하나 남는다(S6 판정자 MPN20 이 87 대 86 으로 잡았다).
     // 배치가 아직 없으면(첫 프레임) pane 본문으로 잰다 — **관측 불가**(S6 적대적 4회차 D2: 0 사각을 돌려줘도 초록):
     // 그 프레임의 clamp 는 어차피 위치를 0 으로 되돌리고 다음 입력이 배치를 갖고 다시 잰다.
+    // **세 열은 폭이 같아** Current 열로 재도 답이 같고(7회차 G3), 높이는 셀 경계를 안 넘는 한 여백 8px 이 행 수를 안
+    // 바꾼다(7회차 G6 — 실측 414px: 406/16 도 414/16 도 25 행). 그래도 Result 열·온전한 여백인 이유는 뜻이다.
     const inset = chrome_editor.frame.content_inset_px;
     if (term.rt.editor_merge_layout) |lay| return .{
         .x = @intCast(@max(lay.result.x, 0)),
@@ -2272,6 +2274,8 @@ pub fn scrollCols(self: *AppSession, term: *Term, leaf_rect: maru.session.SplitR
 
     // **상한은 셈이 멈춘 자리 하나다**(§3.8 — `editor.max-columns`). 예전에는 렌더 비용이
     // 밀린 거리에 비례해 `max_first_col` 이 따로 있었는데, 체크포인트가 그 비례를 없앴다.
+    // 이 상한과 그리기 직전의 `clampOneColumn` 은 **일부러 겹친 방어**다 — 여기 한 칸을 더 허용해도 다음 프레임이
+    // 되돌린다(S6 적대적 7회차 G2 가 살아남아 그 사실을 보여 준다; `clampOneColumn` 의 doc 이 그 규율을 소유한다).
     const max_first: u32 = width - visible;
     const current: i64 = first_col.*;
     const next = std.math.clamp(current - @as(i64, cols), 0, @as(i64, max_first));
@@ -5488,7 +5492,9 @@ fn scrollWidthCols(self: *AppSession, term: *Term, right: bool) u32 {
     const own = if (right) term.rt.editor_max_cols_right else term.rt.editor_max_cols;
     // **병합 모드의 상한은 넷 중 가장 넓은 것이다**(S6 — 계약 §5). 입력이 Result 하나이므로 Result 의 상한이
     // 판의 긴 꼬리까지 닿아야 한다(VS Code 는 어느 pane 에서든 굴려 가장 넓은 pane 이 범위를 정한다).
-    // Result 가 아직 안 셌으면(0) 여기서도 0 — 「안 셌다」를 지어내지 않는다(아래 doc).
+    // Result 가 아직 안 셌으면(0) 여기서도 0 — 「안 셌다」를 지어내지 않는다(아래 doc). **두 가드는 오늘 관측되지
+    // 않는다**(S6 적대적 6회차 F5·F6): 병합 Term 에는 오른쪽 열이 없고, 여는 경로가 Result 를 먼저 센다. 남기는
+    // 이유는 뜻이다 — 「비교의 오른쪽 열은 자기 것」·「안 셌다는 안 셌다」.
     const max_cols = if (!right and own != 0) editor_merge_ops.widestCols(term, own) else own;
     if (max_cols == 0) return 0;
     return max_cols +| self.loaded_config.config.editor.scroll_beyond_last_column;
@@ -10465,6 +10471,13 @@ fn paneCodepointCol(dl: renderer.DrawList, rect: chrome_draw.Rect, cp: u21) ?i64
     return null;
 }
 
+/// 판의 **본문 열 수**를 판정자가 스스로 센다 — 배치 사각 + chrome 의 자기 함수(`sideMetrics`·`geometry.compute`)로.
+/// 제품이 굳힌 `PaneHit.content_width` 를 읽으면 그 값을 한 칸 키운 변이가 산다(7회차 G8 — 판정자가 제품 기하를 믿었다).
+fn paneContentCols(rect: chrome_draw.Rect, lines_len: usize) u32 {
+    const m = chrome_editor.diff_frame.sideMetrics(rect.w, rect.h, 8, 16);
+    return chrome_editor.geometry.compute(m.total_cols, lines_len, .{}).content.width;
+}
+
 test "MPN20 가로는 Result 의 것이다 — 휠이 Result 열에서 듣고, 세 판이 같은 열에 서며, 판은 자기 폭으로 조이고, 상한은 가장 넓은 판이다 (제품 경계, S6)" {
     // S6(계약 §5): 가로 값은 Result 의 `editor_first_col` 하나. 휠은 **제품 라우터**(`scrollWheel`)로 넣고, 글자의 열은
     // DrawList 에서 판 사각 기준으로 읽는다. 전에는 (a) 병합 모드에서 휠이 아예 안 들었고(pane 전체 폭으로 「안 넘친다」),
@@ -10539,7 +10552,8 @@ test "MPN20 가로는 Result 의 것이다 — 휠이 Result 열에서 듣고, �
     try testing.expectEqual(r0 - 10, paneCodepointCol(d1.dl, lay.result, 'R').?);
     try testing.expectEqual(o0 - 10, paneCodepointCol(d1.dl, cur, 'O').?);
     try testing.expectEqual(b0 - 10, paneCodepointCol(d1.dl, base, 'B').?);
-    const inc_cols: u32 = term.rt.editor_merge.?.theirs_hit.content_width;
+    const inc_cols: u32 = paneContentCols(inc, term.rt.editor_merge.?.theirs_lines.len);
+    try testing.expectEqual(inc_cols, term.rt.editor_merge.?.theirs_hit.content_width); // 제품이 굳힌 값과 같다
     try testing.expect(inc_cols > 0 and theirs_max + beyond >= inc_cols + 10); // 전제: 10 칸은 넘친다
     try testing.expectEqual(t0 - 10, paneCodepointCol(d1.dl, inc, 'T').?);
 
@@ -10555,10 +10569,10 @@ test "MPN20 가로는 Result 의 것이다 — 휠이 Result 열에서 듣고, �
     try testing.expect(fc > 70 + beyond - result_content); // Result 자신의 상한 너머
     try testing.expectEqual(200 + beyond - result_content, fc); // 가장 넓은 판(base)의 상한에서 멈춘다
     try testing.expect(paneCodepointCol(d2.dl, lay.result, 'R') == null); // 30 열은 이제 왼쪽 밖
-    const base_cols: u32 = term.rt.editor_merge.?.base_hit.content_width;
+    const base_cols: u32 = paneContentCols(base, term.rt.editor_merge.?.base_lines.len);
     const base_first: u32 = @min(fc, (200 + beyond) -| base_cols);
     try testing.expectEqual(b0 + 160 - @as(i64, base_first), paneCodepointCol(d2.dl, base, 'Y') orelse -1); // 190 = 30 + 160
-    const cur_cols_now: u32 = term.rt.editor_merge.?.ours_hit.content_width;
+    const cur_cols_now: u32 = paneContentCols(cur, term.rt.editor_merge.?.ours_lines.len);
     const cur_first: u32 = @min(fc, (120 + beyond) -| cur_cols_now);
     try testing.expect(cur_first < fc); // 조였다 — 판 값이 Result 값과 다르다
     try testing.expectEqual(o0 + 80 - @as(i64, cur_first), paneCodepointCol(d2.dl, cur, 'Z') orelse -1); // 110 = 30 + 80
@@ -10576,6 +10590,10 @@ test "MPN20 가로는 Result 의 것이다 — 휠이 Result 열에서 듣고, �
         try testing.expect(editor_merge_ops.placePaneCaret(fx.session, term, px, py));
         _ = try fx.session.handleKeyEvent(.{ .key = .arrow_right });
         _ = try fx.session.handleKeyEvent(.{ .key = .arrow_left });
+        try testing.expectEqual(fc, term.rt.editor_first_col);
+        // 조인 판의 마지막 열(120)도 화면 안이다 — `End` 로 가도 Result 는 그대로(10회차 J5: 판의 첫 열을 beyond 없이 세면
+        // 첫 열이 5 작아져 120 이 「폭 밖」으로 보이고 Result 가 77 로 되감긴다).
+        _ = try fx.session.handleKeyEvent(.{ .key = .end });
         try testing.expectEqual(fc, term.rt.editor_first_col);
         // 오른쪽 경계는 `>=` 다: caret 이 「첫 열 + 폭」에 서면 한 칸 민다(2회차 B12: `>` 면 안 민다). Home 으로 0 에서
         // 시작해 End 로 121 − 폭 에 세운 뒤, Result 값을 하나 내려(첫 열 + 폭 == 120) 마지막 칸 다음으로 → 를 친다.
@@ -10604,7 +10622,7 @@ test "MPN20 가로는 Result 의 것이다 — 휠이 Result 열에서 듣고, �
     _ = try fx.session.handleKeyEvent(.{ .key = .home });
     try testing.expectEqual(@as(u32, 0), term.rt.editor_first_col);
     _ = try fx.session.handleKeyEvent(.{ .key = .end });
-    const cur_cols: u32 = term.rt.editor_merge.?.ours_hit.content_width;
+    const cur_cols: u32 = paneContentCols(cur, term.rt.editor_merge.?.ours_lines.len);
     const after_end = term.rt.editor_first_col;
     // caret 열(120)이 **마지막 칸**에 선다 — 최소로만 민다(첫 칸에 세우는 변이는 한 번에 한 화면을 튀긴다, 1회차 A10).
     try testing.expectEqual(120 + 1 - cur_cols, after_end);
@@ -10657,6 +10675,27 @@ test "MPN20 가로는 Result 의 것이다 — 휠이 Result 열에서 듣고, �
         st.base_max_cols = keep[2];
         st.stages.has_base = keep[3];
     }
+    // ⑹ **세로 상한과 그리기 직전의 clamp 가 같은 행 수를 본다** — 끝까지 내리면 마지막 줄이 가로 막대 **위**에 보인다
+    //    (10회차 J3: clamp 가 여백을 안 빼면 한 행을 더 보이는 줄 알아 상한이 한 줄 낮아지고, 마지막 줄이 막대 밑에 숨는다).
+    {
+        _ = try fx.session.handleKeyEvent(.{ .key = .home });
+        term.rt.editor_first_col = 0;
+        fx.session.scrollWheel(-1000, 0, false, rx, ry);
+        var d5 = appendPaneFrame(fx.session, wide, term) orelse return error.EditorPaneDidNotDraw;
+        defer d5.dl.deinit(allocator);
+        try testing.expectEqual(term.rt.editor_max_top_line, term.rt.editor_first_line);
+        try testing.expect(term.rt.editor_first_line > 0);
+        // 마지막 줄(29)의 `R` 이 Result 사각 안에 있다 — 줄이 한 행 밀려 막대 밑이면 안 그려진다.
+        const last_row = paneCodepointRow(d5.dl, lay.result, 'R') orelse return error.LastLineHidden;
+        _ = last_row;
+        var seen_last = false;
+        for (term.rt.editor_hit_rows[0..term.rt.editor_hit_rows_len]) |v| {
+            if (v.kind == .text and @as(usize, v.line) + term.rt.editor_first_line == 29) seen_last = true;
+        }
+        try testing.expect(seen_last);
+        fx.session.scrollWheel(1000, 0, false, rx, ry);
+    }
+
     // ⑸ **랩이면 넷 다 0 열** — 값이 남아 있어도 화면은 0 이다. 그리고 **판 caret 노출도 저장된 값을 안 건드린다**(랩을 껐을 때
     //    돌아갈 자리 — 단일 편집기의 `revealCaretColumn` 과 같은 규칙; 4회차 D3).
     term.rt.editor_wrap = true;

@@ -83,8 +83,11 @@ gh pr edit <번호> --add-assignee ohah --add-label <영역>,<성격>
 
 ## CI 게이트 — 무엇이 머지를 막나 (2026-08-31 사용자 결정)
 
-**required check 는 다섯이다**: `check` · `require label and assignee=ohah` · `core performance budget` ·
-`file explorer macOS product path` · `web build and security fixtures`.
+**required check 는 여섯이다**: `check` · `require label and assignee=ohah` · `core performance budget` ·
+`file explorer macOS product path` · `web build and security fixtures` · `check-boundaries`.
+`check-boundaries`는 `.github/workflows/ci.yml`의 네 인덱스 샤드를 합산하는 집계 잡이다. 샤드 하나의 통과가 아니라
+전체 집계의 통과가 필요하다. 필수 목록의 실제 권위는 GitHub main branch protection이며, 위 목록은
+2026-09-16 `gh api repos/ohah/maru/branches/main/protection/required_status_checks`로 대조했다.
 
 **session-host 잡 셋은 required 에서 빠졌고, PR 에서 아예 돌지 않는다**(`session host macOS (Debug)` ·
 `session host bundled CLI macOS` · `session host slow observer macOS`). push(main)·수동 실행에서만 돈다.

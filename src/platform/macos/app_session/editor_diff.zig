@@ -1774,6 +1774,60 @@ test "비교의 세로 막대는 좌우 어느 쪽을 잡아도 같은 곳으로
     try testing.expectEqual(results[0], results[1]); // 좌우가 같은 곳으로 갔다
 }
 
+test "DSB11 비교 뷰의 변경 위치 마커 — 왼쪽 막대에는 삭제 행, 오른쪽 막대에는 추가 행이 thumb 과 같은 축에 선다 (제품 경계, §4.1a N5b)" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try Fixture.init(allocator);
+    defer fx.deinit(allocator);
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 900, .h = 400 };
+    // 왼쪽에만 있는 줄 하나(앞쪽, 30 번째) · 오른쪽에만 있는 줄 하나(뒤쪽, 150 번째). 나머지 200 줄은 같다.
+    var left: std.ArrayList(u8) = .empty;
+    defer left.deinit(allocator);
+    var right: std.ArrayList(u8) = .empty;
+    defer right.deinit(allocator);
+    for (0..200) |i| {
+        if (i == 30) try left.appendSlice(allocator, "only-left\n");
+        if (i == 150) try right.appendSlice(allocator, "only-right\n");
+        try left.appendSlice(allocator, "line\n");
+        try right.appendSlice(allocator, "line\n");
+    }
+    var entry = testEntry(left.items, right.items);
+    fx.term.file_entry = &entry;
+    fx.term.rt.editor_wrap = false;
+    fx.session.focusTerm(pane_ops.activePane(fx.session).terms.items.len - 1);
+    fx.session.surface_initialized = true;
+    fx.session.backing_width_px = 1200;
+    fx.session.backing_height_px = 800;
+    poll(fx.session, fx.term);
+    fx.session.gpu_quads.clearRetainingCapacity();
+    var f = editor_ops.appendPaneFrame(fx.session, leaf, fx.term) orelse return error.EditorPaneDidNotDraw;
+    f.dl.deinit(allocator);
+    const lbar = fx.term.rt.editor_scrollbar orelse return error.NoScrollbar;
+    const rbar = fx.term.rt.editor_scrollbar_right orelse return error.NoScrollbar;
+    const marker_h: f32 = @floatFromInt(chrome_editor.scrollbar.marker_h_px);
+    var left_n: usize = 0;
+    var right_n: usize = 0;
+    var left_y: f32 = 0;
+    var right_y: f32 = 0;
+    for (fx.session.gpu_quads.items) |q| {
+        if (q.h != marker_h) continue;
+        if (q.x == @as(f32, @floatCast(lbar.track_x))) {
+            left_n += 1;
+            left_y = q.y;
+        } else if (q.x == @as(f32, @floatCast(rbar.track_x))) {
+            right_n += 1;
+            right_y = q.y;
+        }
+    }
+    try testing.expectEqual(@as(usize, 1), left_n); // 삭제 하나 — 오른쪽의 추가는 왼쪽 막대에 없다
+    try testing.expectEqual(@as(usize, 1), right_n);
+    // 자리는 thumb 과 같은 축(행 / 전체 행): 30 행은 위쪽 1/4 안, 150 행은 아래쪽 절반.
+    const ltrack_y: f32 = @floatCast(lbar.track_y);
+    const ltrack_h: f32 = @floatCast(lbar.track_h);
+    try testing.expect(left_y < ltrack_y + ltrack_h / 4.0);
+    try testing.expect(right_y > ltrack_y + ltrack_h / 2.0);
+}
+
 test "비교 뷰에서는 접기를 거절한다 — 성공을 돌려주고 아무 일도 안 하면 안 된다" {
     // `foldAll`은 `editorLines`를 쓰는데 비교에서는 **왼쪽 행 배열**이 나온다. 그러면 접힘 상태가
     // 만들어지지만 렌더는 diff 경로를 타므로 **화면은 그대로**다 — 성공을 돌려주고 아무 일도 안

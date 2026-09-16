@@ -25,6 +25,8 @@ pub const min_content_cols: u32 = 40;
 pub const plain_alpha: u8 = 0x60;
 /// 슬라이더(보이는 구간)의 알파. 선택 띠(`selection_alpha` 45%)보다 옅어야 그 아래 run 이 읽힌다.
 pub const slider_alpha: u8 = 0x38;
+/// 검색 일치 행의 알파(§6.2) — run 위에 얹되 run 색이 비친다.
+pub const mark_alpha: u8 = 0x80;
 
 /// 스트립의 폭(px). **한 자리에서 정한다** — 렌더·히트 기하·보이는 열 수·clamp 가 전부 이 값을 지나야
 /// 「그려진 것 = 클릭되는 것」이 구조로 지켜진다(§6.1).
@@ -82,6 +84,10 @@ pub const Props = struct {
     slider_first: usize,
     slider_len: usize,
     tab_width: u8,
+    /// **검색 일치가 있는 줄**(§6.2) — `lines` 와 같은 축(절대 줄). 창 밖은 안 그린다. 행 전체를 칠한다.
+    mark_lines: []const u32 = &.{},
+    /// `mark_lines` 안에서 현재 일치의 인덱스 — 그 행만 `search_match_current`.
+    mark_current: ?usize = null,
 };
 
 pub const Written = struct { ops: usize, truncated: bool };
@@ -131,6 +137,27 @@ pub fn build(props: Props, out: []draw.Op) Written {
             out[n] = runQuad(props.rect.x, y, s, @min(col, max_cols), max_cols, run_role);
             n += 1;
         }
+    }
+
+    // 검색 일치 행 — run 위·슬라이더 아래(§6.2). 창 `[top, top + rows)` 안의 줄만, 행 전체 폭으로.
+    for (props.mark_lines, 0..) |line, mi| {
+        if (line < props.top or line >= props.top + rows) continue;
+        if (n >= out.len) {
+            truncated = true;
+            break;
+        }
+        const is_current = props.mark_current != null and props.mark_current.? == mi;
+        out[n] = .{ .quad = .{
+            .rect = .{
+                .x = props.rect.x,
+                .y = props.rect.y + @as(i32, @intCast((line - props.top) * line_px)),
+                .w = props.rect.w,
+                .h = line_px,
+            },
+            .fill_role = if (is_current) .search_match_current else .search_match,
+            .alpha = mark_alpha,
+        } };
+        n += 1;
     }
 
     // 슬라이더 — 스트립 안의 보이는 구간. 스트립 밖(비례 스크롤로 밀린 구간)은 잘라 그린다.
@@ -282,6 +309,32 @@ test "MM9 두 칸 글자(CJK)는 두 열을 먹는다 — run 폭은 byte 가 �
     try testing.expectEqual(@as(usize, 2), w.ops);
     try testing.expectEqual(@as(u32, 4), ops[0].quad.rect.w);
     try testing.expectEqual(@as(i32, 5), ops[1].quad.rect.x);
+}
+
+test "MM10 검색 일치 행 — 창 안의 줄만 행 전체를 칠하고, 현재 일치는 다른 색, run 위·슬라이더 아래 (§6.2)" {
+    var ops: [32]draw.Op = undefined;
+    var lines: [40][]const u8 = undefined;
+    for (&lines) |*l| l.* = "x";
+    // 창은 줄 10..20(높이 20px). 일치: 5(창 밖) · 12 · 19(현재) · 25(창 밖).
+    const marks = [_]u32{ 5, 12, 19, 25 };
+    const w = build(.{ .rect = .{ .x = 100, .y = 50, .w = 30, .h = 20 }, .lines = &lines, .top = 10, .slider_first = 11, .slider_len = 3, .tab_width = 4, .mark_lines = &marks, .mark_current = 2 }, &ops);
+    // run 10 + 일치 2 + 슬라이더 1
+    try testing.expectEqual(@as(usize, 13), w.ops);
+    try testing.expect(!w.truncated);
+    const m12 = ops[10].quad;
+    try testing.expectEqual(@as(i32, 100), m12.rect.x);
+    try testing.expectEqual(@as(u32, 30), m12.rect.w); // 행 전체
+    try testing.expectEqual(@as(i32, 50 + 2 * line_px), m12.rect.y); // (12 − 10) 행
+    try testing.expectEqual(@as(u32, line_px), m12.rect.h);
+    try testing.expectEqual(tokens.ColorRole.search_match, m12.fill_role);
+    try testing.expectEqual(mark_alpha, m12.alpha);
+    const m19 = ops[11].quad;
+    try testing.expectEqual(@as(i32, 50 + 9 * line_px), m19.rect.y);
+    try testing.expectEqual(tokens.ColorRole.search_match_current, m19.fill_role);
+    try testing.expectEqual(tokens.ColorRole.selection, ops[12].quad.fill_role); // 슬라이더가 맨 위
+    // 목록이 비면 일치 quad 가 없다.
+    const w0 = build(.{ .rect = .{ .x = 100, .y = 50, .w = 30, .h = 20 }, .lines = &lines, .top = 10, .slider_first = 11, .slider_len = 3, .tab_width = 4 }, &ops);
+    try testing.expectEqual(@as(usize, 11), w0.ops);
 }
 
 test "MM8 저장소가 모자라면 잘리되 죽지 않는다" {

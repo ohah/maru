@@ -489,6 +489,9 @@ const editor_selection_marks = [_][]const chrome.components.editor_view.frame.Ma
     &editor_selection_marks_none,
 };
 
+/// `editor_minimap` 장면의 검색 일치 줄(§6.2 관측점) — 스트립 안 세 줄, 둘째가 현재 일치.
+const editor_minimap_marker_lines = [_]u32{ 6, 14, 30 };
+
 /// `editor_find` 픽스처. 검색어는 `row`이고, **둘째 줄에 넷**이 든다 — 한 줄 여러 매치가 이
 /// 슬라이스의 이유라 그것이 화면 가운데 있어야 한다.
 const editor_find_lines = [_][]const u8{
@@ -1045,6 +1048,9 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
         .selection_marks = if (scenario.id == .editor_selection) &editor_selection_marks else null,
         .search_marks = if (scenario.id == .editor_find) &editor_find_marks else null,
         .search_current = if (scenario.id == .editor_find) editor_find_current else null,
+        // **미니맵 장면은 검색 중이다**(§6.2) — 막대 마커와 스트립의 검색 행이 같은 목록에서 선다(넷째 줄이 현재).
+        .search_marker_lines = if (scenario.id == .editor_minimap) &editor_minimap_marker_lines else &.{},
+        .search_marker_current = if (scenario.id == .editor_minimap) 1 else null,
         // **caret 시나리오만 커서를 세운다.** 다른 골든까지 커서를 켜면 그 캡처들이 깜빡임 축을
         // 함께 떠안는다(커밋 상자 골든이 같은 이유로 한 시나리오에만 caret을 켠다).
         .carets = switch (scenario.id) {

@@ -23,9 +23,11 @@ const minimap = @import("minimap.zig");
 
 /// 한 쪽이 그릴 것.
 pub const Side = struct {
-    /// **미니맵**(§6.1 N5a) — 단일 편집기만 채운다(비교 뷰는 N5b). `cols` 는 설정 `editor.minimap-width`(0 = 끔),
-    /// 실제 px 는 `minimapPx` 가 정한다(좁으면 접힌다).
+    /// **미니맵**(§6.1 N5a) — 단일 편집기만 채운다(비교 뷰·병합에는 두지 않는다, §6.2). `cols` 는 설정
+    /// `editor.minimap-width`(0 = 끔), 실제 px 는 `minimapPx` 가 정한다(좁으면 접힌다).
     minimap: ?MinimapSide = null,
+    /// 세로 막대의 **변경 위치 마커** 종류(§4.1a, N5b). `build` 가 좌우에 `removed`/`added` 를 준다 — 단일 편집기는 `.none`.
+    change_marker_kind: frame.RowBand = .none,
     /// 그 열의 줄마다 **위 위젯 행**(S1.5·S2 — 충돌 구간 머리의 「고르기」 줄). `lines` 와 같은 축이고
     /// 짧은 배열·`null` 항목을 허용한다. 비교 뷰는 안 쓴다(읽기 전용이라 고를 것이 없다).
     widgets: []const ?frame.content.Widget = &.{},
@@ -300,6 +302,7 @@ pub fn buildSide(
         .search_marker_current = side.search_marker_current,
         .search_current = side.search_current,
         .row_bands = side.bands,
+        .change_marker_kind = side.change_marker_kind,
         .line_widgets = side.widgets,
         .row_marks = side.marks,
         .visible_rows = m.visible_rows,
@@ -377,14 +380,20 @@ pub fn build(props: Props, scratch: frame.Scratch) Written {
         .font_px = props.font_px,
         .force_horizontal_bar = wants_h_bar,
     };
-    const lw = buildSide(props.left, shared, cols.left, .{
+    // **변경 위치 마커는 좌우가 다르다**(§4.1a 「변경 위치 마커」): 왼쪽 막대에는 삭제 띠, 오른쪽 막대에는 추가 띠 —
+    // VS Code diff overview ruler 의 두 반쪽을 두 막대에 나눈 것이다.
+    var left_side = props.left;
+    left_side.change_marker_kind = .removed;
+    var right_side = props.right;
+    right_side.change_marker_kind = .added;
+    const lw = buildSide(left_side, shared, cols.left, .{
         .x = left_bg_x,
         .y = outer.y,
         .w = @intCast(cols.right.x - left_bg_x),
         .h = outer.h,
     }, half.first);
 
-    const rw = buildSide(props.right, shared, cols.right, .{
+    const rw = buildSide(right_side, shared, cols.right, .{
         .x = cols.right.x,
         .y = outer.y,
         .w = @intCast(@max(right_bg_end - cols.right.x, 0)),
@@ -476,6 +485,67 @@ test "한쪽만 넘쳐도 양쪽이 같은 높이를 쓴다 — 막대 자리를
 
     try testing.expect(flat.visual_rows > 0); // 실제로 그렸다
     try testing.expect(spilled.visual_rows < flat.visual_rows); // 양쪽 다 자리를 뗐다
+}
+
+test "DFM1 변경 위치 마커 — 왼쪽 막대에는 removed 만, 오른쪽 막대에는 added 만 (§4.1a N5b)" {
+    // VS Code diff overview ruler 의 두 반쪽(원본 삭제 · 수정본 추가)을 두 막대에 나눈다(§6.2). 반대 종류는 그 열에 없다.
+    var ops: [1024]draw.Op = undefined;
+    var text: [4096]u8 = undefined;
+    var runs: [512]draw.Run = undefined;
+    var content_rows: [128]@import("content.zig").Row = undefined;
+    var visual_rows: [128]@import("../../ui/visual_map.zig").VisualRow = undefined;
+    var gutter_rows: [128]gutter.Row = undefined;
+    var counts: [128]u32 = undefined;
+    var count_scratch: [256]u8 = undefined;
+    var caret_cols: [64]u32 = undefined;
+    const s: frame.Scratch = .{
+        .ops = &ops,
+        .text_bytes = &text,
+        .runs = &runs,
+        .content_rows = &content_rows,
+        .visual_rows = &visual_rows,
+        .gutter_rows = &gutter_rows,
+        .row_counts = &counts,
+        .count_scratch = &count_scratch,
+        .caret_cols = &caret_cols,
+    };
+    var lines: [80][]const u8 = undefined;
+    for (&lines) |*l| l.* = "ok";
+    // 왼쪽: 줄 5 removed · 오른쪽: 줄 60 added(이 열의 정렬된 행 축). 서로 다른 줄이라 두 마커의 y 가 갈린다.
+    var left_bands = [_]frame.RowBand{.none} ** 80;
+    left_bands[5] = .removed;
+    var right_bands = [_]frame.RowBand{.none} ** 80;
+    right_bands[60] = .added;
+    const rect: draw.Rect = .{ .x = 0, .y = 0, .w = 640, .h = 320 }; // 20 행 — 문서(80)가 넘쳐 막대가 선다
+    const w = build(.{
+        .caret_visible = false,
+        .caret_shape = .bar,
+        .tab_width = frame.default_tab_width,
+        .left = .{ .lines = &lines, .content_max_cols = 4, .bands = &left_bands },
+        .right = .{ .lines = &lines, .content_max_cols = 4, .bands = &right_bands },
+        .rect = rect,
+        .cell_w_px = 8,
+        .cell_h_px = 16,
+        .font_px = 13,
+    }, s);
+    var removed_n: usize = 0;
+    var added_n: usize = 0;
+    var removed_x: i32 = 0;
+    var added_x: i32 = 0;
+    for (ops[0..w.ops]) |op| {
+        if (op != .quad) continue;
+        if (op.quad.rect.h != @as(u32, @intCast(scrollbar_mod.marker_h_px))) continue; // 마커만(본문 띠는 행 높이)
+        if (op.quad.fill_role == .diff_removed_bg) {
+            removed_n += 1;
+            removed_x = op.quad.rect.x;
+        } else if (op.quad.fill_role == .diff_added_bg) {
+            added_n += 1;
+            added_x = op.quad.rect.x;
+        }
+    }
+    try testing.expectEqual(@as(usize, 1), removed_n);
+    try testing.expectEqual(@as(usize, 1), added_n);
+    try testing.expect(removed_x < 320 and added_x >= 320); // removed 는 왼쪽 열의 막대, added 는 오른쪽 열의 막대
 }
 
 test "두 열이 서로를 침범하지 않고 가운데 한 칸이 빈다" {

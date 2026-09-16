@@ -130,6 +130,28 @@ const RuntimeProcessIdentity = struct {
 
 const r7_runtime_count = 3;
 
+fn writeInputContinuitySpawnParams(allocator: std.mem.Allocator, artifact_root: []const u8) ![]u8 {
+    const command =
+        "(while true; do while [ ! -f \"$MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT/e3c-wake-ready\" ]; do sleep 0.05; done; " ++
+        "rm -f \"$MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT/e3c-wake-ready\"; printf 'E3C-APPKIT-ASYNC-WAKE\\n'; done) & " ++
+        "printf 'CR6C-RECOVERED-MARKER\\nCR6D-HISTORICAL-ONCE\\n'; " ++
+        "printf '\\033]52;c;Q1I2RC1ISVNUT1JJQ0FMLU9TQzUy\\007'; stty -echo; exec /bin/cat";
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    var json: std.json.Stringify = .{ .writer = &out.writer, .options = .{} };
+    try json.beginObject();
+    try json.objectField("argv");
+    try json.write(&.{ "/bin/sh", "-c", command });
+    try json.objectField("cwd");
+    try json.write(artifact_root);
+    try json.objectField("cols");
+    try json.write(80);
+    try json.objectField("rows");
+    try json.write(24);
+    try json.endObject();
+    return out.toOwnedSlice();
+}
+
 fn runR7Integration(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -498,6 +520,14 @@ pub fn main(init: std.process.Init) !void {
         );
     } else null;
     const input_continuity = std.c.getenv("MARU_SESSION_HOST_CR6D_INPUT_CONTINUITY_SMOKE") != null;
+    const input_app_bundle_z = if (input_continuity) blk: {
+        const raw = std.c.getenv("MARU_SESSION_HOST_CR6D_APP_BUNDLE") orelse
+            return error.MissingInputContinuityAppBundle;
+        const path = std.mem.span(raw);
+        if (path.len == 0 or path[0] != '/') return error.InvalidInputContinuityAppBundle;
+        break :blk try allocator.dupeZ(u8, path);
+    } else null;
+    defer if (input_app_bundle_z) |path| allocator.free(path);
     const recovery_baseline_raw = std.c.getenv("MARU_SESSION_HOST_CR6E_RECOVERY_BASELINE_ARTIFACT");
     const recovery_baseline_path = if (recovery_baseline_raw) |raw| std.mem.span(raw) else null;
     if (recovery_baseline_path) |path| if (path.len == 0) return error.InvalidRecoveryBaselineArtifact;
@@ -631,12 +661,15 @@ pub fn main(init: std.process.Init) !void {
         sibling_runtime_id = client_mod.extractRuntimeId(sibling_spawn) orelse
             return error.RuntimeIdMissing;
     }
+    var input_spawn_params: ?[]u8 = null;
+    defer if (input_spawn_params) |params| allocator.free(params);
     const spawn_params = if (auto_reconnect)
         "{\"argv\":[\"/bin/sh\",\"-c\",\"(while [ ! -f \\\"$MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT/c3c-after-disconnect-output\\\" ]; do sleep 0.05; done; rm -f \\\"$MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT/c3c-after-disconnect-output\\\"; printf 'E3C-APPKIT-ASYNC-WAKE\\nCR6E-C3C-AUTO-RECONNECTED\\n') & printf 'CR6C-RECOVERED-MARKER\\nCR6E-C3C-HISTORICAL-ONCE\\n'; exec /bin/cat\"],\"cols\":80,\"rows\":24}"
-    else if (input_continuity)
-        "{\"argv\":[\"/bin/sh\",\"-c\",\"(while true; do while [ ! -f \\\"$MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT/e3c-wake-ready\\\" ]; do sleep 0.05; done; rm -f \\\"$MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT/e3c-wake-ready\\\"; printf 'E3C-APPKIT-ASYNC-WAKE\\n'; done) & printf 'CR6C-RECOVERED-MARKER\\nCR6D-HISTORICAL-ONCE\\n'; printf '\\\\033]52;c;Q1I2RC1ISVNUT1JJQ0FMLU9TQzUy\\\\007'; stty -echo; exec /bin/cat\"],\"cols\":80,\"rows\":24}"
-    else
-        "{\"argv\":[\"/bin/sh\",\"-c\",\"(while true; do while [ ! -f \\\"$MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT/e3c-wake-ready\\\" ]; do sleep 0.05; done; rm -f \\\"$MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT/e3c-wake-ready\\\"; printf 'E3C-APPKIT-ASYNC-WAKE\\n'; done) & printf 'CR6C-RECOVERED-MARKER\\n'; exec /bin/cat\"],\"cols\":80,\"rows\":24}";
+    else if (input_continuity) blk: {
+        const params = try writeInputContinuitySpawnParams(allocator, artifact_root);
+        input_spawn_params = params;
+        break :blk params;
+    } else "{\"argv\":[\"/bin/sh\",\"-c\",\"(while true; do while [ ! -f \\\"$MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT/e3c-wake-ready\\\" ]; do sleep 0.05; done; rm -f \\\"$MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT/e3c-wake-ready\\\"; printf 'E3C-APPKIT-ASYNC-WAKE\\n'; done) & printf 'CR6C-RECOVERED-MARKER\\n'; exec /bin/cat\"],\"cols\":80,\"rows\":24}";
     const spawn = try admin.?.call("runtime.spawn", spawn_params);
     defer allocator.free(spawn);
     const runtime_id = client_mod.extractRuntimeId(spawn) orelse return error.RuntimeIdMissing;
@@ -728,15 +761,20 @@ pub fn main(init: std.process.Init) !void {
                 return error.EnvironmentFailed;
         }
         const harness_launch_ns = monotonicNow(io);
-        const app_pid = std.c.fork();
-        if (app_pid < 0) return error.ForkFailed;
-        if (app_pid == 0) {
-            const argv = [_:null]?[*:0]const u8{app_path_z.ptr};
-            _ = std.c.execve(app_path_z.ptr, &argv, @ptrCast(std.c.environ));
-            std.c._exit(127);
-        }
+        const app_pid = if (input_continuity)
+            try launchInputContinuityApp(input_app_bundle_z.?)
+        else blk: {
+            const pid = std.c.fork();
+            if (pid < 0) return error.ForkFailed;
+            if (pid == 0) {
+                const argv = [_:null]?[*:0]const u8{app_path_z.ptr};
+                _ = std.c.execve(app_path_z.ptr, &argv, @ptrCast(std.c.environ));
+                std.c._exit(127);
+            }
+            break :blk pid;
+        };
         var app_failure: ?anyerror = null;
-        waitForExactExit(app_pid, if (auto_reconnect) 45_000 else 30_000) catch |err| {
+        waitForExactExit(app_pid, if (input_continuity) 75_000 else if (auto_reconnect) 45_000 else 30_000) catch |err| {
             app_failure = err;
         };
         const harness_exit_ns = monotonicNow(io);
@@ -928,6 +966,32 @@ fn launchR7App(app_path: [:0]const u8) !c_int {
     if (pid == 0) {
         const argv = [_:null]?[*:0]const u8{app_path.ptr};
         _ = std.c.execve(app_path.ptr, &argv, @ptrCast(std.c.environ));
+        std.c._exit(127);
+    }
+    return pid;
+}
+
+/// Screen Recording authorization includes the responsible process. Launching the executable
+/// directly from an SSH-backed test runner therefore does not exercise the permission granted to
+/// Maru.app. `open` delegates the bundle launch to LaunchServices and `-W` keeps the harness's
+/// existing bounded child-reap contract intact.
+fn launchInputContinuityApp(app_bundle: [:0]const u8) !c_int {
+    const root = std.mem.span(std.c.getenv("MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT") orelse
+        return error.MissingArtifactRoot);
+    var stderr_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const stderr_path = try std.fmt.bufPrintZ(&stderr_buf, "{s}/app.stderr.txt", .{root});
+    const pid = std.c.fork();
+    if (pid < 0) return error.ForkFailed;
+    if (pid == 0) {
+        // These paths belong to the parent harness. Letting LaunchServices pass them to the app
+        // makes macOS attribute needless Documents-folder access to the staged product child.
+        _ = unsetenv("MARU_SESSION_HOST_CR6C_APP_EXE");
+        _ = unsetenv("MARU_SESSION_HOST_CR6C_PRODUCT_EXE");
+        _ = unsetenv("MARU_SESSION_HOST_CR6D_INPUT_SOURCE_RESTORE_EXE");
+        if (std.c.chdir("/") != 0) std.c._exit(126);
+        const open_path: [*:0]const u8 = "/usr/bin/open";
+        const argv = [_:null]?[*:0]const u8{ "/usr/bin/open", "-n", "-W", "--stderr", stderr_path.ptr, app_bundle.ptr };
+        _ = std.c.execve(open_path, &argv, @ptrCast(std.c.environ));
         std.c._exit(127);
     }
     return pid;

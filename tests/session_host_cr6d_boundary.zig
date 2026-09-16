@@ -104,7 +104,10 @@ test "CR6d 경계는 exact recovered screen probe와 actual AppKit input smoke�
     const restore_global_at = std.mem.indexOf(u8, fail_input, "restoreSessionHostInputSmokeInputSource()") orelse
         return error.TestUnexpectedResult;
     try std.testing.expect(restore_view_at < restore_global_at);
-    try std.testing.expectEqual(@as(usize, 1), count(swift, "guard CGPreflightPostEventAccess() else"));
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(swift, "guard CGPreflightPostEventAccess() || CGRequestPostEventAccess() else"),
+    );
     // The generic smoke deadline must not bypass the product quit state machine while the
     // CR6d input fixture is still waiting for focus/TCC. Otherwise the fixture reports a
     // secondary dead runtime and loses the primary timeout reason.
@@ -143,8 +146,8 @@ test "CR6d 경계는 exact recovered screen probe와 actual AppKit input smoke�
     try std.testing.expectEqual(@as(usize, 1), count(gate, "session_host_input_smoke_post_event_access=true"));
     try std.testing.expectEqual(@as(usize, 1), count(gate, "session_host_input_smoke_source_record_cleared=true"));
     try std.testing.expectEqual(@as(usize, 1), count(gate, "MARU_SESSION_HOST_CR6D_INPUT_SOURCE_RESTORE_EXE"));
-    try std.testing.expectEqual(@as(usize, 1), count(gate, "run_session_host_cr6d_boundary_tests.addArg(\"--maru-expect-tests=2\");"));
-    try std.testing.expectEqual(@as(usize, 1), count(build, "run_session_host_cr6d_global_boundary_tests.addArg(\"--maru-expect-tests=2\");"));
+    try std.testing.expectEqual(@as(usize, 1), count(gate, "run_session_host_cr6d_boundary_tests.addArg(\"--maru-expect-tests=3\");"));
+    try std.testing.expectEqual(@as(usize, 1), count(build, "run_session_host_cr6d_global_boundary_tests.addArg(\"--maru-expect-tests=3\");"));
 
     // v2a의 판정자는 기본 test graph에 고정된 순수 consumer다. 실제 AppKit producer가 붙기 전에도
     // identity/세대/anchor/PPM digest와 관심 영역 계약이 사라지거나 파일 I/O를 직접 열 수 없다.
@@ -218,6 +221,15 @@ test "CR6d v2b0b는 preflight 뒤 전체 inventory를 Zig 판정자에 exact onc
     const header = try read(allocator, "src/platform/macos/app_host_abi.h");
     defer allocator.free(header);
 
+    // Every global HID caller, including candidate open/cancel, must share the same exact
+    // foreground guard. A view can remain first responder while another app owns the keyboard.
+    const hid = between(swift, "private func dispatchSessionHostInputPhysicalKey(", "private func runSessionHostCandidateObservation(") orelse return error.TestUnexpectedResult;
+    const focus_at = std.mem.indexOf(u8, hid, "guard sessionHostInputSmokeOwnsGlobalKeyboardFocus(view: view) else { return false }") orelse
+        return error.TestUnexpectedResult;
+    const post_at = std.mem.indexOf(u8, hid, "down.post(tap: .cghidEventTap)") orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(focus_at < post_at);
+
     try std.testing.expectEqual(@as(usize, 2), count(build, "SessionHostIMECandidateObservation.swift"));
     try std.testing.expectEqual(@as(usize, 1), count(header, "maru_macos_session_host_ime_candidate_observation_publish("));
     try std.testing.expectEqual(@as(usize, 1), count(abi, "pub export fn maru_macos_session_host_ime_candidate_observation_publish("));
@@ -243,9 +255,82 @@ test "CR6d v2b0b는 preflight 뒤 전체 inventory를 Zig 판정자에 exact onc
     }
     try std.testing.expectEqual(@as(usize, 1), count(producer, "CGWindowListCopyWindowInfo("));
     try std.testing.expectEqual(@as(usize, 1), count(producer, "maru_macos_session_host_ime_candidate_observation_publish("));
+    try std.testing.expectEqual(@as(usize, 1), count(abi, "session_host_ime_candidate_publish_error={s}"));
     try std.testing.expectEqual(@as(usize, 1), count(producer, "requiredObservationCount = 5"));
     try std.testing.expectEqual(@as(usize, 1), count(producer, "maximumWindowCount = 256"));
     try std.testing.expectEqual(@as(usize, 0), count(producer, ".write(to:"));
+    try std.testing.expectEqual(@as(usize, 1), count(swift, "session_host_input_smoke_candidate_failure="));
+    const candidate_failure = between(
+        swift,
+        "        } catch let failure as SessionHostIMECandidateObservation.Failure {",
+        "        return false\n    }",
+    ) orelse return error.TestUnexpectedResult;
+    inline for (.{
+        "window-server-unavailable",
+        "inventory-too-large",
+        "malformed-window",
+        "invalid-output",
+        "transcript-too-large",
+        "rejected-\\(status)",
+        "unexpected",
+    }) |failure| try std.testing.expectEqual(@as(usize, 1), count(candidate_failure, failure));
+    inline for (.{ "kCGWindowName", "window title", "candidate text" }) |forbidden| {
+        try std.testing.expectEqual(@as(usize, 0), count(swift, forbidden));
+    }
+}
+
+test "CR6d AppKit child는 TCC responsible identity를 앱 번들에 귀속한다" {
+    const allocator = std.testing.allocator;
+    const source = try read(allocator, "src/platform/macos/session_host/cr6c_appkit_smoke.zig");
+    defer allocator.free(source);
+
+    try std.testing.expect(std.mem.indexOf(u8, source, "launchInputContinuityApp") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "\"/usr/bin/open\", \"-n\", \"-W\"") != null);
+    try std.testing.expectEqual(@as(usize, 1), count(source, "\"--stderr\", stderr_path.ptr"));
+    try std.testing.expect(std.mem.indexOf(u8, source, "if (input_continuity) 75_000") != null);
+    inline for (.{
+        "MARU_SESSION_HOST_CR6C_APP_EXE",
+        "MARU_SESSION_HOST_CR6C_PRODUCT_EXE",
+        "MARU_SESSION_HOST_CR6D_INPUT_SOURCE_RESTORE_EXE",
+    }) |parent_only| {
+        try std.testing.expectEqual(@as(usize, 1), count(source, "_ = unsetenv(\"" ++ parent_only));
+    }
+    try std.testing.expectEqual(@as(usize, 1), count(source, "if (std.c.chdir(\"/\") != 0) std.c._exit(126);"));
+    // The recovered PTY owns its own cwd; changing only the LaunchServices child cwd cannot stop
+    // sidebar Git discovery from touching the developer checkout during this unrelated TCC smoke.
+    // Keep this fixture-only isolation on the input-continuity branch.
+    try std.testing.expectEqual(@as(usize, 1), count(source, "try writeInputContinuitySpawnParams(allocator, artifact_root)"));
+    const spawn_choice = between(source, "    const spawn_params = if (auto_reconnect)", "    const spawn = try admin.?.call") orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), count(spawn_choice, "else if (input_continuity)"));
+    try std.testing.expectEqual(@as(usize, 1), count(source, "try json.objectField(\"cwd\")"));
+    try std.testing.expectEqual(@as(usize, 1), count(source, "try json.write(artifact_root)"));
+    const build = try read(allocator, "build.zig");
+    defer allocator.free(build);
+    const gate = between(
+        build,
+        "const session_host_cr6d_appkit_step =",
+        "const session_host_cr6d_boundary_tests =",
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        gate,
+        "const session_host_cr6d_home = \"/tmp/maru-macos-app/session-host-cr6d-home\"",
+    ) != null);
+    try std.testing.expectEqual(@as(usize, 0), count(gate, "MARU_WEB_APP_ROOT"));
+    try std.testing.expectEqual(@as(usize, 1), count(gate, "MARU_MACOS_APP_SMOKE_MS\", \"60000"));
+    try std.testing.expectEqual(@as(usize, 1), count(gate, "/usr/bin/ditto zig-out/Maru.app"));
+    try std.testing.expectEqual(@as(usize, 1), count(gate, "/usr/bin/diff -qr zig-out/Maru.app"));
+    try std.testing.expectEqual(@as(usize, 1), count(gate, "/usr/bin/codesign --verify --strict"));
+    try std.testing.expectEqual(@as(usize, 1), count(gate, "\"/tmp/maru-macos-app/Maru.app\""));
+    try std.testing.expectEqual(@as(usize, 1), count(
+        build,
+        "\"build-macos-session-host-cr6c-appkit-smoke-harness\"",
+    ));
+    try std.testing.expectEqual(@as(usize, 1), count(
+        build,
+        "install_session_host_cr6c_appkit_harness.step.dependOn(&session_host_cr6c_appkit_harness.step)",
+    ));
 }
 
 fn read(allocator: std.mem.Allocator, path: []const u8) ![]u8 {

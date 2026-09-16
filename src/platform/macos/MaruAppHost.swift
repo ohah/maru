@@ -4252,6 +4252,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var sessionHostCandidateOpened: SessionHostIMECandidateObservation.Snapshot?
     private var sessionHostCandidatePhase: UInt32 = 0
     private var sessionHostCandidateWaitTicks: UInt32 = 0
+    private var sessionHostCandidateFailure = ""
     private var launchSummaryWritten = false
     private var isSessionHostRecoverySmokeMode: Bool {
         smokeMode && ProcessInfo.processInfo.environment["MARU_SESSION_HOST_CR6C_APPKIT_SMOKE"] == "1"
@@ -10654,7 +10655,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             }
             // Only the explicit CR6d smoke posts system HID events. Check TCC before changing the
             // system-global source so a machine without the opt-in permission is mutation-free.
-            guard CGPreflightPostEventAccess() else {
+            guard CGPreflightPostEventAccess() || CGRequestPostEventAccess() else {
                 failSessionHostInputSmoke("accessibility-unavailable")
                 return
             }
@@ -10808,7 +10809,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         view: MaruMetalTerminalView,
         flags: CGEventFlags = []
     ) -> Bool {
-        guard view.window?.firstResponder === view else { return false }
+        // A view retains first-responder status even when another app becomes frontmost. Every
+        // global HID caller, including candidate open/cancel, must revalidate keyboard ownership.
+        guard sessionHostInputSmokeOwnsGlobalKeyboardFocus(view: view) else { return false }
         guard let source = CGEventSource(stateID: .hidSystemState) else { return false }
         guard let down = CGEvent(
             keyboardEventSource: source, virtualKey: CGKeyCode(keyCode), keyDown: true
@@ -10900,7 +10903,18 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             default:
                 return true
             }
+        } catch let failure as SessionHostIMECandidateObservation.Failure {
+            switch failure {
+            case .windowServerUnavailable: sessionHostCandidateFailure = "window-server-unavailable"
+            case .inventoryTooLarge: sessionHostCandidateFailure = "inventory-too-large"
+            case .malformedWindow: sessionHostCandidateFailure = "malformed-window"
+            case .invalidOutput: sessionHostCandidateFailure = "invalid-output"
+            case .transcriptTooLarge: sessionHostCandidateFailure = "transcript-too-large"
+            case .rejected(let status): sessionHostCandidateFailure = "rejected-\(status)"
+            }
+            failSessionHostInputSmoke("candidate-observation-failed")
         } catch {
+            sessionHostCandidateFailure = "unexpected"
             failSessionHostInputSmoke("candidate-observation-failed")
         }
         return false
@@ -12929,6 +12943,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         session_host_input_smoke_first_responder=\(sessionHostInputSmokeFirstResponder)
         session_host_input_smoke_frontmost_pid=\(sessionHostInputSmokeFrontmostPID)
         session_host_input_smoke_failure=\(sessionHostInputSmokeFailure)
+        session_host_input_smoke_candidate_failure=\(sessionHostCandidateFailure)
         agent_session_archive_smoke_stage=\(archiveSmokeStage)
         agent_session_archive_smoke_failure=\(archiveSmokeFailure)
         agent_session_archive_smoke_content_size=\(agentSessionArchiveSmokeContentSize)

@@ -1,4 +1,4 @@
-<!-- 작성 기준과 필수 메타데이터(라벨 1개 이상, assignee=ohah)는 docs/pr-checklist.md를 단일 출처로 둡니다. -->
+<!-- 작성 기준과 필수 메타데이터(라벨 구성·예외, assignee)는 docs/pr-checklist.md를 단일 출처로 둡니다. -->
 
 ## 의도
 

@@ -40,11 +40,15 @@ GROUND = (0x1E, 0x1E, 0x2E)
 SUPERSAMPLE = 4
 
 
-def render(size, *, motif=1.15, ground=GROUND, transparent=False):
+def render(size, *, motif=1.15, ground=GROUND, transparent=False, ink=AMBER):
     """한 장을 그린다.
 
     `motif` 는 모티프가 화면을 얼마나 채우는가다. **Android 적응형 아이콘의 앞면은 더 작다** —
     런처가 원·둥근사각 등으로 잘라내므로 안전 영역(지름 66/108) 안에 들어가야 한다.
+
+    `ink` 는 모티프 색이다. 기본은 브랜드 앰버이고, **Android 알림 아이콘만 흰색**을 쓴다 —
+    상태바 아이콘은 시스템이 **알파만 읽어** 자기 색으로 칠하므로(API 21+) 색을 넣어도 버려진다.
+    흰색으로 두는 것은 그 사실을 파일을 열어 본 사람에게도 보이게 하려는 것이다.
     """
     w = size * SUPERSAMPLE
     mode = "RGBA" if transparent else "RGB"
@@ -64,18 +68,18 @@ def render(size, *, motif=1.15, ground=GROUND, transparent=False):
     x0 = (w - total) // 2
     cy = w // 2
 
-    d.rounded_rectangle([x0, cy - ch // 2, x0 + cw, cy + ch // 2], radius=radius, fill=AMBER)
+    d.rounded_rectangle([x0, cy - ch // 2, x0 + cw, cy + ch // 2], radius=radius, fill=ink)
 
     ax = x0 + cw + gap + aw // 2
     p0 = (ax - aw // 2, cy - ah)
     p1 = (ax + aw // 2, cy)
     p2 = (ax - aw // 2, cy + ah)
-    d.line([p0, p1], fill=AMBER, width=lw)
-    d.line([p1, p2], fill=AMBER, width=lw)
+    d.line([p0, p1], fill=ink, width=lw)
+    d.line([p1, p2], fill=ink, width=lw)
     # **끝을 둥글게 한다.** PIL 의 `joint` 는 이음매만 둥글리고 «끝»은 잘린 채 둔다 — 그러면
     # 큰 크기에서 도끼로 자른 것처럼 보인다(그려 보고 알았다).
     for p in (p0, p1, p2):
-        d.ellipse([p[0] - lw // 2, p[1] - lw // 2, p[0] + lw // 2, p[1] + lw // 2], fill=AMBER)
+        d.ellipse([p[0] - lw // 2, p[1] - lw // 2, p[0] + lw // 2, p[1] + lw // 2], fill=ink)
     return im.resize((size, size), Image.LANCZOS)
 
 
@@ -98,6 +102,16 @@ IOS = [(120, "AppIcon60x60@2x.png"), (180, "AppIcon60x60@3x.png"),
 ANDROID = [("mdpi", 48), ("hdpi", 72), ("xhdpi", 96), ("xxhdpi", 144), ("xxxhdpi", 192)]
 # 적응형 앞면 캔버스는 108dp 이고 안전 영역은 지름 66dp — 모티프를 그 안에 넣는다.
 ADAPTIVE_MOTIF = 0.62
+
+# **상태바 알림 아이콘**(24dp). 런처 아이콘을 그대로 쓸 수 없다 — 시스템이 **알파만 읽어**
+# 자기 색으로 칠하므로 앰버도 바탕도 사라지고, 통짜 사각형 PNG 를 주면 상태바에 **흰 네모**가
+# 뜬다(그래서 그전까지 시스템 `stat_notify_sync` 를 빌려 쓰고 있었다 — 새로고침 아이콘이라
+# 뜻도 어긋났다).
+NOTIFICATION = [("mdpi", 24), ("hdpi", 36), ("xhdpi", 48), ("xxhdpi", 72), ("xxxhdpi", 96)]
+# 24 px 에서도 **두 덩이가 붙지 않아야** 한다 — 붙으면 그냥 얼룩이고 터미널이라는 뜻이 사라진다.
+# 런처보다 조금 줄여 여백을 둔다(상태바는 아이콘 사이가 좁아 꽉 찬 그림이 옆과 뭉친다).
+NOTIFICATION_MOTIF = 0.92
+WHITE = (0xFF, 0xFF, 0xFF)
 
 # **런치 스크린 표식**(M11d). iOS 는 `UILaunchScreen` 이 색과 그림을 **이름으로** 가리키는데,
 # 그 이름은 에셋 카탈로그에만 있다 — 이 번들은 Xcode 프로젝트가 없어 카탈로그가 없었다.
@@ -187,6 +201,27 @@ def groundRuns(im):
     return runs
 
 
+def alphaRuns(im):
+    """**투명 배경** 그림의 가운데 가로줄에서 «비어 있는» 토막을 센다.
+
+    `groundRuns` 는 바탕색으로 재는데 알림 아이콘에는 바탕이 없다 — 상태바가 알파만 읽으므로
+    파일도 알파 마스크다. 재는 것은 같다: 토막이 셋(왼쪽 여백 · 두 덩이 사이 · 오른쪽 여백)이면
+    커서와 셰브론이 **떨어져 있다.**
+    """
+    a = im.convert("RGBA").split()[3]
+    y = im.size[1] // 2
+    runs, cur = [], 0
+    for x in range(im.size[0]):
+        if a.getpixel((x, y)) < 32:
+            cur += 1
+        elif cur:
+            runs.append(cur)
+            cur = 0
+    if cur:
+        runs.append(cur)
+    return runs
+
+
 def selftest():
     """그림을 **재어** 본다 — 눈으로 「괜찮다」고 하는 대신."""
     bad = 0
@@ -198,6 +233,14 @@ def selftest():
         if len(runs) != 3:
             print(f"붙었다: {size}px 의 가운데 줄에 바탕 토막이 {len(runs)} 개다(셋이어야 한다)")
             bad += 1
+    # **알림 아이콘은 24 px 에서도 두 덩이여야 한다.** 상태바에서는 색이 사라지고 실루엣만
+    # 남으므로, 붙으면 「터미널」이 아니라 그냥 얼룩이 된다 — 이 크기가 제품에서 가장 작다.
+    for _, size in NOTIFICATION:
+        runs = alphaRuns(render(size, motif=NOTIFICATION_MOTIF, transparent=True, ink=WHITE))
+        if len(runs) != 3:
+            print(f"붙었다(알림): {size}px 의 가운데 줄에 빈 토막이 {len(runs)} 개다(셋이어야 한다)")
+            bad += 1
+
     # **적응형 앞면은 원 안에 들어야 한다.** 런처가 지름 66/108 로 잘라내므로, 넘으면 «잘린 줄
     # 모르고» 배포된다 — `ㅁ` 을 넓히면 제일 먼저 여기가 깨진다.
     for _, size in ANDROID:
@@ -253,6 +296,11 @@ def main():
         # 적응형 앞면 — 배경은 XML 이 단색으로 깔고, 여기는 모티프만 투명 위에 얹는다.
         want[os.path.join("android", f"mipmap-{density}", "ic_launcher_foreground.png")] = render(
             int(size * 108 / 48), motif=ADAPTIVE_MOTIF, transparent=True
+        )
+    for density, size in NOTIFICATION:
+        # 상태바 알림 — **알파 마스크**다(위 `NOTIFICATION` 주석).
+        want[os.path.join("android", f"drawable-{density}", "ic_notification.png")] = render(
+            size, motif=NOTIFICATION_MOTIF, transparent=True, ink=WHITE
         )
 
     bad = 0

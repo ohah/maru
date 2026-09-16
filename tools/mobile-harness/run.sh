@@ -360,10 +360,17 @@ chrome-android-app)
     sed 's|<application |<application android:debuggable="true" |' \
         "$ANDROID/AndroidManifest.xml" > "$DEVMANIFEST"
     grep -q 'android:debuggable="true"' "$DEVMANIFEST" || { echo "개발 매니페스트에 debuggable 을 못 넣었다" >&2; exit 1; }
-    # Java 코드가 0줄이라 dex 단계가 없다 — aapt2 로 매니페스트만 링크하고 .so 를 넣는다.
+    # **`R.java` 를 함께 뽑는다.** Java 가 우리 리소스를 이름으로 가리키려면(알림 아이콘이 그렇다)
+    # 리소스 ID 상수가 필요한데, 그것은 aapt2 가 만든다 — 없으면 `android.R` 의 시스템 자원만 쓸 수
+    # 있어 제품 아이콘을 못 단다(그래서 한동안 시스템 새로고침 아이콘을 빌려 쓰고 있었다).
+    # 매니페스트 XML 의 `@mipmap/ic_launcher` 는 aapt2 가 직접 풀어 R 없이도 됐던 것이라
+    # 이 필요가 지금까지 안 보였다.
+    rm -rf "$OUT/gen" && mkdir -p "$OUT/gen"
     "$BT/aapt2" link -I "$SDK/platforms/android-35/android.jar" \
         --manifest "$DEVMANIFEST" -A "$OUT/assets" -R "$OUT/res.zip" \
+        --java "$OUT/gen" \
         -o "$OUT/base.apk" --auto-add-overlay
+    [ -s "$OUT/gen/dev/maru/chrome/R.java" ] || { echo "aapt2 가 R.java 를 안 냈다" >&2; exit 1; }
     # IME shim 하나만 컴파일한다. `android.*` 만 써서 AndroidX 도 kotlin-stdlib 도 없다 —
     # 그래서 javac + d8 로 끝나고 Gradle 이 필요 없다(docs/mobile-platform.md §1).
     mkdir -p "$OUT/java"
@@ -371,7 +378,7 @@ chrome-android-app)
     # kotlin-stdlib 도 없다 — 그래서 javac + d8 로 끝나고 Gradle 이 필요 없다(§1).
     javac -source 8 -target 8 -nowarn -bootclasspath "$SDK/platforms/android-35/android.jar" \
         -d "$OUT/java" "$ANDROID/MaruActivity.java" "$ANDROID/MaruSshService.java" \
-        "$ANDROID/MaruKeyStore.java"
+        "$ANDROID/MaruKeyStore.java" "$OUT/gen/dev/maru/chrome/R.java"
     # **`--lib` 를 준다.** 라이브러리 추상 클래스를 상속하고 `super` 를 부르는 클래스가 생기면
     # (접근성 `AccessibilityNodeProvider`) d8 이 상위 사슬을 못 찾아 **내부 오류로 죽는다**
     # (실측: "Cannot invoke String.length()" NPE). 그 전까지는 그런 클래스가 없어 안 드러났다.

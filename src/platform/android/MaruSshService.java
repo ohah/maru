@@ -14,6 +14,7 @@ package dev.maru;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Intent;
 import android.os.IBinder;
@@ -112,6 +113,26 @@ public class MaruSshService extends Service {
         super.onDestroy();
     }
 
+    /// 알림을 눌렀을 때 앱을 앞으로 가져오는 인텐트.
+    ///
+    /// **런처를 누른 것과 같은 인텐트다**(`ACTION_MAIN` + `CATEGORY_LAUNCHER`). 그래서 이미 떠
+    /// 있는 태스크가 있으면 **그것이 앞으로 온다** — 세션 화면이 둘이 되지 않는다.
+    ///
+    /// ⚠️ **`FLAG_ACTIVITY_CLEAR_TOP` 을 쓰지 않는다.** 그 플래그는 액티비티를 **재생성**할 수
+    /// 있는데, 여기 host 는 `NativeActivity` 라 재생성이 곧 창·Vulkan 스왑체인·글리프 아틀라스를
+    /// 다시 세우는 일이다(매니페스트가 `configChanges` 로 피해 둔 바로 그 비용). 살아 있는
+    /// 세션으로 돌아가려고 누른 것이 화면을 한 번 끊는 결과가 되면 안 된다.
+    ///
+    /// `FLAG_IMMUTABLE` 은 API 23+ 이고 우리 최소는 29 다. 이 인텐트는 우리 액티비티를 여는 것
+    /// 뿐이라 받는 쪽이 고칠 여지를 줄 이유가 없다.
+    private PendingIntent openAppIntent() {
+        Intent open = new Intent(this, MaruActivity.class);
+        open.setAction(Intent.ACTION_MAIN);
+        open.addCategory(Intent.CATEGORY_LAUNCHER);
+        open.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        return PendingIntent.getActivity(this, 0, open, PendingIntent.FLAG_IMMUTABLE);
+    }
+
     private Notification buildNotification() {
         NotificationManager manager = getSystemService(NotificationManager.class);
         NotificationChannel channel = new NotificationChannel(
@@ -122,11 +143,21 @@ public class MaruSshService extends Service {
         return new Notification.Builder(this, CHANNEL_ID)
                 .setContentTitle("maru")
                 .setContentText("SSH 세션 유지 중")
-                // **블루투스 아이콘이 붙어 있었다.** 권한을 안 물어 이 알림이 한 번도 안 보였고
-                // (M16c), 보이게 만들자마자 드러났다 — 「SSH 세션 유지 중」 옆에 블루투스 표시가
-                // 뜬다. 앱 리소스가 없으므로(res/ 없이 `android.R` 만 쓴다) 시스템 것 중에서
-                // **뜻이 맞는 것**을 고른다: 이 알림이 말하는 것은 「연결을 들고 있다」다.
-                .setSmallIcon(android.R.drawable.stat_notify_sync)
+                // **누르면 앱으로 돌아온다**(사용자 요청). 이 알림이 말하는 것은 「세션이 살아
+                // 있다」이고, 그것을 본 사람이 하려는 일은 **그 세션으로 가는 것**이다 — 누를
+                // 곳이 없으면 런처를 다시 찾아야 한다.
+                .setContentIntent(openAppIntent())
+                // **우리 심볼을 단다**(사용자 요청 2026-09-16). 그전에는 시스템
+                // `stat_notify_sync`(새로고침 화살표)를 빌려 썼다 — 앱 리소스가 없던 때의
+                // 선택인데, 지금은 `res/` 가 있고 런처 아이콘도 거기서 온다. 뜻도 어긋났다:
+                // 이 알림은 「무언가를 동기화한다」가 아니라 「세션을 들고 있다」다.
+                //
+                // ⚠️ **런처 아이콘을 그대로 쓸 수 없다.** 상태바는 small icon 의 **알파만 읽어**
+                // 자기 색으로 칠하므로(API 21+), 바탕이 있는 통짜 PNG 를 주면 **흰 네모**가 뜬다.
+                // 그래서 `assets/icon/render.py` 가 같은 모티프를 **흰 잉크 · 투명 배경**으로 따로
+                // 뽑고(`NOTIFICATION`), 24 px 에서도 두 덩이가 붙지 않는지 그 파일의 selftest 가
+                // 잰다 — 붙으면 실루엣만 남는 상태바에서 그냥 얼룩이 된다.
+                .setSmallIcon(dev.maru.chrome.R.drawable.ic_notification)
                 .setOngoing(true)
                 .build();
     }

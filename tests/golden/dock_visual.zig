@@ -890,6 +890,15 @@ const cases = [_]Case{
         .contract = "openPath로 읽은 파일이 BOM·CRLF 없이, 탭이 전개된 채로 그려진다",
         .rect = .{ .x = 0, .y = 0, .w = 480, .h = 128 },
     },
+    // §6.1 N5a — **미니맵.** 본문 오른쪽·세로 막대 왼쪽에 문서의 «모양»(줄 2px·글자 1px 의 색 블록 run)이 서고,
+    // 보이는 구간이 반투명 슬라이더로 덮인다. 본문 열 수가 그만큼 줄어(가로 막대 자리와 같은 규율) 스트립이 막대에
+    // 겹치지 않는다.
+    .{
+        .name = "editor-minimap",
+        .capture = "editor-minimap.ppm",
+        .contract = "본문 오른쪽·막대 왼쪽에 문서 모양 스트립과 슬라이더가 선다 — 본문은 그만큼 좁다",
+        .rect = .{ .x = 0, .y = 0, .w = 1200, .h = 320 },
+    },
     .{
         .name = "editor-typescript-colors",
         .capture = "editor-typescript.ppm",

@@ -592,6 +592,103 @@ fn syntaxColors(self: *AppSession, term: *Term) []const []const chrome_editor.co
     );
 }
 
+/// 설정이 준 미니맵 폭(셀). 꺼져 있으면 0 — 실제 px 는 chrome 의 `minimap.widthPx` 가 정한다(좁으면 접힌다).
+pub fn minimapCols(self: *AppSession) u16 {
+    const cfg = self.loaded_config.config.editor;
+    if (!cfg.minimap) return 0;
+    return @intCast(@min(cfg.minimap_width, std.math.maxInt(u16)));
+}
+
+/// 이 Term 의 미니맵이 가져가는 px(§6.1). **본문 열 수를 재는 자리 셋**(렌더·히트 기하·보이는 열 수)이 전부 이것을
+/// 빼고 잰다 — 렌더 쪽 규칙은 `diff_frame.buildSide` 가 같은 함수로 낸다. 비교 뷰·병합 모드는 0(N5b).
+fn minimapPxFor(self: *AppSession, term: *Term, inner_w: u32) u32 {
+    if (term.rt.editor_diff != null or term.rt.editor_merge != null) return 0;
+    return chrome_editor.diff_frame.minimapPx(inner_w, @intCast(self.cell_width_px), minimapCols(self));
+}
+
+/// 미니맵이 그릴 것(§6.1). 창의 첫 줄은 **비례 스크롤**(`minimap.topLine`)이고 그 비례의 분모는 지난 프레임이 실은
+/// 스크롤 상한이라 한 프레임 늦을 수 있다(그 프레임의 색도 같은 창으로 만든다 — 어긋나지 않는다).
+fn minimapSide(self: *AppSession, term: *Term, pane_rect: chrome_draw.Rect, draw_lines: []const []const u8) ?chrome_editor.diff_frame.MinimapSide {
+    const cols = minimapCols(self);
+    if (cols == 0 or term.rt.editor_diff != null or term.rt.editor_merge != null) return null;
+    const doc = term.rt.editor_doc orelse return null;
+    const inset = chrome_editor.frame.content_inset_px;
+    const inner_w = pane_rect.w -| inset * 2;
+    const inner_h = pane_rect.h -| inset * 2;
+    if (chrome_editor.diff_frame.minimapPx(inner_w, @intCast(self.cell_width_px), cols) == 0) return null;
+    const cell_h: u32 = @max(self.cell_height_px, 1);
+    const visible_rows: usize = inner_h / cell_h;
+    // 스트립 높이는 본문이 그리는 행 높이와 같다(프레임이 `visual_budget × cell_h` 로 준다). 가로 막대가 서면 한 행
+    // 짧아지는데 그 차이는 창의 끝 몇 줄뿐이라 색 창을 넉넉히(막대 없는 높이로) 만든다 — 남는 줄의 색은 안 그려질 뿐이다.
+    const strip_rows = chrome_editor.minimap.stripRows(@intCast(visible_rows * cell_h));
+    const top = chrome_editor.minimap.topLine(term.rt.editor_first_line, draw_lines.len, strip_rows, term.rt.editor_max_top_line);
+    const count = @min(strip_rows, draw_lines.len -| top);
+    const colors = syntax_color.minimapColors(
+        &term.rt.editor_syntax,
+        self.allocator,
+        doc.file.content,
+        doc.file.lines,
+        top,
+        count,
+        term.rt.editor_tab_width,
+        term.rt.editor_visible_numbers,
+    );
+    return .{ .cols = cols, .input = .{
+        .top = top,
+        .slider_first = term.rt.editor_first_line,
+        .slider_len = visible_rows,
+        .window_colors = colors,
+    } };
+}
+
+/// 그 프레임의 미니맵 자리를 **창 절대 px 로 굳힌다**(§4.1g 「렌더가 굳힌 것만 읽는다」) — 클릭이 이 사각과 창(top·rows)을
+/// 읽는다. 없으면 `null`(클릭은 본문으로 간다).
+fn storeMinimapHit(self: *AppSession, term: *Term, rect: maru.session.SplitRect) void {
+    term.rt.editor_minimap_rect = null;
+    const cols = minimapCols(self);
+    if (cols == 0 or term.rt.editor_diff != null or term.rt.editor_merge != null) return;
+    const inset = chrome_editor.frame.content_inset_px;
+    const inner_w = rect.w -| inset * 2;
+    const inner_h = rect.h -| inset * 2;
+    const px = chrome_editor.diff_frame.minimapPx(inner_w, @intCast(self.cell_width_px), cols);
+    if (px == 0) return;
+    // 렌더와 같은 계산: 본문 끝 = 열 수 × 셀 폭(열 수는 미니맵을 뺀 폭에서 잰다).
+    const m = chrome_editor.diff_frame.sideMetrics(inner_w -| px, inner_h, @intCast(self.cell_width_px), @intCast(self.cell_height_px));
+    const cell_h: u32 = @max(self.cell_height_px, 1);
+    const rows: usize = inner_h / cell_h;
+    const strip_h: u32 = @intCast(rows * cell_h);
+    term.rt.editor_minimap_rect = .{
+        .x = rect.x + inset + @as(u32, m.total_cols) * self.cell_width_px,
+        .y = rect.y + inset,
+        .w = px,
+        .h = strip_h,
+    };
+    const strip_rows = chrome_editor.minimap.stripRows(strip_h);
+    term.rt.editor_minimap_top = chrome_editor.minimap.topLine(term.rt.editor_first_line, editorLines(term).len, strip_rows, term.rt.editor_max_top_line);
+    term.rt.editor_minimap_rows = strip_rows;
+}
+
+/// 미니맵을 누르면 그 y 의 줄이 **화면 가운데** 오게 굴린다(§6.1 — VS Code 의 클릭). 드래그는 「계속 클릭」이다.
+/// caret 은 안 놓는다. 미니맵이 없거나 밖이면 `false`.
+pub fn minimapClick(self: *AppSession, term: *Term, x_px: f64, y_px: f64) bool {
+    const r = term.rt.editor_minimap_rect orelse return false;
+    if (!app_session_mod.layout_math.pointInRect(x_px, y_px, r)) return false;
+    minimapScrollTo(self, term, y_px);
+    return true;
+}
+
+fn minimapScrollTo(self: *AppSession, term: *Term, y_px: f64) void {
+    const r = term.rt.editor_minimap_rect orelse return;
+    const rel: i64 = @intFromFloat(@floor(y_px - @as(f64, @floatFromInt(r.y))));
+    const total = editorLines(term).len;
+    const line = chrome_editor.minimap.lineAtY(term.rt.editor_minimap_top, rel, total);
+    const cell_h: u32 = @max(self.cell_height_px, 1);
+    const visible: usize = r.h / cell_h;
+    term.rt.editor_first_line = line -| (visible / 2); // 상한은 그리기 직전의 clamp 가 건다
+    term.rt.editor_first_piece = 0;
+    self.metal_dirty = true;
+}
+
 /// 설정의 caret 모양을 chrome 컴포넌트의 enum으로 옮긴다. **chrome은 config를 안 들여온다**(L3) —
 /// 이름이 같으므로 옮겨 담기만 한다. 새 값이 한쪽에만 생기면 여기서 컴파일이 깨져 드러난다.
 fn caretShape(self: *AppSession) chrome_editor.frame.CaretShape {
@@ -658,6 +755,8 @@ pub fn buildPaneOps(
     cell_h_px: u16,
     font_px: u16,
     scratch: FrameScratch,
+    /// 미니맵(§6.1) — 단일 편집기만 넘긴다(`null` 이면 없다).
+    minimap: ?diff_frame.MinimapSide,
 ) PaneFrame {
     // **내용은 뷰 사각에서 한 겹 들어간다**(`frame.content_inset_px`) — 배경은 그대로 전체를 덮는다.
     // 활성 pane 포커스 테두리가 셀 **위** 층에 그려져서, 여백이 없으면 첫 글자 행과 스크롤바를 덮는다
@@ -665,7 +764,7 @@ pub fn buildPaneOps(
     const inset: i32 = @intCast(chrome_editor.frame.content_inset_px);
     const inner: chrome_draw.Rect = .{ .x = 0, .y = 0, .w = rect.w -| chrome_editor.frame.content_inset_px * 2, .h = rect.h -| chrome_editor.frame.content_inset_px * 2 };
     const w = diff_frame.buildSide(
-        .{ .lines = lines, .first_col = first_col, .numbers = numbers, .total_lines = total_lines, .folds = folds, .content_max_cols = content_max_cols, .row_cache = row_cache, .selection_marks = selection_marks, .search_marks = search_marks, .search_current = search_current, .search_marker_lines = search_marker_lines, .search_marker_current = search_marker_current, .line_colors = line_colors, .line_seeks = line_seeks, .carets = carets, .widgets = widgets, .bands = bands },
+        .{ .lines = lines, .first_col = first_col, .numbers = numbers, .total_lines = total_lines, .folds = folds, .content_max_cols = content_max_cols, .row_cache = row_cache, .selection_marks = selection_marks, .search_marks = search_marks, .search_current = search_current, .search_marker_lines = search_marker_lines, .search_marker_current = search_marker_current, .line_colors = line_colors, .line_seeks = line_seeks, .carets = carets, .widgets = widgets, .bands = bands, .minimap = minimap },
         .{ .first_line = first_line, .first_piece = first_piece, .caret_visible = caret_visible, .caret_shape = caret_shape, .wrap = wrap, .tab_width = tab_width, .cell_w_px = cell_w_px, .cell_h_px = cell_h_px, .font_px = font_px },
         inner,
         // **배경만 뒤로 물린다.** 내용 op이 (0,0)에서 시작해야 셀 격자 양자화(`buildTextDrawList`가
@@ -1258,7 +1357,8 @@ fn storeHitRows(self: *AppSession, term: *Term, leaf_rect: maru.session.SplitRec
     }, 0 } else .{ editorBodyRect(self, leaf_rect, term), chrome_editor.frame.content_inset_px };
     const inner_w = body_outer.w -| inset * 2;
     const inner_h = body_outer.h -| inset * 2;
-    const m = chrome_editor.diff_frame.sideMetrics(inner_w, inner_h, @intCast(self.cell_width_px), @intCast(self.cell_height_px));
+    // **미니맵이 가져간 폭을 뺀다**(§6.1) — 렌더가 그 폭에서 열 수를 쟀다.
+    const m = chrome_editor.diff_frame.sideMetrics(inner_w -| minimapPxFor(self, term, inner_w), inner_h, @intCast(self.cell_width_px), @intCast(self.cell_height_px));
     const lay = chrome_editor.geometry.compute(m.total_cols, term.rt.editor_lines.len, .{});
     term.rt.editor_hit_geom = .{
         .body_x = @intCast(body_outer.x + inset),
@@ -1551,7 +1651,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     const pf = if (diff_state_opt) |st| blk: {
         // **상태 줄은 가로로 안 민다** — 한 줄짜리 문구라 밀면 화면에서 사라진다.
         // 한 줄짜리 상태 문구다 — 캐시가 아낄 것이 없다.
-        if (st.view != .compare) break :blk buildPaneOps(lines, null, null, lines.len, term.rt.editor_first_line, 0, 0, null, null, buildSelectionMarks(self, term), null, null, @as([]const u32, &.{}), null, syntaxColors(self, term), &.{}, buildCaretRows(self, term), &.{}, null, self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
+        if (st.view != .compare) break :blk buildPaneOps(lines, null, null, lines.len, term.rt.editor_first_line, 0, 0, null, null, buildSelectionMarks(self, term), null, null, @as([]const u32, &.{}), null, syntaxColors(self, term), &.{}, buildCaretRows(self, term), &.{}, null, self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, null);
         // **좌우가 세로를 공유한다**(§3.5) — 행 배열이 이미 같은 길이라 같은 인덱스가 같은 높이다.
         // 가로는 각자다(§3.5의 그 규칙은 CM6가 "양쪽 줄 길이가 달라 한쪽을 따라가면 다른 쪽이
         // 엉뚱한 곳을 본다"고 적어 둔 근거에서 왔다) — 입력이 붙을 때 열별 `first_col`이 여기 온다.
@@ -1580,7 +1680,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
                 maru.i18n.t(.diff_read_failed)
             else
                 maru.i18n.t(.diff_loading);
-            break :blk buildPaneOps(status_line[0..1], null, null, 1, 0, 0, 0, null, null, null, null, null, @as([]const u32, &.{}), null, &.{}, &.{}, null, &.{}, null, false, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
+            break :blk buildPaneOps(status_line[0..1], null, null, 1, 0, 0, 0, null, null, null, null, null, @as([]const u32, &.{}), null, &.{}, &.{}, null, &.{}, null, false, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, null);
         }
         break :blk buildMergePaneOps(self, term, st, draw_lines, wrap, pane_rect, scratch);
     } else blk: {
@@ -1589,7 +1689,10 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
         var seek_buf: [512]?chrome_editor.content.Seek = undefined;
         const fc = effectiveFirstCol(wrap, term, false);
         const seek_n = buildLineSeeks(self, term, draw_lines.len, term.rt.editor_first_line, fc, &seek_buf);
-        break :blk buildPaneOps(draw_lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), fc, maxColsForRender(self, term, false), row_cache, buildSelectionMarks(self, term), find_marks, find_current, marker_lines, marker_current, syntaxColors(self, term), seek_buf[0..seek_n], buildCaretRows(self, term), conflictWidgets(self, term), conflictBands(term), self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch);
+        // **미니맵**(§6.1) — 병합 모드가 아닌 단일 편집기만. 창(`top`)은 지난 프레임의 스크롤 상한으로 비례를 재고,
+        // 색은 그 창만 묻는다(본문과 다른 저장소).
+        const mm = minimapSide(self, term, pane_rect, draw_lines);
+        break :blk buildPaneOps(draw_lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), fc, maxColsForRender(self, term, false), row_cache, buildSelectionMarks(self, term), find_marks, find_current, marker_lines, marker_current, syntaxColors(self, term), seek_buf[0..seek_n], buildCaretRows(self, term), conflictWidgets(self, term), conflictBands(term), self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, mm);
     };
     if (pf.ops_len == 0) return null;
     // **배치를 싣는다**(병합 모드가 아니면 지운다 — 옛 배치가 남으면 평범한 편집기에서 클릭이
@@ -1672,6 +1775,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     // 좌표로 오므로, 같은 축에서 비교하지 않으면 보이는 자리와 잡히는 자리가 갈린다. 여백(`inset`)은
     // 위 `buildPaneOps`가 원점에 건 그 값이다 — 여기서 다시 더해야 실제로 그려진 자리가 된다.
     term.rt.editor_scrollbar = if (pf.scrollbar) |bar| shiftScrollbar(bar, @intCast(rect.x + inset), @intCast(rect.y + inset)) else null;
+    storeMinimapHit(self, term, rect);
     term.rt.editor_horizontal_scrollbar = if (pf.horizontal_scrollbar) |bar| shiftHorizontalScrollbar(bar, @intCast(rect.x + inset), @intCast(rect.y + inset)) else null;
     // 비교 뷰 오른쪽 열(단일 편집기는 `null`이라 그대로 비워진다).
     term.rt.editor_scrollbar_right = if (pf.right_scrollbar) |bar| shiftScrollbar(bar, @intCast(rect.x + inset), @intCast(rect.y + inset)) else null;
@@ -2429,7 +2533,7 @@ fn visibleCols(self: *AppSession, body: maru.session.SplitRect, term: *Term, rig
         if (st.view != .compare) break :blk inner_w;
         const cols = chrome_editor.diff_frame.columns(.{ .x = 0, .y = 0, .w = inner_w, .h = inner_h }, @intCast(self.cell_width_px));
         break :blk if (right) cols.right.w else cols.left.w;
-    } else inner_w;
+    } else inner_w -| minimapPxFor(self, term, inner_w); // 미니맵이 가져간 폭을 뺀다(§6.1)
     const m = chrome_editor.diff_frame.sideMetrics(side_w, inner_h, @intCast(self.cell_width_px), @intCast(self.cell_height_px));
     const layout = chrome_editor.geometry.compute(m.total_cols, line_count, .{});
     return layout.content.width;
@@ -5290,6 +5394,14 @@ pub fn beginScrollbarGesture(self: *AppSession, pane: *Pane, x_px: f64, y_px: f6
         // **가로는 각자다**(§3.5) — 오른쪽 막대는 오른쪽 열만 민다.
         if (beginHorizontal(self, term, bar, x_px, y_px, true)) return true;
     }
+    // **미니맵**(§6.1) — 막대와 같은 부류의 「굴리는 컨트롤」이라 같은 자리에서 잡는다(본문 선택보다 앞).
+    if (minimapClick(self, term, x_px, y_px)) {
+        self.editor_scrollbar_term = term;
+        self.scrollbar_drag_target = .editor_minimap;
+        self.pointer_gesture_owner = .none;
+        self.metal_dirty = true;
+        return true;
+    }
     return false;
 }
 
@@ -5349,6 +5461,16 @@ pub fn routeScrollbarCapture(self: *AppSession, kind: i32, x_px: f64, y_px: f64)
             }
             return true;
         },
+        .editor_minimap => {
+            // 드래그 = 계속 클릭(§6.1). x 는 안 본다 — 스트립 밖으로 나가도 잡은 채다(막대 드래그와 같다).
+            if (kind == 2) {
+                if (self.editor_scrollbar_term) |term| minimapScrollTo(self, term, y_px);
+            } else {
+                self.scrollbar_drag_target = .none;
+                self.editor_scrollbar_term = null;
+            }
+            return true;
+        },
         else => return false,
     }
 }
@@ -5356,7 +5478,7 @@ pub fn routeScrollbarCapture(self: *AppSession, kind: i32, x_px: f64, y_px: f64)
 /// 편집기 막대 드래그가 진행 중인가 — `mouse()`가 **다른 판정보다 먼저** 물어야 한다(이관 계약 §2:
 /// "진행 중인 capture가 최우선"). 안 그러면 포인터가 본문 위로 지나는 순간 드래그가 끊긴다.
 pub fn scrollbarCaptureActive(self: *const AppSession) bool {
-    return self.scrollbar_drag_target == .editor_vertical or self.scrollbar_drag_target == .editor_horizontal;
+    return self.scrollbar_drag_target == .editor_vertical or self.scrollbar_drag_target == .editor_horizontal or self.scrollbar_drag_target == .editor_minimap;
 }
 
 /// 세로 막대 드래그가 준 **px offset**을 편집기 좌표 `(논리 줄, 조각)`으로 옮긴다.
@@ -10710,6 +10832,118 @@ test "MPN20 가로는 Result 의 것이다 — 휠이 Result 열에서 듣고, �
     term.rt.editor_wrap = false;
 }
 
+test "MMP1 미니맵 — 본문 오른쪽·막대 왼쪽에 서고, 본문 열이 그만큼 줄며, 클릭·드래그는 굴리기이지 caret 이 아니다 (제품 경계, §6.1)" {
+    // N5a(계약 §6.1). 렌더가 굳힌 자리(`editor_minimap_rect`)와 `gpu_quads` 로 «그려진 것» 을, 제품 마우스 라우터
+    // (`session.mouse`)로 «눌리는 것» 을 잰다. 끄면 폭이 돌아오고, 좁으면 접힌다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    // 2,000 줄 — 스트립(높이/2px ≈ 300 줄)보다 길어 비례 스크롤이 걸린다. `.zig` 라 구문 색이 붙는다.
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    for (0..2000) |i| {
+        const l = try std.fmt.allocPrint(allocator, "const v{d} = {d}; // c\n", .{ i, i });
+        defer allocator.free(l);
+        try buf.appendSlice(allocator, l);
+    }
+    try dir.dir.writeFile(testing.io, .{ .sub_path = "mm.zig", .data = buf.items });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(testing.io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "mm.zig" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+    term.rt.editor_wrap = false;
+    fx.session.surface_initialized = true;
+    fx.session.backing_width_px = 1200;
+    fx.session.backing_height_px = 800;
+    const leaf = activeLeafRectForTest(fx.session) orelse return error.SkipZigTest;
+    const cw: u32 = fx.session.cell_width_px;
+    const ch: u32 = fx.session.cell_height_px;
+    const inset = chrome_editor.frame.content_inset_px;
+
+    // ⑴ **자리와 폭** — 렌더가 굳힌 사각은 본문 끝(열 수 × 셀 폭)에서 시작해 설정 폭(15 셀)만큼이고, 막대 왼쪽이다.
+    fx.session.gpu_quads.clearRetainingCapacity();
+    var d0 = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+    defer d0.dl.deinit(allocator);
+    const mr = term.rt.editor_minimap_rect orelse return error.NoMinimap;
+    try testing.expectEqual(@as(u32, 15) * cw, mr.w);
+    const body = editorBodyRect(fx.session, leaf, term);
+    const inner_w = body.w -| inset * 2;
+    const g = term.rt.editor_hit_geom;
+    // 본문 열 수는 미니맵을 뺀 폭에서 나온다: (본문 끝 x) == body.x + inset + (content_left + content_width) × cw
+    try testing.expectEqual(body.x + inset + g.content_left_px + @as(u32, g.content_width) * cw, mr.x);
+    // 막대는 스트립 오른쪽에 있다.
+    const bar = term.rt.editor_scrollbar orelse return error.NoScrollbar;
+    try testing.expect(@as(f64, bar.hit_x) >= @as(f64, @floatFromInt(mr.x + mr.w)));
+    // 폭이 실제로 줄었다: 미니맵 없이 잰 열 수보다 15 열 적다.
+    const cols_without = chrome_editor.geometry.compute(chrome_editor.diff_frame.sideMetrics(inner_w, body.h -| inset * 2, @intCast(cw), @intCast(ch)).total_cols, term.rt.editor_lines.len, .{}).content.width;
+    try testing.expectEqual(cols_without - 15, g.content_width);
+    // **그려졌다** — 스트립 안에 quad 가 있고(run + 슬라이더), 스트립 밖 오른쪽(막대 자리)으로는 안 넘친다.
+    var in_strip: usize = 0;
+    for (fx.session.gpu_quads.items) |q| {
+        const qx: f32 = @floatFromInt(mr.x);
+        const qw: f32 = @floatFromInt(mr.w);
+        if (q.x >= qx and q.x + q.w <= qx + qw + 0.01 and q.h <= 2.01 * @as(f32, @floatFromInt(ch))) in_strip += 1;
+    }
+    try testing.expect(in_strip > 50); // 300 줄 창의 run 들
+    // 슬라이더: 보이는 구간(첫 줄 0..visible) — 스트립 폭 전체·높이 = visible × 2px 인 quad 하나.
+    const visible: usize = mr.h / ch;
+    var slider = false;
+    for (fx.session.gpu_quads.items) |q| {
+        if (q.x == @as(f32, @floatFromInt(mr.x)) and q.w == @as(f32, @floatFromInt(mr.w)) and q.h == @as(f32, @floatFromInt(visible * chrome_editor.minimap.line_px)) and q.y == @as(f32, @floatFromInt(mr.y))) slider = true;
+    }
+    try testing.expect(slider);
+
+    // ⑵ **클릭은 굴리기다** — 스트립의 y 에 해당하는 줄이 화면 가운데 오고, caret(selection)은 그대로다.
+    const sel_before = term.rt.editor_selection;
+    const rows_strip = term.rt.editor_minimap_rows;
+    try testing.expect(rows_strip > 100);
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_minimap_top);
+    const click_row: usize = 100; // 스트립의 100 번째 줄 → 문서 100 줄
+    const cx = @as(f64, @floatFromInt(mr.x)) + @as(f64, @floatFromInt(mr.w)) / 2.0;
+    const cy = @as(f64, @floatFromInt(mr.y)) + @as(f64, @floatFromInt(click_row * chrome_editor.minimap.line_px)) + 1.0;
+    fx.session.mouse(1, cx, cy, 0, 0);
+    try testing.expectEqual(click_row - visible / 2, term.rt.editor_first_line);
+    try testing.expectEqual(sel_before, term.rt.editor_selection);
+    try testing.expect(scrollbarCaptureActive(fx.session));
+    // ⑶ **드래그는 계속 클릭** — 더 아래로 끌면 더 내려가고, 떼면 잡힘이 풀린다.
+    fx.session.mouse(2, cx, cy + 40.0, 0, 0); // +20 줄
+    try testing.expectEqual(click_row + 20 - visible / 2, term.rt.editor_first_line);
+    fx.session.mouse(3, cx, cy + 40.0, 0, 0);
+    try testing.expect(!scrollbarCaptureActive(fx.session));
+    try testing.expect(fx.session.editor_scrollbar_term == null);
+
+    // ⑷ **비례 스크롤** — 본문을 끝까지 내리면 스트립도 끝(`lines − rows`)에 선다.
+    term.rt.editor_first_line = 1_000_000; // clamp 가 상한으로 되돌린다
+    var d1 = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+    defer d1.dl.deinit(allocator);
+    try testing.expectEqual(term.rt.editor_max_top_line, term.rt.editor_first_line);
+    var d2 = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw; // 상한을 안 프레임 뒤
+    defer d2.dl.deinit(allocator);
+    try testing.expectEqual(term.rt.editor_lines.len - term.rt.editor_minimap_rows, term.rt.editor_minimap_top);
+
+    // ⑸ **끄면 돌아온다** — 사각이 없고 본문 열이 전부이며, 스트립 자리를 눌러도 굴리기가 아니다.
+    fx.session.loaded_config.config.editor.minimap = false;
+    var d3 = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+    defer d3.dl.deinit(allocator);
+    try testing.expect(term.rt.editor_minimap_rect == null);
+    try testing.expectEqual(cols_without, term.rt.editor_hit_geom.content_width);
+    const fl = term.rt.editor_first_line;
+    fx.session.mouse(1, cx, cy, 0, 0);
+    try testing.expectEqual(fl, term.rt.editor_first_line);
+    fx.session.mouse(3, cx, cy, 0, 0);
+    fx.session.loaded_config.config.editor.minimap = true;
+
+    // ⑹ **좁으면 접힌다** — 본문이 40 열보다 좁아지는 pane 에서는 사각이 없다(chrome 의 규칙을 제품이 지난다).
+    const narrow: maru.session.SplitRect = .{ .x = leaf.x, .y = leaf.y, .w = 40 * cw + 15 * cw, .h = leaf.h };
+    var d4 = appendPaneFrame(fx.session, narrow, term) orelse return error.EditorPaneDidNotDraw;
+    defer d4.dl.deinit(allocator);
+    try testing.expect(term.rt.editor_minimap_rect == null);
+}
+
 test "MPN12 세 판이 Result 를 «따라» 굴러간다 — 대응표로, 그리고 문서가 바뀌면 표가 새로 선다 (제품 경계)" {
     // S3b-M 의 첫 소비자. 세 판은 아직 입력을 안 받으므로 Result 가 굴러가면 대응표로 따라가야
     // 같은 내용이 같은 높이에 선다 — 안 따라가면 Result 를 100 줄 내려도 세 판은 맨 위에 그대로다.
@@ -13538,8 +13772,10 @@ test "막대 밖을 누르면 드래그가 서지 않는다 — 태그만 남으
     f.dl.deinit(allocator);
     const bar = fx.term.rt.editor_scrollbar orelse return error.NoScrollbar;
 
-    // 막대의 **왼쪽 바깥**(본문 한가운데)을 누른다 — 거터 안이 아니다.
-    const outside_x: f64 = @as(f64, bar.hit_x) - 40;
+    // 막대의 **왼쪽 바깥**(본문 한가운데)을 누른다 — 거터 안도, **미니맵 안도** 아니다(§6.1 — 미니맵은 막대 왼쪽에
+    // 서고 그것도 「굴리는 컨트롤」이라 같은 자리에서 잡힌다; 그래서 미니맵의 왼쪽으로 더 나간다).
+    const mm_w: f64 = if (fx.term.rt.editor_minimap_rect) |mr| @floatFromInt(mr.w) else 0;
+    const outside_x: f64 = @as(f64, bar.hit_x) - 40 - mm_w;
     try testing.expect(!beginScrollbarGesture(fx.session, pane_ops.activePane(fx.session), outside_x, @floatCast(bar.thumb_y)));
     try testing.expect(!scrollbarCaptureActive(fx.session)); // 태그가 안 남았다
     try testing.expect(fx.session.editor_scrollbar_term == null); // 잡은 Term도 안 남았다
@@ -13979,8 +14215,10 @@ test "접혀도 gutter 폭은 문서 줄 수로 잡는다 — 번호는 원래 �
     defer drawn.dl.deinit(allocator);
 
     // 본문이 gutter 뒤에서 시작한다 — 폭이 **문서 줄 수**(6자리)로 잡혔는지 그 자리로 확인한다.
+    // 미니맵이 가져간 px(§6.1)는 chrome 의 그 함수로 뺀다 — 렌더·히트·보이는 열 수가 같은 함수를 지난다.
+    const inner_w_all = editorBodyRect(fx.session, fx.leaf_rect, fx.term).w -| chrome_editor.frame.content_inset_px * 2;
     const m = chrome_editor.diff_frame.sideMetrics(
-        editorBodyRect(fx.session, fx.leaf_rect, fx.term).w -| chrome_editor.frame.content_inset_px * 2,
+        inner_w_all -| chrome_editor.diff_frame.minimapPx(inner_w_all, @intCast(fx.session.cell_width_px), minimapCols(fx.session)),
         editorBodyRect(fx.session, fx.leaf_rect, fx.term).h -| chrome_editor.frame.content_inset_px * 2,
         @intCast(fx.session.cell_width_px),
         @intCast(fx.session.cell_height_px),

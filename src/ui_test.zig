@@ -43,6 +43,7 @@ const editor_gutter = @import("chrome/components/editor_view/gutter.zig");
 const editor_viewport = @import("chrome/components/editor_view/viewport.zig");
 const editor_scrollbar = @import("chrome/components/editor_view/scrollbar.zig");
 const editor_surface = @import("chrome/components/editor_view/surface.zig");
+const editor_minimap = @import("chrome/components/editor_view/minimap.zig");
 
 test {
     // `refAllDecls` is intentionally explicit: imports alone do not make this focused artifact's
@@ -77,4 +78,5 @@ test {
     testing.refAllDecls(editor_viewport);
     testing.refAllDecls(editor_scrollbar);
     testing.refAllDecls(editor_surface);
+    testing.refAllDecls(editor_minimap);
 }

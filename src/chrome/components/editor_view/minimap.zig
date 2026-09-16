@@ -1,0 +1,267 @@
+//! 미니맵(§6 · §6.1 N5a) — 문서의 «모양»을 본문 오른쪽 스트립에 색 블록 quad 로 그린다.
+//!
+//! **글리프를 안 그린다.** 줄 하나가 `line_px`(2px)라 글자가 설 수 없다 — 줄마다 공백 아닌 글자의
+//! **run** 을 quad 하나로 내고, 색은 그 run 첫 글자의 구문 역할이다(VS Code `scale = 1`: 글자 높이 2px·
+//! 폭 1px 그대로).
+//!
+//! **문서 크기와 무관하다.** 스트립은 `[top, top + strip_rows)` 만 그린다(비례 스크롤 — §6.1). 그래서
+//! 프레임 비용은 스트립 행 수에 비례하고, §3.0 이 미니맵을 축소 1 단으로 둔 전제(전 문서 스팬 요구)는
+//! 이 배치에서 사라졌다.
+//!
+//! 이 파일은 순수 컴포넌트다 — 세션·문서 모델을 모르고, 받은 줄 배열과 색 표만 읽는다.
+const std = @import("std");
+const draw = @import("../../draw.zig");
+const tokens = @import("../../tokens.zig");
+const content = @import("content.zig");
+
+/// 줄 하나의 높이(px). VS Code `minimap.scale = 1` 의 글자 높이.
+pub const line_px: u32 = 2;
+/// 글자 하나의 폭(px).
+pub const char_px: u32 = 1;
+/// 미니맵을 두고도 본문에 남아야 하는 최소 열 수. 이보다 좁아지면 미니맵이 **접힌다**(0 px) — 좁은 분할에서
+/// 본문보다 미니맵이 넓은 화면은 뜻이 없다(병합 세 열이 좁으면 Result 만 남는 규칙과 같은 자리).
+pub const min_content_cols: u32 = 40;
+/// 역할이 없는 run 의 알파(본문 전경을 옅게) — 구문 색이 없는 문서(`.txt`)도 모양은 보여야 한다.
+pub const plain_alpha: u8 = 0x60;
+/// 슬라이더(보이는 구간)의 알파. 선택 띠(`selection_alpha` 45%)보다 옅어야 그 아래 run 이 읽힌다.
+pub const slider_alpha: u8 = 0x38;
+
+/// 스트립의 폭(px). **한 자리에서 정한다** — 렌더·히트 기하·보이는 열 수·clamp 가 전부 이 값을 지나야
+/// 「그려진 것 = 클릭되는 것」이 구조로 지켜진다(§6.1).
+///
+/// `cols == 0`(설정으로 껐다)이면 0. 미니맵을 두면 본문이 `min_content_cols` 보다 좁아질 때도 0(접힘).
+pub fn widthPx(inner_w: u32, cell_w_px: u16, scrollbar_gutter_px: u32, minimap_cols: u16) u32 {
+    if (minimap_cols == 0 or cell_w_px == 0) return 0;
+    const want: u32 = @as(u32, minimap_cols) * cell_w_px;
+    const body_w = inner_w -| scrollbar_gutter_px;
+    if (body_w < want) return 0;
+    const content_cols = (body_w - want) / cell_w_px;
+    if (content_cols < min_content_cols) return 0;
+    return want;
+}
+
+/// 스트립의 첫 줄 — **비례 스크롤**(VS Code `minimap.size = proportional`). 문서가 스트립에 다 들어가면 0.
+/// `max_top_line` 은 본문 스크롤 상한(그 줄이 맨 위에 오면 마지막 화면) — 본문이 그 끝에 서면 스트립도 끝에 선다.
+pub fn topLine(first_line: usize, total_lines: usize, strip_rows: usize, max_top_line: usize) usize {
+    if (total_lines <= strip_rows or strip_rows == 0) return 0;
+    const span = total_lines - strip_rows; // 스트립이 갈 수 있는 거리
+    if (max_top_line == 0) return 0;
+    const f = @min(first_line, max_top_line);
+    // u128 로 곱한다 — 줄 수 × 줄 수는 u64 로도 넉넉하지만 뜻을 적어 둔다: 비례식이다.
+    const scaled: u128 = @as(u128, f) * @as(u128, span) / @as(u128, max_top_line);
+    return @intCast(@min(scaled, span));
+}
+
+/// 스트립이 담을 수 있는 줄 수.
+pub fn stripRows(height_px: u32) usize {
+    return height_px / line_px;
+}
+
+/// 스트립의 y(px) → 문서 줄. 스트립 밖이면 마지막/첫 줄로 묶는다.
+pub fn lineAtY(top: usize, rel_y_px: i64, total_lines: usize) usize {
+    if (total_lines == 0) return 0;
+    const row: usize = if (rel_y_px <= 0) 0 else @intCast(@as(u64, @intCast(rel_y_px)) / line_px);
+    return @min(top + row, total_lines - 1);
+}
+
+pub const Props = struct {
+    /// 스트립 사각(px). `w` 는 `widthPx` 의 값.
+    rect: draw.Rect,
+    /// 문서 전체 줄. 스트립은 `[top, top + rows)` 만 읽는다.
+    lines: []const []const u8,
+    /// 스트립 창의 색 — **`top` 기준 상대 첨자**(`window_colors[i]` 는 `lines[top + i]` 의 것). 짧은 배열을
+    /// 허용한다(없는 줄은 무색 run).
+    window_colors: []const []const content.ColorSpan = &.{},
+    /// 스트립 첫 줄(`topLine`).
+    top: usize,
+    /// 슬라이더 — 본문이 보고 있는 구간 `[first, first + len)`.
+    slider_first: usize,
+    slider_len: usize,
+    tab_width: u8,
+};
+
+pub const Written = struct { ops: usize, truncated: bool };
+
+/// 스트립을 그린다. 반환 = 쓴 op 수. 저장소가 모자라면 거기서 멈춘다(잘릴 뿐 죽지 않는다 — 이 컴포넌트 계열의 규율).
+pub fn build(props: Props, out: []draw.Op) Written {
+    var n: usize = 0;
+    if (props.rect.w == 0 or props.rect.h == 0) return .{ .ops = 0, .truncated = false };
+    const rows = stripRows(props.rect.h);
+    const max_cols: u32 = props.rect.w / char_px;
+    var truncated = false;
+
+    var i: usize = 0;
+    outer: while (i < rows and props.top + i < props.lines.len) : (i += 1) {
+        const line = props.lines[props.top + i];
+        const colors: []const content.ColorSpan = if (i < props.window_colors.len) props.window_colors[i] else &.{};
+        const y = props.rect.y + @as(i32, @intCast(i * line_px));
+        var byte: usize = 0;
+        var col: u32 = 0;
+        var run_start: ?u32 = null;
+        var run_role: ?tokens.ColorRole = null;
+        while (byte < line.len and col < max_cols) {
+            const step = content.stepColumn(line, byte, col, props.tab_width);
+            const blank = line[byte] == ' ' or line[byte] == '\t' or line[byte] == '\r';
+            if (!blank and run_start == null) {
+                run_start = col;
+                run_role = roleAt(colors, col);
+            } else if (blank and run_start != null) {
+                if (n >= out.len) {
+                    truncated = true;
+                    break :outer;
+                }
+                out[n] = runQuad(props.rect.x, y, run_start.?, col, max_cols, run_role);
+                n += 1;
+                run_start = null;
+            }
+            byte = step.next_byte;
+            col = step.next_col;
+        }
+        if (run_start) |s| {
+            if (n >= out.len) {
+                truncated = true;
+                break;
+            }
+            out[n] = runQuad(props.rect.x, y, s, @min(col, max_cols), max_cols, run_role);
+            n += 1;
+        }
+    }
+
+    // 슬라이더 — 스트립 안의 보이는 구간. 스트립 밖(비례 스크롤로 밀린 구간)은 잘라 그린다.
+    if (props.slider_len > 0 and n < out.len) {
+        const first = props.slider_first;
+        const last = first + props.slider_len; // 반열림
+        const win_first = props.top;
+        const win_last = props.top + rows;
+        const a = @max(first, win_first);
+        const b = @min(last, win_last);
+        if (b > a) {
+            out[n] = .{ .quad = .{
+                .rect = .{
+                    .x = props.rect.x,
+                    .y = props.rect.y + @as(i32, @intCast((a - props.top) * line_px)),
+                    .w = props.rect.w,
+                    .h = @intCast((b - a) * line_px),
+                },
+                .fill_role = .selection,
+                .alpha = slider_alpha,
+            } };
+            n += 1;
+        }
+    } else if (props.slider_len > 0) truncated = true;
+    return .{ .ops = n, .truncated = truncated };
+}
+
+fn roleAt(colors: []const content.ColorSpan, col: u32) ?tokens.ColorRole {
+    // 스팬은 오름차순이고 겹치지 않는다(`content.Row.colors` 의 계약) — 첫 글자가 든 스팬 하나만 찾는다.
+    for (colors) |sp| {
+        if (col < sp.start_col) return null;
+        if (col < sp.end_col) return sp.role;
+    }
+    return null;
+}
+
+fn runQuad(x0: i32, y: i32, from: u32, to: u32, max_cols: u32, role: ?tokens.ColorRole) draw.Op {
+    const end = @min(to, max_cols);
+    return .{ .quad = .{
+        .rect = .{ .x = x0 + @as(i32, @intCast(from * char_px)), .y = y, .w = (end - from) * char_px, .h = line_px },
+        .fill_role = role orelse .surface_fg,
+        .alpha = if (role != null) 0xFF else plain_alpha,
+    } };
+}
+
+// ── 판정자 ──────────────────────────────────────────────────────────────────────
+
+const testing = std.testing;
+
+test "MM1 공백 아닌 run 마다 quad 하나 — 자리·폭·줄 높이" {
+    var ops: [16]draw.Op = undefined;
+    const lines = [_][]const u8{ "ab  cd", "", "   x" };
+    const w = build(.{ .rect = .{ .x = 100, .y = 10, .w = 40, .h = 8 }, .lines = &lines, .top = 0, .slider_first = 0, .slider_len = 0, .tab_width = 4 }, &ops);
+    try testing.expectEqual(@as(usize, 3), w.ops);
+    try testing.expect(!w.truncated);
+    // "ab" → x 100, w 2 · "cd" → x 104, w 2 · 셋째 줄 "x" → x 103, y 10 + 2·2
+    try testing.expectEqual(@as(i32, 100), ops[0].quad.rect.x);
+    try testing.expectEqual(@as(u32, 2), ops[0].quad.rect.w);
+    try testing.expectEqual(@as(u32, line_px), ops[0].quad.rect.h);
+    try testing.expectEqual(@as(i32, 104), ops[1].quad.rect.x);
+    try testing.expectEqual(@as(i32, 103), ops[2].quad.rect.x);
+    try testing.expectEqual(@as(i32, 14), ops[2].quad.rect.y);
+    // 역할이 없으면 본문 전경을 옅게
+    try testing.expectEqual(tokens.ColorRole.surface_fg, ops[0].quad.fill_role);
+    try testing.expectEqual(plain_alpha, ops[0].quad.alpha);
+}
+
+test "MM2 run 의 색은 첫 글자의 구문 역할 — 스팬 밖 run 은 무색, 탭은 탭 폭으로 전개" {
+    var ops: [16]draw.Op = undefined;
+    const lines = [_][]const u8{"\tconst x = 1;"};
+    // `const` 가 4..9 열(탭 폭 4) — 키워드.
+    const spans = [_]content.ColorSpan{.{ .start_col = 4, .end_col = 9, .role = .syntax_keyword }};
+    const colors = [_][]const content.ColorSpan{&spans};
+    const w = build(.{ .rect = .{ .x = 0, .y = 0, .w = 40, .h = 4 }, .lines = &lines, .window_colors = &colors, .top = 0, .slider_first = 0, .slider_len = 0, .tab_width = 4 }, &ops);
+    // "const" · "x" · "=" · "1;" → 4 run
+    try testing.expectEqual(@as(usize, 4), w.ops);
+    try testing.expectEqual(@as(i32, 4), ops[0].quad.rect.x); // 탭이 4 열을 먹었다
+    try testing.expectEqual(tokens.ColorRole.syntax_keyword, ops[0].quad.fill_role);
+    try testing.expectEqual(@as(u8, 0xFF), ops[0].quad.alpha);
+    try testing.expectEqual(tokens.ColorRole.surface_fg, ops[1].quad.fill_role);
+}
+
+test "MM3 스트립 폭을 넘는 글자는 잘리고, 스트립 행 수를 넘는 줄은 안 그린다" {
+    var ops: [16]draw.Op = undefined;
+    const long = "x" ** 60;
+    const lines = [_][]const u8{ long, "a", "b", "c" };
+    // 폭 10px = 10 글자, 높이 4px = 2 줄
+    const w = build(.{ .rect = .{ .x = 0, .y = 0, .w = 10, .h = 4 }, .lines = &lines, .top = 0, .slider_first = 0, .slider_len = 0, .tab_width = 4 }, &ops);
+    try testing.expectEqual(@as(usize, 2), w.ops);
+    try testing.expectEqual(@as(u32, 10), ops[0].quad.rect.w);
+}
+
+test "MM4 슬라이더는 보이는 구간을 스트립 창 안에서 잘라 그린다 — 창 밖은 없다" {
+    var ops: [16]draw.Op = undefined;
+    const lines = [_][]const u8{ "a", "b", "c", "d", "e", "f" };
+    // 창 = [2, 5) (top 2, 높이 6px = 3 줄). 보이는 구간 [0, 4) → 겹침 [2, 4) → y 0, h 4.
+    const w = build(.{ .rect = .{ .x = 0, .y = 0, .w = 8, .h = 6 }, .lines = &lines, .top = 2, .slider_first = 0, .slider_len = 4, .tab_width = 4 }, &ops);
+    try testing.expectEqual(@as(usize, 4), w.ops); // run 3 + 슬라이더 1
+    const s = ops[3].quad;
+    try testing.expectEqual(tokens.ColorRole.selection, s.fill_role);
+    try testing.expectEqual(@as(i32, 0), s.rect.y);
+    try testing.expectEqual(@as(u32, 4), s.rect.h);
+    try testing.expectEqual(@as(u32, 8), s.rect.w);
+    // 구간이 창 밖이면 슬라이더가 없다
+    const w2 = build(.{ .rect = .{ .x = 0, .y = 0, .w = 8, .h = 6 }, .lines = &lines, .top = 2, .slider_first = 5, .slider_len = 1, .tab_width = 4 }, &ops);
+    try testing.expectEqual(@as(usize, 3), w2.ops);
+}
+
+test "MM5 비례 스크롤 — 본문이 상한에 서면 스트립도 끝에 서고, 다 들어가면 0" {
+    try testing.expectEqual(@as(usize, 0), topLine(50, 100, 200, 60)); // 다 들어간다
+    try testing.expectEqual(@as(usize, 0), topLine(0, 1000, 200, 960));
+    try testing.expectEqual(@as(usize, 800), topLine(960, 1000, 200, 960)); // 끝 = lines − rows
+    try testing.expectEqual(@as(usize, 400), topLine(480, 1000, 200, 960)); // 가운데는 가운데
+    try testing.expectEqual(@as(usize, 800), topLine(5000, 1000, 200, 960)); // 상한 너머는 끝
+    try testing.expectEqual(@as(usize, 0), topLine(10, 1000, 200, 0)); // 상한 0 이면 0
+}
+
+test "MM6 폭 — 설정 0 이면 0, 본문이 최소 열보다 좁아지면 접힌다, 아니면 셀 × 열" {
+    try testing.expectEqual(@as(u32, 0), widthPx(1000, 8, 16, 0));
+    try testing.expectEqual(@as(u32, 120), widthPx(1000, 8, 16, 15)); // (1000−16−120)/8 = 108 열 남는다
+    try testing.expectEqual(@as(u32, 0), widthPx(400, 8, 16, 15)); // (400−16−120)/8 = 33 < 40 → 접힘
+    try testing.expectEqual(@as(u32, 120), widthPx(456, 8, 16, 15)); // (456−16−120)/8 = 40 → 딱 경계는 선다
+    try testing.expectEqual(@as(u32, 0), widthPx(100, 8, 16, 15)); // 폭 자체가 모자란다
+}
+
+test "MM7 y → 줄: 창 첫 줄 + 행, 밖은 묶는다" {
+    try testing.expectEqual(@as(usize, 10), lineAtY(10, 0, 100));
+    try testing.expectEqual(@as(usize, 13), lineAtY(10, 7, 100)); // 7px / 2 = 3
+    try testing.expectEqual(@as(usize, 10), lineAtY(10, -5, 100));
+    try testing.expectEqual(@as(usize, 99), lineAtY(10, 100_000, 100));
+    try testing.expectEqual(@as(usize, 0), lineAtY(10, 4, 0));
+}
+
+test "MM8 저장소가 모자라면 잘리되 죽지 않는다" {
+    var ops: [2]draw.Op = undefined;
+    const lines = [_][]const u8{ "a b c", "d" };
+    const w = build(.{ .rect = .{ .x = 0, .y = 0, .w = 8, .h = 4 }, .lines = &lines, .top = 0, .slider_first = 0, .slider_len = 2, .tab_width = 4 }, &ops);
+    try testing.expectEqual(@as(usize, 2), w.ops);
+    try testing.expect(w.truncated);
+}

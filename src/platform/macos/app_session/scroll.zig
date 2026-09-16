@@ -170,6 +170,8 @@ pub fn applyPendingScrollbarScroll(self: *AppSession) void {
         // `orelse return`), 가로 드래그 중에는 그 Drag가 비활성이라 거기서 빠진다. 가로는 자기 Drag를
         // 쓰는 `applyPendingEditorHScroll`이 소비한다. `switch`가 모든 태그를 요구해 자리만 둔다.
         .editor_horizontal => {},
+        // **미니맵도 여기 못 온다** — 자기 Drag 가 없고 좌표를 바로 줄로 옮긴다(`editor_ops.minimapScrollTo`).
+        .editor_minimap => {},
         .dock_list, .none => dock_ops.setDockListScrollOffsetPx(self, offset_px),
     }
 }

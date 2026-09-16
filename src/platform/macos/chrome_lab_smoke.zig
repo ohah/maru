@@ -31,7 +31,7 @@ const viewport = chrome.ui.layout.UiSize{ .width = 480, .height = 720 };
 /// 맞추는 대신 캡처를 넓힌다. 접히는 쪽은 `editor-merge-narrow` 가 기본 폭으로 따로 찍는다.
 fn viewportFor(id: lab.ScenarioId) chrome.ui.layout.UiSize {
     return switch (id) {
-        .editor_merge_panes, .editor_merge_scrolled, .editor_merge_hscrolled, .editor_merge_caret => .{ .width = 1200, .height = 720 },
+        .editor_merge_panes, .editor_merge_scrolled, .editor_merge_hscrolled, .editor_merge_caret, .editor_minimap => .{ .width = 1200, .height = 720 },
         // 모서리 gap 은 **넓은 창에서 어떤 비율로 읽히는가**가 질문의 절반이다(`ScenarioId` 주석 ⑵).
         // 기본 480px 에서는 한 셀이 폭의 1.7% 라 과장돼 보인다 — 여기만 제품에 가까운 폭으로 넓힌다.
         .context_menu_bottom_right => .{ .width = 1200, .height = 720 },
@@ -106,6 +106,7 @@ fn labQuadLayer(id: lab.ScenarioId) u32 {
         .editor_wrap_stale_scroll,
         .editor_real_file,
         .editor_typescript,
+        .editor_minimap,
         .editor_selection,
         .editor_find,
         .editor_caret_bar,
@@ -400,7 +401,7 @@ pub fn main(init: std.process.Init) !void {
     defer if (real_file_opened) |*o| o.deinit(allocator);
     var real_file_lines: ?[][]const u8 = null;
     defer if (real_file_lines) |l| allocator.free(l);
-    if (scenario_id == .editor_real_file or scenario_id == .editor_typescript) {
+    if (scenario_id == .editor_real_file or scenario_id == .editor_typescript or scenario_id == .editor_minimap) {
         // **Lab 에서는 확장자가 grammar 를 안 정한다.** 색 언어는 `lab.zig` 의 장면 switch 가 고른다 —
         // Lab 계약이 "deterministic, effect-free" 라 파일 이름에 따라 캡처가 달라지면 안 되기 때문이다.
         // 확장자를 `.ts` 로 두는 것은 **제품과 같은 모양을 보이기 위해서**일 뿐이다.
@@ -408,7 +409,7 @@ pub fn main(init: std.process.Init) !void {
         // 적대적 검증 5회차가 이것을 잡았다: 확장자를 `.src` 로 바꾸는 뮤턴트가 **살아남았고**, 그때
         // 여기 적혀 있던 *"확장자가 grammar 를 정한다"* 가 틀린 문장임이 드러났다. 제품 경로에서는
         // 맞는 말이고(`grammarForPath` — `LANG10` 이 지킨다) Lab 에서만 아니다.
-        const ts = scenario_id == .editor_typescript;
+        const ts = scenario_id == .editor_typescript or scenario_id == .editor_minimap;
         const src_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ artifact_dir, if (ts) "editor-typescript.src.ts" else "editor-real-file.src" });
         defer allocator.free(src_path);
         try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = src_path, .data = if (ts) typescript_fixture else real_file_fixture });
@@ -769,7 +770,7 @@ pub fn main(init: std.process.Init) !void {
         const rect = (switch (scenario_id) {
             .scm_rows, .scm_history, .scm_row_hover, .scm_conflict_hover, .scm_conflict_resolved_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_small_font, .scm_blocker, .dock_over_status_bar => chrome.components.scm_dock.build.scrollTextViewport(frame.tree),
             .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome => chrome.components.file_tree.build.scrollTextViewport(frame.tree),
-            .empty, .loading, .retained_list, .font_specimen, .partial_scroll, .partial_group_scroll, .scrollbar, .sticky_at_rest, .sticky_pinned, .sticky_pushed, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .sort_toggle_hover, .sort_toggle_pressed, .sidebar_status_strip, .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .context_menu_checked, .context_menu_send, .context_menu_send_helper, .context_menu_unchecked, .context_menu_bottom_right, .dropdown_open, .dropdown_bottom_clamp, .editor_real_file, .editor_typescript, .editor_selection, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_find, .editor_diff_selection, .editor_diff, .editor_diff_scrolled, .editor_merge_panes, .editor_merge_narrow, .editor_merge_scrolled, .editor_merge_hscrolled, .editor_merge_caret => chrome.components.session_dock.build.scrollTextViewport(frame.tree),
+            .empty, .loading, .retained_list, .font_specimen, .partial_scroll, .partial_group_scroll, .scrollbar, .sticky_at_rest, .sticky_pinned, .sticky_pushed, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .sort_toggle_hover, .sort_toggle_pressed, .sidebar_status_strip, .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .context_menu_checked, .context_menu_send, .context_menu_send_helper, .context_menu_unchecked, .context_menu_bottom_right, .dropdown_open, .dropdown_bottom_clamp, .editor_real_file, .editor_typescript, .editor_minimap, .editor_selection, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_find, .editor_diff_selection, .editor_diff, .editor_diff_scrolled, .editor_merge_panes, .editor_merge_narrow, .editor_merge_scrolled, .editor_merge_hscrolled, .editor_merge_caret => chrome.components.session_dock.build.scrollTextViewport(frame.tree),
         }) orelse break :blk null;
         break :blk .{
             .x = @intFromFloat(@max(rect.x, 0)),
@@ -1015,6 +1016,7 @@ fn scenarioFromEnvValue(raw: []const u8) ?lab.ScenarioId {
     if (std.mem.eql(u8, raw, "editor-wrap-stale-scroll")) return .editor_wrap_stale_scroll;
     if (std.mem.eql(u8, raw, "editor-real-file")) return .editor_real_file;
     if (std.mem.eql(u8, raw, "editor-typescript")) return .editor_typescript;
+    if (std.mem.eql(u8, raw, "editor-minimap")) return .editor_minimap;
     if (std.mem.eql(u8, raw, "editor-selection")) return .editor_selection;
     if (std.mem.eql(u8, raw, "editor-caret-bar")) return .editor_caret_bar;
     if (std.mem.eql(u8, raw, "editor-caret-block")) return .editor_caret_block;
@@ -1110,6 +1112,7 @@ fn artifactName(id: lab.ScenarioId) []const u8 {
         .editor_wrap_stale_scroll => "editor-wrap-stale-scroll",
         .editor_real_file => "editor-real-file",
         .editor_typescript => "editor-typescript",
+        .editor_minimap => "editor-minimap",
         .editor_selection => "editor-selection",
         .editor_caret_bar => "editor-caret-bar",
         .editor_caret_block => "editor-caret-block",

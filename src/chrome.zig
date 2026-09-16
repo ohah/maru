@@ -81,6 +81,7 @@ pub const components = struct {
         /// 그 디렉터리가 "편집기 뷰 것"이라고 하는 선언이 거짓이 된다. 이 별칭은 기존 호출부를 위해 남긴다.
         pub const visual_map = ui.visual_map;
         pub const scrollbar = @import("chrome/components/editor_view/scrollbar.zig");
+        pub const minimap = @import("chrome/components/editor_view/minimap.zig"); // 문서의 «모양» 스트립(§6.1 N5a) — 색 블록 quad
         pub const surface = @import("chrome/components/editor_view/surface.zig");
         pub const frame = @import("chrome/components/editor_view/frame.zig"); // 위 넷의 조립 — Lab과 제품이 같은 순서·저장소 규칙을 쓴다
         pub const diff_frame = @import("chrome/components/editor_view/diff_frame.zig"); // 나란한 비교 — `frame`을 두 번 부르는 조합(§7)

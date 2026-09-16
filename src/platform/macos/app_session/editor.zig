@@ -10924,6 +10924,33 @@ test "MMP1 미니맵 — 본문 오른쪽·막대 왼쪽에 서고, 본문 열�
     fx.session.mouse(3, cx, cy + 40.0, 0, 0);
     try testing.expect(!scrollbarCaptureActive(fx.session));
     try testing.expect(fx.session.editor_scrollbar_term == null);
+    // 슬라이더가 **따라간다** — 다음 프레임에 보이는 구간의 y 가 `(first_line − top) × 2px` 다(늘 맨 위에 그리는 변이).
+    {
+        fx.session.gpu_quads.clearRetainingCapacity();
+        var ds = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+        defer ds.dl.deinit(allocator);
+        const want_y: f32 = @floatFromInt(mr.y + (term.rt.editor_first_line - term.rt.editor_minimap_top) * chrome_editor.minimap.line_px);
+        var moved = false;
+        for (fx.session.gpu_quads.items) |q| {
+            if (q.x == @as(f32, @floatFromInt(mr.x)) and q.w == @as(f32, @floatFromInt(mr.w)) and q.h == @as(f32, @floatFromInt(visible * chrome_editor.minimap.line_px)) and q.y == want_y) moved = true;
+        }
+        try testing.expect(moved);
+    }
+
+    // ⑶ʹ **휠은 본문과 같다** — 스트립 위에서 세로 휠을 굴리면 본문이 굴러간다(스트립도 그 pane 이다).
+    {
+        const fl0 = term.rt.editor_first_line;
+        fx.session.scrollWheel(-5, 0, false, cx, cy);
+        try testing.expect(term.rt.editor_first_line != fl0);
+    }
+    // ⑶ʹʹ **폭은 설정을 따른다** — 10 셀로 바꾸면 스트립이 10 셀이다(15 를 박는 변이).
+    {
+        fx.session.loaded_config.config.editor.minimap_width = 10;
+        var dw = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+        defer dw.dl.deinit(allocator);
+        try testing.expectEqual(@as(u32, 10) * cw, term.rt.editor_minimap_rect.?.w);
+        fx.session.loaded_config.config.editor.minimap_width = 15;
+    }
 
     // ⑷ **비례 스크롤** — 본문을 끝까지 내리면 스트립도 끝(`lines − rows`)에 선다.
     term.rt.editor_first_line = 1_000_000; // clamp 가 상한으로 되돌린다
@@ -10946,11 +10973,23 @@ test "MMP1 미니맵 — 본문 오른쪽·막대 왼쪽에 서고, 본문 열�
     fx.session.mouse(3, cx, cy, 0, 0);
     fx.session.loaded_config.config.editor.minimap = true;
 
-    // ⑹ **좁으면 접힌다** — 본문이 40 열보다 좁아지는 pane 에서는 사각이 없다(chrome 의 규칙을 제품이 지난다).
-    const narrow: maru.session.SplitRect = .{ .x = leaf.x, .y = leaf.y, .w = 40 * cw + 15 * cw, .h = leaf.h };
-    var d4 = appendPaneFrame(fx.session, narrow, term) orelse return error.EditorPaneDidNotDraw;
-    defer d4.dl.deinit(allocator);
-    try testing.expect(term.rt.editor_minimap_rect == null);
+    // ⑹ **좁으면 접힌다** — 본문이 40 열보다 좁아지는 pane 에서는 사각이 없다(chrome 의 규칙을 제품이 지난다). 문턱을 **양쪽에서**
+    //    잰다: 막대 gutter(12px)까지 뺀 폭이 40 열이 되는 자리 — gutter 를 안 빼는 변이(11회차 K3)는 12px 좁은 pane 에서도 선다.
+    //    안쪽 폭 = 본문 폭 − 여백 8. 본문 열 = (안쪽 − gutter − 15×8) / 8 ≥ 40 ⇔ 안쪽 ≥ 452 (gutter 를 빼지 않으면 440).
+    {
+        const gutter = chrome_editor.diff_frame.scrollbar_metrics.gutterPx();
+        try testing.expectEqual(@as(u32, 12), gutter); // 전제(아래 수치의 근거)
+        try testing.expectEqual(@as(u32, 8), cw);
+        const pane_extra = leaf.w - body.w; // pane 폭과 본문 폭의 차(경계·구분선)
+        const just_under: maru.session.SplitRect = .{ .x = leaf.x, .y = leaf.y, .w = 451 + inset * 2 + pane_extra, .h = leaf.h };
+        var d4 = appendPaneFrame(fx.session, just_under, term) orelse return error.EditorPaneDidNotDraw;
+        defer d4.dl.deinit(allocator);
+        try testing.expect(term.rt.editor_minimap_rect == null);
+        const just_over: maru.session.SplitRect = .{ .x = leaf.x, .y = leaf.y, .w = 452 + inset * 2 + pane_extra, .h = leaf.h };
+        var d4b = appendPaneFrame(fx.session, just_over, term) orelse return error.EditorPaneDidNotDraw;
+        defer d4b.dl.deinit(allocator);
+        try testing.expect(term.rt.editor_minimap_rect != null);
+    }
 
     // ⑺ **미니맵의 색은 미니맵 창의 것이다 — 본문 창과 저장소를 나눠 쓰지 않는다**(3회차 C1: 같은 저장소를 쓰는 변이가
     //    살았다 — 픽스처의 줄이 다 같은 모양이라). 앞 200 줄은 주석, 뒤 200 줄은 코드인 문서에서 본문을 200 줄로 내리면
@@ -11009,12 +11048,20 @@ test "MMP1 미니맵 — 본문 오른쪽·막대 왼쪽에 서고, 본문 열�
     // 주석 한 색, 바로 아래 30 행은 코드 색이어야 한다. 표를 절대 줄로 색인한 채 넘기면 색이 `top` 행만큼 밀려 경계 아래
     // 30 행이 주석 색이 된다(6회차 — 실제 결함이었다; 창 안이 균질한 픽스처에서는 안 보였다).
     const boundary_row: f32 = @floatFromInt(200 - term2.rt.editor_minimap_top);
+    // 창의 **끝 20 행**도 색이 있어야 한다 — 색을 창의 첫 줄이 아니라 0 줄부터 물어 앞으로 자르면 끝 `top` 행이 무색이 된다
+    // (13회차 M7: 경계만 재서는 안 보였다).
+    const tail_from: f32 = @floatFromInt(term2.rt.editor_minimap_rows -| 20);
+    var colors_tail = std.AutoHashMap(u32, void).init(allocator);
+    defer colors_tail.deinit();
     for (fx.session.gpu_quads.items) |q| {
         if (q.x < strip_x or q.x + q.w > strip_x + strip_w + 0.01 or q.h != 2.0) continue; // run 만(슬라이더는 높이가 다르다)
         run_quads += 1;
         const row: f32 = (q.y - y0) / 2.0;
         if (row >= boundary_row - 30 and row < boundary_row) try colors_top.put(q.fill_color0, {}) else if (row >= boundary_row and row < boundary_row + 30) try colors_bottom.put(q.fill_color0, {});
+        if (row >= tail_from) try colors_tail.put(q.fill_color0, {});
     }
+    try testing.expect(term2.rt.editor_minimap_top + term2.rt.editor_minimap_rows <= 400); // 전제: 창 끝이 문서 안(코드 줄)
+    try testing.expect(colors_tail.count() >= 2);
     // 줄마다 run 이 적어도 하나다 — 저장소를 나눠 쓰는 변이는 색 표가 깨져 run 이 거의 안 나왔고(13 개) 그 몇 개로는 위
     // 색 판정이 우연히 통과했다(5회차 E1). 수로 잡는다.
     try testing.expect(run_quads >= term2.rt.editor_minimap_rows);

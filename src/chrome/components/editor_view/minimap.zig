@@ -46,6 +46,8 @@ pub fn topLine(first_line: usize, total_lines: usize, strip_rows: usize, max_top
     if (total_lines <= strip_rows or strip_rows == 0) return 0;
     const span = total_lines - strip_rows; // 스트립이 갈 수 있는 거리
     if (max_top_line == 0) return 0;
+    // `first_line` 의 clamp 는 **등가**다(적대적 10·15회차 J2): 상한을 넘는 first_line 도 마지막 `@min(scaled, span)` 이
+    // 잡는다. 남겨 두는 이유는 뜻 — 비례의 분자는 「상한 안의 위치」다.
     const f = @min(first_line, max_top_line);
     // u128 로 곱한다 — 줄 수 × 줄 수는 u64 로도 넉넉하지만 뜻을 적어 둔다: 비례식이다.
     const scaled: u128 = @as(u128, f) * @as(u128, span) / @as(u128, max_top_line);
@@ -269,6 +271,15 @@ test "MM7 y → 줄: 창 첫 줄 + 행, 밖은 묶는다" {
     try testing.expectEqual(@as(usize, 10), lineAtY(10, -5, 100));
     try testing.expectEqual(@as(usize, 99), lineAtY(10, 100_000, 100));
     try testing.expectEqual(@as(usize, 0), lineAtY(10, 4, 0));
+}
+
+test "MM9 두 칸 글자(CJK)는 두 열을 먹는다 — run 폭은 byte 가 아니라 열이다" {
+    var ops: [8]draw.Op = undefined;
+    const lines = [_][]const u8{"가나 x"}; // 가·나 = 2 열씩 → run 4 열, 그다음 x 는 5 열
+    const w = build(.{ .rect = .{ .x = 0, .y = 0, .w = 40, .h = 2 }, .lines = &lines, .top = 0, .slider_first = 0, .slider_len = 0, .tab_width = 4 }, &ops);
+    try testing.expectEqual(@as(usize, 2), w.ops);
+    try testing.expectEqual(@as(u32, 4), ops[0].quad.rect.w);
+    try testing.expectEqual(@as(i32, 5), ops[1].quad.rect.x);
 }
 
 test "MM8 저장소가 모자라면 잘리되 죽지 않는다" {

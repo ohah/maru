@@ -1450,6 +1450,34 @@ test "editor.wrap은 설정 UI에 뜬다 — 값이 렌더에 닿는다" {
     try std.testing.expectEqual(false, (theme.EditorConfig{}).wrap);
 }
 
+test "editor.minimap·minimap-width 는 설정 UI에 뜬다 — 토글과 숫자, 기본은 켬·15 (§6.1)" {
+    // 미니맵은 값이 렌더에 닿는 채로 들어왔다(`minimapCols` → `diff_frame.minimapPx`). 가릴 이유가 없고, 사용자가 끄거나
+    // 폭을 바꾸는 유일한 자리가 이 두 키다 — 설정 화면에서 빠지면 config 파일을 손으로 고쳐야 한다.
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var bools: std.ArrayList(BoolField) = .empty;
+    try appendBoolFields(arena, .{}, &bools);
+    var seen_toggle = false;
+    for (bools.items) |f| {
+        if (std.mem.eql(u8, f.key, "editor.minimap")) seen_toggle = true;
+    }
+    try std.testing.expect(seen_toggle);
+    var nums: std.ArrayList(NumberField) = .empty;
+    try appendNumberFields(arena, .{}, &nums);
+    var seen_width = false;
+    for (nums.items) |f| {
+        if (std.mem.eql(u8, f.key, "editor.minimap-width")) {
+            seen_width = true;
+            try std.testing.expectEqual(@as(f64, 15), f.value);
+            try std.testing.expectEqual(@as(f64, 4), f.min);
+            try std.testing.expectEqual(@as(f64, 60), f.max);
+        }
+    }
+    try std.testing.expect(seen_width);
+    try std.testing.expectEqual(true, (theme.EditorConfig{}).minimap);
+}
+
 // 모든 GUI 필드가 **라벨을 갖는지** 본다.
 //
 // `Meta.doc` 이 `?Key` 라 빠뜨리면 `null` 이 되고, 그때 세팅 화면은 라벨 자리에 빈 문자열을 그린다 —

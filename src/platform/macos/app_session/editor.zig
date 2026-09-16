@@ -11970,14 +11970,19 @@ test "파일 열기가 어디서 할당에 실패해도 새지 않는다 — ini
     // (실측: 할당 15 개인데 열기 실패는 12 번이었다). 폭을 지키는 것은 **앞엣것**이다.
     var induced_steps: usize = 0;
     var step: usize = 0;
-    // **폭은 탐침이 센 수로 시작하되, 주입이 실제로 안 일어난 스텝을 만날 때까지 간다.** 탐침 세션과 걷는 세션은
-    // 같은 프로세스의 다른 순간이라 열기의 할당 수가 **한 개 어긋날 수 있다** — 2026-09-15 CI(4 샤드 동시, 3 vCPU)에서
-    // 「할당 15 · 주입 16 · 실패 12 · 성공 4」로 한 번 빨갰다: 마지막 스텝(16 번째 할당)이 견디는 할당 하나를 더 만났다.
-    // 실측(2026-09-16)으로는 재현되지 않았다 — 고립 30 회 연속 15, 8 프로세스 × 25 회, 전체 바이너리 6 × 2, CI 와 같은
-    // 4 샤드 실행까지 전부 15 였다. 그래서 등호 대신 **「주입이 안 일어난 스텝에서 끝난다」** 를 종료 조건으로 두고
-    // (그 스텝이 곧 그 실행의 할당을 **전부** 한 번씩 실패시켰다는 증거다 — 공허해지지 않는다), 탐침보다 많이 걸으면
-    // 그 자리의 스택을 찍어 다음에 무엇이었는지 남긴다. 상한(탐침의 4 배)은 무한 루프 방어다.
+    // **폭은 탐침이 센 수를 «적어도» 걷고, 그 뒤로는 주입이 안 일어난 스텝을 만날 때까지 간다.** 탐침 세션과 걷는 세션은
+    // 같은 프로세스의 다른 순간이라 열기의 할당 수가 **양쪽으로** 어긋날 수 있다 — CI(4 샤드 동시, 3 vCPU)에서 두 번:
+    // 2026-09-15 「할당 15 · 주입 16」(마지막 스텝이 견디는 할당 하나를 더 만났다), 2026-09-16 「주입 < 15」(어느 스텝이
+    // 탐침보다 일찍 주입 없이 끝났다). 실측으로는 재현되지 않았다 — 고립 30 회 연속 15, 8 프로세스 × 25 회, 전체 바이너리
+    // 6 × 2, CI 와 같은 4 샤드 실행까지 전부 15. 판정의 뜻은 「어느 할당이 실패해도 새지 않는다」이고 그것은 스텝마다
+    // `DebugAllocator` 가 잰다 — 할당 수의 등식은 그 뜻이 아니라 **공허함을 막는 장치**였다. 그래서 등식 대신:
+    //   · 탐침 수만큼은 반드시 걷는다(짧은 실행이 걸음을 일찍 끊지 않게), 그 뒤엔 주입 없는 스텝에서 끝난다.
+    //   · 공허함은 `failed_steps ≥ 1`·`ok_steps ≥ 1` 이 막는다(한 번도 못 열리거나, 한 번도 실패 안 하면 빨강).
+    //   · 어긋나면 **스텝 장부**(할당 수·주입·결과)와 첫 초과 자리의 스택을 찍는다 — 다음 흔들림이 스스로 설명하게.
+    // 상한(탐침의 4 배)은 무한 루프 방어다.
     const walk_cap = @max(open_allocations * 4, 16);
+    const Ledger = struct { allocs: usize, induced: bool, ok: bool, err: ?anyerror };
+    var ledger: [128]Ledger = undefined;
     var extra_trace: ?std.testing.FailingAllocator = null;
     while (true) : (step += 1) {
         if (step > walk_cap) {
@@ -11999,28 +12004,35 @@ test "파일 열기가 어디서 할당에 실패해도 새지 않는다 — ini
         defer session.deinit(); // 누수·이중 해제는 backing(=testing.allocator)이 잡는다
 
         // **여기서부터** 실패시킨다 — init이 쓴 할당은 건드리지 않는다.
-        failing.fail_index = failing.allocations + step;
-        const opened = openPathInActivePane(session, path) catch null;
+        const init_allocs = failing.allocations;
+        failing.fail_index = init_allocs + step;
+        var open_err: ?anyerror = null;
+        const opened = openPathInActivePane(session, path) catch |e| blk: {
+            open_err = e;
+            break :blk null;
+        };
         if (opened) |term| {
             // 성공했으면 세션 해체가 그 Term을 정리한다(그 경로도 함께 확인된다).
             try testing.expect(term.rt.editor_path != null);
             ok_steps += 1;
         } else failed_steps += 1;
-        if (!failing.has_induced_failure) break; // 겨냥할 할당이 없었다 — 이 실행의 할당은 전부 한 번씩 실패했다
-        induced_steps += 1;
-        // 탐침보다 더 걸었다 — 그 자리를 남긴다(다음 CI 흔들림이 스스로 설명하게).
-        if (step >= open_allocations and extra_trace == null) extra_trace = failing;
+        if (step < ledger.len) ledger[step] = .{ .allocs = failing.allocations - init_allocs, .induced = failing.has_induced_failure, .ok = opened != null, .err = open_err };
+        if (failing.has_induced_failure) {
+            induced_steps += 1;
+            // 탐침보다 더 걸었다 — 그 자리를 남긴다.
+            if (step >= open_allocations and extra_trace == null) extra_trace = failing;
+        } else if (step >= open_allocations) break; // 겨냥할 할당이 없었다 — 이 실행의 할당은 전부 한 번씩 실패했다
     }
-    // **공허해질 수 없게 세어서 단언한다.** 적어도 탐침이 센 만큼의 스텝이 각자 실패를 하나씩 주입했어야 한다 —
-    // 이 값은 기계가 아니라 **제품이 몇 번 할당하는가**만 따른다. 열기가 할당을 아예 안 하게 되면
-    // `open_allocations == 0` 이라 여기서 걸린다(`failed_steps >= 1` 도).
-    try testing.expect(induced_steps >= open_allocations);
     if (induced_steps != open_allocations) {
         std.debug.print(
-            "열기 할당 실패 훑기: 탐침 {d} · 주입된 스텝 {d} · 열기 실패 {d} · 열기 성공 {d} — 탐침보다 {d} 개 더 할당했다. 첫 초과 자리:\n",
-            .{ open_allocations, induced_steps, failed_steps, ok_steps, induced_steps - open_allocations },
+            "열기 할당 실패 훑기: 탐침 {d} · 주입된 스텝 {d} · 열기 실패 {d} · 열기 성공 {d} · 걸음 {d} — 스텝 장부(성공 할당 수·주입·결과):\n",
+            .{ open_allocations, induced_steps, failed_steps, ok_steps, step + 1 },
         );
+        for (ledger[0..@min(step + 1, ledger.len)], 0..) |l, i| {
+            std.debug.print("  #{d}: allocs={d} induced={} {s}{s}\n", .{ i, l.allocs, l.induced, if (l.ok) "ok" else "fail:", if (l.err) |e| @errorName(e) else "" });
+        }
         if (extra_trace) |*t| {
+            std.debug.print("첫 초과 자리:\n", .{});
             const st = t.getStackTrace();
             std.debug.dumpStackTrace(&st);
         }

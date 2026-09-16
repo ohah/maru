@@ -600,10 +600,10 @@ pub fn minimapCols(self: *AppSession) u16 {
 }
 
 /// 이 Term 의 미니맵이 가져가는 px(§6.1). **본문 열 수를 재는 자리 셋**(렌더·히트 기하·보이는 열 수)이 전부 이것을
-/// 빼고 잰다 — 렌더 쪽 규칙은 `diff_frame.buildSide` 가 같은 함수로 낸다. 비교 뷰·병합 모드는 0(N5b).
+/// 빼고 잰다 — 렌더 쪽 규칙은 `diff_frame.buildSide` 가 같은 함수로 낸다. 비교 뷰·병합 모드는 0(§6.2 — 레퍼런스도 두지 않는다).
 fn minimapPxFor(self: *AppSession, term: *Term, inner_w: u32) u32 {
-    // 병합 가드는 오늘 관측되지 않는다(적대적 9회차 I2): 세 열이 40 + 15 열보다 좁아 `widthPx` 가 어차피 0 을 낸다. 넓은
-    // 창(열 하나가 440px 넘게)에서는 이 가드가 일한다 — 판 넷에 미니맵을 두는 것은 N5b 의 결정이다.
+    // 병합 가드는 좁은 창에서 관측되지 않는다(적대적 9회차 I2: 세 열이 40 + 15 열보다 좁아 `widthPx` 가 어차피 0). 넓은 창
+    // (열 하나가 440px 넘게)에서는 이 가드가 일한다 — 병합에 미니맵을 두지 않는 것은 §6.2 의 **결정**이다(VS Code 도 끈다).
     if (term.rt.editor_diff != null or term.rt.editor_merge != null) return 0;
     return chrome_editor.diff_frame.minimapPx(inner_w, @intCast(self.cell_width_px), minimapCols(self));
 }
@@ -677,13 +677,48 @@ fn storeMinimapHit(self: *AppSession, term: *Term, rect: maru.session.SplitRect,
     term.rt.editor_minimap_rows = chrome_editor.minimap.stripRows(strip_h);
 }
 
-/// 미니맵을 누르면 그 y 의 줄이 **화면 가운데** 오게 굴린다(§6.1 — VS Code 의 클릭). 드래그는 「계속 클릭」이다.
-/// caret 은 안 놓는다. 미니맵이 없거나 밖이면 `false`.
-pub fn minimapClick(self: *AppSession, term: *Term, x_px: f64, y_px: f64) bool {
-    const r = term.rt.editor_minimap_rect orelse return false;
-    if (!app_session_mod.layout_math.pointInRect(x_px, y_px, r)) return false;
+/// 미니맵 누름의 결과(§6.2): 슬라이더를 **잡았다**(끌기가 이어진다) · 밖을 눌러 가운데로 **한 번** 옮겼다(끌기 없음) ·
+/// 미니맵이 아니다.
+pub const MinimapPress = enum { none, jumped, grabbed };
+
+/// 미니맵을 누르면(§6.1·§6.2 — VS Code 의 동작): 슬라이더 구간 안이면 **잡고**, 밖이면 그 y 의 줄이 **화면 가운데** 오게
+/// 한 번 굴린다. caret 은 안 놓는다. 미니맵이 없거나 밖이면 `.none`.
+pub fn minimapPress(self: *AppSession, term: *Term, x_px: f64, y_px: f64) MinimapPress {
+    const r = term.rt.editor_minimap_rect orelse return .none;
+    if (!app_session_mod.layout_math.pointInRect(x_px, y_px, r)) return .none;
+    const cell_h: u32 = @max(self.cell_height_px, 1);
+    const visible: usize = r.h / cell_h;
+    const rel: i64 = @intFromFloat(@floor(y_px - @as(f64, @floatFromInt(r.y))));
+    const row: usize = if (rel <= 0) 0 else @intCast(@divTrunc(rel, @as(i64, chrome_editor.minimap.line_px)));
+    const top = term.rt.editor_minimap_top;
+    const slider_first = term.rt.editor_first_line -| top;
+    if (term.rt.editor_first_line >= top and row >= slider_first and row < slider_first + visible) {
+        // **잡기** — 끌면 `first_line = start + Δrows × k`. 문서가 스트립보다 길면 k 는 비례의 역수(슬라이더 한 행 = 스크롤
+        // 범위 / 슬라이더가 갈 수 있는 행 수), 다 들어가면 1(슬라이더가 줄과 1:1).
+        const strip_rows = term.rt.editor_minimap_rows;
+        const total = editorLines(term).len;
+        const k: f64 = if (total > strip_rows and strip_rows > visible)
+            @as(f64, @floatFromInt(term.rt.editor_max_top_line)) / @as(f64, @floatFromInt(strip_rows - visible))
+        else
+            1.0;
+        self.editor_minimap_grab = .{ .first_line = term.rt.editor_first_line, .y_px = y_px, .k = k };
+        return .grabbed;
+    }
     minimapScrollTo(self, term, y_px);
-    return true;
+    return .jumped;
+}
+
+/// 잡은 슬라이더를 끈다(§6.2). 잡은 것이 없으면 아무것도 안 한다.
+fn minimapDrag(self: *AppSession, term: *Term, y_px: f64) void {
+    const g = self.editor_minimap_grab orelse return;
+    const d_px = y_px - g.y_px;
+    const d_rows = d_px / @as(f64, @floatFromInt(chrome_editor.minimap.line_px));
+    const d_lines: f64 = @round(d_rows * g.k);
+    const start: f64 = @floatFromInt(g.first_line);
+    const next = @max(start + d_lines, 0.0);
+    term.rt.editor_first_line = @intFromFloat(next); // 상한은 그리기 직전의 clamp 가 건다
+    term.rt.editor_first_piece = 0;
+    self.metal_dirty = true;
 }
 
 fn minimapScrollTo(self: *AppSession, term: *Term, y_px: f64) void {
@@ -5405,17 +5440,24 @@ pub fn beginScrollbarGesture(self: *AppSession, pane: *Pane, x_px: f64, y_px: f6
         // **가로는 각자다**(§3.5) — 오른쪽 막대는 오른쪽 열만 민다.
         if (beginHorizontal(self, term, bar, x_px, y_px, true)) return true;
     }
-    // **미니맵**(§6.1) — 막대와 같은 부류의 「굴리는 컨트롤」이라 같은 자리에서 잡는다(본문 선택보다 앞).
-    if (minimapClick(self, term, x_px, y_px)) {
-        self.editor_scrollbar_term = term;
-        self.scrollbar_drag_target = .editor_minimap;
-        // 막대 잡기와 같은 규약. primary down 이 이미 `cancelPointerGesture` 로 비워 두므로 **등가**다(적대적 20회차 Q4) —
-        // 규약을 한 자리에서 읽히게 남긴다.
-        self.pointer_gesture_owner = .none;
-        self.metal_dirty = true;
-        return true;
+    // **미니맵**(§6.1·§6.2) — 막대와 같은 부류의 「굴리는 컨트롤」이라 같은 자리에서 잡는다(본문 선택보다 앞).
+    switch (minimapPress(self, term, x_px, y_px)) {
+        .none => return false,
+        .jumped => {
+            // 밖 클릭은 가운데로 **한 번** — 끌기로 이어지지 않는다(§6.2, VS Code `proportional`). capture 를 안 세운다.
+            self.metal_dirty = true;
+            return true;
+        },
+        .grabbed => {
+            self.editor_scrollbar_term = term;
+            self.scrollbar_drag_target = .editor_minimap;
+            // 막대 잡기와 같은 규약. primary down 이 이미 `cancelPointerGesture` 로 비워 두므로 **등가**다(적대적 20회차 Q4) —
+            // 규약을 한 자리에서 읽히게 남긴다.
+            self.pointer_gesture_owner = .none;
+            self.metal_dirty = true;
+            return true;
+        },
     }
-    return false;
 }
 
 fn beginVertical(self: *AppSession, term: *Term, bar: chrome.ui.scroll_area.ScrollbarGeometry, x_px: f64, y_px: f64) bool {
@@ -5475,12 +5517,13 @@ pub fn routeScrollbarCapture(self: *AppSession, kind: i32, x_px: f64, y_px: f64)
             return true;
         },
         .editor_minimap => {
-            // 드래그 = 계속 클릭(§6.1). x 는 안 본다 — 스트립 밖으로 나가도 잡은 채다(막대 드래그와 같다).
+            // 잡은 슬라이더를 끈다(§6.2). x 는 안 본다 — 스트립 밖으로 나가도 잡은 채다(막대 드래그와 같다).
             if (kind == 2) {
-                if (self.editor_scrollbar_term) |term| minimapScrollTo(self, term, y_px);
+                if (self.editor_scrollbar_term) |term| minimapDrag(self, term, y_px);
             } else {
                 self.scrollbar_drag_target = .none;
                 self.editor_scrollbar_term = null;
+                self.editor_minimap_grab = null;
             }
             return true;
         },
@@ -10845,6 +10888,158 @@ test "MPN20 가로는 Result 의 것이다 — 휠이 Result 열에서 듣고, �
     term.rt.editor_wrap = false;
 }
 
+test "MMP2 미니맵의 축은 보이는 줄이다 — 접으면 스트립에서도 사라지고, 클릭은 보이는 줄 축으로 환산된다 (제품 경계, §6.1·§6.2)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    // "a:" 아래 200 줄이 들여쓰기(한 접힘 구간), 그 뒤 100 줄이 최상위 — 접으면 보이는 줄이 301 → 101.
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    try buf.appendSlice(allocator, "a:\n");
+    for (0..200) |_| try buf.appendSlice(allocator, "  x\n");
+    for (0..100) |_| try buf.appendSlice(allocator, "b\n");
+    try dir.dir.writeFile(testing.io, .{ .sub_path = "fold.txt", .data = buf.items });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(testing.io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "fold.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+    term.rt.editor_wrap = false;
+    fx.session.surface_initialized = true;
+    fx.session.backing_width_px = 1200;
+    fx.session.backing_height_px = 800;
+    const leaf = activeLeafRectForTest(fx.session) orelse return error.SkipZigTest;
+    const ch: u32 = fx.session.cell_height_px;
+
+    const countRuns = struct {
+        fn f(session: *AppSession, mr: maru.session.SplitRect) usize {
+            var n: usize = 0;
+            const sx: f32 = @floatFromInt(mr.x);
+            const sw: f32 = @floatFromInt(mr.w);
+            for (session.gpu_quads.items) |q| {
+                if (q.x < sx or q.x + q.w > sx + sw + 0.01 or q.h != 2.0) continue;
+                n += 1;
+            }
+            return n;
+        }
+    }.f;
+
+    // 펼친 상태: 스트립이 301 줄을 다 담고(창 0) run 이 줄마다 하나.
+    fx.session.gpu_quads.clearRetainingCapacity();
+    var d0 = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+    d0.dl.deinit(allocator);
+    const mr0 = term.rt.editor_minimap_rect orelse return error.NoMinimap;
+    try testing.expect(term.rt.editor_minimap_rows >= 301); // 전제: 스트립이 문서보다 길다
+    try testing.expectEqual(@as(usize, 301), countRuns(fx.session, mr0));
+
+    // 접으면 **스트립에서도 사라진다** — 보이는 줄 101 만큼의 run.
+    try testing.expect(foldAll(fx.session));
+    fx.session.gpu_quads.clearRetainingCapacity();
+    var d1 = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+    d1.dl.deinit(allocator);
+    const mr = term.rt.editor_minimap_rect orelse return error.NoMinimap;
+    try testing.expectEqual(@as(usize, 101), countRuns(fx.session, mr));
+
+    // 클릭은 **보이는 줄 축**이다: 스트립 50 행 = 보이는 줄 50 = 문서 줄 250(접힌 200 줄 뒤). 가운데로 오게 굴린 뒤
+    // 맨 위 보이는 줄의 번호가 그 환산과 맞아야 한다(문서 줄 축으로 환산하면 접힌 구간 안으로 간다).
+    const visible: usize = mr.h / ch;
+    const cx = @as(f64, @floatFromInt(mr.x)) + 3.0;
+    const cy = @as(f64, @floatFromInt(mr.y)) + @as(f64, @floatFromInt(50 * chrome_editor.minimap.line_px)) + 1.0;
+    fx.session.mouse(1, cx, cy, 0, 0);
+    fx.session.mouse(3, cx, cy, 0, 0);
+    try testing.expectEqual(@as(usize, 50) - visible / 2, term.rt.editor_first_line);
+    var d2 = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+    d2.dl.deinit(allocator);
+    const nums = term.rt.editor_visible_numbers;
+    try testing.expect(nums.len > term.rt.editor_first_line);
+    // 보이는 줄 i(≥ 1)의 문서 번호 = i + 200 (+1, 1-기반).
+    try testing.expectEqual(@as(?u32, @intCast(term.rt.editor_first_line + 200 + 1)), nums[term.rt.editor_first_line]);
+}
+
+test "MMP3 미니맵의 검색 강조 — 찾는 동안 일치 행이 스트립에 행 전체로 서고, 현재 일치는 다른 색, 닫으면 사라진다 (제품 경계, §6.2)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    for (0..200) |_| try buf.appendSlice(allocator, "word\n");
+    try dir.dir.writeFile(testing.io, .{ .sub_path = "f.txt", .data = buf.items });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(testing.io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "f.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+    term.rt.editor_wrap = false;
+    fx.session.surface_initialized = true;
+    fx.session.backing_width_px = 1200;
+    fx.session.backing_height_px = 800;
+    const leaf = activeLeafRectForTest(fx.session) orelse return error.SkipZigTest;
+
+    // 일치 셋(줄 10·20·30), 현재는 둘째. 막대 마커와 같은 출처·같은 게이트(`isFindTarget`).
+    try fx.session.editor_find_matches.append(allocator, .{ .line = 10, .start = 0, .len = 4 });
+    try fx.session.editor_find_matches.append(allocator, .{ .line = 20, .start = 0, .len = 4 });
+    try fx.session.editor_find_matches.append(allocator, .{ .line = 30, .start = 0, .len = 4 });
+    fx.session.chrome_host.find.current = 1;
+    fx.session.chrome_host.find.open = true;
+    fx.session.editor_find_source = term.surfaceId();
+
+    const MarkRows = struct { n: usize, colors: [3]u32, ys: [3]f32 };
+    const collect = struct {
+        fn f(session: *AppSession, mr: maru.session.SplitRect) MarkRows {
+            var out: MarkRows = .{ .n = 0, .colors = undefined, .ys = undefined };
+            const sx: f32 = @floatFromInt(mr.x);
+            const sw: f32 = @floatFromInt(mr.w);
+            for (session.gpu_quads.items) |q| {
+                // 행 전체 폭·줄 높이·검색 알파 — run(알파 0xFF/plain)·슬라이더(높이가 다르다)와 갈린다.
+                if (q.x != sx or q.w != sw or q.h != 2.0 or (q.fill_color0 >> 24) != chrome_editor.minimap.mark_alpha) continue;
+                if (out.n < 3) {
+                    out.colors[out.n] = q.fill_color0;
+                    out.ys[out.n] = q.y;
+                }
+                out.n += 1;
+            }
+            return out;
+        }
+    }.f;
+
+    fx.session.gpu_quads.clearRetainingCapacity();
+    var d0 = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+    d0.dl.deinit(allocator);
+    const mr = term.rt.editor_minimap_rect orelse return error.NoMinimap;
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_minimap_top); // 전제: 200 줄이 스트립에 다 들어간다
+    const got = collect(fx.session, mr);
+    try testing.expectEqual(@as(usize, 3), got.n);
+    // 자리: 줄 × 2px. 순서는 목록 순(10·20·30).
+    const y0: f32 = @floatFromInt(mr.y);
+    try testing.expectEqual(y0 + 20.0, got.ys[0]);
+    try testing.expectEqual(y0 + 40.0, got.ys[1]);
+    try testing.expectEqual(y0 + 60.0, got.ys[2]);
+    // 현재 일치(둘째)만 색이 다르다.
+    try testing.expectEqual(got.colors[0], got.colors[2]);
+    try testing.expect(got.colors[1] != got.colors[0]);
+
+    // 닫으면 사라진다 — 목록이 없는데 표시가 남으면 거짓이다.
+    fx.session.chrome_host.find.open = false;
+    fx.session.gpu_quads.clearRetainingCapacity();
+    var d1 = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+    d1.dl.deinit(allocator);
+    try testing.expectEqual(@as(usize, 0), collect(fx.session, mr).n);
+
+    // 다른 문서의 검색이면 이 스트립에는 없다(§5.1 — 막대 마커와 같은 게이트).
+    fx.session.chrome_host.find.open = true;
+    fx.session.editor_find_source = term.surfaceId() + 1;
+    fx.session.gpu_quads.clearRetainingCapacity();
+    var d2 = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+    d2.dl.deinit(allocator);
+    try testing.expectEqual(@as(usize, 0), collect(fx.session, mr).n);
+}
+
 test "MMP1 미니맵 — 본문 오른쪽·막대 왼쪽에 서고, 본문 열이 그만큼 줄며, 클릭·드래그는 굴리기이지 caret 이 아니다 (제품 경계, §6.1)" {
     // N5a(계약 §6.1). 렌더가 굳힌 자리(`editor_minimap_rect`)와 `gpu_quads` 로 «그려진 것» 을, 제품 마우스 라우터
     // (`session.mouse`)로 «눌리는 것» 을 잰다. 끄면 폭이 돌아오고, 좁으면 접힌다.
@@ -10928,16 +11123,43 @@ test "MMP1 미니맵 — 본문 오른쪽·막대 왼쪽에 서고, 본문 열�
     try testing.expectEqual(@as(u32, 0), term.rt.editor_first_piece);
     try testing.expect(std.meta.activeTag(fx.session.pointer_gesture_owner) == .none);
     try testing.expectEqual(sel_before, term.rt.editor_selection);
+    // **밖 클릭은 한 번이다**(§6.2, VS Code `proportional`) — capture 가 안 서고, 이어지는 drag 는 아무것도 안 굴린다.
+    try testing.expect(!scrollbarCaptureActive(fx.session));
+    {
+        const after_jump = term.rt.editor_first_line;
+        fx.session.mouse(2, cx, cy + 40.0, 0, 0);
+        try testing.expectEqual(after_jump, term.rt.editor_first_line);
+        fx.session.mouse(3, cx, cy + 40.0, 0, 0);
+    }
+    // ⑶ **슬라이더를 잡아 끈다**(§6.2) — 슬라이더 구간(`[first_line − top, +visible)` 행) 안을 누르면 잡히고, 끌면
+    //    `first_line = start + round(Δrows × k)`, `k = max_top / (strip_rows − visible)`(문서가 스트립보다 길다). 떼면 풀린다.
+    //    움직임은 **다시 그리기를 요구한다** — 잡는 순간은 제스처가 dirty 를 올리지만 끌림은 `minimapDrag` 만 지나므로
+    //    거기서 안 올리면 화면이 안 따라온다(17회차 Q1).
+    const grab_start = term.rt.editor_first_line; // 굳힌 창은 아직 top 0 이라 슬라이더 행 = first_line
+    const grab_row: usize = grab_start + 3; // 슬라이더 안
+    const gy = @as(f64, @floatFromInt(mr.y)) + @as(f64, @floatFromInt(grab_row * chrome_editor.minimap.line_px)) + 1.0;
+    fx.session.mouse(1, cx, gy, 0, 0);
     try testing.expect(scrollbarCaptureActive(fx.session));
-    // ⑶ **드래그는 계속 클릭** — 더 아래로 끌면 더 내려가고, 떼면 잡힘이 풀린다. 움직임은 **다시 그리기를 요구한다** — 잡는
-    //    순간은 제스처가 dirty 를 올리지만 끌림은 `minimapScrollTo` 만 지나므로 거기서 안 올리면 화면이 안 따라온다(17회차 Q1).
+    try testing.expectEqual(grab_start, term.rt.editor_first_line); // 잡는 순간은 안 움직인다
+    const k: f64 = @as(f64, @floatFromInt(term.rt.editor_max_top_line)) / @as(f64, @floatFromInt(rows_strip - visible));
+    try testing.expect(k > 1.0); // 전제: 2000 줄이 스트립보다 길다 — 비례의 역수가 1 을 넘는다
     fx.session.metal_dirty = false;
-    fx.session.mouse(2, cx, cy + 40.0, 0, 0); // +20 줄
-    try testing.expectEqual(click_row + 20 - visible / 2, term.rt.editor_first_line);
+    fx.session.mouse(2, cx, gy + 40.0, 0, 0); // +20 행
+    const want_drag: usize = grab_start + @as(usize, @intFromFloat(@round(20.0 * k)));
+    try testing.expectEqual(want_drag, term.rt.editor_first_line);
     try testing.expect(fx.session.metal_dirty);
-    fx.session.mouse(3, cx, cy + 40.0, 0, 0);
+    // 되돌리면(잡은 자리로) 잡은 순간의 값으로 돌아온다 — 누적이 아니라 **시작점 기준**이다.
+    fx.session.mouse(2, cx, gy, 0, 0);
+    try testing.expectEqual(grab_start, term.rt.editor_first_line);
+    // 스트립 위로 한참 끌어도 **0 에서 포화**한다 — 음수를 줄 번호로 바꾸면 죽는다(적대적 4회차 D8: 위로 끄는 판정이 없었다).
+    fx.session.mouse(2, cx, gy - 4000.0, 0, 0);
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_first_line);
+    fx.session.mouse(2, cx, gy + 40.0, 0, 0);
+    fx.session.mouse(3, cx, gy + 40.0, 0, 0);
     try testing.expect(!scrollbarCaptureActive(fx.session));
     try testing.expect(fx.session.editor_scrollbar_term == null);
+    try testing.expect(fx.session.editor_minimap_grab == null);
+    try testing.expectEqual(want_drag, term.rt.editor_first_line);
     // 슬라이더가 **따라간다** — 다음 프레임에 보이는 구간의 y 가 `(first_line − top) × 2px` 다(늘 맨 위에 그리는 변이).
     {
         fx.session.gpu_quads.clearRetainingCapacity();
@@ -10974,6 +11196,20 @@ test "MMP1 미니맵 — 본문 오른쪽·막대 왼쪽에 서고, 본문 열�
     var d2 = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw; // 상한을 안 프레임 뒤
     defer d2.dl.deinit(allocator);
     try testing.expectEqual(term.rt.editor_lines.len - term.rt.editor_minimap_rows, term.rt.editor_minimap_top);
+    // **창이 밀린 뒤의 잡기** — 슬라이더 행은 `first_line − top` 이다(top 을 안 빼면 슬라이더가 스트립 밖에 있다고 보고 잡히지
+    // 않는다 — 적대적 3회차 C9: 창이 0 인 ⑶ 에서는 안 보였다). 슬라이더 안을 누르면 잡히고 값은 그대로다.
+    {
+        const mr4 = term.rt.editor_minimap_rect orelse return error.NoMinimap;
+        try testing.expect(term.rt.editor_minimap_top > 0);
+        const srow = term.rt.editor_first_line - term.rt.editor_minimap_top + 2;
+        const gy2 = @as(f64, @floatFromInt(mr4.y)) + @as(f64, @floatFromInt(srow * chrome_editor.minimap.line_px)) + 1.0;
+        const fl4 = term.rt.editor_first_line;
+        fx.session.mouse(1, cx, gy2, 0, 0);
+        try testing.expect(scrollbarCaptureActive(fx.session));
+        try testing.expectEqual(fl4, term.rt.editor_first_line);
+        fx.session.mouse(3, cx, gy2, 0, 0);
+        try testing.expect(!scrollbarCaptureActive(fx.session));
+    }
 
     // ⑸ **끄면 돌아온다** — 사각이 없고 본문 열이 전부이며, 스트립 자리를 눌러도 굴리기가 아니다.
     fx.session.loaded_config.config.editor.minimap = false;

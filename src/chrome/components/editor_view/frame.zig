@@ -160,6 +160,9 @@ pub const Props = struct {
     /// **이 줄이 추가인가 삭제인가**(비교 본문). 논리 줄 인덱스로 읽는다. `null`이면 밴드를 그리지
     /// 않는다 — 문서 편집기는 이 축이 없다.
     row_bands: ?[]const RowBand = null,
+    /// 세로 막대에 찍을 **변경 위치 띠**의 종류(§4.1a 「변경 위치 마커」, N5b) — `row_bands` 에서 이 종류인 줄만 막대에
+    /// 마커로 선다. 비교 뷰의 왼쪽 열은 `removed`, 오른쪽은 `added`(`diff_frame.build` 가 정한다). `.none` 이면 없다.
+    change_marker_kind: RowBand = .none,
     /// 논리 줄마다 바뀐 글자 범위(없으면 빈 슬라이스). `row_bands`와 같은 인덱스 축이다.
     row_marks: ?[]const []const Mark = null,
     /// 논리 줄마다의 **선택 범위**(§4.1g). `row_marks`와 같은 축이고, diff가 아니어도 선다.
@@ -415,7 +418,7 @@ pub const RowCache = struct {
     }
 
     /// 화면 맨 위 줄까지의 시각 행 수. 같은 근사를 쓴다.
-    fn rowsBefore(self: *const RowCache, line: usize) u32 {
+    pub fn rowsBefore(self: *const RowCache, line: usize) u32 {
         if (line <= self.filled_upto) return self.prefix[line];
         const counted = self.prefix[self.filled_upto];
         const rest = line - self.filled_upto;
@@ -785,6 +788,9 @@ pub fn build(props: Props, scratch: Scratch) Written {
             .slider_first = mi.slider_first,
             .slider_len = mi.slider_len,
             .tab_width = props.tab_width,
+            // 검색 일치 행(§6.2) — 막대 마커와 **같은 목록**(보이는 줄 축). 옮길 것이 없다: 스트립의 축이 그 축이다.
+            .mark_lines = props.search_marker_lines,
+            .mark_current = props.search_marker_current,
         }, scratch.ops[mm_base..]);
         break :blk mw.ops;
     } else 0;
@@ -805,6 +811,9 @@ pub fn build(props: Props, scratch: Scratch) Written {
         .metrics = props.metrics,
         .match_rows = marker_rows[0..marker_n],
         .current_match = marker_current,
+        .change_bands = props.row_bands orelse &.{},
+        .change_kind = props.change_marker_kind,
+        .change_row_cache = cache,
     }, scratch.ops[mm_base + mm_ops ..]);
 
     // ── 5) 가로 스크롤바 ───────────────────────────────────────────────────────
@@ -1608,6 +1617,46 @@ test "WID10 위젯의 `piece` 는 0 이고, 글자는 본문 폭에서 잘리고
         else => {},
     };
     try std.testing.expect(saw_widget);
+}
+
+test "CM1 변경 위치 마커는 랩에서 시각 행 축이다 — 같은 줄의 검색 마커와 같은 슬롯에 떨어진다 (§4.1a N5b)" {
+    // 줄 0..19 는 세 행으로 랩되고 20..39 는 한 행이다: 줄 30 의 시각 행은 70/80 이지 30/40 이 아니다. 같은 줄에 검색 일치를
+    // 두면 두 마커가 **같은 슬롯**에 떨어져 검색이 이긴다(quad 하나) — 줄 축으로 찍으면 둘이 갈려 띠 색 quad 가 하나 더 선다
+    // (적대적 1회차 A7: 프레임이 캐시를 안 넘겨도 초록이었다).
+    var bufs: TestBuffers = .{};
+    var lines: [40][]const u8 = undefined;
+    const long = "x" ** 120;
+    for (&lines, 0..) |*l, i| l.* = if (i < 20) long else "y";
+    var prefix: [64]u32 = @splat(0);
+    var cache: RowCache = .{ .prefix = &prefix };
+    var props = testProps(&lines, true);
+    props.row_cache = &cache;
+    var bands = [_]RowBand{.none} ** 40;
+    bands[30] = .added;
+    props.row_bands = &bands;
+    props.change_marker_kind = .added;
+    const marks = [_]u32{30};
+    props.search_marker_lines = &marks;
+    const w = build(props, bufs.scratch());
+    try std.testing.expect(w.total_visual_rows > 60); // 전제: 앞 스무 줄이 실제로 랩됐다
+    var search_n: usize = 0;
+    var change_n: usize = 0;
+    for (bufs.ops[0..w.ops]) |op| {
+        if (op != .quad or op.quad.rect.h != @as(u32, @intCast(scrollbar.marker_h_px))) continue;
+        if (op.quad.fill_role == .search_match) search_n += 1;
+        if (op.quad.fill_role == .diff_added_bg) change_n += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), search_n);
+    try std.testing.expectEqual(@as(usize, 0), change_n);
+    // 대조: 다른 줄(줄 5)의 띠는 따로 선다.
+    bands[30] = .none;
+    bands[5] = .added;
+    const w2 = build(props, bufs.scratch());
+    change_n = 0;
+    for (bufs.ops[0..w2.ops]) |op| {
+        if (op == .quad and op.quad.rect.h == @as(u32, @intCast(scrollbar.marker_h_px)) and op.quad.fill_role == .diff_added_bg) change_n += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), change_n);
 }
 
 test "WID4 위젯 표가 갈리면 캐시를 다시 센다 — 옛 접두합은 다른 문서의 값이다" {

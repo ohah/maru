@@ -6698,6 +6698,9 @@ pub const AppSession = struct {
     /// 움직여야 하므로 활성 Term을 다시 묻지 않는다. Term이 죽으면 비운다(`invalidateForFreedPane`·
     /// `destroyTerm` 경로) — 죽은 포인터로 스크롤하면 그 자리에서 터진다.
     editor_scrollbar_term: ?*Term = null,
+    /// 미니맵 **슬라이더 잡기**(§6.2) — 잡은 순간의 `first_line`·y 와 비례의 역수 `k`. `scrollbar_drag_target ==
+    /// .editor_minimap` 인 동안만 뜻이 있다.
+    editor_minimap_grab: ?struct { first_line: usize, y_px: f64, k: f64 } = null,
     /// 잡은 **가로** 막대가 비교 뷰의 오른쪽 열인가(§3.5 — 가로는 각자다). 단일 편집기는 늘 `false`.
     editor_hscroll_right: bool = false,
     // AppKit E2E 전용 계측 — 흡수한 move 수와 실제로 재투영한 횟수. 계약 §4.3의 상한이 move 수가

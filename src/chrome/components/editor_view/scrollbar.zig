@@ -17,6 +17,7 @@ const std = @import("std");
 const chrome = @import("../../../chrome.zig");
 const scroll_area = @import("../../ui/scroll_area.zig");
 const continuous_drag = @import("../../ui/continuous_drag.zig");
+const frame = @import("frame.zig");
 
 const draw = chrome.draw;
 const tokens = chrome.tokens;
@@ -48,7 +49,22 @@ pub const Props = struct {
     match_rows: []const u32 = &.{},
     /// `match_rows` 안에서 **현재 일치**의 인덱스. 그 하나만 다른 색으로 그린다.
     current_match: ?usize = null,
+    /// **변경 위치 띠**(§4.1a 「변경 위치 마커」, N5b) — 줄마다의 띠 종류(본문 띠와 같은 배열). `change_kind` 인 줄만
+    /// 찍는다. 비교 뷰의 왼쪽 막대는 `removed`, 오른쪽은 `added` 다. `.none` 이면 안 찍는다.
+    change_bands: []const frame.RowBand = &.{},
+    change_kind: frame.RowBand = .none,
+    /// 줄 → 시각 행(랩). `null` 이면 줄이 곧 행이다 — `match_rows` 가 이미 옮겨진 것과 달리 띠는 줄 축이라 여기서 옮긴다.
+    change_row_cache: ?*const frame.RowCache = null,
 };
+
+/// 변경 위치 마커의 색 — 본문 띠와 같은 role(§4.1a).
+pub fn changeMarkerRole(kind: frame.RowBand) tokens.ColorRole {
+    return switch (kind) {
+        .added => .diff_added_bg,
+        .removed => .diff_removed_bg,
+        else => .surface_fg,
+    };
+}
 
 /// 마커 색 — 본문 강조와 **같은 role** 을 쓴다(§4.1a). 다른 색을 쓰면 「이 표시가 그 매치」라는
 /// 연결이 끊어진다.
@@ -101,7 +117,16 @@ pub fn build(props: Props, out: []draw.Op) Written {
         const usable = @max(track_h - marker_h_px, 0);
         const slots = @min(@as(usize, @intCast(@max(@divTrunc(usable, marker_h_px), 1))), marker_budget);
 
-        var hit = [_]u8{0} ** marker_budget; // 0=없음 1=매치 2=현재
+        var hit = [_]u8{0} ** marker_budget; // 0=없음 1=매치 2=현재 3=변경 띠
+        // **변경 띠를 먼저 깐다** — 검색 마커가 같은 슬롯에 오면 그것이 이긴다(§4.1a 「검색 마커가 위에 선다」).
+        if (props.change_kind != .none) {
+            for (props.change_bands, 0..) |band, line| {
+                if (band != props.change_kind) continue;
+                const row: usize = if (props.change_row_cache) |c| c.rowsBefore(line) else line;
+                const slot = @min((row * slots) / @as(usize, props.total_visual_rows), slots - 1);
+                if (hit[slot] == 0) hit[slot] = 3;
+            }
+        }
         for (props.match_rows, 0..) |row, i| {
             // 슬롯을 `slots - 1` 로 clamp 하므로 행을 따로 clamp 하지 않는다 — 문서 밖 행이
             // 와도 마지막 슬롯에 떨어질 뿐이다(둘 다 막으면 뒤엣것이 판정자에 안 잡힌다).
@@ -112,7 +137,7 @@ pub fn build(props: Props, out: []draw.Op) Written {
             const is_current = props.current_match != null and props.current_match.? == i;
             // **현재 일치가 이긴다.** 같은 슬롯에 여럿이 겹치면 그 하나는 반드시 보여야 한다 —
             // 사용자가 지금 어디를 보고 있는지가 이 표시의 첫 질문이다.
-            if (is_current or hit[slot] == 0) hit[slot] = if (is_current) 2 else 1;
+            if (is_current or hit[slot] == 0 or hit[slot] == 3) hit[slot] = if (is_current) 2 else 1;
         }
         for (hit[0..slots], 0..) |mark, slot| {
             if (mark == 0) continue;
@@ -129,7 +154,11 @@ pub fn build(props: Props, out: []draw.Op) Written {
                     .w = @intFromFloat(@round(bar.track_w)),
                     .h = marker_h_px,
                 },
-                .fill_role = if (mark == 2) marker_current_role else marker_role,
+                .fill_role = switch (mark) {
+                    2 => marker_current_role,
+                    3 => changeMarkerRole(props.change_kind),
+                    else => marker_role,
+                },
             } };
             n += 1;
         }
@@ -480,6 +509,56 @@ test "SBM6 자리가 모자라면 마커를 줄이고 thumb 을 지킨다 (§4.1
     const w1 = build(p, &one);
     try testing.expectEqual(@as(usize, 1), w1.ops);
     try testing.expectEqual(thumb_role, one[0].quad.fill_role);
+}
+
+test "SBM8 변경 위치 마커 — kind 인 줄만, 본문 띠의 role, 검색 마커가 같은 슬롯에서 이긴다 (§4.1a N5b)" {
+    var ops: [16]draw.Op = undefined;
+    var p = testProps(100, 0);
+    // 줄 10 = added, 줄 50 = removed, 줄 90 = added. 왼쪽 막대(removed)는 50 만, 오른쪽(added)은 10·90 만.
+    var bands = [_]frame.RowBand{.none} ** 100;
+    bands[10] = .added;
+    bands[50] = .removed;
+    bands[90] = .added;
+    p.change_bands = &bands;
+    p.change_kind = .removed;
+    const wl = build(p, &ops);
+    try testing.expectEqual(@as(usize, 2), wl.ops); // 마커 하나 + thumb
+    try testing.expectEqual(tokens.ColorRole.diff_removed_bg, ops[0].quad.fill_role);
+    const removed_y = ops[0].quad.rect.y;
+    p.change_kind = .added;
+    const wr = build(p, &ops);
+    try testing.expectEqual(@as(usize, 3), wr.ops); // 마커 둘 + thumb
+    try testing.expectEqual(tokens.ColorRole.diff_added_bg, ops[0].quad.fill_role);
+    try testing.expectEqual(tokens.ColorRole.diff_added_bg, ops[1].quad.fill_role);
+    try testing.expect(ops[0].quad.rect.y < removed_y and removed_y < ops[1].quad.rect.y); // 자리는 thumb 과 같은 축
+    // `.none` 이면 띠가 있어도 안 찍는다(단일 편집기).
+    p.change_kind = .none;
+    try testing.expectEqual(@as(usize, 1), build(p, &ops).ops);
+    // **검색 마커가 위에 선다** — 같은 행에 둘이 오면 검색 색이다(현재 일치면 현재 색).
+    p.change_kind = .added;
+    const rows = [_]u32{ 10, 90 };
+    p.match_rows = &rows;
+    p.current_match = 1;
+    const wb = build(p, &ops);
+    try testing.expectEqual(@as(usize, 3), wb.ops);
+    try testing.expectEqual(marker_role, ops[0].quad.fill_role);
+    try testing.expectEqual(marker_current_role, ops[1].quad.fill_role);
+    // 랩: 줄 → 시각 행을 `RowCache` 로 옮긴다 — 줄 10 이 행 20 에 있으면 마커도 행 20 자리다.
+    var prefix: [101]u32 = undefined;
+    for (&prefix, 0..) |*v, i| v.* = @intCast(i * 2); // 줄마다 2 행
+    const cache = frame.RowCache{ .prefix = &prefix, .filled_upto = 100 };
+    p.match_rows = &.{};
+    p.current_match = null;
+    p.change_row_cache = &cache;
+    const ww = build(p, &ops);
+    try testing.expectEqual(@as(usize, 3), ww.ops);
+    const y_line10_row20 = ops[0].quad.rect.y;
+    p.change_row_cache = null;
+    const rows20 = [_]u32{20};
+    p.change_kind = .none;
+    p.match_rows = &rows20;
+    _ = build(p, &ops);
+    try testing.expectEqual(ops[0].quad.rect.y, y_line10_row20);
 }
 
 test "SBM5 목록이 비면 마커를 안 그린다 — 찾기가 닫히면 표시도 없다 (§4.1a)" {

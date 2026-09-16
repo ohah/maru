@@ -721,7 +721,12 @@ pub const Provider = struct {
         while (true) {
             const node = c.ts_tree_cursor_current_node(&cursor);
             var descend = true;
-            if (c.ts_node_is_missing(node)) {
+            // **뿌리는 진단이 아니다.** 문서가 통째로 안 풀리면 tree-sitter 는 뿌리 자체를 `ERROR` 로 낸다 — 그것을 하나로 접으면
+            // 파일 전체에 밑줄이 간다(제품 캡처에서 실측: 함수 셋 중 하나가 깨졌는데 스무 줄이 전부 빨갰다). 뿌리는 늘 내려간다.
+            const is_root = c.ts_node_eq(node, root);
+            if (is_root) {
+                // 아래로
+            } else if (c.ts_node_is_missing(node)) {
                 const sb = c.ts_node_start_byte(node);
                 try out.append(allocator, .{ .start = sb, .end = sb + 1, .missing = true, .expected = std.mem.span(c.ts_node_type(node)) });
                 descend = false;
@@ -1393,6 +1398,21 @@ test "SYN40 구문 오류 — ERROR 는 가장 바깥 것 하나, MISSING 은 1 
         for (out.items, 0..) |a, i| {
             for (out.items[i + 1 ..]) |b| try std.testing.expect(a.end <= b.start or b.end <= a.start);
         }
+    }
+    // **뿌리가 ERROR 여도 파일 전체가 진단이 되지 않는다** — 함수 셋 중 하나가 깨진 문서에서 tree-sitter 는 뿌리를 ERROR 로 낸다.
+    // 제품 캡처에서 스무 줄이 전부 빨갰다(2026-09-17 실측). 뿌리는 늘 내려가고, 남는 것은 안쪽의 작은 범위들이다.
+    {
+        const src = "const std = @import(\"std\");\n\npub fn ok(a: u32) u32 {\n    return a + 1;\n}\n\npub fn broken(a: u32) u32 {\n    const b = (a + 2;\n    return b;\n}\n\npub fn garbage() void {\n    @@@ ((( !!!\n}\n\npub fn tail() void {\n    return;\n}\n";
+        var prov = Provider.init(src, .zig, 0) orelse return error.NoProvider;
+        defer prov.deinit();
+        try std.testing.expect(try prov.syntaxErrors(allocator, &out));
+        try std.testing.expect(out.items.len >= 2); // MISSING `)` 와 쓰레기 토큰
+        for (out.items) |e| try std.testing.expect(e.end - e.start < 16); // 어느 것도 문서를 통째로 덮지 않는다
+        var has_missing = false;
+        for (out.items) |e| if (e.missing) {
+            has_missing = true;
+        };
+        try std.testing.expect(has_missing);
     }
 }
 

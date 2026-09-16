@@ -1460,7 +1460,10 @@ test "editor.minimap·minimap-width 는 설정 UI에 뜬다 — 토글과 숫자
     try appendBoolFields(arena, .{}, &bools);
     var seen_toggle = false;
     for (bools.items) |f| {
-        if (std.mem.eql(u8, f.key, "editor.minimap")) seen_toggle = true;
+        if (std.mem.eql(u8, f.key, "editor.minimap")) {
+            seen_toggle = true;
+            try std.testing.expectEqual(theme.Section.editor, f.section.?); // 편집기 절에 선다 — 다른 절이면 찾을 수 없다(18회차 R3)
+        }
     }
     try std.testing.expect(seen_toggle);
     var nums: std.ArrayList(NumberField) = .empty;
@@ -1469,6 +1472,7 @@ test "editor.minimap·minimap-width 는 설정 UI에 뜬다 — 토글과 숫자
     for (nums.items) |f| {
         if (std.mem.eql(u8, f.key, "editor.minimap-width")) {
             seen_width = true;
+            try std.testing.expectEqual(theme.Section.editor, f.section.?);
             try std.testing.expectEqual(@as(f64, 15), f.value);
             try std.testing.expectEqual(@as(f64, 4), f.min);
             try std.testing.expectEqual(@as(f64, 60), f.max);

@@ -377,6 +377,22 @@ ck "iOS 는 알림을 안 보낸다" 0 "$(sed 's,//.*,,' $I | grep -c 'UNUserNot
 # 알림이 처음 «보이게» 되면서 드러난 것 — 블루투스 아이콘이 붙어 있었다.
 ck "알림 아이콘이 블루투스가 아니다" 0 "$(sed 's,//.*,,' $V | grep -c 'stat_sys_data_bluetooth')"
 
+echo "§3.0 세션 알림 — 누를 수 있고, 우리 심볼이다"
+# **누를 수 있어야 한다.** 알림이 말하는 것은 「세션이 살아 있다」이고, 그것을 본 사람이 하려는
+# 일은 그 세션으로 가는 것이다 — `contentIntent` 가 없으면 죽은 표시다.
+ck "알림에 누를 자리가 있다" 1 "$(sed 's,//.*,,' $V | grep -c 'setContentIntent')"
+# **재생성시키는 플래그를 안 쓴다.** host 가 `NativeActivity` 라 액티비티 재생성은 창·스왑체인·
+# 아틀라스를 다시 세우는 일이다 — 살아 있는 세션으로 돌아가려고 누른 것이 화면을 끊으면 안 된다.
+ck "알림 인텐트가 CLEAR_TOP 을 안 쓴다" 0 "$(sed 's,//.*,,' $V | grep -c 'FLAG_ACTIVITY_CLEAR_TOP')"
+# **우리 심볼이다.** 0 건 판정(「시스템 것이 아니다」)만 두면 아이콘을 지워도 통과하므로
+# **있는 자리를 센다** — 그 상수는 `R.java` 가 있어야 컴파일되고, 그것을 뽑는 자리는 아래 하네스다.
+ck "알림 아이콘이 우리 것이다" 1 "$(sed 's,//.*,,' $V | grep -c 'R\.drawable\.ic_notification')"
+ck "알림 아이콘에 시스템 것을 안 쓴다" 0 "$(sed 's,//.*,,' $V | grep -c 'setSmallIcon(android\.R\.')"
+# **그림은 생성기에서 나온다**(distribution.md — 손으로 그린 PNG 를 더하지 않는다). 알림 아이콘은
+# 상태바가 **알파만 읽어** 자기 색으로 칠하므로 런처 아이콘을 못 쓴다: 흰 잉크·투명 배경으로 따로 뽑는다.
+ck "알림 아이콘을 생성기가 뽑는다" 1 "$(grep -c 'NOTIFICATION = \[' assets/icon/render.py)"
+ck "알림 아이콘 다섯 밀도가 있다" 5 "$(ls assets/icon/android/drawable-*/ic_notification.png 2>/dev/null | wc -l | tr -d ' ')"
+
 echo "§5 죽으면 그 자리를 남긴다 (M15b)"
 # **두 host 가 같은 규율이다.** 한쪽만 걸면 그 플랫폼의 죽음만 미제로 남는다.
 for f in $A $I; do
@@ -400,6 +416,9 @@ for f in $A $I; do
 done
 
 echo "§하네스 — 조용히 빗나가지 않는다 (M8)"
+# **Java 가 우리 리소스를 가리키려면 `R` 이 필요하다.** 매니페스트의 `@mipmap/...` 는 aapt2 가 직접
+# 풀어 R 없이도 됐지만 `setSmallIcon` 은 상수를 받는다 — 하네스가 뽑아 javac 에 넘긴다.
+ck "하네스가 R.java 를 뽑는다" 1 "$(grep -c -- '--java' $H_RUN)"
 R=tools/mobile-harness/sim_input.swift
 # **좌표를 손으로 박지 않는다.** 창 세로 여유(66)보다 큰 오프셋(70)이 박혀 있어 보내는 점이
 # 통째로 어긋났고, 그래서 손짓이 아무 데도 안 닿았다 — 그런데 **아무 말도 없었다**.

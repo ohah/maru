@@ -46,7 +46,9 @@ test "P3-e4d-1 metadata parity uses actual daemon runtimes and no test wire" {
     try std.testing.expectEqual(@as(usize, 0), count(ssot, "실패 원인 분류(부분 구현)"));
     try std.testing.expectEqual(@as(usize, 0), count(ssot, "실제 제품 process에서 기존 checkpoint file 무변경을\n관측하는 E2E는 남아 있다"));
     try std.testing.expectEqual(@as(usize, 1), count(ssot, "실제 제품 process에서 기존 checkpoint file이\n변하지 않는지는 P4 R2a 제품 E2E가 관측한다"));
-    try std.testing.expectEqual(@as(usize, 1), count(plan, "Session host 실행 중 transport reconnect (CR0a~CR6f 완료)"));
+    // The section is the stable contract pointer; its progress label must not assert that
+    // unrelated CR6d candidate-window evidence is complete before actual product validation.
+    try std.testing.expectEqual(@as(usize, 1), count(plan, "## Session host 실행 중 transport reconnect ("));
     try std.testing.expectEqual(@as(usize, 1), count(matrix, "**상태: 구현 완료(CR0a~CR6f).**"));
     try std.testing.expectEqual(@as(usize, 0), count(matrix, "**상태: 부분 구현(CR0a·CR3a·CR3b R1·R2a·R2b·R2c·R3 완료).**"));
     try std.testing.expectEqual(@as(usize, 1), count(matrix, "이 완료 표식은 실행 중 reconnect gate에만 해당하며,"));

@@ -2650,6 +2650,19 @@ pub fn build(b: *std.Build) void {
                 .imports = &.{.{ .name = "maru", .module = maru_mod }},
             }),
         });
+        // A local TCC grant is tied to the exact ad-hoc code requirement. This compile-only
+        // escape hatch rebuilds the fixture harness without rebuilding, copying, or resigning
+        // the already-staged product app that the user just approved.
+        const install_session_host_cr6c_appkit_harness = b.addInstallArtifact(
+            session_host_cr6c_appkit_harness,
+            .{},
+        );
+        install_session_host_cr6c_appkit_harness.step.dependOn(&session_host_cr6c_appkit_harness.step);
+        const build_session_host_cr6c_appkit_harness = b.step(
+            "build-macos-session-host-cr6c-appkit-smoke-harness",
+            "Build only the CR6c/CR6d AppKit harness without touching the staged app",
+        );
+        build_session_host_cr6c_appkit_harness.dependOn(&install_session_host_cr6c_appkit_harness.step);
         const session_host_r2a_checkpoint_step = b.step(
             "macos-session-host-r2a-checkpoint-smoke",
             "Run actual AppKit duplicate runtime checkpoint rejection and preservation smoke",
@@ -3068,12 +3081,16 @@ pub fn build(b: *std.Build) void {
             "macos-session-host-input-continuity-smoke",
             "Run actual AppKit recovered-session IME and OS clipboard continuity smoke",
         );
+        const session_host_cr6d_home = "/tmp/maru-macos-app/session-host-cr6d-home";
         const session_host_cr6d_fixture = b.addSystemCommand(&.{
             "sh", "-eu", "-c",
-            "root=zig-out/maru-macos-app/session-host-cr6d-home; " ++
+            "root=/tmp/maru-macos-app/session-host-cr6d-home; " ++
+                "app=/tmp/maru-macos-app/Maru.app; " ++
                 "rm -rf \"$root\"; mkdir -p \"$root/captures\" \"$root/.config/maru\"; " ++
                 "printf '%s\\n' 'session.keep-alive-after-quit = true' > \"$root/.config/maru/config\"; " ++
-                "rm -f zig-out/maru-macos-app/app.summary.txt",
+                "if test -d \"$app\" && /usr/bin/diff -qr zig-out/Maru.app \"$app\" >/dev/null; then :; " ++
+                "else rm -rf \"$app\"; /usr/bin/ditto zig-out/Maru.app \"$app\"; fi; " ++
+                "/usr/bin/codesign --verify --strict \"$app\"",
         });
         session_host_cr6d_fixture.setCwd(b.path("."));
         const run_session_host_cr6d_appkit = b.addRunArtifact(session_host_cr6c_appkit_harness);
@@ -3081,6 +3098,10 @@ pub fn build(b: *std.Build) void {
         run_session_host_cr6d_appkit.setEnvironmentVariable(
             "MARU_SESSION_HOST_CR6C_APP_EXE",
             b.pathFromRoot("zig-out/Maru.app/Contents/MacOS/maru-macos-app"),
+        );
+        run_session_host_cr6d_appkit.setEnvironmentVariable(
+            "MARU_SESSION_HOST_CR6D_APP_BUNDLE",
+            "/tmp/maru-macos-app/Maru.app",
         );
         run_session_host_cr6d_appkit.setEnvironmentVariable(
             "MARU_SESSION_HOST_CR6C_PRODUCT_EXE",
@@ -3094,19 +3115,20 @@ pub fn build(b: *std.Build) void {
         );
         run_session_host_cr6d_appkit.setEnvironmentVariable(
             "MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT",
-            b.pathFromRoot("zig-out/maru-macos-app/session-host-cr6d-home"),
+            session_host_cr6d_home,
         );
-        run_session_host_cr6d_appkit.setEnvironmentVariable("MARU_MACOS_APP_SMOKE_MS", "25000");
+        run_session_host_cr6d_appkit.setEnvironmentVariable("MARU_APP_SUMMARY_PATH", "/tmp/maru-macos-app/session-host-cr6d-home/app.summary.txt");
+        run_session_host_cr6d_appkit.setEnvironmentVariable("MARU_MACOS_APP_SMOKE_MS", "60000");
         run_session_host_cr6d_appkit.setEnvironmentVariable("MARU_NO_WORKSPACE_RESTORE", "1");
-        isolateMacosProductTest(b, run_session_host_cr6d_appkit, b.pathFromRoot("zig-out/maru-macos-app/session-host-cr6d-home"), "cr6d");
+        isolateMacosProductTest(b, run_session_host_cr6d_appkit, session_host_cr6d_home, "cr6d");
         run_session_host_cr6d_appkit.setEnvironmentVariable(
             "MARU_CONFIG",
-            b.pathFromRoot("zig-out/maru-macos-app/session-host-cr6d-home/.config/maru/config"),
+            "/tmp/maru-macos-app/session-host-cr6d-home/.config/maru/config",
         );
-        run_session_host_cr6d_appkit.setEnvironmentVariable("MARU_WEB_APP_ROOT", b.pathFromRoot("web/dist"));
         run_session_host_cr6d_appkit.step.dependOn(&macos_app_bundle.step);
         run_session_host_cr6d_appkit.step.dependOn(&file_panel_web_build.step);
         run_session_host_cr6d_appkit.step.dependOn(&session_host_cr6d_fixture.step);
+        session_host_cr6d_fixture.step.dependOn(&macos_app_bundle.step);
         run_session_host_cr6d_appkit.step.dependOn(&session_host_input_source_restore_compile.step);
         const session_host_cr6d_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
@@ -3117,7 +3139,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"CR6d"},
         });
         const run_session_host_cr6d_boundary_tests = b.addRunArtifact(session_host_cr6d_boundary_tests);
-        run_session_host_cr6d_boundary_tests.addArg("--maru-expect-tests=2");
+        run_session_host_cr6d_boundary_tests.addArg("--maru-expect-tests=3");
         run_session_host_cr6d_boundary_tests.setCwd(b.path("."));
         run_session_host_cr6d_appkit.step.dependOn(&run_session_host_cr6d_boundary_tests.step);
         const session_host_cr6d_pixel_verify_mod = b.createModule(.{
@@ -3154,15 +3176,15 @@ pub fn build(b: *std.Build) void {
         const run_session_host_cr6d_pixel_verify = b.addRunArtifact(session_host_cr6d_pixel_verify);
         run_session_host_cr6d_pixel_verify.setCwd(b.path("."));
         run_session_host_cr6d_pixel_verify.addArgs(&.{
-            "zig-out/maru-macos-app/session-host-cr6d-home/session-host-cr6d-ime-pixel-receipt.json",
-            "zig-out/maru-macos-app/session-host-cr6d-home/captures/session-host-recovery-before-ime.ppm",
-            "zig-out/maru-macos-app/session-host-cr6d-home/captures/session-host-recovery-first-marked.ppm",
+            "/tmp/maru-macos-app/session-host-cr6d-home/session-host-cr6d-ime-pixel-receipt.json",
+            "/tmp/maru-macos-app/session-host-cr6d-home/captures/session-host-recovery-before-ime.ppm",
+            "/tmp/maru-macos-app/session-host-cr6d-home/captures/session-host-recovery-first-marked.ppm",
         });
         run_session_host_cr6d_pixel_verify.step.dependOn(&run_session_host_cr6d_appkit.step);
         const session_host_cr6d_assert = b.addSystemCommand(&.{
             "sh", "-eu", "-c",
-            "summary=zig-out/maru-macos-app/app.summary.txt; " ++
-                "candidate=zig-out/maru-macos-app/session-host-cr6d-home/session-host-cr6d-ime-candidate-observation.json; " ++
+            "summary=/tmp/maru-macos-app/session-host-cr6d-home/app.summary.txt; " ++
+                "candidate=/tmp/maru-macos-app/session-host-cr6d-home/session-host-cr6d-ime-candidate-observation.json; " ++
                 "test -f \"$summary\"; " ++
                 "test -f \"$candidate\"; " ++
                 "/usr/bin/grep -Eq '\"schema\":\"maru.session-host-cr6d-ime-candidate-observation.v1\"' \"$candidate\"; " ++
@@ -5222,7 +5244,7 @@ pub fn build(b: *std.Build) void {
         .filters = &.{"CR6d"},
     });
     const run_session_host_cr6d_global_boundary_tests = b.addRunArtifact(session_host_cr6d_global_boundary_tests);
-    run_session_host_cr6d_global_boundary_tests.addArg("--maru-expect-tests=2");
+    run_session_host_cr6d_global_boundary_tests.addArg("--maru-expect-tests=3");
     run_session_host_cr6d_global_boundary_tests.setCwd(b.path("."));
     boundary_step.dependOn(&run_session_host_cr6d_global_boundary_tests.step);
     const session_host_cr6e_boundary_tests = addProjectTest(b, .{

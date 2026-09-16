@@ -123,7 +123,6 @@ test "macOS product smoke children bind workspace and session registry to one fi
         "run_session_host_r2a_checkpoint",
         "run_session_host_r1_tombstone",
         "run_session_host_cr6c_appkit",
-        "run_session_host_cr6d_appkit",
         "run_session_host_cr6e_recovery",
         "run_session_host_cr6e_c3c",
         "macos_app_smoke",
@@ -138,6 +137,13 @@ test "macOS product smoke children bind workspace and session registry to one fi
         defer allocator.free(needle);
         try std.testing.expect(std.mem.indexOf(u8, build, needle) != null);
     }
+    // CR6d uses a /tmp artifact HOME to keep Documents TCC out of actual IME testing.
+    // Its path is already absolute, but the same isolation owner must still bind the registry.
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        build,
+        "isolateMacosProductTest(b, run_session_host_cr6d_appkit, session_host_cr6d_home, \"cr6d\")",
+    ) != null);
     // C4는 한 shell 안에서 서로 다른 두 home을 실행하므로 각 exec 앞에서 세 변수를 다시 묶는다.
     try std.testing.expect(std.mem.indexOf(
         u8,

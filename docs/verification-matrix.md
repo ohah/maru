@@ -609,9 +609,18 @@ marked 8/insert 2, 동일 runtime·surface와 generation 4→5를 결속한 두 
 그 전 잠긴 회차는 frontmost `loginwindow`라 `global-keyboard-focus` RED였고 통과 증거에서 제외했다. v2b0a pure inventory
 reducer/coordinate converter와 Debug·ReleaseFast 8+8 focused gate는 구현됐다. v2b0b의 WindowServer 전체 inventory
 producer·Screen Recording preflight·exact-once Zig ABI·canonical observation artifact도 구현되어 focused gate 10+10,
-Swift typecheck, app build, ABI와 전체 boundary gate를 통과했다. 현재 v2b0b 실제 회차는 다시 frontmost `loginwindow`에서
-source/HID mutation 전 `global-keyboard-focus`로 멈췄으므로, 잠금 해제된 exact-frontmost 제품 회차와 artifact 실재 검증
-전에는 green이 아니다. v2b1 단일-window capture/판정자는 구현 전이다.
+Swift typecheck, app build, ABI와 전체 boundary gate를 통과했다. 2026-09-16 잠금 해제·exact-frontmost 실제 회차는
+recovery 2/input 4, historical·IME·clipboard 각 1, marked 8/insert 2, post-event 권한과 source 복원을 통과했지만
+`candidate-observation-failed`/`rejected-1`로 observation artifact를 게시하지 못했다. 숫자 1은 ABI가 모든 publisher
+오류를 합친 값이므로 후보 부재 등 특정 원인으로 해석하지 않는다. 현재 후보 판정은 RED이며, 오류 이름만 수집하는
+진단 앱의 잠금 해제·exact-frontmost 회차에서 실패 분기 실측이 남아 있다. 2026-09-16 진단 앱 재실행은
+recovery 2/input 4, historical·clipboard 각 1까지 도달했지만 frontmost가 `loginwindow`여서
+`global-keyboard-focus`로 중단됐다. IME callback·post-event preflight·후보 관측에 도달하지 않았으므로
+이 회차는 권한 승인이나 후보 판정의 통과·실패 증거가 아니다. v2b1 단일-window capture/판정자는 구현 전이다.
+추가 적대적 감사에서 후보창 단계의 전역 HID 송신이 first responder만 확인하던 경계를 발견했다. 공통 송신 leaf에
+exact-frontmost PID·앱 active·first responder 재확인을 추가했고, 회귀 boundary는 수정 전 실패·수정 후 3/3 통과했다.
+이 수정의 Swift typecheck와 `macos-app-bundle` build·strict code-sign 검증도 통과했다. `/tmp` 승인 앱은 보존했으며,
+새 제품 앱의 staging·TCC 승인·실측은 남아 있다. 기존 승인 앱을 수정본의 통과 증거로 쓰지 않는다.
 v2b0b는 별도 Swift opt-in producer가 title 없는 전체 inventory 5 triplet을 메모리에만 보존하고, exact-once 동기식 C ABI로
 bounded JSON과 사전 고정한 absent target을 Zig에 빌려준다. Zig entrypoint 하나가 schema/window/byte cap, 기존 pure
 reducer·series validator와 same-directory inode→`link(2)` canonical 배타 게시를 소유한다. raw inventory 중간 파일,

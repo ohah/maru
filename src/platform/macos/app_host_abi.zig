@@ -1400,7 +1400,12 @@ pub export fn maru_macos_session_host_ime_candidate_observation_publish(
         allocator,
         transcript[0..transcript_len],
         path_buf[0..output_path_len :0],
-    ) catch return @intFromEnum(IMECandidateObservationResult.failed);
+    ) catch |err| {
+        // Only the typed failure name crosses this diagnostic boundary, never the borrowed
+        // transcript or another application's window inventory. The strict verdict is unchanged.
+        std.debug.print("session_host_ime_candidate_publish_error={s}\n", .{@errorName(err)});
+        return @intFromEnum(IMECandidateObservationResult.failed);
+    };
     return @intFromEnum(IMECandidateObservationResult.passed);
 }
 

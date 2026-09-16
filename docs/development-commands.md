@@ -843,6 +843,17 @@ pid 를 읽을 수 없는 자리를 **건드리지 않는다** — 지우면 사
 CI 러너는 매번 새 머신이라 이 명령이 필요 없다 — 개발 머신용이다. 실측(2026-08-25): 이 저장소를 개발하던
 머신에서 21,474 개를 거뒀다.
 
+### CR6d TCC 승인 후 하네스만 재빌드
+
+`mise exec -- zig build build-macos-session-host-cr6c-appkit-smoke-harness`는
+`zig-out/bin/maru-session-host-cr6c-appkit-smoke`만 설치한다. 제품 앱 build·staging·서명에는 의존하지 않으므로
+사용자가 승인한 `/tmp/maru-macos-app/Maru.app`의 CDHash를 보존한다. 실제 실행은 정상 CR6d gate와 같은 격리
+환경 및 `/tmp/maru-macos-app/session-host-cr6d-home` artifact root를 사용해야 한다. 다른 root를 사용하면 제품
+캡처 경로 검증에서 실패한다. 성공은 실행 파일 exit 0만으로 판정하지 않고 summary·pixel receipt·candidate
+observation artifact와 별도 strict verifier로 확인한다. `app.stderr.txt`의 publisher 오류 이름은 진단일 뿐이다.
+제품 코드가 바뀌면 정상 `macos-session-host-input-continuity-smoke`로 새 앱을 staging하고 새 CDHash의 TCC 승인을
+받아야 하며, 하네스 전용 명령으로 낡은 제품 앱을 검증해서는 안 된다.
+
 ## 완료 전 확인
 
 원격 release pass-record gate를 구현할 때는 canonical codec, private APFS publication, workflow source 계약을 각각

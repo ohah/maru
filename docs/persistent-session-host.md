@@ -5986,6 +5986,43 @@ original source로 복원하고 marked text를 비운 뒤 CR6c와 같은 실제 
 drift, marker 0/2+, stale historical replay, 직접 ABI input 호출은 실패다. 이 gate는 IME·clipboard 연속성을 닫지만
 stalled socket/backoff, 장시간 soak와 성능 예산은 이 CR6d 계약 밖이며 CR6e가 소유한다.
 
+CR6d의 AppKit child는 실행 파일을 테스트 러너가 직접 `execve`하지 않고, 완성된 `Maru.app` 번들을
+LaunchServices의 새 인스턴스로 열어 종료까지 기다린다. Screen Recording TCC는 요청 프로세스뿐 아니라
+responsible process도 판정하므로 SSH·터미널 테스트 러너가 직접 낳은 앱은 사용자가 `Maru.app`에 부여한 권한과
+다른 귀속으로 거부될 수 있다. 하네스가 준비한 격리 환경은 LaunchServices child에 그대로 전달하며, 앱의 실제
+PID·frontmost PID와 결과는 기존 summary 및 artifact로 판정한다. 이 예외는 Screen Recording과 전역 HID를 함께
+검증하는 CR6d에만 적용하며, 제품에 테스트 전용 launch 진입점을 추가하지 않는다. 격리 HOME·config·artifact는
+macOS의 Documents 폴더 권한을 테스트 전제에 섞지 않도록 `/tmp` 아래의 CR6d 전용 루트에 두고, 웹 자산은 실제
+앱 번들 리소스를 사용한다. 실행할 서명된 앱 번들도 byte-preserving 방식으로 같은 `/tmp` 전용 부모에 staging해
+LaunchServices가 저장소의 Documents 경로를 열지 않게 한다. 이미 staging된 앱이 새 제품 번들과 recursive byte
+comparison으로 같으면 그 bundle inode를 보존해 동일 빌드에 부여된 TCC code requirement를 불필요하게 폐기하지
+않는다. 내용이 다를 때만 staging 앱을 교체하며, staging 전후 code-sign 검증이 실패하면 앱을 열지 않는다.
+로컬 TCC 승인 뒤 재검증은 `build-macos-session-host-cr6c-appkit-smoke-harness`로 하네스만
+`zig-out/bin`에 설치할 수 있다. 이 단계는 제품 app bundle build·copy·sign에 의존하지 않으므로 이미 승인한 staging
+app의 ad-hoc CDHash를 바꾸지 않는다. 제품 코드가 바뀌었다면 이 우회 경로로 낡은 앱을 통과시켜서는 안 되며,
+정상 gate로 새 앱을 staging한 뒤 새 CDHash에 권한을 승인해야 한다.
+LaunchServices child에는 하네스만 소비하는 원본 app/product/restore-helper 실행파일 경로를 전달하지 않는다. 제품
+child가 실제로 소비하는 격리 root·config·summary·smoke mode만 상속해 불필요한 Documents TCC 요청을 막는다.
+또한 `open`을 실행하기 전에 child working directory를 `/`로 닫아 하네스의 저장소 cwd가 앱의 파일 접근 귀속으로
+상속되지 않게 한다. 앱이 여는 모든 테스트 경로는 이후에도 절대경로다. 복구 대상 fixture runtime도
+`runtime.spawn.cwd`를 같은 격리 artifact root로 명시한다. runtime의 PTY cwd는 앱 process cwd와 별개로 workspace
+projection에 복원되므로, 이를 생략하면 recovery row 게시 중 제품의 Git branch 조회가 저장소의 Documents TCC를
+요청해 IME 검증과 무관한 권한·동기 I/O에 묶일 수 있다. 이 cwd 격리는 CR6d input-continuity runtime 하나에만
+적용하며 일반 recovery와 제품의 cwd 복원 계약은 바꾸지 않는다.
+
+event-post 권한은 source mutation 전에 `CGPreflightPostEventAccess`로 먼저 확인하고, 아직 현재 process에
+반영되지 않았으면 Apple의 `CGRequestPostEventAccess`로 이 opt-in smoke에서만 요청한다. 요청 뒤에도 false이면
+그대로 `accessibility-unavailable`로 fail-close한다. 일반 제품 시작이나 사용자 키 입력 경로는 이 권한을 요청하지
+않는다.
+
+전역 HID 송신은 매 key-down/key-up 쌍을 게시하기 직전에 exact-frontmost PID·앱 active·해당 view의 first responder를
+같은 공통 송신 경계에서 다시 확인한다. 한글 입력 단계의 사전 확인만으로 후보창 Option-Return·Escape까지
+허가하지 않는다. 다른 앱이나 잠금 화면이 전면을 점유하면 그 송신은 실패하고 추가 전역 키를 게시하지 않는다.
+
+후보 관측 publisher가 실패하면 Zig는 오류 이름만 `session_host_ime_candidate_publish_error`로 stderr에 남긴다.
+LaunchServices 하네스는 이를 격리 root의 `app.stderr.txt`로 수집한다. raw transcript·창 제목·후보 문자열·창 inventory는
+오류 로그에도 남기지 않으며, 로그는 실패 분기를 진단할 뿐 성공 artifact나 strict reducer를 대신하지 않는다.
+
 **CR6d-v2 시각 증거 계약:** v2a는 같은 recovered Term의 첫 한글 물리 key 직전과 첫 marked callback 반영 뒤
 제품 Metal 프레임을 캡처하고, 같은 runtime·surface의 cursor rect, `firstRect` screen rect와 관심 영역 픽셀 변화를
 하나의 receipt에 결속한다. 이는 Maru-owned preedit 픽셀과 후보 anchor까지의 증거다. OS-owned 후보 목록은 앱의
@@ -5995,24 +6032,23 @@ WindowServer, exact frontmost PID가 없으면 pass/skip이 아니라 `not_provi
 대체하지 않는다. v2a 생산자는 첫 물리 key 전에 `before-ime`, 첫 `setMarkedText` callback 뒤 다음 key 전에
 `first-marked` 제품 PPM을 찍고 `maru.session-host-cr6d-ime-pixel.v1` receipt를 atomic no-overwrite로 게시한다.
 별도 `maru-session-host-cr6d-pixel-verify`가 strict schema, exact P6, runtime/surface/세대/좌표와 cursor 두 cell 밖
-변화 0을 다시 판정한다. 2026-09-14 잠금 해제된 제품 회차는 exact frontmost Maru PID에서 recovery stage 2,
-input stage 4, historical/IME/clipboard 각 1, marked callback 8, insert callback 2로 끝났다. 같은 runtime
-`d72cd830ea22e4cc6dce537383522941`·surface 1에서 frame generation 4→5, cursor·`firstRect` `(668,798,8,18)`을
-결속한 두 960×600 PPM을 별도 판정기가 통과해 v2a를 green으로 닫았다. 그 전 잠긴 회차는 frontmost PID가
-`loginwindow`여서 source 전환·HID 게시·capture 전에 `global-keyboard-focus`로 RED였으며 통과 증거에 포함하지
-않는다. v2b0a pure inventory reducer/coordinate converter와 Debug·ReleaseFast 8+8 focused gate는 구현됐다. v2b0b의
-WindowServer 전체 inventory producer·Screen Recording preflight·exact-once Zig ABI·canonical observation artifact도 구현되어
-focused gate 10+10, Swift typecheck, app build, ABI와 전체 boundary gate를 통과했다. 다만 현재 실측 회차는 전면 process가
-`loginwindow`인 잠금 상태에서 source/HID mutation 전 `global-keyboard-focus`로 멈췄으므로, 잠금 해제된 exact-frontmost 제품
-회차와 artifact 실재 검증 전에는 v2b0b를 green으로 닫지 않는다. v2b1 단일-window capture/판정자는 아직 구현 전이다.
+변화 0을 다시 판정한다. v2a·v2b0b·v2b1의 구현 진행과 실제 제품 회차 결과는
+[검증 매트릭스의 session host IME 시각 증거](verification-matrix.md)를 단일 출처로 둔다.
 
 v2b는 곧바로 owner 이름을 하드코딩하지 않는다. **v2b0 window-authority 관측**이 먼저 Screen Recording preflight를
 source 전환·HID 게시보다 앞에서 통과한 뒤, 후보 요청 직전/직후 `SCShareableContent`/window-server inventory의 차집합을
 만든다. producer는 후보처럼 보이는 행을 선필터하지 않고 각 시점의 전체 on-screen inventory를 pure reducer에 넘긴다.
+후보 요청·취소의 기준은 [Apple Korean Input Method 가이드의 Convert Hangul to Hanja](https://support.apple.com/en-asia/guide/korean-input-method/welcome/mac)다.
+Option-Return은 커서 앞의 변환 가능한 한글 또는 선택한 한글을 대상으로 하며 Escape는 원래 문서 상태로 복원한다.
+따라서 단축키를 게시했다는 사실만으로 후보창 생성 성공을 주장하지 않고, 실제 WindowServer open/close와
+PTY·commit·base-screen 불변을 함께 판정한다.
 snapshot은 최대 256 window이며 cap+1은 일부를 버려 통과하지 않고 `failed`다. diagnostic은 reducer가 고른 새 on-screen
 window의 ID, owner PID·bundle ID, Apple code-signing validity·signing identifier,
 layer, bounds, 선택된 TIS source ID만 허용하고
-window title·후보 문자열·전체 화면 이미지는 금지한다. Maru PID, baseline window ID, off-screen/zero-area window는 제외하며,
+window title·후보 문자열·전체 화면 이미지는 금지한다. 실패 summary도 이 허용 목록 밖의 inventory를 싣지 않고
+producer의 닫힌 failure code 또는 Zig reducer의 숫자 status만 남긴다. 따라서 실측 RED가 capture·schema·reducer 중
+어느 경계인지 구분하되 후보 문자열이나 창 제목을 진단으로 우회 유출하지 않는다. Maru PID, baseline window ID,
+off-screen/zero-area window는 제외하며,
 후보 요청 전에는 없고 요청 뒤 생기며 Escape 뒤 사라지는 open→close를 같은 anchor에서 최소 5회 반복해 Apple-signed
 owner identity와 신규/소멸 window가 매회 일치해야 한다. 각 반복 동안 PTY input, committed text와 base screen generation은
 변하지 않아야 한다. 남은 exact 한

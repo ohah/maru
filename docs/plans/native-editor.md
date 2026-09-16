@@ -621,7 +621,9 @@
     **"링크되지 않는다"도 주장에서 측정으로 옮겼다** — `zig build` 산출물 `zig-out/bin/maru`에
     `ts_parser_new`·`ts_query_new`·`tree_sitter_zig` 심볼이 **0개**이고 `tree_sitter` 문자열도 0개다.
   - **grammar가 없는 파일은 무색이다**(§5). 자체 lexer fallback을 만들지 않는다
-  - **진단**(§5): 물결 밑줄(기존 밑줄 장식 확장)·gutter 마커. 출처가 LSP든 CLI 린터든 한 층
+  - **진단**(§5): 물결 밑줄(기존 밑줄 장식 확장)·gutter 마커. 출처가 LSP든 CLI 린터든 한 층 — **층은 2026-09-17 에 섰고 첫
+    출처는 구문 오류다**(visual-mapping §5.4 — LSP·린터는 코드가 0 이라 출처가 없었다; 사용자 결정으로 tree-sitter `ERROR`/`MISSING`).
+    막대·미니맵 마커·`F8`/`⇧F8` 까지 함께. LSP `publishDiagnostics` 는 같은 목록에 합치면 된다
   - **레이아웃을 바꾸는 LSP 결과**: 인레이 힌트·ghost text(§4 가로 축)·code lens(세로 축)·
     LSP `foldingRange`가 들여쓰기 접힘을 덮음(§4)
   - **떠 있는 UI**: 자동완성 팝업(§8.2 — `dropdown` 재사용)·**호버/시그니처 박스**(§8.3 — 신규, 마크다운 최소

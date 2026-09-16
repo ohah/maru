@@ -1187,8 +1187,11 @@ pub const EditorConfig = struct {
     /// 미니맵 폭(**셀**). 기본 15 셀 ≈ 120px @ 8px 셀 — VS Code 의 기본 폭 120px 과 같은 값. 본문이 40 열보다
     /// 좁아지면 미니맵이 **접힌다**(0px) — 그 규칙은 chrome 의 `minimap.widthPx` 가 소유한다.
     minimap_width: u32 = 15,
+    /// **진단 표시**(visual-mapping §5.4) — 물결 밑줄·gutter 글리프·막대/미니맵 마커·F8 이동을 한꺼번에 켜고 끈다. 지금의
+    /// 출처는 구문 오류(tree-sitter)라 타이핑 중에도 밑줄이 뜬다 — 거슬리면 끈다.
+    diagnostics: bool = true,
 
-    pub const schema = .{ // 키: editor.wrap · editor.tab-width · editor.cursor-shape · editor.scroll-beyond-last-column · editor.cursor-surrounding-lines · editor.cursor-surrounding-columns · editor.minimap · editor.minimap-width
+    pub const schema = .{ // 키: editor.wrap · editor.tab-width · editor.cursor-shape · editor.scroll-beyond-last-column · editor.cursor-surrounding-lines · editor.cursor-surrounding-columns · editor.minimap · editor.minimap-width · editor.diagnostics
         // **둘 다 설정 GUI에 뜬다.** `wrap`은 한때 `hidden`이었는데(*"편집기가 제품 화면에 배선되기
         // 전이라 토글해도 아무 일이 없어 버그로 보인다"*) 값이 렌더에 닿으면서 벗겼다 —
         // `schema.zig`의 "editor.wrap은 설정 UI에 뜬다"가 그 사실을 잰다. 탭 폭도 같은 조건을
@@ -1217,6 +1220,7 @@ pub const EditorConfig = struct {
         // 미니맵 둘(§6.1). 폭의 하한 4 는 「run 이 보이는 최소」, 상한 60 은 그 위가 본문을 잡아먹는다는 판단이다.
         .minimap = Meta{ .doc = .cfg_editor_minimap, .widget = .toggle, .section = .editor },
         .minimap_width = Meta{ .key_seg = "minimap-width", .doc = .cfg_editor_minimap_width, .range = .{ 4, 60 }, .widget = .number, .section = .editor },
+        .diagnostics = Meta{ .doc = .cfg_editor_diagnostics, .widget = .toggle, .section = .editor },
     };
 };
 

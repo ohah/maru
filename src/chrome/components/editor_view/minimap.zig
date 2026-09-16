@@ -12,6 +12,7 @@
 const std = @import("std");
 const draw = @import("../../draw.zig");
 const tokens = @import("../../tokens.zig");
+const diagnostic = @import("diagnostic.zig");
 const content = @import("content.zig");
 
 /// 줄 하나의 높이(px). VS Code `minimap.scale = 1` 의 글자 높이.
@@ -88,6 +89,8 @@ pub const Props = struct {
     mark_lines: []const u32 = &.{},
     /// `mark_lines` 안에서 현재 일치의 인덱스 — 그 행만 `search_match_current`.
     mark_current: ?usize = null,
+    /// **진단 줄**(§5.4) — 같은 축, severity 색으로 행 전체. 검색 행보다 **아래**에 그린다(검색이 위).
+    diag_lines: []const diagnostic.LineMark = &.{},
 };
 
 pub const Written = struct { ops: usize, truncated: bool };
@@ -137,6 +140,26 @@ pub fn build(props: Props, out: []draw.Op) Written {
             out[n] = runQuad(props.rect.x, y, s, @min(col, max_cols), max_cols, run_role);
             n += 1;
         }
+    }
+
+    // 진단 줄 — run 위·검색 아래(§5.4). 창 안의 줄만, 행 전체 폭으로, severity 색.
+    for (props.diag_lines) |dl| {
+        if (dl.line < props.top or dl.line >= props.top + rows) continue;
+        if (n >= out.len) {
+            truncated = true;
+            break;
+        }
+        out[n] = .{ .quad = .{
+            .rect = .{
+                .x = props.rect.x,
+                .y = props.rect.y + @as(i32, @intCast((dl.line - props.top) * line_px)),
+                .w = props.rect.w,
+                .h = line_px,
+            },
+            .fill_role = dl.level.role(),
+            .alpha = mark_alpha,
+        } };
+        n += 1;
     }
 
     // 검색 일치 행 — run 위·슬라이더 아래(§6.2). 창 `[top, top + rows)` 안의 줄만, 행 전체 폭으로.
@@ -342,6 +365,23 @@ test "MM10 검색 일치 행 — 창 안의 줄만 행 전체를 칠하고, 현�
     try testing.expectEqual(@as(usize, 13), wn.ops);
     try testing.expectEqual(tokens.ColorRole.search_match, ops[10].quad.fill_role);
     try testing.expectEqual(tokens.ColorRole.search_match, ops[11].quad.fill_role);
+}
+
+test "MM11 진단 줄 — 창 안 줄만 severity 색으로 행 전체, 검색 행 아래·run 위 (§5.4)" {
+    var ops: [32]draw.Op = undefined;
+    var lines: [40][]const u8 = undefined;
+    for (&lines) |*l| l.* = "x";
+    const diags = [_]diagnostic.LineMark{ .{ .line = 3, .level = .err }, .{ .line = 12, .level = .err }, .{ .line = 15, .level = .warning } };
+    const marks = [_]u32{15};
+    const w = build(.{ .rect = .{ .x = 100, .y = 50, .w = 30, .h = 20 }, .lines = &lines, .top = 10, .slider_first = 11, .slider_len = 3, .tab_width = 4, .mark_lines = &marks, .diag_lines = &diags }, &ops);
+    // run 10 + 진단 2(12·15) + 검색 1 + 슬라이더 1
+    try testing.expectEqual(@as(usize, 14), w.ops);
+    try testing.expectEqual(tokens.ColorRole.diagnostic_error, ops[10].quad.fill_role);
+    try testing.expectEqual(@as(i32, 50 + 2 * line_px), ops[10].quad.rect.y);
+    try testing.expectEqual(@as(u32, 30), ops[10].quad.rect.w);
+    try testing.expectEqual(tokens.ColorRole.diagnostic_warning, ops[11].quad.fill_role);
+    try testing.expectEqual(tokens.ColorRole.search_match, ops[12].quad.fill_role); // 검색이 진단 뒤(위)
+    try testing.expectEqual(tokens.ColorRole.selection, ops[13].quad.fill_role);
 }
 
 test "MM8 저장소가 모자라면 잘리되 죽지 않는다" {

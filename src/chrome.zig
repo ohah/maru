@@ -82,6 +82,7 @@ pub const components = struct {
         pub const visual_map = ui.visual_map;
         pub const scrollbar = @import("chrome/components/editor_view/scrollbar.zig");
         pub const minimap = @import("chrome/components/editor_view/minimap.zig"); // 문서의 «모양» 스트립(§6.1 N5a) — 색 블록 quad
+        pub const diagnostic = @import("chrome/components/editor_view/diagnostic.zig"); // 진단 표시의 어휘(§5.4) — severity → role·글리프
         pub const surface = @import("chrome/components/editor_view/surface.zig");
         pub const frame = @import("chrome/components/editor_view/frame.zig"); // 위 넷의 조립 — Lab과 제품이 같은 순서·저장소 규칙을 쓴다
         pub const diff_frame = @import("chrome/components/editor_view/diff_frame.zig"); // 나란한 비교 — `frame`을 두 번 부르는 조합(§7)

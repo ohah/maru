@@ -1835,6 +1835,8 @@ const TermRuntime = struct {
     /// 함께 살고 함께 죽는다(`releaseEditorTerm`). grammar가 없으면 안이 비어 있고, 그러면 그
     /// 문서는 끝까지 무색이다 — 실패가 아니라 저하다(§5).
     editor_syntax: editor_ops.syntax_color.State = .{},
+    /// 진단 층(§5.4) — 목록(첫 출처: 구문 오류)과 렌더 표. `editor_syntax` 와 같은 단위로 산다.
+    editor_diagnostics: editor_ops.diagnostics.State = .{},
 
     /// 이 문서에 쓰는 tree-sitter 문법. **상태바 언어 항목이 읽는다**(`status-bar.md` 「언어 항목」).
     ///
@@ -10363,6 +10365,8 @@ pub const AppSession = struct {
             .toggle_editor_wrap => _ = editor_ops.toggleWrap(self), // 편집기가 아니면 무동작
             .next_conflict => _ = editor_ops.gotoConflictActive(self, .next), // S5 — 구간이 없으면 무동작
             .prev_conflict => _ = editor_ops.gotoConflictActive(self, .prev),
+            .next_diagnostic => _ = editor_ops.gotoDiagnosticActive(self, .next), // §5.4 — 진단이 없으면 무동작
+            .prev_diagnostic => _ = editor_ops.gotoDiagnosticActive(self, .prev),
             // 접기/펼치기 — 편집기가 아니거나 접을 것이 없으면 무동작(비교 뷰도 거절한다. §4.1f).
             // 비교 뷰면 그쪽을 먼저 본다 — 축이 달라 함수가 갈린다(§4.1g "비교 뷰").
             .copy_editor_selection => _ = editor_ops.copyDiffSelection(self) or editor_ops.copySelection(self),

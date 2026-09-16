@@ -1450,6 +1450,24 @@ test "editor.wrap은 설정 UI에 뜬다 — 값이 렌더에 닿는다" {
     try std.testing.expectEqual(false, (theme.EditorConfig{}).wrap);
 }
 
+test "editor.diagnostics 는 설정 UI에 뜬다 — 편집기 절의 토글, 기본은 켬 (§5.4)" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var bools: std.ArrayList(BoolField) = .empty;
+    try appendBoolFields(arena, .{}, &bools);
+    var seen = false;
+    for (bools.items) |f| {
+        if (std.mem.eql(u8, f.key, "editor.diagnostics")) {
+            seen = true;
+            try std.testing.expectEqual(theme.Section.editor, f.section.?);
+            try std.testing.expectEqual(true, f.value);
+        }
+    }
+    try std.testing.expect(seen);
+    try std.testing.expectEqual(true, (theme.EditorConfig{}).diagnostics);
+}
+
 test "editor.minimap·minimap-width 는 설정 UI에 뜬다 — 토글과 숫자, 기본은 켬·15 (§6.1)" {
     // 미니맵은 값이 렌더에 닿는 채로 들어왔다(`minimapCols` → `diff_frame.minimapPx`). 가릴 이유가 없고, 사용자가 끄거나
     // 폭을 바꾸는 유일한 자리가 이 두 키다 — 설정 화면에서 빠지면 config 파일을 손으로 고쳐야 한다.

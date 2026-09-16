@@ -165,6 +165,22 @@ pub fn diffFromTheme(theme: appearance.ResolvedTheme) DiffColors {
     };
 }
 
+pub const DiagnosticColors = struct { err: color.Rgb, warning: color.Rgb, info: color.Rgb, hint: color.Rgb };
+
+/// 진단 네 색(visual-mapping §5.4) — `diffFromTheme` 와 같은 파생: ANSI bright red(9) · yellow(3) · blue(4) · bright black(8) 에
+/// 배경 대비 바닥. 밑줄·글리프·마커가 전부 **전경**으로 쓰이므로 diff(3.0)보다 높은 4.0 을 건다 — 얇은 지그재그가 배경에
+/// 묻히면 진단이 있는지조차 안 보인다.
+pub fn diagnosticsFromTheme(theme: appearance.ResolvedTheme) DiagnosticColors {
+    const bg_lum = color.relativeLuminance(theme.background);
+    const target: f32 = 4.0;
+    return .{
+        .err = readable(ansi(theme, 9), bg_lum, target),
+        .warning = readable(ansi(theme, 3), bg_lum, target),
+        .info = readable(ansi(theme, 4), bg_lum, target),
+        .hint = readable(ansi(theme, 8), bg_lum, target),
+    };
+}
+
 /// 폰트 패밀리가 CSS/JS 문자열에 안전하게 넣을 수 있는 문자만 쓰는지(주입 방어). 번들·시스템 폰트명은
 /// 영문자·숫자·공백·하이픈뿐이라 이걸로 충분하고, 그 외 문자가 있으면 var를 안 내보내 app.css 폴백을 쓴다.
 fn isSafeFontFamily(family: []const u8) bool {

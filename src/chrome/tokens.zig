@@ -223,6 +223,12 @@ pub const ColorRole = enum {
     /// 띠(진하게)에 함께 쓰이므로, 세기까지 역할로 나누면 토큰이 두 배가 되고 둘이 어긋난다.
     diff_added_bg,
     diff_removed_bg,
+    /// **진단 색**(native-editor-visual-mapping.md §5.4) — 물결 밑줄·gutter 글리프·막대/미니맵 마커가 severity 마다 하나씩
+    /// 쓴다. 팔레트의 bright red · yellow · blue · bright black 에서 파생한다(`syntax_theme.diagnosticsFromTheme`).
+    diagnostic_error,
+    diagnostic_warning,
+    diagnostic_info,
+    diagnostic_hint,
     /// **구문 강조 전경색**(native-editor-visual-mapping.md §5.3). 이름은 `session.syntax_capture.Role`과
     /// 하나씩 대응하며, chrome은 그 모듈을 **import 하지 않는다** — config `ChromeTabStyle`을 중립
     /// enum으로 옮기는 것과 같은 모양이고, 옮기는 일은 platform이 한다.
@@ -384,6 +390,12 @@ pub const ThemeColors = struct {
     /// 함수**에서 색을 받는다.
     diff_added: Rgb,
     diff_removed: Rgb,
+    /// 진단 네 색(§5.4). 호출자가 `syntax_theme.diagnosticsFromTheme(theme)` 를 넘긴다. **기본값이 있는 이유**는 테스트·smoke
+    /// 의 `ThemeColors` 리터럴 열다섯 곳이 이 값을 몰라도 되게 하려는 것이다 — 제품은 늘 채운다(`chrome_theme.tokensFor`).
+    diagnostic_error: Rgb = .{ .r = 235, .g = 80, .b = 80 },
+    diagnostic_warning: Rgb = .{ .r = 220, .g = 180, .b = 60 },
+    diagnostic_info: Rgb = .{ .r = 90, .g = 150, .b = 230 },
+    diagnostic_hint: Rgb = .{ .r = 150, .g = 150, .b = 150 },
 };
 
 /// 한 테마 = 토큰 묶음. `Tokens.base(theme)`가 resolved 테마 색에서 15개 ColorRole을 채운다(C0 구현).
@@ -496,6 +508,10 @@ pub const Tokens = struct {
         palette.set(.terminal_bg, theme.terminal_background);
         palette.set(.diff_added_bg, theme.diff_added);
         palette.set(.diff_removed_bg, theme.diff_removed);
+        palette.set(.diagnostic_error, theme.diagnostic_error);
+        palette.set(.diagnostic_warning, theme.diagnostic_warning);
+        palette.set(.diagnostic_info, theme.diagnostic_info);
+        palette.set(.diagnostic_hint, theme.diagnostic_hint);
         // **구문 색은 본문색으로 시작한다 — 그것이 "무색"이다.** 실제 색은 `setSyntax`가 나중에
         // 덮는다(`chrome_theme.tokensFor`가 `syntax_theme.fromTheme`에서 받아 넘긴다). 여기서
         // 안 채우면 `EnumArray`가 미초기화로 남아 쓰레기 색이 나온다.

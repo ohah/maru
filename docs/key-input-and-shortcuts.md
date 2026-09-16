@@ -286,6 +286,12 @@ Term에서도** 그 chord가 소비된다. 그런데 **편집기 Term에는 PTY�
 **전역 표에 같은 chord 가 없어야** 통과시킨다(있으면 ⑵ 로 근거를 적어야 한다). `needs_editable = false`
 — 읽기 전용 문서에서도 구간 사이를 오가는 것은 편집이 아니다.
 
+**`F8`·`⇧F8` — 다음/이전 진단(2026-09-17, [시각 매핑](native-editor-visual-mapping.md) §5.4).** 두 번째 기능키 쌍.
+전수 대조는 `F7` 과 같다 — 기능키는 IME 를 거치지 않고, ①ʹ 선-가로채기·② 메뉴 keyEquivalent·③ʹ 편집기 앞 갈래 어디에도
+`F8` 이 없으며(`grep function = 8` 이 컨텍스트 표의 이 두 줄뿐), 전역 표에도 없다. 터미널 Term 에서는 `CSI 19~` 로 나간다.
+VS Code 의 `editor.action.marker.next/prev` 가 이 키다. `needs_editable = false`(읽기 전용 문서의 오류 사이를 오가는 것도 편집이
+아니다). `ETX4` 의 ⑶ 수는 넷이 됐다.
+
 #### 충돌 전수 대조 (2026-09-07)
 
 [diff·떠 있는 UI·설정](native-editor-ui.md) §9.1 이 *"충돌 목록은 구현 슬라이스에서 전수 조사한다"*,

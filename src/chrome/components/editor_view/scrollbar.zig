@@ -18,6 +18,7 @@ const chrome = @import("../../../chrome.zig");
 const scroll_area = @import("../../ui/scroll_area.zig");
 const continuous_drag = @import("../../ui/continuous_drag.zig");
 const frame = @import("frame.zig");
+const diagnostic = @import("diagnostic.zig");
 
 const draw = chrome.draw;
 const tokens = chrome.tokens;
@@ -55,7 +56,11 @@ pub const Props = struct {
     change_kind: frame.RowBand = .none,
     /// 줄 → 시각 행(랩). `null` 이면 줄이 곧 행이다 — `match_rows` 가 이미 옮겨진 것과 달리 띠는 줄 축이라 여기서 옮긴다.
     change_row_cache: ?*const frame.RowCache = null,
+    /// **진단 마커**(§5.4) — 시각 행 + severity(호출자가 옮긴다, `match_rows` 와 같다). 우선순위: 현재 검색 > 검색 > 진단 > 변경 띠.
+    diag_rows: []const DiagRow = &.{},
 };
+
+pub const DiagRow = struct { row: u32, level: diagnostic.Level };
 
 /// 변경 위치 마커의 색 — 본문 띠와 같은 role(§4.1a).
 pub fn changeMarkerRole(kind: frame.RowBand) tokens.ColorRole {
@@ -117,7 +122,7 @@ pub fn build(props: Props, out: []draw.Op) Written {
         const usable = @max(track_h - marker_h_px, 0);
         const slots = @min(@as(usize, @intCast(@max(@divTrunc(usable, marker_h_px), 1))), marker_budget);
 
-        var hit = [_]u8{0} ** marker_budget; // 0=없음 1=매치 2=현재 3=변경 띠
+        var hit = [_]u8{0} ** marker_budget; // 0=없음 1=매치 2=현재 3=변경 띠 4..7=진단(4 + severity)
         // **변경 띠를 먼저 깐다** — 검색 마커가 같은 슬롯에 오면 그것이 이긴다(§4.1a 「검색 마커가 위에 선다」).
         if (props.change_kind != .none) {
             for (props.change_bands, 0..) |band, line| {
@@ -129,6 +134,12 @@ pub fn build(props: Props, out: []draw.Op) Written {
                 if (hit[slot] == 0) hit[slot] = 3;
             }
         }
+        // **진단은 변경 띠 위, 검색 아래**(§5.4). 같은 슬롯에 진단이 여럿이면 severity 높은 것.
+        for (props.diag_rows) |dr| {
+            const slot = @min((@as(usize, dr.row) * slots) / @as(usize, props.total_visual_rows), slots - 1);
+            const v: u8 = 4 + @intFromEnum(dr.level);
+            if (hit[slot] == 0 or hit[slot] == 3 or (hit[slot] >= 4 and hit[slot] < v)) hit[slot] = v;
+        }
         for (props.match_rows, 0..) |row, i| {
             // 슬롯을 `slots - 1` 로 clamp 하므로 행을 따로 clamp 하지 않는다 — 문서 밖 행이
             // 와도 마지막 슬롯에 떨어질 뿐이다(둘 다 막으면 뒤엣것이 판정자에 안 잡힌다).
@@ -139,7 +150,7 @@ pub fn build(props: Props, out: []draw.Op) Written {
             const is_current = props.current_match != null and props.current_match.? == i;
             // **현재 일치가 이긴다.** 같은 슬롯에 여럿이 겹치면 그 하나는 반드시 보여야 한다 —
             // 사용자가 지금 어디를 보고 있는지가 이 표시의 첫 질문이다.
-            if (is_current or hit[slot] == 0 or hit[slot] == 3) hit[slot] = if (is_current) 2 else 1;
+            if (is_current or hit[slot] == 0 or hit[slot] >= 3) hit[slot] = if (is_current) 2 else 1;
         }
         for (hit[0..slots], 0..) |mark, slot| {
             if (mark == 0) continue;
@@ -159,6 +170,7 @@ pub fn build(props: Props, out: []draw.Op) Written {
                 .fill_role = switch (mark) {
                     2 => marker_current_role,
                     3 => changeMarkerRole(props.change_kind),
+                    4...7 => @as(diagnostic.Level, @enumFromInt(mark - 4)).role(),
                     else => marker_role,
                 },
             } };
@@ -561,6 +573,32 @@ test "SBM8 변경 위치 마커 — kind 인 줄만, 본문 띠의 role, 검색 
     p.match_rows = &rows20;
     _ = build(p, &ops);
     try testing.expectEqual(ops[0].quad.rect.y, y_line10_row20);
+}
+
+test "SBM9 진단 마커 — severity 색, 같은 슬롯은 높은 severity, 변경 띠 위·검색 아래 (§5.4)" {
+    var ops: [16]draw.Op = undefined;
+    var p = testProps(100, 0);
+    // 행 10 warning, 행 10 error(같은 슬롯 → error), 행 50 hint, 행 90 info.
+    const diags = [_]DiagRow{ .{ .row = 10, .level = .warning }, .{ .row = 10, .level = .err }, .{ .row = 50, .level = .hint }, .{ .row = 90, .level = .info } };
+    p.diag_rows = &diags;
+    const w = build(p, &ops);
+    try testing.expectEqual(@as(usize, 4), w.ops); // 마커 셋 + thumb
+    try testing.expectEqual(tokens.ColorRole.diagnostic_error, ops[0].quad.fill_role);
+    try testing.expectEqual(tokens.ColorRole.diagnostic_hint, ops[1].quad.fill_role);
+    try testing.expectEqual(tokens.ColorRole.diagnostic_info, ops[2].quad.fill_role);
+    // 변경 띠와 겹치면 진단이 이긴다; 검색과 겹치면 검색이 이긴다.
+    var bands = [_]frame.RowBand{.none} ** 100;
+    bands[10] = .added;
+    bands[50] = .added;
+    p.change_bands = &bands;
+    p.change_kind = .added;
+    const rows = [_]u32{50};
+    p.match_rows = &rows;
+    const w2 = build(p, &ops);
+    try testing.expectEqual(@as(usize, 4), w2.ops);
+    try testing.expectEqual(tokens.ColorRole.diagnostic_error, ops[0].quad.fill_role); // 띠(10) 위에 진단
+    try testing.expectEqual(marker_role, ops[1].quad.fill_role); // 진단(50) 위에 검색
+    try testing.expectEqual(tokens.ColorRole.diagnostic_info, ops[2].quad.fill_role);
 }
 
 test "SBM5 목록이 비면 마커를 안 그린다 — 찾기가 닫히면 표시도 없다 (§4.1a)" {

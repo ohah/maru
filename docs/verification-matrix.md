@@ -621,6 +621,9 @@ recovery 2/input 4, historical·clipboard 각 1까지 도달했지만 frontmost�
 exact-frontmost PID·앱 active·first responder 재확인을 추가했고, 회귀 boundary는 수정 전 실패·수정 후 3/3 통과했다.
 이 수정의 Swift typecheck와 `macos-app-bundle` build·strict code-sign 검증도 통과했다. `/tmp` 승인 앱은 보존했으며,
 새 제품 앱의 staging·TCC 승인·실측은 남아 있다. 기존 승인 앱을 수정본의 통과 증거로 쓰지 않는다.
+2026-09-16 PR #3783 Linux `check`는 후보 관측 게시자 테스트의 libc 의존성 미선언으로 Debug·ReleaseFast
+컴파일에서 실패했다. 두 focused test root에 libc 의존성을 명시했고 macOS Debug·ReleaseFast 10+10은 재통과했다.
+Linux CI 재검증은 남아 있다. 이전 macOS 전체 검사 통과는 Linux 컴파일 통과의 증거가 아니다.
 v2b0b는 별도 Swift opt-in producer가 title 없는 전체 inventory 5 triplet을 메모리에만 보존하고, exact-once 동기식 C ABI로
 bounded JSON과 사전 고정한 absent target을 Zig에 빌려준다. Zig entrypoint 하나가 schema/window/byte cap, 기존 pure
 reducer·series validator와 same-directory inode→`link(2)` canonical 배타 게시를 소유한다. raw inventory 중간 파일,

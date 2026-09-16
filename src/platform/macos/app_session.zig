@@ -2273,6 +2273,11 @@ const TermRuntime = struct {
     /// 세로는 좌우 값이 같지만(§3.5 세로 공유) **자리가 둘**이라 각각 들어야 어느 쪽을 눌렀는지 안다.
     editor_scrollbar_right: ?chrome.ui.scroll_area.ScrollbarGeometry = null,
     editor_horizontal_scrollbar_right: ?chrome.components.editor_view.scrollbar.HorizontalGeometry = null,
+    /// **미니맵 스트립의 자리**(창 절대 px — §6.1). 렌더가 굳힌다; 없으면(끔·접힘·비교 뷰) `null` 이고 클릭은 본문으로
+    /// 간다. `editor_minimap_top`·`_rows` 는 그 프레임의 창(비례 스크롤)이라 클릭의 y → 줄 환산이 그리는 것과 같다.
+    editor_minimap_rect: ?maru.session.SplitRect = null,
+    editor_minimap_top: usize = 0,
+    editor_minimap_rows: usize = 0,
     /// 비교 뷰 **오른쪽 열**의 가로 위치. 계약이 *"각 편집기가 자기 안에서 스크롤한다"*를 요구하므로
     /// (editor-surface-dock §3.5) 좌우가 각자 든다 — 공유하면 양쪽 줄 길이가 달라 한쪽을 따라갈 때
     /// 다른 쪽이 엉뚱한 곳을 본다. 단일 파일 편집기는 이 값을 쓰지 않는다(§4.1e).
@@ -6685,7 +6690,7 @@ pub const AppSession = struct {
     ///
     /// 편집기는 축이 둘이라 태그도 둘이다 — 세로는 `(논리 줄, 조각)`, 가로는 **열**로 해석하므로
     /// 같은 태그로 묶으면 어느 축의 offset인지 모른다.
-    scrollbar_drag_target: enum { none, dock_list, sidebar, overlay, editor_vertical, editor_horizontal } = .none,
+    scrollbar_drag_target: enum { none, dock_list, sidebar, overlay, editor_vertical, editor_horizontal, editor_minimap } = .none,
     /// 편집기 **가로** 막대의 드래그 수명. 세로는 도크와 공유하는 `dock_list_scroll_drag`를 쓰지만
     /// 그것은 세로 전용 타입이라(`grab_dy` + `ScrollbarGeometry`) 가로는 자기 짝이 필요하다.
     editor_hscroll_drag: chrome.components.editor_view.scrollbar.HorizontalDrag = .{},

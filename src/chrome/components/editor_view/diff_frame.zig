@@ -19,9 +19,13 @@ const scrollbar_mod = @import("scrollbar.zig");
 const frame = @import("frame.zig");
 const gutter = @import("gutter.zig");
 const geometry = @import("geometry.zig"); // 본문 열 수 — 가로 막대가 서는지 판정할 때 쓴다
+const minimap = @import("minimap.zig");
 
 /// 한 쪽이 그릴 것.
 pub const Side = struct {
+    /// **미니맵**(§6.1 N5a) — 단일 편집기만 채운다(비교 뷰는 N5b). `cols` 는 설정 `editor.minimap-width`(0 = 끔),
+    /// 실제 px 는 `minimapPx` 가 정한다(좁으면 접힌다).
+    minimap: ?MinimapSide = null,
     /// 그 열의 줄마다 **위 위젯 행**(S1.5·S2 — 충돌 구간 머리의 「고르기」 줄). `lines` 와 같은 축이고
     /// 짧은 배열·`null` 항목을 허용한다. 비교 뷰는 안 쓴다(읽기 전용이라 고를 것이 없다).
     widgets: []const ?frame.content.Widget = &.{},
@@ -163,6 +167,18 @@ pub fn columns(inner: draw.Rect, cell_w_px: u16) Columns {
     };
 }
 
+/// 한 열의 미니맵 입력 — 설정 열 수 + 프레임이 그릴 값.
+pub const MinimapSide = struct {
+    cols: u16,
+    input: frame.MinimapInput,
+};
+
+/// 이 열이 미니맵에 내주는 px(§6.1). **본문 열 수·히트 기하·보이는 열 수가 전부 이 함수를 지난다** — 렌더가
+/// `total_cols` 를 이만큼 줄인 폭에서 재므로 호출자도 같은 값을 빼야 「그려진 것 = 클릭되는 것」이다.
+pub fn minimapPx(inner_w: u32, cell_w_px: u16, minimap_cols: u16) u32 {
+    return minimap.widthPx(inner_w, cell_w_px, scrollbar_metrics.gutterPx(), minimap_cols);
+}
+
 /// 한 열의 폭에서 나오는 값들. **편집기 하나든 diff의 한 쪽이든 같은 계산이다** — 두 곳에 두면
 /// 좌우 열만 다르게 어긋난다.
 pub const SideMetrics = struct {
@@ -257,11 +273,16 @@ pub fn buildSide(
     // **가로 막대가 자리를 먹으므로 높이를 먼저 줄인다**(§4.1a) — 판정 규칙은 `frame`이 소유한다.
     // 열 수(`total_cols`)를 알아야 판정할 수 있는데 그 값이 이 계산에서 나오므로, 한 번 재고 나서
     // 막대가 서면 다시 잰다. 두 번째 계산은 폭을 안 바꾸므로(막대는 아래에만 붙는다) 열 수는 같다.
-    const probe = sideMetrics(rect.w, rect.h, shared.cell_w_px, shared.cell_h_px);
+    // **미니맵이 폭을 먼저 가져간다**(§6.1) — 그 나머지에서 열 수·막대 자리를 잰다.
+    const mm_px: u32 = if (side.minimap) |mm| minimapPx(rect.w, shared.cell_w_px, mm.cols) else 0;
+    const body_w = rect.w -| mm_px;
+    const probe = sideMetrics(body_w, rect.h, shared.cell_w_px, shared.cell_h_px);
     const shows_h_bar = shared.force_horizontal_bar orelse
         frame.showsHorizontalBar(shared.wrap, side.content_max_cols, geometry.compute(probe.total_cols, side.total_lines orelse side.lines.len, .{}).content.width);
-    const m = sideMetricsWith(rect.w, rect.h, shared.cell_w_px, shared.cell_h_px, shows_h_bar);
+    const m = sideMetricsWith(body_w, rect.h, shared.cell_w_px, shared.cell_h_px, shows_h_bar);
     return frame.build(.{
+        .minimap = if (side.minimap) |mm| mm.input else null,
+        .minimap_px = mm_px,
         .line_colors = side.line_colors,
         .line_seeks = side.line_seeks,
         .lines = side.lines,

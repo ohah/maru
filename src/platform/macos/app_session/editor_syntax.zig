@@ -27,6 +27,25 @@ const editor_language = maru.session.editor.language;
 pub const max_color_cols = syntax_colors.max_color_cols;
 
 /// 한 문서의 구문 색 상태. **`Term.rt`가 소유한다** — 문서와 수명이 같다.
+/// 한 창(본문 또는 미니맵)의 색 계산 저장소. 프레임마다 다시 채우되 **저장소는 재사용한다**.
+pub const ColorBufs = struct {
+    /// 질의 결과(문서 byte 축).
+    spans: std.ArrayList(syntax.Span) = .empty,
+    /// 색 계산의 저장소. **규칙과 함께 중립이 갖는다**(§2m.112).
+    colors: syntax_colors.Scratch = .{},
+    /// 위 층의 낱말로 옮긴 재료 — 역할이 정해진 스팬과 줄 경계.
+    byte_spans: std.ArrayList(syntax_colors.ByteSpan) = .empty,
+    line_bounds: std.ArrayList(syntax_colors.LineBounds) = .empty,
+
+    pub fn deinit(self: *ColorBufs, allocator: std.mem.Allocator) void {
+        self.spans.deinit(allocator);
+        self.colors.deinit(allocator);
+        self.byte_spans.deinit(allocator);
+        self.line_bounds.deinit(allocator);
+        self.* = .{};
+    }
+};
+
 pub const State = struct {
     /// grammar가 없거나 파서를 못 세우면 `null`이고, 그러면 이 문서는 끝까지 무색이다(§5).
     provider: ?syntax.Provider = null,
@@ -35,13 +54,10 @@ pub const State = struct {
     /// 그 사이 이 문서는 무색이거나(전체 파싱) 직전 색이다(증분).
     pending: bool = false,
 
-    /// 질의 결과(문서 byte 축). 프레임마다 다시 채우되 **저장소는 재사용한다**.
-    spans: std.ArrayList(syntax.Span) = .empty,
-    /// 색 계산의 저장소. **규칙과 함께 중립이 갖는다**(§2m.112).
-    colors: syntax_colors.Scratch = .{},
-    /// 위 층의 낱말로 옮긴 재료 — 역할이 정해진 스팬과 줄 경계.
-    byte_spans: std.ArrayList(syntax_colors.ByteSpan) = .empty,
-    line_bounds: std.ArrayList(syntax_colors.LineBounds) = .empty,
+    /// 색 버퍼 — 본문 창의 것. **미니맵 창은 자기 것을 따로 든다**(`minimap_bufs`): 같은 프레임에 두 창의 색을
+    /// 만드는데 저장소를 나눠 쓰면 뒤에 만든 쪽이 앞의 슬라이스를 덮는다(§6.1).
+    bufs: ColorBufs = .{},
+    minimap_bufs: ColorBufs = .{},
 
     /// 심볼 목록(§7.5). 프레임마다 다시 채우되 **저장소는 재사용한다** — 색 버퍼들과 같은 규율이다.
     symbols: std.ArrayList(syntax.Provider.Symbol) = .empty,
@@ -68,10 +84,8 @@ pub const State = struct {
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
         if (self.provider) |*p| p.deinit();
-        self.spans.deinit(allocator);
-        self.colors.deinit(allocator);
-        self.byte_spans.deinit(allocator);
-        self.line_bounds.deinit(allocator);
+        self.bufs.deinit(allocator);
+        self.minimap_bufs.deinit(allocator);
         self.symbols.deinit(allocator);
         self.crumb.deinit(allocator);
         self.crumb_bounds.deinit(allocator);
@@ -304,6 +318,34 @@ pub fn lineColors(
     /// 접힘 번호 표(보이는 줄 → 1-based 원본 줄). **비어 있으면 두 축이 같다.**
     visible_numbers: []const ?u32,
 ) []const []const content.ColorSpan {
+    return lineColorsInto(self, &self.bufs, allocator, doc_content, line_idx, first_line, line_count, tab_width, visible_numbers);
+}
+
+/// **미니맵 창**의 색(§6.1) — 본문과 같은 규칙, 다른 저장소. 반환 슬라이스는 `first_line` 기준 상대 첨자다.
+pub fn minimapColors(
+    self: *State,
+    allocator: std.mem.Allocator,
+    doc_content: []const u8,
+    line_idx: maru.session.editor.line_index.LineIndex,
+    first_line: usize,
+    line_count: usize,
+    tab_width: u16,
+    visible_numbers: []const ?u32,
+) []const []const content.ColorSpan {
+    return lineColorsInto(self, &self.minimap_bufs, allocator, doc_content, line_idx, first_line, line_count, tab_width, visible_numbers);
+}
+
+fn lineColorsInto(
+    self: *State,
+    bufs: *ColorBufs,
+    allocator: std.mem.Allocator,
+    doc_content: []const u8,
+    line_idx: maru.session.editor.line_index.LineIndex,
+    first_line: usize,
+    line_count: usize,
+    tab_width: u16,
+    visible_numbers: []const ?u32,
+) []const []const content.ColorSpan {
     const p = &(self.provider orelse return &.{});
     if (line_count == 0) return &.{};
 
@@ -323,8 +365,8 @@ pub fn lineColors(
         .end = @intCast(end_line.contentEnd()),
     };
 
-    p.spansForRange(allocator, doc_content, range, &self.spans);
-    if (self.spans.items.len == 0) return &.{};
+    p.spansForRange(allocator, doc_content, range, &bufs.spans);
+    if (bufs.spans.items.len == 0) return &.{};
 
     // **여기부터는 중립이 소유한다**(`chrome…editor_view.syntax_colors`, §2m.112). 이 파일에 있는
     // 동안 「마지막이 이긴다」와 탭 열 계산이 macOS 것이었고, Windows 가 색을 칠하려면 같은 규칙을
@@ -332,29 +374,29 @@ pub fn lineColors(
     //
     // **역할이 `null` 인 스팬은 버린다** — 옛 코드가 `roleOf(...) orelse continue` 로 **건너뛰던**
     // 것과 같은 뜻이다(덮어쓰지 않는다). 그래서 경계에서 버려도 결과가 바뀌지 않는다.
-    self.byte_spans.clearRetainingCapacity();
-    self.byte_spans.ensureTotalCapacity(allocator, self.spans.items.len) catch return &.{};
-    for (self.spans.items) |sp| {
+    bufs.byte_spans.clearRetainingCapacity();
+    bufs.byte_spans.ensureTotalCapacity(allocator, bufs.spans.items.len) catch return &.{};
+    for (bufs.spans.items) |sp| {
         const role = maru.syntax_colors.roleForCapture(sp.capture) orelse continue;
-        self.byte_spans.appendAssumeCapacity(.{ .start = sp.start, .end = sp.end, .role = role });
+        bufs.byte_spans.appendAssumeCapacity(.{ .start = sp.start, .end = sp.end, .role = role });
     }
 
     // 줄 경계는 **CRLF 를 아는 쪽**이 준다(`LineIndex.Line.contentEnd()`).
-    self.line_bounds.clearRetainingCapacity();
-    self.line_bounds.ensureTotalCapacity(allocator, last_line - first_line) catch return &.{};
+    bufs.line_bounds.clearRetainingCapacity();
+    bufs.line_bounds.ensureTotalCapacity(allocator, last_line - first_line) catch return &.{};
     var li: usize = first_line;
     while (li < last_line) : (li += 1) {
         const src = sourceLineFor(visible_numbers, li) orelse break;
         const line = line_idx.line(src) orelse break;
-        self.line_bounds.appendAssumeCapacity(.{ .start = @intCast(line.start), .end = @intCast(line.contentEnd()) });
+        bufs.line_bounds.appendAssumeCapacity(.{ .start = @intCast(line.start), .end = @intCast(line.contentEnd()) });
     }
 
     return syntax_colors.lineColors(
-        &self.colors,
+        &bufs.colors,
         allocator,
         doc_content,
-        self.line_bounds.items,
-        self.byte_spans.items,
+        bufs.line_bounds.items,
+        bufs.byte_spans.items,
         tab_width,
         first_line,
     );

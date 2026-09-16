@@ -19,6 +19,7 @@ pub const content = @import("content.zig");
 const geometry = @import("geometry.zig");
 const gutter = @import("gutter.zig");
 const scrollbar = @import("scrollbar.zig");
+const minimap = @import("minimap.zig");
 const surface = @import("surface.zig");
 const visual_map = @import("../../ui/visual_map.zig");
 const scroll_area = @import("../../ui/scroll_area.zig");
@@ -250,6 +251,20 @@ pub const Props = struct {
     /// 스크롤바가 설 오른쪽 여백(px).
     scrollbar_gutter_px: u32,
     metrics: scroll_area.ScrollbarMetrics,
+    /// **미니맵**(§6.1 N5a) — 본문 오른쪽·막대 왼쪽 스트립. `minimap_px` 가 0 이면 안 그린다(끄거나 접혔다).
+    /// 폭은 호출자가 `minimap.widthPx` 로 정해 `total_cols` 에서 **이미 뺀** 값이다 — 여기서 다시 빼지 않는다.
+    minimap: ?MinimapInput = null,
+    minimap_px: u32 = 0,
+};
+
+/// 미니맵이 그릴 것(§6.1). `top`·슬라이더는 호출자가 정한다(`minimap.topLine` — 비례 스크롤은 지난 프레임의
+/// 스크롤 상한을 읽으므로 한 프레임 늦을 수 있다; 색 창도 같은 `top` 으로 만든다).
+pub const MinimapInput = struct {
+    top: usize,
+    slider_first: usize,
+    slider_len: usize,
+    /// `top` 기준 상대 첨자의 색 표(`minimap.Props.window_colors`).
+    window_colors: []const []const content.ColorSpan = &.{},
 };
 
 /// 바뀐 **글자** 범위(그 줄 안 바이트). `session/editor/intraline.zig`가 계산하고, 무엇이 한 글자인지는
@@ -752,11 +767,33 @@ pub fn build(props: Props, scratch: Scratch) Written {
         marker_n += 1;
     }
 
+    // ── 4b) 미니맵 ────────────────────────────────────────────────────────────
+    // 본문 끝(열 수 × 셀 폭)부터 `minimap_px` 만큼. 막대는 그 **오른쪽**에 선다(아래 `content.w` 가 그만큼 넓다).
+    const mm_base = caret_base + caret_ops;
+    const mm_ops: usize = if (props.minimap != null and props.minimap_px > 0) blk: {
+        const mi = props.minimap.?;
+        const mw = minimap.build(.{
+            .rect = .{
+                .x = props.rect.x + @as(i32, @intCast(@as(u32, props.total_cols) * props.cell_w_px)),
+                .y = props.rect.y,
+                .w = props.minimap_px,
+                .h = @as(u32, visual_budget) * props.cell_h_px,
+            },
+            .lines = props.lines,
+            .window_colors = mi.window_colors,
+            .top = mi.top,
+            .slider_first = mi.slider_first,
+            .slider_len = mi.slider_len,
+            .tab_width = props.tab_width,
+        }, scratch.ops[mm_base..]);
+        break :blk mw.ops;
+    } else 0;
+
     const sw = scrollbar.build(.{
         .content = .{
             .x = @floatFromInt(props.rect.x),
             .y = @floatFromInt(props.rect.y),
-            .w = @floatFromInt(@as(u32, props.total_cols) * props.cell_w_px),
+            .w = @floatFromInt(@as(u32, props.total_cols) * props.cell_w_px + props.minimap_px),
             // **실제로 보이는 높이**여야 한다. 창 전체 높이를 주면 문서가 늘 다 들어간다고
             // 판정돼 막대가 안 그려진다.
             .h = @floatFromInt(@as(u32, visual_budget) * props.cell_h_px),
@@ -768,7 +805,7 @@ pub fn build(props: Props, scratch: Scratch) Written {
         .metrics = props.metrics,
         .match_rows = marker_rows[0..marker_n],
         .current_match = marker_current,
-    }, scratch.ops[caret_base + caret_ops ..]);
+    }, scratch.ops[mm_base + mm_ops ..]);
 
     // ── 5) 가로 스크롤바 ───────────────────────────────────────────────────────
     // **본문 아래 거터에 선다.** 호출자가 그 자리를 이미 비워 두었다(`showsHorizontalBar`로 물어
@@ -786,7 +823,7 @@ pub fn build(props: Props, scratch: Scratch) Written {
             .first_col = props.first_col,
             .cell_w_px = props.cell_w_px,
             .metrics = props.metrics,
-        }, scratch.ops[caret_base + caret_ops + sw.ops ..])
+        }, scratch.ops[mm_base + mm_ops + sw.ops ..])
     else
         scrollbar.HorizontalWritten{ .ops = 0 };
 
@@ -794,7 +831,7 @@ pub fn build(props: Props, scratch: Scratch) Written {
         .total_visual_rows = total_visual,
         .max_top_line = max_top.line,
         .max_top_piece = max_top.piece,
-        .ops = bg.ops + cw.ops + gw.ops + sw.ops + band_ops + sel_ops + find_ops + caret_ops + hw.ops,
+        .ops = bg.ops + cw.ops + gw.ops + sw.ops + band_ops + sel_ops + find_ops + caret_ops + mm_ops + hw.ops,
         .visual_rows = cw.visual_rows,
         .truncated = cw.truncated_rows > 0 or gw.dropped_rows > 0,
         .scrollbar = sw.geometry,

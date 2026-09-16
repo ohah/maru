@@ -708,7 +708,9 @@ pub fn minimapPress(self: *AppSession, term: *Term, x_px: f64, y_px: f64) Minima
     return .jumped;
 }
 
-/// 잡은 슬라이더를 끈다(§6.2). 잡은 것이 없으면 아무것도 안 한다.
+/// 잡은 슬라이더를 끈다(§6.2). 잡은 것이 없으면 아무것도 안 한다 — 그 갈래는 **닿지 않는다**(적대적 6회차 F5, 등가):
+/// 여기 오는 길은 `scrollbar_drag_target == .editor_minimap` 뿐이고 그 target 은 잡기(`.grabbed`)만 세우며 뗄 때 둘을 함께
+/// 비운다. 남기는 이유는 `?` 를 푸는 자리가 필요해서다.
 fn minimapDrag(self: *AppSession, term: *Term, y_px: f64) void {
     const g = self.editor_minimap_grab orelse return;
     const d_px = y_px - g.y_px;
@@ -10957,6 +10959,51 @@ test "MMP2 미니맵의 축은 보이는 줄이다 — 접으면 스트립에서
     try testing.expect(nums.len > term.rt.editor_first_line);
     // 보이는 줄 i(≥ 1)의 문서 번호 = i + 200 (+1, 1-기반).
     try testing.expectEqual(@as(?u32, @intCast(term.rt.editor_first_line + 200 + 1)), nums[term.rt.editor_first_line]);
+
+    // **다 들어가는 문서의 잡기는 1:1 이다**(§6.2 `k = 1`) — 슬라이더 한 행 = 줄 하나. 스트립보다 짧은 문서는 창이 0 이고 슬라이더가
+    // 줄 자리 그대로라, 비례의 역수를 쓰면 손보다 빨리 달아난다(적대적 6회차 F1: 긴 문서 픽스처만 있었다).
+    {
+        const mr5 = term.rt.editor_minimap_rect orelse return error.NoMinimap;
+        try testing.expectEqual(@as(usize, 0), term.rt.editor_minimap_top);
+        const start = term.rt.editor_first_line;
+        const gy = @as(f64, @floatFromInt(mr5.y)) + @as(f64, @floatFromInt((start + 1) * chrome_editor.minimap.line_px)) + 1.0;
+        fx.session.mouse(1, cx, gy, 0, 0);
+        try testing.expect(scrollbarCaptureActive(fx.session));
+        fx.session.mouse(2, cx, gy + 20.0, 0, 0); // +10 행
+        try testing.expectEqual(start + 10, term.rt.editor_first_line);
+        // 반 행은 **반올림**이다(+23px = 11.5 행 → 12) — 버리면 손이 한 행 뒤처진다(적대적 6회차 F6).
+        fx.session.mouse(2, cx, gy + 23.0, 0, 0);
+        try testing.expectEqual(start + 12, term.rt.editor_first_line);
+        fx.session.mouse(3, cx, gy + 23.0, 0, 0);
+    }
+
+    // **비례의 분자·분모도 보이는 줄 축이다** — 스트립보다 긴 문서를 접고 끝까지 내리면 창의 첫 줄은 `보이는 줄 − rows` 다. 문서
+    // 줄 수(접힘 전)로 재면 창이 보이는 줄 밖으로 나가 스트립이 빈다(적대적 8회차 H3: 짧은 문서에서는 창이 0 이라 안 보였다).
+    {
+        var buf2: std.ArrayList(u8) = .empty;
+        defer buf2.deinit(allocator);
+        try buf2.appendSlice(allocator, "a:\n");
+        for (0..200) |_| try buf2.appendSlice(allocator, "  x\n");
+        for (0..900) |_| try buf2.appendSlice(allocator, "b\n");
+        try dir.dir.writeFile(testing.io, .{ .sub_path = "fold2.txt", .data = buf2.items });
+        const path2 = try std.fs.path.join(allocator, &.{ root, "fold2.txt" });
+        defer allocator.free(path2);
+        const term2 = try openPathInActivePane(fx.session, path2);
+        term2.rt.editor_wrap = false;
+        try testing.expect(foldAll(fx.session));
+        term2.rt.editor_first_line = 1_000_000;
+        var e1 = appendPaneFrame(fx.session, leaf, term2) orelse return error.EditorPaneDidNotDraw;
+        e1.dl.deinit(allocator);
+        fx.session.gpu_quads.clearRetainingCapacity();
+        var e2 = appendPaneFrame(fx.session, leaf, term2) orelse return error.EditorPaneDidNotDraw; // 상한을 안 프레임 뒤
+        e2.dl.deinit(allocator);
+        const mr6 = term2.rt.editor_minimap_rect orelse return error.NoMinimap;
+        const rows6 = term2.rt.editor_minimap_rows;
+        try testing.expectEqual(@as(usize, 902), editorLines(term2).len); // 보이는 줄: "a:" + 900 + 끝의 빈 줄
+        try testing.expect(rows6 < 902); // 전제: 보이는 줄이 스트립보다 길다
+        try testing.expectEqual(@as(usize, 902) - rows6, term2.rt.editor_minimap_top); // 문서 줄(1102)로 재면 758 이다
+        try testing.expect(countRuns(fx.session, mr6) >= rows6 - 1); // 창이 보이는 줄 안이라 스트립이 찼다(가로 막대 한 행 여유)
+    }
 }
 
 test "MMP3 미니맵의 검색 강조 — 찾는 동안 일치 행이 스트립에 행 전체로 서고, 현재 일치는 다른 색, 닫으면 사라진다 (제품 경계, §6.2)" {
@@ -11105,7 +11152,9 @@ test "MMP1 미니맵 — 본문 오른쪽·막대 왼쪽에 서고, 본문 열�
     }
     try testing.expect(slider);
 
-    // ⑵ **클릭은 굴리기다** — 스트립의 y 에 해당하는 줄이 화면 가운데 오고, caret(selection)은 그대로다.
+    // ⑵ **클릭은 굴리기다** — 스트립의 y 에 해당하는 줄이 화면 가운데 오고, caret(selection)은 그대로다. **선택을 실제로 둔다** —
+    //    `null` 을 `null` 과 비교하면 지우는 변이가 산다(적대적 6회차 F7).
+    term.rt.editor_selection = .{ .anchor_start = 6, .anchor_end = 6, .focus = 16 };
     const sel_before = term.rt.editor_selection;
     const rows_strip = term.rt.editor_minimap_rows;
     try testing.expect(rows_strip > 100);
@@ -11144,9 +11193,11 @@ test "MMP1 미니맵 — 본문 오른쪽·막대 왼쪽에 서고, 본문 열�
     const k: f64 = @as(f64, @floatFromInt(term.rt.editor_max_top_line)) / @as(f64, @floatFromInt(rows_strip - visible));
     try testing.expect(k > 1.0); // 전제: 2000 줄이 스트립보다 길다 — 비례의 역수가 1 을 넘는다
     fx.session.metal_dirty = false;
+    term.rt.editor_first_piece = 2; // 끌기도 줄의 첫 조각에 선다(8회차 H6 — 점프만 재고 있었다)
     fx.session.mouse(2, cx, gy + 40.0, 0, 0); // +20 행
     const want_drag: usize = grab_start + @as(usize, @intFromFloat(@round(20.0 * k)));
     try testing.expectEqual(want_drag, term.rt.editor_first_line);
+    try testing.expectEqual(@as(u32, 0), term.rt.editor_first_piece);
     try testing.expect(fx.session.metal_dirty);
     // 되돌리면(잡은 자리로) 잡은 순간의 값으로 돌아온다 — 누적이 아니라 **시작점 기준**이다.
     fx.session.mouse(2, cx, gy, 0, 0);
@@ -11209,6 +11260,14 @@ test "MMP1 미니맵 — 본문 오른쪽·막대 왼쪽에 서고, 본문 열�
         try testing.expectEqual(fl4, term.rt.editor_first_line);
         fx.session.mouse(3, cx, gy2, 0, 0);
         try testing.expect(!scrollbarCaptureActive(fx.session));
+        // **굳힌 창보다 위로 간 뒤**(다시 그리기 전) 스트립 맨 위를 누르면 잡기가 아니다 — `first_line < top` 이면 슬라이더는
+        // 창 밖(위)에 있다. 포화(`-|`)로 0 행부터를 슬라이더로 보면 없는 것을 잡는다(적대적 6회차 F2).
+        term.rt.editor_first_line = 0;
+        const gy3 = @as(f64, @floatFromInt(mr4.y)) + 3.0; // 1 행
+        fx.session.mouse(1, cx, gy3, 0, 0);
+        try testing.expect(!scrollbarCaptureActive(fx.session));
+        try testing.expectEqual(term.rt.editor_minimap_top + 1 - visible / 2, term.rt.editor_first_line); // 점프(가운데)
+        fx.session.mouse(3, cx, gy3, 0, 0);
     }
 
     // ⑸ **끄면 돌아온다** — 사각이 없고 본문 열이 전부이며, 스트립 자리를 눌러도 굴리기가 아니다.

@@ -124,6 +124,8 @@ pub fn build(props: Props, out: []draw.Op) Written {
                 if (band != props.change_kind) continue;
                 const row: usize = if (props.change_row_cache) |c| c.rowsBefore(line) else line;
                 const slot = @min((row * slots) / @as(usize, props.total_visual_rows), slots - 1);
+                // 띠는 검색보다 먼저 돌므로 이 시점의 슬롯은 0 아니면 3 이다 — `== 0` 검사는 **등가**다(적대적 7회차 G2).
+                // 남기는 이유는 순서를 바꾸는 편집이 우선순위를 조용히 뒤집지 않게 하려는 것이다.
                 if (hit[slot] == 0) hit[slot] = 3;
             }
         }

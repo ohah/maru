@@ -937,6 +937,27 @@ pub fn nativeCellsHaveAtlasPlacement(cells: []const NativeMetalCell) bool {
 /// gradient 채움). 셀 그리드(NativeMetalCell)와 **별개 파이프라인**으로 SDF anti-aliasing으로 그린다.
 /// tui 테마는 이 배열을 비워 두므로(셀 fill 유지) 시각이 안 바뀐다 — rich 테마만 lowering이 채운다(C4b-2~).
 /// 좌표는 backing 픽셀(좌상단 기준). 설계 근거: docs/layering-and-portability.md §5(C4b).
+/// `GpuQuad.layer` 의 이름 있는 값 — 렌더러가 quad 를 어느 패스에 넣는가.
+///
+/// 순서(터미널 레이어): `bottom` → 사이드바 bg → `header` → 터미널 셀 → **`image_backdrop`** →
+/// 텍스트-앞 이미지 → `under` → 사이드바 셀. `over` 만 모달 오버레이 레이어에서 그려진다.
+pub const quad_layer = struct {
+    /// 사이드바 밴드·배경 tint — 셀 위, 사이드바 제목 아래.
+    pub const under: u32 = 0;
+    /// 모달 배경 — 최상위(오버레이 레이어).
+    pub const over: u32 = 1;
+    /// 탭 밴드 — 터미널 셀보다 아래.
+    pub const bottom: u32 = 2;
+    /// 알림 배지 — 사이드바 bg strip 뒤·헤더 글리프 앞.
+    pub const header: u32 = 4;
+    /// **떠 있는 그림의 뒤판** — 터미널 셀 앞이면서 텍스트-앞 이미지(`pass >= 2`) 뒤.
+    ///
+    /// 이 한 자리가 없으면 화면 위에 뜨는 이미지가 자기 배경을 가질 수 없다: `bottom` 은 셀 뒤라
+    /// 터미널 글자가 판 위로 올라오고, `under`·`over` 는 이미지를 덮는다(마커 프리뷰가 「뒤 글자가
+    /// 비친다」로 보이던 자리 — 2026-09-15 사용자 제보).
+    pub const image_backdrop: u32 = 5;
+};
+
 pub const GpuQuad = extern struct {
     // 사각형 bounds(backing px).
     x: f32,
@@ -957,8 +978,10 @@ pub const GpuQuad = extern struct {
     // rect에 내접, apex=상단 중앙·base=하단, fill_color0 단색 + edge AA; corner/border 무시). 셰이더가 3에서 분기.
     gradient_kind: u32,
     // C4b: 합성 레이어. 0=under(사이드바 밴드 — 셀 part1 위·사이드바 제목 아래), 1=over(모달 — 셀 전체
-    // 위·모달 텍스트 아래, 최상위), 2=bottom(탭 밴드 — part1 터미널·탭 제목 '앞'·아래, C4b-5). draw가 layer로
-    // quad 패스를 셋(bottom→under→over)으로 갈라 z를 맞춘다(모달-1 + C4b-5).
+    // 위·모달 텍스트 아래, 최상위), 2=bottom(탭 밴드 — part1 터미널·탭 제목 '앞'·아래, C4b-5),
+    // 4=header(사이드바 bg strip 뒤·헤더 글리프 앞 — 알림 배지), 5=image_backdrop(터미널 셀 앞·**텍스트-앞
+    // 이미지 뒤** — 떠 있는 그림의 뒤판). draw가 layer로 quad 패스를 갈라 z를 맞춘다. 이름 있는 값은
+    // `quad_layer`가 들고 있다.
     layer: u32,
     // 이 quad를 자를 backing-pixel 뷰포트(좌상단 원점). `clip_w == 0`이면 클리핑 없음이다.
     //

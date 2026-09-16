@@ -380,7 +380,10 @@ typedef struct MaruAppHostGpuQuad {
     uint32_t fill_color1;    /* gradient 끝색(solid면 무시) */
     uint32_t border_color;   /* 0xAARRGGBB */
     uint32_t gradient_kind;  /* 0=solid, 1=vertical(top→bottom), 2=horizontal(left→right), 3=위 삼각형(말풍선 caret, fill_color0 단색+edge AA; corner/border 무시) */
-    uint32_t layer;          /* C4b: 0=under(사이드바 밴드), 1=over(모달 최상위), 2=bottom(탭 밴드 — part1 앞·아래) — draw가 layer로 3패스 분리 */
+    uint32_t layer;          /* C4b: 0=under(사이드바 밴드), 1=over(모달 최상위), 2=bottom(탭 밴드 — part1 앞·아래),
+                                4=header(사이드바 bg strip 뒤·헤더 글리프 앞 — 알림 배지),
+                                5=image_backdrop(터미널 셀 앞·텍스트-앞 이미지 뒤 — 떠 있는 그림의 뒤판)
+                                — draw가 layer로 패스를 가른다 */
     /* ABI v95: 이 quad를 자를 backing-pixel 뷰포트(좌상단 원점). clip_w==0이면 클리핑 없음(기존 동작).
        rect는 원본 그대로 두고 shader가 모양을 그린 뒤 이 사각형 밖 fragment만 버린다 — CPU가 rect를 먼저
        자르면 잘린 변에 없어야 할 corner radius와 border stroke가 생긴다. 끝에 4필드 추가라 기존 offset 불변. */

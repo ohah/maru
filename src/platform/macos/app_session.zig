@@ -1606,6 +1606,10 @@ fn pct(part: usize, whole: usize) f64 {
     return 100.0 * @as(f64, @floatFromInt(part)) / @as(f64, @floatFromInt(whole));
 }
 
+/// 마커 이미지 프리뷰 진단(`MARU_DEBUG` 일 때만). 「눌렀는데 다른 그림이 뜬다」류는 **어느 N 에 어느
+/// 파일이 묶였는가**를 봐야 갈리는데, 그 묶임은 화면 관찰에서 일어나 사후에 재구성할 수 없다.
+pub const marker_preview_diag = std.log.scoped(.marker_preview);
+
 fn nsToMs(ns: i128) f64 {
     return @as(f64, @floatFromInt(ns)) / @as(f64, @floatFromInt(std.time.ns_per_ms));
 }
@@ -15263,6 +15267,10 @@ pub const AppSession = struct {
         // 그래서 **스테이징을 먼저 묻는다.** 거기 있으면 이번 실행에 우리가 직접 실어 둔 것이라
         // 가장 확실하고, 전송된 뒤에도 `sent` 로 남아 있다(§4.2 A11). 없을 때만 인덱스로 간다.
         const staged_known = if (self.marker_preview.stagingFor(surface_id)) |st| st.lookup(m.n) != null else false;
+        if (diag_gate.maruDebugEnabled()) marker_preview_diag.info(
+            "click n={d} row={d} col={d} staged={} surface={d}",
+            .{ m.n, m.row, m.start_col, staged_known, surface_id },
+        );
         if (!staged_known) return self.toggleSentMarkerPreview(surface_id, m, hits.items, self.viewportScrolled(term));
         const next = marker_preview_ops.toggle(&self.marker_preview, self.marker_preview_open, surface_id, m);
         const changed = (next == null) != (self.marker_preview_open == null) or
@@ -15284,7 +15292,10 @@ pub const AppSession = struct {
         }
         const term = pane_ops.activePane(self).activeTerm();
         if (term.kind != .terminal or term.surface.id != open.surface_id) return; // 다른 pane을 보는 중
-        // **앵커 재검증**(§3) — TUI가 그 자리를 덮어도 통보가 없으므로 매 프레임 확인하고 조용히 닫는다.
+        // **앵커 재검증**(§3) — TUI가 그 자리를 덮어도 통보가 없으므로 매 프레임 확인한다. 어긋나면
+        // **따라가고**(같은 N 이 화면에 있다), 그 N 이 아예 없을 때만 조용히 닫는다(2026-09-15 개정 —
+        // 좌표 고정은 리페인트마다 프리뷰를 죽여 「눌러도 안 열린다」가 됐다. `reanchor` 주석이 계측과
+        // 근거를 들고 있다).
         //
         // ⚠️ **`viewport` 로 본다.** 한 판에서는 `cursor_block` 이었는데, 전송된 마커는 커서 블록 **밖**이라
         // 매번 「앵커가 사라졌다」로 판정돼 **열리자마자 다음 tick 에 닫혔다**(사용자 제보 — 「전송 후는
@@ -15293,9 +15304,28 @@ pub const AppSession = struct {
         var hits: std.ArrayList(maru.session.agent_image_markers.Hit) = .empty;
         defer hits.deinit(self.allocator);
         self.collectMarkerHits(term, .viewport, &hits) catch return;
-        if (!marker_preview_ops.stillAnchored(open.*, hits.items)) {
-            self.closeMarkerPreview();
-            return;
+        switch (marker_preview_ops.reanchor(open.*, hits.items)) {
+            .unchanged => {},
+            .moved => |h| {
+                // 좌표만 따라간다 — 이미지·디코드 상태는 **그대로**다(같은 마커, 같은 그림).
+                open.row = h.row;
+                open.start_col = h.start_col;
+                open.end_col = h.end_col;
+                self.metal_dirty = true;
+                if (diag_gate.maruDebugEnabled()) marker_preview_diag.info(
+                    "reanchor n={d} -> row={d} col={d}",
+                    .{ open.n, h.row, h.start_col },
+                );
+            },
+            .lost => {
+                // 그 번호가 화면에서 아예 사라졌다 — 따라갈 자리가 없어 닫는다(§3).
+                if (diag_gate.maruDebugEnabled()) marker_preview_diag.info(
+                    "closed n={d} reason=marker-gone",
+                    .{open.n},
+                );
+                self.closeMarkerPreview();
+                return;
+            },
         }
         if (open.pixels.len > 0 or open.failed) return;
         if (open.decode_generation != 0) return;
@@ -15338,8 +15368,13 @@ pub const AppSession = struct {
                 };
                 remote = .{ .ctl = ctx.ctl, .dest = ctx.dest };
             }
-            if (backend.submit(path, h.data_offset, h.data_len, target, marker_preview_decode_key, remote)) |gen|
+            if (backend.submit(path, h.data_offset, h.data_len, target, marker_preview_decode_key, remote)) |gen| {
                 open.decode_generation = gen;
+                if (diag_gate.maruDebugEnabled()) marker_preview_diag.info(
+                    "decode sent n={d} hit={d} file={d} off={d} gen={d}",
+                    .{ open.n, hit_index, h.file_index, h.data_offset, gen },
+                );
+            }
             return;
         }
         // **전송 전** — maru 가 저장한 그 파일을 그대로 푼다(base64 단계가 없다).
@@ -15357,7 +15392,13 @@ pub const AppSession = struct {
             open.failed = true;
             return;
         };
-        if (backend.submitRawFile(e.path, len, target, marker_preview_decode_key)) |gen| open.decode_generation = gen;
+        if (backend.submitRawFile(e.path, len, target, marker_preview_decode_key)) |gen| {
+            open.decode_generation = gen;
+            if (diag_gate.maruDebugEnabled()) marker_preview_diag.info(
+                "decode staged n={d} path={s} gen={d}",
+                .{ open.n, e.path, gen },
+            );
+        }
     }
 
     /// 열린 프리뷰를 프레임에 싣는다. 자리는 `image_preview.place`가, 픽셀 채널은 갤러리와 같은
@@ -15534,16 +15575,20 @@ pub const AppSession = struct {
         const by: f32 = @floatFromInt(place.box.y);
         const bw: f32 = @floatFromInt(place.box.w);
         const bh: f32 = @floatFromInt(place.box.h);
-        _ = bg;
-        // **테두리 네 변만 그린다 — 안쪽은 비운다.**
+        // **뒤판** — 상자 전체를 불투명하게 깐다(`image_backdrop`: 터미널 셀 앞·그림 뒤).
         //
-        // 상자를 통째로 칠하고 안쪽을 배경색으로 덮는 방식은 쓸 수 없다. 렌더 순서가
-        // `bottom quad(2) → 셀 → 이미지(pass>=2) → under(0)·over(1) quad` 라서 **셀보다 위이면서
-        // 이미지보다 아래인 자리가 없기** 때문이다 — layer 2 면 터미널 글자가 배경 위로 올라오고,
-        // layer 0·1 이면 배경이 그림을 덮는다(둘 다 사용자 제보로 확인했다).
-        //
-        // 네 변 스트립은 그림 가장자리 `border_px` 만 덮으므로 **액자**로 읽힌다. layer 1(over)이라
-        // 터미널 글자에도, 그림에도 가려지지 않는다.
+        // 한때는 「셀보다 위이면서 이미지보다 아래인 자리가 없다」고 적고 테두리만 그렸다. 그 진단은
+        // 맞았지만 결론이 틀렸다 — 없으면 **여는 것이 정공법**이었고(문서가 그렇게 적어 두기까지 했다),
+        // 그 자리가 없는 동안 사용자는 디코드를 기다리는 빈 액자와 투명 PNG 뒤로 **터미널 글자가 비치는**
+        // 화면을 봤다(제보 2026-09-15). 이제 렌더러가 그 패스를 가지므로 판을 깐다.
+        self.appendSolidQuad(bx, by, bw, bh, bg, renderer.metal_frame.quad_layer.image_backdrop);
+        // 계측: 발행과 «화면에 닿음» 은 다른 물음이다(제보 2026-09-16 — 판이 안 보인다). 이 줄이 찍히는데
+        // 렌더러 쪽 줄이 안 찍히면 ABI 를 건너지 못한 것이고, 둘 다 찍히면 그리는 자리의 문제다.
+        if (diag_gate.maruDebugEnabled()) marker_preview_diag.info(
+            "backdrop x={d} y={d} w={d} h={d} argb={x} quads={d}",
+            .{ place.box.x, place.box.y, place.box.w, place.box.h, bg, self.gpu_quads.items.len },
+        );
+        // 테두리 네 변은 **그림 위**(layer 1)에 남는다 — 그림이 판을 꽉 채우므로 액자는 그 앞이라야 보인다.
         self.appendSolidQuad(bx, by, bw, b, border, 1); // 위
         self.appendSolidQuad(bx, by + bh - b, bw, b, border, 1); // 아래
         self.appendSolidQuad(bx, by + b, b, bh - 2 * b, border, 1); // 왼쪽
@@ -15632,7 +15677,12 @@ pub const AppSession = struct {
     fn markerAnchorRect(self: *AppSession, term: *Term, open: marker_preview_ops.Open) ?chrome.draw.Rect {
         // 활성 pane 본문 rect — 프리뷰는 활성 pane에서만 그린다(호출자가 surface_id를 이미 확인했다).
         _ = term;
-        const rect = pane_ops.paneTermRect(self, self.termRect());
+        // ⚠️ **활성 pane 의 leaf 에서 뽑는다.** `self.termRect()` 는 **모든 pane 을 합친** 터미널 영역이라
+        // 분할하면 오른쪽·아래 pane 의 origin 이 통째로 빠진다 — 마커의 셀 좌표는 그 pane 격자 기준인데
+        // 원점만 창 것이어서, 프리뷰가 **엉뚱한 pane 자리에** 떴다(사용자 제보 2026-09-15). 단일 pane 에서는
+        // 두 값이 같아 증상이 없었고, 이 경로에는 좌표를 재는 테스트가 없어 자동 게이트도 못 봤다.
+        const leaf = pane_ops.activeLeafRect(self) orelse self.termRect();
+        const rect = pane_ops.paneTermRect(self, leaf);
         const m = self.buildCellMetrics();
         const cw = @max(m.cell_width_px, 1);
         const ch = @max(m.cell_height_px, 1);
@@ -15675,7 +15725,16 @@ pub const AppSession = struct {
         var visible: std.ArrayList(u32) = .empty;
         defer visible.deinit(self.allocator);
         self.collectMarkerNumbers(term, .viewport, &visible) catch return;
+        const pending_before = self.marker_preview.pending.items.len;
         marker_preview_ops.observe(&self.marker_preview, self.allocator, surface_id, visible.items) catch {};
+        // **묶임은 여기서만 일어난다** — 어느 N 에 어느 파일이 들어갔는지는 사후에 재구성할 수 없다.
+        if (diag_gate.maruDebugEnabled() and self.marker_preview.pending.items.len != pending_before) {
+            if (self.marker_preview.stagingFor(surface_id)) |st| for (st.entries.items) |e|
+                marker_preview_diag.info(
+                    "staged n={d} phase={s} bytes={d} path={s}",
+                    .{ e.n, @tagName(e.phase), e.png.len, e.path },
+                );
+        }
         self.releaseIndexedStaging(surface_id);
     }
 
@@ -15696,6 +15755,12 @@ pub const AppSession = struct {
             if (self.marker_preview_open) |o| {
                 if (o.sent_hit_index == null and o.n == e.n and o.surface_id == surface_id) continue;
             }
+            // 인덱스가 그 그림을 받았다 — 이 줄 뒤로 그 번호의 클릭은 스테이징이 아니라 **갤러리
+            // 인덱스** 경로로 간다(§4.4). 진단 문구는 영어로 둔다(i18n 원장 §7.2 — 표시가 아니다).
+            if (diag_gate.maruDebugEnabled()) marker_preview_diag.info(
+                "release n={d} reason=indexed",
+                .{e.n},
+            );
             st.release(self.allocator, e.n);
         }
     }
@@ -89860,4 +89925,120 @@ test "kitty 이미지 패스 게이트는 U=1 virtual placement 도 센다" {
     // **회귀 판정**: 일반 placement 가 0 이어도 virtual placement 가 있으면 패스를 돌아야 한다.
     const virtual = [_]maru.terminal.KittyVirtualPlacement{.{ .image_id = 1, .placement_id = 0, .columns = 2, .rows = 2 }};
     try std.testing.expect(needsKittyImagePass(.{ .size = .{ .cols = 1, .rows = 1 }, .virtual_placements = &virtual }));
+}
+
+test "MP: 분할하면 프리뷰 앵커가 **그 pane** 원점을 따른다 — 창 전체 기준이면 엉뚱한 pane 자리에 뜬다" {
+    // **사용자 제보 2026-09-15**: 「분할 pane 위치에 안 맞게 그려진다」. 앵커가 `termRect()`(= 모든 pane 을
+    // 합친 영역)에서 출발해 오른쪽·아래 pane 의 원점이 통째로 빠져 있었다. 단일 pane 에서는 두 값이 같아
+    // 증상이 없었고, 이 경로에는 **좌표를 재는 테스트가 하나도 없어** 자동 게이트도 못 봤다.
+    //
+    // 재는 것: 마커 셀 좌표를 고정한 채 **분할만** 했을 때 앵커가 그 pane 쪽으로 밀리는가(x·y 두 축).
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // splitActivePane = 실 PTY/CoreText
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+
+    const full = pane_ops.paneTermRect(session, session.termRect()); // 옛 코드가 늘 쓰던 «창 전체» 기준
+    const marker: struct { row: u16, start_col: u16, end_col: u16 } = .{ .row = 3, .start_col = 5, .end_col = 15 };
+
+    var term = pane_ops.activePane(session).activeTerm();
+    var open: marker_preview_ops.Open = .{
+        .surface_id = term.surface.id,
+        .n = 1,
+        .row = marker.row,
+        .start_col = marker.start_col,
+        .end_col = marker.end_col,
+    };
+    const single = session.markerAnchorRect(term, open) orelse return error.TestUnexpectedResult;
+    // 단일 pane 이면 leaf 가 곧 터미널 영역이라 둘이 같다 — 여기서는 옛 코드도 맞았다.
+    try std.testing.expectEqual(@as(i32, @intCast(full.x)) + @as(i32, marker.start_col) * @as(i32, @intCast(session.cell_width_px)), single.x);
+
+    // 좌우 분할 — 활성은 **오른쪽** pane 이다.
+    try pane_ops.splitActivePane(session, .horizontal);
+    term = pane_ops.activePane(session).activeTerm();
+    open.surface_id = term.surface.id;
+    const right = session.markerAnchorRect(term, open) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(single.y, right.y); // 같은 행이므로 세로는 그대로
+    // 오른쪽 pane 의 원점은 창 절반보다 오른쪽이다 — 옛 코드는 `single.x` 그대로였다.
+    try std.testing.expect(right.x >= @as(i32, @intCast(full.x + full.w / 2)));
+    try std.testing.expect(right.x + @as(i32, @intCast(right.w)) <= @as(i32, @intCast(full.x + full.w)));
+
+    // 다시 위아래 분할 — 활성은 **아래쪽** pane 이다.
+    try pane_ops.splitActivePane(session, .vertical);
+    term = pane_ops.activePane(session).activeTerm();
+    open.surface_id = term.surface.id;
+    const bottom = session.markerAnchorRect(term, open) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(right.x, bottom.x); // 가로는 오른쪽 열 그대로
+    try std.testing.expect(bottom.y >= @as(i32, @intCast(full.y + full.h / 2)));
+    try std.testing.expect(bottom.y + @as(i32, @intCast(bottom.h)) <= @as(i32, @intCast(full.y + full.h)));
+}
+
+test "MP: 프리뷰는 **뒤판 quad**를 낸다 — 그림 뒤로 터미널 글자가 비치지 않는다" {
+    // **사용자 제보 2026-09-16**: 「여전히 불투명판 아닌데요」. 렌더러에 패스를 열었어도 그 자리에 quad 가
+    // 닿지 않으면 화면은 그대로다 — 값이 맞는지와 닿는지는 다른 물음이라, 제품 경로(프레임 조립이 실제로
+    // 부르는 함수)로 묻는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 PTY/CoreText
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    session.marker_preview_open = .{
+        .surface_id = term.surface.id,
+        .n = 1,
+        .row = 6,
+        .start_col = 4,
+        .end_col = 14,
+        .width = 200,
+        .height = 120,
+    };
+    defer session.closeMarkerPreview();
+    const place = session.markerPreviewPlacement(term, session.marker_preview_open.?) orelse
+        return error.TestUnexpectedResult;
+
+    session.gpu_quads.clearRetainingCapacity();
+    var images: []renderer.metal_frame.GpuImage = &.{};
+    defer allocator.free(images);
+    var uploads: []renderer.metal_frame.GpuImageUpload = &.{};
+    defer allocator.free(uploads);
+    var pixels: []u8 = &.{};
+    defer allocator.free(pixels);
+    var owned = false;
+    var live: std.ArrayList(u32) = .empty;
+    defer live.deinit(allocator);
+    // **프레임 조립이 부르는 바로 그 함수**다 — 여기서 안 나가면 화면에도 없다.
+    session.appendMarkerPreviewImage(&images, &uploads, &pixels, &owned, &live);
+
+    var backdrop: ?renderer.metal_frame.GpuQuad = null;
+    for (session.gpu_quads.items) |q| {
+        if (q.layer != renderer.metal_frame.quad_layer.image_backdrop) continue;
+        try std.testing.expect(backdrop == null); // 판은 하나뿐이다
+        backdrop = q;
+    }
+    const bd = backdrop orelse return error.TestUnexpectedResult;
+    // 상자 **전체**를 덮어야 한다 — 그림이 놓일 자리만 덮으면 테두리 안쪽 가장자리로 글자가 샌다.
+    try std.testing.expectEqual(@as(f32, @floatFromInt(place.box.x)), bd.x);
+    try std.testing.expectEqual(@as(f32, @floatFromInt(place.box.y)), bd.y);
+    try std.testing.expectEqual(@as(f32, @floatFromInt(place.box.w)), bd.w);
+    try std.testing.expectEqual(@as(f32, @floatFromInt(place.box.h)), bd.h);
+    // **불투명이라야 뜻이 있다.** 알파가 빠지면 판이 있어도 뒤가 비친다.
+    try std.testing.expectEqual(@as(u32, 0xFF), bd.fill_color0 >> 24);
 }

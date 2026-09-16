@@ -315,8 +315,8 @@ test "MM10 검색 일치 행 — 창 안의 줄만 행 전체를 칠하고, 현�
     var ops: [32]draw.Op = undefined;
     var lines: [40][]const u8 = undefined;
     for (&lines) |*l| l.* = "x";
-    // 창은 줄 10..20(높이 20px). 일치: 5(창 밖) · 12 · 19(현재) · 25(창 밖).
-    const marks = [_]u32{ 5, 12, 19, 25 };
+    // 창은 줄 10..20(높이 20px, 반열림). 일치: 5(창 밖) · 12 · 19(현재) · 20(창 끝 — **밖**, 8회차 H1) · 25(창 밖).
+    const marks = [_]u32{ 5, 12, 19, 20, 25 };
     const w = build(.{ .rect = .{ .x = 100, .y = 50, .w = 30, .h = 20 }, .lines = &lines, .top = 10, .slider_first = 11, .slider_len = 3, .tab_width = 4, .mark_lines = &marks, .mark_current = 2 }, &ops);
     // run 10 + 일치 2 + 슬라이더 1
     try testing.expectEqual(@as(usize, 13), w.ops);
@@ -335,6 +335,13 @@ test "MM10 검색 일치 행 — 창 안의 줄만 행 전체를 칠하고, 현�
     // 목록이 비면 일치 quad 가 없다.
     const w0 = build(.{ .rect = .{ .x = 100, .y = 50, .w = 30, .h = 20 }, .lines = &lines, .top = 10, .slider_first = 11, .slider_len = 3, .tab_width = 4 }, &ops);
     try testing.expectEqual(@as(usize, 11), w0.ops);
+    // 현재 일치가 **없으면** 아무 행도 현재 색이 아니다(`null` 을 0 으로 읽는 변이 — 8회차 H2). 목록의 **첫 항목이 창 안**이어야
+    // 그 변이가 보인다(9회차 I7: 첫 항목 5 는 창 밖이라 살았다).
+    const marks_in = [_]u32{ 12, 19 };
+    const wn = build(.{ .rect = .{ .x = 100, .y = 50, .w = 30, .h = 20 }, .lines = &lines, .top = 10, .slider_first = 11, .slider_len = 3, .tab_width = 4, .mark_lines = &marks_in }, &ops);
+    try testing.expectEqual(@as(usize, 13), wn.ops);
+    try testing.expectEqual(tokens.ColorRole.search_match, ops[10].quad.fill_role);
+    try testing.expectEqual(tokens.ColorRole.search_match, ops[11].quad.fill_role);
 }
 
 test "MM8 저장소가 모자라면 잘리되 죽지 않는다" {
@@ -355,4 +362,10 @@ test "MM8 저장소가 모자라면 잘리되 죽지 않는다" {
     const w3 = build(.{ .rect = .{ .x = 0, .y = 0, .w = 0, .h = 4 }, .lines = &lines, .top = 0, .slider_first = 0, .slider_len = 2, .tab_width = 4 }, &ops);
     try testing.expectEqual(@as(usize, 0), w3.ops);
     try testing.expect(!w3.truncated);
+    // 검색 행이 들어갈 자리가 없어도 표식이 선다(7회차 G5) — run 둘이 저장소를 다 먹은 뒤 일치 하나.
+    const lines4 = [_][]const u8{ "a", "b" };
+    const marks4 = [_]u32{0};
+    const w4 = build(.{ .rect = .{ .x = 0, .y = 0, .w = 8, .h = 4 }, .lines = &lines4, .top = 0, .slider_first = 0, .slider_len = 0, .tab_width = 4, .mark_lines = &marks4 }, &ops);
+    try testing.expectEqual(@as(usize, 2), w4.ops);
+    try testing.expect(w4.truncated);
 }

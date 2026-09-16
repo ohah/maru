@@ -359,6 +359,43 @@ public class MaruActivity extends android.app.NativeActivity {
         /// 다시 온다(`가` → `가나` → `가나다`). 앞부분을 보낸 뒤 그 사실을 안 들고 있으면 다음
         /// 호출에서 같은 글자를 또 보내 **`가가나`** 가 된다.
         private String sent = "";
+        /// **IME 가 이미 확정된 글자를 다시 조합으로 잡았다** — 그 길이(문자 수).
+        ///
+        /// 삼성 키보드는 단어를 이어 고칠 때 `setComposingRegion(0,4)` 로 **이미 커밋된 「가나다순」을
+        /// 되잡고** 곧바로 `setComposingText("가나다순ㅇ")` 을 보낸다(기기 실측 2026-09-16). 그 영역의
+        /// 글자는 **이미 원격에 가 있다** — 그 사실을 모르면 이어지는 조합 문자열의 앞부분이 새 글자로
+        /// 보여 통째로 다시 나가고, 원격은 「가나다순으로 가나다순」이 된다(사용자 제보: "자동 완성으로
+        /// 텍스트가 갑자기 들어간다"). 되잡힌 길이를 들고 있다가 다음 조합·확정에서 `sent` 의 출발점으로
+        /// 삼으면 `reconcileSent` 가 나머지 규칙을 그대로 처리한다.
+        private int reclaimed = 0;
+
+        /// 되잡힌 영역만큼을 «이미 보낸 것»으로 세운다. `text` 는 그 영역을 **포함해서** 오므로
+        /// (실측: region `0..4` 뒤 `가나다순ㅇ`) 앞에서 그만큼 떼면 그것이 원격에 있는 글자다.
+        private void adoptReclaimed(String text) {
+            if (reclaimed <= 0) return;
+            int take = Math.min(reclaimed, text.length());
+            // **코드포인트 경계로 되돌린다** — 서로게이트 쌍 가운데서 끊으면 반쪽 글자가 남는다
+            // (`reconcileSent` 와 같은 규율).
+            if (take > 0 && take < text.length() && Character.isLowSurrogate(text.charAt(take))) take--;
+            sent = text.substring(0, take);
+            reclaimed = 0;
+        }
+
+        /// **IME 콜백 계측.** 어떤 콜백이 **어떤 순서로** 오는지가 이 클래스의 결함을 가른다 —
+        /// 추천 확정은 IME 마다 `commitText` 하나로도 오고, `setComposingRegion`+`setComposingText`
+        /// 로도 오며, `deleteSurroundingText`+`commitText` 로도 온다. 셋은 여기서 **서로 다른 처리**를
+        /// 요구하고, 코드만 봐서는 어느 것인지 알 수 없다(실제로 그 갈림을 몰라 되잡기를 무시하고
+        /// 있었다 — 2026-09-16).
+        ///
+        /// ⚠️ **친 글자는 안 찍는다.** 이 로그는 사용자가 터미널에 치는 모든 것을 지나가고 logcat 은
+        /// 같은 기기의 다른 앱도 읽을 수 있다(`READ_LOGS` 없이도 개발 빌드에서는 흔하다). 길이와
+        /// 상태만으로 순서 문제는 다 드러나고, 내용이 필요한 순간에는 임시로 붙였다 뗀다.
+        /// `adb logcat -s MaruChrome` 로 읽는다.
+        private void imeLog(String what, String detail) {
+            android.util.Log.i("MaruChrome", "MARU_IME " + what + " " + detail
+                    + " composing_len=" + composing.length() + " sent_len=" + sent.length()
+                    + " reclaimed=" + reclaimed + " mods=" + nativeArmedMods());
+        }
 
         /// 원격이 들고 있는 이번 조합의 앞부분을 `target` 과 **같게 맞춘다.**
         ///
@@ -404,6 +441,9 @@ public class MaruActivity extends android.app.NativeActivity {
         @Override
         public boolean setComposingText(CharSequence text, int newCursorPosition) {
             final String next = text == null ? "" : text.toString();
+            imeLog("setComposing", "len=" + next.length() + " pos=" + newCursorPosition);
+            // **되잡힌 영역을 먼저 인정한다** — 그 앞부분은 이미 원격에 있다(위 `reclaimed` 주석).
+            adoptReclaimed(next);
             // **수정자가 걸려 있으면 조합하지 않는다.** `Ctrl+B` 는 조합할 글자가 아니라 **지금
             // 나가야 하는 시퀀스**다(tmux prefix 가 그렇다).
             //
@@ -450,15 +490,31 @@ public class MaruActivity extends android.app.NativeActivity {
             return true;
         }
 
+        /// **추천 치환이 이 길로 올 수 있다.** IME 는 「이미 커밋된 구간을 다시 조합으로 잡아라」를
+        /// 이 콜백으로 말한다. 지금은 `BaseInputConnection` 의 기본 구현(우리가 안 읽는 Editable 만
+        /// 건드린다)이라 **아무 일도 일어나지 않는다** — 그 뒤 오는 `setComposingText` 가 우리
+        /// 눈에는 새 조합으로 보여 이미 보낸 글자 위에 겹쳐 나간다. 그것이 실제로 일어나는지를
+        /// 계측이 먼저 답한다(고치기 전에 재현부터).
+        @Override
+        public boolean setComposingRegion(int start, int end) {
+            imeLog("setComposingRegion", "start=" + start + " end=" + end);
+            // **길이만 기억한다.** 무엇이 들었는지는 곧 오는 `setComposingText` 가 알려 준다 — 우리는
+            // 편집 버퍼를 갖지 않으므로(터미널 화면은 원격이 소유한다) 인덱스로 내용을 조회할 수 없다.
+            reclaimed = Math.max(0, end - start);
+            return true;
+        }
+
         @Override
         public boolean finishComposingText() {
             // **조합을 확정으로 넘긴다.** 겉치레만 지우면 그 글자가 사라진다 — 한글은 조합이
             // 끝나는 순간을 `commitText` 가 아니라 이 콜백으로 알리는 IME 가 있고(삼성 키보드에서
             // 스페이스로 확정할 때 실측: `commitText` 로는 공백 한 바이트만 왔고 '마' 는 유실됐다),
             // 그때 친 글자가 통째로 없어졌다.
+            imeLog("finish", "");
             final String done = composing;
             composing = "";
             sent = "";             // 조합이 끝났다 — 다음 조합은 처음부터 센다
+            reclaimed = 0;         // 되잡힌 영역도 이 확정과 함께 끝났다
             nativeComposing("");   // 겉치레를 지운다
             if (!done.isEmpty()) nativeCommit(done);
             return true;
@@ -469,6 +525,9 @@ public class MaruActivity extends android.app.NativeActivity {
             // **조합을 먼저 비운다.** 이 호출 자체가 확정이므로, 안 비우면 뒤따라오는
             // `finishComposingText` 가 같은 글자를 **한 번 더** 넣는다(IME 마다 순서가 다르다).
             final String t = text == null ? "" : text.toString();
+            imeLog("commit", "len=" + t.length() + " pos=" + newCursorPosition);
+            // 되잡은 뒤 조합 없이 **바로** 확정하는 IME 도 있다 — 같은 규칙을 여기서도 진다.
+            adoptReclaimed(t);
             // **확정 문자열이 «이미 보낸 것으로 시작한다»고 믿지 않는다.**
             //
             // 예전에는 `t.startsWith(sent)` 일 때만 앞부분을 벗기고, 아니면 **통째로** 보냈다.
@@ -485,12 +544,14 @@ public class MaruActivity extends android.app.NativeActivity {
             reconcileSent(t);
             composing = "";
             sent = "";
+            reclaimed = 0;
             nativeComposing("");
             return true;
         }
 
         @Override
         public boolean deleteSurroundingText(int beforeLength, int afterLength) {
+            imeLog("deleteSurrounding", "before=" + beforeLength + " after=" + afterLength);
             // 조합이 없는 상태의 백스페이스가 이리로 온다. 터미널은 화면 버퍼를 편집하지
             // 않으므로 삭제를 흉내 내지 않고 **키 자체를 코어로** 넘긴다.
             for (int i = 0; i < beforeLength; i++) nativeKey(android.view.KeyEvent.KEYCODE_DEL, 0, 0);

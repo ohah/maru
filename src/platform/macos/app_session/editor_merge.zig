@@ -312,7 +312,7 @@ pub fn ensurePaneMaxCols(term: *Term) void {
             var max: u32 = 0;
             for (c[1]) |line| {
                 max = @max(max, chrome_editor.content.lineColumnsUpTo(line, tab_width, limit));
-                if (max >= limit) break;
+                if (max >= limit) break; // 더 세도 답이 같다(성능 — 그 변이는 사는 것이 정상, S6 적대적 6회차 F7)
             }
             slot.* = max;
         }
@@ -324,6 +324,8 @@ pub fn ensurePaneMaxCols(term: *Term) void {
 pub fn widestCols(term: *Term, result_max_cols: u32) u32 {
     const state = &(term.rt.editor_merge orelse return result_max_cols);
     if (!state.ready) return result_max_cols;
+    // `paneFirstCol` 도 세운다 — 둘 중 하나를 지워도 다른 쪽이 세워 화면이 같다(S6 적대적 9회차 I7·I8, 일부러 겹친 방어).
+    // 둘 다 부르는 이유: 어느 쪽이 먼저 불리든(첫 휠 대 첫 프레임) 「안 셌다」로 답하지 않기 위해서다.
     ensurePaneMaxCols(term);
     var w = result_max_cols;
     w = @max(w, state.ours_max_cols orelse 0);
@@ -337,7 +339,7 @@ pub fn widestCols(term: *Term, result_max_cols: u32) u32 {
 /// 판의 가장 긴 줄이 Result 보다 짧으면 그 판은 자기 끝에서 멈춘다 — 빈 화면 대신 내용의 끝이 보인다.
 pub fn paneFirstCol(term: *Term, side: MergeSide, result_first_col: u32, beyond: u32) u32 {
     const state = &(term.rt.editor_merge orelse return result_first_col);
-    if (!state.ready) return result_first_col;
+    if (!state.ready) return result_first_col; // 아직 판이 없다 — 그릴 판도 없어 관측 불가(S6 적대적 8회차 H8)
     ensurePaneMaxCols(term);
     const max_cols: u32 = switch (side) {
         .current => state.ours_max_cols orelse 0,
@@ -349,6 +351,8 @@ pub fn paneFirstCol(term: *Term, side: MergeSide, result_first_col: u32, beyond:
     // pane 전체 폭으로 재고 Result 값 자체를 0 으로 되돌리므로 여기 무엇을 돌려줘도 화면이 같다. 그래도 Result 값을 돌려주는
     // 이유는 뜻이다 — 「모르면 따라간다」.
     if (visible == 0) return result_first_col;
+    // 빈 판(0)에는 beyond 도 안 더한다 — `scrollWidthCols` 의 「안 셌다는 안 셌다」와 같은 뜻. 화면은 같다(beyond 가 판 폭보다
+    // 작아 `max_first` 가 어차피 0 — S6 적대적 6회차 F8).
     const width = if (max_cols == 0) 0 else max_cols +| beyond;
     const max_first: u32 = width -| visible;
     return @min(result_first_col, max_first);

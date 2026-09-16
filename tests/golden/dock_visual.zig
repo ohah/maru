@@ -881,7 +881,8 @@ const cases = [_]Case{
         .name = "editor-merge-follow-hscroll",
         .capture = "editor-merge-hscrolled.ppm",
         .contract = "가로를 밀면 네 판이 같은 열에 선다 — 판은 자기 가로를 갖지 않는다",
-        .rect = .{ .x = 0, .y = 0, .w = 1200, .h = 140 },
+        // **전체 높이다** — 위 140px 만 보면 아래 Base 띠가 자기 가로(0)를 가져도 초록이다(S6 적대적 6회차 F2).
+        .rect = .{ .x = 0, .y = 0, .w = 1200, .h = 720 },
     },
     .{
         .name = "editor-real-file-from-disk",

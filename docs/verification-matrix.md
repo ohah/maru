@@ -2894,6 +2894,13 @@ provisioned Developer ID·Notification Center 등 아래의 외부 release gate 
   server 제품 타입 테스트로 고정한다. 응답 없이 닫는 server action은 `protocol_error | resource_exhausted | internal_error`
   payload를 필수로 가지며 connection turn이 이를 전수 매핑한다. generic server close를 `peer_requested`로 접는 배선이
   없고 close enum/payload가 사라지지 않는지는 `test-close-site-name` source boundary가 검증한다.
+- **poison 진단이 이름으로 나온다: 구현.** `client.zig`의 poison drift 로그가 raw enum 값 대신
+  사유·자리 **이름**을 찍고, 지금까지 로그를 한 줄도 남기지 않던 두 캡처 경로
+  (`prepared_execution`·`read_pump`)가 캡처 시점에 `client poison captured: path= reason= site=`를
+  남긴다. 2026-09-17 실측: GUI가 끊겼는데 단서가 `kept=1 dropped=13` 한 줄뿐이라 enum 선언을 손으로
+  세어 풀어야 했고, 그 과정에서 `dropped=13`을 **개수로 오독**했다(실제로는 사유 값).
+  `test-client-poison-names`가 이름 변환과 `client_poison`/`connection_incident` 두 enum의 u8 대응을
+  고정한다 — 순서가 갈리면 로그가 조용히 틀린 이름을 말한다.
 - **투영 상한 초과와 할당 실패의 분리: 구현.** `screen_snapshot`의 스트림 상한(16 MiB)과 상한 할당자가
   거절한 실패는 `error.SnapshotTooLarge`로 나오고, 진짜 `OutOfMemory`와 갈린다. attach는 전자면 그 요청만
   `payload_too_large`로 거절하고 공유 연결·형제 stream을 유지하며, 후자면 기존대로 닫는다.

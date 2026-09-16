@@ -5188,6 +5188,32 @@ pub fn build(b: *std.Build) void {
         if (boundary_shard != null) "check-boundaries-all" else "check-boundaries",
         "Check facade import boundaries",
     );
+    // poison 진단이 **이름**으로 나오는가. 2026-09-17 에 GUI 가 끊겼을 때 로그는 `kept=1 dropped=13`
+    // 뿐이었고, 손으로 enum 을 세어 풀다 `dropped=13` 을 개수로 오독했다. 숫자로 되돌아가면
+    // 다음 사람이 같은 데서 막힌다.
+    const poison_name_step = b.step(
+        "test-client-poison-names",
+        "Poison diagnostics name the reason and site instead of raw enum values",
+    );
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |poison_name_optimize| {
+        const poison_name_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/client.zig"),
+                .target = target,
+                .optimize = poison_name_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"poison 진단은 raw 숫자가 아니라"},
+        });
+        const run_poison_name_tests = b.addRunArtifact(poison_name_tests);
+        run_poison_name_tests.addArg("--maru-expect-tests=1");
+        run_poison_name_tests.addArg("--maru-expect-passed=1");
+        run_poison_name_tests.setCwd(b.path("."));
+        poison_name_step.dependOn(&run_poison_name_tests.step);
+    }
+    boundary_step.dependOn(poison_name_step);
+
     const session_host_p4_r3_screen_inbox_step = b.step(
         "test-session-host-p4-r3-screen-inbox",
         "P4 R3 single-owner screen inbox boundary gates",

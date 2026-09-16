@@ -911,7 +911,7 @@ pub fn build(b: *std.Build) void {
         macos_chrome_lab_smoke.root_module.linkFramework("QuartzCore", .{});
 
         const macos_chrome_lab_smoke_step = b.step("macos-chrome-lab-smoke", "Capture deterministic Chrome Lab scenarios through the product Metal renderer");
-        inline for ([_][]const u8{ "empty", "loading", "retained-list", "font-specimen", "partial-scroll", "partial-group-scroll", "scrollbar", "sticky-at-rest", "sticky-pinned", "sticky-pushed", "detail-loading", "detail-ready", "detail-stale", "detail-unavailable", "sidebar-status-strip", "editor-gutter", "editor-widget-row", "editor-conflict", "editor-scrolled", "editor-font-large", "editor-hazard", "editor-wide-glyph", "editor-wrap", "editor-hscroll", "editor-folded", "editor-wrap-scrolled", "editor-wrap-stale-scroll", "editor-real-file", "editor-typescript", "editor-selection", "editor-find", "editor-caret-bar", "editor-caret-block", "editor-caret-underline", "editor-diff-selection", "editor-diff", "editor-diff-scrolled", "editor-merge-panes", "editor-merge-narrow", "editor-merge-scrolled", "editor-merge-caret", "context-menu-checked", "context-menu-unchecked", "context-menu-send", "context-menu-send-helper", "context-menu-bottom-right", "dropdown-open", "dropdown-bottom-clamp", "scm-rows", "scm-history", "scm-row-hover", "scm-conflict-hover", "scm-conflict-resolved-hover", "scm-repo-hover", "scm-scrolled", "scm-commit-edit", "scm-blocker", "scm-small-font", "dock-over-status-bar", "file-tree-rows", "file-tree-row-hover", "file-tree-scrolled", "file-tree-over-chrome", "sort-toggle-hover", "sort-toggle-pressed" }) |scenario| {
+        inline for ([_][]const u8{ "empty", "loading", "retained-list", "font-specimen", "partial-scroll", "partial-group-scroll", "scrollbar", "sticky-at-rest", "sticky-pinned", "sticky-pushed", "detail-loading", "detail-ready", "detail-stale", "detail-unavailable", "sidebar-status-strip", "editor-gutter", "editor-widget-row", "editor-conflict", "editor-scrolled", "editor-font-large", "editor-hazard", "editor-wide-glyph", "editor-wrap", "editor-hscroll", "editor-folded", "editor-wrap-scrolled", "editor-wrap-stale-scroll", "editor-real-file", "editor-typescript", "editor-selection", "editor-find", "editor-caret-bar", "editor-caret-block", "editor-caret-underline", "editor-diff-selection", "editor-diff", "editor-diff-scrolled", "editor-merge-panes", "editor-merge-narrow", "editor-merge-scrolled", "editor-merge-hscrolled", "editor-merge-caret", "context-menu-checked", "context-menu-unchecked", "context-menu-send", "context-menu-send-helper", "context-menu-bottom-right", "dropdown-open", "dropdown-bottom-clamp", "scm-rows", "scm-history", "scm-row-hover", "scm-conflict-hover", "scm-conflict-resolved-hover", "scm-repo-hover", "scm-scrolled", "scm-commit-edit", "scm-blocker", "scm-small-font", "dock-over-status-bar", "file-tree-rows", "file-tree-row-hover", "file-tree-scrolled", "file-tree-over-chrome", "sort-toggle-hover", "sort-toggle-pressed" }) |scenario| {
             const run_chrome_lab = b.addRunArtifact(macos_chrome_lab_smoke);
             run_chrome_lab.setCwd(b.path("."));
             run_chrome_lab.setEnvironmentVariable("MARU_CHROME_LAB_SCENARIO", scenario);
@@ -1663,9 +1663,9 @@ pub fn build(b: *std.Build) void {
     //
     // **MPN1~5(배치 산술)는 여기 안 든다** — 그쪽은 `maru` 모듈(chrome 컴포넌트)에 있고 Zig 는
     // **별도 모듈의 test 를 안 모은다**. 그 다섯은 `zig build test-editor` 가 돌린다(실측).
-    run_macos_editor_merge_tests.addArg("--maru-expect-tests=42");
+    run_macos_editor_merge_tests.addArg("--maru-expect-tests=43");
     // ⚠️ **그리고 실제로 돌았는가** — MRG2 이후는 macOS 가 아니면 `SkipZigTest` 다.
-    run_macos_editor_merge_tests.addArg("--maru-expect-passed=42");
+    run_macos_editor_merge_tests.addArg("--maru-expect-passed=43");
     run_macos_editor_merge_tests.setCwd(b.path("."));
     b.step(
         "test-editor-merge",

@@ -36,6 +36,7 @@ pub fn tokensFor(appearance: config.appearance.ResolvedAppearance) chrome.Tokens
     const t = appearance.theme;
     // **한 번만 부른다** — 파생 계산(휘도·대비 바닥)이 호출마다 돈다.
     const diff_colors = session.syntax_theme.diffFromTheme(t);
+    const diag_colors = session.syntax_theme.diagnosticsFromTheme(t);
     var tk = chrome.tokens.Tokens.rich(.{
         .foreground = t.foreground,
         .sidebar_background = t.sidebar_background,
@@ -53,6 +54,11 @@ pub fn tokensFor(appearance: config.appearance.ResolvedAppearance) chrome.Tokens
         // 화면이 같은 초록·빨강을 쓴다(§7).
         .diff_added = diff_colors.added,
         .diff_removed = diff_colors.removed,
+        // 진단 색(§5.4) — diff 와 같은 파생 계열.
+        .diagnostic_error = diag_colors.err,
+        .diagnostic_warning = diag_colors.warning,
+        .diagnostic_info = diag_colors.info,
+        .diagnostic_hint = diag_colors.hint,
     });
     // **구문 강조 색**(§5.3). `diff`와 **같은 함수 계열**에서 온다 — `syntax_theme`가 터미널
     // 팔레트에서 파생하므로 편집기 색이 옆 터미널과 같은 언어를 쓴다(2026-07-22 사용자 결정).

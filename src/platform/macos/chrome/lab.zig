@@ -302,6 +302,8 @@ pub const ScenarioId = enum {
     /// 매치가 조용히 사라지고(리스트는 여전히 넷이라 카운터는 맞다), 현재 매치를 가르는 코드가
     /// 어긋나면 색이 둘인 매치나 색이 없는 매치가 난다 — 둘 다 화면에서만 드러난다.
     editor_find,
+    /// §5.4 — 진단 층: gutter 글리프·지그재그 밑줄·막대 마커·미니맵 행(표는 리터럴 — Lab 은 트리를 안 돈다).
+    editor_diagnostics,
     /// N1 §4.1g "비교 뷰" — **좌우 두 열 중 한 쪽만** 선택 띠가 서는지 픽셀로 본다. 계약이
     /// *"좌우를 걸치는 선택은 만들지 않는다"*로 정한 것이 화면에서 어떻게 보이는가이고, 짝맞춤
     /// 빈 행(왼쪽 3행)에 띠가 어떻게 서는지도 여기서만 드러난다 — 그 행은 그 자리에 줄이 **없다**.
@@ -420,7 +422,7 @@ pub fn buildFrame(
         .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome => buildFileTreeFrame(scenario, tokens, buffers),
         .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper, .context_menu_bottom_right => buildContextMenuFrame(scenario, tokens, buffers),
         .dropdown_open, .dropdown_bottom_clamp => buildDropdownFrame(scenario, tokens, buffers),
-        .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_minimap, .editor_selection, .editor_find, .editor_caret_bar, .editor_caret_block, .editor_caret_underline => buildEditorGutterFrame(scenario, buffers),
+        .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_minimap, .editor_selection, .editor_find, .editor_diagnostics, .editor_caret_bar, .editor_caret_block, .editor_caret_underline => buildEditorGutterFrame(scenario, buffers),
         .editor_diff, .editor_diff_scrolled, .editor_diff_selection => buildEditorDiffFrame(scenario, buffers),
         .editor_merge_panes, .editor_merge_narrow, .editor_merge_caret => buildEditorMergeFrame(scenario, buffers),
         .editor_merge_scrolled, .editor_merge_hscrolled => buildEditorMergeScrolledFrame(scenario, buffers),
@@ -523,6 +525,28 @@ const editor_find_marks = [_][]const chrome.components.editor_view.frame.Mark{
 /// 현재 매치는 **둘째 줄의 둘째 것**이다. 첫 것을 고르면 "앞에서 자른 것"과 구분이 안 되고,
 /// 마지막을 고르면 "뒤에서 자른 것"과 구분이 안 된다 — 가운데여야 셋으로 가르는 코드가 판정된다.
 const editor_find_current: chrome.components.editor_view.frame.CurrentMatch = .{ .line = 1, .start = 15 };
+
+/// `editor_diagnostics` 픽스처(§5.4). 둘째 줄은 닫는 괄호가 빠졌고(MISSING — `;` 자리 1 byte), 셋째 줄은 쓰레기 토큰(ERROR —
+/// 세 셀), 넷째 줄은 경고(색이 severity 마다 다름을 캡처가 들게). 마커는 시작 줄에, 막대·미니맵 행도 그 셋.
+const editor_diagnostics_lines = [_][]const u8{
+    "pub fn f() void {",
+    "    const a = (1 + 2;",
+    "    @@@ garbage here",
+    "    _ = a;",
+    "}",
+    "",
+    "// 아래는 멀쩡하다 — 스트립과 막대에 셋만 선다",
+    "const k = 1;",
+};
+const editor_diag_row1 = [_]chrome.components.editor_view.diagnostic.Mark{.{ .start = 20, .len = 1, .level = .err }};
+const editor_diag_row2 = [_]chrome.components.editor_view.diagnostic.Mark{.{ .start = 4, .len = 3, .level = .err }};
+const editor_diag_row3 = [_]chrome.components.editor_view.diagnostic.Mark{.{ .start = 8, .len = 1, .level = .warning }};
+const editor_diag_none = [_]chrome.components.editor_view.diagnostic.Mark{};
+const editor_diag_marks = [_][]const chrome.components.editor_view.diagnostic.Mark{
+    &editor_diag_none, &editor_diag_row1, &editor_diag_row2, &editor_diag_row3, &editor_diag_none, &editor_diag_none, &editor_diag_none, &editor_diag_none,
+};
+const editor_diag_markers = [_]?chrome.components.editor_view.diagnostic.Level{ null, .err, .err, .warning, null, null, null, null };
+const editor_diag_lines = [_]chrome.components.editor_view.diagnostic.LineMark{ .{ .line = 1, .level = .err }, .{ .line = 2, .level = .err }, .{ .line = 3, .level = .warning } };
 
 /// `editor_widget_row` 픽스처의 위젯 표. **둘을 둔다** — 하나면 「그 줄에만 우연히 맞는」 상태와
 /// 「규칙이 맞는」 상태가 안 갈린다. 하나는 **열 0**, 하나는 **들여쓴 자리**에 세워 `Widget.col` 이
@@ -871,7 +895,7 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
     const view_rect_full = editor_view.frame.contentRect(.{ .x = 0, .y = 0, .w = viewport_w, .h = viewport_h });
     const content_w = view_rect_full.w;
     // **미니맵이 폭을 먼저 가져간다**(§6.1) — 제품의 `diff_frame.buildSide` 와 같은 함수(`minimap.widthPx`)로.
-    const minimap_px: u32 = if (scenario.id == .editor_minimap) editor_view.minimap.widthPx(content_w, cell_w_px, scrollbar_metrics.gutterPx(), 15) else 0;
+    const minimap_px: u32 = if (scenario.id == .editor_minimap or scenario.id == .editor_diagnostics) editor_view.minimap.widthPx(content_w, cell_w_px, scrollbar_metrics.gutterPx(), 15) else 0;
     const total_cols: u16 = @intCast((content_w -| minimap_px -| scrollbar_metrics.gutterPx()) / cell_w_px);
     // **남은 공간 전부가 스크롤바 gutter다.** `total_cols`가 버림이라 본문이 셀 경계에서 끝나고,
     // 요구한 gutter(12px)보다 넓은 자투리가 생긴다 — 그것을 gutter에 포함하지 않으면 막대가 화면
@@ -888,6 +912,7 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
         .editor_conflict => &editor_conflict_lines,
         .editor_selection => &editor_selection_lines,
         .editor_find => &editor_find_lines,
+        .editor_diagnostics => &editor_diagnostics_lines,
         else => &editor_fixture_lines,
     };
     const line_count: usize = lines.len;
@@ -1048,6 +1073,10 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
         .selection_marks = if (scenario.id == .editor_selection) &editor_selection_marks else null,
         .search_marks = if (scenario.id == .editor_find) &editor_find_marks else null,
         .search_current = if (scenario.id == .editor_find) editor_find_current else null,
+        // 진단 층(§5.4) — 표는 리터럴. 제품은 트리에서 같은 표를 만든다(`editor_diagnostics.buildViews`).
+        .diag_marks = if (scenario.id == .editor_diagnostics) &editor_diag_marks else null,
+        .diag_markers = if (scenario.id == .editor_diagnostics) &editor_diag_markers else null,
+        .diag_lines = if (scenario.id == .editor_diagnostics) &editor_diag_lines else &.{},
         // **미니맵 장면은 검색 중이다**(§6.2) — 막대 마커와 스트립의 검색 행이 같은 목록에서 선다(넷째 줄이 현재).
         .search_marker_lines = if (scenario.id == .editor_minimap) &editor_minimap_marker_lines else &.{},
         .search_marker_current = if (scenario.id == .editor_minimap) 1 else null,
@@ -1087,7 +1116,7 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
         .metrics = scrollbar_metrics,
         // **미니맵**(§6.1): 창은 비례 스크롤(`topLine`) — 이 픽스처는 스트립보다 짧아 0 이다. 색 창은 전체 색 표의
         // `top` 부터(제품은 그 창만 묻는다 — Lab 은 전체를 이미 들고 있어 잘라 넘긴다).
-        .minimap = if (scenario.id == .editor_minimap) blk: {
+        .minimap = if (scenario.id == .editor_minimap or scenario.id == .editor_diagnostics) blk: {
             const strip_rows = editor_view.minimap.stripRows(view_h_px);
             const top = editor_view.minimap.topLine(first_line, lines.len, strip_rows, lines.len -| vp.rows);
             break :blk editor_view.frame.MinimapInput{
@@ -1570,7 +1599,7 @@ fn buildDockFrame(
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
             .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
             // editor_gutter는 buildEditorGutterFrame이 처리한다 — 도크 목록을 타지 않는다.
-            .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper, .context_menu_bottom_right, .dropdown_open, .dropdown_bottom_clamp, .scm_rows, .scm_history, .scm_row_hover, .scm_conflict_hover, .scm_conflict_resolved_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_minimap, .editor_selection, .editor_find, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_diff, .editor_diff_scrolled, .editor_diff_selection, .editor_merge_panes, .editor_merge_narrow, .editor_merge_scrolled, .editor_merge_hscrolled, .editor_merge_caret => unreachable,
+            .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper, .context_menu_bottom_right, .dropdown_open, .dropdown_bottom_clamp, .scm_rows, .scm_history, .scm_row_hover, .scm_conflict_hover, .scm_conflict_resolved_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_minimap, .editor_selection, .editor_find, .editor_diagnostics, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_diff, .editor_diff_scrolled, .editor_diff_selection, .editor_merge_panes, .editor_merge_narrow, .editor_merge_scrolled, .editor_merge_hscrolled, .editor_merge_caret => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{

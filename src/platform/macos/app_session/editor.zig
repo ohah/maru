@@ -79,6 +79,7 @@ fn contentHash(bytes: []const u8) u64 {
 /// 구문 강조 색(§5.3 1층). **`syntax` 모듈이 여기서 처음 제품에 들어온다** — 그 전까지는
 /// 모듈만 서 있고 부르는 코드가 없어 exe에 링크되지 않았다.
 pub const syntax_color = @import("editor_syntax.zig");
+pub const diagnostics = @import("editor_diagnostics.zig");
 
 pub const Opened = struct {
     /// 열린 문서. **읽어 온 bytes를 빌리지 않고 소유한다**(N2 — `edit_doc.EditableFile`).
@@ -735,6 +736,40 @@ fn minimapScrollTo(self: *AppSession, term: *Term, y_px: f64) void {
     self.metal_dirty = true;
 }
 
+/// 진단 표(§5.4). 트리가 있으면 이 프레임에 목록을 다시 채운다(구문 오류 — 편집 직후 증분 트리도 그 프레임에 반영된다, 지연
+/// 없음). 파싱이 끊긴 프레임은 직전 목록을 유지한다. 설정으로 껐거나 문서가 없으면 `null`.
+fn diagnosticViews(self: *AppSession, term: *Term, visible_len: usize) ?diagnostics.Views {
+    if (!self.loaded_config.config.editor.diagnostics) return null;
+    const doc = term.rt.editor_doc orelse return null;
+    const st = &term.rt.editor_diagnostics;
+    const prov: ?*syntax_color.syntax.Provider = if (term.rt.editor_syntax.provider) |*p| p else null;
+    _ = diagnostics.refreshFromSyntax(st, self.allocator, prov);
+    return diagnostics.buildViews(st, self.allocator, doc.file.lines, term.rt.editor_visible_numbers, visible_len);
+}
+
+/// 다음/이전 진단으로 caret 을 옮긴다(§5.4 이동 — VS Code `F8`/`⇧F8`). caret 줄 기준 뒤/앞의 첫 진단, 없으면 감김; 진단이 없으면
+/// 무동작. caret 은 시작 offset 에 서고 `navigateTo` 가 드러낸다(되돌아가기 표식까지 — §5.2). 목록은 **직전 프레임의 것**이다 —
+/// 편집 직후 아직 안 그린 프레임이 있어도 다음 프레임이 곧 맞춘다.
+pub fn gotoDiagnostic(self: *AppSession, term: *Term, dir: maru.session.editor.diagnostic.Direction) bool {
+    if (term.kind != .editor) return false;
+    if (!self.loaded_config.config.editor.diagnostics) return false;
+    const doc = term.rt.editor_doc orelse return false;
+    const sorted = term.rt.editor_diagnostics.list.items;
+    if (sorted.len == 0) return false;
+    const focus: usize = if (term.rt.editor_selection) |sel| @min(sel.focus, doc.file.content.len) else 0;
+    const cur_line = doc.file.lines.lineAt(focus);
+    const ln = doc.file.lines.line(cur_line) orelse return false;
+    const pick = maru.session.editor.diagnostic.step(sorted, @intCast(ln.start), @intCast(ln.end_with_ending), dir) orelse return false;
+    navigateTo(self, .{ .offset = sorted[pick].start }) catch return false;
+    return true;
+}
+
+pub fn gotoDiagnosticActive(self: *AppSession, dir: maru.session.editor.diagnostic.Direction) bool {
+    const pane = pane_ops.activePane(self);
+    if (pane.terms.items.len == 0) return false;
+    return gotoDiagnostic(self, pane.activeTerm(), dir);
+}
+
 /// 설정의 caret 모양을 chrome 컴포넌트의 enum으로 옮긴다. **chrome은 config를 안 들여온다**(L3) —
 /// 이름이 같으므로 옮겨 담기만 한다. 새 값이 한쪽에만 생기면 여기서 컴파일이 깨져 드러난다.
 fn caretShape(self: *AppSession) chrome_editor.frame.CaretShape {
@@ -803,6 +838,8 @@ pub fn buildPaneOps(
     scratch: FrameScratch,
     /// 미니맵(§6.1) — 단일 편집기만 넘긴다(`null` 이면 없다).
     minimap: ?diff_frame.MinimapSide,
+    /// 진단 표(§5.4) — 단일 편집기만.
+    diag: ?diagnostics.Views,
 ) PaneFrame {
     // **내용은 뷰 사각에서 한 겹 들어간다**(`frame.content_inset_px`) — 배경은 그대로 전체를 덮는다.
     // 활성 pane 포커스 테두리가 셀 **위** 층에 그려져서, 여백이 없으면 첫 글자 행과 스크롤바를 덮는다
@@ -810,7 +847,7 @@ pub fn buildPaneOps(
     const inset: i32 = @intCast(chrome_editor.frame.content_inset_px);
     const inner: chrome_draw.Rect = .{ .x = 0, .y = 0, .w = rect.w -| chrome_editor.frame.content_inset_px * 2, .h = rect.h -| chrome_editor.frame.content_inset_px * 2 };
     const w = diff_frame.buildSide(
-        .{ .lines = lines, .first_col = first_col, .numbers = numbers, .total_lines = total_lines, .folds = folds, .content_max_cols = content_max_cols, .row_cache = row_cache, .selection_marks = selection_marks, .search_marks = search_marks, .search_current = search_current, .search_marker_lines = search_marker_lines, .search_marker_current = search_marker_current, .line_colors = line_colors, .line_seeks = line_seeks, .carets = carets, .widgets = widgets, .bands = bands, .minimap = minimap },
+        .{ .lines = lines, .first_col = first_col, .numbers = numbers, .total_lines = total_lines, .folds = folds, .content_max_cols = content_max_cols, .row_cache = row_cache, .selection_marks = selection_marks, .search_marks = search_marks, .search_current = search_current, .search_marker_lines = search_marker_lines, .search_marker_current = search_marker_current, .line_colors = line_colors, .line_seeks = line_seeks, .carets = carets, .widgets = widgets, .bands = bands, .minimap = minimap, .diag_marks = if (diag) |d| d.marks else null, .diag_markers = if (diag) |d| d.markers else null, .diag_lines = if (diag) |d| d.lines else &.{} },
         .{ .first_line = first_line, .first_piece = first_piece, .caret_visible = caret_visible, .caret_shape = caret_shape, .wrap = wrap, .tab_width = tab_width, .cell_w_px = cell_w_px, .cell_h_px = cell_h_px, .font_px = font_px },
         inner,
         // **배경만 뒤로 물린다.** 내용 op이 (0,0)에서 시작해야 셀 격자 양자화(`buildTextDrawList`가
@@ -1698,7 +1735,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     const pf = if (diff_state_opt) |st| blk: {
         // **상태 줄은 가로로 안 민다** — 한 줄짜리 문구라 밀면 화면에서 사라진다.
         // 한 줄짜리 상태 문구다 — 캐시가 아낄 것이 없다.
-        if (st.view != .compare) break :blk buildPaneOps(lines, null, null, lines.len, term.rt.editor_first_line, 0, 0, null, null, buildSelectionMarks(self, term), null, null, @as([]const u32, &.{}), null, syntaxColors(self, term), &.{}, buildCaretRows(self, term), &.{}, null, self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, null);
+        if (st.view != .compare) break :blk buildPaneOps(lines, null, null, lines.len, term.rt.editor_first_line, 0, 0, null, null, buildSelectionMarks(self, term), null, null, @as([]const u32, &.{}), null, syntaxColors(self, term), &.{}, buildCaretRows(self, term), &.{}, null, self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, null, null);
         // **좌우가 세로를 공유한다**(§3.5) — 행 배열이 이미 같은 길이라 같은 인덱스가 같은 높이다.
         // 가로는 각자다(§3.5의 그 규칙은 CM6가 "양쪽 줄 길이가 달라 한쪽을 따라가면 다른 쪽이
         // 엉뚱한 곳을 본다"고 적어 둔 근거에서 왔다) — 입력이 붙을 때 열별 `first_col`이 여기 온다.
@@ -1727,7 +1764,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
                 maru.i18n.t(.diff_read_failed)
             else
                 maru.i18n.t(.diff_loading);
-            break :blk buildPaneOps(status_line[0..1], null, null, 1, 0, 0, 0, null, null, null, null, null, @as([]const u32, &.{}), null, &.{}, &.{}, null, &.{}, null, false, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, null);
+            break :blk buildPaneOps(status_line[0..1], null, null, 1, 0, 0, 0, null, null, null, null, null, @as([]const u32, &.{}), null, &.{}, &.{}, null, &.{}, null, false, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, null, null);
         }
         break :blk buildMergePaneOps(self, term, st, draw_lines, wrap, pane_rect, scratch);
     } else blk: {
@@ -1740,7 +1777,9 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
         // 색은 그 창만 묻는다(본문과 다른 저장소).
         const mm = minimapSide(self, term, pane_rect, draw_lines);
         mm_drawn = if (mm) |m| m.input.top else null;
-        break :blk buildPaneOps(draw_lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), fc, maxColsForRender(self, term, false), row_cache, buildSelectionMarks(self, term), find_marks, find_current, marker_lines, marker_current, syntaxColors(self, term), seek_buf[0..seek_n], buildCaretRows(self, term), conflictWidgets(self, term), conflictBands(term), self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, mm);
+        // **진단**(§5.4) — 트리가 있으면 목록을 다시 채우고(구문 오류), 보이는 줄 축의 세 표로 편다. 끄면 없다.
+        const diag = diagnosticViews(self, term, draw_lines.len);
+        break :blk buildPaneOps(draw_lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), fc, maxColsForRender(self, term, false), row_cache, buildSelectionMarks(self, term), find_marks, find_current, marker_lines, marker_current, syntaxColors(self, term), seek_buf[0..seek_n], buildCaretRows(self, term), conflictWidgets(self, term), conflictBands(term), self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, mm, diag);
     };
     if (pf.ops_len == 0) return null;
     // **배치를 싣는다**(병합 모드가 아니면 지운다 — 옛 배치가 남으면 평범한 편집기에서 클릭이
@@ -8885,6 +8924,7 @@ fn dropSelectionState(self: *AppSession, term: *Term) void {
     if (term.rt.editor_find_mark_buf.len > 0) self.allocator.free(term.rt.editor_find_mark_buf);
     term.rt.editor_find_marks = &.{};
     term.rt.editor_find_mark_buf = &.{};
+    term.rt.editor_diagnostics.deinit(self.allocator); // 진단 층(§5.4)도 같은 단위다
     // **예약도 Term과 함께 사라진다.** `drawn` 필드 doc이 적은 규율("한 단위로 세우고 한 단위로
     // 지운다")의 예외를 그 규율을 적은 커밋이 만들어 두었다(적대적 검증 2026-08-24).
     term.rt.editor_find_reveal_pending = false;
@@ -10888,6 +10928,135 @@ test "MPN20 가로는 Result 의 것이다 — 휠이 Result 열에서 듣고, �
     _ = try fx.session.handleKeyEvent(.{ .key = .home });
     try testing.expectEqual(@as(u32, 5), term.rt.editor_first_col);
     term.rt.editor_wrap = false;
+}
+
+test "DGP1 진단 층 — 구문 오류가 gutter 글리프·지그재그 밑줄·막대 마커·미니맵 행으로 서고, F8/⇧F8 이 감기며, 고치면 사라지고, 끄면 넷 다 없다 (제품 경계, §5.4)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    // 둘째 줄에 닫는 괄호가 빠졌다(MISSING). 뒤에 멀쩡한 코드 200 줄 — 막대가 서고 스트립이 다 담는다.
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    try buf.appendSlice(allocator, "pub fn f() void {\n    const a = (1 + 2;\n    _ = a;\n}\n");
+    for (0..200) |i| {
+        const l = try std.fmt.allocPrint(allocator, "const k{d} = {d};\n", .{ i, i });
+        defer allocator.free(l);
+        try buf.appendSlice(allocator, l);
+    }
+    try dir.dir.writeFile(testing.io, .{ .sub_path = "d.zig", .data = buf.items });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(testing.io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "d.zig" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+    term.rt.editor_wrap = false;
+    fx.session.surface_initialized = true;
+    fx.session.backing_width_px = 1200;
+    fx.session.backing_height_px = 800;
+    const leaf = activeLeafRectForTest(fx.session) orelse return error.SkipZigTest;
+    const cw: u32 = fx.session.cell_width_px;
+    var rounds: usize = 0;
+    while (term.rt.editor_syntax.pending and rounds < 100_000) : (rounds += 1) _ = syntax_color.resumeParse(&term.rt.editor_syntax, term.rt.editor_doc.?.file.content);
+
+    const Found = struct { zigzag: usize, zig_color: u32, bar: usize, mm: usize, glyph: bool };
+    const scan = struct {
+        fn f(session: *AppSession, dl: renderer.DrawList, term_: *Term, cw_: u32) Found {
+            var out: Found = .{ .zigzag = 0, .zig_color = 0, .bar = 0, .mm = 0, .glyph = false };
+            out.glyph = drawnHasCodepoint(dl, 0x2716); // ✖
+            const half: f32 = @floatFromInt(@max(cw_ / chrome_editor.frame.zigzag_pieces_per_cell, 1));
+            const thick: f32 = @floatFromInt(chrome_editor.frame.caret_width_px);
+            // 스트립의 run(폭 4·높이 2 인 것이 있다)과 갈라야 한다 — 본문 안(스트립 왼쪽)의 것만.
+            const strip_x: f32 = if (term_.rt.editor_minimap_rect) |mr| @floatFromInt(mr.x) else std.math.inf(f32);
+            for (session.gpu_quads.items) |q| {
+                if (q.x < strip_x and q.w == half and q.h == thick and (q.fill_color0 >> 24) == 0xFF) {
+                    out.zigzag += 1;
+                    out.zig_color = q.fill_color0;
+                }
+            }
+            if (term_.rt.editor_scrollbar) |bar| {
+                for (session.gpu_quads.items) |q| {
+                    if (q.x == @as(f32, @floatCast(bar.track_x)) and q.h == @as(f32, @floatFromInt(chrome_editor.scrollbar.marker_h_px)) and q.fill_color0 == out.zig_color) out.bar += 1;
+                }
+            }
+            if (term_.rt.editor_minimap_rect) |mr| {
+                for (session.gpu_quads.items) |q| {
+                    if (q.x == @as(f32, @floatFromInt(mr.x)) and q.w == @as(f32, @floatFromInt(mr.w)) and q.h == 2.0 and (q.fill_color0 & 0x00FFFFFF) == (out.zig_color & 0x00FFFFFF) and (q.fill_color0 >> 24) == chrome_editor.minimap.mark_alpha) out.mm += 1;
+                }
+            }
+            return out;
+        }
+    }.f;
+
+    // ⑴ 넷이 선다.
+    fx.session.gpu_quads.clearRetainingCapacity();
+    var d0 = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+    const f0 = scan(fx.session, d0.dl, term, cw);
+    d0.dl.deinit(allocator);
+    try testing.expect(term.rt.editor_diagnostics.list.items.len >= 1);
+    try testing.expect(f0.glyph);
+    try testing.expect(f0.zigzag >= chrome_editor.frame.zigzag_pieces_per_cell); // 적어도 한 셀(MISSING 은 1 byte)
+    try testing.expect(f0.bar >= 1);
+    try testing.expect(f0.mm >= 1);
+    // 밑줄은 둘째 줄(오류가 있는 줄)의 행에 있고, 글리프도 그 행이다.
+    const body = editorBodyRect(fx.session, leaf, term);
+    const inset = chrome_editor.frame.content_inset_px;
+    const ch: u32 = fx.session.cell_height_px;
+    var zig_row: ?u32 = null;
+    const strip_x0: f32 = @floatFromInt((term.rt.editor_minimap_rect orelse return error.NoMinimap).x);
+    for (fx.session.gpu_quads.items) |q| {
+        if (q.x < strip_x0 and q.w == @as(f32, @floatFromInt(@max(cw / 2, 1))) and q.h == @as(f32, @floatFromInt(chrome_editor.frame.caret_width_px)) and q.fill_color0 == f0.zig_color) {
+            zig_row = @intFromFloat(@floor((q.y - @as(f32, @floatFromInt(body.y + inset))) / @as(f32, @floatFromInt(ch))));
+            break;
+        }
+    }
+    try testing.expectEqual(@as(?u32, 1), zig_row);
+
+    // ⑵ F8 은 다음 진단으로 caret 을 옮기고, ⇧F8 은 감긴다(진단이 하나면 같은 자리로).
+    term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };
+    const first = term.rt.editor_diagnostics.list.items[0];
+    try testing.expect(gotoDiagnosticActive(fx.session, .next));
+    try testing.expectEqual(@as(usize, first.start), term.rt.editor_selection.?.focus);
+    try testing.expect(gotoDiagnosticActive(fx.session, .prev)); // 감김
+    try testing.expectEqual(@as(usize, first.start), term.rt.editor_selection.?.focus);
+
+    // ⑶ 고치면 사라진다 — 닫는 괄호를 넣고 다음 프레임.
+    const fix_at = std.mem.indexOf(u8, term.rt.editor_doc.?.file.content, "2;") orelse return error.NoAnchor;
+    term.rt.editor_selection = .{ .anchor_start = fix_at + 1, .anchor_end = fix_at + 1, .focus = fix_at + 1 };
+    try testing.expect(insertText(fx.session, term, ")"));
+    rounds = 0;
+    while (term.rt.editor_syntax.pending and rounds < 100_000) : (rounds += 1) _ = syntax_color.resumeParse(&term.rt.editor_syntax, term.rt.editor_doc.?.file.content);
+    fx.session.gpu_quads.clearRetainingCapacity();
+    var d1 = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+    const f1 = scan(fx.session, d1.dl, term, cw);
+    d1.dl.deinit(allocator);
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_diagnostics.list.items.len);
+    try testing.expect(!f1.glyph);
+    try testing.expectEqual(@as(usize, 0), f1.zigzag);
+    try testing.expect(!gotoDiagnosticActive(fx.session, .next)); // 없으면 무동작
+
+    // ⑷ 다시 깨뜨리고 끄면 넷 다 없다(목록은 비고, 이동도 무동작).
+    try testing.expect(insertText(fx.session, term, "@@@"));
+    rounds = 0;
+    while (term.rt.editor_syntax.pending and rounds < 100_000) : (rounds += 1) _ = syntax_color.resumeParse(&term.rt.editor_syntax, term.rt.editor_doc.?.file.content);
+    fx.session.gpu_quads.clearRetainingCapacity();
+    var d2 = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+    const f2 = scan(fx.session, d2.dl, term, cw);
+    d2.dl.deinit(allocator);
+    try testing.expect(f2.glyph and f2.zigzag > 0 and f2.bar >= 1 and f2.mm >= 1);
+    fx.session.loaded_config.config.editor.diagnostics = false;
+    fx.session.gpu_quads.clearRetainingCapacity();
+    var d3 = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+    const f3 = scan(fx.session, d3.dl, term, cw);
+    d3.dl.deinit(allocator);
+    try testing.expect(!f3.glyph);
+    try testing.expectEqual(@as(usize, 0), f3.zigzag);
+    try testing.expectEqual(@as(usize, 0), f3.bar);
+    try testing.expectEqual(@as(usize, 0), f3.mm);
+    try testing.expect(!gotoDiagnosticActive(fx.session, .next));
+    fx.session.loaded_config.config.editor.diagnostics = true;
 }
 
 test "MMP2 미니맵의 축은 보이는 줄이다 — 접으면 스트립에서도 사라지고, 클릭은 보이는 줄 축으로 환산된다 (제품 경계, §6.1·§6.2)" {

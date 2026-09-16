@@ -899,6 +899,13 @@ const cases = [_]Case{
         .contract = "본문 오른쪽·막대 왼쪽에 문서 모양 스트립과 슬라이더가 선다 — 본문은 그만큼 좁다",
         .rect = .{ .x = 0, .y = 0, .w = 1200, .h = 320 },
     },
+    // §5.4 — **진단 층.** 오류 줄에 gutter `✖`(경고는 `⚠`)·셀 아래 지그재그 밑줄·막대 마커·미니맵 행이 severity 색으로 선다.
+    .{
+        .name = "editor-diagnostics",
+        .capture = "editor-diagnostics.ppm",
+        .contract = "오류 줄에 gutter 글리프와 지그재그 밑줄이 severity 색으로 서고, 미니맵에도 그 줄이 찍힌다",
+        .rect = .{ .x = 0, .y = 0, .w = 1200, .h = 160 },
+    },
     .{
         .name = "editor-typescript-colors",
         .capture = "editor-typescript.ppm",

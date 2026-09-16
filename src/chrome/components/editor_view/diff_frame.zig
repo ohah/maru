@@ -51,6 +51,10 @@ pub const Side = struct {
     /// 비교 뷰 검색은 어느 쪽을 검색하는지부터 정해야 하고, 그것은 가로 스크롤·히트테스트가
     /// 좌우를 가른 뒤의 일이다(같은 슬라이스에 든다).
     search_marks: ?[]const []const frame.Mark = null,
+    /// 진단(§5.4) — 줄마다의 밑줄 조각·gutter severity·마커 줄. 단일 편집기만 채운다(비교 뷰의 열은 문서가 아니다).
+    diag_marks: ?[]const []const frame.diagnostic.Mark = null,
+    diag_markers: ?[]const ?frame.diagnostic.Level = null,
+    diag_lines: []const frame.diagnostic.LineMark = &.{},
     /// 검색 결과가 있는 줄(§4.1a 막대 마커). 비교 뷰는 축이 둘이라 각 side 가 자기 것을 든다.
     search_marker_lines: []const u32 = &.{},
     search_marker_current: ?usize = null,
@@ -298,6 +302,9 @@ pub fn buildSide(
         .row_cache = side.row_cache,
         .selection_marks = side.selection_marks,
         .search_marks = side.search_marks,
+        .diag_marks = side.diag_marks,
+        .diag_markers = side.diag_markers,
+        .diag_lines = side.diag_lines,
         .search_marker_lines = side.search_marker_lines,
         .search_marker_current = side.search_marker_current,
         .search_current = side.search_current,

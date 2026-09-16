@@ -168,6 +168,8 @@ pub const editor = struct {
     pub const diff_state = @import("session/editor/diff_state.zig");
     pub const intraline = @import("session/editor/intraline.zig");
     pub const fold = @import("session/editor/fold.zig");
+    /// 진단 층의 순수 규칙(§5·§5.4) — 범위→줄 접기·밑줄 조각·다음/이전. 출처(트리 오류·LSP)는 밖에서 목록을 채운다.
+    pub const diagnostic = @import("session/editor/diagnostic.zig");
     /// S2: 병합 충돌 **마커 구간**(docs/editor-merge-conflicts.md §5). 순수 계산이라 여기 산다 —
     /// 줄 배열을 받아 구간을 내고, 그리기·동작은 위층이 붙인다.
     pub const conflict = @import("session/editor/conflict.zig");

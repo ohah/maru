@@ -20,6 +20,7 @@ const geometry = @import("geometry.zig");
 const gutter = @import("gutter.zig");
 const scrollbar = @import("scrollbar.zig");
 const minimap = @import("minimap.zig");
+pub const diagnostic = @import("diagnostic.zig");
 const surface = @import("surface.zig");
 const visual_map = @import("../../ui/visual_map.zig");
 const scroll_area = @import("../../ui/scroll_area.zig");
@@ -177,6 +178,12 @@ pub const Props = struct {
     /// **"보이는 줄 축"**이라 부른다. 컴포넌트는 접힘을 모르니 그 이름을 쓸 수 없을 뿐 **같은
     /// 것**이다 — §4.1g가 이 두 이름을 섞어 여러 번 틀린 이력이 있어 여기 적어 둔다.
     search_marks: ?[]const []const Mark = null,
+    /// **진단**(§5.4) — 줄마다의 밑줄 조각(`search_marks` 와 같은 축·같은 byte 규칙). 물결(지그재그)로 그린다.
+    diag_marks: ?[]const []const diagnostic.Mark = null,
+    /// 줄마다 gutter 마커의 severity(그 줄에서 **시작하는** 진단의 최고). `null` 항목은 마커 없음.
+    diag_markers: ?[]const ?diagnostic.Level = null,
+    /// 진단이 있는 줄 전체(보이는 줄 축) — 막대·미니맵 마커. `search_marker_lines` 와 같은 축.
+    diag_lines: []const diagnostic.LineMark = &.{},
     /// 검색 결과가 있는 **줄 인덱스** 전체(§4.1a 「검색 결과 마커」). `search_marks` 는 **보이는 줄만**
     /// 담아 화면 밖 매치를 말하지 못하므로 축이 다른 입력이 필요하다. 찾기가 닫히면 빈 조각이다.
     ///
@@ -576,6 +583,15 @@ pub fn build(props: Props, scratch: Scratch) Written {
         props.folds,
         scratch.gutter_rows,
     );
+    // 진단 글리프(§5.4): 줄 번호가 서는 행에만(랩 이어짐 행은 번호와 같은 규칙으로 비운다).
+    if (props.diag_markers) |markers| {
+        for (grows) |*g| {
+            if (g.number == null) continue;
+            const v = scratch.visual_rows[g.visual_row];
+            const idx = v.docIndex(props.first_line);
+            if (idx < markers.len) g.marker = markers[idx];
+        }
+    }
     const gw = gutter.build(.{
         .layout = layout,
         .rows = grows,
@@ -751,7 +767,12 @@ pub fn build(props: Props, scratch: Scratch) Written {
 
     // **커서는 검색 위, 막대 앞이다.** 위 예약과 같은 이유로 막대 몫을 남기고, 커서도 줄당 개수에
     // 상한이 없으므로(만 개까지) 남은 자리 안에서만 그린다 — `paintCarets`가 넘으면 자른다.
-    const caret_base = find_base + find_ops;
+    // **진단 밑줄은 검색 위·커서 아래**(§5.4) — 검색 강조가 배경이고 밑줄은 그 위에 선다. 같은 예약 규칙.
+    const diag_base = find_base + find_ops;
+    const diag_room = (scratch.ops.len -| diag_base) -| scrollbar_reserve_ops;
+    const diag_ops = paintDiagnostics(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[diag_base..][0..diag_room], scratch.count_scratch);
+
+    const caret_base = diag_base + diag_ops;
     const caret_room = (scratch.ops.len -| caret_base) -| scrollbar_reserve_ops;
     const caret_ops = paintCarets(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[caret_base..][0..caret_room]);
 
@@ -768,6 +789,15 @@ pub fn build(props: Props, scratch: Scratch) Written {
         }
         marker_rows[marker_n] = row;
         marker_n += 1;
+    }
+    // 진단 줄도 같은 축으로 옮긴다(§5.4).
+    var diag_rows: [scrollbar.marker_budget]scrollbar.DiagRow = undefined;
+    var diag_n: usize = 0;
+    for (props.diag_lines) |dl| {
+        if (diag_n >= diag_rows.len) break;
+        const row = if (cache) |c| c.rowsBefore(@min(dl.line, props.lines.len)) else dl.line;
+        diag_rows[diag_n] = .{ .row = row, .level = dl.level };
+        diag_n += 1;
     }
 
     // ── 4b) 미니맵 ────────────────────────────────────────────────────────────
@@ -791,6 +821,7 @@ pub fn build(props: Props, scratch: Scratch) Written {
             // 검색 일치 행(§6.2) — 막대 마커와 **같은 목록**(보이는 줄 축). 옮길 것이 없다: 스트립의 축이 그 축이다.
             .mark_lines = props.search_marker_lines,
             .mark_current = props.search_marker_current,
+            .diag_lines = props.diag_lines,
         }, scratch.ops[mm_base..]);
         break :blk mw.ops;
     } else 0;
@@ -814,6 +845,7 @@ pub fn build(props: Props, scratch: Scratch) Written {
         .change_bands = props.row_bands orelse &.{},
         .change_kind = props.change_marker_kind,
         .change_row_cache = cache,
+        .diag_rows = diag_rows[0..diag_n],
     }, scratch.ops[mm_base + mm_ops ..]);
 
     // ── 5) 가로 스크롤바 ───────────────────────────────────────────────────────
@@ -840,7 +872,7 @@ pub fn build(props: Props, scratch: Scratch) Written {
         .total_visual_rows = total_visual,
         .max_top_line = max_top.line,
         .max_top_piece = max_top.piece,
-        .ops = bg.ops + cw.ops + gw.ops + sw.ops + band_ops + sel_ops + find_ops + caret_ops + mm_ops + hw.ops,
+        .ops = bg.ops + cw.ops + gw.ops + sw.ops + band_ops + sel_ops + find_ops + diag_ops + caret_ops + mm_ops + hw.ops,
         .visual_rows = cw.visual_rows,
         .truncated = cw.truncated_rows > 0 or gw.dropped_rows > 0,
         .scrollbar = sw.geometry,
@@ -922,7 +954,12 @@ const RowMarkPaint = struct {
     marks: []const Mark,
     role: tokens.ColorRole,
     alpha: u8,
+    /// `fill` 은 셀 전체를 칠하고(선택·검색), `zigzag` 는 셀 아래에 물결 밑줄을 낸다(진단 §5.4).
+    shape: enum { fill, zigzag } = .fill,
 };
+
+/// 지그재그 밑줄 한 셀의 조각 수 — 반 셀 폭 조각 둘이 위·아래로 번갈아 선다(§5.4).
+pub const zigzag_pieces_per_cell: u32 = 2;
 
 fn paintRowMarks(props: Props, layout: geometry.Layout, p: RowMarkPaint, out: []draw.Op, scratch_cols: []u8) usize {
     var n: usize = 0;
@@ -953,12 +990,66 @@ fn paintRowMarks(props: Props, layout: geometry.Layout, p: RowMarkPaint, out: []
         // (첫 캡처가 정확히 그랬다) — 본문 시작 열(`contentLeft`)을 더한다.
         const col_on_screen: u32 = @as(u32, layout.contentLeft()) + (from - p.row_start_col);
         const x = props.rect.x + @as(i32, @intCast(col_on_screen * props.cell_w_px));
-        out[n] = .{ .quad = .{
-            .rect = .{ .x = x, .y = p.y, .w = (to - from) * props.cell_w_px, .h = props.cell_h_px },
-            .fill_role = p.role,
-            .alpha = p.alpha,
-        } };
-        n += 1;
+        switch (p.shape) {
+            .fill => {
+                out[n] = .{ .quad = .{
+                    .rect = .{ .x = x, .y = p.y, .w = (to - from) * props.cell_w_px, .h = props.cell_h_px },
+                    .fill_role = p.role,
+                    .alpha = p.alpha,
+                } };
+                n += 1;
+            },
+            .zigzag => {
+                // 셀마다 반 셀 폭 조각 둘: 아래·위(두께만큼 올린 자리)를 번갈아. 두께는 caret 과 같다(선 하나의 두께는 한 값).
+                const half: u32 = @max(props.cell_w_px / zigzag_pieces_per_cell, 1);
+                const thick: u32 = caret_width_px;
+                const bottom: i32 = p.y + @as(i32, @intCast(props.cell_h_px -| thick));
+                const pieces = (to - from) * zigzag_pieces_per_cell;
+                var j: u32 = 0;
+                while (j < pieces) : (j += 1) {
+                    if (n >= out.len) break;
+                    const up = (j % 2) == 1;
+                    out[n] = .{ .quad = .{
+                        .rect = .{
+                            .x = x + @as(i32, @intCast(j * half)),
+                            .y = if (up) bottom - @as(i32, @intCast(thick)) else bottom,
+                            .w = half,
+                            .h = thick,
+                        },
+                        .fill_role = p.role,
+                        .alpha = p.alpha,
+                    } };
+                    n += 1;
+                }
+            },
+        }
+    }
+    return n;
+}
+
+/// **진단 밑줄**을 그린다(§5.4). 줄마다 조각을 받고(`diag_marks`, 검색과 같은 축) severity 색의 지그재그로 낸다. severity 마다 role 이
+/// 다르므로 조각을 하나씩 `paintRowMarks` 에 넘긴다 — 열 계산은 그 한 곳이다(§4.1c).
+fn paintDiagnostics(props: Props, layout: geometry.Layout, visual: []const visual_map.VisualRow, out: []draw.Op, scratch_cols: []u8) usize {
+    const rows = props.diag_marks orelse return 0;
+    var n: usize = 0;
+    for (visual, 0..) |v, i| {
+        if (n >= out.len) break;
+        if (v.kind != .text) continue;
+        const idx = v.docIndex(props.first_line);
+        if (idx >= rows.len or idx >= props.lines.len) continue;
+        for (rows[idx]) |dm| {
+            if (n >= out.len) break;
+            const one = [_]Mark{.{ .start = dm.start, .len = dm.len }};
+            n += paintRowMarks(props, layout, .{
+                .line = props.lines[idx],
+                .row_start_col = v.start_col,
+                .y = props.rect.y + @as(i32, @intCast(i)) * @as(i32, props.cell_h_px),
+                .marks = &one,
+                .role = dm.level.role(),
+                .alpha = 0xFF,
+                .shape = .zigzag,
+            }, out[n..], scratch_cols);
+        }
     }
     return n;
 }
@@ -1657,6 +1748,77 @@ test "CM1 변경 위치 마커는 랩에서 시각 행 축이다 — 같은 줄�
         if (op == .quad and op.quad.rect.h == @as(u32, @intCast(scrollbar.marker_h_px)) and op.quad.fill_role == .diff_added_bg) change_n += 1;
     }
     try std.testing.expectEqual(@as(usize, 1), change_n);
+}
+
+test "DGF1 진단 밑줄은 셀마다 지그재그 조각 둘, severity 색, 검색 위·커서 아래; gutter 글리프는 시작 줄의 leading_margin 칸 (§5.4)" {
+    var bufs: TestBuffers = .{};
+    const lines = [_][]const u8{ "abcdef", "ghijkl", "mn" };
+    var props = testProps(&lines, false);
+    // 줄 0 의 byte 1..4(3 셀) 가 error, 줄 1 의 0..2 가 warning.
+    const m0 = [_]diagnostic.Mark{.{ .start = 1, .len = 3, .level = .err }};
+    const m1 = [_]diagnostic.Mark{.{ .start = 0, .len = 2, .level = .warning }};
+    const marks = [_][]const diagnostic.Mark{ &m0, &m1, &.{} };
+    props.diag_marks = &marks;
+    const markers = [_]?diagnostic.Level{ .err, .warning, null };
+    props.diag_markers = &markers;
+    const w = build(props, bufs.scratch());
+
+    var err_pieces: usize = 0;
+    var warn_pieces: usize = 0;
+    var min_x: i32 = std.math.maxInt(i32);
+    var max_right: i32 = 0;
+    var ups: usize = 0;
+    var downs: usize = 0;
+    const cell_w: i32 = @intCast(props.cell_w_px);
+    for (bufs.ops[0..w.ops]) |op| {
+        if (op != .quad) continue;
+        const q = op.quad;
+        if (q.fill_role == .diagnostic_error) {
+            err_pieces += 1;
+            min_x = @min(min_x, q.rect.x);
+            max_right = @max(max_right, q.rect.x + @as(i32, @intCast(q.rect.w)));
+            try std.testing.expectEqual(caret_width_px, q.rect.h);
+            const bottom: i32 = @as(i32, @intCast(props.cell_h_px)) - @as(i32, @intCast(caret_width_px));
+            if (q.rect.y == bottom) downs += 1 else if (q.rect.y == bottom - @as(i32, @intCast(caret_width_px))) ups += 1 else return error.ZigzagOffRow;
+        } else if (q.fill_role == .diagnostic_warning) warn_pieces += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3 * zigzag_pieces_per_cell), err_pieces);
+    try std.testing.expectEqual(@as(usize, 2 * zigzag_pieces_per_cell), warn_pieces);
+    try std.testing.expectEqual(ups, downs); // 위·아래가 번갈아
+    // 자리: 본문 열 1 부터 3 셀.
+    const layout = geometry.compute(props.total_cols, lines.len, .{});
+    const x0: i32 = @as(i32, layout.contentLeft()) * cell_w + cell_w;
+    try std.testing.expectEqual(x0, min_x);
+    try std.testing.expectEqual(x0 + 3 * cell_w, max_right);
+
+    // gutter 글리프: 줄 0 에 ✖(error 색), 줄 1 에 ⚠, 줄 2 에는 없다 — leading_margin 칸(x = 0).
+    var glyphs: usize = 0;
+    for (bufs.ops[0..w.ops]) |op| {
+        if (op != .text) continue;
+        const t = op.text;
+        if (t.role != .diagnostic_error and t.role != .diagnostic_warning) continue;
+        glyphs += 1;
+        try std.testing.expectEqual(@as(i32, layout.leading_margin.start) * cell_w, t.origin.x);
+        const want = if (t.role == .diagnostic_error) "✖" else "⚠";
+        try std.testing.expectEqualStrings(want, t.runs[0].text);
+        const row: i32 = @divTrunc(t.origin.y, @as(i32, @intCast(props.cell_h_px)));
+        try std.testing.expectEqual(if (t.role == .diagnostic_error) @as(i32, 0) else 1, row);
+    }
+    try std.testing.expectEqual(@as(usize, 2), glyphs);
+
+    // 순서: 진단 조각은 검색 quad 뒤(위)·커서 앞. 검색 마크를 같은 자리에 두고 op 순서를 본다.
+    const sm = [_]Mark{.{ .start = 1, .len = 3 }};
+    const search = [_][]const Mark{ &sm, &.{}, &.{} };
+    props.search_marks = &search;
+    const w2 = build(props, bufs.scratch());
+    var last_search: usize = 0;
+    var first_diag: usize = std.math.maxInt(usize);
+    for (bufs.ops[0..w2.ops], 0..) |op, i| {
+        if (op != .quad) continue;
+        if (op.quad.fill_role == .search_match) last_search = i;
+        if (op.quad.fill_role == .diagnostic_error) first_diag = @min(first_diag, i);
+    }
+    try std.testing.expect(last_search < first_diag);
 }
 
 test "WID4 위젯 표가 갈리면 캐시를 다시 센다 — 옛 접두합은 다른 문서의 값이다" {

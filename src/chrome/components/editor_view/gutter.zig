@@ -11,6 +11,7 @@
 const std = @import("std");
 const chrome = @import("../../../chrome.zig");
 const geometry = @import("geometry.zig");
+const diagnostic = @import("diagnostic.zig");
 const visual_map = @import("../../ui/visual_map.zig"); // §4 세로 축 — 본문이 정한 시각 배치를 따른다
 
 const draw = chrome.draw;
@@ -27,6 +28,9 @@ pub const Row = struct {
     visual_row: u16,
     /// 이 줄이 접을 수 있는 머리인가, 접혀 있는가. `none`이면 접힘 칸이 빈다.
     fold: Fold = .none,
+    /// 진단 마커(§5.4) — 이 줄에서 **시작하는** 진단의 최고 severity. `null` 이면 `leading_margin` 칸이 빈다. 랩 이어짐 행에는
+    /// 호출자가 `null` 을 준다(번호와 같은 규칙).
+    marker: ?diagnostic.Level = null,
 };
 
 /// gutter 접힘 칸에 그릴 표식. **늘 그린다 — hover가 아니다.**
@@ -120,6 +124,33 @@ pub fn build(props: Props, out: []draw.Op, text_scratch: []u8, runs: []draw.Run)
 
     var dropped: usize = 0;
     for (props.rows) |row| {
+        // **진단 글리프**(§5.4) — `leading_margin` 한 셀. 접힘 표식과 같은 이유로 번호보다 먼저 낸다.
+        if (!props.layout.leading_margin.isEmpty()) {
+            if (row.marker) |lv| {
+                const g = lv.glyph();
+                if (scratch_used + g.len <= text_scratch.len and run_used < runs.len and op_count < out.len) {
+                    const mark = text_scratch[scratch_used..][0..g.len];
+                    @memcpy(mark, g);
+                    scratch_used += g.len;
+                    runs[run_used] = .{ .text = mark };
+                    const mark_slice = runs[run_used .. run_used + 1];
+                    run_used += 1;
+                    out[op_count] = .{ .text = .{
+                        .origin = .{
+                            .x = props.origin_px.x + @as(i32, props.layout.leading_margin.start) * @as(i32, props.cell_w_px),
+                            .y = props.origin_px.y + @as(i32, row.visual_row) * @as(i32, props.cell_h_px),
+                        },
+                        .runs = mark_slice,
+                        .role = lv.role(),
+                        .max_cols = 1,
+                        .font_px = props.font_px,
+                        .line_height_px = props.cell_h_px,
+                        .cell_w_px = props.cell_w_px,
+                    } };
+                    op_count += 1;
+                }
+            }
+        }
         // **접힘 표식을 번호보다 먼저 낸다.** 번호가 없는 행(랩 이어짐)에서 `continue`가 걸리기
         // 때문이다 — 뒤에 두면 접힌 줄이 랩된 경우에 표식이 사라진다.
         if (!props.layout.folding.isEmpty()) {

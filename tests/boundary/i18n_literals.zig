@@ -192,7 +192,9 @@ const inventory = [_]Entry{
     // 36: 34 + **인라인 위젯 행 픽스처 둘**(S1.5). 표시 문자열이 아니라 **Lab 픽스처**다 — 제품이
     // 이 글자를 내는 일이 없고(위젯을 만드는 것은 S2 이고 그쪽은 `i18n` 키를 쓴다), 골든이 그
     // 글자를 그대로 굳혀 「위젯 글자가 그 열에 선다」를 증언한다.
-    .{ .path = "src/platform/macos/chrome/lab.zig", .count = 36 },
+    // 37 = 36 + **진단 장면의 픽스처 줄 하나**(2026-09-17, §5.4 `editor_diagnostics_lines`) — 화면 문구가 아니라 그려지는
+    // **문서 내용**이다(검색 장면의 한국어 줄과 같은 부류: 한글은 두 칸이라 열 계산 축을 캡처가 담는다).
+    .{ .path = "src/platform/macos/chrome/lab.zig", .count = 37 },
     // 2 → 3: `editor_typescript` 캡처 픽스처의 한국어 주석 한 줄. **표시 문자열이 아니라 그려질
     // 내용**이다 — 캡처가 한글 폭까지 잡도록 일부러 넣었다(같은 파일의 다른 둘도 같은 부류다).
     .{ .path = "src/platform/macos/chrome_lab_smoke.zig", .count = 3 },
@@ -306,7 +308,7 @@ fn countSource(allocator: std.mem.Allocator, source: [:0]const u8) !usize {
 
 /// 헤더가 말하는 총계. **코드가 검증한다** — 손으로 적은 숫자는 원장이 움직일 때 조용히 어긋난다
 /// (실제로 152 로 적혀 있다가 182 와 30 차이가 났다).
-const header_total = 250; // +2: 편집기 판정자의 큰 문서 픽스처 · +2: 인라인 위젯 행 Lab 픽스처(S1.5) · +1: e4d4 메타데이터 대기 진단 · +2: .frametime 단계 요약(§10.6) · +7: 코어 락 경합 진단(§13·§13.7·§12.9·플리커 신호) · +2: grid shaping 진단(§10.7) · +2: run 캐시 셰이핑 픽스처(§10.8)
+const header_total = 251; // +1: 진단 장면 Lab 픽스처(§5.4) · +2: 편집기 판정자의 큰 문서 픽스처 · +2: 인라인 위젯 행 Lab 픽스처(S1.5) · +1: e4d4 메타데이터 대기 진단 · +2: .frametime 단계 요약(§10.6) · +7: 코어 락 경합 진단(§13·§13.7·§12.9·플리커 신호) · +2: grid shaping 진단(§10.7) · +2: run 캐시 셰이핑 픽스처(§10.8)
 const header_config_total = 54;
 
 comptime {

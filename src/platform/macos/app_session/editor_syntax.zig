@@ -13,7 +13,7 @@
 //! 의무가 이 시점에 발생한다.
 
 const std = @import("std");
-const syntax = @import("syntax");
+pub const syntax = @import("syntax");
 const maru = @import("maru");
 const chrome_editor = maru.chrome.components.editor_view;
 const content = chrome_editor.content;

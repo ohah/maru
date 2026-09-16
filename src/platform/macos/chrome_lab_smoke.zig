@@ -31,7 +31,7 @@ const viewport = chrome.ui.layout.UiSize{ .width = 480, .height = 720 };
 /// 맞추는 대신 캡처를 넓힌다. 접히는 쪽은 `editor-merge-narrow` 가 기본 폭으로 따로 찍는다.
 fn viewportFor(id: lab.ScenarioId) chrome.ui.layout.UiSize {
     return switch (id) {
-        .editor_merge_panes, .editor_merge_scrolled, .editor_merge_hscrolled, .editor_merge_caret, .editor_minimap => .{ .width = 1200, .height = 720 },
+        .editor_merge_panes, .editor_merge_scrolled, .editor_merge_hscrolled, .editor_merge_caret, .editor_minimap, .editor_diagnostics => .{ .width = 1200, .height = 720 },
         // 모서리 gap 은 **넓은 창에서 어떤 비율로 읽히는가**가 질문의 절반이다(`ScenarioId` 주석 ⑵).
         // 기본 480px 에서는 한 셀이 폭의 1.7% 라 과장돼 보인다 — 여기만 제품에 가까운 폭으로 넓힌다.
         .context_menu_bottom_right => .{ .width = 1200, .height = 720 },
@@ -109,6 +109,7 @@ fn labQuadLayer(id: lab.ScenarioId) u32 {
         .editor_minimap,
         .editor_selection,
         .editor_find,
+        .editor_diagnostics,
         .editor_caret_bar,
         .editor_caret_block,
         .editor_caret_underline,
@@ -770,7 +771,7 @@ pub fn main(init: std.process.Init) !void {
         const rect = (switch (scenario_id) {
             .scm_rows, .scm_history, .scm_row_hover, .scm_conflict_hover, .scm_conflict_resolved_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_small_font, .scm_blocker, .dock_over_status_bar => chrome.components.scm_dock.build.scrollTextViewport(frame.tree),
             .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome => chrome.components.file_tree.build.scrollTextViewport(frame.tree),
-            .empty, .loading, .retained_list, .font_specimen, .partial_scroll, .partial_group_scroll, .scrollbar, .sticky_at_rest, .sticky_pinned, .sticky_pushed, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .sort_toggle_hover, .sort_toggle_pressed, .sidebar_status_strip, .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .context_menu_checked, .context_menu_send, .context_menu_send_helper, .context_menu_unchecked, .context_menu_bottom_right, .dropdown_open, .dropdown_bottom_clamp, .editor_real_file, .editor_typescript, .editor_minimap, .editor_selection, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_find, .editor_diff_selection, .editor_diff, .editor_diff_scrolled, .editor_merge_panes, .editor_merge_narrow, .editor_merge_scrolled, .editor_merge_hscrolled, .editor_merge_caret => chrome.components.session_dock.build.scrollTextViewport(frame.tree),
+            .empty, .loading, .retained_list, .font_specimen, .partial_scroll, .partial_group_scroll, .scrollbar, .sticky_at_rest, .sticky_pinned, .sticky_pushed, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .sort_toggle_hover, .sort_toggle_pressed, .sidebar_status_strip, .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .context_menu_checked, .context_menu_send, .context_menu_send_helper, .context_menu_unchecked, .context_menu_bottom_right, .dropdown_open, .dropdown_bottom_clamp, .editor_real_file, .editor_typescript, .editor_minimap, .editor_selection, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_find, .editor_diagnostics, .editor_diff_selection, .editor_diff, .editor_diff_scrolled, .editor_merge_panes, .editor_merge_narrow, .editor_merge_scrolled, .editor_merge_hscrolled, .editor_merge_caret => chrome.components.session_dock.build.scrollTextViewport(frame.tree),
         }) orelse break :blk null;
         break :blk .{
             .x = @intFromFloat(@max(rect.x, 0)),
@@ -1012,6 +1013,7 @@ fn scenarioFromEnvValue(raw: []const u8) ?lab.ScenarioId {
     if (std.mem.eql(u8, raw, "editor-hscroll")) return .editor_hscroll;
     if (std.mem.eql(u8, raw, "editor-folded")) return .editor_folded;
     if (std.mem.eql(u8, raw, "editor-find")) return .editor_find;
+    if (std.mem.eql(u8, raw, "editor-diagnostics")) return .editor_diagnostics;
     if (std.mem.eql(u8, raw, "editor-wrap-scrolled")) return .editor_wrap_scrolled;
     if (std.mem.eql(u8, raw, "editor-wrap-stale-scroll")) return .editor_wrap_stale_scroll;
     if (std.mem.eql(u8, raw, "editor-real-file")) return .editor_real_file;
@@ -1108,6 +1110,7 @@ fn artifactName(id: lab.ScenarioId) []const u8 {
         .editor_hscroll => "editor-hscroll",
         .editor_folded => "editor-folded",
         .editor_find => "editor-find",
+        .editor_diagnostics => "editor-diagnostics",
         .editor_wrap_scrolled => "editor-wrap-scrolled",
         .editor_wrap_stale_scroll => "editor-wrap-stale-scroll",
         .editor_real_file => "editor-real-file",

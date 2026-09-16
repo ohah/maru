@@ -268,6 +268,8 @@ pub const editor_context_bindings = [_]EditorContextBinding{
     // `true` 변이가 사는 것이 정상이다(S5 적대적 2회차 B6). `false` 인 것은 뜻이다: 구간 사이를 오가는 것은 편집이 아니다.
     .{ .chord = .{ .modifiers = .{}, .key = .{ .function = 7 } }, .action = .next_conflict, .needs_editable = false }, // F7
     .{ .chord = .{ .modifiers = .{ .shift = true }, .key = .{ .function = 7 } }, .action = .prev_conflict, .needs_editable = false }, // Shift+F7
+    .{ .chord = .{ .modifiers = .{}, .key = .{ .function = 8 } }, .action = .next_diagnostic, .needs_editable = false }, // F8 — §5.4(VS Code editor.action.marker.next)
+    .{ .chord = .{ .modifiers = .{ .shift = true }, .key = .{ .function = 8 } }, .action = .prev_diagnostic, .needs_editable = false }, // Shift+F8
     .{ .chord = .{ .modifiers = .{ .option = true, .shift = true }, .key = .arrow_down }, .action = .duplicate_lines, .needs_editable = true }, // Shift+Opt+Down
     .{ .chord = .{ .modifiers = .{ .option = true }, .key = .arrow_up }, .action = .move_lines_up, .needs_editable = true }, // Opt+Up
     .{ .chord = .{ .modifiers = .{ .option = true }, .key = .arrow_down }, .action = .move_lines_down, .needs_editable = true }, // Opt+Down
@@ -1216,7 +1218,7 @@ test "ETX4 편집기 컨텍스트 기본키가 전역 표를 안 오염시킨다
         try std.testing.expect(b.needs_editable);
     }
     try std.testing.expectEqual(allowed.len, exceptions);
-    try std.testing.expectEqual(@as(usize, 2), bare_function_keys); // F7 · ⇧F7 — 늘리려면 그 절에 전수 대조를 적는다
+    try std.testing.expectEqual(@as(usize, 4), bare_function_keys); // F7 · ⇧F7 · F8 · ⇧F8 — 늘리려면 그 절에 전수 대조를 적는다
     try std.testing.expect(editor_context_bindings.len > 0);
 
     // **`⌘D` 는 전역 표에서 안 없어진다** — 터미널·브라우저·파일 Term 이 그것으로 화면을 나눈다.

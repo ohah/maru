@@ -31,6 +31,8 @@ pub const slider_alpha: u8 = 0x38;
 ///
 /// `cols == 0`(설정으로 껐다)이면 0. 미니맵을 두면 본문이 `min_content_cols` 보다 좁아질 때도 0(접힘).
 pub fn widthPx(inner_w: u32, cell_w_px: u16, scrollbar_gutter_px: u32, minimap_cols: u16) u32 {
+    // `minimap_cols == 0` 가드는 **등가**다(19회차 S5): `want` 가 0 이라 아래 어느 갈래도 0 을 낸다. 남기는 이유는 뜻 —
+    // 「껐다」는 계산이 아니라 결정이다.
     if (minimap_cols == 0 or cell_w_px == 0) return 0;
     const want: u32 = @as(u32, minimap_cols) * cell_w_px;
     const body_w = inner_w -| scrollbar_gutter_px;
@@ -288,4 +290,16 @@ test "MM8 저장소가 모자라면 잘리되 죽지 않는다" {
     const w = build(.{ .rect = .{ .x = 0, .y = 0, .w = 8, .h = 4 }, .lines = &lines, .top = 0, .slider_first = 0, .slider_len = 2, .tab_width = 4 }, &ops);
     try testing.expectEqual(@as(usize, 2), w.ops);
     try testing.expect(w.truncated);
+    // **슬라이더 없이도** 선다 — 위 사례는 슬라이더 자리가 없어 `truncated` 가 서므로 run 쪽이 표식을 안 세워도 초록이었다
+    // (16회차 P5: 두 뜻이 한 픽스처에서 겹쳤다). 그리고 모자라는 run 이 **공백에서 끝나는** 것이어야 한다 — 줄 끝에서 끝나는
+    // run 은 다른 갈래(뒤처리)가 표식을 세워 다시 겹친다(20회차 T2). "a b c d": a·b 뒤 c 가 공백에서 끝나며 자리가 없다.
+    const lines2 = [_][]const u8{"a b c d"};
+    const w2 = build(.{ .rect = .{ .x = 0, .y = 0, .w = 8, .h = 4 }, .lines = &lines2, .top = 0, .slider_first = 0, .slider_len = 0, .tab_width = 4 }, &ops);
+    try testing.expectEqual(@as(usize, 2), w2.ops);
+    try testing.expect(w2.truncated);
+    // 폭 0 사각은 **op 0** — 폭이 0 이라 run 은 안 나오지만 슬라이더는 폭 0 quad 를 내려 했다(16회차 P7). 그리는 것이 없으면
+    // op 도 없어야 op 수를 세는 상위(프레임 합계·판정자)가 흔들리지 않는다.
+    const w3 = build(.{ .rect = .{ .x = 0, .y = 0, .w = 0, .h = 4 }, .lines = &lines, .top = 0, .slider_first = 0, .slider_len = 2, .tab_width = 4 }, &ops);
+    try testing.expectEqual(@as(usize, 0), w3.ops);
+    try testing.expect(!w3.truncated);
 }

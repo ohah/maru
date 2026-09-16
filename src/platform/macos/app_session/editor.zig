@@ -624,6 +624,8 @@ fn minimapSide(self: *AppSession, term: *Term, pane_rect: chrome_draw.Rect, draw
     // 짧아지는데 그 차이는 창의 끝 몇 줄뿐이라 색 창을 넉넉히(막대 없는 높이로) 만든다 — 남는 줄의 색은 안 그려질 뿐이다.
     const strip_rows = chrome_editor.minimap.stripRows(@intCast(visible_rows * cell_h));
     const top = chrome_editor.minimap.topLine(term.rt.editor_first_line, draw_lines.len, strip_rows, term.rt.editor_max_top_line);
+    // 창보다 많이 물어도(18회차 R6: `count + top`) 색은 같다 — `lineColorsInto` 가 문서 끝에서 자르고 남는 항목은 안 그려질
+    // 뿐이다(등가). 창만큼만 묻는 이유는 비용이다.
     const count = @min(strip_rows, draw_lines.len -| top);
     const colors = syntax_color.minimapColors(
         &term.rt.editor_syntax,
@@ -5407,6 +5409,8 @@ pub fn beginScrollbarGesture(self: *AppSession, pane: *Pane, x_px: f64, y_px: f6
     if (minimapClick(self, term, x_px, y_px)) {
         self.editor_scrollbar_term = term;
         self.scrollbar_drag_target = .editor_minimap;
+        // 막대 잡기와 같은 규약. primary down 이 이미 `cancelPointerGesture` 로 비워 두므로 **등가**다(적대적 20회차 Q4) —
+        // 규약을 한 자리에서 읽히게 남긴다.
         self.pointer_gesture_owner = .none;
         self.metal_dirty = true;
         return true;
@@ -10914,13 +10918,23 @@ test "MMP1 미니맵 — 본문 오른쪽·막대 왼쪽에 서고, 본문 열�
     const click_row: usize = 100; // 스트립의 100 번째 줄 → 문서 100 줄
     const cx = @as(f64, @floatFromInt(mr.x)) + @as(f64, @floatFromInt(mr.w)) / 2.0;
     const cy = @as(f64, @floatFromInt(mr.y)) + @as(f64, @floatFromInt(click_row * chrome_editor.minimap.line_px)) + 1.0;
+    term.rt.editor_first_piece = 2; // 랩 조각 위치가 남아 있어도 굴리기는 **줄의 첫 조각**에 선다(막대 드래그와 같다 — 17회차 Q2)
+    // 낡은 포인터 소유(놓친 up)가 남아 있어도 미니맵을 잡은 뒤에는 **소유가 없다** — 안 그러면 다음 drag 를 그 소유자(사이드바
+    // 구분선)가 받는다. 이것을 지키는 자리는 `mouse()` 의 primary down 이 부르는 `cancelPointerGesture` 이고, 잡기 안의
+    // `.none` 대입은 막대 잡기와 같은 규약의 **등가** 방어다(17·20회차 Q4 — 지워도 여기서 초록이다).
+    fx.session.pointer_gesture_owner = .{ .sidebar_divider = .{ .start_pt = 0 } };
     fx.session.mouse(1, cx, cy, 0, 0);
     try testing.expectEqual(click_row - visible / 2, term.rt.editor_first_line);
+    try testing.expectEqual(@as(u32, 0), term.rt.editor_first_piece);
+    try testing.expect(std.meta.activeTag(fx.session.pointer_gesture_owner) == .none);
     try testing.expectEqual(sel_before, term.rt.editor_selection);
     try testing.expect(scrollbarCaptureActive(fx.session));
-    // ⑶ **드래그는 계속 클릭** — 더 아래로 끌면 더 내려가고, 떼면 잡힘이 풀린다.
+    // ⑶ **드래그는 계속 클릭** — 더 아래로 끌면 더 내려가고, 떼면 잡힘이 풀린다. 움직임은 **다시 그리기를 요구한다** — 잡는
+    //    순간은 제스처가 dirty 를 올리지만 끌림은 `minimapScrollTo` 만 지나므로 거기서 안 올리면 화면이 안 따라온다(17회차 Q1).
+    fx.session.metal_dirty = false;
     fx.session.mouse(2, cx, cy + 40.0, 0, 0); // +20 줄
     try testing.expectEqual(click_row + 20 - visible / 2, term.rt.editor_first_line);
+    try testing.expect(fx.session.metal_dirty);
     fx.session.mouse(3, cx, cy + 40.0, 0, 0);
     try testing.expect(!scrollbarCaptureActive(fx.session));
     try testing.expect(fx.session.editor_scrollbar_term == null);
@@ -11053,15 +11067,20 @@ test "MMP1 미니맵 — 본문 오른쪽·막대 왼쪽에 서고, 본문 열�
     const tail_from: f32 = @floatFromInt(term2.rt.editor_minimap_rows -| 20);
     var colors_tail = std.AutoHashMap(u32, void).init(allocator);
     defer colors_tail.deinit();
+    // 창의 **마지막 행**까지 구문 색이다 — 색 창을 한 줄 덜 만들면 끝 행만 무색이 되는데 끝 20 행의 색 수로는 안 보인다(17회차 Q8).
+    const last_row: f32 = @floatFromInt(term2.rt.editor_minimap_rows - 1);
+    var last_row_colored = false;
     for (fx.session.gpu_quads.items) |q| {
         if (q.x < strip_x or q.x + q.w > strip_x + strip_w + 0.01 or q.h != 2.0) continue; // run 만(슬라이더는 높이가 다르다)
         run_quads += 1;
         const row: f32 = (q.y - y0) / 2.0;
         if (row >= boundary_row - 30 and row < boundary_row) try colors_top.put(q.fill_color0, {}) else if (row >= boundary_row and row < boundary_row + 30) try colors_bottom.put(q.fill_color0, {});
         if (row >= tail_from) try colors_tail.put(q.fill_color0, {});
+        if (row >= last_row and (q.fill_color0 >> 24) == 0xFF) last_row_colored = true;
     }
     try testing.expect(term2.rt.editor_minimap_top + term2.rt.editor_minimap_rows <= 400); // 전제: 창 끝이 문서 안(코드 줄)
     try testing.expect(colors_tail.count() >= 2);
+    try testing.expect(last_row_colored);
     // 줄마다 run 이 적어도 하나다 — 저장소를 나눠 쓰는 변이는 색 표가 깨져 run 이 거의 안 나왔고(13 개) 그 몇 개로는 위
     // 색 판정이 우연히 통과했다(5회차 E1). 수로 잡는다.
     try testing.expect(run_quads >= term2.rt.editor_minimap_rows);
@@ -11073,6 +11092,32 @@ test "MMP1 미니맵 — 본문 오른쪽·막대 왼쪽에 서고, 본문 열�
     // 그 한 색은 **구문 색**(알파 0xFF)이지 무색 run(알파 `plain_alpha`)이 아니다 — 본문 창과 저장소를 겹쳐 쓰면 창 앞이
     // 무색으로 지워져 「한 색」이 되지만 그것은 색이 아니다.
     try testing.expectEqual(@as(u32, 0xFF), comment_color >> 24);
+
+    // ⑻ **스트립은 행에 정렬된다** — 높이는 `rows × cell_h`(본문이 그리는 행 높이)이지 안쪽 높이가 아니다. 안쪽 높이가 셀의
+    //    배수보다 `cell_h − 1` 만큼 큰 pane 을 만들어 잰다: 그 자투리(≥ 2px)에 줄이 하나 더 그려지면 스트립이 본문 행 밖으로
+    //    삐져나오고 굳힌 사각(`rows × cell_h`)과도 갈린다(16회차 P1 — 기본 pane 에서는 자투리가 2px 미만이라 안 보였다).
+    {
+        const body2 = editorBodyRect(fx.session, leaf, term2);
+        const extra_h = leaf.h - body2.h; // pane 높이와 본문 높이의 차(헤더·밴드)
+        const rows_n: u32 = (body2.h -| inset * 2) / ch;
+        const tall: maru.session.SplitRect = .{ .x = leaf.x, .y = leaf.y, .w = leaf.w, .h = extra_h + inset * 2 + rows_n * ch + (ch - 1) };
+        fx.session.gpu_quads.clearRetainingCapacity();
+        var d6 = appendPaneFrame(fx.session, tall, term2) orelse return error.EditorPaneDidNotDraw;
+        defer d6.dl.deinit(allocator);
+        const mr3 = term2.rt.editor_minimap_rect orelse return error.NoMinimap;
+        try testing.expectEqual(rows_n * ch, mr3.h);
+        try testing.expect(term2.rt.editor_minimap_top + term2.rt.editor_minimap_rows + 1 < 400); // 전제: 한 줄 더 그릴 문서가 남아 있다
+        const sx: f32 = @floatFromInt(mr3.x);
+        const sw2: f32 = @floatFromInt(mr3.w);
+        const bottom: f32 = @floatFromInt(mr3.y + mr3.h);
+        var strip_quads: usize = 0;
+        for (fx.session.gpu_quads.items) |q| {
+            if (q.x < sx or q.x + q.w > sx + sw2 + 0.01) continue;
+            strip_quads += 1;
+            try testing.expect(q.y + q.h <= bottom + 0.01);
+        }
+        try testing.expect(strip_quads >= term2.rt.editor_minimap_rows);
+    }
 }
 
 test "MPN12 세 판이 Result 를 «따라» 굴러간다 — 대응표로, 그리고 문서가 바뀌면 표가 새로 선다 (제품 경계)" {

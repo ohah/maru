@@ -51,12 +51,14 @@ pub fn refreshFromSyntax(self: *State, allocator: std.mem.Allocator, provider: ?
     for (self.raw.items) |e| {
         self.list.append(allocator, .{
             .start = e.start,
-            .end = @max(e.end, e.start + 1),
+            .end = @max(e.end, e.start + 1), // 출처가 이미 1 byte 를 준다(`syntaxErrors`) — 여기 clamp 는 등가(적대적 2회차 B1), 규칙을 두 층이 함께 든다
             .severity = .@"error",
             .source = .syntax,
             .message = if (e.missing) e.expected else "",
         }) catch break; // 모자라면 앞부분만 — 목록은 이미 문서 순이라 「앞쪽」이 남는다
     }
+    // 트리 순회(전위)가 이미 문서 순이라 오늘은 등가다(적대적 2회차 B2). 남기는 이유는 두 번째 출처다 — LSP 목록은 서버 순서라
+    // 합치는 순간 이 정렬이 규칙이 된다.
     diagnostic.sort(self.list.items);
     return true;
 }

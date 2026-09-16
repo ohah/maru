@@ -1729,6 +1729,28 @@ test "EMK2 사용자 rebind·unbind 가 이기면 컨텍스트는 진다 (양보
     try std.testing.expect(r2.resolveEditorDetailed(cmd_d, false) == .consumed);
 }
 
+test "FKB5 F7·⇧F7·F8·⇧F8 은 편집기 컨텍스트에서 다음/이전 충돌·진단으로 풀리고, 비교 뷰에서도 산다 (S5·§5.4)" {
+    // 표의 두 줄이 서로 바뀌어도(⇧F8 → next) ETX4 의 개수 판정은 초록이다 — chord → 액션을 직접 잰다(적대적 3회차 C14).
+    const resolver = KeyBindingResolver{};
+    const Case = struct { f: u8, shift: bool, want: action_mod.Action };
+    const cases = [_]Case{
+        .{ .f = 7, .shift = false, .want = .next_conflict },
+        .{ .f = 7, .shift = true, .want = .prev_conflict },
+        .{ .f = 8, .shift = false, .want = .next_diagnostic },
+        .{ .f = 8, .shift = true, .want = .prev_diagnostic },
+    };
+    for (cases) |c| {
+        const ev: terminal.KeyEvent = .{ .key = .{ .function = c.f }, .modifiers = .{ .shift = c.shift } };
+        const e = resolver.resolveEditorDetailed(ev, false);
+        try std.testing.expect(e == .editor_context_action);
+        try std.testing.expectEqual(c.want, e.editor_context_action);
+        // `needs_editable = false` — 비교 뷰(읽기 전용)에서도 같은 답이다.
+        const d = resolver.resolveEditorDetailed(ev, true);
+        try std.testing.expect(d == .editor_context_action);
+        try std.testing.expectEqual(c.want, d.editor_context_action);
+    }
+}
+
 test "FKB1 접기 다섯이 ⌥⌘0·J·1~3 으로 풀리고 전역·터미널을 안 뺏는다" {
     // **막고 있던 것이 「한 chord 로 못 적는다」였다**([입력 설정](../../docs/configuration-input.md)
     // 「접기 다섯의 chord」). VSCode 의 `⌘K ⌘0` 두 키 시퀀스에서 선행 `⌘K` 만 뗀 모양이다.

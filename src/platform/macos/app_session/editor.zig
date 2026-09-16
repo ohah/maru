@@ -11014,6 +11014,23 @@ test "DGP1 진단 층 — 구문 오류가 gutter 글리프·지그재그 밑줄
     }
     try testing.expectEqual(@as(?u32, 1), zig_row);
 
+    // ⑴ʹ **파싱이 끊긴 프레임은 직전 목록을 유지한다**(§5.4 갱신 시점) — 트리를 지우고 예산 0 으로 다시 시작해 트리가 없는 상태를
+    //    만든 뒤 한 프레임: 목록도 글리프도 그대로다(적대적 2회차 B3: 트리가 없을 때 목록을 비우는 변이).
+    {
+        const before = term.rt.editor_diagnostics.list.items.len;
+        const prov = &term.rt.editor_syntax.provider.?;
+        // 트리를 잠시 떼어 「파싱이 끊긴 프레임」을 만든다(예산 0 으로도 이 크기의 문서는 첫 진행 콜백 전에 끝나 버린다 — 실측).
+        const saved_tree = prov.tree;
+        prov.tree = null;
+        fx.session.gpu_quads.clearRetainingCapacity();
+        var dp = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+        const fp = scan(fx.session, dp.dl, term, cw);
+        dp.dl.deinit(allocator);
+        prov.tree = saved_tree;
+        try testing.expectEqual(before, term.rt.editor_diagnostics.list.items.len);
+        try testing.expect(fp.glyph and fp.zigzag > 0);
+    }
+
     // ⑵ F8 은 다음 진단으로 caret 을 옮기고, ⇧F8 은 감긴다(진단이 하나면 같은 자리로).
     term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };
     const first = term.rt.editor_diagnostics.list.items[0];

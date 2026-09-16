@@ -1819,6 +1819,22 @@ test "DGF1 진단 밑줄은 셀마다 지그재그 조각 둘, severity 색, 검
         if (op.quad.fill_role == .diagnostic_error) first_diag = @min(first_diag, i);
     }
     try std.testing.expect(last_search < first_diag);
+
+    // 랩: 두 행으로 이어진 줄의 글리프는 **첫 행에만** — 이어짐 행(번호 없음)에 또 찍으면 한 줄이 두 오류로 보인다(적대적 3회차 C6).
+    const long = "x" ** 120;
+    const wl = [_][]const u8{ long, "y" };
+    var pw = testProps(&wl, true);
+    const wm = [_]?diagnostic.Level{ .err, null };
+    pw.diag_markers = &wm;
+    const ww = build(pw, bufs.scratch());
+    try std.testing.expect(ww.visual_rows >= 3); // 전제: 첫 줄이 실제로 랩됐다
+    var wrap_glyphs: usize = 0;
+    for (bufs.ops[0..ww.ops]) |op| {
+        if (op != .text or op.text.role != .diagnostic_error) continue;
+        wrap_glyphs += 1;
+        try std.testing.expectEqual(@as(i32, 0), op.text.origin.y); // 첫 행
+    }
+    try std.testing.expectEqual(@as(usize, 1), wrap_glyphs);
 }
 
 test "WID4 위젯 표가 갈리면 캐시를 다시 센다 — 옛 접두합은 다른 문서의 값이다" {

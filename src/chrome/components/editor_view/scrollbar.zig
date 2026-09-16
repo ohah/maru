@@ -599,6 +599,12 @@ test "SBM9 진단 마커 — severity 색, 같은 슬롯은 높은 severity, 변
     try testing.expectEqual(tokens.ColorRole.diagnostic_error, ops[0].quad.fill_role); // 띠(10) 위에 진단
     try testing.expectEqual(marker_role, ops[1].quad.fill_role); // 진단(50) 위에 검색
     try testing.expectEqual(tokens.ColorRole.diagnostic_info, ops[2].quad.fill_role);
+    // **높은 것이 먼저 오고 낮은 것이 뒤에** 와도 높은 것이 남는다 — 위 목록은 낮은 것이 먼저라 「뒤가 덮는」 변이가 살았다(3회차 C11).
+    var p2 = testProps(100, 0);
+    const rev = [_]DiagRow{ .{ .row = 10, .level = .err }, .{ .row = 10, .level = .hint } };
+    p2.diag_rows = &rev;
+    _ = build(p2, &ops);
+    try testing.expectEqual(tokens.ColorRole.diagnostic_error, ops[0].quad.fill_role);
 }
 
 test "SBM5 목록이 비면 마커를 안 그린다 — 찾기가 닫히면 표시도 없다 (§4.1a)" {

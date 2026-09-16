@@ -127,6 +127,24 @@ pub fn observe(
 ) !void {
     var fresh: std.ArrayList(u32) = .empty;
     defer fresh.deinit(allocator);
+    // ⚠️ **이번 관찰에서 이미 묶은 N** — 없으면 두 장이 **같은 번호를 다툰다.** 간격 없이 두 장을 넣으면
+    // `#2 #3` 이 **한꺼번에** 나타나는데(§10 실측), 대기 둘의 기준선에 둘 다 없으므로 각자 `fresh[0]`(=`#2`)
+    // 을 집어 뒤엣것이 앞엣것을 `put` 으로 덮어썼다 — `#3` 은 아무 그림도 없어 **한 장만 열렸다**
+    // (사용자 제보 2026-09-15). 「오름차순으로 큐 순서에 대응시킨다」는 이 함수의 계약이 여기서 지켜진다.
+    var claimed: std.ArrayList(u32) = .empty;
+    defer claimed.deinit(allocator);
+    // ⚠️ **이미 «화면에 보이는 채로» 들고 있는 N 도 주인이 있다.** 한 관찰 안의 중복만 막으면 tick 을
+    // 넘어선 중복이 남는다: A 가 `#1` 에 묶인 다음 tick 에 `#2` 가 떠도, 아직 기다리던 B 의 기준선에는
+    // `#1` 도 없으므로 B 가 **다시 `#1`** 을 집어 A 를 덮었다(이 파일의 회귀 테스트가 그 자리다).
+    //
+    // `sent` 는 제외한다 — Codex 는 입력창을 비우면 번호를 `#1` 부터 다시 쓰므로(§4.3), 화면에서 사라진
+    // 항목의 번호는 **재사용될 수 있는 자리**다.
+    if (state.stagingFor(surface_id)) |st| {
+        for (st.entries.items) |e| {
+            if (e.phase != .staged) continue;
+            try claimed.append(allocator, e.n);
+        }
+    }
 
     var i: usize = 0;
     while (i < state.pending.items.len) {
@@ -137,10 +155,10 @@ pub fn observe(
         }
         fresh.clearRetainingCapacity();
         try p.observation.fresh(allocator, visible_now, &fresh);
-        if (fresh.items.len > 0) {
-            // 가장 작은 새 N이 가장 먼저 붙여넣은 것이다 — 번호가 단조 증가하므로.
-            const n = fresh.items[0];
+        // 가장 작은 **아직 안 묶인** 새 N이 큐에서 가장 먼저 붙여넣은 것이다 — 번호가 단조 증가하므로.
+        if (firstUnclaimed(fresh.items, claimed.items)) |n| {
             const slot = try state.slotFor(allocator, surface_id);
+            try claimed.append(allocator, n); // put 전에 — 실패해도 이 N 을 다시 집지 않는다
             var done = state.pending.orderedRemove(i);
             try slot.staging.put(allocator, n, done.png, done.path); // png·path 소유권 이전
             done.png = &.{};
@@ -158,6 +176,16 @@ pub fn observe(
     }
 
     if (state.stagingFor(surface_id)) |s| s.syncVisible(visible_now);
+}
+
+/// `fresh`(오름차순)에서 이번 관찰에 아직 안 묶인 첫 N. 전부 묶였으면 null — 그 대기는 **다음 tick 을
+/// 기다린다**(포기하지 않는다: 마커는 아직 안 뜬 것일 수 있다).
+fn firstUnclaimed(fresh: []const u32, claimed: []const u32) ?u32 {
+    outer: for (fresh) |n| {
+        for (claimed) |c| if (c == n) continue :outer;
+        return n;
+    }
+    return null;
 }
 
 /// 열린 프리뷰 하나. **한 번에 하나만** 열린다(§2.2) — 여럿이면 서로를 가리고 닫는 법이 불분명하다.
@@ -232,10 +260,53 @@ pub fn toggle(
     };
 }
 
-/// 열린 프리뷰의 앵커가 아직 유효한가 — 매 프레임 재검증(§3). 아니면 호출자가 조용히 닫는다.
-pub fn stillAnchored(open: Open, hits: []const markers_mod.Hit) bool {
-    const h = markers_mod.hitAt(hits, open.row, open.start_col) orelse return false;
-    return h.n == open.n and h.end_col == open.end_col;
+/// 앵커 재검증의 답(§3). **좌표가 어긋났다고 곧바로 닫지 않는다** — 같은 N 이 화면에 있으면 거기로 따라간다.
+pub const Reanchor = union(enum) {
+    /// 그 자리에 그대로 있다.
+    unchanged,
+    /// 움직였다 — 호출자가 좌표를 이 값으로 갱신한다.
+    moved: markers_mod.Hit,
+    /// 화면에서 사라졌다 — 호출자가 조용히 닫는다.
+    lost,
+};
+
+/// 열린 프리뷰의 앵커를 화면에 **다시 맞춘다** — 매 프레임(§3).
+///
+/// ⚠️ **좌표 고정은 프리뷰를 못 쓰게 만들었다**(사용자 제보 2026-09-15). 옛 판정(`stillAnchored`)은 앵커
+/// 셀에 같은 마커가 없으면 곧바로 닫았는데, 두 provider 의 TUI 는 출력·스피너·상태줄 때문에 입력창을
+/// **수시로 한두 줄 밀어 올린다**. 그러면 누른 다음 tick 에 이미 닫혀 디코드조차 안 걸렸고 — 화면에는
+/// 테두리만 스쳐 「눌러도 안 열린다」로 보였다(계측: 클릭 7 연속에 `decode` 0 건).
+///
+/// **따라가는 것은 추정이 아니라 관찰이다.** 우리는 이미 매 tick 뷰포트를 스캔하고 있고, 그 스캔이
+/// 「같은 N 이 지금 어디 있나」를 그대로 답한다. §9 M6 이 「TUI 레이아웃을 추정해야 한다」며 닫기를
+/// 정상 동작으로 뒀던 것은 **추정 없이 답이 나온다는 것을 못 본** 판단이었다(2026-09-15 개정).
+///
+/// 같은 N 이 여럿이면 **원래 자리에서 가장 가까운 것**을 고른다 — 리페인트는 입력창을 통째로 몇 줄
+/// 옮길 뿐이라 그 규칙이 같은 마커를 집는다. 화면에 그 N 이 아예 없으면 그때는 닫는다(§3 의 방어는
+/// 그대로다 — 프리뷰가 엉뚱한 글자 위에 남지 않는다).
+pub fn reanchor(open: Open, hits: []const markers_mod.Hit) Reanchor {
+    if (markers_mod.hitAt(hits, open.row, open.start_col)) |h| {
+        if (h.n == open.n and h.end_col == open.end_col) return .unchanged;
+    }
+    var best: ?markers_mod.Hit = null;
+    var best_dist: u64 = std.math.maxInt(u64);
+    for (hits) |h| {
+        if (h.n != open.n) continue;
+        const d = anchorDistance(h, open);
+        if (d < best_dist) {
+            best_dist = d;
+            best = h;
+        }
+    }
+    return if (best) |h| .{ .moved = h } else .lost;
+}
+
+/// 옛 자리에서 얼마나 멀어졌나. **행이 열보다 훨씬 무겁다** — 리페인트가 옮기는 축이 행이고, 같은 행
+/// 안에서 나란한 마커(`[Image #1] [Image #2]`)는 N 이 다르므로 애초에 후보가 아니다.
+fn anchorDistance(h: markers_mod.Hit, open: Open) u64 {
+    const row_delta: u64 = @abs(@as(i64, h.row) - @as(i64, open.row));
+    const col_delta: u64 = @abs(@as(i64, h.start_col) - @as(i64, open.start_col));
+    return row_delta * 1024 + col_delta;
 }
 
 /// 열린 프리뷰 한 장을 프레임에 싣는다 — 갤러리의 `appendGpuImages`와 **같은 채널**(§2.1).
@@ -321,6 +392,33 @@ test "MP1 배선: 붙여넣고 마커가 뜨면 그 N 에 묶인다" {
     try testing.expectEqual(@as(usize, 0), st.pending.items.len);
 }
 
+test "MP1 배선: 간격 없이 두 장 — 한 tick 에 `#2 #3` 이 함께 떠도 서로를 덮지 않는다 (§10)" {
+    var st: State = .{};
+    defer st.deinit(testing.allocator);
+    // 두 붙여넣기의 기준선이 **똑같다**(첫 마커가 뜨기 전에 둘째를 넣었다 — 실측 42 ms 안쪽).
+    try onImagePasted(&st, testing.allocator, 7, &.{1}, try dup("FIRST"), &.{});
+    try onImagePasted(&st, testing.allocator, 7, &.{1}, try dup("SECOND"), &.{});
+    try observe(&st, testing.allocator, 7, &.{ 1, 2, 3 }); // 둘이 한꺼번에 나타났다
+    const s = st.stagingFor(7) orelse return error.TestUnexpectedResult;
+    // 큐 순서 그대로 오름차순 대응 — 덮어쓰기(둘 다 `#2`)면 `#3` 이 비어 **한 장만 열린다**.
+    try testing.expectEqualStrings("FIRST", s.lookup(2).?.png);
+    try testing.expectEqualStrings("SECOND", s.lookup(3).?.png);
+    try testing.expectEqual(@as(usize, 0), st.pending.items.len);
+}
+
+test "MP1 배선: 새 N 이 하나뿐인데 대기가 둘이면 — 뒤엣것은 앞엣것을 덮지 않고 **다음 tick 을 기다린다**" {
+    var st: State = .{};
+    defer st.deinit(testing.allocator);
+    try onImagePasted(&st, testing.allocator, 7, &.{}, try dup("A"), &.{});
+    try onImagePasted(&st, testing.allocator, 7, &.{}, try dup("B"), &.{});
+    try observe(&st, testing.allocator, 7, &.{1}); // 첫 마커만 떴다
+    try testing.expectEqualStrings("A", st.stagingFor(7).?.lookup(1).?.png);
+    try testing.expectEqual(@as(usize, 1), st.pending.items.len); // B 는 아직 대기
+    try observe(&st, testing.allocator, 7, &.{ 1, 2 }); // 둘째 마커가 뒤따라 떴다
+    try testing.expectEqualStrings("B", st.stagingFor(7).?.lookup(2).?.png);
+    try testing.expectEqual(@as(usize, 0), st.pending.items.len);
+}
+
 test "MP1 배선: 기준선에 이미 있던 N 은 새것이 아니다 — Claude 가 #3 으로 건너뛰어도 맞는다" {
     var st: State = .{};
     defer st.deinit(testing.allocator);
@@ -392,14 +490,47 @@ test "MP1 배선: 기록에 없는 N 은 안 열린다 — 화면에 글자로 �
     try testing.expect(toggle(&st, null, 7, stranger) == null);
 }
 
-test "MP1 배선: 앵커가 덮이면 재검증이 실패한다 — 조용히 닫을 근거" {
+test "MP1 배선: 앵커 재검증 — 그대로면 unchanged, 그 번호가 사라지면 lost" {
     const open: Open = .{ .surface_id = 7, .n = 1, .row = 3, .start_col = 2, .end_col = 12 };
     const same = [_]markers_mod.Hit{.{ .row = 3, .start_col = 2, .end_col = 12, .n = 1 }};
-    try testing.expect(stillAnchored(open, &same));
-    const moved = [_]markers_mod.Hit{.{ .row = 4, .start_col = 2, .end_col = 12, .n = 1 }};
-    try testing.expect(!stillAnchored(open, &moved));
+    try testing.expectEqual(Reanchor.unchanged, reanchor(open, &same));
+    // 그 자리에 **다른 번호**가 왔고 내 번호는 화면 어디에도 없다 = 사라졌다(§3 의 방어는 그대로다).
     const other_n = [_]markers_mod.Hit{.{ .row = 3, .start_col = 2, .end_col = 12, .n = 2 }};
-    try testing.expect(!stillAnchored(open, &other_n));
+    try testing.expect(reanchor(open, &other_n) == .lost);
+    try testing.expect(reanchor(open, &.{}) == .lost);
+}
+
+test "MP1 배선: 입력창이 밀려도 **따라간다** — 좌표 고정이 프리뷰를 죽였던 자리(2026-09-15)" {
+    // TUI 가 출력 한 줄을 내면 입력창이 통째로 올라간다. 옛 판정은 그 tick 에 닫아 버려 **디코드조차
+    // 안 걸렸다**(계측: 클릭 7 연속에 decode 0 건).
+    const open: Open = .{ .surface_id = 7, .n = 1, .row = 34, .start_col = 2, .end_col = 12 };
+    const moved = [_]markers_mod.Hit{.{ .row = 33, .start_col = 2, .end_col = 12, .n = 1 }};
+    switch (reanchor(open, &moved)) {
+        .moved => |h| {
+            try testing.expectEqual(@as(u16, 33), h.row);
+            try testing.expectEqual(@as(u16, 2), h.start_col);
+            try testing.expectEqual(@as(u16, 12), h.end_col);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    // 폭이 바뀌어도(마커 뒤 글자가 늘어 열이 밀렸다) 같은 번호면 따라간다.
+    const widened = [_]markers_mod.Hit{.{ .row = 34, .start_col = 6, .end_col = 16, .n = 1 }};
+    switch (reanchor(open, &widened)) {
+        .moved => |h| try testing.expectEqual(@as(u16, 6), h.start_col),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "MP1 배선: 같은 번호가 둘이면 **원래 자리에서 가까운 쪽**을 따라간다 (Codex 번호 재사용 §4.3)" {
+    const open: Open = .{ .surface_id = 7, .n = 1, .row = 30, .start_col = 2, .end_col = 12 };
+    const two = [_]markers_mod.Hit{
+        .{ .row = 4, .start_col = 2, .end_col = 12, .n = 1 }, // 대화 영역에 남은 옛 마커
+        .{ .row = 29, .start_col = 2, .end_col = 12, .n = 1 }, // 한 줄 밀린 입력창
+    };
+    switch (reanchor(open, &two)) {
+        .moved => |h| try testing.expectEqual(@as(u16, 29), h.row),
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 test "MP1 배선: 바이트 없이 **경로만** 든 항목도 찾아진다 — 드롭 경로가 그 모양이다" {

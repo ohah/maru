@@ -821,10 +821,12 @@ typedef struct {
     __unsafe_unretained id<MTLBuffer> image_vertex_buffer;
     const MaruAppHostGpuImage *gpu_images;
     CGSize drawable_size;
-    // gpu_quads 레이어 세그먼트 정점 수: bottom(탭 밴드)·under(사이드바 밴드)·header(배지) + 전체.
+    // gpu_quads 레이어 세그먼트 정점 수: bottom(탭 밴드)·under(사이드바 밴드)·header(배지)·
+    // backdrop(이미지 뒤판) + 전체.
     size_t bottom_vertex_count;
     size_t under_vertex_count;
     size_t header_vertex_count;
+    size_t backdrop_vertex_count;
     size_t quad_vertex_total;
     size_t shadow_vertex_total;
     // kitty 이미지: 텍스트-앞(pass>=2) 시작 인덱스와 전체 개수.
@@ -974,6 +976,10 @@ static void maru_draw_terminal_layer(const MaruDrawPass *c) {
     //      커서 레이어를 보존한다. cursor_fade_milli<1이면 반투명으로 아래 본문 셀에 합성돼 blink가 페이드.
     if (c->draw_cursor && c->cursor_in_terminal)
         maru_draw_cells_clipped(c, c->cursor_start, c->cursor_cells, c->cursor_opacity);
+    // 1.4 이미지 뒤판 quad(layer 5) — 셀은 이미 그려졌고 텍스트-앞 이미지는 아직이다. **이 틈이 유일한
+    //     자리다**: 떠 있는 그림(마커 프리뷰)이 터미널 글자를 가리고 자기 배경을 갖게 한다.
+    if (c->quad_vertex_buffer != nil)
+        MARU_DRAW_QUADS(c->bottom_vertex_count + c->under_vertex_count + c->header_vertex_count, c->backdrop_vertex_count);
     MARU_DRAW_IMAGES(c->image_above_start, c->gpu_image_n);                        // 1.5 kitty 이미지(텍스트 앞)
     // 자를 구간은 호스트가 정해 준다(`sidebar_scissor_top/bottom_px` — 아래 4번 주석 참조). under quad와 사이드바
     // cells가 **같은 rect**를 쓰므로 여기서 한 번 읽는다.
@@ -1036,7 +1042,11 @@ static void maru_draw_overlay_layer(const MaruDrawPass *c) {
         [c->encoder setVertexBuffer:c->shadow_vertex_buffer offset:0 atIndex:0];
         [c->encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:c->shadow_vertex_total];
     }
-    if (c->quad_vertex_buffer != nil) MARU_DRAW_QUADS(c->bottom_vertex_count + c->under_vertex_count + c->header_vertex_count, c->quad_vertex_total - c->bottom_vertex_count - c->under_vertex_count - c->header_vertex_count); // 5. over quad(모달 배경)
+    if (c->quad_vertex_buffer != nil) {
+        // over 는 **남은 전부**다 — 앞선 네 버킷(bottom·under·header·backdrop) 뒤가 그 구간이다.
+        const size_t over_start = c->bottom_vertex_count + c->under_vertex_count + c->header_vertex_count + c->backdrop_vertex_count;
+        MARU_DRAW_QUADS(over_start, c->quad_vertex_total - over_start); // 5. over quad(모달 배경)
+    }
     // 6. 모달 텍스트(cells_base_v 오프셋). 모달이 자기 셀에 clip_index를 실어 보내면 그 run만 잘린다 —
     //    터미널 본문과 **같은 헬퍼**를 쓴다(옛 코드는 모달 전용 프레임 슬롯이 따로 있었다).
     //    모달이 caret을 내면(find·palette) 그 구간을 빼고 앞/뒤로 나눠 그리고, 안 내면(notice·드래그 고스트·
@@ -1363,6 +1373,7 @@ bool maru_metal_renderer_draw(
     size_t bottom_quad_n = 0; // C4b-5: layer 2(bottom — 탭 밴드) quad 수. part1(터미널·탭 제목) '앞'에 그려 제목 아래로.
     size_t under_quad_n = 0; // C4b 모달: layer 0(under — 사이드바 밴드) quad 수. draw가 under/over를 가르는 경계.
     size_t header_quad_n = 0; // layer 4(header — 사이드바 bg strip 뒤·헤더 글리프 앞) quad 수. 알림 종 배지(빨강 원) 등.
+    size_t backdrop_quad_n = 0; // layer 5(backdrop — 터미널 셀 앞·텍스트-앞 이미지 뒤) quad 수. 떠 있는 그림의 뒤판.
     const size_t gpu_quad_n = (gpu_quads != NULL) ? gpu_quad_count : 0;
     if (gpu_quad_n > 0) {
         if (gpu_quad_n > SIZE_MAX / 6) {
@@ -1387,13 +1398,16 @@ bool maru_metal_renderer_draw(
             if (gpu_quads[i].layer == 2) bottom_quad_n += 1;
             else if (gpu_quads[i].layer == 0) under_quad_n += 1;
             else if (gpu_quads[i].layer == 4) header_quad_n += 1;
+            else if (gpu_quads[i].layer == 5) backdrop_quad_n += 1;
         }
-        size_t bi = 0, ui = bottom_quad_n, hi = bottom_quad_n + under_quad_n, oi = bottom_quad_n + under_quad_n + header_quad_n;
+        size_t bi = 0, ui = bottom_quad_n, hi = bottom_quad_n + under_quad_n;
+        size_t di = hi + header_quad_n, oi = di + backdrop_quad_n;
         for (size_t i = 0; i < gpu_quad_n; i++) {
             size_t dst;
             if (gpu_quads[i].layer == 2) dst = bi++;
             else if (gpu_quads[i].layer == 0) dst = ui++;
             else if (gpu_quads[i].layer == 4) dst = hi++;
+            else if (gpu_quads[i].layer == 5) dst = di++;
             else dst = oi++;
             maru_fill_quad_instance(&qv[dst * 6], gpu_quads[i], drawable_w, drawable_h);
         }
@@ -1486,6 +1500,18 @@ bool maru_metal_renderer_draw(
     const size_t bottom_vertex_count = bottom_quad_n * 6; // C4b-5: 탭 밴드(part1 앞 패스)
     const size_t under_vertex_count = under_quad_n * 6;
     const size_t header_vertex_count = header_quad_n * 6; // 헤더 quad(알림 배지) — bg strip 뒤·헤더 글리프 앞 패스
+    // 이미지 뒤판 quad(layer 5) — **터미널 셀 앞 · 텍스트-앞 이미지 뒤**. 떠 있는 이미지(마커 프리뷰)가
+    // 불투명한 판 위에 놓이게 하는 유일한 패스다: 0·1 은 이미지를 덮고, 2 는 셀 뒤라 글자가 판 위로 올라온다.
+    const size_t backdrop_vertex_count = backdrop_quad_n * 6;
+    /* 계측(MARU_DEBUG): 렌더러가 **받은** 뒤판 개수. 개수가 바뀔 때만 찍어 프레임마다 도배하지 않는다.
+       Zig 쪽 `backdrop …` 줄과 짝지어 보면 ABI 를 건넜는지가 갈린다(제보 2026-09-16). */
+    {
+        static size_t last_backdrop_n = (size_t)-1;
+        if (backdrop_quad_n != last_backdrop_n && getenv("MARU_DEBUG") != NULL) {
+            last_backdrop_n = backdrop_quad_n;
+            NSLog(@"maru.renderer: backdrop quads=%zu (total quads=%zu)", backdrop_quad_n, gpu_quad_n);
+        }
+    }
     // C4b 모달: 오버레이 셀(모달 텍스트 **또는** 탭/pane 드래그 고스트·drop 하이라이트 — web-panel.md §5)이
     // cells[modal_cells_start..cell_count]에 있으면 이 셀들을 오버레이 레이어(WKWebView 위)에 그리고, over quad(모달
     // 배경)를 그 '앞'에 끼운다. index 0도 유효하며 explicit overlay_cells_present가 존재 여부를 구분한다. 이름은
@@ -1548,6 +1574,7 @@ bool maru_metal_renderer_draw(
         .bottom_vertex_count = bottom_vertex_count,
         .under_vertex_count = under_vertex_count,
         .header_vertex_count = header_vertex_count,
+        .backdrop_vertex_count = backdrop_vertex_count,
         .quad_vertex_total = quad_vertex_total,
         .shadow_vertex_total = shadow_vertex_total,
         .image_above_start = image_above_start,

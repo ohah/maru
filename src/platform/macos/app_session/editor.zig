@@ -602,6 +602,8 @@ pub fn minimapCols(self: *AppSession) u16 {
 /// 이 Term 의 미니맵이 가져가는 px(§6.1). **본문 열 수를 재는 자리 셋**(렌더·히트 기하·보이는 열 수)이 전부 이것을
 /// 빼고 잰다 — 렌더 쪽 규칙은 `diff_frame.buildSide` 가 같은 함수로 낸다. 비교 뷰·병합 모드는 0(N5b).
 fn minimapPxFor(self: *AppSession, term: *Term, inner_w: u32) u32 {
+    // 병합 가드는 오늘 관측되지 않는다(적대적 9회차 I2): 세 열이 40 + 15 열보다 좁아 `widthPx` 가 어차피 0 을 낸다. 넓은
+    // 창(열 하나가 440px 넘게)에서는 이 가드가 일한다 — 판 넷에 미니맵을 두는 것은 N5b 의 결정이다.
     if (term.rt.editor_diff != null or term.rt.editor_merge != null) return 0;
     return chrome_editor.diff_frame.minimapPx(inner_w, @intCast(self.cell_width_px), minimapCols(self));
 }
@@ -633,20 +635,26 @@ fn minimapSide(self: *AppSession, term: *Term, pane_rect: chrome_draw.Rect, draw
         term.rt.editor_tab_width,
         term.rt.editor_visible_numbers,
     );
+    // **표는 렌더 축(절대 줄)으로 색인된다**(`syntax_colors.Scratch.per_line` — 창 앞은 빈 항목) — 미니맵은 `top`
+    // 기준 상대 첨자를 받으므로 그만큼 잘라 넘긴다. 안 자르면 색이 `top` 줄만큼 밀린다(적대적 6회차에서 잡았다:
+    // 주석/코드 경계가 있는 문서에서 경계 위 30 줄이 코드 색이었다).
     return .{ .cols = cols, .input = .{
         .top = top,
         .slider_first = term.rt.editor_first_line,
         .slider_len = visible_rows,
-        .window_colors = colors,
+        .window_colors = if (colors.len > top) colors[top..] else &.{},
     } };
 }
 
 /// 그 프레임의 미니맵 자리를 **창 절대 px 로 굳힌다**(§4.1g 「렌더가 굳힌 것만 읽는다」) — 클릭이 이 사각과 창(top·rows)을
 /// 읽는다. 없으면 `null`(클릭은 본문으로 간다).
-fn storeMinimapHit(self: *AppSession, term: *Term, rect: maru.session.SplitRect) void {
+fn storeMinimapHit(self: *AppSession, term: *Term, rect: maru.session.SplitRect, drawn_top: ?usize) void {
     term.rt.editor_minimap_rect = null;
     const cols = minimapCols(self);
     if (cols == 0 or term.rt.editor_diff != null or term.rt.editor_merge != null) return;
+    // **렌더가 쓴 창을 그대로 굳힌다**(§4.1g). 여기서 다시 재면 이 프레임이 실은 새 스크롤 상한으로 다른 `top` 이 나와
+    // 그리는 것과 누르는 것이 갈린다(적대적 6회차: 첫 프레임에서 렌더 0 · 굳힌 값 31).
+    const top_drawn = drawn_top orelse return;
     const inset = chrome_editor.frame.content_inset_px;
     const inner_w = rect.w -| inset * 2;
     const inner_h = rect.h -| inset * 2;
@@ -663,9 +671,8 @@ fn storeMinimapHit(self: *AppSession, term: *Term, rect: maru.session.SplitRect)
         .w = px,
         .h = strip_h,
     };
-    const strip_rows = chrome_editor.minimap.stripRows(strip_h);
-    term.rt.editor_minimap_top = chrome_editor.minimap.topLine(term.rt.editor_first_line, editorLines(term).len, strip_rows, term.rt.editor_max_top_line);
-    term.rt.editor_minimap_rows = strip_rows;
+    term.rt.editor_minimap_top = top_drawn;
+    term.rt.editor_minimap_rows = chrome_editor.minimap.stripRows(strip_h);
 }
 
 /// 미니맵을 누르면 그 y 의 줄이 **화면 가운데** 오게 굴린다(§6.1 — VS Code 의 클릭). 드래그는 「계속 클릭」이다.
@@ -1648,6 +1655,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     defer if (preedit_rows) |rows| freePreeditLines(self, term, rows);
     const draw_lines: []const []const u8 = if (preedit_rows) |rows| rows else lines;
 
+    var mm_drawn: ?usize = null; // 이 프레임이 그린 미니맵 창의 첫 줄(없으면 null) — 히트 기하가 같은 값을 굳힌다
     const pf = if (diff_state_opt) |st| blk: {
         // **상태 줄은 가로로 안 민다** — 한 줄짜리 문구라 밀면 화면에서 사라진다.
         // 한 줄짜리 상태 문구다 — 캐시가 아낄 것이 없다.
@@ -1692,6 +1700,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
         // **미니맵**(§6.1) — 병합 모드가 아닌 단일 편집기만. 창(`top`)은 지난 프레임의 스크롤 상한으로 비례를 재고,
         // 색은 그 창만 묻는다(본문과 다른 저장소).
         const mm = minimapSide(self, term, pane_rect, draw_lines);
+        mm_drawn = if (mm) |m| m.input.top else null;
         break :blk buildPaneOps(draw_lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), fc, maxColsForRender(self, term, false), row_cache, buildSelectionMarks(self, term), find_marks, find_current, marker_lines, marker_current, syntaxColors(self, term), seek_buf[0..seek_n], buildCaretRows(self, term), conflictWidgets(self, term), conflictBands(term), self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, mm);
     };
     if (pf.ops_len == 0) return null;
@@ -1775,7 +1784,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     // 좌표로 오므로, 같은 축에서 비교하지 않으면 보이는 자리와 잡히는 자리가 갈린다. 여백(`inset`)은
     // 위 `buildPaneOps`가 원점에 건 그 값이다 — 여기서 다시 더해야 실제로 그려진 자리가 된다.
     term.rt.editor_scrollbar = if (pf.scrollbar) |bar| shiftScrollbar(bar, @intCast(rect.x + inset), @intCast(rect.y + inset)) else null;
-    storeMinimapHit(self, term, rect);
+    storeMinimapHit(self, term, rect, mm_drawn);
     term.rt.editor_horizontal_scrollbar = if (pf.horizontal_scrollbar) |bar| shiftHorizontalScrollbar(bar, @intCast(rect.x + inset), @intCast(rect.y + inset)) else null;
     // 비교 뷰 오른쪽 열(단일 편집기는 `null`이라 그대로 비워진다).
     term.rt.editor_scrollbar_right = if (pf.right_scrollbar) |bar| shiftScrollbar(bar, @intCast(rect.x + inset), @intCast(rect.y + inset)) else null;
@@ -10888,7 +10897,7 @@ test "MMP1 미니맵 — 본문 오른쪽·막대 왼쪽에 서고, 본문 열�
         const qw: f32 = @floatFromInt(mr.w);
         if (q.x >= qx and q.x + q.w <= qx + qw + 0.01 and q.h <= 2.01 * @as(f32, @floatFromInt(ch))) in_strip += 1;
     }
-    try testing.expect(in_strip > 50); // 300 줄 창의 run 들
+    try testing.expect(in_strip >= term.rt.editor_minimap_rows); // 창의 줄마다 run 이 적어도 하나(+ 슬라이더)
     // 슬라이더: 보이는 구간(첫 줄 0..visible) — 스트립 폭 전체·높이 = visible × 2px 인 quad 하나.
     const visible: usize = mr.h / ch;
     var slider = false;
@@ -10942,6 +10951,81 @@ test "MMP1 미니맵 — 본문 오른쪽·막대 왼쪽에 서고, 본문 열�
     var d4 = appendPaneFrame(fx.session, narrow, term) orelse return error.EditorPaneDidNotDraw;
     defer d4.dl.deinit(allocator);
     try testing.expect(term.rt.editor_minimap_rect == null);
+
+    // ⑺ **미니맵의 색은 미니맵 창의 것이다 — 본문 창과 저장소를 나눠 쓰지 않는다**(3회차 C1: 같은 저장소를 쓰는 변이가
+    //    살았다 — 픽스처의 줄이 다 같은 모양이라). 앞 200 줄은 주석, 뒤 200 줄은 코드인 문서에서 본문을 200 줄로 내리면
+    //    스트립 위쪽(주석 줄)은 주석 한 색이어야 한다 — 저장소를 나눠 쓰면 본문(코드) 색이 그 자리를 덮어 색이 둘 이상 된다.
+    var buf2: std.ArrayList(u8) = .empty;
+    defer buf2.deinit(allocator);
+    for (0..200) |_| try buf2.appendSlice(allocator, "// comment line here\n");
+    for (0..200) |i| {
+        const l = try std.fmt.allocPrint(allocator, "const k{d} = \"s\";\n", .{i});
+        defer allocator.free(l);
+        try buf2.appendSlice(allocator, l);
+    }
+    try dir.dir.writeFile(testing.io, .{ .sub_path = "mm2.zig", .data = buf2.items });
+    const path2 = try std.fs.path.join(allocator, &.{ root, "mm2.zig" });
+    defer allocator.free(path2);
+    const term2 = try openPathInActivePane(fx.session, path2);
+    term2.rt.editor_wrap = false;
+    // 파싱을 끝낸다(예산에 끊기면 무색이다 — 색을 재는 판정이라 기다린다).
+    var rounds: usize = 0;
+    while (term2.rt.editor_syntax.pending and rounds < 100_000) : (rounds += 1) _ = syntax_color.resumeParse(&term2.rt.editor_syntax, term2.rt.editor_doc.?.file.content);
+    term2.rt.editor_first_line = 200;
+    // 첫 프레임은 스크롤 상한을 아직 몰라 창이 0 에서 시작한다 — 한 프레임 더 그려 **창이 밀린 상태**(top > 0)에서 잰다.
+    // 창이 0 이면 절대 첨자로 넘기는 변이와 본문 창을 겹쳐 쓰는 변이가 우연히 맞는다(7회차 G1·G2).
+    var d5a = appendPaneFrame(fx.session, leaf, term2) orelse return error.EditorPaneDidNotDraw;
+    d5a.dl.deinit(allocator);
+    // **첫 프레임의 클릭은 그 프레임이 그린 창으로 환산된다** — 그 프레임은 상한을 몰라 창을 0 에서 그렸으니 굳힌 창도 0
+    // 이어야 한다. 프레임 뒤에 새 상한으로 다시 재면(8회차 H3) 그려진 것과 누르는 것이 갈린다.
+    {
+        try testing.expectEqual(@as(usize, 0), term2.rt.editor_minimap_top);
+        const r0 = term2.rt.editor_minimap_rect orelse return error.NoMinimap;
+        const vis: usize = r0.h / ch;
+        const px = @as(f64, @floatFromInt(r0.x)) + 3.0;
+        const py = @as(f64, @floatFromInt(r0.y)) + @as(f64, @floatFromInt(100 * chrome_editor.minimap.line_px)) + 1.0;
+        fx.session.mouse(1, px, py, 0, 0);
+        fx.session.mouse(3, px, py, 0, 0);
+        try testing.expectEqual(@as(usize, 100) - vis / 2, term2.rt.editor_first_line);
+        term2.rt.editor_first_line = 200;
+    }
+    fx.session.gpu_quads.clearRetainingCapacity();
+    var d5 = appendPaneFrame(fx.session, leaf, term2) orelse return error.EditorPaneDidNotDraw;
+    defer d5.dl.deinit(allocator);
+    const mr2 = term2.rt.editor_minimap_rect orelse return error.NoMinimap;
+    try testing.expect(term2.rt.editor_minimap_top >= 20); // 전제: 창이 밀렸다
+    try testing.expectEqual(@as(usize, 200), term2.rt.editor_first_line);
+    // 전제: 스트립 위 45 행은 주석 줄이고(창의 첫 줄 + 45 < 200), 200 행 아래는 코드 줄이다.
+    try testing.expect(term2.rt.editor_minimap_top + 45 < 200);
+    var colors_top = std.AutoHashMap(u32, void).init(allocator);
+    defer colors_top.deinit();
+    var colors_bottom = std.AutoHashMap(u32, void).init(allocator);
+    defer colors_bottom.deinit();
+    const strip_x: f32 = @floatFromInt(mr2.x);
+    const strip_w: f32 = @floatFromInt(mr2.w);
+    const y0: f32 = @floatFromInt(mr2.y);
+    var run_quads: usize = 0;
+    // **경계에서 잰다** — 스트립 행 r 은 줄 `top + r` 이다. 주석/코드 경계(200 줄)는 행 `200 − top` 에 있다: 그 바로 위 30 행은
+    // 주석 한 색, 바로 아래 30 행은 코드 색이어야 한다. 표를 절대 줄로 색인한 채 넘기면 색이 `top` 행만큼 밀려 경계 아래
+    // 30 행이 주석 색이 된다(6회차 — 실제 결함이었다; 창 안이 균질한 픽스처에서는 안 보였다).
+    const boundary_row: f32 = @floatFromInt(200 - term2.rt.editor_minimap_top);
+    for (fx.session.gpu_quads.items) |q| {
+        if (q.x < strip_x or q.x + q.w > strip_x + strip_w + 0.01 or q.h != 2.0) continue; // run 만(슬라이더는 높이가 다르다)
+        run_quads += 1;
+        const row: f32 = (q.y - y0) / 2.0;
+        if (row >= boundary_row - 30 and row < boundary_row) try colors_top.put(q.fill_color0, {}) else if (row >= boundary_row and row < boundary_row + 30) try colors_bottom.put(q.fill_color0, {});
+    }
+    // 줄마다 run 이 적어도 하나다 — 저장소를 나눠 쓰는 변이는 색 표가 깨져 run 이 거의 안 나왔고(13 개) 그 몇 개로는 위
+    // 색 판정이 우연히 통과했다(5회차 E1). 수로 잡는다.
+    try testing.expect(run_quads >= term2.rt.editor_minimap_rows);
+    try testing.expectEqual(@as(usize, 1), colors_top.count()); // 주석 한 색
+    try testing.expect(colors_bottom.count() >= 2); // 코드는 키워드·문자열·본문색
+    var top_it = colors_top.keyIterator();
+    const comment_color = top_it.next().?.*;
+    try testing.expect(!colors_bottom.contains(comment_color)); // 주석색은 코드 줄에 없다
+    // 그 한 색은 **구문 색**(알파 0xFF)이지 무색 run(알파 `plain_alpha`)이 아니다 — 본문 창과 저장소를 겹쳐 쓰면 창 앞이
+    // 무색으로 지워져 「한 색」이 되지만 그것은 색이 아니다.
+    try testing.expectEqual(@as(u32, 0xFF), comment_color >> 24);
 }
 
 test "MPN12 세 판이 Result 를 «따라» 굴러간다 — 대응표로, 그리고 문서가 바뀌면 표가 새로 선다 (제품 경계)" {

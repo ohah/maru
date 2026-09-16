@@ -99,6 +99,8 @@ pub fn build(props: Props, out: []draw.Op) Written {
         var col: u32 = 0;
         var run_start: ?u32 = null;
         var run_role: ?tokens.ColorRole = null;
+        // 폭에서 멈춘다 — 그 뒤는 안 그려지므로 걷지 않는다(`runQuad` 의 clamp 와 겹친 방어라 이 조건만 지운 변이는 화면이
+        // 같다, 적대적 1회차 A4. 남기는 이유는 비용이다 — 5 만 열 줄에서 스트립 120 글자만 걷는다).
         while (byte < line.len and col < max_cols) {
             const step = content.stepColumn(line, byte, col, props.tab_width);
             const blank = line[byte] == ' ' or line[byte] == '\t' or line[byte] == '\r';
@@ -205,6 +207,17 @@ test "MM2 run 의 색은 첫 글자의 구문 역할 — 스팬 밖 run 은 무�
     try testing.expectEqual(tokens.ColorRole.syntax_keyword, ops[0].quad.fill_role);
     try testing.expectEqual(@as(u8, 0xFF), ops[0].quad.alpha);
     try testing.expectEqual(tokens.ColorRole.surface_fg, ops[1].quad.fill_role);
+    // **첫 글자**의 역할이다 — 스팬이 run 의 첫 글자만 덮으면 그 색, 둘째 글자만 덮으면 무색(1회차 A2: 둘째 글자를 읽는
+    // 변이가 위 픽스처에서는 같은 스팬 안이라 살았다).
+    const head_only = [_]content.ColorSpan{.{ .start_col = 0, .end_col = 1, .role = .syntax_string }};
+    const tail_only = [_]content.ColorSpan{.{ .start_col = 1, .end_col = 2, .role = .syntax_string }};
+    const two = [_][]const u8{"ab"};
+    const c1 = [_][]const content.ColorSpan{&head_only};
+    _ = build(.{ .rect = .{ .x = 0, .y = 0, .w = 40, .h = 4 }, .lines = &two, .window_colors = &c1, .top = 0, .slider_first = 0, .slider_len = 0, .tab_width = 4 }, &ops);
+    try testing.expectEqual(tokens.ColorRole.syntax_string, ops[0].quad.fill_role);
+    const c2 = [_][]const content.ColorSpan{&tail_only};
+    _ = build(.{ .rect = .{ .x = 0, .y = 0, .w = 40, .h = 4 }, .lines = &two, .window_colors = &c2, .top = 0, .slider_first = 0, .slider_len = 0, .tab_width = 4 }, &ops);
+    try testing.expectEqual(tokens.ColorRole.surface_fg, ops[0].quad.fill_role);
 }
 
 test "MM3 스트립 폭을 넘는 글자는 잘리고, 스트립 행 수를 넘는 줄은 안 그린다" {

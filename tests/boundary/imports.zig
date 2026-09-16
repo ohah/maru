@@ -1286,6 +1286,12 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 // poison 이 어느 불변식에서 났는지 남기는 축(=진단). 판정은 안 바꾸고 사유만 적는다.
                 .{ .parent = "Client", .kind = "const", .visibility = "pub", .modifier = "", .name = "ScopeInvalidAxis" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "logCanonicalScopeInvalid" },
+                // poison 진단이 raw enum 값 대신 이름을 찍게 하는 셋. 2026-09-17 에 GUI 가 끊겼을 때
+                // 남은 단서가 `kept=1 dropped=13` 뿐이라 손으로 enum 을 세어 풀었고 그 과정에서
+                // `dropped=13` 을 개수로 오독했다. 진단 전용이라 제품 판정에 관여하지 않는다.
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "poisonReasonName" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "poisonSourceSiteName" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "logPoisonCaptured" },
                 .{ .parent = "Client", .kind = "field", .visibility = "private", .modifier = "", .name = "notification_delivery_v1" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "catchup_barrier_contract" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "BufferedCatchupBarrier" },

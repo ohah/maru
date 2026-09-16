@@ -10077,7 +10077,7 @@ pub const Client = struct {
             // session host 는 멀쩡히 살아 있는데 앱만 사라져 사용자가 열어 둔 창을 전부 잃었다. 진단 가치는
             // 남기되(첫 사유와 버린 사유를 함께 기록) 프로세스를 끝내지는 않는다.
             if (capture.reason_raw != @intFromEnum(reason))
-                logPoisonReasonDrift(capture.reason_raw, @intFromEnum(reason));
+                logPoisonReasonDrift(capture.reason_raw, @intFromEnum(reason), capture.source_site_raw);
             return true;
         }
         if (capture.source_site_raw != lease.poison_source_site_raw)
@@ -10085,6 +10085,7 @@ pub const Client = struct {
         capture.source_site_raw = source_site_raw;
         capture.reason_raw = @intFromEnum(reason);
         capture.lifecycle_raw = @intFromEnum(incident_publication_contract.PreparedExecutionPoisonCaptureLifecycle.captured);
+        logPoisonCaptured("prepared_execution", capture.reason_raw, capture.source_site_raw);
         return true;
     }
 
@@ -10151,12 +10152,13 @@ pub const Client = struct {
             // 앱이 SIGABRT 로 사라졌다(같은 세션에서 2 회). 같은 구조를 남겨 두지 않는다 — 첫 사유를 지키고
             // 두 번째는 기록만 하고 버린다.
             if (capture.reason_raw != @intFromEnum(reason))
-                logReadPumpPoisonReasonDrift(capture.reason_raw, @intFromEnum(reason));
+                logReadPumpPoisonReasonDrift(capture.reason_raw, @intFromEnum(reason), capture.source_site_raw);
             return true;
         }
         capture.reason_raw = @intFromEnum(reason);
         capture.reason_present_raw = 1;
         capture.lifecycle_raw = @intFromEnum(incident_publication_contract.ReadPumpPoisonCaptureLifecycle.captured);
+        logPoisonCaptured("read_pump", capture.reason_raw, capture.source_site_raw);
         return true;
     }
 
@@ -15220,19 +15222,47 @@ pub const Client = struct {
     /// 이미 캡처된 poison 에 **다른 사유**가 뒤따랐다. 첫 사유를 유지하고 두 번째는 버리되, 그 사실을 남긴다.
     /// 사유가 갈리는 것 자체는 정상이지만(정리 중 2 차 실패), 어떤 조합이 실제로 일어나는지는 알아야 한다.
     /// read pump 쪽 짝. prepared execution 과 사유 공간이 달라 로그를 섞지 않는다.
-    fn logReadPumpPoisonReasonDrift(kept_raw: u8, dropped_raw: u8) void {
+    /// raw 값을 **사람이 읽는 이름**으로. 모르면 `?`(진단이 판정을 바꾸지 않는다).
+    ///
+    /// 2026-09-17 실측: `kept=1 dropped=13` 한 줄을 손으로 풀어야 했다 — enum 선언을 찾아
+    /// 0 부터 세어 `read_timeout`·`local_invariant_violation` 임을 알아냈다. 게다가 `dropped=13` 을
+    /// **개수로** 오독해 「13 개를 버렸다」고 잘못 읽었다. 숫자는 사람을 그렇게 속인다.
+    fn poisonReasonName(raw: u8) []const u8 {
+        const reason = std.enums.fromInt(client_poison.ConnectionReason, raw) orelse return "?";
+        return @tagName(reason);
+    }
+
+    fn poisonSourceSiteName(raw: u8) []const u8 {
+        const site = std.enums.fromInt(connection_incident.SourceSite, raw) orelse return "?";
+        return @tagName(site);
+    }
+
+    /// **캡처된 poison 자체를 남긴다.** 이 두 경로(`prepared execution`·`read pump`)는
+    /// `logPoisonCallSite` 를 지나지 않아, 지금까지 연결이 끊겨도 `client poison:` 줄이 **한 줄도**
+    /// 안 남았다. 2026-09-17 에 GUI 가 끊겼을 때 남은 단서는 뒤따른 사유가 **버려질 때** 찍히는
+    /// drift 한 줄뿐이었다 — 첫 사유(진짜 원인)는 조용히 캡처되고 끝이었다. 두 번째 사유가 없었다면
+    /// 아무 줄도 없었을 것이다.
+    fn logPoisonCaptured(kind: []const u8, reason_raw: u8, source_site_raw: u8) void {
         if (builtin.is_test) return;
         std.log.err(
-            "read pump poison reason drift: kept={d} dropped={d}",
-            .{ kept_raw, dropped_raw },
+            "client poison captured: path={s} reason={s} site={s}",
+            .{ kind, poisonReasonName(reason_raw), poisonSourceSiteName(source_site_raw) },
         );
     }
 
-    fn logPoisonReasonDrift(kept_raw: u8, dropped_raw: u8) void {
+    fn logReadPumpPoisonReasonDrift(kept_raw: u8, dropped_raw: u8, source_site_raw: u8) void {
         if (builtin.is_test) return;
         std.log.err(
-            "prepared execution poison reason drift: kept={d} dropped={d}",
-            .{ kept_raw, dropped_raw },
+            "read pump poison reason drift: kept={s} dropped={s} site={s}",
+            .{ poisonReasonName(kept_raw), poisonReasonName(dropped_raw), poisonSourceSiteName(source_site_raw) },
+        );
+    }
+
+    fn logPoisonReasonDrift(kept_raw: u8, dropped_raw: u8, source_site_raw: u8) void {
+        if (builtin.is_test) return;
+        std.log.err(
+            "prepared execution poison reason drift: kept={s} dropped={s} site={s}",
+            .{ poisonReasonName(kept_raw), poisonReasonName(dropped_raw), poisonSourceSiteName(source_site_raw) },
         );
     }
 
@@ -24774,6 +24804,41 @@ test "client non-timeout read failure is not mislabeled as EOF" {
     try std.testing.expectEqual(
         client_poison.ConnectionReason.transport_read_failure,
         client.firstPoisonReason().?,
+    );
+}
+
+test "poison 진단은 raw 숫자가 아니라 이름으로 나온다" {
+    // 2026-09-17 실측이 만든 판정자. GUI 가 끊겼는데 로그에 남은 것은 `kept=1 dropped=13` 뿐이었다.
+    // enum 선언을 찾아 0 부터 세어야 `read_timeout`·`local_invariant_violation` 임을 알 수 있었고,
+    // 그 과정에서 `dropped=13` 을 **개수로** 오독해 「13 개를 버렸다」고 잘못 읽었다.
+    //
+    // 재는 것은 「raw 가 이름으로 나온다」이다. 숫자로 되돌아가면 다음 사람이 같은 데서 막힌다.
+    try std.testing.expectEqualStrings(
+        "read_timeout",
+        Client.poisonReasonName(@intFromEnum(client_poison.ConnectionReason.read_timeout)),
+    );
+    try std.testing.expectEqualStrings(
+        "local_invariant_violation",
+        Client.poisonReasonName(@intFromEnum(client_poison.ConnectionReason.local_invariant_violation)),
+    );
+    try std.testing.expectEqualStrings(
+        "client_read",
+        Client.poisonSourceSiteName(@intFromEnum(connection_incident.SourceSite.client_read)),
+    );
+
+    // **범위 밖은 죽지 않고 `?` 로 나온다.** 진단이 제품 경로를 바꾸면 안 된다.
+    try std.testing.expectEqualStrings("?", Client.poisonReasonName(250));
+    try std.testing.expectEqualStrings("?", Client.poisonSourceSiteName(250));
+
+    // 두 enum 의 순서가 갈리면 로그가 **조용히 틀린 이름**을 말한다. 실제로 이 값들로 풀었으므로
+    // 그 대응을 못 박는다(`connection_incident` 가 u8 태그의 단일 출처다).
+    try std.testing.expectEqual(
+        @as(u8, @intFromEnum(connection_incident.ConnectionReason.read_timeout)),
+        @as(u8, @intFromEnum(client_poison.ConnectionReason.read_timeout)),
+    );
+    try std.testing.expectEqual(
+        @as(u8, @intFromEnum(connection_incident.ConnectionReason.local_invariant_violation)),
+        @as(u8, @intFromEnum(client_poison.ConnectionReason.local_invariant_violation)),
     );
 }
 

@@ -4344,6 +4344,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/platform/macos/session_host/ime_candidate_evidence.zig"),
             .target = target,
             .optimize = .Debug,
+            .link_libc = true,
         }),
     });
     const run_session_host_cr6d_candidate_debug = b.addRunArtifact(session_host_cr6d_candidate_debug);
@@ -4353,6 +4354,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/platform/macos/session_host/ime_candidate_evidence.zig"),
             .target = target,
             .optimize = .ReleaseFast,
+            .link_libc = true,
         }),
     });
     const run_session_host_cr6d_candidate_release = b.addRunArtifact(session_host_cr6d_candidate_release);

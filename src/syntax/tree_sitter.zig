@@ -709,6 +709,8 @@ pub const Provider = struct {
     /// **구문 오류를 뽑는다**(§5.4): `ERROR` 노드(가장 바깥 것 하나 — 안쪽은 접는다)와 `MISSING` 노드. 트리가 없으면(파싱이 끊긴
     /// 프레임) 아무것도 안 하고 `false` — 호출자는 직전 목록을 유지한다. 순서는 문서 순(트리 순회가 그렇다).
     pub fn syntaxErrors(self: *Provider, allocator: std.mem.Allocator, out: *std.ArrayList(SyntaxError)) error{OutOfMemory}!bool {
+        // 트리가 없을 때 `out` 을 **건드리지 않는다** — 그래서 반환값이 `true` 여도 호출자가 보는 목록은 같다(적대적 1회차 A11,
+        // 등가). `false` 를 주는 이유는 뜻이다: 「이 프레임은 새로 센 것이 아니다」.
         const tree = self.tree orelse return false;
         out.clearRetainingCapacity();
         const root = c.ts_tree_root_node(tree);
@@ -1374,6 +1376,22 @@ test "SYN40 구문 오류 — ERROR 는 가장 바깥 것 하나, MISSING 은 1 
         for (out.items) |e| {
             try std.testing.expect(e.start >= prev);
             prev = e.start;
+        }
+    }
+    // **안쪽 ERROR 는 접힌다** — 이 소스는 ERROR 안에 ERROR 가 둘 더 겹친다(안 접으면 [0,35)·[19,33)·[28,32) 셋, 실측). 가장
+    // 바깥 하나만이고 어떤 두 항목도 겹치지 않는다(적대적 1회차 A9: 위 두 픽스처는 중첩이 없어 안 보였다).
+    {
+        const src = "fn f( void { const a = (1 + ; @@@ }\n";
+        var prov = Provider.init(src, .zig, 0) orelse return error.NoProvider;
+        defer prov.deinit();
+        try std.testing.expect(try prov.syntaxErrors(allocator, &out));
+        var errors: usize = 0;
+        for (out.items) |e| {
+            if (!e.missing) errors += 1;
+        }
+        try std.testing.expectEqual(@as(usize, 1), errors);
+        for (out.items, 0..) |a, i| {
+            for (out.items[i + 1 ..]) |b| try std.testing.expect(a.end <= b.start or b.end <= a.start);
         }
     }
 }

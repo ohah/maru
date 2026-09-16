@@ -142,6 +142,16 @@ test "DG3 gutter 마커는 시작 줄에만, 한 줄에 여럿이면 severity �
     try testing.expectEqual(Severity.@"error", markerOnLine(&items, 10, 20).?);
     try testing.expect(markerOnLine(&items, 20, 40) == null); // 걸치기만 하고 시작하지 않는다
     try testing.expect(markerOnLine(&.{}, 0, 10) == null);
+    // **줄의 첫 byte 에서 시작하는** 진단도 잡는다 — 이진 탐색이 `<=` 로 한 칸 지나치면 이것만 빠진다(적대적 1회차 A4).
+    var at_start = [_]Diagnostic{ .{ .start = 0, .end = 1, .severity = .hint }, .{ .start = 20, .end = 21, .severity = .info } };
+    sort(&at_start);
+    try testing.expectEqual(Severity.info, markerOnLine(&at_start, 20, 40).?);
+    try testing.expectEqual(Severity.hint, markerOnLine(&at_start, 0, 10).?);
+    // 한 줄에서 **낮은 것이 먼저** 오고 높은 것이 뒤에 와도 최고를 고른다 — 첫 항목을 쓰는 변이는 DG3 의 첫 줄(높은 것이 먼저)
+    // 에서 살았다(적대적 1회차 A5).
+    var low_first = [_]Diagnostic{ .{ .start = 21, .end = 22, .severity = .hint }, .{ .start = 25, .end = 26, .severity = .@"error" } };
+    sort(&low_first);
+    try testing.expectEqual(Severity.@"error", markerOnLine(&low_first, 20, 40).?);
 }
 
 test "DG4 다음/이전은 caret 줄을 건너뛰고 감긴다 (§5.4)" {

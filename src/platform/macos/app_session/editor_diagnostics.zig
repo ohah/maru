@@ -79,6 +79,7 @@ pub fn buildViews(
     visible_len: usize,
 ) ?Views {
     const lines_len = if (visible_numbers.len > 0) visible_numbers.len else visible_len;
+    // 빈 표와 `null` 은 소비자(프레임)에게 같다 — 등가(적대적 6회차 F5). 빈 표를 주는 이유는 뜻이다: 「셌는데 없다」 ≠ 「못 셌다」.
     if (lines_len == 0 or self.list.items.len == 0) return .{ .marks = &.{}, .markers = &.{}, .lines = &.{} };
     if (self.marks.len < lines_len) {
         const grown = allocator.alloc([]const chrome_diag.Mark, lines_len) catch return null;
@@ -117,7 +118,8 @@ pub fn buildViews(
         const ls: u32 = @intCast(ln.start);
         const le: u32 = @intCast(ln.contentEnd());
         const le_nl: u32 = @intCast(ln.end_with_ending);
-        // 이 줄보다 앞에서 **시작하고 끝난** 진단은 건너뛴다.
+        // 이 줄보다 앞에서 **시작하고 끝난** 진단은 건너뛴다 — 결과에는 등가(적대적 6회차 F2: 0 부터 훑어도 `pieceOnLine` 이
+        // 걸러 낸다), 비용의 자리다(줄 × 진단이 되지 않게).
         while (di < sorted.len and sorted[di].end <= ls and sorted[di].start < ls) di += 1;
         const from = w;
         var j = di;
@@ -184,4 +186,31 @@ test "DGS1 표 펴기 — 여러 줄 진단은 줄마다 조각, 마커는 시�
     try testing.expectEqual(@as(u32, 2), f.marks[0][0].len);
     try testing.expectEqual(chrome_diag.Level.warning, f.marks[1][0].level);
     try testing.expectEqual(@as(u32, 1), f.lines[1].line);
+
+    // **한 줄에 진단이 줄 수보다 많아도** 조각이 다 선다 — 저장소를 줄 수로만 잡으면 셋째부터 잘린다(적대적 6회차 F1).
+    var st2: State = .{};
+    defer st2.deinit(allocator);
+    try st2.list.append(allocator, .{ .start = 0, .end = 1, .severity = .@"error" });
+    try st2.list.append(allocator, .{ .start = 2, .end = 3, .severity = .@"error" });
+    try st2.list.append(allocator, .{ .start = 4, .end = 5, .severity = .@"error" });
+    diagnostic.sort(st2.list.items);
+    var idx2 = try maru.session.editor.line_index.build(allocator, "abcdef\ng\n");
+    defer idx2.deinit();
+    const v2 = buildViews(&st2, allocator, idx2, &.{}, 2) orelse return error.NoViews;
+    try testing.expectEqual(@as(usize, 3), v2.marks[0].len);
+
+    // **개행 byte 에서 시작하는 진단**(빠진 토큰이 줄 끝에 선다)은 그 줄의 마커다 — 줄 끝을 개행 제외로 재면 어느 줄에도 안 선다
+    // (적대적 6회차 F4). 밑줄 조각은 폭 0 이라 없다(그릴 셀이 없다).
+    var st3: State = .{};
+    defer st3.deinit(allocator);
+    try st3.list.append(allocator, .{ .start = 3, .end = 4, .severity = .@"error" }); // "abc\n" 의 '\n'
+    const v3 = buildViews(&st3, allocator, idx, &.{}, 4) orelse return error.NoViews;
+    try testing.expectEqual(@as(?chrome_diag.Level, .err), v3.markers[0]);
+    try testing.expect(v3.markers[1] == null);
+    try testing.expectEqual(@as(usize, 0), v3.marks[0].len);
+    // severity → Level 은 넷이 제자리로(9회차 I7: info 를 hint 로 옮겨도 초록이었다 — 구문 출처는 error 뿐이라).
+    try testing.expectEqual(chrome_diag.Level.err, toLevel(.@"error"));
+    try testing.expectEqual(chrome_diag.Level.warning, toLevel(.warning));
+    try testing.expectEqual(chrome_diag.Level.info, toLevel(.info));
+    try testing.expectEqual(chrome_diag.Level.hint, toLevel(.hint));
 }

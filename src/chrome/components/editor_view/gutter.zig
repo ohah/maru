@@ -426,6 +426,25 @@ test "접힘 표식 몫까지 예약한다 — 예약이 모자라면 뒤쪽 줄
     try testing.expect(w.bytes <= need);
 }
 
+test "DGG1 진단 글리프는 leading_margin 한 칸(열 0)에 severity 색·max_cols 1 로 서고, 그 칸이 없는 배치에서는 안 선다 (§5.4)" {
+    const layout = geometry.compute(80, 100, .{});
+    const rows = [_]Row{.{ .number = 7, .visual_row = 0, .marker = .warning }};
+    var ops: [4]draw.Op = undefined;
+    var scratch: [32]u8 = undefined;
+    var runs: [4]draw.Run = undefined;
+    const w = build(testProps(layout, &rows), &ops, &scratch, &runs);
+    try testing.expectEqual(@as(usize, 2), w.ops); // 글리프 + 번호
+    try testing.expectEqualStrings("⚠", ops[0].text.runs[0].text);
+    try testing.expectEqual(tokens.ColorRole.diagnostic_warning, ops[0].text.role);
+    try testing.expectEqual(@as(u16, 1), ops[0].text.max_cols); // 두 칸을 주면 번호를 덮는다(적대적 7회차 G6)
+    try testing.expectEqual(@as(i32, layout.leading_margin.start) * 8, ops[0].text.origin.x);
+    // 그 칸이 없는 배치(비교 뷰의 열)에서는 마커가 있어도 글리프가 없다(7회차 G5) — 남의 칸(번호)에 겹쳐 선다.
+    const bare = geometry.compute(80, 100, .{ .leading_margin = false });
+    const wb = build(testProps(bare, &rows), &ops, &scratch, &runs);
+    try testing.expectEqual(@as(usize, 1), wb.ops); // 번호만
+    try testing.expectEqualStrings("7", ops[0].text.runs[0].text);
+}
+
 test "접힘 화살표는 줄 번호와 한 칸 뜬다 — 맞붙으면 숫자에 붙어 보인다" {
     // **이 자리에 판정자가 없었다.** 화살표가 접기 span의 *시작*에 서던 때에는 우측 정렬된 번호의
     // 마지막 자리와 늘 맞붙었고(열 5 → 열 6), 실제 앱에서 *"숫자랑 너무 붙어 있다"*는 지적이

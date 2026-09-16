@@ -152,6 +152,8 @@ test "DG3 gutter 마커는 시작 줄에만, 한 줄에 여럿이면 severity �
     var low_first = [_]Diagnostic{ .{ .start = 21, .end = 22, .severity = .hint }, .{ .start = 25, .end = 26, .severity = .@"error" } };
     sort(&low_first);
     try testing.expectEqual(Severity.@"error", markerOnLine(&low_first, 20, 40).?);
+    // `atLeast` 는 같음을 포함한다(9회차 I5) — 「최고」 판정에서는 등가지만 이름이 약속하는 뜻이다.
+    try testing.expect(Severity.warning.atLeast(.warning) and Severity.@"error".atLeast(.hint) and !Severity.hint.atLeast(.info));
 }
 
 test "DG4 다음/이전은 caret 줄을 건너뛰고 감긴다 (§5.4)" {

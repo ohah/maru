@@ -371,7 +371,8 @@ test "MM11 진단 줄 — 창 안 줄만 severity 색으로 행 전체, 검색 �
     var ops: [32]draw.Op = undefined;
     var lines: [40][]const u8 = undefined;
     for (&lines) |*l| l.* = "x";
-    const diags = [_]diagnostic.LineMark{ .{ .line = 3, .level = .err }, .{ .line = 12, .level = .err }, .{ .line = 15, .level = .warning } };
+    // 창은 [10, 20) 반열림 — 줄 20 은 밖이다(적대적 7회차 G8).
+    const diags = [_]diagnostic.LineMark{ .{ .line = 3, .level = .err }, .{ .line = 12, .level = .err }, .{ .line = 15, .level = .warning }, .{ .line = 20, .level = .err } };
     const marks = [_]u32{15};
     const w = build(.{ .rect = .{ .x = 100, .y = 50, .w = 30, .h = 20 }, .lines = &lines, .top = 10, .slider_first = 11, .slider_len = 3, .tab_width = 4, .mark_lines = &marks, .diag_lines = &diags }, &ops);
     // run 10 + 진단 2(12·15) + 검색 1 + 슬라이더 1

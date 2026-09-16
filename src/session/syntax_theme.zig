@@ -410,6 +410,26 @@ test "diff 색은 터미널 팔레트에서 파생되고 테마를 따라 바뀐
     try testing.expect(std.mem.indexOf(u8, js, "--maru-diff-removed") != null);
 }
 
+test "DGC1 진단 색은 ANSI 9·3·4·8 에서 파생돼 다크 배경에서 넷 다 대비 4.0 이상이고, 색상이 빨강·노랑·파랑·회색이다 (§5.4)" {
+    var theme: appearance.ResolvedTheme = undefined;
+    theme.foreground = .{ .r = 0xe8, .g = 0xe8, .b = 0xe8 };
+    theme.background = .{ .r = 0x10, .g = 0x10, .b = 0x10 };
+    theme.palette = .{null} ** 16;
+    theme.syntax = .{null} ** theme_config.syntax_role_count;
+    const d = diagnosticsFromTheme(theme);
+    const bg_lum = color.relativeLuminance(theme.background);
+    // 얇은 지그재그가 배경에 묻히지 않게 본문 토큰과 같은 4.0 — hint(bright black)는 기본값이 3.0 근처라 바닥이 실제로 든다(8회차 H1).
+    for ([_]color.Rgb{ d.err, d.warning, d.info, d.hint }) |c| try testing.expect(color.contrastRatio(color.relativeLuminance(c), bg_lum) >= 4.0);
+    try testing.expect(d.err.r > d.err.g and d.err.r > d.err.b); // 빨강
+    try testing.expect(d.warning.r > d.warning.b and d.warning.g > d.warning.b); // 노랑(빨강이 아니다 — 8회차 H2)
+    try testing.expect(d.info.b > d.info.r); // 파랑
+    try testing.expect(@abs(@as(i32, d.hint.r) - @as(i32, d.hint.g)) < 24 and @abs(@as(i32, d.hint.g) - @as(i32, d.hint.b)) < 24); // 회색
+    // 팔레트를 바꾸면 따라간다(고정색이 아니다).
+    var over = theme;
+    over.palette[3] = .{ .r = 0xff, .g = 0xd0, .b = 0x20 };
+    try testing.expect(!std.meta.eql(d.warning, diagnosticsFromTheme(over).warning));
+}
+
 test "SC2 역할 override 가 파생을 이기고, 안 정한 역할은 파생으로 떨어진다" {
     // 이 판정자가 기능의 심장이다 — override가 안 먹거나(있으나 마나), 안 정한 역할까지 덮으면
     // (파생이 사라짐) 둘 다 화면에만 나타난다.

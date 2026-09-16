@@ -751,7 +751,8 @@ fn diagnosticViews(self: *AppSession, term: *Term, visible_len: usize) ?diagnost
 /// 무동작. caret 은 시작 offset 에 서고 `navigateTo` 가 드러낸다(되돌아가기 표식까지 — §5.2). 목록은 **직전 프레임의 것**이다 —
 /// 편집 직후 아직 안 그린 프레임이 있어도 다음 프레임이 곧 맞춘다.
 pub fn gotoDiagnostic(self: *AppSession, term: *Term, dir: maru.session.editor.diagnostic.Direction) bool {
-    if (term.kind != .editor) return false;
+    if (term.kind != .editor) return false; // 등가(적대적 6회차 F8): 편집기가 아니면 `editor_doc` 도 없다 — 뜻을 먼저 적는 가드
+
     if (!self.loaded_config.config.editor.diagnostics) return false;
     const doc = term.rt.editor_doc orelse return false;
     const sorted = term.rt.editor_diagnostics.list.items;
@@ -10996,6 +10997,11 @@ test "DGP1 진단 층 — 구문 오류가 gutter 글리프·지그재그 밑줄
     const f0 = scan(fx.session, d0.dl, term, cw);
     d0.dl.deinit(allocator);
     try testing.expect(term.rt.editor_diagnostics.list.items.len >= 1);
+    // 출처는 메타데이터라 화면에 안 보이지만 **LSP 가 합쳐질 때 자기 것을 걷어 내는 열쇠**다(§5) — 전부 `.syntax`·error 다(5회차 E7·E8).
+    for (term.rt.editor_diagnostics.list.items) |d| {
+        try testing.expectEqual(maru.session.editor.diagnostic.Source.syntax, d.source);
+        try testing.expectEqual(maru.session.editor.diagnostic.Severity.@"error", d.severity);
+    }
     try testing.expect(f0.glyph);
     try testing.expect(f0.zigzag >= chrome_editor.frame.zigzag_pieces_per_cell); // 적어도 한 셀(MISSING 은 1 byte)
     try testing.expect(f0.bar >= 1);
@@ -11038,6 +11044,20 @@ test "DGP1 진단 층 — 구문 오류가 gutter 글리프·지그재그 밑줄
     try testing.expectEqual(@as(usize, first.start), term.rt.editor_selection.?.focus);
     try testing.expect(gotoDiagnosticActive(fx.session, .prev)); // 감김
     try testing.expectEqual(@as(usize, first.start), term.rt.editor_selection.?.focus);
+    // caret 줄의 **개행 byte 에서 시작하는** 진단은 「같은 줄」이라 건너뛴다 — 줄 끝을 개행 제외로 재면 그것이 「다음」이 된다
+    // (적대적 6회차 F7). 합성 진단을 목록에 끼워 본다(다음 프레임이 트리에서 다시 채운다).
+    {
+        const doc = term.rt.editor_doc.?;
+        const cur = doc.file.lines.lineAt(first.start);
+        const ln = doc.file.lines.line(cur).?;
+        const nl: u32 = @intCast(ln.end_with_ending - 1);
+        try testing.expect(nl >= ln.contentEnd()); // 전제: 이 줄에 개행이 있다
+        try term.rt.editor_diagnostics.list.append(allocator, .{ .start = nl, .end = nl + 1, .severity = .@"error" });
+        maru.session.editor.diagnostic.sort(term.rt.editor_diagnostics.list.items);
+        try testing.expect(gotoDiagnosticActive(fx.session, .next));
+        try testing.expectEqual(@as(usize, first.start), term.rt.editor_selection.?.focus); // 감겨 자기 자신 — 개행 것이 아니다
+        _ = term.rt.editor_diagnostics.list.pop();
+    }
 
     // ⑶ 고치면 사라진다 — 닫는 괄호를 넣고 다음 프레임.
     const fix_at = std.mem.indexOf(u8, term.rt.editor_doc.?.file.content, "2;") orelse return error.NoAnchor;
@@ -11063,6 +11083,25 @@ test "DGP1 진단 층 — 구문 오류가 gutter 글리프·지그재그 밑줄
     const f2 = scan(fx.session, d2.dl, term, cw);
     d2.dl.deinit(allocator);
     try testing.expect(f2.glyph and f2.zigzag > 0 and f2.bar >= 1 and f2.mm >= 1);
+    // 이동의 기준은 **focus** 다(선택이 걸쳐 있을 때 anchor 가 아니라) — 오류를 하나 더 만들어(뒤쪽 줄) anchor 는 문서 앞, focus 는
+    // 뒤 오류에 두고 ⇧F8: focus 기준이면 앞 오류로, anchor 기준이면 감겨 뒤 오류 그대로다(적대적 6회차 F6).
+    {
+        const k5 = std.mem.indexOf(u8, term.rt.editor_doc.?.file.content, "const k5 ") orelse return error.NoAnchor;
+        term.rt.editor_selection = .{ .anchor_start = k5, .anchor_end = k5, .focus = k5 };
+        try testing.expect(insertText(fx.session, term, "@@@ "));
+        rounds = 0;
+        while (term.rt.editor_syntax.pending and rounds < 100_000) : (rounds += 1) _ = syntax_color.resumeParse(&term.rt.editor_syntax, term.rt.editor_doc.?.file.content);
+        var d2b = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+        d2b.dl.deinit(allocator);
+        const items = term.rt.editor_diagnostics.list.items;
+        try testing.expect(items.len >= 2);
+        const first_start = items[0].start;
+        const last_start = items[items.len - 1].start;
+        try testing.expect(last_start > first_start);
+        term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = last_start };
+        try testing.expect(gotoDiagnosticActive(fx.session, .prev));
+        try testing.expect(term.rt.editor_selection.?.focus < last_start); // 앞 오류로 갔다(anchor 기준이면 감겨 last 그대로)
+    }
     fx.session.loaded_config.config.editor.diagnostics = false;
     fx.session.gpu_quads.clearRetainingCapacity();
     var d3 = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;

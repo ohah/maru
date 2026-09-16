@@ -941,10 +941,19 @@ test "비교 밴드 색은 자기 역할에만 산다 — 다른 역할을 덮�
         .accent = c.rgb(110, 110, 110),
         .diff_added = c.rgb(1, 250, 2), // 팔레트 어디에도 없는 값
         .diff_removed = c.rgb(250, 1, 2),
+        .diagnostic_error = c.rgb(3, 4, 5),
+        .diagnostic_warning = c.rgb(6, 7, 8),
+        .diagnostic_info = c.rgb(9, 10, 11),
+        .diagnostic_hint = c.rgb(12, 13, 14),
     };
     inline for ([_]Tokens{ Tokens.base(theme), Tokens.rich(theme) }) |tk| {
         try std.testing.expectEqual(theme.diff_added, tk.get(.diff_added_bg));
         try std.testing.expectEqual(theme.diff_removed, tk.get(.diff_removed_bg));
+        // 진단 넷도 제자리로(§5.4 — 8회차 H4: error 자리에 warning 색을 넣어도 초록이었다).
+        try std.testing.expectEqual(theme.diagnostic_error, tk.get(.diagnostic_error));
+        try std.testing.expectEqual(theme.diagnostic_warning, tk.get(.diagnostic_warning));
+        try std.testing.expectEqual(theme.diagnostic_info, tk.get(.diagnostic_info));
+        try std.testing.expectEqual(theme.diagnostic_hint, tk.get(.diagnostic_hint));
         inline for (@typeInfo(ColorRole).@"enum".fields) |f| {
             const role: ColorRole = @enumFromInt(f.value);
             if (role == .diff_added_bg or role == .diff_removed_bg) continue;

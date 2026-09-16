@@ -47,5 +47,5 @@ test "DGL1 severity 마다 role·글리프가 하나씩이고 순서가 error > 
     try std.testing.expectEqual(tokens.ColorRole.diagnostic_hint, Level.hint.role());
     try std.testing.expectEqualStrings("✖", Level.err.glyph());
     try std.testing.expectEqualStrings("⚠", Level.warning.glyph());
-    try std.testing.expect(Level.err.atLeast(.warning) and !Level.info.atLeast(.warning));
+    try std.testing.expect(Level.err.atLeast(.warning) and !Level.info.atLeast(.warning) and Level.warning.atLeast(.warning));
 }

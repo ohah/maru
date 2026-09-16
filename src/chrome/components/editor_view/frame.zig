@@ -1739,6 +1739,19 @@ test "CM1 변경 위치 마커는 랩에서 시각 행 축이다 — 같은 줄�
     }
     try std.testing.expectEqual(@as(usize, 1), search_n);
     try std.testing.expectEqual(@as(usize, 0), change_n);
+    // 진단 마커도 같은 축이다(7회차 G7): 줄 30 의 진단은 줄 30 의 검색 마커와 같은 슬롯 — 검색이 이겨 진단 quad 가 없다.
+    const dl = [_]diagnostic.LineMark{.{ .line = 30, .level = .err }};
+    props.diag_lines = &dl;
+    props.change_marker_kind = .none;
+    const wd = build(props, bufs.scratch());
+    var diag_n: usize = 0;
+    for (bufs.ops[0..wd.ops]) |op| {
+        if (op == .quad and op.quad.rect.h == @as(u32, @intCast(scrollbar.marker_h_px)) and op.quad.fill_role == .diagnostic_error) diag_n += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 0), diag_n);
+    props.diag_lines = &.{};
+    props.change_marker_kind = .added;
+
     // 대조: 다른 줄(줄 5)의 띠는 따로 선다.
     bands[30] = .none;
     bands[5] = .added;
@@ -1778,6 +1791,7 @@ test "DGF1 진단 밑줄은 셀마다 지그재그 조각 둘, severity 색, 검
             min_x = @min(min_x, q.rect.x);
             max_right = @max(max_right, q.rect.x + @as(i32, @intCast(q.rect.w)));
             try std.testing.expectEqual(caret_width_px, q.rect.h);
+            try std.testing.expectEqual(@as(u8, 0xFF), q.alpha); // 밑줄은 불투명 — 배경에 묻히면 진단이 있는지조차 안 보인다(7회차 G3)
             const bottom: i32 = @as(i32, @intCast(props.cell_h_px)) - @as(i32, @intCast(caret_width_px));
             if (q.rect.y == bottom) downs += 1 else if (q.rect.y == bottom - @as(i32, @intCast(caret_width_px))) ups += 1 else return error.ZigzagOffRow;
         } else if (q.fill_role == .diagnostic_warning) warn_pieces += 1;
@@ -1835,6 +1849,37 @@ test "DGF1 진단 밑줄은 셀마다 지그재그 조각 둘, severity 색, 검
         try std.testing.expectEqual(@as(i32, 0), op.text.origin.y); // 첫 행
     }
     try std.testing.expectEqual(@as(usize, 1), wrap_glyphs);
+
+    // **가로 스크롤**: 첫 열이 3 이면 1..4 의 조각은 3..4 만 보이고 본문 왼쪽 끝에 선다(적대적 7회차 G1: 행 시작 열을 0 으로 두면
+    // 세 셀이 엉뚱한 x 에 선다).
+    var ph = testProps(&lines, false);
+    ph.first_col = 3;
+    ph.diag_marks = &marks;
+    const wh = build(ph, bufs.scratch());
+    var h_pieces: usize = 0;
+    var h_min_x: i32 = std.math.maxInt(i32);
+    for (bufs.ops[0..wh.ops]) |op| {
+        if (op != .quad or op.quad.fill_role != .diagnostic_error) continue;
+        h_pieces += 1;
+        h_min_x = @min(h_min_x, op.quad.rect.x);
+    }
+    try std.testing.expectEqual(@as(usize, 1 * zigzag_pieces_per_cell), h_pieces);
+    try std.testing.expectEqual(@as(i32, layout.contentLeft()) * cell_w, h_min_x);
+
+    // **위젯 행**(S1.5)에는 밑줄이 없다 — 줄 1 위에 위젯이 서면 그 줄의 조각은 글자 행(둘째 아래)에만(7회차 G2).
+    var pwid = testProps(&lines, false);
+    const widgets = [_]?content.Widget{ null, .{ .text = "w" }, null };
+    pwid.line_widgets = &widgets;
+    pwid.diag_marks = &marks;
+    const wwid = build(pwid, bufs.scratch());
+    var warn_rows_seen: usize = 0;
+    for (bufs.ops[0..wwid.ops]) |op| {
+        if (op != .quad or op.quad.fill_role != .diagnostic_warning) continue;
+        warn_rows_seen += 1;
+        const row: i32 = @divTrunc(op.quad.rect.y, @as(i32, @intCast(props.cell_h_px)));
+        try std.testing.expectEqual(@as(i32, 2), row); // 행 0 = 줄 0, 행 1 = 위젯, 행 2 = 줄 1
+    }
+    try std.testing.expectEqual(@as(usize, 2 * zigzag_pieces_per_cell), warn_rows_seen);
 }
 
 test "WID4 위젯 표가 갈리면 캐시를 다시 센다 — 옛 접두합은 다른 문서의 값이다" {

@@ -149,6 +149,19 @@ test "HL6 구문 색이 테마에서 토큰으로 흐른다 — 11개 전부, �
     }
 }
 
+test "DGT1 진단 색 넷이 테마에서 토큰으로 흐른다 — 값 그대로, 기본값이 아니다 (§5.4)" {
+    // `ThemeColors` 의 진단 필드에는 기본값이 있어(테스트 리터럴을 위해) **안 넘겨도 컴파일이 된다** — 그래서 흐르는지를 따로
+    // 대조한다(적대적 8회차 H3: 넷 중 셋을 빼도 초록이었다).
+    const cfg = config.theme.Config{};
+    const app = appearanceFrom(cfg);
+    const tk = tokensFor(app);
+    const d = session.syntax_theme.diagnosticsFromTheme(app.theme);
+    try testing.expectEqual(d.err, tk.get(.diagnostic_error));
+    try testing.expectEqual(d.warning, tk.get(.diagnostic_warning));
+    try testing.expectEqual(d.info, tk.get(.diagnostic_info));
+    try testing.expectEqual(d.hint, tk.get(.diagnostic_hint));
+}
+
 test "HL7 구문 색이 본문색과 다르다 — 흐르기만 하고 안 보이는 상태를 막는다" {
     // `HL6`은 "테마가 준 값이 그대로 들어갔다"만 본다. 테마가 **전부 본문색을 준다면** 그것도
     // 통과하는데, 그러면 화면은 무색이다. 실제로 색이 갈리는지는 따로 재야 한다.

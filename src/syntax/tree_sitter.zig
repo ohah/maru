@@ -714,7 +714,7 @@ pub const Provider = struct {
         const tree = self.tree orelse return false;
         out.clearRetainingCapacity();
         const root = c.ts_tree_root_node(tree);
-        if (!c.ts_node_has_error(root)) return true; // 오류 없는 트리는 순회할 것도 없다
+        if (!c.ts_node_has_error(root)) return true; // 오류 없는 트리는 순회할 것도 없다 — 결과에는 등가(5회차 E6), 비용의 길
 
         var cursor = c.ts_tree_cursor_new(root);
         defer c.ts_tree_cursor_delete(&cursor);
@@ -734,7 +734,9 @@ pub const Provider = struct {
                 try out.append(allocator, .{ .start = c.ts_node_start_byte(node), .end = c.ts_node_end_byte(node), .missing = false, .expected = "" });
                 descend = false; // 안쪽 오류는 바깥 것에 접는다
             } else if (!c.ts_node_has_error(node)) {
-                descend = false; // 아래에 오류가 없는 가지는 안 내려간다 — 큰 파일에서 순회 비용을 오류 근처로 좁힌다
+                // 아래에 오류가 없는 가지는 안 내려간다 — 큰 파일에서 순회 비용을 오류 근처로 좁힌다. **결과에는 등가**다(적대적
+                // 5회차 E2: 내려가도 오류가 없어 아무것도 안 더한다) — 걸음 수만 다르다.
+                descend = false;
             }
             if (out.items.len >= max_syntax_errors) return true;
             if (descend and c.ts_tree_cursor_goto_first_child(&cursor)) continue;

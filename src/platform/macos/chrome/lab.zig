@@ -321,6 +321,8 @@ pub const ScenarioId = enum {
     /// 맨 위에 자기만의 줄 셋을 더 가져 **같은 글자가 다른 번호로** 같은 높이에 선다. 첫 화면만 찍으면
     /// 「따라 굴리기」는 통째로 무판정이다 — 안 따라가도 맨 위는 똑같다.
     editor_merge_scrolled,
+    /// S6 — 가로를 밀어 둔 병합(네 판이 같은 열). 컴포넌트가 「Result 의 값을 넘겨받으면 같은 열에 선다」를 보인다.
+    editor_merge_hscrolled,
     /// S3b-3b — **판에 caret 이 선 상태.** Current 의 둘째 줄 안에 caret(bar)이 서고 Result 에는 없다 —
     /// 초점은 하나다. caret 은 quad 라 텍스트 DrawList 판정자가 못 보므로 이 골든이 그 자리를 든다.
     editor_merge_caret,
@@ -419,7 +421,7 @@ pub fn buildFrame(
         .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_selection, .editor_find, .editor_caret_bar, .editor_caret_block, .editor_caret_underline => buildEditorGutterFrame(scenario, buffers),
         .editor_diff, .editor_diff_scrolled, .editor_diff_selection => buildEditorDiffFrame(scenario, buffers),
         .editor_merge_panes, .editor_merge_narrow, .editor_merge_caret => buildEditorMergeFrame(scenario, buffers),
-        .editor_merge_scrolled => buildEditorMergeScrolledFrame(scenario, buffers),
+        .editor_merge_scrolled, .editor_merge_hscrolled => buildEditorMergeScrolledFrame(scenario, buffers),
         // 위 early return이 처리한다 — 여기 오면 분기가 갈린 것이다.
         .sidebar_status_strip => unreachable,
         .empty,
@@ -1248,6 +1250,8 @@ var merge_scrolled_bands: [merge_scrolled_result.len]chrome.components.editor_vi
 var merge_scrolled_widgets: [merge_scrolled_result.len]?chrome.components.editor_view.content.Widget = undefined;
 /// Result 의 첫 줄. 충돌 머리(12 줄) 두 줄 위 — 고르기 줄과 마커가 화면 위쪽에 들어온다.
 const merge_scrolled_result_top: u32 = 10;
+/// S6 — 가로로 민 열 수. `    step_NN();` 의 들여쓰기 넷과 `step_` 다섯이 잘려 **숫자부터** 보인다(넷 다 같은 열).
+const merge_hscrolled_first_col: u32 = 9;
 
 /// S3b-M — 굴린 병합 한 프레임. 세 판의 첫 줄은 **제품과 같은 표**(`merge_map`)에서 나온다 — Lab 이
 /// `+3` 을 손으로 적으면 표가 죽어도 그림이 예쁘다. (골든만으로는 그 둘을 못 가른다 — 적대적 3회차
@@ -1287,13 +1291,16 @@ fn buildEditorMergeScrolledFrame(scenario: Scenario, buffers: FrameBuffers) !Fra
     var count_scratch: [editor_view.content.count_scratch_bytes]u8 = undefined;
     var caret_cols: [256]u32 = undefined;
 
+    // S6 — **가로는 하나의 값**이다: `editor_merge_hscrolled` 는 네 판에 같은 `first_col` 을 넘긴다(제품은 Result 의
+    // `editor_first_col` 을 판마다 자기 폭으로 조여 넘긴다 — `paneFirstCol`. 여기 줄들은 다 짧아 조임이 안 걸린다).
+    const first_col: u32 = if (scenario.id == .editor_merge_hscrolled) merge_hscrolled_first_col else 0;
     const w = editor_view.merge_frame.build(.{
         .rect = rect,
         .background_rect = .{ .x = 0, .y = 0, .w = viewport_w, .h = viewport_h },
-        .current = .{ .lines = &merge_scrolled_ours, .first_line = current_top, .widgets = &cur_widgets },
-        .result = .{ .lines = &merge_scrolled_result, .first_line = merge_scrolled_result_top, .widgets = if (collapsed) &merge_scrolled_widgets else &.{}, .bands = &merge_scrolled_bands },
-        .incoming = .{ .lines = &merge_scrolled_theirs, .first_line = incoming_top, .widgets = &inc_widgets },
-        .base = .{ .lines = &merge_scrolled_base, .first_line = base_top },
+        .current = .{ .lines = &merge_scrolled_ours, .first_line = current_top, .first_col = first_col, .widgets = &cur_widgets },
+        .result = .{ .lines = &merge_scrolled_result, .first_line = merge_scrolled_result_top, .first_col = first_col, .widgets = if (collapsed) &merge_scrolled_widgets else &.{}, .bands = &merge_scrolled_bands },
+        .incoming = .{ .lines = &merge_scrolled_theirs, .first_line = incoming_top, .first_col = first_col, .widgets = &inc_widgets },
+        .base = .{ .lines = &merge_scrolled_base, .first_line = base_top, .first_col = first_col },
         .cell_w_px = scenario.cell_w_px,
         .cell_h_px = scenario.cell_h_px,
         .font_px = scenario.font_px,
@@ -1540,7 +1547,7 @@ fn buildDockFrame(
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
             .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
             // editor_gutter는 buildEditorGutterFrame이 처리한다 — 도크 목록을 타지 않는다.
-            .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper, .context_menu_bottom_right, .dropdown_open, .dropdown_bottom_clamp, .scm_rows, .scm_history, .scm_row_hover, .scm_conflict_hover, .scm_conflict_resolved_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_selection, .editor_find, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_diff, .editor_diff_scrolled, .editor_diff_selection, .editor_merge_panes, .editor_merge_narrow, .editor_merge_scrolled, .editor_merge_caret => unreachable,
+            .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper, .context_menu_bottom_right, .dropdown_open, .dropdown_bottom_clamp, .scm_rows, .scm_history, .scm_row_hover, .scm_conflict_hover, .scm_conflict_resolved_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_selection, .editor_find, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_diff, .editor_diff_scrolled, .editor_diff_selection, .editor_merge_panes, .editor_merge_narrow, .editor_merge_scrolled, .editor_merge_hscrolled, .editor_merge_caret => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{

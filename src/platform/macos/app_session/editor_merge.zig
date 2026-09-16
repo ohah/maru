@@ -87,6 +87,11 @@ pub const State = struct {
     actions_revision: ?u64 = null,
     /// 판의 caret(S3b-3b). **초점은 이것만으로 정해지지 않는다** — `focusedSide` 를 보라.
     pane_caret: ?PaneCaret = null,
+    /// 세 판의 **가장 긴 줄의 열 수**(S6 — 가로 상한·판의 조임). stage 는 한 번 읽으면 안 바뀌므로 한 번
+    /// 센다; `null` 은 「아직 안 셌다」. 셈의 규칙(탭 폭·상한)은 Result 의 `ensureMaxCols` 와 같다.
+    ours_max_cols: ?u32 = null,
+    theirs_max_cols: ?u32 = null,
+    base_max_cols: ?u32 = null,
     /// 세 판 바이트를 **누구의 것으로 놓을까**. 워커에게서 넘겨받으므로 제품에서는 늘 워커 것이다.
     ///
     /// **상태가 스스로 기억하는 이유**: 자리마다 손으로 적으면 한 곳만 틀려도 heap 이 깨지고, 더
@@ -292,6 +297,61 @@ pub fn ensureMaps(self: *AppSession, term: *Term) void {
     // **조상이 없으면 표도 없다** — 빈 줄 배열과 비교하면 「전부 삭제」라는 거짓 표가 나온다.
     state.map_base = if (state.stages.has_base) (merge_map.build(self.allocator, state.base_lines, result_lines) catch null) else null;
     state.map_revision = rev;
+}
+
+/// 세 판의 가장 긴 줄(열)을 한 번 센다(S6). **Result 와 같은 셈**(`content.lineColumnsUpTo` — 탭 폭·`editor.max-columns`
+/// 상한)이라 상한이 「셈이 멈춘 자리」로 같은 뜻이다. stage 바이트는 한 번 읽으면 안 바뀌므로 다시 안 센다.
+pub fn ensurePaneMaxCols(term: *Term) void {
+    const state = &(term.rt.editor_merge orelse return);
+    if (!state.ready) return;
+    const tab_width = term.rt.editor_tab_width;
+    const limit = term.rt.editor_max_columns;
+    inline for (.{ .{ &state.ours_max_cols, state.ours_lines }, .{ &state.theirs_max_cols, state.theirs_lines }, .{ &state.base_max_cols, state.base_lines } }) |c| {
+        const slot: *?u32 = c[0];
+        if (slot.* == null) {
+            var max: u32 = 0;
+            for (c[1]) |line| {
+                max = @max(max, chrome_editor.content.lineColumnsUpTo(line, tab_width, limit));
+                if (max >= limit) break;
+            }
+            slot.* = max;
+        }
+    }
+}
+
+/// 네 판 중 **가장 넓은** 줄의 열 수(S6 — 가로 상한). Result 의 값은 호출자가 넘긴다(그 캐시는 편집기 것이다).
+/// 판의 캐시가 아직 없으면 여기서 센다. 조상이 없으면 그 판은 안 든다.
+pub fn widestCols(term: *Term, result_max_cols: u32) u32 {
+    const state = &(term.rt.editor_merge orelse return result_max_cols);
+    if (!state.ready) return result_max_cols;
+    ensurePaneMaxCols(term);
+    var w = result_max_cols;
+    w = @max(w, state.ours_max_cols orelse 0);
+    w = @max(w, state.theirs_max_cols orelse 0);
+    if (state.stages.has_base) w = @max(w, state.base_max_cols orelse 0);
+    return w;
+}
+
+/// 판 하나가 그릴 가로 위치(S6): Result 의 값을 **그 판의 폭으로 조인 것**(Monaco 의 `setScrollLeft` 가 `scrollWidth −
+/// width` 로 조이는 규칙). 판의 폭은 지난 프레임의 `PaneHit.content_width`(0 이면 아직 안 그렸다 — 안 조인다).
+/// 판의 가장 긴 줄이 Result 보다 짧으면 그 판은 자기 끝에서 멈춘다 — 빈 화면 대신 내용의 끝이 보인다.
+pub fn paneFirstCol(term: *Term, side: MergeSide, result_first_col: u32, beyond: u32) u32 {
+    const state = &(term.rt.editor_merge orelse return result_first_col);
+    if (!state.ready) return result_first_col;
+    ensurePaneMaxCols(term);
+    const max_cols: u32 = switch (side) {
+        .current => state.ours_max_cols orelse 0,
+        .incoming => state.theirs_max_cols orelse 0,
+        .base => state.base_max_cols orelse 0,
+    };
+    const visible: u32 = paneHitOf(state, side).content_width;
+    // 아직 한 프레임도 안 그렸으면 안 조인다. **관측 불가**(S6 적대적 1회차 A16): 그 프레임에는 배치도 없어 Result 의 clamp 가
+    // pane 전체 폭으로 재고 Result 값 자체를 0 으로 되돌리므로 여기 무엇을 돌려줘도 화면이 같다. 그래도 Result 값을 돌려주는
+    // 이유는 뜻이다 — 「모르면 따라간다」.
+    if (visible == 0) return result_first_col;
+    const width = if (max_cols == 0) 0 else max_cols +| beyond;
+    const max_first: u32 = width -| visible;
+    return @min(result_first_col, max_first);
 }
 
 /// 판의 고르기 줄을 **지금 개정**에 맞춰 세운다(S3b-3c). 표(`ensureMaps`)와 충돌 구간(`ensureConflicts`)
@@ -575,8 +635,32 @@ pub fn paneMove(self: *AppSession, term: *Term, how: editor_ops.Motion, extend: 
     sel.goal = goal;
     c.sel = sel;
     scrollResultForPaneCaret(term, side, next.row);
+    revealPaneCaretColumn(self, term, side, texts[@min(next.row, texts.len - 1)], next.byte);
     self.metal_dirty = true;
     return true;
+}
+
+/// 초점 판의 caret 이 판의 **폭** 밖으로 나가면 Result 의 `editor_first_col` 을 옮긴다(S6 — 가로는 Result 의 값이라
+/// 세 판이 따라온다). 단일 편집기의 `revealCaretColumn` 과 같은 규칙: 왼쪽으로 나가면 그 열, 오른쪽으로 나가면 그
+/// 열이 마지막 칸. 상한은 그리기 직전의 clamp(Result 열 기준)와 판의 조임(`paneFirstCol`)이 건다.
+/// 랩이면 가로가 없고(넷 다 0), 아직 한 프레임도 안 그렸으면(폭 0) 아무 일도 안 한다.
+fn revealPaneCaretColumn(self: *AppSession, term: *Term, side: MergeSide, line: []const u8, byte: usize) void {
+    if (term.rt.editor_wrap orelse self.loaded_config.config.editor.wrap) return;
+    const state = &(term.rt.editor_merge orelse return);
+    const visible: u32 = paneHitOf(state, side).content_width;
+    if (visible == 0) return;
+    const col = chrome_editor.content.lineColumnsUpTo(line[0..@min(byte, line.len)], term.rt.editor_tab_width, term.rt.editor_max_columns);
+    const result_col = term.rt.editor_first_col;
+    const first = paneFirstCol(term, side, result_col, self.loaded_config.config.editor.scroll_beyond_last_column);
+    var want: u32 = result_col;
+    if (col < first) {
+        want = col;
+    } else if (col >= first + visible) {
+        want = col + 1 - visible;
+    } else return;
+    if (want == result_col) return;
+    term.rt.editor_first_col = want;
+    self.metal_dirty = true;
 }
 
 /// 초점 판 caret 의 **Result 짝 줄**(0-based) — 판에 초점이 있을 때 「caret 줄」이 무엇이냐의 답(S5 의

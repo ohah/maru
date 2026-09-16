@@ -875,6 +875,14 @@ const cases = [_]Case{
         .contract = "Result 를 굴리면 세 판이 대응표로 따라가 같은 글자가 같은 높이에 선다 — 번호는 각자의 것",
         .rect = .{ .x = 0, .y = 0, .w = 1200, .h = 140 },
     },
+    // S6 §5 — **가로는 Result 의 것.** 가로를 9 열 밀면 네 판 모두 `    step_` 이 잘려 숫자부터 보인다 — 한 판이라도
+    // `step_` 이 보이면 그 판은 자기 가로를 가진 것이다.
+    .{
+        .name = "editor-merge-follow-hscroll",
+        .capture = "editor-merge-hscrolled.ppm",
+        .contract = "가로를 밀면 네 판이 같은 열에 선다 — 판은 자기 가로를 갖지 않는다",
+        .rect = .{ .x = 0, .y = 0, .w = 1200, .h = 140 },
+    },
     .{
         .name = "editor-real-file-from-disk",
         .capture = "editor-real-file.ppm",

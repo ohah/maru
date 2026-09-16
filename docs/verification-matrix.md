@@ -625,6 +625,10 @@ exact-frontmost PID·앱 active·first responder 재확인을 추가했고, 회�
 컴파일에서 실패했다. 두 focused test root에 libc 의존성을 명시했고 macOS Debug·ReleaseFast 10+10은 재통과했다.
 수정 커밋 `8c8b7b5de`의 Linux CI 실행 `35076110758` 필수 `check`는 5분 3초에 통과했다.
 이 증거는 Linux 빌드·자동 검사의 통과이며 실제 WindowServer 후보 관측이나 v2b1 픽셀 검증을 닫지 않는다.
+추가 보안 감사에서 후보 관측 게시자의 임시 파일 생성 충돌이 기존 임시 파일을 삭제하는 경계를 재현했다.
+cleanup 등록을 배타 생성 성공 뒤로 옮겼고, 기존 파일 내용 보존 회귀는 Debug·ReleaseFast 모두 수정 전 실패·수정 후
+10+10 통과했다. Linux Debug·ReleaseFast 교차 컴파일도 통과했다. focused 결과와 교차 컴파일만으로 전체 경계·CI
+또는 실제 후보창 검증의 통과를 주장하지 않는다.
 v2b0b는 별도 Swift opt-in producer가 title 없는 전체 inventory 5 triplet을 메모리에만 보존하고, exact-once 동기식 C ABI로
 bounded JSON과 사전 고정한 absent target을 Zig에 빌려준다. Zig entrypoint 하나가 schema/window/byte cap, 기존 pure
 reducer·series validator와 same-directory inode→`link(2)` canonical 배타 게시를 소유한다. raw inventory 중간 파일,

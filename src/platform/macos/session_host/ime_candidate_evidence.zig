@@ -318,7 +318,6 @@ pub fn publishObservation(
 
     const temporary = try std.fmt.allocPrintSentinel(allocator, "{s}.tmp.{d}", .{ output_path, std.c.getpid() }, 0);
     defer allocator.free(temporary);
-    defer _ = std.c.unlink(temporary.ptr);
     const fd = std.c.open(temporary.ptr, .{
         .ACCMODE = .WRONLY,
         .CREAT = true,
@@ -327,6 +326,7 @@ pub fn publishObservation(
         .NOFOLLOW = true,
     }, @as(std.c.mode_t, 0o600));
     if (fd < 0) return error.ArtifactCreateFailed;
+    defer _ = std.c.unlink(temporary.ptr);
     var open = true;
     defer if (open) {
         _ = std.c.close(fd);
@@ -505,6 +505,15 @@ test "v2b0b publisher reduces five complete triplets and refuses overwrite" {
     const root_len = try tmp.dir.realPath(testing.io, &root_buf);
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = try std.fmt.bufPrintZ(&path_buf, "{s}/observation.json", .{root_buf[0..root_len]});
+    const collision_name = try std.fmt.allocPrint(testing.allocator, "collision.json.tmp.{d}", .{std.c.getpid()});
+    defer testing.allocator.free(collision_name);
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = collision_name, .data = "foreign temporary" });
+    var collision_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const collision_path = try std.fmt.bufPrintZ(&collision_path_buf, "{s}/collision.json", .{root_buf[0..root_len]});
+    try testing.expectError(error.ArtifactCreateFailed, publishObservation(testing.allocator, transcript.written(), collision_path));
+    const preserved = try tmp.dir.readFileAlloc(testing.io, collision_name, testing.allocator, .limited(64));
+    defer testing.allocator.free(preserved);
+    try testing.expectEqualStrings("foreign temporary", preserved);
     try publishObservation(testing.allocator, transcript.written(), path);
     const artifact = try tmp.dir.readFileAlloc(testing.io, "observation.json", testing.allocator, .limited(max_artifact_bytes));
     defer testing.allocator.free(artifact);

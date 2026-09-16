@@ -6085,7 +6085,8 @@ WindowServer, API availability 부재는 `not_provisioned`; owner/lifecycle/iden
 preflight가 실패하면 inventory 수집과 시스템 mutation은 모두 0이다. 다섯 묶음이 완성되면 Swift는 bounded JSON bytes와
 caller가 이미 고정한 absent output pathname을 단 한 번의 동기식 C ABI로 Zig에 빌려준다. Zig entrypoint가 byte/schema/window
 수 상한을 먼저 검증하고 이 문서의 pure reducer·series validator를 직접 호출한 뒤, 성공한 exact 5-row canonical artifact를
-same-directory temporary inode→`link(2)`로 배타 게시한다. Swift가 후보를 선별하거나 판정을 복제하는 경로, 전체 inventory
+same-directory temporary inode→`link(2)`로 배타 게시한다. 임시 파일의 cleanup은 배타 생성에 성공한 뒤에만 등록하며,
+생성 충돌 시 기존 임시 파일을 삭제하지 않는다. Swift가 후보를 선별하거나 판정을 복제하는 경로, 전체 inventory
 중간 파일, 장수명 helper/daemon, ABI 재시도와 부분 artifact는 금지한다. raw inventory와 다른 앱의 bundle/signing/bounds는
 process 종료 전에 메모리에서만 소멸한다. Zig ABI는 `passed`/`failed`만 반환하고, preflight에서 ABI를 호출하지 않는
 `not_provisioned`는 AppKit smoke 상태가 소유한다. 이 경계는 v2b0b 관측 증거만 닫고 v2b1 pixel capture 완료를 뜻하지

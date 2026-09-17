@@ -231,28 +231,48 @@ fn appendLine(self: *AppSession, text: []const u8, role: chrome.tokens.ColorRole
     try st.lines.append(self.allocator, .{ .text = owned, .role = role });
 }
 
-/// 그 offset 을 덮는 진단 → 「‹아이콘› ‹문장›」 줄(§8.2b 「내용 순서」 ①). 구문 오류는 i18n 문장, 서버 진단은 message + 출처.
+/// 그 offset 을 덮는 진단 → **VS Code 마커 호버의 모양**(§8.2b 「내용 순서」 ①, 2026-09-17 사용자 결정): 메시지는 평문 한 줄(아이콘·색 없음 —
+/// gutter 글리프가 이미 든다), 그 아래 흐린 색으로 한 칸 들여 `출처(코드)`(출처만·코드만도 가능, 둘 다 없으면 줄 없음). 구문 오류는 i18n 문장에
+/// 출처 줄 없음. severity 높은 것부터 — 목록은 start 순·같은 start 는 severity 순이라 덮는 것끼리 다시 고른다.
 fn buildDiagnosticLines(self: *AppSession, term: *Term, offset: u32) error{OutOfMemory}!void {
     if (!self.loaded_config.config.editor.diagnostics) return;
     const server_name: []const u8 = if (lsp.servers.forGrammar(term.rt.editor_grammar)) |s| s.exe else "";
-    var buf: [512]u8 = undefined;
+    // 덮는 것을 모아 severity 로 고른다(안정 정렬 — 같은 severity 는 목록 순).
+    var covering: [16]diagnostic.Diagnostic = undefined;
+    var n: usize = 0;
     for (term.rt.editor_diagnostics.list.items) |d| {
         if (offset < d.start or offset >= @max(d.end, d.start + 1)) continue;
-        const level = @import("editor_diagnostics.zig").toLevel(d.severity);
+        if (n == covering.len) break;
+        covering[n] = d;
+        n += 1;
+    }
+    std.mem.sort(diagnostic.Diagnostic, covering[0..n], {}, struct {
+        fn f(_: void, a: diagnostic.Diagnostic, b: diagnostic.Diagnostic) bool {
+            return @intFromEnum(a.severity) > @intFromEnum(b.severity);
+        }
+    }.f);
+    var buf: [512]u8 = undefined;
+    for (covering[0..n]) |d| {
         const text: []const u8 = switch (d.source) {
             .syntax => if (d.message.len > 0)
                 maru.i18n.format(&buf, maru.i18n.t(.diag_missing), &.{.{ .s = d.message }})
             else
                 maru.i18n.t(.diag_syntax_error),
-            .lsp, .lint => blk: {
-                const msg = firstLine(d.message);
-                if (server_name.len == 0) break :blk msg;
-                break :blk std.fmt.bufPrint(&buf, "{s}  [{s}]", .{ msg, server_name }) catch msg;
-            },
+            .lsp, .lint => firstLine(d.message),
         };
-        var line_buf: [560]u8 = undefined;
-        const line = std.fmt.bufPrint(&line_buf, "{s} {s}", .{ level.glyph(), text }) catch continue;
-        try appendLine(self, line, level.role());
+        try appendLine(self, text, .surface_fg);
+        const source: []const u8 = if (d.source == .syntax) "" else server_name;
+        if (source.len == 0 and d.code.len == 0) continue;
+        var src_buf: [256]u8 = undefined;
+        const src_line = if (source.len > 0 and d.code.len > 0)
+            std.fmt.bufPrint(&src_buf, " {s}({s})", .{ source, d.code }) catch continue
+        else if (source.len > 0)
+            std.fmt.bufPrint(&src_buf, " {s}", .{source}) catch continue
+        else
+            // 코드만 있는 갈래는 오늘 **닿을 수 없다**(적대적 3회차 C2, 등가) — `.lsp` 진단은 서버 이름이 늘 있고 `.lint` 는 아직 없다.
+            // 남기는 이유는 계약(§8.2b 「코드만이면 `(코드)`」)이 린트를 위해 그 모양을 정해 뒀기 때문이다.
+            std.fmt.bufPrint(&src_buf, " ({s})", .{d.code}) catch continue;
+        try appendLine(self, src_line, .muted_fg);
     }
 }
 

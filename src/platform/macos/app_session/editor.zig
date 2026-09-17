@@ -11581,17 +11581,19 @@ test "HOVB1 호버 박스 — 포인터가 낱말에 머물면 지연 뒤 요청
     try testing.expect(fx.session.awakeMs() - fx.session.editor_hover.pointer_moved_ms >= fx.session.loaded_config.config.editor.hover_delay); // 지연을 지켰다
     {
         const lines = hover_client.lines(fx.session);
-        try testing.expect(lines.len >= 5);
-        // ① 진단: 글리프 + message + 출처, severity 색.
-        try testing.expectEqualStrings("✖ fake: 1  [clangd]", lines[0].text);
-        try testing.expectEqual(maru.chrome.tokens.ColorRole.diagnostic_error, lines[0].role);
-        try testing.expectEqualStrings("", lines[1].text); // 사이 빈 줄
+        try testing.expect(lines.len >= 6);
+        // ① 진단 — VS Code 마커 호버의 모양: 평문 message(아이콘·색 없음), 아래 줄에 흐린 `출처(코드)`.
+        try testing.expectEqualStrings("fake: 1", lines[0].text);
+        try testing.expectEqual(maru.chrome.tokens.ColorRole.surface_fg, lines[0].role);
+        try testing.expectEqualStrings(" clangd(E1)", lines[1].text);
+        try testing.expectEqual(maru.chrome.tokens.ColorRole.muted_fg, lines[1].role);
+        try testing.expectEqualStrings("", lines[2].text); // 사이 빈 줄
         // ② 서버: 펜스 안 그대로, 위치가 utf-8 로 갔다(L0:C1), 굵게 기호는 지워졌다.
-        try testing.expectEqualStrings("int fake", lines[2].text);
-        try testing.expectEqualStrings("fake hover L0:C1", lines[3].text);
-        try testing.expectEqualStrings("bold here", lines[4].text);
-        try testing.expectEqualStrings("• item 1", lines[5].text);
-        try testing.expectEqual(@as(usize, 5 + 14), lines.len);
+        try testing.expectEqualStrings("int fake", lines[3].text);
+        try testing.expectEqualStrings("fake hover L0:C1", lines[4].text);
+        try testing.expectEqualStrings("bold here", lines[5].text);
+        try testing.expectEqualStrings("• item 1", lines[6].text);
+        try testing.expectEqual(@as(usize, 6 + 14), lines.len);
     }
     // 앵커는 서버 range(character 1..4)가 아니라 — offset 1 을 덮으니 그것이 낱말이다 — 그 시작(offset 1)의 셀, 상자는 그 아래.
     {
@@ -11609,7 +11611,7 @@ test "HOVB1 호버 박스 — 포인터가 낱말에 머물면 지연 뒤 요청
             var prep = (try fx.session.buildChromeOverlayPrep()) orelse return error.HoverNotDrawn;
             defer prep.dl.deinit(allocator);
             try testing.expect(prep.dl.cells.len > 0);
-            try testing.expect(drawnHasCodepoint(prep.dl, 0x2716)); // 진단 줄의 ✖ 가 실렸다
+            try testing.expect(drawnHasCodepoint(prep.dl, '(')); // 출처 줄의 `clangd(E1)` 이 실렸다
         }
         // ⑵ 상자 **안** 휠은 스크롤하고 삼킨다.
         const inside_x: f64 = @floatFromInt(rect.x + 2);
@@ -11723,8 +11725,53 @@ test "HOVB1 호버 박스 — 포인터가 낱말에 머물면 지연 뒤 요청
     try testing.expect(opened);
     try testing.expectEqual(sent_before_mute + 1, fx.session.editor_lsp.sent_hovers); // 요청은 갔고
     try testing.expect(fx.session.awakeMs() - start_ms >= hover_client.response_timeout_ms); // 답이 없어 시간 초과를 기다렸다
-    try testing.expectEqual(@as(usize, 1), hover_client.lines(fx.session).len); // 진단 한 줄뿐
-    try testing.expect(std.mem.startsWith(u8, hover_client.lines(fx.session)[0].text, "✖ "));
+    try testing.expectEqual(@as(usize, 2), hover_client.lines(fx.session).len); // 진단(메시지 + 출처 줄)뿐
+    try testing.expect(std.mem.startsWith(u8, hover_client.lines(fx.session)[0].text, "fake: "));
+    try testing.expectEqualStrings(" clangd(E1)", hover_client.lines(fx.session)[1].text);
+    hover_client.hide(fx.session);
+    // ⑾ **같은 자리를 덮는 진단이 여럿이면 severity 높은 것부터**, message 는 **첫 줄만**, 범위 끝은 **반열림** — `INFO`(첫 줄 0..1, severity
+    //    3, 두 줄 message)를 더해 offset 0 에서는 error → info 순으로 넷 줄, offset 1 에서는 error 만(info 의 end=1 은 덮지 않는다).
+    try removeMarkerHover(fx.session, term, "MUTEHOVER ");
+    term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };
+    try testing.expect(insertText(fx.session, term, "INFO "));
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
+        fn f(c: Ctx) bool {
+            var b: [32]u8 = undefined;
+            const want = std.fmt.bufPrint(&b, "fake: {d}", .{c.term.rt.editor_lsp_version}) catch return false;
+            return c.term.rt.editor_diagnostics.lsp.items.len == 2 and std.mem.eql(u8, c.term.rt.editor_diagnostics.lsp.items[0].message, want);
+        }
+    }.f));
+    try drawFrame(fx.session, leaf, term);
+    const pi0_base = pointerAtOffset(term, 0) orelse return error.NoPointer;
+    _ = fx.session.hoverCursor(pi0_base.x + 2, pi0_base.y, 0);
+    try testing.expect(pumpHoverUntil(&fx, 3000, ctx, struct {
+        fn f(c: Ctx) bool {
+            return c.fx.session.chrome_host.hover_box.open;
+        }
+    }.f));
+    {
+        const lines = hover_client.lines(fx.session);
+        try testing.expect(lines.len >= 5);
+        try testing.expect(std.mem.startsWith(u8, lines[0].text, "fake: ")); // error 가 먼저
+        try testing.expectEqualStrings(" clangd(E1)", lines[1].text);
+        try testing.expectEqualStrings("fake: info", lines[2].text); // 첫 줄만 — `note: more` 는 없다
+        try testing.expectEqualStrings(" clangd(I1)", lines[3].text);
+        try testing.expectEqualStrings("", lines[4].text);
+    }
+    hover_client.hide(fx.session);
+    const pi1_base = pointerAtOffset(term, 1) orelse return error.NoPointer;
+    _ = fx.session.hoverCursor(pi1_base.x + 2, pi1_base.y, 0);
+    try testing.expect(pumpHoverUntil(&fx, 3000, ctx, struct {
+        fn f(c: Ctx) bool {
+            return c.fx.session.chrome_host.hover_box.open;
+        }
+    }.f));
+    {
+        const lines = hover_client.lines(fx.session);
+        try testing.expect(std.mem.startsWith(u8, lines[0].text, "fake: "));
+        try testing.expectEqualStrings(" clangd(E1)", lines[1].text);
+        try testing.expectEqualStrings("", lines[2].text); // info(0..1) 는 offset 1 을 덮지 않는다
+    }
     hover_client.hide(fx.session);
 }
 
@@ -11768,16 +11815,14 @@ test "HOVB2 호버 박스 — 서버 없이 구문 오류만으로 열린다(i18
     try testing.expectEqual(@as(u64, 0), fx.session.editor_lsp.sent_hovers);
     {
         const lines = hover_client.lines(fx.session);
-        try testing.expectEqual(@as(usize, 1), lines.len);
+        try testing.expectEqual(@as(usize, 1), lines.len); // 구문 오류는 출처 줄이 없다(우리가 낸 것)
         var want_buf: [256]u8 = undefined;
         const want: []const u8 = if (first.message.len > 0)
             maru.i18n.format(&want_buf, maru.i18n.t(.diag_missing), &.{.{ .s = first.message }})
         else
             maru.i18n.t(.diag_syntax_error);
-        const glyph = "✖ ";
-        try testing.expect(std.mem.startsWith(u8, lines[0].text, glyph));
-        try testing.expectEqualStrings(want, lines[0].text[glyph.len..]);
-        try testing.expect(std.mem.indexOf(u8, lines[0].text, "[") == null); // 서버 출처 꼬리표는 없다
+        try testing.expectEqualStrings(want, lines[0].text); // 평문 — 아이콘·꼬리표 없음
+        try testing.expectEqual(maru.chrome.tokens.ColorRole.surface_fg, lines[0].role);
     }
     hover_client.hide(fx.session);
     // ⑵ 글자 없는 자리(둘째 줄 끝 뒤)는 안 연다 — 진단도 없는 자리(`ok`)도 안 연다(서버가 없다).

@@ -9,6 +9,9 @@
 //!   문서 version. 본문에 `STALE` 이 있으면 version 을 **하나 낮춰**(클라이언트가 버려야 한다). `BOOM` 이 있으면 즉시 exit 1(재시작).
 //!   `WARN` 이 있으면 severity 2 를 하나 더.
 //! - `HANG` 이 있으면 stdout 을 **닫고 살아 있는다**(진단도 exit 도 없다) — 클라이언트는 EOF 를 「끝」으로 보고 죽여 재시작해야 한다.
+//! - `textDocument/hover` → contents(markdown): 펜스 `int fake` · `fake hover L<line>:C<char>` · `**bold** here` · 항목 14개(`- item N`,
+//!   상자 높이 상한 12행을 넘긴다), range = 그 줄의 `character..character+3`(클라이언트가 앵커로 써야 한다). 본문에 `NOHOVER` 가
+//!   있으면 `null` 결과(내용 없음).
 //! - `shutdown` → `null` 응답, `exit` → 종료 0.
 //! - 시작하자마자 stderr 에 한 줄을 쓴다(실서버 clangd 가 그렇다) — stdout 에 섞이면 프레임이 깨진다(§8.2a 「stderr」).
 //! 순수 판정 대상이 아니라(맞으면 되는 도구) 테스트는 없다 — 이 도구의 계약은 `LSPB*` 가 제품 경계에서 든다.
@@ -85,6 +88,8 @@ pub fn main() void {
 }
 
 var answered = false;
+/// 마지막 didOpen/didChange 본문에 `NOHOVER` 가 있었다 — hover 가 `null` 을 낸다.
+var no_hover = false;
 
 fn handle(allocator: std.mem.Allocator, body: []const u8) void {
     var parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch return;
@@ -115,6 +120,28 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
         sendJson(allocator, .{ .jsonrpc = "2.0", .id = "srv-1", .method = "workspace/configuration", .params = .{ .items = [_]struct { section: []const u8 }{.{ .section = "fake" }} } });
         return;
     }
+    if (std.mem.eql(u8, method, "textDocument/hover")) {
+        var line: i64 = 0;
+        var character: i64 = 0;
+        if (obj.get("params")) |p| if (p == .object) if (p.object.get("position")) |pos| if (pos == .object) {
+            line = int(pos.object.get("line")) orelse 0;
+            character = int(pos.object.get("character")) orelse 0;
+        };
+        if (no_hover) {
+            sendJson(allocator, .{ .jsonrpc = "2.0", .id = id.?, .result = null });
+            return;
+        }
+        var md: std.ArrayList(u8) = .empty;
+        defer md.deinit(allocator);
+        md.print(allocator, "```c\nint fake\n```\nfake hover L{d}:C{d}\n**bold** here\n", .{ line, character }) catch return;
+        for (1..15) |n| md.print(allocator, "- item {d}\n", .{n}) catch return;
+        const Pos = struct { line: i64, character: i64 };
+        sendJson(allocator, .{ .jsonrpc = "2.0", .id = id.?, .result = .{
+            .contents = .{ .kind = "markdown", .value = md.items },
+            .range = .{ .start = Pos{ .line = line, .character = character }, .end = Pos{ .line = line, .character = character + 3 } },
+        } });
+        return;
+    }
     if (std.mem.eql(u8, method, "shutdown")) {
         sendJson(allocator, .{ .jsonrpc = "2.0", .id = id.?, .result = null });
         return;
@@ -134,6 +161,7 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
             };
             break :blk "";
         };
+        no_hover = std.mem.indexOf(u8, text, "NOHOVER") != null;
         if (std.mem.indexOf(u8, text, "BOOM") != null) std.c._exit(1);
         if (std.mem.indexOf(u8, text, "HANG") != null) {
             _ = std.c.close(1);

@@ -54,6 +54,7 @@ pub const components = struct {
     pub const sidebar = @import("chrome/components/sidebar.zig"); // 마우스 hit-test 컴포넌트(워크스페이스 사이드바)
     pub const tabbar = @import("chrome/components/tabbar.zig"); // 마우스 hit-test 컴포넌트(pane 탭 바)
     pub const context_menu = @import("chrome/components/context_menu.zig"); // 우클릭 컨텍스트 메뉴(오버레이 모달)
+    pub const hover_box = @import("chrome/components/hover_box.zig"); // 편집기 호버 박스(낱말 옆 텍스트 블록 — 모달 아님, native-editor-ui §8.3 · tooling §8.2b)
     pub const image_preview = @import("chrome/components/image_preview.zig"); // MP1: 터미널 `[Image #N]` 프리뷰 팝오버의 자리·크기(pane 을 모른다 — workspace clamp)
     pub const notifications = @import("chrome/components/notifications.zig"); // 인앱 알림 센터 패널(2줄 카드 오버레이 모달)
     pub const toggle = @import("chrome/components/toggle.zig"); // 설정 폼 위젯 — on/off 스위치(CS-4-1, leaf 컴포넌트)

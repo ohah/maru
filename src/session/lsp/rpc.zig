@@ -7,11 +7,16 @@
 
 const std = @import("std");
 
-/// 1단이 보내는 요청의 id. 알림은 id 가 없다.
-pub const RequestId = enum(u32) {
-    initialize = 1,
-    shutdown = 2,
+/// 우리가 보내는 요청의 id. 알림은 id 가 없다. `initialize`·`shutdown` 은 고정 번호, `hover`(2단 ①, §8.2b)는 `hover_id_base + seq` —
+/// 응답을 「지금 기다리는 seq」와 대조해 낡은 것을 버린다(`$/cancelRequest` 는 안 보낸다).
+pub const RequestId = union(enum) {
+    initialize,
+    shutdown,
+    hover: u32,
 };
+pub const initialize_id: u32 = 1;
+pub const shutdown_id: u32 = 2;
+pub const hover_id_base: u32 = 1000;
 
 /// 위치 인코딩 — `initialize` 에서 utf-8 을 먼저 제안하고 서버가 고른 것을 쓴다(§8.2a).
 pub const PositionEncoding = enum { utf8, utf16 };
@@ -19,7 +24,7 @@ pub const PositionEncoding = enum { utf8, utf16 };
 pub fn initializeRequest(allocator: std.mem.Allocator, root_uri: []const u8, pid: i64) error{OutOfMemory}![]u8 {
     return std.json.Stringify.valueAlloc(allocator, .{
         .jsonrpc = "2.0",
-        .id = @intFromEnum(RequestId.initialize),
+        .id = initialize_id,
         .method = "initialize",
         .params = .{
             .processId = pid,
@@ -30,6 +35,7 @@ pub fn initializeRequest(allocator: std.mem.Allocator, root_uri: []const u8, pid
                 .textDocument = .{
                     .synchronization = .{ .dynamicRegistration = false, .didSave = false },
                     .publishDiagnostics = .{ .versionSupport = true },
+                    .hover = .{ .contentFormat = [_][]const u8{ "markdown", "plaintext" } },
                 },
                 .workspace = .{ .applyEdit = false, .configuration = false, .workspaceFolders = false },
             },
@@ -69,8 +75,93 @@ pub fn didClose(allocator: std.mem.Allocator, uri: []const u8) error{OutOfMemory
     }, .{});
 }
 
+/// `textDocument/hover`(§8.2b). `line`·`character` 는 서버 인코딩의 단위(`position.characterOf`).
+pub fn hoverRequest(allocator: std.mem.Allocator, seq: u32, uri: []const u8, line: u32, character: u32) error{OutOfMemory}![]u8 {
+    return std.json.Stringify.valueAlloc(allocator, .{
+        .jsonrpc = "2.0",
+        .id = hover_id_base + seq,
+        .method = "textDocument/hover",
+        .params = .{ .textDocument = .{ .uri = uri }, .position = .{ .line = line, .character = character } },
+    }, .{});
+}
+
+/// hover 응답의 `contents` 를 **마크다운 한 덩어리**로 편다(§8.2b) — 세 모양이 있다: `MarkupContent{kind,value}` · `MarkedString`
+/// (문자열 또는 `{language,value}` — 후자는 펜스로 친다) · 그 배열(빈 줄로 잇는다). `null` 결과나 빈 내용이면 `null`.
+/// 돌려주는 것은 호출자 소유.
+pub fn hoverMarkdown(allocator: std.mem.Allocator, result: ?std.json.Value) error{OutOfMemory}!?[]u8 {
+    const r = result orelse return null;
+    const obj = switch (r) {
+        .object => |o| o,
+        else => return null,
+    };
+    const contents = obj.get("contents") orelse return null;
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try appendMarked(allocator, &out, contents);
+    const text = std.mem.trim(u8, out.items, " \t\r\n");
+    if (text.len == 0) {
+        out.deinit(allocator);
+        return null;
+    }
+    const owned = try allocator.dupe(u8, text);
+    out.deinit(allocator);
+    return owned;
+}
+
+fn appendMarked(allocator: std.mem.Allocator, out: *std.ArrayList(u8), v: std.json.Value) error{OutOfMemory}!void {
+    switch (v) {
+        .string => |s| try out.appendSlice(allocator, s),
+        .array => |items| for (items.items, 0..) |it, i| {
+            if (i > 0) try out.appendSlice(allocator, "\n\n");
+            try appendMarked(allocator, out, it);
+        },
+        .object => |o| {
+            const value: []const u8 = if (o.get("value")) |x| (switch (x) {
+                .string => |s| s,
+                else => "",
+            }) else "";
+            if (o.get("language")) |lang| if (lang == .string) {
+                try out.appendSlice(allocator, "```");
+                try out.appendSlice(allocator, lang.string);
+                try out.append(allocator, '\n');
+                try out.appendSlice(allocator, value);
+                try out.appendSlice(allocator, "\n```");
+                return;
+            };
+            try out.appendSlice(allocator, value); // MarkupContent — kind 가 plaintext 여도 축소 규칙은 무해하다
+        },
+        else => {},
+    }
+}
+
+/// hover 응답의 `range`(있으면) → `{start,end}` 의 `{line,character}` 넷. 없으면 `null`.
+pub const Range = struct { start_line: u32, start_char: u32, end_line: u32, end_char: u32 };
+pub fn hoverRange(result: ?std.json.Value) ?Range {
+    const r = result orelse return null;
+    if (r != .object) return null;
+    const range = r.object.get("range") orelse return null;
+    if (range != .object) return null;
+    const st = range.object.get("start") orelse return null;
+    const en = range.object.get("end") orelse return null;
+    if (st != .object or en != .object) return null;
+    return .{
+        .start_line = u32Of(st.object.get("line")) orelse return null,
+        .start_char = u32Of(st.object.get("character")) orelse return null,
+        .end_line = u32Of(en.object.get("line")) orelse return null,
+        .end_char = u32Of(en.object.get("character")) orelse return null,
+    };
+}
+
+fn u32Of(v: ?std.json.Value) ?u32 {
+    const x = v orelse return null;
+    return switch (x) {
+        .integer => |n| if (n >= 0 and n <= std.math.maxInt(u32)) @intCast(n) else null,
+        else => null,
+    };
+}
+
 pub fn shutdownRequest(allocator: std.mem.Allocator) error{OutOfMemory}![]u8 {
-    return std.json.Stringify.valueAlloc(allocator, .{ .jsonrpc = "2.0", .id = @intFromEnum(RequestId.shutdown), .method = "shutdown", .params = null }, .{});
+    return std.json.Stringify.valueAlloc(allocator, .{ .jsonrpc = "2.0", .id = shutdown_id, .method = "shutdown", .params = null }, .{});
 }
 
 pub fn exitNotification(allocator: std.mem.Allocator) error{OutOfMemory}![]u8 {
@@ -159,9 +250,9 @@ pub fn classify(root: std.json.Value) Incoming {
         else => return .ignore,
     };
     const rid: RequestId = switch (id_num) {
-        @intFromEnum(RequestId.initialize) => .initialize,
-        @intFromEnum(RequestId.shutdown) => .shutdown,
-        else => return .ignore,
+        initialize_id => .initialize,
+        shutdown_id => .shutdown,
+        else => if (id_num >= hover_id_base and id_num - hover_id_base <= std.math.maxInt(u32)) .{ .hover = @intCast(id_num - hover_id_base) } else return .ignore,
     };
     const is_error = obj.get("error") != null;
     return .{ .response = .{ .id = rid, .result = obj.get("result"), .is_error = is_error } };
@@ -275,6 +366,45 @@ test "LSJ3 들어온 메시지를 가른다 — 응답(우리 id 만)·알림·�
     var r2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"capabilities\":{}}}");
     defer r2.deinit();
     try testing.expectEqual(PositionEncoding.utf16, positionEncodingFromResult(classify(r2.value).response.result));
+}
+
+test "LSJ5 hover — 요청 id 는 1000+seq·contentFormat 에 markdown, 응답은 seq 로 대조, contents 세 모양이 마크다운 한 덩어리 (§8.2b)" {
+    const a = testing.allocator;
+    const req = try hoverRequest(a, 7, "file:///a.c", 3, 5);
+    defer a.free(req);
+    try testing.expect(std.mem.indexOf(u8, req, "\"id\":1007") != null);
+    try testing.expect(std.mem.indexOf(u8, req, "\"method\":\"textDocument/hover\"") != null);
+    try testing.expect(std.mem.indexOf(u8, req, "\"line\":3,\"character\":5") != null);
+    const init = try initializeRequest(a, "file:///r", 1);
+    defer a.free(init);
+    try testing.expect(std.mem.indexOf(u8, init, "\"hover\":{\"contentFormat\":[\"markdown\",\"plaintext\"]}") != null);
+    // 응답 대조 — 1007 은 hover seq 7, 999 는 모르는 id.
+    var p1 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":1007,\"result\":null}");
+    defer p1.deinit();
+    const c1 = classify(p1.value);
+    try testing.expect(c1 == .response and c1.response.id == .hover and c1.response.id.hover == 7);
+    try testing.expect((try hoverMarkdown(a, c1.response.result)) == null); // null 결과 = 내용 없음
+    var p2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":999,\"result\":null}");
+    defer p2.deinit();
+    try testing.expect(classify(p2.value) == .ignore);
+    // contents 세 모양.
+    var m1 = try parse(a, "{\"contents\":{\"kind\":\"markdown\",\"value\":\"**x**\"},\"range\":{\"start\":{\"line\":1,\"character\":2},\"end\":{\"line\":1,\"character\":5}}}");
+    defer m1.deinit();
+    const t1 = (try hoverMarkdown(a, m1.value)).?;
+    defer a.free(t1);
+    try testing.expectEqualStrings("**x**", t1);
+    const rg = hoverRange(m1.value).?;
+    try testing.expectEqual(@as(u32, 2), rg.start_char);
+    try testing.expectEqual(@as(u32, 5), rg.end_char);
+    var m2 = try parse(a, "{\"contents\":[{\"language\":\"c\",\"value\":\"int x\"},\"doc\"]}");
+    defer m2.deinit();
+    const t2 = (try hoverMarkdown(a, m2.value)).?;
+    defer a.free(t2);
+    try testing.expectEqualStrings("```c\nint x\n```\n\ndoc", t2);
+    try testing.expect(hoverRange(m2.value) == null);
+    var m3 = try parse(a, "{\"contents\":\"  \"}");
+    defer m3.deinit();
+    try testing.expect((try hoverMarkdown(a, m3.value)) == null); // 공백뿐이면 없음
 }
 
 test "LSJ4 file URI — 공백·한글은 퍼센트, 되읽으면 같은 경로 (§8.2a)" {

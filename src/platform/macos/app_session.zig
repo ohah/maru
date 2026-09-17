@@ -2425,6 +2425,8 @@ fn modalInputRole(field: ChromeHostField) ModalInputRole {
         // 이어서 타이핑을 못 한다. 누르는 것만 `sendHelperClick` 이 좌표로 받고, 키·IME·단축키는
         // 편집기 것 그대로다. `key_hints`(패시브 HUD)와 같은 자리다.
         .send_helper => .not_an_overlay,
+        // 호버 박스도 같다(tooling §8.2b 「모달 아님」) — 키는 편집기로 가고(오면 닫힌다), 받는 포인터는 상자 안 휠뿐.
+        .hover_box => .not_an_overlay,
         .notice => .{ .transient_toast = .notice },
     };
 }
@@ -5260,6 +5262,8 @@ pub const AppSession = struct {
     pending_confirm: PendingConfirm = .none,
     /// LSP seam 1단(§8.2a) — 클라이언트·신뢰 캐시·프롬프트 주인.
     editor_lsp: editor_ops.lsp_client.State = .{},
+    /// 호버 박스 상태(tooling §8.2b) — 포인터 정지·요청 대기·열린 줄.
+    editor_hover: editor_ops.hover_client.State = .{},
     // window close 확인을 통과했지만 remote event settlement가 남은 경우의 retry latch. 이 값이 켜진 동안
     // topology와 native close intent는 게시하지 않고 tick이 같은 close graph만 한 번 진행한다.
     window_close_pending: bool = false,
@@ -10382,6 +10386,7 @@ pub const AppSession = struct {
             .prev_conflict => _ = editor_ops.gotoConflictActive(self, .prev),
             .next_diagnostic => _ = editor_ops.gotoDiagnosticActive(self, .next), // §5.4 — 진단이 없으면 무동작
             .prev_diagnostic => _ = editor_ops.gotoDiagnosticActive(self, .prev),
+            .show_hover => _ = editor_ops.hover_client.showAtCaret(self), // §8.2b — caret 자리의 호버 박스
             // 접기/펼치기 — 편집기가 아니거나 접을 것이 없으면 무동작(비교 뷰도 거절한다. §4.1f).
             // 비교 뷰면 그쪽을 먼저 본다 — 축이 달라 함수가 갈린다(§4.1g "비교 뷰").
             .copy_editor_selection => _ = editor_ops.copyDiffSelection(self) or editor_ops.copySelection(self),
@@ -12774,6 +12779,9 @@ pub const AppSession = struct {
                 // 키를 **소비하지는 않는다** — 헬퍼는 모달이 아니므로 `Esc` 의 원래 뜻(있다면)을
                 // 뺏지 않는다. 나머지 닫힘은 `refreshSendHelper` 가 프레임마다 스스로 판정한다.
                 if (key_event.key == .escape) editor_ops.hideSendHelper(self);
+                // **키가 오면 호버 박스는 닫힌다**(tooling §8.2b 「닫힘」) — 소비하지 않는다. 수정자만의 키 이벤트는 이 경로에
+                // 오지 않는다(flagsChanged 는 키가 아니다).
+                editor_ops.hover_client.noteKey(self, false);
                 // **편집기 Term 컨텍스트가 판정한다**(key-input-and-shortcuts.md 「편집기 Term 컨텍스트」).
                 // 전역 `resolve` 를 쓰면 편집기 전용 기본키(`⌥Z` 등)가 안 보인다 — 그 표는 전역에 못
                 // 넣는 것들이라 이 컨텍스트 안에만 있다.
@@ -12993,7 +13001,7 @@ pub const AppSession = struct {
     /// 판정자가 **제품이 묻는 그 질문**을 그대로 물을 수 있다.
     pub fn overlayFrameNeeded(self: *const AppSession) bool {
         return self.anyOverlayOpen() or self.chrome_host.key_hints.visible or
-            self.chrome_host.send_helper.open;
+            self.chrome_host.send_helper.open or self.chrome_host.hover_box.open;
     }
 
     /// anyOverlayOpen에서 **notice(비-인터랙티브 토스트)만 제외**한 것 — 입력을 받는 모달(설정·팔레트·확인 등)이
@@ -13429,6 +13437,9 @@ pub const AppSession = struct {
     pub fn mouse(self: *AppSession, kind: i32, x_px: f64, y_px: f64, button: i32, mods: i32) void {
         if (sidebar_ops.activateRecoveredRowBeforeInitialSurface(self, kind, x_px, y_px, button)) return;
         if (!self.surface_initialized) return;
+        // 호버 박스(tooling §8.2b): 상자 밖 눌림은 닫고 **흘려보낸다**, 상자 안은 삼킨다. 모달 게이트보다 앞이어도 무해하다 —
+        // 모달이 열리는 순간 `refresh` 가 상자를 내리므로 둘이 함께 있는 프레임이 없다.
+        if (kind == 1 and editor_ops.hover_client.mouseDown(self, x_px, y_px)) return;
         // 상태바 위 클릭은 **삼킨다**(S3가 항목을 올리기 전까지 눌러도 아무 일도 없는 게 맞다). 안 막으면 아래
         // 사이드바·탭 바 hit-test가 상태바 좌표를 자기 것으로 받거나(상태바는 창 전폭이라 사이드바 아래를 지난다)
         // 터미널 선택 드래그가 시작된다. 드래그 중(kind != 1)은 통과시킨다 — 터미널에서 시작한 선택이 상태바
@@ -17578,6 +17589,8 @@ pub const AppSession = struct {
 
     pub fn hoverCursor(self: *AppSession, x_px: f64, y_px: f64, mods: i32) CursorKind {
         if (!self.surface_initialized) return .text;
+        // 호버 박스의 포인터 추적(tooling §8.2b) — 정지 시간은 tick 이 잰다. 열려 있으면 sticky 판정(낱말·상자 밖이면 닫힘).
+        editor_ops.hover_client.notePointer(self, x_px, y_px);
         // 닫기 확인 모달 중엔 호버 부수효과(사이드바/탭/◧ 호버 강조·스크롤바 hover·URL 밑줄)를 멈추고 화살표 커서만
         // 둔다 — 안 그러면 모달 뒤 버튼/슬롯이 호버에 반응해 강조되며(모달 위로 비침) UI가 깨져 보인다(모달 게이트).
         if (self.chrome_host.confirm.open) return .default;
@@ -20335,6 +20348,7 @@ pub const AppSession = struct {
         debug_fixtures.reapplyForcedScmHover(self); // 캡처 전용: 행 동작(`+`/`−`)은 호버해야 보인다
         debug_fixtures.applyForcedCommitMessage(self); // 캡처 전용: 편집은 클릭·키보드로만 시작된다(한 번만)
         debug_fixtures.applyForcedEditorCaret(self); // 캡처 전용: 선택은 클릭으로만 생긴다
+        debug_fixtures.applyForcedEditorHover(self); // 캡처 전용: 호버는 포인터 정지로만 뜬다(§8.2b)
         debug_fixtures.applyForcedStageAll(self); // 캡처 전용: 전체 스테이지는 그룹 머리 클릭으로만 시작된다(RS4a)
         debug_fixtures.applyForcedFetch(self); // 캡처 전용: 원격 갱신은 브랜치 줄 클릭으로만 시작된다(P6)
         debug_fixtures.applyForcedRemoteMenu(self); // 캡처 전용: `∨` 메뉴도 클릭으로만 열린다(P6b)
@@ -20450,6 +20464,7 @@ pub const AppSession = struct {
         self.pollMarkerPreview();
         self.pumpMarkerPreviewOpen();
         editor_ops.lsp_client.pump(self); // §8.2a: 서버 읽기·문서 동기화 — 스레드 없이 tick 에서
+        editor_ops.hover_client.tick(self); // §8.2b: 포인터 정지 → 호버 요청/열기
         self.advancePendingAppQuitShutdown();
         // end-all target이 source-zero와 ready_remove까지 도달해 종료 승인을 게시한 frame은 더 이상
         // remote maintenance나 Term drain을 실행하지 않는다. 같은 frame의 후속 접근은 deinit이 소유할
@@ -23974,6 +23989,11 @@ pub const AppSession = struct {
         if (draws.items.len == 0 and editor_ops.refreshSendHelper(self)) {
             try self.chrome_host.collectSendHelperDraws(editor_ops.sendHelperItems(self), props, &tokens, arena, &draws);
         }
+        // 호버 박스(tooling §8.2b — 비모달). 헬퍼와 같은 규율: 다른 오버레이가 낼 것이 있으면 안 내고, 프레임마다 `refresh` 가
+        // 설 자리를 다시 묻는다(없으면 스스로 내려간다).
+        if (draws.items.len == 0 and editor_ops.hover_client.refresh(self)) {
+            try self.chrome_host.collectHoverBoxDraws(editor_ops.hover_client.lines(self), props, &tokens, arena, &draws);
+        }
         // 단축키 힌트(재설계): 모달이 안 열렸고 key_hints.visible면 **각 chrome 요소 우상단에 단축키 배지**를 빌드한다
         // (한 박스 HUD가 아니라 요소별 배지 — 사용자 요청). 모달이 열렸으면(위에서 draws 채워짐) 배지는 억제(모달 우선).
         // 배지는 요소 위 흩어진 곳만 칠하므로 아래 rasterize를 transparent_default로 해 나머지가 chrome/터미널이 비치게 한다.
@@ -24143,6 +24163,7 @@ pub const AppSession = struct {
 
     pub fn deinit(self: *AppSession) void {
         editor_ops.lsp_client.deinit(self); // §8.2a: 서버 자식을 거둔다(짧게 — 종료 경로)
+        editor_ops.hover_client.deinit(self);
         // 판정자에서는 detached worker 가 **세션보다 오래 살면 안 된다**. 이유·규율은
         // `detached_worker_wait` 가 단일 출처다(2026-09-08 CI abort: `dupe` 누수 → segfault → 134).
         // 제품에서는 기다리지 않는다 — 멈춘 I/O 로 창 닫기가 굳는 것이 훨씬 나쁘고, 그 계약은 각

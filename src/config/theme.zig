@@ -1190,8 +1190,13 @@ pub const EditorConfig = struct {
     /// **진단 표시**(visual-mapping §5.4) — 물결 밑줄·gutter 글리프·막대/미니맵 마커·F8 이동을 한꺼번에 켜고 끈다. 지금의
     /// 출처는 구문 오류(tree-sitter)라 타이핑 중에도 밑줄이 뜬다 — 거슬리면 끈다.
     diagnostics: bool = true,
+    /// **호버 박스**(tooling §8.2b) — 포인터가 낱말 위에 머물면 진단 메시지와 언어 서버의 hover 를 띄운다. 끄면 포인터 트리거만
+    /// 꺼지고 `show_hover` 명령은 남는다(VS Code `editor.hover.enabled` 와 같은 관계).
+    hover: bool = true,
+    /// 호버가 뜨기까지 포인터가 머무는 시간(ms). VS Code·Zed 기본 300.
+    hover_delay: u32 = 300,
 
-    pub const schema = .{ // 키: editor.wrap · editor.tab-width · editor.cursor-shape · editor.scroll-beyond-last-column · editor.cursor-surrounding-lines · editor.cursor-surrounding-columns · editor.minimap · editor.minimap-width · editor.diagnostics
+    pub const schema = .{ // 키: editor.wrap · editor.tab-width · editor.cursor-shape · editor.scroll-beyond-last-column · editor.cursor-surrounding-lines · editor.cursor-surrounding-columns · editor.minimap · editor.minimap-width · editor.diagnostics · editor.hover · editor.hover-delay
         // **둘 다 설정 GUI에 뜬다.** `wrap`은 한때 `hidden`이었는데(*"편집기가 제품 화면에 배선되기
         // 전이라 토글해도 아무 일이 없어 버그로 보인다"*) 값이 렌더에 닿으면서 벗겼다 —
         // `schema.zig`의 "editor.wrap은 설정 UI에 뜬다"가 그 사실을 잰다. 탭 폭도 같은 조건을
@@ -1221,6 +1226,9 @@ pub const EditorConfig = struct {
         .minimap = Meta{ .doc = .cfg_editor_minimap, .widget = .toggle, .section = .editor },
         .minimap_width = Meta{ .key_seg = "minimap-width", .doc = .cfg_editor_minimap_width, .range = .{ 4, 60 }, .widget = .number, .section = .editor },
         .diagnostics = Meta{ .doc = .cfg_editor_diagnostics, .widget = .toggle, .section = .editor },
+        .hover = Meta{ .doc = .cfg_editor_hover, .widget = .toggle, .section = .editor },
+        // 상한 5000 — 그 위는 「안 뜬다」와 구별이 안 된다. 0 은 「바로」다.
+        .hover_delay = Meta{ .key_seg = "hover-delay", .doc = .cfg_editor_hover_delay, .range = .{ 0, 5000 }, .widget = .number, .section = .editor },
     };
 };
 

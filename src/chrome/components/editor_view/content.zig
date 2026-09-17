@@ -610,6 +610,38 @@ pub fn byteAtPoint(
     x_px: i32,
     cell_w_px: u16,
 ) usize {
+    return walkPoint(.caret, bytes, tab_width, start_byte, start_byte_col, screen_col0, row_cols, x_px, cell_w_px);
+}
+
+/// 포인터 판정의 두 뜻(§4.1g). `caret` 은 글자 **사이**(중점 반올림 — 클릭·드래그), `cluster` 는 포인터 아래의 **글자**
+/// (그 cluster 의 픽셀 범위 `[lo, hi)` 가 x 를 덮으면 그 시작 byte — 호버, tooling §8.2b). 행 끝 너머는 둘 다 행 끝이다.
+pub const PointMode = enum { caret, cluster };
+
+/// `byteAtPoint` 의 **글자 아래** 변형 — 같은 걸음, 반올림만 없다.
+pub fn clusterAtPoint(
+    bytes: []const u8,
+    tab_width: u16,
+    start_byte: usize,
+    start_byte_col: u32,
+    screen_col0: u32,
+    row_cols: u32,
+    x_px: i32,
+    cell_w_px: u16,
+) usize {
+    return walkPoint(.cluster, bytes, tab_width, start_byte, start_byte_col, screen_col0, row_cols, x_px, cell_w_px);
+}
+
+fn walkPoint(
+    comptime mode: PointMode,
+    bytes: []const u8,
+    tab_width: u16,
+    start_byte: usize,
+    start_byte_col: u32,
+    screen_col0: u32,
+    row_cols: u32,
+    x_px: i32,
+    cell_w_px: u16,
+) usize {
     if (cell_w_px == 0 or bytes.len == 0) return @min(start_byte, bytes.len);
     // 행 왼쪽 밖은 **그 행의 시작**이다(줄 시작이 아니다 — 랩된 두 번째 행부터 둘이 다르다).
     if (x_px <= 0) return @min(start_byte, bytes.len);
@@ -643,8 +675,13 @@ pub fn byteAtPoint(
         //  적대적 검증이 **동치 뮤턴트**로 확인했다.)
         const lo = (col -| screen_col0) * cell_w_px;
         const hi = (st.next_col -| screen_col0) * cell_w_px;
-        if (click_px < lo + (hi - lo) / 2) return i;
-        if (click_px < hi) return st.next_byte;
+        switch (mode) {
+            .caret => {
+                if (click_px < lo + (hi - lo) / 2) return i;
+                if (click_px < hi) return st.next_byte;
+            },
+            .cluster => if (click_px < hi) return i,
+        }
 
         i = st.next_byte;
         col = st.next_col;
@@ -2681,6 +2718,36 @@ test "byteAtPoint: 아무 픽셀을 쏴도 cluster 경계이고 줄 범위 안�
         }
     }
     try std.testing.expect(shots > 1000);
+}
+
+test "HL20 clusterAtPoint — 포인터 아래의 글자: 2칸 글자·탭·§3.8 표기의 어느 절반이든 그 시작 byte, 행 끝 너머는 행 끝 (§4.1g·tooling §8.2b)" {
+    const cw: u16 = 10;
+    {
+        const line = "가나";
+        try std.testing.expectEqual(@as(usize, 0), clusterAtPoint(line, 4, 0, 0, 0, 4, 0, cw));
+        try std.testing.expectEqual(@as(usize, 0), clusterAtPoint(line, 4, 0, 0, 0, 4, 19, cw)); // 오른쪽 절반도 그 글자
+        try std.testing.expectEqual(@as(usize, 3), clusterAtPoint(line, 4, 0, 0, 0, 4, 20, cw));
+        try std.testing.expectEqual(@as(usize, 3), clusterAtPoint(line, 4, 0, 0, 0, 4, 39, cw));
+        try std.testing.expectEqual(@as(usize, 6), clusterAtPoint(line, 4, 0, 0, 0, 4, 40, cw)); // 행 끝
+    }
+    {
+        const line = "\tx";
+        try std.testing.expectEqual(@as(usize, 0), clusterAtPoint(line, 4, 0, 0, 0, 5, 39, cw));
+        try std.testing.expectEqual(@as(usize, 1), clusterAtPoint(line, 4, 0, 0, 0, 5, 40, cw));
+    }
+    {
+        const line = "\u{202E}x";
+        try std.testing.expectEqual(@as(usize, 0), clusterAtPoint(line, 4, 0, 0, 0, 9, 79, cw));
+        try std.testing.expectEqual(@as(usize, 3), clusterAtPoint(line, 4, 0, 0, 0, 9, 80, cw));
+    }
+    {
+        // 1칸 글자 — caret 반올림이면 오른쪽 절반이 다음 글자(HOVB1 실측), cluster 는 그 글자.
+        const line = "int";
+        try std.testing.expectEqual(@as(usize, 2), byteAtPoint(line, 4, 0, 0, 0, 3, 15, cw));
+        try std.testing.expectEqual(@as(usize, 1), clusterAtPoint(line, 4, 0, 0, 0, 3, 15, cw));
+        try std.testing.expectEqual(@as(usize, 0), clusterAtPoint(line, 4, 0, 0, 0, 3, -5, cw));
+        try std.testing.expectEqual(@as(usize, 3), clusterAtPoint(line, 4, 0, 0, 0, 3, 9_999, cw));
+    }
 }
 
 test "byteAtPoint 결정표: 걸친 자리마다 무엇을 답하는가 (§4.1g)" {

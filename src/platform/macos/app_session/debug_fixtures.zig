@@ -1204,6 +1204,16 @@ pub fn maybeDebugOpenFilePanel(self: *AppSession) void {
 /// `app_session.zig` 의 tick 안에 인라인으로 있던 것을 옮겼다 — 이 모듈이 존재하는 이유가 정확히
 /// «제품 경로를 읽는 사람이 디버그 스캐폴딩을 지나지 않게» 이고, 그 블록은 턴 하니스가 커지면서
 /// 40줄을 넘었다(적대적 검증에서 잡혔다).
+/// MARU_FORCE_EDITOR_HOVER=1 — caret 자리의 호버 박스를 `show_hover` 명령으로 연다(캡처 전용, tooling §8.2b). 실제 호버는
+/// 포인터 정지가 필요해 헤드리스로는 못 만든다. **작업 공간 복원 알림이 떠 있으면 먼저 내린다** — 하니스 환경(빈 HOME)의
+/// 산물이고, 오버레이가 있으면 상자가 서지 않는다(§8.2b 「닫힘」). 매 프레임 돌되 이미 열려 있거나 응답을 기다리면 손을 뗀다.
+pub fn applyForcedEditorHover(self: *AppSession) void {
+    if (std.c.getenv("MARU_FORCE_EDITOR_HOVER") == null) return;
+    if (self.chrome_host.notice.open) self.chrome_host.notice.dismiss();
+    if (self.chrome_host.hover_box.open or self.editor_hover.waiting) return;
+    _ = editor_ops.hover_client.showAtCaret(self);
+}
+
 pub fn applyForcedScmTab(self: *AppSession) void {
     // MARU_FORCE_SCM_TAB=history|agent — 그 탭을 고른 것처럼 만든다(P4). 탭 전환은 클릭으로만
     // 일어나므로 포인터 없는 캡처 하니스에서는 히스토리 화면을 얻을 방법이 없다(행 호버와 같은 자리).

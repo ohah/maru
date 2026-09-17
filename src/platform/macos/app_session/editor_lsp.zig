@@ -22,6 +22,7 @@ const tab_ops = @import("tab.zig");
 const input_ops = @import("input.zig");
 const term_ops = @import("term.zig");
 const file_tree_backend = @import("../file_tree_backend.zig");
+const editor_hover = @import("editor_hover.zig");
 
 pub const Phase = enum {
     /// 실행 파일이 PATH 에 없다 — 상태바 「설치」.
@@ -71,6 +72,8 @@ pub const Client = struct {
     shutdown_at_ms: u64 = 0,
     /// 신뢰 결정을 기다린다(이 root 의 모달이 떠 있거나, 다른 root 의 모달이 먼저다) — 띄우지 않는다.
     trust_pending: bool = false,
+    /// 마지막으로 보낸 hover 요청의 seq(§8.2b — 응답은 `editor_hover` 가 「지금 기다리는 seq」와 대조한다).
+    hover_seq: u32 = 0,
 
     fn deinit(self: *Client, allocator: std.mem.Allocator) void {
         if (self.proc) |*p| {
@@ -104,6 +107,9 @@ pub const State = struct {
     sent_changes: u64 = 0,
     received_diagnostics: u64 = 0,
     rejected_requests: u64 = 0,
+    /// 판정자 관측: 보낸 hover 요청 수·받은 hover 응답 수(§8.2b).
+    sent_hovers: u64 = 0,
+    received_hovers: u64 = 0,
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
         for (self.clients.items) |*c| c.deinit(allocator);
@@ -457,6 +463,13 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
                 defer self.allocator.free(msg);
                 _ = send(self, c, msg);
             },
+            .hover => |seq| {
+                // 낡은 응답(다른 seq)·에러·빈 내용은 전부 「내용 없음」으로 호버 층에 넘긴다 — 판정은 그쪽이 한다(§8.2b 「요청」).
+                const md: ?[]u8 = if (r.is_error) null else lsp.rpc.hoverMarkdown(self.allocator, r.result) catch null;
+                defer if (md) |m| self.allocator.free(m);
+                self.editor_lsp.received_hovers += 1;
+                editor_hover.onHoverResponse(self, seq, md, lsp.rpc.hoverRange(r.result), c.encoding);
+            },
         },
         .notification => |n| {
             if (std.mem.eql(u8, n.method, "textDocument/publishDiagnostics")) onPublishDiagnostics(self, c, n.params);
@@ -676,6 +689,37 @@ pub fn statusFor(self: *AppSession, term: *Term) ?StatusView {
     // 답을 기다리는 동안(모달이 다른 오버레이 뒤에서 순서를 기다리거나 떠 있는 동안)은 「허락 대기」다 — 「다시 시작 중」이 아니다.
     if (c.trust_pending and c.phase == .restarting) return .{ .phase = .asking, .exe = server.exe };
     return .{ .phase = c.phase, .exe = server.exe };
+}
+
+/// 그 Term 의 문서를 연 **ready** 클라이언트(있으면). 호버(§8.2b)가 「서버가 있는가」를 이것으로 묻는다.
+pub fn readyClientFor(self: *AppSession, term: *Term) ?*Client {
+    if (!self.loaded_config.config.lsp.enabled) return null;
+    if (term.kind != .editor or term.rt.editor_doc == null or term.rt.editor_diff != null) return null;
+    const server = lsp.servers.forGrammar(term.rt.editor_grammar) orelse return null;
+    const root = rootFor(self, term) orelse return null;
+    const c = clientFor(self, root, server) orelse return null;
+    if (c.phase != .ready or c.proc == null) return null;
+    if (c.findDoc(term.surfaceId()) == null) return null;
+    return c;
+}
+
+/// `textDocument/hover` 를 보낸다(§8.2b). 문서 byte `offset` 을 서버 인코딩의 `{line, character}` 로 옮긴다. 보냈으면 그 seq.
+pub fn requestHover(self: *AppSession, term: *Term, offset: usize) ?u32 {
+    const c = readyClientFor(self, term) orelse return null;
+    const d = c.findDoc(term.surfaceId()) orelse return null;
+    const opened = term.rt.editor_doc orelse return null;
+    const content = opened.file.content;
+    const off = @min(offset, content.len);
+    const line_idx = opened.file.lines.lineAt(off);
+    const line = opened.file.lines.line(line_idx) orelse return null;
+    const text = content[line.start..line.contentEnd()];
+    const character = lsp.position.characterOf(text, @intCast(off -| line.start), c.encoding);
+    c.hover_seq +%= 1;
+    const msg = lsp.rpc.hoverRequest(self.allocator, c.hover_seq, d.uri, @intCast(line_idx), character) catch return null;
+    defer self.allocator.free(msg);
+    if (!send(self, c, msg)) return null;
+    self.editor_lsp.sent_hovers += 1;
+    return c.hover_seq;
 }
 
 /// 상태바 항목 클릭(§8.2a): 없음 → 새 탭에 설치 명령 입력 · 거부됨 → 다시 묻기 · 실패 → 재시작. 나머지는 무동작.

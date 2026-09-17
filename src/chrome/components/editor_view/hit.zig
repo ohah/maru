@@ -71,6 +71,19 @@ pub fn bodyPoint(
     x_px: f64,
     y_px: f64,
 ) ?Point {
+    return bodyPointMode(.caret, geom, rows, row_lines, lines, x_px, y_px);
+}
+
+/// `bodyPoint` 에 판정 뜻을 고르는 변형 — `.cluster` 는 포인터 **아래의 글자**(호버, tooling §8.2b). 나머지 네 단계는 같다.
+pub fn bodyPointMode(
+    comptime mode: content.PointMode,
+    geom: Geometry,
+    rows: []const visual_map.VisualRow,
+    row_lines: []const u32,
+    lines: []const []const u8,
+    x_px: f64,
+    y_px: f64,
+) ?Point {
     if (rows.len == 0) return null;
     // **행 배열과 줄 표는 같은 축이다.** 길이가 갈리면 아래 인덱싱이 엉뚱한 줄을 집는다.
     if (row_lines.len < rows.len) return null;
@@ -118,7 +131,10 @@ pub fn bodyPoint(
     if (source_line >= lines.len) return null;
 
     const text = lines[source_line];
-    const off_in_line = content.byteAtPoint(
+    const off_in_line = (switch (mode) {
+        .caret => content.byteAtPoint,
+        .cluster => content.clusterAtPoint,
+    })(
         text,
         geom.tab_width,
         @min(v.start_byte, text.len),

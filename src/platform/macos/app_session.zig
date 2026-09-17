@@ -1839,6 +1839,9 @@ const TermRuntime = struct {
     editor_diagnostics: editor_ops.diagnostics.State = .{},
     /// LSP 문서 version(§8.2a) — 편집마다 오른다. 0 은 「아직 서버에 안 열었다」.
     editor_lsp_version: u64 = 0,
+    /// 이 문서의 워크스페이스 root(§8.2a — 파일 트리와 같은 규칙: 가장 가까운 `.git` 의 디렉터리, 없으면 파일의 디렉터리).
+    /// 처음 물을 때 한 번 정해 굳힌다(owned — `releaseEditorTerm` 이 푼다).
+    editor_lsp_root: ?[]u8 = null,
 
     /// 이 문서에 쓰는 tree-sitter 문법. **상태바 언어 항목이 읽는다**(`status-bar.md` 「언어 항목」).
     ///
@@ -9534,7 +9537,7 @@ pub const AppSession = struct {
             .file_tree_delete => self.pending_file_tree_delete = null,
             // 굳혀 둔 대상을 **비운다** — 안 비우면 다음 확인이 옛 대상을 지울 수 있다.
             .remote_file_tree_delete => self.pending_remote_delete.name_len = 0,
-            .lsp_trust => editor_ops.lsp_client.answerTrust(self, false), // 취소 = 거부(기억된다 — §8.2a)
+            .lsp_trust => editor_ops.lsp_client.dismissTrustPrompt(self), // 프로그램이 닫은 것 — 기억하지 않고 다음에 다시 묻는다
             .none, .close, .reset, .file_conflict_reload => {},
         }
         self.pending_confirm = .none;
@@ -12107,6 +12110,8 @@ pub const AppSession = struct {
                 self.metal_dirty = true;
             },
             .confirm_cancel => { // Esc/N — 보류한 동작(닫기/리셋/종료/붙여넣기/grant)을 버린다.
+                // 신뢰 프롬프트는 **사용자의 취소만** 거부로 기억한다(§8.2a) — 다른 모달이 덮거나 앱이 끝나며 닫히는 것은 답이 아니다.
+                if (self.pending_confirm == .lsp_trust) editor_ops.lsp_client.answerTrust(self, false);
                 self.cancelPendingConfirm();
                 self.metal_dirty = true;
             },

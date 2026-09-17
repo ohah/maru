@@ -385,7 +385,7 @@ TextMate, git staging, formatter는 LSP의 선행 조건이 아니다. 초기 sy
 | **상태바** | 새 항목 `editor_lsp`(편집기 묶음, `editor_degraded` 바로 뒤 — 저하 계열이라 앞쪽): 「‹서버› 없음 — 설치」(클릭 → 새 탭 + 명령 입력) · 「‹서버› 묻는 중」 · 「‹서버› 시작 중」 · 「‹서버›」(연결) · 「‹서버› 실패 — 다시」(클릭 → 재시작) · 「‹서버› 거부됨 — 다시 묻기」(클릭 → 프롬프트). 언어에 서버 이름표가 없으면 항목 없음 | layering §2.2 「조용히 줄어들면 버그로 읽는다」. §8.1a 흐름 2·3·4 |
 | **설치 안내** | 클릭 → `newTab` + `sendTextAsKeys(명령)` — **Enter 는 안 보낸다**. 명령: `brew install zls` · `brew install llvm`(clangd — Xcode 가 있으면 이미 `/usr/bin/clangd`) · `npm i -g typescript-language-server typescript` · `rustup component add rust-analyzer` · `npm i -g pyright` · `go install golang.org/x/tools/gopls@latest` | §8.1a 「입력까지만 하고 실행하지 않는 것이 경계다」 |
 | **위치 인코딩** | `initialize` 에 `general.positionEncodings: ["utf-8", "utf-16"]`. 서버가 `utf-8` 을 고르면 byte 그대로, 아니면(기본 `utf-16`) 줄 안에서 UTF-16 code unit 을 세어 byte 로 옮긴다 | LSP 3.17 `positionEncoding`. clangd 는 utf-8 을 받아들이고 zls·tsserver 는 utf-16 만 — 둘 다 있어야 한다 |
-| **진단 합치기** | `publishDiagnostics` 의 `uri` 가 열린 문서와 같고 `version`(있으면)이 지금 revision 과 같을 때만 받는다 — 아니면 버린다(§5 「revision 으로 폐기」). 그 문서의 `.lsp` 항목을 **통째로 갈아 끼우고** `.syntax` 는 둔다. severity 1..4 → error·warning·info·hint, 없으면 error. root 밖 uri 는 무시(§8.2). 메시지는 서버 문자열을 **복사**해 든다(표시는 §8.3 호버가 오면) | §5 「출처가 여럿이어도 층은 하나」. 구문 오류와 서버 오류가 같은 줄에 겹치면 둘 다 선다(둘 다 참이다) |
+| **진단 합치기** | `publishDiagnostics` 의 `uri` 가 열린 문서와 같고 `version`(있으면)이 지금 revision 과 같을 때만 받는다 — 아니면 버린다(§5 「revision 으로 폐기」). 그 문서의 `.lsp` 항목을 **통째로 갈아 끼우고** `.syntax` 는 둔다. `message` 와 `code`(문자열이든 정수든 글자로 — 호버 박스 §8.2b 가 `출처(코드)` 로 낸다)를 실어 온다. severity 1..4 → error·warning·info·hint, 없으면 error. root 밖 uri 는 무시(§8.2). 메시지는 서버 문자열을 **복사**해 든다(표시는 §8.3 호버가 오면) | §5 「출처가 여럿이어도 층은 하나」. 구문 오류와 서버 오류가 같은 줄에 겹치면 둘 다 선다(둘 다 참이다) |
 | **동기화** | `didOpen`(languageId·version=revision·전문) → 편집마다 revision 이 오르면 **그 프레임 끝에 한 번** `didChange`(Full, 최신 전문·version). 문서를 닫으면 `didClose`. 큰 문서(§3.0 상한 넘음)는 안 보낸다 | 프레임당 한 번이면 타이핑 60Hz 에 60 회 전송 — Full 이라 전문 크기 × 60/s. 1 MB 문서면 60 MB/s: **1단의 알려진 대가**(증분 동기화가 2단인 이유). 상한을 넘는 문서는 아예 안 보낸다 |
 | **수명·재시작** | 자식이 죽으면(읽기 EOF·`waitpid`) 1s·2s·4s 뒤 재시작, 세 번 실패하면 「실패」 상태로 멈춘다(클릭으로 재시도). 앱 종료·root 닫힘·마지막 문서 닫힘 뒤 30 초면 `shutdown`→`exit`, 5 초 안에 안 죽으면 SIGKILL | §8.2 「restart/backoff」. 30 초를 두는 이유는 탭을 오가며 여닫는 동안 서버를 매번 띄우지 않기 위해서다 |
 | **stderr** | `/dev/null`. 서버 로그는 우리 것이 아니다 | §8.3 「tool stdout/stderr 는 기본 제외」 |
@@ -442,14 +442,14 @@ true · `hover_popover_delay` 300 · `hover_popover_sticky` true · `hover_popov
 | **트리거** | 편집기 본문 위에서 포인터가 **한 자리에 `editor.hover-delay`(기본 300ms) 머물면** 그 글자의 offset 으로 연다. 글자가 없는 자리(줄 끝 뒤·빈 줄)는 열지 않는다. 드래그 중·버튼 눌림·오버레이(모달·메뉴·알림) 열림·비교 뷰에서는 열지 않는다 | VS Code·Zed 300ms. 「글자 없음 → 안 연다」는 헬퍼 §6.2 ③과 같은 이유 — 빈 자리에 뜨는 상자는 가린다 |
 | **키보드** | 팔레트 명령 `show_hover`(「Editor: Show Hover」)가 **caret** offset 으로 연다. 기본 chord 없음 — VS Code 의 `⌘K ⌘I` 는 두 단계 chord 라 우리 키 계약(단일 chord)에 없다 | §8 규칙 1(앵커는 caret 또는 포인터) |
 | **앵커** | 그 offset 이 든 **낱말**(selection.zig 의 단어 규칙 — 코드용) 의 시작 글자 셀. 서버 응답에 `range` 가 있으면 그것이 낱말을 대신한다. 상자는 그 셀 **한 줄 아래**, `popup_box.below_flip_up` | 헬퍼와 같은 좌표 출처(`bodyAnchor` — 렌더가 굳힌 행 배열) |
-| **내용 순서** | ① 그 offset 을 덮는 **진단**(§5.4 목록 — severity 아이콘 + 메시지: 구문 오류는 i18n 「구문 오류」·「빠짐: ‹토큰›」, 서버 진단은 message 그대로 + `‹서버›` 출처) ② 서버 `textDocument/hover` 의 contents. 둘 사이 빈 줄 하나 | VS Code 마커 호버가 위, 언어 호버가 아래 |
+| **내용 순서** | ① 그 offset 을 덮는 **진단**(§5.4 목록) — **VS Code 마커 호버의 모양**(2026-09-17 사용자 결정): 메시지는 **평문**(아이콘·severity 색 없음 — gutter 글리프가 이미 있어 상자 안에서는 중복이고, VS Code 도 severity 를 정렬에만 쓴다), 그 **아래 줄**에 흐린 색으로 한 칸 들여 `출처(코드)`(출처만이면 `출처`, 코드만이면 `(코드)`, 둘 다 없으면 줄 없음). 구문 오류의 메시지는 i18n 「구문 오류」·「빠짐: ‹토큰›」이고 출처 줄이 없다(우리가 낸 것 — VS Code 의 마커도 source 가 없으면 그 줄이 없다). 서버 진단은 message 의 첫 줄, 출처 = 서버 실행 파일 이름, 코드 = `Diagnostic.code`(문자열·정수 — §8.2a 표에 실어 온다). 진단이 여럿이면 severity 높은 것부터. ② 서버 `textDocument/hover` 의 contents. ①·② 사이 빈 줄 하나 | VS Code `markerHoverParticipant`(MIT, 동작만): 메시지 span + 아래 줄 `source(code)` 불투명도 0.6·6px 들여쓰기, 아이콘·색 없음, severity 는 정렬. 「View Problem」·「Quick Fix」 동작 줄과 related information 은 「하지 않는 것」 |
 | **마크다운** | §8.3 의 축소 규칙 그대로 — 펜스는 살리고(이 슬라이스는 **색 없음**), 인라인 코드·굵게·이탤릭은 기호만 지우고, 목록은 `• `, 표·이미지·링크는 평문. `MarkedString{language,value}` 는 펜스로 친다. 순수 모듈 `session/editor/hover_text.zig` | §8.3 「이것은 마크다운 렌더러가 아니다」 |
 | **요청** | 포인터가 머문 자리마다 요청 하나(id 는 `1000+seq`, 문서마다가 아니라 클라이언트마다 seq). **응답이 오면** 그 seq 가 지금 기다리는 것일 때만 연다 — 낡은 응답은 버린다. 서버가 없거나(ready 아님) 진단만 있으면 지연 뒤 **바로** 연다. 서버가 있고 진단도 있으면 응답을 기다린다(진단만 먼저 띄우면 응답이 와서 상자가 커지며 흔들린다) — 응답이 2초 안에 안 오면 진단만 연다 | `$/cancelRequest` 는 안 보낸다(1단 「하지 않는 것」과 같은 폭 — 낡은 응답을 버리는 것으로 충분) |
 | **닫힘** | 프레임마다 다시 묻는다(헬퍼 규율): 그 문서가 보이는가 · 그 줄이 아직 그려졌는가 · revision 이 같은가 · 오버레이가 없는가. 그 위에 즉시 닫는 것: 포인터가 **낱말 밖이면서 상자 밖**으로 감(sticky — 상자 위는 남는다) · 수정자 아닌 키 · 스크롤(상자 밖 휠) · 상자 밖 클릭(그 클릭은 흘려보낸다) · `Esc`(소비하지 않는다) · Term/탭 전환 | VS Code 숨김 조건 목록. 「상자 위는 남는다」가 §8.3 의 자체 스크롤을 가능하게 한다 |
 | **크기·스크롤** | 폭 = 가장 긴 줄(EAW 표시폭) + 좌우 1칸, **상한 80칸**; 높이 = 줄 수, **상한 12행**. 넘치면 상자 안 휠로 스크롤(`scroll_area` 규칙 — 행 단위) · 긴 줄은 상한 폭에서 자른다(랩 없음 — 시그니처는 한 줄로 읽히는 편이 낫다) | §8.3 「높이를 제한하고 넘치면 자체 스크롤」. 폭 80 은 VS Code 기본 최대 폭(≈500px)과 같은 자릿수 |
 | **모달 아님** | `modalInputRole` = `.not_an_overlay`(헬퍼·`key_hints` 자리). 키는 편집기로 그대로 간다(단, 키가 오면 닫힌다) · 받는 포인터는 상자 안 휠뿐 | 헬퍼 §6.2 「고르기를 마쳤을 뿐인 사용자에게서 키를 뺏으면 안 된다」 |
 | **켜고 끄기** | `editor.hover`(기본 켬) · `editor.hover-delay`(ms, 기본 300, 0..5000). 끄면 포인터 트리거만 꺼지고 `show_hover` 명령은 남는다 | VS Code `editor.hover.enabled` 를 꺼도 `showHover` 명령은 남는다 |
-| **하지 않는 것(이 슬라이스)** | 시그니처 힌트(`signatureHelp` — 활성 파라미터 추적은 별도) · 펜스 syntax 색 · 링크 이동·액션(quick fix) · 호버 안 포커스/키보드 스크롤 · `hidingDelay`(포인터가 낱말과 상자 사이 틈을 지나는 유예 — 상자가 한 줄 아래에 붙어 있어 틈이 없다) · 비교 뷰 | §8.3 「링크 이동은 팝업이 감당할 상호작용이 아니다」 |
+| **하지 않는 것(이 슬라이스)** | 시그니처 힌트(`signatureHelp` — 활성 파라미터 추적은 별도) · 펜스 syntax 색 · 링크 이동·액션(quick fix·View Problem) · 진단의 related information · 메시지 둘째 줄 이후(clangd 의 note 나열 — 첫 줄이 요지다) · 호버 안 포커스/키보드 스크롤 · `hidingDelay`(포인터가 낱말과 상자 사이 틈을 지나는 유예 — 상자가 한 줄 아래에 붙어 있어 틈이 없다) · 비교 뷰 | §8.3 「링크 이동은 팝업이 감당할 상호작용이 아니다」 |
 
 **구현이 계약에 되먹인 것(2026-09-17).** ① 포인터 아래의 글자는 **클릭의 caret 반올림과 다르다** — `byteAtPoint` 는 셀 중점에서 다음
 경계로 반올림하므로(caret 은 글자 *사이*) 셀 오른쪽 절반에서 다음 글자가 잡혔다(HOVB1 실측 1 → 2). `content.clusterAtPoint` /
@@ -472,8 +472,15 @@ padding 만큼 둔다(`popup_box.gap_px`); sticky·휠 판정도 **보이는** r
 판정자를 세우다 잡은 것: 같은 픽셀로 돌아온 포인터는 「안 움직였다」라 판정이 안 선다 — 실제 포인터는 딴 데를 지나 돌아오므로 판정자가
 한 픽셀 옮긴다(제품 결함 아님).
 
+**적대적 검증 — 진단 줄 모양(2026-09-17, 1~4회차 · 변이 15)**: 1회차 code 파싱 4 → 생존 1 · 2회차 줄 조합 8 → 2 · 3회차 경계 3 → 2 · 4회차 재실행 5 → 1(선언한 등가).
+- **A2** code 저장소를 미리 안 잡음 — 작은 픽스처에선 재할당이 안 나 못 갈랐다. 진단 50 개·code 100 byte 로 재할당을 내고 **모든 슬라이스가 지금
+  저장소 안을 가리키는지 주소로** 잰다(`LSP3` — 읽지 않고 주소로: 해제된 메모리를 읽는 판정은 우연히 초록일 수 있다).
+- **B6** severity 순 · **B8** 첫 줄만 · **C1** 반열림 끝 — 같은 자리를 덮는 진단이 하나뿐이었다. 가짜 서버 `INFO`(첫 줄 0..1, 두 줄 message)로
+  offset 0 은 error → info, offset 1 은 error 만(`HOVB1` ⑾).
+- **C2** 코드만 있을 때 괄호 — 오늘 닿을 수 없다(`.lsp` 는 서버 이름이 늘 있고 `.lint` 는 아직 없다). 등가로 적고 코드 주석에 남겼다.
+
 **관측점**: `HVT*`(순수: 마크다운 축소 — 펜스·인라인 기호·목록·표·`MarkedString`) · `HL20`(순수: `clusterAtPoint`) · `HOVX*`(chrome: 크기 상한·
-스크롤·padding 간격·뒤집기·view) · `LSJ5`(순수: hover 요청 id·응답 대조·`contents` 세 모양) ·
+스크롤·padding 간격·뒤집기·view) · `LSP3`(순수: code 저장소) · `LSJ5`(순수: hover 요청 id·응답 대조·`contents` 세 모양) ·
 `HOVB*`(제품 경계: 가짜 서버가 `textDocument/hover` 에 답한다 — 포인터 정지 → 지연 → 요청 → 응답 → 상자(줄 내용·자리) · 낱말 밖으로 나가면 닫힘 ·
 키·스크롤·편집으로 닫힘 · 서버 없이 구문 오류만으로 열림 · `show_hover` 가 caret 에서 연다 · 낡은 응답은 버린다 · 끄면 포인터로 안 열린다).
 

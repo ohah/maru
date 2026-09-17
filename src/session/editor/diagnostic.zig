@@ -30,6 +30,8 @@ pub const Diagnostic = struct {
     source: Source = .syntax,
     /// 정적 문자열 또는 출처가 소유하는 메모리 — 이 모듈은 소유하지 않는다.
     message: []const u8 = "",
+    /// 출처의 코드(LSP `Diagnostic.code` — 문자열이든 정수든 글자로). 호버 박스가 `출처(코드)` 로 낸다(tooling §8.2b). 없으면 빈 문자열.
+    code: []const u8 = "",
 };
 
 /// `start` 오름차순, 같으면 severity 높은 것이 앞(줄 접기가 첫 항목을 그대로 쓸 수 있게).

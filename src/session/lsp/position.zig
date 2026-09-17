@@ -106,6 +106,7 @@ pub fn appendDiagnostics(
             .string => |m| m.len,
             else => 0,
         };
+        total += codeLen(d.get("code"));
     }
     try messages.ensureTotalCapacity(allocator, messages.items.len + total);
     var n: usize = 0;
@@ -139,16 +140,44 @@ pub fn appendDiagnostics(
         };
         const msg_start = messages.items.len;
         try messages.appendSlice(allocator, msg);
+        // `code` 도 같은 저장소에 — 문자열은 그대로, 정수는 글자로(§8.2a 「진단 합치기」).
+        const code_start = messages.items.len;
+        try appendCode(allocator, messages, d.get("code"));
+        const code_end = messages.items.len;
         try out.append(allocator, .{
             .start = start,
             .end = end,
             .severity = severityOf(d.get("severity")),
             .source = .lsp,
             .message = messages.items[msg_start .. msg_start + msg.len], // 위에서 잡아 둔 저장소 안 — 이 배치 동안 안 옮겨진다
+            .code = messages.items[code_start..code_end],
         });
         n += 1;
     }
     return n;
+}
+
+/// `code` 가 차지할 글자 수(저장소를 미리 잡으려고). 정수는 최대 20 자리.
+fn codeLen(v: ?std.json.Value) usize {
+    const x = v orelse return 0;
+    return switch (x) {
+        .string => |c| c.len,
+        .integer => 20,
+        else => 0,
+    };
+}
+
+fn appendCode(allocator: std.mem.Allocator, messages: *std.ArrayList(u8), v: ?std.json.Value) error{OutOfMemory}!void {
+    const x = v orelse return;
+    switch (x) {
+        .string => |c| try messages.appendSlice(allocator, c),
+        .integer => |n| {
+            var buf: [24]u8 = undefined;
+            const t = std.fmt.bufPrint(&buf, "{d}", .{n}) catch return;
+            try messages.appendSlice(allocator, t);
+        },
+        else => {},
+    }
 }
 
 // ── 판정 ────────────────────────────────────────────────────────────────────────
@@ -173,6 +202,40 @@ test "LSP1 character → byte: utf-8 은 그대로, utf-16 은 한글 1 unit=3 b
     try testing.expectEqual(@as(u32, 9), characterOf(line, 50, .utf8));
 }
 
+test "LSP3 저장소를 message + code 만큼 먼저 잡는다 — 코드가 커서 재할당이 나면 앞 항목의 슬라이스가 허공을 본다 (변이 A2)" {
+    const a = testing.allocator;
+    const content = "int x;\n";
+    var idx = try line_index.build(a, content);
+    defer idx.deinit();
+    // 진단 50개: message 1 byte, code 100 byte — code 를 셈에 안 넣으면 첫 code 에서 저장소가 자란다.
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(a);
+    try text.appendSlice(a, "{\"uri\":\"file:///a.c\",\"diagnostics\":[");
+    var i: usize = 0;
+    while (i < 50) : (i += 1) {
+        if (i > 0) try text.append(a, ',');
+        try text.appendSlice(a, "{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":1}},\"message\":\"m\",\"code\":\"");
+        try text.appendNTimes(a, 'c', 100);
+        try text.appendSlice(a, "\"}");
+    }
+    try text.appendSlice(a, "]}");
+    var p = try std.json.parseFromSlice(std.json.Value, a, text.items, .{});
+    defer p.deinit();
+    var out: std.ArrayList(diagnostic.Diagnostic) = .empty;
+    defer out.deinit(a);
+    var msgs: std.ArrayList(u8) = .empty;
+    defer msgs.deinit(a);
+    try testing.expectEqual(@as(usize, 50), try appendDiagnostics(a, p.value, content, idx, .utf8, &out, &msgs));
+    // **모든 슬라이스가 지금 저장소 안을 가리킨다** — 재할당이 있었으면 앞 항목이 옛 버퍼를 가리킨다(읽지 않고 주소로 잰다).
+    const lo = @intFromPtr(msgs.items.ptr);
+    const hi = lo + msgs.items.len;
+    for (out.items) |d| {
+        try testing.expect(@intFromPtr(d.message.ptr) >= lo and @intFromPtr(d.message.ptr) + d.message.len <= hi);
+        try testing.expect(@intFromPtr(d.code.ptr) >= lo and @intFromPtr(d.code.ptr) + d.code.len <= hi);
+        try testing.expectEqual(@as(usize, 100), d.code.len);
+    }
+}
+
 test "LSP2 publishDiagnostics → 목록: 범위·severity·메시지 복사·폭 0 은 1 byte·줄 밖은 문서 끝 (§8.2a)" {
     const a = testing.allocator;
     const content = "int x;\nint 가 = 1;\n";
@@ -180,8 +243,8 @@ test "LSP2 publishDiagnostics → 목록: 범위·severity·메시지 복사·�
     defer idx.deinit();
     const text =
         \\{"uri":"file:///a.c","version":7,"diagnostics":[
-        \\ {"range":{"start":{"line":1,"character":4},"end":{"line":1,"character":5}},"severity":2,"message":"warn here"},
-        \\ {"range":{"start":{"line":0,"character":4},"end":{"line":0,"character":4}},"message":"zero width"},
+        \\ {"range":{"start":{"line":1,"character":4},"end":{"line":1,"character":5}},"severity":2,"message":"warn here","code":"W1"},
+        \\ {"range":{"start":{"line":0,"character":4},"end":{"line":0,"character":4}},"message":"zero width","code":42},
         \\ {"range":{"start":{"line":9,"character":0},"end":{"line":9,"character":3}},"severity":4,"message":"beyond"},
         \\ "not an object",
         \\ {"nope":1}
@@ -201,6 +264,10 @@ test "LSP2 publishDiagnostics → 목록: 범위·severity·메시지 복사·�
     try testing.expectEqual(diagnostic.Severity.warning, out.items[0].severity);
     try testing.expectEqual(diagnostic.Source.lsp, out.items[0].source);
     try testing.expectEqualStrings("warn here", out.items[0].message);
+    // code — 문자열은 그대로, 정수는 글자로, 없으면 빈 문자열(§8.2a 「진단 합치기」 — 호버가 `출처(코드)` 로 낸다).
+    try testing.expectEqualStrings("W1", out.items[0].code);
+    try testing.expectEqualStrings("42", out.items[1].code);
+    try testing.expectEqualStrings("", out.items[2].code);
     // 폭 0 → 1 byte, severity 없음 → error
     try testing.expectEqual(@as(u32, 4), out.items[1].start);
     try testing.expectEqual(@as(u32, 5), out.items[1].end);
@@ -211,7 +278,7 @@ test "LSP2 publishDiagnostics → 목록: 범위·severity·메시지 복사·�
     try testing.expectEqualStrings("beyond", out.items[2].message);
     // 세 메시지가 한 저장소에 이어 있고 첫 슬라이스가 여전히 유효하다(저장소를 먼저 잡았다).
     try testing.expectEqualStrings("warn here", out.items[0].message);
-    try testing.expectEqual(@as(usize, "warn here".len + "zero width".len + "beyond".len), msgs.items.len);
+    try testing.expectEqual(@as(usize, "warn here".len + "W1".len + "zero width".len + "42".len + "beyond".len), msgs.items.len); // 저장소 = message + code
     // 배열이 아니면 0.
     var q = try std.json.parseFromSlice(std.json.Value, a, "{\"diagnostics\":5}", .{});
     defer q.deinit();

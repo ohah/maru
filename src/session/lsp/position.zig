@@ -29,6 +29,26 @@ pub fn byteInLine(line_text: []const u8, character: u32, enc: rpc.PositionEncodi
     }
 }
 
+/// 줄 안 byte → `character`(서버 인코딩 단위) — `byteInLine` 의 역. hover 요청의 위치가 쓴다(§8.2b).
+pub fn characterOf(line_text: []const u8, byte: u32, enc: rpc.PositionEncoding) u32 {
+    const b: usize = @min(byte, line_text.len);
+    switch (enc) {
+        .utf8 => return @intCast(b),
+        .utf16 => {
+            var units: u32 = 0;
+            var i: usize = 0;
+            while (i < b) {
+                const len = std.unicode.utf8ByteSequenceLength(line_text[i]) catch 1;
+                const end = @min(i + len, line_text.len);
+                const cp = std.unicode.utf8Decode(line_text[i..end]) catch 0xFFFD;
+                units += if (cp >= 0x10000) 2 else 1;
+                i = end;
+            }
+            return units;
+        },
+    }
+}
+
 /// `{line, character}` → 문서 byte. 줄이 문서 밖이면 문서 끝.
 pub fn offsetOf(content: []const u8, lines: LineIndex, line: u32, character: u32, enc: rpc.PositionEncoding) u32 {
     const ln = lines.line(line) orelse return @intCast(content.len);
@@ -145,6 +165,12 @@ test "LSP1 character → byte: utf-8 은 그대로, utf-16 은 한글 1 unit=3 b
     try testing.expectEqual(@as(u32, 9), byteInLine(line, 50, .utf16)); // 줄 끝으로 묶는다
     try testing.expectEqual(@as(u32, 4), byteInLine(line, 4, .utf8));
     try testing.expectEqual(@as(u32, 9), byteInLine(line, 50, .utf8));
+    // 역방향(§8.2b hover 위치) — 왕복이 맞고, 줄 밖은 줄 끝.
+    try testing.expectEqual(@as(u32, 2), characterOf(line, 4, .utf16));
+    try testing.expectEqual(@as(u32, 4), characterOf(line, 8, .utf16));
+    try testing.expectEqual(@as(u32, 5), characterOf(line, 50, .utf16));
+    try testing.expectEqual(@as(u32, 8), characterOf(line, 8, .utf8));
+    try testing.expectEqual(@as(u32, 9), characterOf(line, 50, .utf8));
 }
 
 test "LSP2 publishDiagnostics → 목록: 범위·severity·메시지 복사·폭 0 은 1 byte·줄 밖은 문서 끝 (§8.2a)" {

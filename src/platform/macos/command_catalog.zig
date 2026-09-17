@@ -105,6 +105,7 @@ pub const entries = [_]Entry{
     .{ .action = .prev_conflict, .key = "prev_conflict", .title = "Editor: Go to Previous Conflict" },
     .{ .action = .next_diagnostic, .key = "next_diagnostic", .title = "Editor: Go to Next Problem" },
     .{ .action = .prev_diagnostic, .key = "prev_diagnostic", .title = "Editor: Go to Previous Problem" },
+    .{ .action = .show_hover, .key = "show_hover", .title = "Editor: Show Hover" },
     .{ .action = .copy_editor_selection, .key = "copy_editor_selection", .title = "Editor: Copy Selection" },
     .{ .action = .add_next_occurrence, .key = "add_next_occurrence", .title = "Editor: Add Next Occurrence" },
     .{ .action = .jump_to_bracket, .key = "jump_to_bracket", .title = "Editor: Go to Bracket" },

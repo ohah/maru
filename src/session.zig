@@ -170,6 +170,8 @@ pub const editor = struct {
     pub const fold = @import("session/editor/fold.zig");
     /// 진단 층의 순수 규칙(§5·§5.4) — 범위→줄 접기·밑줄 조각·다음/이전. 출처(트리 오류·LSP)는 밖에서 목록을 채운다.
     pub const diagnostic = @import("session/editor/diagnostic.zig");
+    /// 호버 박스의 마크다운 축소(native-editor-ui §8.3 · tooling §8.2b) — 순수.
+    pub const hover_text = @import("session/editor/hover_text.zig");
     /// LSP seam 1단의 순수 부분(docs/editor-surface-tooling.md §8.2a): 프레임·JSON-RPC·위치/진단·서버 표·신뢰 파일.
     pub const lsp = struct {
         pub const framing = @import("session/lsp/framing.zig");

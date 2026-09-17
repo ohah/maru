@@ -155,6 +155,9 @@ pub const Action = union(enum) {
     /// 다음/이전 진단(visual-mapping §5.4 — VS Code `F8`/`⇧F8`). 진단이 없으면 무동작.
     next_diagnostic,
     prev_diagnostic,
+    /// caret 자리의 호버 박스(tooling §8.2b — 진단 메시지 + 언어 서버 hover). **기본 chord 가 없다** — VS Code 의 `⌘K ⌘I` 는
+    /// 두 단계 chord 라 키 계약에 없다. `editor.hover` 를 꺼도 이 명령은 남는다.
+    show_hover,
     // 활성 편집기의 들여쓰기 접힘을 전부 접는다/펼친다(visual-mapping §4.1f). **기본 chord가 없다** —
     // VSCode의 `⌘K ⌘0`/`⌘K ⌘J`는 두 벌 chord라 키 계약에 그 개념이 없고, 랩 토글과 같은 이유로
     // 편집기 Term 컨텍스트가 아직 없어 조건부로 양보할 자리도 없다(N2의 몫). 그때까지는 커맨드
@@ -295,6 +298,7 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "prev_conflict")) return .prev_conflict;
     if (std.mem.eql(u8, value, "next_diagnostic")) return .next_diagnostic;
     if (std.mem.eql(u8, value, "prev_diagnostic")) return .prev_diagnostic;
+    if (std.mem.eql(u8, value, "show_hover")) return .show_hover;
     if (std.mem.eql(u8, value, "copy_editor_selection")) return .copy_editor_selection;
     if (std.mem.eql(u8, value, "add_next_occurrence")) return .add_next_occurrence;
     if (std.mem.eql(u8, value, "jump_to_bracket")) return .jump_to_bracket;

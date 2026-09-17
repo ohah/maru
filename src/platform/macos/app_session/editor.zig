@@ -81,6 +81,8 @@ fn contentHash(bytes: []const u8) u64 {
 pub const syntax_color = @import("editor_syntax.zig");
 pub const diagnostics = @import("editor_diagnostics.zig");
 pub const lsp_client = @import("editor_lsp.zig");
+/// 호버 박스(tooling §8.2b) — 진단 메시지 + 언어 서버 hover.
+pub const hover_client = @import("editor_hover.zig");
 
 pub const Opened = struct {
     /// 열린 문서. **읽어 온 bytes를 빌리지 않고 소유한다**(N2 — `edit_doc.EditableFile`).
@@ -998,6 +1000,11 @@ fn insideRect(rect: chrome_draw.Rect, x_px: f64, y_px: f64) bool {
 }
 
 pub fn hitTestBody(term: *Term, x_px: f64, y_px: f64) ?usize {
+    return hitTestBodyMode(.caret, term, x_px, y_px);
+}
+
+/// `hitTestBody` 의 뜻 고르기 — `.cluster` 는 포인터 아래의 **글자** offset(호버, tooling §8.2b). caret 반올림이 없다.
+pub fn hitTestBodyMode(comptime mode: chrome_editor.content.PointMode, term: *Term, x_px: f64, y_px: f64) ?usize {
     if (term.kind != .editor) return null;
     if (term.rt.editor_diff != null) return null; // 비교 뷰는 범위 밖
     // **병합 모드에서는 Result pane 만 입력을 받는다**(계약 §5 S3b-2). 이 가드가 없으면 Base pane 을
@@ -1017,7 +1024,8 @@ pub fn hitTestBody(term: *Term, x_px: f64, y_px: f64) ?usize {
     // **이 함수가 남기는 것은 두 가지뿐이다**: ⒜ 굳힌 값을 모아 넘기고 ⒝ 줄 안 byte 를 **문서
     // offset** 으로 바꾼다. ⒝ 는 문서 모델(session)을 알아야 해서 chrome 이 못 한다.
     const geom = term.rt.editor_hit_geom;
-    const p = chrome_editor.hit.bodyPoint(
+    const p = chrome_editor.hit.bodyPointMode(
+        mode,
         .{
             .body_x = geom.body_x,
             .body_y = geom.body_y,
@@ -11470,6 +11478,306 @@ test "LSPB2 서버가 없으면 상태바가 「설치」이고 누르면 새 �
     lsp_client.pump(fx.session);
     try testing.expect(fx.session.pending_confirm == .none);
     fx.session.loaded_config.config.lsp.enabled = true;
+}
+
+/// 포인터 픽셀 — 그 offset 의 글자 셀 **가운데**(hover 판정자용). 그 줄이 안 그려졌으면 `null`.
+fn pointerAtOffset(term: *Term, offset: usize) ?struct { x: f64, y: f64 } {
+    const rows_len = term.rt.editor_hit_rows_len;
+    if (rows_len == 0) return null;
+    const doc = term.rt.editor_doc orelse return null;
+    const geom = term.rt.editor_hit_geom;
+    const line_idx = doc.file.lines.lineAt(offset);
+    const line = doc.file.lines.line(line_idx) orelse return null;
+    const a = chrome_editor.hit.bodyAnchor(
+        .{ .body_x = geom.body_x, .body_y = geom.body_y, .content_left_px = geom.content_left_px, .content_width = geom.content_width, .cell_w_px = geom.cell_w_px, .cell_h_px = geom.cell_h_px, .tab_width = geom.tab_width },
+        term.rt.editor_hit_rows[0..rows_len],
+        term.rt.editor_hit_lines[0..rows_len],
+        term.rt.editor_lines,
+        line_idx,
+        offset -| line.start,
+    ) orelse return null;
+    return .{ .x = @as(f64, @floatFromInt(a.x_px)) + @as(f64, @floatFromInt(geom.cell_w_px)) / 2, .y = @as(f64, @floatFromInt(a.y_px)) + @as(f64, @floatFromInt(geom.cell_h_px)) / 2 };
+}
+
+/// tick 을 돌려(LSP pump + hover tick — 제품 tick 이 부르는 둘) 조건을 기다린다. 최대 `max_ms`.
+fn pumpHoverUntil(fx: *PaneFixture, max_ms: u64, ctx: anytype, comptime pred: fn (@TypeOf(ctx)) bool) bool {
+    const start = fx.session.awakeMs();
+    while (fx.session.awakeMs() - start < max_ms) {
+        lsp_client.pump(fx.session);
+        hover_client.tick(fx.session);
+        if (pred(ctx)) return true;
+        _ = usleep(2_000);
+    }
+    lsp_client.pump(fx.session);
+    hover_client.tick(fx.session);
+    return pred(ctx);
+}
+
+test "HOVB1 호버 박스 — 포인터가 낱말에 머물면 지연 뒤 요청 → 응답 → 진단 문장 + 서버 마크다운이 낱말 아래 상자로; 낱말 안은 남고 밖은 닫힘; 상자 안 휠은 스크롤; 키·편집이 닫는다; 낡은 응답은 버린다 (제품 경계, §8.2b)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
+    var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const fz = try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake});
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);
+    defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const cz = try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root});
+    _ = setenv("MARU_CONFIG", cz.ptr, 1);
+    defer _ = unsetenv("MARU_CONFIG");
+    if (fx.session.config_path_buffer) |b| allocator.free(b);
+    fx.session.config_path_buffer = null;
+    fx.session.editor_lsp.auto_trust_answer = .allow; // 하니스 — 모달 없이 허용
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "h.c", .data = "int x;\nint y;\n" });
+    const path = try std.fs.path.join(allocator, &.{ root, "h.c" });
+    defer allocator.free(path);
+    const saved_repo = fx.session.git_repo;
+    fx.session.git_repo = @constCast(root);
+    defer fx.session.git_repo = saved_repo;
+    const term = try openPathInActivePane(fx.session, path);
+    fx.session.surface_initialized = true;
+    fx.session.backing_width_px = 1200;
+    fx.session.backing_height_px = 800;
+    const leaf = activeLeafRectForTest(fx.session) orelse return error.SkipZigTest;
+    const Ctx = struct { fx: *PaneFixture, term: *Term };
+    const ctx: Ctx = .{ .fx = &fx, .term = term };
+    // 서버가 뜨고 첫 진단("fake: 1" — 0..3 = `int`)이 온다.
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
+        fn f(c: Ctx) bool {
+            return c.term.rt.editor_diagnostics.lsp.items.len >= 1;
+        }
+    }.f));
+    // 프레임을 그려 히트 기하를 굳힌다(포인터 → offset 은 렌더가 굳힌 행 배열에서만 나온다).
+    const drawFrame = struct {
+        fn f(s: *AppSession, l: maru.session.SplitRect, t: *Term) !void {
+            var d = appendPaneFrame(s, l, t) orelse return error.EditorPaneDidNotDraw;
+            d.dl.deinit(testing.allocator);
+        }
+    }.f;
+    try drawFrame(fx.session, leaf, term);
+
+    // ⑴ 포인터를 `int` 의 두 번째 글자(offset 1)에 두고 **머문다** → 지연(300ms) 뒤 요청 하나 → 응답 → 상자.
+    const p1 = pointerAtOffset(term, 1) orelse return error.NoPointer;
+    _ = fx.session.hoverCursor(p1.x, p1.y, 0); // 제품 진입점 — 버튼 없는 이동
+    try testing.expect(!fx.session.chrome_host.hover_box.open);
+    try testing.expect(pumpHoverUntil(&fx, 3000, ctx, struct {
+        fn f(c: Ctx) bool {
+            return c.fx.session.chrome_host.hover_box.open;
+        }
+    }.f));
+    try testing.expectEqual(@as(u64, 1), fx.session.editor_lsp.sent_hovers);
+    try testing.expect(fx.session.awakeMs() - fx.session.editor_hover.pointer_moved_ms >= fx.session.loaded_config.config.editor.hover_delay); // 지연을 지켰다
+    {
+        const lines = hover_client.lines(fx.session);
+        try testing.expect(lines.len >= 5);
+        // ① 진단: 글리프 + message + 출처, severity 색.
+        try testing.expectEqualStrings("✖ fake: 1  [clangd]", lines[0].text);
+        try testing.expectEqual(maru.chrome.tokens.ColorRole.diagnostic_error, lines[0].role);
+        try testing.expectEqualStrings("", lines[1].text); // 사이 빈 줄
+        // ② 서버: 펜스 안 그대로, 위치가 utf-8 로 갔다(L0:C1), 굵게 기호는 지워졌다.
+        try testing.expectEqualStrings("int fake", lines[2].text);
+        try testing.expectEqualStrings("fake hover L0:C1", lines[3].text);
+        try testing.expectEqualStrings("bold here", lines[4].text);
+        try testing.expectEqualStrings("• item 1", lines[5].text);
+        try testing.expectEqual(@as(usize, 5 + 14), lines.len);
+    }
+    // 앵커는 서버 range(character 1..4)가 아니라 — offset 1 을 덮으니 그것이 낱말이다 — 그 시작(offset 1)의 셀, 상자는 그 아래.
+    {
+        const a1 = pointerAtOffset(term, 1).?;
+        try testing.expectEqual(@as(i32, @intFromFloat(a1.x - @as(f64, @floatFromInt(term.rt.editor_hit_geom.cell_w_px)) / 2)), fx.session.chrome_host.hover_box.anchor_x);
+        // 상자 rect 는 **제품이 그리는 props** 로 잰다(모달 padding 이 간격을 정한다 — 캡처 실측으로 낱말 줄을 가렸던 자리).
+        const props = fx.session.buildChromeProps();
+        const rect = maru.chrome.components.hover_box.boxRect(&fx.session.chrome_host.hover_box, hover_client.lines(fx.session), props).?;
+        try testing.expectEqual(fx.session.chrome_host.hover_box.anchor_y + @as(i32, @intCast(term.rt.editor_hit_geom.cell_h_px)) + @as(i32, props.shape.modal_padding_px), rect.y);
+        try testing.expect(props.shape.modal_padding_px > 0); // 전제: 제품 토큰이 padding 을 준다 — 0 이면 위 단언이 간격을 안 잰다
+        try testing.expectEqual(@as(u32, maru.chrome.components.hover_box.max_rows * fx.session.cell_height_px), rect.h); // 19줄 → 12행 상한
+        // 프레임이 오버레이를 낸다(제품이 묻는 그 질문).
+        try testing.expect(fx.session.overlayFrameNeeded());
+        // ⑵ 상자 **안** 휠은 스크롤하고 삼킨다.
+        const inside_x: f64 = @floatFromInt(rect.x + 2);
+        const inside_y: f64 = @floatFromInt(rect.y + 2);
+        fx.session.scrollWheel(-3, 0, false, inside_x, inside_y);
+        try testing.expect(fx.session.chrome_host.hover_box.open);
+        try testing.expectEqual(@as(u32, 1), fx.session.chrome_host.hover_box.scroll_rows);
+        // 상자 안 이동은 남는다(sticky).
+        _ = fx.session.hoverCursor(inside_x + 1, inside_y + 1, 0);
+        try testing.expect(fx.session.chrome_host.hover_box.open);
+    }
+    // ⑶ 낱말 안(offset 2)으로 옮기면 남고, 낱말 밖(`x`, offset 4)으로 옮기면 닫힌다.
+    const p2 = pointerAtOffset(term, 2).?;
+    _ = fx.session.hoverCursor(p2.x, p2.y, 0);
+    try testing.expect(fx.session.chrome_host.hover_box.open);
+    const p4 = pointerAtOffset(term, 4).?;
+    _ = fx.session.hoverCursor(p4.x, p4.y, 0);
+    try testing.expect(!fx.session.chrome_host.hover_box.open);
+    try testing.expect(!fx.session.overlayFrameNeeded());
+    // ⑷ `x` 에 머물면 다시 열린다 — 진단이 없는 자리라 서버 줄만(첫 줄이 펜스).
+    try testing.expect(pumpHoverUntil(&fx, 3000, ctx, struct {
+        fn f(c: Ctx) bool {
+            return c.fx.session.chrome_host.hover_box.open;
+        }
+    }.f));
+    try testing.expectEqual(@as(u64, 2), fx.session.editor_lsp.sent_hovers);
+    try testing.expectEqualStrings("int fake", hover_client.lines(fx.session)[0].text);
+    try testing.expectEqualStrings("fake hover L0:C4", hover_client.lines(fx.session)[1].text);
+    // ⑸ 키가 오면 닫힌다(소비하지 않는다 — caret 이 움직였다).
+    term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };
+    const focus_before = term.rt.editor_selection.?.focus;
+    try pressKey(&fx, .arrow_right, .{});
+    try testing.expect(!fx.session.chrome_host.hover_box.open);
+    try testing.expect(term.rt.editor_selection.?.focus != focus_before);
+    // ⑹ 같은 자리에 그대로 있어도 다시 열지 않는다(정지 하나에 판정 하나) — 움직여야 다음 판정이다.
+    try testing.expect(!pumpHoverUntil(&fx, 500, ctx, struct {
+        fn f(c: Ctx) bool {
+            return c.fx.session.chrome_host.hover_box.open;
+        }
+    }.f));
+    _ = fx.session.hoverCursor(p4.x + 1, p4.y, 0);
+    try testing.expect(pumpHoverUntil(&fx, 3000, ctx, struct {
+        fn f(c: Ctx) bool {
+            return c.fx.session.chrome_host.hover_box.open;
+        }
+    }.f));
+    // ⑺ 편집하면 다음 프레임에 닫힌다(revision) — `refresh` 가 프레임마다 묻는다.
+    try testing.expect(insertText(fx.session, term, "z"));
+    try testing.expect(!hover_client.refresh(fx.session));
+    try testing.expect(!fx.session.chrome_host.hover_box.open);
+    // ⑻ 낡은 응답은 버린다 — 기다리는 seq 가 아니면 열지 않는다; 그 뒤 진짜 응답이 연다.
+    try drawFrame(fx.session, leaf, term);
+    const p1b = pointerAtOffset(term, 1).?;
+    _ = fx.session.hoverCursor(p1b.x, p1b.y, 0);
+    try testing.expect(pumpHoverUntil(&fx, 3000, ctx, struct {
+        fn f(c: Ctx) bool {
+            return c.fx.session.editor_hover.waiting or c.fx.session.chrome_host.hover_box.open;
+        }
+    }.f));
+    if (fx.session.editor_hover.waiting) {
+        const want = fx.session.editor_hover.waiting_seq;
+        hover_client.onHoverResponse(fx.session, want -% 1, "stale", null, .utf8);
+        try testing.expect(fx.session.editor_hover.waiting and !fx.session.chrome_host.hover_box.open);
+    }
+    try testing.expect(pumpHoverUntil(&fx, 3000, ctx, struct {
+        fn f(c: Ctx) bool {
+            return c.fx.session.chrome_host.hover_box.open;
+        }
+    }.f));
+    try testing.expect(std.mem.indexOf(u8, hover_client.lines(fx.session)[0].text, "fake") != null);
+    // ⑼ 상자 밖 클릭은 닫고 흘려보낸다.
+    try testing.expect(!hover_client.mouseDown(fx.session, 5, 5));
+    try testing.expect(!fx.session.chrome_host.hover_box.open);
+}
+
+test "HOVB2 호버 박스 — 서버 없이 구문 오류만으로 열린다(i18n 문장); `show_hover` 는 caret 자리에서 연다(끄도 온다); 끄면 포인터로는 안 열린다; 글자 없는 자리는 안 연다 (제품 경계, §8.2b)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", "/nonexistent-dir-for-lsp-test/zls", 1);
+    defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    // `fn f(` — 닫는 괄호가 없어 MISSING 이 선다. 뒤 줄은 멀쩡하다.
+    try dir.dir.writeFile(testing.io, .{ .sub_path = "e.zig", .data = "fn f( void {}\nconst ok = 1;\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(testing.io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "e.zig" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+    fx.session.surface_initialized = true;
+    fx.session.backing_width_px = 1200;
+    fx.session.backing_height_px = 800;
+    const leaf = activeLeafRectForTest(fx.session) orelse return error.SkipZigTest;
+    {
+        var d = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+        d.dl.deinit(allocator);
+    }
+    try testing.expect(term.rt.editor_diagnostics.list.items.len >= 1);
+    const first = term.rt.editor_diagnostics.list.items[0];
+    try testing.expectEqual(maru.session.editor.diagnostic.Source.syntax, first.source);
+    const Ctx = struct { fx: *PaneFixture };
+    const ctx: Ctx = .{ .fx = &fx };
+    // ⑴ 진단 자리에 머물면 서버 없이도 열린다 — 문장은 i18n(「빠짐: ‹토큰›」 또는 「구문 오류」).
+    const pd = pointerAtOffset(term, first.start) orelse return error.NoPointer;
+    _ = fx.session.hoverCursor(pd.x, pd.y, 0);
+    try testing.expect(pumpHoverUntil(&fx, 3000, ctx, struct {
+        fn f(c: Ctx) bool {
+            return c.fx.session.chrome_host.hover_box.open;
+        }
+    }.f));
+    try testing.expectEqual(@as(u64, 0), fx.session.editor_lsp.sent_hovers);
+    {
+        const lines = hover_client.lines(fx.session);
+        try testing.expectEqual(@as(usize, 1), lines.len);
+        var want_buf: [256]u8 = undefined;
+        const want: []const u8 = if (first.message.len > 0)
+            maru.i18n.format(&want_buf, maru.i18n.t(.diag_missing), &.{.{ .s = first.message }})
+        else
+            maru.i18n.t(.diag_syntax_error);
+        const glyph = "✖ ";
+        try testing.expect(std.mem.startsWith(u8, lines[0].text, glyph));
+        try testing.expectEqualStrings(want, lines[0].text[glyph.len..]);
+        try testing.expect(std.mem.indexOf(u8, lines[0].text, "[") == null); // 서버 출처 꼬리표는 없다
+    }
+    hover_client.hide(fx.session);
+    // ⑵ 글자 없는 자리(둘째 줄 끝 뒤)는 안 연다 — 진단도 없는 자리(`ok`)도 안 연다(서버가 없다).
+    const line2 = term.rt.editor_doc.?.file.lines.line(1).?;
+    const pe = pointerAtOffset(term, line2.contentEnd()) orelse return error.NoPointer;
+    _ = fx.session.hoverCursor(pe.x + 300, pe.y, 0);
+    try testing.expect(!pumpHoverUntil(&fx, 600, ctx, struct {
+        fn f(c: Ctx) bool {
+            return c.fx.session.chrome_host.hover_box.open;
+        }
+    }.f));
+    // 진단이 덮지 않는 글자(둘째 줄에서 찾는다 — tree-sitter 의 복구 범위는 파일마다 달라 자리를 못 박지 않는다).
+    const uncovered: ?usize = blk: {
+        var o: usize = line2.start;
+        while (o < line2.contentEnd()) : (o += 1) {
+            const content = term.rt.editor_doc.?.file.content;
+            if (content[o] == ' ') continue;
+            var covered = false;
+            for (term.rt.editor_diagnostics.list.items) |d| {
+                if (o >= d.start and o < @max(d.end, d.start + 1)) covered = true;
+            }
+            if (!covered) break :blk o;
+        }
+        break :blk null;
+    };
+    if (uncovered) |o| {
+        const pok = pointerAtOffset(term, o).?;
+        _ = fx.session.hoverCursor(pok.x, pok.y, 0);
+        try testing.expect(!pumpHoverUntil(&fx, 600, ctx, struct {
+            fn f(c: Ctx) bool {
+                return c.fx.session.chrome_host.hover_box.open;
+            }
+        }.f));
+    }
+    // ⑶ `show_hover` 는 caret 자리에서 연다 — 끄도(editor.hover=false) 명령은 온다. 포인터 트리거는 꺼진다.
+    fx.session.loaded_config.config.editor.hover = false;
+    _ = fx.session.hoverCursor(pd.x, pd.y, 0);
+    try testing.expect(!pumpHoverUntil(&fx, 600, ctx, struct {
+        fn f(c: Ctx) bool {
+            return c.fx.session.chrome_host.hover_box.open;
+        }
+    }.f));
+    term.rt.editor_selection = .{ .anchor_start = first.start, .anchor_end = first.start, .focus = first.start };
+    fx.session.dispatchAppAction(.show_hover);
+    try testing.expect(fx.session.chrome_host.hover_box.open);
+    try testing.expectEqual(@as(usize, 1), hover_client.lines(fx.session).len);
+    // 다음 프레임에도 산다(앵커 갱신) — 그리고 `Esc` 는 닫는다(소비하지 않는다).
+    try testing.expect(hover_client.refresh(fx.session));
+    try pressKey(&fx, .escape, .{});
+    try testing.expect(!fx.session.chrome_host.hover_box.open);
+    // ⑷ caret 이 글자 없는 자리(문서 끝)면 명령도 안 연다.
+    const end = term.rt.editor_doc.?.file.content.len;
+    term.rt.editor_selection = .{ .anchor_start = end, .anchor_end = end, .focus = end };
+    fx.session.dispatchAppAction(.show_hover);
+    try testing.expect(!fx.session.chrome_host.hover_box.open);
+    fx.session.loaded_config.config.editor.hover = true;
 }
 
 test "MMP2 미니맵의 축은 보이는 줄이다 — 접으면 스트립에서도 사라지고, 클릭은 보이는 줄 축으로 환산된다 (제품 경계, §6.1·§6.2)" {

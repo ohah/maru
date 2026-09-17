@@ -11126,10 +11126,14 @@ extern "c" fn usleep(usec: c_uint) c_int;
 
 extern "c" fn getcwd(buf: [*]u8, size: usize) ?[*:0]u8;
 
-fn fakeLspAbs(buf: []u8) ?[]const u8 {
+/// 가짜 서버의 절대 경로. **없으면 에러지 skip 이 아니다** — 판정자를 돌리는 run 스텝이 설치 단계에 의존하지 않으면(CI 집계 스위트가
+/// 그랬다, PR #3788) 「없음」 상태로 조용히 지나가 프롬프트 판정이 헛돈다. 빌드 배선의 구멍은 여기서 빨갛게 보여야 한다.
+fn fakeLspAbs(buf: []u8) !?[]const u8 {
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd = getcwd(&cwd_buf, cwd_buf.len) orelse return null;
-    return std.fmt.bufPrint(buf, "{s}/{s}", .{ std.mem.span(cwd), fake_lsp_path }) catch null;
+    const path = std.fmt.bufPrint(buf, "{s}/{s}", .{ std.mem.span(cwd), fake_lsp_path }) catch return null;
+    std.Io.Dir.cwd().access(testing.io, path, .{}) catch return error.FakeLspNotInstalled;
+    return path;
 }
 
 /// 몇 tick 을 돌려 조건을 기다린다(서버는 다른 프로세스 — 응답이 다음 read 에 온다). 최대 `max_ms`.
@@ -11150,7 +11154,7 @@ test "LSPB1 LSP seam 1단 — 신뢰를 묻고 기억하며, 허용하면 서버
     var fx = try PaneFixture.init(allocator);
     defer fx.deinit(allocator);
     var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const fake = fakeLspAbs(&abs_buf) orelse return error.SkipZigTest;
+    const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
     // 가짜 서버를 끼운다(이름과 무관). 끝나면 뗀다.
     var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
     const fz = try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake});
@@ -11392,7 +11396,7 @@ test "LSPB2 서버가 없으면 상태바가 「설치」이고 누르면 새 �
     try testing.expect(install[install.len - 1] != '\n');
     // ⑶ 거부를 기억한다: 서버가 있는 척(가짜)하고 물으면 취소 → deny 가 파일에 남고 상태는 denied; 다시 묻기를 누르면 다시 묻는다.
     var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const fake = fakeLspAbs(&abs_buf) orelse return error.SkipZigTest;
+    const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
     var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
     const fz = try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake});
     _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);

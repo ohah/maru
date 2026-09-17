@@ -8928,6 +8928,9 @@ fn dropSelectionState(self: *AppSession, term: *Term) void {
     term.rt.editor_find_marks = &.{};
     term.rt.editor_find_mark_buf = &.{};
     term.rt.editor_diagnostics.deinit(self.allocator); // 진단 층(§5.4)도 같은 단위다
+    if (term.rt.editor_lsp_root) |r| self.allocator.free(r); // LSP root(§8.2a)
+    term.rt.editor_lsp_root = null;
+    term.rt.editor_lsp_version = 0;
     // **예약도 Term과 함께 사라진다.** `drawn` 필드 doc이 적은 규율("한 단위로 세우고 한 단위로
     // 지운다")의 예외를 그 규율을 적은 커밋이 만들어 두었다(적대적 검증 2026-08-24).
     term.rt.editor_find_reveal_pending = false;
@@ -11189,12 +11192,16 @@ test "LSPB1 LSP seam 1단 — 신뢰를 묻고 기억하며, 허용하면 서버
     } else return error.NoClient;
 
     // ⑵ **허용** → 기억(파일에 allow 줄) → 서버가 뜨고 initialize → ready → didOpen → publishDiagnostics 가 `.lsp` 로 선다.
+    fx.session.chrome_host.confirm.dismiss();
     fx.session.dispatchChromeAction(.confirm_accept);
     try testing.expect(fx.session.pending_confirm == .none);
     {
         const trust = try fx.dir.dir.readFileAlloc(testing.io, "lsp-trust", allocator, .limited(4096));
         defer allocator.free(trust);
-        try testing.expectEqual(@as(?maru.session.editor.lsp.trust.Decision, .allow), maru.session.editor.lsp.trust.lookup(trust, root));
+        // root 는 파일 트리 규칙(가장 가까운 `.git`) — 이 픽스처는 저장소 안의 tmp 라 저장소 root 가 그것이다.
+        const lsp_root = term.rt.editor_lsp_root orelse return error.NoRoot;
+        try testing.expect(maru.session.repo_path.underRoot(path, lsp_root));
+        try testing.expectEqual(@as(?maru.session.editor.lsp.trust.Decision, .allow), maru.session.editor.lsp.trust.lookup(trust, lsp_root));
     }
     const Ctx = struct { fx: *PaneFixture, term: *Term, cidx: usize };
     const ctx: Ctx = .{ .fx = &fx, .term = term, .cidx = cidx };
@@ -11327,18 +11334,20 @@ test "LSPB2 서버가 없으면 상태바가 「설치」이고 누르면 새 �
     _ = tab_ops.switchTab(fx.session, 0);
     lsp_client.pump(fx.session);
     try testing.expect(fx.session.pending_confirm == .lsp_trust);
+    fx.session.chrome_host.confirm.dismiss(); // 제품 경로: 컴포넌트가 먼저 닫고 액션을 보낸다
     fx.session.dispatchChromeAction(.confirm_cancel);
     try testing.expectEqual(lsp_client.Phase.denied, lsp_client.statusFor(fx.session, term).?.phase);
     {
         const trust = try fx.dir.dir.readFileAlloc(testing.io, "lsp-trust", allocator, .limited(4096));
         defer allocator.free(trust);
-        try testing.expectEqual(@as(?maru.session.editor.lsp.trust.Decision, .deny), maru.session.editor.lsp.trust.lookup(trust, root));
+        try testing.expectEqual(@as(?maru.session.editor.lsp.trust.Decision, .deny), maru.session.editor.lsp.trust.lookup(trust, term.rt.editor_lsp_root orelse return error.NoRoot));
     }
     lsp_client.pump(fx.session);
     try testing.expect(fx.session.pending_confirm == .none); // 거부는 기억된다 — 다시 안 묻는다
     lsp_client.activateStatus(fx.session); // 「다시 묻기」
     lsp_client.pump(fx.session);
     try testing.expect(fx.session.pending_confirm == .lsp_trust);
+    fx.session.chrome_host.confirm.dismiss(); // 제품 경로: 컴포넌트가 먼저 닫고 액션을 보낸다
     fx.session.dispatchChromeAction(.confirm_cancel);
     // ⑷ 끄면 상태도 클라이언트 동작도 없다.
     fx.session.loaded_config.config.lsp.enabled = false;

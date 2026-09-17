@@ -21,6 +21,7 @@ const pane_ops = @import("pane.zig");
 const tab_ops = @import("tab.zig");
 const input_ops = @import("input.zig");
 const term_ops = @import("term.zig");
+const file_tree_backend = @import("../file_tree_backend.zig");
 
 pub const Phase = enum {
     /// 실행 파일이 PATH 에 없다 — 상태바 「설치」.
@@ -117,11 +118,16 @@ pub const State = struct {
 // ── root·문서 ─────────────────────────────────────────────────────────────────
 
 /// 그 Term 의 문서가 속한 root(§8.2a). 파일 트리 root 가 없거나 문서가 그 밖이면 `null` — 서버를 안 띄운다.
-fn rootFor(self: *AppSession, term: *const Term) ?[]const u8 {
+fn rootFor(self: *AppSession, term: *Term) ?[]const u8 {
+    if (term.rt.editor_lsp_root) |r| return r;
     const path = termPath(term) orelse return null;
-    const root = self.git_repo orelse (self.file_tree.rootAt(0) orelse return null);
-    if (root.len == 0) return null;
-    if (!maru.session.repo_path.underRoot(path, root)) return null;
+    // 파일 트리와 **같은 규칙**(`projectRootForFile`): 가장 가까운 `.git` 의 디렉터리, 없으면 파일의 디렉터리. 한 번 정해 굳힌다.
+    const root = file_tree_backend.projectRootForFile(self.allocator, self.io, path) catch return null;
+    if (root.len == 0 or !maru.session.repo_path.underRoot(path, root)) {
+        self.allocator.free(root);
+        return null;
+    }
+    term.rt.editor_lsp_root = root;
     return root;
 }
 
@@ -222,7 +228,23 @@ fn appendSmallFile(path: []const u8, line: []const u8) void {
     }
 }
 
-/// 신뢰 모달의 답(`confirm_accept` / 취소) — `app_session` 의 pending_confirm 갈래가 부른다.
+/// 모달이 **답 없이** 닫혔다(다른 모달이 덮었다·앱이 끝난다) — 기억하지 않는다. 클라이언트는 다시 물을 수 있게 되돌린다.
+/// 캡처 하니스가 이것을 잡았다: 종료 경로의 `cancelPendingConfirm` 이 「거부」를 파일에 적어 다음 실행이 서버를 안 띄웠다.
+pub fn dismissTrustPrompt(self: *AppSession) void {
+    const st = &self.editor_lsp;
+    const root = st.asking_root orelse return;
+    defer {
+        self.allocator.free(root);
+        st.asking_root = null;
+    }
+    for (st.clients.items) |*c| {
+        if (!std.mem.eql(u8, c.root, root) or c.phase != .asking) continue;
+        c.phase = .restarting;
+        c.trust_pending = true; // 띄우지 않는다 — 다음 gate 가 다시 묻는다
+    }
+}
+
+/// 신뢰 모달의 답(`confirm_accept` / 사용자의 취소) — `app_session` 의 pending_confirm 갈래가 부른다.
 pub fn answerTrust(self: *AppSession, allow: bool) void {
     const st = &self.editor_lsp;
     const root = st.asking_root orelse return;
@@ -550,6 +572,9 @@ fn gateTrust(self: *AppSession, c: *Client) void {
             if (std.mem.eql(u8, asking, c.root)) c.phase = .asking; // 같은 root 의 다른 서버 — 그 모달이 답이다
             return; // 한 번에 하나
         }
+        // 다른 오버레이(알림 토스트·팔레트·설정)가 떠 있으면 **기다린다** — 지금 띄우면 그쪽이 우리 모달을 닫고(`showNotice` →
+        // `cancelPendingClose`) 다음 tick 에 또 띄워 깜빡인다(캡처 하니스에서 실측: 작업 공간 복원 알림과 겹쳤다).
+        if (self.anyOverlayOpen()) return;
         const owned = self.allocator.dupe(u8, c.root) catch return;
         self.editor_lsp.asking_root = owned;
         c.phase = .asking;
@@ -642,12 +667,14 @@ pub fn statusText(view: StatusView, buf: []u8) ?[]const u8 {
 pub const StatusView = struct { phase: Phase, exe: []const u8 };
 
 /// 활성 편집기 Term 의 서버 상태(상태바 항목 — §8.2a). 서버 이름표가 없거나 root 밖이면 `null`(항목 없음).
-pub fn statusFor(self: *AppSession, term: *const Term) ?StatusView {
+pub fn statusFor(self: *AppSession, term: *Term) ?StatusView {
     if (!self.loaded_config.config.lsp.enabled) return null;
     if (term.kind != .editor or term.rt.editor_doc == null or term.rt.editor_diff != null) return null;
     const server = lsp.servers.forGrammar(term.rt.editor_grammar) orelse return null;
     const root = rootFor(self, term) orelse return null;
     const c = clientFor(self, root, server) orelse return .{ .phase = .missing, .exe = server.exe };
+    // 답을 기다리는 동안(모달이 다른 오버레이 뒤에서 순서를 기다리거나 떠 있는 동안)은 「허락 대기」다 — 「다시 시작 중」이 아니다.
+    if (c.trust_pending and c.phase == .restarting) return .{ .phase = .asking, .exe = server.exe };
     return .{ .phase = c.phase, .exe = server.exe };
 }
 

@@ -163,6 +163,19 @@ pub fn build(b: *std.Build) void {
         .{};
     const target = b.standardTargetOptions(.{ .default_target = default_target_query });
     const optimize = b.standardOptimizeOption(.{});
+
+    // **가짜 언어 서버**(tooling §8.2a 관측점) — `LSPB*` 가 `zig-out/bin/maru-fake-lsp` 를 `MARU_LSP_SERVER_OVERRIDE` 로 끼운다.
+    // 그 판정자를 돌리는 run 스텝마다(`test-editor`·macOS 집계 샤드) 이 설치 단계에 의존해 판정자가 돌 때 늘 그 자리에 있다.
+    const fake_lsp = b.addExecutable(.{
+        .name = "maru-fake-lsp",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/fake_lsp.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    const install_fake_lsp = b.addInstallArtifact(fake_lsp, .{});
     const release_tag = b.option([]const u8, "release-tag", "Release tag that must equal v<build.zig.zon version>");
 
     // 제품 version의 단일 출처는 build.zig.zon이다. source plist는 capability template일 뿐이며,
@@ -1466,6 +1479,9 @@ pub fn build(b: *std.Build) void {
     // `tools/run-test-shards.sh` 가 한다. fresh 프로세스 판정자들은 그 스텝 뒤에 돈다(아래).
     const macos_app_host_abi_shards: usize = 4;
     const run_macos_app_host_abi_shards = b.addSystemCommand(&.{"/bin/sh"});
+    // `LSPB*` 가 여기(집계 스위트)서도 돈다 — 가짜 언어 서버가 먼저 설치돼 있어야 한다. `test-editor` 에만 걸었더니 CI 의 이 잡에서
+    // `MARU_LSP_SERVER_OVERRIDE` 가 없는 파일을 가리켜 「없음」이 되고 프롬프트가 안 떴다(PR #3788 CI 실측).
+    run_macos_app_host_abi_shards.step.dependOn(&install_fake_lsp.step);
     run_macos_app_host_abi_shards.addFileArg(b.path("tools/run-test-shards.sh"));
     run_macos_app_host_abi_shards.addArg(b.fmt("{d}", .{macos_app_host_abi_shards}));
     run_macos_app_host_abi_shards.addArtifactArg(macos_app_host_abi_tests);
@@ -4475,18 +4491,6 @@ pub fn build(b: *std.Build) void {
     });
     const run_editor_tests = b.addRunArtifact(editor_tests);
     run_editor_tests.setCwd(b.path("."));
-    // **가짜 언어 서버**(tooling §8.2a 관측점) — `LSPB*` 가 `zig-out/bin/maru-fake-lsp` 를 `MARU_LSP_SERVER_OVERRIDE` 로 끼운다.
-    // 설치 단계에 의존해 판정자가 돌 때 늘 그 자리에 있다.
-    const fake_lsp = b.addExecutable(.{
-        .name = "maru-fake-lsp",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/fake_lsp.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
-    });
-    const install_fake_lsp = b.addInstallArtifact(fake_lsp, .{});
     run_editor_tests.step.dependOn(&install_fake_lsp.step);
     const editor_test_step = b.step("test-editor", "Run the native editor judges only (fast feedback; not a substitute for `test`)");
     editor_test_step.dependOn(&run_editor_tests.step);

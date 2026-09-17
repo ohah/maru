@@ -80,6 +80,7 @@ fn contentHash(bytes: []const u8) u64 {
 /// 모듈만 서 있고 부르는 코드가 없어 exe에 링크되지 않았다.
 pub const syntax_color = @import("editor_syntax.zig");
 pub const diagnostics = @import("editor_diagnostics.zig");
+pub const lsp_client = @import("editor_lsp.zig");
 
 pub const Opened = struct {
     /// 열린 문서. **읽어 온 bytes를 빌리지 않고 소유한다**(N2 — `edit_doc.EditableFile`).
@@ -8773,6 +8774,7 @@ fn sliceOfLines(doc: anytype, from: u32, to: u32) []const u8 {
 pub const max_conflict_regions: usize = 256;
 
 fn refreshAfterEdit(self: *AppSession, term: *Term, edit: ?syntax_color.EditSpan) error{OutOfMemory}!void {
+    lsp_client.noteEdited(term); // §8.2a: version 이 오르면 다음 tick 이 didChange 를 보낸다
     // **가로 위치를 먼저 떠 둔다** — 아래 ⑷ 가 그것을 0 으로 되돌린다. `defer` 안에서 뜨면
     // 늦다: `rebuildVisible` 이 같은 폐기를 **먼저** 불러 그때는 이미 0 이다(실측으로 걸렸다).
     const kept_col = term.rt.editor_first_col;
@@ -11113,6 +11115,237 @@ test "DGP1 진단 층 — 구문 오류가 gutter 글리프·지그재그 밑줄
     try testing.expectEqual(@as(usize, 0), f3.mm);
     try testing.expect(!gotoDiagnosticActive(fx.session, .next));
     fx.session.loaded_config.config.editor.diagnostics = true;
+}
+
+/// LSP 판정자 공용: 가짜 서버 경로. `zig-out/bin/maru-fake-lsp` — `test-editor` 가 설치 단계에 의존한다(cwd 는 저장소 루트).
+const fake_lsp_path = "zig-out/bin/maru-fake-lsp";
+extern "c" fn usleep(usec: c_uint) c_int;
+
+extern "c" fn getcwd(buf: [*]u8, size: usize) ?[*:0]u8;
+
+fn fakeLspAbs(buf: []u8) ?[]const u8 {
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd = getcwd(&cwd_buf, cwd_buf.len) orelse return null;
+    return std.fmt.bufPrint(buf, "{s}/{s}", .{ std.mem.span(cwd), fake_lsp_path }) catch null;
+}
+
+/// 몇 tick 을 돌려 조건을 기다린다(서버는 다른 프로세스 — 응답이 다음 read 에 온다). 최대 `max_ms`.
+fn pumpLspUntil(fx: *PaneFixture, max_ms: u64, ctx: anytype, comptime pred: fn (@TypeOf(ctx)) bool) bool {
+    const start = fx.session.awakeMs();
+    while (fx.session.awakeMs() - start < max_ms) {
+        lsp_client.pump(fx.session);
+        if (pred(ctx)) return true;
+        _ = usleep(2_000);
+    }
+    lsp_client.pump(fx.session);
+    return pred(ctx);
+}
+
+test "LSPB1 LSP seam 1단 — 신뢰를 묻고 기억하며, 허용하면 서버가 뜨고 didOpen → 진단이 §5.4 표에 .lsp 로 서고, 편집하면 version 이 맞는 것만, 서버 요청은 거부, 죽으면 backoff 재시작 (제품 경계, §8.2a)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fake = fakeLspAbs(&abs_buf) orelse return error.SkipZigTest;
+    // 가짜 서버를 끼운다(이름과 무관). 끝나면 뗀다.
+    var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const fz = try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake});
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);
+    defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
+    // 신뢰 파일은 이 픽스처의 임시 디렉터리에(`MARU_CONFIG` 가 그 안을 가리키게).
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const cz = try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root});
+    _ = setenv("MARU_CONFIG", cz.ptr, 1);
+    defer _ = unsetenv("MARU_CONFIG");
+    if (fx.session.config_path_buffer) |b| allocator.free(b);
+    fx.session.config_path_buffer = null; // `MARU_CONFIG` 를 다시 읽게
+
+    // C 파일을 root 안에 연다 — clangd 이름표가 있는 언어(가짜 서버가 대신한다).
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "a.c", .data = "int x;\nint y;\n" });
+    const path = try std.fs.path.join(allocator, &.{ root, "a.c" });
+    defer allocator.free(path);
+    const saved_repo = fx.session.git_repo;
+    fx.session.git_repo = @constCast(root);
+    defer fx.session.git_repo = saved_repo;
+    const term = try openPathInActivePane(fx.session, path);
+    try testing.expectEqual(maru.session.editor.language.Grammar.c, term.rt.editor_grammar);
+
+    // ⑴ **묻는다** — 첫 pump 에 confirm 모달(`.lsp_trust`)이 뜨고 상태는 asking. 서버는 아직 안 떴다.
+    lsp_client.pump(fx.session);
+    try testing.expect(fx.session.pending_confirm == .lsp_trust);
+    try testing.expect(fx.session.chrome_host.confirm.open);
+    try testing.expectEqual(lsp_client.Phase.asking, lsp_client.statusFor(fx.session, term).?.phase);
+    // 픽스처의 `doc.zig` 도 편집기 Term 이라 zls 클라이언트가 하나 더 있다(같은 root — 같은 모달이 답이다). 둘 다 안 떴다.
+    try testing.expectEqual(@as(usize, 2), fx.session.editor_lsp.clients.items.len);
+    for (fx.session.editor_lsp.clients.items) |c| {
+        try testing.expect(c.proc == null);
+        try testing.expectEqual(lsp_client.Phase.asking, c.phase);
+    }
+    const cidx: usize = for (fx.session.editor_lsp.clients.items, 0..) |c, i| {
+        if (std.mem.eql(u8, c.server.exe, "clangd")) break i;
+    } else return error.NoClient;
+
+    // ⑵ **허용** → 기억(파일에 allow 줄) → 서버가 뜨고 initialize → ready → didOpen → publishDiagnostics 가 `.lsp` 로 선다.
+    fx.session.dispatchChromeAction(.confirm_accept);
+    try testing.expect(fx.session.pending_confirm == .none);
+    {
+        const trust = try fx.dir.dir.readFileAlloc(testing.io, "lsp-trust", allocator, .limited(4096));
+        defer allocator.free(trust);
+        try testing.expectEqual(@as(?maru.session.editor.lsp.trust.Decision, .allow), maru.session.editor.lsp.trust.lookup(trust, root));
+    }
+    const Ctx = struct { fx: *PaneFixture, term: *Term, cidx: usize };
+    const ctx: Ctx = .{ .fx = &fx, .term = term, .cidx = cidx };
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
+        fn f(c: Ctx) bool {
+            return c.term.rt.editor_diagnostics.lsp.items.len >= 1;
+        }
+    }.f));
+    try testing.expectEqual(lsp_client.Phase.ready, lsp_client.statusFor(fx.session, term).?.phase);
+    try testing.expectEqual(maru.session.editor.lsp.rpc.PositionEncoding.utf8, fx.session.editor_lsp.clients.items[cidx].encoding); // utf-8 을 골랐다
+    {
+        const d = term.rt.editor_diagnostics.lsp.items[0];
+        try testing.expectEqual(@as(u32, 0), d.start);
+        try testing.expectEqual(@as(u32, 3), d.end);
+        try testing.expectEqual(maru.session.editor.diagnostic.Source.lsp, d.source);
+        try testing.expectEqualStrings("fake: 1", d.message); // 첫 version 은 1
+    }
+    // 서버 요청(`workspace/configuration`)은 거부됐다.
+    try testing.expect(fx.session.editor_lsp.rejected_requests >= 1);
+    // 프레임을 그리면 §5.4 의 목록에 합쳐져 gutter 글리프가 선다(구문 오류는 없다 — 순수 서버 진단).
+    fx.session.surface_initialized = true;
+    fx.session.backing_width_px = 1200;
+    fx.session.backing_height_px = 800;
+    const leaf = activeLeafRectForTest(fx.session) orelse return error.SkipZigTest;
+    var d0 = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+    const glyph0 = drawnHasCodepoint(d0.dl, 0x2716);
+    d0.dl.deinit(allocator);
+    try testing.expect(glyph0);
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_diagnostics.list.items.len);
+
+    // ⑶ **편집 → didChange(version 2) → 새 진단(message 가 version 을 든다)**. `WARN` 을 넣으면 경고가 하나 더.
+    term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };
+    try testing.expect(insertText(fx.session, term, "WARN "));
+    const v_after = term.rt.editor_lsp_version;
+    try testing.expect(v_after >= 2);
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
+        fn f(c: Ctx) bool {
+            return c.term.rt.editor_diagnostics.lsp.items.len == 2;
+        }
+    }.f));
+    try testing.expectEqual(@as(u64, 1), fx.session.editor_lsp.sent_changes);
+    var msg_buf: [32]u8 = undefined;
+    try testing.expectEqualStrings(try std.fmt.bufPrint(&msg_buf, "fake: {d}", .{v_after}), term.rt.editor_diagnostics.lsp.items[0].message);
+    try testing.expectEqual(maru.session.editor.diagnostic.Severity.warning, term.rt.editor_diagnostics.lsp.items[1].severity);
+
+    // ⑷ **낡은 version 은 버린다** — `STALE` 을 넣으면 서버가 version−1 로 낸다 → 목록은 그대로(둘).
+    const before_recv = fx.session.editor_lsp.received_diagnostics;
+    try testing.expect(insertText(fx.session, term, "STALE "));
+    _ = pumpLspUntil(&fx, 400, ctx, struct {
+        fn f(c: Ctx) bool {
+            return c.fx.session.editor_lsp.received_diagnostics > 99999; // 안 온다 — 시간만 흘려보낸다
+        }
+    }.f);
+    try testing.expectEqual(before_recv, fx.session.editor_lsp.received_diagnostics); // 받아들인 것이 없다
+    try testing.expectEqual(@as(usize, 2), term.rt.editor_diagnostics.lsp.items.len);
+
+    // ⑸ **죽으면 backoff 재시작** — `BOOM` 을 넣으면 서버가 exit 1. restarting → (1s) → 다시 ready, 문서가 다시 열린다(didOpen).
+    try testing.expect(insertText(fx.session, term, "BOOM "));
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
+        fn f(c: Ctx) bool {
+            return c.fx.session.editor_lsp.clients.items[c.cidx].phase == .restarting or c.fx.session.editor_lsp.clients.items[c.cidx].phase == .failed;
+        }
+    }.f));
+    try testing.expectEqual(lsp_client.Phase.restarting, fx.session.editor_lsp.clients.items[cidx].phase);
+    try testing.expectEqual(@as(u8, 1), fx.session.editor_lsp.clients.items[cidx].restarts);
+    // BOOM 이 든 채로 다시 열면 또 죽는다 — 고쳐 두고 재시작을 기다린다.
+    term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 5, .focus = 5 };
+    try testing.expect(deleteText(fx.session, term, false)); // 선택을 지운다(BOOM )
+    try testing.expect(pumpLspUntil(&fx, 4000, ctx, struct {
+        fn f(c: Ctx) bool {
+            return c.fx.session.editor_lsp.clients.items[c.cidx].phase == .ready and c.fx.session.editor_lsp.received_diagnostics > 2;
+        }
+    }.f));
+    try testing.expectEqual(@as(u8, 0), fx.session.editor_lsp.clients.items[cidx].restarts); // ready 가 되면 세기를 되돌린다
+
+    // ⑹ **기억된 신뢰** — 새 세션이 같은 root 를 열면 묻지 않고 바로 뜬다(캐시가 아니라 파일에서).
+    fx.session.editor_lsp.deinit(allocator);
+    fx.session.editor_lsp = .{};
+    lsp_client.pump(fx.session);
+    try testing.expect(fx.session.pending_confirm == .none);
+    for (fx.session.editor_lsp.clients.items) |c| try testing.expect(c.phase == .starting or c.phase == .ready);
+}
+
+test "LSPB2 서버가 없으면 상태바가 「설치」이고 누르면 새 탭에 설치 명령을 입력만 한다; 거부는 기억되고 다시 물을 수 있다; 끄면 아무것도 없다 (제품 경계, §8.2a·§8.1a)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const cz = try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root});
+    _ = setenv("MARU_CONFIG", cz.ptr, 1);
+    defer _ = unsetenv("MARU_CONFIG");
+    if (fx.session.config_path_buffer) |b| allocator.free(b);
+    fx.session.config_path_buffer = null; // `MARU_CONFIG` 를 다시 읽게
+    // 서버가 **없는** 상태 — PATH 를 비워도 `git_locate` 의 폴백 디렉터리(`/usr/bin` 등)가 남으므로 override 를 없는 경로로 둔다
+    // (`locate` 는 override 도 실행 가능한지 본다).
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", "/nonexistent-dir-for-lsp-test/clangd", 1);
+    defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "b.c", .data = "int x;\n" });
+    const path = try std.fs.path.join(allocator, &.{ root, "b.c" });
+    defer allocator.free(path);
+    const saved_repo = fx.session.git_repo;
+    fx.session.git_repo = @constCast(root);
+    defer fx.session.git_repo = saved_repo;
+    const term = try openPathInActivePane(fx.session, path);
+
+    // ⑴ 없음 — 묻지 않는다(설치가 먼저).
+    lsp_client.pump(fx.session);
+    try testing.expect(fx.session.pending_confirm == .none);
+    const view = lsp_client.statusFor(fx.session, term) orelse return error.NoStatus;
+    try testing.expectEqual(lsp_client.Phase.missing, view.phase);
+    try testing.expectEqualStrings("clangd", view.exe);
+    var tbuf: [128]u8 = undefined;
+    const text = lsp_client.statusText(view, &tbuf) orelse return error.NoText;
+    try testing.expect(std.mem.indexOf(u8, text, "clangd") != null);
+    // ⑵ 누르면 **새 탭**이 생기고 설치 명령이 입력된다 — Enter 는 아니다(마지막 byte 가 개행이 아니다).
+    const tabs_before = fx.session.tabs.items.len;
+    lsp_client.activateStatus(fx.session);
+    try testing.expectEqual(tabs_before + 1, fx.session.tabs.items.len);
+    const install = maru.session.editor.lsp.servers.forGrammar(.c).?.install;
+    try testing.expect(install[install.len - 1] != '\n');
+    // ⑶ 거부를 기억한다: 서버가 있는 척(가짜)하고 물으면 취소 → deny 가 파일에 남고 상태는 denied; 다시 묻기를 누르면 다시 묻는다.
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fake = fakeLspAbs(&abs_buf) orelse return error.SkipZigTest;
+    var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const fz = try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake});
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);
+    _ = tab_ops.switchTab(fx.session, 0);
+    lsp_client.pump(fx.session);
+    try testing.expect(fx.session.pending_confirm == .lsp_trust);
+    fx.session.dispatchChromeAction(.confirm_cancel);
+    try testing.expectEqual(lsp_client.Phase.denied, lsp_client.statusFor(fx.session, term).?.phase);
+    {
+        const trust = try fx.dir.dir.readFileAlloc(testing.io, "lsp-trust", allocator, .limited(4096));
+        defer allocator.free(trust);
+        try testing.expectEqual(@as(?maru.session.editor.lsp.trust.Decision, .deny), maru.session.editor.lsp.trust.lookup(trust, root));
+    }
+    lsp_client.pump(fx.session);
+    try testing.expect(fx.session.pending_confirm == .none); // 거부는 기억된다 — 다시 안 묻는다
+    lsp_client.activateStatus(fx.session); // 「다시 묻기」
+    lsp_client.pump(fx.session);
+    try testing.expect(fx.session.pending_confirm == .lsp_trust);
+    fx.session.dispatchChromeAction(.confirm_cancel);
+    // ⑷ 끄면 상태도 클라이언트 동작도 없다.
+    fx.session.loaded_config.config.lsp.enabled = false;
+    try testing.expect(lsp_client.statusFor(fx.session, term) == null);
+    lsp_client.pump(fx.session);
+    try testing.expect(fx.session.pending_confirm == .none);
+    fx.session.loaded_config.config.lsp.enabled = true;
 }
 
 test "MMP2 미니맵의 축은 보이는 줄이다 — 접으면 스트립에서도 사라지고, 클릭은 보이는 줄 축으로 환산된다 (제품 경계, §6.1·§6.2)" {

@@ -170,6 +170,14 @@ pub const editor = struct {
     pub const fold = @import("session/editor/fold.zig");
     /// 진단 층의 순수 규칙(§5·§5.4) — 범위→줄 접기·밑줄 조각·다음/이전. 출처(트리 오류·LSP)는 밖에서 목록을 채운다.
     pub const diagnostic = @import("session/editor/diagnostic.zig");
+    /// LSP seam 1단의 순수 부분(docs/editor-surface-tooling.md §8.2a): 프레임·JSON-RPC·위치/진단·서버 표·신뢰 파일.
+    pub const lsp = struct {
+        pub const framing = @import("session/lsp/framing.zig");
+        pub const rpc = @import("session/lsp/rpc.zig");
+        pub const position = @import("session/lsp/position.zig");
+        pub const servers = @import("session/lsp/servers.zig");
+        pub const trust = @import("session/lsp/trust.zig");
+    };
     /// S2: 병합 충돌 **마커 구간**(docs/editor-merge-conflicts.md §5). 순수 계산이라 여기 산다 —
     /// 줄 배열을 받아 구간을 내고, 그리기·동작은 위층이 붙인다.
     pub const conflict = @import("session/editor/conflict.zig");
@@ -217,4 +225,5 @@ test {
     // **네임스페이스 자식은 따로 ref 한다** — `refAllDecls` 는 한 단계라, 소비처가 아직 없는
     // 모듈은 테스트를 써 놔도 집계 밖이다(chrome.ui.gesture 가 실제로 그랬다).
     @import("std").testing.refAllDecls(ssh);
+    @import("std").testing.refAllDecls(editor.lsp);
 }

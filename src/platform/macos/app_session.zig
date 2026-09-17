@@ -1837,6 +1837,8 @@ const TermRuntime = struct {
     editor_syntax: editor_ops.syntax_color.State = .{},
     /// 진단 층(§5.4) — 목록(첫 출처: 구문 오류)과 렌더 표. `editor_syntax` 와 같은 단위로 산다.
     editor_diagnostics: editor_ops.diagnostics.State = .{},
+    /// LSP 문서 version(§8.2a) — 편집마다 오른다. 0 은 「아직 서버에 안 열었다」.
+    editor_lsp_version: u64 = 0,
 
     /// 이 문서에 쓰는 tree-sitter 문법. **상태바 언어 항목이 읽는다**(`status-bar.md` 「언어 항목」).
     ///
@@ -2448,6 +2450,8 @@ const PendingConfirm = union(enum) {
     /// 원격 삭제(RF6c) — **되돌릴 수 없다**. 로컬(휴지통)과 다른 종류로 두는 이유가 그것이다:
     /// 문구도 버튼도 달라야 하고, 한 종류로 합치면 그 차이가 호출자 규율이 되어 샌다(§2.3 ⑷).
     remote_file_tree_delete,
+    /// 언어 서버 신뢰(§8.2a) — 주인 root 는 `editor_lsp.asking_root` 가 든다.
+    lsp_trust,
 };
 
 const FilePanelDirtySyncAction = struct { surface_id: u64, request_id: u64 };
@@ -5251,6 +5255,8 @@ pub const AppSession = struct {
     // 담고 확인 모달을 열며, confirm_accept가 executeClose로 실행하고 confirm_cancel이 버린다. 단일 출처: 어느 닫기
     // 경로였는지(cascade 정책이 경로마다 다름)를 기억해 확정 시 같은 함수를 다시 부른다.
     pending_confirm: PendingConfirm = .none,
+    /// LSP seam 1단(§8.2a) — 클라이언트·신뢰 캐시·프롬프트 주인.
+    editor_lsp: editor_ops.lsp_client.State = .{},
     // window close 확인을 통과했지만 remote event settlement가 남은 경우의 retry latch. 이 값이 켜진 동안
     // topology와 native close intent는 게시하지 않고 tick이 같은 close graph만 한 번 진행한다.
     window_close_pending: bool = false,
@@ -9528,6 +9534,7 @@ pub const AppSession = struct {
             .file_tree_delete => self.pending_file_tree_delete = null,
             // 굳혀 둔 대상을 **비운다** — 안 비우면 다음 확인이 옛 대상을 지울 수 있다.
             .remote_file_tree_delete => self.pending_remote_delete.name_len = 0,
+            .lsp_trust => editor_ops.lsp_client.answerTrust(self, false), // 취소 = 거부(기억된다 — §8.2a)
             .none, .close, .reset, .file_conflict_reload => {},
         }
         self.pending_confirm = .none;
@@ -9535,7 +9542,7 @@ pub const AppSession = struct {
 
     /// 확인 대화상자의 버튼 라벨을 **키로** 든다. 기본값이 공용 확인/취소라 대부분의 호출부는 메시지 키만
     /// 넘긴다. chrome 의 `Buttons`(문자열)는 아직 그대로라 여기서 풀어 넘긴다 — 그쪽은 I3c 범위다.
-    const ConfirmKeys = struct {
+    pub const ConfirmKeys = struct {
         confirm: maru.i18n.Key = .common_confirm,
         cancel: maru.i18n.Key = .common_cancel,
     };
@@ -9563,6 +9570,11 @@ pub const AppSession = struct {
             .alternate = maru.i18n.t(choices.alternate),
             .cancel = maru.i18n.t(choices.cancel),
         });
+    }
+
+    /// 문장을 **미리 만든** 확인 대화상자(서버 이름 같은 값이 든다 — §8.2a 신뢰 프롬프트). 버튼은 키.
+    pub fn showConfirmText(self: *AppSession, owner: PendingConfirm, message: []const u8, buttons: ConfirmKeys) void {
+        self.showConfirmButtons(owner, message, .{ .confirm = maru.i18n.t(buttons.confirm), .cancel = maru.i18n.t(buttons.cancel) });
     }
 
     fn showConfirmButtons(self: *AppSession, owner: PendingConfirm, message: []const u8, buttons: chrome.components.confirm.Buttons) void {
@@ -11985,7 +11997,7 @@ pub const AppSession = struct {
 
     /// chrome 컴포넌트가 낸 의도(HostAction)를 session 부수효과로 디스패치한다 — chrome은 session을 모르므로(경계)
     /// 재검색·스크롤·닫기를 여기서 실행한다. handleKeyEvent의 chrome 라우팅이 부른다.
-    fn dispatchChromeAction(self: *AppSession, action: chrome.host.HostAction) void {
+    pub fn dispatchChromeAction(self: *AppSession, action: chrome.host.HostAction) void {
         switch (action) {
             .none => {}, // notice dismiss 등 — session 부수효과 없음(컴포넌트가 닫음)
             // find.hide는 컴포넌트가 이미 — 하이라이트만 정리. **목록이 둘이라 둘 다 비운다**:
@@ -12062,6 +12074,7 @@ pub const AppSession = struct {
                     },
                     .file_tree_delete => file_panel_ops.confirmFileTreeDelete(self),
                     .remote_file_tree_delete => file_panel_ops.confirmRemoteFileTreeDelete(self),
+                    .lsp_trust => editor_ops.lsp_client.answerTrust(self, true),
                     .grant => |async_id| self.grant_confirm_decision = .{ .async_id = async_id, .approved = true },
                     .quit => {
                         self.quit_decision = .accepted;
@@ -20431,6 +20444,7 @@ pub const AppSession = struct {
         // 활성이 될 때 따라잡는다(관찰 창이 2초라 충분하다).
         self.pollMarkerPreview();
         self.pumpMarkerPreviewOpen();
+        editor_ops.lsp_client.pump(self); // §8.2a: 서버 읽기·문서 동기화 — 스레드 없이 tick 에서
         self.advancePendingAppQuitShutdown();
         // end-all target이 source-zero와 ready_remove까지 도달해 종료 승인을 게시한 frame은 더 이상
         // remote maintenance나 Term drain을 실행하지 않는다. 같은 frame의 후속 접근은 deinit이 소유할
@@ -23256,6 +23270,25 @@ pub const AppSession = struct {
                         rn += 1;
                     }
                 }
+                // ①-c **언어 서버 상태**(tooling §8.2a): 서버 이름표가 있는 문서에만. 저하 계열이라 여기(앞쪽).
+                if (rn < max_status_bar_right_items) {
+                    if (editor_ops.lsp_client.statusFor(self, active_term)) |view| {
+                        var lsp_buf: [128]u8 = undefined;
+                        if (editor_ops.lsp_client.statusText(view, &lsp_buf)) |text| {
+                            const icon: ?u21 = switch (view.phase) {
+                                .ready => null,
+                                .missing, .denied, .failed => icons.codepoint(.bell),
+                                .asking, .starting, .restarting => icons.codepoint(.hourglass),
+                            };
+                            if (self.buildStatusBarItem(icon, text, bar_cols, fg, icon_fg, .plain)) |dl| {
+                                right_frames[rn] = dl;
+                                right_widths[rn] = @as(u32, dl.size.cols) * self.cell_width_px;
+                                right_ids[rn] = .editor_lsp;
+                                rn += 1;
+                            }
+                        }
+                    }
+                }
                 // ② 읽기 전용: **그 문서가 실제로 읽기 전용일 때만** 뜬다(§2.2 — 2026-09-03 정정).
                 //
                 // **오래 조건 없이 그렸다.** 그 문장("N1 편집기는 전부 읽기 전용이다")은 N1 시절의
@@ -23524,6 +23557,7 @@ pub const AppSession = struct {
             // 여기서 만들지 않는다 — 지금 붙이면 선행 gate 우회다(implementation-plan.md CR 절).
             // **언어도 표시 전용이다** — 문법을 사용자가 고르는 개념이 아직 없다(`grammarForPath`
             // 위에 override 층이 필요하고 그건 별도 조각이다). 열 대상이 없으므로 호버도 안 준다.
+            .editor_lsp => editor_ops.lsp_client.activateStatus(self), // 없음 → 설치 명령 입력 · 거부됨 → 다시 묻기 · 실패 → 재시작(§8.2a)
             .editor_degraded, .editor_readonly, .editor_eol, .editor_cursor, .editor_language, .workspace_checkpoint_failure, .session_host_disconnected => {},
         }
         self.metal_dirty = true;
@@ -23539,6 +23573,7 @@ pub const AppSession = struct {
             .viewport_narrowed => false, // 표시 전용 — 열 대상이 없다
             // 열 대상이 없으므로 호버도 주지 않는다 — 눌리는 것처럼 보이는데 아무 일도 안 하는 편이
             // 아무 표시도 없는 것보다 나쁘다(이 함수의 계약).
+            .editor_lsp => true, // 설치·다시 묻기·재시작이 있다(§8.2a)
             .editor_degraded, .editor_readonly, .editor_eol, .editor_cursor, .editor_language, .workspace_checkpoint_failure, .session_host_disconnected => false,
         };
     }
@@ -24102,6 +24137,7 @@ pub const AppSession = struct {
     }
 
     pub fn deinit(self: *AppSession) void {
+        editor_ops.lsp_client.deinit(self); // §8.2a: 서버 자식을 거둔다(짧게 — 종료 경로)
         // 판정자에서는 detached worker 가 **세션보다 오래 살면 안 된다**. 이유·규율은
         // `detached_worker_wait` 가 단일 출처다(2026-09-08 CI abort: `dupe` 누수 → segfault → 134).
         // 제품에서는 기다리지 않는다 — 멈춘 I/O 로 창 닫기가 굳는 것이 훨씬 나쁘고, 그 계약은 각

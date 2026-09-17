@@ -1420,6 +1420,8 @@ pub const Config = struct {
     shell_integration: ShellIntegrationConfig = .{},
     /// 워크스페이스(시작 창·새 탭이 열리는 디렉터리) 설정. loader가 `workspace.*` 키로 파싱.
     workspace: WorkspaceConfig = .{},
+    /// 언어 서버(docs/editor-surface-tooling.md §8.2a). loader 가 `lsp.enabled` 키로 파싱.
+    lsp: LspConfig = .{},
     /// 대화형 셸 프로그램·인자 override. loader가 `shell.command`/`shell.args` 키로 파싱. 기본은 빈 command
     /// (= resolveInteractiveShell 폴백)이라 미설정 시 현행 동작과 동일.
     shell: ShellConfig = .{},
@@ -1576,6 +1578,17 @@ pub const WorkspaceConfig = struct {
         .tab_inherit_cwd = Meta{ .doc = .cfg_workspace_tab_inherit_cwd, .widget = .toggle, .section = .workspace },
         .split_inherit_cwd = Meta{ .doc = .cfg_workspace_split_inherit_cwd, .widget = .toggle, .section = .workspace },
         .hold_on_startup_failure = Meta{ .doc = .cfg_workspace_hold_on_startup_failure, .widget = .toggle, .section = .workspace },
+    };
+};
+
+/// 언어 서버 설정(docs/editor-surface-tooling.md §8.2a). 서버 이름표·설치 명령은 내장 표(`session.lsp.servers`)이고 override 는
+/// 2단이다. 켜져 있어도 **워크스페이스마다 한 번 묻는** 신뢰 게이트가 앞에 선다.
+pub const LspConfig = struct {
+    /// 언어 서버를 쓸지. **기본 true** — 끄면 서버를 찾지도 묻지도 않고 상태바 항목도 없다.
+    enabled: bool = true,
+
+    pub const schema = .{ // 키: lsp.enabled
+        .enabled = Meta{ .doc = .cfg_lsp_enabled, .widget = .toggle, .section = .editor },
     };
 };
 

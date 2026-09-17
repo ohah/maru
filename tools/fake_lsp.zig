@@ -11,7 +11,7 @@
 //! - `HANG` 이 있으면 stdout 을 **닫고 살아 있는다**(진단도 exit 도 없다) — 클라이언트는 EOF 를 「끝」으로 보고 죽여 재시작해야 한다.
 //! - `textDocument/hover` → contents(markdown): 펜스 `int fake` · `fake hover L<line>:C<char>` · `**bold** here` · 항목 14개(`- item N`,
 //!   상자 높이 상한 12행을 넘긴다), range = 그 줄의 `character..character+3`(클라이언트가 앵커로 써야 한다). 본문에 `NOHOVER` 가
-//!   있으면 `null` 결과(내용 없음).
+//!   있으면 `null` 결과(내용 없음). `MUTEHOVER` 가 있으면 hover 에 **답하지 않는다**(시간 초과 경로).
 //! - `shutdown` → `null` 응답, `exit` → 종료 0.
 //! - 시작하자마자 stderr 에 한 줄을 쓴다(실서버 clangd 가 그렇다) — stdout 에 섞이면 프레임이 깨진다(§8.2a 「stderr」).
 //! 순수 판정 대상이 아니라(맞으면 되는 도구) 테스트는 없다 — 이 도구의 계약은 `LSPB*` 가 제품 경계에서 든다.
@@ -90,6 +90,8 @@ pub fn main() void {
 var answered = false;
 /// 마지막 didOpen/didChange 본문에 `NOHOVER` 가 있었다 — hover 가 `null` 을 낸다.
 var no_hover = false;
+/// 마지막 본문에 `MUTEHOVER` 가 있었다 — hover 요청에 **답하지 않는다**.
+var mute_hover = false;
 
 fn handle(allocator: std.mem.Allocator, body: []const u8) void {
     var parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch return;
@@ -127,6 +129,7 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
             line = int(pos.object.get("line")) orelse 0;
             character = int(pos.object.get("character")) orelse 0;
         };
+        if (mute_hover) return; // 답하지 않는다 — 클라이언트가 시간 초과로 진단만 열어야 한다(§8.2b 「요청」)
         if (no_hover) {
             sendJson(allocator, .{ .jsonrpc = "2.0", .id = id.?, .result = null });
             return;
@@ -162,6 +165,7 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
             break :blk "";
         };
         no_hover = std.mem.indexOf(u8, text, "NOHOVER") != null;
+        mute_hover = std.mem.indexOf(u8, text, "MUTEHOVER") != null;
         if (std.mem.indexOf(u8, text, "BOOM") != null) std.c._exit(1);
         if (std.mem.indexOf(u8, text, "HANG") != null) {
             _ = std.c.close(1);

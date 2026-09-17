@@ -236,10 +236,14 @@ test "HOVX3 view — 배경 하나 + 빈 줄을 뺀 텍스트 op, 스크롤한 �
         try testing.expectEqual(tokens.ColorRole.surface_fg, op.text.role);
         break;
     };
-    // 화면 아래 앵커 → 위로 뒤집힌다.
-    st.show(100, 790, 20);
-    const rect = boxRect(&st, &many, p).?;
-    try testing.expect(rect.y + @as(i32, @intCast(rect.h)) <= 790);
+    // 화면 아래쪽 앵커 → **위로 뒤집힌다**(아래로 당기는 것이 아니다 — 당기면 상자가 앵커 줄을 덮는다, 변이 B4). 앵커 700 에
+    // 12행(240px) 상자: 아래는 안 들어가고(700+20+240 > 780), 당기면 540..780 이 앵커를 덮는다. 뒤집으면 앵커 위 padding 간격을 두고 끝난다.
+    var pp = p;
+    pp.shape.modal_padding_px = 12;
+    st.show(100, 700, 20);
+    const rect = boxRect(&st, &many, pp).?;
+    try testing.expectEqual(@as(i32, 700 - 240 - 12), rect.y);
+    try testing.expect(rect.y + @as(i32, @intCast(rect.h)) + 12 <= 700);
     // 닫히면 아무것도 안 낸다.
     st.hide();
     var none: std.ArrayList(draw.Op) = .empty;

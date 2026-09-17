@@ -268,6 +268,13 @@ test "HVT3 링크·이미지는 글자만, 엔티티 넷은 풀고, CR 은 버�
     try expectLines(l, &.{ .{ "see docs and pic <T> &", .text }, .{ "**not bold**", .code }, .{ "[broken](x", .text } });
 }
 
+test "HVT5 별 뒤가 공백이면 여는 기호가 아니다 — 곱셈 `a * b` 뒤에 닫는 별이 와도 짝이 아니다 (변이 A6)" {
+    const a = testing.allocator;
+    var l = try reduce(a, "a * b and c*");
+    defer l.deinit(a);
+    try expectLines(l, &.{.{ "a * b and c*", .text }});
+}
+
 test "HVT4 빈 입력과 공백만인 입력은 줄이 없다" {
     const a = testing.allocator;
     var l = try reduce(a, "");

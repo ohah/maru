@@ -38,6 +38,7 @@ test "LST1 마지막 줄이 이긴다 — allow 뒤 deny 는 deny; 다른 root·
     try testing.expectEqual(@as(?Decision, .allow), lookup(f, "/c"));
     try testing.expect(lookup(f, "/b") == null); // 탭이 아니다
     try testing.expect(lookup(f, "/a/sub") == null); // 접두가 아니라 같음
+    try testing.expect(lookup("deny\t/a/sub\n", "/a") == null); // 반대 방향도 — 자식의 결정이 부모로 새면 안 된다(적대적 1회차 A12)
     try testing.expect(lookup("", "/a") == null);
 }
 

@@ -2,11 +2,15 @@
 //!
 //! stdin 에서 Content-Length 프레임을 읽고:
 //! - `initialize` → 응답(제안된 인코딩에 utf-8 이 있으면 `positionEncoding: "utf-8"`, textDocumentSync Full).
-//! - `initialized` → 서버 → 클라이언트 요청 `workspace/configuration` 하나(클라이언트가 **거부**해야 한다).
+//! - `initialized` → 서버 → 클라이언트 요청 `workspace/configuration` 하나(클라이언트가 **거부**해야 한다). 그 응답(id `srv-1`,
+//!   result 든 error 든)이 오면 `answered` — 안 온 채 didChange 를 받으면 WARN 진단의 message 가 `fake: warn noack` 이 된다
+//!   (답이 없으면 실서버는 그 요청에 **영원히 매달린다** — 카운터가 아니라 서버 쪽에서 봐야 변이 B7 이 죽는다).
 //! - `didOpen`/`didChange` → 그 문서의 `publishDiagnostics` 하나: 첫 줄 0..3 에 error, message `fake: <version>`, `version` 은
 //!   문서 version. 본문에 `STALE` 이 있으면 version 을 **하나 낮춰**(클라이언트가 버려야 한다). `BOOM` 이 있으면 즉시 exit 1(재시작).
 //!   `WARN` 이 있으면 severity 2 를 하나 더.
+//! - `HANG` 이 있으면 stdout 을 **닫고 살아 있는다**(진단도 exit 도 없다) — 클라이언트는 EOF 를 「끝」으로 보고 죽여 재시작해야 한다.
 //! - `shutdown` → `null` 응답, `exit` → 종료 0.
+//! - 시작하자마자 stderr 에 한 줄을 쓴다(실서버 clangd 가 그렇다) — stdout 에 섞이면 프레임이 깨진다(§8.2a 「stderr」).
 //! 순수 판정 대상이 아니라(맞으면 되는 도구) 테스트는 없다 — 이 도구의 계약은 `LSPB*` 가 제품 경계에서 든다.
 
 const std = @import("std");
@@ -59,8 +63,12 @@ fn int(v: ?std.json.Value) ?i64 {
     };
 }
 
+extern "c" fn usleep(us: c_uint) c_int;
+
 pub fn main() void {
     const allocator = std.heap.c_allocator;
+    const noise = "fake: stderr noise\n";
+    _ = std.c.write(2, noise.ptr, noise.len);
     var inbuf: std.ArrayList(u8) = .empty;
     var chunk: [16 * 1024]u8 = undefined;
     while (true) {
@@ -76,6 +84,8 @@ pub fn main() void {
     }
 }
 
+var answered = false;
+
 fn handle(allocator: std.mem.Allocator, body: []const u8) void {
     var parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch return;
     defer parsed.deinit();
@@ -83,8 +93,14 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
         .object => |o| o,
         else => return,
     };
-    const method = str(obj.get("method")) orelse return;
     const id = obj.get("id");
+    const method = str(obj.get("method")) orelse {
+        // 응답 — 우리가 낸 `srv-1` 에 대한 것이면(거부여도) 「답을 받았다」.
+        if (str(id)) |i| if (std.mem.eql(u8, i, "srv-1")) {
+            answered = true;
+        };
+        return;
+    };
     if (std.mem.eql(u8, method, "initialize")) {
         var utf8 = false;
         if (obj.get("params")) |p| if (p == .object) if (p.object.get("capabilities")) |c| if (c == .object) if (c.object.get("general")) |g| if (g == .object) if (g.object.get("positionEncodings")) |pe| if (pe == .array) {
@@ -119,6 +135,10 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
             break :blk "";
         };
         if (std.mem.indexOf(u8, text, "BOOM") != null) std.c._exit(1);
+        if (std.mem.indexOf(u8, text, "HANG") != null) {
+            _ = std.c.close(1);
+            while (true) _ = usleep(100_000);
+        }
         const v = if (std.mem.indexOf(u8, text, "STALE") != null) version - 1 else version;
         var msg_buf: [64]u8 = undefined;
         const msg = std.fmt.bufPrint(&msg_buf, "fake: {d}", .{version}) catch "fake";
@@ -127,7 +147,7 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
         var count: usize = 1;
         diags[0] = .{ .range = .{ .start = .{ .line = 0, .character = 0 }, .end = .{ .line = 0, .character = 3 } }, .severity = 1, .message = msg };
         if (std.mem.indexOf(u8, text, "WARN") != null) {
-            diags[1] = .{ .range = .{ .start = .{ .line = 1, .character = 0 }, .end = .{ .line = 1, .character = 2 } }, .severity = 2, .message = "fake: warn" };
+            diags[1] = .{ .range = .{ .start = .{ .line = 1, .character = 0 }, .end = .{ .line = 1, .character = 2 } }, .severity = 2, .message = if (answered) "fake: warn" else "fake: warn noack" };
             count = 2;
         }
         sendJson(allocator, .{ .jsonrpc = "2.0", .method = "textDocument/publishDiagnostics", .params = .{ .uri = uri, .version = v, .diagnostics = diags[0..count] } });

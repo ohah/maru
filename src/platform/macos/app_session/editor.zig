@@ -11499,6 +11499,13 @@ fn pointerAtOffset(term: *Term, offset: usize) ?struct { x: f64, y: f64 } {
     return .{ .x = @as(f64, @floatFromInt(a.x_px)) + @as(f64, @floatFromInt(geom.cell_w_px)) / 2, .y = @as(f64, @floatFromInt(a.y_px)) + @as(f64, @floatFromInt(geom.cell_h_px)) / 2 };
 }
 
+/// 표식 하나를 문서에서 찾아 지운다(HOVB — LSPB1 의 `removeMarker` 와 같은 규율: 자리를 찾아 지운다).
+fn removeMarkerHover(session: *AppSession, t: *Term, marker: []const u8) !void {
+    const at: u32 = @intCast(std.mem.indexOf(u8, t.rt.editor_doc.?.file.content, marker) orelse return error.NoMarker);
+    t.rt.editor_selection = .{ .anchor_start = at, .anchor_end = at + @as(u32, @intCast(marker.len)), .focus = at + @as(u32, @intCast(marker.len)) };
+    try testing.expect(deleteText(session, t, false));
+}
+
 /// tick 을 돌려(LSP pump + hover tick — 제품 tick 이 부르는 둘) 조건을 기다린다. 최대 `max_ms`.
 fn pumpHoverUntil(fx: *PaneFixture, max_ms: u64, ctx: anytype, comptime pred: fn (@TypeOf(ctx)) bool) bool {
     const start = fx.session.awakeMs();
@@ -11596,8 +11603,14 @@ test "HOVB1 호버 박스 — 포인터가 낱말에 머물면 지연 뒤 요청
         try testing.expectEqual(fx.session.chrome_host.hover_box.anchor_y + @as(i32, @intCast(term.rt.editor_hit_geom.cell_h_px)) + @as(i32, props.shape.modal_padding_px), rect.y);
         try testing.expect(props.shape.modal_padding_px > 0); // 전제: 제품 토큰이 padding 을 준다 — 0 이면 위 단언이 간격을 안 잰다
         try testing.expectEqual(@as(u32, maru.chrome.components.hover_box.max_rows * fx.session.cell_height_px), rect.h); // 19줄 → 12행 상한
-        // 프레임이 오버레이를 낸다(제품이 묻는 그 질문).
+        // 프레임이 오버레이를 낸다(제품이 묻는 그 질문) — 그리고 **실제로 글자를 싣는다**(변이 C8: 게이트는 참인데 안 그리는 것).
         try testing.expect(fx.session.overlayFrameNeeded());
+        {
+            var prep = (try fx.session.buildChromeOverlayPrep()) orelse return error.HoverNotDrawn;
+            defer prep.dl.deinit(allocator);
+            try testing.expect(prep.dl.cells.len > 0);
+            try testing.expect(drawnHasCodepoint(prep.dl, 0x2716)); // 진단 줄의 ✖ 가 실렸다
+        }
         // ⑵ 상자 **안** 휠은 스크롤하고 삼킨다.
         const inside_x: f64 = @floatFromInt(rect.x + 2);
         const inside_y: f64 = @floatFromInt(rect.y + 2);
@@ -11643,8 +11656,11 @@ test "HOVB1 호버 박스 — 포인터가 낱말에 머물면 지연 뒤 요청
             return c.fx.session.chrome_host.hover_box.open;
         }
     }.f));
-    // ⑺ 편집하면 다음 프레임에 닫힌다(revision) — `refresh` 가 프레임마다 묻는다.
+    // ⑺ 편집하면 다음 프레임에 닫힌다(revision) — `refresh` 가 프레임마다 묻는다. **프레임을 먼저 그린다**: 제품은 pane 프레임(행 배열을
+    //    다시 세운다)을 그린 뒤 오버레이를 묻으므로, 그리기 전에 물으면 「행이 없다」로 닫혀 revision 검사가 안 보인다(변이 B15 가 살았다).
     try testing.expect(insertText(fx.session, term, "z"));
+    try drawFrame(fx.session, leaf, term);
+    try testing.expect(term.rt.editor_hit_rows_len > 0);
     try testing.expect(!hover_client.refresh(fx.session));
     try testing.expect(!fx.session.chrome_host.hover_box.open);
     // ⑻ 낡은 응답은 버린다 — 기다리는 seq 가 아니면 열지 않는다; 그 뒤 진짜 응답이 연다.
@@ -11667,9 +11683,49 @@ test "HOVB1 호버 박스 — 포인터가 낱말에 머물면 지연 뒤 요청
         }
     }.f));
     try testing.expect(std.mem.indexOf(u8, hover_client.lines(fx.session)[0].text, "fake") != null);
-    // ⑼ 상자 밖 클릭은 닫고 흘려보낸다.
-    try testing.expect(!hover_client.mouseDown(fx.session, 5, 5));
+    // ⑼ 상자 밖 클릭은 닫고 **흘려보낸다** — 제품 진입점(`mouse`)으로 누른다: 둘째 줄을 눌렀으니 caret 이 거기 선다(변이 C6 — 직접 호출은
+    //    배선을 안 지났다).
+    const line1 = term.rt.editor_doc.?.file.lines.line(1).?;
+    const pc_base = pointerAtOffset(term, line1.start + 2) orelse return error.NoPointer;
+    const pc: struct { x: f64, y: f64 } = .{ .x = pc_base.x + 400, .y = pc_base.y }; // 둘째 줄, 상자 오른쪽 너머(본문 안 — 줄 끝으로 clamp 된다)
+    try testing.expect(!maru.chrome.components.hover_box.contains(&fx.session.chrome_host.hover_box, hover_client.lines(fx.session), fx.session.buildChromeProps(), pc.x, pc.y)); // 전제: 상자 밖
+    fx.session.mouse(1, pc.x, pc.y, 0, 0);
     try testing.expect(!fx.session.chrome_host.hover_box.open);
+    try testing.expect(term.rt.editor_selection.?.focus >= line1.start); // 클릭이 흘러가 caret 이 둘째 줄에 섰다
+    fx.session.mouse(3, pc.x, pc.y, 0, 0); // 뗀다(kind 3 = up)
+    // ⑽ **제품 tick 이 연다** — `hover_client.tick` 을 직접 부르지 않고 `AppSession.tick` 만 돌린다(변이 C7). 그리고 서버가 답하지
+    //    않으면(`MUTEHOVER`) 응답 시간 초과(2s) 뒤 **진단만으로** 연다(변이 C12).
+    try removeMarkerHover(fx.session, term, "z");
+    term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };
+    try testing.expect(insertText(fx.session, term, "MUTEHOVER "));
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
+        fn f(c: Ctx) bool {
+            var b: [32]u8 = undefined;
+            const want = std.fmt.bufPrint(&b, "fake: {d}", .{c.term.rt.editor_lsp_version}) catch return false;
+            return c.term.rt.editor_diagnostics.lsp.items.len >= 1 and std.mem.eql(u8, c.term.rt.editor_diagnostics.lsp.items[0].message, want);
+        }
+    }.f));
+    try drawFrame(fx.session, leaf, term);
+    const pm_base = pointerAtOffset(term, 1) orelse return error.NoPointer; // `MUTEHOVER` 의 U — 진단(0..3)이 덮는다
+    const pm: struct { x: f64, y: f64 } = .{ .x = pm_base.x + 1, .y = pm_base.y }; // ⑻ 과 같은 픽셀이면 「안 움직였다」 — 실제 포인터는 딴 데를 지나 돌아온다
+    _ = fx.session.hoverCursor(pm.x, pm.y, 0);
+    const sent_before_mute = fx.session.editor_lsp.sent_hovers;
+    const start_ms = fx.session.awakeMs();
+    var opened = false;
+    while (fx.session.awakeMs() - start_ms < 4000) {
+        _ = try fx.session.tick(); // 제품 tick — LSP pump 와 hover tick 을 여기서 부른다
+        if (fx.session.chrome_host.hover_box.open) {
+            opened = true;
+            break;
+        }
+        _ = usleep(2_000);
+    }
+    try testing.expect(opened);
+    try testing.expectEqual(sent_before_mute + 1, fx.session.editor_lsp.sent_hovers); // 요청은 갔고
+    try testing.expect(fx.session.awakeMs() - start_ms >= hover_client.response_timeout_ms); // 답이 없어 시간 초과를 기다렸다
+    try testing.expectEqual(@as(usize, 1), hover_client.lines(fx.session).len); // 진단 한 줄뿐
+    try testing.expect(std.mem.startsWith(u8, hover_client.lines(fx.session)[0].text, "✖ "));
+    hover_client.hide(fx.session);
 }
 
 test "HOVB2 호버 박스 — 서버 없이 구문 오류만으로 열린다(i18n 문장); `show_hover` 는 caret 자리에서 연다(끄도 온다); 끄면 포인터로는 안 열린다; 글자 없는 자리는 안 연다 (제품 경계, §8.2b)" {

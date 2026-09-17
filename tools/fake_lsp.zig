@@ -1,0 +1,138 @@
+//! 가짜 언어 서버(docs/editor-surface-tooling.md §8.2a 관측점) — 판정자가 `MARU_LSP_SERVER_OVERRIDE` 로 끼운다.
+//!
+//! stdin 에서 Content-Length 프레임을 읽고:
+//! - `initialize` → 응답(제안된 인코딩에 utf-8 이 있으면 `positionEncoding: "utf-8"`, textDocumentSync Full).
+//! - `initialized` → 서버 → 클라이언트 요청 `workspace/configuration` 하나(클라이언트가 **거부**해야 한다).
+//! - `didOpen`/`didChange` → 그 문서의 `publishDiagnostics` 하나: 첫 줄 0..3 에 error, message `fake: <version>`, `version` 은
+//!   문서 version. 본문에 `STALE` 이 있으면 version 을 **하나 낮춰**(클라이언트가 버려야 한다). `BOOM` 이 있으면 즉시 exit 1(재시작).
+//!   `WARN` 이 있으면 severity 2 를 하나 더.
+//! - `shutdown` → `null` 응답, `exit` → 종료 0.
+//! 순수 판정 대상이 아니라(맞으면 되는 도구) 테스트는 없다 — 이 도구의 계약은 `LSPB*` 가 제품 경계에서 든다.
+
+const std = @import("std");
+
+fn writeAll(bytes: []const u8) void {
+    var off: usize = 0;
+    while (off < bytes.len) {
+        const n = std.c.write(1, bytes[off..].ptr, bytes.len - off);
+        if (n <= 0) std.c._exit(0);
+        off += @intCast(n);
+    }
+}
+
+fn sendJson(allocator: std.mem.Allocator, v: anytype) void {
+    const body = std.json.Stringify.valueAlloc(allocator, v, .{}) catch return;
+    defer allocator.free(body);
+    var hdr: [64]u8 = undefined;
+    const h = std.fmt.bufPrint(&hdr, "Content-Length: {d}\r\n\r\n", .{body.len}) catch return;
+    writeAll(h);
+    writeAll(body);
+}
+
+fn nextFrame(buf: []const u8) ?struct { body: []const u8, consumed: usize } {
+    const header_end = std.mem.indexOf(u8, buf, "\r\n\r\n") orelse return null;
+    var len: ?usize = null;
+    var it = std.mem.splitSequence(u8, buf[0..header_end], "\r\n");
+    while (it.next()) |line| {
+        if (line.len > 15 and std.ascii.eqlIgnoreCase(line[0..15], "content-length:")) {
+            len = std.fmt.parseInt(usize, std.mem.trim(u8, line[15..], " "), 10) catch return null;
+        }
+    }
+    const n = len orelse return null;
+    if (buf.len < header_end + 4 + n) return null;
+    return .{ .body = buf[header_end + 4 .. header_end + 4 + n], .consumed = header_end + 4 + n };
+}
+
+fn str(v: ?std.json.Value) ?[]const u8 {
+    const x = v orelse return null;
+    return switch (x) {
+        .string => |s| s,
+        else => null,
+    };
+}
+
+fn int(v: ?std.json.Value) ?i64 {
+    const x = v orelse return null;
+    return switch (x) {
+        .integer => |n| n,
+        else => null,
+    };
+}
+
+pub fn main() void {
+    const allocator = std.heap.c_allocator;
+    var inbuf: std.ArrayList(u8) = .empty;
+    var chunk: [16 * 1024]u8 = undefined;
+    while (true) {
+        const n = std.c.read(0, &chunk, chunk.len);
+        if (n <= 0) std.c._exit(0);
+        inbuf.appendSlice(allocator, chunk[0..@intCast(n)]) catch std.c._exit(2);
+        while (nextFrame(inbuf.items)) |f| {
+            handle(allocator, f.body);
+            const rest = inbuf.items.len - f.consumed;
+            std.mem.copyForwards(u8, inbuf.items[0..rest], inbuf.items[f.consumed..]);
+            inbuf.shrinkRetainingCapacity(rest);
+        }
+    }
+}
+
+fn handle(allocator: std.mem.Allocator, body: []const u8) void {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch return;
+    defer parsed.deinit();
+    const obj = switch (parsed.value) {
+        .object => |o| o,
+        else => return,
+    };
+    const method = str(obj.get("method")) orelse return;
+    const id = obj.get("id");
+    if (std.mem.eql(u8, method, "initialize")) {
+        var utf8 = false;
+        if (obj.get("params")) |p| if (p == .object) if (p.object.get("capabilities")) |c| if (c == .object) if (c.object.get("general")) |g| if (g == .object) if (g.object.get("positionEncodings")) |pe| if (pe == .array) {
+            for (pe.array.items) |e| if (e == .string and std.mem.eql(u8, e.string, "utf-8")) {
+                utf8 = true;
+            };
+        };
+        sendJson(allocator, .{ .jsonrpc = "2.0", .id = id.?, .result = .{ .capabilities = .{ .positionEncoding = if (utf8) "utf-8" else "utf-16", .textDocumentSync = @as(u8, 1) } } });
+        return;
+    }
+    if (std.mem.eql(u8, method, "initialized")) {
+        sendJson(allocator, .{ .jsonrpc = "2.0", .id = "srv-1", .method = "workspace/configuration", .params = .{ .items = [_]struct { section: []const u8 }{.{ .section = "fake" }} } });
+        return;
+    }
+    if (std.mem.eql(u8, method, "shutdown")) {
+        sendJson(allocator, .{ .jsonrpc = "2.0", .id = id.?, .result = null });
+        return;
+    }
+    if (std.mem.eql(u8, method, "exit")) std.c._exit(0);
+    if (std.mem.eql(u8, method, "textDocument/didOpen") or std.mem.eql(u8, method, "textDocument/didChange")) {
+        const params = obj.get("params") orelse return;
+        if (params != .object) return;
+        const td = params.object.get("textDocument") orelse return;
+        if (td != .object) return;
+        const uri = str(td.object.get("uri")) orelse return;
+        const version = int(td.object.get("version")) orelse 0;
+        const text: []const u8 = blk: {
+            if (str(td.object.get("text"))) |t| break :blk t;
+            if (params.object.get("contentChanges")) |cc| if (cc == .array and cc.array.items.len > 0 and cc.array.items[0] == .object) {
+                if (str(cc.array.items[0].object.get("text"))) |t| break :blk t;
+            };
+            break :blk "";
+        };
+        if (std.mem.indexOf(u8, text, "BOOM") != null) std.c._exit(1);
+        const v = if (std.mem.indexOf(u8, text, "STALE") != null) version - 1 else version;
+        var msg_buf: [64]u8 = undefined;
+        const msg = std.fmt.bufPrint(&msg_buf, "fake: {d}", .{version}) catch "fake";
+        const Diag = struct { range: struct { start: struct { line: u32, character: u32 }, end: struct { line: u32, character: u32 } }, severity: u8, message: []const u8 };
+        var diags: [2]Diag = undefined;
+        var count: usize = 1;
+        diags[0] = .{ .range = .{ .start = .{ .line = 0, .character = 0 }, .end = .{ .line = 0, .character = 3 } }, .severity = 1, .message = msg };
+        if (std.mem.indexOf(u8, text, "WARN") != null) {
+            diags[1] = .{ .range = .{ .start = .{ .line = 1, .character = 0 }, .end = .{ .line = 1, .character = 2 } }, .severity = 2, .message = "fake: warn" };
+            count = 2;
+        }
+        sendJson(allocator, .{ .jsonrpc = "2.0", .method = "textDocument/publishDiagnostics", .params = .{ .uri = uri, .version = v, .diagnostics = diags[0..count] } });
+        return;
+    }
+    // 모르는 요청은 MethodNotFound 로.
+    if (id) |i| sendJson(allocator, .{ .jsonrpc = "2.0", .id = i, .@"error" = .{ .code = @as(i32, -32601), .message = "fake: not supported" } });
+}

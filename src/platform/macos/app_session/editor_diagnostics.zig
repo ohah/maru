@@ -19,6 +19,11 @@ pub const State = struct {
     list: std.ArrayList(Diagnostic) = .empty,
     /// 트리에서 뽑은 원본 — 매 프레임 재사용.
     raw: std.ArrayList(syntax.Provider.SyntaxError) = .empty,
+    /// 언어 서버가 준 목록(§8.2a) — `publishDiagnostics` 마다 통째로 갈아 끼운다. 메시지는 `lsp_messages` 안의 조각.
+    lsp: std.ArrayList(Diagnostic) = .empty,
+    lsp_messages: std.ArrayList(u8) = .empty,
+    /// 서버 목록이 바뀌었는데 아직 `list` 에 합치지 않았다.
+    lsp_dirty: bool = false,
     /// 아래 셋은 **보이는 줄 축**의 표. 길이는 보이는 줄 수까지 자란다.
     marks: [][]const chrome_diag.Mark = &.{},
     mark_buf: []chrome_diag.Mark = &.{},
@@ -29,6 +34,8 @@ pub const State = struct {
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
         self.list.deinit(allocator);
         self.raw.deinit(allocator);
+        self.lsp.deinit(allocator);
+        self.lsp_messages.deinit(allocator);
         if (self.marks.len > 0) allocator.free(self.marks);
         if (self.mark_buf.len > 0) allocator.free(self.mark_buf);
         if (self.markers.len > 0) allocator.free(self.markers);
@@ -44,10 +51,12 @@ pub const State = struct {
 /// **트리에서 목록을 다시 채운다**(§5.4 갱신 시점: 트리가 있을 때마다). 트리가 없으면(파싱이 끊긴 프레임) 직전 목록을 유지하고
 /// `false`. 다른 출처(LSP·린트)가 생기면 여기서 `.syntax` 항목만 갈아 끼운다 — 지금은 목록이 곧 구문 오류다.
 pub fn refreshFromSyntax(self: *State, allocator: std.mem.Allocator, provider: ?*syntax.Provider) bool {
-    const prov = provider orelse return false;
-    const had_tree = prov.syntaxErrors(allocator, &self.raw) catch return false;
-    if (!had_tree) return false;
+    const had_tree = if (provider) |prov| (prov.syntaxErrors(allocator, &self.raw) catch false) else false;
+    // 트리가 없어도 서버 목록이 바뀌었으면 합친다(§8.2a — 두 출처가 한 목록).
+    if (!had_tree and !self.lsp_dirty) return false;
+    self.lsp_dirty = false;
     self.list.clearRetainingCapacity();
+    for (self.lsp.items) |d| self.list.append(allocator, d) catch break;
     for (self.raw.items) |e| {
         self.list.append(allocator, .{
             .start = e.start,

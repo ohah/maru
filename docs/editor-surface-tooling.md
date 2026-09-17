@@ -364,6 +364,40 @@ LSP는 다음 최소 seam만 요구한다.
 
 TextMate, git staging, formatter는 LSP의 선행 조건이 아니다. 초기 syntax는 **CM6 내장 Lezer**(`@codemirror/language` + `@codemirror/lang-*`)로 시작하고, LSP semantic token이 부족하다는 측정이 있을 때만 TextMate/WASM을 재검토한다. (초판의 "Monarch"는 Monaco 토크나이저라 엔진 교체로 무효 — 정정.)
 
+### 8.2a LSP seam 1단 — transport·수명·문서 동기화·진단 (2026-09-17, 계획 공격 뒤의 사용자 결정)
+
+**계획 공격이 드러낸 것.** §8.2 의 seam 은 목록이고 코드는 **0 줄**이다 — 진단 층(visual-mapping §5.4)이 서고서야 「출처가 없다」가
+보였다. 이 저장소에서 자식 프로세스는 `std.process.Child`(0.16 에서 io 기반)를 피해 **posix fork+execve+pipe** 로 띄우고(`ssh_upload`·
+`update_check`·`git_backend` 의 결), 오래 사는 스트림은 **비차단 fd 를 세션 tick 에서 drain** 한다(원격 에이전트 이벤트 스트리머 —
+`spawnAgentEvents`·`setNonBlockingFd`). LSP 도 그 결로 간다 — 스레드를 새로 두지 않는다.
+
+**사용자 결정(2026-09-17).** ① 서버는 **번들하지 않는다**(§8.1a 그대로 — clangd 하나가 55.5 MB, 앱 실행 파일과 맞먹는다). ② 서버가
+있으면 **워크스페이스마다 한 번 묻고 기억**한다(VS Code Workspace Trust 의 모양 — §8.1 의 「trusted workspace」가 이것이다). ③ 없으면
+**상태바에 설치 안내**를 띄우고 누르면 새 터미널 탭에 설치 명령을 **입력만** 한다(§8.1a 흐름 4 — Enter 는 사용자).
+
+| 축 | 결정 | 근거 |
+| --- | --- | --- |
+| **범위(1단)** | transport(Content-Length·JSON-RPC 2.0) · 수명(`initialize`/`initialized`/`shutdown`/`exit`, 죽으면 backoff 재시작 1·2·4s 세 번) · `didOpen`/`didChange`(**Full sync**, 프레임당 한 번 최신 본문)/`didClose` · `publishDiagnostics` → §5.4 의 목록에 `.lsp` 출처로 합침 · 신뢰 프롬프트·기억 · 상태바 항목 · 설치 안내 | 진단이 오늘 표시 자리를 갖는 유일한 결과다. completion·hover·definition·semantic tokens·inlay 는 2단(표시 자리 §8.2·§8.3 이 먼저) |
+| **하지 않는 것(1단)** | 서버→클라이언트 요청(`workspace/applyEdit`·`executeCommand`·`showDocument`·파일 생성/이름/삭제·`workspace/configuration`)은 **전부 거부**(`MethodNotFound` 응답) · 증분 동기화 · 여러 root · `didSave` | §8.2 「기본 거부하고 method 별 승인」— 승인 UI 가 없으니 1단은 거부만. 저장은 아직 서버가 알 필요 없다(진단은 didChange 로 온다) |
+| **서버 찾기** | 언어(§3.7a `Grammar`) → 실행 파일 이름 **내장 표**: zig→`zls` · c/cpp→`clangd` · typescript/javascript/tsx→`typescript-language-server --stdio` · rust→`rust-analyzer` · python→`pyright-langserver --stdio` · go→`gopls` · 나머지 없음. **PATH 만** 본다(`/usr/bin/env` 로 execve — PATH 탐색은 env(1)). 설치 명령도 같은 표(brew·npm) | §8.1a 「내장 기본값 + config override」— override 는 2단(설정 키가 언어 수 × 2 라 표시 슬라이스가 커진다; 1단은 내장 표만, `lsp.enabled` 토글 하나) |
+| **신뢰** | 파일을 열어 서버가 필요하고 PATH 에 있으면 **confirm 모달**: 「이 저장소에서 ‹서버›를 실행할까요? 서버는 저장소의 설정·빌드를 읽고 실행할 수 있습니다」 — 허용/거부. 답은 `~/.config/maru/lsp-trust`(줄마다 `allow\t‹root›` / `deny\t‹root›`)에 **root 별로** 기억. 거부하면 그 root 에서는 안 묻고 안 띄운다 — 상태바 항목을 누르면 다시 묻는다 | §8.1 「trusted workspace 확인」. zls 는 build_on_save 로 `zig build`(빌드 스크립트 실행), TS 서버는 node_modules 플러그인 — 저장소를 열기만 해도 코드가 도는 것을 사용자가 알고 허락해야 한다. 거부를 기억하는 이유는 「열 때마다 묻는 모달」이 곧 사용자를 허용으로 몰기 때문 |
+| **root** | 그 Term 의 문서가 속한 **워크스페이스 root**(파일 트리의 root — `withinNavRoot` 가 쓰는 그것). 서버는 `(root, 언어)` 마다 하나. root 밖 문서는 서버를 안 띄운다 | §8.2 「root 밖 URI」 규칙의 전제 — 경계가 root 다 |
+| **상태바** | 새 항목 `editor_lsp`(편집기 묶음, `editor_degraded` 바로 뒤 — 저하 계열이라 앞쪽): 「‹서버› 없음 — 설치」(클릭 → 새 탭 + 명령 입력) · 「‹서버› 묻는 중」 · 「‹서버› 시작 중」 · 「‹서버›」(연결) · 「‹서버› 실패 — 다시」(클릭 → 재시작) · 「‹서버› 거부됨 — 다시 묻기」(클릭 → 프롬프트). 언어에 서버 이름표가 없으면 항목 없음 | layering §2.2 「조용히 줄어들면 버그로 읽는다」. §8.1a 흐름 2·3·4 |
+| **설치 안내** | 클릭 → `newTab` + `sendTextAsKeys(명령)` — **Enter 는 안 보낸다**. 명령: `brew install zls` · `brew install llvm`(clangd — Xcode 가 있으면 이미 `/usr/bin/clangd`) · `npm i -g typescript-language-server typescript` · `rustup component add rust-analyzer` · `npm i -g pyright` · `go install golang.org/x/tools/gopls@latest` | §8.1a 「입력까지만 하고 실행하지 않는 것이 경계다」 |
+| **위치 인코딩** | `initialize` 에 `general.positionEncodings: ["utf-8", "utf-16"]`. 서버가 `utf-8` 을 고르면 byte 그대로, 아니면(기본 `utf-16`) 줄 안에서 UTF-16 code unit 을 세어 byte 로 옮긴다 | LSP 3.17 `positionEncoding`. clangd 는 utf-8 을 받아들이고 zls·tsserver 는 utf-16 만 — 둘 다 있어야 한다 |
+| **진단 합치기** | `publishDiagnostics` 의 `uri` 가 열린 문서와 같고 `version`(있으면)이 지금 revision 과 같을 때만 받는다 — 아니면 버린다(§5 「revision 으로 폐기」). 그 문서의 `.lsp` 항목을 **통째로 갈아 끼우고** `.syntax` 는 둔다. severity 1..4 → error·warning·info·hint, 없으면 error. root 밖 uri 는 무시(§8.2). 메시지는 서버 문자열을 **복사**해 든다(표시는 §8.3 호버가 오면) | §5 「출처가 여럿이어도 층은 하나」. 구문 오류와 서버 오류가 같은 줄에 겹치면 둘 다 선다(둘 다 참이다) |
+| **동기화** | `didOpen`(languageId·version=revision·전문) → 편집마다 revision 이 오르면 **그 프레임 끝에 한 번** `didChange`(Full, 최신 전문·version). 문서를 닫으면 `didClose`. 큰 문서(§3.0 상한 넘음)는 안 보낸다 | 프레임당 한 번이면 타이핑 60Hz 에 60 회 전송 — Full 이라 전문 크기 × 60/s. 1 MB 문서면 60 MB/s: **1단의 알려진 대가**(증분 동기화가 2단인 이유). 상한을 넘는 문서는 아예 안 보낸다 |
+| **수명·재시작** | 자식이 죽으면(읽기 EOF·`waitpid`) 1s·2s·4s 뒤 재시작, 세 번 실패하면 「실패」 상태로 멈춘다(클릭으로 재시도). 앱 종료·root 닫힘·마지막 문서 닫힘 뒤 30 초면 `shutdown`→`exit`, 5 초 안에 안 죽으면 SIGKILL | §8.2 「restart/backoff」. 30 초를 두는 이유는 탭을 오가며 여닫는 동안 서버를 매번 띄우지 않기 위해서다 |
+| **stderr** | `/dev/null`. 서버 로그는 우리 것이 아니다 | §8.3 「tool stdout/stderr 는 기본 제외」 |
+| **관측** | 1단은 trace event 없음 — 상태바가 관측점이다. `editor.tool-started/completed` 는 §8.3 의 redaction 갱신과 함께 2단 | §8.3 「control-plane event 를 trace 에 넣는 PR 은 먼저 facade/trace-replay 를 갱신한다」 |
+
+**관측점**: 판정자 `LSF*`(순수: Content-Length 프레임 인코더/디코더 — 부분 도착·두 프레임 붙음·헤더 대소문자·잘못된 길이) · `LSJ*`(순수: JSON-RPC
+요청/응답 대조·id·알림·서버 요청 거부) · `LSP*`(순수: UTF-16 ↔ byte 위치·범위 → 진단·severity·version/uri 필터) · `LST*`(순수: 신뢰
+파일 읽기/쓰기·root 정규화) · `LSI*`(순수: 언어 → 서버·설치 명령 표) · `LSPB*`(제품 경계: **가짜 서버**(빌드가 내는 테스트 전용 실행
+파일 `maru-fake-lsp` — 프레임을 읽고 initialize 에 답하며 didOpen/didChange 마다 진단 하나를 version 을 달아 낸다)로 파일을 열면
+프롬프트 → 허용 → didOpen → 진단이 §5.4 표에 `.lsp` 로 서고, 편집하면 version 이 맞는 것만 남고, 서버가 죽으면 backoff 재시작,
+거부하면 안 뜨고 기억되며, 없으면 상태바 「설치」가 새 탭에 명령을 입력한다) · 실측: clangd 로 C 파일(캡처).
+
 ### 8.3 관측 가능성과 민감정보
 
 editor event는 처음부터 하나의 domain schema를 공유하되 문서 원문을 기본 trace에 넣지 않는다.

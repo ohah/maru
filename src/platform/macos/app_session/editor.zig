@@ -11243,9 +11243,16 @@ test "LSPB1 LSP seam 1단 — 신뢰를 묻고 기억하며, 허용하면 서버
         }
     }.f));
     try testing.expectEqual(@as(u64, 1), fx.session.editor_lsp.sent_changes);
+    // 같은 version 은 **한 번만** 간다 — tick 이 더 돌아도 didChange 가 다시 나가지 않는다(보낸 version 을 안 굳히는 변이 B12 는
+    // 응답이 같은 tick 에 오면 위 단언만으로 산다 — 타이밍이 아니라 걸음 수로 본다).
+    for (0..3) |_| lsp_client.pump(fx.session);
+    try testing.expectEqual(@as(u64, 1), fx.session.editor_lsp.sent_changes);
     var msg_buf: [32]u8 = undefined;
     try testing.expectEqualStrings(try std.fmt.bufPrint(&msg_buf, "fake: {d}", .{v_after}), term.rt.editor_diagnostics.lsp.items[0].message);
     try testing.expectEqual(maru.session.editor.diagnostic.Severity.warning, term.rt.editor_diagnostics.lsp.items[1].severity);
+    // 서버가 낸 요청(`workspace/configuration`)에 **답이 갔다** — 서버 쪽에서 본다(답이 없으면 `noack`). 우리 카운터만 보면
+    // 「세고 안 보내는」 변이(B7)가 산다.
+    try testing.expectEqualStrings("fake: warn", term.rt.editor_diagnostics.lsp.items[1].message);
 
     // ⑷ **낡은 version 은 버린다** — `STALE` 을 넣으면 서버가 version−1 로 낸다 → 목록은 그대로(둘).
     const before_recv = fx.session.editor_lsp.received_diagnostics;
@@ -11257,6 +11264,26 @@ test "LSPB1 LSP seam 1단 — 신뢰를 묻고 기억하며, 허용하면 서버
     }.f);
     try testing.expectEqual(before_recv, fx.session.editor_lsp.received_diagnostics); // 받아들인 것이 없다
     try testing.expectEqual(@as(usize, 2), term.rt.editor_diagnostics.lsp.items.len);
+    // 표식은 **자리를 찾아** 지운다 — 「0..5」로 지우면 앞 단계의 표식(`WARN `)이 지워지고 이 표식이 남는다(그 채로도 ⑸ 가
+    // 초록이었다: `received_diagnostics` 는 zls 클라이언트(픽스처 doc.zig)와 합산이고 ready 는 didOpen 이 죽이기 **전**에 잠깐
+    // 참이라 — 크래시 루프를 「복구」로 읽었다. 이제 복구는 「그 version 의 진단이 왔다」로 잰다).
+    const removeMarker = struct {
+        fn f(session: *AppSession, t: *Term, marker: []const u8) !void {
+            const at: u32 = @intCast(std.mem.indexOf(u8, t.rt.editor_doc.?.file.content, marker) orelse return error.NoMarker);
+            t.rt.editor_selection = .{ .anchor_start = at, .anchor_end = at + @as(u32, @intCast(marker.len)), .focus = at + @as(u32, @intCast(marker.len)) };
+            try testing.expect(deleteText(session, t, false));
+            try testing.expect(std.mem.indexOf(u8, t.rt.editor_doc.?.file.content, marker) == null);
+        }
+    }.f;
+    const diagsForCurrentVersion = struct {
+        fn f(c: Ctx) bool {
+            var b: [32]u8 = undefined;
+            const want = std.fmt.bufPrint(&b, "fake: {d}", .{c.term.rt.editor_lsp_version}) catch return false;
+            return c.fx.session.editor_lsp.clients.items[c.cidx].phase == .ready and c.term.rt.editor_diagnostics.lsp.items.len >= 1 and std.mem.eql(u8, c.term.rt.editor_diagnostics.lsp.items[0].message, want);
+        }
+    }.f;
+    try removeMarker(fx.session, term, "STALE ");
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, diagsForCurrentVersion)); // 표식을 빼면 다시 지금 version 의 진단이 온다
 
     // ⑸ **죽으면 backoff 재시작** — `BOOM` 을 넣으면 서버가 exit 1. restarting → (1s) → 다시 ready, 문서가 다시 열린다(didOpen).
     try testing.expect(insertText(fx.session, term, "BOOM "));
@@ -11268,14 +11295,52 @@ test "LSPB1 LSP seam 1단 — 신뢰를 묻고 기억하며, 허용하면 서버
     try testing.expectEqual(lsp_client.Phase.restarting, fx.session.editor_lsp.clients.items[cidx].phase);
     try testing.expectEqual(@as(u8, 1), fx.session.editor_lsp.clients.items[cidx].restarts);
     // BOOM 이 든 채로 다시 열면 또 죽는다 — 고쳐 두고 재시작을 기다린다.
-    term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 5, .focus = 5 };
-    try testing.expect(deleteText(fx.session, term, false)); // 선택을 지운다(BOOM )
-    try testing.expect(pumpLspUntil(&fx, 4000, ctx, struct {
+    const changes_before_restart = fx.session.editor_lsp.sent_changes;
+    try removeMarker(fx.session, term, "BOOM ");
+    try testing.expect(pumpLspUntil(&fx, 4000, ctx, diagsForCurrentVersion)); // 복구 = 지금 version 의 진단이 새 프로세스에서 왔다
+    try testing.expectEqual(@as(u8, 0), fx.session.editor_lsp.clients.items[cidx].restarts); // ready 가 되면 세기를 되돌린다
+    // 새 프로세스는 문서를 모른다 — **didOpen 으로 다시 연다**, didChange 가 아니다(가짜 서버는 둘을 같이 받아 진단만으론 안 갈린다;
+    // 변이 B13 「재시작 뒤 문서를 다시 안 연다」). 편집 하나가 있었는데도 didChange 수가 그대로다.
+    try testing.expectEqual(changes_before_restart, fx.session.editor_lsp.sent_changes);
+
+    // ⑸ʹ **트리 없는 프레임에도 서버 목록은 합쳐진다** — provider 를 떼어(파싱이 끊긴 프레임과 같은 `had_tree=false`) 편집하고,
+    //     새 진단이 오면 다음 프레임의 목록(§5.4 표)에 그 message 가 선다(변이 B16 「lsp_dirty 를 안 올린다」 — 트리가 매 프레임
+    //     서는 작은 C 파일에선 안 보였다: 합치기가 구문 쪽 갱신에 업혀 갔다).
+    //     **개수로 잰다** — message 는 `lsp_messages` 버퍼의 조각이라 낡은 목록 항목도 같은 자리의 새 글자를 가리킨다(같은 길이
+    //     「fake: N」이라 문자열 비교는 변이를 통과시켰다 — 4회차 실측). `WARN ` 을 빼면 서버 진단이 둘 → 하나다.
+    {
+        var d_tree = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+        d_tree.dl.deinit(allocator);
+    }
+    const countLsp = struct {
+        fn f(t: *Term) usize {
+            var n: usize = 0;
+            for (t.rt.editor_diagnostics.list.items) |d| n += @intFromBool(d.source == .lsp);
+            return n;
+        }
+    }.f;
+    try testing.expectEqual(@as(usize, 2), countLsp(term)); // 트리가 있던 마지막 프레임: error + warn
+    term.rt.editor_syntax.deinit(allocator);
+    term.rt.editor_syntax = .{};
+    try removeMarker(fx.session, term, "WARN ");
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, diagsForCurrentVersion));
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_diagnostics.lsp.items.len);
+    var d_notree = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+    d_notree.dl.deinit(allocator);
+    try testing.expectEqual(@as(usize, 1), countLsp(term)); // 트리 없이도 표가 새 목록이다
+
+    // ⑸ʺ **stdout 이 닫히면 끝이다** — `HANG` 을 보면 가짜 서버가 stdout 만 닫고 살아 있는다(exit 가 없어 reap 으로는 안 보인다).
+    //     EOF 를 「끝」으로 봐야 죽이고 재시작 경로로 간다(변이 C3 「EOF 를 데이터 없음으로」 — exit 하는 서버에선 reap 이 대신 잡아
+    //     안 보였다). 복구까지 본다: 고치면 다시 ready.
+    try testing.expect(insertText(fx.session, term, "HANG "));
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
         fn f(c: Ctx) bool {
-            return c.fx.session.editor_lsp.clients.items[c.cidx].phase == .ready and c.fx.session.editor_lsp.received_diagnostics > 2;
+            return c.fx.session.editor_lsp.clients.items[c.cidx].phase == .restarting;
         }
     }.f));
-    try testing.expectEqual(@as(u8, 0), fx.session.editor_lsp.clients.items[cidx].restarts); // ready 가 되면 세기를 되돌린다
+    try testing.expect(fx.session.editor_lsp.clients.items[cidx].proc == null); // 죽였다 — 매달린 프로세스를 남기지 않는다
+    try removeMarker(fx.session, term, "HANG ");
+    try testing.expect(pumpLspUntil(&fx, 4000, ctx, diagsForCurrentVersion));
 
     // ⑹ **기억된 신뢰** — 새 세션이 같은 root 를 열면 묻지 않고 바로 뜬다(캐시가 아니라 파일에서).
     fx.session.editor_lsp.deinit(allocator);
@@ -11344,12 +11409,58 @@ test "LSPB2 서버가 없으면 상태바가 「설치」이고 누르면 새 �
     }
     lsp_client.pump(fx.session);
     try testing.expect(fx.session.pending_confirm == .none); // 거부는 기억된다 — 다시 안 묻는다
+    // 새 세션도 같다 — **파일의 deny 가 클라이언트를 denied 로 세운다**(묻지도, 띄우지도 않는다). 위 단언은 취소가 직접 세운
+    // denied 를 보는 것이라 gate 의 deny 갈래를 지나지 않았다(변이 B4 「거부 결정을 무시」가 살았다).
+    fx.session.editor_lsp.deinit(allocator);
+    fx.session.editor_lsp = .{};
+    lsp_client.pump(fx.session);
+    try testing.expect(fx.session.pending_confirm == .none);
+    try testing.expectEqual(lsp_client.Phase.denied, lsp_client.statusFor(fx.session, term).?.phase);
+    for (fx.session.editor_lsp.clients.items) |c| try testing.expect(c.proc == null);
     lsp_client.activateStatus(fx.session); // 「다시 묻기」
     lsp_client.pump(fx.session);
     try testing.expect(fx.session.pending_confirm == .lsp_trust);
+    // ⑶ʹ **프로그램이 닫은 모달은 답이 아니다** — 알림 토스트가 모달을 덮으면(`showNotice` → `cancelPendingClose`) 파일에 줄이
+    //     늘지 않고, 토스트가 사라지면 다음 pump 가 다시 묻는다(캡처 하니스가 잡은 결함 — 종료 경로가 「거부」를 적었다).
+    const lines_before = blk: {
+        const t = try fx.dir.dir.readFileAlloc(testing.io, "lsp-trust", allocator, .limited(4096));
+        defer allocator.free(t);
+        break :blk std.mem.count(u8, t, "\n");
+    };
+    fx.session.showNotice("x");
+    try testing.expect(fx.session.pending_confirm == .none);
+    {
+        const t = try fx.dir.dir.readFileAlloc(testing.io, "lsp-trust", allocator, .limited(4096));
+        defer allocator.free(t);
+        try testing.expectEqual(lines_before, std.mem.count(u8, t, "\n"));
+    }
+    lsp_client.pump(fx.session);
+    try testing.expect(fx.session.pending_confirm == .none); // 토스트가 떠 있는 동안은 기다린다
+    try testing.expectEqual(lsp_client.Phase.asking, lsp_client.statusFor(fx.session, term).?.phase); // 「허락 대기」로 보인다
+    fx.session.chrome_host.notice.dismiss();
+    lsp_client.pump(fx.session);
+    try testing.expect(fx.session.pending_confirm == .lsp_trust); // 다시 묻는다
+    // ⑶ʺ **한 번에 하나** — 다른 root(`sub/.git`)의 문서가 열려도 그 클라이언트는 지금 모달의 답을 기다린다: 뜨지 않고(proc 없음)
+    //     「허락 대기」로 보인다(변이 B5 「신뢰 대기 중에도 띄운다」 — 같은 root 둘만 있던 픽스처에선 안 보였다).
+    try fx.dir.dir.createDirPath(testing.io, "sub/.git");
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "sub/c.c", .data = "int y;\n" });
+    const sub_path = try std.fs.path.join(allocator, &.{ root, "sub", "c.c" });
+    defer allocator.free(sub_path);
+    const term2 = try openPathInActivePane(fx.session, sub_path);
+    lsp_client.pump(fx.session);
+    try testing.expect(fx.session.pending_confirm == .lsp_trust);
+    try testing.expect(!std.mem.eql(u8, term.rt.editor_lsp_root.?, term2.rt.editor_lsp_root.?));
+    try testing.expectEqual(lsp_client.Phase.asking, lsp_client.statusFor(fx.session, term2).?.phase);
+    for (fx.session.editor_lsp.clients.items) |c| try testing.expect(c.proc == null);
     fx.session.chrome_host.confirm.dismiss(); // 제품 경로: 컴포넌트가 먼저 닫고 액션을 보낸다
     fx.session.dispatchChromeAction(.confirm_cancel);
-    // ⑷ 끄면 상태도 클라이언트 동작도 없다.
+    lsp_client.pump(fx.session);
+    try testing.expect(fx.session.pending_confirm == .lsp_trust); // 이제 sub 의 차례
+    fx.session.chrome_host.confirm.dismiss();
+    fx.session.dispatchChromeAction(.confirm_cancel);
+    // ⑷ 끄면 상태도 클라이언트 동작도 없다 — 「다시 묻기」를 눌러 둔 채(켜져 있었으면 다음 pump 가 묻는다) 끄면 묻지 않는다
+    //    (변이 C5 「끄기 설정 무시(pump)」 — 할 일이 없는 상태에서 끄면 안 보였다).
+    lsp_client.activateStatus(fx.session);
     fx.session.loaded_config.config.lsp.enabled = false;
     try testing.expect(lsp_client.statusFor(fx.session, term) == null);
     lsp_client.pump(fx.session);

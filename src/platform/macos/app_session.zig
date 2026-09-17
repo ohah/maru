@@ -63806,6 +63806,48 @@ test "DSB6 숫자가 잘리면 아예 안 낸다 — 비교 뷰 커서 항목의
     try std.testing.expect(!narrow_has);
 }
 
+test "SBL4 상태바 LSP 항목 — 서버가 없으면 「설치」 항목이 뜨고, **포인터로** 누르면 새 탭에 설치 명령이 입력된다 (제품 경계, §8.2a)" {
+    // `LSPB2` 는 `activateStatus` 를 직접 불러 그 위 층(클릭 가능 판정 → `activateStatusBarItem`)을 안 지난다 — 항목을
+    // 「표시 전용」으로 돌린 변이(3회차 C9)가 살았다. 여기서는 포인터를 실제로 태운다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", "/nonexistent-dir-for-lsp-test/clangd", 1);
+    defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
+
+    var collected: std.ArrayList(AppSession.CollectedPane) = .empty;
+    defer {
+        for (collected.items) |*c| c.deinit(allocator);
+        collected.deinit(allocator);
+    }
+    const builder = pane_ops.paneFrameBuilder(session);
+    const colors: metal_frame.CellColors = .{ .default_fg = session.appearance.theme.foreground };
+    _ = editor_ops.openPathInActivePane(session, "src/platform/macos/session_host_notification_route.c") catch
+        return error.SkipZigTest;
+    editor_ops.lsp_client.pump(session); // tick 이 하는 일 — 클라이언트가 「없음」이 된다
+    session.collectStatusBarItems(&collected, builder, colors);
+
+    const Id = chrome.components.status_bar.ItemId;
+    var lsp_rect: ?chrome.ui.layout.UiRect = null;
+    for (session.statusBarTree().entries) |e| if (@as(Id, @enumFromInt(e.id)) == .editor_lsp) {
+        lsp_rect = e.rect;
+    };
+    const r = lsp_rect orelse return error.NoLspItem; // ⑴ 뜬다
+    try std.testing.expect(r.width > 0 and r.height > 0);
+    try std.testing.expect(AppSession.statusBarItemClickable(.editor_lsp)); // ⑵ 누를 수 있다(호버도 준다)
+
+    // ⑶ 포인터로 누른다 — 제품과 같은 진입점. 새 탭이 하나 늘고 설치 명령이 그 탭에 입력된다(Enter 는 사용자).
+    session.surface_initialized = true;
+    const tabs_before = session.tabs.items.len;
+    const cx: f64 = @floatCast(r.x + r.width / 2);
+    const cy: f64 = @floatCast(r.y + r.height / 2);
+    try std.testing.expect(session.pointInStatusBar(cx, cy));
+    session.mouse(1, cx, cy, 0, 0);
+    try std.testing.expectEqual(tabs_before + 1, session.tabs.items.len);
+}
+
 test "SBL3 상태바 언어 항목 — 뜨고, 자리가 맞고, 표시 전용이고, 문법이 없으면 없다" {
     // **`SB1` 은 접두어가 필터에 없어 `test-editor` 에서 안 돈다**(샤드에서만 돈다). 그래서 항목을
     // 통째로 지우거나 상한 검사를 빼먹은 변이가 **빠른 스위트에서 살아남았다**(2026-09-07 1회차

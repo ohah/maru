@@ -95,6 +95,7 @@ pub fn notePointer(self: *AppSession, x_px: f64, y_px: f64) void {
     st.pointer_valid = true;
     st.pointer_moved_ms = self.awakeMs();
     st.stop_judged = false;
+    if (self.editor_signature.active) return; // 상자의 주인이 시그니처다(§8.2d) — 포인터가 열지도 닫지도 않는다
     if (self.chrome_host.hover_box.open) {
         if (hover_box.contains(&self.chrome_host.hover_box, st.lines.items, chromeProps(self), x_px, y_px)) return;
         if (shownTerm(self)) |term| {
@@ -117,7 +118,7 @@ pub fn tick(self: *AppSession) void {
         }
         return;
     }
-    if (!enabled(self) or !st.pointer_valid or st.stop_judged or self.chrome_host.hover_box.open) return;
+    if (!enabled(self) or !st.pointer_valid or st.stop_judged or self.chrome_host.hover_box.open or self.editor_signature.active) return;
     if (now -| st.pointer_moved_ms < delayMs(self)) return;
     st.stop_judged = true;
     if (self.pointer_gesture_owner != .none) return; // 드래그 중에는 안 연다
@@ -366,7 +367,7 @@ fn shownTerm(self: *AppSession) ?*Term {
 /// **매 프레임 다시 묻는다** — 그 문서가 보이는가 · revision 이 같은가 · 그 줄이 아직 그려졌는가 · 오버레이가 없는가. 살아 있으면
 /// 앵커를 이 프레임의 좌표로 갱신한다. 열려 있고 그릴 수 있으면 true.
 pub fn refresh(self: *AppSession) bool {
-    if (!self.chrome_host.hover_box.open) return false;
+    if (!self.chrome_host.hover_box.open or self.editor_signature.active) return false;
     const st = &self.editor_hover;
     const term = shownTerm(self) orelse {
         hide(self);
@@ -390,7 +391,7 @@ pub fn refresh(self: *AppSession) bool {
 pub fn hide(self: *AppSession) void {
     const st = &self.editor_hover;
     st.waiting = false;
-    if (!self.chrome_host.hover_box.open) return;
+    if (!self.chrome_host.hover_box.open or self.editor_signature.active) return; // 시그니처의 상자는 시그니처가 닫는다
     self.chrome_host.hover_box.hide();
     st.clearLines(self.allocator);
     self.metal_dirty = true;
@@ -404,24 +405,33 @@ pub fn noteKey(self: *AppSession, modifier_only: bool) void {
 
 /// 휠 — 상자 안이면 행 단위로 스크롤하고 **소비**(true), 밖이면 닫고 흘려보낸다(false).
 pub fn wheel(self: *AppSession, x_px: f64, y_px: f64, delta_y: f64) bool {
-    const st = &self.editor_hover;
     if (!self.chrome_host.hover_box.open) return false;
-    if (!hover_box.contains(&self.chrome_host.hover_box, st.lines.items, chromeProps(self), x_px, y_px)) {
-        hide(self);
+    const shown = boxLines(self);
+    if (!hover_box.contains(&self.chrome_host.hover_box, shown, chromeProps(self), x_px, y_px)) {
+        hideOwner(self);
         return false;
     }
     const rows: i32 = if (delta_y > 0) -1 else if (delta_y < 0) 1 else 0;
-    if (rows != 0 and self.chrome_host.hover_box.scrollBy(rows, st.lines.items.len)) self.metal_dirty = true;
+    if (rows != 0 and self.chrome_host.hover_box.scrollBy(rows, shown.len)) self.metal_dirty = true;
     return true;
 }
 
 /// 버튼 눌림 — 상자 밖이면 닫는다(그 클릭은 흘러간다). 상자 안이면 삼킨다(true).
 pub fn mouseDown(self: *AppSession, x_px: f64, y_px: f64) bool {
-    const st = &self.editor_hover;
     if (!self.chrome_host.hover_box.open) return false;
-    if (hover_box.contains(&self.chrome_host.hover_box, st.lines.items, chromeProps(self), x_px, y_px)) return true;
-    hide(self);
+    if (hover_box.contains(&self.chrome_host.hover_box, boxLines(self), chromeProps(self), x_px, y_px)) return true;
+    hideOwner(self);
     return false;
+}
+
+/// 지금 상자를 든 쪽의 줄 — 시그니처가 열려 있으면 그것, 아니면 호버(§8.2d 「한 박스」).
+fn boxLines(self: *const AppSession) []const hover_box.Line {
+    if (self.editor_signature.active) return self.editor_signature.lines.items;
+    return self.editor_hover.lines.items;
+}
+
+fn hideOwner(self: *AppSession) void {
+    if (self.editor_signature.active) @import("editor_signature.zig").hide(self) else hide(self);
 }
 
 /// 그릴 줄(닫혀 있으면 빈 슬라이스).

@@ -24,6 +24,7 @@ const term_ops = @import("term.zig");
 const file_tree_backend = @import("../file_tree_backend.zig");
 const editor_hover = @import("editor_hover.zig");
 const editor_definition = @import("editor_definition.zig");
+const editor_signature = @import("editor_signature.zig");
 
 pub const Phase = enum {
     /// 실행 파일이 PATH 에 없다 — 상태바 「설치」.
@@ -77,6 +78,9 @@ pub const Client = struct {
     hover_seq: u32 = 0,
     /// 마지막으로 보낸 definition 요청의 seq(§8.2c).
     definition_seq: u32 = 0,
+    /// 마지막으로 보낸 signatureHelp 요청의 seq(§8.2d)와 서버가 준 트리거 글자.
+    signature_seq: u32 = 0,
+    signature_triggers: lsp.rpc.SignatureTriggers = .{},
 
     fn deinit(self: *Client, allocator: std.mem.Allocator) void {
         if (self.proc) |*p| {
@@ -115,6 +119,8 @@ pub const State = struct {
     received_hovers: u64 = 0,
     sent_definitions: u64 = 0,
     received_definitions: u64 = 0,
+    sent_signatures: u64 = 0,
+    received_signatures: u64 = 0,
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
         for (self.clients.items) |*c| c.deinit(allocator);
@@ -456,6 +462,7 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
             .initialize => {
                 if (r.is_error) return; // 다음 tick 의 읽기가 EOF 를 보거나, 서버가 살아 있으면 그대로 둔다(진단은 안 온다)
                 c.encoding = lsp.rpc.positionEncodingFromResult(r.result);
+                c.signature_triggers = lsp.rpc.signatureTriggersFromResult(r.result); // §8.2d — 트리거 글자는 서버가 준다
                 c.phase = .ready;
                 c.restarts = 0;
                 const msg = lsp.rpc.initializedNotification(self.allocator) catch return;
@@ -467,6 +474,11 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
                 const msg = lsp.rpc.exitNotification(self.allocator) catch return;
                 defer self.allocator.free(msg);
                 _ = send(self, c, msg);
+            },
+            .signature => |seq| {
+                self.editor_lsp.received_signatures += 1;
+                const view: ?lsp.rpc.SignatureView = if (r.is_error) null else lsp.rpc.signatureView(r.result, c.encoding);
+                editor_signature.onResponse(self, seq, view);
             },
             .definition => |seq| {
                 self.editor_lsp.received_definitions += 1;
@@ -701,6 +713,14 @@ pub fn statusFor(self: *AppSession, term: *Term) ?StatusView {
     return .{ .phase = c.phase, .exe = server.exe };
 }
 
+/// **요청 전에 문서를 먼저 맞춘다** — 위치를 싣는 요청(hover·definition·signatureHelp)이 그 프레임의 편집보다 먼저 서버에 닿으면
+/// 서버는 옛 본문의 자리를 본다(SIG1 실측: `add(` 를 친 직후의 요청이 didChange 보다 먼저 가서 `null` 이 왔다). 동기화는 프레임 끝에 한
+/// 번이지만(§8.2a), 요청이 나가는 순간에는 밀린 didChange 를 그 자리에서 보낸다.
+fn flushDocument(self: *AppSession, c: *Client, term: *Term) void {
+    if (c.phase != .ready) return;
+    syncOne(self, c, term);
+}
+
 /// 그 Term 의 문서를 연 **ready** 클라이언트(있으면). 호버(§8.2b)가 「서버가 있는가」를 이것으로 묻는다.
 pub fn readyClientFor(self: *AppSession, term: *Term) ?*Client {
     if (!self.loaded_config.config.lsp.enabled) return null;
@@ -713,9 +733,38 @@ pub fn readyClientFor(self: *AppSession, term: *Term) ?*Client {
     return c;
 }
 
+/// 그 Term 의 서버가 준 시그니처 트리거 글자(서버가 없거나 ready 아니면 `null`).
+pub fn signatureTriggersFor(self: *AppSession, term: *Term) ?lsp.rpc.SignatureTriggers {
+    const c = readyClientFor(self, term) orelse return null;
+    if (!c.signature_triggers.supported) return null;
+    return c.signature_triggers;
+}
+
+/// `textDocument/signatureHelp` 를 보낸다(§8.2d). 보냈으면 그 seq.
+pub fn requestSignatureHelp(self: *AppSession, term: *Term, offset: usize, kind: lsp.rpc.SignatureTriggerKind, trigger_char: ?u8, is_retrigger: bool) ?u32 {
+    const c = readyClientFor(self, term) orelse return null;
+    flushDocument(self, c, term); // 위치 요청은 지금 본문 기준이어야 한다
+    if (!c.signature_triggers.supported) return null;
+    const d = c.findDoc(term.surfaceId()) orelse return null;
+    const opened = term.rt.editor_doc orelse return null;
+    const content = opened.file.content;
+    const off = @min(offset, content.len);
+    const line_idx = opened.file.lines.lineAt(off);
+    const line = opened.file.lines.line(line_idx) orelse return null;
+    const text = content[line.start..line.contentEnd()];
+    const character = lsp.position.characterOf(text, @intCast(off -| line.start), c.encoding);
+    c.signature_seq +%= 1;
+    const msg = lsp.rpc.signatureHelpRequest(self.allocator, c.signature_seq, d.uri, @intCast(line_idx), character, kind, trigger_char, is_retrigger) catch return null;
+    defer self.allocator.free(msg);
+    if (!send(self, c, msg)) return null;
+    self.editor_lsp.sent_signatures += 1;
+    return c.signature_seq;
+}
+
 /// `textDocument/definition` 을 보낸다(§8.2c). 위치 변환은 hover 와 같다. 보냈으면 그 seq.
 pub fn requestDefinition(self: *AppSession, term: *Term, offset: usize) ?u32 {
     const c = readyClientFor(self, term) orelse return null;
+    flushDocument(self, c, term); // 위치 요청은 지금 본문 기준이어야 한다
     const d = c.findDoc(term.surfaceId()) orelse return null;
     const opened = term.rt.editor_doc orelse return null;
     const content = opened.file.content;
@@ -735,6 +784,7 @@ pub fn requestDefinition(self: *AppSession, term: *Term, offset: usize) ?u32 {
 /// `textDocument/hover` 를 보낸다(§8.2b). 문서 byte `offset` 을 서버 인코딩의 `{line, character}` 로 옮긴다. 보냈으면 그 seq.
 pub fn requestHover(self: *AppSession, term: *Term, offset: usize) ?u32 {
     const c = readyClientFor(self, term) orelse return null;
+    flushDocument(self, c, term); // 위치 요청은 지금 본문 기준이어야 한다
     const d = c.findDoc(term.surfaceId()) orelse return null;
     const opened = term.rt.editor_doc orelse return null;
     const content = opened.file.content;

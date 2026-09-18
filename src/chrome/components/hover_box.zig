@@ -29,6 +29,12 @@ pub const pad_cols: u32 = 1;
 pub const Line = struct {
     text: []const u8,
     role: tokens.ColorRole = .surface_fg,
+    /// 줄 안의 **강조 구간**(byte 반열림) — 시그니처 힌트의 활성 파라미터(§8.2d). raster 는 run 마다 색만 내므로 색 role 로 강조한다.
+    emphasis: ?Emphasis = null,
+
+    /// 기본은 테마 accent(`accent_bar` — 탭 언더바·사이드바 활성 막대와 같은 색). `focus_accent`(사이드바 활성 배경)는 어두운 테마에서
+    /// 회색이라 **덜** 강조돼 보였다(캡처 실측).
+    pub const Emphasis = struct { lo: u32, hi: u32, role: tokens.ColorRole = .accent_bar };
 };
 
 pub const State = struct {
@@ -146,8 +152,24 @@ pub fn view(
     for (lines[first .. first + visible], 0..) |l, i| {
         if (l.text.len == 0) continue;
         const row_y = rect.y + @as(i32, @intCast(i)) * @as(i32, @intCast(ch));
-        const runs = try arena.alloc(draw.Run, 1);
-        runs[0] = .{ .text = clipLine(l.text, inner_cols) };
+        const shown = clipLine(l.text, inner_cols);
+        // 강조 구간이 잘린 줄 안에 온전히 들면 run 셋(앞·강조·뒤), 아니면 run 하나 — 잘린 자리에 걸치면 강조하지 않는다(반쪽 강조는 오독).
+        const runs = if (l.emphasis) |e| blk: {
+            if (e.lo < e.hi and e.hi <= shown.len) {
+                const r = try arena.alloc(draw.Run, 3);
+                r[0] = .{ .text = shown[0..e.lo] };
+                r[1] = .{ .text = shown[e.lo..e.hi], .role = e.role };
+                r[2] = .{ .text = shown[e.hi..] };
+                break :blk r;
+            }
+            const r = try arena.alloc(draw.Run, 1);
+            r[0] = .{ .text = shown };
+            break :blk r;
+        } else blk: {
+            const r = try arena.alloc(draw.Run, 1);
+            r[0] = .{ .text = shown };
+            break :blk r;
+        };
         try out.append(arena, .{ .text = .{ .origin = .{ .x = rect.x + @as(i32, @intCast(cw * pad_cols)), .y = row_y }, .runs = runs, .role = l.role } });
     }
 }
@@ -207,6 +229,34 @@ test "HOVX2 스크롤 — 넘치는 만큼만, 보이는 줄은 scroll_rows 부�
     try testing.expect(!contains(&st, &many, p, @floatFromInt(rect.x - 13), @floatFromInt(rect.y + 1))); // padding 밖은 아니다
     st.hide();
     try testing.expect(!contains(&st, &many, p, @floatFromInt(rect.x + 1), @floatFromInt(rect.y + 1)));
+}
+
+test "HOVX4 강조 구간 — run 셋(앞·강조·뒤)으로 갈라 강조 run 만 role 이 다르다; 잘린 자리에 걸치면 강조하지 않는다 (§8.2d)" {
+    const p = testProps();
+    var st: State = .{};
+    st.show(100, 100, 20);
+    const one = [_]Line{.{ .text = "int add(int a, int b)", .emphasis = .{ .lo = 8, .hi = 13 } }};
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var ops: std.ArrayList(draw.Op) = .empty;
+    const tk = testTokens();
+    try view(&st, &one, p, &tk, arena, &ops);
+    for (ops.items) |op| if (op == .text) {
+        try testing.expectEqual(@as(usize, 3), op.text.runs.len);
+        try testing.expectEqualStrings("int add(", op.text.runs[0].text);
+        try testing.expectEqualStrings("int a", op.text.runs[1].text);
+        try testing.expectEqual(tokens.ColorRole.accent_bar, op.text.runs[1].role.?);
+        try testing.expect(op.text.runs[0].role == null and op.text.runs[2].role == null);
+        try testing.expectEqualStrings(", int b)", op.text.runs[2].text);
+    };
+    // 상한 폭에서 잘려 강조 구간이 걸치면 run 하나 — 반쪽 강조를 내지 않는다.
+    var long_buf: [120]u8 = undefined;
+    @memset(&long_buf, 'x');
+    const long = [_]Line{.{ .text = &long_buf, .emphasis = .{ .lo = 70, .hi = 100 } }};
+    var ops2: std.ArrayList(draw.Op) = .empty;
+    try view(&st, &long, p, &tk, arena, &ops2);
+    for (ops2.items) |op| if (op == .text) try testing.expectEqual(@as(usize, 1), op.text.runs.len);
 }
 
 test "HOVX3 view — 배경 하나 + 빈 줄을 뺀 텍스트 op, 스크롤한 만큼 건너뛴다, 화면 아래면 위로 뒤집힌다" {

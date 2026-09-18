@@ -276,6 +276,9 @@ pub const editor_context_bindings = [_]EditorContextBinding{
     .{ .chord = .{ .modifiers = .{ .control = true }, .key = .{ .char = '-' } }, .action = .navigate_back, .needs_editable = false },
     .{ .chord = .{ .modifiers = .{ .control = true, .shift = true }, .key = .{ .char = '-' } }, .action = .navigate_forward, .needs_editable = false },
     .{ .chord = .{ .modifiers = .{ .control = true, .shift = true }, .key = .{ .char = '_' } }, .action = .navigate_forward, .needs_editable = false },
+    // `⇧⌘Space` — 시그니처 힌트(tooling §8.2d, VS Code `editor.action.triggerParameterHints`). ETX4 ⑵: 전역·터미널 표에 없어 겹치지 않는
+    // `⌘` chord — 근거는 키 입력 문서 「편집기 Term 컨텍스트」의 그 문단. 편집기에서만 뜻이 있다(서버가 없으면 무동작).
+    .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = ' ' } }, .action = .trigger_parameter_hints, .needs_editable = true }, // 비교 뷰에는 서버가 없다 — 예외 규칙대로 편집 가능한 문서만
     .{ .chord = .{ .modifiers = .{ .option = true, .shift = true }, .key = .arrow_down }, .action = .duplicate_lines, .needs_editable = true }, // Shift+Opt+Down
     .{ .chord = .{ .modifiers = .{ .option = true }, .key = .arrow_up }, .action = .move_lines_up, .needs_editable = true }, // Opt+Up
     .{ .chord = .{ .modifiers = .{ .option = true }, .key = .arrow_down }, .action = .move_lines_down, .needs_editable = true }, // Opt+Down
@@ -1199,6 +1202,7 @@ test "ETX4 편집기 컨텍스트 기본키가 전역 표를 안 오염시킨다
         .{ .key = .{ .char = 'D' }, .action = .add_next_occurrence }, // ⌘D — native-editor-ui.md §9.1 확정
         .{ .key = .arrow_up, .action = .add_cursor_above }, // ⌥⌘↑ — §3.2b, focus_pane_up 에서 가져옴
         .{ .key = .arrow_down, .action = .add_cursor_below }, // ⌥⌘↓ — §3.2b
+        .{ .key = .{ .char = ' ' }, .action = .trigger_parameter_hints }, // ⇧⌘Space — tooling §8.2d(전역과 안 겹친다)
     };
     //   ⑷ **`⌃` 조합 — 편집기 Term 에는 PTY 가 없다**(2026-09-18, `⌃-`·`⌃⇧-` 뒤로/앞으로 — tooling §8.2c, 사용자 결정). `⌃` 를
     //      막던 근거(제어문자)는 터미널 Term 의 것이고 이 표는 편집기 Term 에서만 읽힌다. 조건은 ⑶ 과 같다 — 전역 표·터미널 매크로

@@ -12400,6 +12400,11 @@ test "FMT1 문서 포맷 — ⇧⌥F 로 두 줄이 한 응답에 바뀌고 되�
     try testing.expectEqualStrings("Zint  x;\nint   y;\n", content(term));
     try testing.expect(fx.session.chrome_host.notice.open);
     try testing.expect(std.mem.startsWith(u8, &fx.session.notice_message_buf, maru.i18n.t(.fmt_stale)));
+    // 두 알림의 **뜻**을 글자 그대로 잰다 — `t()` 로 같은 표를 읽으면 번역 둘이 바뀌어도 초록이다(적대적 3회차 C5·C6).
+    try testing.expect(std.mem.indexOf(u8, maru.i18n.tIn(.en, .fmt_stale), "discarded") != null);
+    try testing.expect(std.mem.indexOf(u8, maru.i18n.tIn(.ko, .fmt_stale), "버렸") != null);
+    try testing.expect(std.mem.indexOf(u8, maru.i18n.tIn(.en, .fmt_rejected), "rejected") != null);
+    try testing.expect(std.mem.indexOf(u8, maru.i18n.tIn(.ko, .fmt_rejected), "거부") != null);
     fx.session.chrome_host.notice.dismiss();
     try removeMarkerHover(fx.session, term, "Z");
     // ⑶ 이미 정리된 문서 — 빈 결과는 무동작이고 되돌리기 항목도 만들지 않는다.

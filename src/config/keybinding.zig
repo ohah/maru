@@ -279,6 +279,8 @@ pub const editor_context_bindings = [_]EditorContextBinding{
     // `⇧⌘Space` — 시그니처 힌트(tooling §8.2d, VS Code `editor.action.triggerParameterHints`). ETX4 ⑵: 전역·터미널 표에 없어 겹치지 않는
     // `⌘` chord — 근거는 키 입력 문서 「편집기 Term 컨텍스트」의 그 문단. 편집기에서만 뜻이 있다(서버가 없으면 무동작).
     .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = ' ' } }, .action = .trigger_parameter_hints, .needs_editable = true }, // 비교 뷰에는 서버가 없다 — 예외 규칙대로 편집 가능한 문서만
+    // `⇧⌥F` — 문서 포맷(tooling §8.2e, VS Code `editor.action.formatDocument`). ETX4 ⑴ `⌘` 없는 `⌥`. 문서를 바꾸므로 편집 가능할 때만.
+    .{ .chord = .{ .modifiers = .{ .option = true, .shift = true }, .key = .{ .char = 'F' } }, .action = .format_document, .needs_editable = true },
     .{ .chord = .{ .modifiers = .{ .option = true, .shift = true }, .key = .arrow_down }, .action = .duplicate_lines, .needs_editable = true }, // Shift+Opt+Down
     .{ .chord = .{ .modifiers = .{ .option = true }, .key = .arrow_up }, .action = .move_lines_up, .needs_editable = true }, // Opt+Up
     .{ .chord = .{ .modifiers = .{ .option = true }, .key = .arrow_down }, .action = .move_lines_down, .needs_editable = true }, // Opt+Down

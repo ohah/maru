@@ -15,7 +15,10 @@ pub const RequestId = union(enum) {
     hover: u32,
     definition: u32,
     signature: u32,
+    formatting: u32,
 };
+/// `formatting`(2단 ④, §8.2e)의 id 는 `formatting_id_base + seq`. u32 안(4_294_967_295)이라 seq 는 2.9 억까지.
+pub const formatting_id_base: u32 = 4_000_000_000;
 /// `signatureHelp`(2단 ③, §8.2d)의 id 는 `signature_id_base + seq` — definition 보다 위. u32 안에서 셋이 안 겹친다(각 1e9 칸).
 pub const signature_id_base: u32 = 3_000_000_000;
 pub const initialize_id: u32 = 1;
@@ -223,6 +226,30 @@ fn markupText(v: ?std.json.Value) ?[]const u8 {
         .string => |s| if (s.len > 0) s else null,
         .object => |o| if (o.get("value")) |val| (if (val == .string and val.string.len > 0) val.string else null) else null,
         else => null,
+    };
+}
+
+/// `textDocument/formatting`(§8.2e). 들여쓰기 단위는 이 편집기의 탭 문자(`insertSpaces = false`), `tabSize = editor.tab-width`.
+pub fn formattingRequest(allocator: std.mem.Allocator, seq: u32, uri: []const u8, tab_size: u32, insert_spaces: bool) error{OutOfMemory}![]u8 {
+    return std.json.Stringify.valueAlloc(allocator, .{
+        .jsonrpc = "2.0",
+        .id = formatting_id_base + seq,
+        .method = "textDocument/formatting",
+        .params = .{ .textDocument = .{ .uri = uri }, .options = .{ .tabSize = tab_size, .insertSpaces = insert_spaces } },
+    }, .{});
+}
+
+/// `initialize` 응답의 `documentFormattingProvider`(bool 또는 object).
+pub fn formattingSupported(result: ?std.json.Value) bool {
+    const r = result orelse return false;
+    if (r != .object) return false;
+    const caps = r.object.get("capabilities") orelse return false;
+    if (caps != .object) return false;
+    const prov = caps.object.get("documentFormattingProvider") orelse return false;
+    return switch (prov) {
+        .bool => |b| b,
+        .object => true,
+        else => false,
     };
 }
 
@@ -438,7 +465,9 @@ pub fn classify(root: std.json.Value) Incoming {
     const rid: RequestId = switch (id_num) {
         initialize_id => .initialize,
         shutdown_id => .shutdown,
-        else => if (id_num >= signature_id_base and id_num - signature_id_base <= std.math.maxInt(u32))
+        else => if (id_num >= formatting_id_base and id_num - formatting_id_base <= std.math.maxInt(u32))
+            .{ .formatting = @intCast(id_num - formatting_id_base) }
+        else if (id_num >= signature_id_base and id_num - signature_id_base <= std.math.maxInt(u32))
             .{ .signature = @intCast(id_num - signature_id_base) }
         else if (id_num >= definition_id_base and id_num - definition_id_base <= std.math.maxInt(u32))
             .{ .definition = @intCast(id_num - definition_id_base) }
@@ -699,6 +728,32 @@ test "LSJ7 signatureHelp — 요청 id 3_000_000_000+seq·context, capability, �
     var r4 = try parse(a, "{\"signatures\":[{\"label\":\"f()\"}],\"activeSignature\":9}");
     defer r4.deinit();
     try testing.expectEqual(@as(u32, 0), signatureView(r4.value, .utf8).?.index);
+}
+
+test "LSJ8 formatting — 요청 id 4_000_000_000+seq·options(tabSize·insertSpaces false), capability bool/object (§8.2e)" {
+    const a = testing.allocator;
+    const req = try formattingRequest(a, 2, "file:///a.c", 4, false);
+    defer a.free(req);
+    try testing.expect(std.mem.indexOf(u8, req, "\"id\":4000000002") != null);
+    try testing.expect(std.mem.indexOf(u8, req, "\"method\":\"textDocument/formatting\"") != null);
+    try testing.expect(std.mem.indexOf(u8, req, "\"options\":{\"tabSize\":4,\"insertSpaces\":false}") != null);
+    var p1 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":4000000002,\"result\":[]}");
+    defer p1.deinit();
+    const c1 = classify(p1.value);
+    try testing.expect(c1 == .response and c1.response.id == .formatting and c1.response.id.formatting == 2);
+    var p2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":3000000002,\"result\":null}");
+    defer p2.deinit();
+    try testing.expect(classify(p2.value).response.id == .signature); // 3e9 대는 signature
+    var c_true = try parse(a, "{\"capabilities\":{\"documentFormattingProvider\":true}}");
+    defer c_true.deinit();
+    var c_obj = try parse(a, "{\"capabilities\":{\"documentFormattingProvider\":{\"workDoneProgress\":false}}}");
+    defer c_obj.deinit();
+    var c_no = try parse(a, "{\"capabilities\":{\"hoverProvider\":true}}");
+    defer c_no.deinit();
+    var c_false = try parse(a, "{\"capabilities\":{\"documentFormattingProvider\":false}}");
+    defer c_false.deinit();
+    try testing.expect(formattingSupported(c_true.value) and formattingSupported(c_obj.value));
+    try testing.expect(!formattingSupported(c_no.value) and !formattingSupported(c_false.value) and !formattingSupported(null));
 }
 
 test "LSJ4 file URI — 공백·한글은 퍼센트, 되읽으면 같은 경로 (§8.2a)" {

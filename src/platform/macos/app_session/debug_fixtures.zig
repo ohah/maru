@@ -1237,6 +1237,20 @@ pub fn applyForcedParamHints(self: *AppSession) void {
     _ = editor_ops.signature_client.triggerManual(self);
 }
 
+/// MARU_FORCE_FORMAT=1 — 활성 편집기에 `format_document` 를 부른다(캡처 전용, tooling §8.2e). 서버가 뜨기 전에는 요청이 안 나가므로
+/// **보내질 때까지** 매 프레임 되풀이하고, 한 번 보내지면 다시 부르지 않는다(응답이 문서를 바꾼 뒤 또 보내면 두 번째 결과가 빈 배열이라
+/// 해는 없지만 되풀이가 뜻이 아니다). 요청이 나간 순간 caret 훅의 래치를 세운다 — 정의로 이동과 같은 이유(다음 프레임의 caret 훅이
+/// 포맷이 민 caret 을 되돌린다). 작업 공간 복원 알림은 먼저 내린다.
+pub fn applyForcedFormat(self: *AppSession) void {
+    if (std.c.getenv("MARU_FORCE_FORMAT") == null) return;
+    if (self.debug_format_sent) return;
+    if (self.chrome_host.notice.open) self.chrome_host.notice.dismiss();
+    if (editor_ops.format_client.formatDocument(self)) {
+        self.debug_format_sent = true;
+        self.debug_diff_caret_keys_done = true;
+    }
+}
+
 pub fn applyForcedScmTab(self: *AppSession) void {
     // MARU_FORCE_SCM_TAB=history|agent — 그 탭을 고른 것처럼 만든다(P4). 탭 전환은 클릭으로만
     // 일어나므로 포인터 없는 캡처 하니스에서는 히스토리 화면을 얻을 방법이 없다(행 호버와 같은 자리).

@@ -110,6 +110,7 @@ pub const entries = [_]Entry{
     .{ .action = .navigate_back, .key = "navigate_back", .title = "Editor: Go Back" },
     .{ .action = .navigate_forward, .key = "navigate_forward", .title = "Editor: Go Forward" },
     .{ .action = .trigger_parameter_hints, .key = "trigger_parameter_hints", .title = "Editor: Trigger Parameter Hints" },
+    .{ .action = .format_document, .key = "format_document", .title = "Editor: Format Document" },
     .{ .action = .copy_editor_selection, .key = "copy_editor_selection", .title = "Editor: Copy Selection" },
     .{ .action = .add_next_occurrence, .key = "add_next_occurrence", .title = "Editor: Add Next Occurrence" },
     .{ .action = .jump_to_bracket, .key = "jump_to_bracket", .title = "Editor: Go to Bracket" },

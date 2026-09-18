@@ -5268,6 +5268,7 @@ pub const AppSession = struct {
     editor_definition: editor_ops.definition_client.State = .{},
     /// 시그니처 힌트 상태(tooling §8.2d) — 상자의 주인 여부·요청 seq·줄.
     editor_signature: editor_ops.signature_client.State = .{},
+    editor_format: editor_ops.format_client.State = .{},
     // window close 확인을 통과했지만 remote event settlement가 남은 경우의 retry latch. 이 값이 켜진 동안
     // topology와 native close intent는 게시하지 않고 tick이 같은 close graph만 한 번 진행한다.
     window_close_pending: bool = false,
@@ -6977,6 +6978,8 @@ pub const AppSession = struct {
     blink_visible: bool = true,
     /// 비교 뷰 caret 캡처 훅이 이미 키를 태웠는가(`MARU_DIFF_CARET_KEYS`). **태운 뒤에만** 세운다.
     debug_diff_caret_keys_done: bool = false,
+    /// `MARU_FORCE_FORMAT` 이 요청을 보냈다(캡처 전용 래치).
+    debug_format_sent: bool = false,
     // 현재 반주기가 시작된 시각(ns, awake clock). 0=미초기화(다음 tick이 baseline을 잡는다 — 스피너와 같은 규약).
     blink_phase_ns: i128 = 0,
     /// kitty 애니메이션 진행의 baseline(실경과 기준). 커서 깜빡임과 같은 결로 **실경과 ms** 를 코어에
@@ -10395,6 +10398,7 @@ pub const AppSession = struct {
             .navigate_back => _ = editor_ops.navigateBack(self), // §5.2 — 갈 곳이 없으면 무동작
             .navigate_forward => _ = editor_ops.navigateForward(self),
             .trigger_parameter_hints => _ = editor_ops.signature_client.triggerManual(self), // §8.2d
+            .format_document => _ = editor_ops.format_client.formatDocument(self), // §8.2e
             // 접기/펼치기 — 편집기가 아니거나 접을 것이 없으면 무동작(비교 뷰도 거절한다. §4.1f).
             // 비교 뷰면 그쪽을 먼저 본다 — 축이 달라 함수가 갈린다(§4.1g "비교 뷰").
             .copy_editor_selection => _ = editor_ops.copyDiffSelection(self) or editor_ops.copySelection(self),
@@ -20371,6 +20375,7 @@ pub const AppSession = struct {
         debug_fixtures.applyForcedEditorHover(self); // 캡처 전용: 호버는 포인터 정지로만 뜬다(§8.2b)
         debug_fixtures.applyForcedEditorGotoDef(self); // 캡처 전용: 정의로 이동(§8.2c)
         debug_fixtures.applyForcedParamHints(self); // 캡처 전용: 시그니처 힌트(§8.2d)
+        debug_fixtures.applyForcedFormat(self); // 캡처 전용: 문서 포맷(§8.2e)
         debug_fixtures.applyForcedStageAll(self); // 캡처 전용: 전체 스테이지는 그룹 머리 클릭으로만 시작된다(RS4a)
         debug_fixtures.applyForcedFetch(self); // 캡처 전용: 원격 갱신은 브랜치 줄 클릭으로만 시작된다(P6)
         debug_fixtures.applyForcedRemoteMenu(self); // 캡처 전용: `∨` 메뉴도 클릭으로만 열린다(P6b)

@@ -87,6 +87,7 @@ pub const hover_client = @import("editor_hover.zig");
 pub const definition_client = @import("editor_definition.zig");
 /// 시그니처 힌트(tooling §8.2d) — 호버 박스를 같이 쓴다.
 pub const signature_client = @import("editor_signature.zig");
+pub const format_client = @import("editor_format.zig");
 
 pub const Opened = struct {
     /// 열린 문서. **읽어 온 bytes를 빌리지 않고 소유한다**(N2 — `edit_doc.EditableFile`).
@@ -4016,7 +4017,7 @@ fn selectNextMatchAtOrAfter(self: *AppSession, term: *Term, at: usize) void {
 /// 앞서 두는 `read_only` 검사는 **싼 조기 반환**이지 두 번째 방어가 아니다 — 지워도 동작이
 /// 같음을 뮤턴트로 확인했다(적대적 검증 2026-08-27). 이 파일의 여덟 자리가 같은 관용구를 쓰므로
 /// 그 형태는 유지하되, **무엇이 실제로 막는지**를 여기 한 번 적어 둔다.
-fn applyEditAsOne(self: *AppSession, term: *Term, changes: []maru.session.editor.delta.Change) bool {
+pub fn applyEditAsOne(self: *AppSession, term: *Term, changes: []maru.session.editor.delta.Change) bool {
     var sels = selectionsForEdit(self, term) orelse return false;
     defer self.allocator.free(sels.items);
     const before = self.allocator.dupe(editor_selection.Selection, sels.items) catch return false;
@@ -12318,6 +12319,192 @@ test "SIG1 시그니처 힌트 — `(` 를 치면 열리고 첫 파라미터가 
     try testing.expectEqual(@as(usize, 0), fx.session.editor_hover.lines.items.len); // 호버는 내려갔다
     try testing.expect(fx.session.chrome_host.hover_box.open); // 상자는 시그니처의 것
     signature_client.hide(fx.session);
+}
+
+test "FMT1 문서 포맷 — ⇧⌥F 로 두 줄이 한 응답에 바뀌고 되돌리기 하나로 돌아오며 caret 이 같은 글자를 가리킨다; 낡은 revision·겹침은 버리고 알림, 빈 결과·서버 없음·읽기 전용은 무동작, 낡은 seq (제품 경계, §8.2e)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
+    var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const fz = try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake});
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);
+    defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const cz = try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root});
+    _ = setenv("MARU_CONFIG", cz.ptr, 1);
+    defer _ = unsetenv("MARU_CONFIG");
+    if (fx.session.config_path_buffer) |b| allocator.free(b);
+    fx.session.config_path_buffer = null;
+    fx.session.editor_lsp.auto_trust_answer = .allow;
+    // 두 줄 모두 공백 묶음이 있다 — 응답 하나가 두 줄을 바꿔야 「한 연산」이 관측된다(한 줄이면 undo 하나와 구분이 안 된다).
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "f.c", .data = "int  x;\nint   y;\n" });
+    const path = try std.fs.path.join(allocator, &.{ root, "f.c" });
+    defer allocator.free(path);
+    const saved_repo = fx.session.git_repo;
+    fx.session.git_repo = @constCast(root);
+    defer fx.session.git_repo = saved_repo;
+    const term = (try pane_ops.openFileTermInActivePane(fx.session, path, .text)).term;
+    fx.session.surface_initialized = true;
+    fx.session.backing_width_px = 1200;
+    fx.session.backing_height_px = 800;
+    const Ctx = struct { fx: *PaneFixture, term: *Term };
+    const ctx: Ctx = .{ .fx = &fx, .term = term };
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
+        fn f(c: Ctx) bool {
+            return c.term.rt.editor_diagnostics.lsp.items.len >= 1;
+        }
+    }.f));
+    const content = struct {
+        fn f(t: *Term) []const u8 {
+            return t.rt.editor_doc.?.file.content;
+        }
+    }.f;
+    const settled = struct {
+        fn f(c: Ctx) bool {
+            return !c.fx.session.editor_format.waiting;
+        }
+    }.f;
+
+    // ⑴ caret 을 둘째 줄 `y`(offset 14) 에 두고 `⇧⌥F` — 요청 하나 → 두 줄이 한 응답으로 바뀐다. caret 은 여전히 `y` 를 가리킨다(offset 11).
+    term.rt.editor_selection = .{ .anchor_start = 14, .anchor_end = 14, .focus = 14 };
+    const undo_before = term.rt.editor_undo_len;
+    try pressKey(&fx, .{ .char = 'F' }, .{ .option = true, .shift = true });
+    try testing.expectEqual(@as(u64, 1), fx.session.editor_lsp.sent_formattings);
+    try testing.expect(fx.session.editor_format.waiting);
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
+    try testing.expectEqual(@as(u64, 1), fx.session.editor_format.applied);
+    try testing.expectEqualStrings("int x;\nint y;\n", content(term));
+    try testing.expectEqual(@as(usize, 11), term.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(u8, 'y'), content(term)[term.rt.editor_selection.?.focus]);
+    try testing.expectEqual(undo_before + 1, term.rt.editor_undo_len); // 되돌리기 **하나**
+    // 되돌리기 하나로 두 줄이 다 돌아오고 caret 도 원래 글자(offset 14 의 `y`)로.
+    fx.session.dispatchAppAction(.editor_undo);
+    try testing.expectEqualStrings("int  x;\nint   y;\n", content(term));
+    try testing.expectEqual(@as(usize, 14), term.rt.editor_selection.?.focus);
+    try testing.expectEqual(undo_before, term.rt.editor_undo_len);
+    // ⑵ **낡은 revision 은 버리고 알린다** — 요청을 보낸 뒤 응답 전에 문서를 고치면 그 결과는 이 문서의 것이 아니다.
+    fx.session.dispatchAppAction(.format_document); // 팔레트 명령 경로
+    try testing.expectEqual(@as(u64, 2), fx.session.editor_lsp.sent_formattings);
+    const asked = fx.session.editor_format.asked_version;
+    term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };
+    try testing.expect(insertText(fx.session, term, "Z"));
+    try testing.expect(term.rt.editor_lsp_version != asked);
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
+    try testing.expectEqual(@as(u64, 1), fx.session.editor_format.stale);
+    try testing.expectEqual(@as(u64, 1), fx.session.editor_format.applied); // 적용되지 않았다
+    try testing.expectEqualStrings("Zint  x;\nint   y;\n", content(term));
+    try testing.expect(fx.session.chrome_host.notice.open);
+    try testing.expect(std.mem.startsWith(u8, &fx.session.notice_message_buf, maru.i18n.t(.fmt_stale)));
+    fx.session.chrome_host.notice.dismiss();
+    try removeMarkerHover(fx.session, term, "Z");
+    // ⑶ 이미 정리된 문서 — 빈 결과는 무동작이고 되돌리기 항목도 만들지 않는다.
+    fx.session.dispatchAppAction(.format_document);
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
+    try testing.expectEqual(@as(u64, 2), fx.session.editor_format.applied);
+    try testing.expectEqualStrings("int x;\nint y;\n", content(term));
+    const undo_clean = term.rt.editor_undo_len;
+    fx.session.dispatchAppAction(.format_document);
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
+    try testing.expectEqual(@as(u64, 1), fx.session.editor_format.noop);
+    try testing.expectEqual(@as(u64, 2), fx.session.editor_format.applied);
+    try testing.expectEqual(undo_clean, term.rt.editor_undo_len);
+    try testing.expect(!fx.session.chrome_host.notice.open);
+    // ⑷ **겹치는 edit 은 전부 거부** — 문서는 그대로, 알림. (`BADFMT` 는 겹치는 edit 둘을 낸다.)
+    term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };
+    try testing.expect(insertText(fx.session, term, "BADFMT "));
+    const before_bad = try allocator.dupe(u8, content(term));
+    defer allocator.free(before_bad);
+    const undo_bad = term.rt.editor_undo_len;
+    fx.session.dispatchAppAction(.format_document);
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
+    try testing.expectEqual(@as(u64, 1), fx.session.editor_format.rejected);
+    try testing.expectEqualStrings(before_bad, content(term));
+    try testing.expectEqual(undo_bad, term.rt.editor_undo_len);
+    try testing.expect(fx.session.chrome_host.notice.open);
+    try testing.expect(std.mem.startsWith(u8, &fx.session.notice_message_buf, maru.i18n.t(.fmt_rejected)));
+    fx.session.chrome_host.notice.dismiss();
+    try removeMarkerHover(fx.session, term, "BADFMT ");
+    // ⑸ 서버가 포맷을 못 하면 요청이 나가지 않는다 · 읽기 전용 문서도.
+    const sent_before = fx.session.editor_lsp.sent_formattings;
+    const client = lsp_client.readyClientFor(fx.session, term) orelse return error.NoClient;
+    client.formatting_supported = false;
+    try pressKey(&fx, .{ .char = 'F' }, .{ .option = true, .shift = true });
+    try testing.expectEqual(sent_before, fx.session.editor_lsp.sent_formattings);
+    try testing.expect(!fx.session.editor_format.waiting);
+    client.formatting_supported = true;
+    term.rt.editor_doc.?.file.read_only = true;
+    try pressKey(&fx, .{ .char = 'F' }, .{ .option = true, .shift = true });
+    try testing.expectEqual(sent_before, fx.session.editor_lsp.sent_formattings);
+    term.rt.editor_doc.?.file.read_only = false;
+    // ⑹ 낡은 seq 는 버린다 — 기다리는 seq 가 아니면 상태도 문서도 안 건드린다.
+    fx.session.editor_format.waiting = true;
+    fx.session.editor_format.waiting_seq = 99;
+    format_client.onResponse(fx.session, 98, null, .utf8);
+    try testing.expect(fx.session.editor_format.waiting);
+    fx.session.editor_format.waiting = false;
+    // ⑺ **포맷은 화면이 아니라 문서에 한다** — 요청 뒤 같은 pane 에서 다른 파일을 열어 그 문서가 안 보여도 응답은 그 문서에 적용된다
+    // (hover·시그니처의 「보이는 Term 에만」과 다르다).
+    term.rt.editor_selection = .{ .anchor_start = 3, .anchor_end = 3, .focus = 3 };
+    try testing.expect(insertText(fx.session, term, " ")); // `int  x;`
+    fx.session.dispatchAppAction(.format_document);
+    try testing.expect(fx.session.editor_format.waiting);
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "g.c", .data = "int g;\n" });
+    const other = try std.fs.path.join(allocator, &.{ root, "g.c" });
+    defer allocator.free(other);
+    _ = try pane_ops.openFileTermInActivePane(fx.session, other, .text);
+    try testing.expect(pane_ops.activePane(fx.session).activeTerm() != term);
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
+    try testing.expectEqual(@as(u64, 3), fx.session.editor_format.applied);
+    try testing.expectEqualStrings("int x;\nint y;\n", content(term));
+}
+
+test "FMT2 문서 포맷 — 서버가 documentFormattingProvider 를 안 내면 ⇧⌥F 가 요청을 보내지 않는다 (제품 경계, §8.2e)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
+    var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const fz = try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake});
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);
+    defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
+    _ = setenv("MARU_FAKE_LSP_NOFMTCAP", "1", 1);
+    defer _ = unsetenv("MARU_FAKE_LSP_NOFMTCAP");
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const cz = try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root});
+    _ = setenv("MARU_CONFIG", cz.ptr, 1);
+    defer _ = unsetenv("MARU_CONFIG");
+    if (fx.session.config_path_buffer) |b| allocator.free(b);
+    fx.session.config_path_buffer = null;
+    fx.session.editor_lsp.auto_trust_answer = .allow;
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "n.c", .data = "int  x;\n" });
+    const path = try std.fs.path.join(allocator, &.{ root, "n.c" });
+    defer allocator.free(path);
+    const saved_repo = fx.session.git_repo;
+    fx.session.git_repo = @constCast(root);
+    defer fx.session.git_repo = saved_repo;
+    const term = (try pane_ops.openFileTermInActivePane(fx.session, path, .text)).term;
+    const Ctx = struct { fx: *PaneFixture, term: *Term };
+    const ctx: Ctx = .{ .fx = &fx, .term = term };
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
+        fn f(c: Ctx) bool {
+            return c.term.rt.editor_diagnostics.lsp.items.len >= 1;
+        }
+    }.f));
+    try testing.expect(lsp_client.readyClientFor(fx.session, term) != null);
+    term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };
+    try pressKey(&fx, .{ .char = 'F' }, .{ .option = true, .shift = true });
+    try testing.expectEqual(@as(u64, 0), fx.session.editor_lsp.sent_formattings);
+    try testing.expect(!fx.session.editor_format.waiting);
+    try testing.expectEqualStrings("int  x;\n", term.rt.editor_doc.?.file.content);
 }
 
 test "MMP2 미니맵의 축은 보이는 줄이다 — 접으면 스트립에서도 사라지고, 클릭은 보이는 줄 축으로 환산된다 (제품 경계, §6.1·§6.2)" {

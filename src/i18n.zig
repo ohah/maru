@@ -470,6 +470,9 @@ const Table = struct {
     nav_no_definition: [:0]const u8,
     /// `{0}` = 경로. root 밖이라 열지 않았다(§5.2 「표시와 접근을 가른다」).
     nav_outside_root: [:0]const u8,
+    /// 문서 포맷(§8.2e) — 요청 뒤 문서가 바뀌어 결과를 버렸다 / 결과가 겹치거나 모양이 틀려 거부했다.
+    fmt_stale: [:0]const u8,
+    fmt_rejected: [:0]const u8,
     cfg_editor_hover: [:0]const u8,
     cfg_editor_hover_delay: [:0]const u8,
     cfg_editor_parameter_hints: [:0]const u8,
@@ -1586,6 +1589,8 @@ const en: Table = .{
     .lsp_status_denied = "{s} not allowed — ask again",
     .nav_no_definition = "No definition found",
     .nav_outside_root = "Not opened — outside the workspace root: {0}",
+    .fmt_stale = "Document changed — format result discarded",
+    .fmt_rejected = "Format result rejected — edits overlap or are malformed",
     .cfg_editor_hover = "Hover box (diagnostics and language server info under the pointer)",
     .cfg_editor_hover_delay = "Hover delay (ms)",
     .cfg_editor_parameter_hints = "Parameter hints (signature while typing a call)",
@@ -2277,6 +2282,8 @@ const ko: Table = .{
     .lsp_status_denied = "{s} 거부됨 — 다시 묻기",
     .nav_no_definition = "정의를 찾지 못했습니다",
     .nav_outside_root = "루트 밖이라 열지 않습니다 — {0}",
+    .fmt_stale = "문서가 바뀌어 포맷 결과를 버렸습니다",
+    .fmt_rejected = "포맷 결과를 거부했습니다 — 겹치거나 모양이 틀립니다",
     .cfg_editor_hover = "호버 박스(포인터 아래의 진단·언어 서버 정보)",
     .cfg_editor_hover_delay = "호버 지연(ms)",
     .cfg_editor_parameter_hints = "시그니처 힌트(호출을 칠 때 매개변수 안내)",

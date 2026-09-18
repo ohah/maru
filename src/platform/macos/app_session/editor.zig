@@ -11893,6 +11893,56 @@ test "HOVB2 호버 박스 — 서버 없이 구문 오류만으로 열린다(i18
     fx.session.loaded_config.config.editor.hover = true;
 }
 
+test "GOTO2 정의로 이동 — utf-16 서버에는 character 를 utf-16 단위로 보낸다(byte 가 아니다) (제품 경계, §8.2c)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
+    var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const fz = try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake});
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);
+    defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
+    _ = setenv("MARU_FAKE_LSP_UTF16", "1", 1);
+    defer _ = unsetenv("MARU_FAKE_LSP_UTF16");
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const cz = try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root});
+    _ = setenv("MARU_CONFIG", cz.ptr, 1);
+    defer _ = unsetenv("MARU_CONFIG");
+    if (fx.session.config_path_buffer) |b| allocator.free(b);
+    fx.session.config_path_buffer = null;
+    fx.session.editor_lsp.auto_trust_answer = .allow;
+    // 첫 줄 `가 x;` — 가 는 3 byte·utf-16 1 unit. caret 을 `가` 뒤(byte 3)에 두면 character 는 1 이어야 한다(byte 로 보내면 3).
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "u.c", .data = "가 x;\nint y;\n" });
+    const path = try std.fs.path.join(allocator, &.{ root, "u.c" });
+    defer allocator.free(path);
+    const saved_repo = fx.session.git_repo;
+    fx.session.git_repo = @constCast(root);
+    defer fx.session.git_repo = saved_repo;
+    const term = (try pane_ops.openFileTermInActivePane(fx.session, path, .text)).term;
+    const Ctx = struct { fx: *PaneFixture, term: *Term };
+    const ctx: Ctx = .{ .fx = &fx, .term = term };
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
+        fn f(c: Ctx) bool {
+            return c.term.rt.editor_diagnostics.lsp.items.len >= 1;
+        }
+    }.f));
+    try testing.expectEqual(maru.session.editor.lsp.rpc.PositionEncoding.utf16, fx.session.editor_lsp.clients.items[0].encoding);
+    term.rt.editor_selection = .{ .anchor_start = 3, .anchor_end = 3, .focus = 3 };
+    try pressKey(&fx, .{ .function = 12 }, .{});
+    const start = fx.session.awakeMs();
+    while (fx.session.awakeMs() - start < 3000 and fx.session.editor_definition.navigated == 0) {
+        lsp_client.pump(fx.session);
+        _ = usleep(2_000);
+    }
+    try testing.expectEqual(@as(u64, 1), fx.session.editor_definition.navigated);
+    // 가짜 서버는 요청한 character 를 줄 1 에 되돌린다: utf-16 이면 1 → `int y;` 의 offset 7+1 = 8. byte(3)로 보냈으면 10 이다.
+    try testing.expectEqual(@as(usize, 8), term.rt.editor_selection.?.focus);
+}
+
 test "GOTO1 정의로 이동 — F12·⌘클릭이 서버 응답의 첫 항목으로 caret 을 옮기고 되돌아가기 표식을 쌓는다; ⌃-/⌃⇧- 로 뒤로·앞으로; 다른 파일은 열어서; root 밖·없음은 알림; 낡은 응답은 버린다 (제품 경계, §8.2c·§5.2)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
@@ -11946,25 +11996,28 @@ test "GOTO1 정의로 이동 — F12·⌘클릭이 서버 응답의 첫 항목�
         }
     }.f;
 
-    // ⑴ **F12** — caret 0 에서 → 서버의 첫 항목(줄 1 글자 4 = `y`, offset 11)으로. 되돌아가기 표식 하나(0).
-    term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };
+    // ⑴ **F12** — caret 2 에서 → 서버의 첫 항목(줄 1, 글자 = 요청한 2 → offset 7+2 = 9)으로. 되돌아가기 표식 하나(2).
+    //    가짜 서버가 요청 자리를 되돌리므로 「어디서 요청했는가」가 답에 남는다.
+    term.rt.editor_selection = .{ .anchor_start = 2, .anchor_end = 2, .focus = 2 };
     try pressKey(&fx, .{ .function = 12 }, .{});
     try testing.expect(fx.session.editor_definition.waiting);
+    try testing.expectEqual(@as(u32, 1), fx.session.editor_definition.waiting_seq);
     try testing.expectEqual(@as(u64, 1), fx.session.editor_lsp.sent_definitions);
     try testing.expect(navigatedIs(&fx, 1));
     try testing.expectEqual(@as(u64, 1), fx.session.editor_definition.navigated);
-    try testing.expectEqual(@as(usize, 11), term.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 9), term.rt.editor_selection.?.focus);
     try testing.expectEqual(@as(usize, 1), fx.session.editor_nav_back.items.len);
-    try testing.expectEqual(@as(usize, 0), fx.session.editor_nav_back.items[0].offset);
-    // ⑵ **⌃-** 뒤로 → 0, **⌃⇧-** 앞으로 → 11(`_` 도 같다).
+    try testing.expectEqual(@as(usize, 2), fx.session.editor_nav_back.items[0].offset);
+    // ⑵ **⌃-** 뒤로 → 2, **⌃⇧-** 앞으로 → 9(`_` 도 같다).
     try pressKey(&fx, .{ .char = '-' }, .{ .control = true });
-    try testing.expectEqual(@as(usize, 0), term.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 2), term.rt.editor_selection.?.focus);
     try testing.expectEqual(@as(usize, 1), fx.session.editor_nav_forward.items.len);
     try pressKey(&fx, .{ .char = '_' }, .{ .control = true, .shift = true });
-    try testing.expectEqual(@as(usize, 11), term.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 9), term.rt.editor_selection.?.focus);
     try pressKey(&fx, .{ .char = '-' }, .{ .control = true });
-    try testing.expectEqual(@as(usize, 0), term.rt.editor_selection.?.focus);
-    // ⑶ **⌘클릭**(mods 32) — 포인터 아래 글자에서 요청, 선택 드래그를 시작하지 않는다.
+    try testing.expectEqual(@as(usize, 2), term.rt.editor_selection.?.focus);
+    // ⑶ **⌘클릭**(mods 32) — **포인터 아래 글자**(offset 1, caret 2 가 아니다)에서 요청 → 줄 1 글자 1 = offset 8. 선택 드래그를 시작하지
+    //    않는다. 요청 seq 는 오른다(2).
     {
         var d = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
         d.dl.deinit(allocator);
@@ -11973,8 +12026,9 @@ test "GOTO1 정의로 이동 — F12·⌘클릭이 서버 응답의 첫 항목�
     fx.session.mouse(1, p1.x, p1.y, 0, 32);
     try testing.expect(fx.session.pointer_gesture_owner == .none);
     try testing.expectEqual(@as(u64, 2), fx.session.editor_lsp.sent_definitions);
+    try testing.expectEqual(@as(u32, 2), fx.session.editor_definition.waiting_seq);
     try testing.expect(navigatedIs(&fx, 2));
-    try testing.expectEqual(@as(usize, 11), term.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 8), term.rt.editor_selection.?.focus);
     fx.session.mouse(3, p1.x, p1.y, 0, 32);
     // ⑷ **다른 파일** — `XFILE` 이면 서버가 `other.c` 를 준다: 새 Term 이 열리고 그 문서의 줄 1 글자 4(offset 13)에 caret. ⌃- 로 돌아온다.
     term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };
@@ -11993,7 +12047,7 @@ test "GOTO1 정의로 이동 — F12·⌘클릭이 서버 응답의 첫 항목�
     try testing.expect(other != term);
     try testing.expectEqual(terms_before + 1, pane_ops.activePane(fx.session).terms.items.len);
     try testing.expect(std.mem.endsWith(u8, other.rt.editor_path orelse "", "other.c"));
-    try testing.expectEqual(@as(usize, 13), other.rt.editor_selection.?.focus); // "// other\n" = 9 + 4
+    try testing.expectEqual(@as(usize, 9 + 6), other.rt.editor_selection.?.focus); // "// other\n" = 9, 글자 = 요청한 6(`XFILE ` 뒤 caret) — `int z;` 는 6 글자라 줄 끝
     try pressKey(&fx, .{ .char = '-' }, .{ .control = true });
     try testing.expect(pane_ops.activePane(fx.session).activeTerm() == term);
     // ⑸ **root 밖** — 열지 않고 알린다. ⑹ **없음**(`null`) — 알린다. 둘 다 caret 은 그대로.

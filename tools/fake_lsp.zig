@@ -1,7 +1,7 @@
 //! 가짜 언어 서버(docs/editor-surface-tooling.md §8.2a 관측점) — 판정자가 `MARU_LSP_SERVER_OVERRIDE` 로 끼운다.
 //!
 //! stdin 에서 Content-Length 프레임을 읽고:
-//! - `initialize` → 응답(제안된 인코딩에 utf-8 이 있으면 `positionEncoding: "utf-8"`, textDocumentSync Full).
+//! - `initialize` → 응답(제안된 인코딩에 utf-8 이 있으면 `positionEncoding: "utf-8"`, `MARU_FAKE_LSP_UTF16=1` 이면 utf-16; textDocumentSync Full).
 //! - `initialized` → 서버 → 클라이언트 요청 `workspace/configuration` 하나(클라이언트가 **거부**해야 한다). 그 응답(id `srv-1`,
 //!   result 든 error 든)이 오면 `answered` — 안 온 채 didChange 를 받으면 WARN 진단의 message 가 `fake: warn noack` 이 된다
 //!   (답이 없으면 실서버는 그 요청에 **영원히 매달린다** — 카운터가 아니라 서버 쪽에서 봐야 변이 B7 이 죽는다).
@@ -12,7 +12,7 @@
 //! - `textDocument/hover` → contents(markdown): 펜스 `int fake` · `fake hover L<line>:C<char>` · `**bold** here` · 항목 14개(`- item N`,
 //!   상자 높이 상한 12행을 넘긴다), range = 그 줄의 `character..character+3`(클라이언트가 앵커로 써야 한다). 본문에 `NOHOVER` 가
 //!   있으면 `null` 결과(내용 없음). `MUTEHOVER` 가 있으면 hover 에 **답하지 않는다**(시간 초과 경로).
-//! - `textDocument/definition` → `Location[]` 둘(첫 항목 = 줄 1 글자 4, 둘째는 버려져야 한다). 본문에 `NODEF` 면 `null`, `XFILE` 이면
+//! - `textDocument/definition` → `Location[]` 둘(첫 항목 = 줄 1, 글자 = **요청한 character**; 둘째는 버려져야 한다). 본문에 `NODEF` 면 `null`, `XFILE` 이면
 //!   같은 디렉터리의 `other.c`, `OUTSIDE` 면 `file:///nonexistent-outside-root/x.c`(root 밖).
 //! - `shutdown` → `null` 응답, `exit` → 종료 0.
 //! - 시작하자마자 stderr 에 한 줄을 쓴다(실서버 clangd 가 그렇다) — stdout 에 섞이면 프레임이 깨진다(§8.2a 「stderr」).
@@ -142,7 +142,9 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
                 utf8 = true;
             };
         };
-        sendJson(allocator, .{ .jsonrpc = "2.0", .id = id.?, .result = .{ .capabilities = .{ .positionEncoding = if (utf8) "utf-8" else "utf-16", .textDocumentSync = @as(u8, 1) } } });
+        // `MARU_FAKE_LSP_UTF16=1` 이면 제안과 무관하게 utf-16 을 고른다 — 클라이언트의 byte ↔ character 변환을 제품 경계에서 재는 데 쓴다.
+        const force_utf16 = std.c.getenv("MARU_FAKE_LSP_UTF16") != null;
+        sendJson(allocator, .{ .jsonrpc = "2.0", .id = id.?, .result = .{ .capabilities = .{ .positionEncoding = if (utf8 and !force_utf16) "utf-8" else "utf-16", .textDocumentSync = @as(u8, 1) } } });
         return;
     }
     if (std.mem.eql(u8, method, "initialized")) {
@@ -174,8 +176,14 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
     }
     if (std.mem.eql(u8, method, "textDocument/definition")) {
         var req_uri: []const u8 = "";
-        if (obj.get("params")) |p| if (p == .object) if (p.object.get("textDocument")) |td| if (td == .object) {
-            req_uri = str(td.object.get("uri")) orelse "";
+        var req_char: i64 = 0;
+        if (obj.get("params")) |p| if (p == .object) {
+            if (p.object.get("textDocument")) |td| if (td == .object) {
+                req_uri = str(td.object.get("uri")) orelse "";
+            };
+            if (p.object.get("position")) |pos| if (pos == .object) {
+                req_char = int(pos.object.get("character")) orelse 0;
+            };
         };
         const def_mode = docMode(req_uri);
         const Pos = struct { line: i64, character: i64 };
@@ -198,7 +206,8 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
         // `Location[]` 로 낸다(가장 흔한 모양) — 둘째 항목은 버려져야 한다.
         const Loc = struct { uri: []const u8, range: Range };
         const locs = [_]Loc{
-            .{ .uri = uri, .range = .{ .start = .{ .line = 1, .character = 4 }, .end = .{ .line = 1, .character = 5 } } },
+            // 첫 항목의 character 는 **요청한 자리**를 되돌린다 — 어디서 요청했는지가 답에 남아야 caret 자리로 요청한 변이(B5)가 갈린다.
+            .{ .uri = uri, .range = .{ .start = .{ .line = 1, .character = req_char }, .end = .{ .line = 1, .character = req_char + 1 } } },
             .{ .uri = uri, .range = .{ .start = .{ .line = 0, .character = 0 }, .end = .{ .line = 0, .character = 1 } } },
         };
         sendJson(allocator, .{ .jsonrpc = "2.0", .id = id.?, .result = locs });

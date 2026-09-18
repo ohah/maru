@@ -516,7 +516,18 @@ breadcrumb 표시가 같은 함수를 쓰므로 그쪽도 같은 판정이었다
 전역 하나로 두면 다른 문서의 뒤늦은 `didOpen` 이 되돌린다(GOTO1 실측). ④ 캡처 훅 `MARU_FORCE_EDITOR_GOTO_DEF=1`: 요청이 나간 순간 caret
 훅의 래치를 세운다 — 응답이 caret 을 옮긴 뒤 다음 프레임의 caret 훅이 먼저 돌아 되돌렸다.
 
-**관측점**: `LSJ6`(순수: definition 요청 id·결과 세 모양·`LocationLink` 의 selection range 우선) · `CRUMB4`(순수: root `/`) · `GOTO1`(제품 경계: 가짜 서버 — `F12` 로 같은
+**적대적 검증(2026-09-18, 1~4회차 · 변이 23)**: 1회차 순수 9 → 생존 1 · 2회차 제품 8 → 1(+무효 2 → 유효로 재실행) · 3회차 배선 6 → 1 · 4회차
+재실행 5 → 1(선언한 등가).
+- **B5** `⌘클릭`이 포인터가 아니라 caret 자리로 — 가짜 서버가 늘 같은 자리를 답해 「어디서 요청했는가」가 안 보였다. 첫 항목의 character 에
+  **요청한 자리를 되돌리게** 하고, caret(2)과 포인터(1)를 갈라 잰다(`GOTO1`).
+- **C6** 요청 seq 가 안 오름 — 판정자가 seq 를 손으로 세웠다. 요청마다 `waiting_seq` 가 1·2 로 오르는 것을 잰다.
+- **B8** character 를 byte 로 — 가짜 서버가 utf-8 을 골라 등가였다. `MARU_FAKE_LSP_UTF16=1` 로 utf-16 을 고르게 하고 `가 x;` 의 byte 3 이
+  character 1 로 가는 것을 되돌아온 자리로 잰다(`GOTO2`).
+- **B1**(무효 → `seq > waiting_seq` 만 버리는 변이로 재실행) — 낮은 seq 의 낡은 응답이 움직였다 → `GOTO1` ⑺ 이 잡는다.
+- **A9** `ETX4` ⑷ 의 전역 겹침 대조 — 오늘 전역에 `⌃` chord 가 없어 **등가**. 관문으로 남기고 코드 주석에 적었다.
+
+**관측점**: `LSJ6`(순수: definition 요청 id·결과 세 모양·`LocationLink` 의 selection range 우선) · `CRUMB4`(순수: root `/`) · `GOTO2`(utf-16
+서버 — character 단위) · `GOTO1`(제품 경계: 가짜 서버 — `F12` 로 같은
 파일 안 이동(caret·되돌아가기 표식) · `⌃-`/`⌃⇧-` 로 뒤로·앞으로 · `⌘클릭` · 다른 파일(새 Term 이 열리고 caret) · root 밖(알림·안 열림) ·
 `null`(알림) · 낡은 응답 버림) · `ETX4` 의 ⑷ 갈래(`⌃` 예외 목록).
 

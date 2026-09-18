@@ -1223,6 +1223,8 @@ test "ETX4 편집기 컨텍스트 기본키가 전역 표를 안 오염시킨다
         }
         if (b.chord.modifiers.control and !b.chord.modifiers.command and !b.chord.modifiers.option) {
             control_chords += 1;
+            // 전역 표 대조는 오늘 **등가**다(적대적 1회차 A9 — 전역에 `⌃` chord 가 없어 빼도 초록) — 남기는 이유는 관문이다: 전역에 `⌃-` 가
+            // 생기는 날 이 줄이 빨개져 ⑵ 의 근거를 요구한다.
             for (default_app_bindings) |g| try std.testing.expect(!g.chord.eql(b.chord));
             for (default_terminal_bindings) |t| try std.testing.expect(!t.chord.eql(b.chord));
             var matched_c = false;

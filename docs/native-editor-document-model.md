@@ -877,6 +877,9 @@ selection이 배열(§3.2)이므로 복사·붙여넣기가 단순하지 않다.
 - **revision이 어긋나면 버린다.** 도구가 도는 동안 사용자가 편집했다면 그 edits는 다른 문서에 대한 것이다. 판정 축은 [editor-surface.md](editor-surface.md) §4의 revision CAS이며, 이 문서가 별도 축을 만들지 않는다.
 - **저장 시 자동 포맷은 이 계약이 정하지 않는다** — 저장 경로는 editor-surface가 소유한다. 다만 그것을 켤 때 위 세 규칙(undo 하나·커서 보존·revision 검증)은 그대로 적용된다.
 
+**섰다(2026-09-18 — [툴링 §8.2e](editor-surface-tooling.md)).** 세 규칙 중 둘은 `delta.apply`·`applyEditAsOne` 이 이미 들고 있었고, 새로 선 것은
+LSP `TextEdit[]` → `Delta` 변환(정렬·겹침 거부)과 revision 검증이다. 첫 소비자는 문서 포맷(`⇧⌥F`); rename·자동완성이 같은 길을 쓴다.
+
 **진단(린트·컴파일 오류) 표시는 §5 스팬 층이다.** 출처가 LSP `publishDiagnostics`든 CLI 린터든 화면에서는 하나의 층으로 합쳐지며, 표시 계약은 §5가 소유한다.
 
 > **혼동 주의**: `web/` 워크스페이스의 oxlint·oxfmt([file-panel-web-stack.md](file-panel-web-stack.md) §2.1)는 **Maru 자체를 개발할 때 쓰는 품질 게이트**이지 이 편집기가 사용자 파일에 돌리는 도구가 아니다. 둘은 이름만 겹친다.

@@ -25,6 +25,7 @@ const file_tree_backend = @import("../file_tree_backend.zig");
 const editor_hover = @import("editor_hover.zig");
 const editor_definition = @import("editor_definition.zig");
 const editor_signature = @import("editor_signature.zig");
+const editor_format = @import("editor_format.zig");
 
 pub const Phase = enum {
     /// 실행 파일이 PATH 에 없다 — 상태바 「설치」.
@@ -81,6 +82,9 @@ pub const Client = struct {
     /// 마지막으로 보낸 signatureHelp 요청의 seq(§8.2d)와 서버가 준 트리거 글자.
     signature_seq: u32 = 0,
     signature_triggers: lsp.rpc.SignatureTriggers = .{},
+    /// 마지막으로 보낸 formatting 요청의 seq(§8.2e)와 서버의 지원 여부.
+    formatting_seq: u32 = 0,
+    formatting_supported: bool = false,
 
     fn deinit(self: *Client, allocator: std.mem.Allocator) void {
         if (self.proc) |*p| {
@@ -121,6 +125,8 @@ pub const State = struct {
     received_definitions: u64 = 0,
     sent_signatures: u64 = 0,
     received_signatures: u64 = 0,
+    sent_formattings: u64 = 0,
+    received_formattings: u64 = 0,
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
         for (self.clients.items) |*c| c.deinit(allocator);
@@ -463,6 +469,7 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
                 if (r.is_error) return; // 다음 tick 의 읽기가 EOF 를 보거나, 서버가 살아 있으면 그대로 둔다(진단은 안 온다)
                 c.encoding = lsp.rpc.positionEncodingFromResult(r.result);
                 c.signature_triggers = lsp.rpc.signatureTriggersFromResult(r.result); // §8.2d — 트리거 글자는 서버가 준다
+                c.formatting_supported = lsp.rpc.formattingSupported(r.result); // §8.2e
                 c.phase = .ready;
                 c.restarts = 0;
                 const msg = lsp.rpc.initializedNotification(self.allocator) catch return;
@@ -474,6 +481,10 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
                 const msg = lsp.rpc.exitNotification(self.allocator) catch return;
                 defer self.allocator.free(msg);
                 _ = send(self, c, msg);
+            },
+            .formatting => |seq| {
+                self.editor_lsp.received_formattings += 1;
+                editor_format.onResponse(self, seq, if (r.is_error) null else r.result, c.encoding);
             },
             .signature => |seq| {
                 self.editor_lsp.received_signatures += 1;
@@ -738,6 +749,20 @@ pub fn signatureTriggersFor(self: *AppSession, term: *Term) ?lsp.rpc.SignatureTr
     const c = readyClientFor(self, term) orelse return null;
     if (!c.signature_triggers.supported) return null;
     return c.signature_triggers;
+}
+
+/// `textDocument/formatting` 을 보낸다(§8.2e). 서버가 없거나 지원하지 않으면 `null`. 요청 전에 밀린 didChange 를 먼저 보낸다.
+pub fn requestFormatting(self: *AppSession, term: *Term) ?u32 {
+    const c = readyClientFor(self, term) orelse return null;
+    if (!c.formatting_supported) return null;
+    flushDocument(self, c, term);
+    const d = c.findDoc(term.surfaceId()) orelse return null;
+    c.formatting_seq +%= 1;
+    const msg = lsp.rpc.formattingRequest(self.allocator, c.formatting_seq, d.uri, @max(1, term.rt.editor_tab_width), false) catch return null;
+    defer self.allocator.free(msg);
+    if (!send(self, c, msg)) return null;
+    self.editor_lsp.sent_formattings += 1;
+    return c.formatting_seq;
 }
 
 /// `textDocument/signatureHelp` 를 보낸다(§8.2d). 보냈으면 그 seq.

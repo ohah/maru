@@ -576,6 +576,34 @@ caret 앵커가 없을 수 있다(`refreshAfterEdit` 가 스냅숏을 버린다)
 기본값·label 세 모양) · `SIG1`(제품 경계: 가짜 서버 — `(` 를 치면 열리고 첫 파라미터가 accent, `,` 로 둘째, `)` 로 닫힘, `Esc`, 명령, caret
 이동 재요청, 끄면 명령만, 호버가 안 열림).
 
+### 8.2e LSP 2단 ④ — text edits 적용과 문서 포맷 (2026-09-18, 계획 공격 뒤의 결정)
+
+**계획 공격이 드러낸 것.** ① [document-model §3.6](native-editor-document-model.md) 의 세 규칙(undo 하나·커서 보존·revision 검증) 중 **둘은
+이미 서 있다** — `delta.apply` 가 변경 여럿을 한 연산으로 적용하며 같은 연산에서 selection 을 밀고(삭제 구간 안이면 시작으로 접는다 —
+`mapOffset`), 제품의 `applyEditAsOne` 이 그것을 되돌리기 하나·스크롤·caret 추종까지 묶는다. 새로 서는 것은 **LSP `TextEdit[]` → `Delta`
+변환**(줄·글자 → byte, 정렬, 겹침 거부)과 **revision 검증**뿐이다. ② 첫 소비자를 rename 이 아니라 **문서 포맷**으로 둔다 — rename 은 새 이름을
+받는 입력 UI 가 필요한데 그런 오버레이가 없다(`input_box` 는 설정의 숫자 위젯). 포맷은 UI 없이 §3.6 의 세 규칙을 전부 지난다(파일 전체가 바뀌고
+caret 은 남아야 한다). ③ `FormattingOptions.insertSpaces` — 이 편집기의 들여쓰기 단위는 **탭 문자**(`Tab` 키·`indent_lines` 가 넣는 것)라
+`insertSpaces = false`, `tabSize = editor.tab-width`. 서버가 프로젝트 설정(`.clang-format` 등)을 우선하면 그것이 이긴다. ④ 겹치는 edit 은
+명세가 금한다(「must not overlap」) — 거부하고 **아무것도 적용하지 않는다**(반만 적용된 문서를 만들지 않는다, §3.6 「실패하면 문서가 그대로다」).
+
+**레퍼런스(동작만).** VS Code `editor.action.formatDocument` = `⇧⌥F`, `editor.formatOnSave` 기본 false. 포맷 뒤 caret·스크롤은 남는다.
+
+| 축 | 결정 | 근거 |
+| --- | --- | --- |
+| **변환** | `TextEdit{range, newText}` 배열 → `delta.Change[]`: `range` 의 `{line, character}` 를 서버 인코딩으로 byte 에(`position.offsetOf`), `start` 오름차순 정렬(같은 start 의 삽입은 온 순서), **겹치면 전부 거부**(`error.Overlap`), 줄 밖은 문서 끝으로 clamp. `newText` 는 복사해 적용이 끝날 때까지 든다 | `Delta.isWellFormed` 의 불변식(정렬·비겹침)을 변환이 만든다 |
+| **revision** | 요청 때의 `editor_lsp_version` 을 기억하고 응답 때 다르면 **버린다** + 알림 「문서가 바뀌어 포맷 결과를 버렸습니다」. 서버 응답에는 version 이 없으므로 클라이언트가 잰다 | §3.6 「revision 이 어긋나면 버린다」 |
+| **적용** | `applyEditAsOne` — 되돌리기 **하나**, selection 은 delta 가 민다(삭제 구간 안이면 시작으로), 스크롤 앵커 보존, caret 추종 | §3.6 세 규칙 · 「별도 경로를 만들지 않는다」 |
+| **트리거** | `format_document` — `⇧⌥F`(편집기 컨텍스트 ⑴ `⌘` 없는 `⌥`) · 팔레트 「Editor: Format Document」. 서버가 없거나 `documentFormattingProvider` 가 없으면 무동작. 응답이 빈 배열이면 무동작(이미 정리됨) | VS Code 키. 저장 시 자동 포맷은 「하지 않는 것」(§3.6 — 저장 경로는 editor-surface, 그리고 §8.1 의 tool_execute 판정이 선행) |
+| **요청** | id `4_000_000_000+seq`, `options = {tabSize: editor.tab-width, insertSpaces: false}`. 보내기 전에 밀린 didChange 를 먼저 보낸다(`flushDocument`, §8.2d 와 같다). 나가 있는 요청이 있으면 **새 것이 대체**한다 — 앞 응답은 seq 가 달라 버려진다(구현이 되먹인 것: 「나가 있으면 무시」로 두면 답을 안 주는 서버(HANG) 뒤로 포맷이 영영 막힌다) | 위 ③ · 정의로 이동과 같은 seq 규율 |
+| **거부** | `Overlap`·`Malformed` 는 **아무것도 적용하지 않고** 알림 「포맷 결과를 거부했습니다 — 겹치거나 모양이 틀립니다」. 응답이 오류(`error` 멤버)면 결과 없음과 같이 무동작 | 위 ④ |
+| **적용 대상** | 요청한 **문서**(surface) — 탭을 옮겨 안 보여도 문서가 살아 있으면 적용한다(포맷은 화면이 아니라 문서에 하는 것 — hover·시그니처의 「보이는 Term 에만」과 다르다). 닫혔으면 버린다 | §3.6 은 문서 모델의 규칙이다 |
+| **하지 않는 것** | 저장 시 포맷 · 범위 포맷(`rangeFormatting`) · 타이핑 시 포맷 · rename(입력 UI 뒤) · `WorkspaceEdit`(여러 파일 — rename 과 함께) · 포맷 뒤 caret 을 「같은 글자」로 되돌리는 것 이상(줄바꿈이 재배치되면 근사) | 다음 조각 |
+
+**관측점**: `LSJ8`(순수: formatting 요청 id·options·`textDocument/formatting` capability) · `TXE*`(순수: `TextEdit[]` → `Change[]` — 정렬·같은 start
+삽입 순서·겹침 거부·인코딩·줄 밖 clamp·빈 배열) · `FMT1`(제품 경계: 가짜 서버 — `⇧⌥F` 로 두 줄이 한 번에 바뀌고 undo 하나로 돌아오며 caret 이
+같은 글자를 가리킨다 · 낡은 revision 은 버리고 알린다 · 겹침(`BADFMT`)은 거부하고 알린다 · 읽기 전용이면 요청이 안 나간다 · 빈 결과 무동작 · 낡은 seq · 요청한 문서가 안 보여도 적용) · `FMT2`(제품 경계: capability 없는 서버(`MARU_FAKE_LSP_NOFMTCAP`)에는 `⇧⌥F` 가 요청을 안 보낸다). 가짜 서버는 `options` 가 계약(`insertSpaces=false`·`tabSize≥1`)과 다르면 `null` 을 내고(제품 경계에서 options 를 잰다), 줄마다 첫 공백 묶음을 한 칸으로 줄이는 edit 을 **역순**으로 낸다(정렬은 클라이언트의 몫), `NOFMT` 면 `null`.
+
 ### 8.3 관측 가능성과 민감정보
 
 editor event는 처음부터 하나의 domain schema를 공유하되 문서 원문을 기본 trace에 넣지 않는다.

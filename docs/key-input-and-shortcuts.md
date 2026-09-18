@@ -308,6 +308,12 @@ VS Code 의 `editor.action.marker.next/prev` 가 이 키다. `needs_editable = f
 표의 이 줄과 `⌃⌥Space` 표기 판정자뿐), Swift ①ʹ 선-가로채기·② 메뉴 keyEquivalent 에도 없다. macOS 시스템은 `⌘Space`(Spotlight)·
 `⌃⌘Space`(이모지)를 쓰고 `⇧⌘Space` 는 비어 있다. 예외 규칙대로 `needs_editable = true`(비교 뷰에는 서버가 없다).
 
+**`⇧⌥F` — 문서 포맷(2026-09-18, [툴링](editor-surface-tooling.md) §8.2e).** VS Code `editor.action.formatDocument`. `ETX4` ⑴ **`⌘` 없는
+`⌥`** — `⌥Z`·`⇧⌥↓` 와 같은 갈래라 예외 목록이 필요 없다(편집기 Term 에는 Meta/ESC 를 뺏길 PTY 가 없다). 전수: 전역 표의 `F` 는 `⌘F`(찾기)·
+`⌥⌘F`(바꾸기) 뿐이고(`grep "char = 'F'"`), 둘 다 `⌘` 가 있어 chord 가 다르다; Swift ①ʹ 선-가로채기·② 메뉴 keyEquivalent 에 `⇧⌥F` 는 없다.
+터미널 Term 에서는 종전대로 `input.option-as-meta` 를 따라 `ESC F` 로 나간다(이 표는 편집기 Term 에서만 읽힌다). `needs_editable = true` —
+문서를 바꾸는 명령이다(읽기 전용은 `EditableFile.apply` 의 `error.ReadOnly` 가 막는다, §3.5).
+
 #### 충돌 전수 대조 (2026-09-07)
 
 [diff·떠 있는 UI·설정](native-editor-ui.md) §9.1 이 *"충돌 목록은 구현 슬라이스에서 전수 조사한다"*,
@@ -703,6 +709,7 @@ nav 에서 *"`.contains(.command)` 은 `⌘⇧R` 까지 삼킨다(리뷰 [8])"* 
 | `toggle_editor_wrap` | `⌥Z` | (없음) | 산다 |
 | `duplicate_lines` | `⇧⌥↓` | (없음) | 산다 |
 | `move_lines_up`·`_down` | `⌥↑`·`⌥↓` | (없음) | 산다 |
+| `format_document`(2026-09-18) | `⇧⌥F` | (없음) | 산다 |
 
 **살아 있는 넷이 사는 이유는 컨텍스트가 이겨서가 아니다 — 전역에 임자가 없어서다.** 즉 이 컨텍스트는
 지금껏 **한 번도 전역을 이겨 본 적이 없다.** 위 취소선 문장이 참이던 동안에는 그것으로 충분했고,

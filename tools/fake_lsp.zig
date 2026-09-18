@@ -17,6 +17,10 @@
 //! - `textDocument/signatureHelp` → 요청 줄의 caret 앞에서 마지막 `(` 뒤 `,` 수를 activeParameter 로, 시그니처 둘(`int add(int a, int b)` —
 //!   parameters 는 `[8,13]`·`[15,20]`, doc `**adds** two`·첫 파라미터 doc `first`; `int add(double a)`). `(` 가 없거나 닫혔거나 `NOSIG` 면 `null`.
 //!   capability 로 triggerCharacters `(`·`,` 와 retriggerCharacters `)` 를 낸다.
+//! - `textDocument/formatting` → 각 줄에서 **첫 두 칸 이상 공백 묶음**을 한 칸으로 줄이는 `TextEdit[]`(줄마다 하나, 줄 순서의 **역순**으로 보내
+//!   클라이언트가 정렬해야 한다; character = byte — ASCII 본문에서만 맞다). 본문에 `NOFMT` 면 `null`, `BADFMT` 면 겹치는 edit 둘(거부돼야 한다).
+//!   `options` 가 계약(§8.2e ③)과 다르면 — `insertSpaces` 가 false 가 아니거나 `tabSize` 가 1 미만 — `null`(제품 경계에서 options 를 잰다).
+//!   capability `documentFormattingProvider: true`(`MARU_FAKE_LSP_NOFMTCAP=1` 이면 false — 클라이언트가 요청을 안 보내야 한다).
 //! - `shutdown` → `null` 응답, `exit` → 종료 0.
 //! - 시작하자마자 stderr 에 한 줄을 쓴다(실서버 clangd 가 그렇다) — stdout 에 섞이면 프레임이 깨진다(§8.2a 「stderr」).
 //! 순수 판정 대상이 아니라(맞으면 되는 도구) 테스트는 없다 — 이 도구의 계약은 `LSPB*` 가 제품 경계에서 든다.
@@ -190,6 +194,7 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
             .positionEncoding = if (utf8 and !force_utf16) "utf-8" else "utf-16",
             .textDocumentSync = @as(u8, 1),
             .signatureHelpProvider = .{ .triggerCharacters = [_][]const u8{ "(", "," }, .retriggerCharacters = [_][]const u8{")"} },
+            .documentFormattingProvider = std.c.getenv("MARU_FAKE_LSP_NOFMTCAP") == null, // `MARU_FAKE_LSP_NOFMTCAP=1` 이면 false
         } } });
         return;
     }
@@ -231,6 +236,51 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
             .activeSignature = @as(u32, 0),
             .activeParameter = active_param,
         } });
+        return;
+    }
+    if (std.mem.eql(u8, method, "textDocument/formatting")) {
+        var req_uri: []const u8 = "";
+        var options_ok = false;
+        if (obj.get("params")) |p| if (p == .object) {
+            if (p.object.get("textDocument")) |td| if (td == .object) {
+                req_uri = str(td.object.get("uri")) orelse "";
+            };
+            if (p.object.get("options")) |o| if (o == .object) {
+                const insert_spaces = o.object.get("insertSpaces");
+                const tab_size = int(o.object.get("tabSize")) orelse 0;
+                options_ok = insert_spaces != null and insert_spaces.? == .bool and !insert_spaces.?.bool and tab_size >= 1;
+            };
+        };
+        const text = docText(req_uri);
+        const Pos = struct { line: u32, character: u32 };
+        if (!options_ok) {
+            sendJson(allocator, .{ .jsonrpc = "2.0", .id = id.?, .result = null });
+            return;
+        }
+        const Edit = struct { range: struct { start: Pos, end: Pos }, newText: []const u8 };
+        if (std.mem.indexOf(u8, text, "NOFMT") != null) {
+            sendJson(allocator, .{ .jsonrpc = "2.0", .id = id.?, .result = null });
+            return;
+        }
+        if (std.mem.indexOf(u8, text, "BADFMT") != null) {
+            sendJson(allocator, .{ .jsonrpc = "2.0", .id = id.?, .result = [_]Edit{
+                .{ .range = .{ .start = .{ .line = 0, .character = 0 }, .end = .{ .line = 0, .character = 2 } }, .newText = "x" },
+                .{ .range = .{ .start = .{ .line = 0, .character = 1 }, .end = .{ .line = 0, .character = 3 } }, .newText = "y" },
+            } });
+            return;
+        }
+        var edits: std.ArrayList(Edit) = .empty;
+        defer edits.deinit(allocator);
+        var line_no: u32 = 0;
+        var it = std.mem.splitScalar(u8, text, '\n');
+        while (it.next()) |line| : (line_no += 1) {
+            const at = std.mem.indexOf(u8, line, "  ") orelse continue;
+            var end = at;
+            while (end < line.len and line[end] == ' ') end += 1;
+            edits.append(allocator, .{ .range = .{ .start = .{ .line = line_no, .character = @intCast(at) }, .end = .{ .line = line_no, .character = @intCast(end) } }, .newText = " " }) catch return;
+        }
+        std.mem.reverse(Edit, edits.items); // 역순 — 정렬은 클라이언트의 몫이다
+        sendJson(allocator, .{ .jsonrpc = "2.0", .id = id.?, .result = edits.items });
         return;
     }
     if (std.mem.eql(u8, method, "textDocument/hover")) {

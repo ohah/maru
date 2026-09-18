@@ -83,6 +83,8 @@ pub const diagnostics = @import("editor_diagnostics.zig");
 pub const lsp_client = @import("editor_lsp.zig");
 /// 호버 박스(tooling §8.2b) — 진단 메시지 + 언어 서버 hover.
 pub const hover_client = @import("editor_hover.zig");
+/// 정의로 이동(tooling §8.2c) — `textDocument/definition` → §5.2 `navigateTo`.
+pub const definition_client = @import("editor_definition.zig");
 
 pub const Opened = struct {
     /// 열린 문서. **읽어 온 bytes를 빌리지 않고 소유한다**(N2 — `edit_doc.EditableFile`).
@@ -340,7 +342,12 @@ pub const NavTarget = struct {
     path: ?[]const u8 = null,
     /// range 의 **시작** byte offset. 끝은 지금 쓰지 않는다 — §5.2 가 요구하는 것은 「caret 을 range
     /// 시작에 놓는다」 이고, 범위 선택은 그 위에 얹을 별도 결정이다.
-    offset: usize,
+    offset: usize = 0,
+    /// **연 뒤 그 문서로 푸는 자리**(tooling §8.2c) — LSP 는 `(line, character)` 를 서버 인코딩으로 주고 대상 파일이 아직 안 열려
+    /// 있을 수 있어 byte offset 을 미리 셀 수 없다. 있으면 `offset` 대신 이것을 쓴다(열기 → **풀기** → 펴기 → caret → 스크롤).
+    pos: ?LspPos = null,
+
+    pub const LspPos = struct { line: u32, character: u32, enc: maru.session.editor.lsp.rpc.PositionEncoding };
 };
 
 pub const NavError = error{
@@ -374,7 +381,12 @@ pub fn navigateTo(self: *AppSession, target: NavTarget) NavError!void {
 
     if (term.kind != .editor) return error.NoDocument;
     const doc = term.rt.editor_doc orelse return error.NoDocument;
-    const offset = @min(target.offset, doc.file.content.len);
+    // ⑵ʹ 풀기 — `(line, character)` 는 **이 문서**의 줄 표로 byte 가 된다(§8.2c).
+    const raw_offset: usize = if (target.pos) |p|
+        maru.session.editor.lsp.position.offsetOf(doc.file.content, doc.file.lines, p.line, p.character, p.enc)
+    else
+        target.offset;
+    const offset = @min(raw_offset, doc.file.content.len);
 
     // ⑶ **실제로 움직일 때만 쌓는다.** 같은 자리를 여러 번 부른 뒤 뒤로가 먹통처럼 보이지 않게.
     if (from) |mark| {
@@ -482,7 +494,7 @@ fn pushNavMark(self: *AppSession, mark: NavMark) void {
 ///
 /// **root 를 모르면 막지 않는다** — 저장소 밖에서 파일 하나만 열어 쓰는 경우가 그것이고, 그때
 /// 「밖」이라는 개념 자체가 없다.
-fn withinNavRoot(self: *AppSession, path: []const u8) bool {
+pub fn withinNavRoot(self: *AppSession, path: []const u8) bool {
     const root = self.git_repo orelse (self.file_tree.rootAt(0) orelse return true);
     if (root.len == 0) return true;
     return maru.session.repo_path.underRoot(path, root);
@@ -11879,6 +11891,154 @@ test "HOVB2 호버 박스 — 서버 없이 구문 오류만으로 열린다(i18
     fx.session.dispatchAppAction(.show_hover);
     try testing.expect(!fx.session.chrome_host.hover_box.open);
     fx.session.loaded_config.config.editor.hover = true;
+}
+
+test "GOTO1 정의로 이동 — F12·⌘클릭이 서버 응답의 첫 항목으로 caret 을 옮기고 되돌아가기 표식을 쌓는다; ⌃-/⌃⇧- 로 뒤로·앞으로; 다른 파일은 열어서; root 밖·없음은 알림; 낡은 응답은 버린다 (제품 경계, §8.2c·§5.2)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
+    var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const fz = try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake});
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);
+    defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const cz = try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root});
+    _ = setenv("MARU_CONFIG", cz.ptr, 1);
+    defer _ = unsetenv("MARU_CONFIG");
+    if (fx.session.config_path_buffer) |b| allocator.free(b);
+    fx.session.config_path_buffer = null;
+    fx.session.editor_lsp.auto_trust_answer = .allow;
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "g.c", .data = "int x;\nint y;\n" });
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "other.c", .data = "// other\nint z;\n" });
+    const path = try std.fs.path.join(allocator, &.{ root, "g.c" });
+    defer allocator.free(path);
+    const saved_repo = fx.session.git_repo;
+    fx.session.git_repo = @constCast(root);
+    defer fx.session.git_repo = saved_repo;
+    // **제품이 여는 길로 연다**(`openFileTermInActivePane` — 파일 트리 클릭·`navigateTo` 가 쓰는 그것). `openPathInActivePane` 은
+    // file_entry 를 안 세워 「파일 1개 = Term 1개」 유일성 밖에 있고, 그러면 정의로 이동이 같은 파일을 **또 연다**(실측: Term 이 하나 늘었다).
+    const term = (try pane_ops.openFileTermInActivePane(fx.session, path, .text)).term;
+    fx.session.surface_initialized = true;
+    fx.session.backing_width_px = 1200;
+    fx.session.backing_height_px = 800;
+    const leaf = activeLeafRectForTest(fx.session) orelse return error.SkipZigTest;
+    const Ctx = struct { fx: *PaneFixture, term: *Term };
+    const ctx: Ctx = .{ .fx = &fx, .term = term };
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
+        fn f(c: Ctx) bool {
+            return c.term.rt.editor_diagnostics.lsp.items.len >= 1;
+        }
+    }.f));
+    const navigatedIs = struct {
+        fn f(fxp: *PaneFixture, n: u64) bool {
+            const start = fxp.session.awakeMs();
+            while (fxp.session.awakeMs() - start < 3000) {
+                lsp_client.pump(fxp.session);
+                if (fxp.session.editor_definition.navigated + fxp.session.editor_definition.notified_none + fxp.session.editor_definition.notified_outside >= n) return true;
+                _ = usleep(2_000);
+            }
+            return false;
+        }
+    }.f;
+
+    // ⑴ **F12** — caret 0 에서 → 서버의 첫 항목(줄 1 글자 4 = `y`, offset 11)으로. 되돌아가기 표식 하나(0).
+    term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };
+    try pressKey(&fx, .{ .function = 12 }, .{});
+    try testing.expect(fx.session.editor_definition.waiting);
+    try testing.expectEqual(@as(u64, 1), fx.session.editor_lsp.sent_definitions);
+    try testing.expect(navigatedIs(&fx, 1));
+    try testing.expectEqual(@as(u64, 1), fx.session.editor_definition.navigated);
+    try testing.expectEqual(@as(usize, 11), term.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 1), fx.session.editor_nav_back.items.len);
+    try testing.expectEqual(@as(usize, 0), fx.session.editor_nav_back.items[0].offset);
+    // ⑵ **⌃-** 뒤로 → 0, **⌃⇧-** 앞으로 → 11(`_` 도 같다).
+    try pressKey(&fx, .{ .char = '-' }, .{ .control = true });
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 1), fx.session.editor_nav_forward.items.len);
+    try pressKey(&fx, .{ .char = '_' }, .{ .control = true, .shift = true });
+    try testing.expectEqual(@as(usize, 11), term.rt.editor_selection.?.focus);
+    try pressKey(&fx, .{ .char = '-' }, .{ .control = true });
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_selection.?.focus);
+    // ⑶ **⌘클릭**(mods 32) — 포인터 아래 글자에서 요청, 선택 드래그를 시작하지 않는다.
+    {
+        var d = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+        d.dl.deinit(allocator);
+    }
+    const p1 = pointerAtOffset(term, 1) orelse return error.NoPointer;
+    fx.session.mouse(1, p1.x, p1.y, 0, 32);
+    try testing.expect(fx.session.pointer_gesture_owner == .none);
+    try testing.expectEqual(@as(u64, 2), fx.session.editor_lsp.sent_definitions);
+    try testing.expect(navigatedIs(&fx, 2));
+    try testing.expectEqual(@as(usize, 11), term.rt.editor_selection.?.focus);
+    fx.session.mouse(3, p1.x, p1.y, 0, 32);
+    // ⑷ **다른 파일** — `XFILE` 이면 서버가 `other.c` 를 준다: 새 Term 이 열리고 그 문서의 줄 1 글자 4(offset 13)에 caret. ⌃- 로 돌아온다.
+    term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };
+    try testing.expect(insertText(fx.session, term, "XFILE "));
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
+        fn f(c: Ctx) bool {
+            var b: [32]u8 = undefined;
+            const want = std.fmt.bufPrint(&b, "fake: {d}", .{c.term.rt.editor_lsp_version}) catch return false;
+            return c.term.rt.editor_diagnostics.lsp.items.len >= 1 and std.mem.eql(u8, c.term.rt.editor_diagnostics.lsp.items[0].message, want);
+        }
+    }.f));
+    const terms_before = pane_ops.activePane(fx.session).terms.items.len;
+    try pressKey(&fx, .{ .function = 12 }, .{});
+    try testing.expect(navigatedIs(&fx, 3));
+    const other = pane_ops.activePane(fx.session).activeTerm();
+    try testing.expect(other != term);
+    try testing.expectEqual(terms_before + 1, pane_ops.activePane(fx.session).terms.items.len);
+    try testing.expect(std.mem.endsWith(u8, other.rt.editor_path orelse "", "other.c"));
+    try testing.expectEqual(@as(usize, 13), other.rt.editor_selection.?.focus); // "// other\n" = 9 + 4
+    try pressKey(&fx, .{ .char = '-' }, .{ .control = true });
+    try testing.expect(pane_ops.activePane(fx.session).activeTerm() == term);
+    // ⑸ **root 밖** — 열지 않고 알린다. ⑹ **없음**(`null`) — 알린다. 둘 다 caret 은 그대로.
+    _ = tab_ops.switchTab(fx.session, 0);
+    try removeMarkerHover(fx.session, term, "XFILE ");
+    term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };
+    try testing.expect(insertText(fx.session, term, "OUTSIDE "));
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
+        fn f(c: Ctx) bool {
+            var b: [32]u8 = undefined;
+            const want = std.fmt.bufPrint(&b, "fake: {d}", .{c.term.rt.editor_lsp_version}) catch return false;
+            return c.term.rt.editor_diagnostics.lsp.items.len >= 1 and std.mem.eql(u8, c.term.rt.editor_diagnostics.lsp.items[0].message, want);
+        }
+    }.f));
+    const active_before = pane_ops.activePane(fx.session).activeTerm();
+    fx.session.dispatchAppAction(.goto_definition); // 팔레트 명령 경로
+    try testing.expect(navigatedIs(&fx, 4));
+    try testing.expectEqual(@as(u64, 1), fx.session.editor_definition.notified_outside);
+    try testing.expect(fx.session.chrome_host.notice.open);
+    try testing.expect(pane_ops.activePane(fx.session).activeTerm() == active_before);
+    fx.session.chrome_host.notice.dismiss();
+    try removeMarkerHover(fx.session, term, "OUTSIDE ");
+    term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };
+    try testing.expect(insertText(fx.session, term, "NODEF "));
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
+        fn f(c: Ctx) bool {
+            var b: [32]u8 = undefined;
+            const want = std.fmt.bufPrint(&b, "fake: {d}", .{c.term.rt.editor_lsp_version}) catch return false;
+            return c.term.rt.editor_diagnostics.lsp.items.len >= 1 and std.mem.eql(u8, c.term.rt.editor_diagnostics.lsp.items[0].message, want);
+        }
+    }.f));
+    const focus_before_nodef = term.rt.editor_selection.?.focus; // 삽입 뒤 caret(6) — 이동이 없어야 그대로다
+    try pressKey(&fx, .{ .function = 12 }, .{});
+    try testing.expect(navigatedIs(&fx, 5));
+    try testing.expectEqual(@as(u64, 1), fx.session.editor_definition.notified_none);
+    try testing.expect(fx.session.chrome_host.notice.open);
+    try testing.expectEqual(focus_before_nodef, term.rt.editor_selection.?.focus);
+    fx.session.chrome_host.notice.dismiss();
+    // ⑺ **낡은 응답은 버린다** — 기다리는 seq 가 아니면 움직이지 않는다.
+    fx.session.editor_definition.waiting = true;
+    fx.session.editor_definition.waiting_seq = 77;
+    definition_client.onDefinitionResponse(fx.session, 76, .{ .uri = "file:///x", .line = 0, .character = 0 }, .utf8);
+    try testing.expect(fx.session.editor_definition.waiting);
+    try testing.expectEqual(focus_before_nodef, term.rt.editor_selection.?.focus);
+    fx.session.editor_definition.waiting = false;
 }
 
 test "MMP2 미니맵의 축은 보이는 줄이다 — 접으면 스트립에서도 사라지고, 클릭은 보이는 줄 축으로 환산된다 (제품 경계, §6.1·§6.2)" {

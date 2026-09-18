@@ -1214,6 +1214,19 @@ pub fn applyForcedEditorHover(self: *AppSession) void {
     _ = editor_ops.hover_client.showAtCaret(self);
 }
 
+/// MARU_FORCE_EDITOR_GOTO_DEF=1 — caret 자리에서 `goto_definition` 을 부른다(캡처 전용, tooling §8.2c). 서버가 뜨기 전에는 요청이 안 나가므로
+/// 매 프레임 되풀이하고, 한 번 움직이거나 알림을 냈으면 손을 뗀다. 작업 공간 복원 알림은 먼저 내린다(hover 훅과 같은 이유).
+pub fn applyForcedEditorGotoDef(self: *AppSession) void {
+    if (std.c.getenv("MARU_FORCE_EDITOR_GOTO_DEF") == null) return;
+    const st = &self.editor_definition;
+    if (st.navigated + st.notified_none + st.notified_outside > 0) return;
+    if (self.chrome_host.notice.open) self.chrome_host.notice.dismiss();
+    if (st.waiting) return;
+    // 요청이 나간 순간 caret 훅(`MARU_FORCE_EDITOR_CARET`)의 래치를 세운다 — 응답이 caret 을 옮긴 뒤 **다음 프레임의 caret 훅이 먼저
+    // 돌아** 되돌렸다(실측: 캡처에 이동 전 자리가 남았다). 키 훅과 같은 규율(caret 이 선 뒤 한 번만).
+    if (editor_ops.definition_client.gotoDefinitionAtCaret(self)) self.debug_diff_caret_keys_done = true;
+}
+
 pub fn applyForcedScmTab(self: *AppSession) void {
     // MARU_FORCE_SCM_TAB=history|agent — 그 탭을 고른 것처럼 만든다(P4). 탭 전환은 클릭으로만
     // 일어나므로 포인터 없는 캡처 하니스에서는 히스토리 화면을 얻을 방법이 없다(행 호버와 같은 자리).

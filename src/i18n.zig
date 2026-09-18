@@ -466,6 +466,10 @@ const Table = struct {
     lsp_status_restarting: [:0]const u8,
     lsp_status_failed: [:0]const u8,
     lsp_status_denied: [:0]const u8,
+    /// 정의로 이동(§8.2c) — 서버가 `null`/빈 결과를 냈다.
+    nav_no_definition: [:0]const u8,
+    /// `{0}` = 경로. root 밖이라 열지 않았다(§5.2 「표시와 접근을 가른다」).
+    nav_outside_root: [:0]const u8,
     cfg_editor_hover: [:0]const u8,
     cfg_editor_hover_delay: [:0]const u8,
     /// 호버 박스의 구문 오류 문장(visual-mapping §5.4 「메시지는 재료」 — 문장은 표시 자리가 만든다).
@@ -1579,6 +1583,8 @@ const en: Table = .{
     .lsp_status_restarting = "{s}: restarting",
     .lsp_status_failed = "{s} failed — retry",
     .lsp_status_denied = "{s} not allowed — ask again",
+    .nav_no_definition = "No definition found",
+    .nav_outside_root = "Not opened — outside the workspace root: {0}",
     .cfg_editor_hover = "Hover box (diagnostics and language server info under the pointer)",
     .cfg_editor_hover_delay = "Hover delay (ms)",
     .diag_syntax_error = "Syntax error",
@@ -2267,6 +2273,8 @@ const ko: Table = .{
     .lsp_status_restarting = "{s}: 다시 시작 중",
     .lsp_status_failed = "{s} 실패 — 다시",
     .lsp_status_denied = "{s} 거부됨 — 다시 묻기",
+    .nav_no_definition = "정의를 찾지 못했습니다",
+    .nav_outside_root = "루트 밖이라 열지 않습니다 — {0}",
     .cfg_editor_hover = "호버 박스(포인터 아래의 진단·언어 서버 정보)",
     .cfg_editor_hover_delay = "호버 지연(ms)",
     .diag_syntax_error = "구문 오류",

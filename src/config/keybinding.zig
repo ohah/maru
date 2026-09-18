@@ -270,6 +270,12 @@ pub const editor_context_bindings = [_]EditorContextBinding{
     .{ .chord = .{ .modifiers = .{ .shift = true }, .key = .{ .function = 7 } }, .action = .prev_conflict, .needs_editable = false }, // Shift+F7
     .{ .chord = .{ .modifiers = .{}, .key = .{ .function = 8 } }, .action = .next_diagnostic, .needs_editable = false }, // F8 — §5.4(VS Code editor.action.marker.next)
     .{ .chord = .{ .modifiers = .{ .shift = true }, .key = .{ .function = 8 } }, .action = .prev_diagnostic, .needs_editable = false }, // Shift+F8
+    .{ .chord = .{ .modifiers = .{}, .key = .{ .function = 12 } }, .action = .goto_definition, .needs_editable = false }, // F12 — §8.2c(VS Code editor.action.revealDefinition)
+    // **첫 `⌃` 조합**(ETX4 ⑷ — 편집기 Term 에는 PTY 가 없다). VS Code mac 기본 `⌃-`/`⌃⇧-`(2026-09-18 사용자 결정). `⌃⇧-` 는 US 자판에서
+    // `_` 로 오므로 둘 다 묶는다(`⌘-`/`⌘_` 폰트 크기와 같은 선례).
+    .{ .chord = .{ .modifiers = .{ .control = true }, .key = .{ .char = '-' } }, .action = .navigate_back, .needs_editable = false },
+    .{ .chord = .{ .modifiers = .{ .control = true, .shift = true }, .key = .{ .char = '-' } }, .action = .navigate_forward, .needs_editable = false },
+    .{ .chord = .{ .modifiers = .{ .control = true, .shift = true }, .key = .{ .char = '_' } }, .action = .navigate_forward, .needs_editable = false },
     .{ .chord = .{ .modifiers = .{ .option = true, .shift = true }, .key = .arrow_down }, .action = .duplicate_lines, .needs_editable = true }, // Shift+Opt+Down
     .{ .chord = .{ .modifiers = .{ .option = true }, .key = .arrow_up }, .action = .move_lines_up, .needs_editable = true }, // Opt+Up
     .{ .chord = .{ .modifiers = .{ .option = true }, .key = .arrow_down }, .action = .move_lines_down, .needs_editable = true }, // Opt+Down
@@ -1194,8 +1200,17 @@ test "ETX4 편집기 컨텍스트 기본키가 전역 표를 안 오염시킨다
         .{ .key = .arrow_up, .action = .add_cursor_above }, // ⌥⌘↑ — §3.2b, focus_pane_up 에서 가져옴
         .{ .key = .arrow_down, .action = .add_cursor_below }, // ⌥⌘↓ — §3.2b
     };
+    //   ⑷ **`⌃` 조합 — 편집기 Term 에는 PTY 가 없다**(2026-09-18, `⌃-`·`⌃⇧-` 뒤로/앞으로 — tooling §8.2c, 사용자 결정). `⌃` 를
+    //      막던 근거(제어문자)는 터미널 Term 의 것이고 이 표는 편집기 Term 에서만 읽힌다. 조건은 ⑶ 과 같다 — 전역 표·터미널 매크로
+    //      표에 같은 chord 가 없어야 하고, 항목은 이 목록에 근거와 함께 선다. `⌘` 는 안 낀다(끼면 ⑵ 다).
+    const allowed_control = [_]Exception{
+        .{ .key = .{ .char = '-' }, .action = .navigate_back }, // ⌃- — VS Code workbench.action.navigateBack
+        .{ .key = .{ .char = '-' }, .action = .navigate_forward }, // ⌃⇧-
+        .{ .key = .{ .char = '_' }, .action = .navigate_forward }, // ⌃⇧- (US 자판 `_`)
+    };
     var exceptions: usize = 0;
     var bare_function_keys: usize = 0;
+    var control_chords: usize = 0;
     for (editor_context_bindings) |b| {
         const option_only = b.chord.modifiers.option and !b.chord.modifiers.command and !b.chord.modifiers.control;
         if (option_only) continue;
@@ -1204,6 +1219,17 @@ test "ETX4 편집기 컨텍스트 기본키가 전역 표를 안 오염시킨다
             bare_function_keys += 1;
             // ⑶ 은 전역과 안 겹친다 — 겹치면 그것은 ⑵ 라서 아래 목록에 근거와 함께 서야 한다.
             for (default_app_bindings) |g| try std.testing.expect(!g.chord.eql(b.chord));
+            continue;
+        }
+        if (b.chord.modifiers.control and !b.chord.modifiers.command and !b.chord.modifiers.option) {
+            control_chords += 1;
+            for (default_app_bindings) |g| try std.testing.expect(!g.chord.eql(b.chord));
+            for (default_terminal_bindings) |t| try std.testing.expect(!t.chord.eql(b.chord));
+            var matched_c = false;
+            for (allowed_control) |a| {
+                if (b.chord.key.eql(a.key) and std.meta.eql(b.action, a.action)) matched_c = true;
+            }
+            try std.testing.expect(matched_c);
             continue;
         }
         exceptions += 1;
@@ -1218,7 +1244,8 @@ test "ETX4 편집기 컨텍스트 기본키가 전역 표를 안 오염시킨다
         try std.testing.expect(b.needs_editable);
     }
     try std.testing.expectEqual(allowed.len, exceptions);
-    try std.testing.expectEqual(@as(usize, 4), bare_function_keys); // F7 · ⇧F7 · F8 · ⇧F8 — 늘리려면 그 절에 전수 대조를 적는다
+    try std.testing.expectEqual(@as(usize, 5), bare_function_keys); // F7 · ⇧F7 · F8 · ⇧F8 · F12 — 늘리려면 그 절에 전수 대조를 적는다
+    try std.testing.expectEqual(@as(usize, 3), control_chords); // ⌃- · ⌃⇧- · ⌃⇧_ — ⑷, 늘리려면 allowed_control 에 근거와 함께
     try std.testing.expect(editor_context_bindings.len > 0);
 
     // **`⌘D` 는 전역 표에서 안 없어진다** — 터미널·브라우저·파일 Term 이 그것으로 화면을 나눈다.
@@ -1729,6 +1756,23 @@ test "EMK2 사용자 rebind·unbind 가 이기면 컨텍스트는 진다 (양보
     try std.testing.expect(r2.resolveEditorDetailed(cmd_d, false) == .consumed);
 }
 
+test "FKB6 ⌃-·⌃⇧-(·⌃⇧_) 은 편집기 컨텍스트에서 뒤로/앞으로 — 터미널 Term 의 전역 resolve 에는 없다 (§8.2c, ETX4 ⑷)" {
+    const resolver = KeyBindingResolver{};
+    const back: terminal.KeyEvent = .{ .key = .{ .char = '-' }, .modifiers = .{ .control = true } };
+    const fwd: terminal.KeyEvent = .{ .key = .{ .char = '-' }, .modifiers = .{ .control = true, .shift = true } };
+    const fwd_us: terminal.KeyEvent = .{ .key = .{ .char = '_' }, .modifiers = .{ .control = true, .shift = true } };
+    for ([_]terminal.KeyEvent{ back, fwd, fwd_us }, [_]action_mod.Action{ .navigate_back, .navigate_forward, .navigate_forward }) |ev, want| {
+        const e = resolver.resolveEditorDetailed(ev, false);
+        try std.testing.expect(e == .editor_context_action);
+        try std.testing.expectEqual(want, e.editor_context_action);
+        try std.testing.expect(resolver.resolveEditorDetailed(ev, true) == .editor_context_action); // 비교 뷰에서도(읽기 전용 — 이동은 편집이 아니다)
+    }
+    // 터미널 Term 의 전역 resolve 는 이 chord 를 모른다 — `⌃-` 는 제어문자로 PTY 에 간다.
+    var buf: [terminal.input.encoded_key_buffer_len]u8 = undefined;
+    const r = try resolver.resolve(back, &buf, .{});
+    try std.testing.expect(r == .terminal_input);
+}
+
 test "FKB5 F7·⇧F7·F8·⇧F8 은 편집기 컨텍스트에서 다음/이전 충돌·진단으로 풀리고, 비교 뷰에서도 산다 (S5·§5.4)" {
     // 표의 두 줄이 서로 바뀌어도(⇧F8 → next) ETX4 의 개수 판정은 초록이다 — chord → 액션을 직접 잰다(적대적 3회차 C14).
     const resolver = KeyBindingResolver{};
@@ -1738,6 +1782,7 @@ test "FKB5 F7·⇧F7·F8·⇧F8 은 편집기 컨텍스트에서 다음/이전 �
         .{ .f = 7, .shift = true, .want = .prev_conflict },
         .{ .f = 8, .shift = false, .want = .next_diagnostic },
         .{ .f = 8, .shift = true, .want = .prev_diagnostic },
+        .{ .f = 12, .shift = false, .want = .goto_definition },
     };
     for (cases) |c| {
         const ev: terminal.KeyEvent = .{ .key = .{ .function = c.f }, .modifiers = .{ .shift = c.shift } };

@@ -116,6 +116,9 @@ pub fn displayRelative(path: []const u8, root: []const u8) []const u8 {
 pub fn underRoot(path: []const u8, root: []const u8) bool {
     if (root.len == 0 or path.len == 0) return false;
     const r = trimTrailingSlashes(root);
+    // **루트가 `/` 면 모든 절대 경로가 그 아래다** — 아래 경계 검사는 `path[1] == '/'` 를 요구해 `//…` 만 통과시켰다(정의로 이동의 제품
+    // 캡처 실측, 2026-09-18: 파일 트리 root 가 `/` 인 창에서 같은 파일의 정의가 「root 밖」이 됐다).
+    if (r.len == 1 and r[0] == '/') return path.len > 1 and path[0] == '/';
     if (path.len <= r.len) return false;
     if (!std.mem.eql(u8, path[0..r.len], r)) return false;
     // **경계를 문자로 확인한다** — 이것이 없으면 `/a/proj`가 `/a/project/x`에 걸린다.
@@ -147,6 +150,11 @@ test "CRUMB3 루트 아래면 그 아래만 남는다" {
 test "CRUMB4 underRoot: 경계를 문자로 본다 · 루트 자신은 아래가 아니다" {
     try std.testing.expect(underRoot("/repo/src/a.zig", "/repo"));
     try std.testing.expect(underRoot("/repo/a.zig", "/repo/"));
+    // 루트 `/` — 모든 절대 경로가 아래다(제품 캡처 실측, §8.2c). `/` 자신과 상대 경로는 아니다.
+    try std.testing.expect(underRoot("/private/tmp/x.c", "/"));
+    try std.testing.expect(underRoot("/a", "/"));
+    try std.testing.expect(!underRoot("/", "/"));
+    try std.testing.expect(!underRoot("rel/x.c", "/"));
     // **이 술어의 존재 이유**: 접두 비교만 하면 `/a/project/x` 가 `/a/proj` 아래로 보인다.
     try std.testing.expect(!underRoot("/a/project/x", "/a/proj"));
     try std.testing.expect(!underRoot("/other/x", "/repo"));

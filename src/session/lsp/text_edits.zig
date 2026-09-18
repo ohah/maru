@@ -80,6 +80,31 @@ pub fn toChanges(allocator: std.mem.Allocator, edits: ?std.json.Value, content: 
     return .{ .items = items, .texts = texts };
 }
 
+/// 적용 **전** 본문에 대한 정렬·비겹침 `changes` 의 역연산(§8.2f 「기록」) — 적용 **뒤** 좌표로, 각 항목이 새 텍스트 자리를 원래 조각으로
+/// 되돌린다. `delta.apply` 가 돌려주는 `Inverse` 는 undo 스택이 가져가므로, 파일 기록은 이것을 따로 만든다. 텍스트는 복사.
+pub fn inverseOf(allocator: std.mem.Allocator, content_before: []const u8, changes: []const delta_mod.Change) error{OutOfMemory}!Changes {
+    if (changes.len == 0) return .{};
+    var texts = try allocator.alloc([]u8, changes.len);
+    var owned: usize = 0;
+    errdefer {
+        for (texts[0..owned]) |t| allocator.free(t);
+        allocator.free(texts);
+    }
+    const items = try allocator.alloc(delta_mod.Change, changes.len);
+    errdefer allocator.free(items);
+    var shift: i64 = 0;
+    for (changes, 0..) |c, i| {
+        const start = @min(c.start, content_before.len);
+        const end = @min(@max(c.end, start), content_before.len);
+        texts[owned] = try allocator.dupe(u8, content_before[start..end]);
+        owned += 1;
+        const new_start: usize = @intCast(@as(i64, @intCast(start)) + shift);
+        items[i] = .{ .start = new_start, .end = new_start + c.text.len, .text = texts[i] };
+        shift += @as(i64, @intCast(c.text.len)) - @as(i64, @intCast(end - start));
+    }
+    return .{ .items = items, .texts = texts };
+}
+
 fn posOf(v: ?std.json.Value) ?struct { line: u32, character: u32 } {
     const x = v orelse return null;
     if (x != .object) return null;
@@ -101,6 +126,7 @@ fn u32Of(v: ?std.json.Value) ?u32 {
 
 const testing = std.testing;
 const line_index = @import("../editor/line_index.zig");
+const maru_buffer = @import("../editor/buffer.zig");
 
 fn parse(a: std.mem.Allocator, text: []const u8) !std.json.Parsed(std.json.Value) {
     return std.json.parseFromSlice(std.json.Value, a, text, .{});
@@ -131,6 +157,46 @@ test "TXE1 TextEdit[] → Change[]: 인코딩으로 byte, start 오름차순, �
     try testing.expect(ch.delta().isWellFormed());
     // 텍스트는 응답 트리가 아니라 우리 것이다.
     try testing.expect(@intFromPtr(ch.items[0].text.ptr) != @intFromPtr(p.value.array.items[1].object.get("newText").?.string.ptr));
+}
+
+test "TXE3 inverseOf — 적용 뒤 좌표로 원래 조각을 되돌린다; 되감으면 원문 (§8.2f)" {
+    const a = testing.allocator;
+    const before = "int add(int a) { return add(a); }\n";
+    // add → add2 둘, int → long 하나(길이가 다른 세 가지).
+    const changes = [_]delta_mod.Change{
+        .{ .start = 0, .end = 3, .text = "long" },
+        .{ .start = 4, .end = 7, .text = "add2" },
+        .{ .start = 24, .end = 27, .text = "add2" },
+    };
+    var buf = try maru_buffer.Buffer.init(a, before);
+    defer buf.deinit();
+    var sel_items = [_]@import("../editor/selection.zig").Selection{.{ .anchor_start = 0, .anchor_end = 0, .focus = 0 }};
+    var sels = @import("../editor/selection.zig").Selections.init(&sel_items, 0);
+    var inv_unused = try delta_mod.apply(a, &buf, .{ .changes = &changes }, &sels);
+    defer inv_unused.deinit();
+    const after = try buf.copyAll(a);
+    defer a.free(after);
+    try testing.expectEqualStrings("long add2(int a) { return add2(a); }\n", after);
+    var inv = try inverseOf(a, before, &changes);
+    defer inv.deinit(a);
+    try testing.expectEqual(@as(usize, 3), inv.items.len);
+    try testing.expectEqual(@as(usize, 0), inv.items[0].start);
+    try testing.expectEqual(@as(usize, 4), inv.items[0].end);
+    try testing.expectEqualStrings("int", inv.items[0].text);
+    try testing.expectEqual(@as(usize, 5), inv.items[1].start); // "long " 뒤
+    try testing.expectEqual(@as(usize, 9), inv.items[1].end);
+    try testing.expectEqual(@as(usize, 26), inv.items[2].start); // 앞 둘이 +1·+1 밀었다
+    try testing.expectEqual(@as(usize, 30), inv.items[2].end);
+    try testing.expect(inv.delta().isWellFormed());
+    // 되감으면 원문.
+    var inv2 = try delta_mod.apply(a, &buf, inv.delta(), &sels);
+    defer inv2.deinit();
+    const back = try buf.copyAll(a);
+    defer a.free(back);
+    try testing.expectEqualStrings(before, back);
+    var e = try inverseOf(a, before, &.{});
+    defer e.deinit(a);
+    try testing.expectEqual(@as(usize, 0), e.items.len);
 }
 
 test "TXE2 겹치면 전부 거부, 모양이 틀리면 Malformed, 빈 배열·배열 아님은 빈 결과, 줄 밖은 문서 끝, 뒤집힌 범위는 삽입 (§8.2e)" {

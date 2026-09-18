@@ -615,6 +615,42 @@ caret 은 남아야 한다). ③ `FormattingOptions.insertSpaces` — 이 편집
 - **C5·C6** 알림 번역 둘이 바뀜 — 판정자가 `t()` 로 같은 표를 읽어 **동어반복**이었다. `tIn(.en/.ko)` 의 글자(「discarded」·「버렸」·「rejected」·
   「거부」)를 직접 재도록 고쳐 사살.
 
+### 8.2f LSP 2단 ⑤ — WorkspaceEdit 적용 규칙과 심볼 이름 바꾸기 (2026-09-19, 계획 공격 뒤의 사용자 결정)
+
+**계획 공격이 드러낸 것.** ① `WorkspaceEdit` 는 기능이 아니라 **응답의 모양**이다 — 파일 하나의 `TextEdit[]`(§8.2e)을 파일 단위로 넓힌 것.
+그러므로 새로 서는 규칙은 「여러 파일」에서만 생기는 넷이다: 전부 검증 뒤 적용(하나라도 틀리면 전체 거부) · 열려 있지 않은 파일 · 저장 ·
+여러 파일 되돌리기. 파일 안의 규칙(정렬·겹침 거부·revision·undo 하나·caret 보존)은 §8.2e 를 그대로 쓴다. ② 입력 UI 는 이미 있다 —
+탭·pane·파일 트리의 **인라인 rename**(`RenameTarget`·`rename_input`·IME·모달 라우팅). 심볼 rename 은 그 대상 하나를 더하고 상자를
+심볼 자리에 띄우는 것뿐이다. ③ 첫 소비자는 rename — 요청 하나, 결과가 WorkspaceEdit, UI 는 입력 하나. code action 은 목록 UI 가 더
+필요해 다음. ④ **레퍼런스는 열어서 확인했다**(VS Code 소스, MIT — 동작만; 적대적 검증으로 앞선 추정 셋이 틀렸다):
+`files.refactoring.autoSave`(기본 true)는 「관련된 dirty 작업 사본 **전부**」를 저장하되 **두 파일 이상일 때만**이고, 한 파일이면 dirty 로
+둔다; rename 되돌리기는 rename 을 다시 돌리지 않고 **적용 때 만든 역편집**을 되감으며, 닫힌 파일도 내용 해시가 같으면 되돌린다;
+revision 은 `documentChanges` 의 `version` 이 있을 때만 검사한다(clangd 의 `changes` 맵에는 검사가 없다). ⑤ Neovim·Helix 는 버퍼로
+열어 두고 저장을 사용자에게 맡기는데 「저장 안 된 버퍼 ↔ 서버 불일치」가 반복 이슈다 — 이 계약은 VS Code 쪽을 따른다(§1.1).
+
+**사용자 결정(2026-09-19)**: 저장 정책은 **VS Code 그대로**(두 파일 이상이면 관련 파일 전부 저장, 한 파일이면 dirty) · `Undo Rename`
+명령은 **이 조각에** 포함.
+
+| 축 | 결정 | 근거 |
+| --- | --- | --- |
+| **트리거** | `rename_symbol` — `F2`(편집기 컨텍스트 ⑶ 기능키, 파일 트리가 초점일 때의 `F2` 와 겹치지 않는다 — 키 문서 전수 대조) · 팔레트 「Editor: Rename Symbol」. 서버가 없거나 `renameProvider` 가 없으면 무동작 | VS Code `editor.action.rename` |
+| **입력 상자** | 기존 인라인 rename 의 새 대상 `RenameTarget.symbol{surface, offset, revision}` — caret 아래 **낱말**(식별자: 글자·숫자·`_`·비ASCII)을 씨앗으로, 낱말 첫 글자 셀 아래 팝업(`popup_box` `below_flip_up`, 호버 상자와 같은 간격)에 `input_box`(끝 caret). `Enter` 확정 · `Esc` 취소 · 비었거나 같은 이름이면 요청 없이 닫는다. 모달이라 열린 동안 문서는 안 바뀐다 | `prepareRename` 은 하지 않는다 — 상자를 즉시 띄우고, 못 바꾸는 자리는 서버의 오류 응답을 알림으로 낸다 |
+| **요청** | id `5_000_000_000+seq`, `textDocument/rename{position, newName}`. 보내기 전 밀린 didChange 를 먼저(`flushDocument`). 한 번에 하나 — 새 요청이 앞 것을 대체(§8.2e 와 같다) | |
+| **응답 모양** | `changes`(uri → TextEdit[]) 와 `documentChanges`(TextDocumentEdit[] — 같은 uri 는 이어 붙인다) 둘 다 받는다. `CreateFile`·`RenameFile`·`DeleteFile` 이 하나라도 있으면 **전체 거부** + 알림. `file:` 이 아닌 uri 도 전체 거부 | 반만 적용된 rename 은 컴파일되지 않는 코드다 |
+| **검증 → 적용** | 먼저 **모든 파일**을 검증하고 하나라도 틀리면 **아무것도 적용하지 않는다**: root 밖(`withinNavRoot`) · 열린 문서의 revision(그 문서를 든 모든 Term: 서버가 마지막으로 본 `sent_version == editor_lsp_version`, `documentChanges.version` 이 있으면 그것도 같아야) · 읽기 전용 · `toChanges` 의 겹침/모양 · 열려 있지 않은 파일은 읽어서(§3.5 의 `openPath` — UTF-8·BOM·CRLF 보존, 상한 §8.2a) 같은 검증. 그 다음 적용: 열린 Term 은 `applyEditAsOne`(Term 마다 undo 하나), 열려 있지 않은 파일은 메모리에서 적용해 저장 경로(`writeDocumentBytes` — 외부 변경 검사)로 쓴다 | §3.6 · VS Code 보다 엄격한 revision(`changes` 맵에도 검사) |
+| **저장** | 관련 파일이 **두 개 이상**이면 열린 Term 도 `saveDocument` 로 저장한다(열려 있지 않은 파일은 늘 저장 — 버퍼가 없다). **한 파일**이면 저장하지 않고 dirty 로 둔다 | VS Code `files.refactoring.autoSave` 기본(2026-09-19 사용자 결정) |
+| **기록** | 적용에 성공한 WorkspaceEdit 하나를 세션이 든다: 이름·파일마다 {경로, **역연산**(`delta.apply` 가 돌려준 것, 텍스트 소유), 적용 직후 **내용 해시**}. 새 rename 이 성공하면 갈아 끼운다. 되돌리기는 이 기록 위에 선다 | VS Code 의 역편집 보관과 같은 원리 — 되돌리기는 서버에 다시 묻지 않는다 |
+| **`undo_workspace_edit`** | 팔레트 「Editor: Undo Last Rename」(기본 chord 없음). 기록의 **모든 파일**을 먼저 검증: 열린 Term 은 내용 해시가 기록과 같아야(그 뒤 편집·`⌘Z` 가 있었으면 다르다), 열려 있지 않은 파일은 디스크를 읽어 같아야. 하나라도 다르면 **전체 거부** + 알림(「{0} 이 바뀌어 되돌릴 수 없습니다」). 전부 같으면 역연산을 같은 길로 적용(열린 Term 은 `applyEditAsOne` — 그것도 undo 하나, 파일은 쓰기) + 같은 저장 정책. 성공하면 기록을 비운다 | VS Code 는 어긋난 파일에서 「이 파일만」을 묻는다 — 첫 조각은 보수적 부분집합 |
+| **`⌘Z`** | Term 의 `⌘Z` 는 종전대로 **그 문서만** 되돌린다(§3.3). 그러면 기록의 해시가 어긋나 `Undo Rename` 은 거부된다 — 뜻이 맞다(이미 손으로 되돌린 파일을 다시 되돌리면 두 번 되돌아간다) | |
+| **알림** | 성공 「{0}개 파일에서 이름을 바꿨습니다」 · 서버 오류 「이름을 바꿀 수 없습니다 — {0}」(서버 message) · 낡음 「문서가 바뀌어 결과를 버렸습니다」 · root 밖 「루트 밖 파일이 있어 적용하지 않습니다 — {0}」 · 거부 「적용할 수 없는 편집입니다 — {0}」(파일 연산·겹침·읽기 전용·읽기 실패) · 되돌림 「{0}개 파일의 이름 바꾸기를 되돌렸습니다」 · 되돌릴 것 없음 | |
+| **하지 않는 것** | `prepareRename` · 미리보기 · `⌘Z` 에서 여러 파일 확인창 · 「이 파일만 되돌리기」 · redo · `CreateFile`/`RenameFile`/`DeleteFile` · 서버 발 `workspace/applyEdit`(§8.1 기본 거부 그대로) · code action · `annotations`/`changeAnnotations` | 다음 조각 |
+
+**관측점**: `LSJ9`(순수: rename 요청 id·newName·capability·오류 message) · `WSE*`(순수: `WorkspaceEdit` → 파일별 edits — `changes`·`documentChanges`
+합치기·version·파일 연산 거부·`file:` 아님 거부·모양) · `RNM1`(제품 경계: 가짜 서버 — `F2` 로 낱말이 씨앗인 상자, 이름을 치고 `Enter` → 열린 문서와
+**열려 있지 않은** 이웃 파일이 함께 바뀌고 저장되며 기록이 선다 · `undo_workspace_edit` 가 둘 다 되돌린다 · 디스크가 바뀐 뒤의 되돌리기는
+전체 거부 · 낡은 revision 전체 거부 · root 밖 전체 거부 · 파일 연산 전체 거부 · 서버 오류 알림 · `Esc` 는 요청 없음 · 한 파일이면 dirty) ·
+`RNM2`(제품 경계: capability 없는 서버에는 `F2` 가 상자를 열지 않는다).
+
 ### 8.3 관측 가능성과 민감정보
 
 editor event는 처음부터 하나의 domain schema를 공유하되 문서 원문을 기본 trace에 넣지 않는다.

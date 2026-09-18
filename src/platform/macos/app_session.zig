@@ -2427,6 +2427,8 @@ fn modalInputRole(field: ChromeHostField) ModalInputRole {
         .send_helper => .not_an_overlay,
         // 호버 박스도 같다(tooling §8.2b 「모달 아님」) — 키는 편집기로 가고(오면 닫힌다), 받는 포인터는 상자 안 휠뿐.
         .hover_box => .not_an_overlay,
+        // 이름 바꾸기 상자(§8.2f) — 입력은 인라인 rename 모달(`inputFocus() == .rename`)이 이미 든다.
+        .rename_box => .not_an_overlay,
         .notice => .{ .transient_toast = .notice },
     };
 }
@@ -2687,6 +2689,9 @@ pub const RenameTarget = union(enum) {
     /// Project-tree inline editor. The path bytes are copied into the target because async scan/FSEvents may
     /// rebuild every borrowed Row slice while the editor is open.
     file_tree: FileTreeEditTarget,
+    /// 편집기의 심볼(tooling §8.2f) — surface·낱말 범위·revision. 확정하면 `textDocument/rename` 을 보낸다. 포인터가 아니라 id 라
+    /// Term 이 닫혀도 낡은 참조가 없다(확정 때 못 찾으면 그냥 닫힌다).
+    symbol: editor_ops.rename_client.Target,
 };
 
 pub const FileTreeEditKind = enum { create_file, create_directory, rename };
@@ -5269,6 +5274,8 @@ pub const AppSession = struct {
     /// 시그니처 힌트 상태(tooling §8.2d) — 상자의 주인 여부·요청 seq·줄.
     editor_signature: editor_ops.signature_client.State = .{},
     editor_format: editor_ops.format_client.State = .{},
+    editor_rename: editor_ops.rename_client.State = .{},
+    editor_workspace_edit: editor_ops.workspace_edit_client.State = .{},
     // window close 확인을 통과했지만 remote event settlement가 남은 경우의 retry latch. 이 값이 켜진 동안
     // topology와 native close intent는 게시하지 않고 tick이 같은 close graph만 한 번 진행한다.
     window_close_pending: bool = false,
@@ -6980,6 +6987,8 @@ pub const AppSession = struct {
     debug_diff_caret_keys_done: bool = false,
     /// `MARU_FORCE_FORMAT` 이 요청을 보냈다(캡처 전용 래치).
     debug_format_sent: bool = false,
+    /// `MARU_FORCE_RENAME*` 이 상자를 열었다(캡처 전용 래치).
+    debug_rename_done: bool = false,
     // 현재 반주기가 시작된 시각(ns, awake clock). 0=미초기화(다음 tick이 baseline을 잡는다 — 스피너와 같은 규약).
     blink_phase_ns: i128 = 0,
     /// kitty 애니메이션 진행의 baseline(실경과 기준). 커서 깜빡임과 같은 결로 **실경과 ms** 를 코어에
@@ -10399,6 +10408,8 @@ pub const AppSession = struct {
             .navigate_forward => _ = editor_ops.navigateForward(self),
             .trigger_parameter_hints => _ = editor_ops.signature_client.triggerManual(self), // §8.2d
             .format_document => _ = editor_ops.format_client.formatDocument(self), // §8.2e
+            .rename_symbol => _ = editor_ops.rename_client.startAtCaret(self), // §8.2f
+            .undo_workspace_edit => editor_ops.rename_client.undoLast(self), // §8.2f
             // 접기/펼치기 — 편집기가 아니거나 접을 것이 없으면 무동작(비교 뷰도 거절한다. §4.1f).
             // 비교 뷰면 그쪽을 먼저 본다 — 축이 달라 함수가 갈린다(§4.1g "비교 뷰").
             .copy_editor_selection => _ = editor_ops.copyDiffSelection(self) or editor_ops.copySelection(self),
@@ -13015,7 +13026,8 @@ pub const AppSession = struct {
     /// 판정자가 **제품이 묻는 그 질문**을 그대로 물을 수 있다.
     pub fn overlayFrameNeeded(self: *const AppSession) bool {
         return self.anyOverlayOpen() or self.chrome_host.key_hints.visible or
-            self.chrome_host.send_helper.open or self.chrome_host.hover_box.open;
+            self.chrome_host.send_helper.open or self.chrome_host.hover_box.open or
+            (self.rename != null and self.rename.? == .symbol); // 심볼 상자(§8.2f)는 프레임이 앵커를 세워야 열린다 — 상태로 묻는다
     }
 
     /// anyOverlayOpen에서 **notice(비-인터랙티브 토스트)만 제외**한 것 — 입력을 받는 모달(설정·팔레트·확인 등)이
@@ -13534,7 +13546,10 @@ pub const AppSession = struct {
         }
         // 인라인 rename 중 마우스 down(어디든)이면 편집을 확정한다(포커스 상실 = 확정 — docs/tabs-splits-layout.md).
         // 그 뒤 클릭은 정상 처리된다(탭 전환·pane 포커스 등). drag/up(2/3)은 down이 선행하므로 여기서 안 걸린다.
-        if (kind == 1 and self.rename != null) settings_ops.commitRename(self);
+        if (kind == 1 and self.rename != null) {
+            // 심볼 rename(§8.2f)은 클릭-어웨이가 **취소**다 — 확정하면 서버에 rename 이 나가므로(VS Code 도 취소).
+            if (self.rename.? == .symbol) settings_ops.closeRename(self) else settings_ops.commitRename(self);
+        }
         // Phase 7e-2a: 주소창 편집 중 **자기 밴드 밖**(탭/pane/워크스페이스/터미널)을 down하면 편집을 취소한다 — rename의
         // mouse-down commit-away를 미러하되, 브라우저 관례상 클릭-어웨이 = **취소(현재 URL 복원)**로 한다(commit-navigate는
         // 안 친 URL로 튀어 놀람). 단 편집 중인 그 밴드 재클릭(caret 재배치·nav 버튼)은 유지 — 아래 ①b 밴드 핸들러가 URL 존
@@ -20376,6 +20391,7 @@ pub const AppSession = struct {
         debug_fixtures.applyForcedEditorGotoDef(self); // 캡처 전용: 정의로 이동(§8.2c)
         debug_fixtures.applyForcedParamHints(self); // 캡처 전용: 시그니처 힌트(§8.2d)
         debug_fixtures.applyForcedFormat(self); // 캡처 전용: 문서 포맷(§8.2e)
+        debug_fixtures.applyForcedRename(self); // 캡처 전용: 심볼 이름 바꾸기(§8.2f)
         debug_fixtures.applyForcedStageAll(self); // 캡처 전용: 전체 스테이지는 그룹 머리 클릭으로만 시작된다(RS4a)
         debug_fixtures.applyForcedFetch(self); // 캡처 전용: 원격 갱신은 브랜치 줄 클릭으로만 시작된다(P6)
         debug_fixtures.applyForcedRemoteMenu(self); // 캡처 전용: `∨` 메뉴도 클릭으로만 열린다(P6b)
@@ -23980,6 +23996,10 @@ pub const AppSession = struct {
         }
         // 마커 이미지 프리뷰의 테두리·안내(픽셀은 gpu_images가 따로 싣는다 — 갤러리 §5.4 분업).
         try self.collectMarkerPreviewDraws(arena, &draws);
+        // 심볼 이름 바꾸기 상자(tooling §8.2f) — 인라인 rename 의 심볼 대상일 때. 앵커는 프레임마다 다시 잰다(그 문서가 안 그려졌으면 이 프레임엔 없다).
+        if (self.rename) |rt| if (rt == .symbol and editor_ops.rename_client.refreshAnchor(self, rt.symbol)) {
+            try self.chrome_host.collectRenameBoxDraws(try editor_ops.rename_client.boxText(self, arena), props, &tokens, arena, &draws);
+        };
         // **리셋은 설정보다 앞이다.** 처음에 세팅 리셋 옆에 뒀다가 방금 넣은 값을 그 자리에서 지워
         // 막대가 화면에서 사라졌다(실측) — 세팅은 설정이 리셋 뒤라 살아남았고 알림만 순서가 반대였다.
         self.notif_scroll_view = null; // 알림이 닫히면 막대도 없다 — 남기면 stale 막대가 뜬다
@@ -24195,6 +24215,7 @@ pub const AppSession = struct {
         editor_ops.lsp_client.deinit(self); // §8.2a: 서버 자식을 거둔다(짧게 — 종료 경로)
         editor_ops.hover_client.deinit(self);
         editor_ops.signature_client.deinit(self);
+        self.editor_workspace_edit.deinit(self.allocator); // 마지막 WorkspaceEdit 기록(§8.2f)
         // 판정자에서는 detached worker 가 **세션보다 오래 살면 안 된다**. 이유·규율은
         // `detached_worker_wait` 가 단일 출처다(2026-09-08 CI abort: `dupe` 누수 → segfault → 134).
         // 제품에서는 기다리지 않는다 — 멈춘 I/O 로 창 닫기가 굳는 것이 훨씬 나쁘고, 그 계약은 각

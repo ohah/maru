@@ -107,7 +107,9 @@ keybind = F4 = esc:[2J
   §8.2b. **기본 chord 없음** — VS Code 의 `⌘K ⌘I` 는 두 단계 chord 라 키 계약에 없다)·`goto_definition`(`F12`·`⌘클릭` — 언어 서버의
   정의로, §8.2c)·`navigate_back`·`navigate_forward`(`⌃-`·`⌃⇧-` — 이동 스택 뒤로/앞으로, [시각 매핑](native-editor-visual-mapping.md) §5.2;
   편집기 Term 에서만 — 터미널에서는 `⌃-` 가 PTY 로 간다)·`trigger_parameter_hints`(`⇧⌘Space` — 시그니처 힌트, §8.2d)·
-  `format_document`(`⇧⌥F` — 언어 서버로 문서 전체 포맷, §8.2e; 서버가 포맷을 못 하면 무동작, 저장 시 자동 포맷은 없다) — **줄 조작
+  `format_document`(`⇧⌥F` — 언어 서버로 문서 전체 포맷, §8.2e; 서버가 포맷을 못 하면 무동작, 저장 시 자동 포맷은 없다)·
+  `rename_symbol`(`F2` — caret 아래 낱말을 씨앗으로 상자를 열고 `Enter` 면 언어 서버의 rename; 여러 파일이면 관련 파일 전부 저장, §8.2f)·
+  `undo_workspace_edit`(기본 chord 없음 — 팔레트 「Editor: Undo Last Rename」; 마지막 rename 의 모든 파일이 그대로일 때만 되돌린다) — **줄 조작
   넷**(삭제·복제·이동·들여쓰기)은 [문서 모델](native-editor-document-model.md) §3.9a가 소유하고,
   대상은 **선택이 걸친 줄들**이며 전체가 undo 하나다. 들여쓰기·내어쓰기는 **선택이 여러 줄일 때의
   `Tab`·`⇧Tab`** 으로도 닿는다(선택이 한 줄 안이면 종전대로 탭 문자). 레벨은 중첩 **겹수**다(1이 문서

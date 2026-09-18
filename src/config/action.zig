@@ -167,6 +167,11 @@ pub const Action = union(enum) {
     trigger_parameter_hints,
     /// 언어 서버로 문서 전체를 포맷한다(tooling §8.2e — `⇧⌥F`, VS Code `editor.action.formatDocument`). 서버가 없거나 포맷을 못 하면 무동작.
     format_document,
+    /// 심볼 이름 바꾸기(tooling §8.2f — `F2`, VS Code `editor.action.rename`). caret 아래 낱말을 씨앗으로 상자를 열고 `Enter` 면
+    /// `textDocument/rename`. 서버가 없거나 rename 을 못 하면 무동작.
+    rename_symbol,
+    /// 마지막 이름 바꾸기(WorkspaceEdit)를 되돌린다(§8.2f — 기록의 역연산, 모든 파일이 그대로일 때만). **기본 chord 없음**.
+    undo_workspace_edit,
     // 활성 편집기의 들여쓰기 접힘을 전부 접는다/펼친다(visual-mapping §4.1f). **기본 chord가 없다** —
     // VSCode의 `⌘K ⌘0`/`⌘K ⌘J`는 두 벌 chord라 키 계약에 그 개념이 없고, 랩 토글과 같은 이유로
     // 편집기 Term 컨텍스트가 아직 없어 조건부로 양보할 자리도 없다(N2의 몫). 그때까지는 커맨드
@@ -313,6 +318,8 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "navigate_forward")) return .navigate_forward;
     if (std.mem.eql(u8, value, "trigger_parameter_hints")) return .trigger_parameter_hints;
     if (std.mem.eql(u8, value, "format_document")) return .format_document;
+    if (std.mem.eql(u8, value, "rename_symbol")) return .rename_symbol;
+    if (std.mem.eql(u8, value, "undo_workspace_edit")) return .undo_workspace_edit;
     if (std.mem.eql(u8, value, "copy_editor_selection")) return .copy_editor_selection;
     if (std.mem.eql(u8, value, "add_next_occurrence")) return .add_next_occurrence;
     if (std.mem.eql(u8, value, "jump_to_bracket")) return .jump_to_bracket;

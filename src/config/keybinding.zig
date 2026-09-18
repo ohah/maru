@@ -271,6 +271,8 @@ pub const editor_context_bindings = [_]EditorContextBinding{
     .{ .chord = .{ .modifiers = .{}, .key = .{ .function = 8 } }, .action = .next_diagnostic, .needs_editable = false }, // F8 — §5.4(VS Code editor.action.marker.next)
     .{ .chord = .{ .modifiers = .{ .shift = true }, .key = .{ .function = 8 } }, .action = .prev_diagnostic, .needs_editable = false }, // Shift+F8
     .{ .chord = .{ .modifiers = .{}, .key = .{ .function = 12 } }, .action = .goto_definition, .needs_editable = false }, // F12 — §8.2c(VS Code editor.action.revealDefinition)
+    // `F2` — 심볼 이름 바꾸기(tooling §8.2f, VS Code `editor.action.rename`). 파일 트리가 초점일 때의 `F2` 는 ③ʹ 앞 갈래라 겹치지 않는다(키 문서 전수 대조).
+    .{ .chord = .{ .modifiers = .{}, .key = .{ .function = 2 } }, .action = .rename_symbol, .needs_editable = true }, // 문서를 바꾸는 명령 — 비교 뷰에서는 양보
     // **첫 `⌃` 조합**(ETX4 ⑷ — 편집기 Term 에는 PTY 가 없다). VS Code mac 기본 `⌃-`/`⌃⇧-`(2026-09-18 사용자 결정). `⌃⇧-` 는 US 자판에서
     // `_` 로 오므로 둘 다 묶는다(`⌘-`/`⌘_` 폰트 크기와 같은 선례).
     .{ .chord = .{ .modifiers = .{ .control = true }, .key = .{ .char = '-' } }, .action = .navigate_back, .needs_editable = false },
@@ -1254,7 +1256,7 @@ test "ETX4 편집기 컨텍스트 기본키가 전역 표를 안 오염시킨다
         try std.testing.expect(b.needs_editable);
     }
     try std.testing.expectEqual(allowed.len, exceptions);
-    try std.testing.expectEqual(@as(usize, 5), bare_function_keys); // F7 · ⇧F7 · F8 · ⇧F8 · F12 — 늘리려면 그 절에 전수 대조를 적는다
+    try std.testing.expectEqual(@as(usize, 6), bare_function_keys); // F7 · ⇧F7 · F8 · ⇧F8 · F12 · F2 — 늘리려면 그 절에 전수 대조를 적는다
     try std.testing.expectEqual(@as(usize, 3), control_chords); // ⌃- · ⌃⇧- · ⌃⇧_ — ⑷, 늘리려면 allowed_control 에 근거와 함께
     try std.testing.expect(editor_context_bindings.len > 0);
 

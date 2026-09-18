@@ -118,7 +118,9 @@ pub fn tick(self: *AppSession) void {
         }
         return;
     }
-    if (!enabled(self) or !st.pointer_valid or st.stop_judged or self.chrome_host.hover_box.open or self.editor_signature.active) return;
+    // 시그니처가 열려 있으면 상자가 열려 있다(`onResponse` 가 둘을 한 자리에서 세운다) — 그래서 `hover_box.open` 하나가 둘 다 막는다
+    // (`editor_signature.active` 를 따로 보던 조건은 등가였다 — 적대적 3회차 C6).
+    if (!enabled(self) or !st.pointer_valid or st.stop_judged or self.chrome_host.hover_box.open) return;
     if (now -| st.pointer_moved_ms < delayMs(self)) return;
     st.stop_judged = true;
     if (self.pointer_gesture_owner != .none) return; // 드래그 중에는 안 연다
@@ -367,6 +369,8 @@ fn shownTerm(self: *AppSession) ?*Term {
 /// **매 프레임 다시 묻는다** — 그 문서가 보이는가 · revision 이 같은가 · 그 줄이 아직 그려졌는가 · 오버레이가 없는가. 살아 있으면
 /// 앵커를 이 프레임의 좌표로 갱신한다. 열려 있고 그릴 수 있으면 true.
 pub fn refresh(self: *AppSession) bool {
+    // `editor_signature.active` 검사는 오늘 **등가**다(적대적 3회차 C7) — 프레임 빌드가 시그니처의 refresh 를 먼저 묻고 그것이 참이면 여기 안
+    // 오며, 와도 `hide` 가 같은 가드를 든다. 남기는 이유는 호출자가 하나 더 생기는 날 이 함수가 남의 상자를 옮기지 않게 하는 것이다.
     if (!self.chrome_host.hover_box.open or self.editor_signature.active) return false;
     const st = &self.editor_hover;
     const term = shownTerm(self) orelse {

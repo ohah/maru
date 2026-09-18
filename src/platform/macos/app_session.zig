@@ -14287,7 +14287,8 @@ pub const AppSession = struct {
                         _ = pane_ops.focusPaneByPtr(self, pane);
                         self.drag_autoscroll = 0;
                         self.mouse_drag_selecting = false; // 터미널 선택이 아니다 — 소유자가 다르다
-                        editor_ops.signature_client.noteMouseCaret(self); // §8.2d — 마우스로 caret 이 옮겨지면 닫는다(VS Code)
+                        // (시그니처 힌트는 여기서 닫지 않는다 — 상자 밖 눌림은 이 함수 머리의 `hover_client.mouseDown` 이 먼저 닫고, 상자 안은 삼킨다.
+                        //  여기 두었던 닫기는 닿을 수 없는 코드였다 — 적대적 3회차 C4.)
                         return;
                     }
                     // ⓒ' 병합 **판** 본문 클릭 → 그 판에 caret 을 놓는다(S3b-3b). Result 본문(위)이 먼저

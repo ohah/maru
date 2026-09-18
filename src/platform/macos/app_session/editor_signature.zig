@@ -3,8 +3,8 @@
 //!
 //! 트리거: 타이핑한 글자가 서버의 `triggerCharacters` 에 있으면(`noteTyped`) · 열려 있는 동안 `retriggerCharacters` 도 · 열려 있는 동안
 //! revision·caret 이 바뀌면 다시 묻는다(`refresh` — 요청이 나가 있으면 표시해 두었다가 응답 뒤 한 번) · `trigger_parameter_hints` 명령.
-//! 결과가 없으면 닫는다. **키 입력은 닫지 않는다** — 타이핑하면서 보는 것이 존재 이유다(호버와 다른 점). `Esc`·상자 밖 클릭·마우스로 caret
-//! 이동·문서가 안 보임·오버레이가 닫는다. 상자의 주인은 하나: 열려 있는 동안 호버는 열지도 닫지도 않는다(`editor_hover` 가 `active` 를 본다).
+//! 결과가 없으면 닫는다. **키 입력은 닫지 않는다** — 타이핑하면서 보는 것이 존재 이유다(호버와 다른 점). `Esc`·상자 밖 클릭(마우스로 caret 을 옮기는 클릭도 그것이다 — `mouse()` 머리의 `hover_client.mouseDown`)·
+//! 문서가 안 보임·오버레이가 닫는다. 상자의 주인은 하나: 열려 있는 동안 호버는 열지도 닫지도 않는다(`editor_hover` 가 `active` 를 본다).
 
 const std = @import("std");
 const maru = @import("maru");
@@ -266,11 +266,6 @@ pub fn hide(self: *AppSession) void {
 
 /// `Esc` — 닫는다(소비하지 않는다). 다른 키는 닫지 않는다(§8.2d 「닫힘」).
 pub fn noteEscape(self: *AppSession) void {
-    hide(self);
-}
-
-/// 마우스로 caret 이 옮겨졌다(본문 클릭) — 닫는다(VS Code 와 같다).
-pub fn noteMouseCaret(self: *AppSession) void {
     hide(self);
 }
 

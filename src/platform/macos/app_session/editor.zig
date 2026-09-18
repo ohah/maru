@@ -12205,6 +12205,13 @@ test "SIG1 시그니처 힌트 — `(` 를 치면 열리고 첫 파라미터가 
     }.f));
     try testing.expectEqual(@as(u64, 1), fx.session.editor_signature.closed_by_result);
     try testing.expect(!fx.session.chrome_host.hover_box.open);
+    // 닫힌 채로 트리거가 아닌 글자를 쳐도 묻지 않는다(변이 B1 — 아무 글자에나 요청하면 서버가 매 키마다 깨어난다).
+    {
+        const sent_plain = fx.session.editor_lsp.sent_signatures;
+        try testing.expect(insertText(fx.session, term, "z"));
+        try testing.expectEqual(sent_plain, fx.session.editor_lsp.sent_signatures);
+        try removeMarkerHover(fx.session, term, "z");
+    }
     // ⑷ 명령(`trigger_parameter_hints`) — caret 을 `add(` 뒤(offset 11)에 두고 → 열린다(첫 파라미터). `Esc` 가 닫는다(소비하지 않는다).
     term.rt.editor_selection = .{ .anchor_start = 11, .anchor_end = 11, .focus = 11 };
     fx.session.dispatchAppAction(.trigger_parameter_hints);
@@ -12273,6 +12280,44 @@ test "SIG1 시그니처 힌트 — `(` 를 치면 열리고 첫 파라미터가 
     signature_client.onResponse(fx.session, 98, .{ .label = "stale()", .index = 0, .count = 1 });
     try testing.expect(fx.session.editor_signature.waiting and !fx.session.editor_signature.active);
     fx.session.editor_signature.waiting = false;
+    // ⑽ **요청이 나가 있는 동안의 트리거는 응답 뒤 한 번 더 묻는다**(변이 B9) — 대기 중엔 요청을 안 보내고 표시만, 응답이 오면 곧바로 다음 요청.
+    term.rt.editor_selection = .{ .anchor_start = 11, .anchor_end = 11, .focus = 11 };
+    fx.session.editor_signature.waiting = true;
+    fx.session.editor_signature.waiting_seq = 55;
+    fx.session.editor_signature.waiting_surface = term.surface.id;
+    const sent_while_waiting = fx.session.editor_lsp.sent_signatures;
+    fx.session.dispatchAppAction(.trigger_parameter_hints);
+    try testing.expectEqual(sent_while_waiting, fx.session.editor_lsp.sent_signatures); // 대기 중 — 안 보낸다
+    try testing.expect(fx.session.editor_signature.dirty);
+    signature_client.onResponse(fx.session, 55, .{ .label = "f(int a)", .index = 0, .count = 1 });
+    try testing.expectEqual(sent_while_waiting + 1, fx.session.editor_lsp.sent_signatures); // 응답 뒤 한 번 더
+    try testing.expect(fx.session.editor_signature.waiting and !fx.session.editor_signature.dirty);
+    try testing.expect(waitFor(&fx, ctx, struct {
+        fn f(c: Ctx) bool {
+            return !c.fx.session.editor_signature.waiting;
+        }
+    }.f));
+    signature_client.hide(fx.session);
+    // ⑾ **호버가 떠 있을 때 시그니처가 열리면 호버는 내려간다**(변이 B10 — 안 내리면 호버의 줄이 남아 주인이 둘이 된다).
+    try drawFrame(fx.session, leaf, term);
+    const ph = pointerAtOffset(term, 1) orelse return error.NoPointer; // 첫 줄 `int` — 진단이 덮어 호버가 열린다
+    _ = fx.session.hoverCursor(ph.x + 1, ph.y, 0);
+    try testing.expect(pumpHoverUntil(&fx, 3000, ctx, struct {
+        fn f(c: Ctx) bool {
+            return c.fx.session.chrome_host.hover_box.open and !c.fx.session.editor_signature.active;
+        }
+    }.f));
+    try testing.expect(fx.session.editor_hover.lines.items.len > 0);
+    term.rt.editor_selection = .{ .anchor_start = 11, .anchor_end = 11, .focus = 11 };
+    fx.session.dispatchAppAction(.trigger_parameter_hints);
+    try testing.expect(waitFor(&fx, ctx, struct {
+        fn f(c: Ctx) bool {
+            return c.fx.session.editor_signature.active;
+        }
+    }.f));
+    try testing.expectEqual(@as(usize, 0), fx.session.editor_hover.lines.items.len); // 호버는 내려갔다
+    try testing.expect(fx.session.chrome_host.hover_box.open); // 상자는 시그니처의 것
+    signature_client.hide(fx.session);
 }
 
 test "MMP2 미니맵의 축은 보이는 줄이다 — 접으면 스트립에서도 사라지고, 클릭은 보이는 줄 축으로 환산된다 (제품 경계, §6.1·§6.2)" {

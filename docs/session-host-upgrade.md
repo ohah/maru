@@ -366,6 +366,16 @@ U5 제품 admission은 accepted reply를 flush하고 reader를 멈추기 **전**
    화면·notification의 logical generation이 전진하는 것은 정상이며, 최종 bytes가 예약 안에 있으면 commit할 수
    있다. 최종 bytes 자체의 codec·checksum·read-back 검증은 생략하지 않는다.
 
+   **이 대조가 어긋나면 «어느 축»인지 남긴다.** 네 축(`membership`·`count`·`bytes`·`ids`)이
+   `stage=budget_reservation_mismatch` 한 이름으로 뭉쳐 있어, 2026-09-18 실측에서 세션 27개가 붙은 host의
+   반복 실패를 두고 **원인을 두 번 틀리게 짚었다** — 처음엔 「크기가 움직여서」, 다음엔 「멤버십 변화」였고
+   둘 다 근거가 없었다. wire `reason`이 네 축 모두 `.runtime_changed`라 이름이 오히려 오해를 부른다.
+   지금은 스테이지 줄 **바로 다음 줄**에 `session host upgrade budget mismatch: axis=…` 로
+   세 쌍의 숫자(`gen=N->M count=N->M bytes=N->M`, 모두 `예약 -> 실제` 방향)를 남긴다.
+   줄을 나눈 것은 일곱 갈래가 스테이지 라벨을 같은 어휘로 써야 하기 때문이다(라벨 유일성은 경계 판정자가 지킨다). `bytes` 축은 위 문단이
+   인정한 정상 실패이고(예약은 preview 길이로 여유 없이 잡힌다), `membership`·`count`·`ids`는 런타임 집합이
+   실제로 움직인 것이다 — 고칠 곳이 완전히 다르다.
+
 예약 owner는 attempt 하나이며 성공 commit, 모든 in-process retryable rollback과 deadline 경로에서 primary/backup
 pathname과 fd를 exact-once 정리한다. 정리가 실패하면 정상 재개로 축소하지 않고 invariant violation으로 fail-stop한다.
 `SIGKILL`·전원 손실은 userspace cleanup을 실행할 수 없으므로 다음 exact host owner가 시작할 때 위 owner-only stale

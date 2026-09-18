@@ -551,12 +551,30 @@ fn processBudgetReserved(
             .reason = .deadline_exceeded,
         }, deadline);
 
-    if (!budget_reservation.matches(
+    const mismatch_axis = budget_reservation.mismatchAxis(
         capture.membership_generation,
         runtime_ids,
         handoff_bytes.len,
-    )) {
+    );
+    if (mismatch_axis != .none) {
+        // **어느 축인지와 그 숫자를 남긴다.** 이름 하나로는 네 원인이 뭉쳐, 2026-09-18 에
+        // 같은 줄을 근거로 원인을 두 번 틀리게 짚었다. `bytes` 축이면 예약에 여유가 없는
+        // 것이고(미리보기는 freeze 전에 잡힌다), `membership`/`count`/`ids` 면 런타임 집합이
+        // 실제로 움직인 것이다 — 고칠 곳이 완전히 다르다.
+        const report: BudgetMismatchReport = .{
+            .axis = mismatch_axis,
+            .reserved_generation = budget_reservation.membership_generation,
+            .actual_generation = capture.membership_generation,
+            .reserved_count = budget_reservation.runtime_count,
+            .actual_count = runtime_ids.len,
+            .reserved_bytes = budget_reservation.reserved_bytes,
+            .actual_bytes = handoff_bytes.len,
+        };
+        // 두 줄인 것은 게으름이 아니다. 스테이지 라벨은 일곱 갈래가 **같은 어휘**로 남겨야
+        // grep 이 되고, 경계 판정자가 라벨의 유일성을 못 박는다(`upgrade_runtime_changed_stage_boundary`).
+        // 축 줄이 라벨을 다시 쓰면 2 번이 되어 빨개진다 — 합치지 마라.
         noteUpgradeStage("budget_reservation_mismatch");
+        noteUpgradeBudgetMismatch(report);
         return resumeAndFinish(ctx, &frozen, attempt_id, .{
             .status = .resumed,
             .reason = .runtime_changed,
@@ -859,6 +877,86 @@ fn noteUpgradeStage(stage: []const u8) void {
 fn noteUpgradeStageErr(stage: []const u8, err: anyerror) void {
     if (builtin.is_test) return;
     host_log.line("session host upgrade stage failed: stage={s} err={s}", .{ stage, @errorName(err) });
+}
+
+/// 예약 대조가 어긋난 **축과 숫자**를 남긴다. `stage=budget_reservation_mismatch` 만으로는
+/// 네 원인이 구분되지 않아 사람이 추측하게 된다(2026-09-18 실측).
+/// **위치 인자로 받지 않는다.** 일곱 값 중 여섯이 같은 정수 타입이라 순서를 바꿔 넣어도
+/// 컴파일되고 단위 판정자도 못 잡는다 — 그러면 로그가 조용히 거짓을 말한다(예약값과 실제값이
+/// 뒤바뀌어 나오면 사람이 정반대로 읽는다). 필드 이름을 요구해 컴파일러가 막는다.
+const BudgetMismatchReport = struct {
+    axis: budget_admission.Reservation.MismatchAxis,
+    reserved_generation: u64,
+    actual_generation: u64,
+    reserved_count: usize,
+    actual_count: usize,
+    reserved_bytes: usize,
+    actual_bytes: usize,
+};
+
+/// 진단 **문자열을 만드는 순수 함수**. `host_log.line` 은 `builtin.is_test` 에서 조용하므로
+/// 여기까지 빼지 않으면 판정자가 메시지를 읽을 수 없고, 「예약값과 실제값의 방향」처럼 사람이
+/// 정반대로 읽게 되는 오류를 아무도 못 잡는다. 구조체가 인자 순서를 막고, 이 함수가 표기를 막는다.
+///
+/// 방향 규약: 모든 쌍은 **`예약 -> 실제`** 다. 뒤집히면 「예약이 늘었다」로 읽혀 원인이 반대가 된다.
+fn formatBudgetMismatch(buf: []u8, report: BudgetMismatchReport) ![]u8 {
+    return std.fmt.bufPrint(
+        buf,
+        "session host upgrade budget mismatch: axis={s} gen={d}->{d} count={d}->{d} bytes={d}->{d}",
+        .{
+            @tagName(report.axis),
+            report.reserved_generation,
+            report.actual_generation,
+            report.reserved_count,
+            report.actual_count,
+            report.reserved_bytes,
+            report.actual_bytes,
+        },
+    );
+}
+
+fn noteUpgradeBudgetMismatch(report: BudgetMismatchReport) void {
+    if (builtin.is_test) return;
+    var buf: [256]u8 = undefined;
+    const text = formatBudgetMismatch(&buf, report) catch return;
+    host_log.line("{s}", .{text});
+}
+
+test "예약 대조 진단은 «예약 -> 실제» 방향으로 적는다" {
+    // 2026-09-18 적대적 검증이 만든 판정자. 구조체로 인자 순서는 막았지만 **표기 방향**은
+    // 여전히 아무도 안 봤다 — `gen={d}->{d}` 가 뒤집히면 「예약이 늘었다」로 읽혀 원인이
+    // 정반대가 되고, 컴파일도 되고 다른 판정자도 통과한다.
+    var buf: [256]u8 = undefined;
+    const text = try formatBudgetMismatch(&buf, .{
+        .axis = .bytes,
+        .reserved_generation = 41,
+        .actual_generation = 42,
+        .reserved_count = 27,
+        .actual_count = 28,
+        .reserved_bytes = 1000,
+        .actual_bytes = 1001,
+    });
+    try std.testing.expectEqualStrings(
+        "session host upgrade budget mismatch: axis=bytes gen=41->42 count=27->28 bytes=1000->1001",
+        text,
+    );
+
+    // 축 이름이 그대로 실린다 — 넷이 각자 다른 문자열로 나와야 로그에서 갈린다.
+    for ([_]budget_admission.Reservation.MismatchAxis{ .membership, .count, .bytes, .ids }) |axis| {
+        var axis_buf: [256]u8 = undefined;
+        const line = try formatBudgetMismatch(&axis_buf, .{
+            .axis = axis,
+            .reserved_generation = 1,
+            .actual_generation = 1,
+            .reserved_count = 1,
+            .actual_count = 1,
+            .reserved_bytes = 1,
+            .actual_bytes = 1,
+        });
+        var want_buf: [64]u8 = undefined;
+        const want = try std.fmt.bufPrint(&want_buf, "axis={s} ", .{@tagName(axis)});
+        try std.testing.expect(std.mem.indexOf(u8, line, want) != null);
+    }
 }
 
 /// upgrade 가 **왜 되돌려졌는지** host 로그에 남긴다.

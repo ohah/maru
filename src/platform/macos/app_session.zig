@@ -5264,6 +5264,8 @@ pub const AppSession = struct {
     editor_lsp: editor_ops.lsp_client.State = .{},
     /// 호버 박스 상태(tooling §8.2b) — 포인터 정지·요청 대기·열린 줄.
     editor_hover: editor_ops.hover_client.State = .{},
+    /// 정의로 이동 상태(tooling §8.2c) — 기다리는 요청 seq.
+    editor_definition: editor_ops.definition_client.State = .{},
     // window close 확인을 통과했지만 remote event settlement가 남은 경우의 retry latch. 이 값이 켜진 동안
     // topology와 native close intent는 게시하지 않고 tick이 같은 close graph만 한 번 진행한다.
     window_close_pending: bool = false,
@@ -10387,6 +10389,9 @@ pub const AppSession = struct {
             .next_diagnostic => _ = editor_ops.gotoDiagnosticActive(self, .next), // §5.4 — 진단이 없으면 무동작
             .prev_diagnostic => _ = editor_ops.gotoDiagnosticActive(self, .prev),
             .show_hover => _ = editor_ops.hover_client.showAtCaret(self), // §8.2b — caret 자리의 호버 박스
+            .goto_definition => _ = editor_ops.definition_client.gotoDefinitionAtCaret(self), // §8.2c
+            .navigate_back => _ = editor_ops.navigateBack(self), // §5.2 — 갈 곳이 없으면 무동작
+            .navigate_forward => _ = editor_ops.navigateForward(self),
             // 접기/펼치기 — 편집기가 아니거나 접을 것이 없으면 무동작(비교 뷰도 거절한다. §4.1f).
             // 비교 뷰면 그쪽을 먼저 본다 — 축이 달라 함수가 갈린다(§4.1g "비교 뷰").
             .copy_editor_selection => _ = editor_ops.copyDiffSelection(self) or editor_ops.copySelection(self),
@@ -14263,6 +14268,14 @@ pub const AppSession = struct {
                         _ = pane_ops.focusPaneByPtr(self, pane);
                         self.drag_autoscroll = 0;
                         self.mouse_drag_selecting = false;
+                        return;
+                    }
+                    // **`⌘클릭` 은 정의로 간다**(tooling §8.2c) — 링크 열기(`url_at`)와 같은 수식키인데 편집기 본문에는 링크가 없어
+                    // 그 경로가 비어 여기로 떨어진다. 글자가 없는 자리·서버가 없으면 false 라 아래 선택 클릭으로 흘러간다.
+                    if (self.urlModifierHeld(mods) and pane.activeTerm().kind == .editor and
+                        editor_ops.definition_client.gotoDefinitionAtPointer(self, pane.activeTerm(), x_px, y_px))
+                    {
+                        _ = pane_ops.focusPaneByPtr(self, pane);
                         return;
                     }
                     if (editor_ops.beginBodySelection(self, pane, x_px, y_px, mods)) {
@@ -20349,6 +20362,7 @@ pub const AppSession = struct {
         debug_fixtures.applyForcedCommitMessage(self); // 캡처 전용: 편집은 클릭·키보드로만 시작된다(한 번만)
         debug_fixtures.applyForcedEditorCaret(self); // 캡처 전용: 선택은 클릭으로만 생긴다
         debug_fixtures.applyForcedEditorHover(self); // 캡처 전용: 호버는 포인터 정지로만 뜬다(§8.2b)
+        debug_fixtures.applyForcedEditorGotoDef(self); // 캡처 전용: 정의로 이동(§8.2c)
         debug_fixtures.applyForcedStageAll(self); // 캡처 전용: 전체 스테이지는 그룹 머리 클릭으로만 시작된다(RS4a)
         debug_fixtures.applyForcedFetch(self); // 캡처 전용: 원격 갱신은 브랜치 줄 클릭으로만 시작된다(P6)
         debug_fixtures.applyForcedRemoteMenu(self); // 캡처 전용: `∨` 메뉴도 클릭으로만 열린다(P6b)

@@ -292,6 +292,17 @@ Term에서도** 그 chord가 소비된다. 그런데 **편집기 Term에는 PTY�
 VS Code 의 `editor.action.marker.next/prev` 가 이 키다. `needs_editable = false`(읽기 전용 문서의 오류 사이를 오가는 것도 편집이
 아니다). `ETX4` 의 ⑶ 수는 넷이 됐다.
 
+**`F12` — 정의로 이동(2026-09-18, [툴링](editor-surface-tooling.md) §8.2c).** 세 번째 기능키. 전수 대조는 `F7`·`F8` 과 같다 — ①ʹ·②·③ʹ
+어디에도 `F12` 가 없고(Swift 는 F1~F12 를 특수 키로 `handleKeyDown` 에 보낸다), 전역 표에도 없다. VS Code 의 `editor.action.revealDefinition`.
+`needs_editable = false`. `ETX4` 의 ⑶ 수는 다섯이 됐다.
+
+**`⌃-`·`⌃⇧-` — 뒤로·앞으로(2026-09-18 사용자 결정, §8.2c).** VS Code mac 기본(`workbench.action.navigateBack/Forward`)을 따른다 —
+§1.1 「VSCode 사용자 무회귀」. 이것이 이 컨텍스트 표에 들어온 **첫 `⌃` 조합**이라 `ETX4` 에 넷째 갈래를 연다: ⑷ **`⌃` 조합 —
+편집기 Term 에는 PTY 가 없다.** `⌃` 를 막던 근거(*"`⌃` 는 제어문자를 뺏는다"*)는 터미널 Term 의 것이고 이 표는 편집기 Term 에서만
+읽힌다 — 터미널 Term 에서 `⌃-` 는 그대로 PTY 로 간다(`0x1f`). 조건은 ⑶ 과 같다: **전역 표·터미널 매크로 표에 같은 chord 가 없어야**
+하고(있으면 ⑵), 항목은 `ETX4` 의 `allowed_control` 목록에 근거와 함께 서야 한다. `⌃⇧-` 는 US 자판에서 `_` 로 오므로 `⌃⇧_` 도 같은
+액션에 묶는다(`⌘-`/`⌘_` 폰트 크기와 같은 선례). `needs_editable = false`.
+
 #### 충돌 전수 대조 (2026-09-07)
 
 [diff·떠 있는 UI·설정](native-editor-ui.md) §9.1 이 *"충돌 목록은 구현 슬라이스에서 전수 조사한다"*,

@@ -484,6 +484,42 @@ padding 만큼 둔다(`popup_box.gap_px`); sticky·휠 판정도 **보이는** r
 `HOVB*`(제품 경계: 가짜 서버가 `textDocument/hover` 에 답한다 — 포인터 정지 → 지연 → 요청 → 응답 → 상자(줄 내용·자리) · 낱말 밖으로 나가면 닫힘 ·
 키·스크롤·편집으로 닫힘 · 서버 없이 구문 오류만으로 열림 · `show_hover` 가 caret 에서 연다 · 낡은 응답은 버린다 · 끄면 포인터로 안 열린다).
 
+### 8.2c LSP 2단 ② — 정의로 이동과 되돌아가기 (2026-09-18, 계획 공격 뒤의 결정)
+
+**계획 공격이 드러낸 것.** ① [visual-mapping §5.2](native-editor-visual-mapping.md) 의 수렴 진입점(`navigateTo`)과 되돌아가기 스택은 섰고 심볼
+피커·`F7`·`F8` 이 쌓아 왔는데, **되돌아갈 키·명령이 없다**(`navigateBack`/`navigateForward` 는 판정자만 부른다 — 「기능은 섰는데 손이 닿지
+않는다」의 또 한 사례). ② 그 진입점은 `(경로?, byte offset)` 을 받는데 LSP 는 `(line, character)` 를 **서버 인코딩**으로 주고, 대상 파일은
+아직 안 열려 있을 수 있어 offset 을 미리 셀 수 없다 — 열고 나서 그 문서로 풀어야 한다. ③ root 밖 URI 는 §5.2 가 「알리되 열지 않는다」고
+정했지만 알리는 자리가 없었다. ④ 키 계약(`ETX4`)은 편집기 컨텍스트 표에 `⌃` 조합을 막는다 — 되돌아가기의 VS Code mac 기본이 `⌃-` 라
+**예외 갈래를 열어야 한다**(사용자 결정, 아래). ⑤ `⌘클릭` 은 `input.url-click-modifier` 의 링크 열기와 같은 수식키인데 편집기 본문에는
+링크가 없다(링크 감지는 터미널 Term 만) — 같은 수식키가 편집기에서는 정의로 간다.
+
+**레퍼런스(동작만).** VS Code macOS 기본: `F12` = `editor.action.revealDefinition` · `⌃-` = `workbench.action.navigateBack` · `⌃⇧-` =
+`workbench.action.navigateForward` · `⌥F12` = peek · `⌘클릭` = 정의로 이동. 정의를 못 찾으면 편집기 안에 「No definition found for 'x'」.
+결과가 여럿이면 peek 목록. Zed 도 `F12`·`⌘클릭`·`⌃-`.
+
+| 축 | 결정 | 근거 |
+| --- | --- | --- |
+| **트리거** | `goto_definition` — `F12`(편집기 컨텍스트 표 ⑶ 기능키) · **`⌘클릭`**(편집기 본문 위, 눌린 글자 = `.cluster` 판정) · 팔레트 「Editor: Go to Definition」. caret(키) 또는 포인터(클릭) 자리의 offset 으로 `textDocument/definition` | VS Code·Zed 와 같은 키. `⌘클릭` 은 링크 열기(`url_at`)가 먼저 보고 편집기에는 링크가 없어 `mouse()` 로 떨어진다 |
+| **요청** | id 는 `2000+seq`(hover 의 `1000+seq` 와 같은 꼴). 응답이 오면 **지금 기다리는 seq** 일 때만 움직인다 — 낡은 응답은 버린다. 서버가 없거나 ready 아니면 무동작 | §8.2b 와 같은 규율 |
+| **결과** | `Location` · `Location[]` · `LocationLink[]` — **첫 항목**. `LocationLink` 는 `targetSelectionRange`(없으면 `targetRange`)의 시작. `null`/빈 배열이면 알림 토스트 「정의를 찾지 못했습니다」 | VS Code 의 「No definition found」. 여럿의 목록(peek)은 「하지 않는 것」 |
+| **이동** | §5.2 의 `navigateTo` **하나**로 — `NavTarget` 에 `(line, character, 인코딩)` 변형을 더해 **연 뒤 그 문서로 offset 을 푼다**(열기 → 풀기 → 펴기 → caret → 스크롤). 같은 파일이면 파일 열기 없이 같은 경로 | §5.2 「출처가 여럿이어도 경로는 하나다」 |
+| **root 밖** | `withinNavRoot` 가 거부하면 열지 않고 알림 「루트 밖이라 열지 않습니다 — ‹경로›」 | §5.2 「표시와 접근을 가른다」 · §8.2 「URI 를 받았다는 이유로 grant 가 확대되지 않는다」 |
+| **뒤로·앞으로** | `navigate_back` = `⌃-` · `navigate_forward` = `⌃⇧-`(`_` 도) · 팔레트 「Editor: Go Back / Go Forward」. 스택은 §5.2 것 그대로(창 하나에 하나, 닫힌 Term 은 건너뜀). 편집기 Term 컨텍스트에서만 — 터미널 Term 에서는 `⌃-` 가 PTY 로 간다 | **사용자 결정(2026-09-18)**: VS Code mac 기본을 따른다(§1.1 「VSCode 사용자 무회귀」). 키 계약에 `⌃` 예외 갈래 ⑷ 를 연다 — [키 입력](key-input-and-shortcuts.md) 「편집기 Term 컨텍스트」 |
+| **하지 않는 것** | 여러 결과의 목록·peek(`⌥F12`) · declaration/typeDefinition/implementation/references · `⌘` 호버 밑줄(링크처럼 보이기) · 「정의로 이동 → 선택」(caret 만 놓는다 — §5.2) · stale 위치 보정 | 다음 조각들 |
+
+**구현이 계약에 되먹인 것(2026-09-18).** ① **제품 캡처가 결함을 잡았다** — 파일 트리 root 가 `/` 인 창에서 같은 파일의 정의가 「root 밖」이 됐다:
+`repo_path.underRoot` 의 경계 검사(`path[r.len] == '/'`)가 root `/` 에서 `//…` 만 통과시켰다. root 가 `/` 면 모든 절대 경로가 아래다(`CRUMB4`).
+breadcrumb 표시가 같은 함수를 쓰므로 그쪽도 같은 판정이었다. ② 정의로 이동은 「파일 1개 = Term 1개」 유일성(`fileTermForPath`) 위에 선다 —
+`file_entry` 없이 연 Term(판정자·캡처 훅의 `openPathInActivePane`)은 그 밖이라 같은 파일이 **또 열린다**. 제품 경로(파일 트리·`navigateTo`)는
+전부 `openFileTermInActivePane` 이라 해당 없음이고, 판정자는 그 길로 연다. ③ 가짜 서버의 definition 답 모양은 **문서마다** 기억한다 —
+전역 하나로 두면 다른 문서의 뒤늦은 `didOpen` 이 되돌린다(GOTO1 실측). ④ 캡처 훅 `MARU_FORCE_EDITOR_GOTO_DEF=1`: 요청이 나간 순간 caret
+훅의 래치를 세운다 — 응답이 caret 을 옮긴 뒤 다음 프레임의 caret 훅이 먼저 돌아 되돌렸다.
+
+**관측점**: `LSJ6`(순수: definition 요청 id·결과 세 모양·`LocationLink` 의 selection range 우선) · `CRUMB4`(순수: root `/`) · `GOTO1`(제품 경계: 가짜 서버 — `F12` 로 같은
+파일 안 이동(caret·되돌아가기 표식) · `⌃-`/`⌃⇧-` 로 뒤로·앞으로 · `⌘클릭` · 다른 파일(새 Term 이 열리고 caret) · root 밖(알림·안 열림) ·
+`null`(알림) · 낡은 응답 버림) · `ETX4` 의 ⑷ 갈래(`⌃` 예외 목록).
+
 ### 8.3 관측 가능성과 민감정보
 
 editor event는 처음부터 하나의 domain schema를 공유하되 문서 원문을 기본 trace에 넣지 않는다.

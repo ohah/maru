@@ -13,10 +13,14 @@ pub const RequestId = union(enum) {
     initialize,
     shutdown,
     hover: u32,
+    definition: u32,
 };
 pub const initialize_id: u32 = 1;
 pub const shutdown_id: u32 = 2;
 pub const hover_id_base: u32 = 1000;
+/// `definition`(2단 ②, §8.2c)의 id 는 `definition_id_base + seq`. hover 와 겹치지 않게 1000 칸 뒤 — seq 는 u32 라 `hover` 가
+/// 1000 칸을 넘어 자랄 수 있으므로 **큰 쪽부터 가른다**(`classify`).
+pub const definition_id_base: u32 = 2_000_000_000;
 
 /// 위치 인코딩 — `initialize` 에서 utf-8 을 먼저 제안하고 서버가 고른 것을 쓴다(§8.2a).
 pub const PositionEncoding = enum { utf8, utf16 };
@@ -83,6 +87,51 @@ pub fn hoverRequest(allocator: std.mem.Allocator, seq: u32, uri: []const u8, lin
         .method = "textDocument/hover",
         .params = .{ .textDocument = .{ .uri = uri }, .position = .{ .line = line, .character = character } },
     }, .{});
+}
+
+/// `textDocument/definition`(§8.2c).
+pub fn definitionRequest(allocator: std.mem.Allocator, seq: u32, uri: []const u8, line: u32, character: u32) error{OutOfMemory}![]u8 {
+    return std.json.Stringify.valueAlloc(allocator, .{
+        .jsonrpc = "2.0",
+        .id = definition_id_base + seq,
+        .method = "textDocument/definition",
+        .params = .{ .textDocument = .{ .uri = uri }, .position = .{ .line = line, .character = character } },
+    }, .{});
+}
+
+/// definition 결과의 **첫 항목**(§8.2c 「결과」) — `Location` · `Location[]` · `LocationLink[]`. `LocationLink` 는 `targetSelectionRange`
+/// (없으면 `targetRange`)의 시작. `null`·빈 배열·모양이 아니면 `null`. `uri` 는 응답 트리 안의 조각(파싱 결과가 사는 동안 유효).
+pub const Target = struct { uri: []const u8, line: u32, character: u32 };
+pub fn definitionTarget(result: ?std.json.Value) ?Target {
+    const r = result orelse return null;
+    const first: std.json.Value = switch (r) {
+        .object => r,
+        .array => |a| if (a.items.len > 0) a.items[0] else return null,
+        else => return null,
+    };
+    if (first != .object) return null;
+    const o = first.object;
+    // LocationLink
+    if (o.get("targetUri")) |tu| {
+        if (tu != .string) return null;
+        const range = o.get("targetSelectionRange") orelse o.get("targetRange") orelse return null;
+        const st = startOf(range) orelse return null;
+        return .{ .uri = tu.string, .line = st.line, .character = st.character };
+    }
+    const uri = o.get("uri") orelse return null;
+    if (uri != .string) return null;
+    const st = startOf(o.get("range") orelse return null) orelse return null;
+    return .{ .uri = uri.string, .line = st.line, .character = st.character };
+}
+
+fn startOf(range: std.json.Value) ?struct { line: u32, character: u32 } {
+    if (range != .object) return null;
+    const st = range.object.get("start") orelse return null;
+    if (st != .object) return null;
+    return .{
+        .line = u32Of(st.object.get("line")) orelse return null,
+        .character = u32Of(st.object.get("character")) orelse return null,
+    };
 }
 
 /// hover 응답의 `contents` 를 **마크다운 한 덩어리**로 편다(§8.2b) — 세 모양이 있다: `MarkupContent{kind,value}` · `MarkedString`
@@ -252,7 +301,12 @@ pub fn classify(root: std.json.Value) Incoming {
     const rid: RequestId = switch (id_num) {
         initialize_id => .initialize,
         shutdown_id => .shutdown,
-        else => if (id_num >= hover_id_base and id_num - hover_id_base <= std.math.maxInt(u32)) .{ .hover = @intCast(id_num - hover_id_base) } else return .ignore,
+        else => if (id_num >= definition_id_base and id_num - definition_id_base <= std.math.maxInt(u32))
+            .{ .definition = @intCast(id_num - definition_id_base) }
+        else if (id_num >= hover_id_base and id_num - hover_id_base <= std.math.maxInt(u32))
+            .{ .hover = @intCast(id_num - hover_id_base) }
+        else
+            return .ignore,
     };
     const is_error = obj.get("error") != null;
     return .{ .response = .{ .id = rid, .result = obj.get("result"), .is_error = is_error } };
@@ -405,6 +459,44 @@ test "LSJ5 hover — 요청 id 는 1000+seq·contentFormat 에 markdown, 응답�
     var m3 = try parse(a, "{\"contents\":\"  \"}");
     defer m3.deinit();
     try testing.expect((try hoverMarkdown(a, m3.value)) == null); // 공백뿐이면 없음
+}
+
+test "LSJ6 definition — 요청 id 는 2_000_000_000+seq, 응답은 seq 로 대조(hover 와 안 겹침), 결과 세 모양의 첫 항목·LocationLink 는 selection range (§8.2c)" {
+    const a = testing.allocator;
+    const req = try definitionRequest(a, 3, "file:///a.c", 1, 2);
+    defer a.free(req);
+    try testing.expect(std.mem.indexOf(u8, req, "\"id\":2000000003") != null);
+    try testing.expect(std.mem.indexOf(u8, req, "\"method\":\"textDocument/definition\"") != null);
+    var p1 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":2000000003,\"result\":null}");
+    defer p1.deinit();
+    const c1 = classify(p1.value);
+    try testing.expect(c1 == .response and c1.response.id == .definition and c1.response.id.definition == 3);
+    try testing.expect(definitionTarget(c1.response.result) == null);
+    var p2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":1003,\"result\":null}");
+    defer p2.deinit();
+    try testing.expect(classify(p2.value).response.id == .hover); // 1003 은 hover 3 — definition 이 아니다
+    // Location 하나.
+    var l1 = try parse(a, "{\"uri\":\"file:///b.c\",\"range\":{\"start\":{\"line\":4,\"character\":2},\"end\":{\"line\":4,\"character\":5}}}");
+    defer l1.deinit();
+    const t1 = definitionTarget(l1.value).?;
+    try testing.expectEqualStrings("file:///b.c", t1.uri);
+    try testing.expectEqual(@as(u32, 4), t1.line);
+    try testing.expectEqual(@as(u32, 2), t1.character);
+    // Location[] — 첫 항목. LocationLink[] — targetSelectionRange 가 targetRange 보다 먼저.
+    var l2 = try parse(a, "[{\"uri\":\"file:///c.c\",\"range\":{\"start\":{\"line\":1,\"character\":0},\"end\":{\"line\":1,\"character\":1}}},{\"uri\":\"file:///d.c\",\"range\":{\"start\":{\"line\":9,\"character\":9},\"end\":{\"line\":9,\"character\":9}}}]");
+    defer l2.deinit();
+    try testing.expectEqualStrings("file:///c.c", definitionTarget(l2.value).?.uri);
+    var l3 = try parse(a, "[{\"targetUri\":\"file:///e.c\",\"targetRange\":{\"start\":{\"line\":10,\"character\":0},\"end\":{\"line\":20,\"character\":0}},\"targetSelectionRange\":{\"start\":{\"line\":10,\"character\":4},\"end\":{\"line\":10,\"character\":8}}}]");
+    defer l3.deinit();
+    const t3 = definitionTarget(l3.value).?;
+    try testing.expectEqualStrings("file:///e.c", t3.uri);
+    try testing.expectEqual(@as(u32, 4), t3.character);
+    var l4 = try parse(a, "[{\"targetUri\":\"file:///f.c\",\"targetRange\":{\"start\":{\"line\":3,\"character\":1},\"end\":{\"line\":3,\"character\":2}}}]");
+    defer l4.deinit();
+    try testing.expectEqual(@as(u32, 3), definitionTarget(l4.value).?.line); // selection 이 없으면 targetRange
+    var l5 = try parse(a, "[]");
+    defer l5.deinit();
+    try testing.expect(definitionTarget(l5.value) == null);
 }
 
 test "LSJ4 file URI — 공백·한글은 퍼센트, 되읽으면 같은 경로 (§8.2a)" {

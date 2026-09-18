@@ -12,6 +12,8 @@
 //! - `textDocument/hover` → contents(markdown): 펜스 `int fake` · `fake hover L<line>:C<char>` · `**bold** here` · 항목 14개(`- item N`,
 //!   상자 높이 상한 12행을 넘긴다), range = 그 줄의 `character..character+3`(클라이언트가 앵커로 써야 한다). 본문에 `NOHOVER` 가
 //!   있으면 `null` 결과(내용 없음). `MUTEHOVER` 가 있으면 hover 에 **답하지 않는다**(시간 초과 경로).
+//! - `textDocument/definition` → `Location[]` 둘(첫 항목 = 줄 1 글자 4, 둘째는 버려져야 한다). 본문에 `NODEF` 면 `null`, `XFILE` 이면
+//!   같은 디렉터리의 `other.c`, `OUTSIDE` 면 `file:///nonexistent-outside-root/x.c`(root 밖).
 //! - `shutdown` → `null` 응답, `exit` → 종료 0.
 //! - 시작하자마자 stderr 에 한 줄을 쓴다(실서버 clangd 가 그렇다) — stdout 에 섞이면 프레임이 깨진다(§8.2a 「stderr」).
 //! 순수 판정 대상이 아니라(맞으면 되는 도구) 테스트는 없다 — 이 도구의 계약은 `LSPB*` 가 제품 경계에서 든다.
@@ -92,6 +94,31 @@ var answered = false;
 var no_hover = false;
 /// 마지막 본문에 `MUTEHOVER` 가 있었다 — hover 요청에 **답하지 않는다**.
 var mute_hover = false;
+/// definition 의 답 모양 — **문서마다**(uri 별로) 본문 표식으로 고른다: `NODEF` → null · `XFILE` → 같은 디렉터리 `other.c` · `OUTSIDE` →
+/// root 밖 경로 · 없으면 같은 파일. 전역 하나로 두면 다른 문서의 didOpen 이 뒤에 와서 되돌린다(GOTO1 실측 — other.c 의 didOpen 이
+/// g.c 의 `OUTSIDE` 를 지웠다).
+const DefMode = enum { same, none, other, outside };
+const DocMode = struct { uri: [1024]u8 = undefined, len: usize = 0, mode: DefMode = .same };
+var doc_modes: [8]DocMode = [_]DocMode{.{}} ** 8;
+
+fn setDocMode(uri: []const u8, mode: DefMode) void {
+    if (uri.len > 1024) return;
+    for (&doc_modes) |*d| if (d.len == uri.len and std.mem.eql(u8, d.uri[0..d.len], uri)) {
+        d.mode = mode;
+        return;
+    };
+    for (&doc_modes) |*d| if (d.len == 0) {
+        @memcpy(d.uri[0..uri.len], uri);
+        d.len = uri.len;
+        d.mode = mode;
+        return;
+    };
+}
+
+fn docMode(uri: []const u8) DefMode {
+    for (&doc_modes) |*d| if (d.len == uri.len and std.mem.eql(u8, d.uri[0..d.len], uri)) return d.mode;
+    return .same;
+}
 
 fn handle(allocator: std.mem.Allocator, body: []const u8) void {
     var parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch return;
@@ -145,6 +172,38 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
         } });
         return;
     }
+    if (std.mem.eql(u8, method, "textDocument/definition")) {
+        var req_uri: []const u8 = "";
+        if (obj.get("params")) |p| if (p == .object) if (p.object.get("textDocument")) |td| if (td == .object) {
+            req_uri = str(td.object.get("uri")) orelse "";
+        };
+        const def_mode = docMode(req_uri);
+        const Pos = struct { line: i64, character: i64 };
+        const Range = struct { start: Pos, end: Pos };
+        if (def_mode == .none) {
+            sendJson(allocator, .{ .jsonrpc = "2.0", .id = id.?, .result = null });
+            return;
+        }
+        var uri_buf: [4096]u8 = undefined;
+        const uri: []const u8 = switch (def_mode) {
+            .same => req_uri,
+            .other => blk: {
+                // 같은 디렉터리의 `other.c` — 요청 uri 의 마지막 조각을 바꾼다.
+                const slash = std.mem.lastIndexOfScalar(u8, req_uri, '/') orelse break :blk req_uri;
+                break :blk std.fmt.bufPrint(&uri_buf, "{s}/other.c", .{req_uri[0..slash]}) catch req_uri;
+            },
+            .outside => "file:///nonexistent-outside-root/x.c",
+            .none => unreachable,
+        };
+        // `Location[]` 로 낸다(가장 흔한 모양) — 둘째 항목은 버려져야 한다.
+        const Loc = struct { uri: []const u8, range: Range };
+        const locs = [_]Loc{
+            .{ .uri = uri, .range = .{ .start = .{ .line = 1, .character = 4 }, .end = .{ .line = 1, .character = 5 } } },
+            .{ .uri = uri, .range = .{ .start = .{ .line = 0, .character = 0 }, .end = .{ .line = 0, .character = 1 } } },
+        };
+        sendJson(allocator, .{ .jsonrpc = "2.0", .id = id.?, .result = locs });
+        return;
+    }
     if (std.mem.eql(u8, method, "shutdown")) {
         sendJson(allocator, .{ .jsonrpc = "2.0", .id = id.?, .result = null });
         return;
@@ -166,6 +225,7 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
         };
         no_hover = std.mem.indexOf(u8, text, "NOHOVER") != null;
         mute_hover = std.mem.indexOf(u8, text, "MUTEHOVER") != null;
+        setDocMode(uri, if (std.mem.indexOf(u8, text, "NODEF") != null) .none else if (std.mem.indexOf(u8, text, "XFILE") != null) .other else if (std.mem.indexOf(u8, text, "OUTSIDE") != null) .outside else .same);
         if (std.mem.indexOf(u8, text, "BOOM") != null) std.c._exit(1);
         if (std.mem.indexOf(u8, text, "HANG") != null) {
             _ = std.c.close(1);

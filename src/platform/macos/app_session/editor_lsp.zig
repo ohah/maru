@@ -23,6 +23,7 @@ const input_ops = @import("input.zig");
 const term_ops = @import("term.zig");
 const file_tree_backend = @import("../file_tree_backend.zig");
 const editor_hover = @import("editor_hover.zig");
+const editor_definition = @import("editor_definition.zig");
 
 pub const Phase = enum {
     /// 실행 파일이 PATH 에 없다 — 상태바 「설치」.
@@ -74,6 +75,8 @@ pub const Client = struct {
     trust_pending: bool = false,
     /// 마지막으로 보낸 hover 요청의 seq(§8.2b — 응답은 `editor_hover` 가 「지금 기다리는 seq」와 대조한다).
     hover_seq: u32 = 0,
+    /// 마지막으로 보낸 definition 요청의 seq(§8.2c).
+    definition_seq: u32 = 0,
 
     fn deinit(self: *Client, allocator: std.mem.Allocator) void {
         if (self.proc) |*p| {
@@ -110,6 +113,8 @@ pub const State = struct {
     /// 판정자 관측: 보낸 hover 요청 수·받은 hover 응답 수(§8.2b).
     sent_hovers: u64 = 0,
     received_hovers: u64 = 0,
+    sent_definitions: u64 = 0,
+    received_definitions: u64 = 0,
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
         for (self.clients.items) |*c| c.deinit(allocator);
@@ -463,6 +468,11 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
                 defer self.allocator.free(msg);
                 _ = send(self, c, msg);
             },
+            .definition => |seq| {
+                self.editor_lsp.received_definitions += 1;
+                const target: ?lsp.rpc.Target = if (r.is_error) null else lsp.rpc.definitionTarget(r.result);
+                editor_definition.onDefinitionResponse(self, seq, target, c.encoding);
+            },
             .hover => |seq| {
                 // 낡은 응답(다른 seq)·에러·빈 내용은 전부 「내용 없음」으로 호버 층에 넘긴다 — 판정은 그쪽이 한다(§8.2b 「요청」).
                 const md: ?[]u8 = if (r.is_error) null else lsp.rpc.hoverMarkdown(self.allocator, r.result) catch null;
@@ -701,6 +711,25 @@ pub fn readyClientFor(self: *AppSession, term: *Term) ?*Client {
     if (c.phase != .ready or c.proc == null) return null;
     if (c.findDoc(term.surfaceId()) == null) return null;
     return c;
+}
+
+/// `textDocument/definition` 을 보낸다(§8.2c). 위치 변환은 hover 와 같다. 보냈으면 그 seq.
+pub fn requestDefinition(self: *AppSession, term: *Term, offset: usize) ?u32 {
+    const c = readyClientFor(self, term) orelse return null;
+    const d = c.findDoc(term.surfaceId()) orelse return null;
+    const opened = term.rt.editor_doc orelse return null;
+    const content = opened.file.content;
+    const off = @min(offset, content.len);
+    const line_idx = opened.file.lines.lineAt(off);
+    const line = opened.file.lines.line(line_idx) orelse return null;
+    const text = content[line.start..line.contentEnd()];
+    const character = lsp.position.characterOf(text, @intCast(off -| line.start), c.encoding);
+    c.definition_seq +%= 1;
+    const msg = lsp.rpc.definitionRequest(self.allocator, c.definition_seq, d.uri, @intCast(line_idx), character) catch return null;
+    defer self.allocator.free(msg);
+    if (!send(self, c, msg)) return null;
+    self.editor_lsp.sent_definitions += 1;
+    return c.definition_seq;
 }
 
 /// `textDocument/hover` 를 보낸다(§8.2b). 문서 byte `offset` 을 서버 인코딩의 `{line, character}` 로 옮긴다. 보냈으면 그 seq.

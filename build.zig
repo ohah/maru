@@ -5960,11 +5960,13 @@ pub fn build(b: *std.Build) void {
                     .link_libc = true,
                     .imports = &.{.{ .name = "maru", .module = maru_mod }},
                 }),
-                .filters = &.{ "budget projection", "budget admission durable probe", "reservation membership" },
+                // 네 번째: 예약 대조가 «어느 축» 에서 어긋났는지 가리는지. 이름 하나로 뭉치면
+                // 2026-09-18 처럼 사람이 추측하게 된다.
+                .filters = &.{ "budget projection", "budget admission durable probe", "reservation membership", "예약 대조는 어긋난 축을" },
             });
             const run_session_host_upgrade_budget_admission_tests =
                 b.addRunArtifact(session_host_upgrade_budget_admission_tests);
-            run_session_host_upgrade_budget_admission_tests.addArg("--maru-expect-tests=3");
+            run_session_host_upgrade_budget_admission_tests.addArg("--maru-expect-tests=4");
             session_host_upgrade_budget_admission_step.dependOn(
                 &run_session_host_upgrade_budget_admission_tests.step,
             );
@@ -6039,7 +6041,8 @@ pub fn build(b: *std.Build) void {
                     .link_libc = true,
                     .imports = &.{.{ .name = "maru", .module = maru_mod }},
                 }),
-                .filters = &.{"product coordinator uses one graph capture"},
+                // 두 번째: 진단 문자열의 **방향**(예약 -> 실제). 뒤집히면 사람이 원인을 정반대로 읽는다.
+                .filters = &.{ "product coordinator uses one graph capture", "예약 대조 진단은" },
             });
             const run_session_host_upgrade_budget_product = b.addSystemCommand(&.{"/usr/bin/env"});
             run_session_host_upgrade_budget_product.addPrefixedArtifactArg(
@@ -6049,7 +6052,7 @@ pub fn build(b: *std.Build) void {
             run_session_host_upgrade_budget_product.addArtifactArg(
                 session_host_upgrade_budget_product_compile,
             );
-            run_session_host_upgrade_budget_product.addArg("--maru-expect-tests=1");
+            run_session_host_upgrade_budget_product.addArg("--maru-expect-tests=2");
             run_session_host_upgrade_budget_product.expectExitCode(0);
             run_session_host_upgrade_budget_product.setCwd(b.path("."));
             session_host_upgrade_budget_admission_step.dependOn(

@@ -21,6 +21,11 @@
 //!   클라이언트가 정렬해야 한다; character = byte — ASCII 본문에서만 맞다). 본문에 `NOFMT` 면 `null`, `BADFMT` 면 겹치는 edit 둘(거부돼야 한다).
 //!   `options` 가 계약(§8.2e ③)과 다르면 — `insertSpaces` 가 false 가 아니거나 `tabSize` 가 1 미만 — `null`(제품 경계에서 options 를 잰다).
 //!   capability `documentFormattingProvider: true`(`MARU_FAKE_LSP_NOFMTCAP=1` 이면 false — 클라이언트가 요청을 안 보내야 한다).
+//! - `textDocument/rename` → 요청 자리의 식별자를 이 문서와 같은 디렉터리 `other.c`(**디스크에서** 읽는다 — 열려 있지 않은 파일의 관측점)에서
+//!   낱말 단위로 `newName` 으로 바꾸는 `WorkspaceEdit`(`changes` 맵; `MARU_FAKE_LSP_RENAME_DOCCHANGES=1` 이면 `documentChanges` + version).
+//!   `RENAMEFAIL` → 오류 응답 · `RENAMEOUT` → root 밖 파일 edit 추가 · `RENAMECREATE` → `CreateFile` 추가 · `RENAMEBAD` → 겹치는 edit ·
+//!   `RENAMESTALEVER` → `documentChanges` 의 version 을 하나 낮춰(낡은 결과).
+//!   capability `renameProvider: true`(`MARU_FAKE_LSP_NORENAMECAP=1` 이면 false).
 //! - `shutdown` → `null` 응답, `exit` → 종료 0.
 //! - 시작하자마자 stderr 에 한 줄을 쓴다(실서버 clangd 가 그렇다) — stdout 에 섞이면 프레임이 깨진다(§8.2a 「stderr」).
 //! 순수 판정 대상이 아니라(맞으면 되는 도구) 테스트는 없다 — 이 도구의 계약은 `LSPB*` 가 제품 경계에서 든다.
@@ -123,10 +128,10 @@ fn setDocMode(uri: []const u8, mode: DefMode) void {
 }
 
 /// 문서 본문을 uri 별로 기억한다(signatureHelp 가 caret 앞을 본다). 상한 8 문서·64 KB.
-const DocText = struct { uri: [1024]u8 = undefined, len: usize = 0, text: [65536]u8 = undefined, text_len: usize = 0 };
+const DocText = struct { uri: [1024]u8 = undefined, len: usize = 0, text: [65536]u8 = undefined, text_len: usize = 0, version: i64 = 0 };
 var doc_texts: [8]DocText = [_]DocText{.{}} ** 8;
 
-fn setDocText(uri: []const u8, text: []const u8) void {
+fn setDocText(uri: []const u8, text: []const u8, version: i64) void {
     if (uri.len > 1024 or text.len > 65536) return;
     var slot: ?*DocText = null;
     for (&doc_texts) |*d| if (d.len == uri.len and std.mem.eql(u8, d.uri[0..d.len], uri)) {
@@ -141,6 +146,12 @@ fn setDocText(uri: []const u8, text: []const u8) void {
     const d = slot orelse return;
     @memcpy(d.text[0..text.len], text);
     d.text_len = text.len;
+    d.version = version;
+}
+
+fn docVersion(uri: []const u8) i64 {
+    for (&doc_texts) |*d| if (d.len == uri.len and std.mem.eql(u8, d.uri[0..d.len], uri)) return d.version;
+    return 0;
 }
 
 fn docText(uri: []const u8) []const u8 {
@@ -149,6 +160,163 @@ fn docText(uri: []const u8) []const u8 {
 }
 
 /// `line_no` 줄의 `character`(byte 로 친다 — 가짜 서버는 ASCII 픽스처만 받는다) 앞 본문.
+/// `textDocument/rename`(§8.2f 관측점) — 요청 자리의 식별자를 문서 전체와 같은 디렉터리의 `other.c`(디스크에서 읽는다 — 열려 있지 않아도)
+/// 에서 **낱말 단위**로 찾아 `newName` 으로 바꾸는 `WorkspaceEdit`. 기본은 `changes` 맵, `MARU_FAKE_LSP_RENAME_DOCCHANGES=1` 이면
+/// `documentChanges`(마지막으로 본 version 을 싣는다). 본문 표식: `RENAMEFAIL` → 오류 응답(`fake: cannot rename`) · `RENAMEOUT` → root 밖
+/// 파일의 edit 을 하나 더 · `RENAMECREATE` → `documentChanges` 에 `CreateFile` 을 하나 더 · `RENAMEBAD` → 겹치는 edit 둘.
+fn handleRename(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: std.json.Value) void {
+    var req_uri: []const u8 = "";
+    var line_no: i64 = 0;
+    var character: i64 = 0;
+    var new_name: []const u8 = "";
+    if (obj.get("params")) |p| if (p == .object) {
+        if (p.object.get("textDocument")) |td| if (td == .object) {
+            req_uri = str(td.object.get("uri")) orelse "";
+        };
+        if (p.object.get("position")) |pos| if (pos == .object) {
+            line_no = int(pos.object.get("line")) orelse 0;
+            character = int(pos.object.get("character")) orelse 0;
+        };
+        new_name = str(p.object.get("newName")) orelse "";
+    };
+    const text = docText(req_uri);
+    if (std.mem.indexOf(u8, text, "RENAMEFAIL") != null) {
+        sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .@"error" = .{ .code = @as(i32, -32602), .message = "fake: cannot rename" } });
+        return;
+    }
+    // 요청 자리의 낱말.
+    const before = lineBefore(text, line_no, character);
+    const line_start = @intFromPtr(before.ptr) - @intFromPtr(text.ptr);
+    const caret = line_start + before.len;
+    var ws = caret;
+    var we = caret;
+    while (ws > 0 and isIdent(text[ws - 1])) ws -= 1;
+    while (we < text.len and isIdent(text[we])) we += 1;
+    if (ws == we) {
+        sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .result = null });
+        return;
+    }
+    const word = text[ws..we];
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var root: std.json.ObjectMap = .empty;
+    const want_create = std.mem.indexOf(u8, text, "RENAMECREATE") != null;
+    const stale_ver = std.mem.indexOf(u8, text, "RENAMESTALEVER") != null; // documentChanges 의 version 을 하나 낮춰 낸다(클라이언트가 버려야 한다)
+    const use_doc_changes = want_create or stale_ver or std.c.getenv("MARU_FAKE_LSP_RENAME_DOCCHANGES") != null; // 파일 연산은 documentChanges 에만 실릴 수 있다
+    var doc_changes: std.json.Array = .init(arena);
+    var changes: std.json.ObjectMap = .empty;
+    if (want_create) {
+        var op: std.json.ObjectMap = .empty;
+        op.put(arena, "kind", .{ .string = "create" }) catch return;
+        op.put(arena, "uri", .{ .string = "file:///tmp/fake-new.c" }) catch return;
+        doc_changes.append(.{ .object = op }) catch return;
+    }
+    // 이 문서.
+    {
+        const edits = renameEdits(arena, text, word, new_name, std.mem.indexOf(u8, text, "RENAMEBAD") != null) catch return;
+        addFileEdits(arena, &changes, &doc_changes, use_doc_changes, req_uri, docVersion(req_uri) - @as(i64, if (stale_ver) 1 else 0), edits) catch return;
+    }
+    // 같은 디렉터리의 other.c — 디스크에서 읽는다(열려 있지 않은 파일의 관측점).
+    if (std.mem.lastIndexOfScalar(u8, req_uri, '/')) |slash| {
+        var uri_buf: [1200]u8 = undefined;
+        const other_uri = std.fmt.bufPrint(&uri_buf, "{s}/other.c", .{req_uri[0..slash]}) catch "";
+        if (std.mem.startsWith(u8, other_uri, "file://")) {
+            const other_path = other_uri["file://".len..];
+            if (readFileC(arena, other_path)) |other_text| {
+                const edits = renameEdits(arena, other_text, word, new_name, false) catch return;
+                if (edits.items.len > 0) {
+                    const other_known = docVersion(other_uri);
+                    addFileEdits(arena, &changes, &doc_changes, use_doc_changes, other_uri, other_known, edits) catch return;
+                }
+            }
+        }
+    }
+    if (std.mem.indexOf(u8, text, "RENAMEOUT") != null) {
+        const edits = renameEdits(arena, "int x;\n", "x", new_name, false) catch return;
+        addFileEdits(arena, &changes, &doc_changes, use_doc_changes, "file:///nonexistent-outside-root/x.c", 0, edits) catch return;
+    }
+    if (use_doc_changes) {
+        root.put(arena, "documentChanges", .{ .array = doc_changes }) catch return;
+    } else {
+        root.put(arena, "changes", .{ .object = changes }) catch return;
+    }
+    sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .result = std.json.Value{ .object = root } });
+}
+
+/// libc 로 파일을 읽는다(이 도구는 std.Io 를 안 쓴다). 없으면 null. 상한 64 KB.
+fn readFileC(arena: std.mem.Allocator, path: []const u8) ?[]u8 {
+    var path_z: [1200]u8 = undefined;
+    if (path.len >= path_z.len) return null;
+    @memcpy(path_z[0..path.len], path);
+    path_z[path.len] = 0;
+    const fd = std.c.open(path_z[0..path.len :0].ptr, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+    if (fd < 0) return null;
+    defer _ = std.c.close(fd);
+    const buf = arena.alloc(u8, 65536) catch return null;
+    var len: usize = 0;
+    while (len < buf.len) {
+        const n = std.c.read(fd, buf[len..].ptr, buf.len - len);
+        if (n <= 0) break;
+        len += @intCast(n);
+    }
+    return buf[0..len];
+}
+
+fn isIdent(b: u8) bool {
+    return std.ascii.isAlphanumeric(b) or b == '_' or b >= 0x80;
+}
+
+/// `text` 안의 `word` 낱말 전부를 `new_name` 으로 바꾸는 TextEdit 들(character = byte — ASCII 본문). `bad` 면 첫 edit 을 겹치게 하나 더 낸다.
+fn renameEdits(arena: std.mem.Allocator, text: []const u8, word: []const u8, new_name: []const u8, bad: bool) !std.json.Array {
+    var edits: std.json.Array = .init(arena);
+    var line_no: i64 = 0;
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (it.next()) |line| : (line_no += 1) {
+        var from: usize = 0;
+        while (std.mem.indexOfPos(u8, line, from, word)) |at| {
+            from = at + word.len;
+            const left_ok = at == 0 or !isIdent(line[at - 1]);
+            const right_ok = at + word.len >= line.len or !isIdent(line[at + word.len]);
+            if (!left_ok or !right_ok) continue;
+            try edits.append(try editValue(arena, line_no, at, at + word.len, new_name));
+            if (bad and edits.items.len == 1) try edits.append(try editValue(arena, line_no, at + 1, at + word.len + 1, new_name));
+        }
+    }
+    return edits;
+}
+
+fn editValue(arena: std.mem.Allocator, line_no: i64, start: usize, end: usize, new_text: []const u8) !std.json.Value {
+    var s: std.json.ObjectMap = .empty;
+    try s.put(arena, "line", .{ .integer = line_no });
+    try s.put(arena, "character", .{ .integer = @intCast(start) });
+    var e: std.json.ObjectMap = .empty;
+    try e.put(arena, "line", .{ .integer = line_no });
+    try e.put(arena, "character", .{ .integer = @intCast(end) });
+    var range: std.json.ObjectMap = .empty;
+    try range.put(arena, "start", .{ .object = s });
+    try range.put(arena, "end", .{ .object = e });
+    var edit: std.json.ObjectMap = .empty;
+    try edit.put(arena, "range", .{ .object = range });
+    try edit.put(arena, "newText", .{ .string = new_text });
+    return .{ .object = edit };
+}
+
+fn addFileEdits(arena: std.mem.Allocator, changes: *std.json.ObjectMap, doc_changes: *std.json.Array, use_doc_changes: bool, uri: []const u8, version: i64, edits: std.json.Array) !void {
+    const uri_copy = try arena.dupe(u8, uri);
+    if (use_doc_changes) {
+        var td: std.json.ObjectMap = .empty;
+        try td.put(arena, "uri", .{ .string = uri_copy });
+        try td.put(arena, "version", if (version == 0) .null else .{ .integer = version });
+        var tde: std.json.ObjectMap = .empty;
+        try tde.put(arena, "textDocument", .{ .object = td });
+        try tde.put(arena, "edits", .{ .array = edits });
+        try doc_changes.append(.{ .object = tde });
+    } else {
+        try changes.put(arena, uri_copy, .{ .array = edits });
+    }
+}
+
 fn lineBefore(text: []const u8, line_no: i64, character: i64) []const u8 {
     var it = std.mem.splitScalar(u8, text, '\n');
     var i: i64 = 0;
@@ -199,6 +367,7 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
                     .textDocumentSync = @as(u8, 1),
                     .signatureHelpProvider = .{ .triggerCharacters = [_][]const u8{ "(", "," }, .retriggerCharacters = [_][]const u8{")"} },
                     .documentFormattingProvider = std.c.getenv("MARU_FAKE_LSP_NOFMTCAP") == null, // `MARU_FAKE_LSP_NOFMTCAP=1` 이면 false
+                    .renameProvider = std.c.getenv("MARU_FAKE_LSP_NORENAMECAP") == null, // `MARU_FAKE_LSP_NORENAMECAP=1` 이면 false
                 },
             },
         });
@@ -289,6 +458,10 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
         sendJson(allocator, .{ .jsonrpc = "2.0", .id = id.?, .result = edits.items });
         return;
     }
+    if (std.mem.eql(u8, method, "textDocument/rename")) {
+        handleRename(allocator, obj, id.?);
+        return;
+    }
     if (std.mem.eql(u8, method, "textDocument/hover")) {
         var line: i64 = 0;
         var character: i64 = 0;
@@ -372,7 +545,7 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
         };
         no_hover = std.mem.indexOf(u8, text, "NOHOVER") != null;
         mute_hover = std.mem.indexOf(u8, text, "MUTEHOVER") != null;
-        setDocText(uri, text);
+        setDocText(uri, text, version);
         setDocMode(uri, if (std.mem.indexOf(u8, text, "NODEF") != null) .none else if (std.mem.indexOf(u8, text, "XFILE") != null) .other else if (std.mem.indexOf(u8, text, "OUTSIDE") != null) .outside else .same);
         if (std.mem.indexOf(u8, text, "BOOM") != null) std.c._exit(1);
         if (std.mem.indexOf(u8, text, "HANG") != null) {

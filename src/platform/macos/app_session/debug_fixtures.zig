@@ -1251,6 +1251,25 @@ pub fn applyForcedFormat(self: *AppSession) void {
     }
 }
 
+/// MARU_FORCE_RENAME_OPEN=1 — caret 자리에서 `rename_symbol` 을 불러 상자를 연 채 둔다(캡처 전용, tooling §8.2f). MARU_FORCE_RENAME=<이름> — 열고
+/// 그 이름으로 바꿔 곧바로 확정한다(요청이 나간다). 서버가 뜨기 전에는 상자가 안 열리므로 열릴 때까지 매 프레임 되풀이하고, 한 번 열리면
+/// 다시 부르지 않는다(래치). caret 훅의 래치도 함께 세운다(포맷 훅과 같은 이유).
+pub fn applyForcedRename(self: *AppSession) void {
+    if (self.debug_rename_done) return;
+    const open_only = std.c.getenv("MARU_FORCE_RENAME_OPEN") != null;
+    const name_raw = std.c.getenv("MARU_FORCE_RENAME");
+    if (!open_only and name_raw == null) return;
+    if (self.chrome_host.notice.open) self.chrome_host.notice.dismiss();
+    if (!editor_ops.rename_client.startAtCaret(self)) return;
+    self.debug_rename_done = true;
+    self.debug_diff_caret_keys_done = true;
+    if (open_only) return;
+    const name = std.mem.span(name_raw.?);
+    self.rename_input.clear();
+    self.rename_input.query.appendSlice(self.allocator, name) catch return;
+    settings_ops.commitRename(self);
+}
+
 pub fn applyForcedScmTab(self: *AppSession) void {
     // MARU_FORCE_SCM_TAB=history|agent — 그 탭을 고른 것처럼 만든다(P4). 탭 전환은 클릭으로만
     // 일어나므로 포인터 없는 캡처 하니스에서는 히스토리 화면을 얻을 방법이 없다(행 호버와 같은 자리).

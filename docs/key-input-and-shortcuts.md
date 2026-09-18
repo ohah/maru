@@ -314,6 +314,12 @@ VS Code 의 `editor.action.marker.next/prev` 가 이 키다. `needs_editable = f
 터미널 Term 에서는 종전대로 `input.option-as-meta` 를 따라 `ESC F` 로 나간다(이 표는 편집기 Term 에서만 읽힌다). `needs_editable = true` —
 문서를 바꾸는 명령이다(읽기 전용은 `EditableFile.apply` 의 `error.ReadOnly` 가 막는다, §3.5).
 
+**`F2` — 심볼 이름 바꾸기(2026-09-19, [툴링](editor-surface-tooling.md) §8.2f).** VS Code `editor.action.rename`. 네 번째 기능키 — 전수 대조는
+`F7`·`F8`·`F12` 와 같되 한 갈래가 더 있다: ③ʹ 의 편집기 앞 갈래 **「파일 트리가 초점일 때의 `F2`」**(위 「파일 트리」 문단 3 — 트리의 inline
+rename). 그것은 `file_tree_focus` 가 켜졌을 때만 트리가 소비하고, 편집기 Term 에 초점이 있으면 그 갈래를 지나지 않아 `resolveEditor` 까지
+온다(`grep function = 2` 는 트리 판정자 하나와 컨텍스트 표의 이 줄뿐). ①ʹ 선-가로채기·② 메뉴 keyEquivalent·전역 표에는 없다. 터미널 Term
+에서는 `SS3 Q` 로 나간다. `needs_editable = true` — 문서를 바꾸는 명령이라 비교 뷰에서는 양보한다. `ETX4` 의 ⑶ 수는 여섯이 됐다.
+
 #### 충돌 전수 대조 (2026-09-07)
 
 [diff·떠 있는 UI·설정](native-editor-ui.md) §9.1 이 *"충돌 목록은 구현 슬라이스에서 전수 조사한다"*,

@@ -272,6 +272,13 @@ pub fn renameCaretRect(self: *AppSession) ?chrome.draw.Rect {
                 .h = @intCast(ch),
             };
         },
+        // 심볼 상자(§8.2f) — 상자 rect 의 좌패딩 1칸 + query 폭이 caret(`input_box` 의 끝 caret 규약).
+        .symbol => {
+            const st = &self.chrome_host.rename_box;
+            if (!st.open) return null;
+            const rect = chrome.components.rename_box.boxRect(st, self.rename_input.query.items, self.buildChromeProps()) orelse return null;
+            return .{ .x = rect.x + @as(i32, @intCast(cw)) + @as(i32, @intCast(qcols * cw)), .y = rect.y, .w = @intCast(cw), .h = @intCast(ch) };
+        },
     }
 }
 
@@ -1170,6 +1177,7 @@ pub fn startRename(self: *AppSession, target: RenameTarget) void {
         .term => |t| t.surface.custom_name,
         .group => |t| t.group_start, // 그룹 이름 = group_start 마커
         .file_tree => |t| if (t.edit_kind == .rename) std.fs.path.basename(t.path()) else null,
+        .symbol => |t| editor_ops.rename_client.seedFor(self, t), // 낱말 그대로(§8.2f)
     };
     if (seed) |s| self.rename_input.query.appendSlice(self.allocator, s) catch {};
     self.rename = target;
@@ -1188,12 +1196,16 @@ pub fn commitRename(self: *AppSession) void {
         if (file_panel_ops.enqueueFileTreeEdit(self, target.file_tree, text)) closeRename(self);
         return;
     }
+    if (target == .symbol) {
+        editor_ops.rename_client.commit(self, target.symbol, text); // 요청을 보내고(또는 안 보내고) 닫는다(§8.2f)
+        return;
+    }
     const old_name: []const u8 = switch (target) {
         .workspace => |t| t.custom_name orelse "",
         .pane => |p| p.custom_name orelse "",
         .term => |t| t.surface.custom_name orelse "",
         .group => |t| t.group_start orelse "",
-        .file_tree => unreachable,
+        .file_tree, .symbol => unreachable,
     };
     if (std.mem.eql(u8, old_name, text)) {
         closeRename(self);
@@ -1225,7 +1237,7 @@ pub fn commitRename(self: *AppSession) void {
             t.group_start = new_name orelse (self.allocator.dupe(u8, "") catch null);
             sidebar_ops.rebuildSidebar(self) catch {}; // 헤더 라벨 즉시 갱신
         },
-        .file_tree => unreachable,
+        .file_tree, .symbol => unreachable,
     }
     closeRename(self);
     self.workspaceChanged(.naming);
@@ -1236,6 +1248,7 @@ pub fn commitRename(self: *AppSession) void {
 pub fn closeRename(self: *AppSession) void {
     if (self.rename == null) return;
     self.rename = null;
+    self.chrome_host.rename_box.hide(); // 심볼 상자(§8.2f) — 다른 대상이면 이미 닫혀 있다
     self.rename_input.clear();
     self.resetCursorBlink();
     self.metal_dirty = true;

@@ -181,6 +181,8 @@ pub const editor = struct {
         pub const trust = @import("session/lsp/trust.zig");
         /// `TextEdit[]` → `Delta`(tooling §8.2e · document-model §3.6).
         pub const text_edits = @import("session/lsp/text_edits.zig");
+        /// `WorkspaceEdit` → 파일별 `TextEdit[]`(tooling §8.2f).
+        pub const workspace_edit = @import("session/lsp/workspace_edit.zig");
     };
     /// S2: 병합 충돌 **마커 구간**(docs/editor-merge-conflicts.md §5). 순수 계산이라 여기 산다 —
     /// 줄 배열을 받아 구간을 내고, 그리기·동작은 위층이 붙인다.

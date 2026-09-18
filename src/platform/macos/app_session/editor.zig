@@ -72,7 +72,7 @@ pub const OpenFileError = error{
 ///
 /// **저장 identity가 아니다.** 저장 경로는 inode와 `stableOpenedFileHash`로 외부 변경을 잡고
 /// (그쪽은 디스크를 읽는다), 이 함수는 **메모리 안 두 상태가 같은가**만 답한다.
-fn contentHash(bytes: []const u8) u64 {
+pub fn contentHash(bytes: []const u8) u64 {
     return std.hash.Wyhash.hash(0, bytes);
 }
 
@@ -88,6 +88,8 @@ pub const definition_client = @import("editor_definition.zig");
 /// 시그니처 힌트(tooling §8.2d) — 호버 박스를 같이 쓴다.
 pub const signature_client = @import("editor_signature.zig");
 pub const format_client = @import("editor_format.zig");
+pub const rename_client = @import("editor_rename.zig");
+pub const workspace_edit_client = @import("editor_workspace_edit.zig");
 
 pub const Opened = struct {
     /// 열린 문서. **읽어 온 bytes를 빌리지 않고 소유한다**(N2 — `edit_doc.EditableFile`).
@@ -6983,18 +6985,9 @@ pub fn isDirty(term: *const Term) bool {
     return doc.isDirty();
 }
 
-pub fn saveDocument(self: *AppSession, term: *Term) bool {
-    if (term.kind != .editor) return false;
-    if (term.rt.editor_diff != null) return false;
-    const doc = term.rt.editor_doc orelse return false;
-    if (doc.file.read_only) return false;
-    const path = term.rt.editor_path orelse return false;
-
-    const bytes = doc.file.saveBytes(self.allocator) catch return false;
-    // **쓴 내용이 무엇이었는지** 기억해 둔다 — 아래에서 clean 판정에 쓴다.
-    const saved_content = doc.file.content;
-    defer self.allocator.free(bytes);
-
+/// 문서 바이트를 경로에 쓴다 — 저장의 **디스크 부분**(`saveDocument` 와 §8.2f 의 열려 있지 않은 파일 쓰기가 같은 길을 쓴다).
+/// pinned 디렉터리 + 외부 변경 검사(`stableOpenedFileHash`) 그대로. 성공하면 true.
+pub fn writeDocumentBytes(self: *AppSession, path: []const u8, bytes: []const u8) bool {
     var pinned = file_panel_ops.openPinnedFilePanelParent(self.io, path) catch return false;
     defer pinned.dir.close(self.io);
 
@@ -7017,6 +7010,22 @@ pub fn saveDocument(self: *AppSession, term: *Term) bool {
         expected,
         bytes,
     ) catch return false;
+    return true;
+}
+
+pub fn saveDocument(self: *AppSession, term: *Term) bool {
+    if (term.kind != .editor) return false;
+    if (term.rt.editor_diff != null) return false;
+    const doc = term.rt.editor_doc orelse return false;
+    if (doc.file.read_only) return false;
+    const path = term.rt.editor_path orelse return false;
+
+    const bytes = doc.file.saveBytes(self.allocator) catch return false;
+    // **쓴 내용이 무엇이었는지** 기억해 둔다 — 아래에서 clean 판정에 쓴다.
+    const saved_content = doc.file.content;
+    defer self.allocator.free(bytes);
+
+    if (!writeDocumentBytes(self, path, bytes)) return false;
 
     // **여기서 clean이 된다.** 쓰기가 성공한 그 순간의 내용이 곧 디스크 내용이다.
     //
@@ -12510,6 +12519,360 @@ test "FMT2 문서 포맷 — 서버가 documentFormattingProvider 를 안 내면
     try testing.expectEqual(@as(u64, 0), fx.session.editor_lsp.sent_formattings);
     try testing.expect(!fx.session.editor_format.waiting);
     try testing.expectEqualStrings("int  x;\n", term.rt.editor_doc.?.file.content);
+}
+
+/// RNM* 공용 픽스처 — 가짜 서버 + root 에 `r.c`(열린다)·`other.c`(열지 않는다 — 디스크의 관측점).
+const RenameFx = struct {
+    fx: PaneFixture,
+    root: []const u8 = "",
+    root_buf: [std.fs.max_path_bytes]u8 = undefined,
+    fake_z: [std.fs.max_path_bytes + 1]u8 = undefined,
+    cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined,
+    path: []const u8 = "",
+    other: []const u8 = "",
+    term: *Term = undefined,
+
+    const r_text = "int add(int a) { return add(a); }\nint y = add(1);\n";
+    const other_text = "int z = add(2);\nint add_x = 0;\n";
+
+    fn init(self: *RenameFx, allocator: std.mem.Allocator) !void {
+        var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
+        const fz = try std.fmt.bufPrintZ(&self.fake_z, "{s}", .{fake});
+        _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);
+        self.root = self.root_buf[0..try self.fx.dir.dir.realPath(testing.io, &self.root_buf)];
+        const cz = try std.fmt.bufPrintZ(&self.cfg_z, "{s}/config", .{self.root});
+        _ = setenv("MARU_CONFIG", cz.ptr, 1);
+        if (self.fx.session.config_path_buffer) |b| allocator.free(b);
+        self.fx.session.config_path_buffer = null;
+        self.fx.session.editor_lsp.auto_trust_answer = .allow;
+        try self.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "r.c", .data = r_text });
+        try self.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "other.c", .data = other_text });
+        self.path = try std.fs.path.join(allocator, &.{ self.root, "r.c" });
+        self.other = try std.fs.path.join(allocator, &.{ self.root, "other.c" });
+        self.fx.session.git_repo = @constCast(self.root);
+        self.term = (try pane_ops.openFileTermInActivePane(self.fx.session, self.path, .text)).term;
+        self.fx.session.surface_initialized = true;
+        self.fx.session.backing_width_px = 1200;
+        self.fx.session.backing_height_px = 800;
+        const Ctx = struct { t: *Term };
+        try testing.expect(pumpLspUntil(&self.fx, 3000, Ctx{ .t = self.term }, struct {
+            fn f(c: Ctx) bool {
+                return c.t.rt.editor_diagnostics.lsp.items.len >= 1;
+            }
+        }.f));
+    }
+
+    fn deinit(self: *RenameFx, allocator: std.mem.Allocator) void {
+        allocator.free(self.path);
+        allocator.free(self.other);
+        _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
+        _ = unsetenv("MARU_CONFIG");
+        self.fx.session.git_repo = null;
+        self.fx.deinit(allocator);
+    }
+
+    fn content(self: *RenameFx) []const u8 {
+        return self.term.rt.editor_doc.?.file.content;
+    }
+
+    fn otherOnDisk(self: *RenameFx, allocator: std.mem.Allocator) ![]u8 {
+        return self.fx.dir.dir.readFileAlloc(testing.io, "other.c", allocator, .limited(1 << 16));
+    }
+
+    fn settled(self: *RenameFx) bool {
+        const Ctx = struct { s: *AppSession };
+        return pumpLspUntil(&self.fx, 3000, Ctx{ .s = self.fx.session }, struct {
+            fn f(c: Ctx) bool {
+                return !c.s.editor_rename.waiting;
+            }
+        }.f);
+    }
+
+    /// `F2` → 상자 → 이름을 치고 `Enter`. 씨앗은 지우고 새 이름을 친다(backspace 로).
+    fn renameTo(self: *RenameFx, caret: usize, new_name: []const u8) !void {
+        self.term.rt.editor_selection = .{ .anchor_start = caret, .anchor_end = caret, .focus = caret };
+        try pressKey(&self.fx, .{ .function = 2 }, .{});
+        try testing.expect(self.fx.session.rename != null and self.fx.session.rename.? == .symbol);
+        while (self.fx.session.rename_input.query.items.len > 0) try pressKey(&self.fx, .backspace, .{});
+        for (new_name) |ch| try pressKey(&self.fx, .{ .char = ch }, .{});
+        try pressKey(&self.fx, .enter, .{});
+        try testing.expect(self.fx.session.rename == null);
+    }
+};
+
+test "RNM1 심볼 이름 바꾸기 — F2 로 낱말이 씨앗인 상자, 이름을 치고 Enter → 열린 문서와 열려 있지 않은 이웃 파일이 함께 바뀌고 저장·기록; Undo Last Rename 이 둘 다 되돌린다; 디스크가 바뀐 뒤·낡은 revision·root 밖·파일 연산·겹침은 전체 거부; 서버 오류 알림; Esc·같은 이름은 요청 없음; 한 파일이면 dirty (제품 경계, §8.2f)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h: RenameFx = .{ .fx = try PaneFixture.init(allocator) };
+    h.init(allocator) catch |err| {
+        h.fx.deinit(allocator);
+        return err;
+    };
+    defer h.deinit(allocator);
+    const s = h.fx.session;
+    const term = h.term;
+
+    // ⑴ caret 을 `add` 안(offset 5)에 두고 F2 — 상자가 열리고 씨앗은 `add`, 프레임에 상자가 그려진다.
+    term.rt.editor_selection = .{ .anchor_start = 5, .anchor_end = 5, .focus = 5 };
+    try pressKey(&h.fx, .{ .function = 2 }, .{});
+    try testing.expect(s.rename != null and s.rename.? == .symbol);
+    try testing.expectEqualStrings("add", s.rename_input.query.items);
+    try testing.expectEqual(@as(usize, 4), s.rename.?.symbol.start);
+    try testing.expectEqual(@as(u64, 1), s.editor_rename.opened_count);
+    {
+        const leaf = activeLeafRectForTest(s) orelse return error.SkipZigTest;
+        var d = appendPaneFrame(s, leaf, term) orelse return error.EditorPaneDidNotDraw;
+        d.dl.deinit(allocator);
+        try testing.expect(s.overlayFrameNeeded()); // 제품은 이 게이트를 지나야 오버레이 프레임을 만든다(캡처 실측 — 없으면 상자가 안 뜬다)
+        var prep = (try s.buildChromeOverlayPrep()) orelse return error.RenameBoxNotDrawn;
+        defer prep.dl.deinit(allocator);
+        try testing.expect(s.chrome_host.rename_box.open);
+        try testing.expect(settings_ops.renameCaretRect(s) != null); // IME 후보창 자리도 상자 안
+        // 앵커는 낱말 **첫 글자**(offset 4) 셀이다 — caret(5) 이나 낱말 끝이 아니다.
+        const a = pointerAtOffset(term, 4).?;
+        try testing.expectEqual(@as(i32, @intFromFloat(a.x - @as(f64, @floatFromInt(term.rt.editor_hit_geom.cell_w_px)) / 2)), s.chrome_host.rename_box.anchor_x);
+    }
+    // 이름을 `add2` 로 — `2` 를 치고 Enter → 요청 하나.
+    try pressKey(&h.fx, .{ .char = '2' }, .{});
+    try testing.expectEqualStrings("add2", s.rename_input.query.items);
+    try pressKey(&h.fx, .enter, .{});
+    try testing.expect(s.rename == null and !s.chrome_host.rename_box.open);
+    try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_renames);
+    try testing.expect(s.editor_rename.waiting);
+    const undo_before = term.rt.editor_undo_len;
+    try testing.expect(h.settled());
+    // 열린 문서: 세 자리가 한 응답으로 바뀌고 undo 하나 · 열려 있지 않은 other.c: 디스크가 바뀌었고(add_x 는 안 건드린다) · 두 파일이라 r.c 도 저장됐다.
+    try testing.expectEqualStrings("int add2(int a) { return add2(a); }\nint y = add2(1);\n", h.content());
+    try testing.expectEqual(undo_before + 1, term.rt.editor_undo_len);
+    {
+        const od = try h.otherOnDisk(allocator);
+        defer allocator.free(od);
+        try testing.expectEqualStrings("int z = add2(2);\nint add_x = 0;\n", od);
+    }
+    try testing.expect(!isDirty(term));
+    try testing.expectEqual(@as(u64, 2), s.editor_workspace_edit.applied_files);
+    try testing.expectEqual(@as(u64, 4), s.editor_workspace_edit.applied_edits);
+    try testing.expectEqual(@as(u64, 2), s.editor_workspace_edit.saved_files); // other.c 쓰기 + r.c 저장
+    try testing.expect(s.editor_workspace_edit.last != null and s.editor_workspace_edit.last.?.files.len == 2);
+    try testing.expect(s.chrome_host.notice.open);
+    try testing.expect(std.mem.indexOf(u8, &s.notice_message_buf, "2") != null);
+    try testing.expect(std.mem.indexOf(u8, maru.i18n.tIn(.en, .rn_done), "Renamed") != null);
+    try testing.expect(std.mem.indexOf(u8, maru.i18n.tIn(.ko, .rn_done), "바꿨") != null);
+    s.chrome_host.notice.dismiss();
+    // ⑵ Undo Last Rename — 둘 다 돌아오고 저장되며 기록은 비운다.
+    s.dispatchAppAction(.undo_workspace_edit);
+    try testing.expectEqualStrings(RenameFx.r_text, h.content());
+    {
+        const od = try h.otherOnDisk(allocator);
+        defer allocator.free(od);
+        try testing.expectEqualStrings(RenameFx.other_text, od);
+    }
+    try testing.expect(!isDirty(term));
+    try testing.expectEqual(@as(u64, 2), s.editor_workspace_edit.undone_files);
+    try testing.expect(s.editor_workspace_edit.last == null);
+    try testing.expect(s.chrome_host.notice.open);
+    s.chrome_host.notice.dismiss();
+    // 되돌릴 것이 없으면 알림만.
+    s.dispatchAppAction(.undo_workspace_edit);
+    try testing.expect(s.chrome_host.notice.open);
+    try testing.expect(std.mem.startsWith(u8, &s.notice_message_buf, maru.i18n.t(.rn_nothing_to_undo)));
+    s.chrome_host.notice.dismiss();
+    // ⑶ rename 뒤 other.c 가 디스크에서 바뀌면 되돌리기는 **전체 거부** — r.c 도 그대로.
+    try h.renameTo(5, "add3");
+    try testing.expect(h.settled());
+    try testing.expectEqualStrings("int add3(int a) { return add3(a); }\nint y = add3(1);\n", h.content());
+    s.chrome_host.notice.dismiss();
+    try h.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "other.c", .data = "// changed\n" });
+    s.dispatchAppAction(.undo_workspace_edit);
+    try testing.expectEqual(@as(u64, 1), s.editor_workspace_edit.undo_refused);
+    try testing.expectEqualStrings("int add3(int a) { return add3(a); }\nint y = add3(1);\n", h.content());
+    try testing.expect(s.chrome_host.notice.open);
+    try testing.expect(std.mem.indexOf(u8, maru.i18n.tIn(.en, .rn_undo_changed), "changed") != null);
+    s.chrome_host.notice.dismiss();
+    // 열린 문서 쪽이 바뀌어도(⌘Z 로 손으로 되돌림) 같다 — 기록의 해시와 다르다.
+    try h.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "other.c", .data = "int z = add3(2);\nint add_x = 0;\n" });
+    s.dispatchAppAction(.editor_undo);
+    try testing.expectEqualStrings(RenameFx.r_text, h.content());
+    s.dispatchAppAction(.undo_workspace_edit);
+    try testing.expectEqual(@as(u64, 2), s.editor_workspace_edit.undo_refused);
+    s.chrome_host.notice.dismiss();
+    // 정리 — 디스크를 원래대로, r.c 를 저장, 기록을 비운다.
+    try h.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "other.c", .data = RenameFx.other_text });
+    try testing.expect(saveDocument(s, term));
+    s.editor_workspace_edit.deinit(allocator);
+    // ⑷ Esc 는 요청 없음 · 같은 이름도 요청 없음 · 빈 이름도.
+    const sent_before = s.editor_lsp.sent_renames;
+    term.rt.editor_selection = .{ .anchor_start = 5, .anchor_end = 5, .focus = 5 };
+    try pressKey(&h.fx, .{ .function = 2 }, .{});
+    try testing.expect(s.rename != null);
+    try pressKey(&h.fx, .escape, .{});
+    try testing.expect(s.rename == null and !s.chrome_host.rename_box.open);
+    try pressKey(&h.fx, .{ .function = 2 }, .{});
+    try pressKey(&h.fx, .enter, .{});
+    try testing.expect(s.rename == null);
+    try pressKey(&h.fx, .{ .function = 2 }, .{});
+    while (s.rename_input.query.items.len > 0) try pressKey(&h.fx, .backspace, .{});
+    try pressKey(&h.fx, .enter, .{});
+    try testing.expectEqual(sent_before, s.editor_lsp.sent_renames);
+    // 낱말이 없는 자리(공백)에서는 상자가 안 열린다 · 마우스 down 은 취소다.
+    term.rt.editor_selection = .{ .anchor_start = 3, .anchor_end = 3, .focus = 3 }; // `int` 뒤 공백 앞 — 'int' 의 끝이라 열린다
+    try pressKey(&h.fx, .{ .function = 2 }, .{});
+    try testing.expect(s.rename != null);
+    try pressKey(&h.fx, .{ .char = 'X' }, .{}); // 글자를 쳤어도 클릭-어웨이는 확정이 아니라 취소다
+    s.mouse(1, 5, 5, 0, 0);
+    s.mouse(3, 5, 5, 0, 0);
+    try testing.expect(s.rename == null);
+    try testing.expectEqual(sent_before, s.editor_lsp.sent_renames);
+    // ⑸ **낡은 revision 은 전체 거부** — 요청이 나간 뒤 응답 전에 r.c 를 고치면 other.c 도 안 바뀐다.
+    try h.renameTo(5, "add4");
+    term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };
+    try testing.expect(insertText(s, term, "Q"));
+    try testing.expect(h.settled());
+    try testing.expectEqual(@as(u64, 1), s.editor_workspace_edit.refused_stale);
+    try testing.expectEqualStrings("Qint add(int a) { return add(a); }\nint y = add(1);\n", h.content());
+    {
+        const od = try h.otherOnDisk(allocator);
+        defer allocator.free(od);
+        try testing.expectEqualStrings(RenameFx.other_text, od);
+    }
+    try testing.expect(s.chrome_host.notice.open);
+    s.chrome_host.notice.dismiss();
+    try removeMarkerHover(s, term, "Q");
+    // ⑹ 표식으로 서버의 갈래를 고른다 — root 밖(`RENAMEOUT`)·파일 연산(`RENAMECREATE`)·겹침(`RENAMEBAD`)은 전체 거부, `RENAMEFAIL` 은 서버 오류 알림.
+    const Marker = struct { text: []const u8, outside: u64, rejected: u64, err: u64 };
+    const markers = [_]Marker{
+        .{ .text = "// RENAMEOUT\n", .outside = 1, .rejected = 0, .err = 0 },
+        .{ .text = "// RENAMECREATE\n", .outside = 1, .rejected = 1, .err = 0 },
+        .{ .text = "// RENAMEBAD\n", .outside = 1, .rejected = 2, .err = 0 },
+        .{ .text = "// RENAMEFAIL\n", .outside = 1, .rejected = 2, .err = 1 },
+    };
+    for (markers) |m| {
+        const end = h.content().len;
+        term.rt.editor_selection = .{ .anchor_start = end, .anchor_end = end, .focus = end };
+        try testing.expect(insertText(s, term, m.text));
+        const before = try allocator.dupe(u8, h.content());
+        defer allocator.free(before);
+        try h.renameTo(5, "add5");
+        try testing.expect(h.settled());
+        try testing.expectEqualStrings(before, h.content());
+        const od = try h.otherOnDisk(allocator);
+        defer allocator.free(od);
+        try testing.expectEqualStrings(RenameFx.other_text, od);
+        try testing.expectEqual(m.outside, s.editor_workspace_edit.refused_outside);
+        try testing.expectEqual(m.rejected, s.editor_workspace_edit.refused_rejected);
+        try testing.expectEqual(m.err, s.editor_rename.notified_error);
+        try testing.expect(s.chrome_host.notice.open);
+        if (m.err == 1) try testing.expect(std.mem.indexOf(u8, &s.notice_message_buf, "fake: cannot rename") != null);
+        s.chrome_host.notice.dismiss();
+        try removeMarkerHover(s, term, m.text);
+    }
+    // ⑺ **한 파일이면 dirty 로 둔다** — other.c 를 지우면 rename 은 r.c 하나라 저장하지 않는다.
+    try h.fx.dir.dir.deleteFile(testing.io, "other.c");
+    try testing.expect(saveDocument(s, term));
+    try h.renameTo(5, "add6");
+    try testing.expect(h.settled());
+    try testing.expectEqualStrings("int add6(int a) { return add6(a); }\nint y = add6(1);\n", h.content());
+    try testing.expect(isDirty(term));
+    try testing.expect(s.editor_workspace_edit.last != null and s.editor_workspace_edit.last.?.files.len == 1);
+    s.chrome_host.notice.dismiss();
+    // ⑻ 낡은 seq 는 버린다.
+    s.editor_rename.waiting = true;
+    s.editor_rename.waiting_seq = 99;
+    rename_client.onResponse(s, 98, null, false, null, .utf8);
+    try testing.expect(s.editor_rename.waiting);
+    s.editor_rename.waiting = false;
+}
+
+test "RNM2 심볼 이름 바꾸기 — 서버가 renameProvider 를 안 내면 F2 가 상자를 열지 않는다 (제품 경계, §8.2f)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    _ = setenv("MARU_FAKE_LSP_NORENAMECAP", "1", 1);
+    defer _ = unsetenv("MARU_FAKE_LSP_NORENAMECAP");
+    var h: RenameFx = .{ .fx = try PaneFixture.init(allocator) };
+    h.init(allocator) catch |err| {
+        h.fx.deinit(allocator);
+        return err;
+    };
+    defer h.deinit(allocator);
+    const s = h.fx.session;
+    h.term.rt.editor_selection = .{ .anchor_start = 5, .anchor_end = 5, .focus = 5 };
+    try testing.expect(lsp_client.readyClientFor(s, h.term) != null);
+    try pressKey(&h.fx, .{ .function = 2 }, .{});
+    try testing.expect(s.rename == null);
+    try testing.expectEqual(@as(u64, 0), s.editor_rename.opened_count);
+    try testing.expectEqual(@as(u64, 0), s.editor_lsp.sent_renames);
+}
+
+test "RNM3 심볼 이름 바꾸기 — documentChanges 응답(version 포함)도 같은 길; version 이 어긋나면 전체 거부 (제품 경계, §8.2f)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    _ = setenv("MARU_FAKE_LSP_RENAME_DOCCHANGES", "1", 1);
+    defer _ = unsetenv("MARU_FAKE_LSP_RENAME_DOCCHANGES");
+    var h: RenameFx = .{ .fx = try PaneFixture.init(allocator) };
+    h.init(allocator) catch |err| {
+        h.fx.deinit(allocator);
+        return err;
+    };
+    defer h.deinit(allocator);
+    const s = h.fx.session;
+    try h.renameTo(5, "add2");
+    try testing.expect(h.settled());
+    try testing.expectEqualStrings("int add2(int a) { return add2(a); }\nint y = add2(1);\n", h.content());
+    {
+        const od = try h.otherOnDisk(allocator);
+        defer allocator.free(od);
+        try testing.expectEqualStrings("int z = add2(2);\nint add_x = 0;\n", od);
+    }
+    try testing.expectEqual(@as(u64, 2), s.editor_workspace_edit.applied_files);
+    s.chrome_host.notice.dismiss();
+    // 응답의 version 이 지금 문서와 다르면 낡은 것 — 가짜 서버는 마지막으로 본 version 을 싣는데, 요청 뒤 편집으로 version 이 앞서면 어긋난다.
+    try h.renameTo(5, "add3");
+    const end = h.content().len;
+    h.term.rt.editor_selection = .{ .anchor_start = end, .anchor_end = end, .focus = end };
+    try testing.expect(insertText(s, h.term, "\n"));
+    try testing.expect(h.settled());
+    try testing.expectEqual(@as(u64, 1), s.editor_workspace_edit.refused_stale);
+    try testing.expect(std.mem.indexOf(u8, h.content(), "add2") != null);
+    try testing.expect(s.chrome_host.notice.open);
+    s.chrome_host.notice.dismiss();
+    // 요청 뒤 편집이 없어도 응답의 version 이 낡았으면(`RENAMESTALEVER` — 하나 낮춰 낸다) 버린다 — 요청 시점 대조와 별개의 축.
+    {
+        const end2 = h.content().len;
+        h.term.rt.editor_selection = .{ .anchor_start = end2, .anchor_end = end2, .focus = end2 };
+        try testing.expect(insertText(s, h.term, "// RENAMESTALEVER\n"));
+        try h.renameTo(5, "add4");
+        try testing.expect(h.settled());
+        try testing.expectEqual(@as(u64, 2), s.editor_workspace_edit.refused_stale);
+        try testing.expect(std.mem.indexOf(u8, h.content(), "add2") != null);
+        s.chrome_host.notice.dismiss();
+        try removeMarkerHover(s, h.term, "// RENAMESTALEVER\n");
+    }
+    // 관련 파일 중 **읽기 전용으로 열린** 문서가 있으면 전체 거부 — other.c 를 열어 읽기 전용으로 표시하고 rename.
+    {
+        const other_term = (try pane_ops.openFileTermInActivePane(s, h.other, .text)).term;
+        other_term.rt.editor_doc.?.file.read_only = true;
+        const Ctx = struct { t: *Term };
+        try testing.expect(pumpLspUntil(&h.fx, 3000, Ctx{ .t = other_term }, struct {
+            fn f(c: Ctx) bool {
+                return c.t.rt.editor_diagnostics.lsp.items.len >= 1;
+            }
+        }.f));
+        // r.c 로 돌아가 rename.
+        const idx = for (pane_ops.activePane(s).terms.items, 0..) |t, i| {
+            if (t == h.term) break i;
+        } else return error.TermNotFound;
+        s.focusTerm(idx);
+        try testing.expect(pane_ops.activePane(s).activeTerm() == h.term);
+        const before = try allocator.dupe(u8, h.content());
+        defer allocator.free(before);
+        try h.renameTo(5, "add5");
+        try testing.expect(h.settled());
+        try testing.expectEqual(@as(u64, 1), s.editor_workspace_edit.refused_rejected);
+        try testing.expectEqualStrings(before, h.content());
+        try testing.expect(std.mem.indexOf(u8, other_term.rt.editor_doc.?.file.content, "add5") == null);
+        other_term.rt.editor_doc.?.file.read_only = false;
+    }
 }
 
 test "MMP2 미니맵의 축은 보이는 줄이다 — 접으면 스트립에서도 사라지고, 클릭은 보이는 줄 축으로 환산된다 (제품 경계, §6.1·§6.2)" {

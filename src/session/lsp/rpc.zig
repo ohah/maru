@@ -16,7 +16,10 @@ pub const RequestId = union(enum) {
     definition: u32,
     signature: u32,
     formatting: u32,
+    rename: u32,
 };
+/// `rename`(2단 ⑤, §8.2f)의 id 는 `rename_id_base + seq` — u32 밖이라 u64 로 든다(JSON 정수는 i64 까지). classify 는 큰 base 부터 본다.
+pub const rename_id_base: u64 = 5_000_000_000;
 /// `formatting`(2단 ④, §8.2e)의 id 는 `formatting_id_base + seq`. u32 안(4_294_967_295)이라 seq 는 2.9 억까지.
 pub const formatting_id_base: u32 = 4_000_000_000;
 /// `signatureHelp`(2단 ③, §8.2d)의 id 는 `signature_id_base + seq` — definition 보다 위. u32 안에서 셋이 안 겹친다(각 1e9 칸).
@@ -239,18 +242,45 @@ pub fn formattingRequest(allocator: std.mem.Allocator, seq: u32, uri: []const u8
     }, .{});
 }
 
-/// `initialize` 응답의 `documentFormattingProvider`(bool 또는 object).
-pub fn formattingSupported(result: ?std.json.Value) bool {
+/// 오류 응답의 `error.message`(문자열일 때만) — 알림에 싣는다(§8.2f 「이름을 바꿀 수 없습니다 — {0}」).
+fn errorMessage(obj: std.json.ObjectMap) ?[]const u8 {
+    const e = obj.get("error") orelse return null;
+    if (e != .object) return null;
+    const m = e.object.get("message") orelse return null;
+    return if (m == .string) m.string else null;
+}
+
+/// `textDocument/rename`(§8.2f).
+pub fn renameRequest(allocator: std.mem.Allocator, seq: u32, uri: []const u8, line: u32, character: u32, new_name: []const u8) error{OutOfMemory}![]u8 {
+    return std.json.Stringify.valueAlloc(allocator, .{
+        .jsonrpc = "2.0",
+        .id = rename_id_base + seq,
+        .method = "textDocument/rename",
+        .params = .{ .textDocument = .{ .uri = uri }, .position = .{ .line = line, .character = character }, .newName = new_name },
+    }, .{});
+}
+
+/// `initialize` 응답의 `renameProvider`(bool 또는 object).
+pub fn renameSupported(result: ?std.json.Value) bool {
+    return providerFlag(result, "renameProvider");
+}
+
+fn providerFlag(result: ?std.json.Value, name: []const u8) bool {
     const r = result orelse return false;
     if (r != .object) return false;
     const caps = r.object.get("capabilities") orelse return false;
     if (caps != .object) return false;
-    const prov = caps.object.get("documentFormattingProvider") orelse return false;
+    const prov = caps.object.get(name) orelse return false;
     return switch (prov) {
         .bool => |b| b,
         .object => true,
         else => false,
     };
+}
+
+/// `initialize` 응답의 `documentFormattingProvider`(bool 또는 object).
+pub fn formattingSupported(result: ?std.json.Value) bool {
+    return providerFlag(result, "documentFormattingProvider");
 }
 
 /// `textDocument/definition`(§8.2c).
@@ -434,7 +464,7 @@ pub fn pathFromFileUri(uri: []const u8, out: []u8) ?[]const u8 {
 /// 들어온 메시지의 갈래.
 pub const Incoming = union(enum) {
     /// 우리가 보낸 요청의 응답. `result` 는 트리 안의 값(파싱 결과가 사는 동안 유효).
-    response: struct { id: RequestId, result: ?std.json.Value, is_error: bool },
+    response: struct { id: RequestId, result: ?std.json.Value, is_error: bool, error_message: ?[]const u8 = null },
     /// 서버 알림(`publishDiagnostics` 등).
     notification: struct { method: []const u8, params: ?std.json.Value },
     /// 서버 → 클라이언트 요청(id 있음) — 거부 대상.
@@ -465,7 +495,9 @@ pub fn classify(root: std.json.Value) Incoming {
     const rid: RequestId = switch (id_num) {
         initialize_id => .initialize,
         shutdown_id => .shutdown,
-        else => if (id_num >= formatting_id_base and id_num - formatting_id_base <= std.math.maxInt(u32))
+        else => if (id_num >= rename_id_base and id_num - @as(i64, @intCast(rename_id_base)) <= std.math.maxInt(u32))
+            .{ .rename = @intCast(id_num - @as(i64, @intCast(rename_id_base))) }
+        else if (id_num >= formatting_id_base and id_num - formatting_id_base <= std.math.maxInt(u32))
             .{ .formatting = @intCast(id_num - formatting_id_base) }
         else if (id_num >= signature_id_base and id_num - signature_id_base <= std.math.maxInt(u32))
             .{ .signature = @intCast(id_num - signature_id_base) }
@@ -477,7 +509,7 @@ pub fn classify(root: std.json.Value) Incoming {
             return .ignore,
     };
     const is_error = obj.get("error") != null;
-    return .{ .response = .{ .id = rid, .result = obj.get("result"), .is_error = is_error } };
+    return .{ .response = .{ .id = rid, .result = obj.get("result"), .is_error = is_error, .error_message = errorMessage(obj) } };
 }
 
 /// `initialize` 응답에서 서버가 고른 위치 인코딩. 없으면 명세 기본(utf-16).
@@ -754,6 +786,41 @@ test "LSJ8 formatting — 요청 id 4_000_000_000+seq·options(tabSize·insertSp
     defer c_false.deinit();
     try testing.expect(formattingSupported(c_true.value) and formattingSupported(c_obj.value));
     try testing.expect(!formattingSupported(c_no.value) and !formattingSupported(c_false.value) and !formattingSupported(null));
+}
+
+test "LSJ9 rename — 요청 id 5_000_000_000+seq·newName, capability, 오류 응답의 message (§8.2f)" {
+    const a = testing.allocator;
+    const req = try renameRequest(a, 3, "file:///a.c", 1, 4, "add2");
+    defer a.free(req);
+    try testing.expect(std.mem.indexOf(u8, req, "\"id\":5000000003") != null);
+    try testing.expect(std.mem.indexOf(u8, req, "\"method\":\"textDocument/rename\"") != null);
+    try testing.expect(std.mem.indexOf(u8, req, "\"position\":{\"line\":1,\"character\":4}") != null);
+    try testing.expect(std.mem.indexOf(u8, req, "\"newName\":\"add2\"") != null);
+    var p1 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":5000000003,\"result\":null}");
+    defer p1.deinit();
+    const c1 = classify(p1.value);
+    try testing.expect(c1 == .response and c1.response.id == .rename and c1.response.id.rename == 3 and !c1.response.is_error);
+    var p2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":4000000003,\"result\":null}");
+    defer p2.deinit();
+    try testing.expect(classify(p2.value).response.id == .formatting); // 4e9 대는 formatting 그대로
+    var p3 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":5000000003,\"error\":{\"code\":-32602,\"message\":\"cannot rename\"}}");
+    defer p3.deinit();
+    const c3 = classify(p3.value);
+    try testing.expect(c3.response.is_error);
+    try testing.expectEqualStrings("cannot rename", c3.response.error_message.?);
+    var p4 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":5000000003,\"error\":{\"code\":1}}");
+    defer p4.deinit();
+    try testing.expect(classify(p4.value).response.is_error and classify(p4.value).response.error_message == null);
+    var c_true = try parse(a, "{\"capabilities\":{\"renameProvider\":true}}");
+    defer c_true.deinit();
+    var c_obj = try parse(a, "{\"capabilities\":{\"renameProvider\":{\"prepareProvider\":true}}}");
+    defer c_obj.deinit();
+    var c_false = try parse(a, "{\"capabilities\":{\"renameProvider\":false}}");
+    defer c_false.deinit();
+    var c_no = try parse(a, "{\"capabilities\":{\"hoverProvider\":true}}");
+    defer c_no.deinit();
+    try testing.expect(renameSupported(c_true.value) and renameSupported(c_obj.value));
+    try testing.expect(!renameSupported(c_false.value) and !renameSupported(c_no.value) and !renameSupported(null));
 }
 
 test "LSJ4 file URI — 공백·한글은 퍼센트, 되읽으면 같은 경로 (§8.2a)" {

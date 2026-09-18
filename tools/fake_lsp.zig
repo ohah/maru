@@ -190,12 +190,18 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
         };
         // `MARU_FAKE_LSP_UTF16=1` 이면 제안과 무관하게 utf-16 을 고른다 — 클라이언트의 byte ↔ character 변환을 제품 경계에서 재는 데 쓴다.
         const force_utf16 = std.c.getenv("MARU_FAKE_LSP_UTF16") != null;
-        sendJson(allocator, .{ .jsonrpc = "2.0", .id = id.?, .result = .{ .capabilities = .{
-            .positionEncoding = if (utf8 and !force_utf16) "utf-8" else "utf-16",
-            .textDocumentSync = @as(u8, 1),
-            .signatureHelpProvider = .{ .triggerCharacters = [_][]const u8{ "(", "," }, .retriggerCharacters = [_][]const u8{")"} },
-            .documentFormattingProvider = std.c.getenv("MARU_FAKE_LSP_NOFMTCAP") == null, // `MARU_FAKE_LSP_NOFMTCAP=1` 이면 false
-        } } });
+        sendJson(allocator, .{
+            .jsonrpc = "2.0",
+            .id = id.?,
+            .result = .{
+                .capabilities = .{
+                    .positionEncoding = if (utf8 and !force_utf16) "utf-8" else "utf-16",
+                    .textDocumentSync = @as(u8, 1),
+                    .signatureHelpProvider = .{ .triggerCharacters = [_][]const u8{ "(", "," }, .retriggerCharacters = [_][]const u8{")"} },
+                    .documentFormattingProvider = std.c.getenv("MARU_FAKE_LSP_NOFMTCAP") == null, // `MARU_FAKE_LSP_NOFMTCAP=1` 이면 false
+                },
+            },
+        });
         return;
     }
     if (std.mem.eql(u8, method, "initialized")) {

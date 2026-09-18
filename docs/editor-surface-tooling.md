@@ -604,6 +604,17 @@ caret 은 남아야 한다). ③ `FormattingOptions.insertSpaces` — 이 편집
 삽입 순서·겹침 거부·인코딩·줄 밖 clamp·빈 배열) · `FMT1`(제품 경계: 가짜 서버 — `⇧⌥F` 로 두 줄이 한 번에 바뀌고 undo 하나로 돌아오며 caret 이
 같은 글자를 가리킨다 · 낡은 revision 은 버리고 알린다 · 겹침(`BADFMT`)은 거부하고 알린다 · 읽기 전용이면 요청이 안 나간다 · 빈 결과 무동작 · 낡은 seq · 요청한 문서가 안 보여도 적용) · `FMT2`(제품 경계: capability 없는 서버(`MARU_FAKE_LSP_NOFMTCAP`)에는 `⇧⌥F` 가 요청을 안 보낸다). 가짜 서버는 `options` 가 계약(`insertSpaces=false`·`tabSize≥1`)과 다르면 `null` 을 내고(제품 경계에서 options 를 잰다), 줄마다 첫 공백 묶음을 한 칸으로 줄이는 edit 을 **역순**으로 낸다(정렬은 클라이언트의 몫), `NOFMT` 면 `null`.
 
+**적대적 검증(2026-09-18, 1~4회차 · 변이 38)**: 1회차 순수 13 → 0(무효 3 → 유효로 재실행) · 2회차 상태 기계·요청 17 → 1(무효 2 → 유효로 재실행) ·
+3회차 배선 8 → 4 · 4회차 재실행 7 → 0. 선언한 등가 3:
+- **B17** 오류 응답의 `result` 를 그대로 넘긴다 — JSON-RPC 2.0 은 `error` 가 있으면 `result` 가 없어야 하므로 가드를 지워도 같다. 명세를 어기는
+  서버에 대한 방어로 남기고 주석에 적었다.
+- **C3** `⇧⌥F` 의 `needs_editable = false` — `needs_editable` 는 비교 뷰에서만 읽히고 비교 뷰에서는 `formatDocument` 가 먼저 거절한다(S5 B6 과
+  같은 등가). `true` 인 것은 뜻이다.
+- **C7** `formatDocument` 의 비교 뷰 검사 — `readyClientFor` 가 비교 뷰를 먼저 거절한다(비교 뷰는 서버에 동기화되지 않는다). 정의·호버·시그니처와
+  같은 싼 조기 반환.
+- **C5·C6** 알림 번역 둘이 바뀜 — 판정자가 `t()` 로 같은 표를 읽어 **동어반복**이었다. `tIn(.en/.ko)` 의 글자(「discarded」·「버렸」·「rejected」·
+  「거부」)를 직접 재도록 고쳐 사살.
+
 ### 8.3 관측 가능성과 민감정보
 
 editor event는 처음부터 하나의 domain schema를 공유하되 문서 원문을 기본 trace에 넣지 않는다.

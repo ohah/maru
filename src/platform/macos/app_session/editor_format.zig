@@ -34,6 +34,8 @@ pub const State = struct {
 /// 달라 버려진다 — 서버가 답을 안 주는 채로 다음 포맷을 막지 않는다).
 pub fn formatDocument(self: *AppSession) bool {
     const term = pane_ops.activePane(self).activeTerm();
+    // 비교 뷰 거절은 `readyClientFor` 가 먼저 한다(비교 뷰는 서버에 동기화되지 않는다) — 여기 것은 정의·호버·시그니처와 같은 싼 조기
+    // 반환이지 둘째 방어가 아니다(적대적 3회차 C7 등가).
     if (term.kind != .editor or term.rt.editor_diff != null) return false;
     const doc = term.rt.editor_doc orelse return false;
     if (doc.file.read_only) return false; // 싼 조기 반환 — 실제 방어는 `EditableFile.apply` 의 `error.ReadOnly`(§3.5)

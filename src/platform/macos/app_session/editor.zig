@@ -85,6 +85,8 @@ pub const lsp_client = @import("editor_lsp.zig");
 pub const hover_client = @import("editor_hover.zig");
 /// 정의로 이동(tooling §8.2c) — `textDocument/definition` → §5.2 `navigateTo`.
 pub const definition_client = @import("editor_definition.zig");
+/// 시그니처 힌트(tooling §8.2d) — 호버 박스를 같이 쓴다.
+pub const signature_client = @import("editor_signature.zig");
 
 pub const Opened = struct {
     /// 열린 문서. **읽어 온 bytes를 빌리지 않고 소유한다**(N2 — `edit_doc.EditableFile`).
@@ -7241,6 +7243,8 @@ pub fn insertText(self: *AppSession, term: *Term, text: []const u8) bool {
     // 이것이 없어서 화면 밖에서 편집하면 **자기가 어디를 고치는지 못 봤다**(적대적 검증 2026-08-26).
     revealPrimaryCaretRows(self, term, rows_before);
     revealPrimaryCaretCols(self, term, cols_before, max_before);
+    // 시그니처 힌트 트리거(§8.2d) — 타이핑한 마지막 byte 가 서버의 트리거 글자면 묻는다. 삽입 뒤라 caret 은 그 글자 뒤에 있다.
+    if (text.len > 0) signature_client.noteTyped(self, term, text[text.len - 1]);
     return true;
 }
 
@@ -12093,6 +12097,182 @@ test "GOTO1 정의로 이동 — F12·⌘클릭이 서버 응답의 첫 항목�
     try testing.expect(fx.session.editor_definition.waiting);
     try testing.expectEqual(focus_before_nodef, term.rt.editor_selection.?.focus);
     fx.session.editor_definition.waiting = false;
+}
+
+test "SIG1 시그니처 힌트 — `(` 를 치면 열리고 첫 파라미터가 accent, `,` 로 둘째, `)` 로 닫힘; Esc·명령·caret 이동 재요청·끄면 명령만·호버가 안 열림·낡은 응답 (제품 경계, §8.2d)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
+    var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const fz = try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake});
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);
+    defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const cz = try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root});
+    _ = setenv("MARU_CONFIG", cz.ptr, 1);
+    defer _ = unsetenv("MARU_CONFIG");
+    if (fx.session.config_path_buffer) |b| allocator.free(b);
+    fx.session.config_path_buffer = null;
+    fx.session.editor_lsp.auto_trust_answer = .allow;
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "s.c", .data = "int x;\n\n" });
+    const path = try std.fs.path.join(allocator, &.{ root, "s.c" });
+    defer allocator.free(path);
+    const saved_repo = fx.session.git_repo;
+    fx.session.git_repo = @constCast(root);
+    defer fx.session.git_repo = saved_repo;
+    const term = (try pane_ops.openFileTermInActivePane(fx.session, path, .text)).term;
+    fx.session.surface_initialized = true;
+    fx.session.backing_width_px = 1200;
+    fx.session.backing_height_px = 800;
+    const leaf = activeLeafRectForTest(fx.session) orelse return error.SkipZigTest;
+    const Ctx = struct { fx: *PaneFixture, term: *Term };
+    const ctx: Ctx = .{ .fx = &fx, .term = term };
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
+        fn f(c: Ctx) bool {
+            return c.term.rt.editor_diagnostics.lsp.items.len >= 1;
+        }
+    }.f));
+    try testing.expect(lsp_client.signatureTriggersFor(fx.session, term).?.isTrigger('('));
+    const drawFrame = struct {
+        fn f(s: *AppSession, l: maru.session.SplitRect, t: *Term) !void {
+            var d = appendPaneFrame(s, l, t) orelse return error.EditorPaneDidNotDraw;
+            d.dl.deinit(testing.allocator);
+        }
+    }.f;
+    const waitFor = struct {
+        fn f(fxp: *PaneFixture, ctxp: Ctx, comptime pred: fn (Ctx) bool) bool {
+            const start = fxp.session.awakeMs();
+            while (fxp.session.awakeMs() - start < 3000) {
+                lsp_client.pump(fxp.session);
+                if (pred(ctxp)) return true;
+                _ = usleep(2_000);
+            }
+            return false;
+        }
+    }.f;
+
+    // ⑴ 둘째(빈) 줄에 `add(` 를 치면 `(` 가 트리거 — 요청 → 응답 → 상자: 「1/2 int add(int a, int b)」 첫 파라미터 accent, 파라미터 doc, 시그니처 doc.
+    term.rt.editor_selection = .{ .anchor_start = 7, .anchor_end = 7, .focus = 7 };
+    try testing.expect(insertText(fx.session, term, "add("));
+    try testing.expectEqual(@as(u64, 1), fx.session.editor_lsp.sent_signatures);
+    try testing.expect(waitFor(&fx, ctx, struct {
+        fn f(c: Ctx) bool {
+            return c.fx.session.editor_signature.active;
+        }
+    }.f));
+    try drawFrame(fx.session, leaf, term);
+    try testing.expect(signature_client.refresh(fx.session)); // 프레임이 앵커를 세운다
+    try testing.expect(fx.session.chrome_host.hover_box.open);
+    {
+        const l = signature_client.lines(fx.session);
+        try testing.expectEqual(@as(usize, 4), l.len);
+        try testing.expectEqualStrings("1/2 int add(int a, int b)", l[0].text);
+        try testing.expectEqual(@as(u32, 12), l[0].emphasis.?.lo); // "1/2 " 뒤 8..13 → 12..17
+        try testing.expectEqual(@as(u32, 17), l[0].emphasis.?.hi);
+        try testing.expectEqual(maru.chrome.tokens.ColorRole.accent_bar, l[0].emphasis.?.role);
+        try testing.expectEqualStrings("first", l[1].text);
+        try testing.expectEqualStrings("", l[2].text);
+        try testing.expectEqualStrings("adds two", l[3].text); // 굵게 기호는 지워졌다
+        // 앵커는 caret 셀 — 상자는 그 아래.
+        const a = pointerAtOffset(term, term.rt.editor_selection.?.focus).?;
+        try testing.expectEqual(@as(i32, @intFromFloat(a.x - @as(f64, @floatFromInt(term.rt.editor_hit_geom.cell_w_px)) / 2)), fx.session.chrome_host.hover_box.anchor_x);
+        try testing.expect(fx.session.overlayFrameNeeded());
+        var prep = (try fx.session.buildChromeOverlayPrep()) orelse return error.SignatureNotDrawn;
+        defer prep.dl.deinit(allocator);
+        try testing.expect(drawnHasCodepoint(prep.dl, '/')); // 「1/2」
+    }
+    // ⑵ `1,` — `,` 는 트리거: 둘째 파라미터가 accent(15..20 → 19..24). 키 입력은 닫지 않는다.
+    try testing.expect(insertText(fx.session, term, "1,"));
+    try testing.expect(fx.session.editor_signature.active);
+    try testing.expect(waitFor(&fx, ctx, struct {
+        fn f(c: Ctx) bool {
+            const l = signature_client.lines(c.fx.session);
+            return l.len > 0 and l[0].emphasis != null and l[0].emphasis.?.lo == 19;
+        }
+    }.f));
+    try testing.expectEqual(@as(u32, 24), signature_client.lines(fx.session)[0].emphasis.?.hi);
+    // ⑶ `2)` — `)` 는 재트리거: 서버가 `null` → 닫힌다.
+    try testing.expect(insertText(fx.session, term, "2)"));
+    try testing.expect(waitFor(&fx, ctx, struct {
+        fn f(c: Ctx) bool {
+            return !c.fx.session.editor_signature.active;
+        }
+    }.f));
+    try testing.expectEqual(@as(u64, 1), fx.session.editor_signature.closed_by_result);
+    try testing.expect(!fx.session.chrome_host.hover_box.open);
+    // ⑷ 명령(`trigger_parameter_hints`) — caret 을 `add(` 뒤(offset 11)에 두고 → 열린다(첫 파라미터). `Esc` 가 닫는다(소비하지 않는다).
+    term.rt.editor_selection = .{ .anchor_start = 11, .anchor_end = 11, .focus = 11 };
+    fx.session.dispatchAppAction(.trigger_parameter_hints);
+    try testing.expect(waitFor(&fx, ctx, struct {
+        fn f(c: Ctx) bool {
+            return c.fx.session.editor_signature.active;
+        }
+    }.f));
+    try testing.expectEqual(@as(u32, 12), signature_client.lines(fx.session)[0].emphasis.?.lo);
+    try pressKey(&fx, .escape, .{});
+    try testing.expect(!fx.session.editor_signature.active);
+    // ⑸ caret 이동은 다시 묻는다 — 열어 둔 채 `1,` 뒤(offset 13)로 옮기고 프레임(`refresh`)을 돌리면 둘째 파라미터가 된다.
+    fx.session.dispatchAppAction(.trigger_parameter_hints);
+    try testing.expect(waitFor(&fx, ctx, struct {
+        fn f(c: Ctx) bool {
+            return c.fx.session.editor_signature.active;
+        }
+    }.f));
+    try pressKey(&fx, .arrow_right, .{});
+    try pressKey(&fx, .arrow_right, .{});
+    try testing.expectEqual(@as(usize, 13), term.rt.editor_selection.?.focus);
+    try testing.expect(fx.session.editor_signature.active); // 키는 닫지 않는다
+    try drawFrame(fx.session, leaf, term);
+    try testing.expect(signature_client.refresh(fx.session)); // caret 이 바뀌었다 → 다시 묻는다
+    try testing.expect(waitFor(&fx, ctx, struct {
+        fn f(c: Ctx) bool {
+            const l = signature_client.lines(c.fx.session);
+            return l.len > 0 and l[0].emphasis != null and l[0].emphasis.?.lo == 19;
+        }
+    }.f));
+    // ⑹ 열려 있는 동안 호버는 안 열린다 — 포인터를 첫 줄 `int` 에 두고 지연을 넘겨도.
+    try drawFrame(fx.session, leaf, term);
+    const p0 = pointerAtOffset(term, 1) orelse return error.NoPointer;
+    _ = fx.session.hoverCursor(p0.x, p0.y, 0);
+    const hover_opened_before = fx.session.editor_hover.opened_count;
+    _ = pumpHoverUntil(&fx, 600, ctx, struct {
+        fn f(c: Ctx) bool {
+            return c.fx.session.editor_hover.opened_count > 0 and false;
+        }
+    }.f);
+    try testing.expectEqual(hover_opened_before, fx.session.editor_hover.opened_count);
+    try testing.expect(fx.session.editor_signature.active);
+    // ⑺ 상자 밖 클릭(본문 — caret 을 옮긴다)은 닫는다.
+    const pc = pointerAtOffset(term, 1) orelse return error.NoPointer;
+    fx.session.mouse(1, pc.x + 600, pc.y, 0, 0);
+    fx.session.mouse(3, pc.x + 600, pc.y, 0, 0);
+    try testing.expect(!fx.session.editor_signature.active);
+    // ⑻ 끄면 타이핑 트리거는 없고 명령은 온다.
+    fx.session.loaded_config.config.editor.parameter_hints = false;
+    term.rt.editor_selection = .{ .anchor_start = 15, .anchor_end = 15, .focus = 15 }; // `add(1,2)` 뒤 — 줄 끝
+    const sent_before = fx.session.editor_lsp.sent_signatures;
+    try testing.expect(insertText(fx.session, term, "f("));
+    try testing.expectEqual(sent_before, fx.session.editor_lsp.sent_signatures);
+    fx.session.dispatchAppAction(.trigger_parameter_hints);
+    try testing.expectEqual(sent_before + 1, fx.session.editor_lsp.sent_signatures);
+    try testing.expect(waitFor(&fx, ctx, struct {
+        fn f(c: Ctx) bool {
+            return c.fx.session.editor_signature.active;
+        }
+    }.f));
+    fx.session.loaded_config.config.editor.parameter_hints = true;
+    signature_client.hide(fx.session);
+    // ⑼ 낡은 응답은 버린다.
+    fx.session.editor_signature.waiting = true;
+    fx.session.editor_signature.waiting_seq = 99;
+    signature_client.onResponse(fx.session, 98, .{ .label = "stale()", .index = 0, .count = 1 });
+    try testing.expect(fx.session.editor_signature.waiting and !fx.session.editor_signature.active);
+    fx.session.editor_signature.waiting = false;
 }
 
 test "MMP2 미니맵의 축은 보이는 줄이다 — 접으면 스트립에서도 사라지고, 클릭은 보이는 줄 축으로 환산된다 (제품 경계, §6.1·§6.2)" {

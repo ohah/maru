@@ -14,6 +14,9 @@
 //!   있으면 `null` 결과(내용 없음). `MUTEHOVER` 가 있으면 hover 에 **답하지 않는다**(시간 초과 경로).
 //! - `textDocument/definition` → `Location[]` 둘(첫 항목 = 줄 1, 글자 = **요청한 character**; 둘째는 버려져야 한다). 본문에 `NODEF` 면 `null`, `XFILE` 이면
 //!   같은 디렉터리의 `other.c`, `OUTSIDE` 면 `file:///nonexistent-outside-root/x.c`(root 밖).
+//! - `textDocument/signatureHelp` → 요청 줄의 caret 앞에서 마지막 `(` 뒤 `,` 수를 activeParameter 로, 시그니처 둘(`int add(int a, int b)` —
+//!   parameters 는 `[8,13]`·`[15,20]`, doc `**adds** two`·첫 파라미터 doc `first`; `int add(double a)`). `(` 가 없거나 닫혔거나 `NOSIG` 면 `null`.
+//!   capability 로 triggerCharacters `(`·`,` 와 retriggerCharacters `)` 를 낸다.
 //! - `shutdown` → `null` 응답, `exit` → 종료 0.
 //! - 시작하자마자 stderr 에 한 줄을 쓴다(실서버 clangd 가 그렇다) — stdout 에 섞이면 프레임이 깨진다(§8.2a 「stderr」).
 //! 순수 판정 대상이 아니라(맞으면 되는 도구) 테스트는 없다 — 이 도구의 계약은 `LSPB*` 가 제품 경계에서 든다.
@@ -115,6 +118,45 @@ fn setDocMode(uri: []const u8, mode: DefMode) void {
     };
 }
 
+/// 문서 본문을 uri 별로 기억한다(signatureHelp 가 caret 앞을 본다). 상한 8 문서·64 KB.
+const DocText = struct { uri: [1024]u8 = undefined, len: usize = 0, text: [65536]u8 = undefined, text_len: usize = 0 };
+var doc_texts: [8]DocText = [_]DocText{.{}} ** 8;
+
+fn setDocText(uri: []const u8, text: []const u8) void {
+    if (uri.len > 1024 or text.len > 65536) return;
+    var slot: ?*DocText = null;
+    for (&doc_texts) |*d| if (d.len == uri.len and std.mem.eql(u8, d.uri[0..d.len], uri)) {
+        slot = d;
+    };
+    if (slot == null) for (&doc_texts) |*d| if (d.len == 0) {
+        @memcpy(d.uri[0..uri.len], uri);
+        d.len = uri.len;
+        slot = d;
+        break;
+    };
+    const d = slot orelse return;
+    @memcpy(d.text[0..text.len], text);
+    d.text_len = text.len;
+}
+
+fn docText(uri: []const u8) []const u8 {
+    for (&doc_texts) |*d| if (d.len == uri.len and std.mem.eql(u8, d.uri[0..d.len], uri)) return d.text[0..d.text_len];
+    return "";
+}
+
+/// `line_no` 줄의 `character`(byte 로 친다 — 가짜 서버는 ASCII 픽스처만 받는다) 앞 본문.
+fn lineBefore(text: []const u8, line_no: i64, character: i64) []const u8 {
+    var it = std.mem.splitScalar(u8, text, '\n');
+    var i: i64 = 0;
+    while (it.next()) |line| : (i += 1) {
+        if (i == line_no) {
+            const c: usize = @intCast(@max(character, 0));
+            return line[0..@min(c, line.len)];
+        }
+    }
+    return "";
+}
+
 fn docMode(uri: []const u8) DefMode {
     for (&doc_modes) |*d| if (d.len == uri.len and std.mem.eql(u8, d.uri[0..d.len], uri)) return d.mode;
     return .same;
@@ -144,11 +186,51 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
         };
         // `MARU_FAKE_LSP_UTF16=1` 이면 제안과 무관하게 utf-16 을 고른다 — 클라이언트의 byte ↔ character 변환을 제품 경계에서 재는 데 쓴다.
         const force_utf16 = std.c.getenv("MARU_FAKE_LSP_UTF16") != null;
-        sendJson(allocator, .{ .jsonrpc = "2.0", .id = id.?, .result = .{ .capabilities = .{ .positionEncoding = if (utf8 and !force_utf16) "utf-8" else "utf-16", .textDocumentSync = @as(u8, 1) } } });
+        sendJson(allocator, .{ .jsonrpc = "2.0", .id = id.?, .result = .{ .capabilities = .{
+            .positionEncoding = if (utf8 and !force_utf16) "utf-8" else "utf-16",
+            .textDocumentSync = @as(u8, 1),
+            .signatureHelpProvider = .{ .triggerCharacters = [_][]const u8{ "(", "," }, .retriggerCharacters = [_][]const u8{")"} },
+        } } });
         return;
     }
     if (std.mem.eql(u8, method, "initialized")) {
         sendJson(allocator, .{ .jsonrpc = "2.0", .id = "srv-1", .method = "workspace/configuration", .params = .{ .items = [_]struct { section: []const u8 }{.{ .section = "fake" }} } });
+        return;
+    }
+    if (std.mem.eql(u8, method, "textDocument/signatureHelp")) {
+        // 요청 줄의 본문(마지막 didOpen/didChange 에서 기억)에서 caret 앞을 본다: 마지막 `(` 뒤의 `,` 수가 활성 파라미터, 그 `(` 가 없거나
+        // 그 뒤에 `)` 가 왔으면 `null`(닫힌다). `NOSIG` 가 있으면 늘 `null`.
+        var req_uri: []const u8 = "";
+        var line_no: i64 = 0;
+        var character: i64 = 0;
+        if (obj.get("params")) |p| if (p == .object) {
+            if (p.object.get("textDocument")) |td| if (td == .object) {
+                req_uri = str(td.object.get("uri")) orelse "";
+            };
+            if (p.object.get("position")) |pos| if (pos == .object) {
+                line_no = int(pos.object.get("line")) orelse 0;
+                character = int(pos.object.get("character")) orelse 0;
+            };
+        };
+        const text = docText(req_uri);
+        const before = lineBefore(text, line_no, character);
+        const open_at = std.mem.lastIndexOfScalar(u8, before, '(');
+        const closed = if (open_at) |o| std.mem.indexOfScalarPos(u8, before, o, ')') != null else true;
+        if (open_at == null or closed or std.mem.indexOf(u8, text, "NOSIG") != null) {
+            sendJson(allocator, .{ .jsonrpc = "2.0", .id = id.?, .result = null });
+            return;
+        }
+        const active_param: u32 = @intCast(std.mem.count(u8, before[open_at.?..], ","));
+        const Param = struct { label: []const u8, documentation: ?[]const u8 = null };
+        const ParamOff = struct { label: [2]u32, documentation: ?[]const u8 = null };
+        sendJson(allocator, .{ .jsonrpc = "2.0", .id = id.?, .result = .{
+            .signatures = .{
+                .{ .label = "int add(int a, int b)", .documentation = "**adds** two", .parameters = [_]ParamOff{ .{ .label = .{ 8, 13 }, .documentation = "first" }, .{ .label = .{ 15, 20 } } } },
+                .{ .label = "int add(double a)", .parameters = [_]Param{.{ .label = "double a" }} },
+            },
+            .activeSignature = @as(u32, 0),
+            .activeParameter = active_param,
+        } });
         return;
     }
     if (std.mem.eql(u8, method, "textDocument/hover")) {
@@ -234,6 +316,7 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
         };
         no_hover = std.mem.indexOf(u8, text, "NOHOVER") != null;
         mute_hover = std.mem.indexOf(u8, text, "MUTEHOVER") != null;
+        setDocText(uri, text);
         setDocMode(uri, if (std.mem.indexOf(u8, text, "NODEF") != null) .none else if (std.mem.indexOf(u8, text, "XFILE") != null) .other else if (std.mem.indexOf(u8, text, "OUTSIDE") != null) .outside else .same);
         if (std.mem.indexOf(u8, text, "BOOM") != null) std.c._exit(1);
         if (std.mem.indexOf(u8, text, "HANG") != null) {

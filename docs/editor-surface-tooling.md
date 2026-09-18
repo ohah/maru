@@ -531,6 +531,42 @@ breadcrumb 표시가 같은 함수를 쓰므로 그쪽도 같은 판정이었다
 파일 안 이동(caret·되돌아가기 표식) · `⌃-`/`⌃⇧-` 로 뒤로·앞으로 · `⌘클릭` · 다른 파일(새 Term 이 열리고 caret) · root 밖(알림·안 열림) ·
 `null`(알림) · 낡은 응답 버림) · `ETX4` 의 ⑷ 갈래(`⌃` 예외 목록).
 
+### 8.2d LSP 2단 ③ — 시그니처 힌트 (2026-09-18, 계획 공격 뒤의 결정)
+
+**계획 공격이 드러낸 것.** ① [native-editor-ui §8.3](native-editor-ui.md) 은 호버와 시그니처를 **한 박스**로 계약했고 그 박스(`hover_box`)가
+§8.2b 로 섰다 — 새로 서는 것은 「언제 띄우고 무엇을 강조하는가」뿐이다. ② 오버레이 raster 는 run 마다 **색**만 낸다(굵게 없음, `metal_lowering`
+`placeText`) — 활성 파라미터 강조는 색 role 로 한다. ③ 트리거 글자는 서버가 준다(`signatureHelpProvider.triggerCharacters` — clangd 는
+`(`·`,`·`<`… 여섯) — 1단은 `initialize` 응답에서 인코딩만 읽었으므로 이것을 더 읽는다. ④ 호버와 상자를 나눠 쓰므로 **주인**이 있어야 한다 —
+시그니처가 열려 있는 동안 호버는 열지도 닫지도 않는다. ⑤ `ParameterInformation.label` 이 `[start, end]` 이면 그 offset 은 **협상한 위치
+인코딩**의 단위다(LSP 3.17 「offsets are based on a UTF-16 string representation as `Position.character`」 — 협상 뒤엔 그 인코딩) →
+`position.byteInLine` 으로 label 의 byte 로 옮긴다.
+
+**레퍼런스(동작만).** VS Code `parameterHintsModel`: 트리거 글자·재트리거 글자(열려 있을 때)·열려 있는 동안의 caret 이동·내용 변경이 다시
+묻고(`triggerKind`·`isRetrigger`·`activeSignatureHelp`), 결과가 `null`/빈 배열·blur·**마우스로 caret 이동**·설정 끔이면 닫는다. 지연 120ms.
+`⇧⌘Space` = `editor.action.triggerParameterHints`. `↑↓` 로 시그니처를 오간다(`cycle`). Zed 는 `auto_signature_help` 기본 **false**.
+우리는 VS Code 를 따른다(§1.1 「VSCode 사용자 무회귀」 — 기본 켬).
+
+| 축 | 결정 | 근거 |
+| --- | --- | --- |
+| **트리거** | ⑴ 타이핑한 글자가 서버의 `triggerCharacters` 에 있으면(`insertText` 의 마지막 byte) `signatureHelp`(`triggerKind` 2·그 글자) ⑵ 열려 있는 동안 `retriggerCharacters`(`)` 등)도 같다 ⑶ 열려 있는 동안 revision 이나 caret 이 바뀌면 다시 묻는다(`triggerKind` 3·`isRetrigger`) — 요청이 나가 있으면 표시해 두었다가 응답 뒤 한 번 ⑷ `trigger_parameter_hints`(`⇧⌘Space`·팔레트) 는 어디서든(`triggerKind` 1) | VS Code 와 같다. 지연은 두지 않는다 — 요청은 한 번에 하나이고 응답이 갈아 끼운다 |
+| **서버가 없거나 `signatureHelpProvider` 가 없으면** | 타이핑 트리거 없음, 명령은 무동작 | — |
+| **결과** | `signatures` 가 비면 닫는다. `activeSignature`(없으면 0)·`activeParameter`(시그니처 것 → 전체 것 → 0). 줄: ① `‹i/N› ‹label›`(N > 1 일 때만 카운터) — 활성 파라미터 구간은 **테마 accent 색**(`accent_bar` — 탭 언더바와 같은 색; `focus_accent` 는 어두운 테마에서 회색이라 덜 강조돼 보였다, 캡처 실측) ② 파라미터 documentation ③ 시그니처 documentation(마크다운 축소 §8.3). 문자열 label 은 시그니처 label 안의 첫 일치 | VS Code 도 활성 파라미터를 굵게·강조색 — 우리 raster 는 색만 |
+| **자리** | caret 의 셀 아래(§8 규칙 2 — 아래, 안 들어가면 위), `hover_box` 그대로(80칸·12행·padding 간격). caret 이 움직이면 프레임마다 따라간다 | §8.3 「같은 박스」 |
+| **닫힘** | 결과 없음 · `Esc`(소비하지 않는다) · 상자 밖 클릭(흘려보낸다) · 마우스 클릭으로 caret 이 옮겨짐 · 문서가 안 보임·비교 뷰·오버레이 · `editor.parameter-hints` 끔. **키 입력은 닫지 않는다** — 타이핑하면서 보는 것이 존재 이유다(호버와 다른 점) | VS Code 「마우스 caret 이동은 닫는다」 |
+| **호버와의 관계** | 상자의 주인은 하나다: 시그니처가 열려 있으면 호버는 열지도(포인터 정지 무시) 닫지도 않는다. 시그니처가 열릴 때 호버는 닫힌다 | §8.3 「한 박스」 |
+| **켜고 끄기** | `editor.parameter-hints`(기본 켬). 끄면 타이핑 트리거만 꺼지고 명령은 남는다 | `editor.hover` 와 같은 관계 |
+| **하지 않는 것** | `↑↓` 로 시그니처 오가기(첫 조각은 활성 시그니처 하나 + 카운터) · 상자 안 포커스 · 굵게(raster 가 색만) · 자동완성 뒤 자동 트리거(Zed `show_signature_help_after_edits`) · 지연 120ms | 다음 조각 |
+
+**구현이 계약에 되먹인 것(2026-09-18).** ① **위치 요청은 지금 본문 기준이어야 한다** — `add(` 를 친 직후의 `signatureHelp` 가 그 프레임의
+`didChange` 보다 먼저 서버에 닿아 옛 본문의 자리를 봤다(SIG1 실측: `null`). §8.2a 의 「프레임당 한 번」 동기화는 그대로 두되, 위치를 싣는
+요청(hover·definition·signatureHelp)이 나가는 순간에는 밀린 `didChange` 를 먼저 보낸다(`flushDocument`). ② 편집 직후에는 행 배열이 비어
+caret 앵커가 없을 수 있다(`refreshAfterEdit` 가 스냅숏을 버린다) — 응답은 임시 자리로 열고 다음 프레임의 `refresh` 가 자리를 잡는다.
+③ 캡처 훅 `MARU_FORCE_PARAM_HINTS=1` 이 caret 자리에서 명령을 부른다.
+
+**관측점**: `LSJ7`(순수: 요청 id `3_000_000_000+seq`·context·capability 파싱·`signatureHelpProvider` 트리거 글자·결과의 활성 시그니처/파라미터
+기본값·label 세 모양) · `SIG1`(제품 경계: 가짜 서버 — `(` 를 치면 열리고 첫 파라미터가 accent, `,` 로 둘째, `)` 로 닫힘, `Esc`, 명령, caret
+이동 재요청, 끄면 명령만, 호버가 안 열림).
+
 ### 8.3 관측 가능성과 민감정보
 
 editor event는 처음부터 하나의 domain schema를 공유하되 문서 원문을 기본 trace에 넣지 않는다.

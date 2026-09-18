@@ -14,7 +14,10 @@ pub const RequestId = union(enum) {
     shutdown,
     hover: u32,
     definition: u32,
+    signature: u32,
 };
+/// `signatureHelp`(2단 ③, §8.2d)의 id 는 `signature_id_base + seq` — definition 보다 위. u32 안에서 셋이 안 겹친다(각 1e9 칸).
+pub const signature_id_base: u32 = 3_000_000_000;
 pub const initialize_id: u32 = 1;
 pub const shutdown_id: u32 = 2;
 pub const hover_id_base: u32 = 1000;
@@ -40,6 +43,14 @@ pub fn initializeRequest(allocator: std.mem.Allocator, root_uri: []const u8, pid
                     .synchronization = .{ .dynamicRegistration = false, .didSave = false },
                     .publishDiagnostics = .{ .versionSupport = true },
                     .hover = .{ .contentFormat = [_][]const u8{ "markdown", "plaintext" } },
+                    .signatureHelp = .{
+                        .contextSupport = true,
+                        .signatureInformation = .{
+                            .documentationFormat = [_][]const u8{ "markdown", "plaintext" },
+                            .parameterInformation = .{ .labelOffsetSupport = true },
+                            .activeParameterSupport = true,
+                        },
+                    },
                 },
                 .workspace = .{ .applyEdit = false, .configuration = false, .workspaceFolders = false },
             },
@@ -87,6 +98,132 @@ pub fn hoverRequest(allocator: std.mem.Allocator, seq: u32, uri: []const u8, lin
         .method = "textDocument/hover",
         .params = .{ .textDocument = .{ .uri = uri }, .position = .{ .line = line, .character = character } },
     }, .{});
+}
+
+/// `textDocument/signatureHelp`(§8.2d). `trigger_char` 는 `triggerKind == 2` 일 때의 그 글자.
+pub const SignatureTriggerKind = enum(u8) { invoked = 1, trigger_character = 2, content_change = 3 };
+pub fn signatureHelpRequest(allocator: std.mem.Allocator, seq: u32, uri: []const u8, line: u32, character: u32, kind: SignatureTriggerKind, trigger_char: ?u8, is_retrigger: bool) error{OutOfMemory}![]u8 {
+    var ch_buf: [1]u8 = undefined;
+    const tc: ?[]const u8 = if (trigger_char) |c| blk: {
+        ch_buf[0] = c;
+        break :blk ch_buf[0..1];
+    } else null;
+    return std.json.Stringify.valueAlloc(allocator, .{
+        .jsonrpc = "2.0",
+        .id = signature_id_base + seq,
+        .method = "textDocument/signatureHelp",
+        .params = .{
+            .textDocument = .{ .uri = uri },
+            .position = .{ .line = line, .character = character },
+            .context = .{ .triggerKind = @intFromEnum(kind), .triggerCharacter = tc, .isRetrigger = is_retrigger },
+        },
+    }, .{ .emit_null_optional_fields = false });
+}
+
+/// `initialize` 응답의 `signatureHelpProvider` — 트리거·재트리거 글자(첫 byte, ASCII 만). 없으면 `supported = false`.
+pub const SignatureTriggers = struct {
+    supported: bool = false,
+    chars: [16]u8 = undefined,
+    len: usize = 0,
+    retrigger: [8]u8 = undefined,
+    retrigger_len: usize = 0,
+
+    pub fn isTrigger(self: SignatureTriggers, c: u8) bool {
+        return std.mem.indexOfScalar(u8, self.chars[0..self.len], c) != null;
+    }
+    pub fn isRetrigger(self: SignatureTriggers, c: u8) bool {
+        return std.mem.indexOfScalar(u8, self.retrigger[0..self.retrigger_len], c) != null;
+    }
+};
+
+pub fn signatureTriggersFromResult(result: ?std.json.Value) SignatureTriggers {
+    var out: SignatureTriggers = .{};
+    const r = result orelse return out;
+    if (r != .object) return out;
+    const caps = r.object.get("capabilities") orelse return out;
+    if (caps != .object) return out;
+    const prov = caps.object.get("signatureHelpProvider") orelse return out;
+    switch (prov) {
+        .object => |o| {
+            out.supported = true;
+            collectChars(o.get("triggerCharacters"), &out.chars, &out.len);
+            collectChars(o.get("retriggerCharacters"), &out.retrigger, &out.retrigger_len);
+        },
+        .bool => |b| out.supported = b,
+        else => {},
+    }
+    return out;
+}
+
+fn collectChars(v: ?std.json.Value, buf: []u8, len: *usize) void {
+    const arr = v orelse return;
+    if (arr != .array) return;
+    for (arr.array.items) |it| {
+        if (it != .string or it.string.len == 0 or len.* >= buf.len) continue;
+        if (it.string[0] >= 0x80) continue; // ASCII 만 — 트리거 글자는 관례상 구두점이다
+        buf[len.*] = it.string[0];
+        len.* += 1;
+    }
+}
+
+/// signatureHelp 결과의 **활성 시그니처** 하나(§8.2d 「결과」). 슬라이스는 응답 트리 안(파싱 결과가 사는 동안 유효) — 호출자가 복사한다.
+pub const SignatureView = struct {
+    label: []const u8,
+    /// 활성 파라미터의 label 안 **byte** 범위(반열림). 없으면 `null`.
+    param: ?struct { lo: u32, hi: u32 } = null,
+    doc: ?[]const u8 = null,
+    param_doc: ?[]const u8 = null,
+    index: u32 = 0,
+    count: u32 = 1,
+};
+
+pub fn signatureView(result: ?std.json.Value, enc: PositionEncoding) ?SignatureView {
+    const r = result orelse return null;
+    if (r != .object) return null;
+    const sigs = r.object.get("signatures") orelse return null;
+    if (sigs != .array or sigs.array.items.len == 0) return null;
+    const count: u32 = @intCast(sigs.array.items.len);
+    var index: u32 = u32Of(r.object.get("activeSignature")) orelse 0;
+    if (index >= count) index = 0;
+    const sig = sigs.array.items[index];
+    if (sig != .object) return null;
+    const label_v = sig.object.get("label") orelse return null;
+    if (label_v != .string) return null;
+    const label = label_v.string;
+    var out: SignatureView = .{ .label = label, .index = index, .count = count, .doc = markupText(sig.object.get("documentation")) };
+    // 활성 파라미터: 시그니처의 것 → 전체의 것 → 0.
+    const active_param: u32 = u32Of(sig.object.get("activeParameter")) orelse (u32Of(r.object.get("activeParameter")) orelse 0);
+    if (sig.object.get("parameters")) |params| if (params == .array and active_param < params.array.items.len) {
+        const p = params.array.items[active_param];
+        if (p == .object) {
+            out.param_doc = markupText(p.object.get("documentation"));
+            if (p.object.get("label")) |pl| switch (pl) {
+                .string => |sub| if (std.mem.indexOf(u8, label, sub)) |at| {
+                    out.param = .{ .lo = @intCast(at), .hi = @intCast(at + sub.len) };
+                },
+                .array => |pair| if (pair.items.len == 2) {
+                    const a = u32Of(pair.items[0]) orelse 0;
+                    const b = u32Of(pair.items[1]) orelse a;
+                    // offset 은 **협상한 인코딩** 단위 — label 안의 byte 로 옮긴다(§8.2d ⑤).
+                    const lo = @import("position.zig").byteInLine(label, a, enc);
+                    const hi = @import("position.zig").byteInLine(label, b, enc);
+                    if (hi > lo) out.param = .{ .lo = lo, .hi = hi };
+                },
+                else => {},
+            };
+        }
+    };
+    return out;
+}
+
+/// `string | MarkupContent` → 텍스트(마크다운이든 평문이든 축소 규칙은 무해하다).
+fn markupText(v: ?std.json.Value) ?[]const u8 {
+    const x = v orelse return null;
+    return switch (x) {
+        .string => |s| if (s.len > 0) s else null,
+        .object => |o| if (o.get("value")) |val| (if (val == .string and val.string.len > 0) val.string else null) else null,
+        else => null,
+    };
 }
 
 /// `textDocument/definition`(§8.2c).
@@ -301,7 +438,9 @@ pub fn classify(root: std.json.Value) Incoming {
     const rid: RequestId = switch (id_num) {
         initialize_id => .initialize,
         shutdown_id => .shutdown,
-        else => if (id_num >= definition_id_base and id_num - definition_id_base <= std.math.maxInt(u32))
+        else => if (id_num >= signature_id_base and id_num - signature_id_base <= std.math.maxInt(u32))
+            .{ .signature = @intCast(id_num - signature_id_base) }
+        else if (id_num >= definition_id_base and id_num - definition_id_base <= std.math.maxInt(u32))
             .{ .definition = @intCast(id_num - definition_id_base) }
         else if (id_num >= hover_id_base and id_num - hover_id_base <= std.math.maxInt(u32))
             .{ .hover = @intCast(id_num - hover_id_base) }
@@ -497,6 +636,69 @@ test "LSJ6 definition — 요청 id 는 2_000_000_000+seq, 응답은 seq 로 대
     var l5 = try parse(a, "[]");
     defer l5.deinit();
     try testing.expect(definitionTarget(l5.value) == null);
+}
+
+test "LSJ7 signatureHelp — 요청 id 3_000_000_000+seq·context, capability, 트리거 글자, 활성 시그니처/파라미터 기본값과 label 세 모양 (§8.2d)" {
+    const a = testing.allocator;
+    const req = try signatureHelpRequest(a, 5, "file:///a.c", 2, 7, .trigger_character, '(', false);
+    defer a.free(req);
+    try testing.expect(std.mem.indexOf(u8, req, "\"id\":3000000005") != null);
+    try testing.expect(std.mem.indexOf(u8, req, "\"method\":\"textDocument/signatureHelp\"") != null);
+    try testing.expect(std.mem.indexOf(u8, req, "\"context\":{\"triggerKind\":2,\"triggerCharacter\":\"(\",\"isRetrigger\":false}") != null);
+    const req2 = try signatureHelpRequest(a, 6, "file:///a.c", 2, 7, .content_change, null, true);
+    defer a.free(req2);
+    try testing.expect(std.mem.indexOf(u8, req2, "\"context\":{\"triggerKind\":3,\"isRetrigger\":true}") != null); // 글자 없음 → 키 생략
+    const init = try initializeRequest(a, "file:///r", 1);
+    defer a.free(init);
+    try testing.expect(std.mem.indexOf(u8, init, "\"labelOffsetSupport\":true") != null);
+    try testing.expect(std.mem.indexOf(u8, init, "\"contextSupport\":true") != null);
+    var p1 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":3000000005,\"result\":null}");
+    defer p1.deinit();
+    const c1 = classify(p1.value);
+    try testing.expect(c1 == .response and c1.response.id == .signature and c1.response.id.signature == 5);
+    try testing.expect(signatureView(c1.response.result, .utf8) == null);
+    // capability — 트리거·재트리거 글자, 없으면 supported=false, `true` 도 지원.
+    var cap = try parse(a, "{\"capabilities\":{\"signatureHelpProvider\":{\"triggerCharacters\":[\"(\",\",\",\"가\"],\"retriggerCharacters\":[\")\"]}}}");
+    defer cap.deinit();
+    const tr = signatureTriggersFromResult(cap.value);
+    try testing.expect(tr.supported and tr.isTrigger('(') and tr.isTrigger(',') and !tr.isTrigger(')') and tr.isRetrigger(')'));
+    try testing.expectEqual(@as(usize, 2), tr.len); // 비ASCII 는 버린다
+    var cap2 = try parse(a, "{\"capabilities\":{\"hoverProvider\":true}}");
+    defer cap2.deinit();
+    try testing.expect(!signatureTriggersFromResult(cap2.value).supported);
+    // 결과 — activeSignature 1, 시그니처의 activeParameter 가 전체 것보다 먼저, [start,end] 는 인코딩 단위 → byte.
+    var r1 = try parse(a,
+        \\{"signatures":[
+        \\ {"label":"int add(int a, int b)","documentation":"adds","parameters":[{"label":[8,13],"documentation":{"kind":"markdown","value":"first"}},{"label":"int b"}]},
+        \\ {"label":"int 가(int c)","activeParameter":0,"parameters":[{"label":[6,11]}]}
+        \\],"activeSignature":1,"activeParameter":1}
+    );
+    defer r1.deinit();
+    const v1 = signatureView(r1.value, .utf16).?;
+    try testing.expectEqualStrings("int 가(int c)", v1.label);
+    try testing.expectEqual(@as(u32, 1), v1.index);
+    try testing.expectEqual(@as(u32, 2), v1.count);
+    try testing.expectEqual(@as(u32, 8), v1.param.?.lo); // utf-16 6 → byte 8(가 = 3 byte)
+    try testing.expectEqual(@as(u32, 13), v1.param.?.hi);
+    try testing.expect(v1.doc == null);
+    // activeSignature 없음 → 0, 전체 activeParameter 1 → 문자열 label 은 부분 문자열 위치.
+    var r2 = try parse(a,
+        \\{"signatures":[{"label":"int add(int a, int b)","documentation":{"kind":"plaintext","value":"adds"},"parameters":[{"label":[8,13]},{"label":"int b","documentation":"second"}]}],"activeParameter":1}
+    );
+    defer r2.deinit();
+    const v2 = signatureView(r2.value, .utf8).?;
+    try testing.expectEqual(@as(u32, 0), v2.index);
+    try testing.expectEqual(@as(u32, 15), v2.param.?.lo);
+    try testing.expectEqual(@as(u32, 20), v2.param.?.hi);
+    try testing.expectEqualStrings("adds", v2.doc.?);
+    try testing.expectEqualStrings("second", v2.param_doc.?);
+    // 빈 signatures → null; activeSignature 가 범위 밖이면 0.
+    var r3 = try parse(a, "{\"signatures\":[]}");
+    defer r3.deinit();
+    try testing.expect(signatureView(r3.value, .utf8) == null);
+    var r4 = try parse(a, "{\"signatures\":[{\"label\":\"f()\"}],\"activeSignature\":9}");
+    defer r4.deinit();
+    try testing.expectEqual(@as(u32, 0), signatureView(r4.value, .utf8).?.index);
 }
 
 test "LSJ4 file URI — 공백·한글은 퍼센트, 되읽으면 같은 경로 (§8.2a)" {

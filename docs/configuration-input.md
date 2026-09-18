@@ -106,7 +106,7 @@ keybind = F4 = esc:[2J
   `editor.action.marker.next/prev` 와 같은 키)·`show_hover`(caret 자리의 호버 박스 — 진단 메시지 + 언어 서버 hover, [툴링](editor-surface-tooling.md)
   §8.2b. **기본 chord 없음** — VS Code 의 `⌘K ⌘I` 는 두 단계 chord 라 키 계약에 없다)·`goto_definition`(`F12`·`⌘클릭` — 언어 서버의
   정의로, §8.2c)·`navigate_back`·`navigate_forward`(`⌃-`·`⌃⇧-` — 이동 스택 뒤로/앞으로, [시각 매핑](native-editor-visual-mapping.md) §5.2;
-  편집기 Term 에서만 — 터미널에서는 `⌃-` 가 PTY 로 간다) — **줄 조작
+  편집기 Term 에서만 — 터미널에서는 `⌃-` 가 PTY 로 간다)·`trigger_parameter_hints`(`⇧⌘Space` — 시그니처 힌트, §8.2d) — **줄 조작
   넷**(삭제·복제·이동·들여쓰기)은 [문서 모델](native-editor-document-model.md) §3.9a가 소유하고,
   대상은 **선택이 걸친 줄들**이며 전체가 undo 하나다. 들여쓰기·내어쓰기는 **선택이 여러 줄일 때의
   `Tab`·`⇧Tab`** 으로도 닿는다(선택이 한 줄 안이면 종전대로 탭 문자). 레벨은 중첩 **겹수**다(1이 문서

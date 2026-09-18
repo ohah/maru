@@ -1195,8 +1195,11 @@ pub const EditorConfig = struct {
     hover: bool = true,
     /// 호버가 뜨기까지 포인터가 머무는 시간(ms). VS Code·Zed 기본 300.
     hover_delay: u32 = 300,
+    /// **시그니처 힌트**(tooling §8.2d) — `(`·`,` 같은 트리거 글자를 치면 활성 시그니처를 caret 아래 상자로 낸다. 끄면 타이핑 트리거만 꺼지고
+    /// `trigger_parameter_hints` 명령은 남는다(VS Code `editor.parameterHints.enabled` 와 같은 관계).
+    parameter_hints: bool = true,
 
-    pub const schema = .{ // 키: editor.wrap · editor.tab-width · editor.cursor-shape · editor.scroll-beyond-last-column · editor.cursor-surrounding-lines · editor.cursor-surrounding-columns · editor.minimap · editor.minimap-width · editor.diagnostics · editor.hover · editor.hover-delay
+    pub const schema = .{ // 키: editor.wrap · editor.tab-width · editor.cursor-shape · editor.scroll-beyond-last-column · editor.cursor-surrounding-lines · editor.cursor-surrounding-columns · editor.minimap · editor.minimap-width · editor.diagnostics · editor.hover · editor.hover-delay · editor.parameter-hints
         // **둘 다 설정 GUI에 뜬다.** `wrap`은 한때 `hidden`이었는데(*"편집기가 제품 화면에 배선되기
         // 전이라 토글해도 아무 일이 없어 버그로 보인다"*) 값이 렌더에 닿으면서 벗겼다 —
         // `schema.zig`의 "editor.wrap은 설정 UI에 뜬다"가 그 사실을 잰다. 탭 폭도 같은 조건을
@@ -1229,6 +1232,7 @@ pub const EditorConfig = struct {
         .hover = Meta{ .doc = .cfg_editor_hover, .widget = .toggle, .section = .editor },
         // 상한 5000 — 그 위는 「안 뜬다」와 구별이 안 된다. 0 은 「바로」다.
         .hover_delay = Meta{ .key_seg = "hover-delay", .doc = .cfg_editor_hover_delay, .range = .{ 0, 5000 }, .widget = .number, .section = .editor },
+        .parameter_hints = Meta{ .key_seg = "parameter-hints", .doc = .cfg_editor_parameter_hints, .widget = .toggle, .section = .editor },
     };
 };
 

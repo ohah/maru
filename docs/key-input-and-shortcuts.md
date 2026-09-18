@@ -303,6 +303,11 @@ VS Code 의 `editor.action.marker.next/prev` 가 이 키다. `needs_editable = f
 하고(있으면 ⑵), 항목은 `ETX4` 의 `allowed_control` 목록에 근거와 함께 서야 한다. `⌃⇧-` 는 US 자판에서 `_` 로 오므로 `⌃⇧_` 도 같은
 액션에 묶는다(`⌘-`/`⌘_` 폰트 크기와 같은 선례). `needs_editable = false`.
 
+**`⇧⌘Space` — 시그니처 힌트(2026-09-18, [툴링](editor-surface-tooling.md) §8.2d).** VS Code `editor.action.triggerParameterHints`. `ETX4`
+⑵ 의 예외 목록에 서는 `⌘` chord — 전역 표·터미널 매크로 표에 같은 chord 가 없어 **가로채는 것이 없고**(전수: `grep "char = ' '"` 가 컨텍스트
+표의 이 줄과 `⌃⌥Space` 표기 판정자뿐), Swift ①ʹ 선-가로채기·② 메뉴 keyEquivalent 에도 없다. macOS 시스템은 `⌘Space`(Spotlight)·
+`⌃⌘Space`(이모지)를 쓰고 `⇧⌘Space` 는 비어 있다. 예외 규칙대로 `needs_editable = true`(비교 뷰에는 서버가 없다).
+
 #### 충돌 전수 대조 (2026-09-07)
 
 [diff·떠 있는 UI·설정](native-editor-ui.md) §9.1 이 *"충돌 목록은 구현 슬라이스에서 전수 조사한다"*,

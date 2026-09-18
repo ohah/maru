@@ -5266,6 +5266,8 @@ pub const AppSession = struct {
     editor_hover: editor_ops.hover_client.State = .{},
     /// 정의로 이동 상태(tooling §8.2c) — 기다리는 요청 seq.
     editor_definition: editor_ops.definition_client.State = .{},
+    /// 시그니처 힌트 상태(tooling §8.2d) — 상자의 주인 여부·요청 seq·줄.
+    editor_signature: editor_ops.signature_client.State = .{},
     // window close 확인을 통과했지만 remote event settlement가 남은 경우의 retry latch. 이 값이 켜진 동안
     // topology와 native close intent는 게시하지 않고 tick이 같은 close graph만 한 번 진행한다.
     window_close_pending: bool = false,
@@ -10392,6 +10394,7 @@ pub const AppSession = struct {
             .goto_definition => _ = editor_ops.definition_client.gotoDefinitionAtCaret(self), // §8.2c
             .navigate_back => _ = editor_ops.navigateBack(self), // §5.2 — 갈 곳이 없으면 무동작
             .navigate_forward => _ = editor_ops.navigateForward(self),
+            .trigger_parameter_hints => _ = editor_ops.signature_client.triggerManual(self), // §8.2d
             // 접기/펼치기 — 편집기가 아니거나 접을 것이 없으면 무동작(비교 뷰도 거절한다. §4.1f).
             // 비교 뷰면 그쪽을 먼저 본다 — 축이 달라 함수가 갈린다(§4.1g "비교 뷰").
             .copy_editor_selection => _ = editor_ops.copyDiffSelection(self) or editor_ops.copySelection(self),
@@ -12787,6 +12790,8 @@ pub const AppSession = struct {
                 // **키가 오면 호버 박스는 닫힌다**(tooling §8.2b 「닫힘」) — 소비하지 않는다. 수정자만의 키 이벤트는 이 경로에
                 // 오지 않는다(flagsChanged 는 키가 아니다).
                 editor_ops.hover_client.noteKey(self, false);
+                // 시그니처 힌트는 `Esc` 만 닫는다 — 타이핑하면서 보는 것이라 다른 키는 두고, caret 이동은 `refresh` 가 다시 묻는다(§8.2d).
+                if (key_event.key == .escape) editor_ops.signature_client.noteEscape(self);
                 // **편집기 Term 컨텍스트가 판정한다**(key-input-and-shortcuts.md 「편집기 Term 컨텍스트」).
                 // 전역 `resolve` 를 쓰면 편집기 전용 기본키(`⌥Z` 등)가 안 보인다 — 그 표는 전역에 못
                 // 넣는 것들이라 이 컨텍스트 안에만 있다.
@@ -14282,6 +14287,7 @@ pub const AppSession = struct {
                         _ = pane_ops.focusPaneByPtr(self, pane);
                         self.drag_autoscroll = 0;
                         self.mouse_drag_selecting = false; // 터미널 선택이 아니다 — 소유자가 다르다
+                        editor_ops.signature_client.noteMouseCaret(self); // §8.2d — 마우스로 caret 이 옮겨지면 닫는다(VS Code)
                         return;
                     }
                     // ⓒ' 병합 **판** 본문 클릭 → 그 판에 caret 을 놓는다(S3b-3b). Result 본문(위)이 먼저
@@ -20363,6 +20369,7 @@ pub const AppSession = struct {
         debug_fixtures.applyForcedEditorCaret(self); // 캡처 전용: 선택은 클릭으로만 생긴다
         debug_fixtures.applyForcedEditorHover(self); // 캡처 전용: 호버는 포인터 정지로만 뜬다(§8.2b)
         debug_fixtures.applyForcedEditorGotoDef(self); // 캡처 전용: 정의로 이동(§8.2c)
+        debug_fixtures.applyForcedParamHints(self); // 캡처 전용: 시그니처 힌트(§8.2d)
         debug_fixtures.applyForcedStageAll(self); // 캡처 전용: 전체 스테이지는 그룹 머리 클릭으로만 시작된다(RS4a)
         debug_fixtures.applyForcedFetch(self); // 캡처 전용: 원격 갱신은 브랜치 줄 클릭으로만 시작된다(P6)
         debug_fixtures.applyForcedRemoteMenu(self); // 캡처 전용: `∨` 메뉴도 클릭으로만 열린다(P6b)
@@ -24005,7 +24012,10 @@ pub const AppSession = struct {
         }
         // 호버 박스(tooling §8.2b — 비모달). 헬퍼와 같은 규율: 다른 오버레이가 낼 것이 있으면 안 내고, 프레임마다 `refresh` 가
         // 설 자리를 다시 묻는다(없으면 스스로 내려간다).
-        if (draws.items.len == 0 and editor_ops.hover_client.refresh(self)) {
+        if (draws.items.len == 0 and editor_ops.signature_client.refresh(self)) {
+            // 시그니처 힌트(§8.2d) — 같은 상자, 주인이 시그니처일 때. 호버의 refresh 는 그동안 false 다.
+            try self.chrome_host.collectHoverBoxDraws(editor_ops.signature_client.lines(self), props, &tokens, arena, &draws);
+        } else if (draws.items.len == 0 and editor_ops.hover_client.refresh(self)) {
             try self.chrome_host.collectHoverBoxDraws(editor_ops.hover_client.lines(self), props, &tokens, arena, &draws);
         }
         // 단축키 힌트(재설계): 모달이 안 열렸고 key_hints.visible면 **각 chrome 요소 우상단에 단축키 배지**를 빌드한다
@@ -24178,6 +24188,7 @@ pub const AppSession = struct {
     pub fn deinit(self: *AppSession) void {
         editor_ops.lsp_client.deinit(self); // §8.2a: 서버 자식을 거둔다(짧게 — 종료 경로)
         editor_ops.hover_client.deinit(self);
+        editor_ops.signature_client.deinit(self);
         // 판정자에서는 detached worker 가 **세션보다 오래 살면 안 된다**. 이유·규율은
         // `detached_worker_wait` 가 단일 출처다(2026-09-08 CI abort: `dupe` 누수 → segfault → 134).
         // 제품에서는 기다리지 않는다 — 멈춘 I/O 로 창 닫기가 굳는 것이 훨씬 나쁘고, 그 계약은 각

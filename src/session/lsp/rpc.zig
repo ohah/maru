@@ -20,7 +20,10 @@ pub const RequestId = union(enum) {
     completion: u32,
     code_action: u32,
     code_action_resolve: u32,
+    completion_resolve: u32,
 };
+/// `completionItem/resolve`(§8.2g-b) 의 id 는 `completion_resolve_id_base + seq`.
+pub const completion_resolve_id_base: u64 = 9_000_000_000;
 /// `codeAction/resolve`(§8.2h) 의 id 는 `code_action_resolve_id_base + seq`.
 pub const code_action_resolve_id_base: u64 = 8_000_000_000;
 /// `codeAction`(2단 ⑦, §8.2h)의 id 는 `code_action_id_base + seq`.
@@ -60,7 +63,13 @@ pub fn initializeRequest(allocator: std.mem.Allocator, root_uri: []const u8, pid
                     .hover = .{ .contentFormat = [_][]const u8{ "markdown", "plaintext" } },
                     // 자동완성(§8.2g) — 스니펫은 받지 않는다(`snippetSupport = false` 면 서버가 평문 insertText 를 낸다). resolve 도 아직.
                     .completion = .{
-                        .completionItem = .{ .snippetSupport = false, .insertReplaceSupport = false, .documentationFormat = [_][]const u8{"plaintext"} },
+                        .completionItem = .{
+                            .snippetSupport = false,
+                            .insertReplaceSupport = false,
+                            .documentationFormat = [_][]const u8{"plaintext"},
+                            // §8.2g-b — resolve 로 지연해 받는 속성.
+                            .resolveSupport = .{ .properties = [_][]const u8{ "additionalTextEdits", "detail", "documentation" } },
+                        },
                         .contextSupport = true,
                     },
                     // code action(§8.2h) — 리터럴 CodeAction 을 받고, `edit` 을 resolve 로 지연할 수 있으며 `data` 를 되돌려 준다.
@@ -186,6 +195,8 @@ pub fn signatureTriggersFromResult(result: ?std.json.Value) SignatureTriggers {
 /// `completionProvider` 의 트리거 글자(§8.2g).
 pub const CompletionTriggers = struct {
     supported: bool = false,
+    /// `resolveProvider`(§8.2g-b) — 강조된 항목을 미리 `completionItem/resolve` 한다.
+    resolve: bool = false,
     chars: [16]u8 = undefined,
     len: usize = 0,
 
@@ -205,11 +216,17 @@ pub fn completionTriggersFromResult(result: ?std.json.Value) CompletionTriggers 
         .object => |o| {
             out.supported = true;
             collectChars(o.get("triggerCharacters"), &out.chars, &out.len);
+            if (o.get("resolveProvider")) |rp| out.resolve = rp == .bool and rp.bool;
         },
         .bool => |b| out.supported = b,
         else => {},
     }
     return out;
+}
+
+/// `completionItem/resolve`(§8.2g-b) — 고른 항목의 JSON 그대로.
+pub fn completionResolveRequest(allocator: std.mem.Allocator, seq: u32, item_json: []const u8) error{OutOfMemory}![]u8 {
+    return std.fmt.allocPrint(allocator, "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"method\":\"completionItem/resolve\",\"params\":{s}}}", .{ completion_resolve_id_base + seq, item_json });
 }
 
 /// `textDocument/completion`(§8.2g). `trigger_char` 가 있으면 `triggerKind = 2`(TriggerCharacter), 아니면 1(Invoked).
@@ -607,7 +624,9 @@ pub fn classify(root: std.json.Value) Incoming {
     const rid: RequestId = switch (id_num) {
         initialize_id => .initialize,
         shutdown_id => .shutdown,
-        else => if (id_num >= code_action_resolve_id_base and id_num - @as(i64, @intCast(code_action_resolve_id_base)) <= std.math.maxInt(u32))
+        else => if (id_num >= completion_resolve_id_base and id_num - @as(i64, @intCast(completion_resolve_id_base)) <= std.math.maxInt(u32))
+            .{ .completion_resolve = @intCast(id_num - @as(i64, @intCast(completion_resolve_id_base))) }
+        else if (id_num >= code_action_resolve_id_base and id_num - @as(i64, @intCast(code_action_resolve_id_base)) <= std.math.maxInt(u32))
             .{ .code_action_resolve = @intCast(id_num - @as(i64, @intCast(code_action_resolve_id_base))) }
         else if (id_num >= code_action_id_base and id_num - @as(i64, @intCast(code_action_id_base)) <= std.math.maxInt(u32))
             .{ .code_action = @intCast(id_num - @as(i64, @intCast(code_action_id_base))) }
@@ -1011,6 +1030,28 @@ test "LSJ11 codeAction — 요청 id 7_000_000_000+seq·range·context.diagnosti
     defer a.free(init);
     try testing.expect(std.mem.indexOf(u8, init, "\"resolveSupport\":{\"properties\":[\"edit\"]}") != null);
     try testing.expect(std.mem.indexOf(u8, init, "\"dataSupport\":true") != null);
+}
+
+test "LSJ12 completionItem/resolve — 요청은 항목 JSON 그대로(9e9+seq), capability resolveProvider, initialize 의 resolveSupport (§8.2g-b)" {
+    const a = testing.allocator;
+    const req = try completionResolveRequest(a, 6, "{\"label\":\"lazy\",\"data\":{\"id\":3}}");
+    defer a.free(req);
+    try testing.expectEqualStrings("{\"jsonrpc\":\"2.0\",\"id\":9000000006,\"method\":\"completionItem/resolve\",\"params\":{\"label\":\"lazy\",\"data\":{\"id\":3}}}", req);
+    var p1 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":9000000006,\"result\":{}}");
+    defer p1.deinit();
+    try testing.expect(classify(p1.value).response.id == .completion_resolve and classify(p1.value).response.id.completion_resolve == 6);
+    var p2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":8000000006,\"result\":null}");
+    defer p2.deinit();
+    try testing.expect(classify(p2.value).response.id == .code_action_resolve); // 8e9 대는 그대로
+    var caps = try parse(a, "{\"capabilities\":{\"completionProvider\":{\"triggerCharacters\":[\".\"],\"resolveProvider\":true}}}");
+    defer caps.deinit();
+    try testing.expect(completionTriggersFromResult(caps.value).resolve);
+    var caps2 = try parse(a, "{\"capabilities\":{\"completionProvider\":{}}}");
+    defer caps2.deinit();
+    try testing.expect(completionTriggersFromResult(caps2.value).supported and !completionTriggersFromResult(caps2.value).resolve);
+    const init = try initializeRequest(a, "file:///r", 1);
+    defer a.free(init);
+    try testing.expect(std.mem.indexOf(u8, init, "\"resolveSupport\":{\"properties\":[\"additionalTextEdits\",\"detail\",\"documentation\"]}") != null);
 }
 
 test "LSJ4 file URI — 공백·한글은 퍼센트, 되읽으면 같은 경로 (§8.2a)" {

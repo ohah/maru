@@ -27,6 +27,8 @@ pub const gap_cols: u32 = 2;
 pub const Row = struct {
     label: []const u8,
     detail: []const u8 = "",
+    /// kind 한 글자(§8.2g-b) — label 앞 열. 공백이면 빈 칸.
+    kind: u8 = ' ',
 };
 
 pub const State = struct {
@@ -82,7 +84,8 @@ pub fn size(rows: []const Row) ?Size {
         label_w = @max(label_w, overlay_input.displayCols(r.label));
         detail_w = @max(detail_w, overlay_input.displayCols(r.detail));
     }
-    const want: u64 = @as(u64, label_w) + 2 + (if (detail_w > 0) @as(u64, gap_cols + detail_w) else 0);
+    // 좌패딩 1 + kind 1 + 간격 1 + label + (간격 2 + detail) + 우패딩 1.
+    const want: u64 = @as(u64, label_w) + 4 + (if (detail_w > 0) @as(u64, gap_cols + detail_w) else 0);
     return .{ .cols = @intCast(@min(want, @as(u64, max_cols))), .rows = @intCast(@min(rows.len, max_rows)), .label_cols = label_w };
 }
 
@@ -123,13 +126,15 @@ pub fn view(state: *const State, rows: []const Row, p: props.ChromeProps, _: *co
         const row_y = rect.y + @as(i32, @intCast(i)) * @as(i32, @intCast(ch));
         const bg_role: tokens.ColorRole = if (abs == state.selected) .tab_active_bg else .tab_hover_bg;
         try out.append(arena, .{ .fill = .{ .rect = .{ .x = rect.x, .y = row_y, .w = rect.w, .h = ch }, .role = bg_role } });
-        // " " + label(폭 상한에서 자름) + 간격 + detail(남는 칸에 우측 정렬) + 우패딩 — 행 전체 셀에 글리프.
+        // " " + kind + " " + label(폭 상한에서 자름) + 간격 + detail(남는 칸에 우측 정렬) + 우패딩 — 행 전체 셀에 글리프.
         var line: std.ArrayList(u8) = .empty;
         try line.append(arena, ' ');
-        const label_budget = box_cols -| 2;
+        try line.append(arena, r.kind);
+        try line.append(arena, ' ');
+        const label_budget = box_cols -| 4;
         const label = (try overlay_input.truncateToCols(arena, r.label, label_budget));
         try line.appendSlice(arena, label);
-        var used: u32 = 1 + overlay_input.displayCols(label);
+        var used: u32 = 3 + overlay_input.displayCols(label);
         if (r.detail.len > 0 and box_cols > used + gap_cols + 1) {
             const room = box_cols - used - gap_cols - 1;
             const detail = try overlay_input.truncateToCols(arena, r.detail, room);
@@ -164,7 +169,7 @@ test "SGB1 크기·창 — 폭은 label+detail(상한 60), 높이는 min(행, 10
     var rows: [25]Row = undefined;
     for (&rows, 0..) |*r, i| r.* = .{ .label = if (i % 2 == 0) "printf" else "puts", .detail = "int" };
     const sz = size(&rows).?;
-    try testing.expectEqual(@as(u32, 6 + 2 + 2 + 3), sz.cols);
+    try testing.expectEqual(@as(u32, 6 + 4 + 2 + 3), sz.cols);
     try testing.expectEqual(@as(u32, 10), sz.rows);
     var st = State{};
     st.show(100, 200, 20);
@@ -192,7 +197,7 @@ test "SGB2 그리기 — 닫히면 무동작; 열리면 앵커 아래에 창 행
     const arena = arena_state.allocator();
     const p = testProps();
     const tk = testTokens();
-    const rows = [_]Row{ .{ .label = "add", .detail = "int" }, .{ .label = "add_x" }, .{ .label = "printf", .detail = "int (const char *, ...)" } };
+    const rows = [_]Row{ .{ .label = "add", .detail = "int" }, .{ .label = "add_x", .kind = 'f' }, .{ .label = "printf", .detail = "int (const char *, ...)" } };
     var st = State{};
     var out: std.ArrayList(draw.Op) = .empty;
     try view(&st, &rows, p, &tk, arena, &out);
@@ -208,9 +213,9 @@ test "SGB2 그리기 — 닫히면 무동작; 열리면 앵커 아래에 창 행
     try testing.expectEqual(tokens.ColorRole.tab_active_bg, out.items[2].fill.role); // 선택 행(1)
     const line0 = out.items[1].text.runs[0].text;
     try testing.expectEqual(@as(usize, r.w / 10), overlay_input.displayCols(line0)); // 폭까지 채웠다
-    try testing.expect(std.mem.startsWith(u8, line0, " add"));
+    try testing.expect(std.mem.startsWith(u8, line0, "   add")); // 공백 · kind(없음) · 공백 · label
     try testing.expect(std.mem.endsWith(u8, line0, "int ")); // detail 우측 + 우패딩
-    try testing.expect(std.mem.indexOf(u8, out.items[3].text.runs[0].text, "add_x") != null); // `_` 는 그대로다(dropdown 과 다르다)
+    try testing.expect(std.mem.startsWith(u8, out.items[3].text.runs[0].text, " f add_x")); // kind 열 · `_` 는 그대로다(dropdown 과 다르다)
     // 위로 뒤집힘 — 아래에 자리가 없으면 앵커 위.
     st.moveAnchor(300, 780, 20);
     const up = boxRect(&st, &rows, p).?;

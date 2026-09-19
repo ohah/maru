@@ -27,7 +27,8 @@
 //!   `RENAMESTALEVER` → `documentChanges` 의 version 을 하나 낮춰(낡은 결과).
 //!   capability `renameProvider: true`(`MARU_FAKE_LSP_NORENAMECAP=1` 이면 false).
 //! - `textDocument/completion` → 문서의 식별자 전부(나온 순서 sortText) + `fake_import`(textEdit 접두사 교체 + additionalTextEdits 로 첫 줄 include,
-//!   preselect) + `fake_tail`(additional 이 다음 줄 머리 — 낱말 뒤) + `.` 바로 뒤면 `arrow_fix`(textEdit 이 `x.` 부터 덮어 `x->m`).
+//!   preselect) + `fake_tail`(additional 이 다음 줄 머리 — 낱말 뒤) + `lazy_import`(data 만 — `completionItem/resolve` 가 include additional 을
+//!   채운다; `RESOLVESTALL` 이면 답하지 않는다) + `.` 바로 뒤면 `arrow_fix`(textEdit 이 `x.` 부터 덮어 `x->m`). capability `resolveProvider: true`.
 //!   접두사로 거르지 않는다(로컬 필터 관측점), caret 앞 낱말이 2 글자 미만이면 `isIncomplete`. `NOCOMP` → `null`.
 //!   capability `completionProvider{triggerCharacters: ["."]}`(`MARU_FAKE_LSP_NOCOMPCAP=1` 이면 없음).
 //! - `textDocument/codeAction` → 문맥 진단마다 「fake: fix <code>」(range → `FIXED`, 첫 것 isPreferred) + 「fake: lazy」(data 만 — resolve) +
@@ -362,6 +363,17 @@ fn handleCompletion(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: s
         it.put(arena, "textEdit", .{ .object = te }) catch return;
         items.append(.{ .object = it }) catch return;
     }
+    {
+        // lazy_import — additionalTextEdits 없이 `data` 만: resolve 로 온다(§8.2g-b 관측점).
+        var it: std.json.ObjectMap = .empty;
+        it.put(arena, "label", .{ .string = "lazy_import" }) catch return;
+        it.put(arena, "sortText", .{ .string = "zzzw" }) catch return;
+        it.put(arena, "kind", .{ .integer = 3 }) catch return;
+        var data: std.json.ObjectMap = .empty;
+        data.put(arena, "uri", .{ .string = arena.dupe(u8, req_uri) catch return }) catch return;
+        it.put(arena, "data", .{ .object = data }) catch return;
+        items.append(.{ .object = it }) catch return;
+    }
     var root: std.json.ObjectMap = .empty;
     root.put(arena, "isIncomplete", .{ .bool = prefix_len < 2 }) catch return;
     root.put(arena, "items", .{ .array = items }) catch return;
@@ -606,7 +618,7 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
                     .signatureHelpProvider = .{ .triggerCharacters = [_][]const u8{ "(", "," }, .retriggerCharacters = [_][]const u8{")"} },
                     .documentFormattingProvider = std.c.getenv("MARU_FAKE_LSP_NOFMTCAP") == null, // `MARU_FAKE_LSP_NOFMTCAP=1` 이면 false
                     .renameProvider = std.c.getenv("MARU_FAKE_LSP_NORENAMECAP") == null, // `MARU_FAKE_LSP_NORENAMECAP=1` 이면 false
-                    .completionProvider = if (std.c.getenv("MARU_FAKE_LSP_NOCOMPCAP") == null) .{ .triggerCharacters = [_][]const u8{"."} } else null,
+                    .completionProvider = if (std.c.getenv("MARU_FAKE_LSP_NOCOMPCAP") == null) .{ .triggerCharacters = [_][]const u8{"."}, .resolveProvider = true } else null,
                     .codeActionProvider = if (std.c.getenv("MARU_FAKE_LSP_NOACTCAP") == null) .{ .codeActionKinds = [_][]const u8{"quickfix"}, .resolveProvider = true } else null,
                 },
             },
@@ -704,6 +716,34 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
     }
     if (std.mem.eql(u8, method, "textDocument/completion")) {
         handleCompletion(allocator, obj, id.?);
+        return;
+    }
+    if (std.mem.eql(u8, method, "completionItem/resolve")) {
+        // `lazy_import`(data 만) → additionalTextEdits(첫 줄 `#include "lazy.h"`) + detail 을 채워 돌려준다. 문서에 `RESOLVESTALL` 이면 답하지 않는다(`…HANG` 이라 부르면 didChange 의 `HANG` 표식에 걸려 서버째 멈춘다).
+        var uri: []const u8 = "";
+        var label: []const u8 = "";
+        if (obj.get("params")) |p| if (p == .object) {
+            label = str(p.object.get("label")) orelse "";
+            if (p.object.get("data")) |d| if (d == .object) {
+                uri = str(d.object.get("uri")) orelse "";
+            };
+        };
+        if (std.mem.indexOf(u8, docText(uri), "RESOLVESTALL") != null) return;
+        if (!std.mem.eql(u8, label, "lazy_import")) {
+            // 다른 항목은 그대로 돌려준다(풀 것이 없다).
+            sendJson(allocator, .{ .jsonrpc = "2.0", .id = id.?, .result = obj.get("params").? });
+            return;
+        }
+        var arena_state = std.heap.ArenaAllocator.init(allocator);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        var it: std.json.ObjectMap = .empty;
+        it.put(arena, "label", .{ .string = "lazy_import" }) catch return;
+        it.put(arena, "detail", .{ .string = "resolved" }) catch return;
+        var adds: std.json.Array = .init(arena);
+        adds.append(editValue(arena, 0, 0, 0, "#include \"lazy.h\"\n") catch return) catch return;
+        it.put(arena, "additionalTextEdits", .{ .array = adds }) catch return;
+        sendJson(allocator, .{ .jsonrpc = "2.0", .id = id.?, .result = std.json.Value{ .object = it } });
         return;
     }
     if (std.mem.eql(u8, method, "textDocument/codeAction")) {

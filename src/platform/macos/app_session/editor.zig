@@ -13400,8 +13400,46 @@ test "CA1 code action — ⌘. 로 진단 자리의 fix 와 lazy 가 메뉴에(c
     try testing.expectEqual(@as(u64, 1), s.editor_code_action.notified_none);
     try testing.expect(s.chrome_host.notice.open);
     try testing.expect(std.mem.startsWith(u8, &s.notice_message_buf, maru.i18n.t(.ca_none)));
+    try testing.expect(std.mem.indexOf(u8, maru.i18n.tIn(.ko, .ca_none), "없습니다") != null); // 뜻을 글자로(적대적 3회차 C6)
+    try testing.expect(std.mem.indexOf(u8, maru.i18n.tIn(.en, .ca_none), "No code actions") != null);
     s.chrome_host.notice.dismiss();
     try removeMarkerHover(s, term, "// NOACT\n");
+    // ⑷b **상한 25** — `MANYACT` 는 data-only 30 개를 낸다; 메뉴는 25 행이고 넘치는 것은 버린다(메뉴 버퍼 크기).
+    {
+        const e3 = content(term).len;
+        term.rt.editor_selection = .{ .anchor_start = e3, .anchor_end = e3, .focus = e3 };
+        try testing.expect(insertText(s, term, "// MANYACT\n"));
+        term.rt.editor_selection = .{ .anchor_start = 9, .anchor_end = 9, .focus = 9 };
+        s.dispatchAppAction(.quick_fix);
+        try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
+        try testing.expect(s.code_action_menu);
+        try testing.expectEqual(code_action_client.max_items, menuTitles(s).len);
+        try testing.expectEqual(code_action_client.max_items, s.editor_code_action.items.items.len);
+        try pressKey(&fx, .escape, .{});
+        try removeMarkerHover(s, term, "// MANYACT\n");
+    }
+    // ⑷c resolve 응답에 edit 이 없으면(`RESOLVEEMPTY`) 알림, 문서 그대로.
+    {
+        const e4 = content(term).len;
+        term.rt.editor_selection = .{ .anchor_start = e4, .anchor_end = e4, .focus = e4 };
+        try testing.expect(insertText(s, term, "// RESOLVEEMPTY\n"));
+        try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
+            fn f(c: Ctx) bool {
+                return c.term.rt.editor_diagnostics.lsp.items.len >= 1;
+            }
+        }.f));
+        term.rt.editor_selection = .{ .anchor_start = 9, .anchor_end = 9, .focus = 9 };
+        s.dispatchAppAction(.quick_fix);
+        try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
+        try testing.expectEqualStrings("fake: lazy", menuTitles(s)[0]);
+        const none_before = s.editor_code_action.notified_none;
+        try pressKey(&fx, .enter, .{});
+        try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
+        try testing.expectEqual(none_before + 1, s.editor_code_action.notified_none);
+        try testing.expect(std.mem.indexOf(u8, content(term), "// lazy") == null);
+        s.chrome_host.notice.dismiss();
+        try removeMarkerHover(s, term, "// RESOLVEEMPTY\n");
+    }
     // ⑸ **낡은 revision 은 전체 거부** — 메뉴가 뜬 뒤 문서를 고치고(메뉴는 모달이라 키로는 못 고친다 — 프로그램적으로) 고르면 거부.
     try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
         fn f(c: Ctx) bool {

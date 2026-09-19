@@ -31,8 +31,8 @@
 //!   접두사로 거르지 않는다(로컬 필터 관측점), caret 앞 낱말이 2 글자 미만이면 `isIncomplete`. `NOCOMP` → `null`.
 //!   capability `completionProvider{triggerCharacters: ["."]}`(`MARU_FAKE_LSP_NOCOMPCAP=1` 이면 없음).
 //! - `textDocument/codeAction` → 문맥 진단마다 「fake: fix <code>」(range → `FIXED`, 첫 것 isPreferred) + 「fake: lazy」(data 만 — resolve) +
-//!   「fake: command」(command 만) + `Command` 형(둘은 숨겨져야 한다). `NOACT` → `[]`. `codeAction/resolve` → 첫 줄에 `// lazy` 를 넣는 edit;
-//!   `RESOLVEFAIL` → 오류. capability `codeActionProvider{resolveProvider: true}`(`MARU_FAKE_LSP_NOACTCAP=1` 이면 없음).
+//!   「fake: command」(command 만) + `Command` 형(둘은 숨겨져야 한다) + `MANYACT` 면 data-only 30 개(상한 관측점). `NOACT` → `[]`.
+//!   `codeAction/resolve` → 첫 줄에 `// lazy` 를 넣는 edit; `RESOLVEFAIL` → 오류; `RESOLVEEMPTY` → edit 없는 응답. capability `codeActionProvider{resolveProvider: true}`(`MARU_FAKE_LSP_NOACTCAP=1` 이면 없음).
 //! - `shutdown` → `null` 응답, `exit` → 종료 0.
 //! - 시작하자마자 stderr 에 한 줄을 쓴다(실서버 clangd 가 그렇다) — stdout 에 섞이면 프레임이 깨진다(§8.2a 「stderr」).
 //! 순수 판정 대상이 아니라(맞으면 되는 도구) 테스트는 없다 — 이 도구의 계약은 `LSPB*` 가 제품 경계에서 든다.
@@ -411,6 +411,18 @@ fn handleCodeAction(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: s
         it.put(arena, "edit", .{ .object = edit }) catch return;
         items.append(.{ .object = it }) catch return;
     };
+    if (std.mem.indexOf(u8, text, "MANYACT") != null) {
+        // 상한(25 = 메뉴 버퍼) 관측점 — data 만 있는 항목 30 개.
+        var n: usize = 0;
+        while (n < 30) : (n += 1) {
+            var it: std.json.ObjectMap = .empty;
+            it.put(arena, "title", .{ .string = std.fmt.allocPrint(arena, "fake: many {d}", .{n}) catch return }) catch return;
+            var data: std.json.ObjectMap = .empty;
+            data.put(arena, "uri", .{ .string = arena.dupe(u8, req_uri) catch return }) catch return;
+            it.put(arena, "data", .{ .object = data }) catch return;
+            items.append(.{ .object = it }) catch return;
+        }
+    }
     {
         var it: std.json.ObjectMap = .empty;
         it.put(arena, "title", .{ .string = "fake: lazy" }) catch return;
@@ -448,6 +460,11 @@ fn handleCodeActionResolve(allocator: std.mem.Allocator, obj: std.json.ObjectMap
     const text = docText(uri);
     if (std.mem.indexOf(u8, text, "RESOLVEFAIL") != null or uri.len == 0) {
         sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .@"error" = .{ .code = @as(i32, -32603), .message = "fake: cannot resolve" } });
+        return;
+    }
+    if (std.mem.indexOf(u8, text, "RESOLVEEMPTY") != null) {
+        // edit 없이 돌려준다 — 클라이언트가 「없음」을 알려야 한다.
+        sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .result = .{ .title = "fake: lazy" } });
         return;
     }
     var arena_state = std.heap.ArenaAllocator.init(allocator);

@@ -85,9 +85,17 @@ test "닫힘은 사유와 함께 어느 줄이었는지 남긴다" {
 
     // ② **막혔던 두 경로에 빠짐없이 붙는다.** 하나라도 익명이면 다음 재현에서 또 「이 자리인가
     //    저 자리인가」로 돌아간다. 값이 아니라 **자리마다 서로 다른 이름**임을 고정한다.
+    //    2026-09-19: `invalidate_purge_tracker` 하나가 여기서 빠졌다. 그 이름은 닫는 자리에는
+    //    하나였지만 **그 함수를 부르는 자리가 다섯**이라, 9/15 실측의 `err=PartialFrame` 6 건이
+    //    다섯 중 무엇이었는지 못 갈랐다. 이제 이름을 호출자가 주므로 여기서도 다섯을 센다.
     const sites = [_][]const u8{
         "\"invalidate_slot_lookup\"",
-        "\"invalidate_purge_tracker\"",
+        "\"invalidate_pressure_victim\"",
+        "\"invalidate_projection_budget\"",
+        "\"invalidate_turn_rejected\"",
+        "\"invalidate_adopt_pressure\"",
+        "\"invalidate_adopt_rejected\"",
+        "\"invalidate_prepared_attach\"",
         "\"invalidate_notice_take\"",
         "\"invalidate_notice_build\"",
         "\"invalidate_notice_adopt\"",

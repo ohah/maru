@@ -7788,6 +7788,55 @@ host→app 전송 자체가 없어 셀 것이 없지만, 「줄이 없다」를 
 
 **한계.** 이름은 다음 재현부터 붙는다. 이미 쌓인 126 건은 끝내 무엇이었는지 알 수 없다.
 
+### 12.4 `invalidate_purge_tracker` 6 건은 다섯 중 무엇이었나 — 이름이 있어도 못 갈랐다 (2026-09-19)
+
+**§12.3 과 같은 결함인데 한 겹 더 깊다.** 그때는 자리 이름이 **없어서** 못 갈랐다. 이번에는
+이름이 **있었는데도** 못 갈랐다 — 그 이름을 쓰는 닫기는 함수 안에 하나인데, **그 함수를 부르는
+자리가 다섯**이었다.
+
+```
+why=socket_error site=invalidate_purge_tracker err=PartialFrame    ← 6 건 전부 같은 줄
+```
+
+`invalidateSubscriptionOutput` 의 호출자 다섯은 고칠 곳이 전부 다르다:
+
+| 이름 | 무엇이 실패했나 | 재현 조건 |
+| --- | --- | --- |
+| `invalidate_pressure_victim` | owner 가 **다른** 연결을 희생자로 골랐다 | **클라이언트 2 개 이상** |
+| `invalidate_projection_budget` | 제 투영 예산을 못 얻었다 | 단독에서도 |
+| `invalidate_turn_rejected` | 모은 출력의 채택이 거부됐다 | 단독에서도 |
+| `invalidate_adopt_pressure` | 채택이 전역 압력으로 지연됐다 | 단독에서도 |
+| `invalidate_adopt_rejected` | 채택 자체가 거부됐다 | 단독에서도 |
+| `invalidate_prepared_attach` | 첫 화면이 연성 상한(8 MiB)을 넘었다 | 단독에서도 |
+
+첫 줄만 **남의 연결이 죽는다**. `poll_owner.reclaimScreenPressure` 가 requester 를 후보에서 빼고
+큐가 가장 큰 다른 연결을 고르기 때문이다 — 그래서 클라이언트가 하나뿐이면 이 갈래는 아예 안 탄다.
+나머지 넷은 자기 자신을 무효화한다. **재현 조건이 다른 것들이 한 이름에 묶여 있었다.**
+
+`adoptSubscriptionTurn` 의 `.deferred_global_pressure, .rejected` 는 한 `switch` arm 이었다.
+**가르면서 arm 도 갈랐다** — 합쳐 두면 로그가 다시 「둘 중 무엇인지 모름」이 된다. 그래서 호출
+«자리» 는 다섯이었지만 이름은 **여섯**이다.
+
+**적대적 검증이 제 작업에서 결함 넷을 찾았다.** ⑴ 이 표에 `invalidate_adopt_rejected` 가 빠져
+있었다(arm 을 가른 당사자가 그 결과를 안 적었다). ⑵ 경계 축의 하한을 `< 5` 로 적어, 갈래 하나를
+도로 합치는 변경이 통과했다 — 축이 막으려던 바로 그 변경이다. ⑶ 소스 검사만으로는 「받은 값을
+쓴다」를 못 보므로(리터럴을 안 쓴다만 본다) 배선을 직접 타는 순수 판정자를 더했다. ⑷ 커밋
+메시지도 다섯만 적었다.
+
+**`invalidate_slot_lookup` 만 호출자 이름을 안 받는다.** `reactor.get(self.admission)` 은 오직 자기
+admission 에만 달려 있어 어느 자리에서 불렀든 뜻이 같다(이 연결의 슬롯이 사라졌다).
+
+**적대적 검증이 이 조사의 방향을 바꿨다.** 처음에는 「최선 노력 최적화의 실패를 치명적 오류로
+승격시킨다」를 고치려 했고, 그 근거로 「무고한 제3자가 죽는다」를 들었다. 검증해 보니 그것은
+**다섯 중 하나**였고 가장 드문 갈래였다. 또 「아무도 못 알아챘다」도 거짓이었다 — `prepared attach`
+자리에는 2026-09-12 실측과 함께 **같은 논리의 수정이 이미 들어가 있었다**(「전송 자체가 깨진 게
+아니므로 닫을 이유가 없다」). 빈도를 모르는 채 동작을 바꾸는 대신 **이름부터 붙이는 것**으로
+방향을 바꾼 이유다.
+
+**아직 안 고친 것.** 다섯 다 `.socket_error` 로 닫는데 **소켓은 멀쩡하다**. 그리고 같은 함수 주변에
+`deferGlobalPressure`/`deferResyncAttempt` 라는 **백오프 뒤 재시도 기계가 이미 있다** — `PartialFrame`
+만 그 개념을 안 쓴다. 다음 재현에서 어느 갈래인지 읽히면, 그 갈래에 맞는 지연을 넣는다.
+
 ### P0 — 문서 결정
 
 - 이 문서, workspace restore, session-host upgrade, configuration, verification matrix를 정합화한다.

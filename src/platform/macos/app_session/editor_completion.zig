@@ -283,7 +283,7 @@ fn ownedFrom(allocator: std.mem.Allocator, it: completion.Item, content: []const
     errdefer allocator.free(insert);
     const detail = try allocator.dupe(u8, it.detail orelse "");
     errdefer allocator.free(detail);
-    // 빈 것은 복사하지 않는다(빈 슬라이스는 놓지 않는다 — `deinit` 과 짝).
+    // 빈 것은 복사하지 않는다(빈 슬라이스는 놓지 않는다 — `deinit` 과 짝). 빈 dupe 도 0 바이트라 누수는 아니다(적대적 2회차 B8: 등가) — 뜻을 위해 남긴다.
     const label_detail: []u8 = if (it.label_detail) |ld| (if (ld.len > 0) try allocator.dupe(u8, ld) else &.{}) else &.{};
     errdefer if (label_detail.len > 0) allocator.free(label_detail);
     const description: []u8 = if (it.description) |d| (if (d.len > 0) try allocator.dupe(u8, d) else &.{}) else &.{};

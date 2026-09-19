@@ -49,7 +49,7 @@ pub fn fold(label_w: u32, label_detail_w: u32, right_w: u32, usable: u32) Fold {
     if (right_w > 0) {
         // 오른쪽에 남는 칸(간격 2 뒤) — 넘치면 문턱까지만 접는다.
         const spare = usable -| gap_cols -| left_w;
-        right = @min(right_w, @max(spare, @min(right_w, right_min_cols)));
+        right = @min(right_w, @max(spare, right_min_cols)); // 바깥 @min 이 짧은 오른쪽을 이미 묶는다(적대적 1회차 A9: 안쪽 @min 은 등가라 뺐다)
         right = @min(right, usable -| gap_cols -| @min(label_w, label_min_cols)); // 상자가 문턱보다도 좁으면 label 몫을 남기고 있는 만큼
         left_room = usable -| gap_cols -| right;
     }
@@ -298,4 +298,15 @@ test "SGB3 labelDetails — 꼬리는 label 뒤에 옅게, 오른쪽은 descript
     try testing.expectEqual(Fold{ .label = 7, .label_detail = 13, .right = 0 }, fold(7, 31, 0, 20)); // 오른쪽 없음 — 꼬리 접힘
     try testing.expectEqual(Fold{ .label = 4, .label_detail = 0, .right = 3 }, fold(7, 31, 20, 9)); // 상자가 문턱보다 좁으면 label 4 를 남기고 있는 만큼
     try testing.expectEqual(Fold{ .label = 2, .label_detail = 0, .right = 0 }, fold(2, 0, 20, 4)); // 오른쪽 자리가 아예 없다
+    // 그리기도 fold 의 label 값을 쓴다 — 아주 긴 label 은 `…` 로(적대적 1회차 A18: fold 만 재고 그림은 안 쟀다).
+    const long = [_]Row{.{ .label = "a_very_long_label_that_exceeds_the_sixty_column_box_by_a_lot_of_columns", .detail = "T" }};
+    var st2 = State{};
+    st2.show(100, 100, 20);
+    st2.reset(0, 1);
+    var out2: std.ArrayList(draw.Op) = .empty;
+    try view(&st2, &long, p, &tk, arena, &out2);
+    const ll = try lineText(arena, out2.items[1]);
+    try testing.expectEqual(@as(usize, 60), overlay_input.displayCols(ll));
+    try testing.expect(std.mem.indexOf(u8, ll, "…") != null);
+    try testing.expect(std.mem.endsWith(u8, ll, "T ")); // 오른쪽(1칸)은 산다 — label 이 접혔다
 }

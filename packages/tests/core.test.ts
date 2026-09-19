@@ -71,7 +71,7 @@ test("질의 응답이 onData로 흘러나온다 — 안 나가면 TUI가 멈춘
   term.write("\x1b[c"); // Primary DA
   term.write("\x1b[6n"); // CPR
 
-  expect(seen).toContain("\x1b[?6c");
+  expect(seen).toContain("\x1b[?62;22c"); // DA1 — VT220+ANSI 색(2026-09-20, `?6c` 는 kitten 이 못 알아봤다)
   // CPR 응답: ESC [ row ; col R. 정규식에 제어문자를 넣지 않으려 문자열로 판정한다.
   expect(seen.some((s) => s.startsWith("\x1b[") && s.endsWith("R"))).toBe(true);
   term.dispose();

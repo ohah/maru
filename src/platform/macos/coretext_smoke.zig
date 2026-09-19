@@ -1370,6 +1370,36 @@ test "CoreText draw-list shaper gives a four-glyph ligature all four cells (left
     try std.testing.expect(anchor.cell_width <= renderer.max_glyph_cell_span);
 }
 
+test "LIG3 CoreText draw-list shaper gives a three-glyph ligature all three cells — `...` overhang is 1.46 cells and must round UP (left overhang 2)" {
+    // 회귀 고정(2026-09-19, 사용자 제보 — 자동완성 목록의 `printf(const char *, ...)` 가 `*,  ..)` 로): JetBrains Mono 의 `...` 은
+    // 앞 두 칸을 빈 글리프로 두고 마지막 글리프(896)에 세 점을 몰아넣는데 그 ink_x = -11.4, advance 7.8 → 1.46 칸. 오버항을
+    // **반올림**하면 1 이 되어 슬롯이 두 칸뿐이라 첫 점이 잘렸다 — 4글자 `<!--`(2.87 → 3)와 2글자 `//`(0.74 → 1)는 반올림이
+    // 우연히 맞았을 뿐이다. 넘침은 **올림**이 뜻이다(작은 bearing 은 문턱으로 거른다).
+    const allocator = std.testing.allocator;
+    const appearance = try config.resolveAppearance(.{});
+    const shaper = coretext_shaper.CoreTextDrawListShaper{
+        .appearance = appearance,
+        .shape_draw_list = maru_macos_coretext_shape_draw_list,
+    };
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 12, .rows = 1 });
+    defer core.deinit();
+    core.clearDirty();
+    try core.write("a...b"); // col 1~3 이 `...`
+    var draw_list = try renderer.buildDrawList(allocator, core.snapshot());
+    defer draw_list.deinit(allocator);
+    var font_registry = renderer.FontIdentityRegistry.init(allocator);
+    defer font_registry.deinit();
+    var shaped = try shaper.shape(allocator, draw_list, &font_registry);
+    defer shaped.deinit(allocator);
+    // 합자가 걸리면 잉크 글리프는 a · 합자 · b 셋뿐이다(앞 두 점은 빈 글리프). 합자 없는 폰트로 폴백된 환경에서는 요구하지 않는다.
+    if (shaped.runs.glyphs.len != 3) return;
+    const lig = shaped.runs.glyphs[1];
+    try std.testing.expectEqual(@as(u16, 1), lig.col); // 2칸 당겨져 첫 점 자리에서 시작
+    try std.testing.expectEqual(@as(u3, 3), lig.cell_width); // 자기 칸 1 + 오버항 2
+    try std.testing.expectEqual(@as(u3, 3), lig.cache_key.cell_width);
+    try std.testing.expectEqual(@as(u16, 4), shaped.runs.glyphs[2].col); // `b` 는 밀리지 않는다
+}
+
 test "CoreText draw-list shaper composes an NFD Hangul cluster identically to its precomposed syllable (HG3a)" {
     // 회귀 고정(HG3a): macOS 파일명 NFD '한' = 초성 U+1112 + 중성 U+1161 + 종성 U+11AB가 한 셀
     // cluster로 저장된다. DrawList가 grapheme_pool에 [중성, 종성]을 싣고 셰이퍼가 base 뒤에 붙여

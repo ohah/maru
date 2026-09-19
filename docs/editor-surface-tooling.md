@@ -687,6 +687,20 @@ revision 은 `documentChanges` 의 `version` 이 있을 때만 검사한다(clan
 | **적용** | primary caret 하나: 주 편집 = `[word_start, caret)` → `newText`(§3.6 — `applyEditAsOne` 하나) + `additionalTextEdits`. **응답 뒤 문서가 바뀌었으면** `additionalTextEdits` 는 전부 `word_start` 앞에서 끝날 때만 함께 적용한다(타이핑은 `word_start` 뒤에서만 일어나므로 그 앞의 offset 은 그대로다) — 아니면 그 항목의 additional 은 버린다(카운터). 적용 뒤 caret 은 `newText` 끝. 멀티 커서는 primary 만(다음) | §3.6 「자동 import 가 딸린 완성 하나도 undo 하나」 |
 | **하지 않는 것** | 스니펫(`$1` 탭스톱) · fuzzy 필터 · `completionItem/resolve`(문서 지연 로드) · 문서 패널 · kind 아이콘 · commitCharacters · 버퍼 단어 fallback·스니펫·경로 완성(①-b) · ghost text(§4) · `itemDefaults` · 멀티 커서 · `PageUp/Down` | 다음 조각 |
 
+**적대적 검증(2026-09-19, 1~5회차 · 변이 46)**: 1회차 순수·chrome 18 → 0(무효 3 → 유효로 재실행) · 2회차 상태 기계 18 → 5(무효 4 → 재실행) ·
+3회차 배선 10 → 1 · 4회차 재실행 13 → 4 · 5회차 재실행 2 → 0. 판정자를 더해 사살한 것 여섯, 등가 1, 죽은 가드 1 제거:
+- **B5** 대기 중의 트리거를 잊는다 — 대기(seq 55)를 손으로 세우고 글자를 치면 안 보내고 `dirty`, 응답 뒤 한 번 더(`CMP1`).
+- **B9** caret 이 다른 줄로 가도 안 닫힌다 — 프로그램적으로 caret 을 옮기고 프레임을 돌리면 닫혀야 한다(그 검사가 없으면 접두사 슬라이스가 **패닉**한다 —
+  방어이자 뜻).
+- **B14** 응답 뒤 문서가 바뀌어도 낱말 뒤의 additional 을 적용한다 — 가짜 서버에 `fake_tail`(다음 줄 머리에 `// tail`)을 더해, 그대로면 함께·바뀌었으면
+  버림을 잰다.
+- **B16** `textEdit.start` 가 낱말 시작을 못 이긴다 — 가짜 서버에 `.` 뒤 `arrow_fix`(`x.` 부터 덮어 `x->m`)를 더해 잰다.
+- **B8v** 접두사가 같아도 매 프레임 다시 세어 선택이 초기화된다 — `↓` 뒤 프레임을 돌려도 선택이 남아야 한다.
+- **B12v** 수정자 chord 에도 안 닫힌다 — 처음 둔 `⌘→` 판정자는 화살표 갈래가 어차피 닫아 헛것이었다 → caret 을 안 옮기는 `⌥Z` 로.
+- **B17** 낱말 밖 글자 검사 = **거의 등가**(접두사 필터가 먼저 0 으로 닫는다) — 서버가 `a(` 로 시작하는 filterText 를 낼 수 있어 방어로 남기고 주석.
+- **C10** 호버의 완성 가드 — `notePointer` 에 둔 것은 앞서 세워 둔 `pointer_valid` 를 못 막았고(3회차 생존), `tick` 에 두니 `notePointer` 것은 등가가
+  됐다(4회차 생존) → `tick` 하나만 남겼다.
+
 **관측점**: `LSJ10`(순수: 완성 요청 id·context·capability 의 triggerCharacters·`snippetSupport=false`) · `CPL*`(순수: 목록 파싱 두 모양·필터/정렬/preselect·
 `changesFor` — textEdit 범위/insertText/label 폴백·additional 합침·겹침 거부·인코딩) · `SGB*`(chrome: 창 10행·선택 강조·뒤집기·두 열) · `CMP1`(제품 경계:
 가짜 서버 — 식별자 글자로 열리고 접두사로 좁혀지며 `↓`·`Enter` 로 고르면 접두사 교체 + import 한 줄이 **undo 하나**; `Esc`; `.` 트리거; `isIncomplete`

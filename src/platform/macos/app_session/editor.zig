@@ -11693,6 +11693,13 @@ test "HOVB1 호버 박스 — 포인터가 낱말에 머물면 지연 뒤 요청
     try testing.expect(term.rt.editor_hit_rows_len > 0);
     try testing.expect(!hover_client.refresh(fx.session));
     try testing.expect(!fx.session.chrome_host.hover_box.open);
+    // `z` 는 자동완성도 연다(§8.2g) — 팝업이 뜬 동안 호버는 열리지 않으므로 여기서는 닫아 둔다.
+    _ = pumpHoverUntil(&fx, 1500, ctx, struct {
+        fn f(c: Ctx) bool {
+            return !c.fx.session.editor_completion.waiting;
+        }
+    }.f);
+    completion_client.hide(fx.session);
     // ⑻ 낡은 응답은 버린다 — 기다리는 seq 가 아니면 열지 않는다; 그 뒤 진짜 응답이 연다.
     try drawFrame(fx.session, leaf, term);
     const p1b = pointerAtOffset(term, 1).?;
@@ -12991,6 +12998,8 @@ test "CMP1 자동완성 — 식별자 글자로 열리고 접두사로 좁혀지
     try testing.expectEqual(@as(usize, 2), completion_client.rows(s).len); // printf · pr
     try pressKey(&fx, .arrow_down, .{});
     try testing.expectEqual(@as(usize, 1), s.chrome_host.suggest_box.selected);
+    try frame(s, leaf, term); // 접두사가 그대로면 프레임이 선택을 건드리지 않는다(적대적 4회차 B8v)
+    try testing.expectEqual(@as(usize, 1), s.chrome_host.suggest_box.selected);
     try pressKey(&fx, .arrow_down, .{});
     try testing.expectEqual(@as(usize, 0), s.chrome_host.suggest_box.selected); // wrap
     try pressKey(&fx, .enter, .{});
@@ -13051,7 +13060,8 @@ test "CMP1 자동완성 — 식별자 글자로 열리고 접두사로 좁혀지
     try testing.expect(insertText(s, term, "("));
     try frame(s, leaf, term);
     try testing.expect(!s.editor_completion.active);
-    try clearLine3(s, term, 2);
+    try testing.expect(std.mem.indexOf(u8, content(term), "  a()\n") != null); // `(` 는 짝을 자동으로 닫는다(§3.7) — 셋을 지운다
+    try clearLine3(s, term, 3);
     // ⑺ `←` 는 닫되 소비하지 않는다(caret 이 움직인다) · 마우스 클릭은 닫는다.
     term.rt.editor_selection = .{ .anchor_start = line3, .anchor_end = line3, .focus = line3 };
     try testing.expect(insertText(s, term, "a"));
@@ -13091,6 +13101,104 @@ test "CMP1 자동완성 — 식별자 글자로 열리고 접두사로 좁혀지
     completion_client.hide(s);
     s.loaded_config.config.editor.quick_suggestions = true;
     try clearLine3(s, term, 2);
+    // ⑻b **수정자 키는 닫는다**(소비하지 않는다) · caret 이 다른 줄로 가면 프레임이 닫는다(B9) · 팝업이 뜬 동안 호버는 열리지 않는다(C10).
+    term.rt.editor_selection = .{ .anchor_start = line3, .anchor_end = line3, .focus = line3 };
+    try testing.expect(insertText(s, term, "a"));
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
+    try frame(s, leaf, term);
+    try testing.expect(s.editor_completion.active);
+    {
+        const ph = pointerAtOffset(term, 1) orelse return error.NoPointer; // 첫 줄 `int` — 진단이 덮어 호버가 열릴 자리
+        _ = s.hoverCursor(ph.x + 1, ph.y, 0);
+        const hover_opened = s.editor_hover.opened_count;
+        _ = pumpHoverUntil(&fx, 600, ctx, struct {
+            fn f(c: Ctx) bool {
+                return c.fx.session.editor_hover.opened_count > 0 and false;
+            }
+        }.f);
+        try testing.expectEqual(hover_opened, s.editor_hover.opened_count);
+        try testing.expect(s.editor_completion.active);
+    }
+    try pressKey(&fx, .{ .char = 'z' }, .{ .option = true }); // ⌥Z(랩 토글) — caret 은 그대로지만 수정자 chord 는 팝업을 닫는다(적대적 4회차 B12v)
+    try testing.expect(!s.editor_completion.active);
+    try pressKey(&fx, .{ .char = 'z' }, .{ .option = true }); // 랩을 되돌린다
+    try clearLine3(s, term, 1);
+    term.rt.editor_selection = .{ .anchor_start = line3, .anchor_end = line3, .focus = line3 };
+    try testing.expect(insertText(s, term, "a"));
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
+    try frame(s, leaf, term);
+    try testing.expect(s.editor_completion.active);
+    term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 }; // 프로그램적으로 다른 줄로
+    try frame(s, leaf, term);
+    try testing.expect(!s.editor_completion.active);
+    try clearLine3(s, term, 1);
+    // ⑻c **대기 중의 트리거는 응답 뒤 한 번 더 묻는다**(B5) — 대기(seq 55)를 손으로 세우고 글자를 치면 안 보내고 dirty, 응답이 오면 곧바로 다음 요청.
+    term.rt.editor_selection = .{ .anchor_start = line3, .anchor_end = line3, .focus = line3 };
+    s.editor_completion.waiting = true;
+    s.editor_completion.waiting_seq = 55;
+    s.editor_completion.waiting_surface = term.surface.id;
+    const sent_wait = s.editor_lsp.sent_completions;
+    try testing.expect(insertText(s, term, "a"));
+    try testing.expectEqual(sent_wait, s.editor_lsp.sent_completions);
+    try testing.expect(s.editor_completion.dirty);
+    completion_client.onResponse(s, 55, null, .utf8);
+    try testing.expectEqual(sent_wait + 1, s.editor_lsp.sent_completions);
+    try testing.expect(s.editor_completion.waiting and !s.editor_completion.dirty);
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
+    completion_client.hide(s);
+    try clearLine3(s, term, 1);
+    // ⑻d **낱말 뒤의 additional 은 응답 뒤 문서가 바뀌면 버린다**(B14) — `fake_tail` 은 다음 줄 머리에 `// tail` 을 더한다.
+    term.rt.editor_selection = .{ .anchor_start = line3, .anchor_end = line3, .focus = line3 };
+    try testing.expect(insertText(s, term, "fak"));
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
+    try frame(s, leaf, term);
+    try testing.expect(s.editor_completion.active);
+    const pickTail = struct {
+        fn f(fxp: *PaneFixture, sess: *AppSession) !void {
+            var guard: usize = 0;
+            while (!std.mem.eql(u8, completion_client.rows(sess)[sess.chrome_host.suggest_box.selected].label, "fake_tail")) : (guard += 1) {
+                if (guard > 20) return error.NoTailItem;
+                try pressKey(fxp, .arrow_down, .{});
+            }
+        }
+    }.f;
+    try pickTail(&fx, s);
+    const with_add_before = s.editor_completion.accepted_with_additional;
+    try pressKey(&fx, .enter, .{}); // 문서가 그대로 — 함께 적용된다
+    try testing.expectEqual(with_add_before + 1, s.editor_completion.accepted_with_additional);
+    try testing.expect(std.mem.indexOf(u8, content(term), "  fake_tail\n// tail\n") != null);
+    s.dispatchAppAction(.editor_undo);
+    try testing.expectEqual(@as(usize, 0), std.mem.count(u8, content(term), "// tail"));
+    try clearLine3(s, term, 3);
+    term.rt.editor_selection = .{ .anchor_start = line3, .anchor_end = line3, .focus = line3 };
+    try testing.expect(insertText(s, term, "fak"));
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
+    try frame(s, leaf, term);
+    try testing.expect(insertText(s, term, "e")); // 응답 뒤의 편집 — 접두사 3글자라 재요청은 없다
+    try frame(s, leaf, term);
+    try testing.expect(s.editor_completion.active and !s.editor_completion.waiting);
+    try pickTail(&fx, s);
+    try pressKey(&fx, .enter, .{});
+    try testing.expectEqual(@as(u64, 1), s.editor_completion.dropped_additional);
+    try testing.expect(std.mem.indexOf(u8, content(term), "// tail") == null);
+    try testing.expect(std.mem.indexOf(u8, content(term), "  fake_tail\n") != null);
+    s.dispatchAppAction(.editor_undo);
+    try clearLine3(s, term, 4);
+    // ⑻e **textEdit.start 가 낱말 시작을 이긴다**(B16) — `x.` 뒤의 `arrow_fix` 는 `x.` 부터 덮어 `x->m` 이 된다.
+    term.rt.editor_selection = .{ .anchor_start = line3, .anchor_end = line3, .focus = line3 };
+    try testing.expect(insertText(s, term, "x"));
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
+    try testing.expect(insertText(s, term, "."));
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
+    try frame(s, leaf, term);
+    try testing.expect(s.editor_completion.active);
+    try testing.expectEqualStrings("arrow_fix", completion_client.rows(s)[0].label); // sortText 0000
+    s.chrome_host.suggest_box.selected = 0;
+    try pressKey(&fx, .enter, .{});
+    try testing.expect(std.mem.indexOf(u8, content(term), "  x->m\n") != null);
+    try testing.expect(std.mem.indexOf(u8, content(term), "x.") == null);
+    try testing.expectEqual(line3 + 4, term.rt.editor_selection.?.focus);
+    try clearLine3(s, term, 4);
     // ⑼ **보이지 않는 목록은 확정하지 않는다** — 응답은 왔지만 프레임이 아직 상자를 안 세웠으면 Enter 는 줄바꿈이다.
     term.rt.editor_selection = .{ .anchor_start = line3, .anchor_end = line3, .focus = line3 };
     try testing.expect(insertText(s, term, "p"));

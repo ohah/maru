@@ -138,7 +138,7 @@ test "보낼 것을 든 채 끊긴 연결은 «정상» 으로 분류돼도 로�
         "host link state at failure: at_unix={d} pooled=no client=absent",
     }) |needle| try std.testing.expect(std.mem.indexOf(u8, session_src, needle) != null);
     // ⑩ **사용자 동작 실패도 어느 갈래인지 말한다.** 사용자에게는 「세션 정보를 동기화하지 못했습니다」
-    //    한 문장이지만 여기 오는 길은 여덟이다. 2026-09-09 실측: GUI 가 host 와 끊긴 상태에서 `cmd+v` 가
+    //    한 문장이지만 여기 오는 길은 아홉이다. 2026-09-09 실측: GUI 가 host 와 끊긴 상태에서 `cmd+v` 가
     //    그 문구를 냈는데, 로그가 0 줄이라 여덟 중 무엇인지 가릴 수 없었다.
     for ([_][]const u8{
         "user action failed: at_unix={d} why={s} kind={s} host_link={s}",
@@ -154,6 +154,18 @@ test "보낼 것을 든 채 끊긴 연결은 «정상» 으로 분류돼도 로�
     }) |needle| try std.testing.expect(std.mem.indexOf(u8, session_src, needle) != null);
     //    사유 없이 부르던 옛 모양이 되살아나면 빨개진다.
     try std.testing.expect(std.mem.indexOf(u8, session_src, "self.failUserAction(id);") == null);
+
+    // ⑪ **`why` 만으로는 아직 원인을 못 짚는다.** 2026-09-19 실측: 이미지 붙여넣기가 1 초 간격으로 두 번
+    //    `why=active_expired host_link=ok` 를 냈는데, 「어느 런타임인가·보내긴 했나·얼마나 기다렸나」가
+    //    줄에 없어 host 가 바빠서라고 짐작했다. 실측 CPU 는 4.7 % 였다 — 짐작이 틀렸는데 반증할 근거도
+    //    없었다. 그래서 뒤 칸들을 못 박는다. 앞 네 칸은 위 ⑩ 이 지키므로 여기서는 **뒤에 덧붙은 값**만 본다.
+    for ([_][]const u8{
+        " elapsed_ms={d} probe_sent={s} polls={d} rt={d} surface={d} rt_gen={d} queued={d}",
+        // 세는 자리가 사라지면 `polls` 는 영영 0 이고, 「보내지도 못했다」와 「보냈는데 안 온다」가
+        // 다시 한 줄로 뭉친다. 단위 판정자는 이 자리에 닿지 못하므로(실행 경로가 GUI 펌프다)
+        // **문법 자리**에 닻을 내린다 — 부분문자열이 아니라 match arm 통째로.
+        ".pending => slot.*.?.polls +|= 1,",
+    }) |needle| try std.testing.expect(std.mem.indexOf(u8, session_src, needle) != null);
 
     //    풀 구성에서 legacy client 를 읽는 모양이 되살아나면 빨개진다.
     try std.testing.expect(std.mem.indexOf(

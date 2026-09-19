@@ -29,6 +29,10 @@ pub const Owned = struct {
     sort: []u8,
     insert: []u8,
     detail: []u8,
+    /// `labelDetails.detail` — label 뒤 꼬리(§8.2g-c). 버퍼 단어는 빈 문자열.
+    label_detail: []u8 = &.{},
+    /// `labelDetails.description` — 오른쪽 열(§8.2g-c); 비면 행은 `detail` 을 쓴다.
+    description: []u8 = &.{},
     preselect: bool,
     /// `textEdit.range.start` 를 byte 로(응답 시점 본문) — 낱말 시작을 이긴다.
     edit_start: ?usize,
@@ -47,6 +51,8 @@ pub const Owned = struct {
         allocator.free(self.sort);
         allocator.free(self.insert);
         allocator.free(self.detail);
+        if (self.label_detail.len > 0) allocator.free(self.label_detail);
+        if (self.description.len > 0) allocator.free(self.description);
         self.additional.deinit(allocator);
         if (self.raw.len > 0) allocator.free(self.raw);
     }
@@ -277,6 +283,11 @@ fn ownedFrom(allocator: std.mem.Allocator, it: completion.Item, content: []const
     errdefer allocator.free(insert);
     const detail = try allocator.dupe(u8, it.detail orelse "");
     errdefer allocator.free(detail);
+    // 빈 것은 복사하지 않는다(빈 슬라이스는 놓지 않는다 — `deinit` 과 짝).
+    const label_detail: []u8 = if (it.label_detail) |ld| (if (ld.len > 0) try allocator.dupe(u8, ld) else &.{}) else &.{};
+    errdefer if (label_detail.len > 0) allocator.free(label_detail);
+    const description: []u8 = if (it.description) |d| (if (d.len > 0) try allocator.dupe(u8, d) else &.{}) else &.{};
+    errdefer if (description.len > 0) allocator.free(description);
     var additional: lsp.text_edits.Changes = .{};
     if (it.additional) |ad| {
         additional = lsp.text_edits.toChanges(allocator, .{ .array = .{ .items = ad, .capacity = ad.len, .allocator = allocator } }, content, lines, enc) catch |err| switch (err) {
@@ -298,6 +309,8 @@ fn ownedFrom(allocator: std.mem.Allocator, it: completion.Item, content: []const
         .sort = sort,
         .insert = insert,
         .detail = detail,
+        .label_detail = label_detail,
+        .description = description,
         .preselect = it.preselect,
         .edit_start = if (it.edit_range) |r| lsp.position.offsetOf(content, lines, r.start.line, r.start.character, enc) else null,
         .additional = additional,
@@ -396,7 +409,11 @@ fn refilter(self: *AppSession, term: *Term, force: bool) bool {
 fn rebuildRows(self: *AppSession) bool {
     const st = &self.editor_completion;
     st.rows.clearRetainingCapacity();
-    for (st.order.items) |idx| st.rows.append(self.allocator, .{ .label = st.items.items[idx].label, .detail = st.items.items[idx].detail, .kind = completion.kindGlyph(st.items.items[idx].kind) }) catch return false;
+    for (st.order.items) |idx| {
+        const it = st.items.items[idx];
+        // 오른쪽 열은 description 이 있으면 그것, 없으면 detail(§8.2g-c) — resolve 가 detail 을 채우면 description 없는 항목의 오른쪽이 바뀐다.
+        st.rows.append(self.allocator, .{ .label = it.label, .label_detail = it.label_detail, .detail = if (it.description.len > 0) it.description else it.detail, .kind = completion.kindGlyph(it.kind) }) catch return false;
+    }
     return true;
 }
 

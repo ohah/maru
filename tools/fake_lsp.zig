@@ -312,6 +312,11 @@ fn handleCompletion(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: s
         var it: std.json.ObjectMap = .empty;
         it.put(arena, "label", .{ .string = "fake_import" }) catch return;
         it.put(arena, "detail", .{ .string = "adds include" }) catch return;
+        // labelDetails(§8.2g-c) — 꼬리 + 설명(설명이 있으면 행의 오른쪽은 detail 이 아니라 이것).
+        var ld: std.json.ObjectMap = .empty;
+        ld.put(arena, "detail", .{ .string = "(use fake)" }) catch return;
+        ld.put(arena, "description", .{ .string = "mod fake" }) catch return;
+        it.put(arena, "labelDetails", .{ .object = ld }) catch return;
         it.put(arena, "sortText", .{ .string = "zzzz" }) catch return;
         it.put(arena, "preselect", .{ .bool = true }) catch return;
         // textEdit: [낱말 시작, caret) → fake_import
@@ -338,6 +343,11 @@ fn handleCompletion(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: s
         var it: std.json.ObjectMap = .empty;
         it.put(arena, "label", .{ .string = "fake_tail" }) catch return;
         it.put(arena, "sortText", .{ .string = "zzzx" }) catch return;
+        // labelDetails 에 꼬리만(§8.2g-c) — 설명이 없으니 행의 오른쪽은 detail.
+        var ld: std.json.ObjectMap = .empty;
+        ld.put(arena, "detail", .{ .string = "(tail)" }) catch return;
+        it.put(arena, "labelDetails", .{ .object = ld }) catch return;
+        it.put(arena, "detail", .{ .string = "int" }) catch return;
         var adds: std.json.Array = .init(arena);
         adds.append(editValue(arena, line_no + 1, 0, 0, "// tail\n") catch return) catch return;
         it.put(arena, "additionalTextEdits", .{ .array = adds }) catch return;

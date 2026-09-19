@@ -13308,6 +13308,8 @@ test "CMP3 자동완성 ①-b — 서버 없는 파일(markdown)에서도 타이
     try testing.expectEqual(@as(usize, 4), completion_client.rows(s).len);
     try testing.expectEqualStrings("wonderful", completion_client.rows(s)[0].label);
     try testing.expectEqual(@as(u8, 'w'), completion_client.rows(s)[0].kind);
+    try testing.expectEqualStrings("", completion_client.rows(s)[0].label_detail); // 버퍼 단어 — 꼬리도 오른쪽도 없다(§8.2g-c)
+    try testing.expectEqualStrings("", completion_client.rows(s)[0].detail);
     {
         var d = appendPaneFrame(s, leaf, term) orelse return error.EditorPaneDidNotDraw;
         d.dl.deinit(allocator);
@@ -13538,6 +13540,87 @@ test "CMP4 자동완성 ①-b — resolve: 강조된 항목을 미리 풀고(add
     completion_client.onResolveResponse(s, 76, null, .utf8);
     try testing.expect(s.editor_completion.resolve_waiting);
     s.editor_completion.resolve_waiting = false;
+}
+
+test "CMP5 자동완성 ①-c — labelDetails: 행에 꼬리(label_detail)가 서고 오른쪽은 description 이 있으면 그것(detail 을 이긴다), 없으면 detail; labelDetails 없는 항목은 꼬리가 없다; 폭은 label+꼬리 (제품 경계, §8.2g-c)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
+    var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const fz = try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake});
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);
+    defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const cz = try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root});
+    _ = setenv("MARU_CONFIG", cz.ptr, 1);
+    defer _ = unsetenv("MARU_CONFIG");
+    if (fx.session.config_path_buffer) |b| allocator.free(b);
+    fx.session.config_path_buffer = null;
+    fx.session.editor_lsp.auto_trust_answer = .allow;
+    // 버퍼 단어 행(꼬리도 오른쪽도 없다)은 CMP3 가 잰다 — 가짜 서버는 문서의 식별자를 전부 제 항목으로 내서 여기선 순수 단어를 못 만든다.
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "l.c", .data = "int fakir;\nint main() {\n  \n}\n" });
+    const path = try std.fs.path.join(allocator, &.{ root, "l.c" });
+    defer allocator.free(path);
+    const saved_repo = fx.session.git_repo;
+    fx.session.git_repo = @constCast(root);
+    defer fx.session.git_repo = saved_repo;
+    const term = (try pane_ops.openFileTermInActivePane(fx.session, path, .text)).term;
+    fx.session.surface_initialized = true;
+    fx.session.backing_width_px = 1200;
+    fx.session.backing_height_px = 800;
+    const leaf = activeLeafRectForTest(fx.session) orelse return error.SkipZigTest;
+    const s = fx.session;
+    const Ctx = struct { fx: *PaneFixture, term: *Term };
+    const ctx: Ctx = .{ .fx = &fx, .term = term };
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
+        fn f(c: Ctx) bool {
+            return c.term.rt.editor_diagnostics.lsp.items.len >= 1;
+        }
+    }.f));
+    const line3: usize = 11 + 13 + 2;
+    term.rt.editor_selection = .{ .anchor_start = line3, .anchor_end = line3, .focus = line3 };
+    try testing.expect(insertText(s, term, "fak"));
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
+        fn f(c: Ctx) bool {
+            return !c.fx.session.editor_completion.waiting;
+        }
+    }.f));
+    {
+        var d = appendPaneFrame(s, leaf, term) orelse return error.EditorPaneDidNotDraw;
+        d.dl.deinit(allocator);
+        if (try s.buildChromeOverlayPrep()) |*prep| {
+            var pp = prep.*;
+            pp.dl.deinit(allocator);
+        }
+    }
+    try testing.expect(s.editor_completion.active);
+    var seen_import = false;
+    var seen_tail = false;
+    var seen_plain = false;
+    for (completion_client.rows(s)) |r| {
+        if (std.mem.eql(u8, r.label, "fake_import")) {
+            seen_import = true;
+            try testing.expectEqualStrings("(use fake)", r.label_detail);
+            try testing.expectEqualStrings("mod fake", r.detail); // description 이 detail(`adds include`)을 이긴다
+        } else if (std.mem.eql(u8, r.label, "fake_tail")) {
+            seen_tail = true;
+            try testing.expectEqualStrings("(tail)", r.label_detail);
+            try testing.expectEqualStrings("int", r.detail); // description 이 없으면 detail
+        } else if (std.mem.eql(u8, r.label, "fakir")) {
+            seen_plain = true; // labelDetails 없는 서버 항목 — 꼬리 없음, 오른쪽은 detail
+            try testing.expectEqualStrings("", r.label_detail);
+            try testing.expectEqualStrings("fake", r.detail);
+        }
+    }
+    try testing.expect(seen_import and seen_tail and seen_plain);
+    // 상자의 폭은 (label + 꼬리) 를 센다: `fake_import(use fake)` 21 + 4 + 2 + `mod fake` 8 = 35.
+    try testing.expectEqual(@as(u32, 35), maru.chrome.components.suggest_box.size(completion_client.rows(s)).?.cols);
+    completion_client.hide(s);
 }
 
 fn hl_detail(sess: *AppSession) []const u8 {

@@ -1198,8 +1198,11 @@ pub const EditorConfig = struct {
     /// **시그니처 힌트**(tooling §8.2d) — `(`·`,` 같은 트리거 글자를 치면 활성 시그니처를 caret 아래 상자로 낸다. 끄면 타이핑 트리거만 꺼지고
     /// `trigger_parameter_hints` 명령은 남는다(VS Code `editor.parameterHints.enabled` 와 같은 관계).
     parameter_hints: bool = true,
+    /// **자동완성 팝업의 타이핑 트리거**(tooling §8.2g) — 식별자 글자를 치면 완성 목록을 묻는다. 끄면 서버 트리거 글자(`.`)와 `trigger_suggest`
+    /// 명령만 남는다(VS Code `editor.quickSuggestions` 와 같은 관계).
+    quick_suggestions: bool = true,
 
-    pub const schema = .{ // 키: editor.wrap · editor.tab-width · editor.cursor-shape · editor.scroll-beyond-last-column · editor.cursor-surrounding-lines · editor.cursor-surrounding-columns · editor.minimap · editor.minimap-width · editor.diagnostics · editor.hover · editor.hover-delay · editor.parameter-hints
+    pub const schema = .{ // 키: editor.wrap · editor.tab-width · editor.cursor-shape · editor.scroll-beyond-last-column · editor.cursor-surrounding-lines · editor.cursor-surrounding-columns · editor.minimap · editor.minimap-width · editor.diagnostics · editor.hover · editor.hover-delay · editor.parameter-hints · editor.quick-suggestions
         // **둘 다 설정 GUI에 뜬다.** `wrap`은 한때 `hidden`이었는데(*"편집기가 제품 화면에 배선되기
         // 전이라 토글해도 아무 일이 없어 버그로 보인다"*) 값이 렌더에 닿으면서 벗겼다 —
         // `schema.zig`의 "editor.wrap은 설정 UI에 뜬다"가 그 사실을 잰다. 탭 폭도 같은 조건을
@@ -1233,6 +1236,7 @@ pub const EditorConfig = struct {
         // 상한 5000 — 그 위는 「안 뜬다」와 구별이 안 된다. 0 은 「바로」다.
         .hover_delay = Meta{ .key_seg = "hover-delay", .doc = .cfg_editor_hover_delay, .range = .{ 0, 5000 }, .widget = .number, .section = .editor },
         .parameter_hints = Meta{ .key_seg = "parameter-hints", .doc = .cfg_editor_parameter_hints, .widget = .toggle, .section = .editor },
+        .quick_suggestions = Meta{ .key_seg = "quick-suggestions", .doc = .cfg_editor_quick_suggestions, .widget = .toggle, .section = .editor },
     };
 };
 

@@ -17,7 +17,10 @@ pub const RequestId = union(enum) {
     signature: u32,
     formatting: u32,
     rename: u32,
+    completion: u32,
 };
+/// `completion`(2단 ⑥, §8.2g)의 id 는 `completion_id_base + seq`.
+pub const completion_id_base: u64 = 6_000_000_000;
 /// `rename`(2단 ⑤, §8.2f)의 id 는 `rename_id_base + seq` — u32 밖이라 u64 로 든다(JSON 정수는 i64 까지). classify 는 큰 base 부터 본다.
 pub const rename_id_base: u64 = 5_000_000_000;
 /// `formatting`(2단 ④, §8.2e)의 id 는 `formatting_id_base + seq`. u32 안(4_294_967_295)이라 seq 는 2.9 억까지.
@@ -49,6 +52,11 @@ pub fn initializeRequest(allocator: std.mem.Allocator, root_uri: []const u8, pid
                     .synchronization = .{ .dynamicRegistration = false, .didSave = false },
                     .publishDiagnostics = .{ .versionSupport = true },
                     .hover = .{ .contentFormat = [_][]const u8{ "markdown", "plaintext" } },
+                    // 자동완성(§8.2g) — 스니펫은 받지 않는다(`snippetSupport = false` 면 서버가 평문 insertText 를 낸다). resolve 도 아직.
+                    .completion = .{
+                        .completionItem = .{ .snippetSupport = false, .insertReplaceSupport = false, .documentationFormat = [_][]const u8{"plaintext"} },
+                        .contextSupport = true,
+                    },
                     .signatureHelp = .{
                         .contextSupport = true,
                         .signatureInformation = .{
@@ -159,6 +167,54 @@ pub fn signatureTriggersFromResult(result: ?std.json.Value) SignatureTriggers {
         else => {},
     }
     return out;
+}
+
+/// `completionProvider` 의 트리거 글자(§8.2g).
+pub const CompletionTriggers = struct {
+    supported: bool = false,
+    chars: [16]u8 = undefined,
+    len: usize = 0,
+
+    pub fn isTrigger(self: CompletionTriggers, c: u8) bool {
+        return std.mem.indexOfScalar(u8, self.chars[0..self.len], c) != null;
+    }
+};
+
+pub fn completionTriggersFromResult(result: ?std.json.Value) CompletionTriggers {
+    var out: CompletionTriggers = .{};
+    const r = result orelse return out;
+    if (r != .object) return out;
+    const caps = r.object.get("capabilities") orelse return out;
+    if (caps != .object) return out;
+    const prov = caps.object.get("completionProvider") orelse return out;
+    switch (prov) {
+        .object => |o| {
+            out.supported = true;
+            collectChars(o.get("triggerCharacters"), &out.chars, &out.len);
+        },
+        .bool => |b| out.supported = b,
+        else => {},
+    }
+    return out;
+}
+
+/// `textDocument/completion`(§8.2g). `trigger_char` 가 있으면 `triggerKind = 2`(TriggerCharacter), 아니면 1(Invoked).
+pub fn completionRequest(allocator: std.mem.Allocator, seq: u32, uri: []const u8, line: u32, character: u32, trigger_char: ?u8) error{OutOfMemory}![]u8 {
+    var tc_buf: [1]u8 = undefined;
+    const tc: ?[]const u8 = if (trigger_char) |c| blk: {
+        tc_buf[0] = c;
+        break :blk tc_buf[0..1];
+    } else null;
+    return std.json.Stringify.valueAlloc(allocator, .{
+        .jsonrpc = "2.0",
+        .id = completion_id_base + seq,
+        .method = "textDocument/completion",
+        .params = .{
+            .textDocument = .{ .uri = uri },
+            .position = .{ .line = line, .character = character },
+            .context = .{ .triggerKind = @as(u8, if (trigger_char != null) 2 else 1), .triggerCharacter = tc },
+        },
+    }, .{});
 }
 
 fn collectChars(v: ?std.json.Value, buf: []u8, len: *usize) void {
@@ -495,7 +551,9 @@ pub fn classify(root: std.json.Value) Incoming {
     const rid: RequestId = switch (id_num) {
         initialize_id => .initialize,
         shutdown_id => .shutdown,
-        else => if (id_num >= rename_id_base and id_num - @as(i64, @intCast(rename_id_base)) <= std.math.maxInt(u32))
+        else => if (id_num >= completion_id_base and id_num - @as(i64, @intCast(completion_id_base)) <= std.math.maxInt(u32))
+            .{ .completion = @intCast(id_num - @as(i64, @intCast(completion_id_base))) }
+        else if (id_num >= rename_id_base and id_num - @as(i64, @intCast(rename_id_base)) <= std.math.maxInt(u32))
             .{ .rename = @intCast(id_num - @as(i64, @intCast(rename_id_base))) }
         else if (id_num >= formatting_id_base and id_num - formatting_id_base <= std.math.maxInt(u32))
             .{ .formatting = @intCast(id_num - formatting_id_base) }
@@ -821,6 +879,35 @@ test "LSJ9 rename — 요청 id 5_000_000_000+seq·newName, capability, 오류 �
     defer c_no.deinit();
     try testing.expect(renameSupported(c_true.value) and renameSupported(c_obj.value));
     try testing.expect(!renameSupported(c_false.value) and !renameSupported(c_no.value) and !renameSupported(null));
+}
+
+test "LSJ10 completion — 요청 id 6_000_000_000+seq·context(triggerKind 1/2·글자), capability triggerCharacters, snippetSupport=false (§8.2g)" {
+    const a = testing.allocator;
+    const req = try completionRequest(a, 4, "file:///a.c", 2, 7, null);
+    defer a.free(req);
+    try testing.expect(std.mem.indexOf(u8, req, "\"id\":6000000004") != null);
+    try testing.expect(std.mem.indexOf(u8, req, "\"method\":\"textDocument/completion\"") != null);
+    try testing.expect(std.mem.indexOf(u8, req, "\"triggerKind\":1") != null);
+    const req2 = try completionRequest(a, 5, "file:///a.c", 2, 7, '.');
+    defer a.free(req2);
+    try testing.expect(std.mem.indexOf(u8, req2, "\"triggerKind\":2,\"triggerCharacter\":\".\"") != null);
+    var p1 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":6000000004,\"result\":[]}");
+    defer p1.deinit();
+    const c1 = classify(p1.value);
+    try testing.expect(c1 == .response and c1.response.id == .completion and c1.response.id.completion == 4);
+    var p2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":5000000004,\"result\":null}");
+    defer p2.deinit();
+    try testing.expect(classify(p2.value).response.id == .rename); // 5e9 대는 rename 그대로
+    var caps = try parse(a, "{\"capabilities\":{\"completionProvider\":{\"triggerCharacters\":[\".\",\"->\",\"::\"]}}}");
+    defer caps.deinit();
+    const t = completionTriggersFromResult(caps.value);
+    try testing.expect(t.supported and t.isTrigger('.') and t.isTrigger('-') and t.isTrigger(':') and !t.isTrigger('a'));
+    var none = try parse(a, "{\"capabilities\":{\"hoverProvider\":true}}");
+    defer none.deinit();
+    try testing.expect(!completionTriggersFromResult(none.value).supported);
+    const init = try initializeRequest(a, "file:///r", 1);
+    defer a.free(init);
+    try testing.expect(std.mem.indexOf(u8, init, "\"snippetSupport\":false") != null);
 }
 
 test "LSJ4 file URI — 공백·한글은 퍼센트, 되읽으면 같은 경로 (§8.2a)" {

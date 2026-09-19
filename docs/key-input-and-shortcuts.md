@@ -320,6 +320,13 @@ rename). 그것은 `file_tree_focus` 가 켜졌을 때만 트리가 소비하고
 온다(`grep function = 2` 는 트리 판정자 하나와 컨텍스트 표의 이 줄뿐). ①ʹ 선-가로채기·② 메뉴 keyEquivalent·전역 표에는 없다. 터미널 Term
 에서는 `SS3 Q` 로 나간다. `needs_editable = true` — 문서를 바꾸는 명령이라 비교 뷰에서는 양보한다. `ETX4` 의 ⑶ 수는 여섯이 됐다.
 
+**`⌃Space`·`⌥Esc` — 자동완성(2026-09-19, [툴링](editor-surface-tooling.md) §8.2g).** VS Code mac `editor.action.triggerSuggest` 의 두 기본키. `⌃Space` 는
+⑷ `⌃` 조합 — 터미널 Term 에서는 NUL(`0x00`)로 PTY 로 가지만 편집기 Term 에는 PTY 가 없다; `ETX4` 의 `allowed_control` 에 근거와 함께 섰고 ⑷ 수는
+넷이 됐다. 전수: 전역 표·터미널 매크로 표에 `⌃Space` 는 없다(`grep "char = ' '"` 는 `⇧⌘Space`·이 줄·표기 판정자뿐). **macOS 는 `⌃Space` 를 입력 소스
+전환에 쓴다** — 시스템 설정이 켜져 있으면 OS 가 먼저 가로채고, 그것은 VS Code 도 같다(그래서 `⌥Esc` 가 함께 있다). `⌥Esc` 는 ⑴ `⌘` 없는 `⌥`.
+둘 다 `needs_editable = true`(비교 뷰에는 서버가 없다). 팝업이 열린 동안 `↑↓`/`Enter`/`Tab`/`Esc` 는 편집기 키 경로가 먼저 소비한다(ui §8 규칙 3) —
+컨텍스트 표의 항목이 아니라 상태 가드라 `ETX4` 의 셈에 들지 않는다.
+
 #### 충돌 전수 대조 (2026-09-07)
 
 [diff·떠 있는 UI·설정](native-editor-ui.md) §9.1 이 *"충돌 목록은 구현 슬라이스에서 전수 조사한다"*,

@@ -1270,6 +1270,16 @@ pub fn applyForcedRename(self: *AppSession) void {
     settings_ops.commitRename(self);
 }
 
+/// MARU_FORCE_SUGGEST=1 — caret 자리에서 `trigger_suggest` 를 부른다(캡처 전용, tooling §8.2g). 서버가 뜨기 전에는 요청이 안 나가므로 열릴
+/// 때까지 매 프레임 되풀이한다(시그니처 훅과 같다).
+pub fn applyForcedSuggest(self: *AppSession) void {
+    if (std.c.getenv("MARU_FORCE_SUGGEST") == null) return;
+    const st = &self.editor_completion;
+    if (st.active or st.waiting) return;
+    if (self.chrome_host.notice.open) self.chrome_host.notice.dismiss();
+    _ = editor_ops.completion_client.triggerManual(self);
+}
+
 pub fn applyForcedScmTab(self: *AppSession) void {
     // MARU_FORCE_SCM_TAB=history|agent — 그 탭을 고른 것처럼 만든다(P4). 탭 전환은 클릭으로만
     // 일어나므로 포인터 없는 캡처 하니스에서는 히스토리 화면을 얻을 방법이 없다(행 호버와 같은 자리).

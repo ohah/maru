@@ -26,6 +26,9 @@
 //!   `RENAMEFAIL` → 오류 응답 · `RENAMEOUT` → root 밖 파일 edit 추가 · `RENAMECREATE` → `CreateFile` 추가 · `RENAMEBAD` → 겹치는 edit ·
 //!   `RENAMESTALEVER` → `documentChanges` 의 version 을 하나 낮춰(낡은 결과).
 //!   capability `renameProvider: true`(`MARU_FAKE_LSP_NORENAMECAP=1` 이면 false).
+//! - `textDocument/completion` → 문서의 식별자 전부(나온 순서 sortText) + `fake_import`(textEdit 접두사 교체 + additionalTextEdits 로 첫 줄 include,
+//!   preselect). 접두사로 거르지 않는다(로컬 필터 관측점), caret 앞 낱말이 2 글자 미만이면 `isIncomplete`. `NOCOMP` → `null`.
+//!   capability `completionProvider{triggerCharacters: ["."]}`(`MARU_FAKE_LSP_NOCOMPCAP=1` 이면 없음).
 //! - `shutdown` → `null` 응답, `exit` → 종료 0.
 //! - 시작하자마자 stderr 에 한 줄을 쓴다(실서버 clangd 가 그렇다) — stdout 에 섞이면 프레임이 깨진다(§8.2a 「stderr」).
 //! 순수 판정 대상이 아니라(맞으면 되는 도구) 테스트는 없다 — 이 도구의 계약은 `LSPB*` 가 제품 경계에서 든다.
@@ -244,6 +247,93 @@ fn handleRename(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: std.j
     sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .result = std.json.Value{ .object = root } });
 }
 
+/// `textDocument/completion`(§8.2g 관측점) — 문서의 식별자(중복 없이, 나온 순서 = sortText `0000`~)를 항목으로 내고, 마지막에 `fake_import`
+/// (`textEdit` 로 `[낱말 시작, caret)` 교체 + `additionalTextEdits` 로 첫 줄에 `#include "fake.h"\n`, `preselect`) 를 더한다. **접두사로 거르지
+/// 않는다**(로컬 필터의 관측점). caret 앞 낱말이 2 글자 미만이면 `isIncomplete: true`(재요청의 관측점). 본문에 `NOCOMP` 면 `null`.
+/// capability `completionProvider{triggerCharacters: ["."]}`(`MARU_FAKE_LSP_NOCOMPCAP=1` 이면 없음).
+fn handleCompletion(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: std.json.Value) void {
+    var req_uri: []const u8 = "";
+    var line_no: i64 = 0;
+    var character: i64 = 0;
+    if (obj.get("params")) |p| if (p == .object) {
+        if (p.object.get("textDocument")) |td| if (td == .object) {
+            req_uri = str(td.object.get("uri")) orelse "";
+        };
+        if (p.object.get("position")) |pos| if (pos == .object) {
+            line_no = int(pos.object.get("line")) orelse 0;
+            character = int(pos.object.get("character")) orelse 0;
+        };
+    };
+    const text = docText(req_uri);
+    if (std.mem.indexOf(u8, text, "NOCOMP") != null) {
+        sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .result = null });
+        return;
+    }
+    const before = lineBefore(text, line_no, character);
+    var ws = before.len;
+    while (ws > 0 and isIdent(before[ws - 1])) ws -= 1;
+    const prefix_len = before.len - ws;
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var items: std.json.Array = .init(arena);
+    var seen: std.ArrayList([]const u8) = .empty;
+    var i: usize = 0;
+    var n: usize = 0;
+    while (i < text.len) {
+        if (!isIdent(text[i])) {
+            i += 1;
+            continue;
+        }
+        var j = i;
+        while (j < text.len and isIdent(text[j])) j += 1;
+        const word = text[i..j];
+        i = j;
+        if (std.ascii.isDigit(word[0])) continue;
+        var dup = false;
+        for (seen.items) |w| if (std.mem.eql(u8, w, word)) {
+            dup = true;
+        };
+        if (dup) continue;
+        seen.append(arena, word) catch return;
+        var it: std.json.ObjectMap = .empty;
+        it.put(arena, "label", .{ .string = word }) catch return;
+        it.put(arena, "detail", .{ .string = "fake" }) catch return;
+        it.put(arena, "sortText", .{ .string = std.fmt.allocPrint(arena, "{d:0>4}", .{n}) catch return }) catch return;
+        items.append(.{ .object = it }) catch return;
+        n += 1;
+    }
+    {
+        var it: std.json.ObjectMap = .empty;
+        it.put(arena, "label", .{ .string = "fake_import" }) catch return;
+        it.put(arena, "detail", .{ .string = "adds include" }) catch return;
+        it.put(arena, "sortText", .{ .string = "zzzz" }) catch return;
+        it.put(arena, "preselect", .{ .bool = true }) catch return;
+        // textEdit: [낱말 시작, caret) → fake_import
+        var te: std.json.ObjectMap = .empty;
+        var range: std.json.ObjectMap = .empty;
+        var s: std.json.ObjectMap = .empty;
+        s.put(arena, "line", .{ .integer = line_no }) catch return;
+        s.put(arena, "character", .{ .integer = @intCast(ws) }) catch return;
+        var e: std.json.ObjectMap = .empty;
+        e.put(arena, "line", .{ .integer = line_no }) catch return;
+        e.put(arena, "character", .{ .integer = character }) catch return;
+        range.put(arena, "start", .{ .object = s }) catch return;
+        range.put(arena, "end", .{ .object = e }) catch return;
+        te.put(arena, "range", .{ .object = range }) catch return;
+        te.put(arena, "newText", .{ .string = "fake_import" }) catch return;
+        it.put(arena, "textEdit", .{ .object = te }) catch return;
+        var adds: std.json.Array = .init(arena);
+        adds.append(editValue(arena, 0, 0, 0, "#include \"fake.h\"\n") catch return) catch return;
+        it.put(arena, "additionalTextEdits", .{ .array = adds }) catch return;
+        items.append(.{ .object = it }) catch return;
+    }
+    var root: std.json.ObjectMap = .empty;
+    root.put(arena, "isIncomplete", .{ .bool = prefix_len < 2 }) catch return;
+    root.put(arena, "items", .{ .array = items }) catch return;
+    sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .result = std.json.Value{ .object = root } });
+}
+
 /// libc 로 파일을 읽는다(이 도구는 std.Io 를 안 쓴다). 없으면 null. 상한 64 KB.
 fn readFileC(arena: std.mem.Allocator, path: []const u8) ?[]u8 {
     var path_z: [1200]u8 = undefined;
@@ -368,6 +458,7 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
                     .signatureHelpProvider = .{ .triggerCharacters = [_][]const u8{ "(", "," }, .retriggerCharacters = [_][]const u8{")"} },
                     .documentFormattingProvider = std.c.getenv("MARU_FAKE_LSP_NOFMTCAP") == null, // `MARU_FAKE_LSP_NOFMTCAP=1` 이면 false
                     .renameProvider = std.c.getenv("MARU_FAKE_LSP_NORENAMECAP") == null, // `MARU_FAKE_LSP_NORENAMECAP=1` 이면 false
+                    .completionProvider = if (std.c.getenv("MARU_FAKE_LSP_NOCOMPCAP") == null) .{ .triggerCharacters = [_][]const u8{"."} } else null,
                 },
             },
         });
@@ -460,6 +551,10 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
     }
     if (std.mem.eql(u8, method, "textDocument/rename")) {
         handleRename(allocator, obj, id.?);
+        return;
+    }
+    if (std.mem.eql(u8, method, "textDocument/completion")) {
+        handleCompletion(allocator, obj, id.?);
         return;
     }
     if (std.mem.eql(u8, method, "textDocument/hover")) {

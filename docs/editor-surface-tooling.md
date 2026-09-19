@@ -659,6 +659,39 @@ revision 은 `documentChanges` 의 `version` 이 있을 때만 검사한다(clan
 전체 거부 · 낡은 revision 전체 거부 · root 밖 전체 거부 · 파일 연산 전체 거부 · 서버 오류 알림 · `Esc` 는 요청 없음 · 한 파일이면 dirty) ·
 `RNM2`(제품 경계: capability 없는 서버에는 `F2` 가 상자를 열지 않는다).
 
+### 8.2g LSP 2단 ⑥ — 자동완성 ①-a: LSP 완성 팝업 (2026-09-19, 계획 공격 뒤의 결정)
+
+**계획 공격이 드러난 것.** ① 팝업의 **UI 계약은 이미 있다**([native-editor-ui §8.2](native-editor-ui.md) — 공통 규칙 넷 + 로컬 필터·`isIncomplete`·
+「고르면 §3.6 으로」·ghost text 는 별개). 이 절은 그 계약 위에 **언제 묻고·무엇을 어떻게 고르고·어떻게 적용하는가**만 정한다(호버 §8.2b 와
+같은 분업). ② 규칙 4 「목록은 `dropdown.zig` 의 팝업 부분」은 **그대로 쓸 수 없다** — 그 팝업은 enum 값 위젯이라 `_`→`-` 표시 변환, 창 없는
+전체 행, `below_clamp`(뒤집지 않음 — 규칙 2 위반), 항목 하나의 라벨만 안다. 기하는 `popup_box` 가 단일 출처가 됐으므로(§8.3 의 선례 —
+「신규로 남은 것은 줄 배치와 자체 스크롤뿐」) 완성 목록도 같은 꼴로 선다: `chrome/components/suggest_box.zig` = `popup_box` + 창 행(상한
+10) + 선택 강조 + `label`/`detail` 두 열. ③ 적용은 §3.6 세 번째 소비자 — `textEdit`(접두사 교체) + `additionalTextEdits`(자동 import)가
+**한 delta**(#3794 의 길). 응답 뒤에도 타이핑이 이어지므로 offset 이 밀린다 → 아래 「적용」이 그 규칙을 든다. ④ 오버레이 raster 는 프레임에
+상자 **하나**다(`buildChromeOverlayPrep`) — 완성 팝업이 뜨는 프레임에는 호버·시그니처 상자가 안 그려지고(상태는 남는다 — 닫히면 `refresh`
+가 다시 세운다), 호버 tick 은 팝업이 열린 동안 열지 않는다. ⑤ 스니펫은 받지 않는다 — `snippetSupport = false` 로 선언하면 서버가 평문
+`insertText` 를 보낸다(clangd 실측: `add` 만).
+
+**레퍼런스(동작만).** VS Code: 식별자 글자를 치면 뜬다(`editor.quickSuggestions` 기본 on, 지연 10ms), 서버의 `triggerCharacters` 로도, `⌃Space`
+로도(mac). `↑↓` 고르기, `Enter`/`Tab` 확정, `Esc` 닫기, 나머지 키는 편집기로. 접두사가 비면 닫힌다. `insertMode = insert`(교체 범위는
+`textEdit` 의 insert 범위). 필터는 fuzzy — 첫 조각은 **접두사**(대소문자 무시)로 두고 fuzzy 는 다음.
+
+| 축 | 결정 | 근거 |
+| --- | --- | --- |
+| **트리거** | ⑴ `insertText` 의 마지막 글자가 **식별자 글자**(글자·숫자·`_`·비ASCII)면 `triggerKind=1`(설정 `editor.quick-suggestions`, 기본 `true`) · ⑵ 서버의 `completionProvider.triggerCharacters` 에 있으면 `triggerKind=2`(설정과 무관) · ⑶ `trigger_suggest` — `⌃Space`(ETX4 ⑷ — 터미널 Term 에서는 NUL 로 PTY 로 간다)·`⌥Esc`(⑴), 팔레트 「Editor: Trigger Suggest」. 서버가 없거나 `completionProvider` 가 없으면 무동작 | VS Code 기본 셋 |
+| **요청** | id `6_000_000_000+seq`, `textDocument/completion{position, context}`. 보내기 전 `flushDocument`. 한 번에 하나 — 대기 중 트리거는 `dirty` 로 응답 뒤 한 번 더(§8.2d 와 같다). 낡은 seq 는 버린다 | |
+| **낱말** | 요청 때 caret 앞 식별자 구간 `[word_start, caret)` 이 접두사. 응답이 `textEdit` 을 들면 그 범위의 `start` 가 `word_start` 를 이긴다(서버가 `.` 뒤 같은 자리를 안다) | LSP `textEdit.range` |
+| **목록** | `CompletionList{isIncomplete, items}` 또는 `CompletionItem[]`. 항목: `label`·`filterText`(없으면 label)·`sortText`(없으면 label)·`insertText`/`textEdit.newText`(없으면 label)·`detail`·`preselect`·`additionalTextEdits`. **로컬 필터** = 접두사(대소문자 무시)로 `filterText` 시작; **정렬** = 대소문자까지 맞는 접두사가 먼저(구현이 되먹인 것 — clangd 실측: `pri` 에 index 의 `•PRId16` 매크로가 sortText 로 `printf` 를 앞서 창을 채웠다; VS Code 는 자기 fuzzy 점수를 sortText 앞에 둔다), 그 안에서 `sortText`, 같으면 label; `preselect` 가 있으면 그것을 처음 선택. 창 10행, 선택은 창을 따른다 | ui §8.2 「필터링은 로컬」 |
+| **타이핑 중** | 문서가 바뀌면 프레임마다 접두사를 다시 잰다(`[word_start, caret)`). caret 이 `word_start` 앞이거나 다른 줄이면 **닫는다**; 접두사가 바뀌었는데 `isIncomplete` 면 다시 묻는다(응답이 목록을 갈아 끼운다); 필터 결과가 0 이면 닫는다(다음 글자로 다시 뜬다) | ui §8.2 |
+| **키** | 열린 동안 `↑`/`↓` 선택(창 이동), `Enter`/`Tab` 확정, `Esc` 닫기 — 셋만 소비한다. 나머지는 편집기로(타이핑하면서 좁혀진다). 화살표 `←→`·마우스 caret 이동·다른 오버레이·rename·문서 재로드는 닫는다. **보이지 않는 목록은 확정하지 않는다** — 응답은 왔지만 프레임이 아직 상자를 세우지 않았으면 `Enter`/`Tab` 은 편집기로 흘린다(구현이 되먹인 것: 캡처 실측에서 그 사이의 키가 보이지도 않은 첫 항목을 넣었다; VS Code 도 위젯이 보일 때만 받는다) | ui §8 규칙 3 |
+| **적용** | primary caret 하나: 주 편집 = `[word_start, caret)` → `newText`(§3.6 — `applyEditAsOne` 하나) + `additionalTextEdits`. **응답 뒤 문서가 바뀌었으면** `additionalTextEdits` 는 전부 `word_start` 앞에서 끝날 때만 함께 적용한다(타이핑은 `word_start` 뒤에서만 일어나므로 그 앞의 offset 은 그대로다) — 아니면 그 항목의 additional 은 버린다(카운터). 적용 뒤 caret 은 `newText` 끝. 멀티 커서는 primary 만(다음) | §3.6 「자동 import 가 딸린 완성 하나도 undo 하나」 |
+| **하지 않는 것** | 스니펫(`$1` 탭스톱) · fuzzy 필터 · `completionItem/resolve`(문서 지연 로드) · 문서 패널 · kind 아이콘 · commitCharacters · 버퍼 단어 fallback·스니펫·경로 완성(①-b) · ghost text(§4) · `itemDefaults` · 멀티 커서 · `PageUp/Down` | 다음 조각 |
+
+**관측점**: `LSJ10`(순수: 완성 요청 id·context·capability 의 triggerCharacters·`snippetSupport=false`) · `CPL*`(순수: 목록 파싱 두 모양·필터/정렬/preselect·
+`changesFor` — textEdit 범위/insertText/label 폴백·additional 합침·겹침 거부·인코딩) · `SGB*`(chrome: 창 10행·선택 강조·뒤집기·두 열) · `CMP1`(제품 경계:
+가짜 서버 — 식별자 글자로 열리고 접두사로 좁혀지며 `↓`·`Enter` 로 고르면 접두사 교체 + import 한 줄이 **undo 하나**; `Esc`; `.` 트리거; `isIncomplete`
+재요청; 접두사가 비면 닫힘; `⌃Space`; 설정 끄면 타이핑 트리거만 꺼짐; 낡은 응답; 팝업이 뜬 프레임엔 시그니처 상자 없음) · `CMP2`(capability 없음).
+
 ### 8.3 관측 가능성과 민감정보
 
 editor event는 처음부터 하나의 domain schema를 공유하되 문서 원문을 기본 trace에 넣지 않는다.

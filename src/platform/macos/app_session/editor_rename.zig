@@ -144,13 +144,22 @@ pub fn boxText(self: *AppSession, arena: std.mem.Allocator) ![]const u8 {
 /// 상자의 앵커(낱말 첫 글자 셀) — 프레임마다 다시 잰다(스크롤·랩이 바뀌면 자리가 바뀐다). 그 문서가 그려져 있지 않으면 null(상자는 그 프레임에 없다).
 pub fn refreshAnchor(self: *AppSession, t: Target) bool {
     const term = termFor(self, t.surface_id) orelse return false;
+    const a = anchorAt(term, t.start) orelse return false;
+    self.chrome_host.rename_box.show(a.x, a.y, a.h);
+    return true;
+}
+
+pub const Anchor = struct { x: i32, y: i32, h: u32 };
+
+/// 문서 offset 의 셀(좌상단·높이) — 그려진 행 배열에서 잰다(§10 `caretRect` 와 같은 출처 `bodyAnchor`). 그 문서가 안 그려졌으면 null.
+pub fn anchorAt(term: *Term, offset: usize) ?Anchor {
     const rows_len = term.rt.editor_hit_rows_len;
-    if (rows_len == 0) return false;
-    const doc = term.rt.editor_doc orelse return false;
+    if (rows_len == 0) return null;
+    const doc = term.rt.editor_doc orelse return null;
     const geom = term.rt.editor_hit_geom;
-    const off = @min(t.start, doc.file.content.len);
+    const off = @min(offset, doc.file.content.len);
     const line_idx = doc.file.lines.lineAt(off);
-    const line = doc.file.lines.line(line_idx) orelse return false;
+    const line = doc.file.lines.line(line_idx) orelse return null;
     const a = chrome.components.editor_view.hit.bodyAnchor(
         .{
             .body_x = geom.body_x,
@@ -166,9 +175,8 @@ pub fn refreshAnchor(self: *AppSession, t: Target) bool {
         term.rt.editor_lines,
         line_idx,
         off -| line.start,
-    ) orelse return false;
-    self.chrome_host.rename_box.show(a.x_px, a.y_px, geom.cell_h_px);
-    return true;
+    ) orelse return null;
+    return .{ .x = a.x_px, .y = a.y_px, .h = geom.cell_h_px };
 }
 
 /// 모든 탭의 편집기 문서 revision 을 적는다 — 요청과 응답 사이에 바뀐 문서를 응답 때 가려내기 위해.

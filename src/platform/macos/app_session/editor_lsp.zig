@@ -27,6 +27,7 @@ const editor_definition = @import("editor_definition.zig");
 const editor_signature = @import("editor_signature.zig");
 const editor_format = @import("editor_format.zig");
 const editor_rename = @import("editor_rename.zig");
+const editor_completion = @import("editor_completion.zig");
 
 pub const Phase = enum {
     /// 실행 파일이 PATH 에 없다 — 상태바 「설치」.
@@ -89,6 +90,9 @@ pub const Client = struct {
     /// rename(§8.2f).
     rename_seq: u32 = 0,
     rename_supported: bool = false,
+    /// completion(§8.2g).
+    completion_seq: u32 = 0,
+    completion_triggers: lsp.rpc.CompletionTriggers = .{},
 
     fn deinit(self: *Client, allocator: std.mem.Allocator) void {
         if (self.proc) |*p| {
@@ -133,6 +137,8 @@ pub const State = struct {
     received_formattings: u64 = 0,
     sent_renames: u64 = 0,
     received_renames: u64 = 0,
+    sent_completions: u64 = 0,
+    received_completions: u64 = 0,
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
         for (self.clients.items) |*c| c.deinit(allocator);
@@ -477,6 +483,7 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
                 c.signature_triggers = lsp.rpc.signatureTriggersFromResult(r.result); // §8.2d — 트리거 글자는 서버가 준다
                 c.formatting_supported = lsp.rpc.formattingSupported(r.result); // §8.2e
                 c.rename_supported = lsp.rpc.renameSupported(r.result); // §8.2f
+                c.completion_triggers = lsp.rpc.completionTriggersFromResult(r.result); // §8.2g
                 c.phase = .ready;
                 c.restarts = 0;
                 const msg = lsp.rpc.initializedNotification(self.allocator) catch return;
@@ -488,6 +495,10 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
                 const msg = lsp.rpc.exitNotification(self.allocator) catch return;
                 defer self.allocator.free(msg);
                 _ = send(self, c, msg);
+            },
+            .completion => |seq| {
+                self.editor_lsp.received_completions += 1;
+                editor_completion.onResponse(self, seq, if (r.is_error) null else r.result, c.encoding);
             },
             .rename => |seq| {
                 self.editor_lsp.received_renames += 1;
@@ -838,6 +849,33 @@ pub fn requestRename(self: *AppSession, term: *Term, offset: usize, new_name: []
     if (!send(self, c, msg)) return null;
     self.editor_lsp.sent_renames += 1;
     return c.rename_seq;
+}
+
+/// `textDocument/completion` 을 보낸다(§8.2g). 서버가 없거나 `completionProvider` 가 없으면 `null`. 요청 전에 밀린 didChange 를 먼저 보낸다.
+pub fn requestCompletion(self: *AppSession, term: *Term, offset: usize, trigger_char: ?u8) ?u32 {
+    const c = readyClientFor(self, term) orelse return null;
+    if (!c.completion_triggers.supported) return null;
+    flushDocument(self, c, term);
+    const d = c.findDoc(term.surfaceId()) orelse return null;
+    const opened = term.rt.editor_doc orelse return null;
+    const content = opened.file.content;
+    const off = @min(offset, content.len);
+    const line_idx = opened.file.lines.lineAt(off);
+    const line = opened.file.lines.line(line_idx) orelse return null;
+    const text = content[line.start..line.contentEnd()];
+    const character = lsp.position.characterOf(text, @intCast(off -| line.start), c.encoding);
+    c.completion_seq +%= 1;
+    const msg = lsp.rpc.completionRequest(self.allocator, c.completion_seq, d.uri, @intCast(line_idx), character, trigger_char) catch return null;
+    defer self.allocator.free(msg);
+    if (!send(self, c, msg)) return null;
+    self.editor_lsp.sent_completions += 1;
+    return c.completion_seq;
+}
+
+/// 서버의 완성 트리거 글자(없으면 `supported = false`).
+pub fn completionTriggersFor(self: *AppSession, term: *Term) ?lsp.rpc.CompletionTriggers {
+    const c = readyClientFor(self, term) orelse return null;
+    return c.completion_triggers;
 }
 
 /// 서버가 `renameProvider` 를 냈는가 — 상자를 열기 전에 본다(§8.2f: 없으면 무동작).

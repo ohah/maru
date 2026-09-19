@@ -2429,6 +2429,8 @@ fn modalInputRole(field: ChromeHostField) ModalInputRole {
         .hover_box => .not_an_overlay,
         // 이름 바꾸기 상자(§8.2f) — 입력은 인라인 rename 모달(`inputFocus() == .rename`)이 이미 든다.
         .rename_box => .not_an_overlay,
+        // 자동완성 목록(§8.2g) — `↑↓`/`Enter`/`Tab`/`Esc` 만 편집기 키 경로가 소비하고 나머지는 편집기로(ui §8 규칙 3).
+        .suggest_box => .not_an_overlay,
         .notice => .{ .transient_toast = .notice },
     };
 }
@@ -5275,6 +5277,7 @@ pub const AppSession = struct {
     editor_signature: editor_ops.signature_client.State = .{},
     editor_format: editor_ops.format_client.State = .{},
     editor_rename: editor_ops.rename_client.State = .{},
+    editor_completion: editor_ops.completion_client.State = .{},
     editor_workspace_edit: editor_ops.workspace_edit_client.State = .{},
     // window close 확인을 통과했지만 remote event settlement가 남은 경우의 retry latch. 이 값이 켜진 동안
     // topology와 native close intent는 게시하지 않고 tick이 같은 close graph만 한 번 진행한다.
@@ -10410,6 +10413,7 @@ pub const AppSession = struct {
             .format_document => _ = editor_ops.format_client.formatDocument(self), // §8.2e
             .rename_symbol => _ = editor_ops.rename_client.startAtCaret(self), // §8.2f
             .undo_workspace_edit => editor_ops.rename_client.undoLast(self), // §8.2f
+            .trigger_suggest => _ = editor_ops.completion_client.triggerManual(self), // §8.2g
             // 접기/펼치기 — 편집기가 아니거나 접을 것이 없으면 무동작(비교 뷰도 거절한다. §4.1f).
             // 비교 뷰면 그쪽을 먼저 본다 — 축이 달라 함수가 갈린다(§4.1g "비교 뷰").
             .copy_editor_selection => _ = editor_ops.copyDiffSelection(self) or editor_ops.copySelection(self),
@@ -12802,6 +12806,8 @@ pub const AppSession = struct {
                 // 키를 **소비하지는 않는다** — 헬퍼는 모달이 아니므로 `Esc` 의 원래 뜻(있다면)을
                 // 뺏지 않는다. 나머지 닫힘은 `refreshSendHelper` 가 프레임마다 스스로 판정한다.
                 if (key_event.key == .escape) editor_ops.hideSendHelper(self);
+                // **자동완성 팝업이 열려 있으면 `↑↓`/`Enter`/`Tab`/`Esc` 만 가져간다**(tooling §8.2g · ui §8 규칙 3) — 나머지는 편집기로.
+                if (editor_ops.completion_client.handleKey(self, key_event.key, key_event.modifiers)) return input_ops.keyConsumedByApp(self);
                 // **키가 오면 호버 박스는 닫힌다**(tooling §8.2b 「닫힘」) — 소비하지 않는다. 수정자만의 키 이벤트는 이 경로에
                 // 오지 않는다(flagsChanged 는 키가 아니다).
                 editor_ops.hover_client.noteKey(self, false);
@@ -13027,7 +13033,8 @@ pub const AppSession = struct {
     pub fn overlayFrameNeeded(self: *const AppSession) bool {
         return self.anyOverlayOpen() or self.chrome_host.key_hints.visible or
             self.chrome_host.send_helper.open or self.chrome_host.hover_box.open or
-            (self.rename != null and self.rename.? == .symbol); // 심볼 상자(§8.2f)는 프레임이 앵커를 세워야 열린다 — 상태로 묻는다
+            (self.rename != null and self.rename.? == .symbol) or // 심볼 상자(§8.2f)는 프레임이 앵커를 세워야 열린다 — 상태로 묻는다
+            self.editor_completion.active; // 완성 팝업(§8.2g)도 같다
     }
 
     /// anyOverlayOpen에서 **notice(비-인터랙티브 토스트)만 제외**한 것 — 입력을 받는 모달(설정·팔레트·확인 등)이
@@ -13465,6 +13472,7 @@ pub const AppSession = struct {
         if (!self.surface_initialized) return;
         // 호버 박스(tooling §8.2b): 상자 밖 눌림은 닫고 **흘려보낸다**, 상자 안은 삼킨다. 모달 게이트보다 앞이어도 무해하다 —
         // 모달이 열리는 순간 `refresh` 가 상자를 내리므로 둘이 함께 있는 프레임이 없다.
+        if (kind == 1 and editor_ops.completion_client.mouseDown(self, x_px, y_px)) return; // §8.2g — 상자 안 클릭은 그 행을 고르고, 밖은 닫는다
         if (kind == 1 and editor_ops.hover_client.mouseDown(self, x_px, y_px)) return;
         // 상태바 위 클릭은 **삼킨다**(S3가 항목을 올리기 전까지 눌러도 아무 일도 없는 게 맞다). 안 막으면 아래
         // 사이드바·탭 바 hit-test가 상태바 좌표를 자기 것으로 받거나(상태바는 창 전폭이라 사이드바 아래를 지난다)
@@ -20392,6 +20400,7 @@ pub const AppSession = struct {
         debug_fixtures.applyForcedParamHints(self); // 캡처 전용: 시그니처 힌트(§8.2d)
         debug_fixtures.applyForcedFormat(self); // 캡처 전용: 문서 포맷(§8.2e)
         debug_fixtures.applyForcedRename(self); // 캡처 전용: 심볼 이름 바꾸기(§8.2f)
+        debug_fixtures.applyForcedSuggest(self); // 캡처 전용: 자동완성(§8.2g)
         debug_fixtures.applyForcedStageAll(self); // 캡처 전용: 전체 스테이지는 그룹 머리 클릭으로만 시작된다(RS4a)
         debug_fixtures.applyForcedFetch(self); // 캡처 전용: 원격 갱신은 브랜치 줄 클릭으로만 시작된다(P6)
         debug_fixtures.applyForcedRemoteMenu(self); // 캡처 전용: `∨` 메뉴도 클릭으로만 열린다(P6b)
@@ -24038,7 +24047,10 @@ pub const AppSession = struct {
         }
         // 호버 박스(tooling §8.2b — 비모달). 헬퍼와 같은 규율: 다른 오버레이가 낼 것이 있으면 안 내고, 프레임마다 `refresh` 가
         // 설 자리를 다시 묻는다(없으면 스스로 내려간다).
-        if (draws.items.len == 0 and editor_ops.signature_client.refresh(self)) {
+        // 자동완성 팝업(§8.2g) — 프레임에 상자는 하나라 이것이 뜨면 시그니처·호버는 이 프레임에 안 그린다(상태는 남는다).
+        if (draws.items.len == 0 and editor_ops.completion_client.refresh(self)) {
+            try self.chrome_host.collectSuggestBoxDraws(editor_ops.completion_client.rows(self), props, &tokens, arena, &draws);
+        } else if (draws.items.len == 0 and editor_ops.signature_client.refresh(self)) {
             // 시그니처 힌트(§8.2d) — 같은 상자, 주인이 시그니처일 때. 호버의 refresh 는 그동안 false 다.
             try self.chrome_host.collectHoverBoxDraws(editor_ops.signature_client.lines(self), props, &tokens, arena, &draws);
         } else if (draws.items.len == 0 and editor_ops.hover_client.refresh(self)) {
@@ -24216,6 +24228,7 @@ pub const AppSession = struct {
         editor_ops.hover_client.deinit(self);
         editor_ops.signature_client.deinit(self);
         self.editor_workspace_edit.deinit(self.allocator); // 마지막 WorkspaceEdit 기록(§8.2f)
+        editor_ops.completion_client.deinit(self); // 완성 목록(§8.2g)
         // 판정자에서는 detached worker 가 **세션보다 오래 살면 안 된다**. 이유·규율은
         // `detached_worker_wait` 가 단일 출처다(2026-09-08 CI abort: `dupe` 누수 → segfault → 134).
         // 제품에서는 기다리지 않는다 — 멈춘 I/O 로 창 닫기가 굳는 것이 훨씬 나쁘고, 그 계약은 각

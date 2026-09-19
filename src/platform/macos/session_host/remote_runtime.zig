@@ -16002,8 +16002,10 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
             // 들어가면 안 커진다) 한쪽 델타를 다른 쪽에 옮겨 적으면 틀린다. `TerminalCore.handoff`
             // (atomic u32 둘, 2026-09-15)가 그 예다: Debug 는 +16, ReleaseFast 는 기존 패딩에 들어가 +0.
             // 같은 날 `kitty_defer_decode`(bool) + `kitty_pending_jobs`(ArrayList) 는 Debug +16, ReleaseFast +32.
-            .Debug => 11696,
-            .ReleaseFast => 11648,
+            // 2026-09-19 `48f89bc10`(한국어 preedit 앵커 — `terminal/preedit.zig`·`session/surface.zig`)이 Debug·ReleaseFast 둘 다 +16 —
+            // 그 커밋이 이 pin 을 안 올려 main 의 `mise run check` 가 빨갰다(§8.2h 조각의 게이트에서 실측: Debug 11712 · ReleaseFast 11664).
+            .Debug => 11712,
+            .ReleaseFast => 11664,
             else => unreachable,
         },
         // ⚠️ 이 두 값은 **이 트리에서 측정할 수 없다.** `remote_runtime` 은 배럴이 macOS 에서만 열어서
@@ -16018,8 +16020,8 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
     };
     const expected_runtime_remainder: usize = switch (builtin.os.tag) {
         .macos => switch (builtin.mode) {
-            .Debug => 8960,
-            .ReleaseFast => 8912,
+            .Debug => 8976,
+            .ReleaseFast => 8928,
             else => unreachable,
         },
         // 위와 같은 이유로 측정 불가 — 원래 값 그대로다.
@@ -19605,8 +19607,9 @@ test "CR2a RemoteGeneration field inventory는 generation owner 열두 개만 �
             // 들어가면 안 커진다) 한쪽 델타를 다른 쪽에 옮겨 적으면 틀린다. `TerminalCore.handoff`
             // (atomic u32 둘, 2026-09-15)가 그 예다: Debug 는 +16, ReleaseFast 는 기존 패딩에 들어가 +0.
             // 같은 날 `kitty_defer_decode`(bool) + `kitty_pending_jobs`(ArrayList) 는 Debug +16, ReleaseFast +32.
-            .Debug => 11696,
-            .ReleaseFast => 11648,
+            // 2026-09-19 `48f89bc10`(한국어 preedit 앵커) 뒤 둘 다 +16 — 위 `C3-3b2b3` 의 표와 함께 움직인다(경계 판정자가 둘을 센다).
+            .Debug => 11712,
+            .ReleaseFast => 11664,
             else => unreachable,
         },
         // ⚠️ 이 두 값은 **이 트리에서 측정할 수 없다.** `remote_runtime` 은 배럴이 macOS 에서만 열어서

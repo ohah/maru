@@ -396,6 +396,10 @@ pub fn parseKittyGraphicsCommand(body: []const u8) kitty.KittyGraphicsCommand {
             't' => if (val.len == 1) {
                 cmd.medium = val[0];
             },
+            // S/O: 매체(파일·공유메모리)에서 읽을 크기·오프셋. 안 읽으면 「파일 앞 N 바이트만 픽셀」인 전송
+            // (앱이 헤더를 붙여 쓰는 경우)이 조용히 깨진다. direct 에서는 무시된다.
+            'S' => cmd.data_size = std.fmt.parseInt(u32, val, 10) catch 0,
+            'O' => cmd.data_offset = std.fmt.parseInt(u32, val, 10) catch 0,
             // U=1: **unicode placeholder**(virtual placement). 지금 그리지 말고 등록만 하라는 뜻이고,
             // 실제 위치는 화면에 찍힌 U+10EEEE placeholder 셀이 정한다. 안 읽으면 「즉시 커서 자리에
             // 그리기」로 떨어져 엉뚱한 곳에 이미지가 뜬다(무시보다 나쁜 오작동).
@@ -941,9 +945,13 @@ fn dispatchCsi(self: *TerminalCore, final: u8) void {
         'u' => screen.restoreCursorState(self),
 
         // DA1(CSI c / CSI 0 c): 터미널 식별 질의. 프로그램(claude CLI 등)이 시작 시 기능 협상
-        // 으로 보내며, 응답이 없으면 타임아웃을 기다리거나 기능을 보수적으로 끈다. VT102로
-        // 식별한다(CSI ?6c) — 현재 구현 수준(커서/erase/scroll region/IL/DL)과 부합.
-        'c' => if (self.csiRawParam(0) == 0) self.appendResponse("\x1b[?6c"),
+        // 으로 보내며, 응답이 없으면 타임아웃을 기다리거나 기능을 보수적으로 끈다.
+        // **VT220 + ANSI 색(`CSI ?62;22c`)** 으로 식별한다 — Ghostty 와 같은 답(동작 비교). 예전의 VT102
+        // (`?6c`)는 kitten 이 DA1 응답으로 **안 받아** `icat --detect-support` 가 타임아웃했다(실측 2026-09-20:
+        // `?62c`·`?1;2c`·`?6;0c` 는 통과, `?6c` 만 두 번 다 멈춤). 이미지 지원 감지가 «질의 응답 뒤 DA1 응답» 순서로
+        // 이뤄지므로 DA1 을 못 알아보면 그 앞의 OK 셋이 전부 헛것이 된다. 구현 수준도 이제 VT220 항목(DECSCA 제외)과
+        // ANSI 색을 다 갖췄다(docs/verification-matrix.md).
+        'c' => if (self.csiRawParam(0) == 0) self.appendResponse("\x1b[?62;22c"),
 
         // XTWINOPS(CSI Ps t) — 보고형 질의만 답한다. 아래 "구현 범위" 참조.
         't' => reportWindowOps(self),
@@ -958,6 +966,15 @@ fn dispatchCsi(self: *TerminalCore, final: u8) void {
 // 꼬리를 보관하고 다음 호출의 completePendingUtf8이 잇는다(레이어 경계: PTY는 바이트 전송만, 디코딩은 여기).
 
 pub fn feed(self: *TerminalCore, bytes: []const u8) !void {
+    _ = try feedUntil(self, bytes, false);
+}
+
+/// `feed` 와 같되, `stop_on_media` 면 **매체 전송 job 이 큐에 남는 순간 멈추고** 소비한 바이트 수를 돌려준다.
+/// 리더가 그 job 을 락 밖에서 읽어 완료·응답한 뒤 나머지를 다시 넣는다(`pty_reader.applyToCore`). 이유는
+/// 응답 순서다 — 명세: «질의에는 다른 입력을 처리하기 전에 즉시 답하라». icat 은 `a=q`(t=t)·`a=q`(t=s)·DA1 을
+/// 한 write 로 보내고, DA1 응답이 질의 응답보다 먼저 오면 그 매체를 미지원으로 읽는다(실측 2026-09-20).
+/// 멈추지 않으면(`feed`) 매체 job 은 큐에 남고 인라인 완료가 `EBADF` 로 닫는다 — 리더 없는 코어의 계약.
+pub fn feedUntil(self: *TerminalCore, bytes: []const u8, stop_on_media: bool) !usize {
     var index_: usize = 0;
     while (index_ < bytes.len) {
         switch (self.parser) {
@@ -977,7 +994,7 @@ pub fn feed(self: *TerminalCore, bytes: []const u8) !void {
                 const end = index_ + sequence_len;
                 if (end > bytes.len) {
                     storePendingUtf8(self, bytes[index_..]);
-                    return;
+                    return bytes.len; // 꼬리는 코어가 들고 있다 — 호출자 기준으로는 전부 소비됐다
                 }
 
                 const codepoint = decodeUtf8(bytes[index_..end]) catch return error.InvalidUtf8;
@@ -1062,6 +1079,7 @@ pub fn feed(self: *TerminalCore, bytes: []const u8) !void {
                     dispatchApc(self);
                     self.parser = .ground;
                     index_ += 1;
+                    if (stop_on_media and kitty.hasQueuedMediaJob(self)) return index_;
                 } else {
                     self.parser = .escape;
                 }
@@ -1092,6 +1110,7 @@ pub fn feed(self: *TerminalCore, bytes: []const u8) !void {
             },
         }
     }
+    return index_;
 }
 
 fn handleEscapeByte(self: *TerminalCore, byte: u8) void {

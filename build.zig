@@ -5439,6 +5439,18 @@ pub fn build(b: *std.Build) void {
     run_turn_index_cache_wiring_tests.addArg("--maru-expect-tests=3");
     run_turn_index_cache_wiring_tests.setCwd(b.path("."));
     boundary_step.dependOn(&run_turn_index_cache_wiring_tests.step);
+    // kitty 매체 전송(`t=f/t/s`)의 배선 — 리더가 멈춤을 받고 매체 job 을 읽는가, 파서가 매체 job 뒤에서 멈추는가.
+    const kitty_media_wiring_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/kitty_media_wiring.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_kitty_media_wiring_tests = b.addRunArtifact(kitty_media_wiring_tests);
+    run_kitty_media_wiring_tests.addArg("--maru-expect-tests=3");
+    run_kitty_media_wiring_tests.setCwd(b.path("."));
+    boundary_step.dependOn(&run_kitty_media_wiring_tests.step);
     const debug_trace_alloc_wiring_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/debug_trace_alloc_wiring.zig"),

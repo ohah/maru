@@ -386,6 +386,9 @@ pub const kitty_graphics_command_groups = [_]Group{
             "parent_offset_y",
             "quiet",
             "medium",
+            "data_size", // S/O — 매체 전송의 읽기 범위. 첫 청크의 control 에 실려 오므로 명령과 함께 살아남아야 한다
+            "data_offset",
+            "internal_id", // 터미널이 배정한 id 표식 — 응답 억제가 명령과 함께 살아남아야 한다
             "virtual",
             "image_number",
         },
@@ -471,6 +474,7 @@ pub const pty_reader_groups = [_]Group{
             "output_byte_counter",
             "sync_held_buf",
             "sync_bypass",
+            "kitty_media_cap", // 코어 한도의 락 아래 사본 — 다음 청크가 다시 채운다
         },
         .why = "all pointers, synchronization context, processing latch, diagnostic byte counter, and the sync(2026) hold scratch are rebuilt after the quiesced runtime graph exists",
     },

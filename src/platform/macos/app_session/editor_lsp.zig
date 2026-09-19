@@ -94,6 +94,7 @@ pub const Client = struct {
     rename_supported: bool = false,
     /// completion(§8.2g).
     completion_seq: u32 = 0,
+    completion_resolve_seq: u32 = 0,
     completion_triggers: lsp.rpc.CompletionTriggers = .{},
     /// code action(§8.2h).
     code_action_seq: u32 = 0,
@@ -145,6 +146,7 @@ pub const State = struct {
     received_renames: u64 = 0,
     sent_completions: u64 = 0,
     received_completions: u64 = 0,
+    sent_completion_resolves: u64 = 0,
     sent_code_actions: u64 = 0,
     received_code_actions: u64 = 0,
     sent_code_action_resolves: u64 = 0,
@@ -517,6 +519,8 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
                 self.editor_lsp.received_completions += 1;
                 editor_completion.onResponse(self, seq, if (r.is_error) null else r.result, c.encoding);
             },
+            // error 응답은 result 가 없다(JSON-RPC) — `is_error` 가드는 둘을 함께 실은 서버에 대한 방어(적대적 3회차 C2: 등가).
+            .completion_resolve => |seq| editor_completion.onResolveResponse(self, seq, if (r.is_error) null else r.result, c.encoding),
             .rename => |seq| {
                 self.editor_lsp.received_renames += 1;
                 editor_rename.onResponse(self, seq, if (r.is_error) null else r.result, r.is_error, r.error_message, c.encoding);
@@ -798,7 +802,7 @@ pub fn requestFormatting(self: *AppSession, term: *Term) ?u32 {
     if (!c.formatting_supported) return null;
     flushDocument(self, c, term);
     const d = c.findDoc(term.surfaceId()) orelse return null;
-    c.formatting_seq +%= 1;
+    c.formatting_seq = lsp.rpc.nextSeq(c.formatting_seq); // i32 칸 안에서 돈다(§8.2a id)
     const msg = lsp.rpc.formattingRequest(self.allocator, c.formatting_seq, d.uri, @max(1, term.rt.editor_tab_width), false) catch return null;
     defer self.allocator.free(msg);
     if (!send(self, c, msg)) return null;
@@ -819,7 +823,7 @@ pub fn requestSignatureHelp(self: *AppSession, term: *Term, offset: usize, kind:
     const line = opened.file.lines.line(line_idx) orelse return null;
     const text = content[line.start..line.contentEnd()];
     const character = lsp.position.characterOf(text, @intCast(off -| line.start), c.encoding);
-    c.signature_seq +%= 1;
+    c.signature_seq = lsp.rpc.nextSeq(c.signature_seq); // i32 칸 안에서 돈다(§8.2a id)
     const msg = lsp.rpc.signatureHelpRequest(self.allocator, c.signature_seq, d.uri, @intCast(line_idx), character, kind, trigger_char, is_retrigger) catch return null;
     defer self.allocator.free(msg);
     if (!send(self, c, msg)) return null;
@@ -839,7 +843,7 @@ pub fn requestDefinition(self: *AppSession, term: *Term, offset: usize) ?u32 {
     const line = opened.file.lines.line(line_idx) orelse return null;
     const text = content[line.start..line.contentEnd()];
     const character = lsp.position.characterOf(text, @intCast(off -| line.start), c.encoding);
-    c.definition_seq +%= 1;
+    c.definition_seq = lsp.rpc.nextSeq(c.definition_seq); // i32 칸 안에서 돈다(§8.2a id)
     const msg = lsp.rpc.definitionRequest(self.allocator, c.definition_seq, d.uri, @intCast(line_idx), character) catch return null;
     defer self.allocator.free(msg);
     if (!send(self, c, msg)) return null;
@@ -860,7 +864,7 @@ pub fn requestRename(self: *AppSession, term: *Term, offset: usize, new_name: []
     const line = opened.file.lines.line(line_idx) orelse return null;
     const text = content[line.start..line.contentEnd()];
     const character = lsp.position.characterOf(text, @intCast(off -| line.start), c.encoding);
-    c.rename_seq +%= 1;
+    c.rename_seq = lsp.rpc.nextSeq(c.rename_seq); // i32 칸 안에서 돈다(§8.2a id)
     const msg = lsp.rpc.renameRequest(self.allocator, c.rename_seq, d.uri, @intCast(line_idx), character, new_name) catch return null;
     defer self.allocator.free(msg);
     if (!send(self, c, msg)) return null;
@@ -881,7 +885,7 @@ pub fn requestCompletion(self: *AppSession, term: *Term, offset: usize, trigger_
     const line = opened.file.lines.line(line_idx) orelse return null;
     const text = content[line.start..line.contentEnd()];
     const character = lsp.position.characterOf(text, @intCast(off -| line.start), c.encoding);
-    c.completion_seq +%= 1;
+    c.completion_seq = lsp.rpc.nextSeq(c.completion_seq); // i32 칸 안에서 돈다(§8.2a id)
     const msg = lsp.rpc.completionRequest(self.allocator, c.completion_seq, d.uri, @intCast(line_idx), character, trigger_char) catch return null;
     defer self.allocator.free(msg);
     if (!send(self, c, msg)) return null;
@@ -919,7 +923,7 @@ pub fn requestCodeAction(self: *AppSession, term: *Term, start: usize, end: usiz
             .code = if (dg.code.len > 0) dg.code else null,
         }) catch return null;
     }
-    c.code_action_seq +%= 1;
+    c.code_action_seq = lsp.rpc.nextSeq(c.code_action_seq); // i32 칸 안에서 돈다(§8.2a id)
     const msg = lsp.rpc.codeActionRequest(self.allocator, c.code_action_seq, d.uri, range, diags.items) catch return null;
     defer self.allocator.free(msg);
     if (!send(self, c, msg)) return null;
@@ -932,7 +936,7 @@ pub fn requestCodeActionResolve(self: *AppSession, term: *Term, item_json: []con
     const c = readyClientFor(self, term) orelse return null;
     // 등가다(적대적 2회차 B13) — `code_action.parse` 가 resolve 불가 서버의 data-only 항목을 이미 숨겨 이 길로 못 온다. 방어로 남긴다.
     if (!c.code_action_caps.resolve) return null;
-    c.code_action_resolve_seq +%= 1;
+    c.code_action_resolve_seq = lsp.rpc.nextSeq(c.code_action_resolve_seq); // i32 칸 안에서 돈다(§8.2a id)
     const msg = lsp.rpc.codeActionResolveRequest(self.allocator, c.code_action_resolve_seq, item_json) catch return null;
     defer self.allocator.free(msg);
     if (!send(self, c, msg)) return null;
@@ -952,6 +956,18 @@ fn lspPos(opened: editor_ops.Opened, off: usize, enc: lsp.rpc.PositionEncoding) 
     const line = opened.file.lines.line(line_idx) orelse return .{ .line = 0, .character = 0 };
     const text = content[line.start..line.contentEnd()];
     return .{ .line = @intCast(line_idx), .character = lsp.position.characterOf(text, @intCast(o -| line.start), enc) };
+}
+
+/// `completionItem/resolve`(§8.2g-b) — 항목 JSON 그대로. 보냈으면 seq.
+pub fn requestCompletionResolve(self: *AppSession, term: *Term, item_json: []const u8) ?u32 {
+    const c = readyClientFor(self, term) orelse return null;
+    if (!c.completion_triggers.resolve) return null;
+    c.completion_resolve_seq = lsp.rpc.nextSeq(c.completion_resolve_seq); // i32 칸 안에서 돈다(§8.2a id)
+    const msg = lsp.rpc.completionResolveRequest(self.allocator, c.completion_resolve_seq, item_json) catch return null;
+    defer self.allocator.free(msg);
+    if (!send(self, c, msg)) return null;
+    self.editor_lsp.sent_completion_resolves += 1;
+    return c.completion_resolve_seq;
 }
 
 /// 서버의 완성 트리거 글자(없으면 `supported = false`).
@@ -978,7 +994,7 @@ pub fn requestHover(self: *AppSession, term: *Term, offset: usize) ?u32 {
     const line = opened.file.lines.line(line_idx) orelse return null;
     const text = content[line.start..line.contentEnd()];
     const character = lsp.position.characterOf(text, @intCast(off -| line.start), c.encoding);
-    c.hover_seq +%= 1;
+    c.hover_seq = lsp.rpc.nextSeq(c.hover_seq); // i32 칸 안에서 돈다(§8.2a id)
     const msg = lsp.rpc.hoverRequest(self.allocator, c.hover_seq, d.uri, @intCast(line_idx), character) catch return null;
     defer self.allocator.free(msg);
     if (!send(self, c, msg)) return null;

@@ -7145,6 +7145,8 @@ pub const AppSession = struct {
     debug_rename_done: bool = false,
     /// `MARU_FORCE_QUICK_FIX` 가 요청을 보냈다(캡처 전용 래치).
     debug_quick_fix_sent: bool = false,
+    /// `MARU_FORCE_SUGGEST=accept` 가 Enter 를 한 번만 누르게 하는 래치(캡처 전용).
+    debug_suggest_accepted: bool = false,
     // 현재 반주기가 시작된 시각(ns, awake clock). 0=미초기화(다음 tick이 baseline을 잡는다 — 스피너와 같은 규약).
     blink_phase_ns: i128 = 0,
     /// kitty 애니메이션 진행의 baseline(실경과 기준). 커서 깜빡임과 같은 결로 **실경과 ms** 를 코어에

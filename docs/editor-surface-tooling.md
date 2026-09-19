@@ -422,6 +422,13 @@ TextMate, git staging, formatter는 LSP의 선행 조건이 아니다. 초기 sy
 `received_diagnostics` 가 클라이언트 합산(픽스처 doc.zig 의 zls 몫이 섞임)이고 ready 는 didOpen 이 죽이기 **전에** 잠깐 참이라 크래시 루프를
 「복구」로 읽었다. 표식은 자리를 찾아 지우고, 복구는 「**그 version 의** 진단이 왔다」로 잰다.
 
+**요청 id 는 i32 안(2026-09-20 실측 뒤의 결정).** 종류마다 `id_span = 1e8` 칸: hover `1e8+seq` · definition `2e8` · signatureHelp `3e8` · formatting `4e8` ·
+rename `5e8` · completion `6e8` · codeAction `7e8` · codeAction/resolve `8e8` · completionItem/resolve `9e8`(`rpc.zig` 의 base 상수, `nextSeq` 가 칸 안에서 돌린다,
+`classify` 는 칸으로 가른다). 처음엔 `N×1e9+seq` 였고 JSON-RPC 로는 적법하지만, **rust-analyzer(와 ruff 등 Rust `lsp-server` 크레이트 서버)는 정수 id 를 i32 로만
+읽어** 넘치는 요청을 **알림으로 오인해 버린다** — `6_000_000_001` 짜리 completion 이 stderr 에 `unhandled notification` 으로만 남고 응답이 없었다(hover·definition 만
+i32 안이라 그 둘만 됐다). 실 rust-analyzer 에 프레임을 그대로 재생해 잡았다(§8.2g-b 실측). 관측점 `LSJ13`(가장 큰 칸 끝 ≤ i32 최대 · seq 가 칸 안에서 돌고 0 을
+건너뜀 · 칸 경계 · 칸 밖은 무시). 아래 절들의 id 표기는 이 표를 따른다.
+
 ### 8.2b LSP 2단 ① — 호버 박스와 진단 메시지 (2026-09-17, 계획 공격 뒤의 결정)
 
 **계획 공격이 드러낸 것.** ① [native-editor-ui §8.3](native-editor-ui.md) 은 「재활용할 컴포넌트가 없어 작은 신규가 필요하다」고 적었는데
@@ -444,7 +451,7 @@ true · `hover_popover_delay` 300 · `hover_popover_sticky` true · `hover_popov
 | **앵커** | 그 offset 이 든 **낱말**(selection.zig 의 단어 규칙 — 코드용) 의 시작 글자 셀. 서버 응답에 `range` 가 있으면 그것이 낱말을 대신한다. 상자는 그 셀 **한 줄 아래**, `popup_box.below_flip_up` | 헬퍼와 같은 좌표 출처(`bodyAnchor` — 렌더가 굳힌 행 배열) |
 | **내용 순서** | ① 그 offset 을 덮는 **진단**(§5.4 목록) — **VS Code 마커 호버의 모양**(2026-09-17 사용자 결정): 메시지는 **평문**(아이콘·severity 색 없음 — gutter 글리프가 이미 있어 상자 안에서는 중복이고, VS Code 도 severity 를 정렬에만 쓴다), 그 **아래 줄**에 흐린 색으로 한 칸 들여 `출처(코드)`(출처만이면 `출처`, 코드만이면 `(코드)`, 둘 다 없으면 줄 없음). 구문 오류의 메시지는 i18n 「구문 오류」·「빠짐: ‹토큰›」이고 출처 줄이 없다(우리가 낸 것 — VS Code 의 마커도 source 가 없으면 그 줄이 없다). 서버 진단은 message 의 첫 줄, 출처 = 서버 실행 파일 이름, 코드 = `Diagnostic.code`(문자열·정수 — §8.2a 표에 실어 온다). 진단이 여럿이면 severity 높은 것부터. ② 서버 `textDocument/hover` 의 contents. ①·② 사이 빈 줄 하나 | VS Code `markerHoverParticipant`(MIT, 동작만): 메시지 span + 아래 줄 `source(code)` 불투명도 0.6·6px 들여쓰기, 아이콘·색 없음, severity 는 정렬. 「View Problem」·「Quick Fix」 동작 줄과 related information 은 「하지 않는 것」 |
 | **마크다운** | §8.3 의 축소 규칙 그대로 — 펜스는 살리고(이 슬라이스는 **색 없음**), 인라인 코드·굵게·이탤릭은 기호만 지우고, 목록은 `• `, 표·이미지·링크는 평문. `MarkedString{language,value}` 는 펜스로 친다. 순수 모듈 `session/editor/hover_text.zig` | §8.3 「이것은 마크다운 렌더러가 아니다」 |
-| **요청** | 포인터가 머문 자리마다 요청 하나(id 는 `1000+seq`, 문서마다가 아니라 클라이언트마다 seq). **응답이 오면** 그 seq 가 지금 기다리는 것일 때만 연다 — 낡은 응답은 버린다. 서버가 없거나(ready 아님) 진단만 있으면 지연 뒤 **바로** 연다. 서버가 있고 진단도 있으면 응답을 기다린다(진단만 먼저 띄우면 응답이 와서 상자가 커지며 흔들린다) — 응답이 2초 안에 안 오면 진단만 연다 | `$/cancelRequest` 는 안 보낸다(1단 「하지 않는 것」과 같은 폭 — 낡은 응답을 버리는 것으로 충분) |
+| **요청** | 포인터가 머문 자리마다 요청 하나(id 는 `1e8+seq`(§8.2a id 표), 문서마다가 아니라 클라이언트마다 seq). **응답이 오면** 그 seq 가 지금 기다리는 것일 때만 연다 — 낡은 응답은 버린다. 서버가 없거나(ready 아님) 진단만 있으면 지연 뒤 **바로** 연다. 서버가 있고 진단도 있으면 응답을 기다린다(진단만 먼저 띄우면 응답이 와서 상자가 커지며 흔들린다) — 응답이 2초 안에 안 오면 진단만 연다 | `$/cancelRequest` 는 안 보낸다(1단 「하지 않는 것」과 같은 폭 — 낡은 응답을 버리는 것으로 충분) |
 | **닫힘** | 프레임마다 다시 묻는다(헬퍼 규율): 그 문서가 보이는가 · 그 줄이 아직 그려졌는가 · revision 이 같은가 · 오버레이가 없는가. 그 위에 즉시 닫는 것: 포인터가 **낱말 밖이면서 상자 밖**으로 감(sticky — 상자 위는 남는다) · 수정자 아닌 키 · 스크롤(상자 밖 휠) · 상자 밖 클릭(그 클릭은 흘려보낸다) · `Esc`(소비하지 않는다) · Term/탭 전환 | VS Code 숨김 조건 목록. 「상자 위는 남는다」가 §8.3 의 자체 스크롤을 가능하게 한다 |
 | **크기·스크롤** | 폭 = 가장 긴 줄(EAW 표시폭) + 좌우 1칸, **상한 80칸**; 높이 = 줄 수, **상한 12행**. 넘치면 상자 안 휠로 스크롤(`scroll_area` 규칙 — 행 단위) · 긴 줄은 상한 폭에서 자른다(랩 없음 — 시그니처는 한 줄로 읽히는 편이 낫다) | §8.3 「높이를 제한하고 넘치면 자체 스크롤」. 폭 80 은 VS Code 기본 최대 폭(≈500px)과 같은 자릿수 |
 | **모달 아님** | `modalInputRole` = `.not_an_overlay`(헬퍼·`key_hints` 자리). 키는 편집기로 그대로 간다(단, 키가 오면 닫힌다) · 받는 포인터는 상자 안 휠뿐 | 헬퍼 §6.2 「고르기를 마쳤을 뿐인 사용자에게서 키를 뺏으면 안 된다」 |
@@ -501,7 +508,7 @@ padding 만큼 둔다(`popup_box.gap_px`); sticky·휠 판정도 **보이는** r
 | 축 | 결정 | 근거 |
 | --- | --- | --- |
 | **트리거** | `goto_definition` — `F12`(편집기 컨텍스트 표 ⑶ 기능키) · **`⌘클릭`**(편집기 본문 위, 눌린 글자 = `.cluster` 판정) · 팔레트 「Editor: Go to Definition」. caret(키) 또는 포인터(클릭) 자리의 offset 으로 `textDocument/definition` | VS Code·Zed 와 같은 키. `⌘클릭` 은 링크 열기(`url_at`)가 먼저 보고 편집기에는 링크가 없어 `mouse()` 로 떨어진다 |
-| **요청** | id 는 `2000+seq`(hover 의 `1000+seq` 와 같은 꼴). 응답이 오면 **지금 기다리는 seq** 일 때만 움직인다 — 낡은 응답은 버린다. 서버가 없거나 ready 아니면 무동작 | §8.2b 와 같은 규율 |
+| **요청** | id 는 `2e8+seq`(hover 의 `1e8+seq` 와 같은 꼴 — §8.2a id 표). 응답이 오면 **지금 기다리는 seq** 일 때만 움직인다 — 낡은 응답은 버린다. 서버가 없거나 ready 아니면 무동작 | §8.2b 와 같은 규율 |
 | **결과** | `Location` · `Location[]` · `LocationLink[]` — **첫 항목**. `LocationLink` 는 `targetSelectionRange`(없으면 `targetRange`)의 시작. `null`/빈 배열이면 알림 토스트 「정의를 찾지 못했습니다」 | VS Code 의 「No definition found」. 여럿의 목록(peek)은 「하지 않는 것」 |
 | **이동** | §5.2 의 `navigateTo` **하나**로 — `NavTarget` 에 `(line, character, 인코딩)` 변형을 더해 **연 뒤 그 문서로 offset 을 푼다**(열기 → 풀기 → 펴기 → caret → 스크롤). 같은 파일이면 파일 열기 없이 같은 경로 | §5.2 「출처가 여럿이어도 경로는 하나다」 |
 | **root 밖** | `withinNavRoot` 가 거부하면 열지 않고 알림 「루트 밖이라 열지 않습니다 — ‹경로›」 | §5.2 「표시와 접근을 가른다」 · §8.2 「URI 를 받았다는 이유로 grant 가 확대되지 않는다」 |
@@ -572,7 +579,7 @@ caret 앵커가 없을 수 있다(`refreshAfterEdit` 가 스냅숏을 버린다)
   (「시그니처가 열려 있으면 상자가 열려 있다」)을 주석으로. **C7** 호버 refresh 의 `active` 가드 — 프레임이 시그니처를 먼저 묻고 `hide` 도 같은
   가드라 등가. 호출자가 늘어나는 날을 위해 남기고 주석에 적었다.
 
-**관측점**: `LSJ7`(순수: 요청 id `3_000_000_000+seq`·context·capability 파싱·`signatureHelpProvider` 트리거 글자·결과의 활성 시그니처/파라미터
+**관측점**: `LSJ7`(순수: 요청 id `3e8+seq`·context·capability 파싱·`signatureHelpProvider` 트리거 글자·결과의 활성 시그니처/파라미터
 기본값·label 세 모양) · `SIG1`(제품 경계: 가짜 서버 — `(` 를 치면 열리고 첫 파라미터가 accent, `,` 로 둘째, `)` 로 닫힘, `Esc`, 명령, caret
 이동 재요청, 끄면 명령만, 호버가 안 열림).
 
@@ -595,7 +602,7 @@ caret 은 남아야 한다). ③ `FormattingOptions.insertSpaces` — 이 편집
 | **revision** | 요청 때의 `editor_lsp_version` 을 기억하고 응답 때 다르면 **버린다** + 알림 「문서가 바뀌어 포맷 결과를 버렸습니다」. 서버 응답에는 version 이 없으므로 클라이언트가 잰다 | §3.6 「revision 이 어긋나면 버린다」 |
 | **적용** | `applyEditAsOne` — 되돌리기 **하나**, selection 은 delta 가 민다(삭제 구간 안이면 시작으로), 스크롤 앵커 보존, caret 추종 | §3.6 세 규칙 · 「별도 경로를 만들지 않는다」 |
 | **트리거** | `format_document` — `⇧⌥F`(편집기 컨텍스트 ⑴ `⌘` 없는 `⌥`) · 팔레트 「Editor: Format Document」. 서버가 없거나 `documentFormattingProvider` 가 없으면 무동작. 응답이 빈 배열이면 무동작(이미 정리됨) | VS Code 키. 저장 시 자동 포맷은 「하지 않는 것」(§3.6 — 저장 경로는 editor-surface, 그리고 §8.1 의 tool_execute 판정이 선행) |
-| **요청** | id `4_000_000_000+seq`, `options = {tabSize: editor.tab-width, insertSpaces: false}`. 보내기 전에 밀린 didChange 를 먼저 보낸다(`flushDocument`, §8.2d 와 같다). 나가 있는 요청이 있으면 **새 것이 대체**한다 — 앞 응답은 seq 가 달라 버려진다(구현이 되먹인 것: 「나가 있으면 무시」로 두면 답을 안 주는 서버(HANG) 뒤로 포맷이 영영 막힌다) | 위 ③ · 정의로 이동과 같은 seq 규율 |
+| **요청** | id `4e8+seq`, `options = {tabSize: editor.tab-width, insertSpaces: false}`. 보내기 전에 밀린 didChange 를 먼저 보낸다(`flushDocument`, §8.2d 와 같다). 나가 있는 요청이 있으면 **새 것이 대체**한다 — 앞 응답은 seq 가 달라 버려진다(구현이 되먹인 것: 「나가 있으면 무시」로 두면 답을 안 주는 서버(HANG) 뒤로 포맷이 영영 막힌다) | 위 ③ · 정의로 이동과 같은 seq 규율 |
 | **거부** | `Overlap`·`Malformed` 는 **아무것도 적용하지 않고** 알림 「포맷 결과를 거부했습니다 — 겹치거나 모양이 틀립니다」. 응답이 오류(`error` 멤버)면 결과 없음과 같이 무동작 | 위 ④ |
 | **적용 대상** | 요청한 **문서**(surface) — 탭을 옮겨 안 보여도 문서가 살아 있으면 적용한다(포맷은 화면이 아니라 문서에 하는 것 — hover·시그니처의 「보이는 Term 에만」과 다르다). 닫혔으면 버린다 | §3.6 은 문서 모델의 규칙이다 |
 | **하지 않는 것** | 저장 시 포맷 · 범위 포맷(`rangeFormatting`) · 타이핑 시 포맷 · rename(입력 UI 뒤) · `WorkspaceEdit`(여러 파일 — rename 과 함께) · 포맷 뒤 caret 을 「같은 글자」로 되돌리는 것 이상(줄바꿈이 재배치되면 근사) | 다음 조각 |
@@ -635,7 +642,7 @@ revision 은 `documentChanges` 의 `version` 이 있을 때만 검사한다(clan
 | --- | --- | --- |
 | **트리거** | `rename_symbol` — `F2`(편집기 컨텍스트 ⑶ 기능키, 파일 트리가 초점일 때의 `F2` 와 겹치지 않는다 — 키 문서 전수 대조) · 팔레트 「Editor: Rename Symbol」. 서버가 없거나 `renameProvider` 가 없으면 무동작 | VS Code `editor.action.rename` |
 | **입력 상자** | 기존 인라인 rename 의 새 대상 `RenameTarget.symbol{surface, offset, revision}` — caret 아래 **낱말**(식별자: 글자·숫자·`_`·비ASCII)을 씨앗으로, 낱말 첫 글자 셀 아래 팝업(`popup_box` `below_flip_up`, 호버 상자와 같은 간격)에 `input_box`(끝 caret). `Enter` 확정 · `Esc` 취소 · 비었거나 같은 이름이면 요청 없이 닫는다. 모달이라 열린 동안 문서는 안 바뀐다 | `prepareRename` 은 하지 않는다 — 상자를 즉시 띄우고, 못 바꾸는 자리는 서버의 오류 응답을 알림으로 낸다 |
-| **요청** | id `5_000_000_000+seq`, `textDocument/rename{position, newName}`. 보내기 전 밀린 didChange 를 먼저(`flushDocument`). 한 번에 하나 — 새 요청이 앞 것을 대체(§8.2e 와 같다) | |
+| **요청** | id `5e8+seq`, `textDocument/rename{position, newName}`. 보내기 전 밀린 didChange 를 먼저(`flushDocument`). 한 번에 하나 — 새 요청이 앞 것을 대체(§8.2e 와 같다) | |
 | **응답 모양** | `changes`(uri → TextEdit[]) 와 `documentChanges`(TextDocumentEdit[] — 같은 uri 는 이어 붙인다) 둘 다 받는다. `CreateFile`·`RenameFile`·`DeleteFile` 이 하나라도 있으면 **전체 거부** + 알림. `file:` 이 아닌 uri 도 전체 거부 | 반만 적용된 rename 은 컴파일되지 않는 코드다 |
 | **검증 → 적용** | 먼저 **모든 파일**을 검증하고 하나라도 틀리면 **아무것도 적용하지 않는다**: root 밖(`withinNavRoot`) · 열린 문서의 revision(그 문서를 든 모든 Term: 서버가 마지막으로 본 `sent_version == editor_lsp_version`, `documentChanges.version` 이 있으면 그것도 같아야) · 읽기 전용 · `toChanges` 의 겹침/모양 · 열려 있지 않은 파일은 읽어서(§3.5 의 `openPath` — UTF-8·BOM·CRLF 보존, 상한 §8.2a) 같은 검증. 그 다음 적용: 열린 Term 은 `applyEditAsOne`(Term 마다 undo 하나), 열려 있지 않은 파일은 메모리에서 적용해 저장 경로(`writeDocumentBytes` — 외부 변경 검사)로 쓴다 | §3.6 · VS Code 보다 엄격한 revision(`changes` 맵에도 검사) |
 | **저장** | 관련 파일이 **두 개 이상**이면 열린 Term 도 `saveDocument` 로 저장한다(열려 있지 않은 파일은 늘 저장 — 버퍼가 없다). **한 파일**이면 저장하지 않고 dirty 로 둔다 | VS Code `files.refactoring.autoSave` 기본(2026-09-19 사용자 결정) |
@@ -679,7 +686,7 @@ revision 은 `documentChanges` 의 `version` 이 있을 때만 검사한다(clan
 | 축 | 결정 | 근거 |
 | --- | --- | --- |
 | **트리거** | ⑴ `insertText` 의 마지막 글자가 **식별자 글자**(글자·숫자·`_`·비ASCII)면 `triggerKind=1`(설정 `editor.quick-suggestions`, 기본 `true`) · ⑵ 서버의 `completionProvider.triggerCharacters` 에 있으면 `triggerKind=2`(설정과 무관) · ⑶ `trigger_suggest` — `⌃Space`(ETX4 ⑷ — 터미널 Term 에서는 NUL 로 PTY 로 간다)·`⌥Esc`(⑴), 팔레트 「Editor: Trigger Suggest」. 서버가 없거나 `completionProvider` 가 없으면 무동작 | VS Code 기본 셋 |
-| **요청** | id `6_000_000_000+seq`, `textDocument/completion{position, context}`. 보내기 전 `flushDocument`. 한 번에 하나 — 대기 중 트리거는 `dirty` 로 응답 뒤 한 번 더(§8.2d 와 같다). 낡은 seq 는 버린다 | |
+| **요청** | id `6e8+seq`, `textDocument/completion{position, context}`. 보내기 전 `flushDocument`. 한 번에 하나 — 대기 중 트리거는 `dirty` 로 응답 뒤 한 번 더(§8.2d 와 같다). 낡은 seq 는 버린다 | |
 | **낱말** | 요청 때 caret 앞 식별자 구간 `[word_start, caret)` 이 접두사. 응답이 `textEdit` 을 들면 그 범위의 `start` 가 `word_start` 를 이긴다(서버가 `.` 뒤 같은 자리를 안다) | LSP `textEdit.range` |
 | **목록** | `CompletionList{isIncomplete, items}` 또는 `CompletionItem[]`. 항목: `label`·`filterText`(없으면 label)·`sortText`(없으면 label)·`insertText`/`textEdit.newText`(없으면 label)·`detail`·`preselect`·`additionalTextEdits`. **로컬 필터** = 접두사(대소문자 무시)로 `filterText` 시작; **정렬** = 대소문자까지 맞는 접두사가 먼저(구현이 되먹인 것 — clangd 실측: `pri` 에 index 의 `•PRId16` 매크로가 sortText 로 `printf` 를 앞서 창을 채웠다; VS Code 는 자기 fuzzy 점수를 sortText 앞에 둔다), 그 안에서 `sortText`, 같으면 label; `preselect` 가 있으면 그것을 처음 선택. 창 10행, 선택은 창을 따른다 | ui §8.2 「필터링은 로컬」 |
 | **타이핑 중** | 문서가 바뀌면 프레임마다 접두사를 다시 잰다(`[word_start, caret)`). caret 이 `word_start` 앞이거나 다른 줄이면 **닫는다**; 접두사가 바뀌었는데 `isIncomplete` 면 다시 묻는다(응답이 목록을 갈아 끼운다); 필터 결과가 0 이면 닫는다(다음 글자로 다시 뜬다) | ui §8.2 |
@@ -706,6 +713,58 @@ revision 은 `documentChanges` 의 `version` 이 있을 때만 검사한다(clan
 가짜 서버 — 식별자 글자로 열리고 접두사로 좁혀지며 `↓`·`Enter` 로 고르면 접두사 교체 + import 한 줄이 **undo 하나**; `Esc`; `.` 트리거; `isIncomplete`
 재요청; 접두사가 비면 닫힘; `⌃Space`; 설정 끄면 타이핑 트리거만 꺼짐; 낡은 응답; 팝업이 뜬 프레임엔 시그니처 상자 없음) · `CMP2`(capability 없음).
 
+#### 8.2g-b 자동완성 ①-b — 버퍼 단어·병합·fuzzy·resolve·kind (2026-09-19, 계획 공격 뒤의 결정)
+
+**계획 공격이 드러낸 것.** ① ui §8.2 는 「LSP 가 없다고 자동완성이 없는 상태가 되지는 않는다」를 **요구**한다 — ①-a 뒤 서버 없는 파일(Markdown·셸·
+설정)은 타이핑해도 아무것도 안 떴다. ② 출처가 둘이 되면 병합 규칙이 필요하다 — 같은 label 은 LSP 것이 이기고(detail·textEdit 이 있다), 지금 치는
+낱말 자체는 후보가 아니다. ③ 필터는 fuzzy 가 관례(VS Code) — `prtf` 가 `printf` 를 찾아야 한다; 점수는 ①-a 의 「대소문자 맞는 접두사 우선」을
+포함해야 한다(그 판정자가 그대로 살아야 한다). ④ rust-analyzer 는 `additionalTextEdits`(자동 import)를 `completionItem/resolve` 로 **지연**해 낸다 —
+확정 뒤에 resolve 하면 import 가 별도 편집이 되어 §3.6 「자동 import 가 딸린 완성 하나도 undo 하나」가 깨진다. VS Code 는 **강조된 항목을 미리
+resolve** 해 확정 때는 대개 끝나 있다 → 같은 방식. ⑤ 단어 스캔은 문서 전체를 훑는다 — 상한을 두고 재야 한다.
+
+| 축 | 결정 | 근거 |
+| --- | --- | --- |
+| **버퍼 단어** | 문서의 식별자 run(글자·숫자·`_`·비ASCII, 숫자로 시작하지 않음)을 **첫 등장 순**으로 중복 없이 모은다(상한: 앞 1 MiB · 2,000 개). 지금 치는 낱말(`[word_start, caret)`)은 뺀다. 첫 조각은 글자 부류 분할 — §5.3 트리의 토큰 경계는 그것이 더 정확한 사례가 잡힐 때 | ui §8.2(「없으면 단순 단어 분할로 저하」) |
+| **출처 병합** | 서버가 있으면 LSP 항목 + 버퍼 단어, 없으면 버퍼 단어만. 같은 label(대소문자 그대로)은 LSP 것이 이긴다. 버퍼 단어의 `sortText` 는 `~`+단어(LSP 뒤), kind 는 `text` | ui §8.2 「에디터가 병합한다」 |
+| **트리거** | 서버 없이도 식별자 글자면 연다(설정 `editor.quick-suggestions`). 서버 트리거 글자·`⌃Space` 는 그대로. 서버가 없으면 요청 없이 **그 자리에서** 목록이 선다(`isIncomplete` 는 없다) | |
+| **fuzzy** | 접두사 문자들이 `filterText` 에 **순서대로 부분열**로 있으면 후보. 점수 = 정확한 접두사(대소문자까지) > 접두사(무시) > 낱말 경계(`_`·camelCase) 일치 > 연속 일치 > 나머지; 같은 점수는 `sortText`, 그다음 label. 빈 접두사는 전부 | VS Code 의 순서와 같은 축 |
+| **resolve** | `completionProvider.resolveProvider` 면 **강조된 항목**(선택이 바뀔 때·목록이 열릴 때)을 `completionItem/resolve`(id `9e8+seq`, 항목 JSON 그대로)로 미리 푼다. 응답의 `additionalTextEdits`·`insertText`/`textEdit`·`detail` 을 항목에 합친다. 확정 때 아직 안 풀렸으면 응답을 기다렸다 **한 번에** 적용한다(undo 하나) — 300 ms 안에 안 오면 additional 없이 적용하고 센다. 낡은 seq·다른 항목의 응답은 버린다 | 위 ④ · §3.6 |
+| **kind** | LSP `CompletionItemKind` → 한 글자 열(`f` 함수/메서드/생성자, `v` 변수/필드/상수, `t` 타입(클래스·구조체·인터페이스·enum), `k` 키워드, `m` 모듈, `s` 스니펫, `p` 속성, `w` 버퍼 단어, ` ` 그 밖) — label 앞 열 | VS Code 의 아이콘 자리를 글자로(등폭 상자) |
+| **하지 않는 것** | 스니펫·경로 완성 · ghost text · 문서 패널(resolve 의 `documentation` 은 받아 두기만) · §5.3 트리 토큰 경계 · commitCharacters | 다음 |
+
+**관측점**: `CPL4`(순수: 버퍼 단어 수집 — 순서·중복·숫자 시작·상한·치는 낱말 제외) · `CPL5`(순수: 병합 — 같은 label 은 LSP 승·sortText·kind) · `CPL6`(순수: fuzzy — 부분열·
+점수 순서·①-a 의 대소문자 우선이 그대로) · `CPL7`(순수: kind 글자) · `LSJ12`(순수: resolve 요청·capability·응답 합치기) · `CMP3`(제품 경계: 서버 없는 파일 —
+타이핑으로 버퍼 단어 목록이 뜨고 좁혀지고 확정된다) · `CMP4`(제품 경계: 가짜 서버 — 강조 시 resolve → 확정은 undo 하나; 확정 때 미해결이면 응답 뒤 한 번에; `RESOLVESTALL`
+이면 300 ms 뒤 additional 없이; 병합 목록에서 같은 label 은 LSP 것).
+
+**구현이 계약에 되먹인 것.** ① **fuzzy 는 서버가 준 목록 안에서만** — 서버는 제 필터로 거른 목록을 낸다(clangd 실측: `prf`·`prtf` 에 `printf` 를 내지
+않았다). 버퍼 단어는 우리가 전부 들고 있으므로 fuzzy 가 온전히 닿는다(캡처: `prf` → `w prefer_tab`). 서버 목록에 fuzzy 를 더 넓히려면 서버에 다시
+묻는 길(`isIncomplete`)뿐이고, 그것은 서버의 몫이다. ② **resolve 는 한 번에 하나** — 열릴 때 강조된 항목(preselect)의 resolve 가 아직 날아가는 중에
+강조가 옮겨지면, 새 항목의 resolve 는 그 응답이 온 뒤 이어 나간다(`onResolveResponse` → `resolveHighlighted`; 낡은 응답은 버린다). 확정이 그 사이에
+오면 기다리던 것을 버리고 강조된 항목의 resolve 를 새로 보낸 뒤 기다린다. ③ 가짜 서버의 「답하지 않는 resolve」 표식은 `RESOLVESTALL` — `…HANG` 으로
+지으면 didChange 의 `HANG` 표식(서버째 멈춤)에 먼저 걸려 클라이언트가 재시작 상태로 간다(CMP4 첫 판에서 겪었다).
+
+**실 rust-analyzer 실측(2026-09-20 — 사용자 요청: 「못 잰 것」을 재라).** `rustup component add rust-analyzer` 로 설치해 잰 것 둘. ① **요청 id** —
+처음 `6e9+seq` 짜리 completion 은 응답이 아예 없었다(§8.2a id 표: i32 로 고쳤다). ② **resolve 의 모양** — 가짜 서버가 모사한 대로다: 목록의 항목은
+`data` + `filterText: HashMap` + `textEdit`(치던 `HashMa` 구간) + `kind: 22`(Struct → `t`) 만 들고 오고 `additionalTextEdits`·`detail` 은 없다;
+`completionItem/resolve` 응답에 `additionalTextEdits: [{0:0-0:0, "use std::collections::HashMap;\n\n"}]` 과 `detail`·`documentation` 이 온다.
+캡처: 강조되자 resolve 가 나가 detail 이 행에 서고(`t HashMap(use std::collections::HashMap)  HashMap<{unknown…`), 확정 하나로 첫 줄 `use …;` 와
+`HashMap` 이 함께 들어간다(`MARU_FORCE_SUGGEST=accept`). 곁가지 셋: label 이 `HashMap(use std::collections::HashMap)` 인 것은 우리가 `labelDetailsSupport`
+를 안 내 서버가 import 경로를 label 에 접은 것(filterText 로 걸러 fuzzy 는 `HashMap` 을 본다) · 워크스페이스 로드 전(~1.3 s)의 completion 은 오류가 아니라
+`result: null` 이라 목록이 안 서고 다음 글자에서 다시 묻는다(로딩 상태는 `experimental/serverStatus` — 다음) · `isIncomplete` 는 늘 true(flyimport).
+
+**적대적 검증(2026-09-20, 1~5회차 · 변이 59)**: 1회차 순수 25 → 2 · 2회차 상태 기계 25 → 10 · 3회차 배선 6 → 1 · 4회차 재실행 6 + 새 변이 2 → 1 ·
+5회차 재실행 1 → 0. 판정자 보강 일곱, 죽은 가드·중복 3 제거, 등가 4:
+- **A5** 단어 스캔의 1 MiB 상한 — 개수 상한만 재고 있었다 → `CPL4` 에 1 MiB+1 짜리 run 뒤의 단어가 안 보이는 판정자.
+- **A13** 같은 점수면 짧은 filter 우선 — `CPL6` 에 `a_b` › `a_b_long`.
+- **B6** 열릴 때 강조 항목을 미리 푼다 — `CMP4` 가 키 없이 나간 resolve 를 센다(가짜 서버는 치는 낱말 `laz` 자체도 내고 그것이 첫 행이다).
+- **B9** 풀린 항목은 다시 묻지 않는다 — `↓↓` 뒤 요청 수 그대로.
+- **B17** 타임아웃 300 ms — 기다리는 동안 프레임을 돌려 0 ms 면 응답보다 먼저 additional 없이 들어가는 것을 잡고, 경과는 상수가 아니라 **300 리터럴**로 잰다(상수를 되비추면 어떤 값이든 초록).
+- **B19** 접두사가 바뀌어 강조가 옮겨지면 키 없이 푼다 — `laz` → `y` 로 lazy_import 만 남을 때 resolve 가 나간다.
+- **B23/B23v** `words_only` 는 서버 목록이 설 때 지운다 — 처음엔 `hide` 와 `onResponse` 둘에 있어 판정자가 어느 쪽도 못 봤다 → `installItems` 하나로 모으고 앞 흔적을 심어 잰다.
+- **B18** 타임아웃 뒤 `resolved` 표시 = 죽은 코드(accept 는 안 보고 hide 가 비운다) → 제거. **B25** words_only 의 isIncomplete 가드 = 죽은 가드(`incomplete=false` 로 선다) → 제거. **B21** Enter 의 둘째 `resolve_item == idx` = 첫 가드가 보장 → 제거(첫 가드를 빼면 죽는다 — B26).
+- 등가로 남긴 것: **B10**(못 보내면 `resolved` 표시 — Enter 는 어차피 적용한다, 되묻지 않게 하는 표시) · **B22**(hide 의 `pending_accept` 초기화 — 설치가 다시 지운다) · **C2**(error 응답의 `result` 는 없다 — 둘 다 실은 서버 방어).
+
 ### 8.2h LSP 2단 ⑦ — code action (2026-09-19, 계획 공격 뒤의 결정)
 
 **계획 공격이 드러낸 것.** ① 결과는 `WorkspaceEdit` — §8.2f 의 `apply`(전부 검증·저장 정책·기록)를 **두 번째 소비자**가 그대로 쓴다(요청
@@ -723,10 +782,10 @@ revision 은 `documentChanges` 의 `version` 이 있을 때만 검사한다(clan
 | 축 | 결정 | 근거 |
 | --- | --- | --- |
 | **트리거** | `quick_fix` — `⌘.`(ETX4 ⑵ 예외 — 전역 표에 `.` chord 없음, `needs_editable = true`) · 팔레트 「Editor: Quick Fix…」. 서버가 없거나 `codeActionProvider` 가 없으면 무동작 | VS Code |
-| **요청** | id `7_000_000_000+seq`, `textDocument/codeAction{range, context{diagnostics, triggerKind: 1}}`. `range` = 선택이 있으면 그것, 없으면 caret. `context.diagnostics` = 그 범위와 겹치는 `.lsp` 진단을 `range`·`message`·`severity`·`code` 로 되돌린다(byte → 서버 인코딩). 보내기 전 `flushDocument`, 요청 시점 열린 문서 revision 스냅숏(§8.2f). 한 번에 하나 — 새 요청이 앞 것을 대체 | 위 ③ |
+| **요청** | id `7e8+seq`, `textDocument/codeAction{range, context{diagnostics, triggerKind: 1}}`. `range` = 선택이 있으면 그것, 없으면 caret. `context.diagnostics` = 그 범위와 겹치는 `.lsp` 진단을 `range`·`message`·`severity`·`code` 로 되돌린다(byte → 서버 인코딩). 보내기 전 `flushDocument`, 요청 시점 열린 문서 revision 스냅숏(§8.2f). 한 번에 하나 — 새 요청이 앞 것을 대체 | 위 ③ |
 | **목록** | `(Command \| CodeAction)[]` 중 **`edit` 이 있거나(`resolveProvider` 면) `data` 로 resolve 할 수 있는 `CodeAction`** 만. `disabled` 는 숨긴다. `isPreferred` 가 앞(안정 정렬). 상한 25(메뉴 버퍼). 0 이면 알림 「사용할 수 있는 코드 액션이 없습니다」 | 위 ⑤ · VS Code |
 | **메뉴** | `context_menu` 를 caret 셀 아래에 연다(`at_anchor` — 앵커가 caret 아래 줄). 항목은 `title` 그대로(kind 는 첫 조각에서 표시하지 않는다). `↑↓`/`Enter`/클릭 확정, `Esc`·다른 키·바깥 클릭 닫힘 | ui §8 규칙 넷 · §8:441 |
-| **확정** | `edit` 이 있으면 §8.2f `apply`(전부 검증 → 열린 Term undo 하나·디스크·저장 정책·기록 — `Undo Last Rename` 이 이것도 되돌린다). 없으면 `codeAction/resolve`(id `8_000_000_000+seq`, 고른 항목의 JSON 그대로) → 응답의 `edit` 을 같은 길로. 낡음·root 밖·거부 알림은 §8.2f 것 그대로. `command` 는 실행하지 않는다 | 위 ①④⑤ |
+| **확정** | `edit` 이 있으면 §8.2f `apply`(전부 검증 → 열린 Term undo 하나·디스크·저장 정책·기록 — `Undo Last Rename` 이 이것도 되돌린다). 없으면 `codeAction/resolve`(id `8e8+seq`, 고른 항목의 JSON 그대로) → 응답의 `edit` 을 같은 길로. 낡음·root 밖·거부 알림은 §8.2f 것 그대로. `command` 는 실행하지 않는다 | 위 ①④⑤ |
 | **하지 않는 것** | 전구(gutter 표시) · 자동 적용(`Fix All`·저장 시) · `command` 실행 · kind 별 묶음·머리글 · `only` 필터 · 저장 시 code action · refactor 미리보기 · 25 넘는 목록 | 다음 조각 |
 
 **적대적 검증(2026-09-19, 1~4회차 · 변이 30)**: 1회차 순수 10 → 1(무효 2 → 유효로 재실행) · 2회차 상태 기계·요청 13 → 3 · 3회차 배선 7 → 1 ·

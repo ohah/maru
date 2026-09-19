@@ -2,7 +2,7 @@
 //! `RenameTarget`·`rename_input` 모달)를 낱말 첫 글자 아래 팝업으로 띄우고, `Enter` 면 `textDocument/rename` 을 보낸다. 응답의
 //! `WorkspaceEdit` 는 `editor_workspace_edit.apply` 가 §8.2f 규칙으로 적용한다(전부 검증 뒤 적용·저장 정책·기록).
 //!
-//! 요청은 `5_000_000_000+seq` — 응답은 지금 기다리는 seq 일 때만 쓰고 낡은 것은 버린다. 서버가 없거나 `renameProvider` 가 없으면 상자를
+//! 요청은 `5e8+seq` — 응답은 지금 기다리는 seq 일 때만 쓰고 낡은 것은 버린다. 서버가 없거나 `renameProvider` 가 없으면 상자를
 //! 열지 않는다(무동작). `prepareRename` 은 하지 않는다 — 못 바꾸는 자리는 서버의 오류 응답을 알림으로 낸다.
 
 const std = @import("std");

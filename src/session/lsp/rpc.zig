@@ -20,25 +20,61 @@ pub const RequestId = union(enum) {
     completion: u32,
     code_action: u32,
     code_action_resolve: u32,
+    completion_resolve: u32,
 };
-/// `codeAction/resolve`(§8.2h) 의 id 는 `code_action_resolve_id_base + seq`.
-pub const code_action_resolve_id_base: u64 = 8_000_000_000;
-/// `codeAction`(2단 ⑦, §8.2h)의 id 는 `code_action_id_base + seq`.
-pub const code_action_id_base: u64 = 7_000_000_000;
-/// `completion`(2단 ⑥, §8.2g)의 id 는 `completion_id_base + seq`.
-pub const completion_id_base: u64 = 6_000_000_000;
-/// `rename`(2단 ⑤, §8.2f)의 id 는 `rename_id_base + seq` — u32 밖이라 u64 로 든다(JSON 정수는 i64 까지). classify 는 큰 base 부터 본다.
-pub const rename_id_base: u64 = 5_000_000_000;
-/// `formatting`(2단 ④, §8.2e)의 id 는 `formatting_id_base + seq`. u32 안(4_294_967_295)이라 seq 는 2.9 억까지.
-pub const formatting_id_base: u32 = 4_000_000_000;
-/// `signatureHelp`(2단 ③, §8.2d)의 id 는 `signature_id_base + seq` — definition 보다 위. u32 안에서 셋이 안 겹친다(각 1e9 칸).
-pub const signature_id_base: u32 = 3_000_000_000;
+/// 요청 id 는 **i32 안**이어야 한다(2026-09-20 실측): rust-analyzer·ruff 가 쓰는 Rust `lsp-server` 크레이트는 정수 id 를 i32 로만 읽고,
+/// 넘치면 그 메시지를 **알림으로 오인해 버린다**(`6_000_000_001` 짜리 completion 이 stderr 에 `unhandled notification` 으로만 남고 응답이
+/// 없었다 — hover·definition 만 i32 안이라 그 둘만 됐다). 종류마다 `id_span`(1e8) 칸을 갖고 seq 는 칸 안에서 돈다(`nextSeq`) —
+/// 가장 큰 칸(9e8+1e8-1) 도 i32 최대(2_147_483_647) 아래. `classify` 는 칸으로 가른다.
+pub const id_span: u32 = 100_000_000;
 pub const initialize_id: u32 = 1;
 pub const shutdown_id: u32 = 2;
-pub const hover_id_base: u32 = 1000;
-/// `definition`(2단 ②, §8.2c)의 id 는 `definition_id_base + seq`. hover 와 겹치지 않게 1000 칸 뒤 — seq 는 u32 라 `hover` 가
-/// 1000 칸을 넘어 자랄 수 있으므로 **큰 쪽부터 가른다**(`classify`).
-pub const definition_id_base: u32 = 2_000_000_000;
+/// `hover`(2단 ①, §8.2b)
+pub const hover_id_base: u32 = 1 * id_span;
+/// `definition`(2단 ②, §8.2c)
+pub const definition_id_base: u32 = 2 * id_span;
+/// `signatureHelp`(2단 ③, §8.2d)
+pub const signature_id_base: u32 = 3 * id_span;
+/// `formatting`(2단 ④, §8.2e)
+pub const formatting_id_base: u32 = 4 * id_span;
+/// `rename`(2단 ⑤, §8.2f)
+pub const rename_id_base: u32 = 5 * id_span;
+/// `completion`(2단 ⑥, §8.2g)
+pub const completion_id_base: u32 = 6 * id_span;
+/// `codeAction`(2단 ⑦, §8.2h)
+pub const code_action_id_base: u32 = 7 * id_span;
+/// `codeAction/resolve`(§8.2h)
+pub const code_action_resolve_id_base: u32 = 8 * id_span;
+/// `completionItem/resolve`(§8.2g-b)
+pub const completion_resolve_id_base: u32 = 9 * id_span;
+comptime {
+    std.debug.assert(@as(u64, completion_resolve_id_base) + id_span - 1 <= std.math.maxInt(i32));
+}
+/// 종류별 seq 의 다음 값 — 칸 안에서 돈다(0 은 안 쓴다: 처음 보내는 요청이 `base + 1`).
+pub fn nextSeq(seq: u32) u32 {
+    const n = (seq + 1) % id_span;
+    return if (n == 0) 1 else n;
+}
+/// 칸 → 종류. `id` 가 어느 칸에도 없으면 null.
+fn requestIdOf(id_num: i64) ?RequestId {
+    if (id_num == initialize_id) return .initialize;
+    if (id_num == shutdown_id) return .shutdown;
+    if (id_num < hover_id_base or id_num >= @as(i64, completion_resolve_id_base) + id_span) return null;
+    const slot: u32 = @intCast(@divTrunc(id_num, id_span));
+    const seq: u32 = @intCast(@mod(id_num, id_span));
+    return switch (slot) {
+        1 => .{ .hover = seq },
+        2 => .{ .definition = seq },
+        3 => .{ .signature = seq },
+        4 => .{ .formatting = seq },
+        5 => .{ .rename = seq },
+        6 => .{ .completion = seq },
+        7 => .{ .code_action = seq },
+        8 => .{ .code_action_resolve = seq },
+        9 => .{ .completion_resolve = seq },
+        else => null,
+    };
+}
 
 /// 위치 인코딩 — `initialize` 에서 utf-8 을 먼저 제안하고 서버가 고른 것을 쓴다(§8.2a).
 pub const PositionEncoding = enum { utf8, utf16 };
@@ -60,7 +96,13 @@ pub fn initializeRequest(allocator: std.mem.Allocator, root_uri: []const u8, pid
                     .hover = .{ .contentFormat = [_][]const u8{ "markdown", "plaintext" } },
                     // 자동완성(§8.2g) — 스니펫은 받지 않는다(`snippetSupport = false` 면 서버가 평문 insertText 를 낸다). resolve 도 아직.
                     .completion = .{
-                        .completionItem = .{ .snippetSupport = false, .insertReplaceSupport = false, .documentationFormat = [_][]const u8{"plaintext"} },
+                        .completionItem = .{
+                            .snippetSupport = false,
+                            .insertReplaceSupport = false,
+                            .documentationFormat = [_][]const u8{"plaintext"},
+                            // §8.2g-b — resolve 로 지연해 받는 속성.
+                            .resolveSupport = .{ .properties = [_][]const u8{ "additionalTextEdits", "detail", "documentation" } },
+                        },
                         .contextSupport = true,
                     },
                     // code action(§8.2h) — 리터럴 CodeAction 을 받고, `edit` 을 resolve 로 지연할 수 있으며 `data` 를 되돌려 준다.
@@ -186,6 +228,8 @@ pub fn signatureTriggersFromResult(result: ?std.json.Value) SignatureTriggers {
 /// `completionProvider` 의 트리거 글자(§8.2g).
 pub const CompletionTriggers = struct {
     supported: bool = false,
+    /// `resolveProvider`(§8.2g-b) — 강조된 항목을 미리 `completionItem/resolve` 한다.
+    resolve: bool = false,
     chars: [16]u8 = undefined,
     len: usize = 0,
 
@@ -205,11 +249,17 @@ pub fn completionTriggersFromResult(result: ?std.json.Value) CompletionTriggers 
         .object => |o| {
             out.supported = true;
             collectChars(o.get("triggerCharacters"), &out.chars, &out.len);
+            if (o.get("resolveProvider")) |rp| out.resolve = rp == .bool and rp.bool;
         },
         .bool => |b| out.supported = b,
         else => {},
     }
     return out;
+}
+
+/// `completionItem/resolve`(§8.2g-b) — 고른 항목의 JSON 그대로.
+pub fn completionResolveRequest(allocator: std.mem.Allocator, seq: u32, item_json: []const u8) error{OutOfMemory}![]u8 {
+    return std.fmt.allocPrint(allocator, "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"method\":\"completionItem/resolve\",\"params\":{s}}}", .{ completion_resolve_id_base + seq, item_json });
 }
 
 /// `textDocument/completion`(§8.2g). `trigger_char` 가 있으면 `triggerKind = 2`(TriggerCharacter), 아니면 1(Invoked).
@@ -604,28 +654,7 @@ pub fn classify(root: std.json.Value) Incoming {
         .integer => |n| n,
         else => return .ignore,
     };
-    const rid: RequestId = switch (id_num) {
-        initialize_id => .initialize,
-        shutdown_id => .shutdown,
-        else => if (id_num >= code_action_resolve_id_base and id_num - @as(i64, @intCast(code_action_resolve_id_base)) <= std.math.maxInt(u32))
-            .{ .code_action_resolve = @intCast(id_num - @as(i64, @intCast(code_action_resolve_id_base))) }
-        else if (id_num >= code_action_id_base and id_num - @as(i64, @intCast(code_action_id_base)) <= std.math.maxInt(u32))
-            .{ .code_action = @intCast(id_num - @as(i64, @intCast(code_action_id_base))) }
-        else if (id_num >= completion_id_base and id_num - @as(i64, @intCast(completion_id_base)) <= std.math.maxInt(u32))
-            .{ .completion = @intCast(id_num - @as(i64, @intCast(completion_id_base))) }
-        else if (id_num >= rename_id_base and id_num - @as(i64, @intCast(rename_id_base)) <= std.math.maxInt(u32))
-            .{ .rename = @intCast(id_num - @as(i64, @intCast(rename_id_base))) }
-        else if (id_num >= formatting_id_base and id_num - formatting_id_base <= std.math.maxInt(u32))
-            .{ .formatting = @intCast(id_num - formatting_id_base) }
-        else if (id_num >= signature_id_base and id_num - signature_id_base <= std.math.maxInt(u32))
-            .{ .signature = @intCast(id_num - signature_id_base) }
-        else if (id_num >= definition_id_base and id_num - definition_id_base <= std.math.maxInt(u32))
-            .{ .definition = @intCast(id_num - definition_id_base) }
-        else if (id_num >= hover_id_base and id_num - hover_id_base <= std.math.maxInt(u32))
-            .{ .hover = @intCast(id_num - hover_id_base) }
-        else
-            return .ignore,
-    };
+    const rid: RequestId = requestIdOf(id_num) orelse return .ignore;
     const is_error = obj.get("error") != null;
     return .{ .response = .{ .id = rid, .result = obj.get("result"), .is_error = is_error, .error_message = errorMessage(obj) } };
 }
@@ -744,14 +773,14 @@ test "LSJ5 hover — 요청 id 는 1000+seq·contentFormat 에 markdown, 응답�
     const a = testing.allocator;
     const req = try hoverRequest(a, 7, "file:///a.c", 3, 5);
     defer a.free(req);
-    try testing.expect(std.mem.indexOf(u8, req, "\"id\":1007") != null);
+    try testing.expect(std.mem.indexOf(u8, req, "\"id\":100000007") != null);
     try testing.expect(std.mem.indexOf(u8, req, "\"method\":\"textDocument/hover\"") != null);
     try testing.expect(std.mem.indexOf(u8, req, "\"line\":3,\"character\":5") != null);
     const init = try initializeRequest(a, "file:///r", 1);
     defer a.free(init);
     try testing.expect(std.mem.indexOf(u8, init, "\"hover\":{\"contentFormat\":[\"markdown\",\"plaintext\"]}") != null);
     // 응답 대조 — 1007 은 hover seq 7, 999 는 모르는 id.
-    var p1 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":1007,\"result\":null}");
+    var p1 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":100000007,\"result\":null}");
     defer p1.deinit();
     const c1 = classify(p1.value);
     try testing.expect(c1 == .response and c1.response.id == .hover and c1.response.id.hover == 7);
@@ -779,18 +808,18 @@ test "LSJ5 hover — 요청 id 는 1000+seq·contentFormat 에 markdown, 응답�
     try testing.expect((try hoverMarkdown(a, m3.value)) == null); // 공백뿐이면 없음
 }
 
-test "LSJ6 definition — 요청 id 는 2_000_000_000+seq, 응답은 seq 로 대조(hover 와 안 겹침), 결과 세 모양의 첫 항목·LocationLink 는 selection range (§8.2c)" {
+test "LSJ6 definition — 요청 id 는 2e8+seq, 응답은 seq 로 대조(hover 와 안 겹침), 결과 세 모양의 첫 항목·LocationLink 는 selection range (§8.2c)" {
     const a = testing.allocator;
     const req = try definitionRequest(a, 3, "file:///a.c", 1, 2);
     defer a.free(req);
-    try testing.expect(std.mem.indexOf(u8, req, "\"id\":2000000003") != null);
+    try testing.expect(std.mem.indexOf(u8, req, "\"id\":200000003") != null);
     try testing.expect(std.mem.indexOf(u8, req, "\"method\":\"textDocument/definition\"") != null);
-    var p1 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":2000000003,\"result\":null}");
+    var p1 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":200000003,\"result\":null}");
     defer p1.deinit();
     const c1 = classify(p1.value);
     try testing.expect(c1 == .response and c1.response.id == .definition and c1.response.id.definition == 3);
     try testing.expect(definitionTarget(c1.response.result) == null);
-    var p2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":1003,\"result\":null}");
+    var p2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":100000003,\"result\":null}");
     defer p2.deinit();
     try testing.expect(classify(p2.value).response.id == .hover); // 1003 은 hover 3 — definition 이 아니다
     // Location 하나.
@@ -817,11 +846,11 @@ test "LSJ6 definition — 요청 id 는 2_000_000_000+seq, 응답은 seq 로 대
     try testing.expect(definitionTarget(l5.value) == null);
 }
 
-test "LSJ7 signatureHelp — 요청 id 3_000_000_000+seq·context, capability, 트리거 글자, 활성 시그니처/파라미터 기본값과 label 세 모양 (§8.2d)" {
+test "LSJ7 signatureHelp — 요청 id 3e8+seq·context, capability, 트리거 글자, 활성 시그니처/파라미터 기본값과 label 세 모양 (§8.2d)" {
     const a = testing.allocator;
     const req = try signatureHelpRequest(a, 5, "file:///a.c", 2, 7, .trigger_character, '(', false);
     defer a.free(req);
-    try testing.expect(std.mem.indexOf(u8, req, "\"id\":3000000005") != null);
+    try testing.expect(std.mem.indexOf(u8, req, "\"id\":300000005") != null);
     try testing.expect(std.mem.indexOf(u8, req, "\"method\":\"textDocument/signatureHelp\"") != null);
     try testing.expect(std.mem.indexOf(u8, req, "\"context\":{\"triggerKind\":2,\"triggerCharacter\":\"(\",\"isRetrigger\":false}") != null);
     const req2 = try signatureHelpRequest(a, 6, "file:///a.c", 2, 7, .content_change, null, true);
@@ -831,7 +860,7 @@ test "LSJ7 signatureHelp — 요청 id 3_000_000_000+seq·context, capability, �
     defer a.free(init);
     try testing.expect(std.mem.indexOf(u8, init, "\"labelOffsetSupport\":true") != null);
     try testing.expect(std.mem.indexOf(u8, init, "\"contextSupport\":true") != null);
-    var p1 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":3000000005,\"result\":null}");
+    var p1 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":300000005,\"result\":null}");
     defer p1.deinit();
     const c1 = classify(p1.value);
     try testing.expect(c1 == .response and c1.response.id == .signature and c1.response.id.signature == 5);
@@ -880,18 +909,18 @@ test "LSJ7 signatureHelp — 요청 id 3_000_000_000+seq·context, capability, �
     try testing.expectEqual(@as(u32, 0), signatureView(r4.value, .utf8).?.index);
 }
 
-test "LSJ8 formatting — 요청 id 4_000_000_000+seq·options(tabSize·insertSpaces false), capability bool/object (§8.2e)" {
+test "LSJ8 formatting — 요청 id 4e8+seq·options(tabSize·insertSpaces false), capability bool/object (§8.2e)" {
     const a = testing.allocator;
     const req = try formattingRequest(a, 2, "file:///a.c", 4, false);
     defer a.free(req);
-    try testing.expect(std.mem.indexOf(u8, req, "\"id\":4000000002") != null);
+    try testing.expect(std.mem.indexOf(u8, req, "\"id\":400000002") != null);
     try testing.expect(std.mem.indexOf(u8, req, "\"method\":\"textDocument/formatting\"") != null);
     try testing.expect(std.mem.indexOf(u8, req, "\"options\":{\"tabSize\":4,\"insertSpaces\":false}") != null);
-    var p1 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":4000000002,\"result\":[]}");
+    var p1 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":400000002,\"result\":[]}");
     defer p1.deinit();
     const c1 = classify(p1.value);
     try testing.expect(c1 == .response and c1.response.id == .formatting and c1.response.id.formatting == 2);
-    var p2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":3000000002,\"result\":null}");
+    var p2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":300000002,\"result\":null}");
     defer p2.deinit();
     try testing.expect(classify(p2.value).response.id == .signature); // 3e9 대는 signature
     var c_true = try parse(a, "{\"capabilities\":{\"documentFormattingProvider\":true}}");
@@ -906,27 +935,27 @@ test "LSJ8 formatting — 요청 id 4_000_000_000+seq·options(tabSize·insertSp
     try testing.expect(!formattingSupported(c_no.value) and !formattingSupported(c_false.value) and !formattingSupported(null));
 }
 
-test "LSJ9 rename — 요청 id 5_000_000_000+seq·newName, capability, 오류 응답의 message (§8.2f)" {
+test "LSJ9 rename — 요청 id 5e8+seq·newName, capability, 오류 응답의 message (§8.2f)" {
     const a = testing.allocator;
     const req = try renameRequest(a, 3, "file:///a.c", 1, 4, "add2");
     defer a.free(req);
-    try testing.expect(std.mem.indexOf(u8, req, "\"id\":5000000003") != null);
+    try testing.expect(std.mem.indexOf(u8, req, "\"id\":500000003") != null);
     try testing.expect(std.mem.indexOf(u8, req, "\"method\":\"textDocument/rename\"") != null);
     try testing.expect(std.mem.indexOf(u8, req, "\"position\":{\"line\":1,\"character\":4}") != null);
     try testing.expect(std.mem.indexOf(u8, req, "\"newName\":\"add2\"") != null);
-    var p1 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":5000000003,\"result\":null}");
+    var p1 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":500000003,\"result\":null}");
     defer p1.deinit();
     const c1 = classify(p1.value);
     try testing.expect(c1 == .response and c1.response.id == .rename and c1.response.id.rename == 3 and !c1.response.is_error);
-    var p2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":4000000003,\"result\":null}");
+    var p2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":400000003,\"result\":null}");
     defer p2.deinit();
     try testing.expect(classify(p2.value).response.id == .formatting); // 4e9 대는 formatting 그대로
-    var p3 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":5000000003,\"error\":{\"code\":-32602,\"message\":\"cannot rename\"}}");
+    var p3 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":500000003,\"error\":{\"code\":-32602,\"message\":\"cannot rename\"}}");
     defer p3.deinit();
     const c3 = classify(p3.value);
     try testing.expect(c3.response.is_error);
     try testing.expectEqualStrings("cannot rename", c3.response.error_message.?);
-    var p4 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":5000000003,\"error\":{\"code\":1}}");
+    var p4 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":500000003,\"error\":{\"code\":1}}");
     defer p4.deinit();
     try testing.expect(classify(p4.value).response.is_error and classify(p4.value).response.error_message == null);
     var c_true = try parse(a, "{\"capabilities\":{\"renameProvider\":true}}");
@@ -941,21 +970,21 @@ test "LSJ9 rename — 요청 id 5_000_000_000+seq·newName, capability, 오류 �
     try testing.expect(!renameSupported(c_false.value) and !renameSupported(c_no.value) and !renameSupported(null));
 }
 
-test "LSJ10 completion — 요청 id 6_000_000_000+seq·context(triggerKind 1/2·글자), capability triggerCharacters, snippetSupport=false (§8.2g)" {
+test "LSJ10 completion — 요청 id 6e8+seq·context(triggerKind 1/2·글자), capability triggerCharacters, snippetSupport=false (§8.2g)" {
     const a = testing.allocator;
     const req = try completionRequest(a, 4, "file:///a.c", 2, 7, null);
     defer a.free(req);
-    try testing.expect(std.mem.indexOf(u8, req, "\"id\":6000000004") != null);
+    try testing.expect(std.mem.indexOf(u8, req, "\"id\":600000004") != null);
     try testing.expect(std.mem.indexOf(u8, req, "\"method\":\"textDocument/completion\"") != null);
     try testing.expect(std.mem.indexOf(u8, req, "\"triggerKind\":1") != null);
     const req2 = try completionRequest(a, 5, "file:///a.c", 2, 7, '.');
     defer a.free(req2);
     try testing.expect(std.mem.indexOf(u8, req2, "\"triggerKind\":2,\"triggerCharacter\":\".\"") != null);
-    var p1 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":6000000004,\"result\":[]}");
+    var p1 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":600000004,\"result\":[]}");
     defer p1.deinit();
     const c1 = classify(p1.value);
     try testing.expect(c1 == .response and c1.response.id == .completion and c1.response.id.completion == 4);
-    var p2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":5000000004,\"result\":null}");
+    var p2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":500000004,\"result\":null}");
     defer p2.deinit();
     try testing.expect(classify(p2.value).response.id == .rename); // 5e9 대는 rename 그대로
     var caps = try parse(a, "{\"capabilities\":{\"completionProvider\":{\"triggerCharacters\":[\".\",\"->\",\"::\"]}}}");
@@ -970,7 +999,7 @@ test "LSJ10 completion — 요청 id 6_000_000_000+seq·context(triggerKind 1/2�
     try testing.expect(std.mem.indexOf(u8, init, "\"snippetSupport\":false") != null);
 }
 
-test "LSJ11 codeAction — 요청 id 7_000_000_000+seq·range·context.diagnostics(code 없으면 생략)·triggerKind, resolve 요청은 항목 JSON 그대로(8e9+seq), capability resolveProvider (§8.2h)" {
+test "LSJ11 codeAction — 요청 id 7e8+seq·range·context.diagnostics(code 없으면 생략)·triggerKind, resolve 요청은 항목 JSON 그대로(8e8+seq), capability resolveProvider (§8.2h)" {
     const a = testing.allocator;
     const diags = [_]ContextDiagnostic{
         .{ .range = .{ .start = .{ .line = 1, .character = 2 }, .end = .{ .line = 1, .character = 5 } }, .message = "Expected ';'", .severity = 1, .code = "-Wexpected-semi" },
@@ -978,7 +1007,7 @@ test "LSJ11 codeAction — 요청 id 7_000_000_000+seq·range·context.diagnosti
     };
     const req = try codeActionRequest(a, 9, "file:///a.c", .{ .start = .{ .line = 1, .character = 2 }, .end = .{ .line = 1, .character = 2 } }, &diags);
     defer a.free(req);
-    try testing.expect(std.mem.indexOf(u8, req, "\"id\":7000000009") != null);
+    try testing.expect(std.mem.indexOf(u8, req, "\"id\":700000009") != null);
     try testing.expect(std.mem.indexOf(u8, req, "\"method\":\"textDocument/codeAction\"") != null);
     try testing.expect(std.mem.indexOf(u8, req, "\"range\":{\"start\":{\"line\":1,\"character\":2},\"end\":{\"line\":1,\"character\":2}}") != null);
     try testing.expect(std.mem.indexOf(u8, req, "\"code\":\"-Wexpected-semi\"") != null);
@@ -986,14 +1015,14 @@ test "LSJ11 codeAction — 요청 id 7_000_000_000+seq·range·context.diagnosti
     try testing.expect(std.mem.indexOf(u8, req, "\"triggerKind\":1") != null);
     const res = try codeActionResolveRequest(a, 4, "{\"title\":\"x\",\"data\":{\"id\":7}}");
     defer a.free(res);
-    try testing.expectEqualStrings("{\"jsonrpc\":\"2.0\",\"id\":8000000004,\"method\":\"codeAction/resolve\",\"params\":{\"title\":\"x\",\"data\":{\"id\":7}}}", res);
-    var p1 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":7000000009,\"result\":[]}");
+    try testing.expectEqualStrings("{\"jsonrpc\":\"2.0\",\"id\":800000004,\"method\":\"codeAction/resolve\",\"params\":{\"title\":\"x\",\"data\":{\"id\":7}}}", res);
+    var p1 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":700000009,\"result\":[]}");
     defer p1.deinit();
     try testing.expect(classify(p1.value).response.id == .code_action and classify(p1.value).response.id.code_action == 9);
-    var p2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":8000000004,\"result\":null}");
+    var p2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":800000004,\"result\":null}");
     defer p2.deinit();
     try testing.expect(classify(p2.value).response.id == .code_action_resolve and classify(p2.value).response.id.code_action_resolve == 4);
-    var p3 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":6000000004,\"result\":null}");
+    var p3 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":600000004,\"result\":null}");
     defer p3.deinit();
     try testing.expect(classify(p3.value).response.id == .completion); // 6e9 대는 completion 그대로
     var c1 = try parse(a, "{\"capabilities\":{\"codeActionProvider\":{\"codeActionKinds\":[\"quickfix\"],\"resolveProvider\":true}}}");
@@ -1013,6 +1042,28 @@ test "LSJ11 codeAction — 요청 id 7_000_000_000+seq·range·context.diagnosti
     try testing.expect(std.mem.indexOf(u8, init, "\"dataSupport\":true") != null);
 }
 
+test "LSJ12 completionItem/resolve — 요청은 항목 JSON 그대로(9e8+seq), capability resolveProvider, initialize 의 resolveSupport (§8.2g-b)" {
+    const a = testing.allocator;
+    const req = try completionResolveRequest(a, 6, "{\"label\":\"lazy\",\"data\":{\"id\":3}}");
+    defer a.free(req);
+    try testing.expectEqualStrings("{\"jsonrpc\":\"2.0\",\"id\":900000006,\"method\":\"completionItem/resolve\",\"params\":{\"label\":\"lazy\",\"data\":{\"id\":3}}}", req);
+    var p1 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":900000006,\"result\":{}}");
+    defer p1.deinit();
+    try testing.expect(classify(p1.value).response.id == .completion_resolve and classify(p1.value).response.id.completion_resolve == 6);
+    var p2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":800000006,\"result\":null}");
+    defer p2.deinit();
+    try testing.expect(classify(p2.value).response.id == .code_action_resolve); // 8e9 대는 그대로
+    var caps = try parse(a, "{\"capabilities\":{\"completionProvider\":{\"triggerCharacters\":[\".\"],\"resolveProvider\":true}}}");
+    defer caps.deinit();
+    try testing.expect(completionTriggersFromResult(caps.value).resolve);
+    var caps2 = try parse(a, "{\"capabilities\":{\"completionProvider\":{}}}");
+    defer caps2.deinit();
+    try testing.expect(completionTriggersFromResult(caps2.value).supported and !completionTriggersFromResult(caps2.value).resolve);
+    const init = try initializeRequest(a, "file:///r", 1);
+    defer a.free(init);
+    try testing.expect(std.mem.indexOf(u8, init, "\"resolveSupport\":{\"properties\":[\"additionalTextEdits\",\"detail\",\"documentation\"]}") != null);
+}
+
 test "LSJ4 file URI — 공백·한글은 퍼센트, 되읽으면 같은 경로 (§8.2a)" {
     const a = testing.allocator;
     const uri = try fileUri(a, "/tmp/a b/가.c");
@@ -1022,4 +1073,49 @@ test "LSJ4 file URI — 공백·한글은 퍼센트, 되읽으면 같은 경로 
     try testing.expectEqualStrings("/tmp/a b/가.c", pathFromFileUri(uri, &buf).?);
     try testing.expect(pathFromFileUri("http://x/y", &buf) == null);
     try testing.expectEqualStrings("/x", pathFromFileUri("file://localhost/x", &buf).?);
+}
+
+test "LSJ13 요청 id 는 i32 안 — 종류마다 1e8 칸, seq 는 칸 안에서 돌고(0 건너뜀), classify 는 칸 경계에서 갈리며 칸 밖은 무시 (lsp-server 호환, §8.2a)" {
+    const a = testing.allocator;
+    try testing.expect(@as(u64, completion_resolve_id_base) + id_span - 1 <= std.math.maxInt(i32));
+    try testing.expectEqual(@as(u32, 1), nextSeq(0));
+    try testing.expectEqual(@as(u32, 1), nextSeq(id_span - 1)); // 칸 끝에서 1 로(0 은 건너뛴다)
+    try testing.expectEqual(@as(u32, 5), nextSeq(4));
+    const Case = struct { id: i64, want: std.meta.Tag(RequestId), seq: u32 };
+    const cases = [_]Case{
+        .{ .id = hover_id_base + 7, .want = .hover, .seq = 7 },
+        .{ .id = definition_id_base, .want = .definition, .seq = 0 },
+        .{ .id = @as(i64, signature_id_base) + id_span - 1, .want = .signature, .seq = id_span - 1 }, // 칸 끝
+        .{ .id = formatting_id_base, .want = .formatting, .seq = 0 }, // signature 칸 끝 + 1 = formatting 시작
+        .{ .id = rename_id_base + 3, .want = .rename, .seq = 3 },
+        .{ .id = completion_id_base + 1, .want = .completion, .seq = 1 },
+        .{ .id = code_action_id_base + 9, .want = .code_action, .seq = 9 },
+        .{ .id = code_action_resolve_id_base + 4, .want = .code_action_resolve, .seq = 4 },
+        .{ .id = @as(i64, completion_resolve_id_base) + id_span - 1, .want = .completion_resolve, .seq = id_span - 1 },
+    };
+    for (cases) |c| {
+        const body = try std.fmt.allocPrint(a, "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":null}}", .{c.id});
+        defer a.free(body);
+        var p = try parse(a, body);
+        defer p.deinit();
+        const inc = classify(p.value);
+        try testing.expect(inc == .response);
+        try testing.expectEqual(c.want, std.meta.activeTag(inc.response.id));
+        const got: u32 = switch (inc.response.id) {
+            .initialize, .shutdown => 0,
+            inline else => |v| v,
+        };
+        try testing.expectEqual(c.seq, got);
+    }
+    // 칸 밖 — 1e9 이상(옛 1e9 배수 base)·hover 칸 앞은 무시(우리 것이 아니다).
+    var q1 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":6000000001,\"result\":null}");
+    defer q1.deinit();
+    try testing.expect(classify(q1.value) == .ignore);
+    var q2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":1000,\"result\":null}");
+    defer q2.deinit();
+    try testing.expect(classify(q2.value) == .ignore);
+    // 실제 요청 하나가 i32 안의 id 를 싣는다.
+    const req = try completionRequest(a, 1, "file:///a.c", 0, 0, null);
+    defer a.free(req);
+    try testing.expect(std.mem.indexOf(u8, req, "\"id\":600000001,") != null);
 }

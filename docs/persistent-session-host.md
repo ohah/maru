@@ -7556,9 +7556,11 @@ chunk_index:u32 | chunk_count:u32 | record_bytes...
   - `image_blob`의 단위는 **이미지 한 장 전체**지 바뀐 영역이 아니다. 그래서 `generation`이 오르면 픽셀이 한 바이트도 안
     바뀌었어도 통째로 다시 실린다. 실측(64x64 RGBA=16 KiB 이미지, kitty 애니메이션 프레임 1회 전진): delta 16,441 bytes.
     host cadence가 20ms이므로 최대 50fps → 그 작은 이미지도 822 KB/s, 실제 크기(400x300 RGBA=480 KiB)면 24 MB/s다.
-  - **따라서 프레임이 매 tick 바뀌는 원격 애니메이션은 이 계약 위에 그대로 얹을 수 없다.** 프레임들을 미리 한 번 보내고
-    delta는 「지금 몇 번 프레임」만 나르는 레코드가 먼저 있어야 한다. 그 레코드가 생기기 전까지 host는 애니메이션을
-    전진시키지 않는다(로컬 app 프로세스의 core는 비어 있어서 거기 꽂은 전진은 애초에 죽은 코드다). metadata title/cwd/process/agent/notification은 screen delta에 섞지 않는다. 일반 runtime
+  - **그래서 프레임이 매 tick 바뀌는 원격 애니메이션은 이 계약 위에서 비싸다.** 그런데도 host는 애니메이션을 **전진시킨다**
+    (같은 커밋 `7a1546ae7`, `poll_owner.scheduleCadence`가 유일한 시계 — 로컬 app 프로세스의 core는 비어 있어서 거기 꽂은
+    전진은 죽은 코드였다). 즉 지금은 **프레임마다 `image_blob` 전체가 나가는 채로 동작한다**. 프레임들을 미리 한 번 보내고
+    delta는 「지금 몇 번 프레임」만 나르는 레코드는 **아직 없다** — 그것이 생기면 위 24 MB/s가 프레임 번호 한 줄로 준다
+    (2026-09-19 문서 정정: 이 줄이 「전진시키지 않는다」로 적혀 코드와 반대였다). metadata title/cwd/process/agent/notification은 screen delta에 섞지 않는다. 일반 runtime
   metadata는 hello의 `runtime_metadata_v1` capability를 명시한 client에만 attach response initial full-state와 JSON
   `runtime.metadata` event full-state로 전송한다. 같은 MRSH v2 구 client에는 알 수 없는 async event를 push하지 않는다.
   client는 response/snapshot/delta 대기 중에도 shared wire validator를 통과한 event만 stream별 단조 revision 최신 한 건으로

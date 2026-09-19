@@ -706,6 +706,37 @@ revision 은 `documentChanges` 의 `version` 이 있을 때만 검사한다(clan
 가짜 서버 — 식별자 글자로 열리고 접두사로 좁혀지며 `↓`·`Enter` 로 고르면 접두사 교체 + import 한 줄이 **undo 하나**; `Esc`; `.` 트리거; `isIncomplete`
 재요청; 접두사가 비면 닫힘; `⌃Space`; 설정 끄면 타이핑 트리거만 꺼짐; 낡은 응답; 팝업이 뜬 프레임엔 시그니처 상자 없음) · `CMP2`(capability 없음).
 
+#### 8.2g-b 자동완성 ①-b — 버퍼 단어·병합·fuzzy·resolve·kind (2026-09-19, 계획 공격 뒤의 결정)
+
+**계획 공격이 드러낸 것.** ① ui §8.2 는 「LSP 가 없다고 자동완성이 없는 상태가 되지는 않는다」를 **요구**한다 — ①-a 뒤 서버 없는 파일(Markdown·셸·
+설정)은 타이핑해도 아무것도 안 떴다. ② 출처가 둘이 되면 병합 규칙이 필요하다 — 같은 label 은 LSP 것이 이기고(detail·textEdit 이 있다), 지금 치는
+낱말 자체는 후보가 아니다. ③ 필터는 fuzzy 가 관례(VS Code) — `prtf` 가 `printf` 를 찾아야 한다; 점수는 ①-a 의 「대소문자 맞는 접두사 우선」을
+포함해야 한다(그 판정자가 그대로 살아야 한다). ④ rust-analyzer 는 `additionalTextEdits`(자동 import)를 `completionItem/resolve` 로 **지연**해 낸다 —
+확정 뒤에 resolve 하면 import 가 별도 편집이 되어 §3.6 「자동 import 가 딸린 완성 하나도 undo 하나」가 깨진다. VS Code 는 **강조된 항목을 미리
+resolve** 해 확정 때는 대개 끝나 있다 → 같은 방식. ⑤ 단어 스캔은 문서 전체를 훑는다 — 상한을 두고 재야 한다.
+
+| 축 | 결정 | 근거 |
+| --- | --- | --- |
+| **버퍼 단어** | 문서의 식별자 run(글자·숫자·`_`·비ASCII, 숫자로 시작하지 않음)을 **첫 등장 순**으로 중복 없이 모은다(상한: 앞 1 MiB · 2,000 개). 지금 치는 낱말(`[word_start, caret)`)은 뺀다. 첫 조각은 글자 부류 분할 — §5.3 트리의 토큰 경계는 그것이 더 정확한 사례가 잡힐 때 | ui §8.2(「없으면 단순 단어 분할로 저하」) |
+| **출처 병합** | 서버가 있으면 LSP 항목 + 버퍼 단어, 없으면 버퍼 단어만. 같은 label(대소문자 그대로)은 LSP 것이 이긴다. 버퍼 단어의 `sortText` 는 `~`+단어(LSP 뒤), kind 는 `text` | ui §8.2 「에디터가 병합한다」 |
+| **트리거** | 서버 없이도 식별자 글자면 연다(설정 `editor.quick-suggestions`). 서버 트리거 글자·`⌃Space` 는 그대로. 서버가 없으면 요청 없이 **그 자리에서** 목록이 선다(`isIncomplete` 는 없다) | |
+| **fuzzy** | 접두사 문자들이 `filterText` 에 **순서대로 부분열**로 있으면 후보. 점수 = 정확한 접두사(대소문자까지) > 접두사(무시) > 낱말 경계(`_`·camelCase) 일치 > 연속 일치 > 나머지; 같은 점수는 `sortText`, 그다음 label. 빈 접두사는 전부 | VS Code 의 순서와 같은 축 |
+| **resolve** | `completionProvider.resolveProvider` 면 **강조된 항목**(선택이 바뀔 때·목록이 열릴 때)을 `completionItem/resolve`(id `9_000_000_000+seq`, 항목 JSON 그대로)로 미리 푼다. 응답의 `additionalTextEdits`·`insertText`/`textEdit`·`detail` 을 항목에 합친다. 확정 때 아직 안 풀렸으면 응답을 기다렸다 **한 번에** 적용한다(undo 하나) — 300 ms 안에 안 오면 additional 없이 적용하고 센다. 낡은 seq·다른 항목의 응답은 버린다 | 위 ④ · §3.6 |
+| **kind** | LSP `CompletionItemKind` → 한 글자 열(`f` 함수/메서드/생성자, `v` 변수/필드/상수, `t` 타입(클래스·구조체·인터페이스·enum), `k` 키워드, `m` 모듈, `s` 스니펫, `p` 속성, `w` 버퍼 단어, ` ` 그 밖) — label 앞 열 | VS Code 의 아이콘 자리를 글자로(등폭 상자) |
+| **하지 않는 것** | 스니펫·경로 완성 · ghost text · 문서 패널(resolve 의 `documentation` 은 받아 두기만) · §5.3 트리 토큰 경계 · commitCharacters | 다음 |
+
+**관측점**: `CPL4`(순수: 버퍼 단어 수집 — 순서·중복·숫자 시작·상한·치는 낱말 제외) · `CPL5`(순수: 병합 — 같은 label 은 LSP 승·sortText·kind) · `CPL6`(순수: fuzzy — 부분열·
+점수 순서·①-a 의 대소문자 우선이 그대로) · `CPL7`(순수: kind 글자) · `LSJ12`(순수: resolve 요청·capability·응답 합치기) · `CMP3`(제품 경계: 서버 없는 파일 —
+타이핑으로 버퍼 단어 목록이 뜨고 좁혀지고 확정된다) · `CMP4`(제품 경계: 가짜 서버 — 강조 시 resolve → 확정은 undo 하나; 확정 때 미해결이면 응답 뒤 한 번에; `RESOLVESTALL`
+이면 300 ms 뒤 additional 없이; 병합 목록에서 같은 label 은 LSP 것).
+
+**구현이 계약에 되먹인 것.** ① **fuzzy 는 서버가 준 목록 안에서만** — 서버는 제 필터로 거른 목록을 낸다(clangd 실측: `prf`·`prtf` 에 `printf` 를 내지
+않았다). 버퍼 단어는 우리가 전부 들고 있으므로 fuzzy 가 온전히 닿는다(캡처: `prf` → `w prefer_tab`). 서버 목록에 fuzzy 를 더 넓히려면 서버에 다시
+묻는 길(`isIncomplete`)뿐이고, 그것은 서버의 몫이다. ② **resolve 는 한 번에 하나** — 열릴 때 강조된 항목(preselect)의 resolve 가 아직 날아가는 중에
+강조가 옮겨지면, 새 항목의 resolve 는 그 응답이 온 뒤 이어 나간다(`onResolveResponse` → `resolveHighlighted`; 낡은 응답은 버린다). 확정이 그 사이에
+오면 기다리던 것을 버리고 강조된 항목의 resolve 를 새로 보낸 뒤 기다린다. ③ 가짜 서버의 「답하지 않는 resolve」 표식은 `RESOLVESTALL` — `…HANG` 으로
+지으면 didChange 의 `HANG` 표식(서버째 멈춤)에 먼저 걸려 클라이언트가 재시작 상태로 간다(CMP4 첫 판에서 겪었다).
+
 ### 8.2h LSP 2단 ⑦ — code action (2026-09-19, 계획 공격 뒤의 결정)
 
 **계획 공격이 드러낸 것.** ① 결과는 `WorkspaceEdit` — §8.2f 의 `apply`(전부 검증·저장 정책·기록)를 **두 번째 소비자**가 그대로 쓴다(요청

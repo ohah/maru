@@ -94,6 +94,7 @@ pub const Client = struct {
     rename_supported: bool = false,
     /// completion(§8.2g).
     completion_seq: u32 = 0,
+    completion_resolve_seq: u32 = 0,
     completion_triggers: lsp.rpc.CompletionTriggers = .{},
     /// code action(§8.2h).
     code_action_seq: u32 = 0,
@@ -145,6 +146,7 @@ pub const State = struct {
     received_renames: u64 = 0,
     sent_completions: u64 = 0,
     received_completions: u64 = 0,
+    sent_completion_resolves: u64 = 0,
     sent_code_actions: u64 = 0,
     received_code_actions: u64 = 0,
     sent_code_action_resolves: u64 = 0,
@@ -517,6 +519,7 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
                 self.editor_lsp.received_completions += 1;
                 editor_completion.onResponse(self, seq, if (r.is_error) null else r.result, c.encoding);
             },
+            .completion_resolve => |seq| editor_completion.onResolveResponse(self, seq, if (r.is_error) null else r.result, c.encoding),
             .rename => |seq| {
                 self.editor_lsp.received_renames += 1;
                 editor_rename.onResponse(self, seq, if (r.is_error) null else r.result, r.is_error, r.error_message, c.encoding);
@@ -952,6 +955,18 @@ fn lspPos(opened: editor_ops.Opened, off: usize, enc: lsp.rpc.PositionEncoding) 
     const line = opened.file.lines.line(line_idx) orelse return .{ .line = 0, .character = 0 };
     const text = content[line.start..line.contentEnd()];
     return .{ .line = @intCast(line_idx), .character = lsp.position.characterOf(text, @intCast(o -| line.start), enc) };
+}
+
+/// `completionItem/resolve`(§8.2g-b) — 항목 JSON 그대로. 보냈으면 seq.
+pub fn requestCompletionResolve(self: *AppSession, term: *Term, item_json: []const u8) ?u32 {
+    const c = readyClientFor(self, term) orelse return null;
+    if (!c.completion_triggers.resolve) return null;
+    c.completion_resolve_seq +%= 1;
+    const msg = lsp.rpc.completionResolveRequest(self.allocator, c.completion_resolve_seq, item_json) catch return null;
+    defer self.allocator.free(msg);
+    if (!send(self, c, msg)) return null;
+    self.editor_lsp.sent_completion_resolves += 1;
+    return c.completion_resolve_seq;
 }
 
 /// 서버의 완성 트리거 글자(없으면 `supported = false`).

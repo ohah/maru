@@ -3,7 +3,7 @@
 //! `apply` 로(WorkspaceEdit 의 두 번째 소비자 — 전부 검증·저장 정책·기록), `edit` 이 없으면 `codeAction/resolve` 를 보내고 그 응답의 `edit` 을
 //! 같은 길로. `command` 는 실행하지 않는다(§8.2 seam).
 //!
-//! 요청은 `7_000_000_000+seq`(resolve 는 `8e9+seq`) — 응답은 지금 기다리는 seq 일 때만. 항목은 **복사**해 든다(title 과 원래 JSON 텍스트 —
+//! 요청은 `7e8+seq`(resolve 는 `8e8+seq`) — 응답은 지금 기다리는 seq 일 때만. 항목은 **복사**해 든다(title 과 원래 JSON 텍스트 —
 //! resolve 에 그대로 되돌려 주려고).
 
 const std = @import("std");

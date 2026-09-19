@@ -1271,11 +1271,17 @@ pub fn applyForcedRename(self: *AppSession) void {
 }
 
 /// MARU_FORCE_SUGGEST=1 — caret 자리에서 `trigger_suggest` 를 부른다(캡처 전용, tooling §8.2g). 서버가 뜨기 전에는 요청이 안 나가므로 열릴
-/// 때까지 매 프레임 되풀이한다(시그니처 훅과 같다).
+/// 때까지 매 프레임 되풀이한다(시그니처 훅과 같다). `=accept` 면 상자가 선 뒤 한 번 `Enter` 를 누른다(§8.2g-b 의 resolve → 확정을 실서버로
+/// 재는 캡처 — 강조 항목이 아직 안 풀렸으면 제품 규칙대로 응답을 기다린다).
 pub fn applyForcedSuggest(self: *AppSession) void {
-    if (std.c.getenv("MARU_FORCE_SUGGEST") == null) return;
+    const raw = std.c.getenv("MARU_FORCE_SUGGEST") orelse return;
     const st = &self.editor_completion;
-    if (st.active or st.waiting) return;
+    if (st.active and std.mem.eql(u8, std.mem.span(raw), "accept") and self.chrome_host.suggest_box.open and !self.debug_suggest_accepted) {
+        self.debug_suggest_accepted = true;
+        _ = editor_ops.completion_client.handleKey(self, .enter, .{});
+        return;
+    }
+    if (st.active or st.waiting or self.debug_suggest_accepted) return;
     if (self.chrome_host.notice.open) self.chrome_host.notice.dismiss();
     _ = editor_ops.completion_client.triggerManual(self);
 }

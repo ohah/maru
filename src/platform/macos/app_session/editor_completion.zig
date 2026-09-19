@@ -267,6 +267,8 @@ pub fn refresh(self: *AppSession) bool {
         return false;
     }
     // 접두사 안에 식별자가 아닌 글자가 들어오면(`(`·공백) 낱말이 끝난 것이다. 접두사가 비면 닫힌다 — 트리거 글자로 연 것만 빈 채로 산다.
+    // 앞 검사는 **거의 등가**다 — `a(` 로 시작하는 filterText 가 없는 한 아래 refilter 가 0 으로 닫는다(적대적 2회차 B17). 서버가 그런 filterText
+    // 를 낼 수 있으므로(스니펫 라벨) 방어로 남긴다.
     for (doc.file.content[st.word_start..caret]) |b| if (!isIdent(b)) {
         hide(self);
         return false;

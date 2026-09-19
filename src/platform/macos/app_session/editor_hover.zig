@@ -96,7 +96,8 @@ pub fn notePointer(self: *AppSession, x_px: f64, y_px: f64) void {
     st.pointer_moved_ms = self.awakeMs();
     st.stop_judged = false;
     if (self.editor_signature.active) return; // 상자의 주인이 시그니처다(§8.2d) — 포인터가 열지도 닫지도 않는다
-    if (self.editor_completion.active) return; // 완성 팝업이 뜬 동안은 열지 않는다(§8.2g — 프레임에 상자는 하나)
+    // 완성 팝업(§8.2g)의 가드는 여기가 아니라 `tick` 에 있다 — 여기 두면 앞서 세워 둔 `pointer_valid` 를 못 막고(적대적 3회차 C10), `tick` 에
+    // 두면 여기 것은 등가다(4회차 C10). 하나만 둔다.
     if (self.chrome_host.hover_box.open) {
         if (hover_box.contains(&self.chrome_host.hover_box, st.lines.items, chromeProps(self), x_px, y_px)) return;
         if (shownTerm(self)) |term| {
@@ -122,6 +123,9 @@ pub fn tick(self: *AppSession) void {
     // 시그니처가 열려 있으면 상자가 열려 있다(`onResponse` 가 둘을 한 자리에서 세운다) — 그래서 `hover_box.open` 하나가 둘 다 막는다
     // (`editor_signature.active` 를 따로 보던 조건은 등가였다 — 적대적 3회차 C6).
     if (!enabled(self) or !st.pointer_valid or st.stop_judged or self.chrome_host.hover_box.open) return;
+    // 완성 팝업은 다른 상자라 `hover_box.open` 이 막지 않는다 — 팝업이 뜬 동안 포인터가 멈춰 있어도 열지 않는다(§8.2g, 적대적 3회차 C10 은
+    // `notePointer` 의 가드만으로는 앞서 세워 둔 `pointer_valid` 를 못 막았다).
+    if (self.editor_completion.active) return;
     if (now -| st.pointer_moved_ms < delayMs(self)) return;
     st.stop_judged = true;
     if (self.pointer_gesture_owner != .none) return; // 드래그 중에는 안 연다

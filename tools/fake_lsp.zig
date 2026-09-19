@@ -27,7 +27,8 @@
 //!   `RENAMESTALEVER` → `documentChanges` 의 version 을 하나 낮춰(낡은 결과).
 //!   capability `renameProvider: true`(`MARU_FAKE_LSP_NORENAMECAP=1` 이면 false).
 //! - `textDocument/completion` → 문서의 식별자 전부(나온 순서 sortText) + `fake_import`(textEdit 접두사 교체 + additionalTextEdits 로 첫 줄 include,
-//!   preselect). 접두사로 거르지 않는다(로컬 필터 관측점), caret 앞 낱말이 2 글자 미만이면 `isIncomplete`. `NOCOMP` → `null`.
+//!   preselect) + `fake_tail`(additional 이 다음 줄 머리 — 낱말 뒤) + `.` 바로 뒤면 `arrow_fix`(textEdit 이 `x.` 부터 덮어 `x->m`).
+//!   접두사로 거르지 않는다(로컬 필터 관측점), caret 앞 낱말이 2 글자 미만이면 `isIncomplete`. `NOCOMP` → `null`.
 //!   capability `completionProvider{triggerCharacters: ["."]}`(`MARU_FAKE_LSP_NOCOMPCAP=1` 이면 없음).
 //! - `shutdown` → `null` 응답, `exit` → 종료 0.
 //! - 시작하자마자 stderr 에 한 줄을 쓴다(실서버 clangd 가 그렇다) — stdout 에 섞이면 프레임이 깨진다(§8.2a 「stderr」).
@@ -326,6 +327,36 @@ fn handleCompletion(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: s
         var adds: std.json.Array = .init(arena);
         adds.append(editValue(arena, 0, 0, 0, "#include \"fake.h\"\n") catch return) catch return;
         it.put(arena, "additionalTextEdits", .{ .array = adds }) catch return;
+        items.append(.{ .object = it }) catch return;
+    }
+    {
+        // fake_tail — additional 이 **낱말 뒤**(다음 줄 머리)에 있다: 응답 뒤 문서가 바뀌면 버려져야 한다(§8.2g 「적용」).
+        var it: std.json.ObjectMap = .empty;
+        it.put(arena, "label", .{ .string = "fake_tail" }) catch return;
+        it.put(arena, "sortText", .{ .string = "zzzx" }) catch return;
+        var adds: std.json.Array = .init(arena);
+        adds.append(editValue(arena, line_no + 1, 0, 0, "// tail\n") catch return) catch return;
+        it.put(arena, "additionalTextEdits", .{ .array = adds }) catch return;
+        items.append(.{ .object = it }) catch return;
+    }
+    if (ws >= 2 and before[ws - 1] == '.' and isIdent(before[ws - 2])) {
+        // arrow_fix — `x.` 뒤에서 `textEdit` 이 낱말 시작 **앞**(`x.` 부터)을 덮는다(clangd 의 `.`→`->` 교정과 같은 모양).
+        var it: std.json.ObjectMap = .empty;
+        it.put(arena, "label", .{ .string = "arrow_fix" }) catch return;
+        it.put(arena, "sortText", .{ .string = "0000" }) catch return;
+        var te: std.json.ObjectMap = .empty;
+        var range: std.json.ObjectMap = .empty;
+        var s: std.json.ObjectMap = .empty;
+        s.put(arena, "line", .{ .integer = line_no }) catch return;
+        s.put(arena, "character", .{ .integer = @intCast(ws - 2) }) catch return;
+        var e: std.json.ObjectMap = .empty;
+        e.put(arena, "line", .{ .integer = line_no }) catch return;
+        e.put(arena, "character", .{ .integer = character }) catch return;
+        range.put(arena, "start", .{ .object = s }) catch return;
+        range.put(arena, "end", .{ .object = e }) catch return;
+        te.put(arena, "range", .{ .object = range }) catch return;
+        te.put(arena, "newText", .{ .string = "x->m" }) catch return;
+        it.put(arena, "textEdit", .{ .object = te }) catch return;
         items.append(.{ .object = it }) catch return;
     }
     var root: std.json.ObjectMap = .empty;

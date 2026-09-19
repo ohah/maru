@@ -222,8 +222,7 @@ pub fn onResponse(self: *AppSession, seq: u32, result: ?std.json.Value, enc: lsp
     };
     defer list.deinit(self.allocator);
     _ = doc;
-    _ = installItems(self, term, list.items, list.incomplete, enc);
-    st.words_only = false;
+    _ = installItems(self, term, list.items, list.incomplete, enc); // words_only 는 그 안에서 지운다(적대적 4회차 B23v: 여기 있던 중복이 판정자를 가렸다)
 }
 
 /// LSP 항목(있으면) + 버퍼 단어를 병합해 목록을 세운다(§8.2g-b). 항목은 복사한다. 0 이면 닫힌 채 false.
@@ -255,6 +254,7 @@ fn installItems(self: *AppSession, term: *Term, lsp_items: []const completion.It
     st.incomplete = incomplete;
     st.resolve_waiting = false;
     st.pending_accept = false;
+    st.words_only = false; // 서버 목록이 섰다 — `openWordsOnly` 가 뒤에 다시 세운다(적대적 2회차 B23: hide 의 것만으론 판정자가 못 봤다)
     const was_active = st.active;
     st.active = true;
     if (!refilter(self, term, true)) {
@@ -316,7 +316,7 @@ fn resolveHighlighted(self: *AppSession, term: *Term) void {
     const item = st.items.items[idx];
     if (item.resolved or item.raw.len == 0) return;
     const seq = editor_lsp.requestCompletionResolve(self, term, item.raw) orelse {
-        st.items.items[idx].resolved = true; // 못 보내면 그대로 쓴다
+        st.items.items[idx].resolved = true; // 못 보내면 그대로 쓴다 — 동작상 등가(Enter 는 어차피 다시 못 보내고 적용한다), 강조마다 되묻지 않게 하는 표시(적대적 2회차 B10)
         return;
     };
     st.resolve_waiting = true;
@@ -442,12 +442,11 @@ pub fn refresh(self: *AppSession) bool {
         st.pending_accept = false;
         st.resolve_waiting = false;
         st.accepted_on_timeout += 1;
-        if (st.order.items.len > 0) st.items.items[st.order.items[@min(self.chrome_host.suggest_box.selected, st.order.items.len - 1)]].resolved = true;
-        accept(self);
+        accept(self); // `resolved` 표시는 안 한다 — accept 는 그 플래그를 안 보고 hide 가 항목을 비운다(적대적 2회차 B18: 죽은 표시였다)
         return false;
     }
     const changed = !std.mem.eql(u8, doc.file.content[st.word_start..caret], st.last_prefix.items);
-    if (changed and st.incomplete and !st.waiting and !st.words_only) {
+    if (changed and st.incomplete and !st.waiting) { // words_only 는 `incomplete = false` 로 서므로 따로 거르지 않는다(적대적 2회차 B25)
         st.refetched += 1;
         _ = ask(self, term, null); // 응답이 목록을 갈아 끼운다 — 그동안은 지금 목록을 접두사로 좁혀 보인다
     }
@@ -506,10 +505,11 @@ pub fn handleKey(self: *AppSession, key: maru.terminal.input.Key, mods: maru.ter
             const idx = st.order.items[pick];
             if (!st.items.items[idx].resolved) {
                 if (!st.resolve_waiting or st.resolve_item != idx) {
-                    st.resolve_waiting = false;
+                    st.resolve_waiting = false; // 다른 항목의 것을 기다리던 중 — 버리고(낡은 응답은 seq 로 걸러진다) 이 항목을 새로 묻는다
                     if (visibleEditorTerm(self, st.surface_id)) |t| resolveHighlighted(self, t);
                 }
-                if (st.resolve_waiting and st.resolve_item == idx) {
+                // 여기서 기다리는 중이면 그것은 이 항목의 것이다(위가 보장 — 적대적 2회차 B21 의 `resolve_item == idx` 는 등가라 뺐다).
+                if (st.resolve_waiting) {
                     st.pending_accept = true;
                     st.pending_since_ms = self.awakeMs();
                     return true;
@@ -602,7 +602,7 @@ pub fn hide(self: *AppSession) void {
     const st = &self.editor_completion;
     if (!st.active and !self.chrome_host.suggest_box.open) return;
     st.active = false;
-    st.pending_accept = false;
+    st.pending_accept = false; // 등가(설치가 다시 지운다) — 방어(적대적 2회차 B22)
     st.resolve_waiting = false;
     st.words_only = false;
     st.clearItems(self.allocator);

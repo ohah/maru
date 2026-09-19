@@ -519,6 +519,7 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
                 self.editor_lsp.received_completions += 1;
                 editor_completion.onResponse(self, seq, if (r.is_error) null else r.result, c.encoding);
             },
+            // error 응답은 result 가 없다(JSON-RPC) — `is_error` 가드는 둘을 함께 실은 서버에 대한 방어(적대적 3회차 C2: 등가).
             .completion_resolve => |seq| editor_completion.onResolveResponse(self, seq, if (r.is_error) null else r.result, c.encoding),
             .rename => |seq| {
                 self.editor_lsp.received_renames += 1;

@@ -16004,7 +16004,9 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
             // 같은 날 `kitty_defer_decode`(bool) + `kitty_pending_jobs`(ArrayList) 는 Debug +16, ReleaseFast +32.
             // 2026-09-19 `48f89bc10`(한국어 preedit 앵커 — `terminal/preedit.zig`·`session/surface.zig`)이 Debug·ReleaseFast 둘 다 +16 —
             // 그 커밋이 이 pin 을 안 올려 main 의 `mise run check` 가 빨갰다(§8.2h 조각의 게이트에서 실측: Debug 11712 · ReleaseFast 11664).
-            .Debug => 11712,
+            // 2026-09-20 kitty 매체 전송(`KittyGraphicsCommand` 에 `data_size`·`data_offset`·`internal_id` — `TerminalCore.kitty_chunk_cmd` 안):
+            // Debug +16 · ReleaseFast +0(기존 패딩에 들어감) — `test-session-host-2c3d-c3-3b2b3` 에서 실측.
+            .Debug => 11728,
             .ReleaseFast => 11664,
             else => unreachable,
         },
@@ -16020,7 +16022,7 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
     };
     const expected_runtime_remainder: usize = switch (builtin.os.tag) {
         .macos => switch (builtin.mode) {
-            .Debug => 8976,
+            .Debug => 8992, // 2026-09-20 kitty 매체 전송 +16(위 표와 같은 델타 — 실측)
             .ReleaseFast => 8928,
             else => unreachable,
         },
@@ -19608,7 +19610,9 @@ test "CR2a RemoteGeneration field inventory는 generation owner 열두 개만 �
             // (atomic u32 둘, 2026-09-15)가 그 예다: Debug 는 +16, ReleaseFast 는 기존 패딩에 들어가 +0.
             // 같은 날 `kitty_defer_decode`(bool) + `kitty_pending_jobs`(ArrayList) 는 Debug +16, ReleaseFast +32.
             // 2026-09-19 `48f89bc10`(한국어 preedit 앵커) 뒤 둘 다 +16 — 위 `C3-3b2b3` 의 표와 함께 움직인다(경계 판정자가 둘을 센다).
-            .Debug => 11712,
+            // 2026-09-20 kitty 매체 전송(`KittyGraphicsCommand` 에 `data_size`·`data_offset`·`internal_id` — `TerminalCore.kitty_chunk_cmd` 안):
+            // Debug +16 · ReleaseFast +0(기존 패딩에 들어감) — `test-session-host-2c3d-c3-3b2b3` 에서 실측.
+            .Debug => 11728,
             .ReleaseFast => 11664,
             else => unreachable,
         },

@@ -43,7 +43,7 @@ pub fn readAndDecode(io: std.Io, alloc: std.mem.Allocator, job: *const KittyPend
     const raw = switch (job.medium) {
         'f' => readFile(io, alloc, name, range, cap, .keep),
         't' => readFile(io, alloc, name, range, cap, .delete_if_temp),
-        's' => readSharedMemory(alloc, name, range, cap),
+        's' => readSharedMemory(io, alloc, name, range, cap),
         else => return .unreadable,
     } orelse return .unreadable;
     return terminal.kitty.decodeKittyRaw(job, raw, alloc);
@@ -130,14 +130,17 @@ fn underRoot(io: std.Io, abs_path: []const u8, root: []const u8) bool {
 
 /// POSIX 공유메모리 — `shm_open` → `fstat` → `mmap` 복사 → `shm_unlink`(열렸으면 언제나). 이름은 그대로 쓴다
 /// (머리말 3). Windows·libc 없는 타깃은 없는 기능이다(→ `EBADF`).
-fn readSharedMemory(alloc: std.mem.Allocator, name: [:0]const u8, range: Range, cap: usize) ?[]u8 {
+fn readSharedMemory(io: std.Io, alloc: std.mem.Allocator, name: [:0]const u8, range: Range, cap: usize) ?[]u8 {
     if (comptime builtin.os.tag == .windows or !builtin.link_libc) return null;
     const fd = std.c.shm_open(name.ptr, @as(c_int, @bitCast(std.c.O{ .ACCMODE = .RDONLY })), @as(std.c.mode_t, 0));
     if (fd < 0) return null;
-    defer _ = std.c.close(fd);
+    // fd 를 `std.Io.File` 로 감싸 stat·close 를 Io 로 한다 — `std.c.fstat` 은 linux 타깃에서 심볼이 아니라(cross-target
+    // 게이트 실측) 직접 부르면 안 된다. `shm_open`·`shm_unlink` 만 libc 다.
+    const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
+    defer file.close(io);
     defer _ = std.c.shm_unlink(name.ptr); // 앱은 터미널이 언제 다 읽었는지 모른다 — 지우는 쪽은 언제나 터미널이다
-    var st: std.c.Stat = undefined;
-    if (std.c.fstat(fd, &st) != 0 or st.size <= 0) return null;
+    const st = file.stat(io) catch return null;
+    if (st.size <= 0) return null;
     // shm 의 stat 크기는 페이지 배수로 올라가 있을 수 있다 — 범위는 `S`/`O` 가 정하고 여기서는 상한만 본다.
     const total: u64 = @intCast(st.size);
     const win = range.resolve(total) orelse return null;

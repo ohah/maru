@@ -30393,7 +30393,9 @@ test "statusline hook is removed on startup — the wrapped original comes back 
     session.deinit();
 
     // **원본이 돌아온다.** 감싸는 설계의 존재 이유가 이것이었고, 제거가 그 약속을 지키는 자리다.
-    const after = try tmp.dir.readFileAlloc(io, "claude/settings.json", a, .limited(16 * 1024));
+    // 64 KiB — 훅 세트가 11개(AT3b-1)라 우리 항목만 ~27 KB 다. 16 KiB 로 두면 `StreamTooLong` 으로 죽는다
+    // (CI 가 그렇게 빨갰다). 제품 쪽 읽기(`readFileState`)는 파일 크기만큼 읽어 상한이 없다.
+    const after = try tmp.dir.readFileAlloc(io, "claude/settings.json", a, .limited(64 * 1024));
     defer a.free(after);
     var parsed = try std.json.parseFromSlice(std.json.Value, a, after, .{});
     defer parsed.deinit();
@@ -30462,7 +30464,9 @@ test "statusline removal leaves someone else's statusLine alone" {
     });
     session.deinit();
 
-    const after = try tmp.dir.readFileAlloc(io, "claude/settings.json", a, .limited(16 * 1024));
+    // 64 KiB — 훅 세트가 11개(AT3b-1)라 우리 항목만 ~27 KB 다. 16 KiB 로 두면 `StreamTooLong` 으로 죽는다
+    // (CI 가 그렇게 빨갰다). 제품 쪽 읽기(`readFileState`)는 파일 크기만큼 읽어 상한이 없다.
+    const after = try tmp.dir.readFileAlloc(io, "claude/settings.json", a, .limited(64 * 1024));
     defer a.free(after);
     try std.testing.expect(std.mem.indexOf(u8, after, theirs) != null); // 남의 값은 그대로
     try std.testing.expect(tmp.dir.statFile(io, "claude/" ++ sl.script_name, .{}) catch null == null);

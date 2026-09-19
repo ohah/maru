@@ -729,6 +729,14 @@ revision 은 `documentChanges` 의 `version` 이 있을 때만 검사한다(clan
 | **확정** | `edit` 이 있으면 §8.2f `apply`(전부 검증 → 열린 Term undo 하나·디스크·저장 정책·기록 — `Undo Last Rename` 이 이것도 되돌린다). 없으면 `codeAction/resolve`(id `8_000_000_000+seq`, 고른 항목의 JSON 그대로) → 응답의 `edit` 을 같은 길로. 낡음·root 밖·거부 알림은 §8.2f 것 그대로. `command` 는 실행하지 않는다 | 위 ①④⑤ |
 | **하지 않는 것** | 전구(gutter 표시) · 자동 적용(`Fix All`·저장 시) · `command` 실행 · kind 별 묶음·머리글 · `only` 필터 · 저장 시 code action · refactor 미리보기 · 25 넘는 목록 | 다음 조각 |
 
+**적대적 검증(2026-09-19, 1~4회차 · 변이 30)**: 1회차 순수 10 → 1(무효 2 → 유효로 재실행) · 2회차 상태 기계·요청 13 → 3 · 3회차 배선 7 → 1 ·
+4회차 재실행 5 → 0. 판정자 보강 셋, 죽은 가드 1 제거, 등가 1:
+- **A6** `Command` 형을 거르는 가드 — 뒤의 「`edit` 도 `data` 도 없음」이 이미 숨겨 **죽은 코드**였다 → 걷어내고 주석.
+- **B5** 항목 상한 25(메뉴 버퍼) — 가짜 서버 `MANYACT`(data-only 30 개)로 잰다; 상한이 없으면 버퍼 밖을 써 **ABRT** 로 죽는다(방어이자 뜻).
+- **B8** resolve 응답에 `edit` 이 없으면 알림 — 가짜 서버 `RESOLVEEMPTY` 로 잰다.
+- **B13** resolve 요청의 capability 검사 = 등가 — `parse` 가 resolve 불가 서버의 data-only 항목을 이미 숨겨 그 길로 못 온다(방어로 남김).
+- **C6** 알림 번역(ko)이 바뀜 — 판정자가 `t()` 로 같은 표를 읽어 동어반복이었다(§8.2e 와 같은 실수) → `tIn(.ko/.en)` 의 글자로 직접.
+
 **관측점**: `LSJ11`(순수: codeAction 요청 id·range·context.diagnostics·resolve 요청·capability) · `CAX*`(순수: 항목 파싱 — `edit`/`data`/`command`/`disabled`/
 `isPreferred` 정렬·Command 형 거름) · `CA1`(제품 경계: 가짜 서버 — `⌘.` 로 진단 자리의 fix 와 lazy 항목이 메뉴에, command-only 는 없음; fix 를 고르면 진단
 범위가 바뀌고 undo 하나·기록; lazy 를 고르면 resolve → edit 적용; `Esc`·바깥 클릭 닫힘; 문맥 없는 자리(`NOACT`)는 알림; 낡은 revision 전체 거부; resolve

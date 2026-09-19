@@ -48,11 +48,8 @@ pub fn parse(allocator: std.mem.Allocator, result: ?std.json.Value, can_resolve:
             hidden += 1;
             continue;
         };
-        // `Command` 형(`command` 가 문자열)은 실행할 수 없다 — 숨긴다.
-        if (o.get("command")) |c| if (c == .string) {
-            hidden += 1;
-            continue;
-        };
+        // `Command` 형(`command` 가 문자열)은 실행할 수 없다 — 따로 거르지 않아도 아래 「edit 도 data 도 없음」이 숨긴다(적대적 1회차 A6:
+        // 그 가드는 죽은 코드였다). `Command` 에는 `edit` 도 `data` 도 없다.
         if (o.get("disabled")) |d| if (d == .object) {
             hidden += 1;
             continue;

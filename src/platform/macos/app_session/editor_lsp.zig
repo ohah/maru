@@ -930,6 +930,7 @@ pub fn requestCodeAction(self: *AppSession, term: *Term, start: usize, end: usiz
 /// `codeAction/resolve`(§8.2h) — 고른 항목의 JSON 그대로. 보냈으면 seq.
 pub fn requestCodeActionResolve(self: *AppSession, term: *Term, item_json: []const u8) ?u32 {
     const c = readyClientFor(self, term) orelse return null;
+    // 등가다(적대적 2회차 B13) — `code_action.parse` 가 resolve 불가 서버의 data-only 항목을 이미 숨겨 이 길로 못 온다. 방어로 남긴다.
     if (!c.code_action_caps.resolve) return null;
     c.code_action_resolve_seq +%= 1;
     const msg = lsp.rpc.codeActionResolveRequest(self.allocator, c.code_action_resolve_seq, item_json) catch return null;

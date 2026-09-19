@@ -272,6 +272,7 @@ pub const editor_context_bindings = [_]EditorContextBinding{
     .{ .chord = .{ .modifiers = .{ .shift = true }, .key = .{ .function = 8 } }, .action = .prev_diagnostic, .needs_editable = false }, // Shift+F8
     .{ .chord = .{ .modifiers = .{}, .key = .{ .function = 12 } }, .action = .goto_definition, .needs_editable = false }, // F12 — §8.2c(VS Code editor.action.revealDefinition)
     // `F2` — 심볼 이름 바꾸기(tooling §8.2f, VS Code `editor.action.rename`). 파일 트리가 초점일 때의 `F2` 는 ③ʹ 앞 갈래라 겹치지 않는다(키 문서 전수 대조).
+    // `needs_editable` 는 비교 뷰에서만 읽히고 그때는 `startAtCaret` 이 먼저 거절하므로 어느 값이든 무동작이다(S5 B6·§8.2e C3 과 같은 등가, 적대적 3회차 C4).
     .{ .chord = .{ .modifiers = .{}, .key = .{ .function = 2 } }, .action = .rename_symbol, .needs_editable = true }, // 문서를 바꾸는 명령 — 비교 뷰에서는 양보
     // **첫 `⌃` 조합**(ETX4 ⑷ — 편집기 Term 에는 PTY 가 없다). VS Code mac 기본 `⌃-`/`⌃⇧-`(2026-09-18 사용자 결정). `⌃⇧-` 는 US 자판에서
     // `_` 로 오므로 둘 다 묶는다(`⌘-`/`⌘_` 폰트 크기와 같은 선례).

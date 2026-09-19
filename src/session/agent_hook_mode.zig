@@ -75,6 +75,10 @@ pub fn next(current: State, ev: event.Event) State {
         .session_start => .idle,
         .user_prompt_submit => .running,
         .pre_tool_use => .running,
+        // 도구가 끝났다 — 턴은 아직 도는 중이다(모델이 결과를 받아 이어 간다). 상태를 **안 흔든다**: 이것을
+        // `.running` 으로 두면 `blocked` 에서 승인 뒤 온 `Post` 가 배지를 풀지만 그 역할은 이미 `PreToolUse`
+        // 가 한다(승인이 나면 도구가 돌기 전에 Pre 가 온다). 이 이벤트의 소비자는 셸 구간 층뿐이다(AT3b-1).
+        .post_tool_use, .post_tool_use_failure => current,
         .permission_request => .blocked,
         // **오류로 끝난 턴**(계약 §2). provider 가 `Stop` **대신** 보내므로, 이것을 안 받으면 그 pane 은
         // 영영 «진행 중» 에 멈춘다. 끝은 끝이라 같은 전이를 쓴다 — 문구만 알림에서 갈린다.
@@ -769,6 +773,8 @@ test "파서가 아는 모든 이벤트에 전이가 있다 — 한쪽만 늘면
         const moved = next(.unknown, evOf(kind));
         const holds = switch (kind) {
             .notification, .oversized, .unknown => true,
+            // 도구 종료는 구간 층의 신호이지 상태 전이가 아니다(AT3b-1).
+            .post_tool_use, .post_tool_use_failure => true,
             // 서브에이전트 수명은 `next` 가 아니라 `advance` 가 옮긴다(세는 일이라 진행 상태가 필요하다).
             // 그래서 여기서는 «상태를 안 흔든다» 가 맞고, 그 사실을 아래에서 따로 못박는다.
             .subagent_start, .subagent_stop => true,
@@ -1150,7 +1156,7 @@ fn alphabetEvent(i: usize) event.Event {
     const kinds = [_]event.Kind{
         .session_start, .user_prompt_submit, .pre_tool_use,   .permission_request,
         .stop,          .stop_failure,       .subagent_start, .subagent_stop,
-        .notification,  .oversized,          .notification,
+        .notification,  .oversized,          .post_tool_use,  .notification,
     };
     const child = i >= kinds.len;
     const k = i % kinds.len;

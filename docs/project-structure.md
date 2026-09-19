@@ -284,6 +284,7 @@ fixture와 golden 파일의 저장 규칙은 [Fixture와 Oracle 포맷](fixture-
 ```text
 tools/
   perf/                 로컬 성능 예산 측정 harness
+  agent-turn-tool-mix.py  에이전트 턴의 도구 구성(캡처 트리거 없는 턴·셸 편집만 있는 턴·배경 호출)을 provider 트랜스크립트에서 잰다 — 훅 로그는 큐라 지워지므로 이것이 AT3b 수치의 재측정 도구다(plans/agent-turn-changes.md)
   ci/                   CI 파이프라인 헬퍼. `changed-areas.sh`가 "이 diff는 어떤 CI 축을 실행해야 하는가"의 단일 출처이고 `changed-areas.test.sh`(=`mise run ci:changed-areas-check`)가 그 분류를 실제 git diff로 고정한다
 ```
 

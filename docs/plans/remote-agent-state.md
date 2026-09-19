@@ -29,6 +29,16 @@
 - `agent_hook_command.eventsFor(provider)` 가 **로컬/원격을 가르는 축을 하나 더 갖는다.** 전역 세트를
   두지 않는 §2 의 규율을 그대로 따른다.
 - 검증: 세트 상수의 단위 테스트, 원격 세트에 `PreToolUse` 가 없음을 단언하는 테스트.
+- ⚠️ **2026-09-20 관찰 — 같은 기계가 로컬이자 ssh 대상이면 두 설치기가 한 파일을 두고 핑퐁한다.** 개발자
+  머신의 `~/.claude/settings.json` 에 **원격 세트**(`LC_MARU_PANE`·`remote-agent-events`, `PreToolUse` 없음)가
+  서 있었다 — `maru ssh localhost` 류가 `maru agent-hooks` 로 덮어쓴 것이다. 로컬 앱은 켤 때마다 로컬 세트로
+  되돌리고, 다음 ssh 가 다시 뒤집는다. 그 사이 로컬 훅 모드는 `PreToolUse` 없이 돌아 AT3 캡처가 빈다. 해법
+  후보: 두 세트를 **공존**시키기(각 훅이 자기 env 가 없으면 `exit 0` 하므로 항목 둘이 함께 있어도 무해하다 —
+  설치기가 «우리 표식 전부 걷고 한 scope 만 넣는」 규율을 scope 별로 나누면 된다) 또는 원격 설치기가 로컬 세트가
+  이미 있는 기계를 건너뛰기. 이 축이 정한다.
+- **2026-09-20**: AT3b-1 이 로컬 claude 세트에 넣은 `PostToolUse`·`PostToolUseFailure`(`Bash`) 도 같은 세
+  이유로 `remote_excluded` 에 든다 — 주는 것이 셸 구간의 끝(턴 스냅샷 축)뿐이고 `tool_response` 가 명령 출력
+  원문이다. 원격 세트는 그대로 여섯이다.
 
 ### RA2 — pane 신원을 원격에 실어 보낸다
 

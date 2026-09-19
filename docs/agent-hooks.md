@@ -654,7 +654,8 @@ C2 가 선 곳은 명령 전과 완료 후뿐이고 둘 다 실제로 idle 이�
 codex 는 열하나다. 그 둘을 섞어 읽지 않는다 — «세트를 늘린다» 는 발화 비용과 codex 재승인을 부르는 결정이라
 (§3, §2.1) 무엇이 **있는지**와 무엇을 **거는지**는 다른 질문이다.
 
-**세트는 provider 마다 다르다** — claude 9 개, **codex 7 개**(`Notification`·`StopFailure` 가 없다). 코드에서도
+**세트는 provider 마다 다르다** — claude **11 개**(2026-09-20 AT3b-1 로 `PostToolUse`·`PostToolUseFailure`(`Bash`) 가
+들어왔다), **codex 7 개**(`Notification`·`StopFailure` 가 없고, `PostToolUse(Bash)` 는 AT3b-2 에서 넣는다). 코드에서도
 전역 세트를 두지 않고 `agent_hook_command.eventsFor(provider)` 로 갈라 둔다: 하나로 두면 codex 에 없는
 이벤트가 조용히 섞이고, 그 사실이 드러나는 자리는 사용자의 설정 파일뿐이다.
 
@@ -689,8 +690,9 @@ payload 도 같은 소스가 못 박는다(`codex-rs/hooks/src/schema.rs`, `deny
 | `UserPromptSubmit` | — | ✅ | 턴 시작, `working` 진입, 턴 식별자 |
 | `Stop` | — | ✅ | 턴 종료 스냅샷, 마지막 응답(`last_assistant_message` → 사이드바 대화 줄), 완료 상태·완료 알림, **`background_tasks`**(상태를 붙잡는 근거가 **아니다** — 자식 로스터의 유령을 거두는 데만 쓴다). **링 항목의 턴 제목은 (AT2)** — `Snapshot`에 아직 제목 슬롯이 없다 |
 | `PermissionRequest` | `*` | ✅ | **입력 대기** 상태 + 주의 알림. **대화형에서 발화 확인**(2026-08-29 재실측). 헤드리스에서는 권한 거부가 실제로 일어나도 이 이벤트도 `PermissionDenied`도 오지 않는다(§9-6) |
-| `PreToolUse` | `*` | ✅ | 진행 중 세부(`tool_description`). **AI 소행 경로(`file_path`)는 (AT3)** — 파싱만 하고 소비자가 없다. **도구 구간 시작은 (AT3b)** — `tool_use_id`가 파서에 아직 없다. **두 provider의 payload 모양이 다르다 — §2.1** |
-| `PostToolUse` | **(AT3b) `Bash`/`exec`만** | 미검증 | **아직 걸지 않는다** — 세트에 없고 test가 그 부재를 단언한다. AT3b가 셸 브래킷과 함께 되돌린다(§3.1 예외) |
+| `PreToolUse` | `*` | ✅ | 진행 중 세부(`tool_description`). AI 소행 경로(`file_path` — AT3 캡처). **셸 구간의 시작**(`tool_use_id`·`run_in_background` — AT3b-1, [턴 변경분 §4.4](agent-turn-changes.md)). **두 provider의 payload 모양이 다르다 — §2.1** |
+| `PostToolUse` | **`Bash`** | ✅ 있다 — **AT3b-2 에서 건다** | **셸 구간의 끝**(`tool_use_id`·`duration_ms`). `Bash` 로 좁혀 §3.1 의 근거(`originalFile`)를 비껴간다. claude 는 실패한 도구에 이것을 **보내지 않는다** — 아래 변종이 온다. codex 는 실패에도 이것을 보낸다(2026-09-20 실측) |
+| `PostToolUseFailure` | **`Bash`** | ❌ **없다** | **실패로 끝난 도구**(비0 종료 — 셸 호출의 1.7%). 구간을 닫는 데는 성공과 같은 뜻이다. `duration_ms`·`is_interrupt`·`error` 를 싣는다(2026-09-19 실측). 이것이 없으면 실패한 셸의 구간이 턴 끝까지 열린다 |
 | `SubagentStart` | — | ✅ | **서브에이전트 수 세기.** 자식이 도는 동안 lead `Stop` 은 턴 끝이 아니다 |
 | `SubagentStop` | — | ✅ | 자식이 끝났다. **마지막** 자식이 끝나고 lead 도 끝났으면 그때가 턴 끝이다 |
 | `Notification` | — | ❌ **없다** | **입력 대기 판정**(`notification_type` — §6 표). `PermissionRequest`가 발화하지 않는 환경에서 그 배지의 유일한 소스다 |
@@ -984,6 +986,7 @@ trust 키는 `<hooks.json 절대경로>:<이벤트 snake_case>:<그룹 인덱스
 | `permission_request` | **넣는다** |
 | `user_prompt_submit` | **뺀다** |
 | `stop` | **뺀다** |
+| `post_tool_use` (세트 밖 — AT3b 후보, 2026-09-20 실측) | **넣는다** |
 
 메커니즘은 이렇다: `hooks.json` 에 `matcher` 를 적어도 codex 는 그 둘에서 **로드할 때 그것을 버린다**
 (`hooks/list` 가 `matcher: null` 로 돌려준다). 해시는 그 정규화된 결과를 담을 뿐이다 — 우리가 적은 값이
@@ -1157,11 +1160,20 @@ fork·exec)는 다를 수 있다. 다만 그 차이는 spawn 비용 자체의 �
 필요한 경로는 `PreToolUse(Edit).tool_input.file_path`에 있고 그쪽은 1 KB 미만이다. 그래서 `PostToolUse`를
 **세트에서 뺀다.** 얻는 것: 발화 절반, 상한 절단 문제 소멸, `originalFile`이 로그에 남지 않아 평문 노출 축소.
 
-> ⚠️ **예외 — `Bash`/`exec`에는 건다**(2026-08-23 결정, [턴 변경분](agent-turn-changes.md) A21).
-> **아직 걸지 않는다 — 이 되돌림은 [AT3b](plans/agent-turn-changes.md)가 가져온다.** 지금 세트
-> (`agent_hook_command.claude_events`·`codex_events`)에는 `PostToolUse`가 **없고**, 같은 파일의 test가
-> 그 부재를 단언한다. 파서에도 `Kind.post_tool_use`와 `tool_use_id`가 아직 없다. 아래는 그때 무엇을
-> 어떤 근거로 되돌릴지의 기록이다.
+> ⚠️ **예외 — `Bash`에는 건다**(2026-08-23 결정, [턴 변경분](agent-turn-changes.md) A21 · **2026-09-20 AT3b-1 로
+> claude 세트에 들어왔다** — `PostToolUse`·`PostToolUseFailure` 둘 다 matcher `Bash`, 파서에 `Kind.post_tool_use`·
+> `post_tool_use_failure`·`tool_use_id`·`duration_ms`·`run_in_background`). codex 는 AT3b-2 에서 같은 모양으로
+> 넣는다(사용자 결정 — `post_tool_use` 의 신뢰 해시 규칙은 §2.1 표에 실측돼 있다). `exec` 는 걸지 않는다 —
+> 양 provider 의 셸 도구 이름이 `Bash` 이고 `exec` 는 0건이다(2026-08-26 실측).
+>
+> **실패 변종이 있어야 닫힌다.** claude 는 실패한 도구(비0 종료)에 `PostToolUse` 대신 `PostToolUseFailure` 를
+> 보낸다(2026-09-19 격리 세션 실측 — `sh -c 'exit 3'`). 셸 호출의 1.7% 가 실패이고 그것이 이 저장소의 일상이라
+> (테스트·빌드), 한쪽만 걸면 그 구간이 턴 끝까지 열린 채 사용자 편집을 끌어들인다. `grep` 의 exit 1 은 provider
+> 가 «No matches» 로 성공 처리해 `PostToolUse` 로 온다.
+>
+> **크기는 `Bash` 에서는 문제가 아니다.** 트랜스크립트 89,685건 기준 `Post(Bash)` payload 추정 중앙값 1.6 KB·
+> p99 14.5 KB·최대 51 KB 로 **0.1%(65건)** 만 32 KiB 를 넘긴다. 넘긴 줄은 훅이 이름과 **`tool_use_id`** 만
+> 남기고 접으므로(§4.1) 그래도 구간은 닫힌다.
 >
 > 위 근거는
 > `tool_response.originalFile`의 크기이고 **그 필드는 편집 도구에만 있다.** Bash payload는
@@ -1180,7 +1192,7 @@ fork·exec)는 다를 수 있다. 다만 그 차이는 spawn 비용 자체의 �
 | 단점 | 내용 | 대응 |
 | --- | --- | --- |
 | **턴 지연** | provider는 훅 종료를 기다린다. 도구마다 약 12 ms | 발화 횟수를 줄이는 것 외에 방법이 없다(§3.1). 그래도 크면 `Pre`를 편집·셸 도구로 좁히는 후퇴가 남는다 |
-| **로그 크기** | `PreToolUse` 최대 실측 4 KB. 거대한 `originalFile`을 싣던 `PostToolUse`를 뺐다(§3.1) | 라인 상한 + 크기 상한 회전 + 정리 |
+| **로그 크기** | `PreToolUse` 최대 실측 4 KB. 거대한 `originalFile`을 싣는 편집 도구의 `PostToolUse`는 걸지 않는다(§3.1). `PostToolUse(Bash)`(AT3b-1)는 `stdout`을 실어 중앙값 1.6 KB·p99 14.5 KB — 셸 호출마다 한 줄이 더 붙어 로그가 대략 두 배가 되고 **회전이 그만큼 잦다**(회전본 드레인 경로가 자주 밟힌다 — 그 경로의 구간 닫기는 적대적 검증 1회차가 잡아 고쳤다) | 라인 상한 + 크기 상한 회전 + 정리 |
 | append 원자성 | 서브에이전트 병렬 도구 호출이 같은 파일에 동시 append | §4.3 — 섞임을 막지 못한다. 유실 없음만 보장하고 파서가 건진다 |
 | 파싱 부담 | 폭주 구간엔 tick당 수백 줄 | 오프셋 전진(증분) + tick당 처리 상한 |
 
@@ -1320,6 +1332,13 @@ maru의 기존 codex 훅이 이미 이 형태다.
   상한을 넘길 수 있고, 그때 이름까지 버리면 **그 턴의 끝을 못 보고 배지가 «진행 중»에 멈춘다** — 이 층이
   막으려는 바로 그 실패다. 본문은 사라지므로 알림 문구는 비지만 **상태는 옳게 간다**. 둘 중 무엇을 지킬지는
   이미 정해져 있다: 안 풀리는 배지가 더 나쁘다.
+
+  **`tool_use_id` 도 살린다**(2026-09-20 AT3b-1). `PostToolUse(Bash)` 는 명령 출력을 실어 0.1% 가 상한을 넘기는데
+  이름만 남기면 그 구간을 **닫을 수 없다**(짝지을 id 가 없다). 파라미터 확장으로 뽑아(프로세스 0)
+  `{"hook_event_name":"<이름>","tool_use_id":"<id>"}` 로 적는다. 값은 **화이트리스트를 지나야 실린다**
+  (`agent_hook_command.tool_use_id_class` — 영숫자·`_`·`-`, 최대 `max_tool_use_id_len`): 우리가 만드는 JSON 안에
+  그대로 들어가므로 따옴표가 섞인 값을 실으면 파서가 그 줄을 통째로 버려 이름까지 잃는다. 검증을 못 지나면
+  id 를 버리고 이름만 남긴다. 셸 게이트 4c 가 실제 `/bin/sh` 로 이것을 본다.
 
   커맨드는 **claude 세트**로 훑는다 — codex 세트는 그 부분집합이라(§2 테스트가 못박는다) 한 벌이 둘을 덮고
   provider마다 커맨드가 갈리지 않는다.
@@ -1584,7 +1603,8 @@ payload 를 `message`·`title`·`notification_type` 으로 적고, `notification
 뒷날 어느 provider 가 그 이벤트에 `message` 를 더하면 대화 줄이 조용히 오염된다).
 
 ⚠️ **승인된 뒤 명령이 도는 동안에도 배지는 「입력 대기」다.** 그 요구를 푸는 이벤트가 없기 때문이다
-(`PostToolUse` 는 payload 크기 때문에 세트에서 뺐다 — §3.1). 다음 `PreToolUse` 나 `Stop` 이 와야 풀린다.
+(`PostToolUse` 는 **도구가 끝날 때** 오므로 이 자리를 못 푼다 — 명령이 도는 동안이 문제다. AT3b-1 이 `Bash` 에
+그것을 걸었지만 상태 전이에는 일부러 안 쓴다, `agent_hook_mode.next`). 다음 `PreToolUse` 나 `Stop` 이 와야 풀린다.
 자동 승인은 밀리초 안에 지나가므로 알림은 디바운스가 삼키지만, **사람이 승인한 긴 명령**은 그 시간 동안
 배지가 실제와 다르다.
 

@@ -158,6 +158,13 @@ pub const pane_token_class: TokenClass = .{ .ranges = &.{ .{ '0', '9' }, .{ 'a',
 /// 만들었다). 글자 범위를 넓히는 변경은 그 둘이 여전히 빠져 있는지만 확인하면 된다.
 pub const instance_token_class: TokenClass = .{ .ranges = &.{ .{ '0', '9' }, .{ 'a', 'z' } }, .extra = "_" };
 
+/// 상한을 넘긴 payload 에서 살려 두는 `tool_use_id` 의 허용 글자(계획 AT3b-1). 두 provider 의 모양
+/// (`toolu_01Gx…`·`exec-c7898e4a-…`)은 영숫자·`_`·`-` 뿐이다. 이 값은 우리가 만드는 JSON 문자열 안에
+/// 그대로 들어가므로 **따옴표·역슬래시·제어문자가 빠져 있다는 것**이 지키는 성질이다 — 그것이 섞이면
+/// 파서가 그 줄을 통째로 버려 이름까지 잃는다. `-` 는 bracket 표현 **맨 끝**이어야 글자로 읽힌다(`extra`
+/// 가 구간 뒤에 붙는다).
+pub const tool_use_id_class: TokenClass = .{ .ranges = &.{ .{ '0', '9' }, .{ 'a', 'z' }, .{ 'A', 'Z' } }, .extra = "_-" };
+
 /// host 가 소유하는 인스턴스 칸의 접두.
 pub const host_instance_prefix = "host_";
 
@@ -285,11 +292,46 @@ pub const claude_events = [_]Event{
     .{ .name = "Notification" },
     .{ .name = "PermissionRequest", .matcher = "*" },
     .{ .name = "PreToolUse", .matcher = "*" },
+    // **셸 구간의 끝**(계획 AT3b-1). `Bash` 로 좁힌다 — 편집 도구의 `PostToolUse` 는 `originalFile` 을
+    // 실어 상한에 잘리므로 계약 §3.1 대로 여전히 걸지 않는다. `Bash` 의 것은 `tool_response.stdout` 뿐이라
+    // 트랜스크립트 89,685건 중 0.1% 만 상한을 넘긴다(그때도 `tool_use_id` 는 살린다 — 아래 `build`).
+    //
+    // ⚠️ **둘 다 있어야 닫힌다.** claude 는 실패한 도구에 `PostToolUse` 를 **보내지 않고**
+    // `PostToolUseFailure` 를 보낸다(2026-09-19 실측 — `exit 3`). 셸 호출의 1.7% 가 실패이고 그것이
+    // 이 저장소의 일상(테스트·빌드 실패)이라, 실패 변종을 빼면 그 구간이 턴 끝까지 열린다.
+    .{ .name = "PostToolUse", .matcher = shell_tool_matcher },
+    .{ .name = "PostToolUseFailure", .matcher = shell_tool_matcher },
     // 자식 수를 **세는** 유일한 신뢰 신호다(계약 §2). 자식이 도는 동안 lead 의 `Stop` 은 턴 끝이
     // 아니고, 세지 않으면 «자식이 아직 도는데 완료 알림» 이 나간다. 양 provider 열거에 다 있다(실측).
     .{ .name = "SubagentStart" },
     .{ .name = "SubagentStop" },
 };
+
+/// 이 provider 의 로컬 세트가 **셸 구간을 닫을 수 있나** — `PostToolUse` 가 세트에 있는가(계획 AT3b-1).
+///
+/// 배선이 구간을 **열기 전에** 묻는다. 닫을 이벤트가 없는 provider(지금은 codex — AT3b-2 까지)에서 열면 그
+/// 구간은 턴 끝까지 열려 **턴 전체**가 «셸이 돌던 시간» 이 되고, 뒷날 그 데이터를 읽는 쪽이 그것을 근거로
+/// 쓰면 그 턴의 모든 파일이 `✎` 가 된다(적대적 검증 4회차). 세트에서 파생하므로 codex 세트에 `PostToolUse`
+/// 를 넣는 순간 저절로 참이 된다 — 두 곳을 고칠 일이 없다.
+pub fn closesShellBrackets(provider: Provider) bool {
+    for (eventsFor(provider, .local)) |e| {
+        if (std.mem.eql(u8, e.name, "PostToolUse")) return true;
+    }
+    return false;
+}
+
+/// 로그 줄의 표식에서 provider 를 되찾는다(모르면 null).
+pub fn providerFromTag(tag_text: []const u8) ?Provider {
+    inline for (.{ Provider.claude, Provider.codex }) |p| {
+        if (std.mem.eql(u8, tag_text, p.tag())) return p;
+    }
+    return null;
+}
+
+/// `PostToolUse` 계열의 matcher — **셸 도구 하나**다. 양 provider 모두 셸 도구 이름이 `Bash` 다
+/// (2026-08-26 실측: `exec` 는 0건). `Monitor` 는 넣지 않는다 — 장기 실행이라 `Post` 가 수 분 뒤에
+/// 오거나 안 오고, 그 구간은 턴 전체를 덮어 사용자 편집을 끌어들인다.
+pub const shell_tool_matcher = "Bash";
 
 /// codex 세트 — **`Notification` 과 `StopFailure` 가 없다**(2026-08-21 실측). codex 자신에게 물어
 /// 확정했다: app-server `hooks/list` 는 **codex 가 실제로 로드한 것만** 돌려주므로, 모르는 이름을 함께
@@ -297,8 +339,11 @@ pub const claude_events = [_]Event{
 /// 없는 이벤트를 걸면 잘해야 무시되고, 나쁘면 그 파일의 파싱을 통째로 깨뜨린다 — 남의 설정 파일이라
 /// 시험 삼아 넣지 않는다.
 ///
-/// codex 에는 `PostToolUse`·`SessionEnd`·`PreCompact`·`PostCompact` 도 있으나 걸지 않는다 — 앞의 것은
-/// 비용 때문이고(계약 §3.1) 나머지 셋은 지금 쓰는 자리가 없다.
+/// codex 에는 `PostToolUse`·`SessionEnd`·`PreCompact`·`PostCompact` 도 있으나 걸지 않는다 — 나머지 셋은
+/// 지금 쓰는 자리가 없고, `PostToolUse(Bash)` 는 **AT3b-2 에서 넣는다**(사용자 결정 2026-09-20 — 셸
+/// 쓰기만 있는 턴이 codex 는 5.7% 라 화면에 결과가 보이는 단계에 맞춘다). 넣을 준비는 끝났다: codex 는
+/// 실패에도 `PostToolUse` 를 보내고(실패 변종 없음), `post_tool_use` 의 신뢰 해시는 matcher 를 넣는 규칙이다
+/// (2026-09-20 실측 — 계약 §2.1 표). `duration_ms` 는 없다.
 ///
 /// ⚠️ **`StopFailure` 가 없다는 것의 대가는 메울 수 없다**(계약 §9-10, 2026-08-22 종결). codex 는 오류로
 /// 끝난 턴에 `Stop` **도** 보내지 않는다 — 공개 소스에서 오류 경로가 stop 훅을 부르기 전에 반환하고
@@ -343,7 +388,9 @@ pub const Scope = enum {
 /// 2. **비용**: 도구 호출마다 도는 발화가 계약 §3 의 주범이다(턴당 ~90 ms).
 /// 3. **보안**: payload 에 `tool_input.command`(셸 명령 원문)와 `oldString`/`newString`(소스코드)이
 ///    실린다(계약 §7). 원격 축에서는 그것이 **네트워크를 건너므로** 로컬보다 훨씬 무겁게 걸린다.
-pub const remote_excluded = [_][]const u8{"PreToolUse"};
+/// `PostToolUse`·`PostToolUseFailure` 도 같은 셋 중 ⑴·⑵ 로 뺀다 — 그것이 주는 것은 셸 구간의 끝
+/// (턴 스냅샷 축)뿐이고, `tool_response` 가 명령 출력 원문을 실어 ⑶ 도 그대로다.
+pub const remote_excluded = [_][]const u8{ "PreToolUse", "PostToolUse", "PostToolUseFailure" };
 
 fn isRemoteExcluded(name: []const u8) bool {
     for (remote_excluded) |x| {
@@ -491,13 +538,26 @@ pub fn build(
     // 늘지 않는다(셸 내장). 이름을 못 찾으면 예전처럼 표식만 남긴다 — 모르는 것을 지어내지 않는다.
     // 본문은 사라지므로 알림 문구는 비지만, **상태는 옳게 간다**. 그 둘 중 무엇을 지킬지는 계약이
     // 이미 정해 두었다: 안 풀리는 배지가 더 나쁘다.
-    try out.print(allocator, "if [ ${{#mh_p}} -gt {d} ]; then case \"$mh_p\" in ", .{max_payload_bytes});
+    try out.print(allocator, "if [ ${{#mh_p}} -gt {d} ]; then ", .{max_payload_bytes});
+    // **`tool_use_id` 도 살린다**(계획 AT3b-1). `PostToolUse(Bash)` 는 명령 출력을 실어 0.1% 가 상한을
+    // 넘기는데, 이름만 남기면 그 구간을 **닫을 수 없다**(짝지을 id 가 없다) — 턴 끝까지 열린 채로 사용자
+    // 편집을 끌어들인다. 파라미터 확장뿐이라 프로세스가 늘지 않는다(셸 내장).
+    //
+    // 값은 **화이트리스트로 검증한다** — 우리가 만드는 JSON 에 그대로 들어가므로 따옴표·역슬래시가 섞이면
+    // 파서가 그 줄을 버린다(그러면 이름까지 잃는다). 두 provider 의 id 알파벳(`toolu_…`·`exec-<uuid>`)은
+    // 영숫자·`_`·`-` 뿐이다. 길이 상한은 파서 쪽 `max_tool_use_id_len` 과 같은 값이다.
+    try out.print(allocator, "mh_i=\"${{mh_p#*\\\"tool_use_id\\\":\\\"}}\"; " ++
+        "if [ \"$mh_i\" = \"$mh_p\" ]; then mh_i=\"\"; else mh_i=\"${{mh_i%%\\\"*}}\"; fi; " ++
+        "case \"$mh_i\" in ''|*[!{s}]*) mh_i=\"\" ;; esac; " ++
+        "if [ ${{#mh_i}} -gt {d} ]; then mh_i=\"\"; fi; " ++
+        "mh_s=\"\"; if [ -n \"$mh_i\" ]; then mh_s=\",\\\"tool_use_id\\\":\\\"$mh_i\\\"\"; fi; " ++
+        "case \"$mh_p\" in ", .{ comptime tool_use_id_class.shellClass(), event.max_tool_use_id_len });
     // **claude 세트로 훑는다 — codex 세트는 그 부분집합이다**(위 테스트가 못박는다). 그래서 커맨드가
     // provider 마다 갈리지 않고, 한 벌로 두 곳을 덮는다.
     for (claude_events) |e| {
-        try out.print(allocator, "*'\"hook_event_name\":\"{s}\"'*) mh_p='{{\"hook_event_name\":\"{s}\"}}' ;; ", .{ e.name, e.name });
+        try out.print(allocator, "*'\"hook_event_name\":\"{s}\"'*) mh_p='{{\"hook_event_name\":\"{s}\"'\"$mh_s\"'}}' ;; ", .{ e.name, e.name });
     }
-    try out.print(allocator, "*) mh_p='{{\"hook_event_name\":\"{s}\"}}' ;; esac; fi; ", .{event.oversized_marker});
+    try out.print(allocator, "*) mh_p='{{\"hook_event_name\":\"{s}\"'\"$mh_s\"'}}' ;; esac; fi; ", .{event.oversized_marker});
     // **`{ … } 2>/dev/null` 로 감싼다.** `printf … 2>/dev/null` 은 printf 자신의 stderr 만 막고 **리다이렉션
     // 대상이 없을 때 셸이 내는 에러**(`No such file or directory`)는 못 막는다 — 실측에서 로그 디렉터리가
     // 없을 때 그 메시지가 provider 화면으로 샜다. 훅은 어떤 실패도 사용자에게 보이지 않아야 한다.
@@ -821,6 +881,9 @@ test "원격 세트에 PreToolUse 가 없다 — 명령 원문과 소스코드�
     for ([_]Provider{ .claude, .codex }) |provider| {
         for (eventsFor(provider, .remote)) |e| {
             try testing.expect(!std.mem.eql(u8, e.name, "PreToolUse"));
+            // `PostToolUse` 계열도 같은 이유로 없다 — `tool_response` 가 명령 출력 원문이고, 그것이 주는
+            // 셸 구간은 턴 스냅샷 축이라 원격 범위 밖이다.
+            try testing.expect(!std.mem.startsWith(u8, e.name, "PostToolUse"));
         }
         var local_has = false;
         for (eventsFor(provider, .local)) |e| {
@@ -863,6 +926,16 @@ test "remote_excluded 의 이름은 실제 세트에 있는 것이어야 한다 
     }
 }
 
+/// 그 세트에서 실제로 빠지는 이름 수 — `remote_excluded` 에는 있지만 그 세트에 없는 이름은 세지 않는다
+/// (`PostToolUse` 계열은 claude 에만 있다).
+fn excludedIn(set: []const Event) usize {
+    var n: usize = 0;
+    for (set) |e| {
+        if (isRemoteExcluded(e.name)) n += 1;
+    }
+    return n;
+}
+
 test "파생 배열이 런타임에도 제 값을 갖는다 — comptime 저장소가 승격되는지" {
     var seen: usize = 0;
     for (claude_remote_events) |e| {
@@ -870,13 +943,13 @@ test "파생 배열이 런타임에도 제 값을 갖는다 — comptime 저장�
         try testing.expect(!std.mem.eql(u8, e.name, "PreToolUse"));
         seen += 1;
     }
-    try testing.expectEqual(claude_events.len - remote_excluded.len, seen);
+    try testing.expectEqual(claude_events.len - excludedIn(&claude_events), seen);
     seen = 0;
     for (codex_remote_events) |e| {
         try testing.expect(e.name.len > 0);
         seen += 1;
     }
-    try testing.expectEqual(codex_events.len - remote_excluded.len, seen);
+    try testing.expectEqual(codex_events.len - excludedIn(&codex_events), seen);
     // 두 파생본이 같은 저장소를 가리키면 codex 가 claude 세트를 쓴다.
     try testing.expect(claude_remote_events.len != codex_remote_events.len);
 }
@@ -903,6 +976,42 @@ test "상한을 넘긴 payload는 표식으로 바뀐다 — 파서가 아는 �
     // 파서가 그 줄을 실제로 oversized로 읽는지까지 본다(두 모듈이 같은 이름을 쓴다는 증명).
     const line = "claude\t{\"hook_event_name\":\"" ++ event.oversized_marker ++ "\"}";
     try testing.expectEqual(event.Kind.oversized, event.parseLine(line).?.kind);
+}
+
+test "셸 구간은 Post 가 세트에 있는 provider 에서만 연다 — 세트에서 파생된다" {
+    try testing.expect(closesShellBrackets(.claude));
+    try testing.expect(!closesShellBrackets(.codex)); // AT3b-2 가 codex 세트에 넣으면 이 줄이 뒤집힌다 — 그것이 의도다
+    try testing.expectEqual(Provider.claude, providerFromTag("claude").?);
+    try testing.expectEqual(Provider.codex, providerFromTag("codex").?);
+    try testing.expect(providerFromTag("mimo-code") == null);
+    try testing.expect(providerFromTag("") == null);
+}
+
+test "상한을 넘긴 payload 에서 tool_use_id 를 살린다 — 검증·상한을 지나서만" {
+    // 실제 셸 동작은 게이트 4c 가 본다. 여기서는 **구조**만 고정한다: 추출이 파라미터 확장이고(프로세스 0),
+    // 화이트리스트 클래스가 maru 쪽 판정과 같은 소스에서 렌더되며, 길이 상한이 파서 상수와 같은 값이다.
+    const cmd = try buildAlloc("claude", "/tmp/ev", .local);
+    defer testing.allocator.free(cmd);
+    try testing.expect(std.mem.indexOf(u8, cmd, "mh_i=\"${mh_p#*\\\"tool_use_id\\\":\\\"}\"") != null);
+    try testing.expect(std.mem.indexOf(u8, cmd, "*[!" ++ comptime tool_use_id_class.shellClass() ++ "]*) mh_i=\"\"") != null);
+    var limit_buf: [32]u8 = undefined;
+    const limit = try std.fmt.bufPrint(&limit_buf, "-gt {d} ]; then mh_i=\"\"", .{event.max_tool_use_id_len});
+    try testing.expect(std.mem.indexOf(u8, cmd, limit) != null);
+    // 모든 접힌 모양에 id 자리가 붙는다 — 이름은 아는데 id 를 버리는 팔이 하나라도 있으면 그 이벤트의 구간은 안 닫힌다.
+    for (claude_events) |e| {
+        var arm_buf: [160]u8 = undefined;
+        const arm = try std.fmt.bufPrint(&arm_buf, "mh_p='{{\"hook_event_name\":\"{s}\"'\"$mh_s\"'}}'", .{e.name});
+        try testing.expect(std.mem.indexOf(u8, cmd, arm) != null);
+    }
+    // 클래스에 따옴표·역슬래시·`/` 가 없다 — 이것이 지키는 성질이다.
+    try testing.expect(!tool_use_id_class.accepts("ab\"c"));
+    try testing.expect(!tool_use_id_class.accepts("a\\b"));
+    try testing.expect(!tool_use_id_class.accepts("../x"));
+    try testing.expect(tool_use_id_class.accepts("toolu_01GxMwqMfHbwqq1dbuxDCwFB"));
+    try testing.expect(tool_use_id_class.accepts("exec-c7898e4a-0bc2-4b77-8091-90ef775316d9"));
+    // `-` 는 bracket 표현의 맨 끝이어야 글자로 읽힌다 — 그 자리가 바뀌면 범위 표기가 되어 가드가 깨진다.
+    const cls = comptime tool_use_id_class.shellClass();
+    try testing.expectEqual(@as(u8, '-'), cls[cls.len - 1]);
 }
 
 test "어떤 경로로 나가든 exit 0이다" {
@@ -946,7 +1055,8 @@ test "표식에 사람이 읽는 안내가 있고, 그 문구는 언어에 따�
 
 test "이벤트 세트는 계약 §2 그대로다 — provider 마다" {
     // 6 → 9: `StopFailure`(오류로 끝난 턴) + `SubagentStart`/`SubagentStop`(자식 세기).
-    try testing.expectEqual(@as(usize, 9), claude_events.len);
+    // 9 → 11: `PostToolUse`/`PostToolUseFailure`(`Bash` — 셸 구간의 끝, AT3b-1).
+    try testing.expectEqual(@as(usize, 11), claude_events.len);
     // codex 에는 `Notification` 이 없다(계약 §2.1 실측).
     // 5 → 7: 서브에이전트 둘. `StopFailure` 는 codex 열거에 없어 더하지 않는다.
     try testing.expectEqual(@as(usize, 7), codex_events.len);
@@ -969,16 +1079,24 @@ test "이벤트 세트는 계약 §2 그대로다 — provider 마다" {
     for ([_]Provider{ .claude, .codex }) |provider| {
         const set = eventsFor(provider, .local);
         var star: usize = 0;
+        var shell: usize = 0;
         for (set) |e| {
-            if (e.matcher) |m| {
-                try testing.expectEqualStrings("*", m);
+            const m = e.matcher orelse continue;
+            if (std.mem.eql(u8, m, "*")) {
                 star += 1;
+            } else {
+                // `*` 가 아닌 matcher 는 **셸 도구 하나**뿐이다 — `PostToolUse` 계열이 `*` 로 넓어지면
+                // 편집 도구의 `originalFile` 이 실려 상한에 잘린다(계약 §3.1 — 그래서 뺐던 이벤트다).
+                try testing.expectEqualStrings(shell_tool_matcher, m);
+                try testing.expect(std.mem.startsWith(u8, e.name, "PostToolUse"));
+                shell += 1;
             }
         }
-        // matcher가 붙는 것은 도구 이벤트 둘뿐이다(PermissionRequest·PreToolUse).
+        // `*` 가 붙는 것은 도구 이벤트 둘뿐이다(PermissionRequest·PreToolUse).
         try testing.expectEqual(@as(usize, 2), star);
-        // PostToolUse는 세트에 없다 — payload가 originalFile을 실어 큰 파일 편집에서 상한에 잘린다(계약 §3.1).
-        for (set) |e| try testing.expect(!std.mem.eql(u8, e.name, "PostToolUse"));
+        // `PostToolUse` 계열은 **claude 에만, 둘 다** 있다(실패 변종이 없으면 실패한 셸의 구간이 안 닫힌다).
+        // codex 는 AT3b-2 까지 없다(사용자 결정 2026-09-20).
+        try testing.expectEqual(@as(usize, if (provider == .claude) 2 else 0), shell);
         // **이름이 겹치면 안 된다.** 겹치면 설치가 그 이벤트에 항목을 둘 넣는데, 설치 판정은 이벤트를 «덮었나»로
         // 세므로 「우리 항목 수 = 세트 크기」가 영영 맞지 않는다 → 시작할 때마다 사용자 파일을 다시 쓴다
         // (`agent_hook_install.planFor`의 마지막 검사). 손으로 보면 안 보이는 종류의 실수라 여기서 막는다.

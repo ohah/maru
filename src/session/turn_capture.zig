@@ -13,6 +13,7 @@
 
 const std = @import("std");
 const diff_payload = @import("diff_payload.zig");
+const shell_bracket = @import("shell_bracket.zig");
 
 /// 한 쪽(before 또는 after) 하나가 보관할 수 있는 최대 바이트.
 ///
@@ -143,6 +144,10 @@ pub const Turn = struct {
     /// **경로 항목과 독립이다.** 셸만 쓴 턴은 `entries` 가 비어도 이 수가 있고, `seal` 이 그 경우도
     /// 봉인한다(아래) — 고지가 **가장 필요한 자리**가 바로 그 턴이기 때문이다.
     shell_calls: u32 = 0,
+    /// 그 턴에 셸이 **돌던 구간들**(AT3b-1). `shell_calls` 가 «몇 번» 이라면 이것은 «언제» 다 — 다음 단계가
+    /// 이 구간 안에 `ctime` 이 떨어진 파일을 «셸이 고쳤다» 로 올린다. 순수 층(`shell_bracket`)이 규율을
+    /// 들고, 여기서는 턴과 함께 봉인·이동될 뿐이다(고정 크기라 `Turn` 복사에 그대로 실린다).
+    shell: shell_bracket.Brackets = .{},
     /// **봉인 때 한 번 센** 「에이전트가 실제로 고친 경로 수」(= `editedByAgent()` 가 참인 항목).
     ///
     /// 화면이 이 수를 **턴 행마다 매 프레임** 읽는다. 그때마다 세면 `sameAs` 가 `.text` 두 쪽을
@@ -397,6 +402,27 @@ pub const Store = struct {
         slot.turn.shell_calls +|= 1;
     }
 
+    /// `PreToolUse(Bash)` — 그 세션의 진행 중 턴에 구간을 연다(없으면 만든다 — 셸만 쓴 턴도 봉인에 닿아야
+    /// 한다, `noteShellCall` 과 같은 이유). 호출자는 `noteShellCall` 과 **함께** 부른다(수와 시각은 다른 축).
+    pub fn openShell(self: *Store, session_id: []const u8, tool_use_id: []const u8, now_ms: u64, background: bool) void {
+        const slot = self.openFor(session_id) orelse return;
+        slot.turn.shell.openBracket(tool_use_id, now_ms, background);
+    }
+
+    /// `PostToolUse`/`PostToolUseFailure` — 구간을 닫는다. **진행 중 턴이 없으면 만들지 않는다** — 짝이
+    /// 없는 닫기는 무시가 맞고(`shell_bracket.Close.unmatched`), 빈 턴을 만들면 봉인할 것이 없는 버킷만 는다.
+    pub fn closeShell(self: *Store, session_id: []const u8, tool_use_id: []const u8, now_ms: u64, duration_ms: ?u64, slack_ms: u64) shell_bracket.Close {
+        const turn = self.openTurn(session_id) orelse return .unmatched;
+        return turn.shell.closeBracket(tool_use_id, now_ms, duration_ms, slack_ms);
+    }
+
+    /// 턴 경계 — 열린 구간을 전부 닫는다. `seal` **직전**에 부른다(봉인 뒤 `Turn` 은 안 변한다는 불변을
+    /// 지키려면 닫기가 봉인보다 앞서야 한다). 진행 중 턴이 없으면 아무것도 하지 않는다.
+    pub fn sealShell(self: *Store, session_id: []const u8, now_ms: u64, slack_ms: u64) void {
+        const turn = self.openTurn(session_id) orelse return;
+        turn.shell.sealAll(now_ms, slack_ms);
+    }
+
     /// 진행 중 턴을 봉인해 id 를 발급한다. **붙일 것이 하나도 없으면 `0`**(경로도 셸 수도 없는 턴).
     ///
     /// 봉인 자리가 없으면 **가장 오래된 것을 밀어낸다** — 그 자리는 sweep 이 곧 정리하지만, 정리
@@ -482,6 +508,43 @@ pub const Store = struct {
 };
 
 const testing = std.testing;
+
+test "셸 구간은 턴과 함께 봉인된다 — 봉인 전에 닫히고, 봉인된 턴에서 읽힌다(AT3b-1)" {
+    const gpa = testing.allocator;
+    var store: Store = .{};
+    defer store.deinit(gpa);
+
+    // 셸만 쓴 턴: 수와 구간을 함께 든다.
+    store.noteShellCall("S1");
+    store.openShell("S1", "toolu_a", 1000, false);
+    try testing.expectEqual(shell_bracket.Close.closed, store.closeShell("S1", "toolu_a", 2000, 900, 500));
+    // 배경 호출은 열린 채 남는다.
+    store.noteShellCall("S1");
+    store.openShell("S1", "toolu_bg", 3000, true);
+    try testing.expectEqual(shell_bracket.Close.kept_background, store.closeShell("S1", "toolu_bg", 3030, 30, 500));
+    try testing.expect(store.openTurn("S1").?.shell.busy());
+
+    // 턴 끝: 닫고 봉인한다.
+    store.sealShell("S1", 4000, 500);
+    const id = store.seal(gpa, "S1");
+    try testing.expect(id != 0);
+    const turn = store.sealedTurn(id).?;
+    try testing.expect(!turn.shell.busy());
+    try testing.expectEqual(@as(usize, 2), turn.shell.sealed().len);
+    try testing.expectEqual(@as(u32, 2), turn.shell_calls);
+    // 첫 구간: min(1000, 2000−900=1100) − 500 = 500 … 2000. 둘째(배경): 3000 − 500 … 4000.
+    try testing.expect(turn.shell.contains(500));
+    try testing.expect(turn.shell.contains(3999));
+    try testing.expect(!turn.shell.contains(2200)); // 두 구간 사이
+    try testing.expect(turn.shell.contains(2600));
+
+    // 진행 중 턴이 없는 세션의 닫기는 턴을 만들지 않는다.
+    try testing.expectEqual(shell_bracket.Close.unmatched, store.closeShell("S2", "toolu_x", 1, null, 0));
+    try testing.expect(store.openTurn("S2") == null);
+    // 다음 턴은 빈 구간으로 시작한다(봉인이 슬롯을 비운다).
+    store.noteShellCall("S1");
+    try testing.expectEqual(@as(usize, 0), store.openTurn("S1").?.shell.sealed().len);
+}
 
 test "before 는 첫 캡처로 고정된다 — 두 번째 값이 덮지 않는다" {
     const gpa = testing.allocator;

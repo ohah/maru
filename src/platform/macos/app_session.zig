@@ -3685,12 +3685,160 @@ const OwnedUserAction = struct {
     target: session_host.user_action_queue.TargetIdentity,
     probe_sent: bool = false,
     payload: UserActionPayload,
+    /// `Queue` 에 넣은 시각(awake ms). **큐의 시계를 복사해 둔다** — 실패 자리에서 큐는 이미
+    /// `finishActive` 로 비워진 뒤라 그쪽 시각을 읽을 수 없다. 이 값이 없으면 「5 초를 다 쓰고
+    /// 죽었다」와 「즉시 거절당했다」가 같은 줄로 나와 갈리지 않는다.
+    ///
+    /// **기본값을 두지 않는다.** 0 으로 새면 `elapsed_ms` 가 「깨어난 뒤 흐른 시간」이라는 거대한
+    /// 수로 나와 조용히 거짓을 말한다. 새 생성 자리가 빠뜨리면 컴파일러가 막게 둔다.
+    admitted_ms: u64,
+    /// probe 를 보낸 뒤 `.pending` 으로 돌아온 횟수. 0 이면 **한 번도 응답 자리에 못 갔다**는
+    /// 뜻이고, 크면 보내 놓고 계속 안 온 것이다 — 고칠 곳이 다르다.
+    polls: u32 = 0,
 
     fn deinit(self: *OwnedUserAction, allocator: std.mem.Allocator) void {
         self.payload.deinit(allocator);
         self.* = undefined;
     }
 };
+
+/// 실패 한 줄에 실리는 값들. **위치 인자로 받지 않는다** — 열한 값 중 여섯이 정수라 순서를
+/// 바꿔 넣어도 컴파일되고, 그러면 로그가 조용히 거짓을 말한다(어느 런타임이었는지가 다른
+/// 숫자로 바뀌어 나오면 엉뚱한 런타임을 쫓게 된다). 필드 이름을 요구해 컴파일러가 막는다.
+const UserActionFailureReport = struct {
+    at_unix: i64,
+    why: []const u8,
+    kind: []const u8,
+    host_link: []const u8,
+    elapsed_ms: u64,
+    probe_sent: bool,
+    polls: u32,
+    runtime_handle: u64,
+    surface_id: u64,
+    runtime_generation: u64,
+    queued: usize,
+};
+
+/// 실패 한 줄에 **무엇을 실을지** 고르는 순수 함수. 포맷 함수만 판정하면 문장은 옳은데 들어가는
+/// 값이 틀린 경우를 못 잡는다 — 2026-09-19 적대적 검증에서 실제로 `elapsed_ms` 를 0 으로 굳혀도
+/// 판정자가 통과했다. 시계와 큐 상태를 인자로 받아 여기서 고르고, 판정자가 그 고름을 잰다.
+fn userActionFailureReport(
+    at_unix: i64,
+    why: []const u8,
+    action: *const OwnedUserAction,
+    now_ms: u64,
+    host_failed: bool,
+    queued: usize,
+) UserActionFailureReport {
+    return .{
+        .at_unix = at_unix,
+        .why = why,
+        .kind = @tagName(action.payload),
+        .host_link = if (host_failed) "failed" else "ok",
+        // 포화 뺄셈 — 시계가 뒤로 가도 거대한 수로 뒤집히지 않는다.
+        .elapsed_ms = now_ms -| action.admitted_ms,
+        .probe_sent = action.probe_sent,
+        .polls = action.polls,
+        .runtime_handle = action.target.runtime_handle,
+        .surface_id = action.target.surface_id,
+        .runtime_generation = action.target.runtime_generation,
+        .queued = queued,
+    };
+}
+
+/// 줄을 만드는 **순수 함수**. `std.log.warn` 은 판정자가 읽을 수 없으므로 여기까지 빼지 않으면
+/// 표기가 틀려도(값이 엉뚱한 칸에 들어가도) 아무도 못 잡는다.
+///
+/// 앞 네 칸(`at_unix`·`why`·`kind`·`host_link`)의 **순서와 표기는 고정**이다 —
+/// `host_client_close_log_boundary` 가 그 접두를 못 박는다. 새 값은 **뒤에만** 붙인다.
+fn formatUserActionFailure(buf: []u8, report: UserActionFailureReport) ![]u8 {
+    return std.fmt.bufPrint(
+        buf,
+        "user action failed: at_unix={d} why={s} kind={s} host_link={s}" ++
+            " elapsed_ms={d} probe_sent={s} polls={d} rt={d} surface={d} rt_gen={d} queued={d}",
+        .{
+            report.at_unix,
+            report.why,
+            report.kind,
+            report.host_link,
+            report.elapsed_ms,
+            if (report.probe_sent) "yes" else "no",
+            report.polls,
+            report.runtime_handle,
+            report.surface_id,
+            report.runtime_generation,
+            report.queued,
+        },
+    );
+}
+
+test "사용자 동작 실패 줄은 «무엇이·어디서·얼마나» 를 한 줄에 싣는다" {
+    // 2026-09-19 적대적 검증이 만든 판정자. `std.log.warn` 은 판정자가 못 읽으므로 순수 함수로
+    // 빼 두고 **문장 자체**를 대조한다. 값이 엉뚱한 칸에 들어가면 사람이 다른 런타임을 쫓는다.
+    var buf: [320]u8 = undefined;
+    const text = try formatUserActionFailure(&buf, .{
+        .at_unix = 1789810308,
+        .why = "active_expired",
+        .kind = "image",
+        .host_link = "ok",
+        .elapsed_ms = 5001,
+        .probe_sent = true,
+        .polls = 42,
+        .runtime_handle = 7,
+        .surface_id = 9,
+        .runtime_generation = 11,
+        .queued = 3,
+    });
+    try std.testing.expectEqualStrings(
+        "user action failed: at_unix=1789810308 why=active_expired kind=image host_link=ok" ++
+            " elapsed_ms=5001 probe_sent=yes polls=42 rt=7 surface=9 rt_gen=11 queued=3",
+        text,
+    );
+
+    // `probe_sent` 는 두 값이 **서로 다른 글자**로 나와야 갈린다.
+    const unsent = try formatUserActionFailure(&buf, .{
+        .at_unix = 0,
+        .why = "probe_request_failed",
+        .kind = "files",
+        .host_link = "failed",
+        .elapsed_ms = 0,
+        .probe_sent = false,
+        .polls = 0,
+        .runtime_handle = 0,
+        .surface_id = 0,
+        .runtime_generation = 0,
+        .queued = 0,
+    });
+    try std.testing.expect(std.mem.indexOf(u8, unsent, "probe_sent=no") != null);
+
+    // ── 값을 **고르는** 쪽도 잰다 ────────────────────────────────────────────────
+    // 문장만 재면 「형식은 옳은데 들어간 값이 틀린」 경우를 놓친다 — 적대적 2 라운드에서
+    // `elapsed_ms` 를 0 으로 굳혀도 판정자가 통과했다. 그래서 고르는 함수를 따로 잰다.
+    var paths = [_]u8{};
+    const action: OwnedUserAction = .{
+        .id = 1,
+        .target = .{ .surface_id = 9, .runtime_handle = 7, .runtime_generation = 11 },
+        .probe_sent = true,
+        .payload = .{ .files = &paths },
+        .admitted_ms = 1_000,
+        .polls = 42,
+    };
+    const report = userActionFailureReport(1789810308, "active_expired", &action, 6_001, false, 3);
+    try std.testing.expectEqual(@as(u64, 5_001), report.elapsed_ms);
+    try std.testing.expectEqual(@as(u32, 42), report.polls);
+    try std.testing.expectEqual(true, report.probe_sent);
+    try std.testing.expectEqual(@as(u64, 7), report.runtime_handle);
+    try std.testing.expectEqual(@as(u64, 9), report.surface_id);
+    try std.testing.expectEqual(@as(u64, 11), report.runtime_generation);
+    try std.testing.expectEqual(@as(usize, 3), report.queued);
+    try std.testing.expectEqualStrings("files", report.kind);
+    try std.testing.expectEqualStrings("ok", report.host_link);
+
+    // 시계가 뒤로 가도 `elapsed_ms` 가 거대한 수로 뒤집히지 않는다(포화 뺄셈).
+    const backward = userActionFailureReport(0, "probe_stale", &action, 0, true, 0);
+    try std.testing.expectEqual(@as(u64, 0), backward.elapsed_ms);
+    try std.testing.expectEqualStrings("failed", backward.host_link);
+}
 
 pub const AppSession = struct {
     /// P4 C3b manifest-visible transaction의 성공 꼬리에서만 호출한다. 제품 owner가 아직 arm되지 않은 restore/build
@@ -15866,26 +16014,38 @@ pub const AppSession = struct {
         });
     }
 
-    /// 사용자에게는 「세션 정보를 동기화하지 못했습니다」 한 문장이지만, 여기 오는 길은 **다섯**이다 —
-    /// probe 요청 실패 · host 가 계약을 모름 · 응답이 낡음 · 시한 초과(두 자리). 지금까지 그 다섯이
-    /// 로그에 아무 흔적도 남기지 않아, 사용자가 「이미지가 안 붙는다」고 해도 어느 갈래인지 알 수 없었다.
+    /// 사용자에게는 「세션 정보를 동기화하지 못했습니다」 한 문장이지만, 여기 오는 길은 **아홉**이다 —
+    /// 시한 초과(두 자리) · probe 요청 실패 · host 가 계약을 모름 · 응답이 낡음 · 대상 소멸 ·
+    /// 식별자 없음 · 식별자 변경 · 관측 읽기 실패. 사유 이름(`why`)은 2026-09-09 에 붙였다.
     ///
-    /// 2026-09-09 실측: GUI 가 host 와 끊겨 in-process 로 폴백한 상태에서 `cmd+v` 가 이 문구를 냈다.
-    /// 링크가 죽은 것이 원인으로 **보였지만** 다섯 중 무엇인지 가릴 근거가 없었다.
+    /// **그런데 이름만으로는 아직 원인을 못 짚는다.** 2026-09-19 실측: 이미지 붙여넣기가 1 초 간격으로
+    /// 두 번 `why=active_expired host_link=ok` 를 냈다. 링크는 멀쩡했고 시한(5 초)만 넘겼는데,
+    /// 그 다음 질문 — **어느 런타임이었나 · 보내긴 했나 · 얼마나 기다렸나** — 에 답할 값이 줄에 없었다.
+    /// host 전체가 바빠서라고 짐작했지만 실측은 CPU 4.7 % 였다. 짐작이 틀렸는데 반증할 근거도 없었다.
+    ///
+    /// 그래서 뒤에 다섯을 더 싣는다. `probe_sent=no` 면 보내지도 못한 것이고, `probe_sent=yes polls=0`
+    /// 이면 보낸 뒤 응답 자리에 한 번도 못 갔다는 뜻이며, `polls` 가 크면 계속 `.pending` 이었다는
+    /// 뜻이다 — 셋은 고칠 곳이 완전히 다르다. `rt` 는 **특정 런타임 하나만 막힌 경우**를 가른다.
+    ///
+    /// 한계를 적어 둔다: host 쪽이 그 순간 얼마나 바빴는지는 **여기서 볼 수 없다**. `queued` 는
+    /// 앱 안의 대기 수일 뿐이다. host 의 부하를 같이 보려면 별도 경로가 필요하다.
     fn failUserAction(self: *AppSession, id: u64, why: []const u8) void {
         const slot = self.userActionSlot(id) orelse return;
         if (!builtin.is_test) {
             var wall: std.c.timespec = undefined;
             const at: i64 = if (std.c.clock_gettime(.REALTIME, &wall) == 0) wall.sec else 0;
-            std.log.warn(
-                "user action failed: at_unix={d} why={s} kind={s} host_link={s}",
-                .{
-                    at,
-                    why,
-                    @tagName(slot.*.?.payload),
-                    if (host_connect_failed) "failed" else "ok",
-                },
+            var buf: [320]u8 = undefined;
+            const report = userActionFailureReport(
+                at,
+                why,
+                &slot.*.?,
+                self.awakeMs(),
+                host_connect_failed,
+                self.user_action_queue.len,
             );
+            if (formatUserActionFailure(&buf, report)) |text| {
+                std.log.warn("{s}", .{text});
+            } else |_| {}
         }
         self.showUserActionFailure(&slot.*.?);
         self.freeUserAction(id);
@@ -15918,9 +16078,10 @@ pub const AppSession = struct {
             return;
         };
         const id = self.nextUserActionId();
+        const admitted_ms = self.awakeMs();
         const admission = self.user_action_queue.admit(.{
             .id = id,
-            .admitted_ms = self.awakeMs(),
+            .admitted_ms = admitted_ms,
             .payload_bytes = paths_nul.len,
             .path_count = path_count,
             .path_block_bytes = paths_nul.len,
@@ -15935,7 +16096,7 @@ pub const AppSession = struct {
             self.showNoticeKey(.app_file_send_prepare_failed);
             return;
         };
-        if (!self.storeUserAction(.{ .id = id, .target = target, .payload = .{ .files = owned } })) {
+        if (!self.storeUserAction(.{ .id = id, .target = target, .admitted_ms = admitted_ms, .payload = .{ .files = owned } })) {
             self.allocator.free(owned);
             std.debug.assert(self.user_action_queue.rollbackTail(id));
             self.showNoticeKey(.app_file_send_prepare_failed);
@@ -15952,9 +16113,10 @@ pub const AppSession = struct {
             return;
         };
         const id = self.nextUserActionId();
+        const admitted_ms = self.awakeMs();
         const admission = self.user_action_queue.admit(.{
             .id = id,
-            .admitted_ms = self.awakeMs(),
+            .admitted_ms = admitted_ms,
             .payload_bytes = payload_bytes,
             .target = target,
         });
@@ -15973,7 +16135,12 @@ pub const AppSession = struct {
             self.showNoticeKey(.app_image_send_oom);
             return;
         };
-        if (!self.storeUserAction(.{ .id = id, .target = target, .payload = .{ .image = .{ .temp_path = path_owned, .png = png_owned } } })) {
+        if (!self.storeUserAction(.{
+            .id = id,
+            .target = target,
+            .admitted_ms = admitted_ms,
+            .payload = .{ .image = .{ .temp_path = path_owned, .png = png_owned } },
+        })) {
             self.allocator.free(path_owned);
             self.allocator.free(png_owned);
             std.debug.assert(self.user_action_queue.rollbackTail(id));
@@ -16073,7 +16240,9 @@ pub const AppSession = struct {
             }
         }
         switch (backend.pollUserActionObservationProbe(slot.*.?.target.runtime_handle, id)) {
-            .pending => {},
+            // 세어 둔다 — 「보냈는데 안 온다」와 「보내지도 못했다」는 같은 `active_expired` 로 접히지만
+            // 고칠 곳이 완전히 다르다. 포화는 무해하다(여기 쓰이는 건 0 인지 아닌지와 자릿수뿐이다).
+            .pending => slot.*.?.polls +|= 1,
             .stale => {
                 _ = self.user_action_queue.finishActive(id);
                 self.failUserAction(id, "probe_stale");

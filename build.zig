@@ -6426,6 +6426,40 @@ pub fn build(b: *std.Build) void {
     host_close_log_step.dependOn(&run_host_close_log.step);
     boundary_step.dependOn(&run_host_close_log.step);
 
+    // 「세션 정보를 동기화하지 못했습니다」 한 문장 뒤의 아홉 갈래가 **어느 런타임에서·얼마나 기다려서**
+    // 났는지까지 적는가. app_session 전체(12 분)를 돌리지 않고 그 줄만 잰다.
+    if (builtin.os.tag == .macos) {
+        const user_action_failure_log_step = b.step(
+            "test-user-action-failure-log",
+            "User action failure line must carry runtime, elapsed and probe state (why alone was not enough)",
+        );
+        const user_action_failure_log_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/app_session.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "maru", .module = maru_mod },
+                    .{ .name = "syntax", .module = syntax_mod },
+                },
+            }),
+            .filters = &.{"사용자 동작 실패 줄"},
+        });
+        const run_user_action_failure_log = b.addRunArtifact(user_action_failure_log_tests);
+        // **이름 있는 것만 돌린다.** 이름 필터로 골라도 참조된 모듈들의 *무명* `test` 블록이 함께
+        // 컴파일돼 개수가 따라 흔들린다(실측: `app_session.test_0` · `session_host.test_0/1` 이 붙어
+        // 2 → 4 가 됐다). 그 수를 그대로 적으면 남의 파일이 무명 블록을 하나 늘릴 때마다 여기가
+        // 빨개진다 — 판정자가 의도가 아니라 남의 사정을 재게 된다.
+        run_user_action_failure_log.setEnvironmentVariable(
+            "MARU_TEST_KEEP_ONLY_PREFIX",
+            "app_session.test.사용자 동작 실패 줄",
+        );
+        run_user_action_failure_log.addArg("--maru-expect-passed=1");
+        run_user_action_failure_log.setCwd(b.path("."));
+        user_action_failure_log_step.dependOn(&run_user_action_failure_log.step);
+        boundary_step.dependOn(&run_user_action_failure_log.step);
+    }
+
     // 업그레이드가 `runtime_changed` 로 접혔을 때 **어느 갈래였는지** 남기는가. 일곱 자리가 한 wire
     // reason 으로 접히던 것을 끊은 계약이라, 조용한 산출 지점이 새로 늘면 여기서 빨개진다.
     const upgrade_runtime_changed_stage_step = b.step(

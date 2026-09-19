@@ -12,6 +12,7 @@ pub const live_pty_registry = @import("app/live_pty_registry.zig");
 pub const pty_loop_smoke = @import("app/pty_loop_smoke.zig");
 pub const pty_smoke = @import("app/pty_smoke.zig");
 pub const pty_reader = @import("app/pty_reader.zig");
+pub const kitty_media_io = @import("app/kitty_media_io.zig"); // kitty 매체 전송(t=f/t/s) 읽기 — 리더가 락 밖에서 부른다
 /// sync(2026) 프레임 경계 자르기. **배럴에 건다** — 리더가 쓰는 순수 판정이라 모든 타깃에서 돌아야 한다.
 pub const sync_frame_split = @import("app/sync_frame_split.zig");
 pub const runtime = @import("app/runtime.zig");

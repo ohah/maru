@@ -1437,6 +1437,14 @@ pub const TerminalCore = struct {
         return parser.feed(self, bytes);
     }
 
+    /// `write` 와 같되 **매체 전송 job(`t=f/t/s`)이 큐에 남는 순간 멈추고** 소비한 바이트 수를 돌려준다. 리더
+    /// 전용 — 그 job 을 락 밖에서 읽어 완료·응답한 뒤 `bytes[n..]` 로 다시 부른다(`parser.feedUntil` 머리말).
+    pub fn writeUntilMediaJob(self: *TerminalCore, bytes: []const u8) !usize {
+        self.owner_dbg.assertOwnedBySelf();
+        if (bytes.len > 0) _ = self.observer_generation.fetchAdd(1, .release);
+        return parser.feedUntil(self, bytes, true);
+    }
+
     /// 출력 스트림이 **경계**에 있는가 — 시퀀스 중간도, 글자 중간도 아닌가.
     ///
     /// `write` 는 «셸이 보낸 출력»이라는 **한 스트림**을 가정한다: 상태(`parser`·`utf8_tail`)가 write 호출을
@@ -4718,14 +4726,15 @@ test "restoreFromSlot (CSI u / DECRC) preserves pending_wrap saved at line end" 
     try std.testing.expectEqual(@as(u21, 'E'), core.screen.cells[core.index(1, 0)].codepoint);
 }
 
-test "DA1 (CSI c) answers with a VT102 identification over the response path" {
+test "DA1 (CSI c) answers with a VT220+ANSI-color identification over the response path" {
+    // `?62;22c` 다 — `?6c`(VT102)는 kitten 이 DA1 로 안 알아봐 이미지 감지가 타임아웃했다(parser.zig 주석, 실측 2026-09-20).
     var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 4, .rows = 2 });
     defer core.deinit();
     try core.write("\x1b[c");
-    try std.testing.expectEqualStrings("\x1b[?6c", core.pendingResponse());
+    try std.testing.expectEqualStrings("\x1b[?62;22c", core.pendingResponse());
     core.clearResponse();
     try core.write("\x1b[0c"); // 명시적 0도 동일
-    try std.testing.expectEqualStrings("\x1b[?6c", core.pendingResponse());
+    try std.testing.expectEqualStrings("\x1b[?62;22c", core.pendingResponse());
 }
 
 test "OSC 11 (background color) query answers with theme color in xterm rgb format" {
@@ -10406,10 +10415,12 @@ test "kitty graphics: 문서가 미지원이라 적은 갈래는 전부 ENOTSUPP
     core.clearResponse();
 
     // 애니메이션 셋(`a=f`·`a=a`·`a=c`)은 **구현됐다** — 여기서는 「미지원 갈래」 목록에서 빠졌고,
-    // 각자의 판정자가 따로 있다(`kitty 애니메이션: …`). 남은 미지원은 전송 매체뿐이다.
+    // 각자의 판정자가 따로 있다(`kitty 애니메이션: …`).
 
-    // 전송 매체도 같다 — `t=d`(direct)만 구현하고 `f`(파일)·`t`(임시파일)·`s`(공유메모리)는 거부한다.
-    // 안 거부하면 payload 의 **경로 문자열을 픽셀로 오인**해 쓰레기를 디코드한다.
+    // 전송 매체 `f`(파일)·`t`(임시파일)·`s`(공유메모리)는 **리더가 없는 코어에서만** 거부한다(2026-09-20 부터
+    // 구현 — 리더가 붙은 코어는 `kitty 매체 전송: …` 판정자들이 잰다). 여기는 `kitty_defer_decode` 가 꺼진
+    // 인라인 코어라 I/O 주체가 없다 — 그때 `ENOTSUPP` 로 답해야 앱이 direct 로 폴백한다. 안 답하면 payload
+    // 의 **경로 문자열을 픽셀로 오인**해 쓰레기를 디코드한다.
     for ([_]u8{ 'f', 't', 's' }, [_]u32{ 300, 301, 302 }) |medium, id| {
         try core.write(try std.fmt.bufPrint(&seq, "\x1b_Gi={d},a=q,t={c},f=32,s=1,v=1;AAAA\x1b\\", .{ id, medium }));
         try std.testing.expectEqualStrings(
@@ -12292,6 +12303,186 @@ test "kitty 락 밖 디코드: m=0 은 pending 엔트리·job 만 만들고, 완
         try std.testing.expectEqualStrings("\x1b_Gi=7;OK\x1b\\", core.pendingResponse());
         try std.testing.expectEqual(@as(usize, 0), core.kitty_pending_jobs.items.len);
     }
+}
+
+/// 리더 흉내 — 매체 job 을 가져와 «읽은 바이트» 를 넣어 완료한다(I/O 없이). `raw` 가 null 이면 «못 읽음».
+fn kittyMediaDrain(core: *TerminalCore, raw: ?[]const u8) !usize {
+    var jobs: std.ArrayListUnmanaged(kitty.KittyPendingJob) = .empty;
+    defer jobs.deinit(std.testing.allocator);
+    try kitty.takePendingKittyJobs(core, &jobs, std.testing.allocator);
+    for (jobs.items) |*job| {
+        try std.testing.expect(job.medium != 'd');
+        const decoded: kitty.KittyDecoded = if (raw) |r|
+            kitty.decodeKittyRaw(job, try core.allocator.dupe(u8, r), core.allocator)
+        else
+            .unreadable;
+        kitty.completeKittyTransmit(core, job, decoded);
+        kitty.freeJobPayload(core.allocator, job.payload, job.payload_cap);
+        if (job.old_image) |*o| o.freeAll(core.allocator);
+    }
+    return jobs.items.len;
+}
+
+const media_path_b64 = "L3RtcC90dHktZ3JhcGhpY3MtcHJvdG9jb2wtMQ=="; // "/tmp/tty-graphics-protocol-1"
+
+test "kitty 매체 전송: t=f 의 a=T 는 리더 job 이 되고 파서가 그 APC 뒤에서 멈춘다; 완료가 설치·응답한다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    core.kitty_defer_decode = true;
+    const seq = "\x1b_Ga=T,f=32,s=2,v=1,i=7,t=f,S=8,O=4;" ++ media_path_b64 ++ "\x1b\\" ++ "TAIL";
+    const consumed = try core.writeUntilMediaJob(seq);
+    // 파서는 APC 의 ST 까지만 먹었다 — "TAIL" 은 화면에 없다.
+    try std.testing.expectEqual(seq.len - "TAIL".len, consumed);
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_pending_jobs.items.len);
+    const job = core.kitty_pending_jobs.items[0];
+    try std.testing.expectEqual(@as(u8, 'f'), job.medium);
+    try std.testing.expectEqual(@as(u32, 8), job.cmd.data_size);
+    try std.testing.expectEqual(@as(u32, 4), job.cmd.data_offset);
+    try std.testing.expectEqual(@as(usize, 8), job.expected);
+    try std.testing.expectEqualStrings(media_path_b64, job.payload);
+    // 자리는 잡혔다(a=T 의 placement 가 붙을 곳) — 픽셀은 아직 없고 응답도 없다.
+    try std.testing.expect(core.kitty_images.map.get(7).?.isPending());
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_placements.items.len);
+    try std.testing.expectEqualStrings("", core.pendingResponse());
+    // 리더가 8 바이트를 읽어 왔다 → 설치·OK.
+    try std.testing.expectEqual(@as(usize, 1), try kittyMediaDrain(&core, "\xff\x00\x00\xff\x00\xff\x00\xff"));
+    const done = core.kitty_images.map.get(7).?;
+    try std.testing.expect(!done.isPending());
+    try std.testing.expectEqual(@as(usize, 8), done.data.len);
+    try std.testing.expectEqual(@as(u8, 0xff), done.data[0]);
+    try std.testing.expectEqualStrings("\x1b_Gi=7;OK\x1b\\", core.pendingResponse());
+    core.clearResponse();
+    // 나머지를 넣으면 화면에 찍힌다.
+    _ = try core.writeUntilMediaJob(seq[consumed..]);
+    try std.testing.expectEqual(@as(u21, 'T'), core.snapshot().cells[0].codepoint);
+}
+
+test "kitty 매체 전송: 못 읽으면 EBADF 로 답하고 빈 자리를 걷는다; 크기가 안 맞으면 EINVAL" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    core.kitty_defer_decode = true;
+    _ = try core.writeUntilMediaJob("\x1b_Ga=T,f=32,s=2,v=1,i=7,t=t;" ++ media_path_b64 ++ "\x1b\\");
+    try std.testing.expectEqual(@as(usize, 1), try kittyMediaDrain(&core, null));
+    try std.testing.expectEqualStrings("\x1b_Gi=7;EBADF:transmission medium unreadable\x1b\\", core.pendingResponse());
+    core.clearResponse();
+    try std.testing.expect(core.kitty_images.map.get(7) == null); // 빈 pending 과 placement 가 걷혔다
+    try std.testing.expectEqual(@as(usize, 0), core.kitty_placements.items.len);
+
+    _ = try core.writeUntilMediaJob("\x1b_Ga=T,f=32,s=2,v=1,i=8,t=s;" ++ media_path_b64 ++ "\x1b\\");
+    try std.testing.expectEqual(@as(usize, 1), try kittyMediaDrain(&core, "short"));
+    try std.testing.expectEqualStrings("\x1b_Gi=8;EINVAL:bad graphics command\x1b\\", core.pendingResponse());
+    try std.testing.expect(core.kitty_images.map.get(8) == null);
+}
+
+test "kitty 매체 전송: 질의(a=q)는 저장 없이 결과만 답하고, 그 응답이 뒤따르는 DA1 응답보다 **앞선다**" {
+    // icat 은 `a=q`(t=t)·`a=q`(t=s)·DA1 을 한 write 로 보낸다(실측 2026-09-20). DA1 응답이 먼저 나가면 그 매체는
+    // 미지원으로 읽힌다 — 그래서 파서가 매체 job 뒤에서 멈추고 리더가 답한 뒤 나머지를 넣는다.
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    core.kitty_defer_decode = true;
+    const seq = "\x1b_Ga=q,f=24,t=t,s=1,v=1,S=3,i=2;" ++ media_path_b64 ++ "\x1b\\" ++
+        "\x1b_Ga=q,f=24,t=s,s=1,v=1,S=3,i=3;" ++ media_path_b64 ++ "\x1b\\" ++ "\x1b[c";
+    var offset: usize = 0;
+    var replies: std.ArrayListUnmanaged(u8) = .empty;
+    defer replies.deinit(std.testing.allocator);
+    var drains: usize = 0;
+    while (offset < seq.len) {
+        const n = try core.writeUntilMediaJob(seq[offset..]);
+        try replies.appendSlice(std.testing.allocator, core.pendingResponse());
+        core.clearResponse();
+        drains += try kittyMediaDrain(&core, "123");
+        try replies.appendSlice(std.testing.allocator, core.pendingResponse());
+        core.clearResponse();
+        offset += n;
+    }
+    try std.testing.expectEqual(@as(usize, 2), drains);
+    // 질의 둘의 OK 가 먼저, DA1 응답이 마지막이다. 그리고 아무것도 저장되지 않았다.
+    try std.testing.expect(std.mem.startsWith(u8, replies.items, "\x1b_Gi=2;OK\x1b\\\x1b_Gi=3;OK\x1b\\\x1b[?"));
+    try std.testing.expectEqual(@as(usize, 0), core.kitty_images.map.count());
+    try std.testing.expectEqual(@as(usize, 0), core.kitty_images.total_bytes);
+}
+
+test "kitty 매체 전송: direct job 은 파서를 멈추지 않는다 — 큰 이미지마다 끊기면 안 된다 (부정 대조)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    core.kitty_defer_decode = true;
+    const b64 = try kittyDeferTestPayload(std.testing.allocator, false);
+    defer std.testing.allocator.free(b64);
+    const seq = try std.fmt.allocPrint(std.testing.allocator, "\x1b_Ga=t,f=32,s=2,v=2,i=7;{s}\x1b\\TAIL", .{b64});
+    defer std.testing.allocator.free(seq);
+    try std.testing.expectEqual(seq.len, try core.writeUntilMediaJob(seq));
+    try std.testing.expectEqual(@as(u21, 'T'), core.snapshot().cells[0].codepoint);
+    try std.testing.expectEqual(@as(usize, 1), try kittyDeferDrain(&core));
+}
+
+test "kitty 매체 전송: a=f 프레임도 매체로 온다 — 완료가 루트에 합성해 프레임을 붙인다; 루트가 사라졌으면 ENOENT" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    // 루트(2x1 RGBA)는 인라인으로.
+    var b64: [64]u8 = undefined;
+    const rgba = [_]u8{ 255, 0, 0, 255 } ** 2;
+    const enc = std.base64.standard.Encoder.encode(&b64, &rgba);
+    var seq: [200]u8 = undefined;
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=1,i=5,q=2;{s}\x1b\\", .{enc}));
+    core.kitty_defer_decode = true;
+    _ = try core.writeUntilMediaJob("\x1b_Ga=f,f=32,s=2,v=1,i=5,t=f,z=50;" ++ media_path_b64 ++ "\x1b\\");
+    try std.testing.expect(core.kitty_images.map.get(5).?.frames.len == 0); // 아직 안 붙었다
+    try std.testing.expectEqual(@as(usize, 1), try kittyMediaDrain(&core, "\x00\xff\x00\xff\x00\xff\x00\xff"));
+    try std.testing.expectEqualStrings("\x1b_Gi=5;OK\x1b\\", core.pendingResponse());
+    core.clearResponse();
+    const img = core.kitty_images.map.get(5).?;
+    try std.testing.expectEqual(@as(u32, 2), img.frameCount());
+    try std.testing.expectEqual(@as(u8, 0xff), img.framePixels(2)[1]); // 초록
+    try std.testing.expectEqual(@as(u32, 50), img.frameGapMs(2));
+    // 읽는 사이 루트가 지워졌다 → ENOENT(프레임은 갈 곳이 없다).
+    _ = try core.writeUntilMediaJob("\x1b_Ga=f,f=32,s=2,v=1,i=5,t=f;" ++ media_path_b64 ++ "\x1b\\");
+    try core.write("\x1b_Ga=d,d=I,i=5,q=2\x1b\\");
+    try std.testing.expectEqual(@as(usize, 1), try kittyMediaDrain(&core, "\x00\xff\x00\xff\x00\xff\x00\xff"));
+    try std.testing.expectEqualStrings("\x1b_Gi=5;ENOENT:no such image\x1b\\", core.pendingResponse());
+}
+
+test "kitty 매체 전송: 패딩 없는 base64 경로도 받는다 — kitten 은 `=` 를 안 붙인다 (실측 2026-09-20)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    core.kitty_defer_decode = true;
+    // "/tmp/tty-graphics-protocol-22" = 29 바이트 → 표준이면 40 자(`==`), no-pad 면 38 자.
+    const unpadded = "L3RtcC90dHktZ3JhcGhpY3MtcHJvdG9jb2wtMjI";
+    _ = try core.writeUntilMediaJob("\x1b_Ga=q,f=24,t=t,s=1,v=1,S=3,i=2;" ++ unpadded ++ "\x1b\\");
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_pending_jobs.items.len);
+    // 리더가 하는 이름 풀기와 같은 코덱 선택 — 패딩 없는 것을 표준 코덱으로 풀면 InvalidPadding 이다.
+    const dec = kitty.base64Decoder(unpadded);
+    var out: [64]u8 = undefined;
+    const n = try dec.calcSizeForSlice(unpadded);
+    try dec.decode(out[0..n], unpadded);
+    try std.testing.expectEqualStrings("/tmp/tty-graphics-protocol-22", out[0..n]);
+    try std.testing.expectError(error.InvalidPadding, std.base64.standard.Decoder.calcSizeForSlice(unpadded));
+    // direct 픽셀도 패딩 없이 온다면 받는다: 4 바이트 → "/wAA/w" (no-pad) 대신 표준 "/wAA/w==" 둘 다.
+    try std.testing.expectEqual(@as(usize, 1), try kittyMediaDrain(&core, "123"));
+    core.clearResponse();
+    core.kitty_defer_decode = false;
+    try core.write("\x1b_Ga=q,f=32,s=1,v=1,i=5;/wAA/w\x1b\\");
+    try std.testing.expectEqualStrings("\x1b_Gi=5;OK\x1b\\", core.pendingResponse());
+}
+
+test "kitty 매체 전송: 파서가 S/O 를 읽고 direct 에서는 무시한다; 모르는 매체 글자는 EINVAL" {
+    const cmd = parser.parseKittyGraphicsCommand("a=T,f=100,t=s,S=879,O=16,i=1;abc");
+    try std.testing.expectEqual(@as(u32, 879), cmd.data_size);
+    try std.testing.expectEqual(@as(u32, 16), cmd.data_offset);
+    try std.testing.expectEqual(@as(u8, 's'), cmd.medium);
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    core.kitty_defer_decode = true;
+    // direct + S/O: 무시된다(픽셀 수는 s·v 가 정한다).
+    const b64 = try kittyDeferTestPayload(std.testing.allocator, false);
+    defer std.testing.allocator.free(b64);
+    const seq = try std.fmt.allocPrint(std.testing.allocator, "\x1b_Ga=t,f=32,s=2,v=2,i=7,S=3,O=9;{s}\x1b\\", .{b64});
+    defer std.testing.allocator.free(seq);
+    try core.write(seq);
+    try std.testing.expectEqual(@as(usize, 1), try kittyDeferDrain(&core));
+    try std.testing.expectEqualStrings("\x1b_Gi=7;OK\x1b\\", core.pendingResponse());
+    core.clearResponse();
+    try core.write("\x1b_Ga=q,f=24,t=x,s=1,v=1,i=9;AAAA\x1b\\");
+    try std.testing.expectEqualStrings("\x1b_Gi=9;EINVAL:bad graphics command\x1b\\", core.pendingResponse());
 }
 
 test "kitty 락 밖 디코드 [적대·깜빡임]: 같은 id 재전송 동안 옛 이미지가 view 에 그대로 있고, 완료가 교체한다" {

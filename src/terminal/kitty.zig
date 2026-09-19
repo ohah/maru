@@ -81,12 +81,31 @@ pub const KittyGraphicsCommand = struct {
     // U=1: unicode placeholder(virtual placement) — 커서 자리에 그리지 않고 등록만 하고, 실제 배치는
     // 화면의 U+10EEEE placeholder 셀이 정한다. 베이스: kitty graphics protocol "Unicode placeholders".
     virtual: bool = false,
-    // t: 전송 매체(d=direct base64, f=파일, t=임시파일, s=공유메모리). **maru는 direct만 구현한다** —
-    // 파일/공유메모리는 payload가 픽셀이 아니라 **경로/이름**이라, 파싱하지 않으면 그것을 픽셀로 오인해
-    // 조용히 버린다(실측 2026-09-08: t=f 전송이 무음 폐기됐다). 여기서 값을 읽어 `ENOTSUPP`로 **명시
-    // 거부**해야 앱이 direct로 폴백한다(terminal-browser는 t=s→t=f→inline 순으로 물어본다).
+    // t: 전송 매체(d=direct base64, f=파일, t=임시파일, s=공유메모리). f/t/s 는 payload 가 픽셀이 아니라
+    // **경로/이름(base64)** 이다 — 파싱하지 않으면 그것을 픽셀로 오인해 조용히 버린다(실측 2026-09-08). 코어는
+    // I/O 를 하지 않으므로 매체 전송은 **리더가 락 밖에서 읽는 job** 으로 미룬다(`kittyTransmitMedia`, §13.8 과
+    // 같은 이음매). 리더가 없는 코어(헤드리스·wasm·인라인 호출)는 `ENOTSUPP` 로 명시 거부해 앱이 direct 로
+    // 폴백한다(terminal-browser 는 t=s→t=f→inline 순으로, icat 은 t=t·t=s 를 먼저 묻는다).
     medium: u8 = 'd',
+    // S/O: 파일·공유메모리에서 읽을 **크기와 오프셋**(바이트). 0 이면 «전체»·«처음부터». 매체 전송 전용이고
+    // direct 에서는 무시한다. icat 은 탐침(`a=q`)에도 `S=` 를 싣는다(실측 2026-09-14) — 선택 사항이 아니다.
+    data_size: u32 = 0,
+    data_offset: u32 = 0,
+    // 클라이언트가 `i=` 도 `I=` 도 안 준 전송(`a=t/T`)에 터미널이 **내부 id 를 배정했다**는 표식. 명세: 그런 이미지는
+    // 저장·표시되되 참조할 수 없고 **응답도 없다**(응답에 실을 id 를 앱이 모른다). icat 은 `--transfer-mode=file`
+    // 에서 id 없이 보낸다(실측 2026-09-20) — 배정하지 않으면 EINVAL 로 조용히 버려져 이미지가 안 뜬다.
+    internal_id: bool = false,
 };
+
+/// payload 의 base64 코덱 — **패딩이 있으면 표준, 없으면 no-pad**. kitten 은 경로·이름을 패딩 없이 보낸다
+/// (실측 2026-09-20: 160 바이트 경로가 `=` 없이 214 자로 왔다). 표준 코덱만 쓰면 길이가 3 의 배수가 아닌 payload 는
+/// 전부 `InvalidPadding` 으로 떨어져 «운 좋게 3 의 배수인 경로만 되는» 결함이 된다.
+pub fn base64Decoder(payload: []const u8) std.base64.Base64Decoder {
+    return if (payload.len % 4 != 0 and (payload.len == 0 or payload[payload.len - 1] != '='))
+        std.base64.standard_no_pad.Decoder
+    else
+        std.base64.standard.Decoder;
+}
 
 /// kitty graphics 명령의 처리 결과 — 응답(`ESC _ G i=<id>;<코드> ESC \`)의 본문이 된다.
 /// 베이스: kitty graphics protocol "Control data — responses"(OK 또는 `<ERRCODE>:<msg>`).
@@ -96,6 +115,9 @@ pub const KittyStatus = enum {
     enoent, // 참조한 이미지가 없다(display)
     enotsupp, // maru가 구현하지 않은 기능(전송 매체·애니메이션)
     enomem, // 저장 실패(한 장이 한도 초과, evict로도 자리 부족)
+    /// 매체(파일·임시파일·공유메모리)를 못 읽었다 — 없음·특수 파일·권한·범위 밖 `S`/`O`. 명세: «다른 I/O
+    /// 오류와 같이 오류로 답한다». 리더가 정하고 완료가 답한다.
+    ebadf,
     /// 응답을 **아직 못 한다** — 디코드를 리더가 락 밖에서 하고 `completeKittyTransmit` 이 답한다(§13.8).
     /// `kittyReply` 는 이 값을 침묵으로 다룬다. 표시 문자열이 없다.
     deferred,
@@ -108,6 +130,7 @@ pub const KittyStatus = enum {
             .enoent => "ENOENT:no such image",
             .enotsupp => "ENOTSUPP:unsupported graphics feature",
             .enomem => "ENOMEM:image storage full",
+            .ebadf => "EBADF:transmission medium unreadable",
         };
     }
 };
@@ -731,6 +754,13 @@ pub fn execKittyGraphics(self: *TerminalCore, cmd_in: KittyGraphicsCommand, payl
     var cmd = cmd_in;
     // `I=`(image number)를 image id 로 푼다 — 같은 번호는 같은 id 를 재사용해 이전 이미지를 교체한다.
     // **`i=` 가 함께 오면 그쪽이 이긴다**(id 가 더 구체적인 지정이다 — 명세). 배정에 실패하면 거부한다.
+    // id 도 번호도 없는 전송: 내부 id 를 배정한다(표시는 되고 참조·응답은 없다 — 명세). 표시 없는 `a=t` 도
+    // 같이 받는다 — 앱이 참조할 길이 없어 쓸모는 없지만 거부할 근거도 없다(kitty 와 같은 동작).
+    if (cmd.image_id == 0 and cmd.image_number == 0 and (cmd.action == 't' or cmd.action == 'T')) {
+        cmd.image_id = allocateInternalImageId(self);
+        if (cmd.image_id == 0) return; // 배정 실패 — 답할 상대도 없다
+        cmd.internal_id = true;
+    }
     if (cmd.image_number != 0 and cmd.image_id == 0) {
         if (cmd.action == 'd') {
             // **delete 는 배정하지 않는다 — 조회만 한다.** 여기서 resolveImageNumber 를 부르면 없는
@@ -796,6 +826,7 @@ pub fn execKittyGraphics(self: *TerminalCore, cmd_in: KittyGraphicsCommand, payl
 /// 답하고 앱들이 그 응답을 전제로 만들어졌으므로, 표준 동작을 따르는 것이 맞다.
 fn kittyReply(self: *TerminalCore, cmd: KittyGraphicsCommand, status: KittyStatus) void {
     if (status == .deferred) return; // 디코드가 락 밖에서 끝난 뒤 completeKittyTransmit 이 답한다(§13.8)
+    if (cmd.internal_id) return; // 터미널이 배정한 id 는 앱이 모른다 — 식별자 없는 명령과 같이 침묵
     if (cmd.image_id == 0 and cmd.image_number == 0) return; // 식별자(i= 또는 I=) 없는 명령엔 응답하지 않는다(명세)
     if (cmd.quiet >= 2) return; // q=2: 전부 침묵
     if (cmd.quiet == 1 and status == .ok) return; // q=1: 실패만 보고
@@ -904,6 +935,24 @@ fn resolveImageNumber(self: *TerminalCore, number: u32) u32 {
     if (tries == 4096) return 0; // 배정 실패 — 호출자가 ENOMEM 으로 거부한다
     if (self.kitty_image_numbers.items.len >= TerminalCore.max_kitty_placements) return 0; // 폭주 방어선(placement 와 같은 한도)
     self.kitty_image_numbers.append(self.allocator, .{ .number = number, .image_id = candidate }) catch return 0;
+    self.kitty_next_auto_id = candidate -% 1;
+    return candidate;
+}
+
+/// 식별자 없는 전송에 줄 **내부 id** — `resolveImageNumber` 와 같은 자동 대역(천장에서 내려온다)을 쓰되 번호 표에는
+/// 안 적는다(앱이 다시 부를 수 없으니 매핑이 필요 없다). 저장된 이미지·번호에 예약된 id 를 피한다.
+fn allocateInternalImageId(self: *TerminalCore) u32 {
+    var candidate = self.kitty_next_auto_id;
+    var tries: u32 = 0;
+    while (tries < 4096) : (tries += 1) {
+        if (candidate == 0 or candidate > core.kitty_auto_id_top) {
+            candidate = core.kitty_auto_id_top;
+            continue;
+        }
+        if (!self.kitty_images.map.contains(candidate) and !imageIdTaken(self, candidate)) break;
+        candidate -%= 1;
+    }
+    if (tries == 4096) return 0;
     self.kitty_next_auto_id = candidate -% 1;
     return candidate;
 }
@@ -1363,25 +1412,11 @@ fn decodePngFrame(
 /// `Y`=베이스가 없을 때 채울 배경색(0xRRGGBBAA). `s`/`v` 는 **전송하는 사각형**의 크기이고
 /// 프레임 자체는 언제나 이미지 전체 크기다.
 fn kittyTransmitFrame(self: *TerminalCore, cmd: KittyGraphicsCommand, payload: []const u8) KittyStatus {
-    if (cmd.medium != 'd') return .enotsupp; // 파일·공유메모리 매체는 transmit 과 같은 이유로 거부
-    if (cmd.image_id == 0) return .einval;
-    const img = self.kitty_images.map.getPtr(cmd.image_id) orelse return .enoent;
-    const bpp: u8 = switch (cmd.format) {
-        24 => 3,
-        32 => 4,
-        // **PNG 프레임은 루트의 픽셀 형식을 따른다.** 디코더는 언제나 RGBA 를 내지만, 합성 대상은
-        // 루트 프레임 버퍼라 그쪽 bpp 로 맞춰야 한다(RGB 루트면 알파를 떨군다 — `compositeRect` 가
-        // `bpp < 4` 를 덮어쓰기로 다루는 것과 같은 뜻이다). 거절하지 않는 이유는 「RGB 루트 + PNG
-        // 프레임」이 명세상 합법인 조합이기 때문이다.
-        100 => img.bpp,
-        else => return .einval,
-    };
-    if (bpp != img.bpp) return .einval; // 프레임은 루트와 같은 픽셀 형식이어야 합성이 성립한다
-    if (img.isPending()) return .einval; // 루트 픽셀이 아직 없다(락 밖 디코드 중) — 합성할 바탕이 없다
-    const frame_bytes = img.data.len;
-
-    // 프레임 수 상한 — `a=f` 만 반복하는 스트림이 메모리를 무한히 먹지 못하게 한다(총량 한계와 같은 결).
-    if (cmd.rows == 0 and img.frames.len >= max_animation_frames) return .enomem;
+    if (cmd.medium != 'd') return kittyTransmitMedia(self, cmd, payload, true); // 완료가 `installFrame` 으로 온다
+    var status: KittyStatus = .ok;
+    const target = resolveFrameTarget(self, cmd, &status) orelse return status;
+    const img = target.img;
+    const bpp = target.bpp;
 
     // **PNG 는 자기 치수를 말한다** — 루트 전송과 같은 규칙이라 `s`/`v` 를 안 본다.
     var rect_w: u32 = undefined;
@@ -1396,17 +1431,79 @@ fn kittyTransmitFrame(self: *TerminalCore, cmd: KittyGraphicsCommand, payload: [
         rect_h = decoded.height;
         src = decoded.pixels;
     } else {
-        rect_w = if (cmd.width == 0) img.width else cmd.width;
-        rect_h = if (cmd.height == 0) img.height else cmd.height;
-        if (rect_w == 0 or rect_h == 0) return .einval;
-        const rect_px = std.math.mul(usize, rect_w, rect_h) catch return .einval;
-        const expected = std.math.mul(usize, rect_px, bpp) catch return .einval;
-        src = decodeDirectPixels(self, cmd.compression, payload, expected) catch |e| return switch (e) {
+        const rect = frameRect(cmd, img.*) orelse return .einval;
+        rect_w = rect.w;
+        rect_h = rect.h;
+        src = decodeDirectPixels(self, cmd.compression, payload, rect.bytes(bpp) orelse return .einval) catch |e| return switch (e) {
             error.OutOfMemory => .enomem,
             else => .einval,
         };
     }
+    return installFrame(self, cmd, img, src, rect_w, rect_h, bpp);
+}
+
+const FrameTarget = struct { img: *KittyImage, bpp: u8 };
+
+/// `a=f` 의 대상 이미지와 픽셀 형식을 검증해 돌려준다. 실패면 `status_out` 에 이유를 두고 null.
+/// 인라인 전송과 매체 완료(`completeKittyTransmit`)가 같은 검증을 쓴다 — 완료 시점에 이미지가 지워졌거나
+/// 아직 pending 이면 여기서 걸린다.
+fn resolveFrameTarget(self: *TerminalCore, cmd: KittyGraphicsCommand, status_out: *KittyStatus) ?FrameTarget {
+    if (cmd.image_id == 0) {
+        status_out.* = .einval;
+        return null;
+    }
+    const img = self.kitty_images.map.getPtr(cmd.image_id) orelse {
+        status_out.* = .enoent;
+        return null;
+    };
+    const bpp: u8 = switch (cmd.format) {
+        24 => 3,
+        32 => 4,
+        // **PNG 프레임은 루트의 픽셀 형식을 따른다.** 디코더는 언제나 RGBA 를 내지만, 합성 대상은
+        // 루트 프레임 버퍼라 그쪽 bpp 로 맞춰야 한다(RGB 루트면 알파를 떨군다 — `compositeRect` 가
+        // `bpp < 4` 를 덮어쓰기로 다루는 것과 같은 뜻이다). 거절하지 않는 이유는 「RGB 루트 + PNG
+        // 프레임」이 명세상 합법인 조합이기 때문이다.
+        100 => img.bpp,
+        else => {
+            status_out.* = .einval;
+            return null;
+        },
+    };
+    if (bpp != img.bpp or img.isPending()) { // 루트와 같은 픽셀 형식이어야 하고, 루트 픽셀이 있어야 합성이 선다
+        status_out.* = .einval;
+        return null;
+    }
+    // 프레임 수 상한 — `a=f` 만 반복하는 스트림이 메모리를 무한히 먹지 못하게 한다(총량 한계와 같은 결).
+    if (cmd.rows == 0 and img.frames.len >= max_animation_frames) {
+        status_out.* = .enomem;
+        return null;
+    }
+    return .{ .img = img, .bpp = bpp };
+}
+
+const FrameRect = struct {
+    w: u32,
+    h: u32,
+    /// 이 사각형의 raw 픽셀 바이트 수. 곱이 넘치면 null(악의적 대형 값).
+    fn bytes(self: FrameRect, bpp: u8) ?usize {
+        const px = std.math.mul(usize, self.w, self.h) catch return null;
+        return std.math.mul(usize, px, bpp) catch null;
+    }
+};
+
+/// raw 프레임(`f=24/32`)이 전송하는 사각형 — `s`/`v` 가 없으면 이미지 전체.
+fn frameRect(cmd: KittyGraphicsCommand, img: KittyImage) ?FrameRect {
+    const w = if (cmd.width == 0) img.width else cmd.width;
+    const h = if (cmd.height == 0) img.height else cmd.height;
+    if (w == 0 or h == 0) return null;
+    return .{ .w = w, .h = h };
+}
+
+/// 디코드된 프레임 픽셀(`src`, 코어 allocator 소유 — 여기서 free)을 이미지에 합성해 프레임으로 설치한다.
+/// 인라인 경로(`kittyTransmitFrame`)와 매체 완료(`completeKittyTransmit`, `a=f`)가 같은 자리를 쓴다.
+fn installFrame(self: *TerminalCore, cmd: KittyGraphicsCommand, img: *KittyImage, src: []u8, rect_w: u32, rect_h: u32, bpp: u8) KittyStatus {
     defer self.allocator.free(src);
+    const frame_bytes = img.data.len;
 
     // 대상 프레임 버퍼를 만든다: 베이스 프레임 복사, 없으면 `Y` 배경색으로 채운다.
     const buf = self.allocator.alloc(u8, frame_bytes) catch return .enomem;
@@ -1653,7 +1750,7 @@ fn decodeDirectPixels(
     payload: []const u8,
     expected: usize,
 ) error{ OutOfMemory, Invalid }![]u8 {
-    const dec = std.base64.standard.Decoder;
+    const dec = base64Decoder(payload);
     const decoded_len = dec.calcSizeForSlice(payload) catch return error.Invalid;
     if (decoded_len == 0) return error.Invalid;
     if (compression == 0 and decoded_len != expected) return error.Invalid;
@@ -1691,9 +1788,8 @@ fn decodeDirectPixels(
 }
 
 fn kittyTransmit(self: *TerminalCore, cmd: KittyGraphicsCommand, payload: []const u8, store: bool) KittyStatus {
-    // 전송 매체: direct(base64 픽셀)만 구현한다. f/t/s는 payload가 경로·이름이라 픽셀로 오인하면
-    // 쓰레기를 디코드한다 — 명시 거부해야 앱이 direct로 폴백한다.
-    if (cmd.medium != 'd') return .enotsupp;
+    // 전송 매체 f/t/s: payload 가 경로·이름이라 코어가 읽을 수 없다 — 리더 job 으로 미룬다(리더가 없으면 거부).
+    if (cmd.medium != 'd') return kittyTransmitMedia(self, cmd, payload, store);
     if (cmd.image_id == 0) return .einval; // 필수 control 누락(저장 키)
     if (cmd.format == 100) return kittyTransmitPng(self, cmd, payload, store); // PNG는 별도 경로(s/v는 PNG가 자기기술)
     const bpp: u8 = switch (cmd.format) {
@@ -1743,6 +1839,15 @@ pub const KittyPendingJob = struct {
     format: u32 = 32,
     /// `payload` 가 누적 버퍼를 통째로 넘겨받은 것이면 그 할당 길이(free 는 이 길이로). 0 이면 `payload.len` 이 곧 할당 길이.
     payload_cap: usize = 0,
+    /// 전송 매체(`t=`). `'d'` 면 `payload` 는 base64 픽셀이고 리더는 `decodeKittyJob` 으로 푼다. `'f'`/`'t'`/`'s'`
+    /// 면 `payload` 는 base64 **경로·이름**이고 리더가 그것을 읽어(`kitty_media_io`) `decodeKittyRaw` 로 푼다 —
+    /// 코어는 I/O 를 하지 않는다. 매체 job 이 큐에 있는 동안 파서는 **멈춘다**(`hasQueuedMediaJob`): 명세가
+    /// 「질의(`a=q`)에는 다른 입력을 처리하기 전에 즉시 답하라」고 하고, icat 은 `a=q` 셋과 DA1 을 한 write 로
+    /// 보내 DA1 응답이 먼저 오면 그 매체를 «미지원» 으로 읽는다(실측 2026-09-20).
+    medium: u8 = 'd',
+    /// `a=q` — 읽고 디코드까지 하되 **저장하지 않고** 결과만 답한다(pending 엔트리도 없다). 매체 질의는 자원을
+    /// 실제로 소비해야(임시 파일 삭제·shm unlink) 앱이 그 매체를 믿는다 — 그래서 질의도 job 이다.
+    query: bool = false,
     /// 완료가 밀어낸 옛 이미지(`completeKittyTransmit` 이 채운다). 같은 id 재전송은 **완료 시점까지 옛 픽셀을
     /// 그대로 보여 주고**(m=0 에서 map 에서 빼면 디코드 동안 한 프레임이 비어 깜빡인다 — 2026-09-15 사용자 보고),
     /// 설치 순간에 교체된 옛 것을 여기에 실어 리더가 unlock 뒤 `freeAll` 한다(ReleaseSafe 에서 1.56ms 였던 free).
@@ -1754,13 +1859,15 @@ pub const KittyDecoded = union(enum) {
     pixels: struct { data: []u8, width: u32, height: u32, bpp: u8 },
     invalid,
     oom,
+    /// 매체를 못 읽었다(리더의 `kitty_media_io` 가 정한다) → `EBADF`.
+    unreadable,
 };
 
 /// base64 payload 의 머리에서 PNG 시그니처 + IHDR 을 엿본다(33 바이트 = base64 44 자). 픽셀 수와 무관한 O(1).
 /// PNG 가 아니거나 치수가 0 이면 null — 호출자가 인라인 경로로 보낸다.
 fn peekPngDims(payload: []const u8) ?struct { width: u32, height: u32 } {
     if (payload.len < 44) return null;
-    const dec = std.base64.standard.Decoder;
+    const dec = std.base64.standard.Decoder; // 앞 44 자만 본다 — 패딩은 끝에 있으니 여기서는 무관하다
     var head: [33]u8 = undefined;
     dec.decode(&head, payload[0..44]) catch return null;
     if (!std.mem.eql(u8, head[0..8], "\x89PNG\r\n\x1a\n")) return null;
@@ -1778,16 +1885,58 @@ fn deferKittyTransmitPng(self: *TerminalCore, cmd: KittyGraphicsCommand, payload
     var cmd_with_dims = cmd;
     cmd_with_dims.width = width;
     cmd_with_dims.height = height;
-    return deferKittyTransmitInner(self, cmd_with_dims, payload, 4, expected, 100);
+    return deferKittyTransmitInner(self, cmd_with_dims, payload, 4, expected, 100, false);
 }
 
 /// m=0 에서 pending 엔트리를 만들고 job 을 큐에 넣는다. 락 아래에서 하는 일은 검증·복사(payload 수백 KB)·
 /// map 갱신뿐 — 픽셀 수에 비례하는 일은 없다.
 fn deferKittyTransmit(self: *TerminalCore, cmd: KittyGraphicsCommand, payload: []const u8, bpp: u8, expected: usize) KittyStatus {
-    return deferKittyTransmitInner(self, cmd, payload, bpp, expected, cmd.format);
+    return deferKittyTransmitInner(self, cmd, payload, bpp, expected, cmd.format, false);
 }
 
-fn deferKittyTransmitInner(self: *TerminalCore, cmd: KittyGraphicsCommand, payload: []const u8, bpp: u8, expected: usize, format: u32) KittyStatus {
+/// `t=f/t/s` — 리더가 읽을 매체 job 을 만든다. 코어는 경로를 검증하지 않는다(경로 문자열의 뜻은 파일시스템이
+/// 정하고 그건 리더 것이다). 여기서 정하는 것: 리더가 없으면(`kitty_defer_decode` 꺼짐) **`ENOTSUPP`** — 그래야
+/// 앱이 direct 로 폴백한다(헤드리스·wasm·메인 스레드의 인라인 `core.write`). `a=t/T/q/f` 가 여기로 온다.
+fn kittyTransmitMedia(self: *TerminalCore, cmd: KittyGraphicsCommand, payload: []const u8, store: bool) KittyStatus {
+    switch (cmd.medium) {
+        'f', 't', 's' => {},
+        else => return .einval, // 명세에 없는 매체 글자
+    }
+    if (!self.kitty_defer_decode) return .enotsupp;
+    if (cmd.image_id == 0 and cmd.image_number == 0) return .einval; // 응답할 상대가 없다 — 질의도 id 가 있어야 뜻이 있다
+    if (payload.len == 0) return .einval; // 경로가 없다
+    var bpp: u8 = 4;
+    var expected: usize = 0; // 0 = «읽어 봐야 안다»(PNG) — 완료가 실 크기로 한도를 다시 본다
+    if (cmd.action == 'f') {
+        // 프레임: 대상 이미지·형식 검증은 지금 한다(없는 이미지에 프레임을 읽어 올 이유가 없다). 완료가 다시 본다.
+        var status: KittyStatus = .ok;
+        const target = resolveFrameTarget(self, cmd, &status) orelse return status;
+        bpp = target.bpp;
+        if (cmd.format != 100) {
+            const rect = frameRect(cmd, target.img.*) orelse return .einval;
+            expected = rect.bytes(bpp) orelse return .einval;
+        }
+    } else switch (cmd.format) {
+        100 => {},
+        24, 32 => {
+            bpp = if (cmd.format == 24) 3 else 4;
+            if (cmd.width == 0 or cmd.height == 0) return .einval; // raw 픽셀은 치수가 필수
+            const wh = std.math.mul(usize, cmd.width, cmd.height) catch return .einval;
+            expected = std.math.mul(usize, wh, bpp) catch return .einval;
+        },
+        else => return .einval,
+    }
+    return deferKittyTransmitInner(self, cmd, payload, bpp, expected, cmd.format, !store);
+}
+
+/// 리더가 가져갈 매체 job 이 큐에 있는가 — 파서가 이것을 보고 **멈춘다**(`parser.feed`). direct job 은 안 센다:
+/// 그쪽은 응답 순서가 문제되지 않고(질의는 인라인), 멈추면 큰 이미지마다 파서가 끊긴다.
+pub fn hasQueuedMediaJob(self: *const TerminalCore) bool {
+    for (self.kitty_pending_jobs.items) |job| if (job.medium != 'd') return true;
+    return false;
+}
+
+fn deferKittyTransmitInner(self: *TerminalCore, cmd: KittyGraphicsCommand, payload: []const u8, bpp: u8, expected: usize, format: u32, query: bool) KittyStatus {
     if (payload.len == 0) return .einval;
     if (expected > self.kitty_images.limit) return .enomem; // 한 장이 전체 한도 초과 — 디코드해 볼 것도 없다
     // payload 가 chunked 누적 버퍼(`kitty_chunk`) 그 자체면 복사하지 않고 **소유권을 옮긴다** — 3.7MB PNG 의 base64 를
@@ -1810,7 +1959,8 @@ fn deferKittyTransmitInner(self: *TerminalCore, cmd: KittyGraphicsCommand, paylo
     // 같은 id 재전송이면 옛 엔트리를 **그대로 둔다** — 디코드가 끝날 때까지 옛 픽셀이 계속 그려진다(브라우저는
     // 매 프레임 같은 id 로 재전송하므로, 여기서 빼면 프레임마다 한 번 빈 화면이 스쳐 깜빡인다). 새 id 면 빈
     // pending 엔트리를 만들어 a=T 의 placement 가 붙을 자리를 준다(보여 줄 옛 것이 없으니 비어도 깜빡임이 아니다).
-    const created_pending = !self.kitty_images.map.contains(cmd.image_id);
+    // 질의와 프레임은 이미지 자리를 만들지 않는다(질의는 저장이 없고, 프레임은 이미 있는 이미지에 얹는다).
+    const created_pending = !query and cmd.action != 'f' and !self.kitty_images.map.contains(cmd.image_id);
     if (created_pending) {
         self.kitty_images.map.put(self.allocator, cmd.image_id, .{
             .id = cmd.image_id,
@@ -1832,6 +1982,8 @@ fn deferKittyTransmitInner(self: *TerminalCore, cmd: KittyGraphicsCommand, paylo
         .bpp = bpp,
         .format = format,
         .payload_cap = payload_cap,
+        .medium = cmd.medium,
+        .query = query,
     }) catch {
         freeJobPayload(self.allocator, owned, payload_cap);
         if (created_pending) {
@@ -1860,7 +2012,8 @@ pub fn takePendingKittyJobs(self: *TerminalCore, into: *std.ArrayListUnmanaged(K
 /// 코어를 만지지 않는다 — `self` 없이 순수 함수다.
 pub fn decodeKittyJob(job: *KittyPendingJob, alloc: std.mem.Allocator) KittyDecoded {
     // payload 는 여기서 풀지 않는다 — 완료(`completeKittyTransmit`)가 락 아래에서 코어의 누적 버퍼로 되돌리거나 free 한다.
-    const dec = std.base64.standard.Decoder;
+    if (job.medium != 'd') return .unreadable; // 매체 job 은 리더가 읽어 `decodeKittyRaw` 로 온다 — 여기로 오면 I/O 주체가 없다
+    const dec = base64Decoder(job.payload);
     const decoded_len = dec.calcSizeForSlice(job.payload) catch return .invalid;
     if (decoded_len == 0) return .invalid;
     if (job.format != 100 and job.cmd.compression == 0 and decoded_len != job.expected) return .invalid;
@@ -1869,6 +2022,33 @@ pub fn decodeKittyJob(job: *KittyPendingJob, alloc: std.mem.Allocator) KittyDeco
         alloc.free(raw);
         return .invalid;
     };
+    return decodeKittyRaw(job, raw, alloc);
+}
+
+/// 락 **밖**에서: 이미 base64 가 풀린(또는 매체에서 읽은) 바이트 → (zlib) → 픽셀. `raw` 는 `alloc` 소유이고
+/// 여기서 free 한다. 코어를 만지지 않는 순수 함수다.
+pub fn decodeKittyRaw(job: *const KittyPendingJob, raw_in: []u8, alloc: std.mem.Allocator) KittyDecoded {
+    var raw = raw_in;
+    if (raw.len == 0) {
+        alloc.free(raw);
+        return .invalid;
+    }
+    if (job.format != 100 and job.cmd.compression == 0) {
+        if (raw.len < job.expected) {
+            alloc.free(raw);
+            return .invalid;
+        }
+        // **넘치는 바이트는 버린다**(모자라면 거부). direct 는 정확히 맞아야 하지만(`decodeKittyJob` 이 먼저 거른다)
+        // 매체는 그렇지 않다 — icat 의 탐침은 3 바이트 픽셀을 두고 `S=` 에 경로 길이(159)·shm 이름 길이(18)를 싣고,
+        // shm 은 페이지 크기로 올라와 있다(실측 2026-09-20). kitty 는 그것에 OK 로 답한다 — 안 그러면 kitty 공식
+        // 도구가 두 매체를 «미지원» 으로 읽고 inline 으로 내려간다.
+        if (raw.len > job.expected) {
+            raw = alloc.realloc(raw, job.expected) catch {
+                alloc.free(raw);
+                return .oom;
+            };
+        }
+    }
     if (job.format == 100) {
         // PNG 파일 → RGBA. 치수는 디코더가 말한다(IHDR 로 잡은 자리와 같아야 정상이지만, 설치는 디코더 값을 믿는다).
         defer alloc.free(raw);
@@ -1915,6 +2095,21 @@ pub fn completeKittyTransmit(self: *TerminalCore, job: *KittyPendingJob, decoded
     }
     job.payload = &.{};
     job.payload_cap = 0;
+    // 질의(`a=q`)는 저장이 없다 — 디코드 결과만 답한다(pending 엔트리도 만들지 않았다).
+    if (job.query) {
+        const status: KittyStatus = switch (decoded) {
+            .pixels => |px| blk: {
+                self.allocator.free(px.data);
+                break :blk .ok;
+            },
+            .invalid => .einval,
+            .oom => .enomem,
+            .unreadable => .ebadf,
+        };
+        return kittyReply(self, job.cmd, status);
+    }
+    // 프레임(`a=f`, 매체 전용 — direct 프레임은 인라인이다): 대상 이미지에 합성해 설치한다.
+    if (job.cmd.action == 'f') return kittyReply(self, job.cmd, completeMediaFrame(self, job.cmd, decoded));
     const status: KittyStatus = switch (decoded) {
         .invalid => blk: {
             dropPendingKittyEntry(self, job.*);
@@ -1923,6 +2118,10 @@ pub fn completeKittyTransmit(self: *TerminalCore, job: *KittyPendingJob, decoded
         .oom => blk: {
             dropPendingKittyEntry(self, job.*);
             break :blk .enomem;
+        },
+        .unreadable => blk: {
+            dropPendingKittyEntry(self, job.*);
+            break :blk .ebadf;
         },
         .pixels => |px| blk: {
             const pixels = px.data;
@@ -1961,6 +2160,40 @@ pub fn completeKittyTransmit(self: *TerminalCore, job: *KittyPendingJob, decoded
     kittyReply(self, job.cmd, status);
 }
 
+/// 매체 프레임의 완료 — 디코드된 사각형을 `installFrame` 으로 합성한다. 대상 검증은 전송 시점과 같은
+/// `resolveFrameTarget` 이라, 그 사이 이미지가 지워졌으면 `ENOENT`, 픽셀 형식이 어긋나면 `EINVAL` 이다.
+fn completeMediaFrame(self: *TerminalCore, cmd: KittyGraphicsCommand, decoded: KittyDecoded) KittyStatus {
+    const px = switch (decoded) {
+        .pixels => |p| p,
+        .invalid => return .einval,
+        .oom => return .enomem,
+        .unreadable => return .ebadf,
+    };
+    var status: KittyStatus = .ok;
+    const target = resolveFrameTarget(self, cmd, &status) orelse {
+        self.allocator.free(px.data);
+        return status;
+    };
+    var src = px.data;
+    if (px.bpp != target.bpp) {
+        // PNG 프레임이 RGB 루트에 얹히는 경우(디코더는 언제나 RGBA) — `decodePngFrame` 과 같은 규칙으로 알파를 떨군다.
+        if (px.bpp != 4 or target.bpp != 3) {
+            self.allocator.free(px.data);
+            return .einval;
+        }
+        const count = @as(usize, px.width) * @as(usize, px.height);
+        const out = self.allocator.alloc(u8, count * 3) catch {
+            self.allocator.free(px.data);
+            return .enomem;
+        };
+        var i: usize = 0;
+        while (i < count) : (i += 1) @memcpy(out[i * 3 ..][0..3], px.data[i * 4 ..][0..3]);
+        self.allocator.free(px.data);
+        src = out;
+    }
+    return installFrame(self, cmd, target.img, src, px.width, px.height, target.bpp);
+}
+
 /// 디코드 실패·한도 초과 — **빈 pending 엔트리**(새 id)면 그 엔트리와 placement 를 걷는다. 옛 이미지가 있던
 /// 같은 id 재전송이면 옛 것을 그대로 둔다(실패한 전송이 화면을 지우지 않는다).
 fn dropPendingKittyEntry(self: *TerminalCore, job: KittyPendingJob) void {
@@ -1981,6 +2214,8 @@ fn flushPendingKittyImage(self: *TerminalCore, image_id: u32) void {
             continue;
         }
         var job = self.kitty_pending_jobs.orderedRemove(i);
+        // 매체 job 은 여기 올 수 없다 — 파서가 매체 job 뒤에서 멈추므로 같은 write 안에 후속 명령이 없다.
+        // 그래도 오면 I/O 주체가 없으니 `unreadable`(EBADF) 로 닫는다(`decodeKittyJob` 이 그렇게 답한다).
         const decoded = decodeKittyJob(&job, self.allocator);
         completeKittyTransmit(self, &job, decoded);
         if (job.old_image) |*o| o.freeAll(self.allocator); // 인라인 경로는 락을 쥔 채라 여기서 free
@@ -2020,7 +2255,7 @@ fn decodePngPayload(
     compression: u8,
     payload: []const u8,
 ) error{ OutOfMemory, TooBig, Invalid }![]u8 {
-    const dec = std.base64.standard.Decoder;
+    const dec = base64Decoder(payload);
     const decoded_len = dec.calcSizeForSlice(payload) catch return error.Invalid;
     if (decoded_len == 0) return error.Invalid;
     const raw = self.allocator.alloc(u8, decoded_len) catch return error.OutOfMemory;

@@ -5,6 +5,7 @@ const runtime_mod = @import("runtime.zig");
 const terminal = @import("../terminal.zig");
 const core_command = @import("../session/core_command.zig");
 const sync_frame_split = @import("sync_frame_split.zig");
+const kitty_media_io = @import("kitty_media_io.zig");
 extern "c" fn usleep(usec: c_uint) c_int;
 
 /// reader-로컬 응답 outbound 버퍼(runProcessing의 out_buf)의 상한. 자식이 stdin을 안 비우면서(POLLOUT 미발화) 응답
@@ -578,6 +579,8 @@ pub const PtyReader = struct {
     /// 락 밖에서 디코드할 kitty 전송(§13.8). `applyToCore` 가 락 아래에서 코어 큐를 여기로 옮기고,
     /// `drainKittyJobs` 가 같은 iteration 안에 다 처리한다 — pause 경계에 남지 않는다.
     kitty_jobs: std.ArrayListUnmanaged(terminal.kitty.KittyPendingJob) = .empty,
+    /// 매체 전송이 한 번에 읽을 최대 바이트 — 코어의 이미지 총량 한도를 락 아래에서 복사해 둔다(락 밖 읽기가 코어를 안 보게).
+    kitty_media_cap: usize = 0,
     io: std.Io = undefined,
     // 단일 writer(docs/plans/io-render-threading.md §8 P2-3b): processing 경로에서 메인 입력(키/paste/스크롤)이
     // 이 큐로 들어오면 runProcessing이 같은 poll 루프에서 drain해 PTY로 write한다 — 메인은 직접 안 쓴다.
@@ -735,32 +738,43 @@ pub const PtyReader = struct {
         out_head: *usize,
     ) void {
         if (bytes.len == 0) return;
-        const diag_on = diag_hold_enabled.load(.monotonic);
-        const t0: i128 = if (diag_on) std.Io.Clock.awake.now(self.io).nanoseconds else 0;
-        core.owner_dbg.lock(mutex, self.io);
-        const t1: i128 = if (diag_on) std.Io.Clock.awake.now(self.io).nanoseconds else 0;
-        // 이 호출이 만드는 이미지 job 은 아래 drainKittyJobs 가 책임진다 — 그래서 **이 호출 동안만** 디코드를
-        // 미룬다(§13.8). 다른 호출자(메인이 lockCore 아래 core.write 하는 테스트·경로)는 인라인이라 pending 을
-        // 남기지 않는다.
-        core.kitty_defer_decode = true;
-        core.write(bytes) catch {}; // best-effort(파서 OOM 등은 그 청크 드롭)
-        core.kitty_defer_decode = false;
-        const reply = core.pendingResponse();
-        if (reply.len > 0) {
-            appendResponseBounded(self.allocator, out_buf, out_head.*, reply);
-            core.clearResponse();
+        // 매체 전송(`t=f/t/s`) job 이 생기면 코어가 **그 APC 뒤에서 멈춘다**(`writeUntilMediaJob`). 그 job 을
+        // 여기서 읽어 완료·응답한 뒤 나머지 바이트를 다시 넣는다 — 응답이 뒤따르는 입력(DA1 등)의 응답보다
+        // 앞서야 하기 때문이다(`parser.feedUntil` 머리말). direct job 은 멈추지 않는다.
+        var offset: usize = 0;
+        while (offset < bytes.len) {
+            const chunk = bytes[offset..];
+            const diag_on = diag_hold_enabled.load(.monotonic);
+            const t0: i128 = if (diag_on) std.Io.Clock.awake.now(self.io).nanoseconds else 0;
+            core.owner_dbg.lock(mutex, self.io);
+            const t1: i128 = if (diag_on) std.Io.Clock.awake.now(self.io).nanoseconds else 0;
+            // 이 호출이 만드는 이미지 job 은 아래 drainKittyJobs 가 책임진다 — 그래서 **이 호출 동안만** 디코드를
+            // 미룬다(§13.8). 다른 호출자(메인이 lockCore 아래 core.write 하는 테스트·경로)는 인라인이라 pending 을
+            // 남기지 않는다.
+            core.kitty_defer_decode = true;
+            const consumed = core.writeUntilMediaJob(chunk) catch chunk.len; // best-effort(파서 OOM 등은 그 청크 드롭)
+            core.kitty_defer_decode = false;
+            const reply = core.pendingResponse();
+            if (reply.len > 0) {
+                appendResponseBounded(self.allocator, out_buf, out_head.*, reply);
+                core.clearResponse();
+            }
+            // 이 청크가 만든 락 밖 디코드 job 을 가져온다(포인터 이동). OOM 이면 코어 큐에 남겨 두고 다음
+            // 청크에서 다시 시도한다 — pending 엔트리는 그동안 그리지 않을 뿐이다.
+            terminal.kitty.takePendingKittyJobs(core, &self.kitty_jobs, self.allocator) catch {};
+            self.kitty_media_cap = core.kitty_images.limit;
+            core.owner_dbg.unlock(mutex, self.io);
+            if (diag_on) diagRecordHold(t0, t1, std.Io.Clock.awake.now(self.io).nanoseconds, consumed);
+            // 청크 경계: 메인이 락을 요구 중이면 차례를 넘긴다. 이 루프는 pty 청크(~1KB)마다 재잠금하고 사이에
+            // 잠들지 않아, 양보 없이는 불공정 mutex 아래 메인이 보유(~0.13ms)의 수십 배를 기다린다(plans §13).
+            core.handoff.yieldToDemand(self.io);
+            // 이 청크가 남긴 이미지 job 을 지금 끝낸다(락 밖 디코드 → 재잠금 설치). 다음 applyToCore 가 시작될 때
+            // pending 이미지가 없도록 — 같은 applySyncFramed 안의 뒷 조각이 그 이미지에 프레임을 얹을 수 있다.
+            self.drainKittyJobs(core, mutex, out_buf, out_head);
+            // 매체 job 이 큐에 남아(OOM 으로 못 가져감) 코어가 0 바이트에서 멈추면 무한 루프다 — 그 청크는 버린다.
+            if (consumed == 0) break;
+            offset += consumed;
         }
-        // 이 청크가 만든 락 밖 디코드 job 을 가져온다(포인터 이동). OOM 이면 코어 큐에 남겨 두고 다음
-        // 청크에서 다시 시도한다 — pending 엔트리는 그동안 그리지 않을 뿐이다.
-        terminal.kitty.takePendingKittyJobs(core, &self.kitty_jobs, self.allocator) catch {};
-        core.owner_dbg.unlock(mutex, self.io);
-        if (diag_on) diagRecordHold(t0, t1, std.Io.Clock.awake.now(self.io).nanoseconds, bytes.len);
-        // 청크 경계: 메인이 락을 요구 중이면 차례를 넘긴다. 이 루프는 pty 청크(~1KB)마다 재잠금하고 사이에
-        // 잠들지 않아, 양보 없이는 불공정 mutex 아래 메인이 보유(~0.13ms)의 수십 배를 기다린다(plans §13).
-        core.handoff.yieldToDemand(self.io);
-        // 이 청크가 남긴 이미지 job 을 지금 끝낸다(락 밖 디코드 → 재잠금 설치). 다음 applyToCore 가 시작될 때
-        // pending 이미지가 없도록 — 같은 applySyncFramed 안의 뒷 조각이 그 이미지에 프레임을 얹을 수 있다.
-        self.drainKittyJobs(core, mutex, out_buf, out_head);
     }
 
     /// 락 **밖**에서 디코드하고 재잠금해 설치·응답한다(docs/plans/io-render-threading.md §13.8). `applyToCore` 가
@@ -777,7 +791,11 @@ pub const PtyReader = struct {
         if (self.kitty_jobs.items.len == 0) return;
         defer self.kitty_jobs.clearRetainingCapacity();
         for (self.kitty_jobs.items) |*job| {
-            const decoded = terminal.kitty.decodeKittyJob(job, core.allocator); // 락 밖 — payload free 포함
+            // 락 밖 — direct 는 base64 를 풀고, 매체는 파일·shm 을 읽는다(둘 다 코어를 안 만진다).
+            const decoded = if (job.medium == 'd')
+                terminal.kitty.decodeKittyJob(job, core.allocator)
+            else
+                kitty_media_io.readAndDecode(self.io, core.allocator, job, self.kitty_media_cap);
             core.owner_dbg.lock(mutex, self.io);
             terminal.kitty.completeKittyTransmit(core, job, decoded);
             const reply = core.pendingResponse();
@@ -1791,6 +1809,111 @@ test "sync(2026): 청크가 프레임 한가운데서 끝나도 코어에는 «�
     try std.testing.expectEqual(@as(usize, 0), reader.sync_held_len);
 }
 
+test "kitty 매체 전송(리더): a=q(t=t)·a=q(t=s 없음)·DA1 한 청크 — 질의 응답이 DA1 응답보다 앞서고, 임시 파일은 소비된다" {
+    // icat 의 `--detect-support` 가 보내는 모양 그대로다(실측 2026-09-20): 세 질의와 DA1 이 한 write 로 온다. 리더가
+    // 매체 job 뒤에서 코어를 멈추고(`writeUntilMediaJob`) 읽어 답한 뒤 나머지를 넣지 않으면 DA1 응답이 먼저 나가
+    // kitten 이 그 매체를 «미지원» 으로 읽는다.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var queue = try PtyEventQueue.init(io, allocator, 1);
+    defer queue.deinit();
+    var session: pty.PtySession = undefined; // run()을 시작하지 않으므로 역참조 안 됨
+    var reader = PtyReader.init(allocator, 11, &session, &queue);
+    defer reader.deinit();
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 40, .rows = 4 });
+    defer core.deinit();
+    var mutex: std.Io.Mutex = .init;
+    reader.setProcessing(&core, &mutex, io);
+    var out_buf: std.ArrayList(u8) = .empty;
+    defer out_buf.deinit(allocator);
+    var out_head: usize = 0;
+
+    // TMPDIR 을 우리 tmp 로 돌려 표식 파일이 «임시 디렉터리 안» 이 되게 한다(삭제 계약).
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const rootz = try allocator.dupeZ(u8, root);
+    defer allocator.free(rootz);
+    const saved = if (std.c.getenv("TMPDIR")) |v| try allocator.dupeZ(u8, std.mem.span(v)) else null;
+    defer if (saved) |v| allocator.free(v);
+    _ = setenv("TMPDIR", rootz.ptr, 1);
+    defer _ = setenv("TMPDIR", if (saved) |v| v.ptr else "", 1);
+    try tmp.dir.writeFile(io, .{ .sub_path = "kitty-tty-graphics-protocol-r", .data = "\x01\x02\x03" });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/kitty-tty-graphics-protocol-r", .{root});
+    var b64_buf: [std.fs.max_path_bytes * 2]u8 = undefined;
+    const b64 = std.base64.standard_no_pad.Encoder.encode(&b64_buf, path); // kitten 처럼 패딩 없이
+
+    // 하나의 청크: inline 질의 · t=t 질의(S 는 경로 길이 — icat 의 모양) · DA1.
+    const seq = try std.fmt.allocPrint(allocator, "\x1b_Ga=q,f=24,s=1,v=1,S=3,i=1;MTIz\x1b\\\x1b_Ga=q,f=24,t=t,s=1,v=1,S={d},i=2;{s}\x1b\\\x1b[c", .{ path.len, b64 });
+    defer allocator.free(seq);
+    reader.applySyncFramed(&core, &mutex, seq, &out_buf, &out_head);
+
+    // 응답 순서: i=1 OK · i=2 OK · DA1. 그리고 임시 파일은 사라졌고, 저장된 이미지는 없다(질의).
+    const want = "\x1b_Gi=1;OK\x1b\\\x1b_Gi=2;OK\x1b\\\x1b[?62;22c";
+    try std.testing.expectEqualStrings(want, out_buf.items[out_head..]);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "kitty-tty-graphics-protocol-r", .{}));
+    mutex.lockUncancelable(io);
+    const stored = core.kitty_images.map.count();
+    const jobs_left = core.kitty_pending_jobs.items.len;
+    mutex.unlock(io);
+    try std.testing.expectEqual(@as(usize, 0), stored);
+    try std.testing.expectEqual(@as(usize, 0), jobs_left);
+    try std.testing.expectEqual(@as(usize, 0), reader.kitty_jobs.items.len);
+}
+
+test "kitty 매체 전송(리더): a=T(t=f, id 없음) 는 파일을 읽어 이미지를 설치하고 파일은 남긴다; 응답은 없다" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var queue = try PtyEventQueue.init(io, allocator, 1);
+    defer queue.deinit();
+    var session: pty.PtySession = undefined;
+    var reader = PtyReader.init(allocator, 11, &session, &queue);
+    defer reader.deinit();
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 40, .rows = 4 });
+    defer core.deinit();
+    var mutex: std.Io.Mutex = .init;
+    reader.setProcessing(&core, &mutex, io);
+    var out_buf: std.ArrayList(u8) = .empty;
+    defer out_buf.deinit(allocator);
+    var out_head: usize = 0;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    // 2x1 RGBA 앞에 4 바이트 헤더 — O=4 로 건너뛴다.
+    try tmp.dir.writeFile(io, .{ .sub_path = "px.bin", .data = "HDR!" ++ "\xff\x00\x00\xff" ++ "\x00\xff\x00\xff" });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/px.bin", .{root});
+    var b64_buf: [std.fs.max_path_bytes * 2]u8 = undefined;
+    const b64 = std.base64.standard.Encoder.encode(&b64_buf, path);
+    const seq = try std.fmt.allocPrint(allocator, "\x1b_Ga=T,f=32,s=2,v=1,t=f,O=4;{s}\x1b\\Z", .{b64});
+    defer allocator.free(seq);
+    reader.applySyncFramed(&core, &mutex, seq, &out_buf, &out_head);
+
+    try std.testing.expectEqualStrings("", out_buf.items[out_head..]); // id 를 안 줬으니 응답도 없다
+    try tmp.dir.access(io, "px.bin", .{}); // t=f 는 지우지 않는다
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_images.map.count());
+    var it = core.kitty_images.map.valueIterator();
+    const img = it.next().?.*;
+    try std.testing.expect(!img.isPending());
+    try std.testing.expectEqual(@as(usize, 8), img.data.len);
+    try std.testing.expectEqual(@as(u8, 0xff), img.data[0]);
+    try std.testing.expectEqual(@as(usize, 1), core.kitty_placements.items.len);
+    // 뒤따르는 바이트("Z")도 잃지 않았다 — 이미지가 커서를 옮긴 뒤 자리라 위치는 안 묻고 있음만 센다.
+    var found_z = false;
+    for (core.snapshot().cells) |cell| if (cell.codepoint == 'Z') {
+        found_z = true;
+    };
+    try std.testing.expect(found_z);
+}
+
 test "sync(2026): 2026 을 안 쓰는 스트림은 보류도 복사도 없이 그대로 흐른다" {
     // 이 축이 켜졌다고 평범한 셸 출력이 한 tick 늦으면 안 된다. 보류 버퍼는 **첫 프레임을 만날 때만**
     // 잡히므로, 2026 이 없는 스트림은 할당조차 안 일어난다.
@@ -1848,3 +1971,5 @@ test "sync(2026): 끝나지 않는 프레임은 상한에서 접어 스트림을
     try std.testing.expect(saw_bsu >= 1);
     try std.testing.expect(reader.sync_held_len <= PtyReader.sync_held_max);
 }
+
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;

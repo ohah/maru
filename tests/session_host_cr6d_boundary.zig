@@ -3,6 +3,40 @@
 const std = @import("std");
 const posixWalk = @import("support/posix_walk.zig").posixWalk;
 
+test "CR6d 진단은 앱 초기화 뒤에도 하네스 stderr를 유지한다" {
+    const allocator = std.testing.allocator;
+    const source = try read(allocator, "src/platform/macos/app_host_abi.zig");
+    defer allocator.free(source);
+    const redirect = between(source, "fn redirectStderrToAppLog() void {", "// 여러 실행이") orelse
+        return error.TestUnexpectedResult;
+    const smoke = std.mem.indexOf(u8, redirect, "std.c.getenv(\"MARU_SESSION_HOST_CR6D_INPUT_CONTINUITY_SMOKE\")") orelse
+        return error.TestUnexpectedResult;
+    const duplicate = std.mem.indexOf(u8, redirect, "std.c.dup2(fd, 2)") orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(smoke < duplicate);
+    try std.testing.expectEqual(@as(usize, 1), count(redirect, "std.mem.eql(u8, std.mem.span(value), \"1\")"));
+    const swift = try read(allocator, "src/platform/macos/MaruAppHost.swift");
+    defer allocator.free(swift);
+    try std.testing.expectEqual(@as(usize, 1), count(swift, "if !isSessionHostManualInputSmokeMode {\n                guard CGPreflightPostEventAccess()"));
+    const physical = between(swift, "private func dispatchSessionHostInputPhysicalKey(", "/// Apple Korean IME") orelse
+        return error.TestUnexpectedResult;
+    const manual = std.mem.indexOf(u8, physical, "guard !isSessionHostManualInputSmokeMode else { return false }") orelse
+        return error.TestUnexpectedResult;
+    const post = std.mem.indexOf(u8, physical, "down.post(tap:") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(manual < post);
+    try std.testing.expectEqual(@as(usize, 1), count(swift, "probe.ime_count == 1, sessionHostManualReturnObserved,\n                   !view.hasMarkedText(), view.inputContext != nil"));
+    try std.testing.expectEqual(@as(usize, 1), count(swift, "sessionHostManualReturnObserved = event.keyCode == 36 && chord.isEmpty"));
+    try std.testing.expectEqual(@as(usize, 1), count(swift, "session_host_input_smoke_callback_has_marked_text="));
+    try std.testing.expectEqual(@as(usize, 1), count(swift, "session_host_input_smoke_callback_has_input_context="));
+    try std.testing.expectEqual(@as(usize, 1), count(swift, "if !sessionHostCandidateAdmissionValidated {"));
+    try std.testing.expectEqual(@as(usize, 1), count(swift, "session_host_input_smoke_candidate_phase="));
+    try std.testing.expectEqual(@as(usize, 1), count(swift, "session_host_input_smoke_candidate_rows="));
+    try std.testing.expectEqual(@as(usize, 1), count(swift, "window.contentView?.addSubview(label, positioned: .above, relativeTo: nil)"));
+    try std.testing.expectEqual(@as(usize, 1), count(swift, "session_host_manual_prompt="));
+    try std.testing.expectEqual(@as(usize, 1), count(swift, "guard view.sessionHostCandidateTargetReady(), view.hasMarkedText() else { return false }"));
+    try std.testing.expectEqual(@as(usize, 1), count(swift, "candidate-option-as-meta"));
+}
+
 test "CR6d 경계는 exact recovered screen probe와 actual AppKit input smoke만 연다" {
     const allocator = std.testing.allocator;
     const build = try read(allocator, "build.zig");
@@ -138,6 +172,7 @@ test "CR6d 경계는 exact recovered screen probe와 actual AppKit input smoke�
         "const macos_app_smoke_step =",
     ) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), count(gate, "\"macos-session-host-input-continuity-smoke\""));
+    try std.testing.expectEqual(@as(usize, 1), count(gate, "input.option-as-meta = false"));
     try std.testing.expectEqual(@as(usize, 1), count(gate, "MARU_SESSION_HOST_CR6D_INPUT_CONTINUITY_SMOKE"));
     try std.testing.expectEqual(@as(usize, 1), count(gate, "session_host_input_smoke_clipboard_count=1"));
     try std.testing.expectEqual(@as(usize, 1), count(gate, "session_host_input_smoke_ime_count=1"));
@@ -146,8 +181,8 @@ test "CR6d 경계는 exact recovered screen probe와 actual AppKit input smoke�
     try std.testing.expectEqual(@as(usize, 1), count(gate, "session_host_input_smoke_post_event_access=true"));
     try std.testing.expectEqual(@as(usize, 1), count(gate, "session_host_input_smoke_source_record_cleared=true"));
     try std.testing.expectEqual(@as(usize, 1), count(gate, "MARU_SESSION_HOST_CR6D_INPUT_SOURCE_RESTORE_EXE"));
-    try std.testing.expectEqual(@as(usize, 1), count(gate, "run_session_host_cr6d_boundary_tests.addArg(\"--maru-expect-tests=3\");"));
-    try std.testing.expectEqual(@as(usize, 1), count(build, "run_session_host_cr6d_global_boundary_tests.addArg(\"--maru-expect-tests=3\");"));
+    try std.testing.expectEqual(@as(usize, 1), count(gate, "run_session_host_cr6d_boundary_tests.addArg(\"--maru-expect-tests=4\");"));
+    try std.testing.expectEqual(@as(usize, 1), count(build, "run_session_host_cr6d_global_boundary_tests.addArg(\"--maru-expect-tests=4\");"));
 
     // v2a의 판정자는 기본 test graph에 고정된 순수 consumer다. 실제 AppKit producer가 붙기 전에도
     // identity/세대/anchor/PPM digest와 관심 영역 계약이 사라지거나 파일 I/O를 직접 열 수 없다.
@@ -260,6 +295,22 @@ test "CR6d v2b0b는 preflight 뒤 전체 inventory를 Zig 판정자에 exact onc
     try std.testing.expectEqual(@as(usize, 1), count(producer, "maximumWindowCount = 256"));
     try std.testing.expectEqual(@as(usize, 0), count(producer, ".write(to:"));
     try std.testing.expectEqual(@as(usize, 1), count(swift, "session_host_input_smoke_candidate_failure="));
+    try std.testing.expectEqual(@as(usize, 1), count(build, "MARU_SESSION_HOST_CR6D_CANDIDATE_CONTEXT_PROBE"));
+    try std.testing.expectEqual(@as(usize, 1), count(swift, "MARU_SESSION_HOST_CR6D_CANDIDATE_CONTEXT_PROBE"));
+    const context_probe = between(
+        swift,
+        "func prepareSessionHostCandidateContextProbe(",
+        "private var isSessionHostRecoveryBaselineMode:",
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), count(context_probe, "sessionHostCandidatePhase == 1"));
+    try std.testing.expectEqual(@as(usize, 1), count(context_probe, "sessionHostCandidatePhase == 2"));
+    try std.testing.expectEqual(@as(usize, 1), count(swift, "sessionHostCandidateDocumentContext = text"));
+    try std.testing.expectEqual(@as(usize, 1), count(swift, "suppressUnconsumedKey: suppressCandidateProbeKey"));
+    try std.testing.expectEqual(@as(usize, 1), count(swift, "private var inputVisualTickPending = false"));
+    const marked_bridge = between(swift, "    func imeMarked(_ text: String) {", "    func imeDeleteBackward() {") orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 2), count(marked_bridge, "requestInputVisualTick()"));
+    try std.testing.expectEqual(@as(usize, 1), count(marked_bridge, "self.tickAppSession()"));
     const candidate_failure = between(
         swift,
         "        } catch let failure as SessionHostIMECandidateObservation.Failure {",

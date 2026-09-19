@@ -774,7 +774,11 @@ pub fn main(init: std.process.Init) !void {
             break :blk pid;
         };
         var app_failure: ?anyerror = null;
-        waitForExactExit(app_pid, if (input_continuity) 75_000 else if (auto_reconnect) 45_000 else 30_000) catch |err| {
+        const manual_input = input_continuity and if (std.c.getenv("MARU_SESSION_HOST_CR6D_MANUAL_INPUT")) |value|
+            std.mem.eql(u8, std.mem.span(value), "1")
+        else
+            false;
+        waitForExactExit(app_pid, if (manual_input) 315_000 else if (input_continuity) 75_000 else if (auto_reconnect) 45_000 else 30_000) catch |err| {
             app_failure = err;
         };
         const harness_exit_ns = monotonicNow(io);

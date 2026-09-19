@@ -3103,7 +3103,7 @@ pub fn build(b: *std.Build) void {
             "root=/tmp/maru-macos-app/session-host-cr6d-home; " ++
                 "app=/tmp/maru-macos-app/Maru.app; " ++
                 "rm -rf \"$root\"; mkdir -p \"$root/captures\" \"$root/.config/maru\"; " ++
-                "printf '%s\\n' 'session.keep-alive-after-quit = true' > \"$root/.config/maru/config\"; " ++
+                "printf '%s\\n' 'session.keep-alive-after-quit = true' 'input.option-as-meta = false' > \"$root/.config/maru/config\"; " ++
                 "if test -d \"$app\" && /usr/bin/diff -qr zig-out/Maru.app \"$app\" >/dev/null; then :; " ++
                 "else rm -rf \"$app\"; /usr/bin/ditto zig-out/Maru.app \"$app\"; fi; " ++
                 "/usr/bin/codesign --verify --strict \"$app\"",
@@ -3125,6 +3125,10 @@ pub fn build(b: *std.Build) void {
         );
         run_session_host_cr6d_appkit.setEnvironmentVariable("MARU_SESSION_HOST_CR6C_APPKIT_SMOKE", "1");
         run_session_host_cr6d_appkit.setEnvironmentVariable("MARU_SESSION_HOST_CR6D_INPUT_CONTINUITY_SMOKE", "1");
+        run_session_host_cr6d_appkit.setEnvironmentVariable(
+            "MARU_SESSION_HOST_CR6D_CANDIDATE_CONTEXT_PROBE",
+            "maru-test-only-v1",
+        );
         run_session_host_cr6d_appkit.setEnvironmentVariable(
             "MARU_SESSION_HOST_CR6D_INPUT_SOURCE_RESTORE_EXE",
             b.pathFromRoot("zig-out/bin/maru-session-host-input-source-restore"),
@@ -3155,9 +3159,51 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"CR6d"},
         });
         const run_session_host_cr6d_boundary_tests = b.addRunArtifact(session_host_cr6d_boundary_tests);
-        run_session_host_cr6d_boundary_tests.addArg("--maru-expect-tests=3");
+        run_session_host_cr6d_boundary_tests.addArg("--maru-expect-tests=4");
         run_session_host_cr6d_boundary_tests.setCwd(b.path("."));
         run_session_host_cr6d_appkit.step.dependOn(&run_session_host_cr6d_boundary_tests.step);
+        const session_host_cr6d_preedit_incremental_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/app_session.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "maru", .module = maru_mod },
+                    .{ .name = "syntax", .module = syntax_mod },
+                },
+            }),
+            .filters = &.{
+                "terminal IME preedit replaces the visible cell on every marked transaction",
+                "terminal IME next marked syllable keeps its place until committed cursor echo arrives",
+            },
+        });
+        for ([_][]const u8{ "Foundation", "AppKit", "Metal", "MetalKit", "QuartzCore", "CoreText", "CoreGraphics", "ImageIO" }) |framework|
+            session_host_cr6d_preedit_incremental_tests.root_module.linkFramework(framework, .{});
+        session_host_cr6d_preedit_incremental_tests.root_module.addCSourceFile(.{
+            .file = b.path("src/platform/macos/coretext_smoke.m"),
+            .flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined" },
+        });
+        const run_session_host_cr6d_preedit_incremental_tests = b.addRunArtifact(session_host_cr6d_preedit_incremental_tests);
+        run_session_host_cr6d_preedit_incremental_tests.setCwd(b.path("."));
+        const session_host_cr6d_preedit_incremental_step = b.step(
+            "test-session-host-cr6d-preedit-incremental",
+            "Run the per-marked-transaction terminal preedit projection judge",
+        );
+        session_host_cr6d_preedit_incremental_step.dependOn(&run_session_host_cr6d_preedit_incremental_tests.step);
+        const session_host_cr6d_preedit_anchor_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/terminal.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+            .filters = &.{"preedit anchor"},
+        });
+        const run_session_host_cr6d_preedit_anchor_tests = b.addRunArtifact(session_host_cr6d_preedit_anchor_tests);
+        // Six named anchor contracts plus terminal.zig's anonymous facade test block.
+        run_session_host_cr6d_preedit_anchor_tests.addArg("--maru-expect-tests=7");
+        run_session_host_cr6d_preedit_anchor_tests.setCwd(b.path("."));
+        session_host_cr6d_preedit_incremental_step.dependOn(&run_session_host_cr6d_preedit_anchor_tests.step);
         const session_host_cr6d_pixel_verify_mod = b.createModule(.{
             .root_source_file = b.path("tools/session-host/cr6d_pixel_verify.zig"),
             .target = target,
@@ -5289,7 +5335,7 @@ pub fn build(b: *std.Build) void {
         .filters = &.{"CR6d"},
     });
     const run_session_host_cr6d_global_boundary_tests = b.addRunArtifact(session_host_cr6d_global_boundary_tests);
-    run_session_host_cr6d_global_boundary_tests.addArg("--maru-expect-tests=3");
+    run_session_host_cr6d_global_boundary_tests.addArg("--maru-expect-tests=4");
     run_session_host_cr6d_global_boundary_tests.setCwd(b.path("."));
     boundary_step.dependOn(&run_session_host_cr6d_global_boundary_tests.step);
     const session_host_cr6e_boundary_tests = addProjectTest(b, .{

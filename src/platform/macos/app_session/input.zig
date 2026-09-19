@@ -421,6 +421,10 @@ pub fn imeEnd(self: *AppSession, event: ?terminal.KeyEvent) void {
                 if (shouldReplayAfterCommit(ev, self.ime_enter_newline)) ev else null
             else
                 null;
+            const preedit_commit_base = if (terminal_target) |target_id|
+                capturePreeditCommitBase(self, target_id)
+            else
+                null;
             const admitted = if (terminal_target) |target_id|
                 if (replay_event) |ev|
                     routeTerminalCommittedWithReplay(self, target_id, text, ev)
@@ -428,6 +432,12 @@ pub fn imeEnd(self: *AppSession, event: ?terminal.KeyEvent) void {
                     routeCommittedTextAccepted(self, text)
             else
                 routeCommittedTextAccepted(self, text);
+            if (admitted) {
+                if (terminal_target) |target_id| {
+                    if (preedit_commit_base) |base| noteCommittedPreeditAdvance(self, target_id, base, text);
+                }
+            }
+            traceCandidateIME(event, "commit_text", replay_event != null, admitted);
             // 한글 후보를 화살표로 확정하는 경우(insertText('안') + 화살표): 텍스트만 보내고
             // 화살표를 버리면 커서가 안 움직인다. 확정 후 그 화살표를 다시 보낸다(Ghostty
             // shouldReplayCommittedPreeditKey와 같은 의미론 — 위/오른/아래는 항상, 왼쪽은
@@ -444,11 +454,48 @@ pub fn imeEnd(self: *AppSession, event: ?terminal.KeyEvent) void {
                 }
             }
         },
-        .ignore => {}, // 조합 조작 키(자모 삭제) 또는 조합 중 단일 C0 — 입력기 소유
+        .ignore => traceCandidateIME(event, "ignore", false, false),
         .encode_key => if (event) |ev| {
+            traceCandidateIME(event, "encode_key", false, false);
             _ = self.handleKeyEvent(ev) catch {};
         },
     }
+}
+
+fn capturePreeditCommitBase(self: *AppSession, target_id: u64) ?terminal.preedit.CommitBase {
+    if (editorTermBySurfaceId(self, target_id) != null) return null;
+    const surface = imeTerminalSurfaceById(self, target_id) orelse return null;
+    surface.lockCore(self.io);
+    defer surface.unlockCore(self.io);
+    return surface.preeditCommitBaseLocked();
+}
+
+fn noteCommittedPreeditAdvance(
+    self: *AppSession,
+    target_id: u64,
+    base_before_admission: terminal.preedit.CommitBase,
+    bytes: []const u8,
+) void {
+    // Editor surfaces own a separate document preedit model and synchronously update its caret;
+    // this compensation is only for terminal snapshots whose PTY echo arrives asynchronously.
+    if (editorTermBySurfaceId(self, target_id) != null) return;
+    const surface = imeTerminalSurfaceById(self, target_id) orelse return;
+    surface.lockCore(self.io);
+    defer surface.unlockCore(self.io);
+    surface.notePreeditCommittedLocked(base_before_admission, bytes);
+    self.metal_dirty = true;
+}
+
+// Closed scalar diagnostics for the opt-in product gate. Never log committed text/codepoints;
+// replay_requested describes policy, and commit_admitted describes queue ownership, not delivery.
+fn traceCandidateIME(event: ?terminal.KeyEvent, decision: []const u8, replay_requested: bool, commit_admitted: bool) void {
+    const ev = event orelse return;
+    if (ev.key != .enter and ev.key != .escape) return;
+    const flag = std.c.getenv("MARU_SESSION_HOST_CR6D_INPUT_CONTINUITY_SMOKE") orelse return;
+    if (!std.mem.eql(u8, std.mem.span(flag), "1")) return;
+    std.debug.print("session_host_candidate_ime key={s} option={} decision={s} replay_requested={} commit_admitted={}\n", .{
+        @tagName(ev.key), ev.modifiers.option, decision, replay_requested, commit_admitted,
+    });
 }
 
 /// 비터미널 입력 owner(addr/find/palette 등)에 확정 텍스트를 코드포인트 key event로 전달한다.

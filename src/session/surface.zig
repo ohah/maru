@@ -190,11 +190,15 @@ pub const Surface = struct {
     /// 반환 snapshot은 화면 소스 메모리를 alias하므로 caller가 `lockCore`/`unlockCore` 안에서 읽고 복사해야 한다(현행
     /// 계약 그대로, docs/io-render-threading.md — snapshot 슬라이스는 lock 밖으로 새면 안 됨).
     pub fn renderSnapshot(self: *Surface) terminal.RenderSnapshot {
-        const base = if (self.remote) |r|
+        const base = self.baseSnapshotLocked();
+        return self.preedit.compose(base);
+    }
+
+    fn baseSnapshotLocked(self: *Surface) terminal.RenderSnapshot {
+        return if (self.remote) |r|
             r.vtable.render_snapshot(r.ctx)
         else
             self.core.renderSnapshot();
-        return self.preedit.compose(base);
     }
 
     /// caller가 `lockCore`를 보유한 상태에서만 부른다. 빈 bytes는 clear다. OOM이면 이전
@@ -215,6 +219,19 @@ pub const Surface = struct {
 
     pub fn preeditActiveLocked(self: *const Surface) bool {
         return self.preedit.active();
+    }
+
+    /// ordered input queue가 확정 문자열을 수락한 직후 호출한다. host echo보다 GUI callback이
+    /// 앞서는 동안만 필요한 client-local 폭 보정이며 canonical screen과 wire는 바꾸지 않는다.
+    pub fn preeditCommitBaseLocked(self: *Surface) ?terminal.preedit.CommitBase {
+        if (!self.preedit.active()) return null;
+        return terminal.preedit.CommitBase.fromSnapshot(self.baseSnapshotLocked());
+    }
+
+    pub fn notePreeditCommittedLocked(self: *Surface, base_before_admission: terminal.preedit.CommitBase, bytes: []const u8) void {
+        if (!self.preedit.active()) return;
+        self.preedit.noteCommitted(base_before_admission, bytes);
+        if (self.remote == null) self.core.dirty = terminal.core.fullDirty(self.core.size);
     }
 
     /// caller가 lockCore를 보유한 동안만 유효한 borrowed marked text. focus-loss commit은

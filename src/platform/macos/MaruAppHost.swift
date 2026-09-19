@@ -229,6 +229,17 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     // 조합 중(marked) 텍스트 — NSTextInputClient 프로토콜 응답(hasMarkedText/markedRange)용.
     // 표시·판정 상태의 단일 출처는 Zig(Surface.preedit + IME 트랜잭션)다.
     private var markedTextBuffer: String = ""
+    // CR6d의 명시적 test-only 후보 문맥 PoC. 일반 터미널은 편집 문서를 소유하지 않으므로 nil이고,
+    // probe의 Option-Return transaction만 원문을 PTY 대신 여기에 잠시 둔다.
+    private var sessionHostCandidateDocumentContext: String?
+
+    func beginSessionHostCandidateDocumentContextProbe() {
+        sessionHostCandidateDocumentContext = ""
+    }
+
+    func endSessionHostCandidateDocumentContextProbe() {
+        sessionHostCandidateDocumentContext = nil
+    }
 
     // IME 콜백 진단 트레이스(MARU_IME_DEBUG=1). 입력기가 실제로 보내는 콜백 순서/인자를
     // 그대로 찍어, 한글 조합/삭제의 실측 시퀀스로 버그를 잡는다(추측 금지).
@@ -313,6 +324,10 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     }
 
     override func keyDown(with event: NSEvent) {
+        controller?.observeSessionHostManualInputKey(event, view: self)
+        let suppressCandidateProbeKey = controller?.prepareSessionHostCandidateContextProbe(
+            event, view: self
+        ) ?? false
         controller?.cancelKeyHintHold() // 실제 키 입력 = 단축키 실행 → 보류 홀드 취소·표시 중이면 숨김(KH-4 — 깜빡임 방지)
         let m = event.modifierFlags
         let mods = "\(m.contains(.command) ? "Cmd " : "")\(m.contains(.control) ? "Ctrl " : "")\(m.contains(.option) ? "Opt " : "")\(m.contains(.shift) ? "Shift " : "")"
@@ -360,7 +375,7 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         // begin -> interpretKeyEvents(입력기 콜백이 insert/marked로 쌓음) -> end(일괄 판정).
         // Swift에는 IME 분기 로직이 없다 — 입력기의 비동기/다중 콜백에서도 이중 전송이
         // 구조적으로 불가능하고, 판정 규칙은 Zig unit으로 고정된다.
-        controller?.imeKeyTransaction(event) {
+        controller?.imeKeyTransaction(event, suppressUnconsumedKey: suppressCandidateProbeKey) {
             self.interpretKeyEvents([event])
         }
     }
@@ -387,6 +402,12 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         let text = (string as? String) ?? (string as? NSAttributedString)?.string ?? ""
         imeLog("insertText", text)
         controller?.imeMarked("") // 조합 표시 제거(전송 판정은 Zig ime_end가)
+        if sessionHostCandidateDocumentContext != nil {
+            // 후보창 PoC는 AppKit이 방금 확정한 원문을 editable context로 되묻게 하되 PTY에는
+            // admission하지 않는다. 문자열은 로그·artifact·controller counter 경계를 넘지 않는다.
+            sessionHostCandidateDocumentContext = text
+            return
+        }
         controller?.imeInsert(text)
         controller?.recordSessionHostInputSmokeInsert()
     }
@@ -451,6 +472,12 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         return has
     }
 
+    // The opt-in candidate gate must wait for the complete fixed target, not its first jamo.
+    // This predicate reveals no user text and is never used to route normal product input.
+    func sessionHostCandidateTargetReady() -> Bool {
+        markedTextBuffer == "한"
+    }
+
     // NSNotFound가 아니라 빈 NSRange를 돌려준다(Ghostty와 동일). NSNotFound를 주면 입력기가
     // "이 클라이언트는 marked 교체를 지원하지 않는다"로 보고 보수적으로 동작해 — 한국어 조합의
     // 마지막 자모에서 Backspace가 자모 삭제 대신 확정(insertText)으로 처리돼 삭제에 키가 한 번
@@ -464,11 +491,19 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     }
 
     func selectedRange() -> NSRange {
+        if let context = sessionHostCandidateDocumentContext {
+            return NSRange(location: context.utf16.count, length: 0)
+        }
         imeLog("? selectedRange -> (빈 NSRange — 터미널 구현)")
         return NSRange()
     }
 
     func attributedSubstring(forProposedRange range: NSRange, actualRange: NSRangePointer?) -> NSAttributedString? {
+        if let context = sessionHostCandidateDocumentContext {
+            let full = NSRange(location: 0, length: context.utf16.count)
+            actualRange?.pointee = full
+            return NSAttributedString(string: context)
+        }
         imeLog("? attributedSubstring loc=\(range.location) len=\(range.length) -> nil")
         return nil
     }
@@ -4110,6 +4145,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return delayMs
     }
     private var tickTimer: Timer?
+    // IME marked callbacks may arrive between cadence ticks. Coalesce them into one next-turn
+    // projection so intermediate composition cells are visible without adding idle polling.
+    private var inputVisualTickPending = false
     private var frameLoopRateHz: UInt32 = 0
     // Session-host sockets wake the same main-actor tick between display timer fires. Zig lends
     // the original identity only long enough to reconcile; each DispatchSource owns a CLOEXEC
@@ -4253,6 +4291,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var sessionHostCandidatePhase: UInt32 = 0
     private var sessionHostCandidateWaitTicks: UInt32 = 0
     private var sessionHostCandidateFailure = ""
+    private var sessionHostCandidateAdmissionValidated = false
+    private var sessionHostCandidateComposeKeyIndex = 0
+    private var sessionHostCandidateComposePrompted = false
+    private var sessionHostManualCandidateKey: UInt16?
+    private var sessionHostManualPromptLabel: NSTextField?
+    private var sessionHostManualReturnObserved = false
+    private var sessionHostCallbackHasMarkedText: Bool?
+    private var sessionHostCallbackHasInputContext: Bool?
     private var launchSummaryWritten = false
     private var isSessionHostRecoverySmokeMode: Bool {
         smokeMode && ProcessInfo.processInfo.environment["MARU_SESSION_HOST_CR6C_APPKIT_SMOKE"] == "1"
@@ -4272,6 +4318,80 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var isSessionHostInputContinuitySmokeMode: Bool {
         isSessionHostRecoverySmokeMode &&
             ProcessInfo.processInfo.environment["MARU_SESSION_HOST_CR6D_INPUT_CONTINUITY_SMOKE"] == "1"
+    }
+    private var isSessionHostManualInputSmokeMode: Bool {
+        isSessionHostInputContinuitySmokeMode &&
+            ProcessInfo.processInfo.environment["MARU_SESSION_HOST_CR6D_MANUAL_INPUT"] == "1"
+    }
+    private var isSessionHostCandidateContextProbeMode: Bool {
+        isSessionHostInputContinuitySmokeMode &&
+            ProcessInfo.processInfo.environment["MARU_SESSION_HOST_CR6D_CANDIDATE_CONTEXT_PROBE"] ==
+                "maru-test-only-v1"
+    }
+
+    private func showSessionHostManualPrompt(_ message: String, window: NSWindow?) {
+        guard isSessionHostManualInputSmokeMode, let window,
+              let content = window.contentView else { return }
+        let label: NSTextField
+        if let existing = sessionHostManualPromptLabel {
+            label = existing
+        } else {
+            // A native, non-editable overlay makes progress visible without stealing keyboard
+            // focus from the recovered terminal. Normal product windows never create this view.
+            label = NSTextField(labelWithString: "")
+            label.isSelectable = false
+            label.drawsBackground = true
+            label.backgroundColor = .black
+            label.textColor = .white
+            label.font = .systemFont(ofSize: 17, weight: .semibold)
+            label.frame = NSRect(x: 210, y: max(0, content.bounds.height - 100),
+                                 width: max(100, content.bounds.width - 220), height: 50)
+            label.autoresizingMask = [.width, .minYMargin]
+            window.contentView?.addSubview(label, positioned: .above, relativeTo: nil)
+            sessionHostManualPromptLabel = label
+        }
+        label.stringValue = message
+        window.title = message
+        // Only fixed test instructions and the bounded row ordinal cross this log boundary.
+        FileHandle.standardError.write(Data("session_host_manual_prompt=\(message)\n".utf8))
+    }
+
+    // Observe only physical progress keys; never consume them or bypass the normal IME transaction.
+    func observeSessionHostManualInputKey(_ event: NSEvent, view: MaruMetalTerminalView) {
+        guard isSessionHostManualInputSmokeMode, !event.isARepeat,
+              sessionHostInputSmokeOwnsGlobalKeyboardFocus(view: view) else { return }
+        let chord = event.modifierFlags.intersection([.command, .control, .option, .shift])
+        if sessionHostInputSmokeStage == 3 {
+            // A screen substring may already exist while the last syllable is still marked.
+            // Require the user's most recent physical key to be an unmodified Return instead.
+            sessionHostManualReturnObserved = event.keyCode == 36 && chord.isEmpty
+        }
+        if sessionHostInputSmokeStage == 2,
+           (sessionHostCandidatePhase == 1 && event.keyCode == 36 && chord == [.option] ||
+            sessionHostCandidatePhase == 2 && event.keyCode == 53 && chord.isEmpty) {
+            sessionHostManualCandidateKey = event.keyCode
+            sessionHostCandidateWaitTicks = 3
+        }
+    }
+
+    // The probe uses the same recovered product view and Korean input context, but suppresses
+    // terminal admission only for the candidate request/cancel transaction. Returning false is
+    // the complete normal-product behavior.
+    func prepareSessionHostCandidateContextProbe(
+        _ event: NSEvent,
+        view: MaruMetalTerminalView
+    ) -> Bool {
+        guard isSessionHostCandidateContextProbeMode,
+              sessionHostInputSmokeStage == 2 else { return false }
+        let chord = event.modifierFlags.intersection([.command, .control, .option, .shift])
+        if sessionHostCandidatePhase == 1, event.keyCode == 36, chord == [.option] {
+            view.beginSessionHostCandidateDocumentContextProbe()
+            return true
+        }
+        if sessionHostCandidatePhase == 2, event.keyCode == 53, chord.isEmpty {
+            return true
+        }
+        return false
     }
     private var isSessionHostRecoveryBaselineMode: Bool {
         isSessionHostRecoverySmokeMode &&
@@ -10655,11 +10775,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             }
             // Only the explicit CR6d smoke posts system HID events. Check TCC before changing the
             // system-global source so a machine without the opt-in permission is mutation-free.
-            guard CGPreflightPostEventAccess() || CGRequestPostEventAccess() else {
+            if !isSessionHostManualInputSmokeMode {
+                guard CGPreflightPostEventAccess() || CGRequestPostEventAccess() else {
                 failSessionHostInputSmoke("accessibility-unavailable")
                 return
+                }
+                sessionHostInputSmokePostEventAccess = true
             }
-            sessionHostInputSmokePostEventAccess = true
             // Window inventory and later single-window capture are privileged independently of
             // HID posting. Refuse before changing the global input source so a missing Screen
             // Recording grant cannot leave any system mutation behind.
@@ -10714,6 +10836,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 }
                 sessionHostInputPixelBefore = snapshot
                 sessionHostInputPixelPhase = 1
+                if isSessionHostManualInputSmokeMode {
+                    showSessionHostManualPrompt("한글을 한 번 입력하고 Enter(↩)를 누르세요", window: window)
+                }
                 return
             }
             if sessionHostInputPixelPhase == 1, sessionHostInputSmokeKeyIndex > 0 {
@@ -10732,6 +10857,16 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                     return
                 }
                 sessionHostInputPixelPhase = 3
+                return
+            }
+            if isSessionHostManualInputSmokeMode {
+                sessionHostCallbackHasMarkedText = view.hasMarkedText()
+                sessionHostCallbackHasInputContext = view.inputContext != nil
+                if probe.ime_count == 1, sessionHostManualReturnObserved,
+                   !view.hasMarkedText(), view.inputContext != nil {
+                    sessionHostInputSmokeStage = 2
+                    sessionHostInputSmokeRetries = 0
+                }
                 return
             }
             if sessionHostInputSmokeKeyIndex < keys.count {
@@ -10755,11 +10890,19 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 retrySessionHostInputSmoke("ime-timeout")
                 return
             }
-            guard sessionHostInputSmokeMarkedCallbacks > 0,
-                  sessionHostInputSmokeInsertCallbacks > 0,
-                  !view.hasMarkedText(), view.inputContext != nil else {
-                failSessionHostInputSmoke("ime-callback")
-                return
+            if !sessionHostCandidateAdmissionValidated {
+                // Admission proves the original composition finished. Candidate interaction has
+                // its own strict counter/lifecycle verdict and must not repeat this precondition.
+                // Snapshot before cleanup so failure diagnostics retain the admission state.
+                sessionHostCallbackHasMarkedText = view.hasMarkedText()
+                sessionHostCallbackHasInputContext = view.inputContext != nil
+                guard sessionHostInputSmokeMarkedCallbacks > 0,
+                      sessionHostInputSmokeInsertCallbacks > 0,
+                      !view.hasMarkedText(), view.inputContext != nil else {
+                    failSessionHostInputSmoke("ime-callback")
+                    return
+                }
+                sessionHostCandidateAdmissionValidated = true
             }
             guard runSessionHostCandidateObservation(
                 probe: probe, surface: surface, view: view
@@ -10811,6 +10954,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     ) -> Bool {
         // A view retains first-responder status even when another app becomes frontmost. Every
         // global HID caller, including candidate open/cancel, must revalidate keyboard ownership.
+        guard !isSessionHostManualInputSmokeMode else { return false }
         guard sessionHostInputSmokeOwnsGlobalKeyboardFocus(view: view) else { return false }
         guard let source = CGEventSource(stateID: .hidSystemState) else { return false }
         guard let down = CGEvent(
@@ -10853,30 +10997,79 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             }
             switch sessionHostCandidatePhase {
             case 0:
+                // Meta mode deliberately bypasses the IME. Refuse a misconfigured fixture rather
+                // than interpreting an encoded terminal shortcut as a candidate-window request.
+                guard !optionAsMeta else {
+                    failSessionHostInputSmoke("candidate-option-as-meta")
+                    return false
+                }
+                if isSessionHostManualInputSmokeMode {
+                    if !view.sessionHostCandidateTargetReady(), !sessionHostCandidateComposePrompted {
+                        showSessionHostManualPrompt("후보창 준비: 한을 입력하세요 — Enter는 누르지 마세요", window: view.window)
+                        sessionHostCandidateComposePrompted = true
+                    }
+                } else {
+                    let composeKeys: [UInt16] = [5, 40, 1]
+                    if sessionHostCandidateComposeKeyIndex == 0, view.sessionHostCandidateTargetReady() {
+                        sessionHostCandidateComposeKeyIndex = composeKeys.count
+                    }
+                    if sessionHostCandidateComposeKeyIndex < composeKeys.count {
+                        guard dispatchSessionHostInputPhysicalKey(
+                            keyCode: composeKeys[sessionHostCandidateComposeKeyIndex], view: view
+                        ) else {
+                            failSessionHostInputSmoke("candidate-compose-event")
+                            return false
+                        }
+                        sessionHostCandidateComposeKeyIndex += 1
+                        return false
+                    }
+                }
+                guard view.sessionHostCandidateTargetReady(), view.hasMarkedText() else { return false }
                 sessionHostCandidateBefore = try observation.capture(counters: counters, anchor: anchor)
+                if isSessionHostManualInputSmokeMode {
+                    sessionHostManualCandidateKey = nil
+                    sessionHostCandidatePhase = 1
+                    showSessionHostManualPrompt("후보창 \(observation.rows.count + 1)/5: ⌥ Option + Enter(↩)를 누르세요", window: view.window)
+                    return false
+                }
                 guard dispatchSessionHostInputPhysicalKey(
                     keyCode: 36, view: view, flags: .maskAlternate
                 ) else { throw SessionHostIMECandidateObservation.Failure.windowServerUnavailable }
                 sessionHostCandidatePhase = 1
                 sessionHostCandidateWaitTicks = 3
             case 1:
+                if isSessionHostManualInputSmokeMode {
+                    guard sessionHostManualCandidateKey == 36 else { return false }
+                }
                 sessionHostCandidateOpened = try observation.capture(counters: counters, anchor: anchor)
+                if isSessionHostManualInputSmokeMode {
+                    sessionHostManualCandidateKey = nil
+                    sessionHostCandidatePhase = 2
+                    showSessionHostManualPrompt("후보창 \(observation.rows.count + 1)/5: 왼쪽 위 esc 키를 누르세요", window: view.window)
+                    return false
+                }
                 guard dispatchSessionHostInputPhysicalKey(keyCode: 53, view: view) else {
                     throw SessionHostIMECandidateObservation.Failure.windowServerUnavailable
                 }
                 sessionHostCandidatePhase = 2
                 sessionHostCandidateWaitTicks = 3
             case 2:
+                if isSessionHostManualInputSmokeMode {
+                    guard sessionHostManualCandidateKey == 53 else { return false }
+                }
                 guard let before = sessionHostCandidateBefore,
                       let opened = sessionHostCandidateOpened else {
                     throw SessionHostIMECandidateObservation.Failure.malformedWindow
                 }
                 let closed = try observation.capture(counters: counters, anchor: anchor)
+                view.endSessionHostCandidateDocumentContextProbe()
                 try observation.append(before: before, opened: opened, closed: closed)
                 sessionHostCandidateBefore = nil
                 sessionHostCandidateOpened = nil
                 if observation.rows.count < SessionHostIMECandidateObservation.requiredObservationCount {
                     sessionHostCandidatePhase = 0
+                    sessionHostCandidateComposeKeyIndex = 0
+                    sessionHostCandidateComposePrompted = false
                     sessionHostCandidateWaitTicks = 1
                     return false
                 }
@@ -10904,6 +11097,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 return true
             }
         } catch let failure as SessionHostIMECandidateObservation.Failure {
+            view.endSessionHostCandidateDocumentContextProbe()
             switch failure {
             case .windowServerUnavailable: sessionHostCandidateFailure = "window-server-unavailable"
             case .inventoryTooLarge: sessionHostCandidateFailure = "inventory-too-large"
@@ -10914,6 +11108,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             }
             failSessionHostInputSmoke("candidate-observation-failed")
         } catch {
+            view.endSessionHostCandidateDocumentContextProbe()
             sessionHostCandidateFailure = "unexpected"
             failSessionHostInputSmoke("candidate-observation-failed")
         }
@@ -11771,13 +11966,19 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     // IME 키 트랜잭션: begin -> 입력기 해석(클로저) -> end. 판정은 전부 Zig가 한다.
-    func imeKeyTransaction(_ event: NSEvent, interpret: () -> Void) {
+    func imeKeyTransaction(
+        _ event: NSEvent,
+        suppressUnconsumedKey: Bool = false,
+        interpret: () -> Void
+    ) {
         guard let session = appSession else { return }
         _ = maru_macos_app_session_ime_begin(session)
         interpret()
         // ime_end는 정규화 실패(codepoint/keyCode 없음)에도 반드시 호출한다 — 안 그러면 ime_begin
         // 후 트랜잭션이 안 닫혀 누적 텍스트가 유실되고 ime_active가 박힌다. 키가 없으면 nil 전달.
-        if var keyEvent = normalizedKeyEvent(from: event) {
+        if suppressUnconsumedKey {
+            _ = maru_macos_app_session_ime_end(session, nil)
+        } else if var keyEvent = normalizedKeyEvent(from: event) {
             _ = maru_macos_app_session_ime_end(session, &keyEvent)
         } else {
             _ = maru_macos_app_session_ime_end(session, nil)
@@ -11797,6 +11998,17 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         let bytes = Array(text.utf8)
         _ = bytes.withUnsafeBufferPointer { buf in
             maru_macos_app_session_ime_marked(session, buf.baseAddress, buf.count)
+        }
+        requestInputVisualTick()
+    }
+
+    private func requestInputVisualTick() {
+        guard !inputVisualTickPending else { return }
+        inputVisualTickPending = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.inputVisualTickPending = false
+            self.tickAppSession()
         }
     }
 
@@ -12944,6 +13156,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         session_host_input_smoke_frontmost_pid=\(sessionHostInputSmokeFrontmostPID)
         session_host_input_smoke_failure=\(sessionHostInputSmokeFailure)
         session_host_input_smoke_candidate_failure=\(sessionHostCandidateFailure)
+        session_host_input_smoke_candidate_phase=\(sessionHostCandidatePhase)
+        session_host_input_smoke_candidate_rows=\(sessionHostCandidateObservation?.rows.count ?? 0)
+        session_host_input_smoke_manual_input=\(isSessionHostManualInputSmokeMode)
+        session_host_input_smoke_manual_return_observed=\(sessionHostManualReturnObserved)
+        session_host_input_smoke_callback_has_marked_text=\(sessionHostCallbackHasMarkedText.map { String($0) } ?? "unobserved")
+        session_host_input_smoke_callback_has_input_context=\(sessionHostCallbackHasInputContext.map { String($0) } ?? "unobserved")
         agent_session_archive_smoke_stage=\(archiveSmokeStage)
         agent_session_archive_smoke_failure=\(archiveSmokeFailure)
         agent_session_archive_smoke_content_size=\(agentSessionArchiveSmokeContentSize)

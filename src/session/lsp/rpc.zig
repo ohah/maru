@@ -18,7 +18,13 @@ pub const RequestId = union(enum) {
     formatting: u32,
     rename: u32,
     completion: u32,
+    code_action: u32,
+    code_action_resolve: u32,
 };
+/// `codeAction/resolve`(§8.2h) 의 id 는 `code_action_resolve_id_base + seq`.
+pub const code_action_resolve_id_base: u64 = 8_000_000_000;
+/// `codeAction`(2단 ⑦, §8.2h)의 id 는 `code_action_id_base + seq`.
+pub const code_action_id_base: u64 = 7_000_000_000;
 /// `completion`(2단 ⑥, §8.2g)의 id 는 `completion_id_base + seq`.
 pub const completion_id_base: u64 = 6_000_000_000;
 /// `rename`(2단 ⑤, §8.2f)의 id 는 `rename_id_base + seq` — u32 밖이라 u64 로 든다(JSON 정수는 i64 까지). classify 는 큰 base 부터 본다.
@@ -56,6 +62,14 @@ pub fn initializeRequest(allocator: std.mem.Allocator, root_uri: []const u8, pid
                     .completion = .{
                         .completionItem = .{ .snippetSupport = false, .insertReplaceSupport = false, .documentationFormat = [_][]const u8{"plaintext"} },
                         .contextSupport = true,
+                    },
+                    // code action(§8.2h) — 리터럴 CodeAction 을 받고, `edit` 을 resolve 로 지연할 수 있으며 `data` 를 되돌려 준다.
+                    .codeAction = .{
+                        .codeActionLiteralSupport = .{ .codeActionKind = .{ .valueSet = [_][]const u8{ "quickfix", "refactor", "refactor.extract", "refactor.inline", "refactor.rewrite", "source", "source.organizeImports" } } },
+                        .resolveSupport = .{ .properties = [_][]const u8{"edit"} },
+                        .dataSupport = true,
+                        .isPreferredSupport = true,
+                        .disabledSupport = true,
                     },
                     .signatureHelp = .{
                         .contextSupport = true,
@@ -316,6 +330,48 @@ pub fn renameRequest(allocator: std.mem.Allocator, seq: u32, uri: []const u8, li
     }, .{});
 }
 
+/// `codeActionProvider`(§8.2h) — 지원 여부와 `resolveProvider`.
+pub const CodeActionCaps = struct { supported: bool = false, resolve: bool = false };
+
+pub fn codeActionCapsFromResult(result: ?std.json.Value) CodeActionCaps {
+    var out: CodeActionCaps = .{};
+    const r = result orelse return out;
+    if (r != .object) return out;
+    const caps = r.object.get("capabilities") orelse return out;
+    if (caps != .object) return out;
+    const prov = caps.object.get("codeActionProvider") orelse return out;
+    switch (prov) {
+        .object => |o| {
+            out.supported = true;
+            if (o.get("resolveProvider")) |rp| out.resolve = rp == .bool and rp.bool;
+        },
+        .bool => |b| out.supported = b,
+        else => {},
+    }
+    return out;
+}
+
+pub const Pos = struct { line: u32, character: u32 };
+/// LSP `Range` 모양 그대로(요청에 싣는다). 응답의 `hoverRange` 는 평평한 `Range` 를 쓴다 — 이름이 다르다.
+pub const LspRange = struct { start: Pos, end: Pos };
+/// 문맥으로 되돌려 주는 진단(§8.2h ③ — clangd 는 이 넷으로 fix 를 찾는다). `code` 는 글자로 든 것을 그대로 낸다(없으면 생략).
+pub const ContextDiagnostic = struct { range: LspRange, message: []const u8, severity: u8, code: ?[]const u8 = null };
+
+/// `textDocument/codeAction`(§8.2h). `triggerKind` 1(Invoked).
+pub fn codeActionRequest(allocator: std.mem.Allocator, seq: u32, uri: []const u8, range: LspRange, diagnostics: []const ContextDiagnostic) error{OutOfMemory}![]u8 {
+    return std.json.Stringify.valueAlloc(allocator, .{
+        .jsonrpc = "2.0",
+        .id = code_action_id_base + seq,
+        .method = "textDocument/codeAction",
+        .params = .{ .textDocument = .{ .uri = uri }, .range = range, .context = .{ .diagnostics = diagnostics, .triggerKind = @as(u8, 1) } },
+    }, .{ .emit_null_optional_fields = false });
+}
+
+/// `codeAction/resolve`(§8.2h) — 고른 항목의 JSON 을 **그대로** 되돌려 준다(`data` 가 서버의 것이라 다시 만들지 않는다).
+pub fn codeActionResolveRequest(allocator: std.mem.Allocator, seq: u32, item_json: []const u8) error{OutOfMemory}![]u8 {
+    return std.fmt.allocPrint(allocator, "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"method\":\"codeAction/resolve\",\"params\":{s}}}", .{ code_action_resolve_id_base + seq, item_json });
+}
+
 /// `initialize` 응답의 `renameProvider`(bool 또는 object).
 pub fn renameSupported(result: ?std.json.Value) bool {
     return providerFlag(result, "renameProvider");
@@ -551,7 +607,11 @@ pub fn classify(root: std.json.Value) Incoming {
     const rid: RequestId = switch (id_num) {
         initialize_id => .initialize,
         shutdown_id => .shutdown,
-        else => if (id_num >= completion_id_base and id_num - @as(i64, @intCast(completion_id_base)) <= std.math.maxInt(u32))
+        else => if (id_num >= code_action_resolve_id_base and id_num - @as(i64, @intCast(code_action_resolve_id_base)) <= std.math.maxInt(u32))
+            .{ .code_action_resolve = @intCast(id_num - @as(i64, @intCast(code_action_resolve_id_base))) }
+        else if (id_num >= code_action_id_base and id_num - @as(i64, @intCast(code_action_id_base)) <= std.math.maxInt(u32))
+            .{ .code_action = @intCast(id_num - @as(i64, @intCast(code_action_id_base))) }
+        else if (id_num >= completion_id_base and id_num - @as(i64, @intCast(completion_id_base)) <= std.math.maxInt(u32))
             .{ .completion = @intCast(id_num - @as(i64, @intCast(completion_id_base))) }
         else if (id_num >= rename_id_base and id_num - @as(i64, @intCast(rename_id_base)) <= std.math.maxInt(u32))
             .{ .rename = @intCast(id_num - @as(i64, @intCast(rename_id_base))) }
@@ -908,6 +968,49 @@ test "LSJ10 completion — 요청 id 6_000_000_000+seq·context(triggerKind 1/2�
     const init = try initializeRequest(a, "file:///r", 1);
     defer a.free(init);
     try testing.expect(std.mem.indexOf(u8, init, "\"snippetSupport\":false") != null);
+}
+
+test "LSJ11 codeAction — 요청 id 7_000_000_000+seq·range·context.diagnostics(code 없으면 생략)·triggerKind, resolve 요청은 항목 JSON 그대로(8e9+seq), capability resolveProvider (§8.2h)" {
+    const a = testing.allocator;
+    const diags = [_]ContextDiagnostic{
+        .{ .range = .{ .start = .{ .line = 1, .character = 2 }, .end = .{ .line = 1, .character = 5 } }, .message = "Expected ';'", .severity = 1, .code = "-Wexpected-semi" },
+        .{ .range = .{ .start = .{ .line = 3, .character = 0 }, .end = .{ .line = 3, .character = 1 } }, .message = "unused", .severity = 2 },
+    };
+    const req = try codeActionRequest(a, 9, "file:///a.c", .{ .start = .{ .line = 1, .character = 2 }, .end = .{ .line = 1, .character = 2 } }, &diags);
+    defer a.free(req);
+    try testing.expect(std.mem.indexOf(u8, req, "\"id\":7000000009") != null);
+    try testing.expect(std.mem.indexOf(u8, req, "\"method\":\"textDocument/codeAction\"") != null);
+    try testing.expect(std.mem.indexOf(u8, req, "\"range\":{\"start\":{\"line\":1,\"character\":2},\"end\":{\"line\":1,\"character\":2}}") != null);
+    try testing.expect(std.mem.indexOf(u8, req, "\"code\":\"-Wexpected-semi\"") != null);
+    try testing.expect(std.mem.indexOf(u8, req, "\"message\":\"unused\",\"severity\":2}") != null); // code 없는 것은 생략
+    try testing.expect(std.mem.indexOf(u8, req, "\"triggerKind\":1") != null);
+    const res = try codeActionResolveRequest(a, 4, "{\"title\":\"x\",\"data\":{\"id\":7}}");
+    defer a.free(res);
+    try testing.expectEqualStrings("{\"jsonrpc\":\"2.0\",\"id\":8000000004,\"method\":\"codeAction/resolve\",\"params\":{\"title\":\"x\",\"data\":{\"id\":7}}}", res);
+    var p1 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":7000000009,\"result\":[]}");
+    defer p1.deinit();
+    try testing.expect(classify(p1.value).response.id == .code_action and classify(p1.value).response.id.code_action == 9);
+    var p2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":8000000004,\"result\":null}");
+    defer p2.deinit();
+    try testing.expect(classify(p2.value).response.id == .code_action_resolve and classify(p2.value).response.id.code_action_resolve == 4);
+    var p3 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":6000000004,\"result\":null}");
+    defer p3.deinit();
+    try testing.expect(classify(p3.value).response.id == .completion); // 6e9 대는 completion 그대로
+    var c1 = try parse(a, "{\"capabilities\":{\"codeActionProvider\":{\"codeActionKinds\":[\"quickfix\"],\"resolveProvider\":true}}}");
+    defer c1.deinit();
+    const k1 = codeActionCapsFromResult(c1.value);
+    try testing.expect(k1.supported and k1.resolve);
+    var c2 = try parse(a, "{\"capabilities\":{\"codeActionProvider\":true}}");
+    defer c2.deinit();
+    const k2 = codeActionCapsFromResult(c2.value);
+    try testing.expect(k2.supported and !k2.resolve);
+    var c3 = try parse(a, "{\"capabilities\":{\"hoverProvider\":true}}");
+    defer c3.deinit();
+    try testing.expect(!codeActionCapsFromResult(c3.value).supported);
+    const init = try initializeRequest(a, "file:///r", 1);
+    defer a.free(init);
+    try testing.expect(std.mem.indexOf(u8, init, "\"resolveSupport\":{\"properties\":[\"edit\"]}") != null);
+    try testing.expect(std.mem.indexOf(u8, init, "\"dataSupport\":true") != null);
 }
 
 test "LSJ4 file URI — 공백·한글은 퍼센트, 되읽으면 같은 경로 (§8.2a)" {

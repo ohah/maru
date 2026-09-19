@@ -327,6 +327,12 @@ rename). 그것은 `file_tree_focus` 가 켜졌을 때만 트리가 소비하고
 둘 다 `needs_editable = true`(비교 뷰에는 서버가 없다). 팝업이 열린 동안 `↑↓`/`Enter`/`Tab`/`Esc` 는 편집기 키 경로가 먼저 소비한다(ui §8 규칙 3) —
 컨텍스트 표의 항목이 아니라 상태 가드라 `ETX4` 의 셈에 들지 않는다.
 
+**`⌘.` — code action(2026-09-19, [툴링](editor-surface-tooling.md) §8.2h).** VS Code `editor.action.quickFix`. `ETX4` ⑵ 의 예외 목록에 서는 `⌘` chord —
+전수: 전역 표·터미널 매크로 표에 `.` chord 는 없고(`grep "char = '.'"` 는 컨텍스트 표의 이 줄과 `allowed` 의 근거 줄뿐), Swift ①ʹ 선-가로채기·② 메뉴
+keyEquivalent 에도 없다(`MaruAppHost.swift` 의 「기본 modifier 는 ⌘」 주석은 modifier 설명이지 `.` 항목이 아니다). 터미널 Term 에서 `⌘.` 는 지금도
+아무것도 아니다(Terminal.app 의 「취소」 관례를 Maru 는 쓰지 않는다). 예외 규칙대로 `needs_editable = true`. 메뉴가 열린 동안은 `context_menu`
+의 모달 규율(`↑↓`/`Enter`, 그 외 키 = 닫힘)이다.
+
 #### 충돌 전수 대조 (2026-09-07)
 
 [diff·떠 있는 UI·설정](native-editor-ui.md) §9.1 이 *"충돌 목록은 구현 슬라이스에서 전수 조사한다"*,

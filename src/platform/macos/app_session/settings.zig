@@ -1721,6 +1721,7 @@ pub fn closeContextMenu(self: *AppSession) void {
     self.file_tree_background_menu = false;
     self.view_options_menu = false;
     self.terminal_context_menu = false;
+    self.code_action_menu = false; // §8.2h — 항목 텍스트는 다음 응답까지 살려 둔다(accept 가 닫은 뒤 읽는다)
     // **값 자체를 비운다** — 이 메뉴는 플래그가 아니라 대상(surface id)과 굳힌 항목을 든다.
     // 남겨 두면 다음 우클릭이 다른 메뉴를 열어도 accept 가 이 분기로 먼저 들어온다.
     self.editor_context_menu = null;
@@ -1749,6 +1750,13 @@ pub fn clearFileContentMenu(self: *AppSession) void {
 /// 컨텍스트 메뉴의 선택 항목을 실행한다. 0=Rename(모든 대상), workspace는 1=위치 고정 토글·bg_first..=배경 tint 프리셋·accent_first..=좌측 막대색 프리셋.
 /// 메뉴를 먼저 닫고(대상 teardown 시 context_menu_target은 이미 null화됨) selected로 분기한다.
 pub fn acceptContextMenu(self: *AppSession) void {
+    // code action 목록(tooling §8.2h) — 고른 항목의 edit 을 적용(또는 resolve)한다. 먼저 닫는다.
+    if (self.code_action_menu) {
+        const selected = self.chrome_host.context_menu.selected;
+        closeContextMenu(self);
+        editor_ops.code_action_client.accept(self, selected);
+        return;
+    }
     // 리소스 팝오버 — 고른 행의 Term으로 점프하고 닫는다. 점프는 `activateSurfaceById` 단일 출처
     // (알림 클릭이 쓰는 그 경로: switchTab → focusPaneByPtr → focusTerm). 닫힌 탭이면 false라 무동작.
     if (self.resource_menu_open) {

@@ -1280,6 +1280,27 @@ pub fn applyForcedSuggest(self: *AppSession) void {
     _ = editor_ops.completion_client.triggerManual(self);
 }
 
+/// MARU_FORCE_QUICK_FIX=1 — caret 자리에서 `quick_fix` 를 부른다(캡처 전용, tooling §8.2h). 서버가 뜨고 **진단이 온 뒤**에야 문맥이 있으므로
+/// 진단이 하나라도 있을 때 한 번 보낸다(래치). MARU_FORCE_QUICK_FIX=apply 면 메뉴가 뜬 뒤 첫 항목을 곧바로 고른다.
+pub fn applyForcedQuickFix(self: *AppSession) void {
+    const raw = std.c.getenv("MARU_FORCE_QUICK_FIX") orelse return;
+    const term = pane_ops.activePane(self).activeTerm();
+    if (term.kind != .editor) return;
+    if (!self.debug_quick_fix_sent) {
+        if (term.rt.editor_diagnostics.lsp.items.len == 0) return;
+        if (self.chrome_host.notice.open) self.chrome_host.notice.dismiss();
+        if (editor_ops.code_action_client.quickFix(self)) {
+            self.debug_quick_fix_sent = true;
+            self.debug_diff_caret_keys_done = true;
+        }
+        return;
+    }
+    if (std.mem.eql(u8, std.mem.span(raw), "apply") and self.code_action_menu and self.chrome_host.context_menu.open) {
+        self.chrome_host.context_menu.selected = 0;
+        settings_ops.acceptContextMenu(self);
+    }
+}
+
 pub fn applyForcedScmTab(self: *AppSession) void {
     // MARU_FORCE_SCM_TAB=history|agent — 그 탭을 고른 것처럼 만든다(P4). 탭 전환은 클릭으로만
     // 일어나므로 포인터 없는 캡처 하니스에서는 히스토리 화면을 얻을 방법이 없다(행 호버와 같은 자리).

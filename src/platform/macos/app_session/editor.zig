@@ -90,6 +90,7 @@ pub const signature_client = @import("editor_signature.zig");
 pub const format_client = @import("editor_format.zig");
 pub const rename_client = @import("editor_rename.zig");
 pub const completion_client = @import("editor_completion.zig");
+pub const code_action_client = @import("editor_code_action.zig");
 pub const workspace_edit_client = @import("editor_workspace_edit.zig");
 
 pub const Opened = struct {
@@ -13258,6 +13259,238 @@ test "CMP2 자동완성 — 서버가 completionProvider 를 안 내면 타이�
     try pressKey(&fx, .{ .char = ' ' }, .{ .control = true });
     try testing.expectEqual(@as(u64, 0), fx.session.editor_lsp.sent_completions);
     try testing.expect(!fx.session.editor_completion.active);
+}
+
+test "CA1 code action — ⌘. 로 진단 자리의 fix 와 lazy 가 메뉴에(command 만·Command 형은 숨김, preferred 가 앞); fix 를 고르면 진단 범위가 바뀌고 undo 하나·기록; lazy 는 resolve 뒤 적용; Esc·바깥 클릭 닫힘; 문맥 없는 자리(NOACT)는 알림; 낡은 revision 전체 거부; resolve 오류 알림; 낡은 seq (제품 경계, §8.2h)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
+    var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const fz = try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake});
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);
+    defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const cz = try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root});
+    _ = setenv("MARU_CONFIG", cz.ptr, 1);
+    defer _ = unsetenv("MARU_CONFIG");
+    if (fx.session.config_path_buffer) |b| allocator.free(b);
+    fx.session.config_path_buffer = null;
+    fx.session.editor_lsp.auto_trust_answer = .allow;
+    // 가짜 서버는 첫 줄 0..3 에 error(code E1) 진단을 낸다 — 그 자리가 fix 의 문맥이다.
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "q.c", .data = "int x;\nint y;\n" });
+    const path = try std.fs.path.join(allocator, &.{ root, "q.c" });
+    defer allocator.free(path);
+    const saved_repo = fx.session.git_repo;
+    fx.session.git_repo = @constCast(root);
+    defer fx.session.git_repo = saved_repo;
+    const term = (try pane_ops.openFileTermInActivePane(fx.session, path, .text)).term;
+    fx.session.surface_initialized = true;
+    fx.session.backing_width_px = 1200;
+    fx.session.backing_height_px = 800;
+    const leaf = activeLeafRectForTest(fx.session) orelse return error.SkipZigTest;
+    const s = fx.session;
+    const Ctx = struct { fx: *PaneFixture, term: *Term };
+    const ctx: Ctx = .{ .fx = &fx, .term = term };
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
+        fn f(c: Ctx) bool {
+            return c.term.rt.editor_diagnostics.lsp.items.len >= 1;
+        }
+    }.f));
+    const settled = struct {
+        fn f(c: Ctx) bool {
+            return !c.fx.session.editor_code_action.waiting and !c.fx.session.editor_code_action.resolve_waiting;
+        }
+    }.f;
+    const content = struct {
+        fn f(t: *Term) []const u8 {
+            return t.rt.editor_doc.?.file.content;
+        }
+    }.f;
+    const menuTitles = struct {
+        fn f(sess: *AppSession) []const []const u8 {
+            return settings_ops.contextMenuItems(sess);
+        }
+    }.f;
+    {
+        var d = appendPaneFrame(s, leaf, term) orelse return error.EditorPaneDidNotDraw;
+        d.dl.deinit(allocator);
+    }
+    // ⑴ caret 을 진단 안(offset 1)에 두고 ⌘. → 문맥 진단 하나 → 메뉴: fix(preferred, 앞)·lazy. command-only·Command 형은 없다.
+    term.rt.editor_selection = .{ .anchor_start = 1, .anchor_end = 1, .focus = 1 };
+    try pressKey(&fx, .{ .char = '.' }, .{ .command = true });
+    try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_code_actions);
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
+    try testing.expect(s.code_action_menu and s.chrome_host.context_menu.open);
+    try testing.expectEqual(@as(u64, 1), s.editor_code_action.opened_count);
+    try testing.expectEqual(@as(usize, 2), menuTitles(s).len);
+    try testing.expectEqualStrings("fake: fix E1", menuTitles(s)[0]);
+    try testing.expectEqualStrings("fake: lazy", menuTitles(s)[1]);
+    try testing.expectEqual(@as(u64, 2), s.editor_code_action.hidden);
+    // 메뉴는 caret 셀 아래.
+    const a = pointerAtOffset(term, 1).?;
+    try testing.expect(s.chrome_host.context_menu.anchor_y > @as(i32, @intFromFloat(a.y)));
+    // fix 를 고르면(Enter) 진단 범위 0..3 → FIXED, undo 하나, 기록이 선다, 알림.
+    const undo_before = term.rt.editor_undo_len;
+    try pressKey(&fx, .enter, .{});
+    try testing.expect(!s.chrome_host.context_menu.open and !s.code_action_menu);
+    try testing.expectEqualStrings("FIXED x;\nint y;\n", content(term));
+    try testing.expectEqual(undo_before + 1, term.rt.editor_undo_len);
+    try testing.expectEqual(@as(u64, 1), s.editor_code_action.applied);
+    try testing.expect(s.editor_workspace_edit.last != null);
+    try testing.expect(s.chrome_host.notice.open);
+    try testing.expect(std.mem.indexOf(u8, maru.i18n.tIn(.en, .ca_applied), "applied") != null);
+    try testing.expect(std.mem.indexOf(u8, maru.i18n.tIn(.ko, .ca_applied), "적용") != null);
+    s.chrome_host.notice.dismiss();
+    s.dispatchAppAction(.editor_undo);
+    try testing.expectEqualStrings("int x;\nint y;\n", content(term));
+    // ⑵ lazy — resolve 를 보내고 그 edit(첫 줄에 `// lazy`)을 적용한다. 진단 없는 자리(둘째 줄)에서는 fix 가 없고 lazy 만.
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
+        fn f(c: Ctx) bool {
+            return c.term.rt.editor_diagnostics.lsp.items.len >= 1;
+        }
+    }.f));
+    term.rt.editor_selection = .{ .anchor_start = 9, .anchor_end = 9, .focus = 9 }; // `int y;` 안
+    s.dispatchAppAction(.quick_fix); // 팔레트 경로
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
+    try testing.expect(s.code_action_menu);
+    try testing.expectEqual(@as(usize, 1), menuTitles(s).len);
+    try testing.expectEqualStrings("fake: lazy", menuTitles(s)[0]);
+    try pressKey(&fx, .enter, .{});
+    try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_code_action_resolves);
+    try testing.expect(s.editor_code_action.resolve_waiting);
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
+    try testing.expectEqual(@as(u64, 1), s.editor_code_action.resolved);
+    try testing.expectEqualStrings("// lazy\nint x;\nint y;\n", content(term));
+    s.chrome_host.notice.dismiss();
+    s.dispatchAppAction(.editor_undo);
+    try testing.expectEqualStrings("int x;\nint y;\n", content(term));
+    // ⑶ Esc 는 닫고 아무것도 안 바꾼다 · 바깥 클릭도.
+    term.rt.editor_selection = .{ .anchor_start = 1, .anchor_end = 1, .focus = 1 };
+    s.dispatchAppAction(.quick_fix);
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
+    try testing.expect(s.code_action_menu);
+    try pressKey(&fx, .escape, .{});
+    try testing.expect(!s.chrome_host.context_menu.open and !s.code_action_menu);
+    try testing.expectEqualStrings("int x;\nint y;\n", content(term));
+    {
+        var d = appendPaneFrame(s, leaf, term) orelse return error.EditorPaneDidNotDraw;
+        d.dl.deinit(allocator);
+    }
+    s.dispatchAppAction(.quick_fix);
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
+    try testing.expect(s.code_action_menu);
+    const pc = pointerAtOffset(term, 1) orelse return error.NoPointer;
+    s.mouse(1, pc.x + 600, pc.y + 300, 0, 0);
+    s.mouse(3, pc.x + 600, pc.y + 300, 0, 0);
+    try testing.expect(!s.chrome_host.context_menu.open and !s.code_action_menu);
+    try testing.expectEqualStrings("int x;\nint y;\n", content(term));
+    // ⑷ `NOACT` — 서버가 빈 배열 → 알림, 메뉴 없음.
+    const end = content(term).len;
+    term.rt.editor_selection = .{ .anchor_start = end, .anchor_end = end, .focus = end };
+    try testing.expect(insertText(s, term, "// NOACT\n"));
+    term.rt.editor_selection = .{ .anchor_start = 1, .anchor_end = 1, .focus = 1 };
+    s.dispatchAppAction(.quick_fix);
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
+    try testing.expect(!s.chrome_host.context_menu.open);
+    try testing.expectEqual(@as(u64, 1), s.editor_code_action.notified_none);
+    try testing.expect(s.chrome_host.notice.open);
+    try testing.expect(std.mem.startsWith(u8, &s.notice_message_buf, maru.i18n.t(.ca_none)));
+    s.chrome_host.notice.dismiss();
+    try removeMarkerHover(s, term, "// NOACT\n");
+    // ⑸ **낡은 revision 은 전체 거부** — 메뉴가 뜬 뒤 문서를 고치고(메뉴는 모달이라 키로는 못 고친다 — 프로그램적으로) 고르면 거부.
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
+        fn f(c: Ctx) bool {
+            return c.term.rt.editor_diagnostics.lsp.items.len >= 1;
+        }
+    }.f));
+    term.rt.editor_selection = .{ .anchor_start = 1, .anchor_end = 1, .focus = 1 };
+    s.dispatchAppAction(.quick_fix);
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
+    try testing.expect(s.code_action_menu);
+    const end2 = content(term).len;
+    term.rt.editor_selection = .{ .anchor_start = end2, .anchor_end = end2, .focus = end2 };
+    try testing.expect(insertText(s, term, "Q"));
+    s.chrome_host.context_menu.selected = 0;
+    settings_ops.acceptContextMenu(s);
+    try testing.expectEqual(@as(u64, 1), s.editor_workspace_edit.refused_stale);
+    try testing.expect(std.mem.startsWith(u8, content(term), "int x;"));
+    s.chrome_host.notice.dismiss();
+    try removeMarkerHover(s, term, "Q");
+    // ⑹ resolve 오류(`RESOLVEFAIL`) → 알림, 문서 그대로.
+    try testing.expect(insertText(s, term, "// RESOLVEFAIL\n"));
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
+        fn f(c: Ctx) bool {
+            return c.term.rt.editor_diagnostics.lsp.items.len >= 1;
+        }
+    }.f));
+    term.rt.editor_selection = .{ .anchor_start = 9, .anchor_end = 9, .focus = 9 };
+    s.dispatchAppAction(.quick_fix);
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
+    try testing.expectEqualStrings("fake: lazy", menuTitles(s)[0]);
+    try pressKey(&fx, .enter, .{});
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
+    try testing.expectEqual(@as(u64, 1), s.editor_code_action.notified_error);
+    try testing.expect(std.mem.indexOf(u8, &s.notice_message_buf, "fake: cannot resolve") != null);
+    try testing.expect(std.mem.indexOf(u8, content(term), "// lazy") == null);
+    s.chrome_host.notice.dismiss();
+    try removeMarkerHover(s, term, "// RESOLVEFAIL\n");
+    // ⑺ 낡은 seq 는 버린다(둘 다).
+    s.editor_code_action.waiting = true;
+    s.editor_code_action.waiting_seq = 99;
+    code_action_client.onResponse(s, 98, null, false, null);
+    try testing.expect(s.editor_code_action.waiting);
+    s.editor_code_action.waiting = false;
+    s.editor_code_action.resolve_waiting = true;
+    s.editor_code_action.resolve_seq = 77;
+    code_action_client.onResolveResponse(s, 76, null, false, null, .utf8);
+    try testing.expect(s.editor_code_action.resolve_waiting);
+    s.editor_code_action.resolve_waiting = false;
+}
+
+test "CA2 code action — 서버가 codeActionProvider 를 안 내면 ⌘. 가 묻지 않는다 (제품 경계, §8.2h)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    _ = setenv("MARU_FAKE_LSP_NOACTCAP", "1", 1);
+    defer _ = unsetenv("MARU_FAKE_LSP_NOACTCAP");
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
+    var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const fz = try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake});
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);
+    defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const cz = try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root});
+    _ = setenv("MARU_CONFIG", cz.ptr, 1);
+    defer _ = unsetenv("MARU_CONFIG");
+    if (fx.session.config_path_buffer) |b| allocator.free(b);
+    fx.session.config_path_buffer = null;
+    fx.session.editor_lsp.auto_trust_answer = .allow;
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "n.c", .data = "int x;\n" });
+    const path = try std.fs.path.join(allocator, &.{ root, "n.c" });
+    defer allocator.free(path);
+    const saved_repo = fx.session.git_repo;
+    fx.session.git_repo = @constCast(root);
+    defer fx.session.git_repo = saved_repo;
+    const term = (try pane_ops.openFileTermInActivePane(fx.session, path, .text)).term;
+    const Ctx = struct { t: *Term };
+    try testing.expect(pumpLspUntil(&fx, 3000, Ctx{ .t = term }, struct {
+        fn f(c: Ctx) bool {
+            return c.t.rt.editor_diagnostics.lsp.items.len >= 1;
+        }
+    }.f));
+    term.rt.editor_selection = .{ .anchor_start = 1, .anchor_end = 1, .focus = 1 };
+    try pressKey(&fx, .{ .char = '.' }, .{ .command = true });
+    try testing.expectEqual(@as(u64, 0), fx.session.editor_lsp.sent_code_actions);
+    try testing.expect(!fx.session.chrome_host.context_menu.open);
 }
 
 test "MMP2 미니맵의 축은 보이는 줄이다 — 접으면 스트립에서도 사라지고, 클릭은 보이는 줄 축으로 환산된다 (제품 경계, §6.1·§6.2)" {

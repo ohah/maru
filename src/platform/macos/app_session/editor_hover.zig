@@ -96,6 +96,7 @@ pub fn notePointer(self: *AppSession, x_px: f64, y_px: f64) void {
     st.pointer_moved_ms = self.awakeMs();
     st.stop_judged = false;
     if (self.editor_signature.active) return; // 상자의 주인이 시그니처다(§8.2d) — 포인터가 열지도 닫지도 않는다
+    if (self.editor_completion.active) return; // 완성 팝업이 뜬 동안은 열지 않는다(§8.2g — 프레임에 상자는 하나)
     if (self.chrome_host.hover_box.open) {
         if (hover_box.contains(&self.chrome_host.hover_box, st.lines.items, chromeProps(self), x_px, y_px)) return;
         if (shownTerm(self)) |term| {

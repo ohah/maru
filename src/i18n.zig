@@ -485,6 +485,7 @@ const Table = struct {
     cfg_editor_hover: [:0]const u8,
     cfg_editor_hover_delay: [:0]const u8,
     cfg_editor_parameter_hints: [:0]const u8,
+    cfg_editor_quick_suggestions: [:0]const u8,
     /// 호버 박스의 구문 오류 문장(visual-mapping §5.4 「메시지는 재료」 — 문장은 표시 자리가 만든다).
     diag_syntax_error: [:0]const u8,
     /// `{s}` = 기대 토큰.
@@ -1611,6 +1612,7 @@ const en: Table = .{
     .cfg_editor_hover = "Hover box (diagnostics and language server info under the pointer)",
     .cfg_editor_hover_delay = "Hover delay (ms)",
     .cfg_editor_parameter_hints = "Parameter hints (signature while typing a call)",
+    .cfg_editor_quick_suggestions = "Quick suggestions (completion list while typing)",
     .diag_syntax_error = "Syntax error",
     .diag_missing = "Missing: {s}",
     .cfg_editor_cursor_shape = "Caret shape",
@@ -2312,6 +2314,7 @@ const ko: Table = .{
     .cfg_editor_hover = "호버 박스(포인터 아래의 진단·언어 서버 정보)",
     .cfg_editor_hover_delay = "호버 지연(ms)",
     .cfg_editor_parameter_hints = "시그니처 힌트(호출을 칠 때 매개변수 안내)",
+    .cfg_editor_quick_suggestions = "자동완성(타이핑하면 완성 목록)",
     .diag_syntax_error = "구문 오류",
     .diag_missing = "빠짐: {s}",
     .cfg_editor_cursor_shape = "커서 모양",

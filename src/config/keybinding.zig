@@ -279,6 +279,10 @@ pub const editor_context_bindings = [_]EditorContextBinding{
     .{ .chord = .{ .modifiers = .{ .control = true }, .key = .{ .char = '-' } }, .action = .navigate_back, .needs_editable = false },
     .{ .chord = .{ .modifiers = .{ .control = true, .shift = true }, .key = .{ .char = '-' } }, .action = .navigate_forward, .needs_editable = false },
     .{ .chord = .{ .modifiers = .{ .control = true, .shift = true }, .key = .{ .char = '_' } }, .action = .navigate_forward, .needs_editable = false },
+    // `⌃Space`·`⌥Esc` — 자동완성(tooling §8.2g, VS Code mac `editor.action.triggerSuggest` 둘 다). `⌃Space` 는 ⑷(터미널 Term 에서는 NUL 로 PTY 로
+    // 간다 — 여기는 PTY 가 없다), `⌥Esc` 는 ⑴. macOS 의 `⌃Space` 입력 소스 전환은 시스템 설정이 먼저 가로챌 수 있다(VS Code 도 같다).
+    .{ .chord = .{ .modifiers = .{ .control = true }, .key = .{ .char = ' ' } }, .action = .trigger_suggest, .needs_editable = true },
+    .{ .chord = .{ .modifiers = .{ .option = true }, .key = .escape }, .action = .trigger_suggest, .needs_editable = true },
     // `⇧⌘Space` — 시그니처 힌트(tooling §8.2d, VS Code `editor.action.triggerParameterHints`). ETX4 ⑵: 전역·터미널 표에 없어 겹치지 않는
     // `⌘` chord — 근거는 키 입력 문서 「편집기 Term 컨텍스트」의 그 문단. 편집기에서만 뜻이 있다(서버가 없으면 무동작).
     .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = ' ' } }, .action = .trigger_parameter_hints, .needs_editable = true }, // 비교 뷰에는 서버가 없다 — 예외 규칙대로 편집 가능한 문서만
@@ -1218,6 +1222,7 @@ test "ETX4 편집기 컨텍스트 기본키가 전역 표를 안 오염시킨다
         .{ .key = .{ .char = '-' }, .action = .navigate_back }, // ⌃- — VS Code workbench.action.navigateBack
         .{ .key = .{ .char = '-' }, .action = .navigate_forward }, // ⌃⇧-
         .{ .key = .{ .char = '_' }, .action = .navigate_forward }, // ⌃⇧- (US 자판 `_`)
+        .{ .key = .{ .char = ' ' }, .action = .trigger_suggest }, // ⌃Space — VS Code editor.action.triggerSuggest(§8.2g)
     };
     var exceptions: usize = 0;
     var bare_function_keys: usize = 0;
@@ -1258,7 +1263,7 @@ test "ETX4 편집기 컨텍스트 기본키가 전역 표를 안 오염시킨다
     }
     try std.testing.expectEqual(allowed.len, exceptions);
     try std.testing.expectEqual(@as(usize, 6), bare_function_keys); // F7 · ⇧F7 · F8 · ⇧F8 · F12 · F2 — 늘리려면 그 절에 전수 대조를 적는다
-    try std.testing.expectEqual(@as(usize, 3), control_chords); // ⌃- · ⌃⇧- · ⌃⇧_ — ⑷, 늘리려면 allowed_control 에 근거와 함께
+    try std.testing.expectEqual(@as(usize, 4), control_chords); // ⌃- · ⌃⇧- · ⌃⇧_ · ⌃Space — ⑷, 늘리려면 allowed_control 에 근거와 함께
     try std.testing.expect(editor_context_bindings.len > 0);
 
     // **`⌘D` 는 전역 표에서 안 없어진다** — 터미널·브라우저·파일 Term 이 그것으로 화면을 나눈다.

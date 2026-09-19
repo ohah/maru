@@ -89,6 +89,7 @@ pub const definition_client = @import("editor_definition.zig");
 pub const signature_client = @import("editor_signature.zig");
 pub const format_client = @import("editor_format.zig");
 pub const rename_client = @import("editor_rename.zig");
+pub const completion_client = @import("editor_completion.zig");
 pub const workspace_edit_client = @import("editor_workspace_edit.zig");
 
 pub const Opened = struct {
@@ -7255,6 +7256,7 @@ pub fn insertText(self: *AppSession, term: *Term, text: []const u8) bool {
     revealPrimaryCaretCols(self, term, cols_before, max_before);
     // 시그니처 힌트 트리거(§8.2d) — 타이핑한 마지막 byte 가 서버의 트리거 글자면 묻는다. 삽입 뒤라 caret 은 그 글자 뒤에 있다.
     if (text.len > 0) signature_client.noteTyped(self, term, text[text.len - 1]);
+    if (text.len > 0) completion_client.noteTyped(self, term, text[text.len - 1]); // §8.2g
     return true;
 }
 
@@ -12887,6 +12889,267 @@ test "RNM3 심볼 이름 바꾸기 — documentChanges 응답(version 포함)도
         try testing.expect(std.mem.indexOf(u8, other_term.rt.editor_doc.?.file.content, "add5") == null);
         other_term.rt.editor_doc.?.file.read_only = false;
     }
+}
+
+test "CMP1 자동완성 — 식별자 글자로 열리고 접두사로 좁혀지며 isIncomplete 면 다시 묻고, ↓·Enter 로 고르면 접두사 교체(+import 가 undo 하나); Esc·빈 접두사·낱말 밖 글자·←·클릭은 닫힘; `.` 트리거; 설정 끄면 타이핑만 꺼짐; ⌃Space; 낡은 seq (제품 경계, §8.2g)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
+    var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const fz = try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake});
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);
+    defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const cz = try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root});
+    _ = setenv("MARU_CONFIG", cz.ptr, 1);
+    defer _ = unsetenv("MARU_CONFIG");
+    if (fx.session.config_path_buffer) |b| allocator.free(b);
+    fx.session.config_path_buffer = null;
+    fx.session.editor_lsp.auto_trust_answer = .allow;
+    // 식별자: int printf x add a main. 셋째 줄이 빈 줄(공백 둘) — 거기서 친다.
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "c.c", .data = "int printf(int x);\nint add(int a);\nint main() {\n  \n}\n" });
+    const path = try std.fs.path.join(allocator, &.{ root, "c.c" });
+    defer allocator.free(path);
+    const saved_repo = fx.session.git_repo;
+    fx.session.git_repo = @constCast(root);
+    defer fx.session.git_repo = saved_repo;
+    const term = (try pane_ops.openFileTermInActivePane(fx.session, path, .text)).term;
+    fx.session.surface_initialized = true;
+    fx.session.backing_width_px = 1200;
+    fx.session.backing_height_px = 800;
+    const leaf = activeLeafRectForTest(fx.session) orelse return error.SkipZigTest;
+    const s = fx.session;
+    const Ctx = struct { fx: *PaneFixture, term: *Term };
+    const ctx: Ctx = .{ .fx = &fx, .term = term };
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
+        fn f(c: Ctx) bool {
+            return c.term.rt.editor_diagnostics.lsp.items.len >= 1;
+        }
+    }.f));
+    const settled = struct {
+        fn f(c: Ctx) bool {
+            return !c.fx.session.editor_completion.waiting;
+        }
+    }.f;
+    const content = struct {
+        fn f(t: *Term) []const u8 {
+            return t.rt.editor_doc.?.file.content;
+        }
+    }.f;
+    const frame = struct {
+        fn f(sess: *AppSession, l: maru.session.SplitRect, t: *Term) !void {
+            var d = appendPaneFrame(sess, l, t) orelse return error.EditorPaneDidNotDraw;
+            d.dl.deinit(testing.allocator);
+            if (try sess.buildChromeOverlayPrep()) |*prep| {
+                var pp = prep.*;
+                pp.dl.deinit(testing.allocator);
+            }
+        }
+    }.f;
+    const line3: usize = 50; // 셋째 줄 "  " 뒤(19 + 16 + 13 + 2)
+    // 셋째 줄에 친 것을 지운다 — 표식 검색으로 지우면 앞줄의 같은 글자(`pr`intf·`a`dd)가 먼저 걸린다.
+    const clearLine3 = struct {
+        fn f(sess: *AppSession, t: *Term, len: usize) !void {
+            t.rt.editor_selection = .{ .anchor_start = @intCast(line3), .anchor_end = @intCast(line3 + len), .focus = @intCast(line3 + len) };
+            try testing.expect(deleteText(sess, t, false));
+            completion_client.hide(sess);
+        }
+    }.f;
+    // ⑴ `p` 를 치면 묻는다(접두사 1글자 → 서버는 isIncomplete). 응답 뒤 열리고 접두사 `p` 로 좁혀져 printf 하나.
+    term.rt.editor_selection = .{ .anchor_start = line3, .anchor_end = line3, .focus = line3 };
+    try testing.expect(insertText(s, term, "p"));
+    try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_completions);
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
+    try testing.expect(s.editor_completion.active);
+    try testing.expect(s.editor_completion.incomplete);
+    // 접두사 `p` — printf 와 방금 친 `p` 자체(서버는 문서의 식별자를 전부 낸다). sortText 순: printf 가 먼저.
+    try testing.expectEqual(@as(usize, 2), completion_client.rows(s).len);
+    try testing.expectEqualStrings("printf", completion_client.rows(s)[0].label);
+    try testing.expectEqualStrings("p", completion_client.rows(s)[1].label);
+    try testing.expectEqualStrings("fake", completion_client.rows(s)[0].detail);
+    try testing.expect(s.overlayFrameNeeded());
+    try frame(s, leaf, term);
+    try testing.expect(s.chrome_host.suggest_box.open);
+    // 앵커는 낱말 첫 글자(offset 51) 셀.
+    const a = pointerAtOffset(term, line3).?;
+    try testing.expectEqual(@as(i32, @intFromFloat(a.x - @as(f64, @floatFromInt(term.rt.editor_hit_geom.cell_w_px)) / 2)), s.chrome_host.suggest_box.anchor_x);
+    // ⑵ `r` — 접두사 `pr`, isIncomplete 라 다시 묻는다(프레임의 refresh). 응답 뒤엔 완전한 목록.
+    try testing.expect(insertText(s, term, "r"));
+    try frame(s, leaf, term);
+    try testing.expectEqual(@as(u64, 2), s.editor_lsp.sent_completions);
+    try testing.expectEqual(@as(u64, 1), s.editor_completion.refetched);
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
+    try testing.expect(s.editor_completion.active and !s.editor_completion.incomplete);
+    try testing.expectEqualStrings("printf", completion_client.rows(s)[0].label);
+    // ⑶ `↓`·`↓`(wrap)·`Enter` → `pr` 가 `printf` 로, caret 은 끝, undo 하나, 팝업 닫힘.
+    const undo_before = term.rt.editor_undo_len;
+    try testing.expectEqual(@as(usize, 2), completion_client.rows(s).len); // printf · pr
+    try pressKey(&fx, .arrow_down, .{});
+    try testing.expectEqual(@as(usize, 1), s.chrome_host.suggest_box.selected);
+    try pressKey(&fx, .arrow_down, .{});
+    try testing.expectEqual(@as(usize, 0), s.chrome_host.suggest_box.selected); // wrap
+    try pressKey(&fx, .enter, .{});
+    try testing.expect(!s.editor_completion.active and !s.chrome_host.suggest_box.open);
+    try testing.expectEqualStrings("int printf(int x);\nint add(int a);\nint main() {\n  printf\n}\n", content(term));
+    try testing.expectEqual(line3 + 6, term.rt.editor_selection.?.focus);
+    try testing.expectEqual(undo_before + 1, term.rt.editor_undo_len);
+    try testing.expectEqual(@as(u64, 1), s.editor_completion.accepted);
+    s.dispatchAppAction(.editor_undo);
+    try testing.expectEqualStrings("int printf(int x);\nint add(int a);\nint main() {\n  pr\n}\n", content(term));
+    try clearLine3(s, term, 2);
+    // ⑷ `fa` → fake_import(preselect, textEdit 접두사 교체 + additional include) — 하나의 undo.
+    term.rt.editor_selection = .{ .anchor_start = line3, .anchor_end = line3, .focus = line3 };
+    try testing.expect(insertText(s, term, "f"));
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
+    try testing.expect(insertText(s, term, "a"));
+    try frame(s, leaf, term);
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
+    try frame(s, leaf, term);
+    try testing.expect(s.editor_completion.active);
+    try testing.expectEqualStrings("fake_import", completion_client.rows(s)[s.chrome_host.suggest_box.selected].label);
+    const undo_fa = term.rt.editor_undo_len;
+    try pressKey(&fx, .tab, .{});
+    try testing.expectEqualStrings("#include \"fake.h\"\nint printf(int x);\nint add(int a);\nint main() {\n  fake_import\n}\n", content(term));
+    try testing.expectEqual(@as(usize, 18 + line3 + 11), term.rt.editor_selection.?.focus);
+    try testing.expectEqual(undo_fa + 1, term.rt.editor_undo_len);
+    try testing.expectEqual(@as(u64, 1), s.editor_completion.accepted_with_additional);
+    s.dispatchAppAction(.editor_undo);
+    try testing.expectEqualStrings("int printf(int x);\nint add(int a);\nint main() {\n  fa\n}\n", content(term));
+    try clearLine3(s, term, 2);
+    // ⑸ Esc 는 닫고 문서는 그대로; 다음 글자로 다시 뜬다.
+    term.rt.editor_selection = .{ .anchor_start = line3, .anchor_end = line3, .focus = line3 };
+    try testing.expect(insertText(s, term, "a"));
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
+    try frame(s, leaf, term);
+    try testing.expect(s.editor_completion.active);
+    try testing.expectEqual(@as(usize, 2), completion_client.rows(s).len); // add · a
+    try pressKey(&fx, .escape, .{});
+    try testing.expect(!s.editor_completion.active);
+    try testing.expectEqualStrings("int printf(int x);\nint add(int a);\nint main() {\n  a\n}\n", content(term));
+    try testing.expect(insertText(s, term, "d"));
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
+    try frame(s, leaf, term);
+    try testing.expect(s.editor_completion.active);
+    try testing.expectEqual(@as(usize, 2), completion_client.rows(s).len); // add · ad(자기 자신)
+    // ⑹ 접두사가 비면 닫힌다(backspace 둘) · 낱말 밖 글자(`(`)도 닫는다.
+    try pressKey(&fx, .backspace, .{});
+    try frame(s, leaf, term);
+    try testing.expect(s.editor_completion.active); // `a` — 아직 낱말
+    try pressKey(&fx, .backspace, .{});
+    try frame(s, leaf, term);
+    try testing.expect(!s.editor_completion.active);
+    try testing.expectEqualStrings("int printf(int x);\nint add(int a);\nint main() {\n  \n}\n", content(term));
+    try testing.expect(insertText(s, term, "a"));
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
+    try frame(s, leaf, term);
+    try testing.expect(s.editor_completion.active);
+    try testing.expect(insertText(s, term, "("));
+    try frame(s, leaf, term);
+    try testing.expect(!s.editor_completion.active);
+    try clearLine3(s, term, 2);
+    // ⑺ `←` 는 닫되 소비하지 않는다(caret 이 움직인다) · 마우스 클릭은 닫는다.
+    term.rt.editor_selection = .{ .anchor_start = line3, .anchor_end = line3, .focus = line3 };
+    try testing.expect(insertText(s, term, "a"));
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
+    try frame(s, leaf, term);
+    try testing.expect(s.editor_completion.active);
+    try pressKey(&fx, .arrow_left, .{});
+    try testing.expect(!s.editor_completion.active);
+    try testing.expectEqual(line3, term.rt.editor_selection.?.focus);
+    term.rt.editor_selection = .{ .anchor_start = line3 + 1, .anchor_end = line3 + 1, .focus = line3 + 1 };
+    s.dispatchAppAction(.trigger_suggest);
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
+    try frame(s, leaf, term);
+    try testing.expect(s.editor_completion.active);
+    const pc = pointerAtOffset(term, 1) orelse return error.NoPointer;
+    s.mouse(1, pc.x + 600, pc.y, 0, 0);
+    s.mouse(3, pc.x + 600, pc.y, 0, 0);
+    try testing.expect(!s.editor_completion.active);
+    try clearLine3(s, term, 1);
+    // ⑻ `.` 는 서버 트리거 — 빈 접두사로 열려 전부 보인다(설정과 무관).
+    s.loaded_config.config.editor.quick_suggestions = false;
+    term.rt.editor_selection = .{ .anchor_start = line3, .anchor_end = line3, .focus = line3 };
+    const sent_off = s.editor_lsp.sent_completions;
+    try testing.expect(insertText(s, term, "x"));
+    try testing.expectEqual(sent_off, s.editor_lsp.sent_completions); // 꺼져 있다 — 타이핑 트리거 없음
+    try testing.expect(insertText(s, term, "."));
+    try testing.expectEqual(sent_off + 1, s.editor_lsp.sent_completions);
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
+    try frame(s, leaf, term);
+    try testing.expect(s.editor_completion.active);
+    try testing.expect(completion_client.rows(s).len >= 6); // 빈 접두사 — 전부
+    try pressKey(&fx, .escape, .{});
+    // 꺼져 있어도 `⌃Space` 는 온다.
+    try pressKey(&fx, .{ .char = ' ' }, .{ .control = true });
+    try testing.expectEqual(sent_off + 2, s.editor_lsp.sent_completions);
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
+    completion_client.hide(s);
+    s.loaded_config.config.editor.quick_suggestions = true;
+    try clearLine3(s, term, 2);
+    // ⑼ **보이지 않는 목록은 확정하지 않는다** — 응답은 왔지만 프레임이 아직 상자를 안 세웠으면 Enter 는 줄바꿈이다.
+    term.rt.editor_selection = .{ .anchor_start = line3, .anchor_end = line3, .focus = line3 };
+    try testing.expect(insertText(s, term, "p"));
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
+    try testing.expect(s.editor_completion.active and !s.chrome_host.suggest_box.open);
+    const accepted_before = s.editor_completion.accepted;
+    try pressKey(&fx, .enter, .{});
+    try testing.expectEqual(accepted_before, s.editor_completion.accepted);
+    try testing.expect(!s.editor_completion.active);
+    try testing.expect(std.mem.indexOf(u8, content(term), "  p\n") != null); // 줄바꿈이 들어갔다(자동 들여쓰기는 그 뒤)
+    try testing.expect(std.mem.indexOf(u8, content(term), "  printf") == null); // 항목이 들어가지 않았다
+    // ⑽ 낡은 seq 는 버린다.
+    s.editor_completion.waiting = true;
+    s.editor_completion.waiting_seq = 99;
+    completion_client.onResponse(s, 98, null, .utf8);
+    try testing.expect(s.editor_completion.waiting and !s.editor_completion.active);
+    s.editor_completion.waiting = false;
+}
+
+test "CMP2 자동완성 — 서버가 completionProvider 를 안 내면 타이핑도 ⌃Space 도 묻지 않는다 (제품 경계, §8.2g)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    _ = setenv("MARU_FAKE_LSP_NOCOMPCAP", "1", 1);
+    defer _ = unsetenv("MARU_FAKE_LSP_NOCOMPCAP");
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
+    var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const fz = try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake});
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);
+    defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const cz = try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root});
+    _ = setenv("MARU_CONFIG", cz.ptr, 1);
+    defer _ = unsetenv("MARU_CONFIG");
+    if (fx.session.config_path_buffer) |b| allocator.free(b);
+    fx.session.config_path_buffer = null;
+    fx.session.editor_lsp.auto_trust_answer = .allow;
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "n.c", .data = "int x;\n" });
+    const path = try std.fs.path.join(allocator, &.{ root, "n.c" });
+    defer allocator.free(path);
+    const saved_repo = fx.session.git_repo;
+    fx.session.git_repo = @constCast(root);
+    defer fx.session.git_repo = saved_repo;
+    const term = (try pane_ops.openFileTermInActivePane(fx.session, path, .text)).term;
+    const Ctx = struct { t: *Term };
+    try testing.expect(pumpLspUntil(&fx, 3000, Ctx{ .t = term }, struct {
+        fn f(c: Ctx) bool {
+            return c.t.rt.editor_diagnostics.lsp.items.len >= 1;
+        }
+    }.f));
+    term.rt.editor_selection = .{ .anchor_start = 7, .anchor_end = 7, .focus = 7 };
+    try testing.expect(insertText(fx.session, term, "x"));
+    try pressKey(&fx, .{ .char = ' ' }, .{ .control = true });
+    try testing.expectEqual(@as(u64, 0), fx.session.editor_lsp.sent_completions);
+    try testing.expect(!fx.session.editor_completion.active);
 }
 
 test "MMP2 미니맵의 축은 보이는 줄이다 — 접으면 스트립에서도 사라지고, 클릭은 보이는 줄 축으로 환산된다 (제품 경계, §6.1·§6.2)" {

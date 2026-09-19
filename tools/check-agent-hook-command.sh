@@ -145,6 +145,27 @@ printf '%s\n' "$huge2" | env MARU_HOOK_INSTANCE=$inst MARU_HOOK_PANE=11 /bin/sh 
 grep -q '__oversized__' "$evdir/11.ndjson" || fail "모르는 이름인데 표식이 없다"
 pass "상한 접기(미지 이름)"
 
+echo "4c) 상한을 넘겨도 tool_use_id 는 살아남는다 — 없으면 셸 구간을 닫을 수 없다(AT3b-1)"
+# `PostToolUse(Bash)` 는 명령 출력을 실어 0.1% 가 상한을 넘긴다. 이름만 남기면 그 구간은 짝지을 id 가
+# 없어 턴 끝까지 열린 채 사용자 편집을 끌어들인다. 파라미터 확장뿐이라 프로세스는 늘지 않는다.
+huge3=$(awk 'BEGIN { printf "{\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"Bash\",\"tool_response\":{\"stdout\":\""; for (i = 0; i < 40000; i++) printf "x"; printf "\"},\"tool_use_id\":\"toolu_01GxMwqMfHbwqq1dbuxDCwFB\"}" }')
+printf '%s\n' "$huge3" | env MARU_HOOK_INSTANCE=$inst MARU_HOOK_PANE=12 /bin/sh -c "$cmd" || fail "상한 경로가 0 으로 끝나지 않았다"
+grep -q '"hook_event_name":"PostToolUse","tool_use_id":"toolu_01GxMwqMfHbwqq1dbuxDCwFB"' "$evdir/12.ndjson" || fail "상한을 넘겼다고 tool_use_id 까지 버렸다: $(cat "$evdir/12.ndjson")"
+[ "$(wc -c < "$evdir/12.ndjson")" -lt 200 ] || fail "상한을 넘긴 원문이 그대로 실렸다"
+# **값은 화이트리스트를 지나야 실린다.** 우리가 만드는 JSON 안에 그대로 들어가므로 따옴표가 섞인 id 를
+# 실으면 파서가 그 줄을 통째로 버려 이름까지 잃는다 — 그때는 id 를 버리고 이름만 남긴다.
+huge4=$(awk 'BEGIN { printf "{\"hook_event_name\":\"PostToolUseFailure\",\"tool_use_id\":\"ab\\\"c\",\"x\":\""; for (i = 0; i < 40000; i++) printf "x"; printf "\"}" }')
+printf '%s\n' "$huge4" | env MARU_HOOK_INSTANCE=$inst MARU_HOOK_PANE=13 /bin/sh -c "$cmd" || fail "상한 경로가 0 으로 끝나지 않았다"
+grep -q '^claude	{"hook_event_name":"PostToolUseFailure"}$' "$evdir/13.ndjson" || fail "검증을 안 지난 id 가 실렸다: $(cat "$evdir/13.ndjson")"
+# **값 안의 같은 낱말에 안 걸린다.** stdout 에 `"tool_use_id":"FAKE"` 가 들어 있어도 JSON 안에서는 따옴표가
+# `\"` 로 이스케이프돼 있어 패턴(`"tool_use_id":"`)과 다르다 — 그래서 첫 일치가 진짜 키다. 이 저장소의
+# 에이전트는 훅 로그를 `cat` 하므로(실사용) 가상의 경우가 아니다.
+huge5=$(awk 'BEGIN { printf "{\"hook_event_name\":\"PostToolUse\",\"tool_response\":{\"stdout\":\"\\\"tool_use_id\\\":\\\"FAKE\\\""; for (i = 0; i < 40000; i++) printf "x"; printf "\"},\"tool_use_id\":\"toolu_real\"}" }')
+printf '%s\n' "$huge5" | env MARU_HOOK_INSTANCE=$inst MARU_HOOK_PANE=14 /bin/sh -c "$cmd" || fail "상한 경로가 0 으로 끝나지 않았다"
+grep -q '"tool_use_id":"toolu_real"' "$evdir/14.ndjson" || fail "stdout 안의 가짜 id 에 걸렸다: $(cat "$evdir/14.ndjson")"
+# id 가 없는 이벤트(`Stop`)는 예전 모양 그대로다 — 4) 가 그것을 본다.
+pass "상한 접기(tool_use_id 보존·검증)"
+
 echo "5) 로그 디렉터리가 없어도 조용히 0 으로 끝난다"
 # **stderr 까지 조용해야 한다.** `printf … 2>/dev/null` 은 printf 자신의 stderr 만 막고 리다이렉션 대상이
 # 없을 때 셸이 내는 `No such file or directory` 는 못 막는다 — 실제로 그 메시지가 새는 것을 이 검사가

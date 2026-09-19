@@ -4086,6 +4086,37 @@ pub fn build(b: *std.Build) void {
         run_remote_explorer_tests.setCwd(b.path("."));
         b.step("test-remote-explorer", "Run the remote explorer vertical judges only").dependOn(&run_remote_explorer_tests.step);
         macos_only_test_step.dependOn(&run_remote_explorer_tests.step);
+
+        // 에이전트 훅·턴 캡처 배선 판정자(AH·AT3·AT4·AT3b) — app_session 전체를 12 분 돌리지 않고 이 축만
+        // 잰다(«훅» 이 이름에 든 것 전부 + 턴 스냅샷, 45개 · ~15초). 순수 층(`turn_capture`·`shell_bracket`)은
+        // `zig test` 로 단독 확인이 되지만 **배선**(어느 이벤트가 어느 게이트에서 무엇을 트리거하나)은
+        // `AppSession` 을 세워야 보인다.
+        const turn_capture_wiring_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/app_session.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "maru", .module = maru_mod },
+                    .{ .name = "syntax", .module = syntax_mod },
+                },
+            }),
+            .filters = &.{ "훅", "턴 스냅샷" },
+        });
+        turn_capture_wiring_tests.root_module.link_libc = true;
+        for ([_][]const u8{ "AppKit", "Metal", "MetalKit", "QuartzCore", "CoreText", "CoreGraphics", "ImageIO" }) |fw| {
+            turn_capture_wiring_tests.root_module.linkFramework(fw, .{});
+        }
+        turn_capture_wiring_tests.root_module.addCSourceFile(.{
+            .file = b.path("src/platform/macos/coretext_smoke.m"),
+            .flags = &.{"-fobjc-arc"},
+        });
+        const run_turn_capture_wiring = b.addRunArtifact(turn_capture_wiring_tests);
+        // **개수 가드** — 필터가 아무것도 안 고르는 회귀는 실제로 CI 를 통과한 적이 있다(위 `test-remote-activity-vertical`).
+        run_turn_capture_wiring.addArg("--maru-expect-tests=47");
+        run_turn_capture_wiring.setCwd(b.path("."));
+        b.step("test-agent-turn-capture", "Run the agent turn capture wiring judges only (AT3/AT4/AT3b)").dependOn(&run_turn_capture_wiring.step);
+        macos_only_test_step.dependOn(&run_turn_capture_wiring.step);
     }
 
     // **헬퍼 `list` ↔ 코덱 파서 왕복 게이트**(RF2a — docs/plans/remote-file-tree.md §10). 헬퍼는

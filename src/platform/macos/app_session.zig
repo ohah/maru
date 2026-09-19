@@ -28340,6 +28340,89 @@ test "훅 캡처: 셸만 쓴 턴도 배선에서 봉인된다 (AT4)" {
     try std.testing.expectEqual(@as(u64, 0), agent_ops.sealTurnCaptureNow(session, term));
 }
 
+// [AT3b-1] **셸 구간 배선**: `PreToolUse(Bash)` 가 열고 같은 `tool_use_id` 의 `PostToolUse`/`PostToolUseFailure`
+// 가 닫으며, 턴 끝이 열린 것을 전부 닫아 봉인된 턴에 싣는다. 규율(시각 보정·상한·중복)은 순수 층
+// `shell_bracket` 이 갖고, 여기서 보는 것은 **어떤 이벤트가 어느 게이트에서 무엇을 트리거하는가**다.
+test "훅 캡처: 셸 구간이 Pre 로 열리고 Post 로 닫히며 턴 끝이 전부 닫는다 (AT3b-1)" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const term = tab_ops.activeTab(session).panes.items[0].terms.items[0];
+    term.agent_kind = .claude;
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .session_start, .session_id = "S-br" });
+
+    // ① 성공한 명령: Pre 가 열고 Post 가 닫는다.
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .pre_tool_use, .provider = "claude", .session_id = "S-br", .tool_name = "Bash", .tool_command = "ls", .tool_use_id = "toolu_a" });
+    try std.testing.expect(session.turn_captures.openTurn("S-br").?.shell.busy());
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .post_tool_use, .session_id = "S-br", .tool_name = "Bash", .tool_use_id = "toolu_a", .duration_ms = 40 });
+    try std.testing.expect(!session.turn_captures.openTurn("S-br").?.shell.busy());
+    try std.testing.expectEqual(@as(usize, 1), session.turn_captures.openTurn("S-br").?.shell.sealed().len);
+
+    // ② 실패한 명령: claude 는 `PostToolUse` 대신 `PostToolUseFailure` 를 보낸다 — 그것도 닫는다.
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .pre_tool_use, .provider = "claude", .session_id = "S-br", .tool_name = "Bash", .tool_command = "exit 3", .tool_use_id = "toolu_b" });
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .post_tool_use_failure, .session_id = "S-br", .tool_name = "Bash", .tool_use_id = "toolu_b", .duration_ms = 10 });
+    try std.testing.expect(!session.turn_captures.openTurn("S-br").?.shell.busy());
+    try std.testing.expectEqual(@as(usize, 2), session.turn_captures.openTurn("S-br").?.shell.sealed().len);
+
+    // ③ 배경 호출: 띄운 순간 오는 Post 로는 안 닫힌다 — 턴 끝까지 연다.
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .pre_tool_use, .provider = "claude", .session_id = "S-br", .tool_name = "Bash", .tool_command = "sleep 9", .tool_use_id = "toolu_bg", .run_in_background = true });
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .post_tool_use, .session_id = "S-br", .tool_name = "Bash", .tool_use_id = "toolu_bg", .duration_ms = 30 });
+    try std.testing.expect(session.turn_captures.openTurn("S-br").?.shell.busy());
+
+    // ③b provider 에 닫을 이벤트가 없으면(codex — AT3b-2 까지) 열지도 않는다: 열면 턴 전체가 구간이 된다.
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .pre_tool_use, .provider = "codex", .session_id = "S-br", .tool_name = "Bash", .tool_command = "ls", .tool_use_id = "exec-codex-1" });
+    try std.testing.expectEqual(@as(usize, 2), session.turn_captures.openTurn("S-br").?.shell.sealed().len);
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .post_tool_use, .provider = "codex", .session_id = "S-br", .tool_name = "Bash", .tool_use_id = "exec-codex-1" });
+    try std.testing.expectEqual(@as(usize, 2), session.turn_captures.openTurn("S-br").?.shell.sealed().len);
+
+    // ④ `Monitor` 는 셸 수에는 들지만 구간은 안 연다 — 닫을 신호(`Post`)가 그 matcher 에 없다.
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .pre_tool_use, .session_id = "S-br", .tool_name = "Monitor", .tool_command = "tail -f x", .tool_use_id = "toolu_m" });
+    try std.testing.expectEqual(@as(u32, 5), session.turn_captures.openTurn("S-br").?.shell_calls); // a·b·bg·codex·m
+
+    // ⑤ 게이트: **열기는 backlog 뒤, 닫기는 backlog 앞.** 회전본 tail 의 Post 가 살아 있는 파일에서 연
+    // 구간을 닫아야 한다 — 같은 게이트에 두면 그 구간은 영영 안 닫힌다.
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .pre_tool_use, .provider = "claude", .session_id = "S-br", .tool_name = "Bash", .tool_command = "make", .tool_use_id = "toolu_d" });
+    term.agent_hook_backlog_catchup = true;
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .pre_tool_use, .provider = "claude", .session_id = "S-br", .tool_name = "Bash", .tool_command = "old", .tool_use_id = "toolu_old" });
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .post_tool_use, .session_id = "S-br", .tool_name = "Bash", .tool_use_id = "toolu_d", .duration_ms = 5 });
+    term.agent_hook_backlog_catchup = false;
+    {
+        const open = session.turn_captures.openTurn("S-br").?;
+        try std.testing.expectEqual(@as(usize, 3), open.shell.sealed().len); // a·b·d — old 는 열리지 않았다
+        try std.testing.expectEqual(@as(u32, 6), open.shell_calls); // a·b·bg·codex·m·d — backlog 의 Pre 는 세지도 않는다(AT4)
+        // 짝 없는 Post(backlog 에서 건너뛴 Pre 의 것)는 무시하고 센다.
+        _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .post_tool_use, .session_id = "S-br", .tool_name = "Bash", .tool_use_id = "toolu_old" });
+        try std.testing.expectEqual(@as(u32, 2), open.shell.unmatched); // codex 의 Post + old
+        try std.testing.expect(!open.shell.overflow);
+    }
+
+    // ⑥ 턴 끝: 열린 것(배경)을 닫고 봉인된 턴에 싣는다. 시각은 wall-clock 이다(ctime 과 비교하므로).
+    const id = agent_ops.sealTurnCaptureNow(session, term);
+    try std.testing.expect(id != 0);
+    const sealed = session.turn_captures.sealedTurn(id) orelse return error.NoSealedTurn;
+    try std.testing.expect(!sealed.shell.busy());
+    try std.testing.expectEqual(@as(usize, 4), sealed.shell.sealed().len); // a·b·d + 배경
+    for (sealed.shell.sealed()) |iv| {
+        try std.testing.expect(iv.end_ms >= iv.start_ms);
+        try std.testing.expect(iv.end_ms > 1_577_836_800_000); // 2020-01-01 — monotonic 시계면 여기서 죽는다
+    }
+    // 다음 턴은 빈 구간으로 시작한다.
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .pre_tool_use, .provider = "claude", .session_id = "S-br", .tool_name = "Bash", .tool_command = "pwd", .tool_use_id = "toolu_next" });
+    try std.testing.expectEqual(@as(usize, 0), session.turn_captures.openTurn("S-br").?.shell.sealed().len);
+    try std.testing.expect(session.turn_captures.openTurn("S-br").?.shell.busy());
+}
+
 test "훅 캡처: 셸 호출을 세고, backlog 에서는 안 센다 (AT4)" {
     const allocator = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
@@ -28505,6 +28588,153 @@ test "훅 캡처: 회전본의 Stop 이 진행 중 턴의 사본을 가져가지
     const open = session.turn_captures.openTurn("S-rot2") orelse return error.CaptureStolen;
     try std.testing.expectEqual(@as(usize, 1), open.entries.items.len);
     try std.testing.expectEqualStrings("진행 중\n", open.entries.items[0].before.text);
+}
+
+// [AT3b-1] **실제 로그 경로로 한 턴을 통째로 민다** — 파서 → 배치 루프 → 봉인. 위 배선 테스트는 `Event` 를
+// 손으로 만들어 seam 에 넣으므로 「훅이 적는 그 JSON 을 파서가 그 필드로 읽어 배선까지 닿는가」(필드 이름
+// 오타·kind 표 누락)는 한 번도 안 건넌다. 실측 payload 모양을 그대로 적어 `pollAgentHookEvents` 로 읽힌다.
+test "훅 캡처: 실측 모양의 ndjson 한 턴이 파서를 지나 셸 구간으로 봉인된다 (AT3b-1)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const hook_command = maru.session.agent_hook_command;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var env_guard = try workspace_ops.ProviderEnvGuard.capture(a);
+    defer env_guard.restore();
+    try tmp.dir.createDirPath(io, "home");
+    try tmp.dir.createDirPath(io, "cache");
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const home = try std.fmt.allocPrintSentinel(a, "{s}/home", .{root}, 0);
+    defer a.free(home);
+    const cache = try std.fmt.allocPrintSentinel(a, "{s}/cache", .{root}, 0);
+    defer a.free(cache);
+    const config = try std.fmt.allocPrintSentinel(a, "{s}/missing-config", .{root}, 0);
+    defer a.free(config);
+    try std.testing.expectEqual(@as(c_int, 0), setenv("HOME", home.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("XDG_CACHE_HOME", cache.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("MARU_CONFIG", config.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), unsetenv("CLAUDE_CONFIG_DIR"));
+    test_config_text = agent_hooks_on_config;
+    defer test_config_text = "";
+
+    var session: AppSession = .{ .allocator = a, .io = std.testing.io };
+    try session.init(io, a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    const term = pane_ops.activePane(&session).activeTerm();
+    term.agent_kind = .claude;
+
+    const events_dir = try std.fmt.allocPrint(a, "cache/maru/{s}/{d}", .{ hook_command.log_dir_rel, agent_ops.hookInstanceId() });
+    defer a.free(events_dir);
+    try tmp.dir.createDirPath(io, events_dir);
+    const log_rel = try std.fmt.allocPrint(a, "{s}/{d}.ndjson", .{ events_dir, term.surfaceId() });
+    defer a.free(log_rel);
+
+    // 한 턴: 성공한 Bash · 실패한 Bash · 배경 Bash · Read(경로는 없는 파일이라 «모름» 으로 접힌다) · Stop.
+    // 줄은 2026-09-19 격리 세션 실측 payload 의 키를 그대로 쓴다(값만 짧다).
+    const sid = "\"session_id\":\"cafe0000-0000-4000-8000-000000000001\"";
+    try tmp.dir.writeFile(io, .{
+        .sub_path = log_rel,
+        .data = "claude\t{\"hook_event_name\":\"SessionStart\"," ++ sid ++ ",\"source\":\"startup\"}\n" ++
+            "claude\t{\"hook_event_name\":\"UserPromptSubmit\"," ++ sid ++ ",\"prompt_id\":\"p-1\",\"prompt\":\"go\"}\n" ++
+            "claude\t{\"hook_event_name\":\"PreToolUse\"," ++ sid ++ ",\"prompt_id\":\"p-1\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sleep 4\",\"run_in_background\":false},\"tool_use_id\":\"toolu_01GxMwqMfHbwqq1dbuxDCwFB\"}\n" ++
+            "claude\t{\"hook_event_name\":\"PostToolUse\"," ++ sid ++ ",\"prompt_id\":\"p-1\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sleep 4\",\"run_in_background\":false},\"tool_response\":{\"stdout\":\"\",\"stderr\":\"\",\"interrupted\":false},\"tool_use_id\":\"toolu_01GxMwqMfHbwqq1dbuxDCwFB\",\"duration_ms\":4260}\n" ++
+            "claude\t{\"hook_event_name\":\"PreToolUse\"," ++ sid ++ ",\"prompt_id\":\"p-1\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sh -c 'exit 3'\"},\"tool_use_id\":\"toolu_013o3p6eudWZB6eggpZNHx4y\"}\n" ++
+            "claude\t{\"hook_event_name\":\"PostToolUseFailure\"," ++ sid ++ ",\"prompt_id\":\"p-1\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sh -c 'exit 3'\"},\"error\":\"Exit code 3\\nout\",\"is_interrupt\":false,\"duration_ms\":1024,\"tool_use_id\":\"toolu_013o3p6eudWZB6eggpZNHx4y\"}\n" ++
+            "claude\t{\"hook_event_name\":\"PreToolUse\"," ++ sid ++ ",\"prompt_id\":\"p-1\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sleep 9\",\"run_in_background\":true},\"tool_use_id\":\"toolu_012mYbdJzBhYSJhBwBAT56Ka\"}\n" ++
+            "claude\t{\"hook_event_name\":\"PostToolUse\"," ++ sid ++ ",\"prompt_id\":\"p-1\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sleep 9\",\"run_in_background\":true},\"tool_response\":{\"stdout\":\"\"},\"tool_use_id\":\"toolu_012mYbdJzBhYSJhBwBAT56Ka\",\"duration_ms\":30}\n",
+    });
+    agent_ops.pollAgentHookEvents(&session, term, false);
+    const identity = "cafe0000-0000-4000-8000-000000000001";
+    try std.testing.expectEqualStrings(identity, term.agent_transcript.identity());
+    {
+        const open = session.turn_captures.openTurn(identity) orelse return error.NoOpenTurn;
+        try std.testing.expectEqual(@as(u32, 3), open.shell_calls);
+        try std.testing.expectEqual(@as(usize, 2), open.shell.sealed().len); // 성공·실패
+        try std.testing.expect(open.shell.busy()); // 배경은 열려 있다
+        try std.testing.expectEqual(@as(u32, 0), open.shell.unmatched);
+        try std.testing.expect(!open.shell.overflow);
+        // 길이 보정이 실제로 실렸다. 관측은 같은 tick 이라 Pre≈Post 인데, 4260ms 짜리 길이가 시작을 되돌리면
+        // (되돌리기는 slack 하나로 잘린다 — `shell_bracket.closeBracket`) 폭이 **slack 둘**이 된다. 길이를
+        // 안 넘기는 배선은 slack 하나(500)만 낸다.
+        const iv = open.shell.sealed()[0];
+        try std.testing.expect(iv.end_ms - iv.start_ms >= 2 * agent_ops.agent_poll_interval_ms);
+        try std.testing.expect(iv.end_ms - iv.start_ms < 3 * agent_ops.agent_poll_interval_ms);
+    }
+    // 턴 끝이 오면 봉인된다 — 배경까지 셋.
+    try tmp.dir.writeFile(io, .{
+        .sub_path = log_rel,
+        .data = "claude\t{\"hook_event_name\":\"Stop\"," ++ sid ++ ",\"prompt_id\":\"p-1\",\"stop_hook_active\":false,\"last_assistant_message\":\"done\"}\n",
+    });
+    term.agent_hook_cursor = .{};
+    term.agent_hook_cursor_inode = 0;
+    agent_ops.pollAgentHookEvents(&session, term, false);
+    try std.testing.expect(session.turn_captures.openTurn(identity) == null);
+    var found = false;
+    var id: maru.session.turn_capture.Id = 1;
+    while (id < 8) : (id += 1) {
+        const t = session.turn_captures.sealedTurn(id) orelse continue;
+        found = true;
+        try std.testing.expectEqual(@as(usize, 3), t.shell.sealed().len);
+        try std.testing.expect(!t.shell.busy());
+        try std.testing.expectEqual(@as(u32, 3), t.shell_calls);
+    }
+    try std.testing.expect(found);
+}
+
+// [AT3b-1] **회전본의 `Post`·`Stop` 은 살아 있는 파일에서 연 셸 구간을 닫는다.** 사본은 봉인하지 않지만
+// (위 테스트) 구간은 닫아야 한다 — 안 닫으면 다음 턴의 `Stop` 까지 열려 다음 턴 전체를 덮는다.
+test "훅 캡처: 회전본의 Post 와 Stop 이 살아 있는 셸 구간을 닫는다 (AT3b-1)" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root_buf);
+    const root = root_buf[0..root_len];
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const term = tab_ops.activeTab(session).panes.items[0].terms.items[0];
+    term.agent_kind = .claude;
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .session_start, .session_id = "S-rotb" });
+    // 살아 있는 파일에서 둘을 열었다.
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .pre_tool_use, .provider = "claude", .session_id = "S-rotb", .tool_name = "Bash", .tool_command = "make", .tool_use_id = "toolu_p" });
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .pre_tool_use, .provider = "claude", .session_id = "S-rotb", .tool_name = "Bash", .tool_command = "sleep 1", .tool_use_id = "toolu_q" });
+    try std.testing.expect(session.turn_captures.openTurn("S-rotb").?.shell.busy());
+
+    // 회전본 tail: 하나는 `Post` 로, 하나는 `Stop` 으로 닫힌다. `Pre` 는 회전본에서 열리지 않는다.
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "rot.ndjson",
+        .data = "claude\t{\"hook_event_name\":\"PostToolUse\",\"session_id\":\"S-rotb\",\"tool_name\":\"Bash\",\"tool_use_id\":\"toolu_p\",\"duration_ms\":7}\n" ++
+            "claude\t{\"hook_event_name\":\"PreToolUse\",\"session_id\":\"S-rotb\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"old\"},\"tool_use_id\":\"toolu_old\"}\n" ++
+            "claude\t{\"hook_event_name\":\"Stop\",\"session_id\":\"S-rotb\",\"prompt_id\":\"p-1\"}\n",
+    });
+    var rot_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const rotated = try std.fmt.bufPrint(&rot_buf, "{s}/rot.ndjson", .{root});
+    agent_ops.drainRotatedAgentHookLogForTest(session, term, rotated);
+
+    // 버킷은 남아 있되(사본 규율) 구간은 **둘 다 닫혀** 있어야 한다. `toolu_old` 는 열리지 않았다.
+    const open = session.turn_captures.openTurn("S-rotb") orelse return error.BucketGone;
+    try std.testing.expect(!open.shell.busy());
+    try std.testing.expectEqual(@as(usize, 2), open.shell.sealed().len);
+    try std.testing.expectEqual(@as(u32, 2), open.shell_calls); // 회전본의 Pre 는 세지 않는다
 }
 
 // [AT3 §4.4] **회전본의 `PreToolUse` 로는 before 를 뜨지 않는다.** 회전본은 이미 지나간 이벤트라 그 도구는

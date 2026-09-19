@@ -203,11 +203,113 @@
 > 도는 자리에 있어야 한다. L4 는 「시점을 주는 수단」을 갈아 끼우는 자리다.
 
 
+#### 2026-09-19 재실측 — 착수 전에 이 절의 수치를 전부 다시 쟀다
+
+아래 8월 26일자 수치는 훅 로그에서 나왔고 그 로그는 사라졌다. 착수 전에 **같은 물음을 다른 소스로** 다시
+쟀다. 결론부터: **설계는 그대로 서고, 근거 하나가 뒤집혔고(FSEvents 가 이 기계에서 돈다), 건너뛸 목록에
+빠진 것 하나가 컸다(`.claude/worktrees`).**
+
+**⓪ 훅 로그가 사라진 원인은 «미확인» 이 아니다 — 설계다.** 로그는 [계약 §4.2](../agent-hooks.md)가 정한
+**큐**라 소비 즉시 회전·삭제되고(`rotateAgentHookLog`·`drainRotatedAgentHookLog`), 시작·종료 때 통째로
+치운다(`cleanupAgentHookLogs`·`cleanupOwnedAgentHookLogs`). 이 절이 「모두 사라졌다, 원인은 확인하지
+못했다」고 적은 것은 그 큐가 정상 동작한 것이다. **훅 로그는 측정 소스가 아니다.** 영속 소스는
+provider 트랜스크립트(`~/.claude/projects/**/*.jsonl` · `~/.codex/sessions/**/*.jsonl`)이고, 그것을 읽는
+도구를 [`tools/agent-turn-tool-mix.py`](../../tools/agent-turn-tool-mix.py) 로 두었다 — 다음 재측정은
+이 스크립트 한 번이다. ⚠️ 트랜스크립트도 영구는 아니다(같은 세션 안에서 72 → 59 파일로 줄었다 —
+provider 의 보존 기간). 수치를 인용할 때 파일 수를 함께 적는다.
+
+**① 도구 구성 — 사각지대는 8월 수치보다 크다** (Claude 59 파일 · tool_use 95,853 · 도구 쓴 턴 7,479):
+
+| 물음 | 8월 26일(훅 로그) | **9월 19일(트랜스크립트)** |
+|---|---:|---:|
+| 캡처 트리거(`Read`·`Edit`·`Write`) 가 하나도 없는 턴 | 71.5% | **84.7%** |
+| `file_path` 를 실은 호출 | 7.7% | **4.2%** (`Bash` 가 93.4%) |
+| 편집 도구를 쓴 턴 | — | **9.5%** |
+| **셸 쓰기 흔적은 있고 편집 도구는 없는 턴** — AT3b 가 겨냥하는 것 | — | **51.5%** (저장소 대상 내용 변경만) · 55.6%(내용 변경 전부) · 56.3%(mkdir·rm 포함) |
+| `tool_use_id` 짝 | 12,005/12,006 | **95,853/95,853** |
+
+⚠️ **원인이 있다 — 우연이 아니라 구조다.** 도구 쓴 턴 7,479 중 **7,472 가 `permissionMode = bypassPermissions`**
+이고, 그 모드에서 하니스는 모델에게 **「Read·Edit·Write 대신 Bash(cat·sed·heredoc)로 하라」** 고 지시한다.
+그래서 이 사용자의 편집은 `python3 - <<PY … open(p,'w')`(13,808건)·리다이렉트·`cat >`·`zig fmt` 로 간다.
+**이 저장소에서 돌아가는 에이전트의 편집 절반 이상이 편집 도구 밖에서 일어난다** — 「셸 편집 사각지대」는
+드문 예외가 아니라 **기본 경로**이고, AT3b 가 없으면 `✎` 는 이 사용자에게 거의 뜨지 않는다.
+
+Codex(311 파일 · 338,872 호출)는 반대다: 편집이 `apply_patch`(10,228) 로 가고 셸 쓰기만 있는 턴은
+**5.7%** 다. AT3b 의 값어치는 **Claude 쪽에 있다.**
+
+**② 배경 호출** (Claude `Bash` 89,526): ⓐ `run_in_background` **5.1%** · ⓑ 스스로 배경화 **0.8%**
+(heredoc 본문의 `&self` 같은 코드를 세지 않도록 본문을 벗기고 잰다 — 안 벗기면 5.7% 로 튄다, 8월의
+`2>&1` 함정과 같은 종류) · ⓒ `Monitor` 705 → **합집합 6.5%**(8월 3.1%). 처방은 그대로다 — 턴 단위
+합집합 귀속에서는 배경 여부를 물을 일이 없다.
+
+**③ `Pre` → `Post` 시각** (`claude -p --settings` 격리 세션, 다른 설정은 안 건드렸다):
+
+| 호출 | `Pre` → `Post` | 뜻 |
+|---|---:|---|
+| 전경 `sleep 4`(대조군) | **4.26초** | 끝난 뒤 온다 · 오버헤드 0.26초(8월 1.58초보다 작다) |
+| 배경 `sleep 9`(`run_in_background`) | **0.030초** | 띄운 순간 |
+| **스스로 배경화 `sleep 6 &`** | **0.035초** | ⓑ 도 같다 — 셸이 바로 돌아오므로 `Post` 도 바로 온다 |
+
+`tool_use_id` 는 셋 다 정확히 짝지어졌다.
+
+**④ ⚠️ FSEvents 가 이 기계에서 돈다 — 8월의 «안 된다» 가 뒤집혔다** (macOS 26.5.1 / 25F80 · 새로 쓴
+Swift 프로브 · `UseCFTypes|FileEvents|NoDefer` · `FSEventsGetCurrentEventId()` · dispatch queue):
+
+| 감시 경로 | 파일 이벤트 |
+|---|---|
+| `/private/tmp` · scratchpad · **홈 바로 아래** · **저장소(`~/Documents`)** | **넷 다 온다** |
+
+쓰기 → 첫 이벤트 **3~14 ms**(latency 0.05). 리다이렉트·`sed -i`·`mv`·`rm`·중첩 디렉터리 새 파일 **5/5**
+포착(`sed -i` 는 `.!NNN!b.txt` 임시 파일 + rename 쌍으로 온다). **저널 재생도 즉시다** — 쓴 직후(0초)에
+`현재 − 200만` 으로 열어도 그 파일이 재생된다(8월 「5~10초 지연」도 재현되지 않는다).
+
+⚠️ **왜 8월에 안 됐는지는 여전히 모른다**(OS 26.4 → 26.5.1, 재부팅 — 어느 쪽인지 가를 수 없다). 그래서
+**「이벤트가 안 오는 상태를 감지하고 말한다」는 요구사항은 그대로 산다** — 한 번 안 됐던 것이 다시 안 될
+수 있다. 다만 **순서를 정한 근거 중 「이 기계에서 못 돌리므로 FSEvents 부터 만들면 아무것도 확인할 수
+없다」는 사라졌다.** 남는 근거 — 설계상 손실·L2 시각 주입 테스트·드롭 보정 스캔은 어차피 만든다 — 만으로도
+**① `Post(Bash)` 브래킷 → ② ctime 스캔 → ③ FSEvents 는 최적화** 순서는 유지한다. 아래 ⑤ 가 그 순서를
+더 굳힌다.
+
+**⑤ ctime 스캔 비용 — 건너뛸 목록에 빠진 것이 있었고, 그것이 가장 컸다:**
+
+| 스캔 | 파일 | 시간 |
+|---|---:|---:|
+| 전부 | 49,938 | 0.20~1.23초 |
+| 8월 목록(`node_modules`·`.git`·`.zig-cache`·`zig-out`·`target`·`dist`) | 22,752 | 0.085~0.091초 |
+| **+ `.claude` + `zig-pkg`** | **2,182** | **0.006~0.009초** |
+| 참고: tree 스냅샷(`read-tree`+`add -A`+`write-tree`) | — | 0.26~0.52초 |
+
+`.claude/worktrees/` 에 **18,463 파일**이 있다 — 다른 세션이 쓰는 **워크트리들이 저장소 안에** 산다
+(git 추적 파일은 2,125 개뿐이다). ⚠️ 이것은 비용 문제이기 전에 **귀속 문제**다: 이 디렉터리를 안 빼면
+**다른 세션의 편집이 이 세션의 셸 구간에 떨어져 `✎` 로 뜬다.** FSEvents 로 해도 같다(루트 아래를 다
+준다). → 건너뛸 목록에 **`.claude`**(와 `zig-pkg`)를 넣는다. 더 일반적으로는 「루트 아래의 **다른 git
+저장소**(`.git` 을 가진 하위 디렉터리)는 통째로 뺀다」가 맞는 규칙이고, `.claude/worktrees` 는 그 특수형이다.
+
+**⑥ `ctime` 의미론 재확인** (`mv`·`cp -p`·`chmod`·`touch -t` 넷 다 `ctime ≥ t0`, `mtime` 은 그중 셋을
+놓친다). 구간 되찾기 **6/6**(`sed -i`·`mv`·`cp -p`·`chmod`·중첩 새 파일·`touch -t`). 8월과 같다.
+
+**⑧ Codex 쪽 셋 (2026-09-20, codex-cli 0.154.0 · 격리 `CODEX_HOME` · `codex exec --dangerously-bypass-hook-trust`):**
+
+| 물음 | 답 |
+|---|---|
+| 실패한 셸(`exit 3`)에 `PostToolUse` 가 오나 | **온다.** claude 와 달리 실패 변종이 없고 성공·실패 구분 없이 `PostToolUse` 하나다. `PostToolUseFailure` 는 `hooks.json` 에 적어도 **로드되지 않는다**(`hooks/list` 에 `preToolUse`·`postToolUse` 만) |
+| `duration_ms` 가 실리나 | **없다.** 키는 `session_id`·`turn_id`·`transcript_path`·`cwd`·`hook_event_name`·`model`·`permission_mode`·`tool_name`·`tool_input`·`tool_response`·`tool_use_id` 뿐. `tool_response` 는 **stdout 문자열 하나**라 종료 코드도 없다(714~723 B) |
+| `post_tool_use` 의 `matcher_in_hash` | **넣는다.** matcher `Bash` 를 적은 채 `hooks/list` 의 `currentHash` 가 우리 공식(matcher 포함)과 **정확히 일치**하고, codex 도 matcher 를 `null` 로 지우지 않는다(`pre_tool_use` 와 같은 부류) |
+
+→ Codex 브래킷은 `PreToolUse`·`PostToolUse`(`Bash`) 둘로 닫힌다(실패 변종 불필요). 시각 보정(③)은 `duration_ms` 가 없어 **poll 슬랙만으로** 아래쪽을 넉넉히 잡아야 한다 — claude 보다 구간이 조금 더 넓게 잡힌다. 신뢰 항목은 `agent_hook_trust` 에 `post_tool_use`(matcher 포함·measured)로 추가하면 되고, 재승인 비용은 그대로다(세트가 바뀌면 승인 전까지 codex 훅이 통째로 멈춘다 — 계약 §2.1).
+
+**⑦ ⚠️ 부수 발견 — 지금 이 기계의 `~/.claude/settings.json` 에는 `PreToolUse` 가 없다.** 설치돼 있는 것은
+**원격 세트**(`MARU_HOOK_V3`, `remote-agent-events` 로 쓰고 `remote_excluded` 대로 `PreToolUse` 를 뺀 것)
+다. 로컬 세트가 이것을 되돌리지 않은 채로는 **AT3 캡처가 경로를 하나도 못 받으므로 `✎` 가 애초에 못 뜬다**
+— AT3b 를 앱에서 확인하려면 이것부터 풀어야 한다. 원격 축은 다른 세션이 진행 중이라 여기서 손대지 않고
+적어만 둔다.
+
 > **2026-08-26 재작성.** 아래 실측 둘과 적대적 검증 넷이 이 절의 설계를 바꿨다. 바뀐 것을 먼저 적는다.
 >
 > ⚠️ **이 절의 훅 로그 기반 수치는 재검증할 수 없다.** 조사 도중
 > `~/.cache/maru/agent-turn-events/` 의 `.ndjson` 이 **모두 사라졌다**(`host_*/owner.pid` 만 남았다).
-> 원인은 확인하지 못했다. 수치를 다시 재려면 **로그를 새로 모아야 한다.**
+> → **원인은 설계다**(위 2026-09-19 ⓪ — 로그는 큐라 소비 즉시 지워진다). 수치는 트랜스크립트로 다시 쟀고
+> (`tools/agent-turn-tool-mix.py`), 이 절의 수는 그 재측정으로 **대체**된다.
 
 #### 이 절을 바꾼 적대적 검증 넷
 
@@ -355,6 +457,63 @@ maru 세트에 `PostToolUse` 가 없어 Post 데이터가 한 건도 없었고, 
   배경 호출이 구간을 **안 여는지** · `UserDropped` 시 그 턴을 불완전으로 표시하는지.
 - L4(앱 호스트): 스트림이 열리고 경로가 L2 로 넘어오는지. **여기서 규율을 재지 않는다.**
 - ⚠️ **CLI 하니스를 만들지 않는다** — 아래 실측대로 이벤트가 오지 않는다.
+
+#### AT3b-1 — `Post(Bash)` 로 구간 닫기 ✅ 완료 (2026-09-20, Claude 전용)
+
+착수 전에 이 단계를 계획에 적힌 그대로 두고 **적대적으로 공격**했고(격리 세션 실측 포함), 뚫린 셋과 손볼 다섯이
+설계를 바꿨다. 바뀐 것을 먼저 적는다.
+
+| # | 공격 | 결과 | 반영 |
+|---|---|---|---|
+| ① | 실패한 도구에도 `PostToolUse` 가 오나 | **안 온다.** claude 는 `PostToolUseFailure` 를 보낸다(`exit 3` 실측). 셸 호출의 1.7% 가 실패 | `PostToolUseFailure`(`Bash`) 도 세트에 |
+| ② | 배경 호출의 구간 | `run_in_background` 의 `Post` 는 **0.030s** 에 온다 — 거기서 닫으면 뒤의 쓰기가 전부 구간 밖(셸 호출의 5.1%) | 플래그가 참이면 **턴 끝까지 연다**. 스스로 배경화(`&`, 0.8%)는 파싱 없이는 못 가르므로 `·` 로(한계) |
+| ③ | 구간의 시각 | 훅 payload 에 시각이 **없고** 훅 셸은 bash 3.2(`$EPOCHREALTIME` 없음). 아는 시각은 poll(500 ms)뿐. 대신 `duration_ms` 가 `Post`·`Failure` 둘 다에 실린다 | 구간 = `[min(Pre 관측, Post 관측 − duration) − poll 주기, Post 관측]` — **놓치는 쪽이 아니라 더 잡는 쪽으로** 틀린다. wall-clock(ctime 과 비교) |
+| ④ | 상한 초과 payload | 훅이 이름만 남겨 `tool_use_id` 를 잃는다 — `Post(Bash)` 의 0.1%(65/89,685) | 훅이 파라미터 확장으로 id 를 살린다(프로세스 0, 화이트리스트·길이 검증). 셸 게이트 4c |
+| ⑤ | 회전본 드레인 | `Pre` 는 살아 있는 파일에서, `Post` 는 회전본 tail 에서 올 수 있다 — 같은 게이트면 영영 안 닫힌다 | **열기는 backlog 게이트 뒤, 닫기는 앞.** 짝 없는 닫기는 무시하고 센다 |
+| ⑥ | Codex | `PostToolUse` 있음(실패에도 옴)·`duration_ms` 없음·`post_tool_use` 해시는 matcher 포함(위 ⑧ 실측) | **AT3b-2 로 미룬다**(사용자 결정 B). ⚠️ 다만 처음에 든 근거 「재승인 전까지 codex 훅 정지」는 **과했다** — `agent_hook_trust.applyEntries` 가 낡은 값을 스스로 갱신하므로 공식이 맞는 한 프롬프트는 안 뜬다. 남는 결정 근거는 값어치(5.7%)와 화면 변화 시점뿐이다 |
+| ⑦ | `Post` 도 `Failure` 도 안 오는 길 | 승인 거부·중단·크래시 | 턴 경계(`sealTurnCapture`)가 열린 것을 **전부** 닫는다. `Monitor` 는 브래킷하지 않는다(`Post` 가 수 분 뒤·또는 안 온다) |
+| ⑧ | 세션 간 겹침 | 계약 §8-2 가 «확정 안 함» 을 요구한다 | `Brackets.overlapsAny` 를 두고 구간을 봉인된 `Turn` 에 싣는다 — AT3b-2 가 세션 간 조회를 배선한다 |
+
+**만든 것:**
+
+- 세트: claude 9 → **11**(`PostToolUse`·`PostToolUseFailure`, matcher `Bash` — `agent_hook_command.shell_tool_matcher`).
+  원격에서는 셋 다 뺀다(`remote_excluded`). 골든(`tests/golden/agent_hook_command.sh`)을 다시 뽑았다.
+- 파서: `Kind.post_tool_use`·`post_tool_use_failure`, `tool_use_id`·`duration_ms`(정수 아니면 «없음»)·
+  `run_in_background`. `max_tool_use_id_len = 64`(훅·파서·순수 층이 한 값).
+- 순수 층 [`session/shell_bracket.zig`](../../src/session/shell_bracket.zig): 열린 id 집합(8) + 닫힌 구간(48),
+  중복 열기 무시, 상한 초과는 **`overflow` → `contains` 가 언제나 거짓**(확정 안 함), 배경은 `sealAll` 만 닫는다,
+  `duration` 되돌리기는 slack 하나로 잘린다. 구간은 **닫을 이벤트가 세트에 있는 provider 에서만 연다**(`closesShellBrackets`).
+  `turn_capture.Turn.shell` 로 턴과 함께 봉인·이동된다(`Store.openShell`/`closeShell`/`sealShell`).
+- 배선(`app_session/agent.zig`): `captureBeforeForEvent` 가 `Post`/`Failure` 를 게이트 앞에서 닫고 `Pre(Bash)` 를
+  게이트 뒤에서 연다(`noteShellCall` 옆). `sealTurnCapture` 가 `seal` 직전에 `sealShell`. 시각은 `wallMs`.
+- 상태 기계: 두 kind 는 상태를 **안 흔든다**(`next` — `current`). 전수 탐색 알파벳에 `post_tool_use` 를 넣었다.
+- 검증: 파서(실측 payload 모양 셋 + 형 변경) · 순수 층 10 · `turn_capture` 왕복 · 배선
+  (`zig build test-agent-turn-capture` — 새 focused gate, «훅»·«턴 스냅샷» 필터 45개) · 설치(`PreCompact` 로
+  소재를 옮긴 «세트 밖 걷어내기» + **`*` 로 설치된 `PostToolUse` 를 `Bash` 로 고쳐 쓰는가**) · 셸 게이트 4c.
+- **사용자에게 보이는 변화는 없다.** 이 단계는 배관이고, 화면은 AT3b-2(ctime 스캔 → `✎`)가 바꾼다.
+
+**⑦ 의 전제**: 앱에서 눈으로 확인하려면 이 기계의 `~/.claude/settings.json` 에 로컬 세트가 서 있어야 한다.
+2026-09-20 에 설치기의 순수 함수(`agent_hook_install.apply`)로 **직접 설치했다**(백업 `settings.json.bak-20260920-at3b1`).
+원격 세트가 있던 원인은 `maru ssh` 가 이 기계를 원격으로 보고 `maru agent-hooks` 로 덮어쓴 것이고, 로컬 앱은
+켤 때마다 되돌린다 — **같은 기계가 로컬이자 ssh 대상일 때 두 설치기가 한 파일을 두고 핑퐁한다.** 원격 축의
+일이라 [remote-agent-state.md](remote-agent-state.md) 에 적어 둔다.
+
+**적대적 검증 3회 (2026-09-20, 구현 뒤):**
+
+| 회차 | 무엇을 쳤나 | 결과 |
+|---|---|---|
+| 1 | 뮤턴트 8: 닫기를 게이트 뒤로 · `sealShell` 제거 · 배경도 `Post` 로 닫음 · slack 제거 · `duration` 되돌리기 무효 · `Post` 가 상태를 `running` 으로 · matcher `*` · 파서가 id 를 안 읽음 | **8/8 잡혔다**(각각 배선·순수·모드·명령/설치·파서 테스트) |
+| 1 | 코드 읽기: **회전본 tail 의 `Stop` 이 구간을 안 닫는다** — 사본을 봉인하지 않는 규율을 구간까지 따라가면 그 구간이 다음 턴의 `Stop` 까지 열려 **다음 턴 전체를 덮는다** | **결함, 고쳤다** — 회전본 드레인의 `turn_end` 에서 `sealShell`(버킷은 그대로, 구간의 끝만 지금). 판정자 「회전본의 Post 와 Stop 이 살아 있는 셸 구간을 닫는다」, 고치기 전엔 빨갛다 |
+| 1 | 훅 셸: stdout 안에 `"tool_use_id":"FAKE"` 가 든 상한 초과 payload · `/bin/sh`·**dash**·bash·zsh | JSON 안에서는 따옴표가 `\"` 라 패턴이 안 걸린다 — 넷 다 진짜 id. 게이트 4c 에 그 경우를 더했다 |
+| 2 | 손으로 만든 `Event` 가 아니라 **실측 모양의 ndjson** 을 `pollAgentHookEvents` 로 — 파서 → 배치 → 봉인 | 판정자 「실측 모양의 ndjson 한 턴이 …」: 성공·실패·배경 셋이 `Stop` 뒤 봉인된 턴에 실리고, `duration_ms` 보정이 실제로 폭에 반영된다. 게이트에 **개수 가드**(`--maru-expect-tests`) |
+| 2 | 상한 초과 `PreToolUse` — 이름을 잃어 구간이 안 열린다 | 트랜스크립트 96,465건 중 15건(0.02%). 고치지 않고 계약 §8-12 에 적었다 |
+| 3 | 설계 전제: `duration_ms` 가 훅 오버헤드를 포함하나(4260 = Pre→Post 4.26s, 포함 — 넓게 잡히는 쪽) · 같은 세션 id 의 두 Term(한 버킷 공유 — 캡처와 같음) · 자식의 `Post`(같은 id 공간) · 승인 거부(⑦ 턴 끝이 닫음) · `Store.max_open` 8 세션 초과(조용히 안 연다 — 캡처와 같은 기존 상한) | 전제가 선다. 새 결함 없음 |
+| 4 | **터무니없는 `duration_ms`**(provider 결함·시계 점프): `now − 길이` 를 그대로 믿으면 구간이 **epoch 까지** 벌어져 그 턴의 모든 파일이 `✎` | **결함, 고쳤다** — 옳은 길이면 `now − 길이 ≥ Pre 관측 − slack` 이므로 그 아래로는 잘라 넣는다(길이가 시작을 옮길 수 있는 폭은 slack 하나). 판정자 + 뮤턴트 확인. e2e 판정자의 폭 단언도 그 의미로 고쳤다 |
+| 4 | **닫을 이벤트가 없는 provider(codex)에서 구간을 열면** 턴 끝까지 열려 턴 전체가 구간이 된다 — 뒷날 그 데이터를 읽는 쪽이 오탐 | **결함, 고쳤다** — `closesShellBrackets(provider)`(세트에 `PostToolUse` 가 있나, 세트에서 파생)가 참일 때만 연다. codex 세트에 넣는 순간 저절로 뒤집힌다. 판정자 ③b + 뮤턴트 확인 |
+| 4 | 무작위 200회 × ≤120 스텝(열기·닫기·봉인 섞음) 불변식: 열린 수 ≤ 상한 · 끝 ≥ 시작 · 끝 ≤ 지금 · `busy` ⇔ 열린 것 있음 · `overflow` ⇒ `contains` 거짓 | 선다 |
+| 5 | **설치 멱등성** — 직접 설치한 실제 `settings.json` 에 설치기를 다시 돌리면 | `plan = leave`, 바이트 동일. 켤 때마다 다시 쓰지 않는다 |
+| 5 | **codex 신뢰** — 공유 커맨드가 바뀌었으니 개발자의 실제 `config.toml` 에 `applyEntries` 를 dry-run | refreshed **7**·stale 0·diverged 0 — 재승인 프롬프트 없음. 처음의 「세트가 바뀌면 재승인 전까지 정지」 서술을 검증 매트릭스에서도 고쳤다 |
+| 5 | 게이트 4c 의 «stdout 안 가짜 id» payload 가 실제로 이스케이프된 모양인지(awk 이스케이프 검산) · 문서에 남은 「아직 없다」류 낡은 서술 | 맞다 · 없다 |
 
 > **2026-08-26 실측 — 이 절을 쓰기 전에 잰 것 둘.**
 

@@ -779,9 +779,11 @@ test "세트 밖 이벤트에 남은 우리 항목을 걷어 낸다" {
     const want = try wantCommand(a);
     const cmd = std.json.fmt(std.json.Value{ .string = want }, .{});
 
-    // `PostToolUse` 는 세트에서 뺐다(계약 §3.1). 그때 설치된 항목이 남아 있는 상황이다.
+    // 소재는 **여전히 세트 밖인** 이벤트여야 한다. 예전엔 `PostToolUse` 였는데 AT3b-1 이 그것을 세트에
+    // 넣었다 — 소재를 안 옮기고 단언만 뒤집으면 「세트 밖 항목을 걷어낸다」는 규칙 자체가 테스트 밖으로
+    // 나간다. `PreCompact` 는 claude 열거에 있고 우리 세트에는 없다.
     const text = try std.fmt.allocPrint(a,
-        \\{{ "hooks": {{ "PostToolUse": [ {{ "matcher": "*", "hooks": [ {{ "type": "command", "command": {f}, "timeout": 2 }} ] }} ] }} }}
+        \\{{ "hooks": {{ "PreCompact": [ {{ "matcher": "*", "hooks": [ {{ "type": "command", "command": {f}, "timeout": 2 }} ] }} ] }} }}
     , .{cmd});
     const before = (try scanText(a, text, want)).?;
     try testing.expectEqual(@as(usize, 1), before.events_outside);
@@ -789,8 +791,43 @@ test "세트 밖 이벤트에 남은 우리 항목을 걷어 낸다" {
     try testing.expectEqual(Plan.refresh, planForSet(.claude, .local, .{ .known = before }, .ensure));
 
     const after_text = try runClaude(a, text, want, .install);
-    try testing.expect(std.mem.indexOf(u8, after_text, "PostToolUse") == null);
+    try testing.expect(std.mem.indexOf(u8, after_text, "PreCompact") == null);
     try testing.expectEqual(@as(usize, 0), (try scanText(a, after_text, want)).?.events_outside);
+}
+
+test "잘못된 matcher 로 설치된 PostToolUse 는 세트의 matcher(Bash)로 고쳐 쓴다 (AT3b-1)" {
+    // `PostToolUse` 가 `*` 로 걸려 있으면 편집 도구의 `originalFile` 이 실려 상한에 잘린다(계약 §3.1 —
+    // 그래서 뺐던 이벤트다). 세트는 `Bash` 로 좁혀 넣으므로, 옛 항목은 **matcher 가 다르다는 이유로**
+    // `ours_current` 에 안 잡혀야 하고 설치가 그것을 다시 써야 한다. matcher 를 안 보는 구현은 «이미
+    // 우리 것이 있다» 로 보고 그대로 둔다 — 그 회귀를 여기서 막는다.
+    var arena = testArena();
+    defer arena.deinit();
+    const a = arena.allocator();
+    const want = try wantCommand(a);
+    const cmd = std.json.fmt(std.json.Value{ .string = want }, .{});
+
+    const text = try std.fmt.allocPrint(a,
+        \\{{ "hooks": {{ "PostToolUse": [ {{ "matcher": "*", "hooks": [ {{ "type": "command", "command": {f}, "timeout": 2 }} ] }} ] }} }}
+    , .{cmd});
+    const before = (try scanText(a, text, want)).?;
+    try testing.expectEqual(@as(usize, 1), before.ours);
+    try testing.expectEqual(@as(usize, 0), before.ours_current); // matcher 가 달라 «지금 것» 이 아니다
+    try testing.expectEqual(@as(usize, 0), before.events_outside); // 세트 안의 이벤트다
+    try testing.expectEqual(Plan.refresh, planForSet(.claude, .local, .{ .known = before }, .ensure));
+
+    const after_text = try runClaude(a, text, want, .install);
+    const after = (try scanText(a, after_text, want)).?;
+    try testing.expectEqual(command.claude_events.len, after.events_covered);
+    try testing.expectEqual(command.claude_events.len, after.ours_current);
+    // 파일에서 직접 본다 — `PostToolUse` 그룹의 matcher 가 `Bash` 이고 `*` 는 없다.
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, after_text, .{});
+    const hooks = parsed.value.object.get("hooks").?.object;
+    for ([_][]const u8{ "PostToolUse", "PostToolUseFailure" }) |name| {
+        const groups = hooks.get(name).?.array;
+        try testing.expectEqual(@as(usize, 1), groups.items.len);
+        try testing.expectEqualStrings(command.shell_tool_matcher, groups.items[0].object.get("matcher").?.string);
+    }
+    try testing.expectEqualStrings("*", hooks.get("PreToolUse").?.array.items[0].object.get("matcher").?.string);
 }
 
 test "같은 이벤트에 우리 항목이 둘이면 하나로 줄인다" {

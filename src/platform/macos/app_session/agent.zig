@@ -177,6 +177,16 @@ pub var test_last_turn_title_len: usize = 0;
 ///
 /// 루트 밖·바이너리·상한 초과는 **거부가 아니라 접기**다 — 경로는 남고 내용만 없다(`capture_file`).
 fn captureBeforeForEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hook_event.Event) void {
+    // **셸 구간의 끝은 게이트 앞에서 닫는다**(AT3b-1). `Pre` 는 아래 게이트(backlog·신원) 뒤에서 열리는데,
+    // 회전 순서(rename → tail 건지기)상 **`Pre` 는 살아 있는 파일에서 열리고 `Post` 는 회전본 tail 에서**
+    // 올 수 있다 — 닫기까지 같은 게이트 뒤에 두면 그 구간은 영영 안 닫힌다. 짝이 없는 `Post`(backlog 의
+    // 것)는 순수 층이 무시한다. 자식(subagent)의 `Post` 도 같은 id 공간이라 그대로 짝지어진다.
+    if (ev.kind == .post_tool_use or ev.kind == .post_tool_use_failure) {
+        const identity = term.agent_transcript.identity();
+        if (identity.len == 0) return;
+        _ = self.turn_captures.closeShell(identity, ev.tool_use_id, wallMs(self), ev.duration_ms, shell_bracket_slack_ms);
+        return;
+    }
     if (ev.kind != .pre_tool_use) return;
     // ⚠️ **자식(서브에이전트) 이벤트도 센다.** 계약이 말하는 「자식 이벤트는 **부모 상태**를 옮기지
     // 않는다」는 배지·턴 셈의 규율이지 **파일 귀속**의 규율이 아니다 — 서브에이전트가 고친 파일도
@@ -198,6 +208,15 @@ fn captureBeforeForEvent(self: *AppSession, term: *Term, ev: maru.session.agent_
     // 저장소 루트 판정보다 **앞**이다: 세는 데는 루트가 필요 없다.
     if (isShellTool(ev.tool_name)) {
         self.turn_captures.noteShellCall(identity);
+        // **구간은 `Bash` 에만 연다** — `Post` 가 그 matcher 로만 걸려 있어 다른 셸 도구(`Monitor`)는
+        // 닫을 신호가 없다(`agent_hook_command.shell_tool_matcher` 주석). 배경 호출은 턴 끝까지 연다
+        // (`shell_bracket` 머리말). `tool_use_id` 가 비면 순수 층이 `overflow` 로 «확정 안 함» 을 세운다.
+        // **닫을 이벤트가 있는 provider 에서만 연다**(`closesShellBrackets` 주석 — 없으면 턴 전체가 구간이 된다).
+        const hook_command = maru.session.agent_hook_command;
+        const closes = if (hook_command.providerFromTag(ev.provider)) |p| hook_command.closesShellBrackets(p) else false;
+        if (closes and std.mem.eql(u8, ev.tool_name, hook_command.shell_tool_matcher)) {
+            self.turn_captures.openShell(identity, ev.tool_use_id, wallMs(self), ev.run_in_background);
+        }
         return;
     }
 
@@ -322,8 +341,23 @@ pub fn sealTurnCaptureNow(self: *AppSession, term: *Term) turn_capture.Id {
     return sealTurnCapture(self, identity);
 }
 
+/// 셸 구간의 시작을 앞당기는 여유(`shell_bracket` 머리말 — 놓치는 쪽이 아니라 더 잡는 쪽으로). 훅 로그를
+/// 읽는 주기가 곧 우리가 이벤트를 늦게 보는 최대치다.
+const shell_bracket_slack_ms: u64 = agent_poll_interval_ms;
+
+/// wall-clock ms. 셸 구간은 파일 `ctime` 과 비교하므로 `awakeMs`(monotonic)가 아니라 이것이어야 한다.
+fn wallMs(self: *AppSession) u64 {
+    const ns = std.Io.Clock.real.now(self.io).nanoseconds;
+    if (ns <= 0) return 0;
+    return @intCast(@divFloor(ns, std.time.ns_per_ms));
+}
+
 fn sealTurnCapture(self: *AppSession, identity: []const u8) turn_capture.Id {
     const turn = self.turn_captures.openTurn(identity) orelse return 0;
+    // **열린 셸 구간을 봉인 전에 닫는다**(AT3b-1). `Post` 도 `PostToolUseFailure` 도 안 오는 길(거부·
+    // 중단·크래시)과 턴 끝까지 일부러 열어 둔 배경 호출이 여기서 닫힌다. 봉인 뒤 `Turn` 은 안 변한다는
+    // 불변(`edited_count` 캐시가 그 위에 선다)을 지키려면 닫기가 `seal` 보다 앞서야 한다.
+    self.turn_captures.sealShell(identity, wallMs(self), shell_bracket_slack_ms);
     // **경로 수가 아니라 「붙일 것이 있나」로 묻는다.** 예전에는 `entries.len == 0` 이면 여기서 돌아섰는데,
     // 그러면 **셸만 쓴 턴이 봉인에 닿지 못한다** — 경로가 0개이므로. 그런데 그 턴이야말로 고지가 가장
     // 필요한 자리다(파일 행이 전부 `·` 인데 왜 그런지를 말해 줄 것이 셸 수뿐이다). `Store.seal` 이
@@ -2438,6 +2472,11 @@ fn drainRotatedAgentHookLog(self: *AppSession, term: *Term, rotated_path: []cons
             if (applied.turn_end) {
                 rotated_turn_end = true;
                 rotated_facts.captureFrom(term); // 회전본도 같은 규율이다
+                // **열린 셸 구간은 여기서 닫는다**(AT3b-1 적대적 검증 1회차). 사본은 위 이유로 봉인하지
+                // 않지만 구간은 다르다 — 회전본 tail 의 `Stop` 은 살아 있는 파일에서 연 구간의 **진짜 끝**이고,
+                // 안 닫으면 그 구간이 다음 턴의 `Stop` 까지 열려 **다음 턴 전체(사용자 편집 포함)를 덮는다.**
+                // 버킷은 그대로 남아 다음 봉인에 실리지만 구간의 끝은 지금이다.
+                self.turn_captures.sealShell(term.agent_transcript.identity(), wallMs(self), shell_bracket_slack_ms);
             }
             if (applied.base) rotated_base = true;
         }

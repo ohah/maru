@@ -16,10 +16,19 @@ const std = @import("std");
 /// 잘린 조각이 다음 줄과 붙는 사고만 는다). 훅 쪽도 같은 값으로 스스로 자른다.
 ///
 /// **32 KiB인 근거(2026-08-20 실측)**: 우리 세트에서 가장 큰 이벤트가 `PreToolUse(Agent)` 4,249 B였고
-/// 그 다음이 `PreToolUse(Bash)` 3,593 B였다. 거대한 `tool_response.stdout`·`originalFile`을 싣던
-/// `PostToolUse`는 세트에서 뺐다(계약 §3.1). 8 KiB로 잡으면 긴 서브에이전트 프롬프트가 걸리고, 더 키우면
+/// 그 다음이 `PreToolUse(Bash)` 3,593 B였다. 거대한 `originalFile`을 싣는 편집 도구의 `PostToolUse`는
+/// 세트에 없다(계약 §3.1). 8 KiB로 잡으면 긴 서브에이전트 프롬프트가 걸리고, 더 키우면
 /// 훅이 한 번에 밀어 넣는 양만 는다.
+///
+/// **`PostToolUse(Bash)` 가 들어와도(AT3b-1) 이 값은 그대로다.** 그 payload 는 `tool_response.stdout` 을
+/// 싣는데 트랜스크립트 89,685건 기준 중앙값 1.6 KB·p99 14.5 KB·최대 51 KB 라 **0.1%(65건)** 만 넘긴다.
+/// 넘긴 줄은 훅이 이름과 `tool_use_id` 만 남기고 접으므로(`agent_hook_command`) 구간은 그래도 닫힌다.
 pub const max_line_bytes: usize = 32 * 1024;
+
+/// `tool_use_id` 의 길이 상한. 실측 모양은 claude 28자(`toolu_` + 22)·codex 41자(`exec-` + uuid)다. 훅이
+/// 상한 초과 payload 에서 id 를 살릴 때 같은 값으로 자른다(`agent_hook_command`) — 넘는 것은 **버린다**
+/// (잘라서 남기면 남의 id 와 거짓으로 짝지어진다). 순수 층(`shell_bracket`)의 고정 버퍼도 이 값이다.
+pub const max_tool_use_id_len: usize = 64;
 
 /// 한 tick에 처리할 이벤트 상한. 도구 폭주 구간에서 tick 하나가 수백 줄을 파싱하며 렌더를 붙잡지 않게 한다.
 /// 남은 줄은 다음 tick이 이어서 읽는다(오프셋이 전진하므로 다시 읽지 않는다).
@@ -65,6 +74,13 @@ pub const Kind = enum {
     subagent_stop,
     permission_request,
     pre_tool_use,
+    /// 도구가 **끝났다**(성공). `Bash` 에만 건다 — 셸 구간의 끝이고(계획 AT3b-1), `tool_use_id` 로
+    /// `pre_tool_use` 와 짝짓는다. claude 는 실패한 도구에 이것을 **보내지 않는다**(아래 변종이 온다).
+    post_tool_use,
+    /// 도구가 **실패로 끝났다**(claude 전용, 2026-09-19 실측 — 비0 종료의 `Bash` 가 여기로 온다,
+    /// 트랜스크립트 기준 셸 호출의 1.7%). 구간을 닫는 데는 성공과 같은 뜻이다. codex 에는 없다 —
+    /// codex 는 실패에도 `PostToolUse` 를 보낸다(2026-09-20 실측).
+    post_tool_use_failure,
     notification,
     /// 상한을 넘겨 훅이 버린 이벤트. 종류를 알 수 없다.
     oversized,
@@ -119,6 +135,17 @@ pub const Event = struct {
     /// `tool_input.command` 원문(이스케이프 미해제). Codex 의 `apply_patch` 는 여기에 패치 전체가 들어오고,
     /// 셸 도구는 실행할 명령이 들어온다.
     tool_command: []const u8 = "",
+    /// 도구 호출 식별자. `PreToolUse` 와 `PostToolUse`/`PostToolUseFailure` 가 **같은 값**을 실어
+    /// 셸 구간의 열림·닫힘을 짝짓는다(계획 AT3b-1 — 실측 95,853/95,853 짝). claude 는 `toolu_…`,
+    /// codex 는 `exec-<uuid>` 모양이다.
+    tool_use_id: []const u8 = "",
+    /// `PostToolUse`/`PostToolUseFailure` 의 `duration_ms`(claude 전용 — codex 에는 없다, 2026-09-20 실측).
+    /// 훅 payload 에는 시각이 없어(§3 — 훅 셸은 bash 3.2 라 `$EPOCHREALTIME` 도 없다) 구간의 **길이**만
+    /// 이것으로 안다. `null` 은 «없었다» 다 — 0 과 다르다.
+    duration_ms: ?u64 = null,
+    /// `tool_input.run_in_background`(claude `Bash` 전용). 참이면 `PostToolUse` 가 **띄운 순간** 온다
+    /// (실측 0.030s) — 구간을 거기서 닫으면 그 뒤의 쓰기가 전부 구간 밖이다. 셸 호출의 5.1%.
+    run_in_background: bool = false,
     /// `UserPromptSubmit.prompt` 또는 `Stop.last_assistant_message`. 사이드바 대화 줄이 쓴다.
     text: []const u8 = "",
     /// `SessionStart.source`(startup/resume/…).
@@ -283,6 +310,8 @@ fn kindFromName(name: []const u8) Kind {
         .{ "SubagentStop", Kind.subagent_stop },
         .{ "PermissionRequest", Kind.permission_request },
         .{ "PreToolUse", Kind.pre_tool_use },
+        .{ "PostToolUse", Kind.post_tool_use },
+        .{ "PostToolUseFailure", Kind.post_tool_use_failure },
         .{ "Notification", Kind.notification },
         .{ oversized_marker, Kind.oversized },
     };
@@ -321,6 +350,10 @@ pub fn parseLine(line: []const u8) ?Event {
             ev.turn_key = scan.stringValue() orelse return null;
         } else if (std.mem.eql(u8, key, "tool_name")) {
             ev.tool_name = scan.stringValue() orelse return null;
+        } else if (std.mem.eql(u8, key, "tool_use_id")) {
+            ev.tool_use_id = scan.stringValue() orelse return null;
+        } else if (std.mem.eql(u8, key, "duration_ms")) {
+            ev.duration_ms = scan.uintValue() orelse return null;
         } else if (std.mem.eql(u8, key, "agent_id")) {
             ev.agent_id = scan.stringValue() orelse return null;
         } else if (std.mem.eql(u8, key, "source")) {
@@ -357,6 +390,8 @@ pub fn parseLine(line: []const u8) ?Event {
                     ev.tool_description = scan.stringValue() orelse return null;
                 } else if (std.mem.eql(u8, inner, "command")) {
                     ev.tool_command = scan.stringValue() orelse return null;
+                } else if (std.mem.eql(u8, inner, "run_in_background")) {
+                    ev.run_in_background = scan.boolValue() orelse return null;
                 } else if (!scan.skipValue()) return null;
             }
             if (scan.failed) return null;
@@ -752,6 +787,32 @@ const Scanner = struct {
         return false;
     }
 
+    /// 음이 아닌 정수 값. **정수가 아니면 값을 건너뛰고 «없음»(`null`)** 이다 — `boolValue` 와 같은 규율
+    /// (형이 바뀌어도 줄 전체를 잃지 않는다). 상한을 넘기면 포화한다. 실패 표식은 **파싱이 깨졌을 때만** 세운다.
+    fn uintValue(self: *Scanner) ??u64 {
+        const c = self.peek() orelse {
+            self.failed = true;
+            return null;
+        };
+        if (c < '0' or c > '9') {
+            if (!self.skipValue()) {
+                self.failed = true;
+                return null;
+            }
+            return @as(?u64, null);
+        }
+        var v: u64 = 0;
+        while (self.i < self.src.len and self.src[self.i] >= '0' and self.src[self.i] <= '9') : (self.i += 1) {
+            v = v *| 10 +| (self.src[self.i] - '0');
+        }
+        // 소수·지수가 붙어 있으면(`12.5`·`1e3`) 정수부만 쓰고 나머지는 구분자까지 먹는다.
+        while (self.i < self.src.len) : (self.i += 1) {
+            const ch = self.src[self.i];
+            if (ch == ',' or ch == '}' or ch == ']' or ch == ' ' or ch == '\n' or ch == '\r' or ch == '\t') break;
+        }
+        return @as(?u64, v);
+    }
+
     /// 배열 값을 건너뛰면서 **비어 있지 않은지**만 답한다.
     fn nonEmptyArrayValue(self: *Scanner) ?bool {
         const c = self.peek() orelse {
@@ -922,9 +983,63 @@ test "손상된 줄은 조용히 버린다 — 동시 append로 섞일 수 있�
 
 test "모르는 이벤트는 버리지 않고 unknown으로 든다" {
     // 버리면 provider가 이벤트를 늘렸을 때 «아무 일도 없음»과 구분되지 않는다.
-    const ev = parseLine("claude\t{\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"Edit\"}").?;
+    // 소재는 **세트 밖에 남아 있는** 이름이어야 한다 — `PostToolUse` 를 쓰던 것을 AT3b-1 이 세트에
+    // 넣으면서 옮겼다(그대로 두면 이 규칙이 테스트 밖으로 나간다).
+    const ev = parseLine("claude\t{\"hook_event_name\":\"PreCompact\",\"tool_name\":\"Edit\"}").?;
     try testing.expectEqual(Kind.unknown, ev.kind);
     try testing.expectEqualStrings("Edit", ev.tool_name);
+}
+
+test "PostToolUse·PostToolUseFailure — 구간을 닫는 데 필요한 셋(id·길이·배경 플래그)을 읽는다" {
+    // 실측 payload 모양 그대로(2026-09-19 claude · 2026-09-20 codex). 값 안의 같은 낱말에 걸리지 않게
+    // `tool_response` 에 `tool_use_id` 글자를 심어 둔다.
+    const post = "claude\t{\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"Bash\"," ++
+        "\"tool_input\":{\"command\":\"sleep 2; echo hi\",\"run_in_background\":false}," ++
+        "\"tool_response\":{\"stdout\":\"tool_use_id: fake\\n\",\"stderr\":\"\"}," ++
+        "\"tool_use_id\":\"toolu_01GxMwqMfHbwqq1dbuxDCwFB\",\"duration_ms\":2171,\"prompt_id\":\"p1\"}";
+    const a = parseLine(post).?;
+    try testing.expectEqual(Kind.post_tool_use, a.kind);
+    try testing.expectEqualStrings("toolu_01GxMwqMfHbwqq1dbuxDCwFB", a.tool_use_id);
+    try testing.expectEqual(@as(?u64, 2171), a.duration_ms);
+    try testing.expect(!a.run_in_background);
+    try testing.expectEqualStrings("Bash", a.tool_name);
+    try testing.expectEqualStrings("p1", a.turn_key);
+
+    const failed = "claude\t{\"hook_event_name\":\"PostToolUseFailure\",\"tool_name\":\"Bash\"," ++
+        "\"tool_input\":{\"command\":\"sh -c 'exit 3'\",\"run_in_background\":true}," ++
+        "\"error\":\"Exit code 3\\nout\",\"is_interrupt\":false,\"duration_ms\":1024," ++
+        "\"tool_use_id\":\"toolu_013o3p6eudWZB6eggpZNHx4y\"}";
+    const b = parseLine(failed).?;
+    try testing.expectEqual(Kind.post_tool_use_failure, b.kind);
+    try testing.expectEqualStrings("toolu_013o3p6eudWZB6eggpZNHx4y", b.tool_use_id);
+    try testing.expectEqual(@as(?u64, 1024), b.duration_ms);
+    try testing.expect(b.run_in_background);
+
+    // codex: `duration_ms` 가 없고 `tool_response` 가 문자열 하나다 → 길이는 «없음»(0 이 아니다).
+    const codex = "codex\t{\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"Bash\"," ++
+        "\"tool_input\":{\"command\":\"grep -c zzzz /etc/hosts\"},\"tool_response\":\"0\\n\"," ++
+        "\"tool_use_id\":\"exec-2ebb09a1-1d51-4bd3-be8b-5d1e327d20be\",\"turn_id\":\"t1\"}";
+    const c = parseLine(codex).?;
+    try testing.expectEqual(Kind.post_tool_use, c.kind);
+    try testing.expectEqualStrings("exec-2ebb09a1-1d51-4bd3-be8b-5d1e327d20be", c.tool_use_id);
+    try testing.expect(c.duration_ms == null);
+
+    // `PreToolUse` 도 같은 id 를 싣는다 — 짝짓기의 반대쪽.
+    const pre = "claude\t{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\"," ++
+        "\"tool_input\":{\"command\":\"sleep 9\",\"run_in_background\":true},\"tool_use_id\":\"toolu_x\"}";
+    const d = parseLine(pre).?;
+    try testing.expectEqualStrings("toolu_x", d.tool_use_id);
+    try testing.expect(d.run_in_background);
+    try testing.expect(d.duration_ms == null);
+
+    // 형이 바뀌어도 줄을 잃지 않는다: `duration_ms` 가 문자열 → «없음», 나머지는 읽힌다.
+    const odd = "claude\t{\"hook_event_name\":\"PostToolUse\",\"duration_ms\":\"fast\",\"tool_use_id\":\"toolu_y\"}";
+    const e = parseLine(odd).?;
+    try testing.expect(e.duration_ms == null);
+    try testing.expectEqualStrings("toolu_y", e.tool_use_id);
+    // 소수가 와도 정수부를 쓴다(provider 가 ms 를 실수로 바꿔도 구간 길이를 잃지 않는다).
+    const frac = "claude\t{\"hook_event_name\":\"PostToolUse\",\"duration_ms\":12.75,\"tool_use_id\":\"toolu_z\"}";
+    try testing.expectEqual(@as(?u64, 12), parseLine(frac).?.duration_ms);
 }
 
 test "상한을 넘긴 이벤트는 표식으로 남는다 — 조용히 사라지지 않는다" {

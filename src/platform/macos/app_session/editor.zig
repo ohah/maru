@@ -13410,6 +13410,7 @@ test "CMP4 자동완성 ①-b — resolve: 강조된 항목을 미리 풀고(add
     }.f;
     // ⑴ `pri` → 서버 항목 printf(kind 없음, detail fake)가 첫 행 — 버퍼 단어 printf 는 병합에서 졌다(같은 label 은 하나).
     term.rt.editor_selection = .{ .anchor_start = line3, .anchor_end = line3, .focus = line3 };
+    s.editor_completion.words_only = true; // 앞서 서버 없는 파일에서 연 흔적 — 서버 목록이 서면 지워져야 한다(적대적 2회차 B23)
     try testing.expect(insertText(s, term, "pri"));
     try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
     try frame(s, leaf, term);
@@ -13424,19 +13425,27 @@ test "CMP4 자동완성 ①-b — resolve: 강조된 항목을 미리 풀고(add
     try clearRange(s, term, line3, 3);
     // ⑵ `laz` → lazy_import(서버, data 만) 를 강조하면 resolve 가 나가고 additional 이 채워진다 → Enter 는 곧바로, include 와 함께 undo 하나.
     term.rt.editor_selection = .{ .anchor_start = line3, .anchor_end = line3, .focus = line3 };
+    const resolves_before_open = s.editor_lsp.sent_completion_resolves;
     try testing.expect(insertText(s, term, "laz"));
     try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
     try frame(s, leaf, term);
     try testing.expect(s.editor_completion.active);
-    // 열릴 때 강조된 항목(preselect)도 미리 풀리므로 절대값이 아니라 «↓ 로 lazy_import 를 강조하면 하나 더 나간다» 를 본다.
+    // 열릴 때 강조된 항목(가짜 서버는 치는 낱말 `laz` 자체도 낸다 — 첫 행, 미해결)부터 미리 푼다 — 키 없이 하나가 나갔다(적대적 2회차 B6).
+    try testing.expect(s.editor_lsp.sent_completion_resolves > resolves_before_open);
+    try testing.expectEqualStrings("laz", hl(s));
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
+        fn f(c: Ctx) bool {
+            return !c.fx.session.editor_completion.resolve_waiting; // `laz` 가 풀렸다
+        }
+    }.f));
+    // 접두사가 바뀌어 강조가 다른 항목으로 옮겨지면 키 없이도 그것을 푼다(적대적 2회차 B19): `y` 를 치면 `lazy` 에는 lazy_import 만 남고
+    // → 프레임의 refresh 가 그 resolve 를 보낸다.
     const resolves_before = s.editor_lsp.sent_completion_resolves;
     const resolved_before = s.editor_completion.resolved_count;
-    var guard: usize = 0;
-    while (!std.mem.eql(u8, hl(s), "lazy_import")) : (guard += 1) {
-        if (guard > 20) return error.NoLazyItem;
-        try pressKey(&fx, .arrow_down, .{});
-    }
-    // preselect 의 resolve 가 아직 날아가는 중이면 lazy_import 의 resolve 는 그 응답 뒤에 이어 나간다(`onResolveResponse` → `resolveHighlighted`).
+    try testing.expect(insertText(s, term, "y"));
+    try frame(s, leaf, term);
+    try testing.expectEqualStrings("lazy_import", hl(s));
+    try testing.expectEqual(resolves_before + 1, s.editor_lsp.sent_completion_resolves);
     try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
         fn f(c: Ctx) bool {
             const st = &c.fx.session.editor_completion;
@@ -13444,35 +13453,49 @@ test "CMP4 자동완성 ①-b — resolve: 강조된 항목을 미리 풀고(add
             return st.items.items[st.order.items[pick]].resolved;
         }
     }.f));
-    try testing.expect(s.editor_lsp.sent_completion_resolves > resolves_before);
     try testing.expect(s.editor_completion.resolved_count > resolved_before);
     try testing.expectEqualStrings("resolved", hl_detail(s)); // resolve 가 detail 도 채웠다
+    // 풀린 항목은 다시 묻지 않는다 — ↓↓(한 행이라 제자리) 로 강조를 건드려도 요청 수 그대로(적대적 2회차 B9).
+    {
+        const n = s.editor_lsp.sent_completion_resolves;
+        try pressKey(&fx, .arrow_down, .{});
+        try pressKey(&fx, .arrow_down, .{});
+        try testing.expectEqualStrings("lazy_import", hl(s));
+        try testing.expectEqual(n, s.editor_lsp.sent_completion_resolves);
+        try testing.expect(!s.editor_completion.resolve_waiting);
+    }
     const undo_before = term.rt.editor_undo_len;
     try pressKey(&fx, .enter, .{});
     try testing.expect(!s.editor_completion.active); // 이미 풀려 있어 기다리지 않는다
     try testing.expectEqualStrings("#include \"lazy.h\"\nint printf(int x);\nint main() {\n  lazy_import\n}\n", content(term));
     try testing.expectEqual(undo_before + 1, term.rt.editor_undo_len);
     s.dispatchAppAction(.editor_undo);
-    try testing.expectEqualStrings("int printf(int x);\nint main() {\n  laz\n}\n", content(term));
-    try clearRange(s, term, line3, 3);
+    try testing.expectEqualStrings("int printf(int x);\nint main() {\n  lazy\n}\n", content(term));
+    try clearRange(s, term, line3, 4);
     // ⑶ 확정 때 아직 안 풀렸으면(강조 직후 Enter) 응답을 기다렸다 한 번에 적용한다.
     term.rt.editor_selection = .{ .anchor_start = line3, .anchor_end = line3, .focus = line3 };
     try testing.expect(insertText(s, term, "laz"));
     try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
     try frame(s, leaf, term);
-    guard = 0;
+    var guard: usize = 0;
     while (!std.mem.eql(u8, hl(s), "lazy_import")) : (guard += 1) {
         if (guard > 20) return error.NoLazyItem;
         try pressKey(&fx, .arrow_down, .{});
     }
     try pressKey(&fx, .enter, .{}); // resolve 응답 전 — 기다린다
     try testing.expect(s.editor_completion.pending_accept and s.editor_completion.active);
-    try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
-        fn f(c: Ctx) bool {
-            return !c.fx.session.editor_completion.active;
+    {
+        // 기다리는 동안 프레임도 돈다 — 타임아웃이 0 이면 응답보다 먼저 additional 없이 들어간다(적대적 2회차 B17).
+        const t0 = s.awakeMs();
+        while (s.editor_completion.active and s.awakeMs() - t0 < 3000) {
+            lsp_client.pump(s);
+            try frame(s, leaf, term);
+            _ = usleep(2_000);
         }
-    }.f));
+    }
+    try testing.expect(!s.editor_completion.active);
     try testing.expectEqual(@as(u64, 1), s.editor_completion.accepted_after_resolve);
+    try testing.expectEqual(@as(u64, 0), s.editor_completion.accepted_on_timeout);
     try testing.expect(std.mem.startsWith(u8, content(term), "#include \"lazy.h\"\n"));
     s.dispatchAppAction(.editor_undo);
     try clearRange(s, term, line3, 3);
@@ -13502,7 +13525,7 @@ test "CMP4 자동완성 ①-b — resolve: 강조된 항목을 미리 풀고(add
         }
         try testing.expect(!s.editor_completion.active);
         try testing.expectEqual(@as(u64, 1), s.editor_completion.accepted_on_timeout);
-        try testing.expect(s.awakeMs() - start >= completion_client.resolve_wait_ms);
+        try testing.expect(s.awakeMs() - start >= 300); // 계약의 300 ms — 상수를 되비추지 않는다(적대적 2회차 B17)
         try testing.expect(std.mem.indexOf(u8, content(term), "  lazy_import\n") != null);
         try testing.expect(std.mem.indexOf(u8, content(term), "lazy.h") == null);
         s.dispatchAppAction(.editor_undo);

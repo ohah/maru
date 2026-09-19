@@ -450,6 +450,15 @@ test "CPL4 버퍼 단어 — 첫 등장 순·중복 없음·숫자 시작 제외
     const capped = try bufferWords(a, big.items, "");
     defer a.free(capped);
     try testing.expectEqual(max_words, capped.len);
+    // 바이트 상한 — 앞 1 MiB 뒤의 단어는 안 본다(적대적 1회차 A5: 개수 상한만 재고 있었다).
+    var long: std.ArrayList(u8) = .empty;
+    defer long.deinit(a);
+    try long.appendNTimes(a, 'a', max_word_scan_bytes + 1);
+    try long.appendSlice(a, " zzz");
+    const cut = try bufferWords(a, long.items, "");
+    defer a.free(cut);
+    try testing.expectEqual(@as(usize, 1), cut.len);
+    try testing.expectEqual(max_word_scan_bytes, cut[0].len); // 상한에서 잘린 run
 }
 
 test "CPL5 병합 — 같은 label 은 LSP 것이 이기고, 버퍼 단어는 sortText `~`+단어·kind w 로 뒤에 선다 (§8.2g-b)" {
@@ -496,6 +505,8 @@ test "CPL6 fuzzy — 부분열이면 후보, 정확한 접두사 > 무시 접두
     defer a.free(o2);
     try testing.expectEqualStrings("parse_tree_file", l.items[o2[0]].label);
     try testing.expect(fuzzyScore("printf", "prtf") != null);
+    // 같은 점수면 짧은 filter 가 앞 — 접두사가 차지하는 비율이 크다(적대적 1회차 A13).
+    try testing.expect(fuzzyScore("a_b", "ab").? > fuzzyScore("a_b_long", "ab").?);
     try testing.expect(fuzzyScore("printf", "prx") == null);
     try testing.expectEqual(@as(u32, 0), fuzzyScore("anything", "").?);
     const all = try filterSort(a, l, "");

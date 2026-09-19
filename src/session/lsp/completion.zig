@@ -21,6 +21,10 @@ pub const Item = struct {
     /// 넣을 글(`textEdit.newText` → `insertText` → label).
     insert: []const u8,
     detail: ?[]const u8 = null,
+    /// `labelDetails.detail`(§8.2g-c) — label 바로 뒤에 붙는 꼬리(시그니처·import 표시).
+    label_detail: ?[]const u8 = null,
+    /// `labelDetails.description`(§8.2g-c) — 오른쪽 열(없으면 행은 `detail` 을 쓴다).
+    description: ?[]const u8 = null,
     preselect: bool = false,
     /// LSP `kind`(숫자, 없으면 0). 버퍼 단어는 `word_kind`.
     kind: u8 = 0,
@@ -67,6 +71,10 @@ pub fn parse(allocator: std.mem.Allocator, result: ?std.json.Value) Error!List {
         const label = strOf(o.get("label")) orelse continue;
         var item: Item = .{ .label = label, .filter = strOf(o.get("filterText")) orelse label, .sort = strOf(o.get("sortText")) orelse label, .insert = strOf(o.get("insertText")) orelse label, .detail = strOf(o.get("detail")), .raw = it };
         if (o.get("preselect")) |p| item.preselect = p == .bool and p.bool;
+        if (o.get("labelDetails")) |ld| if (ld == .object) {
+            item.label_detail = strOf(ld.object.get("detail"));
+            item.description = strOf(ld.object.get("description"));
+        };
         if (o.get("kind")) |k| if (k == .integer and k.integer >= 0 and k.integer <= 255) {
             item.kind = @intCast(k.integer);
         };
@@ -575,4 +583,22 @@ test "CPL3 changesFor — 주 편집은 [start, caret) → insert(textEdit.start
     defer c2.deinit(a);
     try testing.expectEqual(@as(usize, 8), c2.items[0].start);
     try testing.expectEqual(@as(usize, 8), c2.items[0].end);
+}
+
+test "CPL8 labelDetails — detail·description 둘·하나·없음을 읽고, filter·insert 는 그대로 (§8.2g-c)" {
+    const a = testing.allocator;
+    var p = try parseJson(a, "[{\"label\":\"HashMap\",\"labelDetails\":{\"detail\":\"(use std::collections::HashMap)\",\"description\":\"HashMap<K, V>\"},\"filterText\":\"HashMap\"},{\"label\":\" printf\",\"labelDetails\":{\"detail\":\"(const char *, ...)\"},\"detail\":\"int\",\"filterText\":\"printf\"},{\"label\":\"plain\",\"labelDetails\":\"bogus\"},{\"label\":\"none\"}]");
+    defer p.deinit();
+    var l = try parse(a, p.value);
+    defer l.deinit(a);
+    try testing.expectEqual(@as(usize, 4), l.items.len);
+    try testing.expectEqualStrings("(use std::collections::HashMap)", l.items[0].label_detail.?);
+    try testing.expectEqualStrings("HashMap<K, V>", l.items[0].description.?);
+    try testing.expectEqualStrings("HashMap", l.items[0].filter); // filterText 는 그대로
+    try testing.expectEqualStrings("HashMap", l.items[0].insert);
+    try testing.expectEqualStrings("(const char *, ...)", l.items[1].label_detail.?);
+    try testing.expect(l.items[1].description == null); // clangd — 반환형은 detail
+    try testing.expectEqualStrings("int", l.items[1].detail.?);
+    try testing.expect(l.items[2].label_detail == null and l.items[2].description == null); // 객체가 아니면 무시
+    try testing.expect(l.items[3].label_detail == null and l.items[3].description == null);
 }

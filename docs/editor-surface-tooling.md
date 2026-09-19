@@ -765,6 +765,32 @@ resolve** 해 확정 때는 대개 끝나 있다 → 같은 방식. ⑤ 단어 �
 - **B18** 타임아웃 뒤 `resolved` 표시 = 죽은 코드(accept 는 안 보고 hide 가 비운다) → 제거. **B25** words_only 의 isIncomplete 가드 = 죽은 가드(`incomplete=false` 로 선다) → 제거. **B21** Enter 의 둘째 `resolve_item == idx` = 첫 가드가 보장 → 제거(첫 가드를 빼면 죽는다 — B26).
 - 등가로 남긴 것: **B10**(못 보내면 `resolved` 표시 — Enter 는 어차피 적용한다, 되묻지 않게 하는 표시) · **B22**(hide 의 `pending_accept` 초기화 — 설치가 다시 지운다) · **C2**(error 응답의 `result` 는 없다 — 둘 다 실은 서버 방어).
 
+#### 8.2g-c 자동완성 ①-c — labelDetails (2026-09-20, 계획 공격 뒤의 결정)
+
+**계획 공격이 드러낸 것.** ① §8.2g-b 실측에서 rust-analyzer 의 행이 `t HashMap(use std::collections::HashMap)  HashMap<{unknow…` 로 잘렸다 — 우리가
+`labelDetailsSupport` 를 안 내서 서버가 import 경로를 **label 에 접어** 보낸 것이고(LSP 3.17 `CompletionItemLabelDetails`), 그 긴 label 이 detail 칸을 먹었다.
+② 선언하면 무엇이 오는지 **실측**(rust-analyzer 1.96.1 · clangd): rust-analyzer 는 `label: "HashMap"` + `labelDetails{detail: "(use std::collections::HashMap)",
+description: "HashMap<{unknown}, …>"}`(description = 타입, resolve 뒤의 `detail` 과 같은 글), clangd 는 `label: " printf"` + `labelDetails{detail: "(const char *, ...)"}`
++ `detail: "int"`(description 없음 — 반환형은 `detail`). 즉 `labelDetails.detail` 은 **label 바로 뒤에 붙는 꼬리**(시그니처·import 표시)이고 오른쪽 열은
+`description` 이 있으면 그것, 없으면 `detail` 이다. ③ VS Code(MIT, 동작만 — `suggestWidgetRenderer.ts`·`suggest.css`): 왼쪽 = label + `label.detail`(옅게),
+오른쪽 = `label.description`(85%·옅게); 위젯 430px 고정 안에서 **오른쪽이 먼저 접히고**(`flex-shrink: 4`, `max-width: 70%`) 그래도 넘치면 왼쪽도 `…`. 우리는
+등폭 상자라 칸으로 같은 뜻을 세운다. ④ 필터·정렬·병합·resolve 는 건드릴 것이 없다 — filterText 는 그대로고(rust-analyzer `HashMap`, clangd `printf`) 버퍼 단어는
+labelDetails 가 없다.
+
+| 축 | 결정 | 근거 |
+| --- | --- | --- |
+| **capability** | `initialize` 에 `completionItem.labelDetailsSupport: true`. 선언했으면 **반드시 그린다** — 서버가 label 에서 뺀 것을 우리가 안 그리면 정보가 사라진다 | LSP 3.17 |
+| **파싱** | `labelDetails.detail` → `label_detail`, `labelDetails.description` → `description`(둘 다 없을 수 있다). `filter`·`sort`·`insert` 규칙은 그대로 | ② |
+| **행** | ` k ` + label + **label_detail(옅게, 간격 없이)** + 간격 2 + **오른쪽(옅게, 우측 정렬)** = `description` 있으면 그것, 없으면 `detail`. resolve 가 `detail` 을 채우면 오른쪽이 바뀐다(description 이 없을 때) | ③ · clangd 의 `int` 는 detail 이다 |
+| **폭** | 좌패딩 1 + kind 1 + 간격 1 + (label + label_detail) + (오른쪽 있으면 간격 2 + 오른쪽) + 우패딩 1, 상한 60 | §8.2g 와 같은 상한 |
+| **접기(넘칠 때)** | ① 오른쪽을 먼저 접되 **16칸 아래로는 안 접는다**(오른쪽이 16칸보다 짧으면 그 길이까지) → ② 그래도 넘치면 label_detail 을 `…` 로 → ③ 그래도 넘치면 label 을 `…` 로. 오른쪽이 없으면 label_detail → label 순. 상자가 문턱보다도 좁으면(화면 clamp) label 4칸을 남기고 오른쪽은 있는 만큼 | ③ 의 「오른쪽 먼저, 그래도 넘치면 왼쪽도」 — 등폭 상자에서 비례 대신 문턱 |
+| **색** | label 은 `surface_fg`, label_detail·오른쪽은 `muted_fg`(run 별 role — lowering 은 run 의 색이 이긴다) | VS Code 의 옅은 두 자리 |
+| **하지 않는 것** | 넓히기(드래그·저장) · 옆 문서 패널(②, resolve 의 `documentation` 은 받아 둔 채) · clangd 의 label 접두 정리 — `labelDetailsSupport` 를 내면 clangd 는 include 상태 칸(`•` = include 필요, 공백 = 이미 있음)을 label 머리에 붙여 `f  printf(...)` 로 한 칸 뜬다(캡처 실측; 서버의 것, filterText 는 `printf`) | 다음 |
+
+**관측점**: `CPL8`(순수: labelDetails 파싱 — 둘·하나·없음, filter 는 그대로) · `LSJ14`(순수: initialize 의 `labelDetailsSupport`) · `SGB3`(순수 chrome: 행 run 셋과
+색 역할 · 폭 계산 · 접기 순서 셋 — 오른쪽 16 문턱 → label_detail → label) · `CMP5`(제품 경계: 가짜 서버가 labelDetails 를 실은 항목 — 행에 꼬리와 오른쪽이 서고 description 이 detail 을 이기며, labelDetails 없는
+항목은 꼬리가 없고, 폭은 label+꼬리) · `CMP3`(버퍼 단어 행에는 꼬리도 오른쪽도 없다) · `CMP4` ⑵(resolve 뒤 detail 이 오른쪽에 선다 — description 없는 항목).
+
 ### 8.2h LSP 2단 ⑦ — code action (2026-09-19, 계획 공격 뒤의 결정)
 
 **계획 공격이 드러낸 것.** ① 결과는 `WorkspaceEdit` — §8.2f 의 `apply`(전부 검증·저장 정책·기록)를 **두 번째 소비자**가 그대로 쓴다(요청

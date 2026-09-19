@@ -1304,11 +1304,17 @@ static uint16_t maru_left_overhang_cells(CTFontRef font, CGGlyph glyph) {
     CGSize advance = CGSizeZero;
     CTFontGetAdvancesForGlyphs(font, kCTFontOrientationHorizontal, &glyph, &advance, 1);
     if (!(advance.width > 0.0) || !isfinite((double)advance.width)) return 0;
-    // **올림이 아니라 반올림이다.** 올림으로 두면 left side bearing 이 조금만 음수인 **일반 글자**까지
-    // 1칸 오버항으로 잡혀 자기 칸을 왼쪽으로 당긴다 — 실측으로 기본 픽스처("Maru 한")가 그렇게 깨졌다
-    // (atlas 샘플 3칸 miss). 합자는 넘침이 advance 의 정수배에 가깝다(`//` 는 1.0, `===` 는 2.0),
-    // 일반 글자는 0.1 수준이므로 반올림이 그 둘을 가른다.
-    const double cells = round((double)(-bounds.origin.x) / (double)advance.width);
+    // **문턱을 뺀 올림이다.** 처음엔 반올림이었다 — 올림으로 두면 left side bearing 이 조금만 음수인
+    // **일반 글자**까지 1칸 오버항으로 잡혀 자기 칸을 왼쪽으로 당겼기 때문이다(실측: 기본 픽스처 "Maru 한" 이
+    // atlas 샘플 3칸 miss). 그런데 합자의 넘침이 늘 정수배는 아니었다: JetBrains Mono 의 `...` 은 세 점을
+    // 마지막 글리프(896)에 몰아넣고 ink_x=-11.4, advance 7.8 → **1.46 칸**이라 반올림하면 1 이 되어 슬롯이
+    // 두 칸뿐이고 첫 점이 잘렸다(사용자 제보 2026-09-19 — 자동완성 목록의 `printf(const char *, ...)` 가
+    // `*,  ..)` 로 보였다; 편집기 본문도 같았다). `//`(0.74)·`->`(0.86)·`<!--`(2.87)는 반올림이 우연히
+    // 맞았을 뿐이다. 넘침은 **덮어야 하는 칸 수**이므로 올림이 뜻이고, 일반 글자의 작은 bearing(0.1 수준)은
+    // 1/5 칸 문턱으로 거른다(`prev_glyph_zero_ink` 가드가 이미 합자 꼬리에만 이 값을 쓰게 하므로 문턱은
+    // 이중 방어다). 판정자: `coretext_smoke.zig` LIG3(`...` → 3칸)·four-glyph(`<!--` → 4칸).
+    const double ratio = (double)(-bounds.origin.x) / (double)advance.width;
+    const double cells = ceil(ratio - 0.2);
     if (!(cells >= 1.0)) return 0;
     // **상한 3칸.** downstream 의 `cell_width` 가 `u3`(0~7)라 한 글리프가 덮을 수 있는 칸에 여유가 있다
     // (`renderer/glyph_layout.zig`·`shaped_records.zig`·`coretext_font.zig`). 3 이면 일반 글자(1칸)에

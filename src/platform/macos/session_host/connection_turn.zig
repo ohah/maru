@@ -422,7 +422,10 @@ pub const Client = struct {
     pub fn reclaimScreenPressure(self: *Client, candidate: ScreenPressureCandidate) bool {
         const tracker = self.trackers.get(candidate.stream) orelse return false;
         if (!std.meta.eql(tracker, candidate.tracker)) return false;
-        self.invalidateSubscriptionOutput(candidate.stream, tracker);
+        // owner 가 고른 희생자는 **압력을 겪는 연결이 아니라** 큐가 가장 큰 다른 연결이다
+        // (`poll_owner.reclaimScreenPressure` 가 requester 를 후보에서 뺀다). 클라이언트가 하나뿐이면
+        // 후보가 없어 이 갈래는 아예 안 탄다 — 나머지 넷과 재현 조건부터 다르다.
+        self.invalidateSubscriptionOutput("invalidate_pressure_victim", candidate.stream, tracker);
         return true;
     }
 
@@ -824,7 +827,7 @@ pub const Client = struct {
                         slot.deferGlobalPressure(tracker, now_ns) catch
                             return self.beginClose(.socket_error);
                     } else if (tracker_state == .valid) {
-                        self.invalidateSubscriptionOutput(stream, tracker);
+                        self.invalidateSubscriptionOutput("invalidate_projection_budget", stream, tracker);
                     }
                     return;
                 },
@@ -878,7 +881,7 @@ pub const Client = struct {
                 .rejected => {
                     output.rollback(&self.connection);
                     if (!self.isClosing())
-                        self.invalidateSubscriptionOutput(stream, tracker);
+                        self.invalidateSubscriptionOutput("invalidate_turn_rejected", stream, tracker);
                 },
             }
             if (self.isClosing()) return;
@@ -926,11 +929,21 @@ pub const Client = struct {
         switch (self.tryAdoptSubscriptionTurn(stream, frames, null)) {
             .admitted => return true,
             .deferred_resync => return false,
-            .deferred_global_pressure, .rejected => {
+            // **둘을 한 arm 에 두지 않는다.** 전역 압력으로 미뤄진 것과 채택이 거부된 것은 원인이
+            // 다르고, 합치면 로그가 다시 「둘 중 무엇인지 모름」이 된다 — 이 PR 이 고치는 바로 그것이다.
+            .deferred_global_pressure => {
                 if (!self.isClosing()) {
                     const tracker = self.trackers.get(stream) orelse
                         return self.closeAndReject(.socket_error);
-                    self.invalidateSubscriptionOutput(stream, tracker);
+                    self.invalidateSubscriptionOutput("invalidate_adopt_pressure", stream, tracker);
+                }
+                return false;
+            },
+            .rejected => {
+                if (!self.isClosing()) {
+                    const tracker = self.trackers.get(stream) orelse
+                        return self.closeAndReject(.socket_error);
+                    self.invalidateSubscriptionOutput("invalidate_adopt_rejected", stream, tracker);
                 }
                 return false;
             },
@@ -1096,15 +1109,23 @@ pub const Client = struct {
         return false;
     }
 
+    /// 구독 하나의 밀린 출력을 무효화한다. **`site` 는 호출자가 준다** — 이 함수는 부르는 자리가
+    /// 다섯인데 전부 한 이름(`invalidate_purge_tracker`)으로 닫아, 2026-09-15 실측의 6 건이 다섯 중
+    /// 무엇이었는지 알 수 없었다. 고칠 곳이 갈래마다 다르다: 제 예산이 모자란 것과, owner 가 남의
+    /// 큐를 고른 것과, 첫 화면이 연성 상한을 넘은 것은 서로 다른 문제다.
+    ///
+    /// `invalidate_slot_lookup` 만 호출자 이름을 안 받는다 — `reactor.get(self.admission)` 은 오직
+    /// **자기 admission** 에만 달려 있어 어느 자리에서 불렀든 뜻이 같다(이 연결의 슬롯이 사라졌다).
     fn invalidateSubscriptionOutput(
         self: *Client,
+        site: []const u8,
         stream: subscription_identity.LocalStreamId,
         tracker: slot_mod.ScreenTrackerKey,
     ) void {
         const slot = self.reactor.get(self.admission) catch |err|
             return self.beginCloseAtErr("invalidate_slot_lookup", @errorName(err), .socket_error);
         const outcome = slot.beginPressureInvalidation(tracker) catch |err|
-            return self.beginCloseAtErr("invalidate_purge_tracker", @errorName(err), .socket_error);
+            return self.beginCloseAtErr(site, @errorName(err), .socket_error);
         if (outcome == .drain_current_batch) return;
         self.publishSubscriptionInvalidation(stream);
     }
@@ -1311,7 +1332,7 @@ pub const Client = struct {
                 self.connection.rollbackPreparedAttach(stream);
                 return self.beginClose(.resource_exhausted);
             };
-            self.invalidateSubscriptionOutput(stream, tracker);
+            self.invalidateSubscriptionOutput("invalidate_prepared_attach", stream, tracker);
             // 복구 통지조차 못 넣어 결국 닫히는 경우가 있다 — 슬롯이 청크로 가득 차면
             // `snapshotInvalidatedFrame` 도 자리를 못 얻는다. 그때는 되살릴 스트림이 아니라 닫히는
             // 연결이므로 attach 를 남기면 **매달린 attachment** 가 된다. 옛 동작으로 돌아간다.
@@ -3484,7 +3505,7 @@ test "failed recovery backoff does not pin round robin ahead of healthy siblings
     const slot = try reactor.get(client.admission);
     try slot.consumeWritten(slot.pending_bytes);
     const recovering = client.trackers.get(2).?;
-    client.invalidateSubscriptionOutput(2, recovering);
+    client.invalidateSubscriptionOutput("invalidate_test_fixture", 2, recovering);
     try sendTestStreamFrame(fds[1], .stream_ack, 2, "{\"action\":\"resync\"}");
     client.readReady(10);
 
@@ -4218,4 +4239,55 @@ test "tick tells its four partial_timeout sites apart by name" {
         try testing.expectEqual(CloseReason.partial_timeout, fx.client.closeReason().?);
         try testing.expectEqualStrings("tick_partial_read_stalled", fx.client.closeSite());
     }
+}
+
+// 호출자가 준 자리 이름이 **실제로 닫기까지 닿는지** 잰다.
+//
+// 경계 축(`collect_failure_site_boundary`)은 「모든 호출자가 리터럴을 준다」를 소스로 센다. 그런데
+// 그것만으로는 **그 값이 `closeSite()` 에 실리는지**를 모른다 — 파라미터를 받아 놓고 안 쓰거나
+// 다른 리터럴로 닫아도 소스 검사는 통과한다(돌연변이 N1 이 정확히 그 모양이었고, 축이 잡았지만
+// 그것은 「리터럴을 안 쓴다」를 본 것이지 「받은 값을 쓴다」를 본 것이 아니다).
+//
+// `Stale` 갈래로 재는 이유: 트래커 키 하나만 틀리게 주면 `trackerEntry` 가 바로 `error.Stale` 을
+// 내므로, 소켓 상태를 만들지 않고도 **`site` 가 `beginCloseAtErr` 를 거쳐 나오는 그 길**을 탄다.
+// 이 판정자가 재는 것은 갈래의 의미가 아니라 **배선**이다.
+test "invalidateSubscriptionOutput 은 호출자가 준 이름으로 닫는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const testing = std.testing;
+    var fds: [2]c_int = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var registry_value = registry.TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry_value.deinit();
+    var subscriptions = subscription_identity.Table.init(testing.allocator);
+    defer subscriptions.deinit();
+    const reactor = try slot_mod.ReactorCore.create(testing.allocator);
+    defer reactor.destroy();
+    const client = try Client.create(
+        testing.allocator,
+        fds[0],
+        reactor,
+        915,
+        &registry_value,
+        &subscriptions,
+        .{ .now_ns = 100 },
+    );
+    defer client.destroy();
+
+    // 어느 트래커에도 해당하지 않는 키. `generation` 을 어긋나게 두면 `trackerEntry` 가 `Stale` 이다.
+    const slot = try reactor.get(client.admission);
+    const bogus: slot_mod.ScreenTrackerKey = .{
+        .owner = slot.key,
+        .index = 0,
+        .generation = 0xDEAD_BEEF,
+    };
+
+    client.invalidateSubscriptionOutput("invalidate_wiring_probe", 7, bogus);
+
+    try testing.expect(client.isClosing());
+    // 사유와 오류는 기존 계약 그대로여야 한다 — 이름만 더한 변경이다.
+    try testing.expectEqual(CloseReason.socket_error, client.closeReason().?);
+    try testing.expectEqualStrings("Stale", client.closeError());
+    // 핵심: 리터럴이 아니라 **호출자가 준 값**이 실려 나온다.
+    try testing.expectEqualStrings("invalidate_wiring_probe", client.closeSite());
 }

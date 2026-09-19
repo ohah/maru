@@ -6547,8 +6547,10 @@ pub fn build(b: *std.Build) void {
     });
     const run_collect_fail = b.addRunArtifact(collect_fail_tests);
     // 둘째는 `tick` 의 `partial_timeout` 자리 이름이다 — 2026-09-15 에 126 번이 `site=-` 였다.
-    run_collect_fail.addArg("--maru-expect-tests=2");
-    run_collect_fail.addArg("--maru-expect-passed=2");
+    // 셋째는 `invalidateSubscriptionOutput` 의 호출자 이름이다 — 자리 이름이 있었는데도
+    // **부르는 자리가 다섯**이라 2026-09-15 의 6 건을 못 갈랐다.
+    run_collect_fail.addArg("--maru-expect-tests=3");
+    run_collect_fail.addArg("--maru-expect-passed=3");
     run_collect_fail.setCwd(b.path("."));
     collect_fail_step.dependOn(&run_collect_fail.step);
     boundary_step.dependOn(&run_collect_fail.step);

@@ -236,3 +236,105 @@ test "tick 의 partial_timeout 은 자리 이름 없이 닫지 않는다" {
         if (!read_seen or !write_seen) return error.StallDirectionsMerged;
     }
 }
+
+// `invalidateSubscriptionOutput` 을 부르는 자리마다 **제 이름을 준다.**
+//
+// ## 무엇이 있었나
+//
+// 2026-09-15 실측 — host 로그에 `why=socket_error site=invalidate_purge_tracker err=PartialFrame`
+// 이 6 건 있었다. 자리 이름이 **있었는데도** 못 좁혔다: 그 이름을 쓰는 닫기는 함수 안에 하나인데
+// **그 함수를 부르는 자리가 다섯**이었기 때문이다.
+//
+//   ① owner 가 «다른» 연결을 희생자로 고름 ② 제 투영 예산 부족 ③ 채택 거부
+//   ④ 채택이 전역 압력으로 지연 ⑤ 채택 자체가 거부 ⑥ prepared attach 가 연성 상한 초과
+//
+// ④⑤ 는 원래 한 `switch` arm 이었다 — 가르면서 호출 자리가 다섯에서 여섯이 됐다.
+//
+// 고칠 곳이 전부 다르다. 특히 ①만 클라이언트가 둘 이상일 때 발생하므로 **재현 조건부터** 다르다.
+// 그래서 이름을 호출자가 준다. 이 축은 그 규율이 새 호출자에게도 지켜지는지 센다 —
+// 순수 판정자는 「지금 있는 다섯」만 보고, **여섯째가 익명으로 생기는 것**은 못 본다.
+test "구독 무효화는 부르는 자리마다 제 이름을 싣는다" {
+    const a = std.testing.allocator;
+    const turn_raw = try read(a, turn_path);
+    defer a.free(turn_raw);
+    const turn = try stripComments(a, turn_raw);
+    defer a.free(turn);
+
+    // ① **닫는 자리가 호출자 이름을 쓴다.** 리터럴을 박아 두면 다섯이 다시 하나로 뭉친다.
+    if (std.mem.indexOf(u8, turn, "beginCloseAtErr(\"invalidate_purge_tracker\"") != null) {
+        std.debug.print("닫기가 호출자 이름 대신 리터럴을 쓴다 — 다섯이 한 이름으로 돌아갔다\n", .{});
+        return error.PurgeSiteLiteralReturned;
+    }
+    const fn_at = std.mem.indexOf(u8, turn, "fn invalidateSubscriptionOutput(") orelse
+        return error.InvalidateFnMissing;
+    const fn_end = std.mem.indexOfPos(u8, turn, fn_at, "\n    fn ") orelse turn.len;
+    const body = turn[fn_at..fn_end];
+    try std.testing.expect(std.mem.indexOf(u8, body, "site: []const u8") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "beginCloseAtErr(site,") != null);
+
+    // ② **모든 호출자가 이름을 준다.** 첫 인자가 문자열 리터럴이어야 한다.
+    //
+    //    **제품 구간만 센다** — 첫 `test "` 앞까지다. 처음에는 이름에 `test_fixture` 가 들어가면
+    //    빼는 식으로 걸렀는데, 그 관례는 **새 판정자 하나에 바로 뚫렸다**: 배선을 재는 판정자가
+    //    `invalidate_wiring_probe` 로 부르자 제품 개수가 하나 부풀어, 「갈래 하나를 도로 합치는」
+    //    돌연변이가 통과했다(적대적 검증에서 실측). 이름 관례가 아니라 **구간**으로 가른다.
+    const product_end = std.mem.indexOf(u8, turn, "\ntest \"") orelse turn.len;
+    const product_src = turn[0..product_end];
+
+    var names: std.ArrayList([]const u8) = .empty;
+    defer names.deinit(a);
+    var at: usize = 0;
+    while (std.mem.indexOfPos(u8, product_src, at, "invalidateSubscriptionOutput(")) |call| {
+        at = call + "invalidateSubscriptionOutput(".len;
+        // 정의부 자신은 건너뛴다.
+        if (call >= 3 and std.mem.eql(u8, product_src[call - 3 .. call], "fn ")) continue;
+        if (product_src[at] != '"') {
+            const line_end = std.mem.indexOfScalarPos(u8, product_src, call, '\n') orelse product_src.len;
+            std.debug.print("이름 없이 부르는 자리가 있다: {s}\n", .{std.mem.trim(u8, product_src[call..line_end], " \t")});
+            return error.UnnamedInvalidateCaller;
+        }
+        const name_end = std.mem.indexOfScalarPos(u8, product_src, at + 1, '"') orelse
+            return error.MalformedInvalidateSite;
+        try names.append(a, product_src[at + 1 .. name_end]);
+    }
+
+    // ③ **여섯 갈래가 살아 있다.** 픽스처 호출을 빼고 센다.
+    //
+    //    처음 이 축을 세울 때 `< 5` 로 적었는데 **틀린 하한**이었다: 원래 호출 «자리» 는 다섯이지만
+    //    그중 하나(`adoptSubscriptionTurn`)가 `.deferred_global_pressure, .rejected` 를 한 arm 에
+    //    묶고 있어, 가르고 나면 자리가 **여섯**이다. 하한이 하나 느슨하면 「갈래 하나를 도로
+    //    합치는」 변경이 그대로 통과한다 — 이 축이 막으려는 바로 그 변경이다.
+    const product = names.items.len;
+    if (product < 6) {
+        std.debug.print("이름 붙은 제품 호출자가 {d} 곳뿐이다 — 여섯이 갈리던 자리다\n", .{product});
+        return error.TooFewInvalidateSites;
+    }
+
+    // ④ **이름이 서로 다르다.** 같은 이름 둘은 안 붙인 것과 같다.
+    for (names.items, 0..) |lhs, i| {
+        for (names.items[i + 1 ..]) |rhs| {
+            if (std.mem.eql(u8, lhs, rhs)) {
+                std.debug.print("같은 이름이 두 호출자에 있다: «{s}»\n", .{lhs});
+                return error.DuplicateInvalidateSite;
+            }
+        }
+    }
+
+    // ⑤ **채택의 두 갈래를 한 arm 에 다시 묶지 않는다.** 전역 압력 지연과 채택 거부는 원인이 다르다 —
+    //    묶이면 로그가 다시 「둘 중 무엇인지 모름」이 된다. 이 축이 없으면 `switch` arm 을 합치는
+    //    한 줄짜리 «정리» 로 조용히 되돌아간다.
+    if (std.mem.indexOf(u8, turn, ".deferred_global_pressure, .rejected =>") != null) {
+        std.debug.print("채택의 두 갈래가 다시 한 arm 으로 묶였다\n", .{});
+        return error.AdoptBranchesMerged;
+    }
+
+    // ⑥ **owner 희생자 갈래는 제 이름을 갖는다.** 다섯 중 이것만 「남의 연결이 죽는다」이고,
+    //    클라이언트가 둘 이상일 때만 난다 — 재현 조건이 달라 반드시 따로 읽혀야 한다.
+    {
+        var found = false;
+        for (names.items) |name| {
+            if (std.mem.indexOf(u8, name, "pressure_victim") != null) found = true;
+        }
+        if (!found) return error.VictimBranchUnnamed;
+    }
+}

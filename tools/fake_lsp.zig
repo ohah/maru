@@ -30,6 +30,9 @@
 //!   preselect) + `fake_tail`(additional 이 다음 줄 머리 — 낱말 뒤) + `.` 바로 뒤면 `arrow_fix`(textEdit 이 `x.` 부터 덮어 `x->m`).
 //!   접두사로 거르지 않는다(로컬 필터 관측점), caret 앞 낱말이 2 글자 미만이면 `isIncomplete`. `NOCOMP` → `null`.
 //!   capability `completionProvider{triggerCharacters: ["."]}`(`MARU_FAKE_LSP_NOCOMPCAP=1` 이면 없음).
+//! - `textDocument/codeAction` → 문맥 진단마다 「fake: fix <code>」(range → `FIXED`, 첫 것 isPreferred) + 「fake: lazy」(data 만 — resolve) +
+//!   「fake: command」(command 만) + `Command` 형(둘은 숨겨져야 한다). `NOACT` → `[]`. `codeAction/resolve` → 첫 줄에 `// lazy` 를 넣는 edit;
+//!   `RESOLVEFAIL` → 오류. capability `codeActionProvider{resolveProvider: true}`(`MARU_FAKE_LSP_NOACTCAP=1` 이면 없음).
 //! - `shutdown` → `null` 응답, `exit` → 종료 0.
 //! - 시작하자마자 stderr 에 한 줄을 쓴다(실서버 clangd 가 그렇다) — stdout 에 섞이면 프레임이 깨진다(§8.2a 「stderr」).
 //! 순수 판정 대상이 아니라(맞으면 되는 도구) 테스트는 없다 — 이 도구의 계약은 `LSPB*` 가 제품 경계에서 든다.
@@ -365,6 +368,103 @@ fn handleCompletion(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: s
     sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .result = std.json.Value{ .object = root } });
 }
 
+/// `textDocument/codeAction`(§8.2h 관측점) — `context.diagnostics` 마다 「fake: fix <code>」(그 range 를 `FIXED` 로 바꾸는 `edit`, 첫 것은
+/// `isPreferred`), 늘 「fake: lazy」(`edit` 없이 `data` 만 — resolve 로 온다)와 「fake: command」(`command` 만 — 숨겨져야 한다), `Command` 형
+/// 하나. 본문에 `NOACT` 면 `[]`. `RESOLVEFAIL` 이면 resolve 가 오류 응답. 진단 없이 오면 fix 는 없다(문맥 관측점).
+fn handleCodeAction(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: std.json.Value) void {
+    var req_uri: []const u8 = "";
+    var ctx_diags: ?std.json.Array = null;
+    if (obj.get("params")) |p| if (p == .object) {
+        if (p.object.get("textDocument")) |td| if (td == .object) {
+            req_uri = str(td.object.get("uri")) orelse "";
+        };
+        if (p.object.get("context")) |c| if (c == .object) if (c.object.get("diagnostics")) |d| if (d == .array) {
+            ctx_diags = d.array;
+        };
+    };
+    const text = docText(req_uri);
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var items: std.json.Array = .init(arena);
+    if (std.mem.indexOf(u8, text, "NOACT") != null) {
+        sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .result = std.json.Value{ .array = items } });
+        return;
+    }
+    if (ctx_diags) |ds| for (ds.items, 0..) |dg, i| {
+        if (dg != .object) continue;
+        const range = dg.object.get("range") orelse continue;
+        const code = str(dg.object.get("code")) orelse "?";
+        var it: std.json.ObjectMap = .empty;
+        it.put(arena, "title", .{ .string = std.fmt.allocPrint(arena, "fake: fix {s}", .{code}) catch return }) catch return;
+        it.put(arena, "kind", .{ .string = "quickfix" }) catch return;
+        if (i == 0) it.put(arena, "isPreferred", .{ .bool = true }) catch return;
+        var te: std.json.ObjectMap = .empty;
+        te.put(arena, "range", range) catch return;
+        te.put(arena, "newText", .{ .string = "FIXED" }) catch return;
+        var arr: std.json.Array = .init(arena);
+        arr.append(.{ .object = te }) catch return;
+        var changes: std.json.ObjectMap = .empty;
+        changes.put(arena, arena.dupe(u8, req_uri) catch return, .{ .array = arr }) catch return;
+        var edit: std.json.ObjectMap = .empty;
+        edit.put(arena, "changes", .{ .object = changes }) catch return;
+        it.put(arena, "edit", .{ .object = edit }) catch return;
+        items.append(.{ .object = it }) catch return;
+    };
+    {
+        var it: std.json.ObjectMap = .empty;
+        it.put(arena, "title", .{ .string = "fake: lazy" }) catch return;
+        it.put(arena, "kind", .{ .string = "refactor" }) catch return;
+        var data: std.json.ObjectMap = .empty;
+        data.put(arena, "uri", .{ .string = arena.dupe(u8, req_uri) catch return }) catch return;
+        data.put(arena, "id", .{ .integer = 1 }) catch return;
+        it.put(arena, "data", .{ .object = data }) catch return;
+        items.append(.{ .object = it }) catch return;
+    }
+    {
+        var it: std.json.ObjectMap = .empty;
+        it.put(arena, "title", .{ .string = "fake: command" }) catch return;
+        var cmd: std.json.ObjectMap = .empty;
+        cmd.put(arena, "title", .{ .string = "c" }) catch return;
+        cmd.put(arena, "command", .{ .string = "fake.run" }) catch return;
+        it.put(arena, "command", .{ .object = cmd }) catch return;
+        items.append(.{ .object = it }) catch return;
+    }
+    {
+        var it: std.json.ObjectMap = .empty;
+        it.put(arena, "title", .{ .string = "fake: Command form" }) catch return;
+        it.put(arena, "command", .{ .string = "fake.run" }) catch return;
+        items.append(.{ .object = it }) catch return;
+    }
+    sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .result = std.json.Value{ .array = items } });
+}
+
+/// `codeAction/resolve` — `data.uri` 의 문서 첫 줄 머리에 `// lazy\n` 을 넣는 `edit`. `RESOLVEFAIL` 이면 오류.
+fn handleCodeActionResolve(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: std.json.Value) void {
+    var uri: []const u8 = "";
+    if (obj.get("params")) |p| if (p == .object) if (p.object.get("data")) |d| if (d == .object) {
+        uri = str(d.object.get("uri")) orelse "";
+    };
+    const text = docText(uri);
+    if (std.mem.indexOf(u8, text, "RESOLVEFAIL") != null or uri.len == 0) {
+        sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .@"error" = .{ .code = @as(i32, -32603), .message = "fake: cannot resolve" } });
+        return;
+    }
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var arr: std.json.Array = .init(arena);
+    arr.append(editValue(arena, 0, 0, 0, "// lazy\n") catch return) catch return;
+    var changes: std.json.ObjectMap = .empty;
+    changes.put(arena, arena.dupe(u8, uri) catch return, .{ .array = arr }) catch return;
+    var edit: std.json.ObjectMap = .empty;
+    edit.put(arena, "changes", .{ .object = changes }) catch return;
+    var it: std.json.ObjectMap = .empty;
+    it.put(arena, "title", .{ .string = "fake: lazy" }) catch return;
+    it.put(arena, "edit", .{ .object = edit }) catch return;
+    sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .result = std.json.Value{ .object = it } });
+}
+
 /// libc 로 파일을 읽는다(이 도구는 std.Io 를 안 쓴다). 없으면 null. 상한 64 KB.
 fn readFileC(arena: std.mem.Allocator, path: []const u8) ?[]u8 {
     var path_z: [1200]u8 = undefined;
@@ -490,6 +590,7 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
                     .documentFormattingProvider = std.c.getenv("MARU_FAKE_LSP_NOFMTCAP") == null, // `MARU_FAKE_LSP_NOFMTCAP=1` 이면 false
                     .renameProvider = std.c.getenv("MARU_FAKE_LSP_NORENAMECAP") == null, // `MARU_FAKE_LSP_NORENAMECAP=1` 이면 false
                     .completionProvider = if (std.c.getenv("MARU_FAKE_LSP_NOCOMPCAP") == null) .{ .triggerCharacters = [_][]const u8{"."} } else null,
+                    .codeActionProvider = if (std.c.getenv("MARU_FAKE_LSP_NOACTCAP") == null) .{ .codeActionKinds = [_][]const u8{"quickfix"}, .resolveProvider = true } else null,
                 },
             },
         });
@@ -586,6 +687,14 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
     }
     if (std.mem.eql(u8, method, "textDocument/completion")) {
         handleCompletion(allocator, obj, id.?);
+        return;
+    }
+    if (std.mem.eql(u8, method, "textDocument/codeAction")) {
+        handleCodeAction(allocator, obj, id.?);
+        return;
+    }
+    if (std.mem.eql(u8, method, "codeAction/resolve")) {
+        handleCodeActionResolve(allocator, obj, id.?);
         return;
     }
     if (std.mem.eql(u8, method, "textDocument/hover")) {

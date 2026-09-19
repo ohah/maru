@@ -706,6 +706,34 @@ revision 은 `documentChanges` 의 `version` 이 있을 때만 검사한다(clan
 가짜 서버 — 식별자 글자로 열리고 접두사로 좁혀지며 `↓`·`Enter` 로 고르면 접두사 교체 + import 한 줄이 **undo 하나**; `Esc`; `.` 트리거; `isIncomplete`
 재요청; 접두사가 비면 닫힘; `⌃Space`; 설정 끄면 타이핑 트리거만 꺼짐; 낡은 응답; 팝업이 뜬 프레임엔 시그니처 상자 없음) · `CMP2`(capability 없음).
 
+### 8.2h LSP 2단 ⑦ — code action (2026-09-19, 계획 공격 뒤의 결정)
+
+**계획 공격이 드러낸 것.** ① 결과는 `WorkspaceEdit` — §8.2f 의 `apply`(전부 검증·저장 정책·기록)를 **두 번째 소비자**가 그대로 쓴다(요청
+시점 revision 스냅숏도 같다). 새로 서는 것은 「무엇을 묻고, 무엇을 목록에 내고, 고르면 어디로 가는가」뿐. ② **목록은 메뉴다** — 타이핑으로
+좁히는 것이 아니라 고르는 명령 목록이므로 ui §8:441 「메뉴는 `context_menu.zig`」가 맞고(`suggest_box` 가 아니다), 우클릭·`⚙`·리소스 팝오버가
+쓰는 그 하나에 갈래(`code_action_menu`)를 더한다 — 모달이라 열린 동안 키는 잡힌다(`Esc`·다른 키 = 닫힘, VS Code 의 action widget 과 같다).
+③ **문맥 진단이 있어야 fix 가 온다**(clangd 실측 — 사용자 요청의 적대적 검증): 원본 진단 그대로 / `range`+`message`+`severity`+`code` 만 → 같은
+`insert ';'` / 문맥을 비우면 **없음**. 우리 `Diagnostic` 은 넷을 다 든다(`data`·`source` 문자열은 안 들지만 clangd 는 필요로 하지 않았다). ④ rust-analyzer
+는 `edit` 을 **지연**해 낸다(`codeAction/resolve` 가 있어야 edit 이 온다) — 첫 조각에 resolve 를 넣지 않으면 그 서버에서는 목록만 뜨고 아무것도
+안 된다 → 넣는다. ⑤ `command` 만 있는 항목·`edit` 과 `command` 가 함께인 항목의 `command` — §8.2 seam 은 `workspace/executeCommand` 를 기본 거부로
+못 박았다 → command 는 실행하지 않는다(전자는 숨기고, 후자는 edit 만).
+
+**레퍼런스(동작만).** VS Code `editor.action.quickFix` = `⌘.`(mac), action widget: `↑↓`/`Enter`/`Esc`, `isPreferred` 가 앞, 진단이 있는 줄의 전구.
+
+| 축 | 결정 | 근거 |
+| --- | --- | --- |
+| **트리거** | `quick_fix` — `⌘.`(ETX4 ⑵ 예외 — 전역 표에 `.` chord 없음, `needs_editable = true`) · 팔레트 「Editor: Quick Fix…」. 서버가 없거나 `codeActionProvider` 가 없으면 무동작 | VS Code |
+| **요청** | id `7_000_000_000+seq`, `textDocument/codeAction{range, context{diagnostics, triggerKind: 1}}`. `range` = 선택이 있으면 그것, 없으면 caret. `context.diagnostics` = 그 범위와 겹치는 `.lsp` 진단을 `range`·`message`·`severity`·`code` 로 되돌린다(byte → 서버 인코딩). 보내기 전 `flushDocument`, 요청 시점 열린 문서 revision 스냅숏(§8.2f). 한 번에 하나 — 새 요청이 앞 것을 대체 | 위 ③ |
+| **목록** | `(Command \| CodeAction)[]` 중 **`edit` 이 있거나(`resolveProvider` 면) `data` 로 resolve 할 수 있는 `CodeAction`** 만. `disabled` 는 숨긴다. `isPreferred` 가 앞(안정 정렬). 상한 25(메뉴 버퍼). 0 이면 알림 「사용할 수 있는 코드 액션이 없습니다」 | 위 ⑤ · VS Code |
+| **메뉴** | `context_menu` 를 caret 셀 아래에 연다(`at_anchor` — 앵커가 caret 아래 줄). 항목은 `title` 그대로(kind 는 첫 조각에서 표시하지 않는다). `↑↓`/`Enter`/클릭 확정, `Esc`·다른 키·바깥 클릭 닫힘 | ui §8 규칙 넷 · §8:441 |
+| **확정** | `edit` 이 있으면 §8.2f `apply`(전부 검증 → 열린 Term undo 하나·디스크·저장 정책·기록 — `Undo Last Rename` 이 이것도 되돌린다). 없으면 `codeAction/resolve`(id `8_000_000_000+seq`, 고른 항목의 JSON 그대로) → 응답의 `edit` 을 같은 길로. 낡음·root 밖·거부 알림은 §8.2f 것 그대로. `command` 는 실행하지 않는다 | 위 ①④⑤ |
+| **하지 않는 것** | 전구(gutter 표시) · 자동 적용(`Fix All`·저장 시) · `command` 실행 · kind 별 묶음·머리글 · `only` 필터 · 저장 시 code action · refactor 미리보기 · 25 넘는 목록 | 다음 조각 |
+
+**관측점**: `LSJ11`(순수: codeAction 요청 id·range·context.diagnostics·resolve 요청·capability) · `CAX*`(순수: 항목 파싱 — `edit`/`data`/`command`/`disabled`/
+`isPreferred` 정렬·Command 형 거름) · `CA1`(제품 경계: 가짜 서버 — `⌘.` 로 진단 자리의 fix 와 lazy 항목이 메뉴에, command-only 는 없음; fix 를 고르면 진단
+범위가 바뀌고 undo 하나·기록; lazy 를 고르면 resolve → edit 적용; `Esc`·바깥 클릭 닫힘; 문맥 없는 자리(`NOACT`)는 알림; 낡은 revision 전체 거부; resolve
+오류 알림; 낡은 seq) · `CA2`(capability 없음).
+
 ### 8.3 관측 가능성과 민감정보
 
 editor event는 처음부터 하나의 domain schema를 공유하되 문서 원문을 기본 trace에 넣지 않는다.

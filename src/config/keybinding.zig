@@ -283,6 +283,9 @@ pub const editor_context_bindings = [_]EditorContextBinding{
     // 간다 — 여기는 PTY 가 없다), `⌥Esc` 는 ⑴. macOS 의 `⌃Space` 입력 소스 전환은 시스템 설정이 먼저 가로챌 수 있다(VS Code 도 같다).
     .{ .chord = .{ .modifiers = .{ .control = true }, .key = .{ .char = ' ' } }, .action = .trigger_suggest, .needs_editable = true },
     .{ .chord = .{ .modifiers = .{ .option = true }, .key = .escape }, .action = .trigger_suggest, .needs_editable = true },
+    // `⌘.` — code action(tooling §8.2h, VS Code `editor.action.quickFix`). ETX4 ⑵: 전역·터미널 표에 `.` chord 가 없어 겹치지 않는다 — 근거는 키 문서
+    // 「편집기 Term 컨텍스트」의 그 문단. 편집기에서만 뜻이 있다(서버가 없으면 무동작). 문서를 바꾸므로 `needs_editable = true`.
+    .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = '.' } }, .action = .quick_fix, .needs_editable = true },
     // `⇧⌘Space` — 시그니처 힌트(tooling §8.2d, VS Code `editor.action.triggerParameterHints`). ETX4 ⑵: 전역·터미널 표에 없어 겹치지 않는
     // `⌘` chord — 근거는 키 입력 문서 「편집기 Term 컨텍스트」의 그 문단. 편집기에서만 뜻이 있다(서버가 없으면 무동작).
     .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = ' ' } }, .action = .trigger_parameter_hints, .needs_editable = true }, // 비교 뷰에는 서버가 없다 — 예외 규칙대로 편집 가능한 문서만
@@ -1210,6 +1213,7 @@ test "ETX4 편집기 컨텍스트 기본키가 전역 표를 안 오염시킨다
     // 이 판정자를 고쳐야 하고, 고치는 사람은 그 절에 근거를 적게 된다.
     const Exception = struct { key: KeyName, action: action_mod.Action };
     const allowed = [_]Exception{
+        .{ .key = .{ .char = '.' }, .action = .quick_fix }, // ⌘. — VS Code editor.action.quickFix(§8.2h); 전역 표에 `.` chord 없음
         .{ .key = .{ .char = 'D' }, .action = .add_next_occurrence }, // ⌘D — native-editor-ui.md §9.1 확정
         .{ .key = .arrow_up, .action = .add_cursor_above }, // ⌥⌘↑ — §3.2b, focus_pane_up 에서 가져옴
         .{ .key = .arrow_down, .action = .add_cursor_below }, // ⌥⌘↓ — §3.2b

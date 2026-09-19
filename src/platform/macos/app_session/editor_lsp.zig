@@ -23,11 +23,13 @@ const input_ops = @import("input.zig");
 const term_ops = @import("term.zig");
 const file_tree_backend = @import("../file_tree_backend.zig");
 const editor_hover = @import("editor_hover.zig");
+const editor_ops = @import("editor.zig");
 const editor_definition = @import("editor_definition.zig");
 const editor_signature = @import("editor_signature.zig");
 const editor_format = @import("editor_format.zig");
 const editor_rename = @import("editor_rename.zig");
 const editor_completion = @import("editor_completion.zig");
+const editor_code_action = @import("editor_code_action.zig");
 
 pub const Phase = enum {
     /// 실행 파일이 PATH 에 없다 — 상태바 「설치」.
@@ -93,6 +95,10 @@ pub const Client = struct {
     /// completion(§8.2g).
     completion_seq: u32 = 0,
     completion_triggers: lsp.rpc.CompletionTriggers = .{},
+    /// code action(§8.2h).
+    code_action_seq: u32 = 0,
+    code_action_resolve_seq: u32 = 0,
+    code_action_caps: lsp.rpc.CodeActionCaps = .{},
 
     fn deinit(self: *Client, allocator: std.mem.Allocator) void {
         if (self.proc) |*p| {
@@ -139,6 +145,9 @@ pub const State = struct {
     received_renames: u64 = 0,
     sent_completions: u64 = 0,
     received_completions: u64 = 0,
+    sent_code_actions: u64 = 0,
+    received_code_actions: u64 = 0,
+    sent_code_action_resolves: u64 = 0,
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
         for (self.clients.items) |*c| c.deinit(allocator);
@@ -484,6 +493,7 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
                 c.formatting_supported = lsp.rpc.formattingSupported(r.result); // §8.2e
                 c.rename_supported = lsp.rpc.renameSupported(r.result); // §8.2f
                 c.completion_triggers = lsp.rpc.completionTriggersFromResult(r.result); // §8.2g
+                c.code_action_caps = lsp.rpc.codeActionCapsFromResult(r.result); // §8.2h
                 c.phase = .ready;
                 c.restarts = 0;
                 const msg = lsp.rpc.initializedNotification(self.allocator) catch return;
@@ -495,6 +505,13 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
                 const msg = lsp.rpc.exitNotification(self.allocator) catch return;
                 defer self.allocator.free(msg);
                 _ = send(self, c, msg);
+            },
+            .code_action => |seq| {
+                self.editor_lsp.received_code_actions += 1;
+                editor_code_action.onResponse(self, seq, if (r.is_error) null else r.result, r.is_error, r.error_message);
+            },
+            .code_action_resolve => |seq| {
+                editor_code_action.onResolveResponse(self, seq, if (r.is_error) null else r.result, r.is_error, r.error_message, c.encoding);
             },
             .completion => |seq| {
                 self.editor_lsp.received_completions += 1;
@@ -870,6 +887,70 @@ pub fn requestCompletion(self: *AppSession, term: *Term, offset: usize, trigger_
     if (!send(self, c, msg)) return null;
     self.editor_lsp.sent_completions += 1;
     return c.completion_seq;
+}
+
+/// `textDocument/codeAction` 을 보낸다(§8.2h). `range` 는 byte 반열림 — 서버 인코딩의 줄·글자로 옮기고, 그 범위와 겹치는 `.lsp` 진단을
+/// 문맥으로 싣는다(넷: range·message·severity·code). 서버가 없거나 `codeActionProvider` 가 없으면 `null`.
+pub fn requestCodeAction(self: *AppSession, term: *Term, start: usize, end: usize) ?u32 {
+    const c = readyClientFor(self, term) orelse return null;
+    if (!c.code_action_caps.supported) return null;
+    flushDocument(self, c, term);
+    const d = c.findDoc(term.surfaceId()) orelse return null;
+    const opened = term.rt.editor_doc orelse return null;
+    const content = opened.file.content;
+    const s = @min(start, content.len);
+    const e = @min(@max(end, s), content.len);
+    const range: lsp.rpc.LspRange = .{ .start = lspPos(opened, s, c.encoding), .end = lspPos(opened, e, c.encoding) };
+    var diags: std.ArrayList(lsp.rpc.ContextDiagnostic) = .empty;
+    defer diags.deinit(self.allocator);
+    for (term.rt.editor_diagnostics.lsp.items) |dg| {
+        // 겹침(반열림) — caret 하나(s == e)는 그 자리를 덮는 진단.
+        const overlaps = if (s == e) (dg.start <= s and s < @max(dg.end, dg.start + 1)) else (dg.start < e and s < dg.end);
+        if (!overlaps) continue;
+        diags.append(self.allocator, .{
+            .range = .{ .start = lspPos(opened, dg.start, c.encoding), .end = lspPos(opened, dg.end, c.encoding) },
+            .message = dg.message,
+            .severity = switch (dg.severity) {
+                .@"error" => 1,
+                .warning => 2,
+                .info => 3,
+                .hint => 4,
+            },
+            .code = if (dg.code.len > 0) dg.code else null,
+        }) catch return null;
+    }
+    c.code_action_seq +%= 1;
+    const msg = lsp.rpc.codeActionRequest(self.allocator, c.code_action_seq, d.uri, range, diags.items) catch return null;
+    defer self.allocator.free(msg);
+    if (!send(self, c, msg)) return null;
+    self.editor_lsp.sent_code_actions += 1;
+    return c.code_action_seq;
+}
+
+/// `codeAction/resolve`(§8.2h) — 고른 항목의 JSON 그대로. 보냈으면 seq.
+pub fn requestCodeActionResolve(self: *AppSession, term: *Term, item_json: []const u8) ?u32 {
+    const c = readyClientFor(self, term) orelse return null;
+    if (!c.code_action_caps.resolve) return null;
+    c.code_action_resolve_seq +%= 1;
+    const msg = lsp.rpc.codeActionResolveRequest(self.allocator, c.code_action_resolve_seq, item_json) catch return null;
+    defer self.allocator.free(msg);
+    if (!send(self, c, msg)) return null;
+    self.editor_lsp.sent_code_action_resolves += 1;
+    return c.code_action_resolve_seq;
+}
+
+pub fn codeActionCapsFor(self: *AppSession, term: *Term) ?lsp.rpc.CodeActionCaps {
+    const c = readyClientFor(self, term) orelse return null;
+    return c.code_action_caps;
+}
+
+fn lspPos(opened: editor_ops.Opened, off: usize, enc: lsp.rpc.PositionEncoding) lsp.rpc.Pos {
+    const content = opened.file.content;
+    const o = @min(off, content.len);
+    const line_idx = opened.file.lines.lineAt(o);
+    const line = opened.file.lines.line(line_idx) orelse return .{ .line = 0, .character = 0 };
+    const text = content[line.start..line.contentEnd()];
+    return .{ .line = @intCast(line_idx), .character = lsp.position.characterOf(text, @intCast(o -| line.start), enc) };
 }
 
 /// 서버의 완성 트리거 글자(없으면 `supported = false`).

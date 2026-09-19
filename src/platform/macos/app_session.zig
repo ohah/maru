@@ -2989,7 +2989,7 @@ pub const BaseMenuRow = union(enum) {
     branch: usize,
 };
 const max_base_menu_rows: usize = max_branch_menu_items + 1;
-const ctx_menu_count: usize = ctx_menu_group_promote + 1; // 워크스페이스 메뉴 최대 항목 수(버퍼 크기 단일 출처, 빼기·승격 슬롯 포함)
+pub const ctx_menu_count: usize = ctx_menu_group_promote + 1; // 워크스페이스 메뉴 최대 항목 수(버퍼 크기 단일 출처, 빼기·승격 슬롯 포함)
 comptime {
     // 라벨 버퍼는 **공유**다(`context_menu_items_buf`). 그룹 메뉴엔 이 가드가 있었는데 브랜치·리소스엔 없었다 —
     // 넘치면 버퍼 밖에 쓴다. 상한을 늘릴 때 여기서 멈추게 한다.
@@ -5278,6 +5278,9 @@ pub const AppSession = struct {
     editor_format: editor_ops.format_client.State = .{},
     editor_rename: editor_ops.rename_client.State = .{},
     editor_completion: editor_ops.completion_client.State = .{},
+    editor_code_action: editor_ops.code_action_client.State = .{},
+    /// 컨텍스트 메뉴가 code action 목록이다(tooling §8.2h) — accept 가 이 갈래로 먼저 들어온다. `closeContextMenu` 가 내린다.
+    code_action_menu: bool = false,
     editor_workspace_edit: editor_ops.workspace_edit_client.State = .{},
     // window close 확인을 통과했지만 remote event settlement가 남은 경우의 retry latch. 이 값이 켜진 동안
     // topology와 native close intent는 게시하지 않고 tick이 같은 close graph만 한 번 진행한다.
@@ -6992,6 +6995,8 @@ pub const AppSession = struct {
     debug_format_sent: bool = false,
     /// `MARU_FORCE_RENAME*` 이 상자를 열었다(캡처 전용 래치).
     debug_rename_done: bool = false,
+    /// `MARU_FORCE_QUICK_FIX` 가 요청을 보냈다(캡처 전용 래치).
+    debug_quick_fix_sent: bool = false,
     // 현재 반주기가 시작된 시각(ns, awake clock). 0=미초기화(다음 tick이 baseline을 잡는다 — 스피너와 같은 규약).
     blink_phase_ns: i128 = 0,
     /// kitty 애니메이션 진행의 baseline(실경과 기준). 커서 깜빡임과 같은 결로 **실경과 ms** 를 코어에
@@ -10414,6 +10419,7 @@ pub const AppSession = struct {
             .rename_symbol => _ = editor_ops.rename_client.startAtCaret(self), // §8.2f
             .undo_workspace_edit => editor_ops.rename_client.undoLast(self), // §8.2f
             .trigger_suggest => _ = editor_ops.completion_client.triggerManual(self), // §8.2g
+            .quick_fix => _ = editor_ops.code_action_client.quickFix(self), // §8.2h
             // 접기/펼치기 — 편집기가 아니거나 접을 것이 없으면 무동작(비교 뷰도 거절한다. §4.1f).
             // 비교 뷰면 그쪽을 먼저 본다 — 축이 달라 함수가 갈린다(§4.1g "비교 뷰").
             .copy_editor_selection => _ = editor_ops.copyDiffSelection(self) or editor_ops.copySelection(self),
@@ -12067,10 +12073,11 @@ pub const AppSession = struct {
             .symbol_picker_selection_changed => {}, // 창 갱신은 렌더 직전 follow 가 값 비교로 잡는다
             .symbol_picker_accept => editor_ops.acceptSymbolPicker(self), // 닫고 나서 간다
             .context_menu_accept => settings_ops.acceptContextMenu(self), // selected 항목 실행(현재 "Rename" → 대상 rename)
-            .context_menu_close => { // Esc/그 외 키 — 컴포넌트가 이미 hide, 대상 포인터·view_options 플래그만 비운다
+            .context_menu_close => { // Esc/그 외 키 — 컴포넌트가 이미 hide, 대상 포인터·플래그를 비운다
                 self.context_menu_target = null;
                 self.file_tree_context_target = null;
                 self.view_options_menu = false;
+                self.code_action_menu = false; // §8.2h — 남기면 다음 우클릭 메뉴의 accept 가 이 갈래로 먼저 들어온다
                 self.metal_dirty = true;
             },
             .context_menu_selection_changed => self.metal_dirty = true, // ↑↓ 선택 이동 — 재렌더
@@ -20401,6 +20408,7 @@ pub const AppSession = struct {
         debug_fixtures.applyForcedFormat(self); // 캡처 전용: 문서 포맷(§8.2e)
         debug_fixtures.applyForcedRename(self); // 캡처 전용: 심볼 이름 바꾸기(§8.2f)
         debug_fixtures.applyForcedSuggest(self); // 캡처 전용: 자동완성(§8.2g)
+        debug_fixtures.applyForcedQuickFix(self); // 캡처 전용: code action(§8.2h)
         debug_fixtures.applyForcedStageAll(self); // 캡처 전용: 전체 스테이지는 그룹 머리 클릭으로만 시작된다(RS4a)
         debug_fixtures.applyForcedFetch(self); // 캡처 전용: 원격 갱신은 브랜치 줄 클릭으로만 시작된다(P6)
         debug_fixtures.applyForcedRemoteMenu(self); // 캡처 전용: `∨` 메뉴도 클릭으로만 열린다(P6b)
@@ -24229,6 +24237,7 @@ pub const AppSession = struct {
         editor_ops.signature_client.deinit(self);
         self.editor_workspace_edit.deinit(self.allocator); // 마지막 WorkspaceEdit 기록(§8.2f)
         editor_ops.completion_client.deinit(self); // 완성 목록(§8.2g)
+        editor_ops.code_action_client.deinit(self); // code action 목록(§8.2h)
         // 판정자에서는 detached worker 가 **세션보다 오래 살면 안 된다**. 이유·규율은
         // `detached_worker_wait` 가 단일 출처다(2026-09-08 CI abort: `dupe` 누수 → segfault → 134).
         // 제품에서는 기다리지 않는다 — 멈춘 I/O 로 창 닫기가 굳는 것이 훨씬 나쁘고, 그 계약은 각

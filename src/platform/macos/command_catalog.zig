@@ -114,6 +114,7 @@ pub const entries = [_]Entry{
     .{ .action = .rename_symbol, .key = "rename_symbol", .title = "Editor: Rename Symbol" },
     .{ .action = .undo_workspace_edit, .key = "undo_workspace_edit", .title = "Editor: Undo Last Rename" },
     .{ .action = .trigger_suggest, .key = "trigger_suggest", .title = "Editor: Trigger Suggest" },
+    .{ .action = .quick_fix, .key = "quick_fix", .title = "Editor: Quick Fix…" },
     .{ .action = .copy_editor_selection, .key = "copy_editor_selection", .title = "Editor: Copy Selection" },
     .{ .action = .add_next_occurrence, .key = "add_next_occurrence", .title = "Editor: Add Next Occurrence" },
     .{ .action = .jump_to_bracket, .key = "jump_to_bracket", .title = "Editor: Go to Bracket" },

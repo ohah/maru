@@ -67973,6 +67973,46 @@ test "commitComposition during terminal preedit does not deadlock (회귀: bd5fd
     try std.testing.expectEqual(after_first_commit, session.total_terminal_input_bytes);
 }
 
+test "terminal IME preedit replaces the visible cell on every marked transaction" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+    _ = try session.tick();
+
+    const surface = term_ops.activeSurface(session);
+    surface.lockCore(session.io);
+    const base_snapshot = surface.renderSnapshot();
+    const base_cell_index = @as(usize, base_snapshot.cursor.row) * base_snapshot.size.cols + base_snapshot.cursor.col;
+    surface.unlockCore(session.io);
+    var generation = session.metal_buffer.generation;
+    const marked = [_][]const u8{ "ㅎ", "하", "한" };
+    const expected = [_]u21{ 0x314E, 0xD558, 0xD55C };
+    for (marked, expected) |text, codepoint| {
+        input_ops.imeBegin(session);
+        input_ops.imeMarked(session, text);
+        input_ops.imeEnd(session, null);
+        _ = try session.tick();
+        try std.testing.expect(session.metal_buffer.generation > generation);
+        generation = session.metal_buffer.generation;
+
+        surface.lockCore(session.io);
+        const snapshot = surface.renderSnapshot();
+        const visible_codepoint = snapshot.cells[base_cell_index].codepoint;
+        surface.unlockCore(session.io);
+        try std.testing.expectEqual(codepoint, visible_codepoint);
+    }
+}
+
 test "terminal IME pin tombstones a reaped target and never retargets the same transaction" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -68145,6 +68185,40 @@ test "imeEnd commit + transaction-less imeInsert send via non-blocking path (#10
     input_ops.imeInsert(session, "을");
     try std.testing.expect(session.total_terminal_input_bytes > bytes2);
     try std.testing.expectEqual(keys2, session.total_key_events);
+}
+
+test "terminal IME next marked syllable keeps its place until committed cursor echo arrives" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const surface = term_ops.activeSurface(session);
+    surface.lockCore(session.io);
+    const base = surface.renderSnapshot();
+    const base_linear = @as(usize, base.cursor.row) * base.size.cols + base.cursor.col;
+    surface.unlockCore(session.io);
+
+    // AppKit Korean IME may commit the previous syllable and install the next marked text in
+    // one key transaction. The PTY has accepted "한", but its screen cursor has not echoed yet.
+    input_ops.imeMarked(session, "한");
+    input_ops.imeBegin(session);
+    input_ops.imeInsert(session, "한");
+    input_ops.imeMarked(session, "글");
+    input_ops.imeEnd(session, null);
+
+    surface.lockCore(session.io);
+    defer surface.unlockCore(session.io);
+    const projected = surface.renderSnapshot();
+    try std.testing.expectEqual(@as(u21, 0xAE00), projected.cells[base_linear + 2].codepoint);
 }
 
 const CR2d1InputOwnerFixture = struct {

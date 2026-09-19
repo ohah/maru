@@ -874,6 +874,12 @@ fn enforceAppLogCap() void {
 
 fn redirectStderrToAppLog() void {
     if (builtin.is_test) return;
+    // LaunchServices connects this opt-in harness's stderr to its isolated artifact. Replacing
+    // fd 2 here silently hides typed IME failures from the verifier. Normal GUI logs still use
+    // the bounded app.log owner below; only the exact smoke flag preserves the supplied fd.
+    if (std.c.getenv("MARU_SESSION_HOST_CR6D_INPUT_CONTINUITY_SMOKE")) |value| {
+        if (std.mem.eql(u8, std.mem.span(value), "1")) return;
+    }
     if (std.c.isatty(2) != 0) return;
 
     var base_buf: [std.fs.max_path_bytes]u8 = undefined;

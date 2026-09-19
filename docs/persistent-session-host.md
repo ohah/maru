@@ -6020,8 +6020,55 @@ event-post 권한은 source mutation 전에 `CGPreflightPostEventAccess`로 먼�
 허가하지 않는다. 다른 앱이나 잠금 화면이 전면을 점유하면 그 송신은 실패하고 추가 전역 키를 게시하지 않는다.
 
 후보 관측 publisher가 실패하면 Zig는 오류 이름만 `session_host_ime_candidate_publish_error`로 stderr에 남긴다.
-LaunchServices 하네스는 이를 격리 root의 `app.stderr.txt`로 수집한다. raw transcript·창 제목·후보 문자열·창 inventory는
+LaunchServices 하네스는 이를 격리 root의 `app.stderr.txt`로 수집한다. 명시적 CR6d input-continuity smoke에서는
+앱 초기화의 일반 GUI `app.log` 리다이렉트를 생략해 하네스가 연결한 stderr를 유지한다. 일반 제품의 로그 경로와
+용량 제한은 바꾸지 않는다. raw transcript·창 제목·후보 문자열·창 inventory는
 오류 로그에도 남기지 않으며, 로그는 실패 분기를 진단할 뿐 성공 artifact나 strict reducer를 대신하지 않는다.
+`CounterMutation`에서는 publisher가 실패 row의 0-based ordinal과 `pty_input_changed`,
+`committed_callbacks_changed`, `screen_generation_changed` boolean을 추가 기록한다. 원래 카운터 값이나
+텍스트는 기록하지 않으며, 동시에 여러 축이 변하면 각 boolean을 모두 유지한다. reducer의 거부 조건은 바꾸지 않는다.
+PTY 변화는 `pty_open_interval_changed`(before→opened)와 `pty_close_interval_changed`(opened→closed)도
+독립적으로 기록한다. 이는 후보 요청/취소 관측 구간의 차이이지 특정 key가 원인이라는 증명은 아니며,
+카운터 값·delta·raw key 내용은 기록하지 않는다.
+중복 실패에서는 window owner/lifecycle 검사를 counter 불변 검사보다 먼저 수행해 실제 후보창 부재가
+`CounterMutation`에 가려지지 않게 한다. 모든 거부 조건은 동일하며 성공 집합을 넓히지 않는다. publisher는
+어떤 판정 오류가 발생해도 관측된 counter 변화 boolean을 별도로 기록한다. opt-in CR6d에서만 Enter/Escape의
+IME 판정 tag·Option modifier·commit admission·replay 요청 boolean을 stderr에 남긴다. 이는 replay 요청과
+queue admission의 증거이지 kernel PTY 전달이나 후보창 성공의 대체 증거가 아니다. 확정 문자열은 기록하지 않는다.
+
+CR6d의 `MARU_SESSION_HOST_CR6D_MANUAL_INPUT=1`은 위 격리 input-continuity smoke와 함께 사용할 때만
+수동 물리 입력을 허용한다. 이 모드에서는 HID 게시 및 event-post 권한 요청을 하지 않는다. 사용자는 창 제목의
+단계 안내에 따라 `한글` 입력·Return, 후보 요청 Option-Return과 취소 Escape를 수행한다. 창 제목은 일반 제품에서
+숨겨지므로 수동 단계 안내는 테스트 창 content 안의 비편집 안내 띠에도 표시하고, 고정 안내 문자열만 stderr에
+기록한다. 안내 띠는 first responder를 가져가지 않는다. 실제 keyDown은 소비하거나
+변조하지 않고 단계 진행 신호로만 관측하며, 후보 inventory·5회 lifecycle·카운터 불변·Screen Recording 권한과
+원래 입력기/클립보드 복원 조건은 자동 모드와 동일하다. 수동 입력임을 summary에 명시하고 자동 HID gate의
+완료 증거로 대체하지 않는다. 앱 300초·부모 315초의 유한 deadline을 사용한다.
+수동 조합 단계는 실제 modifier 없는 Return keyDown을 관측하고, 이후 `hasMarkedText=false`와
+`inputContext` 존재 및 기존 marker/callback 조건을 모두 확인한 뒤에만 후보 관측 단계로 넘어간다.
+Return 이후 다른 물리 keyDown이 들어오면 Return 확인을 다시 해제한다. 화면의 marker substring만으로
+조합 종료나 한 줄 전달을 주장하지 않는다. 검사 직전의 조합 잔존·inputContext 존재와 수동 Return 관측값은
+내용 없는 boolean으로 summary에 남기며, 종료 cleanup 이후 상태로 덮어쓰지 않는다.
+초기 조합 종료 검사는 후보 관측 단계 진입 시 한 번만 적용한다. 진입 이후 후보창 조작으로 marked 상태가
+변했다는 이유만으로 초기 검사에 다시 실패시키지 않는다. 후보 관측의 PTY input·확정 callback·base-screen
+세대 불변 조건과 owner/lifecycle/geometry 판정은 그대로 유지한다. summary는 후보 관측 phase와 완료 row 수를
+기록해 진입 전 검사 실패와 open/close 관측 중 실패를 구분한다.
+CR6d의 격리 config는 `input.option-as-meta = false`를 명시해 후보 요청 Option-Return을 정상 IME 경로로
+보낸다. 일반 제품의 기본값은 변경하지 않는다. 확정된 `한글` marker 검사 뒤에는 별도의 미확정 `한` 조합을
+준비하고, 완전한 고정 target `한`과 `hasMarkedText=true`를 확인한 뒤에만 후보 요청 전 inventory/counter baseline을
+수집한다. 첫 자모 `ㅎ`에서 조기 진행하지 않는다. 실제 marked 문자열은 진단에 기록하지 않는다.
+수동 모드는 조합 준비가 필요할 때 안내 띠에 `한` 입력·Enter 금지를 표시하고, 자동 모드는 실제 물리 key를
+순서대로 보낸다. Escape 뒤 조합이 남아 있으면 재사용하며 없으면 다음 baseline 전에 다시 준비한다.
+준비 입력은 관측 triplet 밖에서 수행하고, triplet 안의 PTY·확정·화면 세대 불변 조건은 완화하지 않는다.
+
+한자 후보 요청의 선행 PoC는
+`MARU_SESSION_HOST_CR6D_CANDIDATE_CONTEXT_PROBE=maru-test-only-v1`에서만 실제 recovered terminal view에
+짧은 변환 문맥을 연다. Option-Return이 Korean IME의 `insertText`로 확정하려는 원문은 PTY에 admission하지 않고
+view-local 임시 문맥에 보관한다. 그 transaction 동안 `selectedRange`와 `attributedSubstring`은 임시 문맥만
+노출하고, Escape까지 일반 terminal key replay를 억제한다. 후보 관측이 끝나면 다음 반복 전에 문맥을 지운다.
+일반 제품 입력과 probe가 꺼진 smoke는 이 경로를 사용할 수 없다. 이 PoC의 성공은 공개 AppKit 문맥으로 실제
+후보창을 열 수 있다는 선행 증거일 뿐이며, 후보 선택·취소 후 최종 문자열을 PTY에 exact-once admission하는
+제품 상태 머신의 완료를 뜻하지 않는다. 원문·후보 문자열·range 내용은 로그와 artifact에 남기지 않는다.
 
 **CR6d-v2 시각 증거 계약:** v2a는 같은 recovered Term의 첫 한글 물리 key 직전과 첫 marked callback 반영 뒤
 제품 Metal 프레임을 캡처하고, 같은 runtime·surface의 cursor rect, `firstRect` screen rect와 관심 영역 픽셀 변화를

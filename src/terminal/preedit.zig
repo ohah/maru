@@ -9,10 +9,38 @@ const std = @import("std");
 const types = @import("types.zig");
 const width = @import("../width.zig");
 
+/// Admission 전 canonical cursor에서 복사한 값 타입. RenderSnapshot의 borrowed cell/grapheme
+/// slices를 락 밖으로 가져갈 수 없게 타입 자체에서 제외한다.
+pub const CommitBase = struct {
+    size: types.Size,
+    cursor: types.Cursor,
+    viewport_scrolled: bool,
+    viewport_scrolled_known: bool,
+    ambiguous_wide: bool,
+
+    pub fn fromSnapshot(snapshot: types.RenderSnapshot) CommitBase {
+        return .{
+            .size = snapshot.size,
+            .cursor = snapshot.cursor,
+            .viewport_scrolled = snapshot.viewport_scrolled,
+            .viewport_scrolled_known = snapshot.viewport_scrolled_known,
+            .ambiguous_wide = snapshot.ambiguous_wide,
+        };
+    }
+};
+
 pub const Overlay = struct {
     allocator: std.mem.Allocator,
     text: ?[]u8 = null,
     cells: []types.Cell = &.{},
+    pending_advance_cells: u32 = 0,
+    pending_anchor: ?Anchor = null,
+
+    const Anchor = struct {
+        cursor_linear: u32,
+        cols: u16,
+        rows: u16,
+    };
 
     pub fn init(allocator: std.mem.Allocator) Overlay {
         return .{ .allocator = allocator };
@@ -30,6 +58,7 @@ pub const Overlay = struct {
         if (bytes.len == 0) {
             if (self.text) |old| self.allocator.free(old);
             self.text = null;
+            self.clearPendingAdvance();
             return;
         }
         const next = try self.allocator.dupe(u8, bytes);
@@ -50,7 +79,45 @@ pub const Overlay = struct {
     pub fn take(self: *Overlay) ?Owned {
         const bytes = self.text orelse return null;
         self.text = null;
+        self.clearPendingAdvance();
         return .{ .allocator = self.allocator, .bytes = bytes };
+    }
+
+    /// PTY ordered queue가 확정 문자열을 인수했지만 canonical cursor가 아직 움직이지 않았을 때,
+    /// 다음 marked text가 방금 확정한 글자를 덮지 않도록 **폭만** 보존한다. 문자열은 저장하거나
+    /// 그리지 않으므로 echo가 꺼진 프로그램에서도 입력 내용을 client overlay가 노출하지 않는다.
+    pub fn noteCommitted(self: *Overlay, base: CommitBase, bytes: []const u8) void {
+        if (!self.active()) return;
+        if (!base.viewport_scrolled_known or base.viewport_scrolled or !validCursor(base.size, base.cursor)) {
+            self.clearPendingAdvance();
+            return;
+        }
+        _ = self.reconcilePendingAdvance(base.size, base.cursor);
+
+        var advance: u32 = 0;
+        var it = (std.unicode.Utf8View.init(bytes) catch {
+            self.clearPendingAdvance();
+            return;
+        }).iterator();
+        while (it.nextCodepoint()) |cp| {
+            // Cursor motion cannot be inferred from line/control input. Keeping a guessed offset
+            // across it would be worse than briefly falling back to the canonical cursor.
+            if (cp < 0x20 or cp == 0x7f) {
+                self.clearPendingAdvance();
+                return;
+            }
+            advance +|= width.cellWidthAmbiguous(cp, base.ambiguous_wide);
+        }
+        if (advance == 0) return;
+
+        if (self.pending_anchor == null) {
+            self.pending_anchor = .{
+                .cursor_linear = cursorLinear(base.size, base.cursor),
+                .cols = base.size.cols,
+                .rows = base.size.rows,
+            };
+        }
+        self.pending_advance_cells +|= advance;
     }
 
     /// 최신 base snapshot 위에 marked text를 합성한다. OOM·손상 snapshot·잘못된 UTF-8이면
@@ -63,7 +130,17 @@ pub const Overlay = struct {
         if (!base.viewport_scrolled_known or base.viewport_scrolled) return base;
         const cols = base.size.cols;
         const rows = base.size.rows;
-        if (cols == 0 or rows == 0 or base.cursor.row >= rows or base.cursor.col >= cols) return base;
+        if (!validBaseCursor(base)) {
+            self.clearPendingAdvance();
+            return base;
+        }
+
+        const anchor_advance = self.reconcilePendingAdvance(base.size, base.cursor);
+        const draw_linear = @as(u64, cursorLinear(base.size, base.cursor)) + @as(u64, anchor_advance);
+        const viewport_cells = @as(u64, cols) * @as(u64, rows);
+        if (draw_linear >= viewport_cells) return base;
+        const row: u16 = @intCast(draw_linear / cols);
+        const cursor_col: u16 = @intCast(draw_linear % cols);
 
         const needed = @as(usize, cols) * @as(usize, rows);
         if (base.cells.len < needed) return base;
@@ -84,8 +161,6 @@ pub const Overlay = struct {
         }
         if (preedit_width == 0) return base;
 
-        const row = base.cursor.row;
-        const cursor_col = base.cursor.col;
         const row_cells = self.cells[@as(usize, row) * cols ..][0..cols];
 
         const last_content: ?u16 = blk: {
@@ -147,7 +222,45 @@ pub const Overlay = struct {
         composed.dirty = .{ .start_row = 0, .end_row = rows - 1 };
         return composed;
     }
+
+    fn reconcilePendingAdvance(self: *Overlay, size: types.Size, cursor: types.Cursor) u32 {
+        const anchor = self.pending_anchor orelse return 0;
+        if (!validCursor(size, cursor) or anchor.cols != size.cols or anchor.rows != size.rows) {
+            self.clearPendingAdvance();
+            return 0;
+        }
+        const current = cursorLinear(size, cursor);
+        if (current < anchor.cursor_linear) {
+            self.clearPendingAdvance();
+            return 0;
+        }
+        const consumed = current - anchor.cursor_linear;
+        if (consumed >= self.pending_advance_cells) {
+            self.clearPendingAdvance();
+            return 0;
+        }
+        self.pending_advance_cells -= consumed;
+        self.pending_anchor.?.cursor_linear = current;
+        return self.pending_advance_cells;
+    }
+
+    fn clearPendingAdvance(self: *Overlay) void {
+        self.pending_advance_cells = 0;
+        self.pending_anchor = null;
+    }
 };
+
+fn validBaseCursor(base: types.RenderSnapshot) bool {
+    return validCursor(base.size, base.cursor);
+}
+
+fn validCursor(size: types.Size, cursor: types.Cursor) bool {
+    return size.cols > 0 and size.rows > 0 and cursor.row < size.rows and cursor.col < size.cols;
+}
+
+fn cursorLinear(size: types.Size, cursor: types.Cursor) u32 {
+    return @as(u32, cursor.row) * @as(u32, size.cols) + @as(u32, cursor.col);
+}
 
 /// Overlay/Surface 수명과 독립된 marked text 소유권. take 뒤 Surface가 이동·해제돼도 caller가
 /// 저장된 allocator로 안전하게 해제할 수 있다.
@@ -276,4 +389,95 @@ test "preedit overlay compose returns canonical base and retains state on scratc
 
     try std.testing.expectEqual(@intFromPtr(base.cells.ptr), @intFromPtr(out.cells.ptr));
     try std.testing.expectEqualStrings("한", overlay.textBytes());
+}
+
+test "preedit anchor keeps the next Hangul syllable after an admitted unreflected commit" {
+    var cells = [_]types.Cell{.{}} ** 8;
+    var overlay = Overlay.init(std.testing.allocator);
+    defer overlay.deinit();
+    try overlay.replace("글");
+
+    const base = baseSnapshot(&cells, 8, 1, .{ .row = 0, .col = 0 });
+    overlay.noteCommitted(CommitBase.fromSnapshot(base), "한");
+    const out = overlay.compose(base);
+
+    // The committed syllable belongs to the PTY and is deliberately not copied into the
+    // client-local overlay. Only its two-cell advance positions the next marked syllable.
+    try std.testing.expectEqual(@as(u21, 0), out.cells[0].codepoint);
+    try std.testing.expectEqual(@as(u21, 0xAE00), out.cells[2].codepoint);
+}
+
+test "preedit anchor is consumed by partial and complete base cursor echo" {
+    var cells = [_]types.Cell{.{}} ** 10;
+    var overlay = Overlay.init(std.testing.allocator);
+    defer overlay.deinit();
+    try overlay.replace("x");
+
+    const initial = baseSnapshot(&cells, 10, 1, .{ .row = 0, .col = 1 });
+    overlay.noteCommitted(CommitBase.fromSnapshot(initial), "ab");
+
+    const partial = overlay.compose(baseSnapshot(&cells, 10, 1, .{ .row = 0, .col = 2 }));
+    try std.testing.expectEqual(@as(u21, 'x'), partial.cells[3].codepoint);
+
+    const complete = overlay.compose(baseSnapshot(&cells, 10, 1, .{ .row = 0, .col = 3 }));
+    try std.testing.expectEqual(@as(u21, 'x'), complete.cells[3].codepoint);
+}
+
+test "preedit anchor wraps to the next row" {
+    var cells = [_]types.Cell{.{}} ** 8;
+    var overlay = Overlay.init(std.testing.allocator);
+    defer overlay.deinit();
+    try overlay.replace("x");
+
+    const base = baseSnapshot(&cells, 4, 2, .{ .row = 0, .col = 3 });
+    overlay.noteCommitted(CommitBase.fromSnapshot(base), "ab");
+    const out = overlay.compose(base);
+    try std.testing.expectEqual(@as(u21, 'x'), out.cells[5].codepoint);
+}
+
+test "preedit anchor clears with composition and on non-monotonic cursor movement" {
+    var cells = [_]types.Cell{.{}} ** 8;
+    var overlay = Overlay.init(std.testing.allocator);
+    defer overlay.deinit();
+    try overlay.replace("x");
+
+    const base = baseSnapshot(&cells, 8, 1, .{ .row = 0, .col = 2 });
+    overlay.noteCommitted(CommitBase.fromSnapshot(base), "ab");
+    const moved_back = overlay.compose(baseSnapshot(&cells, 8, 1, .{ .row = 0, .col = 1 }));
+    try std.testing.expectEqual(@as(u21, 'x'), moved_back.cells[1].codepoint);
+
+    overlay.noteCommitted(CommitBase.fromSnapshot(baseSnapshot(&cells, 8, 1, .{ .row = 0, .col = 2 })), "ab");
+    try overlay.replace("");
+    try overlay.replace("y");
+    const after_clear = overlay.compose(base);
+    try std.testing.expectEqual(@as(u21, 'y'), after_clear.cells[2].codepoint);
+}
+
+test "preedit anchor fails closed when geometry changes" {
+    var cells8 = [_]types.Cell{.{}} ** 8;
+    var cells6 = [_]types.Cell{.{}} ** 6;
+    var overlay = Overlay.init(std.testing.allocator);
+    defer overlay.deinit();
+    try overlay.replace("x");
+
+    const base = baseSnapshot(&cells8, 8, 1, .{ .row = 0, .col = 1 });
+    overlay.noteCommitted(CommitBase.fromSnapshot(base), "ab");
+    const resized = overlay.compose(baseSnapshot(&cells6, 6, 1, .{ .row = 0, .col = 1 }));
+    try std.testing.expectEqual(@as(u21, 'x'), resized.cells[1].codepoint);
+}
+
+test "preedit anchor never survives an unproven live viewport" {
+    var cells = [_]types.Cell{.{}} ** 8;
+    var overlay = Overlay.init(std.testing.allocator);
+    defer overlay.deinit();
+    try overlay.replace("x");
+
+    const live = baseSnapshot(&cells, 8, 1, .{ .row = 0, .col = 1 });
+    overlay.noteCommitted(CommitBase.fromSnapshot(live), "ab");
+    var scrolled = live;
+    scrolled.viewport_scrolled = true;
+    overlay.noteCommitted(CommitBase.fromSnapshot(scrolled), "cd");
+
+    const returned_live = overlay.compose(live);
+    try std.testing.expectEqual(@as(u21, 'x'), returned_live.cells[1].codepoint);
 }

@@ -652,6 +652,17 @@ owner-name substring, title/AX text, 좌표만의
 v2b0은 exact 5-row·16 KiB 이하 `maru.session-host-cr6d-ime-candidate-observation.v1`, v2b1은 single-candidate
 `maru.session-host-cr6d-ime-candidate-pixel.v1`을 absent target에 배타 게시한다. permission/WindowServer/API 부재의
 `not_provisioned`와 owner/lifecycle/identity/geometry/capture/cleanup `failed`를 구분하며 둘 다 pass/skip으로 세지 않는다.
+2026-09-19 수동 물리 입력 실측은 Option-Return 5회 모두 `commit_text`와 PTY input 변화를 만들고 후보창을
+관측하지 못했다. `NSTextInputContext.handleEvent` 우선 A/B도 같은 결과여서 제품 변경은 되돌렸다. 문서가 인용한
+Apple 동작은 커서 앞의 확정 한글 또는 선택 문맥을 대상으로 하지만 기존 하네스는 미확정 marked `한`만 제공했다.
+따라서 v2b0 통과를 다시 주장하기 전에 test-only view-local 변환 문맥 PoC가 실제 WindowServer 후보 open/close를
+만드는지 확인한다. PoC는 일반 입력을 바꾸지 않으며, 통과해도 최종 문자열 exact-once PTY admission은 구현 전이다.
+같은 날 recovered session-host Term의 수동 제품 입력에서 `한` 확정 admission과 다음 `글` marked callback 사이에
+canonical cursor echo가 늦어, 다음 음절이 앞 음절 위치에 그려지고 Return 뒤에야 전체 문자열이 보이는 회귀를 재현했다.
+client-local preedit가 admission 전 base cursor와 미인수 확정 셀 폭을 보존하도록 수정한 빌드에서는 Return 전
+`한글테스트` 전부가 즉시 보였고 Return 뒤에도 전체 문자열이 그대로 남았다. 순수 gate는 무반향·부분/완전 echo·행
+wrap·clear·비순차 cursor·geometry 변경을, AppSession gate는 같은 transaction의 `insertText("한")` 뒤
+`setMarkedText("글")` 제품 배선을 검증한다. 이 수동 결과는 v2b OS 후보창 행의 RED를 닫지 않는다.
 
 renderer capability의 현재 검증 계약은 `editor_epoch`를 포함한 `RendererCapability` 6-field 공용 alias이며, epoch를 포함한 어느 필드든 stale이면 fragment 재사용·DOM 높이 변경이 0이어야 한다.
 

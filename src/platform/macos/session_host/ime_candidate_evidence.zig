@@ -57,6 +57,26 @@ pub const Window = struct {
     on_screen: bool,
 };
 
+const CounterChanges = struct {
+    pty_input_changed: bool,
+    pty_open_interval_changed: bool,
+    pty_close_interval_changed: bool,
+    committed_callbacks_changed: bool,
+    screen_generation_changed: bool,
+};
+
+// Describe every changed axis, not just the first mismatch. Diagnostics never expose the values
+// or affect the strict verdict, and both open and close observations matter equally.
+fn counterChanges(before: Counters, opened: Counters, closed: Counters) CounterChanges {
+    return .{
+        .pty_input_changed = before.pty_input_bytes != opened.pty_input_bytes or before.pty_input_bytes != closed.pty_input_bytes,
+        .pty_open_interval_changed = before.pty_input_bytes != opened.pty_input_bytes,
+        .pty_close_interval_changed = opened.pty_input_bytes != closed.pty_input_bytes,
+        .committed_callbacks_changed = before.committed_text_callbacks != opened.committed_text_callbacks or before.committed_text_callbacks != closed.committed_text_callbacks,
+        .screen_generation_changed = before.base_screen_generation != opened.base_screen_generation or before.base_screen_generation != closed.base_screen_generation,
+    };
+}
+
 pub const Counters = struct {
     pty_input_bytes: u64,
     committed_text_callbacks: u64,
@@ -108,8 +128,6 @@ pub fn reduceTriplet(app_pid: i32, triplet: Triplet) Error!Candidate {
     try validateSnapshot(triplet.closed);
     try validateReusedWindowIdentity(triplet.before, triplet.opened);
     try validateReusedWindowIdentity(triplet.before, triplet.closed);
-    if (!Counters.eql(triplet.before_counters, triplet.opened_counters) or
-        !Counters.eql(triplet.before_counters, triplet.closed_counters)) return error.CounterMutation;
 
     var selected: ?Window = null;
     for (triplet.opened) |window| {
@@ -126,6 +144,10 @@ pub fn reduceTriplet(app_pid: i32, triplet: Triplet) Error!Candidate {
             containsId(triplet.before, window.id)) continue;
         return error.CandidateNotClosed;
     }
+    // Diagnose absent/invalid candidate authority first; counter drift must not hide that the
+    // request never produced a candidate. The same conjunction still rejects every mutation.
+    if (!Counters.eql(triplet.before_counters, triplet.opened_counters) or
+        !Counters.eql(triplet.before_counters, triplet.closed_counters)) return error.CounterMutation;
     return .{
         .window_id = candidate.id,
         .owner = candidate.owner,
@@ -277,14 +299,23 @@ pub fn publishObservation(
     var rows: [required_observations]ArtifactRow = undefined;
     var series_anchor: ?ConvertedRect = null;
     for (raw.rows, 0..) |row, index| {
-        const candidate = try reduceTriplet(raw.app_pid, .{
+        const candidate = reduceTriplet(raw.app_pid, .{
             .before = row.before.windows,
             .opened = row.opened.windows,
             .closed = row.closed.windows,
             .before_counters = row.before.counters,
             .opened_counters = row.opened.counters,
             .closed_counters = row.closed.counters,
-        });
+        }) catch |err| {
+            const changes = counterChanges(row.before.counters, row.opened.counters, row.closed.counters);
+            if (changes.pty_input_changed or changes.committed_callbacks_changed or changes.screen_generation_changed) {
+                std.debug.print("session_host_ime_candidate_counter_mutation row={d} pty_input_changed={} committed_callbacks_changed={} screen_generation_changed={} pty_open_interval_changed={} pty_close_interval_changed={}\n", .{
+                    index,                             changes.pty_input_changed,          changes.committed_callbacks_changed, changes.screen_generation_changed,
+                    changes.pty_open_interval_changed, changes.pty_close_interval_changed,
+                });
+            }
+            return err;
+        };
         candidates[index] = candidate;
         const before_anchor = try appKitToQuartz(row.before.anchor_appkit, row.before.displays);
         const opened_anchor = try appKitToQuartz(row.opened.anchor_appkit, row.opened.displays);
@@ -400,6 +431,10 @@ test "v2b0 reducer rejects producer prefilter ambiguity and invalid owner" {
 }
 
 test "v2b0 reducer rejects missing close and screen mutation" {
+    var missing = validTriplet();
+    missing.opened = &.{stable};
+    missing.opened_counters.pty_input_bytes += 1;
+    try std.testing.expectError(error.CandidateMissing, reduceTriplet(999, missing));
     var triplet = validTriplet();
     triplet.closed = &.{ stable, candidate_fixture };
     try std.testing.expectError(error.CandidateNotClosed, reduceTriplet(999, triplet));
@@ -407,6 +442,25 @@ test "v2b0 reducer rejects missing close and screen mutation" {
     triplet = validTriplet();
     triplet.opened_counters.base_screen_generation += 1;
     try std.testing.expectError(error.CounterMutation, reduceTriplet(999, triplet));
+    var changes = counterChanges(triplet.before_counters, triplet.opened_counters, triplet.closed_counters);
+    try std.testing.expect(changes.screen_generation_changed);
+    try std.testing.expect(!changes.pty_input_changed and !changes.committed_callbacks_changed);
+    triplet.closed_counters.pty_input_bytes += 1;
+    triplet.opened_counters.committed_text_callbacks += 1;
+    changes = counterChanges(triplet.before_counters, triplet.opened_counters, triplet.closed_counters);
+    try std.testing.expect(changes.pty_input_changed and changes.committed_callbacks_changed and changes.screen_generation_changed);
+    triplet = validTriplet();
+    changes = counterChanges(triplet.before_counters, triplet.opened_counters, triplet.closed_counters);
+    try std.testing.expect(!changes.pty_input_changed and !changes.committed_callbacks_changed and !changes.screen_generation_changed);
+    triplet.closed_counters.pty_input_bytes += 1;
+    changes = counterChanges(triplet.before_counters, triplet.opened_counters, triplet.closed_counters);
+    try std.testing.expect(!changes.pty_open_interval_changed and changes.pty_close_interval_changed);
+    triplet.opened_counters.pty_input_bytes = triplet.closed_counters.pty_input_bytes;
+    changes = counterChanges(triplet.before_counters, triplet.opened_counters, triplet.closed_counters);
+    try std.testing.expect(changes.pty_open_interval_changed and !changes.pty_close_interval_changed);
+    triplet.closed_counters.pty_input_bytes += 1;
+    changes = counterChanges(triplet.before_counters, triplet.opened_counters, triplet.closed_counters);
+    try std.testing.expect(changes.pty_open_interval_changed and changes.pty_close_interval_changed);
 }
 
 test "v2b0 reducer rejects invalid app identity residual new windows and id reuse" {

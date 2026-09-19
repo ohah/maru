@@ -12724,6 +12724,20 @@ test "RNM1 심볼 이름 바꾸기 — F2 로 낱말이 씨앗인 상자, 이름
     s.mouse(3, 5, 5, 0, 0);
     try testing.expect(s.rename == null);
     try testing.expectEqual(sent_before, s.editor_lsp.sent_renames);
+    // 상자가 열린 동안 문서가 바뀌면(메뉴바 `⌘Z` 는 rename 이 chrome 모달이 아니라 막히지 않는다 — `dispatchAppAction` 경로) 그 자리는 그 낱말이
+    // 아니다 — 확정해도 요청을 보내지 않는다(적대적 2회차 B17).
+    try pressKey(&h.fx, .{ .function = 2 }, .{});
+    try testing.expect(s.rename != null);
+    try pressKey(&h.fx, .{ .char = 'Y' }, .{});
+    const ver_open = term.rt.editor_lsp_version;
+    s.dispatchAppAction(.editor_undo); // 앞의 ⑶ 정리 뒤 남은 undo(마지막 `Q` 삽입 삭제 등)가 문서를 되돌린다
+    try testing.expect(term.rt.editor_lsp_version != ver_open);
+    try pressKey(&h.fx, .enter, .{});
+    try testing.expect(s.rename == null);
+    try testing.expectEqual(sent_before, s.editor_lsp.sent_renames);
+    // 문서를 다시 저장 상태로.
+    s.dispatchAppAction(.editor_redo);
+    try testing.expectEqualStrings(RenameFx.r_text, h.content());
     // ⑸ **낡은 revision 은 전체 거부** — 요청이 나간 뒤 응답 전에 r.c 를 고치면 other.c 도 안 바뀐다.
     try h.renameTo(5, "add4");
     term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };

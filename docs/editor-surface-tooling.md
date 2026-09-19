@@ -645,6 +645,14 @@ revision 은 `documentChanges` 의 `version` 이 있을 때만 검사한다(clan
 | **알림** | 성공 「{0}개 파일에서 이름을 바꿨습니다」 · 서버 오류 「이름을 바꿀 수 없습니다 — {0}」(서버 message) · 낡음 「문서가 바뀌어 결과를 버렸습니다」 · root 밖 「루트 밖 파일이 있어 적용하지 않습니다 — {0}」 · 거부 「적용할 수 없는 편집입니다 — {0}」(파일 연산·겹침·읽기 전용·읽기 실패) · 되돌림 「{0}개 파일의 이름 바꾸기를 되돌렸습니다」 · 되돌릴 것 없음 | |
 | **하지 않는 것** | `prepareRename` · 미리보기 · `⌘Z` 에서 여러 파일 확인창 · 「이 파일만 되돌리기」 · redo · `CreateFile`/`RenameFile`/`DeleteFile` · 서버 발 `workspace/applyEdit`(§8.1 기본 거부 그대로) · code action · `annotations`/`changeAnnotations` | 다음 조각 |
 
+**적대적 검증(2026-09-19, 1~4회차 · 변이 44)**: 1회차 순수 12 → 0 · 2회차 적용 규칙·rename 상태 19 → 1 · 3회차 배선 13 → 1 · 4회차 재실행 2 → 1(선언한 등가).
+- **B17** 확정 때의 revision 검사 — 처음엔 「모달이라 닿을 수 없다」고 봤는데 메뉴바 `⌘Z` 는 rename 이 chrome 모달이 아니라 막히지 않는다
+  (`dispatchAppAction(.editor_undo)` 경로). 상자를 열고 문서를 되돌린 뒤 확정하면 요청이 나가지 않아야 한다(`RNM1`) — 판정자를 더해 사살.
+- **C4** `F2` 의 `needs_editable = false` — `needs_editable` 는 비교 뷰에서만 읽히고 그때는 `startAtCaret` 이 먼저 거절한다(S5 B6·§8.2e C3 과 같은
+  등가). `true` 인 것은 뜻이다.
+- 가짜 서버의 결함도 판정자가 잡았다: `RENAMECREATE` 가 `changes` 맵 모드에서는 파일 연산을 싣지 못해 rename 이 적용됐다 — 파일 연산은
+  `documentChanges` 에만 실릴 수 있으므로 그 표식은 그 모양을 강제한다.
+
 **관측점**: `LSJ9`(순수: rename 요청 id·newName·capability·오류 message) · `WSE*`(순수: `WorkspaceEdit` → 파일별 edits — `changes`·`documentChanges`
 합치기·version·파일 연산 거부·`file:` 아님 거부·모양) · `RNM1`(제품 경계: 가짜 서버 — `F2` 로 낱말이 씨앗인 상자, 이름을 치고 `Enter` → 열린 문서와
 **열려 있지 않은** 이웃 파일이 함께 바뀌고 저장되며 기록이 선다 · `undo_workspace_edit` 가 둘 다 되돌린다 · 디스크가 바뀐 뒤의 되돌리기는

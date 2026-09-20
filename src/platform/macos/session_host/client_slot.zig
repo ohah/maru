@@ -3264,6 +3264,12 @@ const ClientSlotRegistryEntry = struct {
     owner_thread_incarnation: u64 = 0,
 };
 var client_slot_registry_mutex: std.atomic.Mutex = .unlocked;
+/// ⚠️ **이 배열은 언제나 `for (&client_slot_registry) |entry|` 로 훑는다** — `for (client_slot_registry) |entry|` 는
+/// 배열 **값**을 순회하므로 컴파일러가 4096 × 48 B = 192 KiB 를 스택으로 `memcpy` 한 뒤 돈다. 이 스캔은
+/// `beginRegisteredNodeOperation` 이 **runtime 마다 tick 마다** 여러 번 부르는 자리라, 32 세션 idle 에서 앱 메인
+/// 스레드 CPU 의 가장 큰 항목이 그 memcpy 였다(2026-09-20 실측: `<deduplicated_symbol>` = `compiler_rt.memcpy`,
+/// 이미지 부하 프로파일에서 «미해석 29%» 로 남아 있던 것도 이것이다). `tests/client_slot_scan_boundary.zig` 가
+/// 값 순회가 다시 생기지 않게 센다. `registered_node_operations` 도 같은 규칙이다.
 var client_slot_registry: [max_live_client_slots]ClientSlotRegistryEntry =
     [_]ClientSlotRegistryEntry{.{}} ** max_live_client_slots;
 
@@ -3283,9 +3289,9 @@ fn registerClientSlot(entry: ClientSlotRegistryEntry) error{IdentityExhausted}!v
 fn clientSlotRegistryEntry(slot_addr: usize) ?ClientSlotRegistryEntry {
     while (!client_slot_registry_mutex.tryLock()) std.atomic.spinLoopHint();
     defer client_slot_registry_mutex.unlock();
-    for (client_slot_registry) |entry| {
+    for (&client_slot_registry) |*entry| {
         client_idle_pump_evidence.recordRegistryVisit();
-        if (entry.live and entry.ready and entry.slot_addr == slot_addr) return entry;
+        if (entry.live and entry.ready and entry.slot_addr == slot_addr) return entry.*;
     }
     return null;
 }
@@ -3860,11 +3866,11 @@ fn incidentOperationOwner(query: IncidentOperationQuery) ?ClientSlotRegistryEntr
     if (currentPid() == 0 or process_runtime_pid.load(.acquire) != currentPid()) return null;
     while (!client_slot_registry_mutex.tryLock()) std.atomic.spinLoopHint();
     defer client_slot_registry_mutex.unlock();
-    for (client_slot_registry) |entry| {
+    for (&client_slot_registry) |*entry| {
         if (entry.live and entry.ready and entry.slot_addr == query.slot_addr and
             entry.slot_incarnation == query.slot_generation and entry.node_addr == query.node_addr and
             entry.node_incarnation != 0 and operationThreadMatches(entry.owner_thread_incarnation))
-            return entry;
+            return entry.*;
     }
     return null;
 }
@@ -4220,7 +4226,7 @@ fn resolveRegisteredNodeOperation(operation: RegisteredNodeOperation) ?*ClientNo
     const expected = observed orelse return null;
     while (!client_slot_registry_mutex.tryLock()) std.atomic.spinLoopHint();
     defer client_slot_registry_mutex.unlock();
-    for (client_slot_registry) |entry| {
+    for (&client_slot_registry) |*entry| {
         if (entry.live and entry.ready and entry.slot_addr == expected.slot_addr and
             entry.slot_incarnation == expected.slot_incarnation and
             entry.node_addr == expected.node_addr and entry.node_incarnation == expected.node_incarnation and
@@ -4264,7 +4270,7 @@ fn beginRegisteredNodeOperation(
     // The sole nested order is ClientSlot registry -> operation registry publication.
     while (!client_slot_registry_mutex.tryLock()) std.atomic.spinLoopHint();
     defer client_slot_registry_mutex.unlock();
-    for (client_slot_registry) |entry| {
+    for (&client_slot_registry) |*entry| {
         if (!entry.live or !entry.ready or entry.slot_addr != lookup.slot_addr or
             entry.slot_incarnation != lookup.slot_incarnation or
             entry.node_addr == 0 or entry.node_incarnation == 0 or
@@ -4281,7 +4287,7 @@ fn beginRegisteredNodeOperation(
             error.AdminBusy => error.Busy,
             else => error.InvalidOwner,
         };
-        return publishRegisteredNodeOperation(reservation, entry);
+        return publishRegisteredNodeOperation(reservation, entry.*);
     }
     return error.InvalidOwner;
 }
@@ -4395,7 +4401,7 @@ fn finalAdmissionTransactionAddressActive(transaction_addr: usize) bool {
     if (transaction_addr == 0) return false;
     while (!registered_node_operation_mutex.tryLock()) std.atomic.spinLoopHint();
     defer registered_node_operation_mutex.unlock();
-    for (registered_node_operations) |entry| {
+    for (&registered_node_operations) |*entry| {
         if (entry.state == .live and entry.final_admission_txn_addr == transaction_addr)
             return true;
     }
@@ -22897,7 +22903,7 @@ test "B3-0.2 registered node operation registry bounds capacity and normalizes p
 
     next_registered_node_operation_id = std.math.maxInt(u64);
     try std.testing.expectError(error.Busy, reserveRegisteredNodeOperation(lookup));
-    for (registered_node_operations) |entry|
+    for (&registered_node_operations) |*entry|
         try std.testing.expectEqual(RegisteredNodeOperationEntry.State.empty, entry.state);
 }
 

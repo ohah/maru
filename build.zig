@@ -5482,6 +5482,18 @@ pub fn build(b: *std.Build) void {
     run_kitty_media_wiring_tests.addArg("--maru-expect-tests=3");
     run_kitty_media_wiring_tests.setCwd(b.path("."));
     boundary_step.dependOn(&run_kitty_media_wiring_tests.step);
+    // client_slot 의 4096 항목 레지스트리를 값으로 순회하는 `for` 가 되살아나지 않게(192 KiB memcpy — 프로파일로만 보인다).
+    const client_slot_scan_boundary_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/client_slot_scan_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_client_slot_scan_boundary_tests = b.addRunArtifact(client_slot_scan_boundary_tests);
+    run_client_slot_scan_boundary_tests.addArg("--maru-expect-tests=1");
+    run_client_slot_scan_boundary_tests.setCwd(b.path("."));
+    boundary_step.dependOn(&run_client_slot_scan_boundary_tests.step);
     const debug_trace_alloc_wiring_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/debug_trace_alloc_wiring.zig"),

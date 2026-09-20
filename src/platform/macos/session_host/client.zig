@@ -594,6 +594,91 @@ test "client screen assembler yields between split snapshot chunks and resumes b
     try testing.expect(client.screen_inbox.partial_batch == null);
 }
 
+/// `pollReadable` 이 실제로 시스템콜을 했는지 세는 판정자용 계수기 — 제품에서는 0 비용(atomic add 하나).
+var poll_syscalls_for_test: std.atomic.Value(u64) = .init(0);
+
+test "poll 프레임 캐시: 같은 프레임의 두 번째 «비었나» 는 시스템콜을 안 하고, 프레임이 넘어가면 다시 묻고, 데이터가 오면 읽는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var client = Client{ .allocator = allocator, .fd = fds[0], .host_id = 1, .parser = framing.FrameParser.init(allocator) };
+    defer client.deinit();
+    resetUiFrameStampForTest();
+    defer resetUiFrameStampForTest();
+
+    // (0) 도장이 0(프레임 루프 없음)이면 캐시가 안 켜진다 — 매번 묻는다.
+    poll_syscalls_for_test.store(0, .monotonic);
+    try testing.expect((try client.readStreamBatch(7)) == null);
+    try testing.expect((try client.readStreamBatch(7)) == null);
+    try testing.expectEqual(@as(u64, 2), poll_syscalls_for_test.load(.monotonic));
+
+    // (1) 프레임 1: 첫 질문은 poll, 같은 프레임의 둘째·셋째는 poll 없이 «없음».
+    advanceUiFrameStamp();
+    poll_syscalls_for_test.store(0, .monotonic);
+    try testing.expect((try client.readStreamBatch(7)) == null);
+    try testing.expect((try client.readStreamBatch(7)) == null);
+    try testing.expect((try client.readStreamBatch(7)) == null);
+    try testing.expectEqual(@as(u64, 1), poll_syscalls_for_test.load(.monotonic));
+
+    // (2) 프레임 2: 다시 묻는다(프레임이 바뀌면 캐시가 만료된다).
+    advanceUiFrameStamp();
+    try testing.expect((try client.readStreamBatch(7)) == null);
+    try testing.expectEqual(@as(u64, 2), poll_syscalls_for_test.load(.monotonic));
+
+    // (3) 프레임 3: «없음» 을 캐시한 뒤 데이터가 오면 — 같은 프레임에서는 못 본다(설계: 다음 프레임에 본다). 상한은
+    //     프레임 하나이고, 지금도 프레임 경계에서 같은 창이 있다.
+    advanceUiFrameStamp();
+    try testing.expect((try client.readStreamBatch(7)) == null);
+    const batch_bytes = try framing.encodeFrame(allocator, .{ .kind = .snapshot_chunk, .stream_id = 7, .flags = protocol.Flags.end_stream }, "x");
+    defer allocator.free(batch_bytes);
+    try socket_server.writeAll(fds[1], batch_bytes);
+    poll_syscalls_for_test.store(0, .monotonic);
+    try testing.expect((try client.readStreamBatch(7)) == null); // 캐시 — poll 0
+    try testing.expectEqual(@as(u64, 0), poll_syscalls_for_test.load(.monotonic));
+    advanceUiFrameStamp();
+    const batch = (try client.readStreamBatch(7)).?; // 다음 프레임: 읽힌다
+    defer batch.deinit();
+    try testing.expectEqualStrings("x", batch.bytes);
+    // (4) «있음» 은 캐시되지 않는다 — 읽은 직후 같은 프레임의 다음 질문은 실제로 묻는다(그리고 비어 있다).
+    poll_syscalls_for_test.store(0, .monotonic);
+    try testing.expect((try client.readStreamBatch(7)) == null);
+    try testing.expectEqual(@as(u64, 1), poll_syscalls_for_test.load(.monotonic));
+}
+
+test "poll 프레임 캐시 [적대·attach]: 같은 프레임 안에서 자며 기다리는 snapshot 읽기는 캐시에 막히지 않는다" {
+    // 실측된 회귀(2026-09-20): 캐시 첫 판은 `readSnapshotWithIo` 의 20 ms × 250 회 재시도 루프에 «없음» 을 계속
+    // 답해 attach 가 통째로 죽었다. 여기서는 스냅샷이 «늦게»(다른 스레드가 60 ms 뒤에) 도착하게 하고, 프레임 도장은
+    // 그동안 안 움직인다 — 그래도 읽혀야 한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var client = Client{ .allocator = allocator, .fd = fds[0], .host_id = 1, .parser = framing.FrameParser.init(allocator) };
+    defer client.deinit();
+    resetUiFrameStampForTest();
+    defer resetUiFrameStampForTest();
+    advanceUiFrameStamp();
+    // 같은 프레임에서 먼저 한 번 «없음» 을 캐시해 둔다 — 회귀가 나던 정확한 상태.
+    try testing.expect((try client.readStreamBatch(7)) == null);
+
+    const Late = struct {
+        fn run(fd: c.fd_t, a: std.mem.Allocator) void {
+            _ = usleepMs(60);
+            const bytes = framing.encodeFrame(a, .{ .kind = .snapshot_chunk, .stream_id = 7, .flags = protocol.Flags.end_stream }, "late") catch return;
+            defer a.free(bytes);
+            socket_server.writeAll(fd, bytes) catch {};
+        }
+    };
+    const t = try std.Thread.spawn(.{}, Late.run, .{ fds[1], allocator });
+    defer t.join();
+    const bytes = try client.readSnapshot(7);
+    defer allocator.free(bytes);
+    try testing.expectEqualStrings("late", bytes);
+}
+
 test "CR3a-2b1 buffered batch는 pending charge를 transferred charge로 exact 이동한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
@@ -6846,6 +6931,12 @@ pub const Client = struct {
     // async full-state를 하나라도 수용하지 못하면 server subscription base는 이미 전진했을 수 있다. 그 뒤 같은 socket을
     // 계속 쓰면 어떤 shared stream이 누락됐는지 복구할 수 없으므로 connection 전체를 poison/close한다.
     unusable: bool = false,
+    /// 이 소켓이 **비어 있다**고 마지막으로 확인한 UI 프레임(`ui_frame_stamp`). 같은 프레임 안에서는 다시 묻지 않는다 —
+    /// host 하나의 Client 를 그 host 의 runtime 전부가 공유하므로 32 세션이면 프레임마다 같은 fd 에 같은 질문을 16 번
+    /// (`max_owners_per_frame`) 했고, macOS 의 `poll` 은 호출당 10 µs 라 그것이 idle 앱 메인 스레드 비용의 60% 였다
+    /// (2026-09-20 ktrace·sample 실측 — 같은 프레임 안 연속 질문의 간격 중앙값 38 µs, 답이 바뀔 틈이 없다).
+    /// «있음» 은 기록하지 않는다 — 읽고 나면 비었을 수 있으니 다음 runtime 은 다시 묻는다. 0 은 «기록 없음».
+    socket_empty_at_frame: u64 = 0,
     /// 최초 connection poison만 보존한다. 후속 EOF/cleanup 실패는 원인을 덮지 않는다.
     first_poison_reason: ?client_poison.ConnectionReason = null,
     /// 최초 reason과 같은 held operation에서 게시되는 correlation이다. sequence 0은 아직 미게시 상태다.
@@ -11334,6 +11425,11 @@ pub const Client = struct {
                     }
                     attempts += 1;
                     _ = usleepMs(20);
+                    // **한 프레임 안에서 자며 재시도하는 유일한 제품 루프다.** 프레임 캐시(`socket_empty_at_frame`)는
+                    // 「같은 프레임 = 같은 순간」을 전제하는데 여기서는 20 ms 가 흘렀다 — 지우지 않으면 첫 «없음» 이
+                    // 250 회 재시도 내내 그대로 답해 attach 가 `read_timeout` 으로 죽는다(2026-09-20 실측: 32 세션 중
+                    // 3 개만 붙고 나머지가 끊겼다 — 호스트 로그 `rt=3`).
+                    self.socket_empty_at_frame = 0;
                 },
             }
         }
@@ -13989,7 +14085,7 @@ pub const Client = struct {
             // enter the socket's 5s blocking read timeout on the UI frame loop.
             const count = switch (io) {
                 .polling => blk: {
-                    if (!pollReadable(self.fd)) return null;
+                    if (!pollReadableThisFrame(self)) return null;
                     const n = c.read(self.fd, &buf, buf.len);
                     if (n < 0) {
                         if (posix.errno(n) == .INTR) continue; // 시그널 인터럽트는 재시도.
@@ -15878,6 +15974,7 @@ const client_source_schema_field_allowlist = [_][]const u8{
     "parser",
     "ownership",
     "unusable",
+    "socket_empty_at_frame",
     "first_poison_reason",
     "first_incident_id",
     "incident_repeat_key",
@@ -21184,9 +21281,43 @@ test "client ended event replaces same-stream metadata at exact event cap" {
     );
 }
 
+/// UI 프레임 도장. `RemoteTermBackend.maintenanceEventTick` 이 tick 마다 하나 올린다(`advanceUiFrameStamp`). 프레임
+/// 루프가 없는 경로(CLI·판정자)는 0 에 머물고, 그때 `pollReadableThisFrame` 은 언제나 실제로 묻는다 — 도장이 안 움직이면
+/// 「같은 프레임」 판정이 성립하지 않으므로 캐시가 켜지지 않는다(안전한 기본값).
+var ui_frame_stamp: std.atomic.Value(u64) = .init(0);
+
+/// 프레임 하나가 시작됐다. 메인 스레드가 부른다.
+pub fn advanceUiFrameStamp() void {
+    _ = ui_frame_stamp.fetchAdd(1, .monotonic);
+}
+
+/// 판정자 전용 — 도장을 0 으로 되돌려 캐시를 끈다(다른 판정자에 새지 않게).
+pub fn resetUiFrameStampForTest() void {
+    if (!builtin.is_test) @compileError("test-only");
+    ui_frame_stamp.store(0, .monotonic);
+}
+
+/// 판정자 전용 — 지금 도장.
+pub fn uiFrameStampForTest() u64 {
+    if (!builtin.is_test) @compileError("test-only");
+    return ui_frame_stamp.load(.monotonic);
+}
+
+/// `pollReadable` 에 **프레임 캐시**를 얹는다: 이 프레임에 이미 «비어 있음» 이었으면 안 묻는다(`socket_empty_at_frame`).
+/// `pumpScreen` 의 polling 읽기 한 곳만 쓴다 — `pollReadableOrTerminal` 은 peer 종료를 새 TX 보다 먼저 봐야 하는 자리라
+/// 캐시하지 않는다.
+fn pollReadableThisFrame(self: *Client) bool {
+    const frame = ui_frame_stamp.load(.monotonic);
+    if (frame != 0 and self.socket_empty_at_frame == frame) return false;
+    if (pollReadable(self.fd)) return true;
+    self.socket_empty_at_frame = frame;
+    return false;
+}
+
 /// 소켓에 읽을 데이터가 즉시 있는지 논블로킹 확인한다(timeout 0). `readStreamBatch`가 배치 첫 frame에서 idle이면 곧장
 /// 빠져나오게 한다(blocking read로 recv timeout까지 매달리지 않음 — socket_server serveConnection의 poll gate와 대칭).
 fn pollReadable(fd: c.fd_t) bool {
+    if (builtin.is_test) _ = poll_syscalls_for_test.fetchAdd(1, .monotonic);
     var fds = [_]c.pollfd{.{ .fd = fd, .events = c.POLL.IN, .revents = 0 }};
     const rc = c.poll(&fds, 1, 0);
     if (rc <= 0) return false; // EINTR/timeout/오류 → 없음으로 취급(다음 tick에 재확인).

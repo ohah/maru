@@ -383,7 +383,7 @@ TextMate, git staging, formatter는 LSP의 선행 조건이 아니다. 초기 sy
 | **신뢰** | 파일을 열어 서버가 필요하고 PATH 에 있으면 **confirm 모달**: 「이 저장소에서 ‹서버›를 실행할까요? 서버는 저장소의 설정·빌드를 읽고 실행할 수 있습니다」 — 허용/거부. 답은 `~/.config/maru/lsp-trust`(줄마다 `allow\t‹root›` / `deny\t‹root›`)에 **root 별로** 기억. 거부하면 그 root 에서는 안 묻고 안 띄운다 — 상태바 항목을 누르면 다시 묻는다 | §8.1 「trusted workspace 확인」. zls 는 build_on_save 로 `zig build`(빌드 스크립트 실행), TS 서버는 node_modules 플러그인 — 저장소를 열기만 해도 코드가 도는 것을 사용자가 알고 허락해야 한다. 거부를 기억하는 이유는 「열 때마다 묻는 모달」이 곧 사용자를 허용으로 몰기 때문 |
 | **root** | 그 Term 의 문서가 속한 **워크스페이스 root**(파일 트리의 root — `withinNavRoot` 가 쓰는 그것). 서버는 `(root, 언어)` 마다 하나. root 밖 문서는 서버를 안 띄운다 | §8.2 「root 밖 URI」 규칙의 전제 — 경계가 root 다 |
 | **상태바** | 새 항목 `editor_lsp`(편집기 묶음, `editor_degraded` 바로 뒤 — 저하 계열이라 앞쪽): 「‹서버› 없음 — 설치」(클릭 → 새 탭 + 명령 입력) · 「‹서버› 묻는 중」 · 「‹서버› 시작 중」 · 「‹서버›」(연결) · 「‹서버› 실패 — 다시」(클릭 → 재시작) · 「‹서버› 거부됨 — 다시 묻기」(클릭 → 프롬프트). 언어에 서버 이름표가 없으면 항목 없음 | layering §2.2 「조용히 줄어들면 버그로 읽는다」. §8.1a 흐름 2·3·4 |
-| **설치 안내** | 클릭 → `newTab` + `sendTextAsKeys(명령)` — **Enter 는 안 보낸다**. 명령: `brew install zls` · `brew install llvm`(clangd — Xcode 가 있으면 이미 `/usr/bin/clangd`) · `npm i -g typescript-language-server typescript` · `rustup component add rust-analyzer` · `npm i -g pyright` · `go install golang.org/x/tools/gopls@latest` | §8.1a 「입력까지만 하고 실행하지 않는 것이 경계다」 |
+| **설치 안내** | 클릭 → `newTab` + `sendTextAsKeys(명령)` — **Enter 는 안 보낸다**. 명령: `brew install zls` · `brew install llvm`(clangd — Xcode 가 있으면 이미 `/usr/bin/clangd`) · `npm i -g typescript-language-server typescript@5` · `rustup component add rust-analyzer` · `npm i -g pyright` · `go install golang.org/x/tools/gopls@latest` | §8.1a 「입력까지만 하고 실행하지 않는 것이 경계다」 |
 | **위치 인코딩** | `initialize` 에 `general.positionEncodings: ["utf-8", "utf-16"]`. 서버가 `utf-8` 을 고르면 byte 그대로, 아니면(기본 `utf-16`) 줄 안에서 UTF-16 code unit 을 세어 byte 로 옮긴다 | LSP 3.17 `positionEncoding`. clangd 는 utf-8 을 받아들이고 zls·tsserver 는 utf-16 만 — 둘 다 있어야 한다 |
 | **진단 합치기** | `publishDiagnostics` 의 `uri` 가 열린 문서와 같고 `version`(있으면)이 지금 revision 과 같을 때만 받는다 — 아니면 버린다(§5 「revision 으로 폐기」). 그 문서의 `.lsp` 항목을 **통째로 갈아 끼우고** `.syntax` 는 둔다. `message` 와 `code`(문자열이든 정수든 글자로 — 호버 박스 §8.2b 가 `출처(코드)` 로 낸다)를 실어 온다. severity 1..4 → error·warning·info·hint, 없으면 error. root 밖 uri 는 무시(§8.2). 메시지는 서버 문자열을 **복사**해 든다(표시는 §8.3 호버가 오면) | §5 「출처가 여럿이어도 층은 하나」. 구문 오류와 서버 오류가 같은 줄에 겹치면 둘 다 선다(둘 다 참이다) |
 | **동기화** | `didOpen`(languageId·version=revision·전문) → 편집마다 revision 이 오르면 **그 프레임 끝에 한 번** `didChange`(Full, 최신 전문·version). 문서를 닫으면 `didClose`. 큰 문서(§3.0 상한 넘음)는 안 보낸다 | 프레임당 한 번이면 타이핑 60Hz 에 60 회 전송 — Full 이라 전문 크기 × 60/s. 1 MB 문서면 60 MB/s: **1단의 알려진 대가**(증분 동기화가 2단인 이유). 상한을 넘는 문서는 아예 안 보낸다 |
@@ -895,7 +895,7 @@ labelDetails 가 없다.
 | 축 | 결정 | 근거 |
 | --- | --- | --- |
 | **capability** | `textDocument.semanticTokens{requests: {range: true, full: true}, tokenTypes: 표준 23, tokenModifiers: 표준 10, formats: ["relative"], multilineTokenSupport: false, overlappingTokenSupport: false}`. 서버의 `semanticTokensProvider{legend, range, full}` 를 읽는다 | LSP 3.17 |
-| **요청** | id `10e8+seq`(§8.2a 표에 열 번째 칸). `range` 가 있으면 **보이는 원본 줄 범위 ± 20줄** 을 `semanticTokens/range`, 없으면(clangd) `semanticTokens/full`(delta 는 안 쓴다). 보내기 전 `flushDocument`; 요청은 그 문서의 `editor_lsp_version` 을 단다 | §5 「보이는 범위만」·② |
+| **요청** | id `10e8+seq`(§8.2a 표에 열 번째 칸). **capability 로 갈린다**(시도하고 물러나는 폴백이 아니다 — `initialize` 응답의 `range`/`full` 로 처음부터 정한다): `range` 를 냈으면 **보이는 원본 줄 범위 ± 20줄** 을 `semanticTokens/range`, 안 냈으면(clangd) `semanticTokens/full`(delta 는 안 쓴다). 보내기 전 `flushDocument`; 요청은 그 문서의 `editor_lsp_version` 을 단다 | §5 「보이는 범위만」·② |
 | **시점** | 프레임마다 판정: 서버 ready·provider 있음·요청 없음·(토큰의 version ≠ 문서 version **또는** 보이는 범위가 덮인 범위 밖) **그리고 마지막 편집 뒤 120 ms** 가 지났을 때. 한 번에 하나, 대기 중 바뀌면 `dirty` 로 응답 뒤 한 번 더 | 타이핑마다 왕복하지 않는다(VS Code 도 지연) |
 | **응답** | 그 요청의 version 과 지금 version 이 다르면 **버린다**(다시 묻는다). `-32801`(content modified)·오류·`null` 도 버리고 다시. `data` 를 relative 로 풀어 byte 스팬으로 — legend 이름을 `Role` 로 옮기고 모르는 것·무색 것은 뺀다. **상한 50,000 토큰** — 넘으면 앞부분만 | ② |
 | **매핑(코드가 소유 — `session/lsp/semantic.zig`)** | `type·class·struct·enum·interface·typeParameter·builtinType·enumMember` → `type_name` · `function·method·macro` → `function` · `keyword·modifier·builtinAttribute?` → `keyword` · `comment` → `comment` · `string·character·regexp·escapeSequence` → `string` · `number·boolean` → `number` · `property·event` → `property` · `decorator·attribute·derive` → `attribute` · `operator` → `punctuation` · `variable·parameter·namespace·label·lifetime·그 밖` → 무색(1층이 그대로). 수식자는 첫 조각에서 안 쓴다 | §5 「다대일·색이 상한」 — tree-sitter 표(`syntax_capture`)와 같은 방향 |
@@ -908,7 +908,11 @@ labelDetails 가 없다.
 2층 macro → function 색)·구조체 필드 `x`(1층 field → 2층 property), Rust 표본(`use std::collections::HashMap` · `fn add(a: i32…)`)은 tree-sitter 쿼리가 이미
 타입·함수·필드를 가려 **바뀐 자리가 0**이었다. 2층의 값은 TS/JS 처럼 1층이 class 와 variable 을 못 가르는 언어·매크로·typedef 이름의 사용처에 있다.
 ② range 요청의 끝은 `{line: hi+1, character: 0}`(반열림) · `last_edit_ms == 0` 은 「아직 편집이 없다」라 조용 시계를 안 본다 · 응답이 오류면 조용 시계를 되감아
-곧바로 되묻지 않는다. ③ 색 배열은 렌더 축이라 창 앞 줄만큼 빈 슬롯이 앞에 선다(판정자가 `first_line` 을 뺀 첨자로 읽다 틀렸다).
+곧바로 되묻지 않는다. ③ 색 배열은 렌더 축이라 창 앞 줄만큼 빈 슬롯이 앞에 선다(판정자가 `first_line` 을 뺀 첨자로 읽다 틀렸다). ④ **TS 실측(typescript-language-server 6.0 + typescript@5)**:
+`range`·`full` 둘 다 내고 legend 에 표준 밖 `member`(메서드 — function 으로 매핑). 표본(class·enum·enumMember·console.log)에서도 **바뀐 자리 0** — 이유가 다르다: 2층이
+`enumMember → property`·`member → function` 을 냈지만 우리 팔레트에서 **property 와 function 이 같은 색(bright blue)**이고 `variable` 은 무색이라 구분이 색에서 사라진다.
+색 11개 상한(§5.3)의 대가다 — 2층의 값을 보이게 하려면 팔레트 분리(별도 결정)가 먼저다. ⑤ `npm i -g … typescript` 는 이제 typescript@7(네이티브, `tsserver.js` 없음)을
+받아 typescript-language-server 6.0 이 `initialize` 에서 죽는다 → 설치 명령을 `typescript@5` 로 고정했다(§8.1a·`servers.zig`).
 
 **관측점**: `LSJ15`(순수: capability·provider 파싱·요청 둘·id 칸) · `SEM1`(순수: relative 풀기·legend 매핑·모르는 종류 무색·상한·인코딩 utf-16·legend 없는
 provider) · `SEM2`(순수: 편집 밀기 — 앞·겹침·뒤) · `ES40`(순수: 1층+2층 병합 — 겹친 자리만 2층, 꼬리 1층 유지) · `SMT1`(제품 경계: 가짜 서버 — range 요청·

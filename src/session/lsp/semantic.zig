@@ -34,15 +34,26 @@ pub const Caps = struct {
 /// LSP 종류 이름 → 우리 색(§8.2i 표). 모르는 것·의도적으로 무색인 것(`variable`·`parameter`·`namespace`…)은 `null`.
 pub fn roleForType(name: []const u8) ?Role {
     const table = .{
-        .{ "type", Role.type_name },        .{ "class", Role.type_name },            .{ "struct", Role.type_name },
-        .{ "enum", Role.type_name },        .{ "interface", Role.type_name },        .{ "typeParameter", Role.type_name },
-        .{ "builtinType", Role.type_name }, .{ "enumMember", Role.property },        .{ "function", Role.function },
-        .{ "method", Role.function },       .{ "macro", Role.function },             .{ "keyword", Role.keyword },
-        .{ "modifier", Role.keyword },      .{ "comment", Role.comment },            .{ "string", Role.string },
-        .{ "character", Role.string },      .{ "regexp", Role.string },              .{ "escapeSequence", Role.string },
-        .{ "number", Role.number },         .{ "boolean", Role.number },             .{ "property", Role.property },
-        .{ "event", Role.property },        .{ "decorator", Role.attribute },        .{ "attribute", Role.attribute },
-        .{ "derive", Role.attribute },      .{ "builtinAttribute", Role.attribute }, .{ "operator", Role.punctuation },
+        .{ "type", Role.type_name },        .{ "class", Role.type_name },     .{ "struct", Role.type_name },
+        .{ "enum", Role.type_name },        .{ "interface", Role.type_name }, .{ "typeParameter", Role.type_name },
+        .{ "builtinType", Role.type_name }, .{ "enumMember", Role.property }, .{ "function", Role.function },
+        .{ "method", Role.function },       .{ "macro", Role.function },      .{ "keyword", Role.keyword },
+        .{ "member", Role.function }, // typescript-language-server 의 표준 밖 이름(메서드) — 실측 2026-09-20
+        .{ "modifier", Role.keyword },
+        .{ "comment", Role.comment },
+        .{ "string", Role.string },
+        .{ "character", Role.string },
+        .{ "regexp", Role.string },
+        .{ "escapeSequence", Role.string },
+        .{ "number", Role.number },
+        .{ "boolean", Role.number },
+        .{ "property", Role.property },
+        .{ "event", Role.property },
+        .{ "decorator", Role.attribute },
+        .{ "attribute", Role.attribute },
+        .{ "derive", Role.attribute },
+        .{ "builtinAttribute", Role.attribute },
+        .{ "operator", Role.punctuation },
     };
     inline for (table) |entry| {
         if (std.mem.eql(u8, name, entry[0])) return entry[1];

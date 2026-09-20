@@ -2,8 +2,11 @@
 //! 파생한다. 시스템 light/dark가 아니라 `ResolvedTheme`의 ANSI 16색 + fg/bg를 각 syntax 역할에 매핑해, 편집기
 //! 색이 옆 터미널과 같은 팔레트를 쓴다(사용자 결정 2026-07-22). 순수 함수라 헤드리스 테스트로 매핑을 고정한다.
 //!
-//! 매핑은 흔한 터미널-기반 하이라이트 관례를 따른다: keyword=magenta, string=green, number=yellow,
-//! comment/punctuation=fg를 bg 쪽으로 흐린 dim, function=blue, property/type=cyan, tag=red, invalid=bright red.
+//! 매핑은 흔한 터미널-기반 하이라이트 관례를 따른다: keyword=bright magenta, string=bright green, number=bright yellow,
+//! comment/punctuation=fg를 bg 쪽으로 흐린 dim, function=bright blue, property=white(7), type=bright cyan, attribute=magenta(5),
+//! tag/invalid=bright red. **property·attribute 는 2026-09-21 에 function·keyword 와 자리를 갈랐다**(visual-mapping §5.3) — LSP 2층이 낸
+//! `enumMember → property`·`member → function` 구분이 같은 색이라 화면에 안 나타났다. 역할 수는 그대로 11 — 자리만 다르다. **같은 색상 계열의
+//! normal/bright 짝(cyan 6/14 · yellow 3/11)은 라이트 배경에서 대비 보정이 bright 를 어둡게 내려 겹친다**(실측 RGB 거리 18·4) — 그래서 다른 계열로 갔다.
 
 const std = @import("std");
 const color = @import("../color.zig");
@@ -99,12 +102,12 @@ pub fn fromTheme(theme: appearance.ResolvedTheme) SyntaxColors {
         .string = roleColor(theme, .string, ansi(theme, 10), bg_lum, main), // bright green
         .number = roleColor(theme, .number, ansi(theme, 11), bg_lum, main), // bright yellow
         .comment = roleColor(theme, .comment, mix(fg, bg, 48), bg_lum, dim), // fg→bg dim
-        .property = roleColor(theme, .property, ansi(theme, 12), bg_lum, main), // bright blue(JSON 키 등)
+        .property = roleColor(theme, .property, ansi(theme, 7), bg_lum, main), // white(7) — function(12)과 갈린다(§5.3 2026-09-21; cyan(6)은 라이트 배경에서 type(14)과 겹쳤다)
         .type_name = roleColor(theme, .type_name, ansi(theme, 14), bg_lum, main), // bright cyan
         .function = roleColor(theme, .function, ansi(theme, 12), bg_lum, main), // bright blue
         .punctuation = roleColor(theme, .punctuation, mix(fg, bg, 25), bg_lum, dim), // fg 살짝 dim
         .tag = roleColor(theme, .tag, ansi(theme, 9), bg_lum, main), // bright red
-        .attribute = roleColor(theme, .attribute, ansi(theme, 13), bg_lum, main), // bright magenta
+        .attribute = roleColor(theme, .attribute, ansi(theme, 5), bg_lum, main), // magenta(5) — keyword(13)와 갈린다(§5.3 2026-09-21; yellow(3)은 라이트 배경에서 number(11)와 겹쳤다)
         .invalid = roleColor(theme, .invalid, ansi(theme, 9), bg_lum, main), // bright red
     };
 }
@@ -499,4 +502,46 @@ test "SC7 명시한 색은 보정하지 않고, 파생은 보정한다" {
     light.foreground = .{ .r = 0x30, .g = 0x30, .b = 0x30 };
     const bright_magenta = color.xterm256(13);
     try std.testing.expect(!std.meta.eql(bright_magenta, fromTheme(light).keyword));
+}
+
+test "SC8 property 는 function 과, attribute 는 keyword 와 갈린다 — 기본 팔레트·다크/라이트 배경에서 RGB 거리 ≥ 100 이고 대비 ≥ 4.0; 같은 계열(type·number)과도 갈린다 (visual-mapping §5.3, 2026-09-21)" {
+    var dark: appearance.ResolvedTheme = undefined;
+    dark.foreground = .{ .r = 0xe8, .g = 0xe8, .b = 0xe8 };
+    dark.background = .{ .r = 0x10, .g = 0x10, .b = 0x10 };
+    dark.palette = .{null} ** 16;
+    dark.syntax = .{null} ** theme_config.syntax_role_count;
+    dark.selection = .{ .r = 0x33, .g = 0x44, .b = 0x55 };
+    var light = dark;
+    light.foreground = .{ .r = 0x20, .g = 0x20, .b = 0x20 };
+    light.background = .{ .r = 0xff, .g = 0xff, .b = 0xff };
+    const dist = struct {
+        fn f(a: color.Rgb, b: color.Rgb) f32 {
+            const dr: f32 = @as(f32, @floatFromInt(a.r)) - @as(f32, @floatFromInt(b.r));
+            const dg: f32 = @as(f32, @floatFromInt(a.g)) - @as(f32, @floatFromInt(b.g));
+            const db: f32 = @as(f32, @floatFromInt(a.b)) - @as(f32, @floatFromInt(b.b));
+            return @sqrt(dr * dr + dg * dg + db * db);
+        }
+    }.f;
+    inline for (.{ dark, light }) |t| {
+        const c = fromTheme(t);
+        const bg = color.relativeLuminance(t.background);
+        try testing.expect(dist(c.property, c.function) >= 100);
+        try testing.expect(dist(c.property, c.type_name) >= 100);
+        try testing.expect(dist(c.attribute, c.keyword) >= 100);
+        try testing.expect(dist(c.attribute, c.number) >= 100);
+        try testing.expect(dist(c.property, c.attribute) >= 100); // 새 자리 둘끼리도(적대적 A8: 한 자리로 몰리면 안 된다)
+        try testing.expect(dist(c.property, c.keyword) >= 100);
+        try testing.expect(color.contrastRatio(color.relativeLuminance(c.property), bg) >= 4.0);
+        try testing.expect(color.contrastRatio(color.relativeLuminance(c.attribute), bg) >= 4.0);
+    }
+    // 자리 자체를 못 박는다 — 팔레트 7·5 를 바꾸면 그 역할이 따라온다(다른 자리는 안 따라온다).
+    var o = dark;
+    o.palette[7] = .{ .r = 0xa0, .g = 0xa0, .b = 0xa0 };
+    o.palette[5] = .{ .r = 0xa0, .g = 0x10, .b = 0xa0 };
+    const oc = fromTheme(o);
+    const dc = fromTheme(dark);
+    try testing.expect(!std.meta.eql(oc.property, dc.property));
+    try testing.expect(!std.meta.eql(oc.attribute, dc.attribute));
+    try testing.expect(std.meta.eql(oc.function, dc.function));
+    try testing.expect(std.meta.eql(oc.keyword, dc.keyword));
 }

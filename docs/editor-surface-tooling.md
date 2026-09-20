@@ -911,7 +911,7 @@ labelDetails 가 없다.
 곧바로 되묻지 않는다. ③ 색 배열은 렌더 축이라 창 앞 줄만큼 빈 슬롯이 앞에 선다(판정자가 `first_line` 을 뺀 첨자로 읽다 틀렸다). ④ **TS 실측(typescript-language-server 6.0 + typescript@5)**:
 `range`·`full` 둘 다 내고 legend 에 표준 밖 `member`(메서드 — function 으로 매핑). 표본(class·enum·enumMember·console.log)에서도 **바뀐 자리 0** — 이유가 다르다: 2층이
 `enumMember → property`·`member → function` 을 냈지만 우리 팔레트에서 **property 와 function 이 같은 색(bright blue)**이고 `variable` 은 무색이라 구분이 색에서 사라진다.
-색 11개 상한(§5.3)의 대가다 — 2층의 값을 보이게 하려면 팔레트 분리(별도 결정)가 먼저다. ⑤ `npm i -g … typescript` 는 이제 typescript@7(네이티브, `tsserver.js` 없음)을
+색 11개 상한(§5.3)의 대가였다 — **2026-09-21 자리를 갈랐다**(property = ANSI 7, attribute = ANSI 5; visual-mapping §5.3): 역할은 그대로 11개. ⑤ `npm i -g … typescript` 는 이제 typescript@7(네이티브, `tsserver.js` 없음)을
 받아 typescript-language-server 6.0 이 `initialize` 에서 죽는다 → TS 는 서버 **후보 셋**(§8.2a 「서버 찾기」: `tsgo --lsp --stdio` → `typescript-language-server --stdio` →
 `tsc --lsp --stdio`)으로 갈고, 설치 명령은 `@typescript/native-preview` 를 앞세운다. 실측: `tsgo --lsp --stdio` 와 typescript@7 의 `tsc --lsp --stdio` 는 같은 서버로
 표준 legend 22 종류(`member` 없음)·`range`·`full` 을 낸다.

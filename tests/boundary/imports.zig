@@ -3201,8 +3201,11 @@ test "CR3a-2c3b B3-0a response provenance has one strict production path" {
         .{ .expected = 1, .source = "const entry = registered_node_operations[index];" },
         .{ .expected = 3, .source = "&registered_node_operations[operation.registry_index]" },
         .{ .expected = 1, .source = "const entry = registered_node_operations[operation.registry_index];" },
-        // Includes the bounded production fail-stop scan and the existing test oracle scan.
-        .{ .expected = 2, .source = "for (registered_node_operations) |entry|" },
+        // Includes the bounded production fail-stop scan and the existing test oracle scan. **By pointer** —
+        // iterating the array by value copies the whole 4096-entry table onto the stack first
+        // (`tests/client_slot_scan_boundary.zig`, 2026-09-20 profile: that memcpy was the main-thread top leaf).
+        .{ .expected = 2, .source = "for (&registered_node_operations) |*entry|" },
+        .{ .expected = 0, .source = "for (registered_node_operations) |" },
         // 제품 alias preflight와 closed hostile table이 같은 backing 시작 주소를 각각 고정한다.
         .{ .expected = 2, .source = "@intFromPtr(&registered_node_operations)" },
         .{ .expected = 1, .source = "@sizeOf(@TypeOf(registered_node_operations))" },

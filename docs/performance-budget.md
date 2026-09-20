@@ -324,6 +324,22 @@ wall time과 분리된 raw process CPU 25ms다. 이 값은 첫 RED 최대 4.926m
 nominal 1초 창에서 한 코어 2.5%를 넘는 idle 회귀를 닫는다. registry/socket 값은 단순 관측 필드가 아니라 최초
 실측이 기각한 원인의 재도입을 막는 hard gate다.
 
+**정정(2026-09-20) — 위 「4,096 registry scan 가설 기각」은 계수기의 사각이 만든 오판이었다.** `registry visit`
+계수기(`client_idle_pump_evidence.recordRegistryVisit`)는 `clientSlotRegistryEntry` **한 루프**만 센다. 실제로 tick 마다
+돌던 스캔은 `beginRegisteredNodeOperation` 안의 다른 `for (client_slot_registry)` 였고, 그 루프는 세지 않았다. 게다가
+그 스캔은 배열을 **값으로** 순회해 컴파일러가 4096 × 48 B = 192 KiB 를 스택으로 memcpy 한 뒤 돌았다 — 32-runtime idle
+ReleaseFast 앱의 메인 스레드 최대 항목이 그 memcpy 였다(`sample` 의 `<deduplicated_symbol>` = `compiler_rt.memcpy`, `nm`
+으로 확정). 포인터 순회로 바꾸자 32 세션 idle 앱 CPU 시간이 전·후 번갈아 3쌍에서 2.7 s → 1.1 s / 40 s(**−60%**),
+활성 32 세션 −44%(#3808). 따라서:
+
+- 「visit exact 0」 게이트는 유효하되 **그것이 보는 루프만** 지킨다. 다른 스캔의 재도입은 `tests/client_slot_scan_boundary.zig`
+  (값 순회 0·포인터 순회 ≥4)가 막는다. 두 게이트를 합쳐야 "스캔이 원인이 아니다" 를 말할 수 있다.
+- 15-runtime 0.31% 는 **그 하네스의 60 프레임** 안에서 맞았을 수 있다 — 세션 수에 비례해 커지는 비용은 15개·60프레임에서
+  작아 보인다. 이 절의 결론을 세션 수를 늘린 실측 없이 일반화하지 않는다.
+- `socket read attempt exact 0` 도 `poll` 은 세지 않는다. 32 세션이면 프레임마다 같은 host 소켓에 «비었나» 를 16번
+  (`max_owners_per_frame`) 물었고, 같은 프레임 안 캐시(#3813)가 그것을 15× 줄였다(ktrace 11,096 → 718 / 10 s). CPU 이득은
+  A/B 로 ≈0.25%p — 「시스템콜 수 × 마이크로벤치 비용」으로 예측한 1%p 의 1/4 이었다. 이득은 A/B 실측으로만 말한다.
+
 실제 AppKit CR6e-a2 v2 반복 artifact는 ReleaseFast 앱 5회 모두 attach 뒤 handshake 출력에서 native handler exact 증가를
 관측했고, handler 진입부터 normal tick의 Metal frame 뒤 screen probe까지 15.528·23.325·23.954·24.151·24.627ms였다.
 다섯 행 모두 60ms 안이며 fd 6→6, child 0, daemon/socket/host artifact cleanup을 함께 통과했다. 이 하위 값은 host가

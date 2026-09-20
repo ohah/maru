@@ -765,20 +765,19 @@ pub const Slot = struct {
         batch_end: bool,
     ) (EnqueueError || error{Stale})!void {
         _ = try self.trackerEntry(key);
-        try self.enqueue(.screen, key.index, bytes, screen_soft_bytes);
-        const tail = (self.chunk_head + self.chunk_len - 1) % max_chunks_per_slot;
-        self.chunks[tail].screen_batch_end = batch_end;
+        try self.enqueue(.screen, key.index, bytes, screen_soft_bytes, batch_end);
     }
 
     pub fn enqueueControl(self: *Slot, bytes: []const u8) EnqueueError!void {
-        return self.enqueue(.control, null, bytes, null);
+        // control 에는 배치 문법이 없다 — 이 값은 `.screen` 에서만 읽힌다.
+        return self.enqueue(.control, null, bytes, null, false);
     }
 
     /// Ownership-transfer variants used by the readiness adapter. On success the slot owns `bytes`;
     /// on error the caller still owns it. This avoids a second full-frame allocation outside the
     /// charged resident queue.
     pub fn enqueueOwnedControl(self: *Slot, bytes: []u8) EnqueueError!void {
-        return self.enqueueOwned(.control, null, bytes, null);
+        return self.enqueueOwned(.control, null, bytes, null, false);
     }
 
     pub fn enqueueOwnedScreen(
@@ -788,7 +787,10 @@ pub const Slot = struct {
     ) (EnqueueError || error{Stale})!void {
         const tracker = (try self.trackerEntry(key)).tracker.?;
         if (tracker.state != .valid) return error.ScreenInvalidated;
-        return self.enqueueOwned(.screen, key.index, bytes, screen_soft_bytes) catch |err| {
+        // 단일 완결 프레임이다(`enqueueScreen` 의 소유권-이전 짝) — 여기서 배치가 끝난다.
+        // 2026-09-20 까지 이 자리가 표식을 안 달아, 제품 호출자가 생기는 순간 `PartialFrame` 이
+        // 되살아날 자리였다.
+        return self.enqueueOwned(.screen, key.index, bytes, screen_soft_bytes, true) catch |err| {
             if (err != error.GlobalLimit) tracker.state = .invalidated;
             return err;
         };
@@ -835,12 +837,21 @@ pub const Slot = struct {
         self.recordPeak();
     }
 
+    /// **`screen_batch_end` 를 받는다 — 붙인 뒤 되짚어 달지 않는다.**
+    ///
+    /// 예전 관례는 「`enqueue` 로 붙인 다음 꼬리 청크의 표식을 손으로 세운다」였다. 그 한 줄을
+    /// 잊으면 화면 청크가 끝 표식 없이 큐에 남고, 압력 회수가 배치 끝을 못 찾아 `PartialFrame` 으로
+    /// **연결을 통째로 닫는다**(그 소켓의 화면 전부가 detach). 2026-09-20 에 그 한 줄을 잊은 자리가
+    /// **둘** 발견됐다 — resize 발행 경로와 `enqueueOwnedScreen`. 잊을 수 있는 구조였다.
+    ///
+    /// 그래서 인자로 올린다. 이제 화면 청크를 붙이는 쪽은 표식을 **고르지 않을 수 없다**.
     fn enqueue(
         self: *Slot,
         class: QueueClass,
         tracker_index: ?usize,
         bytes: []const u8,
         screen_limit: ?usize,
+        screen_batch_end: bool,
     ) EnqueueError!void {
         if (bytes.len == 0) return;
         if (self.chunk_len == max_chunks_per_slot) return error.ChunkLimit;
@@ -874,6 +885,7 @@ pub const Slot = struct {
             .bytes = owned,
             .class = class,
             .screen_tracker_index = tracker_index,
+            .screen_batch_end = screen_batch_end,
         };
         self.chunk_len += 1;
         self.resident_bytes = next_slot;
@@ -884,12 +896,14 @@ pub const Slot = struct {
         self.recordPeak();
     }
 
+    /// `enqueue` 의 소유권-이전 짝. 표식을 받는 이유도 같다(그쪽 주석).
     fn enqueueOwned(
         self: *Slot,
         class: QueueClass,
         tracker_index: ?usize,
         bytes: []u8,
         screen_limit: ?usize,
+        screen_batch_end: bool,
     ) EnqueueError!void {
         if (bytes.len == 0) {
             self.allocator.free(bytes);
@@ -921,6 +935,7 @@ pub const Slot = struct {
             .bytes = bytes,
             .class = class,
             .screen_tracker_index = tracker_index,
+            .screen_batch_end = screen_batch_end,
         };
         self.chunk_len += 1;
         self.resident_bytes = next_slot;
@@ -992,9 +1007,7 @@ pub const Slot = struct {
         }
         for (chunks, 0..) |bytes, index| {
             if (bytes.len == 0) return error.ScreenInvalidated;
-            try self.enqueue(.screen, key.index, bytes, resync_batch_bytes);
-            const tail = (self.chunk_head + self.chunk_len - 1) % max_chunks_per_slot;
-            self.chunks[tail].screen_batch_end = index + 1 == chunks.len;
+            try self.enqueue(.screen, key.index, bytes, resync_batch_bytes, index + 1 == chunks.len);
             added += 1;
         }
         tracker.state = .resync_draining;
@@ -1028,9 +1041,7 @@ pub const Slot = struct {
         }
         for (chunks, 0..) |bytes, index| {
             if (bytes.len == 0) return error.ScreenInvalidated;
-            try self.enqueueOwned(.screen, key.index, bytes, resync_batch_bytes);
-            const tail = (self.chunk_head + self.chunk_len - 1) % max_chunks_per_slot;
-            self.chunks[tail].screen_batch_end = index + 1 == chunks.len;
+            try self.enqueueOwned(.screen, key.index, bytes, resync_batch_bytes, index + 1 == chunks.len);
             added += 1;
         }
         tracker.state = .resync_draining;

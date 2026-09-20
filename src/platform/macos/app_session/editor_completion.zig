@@ -92,7 +92,7 @@ pub const State = struct {
     /// 강조가 이 항목으로 온 시각(ms) — 미해결이면 250 ms 뒤에야 로딩 줄을 세운다.
     docs_since_ms: u64 = 0,
     docs_loading: bool = false,
-    /// 줄이 그 항목의 최종본이다(풀린 뒤 세움) — resolve 가 다시 오면 내린다.
+    /// 줄이 그 항목의 최종본이다(풀린 뒤 세움). resolve 응답에서 내릴 필요는 없다 — 풀리기 전엔 참이 될 수 없다(적대적 2회차 B11: 그 줄은 등가라 뺐다).
     docs_ready: bool = false,
     docs_built: u64 = 0,
     /// resolve(§8.2g-b): 나가 있는 요청의 seq 와 그 항목(`items` 첨자), 확정이 그 응답을 기다리는가와 기다리기 시작한 시각.
@@ -413,7 +413,6 @@ pub fn onResolveResponse(self: *AppSession, seq: u32, result: ?std.json.Value, e
         };
         st.resolved_count += 1;
     };
-    if (st.docs_item == st.resolve_item) st.docs_ready = false; // 패널이 다음 프레임에 갈아 끼운다(§8.2g-d)
     if (st.pending_accept) {
         st.pending_accept = false;
         st.accepted_after_resolve += 1;

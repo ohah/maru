@@ -13691,6 +13691,15 @@ test "CMP6 자동완성 ①-d — 문서 패널: ⌃Space 가 목록이 열려 �
     try testing.expect(s.editor_completion.active and !s.chrome_host.suggest_docs.expanded);
     try testing.expectEqual(@as(usize, 0), completion_client.docsLines(s).len);
     try testing.expectEqualStrings("laz", hl(s));
+    // 접혀 있으면 **풀린 항목이라도** 줄을 세우지 않는다(적대적 2회차 B3 — 미해결일 때만 재면 접힘과 미해결이 겹친다).
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
+        fn f(c: Ctx) bool {
+            return !c.fx.session.editor_completion.resolve_waiting;
+        }
+    }.f));
+    try frame(s, leaf, term);
+    try testing.expectEqual(@as(usize, 0), completion_client.docsLines(s).len);
+    try testing.expectEqual(@as(u64, 0), s.editor_completion.docs_built);
     try pressKey(&fx, .{ .char = ' ' }, .{ .control = true });
     try testing.expect(s.chrome_host.suggest_docs.expanded);
     try testing.expectEqual(@as(u64, 1), s.editor_completion.docs_toggles);
@@ -13718,6 +13727,13 @@ test "CMP6 자동완성 ①-d — 문서 패널: ⌃Space 가 목록이 열려 �
             _ = usleep(2_000);
         }
     }
+    // 풀린 뒤에는 한 번만 세운다 — 프레임을 더 돌려도 `docs_built` 그대로(적대적 2회차 B7).
+    {
+        const built = s.editor_completion.docs_built;
+        try frame(s, leaf, term);
+        try frame(s, leaf, term);
+        try testing.expectEqual(built, s.editor_completion.docs_built);
+    }
     const dl = completion_client.docsLines(s);
     try testing.expect(dl.len >= 15);
     try testing.expectEqualStrings("resolved", dl[0].text);
@@ -13733,10 +13749,22 @@ test "CMP6 자동완성 ①-d — 문서 패널: ⌃Space 가 목록이 열려 �
     try testing.expectEqual(beside.y, panel.y);
     const inside_x: f64 = @floatFromInt(panel.x + 4);
     const inside_y: f64 = @floatFromInt(panel.y + 4);
-    try testing.expect(completion_client.wheel(s, inside_x, inside_y, -3)); // 아래로
+    // **제품 진입점**으로 굴린다(`scrollWheel` — 적대적 3회차 B18: 클라이언트를 직접 부르면 배선을 빼도 초록).
+    s.scrollWheel(-3, 0, false, inside_x, inside_y); // 아래로
     try testing.expectEqual(@as(u32, 1), s.chrome_host.suggest_docs.scroll_rows);
     try testing.expect(!completion_client.wheel(s, @floatFromInt(beside.x + 2), @floatFromInt(beside.y + 2), -3)); // 목록 상자 위는 흘린다
     try testing.expect(s.editor_completion.active); // 흘려도 닫지 않는다
+    // 패널 안 클릭은 삼킨다 — 목록도 패널도 그대로(제품 진입점 `mouse`; 적대적 3회차 B19).
+    s.mouse(1, inside_x, inside_y, 0, 0);
+    try testing.expect(s.editor_completion.active and s.chrome_host.suggest_box.open);
+    try testing.expectEqual(@as(u32, 1), s.chrome_host.suggest_docs.scroll_rows);
+    // 강조가 바뀌면 패널 스크롤은 0 으로(적대적 3회차 B20) — ↑ 로 `laz` 에 갔다가 ↓ 로 돌아온다.
+    try pressKey(&fx, .arrow_up, .{});
+    try frame(s, leaf, term);
+    try testing.expectEqual(@as(u32, 0), s.chrome_host.suggest_docs.scroll_rows);
+    try pressKey(&fx, .arrow_down, .{});
+    try testing.expectEqualStrings("lazy_import", hl(s));
+    try frame(s, leaf, term);
     // ⑶ Esc — 목록과 줄은 닫히고 펼침은 남는다 → 다시 열면 토글 없이 패널이 선다.
     try pressKey(&fx, .escape, .{});
     try testing.expect(!s.editor_completion.active);

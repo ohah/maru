@@ -166,6 +166,33 @@ grep -q '"tool_use_id":"toolu_real"' "$evdir/14.ndjson" || fail "stdout 안의 �
 # id 가 없는 이벤트(`Stop`)는 예전 모양 그대로다 — 4) 가 그것을 본다.
 pass "상한 접기(tool_use_id 보존·검증)"
 
+echo "4d) 상한을 넘긴 PostToolUse(Bash) 에서 hunks 만 잘라내고 changedFiles 는 살린다 (AT3b-2)"
+# `bashEditDiff` 는 `files`(hunks)·`moreFiles`·`changedFiles` 순이다(실측 528/528). hunks 가 상한을 밀어내면
+# 귀속 근거(`changedFiles`)까지 함께 잃으므로 그 절만 잘라낸다. stdout 안의 `\"files\":` 는 이스케이프라 안 걸린다.
+huge6=$(awk 'BEGIN { big=""; for (i = 0; i < 40000; i++) big = big "x"; printf "{\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"Bash\",\"tool_response\":{\"stdout\":\"\\\"files\\\":[1]\",\"bashEditDiff\":{\"files\":[{\"filePath\":\"/r/a\",\"hunks\":[{\"lines\":[\"+%s\"]}]}],\"moreFiles\":2,\"changedFiles\":[\"/r/a\",\"/r/b c\"]}},\"tool_use_id\":\"toolu_big\"}", big }')
+printf '%s\n' "$huge6" | env MARU_HOOK_INSTANCE=$inst MARU_HOOK_PANE=15 /bin/sh -c "$cmd" || fail "상한 경로가 0 으로 끝나지 않았다"
+line15=$(cat "$evdir/15.ndjson")
+case "$line15" in *'"bashEditDiff":{"moreFiles":2,"changedFiles":["/r/a","/r/b c"]}'*) ;; *) fail "changedFiles 가 살아남지 않았다: $(printf '%s' "$line15" | cut -c1-200)" ;; esac
+case "$line15" in *'"hunks"'*) fail "hunks 가 남았다" ;; esac
+case "$line15" in *'"tool_use_id":"toolu_big"'*) ;; *) fail "id 를 잃었다" ;; esac
+case "$line15" in *'"stdout":"\"files\":[1]"'*) ;; *) fail "stdout 의 이스케이프된 글자를 건드렸다" ;; esac
+[ "$(wc -c < "$evdir/15.ndjson")" -lt 400 ] || fail "잘라낸 뒤에도 상한 근처다"
+# **키 순서가 다르면 지어내지 않는다** — 잘라낸 결과에 `changedFiles` 가 없으면 이름+id 로 접는다.
+huge7=$(awk 'BEGIN { big=""; for (i = 0; i < 40000; i++) big = big "x"; printf "{\"hook_event_name\":\"PostToolUse\",\"tool_response\":{\"bashEditDiff\":{\"files\":[{\"lines\":[\"+%s\"]}],\"changedFiles\":[\"/r/a\"],\"moreFiles\":0}},\"tool_use_id\":\"toolu_rev\"}", big }')
+printf '%s\n' "$huge7" | env MARU_HOOK_INSTANCE=$inst MARU_HOOK_PANE=16 /bin/sh -c "$cmd" || fail "상한 경로가 0 으로 끝나지 않았다"
+grep -q '^claude	{"hook_event_name":"PostToolUse","tool_use_id":"toolu_rev"}$' "$evdir/16.ndjson" || fail "순서가 다른데 잘라낸 것을 실었다: $(cut -c1-200 "$evdir/16.ndjson")"
+pass "상한 접기(hunks 만 잘라내기·순서 가드)"
+
+echo "4e) 상한은 바이트로 센다 — UTF-8 로케일에서 한글 payload 가 글자 수로 상한 안이어도 접힌다 (AT3b-2)"
+# macOS `/bin/sh`(bash 3.2)는 UTF-8 로케일에서 `${#var}` 를 글자 수로 센다. 그러면 60 KB 짜리 한글 payload 가
+# 검사를 지나 통째로 적히고, 파서의 바이트 상한이 그 줄을 **통째로** 버린다(이름·id 까지). 개발자 환경이
+# `LC_ALL=ko_KR.UTF-8` 이라 가상의 경우가 아니다 — 실제 bashEditDiff 563건 중 15건이 이 틈에 있었다.
+hangul=$(awk 'BEGIN { printf "{\"hook_event_name\":\"PostToolUse\",\"tool_use_id\":\"toolu_hangul\",\"tool_response\":{\"stdout\":\""; for (i = 0; i < 20000; i++) printf "한"; printf "\"}}" }')
+printf '%s\n' "$hangul" | env LANG=ko_KR.UTF-8 LC_ALL=ko_KR.UTF-8 MARU_HOOK_INSTANCE=$inst MARU_HOOK_PANE=17 /bin/sh -c "$cmd" || fail "한글 상한 경로가 0 으로 끝나지 않았다"
+[ "$(wc -c < "$evdir/17.ndjson")" -lt 200 ] || fail "한글 payload 가 글자 수로 세어져 통째로 적혔다($(wc -c < "$evdir/17.ndjson") 바이트)"
+grep -q '"hook_event_name":"PostToolUse","tool_use_id":"toolu_hangul"' "$evdir/17.ndjson" || fail "접힌 모양이 아니다: $(cut -c1-120 "$evdir/17.ndjson")"
+pass "상한을 바이트로 센다(UTF-8 로케일)"
+
 echo "5) 로그 디렉터리가 없어도 조용히 0 으로 끝난다"
 # **stderr 까지 조용해야 한다.** `printf … 2>/dev/null` 은 printf 자신의 stderr 만 막고 리다이렉션 대상이
 # 없을 때 셸이 내는 `No such file or directory` 는 못 막는다 — 실제로 그 메시지가 새는 것을 이 검사가

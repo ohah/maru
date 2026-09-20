@@ -185,6 +185,23 @@ fn captureBeforeForEvent(self: *AppSession, term: *Term, ev: maru.session.agent_
         const identity = term.agent_transcript.identity();
         if (identity.len == 0) return;
         _ = self.turn_captures.closeShell(identity, ev.tool_use_id, wallMs(self), ev.duration_ms, shell_bracket_slack_ms);
+        // **provider 가 검증한 셸 편집 목록**(AT3b-2 — `bashEditDiff.changedFiles`, claude bypass 모드). 구간을 닫은
+        // 뒤에, `Pre` 와 **같은 게이트**를 지나서 적는다: backlog·회전본의 것은 버린다(그 턴은 끝났거나 죽었다 —
+        // 지어내는 쪽보다 잃는 쪽), 루트 밖은 애초에 경로만 남고, **루트 아래 다른 저장소**(워크트리)의 경로는
+        // 세지 않는다(그 편집은 다른 세션 것이다 — 재실측 ②). 자식(subagent)의 것은 부모 턴에(AT3 규율).
+        if (term.agent_hook_backlog_catchup) return;
+        var it = maru.session.agent_hook_event.changedFiles(ev);
+        const first = it.next() orelse return;
+        var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const root = self.git_repo orelse (git_ops.gitRepoRoot(self, &repo_buf) orelse return);
+        var pending: ?[]const u8 = first;
+        while (pending) |raw| : (pending = it.next()) {
+            var decoded_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const path = decodeHookPath(&decoded_buf, raw) orelse continue;
+            if (!maru.path_shape.isAbsolute(path)) continue; // 실측 1,637/1,637 절대경로 — 상대는 어느 루트인지 모른다
+            if (capture_file.underNestedRepo(root, path)) continue;
+            _ = self.turn_captures.noteShellDiff(self.allocator, identity, path);
+        }
         return;
     }
     if (ev.kind != .pre_tool_use) return;

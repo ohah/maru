@@ -339,11 +339,9 @@ pub const shell_tool_matcher = "Bash";
 /// 없는 이벤트를 걸면 잘해야 무시되고, 나쁘면 그 파일의 파싱을 통째로 깨뜨린다 — 남의 설정 파일이라
 /// 시험 삼아 넣지 않는다.
 ///
-/// codex 에는 `PostToolUse`·`SessionEnd`·`PreCompact`·`PostCompact` 도 있으나 걸지 않는다 — 나머지 셋은
-/// 지금 쓰는 자리가 없고, `PostToolUse(Bash)` 는 **AT3b-2 에서 넣는다**(사용자 결정 2026-09-20 — 셸
-/// 쓰기만 있는 턴이 codex 는 5.7% 라 화면에 결과가 보이는 단계에 맞춘다). 넣을 준비는 끝났다: codex 는
-/// 실패에도 `PostToolUse` 를 보내고(실패 변종 없음), `post_tool_use` 의 신뢰 해시는 matcher 를 넣는 규칙이다
-/// (2026-09-20 실측 — 계약 §2.1 표). `duration_ms` 는 없다.
+/// codex 에는 `SessionEnd`·`PreCompact`·`PostCompact` 도 있으나 걸지 않는다 — 지금 쓰는 자리가 없다.
+/// `PostToolUse(Bash)` 는 AT3b-2 에서 넣었다(사용자 결정 2026-09-20): codex 는 실패에도 `PostToolUse` 를 보내고
+/// (실패 변종 없음), `post_tool_use` 의 신뢰 해시는 matcher 를 넣는 규칙이다(실측 — 계약 §2.1 표), `duration_ms` 는 없다.
 ///
 /// ⚠️ **`StopFailure` 가 없다는 것의 대가는 메울 수 없다**(계약 §9-10, 2026-08-22 종결). codex 는 오류로
 /// 끝난 턴에 `Stop` **도** 보내지 않는다 — 공개 소스에서 오류 경로가 stop 훅을 부르기 전에 반환하고
@@ -360,6 +358,9 @@ pub const codex_events = [_]Event{
     .{ .name = "Stop" },
     .{ .name = "PermissionRequest", .matcher = "*" },
     .{ .name = "PreToolUse", .matcher = "*" },
+    // **셸 구간의 끝**(AT3b-2 에서 넣었다 — 사용자 결정 B 의 시점). codex 는 실패에도 이것을 보내므로
+    // `PostToolUseFailure` 는 필요 없고 열거에도 없다. `bashEditDiff` 는 없어 구간만 닫힌다(AT3b-3 폴백의 재료).
+    .{ .name = "PostToolUse", .matcher = shell_tool_matcher },
     // 자식 수를 **세는** 유일한 신뢰 신호다(계약 §2). 자식이 도는 동안 lead 의 `Stop` 은 턴 끝이
     // 아니고, 세지 않으면 «자식이 아직 도는데 완료 알림» 이 나간다. 양 provider 열거에 다 있다(실측).
     .{ .name = "SubagentStart" },
@@ -473,6 +474,13 @@ pub fn build(
     // 그것만으로는 부족하다 — 디렉터리 권한은 나중에 사용자가 바꿀 수 있고, 파일 자체가 안전해야 한다.
     // `umask` 는 셸 내장이라 프로세스가 늘지 않는다.
     try out.appendSlice(allocator, "umask 077; ");
+    // **길이를 바이트로 센다**(AT3b-2 적대적 검증 2회차). macOS `/bin/sh`(bash 3.2)는 UTF-8 로케일에서 `${#var}` 를
+    // **글자 수**로 세므로, 한글이 많은 payload 는 32 KiB 를 넘겨도 상한 검사를 지나 통째로 적히고 파서(바이트
+    // 상한)가 그 줄을 **통째로 버린다** — 이름도 id 도 잃는다. 실측: 실제 `bashEditDiff` 563건 중 25건이 바이트로
+    // 상한을 넘기는데 그중 15건은 글자 수로는 안 넘겼다(개발자 환경은 `LC_ALL=ko_KR.UTF-8`). 훅 셸에만 C 로케일을
+    // 준다 — 셸 내장 대입이라 프로세스가 늘지 않고, 이 셸의 자식은 `printf` 뿐이며 agent 환경에는 손대지 않는다.
+    // `[!…]` 문자 클래스도 바이트 단위가 되어 로케일 collation 함정(`TokenClass.shellClass` 주석)에서 멀어진다.
+    try out.appendSlice(allocator, "LC_ALL=C; export LC_ALL; ");
     try out.appendSlice(allocator, "IFS= read -r mh_p || :; while IFS= read -r mh_x; do :; done; ");
     // **pane 칸을 화이트리스트로 검증한다.** 그 값이 그대로 파일명이 되므로 검증 없이 쓰면 경로를 벗어난다 —
     // 실측(2026-08-20)에서 `../outside/pwned` 가 로그 디렉터리 **밖에** 파일을 만들었다. 지키는 성질은
@@ -539,6 +547,18 @@ pub fn build(
     // 본문은 사라지므로 알림 문구는 비지만, **상태는 옳게 간다**. 그 둘 중 무엇을 지킬지는 계약이
     // 이미 정해 두었다: 안 풀리는 배지가 더 나쁘다.
     try out.print(allocator, "if [ ${{#mh_p}} -gt {d} ]; then ", .{max_payload_bytes});
+    // **먼저 hunks 를 잘라낸다**(계획 AT3b-2). `PostToolUse(Bash)` 의 `bashEditDiff` 는 `files`(hunks)·`moreFiles`·
+    // `changedFiles` 순이고(실측 528/528) hunks 가 payload 를 32 KiB 너머로 밀어낸다(4.6%). 필요한 것은
+    // `changedFiles`(최대 ~7 KB)뿐이라 `"bashEditDiff":{"files":` 앞까지 + `"moreFiles":` 부터를 이어 붙인다.
+    // **키 순서는 가정이므로 가드를 둔다**: 이어 붙인 결과에 `"changedFiles":` 가 없으면(순서가 바뀌었거나
+    // `unavailable` 이거나) 버리고 아래의 이름+id 경로로 간다. 여전히 상한을 넘겨도 같다. 파라미터 확장뿐이다.
+    // stdout 안의 같은 글자는 JSON 안에서 `\"files\":` 라 패턴(`"files":`)이 안 걸린다(4c 와 같은 논거).
+    try out.appendSlice(allocator, "case \"$mh_p\" in *'\"bashEditDiff\":{\"files\":'*) " ++
+        // ⚠️ 변수 이름은 `mh_d*` 다 — `mh_t` 는 원격 커맨드가 tmux pane 칸으로 쓴다(그 테스트가 잡았다).
+        "mh_dh=\"${mh_p%%\\\"bashEditDiff\\\":\\{\\\"files\\\":*}\"; mh_dt=\"${mh_p#*\\\"moreFiles\\\":}\"; " ++
+        "if [ \"$mh_dt\" != \"$mh_p\" ]; then mh_dc=\"$mh_dh\\\"bashEditDiff\\\":{\\\"moreFiles\\\":$mh_dt\"; " ++
+        "case \"$mh_dc\" in *'\"changedFiles\":'*) mh_p=\"$mh_dc\" ;; esac; fi ;; esac; ");
+    try out.print(allocator, "fi; if [ ${{#mh_p}} -gt {d} ]; then ", .{max_payload_bytes});
     // **`tool_use_id` 도 살린다**(계획 AT3b-1). `PostToolUse(Bash)` 는 명령 출력을 실어 0.1% 가 상한을
     // 넘기는데, 이름만 남기면 그 구간을 **닫을 수 없다**(짝지을 id 가 없다) — 턴 끝까지 열린 채로 사용자
     // 편집을 끌어들인다. 파라미터 확장뿐이라 프로세스가 늘지 않는다(셸 내장).
@@ -980,7 +1000,7 @@ test "상한을 넘긴 payload는 표식으로 바뀐다 — 파서가 아는 �
 
 test "셸 구간은 Post 가 세트에 있는 provider 에서만 연다 — 세트에서 파생된다" {
     try testing.expect(closesShellBrackets(.claude));
-    try testing.expect(!closesShellBrackets(.codex)); // AT3b-2 가 codex 세트에 넣으면 이 줄이 뒤집힌다 — 그것이 의도다
+    try testing.expect(closesShellBrackets(.codex)); // AT3b-2 가 codex 세트에 넣어 뒤집혔다 — 세트에서 파생된다는 증거
     try testing.expectEqual(Provider.claude, providerFromTag("claude").?);
     try testing.expectEqual(Provider.codex, providerFromTag("codex").?);
     try testing.expect(providerFromTag("mimo-code") == null);
@@ -1003,6 +1023,11 @@ test "상한을 넘긴 payload 에서 tool_use_id 를 살린다 — 검증·상�
         const arm = try std.fmt.bufPrint(&arm_buf, "mh_p='{{\"hook_event_name\":\"{s}\"'\"$mh_s\"'}}'", .{e.name});
         try testing.expect(std.mem.indexOf(u8, cmd, arm) != null);
     }
+    // hunks 잘라내기(AT3b-2)가 **id 추출보다 앞**에 있고, 가드(`"changedFiles":` 확인)가 있다. 실제 동작은 게이트 4d.
+    const strip_at = std.mem.indexOf(u8, cmd, "*'\"bashEditDiff\":{\"files\":'*)").?;
+    const id_at = std.mem.indexOf(u8, cmd, "mh_i=\"${mh_p#*").?;
+    try testing.expect(strip_at < id_at);
+    try testing.expect(std.mem.indexOf(u8, cmd, "case \"$mh_dc\" in *'\"changedFiles\":'*) mh_p=\"$mh_dc\" ;; esac") != null);
     // 클래스에 따옴표·역슬래시·`/` 가 없다 — 이것이 지키는 성질이다.
     try testing.expect(!tool_use_id_class.accepts("ab\"c"));
     try testing.expect(!tool_use_id_class.accepts("a\\b"));
@@ -1058,8 +1083,8 @@ test "이벤트 세트는 계약 §2 그대로다 — provider 마다" {
     // 9 → 11: `PostToolUse`/`PostToolUseFailure`(`Bash` — 셸 구간의 끝, AT3b-1).
     try testing.expectEqual(@as(usize, 11), claude_events.len);
     // codex 에는 `Notification` 이 없다(계약 §2.1 실측).
-    // 5 → 7: 서브에이전트 둘. `StopFailure` 는 codex 열거에 없어 더하지 않는다.
-    try testing.expectEqual(@as(usize, 7), codex_events.len);
+    // 5 → 7: 서브에이전트 둘. `StopFailure` 는 codex 열거에 없어 더하지 않는다. 7 → 8: `PostToolUse(Bash)`(AT3b-2).
+    try testing.expectEqual(@as(usize, 8), codex_events.len);
     for (codex_events) |e| try testing.expect(!std.mem.eql(u8, e.name, "Notification"));
     for (codex_events) |e| try testing.expect(!std.mem.eql(u8, e.name, "StopFailure"));
     // codex 세트는 claude 세트의 **부분집합**이어야 한다(이름도 matcher 도) — 두 세트가 따로 흘러가면
@@ -1094,9 +1119,10 @@ test "이벤트 세트는 계약 §2 그대로다 — provider 마다" {
         }
         // `*` 가 붙는 것은 도구 이벤트 둘뿐이다(PermissionRequest·PreToolUse).
         try testing.expectEqual(@as(usize, 2), star);
-        // `PostToolUse` 계열은 **claude 에만, 둘 다** 있다(실패 변종이 없으면 실패한 셸의 구간이 안 닫힌다).
-        // codex 는 AT3b-2 까지 없다(사용자 결정 2026-09-20).
-        try testing.expectEqual(@as(usize, if (provider == .claude) 2 else 0), shell);
+        // claude 는 **둘 다**(실패 변종이 없으면 실패한 셸의 구간이 안 닫힌다), codex 는 `PostToolUse` 하나
+        // (실패에도 그것이 오고, 실패 변종은 열거에 없다 — 2026-09-20 실측).
+        try testing.expectEqual(@as(usize, if (provider == .claude) 2 else 1), shell);
+        if (provider == .codex) for (set) |e| try testing.expect(!std.mem.eql(u8, e.name, "PostToolUseFailure"));
         // **이름이 겹치면 안 된다.** 겹치면 설치가 그 이벤트에 항목을 둘 넣는데, 설치 판정은 이벤트를 «덮었나»로
         // 세므로 「우리 항목 수 = 세트 크기」가 영영 맞지 않는다 → 시작할 때마다 사용자 파일을 다시 쓴다
         // (`agent_hook_install.planFor`의 마지막 검사). 손으로 보면 안 보이는 종류의 실수라 여기서 막는다.
@@ -1126,6 +1152,10 @@ test "커맨드 구조가 셸 게이트가 검증한 그 모양이다" {
     try testing.expect(std.mem.endsWith(u8, cmd, marker_comment));
     // 권한을 **가장 먼저** 좁힌다 — 뒤에 두면 그 사이에 만들어진 파일이 넓은 권한으로 남는다.
     try testing.expect(std.mem.startsWith(u8, cmd, "umask 077; "));
+    // 그 다음이 로케일이다 — 길이 검사(`${#mh_p}`)보다 **앞**이어야 바이트로 센다.
+    const lc_at = std.mem.indexOf(u8, cmd, "LC_ALL=C; export LC_ALL; ").?;
+    const len_at = std.mem.indexOf(u8, cmd, "${#mh_p}").?;
+    try testing.expect(lc_at < len_at);
 
     // **payload 를 커맨드라인에 올리지 않는다**(계약 §4.1). argv 에 실으면 같은 머신의 다른 프로세스가
     // `ps` 로 읽고 보안 제품이 그 명령줄을 수집·저장한다 — 그 안에는 소스 코드와 셸 명령 원문이 있다(§7).

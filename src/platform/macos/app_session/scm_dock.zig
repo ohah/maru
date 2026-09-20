@@ -852,9 +852,11 @@ fn turnFileOrigin(
     for (found.entries.items) |entry| {
         const entry_rel = maru.session.repo_path.displayRelative(entry.path, repo);
         if (!std.mem.eql(u8, entry_rel, rel_path)) continue;
-        return if (entry.editedByAgent()) .ai_edit else .turn_change;
+        if (!entry.editedByAgent()) return .turn_change;
+        // 근거가 셸 diff 뿐이면 갈라 둔다 — 기호는 같지만(`view.originMark`) 사실은 다르다(AT3b-2).
+        return if (entry.shellOnly()) .shell_edit else .ai_edit;
     }
-    // 캡처가 있는 턴인데 이 파일이 없다 = 편집 도구가 안 만졌다(셸·사용자·다른 세션).
+    // 캡처가 있는 턴인데 이 파일이 없다 = 편집 도구도 셸 diff 도 안 만졌다(사용자·다른 세션·gitignore 파일).
     return .turn_change;
 }
 
@@ -4871,6 +4873,13 @@ test "턴 파일 배지: 절대경로 캡처와 상대경로 목록이 같은 �
     session.turn_captures.noteAfter(gpa, "S1", "/repo/src/edited.zig", .{ .text = try gpa.dupe(u8, "after") });
     try std.testing.expect(session.turn_captures.noteBefore(gpa, "S1", "/repo/src/shell.zig", .read, .{ .text = try gpa.dupe(u8, "before") }));
     session.turn_captures.noteAfter(gpa, "S1", "/repo/src/shell.zig", .{ .text = try gpa.dupe(u8, "after") });
+    // 셸 diff 가 검증한 파일 셋(AT3b-2): before 없이 바뀐 것 · Read 로 before 를 떠 뒀는데 되돌린 것 · 편집 도구와 겹친 것.
+    try std.testing.expect(session.turn_captures.noteShellDiff(gpa, "S1", "/repo/src/by_shell.zig"));
+    session.turn_captures.noteAfter(gpa, "S1", "/repo/src/by_shell.zig", .{ .text = try gpa.dupe(u8, "written by sed") });
+    try std.testing.expect(session.turn_captures.noteBefore(gpa, "S1", "/repo/src/reverted.zig", .read, .{ .text = try gpa.dupe(u8, "same") }));
+    try std.testing.expect(!session.turn_captures.noteShellDiff(gpa, "S1", "/repo/src/reverted.zig"));
+    session.turn_captures.noteAfter(gpa, "S1", "/repo/src/reverted.zig", .{ .text = try gpa.dupe(u8, "same") });
+    try std.testing.expect(!session.turn_captures.noteShellDiff(gpa, "S1", "/repo/src/edited.zig"));
     const id = session.turn_captures.seal(gpa, "S1");
     try std.testing.expect(id != 0);
 
@@ -4891,6 +4900,21 @@ test "턴 파일 배지: 절대경로 캡처와 상대경로 목록이 같은 �
         chrome.components.scm_dock.types.TurnFileOrigin.turn_change,
         turnFileOrigin(session, turnCaptureRef(session, &snap), "src/never_touched.zig"),
     );
+    // 셸 diff 가 유일한 근거면 `.shell_edit`(기호는 `✎` 와 같다), 되돌린 것은 `.turn_change`, 편집 도구와 겹치면 `.ai_edit`.
+    try std.testing.expectEqual(
+        chrome.components.scm_dock.types.TurnFileOrigin.shell_edit,
+        turnFileOrigin(session, turnCaptureRef(session, &snap), "src/by_shell.zig"),
+    );
+    try std.testing.expectEqual(
+        chrome.components.scm_dock.types.TurnFileOrigin.turn_change,
+        turnFileOrigin(session, turnCaptureRef(session, &snap), "src/reverted.zig"),
+    );
+    try std.testing.expectEqual(
+        chrome.components.scm_dock.types.TurnFileOrigin.ai_edit,
+        turnFileOrigin(session, turnCaptureRef(session, &snap), "src/edited.zig"),
+    );
+    // 턴 줄의 `✎N` 은 둘을 합산한다 — edited(편집 도구) + by_shell(셸 diff) = 2.
+    try std.testing.expectEqual(@as(u32, 2), editedCountFor(session, &snap));
     // **캡처가 없는 턴은 `.unknown`** 이다 — 「셸이 고쳤다」와 「우리가 못 봤다」를 가른다.
     var no_capture: maru.session.turn_snapshot.Snapshot = .{};
     try std.testing.expectEqual(

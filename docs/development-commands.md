@@ -131,7 +131,7 @@ zig build test > /tmp/t.log 2>&1;  mise run test-verdict /tmp/t.log
 
 ## 빌드와 테스트
 
-- 에이전트 턴 캡처 **배선**(AT3·AT4·AT3b — 어느 훅 이벤트가 어느 게이트에서 사본·셸 수·셸 구간을 트리거하나)만 잰다: `zig build test-agent-turn-capture` (app_session 그래프에 «훅»·«턴 스냅샷» 필터 — 훅 설치·모드·캡처 배선 45개, ~15초). 순수 층은 `zig test src/session/turn_capture.zig`·`zig test src/session/shell_bracket.zig` 로 단독 확인이 된다. 훅 커맨드 자체는 `zig build check-agent-hook-command`(실제 `/bin/sh`).
+- 에이전트 턴 캡처 **배선**(AT3·AT4·AT3b — 어느 훅 이벤트가 어느 게이트에서 사본·셸 수·셸 구간을 트리거하나)만 잰다: `zig build test-agent-turn-capture` (app_session 그래프에 «훅»·«턴 스냅샷»·«턴 파일 배지» 필터 — 훅 설치·모드·캡처 배선·배지 join 50개, ~15초). 순수 층은 `zig test src/session/turn_capture.zig`·`zig test src/session/shell_bracket.zig` 로 단독 확인이 된다. 훅 커맨드 자체는 `zig build check-agent-hook-command`(실제 `/bin/sh`).
 - Notification Center release 앱 경로의 closed mode, 격리 root, 실제 delegate→attach 결과 결속과 상속 socket receipt/cleanup을 검증: `zig build test-session-host-notification-app-scenario`.
 - Notification Center release callback/attach pure owner의 exact request/route/time 결속을 검증: `zig build test-session-host-notification-scenario-receipt`.
 - Notification Center app receipt의 canonical pipe payload strict parse, helper-click/identity/kind/deadline 재결속과 absent `0600` exclusive publication을 검증: `zig build test-session-host-notification-app-receipt`.

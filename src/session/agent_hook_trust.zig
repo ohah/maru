@@ -43,7 +43,7 @@ pub const EventTrust = struct {
     confidence: Confidence,
 };
 
-/// codex 세트(`agent_hook_command.codex_events`)의 이벤트별 규칙. **다섯 다 실측이다.**
+/// codex 세트(`agent_hook_command.codex_events`)의 이벤트별 규칙. **전부 실측이다.**
 ///
 /// 메커니즘까지 드러났다: `hooks.json` 에 `matcher` 를 적어도 codex 는 `user_prompt_submit`·`stop` 에서
 /// **로드할 때 그것을 버린다**(목록이 `matcher: null` 로 온다). 해시는 그 정규화된 결과를 담을 뿐이라,
@@ -54,6 +54,9 @@ pub const events = [_]EventTrust{
     .{ .json_name = "Stop", .snake = "stop", .matcher_in_hash = false, .confidence = .measured },
     .{ .json_name = "PermissionRequest", .snake = "permission_request", .matcher_in_hash = true, .confidence = .measured },
     .{ .json_name = "PreToolUse", .snake = "pre_tool_use", .matcher_in_hash = true, .confidence = .measured },
+    // 2026-09-20 실측(codex 0.154.0, matcher `Bash`): `hooks/list` 의 `currentHash` 가 matcher 를 넣은 공식과 일치했고
+    // codex 가 matcher 를 지우지도 않았다(`pre_tool_use` 와 같은 부류). AT3b-2 로 세트에 들어왔다.
+    .{ .json_name = "PostToolUse", .snake = "post_tool_use", .matcher_in_hash = true, .confidence = .measured },
     .{ .json_name = "SubagentStart", .snake = "subagent_start", .matcher_in_hash = true, .confidence = .measured },
     .{ .json_name = "SubagentStop", .snake = "subagent_stop", .matcher_in_hash = true, .confidence = .measured },
 };
@@ -456,13 +459,15 @@ fn hashAlloc(entry: EventTrust, cmd: []const u8, timeout_seconds: u32, matcher: 
 const golden_command = "printf fired > /dev/null; exit 0";
 const golden_timeout: u32 = 2;
 
-const GoldenCase = struct { json_name: []const u8, hash: []const u8 };
+const GoldenCase = struct { json_name: []const u8, hash: []const u8, matcher: []const u8 = "*" };
 const golden = [_]GoldenCase{
     .{ .json_name = "SessionStart", .hash = "sha256:9b1757037d5ae6563e2fb361ce7b37fc0899aae52c1b7d80bfab17816d62b8e3" },
     .{ .json_name = "PreToolUse", .hash = "sha256:75d94ad4c3d9f7b851f02876acd2e9c7dc427f0b4f5929310516df12dc0b0635" },
     .{ .json_name = "PermissionRequest", .hash = "sha256:75cb26dffd4ee64f19c90136bc2f5299e5a9df1133c4ad35fd447e717024268f" },
     .{ .json_name = "SubagentStart", .hash = "sha256:97c305fa72ceb659e6097ac1f91571ffa57d6b6c2bfaceb64c27c8c6641dffeb" },
     .{ .json_name = "SubagentStop", .hash = "sha256:fd60f580c15c67ed17cef4dca2b2a8092c6452e63f62a842ea0b0bf2bdc16d19" },
+    // 2026-09-20 — 격리 `CODEX_HOME` 에 matcher `Bash` 로 적고 `hooks/list` 로 받은 값(AT3b-2).
+    .{ .json_name = "PostToolUse", .hash = "sha256:a93b8cae0b10bca454d5abf976f673c7ff96bc01ead5bab58287c958aff9142a", .matcher = "Bash" },
     // 아래 둘은 fixture 에 matcher 가 **있는데도** 없이 계산한 값이다.
     .{ .json_name = "UserPromptSubmit", .hash = "sha256:6ccb18ff90f1de0bbc4e0ddc0818549d36697d64710ab0c5040a165fd86ba45a" },
     .{ .json_name = "Stop", .hash = "sha256:d445818a88b2e64da7d09e58850802e0f15124c6a7d9d428e44e437e433f017d" },
@@ -472,7 +477,7 @@ test "golden: 세트의 모든 이벤트가 codex 가 계산한 값과 같다" {
     // 세트 전체를 덮는다 — 하나라도 빠지면 그 이벤트만 조용히 미신뢰가 된다.
     try testing.expectEqual(command.codex_events.len, golden.len);
     for (golden) |g| {
-        const h = try hashAlloc(forEvent(g.json_name).?, golden_command, golden_timeout, "*");
+        const h = try hashAlloc(forEvent(g.json_name).?, golden_command, golden_timeout, g.matcher);
         defer testing.allocator.free(h);
         try testing.expectEqualStrings(g.hash, h);
     }
@@ -489,7 +494,7 @@ test "golden: matcher 를 빼는 두 이벤트는 matcher 를 줘도 값이 같�
         try testing.expectEqualStrings(with_m, without_m);
     }
     // 반대로 넣는 이벤트는 달라야 한다.
-    for ([_][]const u8{ "SessionStart", "PreToolUse", "PermissionRequest", "SubagentStart", "SubagentStop" }) |name| {
+    for ([_][]const u8{ "SessionStart", "PreToolUse", "PostToolUse", "PermissionRequest", "SubagentStart", "SubagentStop" }) |name| {
         const with_m = try hashAlloc(forEvent(name).?, golden_command, golden_timeout, "*");
         defer testing.allocator.free(with_m);
         const without_m = try hashAlloc(forEvent(name).?, golden_command, golden_timeout, null);

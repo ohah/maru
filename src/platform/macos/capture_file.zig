@@ -25,6 +25,36 @@ const safe_open = @import("safe_open.zig");
 /// 3. **상한을 넘으면 보관은 버리되 EOF 까지 읽어 전문을 해시한다.** 앞부분만 해시하면 뒷부분만 다른
 ///    두 큰 파일이 **거짓으로 같아져** 「순변경 없음」이 거짓으로 선다.
 /// 4. **없음·빔·모름을 셋으로 가른다**(`Side` 주석).
+/// 그 경로가 루트 **아래의 다른 git 저장소**(워크트리·서브모듈·복제본) 안에 있나(계획 AT3b-2 F · AT3b-3).
+///
+/// 루트 아래 디렉터리들에서 `.git`(디렉터리 **또는** 파일 — 워크트리는 파일이다)을 찾는다. 루트 자신의 `.git` 은
+/// 안 본다(그것이 이 세션의 저장소다). 그 안의 편집은 **다른 세션의 것**이라 이 세션의 턴에 세면 귀속이 틀린다 —
+/// 개발자 머신은 `.claude/worktrees/` 에 워크트리 12개가 산다(재실측 ②).
+///
+/// 비용은 경로 깊이만큼의 `lstat` 이고(보통 3~6), `Post` 마다 경로 몇 개라 무시할 만하다. 심링크는 따라가지
+/// 않는다 — 루트 밖을 가리키는 링크는 `underRoot` 가 이미 걸렀고, 여기서 따라가면 링크 하나로 판정이 흔들린다.
+pub fn underNestedRepo(root: []const u8, abs_path: []const u8) bool {
+    if (!repo_path.underRoot(abs_path, root)) return false;
+    const rel = repo_path.displayRelative(abs_path, root);
+    // 마지막 조각은 파일 자신이라 안 본다 — `rel` 이 `a/b/c.txt` 면 `a`·`a/b` 만.
+    const dir_rel = std.fs.path.dirname(rel) orelse return false;
+    var end: usize = 0;
+    while (end < dir_rel.len) {
+        const next_slash = std.mem.indexOfScalarPos(u8, dir_rel, end, '/') orelse dir_rel.len;
+        end = next_slash;
+        if (end == 0) {
+            end += 1;
+            continue;
+        }
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const dot_git = std.fmt.bufPrintZ(&buf, "{s}/{s}/.git", .{ root, dir_rel[0..end] }) catch return false;
+        var st: std.posix.Stat = undefined;
+        if (std.c.fstatat(std.posix.AT.FDCWD, dot_git.ptr, &st, std.posix.AT.SYMLINK_NOFOLLOW) == 0) return true;
+        end += 1;
+    }
+    return false;
+}
+
 pub fn readSide(gpa: std.mem.Allocator, root: []const u8, abs_path: []const u8) turn_capture.Side {
     if (!repo_path.underRoot(abs_path, root)) return .{ .unknown = .outside_root };
     const rel = repo_path.displayRelative(abs_path, root);
@@ -117,6 +147,35 @@ fn freeSideForTest(gpa: std.mem.Allocator, side: *turn_capture.Side) void {
         .text => |t| gpa.free(t),
         else => {},
     }
+}
+
+test "훅 캡처: 중첩 저장소 판정 — 루트 아래의 .git 디렉터리·파일(워크트리) 안은 참, 루트 자신의 .git 은 안 본다" {
+    var fx = try Fixture.init();
+    defer fx.deinit();
+    const io = fixture_io;
+    try fx.dir.dir.createDirPath(io, ".git"); // 루트 자신의 저장소
+    try fx.dir.dir.createDirPath(io, "src");
+    try fx.write("src/a.zig", "a");
+    try fx.dir.dir.createDirPath(io, ".claude/worktrees/agent-x/src");
+    try fx.write(".claude/worktrees/agent-x/.git", "gitdir: /elsewhere\n"); // 워크트리는 파일이다
+    try fx.write(".claude/worktrees/agent-x/src/b.zig", "b");
+    try fx.dir.dir.createDirPath(io, "vendor/lib/.git"); // 복제본은 디렉터리
+    try fx.write("vendor/lib/c.zig", "c");
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const a = try std.fmt.bufPrint(&buf, "{s}/src/a.zig", .{fx.root()});
+    try testing.expect(!underNestedRepo(fx.root(), a));
+    var buf2: [std.fs.max_path_bytes]u8 = undefined;
+    const b = try std.fmt.bufPrint(&buf2, "{s}/.claude/worktrees/agent-x/src/b.zig", .{fx.root()});
+    try testing.expect(underNestedRepo(fx.root(), b));
+    var buf3: [std.fs.max_path_bytes]u8 = undefined;
+    const c = try std.fmt.bufPrint(&buf3, "{s}/vendor/lib/c.zig", .{fx.root()});
+    try testing.expect(underNestedRepo(fx.root(), c));
+    // 루트 바로 아래 파일(조각 하나)과 루트 밖은 거짓이다.
+    var buf4: [std.fs.max_path_bytes]u8 = undefined;
+    const top = try std.fmt.bufPrint(&buf4, "{s}/top.txt", .{fx.root()});
+    try testing.expect(!underNestedRepo(fx.root(), top));
+    try testing.expect(!underNestedRepo(fx.root(), "/etc/hosts"));
 }
 
 test "readSide: 없는 파일은 absent, 빈 파일은 empty — 둘을 가른다" {

@@ -143,6 +143,14 @@ pub const Event = struct {
     /// 훅 payload 에는 시각이 없어(§3 — 훅 셸은 bash 3.2 라 `$EPOCHREALTIME` 도 없다) 구간의 **길이**만
     /// 이것으로 안다. `null` 은 «없었다» 다 — 0 과 다르다.
     duration_ms: ?u64 = null,
+    /// `tool_response.bashEditDiff.changedFiles` 배열의 **원문 슬라이스**(`[` 부터 `]` 까지) — provider 가 그 셸
+    /// 명령 전후의 작업트리 diff 로 검증한 «바뀐 파일» 절대경로들(AT3b-2, claude 2.1.271+ · bypassPermissions).
+    /// 비면 그 키가 없었다. `background_tasks_raw` 와 같은 이유로 값이 아니라 원문을 든다 — 경로가 수십 개일 수
+    /// 있고(실측 최대 ~80) `Event` 는 tick 당 64개가 스택에 선다. 필요한 자리에서 `changedFiles` 로 다시 훑는다.
+    changed_files_raw: []const u8 = "",
+    /// `tool_response.bashEditDiff.unavailable` — provider 가 diff 를 **계산하지 못했다**(523건 중 4). 「바뀐 파일이
+    /// 없다」와 다른 사실이라 따로 든다.
+    shell_diff_unavailable: bool = false,
     /// `tool_input.run_in_background`(claude `Bash` 전용). 참이면 `PostToolUse` 가 **띄운 순간** 온다
     /// (실측 0.030s) — 구간을 거기서 닫으면 그 뒤의 쓰기가 전부 구간 밖이다. 셸 호출의 5.1%.
     run_in_background: bool = false,
@@ -375,6 +383,33 @@ pub fn parseLine(line: []const u8) ?Event {
             const raw_start = scan.i;
             if (!scan.skipValue()) return null;
             if (scan.i > raw_start) ev.background_tasks_raw = std.mem.trim(u8, scan.src[raw_start..scan.i], " \t\r\n");
+        } else if (std.mem.eql(u8, key, "tool_response")) {
+            // `PostToolUse` 의 도구 결과. **객체일 때만** 내려간다 — codex 는 stdout 문자열 하나를 싣는다.
+            // 안에서 보는 것은 `bashEditDiff` 하나이고, 그 안의 `changedFiles`(원문 슬라이스)·`unavailable` 뿐이다.
+            // `files`(hunks)는 크기가 커서 **읽지도 들지도 않는다** — 건너뛴다.
+            if (!scan.expectObjectStart()) {
+                if (!scan.skipValue()) return null;
+                continue;
+            }
+            while (scan.nextKey()) |inner| {
+                if (std.mem.eql(u8, inner, "bashEditDiff")) {
+                    if (!scan.expectObjectStart()) {
+                        if (!scan.skipValue()) return null;
+                        continue;
+                    }
+                    while (scan.nextKey()) |diff_key| {
+                        if (std.mem.eql(u8, diff_key, "changedFiles")) {
+                            const raw_start = scan.i;
+                            if (!scan.skipValue()) return null;
+                            if (scan.i > raw_start) ev.changed_files_raw = std.mem.trim(u8, scan.src[raw_start..scan.i], " \t\r\n");
+                        } else if (std.mem.eql(u8, diff_key, "unavailable")) {
+                            ev.shell_diff_unavailable = scan.boolValue() orelse return null;
+                        } else if (!scan.skipValue()) return null;
+                    }
+                    if (scan.failed) return null;
+                } else if (!scan.skipValue()) return null;
+            }
+            if (scan.failed) return null;
         } else if (std.mem.eql(u8, key, "tool_input")) {
             // 중첩 객체 안에서도 **키 위치**만 본다. 값 안에 같은 단어가 있어도 걸리지 않는다.
             if (!scan.expectObjectStart()) {
@@ -467,6 +502,44 @@ pub const PatchPaths = struct {
 /// 이 이벤트가 만지는 경로를 훑는다. Claude 는 `file_path` 하나를, Codex 는 패치 텍스트의 여러 경로를 준다.
 pub fn patchPaths(ev: Event) PatchPaths {
     return .{ .rest = ev.tool_command };
+}
+
+/// `bashEditDiff.changedFiles` 의 문자열 항목을 하나씩 낸다(원문 — 이스케이프가 남아 있다, `decodeInto` 로 푼다).
+///
+/// 형이 어긋나면(배열이 아니거나 안에 문자열이 아닌 것이 섞임) **거기서 멈춘다** — 지어내지 않는다. 항목이 아닌
+/// 것을 건너뛰고 계속하면 provider 가 모양을 바꿨을 때 엉뚱한 값이 경로로 둔갑한다.
+pub const ChangedFiles = struct {
+    scan: Scanner,
+    started: bool = false,
+    done: bool = false,
+
+    pub fn next(self: *ChangedFiles) ?[]const u8 {
+        if (self.done) return null;
+        if (!self.started) {
+            self.started = true;
+            self.scan.skipWs();
+            if ((self.scan.peek() orelse return self.stop()) != '[') return self.stop();
+            self.scan.i += 1;
+        }
+        self.scan.skipWs();
+        const c = self.scan.peek() orelse return self.stop();
+        if (c == ']') return self.stop();
+        if (c == ',') {
+            self.scan.i += 1;
+            self.scan.skipWs();
+        }
+        if ((self.scan.peek() orelse return self.stop()) != '"') return self.stop();
+        return self.scan.rawString() orelse self.stop();
+    }
+
+    fn stop(self: *ChangedFiles) ?[]const u8 {
+        self.done = true;
+        return null;
+    }
+};
+
+pub fn changedFiles(ev: Event) ChangedFiles {
+    return .{ .scan = .{ .src = ev.changed_files_raw, .i = 0 } };
 }
 
 /// 손상된 줄 안에서 **온전한 이벤트를 다시 찾는다**(재동기화).
@@ -979,6 +1052,60 @@ test "손상된 줄은 조용히 버린다 — 동시 append로 섞일 수 있�
     try testing.expect(parseLine("claude\tnot-json") == null);
     try testing.expect(parseLine("claude\t{\"hook_event_name\":\"Stop\"") == null); // 잘림
     try testing.expect(parseLine("claude\t{\"session_id\":\"x\"}") == null); // 이벤트 이름 없음
+}
+
+test "PostToolUse 의 bashEditDiff — changedFiles 원문과 unavailable 을 읽고 hunks 는 들지 않는다 (AT3b-2)" {
+    // 실측 모양(2026-09-20, claude 2.1.278 bypassPermissions): `files`(hunks) → `moreFiles` → `changedFiles`.
+    const line = "claude\t{\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"Bash\"," ++
+        "\"tool_input\":{\"command\":\"sed -i '' s/a/b/ a.txt\"}," ++
+        "\"tool_response\":{\"stdout\":\"\",\"stderr\":\"\",\"interrupted\":false,\"isImage\":false,\"noOutputExpected\":false," ++
+        "\"bashEditDiff\":{\"files\":[{\"filePath\":\"/r/a.txt\",\"hunks\":[{\"oldStart\":1,\"oldLines\":1,\"newStart\":1,\"newLines\":1,\"lines\":[\"-a\",\"+b\"]}]}]," ++
+        "\"moreFiles\":1,\"changedFiles\":[\"/r/a.txt\",\"/r/sub/b \\\"q\\\".txt\"]}}," ++
+        "\"tool_use_id\":\"toolu_1\",\"duration_ms\":12}";
+    const ev = parseLine(line).?;
+    try testing.expectEqual(Kind.post_tool_use, ev.kind);
+    try testing.expectEqualStrings("toolu_1", ev.tool_use_id);
+    try testing.expect(!ev.shell_diff_unavailable);
+    try testing.expect(std.mem.startsWith(u8, ev.changed_files_raw, "["));
+    var it = changedFiles(ev);
+    try testing.expectEqualStrings("/r/a.txt", it.next().?);
+    // 둘째는 이스케이프가 남은 원문이다 — 소비자가 `decodeInto` 로 푼다.
+    const second = it.next().?;
+    var buf: [64]u8 = undefined;
+    try testing.expectEqualStrings("/r/sub/b \"q\".txt", decodeInto(&buf, second));
+    try testing.expect(it.next() == null);
+    try testing.expect(it.next() == null); // 끝난 뒤에도 안전
+
+    // `unavailable: true` — 목록이 없고 사실만 선다.
+    const un = parseLine("claude\t{\"hook_event_name\":\"PostToolUse\",\"tool_response\":{\"stdout\":\"\",\"bashEditDiff\":{\"files\":[],\"moreFiles\":0,\"unavailable\":true}},\"tool_use_id\":\"toolu_2\"}").?;
+    try testing.expect(un.shell_diff_unavailable);
+    try testing.expectEqualStrings("", un.changed_files_raw);
+    var it_un = changedFiles(un);
+    try testing.expect(it_un.next() == null);
+
+    // 훅이 상한 초과에서 `files` 절을 잘라낸 모양(`agent_hook_command`) — `changedFiles` 만 남아도 읽힌다.
+    const stripped = parseLine("claude\t{\"hook_event_name\":\"PostToolUse\",\"tool_response\":{\"stdout\":\"\",\"bashEditDiff\":{\"moreFiles\":3,\"changedFiles\":[\"/r/x\"]}},\"tool_use_id\":\"toolu_3\"}").?;
+    var it3 = changedFiles(stripped);
+    try testing.expectEqualStrings("/r/x", it3.next().?);
+
+    // codex: `tool_response` 가 문자열 — 내려가지 않고 줄은 산다.
+    const codex = parseLine("codex\t{\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"Bash\",\"tool_response\":\"out\\n\",\"tool_use_id\":\"exec-1\"}").?;
+    try testing.expectEqualStrings("exec-1", codex.tool_use_id);
+    var it_codex = changedFiles(codex);
+    try testing.expect(it_codex.next() == null);
+
+    // 형이 어긋나면 지어내지 않는다: 배열이 아닌 `changedFiles`, 문자열이 아닌 항목이 섞인 배열.
+    const not_array = parseLine("claude\t{\"hook_event_name\":\"PostToolUse\",\"tool_response\":{\"bashEditDiff\":{\"changedFiles\":\"/r/a\"}},\"tool_use_id\":\"t\"}").?;
+    var it_na = changedFiles(not_array);
+    try testing.expect(it_na.next() == null);
+    const mixed = parseLine("claude\t{\"hook_event_name\":\"PostToolUse\",\"tool_response\":{\"bashEditDiff\":{\"changedFiles\":[\"/r/a\",7,\"/r/b\"]}},\"tool_use_id\":\"t\"}").?;
+    var itm = changedFiles(mixed);
+    try testing.expectEqualStrings("/r/a", itm.next().?);
+    try testing.expect(itm.next() == null); // 7 에서 멈춘다 — /r/b 를 지어내지 않는다
+    // 값 안의 같은 낱말에 안 걸린다 — stdout 에 `"changedFiles":[...]` 글자가 있어도 키 위치가 아니다.
+    const decoy = parseLine("claude\t{\"hook_event_name\":\"PostToolUse\",\"tool_response\":{\"stdout\":\"\\\"changedFiles\\\":[\\\"/fake\\\"]\"},\"tool_use_id\":\"t\"}").?;
+    var it_decoy = changedFiles(decoy);
+    try testing.expect(it_decoy.next() == null);
 }
 
 test "모르는 이벤트는 버리지 않고 unknown으로 든다" {

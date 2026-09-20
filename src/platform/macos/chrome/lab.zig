@@ -144,6 +144,11 @@ pub const ScenarioId = enum {
     /// 칩·펼친 파일 행의 증감은 **사용자 캡처로만** 보였다. 실제로 그 목록은 파일마다 증감이 빈 채로
     /// 나갔다(사용자 지적 2026-08-27 — 「라인 몇 개 바뀐지 나왔으면」).
     scm_history,
+    /// AT3b-2 — **에이전트 탭의 턴 파일 배지**. 펼친 턴 아래 파일 줄 넷이 근거 넷(`ai_edit`·`shell_edit`·
+    /// `turn_change`·`unknown`)을 하나씩 든다. 셸 diff 근거(`shell_edit`)가 편집 도구(`ai_edit`)와 **같은 기호·
+    /// 같은 색**으로 서는지, `turn_change` 의 `·` 가 흐린지, 근거 없음이 **비는지**를 한 캡처에서 견준다.
+    /// 이 탭에도 Lab 시나리오가 없었다 — 배지는 사용자 캡처로만 보였다.
+    scm_turn_badges,
     /// SB1 §5.2 — 사이드바 배경 strip이 창 바닥까지 가지 않고 **상태바 위에서 끊기는지**를 픽셀로 본다.
     /// 도크 내용은 필요 없다(strip은 `.m`이 직접 그린다) — 빈 프레임에 사이드바 폭·상태바 높이만 실어 준다.
     sidebar_status_strip,
@@ -419,6 +424,7 @@ pub fn buildFrame(
         .detail_loading, .detail_ready, .detail_stale, .detail_unavailable => buildDetailFrame(scenario, tokens, buffers),
         .scm_rows, .scm_row_hover, .scm_conflict_hover, .scm_conflict_resolved_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_small_font, .dock_over_status_bar => buildScmFrame(scenario, tokens, buffers),
         .scm_history => buildScmHistoryFrame(scenario, tokens, buffers),
+        .scm_turn_badges => buildScmTurnBadgesFrame(scenario, tokens, buffers),
         .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome => buildFileTreeFrame(scenario, tokens, buffers),
         .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper, .context_menu_bottom_right => buildContextMenuFrame(scenario, tokens, buffers),
         .dropdown_open, .dropdown_bottom_clamp => buildDropdownFrame(scenario, tokens, buffers),
@@ -1599,7 +1605,7 @@ fn buildDockFrame(
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
             .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
             // editor_gutter는 buildEditorGutterFrame이 처리한다 — 도크 목록을 타지 않는다.
-            .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper, .context_menu_bottom_right, .dropdown_open, .dropdown_bottom_clamp, .scm_rows, .scm_history, .scm_row_hover, .scm_conflict_hover, .scm_conflict_resolved_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_minimap, .editor_selection, .editor_find, .editor_diagnostics, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_diff, .editor_diff_scrolled, .editor_diff_selection, .editor_merge_panes, .editor_merge_narrow, .editor_merge_scrolled, .editor_merge_hscrolled, .editor_merge_caret => unreachable,
+            .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper, .context_menu_bottom_right, .dropdown_open, .dropdown_bottom_clamp, .scm_rows, .scm_history, .scm_turn_badges, .scm_row_hover, .scm_conflict_hover, .scm_conflict_resolved_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_minimap, .editor_selection, .editor_find, .editor_diagnostics, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_diff, .editor_diff_scrolled, .editor_diff_selection, .editor_merge_panes, .editor_merge_narrow, .editor_merge_scrolled, .editor_merge_hscrolled, .editor_merge_caret => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{
@@ -2001,6 +2007,65 @@ fn buildScmFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers: Fram
     if (budget.ops > buffers.ops.len or budget.runs > buffers.text_runs.len or budget.text_bytes > buffers.text_bytes.len)
         return error.LabBufferTooSmall;
     const draws = try scm_dock.view.view(props, frame, state, tokens, .{
+        .ops = buffers.ops[0..budget.ops],
+        .runs = buffers.text_runs[0..budget.runs],
+        .text_bytes = buffers.text_bytes[0..budget.text_bytes],
+    });
+    return .{ .tree = frame.tree, .draws = draws };
+}
+
+/// 에이전트 탭 — 펼친 턴과 그 파일 줄(AT3b-2). 파일 줄 넷이 `TurnFileOrigin` 넷을 하나씩 든다.
+///
+/// 픽스처는 계약 §4.2 의 배지 표를 그대로 옮긴 것이다: 편집 도구가 고친 파일(`✎`), **셸 diff 가 검증한 파일**
+/// (같은 `✎` — 사용자 결정 2026-09-20), 턴 중에 바뀌었으나 근거가 없는 파일(`·`), 그리고 캡처가 없는 턴의
+/// 파일(아무것도 안 그린다). 턴 줄의 요약(`4개 파일 · ✎2`)이 두 근거를 합산한 수와 맞는지도 이 캡처가 본다.
+fn buildScmTurnBadgesFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers: FrameBuffers) !Frame {
+    const items = [_]scm_dock.types.Item{
+        .{ .turn = .{
+            .index = 0,
+            .title = "마지막 턴",
+            .agent = "claude",
+            .summary = "4개 파일 · ✎2",
+            .when = "2분 전",
+            .reply = "셸 구간을 닫고 changedFiles 를 캡처에 실었다",
+            .expanded = true,
+        } },
+        .{ .commit_file = .{ .index = 0, .name = "agent_hook_event.zig", .dir = "src/session/", .status = .modified, .letter = 'M', .added = 41, .removed = 3, .has_delta = true, .from_turn = true, .origin = .ai_edit } },
+        .{ .commit_file = .{ .index = 1, .name = "turn_capture.zig", .dir = "src/session/", .status = .modified, .letter = 'M', .added = 58, .removed = 6, .has_delta = true, .from_turn = true, .origin = .shell_edit } },
+        .{ .commit_file = .{ .index = 2, .name = "agent-turn-changes.md", .dir = "docs/plans/", .status = .modified, .letter = 'M', .added = 12, .removed = 0, .has_delta = true, .from_turn = true, .origin = .turn_change } },
+        .{ .commit_file = .{ .index = 3, .name = "build.zig", .dir = "", .status = .modified, .letter = 'M', .added = 2, .removed = 1, .has_delta = true, .from_turn = true, .origin = .unknown } },
+        .{ .turn = .{
+            .index = 1,
+            .title = "2턴 전",
+            .agent = "claude",
+            .summary = "1개 파일",
+            .when = "9분 전",
+            .reply = "PostToolUseFailure 를 세트에 넣었다",
+        } },
+    };
+    const props = scm_dock.types.Props{
+        .viewport_px = .{ .x = 0, .y = 0, .width = scenario.viewport_px.width, .height = scenario.viewport_px.height },
+        .cell_width_px = scenario.cell_w_px,
+        .advance_milli_per_point = scenario.advance_milli_per_point,
+        .snapshot_generation = 1,
+        .items = &items,
+        .branch = "",
+        .active_tab = .agent,
+        .show_summary = false,
+        .changed_file_count = 4,
+    };
+    const frame = try scm_dock.build.build(props, .{
+        .nodes = buffers.scm_nodes,
+        .entries = buffers.entries,
+        .layout_items = buffers.items,
+        .flex_scratch = buffers.flex_scratch,
+        .child_rects = buffers.child_rects,
+        .actions = buffers.scm_actions,
+    });
+    const budget = scm_dock.view.drawBufferSizes(props, frame.tree.entries.len);
+    if (budget.ops > buffers.ops.len or budget.runs > buffers.text_runs.len or budget.text_bytes > buffers.text_bytes.len)
+        return error.LabBufferTooSmall;
+    const draws = try scm_dock.view.view(props, frame, .{}, tokens, .{
         .ops = buffers.ops[0..budget.ops],
         .runs = buffers.text_runs[0..budget.runs],
         .text_bytes = buffers.text_bytes[0..budget.text_bytes],

@@ -924,7 +924,7 @@ pub fn build(b: *std.Build) void {
         macos_chrome_lab_smoke.root_module.linkFramework("QuartzCore", .{});
 
         const macos_chrome_lab_smoke_step = b.step("macos-chrome-lab-smoke", "Capture deterministic Chrome Lab scenarios through the product Metal renderer");
-        inline for ([_][]const u8{ "empty", "loading", "retained-list", "font-specimen", "partial-scroll", "partial-group-scroll", "scrollbar", "sticky-at-rest", "sticky-pinned", "sticky-pushed", "detail-loading", "detail-ready", "detail-stale", "detail-unavailable", "sidebar-status-strip", "editor-gutter", "editor-widget-row", "editor-conflict", "editor-scrolled", "editor-font-large", "editor-hazard", "editor-wide-glyph", "editor-wrap", "editor-hscroll", "editor-folded", "editor-wrap-scrolled", "editor-wrap-stale-scroll", "editor-real-file", "editor-typescript", "editor-minimap", "editor-selection", "editor-find", "editor-diagnostics", "editor-caret-bar", "editor-caret-block", "editor-caret-underline", "editor-diff-selection", "editor-diff", "editor-diff-scrolled", "editor-merge-panes", "editor-merge-narrow", "editor-merge-scrolled", "editor-merge-hscrolled", "editor-merge-caret", "context-menu-checked", "context-menu-unchecked", "context-menu-send", "context-menu-send-helper", "context-menu-bottom-right", "dropdown-open", "dropdown-bottom-clamp", "scm-rows", "scm-history", "scm-row-hover", "scm-conflict-hover", "scm-conflict-resolved-hover", "scm-repo-hover", "scm-scrolled", "scm-commit-edit", "scm-blocker", "scm-small-font", "dock-over-status-bar", "file-tree-rows", "file-tree-row-hover", "file-tree-scrolled", "file-tree-over-chrome", "sort-toggle-hover", "sort-toggle-pressed" }) |scenario| {
+        inline for ([_][]const u8{ "empty", "loading", "retained-list", "font-specimen", "partial-scroll", "partial-group-scroll", "scrollbar", "sticky-at-rest", "sticky-pinned", "sticky-pushed", "detail-loading", "detail-ready", "detail-stale", "detail-unavailable", "sidebar-status-strip", "editor-gutter", "editor-widget-row", "editor-conflict", "editor-scrolled", "editor-font-large", "editor-hazard", "editor-wide-glyph", "editor-wrap", "editor-hscroll", "editor-folded", "editor-wrap-scrolled", "editor-wrap-stale-scroll", "editor-real-file", "editor-typescript", "editor-minimap", "editor-selection", "editor-find", "editor-diagnostics", "editor-caret-bar", "editor-caret-block", "editor-caret-underline", "editor-diff-selection", "editor-diff", "editor-diff-scrolled", "editor-merge-panes", "editor-merge-narrow", "editor-merge-scrolled", "editor-merge-hscrolled", "editor-merge-caret", "context-menu-checked", "context-menu-unchecked", "context-menu-send", "context-menu-send-helper", "context-menu-bottom-right", "dropdown-open", "dropdown-bottom-clamp", "scm-rows", "scm-history", "scm-turn-badges", "scm-row-hover", "scm-conflict-hover", "scm-conflict-resolved-hover", "scm-repo-hover", "scm-scrolled", "scm-commit-edit", "scm-blocker", "scm-small-font", "dock-over-status-bar", "file-tree-rows", "file-tree-row-hover", "file-tree-scrolled", "file-tree-over-chrome", "sort-toggle-hover", "sort-toggle-pressed" }) |scenario| {
             const run_chrome_lab = b.addRunArtifact(macos_chrome_lab_smoke);
             run_chrome_lab.setCwd(b.path("."));
             run_chrome_lab.setEnvironmentVariable("MARU_CHROME_LAB_SCENARIO", scenario);
@@ -3993,12 +3993,12 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
             .imports = &.{.{ .name = "shutdown_wire_contract", .module = shutdown_wire_contract_mod }},
         }),
-        .filters = &.{ "충돌 행은 스테이지가 아니라", "충돌과 평범한 변경이 섞인 섹션", "행: 스테이지·언스테이지·충돌", "마커가 없어진 충돌 행에는", "conflict-markers argv", "모두 스테이지의 계획", "헤더 충돌 이동 버튼" },
+        .filters = &.{ "충돌 행은 스테이지가 아니라", "충돌과 평범한 변경이 섞인 섹션", "행: 스테이지·언스테이지·충돌", "마커가 없어진 충돌 행에는", "conflict-markers argv", "모두 스테이지의 계획", "헤더 충돌 이동 버튼", "턴 파일 배지" },
     });
     attachPngCodec(b, scm_row_model_tests.root_module);
     scm_row_model_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
     const run_scm_row_model_tests = b.addRunArtifact(scm_row_model_tests);
-    b.step("test-scm-row-model", "Run the SCM row-action model judges only (S1 filter)").dependOn(&run_scm_row_model_tests.step);
+    b.step("test-scm-row-model", "Run the SCM row-action model judges and the turn file badge view judges only (S1 + AT3 filter)").dependOn(&run_scm_row_model_tests.step);
 
     // 원격 변경 결과 wire(RF6a) 순수 판정자만. 같은 이유로 maru 그래프에 필터를 건다.
     const remote_mutation_wire_tests = addProjectTest(b, .{
@@ -4101,7 +4101,7 @@ pub fn build(b: *std.Build) void {
                     .{ .name = "syntax", .module = syntax_mod },
                 },
             }),
-            .filters = &.{ "훅", "턴 스냅샷" },
+            .filters = &.{ "훅", "턴 스냅샷", "턴 파일 배지" },
         });
         turn_capture_wiring_tests.root_module.link_libc = true;
         for ([_][]const u8{ "AppKit", "Metal", "MetalKit", "QuartzCore", "CoreText", "CoreGraphics", "ImageIO" }) |fw| {
@@ -4113,7 +4113,7 @@ pub fn build(b: *std.Build) void {
         });
         const run_turn_capture_wiring = b.addRunArtifact(turn_capture_wiring_tests);
         // **개수 가드** — 필터가 아무것도 안 고르는 회귀는 실제로 CI 를 통과한 적이 있다(위 `test-remote-activity-vertical`).
-        run_turn_capture_wiring.addArg("--maru-expect-tests=47");
+        run_turn_capture_wiring.addArg("--maru-expect-tests=50");
         run_turn_capture_wiring.setCwd(b.path("."));
         b.step("test-agent-turn-capture", "Run the agent turn capture wiring judges only (AT3/AT4/AT3b)").dependOn(&run_turn_capture_wiring.step);
         macos_only_test_step.dependOn(&run_turn_capture_wiring.step);

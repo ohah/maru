@@ -610,7 +610,8 @@ fn originMark(origin: types.TurnFileOrigin) ?[]const u8 {
     return switch (origin) {
         // 근거가 없으면 **아무것도 그리지 않는다** — 「모른다」를 기호로 지어내면 「셸이 고쳤다」와 섞인다.
         .unknown => null,
-        .ai_edit => "✎",
+        // 셸 diff 도 같은 기호다 — provider 가 내용 diff 로 검증한 근거라 편집 도구와 같은 급(types 주석).
+        .ai_edit, .shell_edit => "✎",
         .turn_change => "·",
     };
 }
@@ -1556,7 +1557,7 @@ const Writer = struct {
                 try self.trailing(rect, text, switch (file.origin) {
                     // 본문 색이다 — 흐린 `·` 와 **대비가 나야** 두 근거가 갈려 보인다. 새 역할을 만들지
                     // 않는다(테마마다 두 곳을 고치게 된다 — `statusRole` 과 같은 규율).
-                    .ai_edit => .surface_fg,
+                    .ai_edit, .shell_edit => .surface_fg,
                     else => .muted_fg,
                 }, .supporting, right_inset);
                 right_inset += @intFromFloat(self.measureBudget(text, .supporting) + gap);
@@ -2976,6 +2977,30 @@ test "턴 파일 배지는 상태 문자와 겹치지 않고 이름보다 오른
     // 이름의 폭 예산이 배지를 침범하지 않는다.
     const budget = name.max_width_px orelse return error.MissingBudget;
     try testing.expect(name.origin.x + @as(i32, @intCast(budget)) <= mark.origin.x);
+}
+
+// [AT3b-2] 셸 diff 근거는 편집 도구와 **같은 기호·같은 색**이다(사용자 결정 2026-09-20 — 둘 다 내용 diff 로 검증됐다).
+// 다른 값(`.shell_edit`)을 두는 것은 테스트·툴팁·뒷날의 분리를 위해서지 지금 화면이 다르기 때문이 아니다.
+test "턴 파일 배지: 셸 diff 근거는 편집 도구와 같은 ✎ 이고 같은 색이다" {
+    var storage: TestStorage = .{};
+    const items = [_]types.Item{
+        .{ .commit_file = .{ .name = "by_tool.zig", .status = .modified, .letter = 'M', .from_turn = true, .origin = .ai_edit } },
+        .{ .commit_file = .{ .name = "by_shell.zig", .status = .modified, .letter = 'M', .from_turn = true, .origin = .shell_edit } },
+    };
+    const draws = try renderFixture(&storage, .{}, &items);
+    var marks: usize = 0;
+    var color: ?tokens.ColorRole = null;
+    for (draws.ops) |op| switch (op) {
+        .text => |text| for (text.runs) |run| {
+            if (!std.mem.eql(u8, run.text, "✎")) continue;
+            marks += 1;
+            const role = run.role orelse text.role;
+            if (color) |c| try testing.expectEqual(c, role) else color = role;
+        },
+        else => {},
+    };
+    try testing.expectEqual(@as(usize, 2), marks);
+    try testing.expectEqual(tokens.ColorRole.surface_fg, color.?);
 }
 
 // **근거가 없으면 아무것도 그리지 않는다.** 「모른다」를 기호로 지어내면 「셸이 고쳤다」와 섞인다.

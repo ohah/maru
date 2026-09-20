@@ -5494,6 +5494,18 @@ pub fn build(b: *std.Build) void {
     run_client_slot_scan_boundary_tests.addArg("--maru-expect-tests=1");
     run_client_slot_scan_boundary_tests.setCwd(b.path("."));
     boundary_step.dependOn(&run_client_slot_scan_boundary_tests.step);
+    // Client poll 프레임 캐시의 배선 — 프레임 루프가 도장을 올리고, polling 읽기가 그 캐시를 쓰는가.
+    const client_poll_frame_memo_wiring_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/client_poll_frame_memo_wiring.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_client_poll_frame_memo_wiring_tests = b.addRunArtifact(client_poll_frame_memo_wiring_tests);
+    run_client_poll_frame_memo_wiring_tests.addArg("--maru-expect-tests=2");
+    run_client_poll_frame_memo_wiring_tests.setCwd(b.path("."));
+    boundary_step.dependOn(&run_client_poll_frame_memo_wiring_tests.step);
     const debug_trace_alloc_wiring_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/debug_trace_alloc_wiring.zig"),

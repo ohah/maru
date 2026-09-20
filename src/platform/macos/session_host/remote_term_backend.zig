@@ -3385,6 +3385,8 @@ pub const RemoteTermBackend = struct {
     }
 
     pub fn maintenanceEventTick(self: *RemoteTermBackend) void {
+        // 프레임 도장을 올린다 — 이 tick 안에서 같은 host Client 에 두 번째 «비었나» 질문이 poll 을 건너뛴다(`client.zig`).
+        client_mod.advanceUiFrameStamp();
         var pending_iterator = self.runtimes.iterator();
         while (pending_iterator.next()) |row| {
             // 여러 AppSession window가 같은 backend를 순서대로 tick해도 앞 window가 만든 frame을 덮지 않는다.

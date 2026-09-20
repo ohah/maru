@@ -57,6 +57,7 @@ pub const components = struct {
     pub const hover_box = @import("chrome/components/hover_box.zig"); // 편집기 호버 박스(낱말 옆 텍스트 블록 — 모달 아님, native-editor-ui §8.3 · tooling §8.2b)
     pub const rename_box = @import("chrome/components/rename_box.zig"); // 심볼 이름 바꾸기 상자(낱말 아래 한 줄 입력 — tooling §8.2f)
     pub const suggest_box = @import("chrome/components/suggest_box.zig"); // 자동완성 목록 상자(낱말 아래 창 행 — tooling §8.2g)
+    pub const suggest_docs = @import("chrome/components/suggest_docs.zig"); // 자동완성 문서 패널(목록 상자 옆 줄 상자 — tooling §8.2g-d)
     pub const image_preview = @import("chrome/components/image_preview.zig"); // MP1: 터미널 `[Image #N]` 프리뷰 팝오버의 자리·크기(pane 을 모른다 — workspace clamp)
     pub const notifications = @import("chrome/components/notifications.zig"); // 인앱 알림 센터 패널(2줄 카드 오버레이 모달)
     pub const toggle = @import("chrome/components/toggle.zig"); // 설정 폼 위젯 — on/off 스위치(CS-4-1, leaf 컴포넌트)

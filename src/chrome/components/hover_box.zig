@@ -141,13 +141,20 @@ pub fn view(
     _ = tk;
     if (!state.open) return;
     const rect = boxRect(state, lines, p) orelse return;
+    try viewAt(rect, lines, state.scroll_rows, p, arena, out);
+}
+
+/// 줄 상자를 **주어진 rect 에** 그린다 — `view`(앵커 아래)와 자동완성 문서 패널(§8.2g-d, 목록 옆)이 같이 쓴다. 테두리 quad 하나 +
+/// 보이는 줄들(`scroll_rows` 부터, `max_rows` 까지).
+pub fn viewAt(rect: draw.Rect, lines: []const Line, scroll_rows: u32, p: props.ChromeProps, arena: std.mem.Allocator, out: *std.ArrayList(draw.Op)) !void {
+    if (lines.len == 0) return;
     const cw = @max(p.metrics.cell_width_px, 1);
     const ch = @max(p.metrics.cell_height_px, 1);
     const bg_r = p.shape.corner_radius_px;
     const bw = p.shape.border_width_px;
     try out.append(arena, .{ .quad = .{ .rect = rect, .fill_role = .surface_bg, .corner_radii = .{ bg_r, bg_r, bg_r, bg_r }, .border_widths = .{ bw, bw, bw, bw }, .border_role = .focus_accent } });
     const visible: usize = @min(lines.len, max_rows);
-    const first: usize = @min(state.scroll_rows, lines.len - visible);
+    const first: usize = @min(scroll_rows, lines.len - visible);
     const inner_cols: u32 = @intCast(@max(rect.w / cw, 2 * pad_cols) - 2 * pad_cols);
     for (lines[first .. first + visible], 0..) |l, i| {
         if (l.text.len == 0) continue;

@@ -317,6 +317,7 @@ fn handleCompletion(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: s
         ld.put(arena, "detail", .{ .string = "(use fake)" }) catch return;
         ld.put(arena, "description", .{ .string = "mod fake" }) catch return;
         it.put(arena, "labelDetails", .{ .object = ld }) catch return;
+        it.put(arena, "documentation", .{ .string = "adds an include" }) catch return; // 문자열 꼴(§8.2g-d) — resolve 없이 곧바로
         it.put(arena, "sortText", .{ .string = "zzzz" }) catch return;
         it.put(arena, "preselect", .{ .bool = true }) catch return;
         // textEdit: [낱말 시작, caret) → fake_import
@@ -750,6 +751,11 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
         var it: std.json.ObjectMap = .empty;
         it.put(arena, "label", .{ .string = "lazy_import" }) catch return;
         it.put(arena, "detail", .{ .string = "resolved" }) catch return;
+        // documentation(§8.2g-d) — 마크다운: 굵게·펜스·목록(줄이 12 를 넘어 패널이 굴러가는 관측점).
+        var doc: std.json.ObjectMap = .empty;
+        doc.put(arena, "kind", .{ .string = "markdown" }) catch return;
+        doc.put(arena, "value", .{ .string = "Lazy **import**.\n\n```c\n#include \"lazy.h\"\n```\n\n- one\n- two\n- three\n- four\n- five\n- six\n- seven\n- eight\n- nine\n- ten\n- eleven\n- twelve" }) catch return;
+        it.put(arena, "documentation", .{ .object = doc }) catch return;
         var adds: std.json.Array = .init(arena);
         adds.append(editValue(arena, 0, 0, 0, "#include \"lazy.h\"\n") catch return) catch return;
         it.put(arena, "additionalTextEdits", .{ .array = adds }) catch return;

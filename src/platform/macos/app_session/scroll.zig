@@ -230,6 +230,8 @@ pub fn scrollWheel(self: *AppSession, delta_y: f64, delta_x: f64, precise: bool,
     if (!self.surface_initialized) return;
     // 호버 박스(tooling §8.2b): 상자 안 휠은 상자를 굴리고 삼킨다, 밖이면 닫고 흘려보낸다.
     if (editor_ops.hover_client.wheel(self, x_px, y_px, delta_y)) return;
+    // 자동완성 문서 패널(§8.2g-d): 패널 안 휠은 패널을 굴리고 삼킨다.
+    if (editor_ops.completion_client.wheel(self, x_px, y_px, delta_y)) return;
     // 닫기 확인 모달은 결정 게이트라 마우스 클릭(mouse())뿐 아니라 휠도 막는다 — 안 막으면 모달 뒤 터미널/스크롤백이
     // 사용자 결정 중에 움직이거나(스크롤) 트래킹 앱에 휠이 리포트된다(모달 의도 위배).
     if (self.chrome_host.confirm.open) return;

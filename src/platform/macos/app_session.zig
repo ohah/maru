@@ -2431,6 +2431,8 @@ fn modalInputRole(field: ChromeHostField) ModalInputRole {
         .rename_box => .not_an_overlay,
         // 자동완성 목록(§8.2g) — `↑↓`/`Enter`/`Tab`/`Esc` 만 편집기 키 경로가 소비하고 나머지는 편집기로(ui §8 규칙 3).
         .suggest_box => .not_an_overlay,
+        // 자동완성 문서 패널(§8.2g-d) — 목록 상자의 곁가지, 키를 가로채지 않고 받는 포인터는 패널 안 휠뿐.
+        .suggest_docs => .not_an_overlay,
         .notice => .{ .transient_toast = .notice },
     };
 }
@@ -24228,7 +24230,7 @@ pub const AppSession = struct {
         // 설 자리를 다시 묻는다(없으면 스스로 내려간다).
         // 자동완성 팝업(§8.2g) — 프레임에 상자는 하나라 이것이 뜨면 시그니처·호버는 이 프레임에 안 그린다(상태는 남는다).
         if (draws.items.len == 0 and editor_ops.completion_client.refresh(self)) {
-            try self.chrome_host.collectSuggestBoxDraws(editor_ops.completion_client.rows(self), props, &tokens, arena, &draws);
+            try self.chrome_host.collectSuggestBoxDraws(editor_ops.completion_client.rows(self), editor_ops.completion_client.docsLines(self), props, &tokens, arena, &draws);
         } else if (draws.items.len == 0 and editor_ops.signature_client.refresh(self)) {
             // 시그니처 힌트(§8.2d) — 같은 상자, 주인이 시그니처일 때. 호버의 refresh 는 그동안 false 다.
             try self.chrome_host.collectHoverBoxDraws(editor_ops.signature_client.lines(self), props, &tokens, arena, &draws);

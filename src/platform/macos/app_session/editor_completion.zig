@@ -21,6 +21,8 @@ const term_ops = @import("term.zig");
 const lsp = maru.session.editor.lsp;
 const completion = lsp.completion;
 const suggest_box = chrome.components.suggest_box;
+const suggest_docs = chrome.components.suggest_docs;
+const hover_text = maru.session.editor.hover_text;
 
 /// 응답에서 복사해 든 항목.
 pub const Owned = struct {
@@ -33,6 +35,8 @@ pub const Owned = struct {
     label_detail: []u8 = &.{},
     /// `labelDetails.description` — 오른쪽 열(§8.2g-c); 비면 행은 `detail` 을 쓴다.
     description: []u8 = &.{},
+    /// `documentation`(§8.2g-d) — 패널의 글(마크다운/평문). resolve 가 채우기도 한다.
+    documentation: []u8 = &.{},
     preselect: bool,
     /// `textEdit.range.start` 를 byte 로(응답 시점 본문) — 낱말 시작을 이긴다.
     edit_start: ?usize,
@@ -53,6 +57,7 @@ pub const Owned = struct {
         allocator.free(self.detail);
         if (self.label_detail.len > 0) allocator.free(self.label_detail);
         if (self.description.len > 0) allocator.free(self.description);
+        if (self.documentation.len > 0) allocator.free(self.documentation);
         self.additional.deinit(allocator);
         if (self.raw.len > 0) allocator.free(self.raw);
     }
@@ -81,6 +86,15 @@ pub const State = struct {
     /// 마지막으로 필터한 접두사(바뀌었을 때만 다시 센다).
     last_prefix: std.ArrayList(u8) = .empty,
     rows: std.ArrayList(suggest_box.Row) = .empty,
+    /// 문서 패널의 줄(§8.2g-d) — 글은 우리 소유(`docs_texts`). `docs_item` 항목의 것; 강조·응답마다 다시 만든다.
+    docs_lines: std.ArrayList(suggest_docs.Line) = .empty,
+    docs_item: ?usize = null,
+    /// 강조가 이 항목으로 온 시각(ms) — 미해결이면 250 ms 뒤에야 로딩 줄을 세운다.
+    docs_since_ms: u64 = 0,
+    docs_loading: bool = false,
+    /// 줄이 그 항목의 최종본이다(풀린 뒤 세움) — resolve 가 다시 오면 내린다.
+    docs_ready: bool = false,
+    docs_built: u64 = 0,
     /// resolve(§8.2g-b): 나가 있는 요청의 seq 와 그 항목(`items` 첨자), 확정이 그 응답을 기다리는가와 기다리기 시작한 시각.
     resolve_waiting: bool = false,
     resolve_seq: u32 = 0,
@@ -94,6 +108,7 @@ pub const State = struct {
     resolved_count: u64 = 0,
     accepted_after_resolve: u64 = 0,
     accepted_on_timeout: u64 = 0,
+    docs_toggles: u64 = 0,
     words_opened: u64 = 0,
     closed_empty: u64 = 0,
     accepted: u64 = 0,
@@ -107,6 +122,15 @@ pub const State = struct {
         self.order.clearRetainingCapacity();
         self.rows.clearRetainingCapacity();
         self.last_prefix.clearRetainingCapacity();
+        self.clearDocs(allocator);
+    }
+
+    pub fn clearDocs(self: *State, allocator: std.mem.Allocator) void {
+        for (self.docs_lines.items) |l| allocator.free(l.text);
+        self.docs_lines.clearRetainingCapacity();
+        self.docs_item = null;
+        self.docs_loading = false;
+        self.docs_ready = false;
     }
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
@@ -114,6 +138,7 @@ pub const State = struct {
         self.items.deinit(allocator);
         self.order.deinit(allocator);
         self.rows.deinit(allocator);
+        self.docs_lines.deinit(allocator);
         self.last_prefix.deinit(allocator);
     }
 };
@@ -155,6 +180,15 @@ pub fn triggerManual(self: *AppSession) bool {
     const term = pane_ops.activePane(self).activeTerm();
     if (term.kind != .editor or term.rt.editor_diff != null) return false;
     if (term.rt.editor_selection == null) return false;
+    // 목록이 보이고 강조 항목이 있으면 같은 키가 문서 패널을 토글한다(§8.2g-d — VS Code 의 `⌃Space` 와 같다).
+    const st = &self.editor_completion;
+    if (st.active and self.chrome_host.suggest_box.open and st.order.items.len > 0) {
+        self.chrome_host.suggest_docs.toggle();
+        st.docs_toggles += 1;
+        st.docs_item = null; // 다음 프레임이 다시 만든다(접었으면 비운다)
+        self.metal_dirty = true;
+        return true;
+    }
     const triggers = editor_lsp.completionTriggersFor(self, term);
     if (triggers != null and triggers.?.supported) return ask(self, term, null);
     return openWordsOnly(self, term, null);
@@ -288,6 +322,8 @@ fn ownedFrom(allocator: std.mem.Allocator, it: completion.Item, content: []const
     errdefer if (label_detail.len > 0) allocator.free(label_detail);
     const description: []u8 = if (it.description) |d| (if (d.len > 0) try allocator.dupe(u8, d) else &.{}) else &.{};
     errdefer if (description.len > 0) allocator.free(description);
+    const documentation: []u8 = if (it.documentation) |d| (if (d.len > 0) try allocator.dupe(u8, d) else &.{}) else &.{};
+    errdefer if (documentation.len > 0) allocator.free(documentation);
     var additional: lsp.text_edits.Changes = .{};
     if (it.additional) |ad| {
         additional = lsp.text_edits.toChanges(allocator, .{ .array = .{ .items = ad, .capacity = ad.len, .allocator = allocator } }, content, lines, enc) catch |err| switch (err) {
@@ -311,6 +347,7 @@ fn ownedFrom(allocator: std.mem.Allocator, it: completion.Item, content: []const
         .detail = detail,
         .label_detail = label_detail,
         .description = description,
+        .documentation = documentation,
         .preselect = it.preselect,
         .edit_start = if (it.edit_range) |r| lsp.position.offsetOf(content, lines, r.start.line, r.start.character, enc) else null,
         .additional = additional,
@@ -361,6 +398,12 @@ pub fn onResolveResponse(self: *AppSession, seq: u32, result: ?std.json.Value, e
                 item.insert = ni;
             } else |_| {}
         }
+        if (view.documentation) |d| if (!std.mem.eql(u8, d, item.documentation)) {
+            if (self.allocator.dupe(u8, d)) |nd| {
+                if (item.documentation.len > 0) self.allocator.free(item.documentation);
+                item.documentation = nd;
+            } else |_| {}
+        };
         if (view.detail) |d| if (!std.mem.eql(u8, d, item.detail)) {
             if (self.allocator.dupe(u8, d)) |nd| {
                 self.allocator.free(item.detail);
@@ -370,6 +413,7 @@ pub fn onResolveResponse(self: *AppSession, seq: u32, result: ?std.json.Value, e
         };
         st.resolved_count += 1;
     };
+    if (st.docs_item == st.resolve_item) st.docs_ready = false; // 패널이 다음 프레임에 갈아 끼운다(§8.2g-d)
     if (st.pending_accept) {
         st.pending_accept = false;
         st.accepted_after_resolve += 1;
@@ -481,6 +525,78 @@ pub fn refresh(self: *AppSession) bool {
         self.chrome_host.suggest_box.selected = sel_idx;
         self.chrome_host.suggest_box.scroll = scroll;
     } else self.chrome_host.suggest_box.moveAnchor(a.x, a.y, a.h);
+    refreshDocs(self);
+    return true;
+}
+
+/// 로딩 줄까지의 유예(ms) — VS Code 의 250 ms 와 같다(§8.2g-d).
+pub const docs_loading_ms: u64 = 250;
+
+/// 문서 패널의 줄을 강조 항목에 맞춘다(§8.2g-d) — 매 프레임 `refresh` 끝에서. 접혀 있으면 비운다. 강조가 바뀌면 다시 세우되,
+/// 미해결 항목은 `docs_loading_ms` 가 지나야 `…` 한 줄을 세우고, 풀린 뒤에는 detail 줄 + 빈 줄 + 문서 줄로 갈아 끼운다.
+fn refreshDocs(self: *AppSession) void {
+    const st = &self.editor_completion;
+    const docs = &self.chrome_host.suggest_docs;
+    if (!docs.expanded or st.order.items.len == 0) {
+        if (st.docs_item != null or st.docs_lines.items.len > 0) st.clearDocs(self.allocator);
+        return;
+    }
+    const pick = @min(self.chrome_host.suggest_box.selected, st.order.items.len - 1);
+    const idx = st.order.items[pick];
+    if (st.docs_item != idx) {
+        st.clearDocs(self.allocator);
+        st.docs_item = idx;
+        st.docs_since_ms = self.awakeMs();
+        docs.scroll_rows = 0;
+    }
+    const item = st.items.items[idx];
+    if (!item.resolved) {
+        if (st.docs_lines.items.len == 0 and self.awakeMs() -| st.docs_since_ms >= docs_loading_ms) {
+            pushDocLine(self, "…") catch return;
+            st.docs_loading = true;
+            self.metal_dirty = true;
+        }
+        return;
+    }
+    if (st.docs_ready) return;
+    // 풀렸다 — 로딩 줄이든 빈 것이든 진짜 줄로.
+    for (st.docs_lines.items) |l| self.allocator.free(l.text);
+    st.docs_lines.clearRetainingCapacity();
+    st.docs_loading = false;
+    st.docs_ready = true;
+    st.docs_built += 1;
+    if (item.detail.len > 0) pushDocLine(self, item.detail) catch return;
+    if (item.documentation.len > 0) {
+        if (st.docs_lines.items.len > 0) pushDocLine(self, "") catch return;
+        var reduced = hover_text.reduce(self.allocator, item.documentation) catch return;
+        defer reduced.deinit(self.allocator);
+        for (reduced.items.items) |l| pushDocLine(self, l.text) catch return;
+    }
+    self.metal_dirty = true;
+}
+
+fn pushDocLine(self: *AppSession, text: []const u8) error{OutOfMemory}!void {
+    const st = &self.editor_completion;
+    const owned = try self.allocator.dupe(u8, text);
+    errdefer self.allocator.free(owned);
+    try st.docs_lines.append(self.allocator, .{ .text = owned, .role = .surface_fg });
+}
+
+/// 문서 패널의 줄(`ChromeHost.collectSuggestBoxDraws` 가 받는다).
+pub fn docsLines(self: *AppSession) []const suggest_docs.Line {
+    return self.editor_completion.docs_lines.items;
+}
+
+/// 휠 — 문서 패널 안이면 행 단위로 굴리고 삼킨다(true). 밖이면 흘린다(목록은 닫지 않는다 — 휠은 읽는 동작이다).
+pub fn wheel(self: *AppSession, x_px: f64, y_px: f64, delta_y: f64) bool {
+    const st = &self.editor_completion;
+    if (!st.active or !self.chrome_host.suggest_box.open or st.docs_lines.items.len == 0) return false;
+    if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return false;
+    const p = self.buildChromeProps();
+    const beside = suggest_box.boxRect(&self.chrome_host.suggest_box, st.rows.items, p) orelse return false;
+    if (!suggest_docs.contains(&self.chrome_host.suggest_docs, st.docs_lines.items, beside, p, x_px, y_px)) return false;
+    const rows_delta: i32 = if (delta_y > 0) -1 else if (delta_y < 0) 1 else 0;
+    if (rows_delta != 0 and self.chrome_host.suggest_docs.scrollBy(rows_delta, st.docs_lines.items.len)) self.metal_dirty = true;
     return true;
 }
 
@@ -493,6 +609,11 @@ pub fn handleKey(self: *AppSession, key: maru.terminal.input.Key, mods: maru.ter
     const st = &self.editor_completion;
     if (!st.active) return false;
     if (mods.command or mods.control or mods.option) {
+        // `trigger_suggest` 로 풀리는 chord(`⌃Space`·`⌥Esc`)는 **닫지 않는다** — 목록이 열린 채 흘러가 `triggerManual` 이 문서 패널을
+        // 토글한다(§8.2g-d). 다른 수정자 chord 는 그대로 닫는다(§8.2g ⑻b).
+        const ev: maru.terminal.KeyEvent = .{ .key = key, .modifiers = mods };
+        const res = self.loaded_config.keyBindingResolver().resolveEditor(ev, false);
+        if (res == .app_action and res.app_action == .trigger_suggest) return false;
         hide(self);
         return false;
     }
@@ -566,6 +687,8 @@ pub fn mouseDown(self: *AppSession, x_px: f64, y_px: f64) bool {
                 return true;
             }
         }
+        // 문서 패널 안 클릭은 삼킨다(닫지 않는다 — 읽는 동작).
+        if (suggest_docs.contains(&self.chrome_host.suggest_docs, st.docs_lines.items, rect, p, x_px, y_px)) return true;
     }
     hide(self);
     return false;

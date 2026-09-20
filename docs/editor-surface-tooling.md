@@ -795,6 +795,35 @@ labelDetails 가 없다.
 - **A18** 그리기가 fold 의 label 값을 쓴다 — `fold` 만 재고 그림은 안 쟀다 → `SGB3` 에 60칸을 넘는 label 행(`…` 이 서고 오른쪽 1칸이 산다).
 - **A9** 문턱 계산의 안쪽 `@min(right_w, 16)` = 등가(바깥 `@min(right_w, …)` 이 이미 묶는다) → 뺐다. **B8** 빈 꼬리를 복사해도 0 바이트라 등가 — 「빈 것은 복사하지 않는다」는 뜻을 위해 남긴다.
 
+#### 8.2g-d 자동완성 ①-d — 옆 문서 패널 (2026-09-20, 계획 공격 뒤의 결정)
+
+**계획 공격이 드러낸 것.** ① §8.2g-c 뒤에도 긴 꼬리·설명은 60칸 안에서 `…` 로 접힌다 — 전문을 읽을 자리가 없다. ② VS Code(MIT, 동작만 —
+`suggestWidgetDetails.ts`·`suggestWidget.ts`·`suggestController.ts`): 패널 = **`detail`(코드 머리) + `documentation`(마크다운)**, 자리는 **동 → 서 → 남/북**
+순으로 들어가는 첫 자리, 토글은 mac `⌃Space`(위젯이 보이고 강조 항목이 있을 때 — 없을 땐 같은 키가 `triggerSuggest`), 펼침 상태는 프로필 저장
+(`expandSuggestionDocs`, 기본 false), 미해결 항목은 250 ms 뒤 「Loading…」, 드래그로 넓힐 수 있다. ③ 우리가 이미 가진 것: 마크다운 축소
+`session/editor/hover_text.reduce`(호버 §8.2b 가 쓴다), 줄 상자 `hover_box`(줄 배치·행 스크롤·폭 80/행 12 상한), `popup_box`(세로 배치 — **옆 배치가
+없다**). ④ `initialize` 의 completion `documentationFormat` 이 `["plaintext"]` 라 서버가 문서를 평문으로 준다 — 패널을 세우면 호버처럼 마크다운을 받아
+같은 축소를 쓴다(`Item` 은 아직 `documentation` 을 안 읽는다; resolve 로도 온다 — `resolveSupport` 에는 이미 있다).
+
+| 축 | 결정 | 근거 |
+| --- | --- | --- |
+| **내용** | `detail` 줄(코드) → 빈 줄 → `documentation`(문자열 또는 `MarkupContent.value`) 을 `hover_text.reduce` 로 줄들. 둘 다 없으면 패널이 없다. `documentationFormat: ["markdown", "plaintext"]` | ② · ③ |
+| **자리** | 목록 상자의 **오른쪽**(간격 1칸, 위 맞춤) → 안 들어가면 **왼쪽** → 그것도 안 되면 **아래**, 그것도 안 되면 **위**(`popup_box.placeBeside`). 네 방향 모두 workspace 안쪽 한 셀을 남긴다(§8 팝업 규칙) | ② 의 동→서→남/북 |
+| **크기** | `hover_box` 와 같다 — 폭 = 가장 긴 줄 + 좌우 1칸(상한 80), 높이 = 줄 수(상한 12), 긴 줄은 자르고 넘치는 줄은 행 스크롤(휠, 패널 안에서만) | ③ |
+| **토글** | 목록이 열려 있고 강조 항목이 있으면 `⌃Space`(=`trigger_suggest`) 는 **패널 토글**, 아니면 지금처럼 목록 열기. 펼침 상태는 **앱 세션 동안 기억**한다(닫았다 다시 열어도 그대로) — 디스크 저장은 다음(설정 저장 층의 결정) | ② 의 같은 키 |
+| **강조 따라가기** | 강조가 바뀌면 패널도 그 항목으로. 항목이 미해결이면(resolve 가 나가 있음) 강조 뒤 **250 ms** 가 지나야 `…` 한 줄(로딩)을 세우고, 응답이 오면 갈아 끼운다 — 250 ms 안에 오면 로딩 줄은 안 보인다 | ② 의 250 ms |
+| **닫힘** | 목록이 닫히면 패널도(줄은 비운다, 펼침 상태는 남는다). 패널은 키를 가로채지 않고(모달 아님) 포인터는 패널 안 휠만 | §8.2b 「모달 아님」과 같다 |
+| **하지 않는 것** | 드래그 넓히기 · 링크 클릭 · 펼침 상태 디스크 저장 · `documentation` 이 없는 항목의 resolve 재시도 | 다음 |
+
+**구현이 계약에 되먹인 것.** ① §8.2g ⑻b 「수정자 키는 목록을 닫는다」에 예외 하나 — `trigger_suggest` 로 풀리는 chord(`⌃Space`·`⌥Esc`, 키바인딩
+표로 판정)는 닫지 않고 흘려 `triggerManual` 이 토글한다(닫고 다시 열면 토글이 설 자리가 없다). ② 실측(rust-analyzer `HashMap`): 문서는 원문이
+줄바꿈된 채 오고(hard wrap) 우리는 80칸에서 자른다 — 랩 없음은 호버와 같은 결정. clangd 의 `documentation` 은 문자열 `From <stdio.h>`.
+③ 패널 줄은 강조 항목마다 다시 세우되 풀린 뒤에는 `docs_ready` 로 한 번만(프레임마다 축소하지 않는다) — resolve 응답이 그 항목이면 내린다.
+
+**관측점**: `CPL9`(순수: `documentation` 파싱 — 문자열·MarkupContent·없음, resolve 로 합치기) · `PBX1`(순수: `placeBeside` — 동·서·남·북과 clamp) ·
+`SGD1`(순수 chrome: 패널 줄·자리·스크롤) · `CMP6`(제품 경계: 가짜 서버 — `⌃Space` 토글, 강조 따라가기, 로딩 줄 250 ms, 응답 뒤 detail+문서, 닫힘, 세션
+기억, 패널 안 휠).
+
 ### 8.2h LSP 2단 ⑦ — code action (2026-09-19, 계획 공격 뒤의 결정)
 
 **계획 공격이 드러낸 것.** ① 결과는 `WorkspaceEdit` — §8.2f 의 `apply`(전부 검증·저장 정책·기록)를 **두 번째 소비자**가 그대로 쓴다(요청

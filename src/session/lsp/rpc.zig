@@ -101,7 +101,7 @@ pub fn initializeRequest(allocator: std.mem.Allocator, root_uri: []const u8, pid
                             .insertReplaceSupport = false,
                             // §8.2g-c — 서버가 label 의 꼬리(시그니처·import)와 설명을 `labelDetails` 로 따로 낸다; 선언했으니 행이 그린다.
                             .labelDetailsSupport = true,
-                            .documentationFormat = [_][]const u8{"plaintext"},
+                            .documentationFormat = [_][]const u8{ "markdown", "plaintext" }, // §8.2g-d — 패널이 호버와 같은 축소로 읽는다
                             // §8.2g-b — resolve 로 지연해 받는 속성.
                             .resolveSupport = .{ .properties = [_][]const u8{ "additionalTextEdits", "detail", "documentation" } },
                         },
@@ -1127,4 +1127,8 @@ test "LSJ14 initialize 가 completionItem.labelDetailsSupport 를 선언한다 (
     const init = try initializeRequest(a, "file:///r", 1);
     defer a.free(init);
     try testing.expect(std.mem.indexOf(u8, init, "\"labelDetailsSupport\":true") != null);
+    // §8.2g-d — completion 의 `completionItem` 블록 안에서(시그니처 쪽에도 같은 키가 있어 전체 검색은 헛것).
+    const ci = std.mem.indexOf(u8, init, "\"completionItem\":{").?;
+    const block = init[ci .. ci + @min(init.len - ci, 400)];
+    try testing.expect(std.mem.indexOf(u8, block, "\"documentationFormat\":[\"markdown\",\"plaintext\"]") != null);
 }

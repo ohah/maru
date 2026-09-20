@@ -98,9 +98,26 @@ test "SGD1 문서 패널 — 펼쳐야 서고, 목록 상자 오른쪽 한 칸 �
     try testing.expect(st.scrollBy(1, many.len));
     try testing.expectEqual(@as(u32, 1), st.scroll_rows);
     try testing.expect(!st.scrollBy(100, many.len) or st.scroll_rows == 8); // 20 - 12
+    try testing.expect(st.scrollBy(-100, many.len)); // 위로는 0 에서 묶인다(적대적 5회차 C10)
+    try testing.expectEqual(@as(u32, 0), st.scroll_rows);
+    try testing.expect(!st.scrollBy(-1, many.len));
+    // 스크롤 값이 넘쳐도 그리기는 마지막 창을 보인다(적대적 5회차 C5 — 직접 세운 값도 묶는다).
+    st.scroll_rows = 100;
+    var out3: std.ArrayList(draw.Op) = .empty;
+    try view(&st, &many, beside, p, arena, &out3);
+    try testing.expectEqual(@as(usize, 1 + 12), out3.items.len);
+    try testing.expectEqualStrings("a", out3.items[1].text.runs[0].text); // 20 - 12 = 8 번째부터(짝수 → a)
     st.toggle(); // 접으면 스크롤도 0
     try testing.expectEqual(@as(u32, 0), st.scroll_rows);
     st.toggle();
+    // 오른쪽 경계는 밖이다(적대적 5회차 C7).
+    try testing.expect(!contains(&st, &lines, beside, p, @floatFromInt(r.x + @as(i32, @intCast(r.w))), 210));
+    try testing.expect(contains(&st, &lines, beside, p, @floatFromInt(r.x + @as(i32, @intCast(r.w)) - 1), 210));
+    // 폭 상한 80(hover_box 규칙 — 적대적 5회차 C8).
+    var long_buf: [120]u8 = undefined;
+    @memset(&long_buf, 'x');
+    const wide = [_]Line{.{ .text = &long_buf }};
+    try testing.expectEqual(@as(u32, (80 + 2) * 10), boxRect(&st, &wide, beside, p).?.w);
     // 오른쪽에 자리가 없으면 왼쪽.
     const right_edge = draw.Rect{ .x = 1000, .y = 200, .w = 150, .h = 60 };
     const l = boxRect(&st, &lines, right_edge, p).?;

@@ -393,6 +393,21 @@ test "PBX1 placeBeside — 오른쪽(위 맞춤) → 왼쪽 → 아래 → 위 �
     const tall = placeBeside(160, 300, low, 8, p).?;
     try testing.expectEqual(popup_box_side(.east), tall.side);
     try testing.expectEqual(@as(i32, 384 - 300), tall.rect.y);
+    // **경계값 — 딱 맞으면 그 자리다**(적대적 5회차 C1~C4: 넉넉한 사례만 재면 `>`/`>=` 를 못 가른다).
+    const east_exact = placeBeside(792 - 308, 64, box, 8, p).?; // 308 + 484 = 792 = 우측 경계
+    try testing.expectEqual(popup_box_side(.east), east_exact.side);
+    try testing.expectEqual(@as(i32, 308), east_exact.rect.x);
+    const west_box = draw.Rect{ .x = 500, .y = 100, .w = 200, .h = 80 };
+    const west_exact = placeBeside(484, 64, west_box, 8, p).?; // 500 - 8 - 484 = 8 = 좌측 경계
+    try testing.expectEqual(popup_box_side(.west), west_exact.side);
+    try testing.expectEqual(@as(i32, 8), west_exact.rect.x);
+    const mid = draw.Rect{ .x = 100, .y = 200, .w = 200, .h = 80 };
+    const south_exact = placeBeside(700, 96, mid, 8, p).?; // 288 + 96 = 384 = 하단 경계 — 북도 들지만(200-8-96 = 96) 남이 먼저
+    try testing.expectEqual(popup_box_side(.south), south_exact.side);
+    try testing.expectEqual(@as(i32, 288), south_exact.rect.y);
+    const north_exact = placeBeside(700, 176, mid, 8, p).?; // 남은 안 든다(288+176 > 384), 200 - 8 - 176 = 16 = 상단 경계
+    try testing.expectEqual(popup_box_side(.north), north_exact.side);
+    try testing.expectEqual(@as(i32, 16), north_exact.rect.y);
     // 극단값·손상 메트릭.
     _ = placeBeside(std.math.maxInt(u32), std.math.maxInt(u32), .{ .x = std.math.maxInt(i32), .y = std.math.minInt(i32), .w = std.math.maxInt(u32), .h = std.math.maxInt(u32) }, std.math.maxInt(u32), p);
     try testing.expect(placeBeside(10, 10, box, 0, metricsOf(8, 16)) == null);

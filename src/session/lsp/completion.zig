@@ -627,6 +627,11 @@ test "CPL9 documentation — 문자열·MarkupContent.value·없음·그 밖(무
     try testing.expectEqualStrings("# H\ntext", l.items[1].documentation.?);
     try testing.expect(l.items[2].documentation == null);
     try testing.expect(l.items[3].documentation == null);
+    var nv = try parseJson(a, "[{\"label\":\"e\",\"documentation\":{\"kind\":\"markdown\"}}]"); // value 없는 MarkupContent — kind 를 글로 읽지 않는다(적대적 7회차 E3)
+    defer nv.deinit();
+    var ln = try parse(a, nv.value);
+    defer ln.deinit(a);
+    try testing.expect(ln.items[0].documentation == null);
     var r = try parseJson(a, "{\"label\":\"c\",\"documentation\":{\"kind\":\"plaintext\",\"value\":\"later\"}}");
     defer r.deinit();
     applyResolved(&l.items[2], r.value);

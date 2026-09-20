@@ -1192,17 +1192,26 @@ fn chargeFor(payload_len: usize) usize {
     return payload_len;
 }
 
+/// **`screen_batch_end` 를 호출자가 준다.** 기본값(`false`)에 맡기면 화면 청크가 끝 표식 없이
+/// 큐에 남고, `beginPressureInvalidation` 이 머리부터 훑어도 배치 끝을 못 찾아 `PartialFrame` 으로
+/// **연결을 통째로 닫는다**(그 소켓의 화면 전부가 detach 된다).
+///
+/// 2026-09-20 실측: 이 함수가 바로 그 상태였다. `commitPreparedControlAndScreenBatch`(resize 발행)가
+/// 여기로 화면 청크를 붙이는데 표식을 안 달아, 창 크기를 바꿀 때마다 끝 없는 청크가 큐에 들어갔다.
+/// 형제 넷(`enqueueScreen` · `enqueueOwnedScreenBatch` · resync 배치 둘)은 전부 단다.
 fn appendOwnedBatchChunk(
     slot: *Slot,
     class: QueueClass,
     tracker_index: ?usize,
     bytes: []u8,
+    screen_batch_end: bool,
 ) void {
     const tail = (slot.chunk_head + slot.chunk_len) % max_chunks_per_slot;
     slot.chunks[tail] = .{
         .bytes = bytes,
         .class = class,
         .screen_tracker_index = tracker_index,
+        .screen_batch_end = screen_batch_end,
     };
     slot.chunk_len += 1;
     slot.pending_bytes += bytes.len;
@@ -1533,12 +1542,15 @@ pub const ReactorCore = struct {
         self.budget.shared_bytes = prepared.future_shared;
         self.budget.recordPeak();
         const control_slot = self.get(prepared.control.admission) catch unreachable;
-        appendOwnedBatchChunk(control_slot, .control, null, prepared.control.bytes);
+        // control 청크에는 배치 문법이 없다 — `screen_batch_end` 는 `.screen` 에만 쓰인다.
+        appendOwnedBatchChunk(control_slot, .control, null, prepared.control.bytes, false);
         control_slot.control_resident_bytes += chargeFor(prepared.control.bytes.len);
         control_slot.recordPeak();
         for (prepared.screens) |item| {
             const slot = self.get(item.admission) catch unreachable;
-            appendOwnedBatchChunk(slot, .screen, item.tracker.index, item.bytes);
+            // 각 item 은 `encodeFrame` 이 만든 **완결 프레임 한 장**이다 — 단일 청크에 표식을 다는
+            // `enqueueScreen` 과 같은 모양이므로 여기서 배치가 끝난다.
+            appendOwnedBatchChunk(slot, .screen, item.tracker.index, item.bytes, true);
             slot.screen_trackers[item.tracker.index].tracker.?.resident_bytes +=
                 chargeFor(item.bytes.len);
             slot.recordPeak();
@@ -3197,4 +3209,52 @@ test "connection key allocator never emits zero or reuses after overflow" {
     _ = try allocator.allocate(1);
     try std.testing.expectError(error.Exhausted, allocator.allocate(1));
     try std.testing.expectError(error.Exhausted, allocator.allocate(0));
+}
+
+// resize 발행이 넣는 화면 청크도 **배치 끝 표식을 단다.**
+//
+// ## 무엇이 있었나
+//
+// `beginPressureInvalidation` 은 머리부터 그 트래커의 청크를 훑어 `screen_batch_end` 를 찾는다.
+// 못 찾으면 `error.PartialFrame` 이고, 호출자는 **연결을 통째로 닫는다**(그 소켓의 화면 전부가
+// detach 된다). 그러니 화면 청크를 큐에 넣는 쪽은 **반드시** 표식을 달아야 한다.
+//
+// 제품 경로 다섯 중 넷은 단다 — `enqueueScreen`(단일), `enqueueOwnedScreenBatch`(마지막),
+// resync 배치 둘(마지막). **`commitPreparedControlAndScreenBatch` 만 안 달았다.** 그 경로가
+// `appendOwnedBatchChunk` 로 직접 붙이는데 `screen_batch_end` 를 건드리지 않아 기본값 `false` 로
+// 남았다. 거기 들어가는 것은 `encodeFrame` 이 만든 **완결 프레임 한 장**이라 `enqueueScreen` 과
+// 같은 모양인데, 표식만 빠졌다.
+//
+// 이 경로는 **resize 발행**이다(`poll_owner` 의 resize 처리). 즉 창 크기를 바꿀 때마다 끝 표식
+// 없는 화면 청크가 큐에 들어가고, 그게 쓰기 도중에 압력 회수를 만나면 연결이 죽는다.
+test "혼합 배치가 넣은 화면 청크도 압력 회수에서 배치 끝을 찾을 수 있다" {
+    const reactor = try ReactorCore.create(std.testing.allocator);
+    defer reactor.destroy();
+    const admission = try reactor.admit();
+    const slot = try reactor.get(admission);
+    const tracker = try slot.createScreenTracker();
+
+    // 소유권 이전이라 성공하면 slot 이 free 한다 — 여기서 free 하지 않는다.
+    const response = try std.testing.allocator.dupe(u8, "R");
+    const event = try std.testing.allocator.dupe(u8, "EEEE");
+    var prepared = try reactor.prepareOwnedControlAndScreenBatch(
+        .{ .admission = admission, .bytes = response },
+        &.{.{ .admission = admission, .tracker = tracker, .bytes = event }},
+    );
+    try reactor.commitPreparedControlAndScreenBatch(&prepared);
+
+    // control 1 B 를 다 쓰고 화면 청크를 1 B 만 쓴다 → 머리가 그 트래커의 화면 청크이고 offset != 0.
+    try slot.consumeWritten(2);
+    try std.testing.expect(try slot.trackerHasWrittenPrefix(tracker));
+
+    // **여기가 핵심.** 표식이 없으면 `error.PartialFrame` 이 나고 호출자는 연결을 닫는다.
+    // 표식이 있으면 「이 배치 끝까지 내보낸 뒤 무효화」로 **살아서** 회수된다.
+    const outcome = slot.beginPressureInvalidation(tracker) catch |err| {
+        std.debug.print(
+            "혼합 배치 청크에 끝 표식이 없다 — 압력 회수가 {s} 로 연결을 닫는다\n",
+            .{@errorName(err)},
+        );
+        return error.MixedBatchChunkMissingBatchEnd;
+    };
+    try std.testing.expectEqual(Slot.PressureInvalidation.drain_current_batch, outcome);
 }

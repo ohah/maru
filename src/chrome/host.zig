@@ -19,6 +19,7 @@ const context_menu = @import("components/context_menu.zig");
 const hover_box = @import("components/hover_box.zig");
 const rename_box = @import("components/rename_box.zig");
 const suggest_box = @import("components/suggest_box.zig");
+const suggest_docs = @import("components/suggest_docs.zig");
 const notifications = @import("components/notifications.zig");
 const settings = @import("components/settings.zig");
 const shortcut_hints = @import("components/shortcut_hints.zig");
@@ -104,6 +105,7 @@ pub const ChromeHost = struct {
     rename_box: rename_box.State = .{},
     /// 자동완성 목록 상자(tooling §8.2g) — 키는 platform 의 편집기 키 경로가 든다; `.not_an_overlay`.
     suggest_box: suggest_box.State = .{},
+    suggest_docs: suggest_docs.State = .{},
     notifications: notifications.State = .{},
     settings: settings.State = .{},
     /// 단축키 힌트 HUD(패시브 — 입력 비소비). 가시성만, 홀드 머신(keyhint_hold)이 토글. 다른 오버레이와 달리 handleInput 라우팅엔 없다.
@@ -232,10 +234,12 @@ pub const ChromeHost = struct {
         if (ops.items.len > 0) try out.append(arena, .{ .layer = rename_box.layer, .ops = ops.items });
     }
 
-    /// 자동완성 목록 상자 — 행은 platform 이 준다(필터·정렬 뒤). 닫힘이면 무동작.
+    /// 자동완성 목록 상자 — 행은 platform 이 준다(필터·정렬 뒤). 닫힘이면 무동작. 문서 패널(§8.2g-d)은 목록 상자 옆에 — 펼쳤고
+    /// 줄이 있을 때만(목록 상자가 없으면 패널도 없다).
     pub fn collectSuggestBoxDraws(
         self: *ChromeHost,
         rows: []const suggest_box.Row,
+        docs: []const suggest_docs.Line,
         p: props.ChromeProps,
         tk: *const tokens.Tokens,
         arena: std.mem.Allocator,
@@ -243,7 +247,10 @@ pub const ChromeHost = struct {
     ) !void {
         var ops: std.ArrayList(draw.Op) = .empty;
         try suggest_box.view(&self.suggest_box, rows, p, tk, arena, &ops);
-        if (ops.items.len > 0) try out.append(arena, .{ .layer = suggest_box.layer, .ops = ops.items });
+        if (ops.items.len > 0) {
+            if (suggest_box.boxRect(&self.suggest_box, rows, p)) |beside| try suggest_docs.view(&self.suggest_docs, docs, beside, p, arena, &ops);
+            try out.append(arena, .{ .layer = suggest_box.layer, .ops = ops.items });
+        }
     }
 
     /// notifications도 카드(Item)를 platform이 히스토리에서 빌드해 주입해야 그릴 수 있다(palette/context_menu와

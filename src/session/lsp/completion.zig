@@ -25,6 +25,8 @@ pub const Item = struct {
     label_detail: ?[]const u8 = null,
     /// `labelDetails.description`(§8.2g-c) — 오른쪽 열(없으면 행은 `detail` 을 쓴다).
     description: ?[]const u8 = null,
+    /// `documentation`(§8.2g-d) — 문자열 또는 `MarkupContent.value`(마크다운/평문 — 패널이 `hover_text.reduce` 로 줄을 만든다).
+    documentation: ?[]const u8 = null,
     preselect: bool = false,
     /// LSP `kind`(숫자, 없으면 0). 버퍼 단어는 `word_kind`.
     kind: u8 = 0,
@@ -75,6 +77,7 @@ pub fn parse(allocator: std.mem.Allocator, result: ?std.json.Value) Error!List {
             item.label_detail = strOf(ld.object.get("detail"));
             item.description = strOf(ld.object.get("description"));
         };
+        item.documentation = docOf(o.get("documentation"));
         if (o.get("kind")) |k| if (k == .integer and k.integer >= 0 and k.integer <= 255) {
             item.kind = @intCast(k.integer);
         };
@@ -263,6 +266,7 @@ pub fn applyResolved(item: *Item, resolved: std.json.Value) void {
         item.additional = ad.array.items;
     };
     if (strOf(o.get("detail"))) |d| item.detail = d;
+    if (docOf(o.get("documentation"))) |d| item.documentation = d; // §8.2g-d — 패널의 글
     if (strOf(o.get("insertText"))) |t| item.insert = t;
     if (o.get("textEdit")) |te| if (te == .object) {
         if (strOf(te.object.get("newText"))) |nt| item.insert = nt;
@@ -335,6 +339,16 @@ pub fn merge(allocator: std.mem.Allocator, additional: []const delta_mod.Change,
         prev_end = c.end;
     }
     return .{ .items = items, .texts = texts };
+}
+
+/// `documentation` — 문자열이거나 `MarkupContent{kind, value}`(§8.2g-d). 그 밖은 없음.
+fn docOf(v: ?std.json.Value) ?[]const u8 {
+    const x = v orelse return null;
+    return switch (x) {
+        .string => |t| t,
+        .object => |o| strOf(o.get("value")),
+        else => null,
+    };
 }
 
 fn strOf(v: ?std.json.Value) ?[]const u8 {
@@ -601,4 +615,22 @@ test "CPL8 labelDetails — detail·description 둘·하나·없음을 읽고, f
     try testing.expectEqualStrings("int", l.items[1].detail.?);
     try testing.expect(l.items[2].label_detail == null and l.items[2].description == null); // 객체가 아니면 무시
     try testing.expect(l.items[3].label_detail == null and l.items[3].description == null);
+}
+
+test "CPL9 documentation — 문자열·MarkupContent.value·없음·그 밖(무시), resolve 로 합치기 (§8.2g-d)" {
+    const a = testing.allocator;
+    var p = try parseJson(a, "[{\"label\":\"a\",\"documentation\":\"plain doc\"},{\"label\":\"b\",\"documentation\":{\"kind\":\"markdown\",\"value\":\"# H\\ntext\"}},{\"label\":\"c\"},{\"label\":\"d\",\"documentation\":7}]");
+    defer p.deinit();
+    var l = try parse(a, p.value);
+    defer l.deinit(a);
+    try testing.expectEqualStrings("plain doc", l.items[0].documentation.?);
+    try testing.expectEqualStrings("# H\ntext", l.items[1].documentation.?);
+    try testing.expect(l.items[2].documentation == null);
+    try testing.expect(l.items[3].documentation == null);
+    var r = try parseJson(a, "{\"label\":\"c\",\"documentation\":{\"kind\":\"plaintext\",\"value\":\"later\"}}");
+    defer r.deinit();
+    applyResolved(&l.items[2], r.value);
+    try testing.expectEqualStrings("later", l.items[2].documentation.?);
+    applyResolved(&l.items[0], r.value); // 이미 있던 것도 응답이 이긴다
+    try testing.expectEqualStrings("later", l.items[0].documentation.?);
 }

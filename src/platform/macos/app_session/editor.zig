@@ -13623,6 +13623,174 @@ test "CMP5 자동완성 ①-c — labelDetails: 행에 꼬리(label_detail)가 �
     completion_client.hide(s);
 }
 
+test "CMP6 자동완성 ①-d — 문서 패널: ⌃Space 가 목록이 열려 있으면 패널을 토글하고, 강조를 따라가며(미해결은 250 ms 뒤 `…`, 풀리면 detail+빈 줄+문서), 닫혀도 펼침은 남고, 패널 안 휠은 굴리고 밖은 흘린다 (제품 경계, §8.2g-d)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
+    var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const fz = try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake});
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);
+    defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const cz = try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root});
+    _ = setenv("MARU_CONFIG", cz.ptr, 1);
+    defer _ = unsetenv("MARU_CONFIG");
+    if (fx.session.config_path_buffer) |b| allocator.free(b);
+    fx.session.config_path_buffer = null;
+    fx.session.editor_lsp.auto_trust_answer = .allow;
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "d.c", .data = "int main() {\n  \n}\n" });
+    const path = try std.fs.path.join(allocator, &.{ root, "d.c" });
+    defer allocator.free(path);
+    const saved_repo = fx.session.git_repo;
+    fx.session.git_repo = @constCast(root);
+    defer fx.session.git_repo = saved_repo;
+    const term = (try pane_ops.openFileTermInActivePane(fx.session, path, .text)).term;
+    fx.session.surface_initialized = true;
+    fx.session.backing_width_px = 1200;
+    fx.session.backing_height_px = 800;
+    const leaf = activeLeafRectForTest(fx.session) orelse return error.SkipZigTest;
+    const s = fx.session;
+    const Ctx = struct { fx: *PaneFixture, term: *Term };
+    const ctx: Ctx = .{ .fx = &fx, .term = term };
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
+        fn f(c: Ctx) bool {
+            return c.term.rt.editor_diagnostics.lsp.items.len >= 1;
+        }
+    }.f));
+    const settled = struct {
+        fn f(c: Ctx) bool {
+            return !c.fx.session.editor_completion.waiting;
+        }
+    }.f;
+    const frame = struct {
+        fn f(sess: *AppSession, l: maru.session.SplitRect, t: *Term) !void {
+            var d = appendPaneFrame(sess, l, t) orelse return error.EditorPaneDidNotDraw;
+            d.dl.deinit(testing.allocator);
+            if (try sess.buildChromeOverlayPrep()) |*prep| {
+                var pp = prep.*;
+                pp.dl.deinit(testing.allocator);
+            }
+        }
+    }.f;
+    const hl = struct {
+        fn f(sess: *AppSession) []const u8 {
+            return completion_client.rows(sess)[sess.chrome_host.suggest_box.selected].label;
+        }
+    }.f;
+    const line2: usize = 13 + 2;
+    // ⑴ `laz` — 접힌 채 열린다: 줄이 없다. ⌃Space 는 목록이 열려 있으니 패널 토글.
+    term.rt.editor_selection = .{ .anchor_start = line2, .anchor_end = line2, .focus = line2 };
+    try testing.expect(insertText(s, term, "laz"));
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
+    try frame(s, leaf, term);
+    try testing.expect(s.editor_completion.active and !s.chrome_host.suggest_docs.expanded);
+    try testing.expectEqual(@as(usize, 0), completion_client.docsLines(s).len);
+    try testing.expectEqualStrings("laz", hl(s));
+    try pressKey(&fx, .{ .char = ' ' }, .{ .control = true });
+    try testing.expect(s.chrome_host.suggest_docs.expanded);
+    try testing.expectEqual(@as(u64, 1), s.editor_completion.docs_toggles);
+    try testing.expect(s.editor_completion.active); // 목록은 그대로
+    // `laz`(치는 낱말 자체 — 서버 항목, detail `fake`, 문서 없음)가 풀리면 줄 하나.
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
+        fn f(c: Ctx) bool {
+            return !c.fx.session.editor_completion.resolve_waiting;
+        }
+    }.f));
+    try frame(s, leaf, term);
+    try testing.expectEqual(@as(usize, 1), completion_client.docsLines(s).len);
+    try testing.expectEqualStrings("fake", completion_client.docsLines(s)[0].text);
+    // ⑵ ↓ lazy_import — 풀리면 detail + 빈 줄 + 문서(굵게 벗김·펜스·목록 12 → 12 행 넘침).
+    try pressKey(&fx, .arrow_down, .{});
+    try testing.expectEqualStrings("lazy_import", hl(s));
+    try frame(s, leaf, term); // 강조가 바뀌었다 — 옛 줄은 지워지고 아직 250 ms 전이라 로딩 줄도 없다
+    try testing.expectEqual(@as(usize, 0), completion_client.docsLines(s).len);
+    {
+        const t0 = s.awakeMs();
+        while (s.awakeMs() - t0 < 3000) {
+            lsp_client.pump(s);
+            try frame(s, leaf, term);
+            if (completion_client.docsLines(s).len > 1) break;
+            _ = usleep(2_000);
+        }
+    }
+    const dl = completion_client.docsLines(s);
+    try testing.expect(dl.len >= 15);
+    try testing.expectEqualStrings("resolved", dl[0].text);
+    try testing.expectEqualStrings("", dl[1].text);
+    try testing.expectEqualStrings("Lazy import.", dl[2].text);
+    try testing.expectEqualStrings("#include \"lazy.h\"", dl[4].text);
+    try testing.expectEqualStrings("• one", dl[6].text);
+    // 패널이 그려지는 자리 — 목록 상자 오른쪽. 휠은 패널 안에서만 굴린다(넘치는 줄이 있다).
+    const p = s.buildChromeProps();
+    const beside = maru.chrome.components.suggest_box.boxRect(&s.chrome_host.suggest_box, completion_client.rows(s), p).?;
+    const panel = maru.chrome.components.suggest_docs.boxRect(&s.chrome_host.suggest_docs, dl, beside, p).?;
+    try testing.expect(panel.x >= beside.x + @as(i32, @intCast(beside.w)));
+    try testing.expectEqual(beside.y, panel.y);
+    const inside_x: f64 = @floatFromInt(panel.x + 4);
+    const inside_y: f64 = @floatFromInt(panel.y + 4);
+    try testing.expect(completion_client.wheel(s, inside_x, inside_y, -3)); // 아래로
+    try testing.expectEqual(@as(u32, 1), s.chrome_host.suggest_docs.scroll_rows);
+    try testing.expect(!completion_client.wheel(s, @floatFromInt(beside.x + 2), @floatFromInt(beside.y + 2), -3)); // 목록 상자 위는 흘린다
+    try testing.expect(s.editor_completion.active); // 흘려도 닫지 않는다
+    // ⑶ Esc — 목록과 줄은 닫히고 펼침은 남는다 → 다시 열면 토글 없이 패널이 선다.
+    try pressKey(&fx, .escape, .{});
+    try testing.expect(!s.editor_completion.active);
+    try testing.expectEqual(@as(usize, 0), completion_client.docsLines(s).len);
+    try testing.expect(s.chrome_host.suggest_docs.expanded);
+    try clearRange(s, term, line2, 3);
+    term.rt.editor_selection = .{ .anchor_start = line2, .anchor_end = line2, .focus = line2 };
+    try testing.expect(insertText(s, term, "f")); // preselect fake_import — 문자열 문서, resolve 없이 곧바로
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
+    try frame(s, leaf, term);
+    try testing.expectEqualStrings("fake_import", hl(s));
+    const fl = completion_client.docsLines(s);
+    try testing.expectEqual(@as(usize, 3), fl.len);
+    try testing.expectEqualStrings("adds include", fl[0].text);
+    try testing.expectEqualStrings("adds an include", fl[2].text);
+    // ⑷ 미해결 항목은 250 ms 뒤에야 `…` — 서버가 답하지 않는 `RESOLVESTALL`.
+    try pressKey(&fx, .escape, .{});
+    try clearRange(s, term, line2, 1);
+    {
+        const e = term.rt.editor_doc.?.file.content.len;
+        term.rt.editor_selection = .{ .anchor_start = e, .anchor_end = e, .focus = e };
+        try testing.expect(insertText(s, term, "// RESOLVESTALL\n"));
+        try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
+        completion_client.hide(s);
+    }
+    term.rt.editor_selection = .{ .anchor_start = line2, .anchor_end = line2, .focus = line2 };
+    try testing.expect(insertText(s, term, "laz"));
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
+    try frame(s, leaf, term);
+    try pressKey(&fx, .arrow_down, .{});
+    try testing.expectEqualStrings("lazy_import", hl(s));
+    try frame(s, leaf, term);
+    try testing.expectEqual(@as(usize, 0), completion_client.docsLines(s).len); // 아직
+    {
+        const t0 = s.awakeMs();
+        while (completion_client.docsLines(s).len == 0 and s.awakeMs() - t0 < 2000) {
+            lsp_client.pump(s);
+            try frame(s, leaf, term);
+            _ = usleep(5_000);
+        }
+        try testing.expect(s.awakeMs() - t0 >= 250);
+    }
+    try testing.expectEqual(@as(usize, 1), completion_client.docsLines(s).len);
+    try testing.expectEqualStrings("…", completion_client.docsLines(s)[0].text);
+    // ⑸ ⌃Space 다시 — 접히고 줄이 비며, 목록은 그대로.
+    try pressKey(&fx, .{ .char = ' ' }, .{ .control = true });
+    try testing.expect(!s.chrome_host.suggest_docs.expanded);
+    try frame(s, leaf, term);
+    try testing.expectEqual(@as(usize, 0), completion_client.docsLines(s).len);
+    try testing.expect(s.editor_completion.active);
+    try testing.expectEqual(@as(u64, 2), s.editor_completion.docs_toggles);
+    completion_client.hide(s);
+}
+
 fn hl_detail(sess: *AppSession) []const u8 {
     return completion_client.rows(sess)[sess.chrome_host.suggest_box.selected].detail;
 }

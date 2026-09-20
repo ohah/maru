@@ -146,6 +146,62 @@ pub fn place(box_w: u32, box_h: u32, pl: Placement, p: props.ChromeProps) ?Resul
     };
 }
 
+/// 어디에 섰나(`placeBeside`) — 판정자 전용(`Result.flipped_up` 과 같은 이유).
+pub const Side = enum { east, west, south, north };
+pub const BesideResult = struct { rect: draw.Rect, side: Side };
+
+/// 상자를 **다른 상자 옆**에 둔다(§8.2g-d 문서 패널): 오른쪽(위 맞춤) → 안 들어가면 왼쪽 → 그것도 안 되면 아래 → 그것도 안 되면 위,
+/// 그것도 안 되면 아래에 두고 당긴다. 네 방향 모두 workspace 안쪽 한 셀을 남기고, `place` 와 같은 i64 도메인·같은 가드.
+pub fn placeBeside(box_w: u32, box_h: u32, beside: draw.Rect, gap_px: u32, p: props.ChromeProps) ?BesideResult {
+    const m = p.metrics;
+    const cw = @max(m.cell_width_px, 1);
+    const ch = @max(m.cell_height_px, 1);
+    const ws = props.workspaceRect(m);
+    if (ws.w < cw or ws.w - cw < cw) return null;
+    if (ws.h < ch or ws.h - ch < ch) return null;
+    const R = i64;
+    const right_bound: R = @as(R, ws.x) + @as(R, ws.w) - @as(R, cw);
+    const bottom_bound: R = @as(R, ws.y) + @as(R, ws.h) - @as(R, ch);
+    const top_bound: R = @as(R, ws.y) + @as(R, ch);
+    const left_bound: R = @as(R, ws.x) + @as(R, cw);
+    const bw: R = box_w;
+    const bh: R = box_h;
+    const ax: R = beside.x;
+    const ay: R = beside.y;
+    const aw: R = beside.w;
+    const ah: R = beside.h;
+    const gap: R = gap_px;
+    var side: Side = .east;
+    var x: R = ax + aw + gap;
+    var y: R = ay;
+    if (x + bw > right_bound) {
+        const west = ax - gap - bw;
+        if (west >= left_bound) {
+            side = .west;
+            x = west;
+        } else {
+            x = ax;
+            const south = ay + ah + gap;
+            if (south + bh <= bottom_bound) {
+                side = .south;
+                y = south;
+            } else if (ay - gap - bh >= top_bound) {
+                side = .north;
+                y = ay - gap - bh;
+            } else {
+                side = .south;
+                y = bottom_bound - bh;
+            }
+        }
+    }
+    // 세로는 위 맞춤이 기본 — 아래로 넘치면 당기고, 좌·상이 마지막이라 이긴다(A34 와 같다).
+    if (y + bh > bottom_bound) y = bottom_bound - bh;
+    if (y < top_bound) y = top_bound;
+    if (x + bw > right_bound) x = right_bound - bw;
+    if (x < left_bound) x = left_bound;
+    return .{ .rect = .{ .x = satI32(x), .y = satI32(y), .w = box_w, .h = box_h }, .side = side };
+}
+
 /// i64 → i32 포화 캐스팅. `place` 가 넓은 도메인에서 계산한 값을 **한 곳에서만** 좁힌다.
 fn satI32(v: i64) i32 {
     return @intCast(std.math.clamp(v, std.math.minInt(i32), std.math.maxInt(i32)));
@@ -303,4 +359,45 @@ test "CSP1 popup_box: 극단값에 안 터진다 — 상자·앵커·간격 전�
     far.metrics.workspace_x_px = std.math.maxInt(u32) - 10;
     far.metrics.workspace_y_px = std.math.maxInt(u32) - 10;
     _ = place(100, 100, .{ .anchor = .{ .x = 0, .y = 0, .w = 0, .h = 0 } }, far);
+}
+
+test "PBX1 placeBeside — 오른쪽(위 맞춤) → 왼쪽 → 아래 → 위 순으로 들어가는 첫 자리, 네 방향 한 셀, 아래로 넘치면 당김, 극단값에 안 터진다 (§8.2g-d)" {
+    const p = metricsOf(800, 400); // 셀 8×16, workspace 전체
+    const box = draw.Rect{ .x = 100, .y = 100, .w = 200, .h = 80 };
+    // 동 — x = 100+200+8, y 그대로.
+    const e = placeBeside(160, 64, box, 8, p).?;
+    try testing.expectEqual(popup_box_side(.east), e.side);
+    try testing.expectEqual(@as(i32, 308), e.rect.x);
+    try testing.expectEqual(@as(i32, 100), e.rect.y);
+    // 서 — 오른쪽에 자리가 없다(500+200+8+160 > 792) 그러나 왼쪽엔 든다(500-8-160 = 332 ≥ 8).
+    const right_box = draw.Rect{ .x = 500, .y = 100, .w = 200, .h = 80 };
+    const w = placeBeside(160, 64, right_box, 8, p).?;
+    try testing.expectEqual(popup_box_side(.west), w.side);
+    try testing.expectEqual(@as(i32, 500 - 8 - 160), w.rect.x);
+    try testing.expectEqual(@as(i32, 100), w.rect.y);
+    // 남 — 왼쪽도 안 된다(100-8-700 < 8) → 아래(y = 100+80+8), x 는 상자와 같다.
+    const s = placeBeside(700, 64, box, 8, p).?;
+    try testing.expectEqual(popup_box_side(.south), s.side);
+    try testing.expectEqual(@as(i32, 188), s.rect.y);
+    try testing.expectEqual(@as(i32, 792 - 700), s.rect.x); // 상자 왼쪽에 맞추되 우단 한 셀 안으로 당긴다
+    // 북 — 아래도 안 들어간다(188+250 > 384) 그러나 위엔 든다(100-8-80 = 12 ≥ 16? 아니 → 당김). 위가 드는 경우: 상자를 더 아래로.
+    const low = draw.Rect{ .x = 100, .y = 300, .w = 200, .h = 80 };
+    const n = placeBeside(700, 200, low, 8, p).?;
+    try testing.expectEqual(popup_box_side(.north), n.side);
+    try testing.expectEqual(@as(i32, 300 - 8 - 200), n.rect.y);
+    // 아무 데도 안 들어가면 아래에 두고 당긴다 — 좌·상이 이긴다.
+    const huge = placeBeside(700, 500, box, 8, p).?;
+    try testing.expectEqual(popup_box_side(.south), huge.side);
+    try testing.expectEqual(@as(i32, 16), huge.rect.y);
+    // 동인데 세로로 넘치면 당긴다.
+    const tall = placeBeside(160, 300, low, 8, p).?;
+    try testing.expectEqual(popup_box_side(.east), tall.side);
+    try testing.expectEqual(@as(i32, 384 - 300), tall.rect.y);
+    // 극단값·손상 메트릭.
+    _ = placeBeside(std.math.maxInt(u32), std.math.maxInt(u32), .{ .x = std.math.maxInt(i32), .y = std.math.minInt(i32), .w = std.math.maxInt(u32), .h = std.math.maxInt(u32) }, std.math.maxInt(u32), p);
+    try testing.expect(placeBeside(10, 10, box, 0, metricsOf(8, 16)) == null);
+}
+
+fn popup_box_side(s: Side) Side {
+    return s;
 }

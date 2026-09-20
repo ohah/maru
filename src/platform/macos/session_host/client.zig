@@ -570,6 +570,11 @@ test "client screen assembler yields between split snapshot chunks and resumes b
         .parser = framing.FrameParser.init(allocator),
     };
     defer client.deinit();
+    // 이 판정자는 «같은 프레임» 안에서 소켓에 써 놓고 곧장 읽는다 — 앞선 판정자(remote_term_backend 의 제품 tick)가
+    // 올려 둔 프레임 도장이 남아 있으면 첫 읽기가 남긴 «비어 있음» 캐시가 두 번째 읽기를 막는다(집계 실행 1550/2662 에서
+    // `.?` 가 터졌다). 도장을 0 으로 되돌려 캐시를 끈다.
+    resetUiFrameStampForTest();
+    defer resetUiFrameStampForTest();
     const first = try framing.encodeFrame(
         allocator,
         .{ .kind = .snapshot_chunk, .stream_id = 7 },
@@ -21282,8 +21287,10 @@ test "client ended event replaces same-stream metadata at exact event cap" {
 }
 
 /// UI 프레임 도장. `RemoteTermBackend.maintenanceEventTick` 이 tick 마다 하나 올린다(`advanceUiFrameStamp`). 프레임
-/// 루프가 없는 경로(CLI·판정자)는 0 에 머물고, 그때 `pollReadableThisFrame` 은 언제나 실제로 묻는다 — 도장이 안 움직이면
-/// 「같은 프레임」 판정이 성립하지 않으므로 캐시가 켜지지 않는다(안전한 기본값).
+/// 루프가 없는 경로(CLI)는 0 에 머물고, 그때 `pollReadableThisFrame` 은 언제나 실제로 묻는다 — 도장이 안 움직이면
+/// 「같은 프레임」 판정이 성립하지 않으므로 캐시가 켜지지 않는다(안전한 기본값). 판정자는 **프로세스 전역**을 나눠 쓴다:
+/// 제품 tick 을 지나는 판정자(remote_term_backend)가 올린 도장이 뒤의 판정자에 남으므로, 같은 프레임 안에서 쓰고 읽는
+/// 판정자는 `resetUiFrameStampForTest` 로 먼저 끈다.
 var ui_frame_stamp: std.atomic.Value(u64) = .init(0);
 
 /// 프레임 하나가 시작됐다. 메인 스레드가 부른다.

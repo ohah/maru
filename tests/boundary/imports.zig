@@ -1602,6 +1602,14 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "screenOverflowDuringCallPeer" },
                 .{ .parent = "Client", .kind = "field", .visibility = "private", .modifier = "", .name = "screen_recovery" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "screenInboxItems" },
+                // poll 프레임 캐시(2026-09-20): 같은 UI 프레임 안 host 소켓 «비었나» 질문을 한 번만. 도장은 backend tick 이
+                // 올리고, Client 는 «이 프레임에 비어 있었다» 만 기록한다. 리셋·계수기는 판정자 전용이다.
+                .{ .parent = "Client", .kind = "field", .visibility = "private", .modifier = "", .name = "socket_empty_at_frame" },
+                .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "", .name = "ui_frame_stamp" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "advanceUiFrameStamp" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "resetUiFrameStampForTest" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "pollReadableThisFrame" },
+                .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "", .name = "poll_syscalls_for_test" },
             },
         },
         .{

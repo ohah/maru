@@ -1503,15 +1503,7 @@ bool maru_metal_renderer_draw(
     // 이미지 뒤판 quad(layer 5) — **터미널 셀 앞 · 텍스트-앞 이미지 뒤**. 떠 있는 이미지(마커 프리뷰)가
     // 불투명한 판 위에 놓이게 하는 유일한 패스다: 0·1 은 이미지를 덮고, 2 는 셀 뒤라 글자가 판 위로 올라온다.
     const size_t backdrop_vertex_count = backdrop_quad_n * 6;
-    /* 계측(MARU_DEBUG): 렌더러가 **받은** 뒤판 개수. 개수가 바뀔 때만 찍어 프레임마다 도배하지 않는다.
-       Zig 쪽 `backdrop …` 줄과 짝지어 보면 ABI 를 건넜는지가 갈린다(제보 2026-09-16). */
-    {
-        static size_t last_backdrop_n = (size_t)-1;
-        if (backdrop_quad_n != last_backdrop_n && getenv("MARU_DEBUG") != NULL) {
-            last_backdrop_n = backdrop_quad_n;
-            NSLog(@"maru.renderer: backdrop quads=%zu (total quads=%zu)", backdrop_quad_n, gpu_quad_n);
-        }
-    }
+
     // C4b 모달: 오버레이 셀(모달 텍스트 **또는** 탭/pane 드래그 고스트·drop 하이라이트 — web-panel.md §5)이
     // cells[modal_cells_start..cell_count]에 있으면 이 셀들을 오버레이 레이어(WKWebView 위)에 그리고, over quad(모달
     // 배경)를 그 '앞'에 끼운다. index 0도 유효하며 explicit overlay_cells_present가 존재 여부를 구분한다. 이름은

@@ -21297,12 +21297,6 @@ pub fn resetUiFrameStampForTest() void {
     ui_frame_stamp.store(0, .monotonic);
 }
 
-/// 판정자 전용 — 지금 도장.
-pub fn uiFrameStampForTest() u64 {
-    if (!builtin.is_test) @compileError("test-only");
-    return ui_frame_stamp.load(.monotonic);
-}
-
 /// `pollReadable` 에 **프레임 캐시**를 얹는다: 이 프레임에 이미 «비어 있음» 이었으면 안 묻는다(`socket_empty_at_frame`).
 /// `pumpScreen` 의 polling 읽기 한 곳만 쓴다 — `pollReadableOrTerminal` 은 peer 종료를 새 TX 보다 먼저 봐야 하는 자리라
 /// 캐시하지 않는다.

@@ -15582,12 +15582,6 @@ pub const AppSession = struct {
         // 그 자리가 없는 동안 사용자는 디코드를 기다리는 빈 액자와 투명 PNG 뒤로 **터미널 글자가 비치는**
         // 화면을 봤다(제보 2026-09-15). 이제 렌더러가 그 패스를 가지므로 판을 깐다.
         self.appendSolidQuad(bx, by, bw, bh, bg, renderer.metal_frame.quad_layer.image_backdrop);
-        // 계측: 발행과 «화면에 닿음» 은 다른 물음이다(제보 2026-09-16 — 판이 안 보인다). 이 줄이 찍히는데
-        // 렌더러 쪽 줄이 안 찍히면 ABI 를 건너지 못한 것이고, 둘 다 찍히면 그리는 자리의 문제다.
-        if (diag_gate.maruDebugEnabled()) marker_preview_diag.info(
-            "backdrop x={d} y={d} w={d} h={d} argb={x} quads={d}",
-            .{ place.box.x, place.box.y, place.box.w, place.box.h, bg, self.gpu_quads.items.len },
-        );
         // 테두리 네 변은 **그림 위**(layer 1)에 남는다 — 그림이 판을 꽉 채우므로 액자는 그 앞이라야 보인다.
         self.appendSolidQuad(bx, by, bw, b, border, 1); // 위
         self.appendSolidQuad(bx, by + bh - b, bw, b, border, 1); // 아래
@@ -20937,6 +20931,11 @@ pub const AppSession = struct {
             self.dropQuadsByLayer(4); // 알림 종 배지(layer4 header)도 per-frame — 헤더 frame(흰 숫자)과 같은 주기로 갱신.
             self.dropQuadsByLayer(agent_activity_ops.hover_layer); // 갤러리 호버 테두리도 per-frame — drop 과 append 를 짝짓는다.
             self.dropQuadsByLayer(status_bar_layer); // 상태바 배경(bottom)도 per-frame — drop과 append를 짝짓는다.
+            // **떠 있는 그림의 뒤판도 per-frame 이다.** 이 줄이 없으면 프리뷰를 열어 둔 동안 프레임마다
+            // 판이 **하나씩 쌓인다** — 계측으로 20 초에 95 → 182 개가 되는 것을 봤다(2026-09-20). 겹쳐
+            // 그려서 당장 눈에 안 띄는 것이 더 나쁘다: 옛 좌표의 판이 남아 마커가 움직이면 **지나온
+            // 자리마다 사각형이 남고**, 정점 버퍼는 끝없이 자란다. drop 과 append 는 **짝지어 둔다**.
+            self.dropQuadsByLayer(renderer.metal_frame.quad_layer.image_backdrop);
             // 위 layer2 drop과 값이 같아 지금은 중복이지만, status_bar_layer가 바뀌어도 짝이 남도록 둔다.
             // 모달·스크롤바가 상태바를 덮는 것은 **버킷이 정한다**(bottom이 over 아래) — 배열 순서가 아니다.
             // 배열 순서가 painter 순서인 것은 **같은 버킷 안**(탭 밴드·상태바 배경·호버)에서만이다.
@@ -90041,4 +90040,61 @@ test "MP: 프리뷰는 **뒤판 quad**를 낸다 — 그림 뒤로 터미널 글
     try std.testing.expectEqual(@as(f32, @floatFromInt(place.box.h)), bd.h);
     // **불투명이라야 뜻이 있다.** 알파가 빠지면 판이 있어도 뒤가 비친다.
     try std.testing.expectEqual(@as(u32, 0xFF), bd.fill_color0 >> 24);
+}
+
+test "MP: 뒤판은 **프레임마다 비워진다** — 안 그러면 프리뷰를 열어 둔 동안 끝없이 쌓인다" {
+    // **계측이 잡은 결함이다**(2026-09-20): 프리뷰를 띄워 두니 렌더러가 받는 뒤판이 20 초에
+    // 95 → 182 개로 늘었다. 겹쳐 그려서 당장 눈에 안 띄는 것이 더 나쁘다 — 마커가 움직이면 옛
+    // 좌표의 판이 **지나온 자리마다** 남고 정점 버퍼는 끝없이 자란다.
+    //
+    // **`appendMarkerPreviewImage` 를 두 번 부르는 것으로는 못 잡는다** — 비우는 자리는 그 함수가
+    // 아니라 프레임 조립의 시작이다. 그래서 제품 경로(`tick`)를 두 번 돈다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 PTY/CoreText
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+
+    const term = pane_ops.activePane(session).activeTerm();
+    // **화면에 마커가 실제로 있어야 한다.** 앵커 재검증이 매 tick 「그 번호가 아직 보이나」를 묻고,
+    // 없으면 조용히 닫는다(§3) — 글자를 안 쓰고 상태만 주입하면 첫 tick 에 닫혀 **이 테스트가
+    // 재려던 것을 못 잰다**(실제로 그렇게 `open=false` 를 봤다).
+    try term.surface.core.write("[Image #1]");
+    session.marker_preview_open = .{
+        .surface_id = term.surface.id,
+        .n = 1,
+        .row = 0,
+        .start_col = 0,
+        .end_col = 10,
+        .width = 200,
+        .height = 120,
+    };
+    defer session.closeMarkerPreview();
+
+    var seen: [3]usize = undefined;
+    for (&seen) |*slot| {
+        // **매 tick 조립을 강제한다.** 프레임이 dirty 하지 않으면 조립을 통째로 건너뛰어 quad 가
+        // 그대로 유지되는데, 그러면 「안 쌓인다」가 아니라 「안 그렸다」를 재게 된다 — 실제로 그
+        // 함정에 빠져 drop 을 빼도 통과하는 헛 판정자를 한 번 만들었다.
+        session.metal_dirty = true;
+        _ = try session.tick();
+        // **프리뷰가 살아 있어야 세는 것에 뜻이 있다** — 닫혀 있으면 0 이 나오는데 그것은 「안
+        // 쌓인다」가 아니라 「잴 것이 없다」다(이 테스트를 처음 쓸 때 정확히 그 함정에 빠졌다).
+        try std.testing.expect(session.marker_preview_open != null);
+        var n: usize = 0;
+        for (session.gpu_quads.items) |q| {
+            if (q.layer == renderer.metal_frame.quad_layer.image_backdrop) n += 1;
+        }
+        slot.* = n;
+    }
+    // **프레임을 몇 번 돌든 하나다.** 자라면 drop 과 append 의 짝이 깨진 것이다.
+    for (seen) |n| try std.testing.expectEqual(@as(usize, 1), n);
 }

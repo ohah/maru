@@ -12570,3 +12570,40 @@ test "scanCoreMutexDirectCalls flags direct lock but not wrappers/fields/pointer
         try std.testing.expectEqual(@as(usize, 0), v);
     }
 }
+
+test "마커 프리뷰: 여는 자리·그리는 자리·푸는 자리가 모두 «그 pane» 을 본다" {
+    // **계약**: docs/agent-image-marker-preview.md §4.2 — 프리뷰는 비활성 pane 의 마커도 눌리고,
+    // 「눌린다」로 끝나면 안 된다. 그리는 쪽과 디코드를 거는 쪽이 `activePane()` 을 보면 그 마커는
+    // **열리기만 하고 아무도 그리지 않는다**(사용자 제보 2026-09-20: Codex pane 이 비활성일 때
+    // 안 열렸다. 계측은 `click … staged=true` 11 건에 `decode` 0 건).
+    //
+    // **0 건만 세지 않는다.** 「`activePane` 이 없다」만 보면 그 함수가 pane 을 **아예 안 찾는**
+    // 퇴행도 통과한다 — 그래서 **찾는 자리(`markerPreviewTarget`)가 있는지**도 함께 센다.
+    const allocator = std.testing.allocator;
+    const app_session = try readZigFileZ(allocator, "src/platform/macos/app_session.zig");
+    defer allocator.free(app_session);
+
+    inline for (.{
+        "pumpMarkerPreviewOpen",
+        "appendMarkerPreviewImage",
+        "collectMarkerPreviewDraws",
+        "markerPreviewDockJumpAt",
+    }) |method| {
+        try expectContainerMethodMarkerCount(
+            allocator,
+            app_session,
+            "AppSession",
+            method,
+            "pane_ops.activePane(",
+            0,
+        );
+        try expectContainerMethodMarkerCount(
+            allocator,
+            app_session,
+            "AppSession",
+            method,
+            "markerPreviewTarget(",
+            1,
+        );
+    }
+}

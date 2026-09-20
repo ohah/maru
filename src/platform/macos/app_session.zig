@@ -15423,8 +15423,7 @@ pub const AppSession = struct {
             open.uploaded = false; // 다른 탭이라 이 프레임엔 안 실린다
             return;
         };
-        const term = target.term;
-        const place = self.markerPreviewPlacement(term, open.*) orelse {
+        const place = self.markerPreviewPlacement(target, open.*) orelse {
             open.uploaded = false;
             return;
         };
@@ -15612,7 +15611,7 @@ pub const AppSession = struct {
         if (!self.surface_initialized or self.tabs.items.len == 0) return false;
         const target = self.markerPreviewTarget() orelse return false;
         if (target.term.kind != .terminal) return false;
-        const place = self.markerPreviewPlacement(target.term, open) orelse return false;
+        const place = self.markerPreviewPlacement(target, open) orelse return false;
         const hit_index = chrome.components.image_preview.dockJumpTarget(open.sent_hit_index, place.box, x_px, y_px) orelse return false;
         // **도크를 연다** — 접혀 있거나 다른 뷰를 보고 있을 수 있다. `enterDockView` 만 부르면 뷰만
         // 바뀌고 화면에는 아무 변화가 없다(접힌 채로 남는다).
@@ -15635,7 +15634,10 @@ pub const AppSession = struct {
     ///
     /// 못 찾으면 null 이다 — 다른 **탭**으로 갔거나 그 pane 이 사라진 경우다. 그때는 그리지 않되
     /// 닫지도 않는다(탭을 돌아오면 그대로 보인다 — 기존 동작).
-    fn markerPreviewTarget(self: *AppSession) ?struct { term: *Term, leaf: maru.session.SplitRect } {
+    /// 열린 프리뷰가 속한 pane 과 그 leaf 사각.
+    const MarkerPreviewOwner = struct { term: *Term, leaf: maru.session.SplitRect };
+
+    fn markerPreviewTarget(self: *AppSession) ?MarkerPreviewOwner {
         const open = self.marker_preview_open orelse return null;
         if (!self.surface_initialized or self.tabs.items.len == 0) return null;
         self.pane_target_rects_scratch.clearRetainingCapacity();
@@ -15650,10 +15652,10 @@ pub const AppSession = struct {
     /// 열린 프리뷰의 자리 — 그리는 쪽과 안내를 얹는 쪽이 **같은 계산**을 쓰게 하는 단일 출처다.
     fn markerPreviewPlacement(
         self: *AppSession,
-        term: *Term,
+        owner: MarkerPreviewOwner,
         open: marker_preview_ops.Open,
     ) ?chrome.components.image_preview.Placement {
-        const anchor_rect = self.markerAnchorRect(term, open) orelse return null;
+        const anchor_rect = self.markerAnchorRect(owner, open);
         const p = chrome.props.ChromeProps{ .metrics = self.buildCellMetrics() };
         // 아직 못 푼 동안에도 **자리는 잡아 둔다** — 클릭했는데 아무것도 안 뜨면 「먹혔나」로 읽힌다.
         const w: u32 = if (open.width > 0) open.width else 24 * @max(p.metrics.cell_width_px, 1);
@@ -15674,7 +15676,7 @@ pub const AppSession = struct {
         const open = self.marker_preview_open orelse return;
         if (!open.failed) return; // 안내가 필요한 경우는 「못 풀었다」 하나뿐이다
         const target = self.markerPreviewTarget() orelse return;
-        const place = self.markerPreviewPlacement(target.term, open) orelse return;
+        const place = self.markerPreviewPlacement(target, open) orelse return;
         const p = chrome.props.ChromeProps{ .metrics = self.buildCellMetrics() };
         const tk = self.buildChromeTokens();
         var ops: std.ArrayList(chrome.draw.Op) = .empty;
@@ -15693,14 +15695,15 @@ pub const AppSession = struct {
     }
 
     /// 마커 span의 화면 사각형(px) — 셀 → px 변환은 여기서 한다(배치 모듈은 px만 안다).
-    fn markerAnchorRect(self: *AppSession, term: *Term, open: marker_preview_ops.Open) ?chrome.draw.Rect {
-        _ = term;
-        // ⚠️ **그 프리뷰가 «속한» pane 의 leaf 에서 뽑는다.** `self.termRect()` 는 모든 pane 을 합친
-        // 터미널 영역이라 분할하면 오른쪽·아래 pane 의 origin 이 통째로 빠지고(제보 2026-09-15),
-        // 활성 pane 의 leaf 를 쓰면 **비활성 pane 에 뜬 프리뷰**가 엉뚱한 자리를 가리킨다
-        // (제보 2026-09-20 — `markerPreviewTarget` 주석). 마커 좌표는 그 pane 격자 기준이다.
-        const target = self.markerPreviewTarget() orelse return null;
-        const rect = pane_ops.paneTermRect(self, target.leaf);
+    /// ⚠️ **그 프리뷰가 «속한» pane 의 leaf 에서 뽑는다.** `self.termRect()` 는 모든 pane 을 합친
+    /// 터미널 영역이라 분할하면 오른쪽·아래 pane 의 origin 이 통째로 빠지고(제보 2026-09-15),
+    /// 활성 pane 의 leaf 를 쓰면 **비활성 pane 에 뜬 프리뷰**가 엉뚱한 자리를 가리킨다
+    /// (제보 2026-09-20 — `markerPreviewTarget` 주석). 마커 좌표는 그 pane 격자 기준이다.
+    ///
+    /// **owner 를 인자로 받는다 — 여기서 다시 찾지 않는다.** 찾는 일(`activeTabLeafRects`)은 할당을
+    /// 하는데, 호출자가 이미 한 것을 프레임마다 두세 번 되풀이하고 있었다(적대 1회차).
+    fn markerAnchorRect(self: *AppSession, owner: MarkerPreviewOwner, open: marker_preview_ops.Open) chrome.draw.Rect {
+        const rect = pane_ops.paneTermRect(self, owner.leaf);
         const m = self.buildCellMetrics();
         const cw = @max(m.cell_width_px, 1);
         const ch = @max(m.cell_height_px, 1);
@@ -89985,7 +89988,7 @@ test "MP: 분할하면 프리뷰 앵커가 **그 pane** 원점을 따른다 — 
     // 그려야 한다, 2026-09-20) 열린 상태가 세션에 있어야 그 pane 을 찾는다.
     session.marker_preview_open = open;
     defer session.closeMarkerPreview();
-    const single = session.markerAnchorRect(term, open) orelse return error.TestUnexpectedResult;
+    const single = session.markerAnchorRect(session.markerPreviewTarget().?, open);
     // 단일 pane 이면 leaf 가 곧 터미널 영역이라 둘이 같다 — 여기서는 옛 코드도 맞았다.
     try std.testing.expectEqual(@as(i32, @intCast(full.x)) + @as(i32, marker.start_col) * @as(i32, @intCast(session.cell_width_px)), single.x);
 
@@ -89994,7 +89997,7 @@ test "MP: 분할하면 프리뷰 앵커가 **그 pane** 원점을 따른다 — 
     term = pane_ops.activePane(session).activeTerm();
     open.surface_id = term.surface.id;
     session.marker_preview_open.?.surface_id = open.surface_id;
-    const right = session.markerAnchorRect(term, open) orelse return error.TestUnexpectedResult;
+    const right = session.markerAnchorRect(session.markerPreviewTarget().?, open);
     try std.testing.expectEqual(single.y, right.y); // 같은 행이므로 세로는 그대로
     // 오른쪽 pane 의 원점은 창 절반보다 오른쪽이다 — 옛 코드는 `single.x` 그대로였다.
     try std.testing.expect(right.x >= @as(i32, @intCast(full.x + full.w / 2)));
@@ -90005,7 +90008,7 @@ test "MP: 분할하면 프리뷰 앵커가 **그 pane** 원점을 따른다 — 
     term = pane_ops.activePane(session).activeTerm();
     open.surface_id = term.surface.id;
     session.marker_preview_open.?.surface_id = open.surface_id;
-    const bottom = session.markerAnchorRect(term, open) orelse return error.TestUnexpectedResult;
+    const bottom = session.markerAnchorRect(session.markerPreviewTarget().?, open);
     try std.testing.expectEqual(right.x, bottom.x); // 가로는 오른쪽 열 그대로
     try std.testing.expect(bottom.y >= @as(i32, @intCast(full.y + full.h / 2)));
     try std.testing.expect(bottom.y + @as(i32, @intCast(bottom.h)) <= @as(i32, @intCast(full.y + full.h)));
@@ -90040,7 +90043,7 @@ test "MP: 프리뷰는 **뒤판 quad**를 낸다 — 그림 뒤로 터미널 글
         .height = 120,
     };
     defer session.closeMarkerPreview();
-    const place = session.markerPreviewPlacement(term, session.marker_preview_open.?) orelse
+    const place = session.markerPreviewPlacement(session.markerPreviewTarget().?, session.marker_preview_open.?) orelse
         return error.TestUnexpectedResult;
 
     session.gpu_quads.clearRetainingCapacity();

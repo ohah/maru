@@ -451,7 +451,7 @@ pub fn semanticTokensRangeRequest(allocator: std.mem.Allocator, seq: u32, uri: [
     }, .{});
 }
 
-/// `textDocument/semanticTokens/full`(§8.2i) — 범위를 못 하는 서버(clangd)의 폴백.
+/// `textDocument/semanticTokens/full`(§8.2i) — `range` 를 안 내는 서버(clangd)에는 처음부터 이것(capability 분기 — 시도 뒤 물러나는 폴백이 아니다).
 pub fn semanticTokensFullRequest(allocator: std.mem.Allocator, seq: u32, uri: []const u8) error{OutOfMemory}![]u8 {
     return std.json.Stringify.valueAlloc(allocator, .{
         .jsonrpc = "2.0",

@@ -13716,7 +13716,7 @@ test "SMT1 semantic tokens — 서버가 ready 면 프레임의 색 만들기가
     try src.appendSlice(allocator, "int my_fn(int a_ty) {\n  return a_ty;\n}\n");
     var k: usize = 0;
     while (k < 296) : (k += 1) try src.appendSlice(allocator, "\n");
-    try src.appendSlice(allocator, "int tail_fn(void);\n");
+    try src.appendSlice(allocator, "int tail_fn(void);"); // 끝 줄바꿈 없음 — 마지막 줄(299)이 곧 범위의 끝: 반열림 끝(`hi+1`)이어야 그 줄이 든다(적대적 3회차 C6)
     var f = (try SmtFixture.open(allocator, "s.c", src.items)) orelse return error.SkipZigTest;
     defer f.close(allocator);
     const s = f.fx.session;
@@ -13771,14 +13771,34 @@ test "SMT1 semantic tokens — 서버가 ready 면 프레임의 색 만들기가
     try testing.expect(f.applied(2));
     const c3 = syntaxColors(s, term);
     try testing.expectEqual(maru.chrome.tokens.ColorRole.syntax_type_name, roleAt(c3, 0, 17, 21).?);
+    // ⑷b undo — undo 도 `spanFromInverse` 가 범위를 내므로 스팬은 **밀린다**(버려지지 않는다; 범위를 못 내는 경우만 버림 — 적대적 3회차 C8 은 그래서 등가에 가깝다).
+    const shifted_before = term.rt.editor_semantic.shifted;
+    s.dispatchAppAction(.editor_undo); // 타이핑 묶음 `///` 이 통째로 돌아간다
+    try testing.expectEqual(shifted_before + 1, term.rt.editor_semantic.shifted);
+    try testing.expectEqual(@as(usize, 3), term.rt.editor_semantic.spans.items.len);
+    const c3b = syntaxColors(s, term);
+    try testing.expectEqual(maru.chrome.tokens.ColorRole.syntax_type_name, roleAt(c3b, 0, 14, 18).?); // 되돌린 만큼(3) 되밀렸다
+    {
+        const t0 = s.awakeMs();
+        while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
+    }
+    _ = syntaxColors(s, term);
+    try testing.expect(f.applied(3));
     // ⑸ 스크롤 — 덮인 범위(0..276) 밖으로 가면 다시 묻고, 응답 뒤 끝 줄의 `tail_fn` 이 2층(function) — 1층이 없어도(선언만) 선다.
     term.rt.editor_first_line = 290;
     _ = syntaxColors(s, term);
-    try testing.expectEqual(@as(u64, 4), s.editor_lsp.sent_semantic);
-    try testing.expect(f.applied(3));
+    try testing.expectEqual(@as(u64, 5), s.editor_lsp.sent_semantic);
+    try testing.expect(f.applied(4));
     const c4 = syntaxColors(s, term);
     try testing.expectEqual(maru.chrome.tokens.ColorRole.syntax_function, roleAt(c4, 299, 4, 11).?); // 색 배열은 렌더 축(앞은 빈 줄)
-    try testing.expect(term.rt.editor_semantic.covered_lo <= 270 and term.rt.editor_semantic.covered_hi >= 299);
+    try testing.expect(term.rt.editor_semantic.covered_lo <= 270 and term.rt.editor_semantic.covered_hi == 299); // 마지막 줄까지
+    // 1층도 선언의 `tail_fn` 을 함수로 칠하므로 색만으론 못 가른다 — 2층 스팬이 **마지막 줄**의 토큰을 실제로 들었는지 본다(적대적 3회차 C6: 범위 끝이 반열림이 아니면 그 줄이 빠진다).
+    const tail_at: u32 = @intCast(std.mem.indexOf(u8, term.rt.editor_doc.?.file.content, "tail_fn").?);
+    var has_tail = false;
+    for (term.rt.editor_semantic.spans.items) |sp| if (sp.start == tail_at) {
+        has_tail = true;
+    };
+    try testing.expect(has_tail);
 }
 
 test "SMT2 semantic tokens — range 없는 서버는 full 로 묻고(스크롤해도 다시 안 묻는다), provider 없으면 아무것도 안 묻고, 오류 응답은 버리고 조용한 뒤 다시 묻는다 (제품 경계, §8.2i)" {

@@ -106,10 +106,10 @@ pub fn decode(allocator: std.mem.Allocator, result: ?std.json.Value, roles: []co
         } else char +|= dc;
         if (ty >= roles.len) continue;
         const role = roles[ty] orelse continue;
-        if (len == 0) continue;
         const start = position.offsetOf(content, lines, line, char, enc);
         const end = position.offsetOf(content, lines, line, char +| len, enc);
-        if (end <= start or end > content.len) continue;
+        // 길이 0·줄 밖(offsetOf 가 줄 끝으로 묶는다)은 여기서 함께 걸러진다 — `len == 0`·`end > content.len` 가드는 등가라 뺐다(적대적 1회차 A9·A10).
+        if (end <= start) continue;
         try out.append(allocator, .{ .start = start, .end = end, .role = role });
     }
     return out.toOwnedSlice(allocator);
@@ -167,6 +167,12 @@ test "SEM1 capability·legend 매핑·relative 풀기 — 모르는 종류는 �
     try testing.expect(caps.roles[2] == null); // variable — 의도된 무색
     try testing.expectEqual(Role.type_name, caps.roles[3].?); // rust-analyzer 의 표준 밖 종류
     try testing.expect(caps.roles[4] == null); // angle — 모르는 것
+    // legend 없는 provider 는 못 푼다 — 미지원(적대적 1회차 A3).
+    var lp = try parseJson(a, "{\"capabilities\":{\"semanticTokensProvider\":{\"range\":true,\"full\":true}}}");
+    defer lp.deinit();
+    var lcaps = try capsFromResult(a, lp.value);
+    defer lcaps.deinit(a);
+    try testing.expect(!lcaps.supported and lcaps.roles.len == 0);
     // provider 없음.
     var np = try parseJson(a, "{\"capabilities\":{}}");
     defer np.deinit();
@@ -184,11 +190,12 @@ test "SEM1 capability·legend 매핑·relative 풀기 — 모르는 종류는 �
     var idx = try line_index.build(a, content);
     defer idx.deinit();
     // 5-tuple: (dLine, dChar, len, type, mods). 둘째 줄의 `가` 는 utf-16 으로 1 글자·byte 3.
-    var d = try parseJson(a, "{\"data\":[0,0,2,0,0, 0,3,3,1,1, 0,4,1,2,0, 1,4,1,2,0, 0,4,1,5,0, 0,0,0,5,0, 0,90,1,5,0, 0,1,1,9,0]}");
+    // `{`(줄 0, 글자 10) 은 legend 밖 첨자 9 — 무색으로 빠져야 한다(적대적 1회차 A8: 줄 밖 자리에 두면 그 이유로 빠져 판정이 안 된다).
+    var d = try parseJson(a, "{\"data\":[0,0,2,0,0, 0,3,3,1,1, 0,4,1,2,0, 0,3,1,9,0, 1,4,1,2,0, 0,4,1,5,0, 0,0,0,5,0, 0,90,1,5,0]}");
     defer d.deinit();
     const spans = try decode(a, d.value, caps.roles, content, idx, .utf16);
     defer a.free(spans);
-    try testing.expectEqual(@as(usize, 3), spans.len); // fn · add · s (a·가 는 무색, 길이 0·문서 밖·모르는 첨자는 뺌)
+    try testing.expectEqual(@as(usize, 3), spans.len); // fn · add · s (a·가 는 무색, 모르는 첨자·길이 0·줄 밖은 뺌)
     try testing.expectEqualStrings("fn", content[spans[0].start..spans[0].end]);
     try testing.expectEqual(Role.keyword, spans[0].role);
     try testing.expectEqualStrings("add", content[spans[1].start..spans[1].end]);

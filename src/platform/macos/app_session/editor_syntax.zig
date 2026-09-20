@@ -383,7 +383,7 @@ fn lineColorsInto(
     };
 
     p.spansForRange(allocator, doc_content, range, &bufs.spans);
-    if (bufs.spans.items.len == 0 and extra.len == 0) return &.{};
+    if (bufs.spans.items.len == 0 and extra.len == 0) return &.{}; // 2층이 있으면 1층 캡처도 있다(글자가 있어야 토큰이 있다) — `extra` 검사는 방어(적대적 2회차 B20: 등가)
 
     // **여기부터는 중립이 소유한다**(`chrome…editor_view.syntax_colors`, §2m.112). 이 파일에 있는
     // 동안 「마지막이 이긴다」와 탭 열 계산이 macOS 것이었고, Windows 가 색을 칠하려면 같은 규칙을
@@ -1116,6 +1116,12 @@ test "ES40 2층 병합 — semantic 스팬은 겹친 자리만 1층을 덮고, �
     }
     try testing.expectEqual(tokens.ColorRole.syntax_keyword, f_role.?); // 2층이 1층(function)을 덮었다
     try testing.expectEqual(tokens.ColorRole.syntax_keyword, fn_role.?);
+    // 마지막 2층 스팬 **뒤**의 1층(`void`)도 남는다(적대적 2회차 B19: 꼬리를 안 붙이면 사라진다).
+    var void_role: ?tokens.ColorRole = null;
+    for (colors[1]) |cs| if (cs.start_col == 11 and cs.end_col == 15) {
+        void_role = cs.role;
+    };
+    try testing.expect(void_role != null);
     // 2층이 비면 `lineColors` 와 같다 — `x` 는 1층 색(number)으로 돌아간다.
     const plain = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, 2, 4, &.{});
     var x_plain: ?tokens.ColorRole = null;

@@ -59,23 +59,54 @@ test "화면 청크를 붙이는 자리는 배치 끝 표식을 스스로 정한
 
     // ① **청크를 «붙이는» 자리를 행위로 센다.** 큐에 새 청크가 생기는 곳은 `chunk_len += 1` 뿐이다.
     //    함수 이름으로 세면 그 둘을 안 거치는 자리를 놓친다 — 실제로 놓쳤다.
+    //    **하한을 실제 개수로 둔다.** 처음에 `< 3` 으로 적었는데 제품 자리는 **넷**이라(배치·
+    //    `enqueue`·`enqueueOwned`·`appendOwnedBatchChunk`) 하나를 지워도 통과했다 — 이 축이 막으려는
+    //    「경로가 조용히 사라지거나 합쳐지는」 변경이 그대로 새는 하한이었다. 같은 실수를 이 세션에서
+    //    두 번 했다(구독 무효화 축의 `< 5`).
     const appends = countAll(product, "chunk_len += 1");
-    if (appends < 3) {
-        std.debug.print("청크를 붙이는 자리가 {d} 곳뿐이다 — 셋이던 자리다\n", .{appends});
+    if (appends < 4) {
+        std.debug.print("청크를 붙이는 자리가 {d} 곳뿐이다 — 넷이던 자리다\n", .{appends});
         return error.TooFewAppendSites;
     }
 
-    // ② **직접 붙이는 자리는 표식을 명시한다.** `appendOwnedBatchChunk` 가 기본값에 기대면
-    //    화면 청크가 끝 없이 남는다. 인자로 받아야 호출자가 **고르지 않을 수 없다**.
-    const fn_at = std.mem.indexOf(u8, product, "fn appendOwnedBatchChunk(") orelse
-        return error.AppendHelperMissing;
-    const fn_end = std.mem.indexOfPos(u8, product, fn_at, "\n}\n") orelse product.len;
-    const body = product[fn_at..fn_end];
-    if (std.mem.indexOf(u8, body, "screen_batch_end: bool") == null) {
-        std.debug.print("appendOwnedBatchChunk 가 표식을 인자로 안 받는다 — 기본값 false 로 샌다\n", .{});
-        return error.AppendHelperDefaultsBatchEnd;
+    // ② **붙이는 «모든» 자리가 표식을 인자로 받는다.**
+    //
+    //    첫 판은 `appendOwnedBatchChunk` 하나만 봤다. 그래서 축 이름이 「모든 자리」라고 말하는데
+    //    실제로는 하나만 지켰고, **그때 이미 표식을 안 다는 화면 경로가 하나 더 있었는데도 초록**
+    //    이었다(`enqueueOwnedScreen` → `enqueueOwned`). 축이 거짓 안전감을 준 것이다.
+    //
+    //    그래서 감시 대신 **구조**로 막는다: 청크를 붙이는 함수 셋이 전부 표식을 인자로 받는다.
+    //    이제 화면 청크를 붙이는 쪽은 값을 고르지 않을 수 없다.
+    const appenders = [_][]const u8{
+        "fn enqueue(",
+        "fn enqueueOwned(",
+        "fn appendOwnedBatchChunk(",
+    };
+    for (appenders) |name| {
+        const fn_at = std.mem.indexOf(u8, product, name) orelse {
+            std.debug.print("붙이는 함수 «{s}» 를 못 찾는다\n", .{name});
+            return error.AppendHelperMissing;
+        };
+        const fn_end = std.mem.indexOfPos(u8, product, fn_at, "\n    }\n") orelse
+            std.mem.indexOfPos(u8, product, fn_at, "\n}\n") orelse product.len;
+        const body = product[fn_at..fn_end];
+        if (std.mem.indexOf(u8, body, "screen_batch_end: bool") == null) {
+            std.debug.print("«{s}» 가 표식을 인자로 안 받는다 — 기본값 false 로 샌다\n", .{name});
+            return error.AppendHelperDefaultsBatchEnd;
+        }
+        if (std.mem.indexOf(u8, body, ".screen_batch_end = screen_batch_end") == null) {
+            std.debug.print("«{s}» 가 받은 표식을 청크에 안 싣는다\n", .{name});
+            return error.AppendHelperDropsBatchEnd;
+        }
     }
-    try std.testing.expect(std.mem.indexOf(u8, body, ".screen_batch_end = screen_batch_end") != null);
+
+    // ②-b **붙인 뒤 «되짚어» 다는 관례가 남지 않는다.** 그 한 줄을 잊는 것이 이 결함의 원인이었고,
+    //      두 곳에서 실제로 잊었다(resize 발행 · `enqueueOwnedScreen`). 한 자리라도 남으면 다음
+    //      호출자가 그 관례를 따라 하고 같은 결함이 돌아온다.
+    if (countAll(product, "chunks[tail].screen_batch_end =") != 0) {
+        std.debug.print("붙인 뒤 되짚어 표식을 다는 자리가 남았다 — 잊을 수 있는 구조로 돌아갔다\n", .{});
+        return error.PostHocBatchEndRemains;
+    }
 
     // ③ **화면으로 붙이는 호출은 «끝» 로 붙인다.** 이 경로가 나르는 것은 `encodeFrame` 이 만든
     //    완결 프레임 한 장이라 그 자리에서 배치가 끝난다(`enqueueScreen` 과 같은 모양).
@@ -99,4 +130,16 @@ test "화면 청크를 붙이는 자리는 배치 끝 표식을 스스로 정한
     // ④ **배치를 여럿 붙이는 자리는 «마지막만» 끝이다.** 전부 끝으로 달면 한 배치가 여러 배치로
     //    보여 압력 회수가 배치 중간에서 끊는다. 그 자리들은 인덱스 비교로 정하고 있어야 한다.
     try std.testing.expect(countAll(product, "index + 1 == chunks.len") >= 3);
+
+    // ⑤ **단일 완결 프레임을 붙이는 짝 둘은 같은 값을 쓴다.** `enqueueScreen`(복사)과
+    //    `enqueueOwnedScreen`(소유권 이전)은 「소유권을 옮기느냐」만 달라야 하는데, 2026-09-20 까지
+    //    **큐 문법이 달랐다** — 앞은 끝으로 달고 뒤는 안 달았다.
+    const owned_at = std.mem.indexOf(u8, product, "pub fn enqueueOwnedScreen(") orelse
+        return error.OwnedScreenMissing;
+    const owned_end = std.mem.indexOfPos(u8, product, owned_at, "\n    }\n") orelse product.len;
+    const owned = product[owned_at..owned_end];
+    if (std.mem.indexOf(u8, owned, "screen_soft_bytes, true") == null) {
+        std.debug.print("enqueueOwnedScreen 이 단일 프레임을 끝으로 안 단다 — 복사 짝과 문법이 갈린다\n", .{});
+        return error.OwnedScreenNotBatchEnd;
+    }
 }

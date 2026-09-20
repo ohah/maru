@@ -28473,15 +28473,19 @@ test "훅 캡처: 셸 구간이 Pre 로 열리고 Post 로 닫히며 턴 끝이 
     _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .post_tool_use, .session_id = "S-br", .tool_name = "Bash", .tool_use_id = "toolu_bg", .duration_ms = 30 });
     try std.testing.expect(session.turn_captures.openTurn("S-br").?.shell.busy());
 
-    // ③b provider 에 닫을 이벤트가 없으면(codex — AT3b-2 까지) 열지도 않는다: 열면 턴 전체가 구간이 된다.
+    // ③b 닫을 이벤트가 세트에 있는 provider 에서만 연다(`closesShellBrackets`). codex 는 AT3b-2 로 `PostToolUse`
+    // 가 들어와 **열리고 닫힌다**; 세트에 없는 provider(모르는 표식)는 열지도 않는다 — 열면 턴 전체가 구간이 된다.
     _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .pre_tool_use, .provider = "codex", .session_id = "S-br", .tool_name = "Bash", .tool_command = "ls", .tool_use_id = "exec-codex-1" });
     try std.testing.expectEqual(@as(usize, 2), session.turn_captures.openTurn("S-br").?.shell.sealed().len);
     _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .post_tool_use, .provider = "codex", .session_id = "S-br", .tool_name = "Bash", .tool_use_id = "exec-codex-1" });
-    try std.testing.expectEqual(@as(usize, 2), session.turn_captures.openTurn("S-br").?.shell.sealed().len);
+    try std.testing.expectEqual(@as(usize, 3), session.turn_captures.openTurn("S-br").?.shell.sealed().len);
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .pre_tool_use, .provider = "mimo-code", .session_id = "S-br", .tool_name = "Bash", .tool_command = "ls", .tool_use_id = "x-1" });
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .post_tool_use, .provider = "mimo-code", .session_id = "S-br", .tool_name = "Bash", .tool_use_id = "x-1" });
+    try std.testing.expectEqual(@as(usize, 3), session.turn_captures.openTurn("S-br").?.shell.sealed().len);
 
     // ④ `Monitor` 는 셸 수에는 들지만 구간은 안 연다 — 닫을 신호(`Post`)가 그 matcher 에 없다.
     _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .pre_tool_use, .session_id = "S-br", .tool_name = "Monitor", .tool_command = "tail -f x", .tool_use_id = "toolu_m" });
-    try std.testing.expectEqual(@as(u32, 5), session.turn_captures.openTurn("S-br").?.shell_calls); // a·b·bg·codex·m
+    try std.testing.expectEqual(@as(u32, 6), session.turn_captures.openTurn("S-br").?.shell_calls); // a·b·bg·codex·mimo·m
 
     // ⑤ 게이트: **열기는 backlog 뒤, 닫기는 backlog 앞.** 회전본 tail 의 Post 가 살아 있는 파일에서 연
     // 구간을 닫아야 한다 — 같은 게이트에 두면 그 구간은 영영 안 닫힌다.
@@ -28492,11 +28496,11 @@ test "훅 캡처: 셸 구간이 Pre 로 열리고 Post 로 닫히며 턴 끝이 
     term.agent_hook_backlog_catchup = false;
     {
         const open = session.turn_captures.openTurn("S-br").?;
-        try std.testing.expectEqual(@as(usize, 3), open.shell.sealed().len); // a·b·d — old 는 열리지 않았다
-        try std.testing.expectEqual(@as(u32, 6), open.shell_calls); // a·b·bg·codex·m·d — backlog 의 Pre 는 세지도 않는다(AT4)
+        try std.testing.expectEqual(@as(usize, 4), open.shell.sealed().len); // a·b·codex·d — old 는 열리지 않았다
+        try std.testing.expectEqual(@as(u32, 7), open.shell_calls); // a·b·bg·codex·mimo·m·d — backlog 의 Pre 는 세지도 않는다(AT4)
         // 짝 없는 Post(backlog 에서 건너뛴 Pre 의 것)는 무시하고 센다.
         _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .post_tool_use, .session_id = "S-br", .tool_name = "Bash", .tool_use_id = "toolu_old" });
-        try std.testing.expectEqual(@as(u32, 2), open.shell.unmatched); // codex 의 Post + old
+        try std.testing.expectEqual(@as(u32, 2), open.shell.unmatched); // mimo 의 Post + old
         try std.testing.expect(!open.shell.overflow);
     }
 
@@ -28505,7 +28509,7 @@ test "훅 캡처: 셸 구간이 Pre 로 열리고 Post 로 닫히며 턴 끝이 
     try std.testing.expect(id != 0);
     const sealed = session.turn_captures.sealedTurn(id) orelse return error.NoSealedTurn;
     try std.testing.expect(!sealed.shell.busy());
-    try std.testing.expectEqual(@as(usize, 4), sealed.shell.sealed().len); // a·b·d + 배경
+    try std.testing.expectEqual(@as(usize, 5), sealed.shell.sealed().len); // a·b·codex·d + 배경
     for (sealed.shell.sealed()) |iv| {
         try std.testing.expect(iv.end_ms >= iv.start_ms);
         try std.testing.expect(iv.end_ms > 1_577_836_800_000); // 2020-01-01 — monotonic 시계면 여기서 죽는다
@@ -28683,6 +28687,81 @@ test "훅 캡처: 회전본의 Stop 이 진행 중 턴의 사본을 가져가지
     try std.testing.expectEqualStrings("진행 중\n", open.entries.items[0].before.text);
 }
 
+// [AT3b-2] **provider 의 셸 diff 가 캡처에 실린다.** `PostToolUse(Bash)` 의 `changedFiles` 가 `Pre` 와 같은 게이트를
+// 지나 엔트리가 되고, 봉인이 after 를 읽어 `✎` 로 선다. 루트 아래 다른 저장소(워크트리)의 경로는 세지 않는다.
+test "훅 캡처: PostToolUse 의 bashEditDiff 가 셸 편집을 캡처에 싣고 워크트리 경로는 거른다 (AT3b-2)" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root_buf);
+    const root = root_buf[0..root_len];
+    try tmp.dir.createDirPath(io, ".git");
+    try tmp.dir.writeFile(io, .{ .sub_path = "by_shell.zig", .data = "sed wrote this\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "read_then_shell.zig", .data = "v1\n" });
+    try tmp.dir.createDirPath(io, ".claude/worktrees/agent-a/src");
+    try tmp.dir.writeFile(io, .{ .sub_path = ".claude/worktrees/agent-a/.git", .data = "gitdir: elsewhere\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = ".claude/worktrees/agent-a/src/other.zig", .data = "other session\n" });
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.git_repo = try allocator.dupe(u8, root);
+    const term = tab_ops.activeTab(session).panes.items[0].terms.items[0];
+    term.agent_kind = .claude;
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .session_start, .session_id = "S-diff" });
+
+    var a_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const by_shell = try std.fmt.bufPrint(&a_buf, "{s}/by_shell.zig", .{root});
+    var b_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const read_then = try std.fmt.bufPrint(&b_buf, "{s}/read_then_shell.zig", .{root});
+    var c_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const in_worktree = try std.fmt.bufPrint(&c_buf, "{s}/.claude/worktrees/agent-a/src/other.zig", .{root});
+
+    // `Read` 가 before 를 떠 둔 파일 하나.
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .pre_tool_use, .provider = "claude", .session_id = "S-diff", .tool_name = "Read", .file_path = read_then, .tool_use_id = "toolu_r" });
+    // 셸 명령: Pre 가 구간을 열고, Post 가 닫으면서 changedFiles 셋을 싣는다 — 하나는 워크트리 안, 하나는 루트 밖.
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .pre_tool_use, .provider = "claude", .session_id = "S-diff", .tool_name = "Bash", .tool_command = "sed -i …", .tool_use_id = "toolu_s" });
+    var raw_buf: [4 * std.fs.max_path_bytes]u8 = undefined;
+    const raw = try std.fmt.bufPrint(&raw_buf, "[\"{s}\",\"{s}\",\"{s}\",\"/etc/hosts\"]", .{ by_shell, read_then, in_worktree });
+    // 도구가 실제로 고친 뒤의 내용(after 는 봉인 때 읽는다).
+    try tmp.dir.writeFile(io, .{ .sub_path = "read_then_shell.zig", .data = "v2\n" });
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .post_tool_use, .provider = "claude", .session_id = "S-diff", .tool_name = "Bash", .tool_use_id = "toolu_s", .duration_ms = 40, .changed_files_raw = raw });
+    {
+        const open = session.turn_captures.openTurn("S-diff") orelse return error.NoOpenTurn;
+        // read_then(이미 있음, 플래그) + by_shell(새) + /etc/hosts(루트 밖 — 경로만) = 3. 워크트리 안은 **없다**.
+        try std.testing.expectEqual(@as(usize, 3), open.entries.items.len);
+        for (open.entries.items) |e| try std.testing.expect(std.mem.indexOf(u8, e.path, "worktrees") == null);
+        try std.testing.expect(open.find(by_shell) != null);
+        try std.testing.expect(open.entries.items[open.find(read_then).?].shell_diff);
+        try std.testing.expectEqualStrings("v1\n", open.entries.items[open.find(read_then).?].before.text); // 첫 캡처 그대로
+        try std.testing.expect(!open.shell.busy());
+    }
+    // backlog 중의 Post 는 버린다 — 게이트가 Pre 와 같다.
+    term.agent_hook_backlog_catchup = true;
+    var late_buf: [std.fs.max_path_bytes + 8]u8 = undefined;
+    const late = try std.fmt.bufPrint(&late_buf, "[\"{s}/late.zig\"]", .{root});
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .post_tool_use, .provider = "claude", .session_id = "S-diff", .tool_name = "Bash", .tool_use_id = "toolu_late", .changed_files_raw = late });
+    term.agent_hook_backlog_catchup = false;
+    try std.testing.expectEqual(@as(usize, 3), session.turn_captures.openTurn("S-diff").?.entries.items.len);
+
+    // 봉인: after 가 읽히고 셸 diff 근거로 ✎ 가 선다 — by_shell(before 모름) + read_then(v1→v2) = 2. /etc/hosts 는 루트 밖이라 아니다.
+    const id = agent_ops.sealTurnCaptureNow(session, term);
+    try std.testing.expect(id != 0);
+    const sealed = session.turn_captures.sealedTurn(id) orelse return error.NoSealedTurn;
+    try std.testing.expectEqual(@as(u32, 2), sealed.edited_count);
+    try std.testing.expect(sealed.entries.items[sealed.find(by_shell).?].shellOnly());
+    try std.testing.expect(sealed.entries.items[sealed.find(read_then).?].shellOnly());
+}
+
 // [AT3b-1] **실제 로그 경로로 한 턴을 통째로 민다** — 파서 → 배치 루프 → 봉인. 위 배선 테스트는 `Event` 를
 // 손으로 만들어 seam 에 넣으므로 「훅이 적는 그 JSON 을 파서가 그 필드로 읽어 배선까지 닿는가」(필드 이름
 // 오타·kind 표 누락)는 한 번도 안 건넌다. 실측 payload 모양을 그대로 적어 `pollAgentHookEvents` 로 읽힌다.
@@ -28723,6 +28802,11 @@ test "훅 캡처: 실측 모양의 ndjson 한 턴이 파서를 지나 셸 구간
     defer session.deinit();
     const term = pane_ops.activePane(&session).activeTerm();
     term.agent_kind = .claude;
+    // AT3b-2: 셸 diff 가 가리킬 파일이 있는 저장소 루트 — 봉인이 after 를 여기서 읽는다.
+    session.git_repo = try a.dupe(u8, root);
+    try tmp.dir.writeFile(io, .{ .sub_path = "by_sed.txt", .data = "ALPHA\n" });
+    var by_sed_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const by_sed = try std.fmt.bufPrint(&by_sed_buf, "{s}/by_sed.txt", .{root});
 
     const events_dir = try std.fmt.allocPrint(a, "cache/maru/{s}/{d}", .{ hook_command.log_dir_rel, agent_ops.hookInstanceId() });
     defer a.free(events_dir);
@@ -28733,24 +28817,31 @@ test "훅 캡처: 실측 모양의 ndjson 한 턴이 파서를 지나 셸 구간
     // 한 턴: 성공한 Bash · 실패한 Bash · 배경 Bash · Read(경로는 없는 파일이라 «모름» 으로 접힌다) · Stop.
     // 줄은 2026-09-19 격리 세션 실측 payload 의 키를 그대로 쓴다(값만 짧다).
     const sid = "\"session_id\":\"cafe0000-0000-4000-8000-000000000001\"";
-    try tmp.dir.writeFile(io, .{
-        .sub_path = log_rel,
-        .data = "claude\t{\"hook_event_name\":\"SessionStart\"," ++ sid ++ ",\"source\":\"startup\"}\n" ++
-            "claude\t{\"hook_event_name\":\"UserPromptSubmit\"," ++ sid ++ ",\"prompt_id\":\"p-1\",\"prompt\":\"go\"}\n" ++
-            "claude\t{\"hook_event_name\":\"PreToolUse\"," ++ sid ++ ",\"prompt_id\":\"p-1\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sleep 4\",\"run_in_background\":false},\"tool_use_id\":\"toolu_01GxMwqMfHbwqq1dbuxDCwFB\"}\n" ++
-            "claude\t{\"hook_event_name\":\"PostToolUse\"," ++ sid ++ ",\"prompt_id\":\"p-1\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sleep 4\",\"run_in_background\":false},\"tool_response\":{\"stdout\":\"\",\"stderr\":\"\",\"interrupted\":false},\"tool_use_id\":\"toolu_01GxMwqMfHbwqq1dbuxDCwFB\",\"duration_ms\":4260}\n" ++
-            "claude\t{\"hook_event_name\":\"PreToolUse\"," ++ sid ++ ",\"prompt_id\":\"p-1\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sh -c 'exit 3'\"},\"tool_use_id\":\"toolu_013o3p6eudWZB6eggpZNHx4y\"}\n" ++
-            "claude\t{\"hook_event_name\":\"PostToolUseFailure\"," ++ sid ++ ",\"prompt_id\":\"p-1\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sh -c 'exit 3'\"},\"error\":\"Exit code 3\\nout\",\"is_interrupt\":false,\"duration_ms\":1024,\"tool_use_id\":\"toolu_013o3p6eudWZB6eggpZNHx4y\"}\n" ++
-            "claude\t{\"hook_event_name\":\"PreToolUse\"," ++ sid ++ ",\"prompt_id\":\"p-1\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sleep 9\",\"run_in_background\":true},\"tool_use_id\":\"toolu_012mYbdJzBhYSJhBwBAT56Ka\"}\n" ++
-            "claude\t{\"hook_event_name\":\"PostToolUse\"," ++ sid ++ ",\"prompt_id\":\"p-1\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sleep 9\",\"run_in_background\":true},\"tool_response\":{\"stdout\":\"\"},\"tool_use_id\":\"toolu_012mYbdJzBhYSJhBwBAT56Ka\",\"duration_ms\":30}\n",
-    });
+    const template = "claude\t{\"hook_event_name\":\"SessionStart\"," ++ sid ++ ",\"source\":\"startup\"}\n" ++
+        "claude\t{\"hook_event_name\":\"UserPromptSubmit\"," ++ sid ++ ",\"prompt_id\":\"p-1\",\"prompt\":\"go\"}\n" ++
+        "claude\t{\"hook_event_name\":\"PreToolUse\"," ++ sid ++ ",\"prompt_id\":\"p-1\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sleep 4\",\"run_in_background\":false},\"tool_use_id\":\"toolu_01GxMwqMfHbwqq1dbuxDCwFB\"}\n" ++
+        "claude\t{\"hook_event_name\":\"PostToolUse\"," ++ sid ++ ",\"prompt_id\":\"p-1\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sleep 4\",\"run_in_background\":false},\"tool_response\":{\"stdout\":\"\",\"stderr\":\"\",\"interrupted\":false},\"tool_use_id\":\"toolu_01GxMwqMfHbwqq1dbuxDCwFB\",\"duration_ms\":4260}\n" ++
+        // AT3b-2 — 실측 모양의 `bashEditDiff`(2026-09-20 격리 세션). hunks 는 실려 오지만 파서가 들지 않는다.
+        "claude\t{\"hook_event_name\":\"PreToolUse\"," ++ sid ++ ",\"prompt_id\":\"p-1\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sed -i '' 's/alpha/ALPHA/' by_sed.txt\"},\"tool_use_id\":\"toolu_sed\"}\n" ++
+        "claude\t{\"hook_event_name\":\"PostToolUse\"," ++ sid ++ ",\"prompt_id\":\"p-1\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sed -i '' 's/alpha/ALPHA/' by_sed.txt\"},\"tool_response\":{\"stdout\":\"\",\"stderr\":\"\",\"interrupted\":false,\"isImage\":false,\"noOutputExpected\":false,\"bashEditDiff\":{\"files\":[{\"filePath\":\"" ++ "__BY_SED__" ++ "\",\"hunks\":[{\"oldStart\":1,\"oldLines\":1,\"newStart\":1,\"newLines\":1,\"lines\":[\"-alpha\",\"+ALPHA\"]}]}],\"moreFiles\":0,\"changedFiles\":[\"" ++ "__BY_SED__" ++ "\"]}},\"tool_use_id\":\"toolu_sed\",\"duration_ms\":31}\n" ++
+        "claude\t{\"hook_event_name\":\"PreToolUse\"," ++ sid ++ ",\"prompt_id\":\"p-1\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sh -c 'exit 3'\"},\"tool_use_id\":\"toolu_013o3p6eudWZB6eggpZNHx4y\"}\n" ++
+        "claude\t{\"hook_event_name\":\"PostToolUseFailure\"," ++ sid ++ ",\"prompt_id\":\"p-1\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sh -c 'exit 3'\"},\"error\":\"Exit code 3\\nout\",\"is_interrupt\":false,\"duration_ms\":1024,\"tool_use_id\":\"toolu_013o3p6eudWZB6eggpZNHx4y\"}\n" ++
+        "claude\t{\"hook_event_name\":\"PreToolUse\"," ++ sid ++ ",\"prompt_id\":\"p-1\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sleep 9\",\"run_in_background\":true},\"tool_use_id\":\"toolu_012mYbdJzBhYSJhBwBAT56Ka\"}\n" ++
+        "claude\t{\"hook_event_name\":\"PostToolUse\"," ++ sid ++ ",\"prompt_id\":\"p-1\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sleep 9\",\"run_in_background\":true},\"tool_response\":{\"stdout\":\"\"},\"tool_use_id\":\"toolu_012mYbdJzBhYSJhBwBAT56Ka\",\"duration_ms\":30}\n";
+    const log_text = try std.mem.replaceOwned(u8, a, template, "__BY_SED__", by_sed);
+    defer a.free(log_text);
+    try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = log_text });
     agent_ops.pollAgentHookEvents(&session, term, false);
     const identity = "cafe0000-0000-4000-8000-000000000001";
     try std.testing.expectEqualStrings(identity, term.agent_transcript.identity());
     {
         const open = session.turn_captures.openTurn(identity) orelse return error.NoOpenTurn;
-        try std.testing.expectEqual(@as(u32, 3), open.shell_calls);
-        try std.testing.expectEqual(@as(usize, 2), open.shell.sealed().len); // 성공·실패
+        try std.testing.expectEqual(@as(u32, 4), open.shell_calls);
+        try std.testing.expectEqual(@as(usize, 3), open.shell.sealed().len); // 성공·실패·sed
+        // AT3b-2: 실제 줄의 `changedFiles` 가 파서를 지나 엔트리가 됐다(경로 그대로, 플래그, before 는 «뜰 기회 없음»).
+        const sed_i = open.find(by_sed) orelse return error.ShellDiffNotCaptured;
+        try std.testing.expect(open.entries.items[sed_i].shell_diff);
+        try std.testing.expectEqual(maru.session.turn_capture.Unknown.no_before, open.entries.items[sed_i].before.unknown);
         try std.testing.expect(open.shell.busy()); // 배경은 열려 있다
         try std.testing.expectEqual(@as(u32, 0), open.shell.unmatched);
         try std.testing.expect(!open.shell.overflow);
@@ -28775,9 +28866,12 @@ test "훅 캡처: 실측 모양의 ndjson 한 턴이 파서를 지나 셸 구간
     while (id < 8) : (id += 1) {
         const t = session.turn_captures.sealedTurn(id) orelse continue;
         found = true;
-        try std.testing.expectEqual(@as(usize, 3), t.shell.sealed().len);
+        try std.testing.expectEqual(@as(usize, 4), t.shell.sealed().len);
         try std.testing.expect(!t.shell.busy());
-        try std.testing.expectEqual(@as(u32, 3), t.shell_calls);
+        try std.testing.expectEqual(@as(u32, 4), t.shell_calls);
+        // 봉인이 after 를 읽었고 셸 diff 근거로 `✎` 가 하나 선다(by_sed).
+        try std.testing.expectEqual(@as(u32, 1), t.edited_count);
+        try std.testing.expectEqualStrings("ALPHA\n", t.entries.items[t.find(by_sed).?].after.?.text);
     }
     try std.testing.expect(found);
 }

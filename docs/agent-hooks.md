@@ -655,7 +655,7 @@ codex 는 열하나다. 그 둘을 섞어 읽지 않는다 — «세트를 늘�
 (§3, §2.1) 무엇이 **있는지**와 무엇을 **거는지**는 다른 질문이다.
 
 **세트는 provider 마다 다르다** — claude **11 개**(2026-09-20 AT3b-1 로 `PostToolUse`·`PostToolUseFailure`(`Bash`) 가
-들어왔다), **codex 7 개**(`Notification`·`StopFailure` 가 없고, `PostToolUse(Bash)` 는 AT3b-2 에서 넣는다). 코드에서도
+들어왔다), **codex 8 개**(`Notification`·`StopFailure` 가 없다 — `PostToolUse(Bash)` 는 AT3b-2 로 들어왔다). 코드에서도
 전역 세트를 두지 않고 `agent_hook_command.eventsFor(provider)` 로 갈라 둔다: 하나로 두면 codex 에 없는
 이벤트가 조용히 섞이고, 그 사실이 드러나는 자리는 사용자의 설정 파일뿐이다.
 
@@ -691,7 +691,7 @@ payload 도 같은 소스가 못 박는다(`codex-rs/hooks/src/schema.rs`, `deny
 | `Stop` | — | ✅ | 턴 종료 스냅샷, 마지막 응답(`last_assistant_message` → 사이드바 대화 줄), 완료 상태·완료 알림, **`background_tasks`**(상태를 붙잡는 근거가 **아니다** — 자식 로스터의 유령을 거두는 데만 쓴다). **링 항목의 턴 제목은 (AT2)** — `Snapshot`에 아직 제목 슬롯이 없다 |
 | `PermissionRequest` | `*` | ✅ | **입력 대기** 상태 + 주의 알림. **대화형에서 발화 확인**(2026-08-29 재실측). 헤드리스에서는 권한 거부가 실제로 일어나도 이 이벤트도 `PermissionDenied`도 오지 않는다(§9-6) |
 | `PreToolUse` | `*` | ✅ | 진행 중 세부(`tool_description`). AI 소행 경로(`file_path` — AT3 캡처). **셸 구간의 시작**(`tool_use_id`·`run_in_background` — AT3b-1, [턴 변경분 §4.4](agent-turn-changes.md)). **두 provider의 payload 모양이 다르다 — §2.1** |
-| `PostToolUse` | **`Bash`** | ✅ 있다 — **AT3b-2 에서 건다** | **셸 구간의 끝**(`tool_use_id`·`duration_ms`). `Bash` 로 좁혀 §3.1 의 근거(`originalFile`)를 비껴간다. claude 는 실패한 도구에 이것을 **보내지 않는다** — 아래 변종이 온다. codex 는 실패에도 이것을 보낸다(2026-09-20 실측) |
+| `PostToolUse` | **`Bash`** | ✅ (AT3b-2 로 세트에) | **셸 구간의 끝**(`tool_use_id`·`duration_ms`)과 **셸 편집 목록**(`tool_response.bashEditDiff.changedFiles` — claude 2.1.271+ bypassPermissions, 명령 전후의 작업트리 diff · AT3b-2). `Bash` 로 좁혀 §3.1 의 근거(`originalFile`)를 비껴간다. claude 는 실패한 도구에 이것을 **보내지 않는다** — 아래 변종이 온다. codex 는 실패에도 이것을 보내지만 `tool_response` 가 stdout 문자열이라 diff 는 없다(2026-09-20 실측) |
 | `PostToolUseFailure` | **`Bash`** | ❌ **없다** | **실패로 끝난 도구**(비0 종료 — 셸 호출의 1.7%). 구간을 닫는 데는 성공과 같은 뜻이다. `duration_ms`·`is_interrupt`·`error` 를 싣는다(2026-09-19 실측). 이것이 없으면 실패한 셸의 구간이 턴 끝까지 열린다 |
 | `SubagentStart` | — | ✅ | **서브에이전트 수 세기.** 자식이 도는 동안 lead `Stop` 은 턴 끝이 아니다 |
 | `SubagentStop` | — | ✅ | 자식이 끝났다. **마지막** 자식이 끝나고 lead 도 끝났으면 그때가 턴 끝이다 |
@@ -986,7 +986,7 @@ trust 키는 `<hooks.json 절대경로>:<이벤트 snake_case>:<그룹 인덱스
 | `permission_request` | **넣는다** |
 | `user_prompt_submit` | **뺀다** |
 | `stop` | **뺀다** |
-| `post_tool_use` (세트 밖 — AT3b 후보, 2026-09-20 실측) | **넣는다** |
+| `post_tool_use` (2026-09-20 실측 · AT3b-2 로 세트에) | **넣는다** |
 
 메커니즘은 이렇다: `hooks.json` 에 `matcher` 를 적어도 codex 는 그 둘에서 **로드할 때 그것을 버린다**
 (`hooks/list` 가 `matcher: null` 로 돌려준다). 해시는 그 정규화된 결과를 담을 뿐이다 — 우리가 적은 값이
@@ -1332,6 +1332,17 @@ maru의 기존 codex 훅이 이미 이 형태다.
   상한을 넘길 수 있고, 그때 이름까지 버리면 **그 턴의 끝을 못 보고 배지가 «진행 중»에 멈춘다** — 이 층이
   막으려는 바로 그 실패다. 본문은 사라지므로 알림 문구는 비지만 **상태는 옳게 간다**. 둘 중 무엇을 지킬지는
   이미 정해져 있다: 안 풀리는 배지가 더 나쁘다.
+
+  **길이는 바이트로 센다**(2026-09-20 AT3b-2 적대적 검증). macOS `/bin/sh`(bash 3.2)는 UTF-8 로케일에서 `${#var}` 를
+  글자 수로 세어 한글 payload 가 상한을 지나 통째로 적히고 파서가 그 줄을 **이름·id 까지** 버렸다(실제 payload 25건 중
+  15건). 커맨드 첫머리의 `LC_ALL=C; export LC_ALL;` 이 훅 셸에만 C 로케일을 준다 — 내장 대입이라 프로세스 0. 게이트 4e.
+
+  **hunks 는 잘라내고 `changedFiles` 는 살린다**(2026-09-20 AT3b-2). `PostToolUse(Bash)` 의 `bashEditDiff` 는 `files`
+  (hunks)·`moreFiles`·`changedFiles` 순이고(실측 528/528) hunks 가 payload 를 상한 너머로 밀어낸다(4.6%). 필요한
+  것은 `changedFiles`(최대 ~7 KB)뿐이라 `"bashEditDiff":{"files":` 앞까지와 `"moreFiles":` 부터를 이어 붙인다 —
+  파라미터 확장뿐이다. **키 순서는 가정이라 가드가 있다**: 결과에 `"changedFiles":` 가 없거나 여전히 상한을 넘기면
+  버리고 아래의 이름+id 경로로 간다. 줄 상한을 올리지 않는 이유: hunks 는 파일 하나를 통째로 다시 쓰면 얼마든지
+  커져 어떤 상한도 안전하지 않고, 회전 상한이 함께 커진다(§7). 셸 게이트 4d.
 
   **`tool_use_id` 도 살린다**(2026-09-20 AT3b-1). `PostToolUse(Bash)` 는 명령 출력을 실어 0.1% 가 상한을 넘기는데
   이름만 남기면 그 구간을 **닫을 수 없다**(짝지을 id 가 없다). 파라미터 확장으로 뽑아(프로세스 0)

@@ -61,6 +61,9 @@ pub const Unknown = enum {
     outside_root,
     /// 턴 예산이 말랐다. 경로는 남긴다 — 조용히 빠지면 「원래 안 바뀐 파일」로 보인다.
     budget,
+    /// **before 를 뜰 기회가 없었다** — provider 의 셸 diff(`bashEditDiff`)가 「바뀌었다」고 알려 준 시점은 명령이
+    /// **끝난 뒤**라 그때 읽으면 after 다(AT3b-2). `Read` 로 미리 떠 둔 사본이 있으면 이 값이 아니라 그 사본이 선다.
+    no_before,
 };
 
 /// 내용을 접은 이유.
@@ -117,16 +120,35 @@ pub const Entry = struct {
     before: Side,
     /// 봉인 전에는 `null` — 「아직 안 읽었다」와 「읽었는데 모른다(`.unknown`)」는 다른 사실이다.
     after: ?Side = null,
+    /// **provider 가 이 경로를 «에이전트 셸 명령이 바꿨다» 고 검증했다**(AT3b-2 — `PostToolUse(Bash)` 의
+    /// `bashEditDiff.changedFiles`, 명령 전후의 작업트리 diff). 편집 도구 캡처와 **다른 축의 근거**라 트리거를
+    /// 격상하지 않고 따로 든다 — 화면이 둘을 갈라 말할 수 있어야 한다(`TurnFileOrigin.shell_edit`).
+    shell_diff: bool = false,
 
-    /// 이 경로가 **에이전트 편집 도구 때문에 실제로 달라졌나.**
+    /// 이 경로가 **에이전트 때문에 실제로 달라졌나.**
     ///
-    /// 셋을 모두 만족해야 참이다: ⑴ 트리거가 `.edit` ⑵ 양쪽을 다 안다 ⑶ 내용이 다르다.
-    /// `.read` 트리거를 빼는 것이 이 함수의 존재 이유다 — 위 `Trigger` 주석의 함정.
+    /// 근거는 둘이고 하나면 된다:
+    /// - 편집 도구: 트리거가 `.edit` 이고 양쪽을 다 알며 내용이 다르다. `.read` 트리거를 빼는 것이 이 함수의
+    ///   존재 이유다 — 위 `Trigger` 주석의 함정.
+    /// - 셸 diff(`shell_diff`): provider 가 내용 diff 로 검증했으므로 우리가 다시 비교하지 않는다. 다만 **양쪽을
+    ///   알고 같다고 확인되면 거짓**이다 — 셸이 바꿨다가 같은 턴에 되돌린 파일은 `↩` 로 간다(`Read` 로 before 를
+    ///   미리 떠 둔 경우에만 가능하고, 그 확인이 없으면 provider 를 믿는다). **after 를 모르면 거짓**이다 —
+    ///   루트 밖·못 읽음·예산 초과는 경로만 남는 자리라(§7) 「고쳤다」를 화면에 세우지 않는다(편집 도구 쪽도 같다).
     pub fn editedByAgent(self: Entry) bool {
-        if (self.trigger != .edit) return false;
         const after = self.after orelse return false;
-        const same = self.before.sameAs(after) orelse return false;
-        return !same;
+        const same = self.before.sameAs(after);
+        if (self.shell_diff) return after != .unknown and same != true;
+        if (self.trigger != .edit) return false;
+        return same == false;
+    }
+
+    /// **✎ 인데 근거가 셸 diff 뿐**인가(편집 도구로는 확정 못 했다). 화면이 `TurnFileOrigin.shell_edit` 로 가른다.
+    /// ✎ 가 아니면(되돌림·미봉인) 거짓이다 — 「근거의 종류」는 「바뀌었다」가 선 뒤의 물음이다.
+    pub fn shellOnly(self: Entry) bool {
+        if (!self.editedByAgent()) return false;
+        if (self.trigger != .edit) return true;
+        const after = self.after orelse return true;
+        return self.before.sameAs(after) != false; // 편집 도구 쪽 근거가 못 섰다(같거나 모름)
     }
 };
 
@@ -423,6 +445,30 @@ pub const Store = struct {
         turn.shell.sealAll(now_ms, slack_ms);
     }
 
+    /// provider 의 셸 diff 가 «바뀌었다» 고 말한 경로를 적는다(AT3b-2). **이미 있으면 플래그만 세운다** —
+    /// before 는 첫 캡처 그대로다(`Read` 가 떠 둔 사본이 있으면 그것이 되돌림 판정의 근거가 된다). 없으면
+    /// `before = .no_before` 로 새 항목을 만든다 — 이 시점은 명령이 끝난 뒤라 지금 읽으면 after 다.
+    /// 상한(경로 수)은 `noteBefore` 와 같다. 반환값은 «새로 만들었나».
+    pub fn noteShellDiff(self: *Store, gpa: std.mem.Allocator, session_id: []const u8, path: []const u8) bool {
+        const slot = self.openFor(session_id) orelse return false;
+        if (slot.turn.find(path)) |i| {
+            slot.turn.entries.items[i].shell_diff = true;
+            return false;
+        }
+        if (slot.turn.entries.items.len >= max_turn_paths) return false;
+        const owned = gpa.dupe(u8, path) catch return false;
+        slot.turn.entries.append(gpa, .{
+            .path = owned,
+            .trigger = .read,
+            .before = .{ .unknown = .no_before },
+            .shell_diff = true,
+        }) catch {
+            gpa.free(owned);
+            return false;
+        };
+        return true;
+    }
+
     /// 진행 중 턴을 봉인해 id 를 발급한다. **붙일 것이 하나도 없으면 `0`**(경로도 셸 수도 없는 턴).
     ///
     /// 봉인 자리가 없으면 **가장 오래된 것을 밀어낸다** — 그 자리는 sweep 이 곧 정리하지만, 정리
@@ -544,6 +590,64 @@ test "셸 구간은 턴과 함께 봉인된다 — 봉인 전에 닫히고, 봉�
     // 다음 턴은 빈 구간으로 시작한다(봉인이 슬롯을 비운다).
     store.noteShellCall("S1");
     try testing.expectEqual(@as(usize, 0), store.openTurn("S1").?.shell.sealed().len);
+}
+
+test "셸 diff 근거 — provider 가 검증한 경로는 before 없이도 ✎ 이고, Read 가 떠 둔 before 로 되돌림을 가른다 (AT3b-2)" {
+    const gpa = testing.allocator;
+    var store: Store = .{};
+    defer store.deinit(gpa);
+
+    // ⑴ 처음 보는 경로: 새 항목, before 는 «뜰 기회가 없었다».
+    try testing.expect(store.noteShellDiff(gpa, "S", "/r/a.zig"));
+    // ⑵ 같은 경로를 다시: 플래그만, 항목은 하나.
+    try testing.expect(!store.noteShellDiff(gpa, "S", "/r/a.zig"));
+    // ⑶ Read 로 먼저 떠 둔 경로에 셸 diff: before 는 그대로 «A», 플래그가 선다.
+    try testing.expect(store.noteBefore(gpa, "S", "/r/b.zig", .read, .{ .text = try gpa.dupe(u8, "A") }));
+    try testing.expect(!store.noteShellDiff(gpa, "S", "/r/b.zig"));
+    // ⑷ 편집 도구로 연 경로에도 셸 diff 가 겹칠 수 있다.
+    try testing.expect(store.noteBefore(gpa, "S", "/r/c.zig", .edit, .{ .text = try gpa.dupe(u8, "C") }));
+    try testing.expect(!store.noteShellDiff(gpa, "S", "/r/c.zig"));
+    // ⑸ Read 만 한 경로(셸 diff 없음) — 대조군.
+    try testing.expect(store.noteBefore(gpa, "S", "/r/d.zig", .read, .{ .text = try gpa.dupe(u8, "D") }));
+
+    const turn = store.openTurn("S").?;
+    try testing.expectEqual(@as(usize, 4), turn.entries.items.len);
+    try testing.expectEqual(Unknown.no_before, turn.entries.items[0].before.unknown);
+    try testing.expectEqualStrings("A", turn.entries.items[1].before.text);
+    try testing.expect(turn.entries.items[1].shell_diff);
+
+    // 봉인 전(after 없음)에는 어느 것도 ✎ 가 아니다 — 「아직 안 읽었다」를 지어내지 않는다.
+    for (turn.entries.items) |e| try testing.expect(!e.editedByAgent());
+
+    // after 를 채운다: a 는 내용 «a'»(before 모름 → provider 를 믿는다), b 는 «A» 그대로(되돌림 → ✎ 아님),
+    // c 는 «C2»(편집 도구 근거로도 ✎), d 는 «D2»(Read 뿐이라 ✎ 아님 — 셸 diff 가 없으니 셸 소행이라 말하지 않는다).
+    store.noteAfter(gpa, "S", "/r/a.zig", .{ .text = try gpa.dupe(u8, "a'") });
+    store.noteAfter(gpa, "S", "/r/b.zig", .{ .text = try gpa.dupe(u8, "A") });
+    store.noteAfter(gpa, "S", "/r/c.zig", .{ .text = try gpa.dupe(u8, "C2") });
+    store.noteAfter(gpa, "S", "/r/d.zig", .{ .text = try gpa.dupe(u8, "D2") });
+    try testing.expect(turn.entries.items[0].editedByAgent());
+    try testing.expect(turn.entries.items[0].shellOnly());
+    try testing.expect(!turn.entries.items[1].editedByAgent()); // 되돌림
+    try testing.expect(!turn.entries.items[1].shellOnly());
+    try testing.expect(turn.entries.items[2].editedByAgent());
+    try testing.expect(!turn.entries.items[2].shellOnly()); // 편집 도구로도 확정됐다
+    try testing.expect(!turn.entries.items[3].editedByAgent());
+    try testing.expectEqual(@as(u32, 2), turn.countEdited());
+    // after 를 모르는(루트 밖) 셸 diff 경로는 ✎ 가 아니다 — 경로만 남는 자리다.
+    try testing.expect(store.noteShellDiff(gpa, "S", "/etc/hosts"));
+    store.noteAfter(gpa, "S", "/etc/hosts", .{ .unknown = .outside_root });
+    try testing.expect(!turn.entries.items[4].editedByAgent());
+    try testing.expectEqual(@as(u32, 2), turn.countEdited());
+
+    // 상한: 경로 수를 넘기면 만들지 않는다(조용히 잘리는 것이 아니라 «못 담았다»).
+    var i: usize = turn.entries.items.len;
+    while (i < max_turn_paths) : (i += 1) {
+        var buf: [32]u8 = undefined;
+        const path = try std.fmt.bufPrint(&buf, "/r/fill{d}.zig", .{i});
+        try testing.expect(store.noteShellDiff(gpa, "S", path));
+    }
+    try testing.expect(!store.noteShellDiff(gpa, "S", "/r/overflow.zig"));
+    try testing.expectEqual(max_turn_paths, turn.entries.items.len);
 }
 
 test "before 는 첫 캡처로 고정된다 — 두 번째 값이 덮지 않는다" {

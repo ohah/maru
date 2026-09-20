@@ -515,6 +515,125 @@ maru 세트에 `PostToolUse` 가 없어 Post 데이터가 한 건도 없었고, 
 | 5 | **codex 신뢰** — 공유 커맨드가 바뀌었으니 개발자의 실제 `config.toml` 에 `applyEntries` 를 dry-run | refreshed **7**·stale 0·diverged 0 — 재승인 프롬프트 없음. 처음의 「세트가 바뀌면 재승인 전까지 정지」 서술을 검증 매트릭스에서도 고쳤다 |
 | 5 | 게이트 4c 의 «stdout 안 가짜 id» payload 가 실제로 이스케이프된 모양인지(awk 이스케이프 검산) · 문서에 남은 「아직 없다」류 낡은 서술 | 맞다 · 없다 |
 
+#### AT3b-2 착수 전 재실측 (2026-09-20) — ctime 스캔이 서는 자리의 수치
+
+트랜스크립트(`~/.claude/projects`, 61 세션·Bash 구간 90,265·셸 쓴 턴 7,382)와 이 기계의 저장소 22개로 쟀다.
+스크립트는 `tools/agent-turn-tool-mix.py` 옆의 일회성 계산이라 여기 수치만 남긴다.
+
+| # | 물음 | 답 | 설계에 주는 것 |
+|---|---|---|---|
+| ① | **세션 간 겹침**(계약 §8-2 «확정 안 함») — 같은 프로젝트의 다른 세션과 Bash 구간이 겹치는 비율 | 구간 **2.6%** · 셸 쓴 턴 **3.1%** | 겹치면 확정 안 함으로 두어도 잃는 턴이 작다 |
+| ② | 워크트리에서 도는 세션 | 61 중 **12** | 루트 아래 다른 git 저장소 제외는 필수(비용이 아니라 귀속) |
+| ③ | **셸 구간 합집합이 에이전트 활동 구간에서 차지하는 비율** — 이 안의 사용자 편집이 `✎` 오탐이 된다 | 중앙값 **8%** · p75 37% · p90 77% · **≥90% 인 턴 3.0%** | 오탐 노출은 대개 작지만 «셸이 거의 내내 도는 턴» 이 3% 있다 — `✎` 의 뜻을 「셸이 도는 동안 바뀌었다」로 적는 이유 |
+| ④ | **구간 상한 48** 을 넘는 턴 | 턴당 Bash 중앙값 5 · p90 28 · p99 108 · 최대 1,067 → **4.24%** 가 넘는다. 겹침 병합은 거의 안 줄인다(4.20% — 호출 사이에 모델 생각 시간이 있다) | 넘기면 «확정 안 함» 은 **가장 셸을 많이 쓴 턴**에서 귀속을 잃는 것이다. 대안: 상한에 닿으면 **가장 작은 틈을 메워** 합친다(더 잡는 쪽) — 초과 턴 310개에서 그렇게 48 까지 줄일 때 더 들어오는 시간은 활동 구간 대비 중앙값 **3.4%(80s)** · p90 12.8%(590s). 상한 64 면 초과 2.6%, 128 이면 0.65% |
+| ⑤ | **스캔 비용**(건너뛸 목록 + 중첩 저장소 제외, Python `scandir`+`stat`) — 저장소 22개 | maru 계열 **6~8 ms**(2.2k 파일) · 대부분 < 80 ms · **최악 kbl-ref 580 ms**(76,744 파일 — `apps/frontend/.tmp-check` 12k·`build` 12k 가 이름 목록 밖) | 동기로 턴 끝에 돌리면 안 된다 — **worker**(tree 스냅샷과 같은 `git_backend` 자리)에서 돌리고 파일 수 상한을 둔다. 이름 목록을 늘리는 것은 끝이 없다 |
+| ⑥ | 스캔이 쓸 수 있는 시간 — 턴 끝(마지막 도구 결과) → 다음 턴 첫 Bash | p1 **13s** · p5 27s · 중앙값 305s · 2초 미만 0% | worker 의 수백 ms 는 안전하다. 그러나 **봉인 시각에 재야 한다**: 목록이 오는 harvest·펼침 시점은 도크를 볼 때뿐이고, 편집의 59.5% 가 같은 세션에서 다시 만지는 파일이라 그때 재면 ctime 이 이미 다음 턴 것이다 |
+| ⑦ | Zig 의 `File.Stat.ctime` 이 darwin 에서 무엇인가 | `st_ctimespec`(inode 변경 시각) — `birthtime` 이 아니다(`std.c.Stat.ctime`) | 그대로 쓴다 |
+| ⑧ | 파일 목록(`turn_name_status`)은 언제 오나 | 도크 에이전트 탭이 **보일 때** 요약 펌프가, 펼치면 그 턴만 | 귀속은 목록과 **독립**으로 봉인 시각에 만들고(경로 집합), 목록이 오면 경로로 join 한다 — AT3 캡처와 같은 모양 |
+
+**⑨ ⚠️ provider 가 셸 편집 목록을 이미 준다 — `PostToolUse(Bash).tool_response.bashEditDiff`** (2026-09-20 발견,
+사용자가 「최근 Claude 가 자기가 고친 diff 를 보여준다」고 짚어 줬다). Claude Code 2.1.271 changelog «Added a diff of the
+files a Bash command changed to the Bash tool result when the Bash tool handles file edits». 실측(격리 세션 2.1.278 ·
+`--permission-mode bypassPermissions` · 기본 모델 — sonnet 헤드리스에서는 안 왔다):
+
+| 명령 | `bashEditDiff` |
+|---|---|
+| `python3 - <<PY … open(p,'w')` · `sed -i` · `cat >` · `cp` | `changedFiles: [절대경로…]` + `files: [{filePath, hunks}]`(최대 5) + `moreFiles` |
+| `echo new > c.txt`(추적 안 되는 새 파일) | **온다** |
+| `python3 gen.py`(편집처럼 안 보이는 명령의 부작용 쓰기) | **온다** — 명령 패턴이 아니라 **작업트리 전후 diff** 다 |
+| gitignore 된 경로 · 저장소 밖(`/tmp`) | 안 온다 |
+| 읽기만 한 명령 | `files: []` 로 오거나 키가 없다 |
+| 드물게 `unavailable: true`(4/523) | 계산 못 함 |
+
+최근 3일 트랜스크립트 523건: **전부 bypassPermissions**, 크기 중앙값 3.6 KB · p90 17.6 KB · p99 47.7 KB · 최대 118 KB
+— **4.6% 가 우리 줄 상한(32 KiB)을 넘긴다**(hunks 때문. `changedFiles` 만은 최대 7.4 KB). 훅 payload 의
+`tool_response` 에 **그대로 실려 온다**(실측). Claude Code 자신의 `/rewind` 체크포인트(`file-history-snapshot`)는 편집
+도구 파일만 추적한다(6 세션 42건 전부 — 셸 편집 0).
+
+→ **AT3b-2 의 1차 소스가 바뀐다.** 시간 창(ctime)이 아니라 **provider 가 명령 단위로 검증한 목록**이다: 명령이 끝난
+순간의 작업트리 diff 라 창이 명령 길이만큼 좁고, 부작용 쓰기·새 파일까지 잡는다. ctime 스캔은 **폴백**으로 내려간다
+(bypass 아닌 모드·`unavailable`·Codex — codex 는 `tool_response` 가 stdout 뿐).
+
+#### AT3b-2 — `bashEditDiff` 로 셸 편집 귀속 ✅ 구현 (2026-09-20 — 사용자 결정: diff 방향)
+
+**만든 것**(설계 1~7 그대로): 파서 `changed_files_raw`·`shell_diff_unavailable` + `changedFiles` 이터레이터(형이 어긋나면
+멈춘다) · `turn_capture.Entry.shell_diff`·`Unknown.no_before`·`Store.noteShellDiff`·`editedByAgent` 둘째 근거(after 를 모르면
+거짓)·`shellOnly` · 배선(`Post` 가지에서 구간 닫은 뒤 `Pre` 와 같은 게이트, `capture_file.underNestedRepo` 로 워크트리 제외) ·
+훅의 hunks 잘라내기(`mh_d*` — `mh_t` 는 원격 tmux 칸이라 못 쓴다, 테스트가 잡았다) + 게이트 4d · codex 세트 8개(`PostToolUse`
+`Bash`) + 신뢰 표 `post_tool_use` golden · `TurnFileOrigin.shell_edit`(기호 `✎`) · 검증: 파서 42 · 순수 80 · 셸 게이트 13 ·
+`test-agent-turn-capture` 50(배선 e2e·워크트리 제외·backlog 게이트·배지 join·`✎N` 합산) · view 배지 테스트(같은 기호·
+같은 색) · **Lab 시나리오 `scm-turn-badges`**(에이전트 탭 — 근거 넷을 한 캡처에, 이 탭의 첫 Lab 골든).
+
+**구현 뒤 적대적 검증 1회차(뮤턴트)**: ⑴ after 를 모르는 셸 diff 경로도 `✎` → 순수 테스트가 잡음 ⑵ 워크트리
+제외 삭제 → 배선 테스트(3 → 4) ⑶ backlog 게이트 삭제 → 배선 테스트 ⑷ origin 을 안 가름(`.shell_edit` → `.ai_edit`)
+→ 배지 join 테스트. **4/4 잡혔다.** 설계 단계에서 잡은 것 하나 더: 훅의 잘라내기 변수 이름 `mh_t` 가 원격 tmux 칸과
+겹쳤다 — 원격 커맨드 테스트가 빨개져 `mh_d*` 로 바꿨다.
+
+**2회차(실제 데이터)**: 최근 3일 세션의 `bashEditDiff` **563건**을 훅 줄 모양으로 만들어 파서에 통째로 — 563/563 파싱,
+`changedFiles` 수·`unavailable` 전부 일치(경로 1,679). 그중 바이트로 상한을 넘기는 25건을 **실제 골든 커맨드**(`/bin/sh`)
+에 넣어 다시 파싱 — 여기서 **결함이 나왔다**: macOS `/bin/sh`(bash 3.2)는 UTF-8 로케일에서 `${#var}` 를 **글자 수**로
+세므로 한글이 든 payload 는 상한 검사를 지나 통째로 적히고, 파서(바이트 상한)가 그 줄을 **이름·id 까지 통째로**
+버린다(25건 중 15건이 이 틈 — 개발자 환경은 `LC_ALL=ko_KR.UTF-8`, dash 는 바이트라 무관). AT3b-1 의 id 보존과 8월의
+이름 보존도 같은 틈에 있었다(`Stop` 의 `last_assistant_message` 는 실측 8,395턴 중 0건이 32 KiB 를 넘겨 실해는 없었다).
+→ 훅 첫머리에 `LC_ALL=C; export LC_ALL;`(내장 대입, 프로세스 0, 훅 셸에만). 게이트 4e(한글 60 KB payload 를
+`ko_KR.UTF-8` 에서 접는가). 고친 뒤 25/25 가 살아남는다(changedFiles 보존 24 · 이름+id 폴백 1 · 버려짐 0).
+
+**3회차(경로·통합)**: 실측 모양의 ndjson e2e 에 `bashEditDiff` 줄(hunks 포함)을 더해 파서 → 배선 → 봉인 → `edited_count`
+·after 내용까지 한 줄로 잰다. 그 밖에 짚은 것 — 삭제된 파일(after `.absent` → `✎`, tree 의 D 행에 붙는다) · 새 파일
+(`✎`) · `Pre` 가 상한에 접혀 이름을 잃어도 `Post` 의 `changedFiles` 는 구간과 **독립**이라 귀속은 산다 · 같은 경로를
+두 명령이 고쳐도 엔트리 하나(`find`) · `unavailable`+상한 초과는 잘라낼 것이 없어 이름+id 로(옳다) · 심링크 디렉터리는
+`fstatat(NOFOLLOW)` 가 마지막 조각만 안 따라가므로 중간 링크의 `.git` 이 보이면 제외되는데, 그 경로는 `readSide` 의
+`openNoFollow` 가 어차피 거절한다. 새 결함 없음.
+
+**설계 원안:**
+
+**1차 소스는 provider 의 명령 단위 작업트리 diff 다**(위 ⑨). ctime 스캔·FSEvents 는 **AT3b-3 폴백**으로 내린다
+(Codex·bypass 아닌 모드·`unavailable`·gitignore 파일). 이 단계가 처음으로 화면을 바꾼다 — 지금 `·` 인 셸 편집이 `✎` 로.
+
+**만드는 것**
+
+1. **파서**: `tool_response.bashEditDiff` 를 내려가 `changedFiles` 배열의 **원문 슬라이스**(`background_tasks_raw` 와 같은
+   방식)와 `unavailable` 을 든다. 이터레이터 `changedFiles(ev)` 가 경로 문자열을 하나씩 낸다(원문 — 쓸 때 `decodeInto`).
+   `tool_response` 가 객체가 아니면(codex 는 문자열) 건너뛴다.
+2. **캡처 엔트리에 근거 하나 더**: `Entry.shell_diff: bool` — «provider 가 이 경로를 에이전트 셸 명령이 바꿨다고 검증했다».
+   `Store.noteShellDiff(session, path)`: 엔트리가 있으면 플래그만 세우고(`before` 는 첫 캡처 그대로), 없으면 트리거
+   `.edit`·`before = .unknown(.no_before)` 로 만든다. `after` 는 봉인 때 기존 루프가 읽는다.
+   `editedByAgent()` = `(.edit ∧ before≠after) ∨ (shell_diff ∧ ¬(before 와 after 가 같다고 확인됨))` — 셸이 바꿨다가
+   같은 턴에 되돌린 파일은 `↩` 로 간다(before 를 `Read` 로 미리 떴을 때만 가능).
+3. **배선**(`captureBeforeForEvent` 의 `post_tool_use` 가지): 구간을 닫은 뒤, `Pre` 와 **같은 게이트**(backlog·신원·루트)를
+   지나 `changedFiles` 마다 `noteShellDiff`. 자식(subagent)의 것도 부모 턴에(AT3 규율). 루트 밖·중첩 저장소 아래 경로는
+   **경로만 적고 내용은 안 읽는다**(§7 — `capture_file` 이 이미 그렇게 한다).
+4. **상한 초과 payload 에서 `changedFiles` 를 살린다**(4.6%). 줄 상한(32 KiB)은 그대로 두고 훅이 **`"files":` 절만 잘라낸다**:
+   `head=${mh_p%%\"files\":*}` · `tail=${mh_p#*\"moreFiles\":}` → `$head"moreFiles":$tail`. 키 순서(`files`·`moreFiles`·
+   `changedFiles`)는 528/528 실측이지만 **가정이므로 가드를 둔다**: 잘라낸 결과에 `"changedFiles":` 가 없거나 여전히
+   상한을 넘기면 지금처럼 이름+`tool_use_id` 만 남긴다. 줄 상한을 올리는 길(128~256 KiB)은 안 택한다 — hunks 는 파일 하나를
+   통째로 다시 쓰면 얼마든지 커져 어떤 상한도 안전하지 않고, 회전 상한이 함께 4~8 MiB 로 커진다(§7).
+5. **배지**: `✎` 에 합친다(내용 diff 로 검증된 근거라 편집 도구와 같은 급). 내부 origin 은 `.shell_edit` 로 갈라 두어
+   테스트·툴팁·뒷날 표기 분리가 가능하게 한다. 턴 줄 `✎N` 은 `edited_count` 가 자동으로 합산한다.
+6. **Codex 세트에 `PostToolUse(Bash)`** — 결정 B 의 시점이 이 단계다. 신뢰 표에 `post_tool_use`(matcher 포함·measured)를
+   더한다. codex 에는 `bashEditDiff` 가 없어 구간만 닫힌다(AT3b-3 폴백의 재료).
+7. **문서**: 계약 §4.2 배지 표(`✎` 의 둘째 근거), §4.4 소스 서술, §7(로그에 hunks 가 실린다 — `oldString` 과 같은 급,
+   0600), §8 한계(명령이 도는 몇 초 안의 사용자 편집 · gitignore 파일 · `git checkout` 류가 바꾼 파일도 `✎`), 훅 계약 §2 표·§4.1.
+
+**착수 전 적대적 공격 (2026-09-20, 설계 위에서)**
+
+| # | 공격 | 결과 |
+|---|---|---|
+| A | 훅의 `files` 절 잘라내기가 키 순서에 기댄다 | 528/528 이 `files`·`moreFiles`·`changedFiles` 순이지만 가정이다 → 잘라낸 뒤 `"changedFiles":` 가 없으면 이름+id 로 폴백. 셸 게이트에 **순서를 뒤집은 payload** 를 넣어 폴백을 본다 |
+| B | stdout 안에 `"files":` 글자가 있으면 | JSON 문자열 안은 `\"files\":` 라 패턴이 안 걸린다(4c 와 같은 논거). 게이트에 그 경우도 |
+| C | `moreFiles > 0` 이면 `changedFiles` 가 잘려 있나 | 아니다 — `changedFiles` = files + moreFiles(예: 5+33 = 38). 잘리는 것은 hunks 뿐 |
+| D | `git checkout`·`git stash`·`cp -r` 이 바꾼 수십 파일이 전부 `✎` | 정의상 맞다(에이전트의 셸이 바꿨다). 그러나 사용자가 «편집» 으로 읽을 수 있어 §8 에 적는다. 엔트리 상한 256 이 예산이다(초과는 `.budget`) |
+| E | 명령이 도는 동안의 사용자 저장 | 여전히 섞인다 — 창이 명령 길이(중앙값 1.6초)라 좁을 뿐. §8 |
+| F | 워크트리 안에서 돈 명령(`cd .claude/worktrees/x && …`)의 경로 | 루트 아래라 `underRoot` 를 지난다 → 엔트리에 들지만 tree 목록엔 없어 «✎N 이 목록보다 큰» 기존 어긋남에 합류. 중첩 저장소 아래 경로는 **내용을 안 읽고 세지도 않는다**(`.outside_root` 와 같은 취급) — AT3b-3 의 중첩 제외 규칙을 여기서 먼저 쓴다 |
+| G | 회전본·backlog 의 `Post` 에 실린 `changedFiles` | `Pre` 와 같은 게이트로 **버린다**. 살아 있는 회전(tail 이 현재 데이터)에서는 그 명령의 귀속을 잃는다 — 드물고, 잃는 쪽이 지어내는 쪽보다 낫다(startup 잔재 회전본은 죽은 턴이다) |
+| H | `changedFiles` 가 수백 개 | 최대 관측 7.4 KB(~80 경로). 엔트리 상한 256 → `.budget` |
+| I | 자식(subagent)의 `Post` | 같은 id 공간·부모 턴 — AT3 결정 그대로 |
+| J | `tool_response` 가 객체가 아니다(codex 문자열) · `bashEditDiff` 가 없다 · `unavailable` | 셋 다 «없음» — 구간은 닫히고 귀속만 안 는다 |
+| K | 파서 형 변경(배열이 아닌 `changedFiles`) | 원문 슬라이스가 `[` 로 안 시작하면 이터레이터가 아무것도 안 낸다(줄은 산다) |
+| L | 봉인 때 `after` 를 읽는 루프가 셸 엔트리도 읽나 | 같은 `entries` 라 읽는다. `before` 가 `.no_before` 면 `sameAs == null` → 되돌림 판정 불가 → 셸 diff 를 믿고 `✎` |
+| M | §7 — 로그에 hunks(소스 조각)가 실린다 | `PreToolUse(Edit)` 의 `oldString`/`newString` 과 같은 급이고 파일은 0600·큐 소비 즉시 삭제. 서술을 §7 에 더한다 |
+| N | sonnet 헤드리스에서 안 왔다 — 모델·배포 게이트 | 없으면 «없음» 으로 떨어질 뿐이다. 실사용(기본 모델·대화형)에서는 523/523 이 왔다 |
+
 > **2026-08-26 실측 — 이 절을 쓰기 전에 잰 것 둘.**
 
 ⚠️ **FSEvents 는 독립 CLI 하니스로 검증할 수 없다.** **같은 프로브·같은 플래그로 감시 경로만 바꿔** 갈랐다:

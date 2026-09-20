@@ -93,8 +93,6 @@ test "닫힘은 사유와 함께 어느 줄이었는지 남긴다" {
         "\"invalidate_pressure_victim\"",
         "\"invalidate_projection_budget\"",
         "\"invalidate_turn_rejected\"",
-        "\"invalidate_adopt_pressure\"",
-        "\"invalidate_adopt_rejected\"",
         "\"invalidate_prepared_attach\"",
         "\"invalidate_notice_take\"",
         "\"invalidate_notice_build\"",
@@ -103,8 +101,14 @@ test "닫힘은 사유와 함께 어느 줄이었는지 남긴다" {
         "\"tick_collect_oom\"",
         "\"tick_connection_self_closed\"",
     };
+    // **제품 구간만 센다.** 이 축이 재는 것은 「제품의 닫는 자리마다 이름이 다르다」이고, 판정자
+    // 픽스처가 같은 이름을 쓰는 것은 그 성질을 깨지 않는다. 2026-09-21 에 죽은 코드를 지우면서
+    // 그 자리를 대신하는 테스트 헬퍼가 `invalidate_turn_rejected` 를 쓰자 파일 전수 계수가 2 가
+    // 되어 빨개졌다 — 재는 대상이 아닌 것을 세고 있었다.
+    const product_end = std.mem.indexOf(u8, turn, "\ntest \"") orelse turn.len;
+    const product = turn[0..product_end];
     for (sites) |site| {
-        const n = countAll(turn, site);
+        const n = countAll(product, site);
         if (n != 1) {
             std.debug.print("자리 «{s}» 가 {d} 번 — 정확히 1 번이어야 갈린다\n", .{ site, n });
             return error.SiteNotUnique;

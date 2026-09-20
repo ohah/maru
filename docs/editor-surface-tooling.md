@@ -423,8 +423,8 @@ TextMate, git staging, formatter는 LSP의 선행 조건이 아니다. 초기 sy
 「복구」로 읽었다. 표식은 자리를 찾아 지우고, 복구는 「**그 version 의** 진단이 왔다」로 잰다.
 
 **요청 id 는 i32 안(2026-09-20 실측 뒤의 결정).** 종류마다 `id_span = 1e8` 칸: hover `1e8+seq` · definition `2e8` · signatureHelp `3e8` · formatting `4e8` ·
-rename `5e8` · completion `6e8` · codeAction `7e8` · codeAction/resolve `8e8` · completionItem/resolve `9e8`(`rpc.zig` 의 base 상수, `nextSeq` 가 칸 안에서 돌린다,
-`classify` 는 칸으로 가른다). 처음엔 `N×1e9+seq` 였고 JSON-RPC 로는 적법하지만, **rust-analyzer(와 ruff 등 Rust `lsp-server` 크레이트 서버)는 정수 id 를 i32 로만
+rename `5e8` · completion `6e8` · codeAction `7e8` · codeAction/resolve `8e8` · completionItem/resolve `9e8` · semanticTokens `10e8`(`rpc.zig` 의 base 상수, `nextSeq` 가 칸 안에서 돌린다,
+`classify` 는 칸으로 가른다; 가장 큰 칸 10e8+1e8-1 = 1,099,999,999 < 2^31). 처음엔 `N×1e9+seq` 였고 JSON-RPC 로는 적법하지만, **rust-analyzer(와 ruff 등 Rust `lsp-server` 크레이트 서버)는 정수 id 를 i32 로만
 읽어** 넘치는 요청을 **알림으로 오인해 버린다** — `6_000_000_001` 짜리 completion 이 stderr 에 `unhandled notification` 으로만 남고 응답이 없었다(hover·definition 만
 i32 안이라 그 둘만 됐다). 실 rust-analyzer 에 프레임을 그대로 재생해 잡았다(§8.2g-b 실측). 관측점 `LSJ13`(가장 큰 칸 끝 ≤ i32 최대 · seq 가 칸 안에서 돌고 0 을
 건너뜀 · 칸 경계 · 칸 밖은 무시). 아래 절들의 id 표기는 이 표를 따른다.
@@ -878,6 +878,41 @@ labelDetails 가 없다.
 `isPreferred` 정렬·Command 형 거름) · `CA1`(제품 경계: 가짜 서버 — `⌘.` 로 진단 자리의 fix 와 lazy 항목이 메뉴에, command-only 는 없음; fix 를 고르면 진단
 범위가 바뀌고 undo 하나·기록; lazy 를 고르면 resolve → edit 적용; `Esc`·바깥 클릭 닫힘; 문맥 없는 자리(`NOACT`)는 알림; 낡은 revision 전체 거부; resolve
 오류 알림; 낡은 seq) · `CA2`(capability 없음).
+
+### 8.2i LSP 2단 ⑧ — semantic tokens 2층 (2026-09-20, 계획 공격 뒤의 결정)
+
+**계획 공격이 드러낸 것.** ① visual-mapping §5 가 층 구조를 이미 계약해 뒀다 — 구문 트리(즉시·항상) 위에 LSP semantic tokens(지연 도착·의미
+인식)가 **부분적으로** 덮고, 어휘는 각자 우리 `Role`(11색)로 다대일 매핑하며, **보이는 범위만** 묻고 범위를 못 하는 서버는 전체로 물러난다.
+그 절이 정한 것은 그것까지고, 요청 시점·낡은 토큰·매핑 표·상한은 여기서 정한다. ② **실측** — rust-analyzer 1.96.1: `range` 지원, legend 가 표준
+23종 밖의 것을 잔뜩 낸다(`builtinType`·`angle`·`brace`·`escapeSequence`·`formatSpecifier` …, 수식자도 `library`·`associated` 등) → **legend 이름으로
+매핑하고 모르는 것은 무색**(우리가 `tokenTypes` 를 선언해도 서버는 제 legend 를 낸다); 로드 전에는 `-32801 content modified` **오류**로 답한다(다시
+묻는다); 12줄에 토큰 60(≈5/줄). clangd: **`range` 없음, `full{delta}` 만** → 전체로 물러난다; 76,760줄·2.5 MB `parser.c` 가 토큰 1,874·39 KB·6 ms(자료
+표라 적다) → 전체 요청의 상한은 문서 크기가 아니라 **토큰 수**로 둔다. ③ 편집 중의 낡은 토큰 — VS Code 는 옛 토큰을 편집만큼 **밀어** 새 것이 올 때까지
+보인다(키마다 색이 꺼졌다 켜지면 깜빡인다); 우리는 편집 통지가 한 자리(`syntax onEdit` 와 같은 함수)를 지나므로 같은 자리에서 민다. ④ 위치는 서버
+인코딩의 (줄, 글자, 길이)라 `position.offsetOf` 로 byte 로 옮긴다(한 줄 토큰만 — `multilineTokenSupport: false`). ⑤ 렌더 합성은 이미 「마지막 스팬이
+이긴다」(`syntax_colors.lineColors`) — 1층 스팬 뒤에 2층 스팬을 문서 순서로 섞어 넣으면 겹치는 자리만 2층이 이긴다.
+
+| 축 | 결정 | 근거 |
+| --- | --- | --- |
+| **capability** | `textDocument.semanticTokens{requests: {range: true, full: true}, tokenTypes: 표준 23, tokenModifiers: 표준 10, formats: ["relative"], multilineTokenSupport: false, overlappingTokenSupport: false}`. 서버의 `semanticTokensProvider{legend, range, full}` 를 읽는다 | LSP 3.17 |
+| **요청** | id `10e8+seq`(§8.2a 표에 열 번째 칸). `range` 가 있으면 **보이는 원본 줄 범위 ± 20줄** 을 `semanticTokens/range`, 없으면(clangd) `semanticTokens/full`(delta 는 안 쓴다). 보내기 전 `flushDocument`; 요청은 그 문서의 `editor_lsp_version` 을 단다 | §5 「보이는 범위만」·② |
+| **시점** | 프레임마다 판정: 서버 ready·provider 있음·요청 없음·(토큰의 version ≠ 문서 version **또는** 보이는 범위가 덮인 범위 밖) **그리고 마지막 편집 뒤 120 ms** 가 지났을 때. 한 번에 하나, 대기 중 바뀌면 `dirty` 로 응답 뒤 한 번 더 | 타이핑마다 왕복하지 않는다(VS Code 도 지연) |
+| **응답** | 그 요청의 version 과 지금 version 이 다르면 **버린다**(다시 묻는다). `-32801`(content modified)·오류·`null` 도 버리고 다시. `data` 를 relative 로 풀어 byte 스팬으로 — legend 이름을 `Role` 로 옮기고 모르는 것·무색 것은 뺀다. **상한 50,000 토큰** — 넘으면 앞부분만 | ② |
+| **매핑(코드가 소유 — `session/lsp/semantic.zig`)** | `type·class·struct·enum·interface·typeParameter·builtinType·enumMember` → `type_name` · `function·method·macro` → `function` · `keyword·modifier·builtinAttribute?` → `keyword` · `comment` → `comment` · `string·character·regexp·escapeSequence` → `string` · `number·boolean` → `number` · `property·event` → `property` · `decorator·attribute·derive` → `attribute` · `operator` → `punctuation` · `variable·parameter·namespace·label·lifetime·그 밖` → 무색(1층이 그대로). 수식자는 첫 조각에서 안 쓴다 | §5 「다대일·색이 상한」 — tree-sitter 표(`syntax_capture`)와 같은 방향 |
+| **편집 중** | 편집 통지(`start, old_end, new_end`)로 토큰을 민다: 편집 구간과 겹치는 토큰은 버리고 뒤는 `new_end - old_end` 만큼 옮긴다. 범위를 모르는 편집(undo/redo)은 전부 버린다. 민 토큰은 문서 version 이 아직 안 맞으므로 다음 요청이 갈아 끼운다 | ③ |
+| **렌더** | `editor_syntax.lineColorsInto` 가 1층 스팬 뒤에 2층 스팬을 **문서 순서로 병합**(같은 시작이면 2층이 뒤) → 「마지막이 이긴다」로 겹친 자리만 2층 | ⑤ |
+| **닫힘·수명** | 문서와 함께(`releaseEditorTerm`). 서버가 죽거나 provider 가 없으면 토큰 없음 — 1층만(저하, 실패 아님) | §5 「LSP 부재는 정확도 저하」 |
+| **하지 않는 것** | `full/delta` · 수식자 색(deprecated 취소선 등) · 미니맵의 2층(§6 — 전 문서) · 토큰 기반 접힘 · `semanticTokens/refresh` 서버 요청(지금은 거부 응답 — 다음) | 다음 |
+
+**구현이 계약에 되먹인 것.** ① **가시 변화는 1층이 못 가르는 자리에서만 난다** — 캡처 실측: C 의 `#define N` 의 `N`(1층 constant → number 색 →
+2층 macro → function 색)·구조체 필드 `x`(1층 field → 2층 property), Rust 표본(`use std::collections::HashMap` · `fn add(a: i32…)`)은 tree-sitter 쿼리가 이미
+타입·함수·필드를 가려 **바뀐 자리가 0**이었다. 2층의 값은 TS/JS 처럼 1층이 class 와 variable 을 못 가르는 언어·매크로·typedef 이름의 사용처에 있다.
+② range 요청의 끝은 `{line: hi+1, character: 0}`(반열림) · `last_edit_ms == 0` 은 「아직 편집이 없다」라 조용 시계를 안 본다 · 응답이 오류면 조용 시계를 되감아
+곧바로 되묻지 않는다. ③ 색 배열은 렌더 축이라 창 앞 줄만큼 빈 슬롯이 앞에 선다(판정자가 `first_line` 을 뺀 첨자로 읽다 틀렸다).
+
+**관측점**: `LSJ15`(순수: capability·provider 파싱·요청 둘·id 칸) · `SEM1`(순수: relative 풀기·legend 매핑·모르는 종류 무색·상한·인코딩 utf-16) · `SEM2`(순수: 편집
+밀기 — 앞·겹침·뒤·undo) · `ES*`(순수: 1층+2층 병합에서 겹친 자리만 2층) · `SMT1`(제품 경계: 가짜 서버 — range 요청·응답 뒤 색이 바뀜·낡은 version 버림·
+편집 뒤 120 ms·`full` 폴백·provider 없음).
 
 ### 8.3 관측 가능성과 민감정보
 

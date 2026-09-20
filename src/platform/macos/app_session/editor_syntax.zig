@@ -318,7 +318,23 @@ pub fn lineColors(
     /// 접힘 번호 표(보이는 줄 → 1-based 원본 줄). **비어 있으면 두 축이 같다.**
     visible_numbers: []const ?u32,
 ) []const []const content.ColorSpan {
-    return lineColorsInto(self, &self.bufs, allocator, doc_content, line_idx, first_line, line_count, tab_width, visible_numbers);
+    return lineColorsInto(self, &self.bufs, allocator, doc_content, line_idx, first_line, line_count, tab_width, visible_numbers, &.{});
+}
+
+/// `lineColors` + **2층 스팬**(semantic tokens, §8.2i — 문서 순서, byte, 우리 색 역할). 1층 스팬 뒤에 문서 순서로 섞여 「마지막이 이긴다」로
+/// 겹친 자리만 2층이 이긴다. 2층이 비면 `lineColors` 와 같다.
+pub fn lineColorsWith(
+    self: *State,
+    allocator: std.mem.Allocator,
+    doc_content: []const u8,
+    line_idx: maru.session.editor.line_index.LineIndex,
+    first_line: usize,
+    line_count: usize,
+    tab_width: u16,
+    visible_numbers: []const ?u32,
+    extra: []const maru.session.editor.lsp.semantic.Span,
+) []const []const content.ColorSpan {
+    return lineColorsInto(self, &self.bufs, allocator, doc_content, line_idx, first_line, line_count, tab_width, visible_numbers, extra);
 }
 
 /// **미니맵 창**의 색(§6.1) — 본문과 같은 규칙, 다른 저장소. 반환 슬라이스는 `first_line` 기준 상대 첨자다.
@@ -332,7 +348,7 @@ pub fn minimapColors(
     tab_width: u16,
     visible_numbers: []const ?u32,
 ) []const []const content.ColorSpan {
-    return lineColorsInto(self, &self.minimap_bufs, allocator, doc_content, line_idx, first_line, line_count, tab_width, visible_numbers);
+    return lineColorsInto(self, &self.minimap_bufs, allocator, doc_content, line_idx, first_line, line_count, tab_width, visible_numbers, &.{}); // 미니맵은 1층만(§6 — 전 문서)
 }
 
 fn lineColorsInto(
@@ -345,6 +361,7 @@ fn lineColorsInto(
     line_count: usize,
     tab_width: u16,
     visible_numbers: []const ?u32,
+    extra: []const maru.session.editor.lsp.semantic.Span,
 ) []const []const content.ColorSpan {
     const p = &(self.provider orelse return &.{});
     if (line_count == 0) return &.{};
@@ -366,7 +383,7 @@ fn lineColorsInto(
     };
 
     p.spansForRange(allocator, doc_content, range, &bufs.spans);
-    if (bufs.spans.items.len == 0) return &.{};
+    if (bufs.spans.items.len == 0 and extra.len == 0) return &.{};
 
     // **여기부터는 중립이 소유한다**(`chrome…editor_view.syntax_colors`, §2m.112). 이 파일에 있는
     // 동안 「마지막이 이긴다」와 탭 열 계산이 macOS 것이었고, Windows 가 색을 칠하려면 같은 규칙을
@@ -380,6 +397,9 @@ fn lineColorsInto(
         const role = maru.syntax_colors.roleForCapture(sp.capture) orelse continue;
         bufs.byte_spans.appendAssumeCapacity(.{ .start = sp.start, .end = sp.end, .role = role });
     }
+    // **2층을 섞는다**(§8.2i) — 창 범위 안의 것만, 문서 순서로 병합하되 같은 시작이면 2층이 뒤(「마지막이 이긴다」). 1층 목록은 이미 문서
+    // 순서이고 2층도 그렇다(서버가 relative 로 내고 편집 밀기가 순서를 지킨다) — 병합 한 번이면 된다.
+    if (extra.len > 0) mergeSecondLayer(allocator, bufs, extra, range) catch return &.{};
 
     // 줄 경계는 **CRLF 를 아는 쪽**이 준다(`LineIndex.Line.contentEnd()`).
     bufs.line_bounds.clearRetainingCapacity();
@@ -400,6 +420,24 @@ fn lineColorsInto(
         tab_width,
         first_line,
     );
+}
+
+/// 1층(`bufs.byte_spans`, 문서 순서)에 2층 스팬을 병합한다 — `range` 밖의 2층은 뺀다. 같은 시작이면 2층이 뒤.
+fn mergeSecondLayer(allocator: std.mem.Allocator, bufs: *ColorBufs, extra: []const maru.session.editor.lsp.semantic.Span, range: syntax.Range) error{OutOfMemory}!void {
+    const first = bufs.byte_spans.items;
+    var merged: std.ArrayList(syntax_colors.ByteSpan) = .empty;
+    errdefer merged.deinit(allocator);
+    try merged.ensureTotalCapacity(allocator, first.len + extra.len);
+    var i: usize = 0;
+    for (extra) |sp| {
+        if (sp.end <= range.start or sp.start >= range.end) continue;
+        while (i < first.len and first[i].start <= sp.start) : (i += 1) merged.appendAssumeCapacity(first[i]);
+        merged.appendAssumeCapacity(.{ .start = sp.start, .end = sp.end, .role = maru.syntax_colors.colorRole(sp.role) });
+    }
+    while (i < first.len) : (i += 1) merged.appendAssumeCapacity(first[i]);
+    bufs.byte_spans.clearRetainingCapacity();
+    try bufs.byte_spans.appendSlice(allocator, merged.items);
+    merged.deinit(allocator);
 }
 
 // ── 판정자 ──────────────────────────────────────────────────────────────────────
@@ -1047,4 +1085,42 @@ test "ES33 체인을 못 만들면 마디 경계도 비운다 — 지난 프레�
     try testing.expect(st.crumb_bounds.items.len > 0);
     _ = breadcrumb(&st, testing.allocator, path, src, src.len);
     try testing.expectEqual(@as(usize, 0), st.crumb_bounds.items.len);
+}
+
+test "ES40 2층 병합 — semantic 스팬은 겹친 자리만 1층을 덮고, 나머지 1층 색·창 밖 2층은 그대로; 2층이 비면 1층과 같다 (§8.2i)" {
+    // `x` 는 1층(zig 쿼리)에서 `constant` 라 number 색이고 `f` 는 함수. 2층이 `x` 를 `type_name` 으로, `f` 를 `keyword` 로 덮는다고 하면
+    // 그 두 자리만 바뀌고 `const`·`pub`·`fn` 은 1층 색 그대로다.
+    var doc = try openDoc("const x = 1;\npub fn f() void {}\n");
+    defer doc.deinit();
+    var st = openParsed(doc.content, .zig);
+    defer st.deinit(testing.allocator);
+    const Span = maru.session.editor.lsp.semantic.Span;
+    const x_at: u32 = @intCast(std.mem.indexOf(u8, doc.content, "x").?);
+    const f_at: u32 = @intCast(std.mem.indexOf(u8, doc.content, "f()").?);
+    const extra = [_]Span{ .{ .start = x_at, .end = x_at + 1, .role = .type_name }, .{ .start = f_at, .end = f_at + 1, .role = .keyword }, .{ .start = 100, .end = 101, .role = .string } }; // 셋째는 문서 밖(창 밖)
+    const colors = lineColorsWith(&st, testing.allocator, doc.content, doc.lines, 0, 2, 4, &.{}, &extra);
+    try testing.expect(colors.len >= 2);
+    var x_role: ?tokens.ColorRole = null;
+    var const_role: ?tokens.ColorRole = null;
+    for (colors[0]) |cs| {
+        if (cs.start_col == 6 and cs.end_col == 7) x_role = cs.role;
+        if (cs.start_col == 0 and cs.end_col == 5) const_role = cs.role;
+    }
+    try testing.expectEqual(tokens.ColorRole.syntax_type_name, x_role.?); // 2층이 이겼다
+    try testing.expectEqual(tokens.ColorRole.syntax_keyword, const_role.?); // 1층 그대로
+    var f_role: ?tokens.ColorRole = null;
+    var fn_role: ?tokens.ColorRole = null;
+    for (colors[1]) |cs| {
+        if (cs.start_col == 7 and cs.end_col == 8) f_role = cs.role;
+        if (cs.start_col == 4 and cs.end_col == 6) fn_role = cs.role;
+    }
+    try testing.expectEqual(tokens.ColorRole.syntax_keyword, f_role.?); // 2층이 1층(function)을 덮었다
+    try testing.expectEqual(tokens.ColorRole.syntax_keyword, fn_role.?);
+    // 2층이 비면 `lineColors` 와 같다 — `x` 는 1층 색(number)으로 돌아간다.
+    const plain = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, 2, 4, &.{});
+    var x_plain: ?tokens.ColorRole = null;
+    for (plain[0]) |cs| if (cs.start_col == 6 and cs.end_col == 7) {
+        x_plain = cs.role;
+    };
+    try testing.expectEqual(tokens.ColorRole.syntax_number, x_plain.?);
 }

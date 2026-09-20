@@ -244,7 +244,7 @@ fn appendLine(self: *AppSession, text: []const u8, role: chrome.tokens.ColorRole
 /// 출처 줄 없음. severity 높은 것부터 — 목록은 start 순·같은 start 는 severity 순이라 덮는 것끼리 다시 고른다.
 fn buildDiagnosticLines(self: *AppSession, term: *Term, offset: u32) error{OutOfMemory}!void {
     if (!self.loaded_config.config.editor.diagnostics) return;
-    const server_name: []const u8 = if (lsp.servers.forGrammar(term.rt.editor_grammar)) |s| s.exe else "";
+    const server_name: []const u8 = if (editor_lsp.serverFor(self, term.rt.editor_grammar)) |s| s.exe else "";
     // 덮는 것을 모아 severity 로 고른다(안정 정렬 — 같은 severity 는 목록 순).
     var covering: [16]diagnostic.Diagnostic = undefined;
     var n: usize = 0;

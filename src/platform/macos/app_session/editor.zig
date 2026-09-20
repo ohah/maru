@@ -11403,6 +11403,78 @@ test "LSPB1 LSP seam 1단 — 신뢰를 묻고 기억하며, 허용하면 서버
     for (fx.session.editor_lsp.clients.items) |c| try testing.expect(c.phase == .starting or c.phase == .ready);
 }
 
+test "LSPB9 TS 계열 후보 셋 — PATH 에 typescript-language-server 만 있으면 그것(둘째 후보)을 고르고; 하나도 없으면 「tsgo 없음」에 native-preview 설치 명령; 없는 채 둘째 후보가 설치되면 다음 gate 가 그것으로 바꾼다 (제품 경계, §8.2a)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const cz = try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root});
+    _ = setenv("MARU_CONFIG", cz.ptr, 1);
+    defer _ = unsetenv("MARU_CONFIG");
+    if (fx.session.config_path_buffer) |b| allocator.free(b);
+    fx.session.config_path_buffer = null;
+    fx.session.editor_lsp.auto_trust_answer = .allow;
+    // override 없이 **PATH** 로 찾게 한다 — PATH 는 빈 디렉터리 하나(`git_locate` 의 폴백 디렉터리에 tsgo·tsc 가 있을 수 있으니 이름을 안 쓰는 wrapper 로 확인).
+    _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
+    try fx.dir.dir.createDirPath(testing.io, "bin");
+    var path_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const pz = try std.fmt.bufPrintZ(&path_z, "{s}/bin", .{root});
+    // **PATH 를 복사해 둔다** — `getenv` 가 준 포인터는 `setenv` 뒤 libc 가 환경을 갈아 끼우면 매달린다(집계 샤드에서 뒤 판정자가 segfault 로 죽었다).
+    const saved_path: ?[:0]u8 = if (std.c.getenv("PATH")) |p| try allocator.dupeZ(u8, std.mem.span(p)) else null;
+    defer if (saved_path) |p| allocator.free(p);
+    _ = setenv("PATH", pz.ptr, 1);
+    defer if (saved_path) |p| {
+        _ = setenv("PATH", p.ptr, 1);
+    };
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "t.ts", .data = "const my_ty = 1;\n" });
+    const path = try std.fs.path.join(allocator, &.{ root, "t.ts" });
+    defer allocator.free(path);
+    const saved_repo = fx.session.git_repo;
+    fx.session.git_repo = @constCast(root);
+    defer fx.session.git_repo = saved_repo;
+    const term = try openPathInActivePane(fx.session, path);
+    // ⑴ 아무것도 없다 — 첫 후보 tsgo 의 이름으로 「없음」, 설치 명령은 native-preview.
+    lsp_client.pump(fx.session);
+    const v0 = lsp_client.statusFor(fx.session, term) orelse return error.NoStatus;
+    if (v0.phase != .missing) return error.SkipZigTest; // 폴백 디렉터리에 진짜 tsgo/tsc 가 있으면 이 판정은 못 한다
+    try testing.expectEqualStrings("tsgo", v0.exe);
+    try testing.expect(std.mem.indexOf(u8, lsp_client.serverFor(fx.session, .typescript).?.install, "@typescript/native-preview") != null);
+    // ⑵ 둘째 후보만 설치된다(가짜 서버를 `typescript-language-server` 이름의 wrapper 로) — 다음 gate 가 그것으로 바꾼다.
+    var wrapper: std.ArrayList(u8) = .empty;
+    defer wrapper.deinit(allocator);
+    try wrapper.appendSlice(allocator, "#!/bin/sh\nexec ");
+    try wrapper.appendSlice(allocator, fake);
+    try wrapper.appendSlice(allocator, " \"$@\"\n");
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "bin/typescript-language-server", .data = wrapper.items });
+    {
+        var wz: [std.fs.max_path_bytes + 1]u8 = undefined;
+        const w = try std.fmt.bufPrintZ(&wz, "{s}/bin/typescript-language-server", .{root});
+        _ = std.c.chmod(w.ptr, 0o755);
+    }
+    const Ctx = struct { fx: *PaneFixture, term: *Term };
+    const ctx: Ctx = .{ .fx = &fx, .term = term };
+    const ok9 = pumpLspUntil(&fx, 5000, ctx, struct {
+        fn f(c: Ctx) bool {
+            const v = lsp_client.statusFor(c.fx.session, c.term) orelse return false;
+            return v.phase == .ready and std.mem.eql(u8, v.exe, "typescript-language-server");
+        }
+    }.f);
+    try testing.expect(ok9);
+    try testing.expectEqualStrings("typescript-language-server", lsp_client.serverFor(fx.session, .typescript).?.exe);
+    try testing.expectEqualStrings("--stdio", lsp_client.serverFor(fx.session, .typescript).?.args[0]);
+    // ⑶ 문서를 열었으니 진단이 온다 — 고른 후보로 실제로 떴다.
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
+        fn f(c: Ctx) bool {
+            return c.term.rt.editor_diagnostics.lsp.items.len >= 1;
+        }
+    }.f));
+}
+
 test "LSPB2 서버가 없으면 상태바가 「설치」이고 누르면 새 탭에 설치 명령을 입력만 한다; 거부는 기억되고 다시 물을 수 있다; 끄면 아무것도 없다 (제품 경계, §8.2a·§8.1a)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;

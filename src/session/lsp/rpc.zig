@@ -21,6 +21,7 @@ pub const RequestId = union(enum) {
     code_action: u32,
     code_action_resolve: u32,
     completion_resolve: u32,
+    semantic_tokens: u32,
 };
 /// 요청 id 는 **i32 안**이어야 한다(2026-09-20 실측): rust-analyzer·ruff 가 쓰는 Rust `lsp-server` 크레이트는 정수 id 를 i32 로만 읽고,
 /// 넘치면 그 메시지를 **알림으로 오인해 버린다**(`6_000_000_001` 짜리 completion 이 stderr 에 `unhandled notification` 으로만 남고 응답이
@@ -47,8 +48,10 @@ pub const code_action_id_base: u32 = 7 * id_span;
 pub const code_action_resolve_id_base: u32 = 8 * id_span;
 /// `completionItem/resolve`(§8.2g-b)
 pub const completion_resolve_id_base: u32 = 9 * id_span;
+/// `semanticTokens/range`·`full`(§8.2i)
+pub const semantic_tokens_id_base: u32 = 10 * id_span;
 comptime {
-    std.debug.assert(@as(u64, completion_resolve_id_base) + id_span - 1 <= std.math.maxInt(i32));
+    std.debug.assert(@as(u64, semantic_tokens_id_base) + id_span - 1 <= std.math.maxInt(i32));
 }
 /// 종류별 seq 의 다음 값 — 칸 안에서 돈다(0 은 안 쓴다: 처음 보내는 요청이 `base + 1`).
 pub fn nextSeq(seq: u32) u32 {
@@ -59,7 +62,7 @@ pub fn nextSeq(seq: u32) u32 {
 fn requestIdOf(id_num: i64) ?RequestId {
     if (id_num == initialize_id) return .initialize;
     if (id_num == shutdown_id) return .shutdown;
-    if (id_num < hover_id_base or id_num >= @as(i64, completion_resolve_id_base) + id_span) return null;
+    if (id_num < hover_id_base or id_num >= @as(i64, semantic_tokens_id_base) + id_span) return null;
     const slot: u32 = @intCast(@divTrunc(id_num, id_span));
     const seq: u32 = @intCast(@mod(id_num, id_span));
     return switch (slot) {
@@ -72,6 +75,7 @@ fn requestIdOf(id_num: i64) ?RequestId {
         7 => .{ .code_action = seq },
         8 => .{ .code_action_resolve = seq },
         9 => .{ .completion_resolve = seq },
+        10 => .{ .semantic_tokens = seq },
         else => null,
     };
 }
@@ -114,6 +118,15 @@ pub fn initializeRequest(allocator: std.mem.Allocator, root_uri: []const u8, pid
                         .dataSupport = true,
                         .isPreferredSupport = true,
                         .disabledSupport = true,
+                    },
+                    // semantic tokens 2층(§8.2i) — 범위·전체 둘 다 선언(clangd 는 전체만 낸다), 표준 종류 23·수식자 10, 한 줄 토큰만.
+                    .semanticTokens = .{
+                        .requests = .{ .range = true, .full = true },
+                        .tokenTypes = semantic_token_types,
+                        .tokenModifiers = semantic_token_modifiers,
+                        .formats = [_][]const u8{"relative"},
+                        .multilineTokenSupport = false,
+                        .overlappingTokenSupport = false,
                     },
                     .signatureHelp = .{
                         .contextSupport = true,
@@ -422,6 +435,30 @@ pub fn codeActionRequest(allocator: std.mem.Allocator, seq: u32, uri: []const u8
 /// `codeAction/resolve`(§8.2h) — 고른 항목의 JSON 을 **그대로** 되돌려 준다(`data` 가 서버의 것이라 다시 만들지 않는다).
 pub fn codeActionResolveRequest(allocator: std.mem.Allocator, seq: u32, item_json: []const u8) error{OutOfMemory}![]u8 {
     return std.fmt.allocPrint(allocator, "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"method\":\"codeAction/resolve\",\"params\":{s}}}", .{ code_action_resolve_id_base + seq, item_json });
+}
+
+/// LSP 3.17 표준 `SemanticTokenTypes`·`SemanticTokenModifiers`(§8.2i capability).
+pub const semantic_token_types = [_][]const u8{ "namespace", "type", "class", "enum", "interface", "struct", "typeParameter", "parameter", "variable", "property", "enumMember", "event", "function", "method", "macro", "keyword", "modifier", "comment", "string", "number", "regexp", "operator", "decorator" };
+pub const semantic_token_modifiers = [_][]const u8{ "declaration", "definition", "readonly", "static", "deprecated", "abstract", "async", "modification", "documentation", "defaultLibrary" };
+
+/// `textDocument/semanticTokens/range`(§8.2i).
+pub fn semanticTokensRangeRequest(allocator: std.mem.Allocator, seq: u32, uri: []const u8, range: LspRange) error{OutOfMemory}![]u8 {
+    return std.json.Stringify.valueAlloc(allocator, .{
+        .jsonrpc = "2.0",
+        .id = semantic_tokens_id_base + seq,
+        .method = "textDocument/semanticTokens/range",
+        .params = .{ .textDocument = .{ .uri = uri }, .range = range },
+    }, .{});
+}
+
+/// `textDocument/semanticTokens/full`(§8.2i) — 범위를 못 하는 서버(clangd)의 폴백.
+pub fn semanticTokensFullRequest(allocator: std.mem.Allocator, seq: u32, uri: []const u8) error{OutOfMemory}![]u8 {
+    return std.json.Stringify.valueAlloc(allocator, .{
+        .jsonrpc = "2.0",
+        .id = semantic_tokens_id_base + seq,
+        .method = "textDocument/semanticTokens/full",
+        .params = .{ .textDocument = .{ .uri = uri } },
+    }, .{});
 }
 
 /// `initialize` 응답의 `renameProvider`(bool 또는 object).
@@ -1131,4 +1168,28 @@ test "LSJ14 initialize 가 completionItem.labelDetailsSupport 를 선언한다 (
     const ci = std.mem.indexOf(u8, init, "\"completionItem\":{").?;
     const block = init[ci .. ci + @min(init.len - ci, 400)];
     try testing.expect(std.mem.indexOf(u8, block, "\"documentationFormat\":[\"markdown\",\"plaintext\"]") != null);
+}
+
+test "LSJ15 semanticTokens — initialize capability(range·full·표준 종류)·요청 둘의 id 칸(10e8)·classify (§8.2i)" {
+    const a = testing.allocator;
+    const init = try initializeRequest(a, "file:///r", 1);
+    defer a.free(init);
+    try testing.expect(std.mem.indexOf(u8, init, "\"semanticTokens\":{\"requests\":{\"range\":true,\"full\":true}") != null);
+    try testing.expect(std.mem.indexOf(u8, init, "\"tokenTypes\":[\"namespace\",\"type\"") != null);
+    try testing.expect(std.mem.indexOf(u8, init, "\"multilineTokenSupport\":false") != null);
+    const rr = try semanticTokensRangeRequest(a, 3, "file:///a.rs", .{ .start = .{ .line = 0, .character = 0 }, .end = .{ .line = 40, .character = 0 } });
+    defer a.free(rr);
+    try testing.expect(std.mem.indexOf(u8, rr, "\"id\":1000000003,\"method\":\"textDocument/semanticTokens/range\"") != null);
+    try testing.expect(std.mem.indexOf(u8, rr, "\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":40,\"character\":0}}") != null);
+    const fr = try semanticTokensFullRequest(a, 4, "file:///a.c");
+    defer a.free(fr);
+    try testing.expect(std.mem.indexOf(u8, fr, "\"id\":1000000004,\"method\":\"textDocument/semanticTokens/full\"") != null);
+    try testing.expect(std.mem.indexOf(u8, fr, "\"range\"") == null);
+    var p1 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":1000000003,\"result\":{\"data\":[]}}");
+    defer p1.deinit();
+    try testing.expect(classify(p1.value).response.id == .semantic_tokens and classify(p1.value).response.id.semantic_tokens == 3);
+    try testing.expect(@as(u64, semantic_tokens_id_base) + id_span - 1 <= std.math.maxInt(i32));
+    var p2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":1100000000,\"result\":null}"); // 칸 밖
+    defer p2.deinit();
+    try testing.expect(classify(p2.value) == .ignore);
 }

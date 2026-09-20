@@ -91,6 +91,7 @@ pub const format_client = @import("editor_format.zig");
 pub const rename_client = @import("editor_rename.zig");
 pub const completion_client = @import("editor_completion.zig");
 pub const code_action_client = @import("editor_code_action.zig");
+pub const semantic_client = @import("editor_semantic.zig");
 pub const workspace_edit_client = @import("editor_workspace_edit.zig");
 
 pub const Opened = struct {
@@ -601,7 +602,13 @@ fn syntaxColors(self: *AppSession, term: *Term) []const []const chrome_editor.co
     // 아래가 무색이 된다.
     const budget: usize = 256;
     const count = @min(budget, axis_len - first);
-    return syntax_color.lineColors(
+    // semantic tokens 2층(§8.2i) — 보이는 원본 줄 범위를 알려 물을 때인지 판정하고, 든 스팬을 1층 뒤에 섞는다.
+    {
+        const first_src = syntax_color.sourceLineFor(term.rt.editor_visible_numbers, first) orelse first;
+        const last_src = syntax_color.sourceLineFor(term.rt.editor_visible_numbers, first + count - 1) orelse (first + count - 1);
+        semantic_client.tick(self, term, first_src, last_src);
+    }
+    return syntax_color.lineColorsWith(
         &term.rt.editor_syntax,
         self.allocator,
         doc.file.content,
@@ -612,6 +619,7 @@ fn syntaxColors(self: *AppSession, term: *Term) []const []const chrome_editor.co
         // **접힘 표를 함께 넘긴다** — 렌더가 받는 `lines` 가 접히면 보이는 줄 축이 되므로 색도
         // 같은 축이어야 한다(그 함수의 doc). 안 넘기면 접는 순간 색만 밀린다.
         term.rt.editor_visible_numbers,
+        semantic_client.spans(term),
     );
 }
 
@@ -8838,6 +8846,8 @@ fn refreshAfterEdit(self: *AppSession, term: *Term, edit: ?syntax_color.EditSpan
     // **줄 인덱스보다 먼저 부른다.** 아래 ⑴이 줄 배열을 갈아 끼우는데, 통지에 실리는 행·열은
     // **편집 뒤 문서**의 것이라 `doc.file.lines`가 이미 새 것이어야 한다 — `file.apply`가 그것을
     // 이미 갱신해 두었다(줄 배열 `editor_lines`와는 다른 축이다).
+    // semantic tokens 2층도 같은 자리에서 민다(§8.2i 「편집 중」) — 범위를 모르면 버린다.
+    if (edit) |e| semantic_client.onEdit(self, term, e.start, e.old_end, e.new_end) else semantic_client.onEdit(self, term, null, 0, 0);
     if (edit) |e|
         syntax_color.onEditSpan(&term.rt.editor_syntax, doc.file.content, e, doc.file.lines)
     else
@@ -9170,6 +9180,7 @@ pub fn releaseEditorTerm(self: *AppSession, term: *Term) void {
     // **구문 트리도 문서와 함께 죽는다.** tree-sitter의 파서·트리는 자기 `malloc`에서 오므로
     // 여기서 안 놓으면 `std.testing.allocator`가 못 보는 누수가 된다(`SYN10`이 그 자리를 잰다).
     term.rt.editor_syntax.deinit(self.allocator);
+    term.rt.editor_semantic.deinit(self.allocator);
     if (term.rt.editor_lines.len > 0) self.allocator.free(term.rt.editor_lines);
     term.rt.editor_lines = &.{};
     dropLineCols(self, term); // 체크포인트도 함께 놓는다
@@ -11362,6 +11373,7 @@ test "LSPB1 LSP seam 1단 — 신뢰를 묻고 기억하며, 허용하면 서버
     }.f;
     try testing.expectEqual(@as(usize, 2), countLsp(term)); // 트리가 있던 마지막 프레임: error + warn
     term.rt.editor_syntax.deinit(allocator);
+    term.rt.editor_semantic.deinit(allocator);
     term.rt.editor_syntax = .{};
     try removeMarker(fx.session, term, "WARN ");
     try testing.expect(pumpLspUntil(&fx, 3000, ctx, diagsForCurrentVersion));
@@ -13621,6 +13633,226 @@ test "CMP5 자동완성 ①-c — labelDetails: 행에 꼬리(label_detail)가 �
     // 상자의 폭은 (label + 꼬리) 를 센다: `fake_import(use fake)` 21 + 4 + 2 + `mod fake` 8 = 35.
     try testing.expectEqual(@as(u32, 35), maru.chrome.components.suggest_box.size(completion_client.rows(s)).?.cols);
     completion_client.hide(s);
+}
+
+/// SMT 판정자의 공통 픽스처 — 가짜 서버로 C 파일을 열고 진단이 올 때까지(서버 ready) 기다린다.
+const SmtFixture = struct {
+    fx: PaneFixture,
+    term: *Term,
+    leaf: maru.session.SplitRect,
+    path: []u8,
+    saved_repo: ?[]u8,
+    fake_z: [std.fs.max_path_bytes + 1]u8 = undefined,
+    cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined,
+
+    fn open(allocator: std.mem.Allocator, name: []const u8, source: []const u8) !?SmtFixture {
+        var out: SmtFixture = undefined;
+        out.fx = try PaneFixture.init(allocator);
+        errdefer out.fx.deinit(allocator);
+        var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const fake = (try fakeLspAbs(&abs_buf)) orelse return null;
+        const fz = try std.fmt.bufPrintZ(&out.fake_z, "{s}", .{fake});
+        _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);
+        var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const root = root_buf[0..try out.fx.dir.dir.realPath(testing.io, &root_buf)];
+        const cz = try std.fmt.bufPrintZ(&out.cfg_z, "{s}/config", .{root});
+        _ = setenv("MARU_CONFIG", cz.ptr, 1);
+        if (out.fx.session.config_path_buffer) |b| allocator.free(b);
+        out.fx.session.config_path_buffer = null;
+        out.fx.session.editor_lsp.auto_trust_answer = .allow;
+        try out.fx.dir.dir.writeFile(testing.io, .{ .sub_path = name, .data = source });
+        out.path = try std.fs.path.join(allocator, &.{ root, name });
+        errdefer allocator.free(out.path);
+        out.saved_repo = out.fx.session.git_repo;
+        out.fx.session.git_repo = @constCast(root);
+        out.term = (try pane_ops.openFileTermInActivePane(out.fx.session, out.path, .text)).term;
+        out.fx.session.surface_initialized = true;
+        out.fx.session.backing_width_px = 1200;
+        out.fx.session.backing_height_px = 800;
+        out.leaf = activeLeafRectForTest(out.fx.session) orelse return null;
+        return out;
+    }
+
+    fn close(self: *SmtFixture, allocator: std.mem.Allocator) void {
+        self.fx.session.git_repo = self.saved_repo;
+        allocator.free(self.path);
+        self.fx.deinit(allocator);
+        _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
+        _ = unsetenv("MARU_CONFIG");
+    }
+
+    fn ready(self: *SmtFixture) bool {
+        const Ctx = struct { t: *Term };
+        return pumpLspUntil(&self.fx, 3000, Ctx{ .t = self.term }, struct {
+            fn f(c: Ctx) bool {
+                return c.t.rt.editor_diagnostics.lsp.items.len >= 1;
+            }
+        }.f);
+    }
+
+    fn applied(self: *SmtFixture, want: u64) bool {
+        const Ctx = struct { t: *Term, n: u64 };
+        return pumpLspUntil(&self.fx, 3000, Ctx{ .t = self.term, .n = want }, struct {
+            fn f(c: Ctx) bool {
+                return c.t.rt.editor_semantic.applied >= c.n;
+            }
+        }.f);
+    }
+};
+
+/// 행 `line` 의 열 `[lo, hi)` 에 정확히 걸린 색 구간의 역할.
+fn roleAt(colors: []const []const chrome_editor.content.ColorSpan, line: usize, lo: u32, hi: u32) ?maru.chrome.tokens.ColorRole {
+    if (line >= colors.len) return null;
+    for (colors[line]) |cs| if (cs.start_col == lo and cs.end_col == hi) return cs.role;
+    return null;
+}
+
+test "SMT1 semantic tokens — 서버가 ready 면 프레임의 색 만들기가 range 를 묻고(한 번에 하나), 응답 뒤 겹친 자리만 2층 색; 편집은 스팬을 밀고 120 ms 조용한 뒤 다시 묻는다; 낡은 version 응답은 버린다; 스크롤로 덮인 범위 밖이면 다시 묻는다 (제품 경계, §8.2i)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    // 300 줄 — 화면(256 줄 예산 + 20 여유) 밖이 있어 스크롤로 범위가 갈린다. 마지막 줄 근처에 토큰 하나.
+    var src: std.ArrayList(u8) = .empty;
+    defer src.deinit(allocator);
+    try src.appendSlice(allocator, "int my_fn(int a_ty) {\n  return a_ty;\n}\n");
+    var k: usize = 0;
+    while (k < 296) : (k += 1) try src.appendSlice(allocator, "\n");
+    try src.appendSlice(allocator, "int tail_fn(void);\n");
+    var f = (try SmtFixture.open(allocator, "s.c", src.items)) orelse return error.SkipZigTest;
+    defer f.close(allocator);
+    const s = f.fx.session;
+    const term = f.term;
+    try testing.expect(f.ready());
+    // ⑴ 첫 색 만들기 — 요청이 나간다(range 0..(256+20)). 1층만 있는 동안 `a_ty` 는 무색·`int` 는 키워드.
+    term.rt.editor_first_line = 0;
+    const c0 = syntaxColors(s, term);
+    try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_semantic);
+    try testing.expect(term.rt.editor_semantic.waiting);
+    try testing.expectEqual(maru.chrome.tokens.ColorRole.syntax_number, roleAt(c0, 0, 14, 18).?); // `a_ty` — 1층(C 쿼리)의 색
+    try testing.expectEqual(maru.chrome.tokens.ColorRole.syntax_type_name, roleAt(c0, 0, 0, 3).?); // `int` — 1층 기본형
+    _ = syntaxColors(s, term); // 대기 중엔 한 번만
+    try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_semantic);
+    // ⑵ 응답 — `a_ty`(type) 가 2층 색(number → type_name), `my_fn`(function) 은 1층과 같은 색, `int`(variable → 무색)은 1층 그대로.
+    try testing.expect(f.applied(1));
+    try testing.expectEqual(@as(usize, 3), term.rt.editor_semantic.spans.items.len); // my_fn·a_ty·a_ty — 범위 밖 `tail_fn` 과 무색 `int`·`return` 은 없다
+    try testing.expectEqual(term.rt.editor_lsp_version, term.rt.editor_semantic.version);
+    const c1 = syntaxColors(s, term);
+    try testing.expectEqual(maru.chrome.tokens.ColorRole.syntax_type_name, roleAt(c1, 0, 14, 18).?);
+    try testing.expectEqual(maru.chrome.tokens.ColorRole.syntax_type_name, roleAt(c1, 1, 9, 13).?);
+    try testing.expectEqual(maru.chrome.tokens.ColorRole.syntax_function, roleAt(c1, 0, 4, 9).?);
+    try testing.expectEqual(maru.chrome.tokens.ColorRole.syntax_type_name, roleAt(c1, 0, 0, 3).?);
+    try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_semantic); // 덮인 범위 안·version 같음 — 다시 안 묻는다
+    // ⑶ 편집 — 첫 줄 머리에 `//` 를 넣으면 스팬이 2 만큼 밀려 색이 따라오고(깜빡임 없음), 120 ms 안엔 안 묻는다.
+    term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };
+    try testing.expect(insertText(s, term, "//"));
+    try testing.expectEqual(@as(u64, 1), term.rt.editor_semantic.shifted);
+    const c2 = syntaxColors(s, term);
+    try testing.expectEqual(maru.chrome.tokens.ColorRole.syntax_type_name, roleAt(c2, 0, 16, 20).?); // 밀린 `a_ty`
+    try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_semantic);
+    {
+        const t0 = s.awakeMs();
+        while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
+    }
+    _ = syntaxColors(s, term); // 조용해졌다 — 묻는다
+    try testing.expectEqual(@as(u64, 2), s.editor_lsp.sent_semantic);
+    // ⑷ 대기 중에 또 편집 — 응답의 version 이 낡아 버리고, 조용해진 뒤 다시 묻는다.
+    try testing.expect(insertText(s, term, "/"));
+    try testing.expect(pumpLspUntil(&f.fx, 3000, term, struct {
+        fn g(t: *Term) bool {
+            return t.rt.editor_semantic.dropped_stale >= 1;
+        }
+    }.g));
+    try testing.expectEqual(@as(u64, 1), term.rt.editor_semantic.applied);
+    {
+        const t0 = s.awakeMs();
+        while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
+    }
+    _ = syntaxColors(s, term);
+    try testing.expectEqual(@as(u64, 3), s.editor_lsp.sent_semantic);
+    try testing.expect(f.applied(2));
+    const c3 = syntaxColors(s, term);
+    try testing.expectEqual(maru.chrome.tokens.ColorRole.syntax_type_name, roleAt(c3, 0, 17, 21).?);
+    // ⑸ 스크롤 — 덮인 범위(0..276) 밖으로 가면 다시 묻고, 응답 뒤 끝 줄의 `tail_fn` 이 2층(function) — 1층이 없어도(선언만) 선다.
+    term.rt.editor_first_line = 290;
+    _ = syntaxColors(s, term);
+    try testing.expectEqual(@as(u64, 4), s.editor_lsp.sent_semantic);
+    try testing.expect(f.applied(3));
+    const c4 = syntaxColors(s, term);
+    try testing.expectEqual(maru.chrome.tokens.ColorRole.syntax_function, roleAt(c4, 299, 4, 11).?); // 색 배열은 렌더 축(앞은 빈 줄)
+    try testing.expect(term.rt.editor_semantic.covered_lo <= 270 and term.rt.editor_semantic.covered_hi >= 299);
+}
+
+test "SMT2 semantic tokens — range 없는 서버는 full 로 묻고(스크롤해도 다시 안 묻는다), provider 없으면 아무것도 안 묻고, 오류 응답은 버리고 조용한 뒤 다시 묻는다 (제품 경계, §8.2i)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var src: std.ArrayList(u8) = .empty;
+    defer src.deinit(allocator);
+    try src.appendSlice(allocator, "int my_fn(int a_ty) { return a_ty; }\n");
+    var k: usize = 0;
+    while (k < 298) : (k += 1) try src.appendSlice(allocator, "\n");
+    try src.appendSlice(allocator, "int tail_fn(void);\n");
+    // ⑴ full 폴백(clangd 꼴).
+    _ = setenv("MARU_FAKE_LSP_SEMFULL", "1", 1);
+    {
+        var f = (try SmtFixture.open(allocator, "f.c", src.items)) orelse return error.SkipZigTest;
+        defer f.close(allocator);
+        const s = f.fx.session;
+        const term = f.term;
+        try testing.expect(f.ready());
+        term.rt.editor_first_line = 0;
+        _ = syntaxColors(s, term);
+        try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_semantic);
+        try testing.expect(term.rt.editor_semantic.waiting_full);
+        try testing.expect(f.applied(1));
+        try testing.expectEqual(std.math.maxInt(usize), term.rt.editor_semantic.covered_hi); // 전부 덮였다
+        term.rt.editor_first_line = 290;
+        const c = syntaxColors(s, term);
+        try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_semantic); // 스크롤해도 다시 안 묻는다
+        try testing.expectEqual(maru.chrome.tokens.ColorRole.syntax_function, roleAt(c, 299, 4, 11).?);
+    }
+    _ = unsetenv("MARU_FAKE_LSP_SEMFULL");
+    // ⑵ provider 없음 — 아무것도 안 묻고 1층만.
+    _ = setenv("MARU_FAKE_LSP_NOSEMCAP", "1", 1);
+    {
+        var f = (try SmtFixture.open(allocator, "n.c", src.items)) orelse return error.SkipZigTest;
+        defer f.close(allocator);
+        const s = f.fx.session;
+        const term = f.term;
+        try testing.expect(f.ready());
+        term.rt.editor_first_line = 0;
+        const c = syntaxColors(s, term);
+        try testing.expectEqual(@as(u64, 0), s.editor_lsp.sent_semantic);
+        try testing.expectEqual(maru.chrome.tokens.ColorRole.syntax_number, roleAt(c, 0, 14, 18).?); // 1층 색 그대로
+        try testing.expectEqual(maru.chrome.tokens.ColorRole.syntax_type_name, roleAt(c, 0, 0, 3).?);
+    }
+    _ = unsetenv("MARU_FAKE_LSP_NOSEMCAP");
+    // ⑶ 오류 응답(`content modified`) — 버리고 조용한 뒤 다시 묻는다; 표식을 지우면 다음 응답이 선다.
+    {
+        var f = (try SmtFixture.open(allocator, "e.c", "int my_fn(int a_ty) { return a_ty; } // SEMERR\n")) orelse return error.SkipZigTest;
+        defer f.close(allocator);
+        const s = f.fx.session;
+        const term = f.term;
+        try testing.expect(f.ready());
+        term.rt.editor_first_line = 0;
+        _ = syntaxColors(s, term);
+        try testing.expect(pumpLspUntil(&f.fx, 3000, term, struct {
+            fn g(t: *Term) bool {
+                return t.rt.editor_semantic.dropped_error >= 1;
+            }
+        }.g));
+        try testing.expect(!term.rt.editor_semantic.waiting and term.rt.editor_semantic.dirty);
+        _ = syntaxColors(s, term); // 곧바로는 안 묻는다(조용 시계)
+        try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_semantic);
+        try removeMarkerHover(s, term, " // SEMERR");
+        {
+            const t0 = s.awakeMs();
+            while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
+        }
+        _ = syntaxColors(s, term);
+        try testing.expectEqual(@as(u64, 2), s.editor_lsp.sent_semantic);
+        try testing.expect(f.applied(1));
+        const c = syntaxColors(s, term);
+        try testing.expectEqual(maru.chrome.tokens.ColorRole.syntax_type_name, roleAt(c, 0, 14, 18).?);
+    }
 }
 
 test "CMP6 자동완성 ①-d — 문서 패널: ⌃Space 가 목록이 열려 있으면 패널을 토글하고, 강조를 따라가며(미해결은 250 ms 뒤 `…`, 풀리면 detail+빈 줄+문서), 닫혀도 펼침은 남고, 패널 안 휠은 굴리고 밖은 흘린다 (제품 경계, §8.2g-d)" {
@@ -23272,6 +23504,7 @@ test "PROMO1 승격이 어느 할당에서 실패해도 뷰가 성하다 — 그
     term.rt.editor_wrap = false;
     const d = term.rt.editor_doc orelse return error.NoDoc;
     term.rt.editor_syntax.deinit(allocator);
+    term.rt.editor_semantic.deinit(allocator);
     term.rt.editor_syntax = syntax_color.open(d.file.content, .zig);
     var rounds: usize = 0;
     while (term.rt.editor_syntax.pending and rounds < 100_000) : (rounds += 1) {
@@ -24603,6 +24836,7 @@ test "PROMO2 접을 것이 없는 문서는 «한 번만» 센다 — 표식이 
     term.rt.editor_wrap = false;
     const d = term.rt.editor_doc orelse return error.NoDoc;
     term.rt.editor_syntax.deinit(allocator);
+    term.rt.editor_semantic.deinit(allocator);
     term.rt.editor_syntax = syntax_color.open(d.file.content, .zig);
     var rounds: usize = 0;
     while (term.rt.editor_syntax.pending and rounds < 100_000) : (rounds += 1) {
@@ -24664,6 +24898,7 @@ test "DHS16 구문 접힘 승격도 가로 상한·위치를 안 버린다 — �
     term.rt.editor_wrap = false;
     const d = term.rt.editor_doc orelse return error.NoDoc;
     term.rt.editor_syntax.deinit(allocator);
+    term.rt.editor_semantic.deinit(allocator);
     term.rt.editor_syntax = syntax_color.open(d.file.content, .zig);
     var rounds: usize = 0;
     while (term.rt.editor_syntax.pending and rounds < 100_000) : (rounds += 1) {

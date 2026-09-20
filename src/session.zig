@@ -188,6 +188,8 @@ pub const editor = struct {
         pub const completion = @import("session/lsp/completion.zig");
         /// code action 목록(tooling §8.2h).
         pub const code_action = @import("session/lsp/code_action.zig");
+        /// semantic tokens 2층(tooling §8.2i · visual-mapping §5) — legend 매핑·relative 풀기·편집 밀기.
+        pub const semantic = @import("session/lsp/semantic.zig");
     };
     /// S2: 병합 충돌 **마커 구간**(docs/editor-merge-conflicts.md §5). 순수 계산이라 여기 산다 —
     /// 줄 배열을 받아 구간을 내고, 그리기·동작은 위층이 붙인다.

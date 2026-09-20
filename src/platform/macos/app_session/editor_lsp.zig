@@ -29,6 +29,7 @@ const editor_signature = @import("editor_signature.zig");
 const editor_format = @import("editor_format.zig");
 const editor_rename = @import("editor_rename.zig");
 const editor_completion = @import("editor_completion.zig");
+const editor_semantic = @import("editor_semantic.zig");
 const editor_code_action = @import("editor_code_action.zig");
 
 pub const Phase = enum {
@@ -100,6 +101,9 @@ pub const Client = struct {
     code_action_seq: u32 = 0,
     code_action_resolve_seq: u32 = 0,
     code_action_caps: lsp.rpc.CodeActionCaps = .{},
+    /// semantic tokens(§8.2i) — legend 를 우리 색으로 옮긴 표를 든다(소유).
+    semantic_seq: u32 = 0,
+    semantic_caps: lsp.semantic.Caps = .{},
 
     fn deinit(self: *Client, allocator: std.mem.Allocator) void {
         if (self.proc) |*p| {
@@ -107,6 +111,7 @@ pub const Client = struct {
             lsp_process.reapBlocking(p);
             p.deinit(allocator);
         }
+        self.semantic_caps.deinit(allocator);
         for (self.docs.items) |d| allocator.free(d.uri);
         self.docs.deinit(allocator);
         self.inbuf.deinit(allocator);
@@ -150,6 +155,8 @@ pub const State = struct {
     sent_code_actions: u64 = 0,
     received_code_actions: u64 = 0,
     sent_code_action_resolves: u64 = 0,
+    sent_semantic: u64 = 0,
+    received_semantic: u64 = 0,
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
         for (self.clients.items) |*c| c.deinit(allocator);
@@ -496,6 +503,8 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
                 c.rename_supported = lsp.rpc.renameSupported(r.result); // §8.2f
                 c.completion_triggers = lsp.rpc.completionTriggersFromResult(r.result); // §8.2g
                 c.code_action_caps = lsp.rpc.codeActionCapsFromResult(r.result); // §8.2h
+                c.semantic_caps.deinit(self.allocator); // 재시작이면 옛 표를 놓는다
+                c.semantic_caps = lsp.semantic.capsFromResult(self.allocator, r.result) catch .{}; // §8.2i
                 c.phase = .ready;
                 c.restarts = 0;
                 const msg = lsp.rpc.initializedNotification(self.allocator) catch return;
@@ -521,6 +530,11 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
             },
             // error 응답은 result 가 없다(JSON-RPC) — `is_error` 가드는 둘을 함께 실은 서버에 대한 방어(적대적 3회차 C2: 등가).
             .completion_resolve => |seq| editor_completion.onResolveResponse(self, seq, if (r.is_error) null else r.result, c.encoding),
+            .semantic_tokens => |seq| {
+                self.editor_lsp.received_semantic += 1;
+                // 어느 문서의 것인지는 seq 로 — 문서마다 대기 seq 하나(§8.2i).
+                if (termWaitingSemantic(self, c, seq)) |t| editor_semantic.onResponse(self, t, seq, r.result, r.is_error, c.encoding);
+            },
             .rename => |seq| {
                 self.editor_lsp.received_renames += 1;
                 editor_rename.onResponse(self, seq, if (r.is_error) null else r.result, r.is_error, r.error_message, c.encoding);
@@ -929,6 +943,37 @@ pub fn requestCodeAction(self: *AppSession, term: *Term, start: usize, end: usiz
     if (!send(self, c, msg)) return null;
     self.editor_lsp.sent_code_actions += 1;
     return c.code_action_seq;
+}
+
+/// `semanticTokens/range`(보이는 원본 줄 `[lo, hi]`) 또는 `full`(§8.2i). 보내기 전 `flushDocument`. 서버가 없거나 provider 가 없으면 `null`.
+pub fn requestSemanticTokens(self: *AppSession, term: *Term, full: bool, lo: usize, hi: usize) ?u32 {
+    const c = readyClientFor(self, term) orelse return null;
+    if (!c.semantic_caps.supported) return null;
+    flushDocument(self, c, term);
+    const d = c.findDoc(term.surfaceId()) orelse return null;
+    c.semantic_seq = lsp.rpc.nextSeq(c.semantic_seq);
+    const msg = if (full)
+        lsp.rpc.semanticTokensFullRequest(self.allocator, c.semantic_seq, d.uri) catch return null
+    else
+        lsp.rpc.semanticTokensRangeRequest(self.allocator, c.semantic_seq, d.uri, .{ .start = .{ .line = @intCast(lo), .character = 0 }, .end = .{ .line = @intCast(hi + 1), .character = 0 } }) catch return null;
+    defer self.allocator.free(msg);
+    if (!send(self, c, msg)) return null;
+    self.editor_lsp.sent_semantic += 1;
+    return c.semantic_seq;
+}
+
+/// 이 클라이언트의 문서 중 `seq` 를 기다리는 편집기 Term.
+fn termWaitingSemantic(self: *AppSession, c: *Client, seq: u32) ?*Term {
+    for (c.docs.items) |d| {
+        const loc = term_ops.findTermWhere(self, d.surface_id, struct {
+            fn pred(want: u64, t: *Term) bool {
+                return t.kind == .editor and t.surface.id == want;
+            }
+        }.pred) orelse continue;
+        const t = loc.pane.terms.items[loc.term_index];
+        if (t.rt.editor_semantic.waiting and t.rt.editor_semantic.waiting_seq == seq) return t;
+    }
+    return null;
 }
 
 /// `codeAction/resolve`(§8.2h) — 고른 항목의 JSON 그대로. 보냈으면 seq.

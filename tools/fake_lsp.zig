@@ -392,6 +392,76 @@ fn handleCompletion(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: s
     sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .result = std.json.Value{ .object = root } });
 }
 
+/// `textDocument/semanticTokens/range`·`full`(§8.2i): 요청 범위(full 이면 전부) 안의 식별자를 **이름 꼬리로** 분류해 relative 5-tuple 로 낸다 —
+/// `*_fn` → function(1) · `*_ty` → type(3) · `*_kw` → keyword(0) · `*_bogus` → bogusKind(4, 클라이언트가 모르는 종류) · 나머지 → variable(2).
+/// 문서에 `SEMSTALL` 이면 답하지 않고, `SEMERR` 면 `-32801 content modified` 오류.
+fn handleSemanticTokens(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: std.json.Value, full: bool) void {
+    var req_uri: []const u8 = "";
+    var lo: i64 = 0;
+    var hi: i64 = std.math.maxInt(i32);
+    if (obj.get("params")) |p| if (p == .object) {
+        if (p.object.get("textDocument")) |td| if (td == .object) {
+            req_uri = str(td.object.get("uri")) orelse "";
+        };
+        if (!full) if (p.object.get("range")) |r| if (r == .object) {
+            if (r.object.get("start")) |st| if (st == .object) {
+                lo = int(st.object.get("line")) orelse 0;
+            };
+            if (r.object.get("end")) |en| if (en == .object) {
+                hi = int(en.object.get("line")) orelse hi;
+            };
+        };
+    };
+    const text = docText(req_uri);
+    if (std.mem.indexOf(u8, text, "SEMSTALL") != null) return;
+    if (std.mem.indexOf(u8, text, "SEMERR") != null) {
+        sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .@"error" = .{ .code = @as(i32, -32801), .message = "content modified" } });
+        return;
+    }
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var data: std.json.Array = .init(arena);
+    var line: i64 = 0;
+    var col: i64 = 0; // 줄 안 byte 열(fake 는 utf-8 이 기본)
+    var prev_line: i64 = 0;
+    var prev_col: i64 = 0;
+    var i: usize = 0;
+    while (i < text.len) {
+        const b = text[i];
+        if (b == '\n') {
+            line += 1;
+            col = 0;
+            i += 1;
+            continue;
+        }
+        if (!isIdent(b)) {
+            i += 1;
+            col += 1;
+            continue;
+        }
+        var j = i;
+        while (j < text.len and isIdent(text[j])) j += 1;
+        const word = text[i..j];
+        const wlen: i64 = @intCast(j - i);
+        if (!std.ascii.isDigit(word[0]) and line >= lo and line < hi) {
+            const ty: i64 = if (std.mem.endsWith(u8, word, "_fn")) 1 else if (std.mem.endsWith(u8, word, "_ty")) 3 else if (std.mem.endsWith(u8, word, "_kw")) 0 else if (std.mem.endsWith(u8, word, "_bogus")) 4 else 2;
+            const dl = line - prev_line;
+            const dc = if (dl == 0) col - prev_col else col;
+            data.append(.{ .integer = dl }) catch return;
+            data.append(.{ .integer = dc }) catch return;
+            data.append(.{ .integer = wlen }) catch return;
+            data.append(.{ .integer = ty }) catch return;
+            data.append(.{ .integer = 0 }) catch return;
+            prev_line = line;
+            prev_col = col;
+        }
+        col += wlen;
+        i = j;
+    }
+    sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .result = .{ .data = std.json.Value{ .array = data }, .resultId = "1" } });
+}
+
 /// `textDocument/codeAction`(§8.2h 관측점) — `context.diagnostics` 마다 「fake: fix <code>」(그 range 를 `FIXED` 로 바꾸는 `edit`, 첫 것은
 /// `isPreferred`), 늘 「fake: lazy」(`edit` 없이 `data` 만 — resolve 로 온다)와 「fake: command」(`command` 만 — 숨겨져야 한다), `Command` 형
 /// 하나. 본문에 `NOACT` 면 `[]`. `RESOLVEFAIL` 이면 resolve 가 오류 응답. 진단 없이 오면 fix 는 없다(문맥 관측점).
@@ -632,6 +702,13 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
                     .renameProvider = std.c.getenv("MARU_FAKE_LSP_NORENAMECAP") == null, // `MARU_FAKE_LSP_NORENAMECAP=1` 이면 false
                     .completionProvider = if (std.c.getenv("MARU_FAKE_LSP_NOCOMPCAP") == null) .{ .triggerCharacters = [_][]const u8{"."}, .resolveProvider = true } else null,
                     .codeActionProvider = if (std.c.getenv("MARU_FAKE_LSP_NOACTCAP") == null) .{ .codeActionKinds = [_][]const u8{"quickfix"}, .resolveProvider = true } else null,
+                    // semantic tokens(§8.2i) — legend 다섯(하나는 클라이언트가 모르는 이름·`variable` 은 무색). `MARU_FAKE_LSP_SEMFULL=1` 이면 range 없이
+                    // full 만(clangd 꼴), `MARU_FAKE_LSP_NOSEMCAP=1` 이면 provider 없음.
+                    .semanticTokensProvider = if (std.c.getenv("MARU_FAKE_LSP_NOSEMCAP") == null) .{
+                        .legend = .{ .tokenTypes = [_][]const u8{ "keyword", "function", "variable", "type", "bogusKind" }, .tokenModifiers = [_][]const u8{"declaration"} },
+                        .range = std.c.getenv("MARU_FAKE_LSP_SEMFULL") == null,
+                        .full = true,
+                    } else null,
                 },
             },
         });
@@ -769,6 +846,10 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
     }
     if (std.mem.eql(u8, method, "codeAction/resolve")) {
         handleCodeActionResolve(allocator, obj, id.?);
+        return;
+    }
+    if (std.mem.eql(u8, method, "textDocument/semanticTokens/range") or std.mem.eql(u8, method, "textDocument/semanticTokens/full")) {
+        handleSemanticTokens(allocator, obj, id.?, std.mem.eql(u8, method, "textDocument/semanticTokens/full"));
         return;
     }
     if (std.mem.eql(u8, method, "textDocument/hover")) {

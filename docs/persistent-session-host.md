@@ -7837,6 +7837,47 @@ admission 에만 달려 있어 어느 자리에서 불렀든 뜻이 같다(이 �
 `deferGlobalPressure`/`deferResyncAttempt` 라는 **백오프 뒤 재시도 기계가 이미 있다** — `PartialFrame`
 만 그 개념을 안 쓴다. 다음 재현에서 어느 갈래인지 읽히면, 그 갈래에 맞는 지연을 넣는다.
 
+### 12.5 `PartialFrame` 의 생산자 — resize 발행이 끝 표식을 안 달았다 (2026-09-20)
+
+§12.3·§12.4 가 이름을 붙여 **어디서** 닫는지 갈랐다면, 이번엔 **왜 그 오류가 났는지**다.
+
+**`err=PartialFrame` 은 「소켓에 절반 쓰인 청크가 있어 지금 못 버린다」가 아니다.** 정확히는
+`beginPressureInvalidation` 이 머리부터 그 트래커의 청크를 훑었는데 **배치 끝 표식
+(`screen_batch_end`) 을 못 찾았다**는 뜻이다. 못 찾으면 호출자가 연결을 통째로 닫는다 — 한 화면
+때문에 그 소켓의 화면 전부(최대 256)가 detach 된다.
+
+그러니 화면 청크를 큐에 넣는 쪽은 **반드시** 표식을 달아야 한다. 제품 경로 다섯 중 넷은 단다:
+
+| 자리 | 표식 |
+| --- | --- |
+| `enqueueScreen` (단일 청크) | `true` |
+| `enqueueOwnedScreenBatch` | 마지막 청크만 |
+| resync 배치 둘 | 마지막 청크만 |
+| **`commitPreparedControlAndScreenBatch`** | **안 달았다** |
+
+다섯째가 `appendOwnedBatchChunk` 로 청크 배열에 **직접** 붙이는데 `screen_batch_end` 를 건드리지
+않아 기본값 `false` 로 남았다. 거기 들어가는 것은 `encodeFrame` 이 만든 **완결 프레임 한 장**이라
+`enqueueScreen` 과 같은 모양인데 표식만 빠졌다.
+
+**그 경로는 resize 발행이다**(`poll_owner` 의 resize 처리 → `commitPreparedControlAndScreenBatch`).
+즉 **창 크기를 바꿀 때마다** 끝 없는 화면 청크가 큐에 들어갔고, 그게 쓰기 도중에 압력 회수를
+만나면 연결이 죽었다.
+
+**재현.** 라이브로는 끝내 못 만들었다(브라우저가 Maru 네이티브 웹 패널로 열려 화면 스트림을 안
+타는 등 조건 세우기가 번번이 막혔다). 대신 유닛 픽스처가 **결정적으로** 재현한다 — 혼합 배치를
+커밋하고, control 을 다 쓰고 화면 청크를 1 B 만 쓴 뒤 압력 회수를 부르면 `PartialFrame` 이 난다.
+고치면 `.drain_current_batch` 로 **살아서** 회수된다.
+
+**어떻게 놓쳤나 — 이 축이 생긴 이유.** 처음에는 「제품 경로가 전부 표식을 다니 `PartialFrame` 은
+도달 불가」라고 결론냈다. `enqueue(.screen` · `enqueueOwned(.screen` 으로 **함수 이름을 세어서**다.
+다섯째는 그 둘을 안 거친다. `chunk_len += 1` 로 **붙이는 행위**를 다시 세고서야 나왔다. 그래서
+새 축(`tests/screen_batch_end_boundary.zig`)은 이름이 아니라 행위를 세고, 헬퍼가 표식을
+**인자로 받게** 해 호출자가 고르지 않을 수 없게 한다.
+
+**아직 안 고친 것.** `PartialFrame` 이 났을 때 **연결을 닫는** 반응은 그대로다. 이 수정으로 그
+오류 자체가 거의 안 날 것이므로, 반응을 바꿀지는 다음 재현이 판단 근거를 줄 때 정한다 —
+빈도를 모르는 채 바꾸면 검증할 수 없다(§12.4 의 결론과 같다).
+
 ### P0 — 문서 결정
 
 - 이 문서, workspace restore, session-host upgrade, configuration, verification matrix를 정합화한다.

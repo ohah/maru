@@ -6835,6 +6835,26 @@ pub fn build(b: *std.Build) void {
     sweep_blocker_step.dependOn(&run_sweep_blocker.step);
     boundary_step.dependOn(&run_sweep_blocker.step);
 
+    // 화면 청크를 붙이는 자리가 «배치 끝» 을 스스로 정하는가. 표식이 빠지면 압력 회수가
+    // `PartialFrame` 으로 연결을 통째로 닫는다(2026-09-20 실측: resize 발행 경로가 그랬다).
+    const batch_end_step = b.step(
+        "test-screen-batch-end",
+        "Every screen chunk append decides its own batch-end marker",
+    );
+    const batch_end_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/screen_batch_end_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_batch_end = b.addRunArtifact(batch_end_tests);
+    run_batch_end.addArg("--maru-expect-tests=1");
+    run_batch_end.addArg("--maru-expect-passed=1");
+    run_batch_end.setCwd(b.path("."));
+    batch_end_step.dependOn(&run_batch_end.step);
+    boundary_step.dependOn(&run_batch_end.step);
+
     // 연결을 «어느 줄이» 닫았는가. 사유는 29·18 곳이 공유하고, 주소 풀이는 2026-09-13 에 어긋나 막혔다.
     const close_site_step = b.step(
         "test-close-site-name",

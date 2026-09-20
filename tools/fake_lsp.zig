@@ -359,6 +359,7 @@ fn handleCompletion(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: s
         var it: std.json.ObjectMap = .empty;
         it.put(arena, "label", .{ .string = "arrow_fix" }) catch return;
         it.put(arena, "sortText", .{ .string = "0000" }) catch return;
+        it.put(arena, "documentation", .{ .string = "arrow doc" }) catch return; // detail 없는 문서(§8.2g-d 패널의 「빈 줄은 detail 이 있을 때만」 관측점)
         var te: std.json.ObjectMap = .empty;
         var range: std.json.ObjectMap = .empty;
         var s: std.json.ObjectMap = .empty;

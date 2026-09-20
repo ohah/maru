@@ -91,7 +91,6 @@ pub const State = struct {
     docs_item: ?usize = null,
     /// 강조가 이 항목으로 온 시각(ms) — 미해결이면 250 ms 뒤에야 로딩 줄을 세운다.
     docs_since_ms: u64 = 0,
-    docs_loading: bool = false,
     /// 줄이 그 항목의 최종본이다(풀린 뒤 세움). resolve 응답에서 내릴 필요는 없다 — 풀리기 전엔 참이 될 수 없다(적대적 2회차 B11: 그 줄은 등가라 뺐다).
     docs_ready: bool = false,
     docs_built: u64 = 0,
@@ -129,7 +128,6 @@ pub const State = struct {
         for (self.docs_lines.items) |l| allocator.free(l.text);
         self.docs_lines.clearRetainingCapacity();
         self.docs_item = null;
-        self.docs_loading = false;
         self.docs_ready = false;
     }
 
@@ -185,8 +183,8 @@ pub fn triggerManual(self: *AppSession) bool {
     if (st.active and self.chrome_host.suggest_box.open and st.order.items.len > 0) {
         self.chrome_host.suggest_docs.toggle();
         st.docs_toggles += 1;
-        st.docs_item = null; // 다음 프레임이 다시 만든다(접었으면 비운다)
-        self.metal_dirty = true;
+        // `docs_item` 은 안 건드린다 — 접히면 `refreshDocs` 가 비우고, 펼칠 땐 이미 비어 있다(적대적 6회차 D7: 비우는 줄은 등가).
+        self.metal_dirty = true; // 키 경로가 어차피 다시 그린다 — 뜻을 위해(적대적 7회차 E9: 등가)
         return true;
     }
     const triggers = editor_lsp.completionTriggersFor(self, term);
@@ -398,7 +396,7 @@ pub fn onResolveResponse(self: *AppSession, seq: u32, result: ?std.json.Value, e
                 item.insert = ni;
             } else |_| {}
         }
-        if (view.documentation) |d| if (!std.mem.eql(u8, d, item.documentation)) {
+        if (view.documentation) |d| if (!std.mem.eql(u8, d, item.documentation)) { // 같으면 안 바꾼다 — 바꿔도 누수는 아니다(적대적 7회차 E5: 등가)
             if (self.allocator.dupe(u8, d)) |nd| {
                 if (item.documentation.len > 0) self.allocator.free(item.documentation);
                 item.documentation = nd;
@@ -552,7 +550,6 @@ fn refreshDocs(self: *AppSession) void {
     if (!item.resolved) {
         if (st.docs_lines.items.len == 0 and self.awakeMs() -| st.docs_since_ms >= docs_loading_ms) {
             pushDocLine(self, "…") catch return;
-            st.docs_loading = true;
             self.metal_dirty = true;
         }
         return;
@@ -561,8 +558,7 @@ fn refreshDocs(self: *AppSession) void {
     // 풀렸다 — 로딩 줄이든 빈 것이든 진짜 줄로.
     for (st.docs_lines.items) |l| self.allocator.free(l.text);
     st.docs_lines.clearRetainingCapacity();
-    st.docs_loading = false;
-    st.docs_ready = true;
+    st.docs_ready = true; // 로딩 줄이었는지는 안 따진다 — 어느 쪽이든 최종본으로 갈아 끼운다(적대적 5회차 계획: `docs_loading` 은 읽는 곳이 없어 뺐다)
     st.docs_built += 1;
     if (item.detail.len > 0) pushDocLine(self, item.detail) catch return;
     if (item.documentation.len > 0) {
@@ -589,7 +585,7 @@ pub fn docsLines(self: *AppSession) []const suggest_docs.Line {
 /// 휠 — 문서 패널 안이면 행 단위로 굴리고 삼킨다(true). 밖이면 흘린다(목록은 닫지 않는다 — 휠은 읽는 동작이다).
 pub fn wheel(self: *AppSession, x_px: f64, y_px: f64, delta_y: f64) bool {
     const st = &self.editor_completion;
-    if (!st.active or !self.chrome_host.suggest_box.open or st.docs_lines.items.len == 0) return false;
+    if (!st.active or !self.chrome_host.suggest_box.open or st.docs_lines.items.len == 0) return false; // 닫히면 줄도 비어 앞 둘은 방어(적대적 7회차 E7: 등가)
     if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return false;
     const p = self.buildChromeProps();
     const beside = suggest_box.boxRect(&self.chrome_host.suggest_box, st.rows.items, p) orelse return false;

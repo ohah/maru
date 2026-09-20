@@ -13687,6 +13687,15 @@ test "CMP6 자동완성 ①-d — 문서 패널: ⌃Space 가 목록이 열려 �
     term.rt.editor_selection = .{ .anchor_start = line2, .anchor_end = line2, .focus = line2 };
     try testing.expect(insertText(s, term, "laz"));
     try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
+    // 응답은 왔지만 상자가 아직 안 섰다 — 이때의 `⌃Space` 는 토글이 아니라 다시 묻기(적대적 6회차 D2: 「보이지 않는 목록」은 토글 대상도 아니다).
+    {
+        const sent = s.editor_lsp.sent_completions;
+        try pressKey(&fx, .{ .char = ' ' }, .{ .control = true });
+        try testing.expect(!s.chrome_host.suggest_docs.expanded);
+        try testing.expectEqual(@as(u64, 0), s.editor_completion.docs_toggles);
+        try testing.expectEqual(sent + 1, s.editor_lsp.sent_completions);
+        try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
+    }
     try frame(s, leaf, term);
     try testing.expect(s.editor_completion.active and !s.chrome_host.suggest_docs.expanded);
     try testing.expectEqual(@as(usize, 0), completion_client.docsLines(s).len);
@@ -13737,6 +13746,7 @@ test "CMP6 자동완성 ①-d — 문서 패널: ⌃Space 가 목록이 열려 �
     const dl = completion_client.docsLines(s);
     try testing.expect(dl.len >= 15);
     try testing.expectEqualStrings("resolved", dl[0].text);
+    try testing.expectEqual(maru.chrome.tokens.ColorRole.surface_fg, dl[0].role); // 읽는 글 — 본문 색(적대적 6회차 D8)
     try testing.expectEqualStrings("", dl[1].text);
     try testing.expectEqualStrings("Lazy import.", dl[2].text);
     try testing.expectEqualStrings("#include \"lazy.h\"", dl[4].text);
@@ -13751,6 +13761,8 @@ test "CMP6 자동완성 ①-d — 문서 패널: ⌃Space 가 목록이 열려 �
     const inside_y: f64 = @floatFromInt(panel.y + 4);
     // **제품 진입점**으로 굴린다(`scrollWheel` — 적대적 3회차 B18: 클라이언트를 직접 부르면 배선을 빼도 초록).
     s.scrollWheel(-3, 0, false, inside_x, inside_y); // 아래로
+    try testing.expectEqual(@as(u32, 1), s.chrome_host.suggest_docs.scroll_rows);
+    s.scrollWheel(0, 0, false, inside_x, inside_y); // 델타 0 은 무동작(적대적 6회차 D4)
     try testing.expectEqual(@as(u32, 1), s.chrome_host.suggest_docs.scroll_rows);
     try testing.expect(!completion_client.wheel(s, @floatFromInt(beside.x + 2), @floatFromInt(beside.y + 2), -3)); // 목록 상자 위는 흘린다
     try testing.expect(s.editor_completion.active); // 흘려도 닫지 않는다
@@ -13780,9 +13792,32 @@ test "CMP6 자동완성 ①-d — 문서 패널: ⌃Space 가 목록이 열려 �
     try testing.expectEqual(@as(usize, 3), fl.len);
     try testing.expectEqualStrings("adds include", fl[0].text);
     try testing.expectEqualStrings("adds an include", fl[2].text);
-    // ⑷ 미해결 항목은 250 ms 뒤에야 `…` — 서버가 답하지 않는 `RESOLVESTALL`.
+    // ⑶b detail 없이 문서만 있는 항목(`.` 뒤 `arrow_fix`)은 빈 줄 없이 문서부터(적대적 6회차 D9).
     try pressKey(&fx, .escape, .{});
     try clearRange(s, term, line2, 1);
+    term.rt.editor_selection = .{ .anchor_start = line2, .anchor_end = line2, .focus = line2 };
+    try testing.expect(insertText(s, term, "x."));
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, settled));
+    try frame(s, leaf, term);
+    {
+        var guard: usize = 0;
+        while (!std.mem.eql(u8, hl(s), "arrow_fix")) : (guard += 1) {
+            if (guard > 20) return error.NoArrowFix;
+            try pressKey(&fx, .arrow_down, .{});
+        }
+    }
+    try frame(s, leaf, term);
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
+        fn f(c: Ctx) bool {
+            return !c.fx.session.editor_completion.resolve_waiting;
+        }
+    }.f));
+    try frame(s, leaf, term);
+    try testing.expectEqual(@as(usize, 1), completion_client.docsLines(s).len);
+    try testing.expectEqualStrings("arrow doc", completion_client.docsLines(s)[0].text);
+    // ⑷ 미해결 항목은 250 ms 뒤에야 `…` — 서버가 답하지 않는 `RESOLVESTALL`.
+    try pressKey(&fx, .escape, .{});
+    try clearRange(s, term, line2, 2);
     {
         const e = term.rt.editor_doc.?.file.content.len;
         term.rt.editor_selection = .{ .anchor_start = e, .anchor_end = e, .focus = e };
@@ -13809,6 +13844,9 @@ test "CMP6 자동완성 ①-d — 문서 패널: ⌃Space 가 목록이 열려 �
     }
     try testing.expectEqual(@as(usize, 1), completion_client.docsLines(s).len);
     try testing.expectEqualStrings("…", completion_client.docsLines(s)[0].text);
+    try frame(s, leaf, term);
+    try frame(s, leaf, term);
+    try testing.expectEqual(@as(usize, 1), completion_client.docsLines(s).len); // 로딩 줄은 하나뿐(적대적 6회차 D1)
     // ⑸ ⌃Space 다시 — 접히고 줄이 비며, 목록은 그대로.
     try pressKey(&fx, .{ .char = ' ' }, .{ .control = true });
     try testing.expect(!s.chrome_host.suggest_docs.expanded);

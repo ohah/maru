@@ -630,3 +630,34 @@ test "host: 단축키 힌트 — visible면 collectKeyHintsDraws 1개(modal laye
     try host.collectKeyHintsDraws(&badges, p, &tk, arena, &out);
     try std.testing.expectEqual(@as(usize, 0), out.items.len);
 }
+
+test "host: 자동완성 목록 + 문서 패널 — 한 레이어에 목록 행이 먼저, 패널 quad 는 그 뒤에 목록 상자 오른쪽·위 맞춤 (§8.2g-d)" {
+    const Rgb = @import("../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    const p = props.ChromeProps{ .metrics = .{ .cell_width_px = 10, .cell_height_px = 20, .sidebar_width_px = 0, .backing_width_px = 1200, .backing_height_px = 800 } };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var host = ChromeHost{};
+    defer host.deinit(std.testing.allocator);
+    const rows = [_]suggest_box.Row{ .{ .label = "lazy_import", .detail = "resolved" }, .{ .label = "laz" } };
+    const docs = [_]suggest_docs.Line{ .{ .text = "resolved" }, .{ .text = "" }, .{ .text = "Lazy import." } };
+    var out: std.ArrayList(draw.ChromeDraw) = .empty;
+    try host.collectSuggestBoxDraws(&rows, &docs, p, &tk, arena, &out);
+    try std.testing.expectEqual(@as(usize, 0), out.items.len); // 목록이 닫혀 있으면 패널도 없다
+    host.suggest_box.show(300, 200, 20);
+    host.suggest_box.reset(0, rows.len);
+    try host.collectSuggestBoxDraws(&rows, &docs, p, &tk, arena, &out);
+    try std.testing.expectEqual(@as(usize, 1), out.items.len);
+    const ops = out.items[0].ops;
+    try std.testing.expectEqual(@as(usize, 2 * 2), ops.len); // 행 둘(fill + text) — 접힌 패널은 없다
+    host.suggest_docs.toggle();
+    out.clearRetainingCapacity();
+    try host.collectSuggestBoxDraws(&rows, &docs, p, &tk, arena, &out);
+    const ops2 = out.items[0].ops;
+    try std.testing.expectEqual(@as(usize, 2 * 2 + 1 + 2), ops2.len); // + 패널 quad + 텍스트 둘(빈 줄 제외)
+    try std.testing.expect(ops2[0] == .fill and ops2[4] == .quad); // 목록이 먼저, 패널이 뒤(적대적 7회차 E2)
+    const list = suggest_box.boxRect(&host.suggest_box, &rows, p).?;
+    try std.testing.expectEqual(list.y, ops2[4].quad.rect.y); // 위 맞춤(적대적 7회차 E10)
+    try std.testing.expectEqual(list.x + @as(i32, @intCast(list.w)) + 10, ops2[4].quad.rect.x); // 오른쪽 한 칸
+}

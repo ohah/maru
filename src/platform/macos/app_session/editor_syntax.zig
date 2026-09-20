@@ -292,6 +292,19 @@ fn pointOf(idx: maru.session.editor.line_index.LineIndex, offset: usize) syntax.
 ///
 /// **한 곳에 둔 이유**: 같은 되풀기를 `storeHitRows`(클릭 히트테스트)도 한다. 두 벌로 두면 하나만
 /// 고쳐질 때 "클릭은 맞는데 색은 틀린" 반쪽 상태가 된다 — 이 결함이 실제로 그 형태였다.
+/// **번호 없는 줄(`null`)이 무슨 뜻인가** — 축을 주는 쪽이 정한다.
+///
+/// 두 소비자가 같은 표(`visible_numbers`)를 쓰는데 `null` 의 뜻이 **정반대**다. 접힘에서 번호가
+/// 없는 줄은 「위 줄에 접혀 있다」라 위 줄의 색을 물려받아야 하고, 비교 뷰에서 번호가 없는 줄은
+/// 정렬로 끼운 **빈 줄**이라 **아무 색도 없어야** 한다. 접힘 규칙을 비교 뷰에 그대로 쓰면 위 줄의
+/// 색이 빈 줄에 얹힌다(diff 하이라이트를 붙이며 회귀 테스트가 잡았다 — 2026-09-20).
+pub const NullAxis = enum {
+    /// 접힘 — 번호 없는 줄은 **위 줄에 속한다**.
+    inherit,
+    /// 비교 뷰 정렬 — 번호 없는 줄은 **빈 줄**이다.
+    empty,
+};
+
 pub fn sourceLineFor(visible_numbers: []const ?u32, visible_idx: usize) ?usize {
     if (visible_numbers.len == 0) return visible_idx; // 접힘 없음 — 두 축이 같다
     if (visible_idx >= visible_numbers.len) return null; // 범위 밖 — 호출자가 거른다
@@ -317,8 +330,10 @@ pub fn lineColors(
     tab_width: u16,
     /// 접힘 번호 표(보이는 줄 → 1-based 원본 줄). **비어 있으면 두 축이 같다.**
     visible_numbers: []const ?u32,
+    /// 그 표의 `null` 이 무슨 뜻인가(`NullAxis`).
+    null_axis: NullAxis,
 ) []const []const content.ColorSpan {
-    return lineColorsInto(self, &self.bufs, allocator, doc_content, line_idx, first_line, line_count, tab_width, visible_numbers, &.{});
+    return lineColorsInto(self, &self.bufs, allocator, doc_content, line_idx, first_line, line_count, tab_width, visible_numbers, null_axis, &.{});
 }
 
 /// `lineColors` + **2층 스팬**(semantic tokens, §8.2i — 문서 순서, byte, 우리 색 역할). 1층 스팬 뒤에 문서 순서로 섞여 「마지막이 이긴다」로
@@ -332,9 +347,10 @@ pub fn lineColorsWith(
     line_count: usize,
     tab_width: u16,
     visible_numbers: []const ?u32,
+    null_axis: NullAxis,
     extra: []const maru.session.editor.lsp.semantic.Span,
 ) []const []const content.ColorSpan {
-    return lineColorsInto(self, &self.bufs, allocator, doc_content, line_idx, first_line, line_count, tab_width, visible_numbers, extra);
+    return lineColorsInto(self, &self.bufs, allocator, doc_content, line_idx, first_line, line_count, tab_width, visible_numbers, null_axis, extra);
 }
 
 /// **미니맵 창**의 색(§6.1) — 본문과 같은 규칙, 다른 저장소. 반환 슬라이스는 `first_line` 기준 상대 첨자다.
@@ -347,8 +363,30 @@ pub fn minimapColors(
     line_count: usize,
     tab_width: u16,
     visible_numbers: []const ?u32,
+    null_axis: NullAxis,
 ) []const []const content.ColorSpan {
-    return lineColorsInto(self, &self.minimap_bufs, allocator, doc_content, line_idx, first_line, line_count, tab_width, visible_numbers, &.{}); // 미니맵은 1층만(§6 — 전 문서)
+    return lineColorsInto(self, &self.minimap_bufs, allocator, doc_content, line_idx, first_line, line_count, tab_width, visible_numbers, null_axis, &.{}); // 미니맵은 1층만(§6 — 전 문서)
+}
+
+/// `.empty` 축에서 구간의 **첫 내용 줄**(문서 축, 0-based). 전부 빈 줄이면 null.
+fn firstContentLine(visible_numbers: []const ?u32, first_line: usize, last_line: usize) ?usize {
+    if (visible_numbers.len == 0) return first_line;
+    var i = first_line;
+    while (i < last_line and i < visible_numbers.len) : (i += 1) {
+        if (visible_numbers[i]) |n| return n - 1;
+    }
+    return null;
+}
+
+/// `.empty` 축에서 구간의 **마지막 내용 줄**(문서 축, 0-based). 전부 빈 줄이면 null.
+fn lastContentLine(visible_numbers: []const ?u32, first_line: usize, last_line: usize) ?usize {
+    if (visible_numbers.len == 0) return last_line - 1;
+    var i = @min(last_line, visible_numbers.len);
+    while (i > first_line) {
+        i -= 1;
+        if (visible_numbers[i]) |n| return n - 1;
+    }
+    return null;
 }
 
 fn lineColorsInto(
@@ -361,6 +399,7 @@ fn lineColorsInto(
     line_count: usize,
     tab_width: u16,
     visible_numbers: []const ?u32,
+    null_axis: NullAxis,
     extra: []const maru.session.editor.lsp.semantic.Span,
 ) []const []const content.ColorSpan {
     const p = &(self.provider orelse return &.{});
@@ -373,8 +412,17 @@ fn lineColorsInto(
 
     // 파싱 범위는 **원본 줄**로 잡는다. 접힘이 있으면 보이는 첫/끝 줄이 가리키는 원본 줄이 범위이고,
     // 그 사이 접힌 줄도 함께 파싱된다 — 트리는 문서 전체를 보므로 그것이 자연스럽다.
-    const first_src = sourceLineFor(visible_numbers, first_line) orelse return &.{};
-    const last_src = sourceLineFor(visible_numbers, last_line - 1) orelse return &.{};
+    // **구간의 두 끝은 «내용이 있는» 줄이라야 한다.** `.empty` 축에서 끝이 빈 줄이면 그 줄에는
+    // 문서 위치가 없다 — 접힘 규칙처럼 위로 거슬러 올라가면 빈 줄에 색이 얹히므로, 여기서는
+    // 실제 줄을 **찾아** 구간을 잡는다(없으면 이 화면에는 칠할 것이 없다).
+    const first_src = switch (null_axis) {
+        .inherit => sourceLineFor(visible_numbers, first_line) orelse return &.{},
+        .empty => firstContentLine(visible_numbers, first_line, last_line) orelse return &.{},
+    };
+    const last_src = switch (null_axis) {
+        .inherit => sourceLineFor(visible_numbers, last_line - 1) orelse return &.{},
+        .empty => lastContentLine(visible_numbers, first_line, last_line) orelse return &.{},
+    };
     const start_line = line_idx.line(first_src) orelse return &.{};
     const end_line = line_idx.line(last_src) orelse return &.{};
     const range: syntax.Range = .{
@@ -406,7 +454,19 @@ fn lineColorsInto(
     bufs.line_bounds.ensureTotalCapacity(allocator, last_line - first_line) catch return &.{};
     var li: usize = first_line;
     while (li < last_line) : (li += 1) {
-        const src = sourceLineFor(visible_numbers, li) orelse break;
+        const src = switch (null_axis) {
+            .inherit => sourceLineFor(visible_numbers, li) orelse break,
+            .empty => blk: {
+                if (visible_numbers.len == 0) break :blk li; // 표가 없으면 두 축이 같다
+                if (li >= visible_numbers.len) break;
+                const n = visible_numbers[li] orelse {
+                    // **정렬로 끼운 빈 줄** — 내용이 없으니 색도 없다(빈 범위를 넣는다).
+                    bufs.line_bounds.appendAssumeCapacity(.{ .start = 0, .end = 0 });
+                    continue;
+                };
+                break :blk n - 1;
+            },
+        };
         const line = line_idx.line(src) orelse break;
         bufs.line_bounds.appendAssumeCapacity(.{ .start = @intCast(line.start), .end = @intCast(line.contentEnd()) });
     }
@@ -487,7 +547,7 @@ test "ES1 zig 문서를 열면 보이는 줄에 색이 붙는다 — 배선 전�
     defer st.deinit(testing.allocator);
     try testing.expect(st.provider != null);
 
-    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, 2, 4, &.{});
+    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, 2, 4, &.{}, .inherit);
     try testing.expect(colors.len >= 2);
     try testing.expect(colors[0].len > 0);
 
@@ -511,7 +571,7 @@ test "ES2 grammar 없는 언어는 무색이다 — provider 자체가 안 선�
     defer st.deinit(testing.allocator);
     try testing.expect(st.provider == null);
 
-    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, 1, 4, &.{});
+    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, 1, 4, &.{}, .inherit);
     try testing.expectEqual(@as(usize, 0), colors.len);
 }
 
@@ -523,7 +583,7 @@ test "ES3 겹치는 캡처는 마지막이 이긴다 — 한 열에 역할이 �
     var st = openParsed(doc.content, .zig);
     defer st.deinit(testing.allocator);
 
-    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, 1, 4, &.{});
+    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, 1, 4, &.{}, .inherit);
     try testing.expect(colors.len >= 1);
 
     // 구간이 겹치지 않고 오름차순이어야 한다 — `content.Row.colors`의 계약이다.
@@ -543,7 +603,7 @@ test "ES4 탭이 있는 줄에서 색 경계가 열로 선다 — byte 가 아�
     var st = openParsed(doc.content, .zig);
     defer st.deinit(testing.allocator);
 
-    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, 1, 4, &.{});
+    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, 1, 4, &.{}, .inherit);
     try testing.expect(colors.len >= 1);
 
     var saw = false;
@@ -583,7 +643,7 @@ test "ES6 겹침에서 마지막 캡처가 이긴다 — 값으로 잰다" {
     var st = openParsed(doc.content, .zig);
     defer st.deinit(testing.allocator);
 
-    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, 1, 4, &.{});
+    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, 1, 4, &.{}, .inherit);
     try testing.expect(colors.len >= 1);
 
     var found: ?tokens.ColorRole = null;
@@ -611,7 +671,7 @@ test "ES7 저장소가 자라도 앞줄 색이 안 매달린다 — 슬라이스
     var st = openParsed(doc.content, .zig);
     defer st.deinit(testing.allocator);
 
-    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, n, 4, &.{});
+    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, n, 4, &.{}, .inherit);
     try testing.expectEqual(@as(usize, n), colors.len);
 
     // **모든 줄**에 키워드가 0~5열로 서 있어야 한다. 매달린 슬라이스면 앞줄들이 쓰레기가 된다.
@@ -636,7 +696,7 @@ test "ES8 화면이 문서 중간에서 시작해도 색이 그 줄에 붙는다
     var st = openParsed(doc.content, .zig);
     defer st.deinit(testing.allocator);
 
-    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 3, 2, 4, &.{});
+    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 3, 2, 4, &.{}, .inherit);
     try testing.expect(colors.len >= 5);
 
     // 앞 세 줄은 **화면 밖**이라 비어 있어야 한다(질의 범위에 없다).
@@ -665,7 +725,7 @@ test "ES34 접히면 색이 보이는 줄 축을 따라간다 — 문서 축으�
     // 가운데 두 줄(원본 2·3)이 접혀 화면에는 원본 1·4만 남은 상태의 번호 표(1-based).
     const numbers = [_]?u32{ 1, 4 };
 
-    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, 2, 4, &numbers);
+    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, 2, 4, &numbers, .inherit);
     try testing.expect(colors.len >= 2);
 
     // 보이는 줄 0 = 원본 1(`const a = 1;`) → 0~5열이 키워드.
@@ -715,7 +775,7 @@ test "ES35 접힘 표가 비면 두 축이 같다 — 되풀기가 평소 경로
     var st = openParsed(doc.content, .zig);
     defer st.deinit(testing.allocator);
 
-    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 3, 1, 4, &.{});
+    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 3, 1, 4, &.{}, .inherit);
     try testing.expect(colors.len >= 4);
     for (colors[0..3]) |cs_line| try testing.expectEqual(@as(usize, 0), cs_line.len); // 화면 밖
     var ok = false;
@@ -744,7 +804,7 @@ test "ES9 여러 줄 토큰은 줄마다 자기 줄 안에서 끝난다" {
     defer st.deinit(testing.allocator);
 
     const n = doc.lines.lineCount();
-    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, n, 4, &.{});
+    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, n, 4, &.{}, .inherit);
 
     // **어느 줄에서도 색이 그 줄의 열 수를 안 넘는다.**
     for (colors, 0..) |cs_line, li| {
@@ -773,7 +833,7 @@ test "ES10 색이 개행을 넘지 않는다 — 줄 끝이 내용 끝이다" {
     var st = openParsed(doc.content, .zig);
     defer st.deinit(testing.allocator);
 
-    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, 2, 4, &.{});
+    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, 2, 4, &.{}, .inherit);
     try testing.expect(colors.len >= 1);
 
     // `// abc` 는 6열이다. 주석 색이 정확히 거기서 끝나야 한다.
@@ -794,7 +854,7 @@ test "ES11 앞줄 색이 다음 줄로 안 샌다 — 짧은 줄 다음에 긴 �
     var st = openParsed(doc.content, .zig);
     defer st.deinit(testing.allocator);
 
-    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, 2, 4, &.{});
+    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, 2, 4, &.{}, .inherit);
     try testing.expect(colors.len >= 2);
 
     // 첫 줄은 주석색이 4열까지다.
@@ -824,7 +884,7 @@ test "ES12 열 경계 방어가 두 겹이다 — 어느 하나를 지워도 화
     var st = openParsed(doc.content, .zig);
     defer st.deinit(testing.allocator);
 
-    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, 1, 4, &.{});
+    const colors = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, 1, 4, &.{}, .inherit);
     try testing.expect(colors.len >= 1);
     const line = doc.lines.line(0).?;
     const cols = content.lineColumnsUpTo(doc.content[line.start..line.contentEnd()], 4, @intCast(max_color_cols));
@@ -1098,7 +1158,7 @@ test "ES40 2층 병합 — semantic 스팬은 겹친 자리만 1층을 덮고, �
     const x_at: u32 = @intCast(std.mem.indexOf(u8, doc.content, "x").?);
     const f_at: u32 = @intCast(std.mem.indexOf(u8, doc.content, "f()").?);
     const extra = [_]Span{ .{ .start = x_at, .end = x_at + 1, .role = .type_name }, .{ .start = f_at, .end = f_at + 1, .role = .keyword }, .{ .start = 100, .end = 101, .role = .string } }; // 셋째는 문서 밖(창 밖)
-    const colors = lineColorsWith(&st, testing.allocator, doc.content, doc.lines, 0, 2, 4, &.{}, &extra);
+    const colors = lineColorsWith(&st, testing.allocator, doc.content, doc.lines, 0, 2, 4, &.{}, .inherit, &extra);
     try testing.expect(colors.len >= 2);
     var x_role: ?tokens.ColorRole = null;
     var const_role: ?tokens.ColorRole = null;
@@ -1123,7 +1183,7 @@ test "ES40 2층 병합 — semantic 스팬은 겹친 자리만 1층을 덮고, �
     };
     try testing.expect(void_role != null);
     // 2층이 비면 `lineColors` 와 같다 — `x` 는 1층 색(number)으로 돌아간다.
-    const plain = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, 2, 4, &.{});
+    const plain = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, 2, 4, &.{}, .inherit);
     var x_plain: ?tokens.ColorRole = null;
     for (plain[0]) |cs| if (cs.start_col == 6 and cs.end_col == 7) {
         x_plain = cs.role;

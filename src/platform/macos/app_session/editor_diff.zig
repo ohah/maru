@@ -33,6 +33,27 @@ const settings_ops = @import("settings.zig");
 pub const State = struct {
     /// 화면이 그릴 네 상태(§7).
     view: diff.View = .loading,
+
+    /// **두 쪽 각각의 구문 트리**(§7 — 「diff 는 §5 스팬을 그대로 쓰는 소비자」).
+    ///
+    /// 파서는 **문서 하나**를 잡는데 비교 뷰의 문서는 둘이다(원본·수정본) — 그래서 한 벌로는
+    /// 한쪽만 칠할 수 있다. 편집 중인 문서의 파서(`term.rt.editor_syntax`)를 빌리는 길도 없다:
+    /// 그것은 작업트리 내용이고 왼쪽은 **커밋된 쪽**이라 줄이 다르다.
+    ///
+    /// 수명은 diff 결과와 같다 — `invalidate`·`release` 가 행 배열과 **함께** 놓는다. 두 쪽 문자열은
+    /// `dock_panel.Entry` 가 소유하므로(`diff_original`/`diff_modified`) 여기서 복사하지 않는다.
+    left_syntax: editor_ops.syntax_color.State = .{},
+    right_syntax: editor_ops.syntax_color.State = .{},
+    /// 두 쪽의 줄 오프셋 표 — `lineColors` 가 요구한다. 내용과 같은 수명이라 같은 자리에서 놓는다.
+    left_index: ?maru.session.editor.line_index.LineIndex = null,
+    right_index: ?maru.session.editor.line_index.LineIndex = null,
+    /// 구문을 연 적이 있나. 두 쪽 문자열이 바뀌면(`invalidate`) 거짓으로 돌아간다.
+    syntax_opened: bool = false,
+    /// 두 쪽 원문(**빌림** — `dock_panel.Entry` 소유다. 행 배열이 같은 버퍼를 빌리는 것과 같은 규율).
+    /// 렌더가 색을 만들 때 원문이 필요한데, 그때 entry 를 다시 찾게 하면 「내용이 어디서 오나」가
+    /// 두 곳이 된다.
+    left_src: []const u8 = &.{},
+    right_src: []const u8 = &.{},
     /// 왼쪽/오른쪽 줄 배열(우리가 할당, entry 버퍼를 빌린다).
     left_lines: []const []const u8 = &.{},
     right_lines: []const []const u8 = &.{},
@@ -154,6 +175,19 @@ fn freeRowArrays(allocator: std.mem.Allocator, st: *State) void {
     if (st.right_bands.len > 0) allocator.free(st.right_bands);
     freeMarks(allocator, st.left_marks);
     freeMarks(allocator, st.right_marks);
+    // **구문 층도 행 배열과 한 수명이다**(§7). 두 쪽 문자열이 갈리면 트리도 함께 죽어야 한다 —
+    // 남겨 두면 다음 diff 가 **옛 문서의 트리**로 색을 칠한다.
+    st.left_syntax.deinit(allocator);
+    st.right_syntax.deinit(allocator);
+    st.left_syntax = .{};
+    st.right_syntax = .{};
+    if (st.left_index) |*ix| ix.deinit(); // LineIndex 는 자기 allocator 를 든다
+    if (st.right_index) |*ix| ix.deinit();
+    st.left_index = null;
+    st.right_index = null;
+    st.syntax_opened = false;
+    st.left_src = &.{}; // 빌림이라 **해제하지 않는다** — 가리키던 버퍼가 곧 갈리므로 비우기만 한다
+    st.right_src = &.{};
 }
 
 /// **entry의 두 쪽 버퍼가 갈리기 전에** 부른다. 우리 줄 배열이 그 버퍼를 빌리므로, 순서가 뒤집히면
@@ -268,6 +302,7 @@ fn computeRows(self: *AppSession, term: *Term, entry: *dock_panel.Entry, st: *St
     };
     st.left_lines = left;
     st.right_lines = right;
+    openSyntax(self, term, entry, st);
     st.view = diff.compute(self.allocator, left, right, .{}) catch {
         // 메모리가 모자란 것은 "너무 크다"가 아니다 — 이유를 지어내지 않는다(§7).
         st.view = .{ .unavailable = .unknown };
@@ -315,6 +350,72 @@ fn computeRows(self: *AppSession, term: *Term, entry: *dock_panel.Entry, st: *St
 }
 
 /// 행 배열을 **화면이 받는 모양**으로 한 번 옮겨 담는다.
+/// **두 쪽 구문 트리를 연다**(§7 — diff 도 §5 스팬을 그대로 쓴다).
+///
+/// 문법은 **경로 하나로 정한다** — 비교하는 두 쪽은 같은 파일의 다른 버전이라 언어가 같다.
+/// 판정은 `grammarForPath` 단일 출처를 그대로 쓴다(표를 여기 다시 적지 않는다).
+///
+/// **실패는 저하지 실패가 아니다**(§5). 줄 표를 못 만들면 그쪽만 무색으로 둔다 — diff 자체는
+/// 그려야 한다. 문법이 없는 언어도 같은 자리에서 조용히 무색이 된다(`provider == null`).
+///
+/// 여는 값은 문서 크기에 비례하지만 `open` 이 **프레임 예산**으로 끊어 열고 렌더가
+/// `resumeParse` 로 이어 판다 — 비교는 그 일이 두 벌이라는 것만 다르다.
+fn openSyntax(self: *AppSession, term: *Term, entry: *dock_panel.Entry, st: *State) void {
+    if (st.syntax_opened) return;
+    st.syntax_opened = true;
+    const grammar = maru.session.editor.language.grammarForPath(entry.path);
+    st.left_src = entry.diff_original;
+    st.right_src = entry.diff_modified;
+    st.left_index = maru.session.editor.line_index.build(self.allocator, entry.diff_original) catch null;
+    st.right_index = maru.session.editor.line_index.build(self.allocator, entry.diff_modified) catch null;
+    if (st.left_index != null) st.left_syntax = editor_ops.syntax_color.open(entry.diff_original, grammar);
+    if (st.right_index != null) st.right_syntax = editor_ops.syntax_color.open(entry.diff_modified, grammar);
+    _ = term;
+}
+
+/// 비교 뷰 한쪽의 구문 색(§7 → §5). **단일 편집기의 `syntaxColors` 와 같은 규율**이다 —
+/// 끊긴 파싱을 프레임 몫만큼 이어 파고(`resumeParse`), 돌려주는 배열은 **렌더가 받는 `lines` 와
+/// 같은 축**이다.
+///
+/// 그 축을 맞추는 것이 `numbers` 다. 비교 뷰는 정렬을 위해 **빈 줄을 끼우므로** 화면 줄과 문서 줄이
+/// 어긋나는데, 그 표가 「보이는 줄 → 1-based 원본 줄」이라 접힘용으로 만든 `visible_numbers` 인자가
+/// 여기에 **그대로** 맞는다(§5 가 「색은 렌더 축」이라고 못 박은 덕이다).
+pub fn sideColors(
+    self: *AppSession,
+    term: *Term,
+    comptime side: enum { left, right },
+) []const []const chrome_editor.content.ColorSpan {
+    const st: *State = if (term.rt.editor_diff) |*p| p else return &.{};
+    if (st.view != .compare) return &.{};
+    const syn = if (side == .left) &st.left_syntax else &st.right_syntax;
+    const src = if (side == .left) st.left_src else st.right_src;
+    const ix = (if (side == .left) st.left_index else st.right_index) orelse return &.{};
+    const numbers = if (side == .left) st.left_numbers else st.right_numbers;
+    if (src.len == 0) return &.{};
+    // **이어 판다 — 그리고 그 프레임을 다시 부른다.** 안 그러면 idle skip 이 도는 순간 파싱이
+    // 거기서 멈춰 색이 영영 안 온다(단일 편집기가 같은 자리에서 겪은 일이다).
+    if (editor_ops.syntax_color.resumeParse(syn, src)) self.metal_dirty = true;
+    const first = term.rt.editor_first_line;
+    // 축은 **정렬된 화면 줄**이다(빈 줄을 끼운 그것) — 문서 줄 수로 재면 화면 끝에서 넘친다.
+    const axis_len = numbers.len;
+    if (axis_len == 0 or first >= axis_len) return &.{};
+    // 화면 높이를 모르는 자리라 **넉넉히** 잡는다 — 단일 편집기(`syntaxColors`)와 같은 예산이다.
+    // 남는 줄의 색은 만들어도 안 그려질 뿐이고, 모자라면 화면 아래가 무색이 된다.
+    const budget: usize = 256;
+    return editor_ops.syntax_color.lineColors(
+        syn,
+        self.allocator,
+        src,
+        ix,
+        first,
+        @min(budget, axis_len - first),
+        term.rt.editor_tab_width,
+        numbers,
+        // **비교 뷰의 `null` 은 빈 줄이다** — 접힘의 `null`(위 줄에 속함)과 뜻이 반대다.
+        .empty,
+    );
+}
+
 fn materialize(allocator: std.mem.Allocator, st: *State) error{OutOfMemory}!void {
     const rows = st.view.compare;
     // **잡자마자 `st`에 넘기고 errdefer를 두지 않는다.** 넘긴 뒤에도 errdefer가 살아 있으면, 뒤에서
@@ -4258,4 +4359,95 @@ test "DHS6: `max_first_col` 을 넘는 줄에서는 그 상한에서 멈춘다" 
     // 그리고 더 가려 해도 그 자리다.
     try testing.expect(editor_ops.diffMove(fx.session, fx.term, .line_end, false) or true);
     try testing.expectEqual(at_end, fx.term.rt.editor_first_col_right);
+}
+
+test "DHL1 비교 뷰도 구문 색을 낸다 — §7 「§5 스팬을 그대로 쓰는 소비자」" {
+    // **계약이 먼저 있었고 구현이 반쪽이었다.** §7 이 「diff 는 별도 렌더 경로가 아니라 §5 스팬을
+    // 그대로 쓰는 소비자」라고 적어 두었는데, 단일 편집기의 `syntaxColors` 는 첫 줄에서
+    // `if (term.rt.editor_diff != null) return &.{};` 로 비교 뷰를 **명시적으로 막고** 있었고
+    // 좌우 pane 구성에는 `line_colors` 가 아예 없었다(사용자 요청 2026-09-20).
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try Fixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    // `.zig` 경로라야 문법이 붙는다 — 판정은 `grammarForPath` 단일 출처다.
+    var entry = testEntry("const a = 1;\n", "const b = 2;\n");
+    entry.path = @constCast("/tmp/t.zig");
+    fx.term.file_entry = &entry;
+    poll(fx.session, fx.term);
+
+    const st = fx.term.rt.editor_diff.?;
+    try testing.expectEqual(std.meta.activeTag(st.view), .compare);
+    // 두 쪽 **각각** 파서가 선다 — 한 벌로는 한쪽만 칠할 수 있다(문서가 둘이다).
+    try testing.expect(st.left_syntax.provider != null);
+    try testing.expect(st.right_syntax.provider != null);
+    try testing.expect(st.left_index != null and st.right_index != null);
+
+    // 파싱은 프레임 예산으로 끊어 열리므로 끝날 때까지 이어 판다(단일 편집기와 같은 규율).
+    var guard: usize = 0;
+    while (fx.term.rt.editor_diff.?.left_syntax.pending and guard < 1000) : (guard += 1) {
+        _ = sideColors(fx.session, fx.term, .left);
+    }
+    const left = sideColors(fx.session, fx.term, .left);
+    const right = sideColors(fx.session, fx.term, .right);
+    // **색이 실제로 나온다.** 빈 슬라이스면 그리는 쪽이 받을 것이 없다.
+    try testing.expect(left.len > 0);
+    try testing.expect(right.len > 0);
+    var any: bool = false;
+    for (left) |spans| if (spans.len > 0) {
+        any = true;
+    };
+    try testing.expect(any); // `const` 키워드가 칠해진다
+}
+
+test "DHL2 색의 축은 **정렬된 화면 줄**이다 — 빈 줄을 끼운 그 축" {
+    // 비교 뷰는 정렬을 위해 한쪽에 **빈 줄**을 끼운다. 색을 문서 축으로 만들면 그 줄 수만큼 밀려
+    // **엉뚱한 줄**이 칠해진다 — §5 가 접힘에서 같은 함정을 이미 겪고 「색은 렌더 축」을 못 박았고,
+    // 그 장치(`visible_numbers`)가 여기서도 그대로 쓰인다.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try Fixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    // 오른쪽에 두 줄이 **추가**돼 왼쪽에 빈 줄이 끼는 입력이다.
+    var entry = testEntry("const a = 1;\n", "const a = 1;\nconst b = 2;\nconst c = 3;\n");
+    entry.path = @constCast("/tmp/t.zig");
+    fx.term.file_entry = &entry;
+    poll(fx.session, fx.term);
+
+    const st = fx.term.rt.editor_diff.?;
+    try testing.expectEqual(std.meta.activeTag(st.view), .compare);
+    // 정렬로 두 축의 **행 수가 같아졌다** — 그 축이 색의 축이다.
+    try testing.expectEqual(st.left_texts.len, st.right_texts.len);
+    try testing.expect(st.left_texts.len > st.left_lines.len); // 왼쪽에 빈 줄이 꼈다
+
+    var guard: usize = 0;
+    while (fx.term.rt.editor_diff.?.right_syntax.pending and guard < 1000) : (guard += 1) {
+        _ = sideColors(fx.session, fx.term, .right);
+    }
+    const right = sideColors(fx.session, fx.term, .right);
+    // **정렬 축만큼** 나온다(문서 줄 수가 아니라) — 넘치면 화면 끝에서 남의 줄을 칠한다.
+    try testing.expect(right.len > 0); // 0 이면 「축이 맞다」가 아니라 「색이 없다」다
+    try testing.expect(right.len <= st.right_texts.len);
+
+    // **축이 맞다는 진짜 증거**: 왼쪽에 낀 **빈 줄(spacer)** 자리에는 색이 없고, 내용이 있는
+    // 줄에는 있다. 문서 축으로 만들면 spacer 만큼 밀려 **빈 줄에 색이 얹힌다**.
+    var guard2: usize = 0;
+    while (fx.term.rt.editor_diff.?.left_syntax.pending and guard2 < 1000) : (guard2 += 1) {
+        _ = sideColors(fx.session, fx.term, .left);
+    }
+    const left = sideColors(fx.session, fx.term, .left);
+    try testing.expect(left.len > 0);
+    var spacer_seen = false;
+    var content_colored = false;
+    for (left, 0..) |spans, i| {
+        if (i >= st.left_numbers.len) break;
+        if (st.left_numbers[i] == null) {
+            spacer_seen = true;
+            try testing.expectEqual(@as(usize, 0), spans.len); // 빈 줄에는 색이 없다
+        } else if (spans.len > 0) content_colored = true;
+    }
+    try testing.expect(spacer_seen); // 이 입력은 spacer 가 있어야 한다(없으면 축을 못 잰 것이다)
+    try testing.expect(content_colored);
 }

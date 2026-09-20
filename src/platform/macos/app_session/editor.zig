@@ -619,6 +619,7 @@ fn syntaxColors(self: *AppSession, term: *Term) []const []const chrome_editor.co
         // **접힘 표를 함께 넘긴다** — 렌더가 받는 `lines` 가 접히면 보이는 줄 축이 되므로 색도
         // 같은 축이어야 한다(그 함수의 doc). 안 넘기면 접는 순간 색만 밀린다.
         term.rt.editor_visible_numbers,
+        .inherit,
         semantic_client.spans(term),
     );
 }
@@ -667,6 +668,7 @@ fn minimapSide(self: *AppSession, term: *Term, pane_rect: chrome_draw.Rect, draw
         count,
         term.rt.editor_tab_width,
         term.rt.editor_visible_numbers,
+        .inherit,
     );
     // **표는 렌더 축(절대 줄)으로 색인된다**(`syntax_colors.Scratch.per_line` — 창 앞은 빈 항목) — 미니맵은 `top`
     // 기준 상대 첨자를 받으므로 그만큼 잘라 넘긴다. 안 자르면 색이 `top` 줄만큼 밀린다(적대적 6회차에서 잡았다:
@@ -1779,8 +1781,8 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
         break :blk buildDiffPaneOps(
             // **검색 강조는 검색 중인 열에만 간다**(§5.1 「비교 뷰 검색」 — 한 번에 한 열이다).
             // 양쪽에 칠하면 카운터가 세지 않은 자리에 색이 남아, Enter 가 어디로 갈지 화면이 거짓말한다.
-            .{ .lines = st.left_texts, .numbers = st.left_numbers, .total_lines = st.left_lines.len, .bands = st.left_bands, .marks = st.left_marks, .first_col = effectiveFirstCol(wrap, term, false), .content_max_cols = maxColsForRender(self, term, false), .selection_marks = buildDiffSelectionMarks(self, term, .left), .search_marks = diffSearchMarksFor(self, term, .left, find_marks), .search_current = diffSearchMarksFor(self, term, .left, find_current), .search_marker_lines = diffMarkerLinesFor(self, term, .left, marker_lines), .search_marker_current = diffSearchMarksFor(self, term, .left, marker_current), .carets = buildDiffCarets(self, term, .left) },
-            .{ .lines = st.right_texts, .numbers = st.right_numbers, .total_lines = st.right_lines.len, .bands = st.right_bands, .marks = st.right_marks, .first_col = effectiveFirstCol(wrap, term, true), .content_max_cols = maxColsForRender(self, term, true), .selection_marks = buildDiffSelectionMarks(self, term, .right), .search_marks = diffSearchMarksFor(self, term, .right, find_marks), .search_current = diffSearchMarksFor(self, term, .right, find_current), .search_marker_lines = diffMarkerLinesFor(self, term, .right, marker_lines), .search_marker_current = diffSearchMarksFor(self, term, .right, marker_current), .carets = buildDiffCarets(self, term, .right) },
+            .{ .lines = st.left_texts, .numbers = st.left_numbers, .total_lines = st.left_lines.len, .bands = st.left_bands, .marks = st.left_marks, .first_col = effectiveFirstCol(wrap, term, false), .content_max_cols = maxColsForRender(self, term, false), .selection_marks = buildDiffSelectionMarks(self, term, .left), .search_marks = diffSearchMarksFor(self, term, .left, find_marks), .search_current = diffSearchMarksFor(self, term, .left, find_current), .search_marker_lines = diffMarkerLinesFor(self, term, .left, marker_lines), .search_marker_current = diffSearchMarksFor(self, term, .left, marker_current), .carets = buildDiffCarets(self, term, .left), .line_colors = editor_diff_ops.sideColors(self, term, .left) },
+            .{ .lines = st.right_texts, .numbers = st.right_numbers, .total_lines = st.right_lines.len, .bands = st.right_bands, .marks = st.right_marks, .first_col = effectiveFirstCol(wrap, term, true), .content_max_cols = maxColsForRender(self, term, true), .selection_marks = buildDiffSelectionMarks(self, term, .right), .search_marks = diffSearchMarksFor(self, term, .right, find_marks), .search_current = diffSearchMarksFor(self, term, .right, find_current), .search_marker_lines = diffMarkerLinesFor(self, term, .right, marker_lines), .search_marker_current = diffSearchMarksFor(self, term, .right, marker_current), .carets = buildDiffCarets(self, term, .right), .line_colors = editor_diff_ops.sideColors(self, term, .right) },
             term.rt.editor_first_line,
             effectiveFirstPiece(wrap, term),
             self.blink_visible,
@@ -30564,7 +30566,7 @@ test "ES17 undo 뒤에도 색이 되돌아온다 — 전체 재파싱 경로가 
     const doc = fx.term.rt.editor_doc.?;
     const st = &fx.term.rt.editor_syntax;
     {
-        const colors = syntax_color.lineColors(st, allocator, doc.file.content, doc.file.lines, 0, 2, 4, &.{});
+        const colors = syntax_color.lineColors(st, allocator, doc.file.content, doc.file.lines, 0, 2, 4, &.{}, .inherit);
         var is_comment = false;
         for (colors[0]) |cs| if (cs.role == .syntax_comment) {
             is_comment = true;
@@ -30576,7 +30578,7 @@ test "ES17 undo 뒤에도 색이 되돌아온다 — 전체 재파싱 경로가 
 
     // 되돌린 뒤 첫 줄은 다시 `const a = 1;`이다 — **키워드**여야 한다.
     const doc2 = fx.term.rt.editor_doc.?;
-    const colors2 = syntax_color.lineColors(st, allocator, doc2.file.content, doc2.file.lines, 0, 2, 4, &.{});
+    const colors2 = syntax_color.lineColors(st, allocator, doc2.file.content, doc2.file.lines, 0, 2, 4, &.{}, .inherit);
     try testing.expect(colors2.len >= 1);
     var is_keyword = false;
     for (colors2[0]) |cs| if (cs.role == .syntax_keyword and cs.start_col == 0) {
@@ -30605,7 +30607,7 @@ test "ES15 편집하면 색이 새 내용을 따라온다 — 트리가 낡지 �
     try testing.expect(insertText(fx.session, fx.term, "// added comment line\n"));
     const doc = fx.term.rt.editor_doc.?;
     const st = &fx.term.rt.editor_syntax;
-    const colors = syntax_color.lineColors(st, allocator, doc.file.content, doc.file.lines, 0, 4, 4, &.{});
+    const colors = syntax_color.lineColors(st, allocator, doc.file.content, doc.file.lines, 0, 4, 4, &.{}, .inherit);
     try testing.expect(colors.len >= 2);
 
     // 첫 줄은 이제 주석이다 — **주석색**이어야 한다. 트리가 낡았으면 여기가 `keyword`로 남는다.

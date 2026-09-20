@@ -878,6 +878,7 @@ fn editorSyntaxColorsBudgeted(
         lines.len,
         tab_width,
         &.{}, // Lab 은 접힘이 없다 — 두 축이 같다
+        .inherit, // 표가 비어 있어 뜻이 없지만, 축은 **부르는 쪽이 밝힌다**
     );
     return out;
 }

@@ -53,7 +53,7 @@ pub fn tick(self: *AppSession, term: *Term, first_src: usize, last_src: usize) v
     const st = &term.rt.editor_semantic;
     if (st.waiting) return;
     const c = editor_lsp.readyClientFor(self, term) orelse return;
-    if (!c.semantic_caps.supported) return;
+    // provider 검사는 `requestSemanticTokens` 가 한다(여기서 또 보면 등가 — 적대적 2회차 B2).
     const doc = term.rt.editor_doc orelse return;
     const now = self.awakeMs();
     if (st.last_edit_ms != 0 and now -| st.last_edit_ms < quiet_ms) return; // 0 = 아직 편집이 없었다
@@ -63,7 +63,7 @@ pub fn tick(self: *AppSession, term: *Term, first_src: usize, last_src: usize) v
     const version_ok = st.version == term.rt.editor_lsp_version and term.rt.editor_lsp_version != 0;
     const covered = lo >= st.covered_lo and hi <= st.covered_hi;
     if (version_ok and covered and !st.dirty) return;
-    const use_full = !c.semantic_caps.range;
+    const use_full = !c.semantic_caps.range; // provider 가 없으면 `range` 도 false 지만 아래 요청이 `null` 로 막는다
     const seq = editor_lsp.requestSemanticTokens(self, term, use_full, lo, hi) orelse return;
     st.waiting = true;
     st.waiting_seq = seq;
@@ -112,7 +112,7 @@ pub fn onEdit(self: *AppSession, term: *Term, start: ?u32, old_end: u32, new_end
         semantic.shift(&st.spans, s, old_end, new_end);
         st.shifted += 1;
     } else st.spans.clearRetainingCapacity();
-    st.dirty = true;
+    // `dirty` 는 안 세운다 — 편집이 `editor_lsp_version` 을 올려 `tick` 의 version 비교가 이미 다시 묻는다(적대적 2회차 B15: 등가).
 }
 
 /// 렌더가 섞을 스팬(문서 순서).

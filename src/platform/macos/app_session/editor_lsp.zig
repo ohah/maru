@@ -533,6 +533,7 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
             .semantic_tokens => |seq| {
                 self.editor_lsp.received_semantic += 1;
                 // 어느 문서의 것인지는 seq 로 — 문서마다 대기 seq 하나(§8.2i).
+                // `is_error` 는 방어 — 오류 응답은 `result` 가 없어 `null` 만으로도 버려진다(적대적 3회차 C2: 등가).
                 if (termWaitingSemantic(self, c, seq)) |t| editor_semantic.onResponse(self, t, seq, r.result, r.is_error, c.encoding);
             },
             .rename => |seq| {
@@ -951,7 +952,7 @@ pub fn requestSemanticTokens(self: *AppSession, term: *Term, full: bool, lo: usi
     if (!c.semantic_caps.supported) return null;
     flushDocument(self, c, term);
     const d = c.findDoc(term.surfaceId()) orelse return null;
-    c.semantic_seq = lsp.rpc.nextSeq(c.semantic_seq);
+    c.semantic_seq = lsp.rpc.nextSeq(c.semantic_seq); // 한 번에 하나라 응답 대조에는 안 올려도 같다(적대적 3회차 C5: 등가) — 낡은 응답을 가르는 규율은 다른 요청들과 같이 둔다
     const msg = if (full)
         lsp.rpc.semanticTokensFullRequest(self.allocator, c.semantic_seq, d.uri) catch return null
     else

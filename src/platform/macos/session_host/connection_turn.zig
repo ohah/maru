@@ -918,38 +918,6 @@ pub const Client = struct {
         slot.detachStream() catch return self.beginClose(.socket_error);
     }
 
-    /// A producer turn belongs to exactly one subscription. Ordinary output is admitted in order;
-    /// any admission failure purges that subscription's unsent prefix and emits one control-reserve
-    /// invalidation notice. An invalidated tracker may recover only through one atomic snapshot batch.
-    fn adoptSubscriptionTurn(
-        self: *Client,
-        stream: subscription_identity.LocalStreamId,
-        frames: [][]u8,
-    ) bool {
-        switch (self.tryAdoptSubscriptionTurn(stream, frames, null)) {
-            .admitted => return true,
-            .deferred_resync => return false,
-            // **둘을 한 arm 에 두지 않는다.** 전역 압력으로 미뤄진 것과 채택이 거부된 것은 원인이
-            // 다르고, 합치면 로그가 다시 「둘 중 무엇인지 모름」이 된다 — 이 PR 이 고치는 바로 그것이다.
-            .deferred_global_pressure => {
-                if (!self.isClosing()) {
-                    const tracker = self.trackers.get(stream) orelse
-                        return self.closeAndReject(.socket_error);
-                    self.invalidateSubscriptionOutput("invalidate_adopt_pressure", stream, tracker);
-                }
-                return false;
-            },
-            .rejected => {
-                if (!self.isClosing()) {
-                    const tracker = self.trackers.get(stream) orelse
-                        return self.closeAndReject(.socket_error);
-                    self.invalidateSubscriptionOutput("invalidate_adopt_rejected", stream, tracker);
-                }
-                return false;
-            },
-        }
-    }
-
     fn tryAdoptSubscriptionTurn(
         self: *Client,
         stream: subscription_identity.LocalStreamId,
@@ -3156,7 +3124,7 @@ test "subscription pressure emits one control notice and recovers with an atomic
         .{ .kind = .delta_chunk, .stream_id = 1, .flags = protocol.Flags.end_stream },
         "overflow",
     );
-    try testing.expect(!client.adoptSubscriptionTurn(1, overflowing));
+    try testing.expect(!try adoptTurnLikeProduct(client, 1, overflowing));
     try testing.expect(!client.isClosing());
     try testing.expectEqual(slot_mod.ScreenState.invalidated, try slot.screenState(tracker));
     try testing.expect(registry.Capability.has(
@@ -3695,7 +3663,7 @@ test "P5b2b3 pressure drains a written screen batch before target-only invalidat
     const current_batch = try testing.allocator.alloc([]u8, 2);
     current_batch[0] = first;
     current_batch[1] = last;
-    try testing.expect(client.adoptSubscriptionTurn(1, current_batch));
+    try testing.expect(try adoptTurnLikeProduct(client, 1, current_batch));
     try testing.expectEqual(slot_mod.QueueClass.screen, slot.firstPending().?.class);
     client.writeReady(4);
     try testing.expect(try slot.trackerHasWrittenPrefix(tracker));
@@ -3708,7 +3676,7 @@ test "P5b2b3 pressure drains a written screen batch before target-only invalidat
         .{ .kind = .delta_chunk, .stream_id = sibling_stream, .flags = protocol.Flags.end_stream },
         "SIBLING-MARKER",
     );
-    try testing.expect(client.adoptSubscriptionTurn(sibling_stream, sibling_batch));
+    try testing.expect(try adoptTurnLikeProduct(client, sibling_stream, sibling_batch));
 
     const megabyte = try testing.allocator.alloc(u8, protocol.max_binary_chunk);
     defer testing.allocator.free(megabyte);
@@ -3720,7 +3688,7 @@ test "P5b2b3 pressure drains a written screen batch before target-only invalidat
         .{ .kind = .delta_chunk, .stream_id = 1, .flags = protocol.Flags.end_stream },
         megabyte,
     );
-    try testing.expect(!client.adoptSubscriptionTurn(1, batch));
+    try testing.expect(!try adoptTurnLikeProduct(client, 1, batch));
     try testing.expect(!client.isClosing());
     try testing.expectEqual(
         slot_mod.ScreenState.drain_current_batch,
@@ -4290,4 +4258,35 @@ test "invalidateSubscriptionOutput 은 호출자가 준 이름으로 닫는다" 
     try testing.expectEqualStrings("Stale", client.closeError());
     // 핵심: 리터럴이 아니라 **호출자가 준 값**이 실려 나온다.
     try testing.expectEqualStrings("invalidate_wiring_probe", client.closeSite());
+}
+
+/// 구독 한 턴을 채택하고, **제품(`tick`)이 그 결과에 하는 일을 그대로** 한다.
+///
+/// 예전에는 제품 함수 `adoptSubscriptionTurn` 이 이 노릇을 했는데, 2026-07-26 에 `tick` 이
+/// `tryAdoptSubscriptionTurn` 을 직접 부르도록 바뀌면서 **호출자를 잃고 죽은 코드가 됐다.**
+/// 그런데도 판정자 넷이 그것을 계속 불러, 제품이 안 타는 길을 재고 있었다 — 게다가 그 죽은
+/// 함수는 `.deferred_global_pressure` 에 **무효화**를 했고 제품은 **백오프**만 한다(정반대다).
+///
+/// 그래서 헬퍼를 테스트 쪽으로 옮기고 제품과 같은 갈래만 남긴다. 미뤄지는 두 갈래에 닿으면
+/// **실패시킨다** — 제품은 거기서 무효화를 안 하므로, 그 자리에 닿는 픽스처는 「제품과 다른 길을
+/// 재고 있다」는 뜻이다. 조용히 갈라지느니 빨갛게 서는 편이 낫다.
+fn adoptTurnLikeProduct(
+    client: *Client,
+    stream: subscription_identity.LocalStreamId,
+    frames: [][]u8,
+) !bool {
+    switch (client.tryAdoptSubscriptionTurn(stream, frames, null)) {
+        .admitted => return true,
+        .rejected => {
+            if (!client.isClosing()) {
+                const tracker = client.trackers.get(stream) orelse {
+                    _ = client.closeAndReject(.socket_error);
+                    return false;
+                };
+                client.invalidateSubscriptionOutput("invalidate_turn_rejected", stream, tracker);
+            }
+            return false;
+        },
+        .deferred_global_pressure, .deferred_resync => return error.NotTheProductPath,
+    }
 }

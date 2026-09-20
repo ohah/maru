@@ -15290,8 +15290,11 @@ pub const AppSession = struct {
             self.closeMarkerPreview();
             return;
         }
-        const term = pane_ops.activePane(self).activeTerm();
-        if (term.kind != .terminal or term.surface.id != open.surface_id) return; // 다른 pane을 보는 중
+        // **그 프리뷰가 속한 pane 을 찾는다** — 활성 pane 이 아닐 수 있다(`markerPreviewTarget`).
+        // 이름이 `target` 이 아닌 것은 이 함수 아래에 디코드 **목표 변**(`target`)이 이미 있어서다.
+        const owner = self.markerPreviewTarget() orelse return; // 다른 탭이다 — 그리지도 닫지도 않는다
+        const term = owner.term;
+        if (term.kind != .terminal) return;
         // **앵커 재검증**(§3) — TUI가 그 자리를 덮어도 통보가 없으므로 매 프레임 확인한다. 어긋나면
         // **따라가고**(같은 N 이 화면에 있다), 그 N 이 아예 없을 때만 조용히 닫는다(2026-09-15 개정 —
         // 좌표 고정은 리페인트마다 프리뷰를 죽여 「눌러도 안 열린다」가 됐다. `reanchor` 주석이 계측과
@@ -15416,11 +15419,11 @@ pub const AppSession = struct {
         live_ids: *std.ArrayList(u32),
     ) void {
         const open = &(self.marker_preview_open orelse return);
-        const term = pane_ops.activePane(self).activeTerm();
-        if (term.surface.id != open.surface_id) {
-            open.uploaded = false; // 다른 pane을 보는 중이라 이 프레임엔 안 실린다
+        const target = self.markerPreviewTarget() orelse {
+            open.uploaded = false; // 다른 탭이라 이 프레임엔 안 실린다
             return;
-        }
+        };
+        const term = target.term;
         const place = self.markerPreviewPlacement(term, open.*) orelse {
             open.uploaded = false;
             return;
@@ -15607,9 +15610,9 @@ pub const AppSession = struct {
     fn markerPreviewDockJumpAt(self: *AppSession, x_px: f64, y_px: f64) bool {
         const open = self.marker_preview_open orelse return false;
         if (!self.surface_initialized or self.tabs.items.len == 0) return false;
-        const term = pane_ops.activePane(self).activeTerm();
-        if (term.kind != .terminal or term.surface.id != open.surface_id) return false;
-        const place = self.markerPreviewPlacement(term, open) orelse return false;
+        const target = self.markerPreviewTarget() orelse return false;
+        if (target.term.kind != .terminal) return false;
+        const place = self.markerPreviewPlacement(target.term, open) orelse return false;
         const hit_index = chrome.components.image_preview.dockJumpTarget(open.sent_hit_index, place.box, x_px, y_px) orelse return false;
         // **도크를 연다** — 접혀 있거나 다른 뷰를 보고 있을 수 있다. `enterDockView` 만 부르면 뷰만
         // 바뀌고 화면에는 아무 변화가 없다(접힌 채로 남는다).
@@ -15619,6 +15622,29 @@ pub const AppSession = struct {
         self.closeMarkerPreview();
         self.metal_dirty = true;
         return true;
+    }
+
+    /// 열린 프리뷰가 **속한 pane** — 활성 pane 이 아닐 수 있다.
+    ///
+    /// ⚠️ **클릭과 그리기가 같은 pane 을 봐야 한다.** 클릭은 «포인터 아래» pane 으로 라우팅되는데
+    /// (비활성 pane 의 링크도 열려야 하므로 — [[pointer-query-must-route-by-pane]]), 그리는 쪽이
+    /// 활성 pane 만 보면 비활성 pane 의 마커는 **열리기는 하고 그려지지는 않는다.** 디코드도 그
+    /// 자리에서 걸리므로 영영 안 풀린다 — 사용자에게는 「눌러도 아무 일이 없다」로 보인다
+    /// (제보 2026-09-20: Codex pane 이 비활성일 때 안 열렸고, 활성으로 만들면 됐다. 계측은
+    /// `click … staged=true` 가 11 번 찍히는 동안 `decode` 가 0 건이었다).
+    ///
+    /// 못 찾으면 null 이다 — 다른 **탭**으로 갔거나 그 pane 이 사라진 경우다. 그때는 그리지 않되
+    /// 닫지도 않는다(탭을 돌아오면 그대로 보인다 — 기존 동작).
+    fn markerPreviewTarget(self: *AppSession) ?struct { term: *Term, leaf: maru.session.SplitRect } {
+        const open = self.marker_preview_open orelse return null;
+        if (!self.surface_initialized or self.tabs.items.len == 0) return null;
+        self.pane_target_rects_scratch.clearRetainingCapacity();
+        tab_ops.activeTabLeafRects(self, self.allocator, self.termRect(), &self.pane_target_rects_scratch) catch return null;
+        for (self.pane_target_rects_scratch.items) |lr| {
+            const t = lr.leaf.activeTerm();
+            if (t.surface.id == open.surface_id) return .{ .term = t, .leaf = lr.rect };
+        }
+        return null;
     }
 
     /// 열린 프리뷰의 자리 — 그리는 쪽과 안내를 얹는 쪽이 **같은 계산**을 쓰게 하는 단일 출처다.
@@ -15647,9 +15673,8 @@ pub const AppSession = struct {
     ) !void {
         const open = self.marker_preview_open orelse return;
         if (!open.failed) return; // 안내가 필요한 경우는 「못 풀었다」 하나뿐이다
-        const term = pane_ops.activePane(self).activeTerm();
-        if (term.surface.id != open.surface_id) return;
-        const place = self.markerPreviewPlacement(term, open) orelse return;
+        const target = self.markerPreviewTarget() orelse return;
+        const place = self.markerPreviewPlacement(target.term, open) orelse return;
         const p = chrome.props.ChromeProps{ .metrics = self.buildCellMetrics() };
         const tk = self.buildChromeTokens();
         var ops: std.ArrayList(chrome.draw.Op) = .empty;
@@ -15669,14 +15694,13 @@ pub const AppSession = struct {
 
     /// 마커 span의 화면 사각형(px) — 셀 → px 변환은 여기서 한다(배치 모듈은 px만 안다).
     fn markerAnchorRect(self: *AppSession, term: *Term, open: marker_preview_ops.Open) ?chrome.draw.Rect {
-        // 활성 pane 본문 rect — 프리뷰는 활성 pane에서만 그린다(호출자가 surface_id를 이미 확인했다).
         _ = term;
-        // ⚠️ **활성 pane 의 leaf 에서 뽑는다.** `self.termRect()` 는 **모든 pane 을 합친** 터미널 영역이라
-        // 분할하면 오른쪽·아래 pane 의 origin 이 통째로 빠진다 — 마커의 셀 좌표는 그 pane 격자 기준인데
-        // 원점만 창 것이어서, 프리뷰가 **엉뚱한 pane 자리에** 떴다(사용자 제보 2026-09-15). 단일 pane 에서는
-        // 두 값이 같아 증상이 없었고, 이 경로에는 좌표를 재는 테스트가 없어 자동 게이트도 못 봤다.
-        const leaf = pane_ops.activeLeafRect(self) orelse self.termRect();
-        const rect = pane_ops.paneTermRect(self, leaf);
+        // ⚠️ **그 프리뷰가 «속한» pane 의 leaf 에서 뽑는다.** `self.termRect()` 는 모든 pane 을 합친
+        // 터미널 영역이라 분할하면 오른쪽·아래 pane 의 origin 이 통째로 빠지고(제보 2026-09-15),
+        // 활성 pane 의 leaf 를 쓰면 **비활성 pane 에 뜬 프리뷰**가 엉뚱한 자리를 가리킨다
+        // (제보 2026-09-20 — `markerPreviewTarget` 주석). 마커 좌표는 그 pane 격자 기준이다.
+        const target = self.markerPreviewTarget() orelse return null;
+        const rect = pane_ops.paneTermRect(self, target.leaf);
         const m = self.buildCellMetrics();
         const cw = @max(m.cell_width_px, 1);
         const ch = @max(m.cell_height_px, 1);
@@ -89957,6 +89981,10 @@ test "MP: 분할하면 프리뷰 앵커가 **그 pane** 원점을 따른다 — 
         .start_col = marker.start_col,
         .end_col = marker.end_col,
     };
+    // **세션에 실어 둔다** — 앵커는 「그 프리뷰가 속한 pane」에서 원점을 뽑으므로(비활성 pane 도
+    // 그려야 한다, 2026-09-20) 열린 상태가 세션에 있어야 그 pane 을 찾는다.
+    session.marker_preview_open = open;
+    defer session.closeMarkerPreview();
     const single = session.markerAnchorRect(term, open) orelse return error.TestUnexpectedResult;
     // 단일 pane 이면 leaf 가 곧 터미널 영역이라 둘이 같다 — 여기서는 옛 코드도 맞았다.
     try std.testing.expectEqual(@as(i32, @intCast(full.x)) + @as(i32, marker.start_col) * @as(i32, @intCast(session.cell_width_px)), single.x);
@@ -89965,6 +89993,7 @@ test "MP: 분할하면 프리뷰 앵커가 **그 pane** 원점을 따른다 — 
     try pane_ops.splitActivePane(session, .horizontal);
     term = pane_ops.activePane(session).activeTerm();
     open.surface_id = term.surface.id;
+    session.marker_preview_open.?.surface_id = open.surface_id;
     const right = session.markerAnchorRect(term, open) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(single.y, right.y); // 같은 행이므로 세로는 그대로
     // 오른쪽 pane 의 원점은 창 절반보다 오른쪽이다 — 옛 코드는 `single.x` 그대로였다.
@@ -89975,6 +90004,7 @@ test "MP: 분할하면 프리뷰 앵커가 **그 pane** 원점을 따른다 — 
     try pane_ops.splitActivePane(session, .vertical);
     term = pane_ops.activePane(session).activeTerm();
     open.surface_id = term.surface.id;
+    session.marker_preview_open.?.surface_id = open.surface_id;
     const bottom = session.markerAnchorRect(term, open) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(right.x, bottom.x); // 가로는 오른쪽 열 그대로
     try std.testing.expect(bottom.y >= @as(i32, @intCast(full.y + full.h / 2)));
@@ -90097,4 +90127,68 @@ test "MP: 뒤판은 **프레임마다 비워진다** — 안 그러면 프리뷰
     }
     // **프레임을 몇 번 돌든 하나다.** 자라면 drop 과 append 의 짝이 깨진 것이다.
     for (seen) |n| try std.testing.expectEqual(@as(usize, 1), n);
+}
+
+test "MP: **비활성 pane** 의 프리뷰도 그려진다 — 클릭은 그 pane 으로 가는데 그리기는 활성만 봤다" {
+    // **사용자 제보 2026-09-20**: Codex pane 의 마커를 눌러도 안 열렸고, 그 pane 을 활성으로
+    // 만들면 됐다. 계측이 갈랐다 — `click … staged=true` 가 11 번 찍히는 동안 `decode` 는 0 건.
+    // 마커는 찾았고 기록에도 있는데 **아무도 그리지 않았다.**
+    //
+    // 클릭은 「포인터 아래 pane」으로 라우팅되는데(비활성 pane 의 링크도 열려야 한다) 그리는 쪽과
+    // 디코드를 거는 쪽이 `activePane()` 만 봤다. 축이 **분할이 아니라 «활성인가»** 라, 앞의 분할
+    // 테스트로는 안 잡힌다 — 그 테스트는 늘 활성 pane 에 프리뷰를 둔다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // splitActivePane = 실 PTY/CoreText
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+
+    try pane_ops.splitActivePane(session, .horizontal); // 활성 = 오른쪽(p1)
+    const tab = tab_ops.activeTab(session);
+    try std.testing.expectEqual(@as(usize, 2), tab.panes.items.len);
+    try std.testing.expectEqual(@as(usize, 1), tab.active_pane);
+
+    // **왼쪽(비활성) pane** 의 마커를 연다 — 클릭 라우팅이 실제로 하는 일이다.
+    const inactive = tab.panes.items[0].terms.items[0];
+    session.marker_preview_open = .{
+        .surface_id = inactive.surface.id,
+        .n = 1,
+        .row = 3,
+        .start_col = 5,
+        .end_col = 15,
+        .width = 200,
+        .height = 120,
+    };
+    defer session.closeMarkerPreview();
+
+    session.gpu_quads.clearRetainingCapacity();
+    var images: []renderer.metal_frame.GpuImage = &.{};
+    defer allocator.free(images);
+    var uploads: []renderer.metal_frame.GpuImageUpload = &.{};
+    defer allocator.free(uploads);
+    var pixels: []u8 = &.{};
+    defer allocator.free(pixels);
+    var owned = false;
+    var live: std.ArrayList(u32) = .empty;
+    defer live.deinit(allocator);
+    session.appendMarkerPreviewImage(&images, &uploads, &pixels, &owned, &live);
+
+    var backdrop: ?renderer.metal_frame.GpuQuad = null;
+    for (session.gpu_quads.items) |q| {
+        if (q.layer == renderer.metal_frame.quad_layer.image_backdrop) backdrop = q;
+    }
+    // **그려진다.** 활성 pane 만 보던 옛 코드는 여기서 아무것도 안 냈다.
+    const bd = backdrop orelse return error.TestUnexpectedResult;
+
+    // **그리고 «왼쪽» pane 을 가리킨다** — 활성(오른쪽) leaf 를 쓰면 반대쪽에 뜬다.
+    const full = pane_ops.paneTermRect(session, session.termRect());
+    try std.testing.expect(bd.x < @as(f32, @floatFromInt(full.x + full.w / 2)));
 }

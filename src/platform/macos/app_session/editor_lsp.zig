@@ -101,6 +101,8 @@ pub const Client = struct {
     code_action_seq: u32 = 0,
     code_action_resolve_seq: u32 = 0,
     code_action_caps: lsp.rpc.CodeActionCaps = .{},
+    /// 이 클라이언트를 만든 문법(후보가 여럿인 언어에서 「없음」일 때 다시 고르는 데 쓴다 — §8.2a 「서버 찾기」).
+    grammar: maru.session.editor.language.Grammar = .none,
     /// semantic tokens(§8.2i) — legend 를 우리 색으로 옮긴 표를 든다(소유).
     semantic_seq: u32 = 0,
     semantic_caps: lsp.semantic.Caps = .{},
@@ -128,6 +130,8 @@ pub const TrustEntry = struct { root: []u8, decision: lsp.trust.Decision };
 
 pub const State = struct {
     clients: std.ArrayList(Client) = .empty,
+    /// 문법마다 고른 서버(§8.2a 「서버 찾기」 — PATH 에 있는 첫 후보). 세션 동안 기억하고, 「없음」이면 gate 가 다시 고른다.
+    resolved: std.EnumArray(maru.session.editor.language.Grammar, ?lsp.servers.Server) = .initFill(null),
     trust: std.ArrayList(TrustEntry) = .empty,
     trust_loaded: bool = false,
     /// 묻는 중인 root(모달의 주인). 답이 오면 그 root 의 클라이언트가 움직인다.
@@ -326,10 +330,35 @@ fn clientFor(self: *AppSession, root: []const u8, server: lsp.servers.Server) ?*
     return null;
 }
 
-fn ensureClient(self: *AppSession, root: []const u8, server: lsp.servers.Server) ?*Client {
+/// 그 문법의 서버 — 후보 중 PATH 에 있는 첫 것(한 번 고르면 세션 동안 그대로). 이름표가 없으면 `null`. `forGrammar` 대신 **여기**를 쓴다 —
+/// 후보가 여럿인 언어(TS 계열)에서 PATH 를 안 보면 없는 것을 띄우려 든다.
+pub fn serverFor(self: *AppSession, g: maru.session.editor.language.Grammar) ?lsp.servers.Server {
+    if (self.editor_lsp.resolved.get(g)) |s| return s;
+    const picked = lsp.servers.resolve(g, {}, struct {
+        fn f(_: void, exe: []const u8) bool {
+            var buf: [std.fs.max_path_bytes]u8 = undefined;
+            return lsp_process.locate(exe, &buf) != null;
+        }
+    }.f) orelse return null;
+    self.editor_lsp.resolved.set(g, picked);
+    return picked;
+}
+
+/// 「없음」인 클라이언트가 다른 후보의 설치를 볼 수 있게 — 다시 골라 달라졌으면 그 서버로 바꾼다(프로세스는 아직 없으니 이름만 바뀐다). 바뀌었으면 true.
+fn repickIfMissing(self: *AppSession, c: *Client) bool {
+    const g = c.grammar;
+    if (g == .none) return false;
+    self.editor_lsp.resolved.set(g, null);
+    const picked = serverFor(self, g) orelse return false;
+    if (std.mem.eql(u8, picked.exe, c.server.exe)) return false;
+    c.server = picked;
+    return true;
+}
+
+fn ensureClient(self: *AppSession, root: []const u8, server: lsp.servers.Server, grammar: maru.session.editor.language.Grammar) ?*Client {
     if (clientFor(self, root, server)) |c| return c;
     const owned = self.allocator.dupe(u8, root) catch return null;
-    self.editor_lsp.clients.append(self.allocator, .{ .root = owned, .server = server, .phase = .restarting }) catch {
+    self.editor_lsp.clients.append(self.allocator, .{ .root = owned, .server = server, .phase = .restarting, .grammar = grammar }) catch {
         self.allocator.free(owned);
         return null;
     };
@@ -617,9 +646,9 @@ fn syncDocuments(self: *AppSession, now_ms: u64) void {
         for (tab.panes.items) |pane| {
             for (pane.terms.items) |term| {
                 if (term.kind != .editor or term.rt.editor_doc == null or term.rt.editor_diff != null) continue;
-                const server = lsp.servers.forGrammar(term.rt.editor_grammar) orelse continue;
+                const server = serverFor(self, term.rt.editor_grammar) orelse continue;
                 const root = rootFor(self, term) orelse continue;
-                const c = ensureClient(self, root, server) orelse continue;
+                const c = ensureClient(self, root, server, term.rt.editor_grammar) orelse continue;
                 seen.put(self.allocator, term.surfaceId(), {}) catch {};
                 if (c.docs.items.len == 0 and c.idle_since_ms != 0) c.idle_since_ms = 0;
                 if (c.retry_at_ms == std.math.maxInt(u64)) c.retry_at_ms = 0; // 잠들어 있던 서버를 깨운다
@@ -659,11 +688,13 @@ fn gateTrust(self: *AppSession, c: *Client) void {
         else => return,
     }
     if (c.proc != null) return;
-    // 실행 파일이 없으면 신뢰를 묻지 않는다 — 「설치」가 먼저다.
+    // 실행 파일이 없으면 신뢰를 묻지 않는다 — 「설치」가 먼저다. 없는 채면 다른 후보가 생겼는지 다시 고른다(TS 계열 — §8.2a 「서버 찾기」).
     var pbuf: [std.fs.max_path_bytes]u8 = undefined;
     if (lsp_process.locate(c.server.exe, &pbuf) == null) {
-        c.phase = .missing;
-        return;
+        if (!repickIfMissing(self, c) or lsp_process.locate(c.server.exe, &pbuf) == null) {
+            c.phase = .missing;
+            return;
+        }
     }
     if (c.phase == .missing) c.phase = .restarting; // 설치된 것을 이제 봤다
     const decision = trustOf(self, c.root) orelse {
@@ -776,7 +807,7 @@ pub const StatusView = struct { phase: Phase, exe: []const u8 };
 pub fn statusFor(self: *AppSession, term: *Term) ?StatusView {
     if (!self.loaded_config.config.lsp.enabled) return null;
     if (term.kind != .editor or term.rt.editor_doc == null or term.rt.editor_diff != null) return null;
-    const server = lsp.servers.forGrammar(term.rt.editor_grammar) orelse return null;
+    const server = serverFor(self, term.rt.editor_grammar) orelse return null;
     const root = rootFor(self, term) orelse return null;
     const c = clientFor(self, root, server) orelse return .{ .phase = .missing, .exe = server.exe };
     // 답을 기다리는 동안(모달이 다른 오버레이 뒤에서 순서를 기다리거나 떠 있는 동안)은 「허락 대기」다 — 「다시 시작 중」이 아니다.
@@ -796,7 +827,7 @@ fn flushDocument(self: *AppSession, c: *Client, term: *Term) void {
 pub fn readyClientFor(self: *AppSession, term: *Term) ?*Client {
     if (!self.loaded_config.config.lsp.enabled) return null;
     if (term.kind != .editor or term.rt.editor_doc == null or term.rt.editor_diff != null) return null;
-    const server = lsp.servers.forGrammar(term.rt.editor_grammar) orelse return null;
+    const server = serverFor(self, term.rt.editor_grammar) orelse return null;
     const root = rootFor(self, term) orelse return null;
     const c = clientFor(self, root, server) orelse return null;
     if (c.phase != .ready or c.proc == null) return null;
@@ -1054,7 +1085,7 @@ pub fn activateStatus(self: *AppSession) void {
     if (pane.terms.items.len == 0) return;
     const term = pane.activeTerm();
     const view = statusFor(self, term) orelse return;
-    const server = lsp.servers.forGrammar(term.rt.editor_grammar) orelse return;
+    const server = serverFor(self, term.rt.editor_grammar) orelse return;
     switch (view.phase) {
         .missing => {
             // §8.1a 흐름 4: **새 탭**에 입력만 — Enter 는 사용자.

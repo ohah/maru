@@ -474,6 +474,14 @@ pub fn gotoConflict(self: *AppSession, term: *Term, which: maru.session.dock_lay
 
 /// caret 을 놓고 그 자리를 드러낸다 — 위 ⑷⑸에 해당한다. **`revealPrimaryCaretRows` 가 펴기까지
 /// 한다**(그 함수가 `revealFoldedLine` 을 먼저 부른다) — 여기서 또 펴면 같은 일을 두 번 한다.
+/// **이름 상자가 붙어 있을 caret 을 화면 안으로 되돌린다**(U2). 상자는 caret 에 앵커를 두므로 caret 이
+/// 화면 밖이면 상자만 사라지고 모달이 남는다 — 사용자는 타이핑이 아무 데도 닿지 않는 것을 본다.
+/// `revealPrimaryCaret` 을 그대로 부른다(스크롤 규칙의 단일 출처) — 여기서 다시 계산하지 않는다.
+pub fn revealCaretForRenameBox(self: *AppSession, term: *Term) void {
+    revealPrimaryCaret(self, term);
+    self.metal_dirty = true;
+}
+
 fn placeCaretAndReveal(self: *AppSession, term: *Term, offset: usize) void {
     clearExtraSelections(self, term);
     term.rt.editor_selection = editor_selection.Selection.at(offset);
@@ -36249,7 +36257,7 @@ test "U2C 제품 키 경로: Enter 가 확정하고 Esc 가 취소하며 클릭-
         try testing.expect(insertText(fx.session, t, "three\n"));
         try testing.expect(!saveDocument(fx.session, t));
         typeName(fx.session, "half"); // 아직 다 안 쳤다
-            fx.session.mouse(1, 10, 10, 0, 0); // down — 어딘가를 클릭
+        fx.session.mouse(1, 10, 10, 0, 0); // down — 어딘가를 클릭
         try testing.expect(fx.session.rename == null);
         try testing.expect(t.rt.editor_path == null);
         try testing.expectError(error.FileNotFound, dir.dir.access(io, "half", .{}));
@@ -36332,4 +36340,62 @@ test "U2E 팔레트에서 골라도 열린다 — 카탈로그 항목이 실제�
         maru.config.Action.new_editor_tab,
         maru.config.action.parseAction("new_editor_tab").?,
     );
+}
+
+test "U2F 상자가 떠 있는데 caret 이 화면 밖으로 나가면 — 보이지 않는 모달이 되지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(std.testing.io, &root_buf)];
+    pinUntitledBase(fx.session, root);
+
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 200 }; // 낮은 pane — 몇 줄만 보인다
+    const t = try openUntitledInActivePane(fx.session);
+    // 화면보다 긴 문서를 만들고 caret 을 맨 위에 둔다.
+    var body: std.ArrayListUnmanaged(u8) = .empty;
+    defer body.deinit(allocator);
+    for (0..200) |i| {
+        var line: [24]u8 = undefined;
+        const s = try std.fmt.bufPrint(&line, "line {d}\n", .{i});
+        try body.appendSlice(allocator, s);
+    }
+    try testing.expect(insertText(fx.session, t, body.items));
+    t.rt.editor_selection = editor_selection.Selection.at(0); // caret 을 맨 위로
+
+    try testing.expect(!saveDocument(fx.session, t));
+    // caret 을 맨 위로 옮겼을 뿐이라 화면은 아직 아래에 있다 — `refreshCaretAnchor` 가 되돌리고
+    // 앵커는 **다음 프레임**에 선다(그 되돌림이 이 회차의 고침이다). 두 프레임을 돌려 자리를 잡는다.
+    for (0..2) |_| {
+        _ = rename_client.refreshCaretAnchor(fx.session, t.surface.id);
+        var drawn = appendPaneFrame(fx.session, leaf, t) orelse return error.EditorPaneDidNotDraw;
+        drawn.dl.deinit(allocator);
+    }
+    try testing.expect(rename_client.refreshCaretAnchor(fx.session, t.surface.id));
+    try testing.expect(fx.session.chrome_host.rename_box.open);
+
+    // **휠로 멀리 굴린다** — 상자는 caret 에 붙어 있으므로 caret 이 화면 밖으로 나가면 앵커가 없어진다.
+    // 그때 상자가 사라지는데 `rename` 이 살아 있으면 **보이지 않는 모달이 키를 먹는다**(10회차의 teardown
+    // 과 같은 증상, 다른 원인). 적대적 20회차.
+    _ = scrollLines(fx.session, t, leaf, 150);
+    {
+        var drawn = appendPaneFrame(fx.session, leaf, t) orelse return error.EditorPaneDidNotDraw;
+        drawn.dl.deinit(allocator);
+    }
+    // 그 프레임에는 앵커가 없다 — 그러나 `refreshCaretAnchor` 가 **caret 을 화면 안으로 되돌린다**.
+    // 되돌림은 스크롤 위치를 바꾸는 일이고 앵커는 **그려진 행 배열**에서 나오므로, 상자는 **다음
+    // 프레임**에 돌아온다(한 프레임의 공백은 사람이 못 본다).
+    _ = rename_client.refreshCaretAnchor(fx.session, t.surface.id);
+    {
+        var drawn = appendPaneFrame(fx.session, leaf, t) orelse return error.EditorPaneDidNotDraw;
+        drawn.dl.deinit(allocator);
+    }
+    // ★ 되돌아왔다 — 상자가 사라진 채 모달이 남는 상태가 이어지지 않는다.
+    try testing.expect(rename_client.refreshCaretAnchor(fx.session, t.surface.id));
+    try testing.expect(fx.session.chrome_host.rename_box.open);
+    // 그리고 이름은 여전히 안 붙었다(되돌림이 확정이 아니다).
+    try testing.expect(t.rt.editor_path == null);
 }

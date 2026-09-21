@@ -42,6 +42,14 @@ pub const Step = struct {
     description: ?[]const u8,
 };
 
+/// `.imports` 원소 한 건 — `.{ .name = "maru", .module = maru_mod }`.
+pub const Import = struct {
+    name: []const u8,
+    /// `.module = …` 의 **표현식 텍스트**. `b.createModule(…)` 을 그 자리에서 만드는지
+    /// (표로 옮기기 어렵다) 기존 변수를 이름으로 부르는지(표의 `deps` 로 충분하다)를 가른다.
+    module: ?[]const u8 = null,
+};
+
 /// `addProjectTest(b, .{ .root_module = b.createModule(.{...}), .filters = &.{...} })` 한 건.
 pub const Registration = struct {
     /// `const b3_0_4_tests = addProjectTest(...)` 의 왼쪽 이름. 이름 없이 바로 넘기면 null.
@@ -53,8 +61,10 @@ pub const Registration = struct {
     /// `.optimize = …` 의 **표현식 텍스트**(`optimize`·`.ReleaseFast`·`b3_optimize` 등).
     /// 값으로 접지 않는 이유는 빌드 스크립트가 변수를 거쳐 넘기기 때문이다.
     optimize: ?[]const u8 = null,
-    /// `.imports = &.{ .{ .name = "maru", … } }` 의 이름들.
-    imports: []const []const u8 = &.{},
+    /// `.imports = &.{ .{ .name = "maru", .module = maru_mod } }` 의 **이름과 모듈 표현식**.
+    /// 이름만 담으면 「이 이름이 늘 같은 모듈을 가리키나」를 물을 수 없다 — 표의 `deps` 가
+    /// 이름 목록으로 충분한지는 그 질문의 답에 달려 있다.
+    imports: []const Import = &.{},
     link_libc: bool = false,
     /// 어느 파일에서 왔나 — 실패를 쫓을 때 필요하다.
     file: []const u8 = "",
@@ -508,9 +518,9 @@ fn readRegistrationFields(
                         if (tree.tokenTag(tok) == .identifier and
                             std.mem.eql(u8, tree.tokenSlice(tok), "true")) out.link_libc = true;
                     }
-                } else if (std.mem.eql(u8, n, "name")) {
-                    if (try stringValue(a, tree, tree.firstToken(f))) |s|
-                        try appendStr(a, &out.imports, s);
+                } else if (std.mem.eql(u8, n, "imports")) {
+                    try readImports(a, tree, f, out, 0);
+                    continue;
                 }
             }
             try readRegistrationFields(a, tree, f, out, depth + 1);
@@ -520,6 +530,7 @@ fn readRegistrationFields(
     var cbuf: [1]std.zig.Ast.Node.Index = undefined;
     if (tree.fullCall(&cbuf, node)) |call| {
         for (call.ast.params) |p| try readRegistrationFields(a, tree, p, out, depth + 1);
+        return;
     }
 }
 
@@ -527,6 +538,65 @@ fn readRegistrationFields(
 //
 // **옛 방식과 새 방식이 같은 값을 내는지 대조한다.** 이 뷰의 목적은 문자열 판정을 대체하는
 // 것이고, 대체가 성립하려면 «같은 것을 세야» 한다. 문자열 판정을 지우기 전에 이 대조를 통과시킨다.
+
+/// 노드가 차지하는 **소스 텍스트 그대로**. 값으로 접지 않는 이유는 빌드 스크립트가
+/// 변수를 거쳐 넘기기 때문이다 — `maru_mod` 인지 `b.createModule(…)` 인지만 알면 된다.
+fn exprText(a: std.mem.Allocator, tree: *const std.zig.Ast, node: std.zig.Ast.Node.Index) ![]const u8 {
+    const first = tree.firstToken(node);
+    const last = tree.lastToken(node);
+    const start = tree.tokenStart(first);
+    const end = tree.tokenStart(last) + tree.tokenSlice(last).len;
+    return a.dupe(u8, std.mem.trim(u8, tree.source[start..end], " \t\n"));
+}
+
+/// `.imports = &.{ .{ .name = "a", .module = m }, … }` 를 **쌍으로** 읽는다.
+///
+/// 예전에는 「어디서든 `.name = "…"` 이 보이면 import 이름」이라고 읽었다. 그건
+/// `addProjectTest(b, .{ .name = "x", … })` 의 테스트 이름까지 같이 주워 담는다 —
+/// 필드 이름으로 들어오는 길을 하나로 좁혀 그 혼동을 없앤다.
+fn readImports(
+    a: std.mem.Allocator,
+    tree: *std.zig.Ast,
+    node: std.zig.Ast.Node.Index,
+    out: *Registration,
+    depth: usize,
+) !void {
+    if (depth > 4) return;
+
+    var sbuf: [2]std.zig.Ast.Node.Index = undefined;
+    if (tree.fullStructInit(&sbuf, node)) |si| {
+        var entry: Import = .{ .name = "" };
+        for (si.ast.fields) |f| {
+            const ft = tree.firstToken(f);
+            if (ft < 2 or tree.tokenTag(ft - 1) != .equal or tree.tokenTag(ft - 2) != .identifier) continue;
+            const fname = tree.tokenSlice(ft - 2);
+            if (std.mem.eql(u8, fname, "name")) {
+                if (try stringValue(a, tree, tree.firstToken(f))) |v| entry.name = v;
+            } else if (std.mem.eql(u8, fname, "module")) {
+                entry.module = try exprText(a, tree, f);
+            }
+        }
+        if (entry.name.len > 0) {
+            const grown = try a.alloc(Import, out.imports.len + 1);
+            @memcpy(grown[0..out.imports.len], out.imports);
+            grown[out.imports.len] = entry;
+            out.imports = grown;
+        }
+        return;
+    }
+
+    var abuf: [2]std.zig.Ast.Node.Index = undefined;
+    if (tree.fullArrayInit(&abuf, node)) |ai| {
+        for (ai.ast.elements) |e| try readImports(a, tree, e, out, depth + 1);
+        return;
+    }
+    switch (tree.nodeTag(node)) {
+        .address_of, .@"try", .grouped_expression => {
+            try readImports(a, tree, tree.nodeData(node).node, out, depth + 1);
+        },
+        else => {},
+    }
+}
 
 fn countOccurrences(haystack: []const u8, needle: []const u8) usize {
     if (needle.len == 0) return 0;
@@ -688,7 +758,58 @@ test "dependentsOf 는 «누가 나를 매달았나» 를 답한다 — 방향�
     }
     try std.testing.expect(found_oracle_step);
 
-    // 문자열 판정과 대조 — `X.dependOn(&run_cwd_axis_boundary_tests.step)` 의 X 가 몇인가
+    // 문자열 판정과 대조 — `X.dependOn(&run_cwd_axis_boundary_tests.step)` 의 X 가 몇인가.
+    //
+    // **0 == 0 으로 통과하지 않게 수를 먼저 잠근다.** 양쪽이 나란히 0 이면 판정이 아무것도
+    // 안 보면서 초록이 된다 — 「없는 것을 없다고 읽는」 그 사고가 이 파일이 고치려는 것이다.
     const old_count = countOccurrences(text, ".dependOn(&run_cwd_axis_boundary_tests.step)");
+    try std.testing.expectEqual(@as(usize, 3), old_count);
     try std.testing.expectEqual(old_count, g.countDependentsOf("run_cwd_axis_boundary_tests"));
+}
+
+test "모듈 주입을 실제로 담는가 — `&.{…}` 에서 멈춰 468건 중 1건만 보이던 자리" {
+    const a = std.testing.allocator;
+    var g = try parse(a);
+    defer g.deinit();
+
+    var with_imports: usize = 0;
+    var pairs: usize = 0;
+    var by_var: usize = 0;
+    var inline_create: usize = 0;
+    for (g.registrations) |r| {
+        if (r.imports.len == 0) continue;
+        with_imports += 1;
+        for (r.imports) |im| {
+            pairs += 1;
+            const m = im.module orelse continue;
+            if (std.mem.indexOf(u8, m, "createModule") != null or
+                std.mem.indexOf(u8, m, "addModule") != null)
+            {
+                inline_create += 1;
+            } else by_var += 1;
+        }
+    }
+
+    // **고치기 전 이 수는 1 이었다.** `.imports = &.{ .{ .name = "maru", … } }` 의 `&.{ … }` 는
+    // struct init 도 call 도 아니라 재귀가 거기서 멈췄고, 모듈을 주입받는 등록이 전부
+    // 「주입 없음」으로 보였다. 뷰가 «안 본다» 는 것을 뷰 자신은 못 신고하므로 수로 잠근다.
+    try std.testing.expectEqual(@as(usize, 468), with_imports);
+    try std.testing.expectEqual(@as(usize, 895), pairs);
+
+    // 그 자리에서 모듈을 만드는가, 기존 모듈 변수를 이름으로 부르는가. 후자가 압도적이라는
+    // 사실이 「등록을 표로 적을 때 `deps` 는 이름 목록으로 족한가」의 답이다.
+    try std.testing.expectEqual(@as(usize, 8), inline_create);
+    try std.testing.expectEqual(@as(usize, 887), by_var);
+
+    // 이름과 모듈이 **짝으로** 들어왔는지 한 자리로 확인한다.
+    var checked = false;
+    for (g.registrations) |r| {
+        const root = r.root orelse continue;
+        if (!std.mem.eql(u8, root, "tests/boundary/pinned_language.zig")) continue;
+        try std.testing.expectEqual(@as(usize, 1), r.imports.len);
+        try std.testing.expectEqualStrings("i18n_table", r.imports[0].name);
+        try std.testing.expect(std.mem.indexOf(u8, r.imports[0].module.?, "src/i18n.zig") != null);
+        checked = true;
+    }
+    try std.testing.expect(checked);
 }

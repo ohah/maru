@@ -1,4 +1,4 @@
-//! 참조 피커(docs/editor-surface-tooling.md §8.2l) — `textDocument/references` 를 보내고 응답의 위치 **전부**를 팔레트 기반 피커(native-editor-ui
+//! 참조 피커(docs/editor-surface-tooling.md §8.2l · 구현·타입 정의·선언은 §8.2m — 같은 길, `kind` 만 다르다) — `textDocument/references` 를 보내고 응답의 위치 **전부**를 팔레트 기반 피커(native-editor-ui
 //! §7.5 의 세 번째 소비자)에 행으로 세운다. 트리거는 `⇧F12`(caret)·팔레트. 고르면 **닫고 나서** §5.2 의 `navigateTo` 하나로 간다(정의로 이동과
 //! 같은 길 — 연 뒤 그 문서로 offset 을 푼다).
 //!
@@ -25,6 +25,8 @@ pub const max_retries: u8 = 8;
 pub const State = struct {
     waiting: bool = false,
     waiting_seq: u32 = 0,
+    /// 기다리는 요청의 종류(§8.2m) — 다른 종류의 응답은 같은 seq 라도 버린다(칸이 달라 seq 가 겹칠 수 있다).
+    waiting_kind: lsp.rpc.LocationKind = .references,
     /// 되묻기 예약(`retry_at_ms` 에 caret 자리로 다시). 사용자가 새로 부르면 지워진다.
     retry_at_ms: u64 = 0,
     retries: u8 = 0,
@@ -33,6 +35,7 @@ pub const State = struct {
     /// 판정자 관측.
     opened: u64 = 0,
     retried: u64 = 0,
+    notified_unsupported: u64 = 0,
     navigated: u64 = 0,
     notified_none: u64 = 0,
     notified_outside: u64 = 0,
@@ -41,19 +44,57 @@ pub const State = struct {
 
 /// `goto_references` 명령·`⇧F12` — 활성 편집기의 caret 자리에서. 보냈으면 true.
 pub fn gotoReferencesAtCaret(self: *AppSession) bool {
+    return gotoLocationsAtCaret(self, .references);
+}
+
+/// 구현·타입 정의·선언(§8.2m) — 같은 길. provider 가 없으면 요청하지 않고 알린다(tsgo 는 `declaration` 을 물으면 `-32600`).
+pub fn gotoLocationsAtCaret(self: *AppSession, kind: lsp.rpc.LocationKind) bool {
     const term = pane_ops.activePane(self).activeTerm();
     if (term.kind != .editor or term.rt.editor_diff != null) return false;
     const doc = term.rt.editor_doc orelse return false;
     const sel = term.rt.editor_selection orelse return false;
     const st = &self.editor_references;
+    if (editor_lsp.readyClientFor(self, term) != null and !editor_lsp.locationKindSupported(self, term, kind)) {
+        st.notified_unsupported += 1;
+        self.showNoticeFmt(.nav_unsupported, &.{.{ .s = commandName(kind) }});
+        return false;
+    }
     st.retry_at_ms = 0;
     st.retries = 0;
+    st.waiting_kind = kind;
     return request(self, term, @min(sel.focus, doc.file.content.len));
+}
+
+fn commandName(kind: lsp.rpc.LocationKind) []const u8 {
+    return switch (kind) {
+        .references => "Go to References",
+        .implementation => "Go to Implementation",
+        .type_definition => "Go to Type Definition",
+        .declaration => "Go to Declaration",
+    };
+}
+
+fn noneKey(kind: lsp.rpc.LocationKind) maru.i18n.Key {
+    return switch (kind) {
+        .references => .ref_none,
+        .implementation => .impl_none,
+        .type_definition => .typedef_none,
+        .declaration => .decl_none,
+    };
+}
+
+fn promptKey(kind: lsp.rpc.LocationKind) maru.i18n.Key {
+    return switch (kind) {
+        .references => .ref_prompt,
+        .implementation => .impl_prompt,
+        .type_definition => .typedef_prompt,
+        .declaration => .decl_prompt,
+    };
 }
 
 fn request(self: *AppSession, term: *Term, offset: usize) bool {
     const st = &self.editor_references;
-    const seq = editor_lsp.requestReferences(self, term, offset) orelse return false;
+    const seq = editor_lsp.requestLocations(self, term, st.waiting_kind, offset) orelse return false;
     st.waiting = true;
     st.waiting_seq = seq;
     st.enc = (editor_lsp.readyClientFor(self, term) orelse return false).encoding;
@@ -73,7 +114,7 @@ pub fn tick(self: *AppSession) void {
     st.retried += 1;
     if (!request(self, term, @min(sel.focus, doc.file.content.len))) {
         st.notified_none += 1;
-        self.showNoticeKey(.ref_none);
+        self.showNoticeKey(noneKey(st.waiting_kind));
     }
 }
 
@@ -99,9 +140,9 @@ fn rowCols() usize {
 
 /// references 응답(`editor_lsp` 가 부른다). 지금 기다리는 seq 가 아니면 버린다. 되물을 수 있는 오류(`content modified` 등)면 잠시 뒤
 /// 다시 — 상한을 넘기면 「찾지 못했습니다」.
-pub fn onReferencesResponse(self: *AppSession, seq: u32, result: ?std.json.Value, retryable: bool) void {
+pub fn onLocationsResponse(self: *AppSession, kind: lsp.rpc.LocationKind, seq: u32, result: ?std.json.Value, retryable: bool) void {
     const st = &self.editor_references;
-    if (!st.waiting or seq != st.waiting_seq) {
+    if (!st.waiting or seq != st.waiting_seq or kind != st.waiting_kind) {
         st.dropped_stale += 1;
         return;
     }
@@ -111,6 +152,7 @@ pub fn onReferencesResponse(self: *AppSession, seq: u32, result: ?std.json.Value
         st.retry_at_ms = self.awakeMs() + retry_ms;
         return;
     }
+    const kind_none = noneKey(kind);
     const term = pane_ops.activePane(self).activeTerm();
     if (term.kind != .editor) return;
     const doc = term.rt.editor_doc orelse return;
@@ -129,7 +171,7 @@ pub fn onReferencesResponse(self: *AppSession, seq: u32, result: ?std.json.Value
     }
     if (locs.items.len == 0) {
         st.notified_none += 1;
-        self.showNoticeKey(.ref_none);
+        self.showNoticeKey(kind_none);
         return;
     }
     const root: []const u8 = self.git_repo orelse (self.file_tree.rootAt(0) orelse "");
@@ -157,16 +199,16 @@ pub fn onReferencesResponse(self: *AppSession, seq: u32, result: ?std.json.Value
     self.reference_picker_followed_selected = null;
     self.chrome_host.reference_picker.selected = 0;
     self.chrome_host.reference_picker.setResultCount(rows.shown.items.len);
-    self.chrome_host.reference_picker.prompt = promptText(self, rows.total, rows.truncated);
+    self.chrome_host.reference_picker.prompt = promptText(self, kind, rows.total, rows.truncated);
     st.opened += 1;
     self.metal_dirty = true;
 }
 
 /// 프롬프트 「참조 N개」(상한을 넘겼으면 `N+`). 버퍼는 세션이 든다(문서를 빌리지 않는다).
-fn promptText(self: *AppSession, total: usize, truncated: bool) []const u8 {
+fn promptText(self: *AppSession, kind: lsp.rpc.LocationKind, total: usize, truncated: bool) []const u8 {
     var num: [24]u8 = undefined;
     const n = std.fmt.bufPrint(&num, "{d}{s}", .{ total, if (truncated) "+" else "" }) catch return "";
-    return maru.i18n.format(&self.reference_picker_prompt, maru.i18n.t(.ref_prompt), &.{.{ .s = n }});
+    return maru.i18n.format(&self.reference_picker_prompt, maru.i18n.t(promptKey(kind)), &.{.{ .s = n }});
     // (`reference_picker_prompt` 는 세션의 고정 버퍼 — `palette.State.prompt` 가 빌린다)
 }
 
@@ -220,7 +262,7 @@ fn goToRow(self: *AppSession, row: *const reference_picker.Row) void {
         },
         error.Unopenable, error.NoDocument => {
             st.notified_none += 1;
-            self.showNoticeKey(.ref_none);
+            self.showNoticeKey(noneKey(st.waiting_kind));
         },
     }
 }

@@ -104,7 +104,7 @@ keybind = F4 = esc:[2J
   `next_conflict`·`prev_conflict`(`F7`/`⇧F7` — 파일 안 다음/이전 충돌 구간, [병합 충돌 해결](editor-merge-conflicts.md) S5)·
   `next_diagnostic`·`prev_diagnostic`(`F8`/`⇧F8` — 다음/이전 진단, [시각 매핑](native-editor-visual-mapping.md) §5.4; VS Code
   `editor.action.marker.next/prev` 와 같은 키)·`show_hover`(caret 자리의 호버 박스 — 진단 메시지 + 언어 서버 hover, [툴링](editor-surface-tooling.md)
-  §8.2b. **기본 chord 없음** — VS Code 의 `⌘K ⌘I` 는 두 단계 chord 라 키 계약에 없다)·`goto_references`(`⇧F12` — 참조 피커, §8.2l)·`goto_definition`(`F12`·`⌘클릭` — 언어 서버의
+  §8.2b. **기본 chord 없음** — VS Code 의 `⌘K ⌘I` 는 두 단계 chord 라 키 계약에 없다)·`goto_references`(`⇧F12` — 참조 피커, §8.2l)·`goto_implementation`·`goto_type_definition`·`goto_declaration`(**기본 chord 없음** — 팔레트만, §8.2m)·`goto_definition`(`F12`·`⌘클릭` — 언어 서버의
   정의로, §8.2c)·`navigate_back`·`navigate_forward`(`⌃-`·`⌃⇧-` — 이동 스택 뒤로/앞으로, [시각 매핑](native-editor-visual-mapping.md) §5.2;
   편집기 Term 에서만 — 터미널에서는 `⌃-` 가 PTY 로 간다)·`trigger_parameter_hints`(`⇧⌘Space` — 시그니처 힌트, §8.2d)·
   `format_document`(`⇧⌥F` — 언어 서버로 문서 전체 포맷, §8.2e; 서버가 포맷을 못 하면 무동작, 저장 시 자동 포맷은 없다)·

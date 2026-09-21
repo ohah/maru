@@ -12599,6 +12599,95 @@ test "REF1 참조 피커 — ⇧F12 가 caret 자리의 참조를 묻고 응답�
     try testing.expect(s.chrome_host.notice.open);
 }
 
+test "REF2 구현·타입 정의·선언 — 팔레트 명령이 같은 피커로 온다: 구현 둘 → 피커(프롬프트 「구현 2개」·LocationLink) · 타입 정의 하나 → 바로 이동 · 선언 provider 없음 → 요청 0·알림 「지원하지 않습니다」 · 종류가 다른 응답은 같은 seq 라도 버린다 (제품 경계, §8.2m)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var f = (try SmtFixture.open(allocator, "im.c", "int zz;\nint zzz;\n  zz = zz + 1;\n")) orelse return error.SkipZigTest;
+    defer f.close(allocator);
+    const s = f.fx.session;
+    const term = f.term;
+    try testing.expect(f.ready());
+    const rows = &s.reference_picker_rows;
+    // ⑴ 구현 — `zz`(셋) 의 선언을 뺀 둘 → 피커. 프롬프트가 종류별이다.
+    term.rt.editor_selection = .{ .anchor_start = 5, .anchor_end = 5, .focus = 5 };
+    s.dispatchAppAction(.goto_implementation);
+    try testing.expect(s.editor_references.waiting);
+    try testing.expectEqual(maru.session.editor.lsp.rpc.LocationKind.implementation, s.editor_references.waiting_kind);
+    try testing.expect(refSettled(&f.fx));
+    try testing.expect(s.chrome_host.reference_picker.open);
+    try testing.expectEqual(@as(usize, 2), rows.all.items.len);
+    try testing.expectEqual(@as(u32, 2), rows.all.items[0].line);
+    {
+        var pb: [64]u8 = undefined;
+        const want = maru.i18n.format(&pb, maru.i18n.t(.impl_prompt), &.{.{ .s = "2" }});
+        try testing.expectEqualStrings(want, s.chrome_host.reference_picker.prompt);
+    }
+    try pressKey(&f.fx, .escape, .{});
+    // ⑵ 타입 정의 — 하나 → 목록 없이 이동(줄 0 글자 4 = offset 4).
+    term.rt.editor_selection = .{ .anchor_start = 19, .anchor_end = 19, .focus = 19 }; // 줄 2(`  zz = zz + 1;`, 17부터)의 첫 `zz`
+    const nav0 = s.editor_references.navigated;
+    s.dispatchAppAction(.goto_type_definition);
+    try testing.expect(refSettled(&f.fx));
+    try testing.expect(!s.chrome_host.reference_picker.open);
+    try testing.expectEqual(nav0 + 1, s.editor_references.navigated);
+    try testing.expectEqual(@as(usize, 4), term.rt.editor_selection.?.focus);
+    // ⑶ 선언 — provider 없음(가짜 기본): 요청이 안 나가고 알림. 서버가 있는데 못 하는 것과 「서버 없음」(무동작)은 다르다.
+    const sent0 = s.editor_lsp.sent_references;
+    s.dispatchAppAction(.goto_declaration);
+    try testing.expectEqual(sent0, s.editor_lsp.sent_references);
+    try testing.expectEqual(@as(u64, 1), s.editor_references.notified_unsupported);
+    try testing.expect(s.chrome_host.notice.open);
+    s.chrome_host.notice.dismiss();
+    // ⑷ 종류가 다른 응답은 버린다 — 구현을 기다리는 동안 references 의 응답(같은 seq 값)이 오면 무시.
+    term.rt.editor_selection = .{ .anchor_start = 5, .anchor_end = 5, .focus = 5 };
+    s.dispatchAppAction(.goto_implementation);
+    const seq_now = s.editor_references.waiting_seq;
+    const stale0 = s.editor_references.dropped_stale;
+    references_client.onLocationsResponse(s, .references, seq_now, null, false);
+    try testing.expectEqual(stale0 + 1, s.editor_references.dropped_stale);
+    try testing.expect(s.editor_references.waiting); // 아직 구현 응답을 기다린다
+    try testing.expect(refSettled(&f.fx));
+    try testing.expect(s.chrome_host.reference_picker.open);
+    try pressKey(&f.fx, .escape, .{});
+    // ⑷ʹ 구현이 없으면(`zzz` 는 한 번뿐 — 선언을 빼면 0) 알림 문구가 **구현**의 것이다(적대적 B6 — 참조의 문구를 쓰면 같은 수로 초록이었다).
+    term.rt.editor_selection = .{ .anchor_start = 13, .anchor_end = 13, .focus = 13 };
+    const none_before = s.editor_references.notified_none;
+    s.dispatchAppAction(.goto_implementation);
+    try testing.expect(refSettled(&f.fx));
+    try testing.expectEqual(none_before + 1, s.editor_references.notified_none);
+    try testing.expect(s.chrome_host.notice.open);
+    try testing.expectEqualStrings(maru.i18n.t(.impl_none), s.chrome_host.notice.message);
+    s.chrome_host.notice.dismiss();
+    // ⑸ 서버가 **없으면**(`lsp.enabled = false`) 「미지원」 알림이 아니라 무동작 — 다른 LSP 명령과 같은 규율(적대적 B3).
+    s.loaded_config.config.lsp.enabled = false;
+    defer s.loaded_config.config.lsp.enabled = true;
+    const unsup0 = s.editor_references.notified_unsupported;
+    const sent_off = s.editor_lsp.sent_references;
+    s.dispatchAppAction(.goto_declaration);
+    try testing.expectEqual(unsup0, s.editor_references.notified_unsupported);
+    try testing.expect(!s.chrome_host.notice.open);
+    try testing.expectEqual(sent_off, s.editor_lsp.sent_references);
+}
+
+test "REF3 선언 — provider 를 내는 서버(`MARU_FAKE_LSP_DECLCAP=1`)에서는 요청이 나가고 하나면 이동한다 (제품 경계, §8.2m)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    _ = setenv("MARU_FAKE_LSP_DECLCAP", "1", 1);
+    defer _ = unsetenv("MARU_FAKE_LSP_DECLCAP");
+    var f = (try SmtFixture.open(allocator, "dc.c", "int zz;\nint zzz;\n  zz = zz + 1;\n")) orelse return error.SkipZigTest;
+    defer f.close(allocator);
+    const s = f.fx.session;
+    const term = f.term;
+    try testing.expect(f.ready());
+    term.rt.editor_selection = .{ .anchor_start = 19, .anchor_end = 19, .focus = 19 };
+    const sent0 = s.editor_lsp.sent_references;
+    s.dispatchAppAction(.goto_declaration);
+    try testing.expectEqual(sent0 + 1, s.editor_lsp.sent_references);
+    try testing.expectEqual(@as(u64, 0), s.editor_references.notified_unsupported);
+    try testing.expect(refSettled(&f.fx));
+    try testing.expectEqual(@as(usize, 4), term.rt.editor_selection.?.focus);
+}
+
 test "GOTO1 정의로 이동 — F12·⌘클릭이 서버 응답의 첫 항목으로 caret 을 옮기고 되돌아가기 표식을 쌓는다; ⌃-/⌃⇧- 로 뒤로·앞으로; 다른 파일은 열어서; root 밖·없음은 알림; 낡은 응답은 버린다 (제품 경계, §8.2c·§5.2)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
@@ -14264,6 +14353,10 @@ const SmtFixture = struct {
     saved_repo: ?[]u8,
     fake_z: [std.fs.max_path_bytes + 1]u8 = undefined,
     cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined,
+    /// root 는 픽스처가 **소유**한다 — `git_repo` 가 이 슬라이스를 든다. 한때 `open` 의 스택 버퍼를 넘겨 판정자 본문에서는 이미 죽은
+    /// 메모리였고, 이동을 안 하는 SMT·FLD·SAV 에선 안 보이다가 `REF2` 의 `withinNavRoot` 가 「루트 밖」으로 읽었다(실측).
+    root_buf: [std.fs.max_path_bytes]u8 = undefined,
+    root_len: usize = 0,
 
     fn open(allocator: std.mem.Allocator, name: []const u8, source: []const u8) !?SmtFixture {
         var out: SmtFixture = undefined;
@@ -14273,8 +14366,8 @@ const SmtFixture = struct {
         const fake = (try fakeLspAbs(&abs_buf)) orelse return null;
         const fz = try std.fmt.bufPrintZ(&out.fake_z, "{s}", .{fake});
         _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);
-        var root_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const root = root_buf[0..try out.fx.dir.dir.realPath(testing.io, &root_buf)];
+        out.root_len = try out.fx.dir.dir.realPath(testing.io, &out.root_buf);
+        const root = out.root_buf[0..out.root_len];
         const cz = try std.fmt.bufPrintZ(&out.cfg_z, "{s}/config", .{root});
         _ = setenv("MARU_CONFIG", cz.ptr, 1);
         if (out.fx.session.config_path_buffer) |b| allocator.free(b);
@@ -14284,6 +14377,8 @@ const SmtFixture = struct {
         out.path = try std.fs.path.join(allocator, &.{ root, name });
         errdefer allocator.free(out.path);
         out.saved_repo = out.fx.session.git_repo;
+        // `git_repo` 는 **호출자에 놓인 픽스처**의 버퍼를 가리켜야 한다 — 이 함수는 값을 돌려주므로 여기서 잡으면 사본의 주소다.
+        // `ready()` 가 자기 주소로 다시 건다(모든 SMT·FLD·SAV·REF 판정자가 `ready()` 를 먼저 부른다).
         out.fx.session.git_repo = @constCast(root);
         out.term = (try pane_ops.openFileTermInActivePane(out.fx.session, out.path, .text)).term;
         out.fx.session.surface_initialized = true;
@@ -14302,6 +14397,7 @@ const SmtFixture = struct {
     }
 
     fn ready(self: *SmtFixture) bool {
+        self.fx.session.git_repo = @constCast(self.root_buf[0..self.root_len]); // 위 `open` 주석 — 자기 주소로 다시 건다
         const Ctx = struct { t: *Term };
         return pumpLspUntil(&self.fx, 3000, Ctx{ .t = self.term }, struct {
             fn f(c: Ctx) bool {

@@ -87,6 +87,13 @@ pub const Client = struct {
     /// 마지막으로 보낸 definition 요청의 seq(§8.2c).
     definition_seq: u32 = 0,
     references_seq: u32 = 0,
+    /// 구현·타입 정의·선언(§8.2m) — seq 는 종류마다, provider 도 종류마다.
+    implementation_seq: u32 = 0,
+    type_definition_seq: u32 = 0,
+    declaration_seq: u32 = 0,
+    implementation_supported: bool = false,
+    type_definition_supported: bool = false,
+    declaration_supported: bool = false,
     /// 마지막으로 보낸 signatureHelp 요청의 seq(§8.2d)와 서버가 준 트리거 글자.
     signature_seq: u32 = 0,
     signature_triggers: lsp.rpc.SignatureTriggers = .{},
@@ -548,6 +555,9 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
                 c.semantic_caps.deinit(self.allocator); // 재시작이면 옛 표를 놓는다
                 c.semantic_caps = lsp.semantic.capsFromResult(self.allocator, r.result) catch .{}; // §8.2i
                 c.fold_supported = lsp.fold_range.supportedFromResult(r.result); // §8.2j
+                c.implementation_supported = lsp.rpc.locationProviderSupported(r.result, .implementation); // §8.2m
+                c.type_definition_supported = lsp.rpc.locationProviderSupported(r.result, .type_definition);
+                c.declaration_supported = lsp.rpc.locationProviderSupported(r.result, .declaration);
                 c.save_caps = lsp.rpc.saveCapsFromResult(r.result); // §8.2k
                 c.phase = .ready;
                 c.restarts = 0;
@@ -601,7 +611,19 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
             },
             .references => |seq| {
                 self.editor_lsp.received_references += 1;
-                editor_references.onReferencesResponse(self, seq, if (r.is_error) null else r.result, r.is_error and lsp.rpc.isRetryableError(r.error_code));
+                editor_references.onLocationsResponse(self, .references, seq, if (r.is_error) null else r.result, r.is_error and lsp.rpc.isRetryableError(r.error_code));
+            },
+            .implementation => |seq| {
+                self.editor_lsp.received_references += 1;
+                editor_references.onLocationsResponse(self, .implementation, seq, if (r.is_error) null else r.result, r.is_error and lsp.rpc.isRetryableError(r.error_code));
+            },
+            .type_definition => |seq| {
+                self.editor_lsp.received_references += 1;
+                editor_references.onLocationsResponse(self, .type_definition, seq, if (r.is_error) null else r.result, r.is_error and lsp.rpc.isRetryableError(r.error_code));
+            },
+            .declaration => |seq| {
+                self.editor_lsp.received_references += 1;
+                editor_references.onLocationsResponse(self, .declaration, seq, if (r.is_error) null else r.result, r.is_error and lsp.rpc.isRetryableError(r.error_code));
             },
             .definition => |seq| {
                 self.editor_lsp.received_definitions += 1;
@@ -922,6 +944,22 @@ pub fn requestDefinition(self: *AppSession, term: *Term, offset: usize) ?u32 {
 
 /// `textDocument/references` 를 보낸다(§8.2l) — 정의 요청과 같은 자리 계산. 서버가 없거나 ready 아니면 `null`.
 pub fn requestReferences(self: *AppSession, term: *Term, offset: usize) ?u32 {
+    return requestLocations(self, term, .references, offset);
+}
+
+/// 그 종류의 provider 가 있는가(ready 클라이언트 기준). 없으면 요청하지 않는다(§8.2m ② — tsgo 는 없는 것을 물으면 `-32600`).
+pub fn locationKindSupported(self: *AppSession, term: *Term, kind: lsp.rpc.LocationKind) bool {
+    const c = readyClientFor(self, term) orelse return false;
+    return switch (kind) {
+        .references => true, // §8.2l — referencesProvider 는 따로 읽지 않는다(셋 다 낸다)
+        .implementation => c.implementation_supported,
+        .type_definition => c.type_definition_supported,
+        .declaration => c.declaration_supported,
+    };
+}
+
+/// 위치 요청(§8.2m) — 종류만 다르고 자리 계산·flush·seq 규율은 같다. 서버가 없거나 ready 아니면 `null`.
+pub fn requestLocations(self: *AppSession, term: *Term, kind: lsp.rpc.LocationKind, offset: usize) ?u32 {
     const c = readyClientFor(self, term) orelse return null;
     flushDocument(self, c, term);
     const d = c.findDoc(term.surfaceId()) orelse return null;
@@ -932,12 +970,20 @@ pub fn requestReferences(self: *AppSession, term: *Term, offset: usize) ?u32 {
     const line = opened.file.lines.line(line_idx) orelse return null;
     const text = content[line.start..line.contentEnd()];
     const character = lsp.position.characterOf(text, @intCast(off -| line.start), c.encoding);
-    c.references_seq = lsp.rpc.nextSeq(c.references_seq);
-    const msg = lsp.rpc.referencesRequest(self.allocator, c.references_seq, d.uri, @intCast(line_idx), character) catch return null;
+    // 종류마다 seq 를 따로 든다 — 응답 대조는 `(칸, seq)` 로 하고 `waiting_kind` 가 종류를 가르므로 하나를 나눠 써도 관측은 같다(적대적 C1: 등가).
+    // 그래도 가르는 이유는 id 표의 뜻이다: 칸마다 자기 seq 가 돈다(§8.2a).
+    const seq_slot: *u32 = switch (kind) {
+        .references => &c.references_seq,
+        .implementation => &c.implementation_seq,
+        .type_definition => &c.type_definition_seq,
+        .declaration => &c.declaration_seq,
+    };
+    seq_slot.* = lsp.rpc.nextSeq(seq_slot.*);
+    const msg = lsp.rpc.locationRequest(self.allocator, kind, seq_slot.*, d.uri, @intCast(line_idx), character) catch return null;
     defer self.allocator.free(msg);
     if (!send(self, c, msg)) return null;
     self.editor_lsp.sent_references += 1;
-    return c.references_seq;
+    return seq_slot.*;
 }
 
 /// `textDocument/rename` 을 보낸다(§8.2f). 서버가 없거나 `renameProvider` 가 없으면 `null`. 요청 전에 밀린 didChange 를 먼저 보낸다.

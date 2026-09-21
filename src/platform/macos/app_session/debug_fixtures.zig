@@ -1265,6 +1265,29 @@ pub fn applyForcedFoldAll(self: *AppSession) void {
     if (editor_ops.foldAll(self)) self.debug_fold_all_done = true;
 }
 
+/// MARU_FORCE_REPLACE_SAVE=<찾을 것>\t<바꿀 것> — 활성 편집기에 LSP 진단이 **온 뒤** 본문의 첫 <찾을 것> 을 <바꿀 것> 으로 바꾸고 저장한다
+/// (캡처 전용, tooling §8.2k — 「고치고 저장하면 진단이 지워지는가」). 진단이 올 때까지 매 프레임 되풀이하고, 한 번 저장하면 다시 안 한다(래치).
+pub fn applyForcedReplaceSave(self: *AppSession) void {
+    const raw = std.c.getenv("MARU_FORCE_REPLACE_SAVE") orelse return;
+    if (self.debug_replace_save_done) return;
+    const spec = std.mem.span(raw);
+    const tab = std.mem.indexOfScalar(u8, spec, '\t') orelse return;
+    const needle = spec[0..tab];
+    const replacement = spec[tab + 1 ..];
+    if (!self.surface_initialized or self.tabs.items.len == 0) return;
+    const term = pane_ops.activePane(self).activeTerm();
+    if (term.kind != .editor) return;
+    const doc = term.rt.editor_doc orelse return;
+    if (term.rt.editor_diagnostics.lsp.items.len == 0) return; // 서버 진단이 먼저 와야 「지워지는가」를 볼 수 있다
+    if (self.chrome_host.notice.open) self.chrome_host.notice.dismiss();
+    const at: u32 = @intCast(std.mem.indexOf(u8, doc.file.content, needle) orelse return);
+    term.rt.editor_selection = .{ .anchor_start = at, .anchor_end = at + @as(u32, @intCast(needle.len)), .focus = at + @as(u32, @intCast(needle.len)) };
+    if (!editor_ops.insertText(self, term, replacement)) return;
+    _ = editor_ops.saveDocument(self, term);
+    self.debug_replace_save_done = true;
+    self.debug_diff_caret_keys_done = true;
+}
+
 /// MARU_FORCE_RENAME_OPEN=1 — caret 자리에서 `rename_symbol` 을 불러 상자를 연 채 둔다(캡처 전용, tooling §8.2f). MARU_FORCE_RENAME=<이름> — 열고
 /// 그 이름으로 바꿔 곧바로 확정한다(요청이 나간다). 서버가 뜨기 전에는 상자가 안 열리므로 열릴 때까지 매 프레임 되풀이하고, 한 번 열리면
 /// 다시 부르지 않는다(래치). caret 훅의 래치도 함께 세운다(포맷 훅과 같은 이유).

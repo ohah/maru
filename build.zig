@@ -4578,7 +4578,7 @@ pub fn build(b: *std.Build) void {
         // 에 걸리므로 `"app_session.editor."` 한 줄이 그 파일을 통째로 고른다. 이름 접두들은 다른
         // 모듈에 흩어진 판정자를 마저 긁으려고 남긴다. 대가는 시간이다 — 실측 75초 → 97초
         // (판정자 1,519 → 1,850). 그 대가로 「있는데 안 도는」 판정자가 사라진다.
-        .filters = &.{ "MC", "EDIT", "UNDO", "SAVE", "EDOC", "FIND", "FOLD", "MOV", "CRT", "MM", "DGS", "DGP", "DGC", "LSF", "LSJ", "LSP", "LST", "LSI", "HVT", "HOVB", "GOTO", "SIG", "TXE", "FMT", "WSE", "RNM", "CPL", "CMP", "SGB", "SEM", "FRG", "FLD", "CAX", "CA", "DIRTY", "COPY", "PASTE", "CUT", "CLIP", "SEL", "DEL", "CUR", "TAB", "ADV", "AID", "PAIR", "CMT", "LANG", "EF", "IME", "ES", "NAV", "SP", "NS", "DFF", "LN", "CS", "ETX", "BR", "AC", "COL", "OPT", "OW", "EMK", "TIG", "FKB", "SBL", "DCARET", "DCOL", "DSB", "DHS", "CRUMB", "LOOP", "app_session.editor.", "app_session.editor_diff.", "session.editor." },
+        .filters = &.{ "MC", "EDIT", "UNDO", "SAVE", "EDOC", "FIND", "FOLD", "MOV", "CRT", "MM", "DGS", "DGP", "DGC", "LSF", "LSJ", "LSP", "LST", "LSI", "HVT", "HOVB", "GOTO", "SIG", "TXE", "FMT", "WSE", "RNM", "CPL", "CMP", "SGB", "SEM", "FRG", "FLD", "SAV", "CAX", "CA", "DIRTY", "COPY", "PASTE", "CUT", "CLIP", "SEL", "DEL", "CUR", "TAB", "ADV", "AID", "PAIR", "CMT", "LANG", "EF", "IME", "ES", "NAV", "SP", "NS", "DFF", "LN", "CS", "ETX", "BR", "AC", "COL", "OPT", "OW", "EMK", "TIG", "FKB", "SBL", "DCARET", "DCOL", "DSB", "DHS", "CRUMB", "LOOP", "app_session.editor.", "app_session.editor_diff.", "session.editor." },
     });
     const run_editor_tests = b.addRunArtifact(editor_tests);
     run_editor_tests.setCwd(b.path("."));

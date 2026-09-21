@@ -110,6 +110,8 @@ pub const Client = struct {
     /// 접힘 3층(§8.2j) — `foldingRangeProvider`.
     fold_seq: u32 = 0,
     fold_supported: bool = false,
+    /// 저장 통지(§8.2k) — `textDocumentSync.save`.
+    save_caps: lsp.rpc.SaveCaps = .{},
 
     fn deinit(self: *Client, allocator: std.mem.Allocator) void {
         if (self.proc) |*p| {
@@ -167,6 +169,7 @@ pub const State = struct {
     received_semantic: u64 = 0,
     sent_folding: u64 = 0,
     received_folding: u64 = 0,
+    sent_saves: u64 = 0,
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
         for (self.clients.items) |*c| c.deinit(allocator);
@@ -541,6 +544,7 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
                 c.semantic_caps.deinit(self.allocator); // 재시작이면 옛 표를 놓는다
                 c.semantic_caps = lsp.semantic.capsFromResult(self.allocator, r.result) catch .{}; // §8.2i
                 c.fold_supported = lsp.fold_range.supportedFromResult(r.result); // §8.2j
+                c.save_caps = lsp.rpc.saveCapsFromResult(r.result); // §8.2k
                 c.phase = .ready;
                 c.restarts = 0;
                 const msg = lsp.rpc.initializedNotification(self.allocator) catch return;
@@ -1017,6 +1021,21 @@ fn termWaitingSemantic(self: *AppSession, c: *Client, seq: u32) ?*Term {
         if (t.rt.editor_semantic.waiting and t.rt.editor_semantic.waiting_seq == seq) return t;
     }
     return null;
+}
+
+/// 저장 통지(§8.2k) — `saveDocument` 가 디스크 쓰기에 **성공한 뒤** 부른다. 밀린 didChange 를 먼저 보내고(서버가 저장된 본문을 든 채 통지를
+/// 받아야 한다) `didSave` 한 통(`includeText` 면 `saved_text` 를 싣는다). 서버가 없거나 ready 가 아니거나 문서를 안 열었거나(크기 상한) 미지원이면
+/// 아무것도 안 한다 — **줄 서지 않는다**(저장은 사실이지 요청이 아니다; 서버가 뜨면 didOpen 이 지금 내용을 통째로 보낸다). 보냈으면 true.
+pub fn noteSaved(self: *AppSession, term: *Term, saved_text: []const u8) bool {
+    const c = readyClientFor(self, term) orelse return false;
+    if (!c.save_caps.supported) return false;
+    flushDocument(self, c, term);
+    const d = c.findDoc(term.surfaceId()) orelse return false;
+    const msg = lsp.rpc.didSave(self.allocator, d.uri, if (c.save_caps.include_text) saved_text else null) catch return false;
+    defer self.allocator.free(msg);
+    if (!send(self, c, msg)) return false;
+    self.editor_lsp.sent_saves += 1;
+    return true;
 }
 
 /// `textDocument/foldingRange`(§8.2j) — 문서 전체. 보내기 전 `flushDocument`. 서버가 없거나 provider 가 없으면 `null`.

@@ -35896,3 +35896,47 @@ test "U2v 상자는 다른 오버레이와 배타다 — 팔레트·찾기를 �
     try testing.expect(fx.session.rename != null); // ★ 인라인은 그대로다
     try testing.expect(fx.session.rename.? == .term);
 }
+
+test "U2w 저장 물음은 이름 없는 문서에만 — 비교·읽기 전용·보통 문서는 지금까지대로다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    const io = std.testing.io;
+    try dir.dir.writeFile(io, .{ .sub_path = "ro.txt", .data = "ro\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    pinUntitledBase(fx.session, root);
+    const path = try std.fs.path.join(allocator, &.{ root, "ro.txt" });
+    defer allocator.free(path);
+
+    // ⑴ **읽기 전용 문서** — 이름 상자가 뜨면 안 된다(저장할 수 없는 문서다).
+    const ro = try openPathInActivePane(fx.session, path);
+    ro.rt.editor_doc.?.file.read_only = true;
+    try testing.expect(!saveDocument(fx.session, ro));
+    try testing.expect(fx.session.rename == null);
+
+    // ⑵ **비교 Term** — 저장할 축이 없다(§7). 여기서 상자가 뜨면 비교 결과에 이름을 붙이려 든다.
+    const diff_term = try openPathInActivePane(fx.session, path);
+    diff_term.rt.editor_diff = .{};
+    defer diff_term.rt.editor_diff = null;
+    try testing.expect(!saveDocument(fx.session, diff_term));
+    try testing.expect(fx.session.rename == null);
+
+    // ⑶ **보통 문서** — 묻지 않고 바로 쓴다(U2j 와 같은 술어를 다른 입구로 확인한다).
+    const normal = try openPathInActivePane(fx.session, path);
+    normal.rt.editor_doc.?.file.read_only = false;
+    normal.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, normal, "n"));
+    try testing.expect(saveDocument(fx.session, normal));
+    try testing.expect(fx.session.rename == null);
+
+    // ⑷ **이름 없는 문서만** 묻는다.
+    const untitled = try openUntitledInActivePane(fx.session);
+    try testing.expect(insertText(fx.session, untitled, "u"));
+    try testing.expect(!saveDocument(fx.session, untitled));
+    try testing.expect(fx.session.rename != null);
+    try testing.expect(fx.session.rename.? == .untitled_save);
+}

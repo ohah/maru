@@ -1219,6 +1219,25 @@ agent-hooks` 를 돌린다 — 지금은 `~/.local/bin/maru`, 09-03 빌드)가 �
 | 4 | 규칙 불변식 property(무작위 Read/Edit/셸 diff 순서 × after, 2만 회 — `scratchpad/at3d_property.zig`) | I1 `editTargeted` ⇔ Edit 있음 · I2 `before_trusted` ⇔ 첫 캡처가 Read · I3 `revertedByAgent` ⇒ 신뢰 ∧ 첫 내용==after · I4 before 는 첫 캡처로 고정 · I6 셸 diff ∧ 내용 다름 ⇒ `editedByAgent` · I7 Read 만 ⇒ 거짓 — **위반 0**(처음 6,998건은 하네스가 «셸 diff 가 첫 캡처» 를 잘못 모델링한 것 — 그때 before 는 `no_before` 다) |
 | 5 | 페이로드 모양 | `Write` 새 파일(`A`)·`apply_patch` «Delete File»(`D`) → `✎` 로 세는 판정자 추가(✎N 4). **`NotebookEdit` 은 `notebook_path` 를 쓰는데 파서는 `file_path` 만 읽는다** → 캡처 안 됨. 60일 트랜스크립트에 `NotebookEdit`·`MultiEdit` 0건이라 코드는 안 바꾸고 §8 한계로 적는다 |
 
+**실기 검증 (2026-09-21, 사용자 요청 「직접 해보실 수 있는거 아니예요?」 — AT3c·RA8·AT3d 세 축을 한 번에)**
+
+방법: `tools/remote-scm/agent_turn_e2e.sh` — 이 Mac 에서 새 Maru.app 을 띄우고(격리 HOME) 그 pane 이 **새 CLI 의 `maru ssh`** 로
+이 Mac 자신(하네스 loopback sshd, `AcceptEnv LC_*`)에 들어가 하네스 저장소에서 `claude -p`(Edit + Write) 한 턴을 돌린 뒤
+에이전트 탭을 찍는다 — 사용자 워크플로(다른 기기 GUI → ssh → 이 Mac)와 같은 경로. 전제로 `~/.local/bin/maru`(09-03 빌드)를 이
+빌드로 바꿨다(`maru.bak-20260921` 백업).
+
+| 축 | 본 것 |
+|---|---|
+| RA8 | GUI 의 원격 설치(`원격 훅을 심었다 dest=127.0.0.1`)가 이 Mac 의 `~/.claude/settings.json` 을 **통일 커맨드·11 이벤트**로 썼고(15:52:55), 그 뒤 두 번의 실행에서 `원격 훅이 이미 있다` — **mtime 불변**(핑퐁 없음). 원격 셸에 `LC_MARU_PANE=<pid>_1` 이 도착했고 훅 로그 `remote-agent-events/<pid>_1.ndjson`(3.5 KB — SessionStart·UserPromptSubmit·Pre(Read×2·Edit·Write)·Stop)·`.tmux` 옆 파일 2 B(tmux 밖) |
+| AT3c | 원격 턴 스냅샷이 **저쪽(= 이 Mac)** 에 찍혔다 — `/tmp/maru-turn-<hash>.idx`(225 B, 작은 저장소), 하네스 저장소 `git status` 는 ` M capture1.txt`/` M capture2.txt`(**진짜 index 불변**). 목록도 저쪽에서 읽혀 에이전트 탭에 「**2개 파일 · ✎ AI 편집 2** · claude 완료했습… 15:56」 |
+| AT3d | `✎ 2` — Edit(capture1)·Write(capture2) 둘 다 겨냥 ∧ 목록. (claude 가 둘 다 Read 를 먼저 했으므로 `before_trusted` 경로였다 — Read 없는 경로는 판정자가 결정적으로 본다) |
+| 덤 | 같은 시간대에 **사용자의 실제 GUI**(다른 기기)가 이 Mac 에 `/tmp/maru-turn-*.idx`(238 KB — maru5 저장소)를 세 번 남겼다 — 이 세션(t27)의 턴이 그쪽 화면에서 스냅샷되고 있다는 실물 증거 |
+
+첫 두 시도가 죽은 이유(기록): ⑴ 기본 `shell.args = -i` 가 래퍼 뒤에 붙어 `ssh -i` 로 읽혔다 → `shell.args =` 로 비움. ⑵ 원격 명령의
+작은따옴표 중첩 → base64 로 싣는다. ⑶ 비대화형 ssh 셸의 PATH 에 `claude` 가 없다 → 절대경로. ⑷ pane 의 HOME 은 GUI 의 격리 HOME 이
+아니라 **실제 HOME** 이라(앱이 passwd 로 되돌린다) control socket 경로가 격리 HOME 의 심링크와 갈렸지만 키 인증으로 새 마스터가 서서
+결과는 같았다.
+
 ### AT4 — 배지·고지 합류 ✅ 고지 줄 완료 (2026-08-25) · 나머지 셋은 tree 제거와 묶인다
 
 > **2026-08-25 적대적 검증.** 이 절은 항목 넷을 나란히 적었는데 **셋은 공존에서 낼 수 없거나 뜻이 다르다.**

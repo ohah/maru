@@ -16,6 +16,9 @@ session_root=$(mktemp -d "/tmp/maru-editor-save-conflict.XXXXXX")
 trap 'rm -rf "$session_root"' EXIT HUP INT TERM
 home="$root/home"
 document="$root/doc.txt"
+# 밖에서 쓴 내용의 **사본**. 판정을 `$(cat …)` 비교로 하면 셸이 끝의 개행을 지워 「내용은 같고 개행만
+# 다르게 덮어쓴 저장」이 통과한다 — `cmp` 로 바이트까지 본다.
+reference="$root/expected.txt"
 ready="$root/ready"
 summary="$workspace/zig-out/maru-macos-app/app.summary.txt"
 
@@ -56,10 +59,20 @@ run_scenario() {
         # 바뀌었다"가 성립한다. 고정 sleep 은 기계에 따라 순서가 뒤집혀 무엇을 쟀는지 알 수 없다.
         waited=0
         while [ ! -f "$ready" ]; do
+            # **앱이 먼저 죽었으면 기다릴 상대가 없다.** 이 검사가 없으면 무장 실패(시나리오 오타로
+            # 드라이버가 안 붙는 것)와 크래시가 전부 20초를 태운 뒤 「밖에서 바꿔 달라고 안 했다」로
+            # 보고돼, 요약이 들고 있는 진짜 이유를 가린다.
+            if ! kill -0 "$app_pid" 2>/dev/null; then
+                wait "$app_pid" 2>/dev/null || true
+                echo "editor save-conflict smoke app exited before asking for the external change" >&2
+                grep -E '^editor_save_conflict_smoke_' "$summary" >&2 || true
+                exit 1
+            fi
             if [ "$waited" -ge 200 ]; then
                 kill "$app_pid" 2>/dev/null || true
                 wait "$app_pid" 2>/dev/null || true
                 echo "editor save-conflict smoke never asked for the external change" >&2
+                grep -E '^editor_save_conflict_smoke_' "$summary" >&2 || true
                 exit 1
             fi
             sleep 0.1
@@ -67,6 +80,7 @@ run_scenario() {
         done
         # **다른 프로세스가 쓴다** — 앱이 쓰면 그것은 "밖에서"가 아니다.
         printf '%s' "$external" > "$document"
+        printf '%s' "$external" > "$reference"
     fi
 
     wait "$app_pid"
@@ -79,7 +93,7 @@ grep -Eq '^editor_save_conflict_smoke_scenario=external-conflict$' "$root/extern
 grep -Eq '^editor_save_conflict_smoke_failure=$' "$root/external-conflict.summary.txt"
 grep -Eq '^editor_save_conflict_smoke_stage=done$' "$root/external-conflict.summary.txt"
 # 앱의 판정과 **별개로** 파일을 직접 센다. 앱 안의 probe 가 거짓말을 해도 이 줄은 안 속는다.
-test "$(cat "$document")" = "$(printf '%s' "$external")"
+cmp -s "$document" "$reference"
 
 run_scenario clean-save
 grep -Eq '^editor_save_conflict_smoke_scenario=clean-save$' "$root/clean-save.summary.txt"

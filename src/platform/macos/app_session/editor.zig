@@ -37285,6 +37285,192 @@ test "C1a-6 상자가 떠 있는데 그 문서를 닫으면 — 확인도 접히
     }
 }
 
+test "C1a-9 상자는 «⌘S 만의 것»이다 — 닫기와 일괄 저장은 자기 길을 그대로 간다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const c = try ConflictFixture.init(allocator, "only.txt", "v0\n");
+    defer c.deinit(allocator);
+    const s = c.fx.session;
+    // 이 판에는 셸 Term 도 있다 — 닫기 확인이 그 문서 때문에 뜨는지 보려면 나머지는 조용해야 한다.
+    for (s.tabs.items) |tb| for (tb.panes.items) |pn| for (pn.terms.items) |tm| {
+        if (tm.kind != .editor) tm.surface.core.semantic_state = .input;
+    };
+
+    try testing.expect(insertText(s, c.term, "x"));
+    try c.writeOutside("only.txt", "outside\n");
+
+    // ⑴ **일괄 경로**: 같은 충돌을 만나도 **상자를 안 띄운다**. 스무 파일이면 스무 개가 뜬다(§3.9d).
+    if (editor_ops_saveForBulkTest(s, c.term)) |_| {
+        try testing.expect(false);
+    } else |e| {
+        try testing.expectEqual(@as(anyerror, error.ExternalConflict), e);
+    }
+    try testing.expect(!s.chrome_host.confirm.open);
+    try testing.expect(s.pending_confirm == .none);
+
+    // ⑵ **닫기 경로**: 확인이 뜨지만 그것은 **닫기 확인**이다(그 경로의 자기 안내) — 저장 충돌 상자가
+    //    그 자리를 빼앗으면 사용자는 「닫을까요?」를 못 보고 닫기가 조용히 취소된다.
+    const pane = pane_ops.activePane(s);
+    var idx: usize = pane.terms.items.len;
+    while (idx > 0) {
+        idx -= 1;
+        if (pane.terms.items[idx] == c.term) break;
+    }
+    pane.active_term = idx;
+    const before_n = pane.terms.items.len;
+    s.requestClose(.active_term);
+    try testing.expectEqual(before_n, pane.terms.items.len); // 안 닫혔다(묻는 중)
+    try testing.expect(s.chrome_host.confirm.open);
+    try testing.expect(s.pending_confirm != .save_conflict);
+    try testing.expectEqualStrings(maru.i18n.t(.app_close_unsaved), s.chrome_host.confirm.message);
+}
+
+test "C1a-10 재진입: 두 문서가 잇달아 충돌해도 답은 «마지막에 물은 그 문서»에만 간다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const c = try ConflictFixture.init(allocator, "one.txt", "one0\n");
+    defer c.deinit(allocator);
+    const s = c.fx.session;
+
+    // 두 번째 문서를 같은 폴더에 만든다.
+    try c.writeOutside("two.txt", "two0\n");
+    const root = std.fs.path.dirname(c.path).?;
+    const path2 = try std.fs.path.join(allocator, &.{ root, "two.txt" });
+    defer allocator.free(path2);
+    const t2 = try openPathInActivePane(s, path2);
+    t2.rt.editor_selection = editor_selection.Selection.at(0);
+
+    // 둘 다 고치고 둘 다 밖에서 바꾼다.
+    try testing.expect(insertText(s, c.term, "A"));
+    try testing.expect(insertText(s, t2, "B"));
+    try c.writeOutside("one.txt", "one-outside\n");
+    try c.writeOutside("two.txt", "two-outside\n");
+
+    // ⑴ 첫 문서로 물어 두고,
+    c.pressSave();
+    try testing.expect(s.pending_confirm == .save_conflict);
+    try testing.expectEqual(c.term.surface.id, s.pending_confirm.save_conflict);
+
+    // ⑵ **답하지 않고** 두 번째 문서로 또 묻는다(팔레트·메뉴는 모달 중에도 액션을 디스패치한다).
+    const pane = pane_ops.activePane(s);
+    var idx: usize = pane.terms.items.len;
+    while (idx > 0) {
+        idx -= 1;
+        if (pane.terms.items[idx] == t2) break;
+    }
+    pane.active_term = idx;
+    s.dispatchAppAction(.editor_save);
+    // 상자는 **하나**이고 대상은 마지막에 물은 그 문서다 — 첫 문서가 남아 있으면 답이 그것을 덮는다.
+    try testing.expect(s.chrome_host.confirm.open);
+    try testing.expect(s.pending_confirm == .save_conflict);
+    try testing.expectEqual(t2.surface.id, s.pending_confirm.save_conflict);
+
+    // ⑶ **답하기 전에 활성 Term 을 첫 문서로 돌려놓는다.** 모달이 떠 있어도 메뉴·팔레트는 탭을
+    //    옮기는 액션을 디스패치하므로(바로 위 ⑵ 가 같은 사실을 쓴다) 이것은 실재하는 순서다.
+    //    **답은 「활성」이 아니라 「물은 그 문서」로 가야 한다** — 활성으로 추정하면 사용자가 보지도
+    //    않은 문서를 덮어쓴다(적대적 3회차에서 이 변이가 살아남아 이 줄이 생겼다).
+    var back: usize = pane.terms.items.len;
+    while (back > 0) {
+        back -= 1;
+        if (pane.terms.items[back] == c.term) break;
+    }
+    pane.active_term = back;
+
+    // ⑷ **덮어쓰기는 두 번째 문서에만 간다.**
+    try c.answer('y');
+    {
+        const two = try c.diskText(allocator, "two.txt");
+        defer allocator.free(two);
+        try testing.expectEqualStrings("Btwo0\n", two);
+        const one = try c.diskText(allocator, "one.txt");
+        defer allocator.free(one);
+        try testing.expectEqualStrings("one-outside\n", one); // 첫 문서는 안 건드렸다
+    }
+    try testing.expect(isDirty(c.term)); // 첫 문서는 여전히 저장 안 됨
+    try testing.expect(!isDirty(t2));
+
+    // ⑸ **답을 또 눌러도 아무 일도 없다** — 보류가 비었으므로 되살아난 답이 남의 문서를 덮지 않는다.
+    try testing.expect(s.pending_confirm == .none);
+    s.dispatchChromeAction(.confirm_accept);
+    {
+        const one = try c.diskText(allocator, "one.txt");
+        defer allocator.free(one);
+        try testing.expectEqualStrings("one-outside\n", one);
+    }
+}
+
+test "C1a-11 다시 읽기도 «물은 그 문서»에만 간다 — 활성 추정이면 남의 편집이 날아간다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const c = try ConflictFixture.init(allocator, "rone.txt", "r1\n");
+    defer c.deinit(allocator);
+    const s = c.fx.session;
+
+    try c.writeOutside("rtwo.txt", "r2\n");
+    const root = std.fs.path.dirname(c.path).?;
+    const path2 = try std.fs.path.join(allocator, &.{ root, "rtwo.txt" });
+    defer allocator.free(path2);
+    const t2 = try openPathInActivePane(s, path2);
+    t2.rt.editor_selection = editor_selection.Selection.at(0);
+
+    try testing.expect(insertText(s, c.term, "MINE1"));
+    try testing.expect(insertText(s, t2, "MINE2"));
+    try c.writeOutside("rone.txt", "r1-outside\n");
+    try c.writeOutside("rtwo.txt", "r2-outside\n");
+
+    // **첫 문서로 묻고**, 활성은 두 번째로 옮긴 뒤 **다시 읽기**를 고른다.
+    c.pressSave();
+    try testing.expectEqual(c.term.surface.id, s.pending_confirm.save_conflict);
+    const pane = pane_ops.activePane(s);
+    var idx: usize = pane.terms.items.len;
+    while (idx > 0) {
+        idx -= 1;
+        if (pane.terms.items[idx] == t2) break;
+    }
+    pane.active_term = idx;
+    try c.answer('d');
+
+    // ⑴ **물은 문서**가 디스크를 받아들였다.
+    try testing.expectEqualStrings("r1-outside\n", c.term.rt.editor_doc.?.file.content);
+    try testing.expect(!isDirty(c.term));
+    // ⑵ **남의 문서는 그대로다** — 활성으로 추정하면 여기서 `MINE2` 가 통째로 날아간다.
+    try testing.expectEqualStrings("MINE2r2\n", t2.rt.editor_doc.?.file.content);
+    try testing.expect(isDirty(t2));
+}
+
+test "C1a-8 다시 읽기는 «그 파일의 형식»을 따른다 — 다음 저장이 BOM·개행을 조용히 갈지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    // LF·BOM 없음으로 시작한다.
+    const c = try ConflictFixture.init(allocator, "fmt.txt", "v0\n");
+    defer c.deinit(allocator);
+    const s = c.fx.session;
+    try testing.expect(!c.term.rt.editor_doc.?.file.format.has_bom);
+
+    try testing.expect(insertText(s, c.term, "mine"));
+    // **밖에서 형식까지 바뀌었다** — BOM 이 붙고 CRLF 가 됐다.
+    try c.writeOutside("fmt.txt", "\xef\xbb\xbfouter\r\n");
+    c.pressSave();
+    try c.answer('d');
+
+    // ⑴ 내용은 BOM 을 뗀 그것이고, **형식은 새 파일의 것**이다.
+    try testing.expectEqualStrings("outer\r\n", c.term.rt.editor_doc.?.file.content);
+    try testing.expect(c.term.rt.editor_doc.?.file.format.has_bom);
+    try testing.expectEqual(
+        maru.session.editor.line_index.LineEnding.crlf,
+        c.term.rt.editor_doc.?.file.format.dominant_ending,
+    );
+
+    // ⑵ **그래서 다음 저장이 그 형식으로 쓴다.** 형식을 안 따라가면 여기서 BOM 이 사라진다 — 사용자가
+    //    바꾸지 않은 포맷을 조용히 바꾸는 것이고, §4.1 이 금지한 그것이다.
+    try testing.expect(insertText(s, c.term, "z"));
+    try saveDocument(s, c.term);
+    const on_disk = try c.diskText(allocator, "fmt.txt");
+    defer allocator.free(on_disk);
+    try testing.expect(std.mem.startsWith(u8, on_disk, "\xef\xbb\xbf"));
+    try testing.expect(std.mem.endsWith(u8, on_disk, "\r\n"));
+}
+
 test "C1a-7 CAS 를 건너뛰는 길은 «사용자가 고른 자리» 하나다 — 평범한 저장은 여전히 묻는다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;

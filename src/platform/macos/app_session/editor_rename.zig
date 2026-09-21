@@ -155,9 +155,20 @@ pub fn refreshAnchor(self: *AppSession, t: Target) bool {
 pub fn refreshCaretAnchor(self: *AppSession, surface_id: u64) bool {
     const term = termFor(self, surface_id) orelse return false;
     const sel = term.rt.editor_selection orelse return false;
-    const a = anchorAt(term, sel.focus) orelse return false;
-    self.chrome_host.rename_box.show(a.x, a.y, a.h);
-    return true;
+    if (anchorAt(term, sel.focus)) |a| {
+        self.chrome_host.rename_box.show(a.x, a.y, a.h);
+        return true;
+    }
+    // ⚠️ **caret 이 화면 밖이면 상자만 사라지고 모달이 남는다** — 사용자는 타이핑이 아무 데도 닿지
+    // 않는 것을 본다(teardown 과 같은 증상, 다른 원인: 휠로 굴렸다). 상자는 caret 에 붙어 있으므로
+    // **caret 을 화면 안으로 되돌린다** — 「그 문서를 보면서 이름을 정한다」가 이 상자의 뜻이고,
+    // 스크롤을 막거나 상자를 닫는 것보다 그 뜻에 맞다(적대적 20회차).
+    editor_ops.revealCaretForRenameBox(self, term);
+    if (anchorAt(term, sel.focus)) |a| {
+        self.chrome_host.rename_box.show(a.x, a.y, a.h);
+        return true;
+    }
+    return false;
 }
 
 pub const Anchor = struct { x: i32, y: i32, h: u32 };

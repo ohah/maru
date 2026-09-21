@@ -70,6 +70,158 @@ fn linkSessionHostNotificationCompileStub(b: *std.Build, compile: *std.Build.Ste
     });
 }
 
+/// 소스를 훑어 불변식을 고정하는 판정자 하나. **내용만 적는다** — 모듈 만들기 · `addRunArtifact` ·
+/// `setCwd(".")` · `check-boundaries` 에 매달기는 스무 건이 전부 같아서 `build()` 의 루프가 한다.
+///
+/// **왜 표인가.** 표가 되기 전 한 건은 아홉 줄이었고, 매다는 줄은 **3천 줄 떨어진 자리**에 따로
+/// 있었다(등록 5032, 매달기 8271). 셋 중 하나를 빠뜨리면 그 판정자는 컴파일도 실행도 되지 않은 채
+/// 조용히 CI 밖에 남는다 — 실제로 `tests/boundary/imports.zig` 가 「등록을 빠뜨리면 그 게이트는
+/// 다시 CI 밖이 된다」며 짝을 세고 있는 이유가 그것이다. 표는 그 셋을 한 줄로 묶어 **빠뜨릴 자리를
+/// 없앤다**.
+///
+/// **새 방식이 아니다.** `tools/release_adapter_macos_test_modules.zig` 가 이미 같은 모양
+/// (`Row{ root, names, deps }`)으로 모듈 77 개를 들고, `build/session_host_release_gates.zig` 의
+/// `ra_mac_modules` 가 이름을 푼다. 다른 점은 둘이다: 그쪽은 이름→모듈 맵을 **표 자신에서**
+/// 만들고(`row.names`) 여기는 `boundary_scan_modules` 를 따로 두며, 그쪽은 77 개를 한 바이너리로
+/// 모아 `--maru-expect-tests` 로 총수를 잠그는데 여기는 스무 개가 각자 바이너리라 그 가드가 없다.
+/// 그래서 행 수는 `build_graph` 판정자(`countTableRows`)가 센다.
+///
+/// **필드는 쓰이는 것만 둔다.** 다른 등록이 쓰는 `filters`·`args`·`env`·`link_libc` 는 여기 스무
+/// 건 중 아무도 안 쓴다. 필요해지는 행이 생길 때 그 필드를 더한다.
+const BoundaryScan = struct {
+    /// 판정자 파일.
+    root: []const u8,
+    /// 주입받을 모듈 **이름**.
+    ///
+    /// `tests/boundary/` 의 파일은 **자기가 모듈 루트**라 `tests/support/` 를 상대 경로로 못 본다
+    /// (`import of file outside module path`). 그래서 모듈로 준다. 이름 → 모듈 은 `build()` 안의
+    /// `boundary_scan_modules` 하나가 풀고, 목록에 없는 이름은 빌드가 그 자리에서 죽는다.
+    deps: []const []const u8 = &.{},
+    /// 기본은 `optimize`. 다른 모드가 필요한 자리만 적는다.
+    optimize: ?std.builtin.OptimizeMode = null,
+};
+
+const boundary_scans: []const BoundaryScan = &.{
+    // 84개 판정자가 소스 트리를 걷고 스캔한다 — 실행이 시간의 본체라(로컬 Debug 40초 → ReleaseSafe 7초,
+    // CI 84초) 안전 검사는 유지한 채 최적화한다. 제품 코드를 컴파일하지 않는 std 전용 판정자라 모드가 검사
+    // 의미를 바꾸지 않는다(빌드 모드로 분기하는 코드 없음, 실측 2026-09-06).
+    .{ .root = "tests/boundary/imports.zig", .deps = &.{ "build_source", "build_graph" }, .optimize = .ReleaseSafe },
+
+    // chrome 셀 텍스트의 grapheme cluster 규율(CG1) — 셀을 만드는 함수가 문자열을 codepoint 단위로 디코드하면
+    // NFD가 자모로 흩어진다(docs/grapheme-clustering.md §3.1a). import 경계와 같은 결의 소스 스캔이라 같은 step에 건다.
+    .{ .root = "tests/boundary/chrome_text_clusters.zig" },
+
+    // 아이콘 이름 규율(IC2) — 등록 아이콘을 codepoint 리터럴(`0xF0023`·`"\u{F0023}"`)로 부르면 어느 그림인지
+    // 안 읽히고 자산 재배치 때 조용히 폰트 폴백으로 빠진다(docs/chrome-strategy.md §9.7). 같은 결의 소스 스캔.
+    .{ .root = "tests/boundary/icon_literals.zig" },
+
+    // cwd 축 규율 — "이 터미널이 서 있는 폴더"를 푸는 지점이 하나여야 한다(docs/editor-surface-dock.md §3.5).
+    // 그 규칙이 주석에만 있던 동안 소비자 여섯이 관측(`observation.cwd`)을 직독해 갈렸고, 셸 통합이 없는 셸과
+    // 재개 Term에서 사이드바·상태바·검색·도크 범위 칩·대화 매핑이 한꺼번에 죽었다. 같은 결의 소스 스캔으로
+    // 정당한 직독의 **개수를 고정**한다(0건 규칙은 세울 수 없다 — Q1 직독이 실재한다).
+    .{ .root = "tests/boundary/cwd_axis.zig" },
+
+    // 원격 스트리머의 **커서 이름 축**. 이벤트는 역조회로 치환된 이름, 커서는 파일 이름 — 이 둘이
+    // 어긋나면 두 기능이 각자 초록인 채로 `--resume` 사슬이 끊긴다(2026-09-03 실측으로 잡았다).
+    .{ .root = "tests/boundary/remote_cursor_axis.zig" },
+
+    // **원격 활동의 오프셋이 로컬 syscall 로 새는 자리가 0 인가**(RAV3 — docs/plans/remote-agent-activity.md
+    // §6.3). 산문으로 두면 반드시 샌다: 원격 경로가 로컬에도 같은 모양으로 있으면 `openFile` 이
+    // **성공해서** 남의 대화가 뜬다(갤러리 §4.1.2 가 실제로 낸 결함). 원격 파일 트리가 같은 축에서
+    // 같은 게이트를 세웠다.
+    .{ .root = "tests/boundary/remote_activity_local_syscall_axis.zig" },
+
+    // `fstat` 축(`file_tree.ScanIdentity`)을 만들거나 벗기는 자리를 재고로 고정한다. Zig 는 필드
+    // 프라이버시가 없어 타입만으로는 `.{ .value = 아무거나 }` 를 막지 못한다 — 언어가 못 하는 봉인을
+    // 이 소스 스캔이 대신한다(2026-08-21: 축을 섞어 탐색기 안내가 끊이지 않던 결함).
+    .{ .root = "tests/boundary/scan_identity_axis.zig" },
+
+    // 도크 트리의 **발행 목록**을 `updateFileTree` 의 발행 단계 밖에서 갈아 끼우는 자리는 출처 기록
+    // (`notePublishedLocalFileTreeRows`)을 반드시 지난다 — 안 지나면 「행은 로컬인데 펜스는 원격」이
+    // 되고 원격을 보는 중에 로컬 트리가 화면에 남는다(2026-09-07 사용자 보고 · RF7).
+    .{ .root = "tests/boundary/file_tree_publish_axis.zig" },
+
+    // detached worker 를 띄우는 backend 는 자기 `deinit` 이나 세션 종료가 반드시 거둔다 — 안 거두면
+    // 아직 도는 job 의 할당이 **다른 판정자의** 누수로 잡히고 트레이스를 찍다 죽는다(2026-09-08 CI
+    // abort: `dupe` 누수 → segfault → 134). 빠른 기계에서는 안 보여 소스 스캔만이 이 축을 CI 로 끌어온다.
+    .{ .root = "tests/boundary/detached_worker_quiesce_axis.zig" },
+
+    // 중립 층으로 가는 경로를 native 구분자로 잇지 않는다 — Windows 전용 오답이라 macOS·Linux 러너에는
+    // 안 보인다. 소스 스캔이 그 배선을 CI 로 끌어오는 유일한 길이다(docs/windows-platform.md §2m.5).
+    .{ .root = "tests/boundary/neutral_path_join.zig" },
+
+    // cli/ 순수 경계 — `cli/`의 제품 코드는 파싱·wire·렌더만 갖고 소켓/프로세스/파일 syscall은 명시된
+    // 예외 파일에만 둔다. 그 순수성이 파서·validator를 살아 있는 앱 없이 단위 테스트할 수 있는 근거인데,
+    // 2026-08-16까지 그 규칙은 **파일 주석에만** 있었다(imports.zig의 강제 레이어 목록에 src/cli가 없었다).
+    // facade-contracts.md "import boundary는 테스트로 확인한다"에 맞춰 같은 결의 소스 스캔으로 닫는다.
+    .{ .root = "tests/boundary/cli_purity.zig" },
+
+    // IME 조합 확정 규칙의 **모달리티 목록** — AppKit 입력기 세션 종료는 NSView만 할 수 있어서 이 규칙은
+    // chokepoint 하나로 닫히지 않고 Swift 입력 경계마다 합류시켜야 하는 열린 목록이다. 빠뜨리면 그 경로에서만
+    // 조합 잔상이 남는다(실측 두 번: 탭 전환·드롭). Swift 는 단위 테스트 하니스가 없어 소스 스캔으로 든다.
+    .{ .root = "tests/boundary/ime_commit_modalities.zig" },
+
+    // i18n: 세션 생성 경로마다 로케일을 넘기는가. 안 넘기면 `ui.language = auto`가 조용히 영어로
+    // 떨어진다 — 크래시도 경고도 없이 화면 언어만 틀리므로 컴파일러도 테스트도 못 잡는다. 실제로 I4a에서
+    // 두 번째 생성 경로(quick 패널)를 빠뜨렸다. 단일 출처: docs/i18n.md §5.1.
+    .{ .root = "tests/boundary/i18n_locale_injection.zig" },
+
+    // sans-io: SSH 프로토콜 층이 소켓·파일·시계를 만지는가. 모바일 브리지는 계약상 OS 호출이 0 이라
+    // (docs/ssh-client.md §2) 그 성질이 깨지면 **모바일 링크 오류로 늦게** 드러난다. 허용 목록 방식이고
+    // 디렉터리를 직접 훑는다 — 앞선 판정자가 금지 목록 + 등록 개수라서 무력했던 실측을 그 파일이 적어 뒀다.
+    .{ .root = "tests/boundary/ssh_sans_io.zig" },
+
+    // i18n 2차 방어: 번역 대상 레이어에 새 한국어 리터럴이 들어오지 않는가. 1차(파라미터 타입)를
+    // 세울 수 없는 sink가 남으므로(정적·동적이 섞이는 컬렉션 — 계약 §7.2) 거기서는 이 검사가 유일한
+    // 방어다. 개수 원장이라 늘어도 줄어도 실패한다(줄면 원장을 함께 줄이라는 뜻).
+    .{ .root = "tests/boundary/i18n_literals.zig" },
+
+    // 기본 `test` 그래프에 셸 단계가 **조용히** 늘지 않는가. 늘면 그 스크립트가 안 도는 호스트에서
+    // 게이트가 통째로 빨개지고, 그 잡음에 진짜 실패가 묻힌다(§2m.111 — 실제로 22 커밋 동안 그랬다).
+    .{ .root = "tests/boundary/shell_gate_ledger.zig", .deps = &.{"build_source"} },
+
+    // 머지 충돌 마커가 커밋되지 않는가. 코드였다면 `zig build` 가 즉시 잡지만(문법 오류), 문서·스크립트는
+    // 깨져도 조용하다 — 실제로 `docs/file-explorer.md` 에 하나가 커밋된 채 남아 있었다.
+    .{ .root = "tests/boundary/conflict_markers.zig" },
+
+    // wake 지연 예산이 **세 자리에서 같은 값인가**. 그 상한은 소유자(`cr6c_appkit_smoke.zig`)·baseline
+    // validator·아래 awk 검증에 각자 적혀 있는데, validator 는 독립 실행 파일이라 import 를 못 하고
+    // awk 는 셸 문자열이라 상수를 못 참조한다 — **컴파일러가 못 잡는 자리**다. 셋이 갈리면 "어느
+    // 게이트는 통과하고 어느 게이트는 죽는" 상태가 된다.
+    .{ .root = "tests/boundary/wake_latency_budget.zig", .deps = &.{"build_source"} },
+
+    // i18n 3차 방어: 표에 **아무도 안 쓰는 키**가 남지 않는가. 1차(파라미터 타입)·2차(리터럴 개수)는
+    // "화면 문자열이 키를 거치는가"를 보지만, 되돌린 작업의 잔해로 남은 키는 둘 다 통과한다 — 실제로
+    // 15개가 쌓여 있었다. 참조 0이면 실패하고 이름을 전부 출력한다.
+    .{ .root = "tests/boundary/i18n_orphan_keys.zig" },
+
+    // i18n 4차 방어: 표시 문자열이 **한 언어로 얼어붙지** 않는가. 컴파일러는 절반만 막는다 —
+    // 컨테이너 수준 `const` 에 `i18n.t()` 를 넣으면 거부하지만(comptime-known 아님), 언어를 인자로 박은
+    // `i18n.tIn(.ko, …)` 는 통과하고 그 자리에서 굳는다. 한글 리터럴이 없으니 리터럴 게이트도 못 본다.
+    // 표의 **가시성 하나**를 컴파일러에게 묻는다(`@hasDecl` 세 줄) — `en`/`ko`/`Table` 이 다시
+    // `pub` 이 되면 comptime 에 거부한다. 그 셋을 비공개로 닫은 것이 이 브랜치의 변경이고,
+    // 문자열로 되묻지 않으려면 표를 모듈로 받아야 한다. 대가는 이 테스트가 단독 `zig test` 로
+    // 안 돈다는 것이고, 붙이는 명령은 그 파일 머리에 적혀 있다.
+    //
+    // 표의 **공개 표면 전체**를 명부로 고정하는 판도 있었으나 걷어냈다(위반 0 인 가정 방어였다).
+    // 그래서 다른 이름으로 재수출하는 것(`pub const ko2 = ko;`)은 **이 게이트가 안 잡는다** —
+    // 인정된 한계로 `pinned_language.zig` 머리와 `docs/i18n.md` §7.2 에 적혀 있다.
+    .{ .root = "tests/boundary/pinned_language.zig", .deps = &.{"i18n_table"} },
+};
+
+/// 표에서 그 판정자의 자리. `check-boundaries` **말고 다른 step** 에도 매다는 행이 조회에 쓴다.
+///
+/// 문자열로 찾지만 **오타가 조용히 지나가지 않는다** — 없는 경로면 컴파일이 거부한다.
+/// 변수 이름으로 부르던 예전과 안전성이 같고, 경로는 표와 파일 시스템 둘 다에 있어 더 잘 읽힌다.
+fn boundaryScanIndex(comptime root: []const u8) usize {
+    return comptime found: {
+        for (boundary_scans, 0..) |scan, index| {
+            if (std.mem.eql(u8, scan.root, root)) break :found index;
+        }
+        @compileError("boundary_scans 에 없는 판정자: " ++ root);
+    };
+}
+
 pub fn build(b: *std.Build) void {
     // 🔥 **macOS 전용 게이트의 집계 — 선언이 «첫 사용보다 앞»이어야 한다**(계획 §28).
     //
@@ -5033,330 +5185,19 @@ pub fn build(b: *std.Build) void {
         .optimize = .ReleaseSafe,
         .imports = &.{.{ .name = "build_source", .module = boundary_build_source_mod }},
     });
-    const boundary_support_imports: []const std.Build.Module.Import = &.{
-        .{ .name = "build_source", .module = boundary_build_source_mod },
-        .{ .name = "build_graph", .module = boundary_build_graph_mod },
-    };
 
     // **뷰 자신의 판정자를 돌린다.** 모듈로 «주입만» 하면 그 파일의 test 는 실행되지 않는다
     // (다른 모듈의 test 는 root 에서 자동으로 딸려 오지 않는다 — 실측). 그 파일의 test 는
     // 「AST 뷰가 문자열 판정과 같은 값을 내는가」를 대조하므로, 안 돌면 뷰가 조용히 틀어진다.
     const build_graph_tests = addProjectTest(b, .{ .root_module = boundary_build_graph_mod });
     const run_build_graph_tests = b.addRunArtifact(build_graph_tests);
-    // 개수 가드 — 뷰의 판정자가 조용히 사라지면 여기서 걸린다. 지금 일곱이다:
+    // 개수 가드 — 뷰의 판정자가 조용히 사라지면 여기서 걸린다. 지금 여덟이다:
     // ① B3-0.4 대조 ② receiver 가 있으면 VarCalls 가 무조건 생긴다
     // ③ dependenciesOf 접두·개수 ④ countCall ⑤ other 가 모르는 배선을 신고한다
     // ⑥ dependentsOf 역방향 — 방향이 하나뿐이면 빈 값을 「없다」로 읽는다
-    // ⑦ 모듈 주입을 실제로 담는가 — `&.{…}` 에서 멈춰 468건 중 1건만 보이던 자리
-    run_build_graph_tests.addArg("--maru-expect-tests=7");
+    // ⑦ 모듈 주입을 실제로 담는가 ⑧ 표도 등록이다 — `boundary_scans` 스무 행
+    run_build_graph_tests.addArg("--maru-expect-tests=8");
     run_build_graph_tests.setCwd(b.path("."));
-    const boundary_tests = addProjectTest(b, .{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/boundary/imports.zig"),
-            // `tests/boundary/` 는 자기 파일이 모듈 루트라 `tests/support/` 를 상대 경로로 못 본다 —
-            // 「빌드 소스」의 정의를 복사하지 않고 모듈로 준다(shell_gate_ledger 와 같은 이유).
-            .imports = boundary_support_imports,
-            .target = target,
-            // 84개 판정자가 소스 트리를 걷고 스캔한다 — 실행이 시간의 본체라(로컬 Debug 40초 → ReleaseSafe 7초,
-            // CI 84초) 안전 검사는 유지한 채 최적화한다. 제품 코드를 컴파일하지 않는 std 전용 판정자라 모드가 검사
-            // 의미를 바꾸지 않는다(빌드 모드로 분기하는 코드 없음, 실측 2026-09-06).
-            .optimize = .ReleaseSafe,
-        }),
-    });
-    const run_boundary_tests = b.addRunArtifact(boundary_tests);
-    run_boundary_tests.setCwd(b.path("."));
-
-    // chrome 셀 텍스트의 grapheme cluster 규율(CG1) — 셀을 만드는 함수가 문자열을 codepoint 단위로 디코드하면
-    // NFD가 자모로 흩어진다(docs/grapheme-clustering.md §3.1a). import 경계와 같은 결의 소스 스캔이라 같은 step에 건다.
-    const chrome_text_boundary_tests = addProjectTest(b, .{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/boundary/chrome_text_clusters.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    const run_chrome_text_boundary_tests = b.addRunArtifact(chrome_text_boundary_tests);
-    run_chrome_text_boundary_tests.setCwd(b.path("."));
-
-    // 아이콘 이름 규율(IC2) — 등록 아이콘을 codepoint 리터럴(`0xF0023`·`"\u{F0023}"`)로 부르면 어느 그림인지
-    // 안 읽히고 자산 재배치 때 조용히 폰트 폴백으로 빠진다(docs/chrome-strategy.md §9.7). 같은 결의 소스 스캔.
-    const icon_literal_boundary_tests = addProjectTest(b, .{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/boundary/icon_literals.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    const run_icon_literal_boundary_tests = b.addRunArtifact(icon_literal_boundary_tests);
-    run_icon_literal_boundary_tests.setCwd(b.path("."));
-
-    // cwd 축 규율 — "이 터미널이 서 있는 폴더"를 푸는 지점이 하나여야 한다(docs/editor-surface-dock.md §3.5).
-    // 그 규칙이 주석에만 있던 동안 소비자 여섯이 관측(`observation.cwd`)을 직독해 갈렸고, 셸 통합이 없는 셸과
-    // 재개 Term에서 사이드바·상태바·검색·도크 범위 칩·대화 매핑이 한꺼번에 죽었다. 같은 결의 소스 스캔으로
-    // 정당한 직독의 **개수를 고정**한다(0건 규칙은 세울 수 없다 — Q1 직독이 실재한다).
-    const cwd_axis_boundary_tests = addProjectTest(b, .{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/boundary/cwd_axis.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    const run_cwd_axis_boundary_tests = b.addRunArtifact(cwd_axis_boundary_tests);
-    run_cwd_axis_boundary_tests.setCwd(b.path("."));
-
-    // 원격 스트리머의 **커서 이름 축**. 이벤트는 역조회로 치환된 이름, 커서는 파일 이름 — 이 둘이
-    // 어긋나면 두 기능이 각자 초록인 채로 `--resume` 사슬이 끊긴다(2026-09-03 실측으로 잡았다).
-    const remote_cursor_axis_boundary_tests = addProjectTest(b, .{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/boundary/remote_cursor_axis.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    const run_remote_cursor_axis_boundary_tests = b.addRunArtifact(remote_cursor_axis_boundary_tests);
-    run_remote_cursor_axis_boundary_tests.setCwd(b.path("."));
-
-    // **원격 활동의 오프셋이 로컬 syscall 로 새는 자리가 0 인가**(RAV3 — docs/plans/remote-agent-activity.md
-    // §6.3). 산문으로 두면 반드시 샌다: 원격 경로가 로컬에도 같은 모양으로 있으면 `openFile` 이
-    // **성공해서** 남의 대화가 뜬다(갤러리 §4.1.2 가 실제로 낸 결함). 원격 파일 트리가 같은 축에서
-    // 같은 게이트를 세웠다.
-    const remote_activity_axis_boundary_tests = addProjectTest(b, .{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/boundary/remote_activity_local_syscall_axis.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    const run_remote_activity_axis_boundary_tests = b.addRunArtifact(remote_activity_axis_boundary_tests);
-    run_remote_activity_axis_boundary_tests.setCwd(b.path("."));
-
-    // `fstat` 축(`file_tree.ScanIdentity`)을 만들거나 벗기는 자리를 재고로 고정한다. Zig 는 필드
-    // 프라이버시가 없어 타입만으로는 `.{ .value = 아무거나 }` 를 막지 못한다 — 언어가 못 하는 봉인을
-    // 이 소스 스캔이 대신한다(2026-08-21: 축을 섞어 탐색기 안내가 끊이지 않던 결함).
-    const scan_identity_axis_boundary_tests = addProjectTest(b, .{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/boundary/scan_identity_axis.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    const run_scan_identity_axis_boundary_tests = b.addRunArtifact(scan_identity_axis_boundary_tests);
-    run_scan_identity_axis_boundary_tests.setCwd(b.path("."));
-
-    // 도크 트리의 **발행 목록**을 `updateFileTree` 의 발행 단계 밖에서 갈아 끼우는 자리는 출처 기록
-    // (`notePublishedLocalFileTreeRows`)을 반드시 지난다 — 안 지나면 「행은 로컬인데 펜스는 원격」이
-    // 되고 원격을 보는 중에 로컬 트리가 화면에 남는다(2026-09-07 사용자 보고 · RF7).
-    const file_tree_publish_axis_boundary_tests = addProjectTest(b, .{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/boundary/file_tree_publish_axis.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    const run_file_tree_publish_axis_boundary_tests = b.addRunArtifact(file_tree_publish_axis_boundary_tests);
-    run_file_tree_publish_axis_boundary_tests.setCwd(b.path("."));
-
-    // detached worker 를 띄우는 backend 는 자기 `deinit` 이나 세션 종료가 반드시 거둔다 — 안 거두면
-    // 아직 도는 job 의 할당이 **다른 판정자의** 누수로 잡히고 트레이스를 찍다 죽는다(2026-09-08 CI
-    // abort: `dupe` 누수 → segfault → 134). 빠른 기계에서는 안 보여 소스 스캔만이 이 축을 CI 로 끌어온다.
-    const detached_worker_quiesce_axis_boundary_tests = addProjectTest(b, .{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/boundary/detached_worker_quiesce_axis.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    const run_detached_worker_quiesce_axis_boundary_tests = b.addRunArtifact(detached_worker_quiesce_axis_boundary_tests);
-    run_detached_worker_quiesce_axis_boundary_tests.setCwd(b.path("."));
-
-    // 중립 층으로 가는 경로를 native 구분자로 잇지 않는다 — Windows 전용 오답이라 macOS·Linux 러너에는
-    // 안 보인다. 소스 스캔이 그 배선을 CI 로 끌어오는 유일한 길이다(docs/windows-platform.md §2m.5).
-    const neutral_path_join_boundary_tests = addProjectTest(b, .{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/boundary/neutral_path_join.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    const run_neutral_path_join_boundary_tests = b.addRunArtifact(neutral_path_join_boundary_tests);
-    run_neutral_path_join_boundary_tests.setCwd(b.path("."));
-
-    // cli/ 순수 경계 — `cli/`의 제품 코드는 파싱·wire·렌더만 갖고 소켓/프로세스/파일 syscall은 명시된
-    // 예외 파일에만 둔다. 그 순수성이 파서·validator를 살아 있는 앱 없이 단위 테스트할 수 있는 근거인데,
-    // 2026-08-16까지 그 규칙은 **파일 주석에만** 있었다(imports.zig의 강제 레이어 목록에 src/cli가 없었다).
-    // facade-contracts.md "import boundary는 테스트로 확인한다"에 맞춰 같은 결의 소스 스캔으로 닫는다.
-    const cli_purity_boundary_tests = addProjectTest(b, .{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/boundary/cli_purity.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    const run_cli_purity_boundary_tests = b.addRunArtifact(cli_purity_boundary_tests);
-    run_cli_purity_boundary_tests.setCwd(b.path("."));
-
-    // IME 조합 확정 규칙의 **모달리티 목록** — AppKit 입력기 세션 종료는 NSView만 할 수 있어서 이 규칙은
-    // chokepoint 하나로 닫히지 않고 Swift 입력 경계마다 합류시켜야 하는 열린 목록이다. 빠뜨리면 그 경로에서만
-    // 조합 잔상이 남는다(실측 두 번: 탭 전환·드롭). Swift 는 단위 테스트 하니스가 없어 소스 스캔으로 든다.
-    const ime_commit_boundary_tests = addProjectTest(b, .{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/boundary/ime_commit_modalities.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    const run_ime_commit_boundary_tests = b.addRunArtifact(ime_commit_boundary_tests);
-    run_ime_commit_boundary_tests.setCwd(b.path("."));
-
-    // i18n: 세션 생성 경로마다 로케일을 넘기는가. 안 넘기면 `ui.language = auto`가 조용히 영어로
-    // 떨어진다 — 크래시도 경고도 없이 화면 언어만 틀리므로 컴파일러도 테스트도 못 잡는다. 실제로 I4a에서
-    // 두 번째 생성 경로(quick 패널)를 빠뜨렸다. 단일 출처: docs/i18n.md §5.1.
-    const i18n_locale_boundary_tests = addProjectTest(b, .{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/boundary/i18n_locale_injection.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    const run_i18n_locale_boundary_tests = b.addRunArtifact(i18n_locale_boundary_tests);
-    run_i18n_locale_boundary_tests.setCwd(b.path("."));
-
-    // sans-io: SSH 프로토콜 층이 소켓·파일·시계를 만지는가. 모바일 브리지는 계약상 OS 호출이 0 이라
-    // (docs/ssh-client.md §2) 그 성질이 깨지면 **모바일 링크 오류로 늦게** 드러난다. 허용 목록 방식이고
-    // 디렉터리를 직접 훑는다 — 앞선 판정자가 금지 목록 + 등록 개수라서 무력했던 실측을 그 파일이 적어 뒀다.
-    const ssh_sans_io_boundary_tests = addProjectTest(b, .{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/boundary/ssh_sans_io.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    const run_ssh_sans_io_boundary_tests = b.addRunArtifact(ssh_sans_io_boundary_tests);
-    run_ssh_sans_io_boundary_tests.setCwd(b.path("."));
-
-    // **이 집계 step 은 boundary 테스트를 Debug 로만 돈다.** 아래 optimize 루프 안에서 등록되는 것들은
-    // `if (<loop>_optimize == .Debug)` 로 걸러 붙는다. 이유는 boundary 테스트가 하는 일 자체다 —
-    // 46개 중 44개가 `readSource` 로 소스 파일을 문자열로 읽어 선언 수·제품 caller 수를 세고, `maru`
-    // 모듈을 import 하는 것은 0개다. 세는 결과는 최적화 모드에 따라 달라질 수 없으므로 ReleaseFast
-    // 사본은 같은 답을 내려고 바이너리를 한 번 더 링크하는 비용일 뿐이다.
-    //
-    // 실측(2026-08-17, ubuntu-latest 2코어): `mise run check` 안에서 mise 가 태스크를 병렬로 돌리는데
-    // `check-boundaries` 만 13분 35초였고 나머지는 전부 1~39초였다 — 즉 `check` job 14분이 사실상
-    // 이 step 하나였다. 등록이 68개이고 그 중 33개가 두 모드로 링크되던 구조가 원인이다.
-    //
-    // 개별 집중 gate(`test-session-host-*`)는 **바꾸지 않는다.** 그쪽은 "Debug·ReleaseFast runtime
-    // N+boundary 1 exact-count" 계약을 문서가 소유하므로 두 모드를 그대로 돌린다. 그 gate 를 직접
-    // 부를 때만 ReleaseFast boundary 가 빌드되고, CI 의 집계 경로에서는 빠진다.
-    // i18n 2차 방어: 번역 대상 레이어에 새 한국어 리터럴이 들어오지 않는가. 1차(파라미터 타입)를
-    // 세울 수 없는 sink가 남으므로(정적·동적이 섞이는 컬렉션 — 계약 §7.2) 거기서는 이 검사가 유일한
-    // 방어다. 개수 원장이라 늘어도 줄어도 실패한다(줄면 원장을 함께 줄이라는 뜻).
-    const i18n_literal_boundary_tests = addProjectTest(b, .{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/boundary/i18n_literals.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    const run_i18n_literal_boundary_tests = b.addRunArtifact(i18n_literal_boundary_tests);
-    run_i18n_literal_boundary_tests.setCwd(b.path("."));
-
-    // 기본 `test` 그래프에 셸 단계가 **조용히** 늘지 않는가. 늘면 그 스크립트가 안 도는 호스트에서
-    // 게이트가 통째로 빨개지고, 그 잡음에 진짜 실패가 묻힌다(§2m.111 — 실제로 22 커밋 동안 그랬다).
-    // 이 판정자는 `tests/boundary/` 안이라 **자기 파일이 모듈 루트**다 — 상대 경로로 `tests/support/`
-    // 를 못 본다(`import of file outside module path`). 「빌드 소스」의 정의는 한 곳이 소유해야 하므로
-    // 사본을 만들지 않고 그 파일을 **모듈로 주입**한다.
-    const shell_gate_ledger_tests = addProjectTest(b, .{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/boundary/shell_gate_ledger.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{.{
-                .name = "build_source",
-                .module = b.createModule(.{
-                    .root_source_file = b.path("tests/support/build_source.zig"),
-                    .target = target,
-                    .optimize = optimize,
-                }),
-            }},
-        }),
-    });
-    const run_shell_gate_ledger_tests = b.addRunArtifact(shell_gate_ledger_tests);
-    run_shell_gate_ledger_tests.setCwd(b.path("."));
-
-    // 머지 충돌 마커가 커밋되지 않는가. 코드였다면 `zig build` 가 즉시 잡지만(문법 오류), 문서·스크립트는
-    // 깨져도 조용하다 — 실제로 `docs/file-explorer.md` 에 하나가 커밋된 채 남아 있었다.
-    const conflict_marker_boundary_tests = addProjectTest(b, .{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/boundary/conflict_markers.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    const run_conflict_marker_boundary_tests = b.addRunArtifact(conflict_marker_boundary_tests);
-    run_conflict_marker_boundary_tests.setCwd(b.path("."));
-
-    // wake 지연 예산이 **세 자리에서 같은 값인가**. 그 상한은 소유자(`cr6c_appkit_smoke.zig`)·baseline
-    // validator·아래 awk 검증에 각자 적혀 있는데, validator 는 독립 실행 파일이라 import 를 못 하고
-    // awk 는 셸 문자열이라 상수를 못 참조한다 — **컴파일러가 못 잡는 자리**다. 셋이 갈리면 "어느
-    // 게이트는 통과하고 어느 게이트는 죽는" 상태가 된다.
-    const wake_budget_boundary_tests = addProjectTest(b, .{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/boundary/wake_latency_budget.zig"),
-            // `tests/boundary/` 는 자기 파일이 모듈 루트라 `tests/support/` 를 상대 경로로 못 본다 —
-            // 「빌드 소스」의 정의를 복사하지 않고 모듈로 준다(imports.zig·shell_gate_ledger.zig 와 같은 이유).
-            .imports = &.{.{
-                .name = "build_source",
-                .module = b.createModule(.{
-                    .root_source_file = b.path("tests/support/build_source.zig"),
-                    .target = target,
-                    .optimize = optimize,
-                }),
-            }},
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    const run_wake_budget_boundary_tests = b.addRunArtifact(wake_budget_boundary_tests);
-    run_wake_budget_boundary_tests.setCwd(b.path("."));
-
-    // i18n 3차 방어: 표에 **아무도 안 쓰는 키**가 남지 않는가. 1차(파라미터 타입)·2차(리터럴 개수)는
-    // "화면 문자열이 키를 거치는가"를 보지만, 되돌린 작업의 잔해로 남은 키는 둘 다 통과한다 — 실제로
-    // 15개가 쌓여 있었다. 참조 0이면 실패하고 이름을 전부 출력한다.
-    const i18n_orphan_key_boundary_tests = addProjectTest(b, .{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/boundary/i18n_orphan_keys.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    const run_i18n_orphan_key_boundary_tests = b.addRunArtifact(i18n_orphan_key_boundary_tests);
-    run_i18n_orphan_key_boundary_tests.setCwd(b.path("."));
-
-    // i18n 4차 방어: 표시 문자열이 **한 언어로 얼어붙지** 않는가. 컴파일러는 절반만 막는다 —
-    // 컨테이너 수준 `const` 에 `i18n.t()` 를 넣으면 거부하지만(comptime-known 아님), 언어를 인자로 박은
-    // `i18n.tIn(.ko, …)` 는 통과하고 그 자리에서 굳는다. 한글 리터럴이 없으니 리터럴 게이트도 못 본다.
-    const i18n_pinned_language_boundary_tests = addProjectTest(b, .{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/boundary/pinned_language.zig"),
-            .target = target,
-            .optimize = optimize,
-            // 표의 **가시성 하나**를 컴파일러에게 묻는다(`@hasDecl` 세 줄) — `en`/`ko`/`Table` 이 다시
-            // `pub` 이 되면 comptime 에 거부한다. 그 셋을 비공개로 닫은 것이 이 브랜치의 변경이고,
-            // 문자열로 되묻지 않으려면 표를 모듈로 받아야 한다. 대가는 이 테스트가 단독 `zig test` 로
-            // 안 돈다는 것이고, 붙이는 명령은 그 파일 머리에 적혀 있다.
-            //
-            // 표의 **공개 표면 전체**를 명부로 고정하는 판도 있었으나 걷어냈다(위반 0 인 가정 방어였다).
-            // 그래서 다른 이름으로 재수출하는 것(`pub const ko2 = ko;`)은 **이 게이트가 안 잡는다** —
-            // 인정된 한계로 `pinned_language.zig` 머리와 `docs/i18n.md` §7.2 에 적혀 있다.
-            .imports = &.{.{ .name = "i18n_table", .module = b.createModule(.{
-                .root_source_file = b.path("src/i18n.zig"),
-                .target = target,
-                .optimize = optimize,
-            }) }},
-        }),
-    });
-    const run_i18n_pinned_language_boundary_tests = b.addRunArtifact(i18n_pinned_language_boundary_tests);
-    run_i18n_pinned_language_boundary_tests.setCwd(b.path("."));
 
     // **check-boundaries 는 CI 에서 인덱스 샤드로 나뉘어 돈다**(`-Dboundary-shard=i/n`). 등록 148줄은 전부 이
     // `boundary_step` 에 그대로 매달린다. 샤드 옵션이 있으면 이 스텝은 `check-boundaries-all` 이 되고, `build()` 끝에서
@@ -5372,6 +5213,63 @@ pub fn build(b: *std.Build) void {
         if (boundary_shard != null) "check-boundaries-all" else "check-boundaries",
         "Check facade import boundaries",
     );
+
+    // **이 집계 step 은 boundary 테스트를 Debug 로만 돈다.** 아래 optimize 루프 안에서 등록되는 것들은
+    // `if (<loop>_optimize == .Debug)` 로 걸러 붙는다. 이유는 boundary 테스트가 하는 일 자체다 —
+    // 46개 중 44개가 `readSource` 로 소스 파일을 문자열로 읽어 선언 수·제품 caller 수를 세고, `maru`
+    // 모듈을 import 하는 것은 0개다. 세는 결과는 최적화 모드에 따라 달라질 수 없으므로 ReleaseFast
+    // 사본은 같은 답을 내려고 바이너리를 한 번 더 링크하는 비용일 뿐이다.
+    //
+    // 실측(2026-08-17, ubuntu-latest 2코어): `mise run check` 안에서 mise 가 태스크를 병렬로 돌리는데
+    // `check-boundaries` 만 13분 35초였고 나머지는 전부 1~39초였다 — 즉 `check` job 14분이 사실상
+    // 이 step 하나였다. 등록이 68개이고 그 중 33개가 두 모드로 링크되던 구조가 원인이다.
+    //
+    // 개별 집중 gate(`test-session-host-*`)는 **바꾸지 않는다.** 그쪽은 "Debug·ReleaseFast runtime
+    // N+boundary 1 exact-count" 계약을 문서가 소유하므로 두 모드를 그대로 돌린다. 그 gate 를 직접
+    // 부를 때만 ReleaseFast boundary 가 빌드되고, CI 의 집계 경로에서는 빠진다.
+
+    // 이름 → 모듈. 표의 `deps` 가 **이 목록으로만** 풀린다. 그래서 같은 파일로 모듈을 두 번
+    // 만드는 일이 없다 — 표가 되기 전에는 `tests/support/build_source.zig` 모듈이 셋이었다.
+    //
+    // **같은 이름을 둘 넣으면 앞이 조용히 이긴다.** 아래 `break` 가 첫 매치에서 끊기 때문이다.
+    // 실측으로 컴파일러는 **두 모듈의 API 가 다를 때만** 잡는다(`… has no member named 'read'`) —
+    // 같은 파일을 다른 `optimize` 로 둘 넣으면 조용히 틀린 쪽을 쓴다. 셋뿐이라 막지 않았고,
+    // 길어지면 그때 막는다(`ra_mac_modules` 는 `StringHashMap.put` 이라 반대로 뒤가 이긴다).
+    const boundary_scan_modules: []const std.Build.Module.Import = &.{
+        .{ .name = "build_source", .module = boundary_build_source_mod },
+        .{ .name = "build_graph", .module = boundary_build_graph_mod },
+        .{ .name = "i18n_table", .module = b.createModule(.{
+            .root_source_file = b.path("src/i18n.zig"),
+            .target = target,
+            .optimize = optimize,
+        }) },
+    };
+
+    var boundary_scan_runs: [boundary_scans.len]*std.Build.Step.Run = undefined;
+    for (boundary_scans, 0..) |scan, scan_index| {
+        const deps = b.allocator.alloc(std.Build.Module.Import, scan.deps.len) catch @panic("OOM");
+        for (scan.deps, 0..) |dep_name, dep_index| {
+            deps[dep_index] = for (boundary_scan_modules) |candidate| {
+                if (std.mem.eql(u8, candidate.name, dep_name)) break candidate;
+            } else std.debug.panic(
+                "boundary_scan_modules 에 «{s}» 가 없다 ({s} 가 요구한다)",
+                .{ dep_name, scan.root },
+            );
+        }
+        const scan_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(scan.root),
+                .target = target,
+                .optimize = scan.optimize orelse optimize,
+                .imports = deps,
+            }),
+        });
+        const run_scan_tests = b.addRunArtifact(scan_tests);
+        run_scan_tests.setCwd(b.path("."));
+        boundary_step.dependOn(&run_scan_tests.step);
+        boundary_scan_runs[scan_index] = run_scan_tests;
+    }
+
     // poison 진단이 **이름**으로 나오는가. 2026-09-17 에 GUI 가 끊겼을 때 로그는 `kept=1 dropped=13`
     // 뿐이었고, 손으로 enum 을 세어 풀다 `dropped=13` 을 개수로 오독했다. 숫자로 되돌아가면
     // 다음 사람이 같은 데서 막힌다.
@@ -7512,8 +7410,10 @@ pub fn build(b: *std.Build) void {
     // Keep the historical executable gate and the canonical AppSession cwd-axis scanner in the same
     // completion step instead of weakening those requirements to source-level assertions in K3.
     session_host_kernel_cwd_k3_step.dependOn(session_host_legacy_metadata_consumers_step);
-    session_host_kernel_cwd_k3_step.dependOn(&run_cwd_axis_boundary_tests.step);
-    session_host_step.dependOn(&run_cwd_axis_boundary_tests.step);
+    // `check-boundaries` 말고 여기에도 매단다 — 표에서 그 행을 자리로 찾는다.
+    const cwd_axis_scan = boundary_scan_runs[boundaryScanIndex("tests/boundary/cwd_axis.zig")];
+    session_host_kernel_cwd_k3_step.dependOn(&cwd_axis_scan.step);
+    session_host_step.dependOn(&cwd_axis_scan.step);
     const session_host_input_parity_step = b.step(
         "test-session-host-input-parity",
         "Verify P4 host-backed DECSET 1003 motion and authoritative selection autoscroll",
@@ -8289,9 +8189,6 @@ pub fn build(b: *std.Build) void {
         session_host_cr6e_c3c_step.dependOn(&run_cr6e_c3c_boundary_tests.step);
         boundary_step.dependOn(&run_cr6e_c3c_boundary_tests.step);
     }
-    boundary_step.dependOn(&run_boundary_tests.step);
-    boundary_step.dependOn(&run_conflict_marker_boundary_tests.step);
-    boundary_step.dependOn(&run_wake_budget_boundary_tests.step);
 
     // **판정 스캐폴딩이 제품 경로에서 돌지 않는가.** 합성 앱 루프를 제품과 스모크가 같이 쓰는데,
     // 단계들이 스핀 번호로만 갈려 있어 제품 실행이 판정 각본을 그대로 따라 했다(캡처에 `MARK-ONE`
@@ -8307,22 +8204,6 @@ pub fn build(b: *std.Build) void {
     const run_smoke_steps_gated_tests = b.addRunArtifact(smoke_steps_gated_tests);
     run_smoke_steps_gated_tests.setCwd(b.path("."));
     boundary_step.dependOn(&run_smoke_steps_gated_tests.step);
-    boundary_step.dependOn(&run_i18n_pinned_language_boundary_tests.step);
-    boundary_step.dependOn(&run_chrome_text_boundary_tests.step);
-    boundary_step.dependOn(&run_icon_literal_boundary_tests.step);
-    boundary_step.dependOn(&run_cwd_axis_boundary_tests.step);
-    boundary_step.dependOn(&run_remote_cursor_axis_boundary_tests.step);
-    boundary_step.dependOn(&run_scan_identity_axis_boundary_tests.step);
-    boundary_step.dependOn(&run_remote_activity_axis_boundary_tests.step);
-    boundary_step.dependOn(&run_file_tree_publish_axis_boundary_tests.step);
-    boundary_step.dependOn(&run_detached_worker_quiesce_axis_boundary_tests.step);
-    boundary_step.dependOn(&run_neutral_path_join_boundary_tests.step);
-    boundary_step.dependOn(&run_cli_purity_boundary_tests.step);
-    boundary_step.dependOn(&run_i18n_locale_boundary_tests.step);
-    boundary_step.dependOn(&run_i18n_literal_boundary_tests.step);
-    boundary_step.dependOn(&run_shell_gate_ledger_tests.step);
-    boundary_step.dependOn(&run_i18n_orphan_key_boundary_tests.step);
-    boundary_step.dependOn(&run_ssh_sans_io_boundary_tests.step);
 
     // SSH 층은 **세 최적화 모드로 다 돈다.** `std` 의 몇몇 검사가 `if (std.debug.runtime_safety)`
     // 뒤에 있어 **배포가 쓰는 ReleaseFast 에서 사라지는데**, `zig build test` 는 Debug 라 CI 가
@@ -8459,8 +8340,6 @@ pub fn build(b: *std.Build) void {
     const pump_linux_step = b.step("check-ssh-pump-portable", "Compile the SSH pump for linux-gnu (glibc feature macros)");
     pump_linux_step.dependOn(&pump_linux.step);
     boundary_step.dependOn(pump_linux_step);
-
-    boundary_step.dependOn(&run_ime_commit_boundary_tests.step);
 
     // config 문서 → 실제 키 드리프트 가드. schema.zig의 doc-drift 가드가 "스키마 키가 표에 있는가"(정방향)를 막는 반면,
     // 이쪽은 "문서가 광고하는 키가 실재하는가"(역방향)를 막는다 — 문서만 보고 config에 적었는데 조용히 무시되던

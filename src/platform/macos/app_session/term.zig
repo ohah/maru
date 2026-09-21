@@ -96,6 +96,23 @@ pub fn ensureRendererState(self: *AppSession) void {
     self.renderer_initialized = true;
 }
 
+/// **rename 이 이 Term 을 겨누고 있나 — teardown 이 묻는 판정.**
+///
+/// `renamingTerm` 과 **다른 질문이라 따로 있다**: 그쪽은 「탭 바에 인라인 편집기를 그릴까」이고
+/// (`.term` 갈래만 참이어야 한다), 이쪽은 「이 Term 이 사라지면 rename 을 접을까」다. 팝업 갈래
+/// (`symbol`·`untitled_save`)는 포인터가 아니라 `surface_id` 로 대상을 들므로 **stale 포인터는 없지만**,
+/// 안 접으면 **상자는 안 그려지는데 모달이 키를 계속 먹는다** — 사용자는 타이핑이 아무 데도 닿지 않는
+/// 것을 본다(앵커를 못 재면 그 프레임에 상자가 없다). 적대적 10회차에서 잡았고, 심볼 쪽에도 있던 자리다.
+pub fn renameTargetsTerm(self: *const AppSession, term: *Term) bool {
+    const r = self.rename orelse return false;
+    return switch (r) {
+        .term => |t| t == term,
+        .symbol => |t| t.surface_id == term.surface.id,
+        .untitled_save => |sid| sid == term.surface.id,
+        .workspace, .pane, .group, .file_tree => false,
+    };
+}
+
 pub fn renamingTerm(self: *const AppSession, term: *Term) bool {
     const r = self.rename orelse return false;
     return switch (r) {
@@ -722,10 +739,13 @@ fn destroyTermWithAbandonBackend(
         var q = kv.value;
         q.buf.deinit(self.allocator);
     }
-    // rename 대상이 이 Term이면 stale 포인터 방지로 비운다(teardown 중 — 직접 null, closeRename 부수효과 없이).
-    if (renamingTerm(self, term)) {
+    // rename 대상이 이 Term이면 비운다(teardown 중 — 직접 null, closeRename 부수효과 없이).
+    // **팝업 갈래까지 본다**(`renameTargetsTerm` 의 doc): 포인터가 아니라 `surface_id` 로 들어 stale
+    // 포인터는 없지만, 안 접으면 상자는 안 그려지는데 모달이 키를 계속 먹는다.
+    if (renameTargetsTerm(self, term)) {
         self.rename = null;
         self.rename_input.clear();
+        self.chrome_host.rename_box.hide();
     }
     // 컨텍스트 메뉴 대상이 이 Term이면 메뉴를 닫고 대상을 비운다(stale 포인터 방지).
     if (self.context_menu_target) |t| if (std.meta.activeTag(t) == .term and t.term == term) {

@@ -36255,3 +36255,45 @@ test "U2C 제품 키 경로: Enter 가 확정하고 Esc 가 취소하며 클릭-
         try testing.expectError(error.FileNotFound, dir.dir.access(io, "half", .{}));
     }
 }
+
+test "U2D 편집기 Term 자체는 «원격이 아니다» — U3 가 그 전제 위에 서면 안 된다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+
+    // U3 는 「어디에 쓸지」를 물어야 하고 그 기본값이 **활성 pane 을 따른다**고 계획에 적혀 있다.
+    // 그런데 편집기 Term 은 sentinel surface 라 **원격 문맥이 늘 없다** — 그 Term 을 물으면 언제나
+    // 「이쪽」이 나온다. U3 는 **그 pane 의 터미널 Term** 을 물어야 한다(적대적 18회차에서 확인).
+    const t = try openUntitledInActivePane(fx.session);
+    try testing.expect(t.surface.remote == null);
+    try testing.expect(!app_session_mod.termCwdIsRemote(t));
+    try testing.expect(fx.session.remoteUploadContextFor(t) == null);
+
+    // 그리고 **base 도 그 사실을 따른다** — 편집기 Term 이 활성이어도 base 는 로컬이다.
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base = app_session_mod.editor_untitled_save_ops.baseDir(fx.session, &buf);
+    try testing.expect(base != null);
+    try testing.expect(std.fs.path.isAbsolute(base.?));
+
+    // **원격 pane 의 cwd 를 base 로 쓰지 않는다.** 그 값은 저쪽 경로이므로 로컬 base 로 쓰면 저쪽 경로를
+    // 이쪽 디스크에 만든다(워크스페이스가 「원격 cwd 는 저장하지 않는다」고 정한 그 사고). 원격처럼
+    // 보이는 Term 을 활성으로 두고 base 가 **그 경로가 아닌지** 잰다 — 이 갈래는 주입해야 닿는다.
+    const pane = pane_ops.activePane(fx.session);
+    var term_idx: usize = 0;
+    while (term_idx < pane.terms.items.len and pane.terms.items[term_idx].kind == .editor) term_idx += 1;
+    if (term_idx < pane.terms.items.len) {
+        const shell = pane.terms.items[term_idx];
+        pane.active_term = term_idx;
+        shell.rt.observation.availability = .current;
+        shell.rt.observation.ssh_remote_dest_present = true;
+        shell.rt.observation.cwd.clearRetainingCapacity();
+        try shell.rt.observation.cwd.appendSlice(allocator, "/remote/only/here");
+        try testing.expect(app_session_mod.termCwdIsRemote(shell));
+
+        var buf2: [std.fs.max_path_bytes]u8 = undefined;
+        const base2 = app_session_mod.editor_untitled_save_ops.baseDir(fx.session, &buf2);
+        try testing.expect(base2 != null);
+        try testing.expect(!std.mem.eql(u8, base2.?, "/remote/only/here")); // ★ 저쪽 경로가 아니다
+    }
+}

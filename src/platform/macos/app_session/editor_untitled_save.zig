@@ -203,6 +203,16 @@ fn writeAndAdopt(self: *AppSession, term: *Term, abs: []const u8, overwriting: b
         return;
     };
     defer self.allocator.free(bytes);
+
+    // ⚠️ **저장 상한은 덮어쓰기 경로가 정한 것과 같아야 한다.** 덮어쓰기는 CAS 를 위해 원본을 읽고
+    // `maru.session.file_panel_bridge.max_file_bytes` 를 넘으면 거절한다 — 그런데 **새 파일 경로에는
+    // 상한이 없어서**, 큰 문서를 한 번 만들면 그 뒤 모든 `⌘S` 가 **조용히 실패**했다(다음 저장은
+    // 덮어쓰기 경로이고 원본이 이미 상한을 넘는다). 만들 수 있는데 다시 저장할 수 없는 문서를 만들지
+    // 않는다 — 적대적 13회차에서 잡았다.
+    if (bytes.len > maru.session.file_panel_bridge.max_file_bytes) {
+        self.showNoticeKey(.app_save_too_large);
+        return;
+    }
     const saved_content = doc.file.content;
 
     // **새 파일과 덮어쓰기는 다른 함수다.** 새 파일은 원본이 없어 CAS 를 걸 수 없고 대신 **배타 생성**

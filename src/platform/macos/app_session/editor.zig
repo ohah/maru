@@ -34453,3 +34453,90 @@ test "U1f chrome 최소 세션(탭 바 없음)에서는 안 열린다" {
     // **번호도 안 써야 한다** — 막힌 자리에서 번호를 먹으면 다음 문서가 `untitled-2` 부터 시작한다.
     try testing.expectEqual(@as(u32, 0), app_session_mod.app_runtime.untitled_docs.last);
 }
+
+test "U1h 이름 없는 문서만 dirty 면 닫기 확인이 «사라진다」고 말한다 — 섞이면 공용 문구다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+
+    // 이 세션의 터미널들을 프롬프트로 정착시킨다 — 안 그러면 「실행 중 명령」이 먼저 걸려 이 판정자가
+    // dirty 를 재는 척만 한다(기존 닫기 판정자가 같은 함정을 두 번 밟았다).
+    const settle = struct {
+        fn f(s: *AppSession) void {
+            for (s.tabs.items) |t| for (t.panes.items) |pn| for (pn.terms.items) |tm| {
+                if (tm.kind != .editor) tm.surface.core.semantic_state = .input;
+            };
+        }
+    }.f;
+
+    const untitled = try openUntitledInActivePane(fx.session);
+    try testing.expect(insertText(fx.session, untitled, "x"));
+    settle(fx.session);
+
+    // ⑴ 이름 없는 것만 dirty → **전용 문구**. 「닫을까요?」로는 되돌릴 파일이 없다는 사실을 못 말한다.
+    fx.session.requestClose(.active_term);
+    try testing.expect(fx.session.chrome_host.confirm.open);
+    try testing.expectEqualStrings(maru.i18n.t(.app_close_untitled), fx.session.chrome_host.confirm.message);
+    try testing.expect(fx.session.scopeUnsavedIsAllUntitled(.term));
+
+    // ⑵ **창 범위도 같은 갈래를 탄다** — 범위마다 따로 배선돼 있어 하나만 재면 나머지가 판정 밖이다.
+    fx.session.chrome_host.confirm.open = false;
+    fx.session.pending_confirm = .none;
+    fx.session.requestClose(.window);
+    try testing.expect(fx.session.chrome_host.confirm.open);
+    try testing.expectEqualStrings(maru.i18n.t(.app_close_window_untitled), fx.session.chrome_host.confirm.message);
+
+    // ⑶ **파일이 있는 dirty 문서가 섞이면 공용 문구다** — 「사라집니다」가 절반만 참이 되면 안 된다.
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    const io = std.testing.io;
+    try dir.dir.writeFile(io, .{ .sub_path = "f.txt", .data = "body\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "f.txt" });
+    defer allocator.free(path);
+    const filed = try openPathInActivePane(fx.session, path);
+    filed.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, filed, "z"));
+    try testing.expect(isDirty(filed));
+    settle(fx.session);
+
+    try testing.expect(!fx.session.scopeUnsavedIsAllUntitled(.pane));
+    fx.session.chrome_host.confirm.open = false;
+    fx.session.pending_confirm = .none;
+    fx.session.requestClose(.window);
+    try testing.expect(fx.session.chrome_host.confirm.open);
+    try testing.expectEqualStrings(maru.i18n.t(.app_close_window_unsaved), fx.session.chrome_host.confirm.message);
+
+    // ⑷ **`.term` 범위에서도 파일 있는 dirty 는 공용 문구다.** 이 갈래를 따로 재지 않으면 「`.term` 은
+    //    언제나 이름 없는 문서다」로 바꾼 변이가 살아남는다(적대적 3회차에서 실제로 살아남았다) —
+    //    위 셋은 전부 `.pane`·`.window` 를 지나기 때문이다. 활성은 방금 연 파일 문서다.
+    try testing.expect(pane_ops.activePane(fx.session).activeTerm() == filed);
+    try testing.expect(!fx.session.scopeUnsavedIsAllUntitled(.term));
+    fx.session.chrome_host.confirm.open = false;
+    fx.session.pending_confirm = .none;
+    fx.session.requestClose(.active_term);
+    try testing.expect(fx.session.chrome_host.confirm.open);
+    try testing.expectEqualStrings(maru.i18n.t(.app_close_unsaved), fx.session.chrome_host.confirm.message);
+}
+
+test "U1i 이름 없는 문서가 clean 이면 닫기 확인이 아예 안 뜬다 — 공허한 참이 문구로 새지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+
+    const untitled = try openUntitledInActivePane(fx.session);
+    try testing.expect(!isDirty(untitled)); // 만들자마자는 clean 이다
+    for (fx.session.tabs.items) |t| for (t.panes.items) |pn| for (pn.terms.items) |tm| {
+        if (tm.kind != .editor) tm.surface.core.semantic_state = .input;
+    };
+
+    // `scopeUnsavedIsAllUntitled` 는 **빈 집합에서 공허하게 참**이다 — 그 값이 문구로 새지 않는 것은
+    // 호출자가 `scopeHasUnsavedEditor` 를 **먼저** 묻기 때문이고, 이 판정자가 그 순서를 잰다.
+    try testing.expect(fx.session.scopeUnsavedIsAllUntitled(.term)); // 공허하게 참
+    try testing.expect(!fx.session.scopeHasUnsavedEditor(.term)); // 그러나 잃을 것이 없다
+    fx.session.requestClose(.active_term);
+    try testing.expect(!fx.session.chrome_host.confirm.open); // 그래서 **아무 문구도 안 뜬다**
+}

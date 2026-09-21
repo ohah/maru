@@ -79,6 +79,9 @@ AuthorizedKeysFile $RUN_DIR/authorized_keys
 PermitRootLogin no
 PermitUserRC no
 PermitUserEnvironment no
+# stock sshd 와 같은 게이트 — `maru ssh` 가 SendEnv 로 보내는 pane 신원(`LC_MARU_PANE`, RA2)이 통과해야 원격 훅이 그 pane 의
+# 이름으로 적는다. 없으면 훅은 tmux 밖에서 아무것도 안 적고 에이전트 턴 e2e(agent_turn_e2e.sh)가 «이벤트 0» 으로 끝난다.
+AcceptEnv LANG LC_*
 AllowTcpForwarding no
 AllowAgentForwarding no
 X11Forwarding no
@@ -130,6 +133,7 @@ echo seed > "$REPO/seed.txt"
 "$GIT" -C "$REPO" add seed.txt
 "$GIT" -C "$REPO" -c commit.gpgsign=false commit -q -m seed
 
+MARU_REMOTE_SCM_PORT=$PORT MARU_REMOTE_SCM_KEY=$RUN_DIR/userkey \
 MARU_REMOTE_SCM_DEST=127.0.0.1 \
 MARU_REMOTE_SCM_CTL=$CTL \
 MARU_REMOTE_SCM_REPO=$REPO \

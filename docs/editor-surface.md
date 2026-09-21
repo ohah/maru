@@ -142,7 +142,39 @@ DocumentState {
 - page는 `document_id`와 path의 대응을 선택할 수 없다. native가 `file.open`에서 결합하고 이후 save/change 요청은 그 결합을 사용한다.
 - page의 content change마다 `editor_revision`이 단조 증가한다.
 - save 요청은 `{document_id, editor_revision, expected_disk_fingerprint, bytes}`를 보낸다. 초기 버전은 bounded full text를 허용하되 큰 파일 상한을 둔다. 증분 edit 프로토콜은 필요가 측정될 때 추가한다.
-- native는 write 직전에 disk fingerprint를 다시 비교한다. 다르면 쓰지 않고 conflict를 반환한다.
+- native는 write 직전에 disk fingerprint를 다시 비교한다. 다르면 **쓰지 않고** conflict를 반환한다.
+  - ⚠️ **거기서 끝내지 않는다 — 그 자리에서 고르게 한다**(2026-09-21 사용자 결정). 옛 문구는
+    *"The file changed outside, so it cannot be saved. Reload the file and save again."*
+    (`app_save_external_conflict`)였다 — 편집 내용을 든 채로 **사용자에게 떠넘기는** 안내다.
+    「다시 로드」를 누르면 방금 친 것이 사라지고, 그걸 피하려면 사용자가 손으로 내용을 옮겨야 한다.
+  - ⚠️ **그 문구는 브리지(CM6) 표면의 것이다 — 네이티브 편집기는 띄우지도 않는다**(적대 검증에서
+    확인). `noticeFilePanelWriteFailure` 는 `usesEditorBridge()` 문서의 쓰기 실패를 알리는 자리이고,
+    네이티브 `saveDocument` 는 같은 CAS(`stableOpenedFileHash`)를 `writeDocumentBytes` 안에서 하면서
+    결과를 **`bool` 로 뭉갠다**. 게다가 디스패치가 `_ = saveDocument(...)` 로 그 `bool` 마저 버린다.
+    **그래서 선택을 주기 전에 이유가 올라와야 한다** — 「충돌이었다」와 「권한이었다」를 못 가르면
+    무엇을 고르게 할지도 정할 수 없다. 이유를 올리는 일은 이 개정의 **전제**이고, 그 순서는
+    [계획](plans/editor-untitled.md) C0·C1 이 소유한다.
+  - **선택은 셋이다**(레퍼런스 실측과 같은 구성 — 동작만 읽었다): **비교**(두 쪽을 diff 로 연다) ·
+    **덮어쓰기**(내 편집으로 디스크를 덮는다 — 외부 변경을 버린다) · **다시 로드**(디스크를 읽어 내
+    편집을 버린다). 창을 닫으면 **아무 일도 일어나지 않는다**(계속 편집 — 저장만 안 된 상태).
+  - **비교는 이미 있는 «화면」을 쓴다** — 비교 뷰(§7)가 그 자리다. 새 화면을 만들지 않는다.
+  - ⚠️ **다만 «두 쪽을 채우는 길」은 새것이다**(적대 검증에서 확인). 지금 제품 경로에서
+    `Entry.diff_original`/`diff_modified` 를 채우는 자리는 **git 워커 결과 하나뿐**이고
+    (`takeDiffResult`), 해제도 `git_backend` 의 worker allocator 가 한다. 저장 충돌의 두 쪽은
+    **(메모리 버퍼, 디스크 바이트)** 라 git 이 관여하지 않으므로, 채우는 갈래와 **소유·해제 규칙**을
+    함께 정해야 한다 — 같은 필드를 다른 allocator 로 채우면 해제가 엉킨다. `dock_panel.DiffBase`
+    열거도 **전부 git 기준**이라(`staged`·`unstaged`·`untracked`·`commit`·`turn_range`·`merge_stages`)
+    이 갈래가 없다.
+  - ⚠️ **덮어쓰기는 재시도에서 CAS 를 건너뛴다.** 안 건너뛰면 그 사이 파일이 또 바뀐 경우 같은 물음이
+    되풀이돼 **영영 저장하지 못한다**. 레퍼런스도 같은 선택이다(`ignoreModifiedSince` 상당). 대가는
+    분명하다 — **사용자가 본 적 없는 변경까지 지운다.** 그래서 이 갈래는 사용자가 **명시로 고른**
+    때만 열리고, 자동 재시도·일괄 저장에서는 쓰지 않는다.
+  - **둘 다 무언가를 버리므로 어느 쪽인지 문구가 말해야 한다.** 「덮어쓰면 **바깥에서 바뀐 내용이**
+    사라지고, 다시 로드하면 **방금 친 내용이** 사라진다」 — 어느 쪽이 사라지는지 안 적으면 사용자는
+    자기가 무엇을 잃는지 모르고 고른다.
+  - 아래 줄의 `reload/keep/compare` 는 **watcher 가 변경을 알렸을 때**의 선택이고 이것은 **저장을 누른
+    순간**의 선택이다 — 두 자리가 다르지만 「사용자가 고른다」는 같다. `compare`(diff 로 보기)를 저장
+    자리에도 둘지는 열어 둔다(지금은 둘로 충분하다는 판단이다 — 저장을 누른 사람은 이미 자기 편집을 안다).
 - save ack는 저장된 revision과 새 disk fingerprint를 돌려준다. ack 뒤 현재 editor revision이 더 크면 dirty는 유지한다.
 - 외부 변경을 받아들일 때 통짜 model 교체로 undo/cursor를 깨지 않는다. clean 문서는 최소 edit로 갱신하고, dirty 문서는 reload/keep/compare를 사용자에게 선택하게 한다.
 - fingerprint는 적어도 file identity, size, mtime, content hash를 포함하되 최종 authority는 content hash다.

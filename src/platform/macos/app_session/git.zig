@@ -145,10 +145,24 @@ pub fn remoteScmTarget(
     dest_buf: []u8,
     ctl_buf: []u8,
     cwd_buf: []u8,
-) ?struct { dest: []const u8, ctl: []const u8, cwd: []const u8 } {
+) ?RemoteTarget {
     if (builtin.os.tag != .macos) return null;
     if (!self.surface_initialized or self.tabs.items.len == 0) return null;
-    const term = pane_ops.activePane(self).activeTerm();
+    return remoteScmTargetFor(self, pane_ops.activePane(self).activeTerm(), dest_buf, ctl_buf, cwd_buf);
+}
+
+pub const RemoteTarget = struct { dest: []const u8, ctl: []const u8, cwd: []const u8 };
+
+/// `remoteScmTarget` 의 **Term 지정판**(AT3c). 턴 스냅샷은 활성 pane 이 아니라 **턴이 끝난 Term** 의 저장소를
+/// 찍어야 한다 — 뒤 pane 에서 턴이 끝날 때 활성 pane 의 목적지를 쓰면 남의 저장소가 그 턴의 스냅샷이 된다.
+pub fn remoteScmTargetFor(
+    self: *AppSession,
+    term: *Term,
+    dest_buf: []u8,
+    ctl_buf: []u8,
+    cwd_buf: []u8,
+) ?RemoteTarget {
+    if (builtin.os.tag != .macos) return null;
     if (term.kind != .terminal) return null;
     term_ops.refreshTermObservation(self, term, false, false);
     if (term.rt.observation.availability == .unavailable) return null;

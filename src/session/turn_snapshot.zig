@@ -52,6 +52,9 @@ pub const Snapshot = struct {
     /// 위 값을 실제로 읽었는가. **0(바꾼 것 없음)과 «아직 모름»은 다른 사실이라** 플래그로 가른다 —
     /// 하나로 합치면 읽기 전 화면이 `0개 파일` 이라고 거짓을 말한다.
     files_known: bool = false,
+    /// 목록과 캡처를 join 해 센 `✎`(AT3c — 원격 턴의 권위). `edited_joined_known` 이 거짓이면 아직 목록이 안 왔다.
+    edited_joined: u32 = 0,
+    edited_joined_known: bool = false,
     /// 그 턴의 **그림자 사본**(`turn_capture.Store`)을 가리키는 id. `0` 은 없음이다.
     ///
     /// **턴 키(`turn`)를 이 용도로 쓰지 않는 이유**: 그 값은 비는 경우가 셋 명문화돼 있다(세션 base·
@@ -242,13 +245,20 @@ pub const Ring = struct {
     /// 그 tree 를 `head` 로 하는 턴의 파일 수를 채운다. **tree OID 로 찾는다** — 결과가 도착하는
     /// 사이에 링이 밀릴 수 있고, 그때 자리로 찾으면 남의 턴에 숫자를 적는다. 못 찾으면 조용히 버린다
     /// (그 턴은 이미 화면에 없다).
-    pub fn markFiles(self: *Ring, tree_oid: []const u8, count: u32) void {
+    ///
+    /// `edited_joined` 는 **목록과 캡처를 join 해 센 `✎`**(AT3c) — 원격 턴은 봉인 캐시가 편집 도구 몫을 못 세므로
+    /// 이 값이 권위다. 로컬은 캐시가 권위라 `null` 을 넘긴다.
+    pub fn markFiles(self: *Ring, tree_oid: []const u8, count: u32, edited_joined: ?u32) void {
         var i: usize = 0;
         while (i < self.len) : (i += 1) {
             const idx = (self.next + capacity - 1 - i) % capacity;
             if (std.mem.eql(u8, self.items[idx].oid(), tree_oid)) {
                 self.items[idx].changed_files = count;
                 self.items[idx].files_known = true;
+                if (edited_joined) |n| {
+                    self.items[idx].edited_joined = n;
+                    self.items[idx].edited_joined_known = true;
+                }
                 return;
             }
         }
@@ -271,6 +281,18 @@ pub const Ring = struct {
             const head = self.nth(back) orelse return null;
             const base = self.nth(back + 1) orelse return null;
             if (!head.files_known) return .{ .base = base.oid(), .head = head.oid() };
+        }
+        return null;
+    }
+
+    /// 그 tree 를 `head` 로 하는 스냅샷(없으면 null). **최신부터** 찾는다 — `markFiles` 와 같은 순서라 둘이 같은
+    /// 턴을 가리킨다(같은 tree 가 링에 두 번 있는 경우는 push 의 중복 억제가 막지만, 사이에 다른 tree 가 끼면
+    /// 가능하다 — 그때도 둘이 같은 것을 고른다).
+    pub fn findOid(self: *const Ring, tree_oid: []const u8) ?*const Snapshot {
+        var i: usize = 0;
+        while (i < self.len) : (i += 1) {
+            const idx = (self.next + capacity - 1 - i) % capacity;
+            if (std.mem.eql(u8, self.items[idx].oid(), tree_oid)) return &self.items[idx];
         }
         return null;
     }
@@ -303,7 +325,61 @@ pub const max_session_id_len: usize = 64;
 
 /// 세션이 기억하는 저장소 경로의 상한. 넘는 경로는 **기억하지 않는다**(그 세션은 저장소 전환을 감지하지
 /// 못하고 링을 유지한다 — 잘라 담으면 다른 저장소를 같다고 볼 수 있어 그쪽이 더 나쁘다).
-pub const max_repo_len: usize = 512;
+pub const max_repo_len: usize = 768;
+
+/// 링의 저장소 키(AT3c). **어느 기계의 저장소인가**까지 키에 든다 — tree 는 그 기계의 object 라 다른 기계에서는
+/// 못 읽고(RS7-0 이 막았던 그 자리), 같은 철자의 경로가 두 기계에 있으면 링이 남의 tree 를 «같은 저장소» 로
+/// 본다. 로컬은 경로 그대로(`/…`), 원격은 `<dest>:<path>` — ssh 철자라 읽는 사람이 바로 안다.
+///
+/// 키를 나누는 `machineOf`·`pathOf` 는 첫 `:` 를 본다. 로컬 경로는 절대경로라 `/` 로 시작하므로 그 둘이 갈리고,
+/// dest 에는 `:` 가 없다(`user@host` — 포트는 config 로 간다). 담지 못하면(상한) `null` — 잘라 담으면 다른
+/// 저장소가 같아 보인다(`max_repo_len` 의 규율).
+pub fn repoKey(buf: []u8, machine: []const u8, path: []const u8) ?[]const u8 {
+    if (machine.len == 0) return path;
+    if (machine.len + 1 + path.len > buf.len) return null;
+    @memcpy(buf[0..machine.len], machine);
+    buf[machine.len] = ':';
+    @memcpy(buf[machine.len + 1 ..][0..path.len], path);
+    return buf[0 .. machine.len + 1 + path.len];
+}
+
+/// `repoKey` 의 기계 부분(로컬이면 빈 슬라이스).
+pub fn machineOf(key: []const u8) []const u8 {
+    if (key.len == 0 or key[0] == '/') return "";
+    const sep = std.mem.indexOfScalar(u8, key, ':') orelse return "";
+    return key[0..sep];
+}
+
+/// `repoKey` 의 경로 부분(로컬이면 키 그대로).
+pub fn pathOf(key: []const u8) []const u8 {
+    const machine = machineOf(key);
+    if (machine.len == 0) return key;
+    return key[machine.len + 1 ..];
+}
+
+test "저장소 키: 원격은 기계가 키에 들고, 로컬은 경로 그대로다 (AT3c)" {
+    var buf: [max_repo_len]u8 = undefined;
+    const local = repoKey(&buf, "", "/repo/one").?;
+    try testing.expectEqualStrings("/repo/one", local);
+    try testing.expectEqualStrings("", machineOf(local));
+    try testing.expectEqualStrings("/repo/one", pathOf(local));
+
+    const remote = repoKey(&buf, "me@box", "/srv/app").?;
+    try testing.expectEqualStrings("me@box:/srv/app", remote);
+    try testing.expectEqualStrings("me@box", machineOf(remote));
+    try testing.expectEqualStrings("/srv/app", pathOf(remote));
+
+    // **같은 철자의 경로라도 기계가 다르면 다른 저장소다** — 링이 남의 tree 를 같다고 보지 않는 근거.
+    var map: RingMap = .{};
+    const a = map.ringFor("sess", "/srv/app").?;
+    a.push(.{ .tree = "t1" });
+    const b = map.ringFor("sess", remote).?;
+    try testing.expectEqual(@as(usize, 0), b.len); // 옮겼다 — 비운다
+
+    // 상한을 넘으면 키를 만들지 않는다.
+    var small: [8]u8 = undefined;
+    try testing.expect(repoKey(&small, "me@box", "/srv/app") == null);
+}
 
 /// 세션 id → 링. **할당하지 않는다** — 고정 배열이라 세션이 값으로 들고 있는다(`Ring` 과 같은 규율).
 ///
@@ -783,12 +859,12 @@ test "턴 파일 수: 모르는 턴을 최신부터 하나씩 주고, 채우면 
     try std.testing.expectEqualStrings("t2", first.base);
     try std.testing.expectEqualStrings("t3", first.head);
 
-    ring.markFiles("t3", 5);
+    ring.markFiles("t3", 5, null);
     const second = ring.nextUnknownFiles().?;
     try std.testing.expectEqualStrings("t1", second.base);
     try std.testing.expectEqualStrings("t2", second.head);
 
-    ring.markFiles("t2", 0);
+    ring.markFiles("t2", 0, null);
     try std.testing.expect(ring.nextUnknownFiles() == null); // 화면에 서는 턴을 다 채웠다
 
     // 가장 오래된 t1 은 `head` 로 서지 않으므로 영영 묻지 않는다(목록에 그 줄이 없다).
@@ -801,14 +877,14 @@ test "턴 파일 수: tree OID 로 찾아 적는다(결과가 늦게 와도 남�
     ring.push(.{ .tree = "bbb", .surface_id = 1, .captured_s = 200, .agent_kind = 1 });
 
     // 링에 없는 tree 로 오면 조용히 버린다 — 그 턴은 이미 화면에 없다.
-    ring.markFiles("zzz", 9);
+    ring.markFiles("zzz", 9, null);
     try std.testing.expect(!ring.nth(0).?.files_known);
 
-    ring.markFiles("bbb", 3);
+    ring.markFiles("bbb", 3, null);
     try std.testing.expect(ring.nth(0).?.files_known);
     try std.testing.expectEqual(@as(u32, 3), ring.nth(0).?.changed_files);
     // 0 도 «읽었다» 다 — «아직 모름» 과 구별된다.
-    ring.markFiles("aaa", 0);
+    ring.markFiles("aaa", 0, null);
     try std.testing.expect(ring.nth(1).?.files_known);
     try std.testing.expectEqual(@as(u32, 0), ring.nth(1).?.changed_files);
 }

@@ -28764,6 +28764,102 @@ test "훅 캡처: PostToolUse 의 bashEditDiff 가 셸 편집을 캡처에 싣�
     try std.testing.expect(sealed.entries.items[sealed.find(read_then).?].shellOnly());
 }
 
+// [AT3c] **원격 턴 스냅샷은 링의 저장소 키에 기계를 싣는다.** `captureTurnSnapshot` 은 테스트에서 git 을 안 돌리므로
+// (`test_allow_turn_snapshot`) 그 자리의 키 조립을 seam 으로 본다 — 기계가 빠지면 두 기계의 같은 철자 경로가 한 링에
+// 섞이고 목록 읽기가 tree 없는 기계로 간다.
+test "턴 스냅샷: 원격 Term 의 링 키에는 목적지가 든다 (AT3c)" {
+    var buf: [maru.session.turn_snapshot.max_repo_len]u8 = undefined;
+    const remote: git_ops.RemoteTarget = .{ .dest = "me@box", .ctl = "/tmp/ctl", .cwd = "/srv/app" };
+    const key = agent_ops.snapshotRepoKey(&buf, remote, remote.cwd) orelse return error.KeyMissing;
+    try std.testing.expectEqualStrings("me@box:/srv/app", key);
+    try std.testing.expectEqualStrings("me@box", maru.session.turn_snapshot.machineOf(key));
+    try std.testing.expectEqualStrings("/srv/app", agent_ops.snapshotRepoKey(&buf, null, "/srv/app").?);
+}
+
+// [AT3c] **원격 Term 의 캡처는 읽지 않는다.** 훅 경로는 저쪽 기계의 것이라 이 기계에서 읽으면 **다른 파일**을
+// 읽는다 — 그래서 이 테스트는 그 경로에 **일부러 로컬 파일을 둔다**: 원격 분기가 빠진 구현은 그 내용을 담고,
+// 올바른 구현은 `.unknown = .remote` 를 담는다. 봉인도 after 를 읽지 않고 `remote` 를 표시하며, 워크트리
+// 제외(`underNestedRepo`)는 로컬 파일시스템을 보는 것이라 원격에서는 돌지 않는다.
+test "훅 캡처: 원격 Term 은 경로만 적고 읽지 않는다 — 봉인은 remote 를 표시한다 (AT3c)" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root_buf);
+    const root = root_buf[0..root_len];
+    try tmp.dir.createDirPath(io, ".git");
+    try tmp.dir.writeFile(io, .{ .sub_path = "edited.zig", .data = "LOCAL BYTES — must not be read\n" });
+    try tmp.dir.createDirPath(io, ".claude/worktrees/w/src");
+    try tmp.dir.writeFile(io, .{ .sub_path = ".claude/worktrees/w/.git", .data = "gitdir: elsewhere\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = ".claude/worktrees/w/src/other.zig", .data = "x\n" });
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    // **이 기계에는 저장소가 없다** — 원격 Term 의 캡처는 로컬 루트를 요구하면 안 된다(원격 pane 만 띄운 창이
+    // 정확히 이 상태다). 로컬 루트를 찾는 구현은 여기서 조용히 아무것도 안 적는다.
+    const term = tab_ops.activeTab(session).panes.items[0].terms.items[0];
+    term.agent_kind = .claude;
+    // 관측이 «이 Term 은 원격» 이라고 말한다 — `maru ssh` 가 붙은 pane 의 사실.
+    term.rt.observation.ssh_remote_dest_present = true;
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .session_start, .session_id = "S-remote" });
+
+    var a_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const edited = try std.fmt.bufPrint(&a_buf, "{s}/edited.zig", .{root});
+    var c_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const in_worktree = try std.fmt.bufPrint(&c_buf, "{s}/.claude/worktrees/w/src/other.zig", .{root});
+
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .pre_tool_use, .provider = "claude", .session_id = "S-remote", .tool_name = "Edit", .file_path = edited, .tool_use_id = "toolu_e" });
+    // 상대경로 패치(Codex 모양)는 원격에서 루트를 몰라 잇지 못한다 — 지어내지 않고 건너뛴다.
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .pre_tool_use, .provider = "codex", .session_id = "S-remote", .tool_name = "apply_patch", .tool_command = "*** Update File: rel.zig\\n@@\\n-a\\n+b\\n" });
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .pre_tool_use, .provider = "claude", .session_id = "S-remote", .tool_name = "Bash", .tool_command = "sed …", .tool_use_id = "toolu_s" });
+    var raw_buf: [3 * std.fs.max_path_bytes]u8 = undefined;
+    const raw = try std.fmt.bufPrint(&raw_buf, "[\"{s}\",\"/srv/elsewhere/README.md\",\"relative.txt\"]", .{in_worktree});
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .post_tool_use, .provider = "claude", .session_id = "S-remote", .tool_name = "Bash", .tool_use_id = "toolu_s", .duration_ms = 40, .changed_files_raw = raw });
+    {
+        const open = session.turn_captures.openTurn("S-remote") orelse return error.NoOpenTurn;
+        // edited + worktree(원격에서는 안 거른다) + elsewhere(루트 밖도 경로만) = 3. 상대경로 둘은 없다.
+        try std.testing.expectEqual(@as(usize, 3), open.entries.items.len);
+        const e = open.entries.items[open.find(edited) orelse return error.EditedMissing];
+        try std.testing.expect(e.before == .unknown);
+        try std.testing.expectEqual(maru.session.turn_capture.Unknown.remote, e.before.unknown);
+        try std.testing.expectEqual(maru.session.turn_capture.Trigger.edit, e.trigger);
+        try std.testing.expect(open.find(in_worktree) != null);
+        try std.testing.expect(open.find("/srv/elsewhere/README.md") != null);
+        try std.testing.expect(open.entries.items[open.find("/srv/elsewhere/README.md").?].shell_diff);
+    }
+
+    // 봉인: after 도 읽지 않는다(로컬 파일은 여전히 거기 있다) — 항목마다 `.remote`, 턴에 `remote`.
+    const id = agent_ops.sealTurnCaptureNow(session, term);
+    try std.testing.expect(id != 0);
+    const sealed = session.turn_captures.sealedTurn(id) orelse return error.NoSealedTurn;
+    try std.testing.expect(sealed.remote);
+    for (sealed.entries.items) |e| {
+        const after = e.after orelse return error.AfterMissing;
+        try std.testing.expect(after == .unknown);
+        try std.testing.expectEqual(maru.session.turn_capture.Unknown.remote, after.unknown);
+    }
+    // 편집 도구 겨냥은 목록 join 전까지 `✎` 가 아니고, 셸 diff 둘은 provider 를 믿어 `✎` 다.
+    try std.testing.expectEqual(@as(u32, 2), sealed.edited_count);
+    try std.testing.expect(sealed.entries.items[sealed.find(edited).?].remoteEditTargeted());
+    try std.testing.expect(!sealed.entries.items[sealed.find(edited).?].editedByAgent());
+
+    // 같은 Term 이 원격을 벗어나면(관측이 바뀐다) 다시 읽는다 — 분기가 Term 의 «지금» 을 본다.
+    term.rt.observation.ssh_remote_dest_present = false;
+    session.git_repo = try allocator.dupe(u8, root);
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .pre_tool_use, .provider = "claude", .session_id = "S-remote", .tool_name = "Edit", .file_path = edited, .tool_use_id = "toolu_e2" });
+    const local_open = session.turn_captures.openTurn("S-remote") orelse return error.NoOpenTurn;
+    try std.testing.expectEqualStrings("LOCAL BYTES — must not be read\n", local_open.entries.items[local_open.find(edited).?].before.text);
+}
+
 // [AT3b-1] **실제 로그 경로로 한 턴을 통째로 민다** — 파서 → 배치 루프 → 봉인. 위 배선 테스트는 `Event` 를
 // 손으로 만들어 seam 에 넣으므로 「훅이 적는 그 JSON 을 파서가 그 필드로 읽어 배선까지 닿는가」(필드 이름
 // 오타·kind 표 누락)는 한 번도 안 건넌다. 실측 payload 모양을 그대로 적어 `pollAgentHookEvents` 로 읽힌다.
@@ -73888,7 +73984,7 @@ test "연결이 끊긴 원격 pane 은 «저장소를 확인할 수 없다»가 
     try std.testing.expect(!git_ops.activeRemoteHasNoControlSocketForTest(session));
 }
 
-test "에이전트 탭은 원격에서 «아직 안 된다»고 말한다 — 로컬 턴을 그 자리에 두지 않는다" {
+test "에이전트 탭은 링의 기계가 목록과 다르면 «다른 기계»라 말한다 — 로컬 턴을 원격 옆에 두지 않고, 그 기계의 링은 보인다" {
     // **사용자 결정 2026-09-14.** 턴 링은 **에이전트 세션**의 것이지 저장소의 것이 아니라, 원격 pane 으로
     // 옮겨도 **로컬 세션의 턴이 그대로 남는다.** 그 줄들은 원격 커밋 목록 옆에서 「이 기계의 기록」으로
     // 읽히고, RS7-0 이 읽기를 막아 둔 탓에 개수(`N개 파일`)도 영영 안 차고 눌러도 이유 없이 실패한다 —
@@ -73932,7 +74028,7 @@ test "에이전트 탭은 원격에서 «아직 안 된다»고 말한다 — �
     for (remote.items) |item| switch (item) {
         .turn => turn_rows += 1,
         .notice => |text| {
-            if (std.mem.eql(u8, text, maru.i18n.t(.scm_turns_remote_unsupported))) saw_reason = true;
+            if (std.mem.eql(u8, text, maru.i18n.t(.scm_turns_other_machine))) saw_reason = true;
             // 로컬 링의 사정을 말하지 않는다 — 훅을 깔라는 말이 **저쪽 기계**에 대한 것으로 읽힌다.
             try std.testing.expect(!std.mem.eql(u8, text, maru.i18n.t(.scm_turns_need_hooks)));
             try std.testing.expect(!std.mem.eql(u8, text, maru.i18n.t(.scm_no_turns)));
@@ -73941,6 +74037,38 @@ test "에이전트 탭은 원격에서 «아직 안 된다»고 말한다 — �
     };
     try std.testing.expectEqual(@as(usize, 0), turn_rows);
     try std.testing.expect(saw_reason);
+
+    // ⑶ **그 원격 기계에서 찍힌 링은 그 원격 목록 옆에 선다**(AT3c). 링의 저장소 키에 기계가 들면 «다른 기계» 가
+    //    아니다 — 이것이 AT3c 가 하려는 일이고, 여기서 안 서면 원격 스냅샷을 찍어 놓고 화면이 계속 «다른 기계» 라 한다.
+    // (픽스처 링은 저장소 키가 비어 있어(`testTurnRing`) 여기서 키를 처음 배운다 — 키가 갈릴 때 비우는 판정은
+    //  `turn_snapshot.zig` 「저장소 키」 단위 판정자가 본다.)
+    const remote_ring = session.turn_rings.ringFor(test_turn_session, "user@build-box:/srv/app") orelse unreachable;
+    remote_ring.push(.{ .tree = "cccc3333", .surface_id = 1, .captured_s = 300, .agent_kind = 1 });
+    remote_ring.push(.{ .tree = "dddd4444", .surface_id = 1, .captured_s = 400, .agent_kind = 1 });
+    const same_machine = scm_dock_ops.projectTabForTest(session, arena_state.allocator()) orelse
+        return error.NoProjection;
+    var remote_turn_rows: usize = 0;
+    for (same_machine.items) |item| switch (item) {
+        .turn => remote_turn_rows += 1,
+        .notice => |text| try std.testing.expect(!std.mem.eql(u8, text, maru.i18n.t(.scm_turns_other_machine))),
+        else => {},
+    };
+    try std.testing.expect(remote_turn_rows > 0);
+
+    // ⑷ 다른 원격 목적지로 옮기면 다시 «다른 기계» 다.
+    git_ops.rememberGitRepoDest(session, "user@other-box");
+    const other = scm_dock_ops.projectTabForTest(session, arena_state.allocator()) orelse return error.NoProjection;
+    var other_turn_rows: usize = 0;
+    var other_reason = false;
+    for (other.items) |item| switch (item) {
+        .turn => other_turn_rows += 1,
+        .notice => |text| {
+            if (std.mem.eql(u8, text, maru.i18n.t(.scm_turns_other_machine))) other_reason = true;
+        },
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 0), other_turn_rows);
+    try std.testing.expect(other_reason);
 }
 
 test "히스토리 탭은 «이 커밋을 어느 기계에서 읽었나»를 말한다 (적대적 검증)" {

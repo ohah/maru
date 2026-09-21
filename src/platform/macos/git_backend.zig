@@ -1111,10 +1111,18 @@ pub const Backend = struct {
 
     /// 턴 하나가 바꾼 파일 목록(P5). 키는 `<treeA> <treeB>`이고 **둘 다 hex여야 한다**.
     ///
-    /// **원격 축이 없다**(RS7c §18.4). 이 키가 가리키는 tree 는 `captureTurnSnapshot` 이 **로컬에** 찍은
-    /// 것이라, 저쪽 기계에는 그 object 가 없다 — 호출자가 그 탭을 원격에서 막는다.
-    pub fn submitTurnFiles(self: *Backend, git_exe: []const u8, repo: []const u8, pair: []const u8, request_id: u64) bool {
-        return self.submitFileList(git_exe, repo, .turn_name_status, pair, request_id, null);
+    /// **tree 가 있는 기계에서 읽는다**(AT3c). 원격 Term 의 턴은 `captureTurnSnapshot` 이 저쪽에 찍으므로 그
+    /// object 는 저쪽에만 있다 — 호출자가 링의 저장소 키(`turn_snapshot.machineOf`)로 기계를 고른다. 로컬 tree 를
+    /// 원격에 묻거나 그 반대는 «없는 object» 실패다(RS7c §18.4 가 막았던 자리).
+    pub fn submitTurnFiles(
+        self: *Backend,
+        git_exe: []const u8,
+        repo: []const u8,
+        pair: []const u8,
+        request_id: u64,
+        remote: ?git_command.Remote,
+    ) bool {
+        return self.submitFileList(git_exe, repo, .turn_name_status, pair, request_id, remote);
     }
 
     /// 펼친 항목 하나의 파일 목록을 읽는다(커밋·턴 공용).
@@ -1228,6 +1236,8 @@ pub const Backend = struct {
         repo: []const u8,
         index_file: []const u8,
         surface_id: u64,
+        /// 원격 Term 이면 그 목적지(AT3c). `index_file` 은 그때 **원격 경로**다(로컬 파일이 아니다).
+        remote: ?git_command.Remote,
     ) bool {
         const state = self.state orelse return false;
         state.mutex.lockUncancelable(state.io);
@@ -1244,6 +1254,10 @@ pub const Backend = struct {
         job.git_exe = state.allocator.dupe(u8, git_exe) catch return self.releaseSnapshotJob(job);
         job.repo = state.allocator.dupe(u8, repo) catch return self.releaseSnapshotJob(job);
         job.index_file = state.allocator.dupe(u8, index_file) catch return self.releaseSnapshotJob(job);
+        if (remote) |r| {
+            job.remote_dest = state.allocator.dupe(u8, r.dest) catch return self.releaseSnapshotJob(job);
+            job.remote_ctl = state.allocator.dupe(u8, r.control_path) catch return self.releaseSnapshotJob(job);
+        }
         const thread = std.Thread.spawn(.{}, snapshotWorker, .{job}) catch return self.releaseSnapshotJob(job);
         thread.detach();
         return true;
@@ -1251,6 +1265,8 @@ pub const Backend = struct {
 
     fn releaseSnapshotJob(self: *Backend, job: *SnapshotJob) bool {
         const state = job.state;
+        if (job.remote_ctl.len > 0) state.allocator.free(job.remote_ctl);
+        if (job.remote_dest.len > 0) state.allocator.free(job.remote_dest);
         if (job.index_file.len > 0) state.allocator.free(job.index_file);
         if (job.repo.len > 0) state.allocator.free(job.repo);
         if (job.git_exe.len > 0) state.allocator.free(job.git_exe);
@@ -1316,6 +1332,14 @@ const SnapshotJob = struct {
     repo: []u8,
     index_file: []u8,
     surface_id: u64,
+    /// 원격 Term 의 턴(AT3c) — 비면 로컬. 둘 다 있어야 원격이다(`remoteTarget`).
+    remote_dest: []u8 = &.{},
+    remote_ctl: []u8 = &.{},
+
+    fn remoteTarget(self: *const SnapshotJob) ?git_command.Remote {
+        if (self.remote_dest.len == 0 or self.remote_ctl.len == 0) return null;
+        return .{ .dest = self.remote_dest, .control_path = self.remote_ctl };
+    }
 };
 
 fn snapshotWorker(job: *SnapshotJob) void {
@@ -1323,11 +1347,21 @@ fn snapshotWorker(job: *SnapshotJob) void {
     var result: SnapshotResult = .{ .surface_id = job.surface_id };
     // 오래된 형제 index(크래시로 남은 다른 창의 것)를 프로세스당 한 번 거둔다 — 메인이 아니라 여기인 이유는
     // 수천 개를 `stat` 하는 비용이 프레임에 들어가면 안 되기 때문이다. 쓰기 **앞**이라 방금 쓴 파일은 후보가 아니다.
-    _ = turn_index_cache.sweepStaleSiblingsOnce(state.io, job.index_file);
-    if (takeTurnSnapshot(state.allocator, job.git_exe, job.repo, job.index_file)) |tree| {
-        result.tree = tree;
-    } else |_| {}
+    if (job.remoteTarget()) |remote| {
+        // **원격 턴**(AT3c): 임시 index 는 원격 `/tmp` 의 파일이고 세 명령이 각각 ControlMaster 위 exec 하나다.
+        // 형제 index 정리는 로컬 파일 세계의 일이라 여기선 없다.
+        if (takeTurnSnapshotRemote(state.allocator, remote, job.repo, job.index_file)) |tree| {
+            result.tree = tree;
+        } else |_| {}
+    } else {
+        _ = turn_index_cache.sweepStaleSiblingsOnce(state.io, job.index_file);
+        if (takeTurnSnapshot(state.allocator, job.git_exe, job.repo, job.index_file)) |tree| {
+            result.tree = tree;
+        } else |_| {}
+    }
 
+    if (job.remote_ctl.len > 0) state.allocator.free(job.remote_ctl);
+    if (job.remote_dest.len > 0) state.allocator.free(job.remote_dest);
     state.allocator.free(job.index_file);
     state.allocator.free(job.repo);
     state.allocator.free(job.git_exe);
@@ -1787,6 +1821,59 @@ pub fn takeTurnSnapshot(
     const oid = try allocator.dupe(u8, trimmed);
     allocator.free(written.bytes);
     return oid;
+}
+
+/// `takeTurnSnapshot` 의 **원격판**(AT3c). 같은 세 단계를 `runOnWithIndex` 로 원격에서 돌린다 — `GIT_INDEX_FILE` 은
+/// 원격 명령 문자열에 실리고(`git_command.buildRemoteWithIndex`), 그 경로는 원격 `/tmp` 의 파일이다.
+///
+/// 로컬과 다른 점 하나: `read-tree HEAD` 가 실패한 unborn 저장소에서 로컬은 index 파일을 `unlink` 하지만 원격에는
+/// 그 손이 없다 — git 자신에게 `read-tree --empty` 로 비우게 한다. 그것도 실패하면(index 파일을 못 만드는 곳)
+/// `add -A` 가 실패해 스냅샷이 없다고 드러난다 — 지난 턴의 항목이 섞인 스냅샷을 내지는 않는다.
+pub fn takeTurnSnapshotRemote(
+    allocator: std.mem.Allocator,
+    remote: git_command.Remote,
+    repo: []const u8,
+    index_file: []const u8,
+) ![]u8 {
+    {
+        const out = runOnWithIndex(allocator, remote, .snapshot_read_tree, repo, index_file) catch null;
+        if (out) |ok| {
+            allocator.free(ok.bytes);
+        } else {
+            const cleared = try runOnWithIndex(allocator, remote, .snapshot_read_tree_empty, repo, index_file);
+            allocator.free(cleared.bytes);
+        }
+    }
+    {
+        const out = try runOnWithIndex(allocator, remote, .snapshot_add, repo, index_file);
+        allocator.free(out.bytes);
+    }
+    const written = try runOnWithIndex(allocator, remote, .snapshot_write_tree, repo, index_file);
+    errdefer allocator.free(written.bytes);
+    const trimmed = std.mem.trim(u8, written.bytes, " \t\r\n");
+    if (trimmed.len == 0) {
+        allocator.free(written.bytes);
+        return error.GitFailed;
+    }
+    const oid = try allocator.dupe(u8, trimmed);
+    allocator.free(written.bytes);
+    return oid;
+}
+
+/// `runOn` + 원격 임시 index(AT3c). 원격 전용이다 — 로컬 index 는 `runWithEnv` 가 자식 env 로 건다.
+fn runOnWithIndex(
+    allocator: std.mem.Allocator,
+    remote: git_command.Remote,
+    kind: git_command.Kind,
+    repo: []const u8,
+    index_file: []const u8,
+) !Output {
+    var argv_buf: [git_command.max_argv][]const u8 = undefined;
+    const local = git_command.build(kind, git_command.remote_git_exe, repo, null, &argv_buf);
+    var remote_buf: [git_command.max_argv][]const u8 = undefined;
+    var cmd_buf: [git_command.max_remote_command_bytes]u8 = undefined;
+    const argv = git_command.buildRemoteWithIndex(local, remote, index_file, &remote_buf, &cmd_buf) orelse return error.GitFailed;
+    return runArgvWithEnv(allocator, argv, null, true, null, false) catch |err| return mapRemoteExitError(err);
 }
 
 /// 그 커밋의 blob(브랜치 섹션 왼쪽). rename이면 옛 경로를 읽는다 — 새 경로는 그 커밋에 없다.
@@ -4816,6 +4903,72 @@ test "원격 커밋의 파일 목록도 저쪽 기계에서 온다 (RS7c)" {
         _ = std.c.nanosleep(&ts, null);
     }
     return error.RemoteCommitFilesDeadSocketNeverCompleted;
+}
+
+// [AT3c] **원격 턴 스냅샷이 저쪽 기계에서 찍힌다.** 임시 index 는 원격 경로이고 명령 문자열의 env 로 실린다
+// (`buildRemoteWithIndex`). 진짜 index 는 건드리지 않는다 — 로컬 e2e 판정자와 같은 안전 근거를 원격에서 다시 잰다.
+test "원격 턴 스냅샷: 임시 index 로 tree 를 굳히고 진짜 index 는 그대로다 (AT3c)" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const hx = remoteScmHarness() orelse return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const remote: git_command.Remote = .{ .dest = hx.dest, .control_path = hx.ctl };
+
+    // 턴이 끝난 시점의 작업트리: 추적 안 되는 새 파일 하나(매번 다른 이름 — 앞 판정자가 남긴 것과 안 섞이게).
+    var name_buf: [64]u8 = undefined;
+    const name = try std.fmt.bufPrint(&name_buf, "at3c-{d}.txt", .{std.Io.Clock.awake.now(io).nanoseconds});
+    var file_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const file = try std.fmt.bufPrint(&file_buf, "{s}/{s}", .{ hx.repo, name });
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = file, .data = "turn\n" });
+    defer std.Io.Dir.cwd().deleteFile(io, file) catch {};
+
+    // 임시 index 는 **원격 `/tmp`** — 제품이 쓰는 모양 그대로(`remoteTurnIndexPath`). 끝나면 지운다.
+    var index_buf: [96]u8 = undefined;
+    const index_file = try std.fmt.bufPrint(&index_buf, "/tmp/maru-turn-test-{d}.idx", .{std.c.getpid()});
+    defer std.Io.Dir.cwd().deleteFile(io, index_file) catch {};
+
+    const oid = try takeTurnSnapshotRemote(allocator, remote, hx.repo, index_file);
+    defer allocator.free(oid);
+    try std.testing.expect(oid.len >= 40);
+
+    // ⑴ **tree 에 그 파일이 있다** — `add -A` 가 임시 index 를 채웠다. 제품이 턴 목록에 쓰는 **바로 그 명령**
+    //    (`turn_name_status`, `HEAD <tree>`)으로 저쪽 git 에게 묻는다 — 목록 읽기가 원격 tree 에 닿는다는 증거다.
+    var pair_buf: [128]u8 = undefined;
+    const pair = try std.fmt.bufPrint(&pair_buf, "HEAD {s}", .{oid});
+    const listed = try runOn(allocator, remote, .turn_name_status, git_command.remote_git_exe, hx.repo, pair);
+    defer allocator.free(listed.bytes);
+    try std.testing.expect(std.mem.indexOf(u8, listed.bytes, name) != null);
+
+    // ⑵ **진짜 index 는 그대로다** — 그 파일은 여전히 추적되지 않는다(`?`).
+    const status = try runOn(allocator, remote, .status, git_command.remote_git_exe, hx.repo, null);
+    defer allocator.free(status.bytes);
+    var q_buf: [96]u8 = undefined;
+    const untracked = try std.fmt.bufPrint(&q_buf, "? {s}", .{name});
+    try std.testing.expect(std.mem.indexOf(u8, status.bytes, untracked) != null);
+
+    // ⑶ **임시 index 가 원격 경로에 생겼다**(loopback 이라 같은 파일시스템 — 대조에서만 직접 본다).
+    _ = try std.Io.Dir.cwd().statFile(io, index_file, .{});
+
+    // ⑷ **`submitSnapshot` 배선** — job 이 원격 두 축을 worker 까지 나른다.
+    var backend = try Backend.init(io);
+    defer backend.deinit();
+    try std.testing.expect(backend.submitSnapshot(git_command.remote_git_exe, hx.repo, index_file, 77, remote));
+    var spins: usize = 0;
+    while (spins < 1000) : (spins += 1) {
+        if (backend.takeSnapshotResult()) |taken| {
+            var result = taken;
+            defer result.deinit(worker_allocator);
+            try std.testing.expectEqual(@as(u64, 77), result.surface_id);
+            try std.testing.expectEqualStrings(oid, result.tree); // 같은 작업트리 = 같은 tree
+            break;
+        }
+        var ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+        _ = std.c.nanosleep(&ts, null);
+    } else return error.RemoteSnapshotNeverCompleted;
+
+    // ⑸ **대조군** — 죽은 소켓이면 실패해야 한다(로컬로 새면 loopback 저장소가 있어 여전히 성공한다).
+    const dead: git_command.Remote = .{ .dest = hx.dest, .control_path = "/nonexistent/sock" };
+    try std.testing.expectError(error.RemoteTransportFailed, takeTurnSnapshotRemote(allocator, dead, hx.repo, index_file));
 }
 
 test "원격 읽기 실패: git 이 없는 것과 연결이 끊긴 것을 가른다 (RS4 §2.2 ⑺)" {

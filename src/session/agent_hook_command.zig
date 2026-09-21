@@ -389,9 +389,13 @@ pub const Scope = enum {
 /// 2. **비용**: 도구 호출마다 도는 발화가 계약 §3 의 주범이다(턴당 ~90 ms).
 /// 3. **보안**: payload 에 `tool_input.command`(셸 명령 원문)와 `oldString`/`newString`(소스코드)이
 ///    실린다(계약 §7). 원격 축에서는 그것이 **네트워크를 건너므로** 로컬보다 훨씬 무겁게 걸린다.
-/// `PostToolUse`·`PostToolUseFailure` 도 같은 셋 중 ⑴·⑵ 로 뺀다 — 그것이 주는 것은 셸 구간의 끝
-/// (턴 스냅샷 축)뿐이고, `tool_response` 가 명령 출력 원문을 실어 ⑶ 도 그대로다.
-pub const remote_excluded = [_][]const u8{ "PreToolUse", "PostToolUse", "PostToolUseFailure" };
+/// **2026-09-21 — 비운다**(AT3c, 사용자 결정으로 8/29 의 «원격은 배지·대화 줄만» 을 뒤집었다). 이 개발자의
+/// 워크플로가 전부 `maru ssh` 라 원격에 `Pre`/`Post` 가 없으면 턴 목록·`✎`·셸 diff 귀속이 **한 번도 안 뜬다**
+/// (계획 AT3b 재실측 ⑩). 위 셋을 다시 본 결과: ⑴ 상태 전이는 그대로지만 턴 스냅샷 축이 이제 원격 범위 안이다
+/// ⑵ 비용은 원격 기계의 것이라 로컬과 같다 ⑶ payload 는 ssh 위를 지나 로컬 GUI 메모리에 로컬과 같은 수명으로
+/// 남는다(계약 §7 — 실측 스트림 볼륨은 턴당 중앙값 ~12 KB). 배열을 남겨 두는 이유는 `eventsFor` 의 파생 구조와
+/// 그 테스트들이 «원격 = 로컬 − 이 목록» 을 못박기 때문이다 — 뺄 것이 생기면 여기 적는다.
+pub const remote_excluded = [_][]const u8{};
 
 fn isRemoteExcluded(name: []const u8) bool {
     for (remote_excluded) |x| {
@@ -876,7 +880,9 @@ test "원격 세트는 로컬에서 파생된다 — 부분집합이고 차이�
     for ([_]Provider{ .claude, .codex }) |provider| {
         const local = eventsFor(provider, .local);
         const remote = eventsFor(provider, .remote);
-        try testing.expect(remote.len < local.len);
+        // AT3c(2026-09-21)부터 `remote_excluded` 가 비어 **같은 세트**다. 파생 구조는 그대로라 목록에 이름을 넣는
+        // 순간 다시 줄어든다 — 그 관계를 아래가 잰다.
+        try testing.expectEqual(local.len - excludedIn(local), remote.len);
         for (remote) |r| {
             var found = false;
             for (local) |l| {
@@ -897,19 +903,26 @@ test "원격 세트는 로컬에서 파생된다 — 부분집합이고 차이�
     }
 }
 
-test "원격 세트에 PreToolUse 가 없다 — 명령 원문과 소스코드가 네트워크를 안 건넌다" {
+test "원격 세트에도 PreToolUse·PostToolUse 가 있다 — 원격 Term 의 턴 목록·귀속이 여기서 선다 (AT3c)" {
+    // 2026-08-29 의 «원격은 배지·대화 줄만» 을 2026-09-21 사용자 결정으로 뒤집었다. 이 개발자의 워크플로가 전부
+    // `maru ssh` 라(계획 AT3b 재실측 ⑩) 이 셋이 원격에 없으면 AT0~AT3b 가 화면에 한 번도 안 나온다.
     for ([_]Provider{ .claude, .codex }) |provider| {
+        var pre = false;
+        var post = false;
         for (eventsFor(provider, .remote)) |e| {
-            try testing.expect(!std.mem.eql(u8, e.name, "PreToolUse"));
-            // `PostToolUse` 계열도 같은 이유로 없다 — `tool_response` 가 명령 출력 원문이고, 그것이 주는
-            // 셸 구간은 턴 스냅샷 축이라 원격 범위 밖이다.
-            try testing.expect(!std.mem.startsWith(u8, e.name, "PostToolUse"));
+            if (std.mem.eql(u8, e.name, "PreToolUse")) pre = true;
+            if (std.mem.eql(u8, e.name, "PostToolUse")) post = true;
         }
-        var local_has = false;
-        for (eventsFor(provider, .local)) |e| {
-            if (std.mem.eql(u8, e.name, "PreToolUse")) local_has = true;
+        try testing.expect(pre);
+        try testing.expect(post);
+        // 원격은 로컬의 파생이다 — 이름·matcher 가 같아야 한다.
+        const local = eventsFor(provider, .local);
+        const remote = eventsFor(provider, .remote);
+        try testing.expectEqual(local.len, remote.len);
+        for (local, remote) |l, r| {
+            try testing.expectEqualStrings(l.name, r.name);
+            try testing.expectEqual(l.matcher == null, r.matcher == null);
         }
-        try testing.expect(local_has); // 원격 축이 로컬 동작을 바꾸지 않는다
     }
 }
 
@@ -960,7 +973,6 @@ test "파생 배열이 런타임에도 제 값을 갖는다 — comptime 저장�
     var seen: usize = 0;
     for (claude_remote_events) |e| {
         try testing.expect(e.name.len > 0);
-        try testing.expect(!std.mem.eql(u8, e.name, "PreToolUse"));
         seen += 1;
     }
     try testing.expectEqual(claude_events.len - excludedIn(&claude_events), seen);

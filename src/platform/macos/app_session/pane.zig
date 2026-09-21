@@ -1690,7 +1690,7 @@ pub fn buildWorkspacePane(self: *AppSession, m: maru.session.workspace.Pane) !*P
 
 pub fn recordEndedPlaceholder(self: *AppSession, newly_gone: bool) void {
     self.ended_placeholder_notice_pending += 1;
-    if (newly_gone) self.ended_placeholder_dropped_pending += 1;
+    if (newly_gone) self.ended_placeholder_demoted_pending += 1;
 }
 
 /// 활성 탭의 leaf 중 pane==찾는 pane인 것의 PaneBar(rename caret 위치 계산용). 못 찾으면 null.

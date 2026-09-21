@@ -107,10 +107,26 @@ persistent-session 문서를 따른다.
 terminate하지 않고 controller subscription만 detach해 rollback한다. saved Window 하나라도 apply하지 못하면 그 추가 창은
 default shell로 위장하지 않고 teardown하며, 이번 실행은 `restore incomplete`로 남는다. **apply가 성공했어도 복원이 조용히
 버린 항목이 있으면 같은 래치를 세운다**(v144): capability 검증에서 버린 파일 패널 entry, 그 결과로 비워져 제거된 dock 그룹,
-접근 불가로 강등한 explorer root, 그리고 **이번 restore에서 live handle을 영구 부재로 새로 분류한 Term**은 apply를
-실패시키지 않는다. 앞 세 범주는 입력을 온전히 표현하지 못했고, 마지막 범주는 오분류 때 마지막 완전본으로 돌아갈
-backup 신호가 필요하므로 Zig가 모두 `take_workspace_restore_dropped`로 노출한다. 개수는 정확한 회계가
-아니라 판정용 신호다 — 한 원인이 entry와 빈 그룹 둘로 세어질 수 있다.
+접근 불가로 강등한 explorer root. 이 **세** 범주는 입력을 온전히 표현하지 못했으므로 Zig가
+`take_workspace_restore_dropped`로 노출한다. 개수는 정확한 회계가 아니라 판정용 신호다 — 한 원인이 entry와
+빈 그룹 둘로 세어질 수 있다.
+
+**네 번째 범주였던 「이번 restore에서 live handle을 영구 부재로 새로 분류한 Term」(묘비 강등)은 2026-09-21에
+래치에서 뺐다.** 그것은 표현 못 한 손실이 아니다 — 묘비는 `runtime-state="ended"`로 exact handle·title·cwd·
+grid까지 **온전히 저장되고**, 그 슬롯은 Recovered Sessions가 정확히 그 자리에 되채우는 예약으로 쓰인다(CR6b).
+막을 이유가 없는 것을 막고 있었고, 그 대가가 아래 「차단의 알려진 대가」가 예고한 자기영속 루프였다.
+
+2026-09-19 실측이 그 예고를 그대로 재현했다. 맥 재부팅(22:17)으로 host가 죽자 저장 파일의 세션 29개가 전부
+무효가 됐고, 29개가 모두 강등으로 세어져 래치가 섰다. 래치는 저장을 막고, 저장이 막히니 파일이 그대로고,
+파일이 그대로라 **앱을 껐다 켤 때마다** 같은 29개를 만나 또 래치가 섰다 — 사용자가 파일을 손으로 치우기
+전까지 안 풀렸다. 그 이틀 동안 새로 연 세션 20개의 탭·칸 배치는 매 실행 사라졌다.
+
+왜 하필 그때였나: 강등을 세는 것 자체는 2026-07-26부터 있었지만 그때는 「백업 후 저장」 신호였다. 종료 저장
+예외가 빠진 2026-09-13 이후로 신호가 「아무것도 안 쓴다」가 되면서 출구가 닫혔고, 9/19 재부팅이 그 뒤 **첫**
+재부팅이었다. 9/6·9/9 재부팅에서 같은 일이 안 난 이유가 이것이다.
+
+**남는 대가.** 영구 부재 판정이 오분류였을 때 마지막 완전본으로 돌아갈 backup 신호를 이 범주에서는 포기한다.
+되돌리는 길은 Recovered Sessions의 명시적 사용자 action이며, 묘비가 보존한 exact handle이 그 대조 기준이다.
 
 **checkpoint 보호(단일 출처 — 현재는 «저장 차단»이고, 그 이유가 아래에 있다).** 이 래치가 선 실행은 **종료 저장을
 포함해 `workspace.v1`에 아무것도 쓰지 않는다.** 판단은 저장을 **시작하기 전**(`beginFinalWorkspaceCheckpoint`)에
@@ -148,9 +164,10 @@ drop을 재생산하고(자기영속 루프), 그 사이 사용자가 만든 창
 복구는 현재도 사용자가 `.bak`을 `workspace.v1`로 되돌리면 되지만, 위 (1)이 없으면 그 `.bak`이 언제 것인지 보장되지 않는다.
 
 quick은 영구히 checkpoint 대상이 아니며 host orphan을 막기 위해 in-process backend로만 생성되어 앱 Quit 때 종료한다.
-live→ended로 **처음** 전이한 실행은 exact `runtime-handle + runtime-state="ended"`를 저장하면서도 오분류 대비
-`dropped` backup 신호를 한 번 유지한다. 이미 durable ended로 저장된 다음 실행부터는 완전히 표현된 상태이므로 dropped
-0이며 정상 checkpoint로 반복 보존한다.
+live→ended로 **처음** 전이한 실행은 exact `runtime-handle + runtime-state="ended"`를 저장한다. 그 전이는
+`dropped` 래치를 세우지 않는다(위 「네 번째 범주」). 이미 durable ended로 저장된 다음 실행도 완전히 표현된
+상태라 정상 checkpoint로 반복 보존한다. 강등 수는 버리지 않고 진단 한 줄로 남긴다 —
+`workspace restore accounting: dropped={d} demoted={d} latch={s}`.
 
 시작 host는 workspace 텍스트를 **AppSession 생성 전** Zig parser로 preflight한다(ABI v142,
 `workspace_window_count(session=NULL)`). 복원할 Window가 하나 이상이면 각 AppSession을

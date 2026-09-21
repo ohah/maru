@@ -125,6 +125,8 @@ typedef enum MaruAppHostStatus {
        범위 밖 워크스페이스(그룹/pinned는 M3d-2a-ii). 이 한 event만 거부이고 세션은 유지된다(fault 아님).
        app_host_abi.zig Status.move_failed=10과 값이 정합해야 한다(ABI 계약 테스트가 강제). */
     MaruAppHostStatusMoveFailed = 10,
+    /* 저장된 창에 탭이 없다 — 실패가 아니라 「복원할 게 없음」. caller 는 래치 대신 기본 창으로 간다. */
+    MaruAppHostStatusWorkspaceEmpty = 11,
 } MaruAppHostStatus;
 
 typedef enum MaruAppHostEventKind {

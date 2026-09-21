@@ -578,7 +578,7 @@ pub fn applyWorkspaceWindow(self: *AppSession, win: maru.session.workspace.Windo
     // 한 지역 변수에 모아 성공 publish 뒤 세션 필드로 넘긴다. 실패 경로에서는 기록하지 않는다 — 창 apply 자체가
     // 실패하면 Swift가 이미 checkpoint 차단 래치를 세우므로 신호가 중복이고, errdefer 롤백과 순서를 다툴 이유도 없다.
     var dropped: usize = 0;
-    const newly_ended_before = self.ended_placeholder_dropped_pending;
+    const demoted_before = self.ended_placeholder_demoted_pending;
     dropped += file_panel_ops.pruneInvalidRestoredFilePanelEntries(self, &new_dock);
     // FP16 2-2r: 여기서 소유를 목록으로 옮긴다. 이후 단계(파일 트리·watcher·rows)는 dock 구조가 아니라
     // 이 목록을 소비하고, 실제 배치(어느 pane의 Term이 되나)는 탭이 생긴 뒤에 정한다.
@@ -762,9 +762,21 @@ pub fn applyWorkspaceWindow(self: *AppSession, win: maru.session.workspace.Windo
     sidebar_ops.rebuildSidebar(self) catch {};
     self.metal_dirty = true;
     // publish가 끝난 뒤에만 기록한다(실패 경로는 창 apply 실패로 이미 신호가 있다). Swift가 apply 성공 직후
-    // take_workspace_restore_dropped로 소비해 0이 아니면 이번 실행의 checkpoint를 마지막 완전본 백업 뒤에 쓴다.
-    dropped += self.ended_placeholder_dropped_pending - newly_ended_before;
+    // `take_workspace_restore_dropped`로 소비해 0이 아니면 이번 실행의 저장을 건너뛴다(복원 불완전 래치).
+    //
+    // **묘비 강등은 여기 더하지 않는다.** 강등된 surface 는 `runtime-state="ended"` 로 **온전히 저장되므로**
+    // 저장을 막을 이유가 없다 — 막으면 오히려 그 뒤에 만든 배치가 영영 저장되지 않는다. 래치는 파일 형식이
+    // 표현하지 못하는 손실(손상된 파일 패널 entry·접근 불가 explorer root)만 세운다. 2026-09-19 실측:
+    // 재부팅으로 저장된 29 개가 전부 죽은 host 를 가리키자 29 가 여기 더해져 래치가 섰고, 래치가 저장을
+    // 막아 파일이 안 바뀌고, 안 바뀌니 다음 실행도 같은 29 개를 만나 다시 래치가 서는 교착이 됐다.
+    const demoted = self.ended_placeholder_demoted_pending - demoted_before;
     self.workspace_restore_dropped = std.math.lossyCast(u32, dropped);
+    // **왜 저장을 건너뛰었는지 남긴다.** 지금까지 이 판정은 어디에도 찍히지 않아, 사용자가 「탭 배치가
+    // 매번 사라진다」고 해도 파일 상태로 역산해야 했다(2026-09-19 실측 — 그 역산에 하루가 걸렸다).
+    if (dropped > 0 or demoted > 0) std.log.info(
+        "workspace restore accounting: dropped={d} demoted={d} latch={s}",
+        .{ dropped, demoted, if (dropped > 0) "set" else "clear" },
+    );
     if (builtin.mode == .Debug) assertPinnedPrefixRuntime(self); // 복원 후 불변식 확인(디버그)
 }
 

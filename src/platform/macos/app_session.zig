@@ -5273,9 +5273,19 @@ pub const AppSession = struct {
     /// §7 종료 placeholder로 복원한 Term 수(첫 tick에 한 번 알리고 0으로 비운다 — host connect notice와 같은 self-gate).
     /// 복원은 AppSession init 중이라 chrome이 없어 그 자리에서 notice를 못 띄운다.
     ended_placeholder_notice_pending: u32 = 0,
-    /// 이번 restore에서 live handle을 positive-Gone으로 새로 강등한 수. 이미 durable ended였던 surface는 완전히
-    /// 표현되므로 dropped가 아니다. notice 회계와 backup 회계를 분리해 두 의미가 소비 순서에 얽히지 않게 한다.
-    ended_placeholder_dropped_pending: u32 = 0,
+    /// 이번 restore에서 live handle을 positive-Gone으로 새로 **강등**한 수. 이미 durable ended였던 surface는
+    /// 완전히 표현되므로 세지 않는다.
+    ///
+    /// **이 수는 「복원 불완전」 래치를 세우지 않는다.** 강등된 surface 는 `runtime-state="ended"` 묘비로
+    /// 온전히 저장되기 때문이다 — 제목·cwd·command·grid·exact handle 이 그대로 남는다. 래치는 **파일 형식이
+    /// 표현하지 못하는** 손실(손상된 파일 패널 entry·접근 불가 explorer root)만 세워야 한다.
+    ///
+    /// 2026-09-19 실측이 그 구분이 없을 때 무슨 일이 생기는지 보여 줬다. 맥을 재부팅하자 저장 파일의
+    /// 세션 29 개가 전부 죽은 host 를 가리켰고, 29 개가 모두 여기 더해져 래치가 섰다. 래치가 서면 저장을
+    /// 건너뛰므로 파일은 그대로고, 파일이 그대로라 다음 실행도 같은 29 개를 만나 다시 래치가 선다 —
+    /// **사용자가 파일을 손으로 치우기 전까지 영영 안 풀리는 교착**이었다. 그 사이 새로 연 세션 20 개는
+    /// 한 번도 저장되지 않아 탭·칸 배치가 매 실행 사라졌다.
+    ended_placeholder_demoted_pending: u32 = 0,
     // surface teardown의 단일 chokepoint(destroyTerm + deinit direct pass)가 알리는 선택적 관찰 훅. cross-window move는
     // destroy가 아니라 소유 이전이므로 호출하지 않는다. app_host_abi가 browser grant/wait 수명에 연결한다.
     surface_closed_context: ?*anyopaque = null,
@@ -9240,13 +9250,13 @@ pub const AppSession = struct {
         pub fn capture(session: *const AppSession) RestoreAccountingSnapshot {
             return .{
                 .notice = session.ended_placeholder_notice_pending,
-                .dropped = session.ended_placeholder_dropped_pending,
+                .dropped = session.ended_placeholder_demoted_pending,
             };
         }
 
         pub fn restore(snapshot: RestoreAccountingSnapshot, session: *AppSession) void {
             session.ended_placeholder_notice_pending = snapshot.notice;
-            session.ended_placeholder_dropped_pending = snapshot.dropped;
+            session.ended_placeholder_demoted_pending = snapshot.dropped;
         }
     };
 
@@ -42794,9 +42804,21 @@ test "종료 placeholder 복원: runtime 없는 Term만 묘비가 되고 탭·sp
     session.showPendingEndedPlaceholderNotice();
     try std.testing.expectEqual(@as(u32, 0), session.ended_placeholder_notice_pending); // self-gate: 두 번 안 띄운다
 
-    // code-review(max): durable wire가 exact handle을 보존해도 첫 영구 부재 판정이 오분류일 수 있다. Recovered Sessions
-    // UI 전에는 되돌릴 경로가 없으므로 첫 live→ended 전이만 마지막 완전본 .bak 신호를 세운다.
-    try std.testing.expectEqual(@as(u32, 1), workspace_ops.takeWorkspaceRestoreDropped(session));
+    // **강등은 세되, 저장을 막지는 않는다.** 이 줄은 원래 `dropped == 1`을 기대했다. 근거는 「첫 live→ended
+    // 전이가 마지막 완전본 `.bak` 신호를 세운다」였는데, 그 `.bak` 경로는 `ensureBackup`이 `O_EXCL`이라
+    // 동작하지 않았고(실제 `.bak`은 7월 25일에 멈춰 있었다) 그래서 종료 저장 자체를 건너뛰는 래치로 바뀌었다.
+    // 신호가 «백업하고 쓴다»에서 «아무것도 안 쓴다»로 뒤집힌 것이다.
+    //
+    // 그 뒤집힘이 2026-09-19 에 교착을 만들었다 — 재부팅으로 저장된 세션 29 개가 전부 죽은 host 를 가리키자
+    // 29 가 래치를 세웠고, 래치가 저장을 막아 파일이 그대로고, 그대로라 다음 실행도 같은 29 개를 만났다.
+    // 사용자가 파일을 손으로 치우기 전까지 안 풀렸고, 그 사이 새로 연 세션 20 개는 배치가 매번 사라졌다.
+    //
+    // 강등이 저장을 막을 이유가 없다: 묘비는 `runtime-state="ended"` 로 **온전히 저장되고**(아래
+    // 「묘비가 다시 저장될 때 …」 판정자가 title·cwd·grid·exact handle 보존을 못 박는다), 오분류였더라도
+    // 그 슬롯은 Recovered Sessions 가 **정확히 그 자리에** 되채우는 예약으로 쓰인다(CR6b).
+    try std.testing.expectEqual(@as(u32, 0), workspace_ops.takeWorkspaceRestoreDropped(session));
+    // 세는 것 자체는 남는다 — 「몇 개가 묘비가 됐나」는 진단으로 찍히고 사용자 notice 로도 나간다.
+    try std.testing.expectEqual(@as(u32, 1), session.ended_placeholder_demoted_pending);
     // 같은 죽은 host를 가리키는 다음 surface는 blocking backoff(10×20ms)를 되풀이하지 않는다 — negative memo가 남는다.
     try std.testing.expectEqual(@as(u128, 0x1234_5678_90ab_cdef_1234_5678_90ab_cdef), session.restore_gone_host_id);
 }
@@ -42955,10 +42977,10 @@ test "legacy bare runtime-id Gone은 host 없는 tombstone으로 승격하지 �
     const accounting = AppSession.RestoreAccountingSnapshot.capture(session);
     pane_ops.recordEndedPlaceholder(session, true);
     try std.testing.expectEqual(@as(u32, 1), session.ended_placeholder_notice_pending);
-    try std.testing.expectEqual(@as(u32, 1), session.ended_placeholder_dropped_pending);
+    try std.testing.expectEqual(@as(u32, 1), session.ended_placeholder_demoted_pending);
     accounting.restore(session);
     try std.testing.expectEqual(@as(u32, 0), session.ended_placeholder_notice_pending);
-    try std.testing.expectEqual(@as(u32, 0), session.ended_placeholder_dropped_pending);
+    try std.testing.expectEqual(@as(u32, 0), session.ended_placeholder_demoted_pending);
 
     const prev_keep = app_keep_alive_after_quit;
     app_keep_alive_after_quit = true;
@@ -42979,7 +43001,102 @@ test "legacy bare runtime-id Gone은 host 없는 tombstone으로 승격하지 �
 
     try std.testing.expectError(error.PersistentRuntimeUnavailable, workspace_ops.applyWorkspaceWindow(session, win));
     try std.testing.expectEqual(@as(u32, 0), session.ended_placeholder_notice_pending);
-    try std.testing.expectEqual(@as(u32, 0), session.ended_placeholder_dropped_pending);
+    try std.testing.expectEqual(@as(u32, 0), session.ended_placeholder_demoted_pending);
+}
+
+// **재부팅 교착**을 못 박는다. 값 하나가 아니라 「두 번째 실행도 저장할 수 있는가」를 잰다 — 그게
+// 실제로 깨졌던 성질이고, `dropped` 한 값만 보면 교착인지 아닌지 알 수 없다.
+//
+// 2026-09-19 실측: 맥을 재부팅하자 저장 파일의 세션 29 개가 전부 죽은 host 를 가리켰다. 29 개 모두
+// 묘비로 강등됐고, 강등 수가 래치 카운터에 더해져 「복원 불완전」이 섰다. 래치가 서면 종료 저장까지
+// 건너뛰므로 파일이 안 바뀌고, 안 바뀌니 다음 실행도 같은 29 개를 만나 또 래치가 선다. 사용자가 파일을
+// 손으로 치우기 전까지 안 풀렸다 — 그 사이 새로 연 세션 20 개는 탭·칸 배치가 매 실행 사라졌다.
+// 「복원할 게 없음」이 「복원 실패」와 **다른 이름으로** 나오는지 못 박는다. 이름이 같으면 caller 가
+// 전자에도 「복원 불완전」 래치를 세우는데, 잃은 것이 없으므로 막을 이유가 없다 — 그리고 한 번 막히면
+// 파일이 그대로라 다음 실행도 같은 빈 창을 만나 또 막힌다(2026-09-21 실측: 앱을 세 번 껐다 켜는 동안
+// 매번 탭 배치가 사라졌다).
+//
+// `tabs=0` 자체는 버릴 수 없다 — dock·explorer 같은 **창 속성만** 든 창의 정당한 직렬화 형식이고
+// `session/workspace.zig` 의 라운드트립 판정자들이 그 형식을 쓴다. 그래서 파서가 아니라 **적용 결과**를
+// 가른다. 오류 → ABI status 매핑은 `app_host_abi` 판정자가 잇는다(그쪽은 CI 가 돌린다 — 로컬 실행은
+// 가짜 host 가 사용자 세션을 죽인다).
+test "복원 교착: 탭 없는 창은 라이브에선 무동작, deferred 에선 «복원할 게 없음» 이다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    defer session.deinit();
+
+    const empty: maru.session.workspace.Window = .{ .tabs = &.{} };
+
+    // ① 이미 surface 가 선 라이브 세션: 빈 모델은 **무동작**이다(지울 것이 없다).
+    try std.testing.expect(session.surface_initialized);
+    const tabs_before = session.tabs.items.len;
+    try workspace_ops.applyWorkspaceWindow(session, empty);
+    try std.testing.expectEqual(tabs_before, session.tabs.items.len);
+
+    // ② 시작 복원용 deferred 세션: 쓸 수 있는 surface 가 없으므로 기본 창으로 가야 한다. 그 신호가
+    //    **EmptyWorkspace** 다 — 일반 실패(`PersistentRuntimeUnavailable` 등)와 반드시 갈려야 한다.
+    session.surface_initialized = false;
+    defer session.surface_initialized = true;
+    try std.testing.expectError(error.EmptyWorkspace, workspace_ops.applyWorkspaceWindow(session, empty));
+}
+
+test "복원 교착: 죽은 host 만 가리키는 파일을 열어도 다음 저장이 막히지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    defer session.deinit();
+
+    const prev_keep = app_keep_alive_after_quit;
+    app_keep_alive_after_quit = true;
+    defer app_keep_alive_after_quit = prev_keep;
+
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+
+    // 파일에 있던 두 surface 가 **둘 다** 이미 묘비다(재부팅 뒤 두 번째 실행의 모습 — 첫 실행이
+    // 강등해 저장해 둔 상태). 이미 durable ended 였던 surface 는 완전히 표현되므로 세지 않는다.
+    var win = try workspace_ops.captureWorkspaceWindow(session, arena.allocator(), false, null);
+    const surfaces = [_]maru.session.workspace.Surface{
+        .{
+            .runtime_host_id = "1234567890abcdef1234567890abcdef",
+            .runtime_id = "fedcba0987654321fedcba0987654321",
+            .runtime_state = .ended,
+            .title = "죽은 세션 하나",
+            .cols = 80,
+            .rows = 24,
+        },
+        .{
+            .runtime_host_id = "1234567890abcdef1234567890abcdef",
+            .runtime_id = "0f1e2d3c4b5a69780f1e2d3c4b5a6978",
+            .runtime_state = .ended,
+            .title = "죽은 세션 둘",
+            .cols = 80,
+            .rows = 24,
+        },
+    };
+    const panes = [_]maru.session.workspace.Pane{.{ .surfaces = &surfaces }};
+    const tree = [_]maru.session.workspace.TreeNode{.{ .leaf = 0 }};
+    const tabs = [_]maru.session.workspace.Tab{.{ .tree = &tree, .panes = &panes, .custom_name = "재부팅 뒤" }};
+    win.tabs = &tabs;
+
+    try workspace_ops.applyWorkspaceWindow(session, win);
+
+    // 레이아웃은 살아 돌아온다 — 탭 이름·칸·두 슬롯 전부.
+    try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
+    try std.testing.expectEqualStrings("재부팅 뒤", session.tabs.items[0].custom_name.?);
+    const pane = session.tabs.items[0].panes.items[0];
+    try std.testing.expectEqual(@as(usize, 2), pane.terms.items.len);
+    try std.testing.expect(pane.terms.items[0].rt.ended_placeholder);
+    try std.testing.expect(pane.terms.items[1].rt.ended_placeholder);
+
+    // **핵심**: 래치가 서지 않는다. 이게 0 이 아니면 이 실행은 저장을 건너뛰고, 그러면 사용자가 지금부터
+    // 만드는 배치가 영영 파일에 닿지 않는다.
+    try std.testing.expectEqual(@as(u32, 0), workspace_ops.takeWorkspaceRestoreDropped(session));
+    // 이미 묘비였던 것은 **강등이 아니다** — 이번 실행이 새로 잃은 것은 없다.
+    try std.testing.expectEqual(@as(u32, 0), session.ended_placeholder_demoted_pending);
 }
 
 // 묘비가 **다시 저장될 때** 마지막 title·cwd·grid와 exact runtime-handle을 함께 보존하는지 못박는다.
@@ -52617,7 +52734,7 @@ test "workspace restore allocation failures preserve the complete live tab dock 
     const before_rows_ptr = session.file_tree_rows.items.ptr;
     const before_rows_len = session.file_tree_rows.items.len;
     session.ended_placeholder_notice_pending = 7;
-    session.ended_placeholder_dropped_pending = 11;
+    session.ended_placeholder_demoted_pending = 11;
     var saw_rollback = false;
     var saw_commit = false;
     // 실패 지점을 0부터 훑되, 한 번 «실패를 못 주입한 채» 성공하면 그 뒤는 전부 같은 성공이라 멈춘다.
@@ -52647,7 +52764,7 @@ test "workspace restore allocation failures preserve the complete live tab dock 
                 before_rows_len,
             );
             try std.testing.expectEqual(@as(u32, 7), session.ended_placeholder_notice_pending);
-            try std.testing.expectEqual(@as(u32, 11), session.ended_placeholder_dropped_pending);
+            try std.testing.expectEqual(@as(u32, 11), session.ended_placeholder_demoted_pending);
             saw_rollback = true;
             session.allocator = allocator; // rejected candidate retained no object backed by `failing`.
         } else {
@@ -52659,7 +52776,7 @@ test "workspace restore allocation failures preserve the complete live tab dock 
             try std.testing.expect(file_panel_ops.fileEntryForPath(session, new_path) != null);
             // plain live + already-ended 후보가 publish돼 notice가 실제 mutate된다. newly-Gone의 notice+dropped 동시
             // rollback은 RestoreAccountingSnapshot/recordEndedPlaceholder production helper 회귀가 별도로 고정한다.
-            try std.testing.expectEqual(@as(u32, 11), session.ended_placeholder_dropped_pending);
+            try std.testing.expectEqual(@as(u32, 11), session.ended_placeholder_demoted_pending);
             try std.testing.expectEqual(@as(u32, 8), session.ended_placeholder_notice_pending);
             failing.fail_index = std.math.maxInt(usize);
             session.deinit(); // committed backends/terms retain failing.allocator(); tear down before it leaves scope.

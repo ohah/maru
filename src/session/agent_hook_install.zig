@@ -417,12 +417,14 @@ pub fn apply(provider: command.Provider, scope: command.Scope, a: std.mem.Alloca
 
 const testing = std.testing;
 
-test "원격 스코프로 판정하면 원격 세트 개수를 본다 — 로컬 개수로 재면 영영 refresh 다" {
-    // 원격 세트는 로컬보다 작다. scope 를 안 넘기던 시절이면 로컬 개수와 비교해 «덜 덮였다» 로 읽혀
-    // 설치가 끝나도 계속 refresh 를 돌린다. 그 회귀를 여기서 막는다.
+test "원격 스코프로 판정하면 원격 세트 개수를 본다 — 세트가 갈리면 로컬 개수로 재는 쪽이 영영 refresh 다" {
+    // RA1 시절 원격 세트는 로컬보다 작았고, scope 를 안 넘기면 로컬 개수와 비교해 «덜 덮였다» 로 읽혀
+    // 설치가 끝나도 계속 refresh 를 돌렸다. **AT3c(2026-09-21) 뒤 두 세트는 같다**(`remote_excluded` 비움) —
+    // 그래서 지금은 두 잣대가 같은 답을 내지만, 판정이 **scope 의 세트**를 보는 사실은 그대로 지킨다: 세트가
+    // 다시 갈리는 날 이 자리가 그 회귀를 잡는다.
     const remote_n = command.eventsFor(.claude, .remote).len;
     const local_n = command.eventsFor(.claude, .local).len;
-    try testing.expect(remote_n < local_n);
+    try testing.expectEqual(local_n, remote_n);
 
     const covered_remote = Known{
         .ours = remote_n,
@@ -432,8 +434,11 @@ test "원격 스코프로 판정하면 원격 세트 개수를 본다 — 로컬
         .legacy_present = false,
     };
     try testing.expectEqual(Plan.leave, planForSet(.claude, .remote, .{ .known = covered_remote }, .ensure));
-    // 같은 상태를 로컬 잣대로 재면 «덜 덮였다» 가 된다.
-    try testing.expectEqual(Plan.refresh, planForSet(.claude, .local, .{ .known = covered_remote }, .ensure));
+    try testing.expectEqual(Plan.leave, planForSet(.claude, .local, .{ .known = covered_remote }, .ensure));
+    // 하나 모자라면 어느 scope 로 재도 «덜 덮였다» 다 — 판정이 개수를 실제로 본다는 대조.
+    var short = covered_remote;
+    short.ours_current -= 1;
+    try testing.expectEqual(Plan.refresh, planForSet(.claude, .remote, .{ .known = short }, .ensure));
 }
 
 test "읽지 못한 파일은 어느 방향으로도 손대지 않는다" {
@@ -1060,7 +1065,9 @@ test "apply 도 scope 를 본다 — 판정만 원격이고 적용이 로컬이�
 
     var hooks: std.json.ObjectMap = .empty;
     try apply(.claude, .remote, arena, &hooks, want, .install);
-    try testing.expect(hooks.get("PreToolUse") == null); // 원격에서 뺀 그 이벤트
+    // **AT3c(2026-09-21) 뒤 원격도 `PreToolUse` 를 심는다** — 원격 Term 의 턴 캡처가 그 이벤트로 경로를 얻는다.
+    // 심는 목록은 어디서도 손으로 적지 않고 **그 scope 의 세트**에서 온다 — 아래 개수 일치가 그 사실이다.
+    try testing.expect(hooks.get("PreToolUse") != null);
     try testing.expectEqual(command.eventsFor(.claude, .remote).len, hooks.count());
 
     // 같은 트리를 **원격 scope 로 세면** 우리 것이 세트만큼 보인다.
@@ -1068,8 +1075,10 @@ test "apply 도 scope 를 본다 — 판정만 원격이고 적용이 로컬이�
     try testing.expectEqual(command.eventsFor(.claude, .remote).len, known_remote.ours);
     try testing.expectEqual(Plan.leave, planForSet(.claude, .remote, .{ .known = known_remote }, .ensure));
 
-    // 로컬 scope 는 같은 트리를 «부족하다» 고 본다 — 두 세트가 다르다는 사실 자체가 여기서 드러난다.
-    try testing.expect(command.eventsFor(.claude, .local).len > command.eventsFor(.claude, .remote).len);
+    // 두 세트가 같으므로 로컬 scope 도 같은 트리를 «다 있다» 로 본다(RA1 시절엔 «부족하다» 였다).
+    try testing.expectEqual(command.eventsFor(.claude, .local).len, command.eventsFor(.claude, .remote).len);
+    const known_local = scan(.claude, .local, .{ .object = hooks }, want) orelse return error.UnknownShape;
+    try testing.expectEqual(Plan.leave, planForSet(.claude, .local, .{ .known = known_local }, .ensure));
 
     // 제거는 scope 와 무관하게 우리 것만 걷어 낸다.
     try apply(.claude, .remote, arena, &hooks, want, .remove);

@@ -9509,8 +9509,19 @@ pub const AppSession = struct {
         if (scope == .term and target != .agent_term) {
             const term = pane_ops.activePane(self).activeTerm();
             if (term.file_entry) |entry| if (entry.surface_id != 0) {
-                file_panel_ops.requestFilePanelClose(self, entry.surface_id);
-                return;
+                // ⚠️ **네이티브 편집기의 저장 안 한 편집은 이 길로 보내지 않는다.** 그쪽 파이프라인은
+                // **CM6 브리지 문서만** 보호한다(`Entry.usesEditorBridge` — 네이티브면 거짓) — 그래서
+                // 트리에서 연 문서를 고치고 ⌘W 를 누르면 **확인 없이 닫혀 편집이 사라졌다**(판정자
+                // U2l 이 제품 경로로 재현했다). 아래 일반 게이트가 이미 그 확인을 갖고 있으므로
+                // **그 길로 흘린다** — 브리지 문서는 지금까지대로 revision-pinned 경로를 탄다.
+                //
+                // 브리지 쪽으로 같은 조건을 복사하지 않는 이유: 그쪽이 요구하는 것은 「CM6 버퍼와
+                // revision 을 맞춘 뒤 닫기」이고 네이티브 문서에는 맞출 버퍼가 없다. 여기서 갈라야
+                // 두 규칙이 한 함수 안에서 섞이지 않는다.
+                if (!(editor_ops.isDirty(term) and !entry.usesEditorBridge())) {
+                    file_panel_ops.requestFilePanelClose(self, entry.surface_id);
+                    return;
+                }
             };
         }
         if (scope != .session and file_panel_ops.closeTargetHasProtectedFilePanel(self, target, scope)) {
@@ -9536,8 +9547,6 @@ pub const AppSession = struct {
         } else if (self.scopeHasUnsavedEditor(scope)) {
             // 저장 안 한 편집 = 잃을 수 있는 상태. running job과 **병렬**로 자기 문구를 띄운다
             // (브라우저 탭 분기와 같은 모양 — 그쪽 주석이 근거를 든다).
-            // **이름 없는 문서만이면 다른 문구다**(§3.11) — 되돌릴 파일이 없으므로 「닫을까요?」로는
-            // 무엇을 잃는지 말하지 못한다. 섞여 있으면 공용 문구가 둘 다에 참이다(그 함수 doc).
             // **이름 없는 문서만이면 다른 문구다**(§3.11) — 되돌릴 파일이 없으므로 「닫을까요?」로는
             // 무엇을 잃는지 말하지 못한다. 섞여 있으면 공용 문구가 둘 다에 참이다(그 함수 doc).
             const all_untitled = self.scopeUnsavedIsAllUntitled(scope);

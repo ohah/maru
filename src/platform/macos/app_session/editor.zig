@@ -34587,3 +34587,66 @@ test "U1k 이름이 붙은 적 없는 문서는 붙여넣기·되돌리기도 �
     // 이름은 그대로다 — 되돌리기가 문서 정체성을 건드리지 않는다.
     try testing.expectEqualStrings("untitled-1", app_session_mod.termLabel(t));
 }
+
+test "U1l 창이 둘이어도 이름이 겹치지 않는다 — 발급기가 앱 전역인 «이유»를 잰다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+
+    // 이 앱의 `AppSession` 은 **창 하나**다(`surface_ids` 가 `app_runtime` 를 가리키는 이유). 계약이
+    // 카운터를 창 단위로 두지 말라고 한 근거가 바로 이것인데, 지금까지 판정자가 전부 세션 하나였다 —
+    // 즉 **그 근거 자체가 판정 밖**이었다(적대적 6회차).
+    const saved = app_session_mod.app_runtime.untitled_docs;
+    defer app_session_mod.app_runtime.untitled_docs = saved;
+    app_session_mod.app_runtime.untitled_docs = .{};
+
+    const mk = struct {
+        fn f(a: std.mem.Allocator) !*AppSession {
+            const s = try a.create(AppSession);
+            errdefer a.destroy(s);
+            try s.init(std.Io.Threaded.global_single_threaded.io(), a, .{
+                .abi_version = app_session_mod.abi_version,
+                .cols = 80,
+                .rows = 24,
+                .queue_capacity = 16,
+                .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+            });
+            return s;
+        }
+    }.f;
+
+    const w1 = try mk(allocator);
+    defer {
+        w1.deinit();
+        allocator.destroy(w1);
+    }
+    const w2 = try mk(allocator);
+    defer {
+        w2.deinit();
+        allocator.destroy(w2);
+    }
+
+    // 창을 번갈아 열어도 번호가 **한 줄로** 흐른다. 창마다 세면 여기서 `untitled-1` 이 둘 나오고,
+    // 탭을 다른 창으로 옮기는 순간 같은 이름이 나란히 선다(§3.11).
+    const a1 = try openUntitledInActivePane(w1);
+    const b1 = try openUntitledInActivePane(w2);
+    const a2 = try openUntitledInActivePane(w1);
+    const b2 = try openUntitledInActivePane(w2);
+
+    try testing.expectEqualStrings("untitled-1", app_session_mod.termLabel(a1));
+    try testing.expectEqualStrings("untitled-2", app_session_mod.termLabel(b1));
+    try testing.expectEqualStrings("untitled-3", app_session_mod.termLabel(a2));
+    try testing.expectEqualStrings("untitled-4", app_session_mod.termLabel(b2));
+
+    // **넷이 서로 다른 이름이다**를 직접 센다 — 위 넷을 일일이 적은 것만으로는 「둘째 창이 늘 2」
+    // 같은 변이가 셋째·넷째에서만 걸리고, 이름이 겹치는지 자체는 안 물었다.
+    const names: [4][]const u8 = .{
+        app_session_mod.termLabel(a1),
+        app_session_mod.termLabel(b1),
+        app_session_mod.termLabel(a2),
+        app_session_mod.termLabel(b2),
+    };
+    for (names, 0..) |n, i| for (names, 0..) |m, j| {
+        if (i == j) continue;
+        try testing.expect(!std.mem.eql(u8, n, m));
+    };
+}

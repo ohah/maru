@@ -2,6 +2,7 @@
 //! fresh 프로세스 판정자는 **모든 샤드 뒤에** 돈다. 누군가 샤드를 하나로 되돌리거나 fresh 판정자를 샤드와 겹치게
 //! 배선하면 여기서 걸린다(실측 2026-09-06: 단일 프로세스 355초가 file explorer 잡의 임계 경로였다).
 const std = @import("std");
+const build_source = @import("support/build_source.zig");
 
 fn count(haystack: []const u8, needle: []const u8) usize {
     var total: usize = 0;
@@ -19,7 +20,7 @@ fn read(allocator: std.mem.Allocator, path: []const u8, limit: usize) ![]u8 {
 
 test "AppSession suite runs as index shards and fresh process judges wait for every shard" {
     const allocator = std.testing.allocator;
-    const build = try read(allocator, "build.zig", 4 * 1024 * 1024);
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
     const runner = try read(allocator, "tools/simple_test_runner.zig", 256 * 1024);
     defer allocator.free(runner);

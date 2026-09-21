@@ -1,5 +1,6 @@
 const std = @import("std");
 const posixWalk = @import("support/posix_walk.zig").posixWalk;
+const build_source = @import("support/build_source.zig");
 
 fn count(haystack: []const u8, needle: []const u8) usize {
     var total: usize = 0;
@@ -65,7 +66,7 @@ test "CR3b R3 경계는 cap 2 oldest tick reclaim과 dormant facade만 연다" {
     defer allocator.free(seal_service);
     const seal_contract = try readSource(allocator, "src/platform/macos/session_host/event_cleanup_seal.zig");
     defer allocator.free(seal_contract);
-    const build = try readSource(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
     const adapter_tests_start = std.mem.indexOf(u8, adapter, "test \"") orelse
         return error.MissingHostAdapterTests;

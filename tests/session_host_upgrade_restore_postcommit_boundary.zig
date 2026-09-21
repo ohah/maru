@@ -1,4 +1,5 @@
 const std = @import("std");
+const build_source = @import("support/build_source.zig");
 
 fn count(haystack: []const u8, needle: []const u8) usize {
     return std.mem.count(u8, haystack, needle);
@@ -43,12 +44,7 @@ test "U5 restore postcommit fault vocabulary is closed and absent from the produ
         .limited(16 * 1024),
     );
     defer std.testing.allocator.free(runner);
-    const build = try std.Io.Dir.cwd().readFileAlloc(
-        std.testing.io,
-        "build.zig",
-        std.testing.allocator,
-        .limited(2 * 1024 * 1024),
-    );
+    const build = try build_source.read(std.testing.allocator);
     defer std.testing.allocator.free(build);
 
     try std.testing.expectEqual(

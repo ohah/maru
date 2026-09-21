@@ -7,6 +7,7 @@
 //! 동작 test 없이는 조용히 지나간다. 그래서 **그 함정으로 되돌아가는 것 자체를** 여기서 막는다.
 
 const std = @import("std");
+const build_source = @import("support/build_source.zig");
 
 fn read(allocator: std.mem.Allocator, path: []const u8, limit: usize) ![]u8 {
     return std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(limit));
@@ -187,7 +188,7 @@ test "빌드가 만드는 변종과 앱이 찾는 변종이 같다" {
     // 어긋나면 앱이 **빌드가 만들지 않은 자리**를 뒤지고, 증상은 「그 아키텍처 원격만 감시가 안 된다」 —
     // 컴파일러가 못 잇는 관계라 여기서 센다.
     const allocator = std.testing.allocator;
-    const build_zig = try read(allocator, "build.zig", 2 * 1024 * 1024);
+    const build_zig = try build_source.read(allocator);
     defer allocator.free(build_zig);
     const install = try read(allocator, "src/session/remote_watch_install.zig", 256 * 1024);
     defer allocator.free(install);

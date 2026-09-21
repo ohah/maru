@@ -1,4 +1,5 @@
 const std = @import("std");
+const build_source = @import("support/build_source.zig");
 
 fn contains(haystack: []const u8, needle: []const u8) bool {
     return std.mem.indexOf(u8, haystack, needle) != null;
@@ -60,12 +61,7 @@ test "U5 second failure matrix keeps the exact component inventory" {
     };
     for (required) |entry| try std.testing.expect(contains(sources[entry.source], entry.title));
 
-    const build = try std.Io.Dir.cwd().readFileAlloc(
-        std.testing.io,
-        "build.zig",
-        std.testing.allocator,
-        .limited(2 * 1024 * 1024),
-    );
+    const build = try build_source.read(std.testing.allocator);
     defer std.testing.allocator.free(build);
     const coordinator = try std.Io.Dir.cwd().readFileAlloc(
         std.testing.io,

@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const child = @import("release_adapter_candidate_baseline_child");
+const build_source = @import("support/build_source.zig");
 
 const uuid = "123e4567-e89b-42d3-a456-426614174000";
 const dmg_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -293,7 +294,7 @@ test "source exposes a real bounded executor and no ambient environment lookup" 
     try std.testing.expectError(error.InvalidInput, child.run(std.testing.io, inputs, &zig, .default_false, -1, &deadline));
     const source = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "src/platform/macos/session_host/release_adapter_candidate_baseline_child.zig", std.testing.allocator, .limited(96 * 1024));
     defer std.testing.allocator.free(source);
-    const build = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "build.zig", std.testing.allocator, .limited(2 * 1024 * 1024));
+    const build = try build_source.read(std.testing.allocator);
     defer std.testing.allocator.free(build);
     const runner_source = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "src/platform/macos/session_host/release_adapter_candidate_baseline_runner.zig", std.testing.allocator, .limited(128 * 1024));
     defer std.testing.allocator.free(runner_source);

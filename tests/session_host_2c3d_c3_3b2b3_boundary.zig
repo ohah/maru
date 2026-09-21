@@ -3,6 +3,7 @@
 const std = @import("std");
 /// 스캐너가 보는 walker 경로를 POSIX 구분자로 정규화한다(정본: tests/support/posix_walk.zig).
 const posixWalk = @import("support/posix_walk.zig").posixWalk;
+const build_source = @import("support/build_source.zig");
 
 test "C3-3b2b3 immutable pending preparation boundary" {
     const allocator = std.testing.allocator;
@@ -32,7 +33,7 @@ test "C3-3b2b3 immutable pending preparation boundary" {
     defer allocator.free(runtime);
     const transport = try readSource(allocator, "src/platform/macos/session_host/generation_transport.zig");
     defer allocator.free(transport);
-    const build = try readSource(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
 
     try std.testing.expectEqual(@as(usize, 1), count(pending_control, "@import(\"runtime_control_types.zig\")"));

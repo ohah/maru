@@ -1,4 +1,5 @@
 const std = @import("std");
+const build_source = @import("support/build_source.zig");
 
 test "CR6f idle soak is continuous actual-host evidence isolated from user session state" {
     const allocator = std.testing.allocator;
@@ -6,7 +7,7 @@ test "CR6f idle soak is continuous actual-host evidence isolated from user sessi
     defer allocator.free(runner);
     const validator = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "tools/perf/session_host_cr6f_idle_soak_validator.zig", allocator, .limited(1024 * 1024));
     defer allocator.free(validator);
-    const build = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "build.zig", allocator, .limited(4 * 1024 * 1024));
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
 
     for ([_][]const u8{

@@ -2,10 +2,11 @@
 
 const std = @import("std");
 const posixWalk = @import("support/posix_walk.zig").posixWalk;
+const build_source = @import("support/build_source.zig");
 
 test "CR6e-a1 경계는 stalled peer raw artifact만 열고 자동 reconnect를 배선하지 않는다" {
     const allocator = std.testing.allocator;
-    const build = try read(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
     const harness = try read(allocator, "src/platform/macos/session_host/cr6e_baseline.zig");
     defer allocator.free(harness);
@@ -40,7 +41,7 @@ test "CR6e-a1 경계는 stalled peer raw artifact만 열고 자동 reconnect를 
 
 test "CR6e-a2 경계는 exact AppKit fixture root와 반복 raw artifact만 연다" {
     const allocator = std.testing.allocator;
-    const build = try read(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
     const swift = try read(allocator, "src/platform/macos/MaruAppHost.swift");
     defer allocator.free(swift);

@@ -1,4 +1,5 @@
 const std = @import("std");
+const build_source = @import("support/build_source.zig");
 
 test "CR6e-c3c boundary keeps one app-global frame caller and quit-before-backend settlement" {
     const allocator = std.testing.allocator;
@@ -16,7 +17,7 @@ test "CR6e-c3c boundary keeps one app-global frame caller and quit-before-backen
     defer allocator.free(daemon);
     const server = try read(allocator, "src/platform/macos/session_host/server.zig");
     defer allocator.free(server);
-    const build = try read(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
     const harness = try read(allocator, "src/platform/macos/session_host/cr6c_appkit_smoke.zig");
     defer allocator.free(harness);

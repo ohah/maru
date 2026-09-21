@@ -1,4 +1,5 @@
 const std = @import("std");
+const build_source = @import("support/build_source.zig");
 
 const max_source_bytes = 16 * 1024 * 1024;
 
@@ -16,7 +17,7 @@ test "CR3a-2d2 경계는 aggregate terminal handoff와 typed teardown owner를 �
     defer allocator.free(slot);
     const generation = try readSource(allocator, "src/platform/macos/session_host/generation_attachment.zig");
     defer allocator.free(generation);
-    const build = try readSource(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
 
     try std.testing.expectEqual(@as(usize, 1), count(contract, "pub const Identity = struct {"));

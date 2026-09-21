@@ -1,4 +1,5 @@
 const std = @import("std");
+const build_source = @import("support/build_source.zig");
 
 test "C3-3b4 product semantic pump boundary는 sole caller와 raw source zero를 고정한다" {
     const allocator = std.testing.allocator;
@@ -12,7 +13,7 @@ test "C3-3b4 product semantic pump boundary는 sole caller와 raw source zero를
     defer allocator.free(backend);
     const app = try readSource(allocator, "src/platform/macos/app_session.zig");
     defer allocator.free(app);
-    const build = try readSource(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
 
     try std.testing.expectEqual(@as(usize, 1), count(adapter, "pub fn settlePreparedEvent("));

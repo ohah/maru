@@ -2,10 +2,11 @@
 
 const std = @import("std");
 const posixWalk = @import("support/posix_walk.zig").posixWalk;
+const build_source = @import("support/build_source.zig");
 
 test "CR6a-1 경계는 inert projection owner와 caller zero를 고정한다" {
     const allocator = std.testing.allocator;
-    const build = try read(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
     const barrel = try read(allocator, "src/platform/macos/session_host.zig");
     defer allocator.free(barrel);

@@ -1,4 +1,5 @@
 const std = @import("std");
+const build_source = @import("support/build_source.zig");
 
 fn contains(haystack: []const u8, needle: []const u8) bool {
     return std.mem.indexOf(u8, haystack, needle) != null;
@@ -12,12 +13,7 @@ test "U5 first failure matrix keeps every process and product rollback leaf" {
         .limited(64 * 1024),
     );
     defer std.testing.allocator.free(process);
-    const build = try std.Io.Dir.cwd().readFileAlloc(
-        std.testing.io,
-        "build.zig",
-        std.testing.allocator,
-        .limited(2 * 1024 * 1024),
-    );
+    const build = try build_source.read(std.testing.allocator);
     defer std.testing.allocator.free(build);
 
     const required_process_cases = [_][]const u8{

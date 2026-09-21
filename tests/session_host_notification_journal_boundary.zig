@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const posixWalk = @import("support/posix_walk.zig").posixWalk;
+const build_source = @import("support/build_source.zig");
 
 test "P4 N1 notification journal 경계는 pure owner와 N2a single product owner를 고정한다" {
     const allocator = std.testing.allocator;
@@ -9,7 +10,7 @@ test "P4 N1 notification journal 경계는 pure owner와 N2a single product owne
     defer allocator.free(journal);
     const barrel = try readSource(allocator, "src/platform/macos/session_host.zig");
     defer allocator.free(barrel);
-    const build = try readSource(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
     const persistent = try readSource(allocator, "docs/persistent-session-host.md");
     defer allocator.free(persistent);

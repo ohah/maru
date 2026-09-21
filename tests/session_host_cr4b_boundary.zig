@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const posixWalk = @import("support/posix_walk.zig").posixWalk;
+const build_source = @import("support/build_source.zig");
 
 const max_source_bytes = 16 * 1024 * 1024;
 
@@ -21,7 +22,7 @@ test "CR4b 경계는 staged receipt 뒤 stable mutation seal exact once만 연�
     defer allocator.free(seal_input);
     const mutation = try readSource(allocator, "src/platform/macos/session_host/reconnect_mutation_seal.zig");
     defer allocator.free(mutation);
-    const build = try readSource(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
     const finish_start = std.mem.indexOf(u8, backend, "fn finishHostReconnectTakeoverOutcome(").?;
     const finish_end = std.mem.indexOfPos(u8, backend, finish_start, "fn sealHostReconnectCandidateFailure(").?;

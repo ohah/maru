@@ -2,10 +2,11 @@
 
 const std = @import("std");
 const posixWalk = @import("support/posix_walk.zig").posixWalk;
+const build_source = @import("support/build_source.zig");
 
 test "CR6a-2 경계는 launch-before-terminal 순서와 inert system rows를 고정한다" {
     const allocator = std.testing.allocator;
-    const build = try read(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
     const app = try read(allocator, "src/platform/macos/app_session.zig");
     defer allocator.free(app);

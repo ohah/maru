@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const posixWalk = @import("support/posix_walk.zig").posixWalk;
+const build_source = @import("support/build_source.zig");
 
 test "Session default G1 provenance boundary keeps one parser and the exact G2 consumer inventory" {
     const allocator = std.testing.allocator;
@@ -15,7 +16,7 @@ test "Session default G1 provenance boundary keeps one parser and the exact G2 c
     defer allocator.free(schema);
     const barrel = try readSource(allocator, "src/config.zig");
     defer allocator.free(barrel);
-    const build = try readSource(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
     const persistent = try readSource(allocator, "docs/persistent-session-host.md");
     defer allocator.free(persistent);

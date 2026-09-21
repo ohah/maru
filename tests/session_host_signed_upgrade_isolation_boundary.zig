@@ -1,6 +1,7 @@
 //! The signed harness consumes one caller-owned absent root and never removes an old artifact.
 
 const std = @import("std");
+const build_source = @import("support/build_source.zig");
 
 test "signed upgrade harness requires an explicit isolated root and exclusive output" {
     const source = @embedFile("session_host_signed_upgrade_e2e.zig");
@@ -13,7 +14,7 @@ test "signed upgrade harness requires an explicit isolated root and exclusive ou
 }
 
 test "both opt-in gates pass distinct fixed roots as the sixth harness argument" {
-    const build = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "build.zig", std.testing.allocator, .limited(2 * 1024 * 1024));
+    const build = try build_source.read(std.testing.allocator);
     defer std.testing.allocator.free(build);
     try std.testing.expect(std.mem.indexOf(u8, build, "session-host-signed-upgrade-root") != null);
     try std.testing.expect(std.mem.indexOf(u8, build, "zig-out/session-host-signed-upgrade/run-root") != null);

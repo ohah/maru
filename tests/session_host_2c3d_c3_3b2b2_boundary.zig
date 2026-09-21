@@ -3,6 +3,7 @@
 const std = @import("std");
 /// 스캐너가 보는 walker 경로를 POSIX 구분자로 정규화한다(정본: tests/support/posix_walk.zig).
 const posixWalk = @import("support/posix_walk.zig").posixWalk;
+const build_source = @import("support/build_source.zig");
 
 test "C3-3b2b2 pure preparation recipe boundary" {
     const allocator = std.testing.allocator;
@@ -31,7 +32,7 @@ test "C3-3b2b2 pure preparation recipe boundary" {
         "src/platform/macos/session_host/remote_runtime.zig",
     );
     defer allocator.free(runtime);
-    const build = try readSource(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
 
     inline for (.{

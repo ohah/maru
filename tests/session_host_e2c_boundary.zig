@@ -1,4 +1,5 @@
 const std = @import("std");
+const build_source = @import("support/build_source.zig");
 
 test "P4 E2c source change preflight stays lock free and steady state foreground sampling stays allocation free" {
     const allocator = std.testing.allocator;
@@ -6,7 +7,7 @@ test "P4 E2c source change preflight stays lock free and steady state foreground
     defer allocator.free(manager);
     const inventory = try readSource(allocator, "src/platform/macos/session_host/handoff_inventory.zig");
     defer allocator.free(inventory);
-    const build = try readSource(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
 
     try std.testing.expectEqual(@as(usize, 1), count(manager, "fn refreshForegroundCache("));

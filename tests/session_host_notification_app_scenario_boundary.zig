@@ -1,6 +1,7 @@
 //! P4 N3-R2b2/R2b3b2 app scenario source and isolation boundary.
 
 const std = @import("std");
+const build_source = @import("support/build_source.zig");
 
 test "N3-R2b2 app scenario observes only the real callback and normal attach path" {
     const allocator = std.testing.allocator;
@@ -10,7 +11,7 @@ test "N3-R2b2 app scenario observes only the real callback and normal attach pat
     defer allocator.free(scenario);
     const receipt = try readSource(allocator, "src/platform/macos/NotificationReleaseScenarioReceipt.swift");
     defer allocator.free(receipt);
-    const build = try readSource(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
     const app_session = try readSource(allocator, "src/platform/macos/app_session.zig");
     defer allocator.free(app_session);

@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const posixWalk = @import("support/posix_walk.zig").posixWalk;
+const build_source = @import("support/build_source.zig");
 const max_source_bytes = 16 * 1024 * 1024;
 
 test "CR4c C2 경계는 forced resize 뒤 generation publication과 ordered reclaim만 연다" {
@@ -14,7 +15,7 @@ test "CR4c C2 경계는 forced resize 뒤 generation publication과 ordered recl
     defer allocator.free(runtime);
     const backend = try readSource(allocator, "src/platform/macos/session_host/remote_term_backend.zig");
     defer allocator.free(backend);
-    const build = try readSource(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
     const matrix = try readSource(allocator, "docs/verification-matrix.md");
     defer allocator.free(matrix);

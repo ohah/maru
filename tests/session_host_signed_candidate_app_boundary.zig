@@ -1,14 +1,10 @@
 //! Release evidence must execute the preserved signed candidate, not a fresh developer bundle.
 
 const std = @import("std");
+const build_source = @import("support/build_source.zig");
 
 test "baseline gates share one signed candidate app and have no developer fallback" {
-    const build = try std.Io.Dir.cwd().readFileAlloc(
-        std.testing.io,
-        "build.zig",
-        std.testing.allocator,
-        .limited(2 * 1024 * 1024),
-    );
+    const build = try build_source.read(std.testing.allocator);
     defer std.testing.allocator.free(build);
 
     const start = std.mem.indexOf(u8, build, "const signed_candidate_app = b.option(") orelse

@@ -3,6 +3,7 @@
 //! 집계 잡이며, 집계는 네 샤드가 찍은 «내 몫 / 전체» 의 합을 다시 센다. 누군가 샤드를 하나로 되돌리거나 집계의 합 검사를
 //! 빼거나 옵션 없는 로컬 실행을 부분 실행으로 바꾸면 여기서 걸린다(실측 2026-09-06: 직렬 810초가 PR 임계 경로였다).
 const std = @import("std");
+const build_source = @import("support/build_source.zig");
 
 fn count(haystack: []const u8, needle: []const u8) usize {
     var total: usize = 0;
@@ -20,7 +21,7 @@ fn read(allocator: std.mem.Allocator, path: []const u8, limit: usize) ![]u8 {
 
 test "check-boundaries runs as four index shards behind one aggregate check that re-counts the union" {
     const allocator = std.testing.allocator;
-    const build = try read(allocator, "build.zig", 4 * 1024 * 1024);
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
     const workflow = try read(allocator, ".github/workflows/ci.yml", 1024 * 1024);
     defer allocator.free(workflow);

@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const posixWalk = @import("support/posix_walk.zig").posixWalk;
+const build_source = @import("support/build_source.zig");
 const max_source_bytes = 16 * 1024 * 1024;
 
 test "CR5d-1 경계는 sealed Window transaction과 product caller zero를 고정한다" {
@@ -13,7 +14,7 @@ test "CR5d-1 경계는 sealed Window transaction과 product caller zero를 고�
     defer allocator.free(seal);
     const service = try readSource(allocator, "src/platform/macos/session_host/process_seal_service.zig");
     defer allocator.free(service);
-    const build = try readSource(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
     const backend = try readSource(allocator, "src/platform/macos/session_host/remote_term_backend.zig");
     defer allocator.free(backend);

@@ -9,7 +9,12 @@ payload_action='./.github/actions/session-host-release-attest-authored-profile'
 legacy_payload_action='./.github/actions/session-host-release-attest-authored'
 contract=src/platform/macos/session_host/release_adapter_attestation_bundle_contract.zig
 workflow=.github/workflows/release.yml
-build_file=build.zig
+# **`build.zig` 한 파일이 아니라 빌드 소스 전체를 본다** — 빌드 그래프 등록이 `build/` 아래로
+# 갈렸고, 이 스크립트가 찾는 두 줄도 그리로 옮겨갔다(docs/project-structure.md
+# "빌드 그래프는 build.zig 하나가 아니다"). 이름으로 한 파일만 열면 조용히 못 찾는다.
+# .zig 판정자 쪽에서는 tests/support/build_source.zig 가 같은 정의를 소유한다.
+# **둘째 소비자가 생기면 tools/ 의 공용 헬퍼로 뺀다** — 지금은 이 스크립트뿐이라 여기 둔다.
+build_files=(build.zig build/*.zig)
 
 test -f "$action"
 test -x "$helper"
@@ -69,8 +74,8 @@ test "$(grep -Fxc '    if: ${{ steps.select.outcome == '\''success'\'' }}' "$liv
 test "$(grep -Fxc '    if: ${{ steps.select.outcome == '\''success'\'' && steps.payload.outcome == '\''success'\'' }}' "$live_action")" -eq 1
 test "$(grep -Fc '/zig-out/bin/maru-session-host-release-workflow-authored-selector' "$live_action")" -eq 2
 test "$(grep -Fxc '            session-host-release-workflow-authored-selector \' "$workflow")" -eq 1
-test "$(grep -Fxc '        "session-host-release-workflow-authored-selector",' "$build_file")" -eq 1
-test "$(grep -Fxc '                        .dest_sub_path = "maru-session-host-release-workflow-authored-selector",' "$build_file")" -eq 1
+test "$(cat "${build_files[@]}" | grep -Fxc '        "session-host-release-workflow-authored-selector",')" -eq 1
+test "$(cat "${build_files[@]}" | grep -Fxc '                        .dest_sub_path = "maru-session-host-release-workflow-authored-selector",')" -eq 1
 test "$(grep -Fc 'GH_TOKEN:' "$live_action")" -eq 0
 test "$(grep -Ec '(^|[[:space:]])(eval|source)([[:space:]]|$)' "$live_action")" -eq 0
 test "$(grep -Fc 'GITHUB_ENV' "$live_action")" -eq 0

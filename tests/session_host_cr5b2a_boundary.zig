@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const posixWalk = @import("support/posix_walk.zig").posixWalk;
+const build_source = @import("support/build_source.zig");
 const max_source_bytes = 16 * 1024 * 1024;
 
 test "CR5b-2a 경계는 all-runtime prepare와 reverse abort만 열고 shared replacement를 닫는다" {
@@ -18,7 +19,7 @@ test "CR5b-2a 경계는 all-runtime prepare와 reverse abort만 열고 shared re
     defer allocator.free(slot);
     const payload = try readSource(allocator, "src/platform/macos/session_host/remote_attachment.zig");
     defer allocator.free(payload);
-    const build = try readSource(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
 
     inline for (.{

@@ -1,4 +1,5 @@
 const std = @import("std");
+const build_source = @import("support/build_source.zig");
 
 test "C3-3b6 shutdown boundary는 제품 caller와 중립 layering을 고정한다" {
     const allocator = std.testing.allocator;
@@ -24,8 +25,8 @@ test "C3-3b6 shutdown boundary는 제품 caller와 중립 layering을 고정한�
     defer allocator.free(baseline_manifest);
     const baseline_patch = try readSource(allocator, "tests/fixtures/session_host_n1/source.patch");
     defer allocator.free(baseline_patch);
-    const build_source = try readSource(allocator, "build.zig");
-    defer allocator.free(build_source);
+    const build = try build_source.read(allocator);
+    defer allocator.free(build);
 
     try std.testing.expectEqual(@as(usize, 1), count(app, "backend.beginAppQuitShutdown(std.Io.Clock.awake.now(self.io).nanoseconds)"));
     try std.testing.expectEqual(@as(usize, 1), count(app, "backend.tombstoneAllRoutingForAppQuit()"));
@@ -69,8 +70,8 @@ test "C3-3b6 shutdown boundary는 제품 caller와 중립 layering을 고정한�
     try std.testing.expectEqual(@as(usize, 1), count(baseline_manifest, "bb9a180c4e085859dc35c4ff264fc0b90c0692f98810c56b6cd5982d5b106fb4"));
     try std.testing.expectEqual(@as(usize, 1), count(baseline_manifest, "4004256667fee2b40d41c7fe678ef44c7b5385fd4ff25410c40a9198344ce64c"));
     try std.testing.expectEqual(@as(usize, 2), count(baseline_patch, "+pub const "));
-    try std.testing.expectEqual(@as(usize, 0), count(build_source, "session_host_2c3d_c3_3b6_red.zig"));
-    try std.testing.expectEqual(@as(usize, 1), count(build_source, "C3-3b6 실제 이전 wire 기준은 ambiguous 뒤 destructive retry를 하지 않는다"));
+    try std.testing.expectEqual(@as(usize, 0), count(build, "session_host_2c3d_c3_3b6_red.zig"));
+    try std.testing.expectEqual(@as(usize, 1), count(build, "C3-3b6 실제 이전 wire 기준은 ambiguous 뒤 destructive retry를 하지 않는다"));
 
     inline for (.{ contract, diagnostic }) |neutral| {
         try std.testing.expectEqual(@as(usize, 0), count(neutral, "app_session"));

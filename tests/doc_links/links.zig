@@ -635,7 +635,10 @@ fn collectRefSourcePaths(arena: std.mem.Allocator) ![][]const u8 {
     for (try collectDocPaths(arena)) |p| try paths.append(arena, p);
     try paths.append(arena, try arena.dupe(u8, "build.zig"));
 
-    for ([_][]const u8{ "src", "tests", "tools" }) |root| {
+    // `build/` 도 함께 본다 — 빌드 그래프 등록이 그리로 갈렸고, 그 주석이 `docs/foo.md §4.2` 로
+    // 계약을 가리킨다(실측: `session_host_gates.zig`·`session_host_release_gates.zig` 에 있다).
+    // 여기를 빼면 그 참조들만 조용히 검사 밖에 남는다.
+    for ([_][]const u8{ "src", "tests", "tools", "build" }) |root| {
         var dir = std.Io.Dir.cwd().openDir(std.testing.io, root, .{ .iterate = true }) catch continue;
         defer dir.close(std.testing.io);
         var walker = try posixWalk(dir, arena);

@@ -178,6 +178,11 @@ final class EditorSaveConflictSmokeDriver {
                 stage = .answered
                 let key: Key = scenario == .conflictOverwrite ? .answerOverwrite : .answerReload
                 guard pressKey(key) else { return fail("answer_key_refused") }
+                // ⚠️ **여기서 돌아간다.** 이 `switch` 아래에는 `.saved` 의 공통 꼬리(`stage = .done`)가
+                // 있어서, 안 돌아가면 답을 누른 그 tick 에 곧바로 `done` 이 되고 `.answered` 검사가
+                // **죽은 코드**가 된다(적대적 4회차에서 그 상태로 변이가 드라이버를 통과했다 — 셸 쪽
+                // 파일 대조만이 잡았다).
+                return
             case .externalConflict:
                 // ⑴ **디스크가 안 덮였다** — 이 스모크의 값이 여기 있다.
                 if now != contentOnDisk { return fail("overwrote_external_change") }

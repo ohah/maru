@@ -81,11 +81,23 @@ run_scenario() {
         # **다른 프로세스가 쓴다** — 앱이 쓰면 그것은 "밖에서"가 아니다.
         printf '%s' "$external" > "$document"
         printf '%s' "$external" > "$reference"
+        # ⚠️ **「다시 읽기」가 몰래 쓰는 것은 내용으로 안 보인다** — 다시 읽은 직후의 버퍼는 디스크와
+        # 같은 바이트라, 그것을 되쓰면 파일은 글자 하나 안 바뀐다. 그래서 **쓴 시각**을 본다(소수점
+        # 포함 mtime). 이 줄이 없으면 「읽기가 아니라 읽고 되쓰기」인 구현이 게이트를 통과한다
+        # (적대적 4회차에서 실제로 통과했다).
+        mtime_before=$(stat -f %Fm "$document")
     fi
 
     wait "$app_pid"
     test -f "$summary"
     cp "$summary" "$root/$scenario.summary.txt"
+    if [ "$scenario" = conflict-reload ]; then
+        # **다시 읽기는 읽기다** — 앱이 그 파일에 한 글자도 쓰지 않았어야 한다.
+        if [ "$(stat -f %Fm "$document")" != "$mtime_before" ]; then
+            echo "reload wrote to the file (mtime moved): $scenario" >&2
+            exit 1
+        fi
+    fi
 }
 
 run_scenario external-conflict

@@ -1637,11 +1637,11 @@ pub fn build(b: *std.Build) void {
         .filters = &.{ "U1", "U2", "C0", "C1a" }, // `SYNU1` 도 걸린다(부분 일치) — 아래 개수가 그것을 포함한다
     });
     const run_macos_editor_untitled_tests = b.addRunArtifact(macos_editor_untitled_tests);
-    // 73 = 앞의 66(U1a~U1r 열여덟 + C0a~C0c 셋 + U2 일가 + SYNU1 + 부분 일치 + `test_0` 다섯)에
-    //      **C1a-1~C1a-7 일곱**을 더한 값이다(C1a — 저장 충돌의 선택).
-    run_macos_editor_untitled_tests.addArg("--maru-expect-tests=73");
+    // 77 = 앞의 66(U1a~U1r 열여덟 + C0a~C0c 셋 + U2 일가 + SYNU1 + 부분 일치 + `test_0` 다섯)에
+    //      **C1a-1~C1a-11 열하나**을 더한 값이다(C1a — 저장 충돌의 선택).
+    run_macos_editor_untitled_tests.addArg("--maru-expect-tests=77");
     // ⚠️ **그리고 실제로 돌았는가** — 전부 macOS 가 아니면 `SkipZigTest` 다.
-    run_macos_editor_untitled_tests.addArg("--maru-expect-passed=73");
+    run_macos_editor_untitled_tests.addArg("--maru-expect-passed=77");
     run_macos_editor_untitled_tests.setCwd(b.path("."));
     const untitled_step = b.step(
         "test-editor-untitled",

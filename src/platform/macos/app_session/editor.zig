@@ -34791,3 +34791,45 @@ test "U1q 빈 문서도 실제로 그려진다 — 프레임을 세워 본다" {
         }
     }
 }
+
+test "U1r 이상한 순서로 만져도 흔들리지 않는다 — rename 우선 · 확인 수락 · 번호는 안 되감긴다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+
+    const pane = pane_ops.activePane(fx.session);
+    for (fx.session.tabs.items) |tb| for (tb.panes.items) |pn| for (pn.terms.items) |tm| {
+        if (tm.kind != .editor) tm.surface.core.semantic_state = .input;
+    };
+
+    // ⑴ **사용자 rename 이 우선이다**(계약: `pickLabel` 단일 해석). 이름이 자동인 자리라 자동 이름이
+    //    사용자 이름을 덮는 변이가 쉽게 생기고, 지금까지 판정 밖이었다(적대적 10회차).
+    const t = try openUntitledInActivePane(fx.session);
+    try testing.expectEqualStrings("untitled-1", app_session_mod.termLabel(t));
+    t.surface.custom_name = try allocator.dupe(u8, "scratch");
+    try testing.expectEqualStrings("scratch", app_session_mod.termLabel(t));
+    // **번호는 그대로다** — rename 은 문서 정체성을 건드리지 않는다(이름만 가린다).
+    try testing.expectEqual(@as(u32, 1), t.rt.editor_untitled.?.n);
+
+    // ⑵ **확인을 «수락」하면 정말 닫힌다.** 여기까지의 판정자는 「문구가 뜬다」까지만 봤다 — 수락 경로가
+    //    끊겨 있으면 사용자는 확인을 눌러도 탭이 안 닫히는 것을 본다.
+    try testing.expect(insertText(fx.session, t, "x"));
+    const before = pane.terms.items.len;
+    fx.session.requestClose(.active_term);
+    try testing.expect(fx.session.chrome_host.confirm.open);
+    fx.session.dispatchChromeAction(.confirm_accept);
+    try testing.expectEqual(before - 1, pane.terms.items.len);
+
+    // ⑶ **닫아도 번호는 안 되감긴다.** 다음 문서는 2 다 — 1 이 다시 나오면 방금 닫은 것과 이름이 같다.
+    const t2 = try openUntitledInActivePane(fx.session);
+    try testing.expectEqualStrings("untitled-2", app_session_mod.termLabel(t2));
+
+    // ⑷ **split 해도 그 문서는 그대로다.** 분할은 pane 을 나누므로 Term 소유가 옮겨 다니는 자리다.
+    try pane_ops.splitActivePane(fx.session, .horizontal);
+    try testing.expect(t2.rt.editor_untitled != null);
+    try testing.expectEqualStrings("untitled-2", app_session_mod.termLabel(t2));
+    // 새 pane 에서 열면 번호가 이어진다(창 단위가 아니라 앱 단위라는 것의 다른 얼굴).
+    const t3 = try openUntitledInActivePane(fx.session);
+    try testing.expectEqualStrings("untitled-3", app_session_mod.termLabel(t3));
+}

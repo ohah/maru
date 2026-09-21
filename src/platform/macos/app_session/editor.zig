@@ -36021,3 +36021,66 @@ test "U2x 파일시스템의 거친 자리: 없는 하위 폴더 · 같은 이�
         try testing.expectEqualStrings("z\n", got);
     }
 }
+
+test "U2y 「이미 열림」은 이 창만 본다 — 다른 창은 검사 범위 밖이다(기존 규칙)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    const io = std.testing.io;
+    try dir.dir.writeFile(io, .{ .sub_path = "shared.txt", .data = "a\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "shared.txt" });
+    defer allocator.free(path);
+
+    const saved = app_session_mod.app_runtime.untitled_docs;
+    defer app_session_mod.app_runtime.untitled_docs = saved;
+    app_session_mod.app_runtime.untitled_docs = .{};
+
+    const mk = struct {
+        fn f(a: std.mem.Allocator, r: []const u8) !*AppSession {
+            const s = try a.create(AppSession);
+            errdefer a.destroy(s);
+            try s.init(std.Io.Threaded.global_single_threaded.io(), a, .{
+                .abi_version = app_session_mod.abi_version,
+                .cols = 80,
+                .rows = 24,
+                .queue_capacity = 16,
+                .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+            });
+            s.loaded_config.config.workspace.root = r;
+            return s;
+        }
+    }.f;
+
+    const w1 = try mk(allocator, root);
+    defer {
+        w1.deinit();
+        allocator.destroy(w1);
+    }
+    const w2 = try mk(allocator, root);
+    defer {
+        w2.deinit();
+        allocator.destroy(w2);
+    }
+
+    // 창 1 이 그 파일을 연다.
+    _ = try pane_ops.openFileTermInActivePane(w1, path, .text);
+    // **같은 창에서는 거절한다**(U2f 가 재는 그 규칙).
+    try testing.expect(file_panel_ops.fileTermForPath(w1, path) != null);
+    // **다른 창에서는 안 보인다** — `fileTermForPath` 가 그 세션의 탭만 훑기 때문이다. 경로 유일성은
+    // 이 앱에서 **창 단위** 불변식이고(파일을 여는 길이 같은 범위를 쓴다), U2 의 검사도 그 범위를
+    // 그대로 따른다. 창을 넘는 보호는 이 슬라이스가 만들지 않는다 — 만들면 파일 열기와 저장이 **다른
+    // 범위**를 쓰게 되어 한쪽이 낡는다(적대적 12회차에서 범위를 확인했다).
+    try testing.expect(file_panel_ops.fileTermForPath(w2, path) == null);
+
+    // 그래서 창 2 의 이름 없는 문서는 그 경로로 **저장된다**(덮어쓰기 확인을 지나). 한계를 값으로 둔다.
+    const t = try openUntitledInActivePane(w2);
+    try testing.expect(insertText(w2, t, "b\n"));
+    try testing.expect(!saveDocument(w2, t));
+    try w2.rename_input.query.appendSlice(allocator, "shared.txt");
+    settings_ops.commitRename(w2);
+    try testing.expect(w2.pending_confirm == .untitled_overwrite); // 확인은 뜬다(디스크에 있다)
+    try testing.expect(t.rt.editor_path == null); // 아직 안 썼다
+}

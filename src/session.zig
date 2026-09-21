@@ -224,6 +224,9 @@ pub const editor = struct {
     /// N2: 편집 가능한 문서 — 버퍼(§3.0)와 소비처가 읽는 평탄한 축을 한 소유자에게 묶는다.
     /// `open`(읽기 전용, bytes를 빌린다)의 편집판이다.
     pub const edit_doc = @import("session/editor/edit_doc.zig");
+    /// U1: 이름 없는 문서의 번호와 표시 이름(§3.11). 발급기는 **앱 전역**이라 `AppRuntime` 이 들고,
+    /// 규칙은 화면도 OS 도 몰라야 해서 여기 산다.
+    pub const untitled = @import("session/editor/untitled.zig");
 };
 
 // surface/window 헬퍼 re-export(app.zig에서 D2로 이동 — platform이 쓴다).

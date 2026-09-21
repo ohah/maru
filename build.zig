@@ -1689,6 +1689,28 @@ pub fn build(b: *std.Build) void {
         "Run the 3-way merge mode judges (S3b-1)",
     ).dependOn(&run_macos_editor_merge_tests.step);
 
+    // **이름 없는 문서**(U1 — docs/plans/editor-untitled.md). 위와 같은 이유로 전용 step 을 둔다:
+    // 변이 검사를 반복하려면 전체 12 분짜리를 돌릴 수 없고, 무관한 concurrent flake 가 「죽음」으로
+    // 세어지면 판정력 측정 자체가 거짓이 된다.
+    //
+    // ⚠️ **L2 규칙(`UT1`~`UT4`)은 여기서 안 돈다** — `session/editor/untitled.zig` 는 `maru` 모듈에
+    // 있고 Zig 는 별도 모듈의 test 를 안 모은다(`MPN1~5` 가 같은 이유로 `test-editor` 에 있다).
+    // 그쪽은 `zig build test` 가 돈다.
+    const macos_editor_untitled_tests = addProjectTest(b, .{
+        .root_module = macos_app_host_abi_tests.root_module,
+        .filters = &.{"U1"}, // `SYNU1` 도 걸린다(부분 일치) — 아래 개수가 그것을 포함한다
+    });
+    const run_macos_editor_untitled_tests = b.addRunArtifact(macos_editor_untitled_tests);
+    // 12 = U1a~U1f 여섯 + SYNU1 하나(필터 부분 일치) + 각 모듈이 자동 생성하는 `test_0` 다섯.
+    run_macos_editor_untitled_tests.addArg("--maru-expect-tests=12");
+    // ⚠️ **그리고 실제로 돌았는가** — 전부 macOS 가 아니면 `SkipZigTest` 다.
+    run_macos_editor_untitled_tests.addArg("--maru-expect-passed=12");
+    run_macos_editor_untitled_tests.setCwd(b.path("."));
+    b.step(
+        "test-editor-untitled",
+        "Run the untitled-document judges only (U1 filter)",
+    ).dependOn(&run_macos_editor_untitled_tests.step);
+
     // 파일 탐색기 제품-path 성능 gate는 app_host_abi 모듈의 실제 AppSession glue를 쓰되
     // 해당 테스트 하나만 컴파일·실행한다. 전체 ABI suite에 결합하면 무관한 socket/WebKit
     // 회귀나 flaky test가 탐색기 artifact의 신호를 가리므로 전용 step으로 분리한다.

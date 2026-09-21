@@ -14,6 +14,12 @@ pub const Action = union(enum) {
     // env 훅 MARU_WEB_PANEL을 사용자 command/메뉴로 승격(docs/plans/web-panel.md §10 4e-5). panel_kind는 .browser(markdown은
     // 후속). 기본 키바인딩 **⌘⌥T**(⌘T=new_term의 web 버전, ⌥로 구분 — ⌘⇧T=new_tab 워크스페이스와도 구분). 메뉴 File·커맨드 팔릿에도 노출.
     new_web_tab,
+    // 활성 pane에 **이름 없는 편집기 Term**(빈 문서)을 생성한다 — `New Browser Tab`·`New Terminal Tab`
+    // 의 편집기 짝(사용자 요청 2026-09-21). 계약은 docs/native-editor-document-model.md §3.11,
+    // 단계는 docs/plans/editor-untitled.md U1. 경로가 없으므로 문법도 없고(무색 — §5 저하), 저장은
+    // 이름을 묻는다(U2). 기본 키바인딩 **⌘⌥N**(형제가 전부 갖고 있다 — ⌘T=new_term·⌘⇧T=new_tab·
+    // ⌘⌥T=new_web_tab). 메뉴 File·커맨드 팔릿에도 노출.
+    new_editor_tab,
     // Markdown/HTML 파일 선택창을 열어 현재 창의 전역 도크에 연다. 기본 Cmd+O(macOS Open 관례), 커맨드 팔릿·메뉴와
     // 사용자 keybind에서도 같은 액션을 쓴다. 파일 선택/경로 I/O는 Swift, 종류·도크 라우팅 정책은 Zig가 소유한다.
     open_file_panel,
@@ -279,6 +285,7 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "promote_to_top_level")) return .promote_to_top_level;
     if (std.mem.eql(u8, value, "new_term")) return .new_term;
     if (std.mem.eql(u8, value, "new_web_tab")) return .new_web_tab;
+    if (std.mem.eql(u8, value, "new_editor_tab")) return .new_editor_tab;
     if (std.mem.eql(u8, value, "open_file_panel")) return .open_file_panel;
     if (std.mem.eql(u8, value, "toggle_file_panel_dock_side")) return .toggle_file_panel_dock_side;
     if (std.mem.eql(u8, value, "toggle_file_panel_focus")) return .toggle_file_panel_focus;
@@ -410,6 +417,7 @@ test "parse configured actions" {
     try std.testing.expectEqual(Action.promote_to_top_level, parseAction("promote_to_top_level").?);
     try std.testing.expectEqual(Action.new_term, parseAction("new_term").?);
     try std.testing.expectEqual(Action.new_web_tab, parseAction("new_web_tab").?);
+    try std.testing.expectEqual(Action.new_editor_tab, parseAction("new_editor_tab").?);
     try std.testing.expectEqual(Action.open_file_panel, parseAction("open_file_panel").?);
     try std.testing.expectEqual(Action.toggle_file_panel_dock_side, parseAction("toggle_file_panel_dock_side").?);
     try std.testing.expectEqual(Action.focus_file_tree, parseAction("focus_file_tree").?);

@@ -9272,6 +9272,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         file.addItem(catalogMenuItem("new_term", catalog))
         file.addItem(catalogMenuItem("new_tab", catalog))
         file.addItem(catalogMenuItem("new_web_tab", catalog)) // 4e-5: 활성 pane에 브라우저 Term(발견성 — 기본 키바인딩 없음)
+        file.addItem(catalogMenuItem("new_editor_tab", catalog)) // U1: 활성 pane에 이름 없는 편집기 Term(빈 문서)
         file.addItem(.separator())
         file.addItem(catalogMenuItem("close_term", catalog))
         attachSubmenu(mainMenu, "File", file)

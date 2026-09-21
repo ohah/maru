@@ -267,8 +267,9 @@ pub fn flattenForHistory(self: *AppSession, body: []const u8) ![]u8 {
 /// 대화를 못 읽었으면(계약 1) provider 문구만 그대로 나가 기존 동작과 같다.
 pub fn notificationBodyOwned(self: *AppSession, term: *Term, body: []const u8) ![]u8 {
     const tr = maru.session.agent_transcript;
-    const prompt = tr.clampUtf8(term.hook.transcript.prompt(), notification_conversation_max_bytes);
-    const reply = tr.clampUtf8(term.hook.transcript.reply(), notification_conversation_max_bytes);
+    const slot = agent_ops.primaryHookSlot(self, term); // pane 슬롯이 있으면 최근 pane 의 대화(RA7)
+    const prompt = tr.clampUtf8(slot.transcript.prompt(), notification_conversation_max_bytes);
+    const reply = tr.clampUtf8(slot.transcript.reply(), notification_conversation_max_bytes);
     if (prompt.len == 0 and reply.len == 0) return self.allocator.dupe(u8, body);
 
     var out: std.ArrayListUnmanaged(u8) = .empty;

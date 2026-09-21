@@ -95,14 +95,14 @@ pub const BatchTurnFacts = struct {
     session_buf: [maru.session.turn_snapshot.max_session_id_len]u8 = undefined,
     session_len: usize = 0,
 
-    pub fn captureFrom(self: *BatchTurnFacts, term: *Term) void {
-        const sid = term.hook.transcript.identity();
+    pub fn captureFrom(self: *BatchTurnFacts, slot: *const HookSlot) void {
+        const sid = slot.transcript.identity();
         self.session_len = if (sid.len <= self.session_buf.len) sid.len else 0;
         if (self.session_len > 0) @memcpy(self.session_buf[0..sid.len], sid);
-        const key = term.hook.progress.turnKey();
+        const key = slot.progress.turnKey();
         self.key_len = if (key.len <= self.key_buf.len) key.len else 0;
         if (self.key_len > 0) @memcpy(self.key_buf[0..key.len], key);
-        const title = maru.session.agent_transcript.clampUtf8(term.hook.transcript.reply(), self.title_buf.len);
+        const title = maru.session.agent_transcript.clampUtf8(slot.transcript.reply(), self.title_buf.len);
         self.title_len = title.len;
         if (title.len > 0) @memcpy(self.title_buf[0..title.len], title);
     }
@@ -187,12 +187,18 @@ pub const TurnBatch = struct {
     capture: turn_capture.Id = 0,
 
     pub fn step(self_: *TurnBatch, self: *AppSession, term: *Term, ev: maru.session.agent_hook_event.Event) void {
-        const applied = applyHookEvent(self, term, ev);
+        self_.stepSlot(self, term, &term.hook, ev);
+    }
+
+    /// `step` 의 본체 — **어느 슬롯인가**를 받는다(RA7 조각 2). 로컬·원격 pane 하나는 `term.hook`, 원격 pane 여럿은
+    /// pane 테이블의 슬롯. 배치는 슬롯마다 하나다 — 두 pane 의 턴 끝이 한 배치에 섞여도 각자의 사실·사본을 굳힌다.
+    pub fn stepSlot(self_: *TurnBatch, self: *AppSession, term: *Term, slot: *HookSlot, ev: maru.session.agent_hook_event.Event) void {
+        const applied = applyHookEventTo(self, term, slot, ev);
         if (applied.base) self_.base_opened = true;
         // **턴이 끝나는 그 순간** 사실과 사본을 함께 굳힌다 — 배치 끝에서 하면 다음 턴의 것이 섞인다.
         if (applied.turn_end) {
-            self_.facts.captureFrom(term);
-            self_.capture = sealTurnCaptureNow(self, term);
+            self_.facts.captureFrom(slot);
+            self_.capture = sealTurnCaptureNowFor(self, term, slot);
             self_.turn_ended = true;
         }
         if (applied.conversation) self_.conversation_changed = true;
@@ -423,7 +429,12 @@ fn noteBeforePath(
 /// 그러면 **다음 턴의 파일이 끝난 턴의 사본에** 들어가 그 턴의 `✎` 와 배지가 남의 편집을 센다.
 /// `BatchTurnFacts.captureFrom` 이 턴 키에서 같은 이유로 같은 자리에 있다(AT2 가 겪은 결함).
 pub fn sealTurnCaptureNow(self: *AppSession, term: *Term) turn_capture.Id {
-    const identity = term.hook.transcript.identity();
+    return sealTurnCaptureNowFor(self, term, &term.hook);
+}
+
+/// `sealTurnCaptureNow` 의 본체 — 신원은 **그 슬롯**의 것이다(RA7 조각 2: pane 마다 세션이 다르다).
+pub fn sealTurnCaptureNowFor(self: *AppSession, term: *Term, slot: *const HookSlot) turn_capture.Id {
+    const identity = slot.transcript.identity();
     if (identity.len == 0) return 0;
     // **봉인 전에 고아를 비운다** — 봉인 자리는 「링이 가리킬 수 있는 최대 + 1」이라 그 한 칸이 고아로
     // 채워지면 아직 가리켜지는 사본이 밀려난다.
@@ -1967,6 +1978,8 @@ pub fn pollAgentConsumer(self: *AppSession, term: *Term, displayed: bool, observ
             // 돌아온 뒤에도 폴더줄이 **옛 경로에 붙박인다** — 그때부터는 OSC 7 이 제대로 갱신되는데
             // 그것을 무시하게 되고, 그 모양이 바로 이 블록이 금지하는 «한 Term 두 소스» 다.
             term.hook.cwd.clear();
+            // pane 슬롯도 이 Term 의 것이다(RA7) — 훅 모드를 벗어나면 함께 버린다.
+            self.remote_agent_panes.dropSurface(term.surfaceId());
             // 자식 셈도 버린다. 남기면 훅 모드로 돌아온 뒤 첫 lead `Stop` 이 «자식이 남았다» 로 읽혀
             // 배지가 안 풀린다(다음 프롬프트가 셈을 지울 때까지).
             term.hook.progress.reset();
@@ -2076,7 +2089,13 @@ pub fn consumeRemoteAgentLines(self: *AppSession, term: *Term, lines: []const []
     var ch = &(term.agent_remote_channel orelse return);
 
     const nonce = term.agent_remote_nonce[0..term.agent_remote_nonce_len];
-    var remote_batch: TurnBatch = .{};
+    // **슬롯마다 배치 하나**(RA7 조각 2). [0] 은 Term 인라인 슬롯(pane 없는 이벤트), 나머지는 pane 테이블 슬롯 — 한 배치에
+    // 두 pane 의 턴 끝이 섞여도 각자 굳힌다. 테이블 상한 + 1 이면 어떤 배치도 넘치지 않는다.
+    const max_slots = maru.session.remote_pane_table.max_panes + 1;
+    var batches: [max_slots]TurnBatch = @splat(.{});
+    var batch_slots: [max_slots]?*HookSlot = @splat(null);
+    batch_slots[0] = &term.hook;
+    var batch_count: usize = 1;
     for (lines) |line| {
         switch (ch.feed(line, now_ms)) {
             // 커서는 **host 소유**다(채널이 host 당 하나라 모든 Term 이 같은 줄을 본다) — 기억은
@@ -2126,11 +2145,34 @@ pub fn consumeRemoteAgentLines(self: *AppSession, term: *Term, lines: []const []
                 }
                 // **로컬과 같은 턴 경계 규율**(AT3c — `TurnBatch` 주석). 예전엔 `applied` 를 버려 원격 Term 에는
                 // 봉인도 스냅샷도 없었다.
-                remote_batch.step(self, term, ev);
+                //
+                // **pane 이 있으면 그 pane 의 슬롯에 쓴다**(RA7 조각 2). 없으면(tmux 밖·구버전 원격) Term 인라인 슬롯 —
+                // 지금까지와 같다. 테이블이 거절하면(상한·이름) 인라인으로 접는다 — 이벤트를 버리지 않는다.
+                var slot: *HookSlot = &term.hook;
+                var bi: usize = 0;
+                if (e.pane.len > 0) {
+                    if (self.remote_agent_panes.slotFor(term.surfaceId(), e.pane, now_ms)) |entry| {
+                        slot = &entry.slot;
+                        bi = batch_count;
+                        var k: usize = 1;
+                        while (k < batch_count) : (k += 1) {
+                            if (batch_slots[k] == slot) {
+                                bi = k;
+                                break;
+                            }
+                        }
+                        if (bi == batch_count) {
+                            batch_slots[bi] = slot;
+                            batch_count += 1;
+                        }
+                    }
+                }
+                batches[bi].stepSlot(self, term, slot, ev);
             },
         }
     }
-    remote_batch.finish(self, term);
+    var b: usize = 0;
+    while (b < batch_count) : (b += 1) batches[b].finish(self, term);
     // **원격 이벤트도 배지까지 가야 한다**(§1.6-⑴). `applyHookEvent` 는 훅 자리만 쓰므로, 여기서
     // 권위표를 돌리지 않으면 원격 pane 의 배지가 영영 안 움직인다. C2 의 셈은 `screen_seq` 가 그대로라
     // 늘지 않는다 — 중재를 한 번 더 부르는 것과 화면을 한 번 더 보는 것은 다르다.
@@ -2328,6 +2370,46 @@ pub fn testApplyHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent
 
 fn applyHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hook_event.Event) Applied {
     return applyHookEventTo(self, term, &term.hook, ev);
+}
+
+/// Term 을 **대표하는** 훅 슬롯(RA7 조각 3). pane 슬롯이 하나라도 있으면 그중 **가장 최근에 이벤트를 받은 pane**, 없으면
+/// Term 인라인 슬롯. 대화 줄·활동·이미지 갤러리·SCM 의 «활성 세션» 처럼 «이 Term 의 에이전트 하나» 를 묻는 자리가 쓴다.
+/// tmux 안 원격 Term 은 모든 이벤트가 pane 을 달고 오므로 인라인은 비어 있고, tmux 밖·구버전 원격·로컬은 인라인뿐이다.
+pub fn primaryHookSlot(self: *AppSession, term: *Term) *HookSlot {
+    if (self.remote_agent_panes.latestFor(term.surfaceId())) |e| return &e.slot;
+    return &term.hook;
+}
+
+/// Term 의 훅 상태 **집계**(RA7.3 결정 1 — 하위 중 하나라도 `running` 이면 running). 그 다음은 blocked(누군가 승인을 기다린다),
+/// 그 다음 idle. 자식 수·턴 순번은 합한다 — 권위표(`arbitrate`)의 입력이 이것이다.
+pub const HookAggregate = struct { state: maru.session.agent_observer.State, child_count: u32, turn_seq: u64 };
+
+pub fn hookSlotsAggregate(self: *AppSession, term: *Term) HookAggregate {
+    var agg: HookAggregate = .{
+        .state = term.hook.state,
+        .child_count = @intCast(term.hook.progress.childCount()),
+        .turn_seq = term.hook.turn_seq,
+    };
+    var it = self.remote_agent_panes.forSurface(term.surfaceId());
+    while (it.next()) |e| {
+        agg.state = strongerState(agg.state, e.slot.state);
+        agg.child_count +|= @as(u32, @intCast(e.slot.progress.childCount()));
+        agg.turn_seq +%= e.slot.turn_seq;
+    }
+    return agg;
+}
+
+fn stateRank(s: maru.session.agent_observer.State) u8 {
+    return switch (s) {
+        .running => 3,
+        .blocked => 2,
+        .idle => 1,
+        .unknown => 0,
+    };
+}
+
+fn strongerState(a: maru.session.agent_observer.State, b: maru.session.agent_observer.State) maru.session.agent_observer.State {
+    return if (stateRank(b) > stateRank(a)) b else a;
 }
 
 /// `applyHookEvent` 의 본체 — **어느 슬롯에 쓰는가**를 인자로 받는다(RA7 조각 1). 로컬 Term 과 원격 pane 하나는
@@ -2610,7 +2692,7 @@ fn drainRotatedAgentHookLog(self: *AppSession, term: *Term, rotated_path: []cons
             const applied = applyHookEvent(self, term, ev);
             if (applied.turn_end) {
                 rotated_turn_end = true;
-                rotated_facts.captureFrom(term); // 회전본도 같은 규율이다
+                rotated_facts.captureFrom(&term.hook); // 회전본도 같은 규율이다
                 // **열린 셸 구간은 여기서 닫는다**(AT3b-1 적대적 검증 1회차). 사본은 위 이유로 봉인하지
                 // 않지만 구간은 다르다 — 회전본 tail 의 `Stop` 은 살아 있는 파일에서 연 구간의 **진짜 끝**이고,
                 // 안 닫으면 그 구간이 다음 턴의 `Stop` 까지 열려 **다음 턴 전체(사용자 편집 포함)를 덮는다.**
@@ -2641,8 +2723,18 @@ pub const HookNotice = struct {
 ///
 /// 꺼내 가면 슬롯을 비운다. 비우지 않으면 다음 tick 마다 같은 것을 다시 본다.
 pub fn takeAgentHookNotice(self: *AppSession, term: *Term) ?HookNotice {
+    if (takeHookNoticeFrom(self, term, &term.hook)) |n| return n;
+    // pane 슬롯의 알림도 같은 규율로 꺼낸다(RA7 조각 3) — 두 에이전트가 각각 끝나면 알림도 둘이다(실기 ④).
+    var it = self.remote_agent_panes.forSurface(term.surfaceId());
+    while (it.next()) |e| {
+        if (takeHookNoticeFrom(self, term, &e.slot)) |n| return n;
+    }
+    return null;
+}
+
+fn takeHookNoticeFrom(self: *AppSession, term: *Term, slot: *HookSlot) ?HookNotice {
     const mode_mod = maru.session.agent_hook_mode;
-    const kind = term.hook.notice.kind;
+    const kind = slot.notice.kind;
     switch (kind) {
         .none => return null,
         // 완료도 오류도 **바로** 띄운다 — 디바운스는 «곧 저절로 해소될 수 있는» 주의 알림만의 규율이다.
@@ -2651,17 +2743,17 @@ pub fn takeAgentHookNotice(self: *AppSession, term: *Term) ?HookNotice {
         // 훅 전이지만, 만들어 둔 알림을 **띄울지**는 지금도 유효한가의 문제다. 훅에는 승인 해제 이벤트가
         // 없어 `agent_hook_state` 는 영영 `blocked` 이므로, 그것으로 판단하면 C1 이 화면으로 풀어 준 뒤에도
         // 디바운스가 끝나며 「승인이 필요합니다」가 나간다 — 사용자가 이미 승인한 뒤에.
-        .attention => switch (mode_mod.attentionDebounce(term.agent_state, term.hook.notice.since_ms, self.awakeMs())) {
+        .attention => switch (mode_mod.attentionDebounce(term.agent_state, slot.notice.since_ms, self.awakeMs())) {
             .wait => return null,
             .drop => {
-                term.hook.notice.clear();
+                slot.notice.clear();
                 return null;
             },
             .emit => {},
         },
     }
-    const body = term.hook.notice.text();
-    term.hook.notice.clear();
+    const body = slot.notice.text();
+    slot.notice.clear();
     return .{ .kind = kind, .body = body };
 }
 
@@ -2798,9 +2890,11 @@ pub fn pollAgentState(self: *AppSession, term: *Term, displayed: bool) void {
     // **판단은 순수 층이 한다**(`ScanSkip` — 그 doc comment 에 왜 거기 있는지 적었다). 이 if 문 안에
     // 두었을 때 C2 가 조용히 굶었고, 판정자를 세울 자리가 없어 그대로 커밋됐다.
     const has_hook = agentHookMode(self, term) == .hook;
+    // pane 슬롯이 있으면 집계(RA7 조각 3) — 없으면 인라인 슬롯 그대로라 값이 같다.
+    const agg = hookSlotsAggregate(self, term);
     if ((maru.session.agent_state_arbiter.ScanSkip{
-        .hook = if (has_hook) term.hook.state else null,
-        .hook_child_count = @intCast(term.hook.progress.childCount()),
+        .hook = if (has_hook) agg.state else null,
+        .hook_child_count = agg.child_count,
         .screen = term.agent_screen_state,
         .idle_confirmations = term.agent_arbiter.idle_confirmations,
         .generation_same = generation == term.agent_screen_generation,
@@ -2861,9 +2955,11 @@ pub fn pollAgentState(self: *AppSession, term: *Term, displayed: bool) void {
 fn arbitrateAgentState(self: *AppSession, term: *Term, displayed: bool) void {
     const before = term.agent_state;
     const has_hook = agentHookMode(self, term) == .hook;
+    // pane 슬롯이 있으면 집계(RA7 조각 3) — 없으면 인라인 슬롯 그대로라 값이 같다.
+    const agg = hookSlotsAggregate(self, term);
     const verdict = term.agent_arbiter.arbitrate(.{
-        .hook = if (has_hook) term.hook.state else null,
-        .hook_child_count = @intCast(term.hook.progress.childCount()),
+        .hook = if (has_hook) agg.state else null,
+        .hook_child_count = agg.child_count,
         .screen = term.agent_screen_state,
         .screen_visible_blocker = term.agent_screen_visible_blocker,
         .screen_visible_idle = term.agent_screen_visible_idle,
@@ -2876,7 +2972,7 @@ fn arbitrateAgentState(self: *AppSession, term: *Term, displayed: bool) void {
         // 죽으면 즉시 idle」 이 하려던 일을 그쪽이 이미 한다. 여기에 kind 를 다시 실으면 같은 판단이 두
         // 곳에 생기고, 한쪽만 고쳐지는 날이 온다. 그래서 **의도적으로 false 다.**
         .process_exited = false,
-        .hook_turn_seq = term.hook.turn_seq,
+        .hook_turn_seq = agg.turn_seq,
         .screen_seq = term.agent_screen_seq,
     });
     term.agent_state = verdict.state;

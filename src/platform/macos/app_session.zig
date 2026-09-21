@@ -6396,6 +6396,10 @@ pub const AppSession = struct {
     ///
     /// 할당하지 않는다(고정 배열) — 세션 수 상한은 `turn_snapshot.max_sessions` 다.
     turn_rings: maru.session.turn_snapshot.RingMap = .{},
+    /// 원격 tmux pane 별 훅 슬롯([계획 RA7](../../../docs/plans/remote-agent-state.md) 조각 2). wire 의 `pane` 이 있는 이벤트는
+    /// `Term.hook` 대신 여기 그 pane 의 슬롯에 쓰인다 — 한 tmux 세션의 pane 여럿이 한 Term 으로 접히지 않게. Term 수준
+    /// 배지·대화 줄은 `agent_ops.hookSlotsAggregate`/`primaryHookSlot` 가 이 슬롯들과 `Term.hook` 을 합쳐 낸다(조각 3).
+    remote_agent_panes: maru.session.remote_pane_table.Table = .{},
     /// 그 링의 각 턴이 만진 파일의 **그림자 사본**(계약 §4.4). 링과는 `Snapshot.capture_id` 로 잇는다.
     ///
     /// **힙을 든다** — 이웃 `turn_rings` 가 고정 배열인 것은 스냅샷이 고정 크기이기 때문이고, 파일 내용은
@@ -27600,6 +27604,110 @@ test "원격 이벤트가 행을 «에이전트 행» 으로 바꾼다 — 상�
     try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state);
 }
 
+// [RA7 조각 2·3] **한 tmux 세션의 pane 둘은 슬롯 둘이다.** wire 의 `pane` 이 다른 두 이벤트 흐름을 한 Term 에 넣으면
+// 예전엔 마지막 이벤트가 상태를 정했다(실기 ④ — «행 하나, 탭은 한 세션»). 이제 pane 마다 슬롯이 갈리고 Term 배지는
+// 하나라도 running 이면 running(결정 1), 알림은 pane 마다, 턴 끝은 각자 봉인·스냅샷을 청한다.
+test "훅 원격 프레임: tmux pane 둘은 슬롯 둘 — 배지는 하나라도 running 이면 running, 턴 끝·알림은 각자 (RA7)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+    test_config_text = agent_hooks_on_config;
+    defer test_config_text = "";
+
+    var session: AppSession = .{ .allocator = a, .io = std.testing.io };
+    try session.init(io, a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_focused = false;
+
+    const term = pane_ops.activePane(&session).activeTerm();
+    var ch = maru.session.remote_agent_stream.Channel.init(0);
+    _ = ch.feed("{\"hello\":\"maru-agent-events\",\"v\":1}", 0);
+    term.agent_remote_channel = ch;
+    const nonce = "4331_7";
+    @memcpy(term.agent_remote_nonce[0..nonce.len], nonce);
+    term.agent_remote_nonce_len = nonce.len;
+    term.agent_kind = .none;
+    term.rt.observation.ssh_remote_dest_present = true;
+    agent_ops.test_turn_snapshot_calls = 0;
+
+    // pane %0 은 세션 A, pane %1 은 세션 B. 세션 시작 둘이 한 배치 — base 스냅샷이 **세션마다** 청해진다(슬롯마다 배치).
+    agent_ops.consumeRemoteAgentLines(&session, term, &.{
+        "{\"nonce\":\"4331_7\",\"pane\":\"%0\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"SessionStart\\\",\\\"session_id\\\":\\\"S-A\\\"}\"}",
+        "{\"nonce\":\"4331_7\",\"pane\":\"%1\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"SessionStart\\\",\\\"session_id\\\":\\\"S-B\\\"}\"}",
+    }, 50);
+    try std.testing.expectEqual(@as(usize, 2), agent_ops.test_turn_snapshot_calls); // base 둘 — 옛 배치 하나면 1 이었다
+    agent_ops.test_turn_snapshot_calls = 0;
+    // 한 배치에 섞어 넣는다 — A 는 턴을 끝내고 B 는 아직 돈다.
+    agent_ops.consumeRemoteAgentLines(&session, term, &.{
+        "{\"nonce\":\"4331_7\",\"pane\":\"%0\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"UserPromptSubmit\\\",\\\"session_id\\\":\\\"S-A\\\",\\\"cwd\\\":\\\"/srv/app\\\",\\\"prompt\\\":\\\"A 의 일\\\"}\"}",
+        "{\"nonce\":\"4331_7\",\"pane\":\"%1\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"UserPromptSubmit\\\",\\\"session_id\\\":\\\"S-B\\\",\\\"prompt\\\":\\\"B 의 일\\\"}\"}",
+        "{\"nonce\":\"4331_7\",\"pane\":\"%0\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"PreToolUse\\\",\\\"session_id\\\":\\\"S-A\\\",\\\"tool_name\\\":\\\"Edit\\\",\\\"tool_input\\\":{\\\"file_path\\\":\\\"/srv/app/a.zig\\\"}}\"}",
+        "{\"nonce\":\"4331_7\",\"pane\":\"%0\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"Stop\\\",\\\"session_id\\\":\\\"S-A\\\",\\\"last_assistant_message\\\":\\\"A 끝\\\"}\"}",
+    }, 100);
+
+    // ⑴ 슬롯 둘 — 인라인 슬롯은 비어 있다(모든 이벤트가 pane 을 달고 왔다).
+    try std.testing.expectEqual(@as(usize, 2), session.remote_agent_panes.countFor(term.surfaceId()));
+    try std.testing.expectEqualStrings("", term.hook.transcript.identity());
+    const pa = session.remote_agent_panes.find(term.surfaceId(), "%0") orelse return error.NoPaneA;
+    const pb = session.remote_agent_panes.find(term.surfaceId(), "%1") orelse return error.NoPaneB;
+    try std.testing.expectEqualStrings("S-A", pa.slot.transcript.identity());
+    try std.testing.expectEqualStrings("S-B", pb.slot.transcript.identity());
+    try std.testing.expectEqual(maru.session.agent_observer.State.idle, pa.slot.state);
+    try std.testing.expectEqual(maru.session.agent_observer.State.running, pb.slot.state);
+    // ⑵ Term 배지: 하나라도 running 이면 running(결정 1) — 옛 동작은 마지막 이벤트(A 의 Stop → idle)가 정했다.
+    try std.testing.expectEqual(maru.session.agent_observer.State.running, agent_ops.hookSlotsAggregate(&session, term).state);
+    try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state);
+    // ⑶ A 의 턴 끝이 봉인·스냅샷을 청했고(세션 A 로), B 는 아직이다.
+    try std.testing.expectEqual(@as(usize, 1), agent_ops.test_turn_snapshot_calls);
+    try std.testing.expectEqualStrings("S-A", agent_ops.test_last_turn_session[0..agent_ops.test_last_turn_session_len]);
+    const sealed = session.turn_captures.sealedTurn(agent_ops.test_last_turn_capture) orelse return error.NoSealedTurn;
+    try std.testing.expectEqualStrings("/srv/app/a.zig", sealed.entries.items[0].path);
+    try std.testing.expect(session.turn_captures.openTurn("S-B") == null); // B 는 캡처할 경로가 아직 없다
+    // ⑷ 대표 슬롯은 가장 최근 pane(%0 — 마지막 이벤트) — 대화 줄이 그것을 읽는다.
+    try std.testing.expectEqualStrings("A 끝", agent_ops.primaryHookSlot(&session, term).transcript.reply());
+    // ⑷' 훅 cwd 도 대표 슬롯에서 — 인라인만 보면 비어 있어 폴더줄·원격 스냅샷이 사라진다(실기 2 pane e2e 가 잡았다).
+    try std.testing.expectEqualStrings("/srv/app", git_ops.remoteCwd(&session, term));
+    // ⑸ 알림: A 의 완료가 나온다. B 는 아직 running 이라 없다.
+    const n1 = agent_ops.takeAgentHookNotice(&session, term) orelse return error.MissingNoticeA;
+    try std.testing.expectEqual(maru.session.agent_hook_mode.Notice.done, n1.kind);
+    try std.testing.expect(agent_ops.takeAgentHookNotice(&session, term) == null);
+
+    // B 가 끝난다 — 이제 idle, 두 번째 스냅샷(세션 B), 두 번째 알림.
+    agent_ops.consumeRemoteAgentLines(&session, term, &.{
+        "{\"nonce\":\"4331_7\",\"pane\":\"%1\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"PreToolUse\\\",\\\"session_id\\\":\\\"S-B\\\",\\\"tool_name\\\":\\\"Write\\\",\\\"tool_input\\\":{\\\"file_path\\\":\\\"/srv/app/b.zig\\\"}}\"}",
+        "{\"nonce\":\"4331_7\",\"pane\":\"%1\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"Stop\\\",\\\"session_id\\\":\\\"S-B\\\",\\\"last_assistant_message\\\":\\\"B 끝\\\"}\"}",
+    }, 200);
+    try std.testing.expectEqual(maru.session.agent_observer.State.idle, agent_ops.hookSlotsAggregate(&session, term).state);
+    try std.testing.expectEqual(@as(usize, 2), agent_ops.test_turn_snapshot_calls);
+    try std.testing.expectEqualStrings("S-B", agent_ops.test_last_turn_session[0..agent_ops.test_last_turn_session_len]);
+    try std.testing.expectEqualStrings("B 끝", agent_ops.primaryHookSlot(&session, term).transcript.reply());
+    const n2 = agent_ops.takeAgentHookNotice(&session, term) orelse return error.MissingNoticeB;
+    try std.testing.expectEqual(maru.session.agent_hook_mode.Notice.done, n2.kind);
+
+    // ⑸' 집계는 **순서와 무관**하다 — 테이블 앞자리(%0)가 running 이고 뒷자리(%1)가 idle 이어도 running(뮤턴트 P2:
+    //     «마지막 슬롯 상태» 는 여기서 idle 을 낸다).
+    agent_ops.consumeRemoteAgentLines(&session, term, &.{
+        "{\"nonce\":\"4331_7\",\"pane\":\"%0\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"UserPromptSubmit\\\",\\\"session_id\\\":\\\"S-A\\\",\\\"prompt\\\":\\\"A 다시\\\"}\"}",
+    }, 250);
+    try std.testing.expectEqual(maru.session.agent_observer.State.running, pa.slot.state);
+    try std.testing.expectEqual(maru.session.agent_observer.State.idle, pb.slot.state);
+    try std.testing.expectEqual(maru.session.agent_observer.State.running, agent_ops.hookSlotsAggregate(&session, term).state);
+    try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state);
+
+    // ⑹ pane 없는 이벤트(구버전 원격·tmux 밖)는 인라인 슬롯 — 지금까지와 같다.
+    agent_ops.consumeRemoteAgentLines(&session, term, &.{
+        "{\"nonce\":\"4331_7\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"SessionStart\\\",\\\"session_id\\\":\\\"S-inline\\\"}\"}",
+    }, 300);
+    try std.testing.expectEqualStrings("S-inline", term.hook.transcript.identity());
+    try std.testing.expectEqual(@as(usize, 2), session.remote_agent_panes.countFor(term.surfaceId()));
+}
+
 // [AT3c] **원격 프레임이 봉인·스냅샷까지 닿는다.** 예전 `consumeRemoteAgentLines` 는 `applied` 를 버려 원격 Term 에
 // 봉인도 스냅샷도 없었다. 이 판정자는 위 캡처 규칙 판정자(`testApplyHookEvent`)보다 **한 층 위** — 실제 wire 프레임
 // (`{"nonce":…,"line":"claude\t{…}"}`)이 원격 소비자 → `TurnBatch` → `sealTurnCaptureNow` → `captureTurnSnapshot` 을
@@ -28616,7 +28724,7 @@ test "턴 스냅샷: 배치 안에서 신원이 갈려도 끝난 턴은 옛 세�
 
     // 제품의 배치 루프가 **여기서** 사실을 굳힌다.
     var facts: agent_ops.BatchTurnFacts = .{};
-    facts.captureFrom(term);
+    facts.captureFrom(&term.hook);
     try std.testing.expectEqualStrings("S-old", facts.facts().session);
 
     // 그 뒤 같은 배치에서 `/clear` — 신원이 갈린다.

@@ -19,6 +19,7 @@ const chrome = maru.chrome;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
 const term_ops = @import("term.zig");
+const agent_ops = @import("agent.zig");
 const scroll_ops = @import("scroll.zig");
 const diag_gate = app_session_mod.diag_gate;
 const git_command = app_session_mod.git_command;
@@ -123,9 +124,12 @@ pub fn termMachineKey(term: *const Term) []const u8 {
 /// **호출 전에 관측이 새로여야 한다**(`refreshTermObservation`) — 이 함수는 관측을 갱신하지 않는다.
 /// 반환 슬라이스는 Term 소유라 다음 갱신까지만 유효하다.
 pub fn remoteCwd(self: *AppSession, term: *Term) []const u8 {
-    if (term.hook.cwd.fresh(self.awakeMs()) and
-        term.hook.cwd.hostMatches(termMachineKey(term)))
-        return term.hook.cwd.text();
+    // 훅 cwd 는 **대표 슬롯**의 것이다(RA7 조각 3) — tmux 안 원격 Term 은 모든 이벤트가 pane 슬롯으로 가서 인라인 슬롯의
+    // cwd 가 영영 비어 있다. 실기(2 pane e2e)에서 폴더줄·원격 스냅샷이 통째로 사라진 것이 이 한 줄이었다.
+    const slot = agent_ops.primaryHookSlot(self, term);
+    if (slot.cwd.fresh(self.awakeMs()) and
+        slot.cwd.hostMatches(termMachineKey(term)))
+        return slot.cwd.text();
     return term.rt.observation.cwd.items;
 }
 
@@ -1630,7 +1634,7 @@ pub fn sessionIdentityFor(self: *AppSession, surface_id: u64) []const u8 {
     for (self.tabs.items) |tab| {
         for (tab.panes.items) |pane| {
             for (pane.terms.items) |term| {
-                if (term.surface.id == surface_id) return term.hook.transcript.identity();
+                if (term.surface.id == surface_id) return agent_ops.primaryHookSlot(self, term).transcript.identity(); // pane 슬롯이 있으면 최근 pane(RA7)
             }
         }
     }

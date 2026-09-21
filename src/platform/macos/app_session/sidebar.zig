@@ -27,6 +27,7 @@ const dock_list_scrollbar_min_thumb_px = app_session_mod.dock_list_scrollbar_min
 const dock_list_scrollbar_width_px = app_session_mod.dock_list_scrollbar_width_px;
 const spinner_wave = app_session_mod.spinner_wave;
 const git_ops = @import("git.zig");
+const agent_ops = @import("agent.zig");
 const notification_ops = @import("notification.zig");
 // 헤더 아이콘 줄의 **정의는 공유 모듈이 소유한다**(`platform/cell_text.zig`) — Windows 사이드바가
 // 같은 줄을 그린다(W8.8⒝). 여기는 `AppSession` 에서 필드를 꺼내 넘기는 껍질만 남는다.
@@ -525,7 +526,7 @@ pub fn sidebarAgentRowLines(self: *AppSession, tab: *Tab, ag: WorkspaceSession) 
     }
     // 마지막 **응답** 줄(§7). 프롬프트는 라벨 줄이 자리를 내주므로 줄 수를 늘리지 않는다. 세션 기록을 못 읽으면
     // (계약 1) 이 줄이 없어 행이 예전 높이로 돌아간다 — 조립부의 append 조건과 1:1이어야 한다.
-    if (term.hook.transcript.reply().len > 0) n += 1;
+    if (agent_ops.primaryHookSlot(self, term).transcript.reply().len > 0) n += 1;
     return n;
 }
 
@@ -1730,7 +1731,7 @@ pub fn agentRowLabelOwned(self: *AppSession, term: *Term) ![]const u8 {
     // - `idle` — 마지막 프롬프트(«무엇을 시켰나»). 턴이 끝난 뒤 그 행에 남을 값은 그것이다.
     //
     // 종류 이름은 프롬프트를 아는 동안 싣지 않는다 — gutter 아이콘이 이미 말한다(아래 폴백은 그것도 모를 때다).
-    const prompt = term.hook.transcript.prompt();
+    const prompt = agent_ops.primaryHookSlot(self, term).transcript.prompt();
     if (prompt.len > 0) {
         const body = if (term.agent_state == .idle) prompt else parts.text;
         if (parts.marker.len == 0) return self.allocator.dupe(u8, body);
@@ -1775,7 +1776,7 @@ pub fn agentAgeOwned(self: *AppSession, term: ?*Term) ![]const u8 {
     // tool_use/tool_result가 그때그때 기록된다). 그래서 "대화가 없으면 멈춘 것처럼 보인다"는 걱정은 근거가
     // 없다. 그럼에도 출력을 **우선**하는 이유는 두 가지다: PTY 출력은 파일 쓰기보다 촘촘하고 즉각적이며,
     // 이 캐시의 mtime은 우리가 마지막으로 폴링해 **읽은** 시점 기준이라 최대 폴링 주기만큼 뒤처진다.
-    const mtime_ns = t.hook.transcript.read_mtime_ns;
+    const mtime_ns = agent_ops.primaryHookSlot(self, t).transcript.read_mtime_ns;
     if (mtime_ns == 0) return self.allocator.dupe(u8, "");
     if (now_wall <= mtime_ns) return self.allocator.dupe(u8, "now"); // 시계 되감김·미래 mtime 방어
     const age_ms: u64 = @intCast(@divTrunc(now_wall - mtime_ns, std.time.ns_per_ms));
@@ -1784,7 +1785,7 @@ pub fn agentAgeOwned(self: *AppSession, term: ?*Term) ![]const u8 {
 
 /// 에이전트 행 **응답 줄**(owned) — 마지막 에이전트 응답(§7). 없으면 빈 문자열이라 렌더가 그 줄을 건너뛴다.
 pub fn agentRowReplyOwned(self: *AppSession, term: *Term, indent: []const u8) ![]const u8 {
-    const reply = term.hook.transcript.reply();
+    const reply = agent_ops.primaryHookSlot(self, term).transcript.reply();
     if (reply.len == 0) return self.allocator.dupe(u8, "");
     return std.fmt.allocPrint(self.allocator, "{s}  {s}", .{ indent, reply });
 }
@@ -1828,7 +1829,7 @@ pub fn agentStatusLine(self: *AppSession, term: *Term) ![]const u8 {
 fn agentStatusLineBase(self: *AppSession, term: *Term) ![]const u8 {
     return switch (term.agent_state) {
         // codex식 4칸 파형 "▁▅▇▃ 진행중"(단일 출처). 훅 모드면 **무엇을 하는 중인지**까지 붙는다.
-        .running => runningStatusLine(self, term.hook.tool.text()),
+        .running => runningStatusLine(self, agent_ops.primaryHookSlot(self, term).tool.text()),
         // 마커(`?`·`✓`·`·`)는 **번역 대상이 아니다** — 기호이지 문장이 아니다. 문구만 키를 거친다.
         .blocked => std.fmt.allocPrint(self.allocator, "? {s}", .{maru.i18n.t(.sb_awaiting_input)}),
         .idle => std.fmt.allocPrint(self.allocator, "\u{2713} {s}", .{maru.i18n.t(.sb_agent_idle)}),

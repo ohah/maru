@@ -10,6 +10,7 @@
 #   - `zig build macos-app-bundle` 이 끝나 있다.
 #
 # 사용: sh tools/remote-scm/agent_turn_e2e.sh /tmp/agent-turn-e2e.png
+#       MARU_E2E_TMUX_PANES=1|2 sh tools/remote-scm/agent_turn_e2e.sh <out.png>   # 원격 tmux 안(사용자 플로우) · 한 세션에 pane 둘(RA7)
 # 결과: 스크린샷(에이전트 탭 «N개 파일 · ✎ AI 편집 N»), 원격 훅 로그(`~/.cache/maru/remote-agent-events/<pid>_<pane>.ndjson`),
 #       원격 임시 index(`/tmp/maru-turn-<hash>.idx`), 하네스 저장소의 `git status`(index 불변), `settings.json` mtime(재설치 무변경).
 # 2026-09-21 실기 결과는 계획 AT3d «수동 검증» 절에 있다.
@@ -30,11 +31,40 @@ printf 'old content\n' > "$MARU_REMOTE_SCM_REPO/capture2.txt"
 GIT_AUTHOR_NAME=e2e GIT_AUTHOR_EMAIL=e2e@maru.test GIT_COMMITTER_NAME=e2e GIT_COMMITTER_EMAIL=e2e@maru.test \
   "$GIT" -C "$MARU_REMOTE_SCM_REPO" -c commit.gpgsign=false commit -q -m base
 # pane 의 셸 = `maru ssh`(새 CLI)로 이 Mac 에 들어가서 새 훅 세트가 심길 때까지 기다린 뒤 claude 한 턴, 그리고 대기.
-REMOTE_CMD="cd $MARU_REMOTE_SCM_REPO && i=0; until grep -q '\"PreToolUse\"' \$HOME/.claude/settings.json; do i=\$((i+1)); [ \$i -lt 90 ] || break; sleep 1; done; echo \"hooks-ready after \$i s\"; env | grep -E '^LC_MARU_PANE|^TMUX' || echo no-LC_MARU_PANE; export PATH=\$HOME/.local/bin:\$PATH; claude_bin=\$(command -v claude || echo \$HOME/.local/bin/claude); \$claude_bin -p 'Use the Edit tool to change the text \"line 1\" to \"line 1 edited by maru e2e\" in capture1.txt, then use the Write tool to overwrite capture2.txt with exactly one line: written by maru e2e. Do not run any shell commands and do not explain.' --permission-mode acceptEdits --allowedTools Edit,Write,Read 2>&1 | tail -5; echo claude-done; sleep 900"
+#
+# `MARU_E2E_TMUX_PANES=0`(기본): 원격 셸에서 바로 claude — tmux 밖.
+# `MARU_E2E_TMUX_PANES=1|2`: 원격에 **`LC_MARU_PANE` 없이** tmux 서버를 띄우고(사용자 워크플로 — 서버는 예전에 떠 있어 pane 에
+#   값이 없고 RA6 역조회로 주인을 찾는다) `maru ssh -t … tmux attach` 로 붙는다. pane 마다 claude 를 한 턴씩(파일이 다르다).
+#   2 면 한 tmux 세션에 pane 둘 — RA7 이 다루는 배치다.
+PANES=${MARU_E2E_TMUX_PANES:-0}
+WAIT_HOOKS="i=0; until grep -q '\"PreToolUse\"' \$HOME/.claude/settings.json; do i=\$((i+1)); [ \$i -lt 90 ] || break; sleep 1; done; echo \"hooks-ready after \$i s\""
+CLAUDE_BIN="export PATH=\$HOME/.local/bin:\$PATH; claude_bin=\$(command -v claude || echo \$HOME/.local/bin/claude)"
+PROMPT1='Use the Edit tool to change the text \"line 1\" to \"line 1 edited by maru e2e\" in capture1.txt, then use the Write tool to overwrite capture2.txt with exactly one line: written by maru e2e. Do not run any shell commands and do not explain.'
+PROMPT2='Use the Write tool to create capture3.txt with exactly one line: pane two wrote this. Do not run any shell commands and do not explain.'
+TURN1="\$claude_bin -p '$PROMPT1' --permission-mode acceptEdits --allowedTools Edit,Write,Read 2>&1 | tail -5; echo claude-done"
+TURN2="\$claude_bin -p '$PROMPT2' --permission-mode acceptEdits --allowedTools Edit,Write,Read 2>&1 | tail -5; echo claude-done-2"
+SSH_T=""
+if [ "$PANES" = 0 ]; then
+  REMOTE_CMD="cd $MARU_REMOTE_SCM_REPO && $WAIT_HOOKS; env | grep -E '^LC_MARU_PANE|^TMUX' || echo no-LC_MARU_PANE; $CLAUDE_BIN; $TURN1; sleep 900"
+else
+  SSH_T="-t"
+  SOCK="/tmp/maru-e2e-tmux.\$\$"
+  # 서버는 LC_MARU_PANE **없이** 뜬다(사용자의 서버가 그렇다). pane 셸은 훅 세트를 기다렸다가 claude 를 돌린다.
+  PANE_SCRIPT1="cd $MARU_REMOTE_SCM_REPO; $WAIT_HOOKS; env | grep -E '^LC_MARU_PANE|^TMUX_PANE' || echo no-LC_MARU_PANE; $CLAUDE_BIN; $TURN1; sleep 900"
+  PANE_SCRIPT2="cd $MARU_REMOTE_SCM_REPO; $WAIT_HOOKS; env | grep -E '^LC_MARU_PANE|^TMUX_PANE' || echo no-LC_MARU_PANE; $CLAUDE_BIN; $TURN2; sleep 900"
+  P1_B64=$(printf '%s' "$PANE_SCRIPT1" | base64 | tr -d '\n')
+  P2_B64=$(printf '%s' "$PANE_SCRIPT2" | base64 | tr -d '\n')
+  # 비대화형 ssh 셸의 PATH 에는 homebrew 가 없다 — tmux 를 찾을 수 있게 앞에 붙인다.
+  REMOTE_CMD="export PATH=/opt/homebrew/bin:/usr/local/bin:\$PATH; SOCK=$SOCK; env -u LC_MARU_PANE tmux -S \$SOCK new-session -d -s e2e -x 80 -y 24 \"printf %s $P1_B64 | base64 -D | sh\""
+  if [ "$PANES" = 2 ]; then
+    REMOTE_CMD="$REMOTE_CMD; env -u LC_MARU_PANE tmux -S \$SOCK split-window -t e2e \"printf %s $P2_B64 | base64 -D | sh\""
+  fi
+  REMOTE_CMD="$REMOTE_CMD; exec tmux -S \$SOCK attach -t e2e"
+fi
 REMOTE_B64=$(printf '%s' "$REMOTE_CMD" | base64 | tr -d '\n')
 cat > "$CAP_HOME/pane.sh" <<WRAP
 #!/bin/sh
-exec $ROOT/zig-out/bin/maru ssh -p $MARU_REMOTE_SCM_PORT -i $MARU_REMOTE_SCM_KEY -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes $MARU_REMOTE_SCM_DEST 'printf %s $REMOTE_B64 | base64 -D | sh'
+exec $ROOT/zig-out/bin/maru ssh $SSH_T -p $MARU_REMOTE_SCM_PORT -i $MARU_REMOTE_SCM_KEY -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes $MARU_REMOTE_SCM_DEST 'sh -c "\$(printf %s $REMOTE_B64 | base64 -D)"'
 WRAP
 chmod 700 "$CAP_HOME/pane.sh"
 {
@@ -61,4 +91,6 @@ echo "=== app.out (tail)"; tail -20 "$CAP_HOME/app.out"
 echo "=== std.log"; tail -40 "$CAP_HOME/.cache/maru/app.log" 2>/dev/null | grep -iE 'agent|hook|remote|snapshot|turn' | tail -25
 echo "=== remote events new files"; ls -la ~/.cache/maru/remote-agent-events/ | grep -v -f "$CAP_HOME/remote-events-before.txt" || true
 echo "=== /tmp/maru-turn idx"; ls -la /tmp/maru-turn-*.idx 2>/dev/null || echo none
+if [ "$PANES" != 0 ]; then echo "=== tmux servers left"; for sk in /tmp/maru-e2e-tmux.*; do [ -S "$sk" ] && { tmux -S "$sk" list-panes -a -F '#{session_name} #{pane_id} #{pane_current_command}' 2>/dev/null; tmux -S "$sk" kill-server 2>/dev/null; }; done; fi
+echo "=== sidecars new"; for f in $(ls ~/.cache/maru/remote-agent-events/*.tmux 2>/dev/null); do b=$(basename "$f"); grep -qx "$b" "$CAP_HOME/remote-events-before.txt" || printf '%s\t%s\n' "$b" "$(tr '\t' ' ' < "$f")"; done
 echo "=== repo status"; "$GIT" -C "$MARU_REMOTE_SCM_REPO" status --short; cat "$MARU_REMOTE_SCM_REPO/capture1.txt" "$MARU_REMOTE_SCM_REPO/capture2.txt"

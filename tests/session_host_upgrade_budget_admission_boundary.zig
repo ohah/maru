@@ -1,6 +1,7 @@
 //! U5 pre-quiesce handoff-size, disk, and I/O budget product boundary.
 
 const std = @import("std");
+const build_source = @import("support/build_source.zig");
 
 fn read(allocator: std.mem.Allocator, path: []const u8, limit: usize) ![]u8 {
     return std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(limit));
@@ -48,7 +49,7 @@ test "U5 budget admission precedes quiesce and owns reserved handoff cleanup" {
         128 * 1024,
     );
     defer allocator.free(outer_loop);
-    const build = try read(allocator, "build.zig", 2 * 1024 * 1024);
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
     const barrel = try read(
         allocator,

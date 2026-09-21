@@ -2,13 +2,14 @@
 
 const std = @import("std");
 const posixWalk = @import("support/posix_walk.zig").posixWalk;
+const build_source = @import("support/build_source.zig");
 const max_source_bytes = 16 * 1024 * 1024;
 
 test "CR5a 경계는 CR2e enum을 재사용한 canonical runtime-set contract와 backend owner를 고정한다" {
     const allocator = std.testing.allocator;
     const contract = try readSource(allocator, "src/platform/macos/session_host/host_reconnect_runtime_ledger.zig");
     defer allocator.free(contract);
-    const build = try readSource(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
     const backend = try readSource(allocator, "src/platform/macos/session_host/remote_term_backend.zig");
     defer allocator.free(backend);

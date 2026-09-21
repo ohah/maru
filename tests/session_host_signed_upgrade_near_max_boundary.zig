@@ -1,4 +1,5 @@
 const std = @import("std");
+const build_source = @import("support/build_source.zig");
 
 fn count(haystack: []const u8, needle: []const u8) usize {
     return std.mem.count(u8, haystack, needle);
@@ -6,12 +7,7 @@ fn count(haystack: []const u8, needle: []const u8) usize {
 
 test "U5 signed near-max gate owns 255 real PTYs and exact GUI reattach evidence" {
     const source = @embedFile("session_host_signed_upgrade_e2e.zig");
-    const build = try std.Io.Dir.cwd().readFileAlloc(
-        std.testing.io,
-        "build.zig",
-        std.testing.allocator,
-        .limited(2 * 1024 * 1024),
-    );
+    const build = try build_source.read(std.testing.allocator);
     defer std.testing.allocator.free(build);
     try std.testing.expectEqual(@as(usize, 1), count(source, "const near_max_runtime_count = session_host.upgrade_limits.max_runtime_count - 1;"));
     try std.testing.expect(std.mem.indexOf(u8, source, "runtime_count: usize") != null);

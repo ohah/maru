@@ -3,6 +3,7 @@
 const std = @import("std");
 /// 스캐너가 보는 walker 경로를 POSIX 구분자로 정규화한다(정본: tests/support/posix_walk.zig).
 const posixWalk = @import("support/posix_walk.zig").posixWalk;
+const build_source = @import("support/build_source.zig");
 
 test "C3-3b3 atomic settlement boundary" {
     const allocator = std.testing.allocator;
@@ -26,7 +27,7 @@ test "C3-3b3 atomic settlement boundary" {
     defer allocator.free(lifetime);
     const runtime_adapter = try readSource(allocator, "src/platform/macos/session_host/remote_runtime_pending_event.zig");
     defer allocator.free(runtime_adapter);
-    const build = try readSource(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
 
     try std.testing.expectEqual(@as(usize, 0), count(contract, "@import(\"client_slot.zig\")"));

@@ -1,4 +1,5 @@
 const std = @import("std");
+const build_source = @import("support/build_source.zig");
 
 fn count(haystack: []const u8, needle: []const u8) usize {
     var total: usize = 0;
@@ -30,8 +31,8 @@ test "C3-3b5 common close progress boundary는 RED inventory와 dormant caller�
     defer allocator.free(seal_source);
     const cleanup_source = try readSource(allocator, "src/platform/macos/session_host/event_cleanup_seal.zig");
     defer allocator.free(cleanup_source);
-    const build_source = try readSource(allocator, "build.zig");
-    defer allocator.free(build_source);
+    const build = try build_source.read(allocator);
+    defer allocator.free(build);
 
     try std.testing.expectEqual(@as(usize, 6), count(red_source, "test \"C3-3b5 중립 계약"));
     try std.testing.expectEqual(@as(usize, 6), count(red_source, "test \"C3-3b5 close readiness"));
@@ -41,10 +42,10 @@ test "C3-3b5 common close progress boundary는 RED inventory와 dormant caller�
     // 두 daemon과 process singleton을 쓰는 제품 검증은 b5 전용 exact-one artifact에서만 필수 실행한다.
     // broad filter는 exact marker로 그 한 행만 건너뛰고 나머지 일곱 synthetic 행을 같은 artifact에서 유지한다.
     try std.testing.expectEqual(@as(usize, 1), count(backend_source, "MARU_SESSION_HOST_WINDOW_CLOSE_MULTIHOST"));
-    try std.testing.expectEqual(@as(usize, 3), count(build_source, "MARU_SESSION_HOST_WINDOW_CLOSE_MULTIHOST"));
-    try std.testing.expectEqual(@as(usize, 3), count(build_source, "\"C3-3b5 remote backend"));
-    try std.testing.expectEqual(@as(usize, 3), count(build_source, "event_c3_3b5_remote_backend_module"));
-    try std.testing.expectEqual(@as(usize, 7), count(build_source, "previous_actual_host_run"));
+    try std.testing.expectEqual(@as(usize, 3), count(build, "MARU_SESSION_HOST_WINDOW_CLOSE_MULTIHOST"));
+    try std.testing.expectEqual(@as(usize, 3), count(build, "\"C3-3b5 remote backend"));
+    try std.testing.expectEqual(@as(usize, 3), count(build, "event_c3_3b5_remote_backend_module"));
+    try std.testing.expectEqual(@as(usize, 7), count(build, "previous_actual_host_run"));
     try std.testing.expectEqual(@as(usize, 2), count(close_graph_source, "test \"C3-3b5 close graph"));
     try std.testing.expectEqual(@as(usize, 4), count(app_source, "test \"C3-3b5 AppSession"));
     try std.testing.expectEqual(@as(usize, 42), count(red_source, "test \"C3-3b5 ") + count(backend_source, "test \"C3-3b5 remote backend") + count(close_graph_source, "test \"C3-3b5 close graph") + count(app_source, "test \"C3-3b5 AppSession"));

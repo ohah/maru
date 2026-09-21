@@ -1,6 +1,7 @@
 //! P4 N2b2 product wiring and layering boundary.
 
 const std = @import("std");
+const build_source = @import("support/build_source.zig");
 
 test "P4 N2b2 OS delivery boundary pins daemon ownership and macOS stable route wiring" {
     const allocator = std.testing.allocator;
@@ -18,7 +19,7 @@ test "P4 N2b2 OS delivery boundary pins daemon ownership and macOS stable route 
     defer allocator.free(adapter);
     const zig_adapter = try readSource(allocator, "src/platform/macos/session_host/notification_macos_adapter.zig");
     defer allocator.free(zig_adapter);
-    const build = try readSource(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
 
     try std.testing.expectEqual(@as(usize, 0), count(machine, "@import(\"../../app_session.zig\")"));

@@ -1,6 +1,7 @@
 //! P3-e4d-1 actual metadata isolation and reconnect boundary.
 
 const std = @import("std");
+const build_source = @import("support/build_source.zig");
 
 fn read(allocator: std.mem.Allocator, path: []const u8, limit: usize) ![]u8 {
     return std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(limit));
@@ -20,7 +21,7 @@ test "P3-e4d-1 metadata parity uses actual daemon runtimes and no test wire" {
     const allocator = std.testing.allocator;
     const runtime = try read(allocator, "src/platform/macos/session_host/remote_runtime.zig", 2 * 1024 * 1024);
     defer allocator.free(runtime);
-    const build = try read(allocator, "build.zig", 2 * 1024 * 1024);
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
     const ssot = try read(allocator, "docs/persistent-session-host.md", 2 * 1024 * 1024);
     defer allocator.free(ssot);

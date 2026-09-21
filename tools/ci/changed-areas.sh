@@ -147,7 +147,7 @@ while IFS= read -r path; do
 	# Zig 제품 코드·테스트·빌드. web:check는 이 경로를 읽지 않는다.
 	# 소스 확장자는 주석 전용 변경이면 `runtime`을 켜지 않는다(위 헤더 참조). 그 밖의 경로
 	# (terminfo·assets·build.zig.zon 등)는 주석 개념이 없거나 형식이 달라 항상 켠다.
-	src/* | tests/* | tools/* | terminfo/* | assets/* | build.zig | build.zig.zon)
+	src/* | tests/* | tools/* | terminfo/* | assets/* | build.zig | build/* | build.zig.zon)
 		code=true
 		# Zig 소스가 바뀌면 커밋된 wasm 도 다시 나와야 한다 — packages 축을 함께 켠다.
 		packages=true

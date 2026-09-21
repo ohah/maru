@@ -359,7 +359,7 @@ run = "zig build perf -Doptimize=ReleaseFast"
 
 [tasks.fmt]
 description = "Format Zig sources"
-run = "zig fmt build.zig src tests tools"
+run = "zig fmt build.zig build src tests tools"
 
 [tasks.test-verdict]
 # `zig build test` 로그를 **빠짐없이** 판정한다 — `grep FAIL`은 크래시를 놓친다(러너가 그것을
@@ -370,7 +370,7 @@ run = "sh tools/test-verdict.sh"
 
 [tasks.fmt-check]
 description = "Check Zig formatting without modifying files"
-run = "zig fmt --check build.zig src tests tools"
+run = "zig fmt --check build.zig build src tests tools"
 
 [tasks.check-boundaries]
 description = "Check facade import boundaries"

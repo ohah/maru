@@ -89,6 +89,9 @@ const client_reflection_owners = [_]ClientReflectionOwnerProof{
 };
 // external source digest 원장은 데이터 전용 파일로 뗐다(충돌 표면 축소 — 그 파일 머리 주석 참고).
 const external_digests = @import("external_source_digests.zig");
+/// **`build.zig` 한 파일이 아니라 빌드 소스 전체**를 읽는다 — 등록이 `build/` 아래로 갈렸다.
+/// 이 파일 안에는 이미 `build_source` 라는 **지역 변수**가 있어 import 는 `_mod` 를 붙여 받는다.
+const build_source_mod = @import("build_source");
 
 test "CR3a-2c2b3b B3b-S shared guard oracle rejects alias late and unbound release shapes" {
     const good =
@@ -3425,7 +3428,7 @@ test "B3-0.4 focused product gate stays nonempty and dual-mode" {
         "src/platform/macos/session_host/generation_transport.zig",
     );
     defer allocator.free(transport_source);
-    const build_source = try readZigFileZ(allocator, "build.zig");
+    const build_source = try build_source_mod.readZ(allocator);
     defer allocator.free(build_source);
 
     try std.testing.expectEqual(
@@ -7614,7 +7617,7 @@ test "macOS 전용 «판정자 스텝»은 하나도 CI 밖에 안 남는다" {
     // **여기서는 스텝 «이름»을 센다**: `if (macos)` 블록 안에서 `b.step("test-…")` 로 만들어진 것은
     // 전부 `macos_only_test_step` 에 닿거나 CI yml 이 직접 불러야 한다.
     const allocator = std.testing.allocator;
-    const source = try readZigFileZ(allocator, "build.zig");
+    const source = try build_source_mod.readZ(allocator);
     defer allocator.free(source);
     const ci = try readZigFileZ(allocator, ".github/workflows/ci.yml");
     defer allocator.free(ci);
@@ -7671,7 +7674,7 @@ test "macOS 전용 «판정자 스텝»은 하나도 CI 밖에 안 남는다" {
 
 test "macOS 전용 게이트는 test 와 test-macos-only 에 짝으로 붙는다" {
     const allocator = std.testing.allocator;
-    const source = try readZigFileZ(allocator, "build.zig");
+    const source = try build_source_mod.readZ(allocator);
     defer allocator.free(source);
 
     var in_macos: usize = 0; // 0 = 밖, 그 외 = 블록이 시작한 중괄호 깊이 + 1

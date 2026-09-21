@@ -1,6 +1,7 @@
 //! P3-e4d-2a actual foreground and AppSession consumer boundary.
 
 const std = @import("std");
+const build_source = @import("support/build_source.zig");
 
 fn read(allocator: std.mem.Allocator, path: []const u8, limit: usize) ![]u8 {
     return std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(limit));
@@ -20,7 +21,7 @@ test "P3-e4d-2a metadata consumers use actual product boundaries" {
     const allocator = std.testing.allocator;
     const app = try read(allocator, "src/platform/macos/app_session.zig", 8 * 1024 * 1024);
     defer allocator.free(app);
-    const build = try read(allocator, "build.zig", 2 * 1024 * 1024);
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
     const matrix = try read(allocator, "docs/verification-matrix.md", 2 * 1024 * 1024);
     defer allocator.free(matrix);

@@ -271,6 +271,63 @@ fixture와 golden 파일의 저장 규칙은 [Fixture와 Oracle 포맷](fixture-
 
 새 테스트 파일을 추가할 때는 같은 PR에서 `build.zig`와 `.mise.toml` 태스크에 연결한다.
 
+### 빌드 그래프는 `build.zig` 하나가 아니다 — `build/` 가 함께 소유한다
+
+`build.zig` 는 21,352줄이었고 그중 `build()` 한 함수가 21,184줄이었다. 지금은 등록을 **바뀌는 이유별로**
+가른다. `build.zig` 는 모듈·의존성·플랫폼 스텝과 **호출 순서**를 소유하고, 덩어리는 `build/` 가 갖는다.
+
+```text
+build.zig                            8,782줄 — 모듈·의존성·스텝, 그리고 register() 호출 순서
+build/
+  support.zig                          116줄 — 양쪽이 함께 쓰는 헬퍼(addProjectTest 등)
+                                              `build.zig` 를 import 하면 순환이라 여기로 내렸다
+  session_host_gates.zig             6,604줄 — MRSH 판정자 등록(host 프로토콜이 움직일 때 바뀐다)
+  session_host_release_gates.zig     6,023줄 — 릴리스 어댑터 판정자(릴리스 절차·GitHub 표면)
+```
+
+규율 셋이다.
+
+- **본문은 옮길 때 바꾸지 않는다.** 바깥 값은 `Context` 로 받아 `register()` 머리에서 **옛 이름 그대로**
+  지역 별칭을 만든다. 그래야 옮긴 줄이 한 글자도 안 달라지고, 그 무변경이 곧 검증 근거가 된다
+  (실제로 6,545줄과 5,967줄을 바이트 비교로 확인했고, 다른 것은 `@import("tools/…")` →
+  `"../tools/…"` 두 줄뿐이었다).
+- **`register()` 호출은 원래 자리에 둔다.** 스텝 그래프는 선언 순서에 의존한다.
+- **`Context` 필드 수가 그 덩어리의 결합도다.** 16개·15개로 시작했고, 늘기 시작하면 경계를 의심한다.
+
+### 판정자는 `build.zig` 를 **이름으로** 열지 않는다
+
+빌드 등록을 문자열로 세는 판정자가 90자리 있었다. 그 자리가 `"build.zig"` 를 직접 열면,
+등록 일부를 `build/` 로 옮기는 순간 **찾던 것이 사라져** `expected 1, found 0` 으로 죽는다
+(실제로 그렇게 52개 판정자가 한 번에 빨개졌다). 그래서 **「빌드 소스」의 정의는
+[`tests/support/build_source.zig`](../tests/support/build_source.zig) 하나가 소유한다** —
+`build.zig` + `build/**.zig` 를 한 덩어리로 읽는다.
+
+새 판정자가 빌드 등록을 셀 때는 `build_source.read(allocator)`(널 종료가 필요하면 `readZ`)를 쓴다.
+`tests/boundary/` 아래는 자기 파일이 모듈 루트라 상대 경로로 `tests/support/` 를 못 보므로,
+`build.zig` 가 `build_source` 를 **모듈로 주입**한다(`imports.zig`·`shell_gate_ledger.zig`·
+`wake_latency_budget.zig` 가 그 형태).
+
+**읽는 길은 하나다.** 판정자 93자리가 전부 `build_source` 를 거치고, `"build.zig"` 라는 리터럴이
+남은 곳은 둘뿐이다 — 정의 자신(`build_source.zig`)과 링크 검사 대상 경로를 모으는
+`tests/doc_links/links.zig`(읽어서 세는 자리가 아니다). **두 벌을 만들지 않는다** — 한쪽만
+남겨 두면 다음에 등록을 옮길 때 그 한쪽만 조용히 깨지고, 그것이 이 저장소가 반복해서 당한 형태다
+([필수 프로젝트 규칙](project-rules.md) "문자열로 구조를 찾지 말고 구조로 찾아라").
+
+> **깨질 자리는 기계로 센다.** `check-boundaries` 초록만 보고 "다 고쳤다"고 판단하면 안 된다 —
+> 실제로 그 게이트를 통과한 뒤에도 `test` 스텝에만 있던 판정자 4개가 죽어 있었다. 등록을 옮길
+> 때는 **`"build.zig"` 를 직접 읽는 자리마다 그 판정 문자열이 「지금 `build.zig` 에 없고 `build/`
+> 에만 있는지」** 대조한다. 그 스캔이 0이어야 안전하다.
+>
+> **그 스캔의 대상은 `.zig` 만이 아니다.** 같은 회차에서 `.zig` 만 훑고 초록을 받았는데 CI 의
+> `check` 가 빨갰다 — `tools/test-session-host-release-authored-attestation-action.sh` 가
+> `grep -Fxc '…' build.zig` 로 등록 두 줄을 세고 있었다. 빌드 등록을 문자열로 보는 곳은
+> **`tests/**.zig` · `tools/**.sh` · `.github/` 셋**이다. 셋을 다 훑는다.
+
+`build/` 는 다른 게이트의 대상 목록에도 들어가야 한다. 실제로 이 분해에서 넷이 빠져 있었다 —
+`zig fmt` 대상(`.mise.toml`), CI 경로 필터 둘(`performance.yml`·`packages.yml`),
+영역 판정(`tools/ci/changed-areas.sh`), 그리고 절 참조 스캐너의 루트 목록(`tests/doc_links/links.zig`).
+**새 최상위 폴더를 만들 때는 이 다섯 자리를 함께 본다.**
+
 테스트가 아직 자동화될 수 없다면 문서와 PR 설명에 다음을 남긴다.
 
 ```text

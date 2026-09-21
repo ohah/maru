@@ -5,10 +5,11 @@
 //! silently falls back to `/tmp/maru-<uid>` and can make the real app's discovery ambiguous.
 
 const std = @import("std");
+const build_source = @import("support/build_source.zig");
 
 test "product-child fixtures require an isolated root and the default suite never injects the live uid root" {
     const allocator = std.testing.allocator;
-    const build = try readSource(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
     const launcher = try readSource(allocator, "src/platform/macos/session_host/launcher.zig");
     defer allocator.free(launcher);
@@ -93,7 +94,7 @@ test "common runner binds session registry and app workspace to the same pid roo
 
 test "macOS product smoke children bind workspace and session registry to one fixture root" {
     const allocator = std.testing.allocator;
-    const build = try readSource(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
     const instance_lease = try readSource(allocator, "tools/test-macos-app-instance-lease.sh");
     defer allocator.free(instance_lease);

@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const posixWalk = @import("support/posix_walk.zig").posixWalk;
+const build_source = @import("support/build_source.zig");
 const max_source_bytes = 16 * 1024 * 1024;
 
 test "CR5b-2c 경계는 shared Client 아래 ordered runtime transaction과 terminal summary만 연다" {
@@ -17,7 +18,7 @@ test "CR5b-2c 경계는 shared Client 아래 ordered runtime transaction과 term
     defer allocator.free(contract);
     const seal = try readSource(allocator, "src/platform/macos/session_host/event_cleanup_seal.zig");
     defer allocator.free(seal);
-    const build = try readSource(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
 
     inline for (.{

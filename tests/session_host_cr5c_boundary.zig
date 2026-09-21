@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const posixWalk = @import("support/posix_walk.zig").posixWalk;
+const build_source = @import("support/build_source.zig");
 
 const max_source_bytes = 16 * 1024 * 1024;
 
@@ -22,7 +23,7 @@ test "CR5c 경계는 shared Client terminal 뒤 all-runtime unavailable 전이 �
     defer allocator.free(backend);
     const contract = try readSource(allocator, "src/platform/macos/session_host/host_reconnect_runtime_transaction.zig");
     defer allocator.free(contract);
-    const build = try readSource(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
 
     inline for (.{

@@ -1,6 +1,7 @@
 //! Actual ENOSPC admission gate의 순서, process evidence와 test-only 경계를 고정한다.
 
 const std = @import("std");
+const build_source = @import("support/build_source.zig");
 
 fn read(allocator: std.mem.Allocator, path: []const u8, limit: usize) ![]u8 {
     return std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(limit));
@@ -28,7 +29,7 @@ test "disk full admission gate uses real ENOSPC before product budget prepare" {
     defer allocator.free(process_test);
     const harness = try read(allocator, "tools/ci/session-host-disk-full-admission.sh", 16 * 1024);
     defer allocator.free(harness);
-    const build = try read(allocator, "build.zig", 2 * 1024 * 1024);
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
 
     try std.testing.expectEqual(@as(usize, 1), count(

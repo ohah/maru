@@ -1,6 +1,7 @@
 //! P4 C1의 layering과 effect ownership을 소스 경계로 고정한다.
 
 const std = @import("std");
+const build_source = @import("support/build_source.zig");
 
 test "P4 C1 경계는 pure coordinator와 caller-owned side effects를 고정한다" {
     const allocator = std.testing.allocator;
@@ -18,12 +19,7 @@ test "P4 C1 경계는 pure coordinator와 caller-owned side effects를 고정한
         .limited(256 * 1024),
     );
     defer allocator.free(facade);
-    const build = try std.Io.Dir.cwd().readFileAlloc(
-        std.testing.io,
-        "build.zig",
-        allocator,
-        .limited(2 * 1024 * 1024),
-    );
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
 
     for ([_][]const u8{

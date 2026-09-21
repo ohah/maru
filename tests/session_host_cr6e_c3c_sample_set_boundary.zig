@@ -1,8 +1,9 @@
 const std = @import("std");
+const build_source = @import("support/build_source.zig");
 
 test "CR6e-c3c sample-set keeps twenty sequential isolated product runs and one strict aggregate" {
     const allocator = std.testing.allocator;
-    const build = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "build.zig", allocator, .limited(4 * 1024 * 1024));
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
     const collector = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "src/platform/macos/session_host/cr6e_c3c_sample_set.zig", allocator, .limited(1024 * 1024));
     defer allocator.free(collector);

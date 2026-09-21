@@ -1,6 +1,7 @@
 //! Daemon cleanup fail-stop process gate의 제품/test 경계와 exact inventory를 고정한다.
 
 const std = @import("std");
+const build_source = @import("support/build_source.zig");
 
 fn read(allocator: std.mem.Allocator, path: []const u8, limit: usize) ![]u8 {
     return std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(limit));
@@ -26,7 +27,7 @@ test "daemon cleanup fail-stop fixture stays test-only and exact" {
     defer allocator.free(coordinator);
     const process_test = try read(allocator, "tests/session_host_daemon_cleanup_fail_stop_e2e.zig", 64 * 1024);
     defer allocator.free(process_test);
-    const build = try read(allocator, "build.zig", 2 * 1024 * 1024);
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
 
     const fixture_start = std.mem.indexOf(

@@ -2,11 +2,12 @@
 
 const std = @import("std");
 const posixWalk = @import("support/posix_walk.zig").posixWalk;
+const build_source = @import("support/build_source.zig");
 const max_source_bytes = 16 * 1024 * 1024;
 
 test "CR5d-2 경계는 기존 Window 이동 뒤 fresh abandon commit 하나만 연다" {
     const allocator = std.testing.allocator;
-    const build = try readSource(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
     const app = try readSource(allocator, "src/platform/macos/app_session.zig");
     defer allocator.free(app);

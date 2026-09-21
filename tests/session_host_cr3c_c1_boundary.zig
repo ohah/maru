@@ -1,5 +1,6 @@
 const std = @import("std");
 const posixWalk = @import("support/posix_walk.zig").posixWalk;
+const build_source = @import("support/build_source.zig");
 
 fn count(haystack: []const u8, needle: []const u8) usize {
     var total: usize = 0;
@@ -63,7 +64,7 @@ test "CR3c C1 경계는 Client replacement와 RemoteGeneration 승격의 단일 
     defer allocator.free(transport);
     const stable = try readSource(allocator, "src/platform/macos/session_host/stable_screen_source.zig");
     defer allocator.free(stable);
-    const build = try readSource(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
 
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "pub fn publishUnavailableAfterAttachmentRetirement("));

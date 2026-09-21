@@ -2,6 +2,7 @@
 //! caller booleans or a fixture-only summary after the fact.
 
 const std = @import("std");
+const build_source = @import("support/build_source.zig");
 
 test "signed app Quit leaf owns candidate identity and canonical publication" {
     const source = try readHarness();
@@ -45,12 +46,7 @@ test "signed app Quit release mode isolates the product child namespace" {
 }
 
 test "signed app Quit child consumes the sealed workspace paths without an ambient registry" {
-    const build = try std.Io.Dir.cwd().readFileAlloc(
-        std.testing.io,
-        "build.zig",
-        std.testing.allocator,
-        .limited(2 * 1024 * 1024),
-    );
+    const build = try build_source.read(std.testing.allocator);
     defer std.testing.allocator.free(build);
     const source = try readHarness();
     defer std.testing.allocator.free(source);

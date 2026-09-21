@@ -11,6 +11,8 @@ on:
       - ".github/workflows/performance.yml"
       - ".mise.toml"
       - "build.zig"
+      # 빌드 그래프 등록이 `build/` 로 갈렸다 — 여기를 안 걸면 게이트를 바꾼 PR 이 이 워크플로를 못 켠다.
+      - "build/**"
       - "src/**"
       - "tests/**"
       - "tools/perf/**"

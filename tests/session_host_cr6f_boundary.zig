@@ -1,4 +1,5 @@
 const std = @import("std");
+const build_source = @import("support/build_source.zig");
 
 test "CR6f output wake keeps reader publication separate from owner-thread delta production" {
     const allocator = std.testing.allocator;
@@ -14,7 +15,7 @@ test "CR6f output wake keeps reader publication separate from owner-thread delta
     defer allocator.free(daemon);
     const restore = try readSource(allocator, "src/platform/macos/session_host/restore_activation.zig");
     defer allocator.free(restore);
-    const build = try readSource(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
 
     try std.testing.expectEqual(@as(usize, 1), count(queue, "pub const WakeNotifier = struct"));

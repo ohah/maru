@@ -2,10 +2,11 @@
 
 const std = @import("std");
 const posixWalk = @import("support/posix_walk.zig").posixWalk;
+const build_source = @import("support/build_source.zig");
 
 test "CR6b 경계는 projection을 직접 attach 권위로 쓰지 않고 fresh evidence validator 하나를 연다" {
     const allocator = std.testing.allocator;
-    const build = try read(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
     const barrel = try read(allocator, "src/platform/macos/session_host.zig");
     defer allocator.free(barrel);

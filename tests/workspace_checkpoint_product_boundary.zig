@@ -1,6 +1,7 @@
 //! P4 C3a 제품 owner의 단일 C1 권위와 side-effect-free 경계를 고정한다.
 
 const std = @import("std");
+const build_source = @import("support/build_source.zig");
 
 test "P4 C3a 경계는 C1 단일 generation과 파일 AppKit 비소유를 고정한다" {
     const source = try std.Io.Dir.cwd().readFileAlloc(
@@ -23,7 +24,7 @@ test "P4 C3c 경계는 main capture immutable bytes serial C2 writer를 고정�
     defer allocator.free(swift);
     const abi = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "src/platform/macos/app_host_abi.zig", allocator, .limited(512 * 1024));
     defer allocator.free(abi);
-    const build = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "build.zig", allocator, .limited(2 * 1024 * 1024));
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
 
     for ([_][]const u8{
@@ -121,7 +122,7 @@ test "P4 C3c 경계는 main capture immutable bytes serial C2 writer를 고정�
 
 test "P4 C3 R7 actual AppKit gate는 격리된 2-window 3-runtime 강제 종료 복원을 고정한다" {
     const allocator = std.testing.allocator;
-    const build = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "build.zig", allocator, .limited(2 * 1024 * 1024));
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
     const mise = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, ".mise.toml", allocator, .limited(256 * 1024));
     defer allocator.free(mise);

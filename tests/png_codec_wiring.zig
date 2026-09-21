@@ -9,9 +9,12 @@
 //! `src/cross_target_surface.zig`, `src/app.zig`가 나오는 만큼 `attachPngCodec(b, ...)`도
 //! 나와야 한다. 새 타깃을 더하면서 배선을 잊으면 여기서 먼저 걸린다.
 const std = @import("std");
+/// **`build.zig` 하나가 아니라 빌드 소스 전체**를 읽는다 — 등록이 `build/` 아래로 갈렸고,
+/// 그 정의는 `support/build_source.zig` 가 소유한다(이름으로 열면 절반만 보인다).
+const build_source = @import("support/build_source.zig");
 
 fn readBuildZig(allocator: std.mem.Allocator) ![]u8 {
-    return std.Io.Dir.cwd().readFileAlloc(std.testing.io, "build.zig", allocator, .limited(4 << 20));
+    return build_source.read(allocator);
 }
 
 /// 겹치지 않게 세되 **주석 줄은 뺀다**. 설명문에 적힌 한 줄이 판정을 뒤집으면 안 된다

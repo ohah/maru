@@ -14,6 +14,10 @@
 //! 판정이 사라진 것을 아무도 모른다.
 
 const std = @import("std");
+/// **`build.zig` 한 파일이 아니라 빌드 소스 전체**를 읽는다 — 등록이 `build/` 아래로 갈렸다.
+/// `tests/boundary/` 는 자기 파일이 모듈 루트라 상대 경로로 `tests/support/` 를 못 봐서,
+/// `build.zig` 가 이 모듈을 주입한다(`imports.zig`·`shell_gate_ledger.zig` 와 같은 형태).
+const build_source = @import("build_source");
 
 /// 경계 판정자들이 쓰는 그 읽기다(`imports.zig` 와 같은 형태) — 못 읽으면 조용히 넘어가지 않고
 /// 무엇을 못 읽었는지 찍고 실패한다.
@@ -45,7 +49,7 @@ test "wake 지연 예산은 세 자리에서 같은 값이다" {
     defer allocator.free(owner_src);
     const validator_src = try readFile(allocator, "tools/perf/session_host_cr6e_recovery_validator.zig");
     defer allocator.free(validator_src);
-    const build_src = try readFile(allocator, "build.zig");
+    const build_src = try build_source.read(allocator);
     defer allocator.free(build_src);
 
     // ⑴·⑵ 는 `<이름>: u64 = <숫자> * std.time.ns_per_ms` 꼴이라 ms 단위로 읽힌다.

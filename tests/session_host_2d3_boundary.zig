@@ -1,4 +1,5 @@
 const std = @import("std");
+const build_source = @import("support/build_source.zig");
 
 const max_source_bytes = 16 * 1024 * 1024;
 
@@ -12,7 +13,7 @@ test "CR3a-2d3 경계는 terminal drain continuation과 제품 proof-loss owner�
     defer allocator.free(attachment);
     const registry = try readSource(allocator, "src/platform/macos/session_host/generation_batch_registry.zig");
     defer allocator.free(registry);
-    const build = try readSource(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
     const runner = try readSource(allocator, "tools/session_host_2d3_test_runner.zig");
     defer allocator.free(runner);

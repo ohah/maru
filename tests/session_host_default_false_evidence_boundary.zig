@@ -2,6 +2,7 @@
 //! caller-provided result booleans or the developer's real config/session-host namespace.
 
 const std = @import("std");
+const build_source = @import("support/build_source.zig");
 
 test "default false leaf observes the closed post-bootstrap ABI state" {
     const harness = try read("src/platform/macos/session_host/cr6c_appkit_smoke.zig", 1024 * 1024);
@@ -40,7 +41,7 @@ test "default false leaf pins the signed candidate and publishes exclusively" {
 }
 
 test "default false product run owns an empty isolated config root" {
-    const build = try read("build.zig", 2 * 1024 * 1024);
+    const build = try build_source.read(std.testing.allocator);
     defer std.testing.allocator.free(build);
     const swift = try read("src/platform/macos/MaruAppHost.swift", 2 * 1024 * 1024);
     defer std.testing.allocator.free(swift);
@@ -52,7 +53,7 @@ test "default false product run owns an empty isolated config root" {
 }
 
 test "default false child consumes the sealed workspace paths without deleting stale state" {
-    const build = try read("build.zig", 2 * 1024 * 1024);
+    const build = try build_source.read(std.testing.allocator);
     defer std.testing.allocator.free(build);
     const harness = try read("src/platform/macos/session_host/cr6c_appkit_smoke.zig", 1024 * 1024);
     defer std.testing.allocator.free(harness);

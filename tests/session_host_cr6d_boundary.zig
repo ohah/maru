@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const posixWalk = @import("support/posix_walk.zig").posixWalk;
+const build_source = @import("support/build_source.zig");
 
 test "CR6d 진단은 앱 초기화 뒤에도 하네스 stderr를 유지한다" {
     const allocator = std.testing.allocator;
@@ -39,7 +40,7 @@ test "CR6d 진단은 앱 초기화 뒤에도 하네스 stderr를 유지한다" {
 
 test "CR6d 경계는 exact recovered screen probe와 actual AppKit input smoke만 연다" {
     const allocator = std.testing.allocator;
-    const build = try read(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
     const app = try read(allocator, "src/platform/macos/app_session.zig");
     defer allocator.free(app);
@@ -245,7 +246,7 @@ test "CR6d 경계는 exact recovered screen probe와 actual AppKit input smoke�
 
 test "CR6d v2b0b는 preflight 뒤 전체 inventory를 Zig 판정자에 exact once 넘긴다" {
     const allocator = std.testing.allocator;
-    const build = try read(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
     const swift = try read(allocator, "src/platform/macos/MaruAppHost.swift");
     defer allocator.free(swift);
@@ -356,7 +357,7 @@ test "CR6d AppKit child는 TCC responsible identity를 앱 번들에 귀속한�
     try std.testing.expectEqual(@as(usize, 1), count(spawn_choice, "else if (input_continuity)"));
     try std.testing.expectEqual(@as(usize, 1), count(source, "try json.objectField(\"cwd\")"));
     try std.testing.expectEqual(@as(usize, 1), count(source, "try json.write(artifact_root)"));
-    const build = try read(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
     const gate = between(
         build,

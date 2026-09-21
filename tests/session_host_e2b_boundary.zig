@@ -1,4 +1,5 @@
 const std = @import("std");
+const build_source = @import("support/build_source.zig");
 
 test "P4 E2b product observation cache has one runtime owner and token-only subscriptions" {
     const allocator = std.testing.allocator;
@@ -10,7 +11,7 @@ test "P4 E2b product observation cache has one runtime owner and token-only subs
     defer allocator.free(turn);
     const inventory = try readSource(allocator, "src/platform/macos/session_host/handoff_inventory.zig");
     defer allocator.free(inventory);
-    const build = try readSource(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
 
     try std.testing.expectEqual(@as(usize, 1), count(manager, "runtime_observation_cache.zig"));

@@ -1,4 +1,5 @@
 const std = @import("std");
+const build_source = @import("support/build_source.zig");
 
 test "L1 launch gate preserves product startup and isolates every ambient profile" {
     const allocator = std.testing.allocator;
@@ -6,7 +7,7 @@ test "L1 launch gate preserves product startup and isolates every ambient profil
     defer allocator.free(swift);
     const harness = try read(allocator, "src/platform/macos/app_launch_first_drawable.zig");
     defer allocator.free(harness);
-    const build = try read(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
     const validator = try read(allocator, "tools/perf/macos_app_launch_first_drawable_validator.zig");
     defer allocator.free(validator);

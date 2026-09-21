@@ -1,6 +1,7 @@
 const std = @import("std");
 /// 스캐너가 보는 walker 경로를 POSIX 구분자로 정규화한다(정본: tests/support/posix_walk.zig).
 const posixWalk = @import("support/posix_walk.zig").posixWalk;
+const build_source = @import("support/build_source.zig");
 
 const max_source_bytes = 16 * 1024 * 1024;
 
@@ -388,7 +389,7 @@ test "CR2d4 경계는 remote Window transfer 제거와 stable runtime parity를 
     const allocator = std.testing.allocator;
     const app_session = try readSource(allocator, "src/platform/macos/app_session.zig");
     defer allocator.free(app_session);
-    const build = try readSource(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
 
     inline for (.{
@@ -430,7 +431,7 @@ test "CR2e-a 경계는 pointer-free reducer와 단일 제품 executor caller를 
         "src/platform/macos/session_host/host_reconnect_runtime_ledger.zig",
     );
     defer allocator.free(cr5_runtime_set);
-    const build = try readSource(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
 
     inline for (.{
@@ -480,7 +481,7 @@ test "CR2e-b 경계는 mutation seal substrate와 CR4b stable runtime owner만 �
     defer allocator.free(source);
     const tests = try readSource(allocator, "tests/session_host_cr2e_mutation.zig");
     defer allocator.free(tests);
-    const build = try readSource(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
     const remote_runtime = try readSource(allocator, "src/platform/macos/session_host/remote_runtime.zig");
     defer allocator.free(remote_runtime);
@@ -539,7 +540,7 @@ test "CR2e-c 경계는 heap-pinned generation slot과 다음 단일 제품 owner
     defer allocator.free(source);
     const tests = try readSource(allocator, "tests/session_host_cr2e_generation_slot.zig");
     defer allocator.free(tests);
-    const build = try readSource(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
 
     try std.testing.expectEqual(@as(usize, 1), count(source, "pub fn GenerationSlot(comptime Payload: type) type"));
@@ -590,7 +591,7 @@ test "CR2e-d 경계는 actual RemoteGeneration PreparedReconnect와 in-place des
     defer allocator.free(slot);
     const screen = try readSource(allocator, "src/platform/macos/session_host/stable_screen_source.zig");
     defer allocator.free(screen);
-    const build = try readSource(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
 
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "pub const PreparedReconnect = struct {"));
@@ -669,7 +670,7 @@ test "CR2e-e1 경계는 current accessor와 backend facade만 generation을 읽�
     defer allocator.free(runtime);
     const backend = try readSource(allocator, "src/platform/macos/session_host/remote_term_backend.zig");
     defer allocator.free(backend);
-    const build = try readSource(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
 
     const runtime_owner = between(
@@ -725,7 +726,7 @@ test "CR2e-e2a 경계는 제품 runtime의 actual GenerationSlot current 저장�
     const allocator = std.testing.allocator;
     const runtime = try readSource(allocator, "src/platform/macos/session_host/remote_runtime.zig");
     defer allocator.free(runtime);
-    const build = try readSource(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
 
     const runtime_owner = between(
@@ -755,7 +756,7 @@ test "CR2e-e2b 경계는 reducer Decision과 actual generation effect parity를 
     const allocator = std.testing.allocator;
     const runtime = try readSource(allocator, "src/platform/macos/session_host/remote_runtime.zig");
     defer allocator.free(runtime);
-    const build = try readSource(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
 
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "const ReconnectGenerationEffect = enum(u8) {"));
@@ -835,7 +836,7 @@ test "CR2e-e3a1 경계는 candidate base resident ledger와 final zero를 고정
         "src/platform/macos/session_host/remote_runtime.zig",
     );
     defer allocator.free(runtime);
-    const build_gate = try readSource(allocator, "build.zig");
+    const build_gate = try build_source.read(allocator);
     defer allocator.free(build_gate);
 
     try std.testing.expectEqual(
@@ -896,7 +897,7 @@ test "CR2e-e3a2 경계는 fixed resident budget과 ReleaseFast child RSS artifac
         "tools/session_host_cr2e_e3a2_rss_test_runner.zig",
     );
     defer allocator.free(rss_runner);
-    const build = try readSource(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
 
     inline for (.{
@@ -982,7 +983,7 @@ test "CR2e-e3b1 경계는 queued 64와 active 8 및 128 MiB 정책을 분리한�
         "src/platform/macos/session_host/reconnect_admission_owner.zig",
     );
     defer allocator.free(queue_owner);
-    const build = try readSource(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
 
     inline for (.{
@@ -1079,7 +1080,7 @@ test "CR2e-e3b2 경계는 sealed queue drain과 stable executor lease의 sole pr
         "src/platform/macos/session_host/remote_runtime.zig",
     );
     defer allocator.free(runtime);
-    const build = try readSource(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
 
     try std.testing.expectEqual(@as(usize, 1), count(owner, "reconnect_budget: reconnect_budget_mod.ReconnectAdmissionBudget = .{},"));
@@ -1119,7 +1120,7 @@ test "CR2e-e3c1 경계는 coordinator sole drain과 기존 owner 보존을 고�
         "src/platform/macos/session_host/reconnect_product_coordinator.zig",
     );
     defer allocator.free(product_coordinator);
-    const build = try readSource(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
 
     try std.testing.expectEqual(@as(usize, 1), count(owner, "reconnect_admissions: reconnect_owner_mod.Owner = .{},"));
@@ -1175,7 +1176,7 @@ test "CR2e-e3c2 경계는 typed external receipt와 sole runtime consumer를 고
     defer allocator.free(backend);
     const runtime = try readSource(allocator, "src/platform/macos/session_host/remote_runtime.zig");
     defer allocator.free(runtime);
-    const build = try readSource(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
 
     try std.testing.expectEqual(@as(usize, 1), count(coordinator, "pub const DirectReleaseReceipt = struct"));
@@ -1255,7 +1256,7 @@ test "CR2e-e3c3 경계는 typed close receipt와 mixed outcome sole consumer를 
     defer allocator.free(runtime);
     const seal = try readSource(allocator, "src/platform/macos/session_host/process_seal_service.zig");
     defer allocator.free(seal);
-    const build = try readSource(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
 
     inline for (.{

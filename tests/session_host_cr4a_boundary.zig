@@ -1,5 +1,6 @@
 const std = @import("std");
 const posixWalk = @import("support/posix_walk.zig").posixWalk;
+const build_source = @import("support/build_source.zig");
 
 fn count(haystack: []const u8, needle: []const u8) usize {
     var total: usize = 0;
@@ -229,7 +230,7 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
     );
     defer allocator.free(cleanup_seal);
     const runtime_product = runtime[0..std.mem.indexOf(u8, runtime, "const testing = std.testing;").?];
-    const build = try readSource(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
     const build_cr4a_start = std.mem.indexOf(u8, build, "const session_host_cr4a_step =").?;
     const build_cr4a_end = std.mem.indexOfPos(u8, build, build_cr4a_start, "const session_host_cr4b_step =").?;

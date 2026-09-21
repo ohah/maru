@@ -28,6 +28,7 @@
 //!   - 인터프리터 이름이 `sh`·`bash` 가 아니면 못 본다(`python3` 등은 이 원장의 대상이 아니다).
 
 const std = @import("std");
+const build_source = @import("build_source");
 
 /// 이 단계가 **어느 호스트에서 도는가**.
 const Reach = enum {
@@ -125,7 +126,7 @@ test "기본 test 그래프의 셸 단계는 원장과 정확히 같다" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const source = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "build.zig", arena, .limited(4 * 1024 * 1024));
+    const source = try build_source.read(arena);
     const found = try scan(arena, source);
 
     var failed = false;

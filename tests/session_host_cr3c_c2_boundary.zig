@@ -1,5 +1,6 @@
 const std = @import("std");
 const posixWalk = @import("support/posix_walk.zig").posixWalk;
+const build_source = @import("support/build_source.zig");
 
 fn count(haystack: []const u8, needle: []const u8) usize {
     var total: usize = 0;
@@ -65,7 +66,7 @@ test "CR3c C2 경계는 matching RemoteGeneration 뒤 retired Client 회수만 �
     defer allocator.free(slot);
     const adapter = try readSource(allocator, "src/platform/macos/session_host/host_adapter.zig");
     defer allocator.free(adapter);
-    const build = try readSource(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
 
     try std.testing.expectEqual(@as(usize, 1), count(slot, "pub const PreparedRetiringReclaim = struct"));

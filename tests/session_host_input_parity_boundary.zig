@@ -1,6 +1,7 @@
 //! P4 input parity micro-gate source and focused-build boundary.
 
 const std = @import("std");
+const build_source = @import("support/build_source.zig");
 
 test "P4 input parity 경계는 AppSession 관측에서 actual host reader PTY까지 한 gate로 묶는다" {
     const allocator = std.testing.allocator;
@@ -10,7 +11,7 @@ test "P4 input parity 경계는 AppSession 관측에서 actual host reader PTY�
     defer allocator.free(manager);
     const backend = try readSource(allocator, "src/platform/macos/session_host/remote_term_backend.zig");
     defer allocator.free(backend);
-    const build = try readSource(allocator, "build.zig");
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
     const persistent = try readSource(allocator, "docs/persistent-session-host.md");
     defer allocator.free(persistent);

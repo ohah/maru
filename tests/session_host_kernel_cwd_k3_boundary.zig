@@ -1,6 +1,7 @@
 //! Session-host kernel cwd K3 actual-product parity and consumer-boundary inventory.
 
 const std = @import("std");
+const build_source = @import("support/build_source.zig");
 
 fn count(haystack: []const u8, needle: []const u8) usize {
     var total: usize = 0;
@@ -20,7 +21,7 @@ test "K3 kernel cwd parity uses an actual daemon and canonical AppSession consum
     const allocator = std.testing.allocator;
     const runtime = try read(allocator, "src/platform/macos/session_host/remote_runtime.zig", 2 * 1024 * 1024);
     defer allocator.free(runtime);
-    const build = try read(allocator, "build.zig", 2 * 1024 * 1024);
+    const build = try build_source.read(allocator);
     defer allocator.free(build);
     const plan = try read(allocator, "docs/plans/session-host-kernel-cwd.md", 128 * 1024);
     defer allocator.free(plan);

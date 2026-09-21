@@ -845,6 +845,8 @@ const Table = struct {
     sb_awaiting_input: [:0]const u8,
     sb_agent_idle: [:0]const u8,
     sb_agent_unknown: [:0]const u8,
+    /// 원격 tmux pane 행 아래 고지 — 슬롯 상한에 밀려 **지금 행이 없는** pane 수(`{0}`). 조용히 사라지지 않는다는 약속의 문구.
+    sb_panes_evicted: [:0]const u8,
     /// 설정 화면의 키 힌트 넷. 화살표·기호는 그대로 두고 **낱말만** 옮긴다 — 기호는 번역 단위가 아니다.
     set_nav_hint: [:0]const u8,
     set_search_hint: [:0]const u8,
@@ -1396,6 +1398,7 @@ const en: Table = .{
     .sb_awaiting_input = "Awaiting input",
     .sb_agent_idle = "Idle",
     .sb_agent_unknown = "Checking status",
+    .sb_panes_evicted = "+{0} panes dropped",
     .set_nav_hint = "← section · → setting · ↑↓ move · ⏎ select",
     .set_search_hint = "/ search",
     .set_search_prompt = "search: ",
@@ -2108,6 +2111,7 @@ const ko: Table = .{
     .sb_awaiting_input = "입력 대기",
     .sb_agent_idle = "대기중",
     .sb_agent_unknown = "상태 확인 중",
+    .sb_panes_evicted = "+{0} pane 밀림",
     .set_nav_hint = "← 섹션 · → 설정 · ↑↓ 이동 · ⏎ 선택",
     .set_search_hint = "/ 검색",
     .set_search_prompt = "검색: ",

@@ -684,6 +684,15 @@ pub fn reprojectSidebarIfRowLinesStale(self: *AppSession) void {
                 stale = true;
                 break;
             };
+            if (pr.name_len == 0) {
+                // 고지 행 — 밀린 수가 달라지면(더 밀리거나 돌아오거나) 낡는다. 0 이 되면 행 자체가 사라져야 하는데, 그것은
+                // 위 `.agent` 의 행 수 비교가 잡는다.
+                if (self.remote_agent_panes.evictedFor(pterm.surfaceId()) != pr.more) {
+                    stale = true;
+                    break;
+                }
+                continue;
+            }
             const entry = self.remote_agent_panes.find(pterm.surfaceId(), pr.name[0..pr.name_len]) orelse {
                 stale = true;
                 break;
@@ -2131,19 +2140,27 @@ pub fn buildSidebarTitleDrawList(self: *AppSession) !renderer.DrawList {
                 const ind_n = @min(@as(usize, pr.depth) * @as(usize, group_indent_cols), indent_buf.len);
                 const ind = indent_buf[0..ind_n];
                 const pname = pr.name[0..pr.name_len];
-                const entry = if (pterm) |t| self.remote_agent_panes.find(t.surfaceId(), pname) else null;
-                if (entry) |e| {
+                const entry = if (pterm != null and pr.name_len > 0) self.remote_agent_panes.find(pterm.?.surfaceId(), pname) else null;
+                if (pr.name_len == 0) {
+                    // 고지 행(조각 5): «+N pane 밀림» — 이름 자리에 문구만. 슬롯 상한에 밀려 지금 행이 없는 pane 이 있다는 말.
+                    var buf: [64]u8 = undefined;
+                    const text = maru.i18n.format(&buf, maru.i18n.t(.sb_panes_evicted), &.{.{ .d = pr.more }});
+                    try names.append(self.allocator, try std.fmt.allocPrint(self.allocator, "{s} {s}", .{ ind, text }));
+                    try status_lines.append(self.allocator, try self.allocator.dupe(u8, ""));
+                    try card_running.append(self.allocator, false);
+                } else if (entry) |e| {
                     const status = try paneStatusLineOwned(self, &e.slot);
                     defer self.allocator.free(status);
-                    // 보조줄 좌단(아이콘 뒤)에 맞춘다 — 에이전트 행의 보조줄과 같은 들여쓰기(indent + 2칸 + 1칸).
-                    try names.append(self.allocator, try std.fmt.allocPrint(self.allocator, "{s}   {s}  {s}", .{ ind, pname, status }));
+                    // 들여쓰기 1칸·이름 뒤 1칸 — 기본 폭(180pt)에서 라벨이 약 12칸이라 «   %0  ✓ 대기»(13칸)는 마지막 글자가
+                    // 잘렸다(조각 4 실기 «✓ 대…»). 이름이 짧으니(`%<n>`) 여백을 줄여 상태 문구에 칸을 준다(조각 5).
+                    try names.append(self.allocator, try std.fmt.allocPrint(self.allocator, "{s} {s} {s}", .{ ind, pname, status }));
                     try status_lines.append(self.allocator, if (e.slot.transcript.reply().len > 0)
-                        try std.fmt.allocPrint(self.allocator, "{s}     {s}", .{ ind, e.slot.transcript.reply() })
+                        try std.fmt.allocPrint(self.allocator, "{s}   {s}", .{ ind, e.slot.transcript.reply() })
                     else
                         try self.allocator.dupe(u8, ""));
                     try card_running.append(self.allocator, e.slot.state == .running);
                 } else {
-                    try names.append(self.allocator, try std.fmt.allocPrint(self.allocator, "{s}   {s}", .{ ind, pname }));
+                    try names.append(self.allocator, try std.fmt.allocPrint(self.allocator, "{s} {s}", .{ ind, pname }));
                     try status_lines.append(self.allocator, try self.allocator.dupe(u8, ""));
                     try card_running.append(self.allocator, false);
                 }

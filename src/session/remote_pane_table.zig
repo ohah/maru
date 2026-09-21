@@ -35,11 +35,28 @@ pub const Entry = struct {
     }
 };
 
+/// 밀린 pane 의 자취 — 어느 surface 의 어느 pane 이 밀렸나. 화면이 **그 Term 에서** «N 개가 밀렸다» 를 말할 근거다
+/// (`evicted` 카운터는 앱 전체라 Term 별로는 못 말한다 — 조각 5 재실측 ①).
+pub const Evicted = struct {
+    surface_id: u64 = 0,
+    pane: [max_pane_len]u8 = undefined,
+    pane_len: u8 = 0,
+
+    pub fn paneName(self: *const Evicted) []const u8 {
+        return self.pane[0..self.pane_len];
+    }
+};
+/// 자취 상한. 넘치면 오래된 자취부터 잊어 **과소 보고**한다 — `RingMap.max_evicted` 와 같은 한계.
+pub const max_evicted: usize = max_panes;
+
 pub const Table = struct {
     entries: [max_panes]Entry = @splat(.{}),
     tick: u64 = 0,
-    /// 상한을 넘겨 **밀어낸 횟수**. 화면이 «pane 행이 밀려났다» 를 말할 근거 — 조용히 사라지지 않는다.
+    /// 상한을 넘겨 **밀어낸 횟수**(앱 전체). 화면이 «pane 행이 밀려났다» 를 말할 근거 — 조용히 사라지지 않는다.
     evicted: u32 = 0,
+    /// 밀린 (surface, pane) 자취(링). 그 pane 이 되돌아오거나 surface 가 버려지면 지운다.
+    evicted_trace: [max_evicted]Evicted = @splat(.{}),
+    evicted_next: usize = 0,
 
     /// 그 (surface, pane) 의 슬롯 — **없으면 만든다**. 빈 pane 이름은 거절한다(그 이벤트는 Term 인라인 슬롯 몫이다).
     pub fn slotFor(self: *Table, surface_id: u64, pane: []const u8, now_ms: u64) ?*Entry {
@@ -51,10 +68,37 @@ pub const Table = struct {
             return e;
         }
         const slot = self.victim();
-        if (slot.used != 0) self.evicted +|= 1;
+        if (slot.used != 0) {
+            self.evicted +|= 1;
+            self.rememberEvicted(slot.surface_id, slot.paneName());
+        }
         slot.* = .{ .surface_id = surface_id, .pane_len = @intCast(pane.len), .used = self.tick, .last_event_ms = now_ms };
         @memcpy(slot.pane[0..pane.len], pane);
+        // 밀렸던 pane 이 되돌아왔다 — 자취를 지운다(행은 다시 서지만 상태·응답은 잃었다).
+        self.forgetEvicted(surface_id, pane);
         return slot;
+    }
+
+    fn rememberEvicted(self: *Table, surface_id: u64, pane: []const u8) void {
+        const t = &self.evicted_trace[self.evicted_next];
+        t.* = .{ .surface_id = surface_id, .pane_len = @intCast(pane.len) };
+        @memcpy(t.pane[0..pane.len], pane);
+        self.evicted_next = (self.evicted_next + 1) % max_evicted;
+    }
+
+    fn forgetEvicted(self: *Table, surface_id: u64, pane: []const u8) void {
+        for (&self.evicted_trace) |*t| {
+            if (t.surface_id == surface_id and std.mem.eql(u8, t.paneName(), pane)) t.* = .{};
+        }
+    }
+
+    /// 그 surface 에서 **밀려 지금 없는** pane 수 — 사이드바 고지 «+N 밀림» 의 값. 자취 상한을 넘긴 것은 세지 못한다(과소 보고).
+    pub fn evictedFor(self: *const Table, surface_id: u64) usize {
+        var n: usize = 0;
+        for (&self.evicted_trace) |*t| {
+            if (t.surface_id == surface_id and t.pane_len != 0) n += 1;
+        }
+        return n;
     }
 
     pub fn find(self: *const Table, surface_id: u64, pane: []const u8) ?*const Entry {
@@ -117,6 +161,9 @@ pub const Table = struct {
         for (&self.entries) |*e| {
             if (e.used != 0 and e.surface_id == surface_id) e.* = .{};
         }
+        for (&self.evicted_trace) |*t| {
+            if (t.surface_id == surface_id) t.* = .{};
+        }
     }
 
     fn victim(self: *Table) *Entry {
@@ -164,6 +211,44 @@ test "pane 테이블: 상한을 넘기면 가장 오래 안 쓴 것부터 밀고
     try testing.expect(t.find(1, "%1") == null);
     try testing.expect(t.find(1, "%0") != null);
     try testing.expect(t.find(1, "%new") != null);
+}
+
+test "pane 테이블: 밀린 자취는 surface 별로 세고, 그 pane 이 돌아오거나 surface 를 버리면 지운다 (RA7 조각 5)" {
+    var t: Table = .{};
+    var i: usize = 0;
+    var buf: [8]u8 = undefined;
+    // surface 1 이 15 칸, surface 2 가 1 칸 — 꽉 찼다.
+    while (i < max_panes - 1) : (i += 1) {
+        const name = std.fmt.bufPrint(&buf, "%{d}", .{i}) catch unreachable;
+        _ = t.slotFor(1, name, i).?;
+    }
+    _ = t.slotFor(2, "%0", 50).?;
+    try testing.expectEqual(@as(usize, 0), t.evictedFor(1));
+    try testing.expectEqual(@as(usize, 0), t.evictedFor(2));
+    // surface 2 의 신참이 surface 1 의 `%0`(가장 오래됨) 을 민다 — 자취는 **밀린 쪽**(surface 1) 에 남는다.
+    _ = t.slotFor(2, "%9", 100).?;
+    try testing.expectEqual(@as(usize, 1), t.evictedFor(1));
+    try testing.expectEqual(@as(usize, 0), t.evictedFor(2));
+    // 하나 더 밀리면 2.
+    _ = t.slotFor(2, "%10", 101).?;
+    try testing.expectEqual(@as(usize, 2), t.evictedFor(1));
+    // 밀렸던 `%0` 이 돌아오면(그 자리에 또 누군가 밀린다) — `%0` 자취는 지워지고 새로 밀린 `%2` 가 남아 여전히 2.
+    _ = t.slotFor(1, "%0", 102).?;
+    try testing.expectEqual(@as(usize, 2), t.evictedFor(1));
+    try testing.expect(t.find(1, "%0") != null);
+    try testing.expect(t.find(1, "%2") == null);
+    // surface 를 버리면 자취도 사라진다.
+    t.dropSurface(1);
+    try testing.expectEqual(@as(usize, 0), t.evictedFor(1));
+    // 자취 상한: max_evicted 를 넘기면 오래된 자취부터 잊는다(과소 보고) — 값이 상한을 넘지 않는다.
+    var t2: Table = .{};
+    i = 0;
+    while (i < max_panes * 3) : (i += 1) {
+        const name = std.fmt.bufPrint(&buf, "%{d}", .{i}) catch unreachable;
+        _ = t2.slotFor(7, name, i).?;
+    }
+    try testing.expect(t2.evictedFor(7) <= max_evicted);
+    try testing.expectEqual(@as(usize, max_evicted), t2.evictedFor(7));
 }
 
 test "pane 테이블: 가장 최근 pane 은 마지막 이벤트 시각으로 고르고, surface 를 비우면 밀림으로 세지 않는다" {

@@ -765,6 +765,7 @@ pub fn focusAgentRow(self: *AppSession, tab_index: usize, pane_index: usize, ter
 /// 그리는데 Term 하나에 세션이 여럿이면 어느 것인지 사용자가 고를 자리가 이것뿐이다. Term 이동은 `focusAgentRow` 가 한다.
 pub fn rememberPaneSession(self: *AppSession, tab_index: usize, pane_index: usize, term_index: usize, pane_name: []const u8) void {
     if (tab_index >= self.tabs.items.len) return;
+    if (pane_name.len == 0) return; // 고지 행 — 기억할 세션이 없다
     const term = agentTermOf(self.tabs.items[tab_index], .{ .pane = pane_index, .term = term_index }) orelse return;
     const entry = self.remote_agent_panes.findMut(term.surfaceId(), pane_name) orelse return;
     git_ops.rememberAgentSession(self, entry.slot.transcript.identity());
@@ -839,34 +840,43 @@ pub fn appendAgentRows(self: *AppSession, out: *std.ArrayList(chrome.components.
 }
 
 pub const PaneRow = @FieldType(chrome.components.sidebar.Row, "agent_pane");
-pub const PaneRows = struct { rows: [maru.session.remote_pane_table.max_panes]PaneRow = undefined, count: usize = 0 };
+/// pane 행 + (밀림이 있으면) 고지 행 하나 — 상한 + 1.
+pub const PaneRows = struct { rows: [maru.session.remote_pane_table.max_panes + 1]PaneRow = undefined, count: usize = 0 };
 
-/// 그 Term 의 tmux pane 행들(둘 이상일 때만, pane 이름 순 — 순서가 tick 마다 흔들리면 클릭 자리가 움직인다).
+/// 그 Term 의 tmux pane 행들(둘 이상일 때만, pane 이름 순 — 순서가 tick 마다 흔들리면 클릭 자리가 움직인다). 슬롯 상한에
+/// 밀려 지금 행이 없는 pane 이 있으면 **맨 뒤에 고지 행** «+N pane 밀림» 을 하나 붙인다(조각 5) — 이것은 «둘 이상» 규칙과
+/// 무관하다: 이 Term 의 pane 이 하나(또는 전부) 밀렸어도 밀린 사실은 말해야 한다(`RingMap.wasEvicted` 와 같은 약속).
 pub fn remotePaneRowsFor(self: *AppSession, tab: *Tab, s: WorkspaceSession) PaneRows {
     var result: PaneRows = .{};
     const term = agentTermOf(tab, s) orelse return result;
-    if (self.remote_agent_panes.countFor(term.surfaceId()) < 2) return result;
-    var it = self.remote_agent_panes.forSurface(term.surfaceId());
-    while (it.next()) |e| {
-        if (result.count >= result.rows.len) break;
-        var row: PaneRow = .{ .tab = 0, .pane = 0, .term = 0 };
-        const name = e.paneName();
-        const n: u8 = @intCast(@min(name.len, row.name.len));
-        @memcpy(row.name[0..n], name[0..n]);
-        row.name_len = n;
-        row.lines = if (e.slot.transcript.reply().len > 0) 2 else 1;
-        result.rows[result.count] = row;
+    if (self.remote_agent_panes.countFor(term.surfaceId()) >= 2) {
+        var it = self.remote_agent_panes.forSurface(term.surfaceId());
+        while (it.next()) |e| {
+            if (result.count >= maru.session.remote_pane_table.max_panes) break;
+            var row: PaneRow = .{ .tab = 0, .pane = 0, .term = 0 };
+            const name = e.paneName();
+            const n: u8 = @intCast(@min(name.len, row.name.len));
+            @memcpy(row.name[0..n], name[0..n]);
+            row.name_len = n;
+            row.lines = if (e.slot.transcript.reply().len > 0) 2 else 1;
+            result.rows[result.count] = row;
+            result.count += 1;
+        }
+        // pane 이름 순(`%3` < `%12` — 숫자로). 이름은 tmux 가 만든 `%<n>` 이라 앞 글자를 떼고 수로 비교한다.
+        std.mem.sort(PaneRow, result.rows[0..result.count], {}, struct {
+            fn lessThan(_: void, a: PaneRow, b: PaneRow) bool {
+                const na = paneNumber(a.name[0..a.name_len]);
+                const nb = paneNumber(b.name[0..b.name_len]);
+                if (na != nb) return na < nb;
+                return std.mem.lessThan(u8, a.name[0..a.name_len], b.name[0..b.name_len]);
+            }
+        }.lessThan);
+    }
+    const evicted = self.remote_agent_panes.evictedFor(term.surfaceId());
+    if (evicted > 0) {
+        result.rows[result.count] = .{ .tab = 0, .pane = 0, .term = 0, .more = std.math.lossyCast(u16, evicted) };
         result.count += 1;
     }
-    // pane 이름 순(`%3` < `%12` — 숫자로). 이름은 tmux 가 만든 `%<n>` 이라 앞 글자를 떼고 수로 비교한다.
-    std.mem.sort(PaneRow, result.rows[0..result.count], {}, struct {
-        fn lessThan(_: void, a: PaneRow, b: PaneRow) bool {
-            const na = paneNumber(a.name[0..a.name_len]);
-            const nb = paneNumber(b.name[0..b.name_len]);
-            if (na != nb) return na < nb;
-            return std.mem.lessThan(u8, a.name[0..a.name_len], b.name[0..b.name_len]);
-        }
-    }.lessThan);
     return result;
 }
 

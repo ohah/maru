@@ -139,6 +139,45 @@ pub fn maybeDebugOpenSettings(self: *AppSession) void {
         t.agent_kind = .claude;
     }
     reapplyForcedAgentStates(self);
+    // MARU_FORCE_REMOTE_PANES=<n>[,<evicted>] — 활성 Term 을 원격 tmux pane n 개의 에이전트 Term 처럼 만든다(RA7 조각 4·5):
+    // pane 슬롯 `%0..%n-1`(짝수는 idle+응답, 홀수는 running) + 밀린 pane <evicted> 개의 자취(다른 surface 가 나머지 칸을
+    // 채워 LRU 로 이 Term 의 오래된 pane 을 밀어낸 상태). 실기 e2e 는 pane 둘까지가 현실적이라 **17 개째가 밀리는 화면**은
+    // 캡처로 만들 수 없다 — `MARU_FORCE_SCM_TURNS_EVICTED` 와 같은 이유.
+    if (std.c.getenv("MARU_FORCE_REMOTE_PANES")) |raw| {
+        const spec = std.mem.span(raw);
+        var parts = std.mem.splitScalar(u8, spec, ',');
+        const n = @min(std.fmt.parseInt(usize, parts.next() orelse "2", 10) catch 2, maru.session.remote_pane_table.max_panes);
+        const evicted = std.fmt.parseInt(usize, parts.next() orelse "0", 10) catch 0;
+        const t = pane_ops.activePane(self).activeTerm();
+        t.agent_kind = .claude;
+        t.agent_kind_from_hook = true;
+        t.rt.observation.ssh_remote_dest_present = true;
+        // 훅 모드가 서야 한다 — 아니면 매 tick 의 `.observe` 분기가 pane 슬롯을 버린다(`agentHookMode`: 원격은 채널이 열려 있을 때).
+        var ch = maru.session.remote_agent_stream.Channel.init(0);
+        _ = ch.feed("{\"hello\":\"maru-agent-events\",\"v\":1}", 0);
+        t.agent_remote_channel = ch;
+        var buf: [24]u8 = undefined;
+        var i: usize = 0;
+        while (i < n + evicted) : (i += 1) {
+            const name = std.fmt.bufPrint(&buf, "%{d}", .{i}) catch break;
+            const e = self.remote_agent_panes.slotFor(t.surfaceId(), name, 1000 + i) orelse break;
+            if (i % 2 == 0) {
+                e.slot.state = .idle;
+                e.slot.transcript.owned.setReply("self-verify reply");
+            } else {
+                e.slot.state = .running;
+                e.slot.tool.set("Bash");
+            }
+        }
+        // 다른 surface 로 남은 칸을 채우고 <evicted> 개를 더 넣어 이 Term 의 가장 오래된 pane 부터 민다.
+        const foreign = maru.session.remote_pane_table.max_panes - (n + evicted) + evicted;
+        i = 0;
+        while (i < foreign) : (i += 1) {
+            const name = std.fmt.bufPrint(&buf, "%{d}", .{i}) catch break;
+            _ = self.remote_agent_panes.slotFor(0xFEED_0000_0000_0001, name, 5000 + i) orelse break;
+        }
+        sidebar_ops.rebuildSidebar(self) catch {};
+    }
     if (std.c.getenv("MARU_FORCE_NOTIFICATIONS")) |raw| {
         const want = std.fmt.parseInt(usize, std.mem.span(raw), 10) catch 1;
         var i: usize = 0;

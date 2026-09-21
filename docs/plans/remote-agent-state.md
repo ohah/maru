@@ -532,8 +532,25 @@ test-macos-only · 전체 test. **실기가 잡은 것**: 처음 두 회차의 �
 전제해 18:28 번들로 돌았다(캡처 게이트는 `--test-filter` 가 고른 test 만 분석해 그 switch 를 안 봤다). 고친 뒤 2 pane e2e: 에이전트
 행 아래 `%0 ✓ 대기 / 완료했습니…`·`%1 ✓ 대기 / 완료했습니…` 두 행(`/tmp/pane-rows-e2e-tmux2.png`), 1 pane e2e: pane 행 없음(그대로).
 e2e 도구도 손봄: 죽은 tmux 소켓이 남아 있으면 `kill-server` 실패가 `set -e` 로 «sidecars·repo status» 절을 삼켰다 → 소켓을 지우고 넘어간다.
-**남은 한계**: `evicted`(17번째 pane) 고지 UI 없음 — 슬롯은 LRU 로 밀리고 행도 그만큼만 선다; pane 행 상태 문구는 사이드바 폭에 잘린다
-(«✓ 대…»); 닫힌 pane 의 행은 스풀 7일 회수 전까지 남는다(결정 4).
+**남은 한계(조각 4 시점)**: `evicted`(17번째 pane) 고지 UI 없음 — 슬롯은 LRU 로 밀리고 행도 그만큼만 선다; pane 행 상태 문구는 사이드바 폭에
+잘린다(«✓ 대…»); 닫힌 pane 의 행은 스풀 7일 회수 전까지 남는다(결정 4). → 앞의 둘은 조각 5 가 닫았다. 셋째는 설계 결정이 먼저다.
+
+**조각 5 ✅ (2026-09-21) — 밀림 고지 + 잘림.** 재실측: ① `Table.evicted` 는 **앱 전체** 카운터(테이블이 surface 무관 16칸)라 «이 Term 에서
+N 개» 를 못 말한다 → `RingMap.evicted` 처럼 **밀린 (surface, pane) 자취**(`evicted_trace`, 상한 16, 링)를 두고 `evictedFor(surface)` 로 센다;
+그 pane 이 돌아오면(`slotFor` 가 같은 키를 다시 만들 때) 자취를 지우고(행은 다시 서지만 상태·응답은 잃었다), `dropSurface` 가 자취도 비운다;
+자취 상한을 넘기면 오래된 것부터 잊어 **과소 보고**(`RingMap.max_evicted` 와 같은 한계). ② 잘림: 기본 폭 180pt 에서 라벨이 약 12칸인데
+pane 행 `"   %0  ✓ 대기중"` 이 13칸 — 들여쓰기 3→1, 이름 뒤 2→1 로 «✓ 대기중» 이 온전히 들어간다(응답 줄도 5→3). 화면: `Row.agent_pane` 에
+`more: u16` — `name_len == 0 ∧ more > 0` 이면 **고지 행** «+N pane 밀림»(`sb_panes_evicted`), pane 행들 맨 뒤에 하나, «둘 이상» 규칙과
+무관(이 Term 의 pane 이 하나만 남았거나 전부 밀렸어도 밀린 사실은 말한다). 클릭 라우팅의 ✕ 판정은 이름이 아니라 **행 종류**(`isPaneRow`)로
+끈다 — 이름 없는 고지 행의 ✕ 자리 클릭이 Term 을 닫으면 안 된다(공격 ④). 낡음 판정이 고지 행의 `more` 를 지금 값과 비교한다. 헤드리스
+픽스처 `MARU_FORCE_REMOTE_PANES=<n>[,<evicted>]`(17개째가 밀리는 화면은 실기로 못 만든다 — `MARU_FORCE_SCM_TURNS_EVICTED` 와 같은 이유;
+훅 모드가 서야 하므로 가짜 원격 채널을 연다). 판정자: 순수 «밀린 자취는 surface 별로 세고 …»(밀린 쪽에 자취·되돌아오면 지움·drop·상한) +
+배선 «슬롯 상한에 밀린 pane 은 «+N pane 밀림» 고지 행으로 남고, 돌아오면 고지가 사라진다»(고지 행 ✕ 클릭이 `pending_confirm` 을 안 세움 —
+마지막 Term 의 닫기는 종료 확인 모달이라 Term 수만 보면 못 잡는다; 행 수 불변·수만 1→2 인 tick; 밀린 채 drop). 뮤턴트 7: N1 `evictedFor`
+항상 0 · N2 고지를 «둘 이상» 안에서만 · N4 돌아와도 자취 안 지움 · N6 낡음 판정의 `more` 비교 제거 잡힘; **N3(✕ 판정을 이름으로)·N5(drop 이
+자취 안 지움) 1차 생존** → N3 은 Term 수 대신 `pending_confirm` 을 보게, N5 는 밀린 채로 drop 하게 판정자를 고쳐 잡음; N7(`rememberPaneSession`
+의 빈 이름 가드 제거)은 **동치 뮤턴트**(`findMut("")` 가 어차피 null) — 가드는 문서용으로 남긴다. 실기 2 pane e2e: `%0 ✓ 대기중 / 완료했습니다.`
+두 행 온전(`/tmp/pane-notice-e2e-tmux2.png`), 헤드리스 3 pane + 2 밀림: `%2·%3·%4` 행 + «+2 pane 밀림»(`/tmp/pane-notice-3,2.png`).
 
 **착수 전 적대적 공격 (2026-09-21)**
 

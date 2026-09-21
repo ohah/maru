@@ -14302,8 +14302,11 @@ pub const AppSession = struct {
                             // (워크스페이스 → Pane → Term, §5). ✕는 호버 없이 고정 표시라 zone 판정만으로 가른다.
                             // tmux pane 행(RA7 조각 4)은 ✕ 가 없고 — Term 까지 가되 **그 pane 의 세션**을 «최근 세션» 으로
                             // 기억해 에이전트 탭이 그 링을 보인다(결정 2 — tmux 조작은 없다).
+                            // ✕ 판정은 **행 종류**로 끈다 — 이름으로 가르면 이름 없는 고지 행(«+N pane 밀림»)의 ✕ 자리 클릭이
+                            // Term 을 닫는다(조각 5 공격 ④).
+                            const is_pane_row = chrome.components.sidebar.isPaneRow(self.sidebar_rows.items, slot);
                             const pane_name = chrome.components.sidebar.paneNameAt(self.sidebar_rows.items, slot);
-                            if (pane_name == null and sidebar_ops.sidebarCloseButtonAt(self, x_px)) {
+                            if (!is_pane_row and sidebar_ops.sidebarCloseButtonAt(self, x_px)) {
                                 agent_ops.closeAgentRow(self, ag.tab, ag.pane, ag.term);
                             } else {
                                 agent_ops.focusAgentRow(self, ag.tab, ag.pane, ag.term);
@@ -27840,6 +27843,134 @@ test "훅 원격 프레임: pane 슬롯이 둘이면 사이드바에 pane 행이
     const status_a = try sidebar_ops.paneStatusLineOwned(&session, &session.remote_agent_panes.find(term.surfaceId(), "%12").?.slot);
     defer a.free(status_a);
     try std.testing.expect(std.mem.indexOf(u8, status_a, maru.i18n.t(.sb_agent_idle)) == null);
+}
+
+// [RA7 조각 5] **밀린 pane 은 조용히 사라지지 않는다.** 슬롯 상한(16)에 밀려 행이 없어진 pane 이 있으면 그 Term 의 pane 행 뒤에
+// «+N pane 밀림» 고지 행이 선다 — «둘 이상» 규칙과 무관하게(이 Term 의 pane 이 하나였어도). 고지 행은 이름이 없고 ✕ 도 없어
+// ✕ 자리 클릭이 Term 을 닫지 않는다. 밀린 pane 이 돌아오면 고지가 줄고, 0 이면 행이 사라진다 — 낡음 판정이 스스로 건다.
+test "훅 원격 프레임: 슬롯 상한에 밀린 pane 은 «+N pane 밀림» 고지 행으로 남고, 돌아오면 고지가 사라진다 (RA7 조각 5)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+    test_config_text = agent_hooks_on_config;
+    defer test_config_text = "";
+
+    var session: AppSession = .{ .allocator = a, .io = std.testing.io };
+    try session.init(io, a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_focused = false;
+    _ = try session.resize(1400, 900, 1000);
+
+    const term = pane_ops.activePane(&session).activeTerm();
+    var ch = maru.session.remote_agent_stream.Channel.init(0);
+    _ = ch.feed("{\"hello\":\"maru-agent-events\",\"v\":1}", 0);
+    term.agent_remote_channel = ch;
+    const nonce = "4331_7";
+    @memcpy(term.agent_remote_nonce[0..nonce.len], nonce);
+    term.agent_remote_nonce_len = nonce.len;
+    term.rt.observation.ssh_remote_dest_present = true;
+
+    const Row = chrome.components.sidebar.Row;
+    const noticeRow = struct {
+        fn f(rows: []const Row) ?Row {
+            for (rows) |r| if (r == .agent_pane and r.agent_pane.name_len == 0) return r;
+            return null;
+        }
+    }.f;
+    const max_panes = maru.session.remote_pane_table.max_panes;
+
+    // 이 Term 의 pane 둘(`%0`·`%1`) — 행 둘, 고지 없음.
+    agent_ops.consumeRemoteAgentLines(&session, term, &.{
+        "{\"nonce\":\"4331_7\",\"pane\":\"%0\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"UserPromptSubmit\\\",\\\"session_id\\\":\\\"S-0\\\",\\\"prompt\\\":\\\"a\\\"}\"}",
+        "{\"nonce\":\"4331_7\",\"pane\":\"%1\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"UserPromptSubmit\\\",\\\"session_id\\\":\\\"S-1\\\",\\\"prompt\\\":\\\"b\\\"}\"}",
+    }, 100);
+    sidebar_ops.reprojectSidebarIfRowLinesStale(&session);
+    try std.testing.expect(noticeRow(session.sidebar_rows.items) == null);
+
+    // **다른 surface** 가 나머지 칸을 전부 채우고 하나 더 — 가장 오래 안 쓴 `%0` 이 밀린다(이 Term 의 것).
+    var buf: [24]u8 = undefined;
+    var i: usize = 0;
+    while (i < max_panes - 1) : (i += 1) {
+        const name = try std.fmt.bufPrint(&buf, "%{d}", .{i});
+        _ = session.remote_agent_panes.slotFor(999_999, name, 200 + i).?;
+    }
+    try std.testing.expectEqual(@as(usize, 1), session.remote_agent_panes.countFor(term.surfaceId())); // `%1` 만 남았다
+    try std.testing.expectEqual(@as(usize, 1), session.remote_agent_panes.evictedFor(term.surfaceId()));
+    // 재투영은 낡음 판정에 맡긴다 — 밀린 tick 에 고지 행이 서야 한다(옛 `%0` 행의 `find` 실패가 낡음을 잡고, 재투영이 고지를 낸다).
+    sidebar_ops.reprojectSidebarIfRowLinesStale(&session);
+    const notice = noticeRow(session.sidebar_rows.items) orelse return error.NoNoticeRow;
+    try std.testing.expectEqual(@as(u16, 1), notice.agent_pane.more);
+    try std.testing.expect(notice.agent_pane.last); // 고지가 묶음의 끝
+    // pane 이 하나만 남았으므로 pane 행은 없고 **고지만** 선다 — «둘 이상» 규칙과 무관.
+    var pane_rows: usize = 0;
+    for (session.sidebar_rows.items) |r| if (r == .agent_pane and r.agent_pane.name_len > 0) {
+        pane_rows += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 0), pane_rows);
+    // 고지 행의 그리기 텍스트에 수가 들어간다.
+    var tbuf: [64]u8 = undefined;
+    const text = maru.i18n.format(&tbuf, maru.i18n.t(.sb_panes_evicted), &.{.{ .d = 1 }});
+    try std.testing.expect(std.mem.indexOf(u8, text, "1") != null);
+
+    // 고지 행 ✕ 자리 클릭 — Term 이 닫히지 않는다(이름이 없는 행이라 `pane_name == null` 로 가르면 닫힌다 — 공격 ④).
+    var notice_index: usize = 0;
+    for (session.sidebar_rows.items, 0..) |r, k| if (r == .agent_pane and r.agent_pane.name_len == 0) {
+        notice_index = k;
+    };
+    try std.testing.expect(chrome.components.sidebar.isPaneRow(session.sidebar_rows.items, notice_index));
+    try std.testing.expect(chrome.components.sidebar.paneNameAt(session.sidebar_rows.items, notice_index) == null);
+    const terms_before = pane_ops.activePane(&session).terms.items.len;
+    const close_x: f64 = sidebar_ops.sidebarColumns(&session).?.closeXRange(session.cell_width_px).start;
+    const m = sidebar_ops.sidebarMetrics(&session);
+    const top = chrome.components.sidebar.rowTop(session.sidebar_rows.items, notice_index, session.sidebar_header_height_px, m, 0);
+    const y: f64 = @floatFromInt(top + @as(i64, @intCast(chrome.components.sidebar.rowHeight(session.sidebar_rows.items[notice_index], m) / 2)));
+    session.mouse(1, close_x, y, 0, 0);
+    session.mouse(3, close_x, y, 0, 0);
+    try std.testing.expectEqual(terms_before, pane_ops.activePane(&session).terms.items.len);
+    // 닫기는 마지막 Term 이라 **확인 모달**(종료 확인)로 나타난다 — Term 수만 보면 못 잡는다(뮤턴트 N3 가 1차 생존한 이유).
+    try std.testing.expect(session.pending_confirm == .none);
+
+    // 하나 더 밀린다(`%1` 까지) — 행 수는 그대로(고지 하나)이고 **수만** 1→2 다. 낡음 판정의 `more` 비교만이 이것을 잡는다
+    // (뮤턴트 N6: 그 비교를 지우면 고지가 «+1» 로 남는다).
+    _ = session.remote_agent_panes.slotFor(999_999, "%extra", 700).?;
+    try std.testing.expectEqual(@as(usize, 2), session.remote_agent_panes.evictedFor(term.surfaceId()));
+    sidebar_ops.reprojectSidebarIfRowLinesStale(&session);
+    try std.testing.expectEqual(@as(u16, 2), (noticeRow(session.sidebar_rows.items) orelse return error.NoNoticeRow).agent_pane.more);
+
+    // 둘 다 돌아온다(그 자리엔 다른 surface 의 가장 오래된 것들이 밀린다). 자취가 지워져 고지가 사라지고 pane 행 둘.
+    agent_ops.consumeRemoteAgentLines(&session, term, &.{
+        "{\"nonce\":\"4331_7\",\"pane\":\"%1\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"PreToolUse\\\",\\\"session_id\\\":\\\"S-1\\\",\\\"tool_name\\\":\\\"Bash\\\",\\\"tool_input\\\":{}}\"}",
+    }, 800);
+    agent_ops.consumeRemoteAgentLines(&session, term, &.{
+        "{\"nonce\":\"4331_7\",\"pane\":\"%0\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"UserPromptSubmit\\\",\\\"session_id\\\":\\\"S-0\\\",\\\"prompt\\\":\\\"a2\\\"}\"}",
+    }, 900);
+    try std.testing.expectEqual(@as(usize, 0), session.remote_agent_panes.evictedFor(term.surfaceId()));
+    sidebar_ops.reprojectSidebarIfRowLinesStale(&session);
+    try std.testing.expect(noticeRow(session.sidebar_rows.items) == null);
+    pane_rows = 0;
+    for (session.sidebar_rows.items) |r| if (r == .agent_pane and r.agent_pane.name_len > 0) {
+        pane_rows += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 2), pane_rows);
+
+    // **밀린 채로** 훅 모드를 벗어나 surface 를 버리면 자취도 사라진다 — 고지가 유령처럼 남지 않는다(뮤턴트 N5). 다른 surface 가
+    // 상한만큼 더 들어와 이 Term 의 오래된 `%1` 을 다시 민 뒤 버린다.
+    i = 0;
+    while (i < max_panes - 1) : (i += 1) {
+        const name = try std.fmt.bufPrint(&buf, "%x{d}", .{i});
+        _ = session.remote_agent_panes.slotFor(999_999, name, 1000 + i).?;
+    }
+    try std.testing.expectEqual(@as(usize, 1), session.remote_agent_panes.evictedFor(term.surfaceId()));
+    session.remote_agent_panes.dropSurface(term.surfaceId());
+    try std.testing.expectEqual(@as(usize, 0), session.remote_agent_panes.evictedFor(term.surfaceId()));
+    sidebar_ops.reprojectSidebarIfRowLinesStale(&session);
+    try std.testing.expect(noticeRow(session.sidebar_rows.items) == null);
 }
 
 // [AT3c] **원격 프레임이 봉인·스냅샷까지 닿는다.** 예전 `consumeRemoteAgentLines` 는 `applied` 를 버려 원격 Term 에

@@ -9793,6 +9793,9 @@ pub const AppSession = struct {
         self.terminal_context_menu = false;
         self.branch_menu_open = false;
         settings_ops.clearFileContentMenu(self);
+        // **팝업 rename 도 내린다**(그 함수 doc) — 심볼·이름 없는 문서 저장 상자는 같은 오버레이
+        // 그리드에 그려져 겹친다. 인라인 rename 은 겹치지 않으므로 그대로 둔다.
+        settings_ops.closePopupRename(self);
         // 세팅 모달도 닫는다 — confirm/notice가 settings와 동시에 열리면 buildChromeOverlayFrame이 둘을 한 오버레이
         // 그리드(union bbox)에 painter-order로 raster해 텍스트가 겹쳐 보였다(z-order 겹침). settings를 단일-오버레이
         // 불변식에 포함해 한 번에 하나만 뜨게 한다. toggleSettings는 이 경로를 거치지 않아 열기엔 영향 없음.

@@ -423,8 +423,8 @@ TextMate, git staging, formatter는 LSP의 선행 조건이 아니다. 초기 sy
 「복구」로 읽었다. 표식은 자리를 찾아 지우고, 복구는 「**그 version 의** 진단이 왔다」로 잰다.
 
 **요청 id 는 i32 안(2026-09-20 실측 뒤의 결정).** 종류마다 `id_span = 1e8` 칸: hover `1e8+seq` · definition `2e8` · signatureHelp `3e8` · formatting `4e8` ·
-rename `5e8` · completion `6e8` · codeAction `7e8` · codeAction/resolve `8e8` · completionItem/resolve `9e8` · semanticTokens `10e8`(`rpc.zig` 의 base 상수, `nextSeq` 가 칸 안에서 돌린다,
-`classify` 는 칸으로 가른다; 가장 큰 칸 10e8+1e8-1 = 1,099,999,999 < 2^31). 처음엔 `N×1e9+seq` 였고 JSON-RPC 로는 적법하지만, **rust-analyzer(와 ruff 등 Rust `lsp-server` 크레이트 서버)는 정수 id 를 i32 로만
+rename `5e8` · completion `6e8` · codeAction `7e8` · codeAction/resolve `8e8` · completionItem/resolve `9e8` · semanticTokens `10e8` · foldingRange `11e8`(`rpc.zig` 의 base 상수, `nextSeq` 가 칸 안에서 돌린다,
+`classify` 는 칸으로 가른다; 가장 큰 칸 11e8+1e8-1 = 1,199,999,999 < 2^31). 처음엔 `N×1e9+seq` 였고 JSON-RPC 로는 적법하지만, **rust-analyzer(와 ruff 등 Rust `lsp-server` 크레이트 서버)는 정수 id 를 i32 로만
 읽어** 넘치는 요청을 **알림으로 오인해 버린다** — `6_000_000_001` 짜리 completion 이 stderr 에 `unhandled notification` 으로만 남고 응답이 없었다(hover·definition 만
 i32 안이라 그 둘만 됐다). 실 rust-analyzer 에 프레임을 그대로 재생해 잡았다(§8.2g-b 실측). 관측점 `LSJ13`(가장 큰 칸 끝 ≤ i32 최대 · seq 가 칸 안에서 돌고 0 을
 건너뜀 · 칸 경계 · 칸 밖은 무시). 아래 절들의 id 표기는 이 표를 따른다.
@@ -930,6 +930,50 @@ provider) · `SEM2`(순수: 편집 밀기 — 앞·겹침·뒤) · `ES40`(순수
   요청이 다시 본다) → 뺐다 · **B15**(onEdit 의 `dirty` — 편집이 version 을 올린다) → 뺐다 · **B20**(1층이 비면 2층도 안 그림 — 글자가 있어야 토큰이 있다) ·
   **C2**(`is_error` — 오류 응답엔 result 가 없다) · **C5**(seq 증가 — 한 번에 하나) · **C8**(undo 를 빈 범위로 — undo 도 `spanFromInverse` 가 범위를 내어 `null` 경로는
   방어) 은 방어로 남기고 주석.
+
+### 8.2j LSP 2단 ⑨ — `foldingRange` 접힘 3층 (2026-09-21, 계획 공격 뒤의 결정)
+
+**계획 공격이 드러낸 것.** ① visual-mapping §4 가 접힘 소스를 **세 층**(들여쓰기 → tree-sitter 쿼리 → LSP `foldingRange` — *"서버가 주면 가장 위다"*)으로
+이미 계약했고, §4.1f 가 「못 센 것 ≠ 접을 것 없음」·래치 규율을, 커서 규칙(접힌 안의 커서는 머리로)을 §4 가 정해 뒀다. 이 절은 **요청 시점·응답
+검증·두 번째 층과의 순서·편집 뒤**만 정한다. ② **실측(2026-09-21, `lineFoldingOnly: true` 로 물었다)** — rust-analyzer: `endLine` 이 **닫는 괄호 줄**
+(tree-sitter 층과 같은 모양), `imports`·`comment` 종류를 내고, **같은 시작줄의 중복**(`let p = Point {` 19..22 와 19..21, `if` 23..25 두 번)을 낸다 · tsgo:
+`endLine` 이 **닫는 괄호 앞 줄**(VS Code 모양 — 접어도 `}` 가 보인다), `startCharacter`/`endCharacter` 를 같이 낸다 · clangd: 전부 `region` 종류,
+닫는 괄호 앞 줄. 셋 다 `foldingRangeProvider: true`, 지연 0~28 ms. ②′ rust-analyzer 는 didOpen 직후엔 답하지만 **로드가 시작된 뒤 끝날 때까지 `null`(프로브 0.3 s) 또는 `[]`(앱 첫 실측 — 화살표가 안 섰다)** 을 낸다 — 오류가 아니라 정상 응답 모양이라 「빈 것 = 접을 것 없음」으로 적으면 안 된다. **서버마다 `}` 가 보이거나 숨는다** — 명세가 *"folded area ends with the line's last
+character"* 라 `endLine` 은 서버의 것이고 우리는 그대로 따른다(정규화하면 서버가 낸 `imports`·`comment` 범위처럼 괄호가 없는 것에서 틀린다). ③ **편집은
+오늘 이미 접힘을 통째로 놓는다**(`refreshAfterEdit` → `dropFoldState` → 들여쓰기로 다시 세움 → 파싱이 끝난 프레임에 구문 승격) — 그래서 3층의 갱신도
+「편집 뒤 조용해지면 다시 묻고, 응답이 갈아 끼운다」로 같은 사다리에 얹힌다. **순서가 문제다**: 큰 문서는 파싱이 여러 프레임이라(§2.1a) LSP 응답이
+승격보다 **먼저** 올 수 있고, 그때 승격이 3층을 덮어쓰면 안 된다. ④ 갈아 끼우면 접어 둔 것이 풀린다 — 승격과 같은 규율(*"틀린 곳이 접힌 채로 남는 것보다
+펼쳐지는 편이 낫다"*)이고, 편집이 이미 전부 풀어 두므로 실제로 잃는 것은 「응답 전 100 ms 안에 접은 것」뿐이다.
+
+| 축 | 결정 | 근거 |
+| --- | --- | --- |
+| **capability** | `textDocument.foldingRange{lineFoldingOnly: true, foldingRangeKind: {valueSet: [comment, imports, region]}}`. 서버의 `foldingRangeProvider`(bool 또는 객체)를 읽는다 — 없으면 3층 없음(1·2층 그대로) | LSP 3.17 · §4 「없어도 접기가 사라지지 않는다」 |
+| **요청** | `textDocument/foldingRange`, id `11e8+seq`(§8.2a 표에 열한 번째 칸). 문서 전체(범위 인자가 없다). 보내기 전 `flushDocument`; 요청은 그 문서의 `editor_lsp_version` 을 단다 | ② 지연 0~28 ms — 전체라도 싸다 |
+| **시점** | 프레임마다(`syntaxColors` — 승격과 같은 자리) 판정: 서버 ready·provider·요청 없음·(든 범위의 version ≠ 문서 version 또는 `dirty`) **그리고 마지막 편집 뒤 120 ms**. 한 번에 하나 | §8.2i 와 같은 시계 |
+| **응답 검증(코드가 소유 — `session/lsp/fold_range.zig`)** | 그 요청의 version ≠ 지금 version 이면 **버리고 다시**(`dirty`). 오류·`null`·**빈 배열**은 「아직 아니다」 — 아래 층을 그대로 두고 조용 시계를 두 배씩 늘려(120 ms → … → 7,680 ms 상한) 되묻는다(실측 ②′: rust-analyzer 가 로드 중 `null`/`[]` 을 낸다 — 빈 것을 「접을 것 없음」으로 적으면 그 문서의 3층이 편집 전까지 안 선다). 접을 것이 정말 없는 문서는 상한 주기로 작은 요청 하나가 계속 나간다(받아들인 비용). 항목은 `startLine < endLine`(머리 한 줄짜리는 안 만든다 — §4.1f)·`endLine < 줄 수` 만 받고, `(startLine ↑, endLine ↓)` 로 정렬해 **같은 시작줄은 큰 것 하나**(tree-sitter 층의 `best` 와 같은 규칙), **엇갈리는 것**(열린 범위 안에서 시작해 그 밖에서 끝남)은 버린다 — 접힘 모델이 중첩만 안다. 레벨은 열린 범위 스택 깊이(승격과 같은 정의). `startCharacter`·`endCharacter`·`collapsedText` 는 안 읽는다(줄 접힘 — §4.1f) | ② rust-analyzer 의 중복 |
+| **층 순서** | `editor_fold_source ∈ {indent, syntax, lsp}`. `dropFoldState` 가 `indent` 로 되돌리고, 승격은 `lsp` 면 **건너뛴다**(3층이 이미 덮었다), 3층 적용은 언제나 덮는다(`syntax` 위든 `indent` 위든). 적용은 승격과 **같은 마무리**(`keepFoldView` → 갈아 끼움 → `rebuildVisible` → `finishFoldChange` — 접어 둔 것은 푼다) | ③④ |
+| **편집 중** | 편집이 `dropFoldState` 로 전부 놓고 들여쓰기로 세운다(오늘 그대로) → 승격 → 조용 120 ms 뒤 3층이 다시 묻는다. 편집 통지는 조용 시계만 되감는다(범위는 안 민다 — 편집이 이미 놓았다) | ③ |
+| **종류** | `kind`(`comment`·`imports`·`region`)는 받되 **쓰지 않는다** — 종류별 접기 명령(「주석 전부 접기」)이 없다 | 다음 |
+| **닫힘·수명** | 문서와 함께. 서버가 죽거나 provider 가 없으면 2층까지(저하, 실패 아님) | §4 |
+| **하지 않는 것** | 종류별 접기 · `collapsedText` 표시 · 문자 단위 접힘 · 응답 전에 접은 것 보존(④) · 비교 뷰(접힘 자체가 없다) | 다음 |
+
+**구현이 계약에 되먹인 것.** ① **표식 배열의 구멍** — `ensureFoldRanges` 는 들여쓰기 범위가 0이면 gutter 표식 배열을 잡지 않았고, 그 위에 2·3층이 범위를
+올려도 **화살표가 안 섰다**(`use` 두 줄에 한 줄짜리 fn 만 있는 파일: 들여쓰기 0 · 서버 `imports` 1). 갈아 끼우기를 한 자리(`installFoldRanges`)로 모으면서 표식
+배열도 거기서 맞춘다 — 승격(2층)도 같은 구멍을 갖고 있었다. ② 빈 응답의 뜻(위 ②′). ③ 캡처 실측(rust-analyzer): 3층은 tree-sitter 가 못 내는 **`use` 묶음·
+`///` 문서 주석 묶음**을 접는다 — 2층과의 가시 차이는 거기서 난다(블록 자체는 둘 다 접는다; `}` 가 숨는 것은 rust-analyzer 도 같다).
+
+**관측점**: `LSJ16`(순수: capability·provider 파싱(bool·객체)·요청·id 칸 11e8·classify·칸 밖) · `FRG1`(순수: 정렬·중복·엇갈림·한 줄·줄 수 밖·레벨·종류 무시) ·
+`FRG2`(provider bool·객체·거짓·없음) · `FRG3`(깊이 상한) · `FLD1`(제품 경계: 가짜 서버 — 들여쓰기 0 문서에서 표식 배열이 잡힘·열면 묻고 응답이 구문 층 위에
+범위를 갈아 끼움·승격이 3층을 안 덮음·전체 접기가 서버 범위로·편집 뒤 120 ms 재요청·낡은 응답 버림) · `FLD2`(빈 응답은 되묻기·provider 없음·오류 응답 뒤
+두 배 조용 시계) · `FLD3`(갈아 끼우기 전의 어느 할당 실패도 적용이 아니고 새지 않는다) · `FRG4`(상한). 캡처 훅 `MARU_FORCE_FOLD_ALL=<indent|syntax|lsp>`(그 층이
+선 뒤 전체 접기 한 번).
+
+**적대적 검증(2026-09-21, 1~4회차 · 변이 37)**: 1회차 순수 15 → 2 · 2회차 제품 14 → 1 · 3회차 배선 9 → 1 · 4회차 재실행 3 → 0. 판정자 보강 셋, 등가 하나:
+- **A6** 열린 범위의 pop 조건 `<` → `<=`: 앞 범위의 **마지막 숨은 줄에서 시작해 밖으로 나가는** 범위가 엇갈림으로 안 걸렸다 → `FRG1` 에 26..30(16..26 뒤) 추가.
+- **A11** 상한 `max_ranges` 를 안 봄 — 상한을 넘는 응답이 판정자에 없었다 → `FRG4`(50,010 항목 → 50,000).
+- **B14** 갈아 끼우기 실패에도 `applied`·`source = lsp` — OOM 이 판정자에 없었다 → `FLD3`(FailingAllocator 로 모든 할당 자리; 갈아 끼운 뒤의 실패는 적용이다 —
+  `PROMO1` 과 같은 축). 변이는 `ranges` 누수로도 죽는다.
+- **C8**(release 가 3층 상태를 안 놓음) — 두 호출자 모두 곧 Term 을 부수므로 관측 불가 → 등가, 규율로 남기고 주석.
 
 ### 8.3 관측 가능성과 민감정보
 

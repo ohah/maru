@@ -1852,6 +1852,8 @@ const TermRuntime = struct {
     editor_syntax: editor_ops.syntax_color.State = .{},
     /// semantic tokens 2층(§8.2i) — 서버가 준 의미 토큰의 byte 스팬. `editor_syntax` 와 같은 단위로 산다.
     editor_semantic: editor_ops.semantic_client.State = .{},
+    /// 접힘 3층(§8.2j) — `foldingRange` 요청·응답 상태. 범위 자체는 `editor_fold_ranges` 에 갈아 끼운다.
+    editor_fold_lsp: editor_ops.fold_lsp_client.State = .{},
     /// 진단 층(§5.4) — 목록(첫 출처: 구문 오류)과 렌더 표. `editor_syntax` 와 같은 단위로 산다.
     editor_diagnostics: editor_ops.diagnostics.State = .{},
     /// LSP 문서 version(§8.2a) — 편집마다 오른다. 0 은 「아직 서버에 안 열었다」.
@@ -1974,6 +1976,9 @@ const TermRuntime = struct {
     /// 한 번 덮는다. 이 표시가 없으면 **매 프레임 다시 세게 된다** — 트리는 그대로인데 훑기와 할당이
     /// 프레임마다 돈다.
     editor_syntax_folds_applied: bool = false,
+    /// 지금 `editor_fold_ranges` 를 낸 층(§4 — 들여쓰기 → tree-sitter → LSP). `dropFoldState` 가 `indent` 로 되돌리고,
+    /// 구문 승격은 `lsp` 면 건너뛴다(3층이 먼저 왔다 — 큰 문서는 파싱이 응답보다 늦을 수 있다 · §8.2j 「층 순서」).
+    editor_fold_source: editor_ops.FoldSource = .indent,
     /// 접힘 집합을 바꾸기 **직전의 집합**. 다시 만들기가 실패하면 여기서 되돌린다.
     ///
     /// **길이만 되돌리는 것으로는 부족하다.** 전체 접기뿐이던 시절에는 집합이 "전부 아니면 없음"이라
@@ -7160,6 +7165,8 @@ pub const AppSession = struct {
     debug_diff_caret_keys_done: bool = false,
     /// `MARU_FORCE_FORMAT` 이 요청을 보냈다(캡처 전용 래치).
     debug_format_sent: bool = false,
+    /// `MARU_FORCE_FOLD_ALL` 이 접었다(캡처 전용 래치).
+    debug_fold_all_done: bool = false,
     /// `MARU_FORCE_RENAME*` 이 상자를 열었다(캡처 전용 래치).
     debug_rename_done: bool = false,
     /// `MARU_FORCE_QUICK_FIX` 가 요청을 보냈다(캡처 전용 래치).
@@ -20737,6 +20744,7 @@ pub const AppSession = struct {
         debug_fixtures.applyForcedRename(self); // 캡처 전용: 심볼 이름 바꾸기(§8.2f)
         debug_fixtures.applyForcedSuggest(self); // 캡처 전용: 자동완성(§8.2g)
         debug_fixtures.applyForcedQuickFix(self); // 캡처 전용: code action(§8.2h)
+        debug_fixtures.applyForcedFoldAll(self); // 캡처 전용: 접힘 층이 선 뒤 전체 접기(§8.2j)
         debug_fixtures.applyForcedStageAll(self); // 캡처 전용: 전체 스테이지는 그룹 머리 클릭으로만 시작된다(RS4a)
         debug_fixtures.applyForcedFetch(self); // 캡처 전용: 원격 갱신은 브랜치 줄 클릭으로만 시작된다(P6)
         debug_fixtures.applyForcedRemoteMenu(self); // 캡처 전용: `∨` 메뉴도 클릭으로만 열린다(P6b)

@@ -92,6 +92,9 @@ pub const rename_client = @import("editor_rename.zig");
 pub const completion_client = @import("editor_completion.zig");
 pub const code_action_client = @import("editor_code_action.zig");
 pub const semantic_client = @import("editor_semantic.zig");
+pub const fold_lsp_client = @import("editor_fold_lsp.zig");
+/// 접힘 범위를 낸 층(§4 의 세 소스).
+pub const FoldSource = enum { indent, syntax, lsp };
 pub const workspace_edit_client = @import("editor_workspace_edit.zig");
 
 pub const Opened = struct {
@@ -588,6 +591,8 @@ fn syntaxColors(self: *AppSession, term: *Term) []const []const chrome_editor.co
         // 없을 수 있어(§2.1a) 들여쓰기로 세웠고, 여기가 그 두 번째 갱신 시점이다.
         promoteFoldRangesToSyntax(self, term);
     }
+    // 접힘 3층(§8.2j) — 승격과 같은 자리에서 「물을 때인가」를 판정한다(트리와 무관하게 — grammar 없는 문서도 서버는 있을 수 있다).
+    fold_lsp_client.tick(self, term);
 
     const first = term.rt.editor_first_line;
     // **길이 판정도 렌더 축이다.** 접히면 보이는 줄이 문서 줄보다 적어, 문서 수로 재면 화면 끝
@@ -2692,7 +2697,7 @@ fn editorLines(term: *Term) []const []const u8 {
 /// 세면서 접힌 것을 못 보게 된다(순환).
 ///
 /// **diff 상태에서는 비어 있다 — 그것이 곧 "접을 수 없다"의 단일 출처다**(`foldsUnavailable`).
-fn foldSourceLines(term: *Term) []const []const u8 {
+pub fn foldSourceLines(term: *Term) []const []const u8 {
     if (term.rt.editor_diff != null) return &.{};
     return term.rt.editor_lines;
 }
@@ -6299,6 +6304,12 @@ fn promoteFoldRangesToSyntax(self: *AppSession, term: *Term) void {
     const st = &term.rt.editor_syntax;
     if (st.pending) return; // 아직 파는 중이다 — 다음 프레임에 다시 본다
     if (term.rt.editor_syntax_folds_applied) return;
+    // **3층이 먼저 왔으면 덮지 않는다**(§8.2j 「층 순서」) — 큰 문서는 파싱이 여러 프레임이라 LSP 응답이 승격보다 앞설 수 있고,
+    // 그때 구문 층이 서버의 범위를 덮어쓰면 「서버가 주면 가장 위」(§4)가 깨진다. 표시도 세운다 — 매 프레임 여기까지 오지 않게.
+    if (term.rt.editor_fold_source == .lsp) {
+        term.rt.editor_syntax_folds_applied = true;
+        return;
+    }
     var prov = &(st.provider orelse return);
     if (prov.tree == null) return; // grammar 없음 — 들여쓰기 층이 그대로 산다(§5)
 
@@ -6336,15 +6347,6 @@ fn promoteFoldRangesToSyntax(self: *AppSession, term: *Term) void {
 
     const n = spans.items.len;
     const ranges = self.allocator.alloc(editor_fold.Range, n) catch return;
-    const folded = self.allocator.alloc(u32, n) catch {
-        self.allocator.free(ranges);
-        return;
-    };
-    const folded_prev = self.allocator.alloc(u32, n) catch {
-        self.allocator.free(ranges);
-        self.allocator.free(folded);
-        return;
-    };
 
     // **중첩 레벨은 담긴 순서로 센다.** 시작 줄 오름차순이므로, 아직 안 끝난 범위의 수가 곧 깊이다
     // (들여쓰기 층이 스택 깊이를 쓰는 것과 같은 정의 — §4의 `Range.level` 주석).
@@ -6364,15 +6366,56 @@ fn promoteFoldRangesToSyntax(self: *AppSession, term: *Term) void {
         };
     }
 
+    // **갈아 끼우기와 마무리는 3층과 같은 한 자리다**(`installFoldRanges`) — 접어 둔 것을 풀고 보이는 줄 표를 다시 만들며
+    // 가로 상한·보던 열을 지킨다. 실패하면(할당) 래치하지 않고 돌아간다 — 다음 프레임이 다시 시도한다(§4.1f).
+    if (!installFoldRanges(self, term, ranges)) {
+        self.allocator.free(ranges);
+        return;
+    }
+    term.rt.editor_fold_source = .syntax;
+    term.rt.editor_syntax_folds_applied = true;
+}
+
+/// 접힘 범위 목록을 **갈아 끼운다** — 구문 승격(2층)과 LSP `foldingRange`(3층)가 같은 자리를 지난다(§4 「층으로 쌓인다」 · §8.2j 「층 순서」).
+/// `ranges` 는 머리 오름차순·중첩만(엇갈림 없음)이어야 하고, 성공하면 **소유가 넘어간다**(실패하면 호출자가 놓는다).
+///
+/// **접어 둔 것은 푼다.** 갈아 끼우면 화살표가 서는 줄이 달라지므로 옛 머리 번호가 가리키는 곳이 다른 범위가 된다 —
+/// **틀린 곳이 접힌 채로 남는 것보다 펼쳐지는 편이 낫다**(승격의 규율 그대로). 편집은 이미 전부 풀어 두므로(`dropFoldState`)
+/// 실제로 잃는 것은 응답이 오기 전 짧은 창에 접은 것뿐이다.
+///
+/// **표식 배열도 여기서 맞춘다.** `ensureFoldRanges` 는 들여쓰기 범위가 0이면 표식을 잡지 않는다 — 그 위에 2·3층이 범위를 올리면
+/// 표식이 없어 **화살표가 안 선다**(§8.2j 계획 공격: `use` 두 줄에 한 줄짜리 fn 만 있는 파일 — 들여쓰기 0, 서버 `imports` 1).
+/// 보이는 줄은 문서 줄보다 많을 수 없으므로 줄 수 크기면 늘 충분하다.
+pub fn installFoldRanges(self: *AppSession, term: *Term, ranges: []editor_fold.Range) bool {
+    const n = ranges.len;
+    const lines = foldSourceLines(term);
+    const folded = self.allocator.alloc(u32, n) catch return false;
+    const folded_prev = self.allocator.alloc(u32, n) catch {
+        self.allocator.free(folded);
+        return false;
+    };
+    var marks: ?[]chrome_editor.gutter.Fold = null;
+    if (term.rt.editor_fold_marks.len < lines.len) {
+        marks = self.allocator.alloc(chrome_editor.gutter.Fold, lines.len) catch {
+            self.allocator.free(folded);
+            self.allocator.free(folded_prev);
+            return false;
+        };
+    }
+
     // 여기서부터 실패 지점이 없다 — 옛 것을 놓고 새 것을 건다.
     if (term.rt.editor_fold_ranges.len > 0) self.allocator.free(term.rt.editor_fold_ranges);
     if (term.rt.editor_folded_buf.len > 0) self.allocator.free(term.rt.editor_folded_buf);
     if (term.rt.editor_folded_prev.len > 0) self.allocator.free(term.rt.editor_folded_prev);
+    if (marks) |m| {
+        if (term.rt.editor_fold_marks.len > 0) self.allocator.free(term.rt.editor_fold_marks);
+        term.rt.editor_fold_marks = m;
+        term.rt.editor_fold_marks_len = 0;
+    }
     term.rt.editor_fold_ranges = ranges;
     term.rt.editor_folded_buf = folded;
     term.rt.editor_folded_prev = folded_prev;
     term.rt.editor_folded_len = 0; // 접어 둔 것은 푼다(위 주석)
-    term.rt.editor_syntax_folds_applied = true;
 
     // **보이는 줄 표를 다시 만든다.** 위에서 접어 둔 것을 풀었으므로 `rebuildVisible` 의 불변식
     // (「접힌 것이 없으면 보이는 줄 배열은 비어 있다」 = 원본을 그대로 그리라는 표시)이 지금
@@ -6382,7 +6425,7 @@ fn promoteFoldRangesToSyntax(self: *AppSession, term: *Term) void {
     // 파싱이 끝나기 전에 접으면(큰 문서는 예산 파싱이 여러 프레임 걸린다 — §2.1a) 본문은 부분집합을
     // 그리는데 접힘 상태는 「없음」이라 화면의 행과 문서의 줄이 어긋난다. 입력은 문서 offset 을,
     // 커서는 시각 행을 쓰므로 그 어긋남이 곧 그 증상이다. `ES32` 가 그 순서를 그대로 잰다.
-    // **접기와 같은 마무리를 탄다.** 이 승격도 접힘 집합을 바꾸므로(위에서 접어 둔 것을 풀었다)
+    // **접기와 같은 마무리를 탄다.** 이 갈아 끼우기도 접힘 집합을 바꾸므로(위에서 접어 둔 것을 풀었다)
     // `rebuildVisible` 이 파생 수치를 버린다 — 그러면 가로 상한이 0 이 되어 **막대가 사라지고**
     // (본문 높이가 한 행 바뀐다) **보던 열이 왼쪽 끝으로 튄다**.
     //
@@ -6406,9 +6449,10 @@ fn promoteFoldRangesToSyntax(self: *AppSession, term: *Term) void {
         // **여기서도 상한은 다시 센다.** 표가 없어도 문서는 그대로라 가로 축은 그대로 있다 —
         // 안 세면 그 프레임부터 막대가 사라진다.
         finishFoldChange(self, term, keep);
-        return;
+        return true;
     };
     finishFoldChange(self, term, keep);
+    return true;
 }
 
 /// 접을 수 있는 것을 **전부 접는다**(§4 — *"큰 파일에서 하나씩 접는 것은 쓸모가 없다"*).
@@ -8929,6 +8973,7 @@ fn refreshAfterEdit(self: *AppSession, term: *Term, edit: ?syntax_color.EditSpan
     // 이미 갱신해 두었다(줄 배열 `editor_lines`와는 다른 축이다).
     // semantic tokens 2층도 같은 자리에서 민다(§8.2i 「편집 중」) — 범위를 모르면 버린다.
     if (edit) |e| semantic_client.onEdit(self, term, e.start, e.old_end, e.new_end) else semantic_client.onEdit(self, term, null, 0, 0);
+    fold_lsp_client.onEdit(self, term); // 3층은 조용 시계만(§8.2j 「편집 중」) — 범위는 아래 ⑵ 의 `dropFoldState` 가 놓는다
     if (edit) |e|
         syntax_color.onEditSpan(&term.rt.editor_syntax, doc.file.content, e, doc.file.lines)
     else
@@ -9079,6 +9124,7 @@ fn dropFoldState(self: *AppSession, term: *Term) void {
     // 열기가 전부 여기를 지난다) 표시를 여기 두면 갈릴 수 없다. 안 되돌리면 다음 문서가 **들여쓰기
     // 범위를 든 채 승격을 건너뛴다** — 구문 접힘이 조용히 사라진다.
     term.rt.editor_syntax_folds_applied = false;
+    term.rt.editor_fold_source = .indent; // 3층 표시도 함께(§8.2j 「층 순서」) — 안 되돌리면 다음 문서의 승격이 영영 건너뛴다
     // 보이는 줄 배열도 접힘에서 나온 것이라 함께 놓는다 — 남기면 접힌 화면이 그대로 보인다.
     if (term.rt.editor_visible_lines.len > 0) self.allocator.free(term.rt.editor_visible_lines);
     if (term.rt.editor_visible_numbers.len > 0) self.allocator.free(term.rt.editor_visible_numbers);
@@ -9262,6 +9308,7 @@ pub fn releaseEditorTerm(self: *AppSession, term: *Term) void {
     // 여기서 안 놓으면 `std.testing.allocator`가 못 보는 누수가 된다(`SYN10`이 그 자리를 잰다).
     term.rt.editor_syntax.deinit(self.allocator);
     term.rt.editor_semantic.deinit(self.allocator);
+    term.rt.editor_fold_lsp = .{}; // 3층 대기 상태도 문서와 함께(`editor_lsp_version = 0` 과 같은 자리) — 두 호출자 모두 곧 Term 을 부수므로 관측되지 않는다(적대적 C8: 등가), 규율로 둔다
     if (term.rt.editor_lines.len > 0) self.allocator.free(term.rt.editor_lines);
     term.rt.editor_lines = &.{};
     dropLineCols(self, term); // 체크포인트도 함께 놓는다
@@ -14029,6 +14076,269 @@ test "SMT2 semantic tokens — range 없는 서버는 full 로 묻고(스크롤�
         const c = syntaxColors(s, term);
         try testing.expectEqual(maru.chrome.tokens.ColorRole.syntax_type_name, roleAt(c, 0, 14, 18).?);
     }
+}
+
+/// FLD 판정자의 C 표본 — **들여쓰기가 없어** 1층(들여쓰기)은 범위 0(표식도 안 잡는다), 2층(tree-sitter)은 `}` 까지 숨기는 블록 셋(0..5·1..3·7..9),
+/// 3층(가짜 서버)은 `}` 앞 줄까지(0..4·1..2·7..8) — 층마다 `last_hidden` 이 달라 어느 층이 섰는지 값으로 가른다.
+const fld_src =
+    \\int add(int a, int b) {
+    \\if (a > b) {
+    \\return a + b;
+    \\}
+    \\return b;
+    \\}
+    \\
+    \\int main(void) {
+    \\return add(1, 2);
+    \\}
+    \\
+;
+
+fn fldApplied(f: *SmtFixture, want: u64) bool {
+    const Ctx = struct { t: *Term, n: u64 };
+    return pumpLspUntil(&f.fx, 3000, Ctx{ .t = f.term, .n = want }, struct {
+        fn g(c: Ctx) bool {
+            return c.t.rt.editor_fold_lsp.applied >= c.n;
+        }
+    }.g);
+}
+
+test "FLD1 foldingRange 3층 — 색 만들기 자리가 문서 전체를 묻고(한 번에 하나), 응답이 구문 층 위에 서버 범위를 갈아 끼운다(표식 배열도 잡힌다); 승격은 3층을 덮지 않는다; 편집은 놓고 120 ms 조용한 뒤 다시 묻고 낡은 version 은 버린다; 전체 접기가 서버 범위로 접는다 (제품 경계, §8.2j)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var f = (try SmtFixture.open(allocator, "f.c", fld_src)) orelse return error.SkipZigTest;
+    defer f.close(allocator);
+    const s = f.fx.session;
+    const term = f.term;
+    try testing.expect(f.ready());
+    // ⑴ 들여쓰기 층: 범위 0, 표식 배열도 없다(`ensureFoldRanges` 는 0 이면 안 잡는다 — 계획 공격이 연 구멍).
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_fold_ranges.len);
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_fold_marks.len);
+    try testing.expectEqual(FoldSource.indent, term.rt.editor_fold_source);
+    // ⑵ 첫 색 만들기 — 파싱이 끝나 구문 층이 서고(`}` 까지), 3층 요청이 나간다(한 번에 하나).
+    term.rt.editor_first_line = 0;
+    _ = syntaxColors(s, term);
+    try testing.expectEqual(FoldSource.syntax, term.rt.editor_fold_source);
+    try testing.expectEqual(@as(usize, 3), term.rt.editor_fold_ranges.len);
+    try testing.expectEqual(@as(u32, 5), term.rt.editor_fold_ranges[0].last_hidden);
+    try testing.expectEqual(@as(usize, 11), term.rt.editor_fold_marks.len); // 승격도 같은 자리를 지나 표식을 잡는다
+    try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_folding);
+    try testing.expect(term.rt.editor_fold_lsp.waiting);
+    _ = syntaxColors(s, term);
+    try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_folding); // 대기 중엔 한 번만
+    // ⑶ 응답 — 서버 범위(`}` 앞 줄까지)가 구문 층을 덮는다. 더러운 항목(중복·문서 밖·한 줄)은 걸러졌다.
+    try testing.expect(fldApplied(&f, 1));
+    try testing.expectEqual(FoldSource.lsp, term.rt.editor_fold_source);
+    try testing.expectEqual(term.rt.editor_lsp_version, term.rt.editor_fold_lsp.version);
+    try testing.expectEqual(@as(usize, 3), term.rt.editor_fold_ranges.len);
+    try testing.expectEqual(@as(u32, 0), term.rt.editor_fold_ranges[0].head);
+    try testing.expectEqual(@as(u32, 4), term.rt.editor_fold_ranges[0].last_hidden);
+    try testing.expectEqual(@as(u16, 1), term.rt.editor_fold_ranges[0].level);
+    try testing.expectEqual(@as(u32, 1), term.rt.editor_fold_ranges[1].head);
+    try testing.expectEqual(@as(u32, 2), term.rt.editor_fold_ranges[1].last_hidden);
+    try testing.expectEqual(@as(u16, 2), term.rt.editor_fold_ranges[1].level);
+    try testing.expectEqual(@as(u32, 7), term.rt.editor_fold_ranges[2].head);
+    try testing.expectEqual(@as(u32, 8), term.rt.editor_fold_ranges[2].last_hidden);
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_folded_len); // 갈아 끼우면 접힌 것이 없다
+    try testing.expectEqual(@as(usize, 11), term.rt.editor_fold_marks_len);
+    try testing.expectEqual(chrome_editor.gutter.Fold.open, term.rt.editor_fold_marks[0]); // 화살표가 선다
+    try testing.expectEqual(chrome_editor.gutter.Fold.none, term.rt.editor_fold_marks[4]);
+    // ⑷ 승격은 3층을 덮지 않는다 — 큰 문서에서 파싱이 응답보다 늦게 끝나는 순서를 표시로 재현한다.
+    term.rt.editor_syntax_folds_applied = false;
+    promoteFoldRangesToSyntax(s, term);
+    try testing.expect(term.rt.editor_syntax_folds_applied);
+    try testing.expectEqual(FoldSource.lsp, term.rt.editor_fold_source);
+    try testing.expectEqual(@as(u32, 4), term.rt.editor_fold_ranges[0].last_hidden);
+    _ = syntaxColors(s, term);
+    try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_folding); // version 같음 — 다시 안 묻는다
+    // ⑸ 전체 접기 — 서버 범위로 접힌다: 0..4 와 7..8 이 숨어 보이는 줄은 11 - 4 - 1 = 6 (구문 층이면 11 - 5 - 2 = 4).
+    try testing.expect(foldAll(s));
+    try testing.expectEqual(@as(usize, 6), term.rt.editor_visible_numbers.len);
+    try testing.expectEqual(@as(?u32, 6), term.rt.editor_visible_numbers[1]); // 줄 6(1-based) = `}` 가 보인다
+    // ⑹ 편집 — 접힘을 통째로 놓고(들여쓰기 → 승격) 120 ms 안엔 안 묻는다; 조용해지면 묻는다. 빈 줄(6)에 주석을 넣는다 — 구조는 그대로.
+    const blank: u32 = @intCast((std.mem.indexOf(u8, term.rt.editor_doc.?.file.content, "\n\n") orelse return error.NoBlankLine) + 1);
+    term.rt.editor_selection = .{ .anchor_start = blank, .anchor_end = blank, .focus = blank };
+    try testing.expect(insertText(s, term, "//"));
+    try testing.expectEqual(FoldSource.indent, term.rt.editor_fold_source);
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_folded_len);
+    _ = syntaxColors(s, term);
+    try testing.expectEqual(FoldSource.syntax, term.rt.editor_fold_source);
+    try testing.expectEqual(@as(u32, 5), term.rt.editor_fold_ranges[0].last_hidden);
+    try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_folding);
+    {
+        const t0 = s.awakeMs();
+        while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
+    }
+    _ = syntaxColors(s, term);
+    try testing.expectEqual(@as(u64, 2), s.editor_lsp.sent_folding);
+    // ⑺ 대기 중에 또 편집 — 응답의 version 이 낡아 버리고(2층 그대로), 조용해진 뒤 다시 묻는다.
+    try testing.expect(insertText(s, term, "/"));
+    try testing.expect(pumpLspUntil(&f.fx, 3000, term, struct {
+        fn g(t: *Term) bool {
+            return t.rt.editor_fold_lsp.dropped_stale >= 1;
+        }
+    }.g));
+    try testing.expectEqual(@as(u64, 1), term.rt.editor_fold_lsp.applied);
+    _ = syntaxColors(s, term);
+    try testing.expectEqual(FoldSource.syntax, term.rt.editor_fold_source);
+    {
+        const t0 = s.awakeMs();
+        while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
+    }
+    _ = syntaxColors(s, term);
+    try testing.expectEqual(@as(u64, 3), s.editor_lsp.sent_folding);
+    try testing.expect(fldApplied(&f, 2));
+    try testing.expectEqual(FoldSource.lsp, term.rt.editor_fold_source);
+    try testing.expectEqual(@as(u32, 4), term.rt.editor_fold_ranges[0].last_hidden);
+}
+
+test "FLD2 foldingRange 3층 — 빈 응답은 아래 층을 그대로 두고 조용 시계를 늘려 되묻는다; provider 없으면 아무것도 안 묻는다; 오류 응답은 버리고 조용 시계를 두 배로 늘려 다시 묻는다 (제품 경계, §8.2j)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    // ⑴ 빈 배열 — 「아직 아니다」: 구문 층이 남고, 조용 시계를 두 배(240 ms)로 늘려 되묻는다(rust-analyzer 가 로드 중 `[]` 을 낸다).
+    {
+        var f = (try SmtFixture.open(allocator, "e.c", "// FOLDEMPTY\n" ++ fld_src)) orelse return error.SkipZigTest;
+        defer f.close(allocator);
+        const s = f.fx.session;
+        const term = f.term;
+        try testing.expect(f.ready());
+        term.rt.editor_first_line = 0;
+        _ = syntaxColors(s, term);
+        try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_folding);
+        try testing.expect(pumpLspUntil(&f.fx, 3000, term, struct {
+            fn g(t: *Term) bool {
+                return t.rt.editor_fold_lsp.applied_empty >= 1;
+            }
+        }.g));
+        try testing.expectEqual(FoldSource.syntax, term.rt.editor_fold_source);
+        try testing.expectEqual(@as(u32, 6), term.rt.editor_fold_ranges[0].last_hidden); // 주석 한 줄이 앞에 있어 한 줄씩 밀렸다
+        try testing.expectEqual(@as(u64, 0), term.rt.editor_fold_lsp.version); // 물었다고 적지 않는다
+        try testing.expectEqual(@as(u6, 1), term.rt.editor_fold_lsp.error_streak);
+        _ = syntaxColors(s, term);
+        try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_folding); // 곧바로는 안 묻는다
+        {
+            const t0 = s.awakeMs();
+            while (s.awakeMs() - t0 < 280) _ = usleep(10_000);
+        }
+        _ = syntaxColors(s, term);
+        try testing.expectEqual(@as(u64, 2), s.editor_lsp.sent_folding);
+        try testing.expect(pumpLspUntil(&f.fx, 3000, term, struct {
+            fn g(t: *Term) bool {
+                return t.rt.editor_fold_lsp.applied_empty >= 2;
+            }
+        }.g));
+        try testing.expectEqual(@as(u6, 2), term.rt.editor_fold_lsp.error_streak);
+        try testing.expectEqual(FoldSource.syntax, term.rt.editor_fold_source);
+    }
+    // ⑵ provider 없음 — 아무것도 안 묻고 구문 층만.
+    _ = setenv("MARU_FAKE_LSP_NOFOLDCAP", "1", 1);
+    defer _ = unsetenv("MARU_FAKE_LSP_NOFOLDCAP");
+    {
+        var f = (try SmtFixture.open(allocator, "n.c", fld_src)) orelse return error.SkipZigTest;
+        defer f.close(allocator);
+        const s = f.fx.session;
+        const term = f.term;
+        try testing.expect(f.ready());
+        term.rt.editor_first_line = 0;
+        _ = syntaxColors(s, term);
+        try testing.expectEqual(@as(u64, 0), s.editor_lsp.sent_folding);
+        try testing.expect(!term.rt.editor_fold_lsp.waiting);
+        try testing.expectEqual(FoldSource.syntax, term.rt.editor_fold_source);
+        try testing.expectEqual(@as(u32, 5), term.rt.editor_fold_ranges[0].last_hidden);
+    }
+    _ = unsetenv("MARU_FAKE_LSP_NOFOLDCAP");
+    // ⑶ 오류 응답(`content modified`) — 버리고, 첫 오류 뒤엔 240 ms(두 배) 조용해야 다시 묻는다; 표식을 지우면 다음 응답이 선다.
+    {
+        var f = (try SmtFixture.open(allocator, "r.c", "// FOLDERR\n" ++ fld_src)) orelse return error.SkipZigTest;
+        defer f.close(allocator);
+        const s = f.fx.session;
+        const term = f.term;
+        try testing.expect(f.ready());
+        term.rt.editor_first_line = 0;
+        _ = syntaxColors(s, term);
+        try testing.expect(pumpLspUntil(&f.fx, 3000, term, struct {
+            fn g(t: *Term) bool {
+                return t.rt.editor_fold_lsp.dropped_error >= 1;
+            }
+        }.g));
+        try testing.expect(!term.rt.editor_fold_lsp.waiting and term.rt.editor_fold_lsp.dirty);
+        try testing.expectEqual(@as(u6, 1), term.rt.editor_fold_lsp.error_streak);
+        try testing.expectEqual(FoldSource.syntax, term.rt.editor_fold_source);
+        {
+            const t0 = s.awakeMs();
+            while (s.awakeMs() - t0 < 160) _ = usleep(10_000);
+        }
+        _ = syntaxColors(s, term); // 120 ms 는 지났지만 두 배(240 ms) 는 안 지났다 — 안 묻는다
+        try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_folding);
+        {
+            const t0 = s.awakeMs();
+            while (s.awakeMs() - t0 < 120) _ = usleep(10_000);
+        }
+        _ = syntaxColors(s, term);
+        try testing.expectEqual(@as(u64, 2), s.editor_lsp.sent_folding);
+        try testing.expect(pumpLspUntil(&f.fx, 3000, term, struct {
+            fn g(t: *Term) bool {
+                return t.rt.editor_fold_lsp.dropped_error >= 2;
+            }
+        }.g));
+        try testing.expectEqual(@as(u6, 2), term.rt.editor_fold_lsp.error_streak);
+        try removeMarkerHover(s, term, "// FOLDERR\n"); // 편집 — 조용 시계가 되감기고(streak 은 그대로 480 ms), 응답이 오면 0 으로
+        {
+            const t0 = s.awakeMs();
+            while (s.awakeMs() - t0 < 520) _ = usleep(10_000);
+        }
+        _ = syntaxColors(s, term);
+        try testing.expectEqual(@as(u64, 3), s.editor_lsp.sent_folding);
+        try testing.expect(fldApplied(&f, 1));
+        try testing.expectEqual(@as(u6, 0), term.rt.editor_fold_lsp.error_streak);
+        try testing.expectEqual(FoldSource.lsp, term.rt.editor_fold_source);
+        try testing.expectEqual(@as(u32, 4), term.rt.editor_fold_ranges[0].last_hidden);
+    }
+}
+
+test "FLD3 foldingRange 3층 — 갈아 끼우기가 어느 할당에서 실패해도 적용으로 치지 않는다(source·applied 그대로, dirty 로 다시), 범위는 새지 않는다 (제품 경계, §8.2j; 적대적 B14)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "fld3.c", fld_src);
+    const s = fx.session;
+    // 서버 없이 상태만 세운다 — 응답 경로는 `waiting`·seq·version 만 본다.
+    term.rt.editor_lsp_version = 1;
+    var p = try std.json.parseFromSlice(std.json.Value, allocator, "[{\"startLine\":0,\"endLine\":4},{\"startLine\":7,\"endLine\":8}]", .{});
+    defer p.deinit();
+    // ⑴ 먼저 실패 없이 돌려 할당 수를 센다.
+    term.rt.editor_fold_lsp = .{ .waiting = true, .waiting_seq = 5, .waiting_version = 1 };
+    var counting = std.testing.FailingAllocator.init(allocator, .{});
+    s.allocator = counting.allocator();
+    fold_lsp_client.onResponse(s, term, 5, p.value, false);
+    s.allocator = allocator;
+    try testing.expectEqual(@as(u64, 1), term.rt.editor_fold_lsp.applied);
+    try testing.expectEqual(FoldSource.lsp, term.rt.editor_fold_source);
+    const n_allocs = counting.alloc_index;
+    try testing.expect(n_allocs >= 3); // decode(목록 둘·소유 슬라이스) + install(folded·folded_prev·표식)
+    // ⑵ 어느 할당에서 실패해도 — 갈아 끼우기 **전**의 실패는 적용으로 안 치고(이전 범위가 그대로, dirty 로 다시), 갈아 끼운 **뒤**의
+    //    실패(마무리 — 가로 상한 등)는 적용이다. 어느 쪽이든 놓친 메모리가 없다(testing.allocator 가 잰다).
+    var k: usize = 0;
+    var refused: usize = 0;
+    while (k < n_allocs) : (k += 1) {
+        term.rt.editor_fold_source = .syntax;
+        term.rt.editor_fold_lsp = .{ .waiting = true, .waiting_seq = 6, .waiting_version = 1 };
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = k });
+        s.allocator = failing.allocator();
+        fold_lsp_client.onResponse(s, term, 6, p.value, false);
+        s.allocator = allocator;
+        try testing.expect(!term.rt.editor_fold_lsp.waiting);
+        try testing.expectEqual(@as(usize, 2), term.rt.editor_fold_ranges.len);
+        if (term.rt.editor_fold_lsp.applied == 0) {
+            refused += 1;
+            try testing.expectEqual(FoldSource.syntax, term.rt.editor_fold_source);
+            try testing.expect(term.rt.editor_fold_lsp.dirty);
+        } else {
+            try testing.expectEqual(FoldSource.lsp, term.rt.editor_fold_source); // 갈아 끼운 뒤의 실패 — 적용이다
+        }
+    }
+    try testing.expect(refused >= 3); // decode 의 할당 + install 의 folded·folded_prev 는 전부 갈아 끼우기 전이다
 }
 
 test "CMP6 자동완성 ①-d — 문서 패널: ⌃Space 가 목록이 열려 있으면 패널을 토글하고, 강조를 따라가며(미해결은 250 ms 뒤 `…`, 풀리면 detail+빈 줄+문서), 닫혀도 펼침은 남고, 패널 안 휠은 굴리고 밖은 흘린다 (제품 경계, §8.2g-d)" {

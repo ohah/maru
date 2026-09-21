@@ -7886,7 +7886,82 @@ admission 에만 달려 있어 어느 자리에서 불렀든 뜻이 같다(이 �
 
 **아직 안 고친 것.** `PartialFrame` 이 났을 때 **연결을 닫는** 반응은 그대로다. 이 수정으로 그
 오류 자체가 거의 안 날 것이므로, 반응을 바꿀지는 다음 재현이 판단 근거를 줄 때 정한다 —
-빈도를 모르는 채 바꾸면 검증할 수 없다(§12.4 의 결론과 같다).
+빈도를 모르는 채 바꾸면 검증할 수 없다(§12.4 의 결론과 같다). 그 반응을 «미룸» 으로 바꾼다면
+어떤 기계로 도는지, 그리고 왜 갈래마다 대안이 다른지는 **§12.6** 에 적어 뒀다.
+
+### 12.6 아직 안 고친 것 — `PartialFrame` 의 «반응», 그리고 미룬다면 어떻게 (2026-09-21)
+
+§12.5 가 `PartialFrame` 을 **만들던 쪽**을 고쳤다. 남은 것은 **났을 때의 반응**이다. 지금은 이렇다:
+
+```zig
+// connection_turn.zig — invalidateSubscriptionOutput
+const outcome = slot.beginPressureInvalidation(tracker) catch |err|
+    return self.beginCloseAtErr(site, @errorName(err), .socket_error);
+```
+
+「지금은 못 버린다」에 **연결 통째 종료**로 답한다. 그 소켓의 화면 전부(최대 256)가 detach 되고
+재접속·전체 재동기화를 한다.
+
+**왜 이상한가.** 같은 기계의 다른 실패는 전부 우아하다 — 요청자가 예산을 못 얻으면 그 프레임만
+건너뛰고(`projection_global_unavailable`), owner 가 희생자를 못 찾으면 그 틱만 건너뛴다
+(`return false`). **이 한 갈래만 치명적**이고, 사유가 `.socket_error` 인데 **소켓은 멀쩡하다.**
+
+#### 미룬다면 어떻게 — 기계는 이미 있다
+
+「미룬다」가 막연한 말이 되지 않으려면 **누가 다시 부르는가**가 있어야 한다. 그 기계가 이미 돈다:
+
+```zig
+// connection_slot.zig
+pub const resync_retry_backoff_ns: u64 = std.time.ns_per_s;   // 1 초
+
+pub fn deferGlobalPressure(self: *Slot, key: ScreenTrackerKey, now_ns: u64) error{Stale}!void {
+    (try self.trackerEntry(key)).tracker.?.global_pressure_retry_after_ns =
+        now_ns +| resync_retry_backoff_ns;
+}
+```
+
+```zig
+// connection_turn.zig — tick 의 생산자 sweep
+if (!(slot.globalPressureReady(tracker, now_ns) catch
+    return self.beginClose(.socket_error))) return;     // ← 백오프 전이면 이 트래커를 건너뛴다
+```
+
+즉 **트래커마다 「이 시각 뒤에 다시」를 들고 있고, 매 틱의 sweep 이 그걸 먼저 물어본다.** 새 스레드도,
+타이머도, 큐도 필요 없다 — 미룸은 **필드 하나 + sweep 의 기존 가드**다. 같은 `switch` 의 옆 팔
+(`.deferred_global_pressure`)이 이미 이렇게 한다. `PartialFrame` 만 그 개념을 안 쓴다.
+
+**영원히 매달리지 않는다.** 정말 안 빠지는 연결은 기존 데드라인이 닫는다 —
+`partial_deadline_ns`(10 초, 진전 없음) 와 `partial_absolute_deadline_ns`(30 초, 절대). 그래서
+「몇 번까지 재시도하나」라는 **새 숫자를 만들 필요가 없다.**
+
+#### 갈래마다 대안이 다르다 — 그래서 일괄 적용을 안 한다
+
+| 자리 | 닫는 대신 | 근거 |
+| --- | --- | --- |
+| `invalidate_pressure_victim` | owner 에 `false` | owner 가 이미 `false` 를 처리한다 |
+| `invalidate_projection_budget` | `deferGlobalPressure` | 원인이 **진짜로** 전역 압력이다 |
+| `invalidate_turn_rejected` | 다음 틱 재시도(백오프 없음) | 원인이 압력이 아니다 — 그 이름을 빌리면 로그가 거짓말한다 |
+| `invalidate_prepared_attach` | **닫는 게 맞을 수 있다** | 무효화가 **곧 복구 수단**이다. 17 MiB 차선은 `.invalidated` 에서만 열리므로, 무효화에 실패했는데 닫지도 않으면 그 세션은 8 MiB 차선에 **영영 갇힌다**(2026-09-12 실측 — 그때는 조용히 갇히는 대신 끊겨서 알아챘다) |
+
+마지막 줄 때문에 **「닫지 말자」를 넷에 일괄 적용하면 그중 하나는 더 나빠진다** — 지금은 끊기기라도
+하지만, 그때는 조용히 멈춘다.
+
+#### 왜 지금 안 하나
+
+§12.5 가 생산자를 막았으므로 이 오류 자체가 **거의 안 난다.** 그러면 지금 반응을 바꾸는 것은
+「거의 안 도는 경로의 반응」을 바꾸는 일이고, **조건을 만들 수 없어 판정자가 「정말 안 닫는다」를
+증명하지 못한다.** 검증 없는 배선 변경이 된다.
+
+#### 언제 하면 되나 — 로그가 말해 준다
+
+`#3775`·`#3803` 이 붙인 이름 덕에, 이제 발생하면 **어느 갈래인지까지** 읽힌다:
+
+```sh
+grep -o 'site=invalidate_[a-z_]*' /tmp/maru-$UID/session-host/host-*.log | sort | uniq -c
+```
+
+여기 뭔가 뜨면 그 갈래에 위 표대로 넣는다. 그때는 **빈도와 갈래를 알고** 고치는 것이라 재시도
+동작을 근거 있게 정할 수 있다. 아무것도 안 뜨면 이 절은 그대로 둔다 — 안 나는 것을 고치지 않는다.
 
 ### P0 — 문서 결정
 

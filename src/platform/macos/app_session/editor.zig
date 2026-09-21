@@ -22623,7 +22623,7 @@ test "SAVE3 읽기 전용은 저장을 거절하고 파일을 건드리지 않�
     try testing.expect(insertText(fx.session, term, "Z"));
     term.rt.editor_doc.?.file.read_only = true;
 
-    try testing.expectError(error.AskName, saveDocument(fx.session, term));
+    try testing.expectError(error.ReadOnly, saveDocument(fx.session, term));
     const on_disk = try fx.dir.dir.readFileAlloc(io, "save4.txt", allocator, .limited(4096));
     defer allocator.free(on_disk);
     try testing.expectEqualStrings("original\n", on_disk); // 안 바뀌었다
@@ -22882,7 +22882,7 @@ test "EDIT3 읽기 전용 문서와 비교 뷰는 타이핑을 거절한다 (§3
     try testing.expect(!insertText(fx.session, term, "x"));
     try testing.expect(!deleteText(fx.session, term, true));
     try testing.expect(!addNextOccurrence(fx.session, term));
-    try testing.expectError(error.AskName, saveDocument(fx.session, term));
+    try testing.expectError(error.NotAnEditor, saveDocument(fx.session, term));
     // **되돌리기도 같은 축이다.** 비교 뷰에서 undo가 돌면 화면은 오른쪽을 그리는데 왼쪽 문서가
     // 바뀐다 — 다섯 경로 중 이것만 판정자가 없어 뮤턴트가 살아남았다(적대적 검증 2026-08-26).
     try testing.expect(!undoEdit(fx.session, term));
@@ -27112,14 +27112,14 @@ test "DIRTY4 저장이 실패하면 dirty가 남는다 — 실패를 성공으�
         if (std.c.chmod(root_z, 0o500) != 0) return error.SkipZigTest; // 권한을 못 바꾸면 이 축을 못 잰다
         defer _ = std.c.chmod(root_z, 0o700); // 픽스처 정리가 지울 수 있게 되돌린다
 
-        try testing.expectError(error.AskName, saveDocument(fx.session, term)); // 실패를 실패로 보고한다
+        try testing.expectError(error.WriteFailed, saveDocument(fx.session, term)); // 실패를 실패로 보고한다
         try testing.expect(isDirty(term)); // **dirty가 남는다**
         try testing.expectEqualStrings("hello!\n", term.rt.editor_doc.?.file.content);
     }
 
     // ⑵ **파일이 사라진 경우**도 같다 — 열기에서 실패하는 다른 갈래다.
     try fx.dir.dir.deleteFile(io, "dirty4.txt");
-    try testing.expectError(error.AskName, saveDocument(fx.session, term));
+    try testing.expectError(error.NotFound, saveDocument(fx.session, term));
     try testing.expect(isDirty(term));
     try testing.expectEqualStrings("hello!\n", term.rt.editor_doc.?.file.content);
 }

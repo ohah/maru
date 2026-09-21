@@ -1706,10 +1706,34 @@ pub fn build(b: *std.Build) void {
     // ⚠️ **그리고 실제로 돌았는가** — 전부 macOS 가 아니면 `SkipZigTest` 다.
     run_macos_editor_untitled_tests.addArg("--maru-expect-passed=12");
     run_macos_editor_untitled_tests.setCwd(b.path("."));
-    b.step(
+    const untitled_step = b.step(
         "test-editor-untitled",
-        "Run the untitled-document judges only (U1 filter)",
-    ).dependOn(&run_macos_editor_untitled_tests.step);
+        "Run the untitled-document judges only (U1 filter) and the L2 naming rules (UT)",
+    );
+    untitled_step.dependOn(&run_macos_editor_untitled_tests.step);
+
+    // **L2 규칙도 같은 이름으로 돈다.** 위 판정자는 배선을 재고 이쪽은 번호·이름 규칙을 잰다 —
+    // 둘이 다른 스텝이면 한쪽만 돌려 놓고 「쟀다」고 말하게 된다. 모듈이 달라 artifact 는 둘이다
+    // (Zig 는 별도 모듈의 test 를 안 모은다).
+    const untitled_rule_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/maru.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "shutdown_wire_contract", .module = shutdown_wire_contract_mod }},
+        }),
+        .filters = &.{ "UT1", "UT2", "UT3", "UT4" },
+    });
+    attachPngCodec(b, untitled_rule_tests.root_module); // maru 루트를 세우는 자리는 전부 이걸 부른다
+    untitled_rule_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
+    const run_untitled_rule_tests = b.addRunArtifact(untitled_rule_tests);
+    // 25 = UT1~UT4 넷 + 이 그래프의 이름 없는 test 블록들(필터와 무관하게 컴파일된다).
+    run_untitled_rule_tests.addArg("--maru-expect-tests=25");
+    // ⚠️ **필터가 0 개를 골랐어도 「돌았다」로 읽히지 않게** 통과 수까지 못박는다(순수라 SKIP 이 없다).
+    run_untitled_rule_tests.addArg("--maru-expect-passed=25");
+    run_untitled_rule_tests.setCwd(b.path("."));
+    untitled_step.dependOn(&run_untitled_rule_tests.step);
 
     // 파일 탐색기 제품-path 성능 gate는 app_host_abi 모듈의 실제 AppSession glue를 쓰되
     // 해당 테스트 하나만 컴파일·실행한다. 전체 ABI suite에 결합하면 무관한 socket/WebKit

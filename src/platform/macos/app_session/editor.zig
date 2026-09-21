@@ -7133,6 +7133,11 @@ pub fn isDirty(term: *const Term) bool {
 ///
 /// **뭉개지 않는다.** 예전에는 전부 「저장하지 못했습니다」 하나였고, 그래서 사용자는 **무엇을 하면
 /// 되는지** 알 수 없었다(다시 눌러 볼지, 파일을 닫을지, 권한을 볼지).
+///
+/// ⚠️ **브리지 표면에 «같은 모양의 표가 하나 더» 있다**(`AppSession.noticeFilePanelWriteFailure`) —
+/// **일부러 둘이다.** 그쪽은 「다시 불러오기」가 실제로 되므로 그 문장을 쓸 수 있고, 이쪽은 그 길이
+/// 없어 같은 문장이 **할 수 없는 일을 지시**한다(적대적 4회차). 중복으로 보고 합치면 한쪽이 거짓이 된다 —
+/// 합칠 수 있는 날은 네이티브에 다시 불러오기가 생기는 날이고, 그것은 C1 의 범위다.
 pub fn saveFailureNoticeKey(e: AppSession.FilePanelWriteError) maru.i18n.Key {
     return switch (e) {
         // 파일이 그 사이 바뀌었다 — 사용자가 고를 일이 있다(C1 이 그 선택을 연다).

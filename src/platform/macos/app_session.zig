@@ -66056,6 +66056,40 @@ test "N1: 컨트롤 플레인이 편집기를 editor detail로 낸다" {
     try std.testing.expectEqual(@as(usize, 1), seen);
 }
 
+test "U1o 컨트롤 플레인에도 이름 없는 문서가 그대로 나간다 — 경로는 null, 제목은 untitled-N" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    // **계산해 두고 안 실으면 밖에서는 없는 것이다.** 라벨과 `editorMeta` 는 맞는데 스냅샷이 그 값을
+    // 안 실으면 컨트롤 플레인·에이전트·세션 목록에서 이 문서는 「제목 없는 편집기」로 보인다
+    // (적대적 7회차 — 같은 모양을 관측 필드에서 이미 겪었다).
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    const saved = app_runtime.untitled_docs;
+    defer app_runtime.untitled_docs = saved;
+    app_runtime.untitled_docs = .{};
+
+    session.dispatchAppAction(.new_editor_tab);
+
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    var surfaces: std.ArrayList(control_surface.SurfaceDto) = .empty;
+    var windows: std.ArrayList(maru.session.WindowMembershipSnapshot) = .empty;
+    try session.collectSessionInto(arena_state.allocator(), 0, .normal, &surfaces, &windows);
+
+    var seen: usize = 0;
+    for (surfaces.items) |dto| {
+        if (dto.detail != .editor) continue;
+        seen += 1;
+        try std.testing.expect(dto.detail.editor.path == null); // 파일이 없다는 사실이 그대로 나간다
+        try std.testing.expect(!dto.detail.editor.read_only); // 권한이라는 축 자체가 없다
+        try std.testing.expect(!dto.detail.editor.dirty); // 만들자마자는 clean
+        try std.testing.expectEqualStrings("untitled-1", dto.title); // **제목이 「편집기」가 아니다**
+    }
+    try std.testing.expectEqual(@as(usize, 1), seen);
+}
+
 test "WP-F1: browser도 페이지 검색으로 가고, 활성이 터미널이면 스크롤백 검색이다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;

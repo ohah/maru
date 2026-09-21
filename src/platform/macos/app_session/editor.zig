@@ -36084,3 +36084,50 @@ test "U2y 「이미 열림」은 이 창만 본다 — 다른 창은 검사 범�
     try testing.expect(w2.pending_confirm == .untitled_overwrite); // 확인은 뜬다(디스크에 있다)
     try testing.expect(t.rt.editor_path == null); // 아직 안 썼다
 }
+
+test "U2z 저장 상한은 두 경로가 같다 — 만들 수 있는데 다시 저장 못 하는 문서를 만들지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    const io = std.testing.io;
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    pinUntitledBase(fx.session, root);
+
+    // 상한을 한 바이트 넘기는 문서. **덮어쓰기 경로는 원본이 이 크기면 CAS 에서 거절하므로**, 새 파일
+    // 경로가 이것을 만들어 주면 그 뒤 모든 `⌘S` 가 조용히 실패한다(적대적 13회차).
+    const cap = maru.session.file_panel_bridge.max_file_bytes;
+    const big = try allocator.alloc(u8, cap + 1);
+    defer allocator.free(big);
+    @memset(big, 'a');
+
+    const t = try openUntitledInActivePane(fx.session);
+    try testing.expect(insertText(fx.session, t, big));
+    try testing.expectEqual(cap + 1, t.rt.editor_doc.?.file.content.len);
+
+    try testing.expect(!saveDocument(fx.session, t));
+    try fx.session.rename_input.query.appendSlice(allocator, "big.txt");
+    settings_ops.commitRename(fx.session);
+
+    // **파일이 안 생겼다** — 그리고 그 이유를 말한다.
+    try testing.expectError(error.FileNotFound, dir.dir.access(io, "big.txt", .{}));
+    try testing.expect(t.rt.editor_path == null);
+    try testing.expect(fx.session.chrome_host.notice.open);
+    try testing.expect(std.mem.startsWith(
+        u8,
+        &fx.session.notice_message_buf,
+        maru.i18n.t(.app_save_too_large),
+    ));
+
+    // **상한 이하는 된다** — 대조군이 없으면 「전부 거절」이 통과한다.
+    const ok_doc = try openUntitledInActivePane(fx.session);
+    try testing.expect(insertText(fx.session, ok_doc, "small\n"));
+    try testing.expect(!saveDocument(fx.session, ok_doc));
+    fx.session.rename_input.clear();
+    try fx.session.rename_input.query.appendSlice(allocator, "small.txt");
+    settings_ops.commitRename(fx.session);
+    try testing.expect(ok_doc.rt.editor_path != null);
+}

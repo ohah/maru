@@ -11541,6 +11541,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         case .selectAll: ("a", 0)
         case .caretToLineEnd: (String(UnicodeScalar(NSRightArrowFunctionKey)!), 124)
         case .save: ("s", 1)
+        // 확인 상자의 버튼 글자(`[Y]`/`[D]`) — `chrome.components.confirm` 이 라벨에 적어 두는 그 키다.
+        // ANSI keyCode: `y`=16, `d`=2. **Cmd 를 함께 보내는 이유**는 아래 주석과 같다: 합성 `NSEvent`
+        // 로는 평키가 `interpretKeyEvents` 를 지나지 않아 이 프로세스에서 재현되지 않는다.
+        case .answerOverwrite: ("y", 16)
+        case .answerReload: ("d", 2)
         }
         guard let event = NSEvent.keyEvent(
             with: .keyDown, location: .zero, modifierFlags: [.command],

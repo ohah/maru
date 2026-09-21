@@ -12719,6 +12719,54 @@ test "이름 없는 문서 저장: 디스크에 쓰는 자리 둘, 이름을 붙
     try std.testing.expectEqual(@as(usize, 1), countOf(save, "std.mem.indexOfScalar(u8, norm, 0)"));
 }
 
+test "저장 충돌: 묻는 자리 하나 · CAS 를 건너뛰는 길 하나 · 포커스 예외의 근거" {
+    // **계약**: docs/editor-surface.md §4(C1a).
+    //
+    // **허용된 자리를 센다.** 「CAS 를 늘 건너뛰지 않는다」류의 부재 판정은 그 갈래를 아예 안 만든
+    // 퇴행도 통과하고, 반대로 자리가 늘어나는 것(자동 재시도가 덮어쓰기를 쓰는 것)도 못 본다.
+    const allocator = std.testing.allocator;
+    const app_session = try readZigFileZ(allocator, "src/platform/macos/app_session.zig");
+    defer allocator.free(app_session);
+    const editor = try readZigFileZ(allocator, "src/platform/macos/app_session/editor.zig");
+    defer allocator.free(editor);
+    const conflict = try readZigFileZ(allocator, "src/platform/macos/app_session/editor_conflict.zig");
+    defer allocator.free(conflict);
+
+    const countOf3 = struct {
+        fn f(hay: []const u8, needle: []const u8) usize {
+            var n: usize = 0;
+            var i: usize = 0;
+            while (std.mem.indexOfPos(u8, hay, i, needle)) |at| : (i = at + needle.len) n += 1;
+            return n;
+        }
+    }.f;
+
+    // ⑴ **묻는 자리는 `⌘S` 하나다.** 닫기-저장은 자기 안내를 갖고 있고(중복 모달), 일괄 저장은
+    //    파일마다 물으면 스무 개가 뜬다(§3.9d 「소비자는 셋」).
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOf3(app_session, "error.ExternalConflict => editor_conflict_ops.ask(self, term),"),
+    );
+    // ⑵ **CAS 를 건너뛰는 길은 전용 함수 하나이고, 그것을 부르는 자리도 하나다**(사용자가 고른 그것).
+    try std.testing.expectEqual(@as(usize, 1), countOf3(editor, "pub fn overwriteDocument("));
+    try std.testing.expectEqual(@as(usize, 1), countOf3(editor, ".overwrite => null,"));
+    try std.testing.expectEqual(@as(usize, 1), countOf3(conflict, "editor_ops.overwriteDocument(self, term)"));
+    // 제품 코드 전체에서 그 함수를 부르는 자리가 **그 하나뿐**이어야 한다 — 자동 경로가 몰래 쓰면
+    // 사용자가 본 적 없는 외부 변경이 조용히 사라진다.
+    try std.testing.expectEqual(@as(usize, 0), countOf3(app_session, "overwriteDocument("));
+    // ⑶ **두 저장이 같은 꼬리를 쓴다** — 쓰는 자리가 갈리면 지문 갱신·clean 판정·LSP 통지 중 하나가 낡는다.
+    try std.testing.expectEqual(@as(usize, 1), countOf3(editor, "fn saveDocumentGuarded("));
+    try std.testing.expectEqual(@as(usize, 1), countOf3(editor, "try writeDocumentBytes(self, path, bytes, switch (guard)"));
+    // ⑷ **포커스를 취소에 두는 자리는 하나이고 그 근거가 적혀 있다.** 근거가 사라지면 다음 사람이
+    //    「일관성」을 이유로 기본값으로 되돌리고, 그러면 Enter 가 바깥 변경을 지운다.
+    try std.testing.expectEqual(@as(usize, 1), countOf3(conflict, ".focus = .cancel"));
+    try std.testing.expect(std.mem.indexOf(u8, conflict, "둘 다 무언가를 버리므로") != null);
+    try std.testing.expect(std.mem.indexOf(u8, app_session, "파괴적인 선택이 둘인 상자는 그 기본이 함정이다") != null);
+    // ⑸ **다시 읽기의 실패 표는 «따로»다** — 읽기 실패에 쓰기 문구를 쓰면 사용자가 할 일이 어긋난다.
+    try std.testing.expectEqual(@as(usize, 1), countOf3(conflict, "pub fn reloadFailureNoticeKey("));
+    try std.testing.expectEqual(@as(usize, 0), countOf3(conflict, "error.Unreadable => .editor_save_gone"));
+}
+
 test "저장 실패 문구 표는 «둘이고 그 이유가 적혀 있다»" {
     // **계약**: docs/native-editor-document-model.md §3.9d.
     //

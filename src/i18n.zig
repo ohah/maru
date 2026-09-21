@@ -110,6 +110,13 @@ const Table = struct {
     /// 표면이 계속 쓴다 — 그쪽은 고를 것이 없어 알리기만 한다(§3.9d 「브리지 문구를 재사용하지 않는다」).
     /// **무엇이 사라지는지** 양쪽 다 적는다: 안 적으면 사용자는 자기가 무엇을 잃는지 모르고 고른다.
     editor_save_conflict_choose: [:0]const u8,
+    /// 「다시 읽기」가 실패한 이유 셋 + 나머지(C1a). **저장 실패 표와 다른 표다** — 그쪽은 쓰기이고
+    /// 이쪽은 읽기라 사용자가 할 일이 다르다. 뭉개지 않는다: 지워진 것과 글자가 아닌 것과 너무 커진
+    /// 것은 서로 다른 상황이다.
+    editor_reload_gone: [:0]const u8,
+    editor_reload_not_text: [:0]const u8,
+    editor_reload_too_large: [:0]const u8,
+    editor_reload_failed: [:0]const u8,
     editor_untitled_overwrite: [:0]const u8,
     git_conflict_not_editable: [:0]const u8,
     git_conflict_open_failed: [:0]const u8,
@@ -1073,6 +1080,10 @@ const en: Table = .{
     .editor_save_gone = "The file is no longer there, so it cannot be saved.",
     .editor_save_external_conflict = "The file changed outside, so nothing was saved. Your edits are still here.",
     .editor_save_conflict_choose = "The file changed outside. Overwrite discards that change; Reload discards what you just typed (undo brings it back).",
+    .editor_reload_gone = "The file is no longer readable, so it was not reloaded. Your edits are still here.",
+    .editor_reload_not_text = "The file on disk is no longer UTF-8 text, so it was not reloaded. Your edits are still here.",
+    .editor_reload_too_large = "The file on disk grew past the size this editor can open, so it was not reloaded. Your edits are still here.",
+    .editor_reload_failed = "The file could not be reloaded. Your edits are still here.",
     .editor_untitled_overwrite = "That file already exists. Overwrite it?",
     .git_conflict_not_editable = "This file cannot be opened in the editor — resolve the conflict with another tool",
     .git_conflict_open_failed = "Could not open that file",
@@ -1794,6 +1805,10 @@ const ko: Table = .{
     .editor_save_gone = "그 파일이 더 이상 없어서 저장할 수 없습니다",
     .editor_save_external_conflict = "파일이 외부에서 바뀌어 아무것도 저장하지 않았습니다. 편집한 내용은 그대로 있습니다",
     .editor_save_conflict_choose = "파일이 외부에서 바뀌었습니다. 덮어쓰면 그 변경이, 다시 읽으면 방금 친 것이 사라집니다(되돌리기로 돌아옵니다)",
+    .editor_reload_gone = "그 파일을 더 이상 읽을 수 없어 다시 읽지 못했습니다. 편집한 내용은 그대로 있습니다",
+    .editor_reload_not_text = "디스크의 파일이 UTF-8 글자가 아니어서 다시 읽지 못했습니다. 편집한 내용은 그대로 있습니다",
+    .editor_reload_too_large = "디스크의 파일이 편집기가 열 수 있는 크기를 넘어 다시 읽지 못했습니다. 편집한 내용은 그대로 있습니다",
+    .editor_reload_failed = "파일을 다시 읽지 못했습니다. 편집한 내용은 그대로 있습니다",
     .editor_untitled_overwrite = "그 파일이 이미 있습니다. 덮어쓸까요?",
     .git_conflict_not_editable = "이 파일은 편집기에서 열 수 없습니다 — 다른 도구로 충돌을 해결하세요",
     .git_conflict_open_failed = "그 파일을 열지 못했습니다",

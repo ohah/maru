@@ -7224,7 +7224,23 @@ pub fn writeDocumentBytes(
 /// `AskName` 은 실패가 아니다 — **이름 없는 문서**라 물어야 한다는 뜻이고(§3.11) 상자는 이미 떴다.
 pub const SaveError = AppSession.FilePanelWriteError || error{ NotAnEditor, ReadOnly, AskName };
 
+/// 저장이 **「연 뒤 바뀌었나」를 묻는가**(C1a — editor-surface.md §4).
+///
+/// **`.overwrite` 는 사용자가 명시로 고른 자리에서만 열린다.** 자동 재시도·일괄 저장이 이 값을 쓰면
+/// 사용자가 본 적 없는 외부 변경을 조용히 지운다 — 그래서 열거로 두어 **부르는 자리가 세어진다**.
+pub const SaveGuard = enum { cas, overwrite };
+
 pub fn saveDocument(self: *AppSession, term: *Term) SaveError!void {
+    return saveDocumentGuarded(self, term, .cas);
+}
+
+/// 「덮어쓰기」를 고른 뒤의 저장 — **CAS 를 건너뛴다**(§4). 건너뛰지 않으면 그 사이 파일이 또 바뀐
+/// 경우 같은 물음이 되풀이돼 영영 저장하지 못한다. 부르는 자리는 **확인 수락 하나**다.
+pub fn overwriteDocument(self: *AppSession, term: *Term) SaveError!void {
+    return saveDocumentGuarded(self, term, .overwrite);
+}
+
+fn saveDocumentGuarded(self: *AppSession, term: *Term, guard: SaveGuard) SaveError!void {
     if (term.kind != .editor) return error.NotAnEditor;
     if (term.rt.editor_diff != null) return error.NotAnEditor; // 비교 뷰는 저장할 축이 없다(§7)
     const doc = term.rt.editor_doc orelse return error.NotAnEditor;
@@ -7252,7 +7268,12 @@ pub fn saveDocument(self: *AppSession, term: *Term) SaveError!void {
 
     // **상한은 §3.11 이 정한 그것이다** — 쓰기 앞에서 잰다(뒤에서 재면 이미 쓴 뒤다).
     if (bytes.len > maru.session.file_panel_bridge.max_file_bytes) return error.TooLarge;
-    try writeDocumentBytes(self, path, bytes, doc.disk_hash);
+    // **묻는 것과 안 묻는 것이 같은 꼬리를 쓴다** — 덮어쓰기에 자기 쓰기 경로를 주면 지문 갱신·clean
+    // 판정·LSP 통지·마커 경고가 두 벌이 되고, 한쪽이 낡는다.
+    try writeDocumentBytes(self, path, bytes, switch (guard) {
+        .cas => doc.disk_hash,
+        .overwrite => null,
+    });
 
     // **여기서 clean이 된다.** 쓰기가 성공한 그 순간의 내용이 곧 디스크 내용이다.
     //
@@ -36912,19 +36933,24 @@ test "C0a 저장 실패는 이유별로 말한다 — 하나로 뭉개면 죽는
             break :blk pane.active_term;
         };
         fx.session.dispatchAppAction(.editor_save);
-        try testing.expect(fx.session.chrome_host.notice.open);
-        // **네이티브 문구다** — 브리지 문장은 *"다시 불러온 뒤 저장하세요"* 인데 이 표면에는 다시
-        // 불러오는 길이 없다(적대적 4회차). 할 수 없는 일을 시키지 않는 것까지 잰다.
+        // **C1a 가 이 자리를 「알린다」에서 「묻는다」로 바꿨다**(editor-surface.md §4) — 알림으로
+        // 끝내면 사용자는 편집을 든 채 손으로 내용을 옮겨야 한다. 그래서 여기서 재는 것은 확인
+        // 상자이고, 그 상자의 문구·선택은 C1a 판정자들이 따로 문다.
+        try testing.expect(!fx.session.chrome_host.notice.open);
+        try testing.expect(fx.session.chrome_host.confirm.open);
+        // **네이티브 문구다** — 브리지 문장은 *"다시 불러온 뒤 저장하세요"* 인데, 이 표면의 「다시
+        // 읽기」는 C1a 가 **만든** 것이라 문장도 그 사실을 말한다(적대적 4회차의 그 지적이 닫힌 자리).
         try testing.expect(std.mem.startsWith(
             u8,
-            &fx.session.notice_message_buf,
-            maru.i18n.t(.editor_save_external_conflict),
+            &fx.session.confirm_message_buf,
+            maru.i18n.t(.editor_save_conflict_choose),
         ));
         try testing.expect(!std.mem.startsWith(
             u8,
-            &fx.session.notice_message_buf,
+            &fx.session.confirm_message_buf,
             maru.i18n.t(.app_save_external_conflict),
         ));
+        fx.session.dispatchChromeAction(.confirm_cancel);
     }
 
     // ⑷ **파일이 사라졌다** — 다시 눌러도 같은 자리라 다른 문장이어야 한다.
@@ -36999,6 +37025,290 @@ test "C0b 일괄 저장은 알림을 늘리지 않는다 — 실패한 문서는
 /// 필요하고, 이 판정자가 재려는 것은 「실패가 성공으로 세어지지 않는가」라 그 함수로 충분하다.
 fn editor_ops_saveForBulkTest(self: *AppSession, term: *Term) SaveError!void {
     return saveDocument(self, term);
+}
+
+/// C1a 판정자들이 공유하는 판: 파일 하나를 열고, 한 글자 치고, **밖에서 바꾼다**. 그 뒤 `⌘S` 를
+/// 제품 경로로 누르면 선택 상자가 떠 있다.
+const ConflictFixture = struct {
+    fx: UntitledFixture,
+    dir: testing.TmpDir,
+    root_buf: [std.fs.max_path_bytes]u8 = undefined,
+    path: []u8 = &.{},
+    term: *Term = undefined,
+
+    fn init(allocator: std.mem.Allocator, name: []const u8, on_disk: []const u8) !*ConflictFixture {
+        // **힙에 둔다** — `root` 슬라이스가 자기 버퍼를 가리키므로 값으로 돌려주면 그 포인터가 낡는다.
+        const self = try allocator.create(ConflictFixture);
+        errdefer allocator.destroy(self);
+        self.* = .{ .fx = try UntitledFixture.init(allocator, false, true), .dir = testing.tmpDir(.{}) };
+        const io = std.testing.io;
+        try self.dir.dir.writeFile(io, .{ .sub_path = name, .data = on_disk });
+        const root = self.root_buf[0..try self.dir.dir.realPath(io, &self.root_buf)];
+        pinUntitledBase(self.fx.session, root);
+        self.path = try std.fs.path.join(allocator, &.{ root, name });
+        self.term = try openPathInActivePane(self.fx.session, self.path);
+        self.term.rt.editor_selection = editor_selection.Selection.at(0);
+        return self;
+    }
+
+    fn deinit(self: *ConflictFixture, allocator: std.mem.Allocator) void {
+        allocator.free(self.path);
+        self.dir.cleanup();
+        self.fx.deinit(allocator);
+        allocator.destroy(self);
+    }
+
+    /// **제품 경로로 `⌘S`** — 디스패치를 지나야 「누가 상자를 여는가」가 검사된다.
+    fn pressSave(self: *ConflictFixture) void {
+        const pane = pane_ops.activePane(self.fx.session);
+        var i: usize = pane.terms.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (pane.terms.items[i] == self.term) {
+                pane.active_term = i;
+                break;
+            }
+        }
+        self.fx.session.dispatchAppAction(.editor_save);
+    }
+
+    /// **제품 키 경로로 답한다** — `handleKeyEvent` → `chrome_host.handleInput` → `confirm.handle`
+    /// (그것이 상자를 닫고) → `dispatchChromeAction`. 디스패치를 직접 부르면 **닫히는가**와 **어느
+    /// 키가 어느 갈래인가**가 판정 밖으로 빠진다(U2C 가 같은 이유로 키를 쓴다).
+    fn answer(self: *ConflictFixture, codepoint: u21) !void {
+        _ = try self.fx.session.handleKeyEvent(.{ .key = .{ .char = codepoint } });
+    }
+
+    fn pressEnter(self: *ConflictFixture) !void {
+        _ = try self.fx.session.handleKeyEvent(.{ .key = .enter });
+    }
+
+    fn writeOutside(self: *ConflictFixture, name: []const u8, data: []const u8) !void {
+        try self.dir.dir.writeFile(std.testing.io, .{ .sub_path = name, .data = data });
+    }
+
+    fn diskText(self: *ConflictFixture, allocator: std.mem.Allocator, name: []const u8) ![]u8 {
+        return self.dir.dir.readFileAlloc(std.testing.io, name, allocator, .limited(4096));
+    }
+};
+
+test "C1a-1 저장 충돌은 «알리지 않고 묻는다» — 두 행동과 계속 편집, 그리고 포커스는 취소에 선다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const c = try ConflictFixture.init(allocator, "ask.txt", "v0\n");
+    defer c.deinit(allocator);
+    const s = c.fx.session;
+
+    try testing.expect(insertText(s, c.term, "x"));
+    try c.writeOutside("ask.txt", "outside\n");
+    c.pressSave();
+
+    // ⑴ 알림이 아니라 확인이다.
+    try testing.expect(!s.chrome_host.notice.open);
+    try testing.expect(s.chrome_host.confirm.open);
+    // ⑵ **세 자리가 다 찼다** — 두 행동 + 계속 편집. 하나라도 비면 사용자는 고를 것을 못 본다.
+    try testing.expect(s.chrome_host.confirm.has_alternate);
+    try testing.expectEqualStrings(maru.i18n.t(.btn_overwrite), s.chrome_host.confirm.confirm_label);
+    try testing.expectEqualStrings(maru.i18n.t(.btn_reload), s.chrome_host.confirm.alternate_label);
+    try testing.expectEqualStrings(maru.i18n.t(.btn_keep_editing), s.chrome_host.confirm.cancel_label);
+    // ⑶ **포커스가 취소다.** 이 상자의 두 행동은 **둘 다 무언가를 버리므로**, 컴포넌트 기본값
+    //    (`primary`)이면 무심한 Enter 가 바깥 변경을 지운다. 여기가 그 예외의 유일한 근거다.
+    try testing.expectEqual(chrome.components.confirm.Focus.cancel, s.chrome_host.confirm.focused);
+    // ⑷ **문구가 양쪽을 다 말한다** — 무엇이 사라지는지 안 적으면 사용자는 모르고 고른다.
+    try testing.expect(std.mem.startsWith(u8, &s.confirm_message_buf, maru.i18n.t(.editor_save_conflict_choose)));
+
+    // ⑸ **그래서 Enter 는 아무것도 안 지운다.** 포커스가 취소에 있으므로 `confirm.handle` 이 Enter 를
+    //    취소로 읽는다 — 상자는 닫히고 디스크는 그대로다. 포커스가 `primary` 이던 변이는 여기서 죽는다.
+    try c.pressEnter();
+    try testing.expect(!s.chrome_host.confirm.open);
+    {
+        const on_disk = try c.diskText(allocator, "ask.txt");
+        defer allocator.free(on_disk);
+        try testing.expectEqualStrings("outside\n", on_disk);
+    }
+    try testing.expect(isDirty(c.term));
+}
+
+test "C1a-2 계속 편집은 «아무 일도 안 한다» — 디스크도 버퍼도 그대로다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const c = try ConflictFixture.init(allocator, "keep.txt", "v0\n");
+    defer c.deinit(allocator);
+    const s = c.fx.session;
+
+    try testing.expect(insertText(s, c.term, "x"));
+    const buffer_before = try allocator.dupe(u8, c.term.rt.editor_doc.?.file.content);
+    defer allocator.free(buffer_before);
+    try c.writeOutside("keep.txt", "outside\n");
+    c.pressSave();
+    _ = try s.handleKeyEvent(.{ .key = .escape });
+
+    try testing.expect(!s.chrome_host.confirm.open);
+    // **버퍼가 그대로다** — 「취소」가 편집을 버리면 그것은 취소가 아니다.
+    try testing.expectEqualStrings(buffer_before, c.term.rt.editor_doc.?.file.content);
+    try testing.expect(isDirty(c.term)); // 저장이 안 됐으니 여전히 dirty 다
+    {
+        const on_disk = try c.diskText(allocator, "keep.txt");
+        defer allocator.free(on_disk);
+        try testing.expectEqualStrings("outside\n", on_disk); // **디스크도 그대로다**
+    }
+    // 보류도 남지 않는다 — 남으면 다음 확인이 남의 답을 받는다.
+    try testing.expect(s.pending_confirm == .none);
+}
+
+test "C1a-3 덮어쓰기는 실제로 쓴다 — 두 번째 충돌에도, 그리고 «누른 시점»의 버퍼로" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const c = try ConflictFixture.init(allocator, "ow.txt", "v0\n");
+    defer c.deinit(allocator);
+    const s = c.fx.session;
+
+    try testing.expect(insertText(s, c.term, "a"));
+    try c.writeOutside("ow.txt", "outside1\n");
+    c.pressSave();
+    try testing.expect(s.chrome_host.confirm.open);
+
+    // **상자가 떠 있는 동안 더 친다.** 충돌 시점의 사본을 들고 있으면 이 글자가 조용히 사라진다.
+    try testing.expect(insertText(s, c.term, "b"));
+    // **그리고 파일이 또 바뀐다.** CAS 를 건너뛰지 않으면 여기서 같은 물음이 되풀이돼 영영 저장 못 한다.
+    try c.writeOutside("ow.txt", "outside2\n");
+    try c.answer('y');
+
+    try testing.expect(!s.chrome_host.confirm.open);
+    try testing.expect(!isDirty(c.term)); // 썼으니 clean
+    {
+        const on_disk = try c.diskText(allocator, "ow.txt");
+        defer allocator.free(on_disk);
+        // 「누른 시점의 버퍼」 = `ba` + 원문(커서가 앞이라 앞에 붙는다). 충돌 시점 사본이었다면 `b` 가 없다.
+        try testing.expectEqualStrings("abv0\n", on_disk);
+    }
+    // **지문도 갱신된다** — 안 하면 다음 저장이 자기가 쓴 것을 「남이 바꿨다」로 읽는다.
+    try testing.expect(insertText(s, c.term, "c"));
+    try saveDocument(s, c.term);
+}
+
+test "C1a-4 다시 읽기는 clean 이고, 되돌리기가 방금 친 것을 되살린다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const c = try ConflictFixture.init(allocator, "rl.txt", "v0\n");
+    defer c.deinit(allocator);
+    const s = c.fx.session;
+
+    try testing.expect(insertText(s, c.term, "mine"));
+    const mine = try allocator.dupe(u8, c.term.rt.editor_doc.?.file.content);
+    defer allocator.free(mine);
+    try c.writeOutside("rl.txt", "outside\n");
+    c.pressSave();
+    try c.answer('d');
+
+    try testing.expect(!s.chrome_host.confirm.open);
+    // ⑴ **디스크 내용이 들어왔다.**
+    try testing.expectEqualStrings("outside\n", c.term.rt.editor_doc.?.file.content);
+    // ⑵ **clean 이다** — 사용자가 「디스크를 받아들였다」고 답했는데 dirty 로 남으면 화면이 그 답과 어긋난다.
+    try testing.expect(!isDirty(c.term));
+    // ⑶ **디스크를 안 건드렸다** — 다시 읽기는 읽기다.
+    {
+        const on_disk = try c.diskText(allocator, "rl.txt");
+        defer allocator.free(on_disk);
+        try testing.expectEqualStrings("outside\n", on_disk);
+    }
+    // ⑷ **되돌리기가 되살린다** — 통짜 교체였다면 여기서 안 돌아온다(§4 「undo 를 깨지 않는다」).
+    try testing.expect(undoEdit(s, c.term));
+    try testing.expectEqualStrings(mine, c.term.rt.editor_doc.?.file.content);
+    try testing.expect(isDirty(c.term)); // 되돌린 내용은 디스크와 다르다
+}
+
+test "C1a-5 다시 읽기가 실패하면 이유별로 말하고 편집은 남는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const c = try ConflictFixture.init(allocator, "bad.txt", "v0\n");
+    defer c.deinit(allocator);
+    const s = c.fx.session;
+
+    // **이유 → 문구가 서로 다르다**(§3.9d 와 같은 규율). 뭉개는 변이가 여기서 죽는다.
+    const keys = [_]maru.i18n.Key{
+        app_session_mod.editor_conflict_ops.reloadFailureNoticeKey(error.Unreadable),
+        app_session_mod.editor_conflict_ops.reloadFailureNoticeKey(error.NotUtf8),
+        app_session_mod.editor_conflict_ops.reloadFailureNoticeKey(error.TooLarge),
+        app_session_mod.editor_conflict_ops.reloadFailureNoticeKey(error.OutOfMemory),
+    };
+    for (keys, 0..) |a, i| for (keys, 0..) |b, j| {
+        if (i == j) continue;
+        try testing.expect(!std.mem.eql(u8, maru.i18n.t(a), maru.i18n.t(b)));
+    };
+
+    try testing.expect(insertText(s, c.term, "mine"));
+    const mine = try allocator.dupe(u8, c.term.rt.editor_doc.?.file.content);
+    defer allocator.free(mine);
+    // **글자가 아닌 파일로 바꾼다** — 다시 읽기가 이것을 문서에 넣으면 안 된다.
+    try c.writeOutside("bad.txt", "\xff\xfe binary\n");
+    c.pressSave();
+    try c.answer('d');
+
+    try testing.expect(s.chrome_host.notice.open);
+    try testing.expect(std.mem.startsWith(u8, &s.notice_message_buf, maru.i18n.t(.editor_reload_not_text)));
+    // **편집이 그대로 남는다** — 실패한 다시 읽기가 문서를 반쯤 갈아 두면 그것이 최악이다.
+    try testing.expectEqualStrings(mine, c.term.rt.editor_doc.?.file.content);
+    try testing.expect(isDirty(c.term));
+}
+
+test "C1a-6 상자가 떠 있는데 그 문서를 닫으면 — 확인도 접히고 남의 문서를 덮지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const c = try ConflictFixture.init(allocator, "gone.txt", "v0\n");
+    defer c.deinit(allocator);
+    const s = c.fx.session;
+
+    try testing.expect(insertText(s, c.term, "x"));
+    try c.writeOutside("gone.txt", "outside\n");
+    c.pressSave();
+    try testing.expect(s.chrome_host.confirm.open);
+
+    // **제품이 닫는 길로 닫는다**(U2B 와 같은 호출) — `destroyTerm` 을 직접 부르면 pane 정리가 빠져
+    // 그 뒤 판정이 우리가 만든 상태를 보게 된다.
+    const pane = pane_ops.activePane(s);
+    var idx: usize = pane.terms.items.len;
+    while (idx > 0) {
+        idx -= 1;
+        if (pane.terms.items[idx] == c.term) break;
+    }
+    term_ops.closeTermAt(s, s.app_window.active_tab, pane, idx);
+    try testing.expect(!s.chrome_host.confirm.open);
+    try testing.expect(s.pending_confirm == .none);
+
+    // **수락이 와도 아무 일도 없다** — 대상이 없으니 쓸 곳도 없다.
+    s.dispatchChromeAction(.confirm_accept);
+    {
+        const on_disk = try c.diskText(allocator, "gone.txt");
+        defer allocator.free(on_disk);
+        try testing.expectEqualStrings("outside\n", on_disk);
+    }
+}
+
+test "C1a-7 CAS 를 건너뛰는 길은 «사용자가 고른 자리» 하나다 — 평범한 저장은 여전히 묻는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const c = try ConflictFixture.init(allocator, "guard.txt", "v0\n");
+    defer c.deinit(allocator);
+    const s = c.fx.session;
+
+    try testing.expect(insertText(s, c.term, "x"));
+    try c.writeOutside("guard.txt", "outside\n");
+    // ⑴ **기본 저장은 CAS 다** — 몇 번을 눌러도 안 덮는다.
+    try testing.expectError(error.ExternalConflict, saveDocument(s, c.term));
+    try testing.expectError(error.ExternalConflict, saveDocument(s, c.term));
+    {
+        const on_disk = try c.diskText(allocator, "guard.txt");
+        defer allocator.free(on_disk);
+        try testing.expectEqualStrings("outside\n", on_disk);
+    }
+    // ⑵ **덮어쓰기 전용 길만 지나간다.** 이 함수가 곧 「사용자가 명시로 골랐다」의 표현이다.
+    try overwriteDocument(s, c.term);
+    {
+        const on_disk = try c.diskText(allocator, "guard.txt");
+        defer allocator.free(on_disk);
+        try testing.expectEqualStrings("xv0\n", on_disk);
+    }
 }
 
 test "C0c 디스크 지문의 수명 — 두 번째 저장이 자기가 쓴 것을 「남이 바꿨다」로 읽지 않는다" {

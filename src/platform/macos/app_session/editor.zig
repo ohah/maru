@@ -2003,14 +2003,18 @@ pub fn nativeTextFromEnv() bool {
 pub const Prepared = struct {
     opened: Opened,
     lines: [][]const u8,
-    path: []u8,
+    /// **없을 수 있다** — 이름 없는 문서(§3.11)는 경로가 아직 없다. 그 「없음」은 이 앱에서
+    /// `editor_path == null` 이 유일한 표현이고(빈 슬라이스가 아니다), 기존 저장 가드가 그 값을
+    /// 묻는다(`const path = term.rt.editor_path orelse …`) — 빈 슬라이스로 두면 그 가드가 안 걸려
+    /// **빈 경로에 쓰려 든다**.
+    path: ?[]u8,
 
     /// 아직 Term에 넘기지 않은 것을 되돌린다. **부착 뒤에는 부르지 않는다** — 그때부터 소유는
     /// Term이고 `destroyTerm`이 같은 것을 푼다(이중 해제).
     pub fn deinit(self: *Prepared, allocator: std.mem.Allocator) void {
         self.opened.deinit(allocator);
         allocator.free(self.lines);
-        allocator.free(self.path);
+        if (self.path) |p| allocator.free(p);
     }
 };
 
@@ -2033,6 +2037,32 @@ pub fn preparePath(self: *AppSession, path: []const u8) OpenFileError!Prepared {
     return .{ .opened = opened, .lines = lines, .path = path_copy };
 }
 
+/// **빈 문서**를 부착 직전까지 만든다 — 이름 없는 문서(§3.11)의 `preparePath` 짝이다. 디스크를
+/// 읽지 않고 경로도 없다.
+///
+/// **같은 `Prepared` 를 돌려주는 이유**: 부착 뒤의 일(줄 배열·접힘·탭 폭·구문)이 경로 있는 문서와
+/// **한 글자도 다르지 않다**. 다른 구조를 주면 `finishAttach` 가 두 벌이 되고, 둘 중 하나만 고쳐지는
+/// 날이 온다(이 파일이 `materialize`·`computeMarks` 에서 이미 겪은 모양이다).
+pub fn prepareUntitled(self: *AppSession) OpenFileError!Prepared {
+    var opened: Opened = blk: {
+        // 빈 내용, **쓸 수 있다**(읽기 전용이 아니다 — 아직 파일이 아니라 권한이라는 축 자체가 없다).
+        const file = editor.edit_doc.EditableFile.init(self.allocator, "", false) catch |e| switch (e) {
+            error.NotUtf8 => unreachable, // 빈 바이트는 UTF-8 이다
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        break :blk .{ .file = file, .saved_hash = contentHash(file.content) };
+    };
+    errdefer opened.deinit(self.allocator);
+
+    // `preparePath` 와 같은 규율 — 줄 슬라이스를 미리 만든다(§4.1a: 프레임마다 할당하지 않는다).
+    const n = opened.file.lineCount();
+    const lines = self.allocator.alloc([]const u8, n) catch return error.OutOfMemory;
+    errdefer self.allocator.free(lines);
+    for (0..n) |i| lines[i] = opened.file.lineText(i) orelse "";
+
+    return .{ .opened = opened, .lines = lines, .path = null };
+}
+
 /// 준비한 문서를 Term에 넘긴다. **실패하지 않는다** — 호출자는 이 앞에서 실패할 수 있는 일을 모두
 /// 끝내 두어야 한다.
 ///
@@ -2051,7 +2081,9 @@ pub fn finishAttach(self: *AppSession, term: *Term, prepared: Prepared) void {
     // 증분이라 65µs다.
     // **한 번 정해 둘이 쓴다** — 구문 강조와 상태바 언어 항목이 **같은 값**을 본다(`status-bar.md`
     // 「언어 항목」). 상태바가 경로에서 다시 판정하면 출처가 둘이 된다.
-    term.rt.editor_grammar = maru.session.editor.language.grammarForPath(prepared.path);
+    // **경로가 없으면 문법도 없다**(§3.11 — 문법은 경로에서 나온다). 그 문서는 끝까지 무색이고
+    // 그것은 실패가 아니라 §5 의 **저하**다. 이름이 붙는 순간(U2) 다시 판정한다.
+    term.rt.editor_grammar = if (prepared.path) |p| maru.session.editor.language.grammarForPath(p) else .none;
     term.rt.editor_syntax = syntax_color.open(
         term.rt.editor_doc.?.file.content,
         term.rt.editor_grammar,
@@ -2164,6 +2196,38 @@ pub fn openPathInActivePane(self: *AppSession, path: []const u8) OpenFileError!*
 
     // 여기부터 실패 지점이 없다 — 소유가 Term으로 넘어간다.
     finishAttach(self, term, prepared);
+    self.focusTerm(pane.terms.items.len - 1);
+    self.metal_dirty = true;
+    return term;
+}
+
+/// 활성 pane 에 **이름 없는 편집기**(빈 문서)를 열고 그 탭으로 포커스한다 — `New Editor Tab`
+/// (U1, docs/plans/editor-untitled.md). `openPathInActivePane` 의 형제라 **여기에 둔다**: 3단계
+/// (준비 → 만들기·붙이기 → 포커스)와 errdefer 규율이 한 글자도 다르지 않다.
+///
+/// **번호는 앱 전역 발급기가 낸다**(`app_runtime.untitled_docs`) — 창마다 세면 탭을 다른 창으로 옮긴
+/// 순간 같은 이름이 둘이 된다(§3.11).
+///
+/// **커서를 들고 열린다.** 파일을 열 때는 커서를 세우지 않고 클릭이 세우는데, 이 문서는 **타이핑하려고
+/// 사용자가 직접 만든 것**이라 그 규칙을 따르면 첫 글자가 조용히 사라진다(`insertText` 는 커서가
+/// 없으면 아무 일도 안 한다 — 적대적 1회차의 판정자가 이것을 잡았다). 빈 문서의 커서 자리는 **하나뿐**
+/// 이라 미룰 애매함도 없다.
+pub fn openUntitledInActivePane(self: *AppSession) !*Term {
+    const n = app_session_mod.app_runtime.untitled_docs.next() orelse return error.OutOfMemory;
+
+    var prepared = try prepareUntitled(self);
+    errdefer prepared.deinit(self.allocator);
+
+    const term = createEditorTerm(self) catch return error.OutOfMemory;
+    errdefer term_ops.destroyTerm(self, term);
+
+    const pane = pane_ops.activePane(self);
+    pane.terms.append(self.allocator, term) catch return error.OutOfMemory;
+
+    // 여기부터 실패 지점이 없다 — 소유가 Term으로 넘어간다.
+    term.rt.editor_untitled = maru.session.editor.untitled.Name.init(n);
+    finishAttach(self, term, prepared);
+    term.rt.editor_selection = editor_selection.Selection.at(0);
     self.focusTerm(pane.terms.items.len - 1);
     self.metal_dirty = true;
     return term;
@@ -7030,6 +7094,18 @@ pub fn saveDocument(self: *AppSession, term: *Term) bool {
     if (term.rt.editor_diff != null) return false;
     const doc = term.rt.editor_doc orelse return false;
     if (doc.file.read_only) return false;
+    // **이름 없는 문서는 조용히 실패하지 않는다**(§3.11). 그대로 `orelse return false` 로 떨어지면
+    // 사용자는 저장한 줄 알고 잃는다 — 디스패치가 이 함수의 반환값을 버리기 때문이다
+    // (`_ = editor_ops.saveDocument(…)`). 그래서 **여기서** 말한다: 알림은 이 함수가 이미 쓰는
+    // 수단이고(`editor_conflict_markers_remain`), 그 자리를 하나 더 늘리지 않는다.
+    //
+    // ⚠️ **나머지 실패는 아직 조용하다**(읽기 전용·쓰기 실패·외부 충돌). 그것을 이유별로 올리는 일은
+    // 반환형을 오류 합집합으로 바꾸는 별개 슬라이스다(계획 C0) — 여기서 절반만 고치면 「어떤 실패는
+    // 말하고 어떤 실패는 안 한다」가 규칙처럼 굳는다.
+    if (term.rt.editor_untitled != null) {
+        self.showNoticeKey(.editor_untitled_needs_name);
+        return false;
+    }
     const path = term.rt.editor_path orelse return false;
 
     const bytes = doc.file.saveBytes(self.allocator) catch return false;
@@ -9215,6 +9291,9 @@ pub fn releaseEditorTerm(self: *AppSession, term: *Term) void {
     if (term.rt.editor_row_cache.prefix.len > 0) self.allocator.free(term.rt.editor_row_cache.prefix);
     term.rt.editor_row_cache = .{ .prefix = &.{} };
     term.rt.editor_path = null;
+    // 이름 없는 문서 표식도 같은 자리에서 비운다(할당이 없어 놓을 것은 없지만, 「이 Term 의 편집기
+    // 상태를 놓는다」가 이 함수의 일이다 — 위 `editor_drawn_*` 과 같은 규율).
+    term.rt.editor_untitled = null;
 }
 
 const testing = std.testing;
@@ -34176,4 +34255,201 @@ test "SCRL4 프레임 사이 편집 둘에서도 가로 노출이 산다 (적대
     // **caret 이 한 글자 더 오른쪽으로 갔으므로 가로도 정확히 한 칸 따라가야 한다.**
     // `>=` 로 재면 «안 움직였다» 도 통과한다 — 그것이 바로 이 판정자가 잡으려는 상태다.
     try testing.expectEqual(col_after_first + 1, fx.term.rt.editor_first_col);
+}
+
+// ── U1 이름 없는 문서(untitled) ────────────────────────────────────────────────────────────────
+//
+// **이 테스트들이 재는 것**: `New Editor Tab` 이 파일 없이 편집기를 세우고, 그 문서가 「경로 없음」을
+// **한 가지 방식으로만** 나타내며, 번호가 겹치지 않고, `⌘S` 가 조용하지 않다는 것.
+// 계약은 docs/native-editor-document-model.md §3.11, 단계는 docs/plans/editor-untitled.md U1.
+//
+// **번호 발급기는 앱 전역이라 테스트끼리 이어진다**(`app_runtime.untitled_docs`) — 그래서 각 테스트가
+// 들어올 때 비우고 나갈 때 되돌린다. 안 그러면 「`untitled-1` 이 나온다」가 **테스트 실행 순서에** 달린다.
+const UntitledFixture = struct {
+    session: *AppSession,
+    saved_counter: maru.session.editor.untitled.Counter,
+
+    fn init(allocator: std.mem.Allocator, chrome_minimal: bool, minimal_tabs: bool) !UntitledFixture {
+        const saved = app_session_mod.app_runtime.untitled_docs;
+        app_session_mod.app_runtime.untitled_docs = .{};
+        errdefer app_session_mod.app_runtime.untitled_docs = saved;
+
+        const session = try allocator.create(AppSession);
+        errdefer allocator.destroy(session);
+        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+            .abi_version = app_session_mod.abi_version,
+            .cols = 80,
+            .rows = 24,
+            .queue_capacity = 16,
+            .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+        });
+        errdefer session.deinit();
+        session.cell_width_px = 8;
+        session.cell_height_px = 16;
+        session.chrome_minimal = chrome_minimal;
+        session.minimal_tabs = minimal_tabs;
+        return .{ .session = session, .saved_counter = saved };
+    }
+
+    fn deinit(self: *UntitledFixture, allocator: std.mem.Allocator) void {
+        self.session.deinit();
+        allocator.destroy(self.session);
+        app_session_mod.app_runtime.untitled_docs = self.saved_counter;
+    }
+
+    /// 활성 pane 의 editor Term 들(순서 그대로).
+    fn editorTerms(self: *UntitledFixture, buf: *std.ArrayListUnmanaged(*Term), allocator: std.mem.Allocator) !void {
+        buf.clearRetainingCapacity();
+        for (pane_ops.activePane(self.session).terms.items) |t| {
+            if (t.kind == .editor) try buf.append(allocator, t);
+        }
+    }
+};
+
+test "U1a New Editor Tab 은 활성 pane 에 편집기 Term 을 더하고 그것이 초점이며 이름이 untitled-1 이다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+
+    const pane = pane_ops.activePane(fx.session);
+    const before = pane.terms.items.len;
+    // **초점이 옮겨졌는지 재려면 시작 초점이 새 Term 이 아니어야 한다** — 0 개에서 시작하면 「초점이
+    // 그것」이 자동으로 참이 되어 판정이 죽는다.
+    try testing.expect(before >= 1);
+
+    fx.session.dispatchAppAction(.new_editor_tab);
+
+    try testing.expectEqual(before + 1, pane.terms.items.len);
+    const term = pane.terms.items[pane.terms.items.len - 1];
+    try testing.expectEqual(maru.session.control_surface.SurfaceKind.editor, term.kind);
+    // **초점이 새 Term 이다** — 만들어만 두고 안 옮기면 사용자는 아무 일도 안 일어난 것으로 본다.
+    try testing.expectEqual(pane.terms.items.len - 1, pane.active_term);
+    try testing.expectEqualStrings("untitled-1", app_session_mod.termLabel(term));
+}
+
+test "U1b 번호는 늘기만 한다 — 닫은 번호가 돌아오지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+
+    fx.session.dispatchAppAction(.new_editor_tab);
+    fx.session.dispatchAppAction(.new_editor_tab);
+
+    var terms: std.ArrayListUnmanaged(*Term) = .empty;
+    defer terms.deinit(allocator);
+    try fx.editorTerms(&terms, allocator);
+    try testing.expectEqual(@as(usize, 2), terms.items.len);
+    try testing.expectEqualStrings("untitled-1", app_session_mod.termLabel(terms.items[0]));
+    try testing.expectEqualStrings("untitled-2", app_session_mod.termLabel(terms.items[1]));
+
+    // 둘째를 닫고 새로 연다. **`untitled-2` 가 다시 나오면 안 된다** — 방금 닫은 것과 새로 연 것이
+    // 같은 이름이면 탭 목록에서 갈리지 않는다(§3.11).
+    const pane = pane_ops.activePane(fx.session);
+    var idx: usize = pane.terms.items.len;
+    while (idx > 0) {
+        idx -= 1;
+        if (pane.terms.items[idx] == terms.items[1]) break;
+    }
+    term_ops.closeTermAt(fx.session, fx.session.app_window.active_tab, pane, idx);
+
+    fx.session.dispatchAppAction(.new_editor_tab);
+    try fx.editorTerms(&terms, allocator);
+    try testing.expectEqual(@as(usize, 2), terms.items.len);
+    try testing.expectEqualStrings("untitled-3", app_session_mod.termLabel(terms.items[1]));
+}
+
+test "U1c 경로 없음은 한 가지로만 나타난다 — null 이고, 그래서 문법도 없다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+
+    fx.session.dispatchAppAction(.new_editor_tab);
+    const pane = pane_ops.activePane(fx.session);
+    const term = pane.terms.items[pane.terms.items.len - 1];
+
+    // **`null` 이다 — 빈 슬라이스가 아니다.** 빈 슬라이스면 기존 저장 가드(`orelse return false`)가
+    // 안 걸려 빈 경로에 쓰려 든다(계약 §3.11 정체성).
+    try testing.expect(term.rt.editor_path == null);
+    try testing.expect(term.rt.editor_untitled != null);
+    try testing.expectEqual(@as(u32, 1), term.rt.editor_untitled.?.n);
+    // **문법이 없다**(경로에서 나오므로) — 그래서 그 문서는 끝까지 무색이고, 그것이 계약이다.
+    // 「색 배열이 비었다」로 재지 않는다: grammar 없는 파일은 어차피 비어서 구현이 없어도 통과한다.
+    //
+    // ⚠️ **`.none` 이다 — optional 이 아니다.** 이 필드는 `Grammar` 열거이고 「없음」이 그 멤버다
+    // (`null` 로 적으면 컴파일되지 않는다 — 처음에 그렇게 썼고 `test-editor-untitled` 가 잡았다).
+    try testing.expectEqual(maru.session.editor.language.Grammar.none, term.rt.editor_grammar);
+    // **커서를 들고 열린다** — 파일을 열 때와 다른 자리다(그쪽은 클릭이 세운다). 이 문서는 타이핑하려고
+    // 만든 것이라 커서가 없으면 첫 글자가 조용히 사라진다(U1d 가 그것을 잰다).
+    try testing.expect(term.rt.editor_selection != null);
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_selection.?.focus);
+    // 빈 문서 한 줄, 그리고 **clean 이다**(여는 순간 저장할 것이 없다).
+    try testing.expect(term.rt.editor_doc != null);
+    try testing.expectEqualStrings("", term.rt.editor_doc.?.file.content);
+    try testing.expect(!isDirty(term));
+    // 편집기 밖에서 보는 값도 같은 이야기를 한다(컨트롤 플레인·헤더가 이것을 읽는다).
+    const meta = editor_diff_ops.editorMeta(term);
+    try testing.expect(meta.path == null);
+    try testing.expect(!meta.read_only); // 파일이 아니라 권한이라는 축 자체가 없다
+}
+
+test "U1d 타이핑하면 dirty 가 되고 이름 앞에 표식이 붙는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+
+    fx.session.dispatchAppAction(.new_editor_tab);
+    const pane = pane_ops.activePane(fx.session);
+    const term = pane.terms.items[pane.terms.items.len - 1];
+
+    try testing.expect(!isDirty(term));
+    try testing.expect(insertText(fx.session, term, "hello"));
+    try testing.expect(isDirty(term));
+    // 이름은 그대로고(표식은 라벨 밖에서 붙는다 — `termLabel` 은 이름만 낸다), 내용이 들어갔다.
+    try testing.expectEqualStrings("untitled-1", app_session_mod.termLabel(term));
+    try testing.expectEqualStrings("hello", term.rt.editor_doc.?.file.content);
+}
+
+test "U1e ⌘S 는 조용히 실패하지 않는다 — 저장하지 않고 이름을 정하라고 말한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+
+    fx.session.dispatchAppAction(.new_editor_tab);
+    const pane = pane_ops.activePane(fx.session);
+    const term = pane.terms.items[pane.terms.items.len - 1];
+    try testing.expect(insertText(fx.session, term, "x"));
+
+    try testing.expect(!fx.session.chrome_host.notice.open);
+    // **저장은 안 된다**(파일이 없다) — 그리고 **말한다**. 둘 다 재야 한다: 조용히 true 를 돌려주면
+    // 사용자는 저장한 줄 알고, 조용히 false 를 돌려줘도 마찬가지다(디스패치가 반환값을 버린다).
+    try testing.expect(!saveDocument(fx.session, term));
+    try testing.expect(fx.session.chrome_host.notice.open);
+    try testing.expect(std.mem.startsWith(
+        u8,
+        &fx.session.notice_message_buf,
+        maru.i18n.t(.editor_untitled_needs_name),
+    ));
+    // 여전히 dirty 이고 여전히 이름이 없다 — 「저장을 시도했다」는 흔적을 남기지 않는다(§3.11).
+    try testing.expect(isDirty(term));
+    try testing.expect(term.rt.editor_path == null);
+}
+
+test "U1f chrome 최소 세션(탭 바 없음)에서는 안 열린다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    // `tabsBlocked` = chrome_minimal and !minimal_tabs — 안 보이는 것을 만들지 않는다.
+    var fx = try UntitledFixture.init(allocator, true, false);
+    defer fx.deinit(allocator);
+
+    const pane = pane_ops.activePane(fx.session);
+    const before = pane.terms.items.len;
+    fx.session.dispatchAppAction(.new_editor_tab);
+    try testing.expectEqual(before, pane.terms.items.len);
+    // **번호도 안 써야 한다** — 막힌 자리에서 번호를 먹으면 다음 문서가 `untitled-2` 부터 시작한다.
+    try testing.expectEqual(@as(u32, 0), app_session_mod.app_runtime.untitled_docs.last);
 }

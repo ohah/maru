@@ -20,6 +20,7 @@
 const std = @import("std");
 const surface_id = @import("../session/surface_id.zig");
 const dock_panel = @import("../session/dock_panel.zig");
+const editor_untitled = @import("../session/editor/untitled.zig");
 const live_surface_registry = @import("../session/live_surface_registry.zig");
 const mermaid_coordinator = @import("../session/mermaid_coordinator.zig");
 const runtime_mod = @import("runtime.zig");
@@ -34,6 +35,12 @@ const workspace_checkpoint_product = @import("workspace_checkpoint_product.zig")
 pub const AppRuntime = struct {
     /// surface_id·pty_id 발급기 — 앱 전역 단조·비재사용(M0a). 모든 창이 공유해 멀티 창에서도 id가 유일하다.
     surface_ids: surface_id.SurfaceIdAllocator = .{},
+
+    /// 이름 없는 문서(`untitled-N`)의 번호 발급기 — **앱 전역 단조·비재사용**
+    /// (docs/native-editor-document-model.md §3.11). `surface_ids` 와 **같은 이유로 여기 있다**:
+    /// 창마다 세면 탭을 다른 창으로 옮긴 순간 같은 이름이 둘이 된다(창보다 오래 사는 값이다).
+    /// 규칙 자체는 화면도 OS 도 몰라야 해서 L2(`session.editor.untitled`)가 안다.
+    untitled_docs: editor_untitled.Counter = .{},
 
     /// 파일 도크 entry의 앱 전역 opaque identity 발급기. path rename과 WKWebView eviction을 넘어 같은 entry를
     /// 추적하며 모든 AppSession이 공유한다. surface_id와 의미/수명은 달라 별도 typed allocator로 둔다.

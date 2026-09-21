@@ -342,6 +342,9 @@ pub const default_app_bindings = [_]AppBinding{
     .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = 'T' } }, .action = .new_term }, // Cmd+T: 활성 pane에 새 Term
     .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = 'T' } }, .action = .new_tab }, // Cmd+Shift+T: 새 워크스페이스
     .{ .chord = .{ .modifiers = .{ .command = true, .option = true }, .key = .{ .char = 'T' } }, .action = .new_web_tab }, // Cmd+Option+T: 활성 pane에 새 브라우저 Term(⌘T=new_term의 web 버전, ⌥로 구분)
+    // Cmd+Option+N: 활성 pane에 이름 없는 편집기 Term(U1). **T 계열을 피한다** — ⌘T·⌘⇧T·⌘⌥T 가 이미
+    // 차 있어 네 번째 T 는 사용자가 못 외운다. N(new document)은 레퍼런스 관례와도 같은 자리다.
+    .{ .chord = .{ .modifiers = .{ .command = true, .option = true }, .key = .{ .char = 'N' } }, .action = .new_editor_tab },
     .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = 'O' } }, .action = .open_file_panel }, // Cmd+O: Markdown/HTML을 현재 창 도크에 열기(macOS Open 관례)
     .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = 'E' } }, .action = .toggle_file_panel_focus }, // Cmd+Shift+E: workspace pane <-> file dock focus
     // Cmd+E: 파일 패널 읽기 <-> 소스. 라이브 프리뷰 폐기로 markdown이 읽기로 시작하게 되면서, 이 chord가

@@ -1502,8 +1502,13 @@ pub fn termLabel(term: *const Term) []const u8 {
     // 흘리면 sentinel `surface.title`을 읽게 되는데, 그건 빈 core라 유효한 라벨이 아니다(적대적
     // 검증에서 collector가 이 경로로 `Invalid free`까지 갔다).
     if (term.kind == .editor) {
+        // **이름 없는 문서는 `untitled-N`**(§3.11) — 「편집기」로 두면 여러 개를 열었을 때 탭이 전부
+        // 같은 이름이라 어느 것이 무엇인지 알 수 없다(파일 Term 이 같은 이유로 파일 이름을 쓴다).
+        // 사용자 rename 이 있으면 그게 우선인 것은 다른 경로와 같다(`pickLabel` 단일 해석).
         const auto_name: []const u8 = if (term.rt.editor_path) |p|
             std.fs.path.basename(p)
+        else if (term.rt.editor_untitled) |*u|
+            u.text()
         else
             maru.i18n.t(.app_editor);
         return app.pickLabel(term.surface.custom_name, auto_name);
@@ -1835,6 +1840,12 @@ const TermRuntime = struct {
     editor_lines: []const []const u8 = &.{},
     /// 열려 있는 파일의 절대 경로(owned). 탭 라벨과 컨트롤 플레인 `EditorMeta.path`가 읽는다.
     editor_path: ?[]u8 = null,
+    /// **이름 없는 문서라면** 그 번호와 표시 이름(§3.11). 위 `editor_path` 와 **배타**다 — 이름이
+    /// 붙는 순간(U2) 경로가 생기고 이 값은 비워진다.
+    ///
+    /// **글자를 값으로 든다**(할당이 아니다). 탭 라벨은 빌린 슬라이스로 나가므로(`termLabel`)
+    /// 부르는 자리에서 포맷하면 그 버퍼의 수명이 없다 — 그 규칙은 `session.editor.untitled` 가 안다.
+    editor_untitled: ?maru.session.editor.untitled.Name = null,
     /// **구문 강조 상태**(§5.3 1층 — tree-sitter 트리와 그 파생 색). 위 셋과 **같은 묶음**이라
     /// 함께 살고 함께 죽는다(`releaseEditorTerm`). grammar가 없으면 안이 비어 있고, 그러면 그
     /// 문서는 끝까지 무색이다 — 실패가 아니라 저하다(§5).
@@ -10442,6 +10453,12 @@ pub const AppSession = struct {
             // 생성 실패는 무시(newWebTermInActivePane이 errdefer로 원복).
             .new_web_tab => if (!self.tabsBlocked()) {
                 pane_ops.newWebTermInActivePane(self, .browser) catch {};
+            },
+            // 활성 pane 에 **이름 없는 편집기 Term** 생성(U1 — docs/plans/editor-untitled.md).
+            // `new_web_tab` 과 같은 `tabsBlocked` 게이트를 지난다: chrome 최소 세션은 탭 바가 없어
+            // 안 보이는 것을 만들지 않는다. 생성 실패는 무시(errdefer 가 원복).
+            .new_editor_tab => if (!self.tabsBlocked()) {
+                _ = editor_ops.openUntitledInActivePane(self) catch {};
             },
             .open_file_panel => file_panel_ops.requestFilePanelPick(self),
             .toggle_file_panel_dock_side => file_panel_ops.toggleFilePanelDockSide(self),

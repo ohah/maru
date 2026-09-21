@@ -52,14 +52,15 @@ pub fn begin(self: *AppSession, term: *Term) bool {
 /// base 디렉터리 — **세 단계**다: 파일 트리의 첫 루트 → 활성 pane 의 작업 디렉터리 → 워크스페이스
 /// 루트(§3.11).
 ///
-/// ⚠️ **원격 cwd 는 건너뛴다.** 활성 pane 이 SSH 면 그 cwd 는 저쪽 경로이고, 그것을 로컬 base 로 쓰면
-/// 저쪽 경로를 이쪽 디스크에 만든다(워크스페이스가 「원격 cwd 는 저장하지 않는다」고 정한 그 사고와
-/// 같은 모양). 저쪽에 쓰는 일은 U3 이 소유한다.
+/// ⚠️ **원격 cwd 는 여기서 거르지 않는다 — 아래 층이 이미 거른다.** `focusedTermCwd` 가 같은 술어
+/// (`termCwdIsRemote`)로 원격 pane 의 cwd 에 `null` 을 내고, 근거도 같다(저쪽 경로를 이쪽에 쓰면 엉뚱한
+/// 자리가 된다 — ssh-integration.md §9.4). 같은 판정을 여기서 한 번 더 적었다가 적대적 18회차에서
+/// **관측되지 않는 중복**임이 드러났다: 지워도 아무 판정자가 죽지 않았고, 두 자리가 갈리면 한쪽이 낡는다.
+/// 저쪽에 쓰는 일은 U3 이 소유한다.
 ///
-/// **거기서 멈추지 않는다.** 원격 pane 에서 `null` 을 내면 「저장할 폴더가 없다」가 되는데, 사실은
-/// 로컬 워크스페이스 루트가 늘 있다(설정값 → launch cwd → HOME). 물러날 자리가 있는데 거절하면
-/// 사용자는 이유 없이 막힌다 — 그래서 **마지막 단계까지 간다**. `null` 은 그 셋이 전부 없을 때뿐이다
-/// (세션이 아직 안 섰거나 HOME 조차 없는 자리).
+/// **원격이어도 멈추지 않는다.** 그 단계가 `null` 이면 「저장할 폴더가 없다」가 아니라 **다음 단계로
+/// 물러난다** — 로컬 워크스페이스 루트가 늘 있다(설정값 → launch cwd → HOME). 물러날 자리가 있는데
+/// 거절하면 사용자는 이유 없이 막힌다. `null` 은 그 셋이 전부 없을 때뿐이다.
 pub fn baseDir(self: *AppSession, buf: []u8) ?[]const u8 {
     if (self.file_tree.roots.items.len > 0) {
         const root = self.file_tree.roots.items[0].path;
@@ -69,10 +70,7 @@ pub fn baseDir(self: *AppSession, buf: []u8) ?[]const u8 {
         }
     }
     if (self.surface_initialized and self.tabs.items.len > 0) {
-        const term = pane_ops.activePane(self).activeTerm();
-        if (!app_session_mod.termCwdIsRemote(term)) {
-            if (term_ops.newSurfaceCwd(self, buf, true)) |c| return c;
-        }
+        if (term_ops.newSurfaceCwd(self, buf, true)) |c| return c;
     }
     if (workspace_ops.workspaceRootCwd(self, buf)) |c| return c;
     // ⚠️ **그 함수의 `null` 은 「없다」가 아니다 — 「물려받은 cwd 를 쓰라」다**(spawn 의미: 설정값이

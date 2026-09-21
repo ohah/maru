@@ -513,6 +513,28 @@ boundaries · `test-macos-only` · 전체 `zig build test` 전부 초록, 실기
 (모든 이벤트가 pane 슬롯으로 가서 인라인이 빈다) → `remoteCwd` 가 대표 슬롯을 읽고, 판정자 ⑷' 가 그것을 문다. 고친 뒤 2 pane e2e:
 폴더줄·«3개 파일 · ✎ 2»·idx 복귀.
 
+**조각 4 ✅ (2026-09-21)** — 사이드바 `Row.agent_pane{tab,pane,term,name,depth,lines,last}`: 원격 Term 의 에이전트 행 아래에
+pane 슬롯이 **둘 이상**일 때만 pane 마다 한 행(«%0 · 상태 문구», 응답이 있으면 2줄째) — 하나면 에이전트 행이 곧 그 pane 이라
+안 편다(«1개면 행 하나만 붙고 토글이 없다» 와 같은 규율). 이름은 tmux 의 `%<n>` 을 수로 정렬(tick 마다 순서가 흔들리면 클릭 자리가
+움직인다). 클릭은 Term 까지(결정 2) + `rememberPaneSession` — 그 pane 의 세션을 «최근 세션» 으로 기억하고 `last_event_ms` 를
+올려 대표 슬롯(대화 줄)도 그 pane 을 따른다; pane 행엔 ✕ 가 없다(✕ 자리를 눌러도 Term 이 안 닫힌다). 낡음 판정
+`reprojectSidebarIfRowLinesStale` 이 에이전트 행 뒤의 pane 행 **수**(슬롯 수와 비교)와 pane 행 **줄 수**(응답 유무)를 함께 본다.
+`sidebarAgentRowLines`·상태·대화 줄은 대표 슬롯. 판정자 «pane 슬롯이 둘이면 사이드바에 pane 행이 서고, 클릭은 그 pane 의 세션을
+최근 세션으로» — 재투영을 손으로 부르지 않고 낡음 판정에 맡기며, 두 번째 pane 의 첫 이벤트를 **프롬프트만**으로 보내 에이전트
+행 줄 수가 안 변하는 채로 pane 행 수 비교만 잡게 하고, 대표가 «응답 있는 A → 응답 있는 B» 로 바뀌는 순간을 만들어 pane 행 줄 수
+비교만 잡게 한다; 실제 `mouse()` 경로로 ✕ 자리 클릭까지 문다. 뮤턴트 8: M1 `<2`→`<1`(pane 하나여도 행) · M2 낡음 판정의 pane 행 수
+비교 제거 · M3 pane 행 클릭의 ✕ 예외 제거 · M4 정렬 역순 · M5 클릭이 대표 슬롯을 안 올림 · M6 클릭이 `rememberPaneSession` 안 부름 ·
+M7 낡음 판정의 pane 행 줄 수 비교 제거 · M8 pane 행 줄 수 항상 1 — **M2·M7 은 1차 생존**(원래 판정자는 두 번째 pane 의
+프롬프트+턴 끝을 한 배치에 보내 에이전트 행 줄 수가 함께 낡았고, 그 비교가 대신 잡아 줬다) → 위처럼 순서를 갈라 잡음.
+게이트: capture 58 · provider-session-removal 39 · scm-row-model 32 · remote-explorer 11 · boundaries · doc-line-refs · hook-command 21 ·
+test-macos-only · 전체 test. **실기가 잡은 것**: 처음 두 회차의 «pane 행이 안 선다» 는 코드가 아니라 **번들이 낡아서**였다 —
+`settings.zig` 의 exhaustive switch 둘이 `.agent_pane` 을 안 다뤄 `macos-app-bundle` 이 실패했는데 e2e 는 «빌드가 끝나 있다» 를
+전제해 18:28 번들로 돌았다(캡처 게이트는 `--test-filter` 가 고른 test 만 분석해 그 switch 를 안 봤다). 고친 뒤 2 pane e2e: 에이전트
+행 아래 `%0 ✓ 대기 / 완료했습니…`·`%1 ✓ 대기 / 완료했습니…` 두 행(`/tmp/pane-rows-e2e-tmux2.png`), 1 pane e2e: pane 행 없음(그대로).
+e2e 도구도 손봄: 죽은 tmux 소켓이 남아 있으면 `kill-server` 실패가 `set -e` 로 «sidecars·repo status» 절을 삼켰다 → 소켓을 지우고 넘어간다.
+**남은 한계**: `evicted`(17번째 pane) 고지 UI 없음 — 슬롯은 LRU 로 밀리고 행도 그만큼만 선다; pane 행 상태 문구는 사이드바 폭에 잘린다
+(«✓ 대…»); 닫힌 pane 의 행은 스풀 7일 회수 전까지 남는다(결정 4).
+
 **착수 전 적대적 공격 (2026-09-21)**
 
 | # | 공격 | 결과 |

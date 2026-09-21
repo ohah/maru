@@ -761,6 +761,18 @@ pub fn focusAgentRow(self: *AppSession, tab_index: usize, pane_index: usize, ter
     self.metal_dirty = true;
 }
 
+/// tmux pane 행 클릭(RA7 조각 4): 그 pane 슬롯의 세션을 «최근 세션» 으로 기억한다 — 에이전트 탭은 «활성 세션» 링을
+/// 그리는데 Term 하나에 세션이 여럿이면 어느 것인지 사용자가 고를 자리가 이것뿐이다. Term 이동은 `focusAgentRow` 가 한다.
+pub fn rememberPaneSession(self: *AppSession, tab_index: usize, pane_index: usize, term_index: usize, pane_name: []const u8) void {
+    if (tab_index >= self.tabs.items.len) return;
+    const term = agentTermOf(self.tabs.items[tab_index], .{ .pane = pane_index, .term = term_index }) orelse return;
+    const entry = self.remote_agent_panes.findMut(term.surfaceId(), pane_name) orelse return;
+    git_ops.rememberAgentSession(self, entry.slot.transcript.identity());
+    // 대표 슬롯도 이 pane 으로 — 대화 줄·활성 세션이 클릭한 pane 을 따르게 «가장 최근» 으로 올린다.
+    entry.last_event_ms = self.awakeMs();
+    self.metal_dirty = true;
+}
+
 /// 카드 아래에 붙는 **세션 목록 행**(에이전트 + 일반 터미널)을 방출한다: `N sessions` 토글 + (펼쳐졌으면) 행들.
 /// 접힘은 `tab.agents_collapsed`가 든다(workspace.v1 영속 — §4. 파일에 키가 없으면 접힘으로 읽는다).
 ///
@@ -799,6 +811,10 @@ pub fn appendAgentRows(self: *AppSession, out: *std.ArrayList(chrome.components.
     }) catch return;
     if (tab.agents_collapsed) return; // 접혔으면 행은 안 낸다(토글만 남는다)
     for (sessions.items, 0..) |s, idx| {
+        const is_last = idx + 1 == sessions.items.len;
+        // 원격 tmux pane 행(RA7 조각 4): 그 Term 에 pane 슬롯이 **둘 이상**이면 에이전트 행 아래에 pane 마다 한 줄. 하나면
+        // 에이전트 행이 곧 그 pane 이라 안 편다(«1개면 행 하나만 붙고 토글이 없다» 와 같은 규율).
+        const pane_rows = remotePaneRowsFor(self, tab, s);
         out.append(self.allocator, .{
             .agent = .{
                 .tab = tab_index,
@@ -806,10 +822,57 @@ pub fn appendAgentRows(self: *AppSession, out: *std.ArrayList(chrome.components.
                 .term = s.term,
                 .depth = depth,
                 .lines = sidebar_ops.sidebarAgentRowLines(self, tab, s),
-                .last = idx + 1 == sessions.items.len, // 마지막 행만 아래 여백을 카드와 같게(밴드 하단)
+                .last = is_last and pane_rows.count == 0, // 마지막 행만 아래 여백을 카드와 같게(밴드 하단)
             },
         }) catch return;
+        var k: usize = 0;
+        while (k < pane_rows.count) : (k += 1) {
+            var row = pane_rows.rows[k];
+            row.tab = tab_index;
+            row.pane = s.pane;
+            row.term = s.term;
+            row.depth = depth;
+            row.last = is_last and k + 1 == pane_rows.count;
+            out.append(self.allocator, .{ .agent_pane = row }) catch return;
+        }
     }
+}
+
+pub const PaneRow = @FieldType(chrome.components.sidebar.Row, "agent_pane");
+pub const PaneRows = struct { rows: [maru.session.remote_pane_table.max_panes]PaneRow = undefined, count: usize = 0 };
+
+/// 그 Term 의 tmux pane 행들(둘 이상일 때만, pane 이름 순 — 순서가 tick 마다 흔들리면 클릭 자리가 움직인다).
+pub fn remotePaneRowsFor(self: *AppSession, tab: *Tab, s: WorkspaceSession) PaneRows {
+    var result: PaneRows = .{};
+    const term = agentTermOf(tab, s) orelse return result;
+    if (self.remote_agent_panes.countFor(term.surfaceId()) < 2) return result;
+    var it = self.remote_agent_panes.forSurface(term.surfaceId());
+    while (it.next()) |e| {
+        if (result.count >= result.rows.len) break;
+        var row: PaneRow = .{ .tab = 0, .pane = 0, .term = 0 };
+        const name = e.paneName();
+        const n: u8 = @intCast(@min(name.len, row.name.len));
+        @memcpy(row.name[0..n], name[0..n]);
+        row.name_len = n;
+        row.lines = if (e.slot.transcript.reply().len > 0) 2 else 1;
+        result.rows[result.count] = row;
+        result.count += 1;
+    }
+    // pane 이름 순(`%3` < `%12` — 숫자로). 이름은 tmux 가 만든 `%<n>` 이라 앞 글자를 떼고 수로 비교한다.
+    std.mem.sort(PaneRow, result.rows[0..result.count], {}, struct {
+        fn lessThan(_: void, a: PaneRow, b: PaneRow) bool {
+            const na = paneNumber(a.name[0..a.name_len]);
+            const nb = paneNumber(b.name[0..b.name_len]);
+            if (na != nb) return na < nb;
+            return std.mem.lessThan(u8, a.name[0..a.name_len], b.name[0..b.name_len]);
+        }
+    }.lessThan);
+    return result;
+}
+
+fn paneNumber(name: []const u8) u64 {
+    const digits = if (name.len > 0 and name[0] == '%') name[1..] else name;
+    return std.fmt.parseInt(u64, digits, 10) catch std.math.maxInt(u64);
 }
 
 /// 인덱스 경로 → 라이브 Term(범위 밖이면 null). 목록 행이 포인터 대신 인덱스를 드는 계약의 재조회 지점이다.
@@ -870,7 +933,7 @@ pub fn anyAgentRunning(self: *AppSession) bool {
     if (self.sidebar_collapsed or self.chrome_minimal) return false;
     for (self.sidebar_rows.items) |row| switch (row) {
         .card => |c| if (c.tab < self.tabs.items.len and tab_ops.tabHasRunningAgent(self.tabs.items[c.tab])) return true,
-        .agent_toggle, .agent => {}, // 같은 탭의 부속이라 카드 판정으로 충분
+        .agent_toggle, .agent, .agent_pane => {}, // 같은 탭의 부속이라 카드 판정으로 충분
         .group_header, .recovered_sessions_header, .recovered_session => {}, // system/header row엔 에이전트가 없다
     };
     return false;

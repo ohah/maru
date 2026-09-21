@@ -36000,7 +36000,7 @@ test "U2x 파일시스템의 거친 자리: 없는 하위 폴더 · 같은 이�
         try testing.expect(std.mem.startsWith(
             u8,
             &fx.session.notice_message_buf,
-            maru.i18n.t(.editor_untitled_name_is_dir),
+            maru.i18n.t(.editor_untitled_name_not_file),
         ));
         try testing.expect(t.rt.editor_path == null);
         try testing.expect(t.rt.editor_untitled != null);

@@ -27601,7 +27601,7 @@ test "훅 원격 프레임: 턴 끝이 봉인과 스냅샷 요청까지 닿는�
     const e = sealed.entries.items[0];
     try std.testing.expectEqualStrings("/srv/app/src/a.zig", e.path);
     try std.testing.expect(e.before == .unknown and e.before.unknown == .remote);
-    try std.testing.expect(e.remoteEditTargeted());
+    try std.testing.expect(e.editTargeted());
 
     // ⑷ 다음 턴은 새 봉인이다 — 배치가 갈려도 진행 중 사본이 이어진다(Pre 만 온 배치 → Stop 만 온 배치).
     agent_ops.consumeRemoteAgentLines(&session, term, &.{
@@ -28997,6 +28997,77 @@ test "훅 캡처: PostToolUse 의 bashEditDiff 가 셸 편집을 캡처에 싣�
     try std.testing.expect(sealed.entries.items[sealed.find(read_then).?].shellOnly());
 }
 
+// [AT3d] **로컬 `Pre(Edit)` 의 before 는 편집 뒤 내용이다.** 훅 로그는 500 ms 폴링으로 읽고 편집 도구는 p50 35 ms 안에
+// 끝나므로(계획 AT3d ②·⑦), 제품이 `Pre(Edit)` 를 읽는 순간 파일은 이미 새 내용이다 — 이 판정자는 그 순서를 결정적으로
+// 만든다(파일을 먼저 고치고 훅 이벤트를 넣는다). 옛 규칙(before≠after)은 이 파일을 `·` 로 떨어뜨렸다(잠복 결함 —
+// 사용자가 로컬 훅을 안 써서 화면에 안 나왔다). 새 규칙은 겨냥 ∧ 목록으로 `✎` 다.
+test "훅 캡처: Read 없이 Edit 한 파일은 폴링이 편집 뒤에 읽어도 겨냥 ∧ 목록으로 ✎ 다 — 되돌림은 Read 가 있을 때만 (AT3d)" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root_buf);
+    const root = root_buf[0..root_len];
+    try tmp.dir.createDirPath(io, ".git");
+    try tmp.dir.writeFile(io, .{ .sub_path = "late.zig", .data = "v2 (already edited when the poll reads)\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "read_first.zig", .data = "v1\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "reverted.zig", .data = "same\n" });
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.git_repo = try allocator.dupe(u8, root);
+    const term = tab_ops.activeTab(session).panes.items[0].terms.items[0];
+    term.agent_kind = .claude;
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .session_start, .session_id = "S-late" });
+
+    var a_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const late = try std.fmt.bufPrint(&a_buf, "{s}/late.zig", .{root});
+    var b_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const read_first = try std.fmt.bufPrint(&b_buf, "{s}/read_first.zig", .{root});
+    var c_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const reverted = try std.fmt.bufPrint(&c_buf, "{s}/reverted.zig", .{root});
+
+    // ⑴ Read 없이 Edit — 제품이 이 이벤트를 읽을 때 파일은 이미 v2 다(위 픽스처).
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .pre_tool_use, .provider = "claude", .session_id = "S-late", .tool_name = "Edit", .file_path = late, .tool_use_id = "toolu_1" });
+    // ⑵ Read 가 앞선 Edit — before 는 진짜 v1, 그 뒤 편집이 v2 를 만든다.
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .pre_tool_use, .provider = "claude", .session_id = "S-late", .tool_name = "Read", .file_path = read_first, .tool_use_id = "toolu_2" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "read_first.zig", .data = "v2\n" });
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .pre_tool_use, .provider = "claude", .session_id = "S-late", .tool_name = "Edit", .file_path = read_first, .tool_use_id = "toolu_3" });
+    // ⑶ Read 가 앞선 Edit 인데 턴 끝에 처음과 같다(되돌림).
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .pre_tool_use, .provider = "claude", .session_id = "S-late", .tool_name = "Read", .file_path = reverted, .tool_use_id = "toolu_4" });
+    _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .pre_tool_use, .provider = "claude", .session_id = "S-late", .tool_name = "Edit", .file_path = reverted, .tool_use_id = "toolu_5" });
+
+    const id = agent_ops.sealTurnCaptureNow(session, term);
+    try std.testing.expect(id != 0);
+    const sealed = session.turn_captures.sealedTurn(id) orelse return error.NoSealedTurn;
+    const e_late = sealed.entries.items[sealed.find(late).?];
+    const e_rf = sealed.entries.items[sealed.find(read_first).?];
+    const e_rev = sealed.entries.items[sealed.find(reverted).?];
+    // 옛 규칙의 결함 그대로: ⑴ 은 before==after 라 «안 바뀜».
+    try std.testing.expect(!e_late.editedByAgent());
+    try std.testing.expect(!e_late.before_trusted);
+    // 새 규칙: ⑴⑵ 겨냥, ⑶ 되돌림.
+    try std.testing.expect(e_late.editTargeted() and !e_late.revertedByAgent());
+    try std.testing.expect(e_rf.editTargeted() and e_rf.before_trusted and !e_rf.revertedByAgent());
+    try std.testing.expect(e_rev.editTargeted() and e_rev.revertedByAgent());
+
+    // 화면: 목록에 있는 ⑴⑵ 는 `✎`, ⑶ 은 `·`(되돌림 — 목록에 있다면 다른 변경이다).
+    var snap: maru.session.turn_snapshot.Snapshot = .{ .capture_id = id };
+    const Origin = chrome.components.scm_dock.types.TurnFileOrigin;
+    try std.testing.expectEqual(Origin.ai_edit, scm_dock_ops.turnFileOriginForTest(session, &snap, "late.zig"));
+    try std.testing.expectEqual(Origin.ai_edit, scm_dock_ops.turnFileOriginForTest(session, &snap, "read_first.zig"));
+    try std.testing.expectEqual(Origin.turn_change, scm_dock_ops.turnFileOriginForTest(session, &snap, "reverted.zig"));
+}
+
 // [AT3c] **원격 턴 스냅샷은 링의 저장소 키에 기계를 싣는다.** `captureTurnSnapshot` 은 테스트에서 git 을 안 돌리므로
 // (`test_allow_turn_snapshot`) 그 자리의 키 조립을 seam 으로 본다 — 기계가 빠지면 두 기계의 같은 철자 경로가 한 링에
 // 섞이고 목록 읽기가 tree 없는 기계로 간다.
@@ -29082,7 +29153,7 @@ test "훅 캡처: 원격 Term 은 경로만 적고 읽지 않는다 — 봉인�
     }
     // 편집 도구 겨냥은 목록 join 전까지 `✎` 가 아니고, 셸 diff 둘은 provider 를 믿어 `✎` 다.
     try std.testing.expectEqual(@as(u32, 2), sealed.edited_count);
-    try std.testing.expect(sealed.entries.items[sealed.find(edited).?].remoteEditTargeted());
+    try std.testing.expect(sealed.entries.items[sealed.find(edited).?].editTargeted());
     try std.testing.expect(!sealed.entries.items[sealed.find(edited).?].editedByAgent());
 
     // 같은 Term 이 원격을 벗어나면(관측이 바뀐다) 다시 읽는다 — 분기가 Term 의 «지금» 을 본다.

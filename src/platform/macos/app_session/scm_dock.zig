@@ -21,6 +21,7 @@ const metal_frame = app_session_mod.metal_frame;
 const terminal = maru.terminal; // Page/Home/End 키 이벤트 타입
 const dock_ops = @import("dock.zig");
 const git_ops = @import("git.zig");
+const agent_ops = @import("agent.zig");
 const scroll_ops = @import("scroll.zig"); // 목록 스크롤 상한(스크롤바 기하의 max_offset)
 const term_ops = @import("term.zig"); // 명령 주입 대상(활성 터미널) 판정 — P6b
 const settings_ops = @import("settings.zig"); // 컨텍스트 메뉴 열고 닫기(브랜치 메뉴와 같은 장치)
@@ -570,7 +571,7 @@ fn agentPresentWithoutIdentity(self: *AppSession) bool {
         for (tab.panes.items) |pane| {
             for (pane.terms.items) |term| {
                 if (term.surface.id != active_id) continue;
-                return term.agent_kind != .none and term.hook.transcript.identity().len == 0;
+                return term.agent_kind != .none and agent_ops.primaryHookSlot(self, term).transcript.identity().len == 0;
             }
         }
     }

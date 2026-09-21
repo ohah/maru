@@ -500,6 +500,19 @@ transcript·image_source), Term 은 `hook: HookSlot` 인라인 하나. 참조 9 
 `captureBeforeForEvent` 가 슬롯을 받는다. 증거: 캡처 게이트 56 · provider-session-removal 39 · scm-row-model 32 · remote-explorer 11 ·
 boundaries · `test-macos-only` · 전체 `zig build test` 전부 초록, 실기 e2e(tmux pane 1) 같은 그림.
 
+**조각 2·3 ✅ (2026-09-21)** — `session/remote_pane_table.zig`(순수: `(surface_id, pane)` 키, 상한 16, LRU 퇴출·`evicted`, `latestFor`,
+`dropSurface`; 판정자 3). 원격 소비자는 wire 의 `pane` 이 있으면 그 pane 의 슬롯, 없으면 인라인(구버전·tmux 밖 — 지금까지와 같다);
+**슬롯마다 `TurnBatch`** 라 한 배치에 두 pane 의 턴 끝이 섞여도 각자 봉인·스냅샷(base 도 세션마다). 집계 `hookSlotsAggregate`
+(running > blocked > idle, 자식 수·턴 순번 합)가 권위표 입력; `primaryHookSlot`(가장 최근 pane, 없으면 인라인)을 사이드바 대화·
+상태 줄·알림 본문·활동·이미지 갤러리·SCM 활성 세션이 읽는다; 알림은 인라인 → pane 순으로 꺼낸다; Term 파괴 시 그 surface 의
+슬롯을 비운다. 배선 판정자 «tmux pane 둘은 슬롯 둘 — 배지는 하나라도 running 이면 running, 턴 끝·알림은 각자»(집계 순서
+무관 포함). 뮤턴트 6: P1 pane 무시(옛 동작)·P3 배치 하나·P4 알림 인라인만·P5 대표 슬롯 늘 인라인·P6 테이블이 surface 무시 —
+잡힘; **P2 집계가 «마지막 슬롯 상태»** — 1차 생존(판정자의 순서가 우연히 맞았다) → 앞자리 running·뒷자리 idle 케이스를 더해 잡음.
+게이트: capture 57 · provider-session-removal 39 · scm-row-model 32 · remote-explorer 11 · boundaries · test-macos-only · 전체 test.
+**실기(2 pane e2e)가 잡은 것**: 훅 cwd 를 `term.hook.cwd`(인라인)에서만 읽어 tmux 안 원격 Term 의 폴더줄·원격 스냅샷이 통째로 사라졌다
+(모든 이벤트가 pane 슬롯으로 가서 인라인이 빈다) → `remoteCwd` 가 대표 슬롯을 읽고, 판정자 ⑷' 가 그것을 문다. 고친 뒤 2 pane e2e:
+폴더줄·«3개 파일 · ✎ 2»·idx 복귀.
+
 **착수 전 적대적 공격 (2026-09-21)**
 
 | # | 공격 | 결과 |

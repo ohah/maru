@@ -703,6 +703,8 @@ fn destroyTermWithAbandonBackend(
         if (o.surface_id == surface_id) self.closeMarkerPreview();
     }
     self.marker_preview.dropSurface(self.allocator, surface_id);
+    // 원격 tmux pane 슬롯도 이 Term 의 것이다(RA7 조각 2) — surface 가 죽으면 그 슬롯을 비운다(밀림으로 세지 않는다).
+    self.remote_agent_panes.dropSurface(surface_id);
     // 탭 드래그 preview는 `*Term`을 **프레임 간 캐시**하는 유일한 자리라, 다른 Term 포인터 보유 상태
     // (rename·context_menu_target)와 같은 barrier가 여기 필요하다. `cancelPointerGestureForTermRemoval`은
     // `pane.terms`에서 빼는 경로만 덮는데, **in-place 교체**(respawnEndedPlaceholder·rebuildFileTermSurface)는

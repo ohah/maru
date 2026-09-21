@@ -122,6 +122,10 @@
 
 - 판정자: 각 이유를 **주입**하면 그 이유의 알림이 뜬다 · **성공에는 안 뜬다** · 일괄 경로는 **알림이
   늘지 않는다** · ⚠️ 변이 검사: 오류를 **하나로 뭉개면** 죽어야 한다.
+- ⚠️ **헤드리스로 닫히지 않는 두 조각은 스모크가 든다** — `zig build macos-editor-save-conflict-smoke`
+  (§3.9d 「판정」). 실측(변이 셋 전부 죽었다): 충돌 검사를 지우면 `overwrote_external_change`,
+  충돌에 침묵하면 `no_notice_after_conflict`, `⌘S` 를 무동작으로 만들면 대조군이
+  `clean_save_did_not_write`.
 
 ## C1 — 저장 충돌을 선택으로 (별개 축, C0 위에)
 

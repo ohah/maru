@@ -36542,3 +36542,105 @@ test "C0a 저장 실패는 이유별로 말한다 — 하나로 뭉개면 죽는
         try testing.expect(!fx.session.chrome_host.notice.open);
     }
 }
+
+test "C0b 일괄 저장은 알림을 늘리지 않는다 — 실패한 문서는 dirty 로 남아 표식이 말한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    const io = std.testing.io;
+    try dir.dir.writeFile(io, .{ .sub_path = "bulk.txt", .data = "a\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "bulk.txt" });
+    defer allocator.free(path);
+
+    const t = try openPathInActivePane(fx.session, path);
+    t.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, t, "x"));
+
+    // **밖에서 고친다** — 다음 저장은 `ExternalConflict` 다(C0 이 그것을 처음으로 낸다).
+    try dir.dir.writeFile(io, .{ .sub_path = "bulk.txt", .data = "changed\n" });
+    fx.session.chrome_host.notice.dismiss();
+
+    // ⑴ **⌘S 는 말한다**(이유별 문구).
+    try testing.expectError(error.ExternalConflict, saveDocument(fx.session, t));
+    try testing.expect(isDirty(t)); // 실패했으니 dirty 그대로
+
+    // ⑵ **일괄 경로는 알림을 늘리지 않는다.** 그 경로가 같은 실패를 만나도 알림 수가 그대로여야 한다 —
+    //    스무 파일을 고치면 스무 개가 뜨는 것이 그 반대다(§3.9d).
+    //    여기서는 그 경로가 쓰는 술어를 직접 확인한다: 실패해도 **성공 수가 안 오르고 dirty 가 남는다**.
+    const before = fx.session.editor_workspace_edit.saved_files;
+    if (editor_ops_saveForBulkTest(fx.session, t)) |_| {
+        try testing.expect(false); // 성공하면 이 판정자가 재는 것이 없다
+    } else |e| {
+        try testing.expectEqual(@as(anyerror, error.ExternalConflict), e);
+    }
+    try testing.expectEqual(before, fx.session.editor_workspace_edit.saved_files);
+    // ⑶ **dirty 가 그 사실을 든다** — 일괄 경로의 유일한 신호다(성공 수는 사용자에게 안 보인다).
+    try testing.expect(isDirty(t));
+    const meta = editor_diff_ops.editorMeta(t);
+    try testing.expect(meta.dirty);
+}
+
+/// C0b 전용: 일괄 경로가 부르는 것과 **같은 함수**다. 그 경로를 통째로 세우려면 LSP 응답 픽스처가
+/// 필요하고, 이 판정자가 재려는 것은 「실패가 성공으로 세어지지 않는가」라 그 함수로 충분하다.
+fn editor_ops_saveForBulkTest(self: *AppSession, term: *Term) SaveError!void {
+    return saveDocument(self, term);
+}
+
+test "C0c 디스크 지문의 수명 — 두 번째 저장이 자기가 쓴 것을 「남이 바꿨다」로 읽지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    const io = std.testing.io;
+    try dir.dir.writeFile(io, .{ .sub_path = "life.txt", .data = "v0\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    pinUntitledBase(fx.session, root);
+    const path = try std.fs.path.join(allocator, &.{ root, "life.txt" });
+    defer allocator.free(path);
+
+    const t = try openPathInActivePane(fx.session, path);
+    // ⑴ **열 때 지문이 선다** — 없으면 「연 뒤 바뀌었나」를 영영 못 묻는다.
+    try testing.expect(t.rt.editor_doc.?.disk_hash != null);
+    const at_open = t.rt.editor_doc.?.disk_hash.?;
+
+    // ⑵ **저장을 두 번 이어서** — 갱신을 빠뜨리면 두 번째가 자기가 쓴 것을 「남이 바꿨다」로 읽는다.
+    t.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, t, "a"));
+    try saveDocument(fx.session, t);
+    const after_first = t.rt.editor_doc.?.disk_hash.?;
+    try testing.expect(after_first != at_open); // 갱신됐다
+    try testing.expect(insertText(fx.session, t, "b"));
+    try saveDocument(fx.session, t); // ★ 여기서 ExternalConflict 가 나면 갱신이 빠진 것이다
+    try testing.expect(!isDirty(t));
+
+    // ⑶ **밖에서 고치면 잡는다** — 그리고 그 뒤 「다시 읽지 않고」 또 저장해도 여전히 잡는다(지문이
+    //    실패로 갱신되면 두 번째 시도가 조용히 덮어쓴다).
+    try dir.dir.writeFile(io, .{ .sub_path = "life.txt", .data = "outside\n" });
+    try testing.expect(insertText(fx.session, t, "c"));
+    try testing.expectError(error.ExternalConflict, saveDocument(fx.session, t));
+    try testing.expectError(error.ExternalConflict, saveDocument(fx.session, t));
+    {
+        const on_disk = try dir.dir.readFileAlloc(io, "life.txt", allocator, .limited(64));
+        defer allocator.free(on_disk);
+        try testing.expectEqualStrings("outside\n", on_disk); // 안 덮었다
+    }
+
+    // ⑷ **이름 없는 문서는 지문이 없다**(비교할 과거가 없다) — 그래서 첫 저장이 충돌로 막히지 않는다.
+    const u = try openUntitledInActivePane(fx.session);
+    try testing.expect(u.rt.editor_doc.?.disk_hash == null);
+    try testing.expect(insertText(fx.session, u, "fresh\n"));
+    try testing.expectError(error.AskName, saveDocument(fx.session, u));
+    try fx.session.rename_input.query.appendSlice(allocator, "fresh.txt");
+    settings_ops.commitRename(fx.session);
+    try testing.expect(u.rt.editor_path != null);
+    // 이름이 붙은 뒤에는 **지문이 선다** — 안 서면 그 문서는 영영 충돌을 못 본다.
+    try testing.expect(u.rt.editor_doc.?.disk_hash != null);
+}

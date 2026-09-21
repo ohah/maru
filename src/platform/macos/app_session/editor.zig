@@ -35664,3 +35664,41 @@ test "U2m 저장을 여러 번·실패를 섞어도 새지 않는다" {
 
     // ⑷ **저장한 문서를 열어 둔 채 세션이 끝난다** — 경로 두 벌과 entry 가 같은 teardown 을 지난다.
 }
+
+test "U2n 쓰기는 됐는데 entry 를 못 붙이면 — 새지 않고, 이름도 안 붙고, 그 사실을 말한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    const io = std.testing.io;
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    pinUntitledBase(fx.session, root);
+
+    // **이 갈래는 주입해야 닿는다**(적대적 3회차: 실패 갈래의 free 를 지운 변이가 살아남았다 — 도달할
+    // 길이 없어서였다). entry id 발급기를 소진시켜 `attachEntry` 를 실패시킨다.
+    const saved_ids = app_session_mod.app_runtime.entry_ids;
+    defer app_session_mod.app_runtime.entry_ids = saved_ids;
+    app_session_mod.app_runtime.entry_ids = .{ .next_id = std.math.maxInt(maru.session.dock_panel.EntryId) };
+
+    const t = try openUntitledInActivePane(fx.session);
+    try testing.expect(insertText(fx.session, t, "written\n"));
+    try testing.expect(!saveDocument(fx.session, t));
+    try fx.session.rename_input.query.appendSlice(allocator, "orphan.txt");
+    settings_ops.commitRename(fx.session);
+
+    // ⚠️ **파일은 이미 있다** — 쓰기가 먼저이기 때문이다(그 순서의 근거는 그 함수 주석에 있다:
+    // 뒤집으면 「경로는 붙었는데 파일이 없는」 중간 상태가 생긴다). 그 대가를 여기서 못 박는다.
+    const on_disk = try dir.dir.readFileAlloc(io, "orphan.txt", allocator, .limited(64));
+    defer allocator.free(on_disk);
+    try testing.expectEqualStrings("written\n", on_disk);
+    // 그러나 **이름은 안 붙었다** — 반쪽 상태(경로는 있고 entry 는 없는)를 만들지 않는다.
+    try testing.expect(t.rt.editor_path == null);
+    try testing.expect(t.rt.editor_untitled != null);
+    try testing.expect(t.file_entry == null);
+    // 그리고 **말한다** — 조용히 실패하면 사용자는 저장된 줄 안다.
+    try testing.expect(fx.session.chrome_host.notice.open);
+    // 새 복사본은 놓았다(testing allocator 가 이 테스트 끝에서 잰다).
+}

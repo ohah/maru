@@ -168,6 +168,10 @@ pub const Action = union(enum) {
     goto_definition,
     /// 참조 피커(tooling §8.2l) — `⇧F12`.
     goto_references,
+    /// 구현·타입 정의·선언(tooling §8.2m) — 팔레트만(키는 안 맨다 — ETX4 ⑵ 와의 모순, 그 절 ③).
+    goto_implementation,
+    goto_type_definition,
+    goto_declaration,
     /// 이동 스택 뒤로/앞으로(visual-mapping §5.2 — `⌃-`·`⌃⇧-`, 편집기 Term 에서만).
     navigate_back,
     navigate_forward,
@@ -328,6 +332,9 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "show_hover")) return .show_hover;
     if (std.mem.eql(u8, value, "goto_definition")) return .goto_definition;
     if (std.mem.eql(u8, value, "goto_references")) return .goto_references;
+    if (std.mem.eql(u8, value, "goto_implementation")) return .goto_implementation;
+    if (std.mem.eql(u8, value, "goto_type_definition")) return .goto_type_definition;
+    if (std.mem.eql(u8, value, "goto_declaration")) return .goto_declaration;
     if (std.mem.eql(u8, value, "navigate_back")) return .navigate_back;
     if (std.mem.eql(u8, value, "navigate_forward")) return .navigate_forward;
     if (std.mem.eql(u8, value, "trigger_parameter_hints")) return .trigger_parameter_hints;

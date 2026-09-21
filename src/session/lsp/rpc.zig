@@ -24,11 +24,14 @@ pub const RequestId = union(enum) {
     semantic_tokens: u32,
     folding_range: u32,
     references: u32,
+    implementation: u32,
+    type_definition: u32,
+    declaration: u32,
 };
 /// 요청 id 는 **i32 안**이어야 한다(2026-09-20 실측): rust-analyzer·ruff 가 쓰는 Rust `lsp-server` 크레이트는 정수 id 를 i32 로만 읽고,
 /// 넘치면 그 메시지를 **알림으로 오인해 버린다**(`6_000_000_001` 짜리 completion 이 stderr 에 `unhandled notification` 으로만 남고 응답이
 /// 없었다 — hover·definition 만 i32 안이라 그 둘만 됐다). 종류마다 `id_span`(1e8) 칸을 갖고 seq 는 칸 안에서 돈다(`nextSeq`) —
-/// 가장 큰 칸(12e8+1e8-1) 도 i32 최대(2_147_483_647) 아래. `classify` 는 칸으로 가른다.
+/// 가장 큰 칸(15e8+1e8-1) 도 i32 최대(2_147_483_647) 아래. `classify` 는 칸으로 가른다.
 pub const id_span: u32 = 100_000_000;
 pub const initialize_id: u32 = 1;
 pub const shutdown_id: u32 = 2;
@@ -56,8 +59,12 @@ pub const semantic_tokens_id_base: u32 = 10 * id_span;
 pub const folding_range_id_base: u32 = 11 * id_span;
 /// `textDocument/references`(§8.2l)
 pub const references_id_base: u32 = 12 * id_span;
+/// `textDocument/implementation`·`typeDefinition`·`declaration`(§8.2m)
+pub const implementation_id_base: u32 = 13 * id_span;
+pub const type_definition_id_base: u32 = 14 * id_span;
+pub const declaration_id_base: u32 = 15 * id_span;
 comptime {
-    std.debug.assert(@as(u64, references_id_base) + id_span - 1 <= std.math.maxInt(i32));
+    std.debug.assert(@as(u64, declaration_id_base) + id_span - 1 <= std.math.maxInt(i32));
 }
 /// 종류별 seq 의 다음 값 — 칸 안에서 돈다(0 은 안 쓴다: 처음 보내는 요청이 `base + 1`).
 pub fn nextSeq(seq: u32) u32 {
@@ -68,7 +75,7 @@ pub fn nextSeq(seq: u32) u32 {
 fn requestIdOf(id_num: i64) ?RequestId {
     if (id_num == initialize_id) return .initialize;
     if (id_num == shutdown_id) return .shutdown;
-    if (id_num < hover_id_base or id_num >= @as(i64, references_id_base) + id_span) return null;
+    if (id_num < hover_id_base or id_num >= @as(i64, declaration_id_base) + id_span) return null;
     const slot: u32 = @intCast(@divTrunc(id_num, id_span));
     const seq: u32 = @intCast(@mod(id_num, id_span));
     return switch (slot) {
@@ -84,6 +91,9 @@ fn requestIdOf(id_num: i64) ?RequestId {
         10 => .{ .semantic_tokens = seq },
         11 => .{ .folding_range = seq },
         12 => .{ .references = seq },
+        13 => .{ .implementation = seq },
+        14 => .{ .type_definition = seq },
+        15 => .{ .declaration = seq },
         else => null,
     };
 }
@@ -137,6 +147,10 @@ pub fn initializeRequest(allocator: std.mem.Allocator, root_uri: []const u8, pid
                         .overlappingTokenSupport = false,
                     },
                     .references = .{ .dynamicRegistration = false }, // 참조 피커(§8.2l)
+                    // 구현·타입 정의·선언(§8.2m) — 같은 피커. `linkSupport` 로 `LocationLink[]` 를 받는다(tsgo 가 그것을 낸다).
+                    .implementation = .{ .dynamicRegistration = false, .linkSupport = true },
+                    .typeDefinition = .{ .dynamicRegistration = false, .linkSupport = true },
+                    .declaration = .{ .dynamicRegistration = false, .linkSupport = true },
                     // 접힘 3층(§8.2j) — 줄 접힘만, 종류 셋을 안다고 선언한다(쓰지는 않는다 — 서버가 종류 때문에 범위를 빼지 않게).
                     .foldingRange = .{
                         .lineFoldingOnly = true,
@@ -523,6 +537,65 @@ pub fn referencesRequest(allocator: std.mem.Allocator, seq: u32, uri: []const u8
         .method = "textDocument/references",
         .params = .{ .textDocument = .{ .uri = uri }, .position = .{ .line = line, .character = character }, .context = .{ .includeDeclaration = true } },
     }, .{});
+}
+
+/// 위치 목록을 내는 요청의 종류(§8.2m) — 참조 피커가 그대로 쓴다. `references` 만 `context` 를 싣는다.
+pub const LocationKind = enum {
+    references,
+    implementation,
+    type_definition,
+    declaration,
+
+    pub fn method(self: LocationKind) []const u8 {
+        return switch (self) {
+            .references => "textDocument/references",
+            .implementation => "textDocument/implementation",
+            .type_definition => "textDocument/typeDefinition",
+            .declaration => "textDocument/declaration",
+        };
+    }
+    pub fn idBase(self: LocationKind) u32 {
+        return switch (self) {
+            .references => references_id_base,
+            .implementation => implementation_id_base,
+            .type_definition => type_definition_id_base,
+            .declaration => declaration_id_base,
+        };
+    }
+    /// `initialize` 응답의 provider 이름.
+    pub fn providerKey(self: LocationKind) []const u8 {
+        return switch (self) {
+            .references => "referencesProvider",
+            .implementation => "implementationProvider",
+            .type_definition => "typeDefinitionProvider",
+            .declaration => "declarationProvider",
+        };
+    }
+};
+
+/// 위치 요청(§8.2m) — `references` 는 `referencesRequest` 와 같은 바이트, 나머지 셋은 `context` 없이.
+pub fn locationRequest(allocator: std.mem.Allocator, kind: LocationKind, seq: u32, uri: []const u8, line: u32, character: u32) error{OutOfMemory}![]u8 {
+    if (kind == .references) return referencesRequest(allocator, seq, uri, line, character);
+    return std.json.Stringify.valueAlloc(allocator, .{
+        .jsonrpc = "2.0",
+        .id = kind.idBase() + seq,
+        .method = kind.method(),
+        .params = .{ .textDocument = .{ .uri = uri }, .position = .{ .line = line, .character = character } },
+    }, .{});
+}
+
+/// 서버가 그 종류의 provider 를 냈는가(bool 또는 객체). tsgo 는 `declarationProvider` 가 없고 그래도 물으면 `-32600` 이라 **안 물어야** 한다(§8.2m ②).
+pub fn locationProviderSupported(result: ?std.json.Value, kind: LocationKind) bool {
+    const r = result orelse return false;
+    if (r != .object) return false;
+    const caps = r.object.get("capabilities") orelse return false;
+    if (caps != .object) return false;
+    const prov = caps.object.get(kind.providerKey()) orelse return false;
+    return switch (prov) {
+        .bool => |b| b,
+        .object => true,
+        else => false,
+    };
 }
 
 /// 응답의 위치 **전부**(§8.2l) — `Location[]`·`LocationLink[]`·단일 `Location`. 각 항목은 `definitionTarget` 과 같은 규칙(LocationLink 는
@@ -1298,7 +1371,7 @@ test "LSJ15 semanticTokens — initialize capability(range·full·표준 종류)
     defer p1.deinit();
     try testing.expect(classify(p1.value).response.id == .semantic_tokens and classify(p1.value).response.id.semantic_tokens == 3);
     try testing.expect(@as(u64, semantic_tokens_id_base) + id_span - 1 <= std.math.maxInt(i32));
-    var p2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":1300000000,\"result\":null}"); // 칸 밖(마지막 칸 12e8 의 다음)
+    var p2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":1600000000,\"result\":null}"); // 칸 밖(마지막 칸 15e8 의 다음)
     defer p2.deinit();
     try testing.expect(classify(p2.value) == .ignore);
 }
@@ -1318,7 +1391,7 @@ test "LSJ16 foldingRange — initialize capability(lineFoldingOnly·종류 셋)�
     var p2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":1199999999,\"result\":null}"); // 칸 끝
     defer p2.deinit();
     try testing.expect(classify(p2.value).response.id == .folding_range and classify(p2.value).response.id.folding_range == 99999999);
-    var p3 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":1300000000,\"result\":null}"); // 칸 밖
+    var p3 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":1600000000,\"result\":null}"); // 칸 밖(마지막 칸 15e8 의 다음)
     defer p3.deinit();
     try testing.expect(classify(p3.value) == .ignore);
 }
@@ -1366,7 +1439,7 @@ test "LSJ18 references — capability·요청(includeDeclaration)·id 칸(12e8)�
     defer p1.deinit();
     try testing.expect(classify(p1.value).response.id == .references and classify(p1.value).response.id.references == 9);
     try testing.expect(@as(u64, references_id_base) + id_span - 1 <= std.math.maxInt(i32));
-    var p2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":1300000000,\"result\":null}"); // 칸 밖
+    var p2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":1600000000,\"result\":null}"); // 칸 밖
     defer p2.deinit();
     try testing.expect(classify(p2.value) == .ignore);
     // 결과 세 모양: Location[] · LocationLink[](selection range 우선) · 단일 Location; 모양 아닌 항목은 뺀다; null 은 빈 목록.
@@ -1386,4 +1459,56 @@ test "LSJ18 references — capability·요청(includeDeclaration)·id 칸(12e8)�
     defer a.free(one);
     try testing.expectEqual(@as(usize, 1), one.len);
     try testing.expectEqual(@as(usize, 0), (try locationsFromResult(a, null)).len);
+}
+
+test "LSJ19 implementation·typeDefinition·declaration — capability 셋(linkSupport)·요청 셋(context 없음)·id 칸 13~15e8·classify·provider 파싱(bool·객체·없음) (§8.2m)" {
+    const a = testing.allocator;
+    const init = try initializeRequest(a, "file:///r", 42);
+    defer a.free(init);
+    try testing.expect(std.mem.indexOf(u8, init, "\"implementation\":{\"dynamicRegistration\":false,\"linkSupport\":true}") != null);
+    try testing.expect(std.mem.indexOf(u8, init, "\"typeDefinition\":{\"dynamicRegistration\":false,\"linkSupport\":true}") != null);
+    try testing.expect(std.mem.indexOf(u8, init, "\"declaration\":{\"dynamicRegistration\":false,\"linkSupport\":true}") != null);
+    const kinds = [_]struct { k: LocationKind, id: []const u8, m: []const u8 }{
+        .{ .k = .implementation, .id = "1300000004", .m = "textDocument/implementation" },
+        .{ .k = .type_definition, .id = "1400000004", .m = "textDocument/typeDefinition" },
+        .{ .k = .declaration, .id = "1500000004", .m = "textDocument/declaration" },
+    };
+    for (kinds) |kd| {
+        const req = try locationRequest(a, kd.k, 4, "file:///a.rs", 1, 7);
+        defer a.free(req);
+        var expect_buf: [256]u8 = undefined;
+        const want = try std.fmt.bufPrint(&expect_buf, "{{\"jsonrpc\":\"2.0\",\"id\":{s},\"method\":\"{s}\",\"params\":{{\"textDocument\":{{\"uri\":\"file:///a.rs\"}},\"position\":{{\"line\":1,\"character\":7}}}}}}", .{ kd.id, kd.m });
+        try testing.expectEqualStrings(want, req);
+        var resp_buf: [96]u8 = undefined;
+        const resp = try std.fmt.bufPrint(&resp_buf, "{{\"jsonrpc\":\"2.0\",\"id\":{s},\"result\":[]}}", .{kd.id});
+        var p = try parse(a, resp);
+        defer p.deinit();
+        const rid = classify(p.value).response.id;
+        try testing.expect(switch (kd.k) {
+            .implementation => rid == .implementation and rid.implementation == 4,
+            .type_definition => rid == .type_definition and rid.type_definition == 4,
+            .declaration => rid == .declaration and rid.declaration == 4,
+            .references => false,
+        });
+    }
+    // references 는 같은 함수로도 같은 바이트(context 포함).
+    const r1 = try locationRequest(a, .references, 9, "file:///a.rs", 2, 11);
+    defer a.free(r1);
+    const r2 = try referencesRequest(a, 9, "file:///a.rs", 2, 11);
+    defer a.free(r2);
+    try testing.expectEqualStrings(r2, r1);
+    try testing.expect(@as(u64, declaration_id_base) + id_span - 1 <= std.math.maxInt(i32));
+    // provider 파싱 — rust-analyzer(셋 다 true) · tsgo(declaration 없음) · 객체 꼴.
+    var ra = try parse(a, "{\"capabilities\":{\"implementationProvider\":true,\"typeDefinitionProvider\":true,\"declarationProvider\":true}}");
+    defer ra.deinit();
+    try testing.expect(locationProviderSupported(ra.value, .implementation) and locationProviderSupported(ra.value, .type_definition) and locationProviderSupported(ra.value, .declaration));
+    var ts = try parse(a, "{\"capabilities\":{\"implementationProvider\":true,\"typeDefinitionProvider\":{\"workDoneProgress\":false}}}");
+    defer ts.deinit();
+    try testing.expect(locationProviderSupported(ts.value, .implementation) and locationProviderSupported(ts.value, .type_definition));
+    try testing.expect(!locationProviderSupported(ts.value, .declaration));
+    try testing.expect(!locationProviderSupported(ts.value, .references));
+    var f = try parse(a, "{\"capabilities\":{\"declarationProvider\":false}}");
+    defer f.deinit();
+    try testing.expect(!locationProviderSupported(f.value, .declaration));
+    try testing.expect(!locationProviderSupported(null, .implementation));
 }

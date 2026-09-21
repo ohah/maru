@@ -10767,6 +10767,9 @@ pub const AppSession = struct {
             .show_hover => _ = editor_ops.hover_client.showAtCaret(self), // §8.2b — caret 자리의 호버 박스
             .goto_definition => _ = editor_ops.definition_client.gotoDefinitionAtCaret(self), // §8.2c
             .goto_references => _ = editor_ops.references_client.gotoReferencesAtCaret(self), // §8.2l
+            .goto_implementation => _ = editor_ops.references_client.gotoLocationsAtCaret(self, .implementation), // §8.2m
+            .goto_type_definition => _ = editor_ops.references_client.gotoLocationsAtCaret(self, .type_definition),
+            .goto_declaration => _ = editor_ops.references_client.gotoLocationsAtCaret(self, .declaration),
             .navigate_back => _ = editor_ops.navigateBack(self), // §5.2 — 갈 곳이 없으면 무동작
             .navigate_forward => _ = editor_ops.navigateForward(self),
             .trigger_parameter_hints => _ = editor_ops.signature_client.triggerManual(self), // §8.2d

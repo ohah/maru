@@ -736,6 +736,55 @@ fn handleReferences(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: s
     sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .result = std.json.Value{ .array = out } });
 }
 
+const KindShape = enum { tail_all, first_one };
+
+fn handleLocationKind(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: std.json.Value, shape: KindShape) void {
+    var req_uri: []const u8 = "";
+    var line_no: i64 = 0;
+    var character: i64 = 0;
+    if (obj.get("params")) |p| if (p == .object) {
+        if (p.object.get("textDocument")) |td| if (td == .object) {
+            req_uri = str(td.object.get("uri")) orelse "";
+        };
+        if (p.object.get("position")) |pos| if (pos == .object) {
+            line_no = int(pos.object.get("line")) orelse 0;
+            character = int(pos.object.get("character")) orelse 0;
+        };
+    };
+    const text = docText(req_uri);
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var out: std.json.Array = .init(arena);
+    const before = lineBefore(text, line_no, character);
+    const line_start = @intFromPtr(before.ptr) - @intFromPtr(text.ptr);
+    const caret = line_start + before.len;
+    var ws = caret;
+    var we = caret;
+    while (ws > 0 and isIdent(text[ws - 1])) ws -= 1;
+    while (we < text.len and isIdent(text[we])) we += 1;
+    if (ws < we) {
+        const mine = wordLocations(arena, text, text[ws..we], req_uri) catch return;
+        switch (shape) {
+            .tail_all => {
+                var i: usize = 1;
+                while (i < mine.items.len) : (i += 1) out.append(asLink(arena, mine.items[i]) catch return) catch return;
+            },
+            .first_one => if (mine.items.len > 0) out.append(asLink(arena, mine.items[0]) catch return) catch return,
+        }
+    }
+    sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .result = std.json.Value{ .array = out } });
+}
+
+/// `Location` → `LocationLink`(targetUri·targetRange·targetSelectionRange) — tsgo 가 내는 모양.
+fn asLink(arena: std.mem.Allocator, loc: std.json.Value) !std.json.Value {
+    var link: std.json.ObjectMap = .empty;
+    try link.put(arena, "targetUri", loc.object.get("uri").?);
+    try link.put(arena, "targetRange", loc.object.get("range").?);
+    try link.put(arena, "targetSelectionRange", loc.object.get("range").?);
+    return .{ .object = link };
+}
+
 fn wordLocations(arena: std.mem.Allocator, text: []const u8, word: []const u8, uri: []const u8) !std.json.Array {
     var locs: std.json.Array = .init(arena);
     var line_no: i64 = 0;
@@ -886,6 +935,9 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
                     // 접힘 3층(§8.2j) — `MARU_FAKE_LSP_NOFOLDCAP=1` 이면 provider 없음.
                     .foldingRangeProvider = std.c.getenv("MARU_FAKE_LSP_NOFOLDCAP") == null,
                     .referencesProvider = true, // §8.2l
+                    .implementationProvider = true, // §8.2m
+                    .typeDefinitionProvider = .{ .workDoneProgress = false }, // 객체 꼴
+                    .declarationProvider = std.c.getenv("MARU_FAKE_LSP_DECLCAP") != null, // 기본 없음(tsgo 꼴)
                     .semanticTokensProvider = if (std.c.getenv("MARU_FAKE_LSP_NOSEMCAP") == null) .{
                         .legend = .{ .tokenTypes = [_][]const u8{ "keyword", "function", "variable", "type", "bogusKind" }, .tokenModifiers = [_][]const u8{"declaration"} },
                         .range = std.c.getenv("MARU_FAKE_LSP_SEMFULL") == null,
@@ -1063,6 +1115,16 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
     }
     if (std.mem.eql(u8, method, "textDocument/references")) {
         handleReferences(allocator, obj, id.?);
+        return;
+    }
+    // 구현·타입 정의(§8.2m): 요청 자리 낱말의 위치를 **뒤에서 둘째까지**(구현 — 선언을 뺀 나머지) / **첫 것 하나**(타입 정의) `LocationLink[]` 로.
+    // `declaration` 은 `MARU_FAKE_LSP_DECLCAP=1` 일 때만 provider 를 내고 처리한다(tsgo 꼴 — 없는데 물으면 `-32600`).
+    if (std.mem.eql(u8, method, "textDocument/implementation") or std.mem.eql(u8, method, "textDocument/typeDefinition") or std.mem.eql(u8, method, "textDocument/declaration")) {
+        if (std.mem.eql(u8, method, "textDocument/declaration") and std.c.getenv("MARU_FAKE_LSP_DECLCAP") == null) {
+            sendJson(allocator, .{ .jsonrpc = "2.0", .id = id.?, .@"error" = .{ .code = @as(i32, -32600), .message = "InvalidRequest" } });
+            return;
+        }
+        handleLocationKind(allocator, obj, id.?, if (std.mem.eql(u8, method, "textDocument/implementation")) .tail_all else .first_one);
         return;
     }
     if (std.mem.eql(u8, method, "textDocument/definition")) {

@@ -34540,3 +34540,50 @@ test "U1i 이름 없는 문서가 clean 이면 닫기 확인이 아예 안 뜬�
     fx.session.requestClose(.active_term);
     try testing.expect(!fx.session.chrome_host.confirm.open); // 그래서 **아무 문구도 안 뜬다**
 }
+
+test "U1j 여러 번 열고 닫아도 새지 않고, 실패해도 번호만 쓰고 끝난다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator; // 이 allocator 가 누수·이중 해제를 잡는다
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+
+    // ⑴ **열고 닫기를 되풀이한다.** `prepareUntitled` 가 만든 문서·줄 배열의 소유가 Term 으로 넘어가고
+    //    `releaseEditorTerm` 이 같은 것을 놓는지 — 한쪽만 틀리면 누수나 이중 해제다.
+    const pane = pane_ops.activePane(fx.session);
+    var round: usize = 0;
+    while (round < 5) : (round += 1) {
+        const t = try openUntitledInActivePane(fx.session);
+        try testing.expect(insertText(fx.session, t, "abc\ndef\n")); // 줄 배열이 다시 서게 만든다
+        var idx: usize = pane.terms.items.len;
+        while (idx > 0) {
+            idx -= 1;
+            if (pane.terms.items[idx] == t) break;
+        }
+        term_ops.closeTermAt(fx.session, fx.session.app_window.active_tab, pane, idx);
+    }
+    // 번호는 다섯을 썼다 — 닫아도 돌려주지 않는다.
+    try testing.expectEqual(@as(u32, 5), app_session_mod.app_runtime.untitled_docs.last);
+
+    // ⑵ **문서를 열어 둔 채 세션이 끝나도** 같은 해제 경로를 지난다(`deinit` → `destroyTerm` →
+    //    `releaseEditorTerm`). 이 Term 은 닫지 않고 둔다 — `fx.deinit` 이 그 길을 밟는다.
+    _ = try openUntitledInActivePane(fx.session);
+}
+
+test "U1k 이름이 붙은 적 없는 문서는 붙여넣기·되돌리기도 정상이다 — 경로를 묻는 길이 섞여 있지 않다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+
+    const t = try openUntitledInActivePane(fx.session);
+    // 붙여넣기는 경로를 묻지 않아야 한다(파일 경로 기반 판정이 끼면 여기서 조용히 안 먹는다).
+    try testing.expect(pasteText(fx.session, t, "hello\nworld\n"));
+    try testing.expectEqualStrings("hello\nworld\n", t.rt.editor_doc.?.file.content);
+    try testing.expect(isDirty(t));
+    // 되돌리면 빈 문서로 돌아오고 **clean 이 된다** — 저장 해시가 「빈 문서」였기 때문이다.
+    try testing.expect(undoEdit(fx.session, t));
+    try testing.expectEqualStrings("", t.rt.editor_doc.?.file.content);
+    try testing.expect(!isDirty(t));
+    // 이름은 그대로다 — 되돌리기가 문서 정체성을 건드리지 않는다.
+    try testing.expectEqualStrings("untitled-1", app_session_mod.termLabel(t));
+}

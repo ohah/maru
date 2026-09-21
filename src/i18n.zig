@@ -106,6 +106,10 @@ const Table = struct {
     editor_untitled_written_not_adopted: [:0]const u8,
     editor_save_gone: [:0]const u8,
     editor_save_external_conflict: [:0]const u8,
+    /// 네이티브 편집기의 저장 충돌 **선택**(C1a). `editor_save_external_conflict` 는 브리지(CM6)
+    /// 표면이 계속 쓴다 — 그쪽은 고를 것이 없어 알리기만 한다(§3.9d 「브리지 문구를 재사용하지 않는다」).
+    /// **무엇이 사라지는지** 양쪽 다 적는다: 안 적으면 사용자는 자기가 무엇을 잃는지 모르고 고른다.
+    editor_save_conflict_choose: [:0]const u8,
     editor_untitled_overwrite: [:0]const u8,
     git_conflict_not_editable: [:0]const u8,
     git_conflict_open_failed: [:0]const u8,
@@ -257,6 +261,10 @@ const Table = struct {
     btn_quit_end_session: [:0]const u8,
     btn_reset: [:0]const u8,
     btn_reload: [:0]const u8,
+    btn_overwrite: [:0]const u8,
+    /// 저장 충돌의 **취소**. 「취소」라고만 하면 *무엇이* 취소인지 모른다 — 저장이 취소된 것이지
+    /// 편집이 취소된 것이 아니다(C1a — editor-surface.md §4).
+    btn_keep_editing: [:0]const u8,
     btn_move_to_trash: [:0]const u8,
     btn_delete_forever: [:0]const u8,
     btn_discard_changes: [:0]const u8,
@@ -1064,6 +1072,7 @@ const en: Table = .{
     .editor_untitled_written_not_adopted = "The file was written but this tab could not be linked to it. Save again with the same name to continue.",
     .editor_save_gone = "The file is no longer there, so it cannot be saved.",
     .editor_save_external_conflict = "The file changed outside, so nothing was saved. Your edits are still here.",
+    .editor_save_conflict_choose = "The file changed outside. Overwrite discards that change; Reload discards what you just typed (undo brings it back).",
     .editor_untitled_overwrite = "That file already exists. Overwrite it?",
     .git_conflict_not_editable = "This file cannot be opened in the editor — resolve the conflict with another tool",
     .git_conflict_open_failed = "Could not open that file",
@@ -1201,6 +1210,8 @@ const en: Table = .{
     .btn_quit_end_session = "Quit and end sessions",
     .btn_reset = "Reset",
     .btn_reload = "Reload",
+    .btn_overwrite = "Overwrite",
+    .btn_keep_editing = "Keep editing",
     .btn_move_to_trash = "Move to Trash",
     .btn_delete_forever = "Delete permanently",
     .btn_discard_changes = "Discard changes",
@@ -1782,6 +1793,7 @@ const ko: Table = .{
     .editor_untitled_written_not_adopted = "파일은 만들어졌지만 이 탭에 연결하지 못했습니다. 같은 이름으로 다시 저장하면 이어집니다",
     .editor_save_gone = "그 파일이 더 이상 없어서 저장할 수 없습니다",
     .editor_save_external_conflict = "파일이 외부에서 바뀌어 아무것도 저장하지 않았습니다. 편집한 내용은 그대로 있습니다",
+    .editor_save_conflict_choose = "파일이 외부에서 바뀌었습니다. 덮어쓰면 그 변경이, 다시 읽으면 방금 친 것이 사라집니다(되돌리기로 돌아옵니다)",
     .editor_untitled_overwrite = "그 파일이 이미 있습니다. 덮어쓸까요?",
     .git_conflict_not_editable = "이 파일은 편집기에서 열 수 없습니다 — 다른 도구로 충돌을 해결하세요",
     .git_conflict_open_failed = "그 파일을 열지 못했습니다",
@@ -1919,6 +1931,8 @@ const ko: Table = .{
     .btn_quit_end_session = "종료 및 세션 끝내기",
     .btn_reset = "초기화",
     .btn_reload = "다시 읽기",
+    .btn_overwrite = "덮어쓰기",
+    .btn_keep_editing = "계속 편집",
     .btn_move_to_trash = "휴지통으로 이동",
     .btn_delete_forever = "영구 삭제",
     .btn_discard_changes = "변경사항 버리기",

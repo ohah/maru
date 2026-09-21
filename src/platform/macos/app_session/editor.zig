@@ -35785,6 +35785,12 @@ test "U2p 이름 상자가 떠 있는 동안 그 Term 이 닫히면 — 확정�
     try testing.expect(insertText(fx.session, t, "gone\n"));
     try testing.expect(!saveDocument(fx.session, t));
 
+    // **두 술어는 다른 질문이다.** `renameTargetsTerm` 은 「이 Term 이 사라지면 접을까」(teardown)이고
+    // `renamingTerm` 은 「탭 바에 인라인 편집기를 그릴까」다. 섞으면 팝업 상자를 쓰는 rename 에서
+    // **탭 바가 인라인 편집기까지 그린다** — 같은 이름이 두 자리에 뜬다(적대적 10회차의 변이가 그 자리다).
+    try testing.expect(term_ops.renameTargetsTerm(fx.session, t));
+    try testing.expect(!term_ops.renamingTerm(fx.session, t));
+
     // 그 Term 을 닫는다 — `RenameTarget` 이 **포인터가 아니라 surface_id** 인 이유가 이 자리다.
     var idx: usize = pane.terms.items.len;
     while (idx > 0) {
@@ -35792,6 +35798,11 @@ test "U2p 이름 상자가 떠 있는 동안 그 Term 이 닫히면 — 확정�
         if (pane.terms.items[idx] == t) break;
     }
     term_ops.closeTermAt(fx.session, fx.session.app_window.active_tab, pane, idx);
+
+    // **rename 자체가 접혔다** — 안 접으면 상자는 안 그려지는데 모달이 키를 계속 먹어, 사용자는 타이핑이
+    // 아무 데도 닿지 않는 것을 본다(적대적 10회차).
+    try testing.expect(fx.session.rename == null);
+    try testing.expect(!fx.session.chrome_host.rename_box.open);
 
     // 확정해도 **아무 일도 안 일어난다**(파일도 안 생긴다) — 낡은 포인터를 만지지 않는다.
     try fx.session.rename_input.query.appendSlice(allocator, "ghost.txt");

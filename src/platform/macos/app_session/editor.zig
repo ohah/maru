@@ -36184,3 +36184,63 @@ test "U2B 덮어쓰기 확인이 떠 있는데 그 문서를 닫으면 — 확�
     defer allocator.free(still);
     try testing.expectEqualStrings("old\n", still);
 }
+
+test "U2C 제품 키 경로: Enter 가 확정하고 Esc 가 취소하며 클릭-어웨이는 «취소»다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    const io = std.testing.io;
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    pinUntitledBase(fx.session, root);
+
+    // **여기까지의 판정자는 `commitRename` 을 직접 불렀다** — 그러면 키가 그 함수까지 닿는지는 판정 밖이다.
+    // 이 판정자는 **키 이벤트로** 글자를 넣고 Enter 로 확정한다(적대적 16회차).
+    const typeName = struct {
+        fn f(s: *AppSession, name: []const u8) void {
+            for (name) |c| settings_ops.handleRenameKey(s, .{ .key = .{ .key = .char, .codepoint = c } });
+        }
+    }.f;
+
+    // ⑴ **Enter = 확정.**
+    {
+        const t = try openUntitledInActivePane(fx.session);
+        try testing.expect(insertText(fx.session, t, "one\n"));
+        try testing.expect(!saveDocument(fx.session, t));
+        typeName(fx.session, "k1.txt");
+        try testing.expectEqualStrings("k1.txt", fx.session.rename_input.query.items);
+        settings_ops.handleRenameKey(fx.session, .{ .key = .{ .key = .enter } });
+        try testing.expect(t.rt.editor_path != null);
+        const got = try dir.dir.readFileAlloc(io, "k1.txt", allocator, .limited(64));
+        defer allocator.free(got);
+        try testing.expectEqualStrings("one\n", got);
+    }
+
+    // ⑵ **Esc = 취소.**
+    {
+        const t = try openUntitledInActivePane(fx.session);
+        try testing.expect(insertText(fx.session, t, "two\n"));
+        try testing.expect(!saveDocument(fx.session, t));
+        typeName(fx.session, "k2.txt");
+        settings_ops.handleRenameKey(fx.session, .{ .key = .{ .key = .escape } });
+        try testing.expect(fx.session.rename == null);
+        try testing.expect(t.rt.editor_path == null);
+        try testing.expectError(error.FileNotFound, dir.dir.access(io, "k2.txt", .{}));
+    }
+
+    // ⑶ **클릭-어웨이 = 취소.** 인라인 rename 은 포커스 상실이 확정이지만, 저장 상자에서 확정하면
+    //    **반쯤 친 이름으로 파일이 만들어진다** — 사용자가 의도하지 않은 파일이 디스크에 남는다.
+    {
+        const t = try openUntitledInActivePane(fx.session);
+        try testing.expect(insertText(fx.session, t, "three\n"));
+        try testing.expect(!saveDocument(fx.session, t));
+        typeName(fx.session, "half"); // 아직 다 안 쳤다
+            fx.session.mouse(1, 10, 10, 0, 0); // down — 어딘가를 클릭
+        try testing.expect(fx.session.rename == null);
+        try testing.expect(t.rt.editor_path == null);
+        try testing.expectError(error.FileNotFound, dir.dir.access(io, "half", .{}));
+    }
+}

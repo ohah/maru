@@ -14763,7 +14763,7 @@ test "SAV1 didSave — 저장이 디스크 쓰기 뒤 서버에 통지하고, �
     const changes0 = s.editor_lsp.sent_changes;
     term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };
     try testing.expect(insertText(s, term, "//"));
-    try testing.expect(saveDocument(s, term));
+    try saveDocument(s, term);
     try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_saves);
     try testing.expectEqual(changes0 + 1, s.editor_lsp.sent_changes); // 밀린 didChange 하나가 통지 앞에 갔다
     try testing.expect(pumpLspUntil(&f.fx, 3000, term, struct {
@@ -14779,7 +14779,7 @@ test "SAV1 didSave — 저장이 디스크 쓰기 뒤 서버에 통지하고, �
     try testing.expectEqualStrings("//int x;\nint y;\n", on_disk);
     // ⑶ 변경 없는 저장 — didChange 는 안 가고 통지는 간다.
     const changes1 = s.editor_lsp.sent_changes;
-    try testing.expect(saveDocument(s, term));
+    try saveDocument(s, term);
     try testing.expectEqual(@as(u64, 2), s.editor_lsp.sent_saves);
     try testing.expectEqual(changes1, s.editor_lsp.sent_changes);
 }
@@ -14797,7 +14797,7 @@ test "SAV2 didSave — 서버가 save 를 선언하지 않으면(숫자 꼴 text
         try testing.expect(f.ready());
         term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };
         try testing.expect(insertText(s, term, "//"));
-        try testing.expect(saveDocument(s, term));
+        try saveDocument(s, term);
         try testing.expectEqual(@as(u64, 0), s.editor_lsp.sent_saves);
         try testing.expect(pumpLspUntil(&f.fx, 3000, term, struct {
             fn g(t: *Term) bool {
@@ -14816,7 +14816,7 @@ test "SAV2 didSave — 서버가 save 를 선언하지 않으면(숫자 꼴 text
         s.loaded_config.config.lsp.enabled = false;
         term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };
         try testing.expect(insertText(s, term, "//"));
-        try testing.expect(saveDocument(s, term));
+        try saveDocument(s, term);
         try testing.expectEqual(@as(u64, 0), s.editor_lsp.sent_saves);
         try testing.expect(!isDirty(term));
         s.loaded_config.config.lsp.enabled = true;
@@ -14827,7 +14827,7 @@ test "SAV2 didSave — 서버가 save 를 선언하지 않으면(숫자 꼴 text
         s.loaded_config.config.lsp.enabled = false;
         const changes_off = s.editor_lsp.sent_changes;
         try testing.expect(insertText(s, term, "/"));
-        try testing.expect(saveDocument(s, term));
+        try saveDocument(s, term);
         try testing.expectEqual(@as(u64, 0), s.editor_lsp.sent_saves);
         try testing.expectEqual(changes_off, s.editor_lsp.sent_changes);
         s.loaded_config.config.lsp.enabled = true;

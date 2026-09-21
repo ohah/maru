@@ -12718,3 +12718,41 @@ test "이름 없는 문서 저장: 디스크에 쓰는 자리 둘, 이름을 붙
     //    적으면 한쪽이 낡는다.
     try std.testing.expectEqual(@as(usize, 1), countOf(save, "std.mem.indexOfScalar(u8, norm, 0)"));
 }
+
+test "저장 실패 문구 표는 «둘이고 그 이유가 적혀 있다»" {
+    // **계약**: docs/native-editor-document-model.md §3.9d.
+    //
+    // 같은 오류 집합(`FilePanelWriteError`)에 문구 표가 둘이다 — 브리지 표면과 네이티브 편집기. 겹쳐
+    // 보이지만 **합치면 한쪽이 거짓**이 된다: 브리지는 「다시 불러온 뒤 저장하세요」가 참이고(host 가
+    // 웹 패널에 reload 를 보낸다) 네이티브는 그 길이 없다. 그래서 **둘인 것과 그 근거가 적혀 있는 것**을
+    // 함께 센다 — 근거가 사라지면 다음 사람이 중복으로 보고 합친다.
+    const allocator = std.testing.allocator;
+    const app_session = try readZigFileZ(allocator, "src/platform/macos/app_session.zig");
+    defer allocator.free(app_session);
+    const editor = try readZigFileZ(allocator, "src/platform/macos/app_session/editor.zig");
+    defer allocator.free(editor);
+
+    const countOf2 = struct {
+        fn f(hay: []const u8, needle: []const u8) usize {
+            var n: usize = 0;
+            var i: usize = 0;
+            while (std.mem.indexOfPos(u8, hay, i, needle)) |at| : (i = at + needle.len) n += 1;
+            return n;
+        }
+    }.f;
+
+    // ⑴ **브리지 표는 브리지 문구를 쓴다**(그쪽은 그 문장이 참이다).
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOf2(app_session, "error.ExternalConflict => .app_save_external_conflict,"),
+    );
+    // ⑵ **네이티브 표는 자기 문구를 쓴다** — 브리지 것을 쓰면 할 수 없는 일을 지시한다.
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOf2(editor, "error.ExternalConflict => .editor_save_external_conflict,"),
+    );
+    try std.testing.expectEqual(@as(usize, 0), countOf2(editor, "=> .app_save_external_conflict,"));
+    // ⑶ **둘 다 서로를 가리키는 근거를 든다** — 없으면 합쳐진다.
+    try std.testing.expect(std.mem.indexOf(u8, app_session, "네이티브 편집기의 것과 합치지 말 것") != null);
+    try std.testing.expect(std.mem.indexOf(u8, editor, "일부러 둘이다") != null);
+}

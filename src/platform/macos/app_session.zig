@@ -11250,6 +11250,10 @@ pub const AppSession = struct {
         if (self.pending_file_panel_close) |pending| {
             if (pending.surface_id == surface_id and pending.phase == .saving) return;
         }
+        // ⚠️ **이 표는 «브리지 표면 전용»이다 — 네이티브 편집기의 것과 합치지 말 것**(§3.9d).
+        // 둘이 다른 이유는 하나다: **여기서는 「다시 불러오기」가 실제로 된다**(host 가 웹 패널에
+        // reload 를 보낸다). 네이티브 Term 은 그 표에 없어 같은 문장이 **할 수 없는 일을 지시**한다 —
+        // 그래서 그쪽은 `editor_ops.saveFailureNoticeKey` 가 자기 문구를 든다. 합치면 한쪽이 거짓이 된다.
         self.showNoticeKey(switch (err) {
             error.ExternalConflict => .app_save_external_conflict,
             error.TooLarge => .app_save_too_large,

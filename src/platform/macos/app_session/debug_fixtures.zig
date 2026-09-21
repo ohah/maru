@@ -1297,7 +1297,20 @@ pub fn applyForcedReplaceSave(self: *AppSession) void {
     const at: u32 = @intCast(std.mem.indexOf(u8, doc.file.content, needle) orelse return);
     term.rt.editor_selection = .{ .anchor_start = at, .anchor_end = at + @as(u32, @intCast(needle.len)), .focus = at + @as(u32, @intCast(needle.len)) };
     if (!editor_ops.insertText(self, term, replacement)) return;
-    _ = editor_ops.saveDocument(self, term);
+    // **저장이 실패하면 래치를 걸지 않는다.** 이 픽스처가 보여 주려는 것은 「고치고 저장하면 진단이
+    // 지워지는가」라, 저장이 안 된 판을 「했다」고 걸어 두면 캡처가 **없는 것을 증명한다**. 이유는
+    // 화면이 이미 말한다(§3.9d — 디스패치와 같은 표로 알림이 뜬다) — 여기서 문구를 다시 고르면
+    // 그 표가 둘이 된다.
+    editor_ops.saveDocument(self, term) catch |e| switch (e) {
+        // 이 픽스처는 **경로가 있는 문서**에 편집기 Term 으로 서므로 이 셋은 올 수 없다. 그래도
+        // `else` 로 뭉개지 않는다 — 뭉개면 나중에 진짜 이유가 하나 늘었을 때 그것이 「알 수 없음」으로
+        // 조용히 빠진다(§3.9d 가 막으려는 바로 그것이다).
+        error.AskName, error.NotAnEditor, error.ReadOnly => return,
+        else => {
+            self.showNoticeKey(editor_ops.saveFailureNoticeKey(@errorCast(e)));
+            return;
+        },
+    };
     self.debug_replace_save_done = true;
     self.debug_diff_caret_keys_done = true;
 }

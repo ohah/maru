@@ -35852,12 +35852,24 @@ test "U2u 재진입: 상자가 떠 있는데 또 ⌘S · 확인 중에 또 저�
     _ = saveDocument(fx.session, b);
     try testing.expectEqual(held, fx.session.pending_untitled_save.path_len);
 
-    // ⑷ 수락하면 **처음 고른 문서**가 그 파일을 갖는다 — b 는 여전히 이름이 없다.
+    // ⑷ **다른 문서를 닫아도 이 확인은 살아남는다.** teardown 이 확인을 접는 조건에 `surface_id` 비교가
+    //    없으면 남의 확인까지 접혀, 사용자가 누르려던 물음이 사라진다(적대적 15회차의 변이가 그 자리다).
+    {
+        const pane = pane_ops.activePane(fx.session);
+        var idx: usize = pane.terms.items.len;
+        while (idx > 0) {
+            idx -= 1;
+            if (pane.terms.items[idx] == b) break;
+        }
+        term_ops.closeTermAt(fx.session, fx.session.app_window.active_tab, pane, idx);
+    }
+    try testing.expect(fx.session.pending_confirm == .untitled_overwrite);
+    try testing.expectEqual(held, fx.session.pending_untitled_save.path_len);
+
+    // ⑸ 수락하면 **처음 고른 문서**가 그 파일을 갖는다.
     fx.session.dispatchChromeAction(.confirm_accept);
     try testing.expect(a.rt.editor_path != null);
     try testing.expect(std.mem.endsWith(u8, a.rt.editor_path.?, "/exists.txt"));
-    try testing.expect(b.rt.editor_path == null);
-    try testing.expect(b.rt.editor_untitled != null);
     const got = try dir.dir.readFileAlloc(io, "exists.txt", allocator, .limited(64));
     defer allocator.free(got);
     try testing.expectEqualStrings("A\n", got);
@@ -36130,4 +36142,45 @@ test "U2z 저장 상한은 두 경로가 같다 — 만들 수 있는데 다시 
     try fx.session.rename_input.query.appendSlice(allocator, "small.txt");
     settings_ops.commitRename(fx.session);
     try testing.expect(ok_doc.rt.editor_path != null);
+}
+
+test "U2B 덮어쓰기 확인이 떠 있는데 그 문서를 닫으면 — 확인도 접힌다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    const io = std.testing.io;
+    try dir.dir.writeFile(io, .{ .sub_path = "target.txt", .data = "old\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    pinUntitledBase(fx.session, root);
+
+    const pane = pane_ops.activePane(fx.session);
+    const t = try openUntitledInActivePane(fx.session);
+    try testing.expect(insertText(fx.session, t, "new\n"));
+    try testing.expect(!saveDocument(fx.session, t));
+    try fx.session.rename_input.query.appendSlice(allocator, "target.txt");
+    settings_ops.commitRename(fx.session);
+    try testing.expect(fx.session.pending_confirm == .untitled_overwrite);
+    try testing.expect(fx.session.chrome_host.confirm.open);
+
+    // 그 문서를 닫는다. **확인도 접혀야 한다** — 안 접으면 「덮어쓸까요?」가 남아 있고, 수락해도
+    // 대상이 없어 **조용히 아무 일도 안 한다**(사용자는 눌렀는데 아무 반응이 없다). 적대적 15회차의
+    // 「모든 조기 반환이 말을 하는가」 감사에서 드러났다.
+    var idx: usize = pane.terms.items.len;
+    while (idx > 0) {
+        idx -= 1;
+        if (pane.terms.items[idx] == t) break;
+    }
+    term_ops.closeTermAt(fx.session, fx.session.app_window.active_tab, pane, idx);
+
+    try testing.expect(fx.session.pending_confirm == .none);
+    try testing.expect(!fx.session.chrome_host.confirm.open);
+    try testing.expectEqual(@as(usize, 0), fx.session.pending_untitled_save.path_len);
+    // 파일도 그대로다.
+    const still = try dir.dir.readFileAlloc(io, "target.txt", allocator, .limited(64));
+    defer allocator.free(still);
+    try testing.expectEqualStrings("old\n", still);
 }

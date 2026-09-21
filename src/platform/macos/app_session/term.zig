@@ -747,6 +747,16 @@ fn destroyTermWithAbandonBackend(
         self.rename_input.clear();
         self.chrome_host.rename_box.hide();
     }
+    // **이름 없는 문서의 덮어쓰기 확인도 접는다**(U2). 대상이 사라지면 「덮어쓸까요?」가 남아 있고,
+    // 수락해도 대상을 못 찾아 **조용히 아무 일도 안 한다** — 사용자는 눌렀는데 아무 반응이 없는 것을
+    // 본다. 들고 있던 경로도 함께 비운다: 안 비우면 다음 확인이 옛 경로에 쓴다.
+    if (self.pending_confirm == .untitled_overwrite and
+        self.pending_confirm.untitled_overwrite == term.surface.id)
+    {
+        self.pending_confirm = .none;
+        self.pending_untitled_save = .{};
+        self.chrome_host.confirm.dismiss();
+    }
     // 컨텍스트 메뉴 대상이 이 Term이면 메뉴를 닫고 대상을 비운다(stale 포인터 방지).
     if (self.context_menu_target) |t| if (std.meta.activeTag(t) == .term and t.term == term) {
         self.context_menu_target = null;

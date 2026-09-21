@@ -252,6 +252,10 @@ run = "zig build macos-session-host-cr6e-c3c-sample-set -Doptimize=ReleaseFast"
 description = "Run the visible AppKit Codex archive action fixture"
 run = "zig build macos-agent-session-archive-smoke"
 
+[tasks.macos-editor-save-conflict-smoke]
+description = "Run the AppKit native-editor save-conflict fixture"
+run = "zig build macos-editor-save-conflict-smoke"
+
 [tasks.test-dock-visual-golden]
 description = "Compare Session Dock smoke captures against committed golden images"
 run = "zig build test-dock-visual-golden"

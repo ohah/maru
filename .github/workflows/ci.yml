@@ -525,6 +525,57 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+  editor-save-conflict-macos:
+    name: editor save conflict macOS
+    needs: changes
+    # **왜 새 잡인가.** 바로 위 `agent session archive macOS` 가 그 이유를 이미 적어 두었다: 잡 이름이
+    # 곧 귀책이라, 번들을 이미 만드는 잡에 얹으면 편집기 저장 회귀가 「그 잡이 빨갛다」로 보고된다.
+    # 그리고 손으로만 도는 게이트는 결국 안 돈다.
+    #
+    # **이 스모크만 보는 것**: `⌘S` 가 `keyDown` 의 chord 우회를 지나 저장 디스패치에 닿는가, 그리고
+    # 밖에서 바뀐 파일을 **안 덮는가**(docs/native-editor-document-model.md §3.9d 「판정」). 헤드리스
+    # 판정자는 그 둘을 볼 수 없다 — 하나는 AppKit 키 배달이고 하나는 디스크의 사실이다.
+    #
+    # **wall-clock 은 안 늘어난다**: macOS 잡은 병렬이고 임계경로는 `file explorer` 다. 이 잡은 번들
+    # 빌드 + 스모크 두 판(실측 약 30초, 웜 캐시 로컬)으로 그 그늘에 들어간다.
+    if: ${{ github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') }}
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        with:
+          version: 2026.2.7
+          sha256: f8becf318705e1bd91227ed0efee4f9fd988d1d5c66bb48e996f030792a0d3b7 # macos-arm64 binary
+          cache_save: false
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            .zig-cache
+            ~/.cache/zig
+          key: zig-v2-${{ runner.os }}-editor-save-conflict-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
+          restore-keys: |
+            zig-v2-${{ runner.os }}-editor-save-conflict-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-
+            zig-v2-${{ runner.os }}-editor-save-conflict-
+      # 앱 번들 빌드가 `web:build` 를 타므로 웹 의존성이 먼저 있어야 한다(위 잡들과 같은 이유·같은 명령).
+      - name: 웹 의존성 설치
+        run: bun install --cwd web --frozen-lockfile
+      # 격리 HOME 의 cold AppKit 프로세스 둘이 **자기가 만든 텍스트 파일 하나**만 읽고 쓴다. 사용자
+      # 파일·네트워크·실제 HOME 에는 닿지 않고, summary 에는 단계 이름과 시나리오 이름만 남는다.
+      - name: 편집기 저장 충돌 스모크
+        run: mise run macos-editor-save-conflict-smoke
+      # 실패하면 **어디서 멈췄는지**가 summary 에 있다(`editor_save_conflict_smoke_stage` · `_failure`).
+      - name: Upload editor save-conflict smoke artifacts
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: maru-editor-save-conflict-smoke
+          path: zig-out/maru-editor-save-conflict-smoke
+          if-no-files-found: warn
+          retention-days: 14
+
   session-host-macos-debug:
     name: session host macOS (Debug)
     needs: changes

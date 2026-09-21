@@ -10725,7 +10725,12 @@ pub const AppSession = struct {
             ),
             .editor_undo => _ = editor_ops.undoEdit(self, pane_ops.activePane(self).activeTerm()),
             .editor_redo => _ = editor_ops.redoEdit(self, pane_ops.activePane(self).activeTerm()),
-            .editor_save => _ = editor_ops.saveDocument(self, pane_ops.activePane(self).activeTerm()),
+            // **저장 실패는 이유별로 말한다**(§3.9d) — 예전에는 `_ =` 로 결과를 통째로 버려 사용자가
+            // `⌘S` 를 누르고 아무 일도 없는 것을 봤다. `AskName` 은 실패가 아니라 「이름을 물었다」다.
+            .editor_save => editor_ops.saveDocument(self, pane_ops.activePane(self).activeTerm()) catch |e| switch (e) {
+                error.AskName, error.NotAnEditor => {},
+                else => self.showNoticeKey(editor_ops.saveFailureNoticeKey(@errorCast(e))),
+            },
             .fold_all => _ = editor_ops.foldAll(self),
             .unfold_all => _ = editor_ops.unfoldAll(self),
             // 레벨 접기 — 그 레벨에 블록이 없으면 무동작이다(빈 집합을 넣어 화면이 펼쳐지지 않게).
@@ -66591,7 +66596,7 @@ test "U2A 저장 뒤 컨트롤 플레인·사이드바가 같은 사실을 말�
 
     const t = try editor_ops.openUntitledInActivePane(session);
     try std.testing.expect(editor_ops.insertText(session, t, "saved body\n"));
-    try std.testing.expect(!editor_ops.saveDocument(session, t));
+    try std.testing.expectError(error.AskName, editor_ops.saveDocument(session, t));
     try session.rename_input.query.appendSlice(allocator, "outward.txt");
     settings_ops.commitRename(session);
     try std.testing.expect(t.rt.editor_path != null);

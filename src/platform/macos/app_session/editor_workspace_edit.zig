@@ -239,12 +239,14 @@ fn applyPlan(self: *AppSession, items: []Item) Outcome {
                 applied_inv.deinit();
                 const bytes = d.opened.file.saveBytes(self.allocator) catch return .{ .refused = .out_of_memory };
                 defer self.allocator.free(bytes);
-                if (!editor_ops.writeDocumentBytes(self, item.path, bytes)) {
+                // ⚠️ **일괄 경로는 파일마다 알림을 띄우지 않는다**(§3.9d) — 스무 파일을 고치면 스무
+                // 개가 뜬다. 이유는 여기서 버리고, 그 자리의 요약이 「몇 개가 됐나」로 말한다.
+                editor_ops.writeDocumentBytes(self, item.path, bytes, null) catch {
                     var i = inv;
                     i.deinit(self.allocator);
                     failed_write = keepPath(item.path);
                     break;
-                }
+                };
                 any = true;
                 edits_total += d.changes.items.len;
                 inverse = inv;
@@ -265,7 +267,12 @@ fn applyPlan(self: *AppSession, items: []Item) Outcome {
         for (items) |*item| {
             for (item.open) |o| {
                 if (o.changes.items.len == 0) continue;
-                if (editor_ops.isDirty(o.term) and editor_ops.saveDocument(self, o.term)) st.saved_files += 1;
+                // 일괄 경로 — 이유는 여기서 버린다(§3.9d: 파일마다 알림을 띄우지 않는다). 성공만 센다.
+                if (editor_ops.isDirty(o.term)) {
+                    if (editor_ops.saveDocument(self, o.term)) |_| {
+                        st.saved_files += 1;
+                    } else |_| {}
+                }
             }
         }
     }

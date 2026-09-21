@@ -118,6 +118,14 @@ pub const Opened = struct {
     /// 자체는 내용을 그대로 쓴다.
     saved_hash: u64,
 
+    /// **마지막으로 본 «디스크» 내용의 지문**(§3.9d). `saved_hash` 가 「우리 내용」이라면 이것은
+    /// 「그때 파일에 있던 것」이다 — 둘은 다른 질문이고, 이 값이 없으면 **연 뒤 남이 고친 것을 알 수
+    /// 없다**. 예전에는 그 검사가 아예 없어 `ExternalConflict` 가 네이티브에서 **도달 불가**였다:
+    /// 쓰기 직전 CAS 는 「쓰는 동안」의 변경만 막고, 「연 뒤」의 변경은 그 앞에서 지나간다.
+    ///
+    /// `null` 은 「아직 디스크를 본 적 없다」(이름 없는 문서) — 그때는 비교할 것이 없다.
+    disk_hash: ?u64 = null,
+
     /// 지금 내용이 마지막 저장과 다른가.
     pub fn isDirty(self: Opened) bool {
         return contentHash(self.file.content) != self.saved_hash;
@@ -161,7 +169,9 @@ pub fn openPath(io: std.Io, allocator: std.mem.Allocator, path: []const u8) Open
         error.OutOfMemory => return error.OutOfMemory,
     };
     // 방금 읽어 온 그대로다 — **여는 순간은 clean**이다.
-    return .{ .file = opened, .saved_hash = contentHash(opened.content) };
+    // **디스크 지문은 방금 읽은 그 bytes 에서 낸다** — 같은 함수(`contentHash`)라 저장 직전 비교와
+    // 축이 같다. 여기서 안 남기면 「연 뒤 바뀌었나」를 영영 물을 수 없다(§3.9d).
+    return .{ .file = opened, .saved_hash = contentHash(opened.content), .disk_hash = contentHash(buf[0..n]) };
 }
 
 /// 이 경로에 쓸 수 있는가. **여는 것을 막는 판정이 아니라 표시할 값**이다.
@@ -7118,39 +7128,75 @@ pub fn isDirty(term: *const Term) bool {
 
 /// 문서 바이트를 경로에 쓴다 — 저장의 **디스크 부분**(`saveDocument` 와 §8.2f 의 열려 있지 않은 파일 쓰기가 같은 길을 쓴다).
 /// pinned 디렉터리 + 외부 변경 검사(`stableOpenedFileHash`) 그대로. 성공하면 true.
+/// **저장 실패의 이유 → 사용자에게 할 말**(§3.9d). 이 표가 단일 출처다 — 호출자마다 따로 고르면
+/// 같은 이유가 자리마다 다른 문장이 된다.
+///
+/// **뭉개지 않는다.** 예전에는 전부 「저장하지 못했습니다」 하나였고, 그래서 사용자는 **무엇을 하면
+/// 되는지** 알 수 없었다(다시 눌러 볼지, 파일을 닫을지, 권한을 볼지).
+pub fn saveFailureNoticeKey(e: AppSession.FilePanelWriteError) maru.i18n.Key {
+    return switch (e) {
+        // 파일이 그 사이 바뀌었다 — 사용자가 고를 일이 있다(C1 이 그 선택을 연다).
+        error.ExternalConflict => .app_save_external_conflict,
+        error.TooLarge => .app_save_too_large,
+        // 자리 자체가 없어졌다(지워졌거나 부모가 사라졌다) — 다시 눌러도 같다.
+        error.NotFound => .editor_save_gone,
+        error.NotRegularFile => .editor_untitled_name_not_file,
+        // 나머지는 「쓰지 못했다」로 묶는다 — 사용자가 할 일이 같다(권한·디스크).
+        else => .app_save_failed,
+    };
+}
+
 /// **새 파일을 만들어 쓴다**(U2 — 이름 없는 문서의 첫 저장). `writeDocumentBytes` 는 **있는 파일만**
 /// 쓴다: CAS 를 위해 원본을 열고 해시를 재기 때문이다(그 함수 첫 줄). 새 파일에는 원본이 없다.
 ///
 /// **배타 생성이다.** 「없는지 봤다」와 「쓴다」 사이에 남이 같은 이름을 만들 수 있고, 그때 덮어쓰면
 /// 사용자가 못 본 파일이 사라진다 — 그 틈을 커널이 막게 한다(`O_EXCL`). 이미 있으면 거짓이고,
 /// 호출자는 그것을 「그 사이에 생겼다」로 읽는다.
-pub fn createDocumentBytes(self: *AppSession, path: []const u8, bytes: []const u8) bool {
-    var pinned = file_panel_ops.openPinnedFilePanelParent(self.io, path) catch return false;
+pub fn createDocumentBytes(self: *AppSession, path: []const u8, bytes: []const u8) AppSession.FilePanelWriteError!void {
+    var pinned = file_panel_ops.openPinnedFilePanelParent(self.io, path) catch return error.NotFound;
     defer pinned.dir.close(self.io);
-    var file = pinned.dir.createFile(self.io, pinned.basename, .{ .exclusive = true }) catch return false;
+    // **배타 생성이 실패하면 「그 사이에 생겼다」다** — 그 사실을 `ExternalConflict` 로 올린다(그 낱말이
+    // 뜻하는 것이 바로 「내가 보지 않은 변화가 디스크에 있다」이고, 덮어쓰기 CAS 가 같은 이름을 쓴다).
+    var file = pinned.dir.createFile(self.io, pinned.basename, .{ .exclusive = true }) catch |e| switch (e) {
+        error.PathAlreadyExists => return error.ExternalConflict,
+        else => return error.WriteFailed,
+    };
     defer file.close(self.io);
     var write_buf: [64 * 1024]u8 = undefined;
     var w = file.writer(self.io, &write_buf);
-    w.interface.writeAll(bytes) catch return false;
-    w.interface.flush() catch return false;
-    return true;
+    w.interface.writeAll(bytes) catch return error.WriteFailed;
+    w.interface.flush() catch return error.WriteFailed;
 }
 
-pub fn writeDocumentBytes(self: *AppSession, path: []const u8, bytes: []const u8) bool {
-    var pinned = file_panel_ops.openPinnedFilePanelParent(self.io, path) catch return false;
+/// `expect_disk` 는 **「연 뒤(또는 마지막 저장 뒤) 파일이 그대로인가」**를 묻는 지문이다(§3.9d).
+/// `null` 이면 안 묻는다 — 이름 없는 문서의 첫 저장·일괄 쓰기처럼 비교할 과거가 없는 자리다.
+pub fn writeDocumentBytes(
+    self: *AppSession,
+    path: []const u8,
+    bytes: []const u8,
+    expect_disk: ?u64,
+) AppSession.FilePanelWriteError!void {
+    // **이유를 지우지 않는다**(§3.9d). 예전에는 다섯 자리가 전부 `catch return false` 였고, 그래서
+    // 읽기 실패·외부 변경·쓰기 실패가 한 개의 `false` 로 뭉개져 사용자는 `⌘S` 를 누르고 아무 일도
+    // 없는 것을 봤다. 아래 층이 이미 `FilePanelWriteError` 를 내므로 **새 어휘를 짓지 않고 올린다**.
+    var pinned = file_panel_ops.openPinnedFilePanelParent(self.io, path) catch return error.NotFound;
     defer pinned.dir.close(self.io);
 
-    var original = pinned.dir.openFile(self.io, pinned.basename, .{ .mode = .read_only }) catch return false;
+    var original = pinned.dir.openFile(self.io, pinned.basename, .{ .mode = .read_only }) catch return error.NotFound;
     defer original.close(self.io);
-    const stat = original.stat(self.io) catch return false;
+    const stat = original.stat(self.io) catch return error.NotFound;
 
     // **지금 디스크에 있는 것의 해시를 넘긴다.** 0을 넘겨 "검사를 건너뛴다"고 적었다가 실제
     // 구현을 보니 **무조건 비교**한다 — 0이면 정상 파일이 늘 `ExternalConflict`가 된다.
     // 그 검사가 막는 것은 *"temp를 쓰는 동안 남이 같은 inode를 in-place로 고쳤다"*이므로,
     // 쓰기 직전에 읽은 값을 기준으로 두는 것이 맞다.
-    const expected = AppSession.stableOpenedFileHash(self.io, original, stat.inode) catch return false;
+    const expected = try AppSession.stableOpenedFileHash(self.io, original, stat.inode);
+    // ⚠️ **여기가 「연 뒤 바뀌었나」를 묻는 유일한 자리다.** 아래 `writePinnedFilePanel` 의 검사는
+    // 「쓰는 동안 바뀌었나」라 이 질문에 답하지 않는다 — 그래서 예전에는 밖에서 고친 파일 위에
+    // 조용히 덮어썼다(적대적 검증에서 판정자가 그것을 드러냈다).
+    if (expect_disk) |want| if (want != expected) return error.ExternalConflict;
 
-    file_panel_ops.writePinnedFilePanel(
+    try file_panel_ops.writePinnedFilePanel(
         self.io,
         pinned.dir,
         pinned.basename,
@@ -7158,15 +7204,20 @@ pub fn writeDocumentBytes(self: *AppSession, path: []const u8, bytes: []const u8
         stat,
         expected,
         bytes,
-    ) catch return false;
-    return true;
+    );
 }
 
-pub fn saveDocument(self: *AppSession, term: *Term) bool {
-    if (term.kind != .editor) return false;
-    if (term.rt.editor_diff != null) return false;
-    const doc = term.rt.editor_doc orelse return false;
-    if (doc.file.read_only) return false;
+/// 편집기 문서를 저장한다. **실패하면 이유를 돌려준다**(§3.9d) — 예전에는 `bool` 이라 읽기 전용·쓰기
+/// 실패·외부 변경·상한 초과가 한 개의 `false` 로 뭉개졌고, 디스패치는 그 `false` 마저 버렸다.
+///
+/// `AskName` 은 실패가 아니다 — **이름 없는 문서**라 물어야 한다는 뜻이고(§3.11) 상자는 이미 떴다.
+pub const SaveError = AppSession.FilePanelWriteError || error{ NotAnEditor, ReadOnly, AskName };
+
+pub fn saveDocument(self: *AppSession, term: *Term) SaveError!void {
+    if (term.kind != .editor) return error.NotAnEditor;
+    if (term.rt.editor_diff != null) return error.NotAnEditor; // 비교 뷰는 저장할 축이 없다(§7)
+    const doc = term.rt.editor_doc orelse return error.NotAnEditor;
+    if (doc.file.read_only) return error.ReadOnly;
     // **이름 없는 문서는 조용히 실패하지 않는다**(§3.11). 그대로 `orelse return false` 로 떨어지면
     // 사용자는 저장한 줄 알고 잃는다 — 디스패치가 이 함수의 반환값을 버리기 때문이다
     // (`_ = editor_ops.saveDocument(…)`). 그래서 **여기서** 말한다: 알림은 이 함수가 이미 쓰는
@@ -7179,16 +7230,18 @@ pub fn saveDocument(self: *AppSession, term: *Term) bool {
         // **이름을 묻는다**(U2 — §3.11). 저장은 그 상자를 확정한 뒤에 일어나므로 여기서는 거짓이다 —
         // 「지금 저장했다」가 아니다. 물을 수 없으면 그쪽이 이유를 말한다.
         _ = app_session_mod.editor_untitled_save_ops.begin(self, term);
-        return false;
+        return error.AskName;
     }
-    const path = term.rt.editor_path orelse return false;
+    const path = term.rt.editor_path orelse return error.NotAnEditor;
 
-    const bytes = doc.file.saveBytes(self.allocator) catch return false;
+    const bytes = doc.file.saveBytes(self.allocator) catch return error.WriteFailed;
     // **쓴 내용이 무엇이었는지** 기억해 둔다 — 아래에서 clean 판정에 쓴다.
     const saved_content = doc.file.content;
     defer self.allocator.free(bytes);
 
-    if (!writeDocumentBytes(self, path, bytes)) return false;
+    // **상한은 §3.11 이 정한 그것이다** — 쓰기 앞에서 잰다(뒤에서 재면 이미 쓴 뒤다).
+    if (bytes.len > maru.session.file_panel_bridge.max_file_bytes) return error.TooLarge;
+    try writeDocumentBytes(self, path, bytes, doc.disk_hash);
 
     // **여기서 clean이 된다.** 쓰기가 성공한 그 순간의 내용이 곧 디스크 내용이다.
     //
@@ -7200,6 +7253,9 @@ pub fn saveDocument(self: *AppSession, term: *Term) bool {
     // 그래서 저장 시작 시점이 아니라 **끝난 뒤**의 내용을 재면 안 된다 — `saved_bytes`가 그것을
     // 위해 남아 있다.
     term.rt.editor_doc.?.saved_hash = contentHash(saved_content);
+    // **디스크 지문도 갱신한다** — 방금 쓴 것이 곧 파일 내용이다. 안 갱신하면 두 번째 저장이 자기가
+    // 쓴 것을 「남이 바꿨다」로 읽는다.
+    term.rt.editor_doc.?.disk_hash = contentHash(bytes);
     self.metal_dirty = true;
     // **서버에 저장을 알린다**(§8.2k) — rustc 진단은 저장에만 다시 돌므로, 안 알리면 고친 오류가 다시 열 때까지 남는다. 디스크 쓰기가
     // 성공한 뒤이고, 실은 본문은 **방금 쓴 것**(`saved_content` — 쓰는 동안 더 친 것은 아직 저장이 아니다; 쓰기가 동기라 오늘은
@@ -7215,7 +7271,6 @@ pub fn saveDocument(self: *AppSession, term: *Term) bool {
     if (maru.session.editor.conflict.hasUnresolved(term.rt.editor_lines)) {
         self.showNoticeKey(.editor_conflict_markers_remain);
     }
-    return true;
 }
 
 /// **커서마다 텍스트를 넣는다** — 타이핑의 실제 진입점(§3.3).
@@ -12956,7 +13011,7 @@ test "RNM1 심볼 이름 바꾸기 — F2 로 낱말이 씨앗인 상자, 이름
     s.chrome_host.notice.dismiss();
     // 정리 — 디스크를 원래대로, r.c 를 저장, 기록을 비운다.
     try h.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "other.c", .data = RenameFx.other_text });
-    try testing.expect(saveDocument(s, term));
+    try saveDocument(s, term);
     s.editor_workspace_edit.deinit(allocator);
     // ⑷ Esc 는 요청 없음 · 같은 이름도 요청 없음 · 빈 이름도.
     const sent_before = s.editor_lsp.sent_renames;
@@ -13040,7 +13095,7 @@ test "RNM1 심볼 이름 바꾸기 — F2 로 낱말이 씨앗인 상자, 이름
     }
     // ⑺ **한 파일이면 dirty 로 둔다** — other.c 를 지우면 rename 은 r.c 하나라 저장하지 않는다.
     try h.fx.dir.dir.deleteFile(testing.io, "other.c");
-    try testing.expect(saveDocument(s, term));
+    try saveDocument(s, term);
     try h.renameTo(5, "add6");
     try testing.expect(h.settled());
     try testing.expectEqualStrings("int add6(int a) { return add6(a); }\nint y = add6(1);\n", h.content());
@@ -22077,7 +22132,7 @@ test "CFL8 마커를 남긴 채 저장하면 «말한다» — 막지는 않는�
 
     @memset(&fx.session.notice_message_buf, 0);
     // **저장은 된다** — 반쯤 고치다 멈추는 것은 정당한 중간 상태다. 막아야 하는 것은 «모른 채» 두는 일이다.
-    try testing.expect(saveDocument(fx.session, term));
+    try saveDocument(fx.session, term);
     try testing.expect(std.mem.startsWith(u8, &fx.session.notice_message_buf, maru.i18n.t(.editor_conflict_markers_remain)));
 
     // **접어서 안 보여도 말한다.** 알림이 「보이는 줄」을 보면 접는 순간 조용해지는데, 마커는 접혀
@@ -22094,14 +22149,14 @@ test "CFL8 마커를 남긴 채 저장하면 «말한다» — 막지는 않는�
             term.rt.editor_visible_lines = saved_lines;
         }
         @memset(&fx.session.notice_message_buf, 0);
-        try testing.expect(saveDocument(fx.session, term));
+        try saveDocument(fx.session, term);
         try testing.expect(std.mem.startsWith(u8, &fx.session.notice_message_buf, maru.i18n.t(.editor_conflict_markers_remain)));
     }
 
     // **고친 뒤에는 조용하다** — 늘 말하면 그 문구가 무의미해진다.
     try testing.expect(acceptConflict(fx.session, term, 0, .current));
     @memset(&fx.session.notice_message_buf, 0);
-    try testing.expect(saveDocument(fx.session, term));
+    try saveDocument(fx.session, term);
     try testing.expectEqual(@as(u8, 0), fx.session.notice_message_buf[0]);
 }
 
@@ -22449,7 +22504,7 @@ test "CFL18 편집기가 «아닌» 것과 «빈» 문서에는 표를 안 잡�
     try testing.expectEqual(@as(usize, 0), empty.rt.editor_conflict_actions.len);
     // 저장해도 조용하다 — 빈 문서에 「마커가 남았다」고 말하면 그 문구가 무의미해진다.
     @memset(&fx.session.notice_message_buf, 0);
-    _ = saveDocument(fx.session, empty);
+    saveDocument(fx.session, empty) catch {};
     try testing.expectEqual(@as(u8, 0), fx.session.notice_message_buf[0]);
 }
 
@@ -22599,7 +22654,7 @@ test "SAVE1 편집한 내용이 디스크에 실제로 남는다 (§3.5)" {
 
     term.rt.editor_selection = editor_selection.Selection.at(5);
     try testing.expect(insertText(fx.session, term, " EDITED"));
-    try testing.expect(saveDocument(fx.session, term));
+    try saveDocument(fx.session, term);
 
     const on_disk = try fx.dir.dir.readFileAlloc(io, "save1.txt", allocator, .limited(4096));
     defer allocator.free(on_disk);
@@ -22623,7 +22678,7 @@ test "SAVE2 연 그대로의 파일 속성이 디스크에 되돌아간다 (§3.
         const term = try undoFixture(&fx, allocator, "save2.txt", "\xEF\xBB\xBFa\r\nb");
         term.rt.editor_selection = editor_selection.Selection.at(0);
         try testing.expect(insertText(fx.session, term, "X"));
-        try testing.expect(saveDocument(fx.session, term));
+        try saveDocument(fx.session, term);
 
         const on_disk = try fx.dir.dir.readFileAlloc(io, "save2.txt", allocator, .limited(4096));
         defer allocator.free(on_disk);
@@ -22638,7 +22693,7 @@ test "SAVE2 연 그대로의 파일 속성이 디스크에 되돌아간다 (§3.
         const term = try undoFixture(&fx, allocator, "save3.txt", "keep\n");
         term.rt.editor_selection = editor_selection.Selection.at(4);
         try testing.expect(insertText(fx.session, term, "!"));
-        try testing.expect(saveDocument(fx.session, term));
+        try saveDocument(fx.session, term);
 
         const on_disk = try fx.dir.dir.readFileAlloc(io, "save3.txt", allocator, .limited(4096));
         defer allocator.free(on_disk);
@@ -22662,7 +22717,7 @@ test "SAVE3 읽기 전용은 저장을 거절하고 파일을 건드리지 않�
     try testing.expect(insertText(fx.session, term, "Z"));
     term.rt.editor_doc.?.file.read_only = true;
 
-    try testing.expect(!saveDocument(fx.session, term));
+    try testing.expectError(error.AskName, saveDocument(fx.session, term));
     const on_disk = try fx.dir.dir.readFileAlloc(io, "save4.txt", allocator, .limited(4096));
     defer allocator.free(on_disk);
     try testing.expectEqualStrings("original\n", on_disk); // 안 바뀌었다
@@ -22921,7 +22976,7 @@ test "EDIT3 읽기 전용 문서와 비교 뷰는 타이핑을 거절한다 (§3
     try testing.expect(!insertText(fx.session, term, "x"));
     try testing.expect(!deleteText(fx.session, term, true));
     try testing.expect(!addNextOccurrence(fx.session, term));
-    try testing.expect(!saveDocument(fx.session, term));
+    try testing.expectError(error.AskName, saveDocument(fx.session, term));
     // **되돌리기도 같은 축이다.** 비교 뷰에서 undo가 돌면 화면은 오른쪽을 그리는데 왼쪽 문서가
     // 바뀐다 — 다섯 경로 중 이것만 판정자가 없어 뮤턴트가 살아남았다(적대적 검증 2026-08-26).
     try testing.expect(!undoEdit(fx.session, term));
@@ -26589,7 +26644,7 @@ test "DIRTY1 저장과 다르면 dirty, undo로 같은 내용에 돌아오면 cl
     // 다시 고치면 dirty, 저장하면 clean.
     try testing.expect(insertText(fx.session, term, "?"));
     try testing.expect(term.rt.editor_doc.?.isDirty());
-    try testing.expect(saveDocument(fx.session, term));
+    try saveDocument(fx.session, term);
     try testing.expect(!term.rt.editor_doc.?.isDirty());
 
     // **저장 뒤 되돌리면 다시 dirty다** — 이제 디스크와 다르다.
@@ -27115,7 +27170,7 @@ test "DIRTY5 저장 안 한 편집기를 닫으면 확인을 묻는다 (file-pan
     // 저장하면 다시 묻지 않는다 — 닫힌다.
     fx.session.chrome_host.confirm.open = false;
     fx.session.pending_confirm = .none;
-    try testing.expect(saveDocument(fx.session, term));
+    try saveDocument(fx.session, term);
     fx.session.requestClose(.active_term);
     try testing.expect(!fx.session.chrome_host.confirm.open);
     for ([_]app_session_mod.CloseScope{ .term, .pane, .{ .tab = 0 }, .session }) |scope| {
@@ -27151,14 +27206,14 @@ test "DIRTY4 저장이 실패하면 dirty가 남는다 — 실패를 성공으�
         if (std.c.chmod(root_z, 0o500) != 0) return error.SkipZigTest; // 권한을 못 바꾸면 이 축을 못 잰다
         defer _ = std.c.chmod(root_z, 0o700); // 픽스처 정리가 지울 수 있게 되돌린다
 
-        try testing.expect(!saveDocument(fx.session, term)); // 실패를 실패로 보고한다
+        try testing.expectError(error.AskName, saveDocument(fx.session, term)); // 실패를 실패로 보고한다
         try testing.expect(isDirty(term)); // **dirty가 남는다**
         try testing.expectEqualStrings("hello!\n", term.rt.editor_doc.?.file.content);
     }
 
     // ⑵ **파일이 사라진 경우**도 같다 — 열기에서 실패하는 다른 갈래다.
     try fx.dir.dir.deleteFile(io, "dirty4.txt");
-    try testing.expect(!saveDocument(fx.session, term));
+    try testing.expectError(error.AskName, saveDocument(fx.session, term));
     try testing.expect(isDirty(term));
     try testing.expectEqualStrings("hello!\n", term.rt.editor_doc.?.file.content);
 }
@@ -27226,7 +27281,7 @@ test "DIRTY3 dirty면 제목에 점이 붙고, 저장하면 사라진다 (file-p
         try testing.expect(!std.mem.eql(u8, marker, flag[0..n]));
     }
 
-    try testing.expect(saveDocument(fx.session, term));
+    try saveDocument(fx.session, term);
     try testing.expect(!isDirty(term));
     {
         const label = try fx.session.diffAwareLabel(allocator, term);
@@ -27255,7 +27310,7 @@ test "DIRTY2 BOM이 있는 파일도 저장 직후 clean이다 (§3.5)" {
     term.rt.editor_selection = editor_selection.Selection.at(2);
     try testing.expect(insertText(fx.session, term, "!"));
     try testing.expect(term.rt.editor_doc.?.isDirty());
-    try testing.expect(saveDocument(fx.session, term));
+    try saveDocument(fx.session, term);
     try testing.expect(!term.rt.editor_doc.?.isDirty());
 }
 
@@ -34870,7 +34925,7 @@ test "U1e ⌘S 는 조용히 실패하지 않는다 — 저장하지 않고 이�
     // **저장은 안 된다**(파일이 없다) — 그리고 **조용하지 않다**: 이름을 묻는 상자가 열린다(U2).
     // 둘 다 재야 한다: 조용히 true 를 돌려주면 사용자는 저장한 줄 알고, 조용히 false 를 돌려줘도
     // 마찬가지다(디스패치가 반환값을 버린다).
-    try testing.expect(!saveDocument(fx.session, term));
+    try testing.expectError(error.AskName, saveDocument(fx.session, term));
     try testing.expect(fx.session.rename != null);
     try testing.expect(fx.session.rename.? == .untitled_save);
     // 여전히 dirty 이고 여전히 이름이 없다 — 「저장을 시도했다」는 흔적을 남기지 않는다(§3.11).
@@ -35291,7 +35346,7 @@ test "U2a ⌘S 는 이름 상자를 연다 — 저장은 아직 아니다" {
     try testing.expect(insertText(fx.session, t, "body\n"));
 
     // **저장은 안 된다**(false) — 그러나 조용하지 않다: 이름 상자가 열린다.
-    try testing.expect(!saveDocument(fx.session, t));
+    try testing.expectError(error.AskName, saveDocument(fx.session, t));
     try testing.expect(fx.session.rename != null);
     try testing.expect(fx.session.rename.? == .untitled_save);
     try testing.expectEqual(t.surface.id, fx.session.rename.?.untitled_save);
@@ -35322,7 +35377,7 @@ test "U2b 이름을 주면 파일이 생기고 보통 문서가 된다 — 경�
 
     const t = try openUntitledInActivePane(fx.session);
     try testing.expect(insertText(fx.session, t, "const a = 1;\n"));
-    try testing.expect(!saveDocument(fx.session, t)); // 상자가 열린다
+    try testing.expectError(error.AskName, saveDocument(fx.session, t)); // 상자가 열린다
 
     try fx.session.rename_input.query.appendSlice(allocator, "new.zig");
     settings_ops.commitRename(fx.session);
@@ -35370,7 +35425,7 @@ test "U2c 취소는 무상태다 — 이름 없는 dirty 그대로" {
 
     const t = try openUntitledInActivePane(fx.session);
     try testing.expect(insertText(fx.session, t, "x"));
-    try testing.expect(!saveDocument(fx.session, t));
+    try testing.expectError(error.AskName, saveDocument(fx.session, t));
     try fx.session.rename_input.query.appendSlice(allocator, "cancelled.txt");
     settings_ops.closeRename(fx.session); // Esc
 
@@ -35401,7 +35456,7 @@ test "U2d 같은 이름이 이미 있으면 덮어쓸지 묻고, 수락하면 �
 
     const t = try openUntitledInActivePane(fx.session);
     try testing.expect(insertText(fx.session, t, "new\n"));
-    try testing.expect(!saveDocument(fx.session, t));
+    try testing.expectError(error.AskName, saveDocument(fx.session, t));
     try fx.session.rename_input.query.appendSlice(allocator, "taken.txt");
     settings_ops.commitRename(fx.session);
 
@@ -35447,7 +35502,7 @@ test "U2e 덮어쓰기를 취소하면 아무 일도 없고 들고 있던 경로
 
     const t = try openUntitledInActivePane(fx.session);
     try testing.expect(insertText(fx.session, t, "new\n"));
-    try testing.expect(!saveDocument(fx.session, t));
+    try testing.expectError(error.AskName, saveDocument(fx.session, t));
     try fx.session.rename_input.query.appendSlice(allocator, "taken.txt");
     settings_ops.commitRename(fx.session);
     try testing.expect(fx.session.pending_untitled_save.path_len > 0);
@@ -35481,7 +35536,7 @@ test "U2f 그 경로로 이미 열린 Term 이 있으면 저장하지 않는다 
 
     const t = try openUntitledInActivePane(fx.session);
     try testing.expect(insertText(fx.session, t, "z\n"));
-    try testing.expect(!saveDocument(fx.session, t));
+    try testing.expectError(error.AskName, saveDocument(fx.session, t));
     try fx.session.rename_input.query.appendSlice(allocator, "open.txt");
     settings_ops.commitRename(fx.session);
 
@@ -35517,7 +35572,7 @@ test "U2g base 밖 이름은 거절한다 — 절대 경로도 «갈아입은 ..
 
     for ([_][]const u8{ "/tmp/escape.txt", "../escape.txt", "a/../../escape.txt", "" }) |bad| {
         fx.session.chrome_host.notice.dismiss();
-        try testing.expect(!saveDocument(fx.session, t));
+        try testing.expectError(error.AskName, saveDocument(fx.session, t));
         fx.session.rename_input.clear();
         try fx.session.rename_input.query.appendSlice(allocator, bad);
         settings_ops.commitRename(fx.session);
@@ -35541,7 +35596,7 @@ test "U2h 새 파일 쓰기는 배타다 — 그 사이에 생긴 파일을 덮�
     // **없으면 만든다.**
     const fresh = try std.fs.path.join(allocator, &.{ root, "fresh.txt" });
     defer allocator.free(fresh);
-    try testing.expect(createDocumentBytes(fx.session, fresh, "mine\n"));
+    try createDocumentBytes(fx.session, fresh, "mine\n");
     {
         const got = try dir.dir.readFileAlloc(io, "fresh.txt", allocator, .limited(64));
         defer allocator.free(got);
@@ -35551,7 +35606,7 @@ test "U2h 새 파일 쓰기는 배타다 — 그 사이에 생긴 파일을 덮�
     // **있으면 거짓이고 내용을 건드리지 않는다.** 이것이 「없는지 봤다」와 「쓴다」 사이의 틈을 막는
     // 자리다 — 그 사이 남이 같은 이름을 만들었을 때 덮어쓰면 사용자가 못 본 파일이 사라진다.
     // 보통 생성(`.{}`)으로 바꾼 변이가 이 판정자 없이는 **살아남았다**(적대적 1회차 N4).
-    try testing.expect(!createDocumentBytes(fx.session, fresh, "theirs\n"));
+    try testing.expectError(error.ExternalConflict, createDocumentBytes(fx.session, fresh, "theirs\n"));
     const still = try dir.dir.readFileAlloc(io, "fresh.txt", allocator, .limited(64));
     defer allocator.free(still);
     try testing.expectEqualStrings("mine\n", still);
@@ -35573,7 +35628,7 @@ test "U2i 저장하면 workspace 저장 시퀀스에 든다 — 다음 실행에
     // 돌아오지 않는다. 그 조건은 「편집기인데 도크 entry 가 없다」이므로 entry 를 붙이는 것이 곧 이것이다.
     const t = try openUntitledInActivePane(fx.session);
     try testing.expect(insertText(fx.session, t, "kept\n"));
-    try testing.expect(!saveDocument(fx.session, t));
+    try testing.expectError(error.AskName, saveDocument(fx.session, t));
     try fx.session.rename_input.query.appendSlice(allocator, "kept.txt");
     settings_ops.commitRename(fx.session);
     try testing.expect(t.rt.editor_path != null);
@@ -35616,14 +35671,14 @@ test "U2j 저장 뒤에는 보통 문서의 저장 경로를 탄다 — 두 번�
 
     const t = try openUntitledInActivePane(fx.session);
     try testing.expect(insertText(fx.session, t, "one\n"));
-    try testing.expect(!saveDocument(fx.session, t));
+    try testing.expectError(error.AskName, saveDocument(fx.session, t));
     try fx.session.rename_input.query.appendSlice(allocator, "twice.txt");
     settings_ops.commitRename(fx.session);
 
     // 더 고치고 다시 저장 — **상자가 뜨지 않고** 그 파일에 바로 쓴다(이름이 이미 있다).
     try testing.expect(insertText(fx.session, t, "two\n"));
     try testing.expect(isDirty(t));
-    try testing.expect(saveDocument(fx.session, t)); // ★ 이제 참이다
+    try saveDocument(fx.session, t); // ★ 이제 참이다
     try testing.expect(fx.session.rename == null);
     try testing.expect(!isDirty(t));
     const got = try dir.dir.readFileAlloc(io, "twice.txt", allocator, .limited(64));
@@ -35647,7 +35702,7 @@ test "U2k 저장 뒤 닫기 확인은 «공용» 문구다 — 더 이상 사라
 
     const t = try openUntitledInActivePane(fx.session);
     try testing.expect(insertText(fx.session, t, "a\n"));
-    try testing.expect(!saveDocument(fx.session, t));
+    try testing.expectError(error.AskName, saveDocument(fx.session, t));
     try fx.session.rename_input.query.appendSlice(allocator, "closed.txt");
     settings_ops.commitRename(fx.session);
     try testing.expect(insertText(fx.session, t, "b\n")); // 다시 dirty
@@ -35729,7 +35784,7 @@ test "U2m 저장을 여러 번·실패를 섞어도 새지 않는다" {
     while (i < 3) : (i += 1) {
         const t = try openUntitledInActivePane(fx.session);
         try testing.expect(insertText(fx.session, t, "x\n"));
-        try testing.expect(!saveDocument(fx.session, t));
+        try testing.expectError(error.AskName, saveDocument(fx.session, t));
         var name_buf: [32]u8 = undefined;
         const name = try std.fmt.bufPrint(&name_buf, "m{d}.txt", .{i});
         fx.session.rename_input.clear();
@@ -35744,7 +35799,7 @@ test "U2m 저장을 여러 번·실패를 섞어도 새지 않는다" {
         const t = try openUntitledInActivePane(fx.session);
         try testing.expect(insertText(fx.session, t, "y\n"));
         for ([_][]const u8{ "../out.txt", "/abs.txt", "" }) |bad| {
-            try testing.expect(!saveDocument(fx.session, t));
+            try testing.expectError(error.AskName, saveDocument(fx.session, t));
             fx.session.rename_input.clear();
             try fx.session.rename_input.query.appendSlice(allocator, bad);
             settings_ops.commitRename(fx.session);
@@ -35752,7 +35807,7 @@ test "U2m 저장을 여러 번·실패를 섞어도 새지 않는다" {
             try testing.expect(t.file_entry == null);
         }
         // 그 뒤에 성공해도 정상이다.
-        try testing.expect(!saveDocument(fx.session, t));
+        try testing.expectError(error.AskName, saveDocument(fx.session, t));
         fx.session.rename_input.clear();
         try fx.session.rename_input.query.appendSlice(allocator, "after-bad.txt");
         settings_ops.commitRename(fx.session);
@@ -35764,14 +35819,14 @@ test "U2m 저장을 여러 번·실패를 섞어도 새지 않는다" {
         try dir.dir.writeFile(io, .{ .sub_path = "over.txt", .data = "old\n" });
         const t = try openUntitledInActivePane(fx.session);
         try testing.expect(insertText(fx.session, t, "z\n"));
-        try testing.expect(!saveDocument(fx.session, t));
+        try testing.expectError(error.AskName, saveDocument(fx.session, t));
         fx.session.rename_input.clear();
         try fx.session.rename_input.query.appendSlice(allocator, "over.txt");
         settings_ops.commitRename(fx.session);
         fx.session.dispatchChromeAction(.confirm_cancel);
         try testing.expectEqual(@as(usize, 0), fx.session.pending_untitled_save.path_len);
         // 다른 이름으로 저장 — **취소한 경로에 쓰이면 안 된다**.
-        try testing.expect(!saveDocument(fx.session, t));
+        try testing.expectError(error.AskName, saveDocument(fx.session, t));
         fx.session.rename_input.clear();
         try fx.session.rename_input.query.appendSlice(allocator, "other.txt");
         settings_ops.commitRename(fx.session);
@@ -35804,7 +35859,7 @@ test "U2n 쓰기는 됐는데 entry 를 못 붙이면 — 새지 않고, 이름�
 
     const t = try openUntitledInActivePane(fx.session);
     try testing.expect(insertText(fx.session, t, "written\n"));
-    try testing.expect(!saveDocument(fx.session, t));
+    try testing.expectError(error.AskName, saveDocument(fx.session, t));
     try fx.session.rename_input.query.appendSlice(allocator, "orphan.txt");
     settings_ops.commitRename(fx.session);
 
@@ -35850,7 +35905,7 @@ test "U2o 이름 상자는 caret 에 실제로 선다 — 앵커가 없으면 �
 
     // **상자는 그려야 보인다.** 상태만 재면(`rename != null`) 앵커가 서지 않아 화면에 아무것도 없는
     // 경우를 통과시킨다 — 이 저장소에서 같은 모양을 여러 번 겪었다(적대적 5회차).
-    try testing.expect(!saveDocument(fx.session, t));
+    try testing.expectError(error.AskName, saveDocument(fx.session, t));
     try testing.expect(!fx.session.chrome_host.rename_box.open); // 아직 앵커를 안 쟀다
 
     // 프레임이 앵커를 잰다 — 그 문서가 그려져 있어야 한다(먼저 pane 프레임을 세운다).
@@ -35896,7 +35951,7 @@ test "U2p 이름 상자가 떠 있는 동안 그 Term 이 닫히면 — 확정�
 
     const t = try openUntitledInActivePane(fx.session);
     try testing.expect(insertText(fx.session, t, "gone\n"));
-    try testing.expect(!saveDocument(fx.session, t));
+    try testing.expectError(error.AskName, saveDocument(fx.session, t));
 
     // **두 술어는 다른 질문이다.** `renameTargetsTerm` 은 「이 Term 이 사라지면 접을까」(teardown)이고
     // `renamingTerm` 은 「탭 바에 인라인 편집기를 그릴까」다. 섞으면 팝업 상자를 쓰는 rename 에서
@@ -35945,9 +36000,9 @@ test "U2u 재진입: 상자가 떠 있는데 또 ⌘S · 확인 중에 또 저�
     try testing.expect(insertText(fx.session, a, "A\n"));
 
     // ⑴ **상자가 떠 있는데 또 ⌘S** — 같은 문서를 다시 물어도 대상이 갈리지 않는다.
-    try testing.expect(!saveDocument(fx.session, a));
+    try testing.expectError(error.AskName, saveDocument(fx.session, a));
     try testing.expectEqual(a.surface.id, fx.session.rename.?.untitled_save);
-    try testing.expect(!saveDocument(fx.session, a));
+    try testing.expectError(error.AskName, saveDocument(fx.session, a));
     try testing.expectEqual(a.surface.id, fx.session.rename.?.untitled_save);
     // 입력한 글자가 상자 열기로 지워졌다면 사용자는 다시 쳐야 한다 — 그 사실을 값으로 둔다.
     try fx.session.rename_input.query.appendSlice(allocator, "exists.txt");
@@ -35962,7 +36017,7 @@ test "U2u 재진입: 상자가 떠 있는데 또 ⌘S · 확인 중에 또 저�
     //    **들고 있던 경로가 조용히 바뀌어선 안 된다**(바뀌면 수락이 엉뚱한 문서를 덮는다).
     const b = try openUntitledInActivePane(fx.session);
     try testing.expect(insertText(fx.session, b, "B\n"));
-    _ = saveDocument(fx.session, b);
+    saveDocument(fx.session, b) catch {};
     try testing.expectEqual(held, fx.session.pending_untitled_save.path_len);
 
     // ⑷ **다른 문서를 닫아도 이 확인은 살아남는다.** teardown 이 확인을 접는 조건에 `surface_id` 비교가
@@ -36001,7 +36056,7 @@ test "U2v 상자는 다른 오버레이와 배타다 — 팔레트·찾기를 �
 
     const t = try openUntitledInActivePane(fx.session);
     try testing.expect(insertText(fx.session, t, "x"));
-    try testing.expect(!saveDocument(fx.session, t));
+    try testing.expectError(error.AskName, saveDocument(fx.session, t));
     try testing.expect(fx.session.rename != null);
 
     // **먼저 프레임을 돌려 상자를 실제로 세운다** — 안 세우면 아래 단언이 「원래 안 열려 있었다」로
@@ -36051,14 +36106,14 @@ test "U2w 저장 물음은 이름 없는 문서에만 — 비교·읽기 전용�
     // ⑴ **읽기 전용 문서** — 이름 상자가 뜨면 안 된다(저장할 수 없는 문서다).
     const ro = try openPathInActivePane(fx.session, path);
     ro.rt.editor_doc.?.file.read_only = true;
-    try testing.expect(!saveDocument(fx.session, ro));
+    try testing.expectError(error.ReadOnly, saveDocument(fx.session, ro));
     try testing.expect(fx.session.rename == null);
 
     // ⑵ **비교 Term** — 저장할 축이 없다(§7). 여기서 상자가 뜨면 비교 결과에 이름을 붙이려 든다.
     const diff_term = try openPathInActivePane(fx.session, path);
     diff_term.rt.editor_diff = .{};
     defer diff_term.rt.editor_diff = null;
-    try testing.expect(!saveDocument(fx.session, diff_term));
+    try testing.expectError(error.NotAnEditor, saveDocument(fx.session, diff_term));
     try testing.expect(fx.session.rename == null);
 
     // ⑶ **보통 문서** — 묻지 않고 바로 쓴다(U2j 와 같은 술어를 다른 입구로 확인한다).
@@ -36066,13 +36121,13 @@ test "U2w 저장 물음은 이름 없는 문서에만 — 비교·읽기 전용�
     normal.rt.editor_doc.?.file.read_only = false;
     normal.rt.editor_selection = editor_selection.Selection.at(0);
     try testing.expect(insertText(fx.session, normal, "n"));
-    try testing.expect(saveDocument(fx.session, normal));
+    try saveDocument(fx.session, normal);
     try testing.expect(fx.session.rename == null);
 
     // ⑷ **이름 없는 문서만** 묻는다.
     const untitled = try openUntitledInActivePane(fx.session);
     try testing.expect(insertText(fx.session, untitled, "u"));
-    try testing.expect(!saveDocument(fx.session, untitled));
+    try testing.expectError(error.AskName, saveDocument(fx.session, untitled));
     try testing.expect(fx.session.rename != null);
     try testing.expect(fx.session.rename.? == .untitled_save);
 }
@@ -36091,7 +36146,7 @@ test "U2x 파일시스템의 거친 자리: 없는 하위 폴더 · 같은 이�
 
     const save = struct {
         fn f(s: *AppSession, a: std.mem.Allocator, t: *Term, name: []const u8) !void {
-            try testing.expect(!saveDocument(s, t));
+            try testing.expectError(error.AskName, saveDocument(s, t));
             s.rename_input.clear();
             try s.rename_input.query.appendSlice(a, name);
             settings_ops.commitRename(s);
@@ -36203,7 +36258,7 @@ test "U2y 「이미 열림」은 이 창만 본다 — 다른 창은 검사 범�
     // 그래서 창 2 의 이름 없는 문서는 그 경로로 **저장된다**(덮어쓰기 확인을 지나). 한계를 값으로 둔다.
     const t = try openUntitledInActivePane(w2);
     try testing.expect(insertText(w2, t, "b\n"));
-    try testing.expect(!saveDocument(w2, t));
+    try testing.expectError(error.AskName, saveDocument(w2, t));
     try w2.rename_input.query.appendSlice(allocator, "shared.txt");
     settings_ops.commitRename(w2);
     try testing.expect(w2.pending_confirm == .untitled_overwrite); // 확인은 뜬다(디스크에 있다)
@@ -36233,7 +36288,7 @@ test "U2z 저장 상한은 두 경로가 같다 — 만들 수 있는데 다시 
     try testing.expect(insertText(fx.session, t, big));
     try testing.expectEqual(cap + 1, t.rt.editor_doc.?.file.content.len);
 
-    try testing.expect(!saveDocument(fx.session, t));
+    try testing.expectError(error.AskName, saveDocument(fx.session, t));
     try fx.session.rename_input.query.appendSlice(allocator, "big.txt");
     settings_ops.commitRename(fx.session);
 
@@ -36250,7 +36305,7 @@ test "U2z 저장 상한은 두 경로가 같다 — 만들 수 있는데 다시 
     // **상한 이하는 된다** — 대조군이 없으면 「전부 거절」이 통과한다.
     const ok_doc = try openUntitledInActivePane(fx.session);
     try testing.expect(insertText(fx.session, ok_doc, "small\n"));
-    try testing.expect(!saveDocument(fx.session, ok_doc));
+    try testing.expectError(error.AskName, saveDocument(fx.session, ok_doc));
     fx.session.rename_input.clear();
     try fx.session.rename_input.query.appendSlice(allocator, "small.txt");
     settings_ops.commitRename(fx.session);
@@ -36273,7 +36328,7 @@ test "U2B 덮어쓰기 확인이 떠 있는데 그 문서를 닫으면 — 확�
     const pane = pane_ops.activePane(fx.session);
     const t = try openUntitledInActivePane(fx.session);
     try testing.expect(insertText(fx.session, t, "new\n"));
-    try testing.expect(!saveDocument(fx.session, t));
+    try testing.expectError(error.AskName, saveDocument(fx.session, t));
     try fx.session.rename_input.query.appendSlice(allocator, "target.txt");
     settings_ops.commitRename(fx.session);
     try testing.expect(fx.session.pending_confirm == .untitled_overwrite);
@@ -36322,7 +36377,7 @@ test "U2C 제품 키 경로: Enter 가 확정하고 Esc 가 취소하며 클릭-
     {
         const t = try openUntitledInActivePane(fx.session);
         try testing.expect(insertText(fx.session, t, "one\n"));
-        try testing.expect(!saveDocument(fx.session, t));
+        try testing.expectError(error.AskName, saveDocument(fx.session, t));
         typeName(fx.session, "k1.txt");
         try testing.expectEqualStrings("k1.txt", fx.session.rename_input.query.items);
         settings_ops.handleRenameKey(fx.session, .{ .key = .{ .key = .enter } });
@@ -36336,7 +36391,7 @@ test "U2C 제품 키 경로: Enter 가 확정하고 Esc 가 취소하며 클릭-
     {
         const t = try openUntitledInActivePane(fx.session);
         try testing.expect(insertText(fx.session, t, "two\n"));
-        try testing.expect(!saveDocument(fx.session, t));
+        try testing.expectError(error.AskName, saveDocument(fx.session, t));
         typeName(fx.session, "k2.txt");
         settings_ops.handleRenameKey(fx.session, .{ .key = .{ .key = .escape } });
         try testing.expect(fx.session.rename == null);
@@ -36349,7 +36404,7 @@ test "U2C 제품 키 경로: Enter 가 확정하고 Esc 가 취소하며 클릭-
     {
         const t = try openUntitledInActivePane(fx.session);
         try testing.expect(insertText(fx.session, t, "three\n"));
-        try testing.expect(!saveDocument(fx.session, t));
+        try testing.expectError(error.AskName, saveDocument(fx.session, t));
         typeName(fx.session, "half"); // 아직 다 안 쳤다
         fx.session.mouse(1, 10, 10, 0, 0); // down — 어딘가를 클릭
         try testing.expect(fx.session.rename == null);
@@ -36460,7 +36515,7 @@ test "U2F 상자가 떠 있는데 caret 이 화면 밖으로 나가면 — 보�
     try testing.expect(insertText(fx.session, t, body.items));
     t.rt.editor_selection = editor_selection.Selection.at(0); // caret 을 맨 위로
 
-    try testing.expect(!saveDocument(fx.session, t));
+    try testing.expectError(error.AskName, saveDocument(fx.session, t));
     // caret 을 맨 위로 옮겼을 뿐이라 화면은 아직 아래에 있다 — `refreshCaretAnchor` 가 되돌리고
     // 앵커는 **다음 프레임**에 선다(그 되돌림이 이 회차의 고침이다). 두 프레임을 돌려 자리를 잡는다.
     for (0..2) |_| {
@@ -36492,4 +36547,92 @@ test "U2F 상자가 떠 있는데 caret 이 화면 밖으로 나가면 — 보�
     try testing.expect(fx.session.chrome_host.rename_box.open);
     // 그리고 이름은 여전히 안 붙었다(되돌림이 확정이 아니다).
     try testing.expect(t.rt.editor_path == null);
+}
+
+test "C0a 저장 실패는 이유별로 말한다 — 하나로 뭉개면 죽는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    const io = std.testing.io;
+    try dir.dir.writeFile(io, .{ .sub_path = "c0.txt", .data = "body\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    pinUntitledBase(fx.session, root);
+    const path = try std.fs.path.join(allocator, &.{ root, "c0.txt" });
+    defer allocator.free(path);
+
+    // ⑴ **이유 → 문구가 서로 다르다.** 「하나라도 뜨면 통과」를 세지 않기 위해 **문구가 갈리는 것**을
+    //    직접 본다 — 뭉개는 변이는 여기서 죽는다(적대적 1회차의 그 함정).
+    const keys = [_]maru.i18n.Key{
+        saveFailureNoticeKey(error.ExternalConflict),
+        saveFailureNoticeKey(error.TooLarge),
+        saveFailureNoticeKey(error.NotFound),
+        saveFailureNoticeKey(error.WriteFailed),
+    };
+    for (keys, 0..) |a, i| for (keys, 0..) |b, j| {
+        if (i == j) continue;
+        try testing.expect(!std.mem.eql(u8, maru.i18n.t(a), maru.i18n.t(b)));
+    };
+
+    // ⑵ **읽기 전용** — 제품 경로로 이유가 온다.
+    {
+        const t = try openPathInActivePane(fx.session, path);
+        t.rt.editor_doc.?.file.read_only = true;
+        try testing.expectError(error.ReadOnly, saveDocument(fx.session, t));
+    }
+
+    // ⑶ **외부 변경** — 쓰기 직전 CAS 가 잡는다. 파일을 밖에서 바꾼 뒤 저장한다.
+    {
+        const t = try openPathInActivePane(fx.session, path);
+        t.rt.editor_selection = editor_selection.Selection.at(0);
+        try testing.expect(insertText(fx.session, t, "x"));
+        try dir.dir.writeFile(io, .{ .sub_path = "c0.txt", .data = "changed outside\n" });
+        try testing.expectError(error.ExternalConflict, saveDocument(fx.session, t));
+        // ⌘S 디스패치가 **그 이유의 문구**를 띄운다(값을 버리지 않는다).
+        fx.session.chrome_host.notice.dismiss();
+        pane_ops.activePane(fx.session).active_term = blk: {
+            const pane = pane_ops.activePane(fx.session);
+            var i: usize = pane.terms.items.len;
+            while (i > 0) {
+                i -= 1;
+                if (pane.terms.items[i] == t) break :blk i;
+            }
+            break :blk pane.active_term;
+        };
+        fx.session.dispatchAppAction(.editor_save);
+        try testing.expect(fx.session.chrome_host.notice.open);
+        try testing.expect(std.mem.startsWith(
+            u8,
+            &fx.session.notice_message_buf,
+            maru.i18n.t(.app_save_external_conflict),
+        ));
+    }
+
+    // ⑷ **파일이 사라졌다** — 다시 눌러도 같은 자리라 다른 문장이어야 한다.
+    {
+        try dir.dir.writeFile(io, .{ .sub_path = "gone.txt", .data = "a\n" });
+        const gone = try std.fs.path.join(allocator, &.{ root, "gone.txt" });
+        defer allocator.free(gone);
+        const t = try openPathInActivePane(fx.session, gone);
+        t.rt.editor_selection = editor_selection.Selection.at(0);
+        try testing.expect(insertText(fx.session, t, "y"));
+        try dir.dir.deleteFile(io, "gone.txt");
+        try testing.expectError(error.NotFound, saveDocument(fx.session, t));
+    }
+
+    // ⑸ **성공은 조용하다.**
+    {
+        try dir.dir.writeFile(io, .{ .sub_path = "ok.txt", .data = "a\n" });
+        const okp = try std.fs.path.join(allocator, &.{ root, "ok.txt" });
+        defer allocator.free(okp);
+        const t = try openPathInActivePane(fx.session, okp);
+        t.rt.editor_selection = editor_selection.Selection.at(0);
+        try testing.expect(insertText(fx.session, t, "z"));
+        fx.session.chrome_host.notice.dismiss();
+        try saveDocument(fx.session, t);
+        try testing.expect(!fx.session.chrome_host.notice.open);
+    }
 }

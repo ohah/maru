@@ -494,6 +494,12 @@ Term 수명마다 할당·해제가 붙어 그 규율이 막으려던 것을 그
    → 에이전트 탭이 그 세션의 링을 보인다. 닫힌 pane 은 접지 않는다(결정 4 — 스풀 7일 회수).
 5. 검증: `MARU_E2E_TMUX_PANES=2` 가 «행 둘·각각 ✎·탭 전환» 을 찍는다; 조각 1 은 캡처 게이트 56 + 원격 판정자 전부 불변이 증거.
 
+**조각 1 ✅ (2026-09-21)** — `session_model.HookSlot`(state·progress·notice·backlog_catchup·turn_seq·turn_opened_wall_ns·tool·cwd·
+transcript·image_source), Term 은 `hook: HookSlot` 인라인 하나. 참조 9 파일 기계 치환(`term.agent_hook_state` → `term.hook.state`),
+`applyHookEvent(term, ev)` = `applyHookEventTo(term, &term.hook, ev)`, `adoptHookSessionIdentity`·`adoptHookImageSource`·
+`captureBeforeForEvent` 가 슬롯을 받는다. 증거: 캡처 게이트 56 · provider-session-removal 39 · scm-row-model 32 · remote-explorer 11 ·
+boundaries · `test-macos-only` · 전체 `zig build test` 전부 초록, 실기 e2e(tmux pane 1) 같은 그림.
+
 **착수 전 적대적 공격 (2026-09-21)**
 
 | # | 공격 | 결과 |

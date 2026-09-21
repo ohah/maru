@@ -152,7 +152,7 @@ lead의 `Stop`이 턴 끝이 아니기 때문이고, 그 판별은 화면에 근
 ### 1.1 권위표 — 화면이 훅을 뒤집는 조건 (열거)
 
 > ✅ **배선됐다**(2026-09-01). 훅 Term 에서도 `pollAgentState` 가 돌고, `arbitrateAgentState` 가 이 표를
-> 그대로 실행한다. 상태 자리는 셋으로 갈렸다 — `agent_hook_state`·`agent_screen_state`, 그리고 이 표가
+> 그대로 실행한다. 상태 자리는 셋으로 갈렸다 — `hook.state`(훅 슬롯 — RA7 조각 1 에서 `agent_hook_*` 를 `Term.hook` 으로 모았다)·`agent_screen_state`, 그리고 이 표가
 > 내는 `agent_state`. **`agent_state` 에 직접 쓰는 코드를 새로 만들지 않는다**(§1.6-⑴).
 
 훅이 살아 있는 Term에서도 **상태 입력은 전부 켠다** — 화면 tail·OSC title·OSC progress·`output_active`.
@@ -512,7 +512,7 @@ foreground 프로세스를 열거해야 닿아 제품 테스트로 몰기 어려
 **⑴ `term.agent_state` 를 두 함수가 직접 쓰고 있다 — 필드 분리가 먼저다.**
 
     pollAgentState        term.agent_state = term.agent_stabilizer.observe(detection, now_ms);
-    pollAgentHookEvents   term.agent_state = mode_mod.advance(&term.agent_hook_progress, term.agent_state, ev);
+    pollAgentHookEvents   term.agent_state = mode_mod.advance(&term.hook.progress, term.agent_state, ev);
                                                                                         ^^^^^^^^^^^^^^^^
 훅은 그 필드를 **출력이자 입력**으로 쓴다. 화면이 덮으면 다음 훅 이벤트가 «화면이 쓴 값» 을 이전
 상태로 받아 **상태 기계가 오염된다** — 중재가 아니라 덮어쓰기가 되고, 그것도 마지막에 부른 쪽이 이긴다.

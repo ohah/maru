@@ -46,6 +46,7 @@ const AgentKind = app_session_mod.AgentKind;
 const AgentTally = AppSession.AgentTally;
 const Tab = app_session_mod.Tab;
 const Term = app_session_mod.Term;
+const HookSlot = maru.session.session_model.HookSlot;
 const WorkspaceSession = AppSession.WorkspaceSession;
 const agent_session_archive_backend = app_session_mod.agent_session_archive_backend;
 const agent_session_archive = maru.session.agent_session_archive;
@@ -95,13 +96,13 @@ pub const BatchTurnFacts = struct {
     session_len: usize = 0,
 
     pub fn captureFrom(self: *BatchTurnFacts, term: *Term) void {
-        const sid = term.agent_transcript.identity();
+        const sid = term.hook.transcript.identity();
         self.session_len = if (sid.len <= self.session_buf.len) sid.len else 0;
         if (self.session_len > 0) @memcpy(self.session_buf[0..sid.len], sid);
-        const key = term.agent_hook_progress.turnKey();
+        const key = term.hook.progress.turnKey();
         self.key_len = if (key.len <= self.key_buf.len) key.len else 0;
         if (self.key_len > 0) @memcpy(self.key_buf[0..key.len], key);
-        const title = maru.session.agent_transcript.clampUtf8(term.agent_transcript.reply(), self.title_buf.len);
+        const title = maru.session.agent_transcript.clampUtf8(term.hook.transcript.reply(), self.title_buf.len);
         self.title_len = title.len;
         if (title.len > 0) @memcpy(self.title_buf[0..title.len], title);
     }
@@ -121,7 +122,7 @@ pub const BatchTurnFacts = struct {
 pub fn turnFactsForCapture(term: *Term, turn_ended: bool) TurnFacts {
     if (!turn_ended) return .{};
     return .{
-        .key = term.agent_hook_progress.turnKey(),
+        .key = term.hook.progress.turnKey(),
         // 그 턴의 마지막 응답. `applyHookEvent` 가 `.stop`·`.stop_failure` 에서 이미 눕혀 담아 두었다
         // (`hookConversationText` — 이스케이프 해제 + 경계 정리 + 개행 눕히기). 여기서 다시 만들지 않는다.
         //
@@ -137,7 +138,7 @@ pub fn turnFactsForCapture(term: *Term, turn_ended: bool) TurnFacts {
         //
         // **오류로 끝난 턴은 그 사유가 제목이 된다**(`.stop_failure` 도 같은 분기다). 그 턴이 마지막으로
         // 한 말이 사유이므로 맞다.
-        .title = term.agent_transcript.reply(),
+        .title = term.hook.transcript.reply(),
     };
 }
 
@@ -230,20 +231,20 @@ pub var test_last_turn_title_len: usize = 0;
 /// - **신원이 없을 때** — 귀속 못 할 바이트를 드는 것은 순수한 누수다(`captureTurnSnapshot` 과 같다).
 ///
 /// 루트 밖·바이너리·상한 초과는 **거부가 아니라 접기**다 — 경로는 남고 내용만 없다(`capture_file`).
-fn captureBeforeForEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hook_event.Event) void {
+fn captureBeforeForEvent(self: *AppSession, term: *Term, slot: *HookSlot, ev: maru.session.agent_hook_event.Event) void {
     // **셸 구간의 끝은 게이트 앞에서 닫는다**(AT3b-1). `Pre` 는 아래 게이트(backlog·신원) 뒤에서 열리는데,
     // 회전 순서(rename → tail 건지기)상 **`Pre` 는 살아 있는 파일에서 열리고 `Post` 는 회전본 tail 에서**
     // 올 수 있다 — 닫기까지 같은 게이트 뒤에 두면 그 구간은 영영 안 닫힌다. 짝이 없는 `Post`(backlog 의
     // 것)는 순수 층이 무시한다. 자식(subagent)의 `Post` 도 같은 id 공간이라 그대로 짝지어진다.
     if (ev.kind == .post_tool_use or ev.kind == .post_tool_use_failure) {
-        const identity = term.agent_transcript.identity();
+        const identity = slot.transcript.identity();
         if (identity.len == 0) return;
         _ = self.turn_captures.closeShell(identity, ev.tool_use_id, wallMs(self), ev.duration_ms, shell_bracket_slack_ms);
         // **provider 가 검증한 셸 편집 목록**(AT3b-2 — `bashEditDiff.changedFiles`, claude bypass 모드). 구간을 닫은
         // 뒤에, `Pre` 와 **같은 게이트**를 지나서 적는다: backlog·회전본의 것은 버린다(그 턴은 끝났거나 죽었다 —
         // 지어내는 쪽보다 잃는 쪽), 루트 밖은 애초에 경로만 남고, **루트 아래 다른 저장소**(워크트리)의 경로는
         // 세지 않는다(그 편집은 다른 세션 것이다 — 재실측 ②). 자식(subagent)의 것은 부모 턴에(AT3 규율).
-        if (term.agent_hook_backlog_catchup) return;
+        if (slot.backlog_catchup) return;
         var it = maru.session.agent_hook_event.changedFiles(ev);
         const first = it.next() orelse return;
         // **원격 Term 은 경로만 적는다**(AT3c) — 루트도 중첩 저장소도 이 기계에 없다. provider 가 저쪽 저장소의
@@ -270,8 +271,8 @@ fn captureBeforeForEvent(self: *AppSession, term: *Term, ev: maru.session.agent_
     // 처음에는 그 규율을 과잉 적용해 자식을 통째로 뺐다. 실측(2026-08-26)이 대가를 보여 줬다:
     // **셸 호출의 15.6%(1,516/9,735)가 자식의 것**이라 고지가 그만큼 적게 셌고, 자식의 편집은
     // `✎` 대신 `·` 로 떨어졌다.
-    if (term.agent_hook_backlog_catchup) return;
-    const identity = term.agent_transcript.identity();
+    if (slot.backlog_catchup) return;
+    const identity = slot.transcript.identity();
     if (identity.len == 0) return;
 
     // **셸은 경로를 안 준다 — 셀 수만 있다**(계약 §2.3: provider 구현이 그 필드를 아예 안 만든다).
@@ -422,7 +423,7 @@ fn noteBeforePath(
 /// 그러면 **다음 턴의 파일이 끝난 턴의 사본에** 들어가 그 턴의 `✎` 와 배지가 남의 편집을 센다.
 /// `BatchTurnFacts.captureFrom` 이 턴 키에서 같은 이유로 같은 자리에 있다(AT2 가 겪은 결함).
 pub fn sealTurnCaptureNow(self: *AppSession, term: *Term) turn_capture.Id {
-    const identity = term.agent_transcript.identity();
+    const identity = term.hook.transcript.identity();
     if (identity.len == 0) return 0;
     // **봉인 전에 고아를 비운다** — 봉인 자리는 「링이 가리킬 수 있는 최대 + 1」이라 그 한 칸이 고아로
     // 채워지면 아직 가리켜지는 사본이 밀려난다.
@@ -881,7 +882,7 @@ pub fn anyAgentRunning(self: *AppSession) bool {
 pub fn resetAgentObservationForKindChange(term: *Term) void {
     // 새 프로세스의 화면/OSC/activity를 이전 상태와 섞지 않는다.
     term.agent_state = .unknown;
-    term.agent_hook_state = .unknown;
+    term.hook.state = .unknown;
     term.agent_screen_state = .unknown;
     term.agent_screen_visible_blocker = false;
     term.agent_screen_visible_idle = false;
@@ -895,7 +896,7 @@ pub fn resetAgentObservationForKindChange(term: *Term) void {
     term.agent_stabilizer.reset();
     term.agent_screen_generation = 0;
     term.agent_last_output_ms = 0;
-    term.agent_transcript.reset();
+    term.hook.transcript.reset();
 }
 
 pub fn pollAgentKinds(self: *AppSession) void {
@@ -979,7 +980,7 @@ pub fn pollAgentKinds(self: *AppSession) void {
                         if (diag_gate.maruDebugEnabled()) std.log.scoped(.agent).info("agent: {s}", .{@tagName(term.agent_kind)});
                         // 새 프로세스의 대화를 이전 세션 것과 섞지 않는다. 응답 줄이 사라지면 행 줄 수도
                         // 바뀌므로 **재투영까지** 해야 한다 — metal_dirty만으로는 행 높이가 옛 값으로 남는다.
-                        const had_reply_kind = term.agent_transcript.owned.reply().len > 0;
+                        const had_reply_kind = term.hook.transcript.owned.reply().len > 0;
                         resetAgentObservationForKindChange(term);
                         if (had_reply_kind) sidebar_ops.rebuildSidebar(self) catch {};
                     }
@@ -1009,7 +1010,7 @@ pub fn pollAgentKinds(self: *AppSession) void {
 /// 그래서 이 함수는 error를 내지 않는다.
 pub fn pollAgentTranscript(self: *AppSession, term: *Term, displayed: bool) void {
     if (term.agent_kind == .none) return;
-    const cache = &term.agent_transcript;
+    const cache = &term.hook.transcript;
     const now = self.awakeMs();
     if (cache.last_poll_ms != 0 and now -| cache.last_poll_ms < transcript_poll_interval_ms) return;
     cache.last_poll_ms = now;
@@ -1065,13 +1066,13 @@ pub fn pollAgentTranscript(self: *AppSession, term: *Term, displayed: bool) void
 /// 조용히 비고, 사용자에게는 고장과 구분되지 않는다.
 ///
 /// **추측은 하지 않는다.** 여기서 쓰는 것은 사이드바 대화 라벨이 이미 자식 env 신원으로 확정해 둔
-/// 바로 그 파일(`term.agent_transcript`)이다. 신원이 없으면 폴백도 없다 — 「그 디렉터리의 최신 파일」
+/// 바로 그 파일(`term.hook.transcript`)이다. 신원이 없으면 폴백도 없다 — 「그 디렉터리의 최신 파일」
 /// 추측은 §7.2 가 이미 기각했다(새 터미널에 직전 세션 대화가 붙었다).
 ///
 /// 이미 소스가 있으면 아무것도 하지 않는다. 훅이 나중에 오면 그 값이 이긴다(같은 파일이면 무동작).
 pub fn adoptFallbackImageSource(self: *AppSession, term: *Term) void {
-    if (!term.agent_image_source.isEmpty()) return;
-    const cache = &term.agent_transcript;
+    if (!term.hook.image_source.isEmpty()) return;
+    const cache = &term.hook.transcript;
     if (cache.identity_len == 0 or cache.name_len == 0) return;
 
     var buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -1091,7 +1092,7 @@ pub fn adoptFallbackImageSource(self: *AppSession, term: *Term) void {
             break :blk maru.session.agent_transcript.claudeTranscriptPath(&buf, claude_dir, cwd, cache.fileName()) orelse return;
         },
     };
-    _ = term.agent_image_source.set(path);
+    _ = term.hook.image_source.set(path);
 }
 
 /// 자식 프로세스 env에서 세션 신원을 읽는다(§7.2.1 — 기본 경로, 사용자 파일 무침습).
@@ -1765,7 +1766,7 @@ pub fn refreshAgentSessionIdentity(self: *AppSession, term: *Term) void {
     var buf: [maru.session.agent_transcript.max_identity_bytes]u8 = undefined;
     const value = agentIdentityFromChildEnv(self, term, key, &buf) orelse
         agentIdentityFromStatuslineFile(self, term, &buf) orelse return;
-    const cache = &term.agent_transcript;
+    const cache = &term.hook.transcript;
     if (std.mem.eql(u8, cache.identity(), value)) return;
     // 신원이 바뀌었다 = 다른 세션이다. 옛 대화가 새 세션 행에 남지 않게 매핑을 통째로 버린다.
     cache.reset();
@@ -1782,7 +1783,7 @@ pub fn refreshAgentSessionIdentity(self: *AppSession, term: *Term) void {
 /// **이 배관은 `git.zig` 의 `sessionIdentityFor` 주석이 이미 약속하던 것**인데 실제로는 없었다. 그래서
 /// 훅 모드의 링이 빈 신원(→ `captureTurnSnapshot` 이 그대로 조기 반환)이나 `/clear` 뒤의 **낡은 신원**에
 /// 붙었다.
-fn adoptHookSessionIdentity(self: *AppSession, term: *Term, ev: maru.session.agent_hook_event.Event) void {
+fn adoptHookSessionIdentity(self: *AppSession, slot: *HookSlot, ev: maru.session.agent_hook_event.Event) void {
     const tr = maru.session.agent_transcript;
     if (!maru.session.agent_hook_mode.carriesSessionIdentity(ev)) return;
     // **이스케이프를 푼 뒤 상한을 잰다** — 한 자리에서 해야 «풀고 나서 길어지는» 값이 안 샌다. 버퍼가
@@ -1799,7 +1800,7 @@ fn adoptHookSessionIdentity(self: *AppSession, term: *Term, ev: maru.session.age
     // 실측(2026-08-24, 이 기계의 훅 로그 5,221 이벤트)에서는 `session_id` 가 **전부 36바이트 UUID** 라
     // 이 가지가 밟힌 적이 없다. 그럼에도 남기는 이유는 밟혔을 때의 오염이 **조용하기** 때문이다.
     if (value.len == 0 or value.len > tr.max_identity_bytes) return;
-    const cache = &term.agent_transcript;
+    const cache = &slot.transcript;
     if (std.mem.eql(u8, cache.identity(), value)) return;
     // 신원이 바뀌었다 = 다른 세션이다(`/clear`). 옛 대화가 새 세션 행에 남지 않게 매핑을 통째로 버린다 —
     // 관측 경로와 **같은 판단**이다.
@@ -1835,11 +1836,11 @@ pub fn isRemoteAgentPane(term: *const Term) bool {
     return term.agent_remote_channel != null;
 }
 
-fn adoptHookImageSource(self: *AppSession, term: *Term, ev: maru.session.agent_hook_event.Event) void {
+fn adoptHookImageSource(self: *AppSession, slot: *HookSlot, ev: maru.session.agent_hook_event.Event) void {
     if (ev.transcript_path.len == 0) return;
     var buf: [maru.session.agent_image_index.max_source_path_bytes + 1]u8 = undefined;
     const value = maru.session.agent_hook_event.decodeInto(&buf, ev.transcript_path);
-    if (!term.agent_image_source.set(value)) return;
+    if (!slot.image_source.set(value)) return;
     self.metal_dirty = true;
     // 갤러리를 **보고 있을 때만** 다시 훑는다. 안 보는 뷰 때문에 1.6 GB 를 읽지 않는다 —
     // 다음에 들어올 때 `refresh` 가 경로 불일치를 보고 알아서 훑는다.
@@ -1850,7 +1851,7 @@ fn adoptHookImageSource(self: *AppSession, term: *Term, ev: maru.session.agent_h
 /// 쌓이므로 그것만으로 배제된다(§7.3). 대화가 갱신됐으면 true.
 pub fn refreshClaudeTranscript(self: *AppSession, term: *Term, cwd: []const u8) bool {
     const tr = maru.session.agent_transcript;
-    const cache = &term.agent_transcript;
+    const cache = &term.hook.transcript;
     // **신원이 없으면 아무것도 하지 않는다.** 예전엔 여기서 "그 디렉터리의 가장 최신 파일"을 추측했는데, 그게
     // 새 터미널에 직전 세션의 대화를 붙이고(사용자 제보) 같은 cwd의 두 에이전트가 서로의 대화를 물게 했다.
     // 추측으로 틀린 대화를 보여주느니 비우는 편이 낫다는 계약 1과도 어긋났다 — 그래서 폴백을 없앴다(§7.2).
@@ -1898,7 +1899,7 @@ pub fn refreshClaudeTranscript(self: *AppSession, term: *Term, cwd: []const u8) 
 /// `thread_source == "user"`이고 cwd가 이 Term과 같은 첫 후보를 고른다. 대화가 갱신됐으면 true.
 pub fn refreshCodexTranscript(self: *AppSession, term: *Term, cwd: []const u8) bool {
     const tr = maru.session.agent_transcript;
-    const cache = &term.agent_transcript;
+    const cache = &term.hook.transcript;
     _ = cwd; // 신원으로 파일을 확정하므로 cwd 대조가 필요 없다(그 값이 곧 그 세션이다)
     if (cache.identity_len == 0) return false; // claude와 같은 이유로 폴백 없음(§7.2)
     const home_z = std.c.getenv("HOME") orelse return false;
@@ -1961,19 +1962,19 @@ pub fn pollAgentConsumer(self: *AppSession, term: *Term, displayed: bool, observ
         .observe => {
             // 훅 모드에서 남은 **진행 중 세부**를 버린다. 남겨 두면 관측 소스가 그린 배지 옆에 훅이
             // 적은 문구가 붙는다 — 그것이 곧 계약 §1 이 금지하는 «한 Term 두 소스» 다.
-            term.agent_hook_tool.clear();
+            term.hook.tool.clear();
             // **작업 디렉터리도 버린다**(적대적 검증 1 회차). 안 버리면 에이전트를 끝내고 평범한 셸로
             // 돌아온 뒤에도 폴더줄이 **옛 경로에 붙박인다** — 그때부터는 OSC 7 이 제대로 갱신되는데
             // 그것을 무시하게 되고, 그 모양이 바로 이 블록이 금지하는 «한 Term 두 소스» 다.
-            term.agent_hook_cwd.clear();
+            term.hook.cwd.clear();
             // 자식 셈도 버린다. 남기면 훅 모드로 돌아온 뒤 첫 lead `Stop` 이 «자식이 남았다» 로 읽혀
             // 배지가 안 풀린다(다음 프롬프트가 셈을 지울 때까지).
-            term.agent_hook_progress.reset();
+            term.hook.progress.reset();
             // **훅 상태도 버린다**(적대적 검증 2026-09-01 — 위 셋과 같은 이유인데 빠져 있었다). 남기면
             // 훅 소스가 돌아온 순간 **낡은 값이 그대로 배지가 된다**: 설정을 껐다 켜거나 로그가
             // 사라졌다 돌아오는 사이 에이전트가 턴을 끝냈어도 배지는 옛 `running` 이다. `unknown` 으로
             // 두면 §1.1 의 B0 가 첫 훅 이벤트가 올 때까지 화면을 쓴다 — 「모른다」와 「idle 이다」는 다르다.
-            term.agent_hook_state = .unknown;
+            term.hook.state = .unknown;
             if (observation_current) {
                 pollAgentState(self, term, displayed);
                 pollAgentTranscript(self, term, displayed);
@@ -2137,7 +2138,7 @@ pub fn consumeRemoteAgentLines(self: *AppSession, term: *Term, lines: []const []
     ch.tick(now_ms);
 }
 
-/// 훅 이벤트 로그를 읽어 **`term.agent_hook_state`** 를 채운다(계약 §4).
+/// 훅 이벤트 로그를 읽어 **`term.hook.state`** 를 채운다(계약 §4).
 ///
 /// **배지로 나가는 값은 여기서 정해지지 않는다**(§1.1 · 2026-09-01 개정). 예전에는 이 함수가 훅 모드의
 /// 유일한 상태 소스라 `term.agent_state` 를 직접 썼는데, 그러면 승인 해제·codex 오류 턴·훅 유실을
@@ -2181,7 +2182,7 @@ pub fn pollAgentHookEvents(self: *AppSession, term: *Term, displayed: bool) void
     const backlog_window: u64 = maru.session.agent_hook_event.max_line_bytes * 2;
     if (first_read and st.size > term.agent_hook_cursor.offset + backlog_window) {
         term.agent_hook_cursor.offset = st.size - backlog_window;
-        term.agent_hook_backlog_catchup = true;
+        term.hook.backlog_catchup = true;
     }
 
     if (st.size <= term.agent_hook_cursor.offset) return; // 새 내용이 없다
@@ -2198,8 +2199,8 @@ pub fn pollAgentHookEvents(self: *AppSession, term: *Term, displayed: bool) void
     const batch = term.agent_hook_cursor.take(buf[0..n], &events);
 
     const before = term.agent_state;
-    const tool_before = term.agent_hook_tool;
-    const had_reply = term.agent_transcript.owned.reply().len > 0;
+    const tool_before = term.hook.tool;
+    const had_reply = term.hook.transcript.owned.reply().len > 0;
     var turn_batch: TurnBatch = .{};
     for (events[0..batch.count]) |ev| turn_batch.step(self, term, ev);
     const conversation_changed = turn_batch.conversation_changed;
@@ -2218,22 +2219,22 @@ pub fn pollAgentHookEvents(self: *AppSession, term: *Term, displayed: bool) void
     // 기록») 그런 턴은 다음 프롬프트까지 «진행 중» 으로 남는다. 그 자체는 정상 동작이지만, 사후에
     // «얼마나 오래였나» 를 답할 근거가 없었다 — payload 에 시각이 없고 파일 mtime 은 로그 전체의 마지막
     // 쓰기다. 이 한 줄이 그 근거다. 시각을 주장할 수 있을 때만(=backlog 가 아니었을 때) 찍는다.
-    if (diag_gate.maruDebugEnabled() and term.agent_hook_turn_opened_wall_ns != 0) {
+    if (diag_gate.maruDebugEnabled() and term.hook.turn_opened_wall_ns != 0) {
         const now_ns: i96 = @intCast(std.Io.Clock.real.now(self.io).nanoseconds);
-        const open_ms = @divFloor(now_ns - term.agent_hook_turn_opened_wall_ns, std.time.ns_per_ms);
+        const open_ms = @divFloor(now_ns - term.hook.turn_opened_wall_ns, std.time.ns_per_ms);
         if (open_ms >= turn_open_warn_ms) std.log.scoped(.agenthook).info(
             "hook turn still open: {d}ms (state={s})",
-            .{ open_ms, @tagName(term.agent_hook_state) },
+            .{ open_ms, @tagName(term.hook.state) },
         );
     }
     // **backlog 는 상태만 세우고 알리지 않는다**(계약 §4). 그 이벤트는 창이 없던 시간의 것이라 «지금 막
     // 일어난 일» 이 아니다 — 재접속하자마자 몇 시간 전 턴의 «완료» 가 뜨면 그것은 거짓말이다. 배지·대화
     // 줄은 그대로 두어 **지금 상태**는 옳게 선다.
-    if (term.agent_hook_backlog_catchup) {
-        term.agent_hook_notice.clear();
+    if (term.hook.backlog_catchup) {
+        term.hook.notice.clear();
         // **따라잡기가 끝나는 순간**(더 읽을 것이 없다)부터 다시 알린다. 그 뒤의 이벤트는 창이 열린 채
         // 일어난 «지금» 이다.
-        if (!batch.more) term.agent_hook_backlog_catchup = false;
+        if (!batch.more) term.hook.backlog_catchup = false;
     }
     // **배치당 한 번만 찍는다** — 배치 안의 이벤트는 모두 같은 작업트리를 본다(위 `applyHookEvent`).
     //
@@ -2252,7 +2253,7 @@ pub fn pollAgentHookEvents(self: *AppSession, term: *Term, displayed: bool) void
     if (displayed and term.agent_state != before) self.metal_dirty = true;
     // 세부가 바뀌면 그 줄의 **글자가** 달라진다 — 스피너 위상 진행이 다음 주기에 어차피 다시 그리지만,
     // 그때까지 옛 도구 이름이 남는다. 바뀐 tick 에 바로 반영한다.
-    if (displayed and !std.mem.eql(u8, term.agent_hook_tool.text(), tool_before.text()))
+    if (displayed and !std.mem.eql(u8, term.hook.tool.text(), tool_before.text()))
         self.chrome_dirty = true;
 
     // **다 읽은 뒤에 회전한다**(계약 §4.2). 읽기 전에 돌리면 방금 온 이벤트를 회전본에 두고 새 파일부터
@@ -2262,7 +2263,7 @@ pub fn pollAgentHookEvents(self: *AppSession, term: *Term, displayed: bool) void
     // 응답 줄이 생기거나 사라지면 **행 높이가 바뀐다** — 재투영까지 해야 옛 높이가 남지 않는다
     // (관측 모드의 `pollAgentKinds` 가 같은 이유로 그렇게 한다).
     if (conversation_changed) {
-        const has_reply = term.agent_transcript.owned.reply().len > 0;
+        const has_reply = term.hook.transcript.owned.reply().len > 0;
         if (has_reply != had_reply) sidebar_ops.rebuildSidebar(self) catch {} else if (displayed) self.metal_dirty = true;
     }
 }
@@ -2326,6 +2327,13 @@ pub fn testApplyHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent
 }
 
 fn applyHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hook_event.Event) Applied {
+    return applyHookEventTo(self, term, &term.hook, ev);
+}
+
+/// `applyHookEvent` 의 본체 — **어느 슬롯에 쓰는가**를 인자로 받는다(RA7 조각 1). 로컬 Term 과 원격 pane 하나는
+/// `term.hook`, 원격 pane 여럿은 `AppSession` 의 pane 테이블 슬롯(조각 2). Term 수준 값(`agent_kind`·기계 키·
+/// 화면 관측)은 그대로 `term` 에서 읽는다.
+fn applyHookEventTo(self: *AppSession, term: *Term, slot: *HookSlot, ev: maru.session.agent_hook_event.Event) Applied {
     const mode_mod = maru.session.agent_hook_mode;
     // **맨 앞이어야 한다.** 신원이 갈리면 `cache.reset()` 이 `owned` 를 비우는데, 이 함수 아래쪽이
     // `owned.setPrompt`/`setReply` 를 쓰고 `.done` 분기가 `owned.reply()` 를 읽는다 — 뒤에 두면 방금
@@ -2336,8 +2344,8 @@ fn applyHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hook_ev
     //   ⑵ 그 switch 는 `.stop`·`.user_prompt_submit` 에서 **early return** 한다 — 대화를 싣는 바로 그
     //      이벤트에서 채택이 **아예 안 돈다**.
     // 판정자: `app_session.zig` 「신원은 payload 가 정한다」 블록의 마지막 두 단언.
-    adoptHookSessionIdentity(self, term, ev);
-    adoptHookImageSource(self, term, ev);
+    adoptHookSessionIdentity(self, slot, ev);
+    adoptHookImageSource(self, slot, ev);
     // **훅이 알려 준 작업 디렉터리를 담는다.** 원격 pane 에서 OSC 7 은 `precmd` 라 전면 TUI 가 붙어
     // 있는 동안 발화하지 못해 값이 접속 직전에서 멈춘다(ssh-integration.md §9.5) — 훅은 그 구간에도
     // **매 턴** 오므로 이 값이 그 자리를 메운다. 로컬은 커널 조회가 이미 정확해서 소비하지 않는다.
@@ -2345,19 +2353,19 @@ fn applyHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hook_ev
     // **어느 기계의 경로인지 함께 담는다.** 이 값을 읽는 쪽에는 원격 SCM 이 있고, 거기서는 이 경로가
     // 곧 `git -C` 의 인자다 — 목적지를 안 적으면 로컬 에이전트가 남긴 경로가 그 pane 이 `maru ssh` 로
     // 들어간 뒤 **저쪽 기계의 같은 철자**를 연다(`CwdLabel.max_host` 주석).
-    if (ev.cwd.len > 0) term.agent_hook_cwd.set(ev.cwd, git_ops.termMachineKey(term), self.awakeMs());
-    captureBeforeForEvent(self, term, ev);
+    if (ev.cwd.len > 0) slot.cwd.set(ev.cwd, git_ops.termMachineKey(term), self.awakeMs());
+    captureBeforeForEvent(self, term, slot, ev);
     // **훅 자리만 읽고 훅 자리만 쓴다**(§1.6-⑴). 이 값은 `advance` 의 입력이자 출력이라 화면이 끼어들면
     // 상태 기계가 오염된다 — 배지에 나가는 값은 권위표를 통과한 `agent_state` 다.
-    const prev_state = term.agent_hook_state;
+    const prev_state = slot.state;
     // **`advance` 를 쓴다**(`next` 가 아니라) — 서브에이전트를 세야 lead 의 `Stop` 을 완료로 단정하지
     // 않으면서도 마지막 자식이 끝날 때 배지가 풀린다(계약 §2).
-    const turn_open_before = term.agent_hook_progress.turn_open;
+    const turn_open_before = slot.progress.turn_open;
     var key_before_buf: [@sizeOf(@FieldType(mode_mod.Progress, "turn_buf"))]u8 = undefined;
-    const key_before_src = term.agent_hook_progress.turnKey();
+    const key_before_src = slot.progress.turnKey();
     @memcpy(key_before_buf[0..key_before_src.len], key_before_src);
     const key_before = key_before_buf[0..key_before_src.len];
-    term.agent_hook_state = mode_mod.advance(&term.agent_hook_progress, term.agent_hook_state, ev);
+    slot.state = mode_mod.advance(&slot.progress, slot.state, ev);
 
     // 턴이 **열리는 순간**을 찍는다(session_model 의 필드 주석 — provider payload 에 시각이 없다).
     //
@@ -2368,15 +2376,15 @@ fn applyHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hook_ev
     //
     // backlog 따라잡기 중에는 찍지 않는다: 창이 없던 시간의 이벤트라 지금을 찍으면 몇 시간 전 턴이
     // «방금 열렸다» 가 된다. 그 구간의 턴은 시각을 주장하지 않고 0 으로 남는다.
-    const open_now = term.agent_hook_progress.turn_open;
-    const key_now = term.agent_hook_progress.turnKey();
+    const open_now = slot.progress.turn_open;
+    const key_now = slot.progress.turnKey();
     const turn_changed = !std.mem.eql(u8, key_before, key_now);
     // **권위표의 C2 가 언제 셈을 버릴지의 유일한 입력이다**(§1.6-⑵-a). 안 올리면 C2 가 한 번 성공한 뒤
     // 카운터가 임계에 남아, 새 턴의 첫 판정에서 화면이 아직 이전 idle chrome 을 들고 있는 동안 **확인
     // 절차 없이 완료**가 된다(적대적 검증 R8 에서 재현한 그 버그다). 턴 정체가 바뀌면 새 턴이다.
-    if (turn_changed) term.agent_hook_turn_seq +%= 1;
+    if (turn_changed) slot.turn_seq +%= 1;
     if (open_now != turn_open_before or (open_now and turn_changed)) {
-        term.agent_hook_turn_opened_wall_ns = if (open_now and !term.agent_hook_backlog_catchup)
+        slot.turn_opened_wall_ns = if (open_now and !slot.backlog_catchup)
             @intCast(std.Io.Clock.real.now(self.io).nanoseconds)
         else
             0;
@@ -2388,8 +2396,8 @@ fn applyHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hook_ev
     var label_scratch: [mode_mod.ToolLabel.max_text]u8 = undefined;
     switch (mode_mod.labelFor(ev)) {
         .keep => {},
-        .clear => term.agent_hook_tool.clear(),
-        .set => |body| term.agent_hook_tool.set(hookConversationText(&label_buf, &label_scratch, body)),
+        .clear => slot.tool.clear(),
+        .set => |body| slot.tool.set(hookConversationText(&label_buf, &label_scratch, body)),
     }
 
     // **턴이 끝났다는 사실만 돌려준다**(계약 §1 표 — 훅 모드의 턴 경계는 `UserPromptSubmit`/`Stop`).
@@ -2402,7 +2410,7 @@ fn applyHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hook_ev
     // 특히 그렇다), 그때마다 찍으면 `git write-tree` 가 그 수만큼 **동기로** 돈다. 배치 안의 이벤트는
     // 모두 **같은 작업트리**를 보므로 여러 번 찍어도 나오는 tree 가 같다 — 비용만 늘고 얻는 것이 없다.
     // 호출자가 배치 끝에서 한 번 찍는다.
-    const turn_end = maru.session.turn_snapshot.isTurnEnd(turnStateOf(prev_state), turnStateOf(term.agent_hook_state));
+    const turn_end = maru.session.turn_snapshot.isTurnEnd(turnStateOf(prev_state), turnStateOf(slot.state));
     // **세션 base(턴 0)** — 타임라인은 스냅샷 **두 개**라야 완료 턴 하나를 낸다. base 가 없으면 그 세션의
     // 첫 턴이 화면에 아예 안 뜬다(두 번째 턴이 끝나야 보인다). `previous == .running` 인 `SessionStart`
     // 는 위 `turn_end` 가 이미 잡으므로 여기서 빠진다 — 둘은 상호배타다(`opensSessionBase` 주석의 표).
@@ -2415,7 +2423,7 @@ fn applyHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hook_ev
     // 시작했다» 다. 배지는 그대로 바뀌고 알림만 가려진다.
     // **알림은 훅 전이에만 붙는다**(§1.1.1). C1·C2 가 만든 전이에 걸면 codex 오류 턴에 「완료」가
     // 나간다 — 화면은 «끝났다» 는 알아도 «어떻게 끝났는지» 는 모른다(계약 §2).
-    const notice = if (mode_mod.suppressesNotice(ev)) mode_mod.Notice.none else mode_mod.noticeOn(prev_state, term.agent_hook_state);
+    const notice = if (mode_mod.suppressesNotice(ev)) mode_mod.Notice.none else mode_mod.noticeOn(prev_state, slot.state);
     switch (notice) {
         .none => {},
         // 턴 끝은 같은 전이지만 **오류로 끝난 턴을 «완료» 라 부르지 않는다**(계약 §2). 그 사실은
@@ -2436,15 +2444,15 @@ fn applyHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hook_ev
         .done => {
             // 이벤트에서 바로 꺼낸 문자열만 푼다 — 쌓아 둔 lead 응답은 저장할 때 이미 풀었다.
             var body_buf: [mode_mod.PendingNotice.max_text]u8 = undefined;
-            const body = if (ev.agent_id.len == 0) hookDisplayText(&body_buf, ev.text) else term.agent_transcript.owned.reply();
-            if (term.agent_hook_progress.takeFailed())
-                term.agent_hook_notice.set(.failed, body, self.awakeMs())
+            const body = if (ev.agent_id.len == 0) hookDisplayText(&body_buf, ev.text) else slot.transcript.owned.reply();
+            if (slot.progress.takeFailed())
+                slot.notice.set(.failed, body, self.awakeMs())
             else
-                term.agent_hook_notice.set(.done, body, self.awakeMs());
+                slot.notice.set(.done, body, self.awakeMs());
         },
         // `noticeOn` 은 전이만 보므로 지금은 이 값을 내지 않는다(위 `.done` 에서 갈린다). 그래도
         // `unreachable` 을 두지 않는다 — 뒷날 그 함수가 이벤트를 보게 되면 그 순간 제품이 죽는다.
-        .failed => term.agent_hook_notice.set(.failed, "", self.awakeMs()),
+        .failed => slot.notice.set(.failed, "", self.awakeMs()),
         .attention => {
             // 무엇을 승인하는지 — 사람이 읽는 설명이 있으면 그것, 없으면 도구 이름. **명령 원문은
             // 싣지 않는다**(계약 §7: 길고 민감하다).
@@ -2459,7 +2467,7 @@ fn applyHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hook_ev
             else
                 ev.notice_text;
             var body_buf: [mode_mod.PendingNotice.max_text]u8 = undefined;
-            term.agent_hook_notice.set(.attention, hookDisplayText(&body_buf, raw), self.awakeMs());
+            slot.notice.set(.attention, hookDisplayText(&body_buf, raw), self.awakeMs());
         },
     }
 
@@ -2469,16 +2477,16 @@ fn applyHookEvent(self: *AppSession, term: *Term, ev: maru.session.agent_hook_ev
     var text_scratch: [maru.session.agent_transcript.max_text_bytes]u8 = undefined;
     switch (ev.kind) {
         .user_prompt_submit => if (ev.text.len > 0) {
-            term.agent_transcript.owned.setPrompt(hookConversationText(&text_buf, &text_scratch, ev.text));
+            slot.transcript.owned.setPrompt(hookConversationText(&text_buf, &text_scratch, ev.text));
             // 새 프롬프트가 오면 이전 응답은 지난 턴 것이다 — 남겨 두면 «질문은 새것, 답은 옛것» 이 붙는다.
-            term.agent_transcript.owned.setReply("");
+            slot.transcript.owned.setReply("");
             return .{ .conversation = true, .turn_end = turn_end, .base = base };
         },
         // **오류 사유도 마지막 응답이다.** provider 가 `StopFailure` 의 `last_assistant_message` 로
         // 사유를 준다(실측). 저장하지 않으면 사이드바 대화 줄이 오류 턴만 비고, 자식이 남아 알림이
         // 늦게 나가는 경우엔 그 본문마저 잃는다(위 `.done` 분기가 이 값을 쓴다).
         .stop, .stop_failure => if (ev.text.len > 0) {
-            term.agent_transcript.owned.setReply(hookConversationText(&text_buf, &text_scratch, ev.text));
+            slot.transcript.owned.setReply(hookConversationText(&text_buf, &text_scratch, ev.text));
             return .{ .conversation = true, .turn_end = turn_end, .base = base };
         },
         else => {},
@@ -2584,9 +2592,9 @@ fn drainRotatedAgentHookLog(self: *AppSession, term: *Term, rotated_path: []cons
     //
     // 알림 억제와 **같은 플래그**를 쓴다(사유가 같기 때문이다). 드레인이 끝나면 되돌린다 — 이 함수는
     // tick 안에서 동기로 돌므로 그 사이 다른 경로가 이 플래그를 볼 일이 없다.
-    const restore_catchup = term.agent_hook_backlog_catchup;
-    term.agent_hook_backlog_catchup = true;
-    defer term.agent_hook_backlog_catchup = restore_catchup;
+    const restore_catchup = term.hook.backlog_catchup;
+    term.hook.backlog_catchup = true;
+    defer term.hook.backlog_catchup = restore_catchup;
     while (true) {
         const batch = cursor.take(text, &events);
         var rotated_turn_end = false;
@@ -2607,7 +2615,7 @@ fn drainRotatedAgentHookLog(self: *AppSession, term: *Term, rotated_path: []cons
                 // 않지만 구간은 다르다 — 회전본 tail 의 `Stop` 은 살아 있는 파일에서 연 구간의 **진짜 끝**이고,
                 // 안 닫으면 그 구간이 다음 턴의 `Stop` 까지 열려 **다음 턴 전체(사용자 편집 포함)를 덮는다.**
                 // 버킷은 그대로 남아 다음 봉인에 실리지만 구간의 끝은 지금이다.
-                self.turn_captures.sealShell(term.agent_transcript.identity(), wallMs(self), shell_bracket_slack_ms);
+                self.turn_captures.sealShell(term.hook.transcript.identity(), wallMs(self), shell_bracket_slack_ms);
             }
             if (applied.base) rotated_base = true;
         }
@@ -2634,7 +2642,7 @@ pub const HookNotice = struct {
 /// 꺼내 가면 슬롯을 비운다. 비우지 않으면 다음 tick 마다 같은 것을 다시 본다.
 pub fn takeAgentHookNotice(self: *AppSession, term: *Term) ?HookNotice {
     const mode_mod = maru.session.agent_hook_mode;
-    const kind = term.agent_hook_notice.kind;
+    const kind = term.hook.notice.kind;
     switch (kind) {
         .none => return null,
         // 완료도 오류도 **바로** 띄운다 — 디바운스는 «곧 저절로 해소될 수 있는» 주의 알림만의 규율이다.
@@ -2643,17 +2651,17 @@ pub fn takeAgentHookNotice(self: *AppSession, term: *Term) ?HookNotice {
         // 훅 전이지만, 만들어 둔 알림을 **띄울지**는 지금도 유효한가의 문제다. 훅에는 승인 해제 이벤트가
         // 없어 `agent_hook_state` 는 영영 `blocked` 이므로, 그것으로 판단하면 C1 이 화면으로 풀어 준 뒤에도
         // 디바운스가 끝나며 「승인이 필요합니다」가 나간다 — 사용자가 이미 승인한 뒤에.
-        .attention => switch (mode_mod.attentionDebounce(term.agent_state, term.agent_hook_notice.since_ms, self.awakeMs())) {
+        .attention => switch (mode_mod.attentionDebounce(term.agent_state, term.hook.notice.since_ms, self.awakeMs())) {
             .wait => return null,
             .drop => {
-                term.agent_hook_notice.clear();
+                term.hook.notice.clear();
                 return null;
             },
             .emit => {},
         },
     }
-    const body = term.agent_hook_notice.text();
-    term.agent_hook_notice.clear();
+    const body = term.hook.notice.text();
+    term.hook.notice.clear();
     return .{ .kind = kind, .body = body };
 }
 
@@ -2791,8 +2799,8 @@ pub fn pollAgentState(self: *AppSession, term: *Term, displayed: bool) void {
     // 두었을 때 C2 가 조용히 굶었고, 판정자를 세울 자리가 없어 그대로 커밋됐다.
     const has_hook = agentHookMode(self, term) == .hook;
     if ((maru.session.agent_state_arbiter.ScanSkip{
-        .hook = if (has_hook) term.agent_hook_state else null,
-        .hook_child_count = @intCast(term.agent_hook_progress.childCount()),
+        .hook = if (has_hook) term.hook.state else null,
+        .hook_child_count = @intCast(term.hook.progress.childCount()),
         .screen = term.agent_screen_state,
         .idle_confirmations = term.agent_arbiter.idle_confirmations,
         .generation_same = generation == term.agent_screen_generation,
@@ -2854,8 +2862,8 @@ fn arbitrateAgentState(self: *AppSession, term: *Term, displayed: bool) void {
     const before = term.agent_state;
     const has_hook = agentHookMode(self, term) == .hook;
     const verdict = term.agent_arbiter.arbitrate(.{
-        .hook = if (has_hook) term.agent_hook_state else null,
-        .hook_child_count = @intCast(term.agent_hook_progress.childCount()),
+        .hook = if (has_hook) term.hook.state else null,
+        .hook_child_count = @intCast(term.hook.progress.childCount()),
         .screen = term.agent_screen_state,
         .screen_visible_blocker = term.agent_screen_visible_blocker,
         .screen_visible_idle = term.agent_screen_visible_idle,
@@ -2868,7 +2876,7 @@ fn arbitrateAgentState(self: *AppSession, term: *Term, displayed: bool) void {
         // 죽으면 즉시 idle」 이 하려던 일을 그쪽이 이미 한다. 여기에 kind 를 다시 실으면 같은 판단이 두
         // 곳에 생기고, 한쪽만 고쳐지는 날이 온다. 그래서 **의도적으로 false 다.**
         .process_exited = false,
-        .hook_turn_seq = term.agent_hook_turn_seq,
+        .hook_turn_seq = term.hook.turn_seq,
         .screen_seq = term.agent_screen_seq,
     });
     term.agent_state = verdict.state;
@@ -2914,11 +2922,11 @@ fn arbitrateAgentState(self: *AppSession, term: *Term, displayed: bool) void {
         if (diag_gate.maruDebugEnabled()) std.log.scoped(.agent).info(
             "arbitrate {s} -> {s} origin={s} rule={s} hook={s} screen={s} screen_rule={s} idle={} children={d}",
             .{
-                @tagName(before),                      @tagName(verdict.state),
-                @tagName(verdict.origin),              verdict.rule,
-                @tagName(term.agent_hook_state),       @tagName(term.agent_screen_state),
-                term.agent_screen_rule,                term.agent_screen_visible_idle,
-                term.agent_hook_progress.childCount(),
+                @tagName(before),                @tagName(verdict.state),
+                @tagName(verdict.origin),        verdict.rule,
+                @tagName(term.hook.state),       @tagName(term.agent_screen_state),
+                term.agent_screen_rule,          term.agent_screen_visible_idle,
+                term.hook.progress.childCount(),
             },
         );
     }

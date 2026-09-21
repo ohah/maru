@@ -38,6 +38,52 @@ pub const PanelKind = control_surface.PanelKind;
 /// platform이 PTY proc_name 폴링(pollAgentKinds)으로 채우는 파생값이고, 모델은 라벨 표시에만 쓴다.
 pub const AgentKind = enum(u8) { none = 0, claude, codex };
 
+pub const HookSlot = struct {
+    /// 훅 payload 만으로 세운 상태(§1.1 의 `hook`). `agent_hook_mode.advance` 의 입력이자 출력이라
+    /// **화면이 절대 건드리면 안 된다.**
+    state: agent_observer.State = .unknown,
+    /// 이 턴의 진행 상태 — 자식이 몇이나 도는지와 lead 가 이미 끝났는지(계약 §2). 자식이 도는
+    /// 동안 lead 의 `Stop` 은 턴 끝이 아니고, 그것을 완료로 다루면 «자식이 아직 도는데 완료
+    /// 알림» 이 나간다.
+    progress: agent_hook_mode.Progress = .{},
+    /// 아직 띄우지 않은 훅 알림(계약 §6). 전이에서 예약하고 드레인 루프가 꺼내 간다 — 고정 크기라
+    /// 힙을 잡지 않는다.
+    notice: agent_hook_mode.PendingNotice = .{},
+    /// 부재 중 쌓인 로그를 **따라잡는 중**인가(docs/agent-hooks.md §4). 그동안의 이벤트는 창이
+    /// 없던 시간의 것이라 상태만 세우고 **알리지 않는다** — 재접속하자마자 몇 시간 전 턴의 «완료»
+    /// 가 뜨면 거짓말이다. 첫 tick 만 막으면 안 된다: tick 상한은 이벤트 **개수**라 짧은 줄이 많은
+    /// 파일은 여러 tick 에 걸쳐 따라잡고, 그 2번째 tick 부터 옛 알림이 새어 나간다.
+    backlog_catchup: bool = false,
+    turn_seq: u64 = 0,
+    /// lead 의 턴이 **열린 시각**(wall clock ns, 0=닫혀 있거나 모름). 훅 payload 에는 시각이 없어
+    /// (provider 가 안 싣는다) 「이 턴이 얼마나 오래 열려 있었나」 를 답할 근거가 없었다 — 파일
+    /// mtime 은 로그 전체의 마지막 쓰기라 개별 턴의 것이 아니다.
+    ///
+    /// **읽은 순간을 찍는다.** 훅에서 찍는 편이 정확하지만 그 셸(macOS `/bin/sh` = bash 3.2)에는
+    /// 시각 내장이 없어 `date` 프로세스가 훅마다 하나씩 늘어난다(계약 §4.1 이 피한 비용).
+    /// 그래서 해상도를 폴 간격으로 낮추는 대신 훅 비용을 0 으로 둔다.
+    ///
+    /// **backlog 따라잡기 중에는 찍지 않는다.** 그 이벤트는 창이 없던 시간의 것이라 지금을 찍으면
+    /// 몇 시간 전 턴이 «방금 열렸다» 가 된다 — 알림·캡처를 억제하는 것과 같은 자리·같은 근거다.
+    /// 그 구간의 턴은 시각을 **주장하지 않는다**(0 으로 남는다).
+    turn_opened_wall_ns: i96 = 0,
+    /// 훅 모드의 **진행 중 세부**(계약 §2). 관측 모드는 이 값을 쓰지 않는다 — 모드가
+    /// 바뀌면 소비처가 아니라 `pollAgentConsumer` 가 비운다(남은 값이 다른 소스의 배지
+    /// 옆에 붙으면 그것이 곧 두 소스 혼합이다).
+    tool: agent_hook_mode.ToolLabel = .{},
+    /// 훅이 알려 준 작업 디렉터리. **원격 pane 에서 OSC 7 이 멈춘 구간을 메운다** —
+    /// 그 보고자는 `precmd` 라 전면 TUI 가 붙어 있는 동안 발화하지 못한다.
+    cwd: agent_hook_mode.CwdLabel = .{},
+    /// 사이드바 에이전트 행의 **마지막 대화**(프롬프트·응답) 캐시 + 세션 기록 파일 매핑
+    /// (docs/sidebar-agent-list.md §7). 고정 크기라 힙을 잡지 않아 destroyTerm이 따로 해제하지 않는다.
+    transcript: agent_transcript_mod.Cache = .{},
+    /// 이미지 갤러리가 읽을 트랜스크립트 절대 경로(docs/agent-image-gallery.md §4.1). 훅
+    /// `transcript_path` 가 통째로 주므로 추측이 없다 — `agent_transcript.Cache.name` 은 파일 **이름**
+    /// 뿐이라 디렉터리를 다시 조립해야 하고, 그 조립이 과거에 «다른 세션의 대화를 붙이는» 사고를 냈다.
+    /// 고정 크기라 destroyTerm 이 따로 해제하지 않는다.
+    image_source: agent_image_index.Source = .{},
+};
+
 /// 세션 모델 생성자 — 런타임 부착 타입 `Rt`로 parametrize한다(platform=`TermRuntime`).
 /// `const Model = session_model.Model(TermRuntime); const Term = Model.Term;` 식으로 platform이
 /// 별칭을 잡으면 기존 `Term`/`*Term`/`Pane`/`Tab`/`PaneTree` 참조가 전부 그대로다.
@@ -99,9 +145,12 @@ pub fn Model(comptime Rt: type) type {
             /// 마지막에 쓴 쪽이 이기는 덮어쓰기였다. 그래서 소스별 자리를 따로 두고(`agent_hook_state`·
             /// `agent_screen_state`) 이 필드는 **중재 결과만** 담는다(§1.6-⑴).
             agent_state: agent_observer.State = .unknown,
-            /// 훅 payload 만으로 세운 상태(§1.1 의 `hook`). `agent_hook_mode.advance` 의 입력이자 출력이라
-            /// **화면이 절대 건드리면 안 된다.**
-            agent_hook_state: agent_observer.State = .unknown,
+            /// 훅 모드가 세운 **한 에이전트 세션분의 상태**(RA7 조각 1 — [계획](../../docs/plans/remote-agent-state.md)).
+            ///
+            /// 예전에는 이 필드들이 Term 에 직접 있었다. 그러면 «상태 자리가 Term 당 하나» 라 한 tmux 세션의 pane 여럿이
+            /// 한 Term 으로 접힌다(RA7). 슬롯으로 뽑아 두면 Term 은 인라인 슬롯 하나(로컬·원격 pane 하나 — 동작 불변)를
+            /// 들고, 원격 pane 여럿은 `AppSession` 의 pane 테이블이 슬롯을 하나씩 든다(조각 2). 고정 크기라 힙을 안 잡는다.
+            hook: HookSlot = .{},
             /// 화면·OSC 만으로 세운 상태(§1.1 의 `screen`). `Stabilizer` 를 통과한 값이다.
             agent_screen_state: agent_observer.State = .unknown,
             /// 화면 판정이 함께 낸 신뢰도 플래그. 권위표의 C1·C2 가 이 둘로 선다.
@@ -142,7 +191,6 @@ pub fn Model(comptime Rt: type) type {
             /// 「채널이 열렸나」로 재면, **훅이 영영 안 오는 동안에도** 판정이 멈춘 채로 있다 — 아이콘이
             /// 옛 provider 색으로 굳거나 아예 안 선다(2026-09-13 실측). 그래서 「받은 적이 있나」로 잰다.
             agent_kind_from_hook: bool = false,
-            agent_hook_turn_seq: u64 = 0,
             agent_stabilizer: agent_observer.Stabilizer = .{},
             /// observer가 마지막으로 읽은 TerminalCore write sequence와 마지막 PTY activity 시각(ms, awake clock).
             agent_screen_generation: u64 = 0,
@@ -168,14 +216,6 @@ pub fn Model(comptime Rt: type) type {
             /// 커서가 읽고 있는 파일의 inode. **회전을 크기만으로 판정하면 놓친다** — 같은 크기로 갈린
             /// 파일이 있으면 옛 오프셋으로 새 내용을 읽어 줄 가운데부터 파싱한다(`resetIfRotated` 계약).
             agent_hook_cursor_inode: u64 = 0,
-            /// 부재 중 쌓인 로그를 **따라잡는 중**인가(docs/agent-hooks.md §4). 그동안의 이벤트는 창이
-            /// 없던 시간의 것이라 상태만 세우고 **알리지 않는다** — 재접속하자마자 몇 시간 전 턴의 «완료»
-            /// 가 뜨면 거짓말이다. 첫 tick 만 막으면 안 된다: tick 상한은 이벤트 **개수**라 짧은 줄이 많은
-            /// 파일은 여러 tick 에 걸쳐 따라잡고, 그 2번째 tick 부터 옛 알림이 새어 나간다.
-            agent_hook_backlog_catchup: bool = false,
-            /// 아직 띄우지 않은 훅 알림(계약 §6). 전이에서 예약하고 드레인 루프가 꺼내 간다 — 고정 크기라
-            /// 힙을 잡지 않는다.
-            agent_hook_notice: agent_hook_mode.PendingNotice = .{},
             /// 원격(SSH) Term 의 이벤트 채널([계획](../../docs/plans/remote-agent-state.md) RA5).
             ///
             /// **로컬 훅 경로와 자리를 나눈다.** 로컬은 `agent_hook_cursor` 로 파일을 tail 하지만 원격은
@@ -190,37 +230,6 @@ pub fn Model(comptime Rt: type) type {
             /// (`agent_hook_command.remoteNonceMatches`). 고정 크기라 힙을 안 잡는다.
             agent_remote_nonce: [agent_hook_command.remote_pane_nonce_max]u8 = undefined,
             agent_remote_nonce_len: u8 = 0,
-            /// 이 턴의 진행 상태 — 자식이 몇이나 도는지와 lead 가 이미 끝났는지(계약 §2). 자식이 도는
-            /// 동안 lead 의 `Stop` 은 턴 끝이 아니고, 그것을 완료로 다루면 «자식이 아직 도는데 완료
-            /// 알림» 이 나간다.
-            agent_hook_progress: agent_hook_mode.Progress = .{},
-            /// lead 의 턴이 **열린 시각**(wall clock ns, 0=닫혀 있거나 모름). 훅 payload 에는 시각이 없어
-            /// (provider 가 안 싣는다) 「이 턴이 얼마나 오래 열려 있었나」 를 답할 근거가 없었다 — 파일
-            /// mtime 은 로그 전체의 마지막 쓰기라 개별 턴의 것이 아니다.
-            ///
-            /// **읽은 순간을 찍는다.** 훅에서 찍는 편이 정확하지만 그 셸(macOS `/bin/sh` = bash 3.2)에는
-            /// 시각 내장이 없어 `date` 프로세스가 훅마다 하나씩 늘어난다(계약 §4.1 이 피한 비용).
-            /// 그래서 해상도를 폴 간격으로 낮추는 대신 훅 비용을 0 으로 둔다.
-            ///
-            /// **backlog 따라잡기 중에는 찍지 않는다.** 그 이벤트는 창이 없던 시간의 것이라 지금을 찍으면
-            /// 몇 시간 전 턴이 «방금 열렸다» 가 된다 — 알림·캡처를 억제하는 것과 같은 자리·같은 근거다.
-            /// 그 구간의 턴은 시각을 **주장하지 않는다**(0 으로 남는다).
-            agent_hook_turn_opened_wall_ns: i96 = 0,
-            /// 훅 모드의 **진행 중 세부**(계약 §2). 관측 모드는 이 값을 쓰지 않는다 — 모드가
-            /// 바뀌면 소비처가 아니라 `pollAgentConsumer` 가 비운다(남은 값이 다른 소스의 배지
-            /// 옆에 붙으면 그것이 곧 두 소스 혼합이다).
-            agent_hook_tool: agent_hook_mode.ToolLabel = .{},
-            /// 훅이 알려 준 작업 디렉터리. **원격 pane 에서 OSC 7 이 멈춘 구간을 메운다** —
-            /// 그 보고자는 `precmd` 라 전면 TUI 가 붙어 있는 동안 발화하지 못한다.
-            agent_hook_cwd: agent_hook_mode.CwdLabel = .{},
-            /// 사이드바 에이전트 행의 **마지막 대화**(프롬프트·응답) 캐시 + 세션 기록 파일 매핑
-            /// (docs/sidebar-agent-list.md §7). 고정 크기라 힙을 잡지 않아 destroyTerm이 따로 해제하지 않는다.
-            agent_transcript: agent_transcript_mod.Cache = .{},
-            /// 이미지 갤러리가 읽을 트랜스크립트 절대 경로(docs/agent-image-gallery.md §4.1). 훅
-            /// `transcript_path` 가 통째로 주므로 추측이 없다 — `agent_transcript.Cache.name` 은 파일 **이름**
-            /// 뿐이라 디렉터리를 다시 조립해야 하고, 그 조립이 과거에 «다른 세션의 대화를 붙이는» 사고를 냈다.
-            /// 고정 크기라 destroyTerm 이 따로 해제하지 않는다.
-            agent_image_source: agent_image_index.Source = .{},
             /// 사이드바·탭 라벨용 자동 제목 캐시(owned). syncAutoTitles가 core.windowTitle()을 복사해 채운다. destroyTerm이 해제.
             auto_title: std.ArrayListUnmanaged(u8) = .empty,
             /// syncAutoTitles가 마지막으로 auto_title에 반영한 core.title_generation(P4-1). 코어의 현재 generation과 같으면

@@ -26031,7 +26031,7 @@ test "원격 이벤트가 배지·알림을 로컬과 같은 자리에 쓴다 �
         "{\"nonce\":\"4331_7\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"Stop\\\",\\\"last_assistant_message\\\":\\\"끝\\\"}\"}",
     }, 300);
     try std.testing.expectEqual(maru.session.agent_observer.State.idle, term.agent_state);
-    try std.testing.expect(term.agent_hook_notice.kind != .none);
+    try std.testing.expect(term.hook.notice.kind != .none);
 }
 
 test "원격 채널을 tick 이 직접 드레인한다 — 반 줄로 끊겨 와도 이어 붙이고, EOF 는 강등으로 보인다" {
@@ -26358,7 +26358,7 @@ test "AK1: 에이전트 종류가 바뀌면 지난 프로세스의 관측이 통
 
     // 지난 프로세스가 남긴 값으로 전부 채운다 — 하나도 초기값이 아니게.
     term.agent_state = .running;
-    term.agent_hook_state = .blocked;
+    term.hook.state = .blocked;
     term.agent_screen_state = .running;
     term.agent_screen_visible_blocker = true;
     term.agent_screen_visible_idle = true;
@@ -26374,7 +26374,7 @@ test "AK1: 에이전트 종류가 바뀌면 지난 프로세스의 관측이 통
     agent_ops.resetAgentObservationForKindChange(term);
 
     try std.testing.expectEqual(maru.session.agent_observer.State.unknown, term.agent_state);
-    try std.testing.expectEqual(maru.session.agent_observer.State.unknown, term.agent_hook_state);
+    try std.testing.expectEqual(maru.session.agent_observer.State.unknown, term.hook.state);
     try std.testing.expectEqual(maru.session.agent_observer.State.unknown, term.agent_screen_state);
     try std.testing.expect(!term.agent_screen_visible_blocker);
     try std.testing.expect(!term.agent_screen_visible_idle);
@@ -26383,7 +26383,7 @@ test "AK1: 에이전트 종류가 바뀌면 지난 프로세스의 관측이 통
     try std.testing.expectEqual(@as(u64, 0), term.agent_screen_seq);
     try std.testing.expectEqual(@as(u64, 0), term.agent_screen_generation);
     try std.testing.expectEqual(@as(u64, 0), term.agent_last_output_ms);
-    try std.testing.expectEqual(@as(usize, 0), term.agent_transcript.owned.reply().len);
+    try std.testing.expectEqual(@as(usize, 0), term.hook.transcript.owned.reply().len);
 
     // **중재기가 실제로 비워졌는가** — 필드가 아니라 «행동» 으로 잰다. 셈이 남아 있었다면 아래 한 번의
     // 관측으로 C2 가 성립해 idle 로 접힌다(리셋 전에 둘을 쌓아 뒀다).
@@ -27988,7 +27988,7 @@ test "훅 Term 은 두 소스를 함께 읽고 권위표가 중재한다 — 알
     // 그런데 `pending` 은 **비워져야** 한다 — 안 비우면 드레인 루프가 그 Term 에서 멈춰 다른 Term 의
     // 알림까지 막힌다.
     try term.surface.core.write("\x1b]9;OSC 알림이 나가면 안 된다\x07");
-    term.agent_hook_notice.clear(); // 훅 알림은 없는 상태로 둔다 — OSC 만 본다
+    term.hook.notice.clear(); // 훅 알림은 없는 상태로 둔다 — OSC 만 본다
     try std.testing.expect(notification_ops.pendingNotification(&session) == null);
     {
         term.surface.lockCore(io);
@@ -27997,7 +27997,7 @@ test "훅 Term 은 두 소스를 함께 읽고 권위표가 중재한다 — 알
     }
 
     // ── ③ 훅 알림은 실제로 방출된다 ──────────────────────────────────────────────────────────
-    term.agent_hook_notice.set(.done, "끝났습니다", session.awakeMs());
+    term.hook.notice.set(.done, "끝났습니다", session.awakeMs());
     const emitted = notification_ops.pendingNotification(&session) orelse return error.MissingHookNotification;
     // 본문에는 그 Term 의 **마지막 대화**가 함께 실린다(`notificationBodyOwned` — 관측 모드와 같은 tail).
     // 그래서 정확히 같지 않고 포함 관계다.
@@ -28017,7 +28017,7 @@ test "훅 Term 은 두 소스를 함께 읽고 권위표가 중재한다 — 알
         // 순수 분기 테스트라 vtable 을 부르지 않는다(위 `shouldDetachRemoteOnAppQuit` 테스트와 같은 주입).
         term.surface.remote = .{ .ctx = @ptrFromInt(1), .vtable = @ptrFromInt(@alignOf(maru.session.surface.ScreenSource.VTable)) };
         defer term.surface.remote = null;
-        term.agent_hook_notice.set(.done, "원격에서도 끝났습니다", session.awakeMs());
+        term.hook.notice.set(.done, "원격에서도 끝났습니다", session.awakeMs());
         const remote_emitted = notification_ops.pendingNotification(&session) orelse return error.MissingHookNotification;
         try std.testing.expect(std.mem.indexOf(u8, remote_emitted.body, "원격에서도 끝났습니다") != null);
         try std.testing.expectEqual(term.surfaceId(), remote_emitted.surface_id);
@@ -28027,11 +28027,11 @@ test "훅 Term 은 두 소스를 함께 읽고 권위표가 중재한다 — 알
     // `StopFailure` 도 `last_assistant_message` 에 사유를 싣고 온다(실측 — 로그인 안 된 세션에서 그대로
     // 받았다). 그 자리를 비우면 알림이 «오류로 끝났습니다» 한 마디만 하고 사용자는 무엇이 잘못됐는지
     // 다시 찾아야 한다.
-    term.agent_hook_progress = .{};
+    term.hook.progress = .{};
     term.agent_state = .unknown;
     term.agent_hook_cursor = .{};
     term.agent_hook_cursor_inode = 0;
-    term.agent_hook_notice.clear();
+    term.hook.notice.clear();
     try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"조사해줘\"}\n" ++ "claude\t{\"hook_event_name\":\"StopFailure\",\"last_assistant_message\":\"Not logged in · Please run /login\"}\n" });
     agent_ops.pollAgentHookEvents(&session, term, false);
     const with_reason = notification_ops.pendingNotification(&session) orelse return error.MissingHookNotification;
@@ -28042,7 +28042,7 @@ test "훅 Term 은 두 소스를 함께 읽고 권위표가 중재한다 — 알
     // 관측 모드는 `pollAgentState` 가 그 일을 하는데 훅 모드는 그 함수를 아예 안 부른다(§1.3 배타).
     // 여기서 안 하면 **게이트를 켠 것만으로** «에이전트가 방금 바꾼 것» 이 통째로 사라진다.
     // 저장소가 없으면 그 함수가 조용히 돌아가므로 결과가 아니라 **호출 자체**를 센다.
-    term.agent_hook_progress = .{};
+    term.hook.progress = .{};
     term.agent_state = .unknown;
     term.agent_hook_cursor = .{};
     term.agent_hook_cursor_inode = 0;
@@ -28056,7 +28056,7 @@ test "훅 Term 은 두 소스를 함께 읽고 권위표가 중재한다 — 알
 
     // 자식이 남아 lead 를 붙잡은 동안에는 **아직 턴 끝이 아니다** — 그때 찍으면 자식이 고칠 파일이
     // 스냅샷 뒤에 바뀌어 «AI 가 바꾼 것» 에서 빠진다.
-    term.agent_hook_progress = .{};
+    term.hook.progress = .{};
     term.agent_state = .unknown;
     term.agent_hook_cursor = .{};
     term.agent_hook_cursor_inode = 0;
@@ -28070,7 +28070,7 @@ test "훅 Term 은 두 소스를 함께 읽고 권위표가 중재한다 — 알
 
     // 한 배치에 턴 끝이 **여럿** 들어와도 한 번만 찍는다. 배치 안의 이벤트는 모두 같은 작업트리를
     // 보므로 여러 번 찍어도 나오는 tree 가 같다 — 비용만 는다(회전본을 건질 때가 특히 그렇다).
-    term.agent_hook_progress = .{};
+    term.hook.progress = .{};
     term.agent_state = .unknown;
     term.agent_hook_cursor = .{};
     term.agent_hook_cursor_inode = 0;
@@ -28082,7 +28082,7 @@ test "훅 Term 은 두 소스를 함께 읽고 권위표가 중재한다 — 알
     // ── ⑤b **세션이 시작되면 base(턴 0)를 찍는다**(AT1) ───────────────────────────────────
     // 타임라인은 「턴 K = 스냅샷[K+1] ↔ 스냅샷[K]」라 스냅샷이 하나면 완료된 턴이 **0개**다. base 가
     // 없으면 그 세션의 **첫 턴이 화면에 아예 안 뜬다** — 두 번째 턴이 끝나야 보인다.
-    term.agent_hook_progress = .{};
+    term.hook.progress = .{};
     term.agent_state = .unknown;
     term.agent_hook_cursor = .{};
     term.agent_hook_cursor_inode = 0;
@@ -28095,7 +28095,7 @@ test "훅 Term 은 두 소스를 함께 읽고 권위표가 중재한다 — 알
     // resume·컨텍스트 압축이 턴 중간에 `SessionStart` 를 만드는데, 그 전이(`running → idle`)는 이미
     // «턴 끝» 으로 찍힌다. 그 자리를 base 로도 세면 **한 이벤트가 두 사유**를 만들어 셈이 갈린다.
     // `opensSessionBase` 의 `previous != .running` 한 줄이 그것을 막고, 이 단언이 그 줄을 지킨다.
-    term.agent_hook_progress = .{};
+    term.hook.progress = .{};
     term.agent_state = .unknown;
     term.agent_hook_cursor = .{};
     term.agent_hook_cursor_inode = 0;
@@ -28105,7 +28105,7 @@ test "훅 Term 은 두 소스를 함께 읽고 권위표가 중재한다 — 알
     try std.testing.expectEqual(@as(usize, 1), agent_ops.test_turn_snapshot_calls);
 
     // 배치에 base 와 턴 끝이 **함께** 와도 한 번이다(첫 프롬프트가 곧바로 끝난 세션).
-    term.agent_hook_progress = .{};
+    term.hook.progress = .{};
     term.agent_state = .unknown;
     term.agent_hook_cursor = .{};
     term.agent_hook_cursor_inode = 0;
@@ -28118,12 +28118,12 @@ test "훅 Term 은 두 소스를 함께 읽고 권위표가 중재한다 — 알
     // lead 가 먼저 끝나고 자식이 남으면 턴 끝 전이는 마지막 `SubagentStop` 에서 일어난다. 그 이벤트의
     // `last_assistant_message` 는 **자식의 응답**이다(실측 `"from-child"`) — 그것을 그대로 실으면
     // «완료: from-child» 가 나가 lead 가 한 말 대신 자식이 한 말을 알린다.
-    term.agent_hook_progress = .{};
+    term.hook.progress = .{};
     term.agent_state = .unknown;
     term.agent_hook_cursor = .{};
     term.agent_hook_cursor_inode = 0;
-    term.agent_hook_notice.clear();
-    term.agent_transcript.owned.setReply("");
+    term.hook.notice.clear();
+    term.hook.transcript.owned.setReply("");
     try tmp.dir.writeFile(io, .{
         .sub_path = log_rel,
         .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"조사해줘\"}\n" ++ "claude\t{\"hook_event_name\":\"SubagentStart\",\"agent_id\":\"a533c21143f8edccb\"}\n" ++ "claude\t{\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"lead 가 정리했습니다\"}\n" ++ "claude\t{\"hook_event_name\":\"SubagentStop\",\"agent_id\":\"a533c21143f8edccb\",\"last_assistant_message\":\"from-child\"}\n",
@@ -28135,12 +28135,12 @@ test "훅 Term 은 두 소스를 함께 읽고 권위표가 중재한다 — 알
     try std.testing.expect(std.mem.indexOf(u8, lead_body.body, "from-child") == null);
 
     // 오류로 끝난 경우도 같다 — 그 자리에 자식 응답이 들어가면 «오류 사유» 를 참칭한다.
-    term.agent_hook_progress = .{};
+    term.hook.progress = .{};
     term.agent_state = .unknown;
     term.agent_hook_cursor = .{};
     term.agent_hook_cursor_inode = 0;
-    term.agent_hook_notice.clear();
-    term.agent_transcript.owned.setReply("");
+    term.hook.notice.clear();
+    term.hook.transcript.owned.setReply("");
     try tmp.dir.writeFile(io, .{
         .sub_path = log_rel,
         .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"조사해줘\"}\n" ++ "claude\t{\"hook_event_name\":\"SubagentStart\",\"agent_id\":\"a533c21143f8edccb\"}\n" ++ "claude\t{\"hook_event_name\":\"StopFailure\",\"last_assistant_message\":\"Not logged in · Please run /login\"}\n" ++ "claude\t{\"hook_event_name\":\"SubagentStop\",\"agent_id\":\"a533c21143f8edccb\",\"last_assistant_message\":\"from-child\"}\n",
@@ -28155,11 +28155,11 @@ test "훅 Term 은 두 소스를 함께 읽고 권위표가 중재한다 — 알
     // 같은 전이(턴 끝)라 문구를 안 가르면 오류로 끊긴 턴이 «턴이 끝났습니다» 로 나간다 — 그 알림
     // 자체가 거짓말이다. 자식이 남은 경우까지 본다: 그때는 끝 전이가 `StopFailure` 가 아니라
     // **마지막 `SubagentStop`** 에서 일어나 오류였다는 사실이 사라지기 쉽다.
-    term.agent_hook_progress = .{};
+    term.hook.progress = .{};
     term.agent_state = .unknown;
     term.agent_hook_cursor = .{};
     term.agent_hook_cursor_inode = 0;
-    term.agent_hook_notice.clear();
+    term.hook.notice.clear();
     try tmp.dir.writeFile(io, .{
         .sub_path = log_rel,
         .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"조사해줘\"}\n" ++ "claude\t{\"hook_event_name\":\"SubagentStart\"}\n" ++ "claude\t{\"hook_event_name\":\"StopFailure\"}\n" ++ "claude\t{\"hook_event_name\":\"SubagentStop\"}\n",
@@ -28174,7 +28174,7 @@ test "훅 Term 은 두 소스를 함께 읽고 권위표가 중재한다 — 알
     term.agent_hook_cursor = .{};
     term.agent_hook_cursor_inode = 0;
     term.agent_state = .unknown;
-    term.agent_hook_notice.clear();
+    term.hook.notice.clear();
     try tmp.dir.writeFile(io, .{
         .sub_path = log_rel,
         .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"조사해줘\"}\n" ++ "claude\t{\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"다 했습니다\"}\n",
@@ -28187,20 +28187,20 @@ test "훅 Term 은 두 소스를 함께 읽고 권위표가 중재한다 — 알
     // ── ⑦ **신원은 payload 가 정한다**(AT1) ────────────────────────────────────────────────
     // 훅 모드에는 신원을 갱신할 다른 자리가 **없다** — `refreshAgentSessionIdentity` 는 `.observe`
     // 분기 전용이다(§1.3 배타). 이것이 없으면 링이 빈 신원이나 `/clear` 뒤의 낡은 신원에 붙는다.
-    term.agent_hook_progress = .{};
+    term.hook.progress = .{};
     term.agent_state = .unknown;
     term.agent_hook_cursor = .{};
     term.agent_hook_cursor_inode = 0;
     // `reset()` 은 **신원을 안 지운다**(그건 provider 가 밝힌 사실이라 매핑과 수명이 다르다) — 이 블록이
     // «빈 신원에서 시작한다» 를 보려면 신원 자체를 따로 비워야 한다.
-    term.agent_transcript.reset();
-    term.agent_transcript.setIdentity("");
+    term.hook.transcript.reset();
+    term.hook.transcript.setIdentity("");
     try tmp.dir.writeFile(io, .{
         .sub_path = log_rel,
         .data = "claude\t{\"hook_event_name\":\"SessionStart\",\"session_id\":\"11111111-1111-4111-8111-111111111111\"}\n",
     });
     agent_ops.pollAgentHookEvents(&session, term, false);
-    try std.testing.expectEqualStrings("11111111-1111-4111-8111-111111111111", term.agent_transcript.identity());
+    try std.testing.expectEqualStrings("11111111-1111-4111-8111-111111111111", term.hook.transcript.identity());
     // **캡처가 실제로 읽는 자리까지 이어 본다.** `identity()` 는 중간 필드일 뿐이고, `captureTurnSnapshot`
     // 이 링의 키로 쓰는 것은 `sessionIdentityFor` 다 — 그 둘이 이어져 있어야 「훅 모드에서 링이 선다」가
     // 성립한다. (링이 실제로 서는 것까지는 실제 git 저장소가 필요해 별도 통합 test 가 본다.)
@@ -28212,7 +28212,7 @@ test "훅 Term 은 두 소스를 함께 읽고 권위표가 중재한다 — 알
     // ── ⑦-b **이미지 갤러리 소스도 payload 가 정한다**(IG1, docs/agent-image-gallery.md §4.4) ────────
     // `session_id` 와 같은 자리에서 `transcript_path` 를 채택한다. 이것이 없으면 갤러리는 읽을 파일을
     // 모르고, 예전 방식대로 디렉터리를 조립해 추측하면 «다른 세션의 대화를 붙이는» 사고로 돌아간다.
-    term.agent_image_source.clear();
+    term.hook.image_source.clear();
     // **커서를 되감아야 새 내용이 읽힌다.** 앞 블록의 poll 이 오프셋을 파일 끝에 두었으므로, 리셋 없이
     // 덮어쓰면 poll 이 «읽을 것 없음» 으로 지나가고 이 블록은 **아무것도 검증하지 않는다**. 위 ⑦·⑧ 블록이
     // 같은 이유로 매번 되감는다.
@@ -28223,7 +28223,7 @@ test "훅 Term 은 두 소스를 함께 읽고 권위표가 중재한다 — 알
         .data = "claude\t{\"hook_event_name\":\"SessionStart\",\"transcript_path\":\"/tmp/ig/a.jsonl\"}\n",
     });
     agent_ops.pollAgentHookEvents(&session, term, false);
-    try std.testing.expectEqualStrings("/tmp/ig/a.jsonl", term.agent_image_source.path());
+    try std.testing.expectEqualStrings("/tmp/ig/a.jsonl", term.hook.image_source.path());
 
     // `/clear` 는 **새 파일**을 만든다(실측: 직전 세션 종료 46 ms 뒤 새 세션). 경로가 갈리면 그대로 따라간다 —
     // 옛 파일의 바이트 오프셋은 새 파일에서 아무 뜻이 없기 때문이다.
@@ -28234,7 +28234,7 @@ test "훅 Term 은 두 소스를 함께 읽고 권위표가 중재한다 — 알
         .data = "claude\t{\"hook_event_name\":\"SessionStart\",\"transcript_path\":\"/tmp/ig/b.jsonl\"}\n",
     });
     agent_ops.pollAgentHookEvents(&session, term, false);
-    try std.testing.expectEqualStrings("/tmp/ig/b.jsonl", term.agent_image_source.path());
+    try std.testing.expectEqualStrings("/tmp/ig/b.jsonl", term.hook.image_source.path());
 
     // **상한을 넘으면 자르지 않고 비운다.** 자른 경로는 없는 파일이거나 더 나쁘게는 **다른 파일**이다.
     term.agent_hook_cursor = .{};
@@ -28245,19 +28245,19 @@ test "훅 Term 은 두 소스를 함께 읽고 권위표가 중재한다 — 알
         try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = line });
     }
     agent_ops.pollAgentHookEvents(&session, term, false);
-    try std.testing.expect(term.agent_image_source.isEmpty());
+    try std.testing.expect(term.hook.image_source.isEmpty());
 
     // **이 블록은 신원을 건드리지 않는다.** 갤러리 소스와 세션 신원은 같은 payload 에서 오지만 서로 다른
     // 축이고, 뒤 블록들이 신원이 `11111111…` 로 남아 있음을 단언한다 — 그래서 여기 훅 줄에 `session_id` 를
     // 싣지 않는다. 그 사실을 여기서 한 번 못 박아, 나중에 누가 편의로 id 를 넣으면 바로 걸리게 한다.
-    try std.testing.expectEqualStrings("11111111-1111-4111-8111-111111111111", term.agent_transcript.identity());
+    try std.testing.expectEqualStrings("11111111-1111-4111-8111-111111111111", term.hook.transcript.identity());
 
     // ── ⑧ **한 배치에 다음 턴이 시작돼도 스냅샷은 «끝난 턴» 의 사실을 든다**(AT2 적대적 검증) ────────
     // `Stop(p-1)` 다음 `UserPromptSubmit(p-2)` 가 한 tick 에 함께 올 수 있다(사용자가 곧바로 다음
     // 프롬프트를 넣으면 그렇다). 배치 **끝**에서 진행 상태를 읽으면 그때 `turnKey()` 는 이미 `p-2` 이고
     // `reply()` 는 그 프롬프트가 지워 **비어 있다** — 턴 1의 스냅샷에 턴 2의 키가 붙는다.
     // 계약 §3.1 이 「시각으로 맞추면 tick 지연에서 어긋난다」며 키를 도입한 바로 그 어긋남이다.
-    term.agent_hook_progress = .{};
+    term.hook.progress = .{};
     term.agent_state = .unknown;
     term.agent_hook_cursor = .{};
     term.agent_hook_cursor_inode = 0;
@@ -28267,15 +28267,15 @@ test "훅 Term 은 두 소스를 함께 읽고 권위표가 중재한다 — 알
     });
     agent_ops.pollAgentHookEvents(&session, term, false);
     // 배치가 끝난 지금 진행 상태는 **이미 다음 턴**이다 — 그것을 그대로 실으면 안 된다.
-    try std.testing.expectEqualStrings("p-2", term.agent_hook_progress.turnKey());
-    try std.testing.expectEqual(@as(usize, 0), term.agent_transcript.reply().len);
+    try std.testing.expectEqualStrings("p-2", term.hook.progress.turnKey());
+    try std.testing.expectEqual(@as(usize, 0), term.hook.transcript.reply().len);
     // **그런데 스냅샷에 넘어간 것은 끝난 턴(`p-1`)의 사실이어야 한다.** 이것을 안 재면 「전제만 보고
     // 결과는 안 보는」 test 가 된다 — 배치 끝에서 읽는 구현이 위 두 단언은 그대로 통과시킨다.
     try std.testing.expectEqualStrings("p-1", agent_ops.test_last_turn_key[0..agent_ops.test_last_turn_key_len]);
     try std.testing.expectEqualStrings("첫 답", agent_ops.test_last_turn_title[0..agent_ops.test_last_turn_title_len]);
 
     // **자식은 부모의 신원을 옮기지 않는다**(계약 §2) — codex 자식이 자기 축을 싣고 온다는 실측이 근거다.
-    term.agent_hook_progress = .{};
+    term.hook.progress = .{};
     term.agent_state = .unknown;
     term.agent_hook_cursor = .{};
     term.agent_hook_cursor_inode = 0;
@@ -28284,7 +28284,7 @@ test "훅 Term 은 두 소스를 함께 읽고 권위표가 중재한다 — 알
         .data = "claude\t{\"hook_event_name\":\"SubagentStop\",\"agent_id\":\"a5\",\"session_id\":\"99999999-9999-4999-8999-999999999999\"}\n",
     });
     agent_ops.pollAgentHookEvents(&session, term, false);
-    try std.testing.expectEqualStrings("11111111-1111-4111-8111-111111111111", term.agent_transcript.identity());
+    try std.testing.expectEqualStrings("11111111-1111-4111-8111-111111111111", term.hook.transcript.identity());
 
     // **상한을 넘는 id 는 채택하지 않는다 — 자르지 않는다.** `Cache.setIdentity` 는 `@min` 으로 자르는데
     // `RingMap.ringFor` 는 그 길이를 정상 키로 받으므로, 앞부분을 공유하는 서로 다른 두 세션의 링이
@@ -28297,7 +28297,7 @@ test "훅 Term 은 두 소스를 함께 읽고 권위표가 중재한다 — 알
         .data = "claude\t{\"hook_event_name\":\"Stop\",\"session_id\":\"" ++ ("x" ** 65) ++ "\"}\n",
     });
     agent_ops.pollAgentHookEvents(&session, term, false);
-    try std.testing.expectEqualStrings("11111111-1111-4111-8111-111111111111", term.agent_transcript.identity());
+    try std.testing.expectEqualStrings("11111111-1111-4111-8111-111111111111", term.hook.transcript.identity());
 
     // **`/clear` 는 새 id 를 발급한다** — 그 순간 신원이 갈리고 옛 대화 매핑은 버린다.
     term.agent_hook_cursor = .{};
@@ -28307,7 +28307,7 @@ test "훅 Term 은 두 소스를 함께 읽고 권위표가 중재한다 — 알
         .data = "claude\t{\"hook_event_name\":\"SessionStart\",\"session_id\":\"22222222-2222-4222-8222-222222222222\"}\n",
     });
     agent_ops.pollAgentHookEvents(&session, term, false);
-    try std.testing.expectEqualStrings("22222222-2222-4222-8222-222222222222", term.agent_transcript.identity());
+    try std.testing.expectEqualStrings("22222222-2222-4222-8222-222222222222", term.hook.transcript.identity());
 
     // **신원 채택이 그 이벤트의 대화를 지우면 안 된다** — 채택이 `applyHookEvent` 맨 앞이어야 하는 이유가
     // 이것이고, 그 정당화에 판정자가 없으면 다음 사람이 호출을 옮긴다(적대적 검증 — 실제로 내 첫 판에
@@ -28318,14 +28318,14 @@ test "훅 Term 은 두 소스를 함께 읽고 권위표가 중재한다 — 알
     // 바로 그 이벤트들에서 채택이 **아예 안 돈다**.
     term.agent_hook_cursor = .{};
     term.agent_hook_cursor_inode = 0;
-    term.agent_transcript.owned.setReply("");
+    term.hook.transcript.owned.setReply("");
     try tmp.dir.writeFile(io, .{
         .sub_path = log_rel,
         .data = "claude\t{\"hook_event_name\":\"Stop\",\"session_id\":\"33333333-3333-4333-8333-333333333333\",\"last_assistant_message\":\"새 세션의 답\"}\n",
     });
     agent_ops.pollAgentHookEvents(&session, term, false);
-    try std.testing.expectEqualStrings("33333333-3333-4333-8333-333333333333", term.agent_transcript.identity());
-    try std.testing.expectEqualStrings("새 세션의 답", term.agent_transcript.reply());
+    try std.testing.expectEqualStrings("33333333-3333-4333-8333-333333333333", term.hook.transcript.identity());
+    try std.testing.expectEqualStrings("새 세션의 답", term.hook.transcript.reply());
 }
 
 // [AT3 §4.4] **캡처 배선을 훅 로그로만 몬다**: `PreToolUse` 가 before 를 뜨고, 그 사이 파일이 바뀌고,
@@ -28446,8 +28446,8 @@ test "훅 턴 시각: 중단 뒤 새 프롬프트는 옛 턴의 시각을 물려
     // 턴 1 이 열린다 — 시각이 선다.
     _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .session_start, .session_id = "S-ts" });
     _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .user_prompt_submit, .session_id = "S-ts", .turn_key = "turn-1" });
-    try std.testing.expect(term.agent_hook_progress.turn_open);
-    try std.testing.expect(term.agent_hook_turn_opened_wall_ns != 0);
+    try std.testing.expect(term.hook.progress.turn_open);
+    try std.testing.expect(term.hook.turn_opened_wall_ns != 0);
 
     // **`Stop` 없이** 턴 2 가 시작된다(= 중단된 턴 뒤의 새 프롬프트). 옛 시각을 물려받으면 안 된다.
     //
@@ -28459,17 +28459,17 @@ test "훅 턴 시각: 중단 뒤 새 프롬프트는 옛 턴의 시각을 물려
     // 대신 **클럭이 낼 수 없는 표식**으로 덮고, 다시 찍혔는지를 값의 크기로 본다. 물려받는
     // 회귀는 표식을 그대로 남기므로 해상도와 무관하게 잡힌다.
     const sentinel: i96 = 1;
-    term.agent_hook_turn_opened_wall_ns = sentinel;
+    term.hook.turn_opened_wall_ns = sentinel;
     _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .user_prompt_submit, .session_id = "S-ts", .turn_key = "turn-2" });
-    try std.testing.expect(term.agent_hook_progress.turn_open);
-    try std.testing.expect(term.agent_hook_turn_opened_wall_ns != sentinel);
+    try std.testing.expect(term.hook.progress.turn_open);
+    try std.testing.expect(term.hook.turn_opened_wall_ns != sentinel);
     // 그리고 **실제 벽시계**를 찍었다 — 아무 상수나 넣은 것이 아니다(2020-01-01 이후).
-    try std.testing.expect(term.agent_hook_turn_opened_wall_ns > 1_577_836_800 * @as(i96, std.time.ns_per_s));
+    try std.testing.expect(term.hook.turn_opened_wall_ns > 1_577_836_800 * @as(i96, std.time.ns_per_s));
 
     // 턴이 닫히면 0 으로 돌아간다 — «열려 있지 않다» 를 시각으로 주장하지 않는다.
     _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .stop, .session_id = "S-ts", .turn_key = "turn-2" });
-    try std.testing.expect(!term.agent_hook_progress.turn_open);
-    try std.testing.expectEqual(@as(i96, 0), term.agent_hook_turn_opened_wall_ns);
+    try std.testing.expect(!term.hook.progress.turn_open);
+    try std.testing.expectEqual(@as(i96, 0), term.hook.turn_opened_wall_ns);
 }
 
 test "훅 캡처: 배치 안에서 다음 턴이 시작돼도 사본이 안 섞인다 (AT3)" {
@@ -28574,7 +28574,7 @@ test "턴 스냅샷: 배치 안에서 신원이 갈려도 끝난 턴은 옛 세�
 
     // 그 뒤 같은 배치에서 `/clear` — 신원이 갈린다.
     _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .session_start, .session_id = "S-new" });
-    try std.testing.expectEqualStrings("S-new", term.agent_transcript.identity());
+    try std.testing.expectEqualStrings("S-new", term.hook.transcript.identity());
 
     // 배치 끝의 캡처는 **굳혀 둔 신원**을 써야 한다 — 지금 신원을 쓰면 옛 턴이 새 세션에 붙는다.
     agent_ops.test_turn_snapshot_calls = 0;
@@ -28733,10 +28733,10 @@ test "훅 캡처: 셸 구간이 Pre 로 열리고 Post 로 닫히며 턴 끝이 
     // ⑤ 게이트: **열기는 backlog 뒤, 닫기는 backlog 앞.** 회전본 tail 의 Post 가 살아 있는 파일에서 연
     // 구간을 닫아야 한다 — 같은 게이트에 두면 그 구간은 영영 안 닫힌다.
     _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .pre_tool_use, .provider = "claude", .session_id = "S-br", .tool_name = "Bash", .tool_command = "make", .tool_use_id = "toolu_d" });
-    term.agent_hook_backlog_catchup = true;
+    term.hook.backlog_catchup = true;
     _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .pre_tool_use, .provider = "claude", .session_id = "S-br", .tool_name = "Bash", .tool_command = "old", .tool_use_id = "toolu_old" });
     _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .post_tool_use, .session_id = "S-br", .tool_name = "Bash", .tool_use_id = "toolu_d", .duration_ms = 5 });
-    term.agent_hook_backlog_catchup = false;
+    term.hook.backlog_catchup = false;
     {
         const open = session.turn_captures.openTurn("S-br").?;
         try std.testing.expectEqual(@as(usize, 4), open.shell.sealed().len); // a·b·codex·d — old 는 열리지 않았다
@@ -28809,7 +28809,7 @@ test "훅 캡처: 셸 호출을 세고, backlog 에서는 안 센다 (AT4)" {
     try std.testing.expectEqual(@as(u32, 1), session.turn_captures.openTurn("S-sh").?.shell_calls);
 
     // **backlog 중에는 안 센다.**
-    term.agent_hook_backlog_catchup = true;
+    term.hook.backlog_catchup = true;
     _ = agent_ops.testApplyHookEvent(session, term, .{
         .kind = .pre_tool_use,
         .session_id = "S-sh",
@@ -28819,7 +28819,7 @@ test "훅 캡처: 셸 호출을 세고, backlog 에서는 안 센다 (AT4)" {
     try std.testing.expectEqual(@as(u32, 1), session.turn_captures.openTurn("S-sh").?.shell_calls);
 
     // **플래그를 내리면 다시 센다** — 뒤 절반이 없으면 「영영 안 세는」 구현이 통과한다.
-    term.agent_hook_backlog_catchup = false;
+    term.hook.backlog_catchup = false;
     _ = agent_ops.testApplyHookEvent(session, term, .{
         .kind = .pre_tool_use,
         .session_id = "S-sh",
@@ -28989,11 +28989,11 @@ test "훅 캡처: PostToolUse 의 bashEditDiff 가 셸 편집을 캡처에 싣�
         try std.testing.expect(!open.shell.busy());
     }
     // backlog 중의 Post 는 버린다 — 게이트가 Pre 와 같다.
-    term.agent_hook_backlog_catchup = true;
+    term.hook.backlog_catchup = true;
     var late_buf: [std.fs.max_path_bytes + 8]u8 = undefined;
     const late = try std.fmt.bufPrint(&late_buf, "[\"{s}/late.zig\"]", .{root});
     _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .post_tool_use, .provider = "claude", .session_id = "S-diff", .tool_name = "Bash", .tool_use_id = "toolu_late", .changed_files_raw = late });
-    term.agent_hook_backlog_catchup = false;
+    term.hook.backlog_catchup = false;
     try std.testing.expectEqual(@as(usize, 3), session.turn_captures.openTurn("S-diff").?.entries.items.len);
 
     // 봉인: after 가 읽히고 셸 diff 근거로 ✎ 가 선다 — by_shell(before 모름) + read_then(v1→v2) = 2. /etc/hosts 는 루트 밖이라 아니다.
@@ -29243,7 +29243,7 @@ test "훅 캡처: 실측 모양의 ndjson 한 턴이 파서를 지나 셸 구간
     try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = log_text });
     agent_ops.pollAgentHookEvents(&session, term, false);
     const identity = "cafe0000-0000-4000-8000-000000000001";
-    try std.testing.expectEqualStrings(identity, term.agent_transcript.identity());
+    try std.testing.expectEqualStrings(identity, term.hook.transcript.identity());
     {
         const open = session.turn_captures.openTurn(identity) orelse return error.NoOpenTurn;
         try std.testing.expectEqual(@as(u32, 4), open.shell_calls);
@@ -29557,7 +29557,7 @@ test "훅 캡처: backlog 따라잡기 중에는 before 를 뜨지 않는다 (AT
 
     _ = agent_ops.testApplyHookEvent(session, term, .{ .kind = .session_start, .session_id = "S-bl" });
 
-    term.agent_hook_backlog_catchup = true;
+    term.hook.backlog_catchup = true;
     _ = agent_ops.testApplyHookEvent(session, term, .{
         .kind = .pre_tool_use,
         .session_id = "S-bl",
@@ -29567,7 +29567,7 @@ test "훅 캡처: backlog 따라잡기 중에는 before 를 뜨지 않는다 (AT
     try std.testing.expect(session.turn_captures.openTurn("S-bl") == null);
 
     // **뒤 절반이 없으면 「영영 캡처 안 하는」 구현이 통과한다.**
-    term.agent_hook_backlog_catchup = false;
+    term.hook.backlog_catchup = false;
     _ = agent_ops.testApplyHookEvent(session, term, .{
         .kind = .pre_tool_use,
         .session_id = "S-bl",
@@ -29673,22 +29673,22 @@ test "hook mode fills state and conversation from the event log, and only then" 
     try std.testing.expect(term.agent_hook_log_present);
     try std.testing.expectEqual(hook_mode.Mode.hook, agent_ops.agentHookMode(&session, term)); // 이제 훅 모드
     try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state);
-    try std.testing.expectEqualStrings("테스트 프롬프트", term.agent_transcript.owned.prompt());
+    try std.testing.expectEqualStrings("테스트 프롬프트", term.hook.transcript.owned.prompt());
 
     // ③ 턴이 끝난다 — **이어 붙인 부분만** 읽어야 한다(커서가 전진했으므로).
     const stop_line = "claude\t{\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"끝났습니다\"}\n";
     try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = start_line ++ prompt_line ++ stop_line });
     agent_ops.pollAgentHookEvents(&session, term, false);
     try std.testing.expectEqual(maru.session.agent_observer.State.idle, term.agent_state);
-    try std.testing.expectEqualStrings("끝났습니다", term.agent_transcript.owned.reply());
-    try std.testing.expectEqualStrings("테스트 프롬프트", term.agent_transcript.owned.prompt());
+    try std.testing.expectEqualStrings("끝났습니다", term.hook.transcript.owned.reply());
+    try std.testing.expectEqualStrings("테스트 프롬프트", term.hook.transcript.owned.prompt());
 
     // ④ 새 프롬프트가 오면 **이전 응답은 지운다** — 남겨 두면 「질문은 새것, 답은 옛것」이 붙는다.
     const next_prompt = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"다음 질문\"}\n";
     try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = start_line ++ prompt_line ++ stop_line ++ next_prompt });
     agent_ops.pollAgentHookEvents(&session, term, false);
-    try std.testing.expectEqualStrings("다음 질문", term.agent_transcript.owned.prompt());
-    try std.testing.expectEqual(@as(usize, 0), term.agent_transcript.owned.reply().len);
+    try std.testing.expectEqualStrings("다음 질문", term.hook.transcript.owned.prompt());
+    try std.testing.expectEqual(@as(usize, 0), term.hook.transcript.owned.reply().len);
     try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state);
 
     // ⑤ **커서가 실제로 전진한다.** 파일을 통째로 다시 읽어도 마지막 상태는 같아서 상태만 보면 그 차이가
@@ -29730,11 +29730,11 @@ test "hook mode fills state and conversation from the event log, and only then" 
     //    버린다(자동 승인으로 해소된 경우 — 배지만 바뀌고 배너는 안 뜬다).
     {
         term.agent_state = .blocked;
-        term.agent_hook_notice.set(.attention, "Bash 실행 승인", session.awakeMs());
+        term.hook.notice.set(.attention, "Bash 실행 승인", session.awakeMs());
         try std.testing.expectEqual(@as(?agent_ops.HookNotice, null), agent_ops.takeAgentHookNotice(&session, term)); // 아직 이르다
         term.agent_state = .running; // 자동 승인으로 해소됐다
         try std.testing.expectEqual(@as(?agent_ops.HookNotice, null), agent_ops.takeAgentHookNotice(&session, term));
-        try std.testing.expectEqual(maru.session.agent_hook_mode.Notice.none, term.agent_hook_notice.kind); // 버려졌다
+        try std.testing.expectEqual(maru.session.agent_hook_mode.Notice.none, term.hook.notice.kind); // 버려졌다
     }
 
     // ⑨ **회전해도 마지막 이벤트를 잃지 않는다**(계약 §4.2). rename 하는 순간 훅이 열어 둔 fd 는 옛 inode 에
@@ -29765,7 +29765,7 @@ test "hook mode fills state and conversation from the event log, and only then" 
             if (term.agent_state == .idle) break; // 마지막 `Stop` 까지 읽었다
         }
         try std.testing.expectEqual(maru.session.agent_observer.State.idle, term.agent_state);
-        try std.testing.expectEqualStrings("회전 뒤에도 남는다", term.agent_transcript.owned.reply());
+        try std.testing.expectEqualStrings("회전 뒤에도 남는다", term.hook.transcript.owned.reply());
 
         // 회전이 실제로 일어나 **원본이 작아졌다**(또는 사라졌다).
         const after = tmp.dir.statFile(io, log_rel, .{}) catch null;
@@ -29782,7 +29782,7 @@ test "hook mode fills state and conversation from the event log, and only then" 
         const fresh = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"회전 뒤 첫 줄\"}\n";
         try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = fresh });
         agent_ops.pollAgentHookEvents(&session, term, false);
-        try std.testing.expectEqualStrings("회전 뒤 첫 줄", term.agent_transcript.owned.prompt());
+        try std.testing.expectEqualStrings("회전 뒤 첫 줄", term.hook.transcript.owned.prompt());
         try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state);
     }
 
@@ -29800,11 +29800,11 @@ test "hook mode fills state and conversation from the event log, and only then" 
         defer a.free(rotated_abs);
         // 턴이 돌던 중에 회전이 있었다. **훅 자리를 세운다**(§1.6-⑴) — `agent_state` 는 권위표가 내는
         // 결과라 직접 쓰면 다음 판정이 그것을 덮는다. 「턴이 돌고 있다」를 말하는 자리는 훅 쪽이다.
-        term.agent_hook_state = .running;
+        term.hook.state = .running;
         term.agent_state = .running;
         agent_ops.test_turn_snapshot_calls = 0;
         agent_ops.drainRotatedAgentHookLogForTest(&session, term, rotated_abs);
-        try std.testing.expectEqualStrings("회전본에 남아 있던 응답", term.agent_transcript.owned.reply());
+        try std.testing.expectEqualStrings("회전본에 남아 있던 응답", term.hook.transcript.owned.reply());
         try std.testing.expectEqual(maru.session.agent_observer.State.idle, term.agent_state);
         // **건진 이벤트도 턴 끝을 만든다.** 회전본 쪽만 빠뜨리면 «마지막 Stop 이 회전본에 들어간 턴» 의
         // 작업트리가 통째로 안 굳는다 — 대화를 빠뜨렸던 것과 같은 부류의 누락이다.
@@ -29815,11 +29815,11 @@ test "hook mode fills state and conversation from the event log, and only then" 
     // ⑫ **서브에이전트가 도는 동안 lead 의 Stop 을 완료로 단정하지 않는다**(계약 §2). 그리고 마지막 자식이
     //    끝나면 풀린다 — 안 풀리면 그것도 «거짓말하는 배지» 다.
     {
-        term.agent_hook_progress = .{};
+        term.hook.progress = .{};
         term.agent_state = .unknown;
         term.agent_hook_cursor = .{};
         term.agent_hook_cursor_inode = 0;
-        term.agent_hook_notice.clear();
+        term.hook.notice.clear();
         const sub_prompt_line = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"조사해줘\"}\n";
         const sub_start_line = "claude\t{\"hook_event_name\":\"SubagentStart\",\"agent_id\":\"ac963bb35f95b11fd\"}\n";
         const sub_lead_stop_line = "claude\t{\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"자식에게 맡겼습니다\"}\n";
@@ -29832,9 +29832,9 @@ test "hook mode fills state and conversation from the event log, and only then" 
         // lead 는 끝났지만 자식이 돈다 → 여전히 진행 중이고 **완료 알림이 예약되지 않는다**.
         // 남의 종료가 하나 섞여 왔어도 우리 자식은 그대로다 — 개수를 세면 여기서 이미 풀린다.
         try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state);
-        try std.testing.expectEqual(@as(usize, 1), term.agent_hook_progress.childCount());
-        try std.testing.expect(!term.agent_hook_progress.turn_open); // lead 의 턴은 닫혔다
-        try std.testing.expectEqual(maru.session.agent_hook_mode.Notice.none, term.agent_hook_notice.kind);
+        try std.testing.expectEqual(@as(usize, 1), term.hook.progress.childCount());
+        try std.testing.expect(!term.hook.progress.turn_open); // lead 의 턴은 닫혔다
+        try std.testing.expectEqual(maru.session.agent_hook_mode.Notice.none, term.hook.notice.kind);
 
         // **우리** 자식이 끝나면 그때가 진짜 턴 끝이다.
         try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = sub_prompt_line ++ sub_start_line ++ sub_lead_stop_line ++ sub_other_stop_line ++ sub_our_stop_line });
@@ -29844,7 +29844,7 @@ test "hook mode fills state and conversation from the event log, and only then" 
 
     // ⑬ **오류로 끝난 턴도 끝이다.** `StopFailure` 를 안 받으면 그 pane 이 영영 «진행 중» 이다.
     {
-        term.agent_hook_progress = .{};
+        term.hook.progress = .{};
         term.agent_state = .unknown;
         term.agent_hook_cursor = .{};
         term.agent_hook_cursor_inode = 0;
@@ -29858,7 +29858,7 @@ test "hook mode fills state and conversation from the event log, and only then" 
     //    «하나라도 `running` 이면 진행 중» 이었는데, 그 셈이 `type` 을 안 가려 셸 작업까지 붙잡았고 그 축에는
     //    푸는 이벤트가 없어 완료 알림이 통째로 막혔다. 이제 붙잡는 근거는 자식 로스터 하나다(아래 ⑮e).
     {
-        term.agent_hook_progress = .{};
+        term.hook.progress = .{};
         term.agent_state = .unknown;
         term.agent_hook_cursor = .{};
         term.agent_hook_cursor_inode = 0;
@@ -29880,15 +29880,15 @@ test "hook mode fills state and conversation from the event log, and only then" 
     // ⑮ **진행 중 세부가 사이드바 줄까지 간다**(계약 §2·§8). 훅 모드는 화면·프로세스 관측을 끄므로
     //    이 자리가 비면 훅을 켠 사용자가 관측 모드보다 **정보를 잃는다**.
     {
-        term.agent_hook_progress = .{};
+        term.hook.progress = .{};
         term.agent_state = .unknown;
         term.agent_hook_cursor = .{};
         term.agent_hook_cursor_inode = 0;
-        term.agent_hook_tool.clear();
+        term.hook.tool.clear();
         session.agent_spin_frame = 0; // 파형은 애니메이션 — 고정해야 문자열이 실행마다 같다
         try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"조사해줘\"}\n" ++ "claude\t{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"description\":\"테스트를 돌린다\"}}\n" });
         agent_ops.pollAgentHookEvents(&session, term, false);
-        try std.testing.expectEqualStrings("테스트를 돌린다", term.agent_hook_tool.text());
+        try std.testing.expectEqualStrings("테스트를 돌린다", term.hook.tool.text());
         const with_detail = try sidebar_ops.agentStatusLine(&session, term);
         defer a.free(with_detail);
         try std.testing.expect(std.mem.endsWith(u8, with_detail, "\u{00b7} 테스트를 돌린다"));
@@ -29897,35 +29897,35 @@ test "hook mode fills state and conversation from the event log, and only then" 
         // 설명이 없는 도구는 이름이라도 보인다 — 빈 줄보다 낫다.
         try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"조사해줘\"}\n" ++ "claude\t{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"description\":\"테스트를 돌린다\"}}\n" ++ "claude\t{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Read\"}\n" });
         agent_ops.pollAgentHookEvents(&session, term, false);
-        try std.testing.expectEqualStrings("Read", term.agent_hook_tool.text());
+        try std.testing.expectEqualStrings("Read", term.hook.tool.text());
 
         // 자식의 도구 호출은 **부모의** 세부를 갈아 끼우지 않는다(계약 §2).
         try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"조사해줘\"}\n" ++ "claude\t{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"description\":\"테스트를 돌린다\"}}\n" ++ "claude\t{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Read\"}\n" ++ "claude\t{\"hook_event_name\":\"PreToolUse\",\"agent_id\":\"child-1\",\"tool_name\":\"Bash\",\"tool_input\":{\"description\":\"자식이 하는 일\"}}\n" });
         agent_ops.pollAgentHookEvents(&session, term, false);
-        try std.testing.expectEqualStrings("Read", term.agent_hook_tool.text());
+        try std.testing.expectEqualStrings("Read", term.hook.tool.text());
 
         // 새 턴이 시작되면 비운다 — 안 비우면 지난 턴의 마지막 도구가 계속 붙어 있다. 그리고 그때의
         // 상태줄은 예전과 **바이트가 같다**(세부가 없으면 구분자도 없다).
         try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"조사해줘\"}\n" ++ "claude\t{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"description\":\"테스트를 돌린다\"}}\n" ++ "claude\t{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Read\"}\n" ++ "claude\t{\"hook_event_name\":\"PreToolUse\",\"agent_id\":\"child-1\",\"tool_name\":\"Bash\",\"tool_input\":{\"description\":\"자식이 하는 일\"}}\n" ++ "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"조사해줘\"}\n" });
         agent_ops.pollAgentHookEvents(&session, term, false);
-        try std.testing.expectEqualStrings("", term.agent_hook_tool.text());
+        try std.testing.expectEqualStrings("", term.hook.tool.text());
         const plain = try sidebar_ops.agentStatusLine(&session, term);
         defer a.free(plain);
         try std.testing.expect(std.mem.endsWith(u8, plain, sidebar_ops.runningLabel()));
 
         // 관측 모드로 돌아가면 남은 세부를 버린다 — 남기면 다른 소스의 배지 옆에 훅 문구가 붙는다(§1).
-        term.agent_hook_tool.set("남은 것");
+        term.hook.tool.set("남은 것");
         // 자식 셈도 함께 버린다 — 남기면 훅 모드로 돌아온 뒤 첫 lead `Stop` 이 «자식이 남았다» 로 읽혀
         // 배지가 안 풀린다(다음 프롬프트가 셈을 지울 때까지).
-        term.agent_hook_progress = .{ .turn_open = true };
+        term.hook.progress = .{ .turn_open = true };
         // 자식 자리는 **id 해시**다(전문을 담지 않는다) — 여기서는 «하나 담겨 있다» 만 만들면 된다.
-        term.agent_hook_progress.children[0] = 0xc1;
-        term.agent_hook_progress.child_count = 1;
+        term.hook.progress.children[0] = 0xc1;
+        term.hook.progress.child_count = 1;
         session.loaded_config.config.sidebar.agent_hooks = false;
         agent_ops.pollAgentConsumer(&session, term, false, false);
-        try std.testing.expectEqualStrings("", term.agent_hook_tool.text());
-        try std.testing.expectEqual(@as(usize, 0), term.agent_hook_progress.childCount());
-        try std.testing.expect(!term.agent_hook_progress.turn_open);
+        try std.testing.expectEqualStrings("", term.hook.tool.text());
+        try std.testing.expectEqual(@as(usize, 0), term.hook.progress.childCount());
+        try std.testing.expect(!term.hook.progress.turn_open);
         session.loaded_config.config.sidebar.agent_hooks = true;
     }
 
@@ -29934,29 +29934,29 @@ test "hook mode fills state and conversation from the event log, and only then" 
     // 권한이 실제로 거부돼도 안 온다 — §9-6). 그것 하나에만 걸어 두면 대화형에서도 안 올 경우 그 배지에
     // 소스가 하나도 없다. `Notification` 은 실사용에서 **실제로 오는 것을 봤다**.
     {
-        term.agent_hook_progress = .{};
+        term.hook.progress = .{};
         term.agent_state = .unknown;
         term.agent_hook_cursor = .{};
         term.agent_hook_cursor_inode = 0;
-        term.agent_hook_notice.clear();
+        term.hook.notice.clear();
         try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"파일 하나 고쳐줘\"}\n" ++ "claude\t{\"hook_event_name\":\"Notification\",\"notification_type\":\"permission_prompt\",\"message\":\"Claude needs your permission to use Bash\"}\n" });
         agent_ops.pollAgentHookEvents(&session, term, false);
         try std.testing.expectEqual(maru.session.agent_observer.State.blocked, term.agent_state);
         // 무엇을 승인해야 하는지도 함께 온다. **본문까지 본다** — 종류만 물으면 «알림은 떴는데 아무 말도
         // 안 하는» 경우가 통과한다. `Notification` payload 에는 `tool_name` 이 **없으므로**(실측: 키는
         // `message`·`title`·`notification_type` + 공통부) 승인 경로의 본문 규칙을 그대로 쓰면 빈 문자열이다.
-        try std.testing.expectEqual(maru.session.agent_hook_mode.Notice.attention, term.agent_hook_notice.kind);
-        try std.testing.expect(std.mem.indexOf(u8, term.agent_hook_notice.text(), "permission to use Bash") != null);
+        try std.testing.expectEqual(maru.session.agent_hook_mode.Notice.attention, term.hook.notice.kind);
+        try std.testing.expect(std.mem.indexOf(u8, term.hook.notice.text(), "permission to use Bash") != null);
 
         // **유휴 알림은 배지를 흔들지 않는다** — 실사용에서 이것이 턴 끝 뒤에 온다.
         term.agent_hook_cursor = .{};
         term.agent_hook_cursor_inode = 0;
         term.agent_state = .unknown;
-        term.agent_hook_notice.clear();
+        term.hook.notice.clear();
         try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"파일 하나 고쳐줘\"}\n" ++ "claude\t{\"hook_event_name\":\"Notification\",\"notification_type\":\"idle_prompt\"}\n" });
         agent_ops.pollAgentHookEvents(&session, term, false);
         try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state);
-        try std.testing.expectEqual(maru.session.agent_hook_mode.Notice.none, term.agent_hook_notice.kind);
+        try std.testing.expectEqual(maru.session.agent_hook_mode.Notice.none, term.hook.notice.kind);
     }
 
     // ── ⑯c **자식이 남은 뒤 온 알림이 배지를 가두지 않는다**(계약 §6) ─────────────────────
@@ -29965,11 +29965,11 @@ test "hook mode fills state and conversation from the event log, and only then" 
     // «턴이 안 끝났다» 가 되어 배지가 영영 「입력 대기」에 멈춘다. 순수 층이 그 규칙을 갖고 있어도
     // **제품이 이벤트 사이로 상태를 안 이어 주면** 같은 결과가 안 나오므로 여기서 한 번 더 본다.
     {
-        term.agent_hook_progress = .{};
+        term.hook.progress = .{};
         term.agent_state = .unknown;
         term.agent_hook_cursor = .{};
         term.agent_hook_cursor_inode = 0;
-        term.agent_hook_notice.clear();
+        term.hook.notice.clear();
         try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"두 갈래로 조사해줘\"}\n" ++ "claude\t{\"hook_event_name\":\"SubagentStart\",\"agent_id\":\"c1\"}\n" ++ "claude\t{\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"맡겼습니다\"}\n" ++ "claude\t{\"hook_event_name\":\"Notification\",\"notification_type\":\"worker_permission_prompt\",\"message\":\"c1 needs permission for Bash\"}\n" ++ "claude\t{\"hook_event_name\":\"SubagentStop\",\"agent_id\":\"c1\",\"last_assistant_message\":\"끝냈습니다\"}\n" });
         agent_ops.pollAgentHookEvents(&session, term, false);
         try std.testing.expectEqual(maru.session.agent_observer.State.idle, term.agent_state);
@@ -29980,18 +29980,18 @@ test "hook mode fills state and conversation from the event log, and only then" 
     // 붙잡는다 — **안 풀리는 배지**다. provider 가 `Stop` 에 실어 주는 목록이 그것을 정리한다:
     // `type: "subagent"` 항목의 `id` 가 수명 이벤트의 `agent_id` 와 **정확히 같다**(실측).
     {
-        term.agent_hook_progress = .{};
+        term.hook.progress = .{};
         term.agent_state = .unknown;
         term.agent_hook_cursor = .{};
         term.agent_hook_cursor_inode = 0;
-        term.agent_hook_notice.clear();
+        term.hook.notice.clear();
         try tmp.dir.writeFile(io, .{
             .sub_path = log_rel,
             .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"조사해줘\"}\n" ++ "claude\t{\"hook_event_name\":\"SubagentStart\",\"agent_id\":\"ghost-1\"}\n" ++ "claude\t{\"hook_event_name\":\"SubagentStart\",\"agent_id\":\"ab8b2cd7ddd4dce44\"}\n" ++ "claude\t{\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"백그라운드로 띄웠습니다\",\"background_tasks\":[{\"id\":\"ab8b2cd7ddd4dce44\",\"type\":\"subagent\",\"status\":\"running\",\"description\":\"List and summarize files\"}]}\n",
         });
         agent_ops.pollAgentHookEvents(&session, term, false);
         // 유령은 거둬지고, 목록이 «도는 중» 이라 말한 자식만 남아 배지를 붙잡는다.
-        try std.testing.expectEqual(@as(usize, 1), term.agent_hook_progress.childCount());
+        try std.testing.expectEqual(@as(usize, 1), term.hook.progress.childCount());
         try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state);
 
         // 그 자식이 끝나면 그때가 진짜 턴 끝이다 — 유령이 남아 있었다면 여기서 안 풀렸다.
@@ -30001,7 +30001,7 @@ test "hook mode fills state and conversation from the event log, and only then" 
         });
         agent_ops.pollAgentHookEvents(&session, term, false);
         try std.testing.expectEqual(maru.session.agent_observer.State.idle, term.agent_state);
-        try std.testing.expectEqual(@as(usize, 0), term.agent_hook_progress.childCount());
+        try std.testing.expectEqual(@as(usize, 0), term.hook.progress.childCount());
     }
 
     // ── ⑰ **실측 줄을 그대로 태운다**(2026-08-21 claude 서브에이전트 턴) ─────────────────────
@@ -30011,12 +30011,12 @@ test "hook mode fills state and conversation from the event log, and only then" 
     // 그 이벤트는 **조용히 사라지고**, 그것이 곧 안 풀리는 배지다. 경로만 가리고 나머지는 한 글자도
     // 안 고쳤다.
     {
-        term.agent_hook_progress = .{};
+        term.hook.progress = .{};
         term.agent_state = .unknown;
         term.agent_hook_cursor = .{};
         term.agent_hook_cursor_inode = 0;
-        term.agent_hook_notice.clear();
-        term.agent_transcript.owned.setReply("");
+        term.hook.notice.clear();
+        term.hook.transcript.owned.setReply("");
         agent_ops.test_turn_snapshot_calls = 0;
 
         const real_turn = "claude\t{\"session_id\":\"fa0a0dd2-9bf5-4bae-9b9b-ac3369a2cada\",\"transcript_path\":\"/Users/u/.claude/projects/-private-tmp-maru-e2e-matrix/fa0a0dd2-9bf5-4bae-9b9b-ac3369a2cada.jsonl\",\"cwd\":\"/private/tmp/maru-e2e-matrix\",\"hook_event_name\":\"SessionStart\",\"source\":\"startup\"}\n" ++
@@ -30031,22 +30031,22 @@ test "hook mode fills state and conversation from the event log, and only then" 
 
         // 턴이 끝났다 — 자식이 먼저 끝나고 lead 가 뒤에 끝나는 **실측 순서** 그대로다.
         try std.testing.expectEqual(maru.session.agent_observer.State.idle, term.agent_state);
-        try std.testing.expectEqual(@as(usize, 0), term.agent_hook_progress.childCount());
-        try std.testing.expect(!term.agent_hook_progress.turn_open);
+        try std.testing.expectEqual(@as(usize, 0), term.hook.progress.childCount());
+        try std.testing.expect(!term.hook.progress.turn_open);
         // 턴 키를 실제 payload 에서 집었다(`prompt_id`).
-        try std.testing.expectEqual(@as(usize, 36), term.agent_hook_progress.turnKey().len);
+        try std.testing.expectEqual(@as(usize, 36), term.hook.progress.turnKey().len);
         // 대화는 **lead 의 것**이다 — 자식의 `last_assistant_message`("from-child")가 아니다.
         //
         // 「"from-child" 를 포함하지 않는다」로 쓰면 안 된다: **lead 자신의 응답이 그 말을 인용한다**
         // ("서브에이전트가 `echo from-child`를 실행했고 …"). 실측 데이터가 그 단언을 깼다 — 합성
         // 입력이었다면 영영 안 걸렸을 함정이라, 이 자리는 «자식 것과 같지 않다» 로 물어야 한다.
-        try std.testing.expect(!std.mem.eql(u8, term.agent_transcript.owned.reply(), "from-child"));
-        try std.testing.expect(std.mem.indexOf(u8, term.agent_transcript.owned.reply(), "done") != null);
-        try std.testing.expect(term.agent_transcript.owned.prompt().len > 0);
+        try std.testing.expect(!std.mem.eql(u8, term.hook.transcript.owned.reply(), "from-child"));
+        try std.testing.expect(std.mem.indexOf(u8, term.hook.transcript.owned.reply(), "done") != null);
+        try std.testing.expect(term.hook.transcript.owned.prompt().len > 0);
         // 작업트리도 굳었다(배치 안이므로 한 번).
         try std.testing.expectEqual(@as(usize, 1), agent_ops.test_turn_snapshot_calls);
         // 완료 알림이 예약됐고 오류가 아니다.
-        try std.testing.expectEqual(maru.session.agent_hook_mode.Notice.done, term.agent_hook_notice.kind);
+        try std.testing.expectEqual(maru.session.agent_hook_mode.Notice.done, term.hook.notice.kind);
     }
 
     // ⑮b **JSON 이스케이프를 푼 뒤에 보여 준다**(계약 §4). 파서는 줄 버퍼를 빌려 쓰느라 이스케이프를
@@ -30054,11 +30054,11 @@ test "hook mode fills state and conversation from the event log, and only then" 
     //    두 글자로** 보이고 따옴표마다 역슬래시가 붙는다. claude 의 `last_assistant_message` 는 대개
     //    여러 줄이라(위 ⑮ 실측 payload 도 `\n\n` 을 담고 있다) 실사용에서 늘 걸리던 자리다.
     {
-        term.agent_hook_progress = .{};
+        term.hook.progress = .{};
         term.agent_state = .unknown;
         term.agent_hook_cursor = .{};
         term.agent_hook_cursor_inode = 0;
-        term.agent_hook_notice.clear();
+        term.hook.notice.clear();
         try tmp.dir.writeFile(io, .{
             .sub_path = log_rel,
             .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"첫 줄\\n둘째 줄\"}\n" ++
@@ -30068,9 +30068,9 @@ test "hook mode fills state and conversation from the event log, and only then" 
         // **대화 줄은 한 줄로 눕는다.** 이스케이프만 풀고 멈추면 그 자리에 진짜 개행이 들어가 한 줄
         // 텍스트 run 이 뭉개진다 — 관측 모드 파서가 저장 직전에 `flatten` 을 지나는 것과 같은 모양이어야
         // 한다(계약 §1: 두 소스가 같은 자리에 같은 모양을 그린다).
-        try std.testing.expectEqualStrings("첫 줄 둘째 줄", term.agent_transcript.owned.prompt());
-        try std.testing.expectEqualStrings("정리했습니다 그는 \"네\"라고 했다", term.agent_transcript.owned.reply());
-        try std.testing.expect(std.mem.indexOfScalar(u8, term.agent_transcript.owned.reply(), '\n') == null);
+        try std.testing.expectEqualStrings("첫 줄 둘째 줄", term.hook.transcript.owned.prompt());
+        try std.testing.expectEqualStrings("정리했습니다 그는 \"네\"라고 했다", term.hook.transcript.owned.reply());
+        try std.testing.expect(std.mem.indexOfScalar(u8, term.hook.transcript.owned.reply(), '\n') == null);
         // 알림 본문은 **반대다** — OS 배너는 여러 줄을 제대로 보여주므로 개행을 살리고, 대신 `\n` 두 글자가
         // 나가면 안 된다(인앱 히스토리는 자기 tail 에서 눕힌다).
         const notice = agent_ops.takeAgentHookNotice(&session, term) orelse return error.MissingHookNotice;
@@ -30083,11 +30083,11 @@ test "hook mode fills state and conversation from the event log, and only then" 
     //    상한)를 손대지 않는다. 512 바이트면 한글 170자 + 2바이트라 조금 긴 답변 하나면 배너 끝에 U+FFFD 가
     //    붙는다 — 경계를 푸는 쪽(`hookDisplayText`)에서 물려야 한다.
     {
-        term.agent_hook_progress = .{};
+        term.hook.progress = .{};
         term.agent_state = .unknown;
         term.agent_hook_cursor = .{};
         term.agent_hook_cursor_inode = 0;
-        term.agent_hook_notice.clear();
+        term.hook.notice.clear();
         const long_korean = "가" ** 300; // 900 바이트 — 알림 상한(512)과 대화 상한(512)을 둘 다 넘긴다
         try tmp.dir.writeFile(io, .{
             .sub_path = log_rel,
@@ -30098,8 +30098,8 @@ test "hook mode fills state and conversation from the event log, and only then" 
         const notice = agent_ops.takeAgentHookNotice(&session, term) orelse return error.MissingHookNotice;
         try std.testing.expect(notice.body.len > 0);
         try std.testing.expect(std.unicode.utf8ValidateSlice(notice.body)); // 배너
-        try std.testing.expect(std.unicode.utf8ValidateSlice(term.agent_transcript.owned.reply())); // 사이드바
-        try std.testing.expect(std.unicode.utf8ValidateSlice(term.agent_transcript.owned.prompt()));
+        try std.testing.expect(std.unicode.utf8ValidateSlice(term.hook.transcript.owned.reply())); // 사이드바
+        try std.testing.expect(std.unicode.utf8ValidateSlice(term.hook.transcript.owned.prompt()));
     }
 
     // ⑮c **턴을 거듭해도 대화 줄이 안 빈다.** 훅 모드는 Term 이 든 `Owned` 버퍼에 **직접** 쓰는데, 그
@@ -30108,11 +30108,11 @@ test "hook mode fills state and conversation from the event log, and only then" 
     //    갑자기 사라진다» 로 보였고 `agent_kind` 가 바뀌기 전에는 회복되지 않았다. 관측 모드는 폴링마다
     //    새 버퍼로 다시 담아 이 증상이 없었으므로, **훅 모드에서만** 나던 회귀다.
     {
-        term.agent_hook_progress = .{};
+        term.hook.progress = .{};
         term.agent_state = .unknown;
         term.agent_hook_cursor = .{};
         term.agent_hook_cursor_inode = 0;
-        term.agent_transcript.reset();
+        term.hook.transcript.reset();
 
         var log: std.ArrayListUnmanaged(u8) = .empty;
         defer log.deinit(a);
@@ -30126,8 +30126,8 @@ test "hook mode fills state and conversation from the event log, and only then" 
             try tmp.dir.writeFile(io, .{ .sub_path = log_rel, .data = log.items });
             agent_ops.pollAgentHookEvents(&session, term, false);
         }
-        try std.testing.expectEqual(@as(usize, reply_len), term.agent_transcript.owned.reply().len);
-        try std.testing.expect(std.mem.indexOf(u8, term.agent_transcript.owned.prompt(), "배포 스크립트") != null);
+        try std.testing.expectEqual(@as(usize, reply_len), term.hook.transcript.owned.reply().len);
+        try std.testing.expect(std.mem.indexOf(u8, term.hook.transcript.owned.prompt(), "배포 스크립트") != null);
     }
 
     // ⑮d **백그라운드 셸 작업이 도는 중에도 완료 알림이 나간다**(2026-08-23 결정). 예전에는 `Stop` 의
@@ -30136,11 +30136,11 @@ test "hook mode fills state and conversation from the event log, and only then" 
     //    한 번 쓰면 그 pane 의 완료 알림이 그 작업이 끝날 때까지 **한 건도** 안 나갔다(사용자 보고 →
     //    실측 확인). payload 는 실측 그대로다.
     {
-        term.agent_hook_progress = .{};
+        term.hook.progress = .{};
         term.agent_state = .unknown;
         term.agent_hook_cursor = .{};
         term.agent_hook_cursor_inode = 0;
-        term.agent_hook_notice.clear();
+        term.hook.notice.clear();
         try tmp.dir.writeFile(io, .{
             .sub_path = log_rel,
             .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"sleep 을 백그라운드로 띄워줘\"}\n" ++
@@ -30158,11 +30158,11 @@ test "hook mode fills state and conversation from the event log, and only then" 
     // ⑮e **그래도 서브에이전트는 여전히 붙잡는다.** 위 결정은 «목록을 붙잡는 근거로 쓰지 않는다» 이지
     //    «자식을 안 기다린다» 가 아니다 — 자식은 우리 로스터가 붙잡고 `SubagentStop` 이 푼다.
     {
-        term.agent_hook_progress = .{};
+        term.hook.progress = .{};
         term.agent_state = .unknown;
         term.agent_hook_cursor = .{};
         term.agent_hook_cursor_inode = 0;
-        term.agent_hook_notice.clear();
+        term.hook.notice.clear();
         try tmp.dir.writeFile(io, .{
             .sub_path = log_rel,
             .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"자식을 하나 띄워줘\"}\n" ++
@@ -30180,12 +30180,12 @@ test "hook mode fills state and conversation from the event log, and only then" 
     //    같은 파일 이름을 갖고 **서로의 이벤트를 읽었다**(그리고 시작 시 정리가 남의 살아 있는 로그를 지웠다).
     //    같은 `surface_id` 로 남의 칸에 이벤트를 놓고, 우리 Term 이 그것을 안 무는지 본다.
     {
-        term.agent_hook_progress = .{};
+        term.hook.progress = .{};
         term.agent_state = .unknown;
         term.agent_hook_cursor = .{};
         term.agent_hook_cursor_inode = 0;
-        term.agent_hook_notice.clear();
-        term.agent_transcript.reset();
+        term.hook.notice.clear();
+        term.hook.transcript.reset();
 
         // 우리 칸은 비운다(우리 것은 없다).
         try tmp.dir.deleteFile(io, log_rel);
@@ -30216,8 +30216,8 @@ test "hook mode fills state and conversation from the event log, and only then" 
         try std.testing.expect(!term.agent_hook_log_present);
         try std.testing.expectEqual(hook_mode.Mode.observe, agent_ops.agentHookMode(&session, term));
         // 그리고 남의 대화가 이 Term 에 붙지 않는다.
-        try std.testing.expectEqual(@as(usize, 0), term.agent_transcript.owned.reply().len);
-        try std.testing.expect(std.mem.indexOf(u8, term.agent_transcript.owned.prompt(), "남의 인스턴스") == null);
+        try std.testing.expectEqual(@as(usize, 0), term.hook.transcript.owned.reply().len);
+        try std.testing.expect(std.mem.indexOf(u8, term.hook.transcript.owned.prompt(), "남의 인스턴스") == null);
     }
 
     // ⑯ 게이트를 끄면 그 Term 은 **관측 모드로 돌아간다**(로그가 있어도) — 모드는 세 조건이 다 서야 한다.
@@ -38032,7 +38032,7 @@ test "fillSidebarGlyphPyTop: 그룹 헤더가 앞서면 카드 glyph py_top이 r
 // 터미널에서 왜 중요한가: 사이드바 ✕ 한 번이 되돌릴 수 없는 종료인데, 다른 모든 닫기 경로가 거치는 확인 규율만
 // 이 자리에서 빠져 있었다. 이제 requestClose가 캐스케이드 범위(Term→pane→탭→세션)를 풀고 그 범위로 확인한다.
 // 4단계(§7): 세션 기록에서 읽은 마지막 대화가 **행 라벨·줄 수·알림 본문** 셋에 실제로 도달하는지 고정한다.
-// 캐시(Term.agent_transcript)까지는 폴링이 채우고, 여기서 검증하는 건 그 아래 소비 경로다 — 파일→캐시 구간은
+// 캐시(Term.hook.transcript)까지는 폴링이 채우고, 여기서 검증하는 건 그 아래 소비 경로다 — 파일→캐시 구간은
 // 실제 FS·provider 포맷에 의존해 단위 테스트가 못 덮으므로 앱 실행으로 확인한다(§10).
 // 활동 시각의 **우선순위**를 고정한다: 관측된 출력 > 세션 기록 mtime > 빈칸. mtime 폴백이 없으면 앱을 새로 켠
 // 직후(= 사이드바를 보는 바로 그 순간) 모든 행이 빈칸이 된다.
@@ -38058,7 +38058,7 @@ test "에이전트 행 활동 시각: 출력이 mtime보다 우선하고, 둘 �
     }
 
     // mtime만 있다 → 폴백이 값을 낸다. 앱을 새로 켠 직후가 정확히 이 상태다.
-    term.agent_transcript.read_mtime_ns = now - 2 * std.time.ns_per_hour;
+    term.hook.transcript.read_mtime_ns = now - 2 * std.time.ns_per_hour;
     {
         const age = try sidebar_ops.agentAgeOwned(session, term);
         defer a.free(age);
@@ -38325,14 +38325,14 @@ test "에이전트 대화: codex는 cwd를 몰라도 신원만으로 rollout을 
     const term = session.tabs.items[0].panes.items[0].terms.items[0];
     term.agent_kind = .codex;
     term.agent_state = .idle;
-    term.agent_transcript.setIdentity(thread_id);
+    term.hook.transcript.setIdentity(thread_id);
     // **전제: cwd를 모른다.** 관측은 비어 있고, 커널 폴백이 답하더라도 codex 경로는 그 값을 쓰지 않는다.
     try std.testing.expectEqual(@as(usize, 0), term.rt.observation.cwd.items.len);
 
     agent_ops.pollAgentTranscript(session, term, true);
 
     // 예전에는 cwd 게이트에 걸려 여기가 빈 채로 남았다.
-    try std.testing.expect(std.mem.indexOf(u8, term.agent_transcript.owned.reply(), "읽힌다") != null);
+    try std.testing.expect(std.mem.indexOf(u8, term.hook.transcript.owned.reply(), "읽힌다") != null);
 }
 
 test "에이전트 행: 마지막 대화가 라벨·줄 수·알림 본문에 실린다" {
@@ -38355,8 +38355,8 @@ test "에이전트 행: 마지막 대화가 라벨·줄 수·알림 본문에 �
     }
     const lines_before = sidebar_ops.sidebarAgentRowLines(session, tab, .{ .pane = 0, .term = 0 });
 
-    term.agent_transcript.owned.setPrompt("배포 스크립트 고쳐줘");
-    term.agent_transcript.owned.setReply("네, 수정했습니다");
+    term.hook.transcript.owned.setPrompt("배포 스크립트 고쳐줘");
+    term.hook.transcript.owned.setReply("네, 수정했습니다");
 
     // 라벨: 종류 이름 대신 **프롬프트**가 오고, 상태 마커(✓)는 남는다 — 진행 여부를 잃지 않는다.
     {
@@ -38372,7 +38372,7 @@ test "에이전트 행: 마지막 대화가 라벨·줄 수·알림 본문에 �
     // 훅을 켜야만 얻는 정보가 훅을 켠 화면에서만 안 보이는 뒤집힌 상태가 된다.
     {
         term.agent_state = .running;
-        term.agent_hook_tool.set("파일 씀");
+        term.hook.tool.set("파일 씀");
         const label = try sidebar_ops.agentRowLabelOwned(session, term);
         defer a.free(label);
         try std.testing.expect(std.mem.indexOf(u8, label, "파일 씀") != null); // 무엇을 하는 중인지
@@ -38385,7 +38385,7 @@ test "에이전트 행: 마지막 대화가 라벨·줄 수·알림 본문에 �
         try std.testing.expect(std.mem.indexOf(u8, blocked, maru.i18n.t(.sb_awaiting_input)) != null);
         try std.testing.expect(std.mem.indexOf(u8, blocked, "배포 스크립트 고쳐줘") == null);
 
-        term.agent_hook_tool.clear();
+        term.hook.tool.clear();
         term.agent_state = .idle;
     }
 
@@ -38405,7 +38405,7 @@ test "에이전트 행: 마지막 대화가 라벨·줄 수·알림 본문에 �
     }
 
     // 대화가 없으면 알림은 provider 문구 그대로 — 기존 동작과 byte-identical이어야 한다.
-    term.agent_transcript.reset();
+    term.hook.transcript.reset();
     {
         const body = try notification_ops.notificationBodyOwned(session, term, "Claude is waiting for your input");
         defer a.free(body);
@@ -38449,7 +38449,7 @@ test "에이전트 행 라벨: 프롬프트를 알든 모르든 상태 마커가
     // **본문을 무엇으로 채우는지는 2026-08-22 에 바뀌었다**(사용자 결정): 프롬프트를 알아도 `running` 이면
     // «무엇을 하는 중인가» 를 싣는다. 그 세부는 이 행 말고 보일 자리가 없고, 훅 모드에서는 프롬프트가 **항상**
     // 있어 예전 규칙으로는 영영 가려졌다. 프롬프트는 턴이 끝난 뒤 `idle` 에서 본문이 된다(아래 2b).
-    term.agent_transcript.owned.setPrompt("지금 용량 없는데 용량 늘려줘");
+    term.hook.transcript.owned.setPrompt("지금 용량 없는데 용량 늘려줘");
     {
         const label = try sidebar_ops.agentRowLabelOwned(session, term);
         defer a.free(label);
@@ -38469,7 +38469,7 @@ test "에이전트 행 라벨: 프롬프트를 알든 모르든 상태 마커가
 
     // (3) running이 아닌 상태도 같은 규칙이다. unknown은 마커 자체가 `·`라, 옛 형태에서는 구분자와 겹쳐
     // `Codex · · 상태 확인 중`으로 점이 둘이었다.
-    term.agent_transcript.reset();
+    term.hook.transcript.reset();
     term.agent_state = .unknown;
     {
         const label = try sidebar_ops.agentRowLabelOwned(session, term);
@@ -38515,7 +38515,7 @@ test "에이전트 행 렌더: 프롬프트 유무가 갈린 두 행의 파형�
         t.agent_kind = .codex;
         t.agent_state = .running;
     }
-    terms[1].agent_transcript.owned.setPrompt("지금 용량 없는데 용량 늘려줘");
+    terms[1].hook.transcript.owned.setPrompt("지금 용량 없는데 용량 늘려줘");
     session.agent_spin_frame = 0; // 파형은 애니메이션 — 고정하지 않으면 칸 수가 실행마다 다르다
 
     // 기본 fixture 사이드바는 20칸이라 라벨이 통째로 말줄임된다. 잘린 화면에서는 파형이 아예 안 나와 아래
@@ -40745,15 +40745,15 @@ test "부재 중 쌓인 로그는 상태만 세우고 알리지 않는다 — �
     var ticks: usize = 0;
     while (ticks < 200) : (ticks += 1) {
         agent_ops.pollAgentHookEvents(&session, term, false);
-        if (std.mem.eql(u8, term.agent_transcript.owned.prompt(), "지금 질문")) break;
+        if (std.mem.eql(u8, term.hook.transcript.owned.prompt(), "지금 질문")) break;
     }
 
     // ① 상태는 선다 — 꼬리의 프롬프트가 그 Term 을 «진행 중» 으로 만든다.
     try std.testing.expect(term.agent_hook_log_present);
     try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state);
-    try std.testing.expectEqualStrings("지금 질문", term.agent_transcript.owned.prompt());
+    try std.testing.expectEqualStrings("지금 질문", term.hook.transcript.owned.prompt());
     // ② 그런데 **알림은 없다.** 건너뛴 구간의 옛 «완료» 가 지금 뜨면 그것은 거짓말이다.
-    try std.testing.expectEqual(maru.session.agent_hook_mode.Notice.none, term.agent_hook_notice.kind);
+    try std.testing.expectEqual(maru.session.agent_hook_mode.Notice.none, term.hook.notice.kind);
     // ③ **몇 tick 만에 따라잡았는가** 가 곧 «건너뛰었는가» 다. 건너뛰지 않으면 파일 전체(창의 여덟 배)를
     //    64 이벤트씩 되짚어 tick 이 수십~수백 번 든다 — 그 회귀를 이 상한이 잡는다(뮤테이션으로 확인).
     try std.testing.expect(ticks < 40);
@@ -42120,7 +42120,7 @@ test "AH7 통합: host-backed Term 의 배지와 대화 줄이 진짜 훅 커맨
         var tick: usize = 0;
         while (tick < 1000 and !consumed) : (tick += 1) {
             agent_ops.pollAgentHookEvents(session, term, false);
-            consumed = std.mem.eql(u8, term.agent_transcript.owned.reply(), "훅에서 온 답");
+            consumed = std.mem.eql(u8, term.hook.transcript.owned.reply(), "훅에서 온 답");
             if (!consumed) _ = usleep(10 * 1000);
         }
 
@@ -76030,7 +76030,7 @@ fn testTurnRing(session: *AppSession) *maru.session.turn_snapshot.Ring {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
                     if (term.surface.id != active_id) continue;
-                    term.agent_transcript.setIdentity(test_turn_session);
+                    term.hook.transcript.setIdentity(test_turn_session);
                     break :outer;
                 }
             }
@@ -76059,7 +76059,7 @@ fn seedTurnIdentity(session: *AppSession, surface_id: u64) void {
     for (session.tabs.items) |tab| {
         for (tab.panes.items) |pane| {
             for (pane.terms.items) |term| {
-                if (term.surface.id == surface_id) term.agent_transcript.setIdentity(test_turn_session);
+                if (term.surface.id == surface_id) term.hook.transcript.setIdentity(test_turn_session);
             }
         }
     }
@@ -79088,8 +79088,8 @@ test "턴 스냅샷이 링에 실리고 base 는 직전 턴의 키·제목을 �
         const term = tab_ops.activeTab(session).panes.items[0].terms.items[0];
         var prompt: maru.session.agent_hook_event.Event = .{ .kind = .user_prompt_submit };
         prompt.turn_key = "p-live";
-        _ = maru.session.agent_hook_mode.advance(&term.agent_hook_progress, .unknown, prompt);
-        try std.testing.expectEqualStrings("p-live", term.agent_hook_progress.turnKey());
+        _ = maru.session.agent_hook_mode.advance(&term.hook.progress, .unknown, prompt);
+        try std.testing.expectEqualStrings("p-live", term.hook.progress.turnKey());
         // 턴 끝이면 그 키를 싣고,
         try std.testing.expectEqualStrings("p-live", agent_ops.turnFactsForCapture(term, true).key);
         // base 면 **같은 진행 상태를 보고도** 비운다.
@@ -79175,7 +79175,7 @@ test "AW1 훅이 blocked 여도 화면에 승인 chrome 이 없으면 배지가 
     const surface = session.term_backend.surfaceFor(term.rt.handle) orelse return error.SkipZigTest;
 
     // ① 승인 대기 — 훅이 그렇게 말했고 화면에도 그 chrome 이 있다.
-    term.agent_hook_state = .blocked;
+    term.hook.state = .blocked;
     try surface.core.write("\x1b[2J\x1b[H  Would you like to proceed?\r\n❯ 1. Yes\r\n  2. No\r\n");
     term.rt.observation.observer_generation +%= 1;
     agent_ops.pollAgentState(session, term, false);
@@ -79189,7 +79189,7 @@ test "AW1 훅이 blocked 여도 화면에 승인 chrome 이 없으면 배지가 
     term.rt.observation.observer_generation +%= 1;
     agent_ops.pollAgentState(session, term, false);
     try std.testing.expect(!term.agent_screen_visible_blocker);
-    try std.testing.expectEqual(maru.session.agent_observer.State.blocked, term.agent_hook_state); // 훅은 여전히
+    try std.testing.expectEqual(maru.session.agent_observer.State.blocked, term.hook.state); // 훅은 여전히
     try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state); // 배지는 풀렸다
     try std.testing.expectEqualStrings("C1", term.agent_state_rule);
     try std.testing.expectEqual(maru.session.agent_state_arbiter.Origin.screen, term.agent_state_origin);
@@ -79217,14 +79217,14 @@ test "AW3 훅 소스가 끊기면 훅 자리도 버린다 — 돌아왔을 때 �
     term.rt.observation.availability = .current;
     session.loaded_config.config.sidebar.agent_hooks = true;
     term.agent_hook_log_present = true;
-    term.agent_hook_state = .running;
-    term.agent_hook_progress.reset();
+    term.hook.state = .running;
+    term.hook.progress.reset();
 
     // 훅 소스가 끊긴다(사용자가 게이트를 껐다 — 로그가 사라진 경우도 같은 분기다).
     session.loaded_config.config.sidebar.agent_hooks = false;
     agent_ops.pollAgentConsumer(session, term, false, true);
     try std.testing.expectEqual(maru.session.agent_hook_mode.Mode.observe, agent_ops.agentHookMode(session, term));
-    try std.testing.expectEqual(maru.session.agent_observer.State.unknown, term.agent_hook_state);
+    try std.testing.expectEqual(maru.session.agent_observer.State.unknown, term.hook.state);
 
     // 돌아온다. 낡은 `running` 이 살아나면 안 되고, 첫 훅 이벤트가 올 때까지는 화면이 답한다(§1.1 B0).
     session.loaded_config.config.sidebar.agent_hooks = true;
@@ -79266,7 +79266,7 @@ test "AW5 작업 중(출력이 계속 있음)에는 chrome idle 이 훅의 runni
     const surface = session.term_backend.surfaceFor(term.rt.handle) orelse return error.SkipZigTest;
 
     // 훅은 running 이라 하고, 화면에는 입력창(chrome)만 보인다 — 여기까지는 AW2 와 같다.
-    term.agent_hook_state = .running;
+    term.hook.state = .running;
     try surface.core.write("\x1b[2J\x1b[H  응답을 쓰는 중\r\n\r\n› \r\n  Context 2% used\r\n");
 
     // **다른 것은 이것뿐이다: 매 회차 출력이 있다.** 실제로도 스피너가 회전하므로 PTY 출력이 끊기지 않는다.
@@ -79308,7 +79308,7 @@ test "AW2 훅이 running 에 멈춰도 화면 idle 이 연속 3회면 턴이 닫
     const surface = session.term_backend.surfaceFor(term.rt.handle) orelse return error.SkipZigTest;
 
     // 훅은 running 에 멈췄다(codex 오류 턴 — `Stop` 도 `StopFailure` 도 오지 않는다).
-    term.agent_hook_state = .running;
+    term.hook.state = .running;
     try surface.core.write("\x1b[2J\x1b[H  작업이 끝났습니다\r\n\r\n› \r\n  Context 2% used\r\n");
     term.rt.observation.observer_generation +%= 1;
 
@@ -79324,7 +79324,7 @@ test "AW2 훅이 running 에 멈춰도 화면 idle 이 연속 3회면 턴이 닫
     agent_ops.pollAgentState(session, term, false);
     try std.testing.expectEqual(maru.session.agent_observer.State.idle, term.agent_state);
     try std.testing.expectEqualStrings("C2", term.agent_state_rule);
-    try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_hook_state); // 훅은 여전히
+    try std.testing.expectEqual(maru.session.agent_observer.State.running, term.hook.state); // 훅은 여전히
 
     // 닫힌 뒤에는 다시 건너뛴다 — 그 구간에만 더 본다(§1.1 C2 의 대가).
     const seq_after = term.agent_screen_seq;
@@ -82924,7 +82924,7 @@ const ActivityWait = struct {
 };
 
 test "이미지 갤러리: 워커가 훑고 tick 이 수확한다 — 사슬이 실제로 이어진다 (IG1-e)" {
-    // 이 슬라이스가 보이려는 것은 하나다: `Term.agent_image_source` → 워커 스캔 → tick 수확 → 화면 문구.
+    // 이 슬라이스가 보이려는 것은 하나다: `Term.hook.image_source` → 워커 스캔 → tick 수확 → 화면 문구.
     // 훅이 소스를 채우는 부분은 「hook mode runs exactly one source」의 ⑦-b 가 따로 본다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const io = std.Io.Threaded.global_single_threaded.io();
@@ -82988,7 +82988,7 @@ test "이미지 갤러리: 워커가 훑고 tick 이 수확한다 — 사슬이 
 
     // ── 소스가 붙으면 워커가 훑는다 ─────────────────────────────────────────────────────
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
 
     // **거는 즉시 「세는 중」이다.** 3.6 초짜리 스캔 동안 「이미지가 없습니다」라고 거짓말하지 않는다.
@@ -83044,7 +83044,7 @@ test "이미지 갤러리: 워커가 훑고 tick 이 수확한다 — 사슬이 
     try tmp.dir.writeFile(io, .{ .sub_path = "u.jsonl", .data = "{\"type\":\"assistant\"}\n" });
     const path2 = try std.fmt.allocPrint(allocator, "{s}/u.jsonl", .{root});
     defer allocator.free(path2);
-    try std.testing.expect(term.agent_image_source.set(path2));
+    try std.testing.expect(term.hook.image_source.set(path2));
     agent_activity_ops.refresh(session, false);
     try Wait.until(session);
     try std.testing.expectEqual(@as(usize, 0), session.agent_activity.count());
@@ -83060,7 +83060,7 @@ test "이미지 갤러리: 워커가 훑고 tick 이 수확한다 — 사슬이 
     // ── 못 읽으면 「없다」가 아니라 「못 봤다」다 ────────────────────────────────────────
     const missing = try std.fmt.allocPrint(allocator, "{s}/does-not-exist.jsonl", .{root});
     defer allocator.free(missing);
-    try std.testing.expect(term.agent_image_source.set(missing));
+    try std.testing.expect(term.hook.image_source.set(missing));
     agent_activity_ops.refresh(session, false);
     try Wait.until(session);
     try std.testing.expect(session.agent_activity.partial);
@@ -83075,7 +83075,7 @@ test "이미지 갤러리: 워커가 훑고 tick 이 수확한다 — 사슬이 
     // ── **인덱스를 든 채로 끝낸다** ─────────────────────────────────────────────────────
     // 여기서 비우고 끝내면 `deinit` 이 `hits` 를 푸는지 이 test 가 못 본다 — 뷰를 열어 둔 채 창을 닫는
     // 실제 경로가 바로 이 모양이다. test 할당자가 누수를 잡게 인덱스가 살아 있는 상태로 둔다.
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     try Wait.until(session);
     try std.testing.expectEqual(@as(usize, 2), session.agent_activity.count());
@@ -83117,7 +83117,7 @@ test "이미지 갤러리: 인덱스가 가리킨 자리를 실제로 디코드�
     defer session.deinit();
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -83191,7 +83191,7 @@ test "이미지 갤러리: 타일이 프레임 이미지 채널까지 간다 (IG
     try std.testing.expect(dock_ops.dockVisible(session));
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -83398,7 +83398,7 @@ test "이미지 갤러리: 격자에 다 안 들어가면 「몇 장 중 몇 장
     try std.testing.expect(dock_ops.dockVisible(session));
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -83490,7 +83490,7 @@ test "활동 뷰 펼침: 라벨이 요약이어도 펼침은 명령을 읽는다
     defer quietActivityWorkers(session);
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -83563,7 +83563,7 @@ test "활동 뷰 펼침: 줄을 누르면 그때 받은 명령·결과 전문이
     defer quietActivityWorkers(session);
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -83676,7 +83676,7 @@ test "이미지 갤러리: 칸을 누르면 크게 열리고 Esc 로 닫힌다 (
     try std.testing.expect(dock_ops.dockVisible(session));
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -83831,7 +83831,7 @@ test "활동 뷰: Tab 으로 종류를 바꾸면 목록이 그것으로 바뀐�
     dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -83929,7 +83929,7 @@ test "활동 뷰: 줄 목록에서는 격자의 클릭·호버가 돌지 않는�
     dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -84016,7 +84016,7 @@ test "활동 뷰: 필터를 되풀이해 돌려도 새는 것이 없다 (적대�
     dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -84089,7 +84089,7 @@ test "활동 뷰: 훑는 중에 필터를 바꿔도 결과가 그 필터를 따�
     dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
 
     // **스캔을 걸어 두고 그것이 끝나기 전에** 필터를 바꾼다.
     agent_activity_ops.refresh(session, true);
@@ -84207,7 +84207,7 @@ test "활동 뷰: 썸네일이 다시 훑어도 살아남고, 펼치면 사라�
     dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -84371,7 +84371,7 @@ test "활동 뷰: 도크를 접었다 펴도 썸네일이 돌아온다 (AV5 적�
     dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -84480,7 +84480,7 @@ test "활동 뷰: 그림이 여럿이면 각자 제 줄에 붙는다 (AV5 적대
     dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -84581,7 +84581,7 @@ test "활동 뷰: 그림 결과를 펼치면 「이미지」 한 줄이 선다 (
     dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -84678,7 +84678,7 @@ test "활동 뷰: 필터를 오가도 그림이 안 사라진다 (AV5 · 사용�
     dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -84786,7 +84786,7 @@ test "활동 뷰: 접힌 줄에만 썸네일이 붙는다 (AV5)" {
     dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -84884,7 +84884,7 @@ test "활동 뷰: 결과가 이미지인 호출은 「전체」에서 한 줄이
     dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -84982,7 +84982,7 @@ test "활동 뷰: 입력을 다 못 보면 **명령 조각이라도** 본다 (�
     dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -85058,7 +85058,7 @@ test "활동 뷰 펼침: chunk 껍데기를 벗기고 **종료 코드**를 머�
     dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -85136,7 +85136,7 @@ test "활동 뷰: 입력이 조각 상한을 넘으면 「없다」가 아니라
     dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -85210,7 +85210,7 @@ test "활동 뷰: `Enter` 가 **입력의 나머지 필드**까지 넓힌다 —
     dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -85299,7 +85299,7 @@ test "활동 뷰: Enter 가 본문까지 넓힌다 — 라벨에 없는 말이 �
     dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -85427,7 +85427,7 @@ test "활동 뷰: 본문 검색은 못 걸어도 잃지 않는다 — 예약·�
     dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     session.agent_activity.key_focus = true;
     agent_activity_ops.setFilter(session, .execs);
 
@@ -85725,7 +85725,7 @@ test "활동 뷰: Codex 결과 배열은 원소를 이어 보여 주고, 거기�
     defer quietActivityWorkers(session);
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -85881,7 +85881,7 @@ test "활동 뷰: 칩을 눌러 종류를 바꾸고, Tab 은 터미널이 가져
     dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -85971,7 +85971,7 @@ test "활동 뷰: 펼치면 칩 줄이 자리를 돌려준다 — 그 줄을 눌
     dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -86103,7 +86103,7 @@ test "활동 뷰: 목록이 실제로 그려진다 — 제품 tick 으로 확인
     dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -86191,7 +86191,7 @@ test "활동 뷰: 굴린 뒤 목록이 짧아져도 화면이 살아 있다 (적
     dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -86276,7 +86276,7 @@ test "활동 뷰: 한 줄도 못 그리면 그렇게 말한다 (적대적 C3)" {
     dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -86365,7 +86365,7 @@ test "활동 뷰: 줄 목록은 끝까지 스크롤된다 (적대적 B3)" {
     dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -86443,7 +86443,7 @@ test "활동 뷰: 줄 목록일 때 격자 그림을 싣지 않는다 — 그리
     dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -86563,7 +86563,7 @@ test "이미지 갤러리: 크게 본 채 도크를 접었다 펴도 그림이 �
     try std.testing.expect(dock_ops.dockVisible(session));
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var spins: usize = 0;
@@ -86686,7 +86686,7 @@ test "이미지 갤러리: 크게 보기에서 휠은 확대하고 드래그는 
     try std.testing.expect(dock_ops.dockVisible(session));
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -86798,30 +86798,30 @@ test "이미지 갤러리: 훅이 없으면 자식 env 로 확정한 트랜스�
     defer session.deinit();
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.isEmpty());
+    try std.testing.expect(term.hook.image_source.isEmpty());
 
     // ── ① 신원이 없으면 폴백도 없다. **추측하지 않는다**(§7.2 가 기각한 그 폴백을 되살리지 않는다).
     term.agent_kind = .codex;
     agent_ops.adoptFallbackImageSource(session, term);
-    try std.testing.expect(term.agent_image_source.isEmpty());
+    try std.testing.expect(term.hook.image_source.isEmpty());
 
     // ── ② 신원과 파일명이 있으면 그 파일을 가리킨다. codex 이름은 날짜 계층을 포함한 상대경로다.
-    term.agent_transcript.setIdentity("thread-abc");
-    term.agent_transcript.setFileName("2026/08/29/rollout-2026-08-29T00-00-00-thread-abc.jsonl");
+    term.hook.transcript.setIdentity("thread-abc");
+    term.hook.transcript.setFileName("2026/08/29/rollout-2026-08-29T00-00-00-thread-abc.jsonl");
     agent_ops.adoptFallbackImageSource(session, term);
-    try std.testing.expect(!term.agent_image_source.isEmpty());
+    try std.testing.expect(!term.hook.image_source.isEmpty());
     // HOME 은 이 test 가 못 정하므로 **꼬리만** 본다 — 앞은 `codexTranscriptPath` 순수 test 가 본다.
     try std.testing.expect(std.mem.endsWith(
         u8,
-        term.agent_image_source.path(),
+        term.hook.image_source.path(),
         "/.codex/sessions/2026/08/29/rollout-2026-08-29T00-00-00-thread-abc.jsonl",
     ));
 
     // ── ③ 이미 소스가 있으면 건드리지 않는다. 훅이 준 값이 이긴다 — 폴백이 그것을 덮으면
     // 훅을 켠 사용자가 오히려 틀린 파일을 보게 된다.
-    _ = term.agent_image_source.set("/tmp/from-hook.jsonl");
+    _ = term.hook.image_source.set("/tmp/from-hook.jsonl");
     agent_ops.adoptFallbackImageSource(session, term);
-    try std.testing.expectEqualStrings("/tmp/from-hook.jsonl", term.agent_image_source.path());
+    try std.testing.expectEqualStrings("/tmp/from-hook.jsonl", term.hook.image_source.path());
 }
 
 test "설정 줄이 없으면 내장 기본값이 그대로 정책이 된다 (G3 선결)" {
@@ -87567,7 +87567,7 @@ test "이미지 갤러리: 원격 pane 의 대화는 로컬에서 열지 않는�
     const term = pane_ops.activePane(session).activeTerm();
 
     // ── ① 대조군: 로컬 pane 이면 그 파일을 읽는다. 이것이 서야 ② 의 0 이 «원격이라서» 가 된다.
-    _ = term.agent_image_source.set(path);
+    _ = term.hook.image_source.set(path);
     agent_activity_ops.refresh(session, false);
     try Wait.until(session);
     try std.testing.expect(session.agent_activity.count() > 0);
@@ -87654,7 +87654,7 @@ test "이미지 갤러리: 타일에 「무엇이었는지」가 붙는다 (IG5-
     dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -87748,7 +87748,7 @@ test "이미지 갤러리: 최신이 먼저 오고, 스크롤로 나머지에 �
     dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -87893,7 +87893,7 @@ test "이미지 갤러리: 재개 세션은 부모 rollout 까지 훑는다 (IG8
     dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(child_path));
+    try std.testing.expect(term.hook.image_source.set(child_path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -87967,7 +87967,7 @@ test "이미지 갤러리: 크게 보기에서 ←→ 로 넘기고, 그 밖에�
     dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -88099,7 +88099,7 @@ test "이미지 갤러리: 얹힌 칸을 밝히고 커서를 바꾼다 (IG10)" {
     dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -88235,7 +88235,7 @@ test "이미지 갤러리: 라벨로 거르고, 지우면 되돌아온다 (IG11)
     dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -88358,7 +88358,7 @@ test "이미지 갤러리: 라벨과 함께 「언제」도 붙는다 (IG12)" {
     dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -88444,7 +88444,7 @@ test "이미지 갤러리: 시각 창이 줄을 넘지 않는다 — 다음 항�
     dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -88542,7 +88542,7 @@ test "이미지 갤러리: 같은 세션에 이미지가 붙으면 갤러리도 
     dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -88662,7 +88662,7 @@ test "이미지 갤러리: 포커스가 옮겨 가면 그 pane 의 세션을 본
 
     // ── pane A: 1 장짜리 세션. 소스를 세우는 것은 훅이므로 그 자리(`onSourceChanged`)로 민다.
     const pane_a = pane_ops.activePane(session);
-    try std.testing.expect(pane_a.activeTerm().agent_image_source.set(path_a));
+    try std.testing.expect(pane_a.activeTerm().hook.image_source.set(path_a));
     agent_activity_ops.onSourceChanged(session);
     try Gallery.scanned(session, 1);
 
@@ -88670,7 +88670,7 @@ test "이미지 갤러리: 포커스가 옮겨 가면 그 pane 의 세션을 본
     try pane_ops.splitActivePane(session, .horizontal);
     const pane_b = pane_ops.activePane(session);
     try std.testing.expect(pane_b != pane_a);
-    try std.testing.expect(pane_b.activeTerm().agent_image_source.set(path_b));
+    try std.testing.expect(pane_b.activeTerm().hook.image_source.set(path_b));
     agent_activity_ops.onSourceChanged(session);
     try Gallery.scanned(session, 2);
 
@@ -88687,7 +88687,7 @@ test "이미지 갤러리: 포커스가 옮겨 가면 그 pane 의 세션을 본
     try pane_ops.splitActivePane(session, .vertical);
     const pane_c = pane_ops.activePane(session);
     try std.testing.expect(pane_c != pane_a and pane_c != pane_b);
-    try std.testing.expect(pane_c.activeTerm().agent_image_source.isEmpty());
+    try std.testing.expect(pane_c.activeTerm().hook.image_source.isEmpty());
     _ = session.tick() catch {};
     try std.testing.expect(session.agent_activity.chain.isEmpty());
     try std.testing.expectEqual(@as(usize, 0), session.agent_activity.count());
@@ -88771,7 +88771,7 @@ test "이미지 갤러리: 다시 훑어도 검색어를 뺏지 않고, 크게 �
     dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     try Wait.built(session);
     try std.testing.expectEqual(@as(usize, 1), session.agent_activity.count());
@@ -88876,7 +88876,7 @@ test "이미지 갤러리: 다시 훑는 동안 화면이 비지 않는다 (IG2 
     dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -88945,7 +88945,7 @@ test "이미지 갤러리: 못 읽는 파일을 되풀이해 훑지 않는다 (I
     dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -89020,7 +89020,7 @@ test "이미지 갤러리: 다시 훑어도 썸네일을 버리지 않는다 (IG
     dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -89105,7 +89105,7 @@ test "이미지 갤러리: 검색이 켜진 채 자동 갱신이 와도 앞뒤�
     dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -89191,7 +89191,7 @@ test "이미지 갤러리: 자동 갱신이 반복돼도 상태가 어긋나지 
     dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -89276,7 +89276,7 @@ test "이미지 갤러리: 크게 보기가 「그때 무슨 얘기였나」를 
     dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -89375,7 +89375,7 @@ test "이미지 갤러리: 문맥이 없으면 지어내지 않는다 (IG13)" {
     dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -89578,7 +89578,7 @@ test "이미지 갤러리: 한 틱에 여러 장을 동시에 건다 (IG14)" {
     dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -89650,7 +89650,7 @@ test "이미지 갤러리: 취소한 뒤에도 다시 채워진다 (IG14 적대�
     dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path_a));
+    try std.testing.expect(term.hook.image_source.set(path_a));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -89665,7 +89665,7 @@ test "이미지 갤러리: 취소한 뒤에도 다시 채워진다 (IG14 적대�
     );
 
     // ── ② 다른 세션으로 갈린다 — 도는 디코드는 옛 파일의 오프셋이라 전부 취소된다.
-    try std.testing.expect(term.agent_image_source.set(path_b));
+    try std.testing.expect(term.hook.image_source.set(path_b));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -89747,7 +89747,7 @@ test "이미지 갤러리: 검색으로 걸러도 남의 그림이 안 붙는다
     dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -89831,7 +89831,7 @@ test "이미지 갤러리: 크게 보기는 뷰포트만큼만 풀고, 확대하
     dock_ops.setDockView(session, .agent_activity);
 
     const term = pane_ops.activePane(session).activeTerm();
-    try std.testing.expect(term.agent_image_source.set(path));
+    try std.testing.expect(term.hook.image_source.set(path));
     agent_activity_ops.refresh(session, false);
     {
         var wait = ActivityWait.start(session.io);
@@ -90119,7 +90119,7 @@ test "원격 폴더줄은 훅이 알려 준 cwd 를 쓴다 — OSC 7 이 멈춘 
     }
 
     // ── ② 훅이 진짜 작업 디렉터리를 알려 준다 → 폴더줄이 그것으로 바뀐다.
-    term.agent_hook_cwd.set("/srv/app/proj", "build-box", session.awakeMs()); // 그 기계가 보고한 값이다
+    term.hook.cwd.set("/srv/app/proj", "build-box", session.awakeMs()); // 그 기계가 보고한 값이다
     {
         const shown = try sidebarCwdPath(session, term);
         defer a.free(shown);
@@ -90129,15 +90129,15 @@ test "원격 폴더줄은 훅이 알려 준 cwd 를 쓴다 — OSC 7 이 멈춘 
     }
 
     // ── ③ **잘린 경로·상대 경로는 안 담는다.** 담으면 남의 디렉터리를 가리킨다.
-    term.agent_hook_cwd.clear();
-    term.agent_hook_cwd.set("relative/path", "", session.awakeMs());
-    try std.testing.expect(term.agent_hook_cwd.isEmpty());
+    term.hook.cwd.clear();
+    term.hook.cwd.set("relative/path", "", session.awakeMs());
+    try std.testing.expect(term.hook.cwd.isEmpty());
 
     // ── ④ 대조군: 로컬 pane 은 이 값을 안 본다(커널 조회가 이미 정확하다).
     try term_ops.activeSurface(session).core.write("\x1b]7;file:///tmp\x07");
     term_ops.refreshTermObservation(session, term, false, false);
     try std.testing.expect(!termCwdIsRemote(term));
-    term.agent_hook_cwd.set("/srv/app/proj", "", session.awakeMs());
+    term.hook.cwd.set("/srv/app/proj", "", session.awakeMs());
     {
         const shown = try sidebarCwdPath(session, term);
         defer a.free(shown);
@@ -90166,15 +90166,15 @@ test "훅 모드를 벗어나면 그 cwd 를 버린다 — 옛 경로에 붙박�
     _ = try session.resize(800, 600, 1000);
 
     const term = pane_ops.activePane(session).activeTerm();
-    term.agent_hook_cwd.set("/srv/app/proj", "", session.awakeMs());
-    try std.testing.expect(!term.agent_hook_cwd.isEmpty());
+    term.hook.cwd.set("/srv/app/proj", "", session.awakeMs());
+    try std.testing.expect(!term.hook.cwd.isEmpty());
 
     // 훅 모드가 아니다(로그도 없고 에이전트도 없고 원격 채널도 없다) → 관측 모드로 내려간다.
     try std.testing.expectEqual(maru.session.agent_hook_mode.Mode.observe, agent_ops.agentHookMode(session, term));
     agent_ops.pollAgentConsumer(session, term, true, true);
 
     // 그 자리에서 훅이 남긴 세부가 버려진다 — cwd 도 그 목록이다.
-    try std.testing.expect(term.agent_hook_cwd.isEmpty());
+    try std.testing.expect(term.hook.cwd.isEmpty());
 }
 
 test "보고자 없는 원격도 원격으로 판정한다 — 링크가 로컬 파일을 열지 않는다 (A)" {
@@ -90226,7 +90226,7 @@ test "보고자 없는 원격도 원격으로 판정한다 — 링크가 로컬 
     }
 
     // ── ③ 훅이 작업 디렉터리를 알려 주면 그때 그린다 — host 는 **목적지에서** 뽑는다.
-    term.agent_hook_cwd.set("/srv/app/proj", "me@build-box", session.awakeMs());
+    term.hook.cwd.set("/srv/app/proj", "me@build-box", session.awakeMs());
     {
         const shown = try sidebarCwdPath(session, term);
         defer a.free(shown);
@@ -90281,7 +90281,7 @@ test "원격 SCM 은 폴더줄과 같은 cwd 를 본다 — 그리고 다른 기
     try std.testing.expectEqualStrings("/home/me", git_ops.remoteCwd(session, term));
 
     // ── ② 훅이 진짜 작업 디렉터리를 알려 준다 → **SCM 축도** 그것을 본다(예전에는 여기서 갈렸다).
-    term.agent_hook_cwd.set("/srv/app/proj", "me@build-box", session.awakeMs());
+    term.hook.cwd.set("/srv/app/proj", "me@build-box", session.awakeMs());
     try std.testing.expectEqualStrings("/srv/app/proj", git_ops.remoteCwd(session, term));
     {
         // 폴더줄과 **같은 답**이다 — 이것이 이 슬라이스가 지키는 불변식이다.
@@ -90293,15 +90293,15 @@ test "원격 SCM 은 폴더줄과 같은 cwd 를 본다 — 그리고 다른 기
     // ── ③ **다른 기계에서 적힌 값은 안 쓴다.** 훅 모드는 로그 파일이 한 번 생기면 세션 내내
     //     유지되므로(`agentHookMode`), 로컬에서 돌던 에이전트가 남긴 cwd 가 그 pane 이 `maru ssh` 로
     //     들어간 뒤에도 신선한 채로 남는다. 그 값을 쓰면 로컬 경로가 **원격 `git -C`** 가 된다.
-    term.agent_hook_cwd.set("/Users/me/local-proj", "", session.awakeMs()); // 로컬 에이전트가 남긴 값
-    try std.testing.expect(term.agent_hook_cwd.fresh(session.awakeMs())); // 시간만 보면 통과한다
+    term.hook.cwd.set("/Users/me/local-proj", "", session.awakeMs()); // 로컬 에이전트가 남긴 값
+    try std.testing.expect(term.hook.cwd.fresh(session.awakeMs())); // 시간만 보면 통과한다
     try std.testing.expectEqualStrings("/home/me", git_ops.remoteCwd(session, term)); // 그래도 관측으로 돌아간다
 
     // ── ④ 훅 모드를 벗어나 값을 버리면 관측으로 돌아간다 — 에이전트를 끝내고 그 pane 에서 계속
     //     일하는 흐름이다(만료 축은 `CwdLabel` 의 순수 판정자가 소유한다).
-    term.agent_hook_cwd.set("/srv/app/proj", "me@build-box", session.awakeMs());
+    term.hook.cwd.set("/srv/app/proj", "me@build-box", session.awakeMs());
     try std.testing.expectEqualStrings("/srv/app/proj", git_ops.remoteCwd(session, term));
-    term.agent_hook_cwd.clear();
+    term.hook.cwd.clear();
     try std.testing.expectEqualStrings("/home/me", git_ops.remoteCwd(session, term));
 
     // ── ⑤ **목적지가 없는 원격도 기계를 안다**(적대적 검증 12 회차). 맨 `ssh` 는 OSC 5379 를 안 보내
@@ -90313,7 +90313,7 @@ test "원격 SCM 은 폴더줄과 같은 cwd 를 본다 — 그리고 다른 기
     try std.testing.expect(termCwdIsRemote(term)); // authority 가 원격이다
     try std.testing.expectEqualStrings("", git_ops.termRemoteDest(term)); // 목적지는 없다
     try std.testing.expectEqualStrings("build-box", git_ops.termMachineKey(term)); // 그래도 기계는 안다
-    term.agent_hook_cwd.set("/Users/me/local-proj", "", session.awakeMs()); // 로컬 에이전트가 남긴 값
+    term.hook.cwd.set("/Users/me/local-proj", "", session.awakeMs()); // 로컬 에이전트가 남긴 값
     try std.testing.expectEqualStrings("/home/me", git_ops.remoteCwd(session, term));
 }
 

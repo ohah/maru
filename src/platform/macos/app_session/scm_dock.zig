@@ -570,7 +570,7 @@ fn agentPresentWithoutIdentity(self: *AppSession) bool {
         for (tab.panes.items) |pane| {
             for (pane.terms.items) |term| {
                 if (term.surface.id != active_id) continue;
-                return term.agent_kind != .none and term.agent_transcript.identity().len == 0;
+                return term.agent_kind != .none and term.hook.transcript.identity().len == 0;
             }
         }
     }

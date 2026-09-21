@@ -123,9 +123,9 @@ pub fn termMachineKey(term: *const Term) []const u8 {
 /// **호출 전에 관측이 새로여야 한다**(`refreshTermObservation`) — 이 함수는 관측을 갱신하지 않는다.
 /// 반환 슬라이스는 Term 소유라 다음 갱신까지만 유효하다.
 pub fn remoteCwd(self: *AppSession, term: *Term) []const u8 {
-    if (term.agent_hook_cwd.fresh(self.awakeMs()) and
-        term.agent_hook_cwd.hostMatches(termMachineKey(term)))
-        return term.agent_hook_cwd.text();
+    if (term.hook.cwd.fresh(self.awakeMs()) and
+        term.hook.cwd.hostMatches(termMachineKey(term)))
+        return term.hook.cwd.text();
     return term.rt.observation.cwd.items;
 }
 
@@ -1630,7 +1630,7 @@ pub fn sessionIdentityFor(self: *AppSession, surface_id: u64) []const u8 {
     for (self.tabs.items) |tab| {
         for (tab.panes.items) |pane| {
             for (pane.terms.items) |term| {
-                if (term.surface.id == surface_id) return term.agent_transcript.identity();
+                if (term.surface.id == surface_id) return term.hook.transcript.identity();
             }
         }
     }

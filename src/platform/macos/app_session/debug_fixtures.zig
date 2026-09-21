@@ -80,7 +80,7 @@ pub fn maybeDebugOpenSettings(self: *AppSession) void {
     if (std.c.getenv("MARU_FORCE_IMAGE_GALLERY")) |raw| {
         const path = std.mem.span(raw);
         const t = pane_ops.activePane(self).activeTerm();
-        if (t.agent_image_source.set(path)) {
+        if (t.hook.image_source.set(path)) {
             dock_ops.openDockTo(self, .agent_activity);
             // MARU_FORCE_IMAGE_GALLERY_FILTER=<images|reads|execs|all> — 종류 필터를 세운다.
             // **활동 목록의 픽셀을 헤드리스로 찍는 유일한 길**이다: 제품에서 필터를 바꾸는 수단은
@@ -1352,7 +1352,7 @@ pub fn applyForcedScmTab(self: *AppSession) void {
                             for (tab_item.panes.items) |pane| {
                                 for (pane.terms.items) |term| {
                                     if (term.surface.id != active_id) continue;
-                                    term.agent_transcript.setIdentity(demo_session);
+                                    term.hook.transcript.setIdentity(demo_session);
                                     break :outer;
                                 }
                             }

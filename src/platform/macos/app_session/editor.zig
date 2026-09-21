@@ -34744,3 +34744,50 @@ test "U1p 이름과 경로는 배타다 — 파일을 연 문서에는 이름 �
     try testing.expectError(error.UntitledNamesExhausted, openUntitledInActivePane(fx.session));
     app_session_mod.app_runtime.untitled_docs = before;
 }
+
+test "U1q 빈 문서도 실제로 그려진다 — 프레임을 세워 본다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+
+    // **여기까지의 판정자는 전부 상태만 봤다**(적대적 9회차). 값이 맞아도 그리는 자리가 틀리면 사용자는
+    // 빈 화면을 본다 — 이 앱에서 같은 모양을 여러 번 겪었다. 그래서 **실제 프레임을 세운다.**
+    const leaf: maru.session.SplitRect = .{ .x = 100, .y = 50, .w = 800, .h = 600 };
+    const t = try openUntitledInActivePane(fx.session);
+
+    // ⑴ **빈 문서에서 프레임이 선다.** 0 줄/1 줄 경계에서 기하가 깨지면 여기서 `null` 이거나 죽는다.
+    {
+        var drawn = appendPaneFrame(fx.session, leaf, t) orelse return error.EditorPaneDidNotDraw;
+        defer drawn.dl.deinit(allocator);
+        // 빈 문서라 **글자는 없어도 된다** — 그릴 사각이 서 있어야 한다(커서가 설 자리).
+        try testing.expect(drawn.rect.w > 0 and drawn.rect.h > 0);
+    }
+
+    // ⑵ **친 글자가 화면에 나온다.** 문서에는 들어갔는데 프레임에 안 실리는 경우를 가른다.
+    try testing.expect(insertText(fx.session, t, "\xed\x95\x9c")); // "한"
+    {
+        var drawn = appendPaneFrame(fx.session, leaf, t) orelse return error.EditorPaneDidNotDraw;
+        defer drawn.dl.deinit(allocator);
+        try testing.expect(drawnHasCodepoint(drawn.dl, 0xD55C));
+    }
+
+    // ⑶ **조합 글자도 화면에 나온다** — 확정과 다른 층이라 따로 잰다(U1n 은 상태만 봤다).
+    setEditorPreedit(fx.session, t, "\xea\xb0\x80"); // "가"(U+AC00)
+    {
+        var drawn = appendPaneFrame(fx.session, leaf, t) orelse return error.EditorPaneDidNotDraw;
+        defer drawn.dl.deinit(allocator);
+        try testing.expect(drawnHasCodepoint(drawn.dl, 0xAC00));
+    }
+    setEditorPreedit(fx.session, t, "");
+
+    // ⑷ **아주 좁은 pane 에서도 죽지 않는다** — 빈 문서 + 좁은 기하가 겹치는 자리다(본문 폭이 0 이
+    //    되는 계산이 있으면 여기서 터진다).
+    {
+        const tiny: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 40, .h = 40 };
+        if (appendPaneFrame(fx.session, tiny, t)) |*d| {
+            var dd = d.*;
+            dd.dl.deinit(allocator);
+        }
+    }
+}

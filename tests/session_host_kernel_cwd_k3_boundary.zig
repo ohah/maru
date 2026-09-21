@@ -47,7 +47,9 @@ test "K3 kernel cwd parity uses an actual daemon and canonical AppSession consum
     ));
     try std.testing.expectEqual(@as(usize, 1), count(
         build,
-        "session_host_kernel_cwd_k3_step.dependOn(&run_cwd_axis_boundary_tests.step);",
+        // cwd 축 판정자는 `boundary_scans` 표의 한 행이라 등록마다 이름을 갖지 않는다 —
+        // 표에서 자리로 찾아 받은 지역 이름이 `cwd_axis_scan` 이다(build.zig `boundaryScanIndex`).
+        "session_host_kernel_cwd_k3_step.dependOn(&cwd_axis_scan.step);",
     ));
     // `test-session-host` 는 k3 를 **스텝째 의존하지 않는다** — 스텝 의존은 모드를 몰라 k3 의 Debug·ReleaseFast
     // 두 모드를 다 물려받고, `-Doptimize=Debug` 잡이 ReleaseFast 까지 컴파일했다(2026-09-06 CI 실측). 대신 k3 의
@@ -66,7 +68,7 @@ test "K3 kernel cwd parity uses an actual daemon and canonical AppSession consum
     ));
     try std.testing.expectEqual(@as(usize, 1), count(
         build,
-        "session_host_step.dependOn(&run_cwd_axis_boundary_tests.step);",
+        "session_host_step.dependOn(&cwd_axis_scan.step);",
     ));
     try std.testing.expectEqual(@as(usize, 1), count(plan, "K3 - 제품 parity gate (완료)"));
     try std.testing.expectEqual(@as(usize, 1), count(matrix, "K3 actual daemon kernel cwd parity: 구현"));

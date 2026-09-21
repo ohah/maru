@@ -337,10 +337,78 @@ graph.dependsOn("run_b3_0_4_tests", "run_b3_strict_cleanup_tests")
 **이관은 아직 진행 중이다** — 178자리 중 9자리가 뷰로 갔다. 나머지는 그 도메인을 만질 때 옮긴다.
 구조로 옮기면 뜻이 바뀌는 자리(일부러 잘라 쓴 접두 매칭 8자리)는 **문자열로 남기고 이유를 적는다**.
 
+### 같은 모양이 스무 번이면 **표**로 적는다
+
+**이건 새 규율이 아니다.** [`tools/release_adapter_macos_test_modules.zig`](../tools/release_adapter_macos_test_modules.zig)
+가 이미 같은 일을 한다 — release adapter 모듈 77 개를 `pub const Row = struct { root, names, deps }`
+행으로 들고, `build/session_host_release_gates.zig` 가 `StringHashMap(*Module)` 로 이름을 푼다.
+아래는 그 방식을 **판정자 등록**에 적용한 것이고, 두 자리의 차이도 함께 적는다.
+
+`tests/boundary/` 판정자 스무 개는 한 글자도 다르지 않은 모양이었다 — 모듈 하나 만들고,
+`addRunArtifact`, `setCwd(".")`, 그리고 `check-boundaries` 에 매달기. 한 건이 아홉 줄이었고
+**매다는 줄은 3천 줄 떨어진 자리**에 따로 있었다(등록 5032, 매달기 8271). 셋 중 하나를
+빠뜨리면 그 판정자는 조용히 CI 밖에 남는다.
+
+그래서 `build.zig` 가 그 스무 건을 `boundary_scans` **표**로 들고 루프가 셋을 한 번에 한다.
+내용만 적고 형식은 루프가 갖는다.
+
+```zig
+const BoundaryScan = struct {
+    root: []const u8,
+    deps: []const []const u8 = &.{},        // 이름 → 모듈 은 boundary_scan_modules 가 푼다
+    optimize: ?std.builtin.OptimizeMode = null,
+};
+```
+
+규율 셋이다.
+
+- **필드는 쓰이는 것만 둔다.** 다른 등록이 쓰는 `filters`·`args`·`env`·`link_libc` 는 이 스무
+  건 중 아무도 안 써서 넣지 않았다. 필요한 행이 생길 때 그 필드를 더한다.
+- **이름 → 모듈 은 한 곳이 푼다.** `deps` 는 이름만 적고 `boundary_scan_modules` 가 실제 모듈을
+  준다. 목록에 없는 이름은 **빌드가 그 자리에서 죽는다**(실측: `zig build --help` 만으로도
+  `boundary_scans 에 «없는이름» 가 없다 (… 가 요구한다)` 로 panic). 표 이전에는 같은
+  `tests/support/build_source.zig` 로 모듈을 **셋** 만들고 있었다.
+- **표 밖에서 매달 때는 자리로 찾는다.** `check-boundaries` 말고 다른 step 에도 붙는 행은
+  `boundaryScanIndex("tests/boundary/cwd_axis.zig")` 로 찾는다 — 문자열이지만 **없는 경로면
+  컴파일이 거부한다**(`@compileError`).
+
+**`deps` 를 이름으로만 적어도 되는 근거.** 빌드 소스의 `.{ .name = …, .module = 변수 }` 쌍을
+**선언 위치를 따라** 풀면, 주입 이름 214 가지 중 서로 다른 소스 파일을 가리키는 것은 **하나뿐**이다
+(`maru` → `tests/session_host_compatibility_maru_root.zig`, `compatibility.zig` 를 격리하려고
+일부러 끼운 스텁 루트). **스코프를 빼먹고 재면 20 가지로 보인다** — `authority_mod`·`composition_mod`
+같은 지역 이름이 여러 블록에서 재사용되기 때문이다. 빌드 소스를 이름만으로 집계할 때 늘 밟는
+함정이고, 이 절의 첫 판에도 그 틀린 수가 실려 있었다.
+
+**알려진 한계 — 같은 이름을 둘 넣으면 조용히 하나가 이긴다.** 여기서는 앞이,
+`ra_mac_modules` 쪽은 `StringHashMap.put` 이라 뒤가 이긴다. 실측으로 컴파일러가 **두 모듈의 API 가
+다를 때만** 잡는다(`root source file struct 'i18n' has no member named 'read'`). 같은 파일을
+다른 `optimize` 로 둘 넣는 경우처럼 API 가 같으면 조용히 틀린 쪽을 쓴다. 지금 목록이 셋이라
+막지 않았고, 길어지면 그때 막는다.
+
+**표로 옮기면 뷰가 스무 건을 한 건으로 읽는다.** 호출만 보는 눈에는 `boundary_step.dependOn` 이
+루프 안의 한 줄이기 때문이다. 실제로 `boundary_step` 의 `run_` 의존 수가 223 에서 204 로 줄었다 —
+**등록은 하나도 안 줄었는데** 그렇다. 그래서 뷰가 **표도 읽는다**:
+
+```zig
+graph.countTableRows("boundary_scans")                                   // 행 수
+graph.tableHas("boundary_scans", "root", "tests/boundary/cwd_axis.zig")  // 그 행이 있는가
+graph.rows                                                               // 필드까지 훑을 때
+```
+
+**그 판정자가 없으면 무엇을 놓치는지도 실측했다.** 표에서 `conflict_markers.zig` 행을 지우고
+`countTableRows` 를 20 → 19 로 풀어 준 뒤 `check-boundaries` 를 돌리면 **exit 0 이다** —
+판정자 하나가 CI 밖으로 나갔는데 게이트는 초록이고, 실행 수만 301 → 300 으로 줄어든다.
+선례(`ra_mac`)에 이 판정자가 없어도 됐던 이유는 그쪽이 77 개를 **한 바이너리**로 모아
+`--maru-expect-tests=649` 로 총수를 잠그기 때문이다. 이 표는 스무 개가 **각자 다른 바이너리**라
+그런 총수 가드가 없고, 그래서 행 수를 세는 판정자가 자기 값을 한다.
+
+**등록을 선언적으로 바꿀 때는 뷰에 그 형태를 가르치는 것이 같은 작업의 일부다.** 안 가르치면
+판정자 수가 줄어든 것을 아무도 못 보고, 줄어든 수를 다음 사람이 「등록이 사라졌다」로 읽는다.
+
 새 판정자가 빌드 등록을 셀 때 문자열이 꼭 필요하면 `build_source.read(allocator)`(널 종료가 필요하면 `readZ`)를 쓴다.
 `tests/boundary/` 아래는 자기 파일이 모듈 루트라 상대 경로로 `tests/support/` 를 못 보므로,
-`build.zig` 가 `build_source` 를 **모듈로 주입**한다(`imports.zig`·`shell_gate_ledger.zig`·
-`wake_latency_budget.zig` 가 그 형태).
+`build.zig` 가 `build_source` 를 **모듈로 주입**한다 — 표에서는 그 행에 `.deps = &.{"build_source"}`
+를 적으면 된다(`imports.zig`·`shell_gate_ledger.zig`·`wake_latency_budget.zig` 가 그 형태).
 
 **읽는 길은 하나다.** 판정자 93자리가 전부 `build_source` 를 거치고, `"build.zig"` 라는 리터럴이
 남은 곳은 둘뿐이다 — 정의 자신(`build_source.zig`)과 링크 검사 대상 경로를 모으는

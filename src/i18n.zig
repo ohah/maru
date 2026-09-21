@@ -281,6 +281,8 @@ const Table = struct {
     /// 말하면 사용자가 무엇을 잃는지 모른다. 브라우저 탭이 같은 이유로 자기 문구를 갖는다.
     app_close_unsaved: [:0]const u8,
     app_close_window_unsaved: [:0]const u8,
+    app_close_untitled: [:0]const u8,
+    app_close_window_untitled: [:0]const u8,
 
     // ── 세팅 섹션 이름 (I4) ──
     // 스키마의 `Section` 과 1:1 이다. 새 섹션을 넣고 여기 키를 빠뜨리면 `settingsSectionLabel` 의
@@ -1202,8 +1204,10 @@ const en: Table = .{
     .app_close_window_running = "A command is still running. Close this window?",
     .app_close_browser = "You have open browser tabs. Close anyway?",
     .app_close_unsaved = "You have unsaved changes. Close anyway?",
+    .app_close_untitled = "This document was never saved, so closing discards it. Close anyway?",
     .app_close_window_browser = "You have open browser tabs. Close this window?",
     .app_close_window_unsaved = "You have unsaved changes. Close this window?",
+    .app_close_window_untitled = "These documents were never saved, so closing discards them. Close this window?",
     .set_section_app = "App",
     .set_section_font = "Font",
     .set_section_theme = "Theme",
@@ -1908,8 +1912,10 @@ const ko: Table = .{
     .app_close_window_running = "실행 중인 명령이 있습니다. 이 창을 닫을까요?",
     .app_close_browser = "열린 브라우저 탭이 있습니다. 닫을까요?",
     .app_close_unsaved = "저장하지 않은 편집이 있습니다. 닫을까요?",
+    .app_close_untitled = "한 번도 저장하지 않은 문서라 닫으면 이 내용은 사라집니다. 닫을까요?",
     .app_close_window_browser = "열린 브라우저 탭이 있습니다. 이 창을 닫을까요?",
     .app_close_window_unsaved = "저장하지 않은 편집이 있습니다. 이 창을 닫을까요?",
+    .app_close_window_untitled = "한 번도 저장하지 않은 문서라 닫으면 그 내용은 사라집니다. 이 창을 닫을까요?",
     .set_section_app = "앱",
     .set_section_font = "폰트",
     .set_section_theme = "테마",

@@ -9409,6 +9409,51 @@ pub const AppSession = struct {
         };
     }
 
+    /// 이 범위의 저장 안 한 편집이 **전부 이름 없는 문서**인가(§3.11 「닫기와 백업」).
+    ///
+    /// **왜 문구를 가르나.** 파일이 있는 문서는 닫아도 디스크에 원본이 남지만, 이름 없는 문서는
+    /// **되돌릴 파일이 아예 없다** — 「닫을까요?」와 「이 내용은 사라집니다」는 사용자가 무엇을 잃는지
+    /// 다르게 말한다. 그것이 이 절이 문구를 따로 두라고 한 이유다.
+    ///
+    /// **섞여 있으면 공용 문구를 쓴다.** 하나는 파일이 있고 하나는 없으면 「사라집니다」가 절반만
+    /// 참이고, 절반만 참인 경고는 사용자가 다음부터 안 읽는다. 공용 문구는 둘 다에 참이다.
+    ///
+    /// ⚠️ **빈 집합에서는 공허하게 참이다** — dirty 가 하나도 없으면 「전부 그렇다」가 참이 된다.
+    /// 그래서 이 함수만으로 판정하지 않는다: 호출자는 `scopeHasUnsavedEditor` 가 참인 것을 **먼저**
+    /// 확인한다. 범위마다 그 성질을 다르게 두지 않는다 — 처음에 `.term` 갈래에만 `isDirty` 를 겹쳐
+    /// 두었는데, 호출자가 이미 같은 것을 물어서 **도달할 수 없는 방어**였고 네 범위 중 하나만 규칙이
+    /// 달랐다(적대적 3회차의 변이가 살아남아 드러났다).
+    pub fn scopeUnsavedIsAllUntitled(self: *AppSession, scope: CloseScope) bool {
+        const paneAll = struct {
+            fn f(pane: *Pane) bool {
+                for (pane.terms.items) |t| {
+                    if (!editor_ops.isDirty(t)) continue;
+                    if (t.rt.editor_untitled == null) return false;
+                }
+                return true;
+            }
+        }.f;
+        const tabAll = struct {
+            fn f(tab: *Tab) bool {
+                for (tab.panes.items) |p| if (!paneAll(p)) return false;
+                return true;
+            }
+        }.f;
+        return switch (scope) {
+            .none => false,
+            .term => blk: {
+                const t = pane_ops.activePane(self).activeTerm();
+                break :blk !editor_ops.isDirty(t) or t.rt.editor_untitled != null;
+            },
+            .pane => paneAll(pane_ops.activePane(self)),
+            .tab => |idx| tabAll(self.tabs.items[idx]),
+            .session => blk: {
+                for (self.tabs.items) |t| if (!tabAll(t)) break :blk false;
+                break :blk true;
+            },
+        };
+    }
+
     /// 보류 대상이 실제 닫을 Term들에 실행 중 명령이 있나 — resolveCloseScope(cascade 단일 출처)로 범위를 풀고 검사.
     pub fn closeTargetHasRunningJob(self: *AppSession, target: PendingClose) bool {
         const scope = self.resolveCloseScope(target);
@@ -9473,9 +9518,14 @@ pub const AppSession = struct {
         } else if (self.scopeHasUnsavedEditor(scope)) {
             // 저장 안 한 편집 = 잃을 수 있는 상태. running job과 **병렬**로 자기 문구를 띄운다
             // (브라우저 탭 분기와 같은 모양 — 그쪽 주석이 근거를 든다).
+            // **이름 없는 문서만이면 다른 문구다**(§3.11) — 되돌릴 파일이 없으므로 「닫을까요?」로는
+            // 무엇을 잃는지 말하지 못한다. 섞여 있으면 공용 문구가 둘 다에 참이다(그 함수 doc).
+            // **이름 없는 문서만이면 다른 문구다**(§3.11) — 되돌릴 파일이 없으므로 「닫을까요?」로는
+            // 무엇을 잃는지 말하지 못한다. 섞여 있으면 공용 문구가 둘 다에 참이다(그 함수 doc).
+            const all_untitled = self.scopeUnsavedIsAllUntitled(scope);
             self.showConfirm(switch (target) {
-                .window => .app_close_window_unsaved,
-                else => .app_close_unsaved,
+                .window => if (all_untitled) .app_close_window_untitled else .app_close_window_unsaved,
+                else => if (all_untitled) .app_close_untitled else .app_close_unsaved,
             }, target);
         } else if (web_ops.scopeHasWebBrowser(self, scope)) {
             // 브라우저 탭 닫기 확인(제보): web browser term은 실행 중 셸 명령이 없어(live_initialized=false) 위 게이트를

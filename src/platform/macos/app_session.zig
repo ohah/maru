@@ -69093,10 +69093,29 @@ test "terminal IME preedit replaces the visible cell on every marked transaction
     _ = try session.tick();
 
     const surface = term_ops.activeSurface(session);
+    // **자식의 첫 줄이 도착할 때까지 기다린 뒤 기준 셀을 잡는다.** `controlled_smoke` 는 `Maru app shell\r\n` 을 찍고 `read` 에서 선다 —
+    // 그 줄이 오기 **전에** 커서 자리를 굳히면 기준 셀이 (0,0) 이고, 뒤늦게 온 `M`(77) 이 그 자리를 덮어 preedit 은 1행에 서는데
+    // 판정자는 0행을 읽는다. CI 러너(느림)에서 세 PR 연속 `expected 12622, found 77` 로 빨갰다(2026-09-21). tick 한 번은 「출력이
+    // 왔다」의 보장이 아니다 — 화면에 그 줄이 있는지로 기다린다(다른 판정자의 `tickUntil` 과 같은 축).
+    {
+        var i: usize = 0;
+        var seen = false;
+        while (i < 400) : (i += 1) {
+            const dump = try surface.core.dumpUtf8(allocator);
+            defer allocator.free(dump);
+            if (std.mem.indexOf(u8, dump, "Maru app shell") != null) {
+                seen = true;
+                break;
+            }
+            _ = try session.tick();
+        }
+        try std.testing.expect(seen);
+    }
     surface.lockCore(session.io);
     const base_snapshot = surface.renderSnapshot();
     const base_cell_index = @as(usize, base_snapshot.cursor.row) * base_snapshot.size.cols + base_snapshot.cursor.col;
     surface.unlockCore(session.io);
+    try std.testing.expectEqual(@as(u16, 1), base_snapshot.cursor.row); // 첫 줄 뒤의 빈 줄 — 자식이 `read` 에서 서 있는 자리
     var generation = session.metal_buffer.generation;
     const marked = [_][]const u8{ "ㅎ", "하", "한" };
     const expected = [_]u21{ 0x314E, 0xD558, 0xD55C };

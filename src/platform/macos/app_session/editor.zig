@@ -35437,3 +35437,158 @@ test "U2h 새 파일 쓰기는 배타다 — 그 사이에 생긴 파일을 덮�
     defer allocator.free(still);
     try testing.expectEqualStrings("mine\n", still);
 }
+
+test "U2i 저장하면 workspace 저장 시퀀스에 든다 — 다음 실행에 그 파일이 돌아온다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(std.testing.io, &root_buf)];
+    pinUntitledBase(fx.session, root);
+
+    // **이것이 U1p 가 예고한 증상의 반대편이다.** U1 에서는 이름 없는 문서가 저장 시퀀스에서 빠지는
+    // 것이 맞았고(복원은 U4), U2 로 이름이 붙으면 **들어야** 한다 — 안 들면 저장한 파일이 다음 실행에
+    // 돌아오지 않는다. 그 조건은 「편집기인데 도크 entry 가 없다」이므로 entry 를 붙이는 것이 곧 이것이다.
+    const t = try openUntitledInActivePane(fx.session);
+    try testing.expect(insertText(fx.session, t, "kept\n"));
+    try testing.expect(!saveDocument(fx.session, t));
+    try fx.session.rename_input.query.appendSlice(allocator, "kept.txt");
+    settings_ops.commitRename(fx.session);
+    try testing.expect(t.rt.editor_path != null);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const wtab = try tab_ops.captureWorkspaceTab(fx.session, arena.allocator(), tab_ops.activeTab(fx.session));
+    const wp = wtab.panes[0];
+    try testing.expectEqual(@as(usize, 1), wp.file_terms.len); // ★ 이제 실린다
+    try testing.expectEqualStrings(t.rt.editor_path.?, wp.file_terms[0].path);
+    try testing.expectEqual(maru.session.dock_panel.EntryKind.text, wp.file_terms[0].kind);
+    // 직렬화 → 파싱 왕복이 폴백 없이 통과해야 한다(그것이 곧 「유지된다」의 정의다).
+    const tabs_slice = try arena.allocator().dupe(maru.session.workspace.Tab, &.{wtab});
+    const wins = try arena.allocator().dupe(maru.session.workspace.Window, &.{.{
+        .active_tab = 0,
+        .active = true,
+        .frame = null,
+        .tabs = tabs_slice,
+        .dock = .{},
+        .explorer = .{ .roots = null },
+    }});
+    const text = try maru.session.workspace.serialize(allocator, .{ .windows = wins });
+    defer allocator.free(text);
+    var parsed = try maru.session.workspace.parse(allocator, text);
+    defer parsed.deinit();
+    try testing.expectEqual(@as(usize, 1), parsed.workspace.windows[0].tabs[0].panes[0].file_terms.len);
+}
+
+test "U2j 저장 뒤에는 보통 문서의 저장 경로를 탄다 — 두 번째 ⌘S 는 묻지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    const io = std.testing.io;
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    pinUntitledBase(fx.session, root);
+
+    const t = try openUntitledInActivePane(fx.session);
+    try testing.expect(insertText(fx.session, t, "one\n"));
+    try testing.expect(!saveDocument(fx.session, t));
+    try fx.session.rename_input.query.appendSlice(allocator, "twice.txt");
+    settings_ops.commitRename(fx.session);
+
+    // 더 고치고 다시 저장 — **상자가 뜨지 않고** 그 파일에 바로 쓴다(이름이 이미 있다).
+    try testing.expect(insertText(fx.session, t, "two\n"));
+    try testing.expect(isDirty(t));
+    try testing.expect(saveDocument(fx.session, t)); // ★ 이제 참이다
+    try testing.expect(fx.session.rename == null);
+    try testing.expect(!isDirty(t));
+    const got = try dir.dir.readFileAlloc(io, "twice.txt", allocator, .limited(64));
+    defer allocator.free(got);
+    try testing.expectEqualStrings("one\ntwo\n", got); // caret 은 저장을 넘어 보존된다
+}
+
+test "U2k 저장 뒤 닫기 확인은 «공용» 문구다 — 더 이상 사라지는 문서가 아니다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(std.testing.io, &root_buf)];
+    pinUntitledBase(fx.session, root);
+    for (fx.session.tabs.items) |tb| for (tb.panes.items) |pn| for (pn.terms.items) |tm| {
+        if (tm.kind != .editor) tm.surface.core.semantic_state = .input;
+    };
+
+    const t = try openUntitledInActivePane(fx.session);
+    try testing.expect(insertText(fx.session, t, "a\n"));
+    try testing.expect(!saveDocument(fx.session, t));
+    try fx.session.rename_input.query.appendSlice(allocator, "closed.txt");
+    settings_ops.commitRename(fx.session);
+    try testing.expect(insertText(fx.session, t, "b\n")); // 다시 dirty
+
+    // ⑴ **이름 표식이 사라졌으므로** 이 문서는 더 이상 「사라지는 문서」가 아니다. 안 지우면 저장한
+    //    파일을 두고도 「이 내용은 사라집니다」라고 말한다(거짓말이다).
+    try testing.expect(!fx.session.scopeUnsavedIsAllUntitled(.term));
+
+    // ⑵ **닫기도 파일 문서의 경로를 탄다**(적대적 2회차에서 드러났다). 도크 entry 가 붙었으므로
+    //    `requestClose` 의 `scope == .term` 갈래가 그것을 보고 **2단계 파일 close 파이프라인**으로
+    //    보낸다 — 「보통 문서와 구분되지 않는다」가 닫기에서도 참이라는 뜻이고, 편집기 전용 확인 문구가
+    //    뜨지 않는 것이 **맞다**. 처음에 공용 확인이 뜰 것으로 적었다가 이 사실을 알았다.
+    // ⑵ **닫기는 묻는다.** 도크 entry 가 붙었으므로 `requestClose` 의 `scope == .term` 갈래가 파일
+    //    파이프라인으로 보내는데, 그쪽은 **CM6 브리지 문서만** 보호한다(`usesEditorBridge`) — 네이티브
+    //    편집기는 그 술어가 거짓이라 **확인 없이 즉시 닫혔다**(적대적 2회차에서 실측: `terms 2→1`).
+    //    그것은 dirty 편집을 말없이 버리는 것이고, U1 의 판정자들이 세운 「닫으면 묻는다」와도 어긋난다.
+    const before_n = pane_ops.activePane(fx.session).terms.items.len;
+    fx.session.requestClose(.active_term);
+    try testing.expectEqual(before_n, pane_ops.activePane(fx.session).terms.items.len); // 안 닫혔다
+    try testing.expect(fx.session.chrome_host.confirm.open);
+    try testing.expectEqualStrings(maru.i18n.t(.app_close_unsaved), fx.session.chrome_host.confirm.message);
+    // 그리고 그 파이프라인이 도는 동안 **편집기 전용 확인은 안 뜬다**(두 길이 겹치면 확인이 둘이다).
+    try testing.expect(!std.mem.eql(
+        u8,
+        fx.session.chrome_host.confirm.message,
+        maru.i18n.t(.app_close_untitled),
+    ));
+}
+
+test "U2l 트리에서 연 네이티브 문서도 dirty 면 닫기를 묻는다 — U2 와 무관한 기존 경로" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    const io = std.testing.io;
+    try dir.dir.writeFile(io, .{ .sub_path = "tree.txt", .data = "a\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "tree.txt" });
+    defer allocator.free(path);
+    for (fx.session.tabs.items) |tb| for (tb.panes.items) |pn| for (pn.terms.items) |tm| {
+        if (tm.kind != .editor) tm.surface.core.semantic_state = .input;
+    };
+
+    // **이 경로는 U2 가 만들지 않았다** — 파일 트리 클릭·⌘O 가 쓰는 제품 경로다(도크 entry + 네이티브
+    // 편집기). 그 문서를 고치고 ⌘W 를 누르면 **확인 없이 닫혀 편집이 사라졌다**. U2 가 entry 를 붙이면서
+    // 같은 구멍을 물려받게 되어 드러났다.
+    const opened = try pane_ops.openFileTermInActivePane(fx.session, path, .text);
+    const t = opened.term;
+    try testing.expect(t.kind == .editor and t.file_entry != null);
+    try testing.expect(!t.file_entry.?.usesEditorBridge()); // 네이티브다
+    t.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, t, "x"));
+    try testing.expect(isDirty(t));
+
+    const before_n = pane_ops.activePane(fx.session).terms.items.len;
+    fx.session.requestClose(.active_term);
+    try testing.expectEqual(before_n, pane_ops.activePane(fx.session).terms.items.len);
+    try testing.expect(fx.session.chrome_host.confirm.open);
+    try testing.expectEqualStrings(maru.i18n.t(.app_close_unsaved), fx.session.chrome_host.confirm.message);
+}

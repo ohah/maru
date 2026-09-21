@@ -4342,10 +4342,10 @@ test "파일 목록 읽기는 hex가 아닌 rev를 거절한다(커밋·턴 둘 
     var backend = try Backend.init(fixture_io);
     defer backend.deinit();
     const good = "650a0bbef96a1dd562e0d39f262260ae002c1545";
-    try std.testing.expect(!backend.submitTurnFiles("/usr/bin/git", "/repo", "HEAD HEAD~1", 1));
-    try std.testing.expect(!backend.submitTurnFiles("/usr/bin/git", "/repo", good ++ " --upload-pack=x", 2));
+    try std.testing.expect(!backend.submitTurnFiles("/usr/bin/git", "/repo", "HEAD HEAD~1", 1, null));
+    try std.testing.expect(!backend.submitTurnFiles("/usr/bin/git", "/repo", good ++ " --upload-pack=x", 2, null));
     // 셋 이상도 거절한다 — 인자가 하나 더 붙는 길을 열지 않는다.
-    try std.testing.expect(!backend.submitTurnFiles("/usr/bin/git", "/repo", good ++ " " ++ good ++ " " ++ good, 3));
+    try std.testing.expect(!backend.submitTurnFiles("/usr/bin/git", "/repo", good ++ " " ++ good ++ " " ++ good, 3, null));
 }
 
 test "원격 쓰기 실패: ssh 가 한 말과 git 이 한 말을 가른다 (RS4a 5회차)" {

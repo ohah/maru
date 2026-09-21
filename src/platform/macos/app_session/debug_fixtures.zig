@@ -1297,7 +1297,7 @@ pub fn applyForcedReplaceSave(self: *AppSession) void {
     const at: u32 = @intCast(std.mem.indexOf(u8, doc.file.content, needle) orelse return);
     term.rt.editor_selection = .{ .anchor_start = at, .anchor_end = at + @as(u32, @intCast(needle.len)), .focus = at + @as(u32, @intCast(needle.len)) };
     if (!editor_ops.insertText(self, term, replacement)) return;
-    _ = editor_ops.saveDocument(self, term);
+    editor_ops.saveDocument(self, term) catch {}; // 캡처 전용 — 실패 이유는 제품이 알림으로 낸다(C0)
     self.debug_replace_save_done = true;
     self.debug_diff_caret_keys_done = true;
 }

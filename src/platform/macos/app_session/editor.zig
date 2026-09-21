@@ -35719,3 +35719,87 @@ test "U2n 쓰기는 됐는데 entry 를 못 붙이면 — 새지 않고, 이름�
     try testing.expect(fx.session.chrome_host.notice.open);
     // 새 복사본은 놓았다(testing allocator 가 이 테스트 끝에서 잰다).
 }
+
+test "U2o 이름 상자는 caret 에 실제로 선다 — 앵커가 없으면 그 프레임에 상자가 없다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(std.testing.io, &root_buf)];
+    pinUntitledBase(fx.session, root);
+
+    const leaf: maru.session.SplitRect = .{ .x = 100, .y = 50, .w = 800, .h = 600 };
+    const t = try openUntitledInActivePane(fx.session);
+    try testing.expect(insertText(fx.session, t, "abc"));
+
+    // **상자는 그려야 보인다.** 상태만 재면(`rename != null`) 앵커가 서지 않아 화면에 아무것도 없는
+    // 경우를 통과시킨다 — 이 저장소에서 같은 모양을 여러 번 겪었다(적대적 5회차).
+    try testing.expect(!saveDocument(fx.session, t));
+    try testing.expect(!fx.session.chrome_host.rename_box.open); // 아직 앵커를 안 쟀다
+
+    // 프레임이 앵커를 잰다 — 그 문서가 그려져 있어야 한다(먼저 pane 프레임을 세운다).
+    {
+        var drawn = appendPaneFrame(fx.session, leaf, t) orelse return error.EditorPaneDidNotDraw;
+        drawn.dl.deinit(allocator);
+    }
+    try testing.expect(rename_client.refreshCaretAnchor(fx.session, t.surface.id));
+    try testing.expect(fx.session.chrome_host.rename_box.open);
+    // 앵커가 **본문 안**이다 — 0,0 이나 pane 밖이면 상자가 엉뚱한 자리에 뜬다.
+    const box = fx.session.chrome_host.rename_box;
+    try testing.expect(box.anchor_x >= @as(i32, @intCast(leaf.x)));
+    try testing.expect(box.anchor_y >= @as(i32, @intCast(leaf.y)));
+    try testing.expect(box.anchor_h > 0);
+
+    // **커서가 없으면 앵커도 없다** — 그때 상자는 그 프레임에 없다(조용히 0,0 에 뜨지 않는다).
+    const saved_sel = t.rt.editor_selection;
+    t.rt.editor_selection = null;
+    try testing.expect(!rename_client.refreshCaretAnchor(fx.session, t.surface.id));
+    t.rt.editor_selection = saved_sel;
+
+    // 다른 surface id 를 물으면 못 찾는다(상자가 떠 있는 동안 Term 이 닫히는 자리 — 포인터를 안 드는 이유).
+    try testing.expect(!rename_client.refreshCaretAnchor(fx.session, t.surface.id + 9999));
+}
+
+test "U2p 이름 상자가 떠 있는 동안 그 Term 이 닫히면 — 확정이 아무 일도 하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    const io = std.testing.io;
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    pinUntitledBase(fx.session, root);
+
+    const pane = pane_ops.activePane(fx.session);
+    // **이름 없는 문서를 둘 둔다.** 하나뿐이면 「닫힌 것을 못 찾으면 아무거나 집는다」는 변이가
+    // 같은 답(null)을 내 살아남는다 — 엉뚱한 문서에 쓰는 것이 그 변이의 진짜 해악이다(적대적 5회차).
+    const other = try openUntitledInActivePane(fx.session);
+    try testing.expect(insertText(fx.session, other, "keep me\n"));
+
+    const t = try openUntitledInActivePane(fx.session);
+    try testing.expect(insertText(fx.session, t, "gone\n"));
+    try testing.expect(!saveDocument(fx.session, t));
+
+    // 그 Term 을 닫는다 — `RenameTarget` 이 **포인터가 아니라 surface_id** 인 이유가 이 자리다.
+    var idx: usize = pane.terms.items.len;
+    while (idx > 0) {
+        idx -= 1;
+        if (pane.terms.items[idx] == t) break;
+    }
+    term_ops.closeTermAt(fx.session, fx.session.app_window.active_tab, pane, idx);
+
+    // 확정해도 **아무 일도 안 일어난다**(파일도 안 생긴다) — 낡은 포인터를 만지지 않는다.
+    try fx.session.rename_input.query.appendSlice(allocator, "ghost.txt");
+    settings_ops.commitRename(fx.session);
+    try testing.expect(fx.session.rename == null);
+    try testing.expectError(error.FileNotFound, dir.dir.access(io, "ghost.txt", .{}));
+    // **남은 문서는 그대로다** — 닫힌 것을 못 찾았다고 아무 문서에나 이름을 붙이지 않는다.
+    try testing.expect(other.rt.editor_untitled != null);
+    try testing.expect(other.rt.editor_path == null);
+    try testing.expect(other.file_entry == null);
+}

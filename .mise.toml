@@ -272,7 +272,7 @@ env = { MARU_REQUIRE_GOLDEN = "1" }
 run = [
   "zig build macos-app-bundle",
   "sh tools/remote-scm/capture.sh zig-out/remote-scm-capture/history-expanded.png MARU_FORCE_SCM_COMMIT_EXPAND=0",
-  "sh tools/remote-scm/capture.sh zig-out/remote-scm-capture/agent-remote-unsupported.png MARU_FORCE_SCM_TAB=agent",
+  "sh tools/remote-scm/capture.sh zig-out/remote-scm-capture/agent-remote-no-turns.png MARU_FORCE_SCM_TAB=agent",
   "zig build test-remote-scm-visual-golden",
 ]
 

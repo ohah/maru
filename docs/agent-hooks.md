@@ -2032,6 +2032,12 @@ trusted_hash = "sha256:…"
 - **선다(이어서)**: **codex 도 자동으로 깐다**(§11.5 정정). 훅과 함께 **신뢰 항목까지** 그 기계의
   `maru` 가 쓴다 — 로컬 설치기와 같은 순수 판정이다. 원격 세션에는 승인 TUI 를 볼 사람이 없으므로
   그것을 사용자에게 미루면 훅이 영영 안 도는 것과 같다.
+- **선다(2026-09-21, AT3c)**: **턴 스냅샷·`✎` 귀속도 원격에서 선다.** 원격 세트는 로컬과 **같다**
+  (`remote_excluded` 가 비었다 — `PreToolUse(*)`·`PostToolUse(Bash)`·`PostToolUseFailure(Bash)` 포함). 도착한
+  프레임은 로컬 배치 루프와 같은 `TurnBatch` 로 봉인·스냅샷을 청하고, 스냅샷은 **그 Term 의 기계에서**
+  (`GIT_INDEX_FILE` 을 명령 문자열의 env 로, 임시 index 는 원격 `/tmp`) 찍는다. 다만 그림자 사본은 원격에서
+  뜨지 않는다 — 한계는 [턴 변경분 §8-14](agent-turn-changes.md)에 있다. RA1 이 `PreToolUse` 를 뺀 세 이유
+  (비용·보안·codex 재승인)는 [계획 AT3c](plans/agent-turn-changes.md)가 하나씩 다시 봤다.
 - ⚠️ **원격에 `maru` 가 «있어도 못 찾을» 수 있다**(2026-08-30 실측). `ssh host cmd` 의 PATH 는 로그인
   셸보다 좁아 흔히 `/usr/bin:/bin:/usr/sbin:/sbin` 뿐이고, 그러면 `~/.local/bin/maru` 나 Homebrew 의
   `maru` 가 **안 잡힌다** — 그때 축은 「원격에 maru 가 없다」로 접힌다. 그래서 설치·스트리머 명령이

@@ -64,6 +64,9 @@ pub const Unknown = enum {
     /// **before 를 뜰 기회가 없었다** — provider 의 셸 diff(`bashEditDiff`)가 「바뀌었다」고 알려 준 시점은 명령이
     /// **끝난 뒤**라 그때 읽으면 after 다(AT3b-2). `Read` 로 미리 떠 둔 사본이 있으면 이 값이 아니라 그 사본이 선다.
     no_before,
+    /// **원격 Term 이라 읽지 않았다**(AT3c) — 못 읽은 것이 아니다. 경로마다 ssh 왕복을 낼 수 없어 내용은 안 들고,
+    /// 근거는 provider(셸 diff)와 tree 목록(편집 도구가 겨냥한 경로가 그 턴에 실제로 바뀌었나)에서 온다.
+    remote,
 };
 
 /// 내용을 접은 이유.
@@ -137,9 +140,20 @@ pub const Entry = struct {
     pub fn editedByAgent(self: Entry) bool {
         const after = self.after orelse return false;
         const same = self.before.sameAs(after);
-        if (self.shell_diff) return after != .unknown and same != true;
+        // 원격(AT3c)은 «읽지 않았다» 지 «못 읽었다» 가 아니다 — provider 의 diff 를 믿는다.
+        const after_known = after != .unknown or after.unknown == .remote;
+        if (self.shell_diff) return after_known and same != true;
         if (self.trigger != .edit) return false;
         return same == false;
+    }
+
+    /// **원격 Term 의 편집 도구 근거**(AT3c): `Edit`·`Write` 가 이 경로를 겨냥했고 내용은 못 읽었다. 이것만으로는
+    /// «바뀌었다» 가 아니다 — 실패한 편집(권한 거부)도 겨냥은 했다. **tree 목록에 그 경로가 있을 때만** `✎` 가
+    /// 되고, 그 판정은 목록을 아는 자리(`turnFileOrigin`·요약 join)가 한다. 그래서 `editedByAgent` 와 갈라 둔다.
+    pub fn remoteEditTargeted(self: Entry) bool {
+        if (self.trigger != .edit) return false;
+        const after = self.after orelse return false;
+        return after == .unknown and after.unknown == .remote;
     }
 
     /// **✎ 인데 근거가 셸 diff 뿐**인가(편집 도구로는 확정 못 했다). 화면이 `TurnFileOrigin.shell_edit` 로 가른다.
@@ -170,6 +184,9 @@ pub const Turn = struct {
     /// 이 구간 안에 `ctime` 이 떨어진 파일을 «셸이 고쳤다» 로 올린다. 순수 층(`shell_bracket`)이 규율을
     /// 들고, 여기서는 턴과 함께 봉인·이동될 뿐이다(고정 크기라 `Turn` 복사에 그대로 실린다).
     shell: shell_bracket.Brackets = .{},
+    /// **원격 Term 의 턴**(AT3c) — 내용을 읽지 않았다. `✎N` 은 봉인 캐시가 아니라 목록 join 때 센 값(`Snapshot.edited_joined`)
+    /// 을 써야 한다(편집 도구 근거가 tree 목록에 기댄다).
+    remote: bool = false,
     /// **봉인 때 한 번 센** 「에이전트가 실제로 고친 경로 수」(= `editedByAgent()` 가 참인 항목).
     ///
     /// 화면이 이 수를 **턴 행마다 매 프레임** 읽는다. 그때마다 세면 `sameAs` 가 `.text` 두 쪽을
@@ -438,6 +455,17 @@ pub const Store = struct {
         return turn.shell.closeBracket(tool_use_id, now_ms, duration_ms, slack_ms);
     }
 
+    /// **원격 Term 의 턴을 봉인하기 전에** — after 를 읽지 않았다는 사실을 모든 항목에 적고 턴에 표시한다(AT3c).
+    /// `seal` 이 세는 `edited_count` 는 셸 diff 항목만 센다(편집 도구 근거는 목록 join 때). `noteAfter` 처럼
+    /// **이미 after 가 있는 항목은 건드리지 않는다**(원격 턴에서는 없어야 하지만, 규칙은 같다).
+    pub fn markRemote(self: *Store, session_id: []const u8) void {
+        const turn = self.openTurn(session_id) orelse return;
+        turn.remote = true;
+        for (turn.entries.items) |*e| {
+            if (e.after == null) e.after = .{ .unknown = .remote };
+        }
+    }
+
     /// 턴 경계 — 열린 구간을 전부 닫는다. `seal` **직전**에 부른다(봉인 뒤 `Turn` 은 안 변한다는 불변을
     /// 지키려면 닫기가 봉인보다 앞서야 한다). 진행 중 턴이 없으면 아무것도 하지 않는다.
     pub fn sealShell(self: *Store, session_id: []const u8, now_ms: u64, slack_ms: u64) void {
@@ -648,6 +676,33 @@ test "셸 diff 근거 — provider 가 검증한 경로는 before 없이도 ✎ 
     }
     try testing.expect(!store.noteShellDiff(gpa, "S", "/r/overflow.zig"));
     try testing.expectEqual(max_turn_paths, turn.entries.items.len);
+}
+
+test "원격 턴 — 읽지 않은 after 는 셸 diff 를 믿고, 편집 도구 근거는 겨냥만 기록한다 (AT3c)" {
+    const gpa = testing.allocator;
+    var store: Store = .{};
+    defer store.deinit(gpa);
+    try testing.expect(store.noteBefore(gpa, "R", "/r/edit.zig", .edit, .{ .unknown = .remote }));
+    try testing.expect(store.noteBefore(gpa, "R", "/r/read.zig", .read, .{ .unknown = .remote }));
+    try testing.expect(store.noteShellDiff(gpa, "R", "/r/shell.zig"));
+    store.markRemote("R");
+    const turn = store.openTurn("R").?;
+    try testing.expect(turn.remote);
+    for (turn.entries.items) |e| try testing.expectEqual(Unknown.remote, e.after.?.unknown);
+    // 셸 diff: provider 를 믿는다. 편집 도구: 겨냥만 — 목록이 있어야 ✎. Read: 아무것도 아니다.
+    try testing.expect(turn.entries.items[2].editedByAgent());
+    try testing.expect(!turn.entries.items[0].editedByAgent());
+    try testing.expect(turn.entries.items[0].remoteEditTargeted());
+    try testing.expect(!turn.entries.items[1].remoteEditTargeted());
+    try testing.expect(!turn.entries.items[2].remoteEditTargeted());
+    // 봉인 캐시는 셸 diff 하나만 센다 — 편집 도구 몫은 join 이 더한다.
+    const id = store.seal(gpa, "R");
+    try testing.expectEqual(@as(u32, 1), store.sealedTurn(id).?.edited_count);
+    try testing.expect(store.sealedTurn(id).?.remote);
+    // 로컬 턴은 그대로다 — `.outside_root` 같은 «못 읽음» 은 여전히 ✎ 가 아니다.
+    try testing.expect(store.noteShellDiff(gpa, "L", "/etc/hosts"));
+    store.noteAfter(gpa, "L", "/etc/hosts", .{ .unknown = .outside_root });
+    try testing.expect(!store.openTurn("L").?.entries.items[0].editedByAgent());
 }
 
 test "before 는 첫 캡처로 고정된다 — 두 번째 값이 덮지 않는다" {

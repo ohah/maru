@@ -78,6 +78,9 @@ pub const Kind = enum {
     /// 턴 스냅샷 ①: 임시 index를 HEAD로 채운다(`read-tree HEAD`). 진짜 index는 안 건드린다 — `GIT_INDEX_FILE`이
     /// 가리키는 파일만 쓴다. 그 파일은 **저장소 밖**에 둔다(안에 두면 그 파일 자체가 diff에 잡힌다).
     snapshot_read_tree,
+    /// 턴 스냅샷 ①′: 임시 index 를 **비운다**(`read-tree --empty`). ①이 실패한 unborn 저장소에서 지난 턴의 항목이
+    /// 남지 않게 — 로컬은 파일을 `unlink` 하지만 원격에는 그 손이 없어(AT3c) git 자신에게 비우게 한다.
+    snapshot_read_tree_empty,
     /// 턴 스냅샷 ②: 그 임시 index에 작업트리를 반영한다(`add -A`). 작업트리는 안 바뀐다.
     snapshot_add,
     /// 턴 스냅샷 ③: 그 index를 tree 하나로 굳힌다(`write-tree`). 이 tree OID가 "그 턴이 끝난 순간"이다.
@@ -625,6 +628,19 @@ pub fn buildRemote(
     buf: *[max_argv][]const u8,
     cmd_buf: []u8,
 ) ?[]const []const u8 {
+    return buildRemoteWithIndex(local_argv, remote, null, buf, cmd_buf);
+}
+
+/// `buildRemote` + **원격 임시 index**(AT3c 턴 스냅샷). 로컬은 `GIT_INDEX_FILE` 을 자식 env 로 거는데
+/// (`runArgvWithEnv`), 원격 셸은 우리 env 를 물려받지 않으므로 다른 override 와 같은 자리에 **명령 문자열로**
+/// 싣는다. 경로에 제어문자·작은따옴표가 있으면 만들지 않는다(env 값 규칙과 같다 — 잘린 명령은 다른 명령이다).
+pub fn buildRemoteWithIndex(
+    local_argv: []const []const u8,
+    remote: Remote,
+    index_file: ?[]const u8,
+    buf: *[max_argv][]const u8,
+    cmd_buf: []u8,
+) ?[]const []const u8 {
     if (local_argv.len < 2) return null; // 최소 `git -C <repo>` 는 있어야 한다
     // dest·control socket 검증은 `remoteArgv` 가 진다(두 빌더가 같은 판정을 공유한다).
 
@@ -656,6 +672,22 @@ pub fn buildRemote(
             n += 1;
         }
         if (n >= cmd_buf.len) return null;
+        cmd_buf[n] = '\'';
+        n += 1;
+    }
+    if (index_file) |path| {
+        if (!remoteTokenIsSafe(path) or std.mem.indexOfScalar(u8, path, '\'') != null or path.len == 0) return null;
+        if (n + 1 + "'GIT_INDEX_FILE='".len + path.len + 1 > cmd_buf.len) return null;
+        cmd_buf[n] = ' ';
+        n += 1;
+        for ("'GIT_INDEX_FILE=") |c| {
+            cmd_buf[n] = c;
+            n += 1;
+        }
+        for (path) |c| {
+            cmd_buf[n] = c;
+            n += 1;
+        }
         cmd_buf[n] = '\'';
         n += 1;
     }
@@ -827,6 +859,12 @@ pub fn build(kind: Kind, git_exe: []const u8, repo: []const u8, arg: ?[]const u8
             buf[n] = "read-tree";
             n += 1;
             buf[n] = "HEAD";
+            n += 1;
+        },
+        .snapshot_read_tree_empty => {
+            buf[n] = "read-tree";
+            n += 1;
+            buf[n] = "--empty";
             n += 1;
         },
         .snapshot_add => {
@@ -1221,6 +1259,7 @@ test "턴 스냅샷은 임시 index로만 돌고 작업트리를 건드리지 �
     // 이 기능의 안전 근거이고, argv에는 그 사실이 안 보이므로(환경은 L4가 건다) 여기서는 **명령 모양**만 고정한다.
     var buf: [max_argv][]const u8 = undefined;
     try testing.expect(has(build(.snapshot_read_tree, "/usr/bin/git", "/repo", null, &buf), "read-tree"));
+    try testing.expect(has(build(.snapshot_read_tree_empty, "/usr/bin/git", "/repo", null, &buf), "--empty"));
     try testing.expect(has(build(.snapshot_add, "/usr/bin/git", "/repo", null, &buf), "-A"));
     try testing.expect(has(build(.snapshot_write_tree, "/usr/bin/git", "/repo", null, &buf), "write-tree"));
 }
@@ -1631,6 +1670,28 @@ test "원격 argv: 로컬이 닫아 둔 구멍이 원격에서도 닫혀 있다"
     try std.testing.expect(std.mem.startsWith(u8, line[prologue.len..], "'env' "));
     try std.testing.expect(std.mem.indexOf(u8, line, "'-C' '/srv/app'") != null);
     try std.testing.expect(std.mem.indexOf(u8, line, "'status'") != null);
+}
+
+test "원격 argv: 턴 스냅샷의 임시 index 는 명령 문자열의 env 로 실린다 (AT3c)" {
+    var buf: [max_argv][]const u8 = undefined;
+    var local_buf: [max_argv][]const u8 = undefined;
+    var cmd: [max_remote_command_bytes]u8 = undefined;
+    const local = build(.snapshot_write_tree, "/opt/homebrew/bin/git", "/srv/app", null, &local_buf);
+    const remote: Remote = .{ .dest = "user@build-box", .control_path = "/tmp/ctl" };
+    const argv = buildRemoteWithIndex(local, remote, "/tmp/maru-turn-0a1b.idx", &buf, &cmd) orelse return error.RemoteArgvRefused;
+    const line = argv[7];
+    // 다른 override 와 같은 자리(`env` 뒤·`git` 앞)에 **한 토큰으로** 인용돼 있다.
+    try std.testing.expect(std.mem.indexOf(u8, line, "'GIT_INDEX_FILE=/tmp/maru-turn-0a1b.idx' 'git'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, line, "'write-tree'") != null);
+    // index 없이 만든 줄에는 그 이름이 없다 — 원격 진짜 index 를 건드리는 명령은 이 길로 못 간다.
+    var cmd2: [max_remote_command_bytes]u8 = undefined;
+    const plain = buildRemote(local, remote, &buf, &cmd2) orelse return error.RemoteArgvRefused;
+    try std.testing.expect(std.mem.indexOf(u8, plain[7], "GIT_INDEX_FILE") == null);
+    // 못 믿을 경로면 만들지 않는다 — 작은따옴표·제어문자·빈 값.
+    var cmd3: [max_remote_command_bytes]u8 = undefined;
+    try std.testing.expect(buildRemoteWithIndex(local, remote, "/tmp/it's.idx", &buf, &cmd3) == null);
+    try std.testing.expect(buildRemoteWithIndex(local, remote, "/tmp/x\ny.idx", &buf, &cmd3) == null);
+    try std.testing.expect(buildRemoteWithIndex(local, remote, "", &buf, &cmd3) == null);
 }
 
 test "원격 argv: 셸 메타문자가 든 경로도 한 인자로 도착한다" {

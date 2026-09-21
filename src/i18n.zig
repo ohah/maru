@@ -719,7 +719,7 @@ const Table = struct {
     /// 원격 pane 을 보는 동안 에이전트 탭. 턴 링은 **에이전트 세션**의 것이라 원격으로 옮겨도 로컬
     /// 기록이 그대로 남는데, 그것을 원격 목록 옆에 두면 「이 기계의 기록」으로 읽힌다. 반쪽으로 보여
     /// 주느니 **한 줄로 말한다**(원격 SCM 계약 §2.3 — 지원하지 않는 동작은 이유를 말한다).
-    scm_turns_remote_unsupported: [:0]const u8,
+    scm_turns_other_machine: [:0]const u8,
     /// 에이전트 탭: 마지막 스냅샷 이후 작업트리에 생긴 변경(오른쪽이 작업트리라 계속 변한다).
     ///
     /// ⚠️ **에이전트 상태가 아니다.** 이 줄은 링에 스냅샷이 하나라도 있으면 **늘 선다** — 에이전트가
@@ -1293,7 +1293,7 @@ const en: Table = .{
     .scm_turns_need_hooks = "Agent turns need hooks enabled",
     .scm_turns_missed = "{0} turns were not recorded",
     .scm_turns_evicted = "Earlier turns were dropped for newer sessions",
-    .scm_turns_remote_unsupported = "Agent turns are not available on a remote pane yet",
+    .scm_turns_other_machine = "These agent turns were recorded on another machine",
     .scm_turn_live = "Since last turn",
     .scm_turn_last = "Last turn",
     .scm_turn_back_suffix = " turns ago",
@@ -1998,7 +1998,7 @@ const ko: Table = .{
     .scm_turns_need_hooks = "에이전트 훅을 켜야 턴이 기록됩니다",
     .scm_turns_missed = "기록하지 못한 턴 {0}개",
     .scm_turns_evicted = "최근 세션에 밀려 이전 턴 기록이 사라졌습니다",
-    .scm_turns_remote_unsupported = "원격 pane 에서는 아직 지원하지 않습니다",
+    .scm_turns_other_machine = "이 세션의 턴은 다른 기계에서 기록됐습니다",
     .scm_turn_live = "마지막 턴 이후",
     .scm_turn_last = "마지막 턴",
     .scm_turn_back_suffix = "턴 전",

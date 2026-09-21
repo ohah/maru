@@ -540,6 +540,18 @@ fn activeTurnRing(self: *AppSession) ?*const maru.session.turn_snapshot.Ring {
     return self.turn_rings.find(identity);
 }
 
+/// 활성 세션의 링이 **목록과 다른 기계의 것**인가(AT3c). 링의 저장소 키에 든 기계(`turn_snapshot.machineOf` —
+/// 로컬은 빈 값)와 활성 목록의 목적지(`git_repo_dest` — 로컬은 null)를 맞춘다. 링이 없으면(신원 없음·아직 안 찍힘)
+/// **낯설지 않다** — 어디에도 기록이 없는데 «다른 기계의 기록» 이라 하면 거짓이고, 그때의 «훅을 깔라» 는 원격
+/// 훅도 우리가 심으므로(§11.6) 저쪽 기계에 대한 말로 읽혀도 맞는 말이다(뮤턴트 M14 가 이 판단을 뒤집어 보였다).
+fn turnRingIsForeign(self: *AppSession) bool {
+    const dest = self.git_repo_dest orelse "";
+    const identity = git_ops.activeOrLastSessionIdentity(self);
+    if (identity.len == 0 or self.turn_rings.find(identity) == null) return false;
+    const machine = maru.session.turn_snapshot.machineOf(self.turn_rings.repoFor(identity));
+    return !std.mem.eql(u8, machine, dest);
+}
+
 /// 활성 세션의 링이 **밀려나서** 없나. 맵이 최근 세션 신원 몇 개까지만 들기 때문에 생기는 일이고
 /// (`turn_snapshot.max_sessions` — `/clear` 도 새 신원을 만든다), 그때 「관측한 턴이 없다」고 말하면
 /// 있었던 기록을 없었던 것처럼 만든다. **링이 아예 없을 때만** 묻는다 — 링이 다시 섰으면 그쪽이
@@ -573,16 +585,18 @@ fn projectAgentTurns(self: *AppSession, arena: std.mem.Allocator) ?Projection {
     const m = component.types.DockMetrics.resolve(scmDockScaleMilli(self));
     const now_s: i64 = @intCast(@divFloor(std.Io.Clock.real.now(self.io).nanoseconds, std.time.ns_per_s));
 
-    // ⚠️ **원격 목록을 보는 동안에는 이 탭이 «아직 안 된다»고 말한다**(사용자 결정 2026-09-14).
+    // ⚠️ **링의 기계가 목록의 기계와 다르면 이 탭은 그 사실을 한 줄로 말한다**(사용자 결정 2026-09-14, AT3c 로 좁힘).
     //
     // 링은 **에이전트 세션**의 것이지 저장소의 것이 아니라, 원격 pane 으로 옮겨도 **로컬 세션의 턴이
-    // 그대로 남는다.** 그 줄들은 원격 커밋 목록 옆에서 「이 기계의 기록」으로 읽히고, RS7-0 이 읽기를
-    // 막아 둔 탓에 개수(`N개 파일`)도 영영 안 차고 눌러도 이유 없이 실패한다 — **세 가지 어긋남이
-    // 한 화면에 겹친다.**
+    // 그대로 남는다.** 그 줄들은 원격 커밋 목록 옆에서 「이 기계의 기록」으로 읽히고, tree 는 저쪽에 없어
+    // 개수(`N개 파일`)도 영영 안 차고 눌러도 이유 없이 실패한다 — **세 가지 어긋남이 한 화면에 겹친다.**
+    // 반쪽으로 보여 주느니 **한 줄로 말한다**(계약 §2.3).
     //
-    // 반쪽으로 보여 주느니 **한 줄로 말한다**: 계약 §2.3 의 「원격에서 아직 지원하지 않는 동작은 이유를
-    // 말한다」가 이 자리에도 걸린다. 턴 축을 원격으로 여는 것은 `agent-turn-changes` 의 일이다.
-    const remote = git_ops.scmTargetIsRemote(self);
+    // AT3c 뒤 원격 Term 의 턴은 **저쪽 기계에** 찍히고 링의 저장소 키에 그 기계가 든다(`turn_snapshot.repoKey`).
+    // 그래서 판정은 «원격인가» 가 아니라 **«링의 기계 = 목록의 기계인가»** 다 — 원격 세션의 링을 그 원격 목록
+    // 옆에 두는 것이 정확히 이 기능이 하려는 일이다. 로컬 링 + 원격 목록, 원격 링 + 로컬 목록, 다른 원격끼리는
+    // 전부 «다른 기계» 다.
+    const remote = turnRingIsForeign(self);
 
     var rows_buf: [maru.session.turn_snapshot.capacity]maru.session.turn_snapshot.Ring.TimelineRow = undefined;
     // **한 번만 조회한다** — 행과 «놓친 턴» 이 같은 링을 보므로 두 번 물으면 같은 답을 두 번 계산한다.
@@ -645,9 +659,9 @@ fn projectAgentTurns(self: *AppSession, arena: std.mem.Allocator) ?Projection {
         // 있었는데 사라진 것이라, 같은 문구로 말하면 화면이 없던 일로 만든다.
         items[n] = .{
             .notice = if (remote)
-                // **원격이 맨 앞이다** — 아래 셋은 전부 «로컬 링이 왜 비었나» 라서, 원격에서는 물음 자체가
+                // **다른 기계가 맨 앞이다** — 아래 셋은 전부 «이 링이 왜 비었나» 라서, 기계가 다르면 물음 자체가
                 // 다르다(훅을 깔라는 말이 저쪽 기계에 대한 것으로 읽히면 사용자는 엉뚱한 일을 한다).
-                maru.i18n.t(.scm_turns_remote_unsupported)
+                maru.i18n.t(.scm_turns_other_machine)
             else if (agentPresentWithoutIdentity(self))
                 maru.i18n.t(.scm_turns_need_hooks)
             else if (evicted)
@@ -850,8 +864,10 @@ fn turnFileOrigin(
     const found = turn orelse return .unknown;
     const repo = self.git_repo orelse return .unknown;
     for (found.entries.items) |entry| {
-        const entry_rel = maru.session.repo_path.displayRelative(entry.path, repo);
-        if (!std.mem.eql(u8, entry_rel, rel_path)) continue;
+        if (!turnEntryMatches(self, found, entry.path, repo, rel_path)) continue;
+        // 원격 턴(AT3c): 편집 도구가 겨냥했고 **목록에 있다**(이 함수는 목록 경로로만 불린다) — 그것이 `✎` 의
+        // 전부다. 내용은 읽지 않았으므로 되돌림(`↩`)은 원격에서 판정하지 않는다(계약 §8).
+        if (entry.remoteEditTargeted()) return .ai_edit;
         if (!entry.editedByAgent()) return .turn_change;
         // 근거가 셸 diff 뿐이면 갈라 둔다 — 기호는 같지만(`view.originMark`) 사실은 다르다(AT3b-2).
         return if (entry.shellOnly()) .shell_edit else .ai_edit;
@@ -860,15 +876,59 @@ fn turnFileOrigin(
     return .turn_change;
 }
 
+/// 캡처 경로(훅이 준 **절대경로**)가 목록 경로(**저장소 상대**)와 같은 파일인가 — `turnFileOrigin` 과 요약 join 의
+/// 단일 출처.
+///
+/// 로컬은 `git_repo`(cwd = 루트) 로 상대화해 정확히 맞춘다. **원격 턴**(AT3c)의 절대경로는 저쪽 기계의 것이라
+/// `git_repo`(원격 cwd) 로는 못 자른다 — 저장소 루트를 물어 알았으면(`git_repo_remote_root`, RS3) 그것으로,
+/// 아직이면 **꼬리 일치**(`…/<rel>`) 로 맞춘다. 꼬리 일치는 다른 디렉터리의 같은 상대경로를 오인할 수 있지만
+/// 그것은 캡처가 같은 턴 안에서 두 저장소를 만졌을 때뿐이고, 원격 루트가 오면 정확해진다.
+fn turnEntryMatches(
+    self: *AppSession,
+    turn: *const maru.session.turn_capture.Turn,
+    entry_path: []const u8,
+    repo: []const u8,
+    rel_path: []const u8,
+) bool {
+    if (!turn.remote) return std.mem.eql(u8, maru.session.repo_path.displayRelative(entry_path, repo), rel_path);
+    if (self.git_repo_remote_root) |root| {
+        return std.mem.eql(u8, maru.session.repo_path.displayRelative(entry_path, root), rel_path);
+    }
+    if (rel_path.len == 0 or entry_path.len <= rel_path.len) return false;
+    return std.mem.endsWith(u8, entry_path, rel_path) and entry_path[entry_path.len - rel_path.len - 1] == '/';
+}
+
 /// 그 스냅샷이 가리키는 사본에서 **에이전트 편집 도구가 실제로 바꾼 파일 수**. 없으면 0.
 ///
 /// `turnSummary` 밖에 두는 이유: 그 함수는 세션 없이 값으로 검증되어야 한다(아래 테스트).
 fn editedCountFor(self: *AppSession, snap: *const maru.session.turn_snapshot.Snapshot) u32 {
     if (snap.capture_id == 0) return 0;
     const turn = self.turn_captures.sealedTurn(snap.capture_id) orelse return 0;
+    // **원격 턴은 목록과 join 해 센 값이 권위다**(AT3c) — 봉인 캐시는 내용을 안 읽어 편집 도구 몫을 못 센다.
+    // 목록이 아직 안 왔으면 0(화면은 0을 그리지 않는다 — «모른다» 와 같은 자리).
+    if (turn.remote) return if (snap.edited_joined_known) snap.edited_joined else 0;
     // **캐시를 읽는다** — 이 함수는 턴 행마다 **매 프레임** 돈다. 훑어 세는 `countEdited()` 는
     // 항목마다 `mem.eql` 로 최대 1 MiB 를 비교한다(`turn_capture.Turn.edited_count` 주석).
     return turn.edited_count;
+}
+
+/// 목록과 캡처를 join 해 `✎` 를 센다(AT3c) — **원격 턴에만** 값이 있고 로컬은 `null`(캐시가 권위). 목록이 오는
+/// 자리(`applyTurnSummary`)에서 한 번만 돈다 — 매 프레임 join 하지 않으려고 링에 적어 둔다(공격 G).
+fn joinedEditedCount(self: *AppSession, head_oid: []const u8, sid: []const u8, text: []const u8) ?u32 {
+    const ring = self.turn_rings.find(sid) orelse return null;
+    const snap = ring.findOid(head_oid) orelse return null;
+    if (snap.capture_id == 0) return null;
+    const turn = self.turn_captures.sealedTurn(snap.capture_id) orelse return null;
+    if (!turn.remote) return null;
+    var n: u32 = 0;
+    var files = maru.session.git_status.iterateCommitFiles(text);
+    while (files.next()) |f| {
+        switch (turnFileOrigin(self, turn, f.path)) {
+            .ai_edit, .shell_edit => n +|= 1,
+            else => {},
+        }
+    }
+    return n;
 }
 
 fn turnSummary(
@@ -2700,30 +2760,37 @@ pub fn pumpCommitFiles(self: *AppSession) void {
     if (self.scm_commit_files_oid) |current| {
         if (std.mem.eql(u8, current, key)) return; // 이미 그것을 읽어 뒀다(실패도 답이다)
     }
-    const repo = self.git_repo orelse return;
-
-    // **커밋 쪽만 원격으로 간다**(RS7c — [계획](../../../../docs/plans/remote-scm.md) §18.4).
-    //
-    // 두 탭이 같은 슬롯을 쓰지만 **축이 다르다**: 커밋의 파일 목록은 히스토리(RS7b)의 일부이고,
-    // 턴의 파일 목록은 `captureTurnSnapshot` 이 찍은 **로컬 tree** 를 읽는다 — 그 스냅샷은 원격에서
-    // 아예 안 돌므로(RS7-0), 원격에서 턴을 읽으려 들면 저쪽에 없는 tree 를 묻는 꼴이다. 턴 축은
-    // RS7 의 범위가 아니므로 여기서는 **그 탭만** 막는다.
     var ctl_buf: [std.fs.max_path_bytes]u8 = undefined;
     var remote: ?maru.session.git_command.Remote = null;
-    if (self.git_repo_dest) |dest| {
-        if (self.scm_tab != .history) {
-            // **턴 축은 원격으로 안 간다 — 그래도 조용히 두지는 않는다**(적대적 검증 5회차). 읽기를
-            // 안 걸고 그냥 돌아가면 펼친 그 줄이 **영영 「읽는 중…」**이다. 링은 로컬 세션에서 이미 차
-            // 있을 수 있어(RS7-0 이 `pumpTurnSummaries` 에서 막은 그 상태) 실제로 펼쳐질 수 있다.
-            markCommitFilesFailed(self, key);
-            return;
-        }
-        // 소켓이 없으면 **보내지 않고 실패로 적는다** — 로컬로 떨어지지 않는다(§5 6회차).
-        const ctl = git_ops.remoteControlSocketFor(self, dest, &ctl_buf) orelse {
-            markCommitFilesFailed(self, key);
-            return;
-        };
-        remote = .{ .dest = dest, .control_path = ctl };
+    var repo: []const u8 = self.git_repo orelse return;
+    switch (self.scm_tab) {
+        .history => {
+            // **커밋 쪽은 활성 저장소의 기계로 간다**(RS7c — [계획](../../../../docs/plans/remote-scm.md) §18.4).
+            if (self.git_repo_dest) |dest| {
+                // 소켓이 없으면 **보내지 않고 실패로 적는다** — 로컬로 떨어지지 않는다(§5 6회차).
+                const ctl = git_ops.remoteControlSocketFor(self, dest, &ctl_buf) orelse {
+                    markCommitFilesFailed(self, key);
+                    return;
+                };
+                remote = .{ .dest = dest, .control_path = ctl };
+            }
+        },
+        .agent => {
+            // **턴 쪽은 tree 가 있는 기계로 간다**(AT3c) — 활성 저장소가 아니라 **그 링의 저장소 키**가 정한다.
+            // 읽기를 안 걸고 조용히 돌아가면 펼친 그 줄이 **영영 「읽는 중…」**이라(적대적 검증 5회차) 못 가는
+            // 경우는 실패로 적는다.
+            switch (turnReadTarget(self, git_ops.activeOrLastSessionIdentity(self), &ctl_buf)) {
+                .read => |t| {
+                    repo = t.repo;
+                    remote = t.remote;
+                },
+                .unavailable => {
+                    markCommitFilesFailed(self, key);
+                    return;
+                },
+            }
+        },
+        .changes => unreachable,
     }
 
     // **원격이면 로컬 git 을 찾지 않는다**(`pumpScmLog` 와 같은 규율 — `buildRemote` 가 `argv[0]` 을 버린다).
@@ -2738,11 +2805,39 @@ pub fn pumpCommitFiles(self: *AppSession) void {
     self.scm_commit_files_seq += 1;
     const submitted = switch (self.scm_tab) {
         .history => self.git_backend.?.submitCommitFiles(git_exe, repo, key, self.scm_commit_files_seq, remote),
-        .agent => self.git_backend.?.submitTurnFiles(git_exe, repo, key, self.scm_commit_files_seq),
+        .agent => self.git_backend.?.submitTurnFiles(git_exe, repo, key, self.scm_commit_files_seq, remote),
         .changes => false,
     };
     if (!submitted) return;
     self.scm_commit_files_inflight = self.scm_commit_files_seq;
+}
+
+/// 그 세션의 턴 tree 를 **어디서 읽는가**(AT3c). 링의 저장소 키(`turn_snapshot.repoKey`)가 기계를 말한다:
+///
+/// - 로컬 링 — 로컬 git, 링에 적힌 경로. 단 **활성 목록이 원격이면 읽지 않는다**(RS7-0, 적대적 검증
+///   2026-09-13 5회차): 로컬 tree 를 로컬 git 에 묻는 것 자체는 옳지만, 그 목록은 원격 저장소 옆에 서 있어
+///   「이 기계의 기록」으로 읽히고 그 자리는 RS7-0 이 비워 두기로 했다.
+/// - 원격 링 — **그 기계**의 control socket 으로 간다(활성 저장소와 무관하다 — tree 는 거기에만 있다). 소켓이
+///   없으면 `.unavailable` — 로컬로 떨어뜨리면 원격 경로를 로컬 git 에 넘긴다(RS2 1회차의 그 함정).
+const TurnReadTarget = union(enum) {
+    read: struct { repo: []const u8, remote: ?maru.session.git_command.Remote },
+    unavailable,
+};
+
+fn turnReadTarget(self: *AppSession, identity: []const u8, ctl_buf: []u8) TurnReadTarget {
+    const key = self.turn_rings.repoFor(identity);
+    const machine = maru.session.turn_snapshot.machineOf(key);
+    if (machine.len == 0) {
+        if (git_ops.scmTargetIsRemote(self)) return .unavailable;
+        // 키를 못 담은 링(`repo_len == 0`)은 활성 저장소로 떨어진다 — 종전 동작 그대로다.
+        const repo = if (key.len > 0) key else (self.git_repo orelse return .unavailable);
+        return .{ .read = .{ .repo = repo, .remote = null } };
+    }
+    const ctl = git_ops.remoteControlSocketFor(self, machine, ctl_buf) orelse return .unavailable;
+    return .{ .read = .{
+        .repo = maru.session.turn_snapshot.pathOf(key),
+        .remote = .{ .dest = machine, .control_path = ctl },
+    } };
 }
 
 /// 파일 목록 읽기를 **걸지 않고** 실패로 적는다(RS7c). 소켓이 없을 때뿐이다 — 조용히 무동작으로 두면
@@ -2775,22 +2870,32 @@ fn markCommitFilesFailed(self: *AppSession, key: []const u8) void {
 pub fn pumpTurnSummaries(self: *AppSession) void {
     if (self.dock.view != .source_control or !dock_ops.dockVisible(self)) return;
     if (self.scm_tab != .agent) return; // 안 보는 탭 때문에 프로세스를 띄우지 않는다
-    // **원격 목록을 보는 동안에는 턴 요약도 안 읽는다**(RS7-0 — [계획](../../../../docs/plans/remote-scm.md) §18.1,
-    // 적대적 검증 2026-09-13 5회차). RS2 1회차는 이 자리를 세지 않았다 — 링을 채우는
-    // `captureTurnSnapshot` 만 막으면 된다고 봤기 때문인데, **링은 로컬 세션에서 이미 차 있을 수 있다.**
-    // 에이전트 탭을 연 채 원격 pane 으로 옮기면 그 미확인 턴이 `git_repo`(원격 경로)로 로컬 git 을 부른다.
-    //
-    // **이 가드는 RS7b 뒤에도 남는다** — 턴 축(스냅샷을 찍는 쓰기 경로)은 RS7 의 범위가 아니다.
-    if (git_ops.scmTargetIsRemote(self)) return;
     if (self.scm_commit_files_inflight != 0 or self.scm_turn_summary_inflight != 0) return;
     const identity = git_ops.activeOrLastSessionIdentity(self);
     if (identity.len == 0) return;
     const ring = self.turn_rings.find(identity) orelse return;
     const turn = ring.nextUnknownFiles() orelse return;
 
-    const repo = self.git_repo orelse return;
+    // **tree 가 있는 기계에서 읽는다**(AT3c — `turnReadTarget`). 로컬 링을 원격 목록 옆에서 읽지 않는 RS7-0
+    // 가드도 그 안에 있다(RS2 1회차가 놓쳤던 자리 — 링은 로컬 세션에서 이미 차 있을 수 있다). 못 가는 경우는
+    // **읽었다(0)로 적는다** — 매 tick 다시 묻지 않게(`applyTurnSummary` 의 실패 규율과 같다).
+    var ctl_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const target = switch (turnReadTarget(self, identity, &ctl_buf)) {
+        .read => |t| t,
+        .unavailable => {
+            // 로컬 링 + 원격 목록(RS7-0)은 **적지 않는다** — 로컬 목록으로 돌아오면 그때 읽는다. 원격 링인데
+            // 소켓이 없는 것만 0 으로 닫는다(그 세션의 `maru ssh` 가 끊겼다 — 돌아와도 링은 새 세션이다).
+            if (maru.session.turn_snapshot.machineOf(self.turn_rings.repoFor(identity)).len == 0) return;
+            if (self.turn_rings.findMut(identity)) |r| r.markFiles(turn.head, 0, null);
+            return;
+        },
+    };
+    const repo = target.repo;
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const git_exe = git_backend_mod.locate(&exe_buf) orelse return;
+    const git_exe = if (target.remote != null)
+        maru.session.git_command.remote_git_exe
+    else
+        git_backend_mod.locate(&exe_buf) orelse return;
     if (self.git_backend == null) {
         self.git_backend = git_backend_mod.Backend.init(self.io) catch return;
     }
@@ -2806,7 +2911,7 @@ pub fn pumpTurnSummaries(self: *AppSession) void {
     };
 
     self.scm_commit_files_seq += 1;
-    if (!self.git_backend.?.submitTurnFiles(git_exe, repo, key, self.scm_commit_files_seq)) {
+    if (!self.git_backend.?.submitTurnFiles(git_exe, repo, key, self.scm_commit_files_seq, target.remote)) {
         self.allocator.free(head_owned);
         self.allocator.free(session_owned);
         return;
@@ -2834,7 +2939,8 @@ fn applyTurnSummary(self: *AppSession, ok: bool, text: []const u8) void {
     // 바뀌었을 수 있고, 그때 «지금 활성» 링에 적으면 남의 세션에 숫자를 적는다. 그 세션이 맵에서
     // 밀려났으면 버린다 — 화면에도 없는 링이다.
     if (self.scm_turn_summary_session) |sid| {
-        if (self.turn_rings.findMut(sid)) |ring| ring.markFiles(head, count);
+        const joined: ?u32 = if (ok) joinedEditedCount(self, head, sid, text) else null;
+        if (self.turn_rings.findMut(sid)) |ring| ring.markFiles(head, count, joined);
     }
     self.allocator.free(head);
     self.scm_turn_summary_head = null;
@@ -4925,6 +5031,145 @@ test "턴 파일 배지: 절대경로 캡처와 상대경로 목록이 같은 �
         chrome.components.scm_dock.types.TurnFileOrigin.unknown,
         turnFileOrigin(session, turnCaptureRef(session, null), "src/edited.zig"),
     );
+}
+
+// 원격 Term(AT3c)의 턴은 **내용을 읽지 않는다** — 캡처는 경로와 트리거뿐이고(`.unknown = .remote`), `✎` 는
+// 「편집 도구가 겨냥했고 tree 목록에 있다」와 「provider 의 셸 diff 에 있다」로만 선다. 그래서 봉인 캐시
+// (`edited_count`)는 0이고, 목록이 온 자리에서 join 해 센 `edited_joined` 가 `✎N` 의 권위다(공격 G).
+test "턴 파일 배지: 원격 턴은 겨냥 ∧ 목록으로 ✎ 를 세우고, ✎N 은 목록 join 값을 쓴다 (AT3c)" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = app_session_mod.abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    // 원격 cwd 는 저장소 **하위** 디렉터리다 — 루트를 아직 모르는 동안은 꼬리 일치로, 루트가 오면 상대화로 맞는다.
+    session.git_repo = try allocator.dupe(u8, "/srv/work/app/src");
+
+    const gpa = session.allocator;
+    // 편집 도구가 겨냥한 둘(하나는 실패해서 목록에 없다) · Read 만 한 것 · 셸 diff 가 준 것.
+    try std.testing.expect(session.turn_captures.noteBefore(gpa, "R1", "/srv/work/app/src/edited.zig", .edit, .{ .unknown = .remote }));
+    try std.testing.expect(session.turn_captures.noteBefore(gpa, "R1", "/srv/work/app/src/denied.zig", .edit, .{ .unknown = .remote }));
+    try std.testing.expect(session.turn_captures.noteBefore(gpa, "R1", "/srv/work/app/src/read_only.zig", .read, .{ .unknown = .remote }));
+    try std.testing.expect(session.turn_captures.noteBefore(gpa, "R1", "/srv/work/app/src/notes.md", .edit, .{ .unknown = .remote }));
+    try std.testing.expect(session.turn_captures.noteShellDiff(gpa, "R1", "/srv/work/app/README.md"));
+    session.turn_captures.markRemote("R1");
+    const id = session.turn_captures.seal(gpa, "R1");
+    try std.testing.expect(id != 0);
+    const turn = session.turn_captures.sealedTurn(id).?;
+    try std.testing.expect(turn.remote);
+    // 봉인 캐시는 편집 도구 몫을 못 센다(내용을 안 읽었다) — 셸 diff 만 1.
+    try std.testing.expectEqual(@as(u32, 1), turn.edited_count);
+
+    var snap: maru.session.turn_snapshot.Snapshot = .{ .capture_id = id };
+    const Origin = chrome.components.scm_dock.types.TurnFileOrigin;
+    // 목록 경로는 **저장소 루트 상대**라 cwd(`src/`) 보다 위에서 시작한다.
+    try std.testing.expectEqual(Origin.ai_edit, turnFileOrigin(session, turnCaptureRef(session, &snap), "src/edited.zig"));
+    try std.testing.expectEqual(Origin.shell_edit, turnFileOrigin(session, turnCaptureRef(session, &snap), "README.md"));
+    try std.testing.expectEqual(Origin.turn_change, turnFileOrigin(session, turnCaptureRef(session, &snap), "src/read_only.zig"));
+    try std.testing.expectEqual(Origin.turn_change, turnFileOrigin(session, turnCaptureRef(session, &snap), "src/untouched.zig"));
+    // 꼬리 일치는 **경로 경계**를 본다 — `xedited.zig` 는 `edited.zig` 가 아니고, 루트의 `es.md` 는 `src/notes.md` 의 꼬리가 아니다.
+    try std.testing.expectEqual(Origin.turn_change, turnFileOrigin(session, turnCaptureRef(session, &snap), "src/xedited.zig"));
+    try std.testing.expectEqual(Origin.turn_change, turnFileOrigin(session, turnCaptureRef(session, &snap), "es.md"));
+
+    // 루트를 알면 상대화로 맞춘다 — 같은 답이어야 한다.
+    session.git_repo_remote_root = try allocator.dupe(u8, "/srv/work/app");
+    try std.testing.expectEqual(Origin.ai_edit, turnFileOrigin(session, turnCaptureRef(session, &snap), "src/edited.zig"));
+    try std.testing.expectEqual(Origin.turn_change, turnFileOrigin(session, turnCaptureRef(session, &snap), "src/xedited.zig"));
+
+    // 목록이 오기 전 `✎N` 은 0(그리지 않는 자리) — 캐시 1을 **원격에서는 쓰지 않는다**.
+    try std.testing.expectEqual(@as(u32, 0), editedCountFor(session, &snap));
+
+    // 목록 도착: 링에 실린 턴에 join 값이 적힌다. denied.zig 는 목록에 없으므로 세지 않는다 → edited + README = 2.
+    const ring = session.turn_rings.ringFor("R1", "/srv/work/app/src").?;
+    ring.push(.{ .tree = "base0000", .surface_id = 1 });
+    ring.push(.{ .tree = "head1111", .surface_id = 1, .capture_id = id });
+    session.scm_turn_summary_head = try allocator.dupe(u8, "head1111");
+    session.scm_turn_summary_session = try allocator.dupe(u8, "R1");
+    const list =
+        ":100644 100644 aaaaaaa bbbbbbb M\tsrc/edited.zig\n" ++
+        ":100644 100644 aaaaaaa bbbbbbb M\tREADME.md\n" ++
+        ":100644 100644 aaaaaaa bbbbbbb M\tsrc/untouched.zig\n" ++
+        "3\t1\tsrc/edited.zig\n1\t0\tREADME.md\n2\t2\tsrc/untouched.zig\n";
+    applyTurnSummary(session, true, list);
+    const marked = session.turn_rings.find("R1").?.findOid("head1111").?;
+    try std.testing.expect(marked.files_known);
+    try std.testing.expectEqual(@as(u32, 3), marked.changed_files);
+    try std.testing.expect(marked.edited_joined_known);
+    try std.testing.expectEqual(@as(u32, 2), marked.edited_joined);
+    try std.testing.expectEqual(@as(u32, 2), editedCountFor(session, marked));
+}
+
+// 턴 목록·요약 읽기가 **tree 가 있는 기계**로 가는지(AT3c). 링의 저장소 키가 기계를 말하고, 원격 링은
+// 활성 저장소와 무관하게 그 기계의 소켓으로 간다 — 소켓이 없으면 로컬로 떨어지지 않는다(RS2 1회차의 함정).
+test "턴 스냅샷 읽기 대상: 링의 저장소 키가 기계를 정한다 — 원격 링은 그 소켓으로, 없으면 안 읽는다 (AT3c)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    // HOME 은 **짧은 우리 자리**로 — 소켓 경로는 103 바이트 규격이라 다른 판정자가 남긴 긴 HOME 으로는 못 만든다,
+    // 그리고 사용자의 `~/.cache/maru` 에 파일을 놓지 않는다.
+    var env_guard = try app_session_mod.workspace_ops.ProviderEnvGuard.capture(allocator);
+    defer env_guard.restore();
+    var home_buf: [64]u8 = undefined;
+    const home = try std.fmt.bufPrintZ(&home_buf, "/tmp/maru-at3c-{d}", .{std.c.getpid()});
+    try std.Io.Dir.cwd().createDirPath(io, home);
+    defer std.Io.Dir.cwd().deleteTree(io, home) catch {};
+    try std.testing.expectEqual(@as(c_int, 0), app_session_mod.setenv("HOME", home.ptr, 1));
+    var cache_buf: [96]u8 = undefined;
+    try std.Io.Dir.cwd().createDirPath(io, try std.fmt.bufPrint(&cache_buf, "{s}/.cache/maru", .{home}));
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = app_session_mod.abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(app_session_mod.CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.git_repo = try allocator.dupe(u8, "/local/repo");
+    var ctl_buf: [std.fs.max_path_bytes]u8 = undefined;
+
+    // ⑴ 로컬 링 — 링에 적힌 경로로 로컬 git.
+    _ = session.turn_rings.ringFor("L1", "/local/repo").?;
+    switch (turnReadTarget(session, "L1", &ctl_buf)) {
+        .read => |t| {
+            try std.testing.expectEqualStrings("/local/repo", t.repo);
+            try std.testing.expect(t.remote == null);
+        },
+        .unavailable => return error.LocalRingShouldRead,
+    }
+
+    // ⑵ 원격 링, 소켓 없음 — **로컬로 떨어지지 않는다.**
+    const dest = "maru-at3c-judge@127.0.0.1";
+    _ = session.turn_rings.ringFor("R1", dest ++ ":/srv/app").?;
+    try std.testing.expect(turnReadTarget(session, "R1", &ctl_buf) == .unavailable);
+
+    // ⑶ 원격 링, 소켓 있음 — 그 기계의 소켓과 **경로 부분**으로 간다(키 그대로 넘기면 `git -C user@host:/…` 다).
+    const ctl = try maru.cli.ssh.controlSocketPath(allocator, home, dest);
+    defer allocator.free(ctl);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = ctl, .data = "" });
+    defer std.Io.Dir.cwd().deleteFile(io, ctl) catch {};
+    switch (turnReadTarget(session, "R1", &ctl_buf)) {
+        .read => |t| {
+            try std.testing.expectEqualStrings("/srv/app", t.repo);
+            const r = t.remote orelse return error.RemoteRingShouldGoRemote;
+            try std.testing.expectEqualStrings(dest, r.dest);
+            try std.testing.expectEqualStrings(ctl, r.control_path);
+        },
+        .unavailable => return error.RemoteRingWithSocketShouldRead,
+    }
+
+    // ⑷ 활성 저장소가 원격이어도 원격 링은 **자기 기계**로 간다(활성 목적지가 아니다) — 로컬 링은 RS7-0 대로 막힌다.
+    session.git_repo_dest = try allocator.dupe(u8, "someone@else");
+    try std.testing.expect(turnReadTarget(session, "R1", &ctl_buf) == .read);
+    try std.testing.expect(turnReadTarget(session, "L1", &ctl_buf) == .unavailable);
 }
 
 test "턴 요약: 캡처가 센 편집 수를 tree 의 수와 **나란히** 말한다" {

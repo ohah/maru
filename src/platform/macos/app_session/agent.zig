@@ -153,6 +153,58 @@ pub const TurnFacts = struct {
     session: []const u8 = "",
 };
 
+/// 링에 적을 저장소 키(AT3c): 원격 Term 이면 **기계가 든다**(`turn_snapshot.repoKey`). 이 한 줄이 갈리면 두 기계의
+/// 같은 철자 경로가 한 링에 섞이고, 목록 읽기가 tree 없는 기계로 간다 — 그래서 seam 으로 떼어 판정자가 직접 본다.
+pub fn snapshotRepoKey(buf: []u8, remote_target: ?git_ops.RemoteTarget, repo: []const u8) ?[]const u8 {
+    return maru.session.turn_snapshot.repoKey(buf, if (remote_target) |r| r.dest else "", repo);
+}
+
+/// 원격 턴 스냅샷의 임시 index 경로(AT3c) — 원격 `/tmp` 의 파일. **창·목적지마다 다르다**(로컬 `turnIndexPath` 와
+/// 같은 이유 — 두 창이 같은 파일을 쓰면 한쪽 스냅샷이 다른 쪽 작업트리를 담는다). 이름은 창 포인터와 dest 의
+/// 해시라 제어문자·따옴표가 없고(`buildRemoteWithIndex` 가 거른다) `/tmp` 는 POSIX 다. 턴마다 재사용하며 창이
+/// 닫혀도 지우지 않는다 — 원격에 지우는 손이 없다. 파일 하나(~수백 KB)가 남고 OS 의 `/tmp` 정리가 거둔다(한계).
+fn remoteTurnIndexPath(buf: *[96]u8, self: *const AppSession, dest: []const u8) []const u8 {
+    var h = std.hash.Fnv1a_64.init();
+    h.update(std.mem.asBytes(&@intFromPtr(self)));
+    h.update(dest);
+    return std.fmt.bufPrint(buf, "/tmp/maru-turn-{x:0>16}.idx", .{h.final()}) catch unreachable;
+}
+
+/// 한 배치의 이벤트를 턴 경계 규율대로 먹는다 — **로컬 배치 루프와 원격 소비자가 함께 쓴다**(AT3c).
+///
+/// 규율은 「턴이 끝나는 그 순간」에 셋을 굳히는 것이다(계획 AT4 불변): 키·제목(`BatchTurnFacts`), 사본
+/// (`sealTurnCaptureNow`), 세션 신원. 배치 끝으로 미루면 다음 턴의 것이 섞인다 — AT2·AT3·AT0 이 각각 겪었다.
+/// 예전에는 로컬 루프에 인라인이라 원격 소비자는 `applied` 를 **버렸고**, 그래서 원격 Term 에는 봉인도
+/// 스냅샷도 없었다(재실측 ⑩). 한 자리로 뽑아 두 소비자가 갈릴 수 없게 한다(§2 의 세트 규율과 같은 형태).
+pub const TurnBatch = struct {
+    conversation_changed: bool = false,
+    turn_ended: bool = false,
+    base_opened: bool = false,
+    facts: BatchTurnFacts = .{},
+    capture: turn_capture.Id = 0,
+
+    pub fn step(self_: *TurnBatch, self: *AppSession, term: *Term, ev: maru.session.agent_hook_event.Event) void {
+        const applied = applyHookEvent(self, term, ev);
+        if (applied.base) self_.base_opened = true;
+        // **턴이 끝나는 그 순간** 사실과 사본을 함께 굳힌다 — 배치 끝에서 하면 다음 턴의 것이 섞인다.
+        if (applied.turn_end) {
+            self_.facts.captureFrom(term);
+            self_.capture = sealTurnCaptureNow(self, term);
+            self_.turn_ended = true;
+        }
+        if (applied.conversation) self_.conversation_changed = true;
+        // 활동 시각은 관측 모드와 같은 필드를 쓴다 — 사이드바의 «몇 분 전» 이 소스를 타지 않게.
+        term.agent_last_output_ms = self.awakeMs();
+        term.agent_last_output_wall_ns = @intCast(std.Io.Clock.real.now(self.io).nanoseconds);
+    }
+
+    /// 배치가 끝나면 **한 번** 스냅샷을 청한다 — 배치 안의 이벤트는 같은 작업트리를 본다(로컬 루프의 주석).
+    pub fn finish(self_: *const TurnBatch, self: *AppSession, term: *Term) void {
+        if (self_.turn_ended or self_.base_opened)
+            captureTurnSnapshot(self, term.surfaceId(), if (self_.turn_ended) self_.facts.facts() else .{}, self_.capture);
+    }
+};
+
 /// 테스트 전용 — **마지막 캡처에 넘어간 턴 사실**. `test_turn_snapshot_calls` 와 같은 규약이고 같은 이유다:
 /// 이 함수는 git 저장소가 없으면 조용히 돌아가므로 **링(결과)으로는 「무엇을 넘겼나」를 볼 수 없다.**
 /// 넘긴 값 자체를 기록해야 「배치 안에서 다음 턴이 시작돼도 끝난 턴의 사실을 든다」를 잴 수 있다.
@@ -192,14 +244,18 @@ fn captureBeforeForEvent(self: *AppSession, term: *Term, ev: maru.session.agent_
         if (term.agent_hook_backlog_catchup) return;
         var it = maru.session.agent_hook_event.changedFiles(ev);
         const first = it.next() orelse return;
+        // **원격 Term 은 경로만 적는다**(AT3c) — 루트도 중첩 저장소도 이 기계에 없다. provider 가 저쪽 저장소의
+        // 작업트리 diff 로 검증한 목록이므로 워크트리 제외는 **저쪽 tree 목록과의 join** 이 대신한다(목록에 없는
+        // 경로는 애초에 행이 없다).
+        const remote = termIsRemote(term);
         var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const root = self.git_repo orelse (git_ops.gitRepoRoot(self, &repo_buf) orelse return);
+        const root: []const u8 = if (remote) "" else (self.git_repo orelse (git_ops.gitRepoRoot(self, &repo_buf) orelse return));
         var pending: ?[]const u8 = first;
         while (pending) |raw| : (pending = it.next()) {
             var decoded_buf: [std.fs.max_path_bytes]u8 = undefined;
             const path = decodeHookPath(&decoded_buf, raw) orelse continue;
             if (!maru.path_shape.isAbsolute(path)) continue; // 실측 1,637/1,637 절대경로 — 상대는 어느 루트인지 모른다
-            if (capture_file.underNestedRepo(root, path)) continue;
+            if (!remote and capture_file.underNestedRepo(root, path)) continue;
             _ = self.turn_captures.noteShellDiff(self.allocator, identity, path);
         }
         return;
@@ -237,8 +293,11 @@ fn captureBeforeForEvent(self: *AppSession, term: *Term, ev: maru.session.agent_
         return;
     }
 
+    // **원격 Term 은 읽지 않는다**(AT3c) — 경로마다 ssh 왕복은 못 낸다. 경로와 트리거만 적고 내용은 `.remote`
+    // (읽지 않았다 — 못 읽은 게 아니다). 근거는 봉인 뒤 provider diff·tree 목록에서 온다(`Entry.remoteEditTargeted`).
+    const remote = termIsRemote(term);
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const root = self.git_repo orelse (git_ops.gitRepoRoot(self, &repo_buf) orelse return);
+    const root: []const u8 = if (remote) "" else (self.git_repo orelse (git_ops.gitRepoRoot(self, &repo_buf) orelse return));
 
     // Claude 는 `tool_input.file_path` 하나, Codex 는 패치 텍스트 안에 여러 개다.
     // ⚠️ `patchPaths` 는 `tool_command` 를 훑으므로 **`apply_patch` 에만** 부른다 — 셸 이벤트에 부르면
@@ -246,7 +305,7 @@ fn captureBeforeForEvent(self: *AppSession, term: *Term, ev: maru.session.agent_
     if (ev.file_path.len > 0) {
         var decoded_buf: [std.fs.max_path_bytes]u8 = undefined;
         const path = decodeHookPath(&decoded_buf, ev.file_path) orelse return;
-        noteBeforePath(self, identity, root, path, triggerForTool(ev.tool_name));
+        noteBeforePath(self, identity, root, path, triggerForTool(ev.tool_name), remote);
         return;
     }
     if (!std.mem.eql(u8, ev.tool_name, "apply_patch")) return;
@@ -259,11 +318,14 @@ fn captureBeforeForEvent(self: *AppSession, term: *Term, ev: maru.session.agent_
         var decoded_buf: [std.fs.max_path_bytes]u8 = undefined;
         const path = decodeHookPath(&decoded_buf, p) orelse continue;
         var joined: [std.fs.max_path_bytes]u8 = undefined;
+        // 원격에서는 루트를 모르므로 상대경로는 못 잇는다 — 그런 경로는 건너뛴다(계약 §2.3.1 이 «섞인다» 고 적었지만
+        // 이 기계 실측은 전부 절대였다. 잇지 못한 경로를 지어내지 않는다).
+        if (remote and !maru.path_shape.isAbsolute(path)) continue;
         const abs = if (maru.path_shape.isAbsolute(path))
             path
         else
             (std.fmt.bufPrint(&joined, "{s}/{s}", .{ root, path }) catch continue);
-        noteBeforePath(self, identity, root, abs, .edit);
+        noteBeforePath(self, identity, root, abs, .edit, remote);
     }
 }
 
@@ -277,6 +339,12 @@ fn captureBeforeForEvent(self: *AppSession, term: *Term, ev: maru.session.agent_
 /// **넘치면 아예 안 담는다(자르지 않는다).** 잘린 경로는 **다른 파일**을 가리킨다 — 없는 것보다 나쁘다.
 /// (`decodeInto` 는 `\uXXXX` 를 자리만 지키는 `?` 로 푼다. 그런 경로는 열리지 않아 «모름» 으로 떨어지는데,
 /// 원문 그대로 열어도 마찬가지라 잃는 것이 없다.)
+/// 이 Term 이 `maru ssh` 너머의 원격인가(AT3c). 관측의 `ssh_remote_dest_present` 가 그 사실이다 — `remoteScmTargetFor`
+/// 는 소켓 `stat` 까지 하므로 이벤트마다 부르지 않는다. 캡처는 **원격이면 읽지 않는다**(경로만 적는다).
+fn termIsRemote(term: *const Term) bool {
+    return term.rt.observation.ssh_remote_dest_present;
+}
+
 fn decodeHookPath(buf: []u8, raw: []const u8) ?[]const u8 {
     if (raw.len == 0 or raw.len > buf.len) return null;
     const decoded = maru.session.agent_hook_event.decodeInto(buf, raw);
@@ -325,6 +393,8 @@ fn noteBeforePath(
     root: []const u8,
     path: []const u8,
     trigger: turn_capture.Trigger,
+    /// 원격 Term(AT3c) — 읽지 않고 `.unknown = .remote` 로 적는다.
+    remote: bool,
 ) void {
     // **이미 있으면 읽지도 않는다.** 「첫 캡처로 고정」은 저장 층의 규칙이지만, 여기서 먼저 걸러야
     // 같은 파일을 여러 번 만지는 턴에서 **읽기가 도구 수만큼 는다**(순수 층은 읽은 뒤에야 버린다).
@@ -334,7 +404,7 @@ fn noteBeforePath(
             return;
         }
     }
-    const side = capture_file.readSide(self.allocator, root, path);
+    const side: turn_capture.Side = if (remote) .{ .unknown = .remote } else capture_file.readSide(self.allocator, root, path);
     _ = self.turn_captures.noteBefore(self.allocator, identity, path, trigger, side);
 }
 
@@ -355,7 +425,7 @@ pub fn sealTurnCaptureNow(self: *AppSession, term: *Term) turn_capture.Id {
     // **봉인 전에 고아를 비운다** — 봉인 자리는 「링이 가리킬 수 있는 최대 + 1」이라 그 한 칸이 고아로
     // 채워지면 아직 가리켜지는 사본이 밀려난다.
     git_ops.sweepTurnCaptures(self);
-    return sealTurnCapture(self, identity);
+    return sealTurnCapture(self, identity, termIsRemote(term));
 }
 
 /// 셸 구간의 시작을 앞당기는 여유(`shell_bracket` 머리말 — 놓치는 쪽이 아니라 더 잡는 쪽으로). 훅 로그를
@@ -369,7 +439,7 @@ fn wallMs(self: *AppSession) u64 {
     return @intCast(@divFloor(ns, std.time.ns_per_ms));
 }
 
-fn sealTurnCapture(self: *AppSession, identity: []const u8) turn_capture.Id {
+fn sealTurnCapture(self: *AppSession, identity: []const u8, remote: bool) turn_capture.Id {
     const turn = self.turn_captures.openTurn(identity) orelse return 0;
     // **열린 셸 구간을 봉인 전에 닫는다**(AT3b-1). `Post` 도 `PostToolUseFailure` 도 안 오는 길(거부·
     // 중단·크래시)과 턴 끝까지 일부러 열어 둔 배경 호출이 여기서 닫힌다. 봉인 뒤 `Turn` 은 안 변한다는
@@ -380,6 +450,12 @@ fn sealTurnCapture(self: *AppSession, identity: []const u8) turn_capture.Id {
     // 필요한 자리다(파일 행이 전부 `·` 인데 왜 그런지를 말해 줄 것이 셸 수뿐이다). `Store.seal` 이
     // 이미 같은 질문을 하지만, 여기서 먼저 물어야 **뒤의 저장소 루트 조회를 안 한다**.
     if (!turn.hasEvidence()) return 0;
+    // **원격 턴은 after 를 읽지 않는다**(AT3c) — 항목마다 «읽지 않았다» 를 적고 턴에 표시한다. `✎N` 의 편집 도구
+    // 몫은 목록 join 때(`applyTurnSummary`) 센다.
+    if (remote) {
+        self.turn_captures.markRemote(identity);
+        return self.turn_captures.seal(self.allocator, identity);
+    }
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
     // 경로가 없으면 사본을 뜰 것도 없다 — 루트를 찾는 syscall 도 건너뛴다.
     const root = if (turn.entries.items.len == 0) "" else (self.git_repo orelse (git_ops.gitRepoRoot(self, &repo_buf) orelse ""));
@@ -473,12 +549,24 @@ pub fn captureTurnSnapshot(self: *AppSession, surface_id: u64, facts: TurnFacts,
     // 자리다). 여기는 `add -A` 로 **작업트리를 통째로 임시 index 에 굳히는** 경로인데, `git_repo` 에 든
     // 것이 원격 경로라 로컬에 우연히 같은 경로가 있으면 **그 로컬 트리**가 원격 세션의 턴 스냅샷으로
     // 박힌다. 원격 턴의 변경분은 RS3·RS4 가 원격 축으로 다시 잇는다.
-    if (git_ops.scmTargetIsRemote(self)) return;
+    // **원격 Term 의 턴은 원격에서 찍는다**(AT3c). 그 Term 의 `(dest, cwd)` 가 대상이고 임시 index 는 원격 `/tmp` 다.
+    // `git -C <cwd>` 가 상위 저장소를 스스로 찾으므로 루트가 필요 없다(RS2 가 목록에서 같은 이유로 cwd 를 쓴다).
+    // 위 경고는 **로컬 Term** 에 그대로 산다 — 로컬 Term 인데 활성 SCM 대상이 원격이면 여전히 건너뛴다.
+    var remote_dest_buf: [git_ops.max_remote_dest_bytes]u8 = undefined;
+    var remote_ctl_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var remote_cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var remote_index_buf: [96]u8 = undefined;
+    const remote_target = if (term_ops.termBySurfaceId(self, surface_id)) |term|
+        git_ops.remoteScmTargetFor(self, term, &remote_dest_buf, &remote_ctl_buf, &remote_cwd_buf)
+    else
+        null;
+    if (remote_target == null and git_ops.scmTargetIsRemote(self)) return;
     var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const repo = self.git_repo orelse (git_ops.gitRepoRoot(self, &repo_buf) orelse return);
+    const repo: []const u8 = if (remote_target) |r| r.cwd else (self.git_repo orelse (git_ops.gitRepoRoot(self, &repo_buf) orelse return));
     // 저장소 전환은 **그 세션의 링만** 비운다 — `RingMap.ringFor` 가 수확 시점에 판정한다(§6.1).
 
-    const index_file = self.turnIndexPath() orelse return;
+    const index_file: []const u8 = if (remote_target) |r| remoteTurnIndexPath(&remote_index_buf, self, r.dest) else (self.turnIndexPath() orelse return);
+    const remote: ?maru.session.git_command.Remote = if (remote_target) |r| .{ .dest = r.dest, .control_path = r.ctl } else null;
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
     const git_exe = git_backend_mod.locate(&exe_buf) orelse return;
     if (self.git_backend == null) {
@@ -487,11 +575,18 @@ pub fn captureTurnSnapshot(self: *AppSession, surface_id: u64, facts: TurnFacts,
     // **요청 시점의 신원을 붙들어 둔다**(적대적 검증 1회차). 수확 때 다시 조회하면 그 사이 `/clear` 로
     // 세션이 갈렸을 때 옛 턴이 새 세션 링에 들어간다.
     const owned = self.allocator.dupe(u8, identity) catch return;
-    const owned_repo = self.allocator.dupe(u8, repo) catch {
+    // 링의 저장소 키에는 **기계**가 든다(AT3c — `turn_snapshot.repoKey`). 같은 철자의 경로가 두 기계에 있어도
+    // 링이 남의 tree 를 같은 저장소로 보지 않고, 목록 읽기(`pumpTurnSummaries`)가 tree 가 있는 기계로 간다.
+    var repo_key_buf: [maru.session.turn_snapshot.max_repo_len]u8 = undefined;
+    const repo_key = snapshotRepoKey(&repo_key_buf, remote_target, repo) orelse {
         self.allocator.free(owned);
         return;
     };
-    if (!self.git_backend.?.submitSnapshot(git_exe, repo, index_file, surface_id)) {
+    const owned_repo = self.allocator.dupe(u8, repo_key) catch {
+        self.allocator.free(owned);
+        return;
+    };
+    if (!self.git_backend.?.submitSnapshot(git_exe, repo, index_file, surface_id, remote)) {
         // **거절을 조용히 삼키지 않는다**(적대적 검증 3회차). 백엔드 스냅샷 자리가 하나라 다른 세션의
         // 캡처가 도는 중이면 이 턴은 **영영 안 찍힌다** — 재시도하면 스냅샷 시점이 «턴이 끝난 순간» 이
         // 아니라 «재시도한 순간» 이 되어 내용이 틀린 턴을 만드는데, 그것은 없는 것보다 나쁘다.
@@ -1951,6 +2046,7 @@ pub fn consumeRemoteAgentLines(self: *AppSession, term: *Term, lines: []const []
     var ch = &(term.agent_remote_channel orelse return);
 
     const nonce = term.agent_remote_nonce[0..term.agent_remote_nonce_len];
+    var remote_batch: TurnBatch = .{};
     for (lines) |line| {
         switch (ch.feed(line, now_ms)) {
             // 커서는 **host 소유**다(채널이 host 당 하나라 모든 Term 이 같은 줄을 본다) — 기억은
@@ -1998,10 +2094,13 @@ pub fn consumeRemoteAgentLines(self: *AppSession, term: *Term, lines: []const []
                     // 행 높이가 바뀐다(에이전트 행은 상태·대화 줄을 더 쓴다) — 재투영까지 해야 한다.
                     sidebar_ops.rebuildSidebar(self) catch {};
                 }
-                _ = applyHookEvent(self, term, ev);
+                // **로컬과 같은 턴 경계 규율**(AT3c — `TurnBatch` 주석). 예전엔 `applied` 를 버려 원격 Term 에는
+                // 봉인도 스냅샷도 없었다.
+                remote_batch.step(self, term, ev);
             },
         }
     }
+    remote_batch.finish(self, term);
     // **원격 이벤트도 배지까지 가야 한다**(§1.6-⑴). `applyHookEvent` 는 훅 자리만 쓰므로, 여기서
     // 권위표를 돌리지 않으면 원격 pane 의 배지가 영영 안 움직인다. C2 의 셈은 `screen_seq` 가 그대로라
     // 늘지 않는다 — 중재를 한 번 더 부르는 것과 화면을 한 번 더 보는 것은 다르다.
@@ -2072,27 +2171,13 @@ pub fn pollAgentHookEvents(self: *AppSession, term: *Term, displayed: bool) void
     const before = term.agent_state;
     const tool_before = term.agent_hook_tool;
     const had_reply = term.agent_transcript.owned.reply().len > 0;
-    var conversation_changed = false;
-    var turn_ended = false;
-    var base_opened = false;
-    var batch_facts: BatchTurnFacts = .{};
-    var batch_capture: turn_capture.Id = 0;
-    for (events[0..batch.count]) |ev| {
-        const applied = applyHookEvent(self, term, ev);
-        if (applied.base) base_opened = true;
-        // **턴이 끝나는 그 순간** 사실을 굳힌다(`BatchTurnFacts` 주석 — 배치 끝에서 읽으면 다음 턴의
-        // 키·빈 제목이 실린다).
-        // **턴이 끝나는 그 순간** 사실과 사본을 함께 굳힌다 — 배치 끝에서 하면 다음 턴의 것이 섞인다.
-        if (applied.turn_end) {
-            batch_facts.captureFrom(term);
-            batch_capture = sealTurnCaptureNow(self, term);
-        }
-        if (applied.conversation) conversation_changed = true;
-        if (applied.turn_end) turn_ended = true;
-        // 활동 시각은 관측 모드와 같은 필드를 쓴다 — 사이드바의 «몇 분 전» 이 소스를 타지 않게.
-        term.agent_last_output_ms = self.awakeMs();
-        term.agent_last_output_wall_ns = @intCast(std.Io.Clock.real.now(self.io).nanoseconds);
-    }
+    var turn_batch: TurnBatch = .{};
+    for (events[0..batch.count]) |ev| turn_batch.step(self, term, ev);
+    const conversation_changed = turn_batch.conversation_changed;
+    const turn_ended = turn_batch.turn_ended;
+    const base_opened = turn_batch.base_opened;
+    const batch_facts = turn_batch.facts;
+    const batch_capture = turn_batch.capture;
     if (batch.dropped != 0 or batch.recovered != 0) {
         // **개수만** 남긴다 — payload 에는 프롬프트 원문과 셸 명령이 들어 있다(계약 §7).
         if (diag_gate.maruDebugEnabled()) std.log.scoped(.agenthook).info(

@@ -235,7 +235,9 @@ provider 의 보존 기간). 수치를 인용할 때 파일 수를 함께 적는
 드문 예외가 아니라 **기본 경로**이고, AT3b 가 없으면 `✎` 는 이 사용자에게 거의 뜨지 않는다.
 
 Codex(311 파일 · 338,872 호출)는 반대다: 편집이 `apply_patch`(10,228) 로 가고 셸 쓰기만 있는 턴은
-**5.7%** 다. AT3b 의 값어치는 **Claude 쪽에 있다.**
+**16.8%** 다(⚠️ 처음엔 5.7% 로 적었다 — codex 의 `exec` custom tool(223,661건, JS 로 `tools.exec_command({cmd})` 를
+부르는 스크립트)을 셸로 안 센 과소집계였다. 2026-09-20 정정). AT3b 의 값어치는 여전히 Claude 쪽이 크지만 Codex 도
+작지 않다 — AT3b-3 폴백의 무게가 그만큼 는다.
 
 **② 배경 호출** (Claude `Bash` 89,526): ⓐ `run_in_background` **5.1%** · ⓑ 스스로 배경화 **0.8%**
 (heredoc 본문의 `&self` 같은 코드를 세지 않도록 본문을 벗기고 잰다 — 안 벗기면 5.7% 로 튄다, 8월의
@@ -549,6 +551,27 @@ files a Bash command changed to the Bash tool result when the Bash tool handles 
 — **4.6% 가 우리 줄 상한(32 KiB)을 넘긴다**(hunks 때문. `changedFiles` 만은 최대 7.4 KB). 훅 payload 의
 `tool_response` 에 **그대로 실려 온다**(실측). Claude Code 자신의 `/rewind` 체크포인트(`file-history-snapshot`)는 편집
 도구 파일만 추적한다(6 세션 42건 전부 — 셸 편집 0).
+
+**⑩ ⚠️ 이 개발자의 워크플로는 전부 `maru ssh`(원격 경로)다 — 로컬 훅 파이프라인(AT1~AT3b)은 여기서 한 번도 안 돈다**
+(2026-09-20, 「다음 작업」 주장의 적대적 검증 → 실측). 이 Mac 에서 지금 도는 에이전트 12개(claude 9·codex 3)는 **전부**
+tmux 서버 `maru-sessionhost`(2026-08-11 09:31, ssh 로그인 셸에서 손으로 띄운 것 — maru 코드·launchd·rc 어디에도 없다)
+안에 있고, 프로젝트마다 세션 하나(`allthatnba`·`hwpjs`·`maru-editor`·`maru-mobile`·`maru-refactor`·… 11개, pane 하나씩).
+그 세션에 붙은 tmux 클라이언트 10개는 **모두 `sshd-session` 의 자식**이고 `SSH_CLIENT=211.50.74.130` 이며 env 에
+`LC_MARU_PANE=host_<host_id>_<runtime_id>`(원격 pane nonce)를 든다 — 즉 **다른 기기의 maru 가 이 Mac 에 `maru ssh` 로
+들어와 `tmux attach-session -t <프로젝트>` 를 한 Term 들**이다. 이 Mac 에 GUI maru 는 떠 있지 않다(session host 데몬뿐).
+
+그래서:
+- 이 Mac 의 `~/.claude/settings.json` 에 **원격 세트가 서 있던 것이 맞는 상태**였고(원격 CLI `maru agent-hooks` 가 심는다),
+  어제 제가 로컬 세트로 «고친» 것은 이 워크플로에서는 오히려 잘못이다(tmux 안 pane 에 `MARU_HOOK_*` 이 없어 로컬 훅은
+  `exit 0` — 오늘 로컬 이벤트 0건). 핑퐁의 정체: **이 Mac 이 «원격 호스트»이고, 여기서 가끔 도는 로컬 앱/테스트가 로컬
+  세트로 되돌린다.** 로컬 설치는 백업(`settings.json.bak-20260920-at3b1`)으로 되돌려야 한다.
+- 원격 경로는 [remote-agent-state.md](remote-agent-state.md) §0 대로 **배지·대화 줄만**이고 **턴 경계 스냅샷은 비범위**
+  (사용자 결정 2026-08-29), 세트도 `PreToolUse`·`PostToolUse` 를 뺀다(RA1). 즉 AT0~AT3b 가 만든 턴 목록·`✎`·셸 diff 귀속은
+  **이 사용자 화면에 나온 적이 없다.** 나오려면 원격 경로에 ⑴ `Pre`/`Post` 이벤트(네트워크를 건너는 payload — RA1 이
+  뺀 이유 셋: 비용·보안·codex 재승인) ⑵ **원격 호스트에서 도는** 스냅샷·캡처(파일이 거기 있다 — `remote-scm.md` 의 원격 git
+  실행 경로와 같은 축) ⑶ 링·캡처 결과의 전송이 필요하다. 「tmux 안의 로컬 pane 에 신원 주기」(직전 판)는 **문제를 잘못
+  짚은 것**이었다 — 로컬 pane 이 아니라 원격 Term 이다.
+- 세션 간 겹침(재실측 ①)·워크트리(②) 수치는 그대로 유효하고, tmux 질의 비용(`list-clients`+`list-panes -a`)은 **10 ms** 다.
 
 → **AT3b-2 의 1차 소스가 바뀐다.** 시간 창(ctime)이 아니라 **provider 가 명령 단위로 검증한 목록**이다: 명령이 끝난
 순간의 작업트리 diff 라 창이 명령 길이만큼 좁고, 부작용 쓰기·새 파일까지 잡는다. ctime 스캔은 **폴백**으로 내려간다
@@ -968,6 +991,115 @@ CLI 하니스를 먼저 만들면 「스트림은 열리는데 아무것도 안 
 `.env`·로컬 설정이 **안 보인다.** 두 소스의 정밀도가 다르므로(훅은 에이전트가 **이름을 준** 경로만,
 FSEvents 는 **구간 안의 모든 쓰기**) 필터를 달리 잡는 것은 방어할 수 있다 — 다만 **적어 두고 정하는
 결정**이어야 하고, 사고로 갈라지면 안 된다.
+
+### AT3c — 원격 Term 의 턴 스냅샷·귀속 ✅ 완료 (2026-09-21 — 사용자 결정: 8/29 비범위를 뒤집는다)
+
+**왜**: 재실측 ⑩ — 이 개발자는 다른 기기의 maru 에서 `maru ssh` 로 이 Mac 에 들어와 tmux 안에서 에이전트를 돌린다.
+[remote-agent-state.md](remote-agent-state.md) §0 은 원격을 **배지·대화 줄만**으로 못 박아(2026-08-29) AT0~AT3b 가 만든
+턴 목록·`✎`·셸 diff 귀속이 **이 사용자 화면에 한 번도 안 나왔다.** 2026-09-21 사용자 결정으로 그 비범위를 푼다.
+
+**착수 전 실측 (2026-09-21)** — ⚠️ 성격을 가른다: 이 Mac 은 **원격 호스트 쪽**이라 GUI 쪽에서만 잴 수 있는 것(RTT·원격
+스냅샷 왕복·끝에서 끝까지 지연)은 **못 쟀다**(ControlMaster 소켓이 반대편 기기에 있고 `ssh localhost` 는 키가 없다). 구현 뒤
+사용자 기기에서 수동 검증으로 잰다.
+
+| # | 물음 | 답 | 성격 |
+|---|---|---|---|
+| ① | 원격 세트에 `Pre(*)`·`Post(Bash)`·`PostToolUseFailure(Bash)` 를 더하면 스트림에 얼마나 흐르나 | 트랜스크립트 8,885턴에서 **추정** 턴당 중앙값 11.8 KB · p90 78 KB · p99 328 KB(이벤트 수 중앙값 10). 대조: 이 Mac 의 **실제 원격 로그**(`t8.ndjson` 332줄·`t37.ndjson` 329줄, 현 세트)는 턴당 **5~7 KB** — 같은 자릿수 | 추정(대조 실측 있음) |
+| ② | 원격 이벤트가 로컬에 닿는 지연 | 스트리머 `tick_ms = 200` + 네트워크 + 로컬 poll 500. 턴 경계엔 충분, before 캡처엔 어차피 늦다(로컬도 같다 — AT3 는 before 를 **앞선 `Read`** 에서 얻는다) | 코드의 상수 |
+| ③ | 원격 프레임은 어디로 가나 | `consumeRemoteAgentFrames` → **같은 `applyHookEvent`**. 다만 `applied.turn_end` 를 버린다 — 봉인·스냅샷은 로컬 배치 루프에만 있다 | 코드 확인 |
+| ④ | 원격 git 실행 경로가 있나 | 있다 — `git_backend.runOn(remote: ?Remote)`(RS2), diff 좌우 원격 읽기(RS3a), 원격 루트 `--show-toplevel`. 스냅샷 잡은 `GIT_INDEX_FILE` 을 env 로 걸므로 원격에서는 명령 문자열 앞에 붙인다. **실제로 돌려 보진 못했다** | 코드 확인 |
+| ⑤ | 원격 RTT · 원격 스냅샷 왕복 | **못 쟀다.** 스냅샷 자체의 원격 CPU 비용은 이 Mac 에서 0.26~0.52 s(AT3b 재실측 ⑤) | 미측 |
+| ⑥ | 세트 둘의 핑퐁 | 원격 세트를 로컬과 같은 이벤트로 하면 남는 차이는 로그 경로·신원 env 뿐 — 커맨드 하나가 두 모양을 받게 하면 설치기 둘이 같은 바이트를 써 핑퐁이 사라진다. 원격 CLI 도 로컬과 같은 `applyEntries` 로 신뢰 값을 쓴다(`main.zig:14664`) | 추론(코드 확인 하나) |
+| ⑦ | tmux 질의 · 에이전트 위치 · 클라이언트 계보 | 10 ms · 12개 전부 tmux · 10개 전부 `sshd-session` 자식(`SSH_CLIENT=211.50.74.130`) | 실측 |
+
+**설계:**
+
+1. **세트 통일** — `remote_excluded` 를 비운다. 원격도 `PreToolUse(*)`·`PostToolUse(Bash)`·`PostToolUseFailure(Bash)`.
+   RA1 이 뺀 이유 셋을 다시 본다: 비용(턴당 ~90 ms 는 원격 기계의 것 — 로컬과 같다) · 보안(payload 는 ssh 위를 지나
+   로컬 GUI 메모리에만 남는다 — 로컬과 같은 §7 규율, 원격 로그는 0600) · codex 재승인(`applyEntries` 가 값을 스스로
+   갱신하므로 프롬프트 없음 — 2026-09-20 실측). **커맨드도 하나로**(⑥): 로컬/원격 scope 가 이벤트가 아니라 **경로 분기**만
+   갈리므로 `build` 가 두 가드를 순서대로 두면 된다.
+2. **원격 소비자에 턴 경계 배선** — `consumeRemoteAgentFrames` 가 로컬 배치 루프와 같은 넷을 한다: `BatchTurnFacts`
+   굳히기 · `sealTurnCaptureNow` · base · `captureTurnSnapshot`. **한 함수로 뽑아 둘이 공유한다**(지금은 로컬 루프에
+   인라인) — 갈리면 원격이 조용히 뒤처진다(§2 의 세트 규율과 같은 형태).
+3. **원격 스냅샷** — `captureTurnSnapshot` 이 Term 의 `(host, path)`(RS2 `remoteScmTarget`)를 보고 원격이면
+   `submitSnapshot` 을 `runOn(remote)` 로: 임시 index 는 **원격 `mktemp`**, `read-tree HEAD`·`add -A`·`write-tree` 를
+   한 명령 문자열로(왕복 1회). `turn_name_status`·diff 열기는 RS3a 경로 그대로(tree OID 는 원격 저장소 것).
+4. **원격 캡처는 읽지 않는다** — `readSide` 를 원격에서 부르지 않는다(경로 하나마다 ssh 왕복은 못 낸다). 대신:
+   - 셸 편집: `bashEditDiff.changedFiles`(AT3b-2) 그대로. `after` 를 모르므로 `editedByAgent` 의 «after 를 모르면 거짓»
+     규칙을 **원격 사유로 가른다** — `Unknown.remote`(읽지 않았다, 못 읽은 게 아니다) 는 provider 를 믿는다. 되돌림(`↩`)
+     판정은 원격에서 못 한다(한계).
+   - 편집 도구: `PreToolUse(Edit·Write)` 의 경로를 `.edit` 트리거로 적고, **tree 목록에 그 경로가 있으면** `✎`
+     (before≠after 대신 «편집 도구가 겨냥했고 그 턴에 실제로 바뀌었다»). `Read` 만 한 경로는 `·`. 로컬의 판정보다
+     약하지만 거짓 `✎` 를 만들지 않는다(tree 가 바뀌었다고 말한 파일만).
+5. **RA7(한 세션 pane 여럿)** 은 건드리지 않는다 — 역조회가 Term 을 정하고, 링은 세션 id 별이라 그대로.
+6. 문서: agent-hooks.md §11(원격도 턴 스냅샷), remote-agent-state.md §0·RA1(뒤집힘), agent-turn-changes.md §8(원격 한계).
+
+**착수 전 적대적 공격 (2026-09-21):**
+
+| # | 공격 | 결과 |
+|---|---|---|
+| A | 원격 스냅샷이 `add -A` 로 **원격 작업트리를 임시 index 에 굳힐 때** 큰 저장소(kbl-ref 76k 파일)에서 원격 CPU 를 잡아먹는다 | 로컬과 같은 비용(0.26~0.52 s, git 이 gitignore 로 자른다)이고 워커라 UI 를 안 잡는다. 턴당 1회 |
+| B | `mktemp` 가 원격에 없거나 `$TMPDIR` 이 다르다 | `mktemp` 는 POSIX 다. 실패하면 스냅샷만 없고(`files_known = false`) 배지·대화 줄은 그대로 — 조용한 폴백이 아니라 «스냅샷 없음» 으로 드러난다 |
+| C | 원격 세트에 `Pre(*)` 를 넣으면 **Agent 도구 프롬프트(4 KB)·Edit 의 `oldString/newString`** 이 ssh 를 건넌다 | ssh 는 암호화되고 로컬 GUI 메모리에서 로컬과 같은 수명이다. 남는 차이는 «다른 기계에 잠시 머문다» — §7 에 적는다. 사용자가 이미 원격 diff 열기(RS3a)로 파일 전체를 건너고 있다 |
+| D | 원격 codex `hooks.json` 변경 → 재승인 프롬프트가 **아무도 안 보는 화면**에 뜬다(§11.5 의 경고) | `applyEntries` 가 원격 `config.toml` 의 값을 갱신한다(RA3 가 이미 그렇게 심는다). 공식이 맞는 한 프롬프트 없음 — AT3b-2 가 `post_tool_use` 를 실측했다 |
+| E | 커맨드 통일 뒤 **골든·게이트 13개**가 두 scope 를 다 봐야 한다 | 게이트에 «원격 env 모양» 케이스를 더한다(`LC_MARU_PANE` 만·`TMUX_PANE` 만·둘 다 없음). `isOurs`/`isLegacy` 판정은 표식 기반이라 그대로 |
+| F | 편집 도구 ✎ 규칙(4)이 **`Read` 뒤 셸 편집** 을 `·` 로 둔다 | 맞다 — 그건 `bashEditDiff` 가 잡는다. `Edit` 가 겨냥했지만 **실패**(권한 거부)한 파일은 tree 에 없으니 `✎` 가 안 붙는다 ✓ |
+| G | 원격 `after` 를 안 읽으니 `edited_count` 캐시(봉인 때 `countEdited`)가 0 이 된다 | `editedByAgent` 가 `Unknown.remote` 를 «믿는다» 로 가르므로 셸 diff 는 센다. 편집 도구 쪽은 봉인 때 tree 목록이 없어(harvest 뒤) 못 세므로 **`✎N` 을 harvest 때 다시 센다** — 로컬 규율(봉인 뒤 `entries` 불변)을 깨지 않으려면 캐시가 아니라 목록 join 때 세는 별도 값이 필요하다. 설계 항목으로 올린다 |
+| H | 같은 tmux 세션에 pane 이 둘이고 둘 다 에이전트 | RA7 미완이라 오늘도 하나로 접힌다 — 이 단계의 범위가 아니다 |
+| I | 스트리머가 죽어 있는 동안의 이벤트 | RA5-b 가 커서로 잇는다. 그 사이 `Stop` 을 놓치면 턴 둘이 합쳐진다 — 로컬에서 backlog 가 그렇듯 같은 한계 |
+
+**구현 (2026-09-21)** — 설계 1~5 그대로, 다음이 설계와 다르거나 구현 중 드러난 것이다:
+
+- (3) 임시 index 는 `mktemp` 가 아니라 **고정 이름** `/tmp/maru-turn-<fnv16(창·dest)>.idx` 다(`remoteTurnIndexPath`) — `mktemp`
+  는 왕복이 하나 더 들고 이름을 되받아야 한다. 턴마다 재사용하며 **창을 닫아도 지우지 않는다**(원격에 지우는 손이 없다 — 파일
+  하나가 남고 OS 의 `/tmp` 정리가 거둔다). 명령은 한 문자열이 아니라 `read-tree`·`add -A`·`write-tree` **세 왕복**이다
+  (`takeTurnSnapshotRemote`) — `runOnWithIndex` 가 명령 하나씩 `GIT_INDEX_FILE=<path>` 를 env 로 얹는다(`buildRemoteWithIndex`,
+  제어문자·`'`·빈 값이면 명령을 안 만든다). ControlMaster 위라 왕복당 수 ms 다(미측 — 아래).
+- (3) **목록 읽기도 tree 가 있는 기계로 간다** — 설계가 «RS3a 경로 그대로» 라고만 적었는데 실제로는 `submitTurnFiles` 에 원격
+  축이 없었고(RS7c §18.4) `pumpTurnSummaries`·`pumpCommitFiles(.agent)` 는 RS7-0 가드로 **원격이면 통째로 안 읽었다.** 링의
+  저장소 키에 **기계를 싣는다**(`turn_snapshot.repoKey` — `<dest>:<path>`, 로컬은 경로 그대로) 하고, `turnReadTarget` 이 그
+  키로 기계를 고른다: 원격 링 → 그 기계의 control socket(활성 저장소와 무관 — tree 는 거기에만 있다), 소켓 없으면 **안 읽고
+  0 으로 닫는다**(로컬로 안 떨어진다 — RS2 1회차의 함정); 로컬 링 + 원격 목록 → RS7-0 대로 막는다. 같은 철자의 경로가
+  두 기계에 있어도 링이 남의 tree 를 «같은 저장소» 로 보지 않는다(`ringFor` 가 키가 갈리면 비운다).
+- (4) 원격 캡처의 경로 join: 훅 경로는 저쪽 절대경로, 목록은 저장소 상대다. 원격 루트를 알면(`git_repo_remote_root`) 상대화,
+  아직이면 **꼬리 일치**(`…/<rel>`, 경로 경계 확인)다(`turnEntryMatches`). 한계: 활성 목적지가 그 링의 기계와 다르면 루트가
+  남의 것이라 상대화가 빗나가 `.turn_change` 로 떨어진다(꼬리 일치는 루트가 없을 때만).
+- (4)·공격 G: `✎N` 은 **목록이 온 자리에서 한 번 join 해** `Snapshot.edited_joined` 에 적고(`applyTurnSummary` →
+  `Ring.markFiles(…, joined)`), `editedCountFor` 가 원격 턴이면 그 값을 쓴다(목록 전엔 0 — 그리지 않는 자리). 봉인 캐시
+  `edited_count` 는 원격에서 셸 diff 몫만 센다.
+- (4) Codex 패치의 **상대경로**는 원격에서 루트를 몰라 잇지 못한다 — 지어내지 않고 건너뛴다(이 기계 실측은 전부 절대였다).
+- (2) `TurnBatch`(step/finish) 하나를 로컬 배치 루프와 `consumeRemoteAgentLines` 가 공유한다.
+- 원격 Term 판정은 관측의 `ssh_remote_dest_present`(`termIsRemote`) — `remoteScmTargetFor` 는 소켓 `stat` 을 하므로 이벤트마다
+  안 부르고, 스냅샷을 청할 때만 부른다. **로컬 Term 인데 활성 SCM 이 원격**이면 종전대로 스냅샷을 건너뛴다.
+
+**게이트**: `test-agent-turn-capture` 54(+harness 1 skip) · `test-remote-scm` **7/7**(loopback sshd 위 실물 — 원격 임시 index 로
+tree 를 굳히고 진짜 index 는 `?` 그대로, `turn_name_status` 가 그 tree 를 읽고, 죽은 소켓이면 `RemoteTransportFailed`) ·
+`test-scm-row-model` 32 · `test-provider-session-removal` 39 · `test-remote-explorer` 11 · `check-boundaries` · 순수 층
+(`turn_capture` 81 · `turn_snapshot` 55 · `git_command` 60 · `agent_hook_command` 84) · 훅 커맨드 게이트 14 계약.
+
+**적대적 검증 (2026-09-21, 뮤턴트 15)**:
+
+| # | 뮤턴트 | 결과 |
+|---|---|---|
+| M1 | `noteBeforePath` 가 원격에서도 읽는다 | 잡힘(컴파일 — `remote` 미사용) |
+| M2 | 봉인의 원격 가지를 잃는다 | 잡힘(원격 배선 판정자 — `sealed.remote`) |
+| M3 | `Post(changedFiles)` 가 원격에서도 로컬 루트를 요구한다 | **1차 생존** — 판정자가 `git_repo` 를 세워 두어 루트가 있었다. 원격 배선 판정자에서 **이 기계엔 저장소가 없다** 로 바꾸니 잡힘(항목 3→2) |
+| M3b | `Pre` 가 원격에서도 로컬 루트를 요구한다 | 잡힘(같은 판정자). ⚠️ 디스크가 차 뮤테이션 루프가 중단됐을 때 **이 뮤턴트가 트리에 남아 있었다** — 백업(`scratchpad/bak`)과 `cmp` 로 찾아 되돌렸다. 되돌리기는 `git checkout` 이 아니라 사본으로(2026-09-20 규칙) |
+| M4 | `turnFileOrigin` 이 `remoteEditTargeted` 를 안 본다 | 잡힘(`src/edited.zig` 가 `.ai_edit` 이 아니다) |
+| M5 | `editedCountFor` 가 원격에서 봉인 캐시를 쓴다 | 잡힘(목록 전 0 이어야 하는데 1) |
+| M6 | `applyTurnSummary` 가 join 값을 안 적는다 | 잡힘(`edited_joined_known`) |
+| M7 | 꼬리 일치가 경로 경계를 안 본다 | **1차 생존** — 경계가 갈리는 입력이 없었다. `src/notes.md` ↔ 루트 `es.md` 를 더하니 잡힘 |
+| M8 | `turnReadTarget` 이 소켓 없는 원격 링을 로컬로 떨어뜨린다 | 잡힘 |
+| M9 | `turnReadTarget` 이 기계 포함 키를 `repo` 로 넘긴다(`git -C user@host:/…`) | 잡힘 |
+| M10 | 스냅샷 링 키에 기계가 안 든다 | **1차 생존** — `captureTurnSnapshot` 은 테스트에서 git 을 안 돌려 그 줄에 못 닿는다. 키 조립을 `snapshotRepoKey` seam 으로 떼고 판정자를 붙이니 잡힘 |
+| M11 | 원격 봉인이 `markRemote` 를 빼먹는다 | 잡힘 |
+| M13 | 에이전트 탭의 «다른 기계» 판정이 옛 «원격인가» 로 돌아간다 | 잡힘(원격 링이 그 원격 목록 옆에 서야 한다 — 이 판정자가 없으면 스냅샷을 찍어 놓고 화면이 계속 «다른 기계» 라 한다) |
+| M14 | 링이 없을 때 원격 목록이면 «다른 기계» 라 한다(초안) | **생존 → 뮤턴트 쪽이 맞아 채택.** 어디에도 기록이 없는데 «다른 기계의 기록» 은 거짓이고, «훅을 깔라» 는 원격 훅도 우리가 심으므로 맞는 말이다 |
+| M12 | `pumpTurnSummaries` 가 원격에서도 로컬 git 을 찾는다 | **생존(동치)** — `buildRemote` 가 `argv[0]` 을 버리므로 로컬 git 이 있는 기계에선 결과가 같다. 로컬 git 이 없는 기계에서만 갈린다(원격 요약이 안 읽힘). 판정자로 못 가르는 자리라 적어 둔다 |
+
+**미측(사용자 기기에서 수동 검증)**: 원격 RTT · 스냅샷 세 왕복의 벽시계 · 턴 끝 → `✎N` 까지 지연 · 큰 저장소(kbl-ref)에서의
+원격 `add -A`.
 
 ### AT4 — 배지·고지 합류 ✅ 고지 줄 완료 (2026-08-25) · 나머지 셋은 tree 제거와 묶인다
 

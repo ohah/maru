@@ -64,7 +64,10 @@ pub const Row = union(enum) {
     /// 표시 텍스트는 싣지 않는다(에이전트 행과 같은 규율 — platform 이 (surface, pane) 으로 슬롯을 라이브 재조회한다);
     /// pane 이름만 **고정 바이트**로 든다(borrowed 슬라이스 금지). 클릭은 그 Term 까지만 간다(결정 2 — tmux 조작 없음)
     /// + 그 pane 의 세션을 «최근 세션» 으로 기억해 에이전트 탭이 그 링을 보인다.
-    agent_pane: struct { tab: usize, pane: usize, term: usize, name: [16]u8 = @splat(0), name_len: u8 = 0, depth: u8 = 0, lines: u8 = 1, last: bool = false },
+    ///
+    /// **`name_len == 0` 이고 `more > 0` 이면 고지 행**(조각 5) — «+N pane 밀림»: 슬롯 상한에 밀려 지금 행이 없는 pane 수.
+    /// pane 이 아니라 pane 이 없다는 말이라 이름이 없고, 클릭은 Term 까지만(기억할 세션이 없다). `paneNameAt` 은 null.
+    agent_pane: struct { tab: usize, pane: usize, term: usize, name: [16]u8 = @splat(0), name_len: u8 = 0, more: u16 = 0, depth: u8 = 0, lines: u8 = 1, last: bool = false },
     /// App-global session-host recovery projection의 typed system header. 사용자 그룹이 아니므로 tab/name/drag
     /// identity를 싣지 않는다. primary Window만 이 variant를 materialize한다.
     recovered_sessions_header,
@@ -242,9 +245,15 @@ pub fn agentAt(rows: []const Row, row_index: usize) ?struct { tab: usize, pane: 
 pub fn paneNameAt(rows: []const Row, row_index: usize) ?[]const u8 {
     if (row_index >= rows.len) return null;
     return switch (rows[row_index]) {
-        .agent_pane => |*a| a.name[0..a.name_len],
+        .agent_pane => |*a| if (a.name_len == 0) null else a.name[0..a.name_len],
         else => null,
     };
+}
+
+/// 그 행이 **pane 행 또는 pane 고지 행**인가 — 둘 다 ✕ 가 없다(Term 이 아니다). 클릭 라우팅이 ✕ 자리 판정을 끄는 기준.
+pub fn isPaneRow(rows: []const Row, row_index: usize) bool {
+    if (row_index >= rows.len) return false;
+    return rows[row_index] == .agent_pane;
 }
 
 /// 카드 `index`에 딸린 **에이전트 목록까지 포함한 span의 끝**(반열림 `[index, end)`). 카드 뒤에 이어지는

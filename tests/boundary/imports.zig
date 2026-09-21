@@ -92,6 +92,9 @@ const external_digests = @import("external_source_digests.zig");
 /// **`build.zig` 한 파일이 아니라 빌드 소스 전체**를 읽는다 — 등록이 `build/` 아래로 갈렸다.
 /// 이 파일 안에는 이미 `build_source` 라는 **지역 변수**가 있어 import 는 `_mod` 를 붙여 받는다.
 const build_source_mod = @import("build_source");
+/// 빌드 등록을 **문자열이 아니라 구조로** 본다. 문자열 판정은 등록이 다른 파일로 옮겨가거나
+/// 공백 한 칸이 달라져도 죽고, «등록이 아닌 자리»까지 세는 일이 실제로 있었다(아래 §root 참조).
+const build_graph = @import("build_graph");
 
 test "CR3a-2c2b3b B3b-S shared guard oracle rejects alias late and unbound release shapes" {
     const good =
@@ -3456,26 +3459,17 @@ test "B3-0.4 focused product gate stays nonempty and dual-mode" {
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(transport_source, "const response_payload = try allocator.alloc(u8, 64 * 1024);"));
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(transport_source, ".eof_after_request => .connection_eof"));
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(transport_source, ".partial_header_eof, .partial_payload_eof => .frame_malformed"));
-    try std.testing.expectEqual(
-        @as(usize, 1),
-        countOccurrences(build_source, "\"test-session-host-b3-0-4\""),
-    );
-    try std.testing.expectEqual(
-        @as(usize, 1),
-        countOccurrences(build_source, ".filters = &.{\"B3-0.4\"}"),
-    );
-    try std.testing.expectEqual(
-        @as(usize, 1),
-        countOccurrences(build_source, "std.builtin.OptimizeMode.Debug"),
-    );
-    try std.testing.expectEqual(
-        @as(usize, 1),
-        countOccurrences(build_source, "std.builtin.OptimizeMode.ReleaseFast"),
-    );
-    try std.testing.expectEqual(
-        @as(usize, 1),
-        countOccurrences(build_source, "run_b3_0_4_tests.addArg(\"--maru-expect-tests=8\")"),
-    );
+    // ── 빌드 등록은 **구조로** 본다(`build_graph`) ────────────────────────────────
+    // 문자열로 세면 등록을 다른 파일로 옮기는 순간 죽는다 — 2026-09-21 에 그 형태로 52개가
+    // 한꺼번에 빨개졌다. 뷰는 파일 위치를 모르므로 그 사고에 영향받지 않는다.
+    var graph = try build_graph.parse(allocator);
+    defer graph.deinit();
+
+    try std.testing.expect(graph.step("test-session-host-b3-0-4") != null);
+    try std.testing.expectEqual(@as(usize, 1), graph.countRegistrationsWithFilter("B3-0.4"));
+    try std.testing.expectEqual(@as(usize, 1), graph.countFieldPath("std.builtin.OptimizeMode.Debug"));
+    try std.testing.expectEqual(@as(usize, 1), graph.countFieldPath("std.builtin.OptimizeMode.ReleaseFast"));
+    try std.testing.expect(graph.hasArg("run_b3_0_4_tests", "--maru-expect-tests=8"));
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(transport_source, "const B3Scenario = enum {"));
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(transport_source, "const b3_expected_rows = [_]B3Expected{"));
     const table_start = std.mem.indexOf(u8, transport_source, "const b3_expected_rows = [_]B3Expected{") orelse
@@ -3488,15 +3482,19 @@ test "B3-0.4 focused product gate stays nonempty and dual-mode" {
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(transport_source, "const B3ResponseClass = enum"));
     try std.testing.expectEqual(@as(usize, 13), countOccurrences(table_source, ".final_zero = "));
     try std.testing.expectEqual(@as(usize, 2), countOccurrences(transport_source, "MARU_SESSION_HOST_B3_STRICT_GATE"));
-    try std.testing.expectEqual(@as(usize, 1), countOccurrences(build_source, "run_b3_0_4_tests.step.dependOn(&run_b3_strict_cleanup_tests.step)"));
-    try std.testing.expectEqual(@as(usize, 1), countOccurrences(build_source, "run_b3_0_4_tests.step.dependOn(&run_b3_issuer_cleanup_tests.step)"));
-    try std.testing.expectEqual(@as(usize, 1), countOccurrences(build_source, ".filters = &.{\"B3-0.1 pre-wire issuer exhaustion\"}"));
+    try std.testing.expect(graph.dependsOn("run_b3_0_4_tests", "run_b3_strict_cleanup_tests"));
+    try std.testing.expect(graph.dependsOn("run_b3_0_4_tests", "run_b3_issuer_cleanup_tests"));
+    try std.testing.expectEqual(@as(usize, 1), graph.countRegistrationsWithFilter("B3-0.1 pre-wire issuer exhaustion"));
     // CR6a-2 app-host aggregate 격리는 C2 다섯 행을 같은 generation_transport root의
     // fresh exact artifact에서 실행하므로 이 owner 경로가 하나 늘어난다.
-    try std.testing.expectEqual(
-        @as(usize, 15),
-        countOccurrences(build_source, "src/platform/macos/session_host/generation_transport.zig"),
-    );
+    //
+    // **두 값을 모두 고정한다.** 문자열은 이 경로가 나오는 «모든 자리» 15개를 세고, 뷰는 그중
+    // **실제 등록** 12건만 센다 — 나머지 셋은 별도 `b.createModule` 하나와 `inline for` 표의 행 둘이다.
+    // 한쪽만 남기면 감시가 줄어든다: 문자열만 두면 등록이 셋 사라져도 다른 자리가 늘어 15를 채울 수
+    // 있고, 뷰만 두면 그 셋이 사라지는 것을 아무도 안 본다.
+    const transport_root = "src/platform/macos/session_host/generation_transport.zig";
+    try std.testing.expectEqual(@as(usize, 15), countOccurrences(build_source, transport_root));
+    try std.testing.expectEqual(@as(usize, 12), graph.countRegistrationsWithRoot(transport_root));
 }
 
 test "external pump acquires storage claim before reading owned Client" {

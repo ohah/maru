@@ -35951,3 +35951,73 @@ test "U2w 저장 물음은 이름 없는 문서에만 — 비교·읽기 전용�
     try testing.expect(fx.session.rename != null);
     try testing.expect(fx.session.rename.? == .untitled_save);
 }
+
+test "U2x 파일시스템의 거친 자리: 없는 하위 폴더 · 같은 이름의 디렉터리" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    const io = std.testing.io;
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    pinUntitledBase(fx.session, root);
+
+    const save = struct {
+        fn f(s: *AppSession, a: std.mem.Allocator, t: *Term, name: []const u8) !void {
+            try testing.expect(!saveDocument(s, t));
+            s.rename_input.clear();
+            try s.rename_input.query.appendSlice(a, name);
+            settings_ops.commitRename(s);
+        }
+    }.f;
+
+    // ⑴ **없는 하위 폴더** — `sub/x.txt` 에서 `sub` 가 없다. 폴더를 **만들지 않는다**(계약: 저장은
+    //    파일 하나를 쓰는 일이고 디렉터리 생성은 다른 결정이다). 실패하되 **조용하지 않다**.
+    {
+        const t = try openUntitledInActivePane(fx.session);
+        try testing.expect(insertText(fx.session, t, "x\n"));
+        fx.session.chrome_host.notice.dismiss();
+        try save(fx.session, allocator, t, "nodir/x.txt");
+        try testing.expect(t.rt.editor_path == null); // 이름이 안 붙었다
+        try testing.expect(t.rt.editor_untitled != null);
+        try testing.expect(fx.session.chrome_host.notice.open); // 말한다
+        try testing.expectError(error.FileNotFound, dir.dir.access(io, "nodir", .{}));
+    }
+
+    // ⑵ **같은 이름의 디렉터리가 이미 있다** — 파일로 만들 수 없다. 덮어쓰기 확인을 띄우면 사용자는
+    //    「덮어쓰면 된다」고 읽는데 실제로는 못 쓴다.
+    {
+        try dir.dir.createDirPath(io, "taken");
+        const t = try openUntitledInActivePane(fx.session);
+        try testing.expect(insertText(fx.session, t, "y\n"));
+        fx.session.chrome_host.notice.dismiss();
+        try save(fx.session, allocator, t, "taken");
+        // **확인을 띄우지 않는다** — 폴더는 덮어쓸 수 있는 것이 아니다. 그 사실을 말한다.
+        try testing.expect(!fx.session.chrome_host.confirm.open);
+        try testing.expect(fx.session.chrome_host.notice.open);
+        try testing.expect(std.mem.startsWith(
+            u8,
+            &fx.session.notice_message_buf,
+            maru.i18n.t(.editor_untitled_name_is_dir),
+        ));
+        try testing.expect(t.rt.editor_path == null);
+        try testing.expect(t.rt.editor_untitled != null);
+        // 디렉터리는 그대로다(지우거나 바꾸지 않았다).
+        var d = try dir.dir.openDir(io, "taken", .{});
+        d.close(io);
+    }
+
+    // ⑶ **있는 하위 폴더에는 쓴다** — ⑴ 이 「하위 경로를 아예 못 쓴다」가 아니라는 대조군이다.
+    {
+        try dir.dir.createDirPath(io, "yesdir");
+        const t = try openUntitledInActivePane(fx.session);
+        try testing.expect(insertText(fx.session, t, "z\n"));
+        try save(fx.session, allocator, t, "yesdir/x.txt");
+        try testing.expect(t.rt.editor_path != null);
+        const got = try dir.dir.readFileAlloc(io, "yesdir/x.txt", allocator, .limited(64));
+        defer allocator.free(got);
+        try testing.expectEqualStrings("z\n", got);
+    }
+}

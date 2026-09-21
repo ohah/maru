@@ -66200,6 +66200,56 @@ test "U1o 컨트롤 플레인에도 이름 없는 문서가 그대로 나간다 
     try std.testing.expectEqual(@as(usize, 1), seen);
 }
 
+test "U2A 저장 뒤 컨트롤 플레인·사이드바가 같은 사실을 말한다 — 경로 있는 편집기다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    // **밖으로 나가는 값이 안 바뀌면 저장은 절반이다.** U1o 가 「경로 null · untitled-N」 을 쟀고 이쪽은
+    // 그 반대편이다 — 저장 뒤 스냅샷이 옛 사실을 계속 말하면 에이전트·세션 목록·사이드바가 그 문서를
+    // 「한 번도 저장 안 한 것」으로 본다(적대적 14회차).
+    const allocator = std.testing.allocator;
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    session.loaded_config.config.workspace.root = root;
+
+    const saved = app_runtime.untitled_docs;
+    defer app_runtime.untitled_docs = saved;
+    app_runtime.untitled_docs = .{};
+
+    const t = try editor_ops.openUntitledInActivePane(session);
+    try std.testing.expect(editor_ops.insertText(session, t, "saved body\n"));
+    try std.testing.expect(!editor_ops.saveDocument(session, t));
+    try session.rename_input.query.appendSlice(allocator, "outward.txt");
+    settings_ops.commitRename(session);
+    try std.testing.expect(t.rt.editor_path != null);
+
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    var surfaces: std.ArrayList(control_surface.SurfaceDto) = .empty;
+    var windows: std.ArrayList(maru.session.WindowMembershipSnapshot) = .empty;
+    try session.collectSessionInto(arena_state.allocator(), 0, .normal, &surfaces, &windows);
+
+    var seen: usize = 0;
+    for (surfaces.items) |dto| {
+        if (dto.detail != .editor) continue;
+        seen += 1;
+        try std.testing.expect(dto.detail.editor.path != null); // ★ 경로가 나간다
+        try std.testing.expectEqualStrings(t.rt.editor_path.?, dto.detail.editor.path.?);
+        try std.testing.expect(!dto.detail.editor.dirty); // 방금 쓴 것이 곧 디스크 내용이다
+        try std.testing.expectEqualStrings("outward.txt", dto.title); // ★ 더 이상 untitled-N 이 아니다
+    }
+    try std.testing.expectEqual(@as(usize, 1), seen);
+
+    // 사이드바 아이콘도 이제 **파일 entry 갈래**로 간다 — 경로 없던 시절의 `.document` 폴백이 아니다.
+    const icon = sidebar_ops.sessionRowIconCodepoint(t);
+    try std.testing.expect(icon != 0);
+}
+
 test "WP-F1: browser도 페이지 검색으로 가고, 활성이 터미널이면 스크롤백 검색이다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;

@@ -35208,6 +35208,16 @@ test "U2b 이름을 주면 파일이 생기고 보통 문서가 된다 — 경�
     const root = root_buf[0..try dir.dir.realPath(std.testing.io, &root_buf)];
     pinUntitledBase(fx.session, root);
 
+    // checkpoint 는 헤드리스에서 꺼져 있다(`armed=false` 면 `markChanged` 가 조기 반환한다) — ⑻ 을 재려면
+    // 켜야 한다. 앱 전역 값이라 되돌린다.
+    const saved_cp = app_session_mod.app_runtime.workspace_checkpoint;
+    defer app_session_mod.app_runtime.workspace_checkpoint = saved_cp;
+    app_session_mod.app_runtime.workspace_checkpoint.armed = true;
+    // 세션 쪽 게이트도 켠다 — `workspaceChanged` 가 그것을 먼저 본다(둘이 따로다).
+    const saved_mut = fx.session.workspace_checkpoint_mutations_enabled;
+    defer fx.session.workspace_checkpoint_mutations_enabled = saved_mut;
+    fx.session.workspace_checkpoint_mutations_enabled = true;
+
     const t = try openUntitledInActivePane(fx.session);
     try testing.expect(insertText(fx.session, t, "const a = 1;\n"));
     try testing.expect(!saveDocument(fx.session, t)); // 상자가 열린다
@@ -35236,6 +35246,13 @@ test "U2b 이름을 주면 파일이 생기고 보통 문서가 된다 — 경�
     try testing.expectEqualStrings("new.zig", app_session_mod.termLabel(t));
     // ⑺ 상자는 닫혔다.
     try testing.expect(fx.session.rename == null);
+    // ⑻ **워크스페이스 checkpoint 축이 맞다** — 이름이 바뀐 것(`naming`)이 아니라 **영속되는 surface 가
+    //    하나 생겼다**(`persisted_surface`). 축이 틀리면 checkpoint 를 소비하는 쪽이 어떤 변화였는지
+    //    잘못 읽는다(적대적 4회차: 처음에 `.naming` 으로 적었다).
+    try testing.expectEqual(
+        maru.app.workspace_checkpoint_product.ChangeKind.persisted_surface,
+        app_session_mod.app_runtime.workspace_checkpoint.last_change_kind,
+    );
 }
 
 test "U2c 취소는 무상태다 — 이름 없는 dirty 그대로" {

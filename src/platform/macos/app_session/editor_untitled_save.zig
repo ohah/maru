@@ -238,7 +238,10 @@ fn writeAndAdopt(self: *AppSession, term: *Term, abs: []const u8, overwriting: b
         term.rt.editor_grammar,
     );
     self.metal_dirty = true;
-    self.workspaceChanged(.naming);
+    // **`.persisted_surface` 다 — `.naming` 이 아니다.** 이름이 바뀐 것이 아니라 **영속되는 surface 가
+    // 하나 생겼다**(이제 workspace 저장 시퀀스에 든다). 선례는 파일 Term 생성(`openFilePanelPath` 의
+    // `if (opened.created)`)이고, 축이 틀리면 checkpoint 를 소비하는 쪽이 어떤 변화였는지 잘못 읽는다.
+    self.workspaceChanged(.persisted_surface);
 }
 
 /// 도크 entry 를 만들어 붙인다 — **안 붙이면 workspace 저장 시퀀스 밖**이고(그 조건이 「편집기인데

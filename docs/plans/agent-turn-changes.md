@@ -1078,7 +1078,7 @@ tree 를 굳히고 진짜 index 는 `?` 그대로, `turn_name_status` 가 그 tr
 `test-scm-row-model` 32 · `test-provider-session-removal` 39 · `test-remote-explorer` 11 · `check-boundaries` · 순수 층
 (`turn_capture` 81 · `turn_snapshot` 55 · `git_command` 60 · `agent_hook_command` 84) · 훅 커맨드 게이트 14 계약.
 
-**적대적 검증 (2026-09-21, 뮤턴트 15)**:
+**적대적 검증 1회차 (2026-09-21, 뮤턴트 15)**:
 
 | # | 뮤턴트 | 결과 |
 |---|---|---|
@@ -1097,6 +1097,23 @@ tree 를 굳히고 진짜 index 는 `?` 그대로, `turn_name_status` 가 그 tr
 | M13 | 에이전트 탭의 «다른 기계» 판정이 옛 «원격인가» 로 돌아간다 | 잡힘(원격 링이 그 원격 목록 옆에 서야 한다 — 이 판정자가 없으면 스냅샷을 찍어 놓고 화면이 계속 «다른 기계» 라 한다) |
 | M14 | 링이 없을 때 원격 목록이면 «다른 기계» 라 한다(초안) | **생존 → 뮤턴트 쪽이 맞아 채택.** 어디에도 기록이 없는데 «다른 기계의 기록» 은 거짓이고, «훅을 깔라» 는 원격 훅도 우리가 심으므로 맞는 말이다 |
 | M12 | `pumpTurnSummaries` 가 원격에서도 로컬 git 을 찾는다 | **생존(동치)** — `buildRemote` 가 `argv[0]` 을 버리므로 로컬 git 이 있는 기계에선 결과가 같다. 로컬 git 이 없는 기계에서만 갈린다(원격 요약이 안 읽힘). 판정자로 못 가르는 자리라 적어 둔다 |
+
+**적대적 검증 2회차 (2026-09-21, 사용자 물음 「적대적 검증 하셨나요?」 뒤 — 1회차의 빈틈)**: 1회차는 캡처 규칙
+(`testApplyHookEvent` 층)만 뮤테이션했고 **그 위 한 층 — 실제 wire 프레임이 원격 소비자 → `TurnBatch` → 봉인 → 스냅샷 요청
+까지 닿는가** 는 판정자도 뮤턴트도 없었다. 채운 것:
+
+| # | 판정자/뮤턴트 | 결과 |
+|---|---|---|
+| 판정자 | «훅 원격 프레임: 턴 끝이 봉인과 스냅샷 요청까지 닿는다» — wire 프레임 4개(SessionStart·UserPromptSubmit·PreToolUse Edit·Stop)를 `consumeRemoteAgentLines` 에 넣고 스냅샷 호출 1·세션 id·봉인 id(`test_last_turn_capture` 추가)·`remote`·경로·`.unknown(.remote)`·배치 경계에 걸친 둘째 턴 | 통과 |
+| M15 | 원격 소비자가 `TurnBatch.step` 대신 옛 `applyHookEvent`(applied 버림) | 잡힘 |
+| M16 | `finish` 를 안 부른다 | 잡힘 |
+| M17 | 봉인이 Term 의 원격 여부를 안 본다 | 잡힘 |
+| 실데이터 | «실제 원격 로그를 통째로 재생» (opt-in `MARU_REMOTE_REPLAY_LOG`) — 이 Mac 의 실제 원격 훅 로그 4개(`t15` 487줄·`t16` 230·`t18` 266·`t27` 583)를 스트리머와 같은 `formatEvent` 로 싸서 7줄 배치로 흘림 | 통과 — 스냅샷 요청 50·33·31·79(Stop 349·56·54·158 ≤ 규칙대로), 봉인 0 |
+
+⚠️ **봉인 0 의 뜻**: 이 로그들은 전부 **옛 원격 세트**(`PreToolUse` 없음)로 적힌 것이라 근거 없는 턴은 봉인되지 않는다(`hasEvidence`).
+`grep PreToolUse` 가 t27 에서 6줄을 찾지만 그것은 이 세션의 `Stop.last_assistant_message` 본문이다. 즉 **AT3c 뒤 새 세트를 심어야
+원격 캡처 실데이터가 생긴다** — 이 Mac 의 원격 세트는 **다른 기기의 maru** 가 `maru agent-hooks` 로 심는 것이라, 그 기기의 maru 를
+이 PR 이 든 빌드로 올려야 `PreToolUse` 가 온다(수동 검증 항목 첫 줄).
 
 **미측(사용자 기기에서 수동 검증)**: 원격 RTT · 스냅샷 세 왕복의 벽시계 · 턴 끝 → `✎N` 까지 지연 · 큰 저장소(kbl-ref)에서의
 원격 `add -A`.

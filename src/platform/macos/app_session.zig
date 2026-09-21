@@ -25708,17 +25708,17 @@ test "agent hooks install into the claude hooks array and leave user entries unt
 
     // 지난 실행이 남긴 로그 둘을 미리 둔다 — 시작 시 정리가 **실제로** 지우는지 보기 위해서다. 소비자가
     // 없는 지금 이것이 없으면 파일이 무한히 자란다(계약 §4.2·§5).
-    try tmp.dir.createDirPath(io, "cache/maru/agent-turn-events");
+    try tmp.dir.createDirPath(io, "home/.cache/maru/agent-turn-events");
     // **이 세션이 소유할 수 없는 id 를 쓴다.** 예전에는 `7.ndjson` 이었는데 이 테스트의 Term 이 하필
     // surface_id 7 을 받아, 종료 시 «소유 pane 정리»(`cleanupOwnedAgentHookLogs`)가 지웠다 — 시작 시
     // 정리가 돌든 안 돌든 통과하는, **딴 것을 재던** 테스트였다. 큰 수는 이 프로세스가 발급하지 않는다.
-    try tmp.dir.writeFile(io, .{ .sub_path = "cache/maru/agent-turn-events/987654.ndjson", .data = "claude\t{}\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "home/.cache/maru/agent-turn-events/987654.ndjson", .data = "claude\t{}\n" });
     // 우리 이름 모양이 **아닌** 것은 남의 것이라 건드리지 않는다. 두 가드(확장자·숫자 stem)를 따로 물게
     // 하려고 둘 다 둔다 — 하나만 두면 다른 가드를 지워도 이 검사가 통과한다(뮤테이션으로 확인했다).
-    try tmp.dir.writeFile(io, .{ .sub_path = "cache/maru/agent-turn-events/notes.txt", .data = "keep me" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "cache/maru/agent-turn-events/abc.ndjson", .data = "not ours" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "home/.cache/maru/agent-turn-events/notes.txt", .data = "keep me" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "home/.cache/maru/agent-turn-events/abc.ndjson", .data = "not ours" });
     // 숫자 이름이지만 확장자가 우리 것이 아니다 — 이것이 확장자 가드를 무는 자리다.
-    try tmp.dir.writeFile(io, .{ .sub_path = "cache/maru/agent-turn-events/9.log", .data = "not ours" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "home/.cache/maru/agent-turn-events/9.log", .data = "not ours" });
 
     // 정리는 **프로세스에 한 번**이라(창마다 도는 것을 막는다) 같은 바이너리의 앞선 테스트가 이미 썼다.
     // 이 테스트가 그 경로를 보려면 되돌려야 한다 — 그 되돌림이 필요하다는 사실 자체가 계약의 일부다.
@@ -25755,7 +25755,7 @@ test "agent hooks install into the claude hooks array and leave user entries unt
     {
         agent_ops.hook_logs_cleaned = false;
         agent_ops.test_allow_log_cleanup = false; // 밝히지 않았다
-        try tmp.dir.writeFile(io, .{ .sub_path = "cache/maru/agent-turn-events/876543.ndjson", .data = "claude\t{}\n" });
+        try tmp.dir.writeFile(io, .{ .sub_path = "home/.cache/maru/agent-turn-events/876543.ndjson", .data = "claude\t{}\n" });
         var guarded: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
         try guarded.init(io, a, .{
             .abi_version = abi_version,
@@ -25778,7 +25778,7 @@ test "agent hooks install into the claude hooks array and leave user entries unt
     try expectProviderFixtureEntries(io, claude, &.{.{ .name = "settings.json", .kind = .file }});
 
     // **로그 디렉터리를 만들었고 0700이다.** 이걸 빠뜨리면 훅은 돌지만 아무것도 적지 않는다(계약 §4.2).
-    const log_dir = try std.fmt.allocPrintSentinel(a, "{s}/maru/{s}", .{ cache, hook_command.log_dir_rel }, 0);
+    const log_dir = try std.fmt.allocPrintSentinel(a, "{s}/.cache/maru/{s}", .{ home, hook_command.log_dir_rel }, 0); // 훅 로그는 HOME 만 본다(RA8)
     defer a.free(log_dir);
     {
         var stat: std.posix.Stat = undefined;
@@ -25789,7 +25789,7 @@ test "agent hooks install into the claude hooks array and leave user entries unt
 
     var want: std.ArrayListUnmanaged(u8) = .empty;
     defer want.deinit(a);
-    try hook_command.build(&want, a, "claude", log_dir, .local);
+    try hook_command.build(&want, a, "claude", log_dir, "/tmp/maru-remote-events-judge");
 
     const settings_after = try tmp.dir.readFileAlloc(io, "claude/settings.json", a, .limited(64 * 1024));
     defer a.free(settings_after);
@@ -25834,7 +25834,7 @@ test "agent hooks install into the claude hooks array and leave user entries unt
         // **두 번째 세션 = 두 번째 창이다.** 그때 정리가 또 돌면 먼저 열린 창이 지금 쓰고 있는 로그를 지운다 —
         // 지금은 소비자가 없어 티가 안 나지만 AH3에서 그대로 조용한 유실이 된다. 살아 있는 로그를 하나 두고
         // 그것이 살아남는지 본다(`hook_logs_cleaned`를 여기서는 되돌리지 않는다 — 그게 실제 두 번째 창의 상태다).
-        try tmp.dir.writeFile(io, .{ .sub_path = "cache/maru/agent-turn-events/5.ndjson", .data = "claude\t{}\n" });
+        try tmp.dir.writeFile(io, .{ .sub_path = "home/.cache/maru/agent-turn-events/5.ndjson", .data = "claude\t{}\n" });
 
         var again: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
         try again.init(io, a, .{
@@ -25849,7 +25849,7 @@ test "agent hooks install into the claude hooks array and leave user entries unt
         defer a.free(twice);
         try std.testing.expectEqualStrings(settings_after, twice);
 
-        const live = try tmp.dir.readFileAlloc(io, "cache/maru/agent-turn-events/5.ndjson", a, .limited(4096));
+        const live = try tmp.dir.readFileAlloc(io, "home/.cache/maru/agent-turn-events/5.ndjson", a, .limited(4096));
         defer a.free(live);
         try std.testing.expectEqualStrings("claude\t{}\n", live);
     }
@@ -27826,7 +27826,7 @@ test "훅 Term 은 두 소스를 함께 읽고 권위표가 중재한다 — 알
 
     // 훅 로그를 놓고 한 번 소비해 훅 모드로 만든다(파일이 생겨야 훅 모드다 — 계약 §1.2).
     // 로그 경로에는 **인스턴스 칸**이 있다(계약 §4) — maru 를 두 개 띄워도 이름이 안 겹치게 하는 자리다.
-    const events_dir = try std.fmt.allocPrint(a, "cache/maru/{s}/{d}", .{ hook_command.log_dir_rel, agent_ops.hookInstanceId() });
+    const events_dir = try std.fmt.allocPrint(a, "home/.cache/maru/{s}/{d}", .{ hook_command.log_dir_rel, agent_ops.hookInstanceId() });
     defer a.free(events_dir);
     try tmp.dir.createDirPath(io, events_dir);
     const log_rel = try std.fmt.allocPrint(a, "{s}/{d}.ndjson", .{ events_dir, term.surfaceId() });
@@ -29070,7 +29070,7 @@ test "훅 캡처: 실측 모양의 ndjson 한 턴이 파서를 지나 셸 구간
     var by_sed_buf: [std.fs.max_path_bytes]u8 = undefined;
     const by_sed = try std.fmt.bufPrint(&by_sed_buf, "{s}/by_sed.txt", .{root});
 
-    const events_dir = try std.fmt.allocPrint(a, "cache/maru/{s}/{d}", .{ hook_command.log_dir_rel, agent_ops.hookInstanceId() });
+    const events_dir = try std.fmt.allocPrint(a, "home/.cache/maru/{s}/{d}", .{ hook_command.log_dir_rel, agent_ops.hookInstanceId() });
     defer a.free(events_dir);
     try tmp.dir.createDirPath(io, events_dir);
     const log_rel = try std.fmt.allocPrint(a, "{s}/{d}.ndjson", .{ events_dir, term.surfaceId() });
@@ -29510,7 +29510,7 @@ test "hook mode fills state and conversation from the event log, and only then" 
     try std.testing.expectEqual(hook_mode.Mode.observe, agent_ops.agentHookMode(&session, term));
 
     // 로그 경로에는 **인스턴스 칸**이 있다(계약 §4) — maru 를 두 개 띄워도 이름이 안 겹치게 하는 자리다.
-    const events_dir = try std.fmt.allocPrint(a, "cache/maru/{s}/{d}", .{ hook_command.log_dir_rel, agent_ops.hookInstanceId() });
+    const events_dir = try std.fmt.allocPrint(a, "home/.cache/maru/{s}/{d}", .{ hook_command.log_dir_rel, agent_ops.hookInstanceId() });
     defer a.free(events_dir);
     try tmp.dir.createDirPath(io, events_dir);
     const log_rel = try std.fmt.allocPrint(a, "{s}/{d}.ndjson", .{ events_dir, term.surfaceId() });
@@ -30048,7 +30048,7 @@ test "hook mode fills state and conversation from the event log, and only then" 
         // ⓐ **인스턴스 칸이 없던 시절의 자리**(`<base>/<surface_id>.ndjson`). 그 시절엔 두 인스턴스가 이
         //    한 파일을 공유했다 — 이 자리를 다시 읽기 시작하면 그때의 오독이 그대로 돌아온다. 판정자가
         //    실제로 무는 자리라, 인스턴스 칸을 되돌리는 뮤테이션이 여기서 빨개진다.
-        const base_dir = try std.fmt.allocPrint(a, "cache/maru/{s}", .{hook_command.log_dir_rel});
+        const base_dir = try std.fmt.allocPrint(a, "home/.cache/maru/{s}", .{hook_command.log_dir_rel});
         defer a.free(base_dir);
         const shared_log = try std.fmt.allocPrint(a, "{s}/{d}.ndjson", .{ base_dir, term.surfaceId() });
         defer a.free(shared_log);
@@ -30278,11 +30278,11 @@ test "agent hooks install into codex and record trust without touching existing 
     });
     session.deinit();
 
-    const log_dir = try std.fmt.allocPrint(a, "{s}/maru/{s}", .{ cache, hook_command.log_dir_rel });
+    const log_dir = try std.fmt.allocPrint(a, "{s}/.cache/maru/{s}", .{ home, hook_command.log_dir_rel }); // 훅 로그는 HOME 만 본다(RA8)
     defer a.free(log_dir);
     var want: std.ArrayListUnmanaged(u8) = .empty;
     defer want.deinit(a);
-    try hook_command.build(&want, a, hook_command.Provider.codex.tag(), log_dir, .local);
+    try hook_command.build(&want, a, hook_command.Provider.codex.tag(), log_dir, "/tmp/maru-remote-events-judge");
 
     const hooks_after = try tmp.dir.readFileAlloc(io, "codex/hooks.json", a, .limited(64 * 1024));
     defer a.free(hooks_after);
@@ -30403,7 +30403,7 @@ test "agent hooks install into codex and record trust without touching existing 
     {
         var stale: std.ArrayListUnmanaged(u8) = .empty;
         defer stale.deinit(a);
-        try hook_command.build(&stale, a, hook_command.Provider.codex.tag(), "/tmp/maru-old-log-dir", .local);
+        try hook_command.build(&stale, a, hook_command.Provider.codex.tag(), "/tmp/maru-old-log-dir", "/tmp/maru-remote-events-judge");
         const stale_json = try std.fmt.allocPrint(a,
             \\{{ "hooks": {{ "Stop": [ {{ "hooks": [ {{ "type": "command", "command": {f}, "timeout": 2 }} ] }} ] }} }}
         , .{std.json.fmt(std.json.Value{ .string = stale.items }, .{})});
@@ -30769,7 +30769,7 @@ test "agent hooks stay out of provider files while the gate is off" {
         try std.testing.expectEqualStrings("opus", parsed.value.object.get("model").?.string);
     }
     // 로그 디렉터리도 만들지 않는다 — 끈 사람의 디스크에 우리 자리를 잡아 두지 않는다.
-    const log_dir = try std.fmt.allocPrintSentinel(a, "{s}/maru/{s}", .{ cache, maru.session.agent_hook_command.log_dir_rel }, 0);
+    const log_dir = try std.fmt.allocPrintSentinel(a, "{s}/.cache/maru/{s}", .{ home, maru.session.agent_hook_command.log_dir_rel }, 0); // 훅 로그는 HOME 만 본다(RA8)
     defer a.free(log_dir);
     var stat: std.posix.Stat = undefined;
     try std.testing.expect(std.c.fstatat(std.posix.AT.FDCWD, log_dir.ptr, &stat, std.posix.AT.SYMLINK_NOFOLLOW) != 0);
@@ -40561,7 +40561,7 @@ test "부재 중 쌓인 로그는 상태만 세우고 알리지 않는다 — �
     const term = pane_ops.activePane(&session).activeTerm();
     term.agent_kind = .claude;
 
-    const events_dir = try std.fmt.allocPrint(a, "cache/maru/{s}/{d}", .{
+    const events_dir = try std.fmt.allocPrint(a, "home/.cache/maru/{s}/{d}", .{
         hook_command.log_dir_rel,
         agent_ops.hookInstanceId(),
     });
@@ -41857,6 +41857,16 @@ test "AH7 통합: host-backed Term 의 배지와 대화 줄이 진짜 훅 커맨
                 _ = unsetenv("XDG_CACHE_HOME");
             }
         }
+        // **훅 로그는 HOME 만 본다**(RA8) — XDG 만 격리하면 실제 `~/.cache/maru` 에 쓴다. HOME 도 같은 자리로 돌린다.
+        const prev_home = std.c.getenv("HOME");
+        _ = setenv("HOME", cache_z.ptr, 1);
+        defer {
+            if (prev_home) |v| {
+                _ = setenv("HOME", v, 1);
+            } else {
+                _ = unsetenv("HOME");
+            }
+        }
 
         var base_buf: [96]u8 = undefined;
         const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-ah7-app-{d}", .{std.c.getpid()}) catch return error.SkipZigTest;
@@ -41924,11 +41934,11 @@ test "AH7 통합: host-backed Term 의 배지와 대화 줄이 진짜 훅 커맨
 
         // **자식이 돌릴 훅 커맨드**를 파일로 둔다 — provider 가 설정 항목으로 실행하는 그 문자열 그대로다.
         // (한 줄 안에 감싸면 끝의 표식 주석이 닫는 괄호를 먹는다 — 실측으로 확인했다.)
-        const log_dir = try std.fmt.allocPrint(allocator, "{s}/maru/{s}", .{ cache_root, hook_command.log_dir_rel });
+        const log_dir = try std.fmt.allocPrint(allocator, "{s}/.cache/maru/{s}", .{ cache_root, hook_command.log_dir_rel });
         defer allocator.free(log_dir);
         var cmd: std.ArrayListUnmanaged(u8) = .empty;
         defer cmd.deinit(allocator);
-        try hook_command.build(&cmd, allocator, "claude", log_dir, .local);
+        try hook_command.build(&cmd, allocator, "claude", log_dir, "/tmp/maru-remote-events-judge");
         const script_path = try std.fmt.allocPrintSentinel(allocator, "{s}/hook.sh", .{cache_root}, 0);
         defer allocator.free(script_path);
         {

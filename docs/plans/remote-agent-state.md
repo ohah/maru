@@ -471,6 +471,107 @@ Term 수명마다 할당·해제가 붙어 그 규율이 막으려던 것을 그
 - 역조회는 pane 마다 한 번씩 도는가, 세션당 한 번인가 — `route_ttl_ms` 캐시가 pane 축에서도 유효한지.
 - 사용자가 pane 을 닫은 뒤 목록에서 사라지기까지의 시간(위 4번의 접는 규칙과 같은 문제).
 
+### RA8 — 훅 커맨드 통일: 로컬/원격 설치기가 같은 바이트를 써서 핑퐁을 없앤다 ✅ 완료 (2026-09-21)
+
+**왜**: RA1 의 2026-09-20 관찰 — 같은 기계가 로컬이자 ssh 대상이면 두 설치기가 `~/.claude/settings.json` 을 두고 핑퐁한다.
+AT3c 가 이벤트 세트를 같게 만들었으니 남은 차이는 **커맨드 바이트**뿐이다: 로컬은 `MARU_HOOK_INSTANCE`/`MARU_HOOK_PANE` 을
+검증해 `<로컬 로그 디렉터리>/<인스턴스>/<pane>.ndjson` 에, 원격은 `LC_MARU_PANE`/`TMUX_PANE` 을 검증해 `<원격 로그
+디렉터리>/<nonce>[_t<pane>].ndjson` 에 적는다. 두 설치기는 «우리 것인데 지금 것이 아니다»(`ours_current < ours`)를
+refresh 로 읽으므로 서로의 것을 매번 덮는다.
+
+**착수 전 실측 (2026-09-21)**
+
+| # | 물음 | 답 | 성격 |
+|---|---|---|---|
+| ① | 지금 이 Mac 의 `settings.json` 은 어느 세트인가 | **원격 세트 8 이벤트**, 커맨드 1종(`LC_MARU_PANE`·`remote-agent-events`), mtime **09-21 08:46** — 내가 00:07 에 원격 세트로 되돌린 뒤 다른 기기의 `maru ssh` 가 다시 심었다(옛 원격 커맨드 — AT3c 이전 빌드). 로컬 앱 로그(`app.log`, 00:48 마지막)에는 그 뒤 실행이 없다 | 실측 |
+| ② | 두 설치기는 언제 도나 | 로컬: `finishInitialSurface`(앱 시작) + 설정 재적용(`settings.zig`) + `reconcileAgentHooks` 테스트 seam. 원격: `maru ssh` 접속마다 `remoteShellCommandAll(.install)` 이 원격 `maru agent-hooks` 를 돌린다 | 코드 확인 |
+| ③ | 두 커맨드가 갈리는 자리 | `agent_hook_command.build(…, scope)` 안의 **세 분기**: 신원 검증(`case "$MARU_HOOK_PANE"`·`case "$MARU_HOOK_INSTANCE"` vs `case "$LC_MARU_PANE"`+`TMUX_PANE` 칸), 파일 경로(`/$MARU_HOOK_INSTANCE/$MARU_HOOK_PANE.ndjson` vs `/$mh_n$mh_t.ndjson`), 원격만 tmux 옆 파일(`.tmux`). 나머지(umask·`LC_ALL=C`·stdin 드레인·상한·hunks 잘라내기·`tool_use_id`·이름 폴백·printf)는 **같은 바이트** | 코드 확인 |
+| ④ | 로그 디렉터리는 어디서 오나 | 로컬: `<XDG_CACHE_HOME ∨ ~/.cache>/maru/agent-turn-events`(`sessionCacheBase`). 원격: `$HOME/.cache/maru/remote-agent-events`(`remote_log_dir_rel`, 원격 셸이 `$HOME` 으로 푼다). 둘 다 **절대경로로 커맨드 안에 박힌다** | 코드 확인 |
+| ⑤ | `refresh` 판정은 무엇을 비교하나 | `scan` 이 `want_command` 와 **바이트 동일**한 항목만 `ours_current` 로 센다(`isOurs` 는 표식만 보므로 «우리 것» 이지만 «지금 것» 은 아니다) → `planFor` 가 refresh | 코드 확인 |
+| ⑥ | 로컬 pane 의 셸 env 에 `LC_MARU_PANE` 이 있나 | 없다 — `maru ssh` 가 ssh 프로세스에만 `env LC_MARU_PANE=… ssh …` 로 얹는다(`cli/ssh.zig`). 로컬 pane 은 `MARU_HOOK_*` 만 갖고, 원격 셸은 `LC_MARU_PANE`(+`TMUX_PANE`)만 갖는다 | 코드 확인 |
+| ⑦ | 원격 codex 재승인 | 커맨드가 바뀌면 `hooks.json` 해시가 바뀌고 `applyEntries` 가 신뢰 값을 갱신한다 — AT3b-2 때 실측(프롬프트 없음) | 실측(09-20) |
+
+**설계**
+
+1. **커맨드 하나.** `build` 에서 `scope` 를 뺀다. 커맨드는 env 모양으로 자기 자리를 고른다 — **로컬이 먼저다**:
+   `MARU_HOOK_PANE`·`MARU_HOOK_INSTANCE` 중 하나라도 비어 있지 않으면 **로컬 분기**(둘 다 클래스를 지나야 하고 아니면
+   `exit 0` — 지금 로컬 커맨드의 fail-closed 그대로, 공격 L), 둘 다 비면 **원격 분기**(`LC_MARU_PANE` 클래스 ∨ `TMUX_PANE`,
+   못 지난 nonce 는 **비운다** — 공격 K 의 경로 탈출을 여기서 막는다), 둘 다 아니면 `exit 0`. 경로 규칙은 지금 두 분기
+   그대로다(`<local>/<inst>/<pane>.ndjson` · `<remote>/<nonce>[_t<pane>].ndjson` + `.tmux` 옆 파일).
+2. **디렉터리 둘 다 커맨드에 박고, 둘 다 `HOME` 만으로 계산한다**(사용자 결정 2026-09-21 — 공격 D 를 없앤다).
+   `build(out, a, provider, local_log_dir_abs, remote_log_dir_abs)`. 로컬은 `$HOME/.cache/maru/agent-turn-events`, 원격은
+   `$HOME/.cache/maru/remote-agent-events` — **`XDG_CACHE_HOME` 을 보지 않는다.** 원격 디렉터리는 이미 그랬고, 로컬은
+   `cache_path.maruBaseAlloc(XDG, HOME)` 을 보던 것을 훅 로그에 한해 HOME 으로 고정한다(다른 캐시는 그대로 XDG). 계산기는
+   **한 순수 함수**(`agent_hook_command.localLogDir`/`remoteLogDir`)이고 GUI(`agentHookLogDir`)·session host
+   (`agent_hook_logs.zig`)·원격 CLI 셋이 그것을 부른다 — GUI 와 host 가 각자 env 로 계산해 갈릴 여지도 함께 사라진다.
+   원격 CLI 는 두 디렉터리를 다 만든다(0700). 부수 효과: XDG 사용자의 훅 로그가 `~/.cache` 로 옮겨간다(시작 시 정리가
+   지우는 임시 로그라 잃는 것은 없다).
+3. **`Scope` 는 세트 축에만 남긴다**(`eventsFor`·`scan`·`apply`·`planForSet`). 지금은 두 세트가 같지만 다시 갈릴 수 있고,
+   그 축은 커맨드 바이트와 무관하다.
+4. **설치기 판정은 안 바꾼다.** 두 설치기가 같은 바이트를 원하면 `ours_current == ours` 라 `leave` 다 — 핑퐁은 판정이
+   아니라 입력이 만든 것이었다.
+5. 게이트: 골든 `tests/golden/agent_hook_command.sh` 갱신(바이트가 바뀐다), `tools/check-agent-hook-command.sh` 에 **env 모양
+   케이스** — 로컬 둘만 · `LC_MARU_PANE` 만 · `TMUX_PANE` 만 · 둘 다(로컬이 이긴다) · 아무것도 없음(파일 0). 원격 pane 판정자
+   (`agent_hook_command.zig` 의 원격 테스트들)는 같은 커맨드에 대해 그대로 서야 한다.
+6. 문서: agent-hooks.md §4(커맨드 하나·두 자리)·§11.6, 이 문서 RA1 관찰 닫기, development-commands.
+
+**착수 전 적대적 공격 (2026-09-21)**
+
+| # | 공격 | 결과 |
+|---|---|---|
+| A | 훅이 하는 일이 는다(계약 §4.1 — 프로세스 수) | `case` 둘이 더 돈다 — 전부 셸 내장, 프로세스 0. 실측 상한(턴당 ~90 ms)의 지배항은 `sh` 자체 spawn 이라 변화 없음 |
+| B | 로컬 pane 안에서 로컬 tmux 를 쓰면 `TMUX_PANE` 이 있어 원격 분기로 샌다 | **설계 1 의 순서가 답이다** — 로컬 검증이 먼저 서면 원격 가드는 안 본다. 반대(원격 먼저)로 두면 이 케이스가 원격 파일에 적혀 로컬 캡처가 빈다 → 게이트 «둘 다» 케이스로 못 박는다 |
+| C | 원격 기계가 **자기 maru GUI** 도 돌린다(개발자 Mac 이 정확히 이것) — 그 GUI 의 pane 에서 띄운 에이전트 훅 env 는? | `MARU_HOOK_*` 만 있다(⑥) → 로컬 경로. ssh 로 들어온 셸의 에이전트는 `LC_MARU_PANE` 만 → 원격 경로. 같은 커맨드가 두 자리를 다 맞게 고른다 — 이것이 핑퐁의 실제 사례를 그대로 덮는다 |
+| D | `XDG_CACHE_HOME` 이 GUI env 와 sshd env 에서 다르면 로컬 디렉터리 바이트가 갈려 핑퐁이 남는다 | 초안은 «남는다» 였다. 사용자 물음(「어쩔 수 없나」)에 다시 보니 **없앨 수 있다** — 훅 로그 디렉터리를 HOME 만으로 정하면 어느 env 에서 계산해도 같다(설계 2 로 반영, 사용자 결정). 남는 것은 «HOME 이 다르다» 뿐인데 그것은 다른 사용자다 |
+| E | 다른 기기의 **옛 maru** 가 옛 원격 커맨드를 계속 심는다 | **오진이었다.** `install_all_script` 는 ssh **대상 기계**의 PATH 에서 `maru agent-hooks` 를 돌린다 — 오늘 08:46 의 옛 세트는 이 Mac 의 `~/.local/bin/maru`(09-03 빌드, AT3c 이전)가 심은 것이다. 다른 기기는 셸 한 줄(`maru agent-hooks … --dir="$HOME/<rel>"`)만 보내고 새 CLI 도 그 인자를 받는다. 그러니 **이 Mac 의 CLI 를 새 빌드로 바꾸면 끝**이다(사용자 손). 새 커맨드는 옛 원격 훅과 **같은 파일 이름**에 적으므로 그 사이도 호환이다 |
+| F | 골든·게이트 14 개가 로컬 env 로만 돈다 | 설계 5 — env 모양 케이스 5 개를 게이트에 더한다. 원격 판정자(`remote pane 칸`·`.tmux` 옆 파일·빈 nonce+tmux)는 `build` 서명만 바뀌고 단언은 그대로 |
+| G | 커맨드 길이 상한(codex `hooks.json`·claude settings)이 늘어난 바이트로 걸린다 | 지금 ~2.2 KB, 원격 분기 합쳐도 ~2.6 KB. 실측 상한은 없다(둘 다 문자열 필드). 골든 크기를 적어 둔다 |
+| H | 원격 CLI 가 로컬 디렉터리를 만든다 — 원격 기계에 우리 자리를 하나 더 잡는다 | 0700 빈 디렉터리 하나. 그 기계에서 로컬 maru 를 켜면 어차피 같은 자리를 만든다. 안 만들면 그 기계의 로컬 pane 훅이 조용히 안 적는다(계약 §4.1 의 «훅은 mkdir 안 한다») — 만드는 쪽이 옳다 |
+| I | 두 설치기가 **동시에** 같은 파일을 쓰면 | 지금도 락(원격 CLI 는 그 기계의 락, 로컬 앱은 atomic write)이 있고, 같은 바이트를 쓰므로 순서가 바뀌어도 결과가 같다 |
+| J | `Scope` 를 `build` 에서만 빼면 «조용히 로컬 세트를 쓰는 원격 경로» 규율(`eventsFor` 주석)이 흐려진다 | 세트 축은 그대로 scope 를 받는다(설계 3). 커맨드 축은 애초에 scope 로 갈릴 이유가 없었다 — env 가 자리를 말한다 |
+
+**착수 전 적대적 공격 2회차 (2026-09-21, 사용자 요청 — 1회차가 D·E 를 잘못 읽었으므로 새 각도로)**
+
+| # | 공격 | 결과 |
+|---|---|---|
+| K | 지금 원격 커맨드의 RA6 가드: `case "$LC_MARU_PANE" in ''\|*[!class]*) [ -n "$TMUX_PANE" ] \|\| exit 0 ;; esac; mh_n="$LC_MARU_PANE"` — nonce 가 **비어 있지 않은데 클래스를 못 지나고** tmux 안이면 `mh_n` 에 **검증 안 된 값**이 든다 | **실측으로 뚫렸다.** `LC_MARU_PANE='../ra8-evil' TMUX_PANE='%3'` 로 현행 원격 커맨드를 돌리니 `/tmp/ra8-evil_t3.ndjson`·`.tmux` 가 로그 디렉터리 **밖**(부모)에 생겼다. sshd 는 `AcceptEnv LC_*` 라 클라이언트가 임의 값을 보낼 수 있다(같은 사용자 권한이라 상승은 아니지만 「검증 없는 env 를 경로에 넣지 않는다」 규율 위반). 통일 커맨드에서 고친다: 못 지나면 `mh_n=""` 로 비우고 tmux 칸만 쓴다. 게이트 케이스로 못 박는다(로그 디렉터리 밖에 파일 0) |
+| L | 로컬 env 가 **있는데 틀리면**(`MARU_HOOK_PANE` 이 비어 있지 않은데 클래스 밖) 설계 1 초안(«둘 다 지나면 로컬, 아니면 원격 가드»)은 원격 분기로 흘러 로컬 tmux 안에서 `t<pane>` 파일을 원격 디렉터리에 적는다 — 지금 로컬 커맨드는 그때 `exit 0`(fail-closed) | 설계 1 을 좁힌다: **로컬 env 가 하나라도 비어 있지 않으면 로컬 분기**이고 거기서 검증에 실패하면 `exit 0`. 원격 분기는 로컬 env 둘 다 빈 경우에만 |
+| M | 원격 CLI 의 `--scope=remote`·`--dir=` 인자 — 다른 기기의 옛 스크립트가 보낸다 | 둘 다 계속 받는다. `--scope` 는 세트 축(`eventsFor`)에만 쓰고, `--dir` 는 원격 디렉터리로 그대로 쓴다(스크립트가 늘 `$HOME/<remote_log_dir_rel>` 을 보내므로 로컬 앱 계산과 같다). 다른 값을 넘기면 바이트가 갈려 핑퐁이 되살아난다 — CLI 가 그 경우 stderr 로 경고한다 |
+| N | 영속 session host 는 앱보다 오래 산다 — XDG 사용자는 옛 host 가 `$XDG/…` 에 적고 새 GUI 는 `~/.cache/…` 를 읽는다 | 한 번 갈린다(host 가 새 빌드로 재시작할 때까지 — 앱 업데이트가 host 재시작을 밀어 준다). XDG 를 안 쓰는 사용자(macOS 기본)는 두 값이 같아 무관. 계약 §11.6 한계로 적는다 |
+| O | XDG 사용자의 옛 자리(`$XDG/maru/agent-turn-events`)가 영영 안 지워진다 | 시작 시 정리는 새 자리만 본다. 옛 자리엔 지난 실행의 임시 로그 몇 개 — 문서로 적고 지우지 않는다(legacy 잔재를 자동 정리하지 않는 규율) |
+| P | `build` 서명이 바뀌는데 로컬 게이트가 `--test-filter` 로 안 고른 test 본문을 분석하지 않는다(AT3c 에서 겪음) | 호출자 전수 grep + `zig build test-macos-only` + `zig build test` 를 로컬에서 돈다 |
+| Q | 골든 `tests/golden/agent_hook_command.sh` 는 절대 디렉터리를 어떻게 담나 | 구현 때 본다 — 지금 골든이 하나(로컬)라 통일 뒤 골든도 하나면 된다(원격 골든은 원래 없었다) |
+
+**구현 (2026-09-21)** — 설계 1~5 그대로(2회차 공격으로 좁힌 1 포함):
+
+- `agent_hook_command.build(out, a, provider, local_log_dir_abs, remote_log_dir_abs)` — `scope` 없음. 커맨드는 `if [ -n
+  "$MARU_HOOK_PANE$MARU_HOOK_INSTANCE" ]` 로 로컬 분기(두 칸 검증, 실패면 `exit 0`), `else` 원격 분기(`mh_n=""; case
+  "$LC_MARU_PANE" … *) mh_n="$LC_MARU_PANE"` — 못 지나면 빈 채로, tmux 칸 `mh_t`). 두 분기가 `mh_o`(이벤트 파일)·`mh_c`
+  (옆 파일, 로컬은 빈 값)만 정하고 `printf` 는 하나다. 크기 2,238 B → 2,801 B.
+- `hookCacheBaseAlloc(home)`·`localLogDirAlloc(home)`·`remoteLogDirAlloc(home)` — HOME 만. GUI `agentHookLogDir`/host 소유
+  로그 경로/`reconcileProviderHooks`(원격 자리도 만든다), session host `agent_hook_logs.resolveCacheBase`, 원격 CLI
+  (`--dir` 는 원격 자리로 그대로, 로컬 자리는 HOME 으로; 둘이 HOME 규칙과 다르면 stderr 경고; 두 자리 다 만든다).
+- 게이트: `tools/check-agent-hook-command.sh` **20 계약**(7·7b·7c·7d·7e·7f — 원격 자리·tmux 칸·옆 파일·빈 nonce·**경로 탈출
+  없음(공격 K 실측 재현)**·로컬 우선·로컬 fail-closed·빈 env). ⚠️ 게이트 자체가 tmux 안에서 돌 수 있어 «tmux 밖» 케이스는
+  `TMUX_PANE`·`TMUX` 를 명시적으로 뺀다. 골든 재생성(`__LOG_DIR__`·`__REMOTE_LOG_DIR__`). 단위 판정자: «커맨드는 하나고 두
+  자리를 env 로 고른다»(순서·경로·printf 하나), «못 지난 nonce 를 비운다», «두 설치기의 입력은 HOME 하나에서 같은 두
+  디렉터리를 낸다 — 바이트가 같다». app_session 판정자 13곳의 픽스처를 `home/.cache/maru/…` 로 옮겼고 AH7 은 HOME 도 격리한다.
+
+**적대적 검증 (2026-09-21, 구현 뒤 뮤턴트 7)**
+
+| # | 뮤턴트 | 결과 |
+|---|---|---|
+| R1 | 못 지난 nonce 를 옛처럼 그대로 쓴다(공격 K 되돌림) | 잡힘 — 단위 판정자 + 게이트 7c(«디렉터리 밖에 파일») |
+| R2 | 로컬 분기 판정이 pane 칸만 본다(인스턴스만 있으면 원격으로 샌다) | 잡힘 — 단위 «순서·경로» + 게이트 7e |
+| R3 | 로컬 분기가 인스턴스 칸을 검증하지 않는다 | 잡힘 — 게이트 5c |
+| R4 | 옆 파일을 로컬 분기에서도 적는다 | 잡힘 — 단위 + 게이트 2 |
+| R5 | 원격 자리에 로컬 디렉터리를 박는다 | 잡힘 — 단위 «두 디렉터리가 각자» + 게이트 7 |
+| R6 | `hookCacheBaseAlloc` 이 XDG 를 본다(HOME 규칙 되돌림) | 잡힘 — `test-agent-turn-capture`(픽스처가 `home/.cache` 를 본다) |
+| e2e | 제품 바이너리 `maru agent-hooks` 가 심은 바이트 = 골든(HOME 규칙), XDG 무시, 두 자리 생성, 재설치 무변경 | 게이트 8 통과 |
+
+**남은 손**: 이 Mac 의 `~/.local/bin/maru`(09-03 빌드)가 ssh 대상 CLI 다 — 새 빌드로 바꿔야 원격 설치기가 새 바이트를 쓴다.
+그 전까지는 그 CLI 가 옛 원격 커맨드를 심고 새 GUI 가 되돌리는 핑퐁이 **남아 있다**(공격 E 의 정정 — 사용자 손).
+
 ## 1.9 결착 — 「열 중 둘만 뜬다」가 무엇이었나 (2026-09-11~14)
 
 배지가 **다 선다**. 원인은 하나가 아니라 **넷이 겹쳐 있었고**, 그 사이 진단이 **스스로 거짓말한 구간**이

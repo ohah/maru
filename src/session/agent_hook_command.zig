@@ -56,6 +56,36 @@ pub const log_dir_rel = "agent-turn-events";
 /// 같은 기계에 로컬 maru 도 돌 때 두 이름 규칙이 한 디렉터리에서 섞인다.
 pub const remote_log_dir_rel = ".cache/maru/remote-agent-events";
 
+/// 로컬 훅 로그의 **홈 기준** 자리(`<home>/.cache/maru/agent-turn-events`) — RA8 부터 `XDG_CACHE_HOME` 을 **보지
+/// 않는다**([계획](../../docs/plans/remote-agent-state.md) RA8 설계 2, 사용자 결정 2026-09-21). 이유: 커맨드에 이
+/// 절대경로가 박히는데, 로컬 앱(GUI env)과 원격 CLI(sshd env)가 그것을 각자 계산한다. XDG 를 보면 두 env 에서
+/// 값이 갈릴 수 있고 그러면 바이트가 달라 두 설치기가 서로를 덮는다(핑퐁). HOME 만 보면 같은 사용자면 같다.
+/// 원격 자리(`remote_log_dir_rel`)는 원래 그랬다. 다른 캐시는 그대로 XDG 를 본다 — 훅 로그만이다.
+pub const local_log_dir_rel = ".cache/maru/" ++ log_dir_rel;
+
+/// 로컬 훅 로그 base(`<home>/.cache/maru`) — GUI·session host·원격 CLI 가 **이 하나**로 계산한다. `cache_path.maruBaseAlloc`
+/// 과 달리 XDG 를 안 본다(위 `local_log_dir_rel`). `home` 이 비면 null.
+pub fn hookCacheBaseAlloc(allocator: std.mem.Allocator, home: ?[]const u8) std.mem.Allocator.Error!?[]u8 {
+    const value = home orelse return null;
+    if (value.len == 0) return null;
+    return try std.fmt.allocPrint(allocator, "{s}/.cache/maru", .{std.mem.trimEnd(u8, value, "/")});
+}
+
+/// 로컬 훅 로그 디렉터리 절대경로(`<home>/.cache/maru/agent-turn-events`).
+pub fn localLogDirAlloc(allocator: std.mem.Allocator, home: ?[]const u8) std.mem.Allocator.Error!?[]u8 {
+    const value = home orelse return null;
+    if (value.len == 0) return null;
+    return try std.fmt.allocPrint(allocator, "{s}/{s}", .{ std.mem.trimEnd(u8, value, "/"), local_log_dir_rel });
+}
+
+/// 원격 훅 로그 디렉터리 절대경로(`<home>/.cache/maru/remote-agent-events`) — 원격 설치 스크립트가 `$HOME/<rel>` 로
+/// 푸는 것과 **같은 값**이어야 한다(`cli/agent_hooks.zig` `install_all_script`).
+pub fn remoteLogDirAlloc(allocator: std.mem.Allocator, home: ?[]const u8) std.mem.Allocator.Error!?[]u8 {
+    const value = home orelse return null;
+    if (value.len == 0) return null;
+    return try std.fmt.allocPrint(allocator, "{s}/{s}", .{ std.mem.trimEnd(u8, value, "/"), remote_log_dir_rel });
+}
+
 /// 원격 훅이 tmux 좌표를 남기는 **옆 파일**의 확장자([계획](../../docs/plans/remote-agent-state.md) RA6).
 ///
 /// 이벤트 로그(`.ndjson`)와 확장자가 달라야 한다 — 스트리머의 파일 이름 판정이 이것을 이벤트로 읽으면
@@ -451,7 +481,14 @@ fn appendQuoted(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, 
     try out.append(allocator, '\'');
 }
 
-/// 한 provider의 훅 커맨드를 만든다. `log_dir_abs`는 maru가 **미리 만들어 둔** 이벤트 로그 디렉터리다.
+/// 한 provider의 훅 커맨드를 만든다. `local_log_dir_abs`·`remote_log_dir_abs` 는 maru 가 **미리 만들어 둔** 이벤트 로그
+/// 디렉터리 둘이다(`localLogDirAlloc`·`remoteLogDirAlloc` — 둘 다 HOME 만으로 계산한다).
+///
+/// **커맨드는 하나다**([계획](../../docs/plans/remote-agent-state.md) RA8). 로컬 설치기(GUI)와 원격 설치기(`maru agent-hooks`)가
+/// 같은 기계의 같은 파일을 두고 **같은 바이트**를 써야 서로를 덮지 않는다 — 예전엔 scope 마다 다른 커맨드를 만들어
+/// 두 설치기가 핑퐁했다(RA1 2026-09-20 관찰). 자리는 훅이 **env 모양**으로 고른다: 로컬 두 칸(`MARU_HOOK_INSTANCE`·
+/// `MARU_HOOK_PANE`)이 하나라도 있으면 로컬(둘 다 검증을 지나야 하고 아니면 나간다 — fail-closed), 둘 다 비면 원격
+/// (`LC_MARU_PANE` ∨ `TMUX_PANE`). 로컬이 먼저인 이유: 로컬 pane 안의 로컬 tmux 도 `TMUX_PANE` 을 갖는다.
 ///
 /// 계약이 요구하는 것을 순서대로 지킨다:
 /// 1. **stdin을 먼저 전부 삼킨다** — 첫 줄을 payload로 받고 나머지를 드레인한다. 안 그러면 provider 파이프가
@@ -464,8 +501,8 @@ pub fn build(
     out: *std.ArrayListUnmanaged(u8),
     allocator: std.mem.Allocator,
     provider: []const u8,
-    log_dir_abs: []const u8,
-    scope: Scope,
+    local_log_dir_abs: []const u8,
+    remote_log_dir_abs: []const u8,
 ) error{ OutOfMemory, InvalidProvider }!void {
     // **provider 이름을 검증한다.** 이 값은 줄 앞에 그대로 적히므로 탭이나 개행이 들어오면 **모든 줄이
     // 깨진다**(구분자가 둘이 되거나 줄이 둘로 갈린다). 파서와 같은 규칙을 쓴다 — 두 곳이 기준이 다르면
@@ -490,56 +527,64 @@ pub fn build(
     // 실측(2026-08-20)에서 `../outside/pwned` 가 로그 디렉터리 **밖에** 파일을 만들었다. 지키는 성질은
     // «숫자만» 이 아니라 «`/` 와 `.` 가 없다» 이고, 클래스가 그것을 보장한다. 문자 클래스는 `pane_token_class`
     // 에서 렌더한다 — 여기 손으로 적으면 maru 쪽 판정과 갈린다. `case` 는 셸 내장이라 프로세스가 늘지 않는다.
-    if (scope == .remote) {
-        // **원격은 칸이 하나다.** 합쳐진 값이므로 두 클래스의 합집합으로 검증한다 —
-        // `instance_token_class`(숫자·소문자·`_`)가 `pane_token_class`(숫자·hex)를 덮는 상위집합이다.
-        // 지키는 성질은 로컬과 같다: `/` 와 `.` 가 없어 경로를 벗어나지 못한다.
-        // ⚠️ **빈 nonce 라도 tmux 안이면 적는다**(2026-08-31 실사용에서 잡았다).
-        //
-        // RA6 은 오염을 «남의 값이 온다» 로만 봤는데, 실제로 더 흔한 것은 **«아무 값도 안 온다»** 였다:
-        // tmux 서버가 `maru ssh` **전에**(또는 그 밖에서) 만들어졌으면 그 서버의 pane 자식들은 값을
-        // 아예 못 받는다. 클라이언트에는 값이 있는데 pane 에는 없다 — 실측으로 그 둘을 나란히 확인했다.
-        //
-        // 그때 여기서 그냥 나가면 **파일이 아예 안 생겨서 나중에 되찾을 대상이 없다.** 역조회 기계는
-        // 이미 있는데 쓸 기회가 없는 셈이다. 그래서 `$TMUX_PANE` 이 있으면 **그 이름으로 적어 두고**,
-        // 진짜 주인은 스트리머가 클라이언트 env 에서 되찾는다(RA6).
-        //
-        // 둘 다 없으면(= tmux 밖 + 신원 없음) 그때는 귀속할 곳이 정말 없으므로 나간다.
-        try out.print(allocator, "case \"${s}\" in ''|*[!{s}]*) [ -n \"$TMUX_PANE\" ] || exit 0 ;; esac; ", .{
-            remote_pane_env,
-            comptime instance_token_class.shellClass(),
-        });
-        // **tmux 안이면 파일 이름을 pane 으로 한 칸 더 가른다**([계획](../../docs/plans/remote-agent-state.md) RA6).
-        //
-        // ⚠️ 오염은 «한 pane 이 남의 이름을 쓴다» 가 아니라 **«그 tmux 서버의 모든 pane 이 같은 이름을
-        // 쓴다»** 이다(서버 생성 시 env 가 자식 전부에게 간다). 그래서 이 칸이 없으면 pane 셋의 이벤트가
-        // **한 파일에 섞이고**, 옆 파일은 마지막에 쓴 pane 만 가리켜 역조회로도 못 가른다 — 셋 중 하나에
-        // 전부 귀속된다. 이름을 가르면 그 문제가 애초에 안 생긴다.
-        //
-        // `${{TMUX_PANE#%}}` 로 앞의 `%` 를 뗀다 — 그 글자는 파일 이름 문자 클래스 밖이라 스트리머가
-        // 그 파일을 아예 안 읽는다. 뗀 값도 **검증한다**: tmux 는 `%<숫자>` 만 만들지만, 검증 없는 env 를
-        // 경로에 넣지 않는다는 규율이 여기서도 같다.
-        try out.appendSlice(allocator, "mh_t=\"\"; if [ -n \"$TMUX_PANE\" ]; then mh_t=\"${TMUX_PANE#%}\"; " ++
-            "case \"$mh_t\" in ''|*[!0-9]*) exit 0 ;; esac; mh_t=\"_t$mh_t\"; fi; ");
-        // **이름의 앞칸이 비면 `t` 하나로 세운다.** `_t16` 처럼 밑줄로 시작하는 이름은 우리 파일 이름
-        // 규칙(`<nonce>` 또는 `<nonce>_t<pane>`)과 모양이 달라 스트리머가 읽지 않는다. 앞이 비었을
-        // 때만 밑줄을 떼어 `t16` 으로 만든다 — 그 이름도 문자 클래스를 지나고, 옆 파일이 그 pane 을
-        // 가리키므로 역조회가 주인을 되찾는다.
-        try out.print(allocator, "mh_n=\"${s}\"; [ -n \"$mh_n\" ] || mh_t=\"${{mh_t#_}}\"; ", .{remote_pane_env});
-    } else try out.print(allocator, "case \"${s}\" in ''|*[!{s}]*) exit 0 ;; esac; ", .{
-        pane_env,
-        comptime pane_token_class.shellClass(),
+    // ── 자리 고르기(RA8): 로컬 env 가 하나라도 있으면 로컬, 아니면 원격 ─────────────────────────────
+    //
+    // **로컬 분기는 fail-closed 다.** 두 칸이 그대로 파일명이 되므로 검증 없이 쓰면 경로를 벗어난다 — 실측(2026-08-20)
+    // 에서 `../outside/pwned` 가 로그 디렉터리 **밖에** 파일을 만들었다. 지키는 성질은 «`/` 와 `.` 가 없다» 이고
+    // 클래스가 그것을 보장한다. 클래스는 `pane_token_class`/`instance_token_class` 에서 렌더한다 — 여기 손으로 적으면
+    // maru 쪽 판정과 갈린다. 인스턴스 칸이 필요한 이유: 로그 디렉터리는 사용자 캐시 하나뿐인데 `surface_id` 는
+    // 프로세스마다 1 부터라 maru 를 둘 띄우면 첫 pane 이 같은 파일 이름을 갖는다(`formatGuiInstance`/`formatHostInstance`).
+    // 로컬 env 가 **있는데 틀리면** 원격으로 흘리지 않고 나간다(계획 RA8 공격 L) — 옛 로컬 커맨드와 같은 fail-closed 다.
+    try out.print(allocator, "if [ -n \"${s}${s}\" ]; then " ++
+        "case \"${s}\" in ''|*[!{s}]*) exit 0 ;; esac; " ++
+        "case \"${s}\" in ''|*[!{s}]*) exit 0 ;; esac; ", .{
+        pane_env,     instance_env,
+        pane_env,     comptime pane_token_class.shellClass(),
+        instance_env, comptime instance_token_class.shellClass(),
     });
-    // **인스턴스 식별자도 같은 규율로 검증한다.** 로그 디렉터리는 사용자 캐시 하나뿐이라 **maru 를 두 개
-    // 띄우면 두 인스턴스가 같은 디렉터리를 쓴다.** 그런데 `surface_id` 는 프로세스마다 1 부터 발급되므로
-    // (`SurfaceIdAllocator`) 두 인스턴스의 첫 pane 이 **같은 파일 이름**을 갖는다 — 서로의 이벤트를 읽고,
-    // 시작 시 정리가 남의 살아 있는 로그를 지운다. 그래서 파일 이름 앞에 인스턴스 칸을 하나 둔다.
-    // 값은 GUI 소유면 그 pid, host 소유면 `host_<hex host_id>` 다(`formatGuiInstance`/`formatHostInstance`).
-    // 그 밖의 모양이면 우리 세션이 아니라고 보고 나간다 — 경로 탈출 방어는 pane 칸과 같은 이유·같은 방법이다.
-    if (scope == .local) try out.print(allocator, "case \"${s}\" in ''|*[!{s}]*) exit 0 ;; esac; ", .{
-        instance_env,
+    // 경로는 `<로컬 로그 디렉터리>/<인스턴스>/<pane>.ndjson` 이다 — 따옴표 밖에서 확장해야 값이 들어간다. 옆 파일은 없다.
+    try out.appendSlice(allocator, "mh_o=");
+    try appendQuoted(out, allocator, local_log_dir_abs);
+    try out.print(allocator, "\"/${s}/${s}.ndjson\"; mh_c=\"\"; else ", .{ instance_env, pane_env });
+    // **원격 분기는 칸이 하나다.** 합쳐진 값이므로 두 클래스의 합집합(`instance_token_class` 가 `pane_token_class` 를
+    // 덮는 상위집합)으로 검증한다. 지키는 성질은 로컬과 같다: `/` 와 `.` 가 없어 경로를 벗어나지 못한다.
+    // ⚠️ **빈 nonce 라도 tmux 안이면 적는다**(2026-08-31 실사용에서 잡았다).
+    //
+    // RA6 은 오염을 «남의 값이 온다» 로만 봤는데, 실제로 더 흔한 것은 **«아무 값도 안 온다»** 였다: tmux 서버가
+    // `maru ssh` **전에**(또는 그 밖에서) 만들어졌으면 그 서버의 pane 자식들은 값을 아예 못 받는다. 그때 그냥
+    // 나가면 파일이 아예 안 생겨 나중에 되찾을 대상이 없다. 그래서 `$TMUX_PANE` 이 있으면 **그 이름으로 적어 두고**,
+    // 진짜 주인은 스트리머가 클라이언트 env 에서 되찾는다(RA6). 둘 다 없으면 귀속할 곳이 정말 없으므로 나간다.
+    //
+    // ⚠️ **클래스를 못 지난 nonce 는 비운다**(계획 RA8 공격 K — 실측으로 뚫렸던 자리). 옛 커맨드는 «못 지났지만 tmux
+    // 안» 일 때 그 값을 **그대로** 이름에 썼다 — `LC_MARU_PANE='../x'` 가 로그 디렉터리 밖에 파일을 만들었다. sshd 는
+    // `AcceptEnv LC_*` 라 클라이언트가 임의 값을 보낼 수 있다. 이제 그 경우는 빈 nonce + tmux 칸으로 접는다.
+    try out.print(allocator, "mh_n=\"\"; case \"${s}\" in ''|*[!{s}]*) [ -n \"$TMUX_PANE\" ] || exit 0 ;; *) mh_n=\"${s}\" ;; esac; ", .{
+        remote_pane_env,
         comptime instance_token_class.shellClass(),
+        remote_pane_env,
     });
+    // **tmux 안이면 파일 이름을 pane 으로 한 칸 더 가른다**([계획](../../docs/plans/remote-agent-state.md) RA6).
+    //
+    // ⚠️ 오염은 «한 pane 이 남의 이름을 쓴다» 가 아니라 **«그 tmux 서버의 모든 pane 이 같은 이름을 쓴다»** 이다
+    // (서버 생성 시 env 가 자식 전부에게 간다). 그래서 이 칸이 없으면 pane 셋의 이벤트가 **한 파일에 섞이고**, 옆
+    // 파일은 마지막에 쓴 pane 만 가리켜 역조회로도 못 가른다. 이름을 가르면 그 문제가 애초에 안 생긴다.
+    //
+    // `${TMUX_PANE#%}` 로 앞의 `%` 를 뗀다 — 그 글자는 파일 이름 문자 클래스 밖이라 스트리머가 그 파일을 아예 안
+    // 읽는다. 뗀 값도 **검증한다**: tmux 는 `%<숫자>` 만 만들지만, 검증 없는 env 를 경로에 넣지 않는 규율이 같다.
+    try out.appendSlice(allocator, "mh_t=\"\"; if [ -n \"$TMUX_PANE\" ]; then mh_t=\"${TMUX_PANE#%}\"; " ++
+        "case \"$mh_t\" in ''|*[!0-9]*) exit 0 ;; esac; mh_t=\"_t$mh_t\"; fi; ");
+    // **이름의 앞칸이 비면 `t` 하나로 세운다.** `_t16` 처럼 밑줄로 시작하는 이름은 우리 파일 이름 규칙(`<nonce>` 또는
+    // `<nonce>_t<pane>`)과 모양이 달라 스트리머가 읽지 않는다. 앞이 비었을 때만 밑줄을 떼어 `t16` 으로 만든다.
+    try out.appendSlice(allocator, "[ -n \"$mh_n\" ] || mh_t=\"${mh_t#_}\"; ");
+    // 원격 경로는 **평평하다** — 인스턴스 칸이 이미 nonce 안에 들어 있다(`formatRemotePaneNonce`). 옆 파일(`.tmux`)에
+    // tmux 좌표를 남긴다(RA6): 훅이 B 의 이벤트를 A 의 파일에 적을 때 진짜 주인은 `pane → session → client` 역조회로만
+    // 되찾을 수 있고, 그러려면 **어느 서버의 어느 pane 이었는지** 가 남아 있어야 한다. 줄에 칸을 더하지 않는 이유는
+    // `<provider>\t<payload>` 형식이 원격에서만 달라지면 §4 의 「파서를 나누지 않는다」가 깨지기 때문이다.
+    try out.appendSlice(allocator, "mh_o=");
+    try appendQuoted(out, allocator, remote_log_dir_abs);
+    try out.appendSlice(allocator, "\"/$mh_n$mh_t.ndjson\"; mh_c=");
+    try appendQuoted(out, allocator, remote_log_dir_abs);
+    try out.print(allocator, "\"/$mh_n$mh_t{s}\"; fi; ", .{tmux_sidecar_suffix});
     // **상한을 넘겨도 «무엇이었는지» 는 살린다**(2026-08-21 실사용에서 실제로 넘겼다 — codex payload 하나).
     //
     // 예전에는 이름까지 버리고 `__oversized__` 하나만 남겼다. 그런데 `Stop` 은 최종 답변 전문
@@ -595,31 +640,10 @@ pub fn build(
                 "update the `\\t` in the printf format string too");
         }
     }
-    try out.print(allocator, "{{ printf '{s}\\t%s\\n' \"$mh_p\" >> ", .{provider});
-    try appendQuoted(out, allocator, log_dir_abs);
-    // 경로는 `<로그 디렉터리>/<인스턴스>/<pane>.ndjson` 이다 — 따옴표 밖에서 확장해야 값이 들어간다.
-    // 인스턴스 칸이 있어야 maru 를 여러 개 띄워도 이름이 안 겹친다(위 가드 주석). 디렉터리는 maru 가
-    // 미리 만든다 — 훅이 `mkdir` 을 부르면 그만큼 프로세스가 늘고(계약 §4.1), 없으면 조용히 나간다.
-    if (scope == .remote) {
-        // 원격 경로는 **평평하다** — 인스턴스 칸이 이미 nonce 안에 들어 있다(`formatRemotePaneNonce`).
-        try out.appendSlice(allocator, "\"/$mh_n$mh_t.ndjson\"");
-        // **tmux 좌표를 옆 파일로 남긴다**([계획](../../docs/plans/remote-agent-state.md) RA6).
-        //
-        // tmux 안에서는 `LC_MARU_PANE` 이 서버 생성 시 값으로 굳어 **남의 값이 온다** — 즉 훅은 B 의
-        // 이벤트를 A 의 파일에 적는다(값이 비는 것이 아니라 오배달이다). 그 줄의 진짜 주인은 나중에
-        // `pane → session → client` 역조회로만 되찾을 수 있고, 그러려면 **어느 서버의 어느 pane 이었는지**
-        // 가 남아 있어야 한다.
-        //
-        // **줄에 칸을 더하지 않는다.** `<provider>\t<payload JSON>` 형식이 원격에서만 달라지면 §4 가 지킨
-        // 「파서를 나누지 않는다」가 깨진다. 확장자가 다른 옆 파일이라 스트리머의 이름 판정이 이것을
-        // 이벤트 로그로 착각하지도 않는다.
-        //
-        // `>` 로 **덮어쓴다** — 이 값은 기록이 아니라 «지금 어디인가» 이고, append 하면 상한 없이 자란다.
-        // tmux 밖이면 두 변수가 비어 이 파일이 빈 채로 남고, 순수 층이 그것을 `direct` 로 접는다.
-        try out.appendSlice(allocator, "; printf '%s\t%s\n' \"$TMUX\" \"$TMUX_PANE\" > ");
-        try appendQuoted(out, allocator, log_dir_abs);
-        try out.print(allocator, "\"/$mh_n$mh_t{s}\"; }} 2>/dev/null; exit 0 ", .{tmux_sidecar_suffix});
-    } else try out.print(allocator, "\"/${s}/${s}.ndjson\"; }} 2>/dev/null; exit 0 ", .{ instance_env, pane_env });
+    // 옆 파일은 `>` 로 **덮어쓴다** — 이 값은 기록이 아니라 «지금 어디인가» 이고, append 하면 상한 없이 자란다.
+    // tmux 밖이면 두 변수가 비어 이 파일이 빈 채로 남고, 순수 층이 그것을 `direct` 로 접는다.
+    try out.print(allocator, "{{ printf '{s}\\t%s\\n' \"$mh_p\" >> \"$mh_o\"; " ++
+        "if [ -n \"$mh_c\" ]; then printf '%s\\t%s\\n' \"$TMUX\" \"$TMUX_PANE\" > \"$mh_c\"; fi; }} 2>/dev/null; exit 0 ", .{provider});
     try out.appendSlice(allocator, marker_comment);
 }
 
@@ -644,9 +668,11 @@ pub fn isLegacy(command: []const u8) bool {
 const testing = std.testing;
 
 fn buildAlloc(provider: []const u8, dir: []const u8, scope: Scope) ![]u8 {
+    // RA8 부터 커맨드는 하나다 — 판정자는 로컬/원격 디렉터리를 **다르게** 넘겨 두 자리가 각각 제 디렉터리를 쓰는지 본다.
+    _ = scope;
     var out: std.ArrayListUnmanaged(u8) = .empty;
     errdefer out.deinit(testing.allocator);
-    try build(&out, testing.allocator, provider, dir, scope);
+    try build(&out, testing.allocator, provider, dir, "/tmp/ev-remote");
     return out.toOwnedSlice(testing.allocator);
 }
 
@@ -765,40 +791,83 @@ test "stdin을 먼저 받고 나머지를 드레인한 뒤에야 가드가 온�
     try testing.expect(drain_at < guard_at);
 }
 
-test "원격 커맨드는 칸이 하나고 경로가 평평하다 — 로컬과 갈리는 자리는 그 둘뿐이다" {
-    const remote = try buildAlloc("claude", "/tmp/ev", .remote);
-    defer testing.allocator.free(remote);
-    const local = try buildAlloc("claude", "/tmp/ev", .local);
-    defer testing.allocator.free(local);
+test "커맨드는 하나고 두 자리를 env 로 고른다 — 로컬 두 칸이 먼저, 그 다음 원격 칸·평평한 경로 (RA8)" {
+    const cmd = try buildAlloc("claude", "/tmp/ev", .local);
+    defer testing.allocator.free(cmd);
 
-    // 원격은 `LC_MARU_PANE` 하나만 보고, 로컬 두 칸은 아예 안 나온다.
-    try testing.expect(std.mem.indexOf(u8, remote, remote_pane_env) != null);
-    try testing.expect(std.mem.indexOf(u8, remote, instance_env) == null);
-    try testing.expect(std.mem.indexOf(u8, remote, pane_env) == null);
-    // 로컬은 반대다 — 원격 축이 로컬 커맨드를 바꾸지 않는다.
-    try testing.expect(std.mem.indexOf(u8, local, remote_pane_env) == null);
-    try testing.expect(std.mem.indexOf(u8, local, instance_env) != null);
+    // 세 env 이름이 **한 커맨드**에 다 있다 — 설치기 둘이 같은 바이트를 쓰는 근거다(RA8).
+    try testing.expect(std.mem.indexOf(u8, cmd, remote_pane_env) != null);
+    try testing.expect(std.mem.indexOf(u8, cmd, instance_env) != null);
+    try testing.expect(std.mem.indexOf(u8, cmd, pane_env) != null);
 
-    // 경로: 원격은 평평하고(`/<nonce><tmux 칸>.ndjson`) 로컬은 인스턴스 디렉터리를 낀다.
-    //
-    // **tmux 칸(`$mh_t`)이 이름에 붙는다**(RA6). tmux 밖에서는 빈 문자열이라 이름이 예전과 같고, 안에서는
-    // `_t<pane>` 이 붙어 **같은 서버의 pane 들이 한 파일에 안 섞인다** — 그 칸이 없던 동안 셋의 이벤트가
-    // 한 파일에 쌓였다(적대적 검증이 잡고 실측이 확인했다).
-    // ⚠️ **경로는 `$mh_n$mh_t` 다** — env 를 직접 안 쓴다. 빈 nonce 라도 tmux 안이면 적어야 하는데
-    // (2026-08-31), 그때 이름의 앞칸이 비고 `mh_t` 가 `t<pane>` 이 된다. 그 조립을 셸 변수 둘로
-    // 나눠 두어야 네 경우(신원×tmux 안팎)가 한 형식으로 나온다.
-    try testing.expect(std.mem.indexOf(u8, remote, "\"/$mh_n$mh_t.ndjson\"") != null);
+    // **로컬이 먼저다.** 로컬 두 칸 중 하나라도 있으면 그 분기이고, 원격 가드는 `else` 뒤다 — 로컬 pane 안의
+    // 로컬 tmux 가 `TMUX_PANE` 을 갖기 때문에 순서가 뒤집히면 로컬 캡처가 원격 파일로 샌다(계획 RA8 공격 B).
+    const local_at = std.mem.indexOf(u8, cmd, "if [ -n \"$" ++ pane_env ++ "$" ++ instance_env ++ "\" ]; then").?;
+    const remote_at = std.mem.indexOf(u8, cmd, "case \"$" ++ remote_pane_env ++ "\" in").?;
+    const else_at = std.mem.indexOf(u8, cmd, "; else ").?;
+    try testing.expect(local_at < else_at and else_at < remote_at);
+
+    // 경로: 로컬은 인스턴스 디렉터리를 끼고(`<local>/<inst>/<pane>.ndjson`), 원격은 평평하다(`<remote>/<nonce><tmux 칸>.ndjson`).
+    // 두 디렉터리가 **각자** 박힌다 — buildAlloc 은 둘을 다르게 넘긴다.
+    try testing.expect(std.mem.indexOf(u8, cmd, "mh_o='/tmp/ev'\"/$" ++ instance_env ++ "/$" ++ pane_env ++ ".ndjson\"") != null);
+    try testing.expect(std.mem.indexOf(u8, cmd, "mh_o='/tmp/ev-remote'\"/$mh_n$mh_t.ndjson\"") != null);
     // 그 앞칸이 그 env 에서 온다는 것도 함께 문다 — 두 줄이 갈리면 이름이 조용히 달라진다.
-    try testing.expect(std.mem.indexOf(u8, remote, "mh_n=\"$" ++ remote_pane_env ++ "\"") != null);
-    try testing.expect(std.mem.indexOf(u8, local, "/$" ++ instance_env ++ "/$" ++ pane_env ++ ".ndjson") != null);
+    try testing.expect(std.mem.indexOf(u8, cmd, "*) mh_n=\"$" ++ remote_pane_env ++ "\" ;; esac;") != null);
+    // 두 분기 다 같은 자리(`$mh_o`)에 적는다 — printf 는 하나다.
+    try testing.expect(std.mem.indexOf(u8, cmd, ">> \"$mh_o\"") != null);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, cmd, "printf 'claude"));
 
     // 나머지 규율은 그대로다 — umask·구분자·상한 표식·조용한 실패.
-    for ([_][]const u8{ remote, local }) |cmd| {
-        try testing.expect(std.mem.indexOf(u8, cmd, "umask 077;") != null);
-        try testing.expect(std.mem.indexOf(u8, cmd, "claude\\t%s\\n") != null);
-        try testing.expect(std.mem.indexOf(u8, cmd, "2>/dev/null; exit 0") != null);
-        try testing.expect(std.mem.indexOf(u8, cmd, event.oversized_marker) != null);
-    }
+    try testing.expect(std.mem.indexOf(u8, cmd, "umask 077;") != null);
+    try testing.expect(std.mem.indexOf(u8, cmd, "claude\\t%s\\n") != null);
+    try testing.expect(std.mem.indexOf(u8, cmd, "2>/dev/null; exit 0") != null);
+    try testing.expect(std.mem.indexOf(u8, cmd, event.oversized_marker) != null);
+}
+
+test "두 설치기의 입력은 HOME 하나에서 같은 두 디렉터리를 낸다 — 바이트가 같아야 핑퐁이 없다 (RA8)" {
+    // 로컬 GUI 는 `hookCacheBaseAlloc` + `log_dir_rel` 로, 원격 CLI 는 `localLogDirAlloc` 로 로컬 자리를 계산한다 —
+    // 둘이 같은 문자열이어야 커맨드 바이트가 같다. 원격 자리는 CLI 가 `$HOME/<remote_log_dir_rel>` 로 받는다.
+    const a = testing.allocator;
+    const base = (try hookCacheBaseAlloc(a, "/Users/me/")).?;
+    defer a.free(base);
+    const gui_local = try std.fmt.allocPrint(a, "{s}/{s}", .{ base, log_dir_rel });
+    defer a.free(gui_local);
+    const cli_local = (try localLogDirAlloc(a, "/Users/me")).?;
+    defer a.free(cli_local);
+    try testing.expectEqualStrings(gui_local, cli_local);
+    try testing.expectEqualStrings("/Users/me/.cache/maru/agent-turn-events", cli_local);
+
+    const remote = (try remoteLogDirAlloc(a, "/Users/me")).?;
+    defer a.free(remote);
+    const script_style = try std.fmt.allocPrint(a, "/Users/me/{s}", .{remote_log_dir_rel});
+    defer a.free(script_style);
+    try testing.expectEqualStrings(script_style, remote);
+
+    // **XDG 를 안 본다** — 인자에 없다(서명이 그 사실이다). HOME 이 비면 어느 쪽도 자리를 만들지 않는다.
+    try testing.expect((try hookCacheBaseAlloc(a, "")) == null);
+    try testing.expect((try localLogDirAlloc(a, null)) == null);
+    try testing.expect((try remoteLogDirAlloc(a, "")) == null);
+
+    // 그 둘로 만든 커맨드는 한 바이트도 안 갈린다(설치기 둘이 각각 부른다는 가정으로 두 번 만든다).
+    var one: std.ArrayListUnmanaged(u8) = .empty;
+    defer one.deinit(a);
+    try build(&one, a, "claude", gui_local, remote);
+    var two: std.ArrayListUnmanaged(u8) = .empty;
+    defer two.deinit(a);
+    try build(&two, a, "claude", cli_local, script_style);
+    try testing.expectEqualStrings(one.items, two.items);
+}
+
+test "원격 분기는 클래스를 못 지난 nonce 를 비운다 — 옛 커맨드는 그 값을 그대로 이름에 썼다 (RA8 공격 K)" {
+    // 실측(2026-09-21): `LC_MARU_PANE='../ra8-evil' TMUX_PANE='%3'` 로 옛 원격 커맨드를 돌리니 로그 디렉터리
+    // **부모**에 `ra8-evil_t3.ndjson` 이 생겼다. sshd 는 `AcceptEnv LC_*` 라 클라이언트가 임의 값을 보낼 수 있다.
+    const cmd = try buildAlloc("claude", "/tmp/ev", .local);
+    defer testing.allocator.free(cmd);
+    // 가드에 걸리면 `mh_n` 은 앞서 비운 값 그대로이고, 지났을 때만 env 가 든다.
+    try testing.expect(std.mem.indexOf(u8, cmd, "mh_n=\"\"; case \"$" ++ remote_pane_env ++ "\" in ''|*[!") != null);
+    try testing.expect(std.mem.indexOf(u8, cmd, "]*) [ -n \"$TMUX_PANE\" ] || exit 0 ;; *) mh_n=\"$" ++ remote_pane_env ++ "\" ;; esac;") != null);
+    // 옛 모양(무조건 대입)은 없다.
+    try testing.expect(std.mem.indexOf(u8, cmd, "esac; mh_n=\"$" ++ remote_pane_env ++ "\";") == null);
 }
 
 test "원격 커맨드의 가드는 합쳐진 nonce 를 통과시키고 경로 탈출은 막는다" {
@@ -1248,14 +1317,14 @@ test "provider 이름이 줄을 깨뜨릴 수 있으면 거절한다" {
     // 커맨드를 만들면 **그 provider 의 모든 이벤트가 조용히 파싱 실패**한다.
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(testing.allocator);
-    try testing.expectError(error.InvalidProvider, build(&out, testing.allocator, "cl\taude", "/tmp/ev", .local));
-    try testing.expectError(error.InvalidProvider, build(&out, testing.allocator, "cl\naude", "/tmp/ev", .local));
-    try testing.expectError(error.InvalidProvider, build(&out, testing.allocator, "", "/tmp/ev", .local));
-    try testing.expectError(error.InvalidProvider, build(&out, testing.allocator, "Claude", "/tmp/ev", .local));
+    try testing.expectError(error.InvalidProvider, build(&out, testing.allocator, "cl\taude", "/tmp/ev", "/tmp/ev-remote"));
+    try testing.expectError(error.InvalidProvider, build(&out, testing.allocator, "cl\naude", "/tmp/ev", "/tmp/ev-remote"));
+    try testing.expectError(error.InvalidProvider, build(&out, testing.allocator, "", "/tmp/ev", "/tmp/ev-remote"));
+    try testing.expectError(error.InvalidProvider, build(&out, testing.allocator, "Claude", "/tmp/ev", "/tmp/ev-remote"));
 
     // 우리가 쓰는 이름은 통과한다.
     out.clearRetainingCapacity();
-    try build(&out, testing.allocator, "claude", "/tmp/ev", .local);
+    try build(&out, testing.allocator, "claude", "/tmp/ev", "/tmp/ev-remote");
     try testing.expect(out.items.len > 0);
 }
 
@@ -1330,10 +1399,9 @@ test "원격 커맨드는 tmux 좌표를 옆 파일에 남긴다 — 줄 형식�
     try testing.expect(std.mem.indexOf(u8, cmd, "'claude\\t%s\\n'") != null);
     try testing.expect(std.mem.indexOf(u8, cmd, ">> ") != null);
 
-    // 로컬 커맨드는 이 축과 무관하다 — tmux 좌표를 안 남긴다(로컬은 pane 이름이 안 오염된다).
-    const local = try buildAlloc("claude", "/tmp/ev", .local);
-    defer testing.allocator.free(local);
-    try testing.expect(std.mem.indexOf(u8, local, "TMUX") == null);
+    // 로컬 분기는 이 축과 무관하다 — 옆 파일 변수를 비워 두어(`mh_c=""`) 안 적는다(로컬은 pane 이름이 안 오염된다).
+    try testing.expect(std.mem.indexOf(u8, cmd, ".ndjson\"; mh_c=\"\"; else ") != null);
+    try testing.expect(std.mem.indexOf(u8, cmd, "if [ -n \"$mh_c\" ]; then printf") != null);
 }
 
 test "원격 커맨드는 tmux pane 으로 파일 이름을 한 칸 더 가른다 — 안 그러면 pane 셋이 한 파일에 섞인다" {
@@ -1358,10 +1426,10 @@ test "원격 커맨드는 tmux pane 으로 파일 이름을 한 칸 더 가른�
     // tmux 밖이면 그 칸이 빈 문자열이라 이름이 예전과 같다.
     try testing.expect(std.mem.indexOf(u8, cmd, "mh_t=\"\";") != null);
 
-    // 로컬은 이 축과 무관하다.
-    const local = try buildAlloc("claude", "/tmp/ev", .local);
-    defer testing.allocator.free(local);
-    try testing.expect(std.mem.indexOf(u8, local, "mh_t") == null);
+    // 로컬 분기는 이 칸을 안 쓴다 — 로컬 경로에는 `mh_t` 가 없다.
+    const local_path = std.mem.indexOf(u8, cmd, "/$" ++ instance_env ++ "/$" ++ pane_env ++ ".ndjson").?;
+    try testing.expect(std.mem.indexOf(u8, cmd[local_path..], "mh_t") != null); // 원격 분기가 뒤에 있다
+    try testing.expect(std.mem.indexOf(u8, cmd[0..local_path], "mh_t") == null);
 }
 
 test "원격 훅은 nonce 가 비어도 tmux 안이면 적는다 — 안 적으면 되찾을 대상이 없다" {

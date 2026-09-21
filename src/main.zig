@@ -14297,10 +14297,28 @@ fn runAgentHooks(
             std.process.exit(1);
         };
 
-        // 우리가 심을 커맨드. **원격 scope** 다 — 훅이 `LC_MARU_PANE` 을 검증해 평평한 경로에 적는다.
+        // 우리가 심을 커맨드. **로컬 GUI 설치기와 같은 바이트다**([계획](../docs/plans/remote-agent-state.md) RA8) —
+        // 커맨드 하나가 env 모양으로 로컬/원격 자리를 고르므로 여기서도 두 디렉터리를 다 박는다. 로컬 자리는 HOME 만으로
+        // 계산한다(`localLogDirAlloc` — GUI 가 같은 함수를 쓴다). 원격 자리는 `--dir` 그대로다(다른 기기의 옛 스크립트가
+        // `$HOME/<remote_log_dir_rel>` 을 보낸다). ⚠️ `--dir` 가 HOME 규칙과 다르면 GUI 설치기와 바이트가 갈려 핑퐁이
+        // 되살아난다 — 그때는 경고한다(계획 RA8 공격 M).
+        const home_for_dirs: ?[]const u8 = if (home_c) |h| std.mem.span(h) else null;
+        const local_dir = (hook_command.localLogDirAlloc(allocator, home_for_dirs) catch null) orelse {
+            try stderr.writeAll("maru agent-hooks: HOME is not set — cannot place the local event log directory\n");
+            try stderr.flush();
+            std.process.exit(1);
+        };
+        defer allocator.free(local_dir);
+        if (hook_command.remoteLogDirAlloc(allocator, home_for_dirs) catch null) |canonical_remote| {
+            defer allocator.free(canonical_remote);
+            if (!std.mem.eql(u8, canonical_remote, opts.dir)) {
+                try stderr.print("maru agent-hooks: --dir differs from the canonical remote log directory ({s}); the local installer will rewrite this entry\n", .{canonical_remote});
+                try stderr.flush();
+            }
+        }
         var cmd: std.ArrayListUnmanaged(u8) = .empty;
         defer cmd.deinit(allocator);
-        hook_command.build(&cmd, allocator, opts.provider.tag(), opts.dir, .remote) catch {
+        hook_command.build(&cmd, allocator, opts.provider.tag(), local_dir, opts.dir) catch {
             try stderr.writeAll("maru agent-hooks: could not build the hook command\n");
             try stderr.flush();
             std.process.exit(1);
@@ -14308,9 +14326,11 @@ fn runAgentHooks(
 
         // 훅이 적을 디렉터리를 **우리가 만든다**(훅은 `mkdir` 을 안 한다 — 계약 §4: 훅이 하는 일이 적을수록
         // 턴이 빨리 끝나고, 훅 안에서 실패를 다룰 방법도 없다). 0700 이다: 이 안에는 프롬프트 원문과 셸
-        // 명령이 평문으로 들어간다(§7).
+        // 명령이 평문으로 들어간다(§7). **로컬 자리도 만든다**(RA8) — 이 기계에서 로컬 pane 훅이 돌면 거기 적는다.
         std.Io.Dir.cwd().createDirPath(io, opts.dir) catch {};
         setDirMode0700(opts.dir);
+        std.Io.Dir.cwd().createDirPath(io, local_dir) catch {};
+        setDirMode0700(local_dir);
 
         const hooks_path = try std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ config_dir, install.hooksFileName(opts.provider) }, 0);
         defer allocator.free(hooks_path);

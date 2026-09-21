@@ -40,14 +40,14 @@ const hook_command = maru.session.agent_hook_command;
 /// 이 프로세스의 훅 로그 base(`<cache>/maru`)를 env 에서 유도한다 — **env 를 읽는 유일한 자리**다.
 /// 호출자가 소유하며, 못 구하면 null 이다(그러면 훅 신원 자체를 안 싣는다 — fail-closed).
 ///
-/// **GUI 와 같은 규칙이어야 한다**(`cache_path.maruBaseAlloc`). host 는 GUI 가 launch 하며 물려준 env 에서
-/// 유도하므로 실제로 같은 값이 나온다. ⚠️ 만약 둘이 갈리면 GUI 는 그 로그를 **찾지 못한다**(파일이 엉뚱한
-/// 곳에 생기는 것이 아니라 아무도 안 읽는다 — fail-closed). 그 경우까지 닫으려면 host 가 자기 base 를
-/// hello 로 알려 줘야 하고, 그것은 별도 슬라이스다.
+/// **GUI 와 같은 규칙이어야 한다** — `agent_hook_command.hookCacheBaseAlloc`(**HOME 만**, RA8). 예전엔
+/// `cache_path.maruBaseAlloc`(XDG 우선)이었는데, 그 경로가 훅 커맨드에 박히고 원격 CLI(sshd env)도 계산하므로 env 를
+/// 덜 탈수록 좋다. host 는 GUI 가 launch 하며 물려준 env 에서 유도하므로 HOME 은 같다. ⚠️ 만약 둘이 갈리면 GUI 는 그
+/// 로그를 **찾지 못한다**(파일이 엉뚱한 곳에 생기는 것이 아니라 아무도 안 읽는다 — fail-closed). 그 경우까지 닫으려면
+/// host 가 자기 base 를 hello 로 알려 줘야 하고, 그것은 별도 슬라이스다.
 pub fn resolveCacheBase(allocator: std.mem.Allocator) ?[]u8 {
-    const xdg = if (c.getenv("XDG_CACHE_HOME")) |value| std.mem.span(value) else null;
     const home = if (c.getenv("HOME")) |value| std.mem.span(value) else null;
-    return maru.session.cache_path.maruBaseAlloc(allocator, xdg, home) catch null;
+    return maru.session.agent_hook_command.hookCacheBaseAlloc(allocator, home) catch null;
 }
 
 /// host 가 소유하는 훅 로그 칸의 절대 경로(`<base>/agent-turn-events/host_<hex>`).

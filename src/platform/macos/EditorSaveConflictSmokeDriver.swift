@@ -17,6 +17,10 @@ final class EditorSaveConflictSmokeDriver {
         case externalConflict = "external-conflict"
         /// 밖에서 바뀌지 않은 파일에 `⌘S` — 조용히 저장되어야 한다(대조군).
         case cleanSave = "clean-save"
+        /// 충돌 상자에서 **덮어쓰기**(`Y`) — 내 편집이 디스크에 있어야 한다(C1a).
+        case conflictOverwrite = "conflict-overwrite"
+        /// 충돌 상자에서 **다시 읽기**(`D`) — 디스크는 그대로이고 문서가 clean 이어야 한다(C1a).
+        case conflictReload = "conflict-reload"
 
         init?(environment: [String: String] = ProcessInfo.processInfo.environment) {
             guard let raw = environment["MARU_EDITOR_SAVE_CONFLICT_SMOKE_SCENARIO"] else { return nil }
@@ -31,6 +35,9 @@ final class EditorSaveConflictSmokeDriver {
         case typed = "typed"
         case awaitingExternalChange = "awaiting_external_change"
         case saved = "saved"
+        /// 충돌 상자가 떠 있다 — 답을 누르기 전.
+        case asked = "asked"
+        case answered = "answered"
         case done = "done"
         case failed = "failed"
     }
@@ -47,6 +54,11 @@ final class EditorSaveConflictSmokeDriver {
         case caretToLineEnd
         /// `⌘S`.
         case save
+        /// 확인 상자의 **덮어쓰기**. 컴포넌트가 `Y`/`D`/`N` 를 버튼에 적어 두므로 그 글자를 누른다 —
+        /// Enter 는 포커스(취소)를 실행하고, 그것은 「아무 일도 안 한다」를 재는 다른 시나리오다.
+        case answerOverwrite
+        /// 확인 상자의 **다시 읽기**.
+        case answerReload
     }
 
     /// 호스트가 Zig 에서 읽어 주는 세 사실. 「편집기가 붙었나 · 편집이 남았나 · 무언가 떠 있나」.
@@ -140,7 +152,7 @@ final class EditorSaveConflictSmokeDriver {
             case .cleanSave:
                 stage = .saved
                 guard pressKey(.save) else { return fail("save_key_refused") }
-            case .externalConflict:
+            case .externalConflict, .conflictOverwrite, .conflictReload:
                 // 신호를 못 남기면 기다릴 상대가 없다 — budget 을 태우지 말고 바로 말한다.
                 guard announceReady() else { return fail("ready_signal_unwritable") }
                 stage = .awaitingExternalChange
@@ -158,6 +170,14 @@ final class EditorSaveConflictSmokeDriver {
             guard let now = diskContent() else { return fail("document_vanished_after_save") }
             guard let p = probe() else { return fail("probe_gone_after_save") }
             switch scenario {
+            case .conflictOverwrite, .conflictReload:
+                // 두 시나리오의 **공통 전제**: 저장이 멈추고 상자가 떴다. 그것까지는
+                // `external-conflict` 가 이미 재므로 여기서는 전제만 확인하고 답을 누른다.
+                if now != contentOnDisk { return fail("overwrote_external_change") }
+                guard p.overlayOpen else { return fail("no_notice_after_conflict") }
+                stage = .answered
+                let key: Key = scenario == .conflictOverwrite ? .answerOverwrite : .answerReload
+                guard pressKey(key) else { return fail("answer_key_refused") }
             case .externalConflict:
                 // ⑴ **디스크가 안 덮였다** — 이 스모크의 값이 여기 있다.
                 if now != contentOnDisk { return fail("overwrote_external_change") }
@@ -173,7 +193,26 @@ final class EditorSaveConflictSmokeDriver {
             }
             stage = .done
 
-        case .done, .failed:
+        case .answered:
+            guard let now = diskContent() else { return fail("document_vanished_after_answer") }
+            guard let p = probe() else { return fail("probe_gone_after_answer") }
+            // 답은 상자를 닫는다 — 안 닫히면 그 키가 그 갈래에 닿지 않았다는 뜻이다.
+            if p.overlayOpen { return fail("overlay_stayed_after_answer") }
+            switch scenario {
+            case .conflictOverwrite:
+                // **내 편집이 디스크에 있다** — CAS 를 건너뛰는 그 길이 실제로 쓰는지가 이 줄이다.
+                guard now.contains(Self.typed_marker) else { return fail("overwrite_did_not_write") }
+                if p.dirty { return fail("overwrite_left_dirty") }
+            case .conflictReload:
+                // **디스크는 그대로**(다시 읽기는 읽기다) 그리고 **문서는 clean** 이다.
+                guard now == contentOnDisk else { return fail("reload_touched_disk") }
+                if p.dirty { return fail("reload_left_dirty") }
+            case .externalConflict, .cleanSave:
+                return fail("unexpected_answer_stage")
+            }
+            stage = .done
+
+        case .asked, .done, .failed:
             return
         }
     }

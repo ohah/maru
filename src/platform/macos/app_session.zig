@@ -2497,6 +2497,11 @@ const PendingConfirm = union(enum) {
     /// 이름 없는 문서를 **있는 파일 위에** 저장할까(U2 — §3.11). 고른 경로는
     /// `pending_untitled_save` 가 든다(오버레이가 하나뿐이라 상자를 닫고 확인을 띄우므로).
     untitled_overwrite: u64,
+    /// 저장하려는데 **파일이 밖에서 바뀌었다** — 덮어쓸까 다시 읽을까(C1a — editor-surface.md §4).
+    ///
+    /// **들고 있는 것은 surface id 하나뿐이다.** 내용을 들고 있으면 상자가 떠 있는 동안 친 글자가
+    /// 조용히 사라진다 — 고른 순간의 버퍼를 읽는 것이 그 계약이다.
+    save_conflict: u64,
 };
 
 const FilePanelDirtySyncAction = struct { surface_id: u64, request_id: u64 };
@@ -3088,6 +3093,9 @@ pub var app_runtime: app.AppRuntime = .{};
 
 /// U2 — 이름 없는 문서 저장(§3.11). 세션 필드 타입과 확인 수락이 이 모듈을 부른다.
 pub const editor_untitled_save_ops = @import("app_session/editor_untitled_save.zig");
+
+/// C1a — 저장 충돌의 선택(editor-surface.md §4). 확인 수락·alternate 가 이 모듈을 부른다.
+pub const editor_conflict_ops = @import("app_session/editor_conflict.zig");
 
 // P3-e3-4d 영속 세션 host 연결 — **앱 프로세스 전역**(창별이 아니라). 한 앱에 창을 여러 개 열어도 host 연결은 **하나**를
 // 공유한다(daemon은 serial serve라 연결이 앱당 하나여야 함 — 창마다 연결하면 두 번째 창이 handshake 타임아웃→in-process
@@ -9870,7 +9878,9 @@ pub const AppSession = struct {
             .lsp_trust => editor_ops.lsp_client.dismissTrustPrompt(self), // 프로그램이 닫은 것 — 기억하지 않고 다음에 다시 묻는다
             // **취소는 무상태다**(§3.11) — 들고 있던 경로를 비운다. 안 비우면 다음 확인이 옛 경로에 쓴다.
             .untitled_overwrite => self.pending_untitled_save = .{},
-            .none, .close, .reset, .file_conflict_reload => {},
+            // **저장 충돌의 취소는 아무 일도 안 한다**(§4) — 디스크도 버퍼도 그대로다. 들고 있는
+            // 것이 surface id 하나라 비울 것도 없다.
+            .none, .close, .reset, .file_conflict_reload, .save_conflict => {},
         }
         self.pending_confirm = .none;
     }
@@ -9888,6 +9898,13 @@ pub const AppSession = struct {
         primary: maru.i18n.Key,
         alternate: maru.i18n.Key,
         cancel: maru.i18n.Key = .common_cancel,
+        /// 열 때 포커스를 어디에 두나. **기본은 `primary`** 다(Enter = 확정 — 컴포넌트의 오랜 계약).
+        ///
+        /// ⚠️ **파괴적인 선택이 둘인 상자는 그 기본이 함정이다**(C1a — §4). 저장 충돌은 `primary`
+        /// (덮어쓰기)도 `alternate`(다시 읽기)도 무언가를 버리므로, 무심한 Enter 가 그것을 실행하면
+        /// 확인 상자가 아니라 지뢰다. 그때만 `cancel` 에 둔다 — C1b 가 안전한 선택(비교)을
+        /// `primary` 로 올리면 이 예외는 사라진다.
+        focus: chrome.components.confirm.Focus = .confirm,
     };
 
     /// 키로 확인 대화상자를 연다(docs/i18n.md §7.2 1차) — 리터럴을 넘기면 컴파일되지 않는다.
@@ -9905,6 +9922,7 @@ pub const AppSession = struct {
             .alternate = maru.i18n.t(choices.alternate),
             .cancel = maru.i18n.t(choices.cancel),
         });
+        self.chrome_host.confirm.focused = choices.focus;
     }
 
     /// 문장을 **미리 만든** 확인 대화상자(서버 이름 같은 값이 든다 — §8.2a 신뢰 프롬프트). 버튼은 키.
@@ -10765,9 +10783,17 @@ pub const AppSession = struct {
             .editor_redo => _ = editor_ops.redoEdit(self, pane_ops.activePane(self).activeTerm()),
             // **저장 실패는 이유별로 말한다**(§3.9d) — 예전에는 `_ =` 로 결과를 통째로 버려 사용자가
             // `⌘S` 를 누르고 아무 일도 없는 것을 봤다. `AskName` 은 실패가 아니라 「이름을 물었다」다.
-            .editor_save => editor_ops.saveDocument(self, pane_ops.activePane(self).activeTerm()) catch |e| switch (e) {
-                error.AskName, error.NotAnEditor => {},
-                else => self.showNoticeKey(editor_ops.saveFailureNoticeKey(@errorCast(e))),
+            .editor_save => blk: {
+                const term = pane_ops.activePane(self).activeTerm();
+                editor_ops.saveDocument(self, term) catch |e| switch (e) {
+                    error.AskName, error.NotAnEditor => break :blk,
+                    // ⚠️ **충돌은 알리는 자리가 아니라 «묻는» 자리다**(C1a — editor-surface.md §4).
+                    // C0 은 이유를 올렸을 뿐 「아무것도 저장하지 않았다」로 끝냈고, 그러면 사용자는
+                    // 편집을 든 채 손으로 내용을 옮겨야 한다. 여기만 묻는다 — 닫기-저장은 자기
+                    // 안내를 갖고 있고, 일괄 저장은 파일마다 물으면 스무 개가 뜬다.
+                    error.ExternalConflict => editor_conflict_ops.ask(self, term),
+                    else => self.showNoticeKey(editor_ops.saveFailureNoticeKey(@errorCast(e))),
+                };
             },
             .fold_all => _ = editor_ops.foldAll(self),
             .unfold_all => _ = editor_ops.unfoldAll(self),
@@ -12452,6 +12478,9 @@ pub const AppSession = struct {
                     .paste => |target_id| self.confirmPendingPaste(target_id),
                     .close => |target| self.executeClose(target),
                     .untitled_overwrite => editor_untitled_save_ops.confirmOverwrite(self),
+                    // **`primary` = 덮어쓰기**(C1a — §4). 이 상자만 포커스를 `cancel` 에 두고 여는
+                    // 이유가 그것이다: Enter 가 이 갈래를 실행하면 바깥 변경이 사라진다.
+                    .save_conflict => |surface_id| editor_conflict_ops.confirmOverwrite(self, surface_id),
                     .none => {},
                 }
             },
@@ -12470,6 +12499,10 @@ pub const AppSession = struct {
                                 file_panel_ops.abortStaleFilePanelClose(self);
                         }
                     } else self.cancelPendingConfirm();
+                } else if (owner == .save_conflict) {
+                    // **`alternate` = 다시 읽기**(C1a — §4). 되돌릴 수 있는 편집으로 넣으므로
+                    // `⌘Z` 가 방금 친 것을 되살린다.
+                    editor_conflict_ops.confirmReload(self, owner.save_conflict);
                 }
                 self.metal_dirty = true;
             },

@@ -54,7 +54,7 @@ run_scenario() {
     "$app_path" &
     app_pid=$!
 
-    if [ "$scenario" = external-conflict ]; then
+    if [ "$scenario" != clean-save ]; then
         # **드라이버가 부를 때까지 기다린다.** 편집기가 파일을 읽고 글자를 넣은 뒤에야 "밖에서
         # 바뀌었다"가 성립한다. 고정 sleep 은 기계에 따라 순서가 뒤집혀 무엇을 쟀는지 알 수 없다.
         waited=0
@@ -102,3 +102,19 @@ grep -Eq '^editor_save_conflict_smoke_stage=done$' "$root/clean-save.summary.txt
 # 대조군이 없으면 "무조건 거절"도 위 판정을 통과한다. 여기서는 **우리가 넣은 글자가 디스크에** 있어야 한다.
 grep -q 'xyz' "$document"
 grep -q 'original-from-open' "$document"
+
+# C1a — 충돌 상자에서 **덮어쓰기**를 고르면 내 편집이 디스크에 있다.
+run_scenario conflict-overwrite
+grep -Eq '^editor_save_conflict_smoke_scenario=conflict-overwrite$' "$root/conflict-overwrite.summary.txt"
+grep -Eq '^editor_save_conflict_smoke_failure=$' "$root/conflict-overwrite.summary.txt"
+grep -Eq '^editor_save_conflict_smoke_stage=done$' "$root/conflict-overwrite.summary.txt"
+# 앱 밖에서 한 번 더: **우리 글자가 있고 밖에서 쓴 줄은 사라졌다**(그것이 덮어쓰기다).
+grep -q 'xyz' "$document"
+! grep -q 'changed-by-another-process' "$document"
+
+# C1a — **다시 읽기**를 고르면 디스크는 그대로다(읽기는 쓰지 않는다).
+run_scenario conflict-reload
+grep -Eq '^editor_save_conflict_smoke_scenario=conflict-reload$' "$root/conflict-reload.summary.txt"
+grep -Eq '^editor_save_conflict_smoke_failure=$' "$root/conflict-reload.summary.txt"
+grep -Eq '^editor_save_conflict_smoke_stage=done$' "$root/conflict-reload.summary.txt"
+cmp -s "$document" "$reference"

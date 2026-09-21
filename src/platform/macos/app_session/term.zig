@@ -759,6 +759,14 @@ fn destroyTermWithAbandonBackend(
         self.pending_untitled_save = .{};
         self.chrome_host.confirm.dismiss();
     }
+    // **저장 충돌의 선택도 같은 이유로 접는다**(C1a — editor-surface.md §4). 여기는 한 술 더 뜬다:
+    // 남겨 두면 그 선택이 **다음에 같은 surface id 를 받은 Term 의 문서를 덮어쓸** 수 있다.
+    if (self.pending_confirm == .save_conflict and
+        self.pending_confirm.save_conflict == term.surface.id)
+    {
+        self.pending_confirm = .none;
+        self.chrome_host.confirm.dismiss();
+    }
     // 컨텍스트 메뉴 대상이 이 Term이면 메뉴를 닫고 대상을 비운다(stale 포인터 방지).
     if (self.context_menu_target) |t| if (std.meta.activeTag(t) == .term and t.term == term) {
         self.context_menu_target = null;

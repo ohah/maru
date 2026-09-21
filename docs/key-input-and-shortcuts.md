@@ -49,6 +49,7 @@ config는 다음 범주를 분리한다. 실제 형식은 `keybind = <chord> = <
 앱 단축키 — keybind = <chord> = <action>:
   - new_tab
   - new_web_tab (기본 ⌘⌥T — 활성 pane에 브라우저 Term)
+  - new_editor_tab (기본 ⌘⌥N — 활성 pane에 이름 없는 편집기 Term. T 계열이 ⌘T·⌘⇧T·⌘⌥T 로 차 있어 N)
   - close_tab (워크스페이스 cascade, 기본 없음)
   - close_focused (기본 Cmd+W — 입력 포커스 기준 파일 entry 또는 Term close cascade)
   - close_term (기본 없음 — 명시적 사용자 바인딩 호환용 terminal 전용)

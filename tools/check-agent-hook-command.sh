@@ -72,7 +72,12 @@ done
 grep -q '\[!0123456789abcdef\]' "$golden" || fail_early "golden 이 낡았다 — pane 칸 알파벳(hex)이 fixture 와 다르다"
 grep -q '\[!0123456789abcdefghijklmnopqrstuvwxyz_\]' "$golden" || fail_early "golden 이 낡았다 — 인스턴스 칸 알파벳이 fixture 와 다르다"
 
-cmd=$(sed "s|__LOG_DIR__|$logdir|g" "$golden")
+# 커맨드는 하나고 자리 둘을 env 로 고른다(RA8) — 원격 자리(`<remote>/<nonce>[_t<pane>].ndjson`)도 같은 fixture 에 있다.
+remotedir="$work/remote-events"
+mkdir -p "$remotedir"
+grep -q '__REMOTE_LOG_DIR__' "$golden" || fail_early "golden 이 낡았다 — 원격 자리(RA8)가 fixture 에 없다"
+grep -q 'LC_MARU_PANE' "$golden" || fail_early "golden 이 낡았다 — 원격 pane 칸이 fixture 에 없다"
+cmd=$(sed "s|__LOG_DIR__|$logdir|g; s|__REMOTE_LOG_DIR__|$remotedir|g" "$golden")
 
 fail() { echo "FAIL: $1" >&2; exit 1; }
 # **개수는 세고 적지 않는다.** 손으로 적은 수는 검사를 더할 때마다 어긋나고("계약 6개"라고 적힌 채 7개를
@@ -280,5 +285,89 @@ bytes=$(wc -c < "$evdir/11.ndjson" | tr -d ' ')
 [ "$bytes" -eq "$expect_bytes" ] || fail "바이트가 $expect_bytes 여야 하는데 $bytes 다(파일이 잘렸다)"
 intact=$(grep -c '^claude	{.*}$' "$evdir/11.ndjson" 2>/dev/null || true)
 pass "동시 append(줄당 $fat_size B x $runs, 온전한 줄 $intact/$runs)"
+
+echo "7) 원격 자리 — 로컬 두 칸이 비면 LC_MARU_PANE 으로 평평한 경로에 적는다 (RA8)"
+# ⚠️ 이 게이트 자체가 tmux 안에서 돌 수 있다(개발자 셸) — «tmux 밖» 을 재려면 `TMUX_PANE` 을 명시적으로 뺀다.
+printf '%s\n' "$payload" | env -u MARU_HOOK_INSTANCE -u MARU_HOOK_PANE -u TMUX_PANE -u TMUX LC_MARU_PANE=4331_7 /bin/sh -c "$cmd" || fail "원격 경로가 0 으로 끝나지 않았다"
+[ -f "$remotedir/4331_7.ndjson" ] || fail "원격 파일이 생기지 않았다"
+grep -q "^claude	{" "$remotedir/4331_7.ndjson" || fail "원격 줄 형식이 로컬과 다르다"
+[ -f "$remotedir/4331_7.tmux" ] || fail "tmux 옆 파일이 없다(tmux 밖이면 빈 파일로 남아야 한다)"
+# tmux 밖이면 두 변수가 비어 옆 파일은 `\t\n` 두 바이트다 — 순수 층이 그것을 `direct` 로 접는다.
+[ "$(wc -c < "$remotedir/4331_7.tmux" | tr -d ' ')" -eq 2 ] || fail "tmux 밖인데 옆 파일에 좌표가 있다"
+[ "$(ls "$evdir" | wc -l)" -eq "$(ls "$evdir" | wc -l)" ] && [ ! -f "$evdir/4331_7.ndjson" ] || fail "원격 이벤트가 로컬 자리에도 적혔다"
+pass "원격 자리(평평한 경로·옆 파일)"
+
+echo "7b) tmux 안이면 pane 칸이 붙고 옆 파일에 좌표가 남는다 — nonce 가 비어도 적는다 (RA6)"
+printf '%s\n' "$payload" | env -u MARU_HOOK_INSTANCE -u MARU_HOOK_PANE LC_MARU_PANE=4331_7 TMUX_PANE='%3' TMUX='/tmp/tmux-x/default,1,0' /bin/sh -c "$cmd" || fail "원격 tmux 경로가 0 으로 끝나지 않았다"
+[ -f "$remotedir/4331_7_t3.ndjson" ] || fail "tmux 칸이 이름에 안 붙었다"
+grep -q "^/tmp/tmux-x/default,1,0	%3$" "$remotedir/4331_7_t3.tmux" || fail "옆 파일에 tmux 좌표가 없다"
+printf '%s\n' "$payload" | env -u MARU_HOOK_INSTANCE -u MARU_HOOK_PANE -u LC_MARU_PANE TMUX_PANE='%5' TMUX='/tmp/tmux-x/default,1,0' /bin/sh -c "$cmd" || fail "빈 nonce 경로가 0 으로 끝나지 않았다"
+[ -f "$remotedir/t5.ndjson" ] || fail "빈 nonce + tmux 가 t<pane> 으로 안 적혔다"
+pass "원격 tmux 칸·옆 파일·빈 nonce"
+
+echo "7c) 클래스를 못 지난 nonce 는 비운다 — 옛 커맨드는 로그 디렉터리 밖에 파일을 만들었다 (RA8 공격 K, 실측)"
+printf '%s\n' "$payload" | env -u MARU_HOOK_INSTANCE -u MARU_HOOK_PANE LC_MARU_PANE='../evil' TMUX_PANE='%3' TMUX='/tmp/tmux-x/default,1,0' /bin/sh -c "$cmd" || fail "탈출 시도 경로가 0 으로 끝나지 않았다"
+[ ! -e "$work/evil_t3.ndjson" ] && [ ! -e "$work/evil_t3.tmux" ] || fail "nonce 의 '../' 가 로그 디렉터리 밖에 파일을 만들었다"
+[ "$(find "$work" -name '*evil*' | wc -l)" -eq 0 ] || fail "evil 이름이 어딘가에 남았다"
+# 못 지난 nonce 는 비고, tmux 칸만으로 적힌다(빈 nonce 규칙과 같다).
+[ "$(wc -l < "$remotedir/t3.ndjson")" -eq 1 ] || fail "못 지난 nonce 가 빈 nonce 로 접히지 않았다"
+printf '%s\n' "$payload" | env -u MARU_HOOK_INSTANCE -u MARU_HOOK_PANE -u TMUX_PANE -u TMUX LC_MARU_PANE='../evil' /bin/sh -c "$cmd" || fail "탈출 시도(tmux 밖) 경로가 0 으로 끝나지 않았다"
+[ "$(find "$work" -name '*evil*' | wc -l)" -eq 0 ] || fail "tmux 밖에서 evil 이름이 남았다"
+pass "원격 nonce 검증(경로 탈출 없음)"
+
+echo "7d) 로컬 두 칸이 있으면 로컬이 이긴다 — 로컬 pane 안의 로컬 tmux 가 원격으로 새지 않는다 (RA8 공격 B)"
+printf '%s\n' "$payload" | env MARU_HOOK_INSTANCE=$inst MARU_HOOK_PANE=12 TMUX_PANE='%9' TMUX='/tmp/tmux-x/default,1,0' LC_MARU_PANE=4331_7 /bin/sh -c "$cmd" || fail "둘 다 있는 경로가 0 으로 끝나지 않았다"
+[ -f "$evdir/12.ndjson" ] || fail "로컬 두 칸이 있는데 로컬에 안 적혔다"
+[ ! -f "$remotedir/4331_7_t9.ndjson" ] || fail "로컬 두 칸이 있는데 원격에도 적혔다"
+pass "로컬 우선"
+
+echo "7e) 로컬 칸이 있는데 틀리면 원격으로 흘리지 않고 나간다 — fail-closed (RA8 공격 L)"
+before_remote=$(ls "$remotedir" | wc -l)
+printf '%s\n' "$payload" | env MARU_HOOK_INSTANCE=$inst MARU_HOOK_PANE='../x' TMUX_PANE='%9' TMUX='/tmp/tmux-x/default,1,0' /bin/sh -c "$cmd" || fail "틀린 로컬 칸 경로가 0 으로 끝나지 않았다"
+printf '%s\n' "$payload" | env -u MARU_HOOK_PANE MARU_HOOK_INSTANCE=$inst TMUX_PANE='%9' TMUX='/tmp/tmux-x/default,1,0' /bin/sh -c "$cmd" || fail "인스턴스만 있는 경로가 0 으로 끝나지 않았다"
+[ "$(ls "$remotedir" | wc -l)" -eq "$before_remote" ] || fail "틀린 로컬 칸이 원격 자리에 적혔다"
+[ "$(find "$work" -name '*x*.ndjson' | wc -l)" -eq 0 ] || fail "틀린 pane 칸이 어딘가에 적혔다"
+pass "로컬 fail-closed"
+
+echo "7f) 아무 칸도 없으면 아무것도 안 적는다"
+before_all=$(find "$work" -type f | wc -l)
+printf '%s\n' "$payload" | env -u MARU_HOOK_INSTANCE -u MARU_HOOK_PANE -u LC_MARU_PANE -u TMUX_PANE -u TMUX /bin/sh -c "$cmd" || fail "빈 env 경로가 0 으로 끝나지 않았다"
+[ "$(find "$work" -type f | wc -l)" -eq "$before_all" ] || fail "빈 env 인데 파일이 생겼다"
+pass "빈 env"
+
+echo "8) 원격 설치기(maru agent-hooks)가 심는 바이트는 이 fixture 를 HOME 규칙으로 채운 것과 같다 — 핑퐁의 부재 (RA8)"
+# 로컬 GUI 설치기는 빌더 + HOME 규칙으로 커맨드를 만들고 이 fixture 는 그 빌더에서 나온다. 원격 CLI 가 같은 바이트를
+# 쓰는지는 **제품 바이너리**로만 알 수 있다. 바이너리가 없으면 «못 쟀다» 로 적는다(SKIP — 초록으로 세지 않는다).
+maru_bin="$root/zig-out/bin/maru"
+if [ -x "$maru_bin" ]; then
+  cli_home="$work/cli-home"
+  mkdir -p "$cli_home/.claude"
+  printf '{}\n' > "$cli_home/.claude/settings.json"
+  # 다른 기기의 스크립트가 보내는 그 인자 그대로(`install_all_script`).
+  env HOME="$cli_home" XDG_CACHE_HOME="$work/should-be-ignored" \
+    "$maru_bin" agent-hooks install --provider=claude --scope=remote --dir="$cli_home/.cache/maru/remote-agent-events" >/dev/null 2>"$work/cli.err" \
+    || fail "maru agent-hooks 가 실패했다: $(cat "$work/cli.err")"
+  expected=$(sed "s|__LOG_DIR__|$cli_home/.cache/maru/agent-turn-events|g; s|__REMOTE_LOG_DIR__|$cli_home/.cache/maru/remote-agent-events|g" "$golden")
+  actual=$(python3 - "$cli_home/.claude/settings.json" <<'PY'
+import json,sys
+d=json.load(open(sys.argv[1]))
+cmds={h["command"] for arr in d.get("hooks",{}).values() for m in arr for h in m.get("hooks",[])}
+assert len(cmds)==1, cmds
+print(next(iter(cmds)), end="")
+PY
+)
+  [ "$actual" = "$expected" ] || { printf '%s\n' "$actual" > "$work/actual.sh"; printf '%s\n' "$expected" > "$work/expected.sh"; diff "$work/expected.sh" "$work/actual.sh" | head -5 >&2; fail "원격 CLI 가 심은 커맨드가 HOME 규칙 fixture 와 다르다(핑퐁이 되살아난다)"; }
+  # XDG 를 무시했다 — 그 자리는 안 만든다. 두 자리는 만든다(0700).
+  [ ! -d "$work/should-be-ignored" ] || fail "원격 CLI 가 XDG_CACHE_HOME 을 봤다"
+  [ -d "$cli_home/.cache/maru/agent-turn-events" ] || fail "원격 CLI 가 로컬 자리를 안 만들었다"
+  [ -d "$cli_home/.cache/maru/remote-agent-events" ] || fail "원격 CLI 가 원격 자리를 안 만들었다"
+  # 같은 인자로 한 번 더 돌리면 «그대로 둔다» — 파일이 바뀌지 않는다(설치기 판정이 자기 바이트를 알아본다).
+  before_sum=$(cksum < "$cli_home/.claude/settings.json")
+  env HOME="$cli_home" "$maru_bin" agent-hooks install --provider=claude --scope=remote --dir="$cli_home/.cache/maru/remote-agent-events" >/dev/null 2>&1 || fail "두 번째 설치가 실패했다"
+  [ "$(cksum < "$cli_home/.claude/settings.json")" = "$before_sum" ] || fail "같은 바이트인데 두 번째 설치가 파일을 다시 썼다"
+  pass "원격 CLI 바이트 = fixture(HOME 규칙) · XDG 무시 · 두 자리 생성 · 재설치 무변경"
+else
+  skip "원격 CLI 바이트 대조 — zig-out/bin/maru 가 없다(**안 쟀다**; \`zig build\` 뒤 다시 돌리면 잰다)"
+fi
 
 echo "OK: 훅 커맨드가 실제 셸에서 계약 $checks 개를 지킨다"

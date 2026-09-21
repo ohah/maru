@@ -1202,7 +1202,7 @@ fork·exec)는 다를 수 있다. 다만 그 차이는 spawn 비용 자체의 �
 `SessionStart → UserPromptSubmit → Stop`이 이어지면 앞의 둘이 사라진다(실측: 회수한 pane 파일에 Stop 하나만
 있었다). 턴 경계는 모든 이벤트가 필요하므로 그 채널을 쓸 수 없다.
 
-- 훅은 `<cache>/maru/agent-turn-events/<인스턴스>/<pane>.ndjson`에 **한 줄씩 append**(`>>`)한다. 줄 형식은
+- 훅은 `~/.cache/maru/agent-turn-events/<인스턴스>/<pane>.ndjson`에 **한 줄씩 append**(`>>`)한다. 줄 형식은
   `<provider>\t<payload JSON>` 이다 — payload는 개행 없는 한 줄 JSON이고 제어문자를 이스케이프하므로
   raw 탭이 들어올 수 없다(실측). 파일명이
   Term 단위이므로 **한 Term에서 claude를 쓰다 codex를 실행하면 같은 파일에 섞인다** — 각 줄의 provider
@@ -1319,8 +1319,19 @@ maru의 기존 codex 훅이 이미 이 형태다.
   **셸 내장 `read`로 받는다** — `cat`을 쓰면 프로세스가 하나 더 뜨고, 그 비용이 도구 호출마다 얹힌다.
   실측 payload가 개행 없는 한 줄 JSON이라 «첫 줄을 받고 나머지를 드레인»으로 충분하다.
 - **디렉터리는 maru가 미리 만든다.** 훅이 `mkdir`을 부르면 그만큼 프로세스가 는다. 없으면 훅은 조용히 나간다.
-  만들 자리는 **둘**이다 — 로그 디렉터리와 그 아래 **인스턴스 칸**(0700). 칸을 빠뜨리면 훅이 도는데 이벤트가
-  0 인, 진단하기 가장 나쁜 상태가 된다.
+  만들 자리는 **셋**이다 — 로컬 로그 디렉터리와 그 아래 **인스턴스 칸**(0700), 그리고 원격 로그 디렉터리
+  (`~/.cache/maru/remote-agent-events`). 칸을 빠뜨리면 훅이 도는데 이벤트가 0 인, 진단하기 가장 나쁜 상태가 된다.
+- **커맨드는 하나고 자리 둘을 env 로 고른다**(RA8, 2026-09-21 — [계획](plans/remote-agent-state.md)). 로컬 설치기(GUI)와
+  원격 설치기(`maru agent-hooks`, ssh 대상 기계의 CLI)가 **같은 기계의 같은 파일**을 두고 **같은 바이트**를 써야 서로를
+  덮지 않는다 — 예전엔 scope 마다 다른 커맨드라 두 설치기가 핑퐁했다(RA1 관찰). 로컬 두 칸(`MARU_HOOK_INSTANCE`·
+  `MARU_HOOK_PANE`)이 하나라도 있으면 **로컬 분기**(둘 다 검증을 지나야 하고 아니면 `exit 0`), 둘 다 비면 **원격 분기**
+  (`LC_MARU_PANE` ∨ `TMUX_PANE` — §11.6). 로컬이 먼저인 이유: 로컬 pane 안의 로컬 tmux 도 `TMUX_PANE` 을 갖는다.
+  원격 분기에서 **클래스를 못 지난 nonce 는 비운다** — 옛 원격 커맨드는 그 값을 그대로 이름에 써서 `LC_MARU_PANE='../x'`
+  가 로그 디렉터리 밖에 파일을 만들었다(2026-09-21 실측, sshd 는 `AcceptEnv LC_*` 다).
+- **두 디렉터리는 `HOME` 만으로 정한다**(`XDG_CACHE_HOME` 을 안 본다 — 다른 캐시와 다르다). 커맨드에 절대경로가 박히고
+  그것을 GUI env 와 sshd env 가 각자 계산하므로, XDG 를 보면 두 env 에서 값이 갈려 바이트가 달라진다. GUI·session host·
+  원격 CLI 가 한 함수(`agent_hook_command.hookCacheBaseAlloc`/`localLogDirAlloc`/`remoteLogDirAlloc`)를 쓴다. XDG 사용자의
+  훅 로그는 `~/.cache` 로 옮겨갔다(시작 시 정리가 지우는 임시 로그라 잃는 것은 없다).
 - **길이 제한도 셸 내장(`${#var}`)으로 한다.** `head -c`는 프로세스이고, 게다가 개행까지 잘라 다음 줄과
   붙는다. 상한을 넘으면 payload를 통째로 바꿔 적는다 — 잘린 반쪽 JSON을 남기지 않기 위해서다.
 
@@ -1879,10 +1890,10 @@ payload 를 `message`·`title`·`notification_type` 으로 적고, `notification
    `if (!probe.agent_present) return .observe` 인데, ssh 너머 원격 process tree 는 로컬에서 안 보여
    `agent_kind` 가 `none` 이다([agent-session.md](agent-session.md) «agent kind 판정»).
 2. **훅 로그 경로의 두 칸이 원격에 없다.** `MARU_HOOK_INSTANCE`(그 GUI 프로세스 pid)·`MARU_HOOK_PANE`
-   (§4)은 maru 가 **자기가 띄운 pty 에만** 주입하는 예약 키다. 우리 훅 커맨드를 원격에 그대로 복사해도
-   첫 `case` 에서 아무 일 없이 `exit 0` 한다.
-3. **경로가 로컬 절대경로로 박혀 있다.** platform 이 `<cache>/maru/agent-turn-events` 를 미리 만들어
-   그 절대 경로를 커맨드에 넣는다(§4.1). 원격에서 실행되면 **원격 디스크**에 쌓이고 maru 는 로컬 캐시를 읽는다.
+   (§4)은 maru 가 **자기가 띄운 pty 에만** 주입하는 예약 키다. 원격 셸에는 없으므로 커맨드는 원격 분기로 간다
+   (RA8 뒤 커맨드는 하나다 — §4.1 «커맨드는 하나고 자리 둘을 env 로 고른다»).
+3. **경로가 절대경로로 박혀 있다.** 원격에서 실행되면 **원격 디스크**(`~/.cache/maru/remote-agent-events`)에 쌓이고
+   그것을 스트리머가 로컬로 나른다(§11.6).
 
 **그리고 이것이 손해가 아니라 이 절이 성립하는 이유다.** SSH pane 은 항상 관측 모드로 남으므로
 §1.1 이 훅 모드에서 버리는 **OSC 9/777 알림이 그대로 산다.** 두 경로가 서로를 밟지 않는다.

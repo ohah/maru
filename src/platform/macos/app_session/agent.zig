@@ -1209,9 +1209,25 @@ pub fn removeAgentStatuslineHook(self: *AppSession) void {
 /// 훅 이벤트 로그 디렉터리의 절대 경로. **설치와 정리가 같은 자리를 봐야 한다** — 두 곳에서 따로 조립하면
 /// 한쪽만 바뀌었을 때 «설치는 A 에 쓰고 정리는 B 를 지운다» 가 조용히 성립하고, 증상은 「로그가 안 줄어든다」
 /// 하나뿐이라 원인에 닿기 어렵다.
+/// 훅 로그 base(`<home>/.cache/maru`) — **HOME 만 본다**(RA8, `agent_hook_command.hookCacheBaseAlloc`). `sessionCacheBase`
+/// 와 달리 `XDG_CACHE_HOME` 을 안 보는 이유는 이 경로가 훅 커맨드에 박히고 그것을 원격 CLI(sshd env)도 계산하기
+/// 때문이다 — 두 env 에서 갈리면 두 설치기가 서로를 덮는다. session host 도 같은 함수를 쓴다(`agent_hook_logs.zig`).
+fn hookCacheBase(a: std.mem.Allocator) ?[]const u8 {
+    const home = if (std.c.getenv("HOME")) |v| std.mem.span(v) else null;
+    return maru.session.agent_hook_command.hookCacheBaseAlloc(a, home) catch null;
+}
+
 fn agentHookLogDir(a: std.mem.Allocator) ?[:0]const u8 {
-    const base = sessionCacheBase(a) orelse return null;
+    const base = hookCacheBase(a) orelse return null;
     return std.fmt.allocPrintSentinel(a, "{s}/{s}", .{ base, maru.session.agent_hook_command.log_dir_rel }, 0) catch null;
+}
+
+/// 원격 훅 로그 디렉터리(`<home>/.cache/maru/remote-agent-events`) — 커맨드 하나에 두 자리가 박히므로(RA8) 로컬 설치기도
+/// 이 값을 안다. 원격 CLI 가 `$HOME/<remote_log_dir_rel>` 로 푸는 것과 같은 규칙이다.
+fn remoteAgentHookLogDir(a: std.mem.Allocator) ?[:0]const u8 {
+    const home = if (std.c.getenv("HOME")) |v| std.mem.span(v) else null;
+    const dir = (maru.session.agent_hook_command.remoteLogDirAlloc(a, home) catch null) orelse return null;
+    return std.fmt.allocPrintSentinel(a, "{s}", .{dir}, 0) catch null;
 }
 
 /// 이 **프로세스**를 가리키는 훅 로그 인스턴스 식별자(현재 pid).
@@ -1438,9 +1454,10 @@ fn reconcileProviderHooks(
     // **지울 때는 디렉터리를 만들지 않는다.** 끄는 사람의 디스크에 우리 자리를 새로 잡을 이유가 없다.
     // 경로 자체는 커맨드를 만들 때 필요하므로(그 문자열이 우리 항목의 모양이다) 계산은 양쪽 다 한다.
     const log_dir = agentHookLogDir(a) orelse return;
+    const remote_log_dir = remoteAgentHookLogDir(a) orelse return;
     if (intent == .ensure) {
         // 캐시 base 자체가 아직 없을 수 있다(새 사용자·캐시를 비운 뒤). `mkdir`은 부모를 만들지 않으므로 둘을 차례로 만든다.
-        const cache_base = sessionCacheBase(a) orelse return;
+        const cache_base = hookCacheBase(a) orelse return;
         const base_z = std.fmt.allocPrintSentinel(a, "{s}", .{cache_base}, 0) catch return;
         _ = std.c.mkdir(base_z.ptr, 0o700);
         _ = std.c.mkdir(log_dir.ptr, 0o700); // 이미 있으면 EEXIST — 그대로 진행한다
@@ -1453,6 +1470,10 @@ fn reconcileProviderHooks(
         // **이미 있던 디렉터리도 좁힌다.** `mkdir`은 EEXIST면 권한을 손대지 않으므로, 옛 버전이나 넉넉한 umask가
         // 만들어 둔 `0755` 디렉터리가 그대로 남는다. 우리가 만든 자리이니 우리가 맞춘다(파일 쪽은 훅의 `umask`).
         _ = std.c.chmod(log_dir.ptr, 0o700);
+        // **원격 자리도 만든다**(RA8 — 커맨드 하나가 두 자리를 고른다). 이 기계로 `maru ssh` 가 들어오면 그 훅이
+        // 여기 적는다; 원격 CLI 도 같은 자리를 만들지만 먼저 켜진 쪽이 만든다.
+        _ = std.c.mkdir(remote_log_dir.ptr, 0o700);
+        _ = std.c.chmod(remote_log_dir.ptr, 0o700);
         // **만들지 못했으면 설치하지 않는다.** 훅만 걸고 디렉터리가 없으면 이벤트가 0인 채로 도는, 진단하기 가장
         // 나쁜 상태가 된다(그 조용함은 훅 커맨드의 의도된 성질이라 사용자에게 아무 신호도 가지 않는다).
         const log_dir_handle = openAgentDirAbsolute(self, log_dir, .{}) orelse return;
@@ -1460,7 +1481,7 @@ fn reconcileProviderHooks(
     }
 
     var cmd: std.ArrayListUnmanaged(u8) = .empty;
-    hook_command.build(&cmd, a, provider.tag(), log_dir, .local) catch return;
+    hook_command.build(&cmd, a, provider.tag(), log_dir, remote_log_dir) catch return;
 
     const hooks_path = std.fmt.allocPrintSentinel(a, "{s}/{s}", .{ config_dir, install.hooksFileName(provider) }, 0) catch return;
 
@@ -2682,7 +2703,7 @@ pub fn agentHookLogPath(a: std.mem.Allocator, term: *Term) ?[]const u8 {
         // (그래야 host 가 두 번째를 observer 로 강등한다) 그것은 실 fork host + AppSession 둘을 엮는
         // OS-E2E 다. 뮤테이션에서 이 줄만 지워도 초록인 것이 그 증거다.
         if (owned.observer) return null;
-        const base = sessionCacheBase(a) orelse return null;
+        const base = hookCacheBase(a) orelse return null;
         var inst_buf: [hook_command.instance_token_max]u8 = undefined;
         const inst = hook_command.formatHostInstance(&inst_buf, owned.host_id);
         var pane_buf: [hook_command.pane_token_max]u8 = undefined;

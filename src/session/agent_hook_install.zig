@@ -593,7 +593,7 @@ test "Known 의 필드가 늘면 판정 누락을 잡는다" {
 /// 지금 세트로 만드는 커맨드(테스트 로그 디렉터리 기준).
 fn wantCommand(a: std.mem.Allocator) ![]u8 {
     var out: std.ArrayListUnmanaged(u8) = .empty;
-    try command.build(&out, a, "claude", "/tmp/maru-hooks", .local);
+    try command.build(&out, a, "claude", "/tmp/maru-hooks", "/tmp/maru-remote-events");
     return out.toOwnedSlice(a);
 }
 
@@ -726,7 +726,7 @@ test "낡은 커맨드는 걷어 내고 다시 넣는다 — 한 벌만 남는�
 
     // 경로가 달랐던 시절의 우리 항목(표식은 같다).
     var stale_out: std.ArrayListUnmanaged(u8) = .empty;
-    try command.build(&stale_out, a, "claude", "/tmp/maru-hooks-old", .local);
+    try command.build(&stale_out, a, "claude", "/tmp/maru-hooks-old", "/tmp/maru-remote-events");
     const stale = try stale_out.toOwnedSlice(a);
 
     const text = try std.fmt.allocPrint(a,
@@ -1060,7 +1060,7 @@ test "apply 도 scope 를 본다 — 판정만 원격이고 적용이 로컬이�
     // 되지만 세어지지 않아, 판정자가 «apply 가 아무것도 안 했다» 로 잘못 읽는다(실제로 그랬다).
     var want_buf: std.ArrayListUnmanaged(u8) = .empty;
     defer want_buf.deinit(a);
-    try command.build(&want_buf, a, "claude", "/tmp/maru-remote-events", .remote);
+    try command.build(&want_buf, a, "claude", "/tmp/maru-hooks", "/tmp/maru-remote-events");
     const want = want_buf.items;
 
     var hooks: std.json.ObjectMap = .empty;

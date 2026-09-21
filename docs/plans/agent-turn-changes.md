@@ -1112,8 +1112,10 @@ tree 를 굳히고 진짜 index 는 `?` 그대로, `turn_name_status` 가 그 tr
 
 ⚠️ **봉인 0 의 뜻**: 이 로그들은 전부 **옛 원격 세트**(`PreToolUse` 없음)로 적힌 것이라 근거 없는 턴은 봉인되지 않는다(`hasEvidence`).
 `grep PreToolUse` 가 t27 에서 6줄을 찾지만 그것은 이 세션의 `Stop.last_assistant_message` 본문이다. 즉 **AT3c 뒤 새 세트를 심어야
-원격 캡처 실데이터가 생긴다** — 이 Mac 의 원격 세트는 **다른 기기의 maru** 가 `maru agent-hooks` 로 심는 것이라, 그 기기의 maru 를
-이 PR 이 든 빌드로 올려야 `PreToolUse` 가 온다(수동 검증 항목 첫 줄).
+원격 캡처 실데이터가 생긴다** — ~~이 Mac 의 원격 세트는 다른 기기의 maru 가 심는 것이라 그 기기의 maru 를 올려야 한다~~
+**정정(2026-09-21, RA8 재실측)**: 원격 설치는 ssh **대상 기계의 CLI**(`install_all_script` 가 이 Mac 의 PATH 에서 `maru
+agent-hooks` 를 돌린다 — 지금은 `~/.local/bin/maru`, 09-03 빌드)가 한다. 다른 기기는 셸 한 줄만 보낸다. 그러니 **이 Mac 의
+`~/.local/bin/maru` 를 새 빌드로 바꿔야** `PreToolUse` 가 온다(수동 검증 항목 첫 줄, [remote-agent-state.md](remote-agent-state.md) RA8 공격 E).
 
 **미측(사용자 기기에서 수동 검증)**: 원격 RTT · 스냅샷 세 왕복의 벽시계 · 턴 끝 → `✎N` 까지 지연 · 큰 저장소(kbl-ref)에서의
 원격 `add -A`.

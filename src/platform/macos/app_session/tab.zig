@@ -1320,6 +1320,18 @@ pub fn captureWorkspaceTab(self: *AppSession, arena: std.mem.Allocator, tab: *Ta
                 persisted_index += 1;
                 continue;
             }
+            // **도크 entry 없는 편집기 Term은 persisted 시퀀스에 들지 않는다**(U1 — 이름 없는 문서,
+            // docs/native-editor-document-model.md §3.11). 아래 터미널 갈래로 흘리면 **셸 surface 로
+            // 저장되어 복원 때 로그인 셸이 열린다** — 사용자가 만든 빈 문서가 셸 탭으로 돌아온다.
+            // sentinel core 에 `refreshTermObservation` 을 부르는 것도 그 길에서 함께 일어난다
+            // (편집기 Term 은 cwd·git·at_prompt 를 읽으면 안 된다).
+            //
+            // **자리를 아예 만들지 않는다**(`.web`·diff 와 같은 규칙) — index 만 빼면 이미 부여한
+            // index 가 줄어든 총계와 어긋나 복원 시 그 창이 통째로 fail-close 된다.
+            //
+            // 이름 없는 문서를 **실제로 되살리는** 일은 U4 다(백업 id 를 창 상태에 싣는다). 그때
+            // 이 자리에 전용 갈래가 생기고, 아래 `restored_active` 의 같은 조건도 함께 고쳐야 한다.
+            if (term.kind == .editor and term.file_entry == null) continue;
             if (term.kind == .web) {
                 // 브라우저: 관측된 현재 URL을 싣는다. URL이 없거나(아직 아무것도 안 띄운 빈 패널) 주소창
                 // navigate 상한을 넘으면(큰 data: URI — 한 줄 길이·512 필드 cap 위협) **저장하지 않는다**.
@@ -1410,10 +1422,11 @@ pub fn captureWorkspaceTab(self: *AppSession, arena: std.mem.Allocator, tab: *Ta
                 if (e.kind != .diff) restored_active += 1;
                 continue;
             }
-            // **편집기 Term은 아직 여기 오지 않는다** — 저장 경로에 들어간 적이 없어 복원 목록에
-            // 나타날 수 없다. 복원이 붙을 때(workspace-restore) "편집기가 활성 후보인가"를 함께
-            // 정하고 이 조건을 고쳐야 한다 — 빠뜨리면 복원 후 엉뚱한 탭이 활성이 되고, 원인을
-            // 찾기 어렵다(`kind == .web` 비교라 컴파일러가 안 잡는다).
+            // **도크 entry 없는 편집기 Term도 앞자리로 세지 않는다** — 위 capture 가 자리를 만들지
+            // 않았으므로 여기서 세면 `active-term` 이 한 칸 밀려 복원 후 엉뚱한 탭이 활성이 된다
+            // (`kind == .web` 비교라 컴파일러가 안 잡는다 — 그래서 조건을 **capture 와 같은 문장으로**
+            // 적는다). 이름 없는 문서 복원이 붙을 때(U4) 두 자리를 함께 고친다.
+            if (t.kind == .editor and t.file_entry == null) continue;
             if (t.kind != .web) restored_active += 1;
         }
         // **범위로 clamp한다.** "활성이 브라우저면 다음 persisted Term을 가리킨다"는 **다음이 있을 때만** 참이다 —

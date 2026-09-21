@@ -378,7 +378,7 @@ TextMate, git staging, formatter는 LSP의 선행 조건이 아니다. 초기 sy
 | 축 | 결정 | 근거 |
 | --- | --- | --- |
 | **범위(1단)** | transport(Content-Length·JSON-RPC 2.0) · 수명(`initialize`/`initialized`/`shutdown`/`exit`, 죽으면 backoff 재시작 1·2·4s 세 번) · `didOpen`/`didChange`(**Full sync**, 프레임당 한 번 최신 본문)/`didClose` · `publishDiagnostics` → §5.4 의 목록에 `.lsp` 출처로 합침 · 신뢰 프롬프트·기억 · 상태바 항목 · 설치 안내 | 진단이 오늘 표시 자리를 갖는 유일한 결과다. completion·hover·definition·semantic tokens·inlay 는 2단(표시 자리 §8.2·§8.3 이 먼저) |
-| **하지 않는 것(1단)** | 서버→클라이언트 요청(`workspace/applyEdit`·`executeCommand`·`showDocument`·파일 생성/이름/삭제·`workspace/configuration`)은 **전부 거부**(`MethodNotFound` 응답) · 증분 동기화 · 여러 root · `didSave` | §8.2 「기본 거부하고 method 별 승인」— 승인 UI 가 없으니 1단은 거부만. 저장은 아직 서버가 알 필요 없다(진단은 didChange 로 온다) |
+| **하지 않는 것(1단)** | 서버→클라이언트 요청(`workspace/applyEdit`·`executeCommand`·`showDocument`·파일 생성/이름/삭제·`workspace/configuration`)은 **전부 거부**(`MethodNotFound` 응답) · 증분 동기화 · 여러 root · ~~`didSave`~~(**2026-09-21 §8.2k 에서 섰다** — 「진단은 didChange 로 온다」가 rust-analyzer 실측에 뒤집혔다: rustc 진단은 저장에만 다시 돈다) | §8.2 「기본 거부하고 method 별 승인」— 승인 UI 가 없으니 1단은 거부만 |
 | **서버 찾기** | 언어(§3.7a `Grammar`) → 실행 파일 이름 **내장 표**: zig→`zls` · c/cpp→`clangd` · typescript/javascript/tsx→**후보 셋을 차례로**(2026-09-20 사용자 결정 「tsgo 도 되어야」): `tsgo --lsp --stdio`(TypeScript 7 네이티브 — `@typescript/native-preview`) → `typescript-language-server --stdio`(TS 5 계열) → `tsc --lsp --stdio`(`npm i -g typescript`@7 의 `tsc` 가 같은 네이티브 LSP; TS 5 의 `tsc` 는 `--lsp` 를 몰라 곧 죽고 backoff 뒤 「실패」로 선다). PATH 에 있는 **첫 후보**를 고르고 세션 동안 기억한다(`(root, exe)` 키); 하나도 없으면 첫 후보의 이름·설치 명령으로 「없음」. 「없음」인 채 다른 후보가 설치되면 다음 gate 가 그것으로 바꾼다 · rust→`rust-analyzer` · python→`pyright-langserver --stdio` · go→`gopls` · 나머지 없음. **PATH 만** 본다(`/usr/bin/env` 로 execve — PATH 탐색은 env(1)). 설치 명령도 같은 표(brew·npm) | §8.1a 「내장 기본값 + config override」— override 는 2단(설정 키가 언어 수 × 2 라 표시 슬라이스가 커진다; 1단은 내장 표만, `lsp.enabled` 토글 하나) |
 | **신뢰** | 파일을 열어 서버가 필요하고 PATH 에 있으면 **confirm 모달**: 「이 저장소에서 ‹서버›를 실행할까요? 서버는 저장소의 설정·빌드를 읽고 실행할 수 있습니다」 — 허용/거부. 답은 `~/.config/maru/lsp-trust`(줄마다 `allow\t‹root›` / `deny\t‹root›`)에 **root 별로** 기억. 거부하면 그 root 에서는 안 묻고 안 띄운다 — 상태바 항목을 누르면 다시 묻는다 | §8.1 「trusted workspace 확인」. zls 는 build_on_save 로 `zig build`(빌드 스크립트 실행), TS 서버는 node_modules 플러그인 — 저장소를 열기만 해도 코드가 도는 것을 사용자가 알고 허락해야 한다. 거부를 기억하는 이유는 「열 때마다 묻는 모달」이 곧 사용자를 허용으로 몰기 때문 |
 | **root** | 그 Term 의 문서가 속한 **워크스페이스 root**(파일 트리의 root — `withinNavRoot` 가 쓰는 그것). 서버는 `(root, 언어)` 마다 하나. root 밖 문서는 서버를 안 띄운다 | §8.2 「root 밖 URI」 규칙의 전제 — 경계가 root 다 |
@@ -977,6 +977,33 @@ character"* 라 `endLine` 은 서버의 것이고 우리는 그대로 따른다(
 - **CI 되먹임**: `FLD2` 의 「240 ms 안에는 안 묻는다」가 CI 러너(느림)에서 창을 넘겨 빨갰다 — 제품이 (맞게) 물은 것. 「안 묻는다」 판정은 **실제 경과가 창
   안일 때만** 재고, 창은 글자 숫자·사건 시각은 판정자가 직접 잰다(제품 상수를 쓰면 상수를 바꾼 변이가 창까지 바꿔 산다). 5회차: 시계 변이 B3(의미 변이로
   다시)·B7·B8·B11·B13 → 0 생존.
+
+### 8.2k LSP 2단 ⑩ — 저장 통지 `didSave` (2026-09-21, 계획 공격 뒤의 결정)
+
+**계획 공격이 드러낸 것.** ① §8.2a 가 *"저장은 아직 서버가 알 필요 없다(진단은 didChange 로 온다)"* 고 적었는데 **실측에 뒤집혔다**(rust-analyzer 1.96,
+JSON-RPC 프로브): 열면 `cargo check`(rustc) 진단이 오고, 오류를 **고쳐 `didChange` 를 보내도 15 s 동안 rustc 진단이 그대로** 남으며, 디스크에 쓰고
+**`didSave` 를 보내야** `n=0` 으로 지워진다 — rust-analyzer 는 flycheck 를 저장에만 건다(gopls 도 같은 축). 즉 Maru 에서는 Rust 오류를 고치고 저장해도
+빨간 진단이 **다시 열 때까지** 남아 있었다. ② 서버 셋이 다 받는다 — `textDocumentSync.save`: tsgo `true` · clangd `true` · rust-analyzer `{}`(객체, `includeText`
+없음). 명세는 `textDocumentSync` 가 **숫자**(옛 `TextDocumentSyncKind`)일 수도 있다고 한다 — 그때는 `save` 선언이 없으므로 안 보낸다(capability 분기). ③ 저장은
+사실이지 요청이 아니다 — 서버가 아직 없으면 **줄을 서지 않는다**: 뜨면 `didOpen` 이 지금 내용(= 디스크)을 통째로 보내고, rust-analyzer 는 열 때도 flycheck 를
+돈다. ④ 통지 앞에 밀린 `didChange` 를 먼저 보낸다(`flushDocument` — 요청들과 같은 규율) — 서버가 「저장된 것」과 다른 본문을 든 채 저장 통지를 받으면 안 된다.
+
+| 축 | 결정 | 근거 |
+| --- | --- | --- |
+| **capability** | `textDocument.synchronization.didSave: true`. 서버의 `textDocumentSync` 를 읽는다: 객체면 `save`(`true` 또는 `{includeText}`), 숫자·없음·`save: false` 면 미지원 | LSP 3.17 · ② |
+| **통지** | `saveDocument` 가 디스크 쓰기에 **성공한 뒤** `textDocument/didSave{textDocument{uri}, text?}` 한 통 — `includeText` 를 냈으면 저장한 본문을 싣는다. 보내기 전 `flushDocument`. 서버가 없거나 ready 가 아니거나 문서를 안 열었거나(크기 상한) 미지원이면 **아무것도 안 한다**(줄 서지 않는다) | ③④ |
+| **하지 않는 것** | `willSave`·`willSaveWaitUntil` · 저장 시 포맷/code action(§8.2e·§8.2h 그대로) · §8.2f 가 **열려 있지 않은** 파일을 디스크에 쓰는 것에 대한 통지(그 파일은 서버에 안 열려 있다 — `didChangeWatchedFiles` 는 별개) · 이름 없는 문서 | 다음 |
+
+**관측점**: `LSJ17`(순수: capability 선언·`didSave` 통지 둘(text 유무)·`saveCapsFromResult` — 객체 `true`/`{includeText}`/`false`·숫자·없음) · `SAV1`(제품 경계: 가짜 서버 —
+저장이 `didSave` 를 보내고 그 앞에 밀린 didChange 가 먼저 가며(가짜가 본문 불일치를 진단으로 낸다) `includeText` 본문이 실리고, 저장 뒤 진단이 갈아 끼워진다) ·
+`SAV2`(`save` 미지원·서버 없음 → 안 보냄·줄 서지 않음·**있다가 꺼진 뒤**에도 안 보냄). 캡처 훅 `MARU_FORCE_REPLACE_SAVE=<찾을 것>\t<바꿀 것>`(진단이 온 뒤 한 번 바꾸고 저장).
+
+**구현이 계약에 되먹인 것.** 캡처 실측(rust-analyzer, 타입 오류를 고치고 저장): main 은 저장 뒤에도 gutter ✖·밑줄이 그대로였고, 이 조각 뒤에는 몇 초 안에 지워진다.
+
+**적대적 검증(2026-09-21, 1~3회차 · 변이 14)**: 1회차 순수 7 → 0 · 2회차 제품 7 → 2 · 3회차 재실행 2 → 0. 판정자 보강 하나, 등가 하나:
+- **B7** ready 검사(`readyClientFor`)를 우회 — 서버가 **있다가** `lsp.enabled = false` 가 된 뒤의 저장에서 didChange·didSave 가 나갔다 → `SAV2` ⑶.
+- **B6** 통지에 「지금 내용」을 싣기 — 디스크 쓰기가 동기라 `saved_content` 와 같은 값(재편집이 끼어들 수 없다) → 등가, 뜻으로 두고 주석.
+- **B3**(includeText 무시)은 처음 「미사용 인자」 컴파일 오류로 죽어 의미 변이로 다시 돌렸다 — `SAV1` 의 `fake: saved 16` 이 잡는다.
 
 ### 8.3 관측 가능성과 민감정보
 

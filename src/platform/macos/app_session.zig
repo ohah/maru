@@ -7167,6 +7167,8 @@ pub const AppSession = struct {
     debug_format_sent: bool = false,
     /// `MARU_FORCE_FOLD_ALL` 이 접었다(캡처 전용 래치).
     debug_fold_all_done: bool = false,
+    /// `MARU_FORCE_REPLACE_SAVE` 가 바꾸고 저장했다(캡처 전용 래치).
+    debug_replace_save_done: bool = false,
     /// `MARU_FORCE_RENAME*` 이 상자를 열었다(캡처 전용 래치).
     debug_rename_done: bool = false,
     /// `MARU_FORCE_QUICK_FIX` 가 요청을 보냈다(캡처 전용 래치).
@@ -20745,6 +20747,7 @@ pub const AppSession = struct {
         debug_fixtures.applyForcedSuggest(self); // 캡처 전용: 자동완성(§8.2g)
         debug_fixtures.applyForcedQuickFix(self); // 캡처 전용: code action(§8.2h)
         debug_fixtures.applyForcedFoldAll(self); // 캡처 전용: 접힘 층이 선 뒤 전체 접기(§8.2j)
+        debug_fixtures.applyForcedReplaceSave(self); // 캡처 전용: 진단이 온 뒤 고치고 저장(§8.2k)
         debug_fixtures.applyForcedStageAll(self); // 캡처 전용: 전체 스테이지는 그룹 머리 클릭으로만 시작된다(RS4a)
         debug_fixtures.applyForcedFetch(self); // 캡처 전용: 원격 갱신은 브랜치 줄 클릭으로만 시작된다(P6)
         debug_fixtures.applyForcedRemoteMenu(self); // 캡처 전용: `∨` 메뉴도 클릭으로만 열린다(P6b)

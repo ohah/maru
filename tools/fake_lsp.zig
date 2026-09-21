@@ -753,6 +753,14 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
         return;
     };
     if (std.mem.eql(u8, method, "initialize")) {
+        var sync_caps: std.json.ObjectMap = .empty;
+        var save_opts: std.json.ObjectMap = .empty;
+        save_opts.put(allocator, "includeText", .{ .bool = true }) catch return;
+        sync_caps.put(allocator, "openClose", .{ .bool = true }) catch return;
+        sync_caps.put(allocator, "change", .{ .integer = 1 }) catch return;
+        sync_caps.put(allocator, "save", .{ .object = save_opts }) catch return;
+        defer sync_caps.deinit(allocator);
+        defer save_opts.deinit(allocator);
         var utf8 = false;
         if (obj.get("params")) |p| if (p == .object) if (p.object.get("capabilities")) |c| if (c == .object) if (c.object.get("general")) |g| if (g == .object) if (g.object.get("positionEncodings")) |pe| if (pe == .array) {
             for (pe.array.items) |e| if (e == .string and std.mem.eql(u8, e.string, "utf-8")) {
@@ -767,7 +775,9 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
             .result = .{
                 .capabilities = .{
                     .positionEncoding = if (utf8 and !force_utf16) "utf-8" else "utf-16",
-                    .textDocumentSync = @as(u8, 1),
+                    // 저장 통지(§8.2k) — 객체 꼴로 `save{includeText: true}`(본문을 실어 오게 — 가짜가 didChange 본문과 대조한다).
+                    // `MARU_FAKE_LSP_NOSAVECAP=1` 이면 옛 숫자 꼴(Full=1) — save 선언 없음.
+                    .textDocumentSync = if (std.c.getenv("MARU_FAKE_LSP_NOSAVECAP") == null) std.json.Value{ .object = sync_caps } else std.json.Value{ .integer = 1 },
                     .signatureHelpProvider = .{ .triggerCharacters = [_][]const u8{ "(", "," }, .retriggerCharacters = [_][]const u8{")"} },
                     .documentFormattingProvider = std.c.getenv("MARU_FAKE_LSP_NOFMTCAP") == null, // `MARU_FAKE_LSP_NOFMTCAP=1` 이면 false
                     .renameProvider = std.c.getenv("MARU_FAKE_LSP_NORENAMECAP") == null, // `MARU_FAKE_LSP_NORENAMECAP=1` 이면 false
@@ -1037,6 +1047,23 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
             count += 1;
         }
         sendJson(allocator, .{ .jsonrpc = "2.0", .method = "textDocument/publishDiagnostics", .params = .{ .uri = uri, .version = v, .diagnostics = diags[0..count] } });
+        return;
+    }
+    // 저장 통지(§8.2k): 실린 `text` 를 마지막 didOpen/didChange 본문과 대조해 진단 하나로 답한다 — 같으면 `fake: saved <bytes>`(info, 줄 0),
+    // 다르면 `fake: save desync`(error) — 클라이언트가 밀린 didChange 를 먼저 보냈는지가 여기서 드러난다. `text` 가 없으면 `fake: save notext`.
+    if (std.mem.eql(u8, method, "textDocument/didSave")) {
+        const params = obj.get("params") orelse return;
+        if (params != .object) return;
+        const td = params.object.get("textDocument") orelse return;
+        if (td != .object) return;
+        const uri = str(td.object.get("uri")) orelse return;
+        const Diag = struct { range: struct { start: struct { line: u32, character: u32 }, end: struct { line: u32, character: u32 } }, severity: u8, message: []const u8, code: []const u8 };
+        var msg_buf: [64]u8 = undefined;
+        const text = str(params.object.get("text"));
+        const msg: []const u8 = if (text == null) "fake: save notext" else if (!std.mem.eql(u8, text.?, docText(uri))) "fake: save desync" else std.fmt.bufPrint(&msg_buf, "fake: saved {d}", .{text.?.len}) catch "fake: saved";
+        const sev: u8 = if (text != null and std.mem.eql(u8, text.?, docText(uri))) 3 else 1;
+        const diags = [_]Diag{.{ .range = .{ .start = .{ .line = 0, .character = 0 }, .end = .{ .line = 0, .character = 3 } }, .severity = sev, .message = msg, .code = "S1" }};
+        sendJson(allocator, .{ .jsonrpc = "2.0", .method = "textDocument/publishDiagnostics", .params = .{ .uri = uri, .version = docVersion(uri), .diagnostics = diags[0..] } });
         return;
     }
     // 모르는 요청은 MethodNotFound 로.

@@ -99,7 +99,7 @@ pub fn initializeRequest(allocator: std.mem.Allocator, root_uri: []const u8, pid
             .capabilities = .{
                 .general = .{ .positionEncodings = [_][]const u8{ "utf-8", "utf-16" } },
                 .textDocument = .{
-                    .synchronization = .{ .dynamicRegistration = false, .didSave = false },
+                    .synchronization = .{ .dynamicRegistration = false, .didSave = true }, // §8.2k — rustc 진단은 저장에만 다시 돈다
                     .publishDiagnostics = .{ .versionSupport = true },
                     .hover = .{ .contentFormat = [_][]const u8{ "markdown", "plaintext" } },
                     // 자동완성(§8.2g) — 스니펫은 받지 않는다(`snippetSupport = false` 면 서버가 평문 insertText 를 낸다). resolve 도 아직.
@@ -174,6 +174,40 @@ pub fn didChangeFull(allocator: std.mem.Allocator, uri: []const u8, version: i64
             .contentChanges = [_]struct { text: []const u8 }{.{ .text = text }},
         },
     }, .{});
+}
+
+/// 저장 통지(§8.2k) — 서버가 `includeText` 를 냈으면 저장한 본문을 싣는다(`text`), 아니면 uri 만.
+pub fn didSave(allocator: std.mem.Allocator, uri: []const u8, text: ?[]const u8) error{OutOfMemory}![]u8 {
+    if (text) |t| {
+        return std.json.Stringify.valueAlloc(allocator, .{
+            .jsonrpc = "2.0",
+            .method = "textDocument/didSave",
+            .params = .{ .textDocument = .{ .uri = uri }, .text = t },
+        }, .{});
+    }
+    return std.json.Stringify.valueAlloc(allocator, .{
+        .jsonrpc = "2.0",
+        .method = "textDocument/didSave",
+        .params = .{ .textDocument = .{ .uri = uri } },
+    }, .{});
+}
+
+/// 서버의 저장 통지 지원(§8.2k) — `textDocumentSync` 가 **객체**이고 `save` 가 `true` 또는 객체일 때만. 숫자(옛 `TextDocumentSyncKind`)·없음·`false` 는 미지원.
+pub const SaveCaps = struct { supported: bool = false, include_text: bool = false };
+
+pub fn saveCapsFromResult(result: ?std.json.Value) SaveCaps {
+    const r = result orelse return .{};
+    if (r != .object) return .{};
+    const caps = r.object.get("capabilities") orelse return .{};
+    if (caps != .object) return .{};
+    const sync = caps.object.get("textDocumentSync") orelse return .{};
+    if (sync != .object) return .{}; // 숫자 꼴 — save 선언이 없다
+    const save = sync.object.get("save") orelse return .{};
+    return switch (save) {
+        .bool => |b| .{ .supported = b },
+        .object => |o| .{ .supported = true, .include_text = if (o.get("includeText")) |v| (v == .bool and v.bool) else false },
+        else => .{},
+    };
 }
 
 pub fn didClose(allocator: std.mem.Allocator, uri: []const u8) error{OutOfMemory}![]u8 {
@@ -1231,4 +1265,35 @@ test "LSJ16 foldingRange — initialize capability(lineFoldingOnly·종류 셋)�
     var p3 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":1200000000,\"result\":null}"); // 칸 밖
     defer p3.deinit();
     try testing.expect(classify(p3.value) == .ignore);
+}
+
+test "LSJ17 didSave — capability 선언·통지 둘(text 유무)·서버 save 선언 파싱(객체 true·{includeText}·false·숫자·없음) (§8.2k)" {
+    const a = testing.allocator;
+    const init = try initializeRequest(a, "file:///r", 42);
+    defer a.free(init);
+    try testing.expect(std.mem.indexOf(u8, init, "\"synchronization\":{\"dynamicRegistration\":false,\"didSave\":true}") != null);
+    const bare = try didSave(a, "file:///a.rs", null);
+    defer a.free(bare);
+    try testing.expectEqualStrings("{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didSave\",\"params\":{\"textDocument\":{\"uri\":\"file:///a.rs\"}}}", bare);
+    const with = try didSave(a, "file:///a.rs", "fn main() {}\n");
+    defer a.free(with);
+    try testing.expectEqualStrings("{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didSave\",\"params\":{\"textDocument\":{\"uri\":\"file:///a.rs\"},\"text\":\"fn main() {}\\n\"}}", with);
+    const cases = [_]struct { json: []const u8, supported: bool, include: bool }{
+        .{ .json = "{\"capabilities\":{\"textDocumentSync\":{\"openClose\":true,\"change\":2,\"save\":true}}}", .supported = true, .include = false }, // tsgo·clangd
+        .{ .json = "{\"capabilities\":{\"textDocumentSync\":{\"openClose\":true,\"change\":2,\"save\":{}}}}", .supported = true, .include = false }, // rust-analyzer
+        .{ .json = "{\"capabilities\":{\"textDocumentSync\":{\"save\":{\"includeText\":true}}}}", .supported = true, .include = true },
+        .{ .json = "{\"capabilities\":{\"textDocumentSync\":{\"save\":{\"includeText\":false}}}}", .supported = true, .include = false },
+        .{ .json = "{\"capabilities\":{\"textDocumentSync\":{\"save\":false}}}", .supported = false, .include = false },
+        .{ .json = "{\"capabilities\":{\"textDocumentSync\":{\"openClose\":true,\"change\":1}}}", .supported = false, .include = false },
+        .{ .json = "{\"capabilities\":{\"textDocumentSync\":1}}", .supported = false, .include = false }, // 숫자 꼴 — 선언 없음
+        .{ .json = "{\"capabilities\":{\"hoverProvider\":true}}", .supported = false, .include = false },
+    };
+    for (cases) |cse| {
+        var p = try parse(a, cse.json);
+        defer p.deinit();
+        const sc = saveCapsFromResult(p.value);
+        try testing.expectEqual(cse.supported, sc.supported);
+        try testing.expectEqual(cse.include, sc.include_text);
+    }
+    try testing.expect(!saveCapsFromResult(null).supported);
 }

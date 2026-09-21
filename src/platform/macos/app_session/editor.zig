@@ -7173,6 +7173,10 @@ pub fn saveDocument(self: *AppSession, term: *Term) bool {
     // 위해 남아 있다.
     term.rt.editor_doc.?.saved_hash = contentHash(saved_content);
     self.metal_dirty = true;
+    // **서버에 저장을 알린다**(§8.2k) — rustc 진단은 저장에만 다시 돌므로, 안 알리면 고친 오류가 다시 열 때까지 남는다. 디스크 쓰기가
+    // 성공한 뒤이고, 실은 본문은 **방금 쓴 것**(`saved_content` — 쓰는 동안 더 친 것은 아직 저장이 아니다; 쓰기가 동기라 오늘은
+    // `doc.file.content` 와 같은 값이다 — 적대적 B6: 등가, 뜻으로 둔다). 서버가 없으면 줄 서지 않는다.
+    _ = lsp_client.noteSaved(self, term, saved_content);
     // **마커가 남았으면 말한다**(S2 — docs/editor-merge-conflicts.md §5). 저장을 막지는 **않는다**:
     // 마커를 남긴 채 저장하는 것은 정당한 중간 상태다(반쯤 고치다 멈추는 흐름이 있다). 막아야 하는
     // 것은 **모른 채** 커밋하는 일이고, 그것을 막는 수단은 「말하는 것」이다 —
@@ -14346,6 +14350,96 @@ test "FLD3 foldingRange 3층 — 갈아 끼우기가 어느 할당에서 실패�
         }
     }
     try testing.expect(refused >= 3); // decode 의 할당 + install 의 folded·folded_prev 는 전부 갈아 끼우기 전이다
+}
+
+/// 첫 LSP 진단의 message(없으면 빈 문자열) — `lsp_messages` 버퍼의 조각이라 응답이 갈아 끼우면 같이 바뀐다.
+fn firstLspMessage(term: *Term) []const u8 {
+    const items = term.rt.editor_diagnostics.lsp.items;
+    return if (items.len > 0) items[0].message else "";
+}
+
+test "SAV1 didSave — 저장이 디스크 쓰기 뒤 서버에 통지하고, 밀린 didChange 가 먼저 가며(가짜가 본문 불일치를 진단으로 낸다), includeText 본문이 실리고, 저장 뒤 진단이 갈아 끼워진다; 변경 없는 저장도 통지한다 (제품 경계, §8.2k)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var f = (try SmtFixture.open(allocator, "sv.c", "int x;\nint y;\n")) orelse return error.SkipZigTest;
+    defer f.close(allocator);
+    const s = f.fx.session;
+    const term = f.term;
+    try testing.expect(f.ready());
+    try testing.expectEqualStrings("fake: 1", firstLspMessage(term));
+    // ⑴ 편집하고 **pump 없이** 곧바로 저장 — didChange 가 밀려 있다. 통지는 flush 뒤에 가야 가짜가 「같은 본문」으로 본다.
+    const changes0 = s.editor_lsp.sent_changes;
+    term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };
+    try testing.expect(insertText(s, term, "//"));
+    try testing.expect(saveDocument(s, term));
+    try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_saves);
+    try testing.expectEqual(changes0 + 1, s.editor_lsp.sent_changes); // 밀린 didChange 하나가 통지 앞에 갔다
+    try testing.expect(pumpLspUntil(&f.fx, 3000, term, struct {
+        fn g(t: *Term) bool {
+            return std.mem.startsWith(u8, firstLspMessage(t), "fake: save");
+        }
+    }.g));
+    try testing.expectEqualStrings("fake: saved 16", firstLspMessage(term)); // `//int x;\nint y;\n` = 16 바이트 — includeText 본문이 실렸고 didChange 본문과 같다
+    try testing.expectEqual(maru.session.editor.diagnostic.Severity.info, term.rt.editor_diagnostics.lsp.items[0].severity);
+    // ⑵ 디스크에도 그 본문이 있다(저장은 저장이다).
+    var buf: [64]u8 = undefined;
+    const on_disk = try f.fx.dir.dir.readFile(testing.io, "sv.c", &buf);
+    try testing.expectEqualStrings("//int x;\nint y;\n", on_disk);
+    // ⑶ 변경 없는 저장 — didChange 는 안 가고 통지는 간다.
+    const changes1 = s.editor_lsp.sent_changes;
+    try testing.expect(saveDocument(s, term));
+    try testing.expectEqual(@as(u64, 2), s.editor_lsp.sent_saves);
+    try testing.expectEqual(changes1, s.editor_lsp.sent_changes);
+}
+
+test "SAV2 didSave — 서버가 save 를 선언하지 않으면(숫자 꼴 textDocumentSync) 안 보내고, 서버가 없어도(lsp.enabled=false) 저장은 그대로 성공하며 줄 서지 않는다 (제품 경계, §8.2k)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    _ = setenv("MARU_FAKE_LSP_NOSAVECAP", "1", 1);
+    defer _ = unsetenv("MARU_FAKE_LSP_NOSAVECAP");
+    {
+        var f = (try SmtFixture.open(allocator, "ns.c", "int x;\n")) orelse return error.SkipZigTest;
+        defer f.close(allocator);
+        const s = f.fx.session;
+        const term = f.term;
+        try testing.expect(f.ready());
+        term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };
+        try testing.expect(insertText(s, term, "//"));
+        try testing.expect(saveDocument(s, term));
+        try testing.expectEqual(@as(u64, 0), s.editor_lsp.sent_saves);
+        try testing.expect(pumpLspUntil(&f.fx, 3000, term, struct {
+            fn g(t: *Term) bool {
+                return std.mem.eql(u8, firstLspMessage(t), "fake: 2"); // didChange 는 평소대로 간다
+            }
+        }.g));
+        try testing.expectEqualStrings("fake: 2", firstLspMessage(term)); // `fake: save…` 가 아니다
+    }
+    _ = unsetenv("MARU_FAKE_LSP_NOSAVECAP");
+    // 서버 없음 — `lsp.enabled = false`: 저장은 성공, 통지 0, 그리고 켜져도 「밀린 저장」이 나가지 않는다(줄 서지 않는다).
+    {
+        var f = (try SmtFixture.open(allocator, "off.c", "int x;\n")) orelse return error.SkipZigTest;
+        defer f.close(allocator);
+        const s = f.fx.session;
+        const term = f.term;
+        s.loaded_config.config.lsp.enabled = false;
+        term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };
+        try testing.expect(insertText(s, term, "//"));
+        try testing.expect(saveDocument(s, term));
+        try testing.expectEqual(@as(u64, 0), s.editor_lsp.sent_saves);
+        try testing.expect(!isDirty(term));
+        s.loaded_config.config.lsp.enabled = true;
+        try testing.expect(f.ready()); // 이제 서버가 뜬다 — didOpen 이 지금 내용을 보낸다
+        try testing.expectEqual(@as(u64, 0), s.editor_lsp.sent_saves); // 밀린 저장 통지는 없다
+        try testing.expectEqualStrings("fake: 2", firstLspMessage(term)); // didOpen 의 version 은 편집으로 오른 2
+        // ⑶ 서버가 **있다가** `lsp.enabled = false` 가 된 뒤의 저장 — 통지도 didChange 도 안 나간다(적대적 B7: ready 검사를 우회하면 꺼진 뒤에도 보낸다).
+        s.loaded_config.config.lsp.enabled = false;
+        const changes_off = s.editor_lsp.sent_changes;
+        try testing.expect(insertText(s, term, "/"));
+        try testing.expect(saveDocument(s, term));
+        try testing.expectEqual(@as(u64, 0), s.editor_lsp.sent_saves);
+        try testing.expectEqual(changes_off, s.editor_lsp.sent_changes);
+        s.loaded_config.config.lsp.enabled = true;
+    }
 }
 
 test "CMP6 자동완성 ①-d — 문서 패널: ⌃Space 가 목록이 열려 있으면 패널을 토글하고, 강조를 따라가며(미해결은 250 ms 뒤 `…`, 풀리면 detail+빈 줄+문서), 닫혀도 펼침은 남고, 패널 안 휠은 굴리고 밖은 흘린다 (제품 경계, §8.2g-d)" {

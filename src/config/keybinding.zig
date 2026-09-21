@@ -271,6 +271,7 @@ pub const editor_context_bindings = [_]EditorContextBinding{
     .{ .chord = .{ .modifiers = .{}, .key = .{ .function = 8 } }, .action = .next_diagnostic, .needs_editable = false }, // F8 — §5.4(VS Code editor.action.marker.next)
     .{ .chord = .{ .modifiers = .{ .shift = true }, .key = .{ .function = 8 } }, .action = .prev_diagnostic, .needs_editable = false }, // Shift+F8
     .{ .chord = .{ .modifiers = .{}, .key = .{ .function = 12 } }, .action = .goto_definition, .needs_editable = false }, // F12 — §8.2c(VS Code editor.action.revealDefinition)
+    .{ .chord = .{ .modifiers = .{ .shift = true }, .key = .{ .function = 12 } }, .action = .goto_references, .needs_editable = false }, // Shift+F12 — §8.2l(VS Code editor.action.goToReferences)
     // `F2` — 심볼 이름 바꾸기(tooling §8.2f, VS Code `editor.action.rename`). 파일 트리가 초점일 때의 `F2` 는 ③ʹ 앞 갈래라 겹치지 않는다(키 문서 전수 대조).
     // `needs_editable` 는 비교 뷰에서만 읽히고 그때는 `startAtCaret` 이 먼저 거절하므로 어느 값이든 무동작이다(S5 B6·§8.2e C3 과 같은 등가, 적대적 3회차 C4).
     .{ .chord = .{ .modifiers = .{}, .key = .{ .function = 2 } }, .action = .rename_symbol, .needs_editable = true }, // 문서를 바꾸는 명령 — 비교 뷰에서는 양보
@@ -1269,7 +1270,7 @@ test "ETX4 편집기 컨텍스트 기본키가 전역 표를 안 오염시킨다
         try std.testing.expect(b.needs_editable);
     }
     try std.testing.expectEqual(allowed.len, exceptions);
-    try std.testing.expectEqual(@as(usize, 6), bare_function_keys); // F7 · ⇧F7 · F8 · ⇧F8 · F12 · F2 — 늘리려면 그 절에 전수 대조를 적는다
+    try std.testing.expectEqual(@as(usize, 7), bare_function_keys); // F7 · ⇧F7 · F8 · ⇧F8 · F12 · ⇧F12 · F2 — 늘리려면 그 절에 전수 대조를 적는다
     try std.testing.expectEqual(@as(usize, 4), control_chords); // ⌃- · ⌃⇧- · ⌃⇧_ · ⌃Space — ⑷, 늘리려면 allowed_control 에 근거와 함께
     try std.testing.expect(editor_context_bindings.len > 0);
 
@@ -1808,6 +1809,7 @@ test "FKB5 F7·⇧F7·F8·⇧F8 은 편집기 컨텍스트에서 다음/이전 �
         .{ .f = 8, .shift = false, .want = .next_diagnostic },
         .{ .f = 8, .shift = true, .want = .prev_diagnostic },
         .{ .f = 12, .shift = false, .want = .goto_definition },
+        .{ .f = 12, .shift = true, .want = .goto_references }, // §8.2l
     };
     for (cases) |c| {
         const ev: terminal.KeyEvent = .{ .key = .{ .function = c.f }, .modifiers = .{ .shift = c.shift } };

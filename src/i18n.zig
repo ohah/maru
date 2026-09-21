@@ -480,6 +480,10 @@ const Table = struct {
     nav_no_definition: [:0]const u8,
     /// `{0}` = 경로. root 밖이라 열지 않았다(§5.2 「표시와 접근을 가른다」).
     nav_outside_root: [:0]const u8,
+    /// 참조 피커(§8.2l) — 서버가 `null`/빈 결과를 냈다 · 프롬프트 `{0}` = 수(`+` 는 상한을 넘겼다) · root 밖 행의 제목.
+    ref_none: [:0]const u8,
+    ref_prompt: [:0]const u8,
+    ref_outside_title: [:0]const u8,
     /// 문서 포맷(§8.2e) — 요청 뒤 문서가 바뀌어 결과를 버렸다 / 결과가 겹치거나 모양이 틀려 거부했다.
     fmt_stale: [:0]const u8,
     fmt_rejected: [:0]const u8,
@@ -1623,6 +1627,9 @@ const en: Table = .{
     .lsp_status_denied = "{s} not allowed — ask again",
     .nav_no_definition = "No definition found",
     .nav_outside_root = "Not opened — outside the workspace root: {0}",
+    .ref_none = "No references found",
+    .ref_prompt = "{0} references",
+    .ref_outside_title = "outside the workspace root",
     .fmt_stale = "Document changed — format result discarded",
     .fmt_rejected = "Format result rejected — edits overlap or are malformed",
     .rn_done = "Renamed in {0} file(s)",
@@ -2338,6 +2345,9 @@ const ko: Table = .{
     .lsp_status_denied = "{s} 거부됨 — 다시 묻기",
     .nav_no_definition = "정의를 찾지 못했습니다",
     .nav_outside_root = "루트 밖이라 열지 않습니다 — {0}",
+    .ref_none = "참조를 찾지 못했습니다",
+    .ref_prompt = "참조 {0}개",
+    .ref_outside_title = "루트 밖",
     .fmt_stale = "문서가 바뀌어 포맷 결과를 버렸습니다",
     .fmt_rejected = "포맷 결과를 거부했습니다 — 겹치거나 모양이 틀립니다",
     .rn_done = "{0}개 파일에서 이름을 바꿨습니다",

@@ -671,6 +671,104 @@ fn isIdent(b: u8) bool {
 }
 
 /// `text` 안의 `word` 낱말 전부를 `new_name` 으로 바꾸는 TextEdit 들(character = byte — ASCII 본문). `bad` 면 첫 edit 을 겹치게 하나 더 낸다.
+/// `textDocument/references`(§8.2l 관측점): 요청 자리의 식별자를 이 문서 전체에서 **낱말 단위**로 찾아 `Location[]` 로 낸다 — **뒤에서 앞으로**
+/// (클라이언트가 정렬하는지 보이게) 그리고 첫 위치를 **두 번**(중복을 하나로 접는지). 같은 디렉터리에 `other.c` 가 있으면 디스크에서 읽어 그
+/// 파일의 위치도 섞는다(열려 있지 않은 파일). 본문 표식: `REFOUT` → root 밖 위치 하나 더 · `REFNONE` → 빈 배열 · `REFNULL` → `null` ·
+/// `REFSTALL` → 답하지 않는다 · `REFBUSY` → `-32801 content modified` 오류(rust-analyzer 가 로드 중에 내는 것 — 클라이언트가 되묻는다).
+fn handleReferences(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: std.json.Value) void {
+    var req_uri: []const u8 = "";
+    var line_no: i64 = 0;
+    var character: i64 = 0;
+    if (obj.get("params")) |p| if (p == .object) {
+        if (p.object.get("textDocument")) |td| if (td == .object) {
+            req_uri = str(td.object.get("uri")) orelse "";
+        };
+        if (p.object.get("position")) |pos| if (pos == .object) {
+            line_no = int(pos.object.get("line")) orelse 0;
+            character = int(pos.object.get("character")) orelse 0;
+        };
+    };
+    const text = docText(req_uri);
+    if (std.mem.indexOf(u8, text, "REFSTALL") != null) return;
+    if (std.mem.indexOf(u8, text, "REFBUSY") != null) {
+        sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .@"error" = .{ .code = @as(i32, -32801), .message = "content modified" } });
+        return;
+    }
+    if (std.mem.indexOf(u8, text, "REFNULL") != null) {
+        sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .result = null });
+        return;
+    }
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var out: std.json.Array = .init(arena);
+    if (std.mem.indexOf(u8, text, "REFNONE") == null) {
+        const before = lineBefore(text, line_no, character);
+        const line_start = @intFromPtr(before.ptr) - @intFromPtr(text.ptr);
+        const caret = line_start + before.len;
+        var ws = caret;
+        var we = caret;
+        while (ws > 0 and isIdent(text[ws - 1])) ws -= 1;
+        while (we < text.len and isIdent(text[we])) we += 1;
+        if (ws < we) {
+            const word = text[ws..we];
+            // 이 문서 — 뒤에서 앞으로, 첫 것은 두 번.
+            const mine = wordLocations(arena, text, word, req_uri) catch return;
+            var i: usize = mine.items.len;
+            while (i > 0) : (i -= 1) out.append(mine.items[i - 1]) catch return;
+            if (mine.items.len > 0) out.append(mine.items[0]) catch return;
+            // 같은 디렉터리의 other.c — 디스크에서.
+            var uri_buf: [4096]u8 = undefined;
+            if (std.mem.lastIndexOfScalar(u8, req_uri, '/')) |slash| {
+                const other_uri = std.fmt.bufPrint(&uri_buf, "{s}/other.c", .{req_uri[0..slash]}) catch "";
+                if (std.mem.startsWith(u8, other_uri, "file://")) {
+                    if (readFileC(arena, other_uri["file://".len..])) |other_text| {
+                        const theirs = wordLocations(arena, other_text, word, arena.dupe(u8, other_uri) catch return) catch return;
+                        for (theirs.items) |l| out.append(l) catch return;
+                    }
+                }
+            }
+            if (std.mem.indexOf(u8, text, "REFOUT") != null) {
+                out.append(locationValue(arena, "file:///nonexistent-outside-root/x.c", 3, 0, 4) catch return) catch return;
+            }
+        }
+    }
+    sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .result = std.json.Value{ .array = out } });
+}
+
+fn wordLocations(arena: std.mem.Allocator, text: []const u8, word: []const u8, uri: []const u8) !std.json.Array {
+    var locs: std.json.Array = .init(arena);
+    var line_no: i64 = 0;
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (it.next()) |line| : (line_no += 1) {
+        var from: usize = 0;
+        while (std.mem.indexOfPos(u8, line, from, word)) |at| {
+            from = at + word.len;
+            const left_ok = at == 0 or !isIdent(line[at - 1]);
+            const right_ok = at + word.len >= line.len or !isIdent(line[at + word.len]);
+            if (!left_ok or !right_ok) continue;
+            try locs.append(try locationValue(arena, uri, line_no, at, at + word.len));
+        }
+    }
+    return locs;
+}
+
+fn locationValue(arena: std.mem.Allocator, uri: []const u8, line_no: i64, start: usize, end: usize) !std.json.Value {
+    var s: std.json.ObjectMap = .empty;
+    try s.put(arena, "line", .{ .integer = line_no });
+    try s.put(arena, "character", .{ .integer = @intCast(start) });
+    var e: std.json.ObjectMap = .empty;
+    try e.put(arena, "line", .{ .integer = line_no });
+    try e.put(arena, "character", .{ .integer = @intCast(end) });
+    var range: std.json.ObjectMap = .empty;
+    try range.put(arena, "start", .{ .object = s });
+    try range.put(arena, "end", .{ .object = e });
+    var loc: std.json.ObjectMap = .empty;
+    try loc.put(arena, "uri", .{ .string = uri });
+    try loc.put(arena, "range", .{ .object = range });
+    return .{ .object = loc };
+}
+
 fn renameEdits(arena: std.mem.Allocator, text: []const u8, word: []const u8, new_name: []const u8, bad: bool) !std.json.Array {
     var edits: std.json.Array = .init(arena);
     var line_no: i64 = 0;
@@ -787,6 +885,7 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
                     // full 만(clangd 꼴), `MARU_FAKE_LSP_NOSEMCAP=1` 이면 provider 없음.
                     // 접힘 3층(§8.2j) — `MARU_FAKE_LSP_NOFOLDCAP=1` 이면 provider 없음.
                     .foldingRangeProvider = std.c.getenv("MARU_FAKE_LSP_NOFOLDCAP") == null,
+                    .referencesProvider = true, // §8.2l
                     .semanticTokensProvider = if (std.c.getenv("MARU_FAKE_LSP_NOSEMCAP") == null) .{
                         .legend = .{ .tokenTypes = [_][]const u8{ "keyword", "function", "variable", "type", "bogusKind" }, .tokenModifiers = [_][]const u8{"declaration"} },
                         .range = std.c.getenv("MARU_FAKE_LSP_SEMFULL") == null,
@@ -960,6 +1059,10 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
             .contents = .{ .kind = "markdown", .value = md.items },
             .range = .{ .start = Pos{ .line = line, .character = character }, .end = Pos{ .line = line, .character = character + 3 } },
         } });
+        return;
+    }
+    if (std.mem.eql(u8, method, "textDocument/references")) {
+        handleReferences(allocator, obj, id.?);
         return;
     }
     if (std.mem.eql(u8, method, "textDocument/definition")) {

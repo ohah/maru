@@ -423,8 +423,8 @@ TextMate, git staging, formatter는 LSP의 선행 조건이 아니다. 초기 sy
 「복구」로 읽었다. 표식은 자리를 찾아 지우고, 복구는 「**그 version 의** 진단이 왔다」로 잰다.
 
 **요청 id 는 i32 안(2026-09-20 실측 뒤의 결정).** 종류마다 `id_span = 1e8` 칸: hover `1e8+seq` · definition `2e8` · signatureHelp `3e8` · formatting `4e8` ·
-rename `5e8` · completion `6e8` · codeAction `7e8` · codeAction/resolve `8e8` · completionItem/resolve `9e8` · semanticTokens `10e8` · foldingRange `11e8`(`rpc.zig` 의 base 상수, `nextSeq` 가 칸 안에서 돌린다,
-`classify` 는 칸으로 가른다; 가장 큰 칸 11e8+1e8-1 = 1,199,999,999 < 2^31). 처음엔 `N×1e9+seq` 였고 JSON-RPC 로는 적법하지만, **rust-analyzer(와 ruff 등 Rust `lsp-server` 크레이트 서버)는 정수 id 를 i32 로만
+rename `5e8` · completion `6e8` · codeAction `7e8` · codeAction/resolve `8e8` · completionItem/resolve `9e8` · semanticTokens `10e8` · foldingRange `11e8` · references `12e8`(`rpc.zig` 의 base 상수, `nextSeq` 가 칸 안에서 돌린다,
+`classify` 는 칸으로 가른다; 가장 큰 칸 12e8+1e8-1 = 1,299,999,999 < 2^31). 처음엔 `N×1e9+seq` 였고 JSON-RPC 로는 적법하지만, **rust-analyzer(와 ruff 등 Rust `lsp-server` 크레이트 서버)는 정수 id 를 i32 로만
 읽어** 넘치는 요청을 **알림으로 오인해 버린다** — `6_000_000_001` 짜리 completion 이 stderr 에 `unhandled notification` 으로만 남고 응답이 없었다(hover·definition 만
 i32 안이라 그 둘만 됐다). 실 rust-analyzer 에 프레임을 그대로 재생해 잡았다(§8.2g-b 실측). 관측점 `LSJ13`(가장 큰 칸 끝 ≤ i32 최대 · seq 가 칸 안에서 돌고 0 을
 건너뜀 · 칸 경계 · 칸 밖은 무시). 아래 절들의 id 표기는 이 표를 따른다.
@@ -513,7 +513,7 @@ padding 만큼 둔다(`popup_box.gap_px`); sticky·휠 판정도 **보이는** r
 | **이동** | §5.2 의 `navigateTo` **하나**로 — `NavTarget` 에 `(line, character, 인코딩)` 변형을 더해 **연 뒤 그 문서로 offset 을 푼다**(열기 → 풀기 → 펴기 → caret → 스크롤). 같은 파일이면 파일 열기 없이 같은 경로 | §5.2 「출처가 여럿이어도 경로는 하나다」 |
 | **root 밖** | `withinNavRoot` 가 거부하면 열지 않고 알림 「루트 밖이라 열지 않습니다 — ‹경로›」 | §5.2 「표시와 접근을 가른다」 · §8.2 「URI 를 받았다는 이유로 grant 가 확대되지 않는다」 |
 | **뒤로·앞으로** | `navigate_back` = `⌃-` · `navigate_forward` = `⌃⇧-`(`_` 도) · 팔레트 「Editor: Go Back / Go Forward」. 스택은 §5.2 것 그대로(창 하나에 하나, 닫힌 Term 은 건너뜀). 편집기 Term 컨텍스트에서만 — 터미널 Term 에서는 `⌃-` 가 PTY 로 간다 | **사용자 결정(2026-09-18)**: VS Code mac 기본을 따른다(§1.1 「VSCode 사용자 무회귀」). 키 계약에 `⌃` 예외 갈래 ⑷ 를 연다 — [키 입력](key-input-and-shortcuts.md) 「편집기 Term 컨텍스트」 |
-| **하지 않는 것** | 여러 결과의 목록·peek(`⌥F12`) · declaration/typeDefinition/implementation/references · `⌘` 호버 밑줄(링크처럼 보이기) · 「정의로 이동 → 선택」(caret 만 놓는다 — §5.2) · stale 위치 보정 | 다음 조각들 |
+| **하지 않는 것** | 여러 결과의 목록·peek(`⌥F12`) · declaration/typeDefinition/implementation · ~~references~~(**§8.2l 에서 섰다** — 2026-09-21, 참조 피커) · `⌘` 호버 밑줄(링크처럼 보이기) · 「정의로 이동 → 선택」(caret 만 놓는다 — §5.2) · stale 위치 보정 | 다음 조각들 |
 
 **구현이 계약에 되먹인 것(2026-09-18).** ① **제품 캡처가 결함을 잡았다** — 파일 트리 root 가 `/` 인 창에서 같은 파일의 정의가 「root 밖」이 됐다:
 `repo_path.underRoot` 의 경계 검사(`path[r.len] == '/'`)가 root `/` 에서 `//…` 만 통과시켰다. root 가 `/` 면 모든 절대 경로가 아래다(`CRUMB4`).
@@ -1004,6 +1004,58 @@ JSON-RPC 프로브): 열면 `cargo check`(rustc) 진단이 오고, 오류를 **�
 - **B7** ready 검사(`readyClientFor`)를 우회 — 서버가 **있다가** `lsp.enabled = false` 가 된 뒤의 저장에서 didChange·didSave 가 나갔다 → `SAV2` ⑶.
 - **B6** 통지에 「지금 내용」을 싣기 — 디스크 쓰기가 동기라 `saved_content` 와 같은 값(재편집이 끼어들 수 없다) → 등가, 뜻으로 두고 주석.
 - **B3**(includeText 무시)은 처음 「미사용 인자」 컴파일 오류로 죽어 의미 변이로 다시 돌렸다 — `SAV1` 의 `fake: saved 16` 이 잡는다.
+
+### 8.2l LSP 2단 ⑪ — 참조 피커 (2026-09-21, 계획 공격 뒤의 결정)
+
+**계획 공격이 드러낸 것.** ① §8.2c 가 「여러 결과의 목록」을 하지 않는 것으로 두고 정의로 이동은 **첫 항목**만 썼다 — 참조는 본질이
+「여럿」이라 목록 표면 없이는 못 선다. ② 그 표면은 새로 만들지 않는다: [native-editor-ui §7.5](native-editor-ui.md) 「피커는 팔레트를 다시 쓴다 —
+새 오버레이 UI 는 없다」가 심볼 피커에서 이미 정한 규칙이고, 그 절이 **데이터 출처는 가르고 목록 역학은 합친다**(모듈 분리·오버레이 State 각자·
+윈도잉은 매개변수화)고 적어 둔 대로 **세 번째 소비자**로 얹는다. 오버레이 등록은 한 자리(`InputFocus` 값 + `modalInputRole` 한 줄)라 비용이 작다.
+③ **실측(2026-09-21, JSON-RPC 프로브)** — rust-analyzer: `Location[]`, **정렬되지 않았다**(선언이 마지막), 다른 파일(`src/util.rs`)이 섞여 온다,
+`includeDeclaration: false` 면 선언이 빠진다, 지연 120~190 ms · tsgo: 정렬됨, **한 줄에 둘**(`make(p: Point): Point`), 31 ms · clangd: 0 ms. 셋 다
+`referencesProvider: true`. → 순서는 우리가 정한다(현재 파일 먼저 → 경로 → 줄 → 열), 같은 위치 중복은 하나로. ④ 미리보기 줄을 보이려면 **다른
+파일을 읽어야** 한다 — §5.2 「표시와 접근을 가른다」·§8.2 「URI 를 받았다는 이유로 grant 가 확대되지 않는다」: root 안 파일만 읽고(파일 64개·각
+4 MB 상한, 넘으면 미리보기 없이 경로만), root 밖은 **행으로 보이되** 고르면 알림(정의로 이동과 같은 규율). ⑤ 결과가 하나면 목록을 띄우지 않고 바로
+간다(VS Code `editor.gotoLocation.multipleReferences = peek` 의 「여럿일 때만」과 같은 결).
+
+**레퍼런스(동작만).** VS Code macOS: `⇧F12` = `editor.action.goToReferences`(여럿이면 peek 목록, 하나면 이동), `⌥⇧F12` = 참조 뷰(패널). 없으면
+「No references found」.
+
+| 축 | 결정 | 근거 |
+| --- | --- | --- |
+| **트리거** | `goto_references` — `⇧F12`(편집기 컨텍스트 표 ⑶ 기능키, `needs_editable = false`) · 팔레트 「Editor: Go to References」. caret 자리 offset 으로 `textDocument/references{context.includeDeclaration: true}` | VS Code 키. 선언을 포함해야 「정의 자리」도 목록에서 보인다 |
+| **요청** | id `12e8+seq`(§8.2a 표에 열두 번째 칸). 응답은 **지금 기다리는 seq** 일 때만 연다 — 낡은 것은 버린다. 서버가 없거나 ready 아니면 무동작. 보내기 전 `flushDocument` | §8.2c 와 같은 규율 |
+| **결과(코드가 소유 — `platform/macos/reference_picker.zig`)** | `Location[]`(`LocationLink[]` 도 받는다 — `targetSelectionRange` 우선). `file:` 아닌 URI 는 뺀다. 같은 `(경로, 줄, 열)` 은 하나. **순서**: 현재 파일 → 경로 사전순 → 줄 → 열. **상한 500**(넘으면 앞부분만, 프롬프트에 「+」). 0 → 알림 「참조를 찾지 못했습니다」 · 1 → 목록 없이 이동 · 2+ → 피커 | ③⑤ |
+| **행** | 제목 = 그 줄의 본문(앞 공백을 떼고, 라벨 폭에 맞춰 뒤를 `…`) · 우측 보조 텍스트 = `상대경로:줄`(현재 파일은 `:줄` 만). 미리보기 본문: 현재 문서는 메모리에서, root 안 다른 파일은 디스크에서(파일 64개·4 MB 상한 — 넘으면 제목이 경로), **root 밖은 제목이 「루트 밖」** 이고 본문을 읽지 않는다 | ④ · §7.5 「라벨은 host 가 잘라서 넘긴다」 |
+| **필터** | 심볼 피커와 같은 것 — 제목·보조 텍스트에 **바이트 부분일치 + ASCII 접기**. 쿼리가 바뀌면 선택은 맨 위 | §7.5 「필터의 근거」 |
+| **이동** | 고르면 **닫고 나서** §5.2 의 `navigateTo(path, pos{line, character, enc})` 하나로 — 정의로 이동과 같은 길(연 뒤 그 문서로 offset 을 푼다, 되돌아가기 스택이 따라온다). root 밖 행은 알림 「루트 밖이라 열지 않습니다」 | §7.5 「고르면 어디로 가나」 · §8.2c |
+| **닫힘** | `Esc` · 다른 오버레이 · 편집기 아님. 목록은 요청 때의 문서 기준이라 **편집하면 낡을 수 있다** — 열려 있는 동안은 오버레이가 키를 가로채 편집이 없다 | §7.5 |
+| **하지 않는 것** | 편집기 안 인라인 peek 창 · 참조 뷰 패널(`⌥⇧F12`) · declaration/typeDefinition/implementation(같은 표면으로 다음) · 미리보기 캐시의 지속(피커 수명) · 다른 파일의 낡은 위치 보정 | 다음 |
+
+**관측점**: `LSJ18`(순수: capability·요청·id 칸 12e8·classify·`locationsFromResult` 세 모양) · `RFP1~`(순수: 정렬·중복·상한·root 밖·미리보기 자르기·필터) ·
+`REF1`(제품 경계: 가짜 서버 — `⇧F12` 로 피커가 열리고 행이 현재 파일 먼저·다른 파일·root 밖 순으로 서며 프레임에 실린다, `Enter` 가 닫고 이동(같은 파일 caret ·
+다른 파일 새 Term · root 밖 알림), 필터가 선택을 맨 위로, 하나면 바로 이동, 없으면 알림, 낡은 응답 버림(결과 모양으로 잰다), 알림이 뜨면 피커가 닫히고 행이 놓임,
+`content modified` 뒤 400 ms 되묻기(제품 tick 으로)·새 요청이 예약을 지움·상한 8) · `RFP4`(폭 나눔) · `FKB5`·`ETX4`(`⇧F12` 는 ⑶ 의 일곱 번째). 캡처 훅
+`MARU_FORCE_REFERENCES=1`(서버 진단이 한 번 온 뒤).
+
+**구현이 계약에 되먹인 것.** ① **로드 중 `content modified`** — 첫 캡처가 「참조를 찾지 못했습니다」였다: rust-analyzer 는 작업 공간을 읽는 동안 `-32801` 로 답한다.
+오류 코드를 응답에 실어(`error_code`) `-32801`·`-32802` 는 알리지 않고 400 ms 뒤 caret 자리로 되묻는다(최대 8회, 새 요청은 예약을 지운다). ② **제목과 보조
+텍스트가 겹쳤다**(캡처 실측 — `pub fn twice(p: &Point) -.zig-cache/…/util.rs:7`): 팔레트는 둘의 충돌을 안 보므로(§7.5) `build` 가 보조 텍스트를 먼저 28칸 꼬리
+(`…/util.rs:3`)로 맞추고 **가장 긴 보조 텍스트**만큼 모든 행의 제목 폭을 줄인다(최소 12). ③ 상대 경로의 기준은 `withinNavRoot` 와 같은 root(`git_repo` →
+파일 트리 root → 없음)다 — LSP 의 신뢰 root 와 다를 수 있다(캡처의 `.zig-cache/refrs/…` 가 그것).
+
+**적대적 검증(2026-09-21, 1~6회차 · 변이 43)**: 1회차 순수 17 → 0 · 2회차 제품 14 → 3 · 3회차 배선 8 → 2 · 4회차 재실행 8(컴파일 오류로 죽은 넷은 의미 변이로) → 2 ·
+5회차 2 → 0 · 6회차 폭 나눔 4 → 0. 판정자 보강 다섯, 등가 하나:
+- **B1** 낡은 seq 응답 받기(`seq == 0` 변이) — 두 요청이 **같은 모양**의 답을 내면 「첫 것을 받고 둘째를 버린」 변이도 `dropped_stale == 1` → 첫 요청은 `zz`(다섯·피커),
+  둘째는 `zzz`(하나·바로 이동)로 **결과 모양이 갈리게**.
+- **B6** 필터 뒤 선택을 안 되돌림 — 선택이 0 인 채 필터해 안 보였다 → `↓↓` 뒤 필터 → `selected == 0`.
+- **B9** 되묻기 간격 0 — 오류 직후 제품 tick 한 번에 요청이 안 나감(실제 경과가 300 ms 안일 때만 잰다 — `FLD` 판정자와 같은 축).
+- **B14** 새 요청이 되묻기 예약을 안 지움 — 예약이 선 채 `⇧F12` → 응답 뒤 600 ms 동안 요청 수가 그대로.
+- **C3** 알림이 피커를 안 닫음 — 피커가 열린 채 `showNotice` → 닫힘·행 놓임·`inputFocus == .notice`. (처음 세운 「팔레트 토글」은 제품 경로가 아니었다 — 토글은
+  `dismissMessageOverlays` 를 안 부른다.) **C8** 되묻기 tick 을 세션 tick 이 안 부름 — 판정자가 직접 부르던 것을 `session.tick()` 으로.
+- **B4**(root 밖 행도 연다) — `navigateTo` 의 `withinNavRoot` 가 같은 답을 내어 알림이 같다 → 등가, 방어로 두고 주석.
+- **check 되먹임**: `REF1` 의 대기가 계수 합을 손으로 센 절대 수였다 — 합이 이미 그 수를 넘으면 곧바로 돌아와 4-샤드(느린) 실행에서 응답 전에 단언이 돌았다
+  → 「보낸 요청이 전부 답을 받았다」(`received_references >= sent_references`)로 기다린다.
 
 ### 8.3 관측 가능성과 민감정보
 

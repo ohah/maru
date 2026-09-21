@@ -85,6 +85,7 @@ pub const lsp_client = @import("editor_lsp.zig");
 pub const hover_client = @import("editor_hover.zig");
 /// 정의로 이동(tooling §8.2c) — `textDocument/definition` → §5.2 `navigateTo`.
 pub const definition_client = @import("editor_definition.zig");
+pub const references_client = @import("editor_references.zig");
 /// 시그니처 힌트(tooling §8.2d) — 호버 박스를 같이 쓴다.
 pub const signature_client = @import("editor_signature.zig");
 pub const format_client = @import("editor_format.zig");
@@ -12277,6 +12278,304 @@ test "GOTO2 정의로 이동 — utf-16 서버에는 character 를 utf-16 단위
     try testing.expectEqual(@as(u64, 1), fx.session.editor_definition.navigated);
     // 가짜 서버는 요청한 character 를 줄 1 에 되돌린다: utf-16 이면 1 → `int y;` 의 offset 7+1 = 8. byte(3)로 보냈으면 10 이다.
     try testing.expectEqual(@as(usize, 8), term.rt.editor_selection.?.focus);
+}
+
+/// REF 판정자의 대기 — **보낸 요청이 전부 답을 받고** 기다리는 것이 없을 때까지(응답이 피커를 열었든 이동했든 알렸든 버렸든). 계수 합을 손으로
+/// 세지 않는다 — 합이 이미 그 수를 넘으면 곧바로 돌아와 느린 러너에선 응답 전에 단언이 돈다(`mise run check` 의 4-샤드 실행에서 실측).
+fn refSettled(fxp: *PaneFixture) bool {
+    const start = fxp.session.awakeMs();
+    while (fxp.session.awakeMs() - start < 3000) {
+        lsp_client.pump(fxp.session);
+        const s = fxp.session;
+        if (s.editor_lsp.received_references >= s.editor_lsp.sent_references and !s.editor_references.waiting) return true;
+        _ = usleep(2_000);
+    }
+    return false;
+}
+
+test "REF1 참조 피커 — ⇧F12 가 caret 자리의 참조를 묻고 응답이 피커를 연다(현재 파일 먼저·중복 하나·other.c 는 디스크 미리보기·root 밖 행); ↓·Enter 가 닫고 그 자리로 간다(같은 파일 caret · 다른 파일 새 Term · root 밖 알림); 필터; 하나면 바로 이동; 없으면 알림; 낡은 응답은 버린다 (제품 경계, §8.2l)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
+    var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const fz = try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake});
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);
+    defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const cz = try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root});
+    _ = setenv("MARU_CONFIG", cz.ptr, 1);
+    defer _ = unsetenv("MARU_CONFIG");
+    if (fx.session.config_path_buffer) |b| allocator.free(b);
+    fx.session.config_path_buffer = null;
+    fx.session.editor_lsp.auto_trust_answer = .allow;
+    // `zz` 가 세 번(줄 0·2·2) — 같은 줄 둘, 그리고 `zzz` 는 낱말이 달라 안 걸린다. other.c 에도 둘.
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "r.c", .data = "int zz;\nint zzz;\n  zz = zz + 1;\n" });
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "other.c", .data = "// other\nint q = zz;\nzz++;\n" });
+    const path = try std.fs.path.join(allocator, &.{ root, "r.c" });
+    defer allocator.free(path);
+    const saved_repo = fx.session.git_repo;
+    fx.session.git_repo = @constCast(root);
+    defer fx.session.git_repo = saved_repo;
+    const term = (try pane_ops.openFileTermInActivePane(fx.session, path, .text)).term;
+    fx.session.surface_initialized = true;
+    fx.session.backing_width_px = 1200;
+    fx.session.backing_height_px = 800;
+    const leaf = activeLeafRectForTest(fx.session) orelse return error.SkipZigTest;
+    const Ctx = struct { fx: *PaneFixture, term: *Term };
+    const ctx: Ctx = .{ .fx = &fx, .term = term };
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
+        fn f(c: Ctx) bool {
+            return c.term.rt.editor_diagnostics.lsp.items.len >= 1;
+        }
+    }.f));
+    const s = fx.session;
+
+    // ⑴ ⇧F12 — caret 5(`zz` 안) 에서 요청(seq 1). 응답 → 피커가 열리고 행은 현재 파일 3(줄 1·3·3, 중복 하나로) + other.c 2 = 5.
+    term.rt.editor_selection = .{ .anchor_start = 5, .anchor_end = 5, .focus = 5 };
+    try pressKey(&fx, .{ .function = 12 }, .{ .shift = true });
+    try testing.expect(s.editor_references.waiting);
+    try testing.expectEqual(@as(u32, 1), s.editor_references.waiting_seq);
+    try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_references);
+    try testing.expect(refSettled(&fx));
+    try testing.expect(s.chrome_host.reference_picker.open);
+    try testing.expectEqual(AppSession.InputFocus.reference_picker, s.inputFocus());
+    const rows = &s.reference_picker_rows;
+    try testing.expectEqual(@as(usize, 5), rows.all.items.len);
+    try testing.expectEqual(@as(usize, 5), rows.total);
+    try testing.expectEqualStrings(":1", rows.all.items[0].binding);
+    try testing.expectEqualStrings("int zz;", rows.all.items[0].title);
+    try testing.expectEqualStrings(":3", rows.all.items[1].binding);
+    try testing.expectEqualStrings("zz = zz + 1;", rows.all.items[1].title); // 앞 공백을 뗐다
+    try testing.expectEqual(@as(u32, 2), rows.all.items[1].character);
+    try testing.expectEqual(@as(u32, 7), rows.all.items[2].character); // 같은 줄 둘째
+    try testing.expectEqualStrings("other.c:2", rows.all.items[3].binding);
+    try testing.expectEqualStrings("int q = zz;", rows.all.items[3].title); // 디스크에서 읽은 미리보기(열려 있지 않은 파일)
+    try testing.expectEqualStrings("other.c:3", rows.all.items[4].binding);
+    {
+        var pb: [64]u8 = undefined;
+        const want = maru.i18n.format(&pb, maru.i18n.t(.ref_prompt), &.{.{ .s = "5" }});
+        try testing.expectEqualStrings(want, s.chrome_host.reference_picker.prompt); // 「참조 5개」/「5 references」
+    }
+    // 프레임에 실린다(팔레트 컴포넌트 경로) — 미리보기 줄의 글자(`;`)와 보조 텍스트의 `:` 가 오버레이에 있다.
+    {
+        var d = appendPaneFrame(s, leaf, term) orelse return error.EditorPaneDidNotDraw;
+        d.dl.deinit(allocator);
+        var prep = (try s.buildChromeOverlayPrep()) orelse return error.PickerNotDrawn;
+        defer prep.dl.deinit(allocator);
+        try testing.expect(prep.dl.cells.len > 0);
+        try testing.expect(drawnHasCodepoint(prep.dl, ';'));
+        try testing.expect(drawnHasCodepoint(prep.dl, ':'));
+    }
+    // ⑵ ↓ 두 번 → 셋째 행(줄 3 글자 7 = offset 8+8+7 = 23) · Enter → 닫히고 caret 이 거기로, 되돌아가기 표식은 5.
+    try pressKey(&fx, .arrow_down, .{});
+    try pressKey(&fx, .arrow_down, .{});
+    try testing.expectEqual(@as(usize, 2), s.chrome_host.reference_picker.selected);
+    try pressKey(&fx, .enter, .{});
+    try testing.expect(!s.chrome_host.reference_picker.open);
+    try testing.expectEqual(@as(u64, 1), s.editor_references.navigated);
+    try testing.expectEqual(@as(usize, 8 + 9 + 7), term.rt.editor_selection.?.focus); // "int zz;\n"=8, "int zzz;\n"=9, 글자 7
+    try testing.expectEqual(@as(usize, 0), rows.all.items.len); // 행을 놓았다
+    try testing.expectEqual(@as(usize, 5), s.editor_nav_back.items[s.editor_nav_back.items.len - 1].offset);
+    // ⑶ 다시 열고 필터 `other` → 2행 · Enter → other.c 가 새 Term 으로 열리고 줄 1 글자 8 에 caret. ⌃- 로 돌아온다.
+    term.rt.editor_selection = .{ .anchor_start = 5, .anchor_end = 5, .focus = 5 };
+    try pressKey(&fx, .{ .function = 12 }, .{ .shift = true });
+    try testing.expect(refSettled(&fx));
+    try testing.expect(s.chrome_host.reference_picker.open);
+    try pressKey(&fx, .arrow_down, .{});
+    try pressKey(&fx, .arrow_down, .{});
+    try testing.expectEqual(@as(usize, 2), s.chrome_host.reference_picker.selected);
+    for ("other") |ch| try pressKey(&fx, .{ .char = ch }, .{});
+    try testing.expectEqual(@as(usize, 2), rows.shown.items.len);
+    try testing.expectEqual(@as(usize, 0), s.chrome_host.reference_picker.selected); // 쿼리가 바뀌면 선택은 맨 위(적대적 B6)
+    try testing.expectEqualStrings("other.c:2", rows.shownRow(0).?.binding);
+    const terms_before = pane_ops.activePane(s).terms.items.len;
+    try pressKey(&fx, .enter, .{});
+    try testing.expect(refSettled(&fx));
+    const other = pane_ops.activePane(s).activeTerm();
+    try testing.expect(other != term);
+    try testing.expectEqual(terms_before + 1, pane_ops.activePane(s).terms.items.len);
+    try testing.expect(std.mem.endsWith(u8, other.rt.editor_path orelse "", "other.c"));
+    try testing.expectEqual(@as(usize, 9 + 8), other.rt.editor_selection.?.focus); // "// other\n"=9, `int q = zz;` 의 8
+    try pressKey(&fx, .{ .char = '-' }, .{ .control = true });
+    try testing.expect(pane_ops.activePane(s).activeTerm() == term);
+    // ⑷ root 밖 행(`REFOUT`) — 행은 서되(제목 「루트 밖」·보조 텍스트는 절대 경로) 고르면 알림, 이동 없음.
+    term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };
+    try testing.expect(insertText(s, term, "// REFOUT\n"));
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
+        fn f(c: Ctx) bool {
+            var b: [32]u8 = undefined;
+            const want = std.fmt.bufPrint(&b, "fake: {d}", .{c.term.rt.editor_lsp_version}) catch return false;
+            return c.term.rt.editor_diagnostics.lsp.items.len >= 1 and std.mem.eql(u8, c.term.rt.editor_diagnostics.lsp.items[0].message, want);
+        }
+    }.f));
+    term.rt.editor_selection = .{ .anchor_start = 15, .anchor_end = 15, .focus = 15 }; // 줄 1 `int zz;` 의 zz 안
+    s.dispatchAppAction(.goto_references); // 팔레트 명령 경로
+    try testing.expect(refSettled(&fx));
+    try testing.expect(s.chrome_host.reference_picker.open);
+    try testing.expectEqual(@as(usize, 6), rows.all.items.len);
+    const last = rows.all.items[5];
+    try testing.expect(last.outside);
+    try testing.expectEqualStrings(maru.i18n.t(.ref_outside_title), last.title);
+    try testing.expectEqualStrings("…onexistent-outside-root/x.c", last.binding); // 절대 경로는 28칸 꼬리로(앞 `…`)
+    s.chrome_host.reference_picker.selected = 5;
+    const focus_before = term.rt.editor_selection.?.focus;
+    try pressKey(&fx, .enter, .{});
+    try testing.expectEqual(@as(u64, 1), s.editor_references.notified_outside);
+    try testing.expect(s.chrome_host.notice.open);
+    try testing.expectEqual(focus_before, term.rt.editor_selection.?.focus);
+    s.chrome_host.notice.dismiss();
+    try removeMarkerHover(s, term, "// REFOUT\n");
+    // ⑸ 하나면 바로 이동 — `zzz` 는 한 번뿐: 목록 없이 caret 이 거기(줄 1 글자 4 = offset 12)로.
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
+        fn f(c: Ctx) bool {
+            var b: [32]u8 = undefined;
+            const want = std.fmt.bufPrint(&b, "fake: {d}", .{c.term.rt.editor_lsp_version}) catch return false;
+            return c.term.rt.editor_diagnostics.lsp.items.len >= 1 and std.mem.eql(u8, c.term.rt.editor_diagnostics.lsp.items[0].message, want);
+        }
+    }.f));
+    term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };
+    term.rt.editor_selection = .{ .anchor_start = 13, .anchor_end = 13, .focus = 13 };
+    const navigated_before = s.editor_references.navigated;
+    try pressKey(&fx, .{ .function = 12 }, .{ .shift = true });
+    try testing.expect(refSettled(&fx));
+    try testing.expect(!s.chrome_host.reference_picker.open);
+    try testing.expectEqual(navigated_before + 1, s.editor_references.navigated);
+    try testing.expectEqual(@as(usize, 8 + 4), term.rt.editor_selection.?.focus);
+    // ⑹ 없음(`REFNONE`) — 알림. ⑺ 낡은 응답 — 요청 둘을 연달아 보내면 첫 응답(seq 1)은 버려진다.
+    term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };
+    try testing.expect(insertText(s, term, "// REFNONE\n"));
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
+        fn f(c: Ctx) bool {
+            var b: [32]u8 = undefined;
+            const want = std.fmt.bufPrint(&b, "fake: {d}", .{c.term.rt.editor_lsp_version}) catch return false;
+            return c.term.rt.editor_diagnostics.lsp.items.len >= 1 and std.mem.eql(u8, c.term.rt.editor_diagnostics.lsp.items[0].message, want);
+        }
+    }.f));
+    term.rt.editor_selection = .{ .anchor_start = 16, .anchor_end = 16, .focus = 16 };
+    try pressKey(&fx, .{ .function = 12 }, .{ .shift = true });
+    try testing.expect(refSettled(&fx));
+    try testing.expectEqual(@as(u64, 1), s.editor_references.notified_none);
+    try testing.expect(s.chrome_host.notice.open);
+    s.chrome_host.notice.dismiss();
+    try removeMarkerHover(s, term, "// REFNONE\n");
+    try testing.expect(pumpLspUntil(&fx, 3000, ctx, struct {
+        fn f(c: Ctx) bool {
+            var b: [32]u8 = undefined;
+            const want = std.fmt.bufPrint(&b, "fake: {d}", .{c.term.rt.editor_lsp_version}) catch return false;
+            return c.term.rt.editor_diagnostics.lsp.items.len >= 1 and std.mem.eql(u8, c.term.rt.editor_diagnostics.lsp.items[0].message, want);
+        }
+    }.f));
+    // 첫 요청은 `zz`(다섯 — 피커), 둘째는 `zzz`(하나 — 바로 이동): 어느 응답이 살았는지가 **결과의 모양**으로 갈린다(적대적 B1 — 둘이 같은
+    // 모양이면 「첫 것을 받고 둘째를 버린」 변이도 `dropped_stale == 1` 이 된다).
+    term.rt.editor_selection = .{ .anchor_start = 5, .anchor_end = 5, .focus = 5 };
+    _ = references_client.gotoReferencesAtCaret(s);
+    const seq_a = s.editor_references.waiting_seq;
+    term.rt.editor_selection = .{ .anchor_start = 13, .anchor_end = 13, .focus = 13 };
+    _ = references_client.gotoReferencesAtCaret(s); // 둘째 요청이 첫째를 덮는다
+    try testing.expectEqual(seq_a + 1, s.editor_references.waiting_seq);
+    const navigated_stale = s.editor_references.navigated;
+    try testing.expect(refSettled(&fx));
+    try testing.expectEqual(@as(u64, 1), s.editor_references.dropped_stale); // 첫 응답은 버려졌다
+    try testing.expect(!s.chrome_host.reference_picker.open); // 둘째(하나)가 살아 목록 없이 갔다
+    try testing.expectEqual(navigated_stale + 1, s.editor_references.navigated);
+    try testing.expectEqual(@as(usize, 8 + 4), term.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 0), rows.all.items.len);
+    // ⑺ʹ 단일-오버레이 불변식 — 피커가 열린 채 알림이 뜨면(서버 재시작 등 어느 경로든 `showNotice`) 피커가 닫히고 행이 놓인다(적대적 C3).
+    term.rt.editor_selection = .{ .anchor_start = 5, .anchor_end = 5, .focus = 5 };
+    try pressKey(&fx, .{ .function = 12 }, .{ .shift = true });
+    try testing.expect(refSettled(&fx));
+    try testing.expect(s.chrome_host.reference_picker.open);
+    s.showNoticeKey(.symbol_picker_empty);
+    try testing.expect(s.chrome_host.notice.open);
+    try testing.expect(!s.chrome_host.reference_picker.open);
+    try testing.expectEqual(@as(usize, 0), rows.all.items.len);
+    try testing.expectEqual(AppSession.InputFocus.notice, s.inputFocus());
+    s.chrome_host.notice.dismiss();
+    // ⑻ 「지금은 못 답한다」(`REFBUSY` → -32801) — 알리지 않고 400 ms 뒤 caret 자리로 되묻는다; 표식을 빼면 그 되묻기가 피커를 연다.
+    const waitBusyError = struct {
+        fn f(fxp: *PaneFixture, t: *Term, c: Ctx) !void {
+            t.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };
+            try testing.expect(insertText(fxp.session, t, "// REFBUSY\n"));
+            try testing.expect(pumpLspUntil(fxp, 3000, c, struct {
+                fn g(cc: Ctx) bool {
+                    var b: [32]u8 = undefined;
+                    const want = std.fmt.bufPrint(&b, "fake: {d}", .{cc.term.rt.editor_lsp_version}) catch return false;
+                    return cc.term.rt.editor_diagnostics.lsp.items.len >= 1 and std.mem.eql(u8, cc.term.rt.editor_diagnostics.lsp.items[0].message, want);
+                }
+            }.g));
+            t.rt.editor_selection = .{ .anchor_start = 16, .anchor_end = 16, .focus = 16 }; // `int zz;` 의 zz
+            try pressKey(fxp, .{ .function = 12 }, .{ .shift = true });
+            try testing.expect(pumpLspUntil(fxp, 3000, c, struct {
+                fn g(cc: Ctx) bool {
+                    return cc.fx.session.editor_references.retries >= 1 and !cc.fx.session.editor_references.waiting;
+                }
+            }.g));
+        }
+    }.f;
+    const none_before = s.editor_references.notified_none;
+    try waitBusyError(&fx, term, ctx);
+    const t_err = s.awakeMs();
+    try testing.expectEqual(none_before, s.editor_references.notified_none); // 알리지 않았다
+    try testing.expect(!s.chrome_host.notice.open);
+    try testing.expect(s.editor_references.retry_at_ms > 0);
+    // 곧바로는 되묻지 않는다(400 ms 창 — 실제 경과가 창 안일 때만 잰다; 적대적 B9 「간격 0」).
+    const sent_at_err = s.editor_lsp.sent_references;
+    _ = try s.tick();
+    if (s.awakeMs() - t_err < 300) try testing.expectEqual(sent_at_err, s.editor_lsp.sent_references);
+    // ⑻ʹ 예약이 선 채 사용자가 다시 부르면 예약은 지워진다 — 응답 뒤 낡은 되묻기가 **한 번 더** 나가지 않는다(적대적 B14).
+    try removeMarkerHover(s, term, "// REFBUSY\n");
+    term.rt.editor_selection = .{ .anchor_start = 5, .anchor_end = 5, .focus = 5 };
+    try pressKey(&fx, .{ .function = 12 }, .{ .shift = true });
+    try testing.expectEqual(@as(u64, 0), s.editor_references.retry_at_ms);
+    const opened_b14 = s.editor_references.opened;
+    try testing.expect(refSettled(&fx));
+    try testing.expectEqual(opened_b14 + 1, s.editor_references.opened);
+    try testing.expectEqual(@as(u64, 0), s.editor_references.retried);
+    {
+        const sent_open = s.editor_lsp.sent_references;
+        const t0 = s.awakeMs();
+        while (s.awakeMs() - t0 < 600) {
+            _ = try s.tick();
+            _ = usleep(10_000);
+        }
+        try testing.expectEqual(sent_open, s.editor_lsp.sent_references); // 낡은 예약이 나가지 않았다
+        try testing.expectEqual(@as(u64, 0), s.editor_references.retried);
+    }
+    try pressKey(&fx, .escape, .{});
+    // ⑻ʺ 되묻기 자체 — 오류 뒤 표식을 빼면 400 ms 뒤 caret 자리로 다시 물어 피커가 열린다. **제품 tick 으로** 기다린다(적대적 C8).
+    try waitBusyError(&fx, term, ctx);
+    try removeMarkerHover(s, term, "// REFBUSY\n"); // 되묻기 전에 표식을 뺀다(caret 은 0 으로 — 되묻기는 caret 자리)
+    term.rt.editor_selection = .{ .anchor_start = 5, .anchor_end = 5, .focus = 5 };
+    const opened_before = s.editor_references.opened;
+    {
+        const t0 = s.awakeMs();
+        while (s.awakeMs() - t0 < 3000 and s.editor_references.opened == opened_before) {
+            _ = try s.tick();
+            _ = usleep(5_000);
+        }
+    }
+    try testing.expectEqual(opened_before + 1, s.editor_references.opened);
+    try testing.expectEqual(@as(u64, 1), s.editor_references.retried);
+    try testing.expect(s.chrome_host.reference_picker.open);
+    try pressKey(&fx, .escape, .{});
+    // 상한 — 표식을 둔 채 부르면 8번 되묻고 알린다.
+    try waitBusyError(&fx, term, ctx);
+    {
+        const t0 = s.awakeMs();
+        while (s.awakeMs() - t0 < 8000 and s.editor_references.notified_none == none_before) {
+            _ = try s.tick();
+            _ = usleep(5_000);
+        }
+    }
+    try testing.expectEqual(none_before + 1, s.editor_references.notified_none);
+    try testing.expectEqual(@as(u8, references_client.max_retries), s.editor_references.retries);
+    try testing.expectEqual(@as(u64, 1 + references_client.max_retries), s.editor_references.retried);
+    try testing.expect(s.chrome_host.notice.open);
 }
 
 test "GOTO1 정의로 이동 — F12·⌘클릭이 서버 응답의 첫 항목으로 caret 을 옮기고 되돌아가기 표식을 쌓는다; ⌃-/⌃⇧- 로 뒤로·앞으로; 다른 파일은 열어서; root 밖·없음은 알림; 낡은 응답은 버린다 (제품 경계, §8.2c·§5.2)" {

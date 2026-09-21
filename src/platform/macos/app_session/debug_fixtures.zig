@@ -1227,6 +1227,20 @@ pub fn applyForcedEditorGotoDef(self: *AppSession) void {
     if (editor_ops.definition_client.gotoDefinitionAtCaret(self)) self.debug_diff_caret_keys_done = true;
 }
 
+/// MARU_FORCE_REFERENCES=1 — caret 자리에서 `goto_references` 를 부른다(캡처 전용, tooling §8.2l). 서버가 뜨기 전에는 요청이 안 나가므로
+/// 매 프레임 되풀이하고, 피커가 열리거나 알림이 나면 손을 뗀다. caret 훅의 래치는 요청이 나간 순간 세운다(정의로 이동 훅과 같은 이유).
+pub fn applyForcedReferences(self: *AppSession) void {
+    if (std.c.getenv("MARU_FORCE_REFERENCES") == null) return;
+    const st = &self.editor_references;
+    if (st.opened + st.navigated + st.notified_none + st.notified_outside > 0) return;
+    if (self.chrome_host.notice.open) self.chrome_host.notice.dismiss();
+    if (st.waiting) return;
+    // 서버가 진단을 한 번 낸 뒤에 묻는다 — rust-analyzer 는 로드가 끝나기 전엔 빈 답을 내므로(§8.2j 실측과 같은 창) 그 전에 물으면
+    // 「참조를 찾지 못했습니다」가 찍힌다(첫 캡처 실측).
+    if (self.editor_lsp.received_diagnostics == 0) return;
+    if (editor_ops.references_client.gotoReferencesAtCaret(self)) self.debug_diff_caret_keys_done = true;
+}
+
 /// MARU_FORCE_PARAM_HINTS=1 — caret 자리에서 `trigger_parameter_hints` 를 부른다(캡처 전용, tooling §8.2d). 서버가 뜨기 전에는 요청이
 /// 안 나가므로 열릴 때까지 매 프레임 되풀이한다. 작업 공간 복원 알림은 먼저 내린다(hover 훅과 같은 이유).
 pub fn applyForcedParamHints(self: *AppSession) void {

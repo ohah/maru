@@ -48,6 +48,11 @@ pub const HostAction = union(enum) {
     symbol_picker_accept,
     symbol_picker_query_changed,
     symbol_picker_selection_changed,
+    /// 참조 피커(tooling §8.2l) — 팔레트의 세 번째 소비자, 같은 네 결과.
+    reference_picker_close,
+    reference_picker_accept,
+    reference_picker_query_changed,
+    reference_picker_selection_changed,
     context_menu_accept, // 우클릭 메뉴 항목 선택 — platform이 selected→대상 액션(rename) 해석·실행
     context_menu_close,
     context_menu_selection_changed,
@@ -89,6 +94,8 @@ pub const ChromeHost = struct {
     /// 쓰되 State 는 따로 둔다** — 명령 카탈로그 필터와 심볼 필터는 무관한 책임이라 모드 플래그로
     /// 가르지 않는다(project-rules.md §구조와 파일 분리). 오버레이당 배관은 `modalInputRole` 한 줄이다.
     symbol_picker: palette.State = .{},
+    /// 참조 피커(tooling §8.2l) — 심볼 피커와 같은 컴포넌트, 오버레이 State 는 각자(§7.5 「오버레이 State 각자」).
+    reference_picker: palette.State = .{},
     context_menu: context_menu.State = .{},
     /// 편집기 선택 헬퍼(NSH — docs/send-selection-to-agent.md §6.2). **같은 컴포넌트, 다른 State**
     /// (symbol_picker 선례) — 한 줄짜리 메뉴라 박스·clamp·hit-test 가 그대로 맞고, 새 팝업 UI 를
@@ -116,6 +123,7 @@ pub const ChromeHost = struct {
         self.find.deinit(allocator);
         self.palette.deinit(allocator);
         self.symbol_picker.deinit(allocator);
+        self.reference_picker.deinit(allocator);
     }
 
     /// 각 컴포넌트 view를 호출해 (layer, ops) = ChromeDraw를 arena에 빌드한다. 빈(닫힌) 컴포넌트는 건너뛴다.
@@ -163,6 +171,19 @@ pub const ChromeHost = struct {
 
     /// 심볼 피커 — **같은 컴포넌트, 다른 State**(native-editor-ui.md §7.5). 행을 platform 이 주입해야
     /// 하는 것도 팔레트와 같아서 generic `collectDraws` 로는 못 부른다.
+    pub fn collectReferencePickerDraws(
+        self: *ChromeHost,
+        rows: []const palette.Row,
+        p: props.ChromeProps,
+        tk: *const tokens.Tokens,
+        arena: std.mem.Allocator,
+        out: *std.ArrayList(draw.ChromeDraw),
+    ) !void {
+        var ops: std.ArrayList(draw.Op) = .empty;
+        try palette.view(&self.reference_picker, rows, p, tk, arena, &ops);
+        if (ops.items.len > 0) try out.append(arena, .{ .layer = palette.layer, .ops = ops.items });
+    }
+
     pub fn collectSymbolPickerDraws(
         self: *ChromeHost,
         rows: []const palette.Row,
@@ -361,6 +382,14 @@ pub const ChromeHost = struct {
                         .accept => .palette_accept,
                         .query_changed => .palette_query_changed,
                         .selection_changed => .palette_selection_changed,
+                    };
+                }
+                if (self.reference_picker.open) {
+                    return switch (palette.handle(allocator, k, &self.reference_picker)) {
+                        .close => .reference_picker_close,
+                        .accept => .reference_picker_accept,
+                        .query_changed => .reference_picker_query_changed,
+                        .selection_changed => .reference_picker_selection_changed,
                     };
                 }
                 if (self.symbol_picker.open) {

@@ -57340,6 +57340,39 @@ test "captureWorkspaceTab: 활성 브라우저가 마지막 탭이어도 active-
     try std.testing.expectEqual(@as(usize, 1), parsed.workspace.windows[0].tabs[0].panes[0].file_terms.len);
 }
 
+test "U1g captureWorkspaceTab: 이름 없는 편집기는 셸로 저장되지 않고 앞자리로도 세지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    const saved_counter = app_runtime.untitled_docs;
+    defer app_runtime.untitled_docs = saved_counter;
+    app_runtime.untitled_docs = .{};
+
+    // pane = [터미널, untitled(편집기), 터미널(활성·마지막)]
+    session.dispatchAppAction(.new_editor_tab);
+    session.dispatchAppAction(.new_term);
+    const pane = pane_ops.activePane(session);
+    try std.testing.expectEqual(@as(usize, 3), pane.terms.items.len);
+    try std.testing.expectEqual(@as(usize, 2), pane.active_term);
+    try std.testing.expect(pane.terms.items[1].kind == .editor and pane.terms.items[1].file_entry == null);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const wtab = try tab_ops.captureWorkspaceTab(session, arena.allocator(), tab_ops.activeTab(session));
+    const wp = wtab.panes[0];
+    // ★ 옛 코드: 편집기 Term 이 터미널 갈래로 흘러 **셸 surface 로 저장**됐다 — 복원 때 로그인 셸이 열린다.
+    try std.testing.expectEqual(@as(usize, 2), wp.surfaces.len); // 터미널 둘만
+    try std.testing.expectEqual(@as(usize, 0), wp.file_terms.len);
+    // ★ 그리고 앞자리로 세지도 않는다 — 세면 활성이 한 칸 밀려 복원 후 엉뚱한 탭이 활성이 된다.
+    try std.testing.expectEqual(@as(usize, 1), wp.active_term);
+    // 저장된 surface 가 정말 터미널인지(빈 command = 기본 셸 placeholder 가 아니라 실제 Term)까지 본다 —
+    // 개수만 세면 「편집기를 싣고 터미널 하나를 빠뜨린」 변이가 살아남는다.
+    try std.testing.expect(wp.surfaces.len == 2);
+}
+
 // [4e review 3] captureWorkspaceTab: web Term은 capture서 스킵(복원 시 셸 오spawn 방지)하고, web-only pane은 기본 셸
 // placeholder 1개를 실어 빈 pane(→EmptyPane 전체 복원 중단)을 막는다. 실 init/spawn 경로라 게이트.
 test "captureWorkspaceTab: web Term 스킵 + web-only pane은 셸 placeholder" {

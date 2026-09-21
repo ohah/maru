@@ -20,7 +20,10 @@ const settings_ops = @import("settings.zig");
 const term_ops = @import("term.zig");
 const lsp = maru.session.editor.lsp;
 
-/// 메뉴 항목 상한 — `context_menu_items_buf` 의 크기.
+/// 메뉴 항목 상한. **버퍼 크기가 아니라 이 메뉴가 스스로 정한 상한**이다(버퍼는 `ctx_menu_buf_len`
+/// 이고 이보다 크다). 예전엔 `ctx_menu_count` 가 두 뜻을 겸해 「버퍼 크기」라고 적혀 있었는데,
+/// 2026-09-21 에 리소스 행을 늘리려고 그 상수를 키웠더니 이 메뉴의 항목 수까지 따라 커져
+/// 판정자가 빨개졌다 — 그래서 뜻을 갈랐다. 여기는 탭 메뉴와 같은 수를 상한으로 쓴다.
 pub const max_items: usize = app_session_mod.ctx_menu_count;
 
 pub const Owned = struct {

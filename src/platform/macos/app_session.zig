@@ -965,9 +965,23 @@ pub const scrollbar_alpha_full: u8 = 0xFF; // 활성/hover/드래그
 const resource_poll_interval_ms: u32 = 1000;
 /// 한 Term 트리에서 가져올 표본 상한. 폭주 방어 — fork 폭탄이나 깊은 트리가 tick을 붙잡지 않게 한다.
 const max_resource_samples_per_term: usize = 48;
+/// 한 번의 폴링이 담을 수 있는 **전체** 표본 수. 예전에는 `pollResourceUsage` 안에 `* 4`(192)로
+/// 박혀 있었고, 그 상한에 닿으면 뒤쪽 탭은 표본을 아예 못 받아 **총합에서도 빠졌다** — 화면에는
+/// 「합이 안 맞는다」로만 보인다(2026-09-21 실측: 머리글 17.4 GB vs 보이는 행 합 2.5 GB).
+///
+/// **이름을 붙여 단일 출처로 둔다.** 배열과 판정자가 같은 상수를 봐야 한 쪽만 줄었을 때 빨개진다 —
+/// 적대적 검증에서 실제로 산술을 두 번 적어 두는 바람에 배열을 되돌려도 판정자가 통과했다.
+const max_resource_samples: usize = max_resource_rows * 16;
 /// 리소스 팝오버가 띄우는 최대 행 수(= 최대 Term 수). 라벨은 공유 버퍼(`context_menu_items_buf`)를 쓰므로
-/// 그 크기를 넘으면 버퍼 밖에 쓴다 — 아래 comptime이 그걸 막는다. 넘치는 탭은 무거운 순 상위만 보인다.
-const max_resource_rows: usize = 12;
+/// 그 크기를 넘으면 버퍼 밖에 쓴다 — 아래 comptime이 그걸 막는다.
+///
+/// **12 였다.** 그런데 자르는 자리가 정렬 **앞**이라, 13 번째 탭이 아무리 커도 보이지 않았다 —
+/// 2026-09-21 실측: 총합 17.4 GB 인데 보이는 행의 합은 2.5 GB 였고, 없어진 15 GB 는 13 번째 이후
+/// 탭들이었다. 사용자에게는 「합이 안 맞는다」로만 보인다.
+///
+/// 상한을 창 하나가 현실적으로 가질 수 있는 Term 수까지 연다. 화면 높이를 넘으면 그때 잘리는데,
+/// 그 자름은 **정렬 뒤**라 큰 것부터 남고 남은 몫은 꼬리 행이 합계로 보여 준다.
+const max_resource_rows: usize = 64;
 /// 한 행 문자열의 바이트 상한. `탭 › 팬`(UTF-8, 한 글자 최대 3바이트) + 고정 폭 숫자 + 구분자.
 const resource_row_max_bytes: usize = 256;
 /// 행에서 **이름이 쓸 수 있는 표시 칸**. 숫자 열은 고정 폭이라(§4.1) 이름만 예산을 먹는다. 넘치면 EAW 절단.
@@ -3019,18 +3033,30 @@ pub const BaseMenuRow = union(enum) {
     branch: usize,
 };
 const max_base_menu_rows: usize = max_branch_menu_items + 1;
-pub const ctx_menu_count: usize = ctx_menu_group_promote + 1; // 워크스페이스 메뉴 최대 항목 수(버퍼 크기 단일 출처, 빼기·승격 슬롯 포함)
+/// **탭 우클릭 메뉴의 항목 수.** 슬롯 번호(`ctx_menu_group_promote` 등)가 이 수 안에 들어가고,
+/// 판정자가 실제로 그리는 항목 수와 이 값을 대조한다 — 그러니 버퍼 크기로 겸용하면 안 된다.
+/// 2026-09-21 에 리소스 행 상한을 늘리려고 이 값을 키웠다가, 탭 메뉴가 그리는 25 개와 어긋나
+/// 판정자가 `expected 68, found 25` 로 빨개졌다. 두 뜻을 한 이름에 얹은 것이 결함이었다.
+pub const ctx_menu_count: usize = ctx_menu_group_promote + 1;
+
+/// 공유 라벨 버퍼(`context_menu_items_buf`)의 **크기**. 세 메뉴가 이 버퍼를 나눠 쓴다 — 탭 우클릭,
+/// 리소스 팝오버, 에이전트 팝오버 — 그래서 셋 중 **가장 큰 것**이어야 한다. 항목 수가 아니라
+/// 그릇 크기라, 어느 메뉴가 커져도 다른 메뉴의 계약을 흔들지 않는다.
+pub const ctx_menu_buf_len: usize = @max(
+    @max(ctx_menu_count, max_agent_rows + agent_header_rows),
+    max_resource_rows + resource_header_rows + resource_footer_rows,
+);
 comptime {
     // 라벨 버퍼는 **공유**다(`context_menu_items_buf`). 그룹 메뉴엔 이 가드가 있었는데 브랜치·리소스엔 없었다 —
     // 넘치면 버퍼 밖에 쓴다. 상한을 늘릴 때 여기서 멈추게 한다.
-    if (max_branch_menu_items > ctx_menu_count) @compileError("branch menu exceeds context_menu_items_buf");
+    if (max_branch_menu_items > ctx_menu_buf_len) @compileError("branch menu exceeds context_menu_items_buf");
     // 기준 목록은 브랜치 목록에 `기본값` 줄 하나가 더 붙는다 — 그 하나 때문에 넘칠 수 있고, 넘치면
     // 조용히 잘리는 게 아니라 버퍼 밖을 쓴다(브랜치 목록이 같은 이유로 여기 서 있다).
-    if (max_base_menu_rows > ctx_menu_count) @compileError("base menu exceeds context_menu_items_buf");
+    if (max_base_menu_rows > ctx_menu_buf_len) @compileError("base menu exceeds context_menu_items_buf");
     // 라벨 슬라이스는 머리글 2줄 + 탭 행 + 공유 행 둘이 **함께** 들어간다 — 행만 재면 4만큼 낙관적이다.
-    if (max_resource_rows + resource_header_rows + resource_footer_rows > ctx_menu_count)
+    if (max_resource_rows + resource_header_rows + resource_footer_rows > ctx_menu_buf_len)
         @compileError("resource rows + headers + shared rows exceed context_menu_items_buf");
-    if (max_agent_rows + agent_header_rows > ctx_menu_count)
+    if (max_agent_rows + agent_header_rows > ctx_menu_buf_len)
         @compileError("agent rows + headers exceed context_menu_items_buf");
 }
 
@@ -3045,7 +3071,7 @@ pub const ctx_group_menu_ungroup: usize = ctx_group_menu_pin + 1; // 그 다음:
 pub const ctx_group_menu_color_first: usize = ctx_group_menu_ungroup + 1; // 그룹 색 프리셋 시작(카드 메뉴의 group_color_first와 같은 라벨/팔레트)
 comptime {
     // 그룹 헤더 메뉴 항목 최대치(Rename + 그룹 풀기 + 색 프리셋)가 공유 버퍼(ctx_menu_count 크기)를 넘지 않는지 확인.
-    if (ctx_group_menu_color_first + tab_group_color_labels.len > ctx_menu_count) @compileError("group header menu exceeds context_menu_items_buf");
+    if (ctx_group_menu_color_first + tab_group_color_labels.len > ctx_menu_buf_len) @compileError("group header menu exceeds context_menu_items_buf");
 }
 
 /// orderedRemove(removed_index)로 한 항목을 뺀 뒤, active 인덱스가 같은 논리적 항목을 계속 가리키도록 보정한다.
@@ -6818,7 +6844,7 @@ pub const AppSession = struct {
     // 컨텍스트 메뉴 항목(동적, 대상 타입·pin 상태에 따라). show가 buildContextMenuItems로 채우고 itemAt/draws/accept가
     // contextMenuItems로 같은 리스트를 본다(보이는 항목 == 클릭/실행되는 항목). 라벨은 정적 리터럴이라 소유 불요.
     // 크기 = 최대 항목 수(Rename + Pin + 배경·바·그룹 색 프리셋 + 그룹 묶기/풀기 = ctx_menu_count)로 정확히 잡아 buf 오버플로를 컴파일 타임에 막는다.
-    context_menu_items_buf: [ctx_menu_count][]const u8 = undefined,
+    context_menu_items_buf: [ctx_menu_buf_len][]const u8 = undefined,
     context_menu_items_len: usize = 0,
     // 사이드바 탭 드래그 재정렬 상태. down이 사이드바 슬롯(✕ 아님)에서 시작하면 active=true가 되고, 이후 drag(kind 2)는
     // **비커밋 고스트 프리뷰**(SG8d — refreshDragPreview로 sidebar_preview_rows에 투영, self.tabs 불변), up(kind 3)이 마지막
@@ -19266,7 +19292,9 @@ pub const AppSession = struct {
             return;
         }
 
-        var samples: [max_resource_samples_per_term * 4]maru.session.resource_usage.Sample = undefined;
+        // **행 수와 함께 큰다.** 예전엔 `* 4`(192 개)였는데, 그 상한에 닿으면 뒤 탭은 표본을 아예 못 받아
+        // **총합에서도 빠졌다** — 「합이 안 맞는다」의 둘째 원인이고, 행만 늘리면 안 고쳐진다.
+        var samples: [max_resource_samples]maru.session.resource_usage.Sample = undefined;
         var groups: [max_resource_rows + resource_footer_rows]maru.session.resource_usage.Group = undefined;
         var n: usize = 0;
         var group_n: usize = 0;
@@ -43148,6 +43176,36 @@ test "복원 교착: 탭 없는 창은 라이브에선 무동작, deferred 에�
     session.surface_initialized = false;
     defer session.surface_initialized = true;
     try std.testing.expectError(error.EmptyWorkspace, workspace_ops.applyWorkspaceWindow(session, empty));
+}
+
+// 리소스 팝오버의 **합이 맞는지**를 못 박는다. 2026-09-21 실측: 머리글은 17.4 GB 인데 보이는 행의
+// 합은 2.5 GB 였다. 사용자에게는 「합이 안 맞는다」로만 보이고, 어디가 새는지는 화면에 없었다.
+//
+// 새던 자리는 둘이다.
+//   ⑴ **행 상한(12)이 정렬보다 앞에서 잘랐다.** 탭 순서로 앞 12 개만 그룹이 되고 그 12 개 안에서만
+//      무거운 순으로 정렬했다 — 13 번째의 GB 짜리가 6 MB 짜리에 밀려 안 보였다.
+//   ⑵ **표본 배열(192)이 먼저 찼다.** 상한에 닿은 뒤의 탭은 표본을 못 받아 **총합에서도 빠졌다**.
+//      행만 늘리면 이쪽은 안 고쳐진다.
+//
+// 그래서 이 판정자는 「보이는 행 수」가 아니라 **버퍼가 탭을 담을 수 있는가**를 잰다.
+test "리소스 팝오버: 행 상한과 표본 상한이 창의 Term 수를 담는다" {
+    // ① 행 상한은 공유 라벨 버퍼에 갇혀 있었다. 이제 버퍼가 행 상한을 따라간다 — 갇힘이 되살아나면
+    //    `ctx_menu_count` 가 작아져 여기서 빨개진다(그리고 파일 아래 comptime 가드가 컴파일을 막는다).
+    try std.testing.expect(ctx_menu_buf_len >= max_resource_rows + resource_header_rows + resource_footer_rows);
+
+    // ② 탭 우클릭 메뉴의 슬롯 번호는 그대로여야 한다 — 버퍼를 키우면서 인덱스 계약을 흔들면
+    //    엉뚱한 줄이 눌린다. 가장 큰 슬롯이 여전히 버퍼 안이다.
+    // 탭 메뉴의 슬롯 번호는 **그 메뉴의 항목 수** 안에 있어야 한다 — 버퍼를 키운다고 이 계약이
+    // 늘어나면 안 된다(그 겸용이 바로 이번 회귀의 원인이었다).
+    try std.testing.expect(ctx_menu_group_promote < ctx_menu_count);
+    try std.testing.expect(ctx_menu_count <= ctx_menu_buf_len);
+
+    // ③ 표본 배열이 **행 상한 × Term 당 상한**을 감당하지 못하면, 뒤쪽 탭이 총합에서 조용히 빠진다.
+    //    `pollResourceUsage` 의 배열과 **같은 산술**을 여기 적어 둔다 — 한쪽만 줄면 갈린다.
+    try std.testing.expect(max_resource_samples >= max_resource_rows);
+    // 한 Term 이 트리 상한을 다 써도 최소 이만큼의 Term 은 온전히 담긴다.
+    const terms_fully_covered = max_resource_samples / max_resource_samples_per_term;
+    try std.testing.expect(terms_fully_covered >= 20);
 }
 
 test "복원 교착: 죽은 host 만 가리키는 파일을 열어도 다음 저장이 막히지 않는다" {

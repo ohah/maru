@@ -4077,7 +4077,7 @@ pub fn build(b: *std.Build) void {
                     .{ .name = "syntax", .module = syntax_mod },
                 },
             }),
-            .filters = &.{ "복원 교착", "종료 placeholder 복원" },
+            .filters = &.{ "복원 교착", "종료 placeholder 복원", "리소스 팝오버" },
         });
         restore_accounting_tests.root_module.link_libc = true;
         for ([_][]const u8{ "AppKit", "Metal", "MetalKit", "QuartzCore", "CoreText", "CoreGraphics", "ImageIO" }) |fw| {
@@ -4088,8 +4088,8 @@ pub fn build(b: *std.Build) void {
             .flags = &.{"-fobjc-arc"},
         });
         const run_restore_accounting = b.addRunArtifact(restore_accounting_tests);
-        run_restore_accounting.setEnvironmentVariable("MARU_TEST_KEEP_ONLY_PREFIX", "app_session.test.복원 교착,app_session.test.종료 placeholder 복원");
-        run_restore_accounting.addArg("--maru-expect-passed=3");
+        run_restore_accounting.setEnvironmentVariable("MARU_TEST_KEEP_ONLY_PREFIX", "app_session.test.복원 교착,app_session.test.종료 placeholder 복원,app_session.test.리소스 팝오버");
+        run_restore_accounting.addArg("--maru-expect-passed=4");
         run_restore_accounting.setCwd(b.path("."));
         b.step("test-restore-accounting", "Restore must not latch on tombstone demotion (reboot deadlock)").dependOn(&run_restore_accounting.step);
         test_step.dependOn(&run_restore_accounting.step);

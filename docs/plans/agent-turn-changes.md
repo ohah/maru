@@ -29,7 +29,7 @@
 통째로 사라진다.
 
 - **자료구조**: `AppSession.turn_ring`(+`turn_ring_repo`) 한 쌍 → `turn_rings: <세션 id> → Ring`.
-  Term은 아무것도 소유하지 않는다(자기 신원을 조회할 뿐 — 신원 캐시는 이미 `term.agent_transcript`에 있다).
+  Term은 아무것도 소유하지 않는다(자기 신원을 조회할 뿐 — 신원 캐시는 이미 `term.hook.transcript`에 있다).
 - **신원 소스는 훅 payload 하나다.** 모든 훅 이벤트가 `session_id`를 싣고, 특히 턴 경계인 `Stop`이 실어 오므로
   **스냅샷을 찍는 그 순간 신원이 손에 있다**(실측 2026-08-23).
 - **관측 모드에서는 스냅샷을 찍지 않는다.** 신원이 없어 어차피 링에 못 넣는데 찍으면 git 프로세스만 공짜로

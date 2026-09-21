@@ -153,7 +153,7 @@ Term 의 알림을 버리되 `pending` 은 비운다(안 비우면 드레인 루
   진행중 라벨은 `tool_name` + **`tool_input.description`**(사람이 읽는 설명, 실측 확인)에서
   온다. 명령 원문은 길고 민감해 배지에 쓰지 않는다 — 관측 모드의 foreground
   process 라벨과 **같은 자리**에 그리되 소스는 섞지 않는다.
-  **구현됨**: `agent_hook_mode.labelFor`(순수 규칙)가 세우고 지우는 자리를 정하고, `Term.agent_hook_tool`이
+  **구현됨**: `agent_hook_mode.labelFor`(순수 규칙)가 세우고 지우는 자리를 정하고, `Term.hook.tool`이
   들고, 사이드바의 running 상태줄이 `"▁▅▇▃ 진행중 · <세부>"`로 그린다. 세부가 없으면(관측 모드거나 아직
   도구를 안 부른 구간) **예전과 바이트가 같은** 문자열이다. 자식의 도구 호출은 부모 줄을 갈아 끼우지
   않고(`agent_id`), 턴 경계(`Stop`·`StopFailure`·`UserPromptSubmit`·`SessionStart`)에서 비운다.

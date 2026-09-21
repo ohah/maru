@@ -2,7 +2,7 @@
 //!
 //! 지금 하는 일은 하나다: **활성 pane 의 트랜스크립트를 훑어 이미지가 몇 장인지 안다.** 썸네일도 격자도
 //! 아직 없다(IG3·IG4). 이 슬라이스의 값어치는 사슬이 실제로 이어지는지 보는 것이다 —
-//! 훅 `transcript_path` → `Term.agent_image_source` → 스캔 → 화면.
+//! 훅 `transcript_path` → `Term.hook.image_source` → 스캔 → 화면.
 //!
 //! **스캔은 워커가 한다**(계약 §4.1.1). 처음에는 여기서 동기로 훑었는데, 제품 스캐너로 최악 파일을 재니
 //! 1,680 MB / **3,599.9 ms** 였다 — 프레임 예산의 216배다. main actor 는 요청을 걸고 완료본을 가져갈 뿐이다.
@@ -968,8 +968,8 @@ fn activeSourcePath(self: *AppSession) ?[]const u8 {
     // 훅이 아직 한 번도 안 돌았으면 자식 env 로 확정해 둔 파일로 메운다(추측이 아니다 — 사이드바
     // 대화 라벨이 읽고 있는 그 파일이다). 훅이 나중에 오면 그 값이 이긴다.
     agent_ops.adoptFallbackImageSource(self, term);
-    if (term.agent_image_source.isEmpty()) return null;
-    return term.agent_image_source.path();
+    if (term.hook.image_source.isEmpty()) return null;
+    return term.hook.image_source.path();
 }
 
 /// 이 트랜스크립트가 재개/fork 라면 **부모까지** 잇는다(계약 §3.3).

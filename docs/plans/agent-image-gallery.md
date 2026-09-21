@@ -24,7 +24,7 @@
 | IG0 | ✅ 완료 — 손-미러 제거 + 컴파일 게이트 확정(§2) |
 | IG1-a 인덱스 코어 | ✅ 완료 — `src/session/agent_image_index.zig`, 단위 13개 |
 | IG1-b 도크 뷰 껍데기 | ✅ 완료 — 4번째 슬롯·아이콘·기본 폭. 아이콘은 **이미 있었다**(`icons.Icon.image`) |
-| IG1-c pane↔파일 매핑 | ✅ 완료 — `Term.agent_image_source` + 훅 `transcript_path` 채택 |
+| IG1-c pane↔파일 매핑 | ✅ 완료 — `Term.hook.image_source`(RA7 조각 1 뒤 이름) + 훅 `transcript_path` 채택 |
 | IG1-d 뷰에 잇기 | ✅ 완료 — 사슬(훅→소스→스캔→화면)이 이어졌다. 다만 **격자 사각형이 아니라 문구 한 줄**이다(아래) |
 | **IG1-e 스캔 워커** | ✅ 완료 — `agent_image_scan_backend.zig`(refcount·generation·청크별 취소) + tick 수확 |
 | **IG3-a** clamp 계산 | ✅ 완료 — `session/image_scale.zig`(텍스처를 만들지 않는 순수 함수, 단위 11개) |

@@ -2094,7 +2094,7 @@ pub fn archiveSessionHasLiveMapping(self: *const AppSession, detail: *const Inli
             .claude => term.agent_kind == .claude,
             .codex => term.agent_kind == .codex,
         };
-        if (provider_matches and std.mem.eql(u8, term.agent_transcript.identity(), detail.record.parsed.session_id)) return true;
+        if (provider_matches and std.mem.eql(u8, term.hook.transcript.identity(), detail.record.parsed.session_id)) return true;
     };
     return false;
 }
@@ -2109,7 +2109,7 @@ pub fn focusLiveArchiveSession(self: *AppSession, detail: *const InlineArchiveDe
             .claude => term.agent_kind == .claude,
             .codex => term.agent_kind == .codex,
         };
-        if (!provider_matches or !std.mem.eql(u8, term.agent_transcript.identity(), detail.record.parsed.session_id)) continue;
+        if (!provider_matches or !std.mem.eql(u8, term.hook.transcript.identity(), detail.record.parsed.session_id)) continue;
         _ = tab_ops.switchTab(self, tab_index);
         _ = pane_ops.focusPaneByPtr(self, pane);
         self.focusTerm(term_index);

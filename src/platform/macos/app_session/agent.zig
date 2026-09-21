@@ -1456,9 +1456,14 @@ fn reconcileProviderHooks(
     const log_dir = agentHookLogDir(a) orelse return;
     const remote_log_dir = remoteAgentHookLogDir(a) orelse return;
     if (intent == .ensure) {
-        // 캐시 base 자체가 아직 없을 수 있다(새 사용자·캐시를 비운 뒤). `mkdir`은 부모를 만들지 않으므로 둘을 차례로 만든다.
+        // 캐시 base 자체가 아직 없을 수 있다(새 사용자·캐시를 비운 뒤). `mkdir`은 부모를 만들지 않으므로 차례로 만든다 —
+        // base 가 `<home>/.cache/maru` 라(RA8, HOME 규칙) `.cache` 부터다(XDG 시절엔 XDG 디렉터리가 이미 있었다).
         const cache_base = hookCacheBase(a) orelse return;
         const base_z = std.fmt.allocPrintSentinel(a, "{s}", .{cache_base}, 0) catch return;
+        if (std.fs.path.dirname(cache_base)) |dot_cache| {
+            const dot_cache_z = std.fmt.allocPrintSentinel(a, "{s}", .{dot_cache}, 0) catch return;
+            _ = std.c.mkdir(dot_cache_z.ptr, 0o700);
+        }
         _ = std.c.mkdir(base_z.ptr, 0o700);
         _ = std.c.mkdir(log_dir.ptr, 0o700); // 이미 있으면 EEXIST — 그대로 진행한다
         // **인스턴스 칸도 우리가 만든다.** 훅은 `mkdir` 을 부르지 않으므로(계약 §4.1) 이 자리가 없으면

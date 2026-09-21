@@ -25739,7 +25739,7 @@ test "agent hooks install into the claude hooks array and leave user entries unt
     session.deinit();
 
     {
-        const events_dir = try std.fmt.allocPrint(a, "{s}/maru/agent-turn-events", .{cache});
+        const events_dir = try std.fmt.allocPrint(a, "{s}/.cache/maru/agent-turn-events", .{home}); // 훅 로그는 HOME 만 본다(RA8)
         defer a.free(events_dir);
         try expectProviderFixtureEntries(io, events_dir, &.{
             .{ .name = "notes.txt", .kind = .file },
@@ -25765,7 +25765,7 @@ test "agent hooks install into the claude hooks array and leave user entries unt
             .command_kind = @intFromEnum(CommandKind.controlled_smoke),
         });
         guarded.deinit();
-        const events_dir = try std.fmt.allocPrint(a, "{s}/maru/agent-turn-events", .{cache});
+        const events_dir = try std.fmt.allocPrint(a, "{s}/.cache/maru/agent-turn-events", .{home}); // 훅 로그는 HOME 만 본다(RA8)
         defer a.free(events_dir);
         const kept = try std.fmt.allocPrint(a, "{s}/876543.ndjson", .{events_dir});
         defer a.free(kept);
@@ -25789,7 +25789,9 @@ test "agent hooks install into the claude hooks array and leave user entries unt
 
     var want: std.ArrayListUnmanaged(u8) = .empty;
     defer want.deinit(a);
-    try hook_command.build(&want, a, "claude", log_dir, "/tmp/maru-remote-events-judge");
+    const remote_dir = (try hook_command.remoteLogDirAlloc(a, home)).?; // 설치기와 같은 HOME 규칙(RA8)
+    defer a.free(remote_dir);
+    try hook_command.build(&want, a, "claude", log_dir, remote_dir);
 
     const settings_after = try tmp.dir.readFileAlloc(io, "claude/settings.json", a, .limited(64 * 1024));
     defer a.free(settings_after);
@@ -30282,7 +30284,9 @@ test "agent hooks install into codex and record trust without touching existing 
     defer a.free(log_dir);
     var want: std.ArrayListUnmanaged(u8) = .empty;
     defer want.deinit(a);
-    try hook_command.build(&want, a, hook_command.Provider.codex.tag(), log_dir, "/tmp/maru-remote-events-judge");
+    const remote_dir = (try hook_command.remoteLogDirAlloc(a, home)).?; // 설치기와 같은 HOME 규칙(RA8)
+    defer a.free(remote_dir);
+    try hook_command.build(&want, a, hook_command.Provider.codex.tag(), log_dir, remote_dir);
 
     const hooks_after = try tmp.dir.readFileAlloc(io, "codex/hooks.json", a, .limited(64 * 1024));
     defer a.free(hooks_after);
@@ -30403,7 +30407,7 @@ test "agent hooks install into codex and record trust without touching existing 
     {
         var stale: std.ArrayListUnmanaged(u8) = .empty;
         defer stale.deinit(a);
-        try hook_command.build(&stale, a, hook_command.Provider.codex.tag(), "/tmp/maru-old-log-dir", "/tmp/maru-remote-events-judge");
+        try hook_command.build(&stale, a, hook_command.Provider.codex.tag(), "/tmp/maru-old-log-dir", remote_dir);
         const stale_json = try std.fmt.allocPrint(a,
             \\{{ "hooks": {{ "Stop": [ {{ "hooks": [ {{ "type": "command", "command": {f}, "timeout": 2 }} ] }} ] }} }}
         , .{std.json.fmt(std.json.Value{ .string = stale.items }, .{})});

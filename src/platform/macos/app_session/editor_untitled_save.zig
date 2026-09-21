@@ -258,6 +258,11 @@ fn writeAndAdopt(self: *AppSession, term: *Term, abs: []const u8, overwriting: b
     term.rt.editor_path = owned;
     term.rt.editor_untitled = null; // **배타다**(§3.11) — 안 지우면 영원히 「저장 안 한 문서」다
     term.rt.editor_doc.?.saved_hash = editor_ops.contentHash(saved_content);
+    // ⚠️ **디스크 지문도 여기서 처음 선다**(§3.9d). 이름 없는 문서는 볼 디스크가 없어 `null` 이었고,
+    // 이름이 붙는 이 순간이 그 값을 얻는 유일한 자리다 — 안 세우면 **그 문서는 영영 외부 변경을 못
+    // 본다**(저장할 때 비교할 과거가 없다). 적대적 3회차에서 잡았다: U2 로 만든 문서만 C0·C1 의
+    // 보호 밖에 남는다.
+    term.rt.editor_doc.?.disk_hash = editor_ops.contentHash(bytes);
 
     // **문법을 다시 판정한다**(§3.11 — 경로가 생겼다). 옛 상태는 grammar 가 없어 비어 있지만
     // 그래도 같은 자리에서 놓는다(두 벌이 되면 한쪽이 새는 길이 생긴다).

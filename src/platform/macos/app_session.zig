@@ -27476,6 +27476,170 @@ test "원격 이벤트가 행을 «에이전트 행» 으로 바꾼다 — 상�
     try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state);
 }
 
+// [AT3c] **원격 프레임이 봉인·스냅샷까지 닿는다.** 예전 `consumeRemoteAgentLines` 는 `applied` 를 버려 원격 Term 에
+// 봉인도 스냅샷도 없었다. 이 판정자는 위 캡처 규칙 판정자(`testApplyHookEvent`)보다 **한 층 위** — 실제 wire 프레임
+// (`{"nonce":…,"line":"claude\t{…}"}`)이 원격 소비자 → `TurnBatch` → `sealTurnCaptureNow` → `captureTurnSnapshot` 을
+// 지나는지를 호출 수와 봉인 id 로 본다.
+test "훅 원격 프레임: 턴 끝이 봉인과 스냅샷 요청까지 닿는다 — 원격 캡처는 읽지 않은 채 봉인된다 (AT3c)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+    test_config_text = agent_hooks_on_config;
+    defer test_config_text = "";
+
+    var session: AppSession = .{ .allocator = a, .io = std.testing.io };
+    try session.init(io, a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_focused = false;
+
+    const term = pane_ops.activePane(&session).activeTerm();
+    var ch = maru.session.remote_agent_stream.Channel.init(0);
+    _ = ch.feed("{\"hello\":\"maru-agent-events\",\"v\":1}", 0);
+    term.agent_remote_channel = ch;
+    const nonce = "4331_7";
+    @memcpy(term.agent_remote_nonce[0..nonce.len], nonce);
+    term.agent_remote_nonce_len = nonce.len;
+    term.agent_kind = .none;
+    term.rt.observation.ssh_remote_dest_present = true;
+
+    agent_ops.test_turn_snapshot_calls = 0;
+    agent_ops.test_last_turn_capture = 0;
+    // 한 배치: 세션 시작 → 편집 도구가 저쪽 경로를 겨냥 → 턴 끝. 로컬에 없는 경로다(읽으면 «못 읽음» 이 된다).
+    agent_ops.consumeRemoteAgentLines(&session, term, &.{
+        "{\"nonce\":\"4331_7\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"SessionStart\\\",\\\"session_id\\\":\\\"S-rw\\\",\\\"cwd\\\":\\\"/srv/app\\\"}\"}",
+        "{\"nonce\":\"4331_7\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"UserPromptSubmit\\\",\\\"session_id\\\":\\\"S-rw\\\",\\\"prompt\\\":\\\"고쳐줘\\\"}\"}",
+        "{\"nonce\":\"4331_7\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"PreToolUse\\\",\\\"session_id\\\":\\\"S-rw\\\",\\\"tool_name\\\":\\\"Edit\\\",\\\"tool_input\\\":{\\\"file_path\\\":\\\"/srv/app/src/a.zig\\\"}}\"}",
+        "{\"nonce\":\"4331_7\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"Stop\\\",\\\"session_id\\\":\\\"S-rw\\\",\\\"last_assistant_message\\\":\\\"다 했습니다\\\"}\"}",
+    }, 100);
+
+    // ⑴ 스냅샷을 **한 번** 청했고, 그 세션으로 청했다.
+    try std.testing.expectEqual(@as(usize, 1), agent_ops.test_turn_snapshot_calls);
+    try std.testing.expectEqualStrings("S-rw", agent_ops.test_last_turn_session[0..agent_ops.test_last_turn_session_len]);
+    // ⑵ 봉인이 스냅샷보다 먼저 났고 그 id 가 요청에 실렸다 — 링이 사본을 가리킬 수 있다.
+    const id = agent_ops.test_last_turn_capture;
+    try std.testing.expect(id != 0);
+    try std.testing.expect(session.turn_captures.openTurn("S-rw") == null);
+    const sealed = session.turn_captures.sealedTurn(id) orelse return error.NoSealedTurn;
+    // ⑶ 원격 규칙으로 봉인됐다 — 경로는 적혔고 내용은 읽지 않았다.
+    try std.testing.expect(sealed.remote);
+    try std.testing.expectEqual(@as(usize, 1), sealed.entries.items.len);
+    const e = sealed.entries.items[0];
+    try std.testing.expectEqualStrings("/srv/app/src/a.zig", e.path);
+    try std.testing.expect(e.before == .unknown and e.before.unknown == .remote);
+    try std.testing.expect(e.remoteEditTargeted());
+
+    // ⑷ 다음 턴은 새 봉인이다 — 배치가 갈려도 진행 중 사본이 이어진다(Pre 만 온 배치 → Stop 만 온 배치).
+    agent_ops.consumeRemoteAgentLines(&session, term, &.{
+        "{\"nonce\":\"4331_7\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"UserPromptSubmit\\\",\\\"session_id\\\":\\\"S-rw\\\",\\\"prompt\\\":\\\"또\\\"}\"}",
+        "{\"nonce\":\"4331_7\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"PreToolUse\\\",\\\"session_id\\\":\\\"S-rw\\\",\\\"tool_name\\\":\\\"Write\\\",\\\"tool_input\\\":{\\\"file_path\\\":\\\"/srv/app/src/b.zig\\\"}}\"}",
+    }, 200);
+    try std.testing.expectEqual(@as(usize, 1), agent_ops.test_turn_snapshot_calls); // 아직 턴 끝이 아니다
+    try std.testing.expect(session.turn_captures.openTurn("S-rw") != null);
+    agent_ops.consumeRemoteAgentLines(&session, term, &.{
+        "{\"nonce\":\"4331_7\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"Stop\\\",\\\"session_id\\\":\\\"S-rw\\\"}\"}",
+    }, 300);
+    try std.testing.expectEqual(@as(usize, 2), agent_ops.test_turn_snapshot_calls);
+    try std.testing.expect(agent_ops.test_last_turn_capture != id);
+    const second = session.turn_captures.sealedTurn(agent_ops.test_last_turn_capture) orelse return error.NoSecondTurn;
+    try std.testing.expect(second.remote);
+    try std.testing.expectEqualStrings("/srv/app/src/b.zig", second.entries.items[0].path);
+}
+
+// [AT3c] **실제 원격 로그 재생**(opt-in — `MARU_REMOTE_REPLAY_LOG=<원격 훅 로그 ndjson>`). 이 Mac 에 남은 실제 원격 훅
+// 로그(`~/.cache/maru/remote-agent-events/t*.ndjson`, 원격 쪽 모양 `<provider>\t<payload>`)를 스트리머와 같은 이스케이프
+// (`cli.agent_events.formatEvent`)로 프레임에 싸서 원격 소비자에 통째로 흘린다. 보는 것: 턴 끝마다 스냅샷을 청하고,
+// 봉인된 턴은 전부 원격 규칙(읽지 않음)이며, 경로는 전부 절대경로다. env 가 없으면 건너뛴다(CI 에는 그 로그가 없다).
+test "훅 원격 프레임: 실제 원격 로그를 통째로 재생해도 봉인·스냅샷 규율이 선다 (AT3c 실데이터)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const log_path_z = std.c.getenv("MARU_REMOTE_REPLAY_LOG") orelse return error.SkipZigTest;
+    const log_path = std.mem.span(log_path_z);
+    if (log_path.len == 0) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+    test_config_text = agent_hooks_on_config;
+    defer test_config_text = "";
+
+    const raw = try std.Io.Dir.cwd().readFileAlloc(io, log_path, a, .limited(64 * 1024 * 1024));
+    defer a.free(raw);
+
+    var session: AppSession = .{ .allocator = a, .io = std.testing.io };
+    try session.init(io, a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_focused = false;
+    const term = pane_ops.activePane(&session).activeTerm();
+    var ch = maru.session.remote_agent_stream.Channel.init(0);
+    _ = ch.feed("{\"hello\":\"maru-agent-events\",\"v\":1}", 0);
+    term.agent_remote_channel = ch;
+    const nonce = "4331_7";
+    @memcpy(term.agent_remote_nonce[0..nonce.len], nonce);
+    term.agent_remote_nonce_len = nonce.len;
+    term.rt.observation.ssh_remote_dest_present = true;
+    agent_ops.test_turn_snapshot_calls = 0;
+
+    var frames: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer {
+        for (frames.items) |f| a.free(f);
+        frames.deinit(a);
+    }
+    var lines: usize = 0;
+    var stops: usize = 0;
+    var it = std.mem.splitScalar(u8, raw, '\n');
+    while (it.next()) |line| {
+        if (line.len == 0) continue;
+        lines += 1;
+        if (std.mem.indexOf(u8, line, "\"hook_event_name\":\"Stop\"") != null) stops += 1;
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        try maru.cli.agent_events.formatEvent(&buf, a, nonce, line, "%16");
+        try frames.append(a, try buf.toOwnedSlice(a));
+    }
+    // 스트리머처럼 **여러 배치**로 흘린다 — 한 배치에 턴 끝이 여럿 들어오기도, 턴이 배치 경계에 걸리기도 한다.
+    var now_ms: u64 = 100;
+    var i: usize = 0;
+    var seen_sealed: usize = 0;
+    var seen_entries: usize = 0;
+    var last_capture: maru.session.turn_capture.Id = 0;
+    while (i < frames.items.len) : (i += 7) {
+        const end = @min(i + 7, frames.items.len);
+        agent_ops.consumeRemoteAgentLines(&session, term, frames.items[i..end], now_ms);
+        now_ms += 500;
+        if (agent_ops.test_last_turn_capture != last_capture and agent_ops.test_last_turn_capture != 0) {
+            last_capture = agent_ops.test_last_turn_capture;
+            if (session.turn_captures.sealedTurn(last_capture)) |turn| {
+                seen_sealed += 1;
+                try std.testing.expect(turn.remote);
+                for (turn.entries.items) |e| {
+                    seen_entries += 1;
+                    try std.testing.expect(maru.path_shape.isAbsolute(e.path));
+                    // 읽은 흔적이 없다 — before 도 after 도 «읽지 않았다» 다(사본 예산이 0 이다).
+                    try std.testing.expect(e.before == .unknown);
+                    const after = e.after orelse return error.AfterMissing;
+                    try std.testing.expect(after == .unknown and after.unknown == .remote);
+                }
+            }
+        }
+    }
+    std.debug.print("\n[AT3c replay] {s}: lines {d} · Stop {d} · snapshot calls {d} · sealed seen {d} · entries {d} · shell calls(last) {d}\n", .{
+        log_path,                                                                     lines, stops, agent_ops.test_turn_snapshot_calls, seen_sealed, seen_entries,
+        if (session.turn_captures.sealedTurn(last_capture)) |t| t.shell_calls else 0,
+    });
+    try std.testing.expect(lines > 0);
+    // 턴 끝마다 스냅샷을 청한다 — 배치 안에 턴 끝이 여럿이면 한 번이라 `<=`, 0 이면 배선이 죽은 것이라 `>0`.
+    try std.testing.expect(agent_ops.test_turn_snapshot_calls > 0);
+    try std.testing.expect(agent_ops.test_turn_snapshot_calls <= stops + 1);
+}
+
 test "훅 게이트를 끄면 원격 축도 접힌다 — 안 접으면 한 Term 을 두 소스가 쓴다" {
     // **계약 §1 의 «소스는 Term 마다 정확히 하나» 가 여기서 깨질 뻔했다.** 게이트가 꺼지면 `modeFor` 는
     // `.observe` 를 주고 그 가지는 `pollAgentState` 가 `agent_state` 를 쓴다. 그런데 채널을 계속 돌리면

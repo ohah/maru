@@ -61,6 +61,8 @@ const agent_activity_ops = @import("agent_activity.zig");
 /// «불렸는가» 를 볼 수 없다 — 훅 모드가 턴 끝에 이것을 부르는지는 호출 자체를 세야 알 수 있다.
 /// 제품 빌드에서는 `comptime` 으로 사라진다(배타 카운터와 같은 규약).
 pub var test_turn_snapshot_calls: usize = 0;
+/// 마지막 `captureTurnSnapshot` 이 받은 봉인 id(AT3c 판정자 — 원격 프레임이 봉인까지 닿았는지를 본다).
+pub var test_last_turn_capture: turn_capture.Id = 0;
 
 /// 이 캡처에 실을 **턴 키**. 턴이 끝났을 때만 있다.
 ///
@@ -506,6 +508,7 @@ fn openAgentDirAbsolute(self: *AppSession, path: []const u8, options: std.Io.Dir
 pub fn captureTurnSnapshot(self: *AppSession, surface_id: u64, facts: TurnFacts, capture_id: turn_capture.Id) void {
     if (builtin.is_test) {
         test_turn_snapshot_calls += 1;
+        test_last_turn_capture = capture_id;
         // **게이트보다 먼저 기록한다** — 저장소가 없어도 「무엇을 넘겼나」는 사실이다.
         test_last_turn_key_len = @min(facts.key.len, test_last_turn_key.len);
         @memcpy(test_last_turn_key[0..test_last_turn_key_len], facts.key[0..test_last_turn_key_len]);

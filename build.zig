@@ -4965,19 +4965,39 @@ pub fn build(b: *std.Build) void {
     const replay_step = b.step("test-replay", "Replay committed trace fixtures against golden screens (MARU_UPDATE_GOLDEN=1 to refresh)");
     replay_step.dependOn(&run_replay_fixture_tests.step);
 
+    // 「빌드 소스」를 보는 두 얼굴 — 문자열(`build_source`)과 구조(`build_graph`).
+    // **모듈은 하나씩만 만든다**: 같은 파일이 두 모듈의 루트가 되면 Zig 가 거절하므로
+    // `build_graph` 는 `build_source` 를 상대 경로가 아니라 **모듈로** 받는다.
+    // 그리고 이 주입이 없으면 `build_graph.zig` 는 어느 바이너리에도 안 들어가 컴파일조차 안 된다.
+    const boundary_build_source_mod = b.createModule(.{
+        .root_source_file = b.path("tests/support/build_source.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+    });
+    const boundary_build_graph_mod = b.createModule(.{
+        .root_source_file = b.path("tests/support/build_graph.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+        .imports = &.{.{ .name = "build_source", .module = boundary_build_source_mod }},
+    });
+    const boundary_support_imports: []const std.Build.Module.Import = &.{
+        .{ .name = "build_source", .module = boundary_build_source_mod },
+        .{ .name = "build_graph", .module = boundary_build_graph_mod },
+    };
+
+    // **뷰 자신의 판정자를 돌린다.** 모듈로 «주입만» 하면 그 파일의 test 는 실행되지 않는다
+    // (다른 모듈의 test 는 root 에서 자동으로 딸려 오지 않는다 — 실측). 그 파일의 test 는
+    // 「AST 뷰가 문자열 판정과 같은 값을 내는가」를 대조하므로, 안 돌면 뷰가 조용히 틀어진다.
+    const build_graph_tests = addProjectTest(b, .{ .root_module = boundary_build_graph_mod });
+    const run_build_graph_tests = b.addRunArtifact(build_graph_tests);
+    run_build_graph_tests.addArg("--maru-expect-tests=1");
+    run_build_graph_tests.setCwd(b.path("."));
     const boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/boundary/imports.zig"),
             // `tests/boundary/` 는 자기 파일이 모듈 루트라 `tests/support/` 를 상대 경로로 못 본다 —
             // 「빌드 소스」의 정의를 복사하지 않고 모듈로 준다(shell_gate_ledger 와 같은 이유).
-            .imports = &.{.{
-                .name = "build_source",
-                .module = b.createModule(.{
-                    .root_source_file = b.path("tests/support/build_source.zig"),
-                    .target = target,
-                    .optimize = .ReleaseSafe,
-                }),
-            }},
+            .imports = boundary_support_imports,
             .target = target,
             // 84개 판정자가 소스 트리를 걷고 스캔한다 — 실행이 시간의 본체라(로컬 Debug 40초 → ReleaseSafe 7초,
             // CI 84초) 안전 검사는 유지한 채 최적화한다. 제품 코드를 컴파일하지 않는 std 전용 판정자라 모드가 검사
@@ -5426,6 +5446,7 @@ pub fn build(b: *std.Build) void {
     run_check_boundaries_shards_boundary_tests.addArg("--maru-expect-tests=1");
     run_check_boundaries_shards_boundary_tests.setCwd(b.path("."));
     boundary_step.dependOn(&run_check_boundaries_shards_boundary_tests.step);
+    boundary_step.dependOn(&run_build_graph_tests.step);
     const ci_cache_generations_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/ci_cache_generations_boundary.zig"),

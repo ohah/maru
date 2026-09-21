@@ -302,7 +302,42 @@ build/
 [`tests/support/build_source.zig`](../tests/support/build_source.zig) 하나가 소유한다** —
 `build.zig` + `build/**.zig` 를 한 덩어리로 읽는다.
 
-새 판정자가 빌드 등록을 셀 때는 `build_source.read(allocator)`(널 종료가 필요하면 `readZ`)를 쓴다.
+### 빌드 등록은 문자열이 아니라 **구조**로 센다
+
+`build_source` 가 주는 것은 **텍스트**라, 세는 쪽이 결국 문자열 매칭이 된다. 그 방식은 셋으로 약하다 —
+공백 한 칸·주석 한 줄에 흔들리고, 등록이 다른 파일로 옮겨가면 죽으며, **등록이 아닌 자리까지 센다.**
+마지막 것은 가설이 아니라 실측이다: `imports.zig` 의 B3-0.4 판정자가 한 경로를 **15**로 세고 그 숫자를
+등록 수로 읽고 있었는데, 실제 `addProjectTest` 등록은 **12**건이고 나머지 셋은 별도 `b.createModule`
+하나와 `inline for` 표의 행 둘이었다.
+
+그래서 빌드 등록을 세는 판정자는 [`tests/support/build_graph.zig`](../tests/support/build_graph.zig) 를 쓴다 —
+`build_source.paths()` 를 받아 **파일별로** `std.zig.Ast` 로 파싱하고 구조화된 뷰를 준다
+(`read()` 가 주는 이어 붙인 텍스트는 유효한 Zig 파일이 아니라 파서가 받지 못한다).
+
+```zig
+graph.step("test-session-host-b3-0-4")              // 스텝이 있는가
+graph.countRegistrationsWithFilter("B3-0.4")        // 그 필터를 쓰는 «등록» 수
+graph.countRegistrationsWithRoot(path)              // 그 루트를 쓰는 «등록» 수
+graph.hasArg("run_b3_0_4_tests", "--maru-expect-tests=8")
+graph.dependsOn("run_b3_0_4_tests", "run_b3_strict_cleanup_tests")
+```
+
+규율 넷이다.
+
+- **모듈로 주입해야 산다.** `build_graph.zig` 를 아무도 `@import` 하지 않으면 어느 바이너리에도
+  안 들어가 **컴파일조차 되지 않는다.** `build.zig` 가 판정자에 모듈로 준다.
+- **주입만으로는 그 파일의 test 가 안 돈다**(다른 모듈의 test 는 root 에서 딸려 오지 않는다 — 실측).
+  뷰 자신의 판정자를 돌리려면 그 모듈을 root 로 하는 등록이 **따로** 있어야 한다.
+- **모듈은 하나만 만든다.** 같은 파일이 두 모듈의 루트가 되면 Zig 가 거절한다
+  (`file exists in modules 'build_source' and 'build_graph'`). `build_graph` 는 `build_source` 를
+  상대 경로가 아니라 **모듈로** 받는다.
+- **옮길 때는 두 값을 다 남긴다.** 문자열이 세던 수와 뷰가 세는 수가 다르면(위 15 vs 12) 한쪽만
+  남기는 순간 감시가 줄어든다. 둘을 함께 고정하고 차이의 이유를 그 자리에 적는다.
+
+**이관은 아직 진행 중이다** — 178자리 중 9자리가 뷰로 갔다. 나머지는 그 도메인을 만질 때 옮긴다.
+구조로 옮기면 뜻이 바뀌는 자리(일부러 잘라 쓴 접두 매칭 8자리)는 **문자열로 남기고 이유를 적는다**.
+
+새 판정자가 빌드 등록을 셀 때 문자열이 꼭 필요하면 `build_source.read(allocator)`(널 종료가 필요하면 `readZ`)를 쓴다.
 `tests/boundary/` 아래는 자기 파일이 모듈 루트라 상대 경로로 `tests/support/` 를 못 보므로,
 `build.zig` 가 `build_source` 를 **모듈로 주입**한다(`imports.zig`·`shell_gate_ledger.zig`·
 `wake_latency_budget.zig` 가 그 형태).

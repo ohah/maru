@@ -233,19 +233,22 @@ fn writeAndAdopt(self: *AppSession, term: *Term, abs: []const u8, overwriting: b
     // 그때는 그 사실을 말한다(다시 `⌘S` 하면 같은 이름으로 이어진다).
     // ⚠️ **경로를 두 벌 소유한다.** `editor_path` 는 `releaseEditorTerm` 이 놓고 `entry.path` 는 세션이
     // 놓는다 — 하나를 둘이 가리키면 **이중 해제**다(파일을 여는 길도 그래서 각자 dupe 한다).
+    // ⚠️ **여기부터의 실패는 「저장하지 못했다」가 아니다 — 파일은 이미 있다.** 같은 문구를 쓰면
+    // 사용자는 아무 일도 없었다고 읽고, 디스크에는 자기 내용이 담긴 파일이 남는다(적대적 17회차).
+    // 무엇이 됐고 무엇이 안 됐는지, 그리고 **다음에 무엇을 하면 되는지**를 말한다.
     const owned = self.allocator.dupe(u8, abs) catch {
-        self.showNoticeKey(.app_save_failed);
+        self.showNoticeKey(.editor_untitled_written_not_adopted);
         return;
     };
     const entry_path = self.allocator.dupe(u8, abs) catch {
         self.allocator.free(owned);
-        self.showNoticeKey(.app_save_failed);
+        self.showNoticeKey(.editor_untitled_written_not_adopted);
         return;
     };
     _ = attachEntry(self, term, entry_path) catch {
         self.allocator.free(entry_path);
         self.allocator.free(owned);
-        self.showNoticeKey(.app_save_failed);
+        self.showNoticeKey(.editor_untitled_written_not_adopted);
         return;
     };
 

@@ -35715,8 +35715,19 @@ test "U2n 쓰기는 됐는데 entry 를 못 붙이면 — 새지 않고, 이름�
     try testing.expect(t.rt.editor_path == null);
     try testing.expect(t.rt.editor_untitled != null);
     try testing.expect(t.file_entry == null);
-    // 그리고 **말한다** — 조용히 실패하면 사용자는 저장된 줄 안다.
+    // 그리고 **무엇이 됐는지 말한다** — 「저장하지 못했습니다」는 이 자리에서 **거짓**이다(파일은 있다).
+    // 같은 문구를 쓰면 사용자는 아무 일도 없었다고 읽고, 디스크에는 자기 내용이 담긴 파일이 남는다.
     try testing.expect(fx.session.chrome_host.notice.open);
+    try testing.expect(std.mem.startsWith(
+        u8,
+        &fx.session.notice_message_buf,
+        maru.i18n.t(.editor_untitled_written_not_adopted),
+    ));
+    try testing.expect(!std.mem.startsWith(
+        u8,
+        &fx.session.notice_message_buf,
+        maru.i18n.t(.app_save_failed),
+    ));
     // 새 복사본은 놓았다(testing allocator 가 이 테스트 끝에서 잰다).
 }
 

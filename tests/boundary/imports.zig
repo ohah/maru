@@ -12701,7 +12701,15 @@ test "이름 없는 문서 저장: 디스크에 쓰는 자리 둘, 이름을 붙
         countOf(app_session, ".untitled_overwrite => self.pending_untitled_save = .{}"),
     );
 
-    // ⑷ **NUL 검사는 경로를 «푼 뒤»에 한 번** — 푸는 앞에서 이름만 보면 base 쪽 NUL 이 새고, 두 번
+    // ⑷ **실패 문구는 「쓰기 앞」과 「쓰기 뒤」로 갈린다.** 쓰기 뒤의 실패에 「저장하지 못했습니다」를
+    //    쓰면 **거짓**이다(파일은 이미 있다) — 사용자는 아무 일도 없었다고 읽는다. 반대로 쓰기 앞의
+    //    실패에 「파일은 만들어졌지만…」을 쓰면 그것도 거짓이다. 각 자리 수를 센다.
+    //
+    //    쓰기 앞 둘: `saveBytes` 실패 · 쓰기 자체 실패. 쓰기 뒤 셋: 경로 복사 둘 · entry 붙이기.
+    try std.testing.expectEqual(@as(usize, 2), countOf(save, "showNoticeKey(.app_save_failed)"));
+    try std.testing.expectEqual(@as(usize, 3), countOf(save, "showNoticeKey(.editor_untitled_written_not_adopted)"));
+
+    // ⑸ **NUL 검사는 경로를 «푼 뒤»에 한 번** — 푸는 앞에서 이름만 보면 base 쪽 NUL 이 새고, 두 번
     //    적으면 한쪽이 낡는다.
     try std.testing.expectEqual(@as(usize, 1), countOf(save, "std.mem.indexOfScalar(u8, norm, 0)"));
 }

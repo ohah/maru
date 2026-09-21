@@ -35803,3 +35803,96 @@ test "U2p 이름 상자가 떠 있는 동안 그 Term 이 닫히면 — 확정�
     try testing.expect(other.rt.editor_path == null);
     try testing.expect(other.file_entry == null);
 }
+
+test "U2u 재진입: 상자가 떠 있는데 또 ⌘S · 확인 중에 또 저장 — 들고 있는 것이 엉키지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    const io = std.testing.io;
+    try dir.dir.writeFile(io, .{ .sub_path = "exists.txt", .data = "old\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    pinUntitledBase(fx.session, root);
+
+    const a = try openUntitledInActivePane(fx.session);
+    try testing.expect(insertText(fx.session, a, "A\n"));
+
+    // ⑴ **상자가 떠 있는데 또 ⌘S** — 같은 문서를 다시 물어도 대상이 갈리지 않는다.
+    try testing.expect(!saveDocument(fx.session, a));
+    try testing.expectEqual(a.surface.id, fx.session.rename.?.untitled_save);
+    try testing.expect(!saveDocument(fx.session, a));
+    try testing.expectEqual(a.surface.id, fx.session.rename.?.untitled_save);
+    // 입력한 글자가 상자 열기로 지워졌다면 사용자는 다시 쳐야 한다 — 그 사실을 값으로 둔다.
+    try fx.session.rename_input.query.appendSlice(allocator, "exists.txt");
+
+    // ⑵ 확정 → **덮어쓰기 확인**이 뜨고 경로를 들고 있다.
+    settings_ops.commitRename(fx.session);
+    try testing.expect(fx.session.pending_confirm == .untitled_overwrite);
+    const held = fx.session.pending_untitled_save.path_len;
+    try testing.expect(held > 0);
+
+    // ⑶ **확인이 떠 있는데 다른 문서에서 또 저장** — 오버레이는 하나뿐이라 상자가 열리든 안 열리든,
+    //    **들고 있던 경로가 조용히 바뀌어선 안 된다**(바뀌면 수락이 엉뚱한 문서를 덮는다).
+    const b = try openUntitledInActivePane(fx.session);
+    try testing.expect(insertText(fx.session, b, "B\n"));
+    _ = saveDocument(fx.session, b);
+    try testing.expectEqual(held, fx.session.pending_untitled_save.path_len);
+
+    // ⑷ 수락하면 **처음 고른 문서**가 그 파일을 갖는다 — b 는 여전히 이름이 없다.
+    fx.session.dispatchChromeAction(.confirm_accept);
+    try testing.expect(a.rt.editor_path != null);
+    try testing.expect(std.mem.endsWith(u8, a.rt.editor_path.?, "/exists.txt"));
+    try testing.expect(b.rt.editor_path == null);
+    try testing.expect(b.rt.editor_untitled != null);
+    const got = try dir.dir.readFileAlloc(io, "exists.txt", allocator, .limited(64));
+    defer allocator.free(got);
+    try testing.expectEqualStrings("A\n", got);
+}
+
+test "U2v 상자는 다른 오버레이와 배타다 — 팔레트·찾기를 열면 상자가 닫힌다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(std.testing.io, &root_buf)];
+    pinUntitledBase(fx.session, root);
+
+    const t = try openUntitledInActivePane(fx.session);
+    try testing.expect(insertText(fx.session, t, "x"));
+    try testing.expect(!saveDocument(fx.session, t));
+    try testing.expect(fx.session.rename != null);
+
+    // **먼저 프레임을 돌려 상자를 실제로 세운다** — 안 세우면 아래 단언이 「원래 안 열려 있었다」로
+    // 공허하게 통과한다(적대적 7회차: 처음에 그렇게 적었고 변이가 살아남았다).
+    const leaf: maru.session.SplitRect = .{ .x = 100, .y = 50, .w = 800, .h = 600 };
+    {
+        var drawn = appendPaneFrame(fx.session, leaf, t) orelse return error.EditorPaneDidNotDraw;
+        drawn.dl.deinit(allocator);
+    }
+    try testing.expect(rename_client.refreshCaretAnchor(fx.session, t.surface.id));
+    try testing.expect(fx.session.chrome_host.rename_box.open);
+
+    // **세팅을 열면** 단일 오버레이 불변식이 상자를 내려야 한다 — 안 내리면 두 모달이 키를 다투고
+    // 상자가 세팅 화면 위에 남는다.
+    settings_ops.toggleSettings(fx.session);
+    try testing.expect(fx.session.rename == null);
+    try testing.expect(!fx.session.chrome_host.rename_box.open);
+    // 그리고 **이름은 안 붙었다** — 닫힘이 곧 확정이 되면 사용자가 안 정한 이름으로 저장된다.
+    try testing.expect(t.rt.editor_path == null);
+    try testing.expect(t.rt.editor_untitled != null);
+
+    // **인라인 rename 은 «살아남아야」 한다.** 「전부 닫기」로 넓히면 무관한 알림 하나가 사용자가 치던
+    // 이름을 통째로 버린다 — 그쪽은 같은 그리드에 그려지지 않아 겹치지도 않는다. 허용된 자리를 센다.
+    settings_ops.toggleSettings(fx.session); // 세팅을 닫는다
+    settings_ops.startRename(fx.session, .{ .term = t });
+    try testing.expect(fx.session.rename.? == .term);
+    fx.session.showNoticeKey(.editor_untitled_bad_name); // 무관한 알림
+    try testing.expect(fx.session.rename != null); // ★ 인라인은 그대로다
+    try testing.expect(fx.session.rename.? == .term);
+}

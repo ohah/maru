@@ -292,6 +292,9 @@ pub fn toggleSettings(self: *AppSession) void {
         self.chrome_host.notice.dismiss(); // 배타적
         self.chrome_host.find.hide();
         self.chrome_host.palette.hide();
+        // **팝업 rename 도 내린다** — 안 내리면 이름 상자가 세팅 화면 위에 남아 키를 다툰다
+        // (적대적 7회차). `toggleSettings` 는 `dismissMessageOverlays` 를 거치지 않으므로 여기서 부른다.
+        closePopupRename(self);
         find_ops.clearAllFindMatches(self); // 목록은 둘이다 — 한쪽만 비우면 편집기 강조가 남는다
         self.chrome_host.settings.show();
         self.chrome_host.settings.section = 0; // 항상 첫 섹션부터(네비 — config-gui §4)
@@ -1251,6 +1254,23 @@ pub fn commitRename(self: *AppSession) void {
     }
     closeRename(self);
     self.workspaceChanged(.naming);
+}
+
+/// **오버레이로 그려지는 rename 만 내린다** — 단일 오버레이 불변식에 드는 것은 그것들이다.
+///
+/// 이 앱의 rename 은 두 모양이다: 사이드바·탭·트리의 **인라인 편집**(그 행 자리에 그려진다)과
+/// 심볼·이름 없는 문서 저장의 **팝업 상자**(`rename_box` — 오버레이 그리드에 그려진다). 세팅·확인 같은
+/// 다른 오버레이가 열릴 때 **팝업만** 충돌한다(같은 그리드에 painter-order 로 겹쳐 글자가 섞인다).
+///
+/// **인라인은 닫지 않는다.** 무관한 알림 하나가 사용자가 치던 이름을 통째로 버리면 그것이 더 나쁘다 —
+/// 그쪽은 겹치지도 않는다. 적대적 7회차에서 팝업이 세팅 화면 위에 남는 것을 잡았고, 그때 「전부 닫기」로
+/// 넓히면 인라인 rename 이 함께 죽는다는 것이 이 구분의 이유다.
+pub fn closePopupRename(self: *AppSession) void {
+    const rt = self.rename orelse return;
+    switch (rt) {
+        .symbol, .untitled_save => closeRename(self),
+        .workspace, .pane, .term, .group, .file_tree => {},
+    }
 }
 
 /// rename 편집기를 닫는다(취소·커밋 공통 종료) — 입력을 비우고 rename을 null로. custom_name은 안 건드린다

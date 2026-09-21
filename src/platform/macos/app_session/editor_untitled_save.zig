@@ -163,6 +163,14 @@ pub fn commit(self: *AppSession, surface_id: u64, text: []const u8) void {
         return;
     }
 
+    // ⚠️ **그 이름이 폴더면 덮어쓸지 묻지 않는다.** 디렉터리에도 `openFile` 은 성공하므로 「있다」로만
+    // 재면 폴더에 대고 「덮어쓸까요?」를 묻는다 — 사용자는 「덮어쓰면 된다」로 읽는데 실제로는 못 쓴다
+    // (적대적 11회차: 실측으로 그 확인이 떴다). 다른 질문이므로 확인이 아니라 그 사실을 말한다.
+    if (isDirectory(self, abs)) {
+        self.showNoticeKey(.editor_untitled_name_is_dir);
+        return;
+    }
+
     if (fileExists(self, abs)) {
         // 두 단계다 — 상자를 닫고(위 defer) 확인을 띄우며 **고른 경로를 들고 있는다**.
         self.pending_untitled_save = .{ .surface_id = surface_id, .path_len = abs.len };
@@ -271,10 +279,21 @@ fn attachEntry(self: *AppSession, term: *Term, owned_path: []const u8) !*dock_pa
     return entry;
 }
 
+/// **보통 파일**이 있나. 디렉터리는 `openFile` 이 열어 주므로 종류까지 본다 — 안 보면 폴더를
+/// 「덮어쓸 수 있는 파일」로 읽는다(그 위 갈래의 근거).
 fn fileExists(self: *AppSession, abs: []const u8) bool {
     var f = std.Io.Dir.cwd().openFile(self.io, abs, .{}) catch return false;
-    f.close(self.io);
-    return true;
+    defer f.close(self.io);
+    const st = f.stat(self.io) catch return false;
+    return st.kind == .file;
+}
+
+/// 그 이름이 **디렉터리**인가.
+fn isDirectory(self: *AppSession, abs: []const u8) bool {
+    var f = std.Io.Dir.cwd().openFile(self.io, abs, .{}) catch return false;
+    defer f.close(self.io);
+    const st = f.stat(self.io) catch return false;
+    return st.kind == .directory;
 }
 
 fn termFor(self: *AppSession, surface_id: u64) ?*Term {

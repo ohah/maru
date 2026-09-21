@@ -14094,6 +14094,15 @@ const fld_src =
     \\
 ;
 
+/// 「조용 시계 안에서는 안 묻는다」 판정 — **실제 경과**가 창 안일 때만 잰다. CI 러너는 이 기기보다 느려(실측 2.8배) 픽스처 사이의
+/// 시간이 창을 넘길 수 있고, 그때는 제품이 묻는 것이 **맞다**(판정을 건너뛴다). 「묻는다」 쪽 판정은 늘 잰다 — 기다린 뒤라 느려도 참이다.
+/// `since` 는 판정자가 **직접 잰** 사건 시각(편집 직전·응답 뒤의 `last_edit_ms`)이고 창은 계약 숫자를 **글자로** 박는다 — 제품 상수를 쓰면
+/// 상수를 바꾼 변이가 창까지 같이 바꿔 산다(적대적 B11·B13 축).
+fn expectFoldQuiet(s: *AppSession, term: *Term, since: u64, window_ms: u64, want_sent: u64) !void {
+    _ = syntaxColors(s, term);
+    if (s.awakeMs() -| since < window_ms) try testing.expectEqual(want_sent, s.editor_lsp.sent_folding);
+}
+
 fn fldApplied(f: *SmtFixture, want: u64) bool {
     const Ctx = struct { t: *Term, n: u64 };
     return pumpLspUntil(&f.fx, 3000, Ctx{ .t = f.term, .n = want }, struct {
@@ -14158,13 +14167,13 @@ test "FLD1 foldingRange 3층 — 색 만들기 자리가 문서 전체를 묻고
     // ⑹ 편집 — 접힘을 통째로 놓고(들여쓰기 → 승격) 120 ms 안엔 안 묻는다; 조용해지면 묻는다. 빈 줄(6)에 주석을 넣는다 — 구조는 그대로.
     const blank: u32 = @intCast((std.mem.indexOf(u8, term.rt.editor_doc.?.file.content, "\n\n") orelse return error.NoBlankLine) + 1);
     term.rt.editor_selection = .{ .anchor_start = blank, .anchor_end = blank, .focus = blank };
+    const edited_at = s.awakeMs();
     try testing.expect(insertText(s, term, "//"));
     try testing.expectEqual(FoldSource.indent, term.rt.editor_fold_source);
     try testing.expectEqual(@as(usize, 0), term.rt.editor_folded_len);
-    _ = syntaxColors(s, term);
+    try expectFoldQuiet(s, term, edited_at, 120, 1); // 120 ms 안 — 안 묻는다(승격은 이 호출에서 선다)
     try testing.expectEqual(FoldSource.syntax, term.rt.editor_fold_source);
     try testing.expectEqual(@as(u32, 5), term.rt.editor_fold_ranges[0].last_hidden);
-    try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_folding);
     {
         const t0 = s.awakeMs();
         while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
@@ -14214,8 +14223,7 @@ test "FLD2 foldingRange 3층 — 빈 응답은 아래 층을 그대로 두고 �
         try testing.expectEqual(@as(u32, 6), term.rt.editor_fold_ranges[0].last_hidden); // 주석 한 줄이 앞에 있어 한 줄씩 밀렸다
         try testing.expectEqual(@as(u64, 0), term.rt.editor_fold_lsp.version); // 물었다고 적지 않는다
         try testing.expectEqual(@as(u6, 1), term.rt.editor_fold_lsp.error_streak);
-        _ = syntaxColors(s, term);
-        try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_folding); // 곧바로는 안 묻는다
+        try expectFoldQuiet(s, term, term.rt.editor_fold_lsp.last_edit_ms, 240, 1); // 곧바로는(240 ms 안) 안 묻는다
         {
             const t0 = s.awakeMs();
             while (s.awakeMs() - t0 < 280) _ = usleep(10_000);
@@ -14268,8 +14276,7 @@ test "FLD2 foldingRange 3층 — 빈 응답은 아래 층을 그대로 두고 �
             const t0 = s.awakeMs();
             while (s.awakeMs() - t0 < 160) _ = usleep(10_000);
         }
-        _ = syntaxColors(s, term); // 120 ms 는 지났지만 두 배(240 ms) 는 안 지났다 — 안 묻는다
-        try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_folding);
+        try expectFoldQuiet(s, term, term.rt.editor_fold_lsp.last_edit_ms, 240, 1); // 120 ms 는 지났지만 두 배(240 ms) 는 안 지났다 — 안 묻는다
         {
             const t0 = s.awakeMs();
             while (s.awakeMs() - t0 < 120) _ = usleep(10_000);

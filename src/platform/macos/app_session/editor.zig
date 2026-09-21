@@ -35407,3 +35407,33 @@ test "U2g base 밖 이름은 거절한다 — 절대 경로도 «갈아입은 ..
         try testing.expect(t.rt.editor_untitled != null);
     }
 }
+
+test "U2h 새 파일 쓰기는 배타다 — 그 사이에 생긴 파일을 덮지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    const io = std.testing.io;
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+
+    // **없으면 만든다.**
+    const fresh = try std.fs.path.join(allocator, &.{ root, "fresh.txt" });
+    defer allocator.free(fresh);
+    try testing.expect(createDocumentBytes(fx.session, fresh, "mine\n"));
+    {
+        const got = try dir.dir.readFileAlloc(io, "fresh.txt", allocator, .limited(64));
+        defer allocator.free(got);
+        try testing.expectEqualStrings("mine\n", got);
+    }
+
+    // **있으면 거짓이고 내용을 건드리지 않는다.** 이것이 「없는지 봤다」와 「쓴다」 사이의 틈을 막는
+    // 자리다 — 그 사이 남이 같은 이름을 만들었을 때 덮어쓰면 사용자가 못 본 파일이 사라진다.
+    // 보통 생성(`.{}`)으로 바꾼 변이가 이 판정자 없이는 **살아남았다**(적대적 1회차 N4).
+    try testing.expect(!createDocumentBytes(fx.session, fresh, "theirs\n"));
+    const still = try dir.dir.readFileAlloc(io, "fresh.txt", allocator, .limited(64));
+    defer allocator.free(still);
+    try testing.expectEqualStrings("mine\n", still);
+}

@@ -127,6 +127,27 @@ pub const Entry = struct {
     /// `bashEditDiff.changedFiles`, 명령 전후의 작업트리 diff). 편집 도구 캡처와 **다른 축의 근거**라 트리거를
     /// 격상하지 않고 따로 든다 — 화면이 둘을 갈라 말할 수 있어야 한다(`TurnFileOrigin.shell_edit`).
     shell_diff: bool = false,
+    /// **before 가 편집 전 내용이라고 믿을 수 있나**(AT3d). 첫 캡처가 `.read` 트리거(`Read` 도구)였을 때만 참이다.
+    /// `Pre(Edit)` 에서 뜬 before 는 훅 로그를 500 ms 폴링으로 읽는 우리에게 **이미 편집 뒤 내용**이다(편집 도구 지연
+    /// p50 35 ms — 계획 AT3d ②·⑦). 그래서 `.edit` 트리거로 처음 만난 경로의 before 는 «같다» 를 증명하지 못하고,
+    /// 되돌림(`↩`) 판정은 이 값이 참일 때만 한다.
+    before_trusted: bool = false,
+
+    /// **편집 도구가 이 경로를 겨냥했다**(AT3d — 로컬·원격 공통 `✎` 의 첫 근거). `Pre(Edit·Write·apply_patch…)` 페이로드가
+    /// 편집 **시도**를 증명한다. 이것만으로는 «바뀌었다» 가 아니다 — 실패한 편집(권한 거부·old_string 불일치)도 겨냥은
+    /// 했다. **그 턴의 tree 목록에 그 경로가 있을 때만** `✎` 가 되고, 그 판정은 목록을 아는 자리(`turnFileOrigin`·요약
+    /// join)가 한다. before≠after 를 요구하지 않는 이유가 위 `before_trusted` 다.
+    pub fn editTargeted(self: Entry) bool {
+        return self.trigger == .edit;
+    }
+
+    /// **편집 도구가 겨냥했는데 턴 끝에 내용이 처음과 같다**(`↩`) — before 를 믿을 수 있을 때(`before_trusted`)만 말한다.
+    /// 믿을 수 없는 before(편집 뒤 읽은 것)가 after 와 같은 것은 «되돌림» 이 아니라 «편집 뒤 그대로» 다.
+    pub fn revertedByAgent(self: Entry) bool {
+        if (!self.before_trusted) return false;
+        const after = self.after orelse return false;
+        return self.before.sameAs(after) == true;
+    }
 
     /// 이 경로가 **에이전트 때문에 실제로 달라졌나.**
     ///
@@ -145,15 +166,6 @@ pub const Entry = struct {
         if (self.shell_diff) return after_known and same != true;
         if (self.trigger != .edit) return false;
         return same == false;
-    }
-
-    /// **원격 Term 의 편집 도구 근거**(AT3c): `Edit`·`Write` 가 이 경로를 겨냥했고 내용은 못 읽었다. 이것만으로는
-    /// «바뀌었다» 가 아니다 — 실패한 편집(권한 거부)도 겨냥은 했다. **tree 목록에 그 경로가 있을 때만** `✎` 가
-    /// 되고, 그 판정은 목록을 아는 자리(`turnFileOrigin`·요약 join)가 한다. 그래서 `editedByAgent` 와 갈라 둔다.
-    pub fn remoteEditTargeted(self: Entry) bool {
-        if (self.trigger != .edit) return false;
-        const after = self.after orelse return false;
-        return after == .unknown and after.unknown == .remote;
     }
 
     /// **✎ 인데 근거가 셸 diff 뿐**인가(편집 도구로는 확정 못 했다). 화면이 `TurnFileOrigin.shell_edit` 로 가른다.
@@ -393,6 +405,9 @@ pub const Store = struct {
             .path = owned,
             .trigger = trigger,
             .before = stored,
+            // `Read` 에서 뜬 before 만 편집 전 내용이라 믿는다(위 `Entry.before_trusted`). 모르는 값(`.unknown`)은 비교
+            // 자체가 안 되므로 믿음도 없다.
+            .before_trusted = trigger == .read and stored != .unknown,
         }) catch {
             gpa.free(owned);
             freeSide(gpa, stored);
@@ -692,9 +707,9 @@ test "원격 턴 — 읽지 않은 after 는 셸 diff 를 믿고, 편집 도구 
     // 셸 diff: provider 를 믿는다. 편집 도구: 겨냥만 — 목록이 있어야 ✎. Read: 아무것도 아니다.
     try testing.expect(turn.entries.items[2].editedByAgent());
     try testing.expect(!turn.entries.items[0].editedByAgent());
-    try testing.expect(turn.entries.items[0].remoteEditTargeted());
-    try testing.expect(!turn.entries.items[1].remoteEditTargeted());
-    try testing.expect(!turn.entries.items[2].remoteEditTargeted());
+    try testing.expect(turn.entries.items[0].editTargeted());
+    try testing.expect(!turn.entries.items[1].editTargeted());
+    try testing.expect(!turn.entries.items[2].editTargeted());
     // 봉인 캐시는 셸 diff 하나만 센다 — 편집 도구 몫은 join 이 더한다.
     const id = store.seal(gpa, "R");
     try testing.expectEqual(@as(u32, 1), store.sealedTurn(id).?.edited_count);
@@ -975,4 +990,42 @@ test "세션 상한을 넘는 신원은 받지 않는다 — 잘라 담으면 �
     const too_long = "x" ** (max_session_id_len + 1);
     try testing.expect(!store.noteBefore(gpa, too_long, "/r/a.zig", .edit, .empty));
     try testing.expect(store.openTurn(too_long) == null);
+}
+
+// [AT3d] **`Pre(Edit)` 의 before 는 편집 뒤 내용이다** — 훅 로그를 500 ms 폴링으로 읽으므로(편집 도구 지연 p50 35 ms).
+// 그 before 는 after 와 같아 옛 규칙(`editedByAgent` — before≠after)으로는 `·` 였다. 새 규칙은 겨냥(`editTargeted`)을
+// 근거로 삼고, 목록 join 이 «실제 변경» 을 확인한다. 되돌림(`↩`)은 `Read` 에서 뜬 before 가 있을 때만 말한다.
+test "겨냥 ∧ 목록 (AT3d): 편집 뒤에 읽은 before 는 ✎ 를 막지 않고, ↩ 는 Read 에서 뜬 before 가 있을 때만" {
+    const gpa = testing.allocator;
+    var store: Store = .{};
+    defer store.deinit(gpa);
+    // ⑴ Read 없이 Edit — 폴링이 읽은 before 는 이미 v2(편집 뒤). 옛 규칙: 거짓. 새 규칙: 겨냥.
+    try testing.expect(store.noteBefore(gpa, "D", "/r/late.zig", .edit, .{ .text = try gpa.dupe(u8, "v2") }));
+    store.noteAfter(gpa, "D", "/r/late.zig", .{ .text = try gpa.dupe(u8, "v2") });
+    // ⑵ Read 가 앞선 Edit — before 는 진짜 v1.
+    try testing.expect(store.noteBefore(gpa, "D", "/r/read_then_edit.zig", .read, .{ .text = try gpa.dupe(u8, "v1") }));
+    try testing.expect(!store.noteBefore(gpa, "D", "/r/read_then_edit.zig", .edit, .{ .text = try gpa.dupe(u8, "v2") })); // 격상만
+    store.noteAfter(gpa, "D", "/r/read_then_edit.zig", .{ .text = try gpa.dupe(u8, "v2") });
+    // ⑶ Read 가 앞선 Edit 인데 턴 끝에 처음과 같다 — 되돌림.
+    try testing.expect(store.noteBefore(gpa, "D", "/r/reverted.zig", .read, .{ .text = try gpa.dupe(u8, "same") }));
+    try testing.expect(!store.noteBefore(gpa, "D", "/r/reverted.zig", .edit, .{ .text = try gpa.dupe(u8, "x") }));
+    store.noteAfter(gpa, "D", "/r/reverted.zig", .{ .text = try gpa.dupe(u8, "same") });
+    // ⑷ Read 만 한 파일 — 겨냥이 아니다.
+    try testing.expect(store.noteBefore(gpa, "D", "/r/read_only.zig", .read, .{ .text = try gpa.dupe(u8, "a") }));
+    store.noteAfter(gpa, "D", "/r/read_only.zig", .{ .text = try gpa.dupe(u8, "b") });
+    const turn = store.openTurn("D").?;
+    const late = turn.entries.items[turn.find("/r/late.zig").?];
+    const rte = turn.entries.items[turn.find("/r/read_then_edit.zig").?];
+    const rev = turn.entries.items[turn.find("/r/reverted.zig").?];
+    const ro = turn.entries.items[turn.find("/r/read_only.zig").?];
+    // 옛 규칙의 결함을 그대로 보인다 — 내용 비교로는 ⑴ 이 «안 바뀜» 이다.
+    try testing.expect(!late.editedByAgent());
+    try testing.expect(!late.before_trusted);
+    // 새 규칙: ⑴⑵ 는 겨냥, ⑶ 은 겨냥이지만 되돌림, ⑷ 는 아무것도 아니다.
+    try testing.expect(late.editTargeted() and !late.revertedByAgent());
+    try testing.expect(rte.editTargeted() and rte.before_trusted and !rte.revertedByAgent());
+    try testing.expect(rev.editTargeted() and rev.revertedByAgent());
+    try testing.expect(!ro.editTargeted() and !ro.revertedByAgent());
+    // 편집 뒤에 읽은 before 는 «같다» 를 증명하지 못한다 — ⑴ 은 절대 되돌림이 아니다.
+    try testing.expect(!late.revertedByAgent());
 }

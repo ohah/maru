@@ -856,6 +856,16 @@ fn turnCaptureRef(
     return self.turn_captures.sealedTurn(snap.capture_id);
 }
 
+/// 판정자용 seam — 목록 한 경로의 origin 을 제품 규칙(`turnFileOrigin`)으로 묻는다.
+pub fn turnFileOriginForTest(
+    self: *AppSession,
+    snap: *const maru.session.turn_snapshot.Snapshot,
+    rel_path: []const u8,
+) chrome.components.scm_dock.types.TurnFileOrigin {
+    comptime std.debug.assert(builtin.is_test);
+    return turnFileOrigin(self, turnCaptureRef(self, snap), rel_path);
+}
+
 fn turnFileOrigin(
     self: *AppSession,
     turn: ?*const maru.session.turn_capture.Turn,
@@ -865,9 +875,11 @@ fn turnFileOrigin(
     const repo = self.git_repo orelse return .unknown;
     for (found.entries.items) |entry| {
         if (!turnEntryMatches(self, found, entry.path, repo, rel_path)) continue;
-        // 원격 턴(AT3c): 편집 도구가 겨냥했고 **목록에 있다**(이 함수는 목록 경로로만 불린다) — 그것이 `✎` 의
-        // 전부다. 내용은 읽지 않았으므로 되돌림(`↩`)은 원격에서 판정하지 않는다(계약 §8).
-        if (entry.remoteEditTargeted()) return .ai_edit;
+        // **겨냥 ∧ 목록**(AT3d — 로컬·원격 공통): 편집 도구가 겨냥했고 **목록에 있다**(이 함수는 목록 경로로만 불린다)
+        // 가 `✎` 의 첫 근거다. before≠after 를 요구하지 않는다 — `Pre(Edit)` 에서 뜬 before 는 500 ms 폴링 탓에 이미
+        // 편집 뒤 내용이라(계획 AT3d ②·⑦) 그 비교는 «안 바뀜» 을 거짓으로 말했다. 되돌림(`↩`)은 `Read` 에서 뜬
+        // before 가 있을 때만(`revertedByAgent`) — 그때 목록에 있는 것은 사용자·셸 등 다른 변경이다.
+        if (entry.editTargeted() and !entry.revertedByAgent()) return .ai_edit;
         if (!entry.editedByAgent()) return .turn_change;
         // 근거가 셸 diff 뿐이면 갈라 둔다 — 기호는 같지만(`view.originMark`) 사실은 다르다(AT3b-2).
         return if (entry.shellOnly()) .shell_edit else .ai_edit;
@@ -903,23 +915,20 @@ fn turnEntryMatches(
 /// `turnSummary` 밖에 두는 이유: 그 함수는 세션 없이 값으로 검증되어야 한다(아래 테스트).
 fn editedCountFor(self: *AppSession, snap: *const maru.session.turn_snapshot.Snapshot) u32 {
     if (snap.capture_id == 0) return 0;
-    const turn = self.turn_captures.sealedTurn(snap.capture_id) orelse return 0;
-    // **원격 턴은 목록과 join 해 센 값이 권위다**(AT3c) — 봉인 캐시는 내용을 안 읽어 편집 도구 몫을 못 센다.
-    // 목록이 아직 안 왔으면 0(화면은 0을 그리지 않는다 — «모른다» 와 같은 자리).
-    if (turn.remote) return if (snap.edited_joined_known) snap.edited_joined else 0;
-    // **캐시를 읽는다** — 이 함수는 턴 행마다 **매 프레임** 돈다. 훑어 세는 `countEdited()` 는
-    // 항목마다 `mem.eql` 로 최대 1 MiB 를 비교한다(`turn_capture.Turn.edited_count` 주석).
-    return turn.edited_count;
+    // **목록과 join 해 센 값이 권위다**(AT3c 원격 → AT3d 로컬도). 봉인 캐시(`edited_count`)는 내용 비교라 `Pre(Edit)` 의
+    // 가짜 before(편집 뒤 읽음)를 «안 바뀜» 으로 세어 편집 도구 몫을 빠뜨린다. 목록이 아직 안 왔으면 0 — 화면은 0을
+    // 그리지 않으므로 «모른다» 와 같은 자리이고, 목록은 이 탭을 보는 동안 `pumpTurnSummaries` 가 한 번 읽는다.
+    if (self.turn_captures.sealedTurn(snap.capture_id) == null) return 0;
+    return if (snap.edited_joined_known) snap.edited_joined else 0;
 }
 
-/// 목록과 캡처를 join 해 `✎` 를 센다(AT3c) — **원격 턴에만** 값이 있고 로컬은 `null`(캐시가 권위). 목록이 오는
-/// 자리(`applyTurnSummary`)에서 한 번만 돈다 — 매 프레임 join 하지 않으려고 링에 적어 둔다(공격 G).
+/// 목록과 캡처를 join 해 `✎` 를 센다(AT3c 원격 → AT3d 로컬도). 목록이 오는 자리(`applyTurnSummary`)에서 한 번만
+/// 돈다 — 매 프레임 join 하지 않으려고 링에 적어 둔다(공격 G). 캡처가 없는 턴은 `null`(«모른다»).
 fn joinedEditedCount(self: *AppSession, head_oid: []const u8, sid: []const u8, text: []const u8) ?u32 {
     const ring = self.turn_rings.find(sid) orelse return null;
     const snap = ring.findOid(head_oid) orelse return null;
     if (snap.capture_id == 0) return null;
     const turn = self.turn_captures.sealedTurn(snap.capture_id) orelse return null;
-    if (!turn.remote) return null;
     var n: u32 = 0;
     var files = maru.session.git_status.iterateCommitFiles(text);
     while (files.next()) |f| {
@@ -5019,8 +5028,24 @@ test "턴 파일 배지: 절대경로 캡처와 상대경로 목록이 같은 �
         chrome.components.scm_dock.types.TurnFileOrigin.ai_edit,
         turnFileOrigin(session, turnCaptureRef(session, &snap), "src/edited.zig"),
     );
-    // 턴 줄의 `✎N` 은 둘을 합산한다 — edited(편집 도구) + by_shell(셸 diff) = 2.
-    try std.testing.expectEqual(@as(u32, 2), editedCountFor(session, &snap));
+    // 턴 줄의 `✎N` 은 **목록 join** 으로 센다(AT3d — 로컬도). 목록 전엔 0(그리지 않는 자리), 목록이 오면
+    // edited(편집 도구) + by_shell(셸 diff) = 2 — reverted·shell(읽기만)·never_touched 는 세지 않는다.
+    try std.testing.expectEqual(@as(u32, 0), editedCountFor(session, &snap));
+    {
+        const ring = session.turn_rings.ringFor("S1", "/repo").?;
+        ring.push(.{ .tree = "base0000", .surface_id = 1 });
+        ring.push(.{ .tree = "head1111", .surface_id = 1, .capture_id = id });
+        session.scm_turn_summary_head = try allocator.dupe(u8, "head1111");
+        session.scm_turn_summary_session = try allocator.dupe(u8, "S1");
+        const list =
+            ":100644 100644 a b M\tsrc/edited.zig\n:100644 100644 a b M\tsrc/shell.zig\n:100644 100644 a b M\tsrc/by_shell.zig\n" ++
+            ":100644 100644 a b M\tsrc/reverted.zig\n:100644 100644 a b M\tsrc/never_touched.zig\n" ++
+            "1\t1\tsrc/edited.zig\n1\t1\tsrc/shell.zig\n1\t1\tsrc/by_shell.zig\n1\t1\tsrc/reverted.zig\n1\t1\tsrc/never_touched.zig\n";
+        applyTurnSummary(session, true, list);
+        const marked = session.turn_rings.find("S1").?.findOid("head1111").?;
+        try std.testing.expectEqual(@as(u32, 5), marked.changed_files);
+        try std.testing.expectEqual(@as(u32, 2), editedCountFor(session, marked));
+    }
     // **캡처가 없는 턴은 `.unknown`** 이다 — 「셸이 고쳤다」와 「우리가 못 봤다」를 가른다.
     var no_capture: maru.session.turn_snapshot.Snapshot = .{};
     try std.testing.expectEqual(

@@ -4995,6 +4995,12 @@ test "턴 파일 배지: 절대경로 캡처와 상대경로 목록이 같은 �
     try std.testing.expect(!session.turn_captures.noteShellDiff(gpa, "S1", "/repo/src/reverted.zig"));
     session.turn_captures.noteAfter(gpa, "S1", "/repo/src/reverted.zig", .{ .text = try gpa.dupe(u8, "same") });
     try std.testing.expect(!session.turn_captures.noteShellDiff(gpa, "S1", "/repo/src/edited.zig"));
+    // AT3d 5회차: 편집 도구가 **새로 만든** 파일(before 없음 → after 있음)과 **지운** 파일(apply_patch «Delete File»)도 겨냥이다 —
+    // 목록에는 각각 `A`·`D` 행으로 온다.
+    try std.testing.expect(session.turn_captures.noteBefore(gpa, "S1", "/repo/src/new.zig", .edit, .absent));
+    session.turn_captures.noteAfter(gpa, "S1", "/repo/src/new.zig", .{ .text = try gpa.dupe(u8, "fresh") });
+    try std.testing.expect(session.turn_captures.noteBefore(gpa, "S1", "/repo/src/gone.zig", .edit, .{ .text = try gpa.dupe(u8, "old") }));
+    session.turn_captures.noteAfter(gpa, "S1", "/repo/src/gone.zig", .absent);
     const id = session.turn_captures.seal(gpa, "S1");
     try std.testing.expect(id != 0);
 
@@ -5028,6 +5034,16 @@ test "턴 파일 배지: 절대경로 캡처와 상대경로 목록이 같은 �
         chrome.components.scm_dock.types.TurnFileOrigin.ai_edit,
         turnFileOrigin(session, turnCaptureRef(session, &snap), "src/edited.zig"),
     );
+    // **로컬 join 은 상대화로 정확히 맞춘다** — 꼬리 일치면 루트의 `edited.zig`(다른 파일)가 `src/edited.zig` 의 캡처에
+    // 걸려 `✎` 가 된다(뮤턴트 E2 가 이것을 잡을 판정자가 없어 살아남았다). 꼬리 일치는 원격에서 루트를 모를 때만이다.
+    try std.testing.expectEqual(
+        chrome.components.scm_dock.types.TurnFileOrigin.turn_change,
+        turnFileOrigin(session, turnCaptureRef(session, &snap), "edited.zig"),
+    );
+    try std.testing.expectEqual(
+        chrome.components.scm_dock.types.TurnFileOrigin.turn_change,
+        turnFileOrigin(session, turnCaptureRef(session, &snap), "other/src/edited.zig"),
+    );
     // 턴 줄의 `✎N` 은 **목록 join** 으로 센다(AT3d — 로컬도). 목록 전엔 0(그리지 않는 자리), 목록이 오면
     // edited(편집 도구) + by_shell(셸 diff) = 2 — reverted·shell(읽기만)·never_touched 는 세지 않는다.
     try std.testing.expectEqual(@as(u32, 0), editedCountFor(session, &snap));
@@ -5040,11 +5056,16 @@ test "턴 파일 배지: 절대경로 캡처와 상대경로 목록이 같은 �
         const list =
             ":100644 100644 a b M\tsrc/edited.zig\n:100644 100644 a b M\tsrc/shell.zig\n:100644 100644 a b M\tsrc/by_shell.zig\n" ++
             ":100644 100644 a b M\tsrc/reverted.zig\n:100644 100644 a b M\tsrc/never_touched.zig\n" ++
-            "1\t1\tsrc/edited.zig\n1\t1\tsrc/shell.zig\n1\t1\tsrc/by_shell.zig\n1\t1\tsrc/reverted.zig\n1\t1\tsrc/never_touched.zig\n";
+            ":000000 100644 0 b A\tsrc/new.zig\n:100644 000000 a 0 D\tsrc/gone.zig\n" ++
+            "1\t1\tsrc/edited.zig\n1\t1\tsrc/shell.zig\n1\t1\tsrc/by_shell.zig\n1\t1\tsrc/reverted.zig\n1\t1\tsrc/never_touched.zig\n" ++
+            "1\t0\tsrc/new.zig\n0\t1\tsrc/gone.zig\n";
         applyTurnSummary(session, true, list);
         const marked = session.turn_rings.find("S1").?.findOid("head1111").?;
-        try std.testing.expectEqual(@as(u32, 5), marked.changed_files);
-        try std.testing.expectEqual(@as(u32, 2), editedCountFor(session, marked));
+        try std.testing.expectEqual(@as(u32, 7), marked.changed_files);
+        // edited + by_shell + new(A) + gone(D) = 4
+        try std.testing.expectEqual(@as(u32, 4), editedCountFor(session, marked));
+        try std.testing.expectEqual(chrome.components.scm_dock.types.TurnFileOrigin.ai_edit, turnFileOrigin(session, turnCaptureRef(session, marked), "src/new.zig"));
+        try std.testing.expectEqual(chrome.components.scm_dock.types.TurnFileOrigin.ai_edit, turnFileOrigin(session, turnCaptureRef(session, marked), "src/gone.zig"));
     }
     // **캡처가 없는 턴은 `.unknown`** 이다 — 「셸이 고쳤다」와 「우리가 못 봤다」를 가른다.
     var no_capture: maru.session.turn_snapshot.Snapshot = .{};

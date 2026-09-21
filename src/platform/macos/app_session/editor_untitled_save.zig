@@ -216,14 +216,19 @@ fn writeAndAdopt(self: *AppSession, term: *Term, abs: []const u8, overwriting: b
     // **새 파일과 덮어쓰기는 다른 함수다.** 새 파일은 원본이 없어 CAS 를 걸 수 없고 대신 **배타 생성**
     // 으로 「그 사이에 생긴 파일」을 커널이 막는다. 덮어쓰기는 원본이 있으니 기존 CAS 경로를 그대로
     // 탄다 — 그쪽 방어(부모 핀·RENAME_SWAP·inode 검증)를 다시 짜지 않는다.
-    const ok = if (overwriting)
-        editor_ops.writeDocumentBytes(self, abs, bytes)
+    if (overwriting)
+        // 덮어쓰기는 **사용자가 그 자리에서 고른 것**이라 「연 뒤 바뀌었나」를 다시 묻지 않는다
+        // (`null`) — 방금 「있다」를 보고 「덮어쓴다」고 답했다. 쓰는 동안의 보호는 그대로 돈다.
+        editor_ops.writeDocumentBytes(self, abs, bytes, null) catch |e| {
+            // **이유별로 말한다**(§3.9d) — 여기서 뭉개면 C0 이 올린 것을 다시 지우는 셈이다.
+            self.showNoticeKey(editor_ops.saveFailureNoticeKey(e));
+            return;
+        }
     else
-        editor_ops.createDocumentBytes(self, abs, bytes);
-    if (!ok) {
-        self.showNoticeKey(.app_save_failed);
-        return;
-    }
+        editor_ops.createDocumentBytes(self, abs, bytes) catch |e| {
+            self.showNoticeKey(editor_ops.saveFailureNoticeKey(e));
+            return;
+        };
 
     // **여기부터 실패해도 파일은 이미 있다** — 그래서 실패할 수 있는 일(경로 복사·entry 생성)을
     // 쓰기 **앞에** 둘 수 없다: 그것이 성공하고 쓰기가 실패하면 「경로는 붙었는데 파일이 없는」

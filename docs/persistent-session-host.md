@@ -6461,21 +6461,25 @@ attach하지 못해 앱이 in-process로 폴백했다. host 로그는 `site=atta
 남는다. 분류를 이 전환보다 **먼저** 별도로 도입한 이유는, 오분류 회귀가 곧바로
 checkpoint 오염으로 이어져 재현·롤백이 불가능한 손실이 되기 때문이다.
 
-**새 live→ended 판정은 checkpoint 신호를 한 번 세운다(code-review max 수정).** 처음엔 "래치를 손대지 않는다"였다 — 일시 실패는 묘비가 되지
-않으니 `Unreachable` 묘비라는 범주가 구조적으로 없고, 파일 패널·dock·explorer의 drop만 래치를 세우면 충분하다는 논리였다.
-그 논리의 구멍은 **분류가 틀렸을 때**다: 접속을 한 번만 영구로 오분류해도 그 Term은 묘비가 된다. durable wire가
-handle을 보존하고 `Recovered Sessions`가 runtime을 다시 보여 주더라도 fresh evidence를 통과한 명시적 사용자 action
-전에는 오분류를 되돌릴 수 없으므로 첫 전이 때 마지막 완전본 backup 신호가 필요하다. 그래서 `applyWorkspaceWindow`는 이번
-창에서 새로 live→ended가 된 수를 `dropped`에 합산한다.
-이미 `runtime-state="ended"`로 들어온 후속 relaunch는 완전히 표현된 상태라 dropped 0이다.
+**새 live→ended 판정은 래치를 세우지 않는다(2026-09-21 정정).** 한때는 세웠다 — 처음엔 "래치를 손대지 않는다"였고,
+code-review max 가 「분류가 틀렸을 때」의 구멍을 지적해 첫 전이를 `dropped`에 합산하게 바꿨다. 접속을 한 번만
+영구로 오분류해도 그 Term 은 묘비가 되므로, 마지막 완전본으로 돌아갈 backup 신호가 필요하다는 논리였다.
+
+그 논리는 신호가 「**백업하고** 저장」이던 동안만 성립했다. 2026-09-13 에 종료 저장 예외가 빠지면서 같은 신호가
+「아무것도 안 쓴다」가 됐고, 그 순간 이 합산은 보험이 아니라 **자물쇠**가 됐다 — 2026-09-19 재부팅으로 저장된
+29 개가 전부 무효가 되자 29 개가 모두 여기 세어져, 사용자가 파일을 손으로 치우기 전까지 저장이 영영 막혔다.
+
+그래서 `applyWorkspaceWindow`는 강등 수를 **세되 `dropped`에 합산하지 않는다.** 묘비는 exact handle 과 함께
+온전히 저장되고 그 슬롯은 Recovered Sessions 의 예약으로 쓰이므로, 저장을 막아서 지킬 것이 없다. 이미
+`runtime-state="ended"`로 들어온 후속 relaunch 역시 완전히 표현된 상태라 dropped 0 이다.
 
 **그 신호를 받은 실행이 저장 파일을 어떻게 다루는지는 [workspace-restore.md](workspace-restore.md) 「checkpoint 보호」가 단일 출처다.** 이 문서는 그 결론을
 복제하지 않는다 — 예전에 복제해 둔 탓에 정책이 바뀌었을 때 한쪽만 고쳐져 **두 문서가 서로 다른 정책을 말한 적이 있다**
-(2026-09-13). 이 문서가 지는 책임은 여기까지다: 오분류 대비로 `dropped` 신호를 **한 번** 세운다.
+(2026-09-13). 이 문서가 지는 책임은 여기까지다: 묘비 강등은 세되 `dropped` 래치를 세우지 않는다.
 
 **P4 R1 durable tombstone 구현.** capture는 placeholder의 마지막 handle과 `runtime-state="ended"`를 함께 보존하고,
 reader는 이 상태를 host 경계보다 먼저 placeholder로 만든다. Enter 없는 두 번째 이후 relaunch에서도 자동 spawn하지
-않으며, 위 최초 backup 신호와 일시 실패 fail-close는 그대로 유지한다.
+않으며, 일시 실패(`PersistentRuntimeUnavailable`)의 fail-close는 그대로 유지한다.
 
 **종료 placeholder 객체와 첫 복원 배선(구현됨).** placeholder Term 자체와 그 수명은 `TermRuntime.ended_placeholder`
 + `createEndedPlaceholderTerm`으로 구현했다. `SurfaceKind`(닫힌 열거)를 확장하지 않고 `kind = .terminal`을 유지하며

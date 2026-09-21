@@ -54,6 +54,14 @@ pub const Status = enum(c_int) {
     // 워크스페이스(UnsupportedMove: pinned·그룹은 M3d-2a-ii). Swift 미소비(M3d-2b가 배선하며 app_host_abi.h에 미러). 이
     // 한 event만 거부이고 세션은 유지(fault 아님).
     move_failed = 10,
+    // 저장된 창에 탭이 **하나도 없다**(`window tabs=0`). 이것은 **실패가 아니라 「복원할 게 없음」**이다.
+    // `create_failed` 로 접으면 caller 가 「복원이 불완전하다」로 읽어 그 실행의 저장을 막는데, 잃은 것이
+    // 없으므로 막을 이유가 없다 — 그리고 한 번 막히면 파일이 그대로라 다음 실행도 같은 빈 창을 만나
+    // 또 막힌다(2026-09-21 실측: 앱을 세 번 껐다 켜는 동안 매번 배치가 사라졌다).
+    //
+    // `tabs=0` 자체는 정당한 직렬화 형식이다 — dock·explorer 같은 창 속성만 든 창이 그렇게 적힌다.
+    // 그래서 파서에서 버리지 않고, **적용 결과**를 갈라 caller 가 래치 대신 기본 창으로 가게 한다.
+    workspace_empty = 11,
 };
 
 pub const AppInstanceLeaseResult = enum(u32) {
@@ -3373,6 +3381,9 @@ pub export fn maru_macos_app_session_apply_workspace_window(
     defer parsed.deinit(); // apply가 cwd 슬라이스를 spawn에 다 쓴 뒤 arena 해제(안전)
     if (window_index >= parsed.workspace.windows.len) return @intFromEnum(Status.invalid_config);
     app_session.applyWorkspaceWindow(parsed.workspace.windows[window_index]) catch |err| {
+        // 「복원할 게 없음」은 실패 묶음에서 먼저 뺀다 — 아래 진단은 **무엇이 죽었는지** 를 적는 자리라,
+        // 죽은 것이 없는 사건을 같이 실으면 로그가 거짓을 말한다.
+        if (err == error.EmptyWorkspace) return @intFromEnum(Status.workspace_empty);
         // **`create_failed` 하나가 열일곱을 접는다.** 2026-09-13 실측: 저장 파일에 창 둘(탭 11 + 탭 1)이
         // 온전하고 host 에 세션 23 개가 살아 있는데도 두 창이 모두 `status=4` 로 거절돼, 앱이 기본
         // `/bin/zsh` 한 창으로 뜨고 그 상태가 원본을 덮었다 — 하루에 다섯 번.
@@ -7240,6 +7251,17 @@ test "workspace restore ABI preserves multi-window count active and apply" {
     defer maru_macos_app_session_destroy(session1);
     try std.testing.expectEqual(@as(usize, 0), session1.?.tabs.items.len); // restore 전 throwaway tab/PTY 0.
     try std.testing.expect(!session1.?.surface_initialized);
+
+    // **탭 없는 창은 「복원할 게 없음」이지 실패가 아니다.** `create_failed` 로 접으면 Swift 가 「복원
+    // 불완전」으로 읽어 그 실행의 저장을 막는데, 잃은 것이 없으므로 막을 이유가 없다 — 그리고 한 번
+    // 막히면 파일이 그대로라 다음 실행도 같은 빈 창을 만나 또 막힌다(2026-09-21 실측: 앱을 세 번
+    // 껐다 켜는 동안 매번 탭 배치가 사라졌다). `tabs=0` 자체는 dock·explorer 같은 창 속성만 든 창의
+    // 정당한 직렬화 형식이라 파서에서 버릴 수 없고, 그래서 **적용 결과**를 갈라야 한다.
+    const empty_text = "maru.workspace.v1\nwindow tabs=0 active-tab=0\n";
+    try std.testing.expectEqual(
+        @as(c_int, @intFromEnum(Status.workspace_empty)),
+        maru_macos_app_session_apply_workspace_window(session1, empty_text.ptr, empty_text.len, 0),
+    );
 
     const text =
         "maru.workspace.v1\n" ++

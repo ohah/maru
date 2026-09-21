@@ -4062,6 +4062,38 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run_remote_activity_vertical.step);
         macos_only_test_step.dependOn(&run_remote_activity_vertical.step);
 
+        // 복원 회계 **수직** 판정자 — 재부팅 뒤 저장이 영영 막히던 교착을 잰다. app_session 전체를
+        // 12 분 돌리지 않고 이 축만 본다. `MARU_TEST_KEEP_ONLY_PREFIX` 로 **이름 있는 것만** 세는
+        // 이유: 참조된 모듈의 이름 없는 `test` 블록이 필터와 무관하게 함께 컴파일돼 개수가 남의
+        // 파일 사정에 흔들린다.
+        const restore_accounting_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/app_session.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "maru", .module = maru_mod },
+                    .{ .name = "syntax", .module = syntax_mod },
+                },
+            }),
+            .filters = &.{ "복원 교착", "종료 placeholder 복원" },
+        });
+        restore_accounting_tests.root_module.link_libc = true;
+        for ([_][]const u8{ "AppKit", "Metal", "MetalKit", "QuartzCore", "CoreText", "CoreGraphics", "ImageIO" }) |fw| {
+            restore_accounting_tests.root_module.linkFramework(fw, .{});
+        }
+        restore_accounting_tests.root_module.addCSourceFile(.{
+            .file = b.path("src/platform/macos/coretext_smoke.m"),
+            .flags = &.{"-fobjc-arc"},
+        });
+        const run_restore_accounting = b.addRunArtifact(restore_accounting_tests);
+        run_restore_accounting.setEnvironmentVariable("MARU_TEST_KEEP_ONLY_PREFIX", "app_session.test.복원 교착,app_session.test.종료 placeholder 복원");
+        run_restore_accounting.addArg("--maru-expect-passed=3");
+        run_restore_accounting.setCwd(b.path("."));
+        b.step("test-restore-accounting", "Restore must not latch on tombstone demotion (reboot deadlock)").dependOn(&run_restore_accounting.step);
+        test_step.dependOn(&run_restore_accounting.step);
+        macos_only_test_step.dependOn(&run_restore_accounting.step);
+
         const run_remote_explorer_tests = b.addRunArtifact(remote_explorer_tests);
         run_remote_explorer_tests.addArg("--maru-expect-tests=11"); // 이름 있는 8 + 이 그래프의 이름 없는 test 블록들(필터와 무관하게 컴파일된다)
         run_remote_explorer_tests.setCwd(b.path("."));

@@ -6083,7 +6083,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             if let ws {
                 // 복원 적용 실패인데 default 셸 창을 성공으로 등록하면 persistent runtime 단절을 숨기고 다음 Quit에서
                 // 원래 checkpoint까지 덮는다. 실패 창은 즉시 teardown하고 caller가 incomplete로 기록한다.
-                guard applyWorkspaceWindow(ws.text, ws.index) else {
+                switch applyWorkspaceWindow(ws.text, ws.index) {
+                case .applied: break
+                // 탭 없는 창은 복원할 것이 없다 — 창은 기본 상태로 두고 계속 간다(실패가 아니다).
+                case .empty: break
+                case .failed:
                     fputs("maru: window create failed at applyWorkspaceWindow block=\(ws.index)\n", stderr)
                     return
                 }
@@ -6119,12 +6123,24 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return surface
     }
 
+    /// 복원 적용의 **세 갈래**. `Bool` 로는 「복원할 게 없음」과 「복원 실패」가 한 값으로 접혀,
+    /// caller 가 전자에도 「불완전」 래치를 세웠다 — 잃은 것이 없는데 저장이 막히고, 막히면 파일이
+    /// 그대로라 다음 실행도 같은 빈 창을 만나 또 막혔다(2026-09-21 실측).
+    enum WorkspaceApplyOutcome {
+        case applied
+        /// 저장된 창에 탭이 없다. 기본 창으로 시작하되 **이번 실행의 저장은 막지 않는다.**
+        case empty
+        case failed
+    }
+
+    private static let statusWorkspaceEmpty = Int32(MaruAppHostStatusWorkspaceEmpty.rawValue)
+
     /// 활성 surface(forwarder 대상)의 세션에 workspace **전체 텍스트**의 window_index번째 창을 적용한다 — 헤더
     /// 포함 전체를 그대로 ABI에 넘긴다(창 경계 분할은 Zig가 소유). 일반 live session은 실패해도 기존 모델을 보존하고,
     /// 시작 restore용 deferred session은 빈 상태로 남는다. **적용 성공 여부를 반환**해 호출자가 teardown/fallback과
     /// checkpoint 보존을 결정하게 한다(파싱은 됐어도 attach/spawn 실패 등).
     @discardableResult
-    private func applyWorkspaceWindow(_ text: String, _ index: Int) -> Bool {
+    private func applyWorkspaceWindow(_ text: String, _ index: Int) -> WorkspaceApplyOutcome {
         // **왜 실패했는지 남긴다.** 이 함수는 실패를 `false` 하나로만 말했고, 호출자는 블록 1 이상만
         // 로그를 찍었다 — 그래서 **주 창(블록 0) 실패는 완전히 조용했다.** 2026-09-13 실측: 저장
         // 파일에 창 둘(탭 11 + 탭 1)이 온전했고 host 에도 세션 23 개가 살아 있었는데, 앱은 기본
@@ -6132,24 +6148,34 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 왜 안 왔는지 알 길이 없었다.
         guard let session = appSession else {
             fputs("maru: workspace apply failed block=\(index) at=no_session\n", stderr)
-            return false
+            return .failed
         }
         let bytes = Array(text.utf8)
         let status = bytes.withUnsafeBufferPointer { buf in
             maru_macos_app_session_apply_workspace_window(session, buf.baseAddress, buf.count, index)
         }
+        if status == Self.statusWorkspaceEmpty {
+            // 실패로 적지 않는다 — 죽은 것이 없다. 사유만 남기고 caller 가 기본 창으로 가게 한다.
+            fputs("maru: workspace block=\(index) has no tabs — starting default window (not a restore failure)\n", stderr)
+            return .empty
+        }
         guard status == Self.statusOK else {
             fputs("maru: workspace apply failed block=\(index) at=apply status=\(status)\n", stderr)
-            return false
+            return .failed
         }
         // 복원은 손상된 파일 패널 entry·그 결과로 비워진 dock 그룹·접근 불가 explorer root를 **버리면서도 성공을
         // 반환**한다. 그 사실을 모르면 다음 Quit의 자동 checkpoint가 버려진 상태를 파일에 커밋해 사용자가 도크 배치와
         // explorer root를 영구히 잃는다. apply가 성공했어도 버린 것이 있으면 이번 실행의 저장을 막아 마지막 완전본을
         // 보존한다(v144, saveWorkspace의 guard와 같은 래치). 창마다 호출되므로 drain은 창별로 판정된다.
-        if maru_macos_app_session_take_workspace_restore_dropped(session) != 0 {
+        // **래치를 세운 이유를 남긴다.** 이 자리는 지금까지 완전히 침묵해서, 저장이 왜 건너뛰어졌는지
+        // 사용자에게도 로그에도 아무 흔적이 없었다(2026-09-19 실측 — 파일 상태로 역산해야 했다).
+        // 세부 회계(dropped·demoted)는 Zig 쪽 `workspace restore accounting:` 줄이 든다.
+        let droppedCount = maru_macos_app_session_take_workspace_restore_dropped(session)
+        if droppedCount != 0 {
+            fputs("maru: workspace restore dropped \(droppedCount) unrepresentable item(s) block=\(index) — this run will not save\n", stderr)
             workspaceRestoreIncomplete = true
         }
-        return true
+        return .applied
     }
 
     /// (M3f) 저장된 workspace에서 window_index 창의 frame(전역 스크린 좌표)을 읽어, 화면 안이면 그대로·아니면 main
@@ -6247,13 +6273,17 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 매핑을 만든다 — 블록 0 = primary, 추가 창 i = createTerminalWindow가 성공 시 반환한 surface(실패 = 키 없음).
         var windowByBlock: [Int: TerminalSurface] = [:]
         if let primary { windowByBlock[0] = primary }
-        var primaryApplied = false
-        withSurface(primary) { primaryApplied = applyWorkspaceWindow(text, 0) }
-        if !primaryApplied {
+        var primaryOutcome: WorkspaceApplyOutcome = .failed
+        withSurface(primary) { primaryOutcome = applyWorkspaceWindow(text, 0) }
+        if primaryOutcome != .applied {
             // **블록 1 이상과 같은 모양으로 남긴다.** 이 비대칭 자체가 결함이었다 — 추가 창 실패는
             // 보이는데 주 창 실패는 안 보여, 「복원이 왜 안 되나」가 로그에서 통째로 사라졌다.
-            fputs("maru: workspace restore failed to apply window block=0 of \(count)\n", stderr)
-            workspaceRestoreIncomplete = true
+            // **빈 창은 래치를 세우지 않는다.** 아래 fallback 은 둘 다 타야 한다(deferred 세션에는 쓸 수 있는
+            // surface 가 없다). 다른 것은 「저장을 막을 손실이 있었는가」뿐이고, 빈 창에는 없다.
+            if primaryOutcome == .failed {
+                fputs("maru: workspace restore failed to apply window block=0 of \(count)\n", stderr)
+                workspaceRestoreIncomplete = true
+            }
             // deferred primary에는 fallback surface도 없다. 실패한 staged attach를 Zig가 rollback한 뒤 이 빈 세션을
             // 폐기하고 명시적인 default-shell 세션을 새로 만들어 사용자에게 usable 창을 남긴다.
             if deferredInitialSurface {

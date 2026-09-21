@@ -7136,7 +7136,12 @@ pub fn isDirty(term: *const Term) bool {
 pub fn saveFailureNoticeKey(e: AppSession.FilePanelWriteError) maru.i18n.Key {
     return switch (e) {
         // 파일이 그 사이 바뀌었다 — 사용자가 고를 일이 있다(C1 이 그 선택을 연다).
-        error.ExternalConflict => .app_save_external_conflict,
+        //
+        // ⚠️ **브리지 문구를 쓰지 않는다.** 그쪽 문장은 *"파일을 다시 불러온 뒤 저장하세요"* 인데
+        // **네이티브 편집기에는 다시 불러오는 길이 없다** — 그 요청은 Swift 에서 `webPanels[sid]` 로만
+        // 가고 네이티브 Term 은 그 표에 없다(적대적 4회차에서 확인). 할 수 없는 일을 시키지 않는다:
+        // **무엇이 일어났고 무엇이 안전한지**만 말하고, 고를 것을 주는 일은 C1 이 한다.
+        error.ExternalConflict => .editor_save_external_conflict,
         error.TooLarge => .app_save_too_large,
         // 자리 자체가 없어졌다(지워졌거나 부모가 사라졌다) — 다시 눌러도 같다.
         error.NotFound => .editor_save_gone,
@@ -36604,7 +36609,14 @@ test "C0a 저장 실패는 이유별로 말한다 — 하나로 뭉개면 죽는
         };
         fx.session.dispatchAppAction(.editor_save);
         try testing.expect(fx.session.chrome_host.notice.open);
+        // **네이티브 문구다** — 브리지 문장은 *"다시 불러온 뒤 저장하세요"* 인데 이 표면에는 다시
+        // 불러오는 길이 없다(적대적 4회차). 할 수 없는 일을 시키지 않는 것까지 잰다.
         try testing.expect(std.mem.startsWith(
+            u8,
+            &fx.session.notice_message_buf,
+            maru.i18n.t(.editor_save_external_conflict),
+        ));
+        try testing.expect(!std.mem.startsWith(
             u8,
             &fx.session.notice_message_buf,
             maru.i18n.t(.app_save_external_conflict),

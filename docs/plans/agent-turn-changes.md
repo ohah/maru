@@ -1211,6 +1211,14 @@ agent-hooks` 를 돌린다 — 지금은 `~/.local/bin/maru`, 09-03 빌드)가 �
 턴 345·편집 대상 경로 1,039 중 **같은 턴에 `Read` 가 앞선 것은 33(3.2%)** — 옛 규칙이 `✎` 를 세울 수 있던 상한이다(①' 의 36%
 는 세션 전체 기준이라 과대). 새 규칙은 1,039 전부 겨냥(목록 join 은 트랜스크립트로 못 잰다). Edit 뒤 같은 파일 Read 는 18건.
 
+**3~5회차 (2026-09-21, 사용자 요청 «3회 더»)**
+
+| 회차 | 층 | 결과 |
+|---|---|---|
+| 3 | 도크 join 층 뮤턴트 5 | E1 join 이 `turn_change` 도 셈·E3 원격 턴에만 join(AT3c 되돌림)·E4 셸 diff 가 겨냥보다 앞섬·E5 목록 대신 캡처 항목을 셈 — 잡힘. **E2 로컬 join 이 상대화 대신 꼬리 일치(루트의 같은 이름 파일 오인) — 컴파일되는 변형이 생존** → 배지 판정자에 `edited.zig`(루트)·`other/src/edited.zig` 가 `.turn_change` 인 단언을 더해 잡음 |
+| 4 | 규칙 불변식 property(무작위 Read/Edit/셸 diff 순서 × after, 2만 회 — `scratchpad/at3d_property.zig`) | I1 `editTargeted` ⇔ Edit 있음 · I2 `before_trusted` ⇔ 첫 캡처가 Read · I3 `revertedByAgent` ⇒ 신뢰 ∧ 첫 내용==after · I4 before 는 첫 캡처로 고정 · I6 셸 diff ∧ 내용 다름 ⇒ `editedByAgent` · I7 Read 만 ⇒ 거짓 — **위반 0**(처음 6,998건은 하네스가 «셸 diff 가 첫 캡처» 를 잘못 모델링한 것 — 그때 before 는 `no_before` 다) |
+| 5 | 페이로드 모양 | `Write` 새 파일(`A`)·`apply_patch` «Delete File»(`D`) → `✎` 로 세는 판정자 추가(✎N 4). **`NotebookEdit` 은 `notebook_path` 를 쓰는데 파서는 `file_path` 만 읽는다** → 캡처 안 됨. 60일 트랜스크립트에 `NotebookEdit`·`MultiEdit` 0건이라 코드는 안 바꾸고 §8 한계로 적는다 |
+
 ### AT4 — 배지·고지 합류 ✅ 고지 줄 완료 (2026-08-25) · 나머지 셋은 tree 제거와 묶인다
 
 > **2026-08-25 적대적 검증.** 이 절은 항목 넷을 나란히 적었는데 **셋은 공존에서 낼 수 없거나 뜻이 다르다.**

@@ -170,6 +170,44 @@ pub const Graph = struct {
         return v.depends_on;
     }
 
+    /// **역방향** — 누가 이것을 매달았나. `step.dependOn(&run_x.step)` 는 `step` 쪽에 기록되므로,
+    /// 「이 run 이 어느 step 에 붙었나」는 이 함수로만 답할 수 있다.
+    ///
+    /// **이 API 가 없어서 실제로 틀렸다**: 파일럿 범위를 재면서 38건이 「어느 step 에도 안 매달린다」고
+    /// 읽었는데, 실은 `oracle_step.dependOn(&run_oracle_tests.step)` 처럼 **매달려 있었다**.
+    /// 방향이 하나뿐인 조회는 빈 값을 「없다」로 읽게 만든다 — 그것이 이 파일이 고치려는 사고다.
+    ///
+    /// 호출자가 결과를 소유하지 않는다(뷰의 arena 수명을 따른다). 채울 버퍼를 받는다.
+    pub fn dependentsOf(
+        self: Graph,
+        target: []const u8,
+        out: *std.ArrayList([]const u8),
+        a: std.mem.Allocator,
+    ) !void {
+        for (self.vars) |v| {
+            for (v.depends_on) |d| {
+                if (std.mem.eql(u8, d, target)) {
+                    try out.append(a, v.name);
+                    break;
+                }
+            }
+        }
+    }
+
+    /// 누가 이것을 매달았는지의 **수**. 버퍼 없이 묻고 싶을 때.
+    pub fn countDependentsOf(self: Graph, target: []const u8) usize {
+        var n: usize = 0;
+        for (self.vars) |v| {
+            for (v.depends_on) |d| {
+                if (std.mem.eql(u8, d, target)) {
+                    n += 1;
+                    break;
+                }
+            }
+        }
+        return n;
+    }
+
     /// `dependenciesOf` 중 접두가 맞는 것의 수.
     pub fn countDependenciesWithPrefix(self: Graph, var_name: []const u8, prefix: []const u8) usize {
         var n: usize = 0;
@@ -624,4 +662,33 @@ test "other 는 뷰가 모르는 배선을 신고한다" {
         if (v.other.len > 0) with_other += 1;
     }
     try std.testing.expect(with_other > 0);
+}
+
+test "dependentsOf 는 «누가 나를 매달았나» 를 답한다 — 방향이 하나뿐이면 빈 값을 「없다」로 읽는다" {
+    const a = std.testing.allocator;
+    var g = try parse(a);
+    defer g.deinit();
+
+    const text = try build_source.read(a);
+    defer a.free(text);
+
+    // `run_oracle_tests` 는 정방향(`depends_on`)으로 보면 비어 있다 — 자기가 매단 것이 없으니까.
+    const v = g.varCalls("run_oracle_tests") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 0), v.depends_on.len);
+
+    // 하지만 «매달려 있다». 역방향으로 물어야 보인다.
+    try std.testing.expect(g.countDependentsOf("run_oracle_tests") >= 1);
+
+    var who: std.ArrayList([]const u8) = .empty;
+    defer who.deinit(a);
+    try g.dependentsOf("run_oracle_tests", &who, a);
+    var found_oracle_step = false;
+    for (who.items) |w| {
+        if (std.mem.eql(u8, w, "oracle_step")) found_oracle_step = true;
+    }
+    try std.testing.expect(found_oracle_step);
+
+    // 문자열 판정과 대조 — `X.dependOn(&run_cwd_axis_boundary_tests.step)` 의 X 가 몇인가
+    const old_count = countOccurrences(text, ".dependOn(&run_cwd_axis_boundary_tests.step)");
+    try std.testing.expectEqual(old_count, g.countDependentsOf("run_cwd_axis_boundary_tests"));
 }

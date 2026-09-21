@@ -299,7 +299,7 @@ control socket 경로가 규격 초과 · 재시도 예산 소진. 그래서 `st
   넣어 둔 `preferredNotifChannel`·`[tui] notifications` 는 **그대로 두어도 무해**하다(그 Term 에서만 무시된다)
   — 축이 죽어 관측 모드로 강등되면 다시 산다. 그 성질을 문서에 적어 사용자가 설정을 지우지 않게 한다.
 
-### RA7 — 한 tmux 세션의 pane 여럿을 각각 드러낸다 (설계, 2026-09-02)
+### RA7 — 한 tmux 세션의 pane 여럿을 각각 드러낸다 (설계 2026-09-02 · 재실측·조각화 2026-09-21)
 
 **증상**: 원격 tmux 세션 하나에 pane 을 여럿 열고 각 pane 에서 claude 를 돌리면 **하나만 감지된다.**
 사용자 보고이고, 같은 기계에서 실물로 확인했다 — 스풀에 `t16`·`t18`·`t27` 이 각각 살아 이벤트를 쌓는데
@@ -470,6 +470,41 @@ Term 수명마다 할당·해제가 붙어 그 규율이 막으려던 것을 그
 - pane 이 수십 개인 tmux 세션에서 사이드바 행이 몇 개까지 늘어나는가(§3 의 동적 높이 재투영 비용).
 - 역조회는 pane 마다 한 번씩 도는가, 세션당 한 번인가 — `route_ttl_ms` 캐시가 pane 축에서도 유효한지.
 - 사용자가 pane 을 닫은 뒤 목록에서 사라지기까지의 시간(위 4번의 접는 규칙과 같은 문제).
+
+#### RA7 재실측 (2026-09-21) — 사용자 결정 «지금 플로우도, RA7 플로우도 둘 다»
+
+| # | 물음 | 답 | 성격 |
+|---|---|---|---|
+| ① | 이 Mac 의 tmux 배치 | 서버 1(`/private/tmp/tmux-501/default`), 세션 **11개 전부 창 1·pane 1**, 각각 따로 attach. 에이전트 pane 9(claude 2.1.26x~271)가 **모두 다른 세션**에 하나씩. 같은 세션에 에이전트 pane 둘 이상: **0** | 실측(`tmux list-panes -a`) |
+| ② | 스풀 옆 파일 | `t8·t15·t16·t18·t19·t20·t24·t27·t37` 전부 다른 pane — 같은 세션 겹침 0 | 실측 |
+| ③ | 지금 플로우(세션당 pane 1)는 실기로 서는가 | **선다** — `MARU_E2E_TMUX_PANES=1 tools/remote-scm/agent_turn_e2e.sh`: `LC_MARU_PANE` 없이 뜬 tmux 서버의 pane 에서 claude 한 턴 → 훅이 `t0.ndjson`+`.tmux`(`/tmp/maru-e2e-tmux.<pid>,<pid>,0 %0`) 로 적고 → 스트리머 역조회(RA6)가 attach 클라이언트의 `LC_MARU_PANE` 으로 주인을 찾아 → 에이전트 탭 «2개 파일 · ✎ AI 편집 2», 원격 스냅샷 idx 생성 | 실기 |
+| ④ | RA7 플로우(한 세션에 pane 2)는 지금 어떻게 보이나 | `MARU_E2E_TMUX_PANES=2`: 두 pane 이 각각 claude 한 턴(`t0`·`t1` 스풀, 세션 id 둘) → GUI 는 **Term 하나·에이전트 행 하나**, 에이전트 탭은 한 세션의 턴만(«3개 파일 · ✎ 2» — 3개는 두 턴이 바꾼 파일 합, ✎2 는 그 세션 몫), 알림 배지 2. 다른 세션의 턴은 링에 있지만 화면에 없다 — RA7.3 착지 상태 그대로 | 실기 |
+| ⑤ | 훅 상태가 Term 에 몇 개나 박혀 있나 | `applyHookEvent` 가 만지는 Term 필드: `agent_transcript`(신원·대화) 22 · `agent_kind` 21 · `agent_hook_state` 12 · `agent_hook_progress` 12 · `agent_hook_notice` 10 · `agent_hook_backlog_catchup` 9 · `agent_state` 8 · `agent_hook_tool` 5 · `agent_hook_turn_opened_wall_ns`·`agent_hook_turn_seq`·`agent_hook_cwd`·`agent_image_source` — «상태 자리가 Term 당 하나» 가 실체다 | 코드 확인 |
+
+**설계 (RA7.2·RA7.3 그대로, 조각으로 나눈다)**
+
+1. **`HookSlot`** — 위 ⑤ 의 훅 모드 상태를 한 구조체로 뽑는다(`session_model` 의 Term 에 하나 인라인). `applyHookEvent(self, term, slot, ev)`
+   가 Term 대신 slot 을 쓴다. 로컬·원격(pane 하나)은 Term 의 인라인 slot — **동작 불변**(이 조각만으로 PR 하나, 판정자 전부 그대로).
+2. **pane 테이블** — `AppSession.remote_agent_panes: [max]RemotePaneEntry{surface_id, pane, slot}`(RA7.3.2 ⓒ, `RingMap` 과 같은 모양 —
+   상한·LRU 퇴출·`evicted` 고지). `consumeRemoteAgentLines` 가 `e.pane` 이 비어 있지 않으면 그 pane 의 slot 으로 보낸다(없으면 만든다);
+   비면 Term 인라인 slot(지금과 같다). 턴 캡처·링은 세션 id 키라 그대로 갈린다.
+3. **Term 집계** — 배지: 하위 slot 중 하나라도 `running` 이면 running, 아니면 blocked, 아니면 idle(RA7.3 결정 1). 대화 줄: 가장 최근
+   이벤트의 slot. 알림: slot 마다(지금 실기 ④ 에서 배지 2 가 뜬 것과 같다).
+4. **사이드바** — 원격 Term 행 아래 pane 행(«%0 · 상태 · 대화 한 줄»), 클릭은 Term 까지(결정 2) + `rememberAgentSession(그 pane 의 세션)`
+   → 에이전트 탭이 그 세션의 링을 보인다. 닫힌 pane 은 접지 않는다(결정 4 — 스풀 7일 회수).
+5. 검증: `MARU_E2E_TMUX_PANES=2` 가 «행 둘·각각 ✎·탭 전환» 을 찍는다; 조각 1 은 캡처 게이트 56 + 원격 판정자 전부 불변이 증거.
+
+**착수 전 적대적 공격 (2026-09-21)**
+
+| # | 공격 | 결과 |
+|---|---|---|
+| A | 조각 1(HookSlot 추출)이 «동작 불변» 이라는 말을 무엇이 증명하나 | `test-agent-turn-capture`·`test-provider-session-removal`·app_session 훅 판정자 전부와 실기 e2e(0·1 pane) 가 바이트 하나 안 바뀌고 초록 — 그것이 증거다. 필드 이름이 바뀌므로 판정자는 손대지만 단언은 그대로 |
+| B | 한 배치에 두 pane 의 이벤트가 섞이면 `TurnBatch` 가 갈린다 | `TurnBatch` 는 slot 별로 든다(pane 마다 하나) — 지금 Term 별로 하나인 것과 같은 규율. `facts.session` 이 세션 id 라 스냅샷은 애초에 갈린다(실기 ④ 에서 두 idx 가 각각 생겼다) |
+| C | 같은 pane 번호가 다른 tmux **서버**에 있다(`t0` 가 두 서버에) | 스풀 이름은 같지만 옆 파일의 `$TMUX` 소켓이 다르다 — 스트리머가 역조회로 nonce 를 되찾으니 wire 의 `pane` 은 «그 nonce 의 서버 안 pane» 이다. 테이블 키는 (surface_id, pane) 이고 surface_id 가 이미 nonce(=Term) 을 가르니 충돌 없음. 단 **같은 Term 이 서버를 바꾸면**(tmux 를 껐다 켬) 옛 `%0` 과 새 `%0` 이 같은 키 — 결정 4 대로 접지 않으므로 옛 slot 을 새 이벤트가 이어받는다(무해: 상태는 최신 이벤트가 정한다) |
+| D | pane 행이 생기면 사이드바 높이 재투영 비용(RA7.4) | pane 행은 원격 Term 에만, 실기 상한은 세션당 pane 수 — 이 사용자 0~2. `max_remote_panes` 를 16 으로 작게 잡고 퇴출을 고지한다 |
+| E | 로컬 tmux(로컬 pane 안 tmux 여럿) | 로컬 훅은 `MARU_HOOK_PANE` 으로 적어 tmux 와 무관 — 로컬은 pane 축이 없다(pane 필드는 원격 wire 에만 있다). 범위 밖으로 명시 |
+| F | 알림이 pane 마다 나가면 «완료» 가 두 배 | 그것이 맞다 — 두 에이전트가 각각 끝났다. 지금도 실기 ④ 에서 2 가 떴다(같은 Term 에 접혀도 알림은 이벤트마다) |
+| G | 조각 2 없이 조각 1 만 머지되면 | 무해(동작 불변). 조각 단위 PR 이 가능한 이유 |
 
 ### RA8 — 훅 커맨드 통일: 로컬/원격 설치기가 같은 바이트를 써서 핑퐁을 없앤다 ✅ 완료 (2026-09-21)
 

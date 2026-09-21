@@ -34650,3 +34650,55 @@ test "U1l 창이 둘이어도 이름이 겹치지 않는다 — 발급기가 앱
         try testing.expect(!std.mem.eql(u8, n, m));
     };
 }
+
+test "U1m 이름 없는 문서만 있는 pane 은 «기본 셸 하나»로 복원된다 — 창을 잃지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+
+    // **이것은 알려진 한계를 못 박는 판정자다.** 이름 없는 문서는 아직 저장 시퀀스에 없으므로(U4 가
+    // 붙인다) 그것만 있는 pane 은 복원할 것이 0 이고, 저장이 **기본 셸 placeholder 하나**를 넣는다
+    // (web-only pane 과 같은 자리). 한계인 것은 맞지만 **창을 잃는 것과는 다르다** — 여기서 자리 수가
+    // 0 이 되면 `buildWorkspacePane` 이 `EmptyPane` 으로 복원을 통째로 중단해 그 창의 탭·split·frame 이
+    // 다음 checkpoint 에서 영구히 사라진다. 그래서 「하나」를 센다.
+    const pane = pane_ops.activePane(fx.session);
+    _ = try openUntitledInActivePane(fx.session);
+    // 터미널들을 걷어내 pane 에 이름 없는 문서만 남긴다.
+    var i: usize = pane.terms.items.len;
+    while (i > 0) {
+        i -= 1;
+        if (pane.terms.items[i].kind != .editor) {
+            term_ops.closeTermAt(fx.session, fx.session.app_window.active_tab, pane, i);
+        }
+    }
+    try testing.expectEqual(@as(usize, 1), pane.terms.items.len);
+    try testing.expect(pane.terms.items[0].rt.editor_untitled != null);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const wtab = try tab_ops.captureWorkspaceTab(fx.session, arena.allocator(), tab_ops.activeTab(fx.session));
+    const wp = wtab.panes[0];
+    // 편집기는 안 실린다(U1g) — 대신 **기본 셸 placeholder 하나**가 선다. 0 이면 창을 잃는다.
+    try testing.expectEqual(@as(usize, 1), wp.surfaces.len);
+    try testing.expectEqual(@as(usize, 0), wp.file_terms.len);
+    try testing.expectEqualStrings("", wp.surfaces[0].command); // 기본 로그인 셸(placeholder)
+    try testing.expect(wp.active_term < wp.surfaces.len + wp.file_terms.len);
+}
+
+test "U1n 조합(IME)도 바로 받는다 — 커서가 서 있는 것의 다른 얼굴이다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+
+    const t = try openUntitledInActivePane(fx.session);
+    // **조합은 selection 이 없으면 안 받는다**(그 술어는 확정과 같다). 커서를 세우지 않았다면 여기서
+    // 조합 글자가 안 들어가고, 사용자는 한글을 한 글자도 못 친다 — U1d(확정)와 **다른 축**이다.
+    setEditorPreedit(fx.session, t, "\xed\x95\x9c"); // "한"
+    try testing.expectEqualStrings("\xed\x95\x9c", t.rt.editor_preedit);
+    // 확정하면 문서에 들어간다.
+    setEditorPreedit(fx.session, t, "");
+    try testing.expect(insertText(fx.session, t, "\xed\x95\x9c"));
+    try testing.expectEqualStrings("\xed\x95\x9c", t.rt.editor_doc.?.file.content);
+}

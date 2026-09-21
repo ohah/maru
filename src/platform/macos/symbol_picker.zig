@@ -46,7 +46,7 @@ pub const List = struct {
 };
 
 /// ASCII 대소문자 무시 **바이트** 부분일치. needle 이 비면 true(전체 통과).
-fn containsFoldAscii(haystack: []const u8, needle: []const u8) bool {
+pub fn containsFoldAscii(haystack: []const u8, needle: []const u8) bool {
     if (needle.len == 0) return true;
     if (needle.len > haystack.len) return false;
     const last = haystack.len - needle.len;
@@ -102,7 +102,7 @@ fn fitLabel(allocator: std.mem.Allocator, text: []const u8, max_cols: usize) ![]
 }
 
 /// 앞을 남기고 꼬리를 `…` 로. 잎 이름이 혼자서도 넘칠 때 쓴다.
-fn fitHead(allocator: std.mem.Allocator, text: []const u8, max_cols: usize) ![]u8 {
+pub fn fitHead(allocator: std.mem.Allocator, text: []const u8, max_cols: usize) ![]u8 {
     if (max_cols == 0) return allocator.alloc(u8, 0);
     if (displayCols(text) <= max_cols) return allocator.dupe(u8, text);
     const budget = max_cols - 1; // 1칸은 "…" 몫
@@ -125,7 +125,7 @@ fn fitHead(allocator: std.mem.Allocator, text: []const u8, max_cols: usize) ![]u
 
 /// 표시 폭(East Asian Wide = 2칸). chrome 의 `overlay_input.displayCols` 와 같은 셈법이되 이 모듈은
 /// chrome 을 import 하지 않으므로(platform 전용) 최소한만 둔다.
-fn displayCols(text: []const u8) usize {
+pub fn displayCols(text: []const u8) usize {
     var i: usize = 0;
     var cols: usize = 0;
     while (i < text.len) {

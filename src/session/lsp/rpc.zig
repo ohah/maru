@@ -23,11 +23,12 @@ pub const RequestId = union(enum) {
     completion_resolve: u32,
     semantic_tokens: u32,
     folding_range: u32,
+    references: u32,
 };
 /// 요청 id 는 **i32 안**이어야 한다(2026-09-20 실측): rust-analyzer·ruff 가 쓰는 Rust `lsp-server` 크레이트는 정수 id 를 i32 로만 읽고,
 /// 넘치면 그 메시지를 **알림으로 오인해 버린다**(`6_000_000_001` 짜리 completion 이 stderr 에 `unhandled notification` 으로만 남고 응답이
 /// 없었다 — hover·definition 만 i32 안이라 그 둘만 됐다). 종류마다 `id_span`(1e8) 칸을 갖고 seq 는 칸 안에서 돈다(`nextSeq`) —
-/// 가장 큰 칸(11e8+1e8-1) 도 i32 최대(2_147_483_647) 아래. `classify` 는 칸으로 가른다.
+/// 가장 큰 칸(12e8+1e8-1) 도 i32 최대(2_147_483_647) 아래. `classify` 는 칸으로 가른다.
 pub const id_span: u32 = 100_000_000;
 pub const initialize_id: u32 = 1;
 pub const shutdown_id: u32 = 2;
@@ -53,8 +54,10 @@ pub const completion_resolve_id_base: u32 = 9 * id_span;
 pub const semantic_tokens_id_base: u32 = 10 * id_span;
 /// `textDocument/foldingRange`(§8.2j)
 pub const folding_range_id_base: u32 = 11 * id_span;
+/// `textDocument/references`(§8.2l)
+pub const references_id_base: u32 = 12 * id_span;
 comptime {
-    std.debug.assert(@as(u64, folding_range_id_base) + id_span - 1 <= std.math.maxInt(i32));
+    std.debug.assert(@as(u64, references_id_base) + id_span - 1 <= std.math.maxInt(i32));
 }
 /// 종류별 seq 의 다음 값 — 칸 안에서 돈다(0 은 안 쓴다: 처음 보내는 요청이 `base + 1`).
 pub fn nextSeq(seq: u32) u32 {
@@ -65,7 +68,7 @@ pub fn nextSeq(seq: u32) u32 {
 fn requestIdOf(id_num: i64) ?RequestId {
     if (id_num == initialize_id) return .initialize;
     if (id_num == shutdown_id) return .shutdown;
-    if (id_num < hover_id_base or id_num >= @as(i64, folding_range_id_base) + id_span) return null;
+    if (id_num < hover_id_base or id_num >= @as(i64, references_id_base) + id_span) return null;
     const slot: u32 = @intCast(@divTrunc(id_num, id_span));
     const seq: u32 = @intCast(@mod(id_num, id_span));
     return switch (slot) {
@@ -80,6 +83,7 @@ fn requestIdOf(id_num: i64) ?RequestId {
         9 => .{ .completion_resolve = seq },
         10 => .{ .semantic_tokens = seq },
         11 => .{ .folding_range = seq },
+        12 => .{ .references = seq },
         else => null,
     };
 }
@@ -132,6 +136,7 @@ pub fn initializeRequest(allocator: std.mem.Allocator, root_uri: []const u8, pid
                         .multilineTokenSupport = false,
                         .overlappingTokenSupport = false,
                     },
+                    .references = .{ .dynamicRegistration = false }, // 참조 피커(§8.2l)
                     // 접힘 3층(§8.2j) — 줄 접힘만, 종류 셋을 안다고 선언한다(쓰지는 않는다 — 서버가 종류 때문에 범위를 빼지 않게).
                     .foldingRange = .{
                         .lineFoldingOnly = true,
@@ -421,6 +426,22 @@ pub fn formattingRequest(allocator: std.mem.Allocator, seq: u32, uri: []const u8
 }
 
 /// 오류 응답의 `error.message`(문자열일 때만) — 알림에 싣는다(§8.2f 「이름을 바꿀 수 없습니다 — {0}」).
+/// `-32801 ContentModified`·`-32802 ServerCancelled` — 「지금은 못 답한다, 다시 물어라」(LSP 3.17). 사용자가 부른 요청은 잠시 뒤 다시 보낸다(§8.2l).
+pub const err_content_modified: i64 = -32801;
+pub const err_server_cancelled: i64 = -32802;
+
+pub fn isRetryableError(code: ?i64) bool {
+    const c = code orelse return false;
+    return c == err_content_modified or c == err_server_cancelled;
+}
+
+fn errorCode(obj: std.json.ObjectMap) ?i64 {
+    const e = obj.get("error") orelse return null;
+    if (e != .object) return null;
+    const c = e.object.get("code") orelse return null;
+    return if (c == .integer) c.integer else null;
+}
+
 fn errorMessage(obj: std.json.ObjectMap) ?[]const u8 {
     const e = obj.get("error") orelse return null;
     if (e != .object) return null;
@@ -492,6 +513,32 @@ pub fn semanticTokensRangeRequest(allocator: std.mem.Allocator, seq: u32, uri: [
         .method = "textDocument/semanticTokens/range",
         .params = .{ .textDocument = .{ .uri = uri }, .range = range },
     }, .{});
+}
+
+/// `textDocument/references`(§8.2l) — caret 자리, 선언 포함.
+pub fn referencesRequest(allocator: std.mem.Allocator, seq: u32, uri: []const u8, line: u32, character: u32) error{OutOfMemory}![]u8 {
+    return std.json.Stringify.valueAlloc(allocator, .{
+        .jsonrpc = "2.0",
+        .id = references_id_base + seq,
+        .method = "textDocument/references",
+        .params = .{ .textDocument = .{ .uri = uri }, .position = .{ .line = line, .character = character }, .context = .{ .includeDeclaration = true } },
+    }, .{});
+}
+
+/// 응답의 위치 **전부**(§8.2l) — `Location[]`·`LocationLink[]`·단일 `Location`. 각 항목은 `definitionTarget` 과 같은 규칙(LocationLink 는
+/// `targetSelectionRange` 우선). 모양이 아닌 항목은 뺀다. 돌려주는 것은 호출자 소유(문자열은 `result` 를 빌린다).
+pub fn locationsFromResult(allocator: std.mem.Allocator, result: ?std.json.Value) error{OutOfMemory}![]Target {
+    const r = result orelse return &.{};
+    var out: std.ArrayList(Target) = .empty;
+    errdefer out.deinit(allocator);
+    switch (r) {
+        .object => if (definitionTarget(r)) |t| try out.append(allocator, t),
+        .array => |a| for (a.items) |it| {
+            if (definitionTarget(it)) |t| try out.append(allocator, t);
+        },
+        else => {},
+    }
+    return try out.toOwnedSlice(allocator);
 }
 
 /// `textDocument/foldingRange`(§8.2j) — 문서 전체(범위 인자가 없다).
@@ -718,7 +765,7 @@ pub fn pathFromFileUri(uri: []const u8, out: []u8) ?[]const u8 {
 /// 들어온 메시지의 갈래.
 pub const Incoming = union(enum) {
     /// 우리가 보낸 요청의 응답. `result` 는 트리 안의 값(파싱 결과가 사는 동안 유효).
-    response: struct { id: RequestId, result: ?std.json.Value, is_error: bool, error_message: ?[]const u8 = null },
+    response: struct { id: RequestId, result: ?std.json.Value, is_error: bool, error_message: ?[]const u8 = null, error_code: ?i64 = null },
     /// 서버 알림(`publishDiagnostics` 등).
     notification: struct { method: []const u8, params: ?std.json.Value },
     /// 서버 → 클라이언트 요청(id 있음) — 거부 대상.
@@ -748,7 +795,7 @@ pub fn classify(root: std.json.Value) Incoming {
     };
     const rid: RequestId = requestIdOf(id_num) orelse return .ignore;
     const is_error = obj.get("error") != null;
-    return .{ .response = .{ .id = rid, .result = obj.get("result"), .is_error = is_error, .error_message = errorMessage(obj) } };
+    return .{ .response = .{ .id = rid, .result = obj.get("result"), .is_error = is_error, .error_message = errorMessage(obj), .error_code = errorCode(obj) } };
 }
 
 /// `initialize` 응답에서 서버가 고른 위치 인코딩. 없으면 명세 기본(utf-16).
@@ -1050,6 +1097,15 @@ test "LSJ9 rename — 요청 id 5e8+seq·newName, capability, 오류 응답의 m
     var p4 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":500000003,\"error\":{\"code\":1}}");
     defer p4.deinit();
     try testing.expect(classify(p4.value).response.is_error and classify(p4.value).response.error_message == null);
+    // 오류 코드 — content modified(-32801)·server cancelled(-32802) 는 되물을 수 있는 것, 그 밖은 아니다(§8.2l).
+    var p5 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":1200000001,\"error\":{\"code\":-32801,\"message\":\"content modified\"}}");
+    defer p5.deinit();
+    try testing.expectEqual(@as(?i64, -32801), classify(p5.value).response.error_code);
+    try testing.expect(isRetryableError(classify(p5.value).response.error_code));
+    try testing.expect(isRetryableError(-32802));
+    try testing.expect(!isRetryableError(-32601) and !isRetryableError(null));
+    try testing.expectEqual(@as(?i64, -32602), classify(p3.value).response.error_code);
+    try testing.expectEqual(@as(?i64, 1), classify(p4.value).response.error_code);
     var c_true = try parse(a, "{\"capabilities\":{\"renameProvider\":true}}");
     defer c_true.deinit();
     var c_obj = try parse(a, "{\"capabilities\":{\"renameProvider\":{\"prepareProvider\":true}}}");
@@ -1242,7 +1298,7 @@ test "LSJ15 semanticTokens — initialize capability(range·full·표준 종류)
     defer p1.deinit();
     try testing.expect(classify(p1.value).response.id == .semantic_tokens and classify(p1.value).response.id.semantic_tokens == 3);
     try testing.expect(@as(u64, semantic_tokens_id_base) + id_span - 1 <= std.math.maxInt(i32));
-    var p2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":1200000000,\"result\":null}"); // 칸 밖
+    var p2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":1300000000,\"result\":null}"); // 칸 밖(마지막 칸 12e8 의 다음)
     defer p2.deinit();
     try testing.expect(classify(p2.value) == .ignore);
 }
@@ -1262,7 +1318,7 @@ test "LSJ16 foldingRange — initialize capability(lineFoldingOnly·종류 셋)�
     var p2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":1199999999,\"result\":null}"); // 칸 끝
     defer p2.deinit();
     try testing.expect(classify(p2.value).response.id == .folding_range and classify(p2.value).response.id.folding_range == 99999999);
-    var p3 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":1200000000,\"result\":null}"); // 칸 밖
+    var p3 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":1300000000,\"result\":null}"); // 칸 밖
     defer p3.deinit();
     try testing.expect(classify(p3.value) == .ignore);
 }
@@ -1296,4 +1352,38 @@ test "LSJ17 didSave — capability 선언·통지 둘(text 유무)·서버 save 
         try testing.expectEqual(cse.include, sc.include_text);
     }
     try testing.expect(!saveCapsFromResult(null).supported);
+}
+
+test "LSJ18 references — capability·요청(includeDeclaration)·id 칸(12e8)·classify·칸 밖·locationsFromResult 세 모양 (§8.2l)" {
+    const a = testing.allocator;
+    const init = try initializeRequest(a, "file:///r", 42);
+    defer a.free(init);
+    try testing.expect(std.mem.indexOf(u8, init, "\"references\":{\"dynamicRegistration\":false}") != null);
+    const req = try referencesRequest(a, 9, "file:///a.rs", 2, 11);
+    defer a.free(req);
+    try testing.expect(std.mem.indexOf(u8, req, "\"id\":1200000009,\"method\":\"textDocument/references\",\"params\":{\"textDocument\":{\"uri\":\"file:///a.rs\"},\"position\":{\"line\":2,\"character\":11},\"context\":{\"includeDeclaration\":true}}") != null);
+    var p1 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":1200000009,\"result\":[]}");
+    defer p1.deinit();
+    try testing.expect(classify(p1.value).response.id == .references and classify(p1.value).response.id.references == 9);
+    try testing.expect(@as(u64, references_id_base) + id_span - 1 <= std.math.maxInt(i32));
+    var p2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":1300000000,\"result\":null}"); // 칸 밖
+    defer p2.deinit();
+    try testing.expect(classify(p2.value) == .ignore);
+    // 결과 세 모양: Location[] · LocationLink[](selection range 우선) · 단일 Location; 모양 아닌 항목은 뺀다; null 은 빈 목록.
+    var r1 = try parse(a, "[{\"uri\":\"file:///a.rs\",\"range\":{\"start\":{\"line\":8,\"character\":12},\"end\":{\"line\":8,\"character\":17}}},{\"targetUri\":\"file:///b.rs\",\"targetRange\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":3,\"character\":0}},\"targetSelectionRange\":{\"start\":{\"line\":1,\"character\":4},\"end\":{\"line\":1,\"character\":9}}},7,{\"uri\":3}]");
+    defer r1.deinit();
+    const locs = try locationsFromResult(a, r1.value);
+    defer a.free(locs);
+    try testing.expectEqual(@as(usize, 2), locs.len);
+    try testing.expectEqualStrings("file:///a.rs", locs[0].uri);
+    try testing.expectEqual(@as(u32, 8), locs[0].line);
+    try testing.expectEqualStrings("file:///b.rs", locs[1].uri);
+    try testing.expectEqual(@as(u32, 1), locs[1].line);
+    try testing.expectEqual(@as(u32, 4), locs[1].character);
+    var r2 = try parse(a, "{\"uri\":\"file:///c.rs\",\"range\":{\"start\":{\"line\":2,\"character\":0},\"end\":{\"line\":2,\"character\":1}}}");
+    defer r2.deinit();
+    const one = try locationsFromResult(a, r2.value);
+    defer a.free(one);
+    try testing.expectEqual(@as(usize, 1), one.len);
+    try testing.expectEqual(@as(usize, 0), (try locationsFromResult(a, null)).len);
 }

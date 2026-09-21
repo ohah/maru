@@ -102,6 +102,7 @@ const update_repo = "ohah/maru"; // GitHub releases/latest를 조회할 repo(인
 pub const keyhint_hold = maru.session.keyhint_hold; // 단축키 힌트 홀드 gesture 정책(OS-중립 L2 — session/keyhint_hold.zig). platform은 alias로 참조.
 const command_palette = @import("command_palette.zig");
 const symbol_picker = @import("symbol_picker.zig");
+const reference_picker = @import("reference_picker.zig");
 const find_ops = @import("app_session/find.zig");
 pub const agent_dock = @import("app_session/agent_dock.zig");
 pub const scm_dock_ops = @import("app_session/scm_dock.zig");
@@ -2441,6 +2442,7 @@ fn modalInputRole(field: ChromeHostField) ModalInputRole {
         .find => .{ .routes_text = .find },
         .palette => .{ .routes_text = .palette },
         .symbol_picker => .{ .routes_text = .symbol_picker },
+        .reference_picker => .{ .routes_text = .reference_picker }, // §8.2l — 심볼 피커와 같은 컴포넌트·같은 역할
         .settings => .{ .routes_text = .settings },
         .context_menu, .notifications => .blocks_without_text,
         // **헬퍼는 입력을 안 막는다**(NSH — §6.2). 선택을 마쳤을 뿐인 사용자에게서 키를 뺏으면
@@ -5379,6 +5381,11 @@ pub const AppSession = struct {
     find_selection_at_open: ?struct { start: usize, end: usize } = null,
     symbol_picker_scroll: chrome.ui.scroll_area.State = .{},
     symbol_picker_followed_selected: ?usize = null,
+    /// 참조 피커(tooling §8.2l) — 굳힌 행(값)·프롬프트 버퍼·목록 역학(심볼 피커와 같은 셋).
+    reference_picker_rows: reference_picker.Picker = .{},
+    reference_picker_prompt: [96]u8 = undefined,
+    reference_picker_scroll: chrome.ui.scroll_area.State = .{},
+    reference_picker_followed_selected: ?usize = null,
 
     editor_nav_back: std.ArrayList(editor_ops.NavMark) = .empty,
     /// 뒤로 간 뒤 다시 앞으로 갈 자리. **새로 이동하면 통째로 버린다**(브라우저와 같은 규약) —
@@ -5466,6 +5473,8 @@ pub const AppSession = struct {
     editor_hover: editor_ops.hover_client.State = .{},
     /// 정의로 이동 상태(tooling §8.2c) — 기다리는 요청 seq.
     editor_definition: editor_ops.definition_client.State = .{},
+    /// 참조 피커(§8.2l)의 요청 상태.
+    editor_references: editor_ops.references_client.State = .{},
     /// 시그니처 힌트 상태(tooling §8.2d) — 상자의 주인 여부·요청 seq·줄.
     editor_signature: editor_ops.signature_client.State = .{},
     editor_format: editor_ops.format_client.State = .{},
@@ -9801,6 +9810,10 @@ pub const AppSession = struct {
         find_ops.clearAllFindMatches(self); // find 닫힘 — 매치 하이라이트 정리(toggleFind와 동일. 목록은 둘이다)
         self.chrome_host.palette.hide();
         self.chrome_host.symbol_picker.hide(); // §7.5 — 같은 불변식 아래 산다
+        if (self.chrome_host.reference_picker.open) {
+            self.chrome_host.reference_picker.hide();
+            editor_ops.references_client.closed(self); // §8.2l — 행도 함께 놓는다
+        }
         self.chrome_host.context_menu.hide();
         self.context_menu_target = null;
         self.file_tree_context_target = null;
@@ -10685,6 +10698,7 @@ pub const AppSession = struct {
             .prev_diagnostic => _ = editor_ops.gotoDiagnosticActive(self, .prev),
             .show_hover => _ = editor_ops.hover_client.showAtCaret(self), // §8.2b — caret 자리의 호버 박스
             .goto_definition => _ = editor_ops.definition_client.gotoDefinitionAtCaret(self), // §8.2c
+            .goto_references => _ = editor_ops.references_client.gotoReferencesAtCaret(self), // §8.2l
             .navigate_back => _ = editor_ops.navigateBack(self), // §5.2 — 갈 곳이 없으면 무동작
             .navigate_forward => _ = editor_ops.navigateForward(self),
             .trigger_parameter_hints => _ = editor_ops.signature_client.triggerManual(self), // §8.2d
@@ -12345,6 +12359,10 @@ pub const AppSession = struct {
             .symbol_picker_query_changed => editor_ops.recomputeSymbolPicker(self),
             .symbol_picker_selection_changed => {}, // 창 갱신은 렌더 직전 follow 가 값 비교로 잡는다
             .symbol_picker_accept => editor_ops.acceptSymbolPicker(self), // 닫고 나서 간다
+            .reference_picker_close => editor_ops.references_client.closed(self), // hide 는 컴포넌트가 이미 했다 — 행을 놓는다(§8.2l)
+            .reference_picker_query_changed => editor_ops.references_client.recompute(self),
+            .reference_picker_selection_changed => {}, // 창 갱신은 렌더 직전 follow 가 값 비교로 잡는다
+            .reference_picker_accept => editor_ops.references_client.accept(self), // 닫고 나서 간다
             .context_menu_accept => settings_ops.acceptContextMenu(self), // selected 항목 실행(현재 "Rename" → 대상 rename)
             .context_menu_close => { // Esc/그 외 키 — 컴포넌트가 이미 hide, 대상 포인터·플래그를 비운다
                 self.context_menu_target = null;
@@ -13300,7 +13318,7 @@ pub const AppSession = struct {
     /// 자동 닫힘 타이머가 없어 아무 입력으로나 닫지 않으면 토스트 동안 입력이 영구히 막히기 때문이다.
     pub fn anyOverlayOpen(self: *const AppSession) bool {
         const h = &self.chrome_host;
-        return h.confirm.open or h.notice.open or h.context_menu.open or h.notifications.open or h.find.open or h.palette.open or h.symbol_picker.open or h.settings.open;
+        return h.confirm.open or h.notice.open or h.context_menu.open or h.notifications.open or h.find.open or h.palette.open or h.symbol_picker.open or h.reference_picker.open or h.settings.open;
     }
 
     /// 오버레이 frame 을 **그려야** 하는가. `anyOverlayOpen` 과 갈리는 이유는 **패시브 표면**이다 —
@@ -14883,7 +14901,7 @@ pub const AppSession = struct {
         // 텍스트 blink(SGR 5): config text.blink가 켜졌고 보이는 뷰포트에 blink 셀이 있을 때만 위상 진행. viewport_has_blink는
         // need_blink_scan(idle + blink_text)일 때만 스냅샷이 실제 스캔한 값이라, blink_text off면 false로 접혀 안전.
         const text_blinks = self.appearance.blink_text and snap.viewport_has_blink;
-        const overlay_open = self.chrome_host.find.open or self.chrome_host.palette.open or self.chrome_host.symbol_picker.open;
+        const overlay_open = self.chrome_host.find.open or self.chrome_host.palette.open or self.chrome_host.symbol_picker.open or self.chrome_host.reference_picker.open;
         // 인라인 rename 편집 caret도 깜빡인다 — 사이드바/탭/라벨 셀 스트림의 '|' 글자라(터미널 커서처럼 suffix-trim
         // 으로 못 숨김) text-blink와 같이 full rebuild가 필요하다(renameEditText가 blink_visible로 '|'↔공백 토글).
         const rename_active = self.rename != null;
@@ -15004,7 +15022,7 @@ pub const AppSession = struct {
     /// togglePalette가 나머지를 닫아 한 번에 하나만 열린다)이다. notice는 텍스트 입력 대상이 아니지만(dismiss만) IME가
     /// 뒤(터미널/find)로 새지 않게 **최우선**으로 잡아 무시한다. 모든 IME 연산(preedit set·조합 판정·caret)이 이걸로
     /// 분기해, 라우팅이 콜백마다 흩어져 일부를 누락하던 단일-출처 위반을 없앤다.
-    pub const InputFocus = enum { terminal, file_tree, dock_pending, confirm, notice, settings, rename, sidebar_search, agent_session_search, agent_activity_search, find, palette, symbol_picker, addr_edit, scm_commit };
+    pub const InputFocus = enum { terminal, file_tree, dock_pending, confirm, notice, settings, rename, sidebar_search, agent_session_search, agent_activity_search, find, palette, symbol_picker, reference_picker, addr_edit, scm_commit };
     pub fn inputFocus(self: *const AppSession) InputFocus {
         if (self.chrome_host.confirm.open) return .confirm; // 닫기 확인 — 파괴적 동작 게이트라 최우선(notice와 동형: IME 비대상)
         if (self.chrome_host.notice.open) return .notice; // 최우선 모달 — 텍스트/IME를 받지 않고 무시(뒤로 안 샘)
@@ -15020,6 +15038,7 @@ pub const AppSession = struct {
         if (self.chrome_host.find.open) return .find;
         if (self.chrome_host.palette.open) return .palette;
         if (self.chrome_host.symbol_picker.open) return .symbol_picker;
+        if (self.chrome_host.reference_picker.open) return .reference_picker; // §8.2l
         // Phase 7e-2b 수정: browser 주소창 편집이 활성이면 확정 텍스트/조합이 터미널로 새지 않고 주소창 편집으로 간다
         // (평문 타이핑이 IME→routeCommittedText 경로라 handleKeyEvent 인터셉트만으론 안 잡혔던 버그). 모달·rename·find·
         // palette·sidebar_search가 없을 때만(그것들이 열리면 addr_edit보다 우선 — 위 조기 반환). routeCommittedText가
@@ -15111,6 +15130,10 @@ pub const AppSession = struct {
             },
             .symbol_picker => if (self.chrome_host.symbol_picker.input.commitPreedit(self.allocator)) {
                 editor_ops.recomputeSymbolPicker(self); // 필터가 바뀜(§7.5)
+                self.metal_dirty = true;
+            },
+            .reference_picker => if (self.chrome_host.reference_picker.input.commitPreedit(self.allocator)) {
+                editor_ops.references_client.recompute(self); // §8.2l
                 self.metal_dirty = true;
             },
         }
@@ -20791,6 +20814,7 @@ pub const AppSession = struct {
         debug_fixtures.applyForcedEditorCaret(self); // 캡처 전용: 선택은 클릭으로만 생긴다
         debug_fixtures.applyForcedEditorHover(self); // 캡처 전용: 호버는 포인터 정지로만 뜬다(§8.2b)
         debug_fixtures.applyForcedEditorGotoDef(self); // 캡처 전용: 정의로 이동(§8.2c)
+        debug_fixtures.applyForcedReferences(self); // 캡처 전용: 참조 피커(§8.2l)
         debug_fixtures.applyForcedParamHints(self); // 캡처 전용: 시그니처 힌트(§8.2d)
         debug_fixtures.applyForcedFormat(self); // 캡처 전용: 문서 포맷(§8.2e)
         debug_fixtures.applyForcedRename(self); // 캡처 전용: 심볼 이름 바꾸기(§8.2f)
@@ -20914,6 +20938,7 @@ pub const AppSession = struct {
         self.pumpMarkerPreviewOpen();
         editor_ops.lsp_client.pump(self); // §8.2a: 서버 읽기·문서 동기화 — 스레드 없이 tick 에서
         editor_ops.hover_client.tick(self); // §8.2b: 포인터 정지 → 호버 요청/열기
+        editor_ops.references_client.tick(self); // §8.2l: 「지금은 못 답한다」 뒤 되묻기
         self.advancePendingAppQuitShutdown();
         // end-all target이 source-zero와 ready_remove까지 도달해 종료 승인을 게시한 frame은 더 이상
         // remote maintenance나 Term drain을 실행하지 않는다. 같은 frame의 후속 접근은 deinit이 소유할
@@ -22983,6 +23008,17 @@ pub const AppSession = struct {
         );
     }
 
+    /// 참조 피커(§8.2l) — 셋째 소비자.
+    fn followReferencePickerSelection(self: *AppSession) void {
+        followListSelection(
+            self.chrome_host.reference_picker.selected,
+            self.reference_picker_rows.shown.items.len,
+            @max(self.cell_height_px, 1),
+            &self.reference_picker_scroll,
+            &self.reference_picker_followed_selected,
+        );
+    }
+
     /// 심볼 피커도 같은 역학을 쓴다(native-editor-ui.md §7.5 「목록이 화면보다 길다」).
     fn followSymbolPickerSelection(self: *AppSession) void {
         followListSelection(
@@ -24345,6 +24381,29 @@ pub const AppSession = struct {
         return rows;
     }
 
+    /// 참조 피커의 가시 행(§8.2l) — 제목은 미리보기 줄, 우측은 `경로:줄`. 필터 뒤 행(`shown`)만 센다.
+    fn buildReferencePickerRows(self: *AppSession, arena: std.mem.Allocator) ![]chrome.components.palette.Row {
+        const Row = chrome.components.palette.Row;
+        const picker = &self.reference_picker_rows;
+        const max_visible = chrome.components.palette.max_visible;
+        const total = picker.shown.items.len;
+        const visible_count = @min(total, max_visible);
+        const ch = @max(self.cell_height_px, 1);
+        const win_start = @min(self.reference_picker_scroll.offset_y_px / ch, total -| visible_count);
+        const rows = try arena.alloc(Row, visible_count);
+        var i: usize = 0;
+        while (i < visible_count) : (i += 1) {
+            const fi = win_start + i;
+            const src = picker.shownRow(fi) orelse break;
+            rows[i] = .{
+                .title = src.title,
+                .binding = src.binding,
+                .selected = (fi == self.chrome_host.reference_picker.selected),
+            };
+        }
+        return rows[0..i];
+    }
+
     /// 심볼 피커의 가시 행. 팔레트와 **같은 윈도잉**이되 행의 출처가 다르다 — 라벨은 이미 굳어 있고
     /// (§7.5 — 공유 버퍼를 안 본다) 줄 번호가 우측 보조 텍스트로 간다.
     fn buildSymbolPickerRows(self: *AppSession, arena: std.mem.Allocator) ![]chrome.components.palette.Row {
@@ -24401,6 +24460,11 @@ pub const AppSession = struct {
             self.followSymbolPickerSelection(); // 팔레트와 같은 역학(§7.5)
             const rows = try self.buildSymbolPickerRows(arena);
             try self.chrome_host.collectSymbolPickerDraws(rows, props, &tokens, arena, &draws);
+        }
+        if (self.chrome_host.reference_picker.open) {
+            self.followReferencePickerSelection(); // §8.2l — 같은 역학
+            const rows = try self.buildReferencePickerRows(arena);
+            try self.chrome_host.collectReferencePickerDraws(rows, props, &tokens, arena, &draws);
         }
         if (self.chrome_host.context_menu.open) {
             try self.chrome_host.collectContextMenuDraws(settings_ops.contextMenuItems(self), props, &tokens, arena, &draws); // 항목 라벨 주입(platform 소유, 동적)
@@ -24996,6 +25060,7 @@ pub const AppSession = struct {
         self.find_matches.deinit(self.allocator);
         self.symbol_picker_rows.deinit(self.allocator);
         self.symbol_picker_prompt.deinit(self.allocator);
+        self.reference_picker_rows.deinit(self.allocator);
         self.editor_nav_back.deinit(self.allocator);
         self.editor_nav_forward.deinit(self.allocator);
         self.editor_find_matches.deinit(self.allocator);
@@ -81286,6 +81351,7 @@ fn expectedTerminalResponder(focus: AppSession.InputFocus) bool {
         .palette,
         // 심볼 피커도 텍스트를 받는 모달이라 터미널이 first responder 를 내줘야 한다(§7.5).
         .symbol_picker,
+        .reference_picker,
         .addr_edit,
         .scm_commit,
         .file_tree,
@@ -81304,6 +81370,7 @@ fn activateSoleFocus(session: *AppSession, focus: AppSession.InputFocus) bool {
         .find => session.chrome_host.find.open = true,
         .palette => session.chrome_host.palette.open = true,
         .symbol_picker => session.chrome_host.symbol_picker.open = true,
+        .reference_picker => session.chrome_host.reference_picker.open = true,
         .rename => settings_ops.startRename(session, .{ .workspace = session.tabs.items[0] }),
         .sidebar_search => session.sidebar_search_active = true,
         .addr_edit => session.addr_edit = 1,

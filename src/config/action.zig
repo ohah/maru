@@ -166,6 +166,8 @@ pub const Action = union(enum) {
     show_hover,
     /// 언어 서버의 정의로 이동(tooling §8.2c — `F12`·`⌘클릭`). §5.2 의 `navigateTo` 하나로 간다(되돌아가기 표식까지).
     goto_definition,
+    /// 참조 피커(tooling §8.2l) — `⇧F12`.
+    goto_references,
     /// 이동 스택 뒤로/앞으로(visual-mapping §5.2 — `⌃-`·`⌃⇧-`, 편집기 Term 에서만).
     navigate_back,
     navigate_forward,
@@ -325,6 +327,7 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "prev_diagnostic")) return .prev_diagnostic;
     if (std.mem.eql(u8, value, "show_hover")) return .show_hover;
     if (std.mem.eql(u8, value, "goto_definition")) return .goto_definition;
+    if (std.mem.eql(u8, value, "goto_references")) return .goto_references;
     if (std.mem.eql(u8, value, "navigate_back")) return .navigate_back;
     if (std.mem.eql(u8, value, "navigate_forward")) return .navigate_forward;
     if (std.mem.eql(u8, value, "trigger_parameter_hints")) return .trigger_parameter_hints;

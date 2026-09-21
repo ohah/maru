@@ -108,6 +108,7 @@ pub const entries = [_]Entry{
     .{ .action = .prev_diagnostic, .key = "prev_diagnostic", .title = "Editor: Go to Previous Problem" },
     .{ .action = .show_hover, .key = "show_hover", .title = "Editor: Show Hover" },
     .{ .action = .goto_definition, .key = "goto_definition", .title = "Editor: Go to Definition" },
+    .{ .action = .goto_references, .key = "goto_references", .title = "Editor: Go to References" },
     .{ .action = .navigate_back, .key = "navigate_back", .title = "Editor: Go Back" },
     .{ .action = .navigate_forward, .key = "navigate_forward", .title = "Editor: Go Forward" },
     .{ .action = .trigger_parameter_hints, .key = "trigger_parameter_hints", .title = "Editor: Trigger Parameter Hints" },

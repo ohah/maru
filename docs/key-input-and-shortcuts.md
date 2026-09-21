@@ -297,6 +297,10 @@ VS Code 의 `editor.action.marker.next/prev` 가 이 키다. `needs_editable = f
 어디에도 `F12` 가 없고(Swift 는 F1~F12 를 특수 키로 `handleKeyDown` 에 보낸다), 전역 표에도 없다. VS Code 의 `editor.action.revealDefinition`.
 `needs_editable = false`. `ETX4` 의 ⑶ 수는 다섯이 됐다.
 
+**`⇧F12` — 참조 피커(2026-09-21, [툴링](editor-surface-tooling.md) §8.2l).** `F12` 의 `⇧` 짝. 전수 대조는 `F12` 와 같다 — ①ʹ·②·③ʹ 어디에도
+`⇧F12` 가 없고(기능키는 수식키가 붙어도 IME 를 거치지 않고 `handleKeyDown` 으로 온다 — `⇧F8` 이 이미 그 길이다), 전역 표에도 없다. VS Code 의
+`editor.action.goToReferences`. `needs_editable = false`. `ETX4` 의 ⑶ 수는 일곱이 됐다(`F2` 포함).
+
 **`⌃-`·`⌃⇧-` — 뒤로·앞으로(2026-09-18 사용자 결정, §8.2c).** VS Code mac 기본(`workbench.action.navigateBack/Forward`)을 따른다 —
 §1.1 「VSCode 사용자 무회귀」. 이것이 이 컨텍스트 표에 들어온 **첫 `⌃` 조합**이라 `ETX4` 에 넷째 갈래를 연다: ⑷ **`⌃` 조합 —
 편집기 Term 에는 PTY 가 없다.** `⌃` 를 막던 근거(*"`⌃` 는 제어문자를 뺏는다"*)는 터미널 Term 의 것이고 이 표는 편집기 Term 에서만

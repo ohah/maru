@@ -31,6 +31,7 @@ const editor_rename = @import("editor_rename.zig");
 const editor_completion = @import("editor_completion.zig");
 const editor_semantic = @import("editor_semantic.zig");
 const editor_fold_lsp = @import("editor_fold_lsp.zig");
+const editor_references = @import("editor_references.zig");
 const editor_code_action = @import("editor_code_action.zig");
 
 pub const Phase = enum {
@@ -85,6 +86,7 @@ pub const Client = struct {
     hover_seq: u32 = 0,
     /// 마지막으로 보낸 definition 요청의 seq(§8.2c).
     definition_seq: u32 = 0,
+    references_seq: u32 = 0,
     /// 마지막으로 보낸 signatureHelp 요청의 seq(§8.2d)와 서버가 준 트리거 글자.
     signature_seq: u32 = 0,
     signature_triggers: lsp.rpc.SignatureTriggers = .{},
@@ -153,6 +155,8 @@ pub const State = struct {
     received_hovers: u64 = 0,
     sent_definitions: u64 = 0,
     received_definitions: u64 = 0,
+    sent_references: u64 = 0,
+    received_references: u64 = 0,
     sent_signatures: u64 = 0,
     received_signatures: u64 = 0,
     sent_formattings: u64 = 0,
@@ -595,6 +599,10 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
                 const view: ?lsp.rpc.SignatureView = if (r.is_error) null else lsp.rpc.signatureView(r.result, c.encoding);
                 editor_signature.onResponse(self, seq, view);
             },
+            .references => |seq| {
+                self.editor_lsp.received_references += 1;
+                editor_references.onReferencesResponse(self, seq, if (r.is_error) null else r.result, r.is_error and lsp.rpc.isRetryableError(r.error_code));
+            },
             .definition => |seq| {
                 self.editor_lsp.received_definitions += 1;
                 const target: ?lsp.rpc.Target = if (r.is_error) null else lsp.rpc.definitionTarget(r.result);
@@ -910,6 +918,26 @@ pub fn requestDefinition(self: *AppSession, term: *Term, offset: usize) ?u32 {
     if (!send(self, c, msg)) return null;
     self.editor_lsp.sent_definitions += 1;
     return c.definition_seq;
+}
+
+/// `textDocument/references` 를 보낸다(§8.2l) — 정의 요청과 같은 자리 계산. 서버가 없거나 ready 아니면 `null`.
+pub fn requestReferences(self: *AppSession, term: *Term, offset: usize) ?u32 {
+    const c = readyClientFor(self, term) orelse return null;
+    flushDocument(self, c, term);
+    const d = c.findDoc(term.surfaceId()) orelse return null;
+    const opened = term.rt.editor_doc orelse return null;
+    const content = opened.file.content;
+    const off = @min(offset, content.len);
+    const line_idx = opened.file.lines.lineAt(off);
+    const line = opened.file.lines.line(line_idx) orelse return null;
+    const text = content[line.start..line.contentEnd()];
+    const character = lsp.position.characterOf(text, @intCast(off -| line.start), c.encoding);
+    c.references_seq = lsp.rpc.nextSeq(c.references_seq);
+    const msg = lsp.rpc.referencesRequest(self.allocator, c.references_seq, d.uri, @intCast(line_idx), character) catch return null;
+    defer self.allocator.free(msg);
+    if (!send(self, c, msg)) return null;
+    self.editor_lsp.sent_references += 1;
+    return c.references_seq;
 }
 
 /// `textDocument/rename` 을 보낸다(§8.2f). 서버가 없거나 `renameProvider` 가 없으면 `null`. 요청 전에 밀린 didChange 를 먼저 보낸다.

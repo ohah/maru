@@ -12624,3 +12624,41 @@ test "마커 프리뷰: 여는 자리·그리는 자리·푸는 자리가 모두
         );
     }
 }
+
+test "이름 없는 문서: 이름을 붙이는 자리는 하나, workspace 제외는 «두 자리가 같은 문장»이다" {
+    // **계약**: docs/native-editor-document-model.md §3.11.
+    //
+    // **허용된 자리를 센다 — 금지된 모양 0 건이 아니다.** 「빈 슬라이스가 없다」나 「activePane 이
+    // 없다」 같은 부재 판정은 그 일을 **아예 안 하는** 퇴행도 통과한다.
+    const allocator = std.testing.allocator;
+
+    {
+        // ⑴ **이름은 한 자리에서만 붙는다.** 두 번째 setter 가 생기면 번호 발급과 이름 짓기가 갈려
+        //    한쪽이 낡는다(발급기를 안 쓰고 이름만 짓는 경로가 실제로 쉽게 생긴다).
+        const editor = try readZigFileZ(allocator, "src/platform/macos/app_session/editor.zig");
+        defer allocator.free(editor);
+        var set: usize = 0;
+        var i: usize = 0;
+        const needle = "term.rt.editor_untitled = maru.session.editor.untitled.Name.init(";
+        while (std.mem.indexOfPos(u8, editor, i, needle)) |at| : (i = at + needle.len) set += 1;
+        try std.testing.expectEqual(@as(usize, 1), set);
+    }
+
+    {
+        // ⑵ **workspace 제외는 두 자리다 — 그리고 «같은 문장」이어야 한다.** 저장에서 빼면서 활성 탭
+        //    셈에서 빼지 않으면 복원 후 엉뚱한 탭이 활성이 되고, `kind == .web` 비교라 컴파일러가
+        //    안 잡는다. 문장을 갈라 적으면 한쪽만 고쳐진다 — 그래서 **똑같은 조건 두 번**을 센다.
+        const tab = try readZigFileZ(allocator, "src/platform/macos/app_session/tab.zig");
+        defer allocator.free(tab);
+        var hits: usize = 0;
+        var i: usize = 0;
+        // `term` 과 `t` 두 이름을 쓰므로 공통 꼬리만 본다.
+        const needle = ".kind == .editor and ";
+        while (std.mem.indexOfPos(u8, tab, i, needle)) |at| : (i = at + needle.len) {
+            const rest = tab[at + needle.len ..];
+            if (std.mem.startsWith(u8, rest, "term.file_entry == null) continue;")) hits += 1;
+            if (std.mem.startsWith(u8, rest, "t.file_entry == null) continue;")) hits += 1;
+        }
+        try std.testing.expectEqual(@as(usize, 2), hits);
+    }
+}

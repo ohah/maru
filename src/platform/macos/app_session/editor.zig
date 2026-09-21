@@ -2212,8 +2212,11 @@ pub fn openPathInActivePane(self: *AppSession, path: []const u8) OpenFileError!*
 /// 사용자가 직접 만든 것**이라 그 규칙을 따르면 첫 글자가 조용히 사라진다(`insertText` 는 커서가
 /// 없으면 아무 일도 안 한다 — 적대적 1회차의 판정자가 이것을 잡았다). 빈 문서의 커서 자리는 **하나뿐**
 /// 이라 미룰 애매함도 없다.
-pub fn openUntitledInActivePane(self: *AppSession) !*Term {
-    const n = app_session_mod.app_runtime.untitled_docs.next() orelse return error.OutOfMemory;
+pub fn openUntitledInActivePane(self: *AppSession) (OpenFileError || error{UntitledNamesExhausted})!*Term {
+    // **번호가 다 된 것을 OOM 이라 부르지 않는다.** 42 억 번을 열어야 닿는 자리라 실제로는 안 오지만,
+    // 그렇다고 **다른 이유의 이름**을 붙이면 뒤에 이 실패를 읽는 쪽(계획 C0 — 저장·열기 실패를 이유별로
+    // 말하는 슬라이스)이 「메모리가 없다」고 말한다. 있는 원인을 지우는 것이 값싼 거짓말이다.
+    const n = app_session_mod.app_runtime.untitled_docs.next() orelse return error.UntitledNamesExhausted;
 
     var prepared = try prepareUntitled(self);
     errdefer prepared.deinit(self.allocator);
@@ -34701,4 +34704,43 @@ test "U1n 조합(IME)도 바로 받는다 — 커서가 서 있는 것의 다른
     setEditorPreedit(fx.session, t, "");
     try testing.expect(insertText(fx.session, t, "\xed\x95\x9c"));
     try testing.expectEqualStrings("\xed\x95\x9c", t.rt.editor_doc.?.file.content);
+}
+
+test "U1p 이름과 경로는 배타다 — 파일을 연 문서에는 이름 표식이 없다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+
+    // 계약 §3.11 정체성: `editor_untitled` 는 `editor_path` 와 **배타**다. 지금은 그 불변식을 지키는
+    // 코드가 「경로 있는 문서에는 안 붙인다」 하나뿐이고 **아무도 재지 않는다** — U2 가 이름을 붙이면서
+    // 이 표식을 안 지우면 그 문서가 영원히 「한 번도 저장 안 한 문서」로 취급된다(닫기 확인 문구가
+    // 「사라집니다」로 남고, workspace 저장에서도 계속 빠진다 — 즉 **저장한 파일이 복원되지 않는다**).
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    const io = std.testing.io;
+    try dir.dir.writeFile(io, .{ .sub_path = "g.txt", .data = "body\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "g.txt" });
+    defer allocator.free(path);
+
+    const filed = try openPathInActivePane(fx.session, path);
+    try testing.expect(filed.rt.editor_path != null);
+    try testing.expect(filed.rt.editor_untitled == null); // ★ 배타
+    // 번호도 안 썼다 — 파일을 여는 길이 발급기를 건드리면 이름이 건너뛴다.
+    try testing.expectEqual(@as(u32, 0), app_session_mod.app_runtime.untitled_docs.last);
+
+    // 그리고 반대쪽: 이름 있는 문서에는 경로가 없다.
+    const untitled = try openUntitledInActivePane(fx.session);
+    try testing.expect(untitled.rt.editor_untitled != null);
+    try testing.expect(untitled.rt.editor_path == null); // ★ 배타
+
+    // **번호가 다 되면 그 이름의 오류가 온다** — `OutOfMemory` 가 아니다. 실제로는 42 억 번을 열어야
+    // 닿지만, 다른 이유의 이름을 붙이면 이 실패를 읽는 쪽(C0)이 「메모리가 없다」고 말한다. 주입해서
+    // 잰다 — 안 재면 그 자리에 무슨 오류가 있든 아무도 모른다.
+    const before = app_session_mod.app_runtime.untitled_docs;
+    app_session_mod.app_runtime.untitled_docs = .{ .last = std.math.maxInt(u32) };
+    try testing.expectError(error.UntitledNamesExhausted, openUntitledInActivePane(fx.session));
+    app_session_mod.app_runtime.untitled_docs = before;
 }

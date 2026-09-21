@@ -12663,3 +12663,45 @@ test "이름 없는 문서: 이름을 붙이는 자리는 하나, workspace 제�
         try std.testing.expectEqual(@as(usize, 2), hits);
     }
 }
+
+test "이름 없는 문서 저장: 디스크에 쓰는 자리 둘, 이름을 붙이는 자리 하나" {
+    // **계약**: docs/native-editor-document-model.md §3.11 저장 절.
+    //
+    // **허용된 자리를 센다 — 금지된 모양 0 건이 아니다.** 「빈 슬라이스가 없다」류의 부재 판정은 그 일을
+    // 아예 안 하는 퇴행도 통과한다.
+    const allocator = std.testing.allocator;
+    const save = try readZigFileZ(allocator, "src/platform/macos/app_session/editor_untitled_save.zig");
+    defer allocator.free(save);
+
+    const countOf = struct {
+        fn f(hay: []const u8, needle: []const u8) usize {
+            var n: usize = 0;
+            var i: usize = 0;
+            while (std.mem.indexOfPos(u8, hay, i, needle)) |at| : (i = at + needle.len) n += 1;
+            return n;
+        }
+    }.f;
+
+    // ⑴ **쓰는 함수는 둘이고 각자 한 번씩만 불린다.** 새 파일은 배타 생성, 덮어쓰기는 CAS — 하나로
+    //    합치면 새 파일에서 CAS 가 원본을 못 찾아 실패하거나(그 방향) 덮어쓰기에서 배타가 늘 실패한다.
+    try std.testing.expectEqual(@as(usize, 1), countOf(save, "editor_ops.createDocumentBytes(self, abs, bytes)"));
+    try std.testing.expectEqual(@as(usize, 1), countOf(save, "editor_ops.writeDocumentBytes(self, abs, bytes)"));
+
+    // ⑵ **이름을 지우는 자리는 하나다**(경로가 붙는 그 순간). 둘이 되면 한쪽이 낡아 문서가 영원히
+    //    「저장 안 한 문서」로 남거나 반대로 이름 없는 문서가 이름을 잃는다.
+    try std.testing.expectEqual(@as(usize, 1), countOf(save, "term.rt.editor_untitled = null"));
+
+    // ⑶ **들고 있던 경로를 비우는 자리는 둘이다** — 수락(그 함수 머리)과 취소(`cancelPendingConfirm`).
+    //    수락 쪽만 비우면 취소한 경로가 남아 다음 저장을 오염시킨다(U2m ⑶ 이 그 증상을 잰다).
+    try std.testing.expectEqual(@as(usize, 1), countOf(save, "self.pending_untitled_save = .{}"));
+    const app_session = try readZigFileZ(allocator, "src/platform/macos/app_session.zig");
+    defer allocator.free(app_session);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOf(app_session, ".untitled_overwrite => self.pending_untitled_save = .{}"),
+    );
+
+    // ⑷ **NUL 검사는 경로를 «푼 뒤»에 한 번** — 푸는 앞에서 이름만 보면 base 쪽 NUL 이 새고, 두 번
+    //    적으면 한쪽이 낡는다.
+    try std.testing.expectEqual(@as(usize, 1), countOf(save, "std.mem.indexOfScalar(u8, norm, 0)"));
+}

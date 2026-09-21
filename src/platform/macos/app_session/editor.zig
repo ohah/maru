@@ -36297,3 +36297,39 @@ test "U2D 편집기 Term 자체는 «원격이 아니다» — U3 가 그 전제
         try testing.expect(!std.mem.eql(u8, base2.?, "/remote/only/here")); // ★ 저쪽 경로가 아니다
     }
 }
+
+test "U2E 팔레트에서 골라도 열린다 — 카탈로그 항목이 실제로 그 액션을 디스패치한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+
+    // **카탈로그에 항목만 있고 배선이 끊겨도 「팔레트에 보인다」는 참이다.** 그래서 목록에 있는지와
+    // **골랐을 때 실제로 열리는지**를 나란히 잰다(적대적 19회차).
+    const pane = pane_ops.activePane(fx.session);
+    const before = pane.terms.items.len;
+
+    // ⑴ 카탈로그가 그 항목을 든다(팔레트·메뉴가 같은 목록을 쓴다).
+    var found = false;
+    for (app_session_mod.command_catalog.entries) |e| {
+        if (std.mem.eql(u8, e.key, "new_editor_tab")) {
+            found = true;
+            try testing.expectEqualStrings("New Editor Tab", e.title);
+            try testing.expectEqual(maru.config.Action.new_editor_tab, e.action);
+        }
+    }
+    try testing.expect(found);
+
+    // ⑵ 그 액션을 디스패치하면 실제로 열린다(팔레트 확정이 지나는 그 함수다).
+    fx.session.dispatchAppAction(.new_editor_tab);
+    try testing.expectEqual(before + 1, pane.terms.items.len);
+    const t = pane.terms.items[pane.terms.items.len - 1];
+    try testing.expect(t.kind == .editor and t.rt.editor_untitled != null);
+
+    // ⑶ **config 문자열로도 같은 액션이 나온다** — 사용자 keybind 가 이름으로 부른다. 이름이 갈리면
+    //    문서에 적힌 `keybind = … = new_editor_tab` 이 조용히 안 먹는다.
+    try testing.expectEqual(
+        maru.config.Action.new_editor_tab,
+        maru.config.action.parseAction("new_editor_tab").?,
+    );
+}

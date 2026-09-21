@@ -1636,11 +1636,11 @@ pub fn build(b: *std.Build) void {
         .filters = &.{ "U1", "U2" }, // `SYNU1` 도 걸린다(부분 일치) — 아래 개수가 그것을 포함한다
     });
     const run_macos_editor_untitled_tests = b.addRunArtifact(macos_editor_untitled_tests);
-    // 60 = U1a~U1r 열여덟 + U2a~U2p 열여섯 + U2t~U2z 일곱 + U2A~U2D 넷 + U2r·U2s 둘 + SYNU1 하나(필터 부분 일치)
+    // 61 = U1a~U1r 열여덟 + U2a~U2p 열여섯 + U2t~U2z 일곱 + U2A~U2E 다섯 + U2r·U2s 둘 + SYNU1 하나(필터 부분 일치)
     //      + `U2` 가 부분 일치하는 기존 판정자 일곱 + 각 모듈이 자동 생성하는 `test_0` 다섯.
-    run_macos_editor_untitled_tests.addArg("--maru-expect-tests=60");
+    run_macos_editor_untitled_tests.addArg("--maru-expect-tests=61");
     // ⚠️ **그리고 실제로 돌았는가** — 전부 macOS 가 아니면 `SkipZigTest` 다.
-    run_macos_editor_untitled_tests.addArg("--maru-expect-passed=60");
+    run_macos_editor_untitled_tests.addArg("--maru-expect-passed=61");
     run_macos_editor_untitled_tests.setCwd(b.path("."));
     const untitled_step = b.step(
         "test-editor-untitled",

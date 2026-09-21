@@ -97,6 +97,11 @@ pub fn resolve(base: []const u8, name: []const u8, out: []u8) ?[]const u8 {
     // 갈아입으면 샌다. 다만 `realpath` 는 아직 없는 파일에 못 쓰므로 어휘적으로 정규화한다.
     var norm_buf: [std.fs.max_path_bytes]u8 = undefined;
     const norm = normalize(joined, &norm_buf) orelse return null;
+    // ⚠️ **NUL 이 든 경로는 거절한다.** 경로 syscall 은 NUL 에서 끊기므로 `a\0b.txt` 는 실제로 **`a`** 에
+    // 쓴다 — 그러면 위아래 판정(base 아래인가·이미 열려 있나·파일이 있나)이 전부 **다른 경로**를 보고
+    // 지나가고, 사용자가 준 이름과 다른 파일이 덮인다. 「이름을 다듬어」 통과시키지 않는 이유는 그
+    // 다듬은 이름이 사용자가 준 것이 아니기 때문이다(적대적 6회차).
+    if (std.mem.indexOfScalar(u8, norm, 0) != null) return null;
     if (!maru.session.repo_path.underRoot(norm, base)) return null;
     if (norm.len > out.len) return null;
     @memcpy(out[0..norm.len], norm);
@@ -312,4 +317,41 @@ test "U2s 정규화는 루트 위로 못 올라간다" {
     try testing.expect(normalize("/../b", &buf) == null); // 루트 위
     try testing.expect(normalize("relative/x", &buf) == null); // 절대 경로가 아니다
     try testing.expect(normalize("/", &buf) == null); // 파일 이름이 아니다
+}
+
+test "U2t 적대적 이름: 아주 길거나 이상한 문자도 조용히 통과하지 않는다" {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+
+    // **UTF-8 이름은 받는다** — 파일 이름은 바이트열이고 한글도 정당하다.
+    try testing.expectEqualStrings("/w/\xed\x95\x9c.txt", resolve("/w", "\xed\x95\x9c.txt", &buf).?);
+    // 공백이 든 이름도 받는다(macOS 에서 정당하다). 호출자가 앞뒤 공백을 다듬는다.
+    try testing.expectEqualStrings("/w/a b.txt", resolve("/w", "a b.txt", &buf).?);
+    // 점으로 시작하는 이름(숨김)도 받는다 — 거절할 근거가 없다.
+    try testing.expectEqualStrings("/w/.env", resolve("/w", ".env", &buf).?);
+    // 중복 슬래시는 접힌다.
+    try testing.expectEqualStrings("/w/a/b", resolve("/w", "a//b", &buf).?);
+
+    // **base 가 `/` 인 경우** — `underRoot` 가 그 자리를 특별히 다룬다(모든 절대 경로가 아래다).
+    try testing.expectEqualStrings("/x.txt", resolve("/", "x.txt", &buf).?);
+
+    // **아주 긴 이름은 거절한다** — 버퍼를 넘기면 `bufPrint` 가 실패하고, 그것이 곧 거절이다.
+    //   조용히 자르면 **사용자가 준 이름과 다른 파일**에 쓴다.
+    var long: [std.fs.max_path_bytes + 64]u8 = undefined;
+    @memset(&long, 'a');
+    try testing.expect(resolve("/w", &long, &buf) == null);
+
+    // **구간이 아주 많은 이름도 거절한다**(`normalize` 의 구간 상한) — 잘리면 위와 같은 사고다.
+    var many: std.ArrayListUnmanaged(u8) = .empty;
+    defer many.deinit(testing.allocator);
+    for (0..400) |_| many.appendSlice(testing.allocator, "a/") catch unreachable;
+    many.appendSlice(testing.allocator, "x") catch unreachable;
+    try testing.expect(resolve("/w", many.items, &buf) == null);
+
+    // **공백만 있는 이름**은 호출자가 다듬어 빈 이름이 되므로 거절된다(여기서는 그 뒤를 잰다).
+    try testing.expect(resolve("/w", "", &buf) == null);
+    // 점 하나·둘은 파일 이름이 아니다(이미 U2r 이 재지만 기호 조합도 본다).
+    try testing.expect(resolve("/w", "./", &buf) == null);
+    try testing.expect(resolve("/w", "a/./", &buf) == null);
+    // **NUL 이 든 이름은 거절한다** — 경로 syscall 은 NUL 에서 끊기므로 통과시키면 **다른 파일**에 쓴다.
+    try testing.expect(resolve("/w", "a\x00b.txt", &buf) == null);
 }

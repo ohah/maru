@@ -13820,8 +13820,14 @@ pub const AppSession = struct {
         // 인라인 rename 중 마우스 down(어디든)이면 편집을 확정한다(포커스 상실 = 확정 — docs/tabs-splits-layout.md).
         // 그 뒤 클릭은 정상 처리된다(탭 전환·pane 포커스 등). drag/up(2/3)은 down이 선행하므로 여기서 안 걸린다.
         if (kind == 1 and self.rename != null) {
-            // 심볼 rename(§8.2f)은 클릭-어웨이가 **취소**다 — 확정하면 서버에 rename 이 나가므로(VS Code 도 취소).
-            if (self.rename.? == .symbol) settings_ops.closeRename(self) else settings_ops.commitRename(self);
+            // **팝업 상자는 클릭-어웨이가 취소다.** 심볼 rename(§8.2f)은 확정하면 서버에 rename 이 나가고
+            // (VS Code 도 취소), 이름 없는 문서 저장(U2)은 확정하면 **반쯤 친 이름으로 파일이 만들어진다** —
+            // 사용자가 의도하지 않은 이름의 파일이 디스크에 남는다(적대적 16회차). 인라인 rename 은
+            // 지금까지대로 확정이다(포커스 상실 = 확정, docs/tabs-splits-layout.md).
+            switch (self.rename.?) {
+                .symbol, .untitled_save => settings_ops.closeRename(self),
+                .workspace, .pane, .term, .group, .file_tree => settings_ops.commitRename(self),
+            }
         }
         // Phase 7e-2a: 주소창 편집 중 **자기 밴드 밖**(탭/pane/워크스페이스/터미널)을 down하면 편집을 취소한다 — rename의
         // mouse-down commit-away를 미러하되, 브라우저 관례상 클릭-어웨이 = **취소(현재 URL 복원)**로 한다(commit-navigate는

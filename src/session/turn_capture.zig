@@ -1028,4 +1028,12 @@ test "겨냥 ∧ 목록 (AT3d): 편집 뒤에 읽은 before 는 ✎ 를 막지 �
     try testing.expect(!ro.editTargeted() and !ro.revertedByAgent());
     // 편집 뒤에 읽은 before 는 «같다» 를 증명하지 못한다 — ⑴ 은 절대 되돌림이 아니다.
     try testing.expect(!late.revertedByAgent());
+
+    // ⑸ **Edit 뒤에 같은 파일을 Read**(고친 뒤 확인하는 흔한 순서) — 겨냥이 지워지면 안 된다(트리거는 격상만, 강등 없음).
+    //    뮤턴트 D9(«격상이 아니라 마지막 트리거로 덮는다»)가 이것을 잡을 판정자가 없어 살아남았다.
+    try testing.expect(store.noteBefore(gpa, "D", "/r/edit_then_read.zig", .edit, .{ .text = try gpa.dupe(u8, "v2") }));
+    try testing.expect(!store.noteBefore(gpa, "D", "/r/edit_then_read.zig", .read, .{ .text = try gpa.dupe(u8, "v2") }));
+    const etr = turn.entries.items[turn.find("/r/edit_then_read.zig").?];
+    try testing.expectEqual(Trigger.edit, etr.trigger);
+    try testing.expect(etr.editTargeted() and !etr.before_trusted); // Read 가 **뒤** 라 before 는 여전히 못 믿는다
 }

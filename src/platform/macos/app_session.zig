@@ -275,7 +275,7 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 185: CR6d-v2b0b extends the read-only input probe with terminal byte/screen generation counters
 // and adds one synchronous transcript-to-canonical-evidence leaf. Raw inventories are borrowed
 // only for the call; Zig owns reduction and absent-target publication.
-pub const abi_version: u32 = 185;
+pub const abi_version: u32 = 186;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -2394,6 +2394,13 @@ test "P2-b: TermRuntime는 opaque handle을 들고 *LivePtySession을 직접 참
 /// 닫기 확인이 보류한 닫기 **진입점**(어떤 UI 동작이 닫기를 요청했나). 진입점마다 cascade 정책이 달라, 확정 시 같은
 /// 판단을 다시 하려고 어느 경로였는지 기억한다. 진입점 → 실제 teardown 범위(CloseScope) 변환은 resolveCloseScope가
 /// **단일 출처**로 한다 — 실행 중 명령 판정(closeTargetHasRunningJob)과 실제 실행(executeClose)이 그 한 함수를 공유한다.
+/// `editorSaveConflictSmokeProbe` 가 답하는 셋. `extern` 이라 ABI 가 그대로 싣는다.
+pub const EditorSaveConflictSmokeProbe = extern struct {
+    editor_present: u32 = 0,
+    dirty: u32 = 0,
+    overlay_open: u32 = 0,
+};
+
 pub const PendingClose = union(enum) {
     pane_or_tab, // close_tab 액션(워크스페이스 cascade): split이면 활성 pane, 아니면 탭(마지막이면 창)
     term_or_pane, // close_term 액션(⌘W Term cascade): Term>pane>워크스페이스
@@ -4366,6 +4373,23 @@ pub const AppSession = struct {
     /// 본문 분리: app_session/term.zig(F16). ABI가 직접 부르므로 진입만 남긴다.
     pub fn agentSessionArchiveSmokeTermCount(self: *const AppSession) u32 {
         return term_ops.agentSessionArchiveSmokeTermCount(self);
+    }
+
+    /// **저장 충돌 스모크의 read-only 관측**(C0 — §3.9d). 세 사실만 답한다: 활성이 편집기 문서인가 ·
+    /// 저장하지 않은 편집이 있나 · 오버레이(알림)가 떠 있나.
+    ///
+    /// **자동화가 아니다.** 스모크는 파일 열기를 공개 ABI 로 하고 저장을 **실제 키 이벤트**로 한다 —
+    /// 이 함수는 그 결과를 밖에서 볼 창 하나다. 그것이 없으면 스모크가 「눌렀다」까지만 알고 **무엇이
+    /// 일어났는지** 모른다(그러면 아무것도 증명하지 않는다).
+    pub fn editorSaveConflictSmokeProbe(self: *AppSession) EditorSaveConflictSmokeProbe {
+        if (!self.surface_initialized or self.tabs.items.len == 0) return .{};
+        const term = pane_ops.activePane(self).activeTerm();
+        if (term.kind != .editor or term.rt.editor_doc == null) return .{ .overlay_open = @intFromBool(self.anyOverlayOpen()) };
+        return .{
+            .editor_present = 1,
+            .dirty = @intFromBool(editor_ops.isDirty(term)),
+            .overlay_open = @intFromBool(self.anyOverlayOpen()),
+        };
     }
     /// 본문 분리: app_session/term.zig(F16). ABI가 직접 부르므로 진입만 남긴다.
     pub fn focusTerm(self: *AppSession, term_index: usize) void {

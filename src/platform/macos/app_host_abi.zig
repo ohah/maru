@@ -165,7 +165,7 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
 }
 
 test "ABI v185 notification release end-all and cold route values match the C header" {
-    try std.testing.expectEqual(@as(u32, 185), abi_version);
+    try std.testing.expectEqual(@as(u32, 186), abi_version);
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @intFromEnum(AppInstanceLeaseResult.acquired));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_HELD), @intFromEnum(AppInstanceLeaseResult.held));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_UNSAFE), @intFromEnum(AppInstanceLeaseResult.unsafe));
@@ -1252,6 +1252,21 @@ pub export fn maru_macos_app_session_agent_session_archive_smoke_term_count(
 ) u32 {
     const app_session = session orelse return 0;
     return app_session.agentSessionArchiveSmokeTermCount();
+}
+
+pub const EditorSaveConflictSmokeProbe = session_mod.EditorSaveConflictSmokeProbe;
+
+/// Closed-fixture-only observer for the C0 save-conflict AppKit smoke. It answers three published
+/// facts (active surface is an editor document, it has unsaved edits, an overlay is up) so the
+/// smoke can tell **what happened** after a real `⌘S` key event. It performs no action.
+pub export fn maru_macos_app_session_editor_save_conflict_smoke_probe(
+    session: ?*AppSession,
+    out: ?*EditorSaveConflictSmokeProbe,
+) i32 {
+    const app_session = session orelse return -1;
+    const slot = out orelse return -1;
+    slot.* = app_session.editorSaveConflictSmokeProbe();
+    return 0;
 }
 
 pub const DividerSmokeProbe = extern struct {

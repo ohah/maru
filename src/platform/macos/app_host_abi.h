@@ -9,7 +9,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 185u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 186u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -695,6 +695,21 @@ uint64_t maru_macos_app_session_agent_session_archive_smoke_active_surface_id(
 uint32_t maru_macos_app_session_agent_session_archive_smoke_term_count(
     const MaruAppHostSession *session
 );
+/* Closed-fixture-only observer for the C0 save-conflict AppKit smoke (docs/native-editor-document-
+   model.md §3.9d). Three published facts only: the active surface is an editor document, it has
+   unsaved edits, an overlay is up. The smoke opens the file through the public path and saves with a
+   real key event; this window is how it learns **what happened**. It performs no action. v186. */
+typedef struct MaruAppHostEditorSaveConflictSmokeProbe {
+    uint32_t editor_present;
+    uint32_t dirty;
+    uint32_t overlay_open;
+} MaruAppHostEditorSaveConflictSmokeProbe;
+
+int32_t maru_macos_app_session_editor_save_conflict_smoke_probe(
+    MaruAppHostSession *session,
+    MaruAppHostEditorSaveConflictSmokeProbe *out
+);
+
 /* Closed-fixture-only divider observer for the CIM2 AppKit E2E. It exposes the published grab
    band of the first divider, the current split ratio in per-mille, and this drag's instrumentation
    (absorbed moves vs applied resizes). No split pointer or tree structure crosses the ABI. v163. */

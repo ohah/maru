@@ -992,6 +992,7 @@ pub fn build(b: *std.Build) void {
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/MermaidProductTick.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/MaruAppSchemeHandler.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/AgentSessionArchiveSmokeDriver.swift"));
+        macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/EditorSaveConflictSmokeDriver.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/SessionHostInputSourcePolicy.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/SessionHostIMECandidateObservation.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/NotificationReleaseScenarioReceipt.swift"));
@@ -1911,6 +1912,7 @@ pub fn build(b: *std.Build) void {
         macos_app_compile.addFileArg(b.path("src/platform/macos/MermaidProductTick.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/MaruAppSchemeHandler.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/AgentSessionArchiveSmokeDriver.swift"));
+        macos_app_compile.addFileArg(b.path("src/platform/macos/EditorSaveConflictSmokeDriver.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/SessionHostInputSourcePolicy.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/SessionHostIMECandidateObservation.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/NotificationReleaseScenarioReceipt.swift"));
@@ -3752,6 +3754,24 @@ pub fn build(b: *std.Build) void {
         macos_agent_session_archive_smoke.has_side_effects = true;
         macos_agent_session_archive_smoke.step.dependOn(&macos_app_bundle.step);
         macos_agent_session_archive_smoke_step.dependOn(&macos_agent_session_archive_smoke.step);
+
+        // C0: 저장 충돌을 실제 AppKit 프로세스에서 확인한다. 헤드리스 판정자가 못 보는 두 조각
+        // (`⌘S` 키가 `keyDown` 을 지나 디스패치에 닿는가 · 디스크가 안 덮이는가)만 잰다.
+        const macos_editor_save_conflict_smoke_step = b.step(
+            "macos-editor-save-conflict-smoke",
+            "Run the AppKit native-editor save-conflict fixture",
+        );
+        const macos_editor_save_conflict_smoke = b.addSystemCommand(&.{
+            "sh",
+            "tools/test-macos-editor-save-conflict.sh",
+            "./zig-out/Maru.app/Contents/MacOS/maru-macos-app",
+        });
+        macos_editor_save_conflict_smoke.setCwd(b.path("."));
+        // 아카이브 fixture 와 같은 이유: AppKit 프로세스를 띄우고 격리 HOME·문서를 고쳐 쓴다.
+        // 부작용 없음으로 두면 드라이버를 고친 뒤에도 옛 성공을 재사용해 조용히 안 돈다.
+        macos_editor_save_conflict_smoke.has_side_effects = true;
+        macos_editor_save_conflict_smoke.step.dependOn(&macos_app_bundle.step);
+        macos_editor_save_conflict_smoke_step.dependOn(&macos_editor_save_conflict_smoke.step);
 
         const macos_browser_bounded_smoke_step = b.step("macos-browser-bounded-smoke", "Run and assert the bounded browser.executeScript WKWebView/socket smoke");
         const macos_browser_bounded_smoke = b.addSystemCommand(&.{ "sh", "tools/test-macos-browser-bounded-smoke.sh" });

@@ -4453,6 +4453,15 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         smokeMode && ProcessInfo.processInfo.environment["MARU_AGENT_SESSION_ARCHIVE_SMOKE"] == "1"
     }
 
+    /// C0 저장 충돌 E2E(docs/native-editor-document-model.md §3.9d). `⌘S`를 **진짜 키 이벤트**로
+    /// 보낸다 — Zig 디스패치를 직접 부르면 정작 검증 대상인 `keyDown` chord 우회를 건너뛴다.
+    /// 아카이브 fixture와 같은 이유로 자기 env 게이트를 따로 둔다: 일반 PTY smoke가 이 문서 열기와
+    /// 합성 저장을 얻으면 안 된다.
+    private var editorSaveConflictSmokeDriver: EditorSaveConflictSmokeDriver?
+    private var isEditorSaveConflictSmokeMode: Bool {
+        smokeMode && ProcessInfo.processInfo.environment["MARU_EDITOR_SAVE_CONFLICT_SMOKE"] == "1"
+    }
+
     /// CIM2 divider E2E. 이 모드는 실제 `NSEvent`를 `MaruMetalTerminalView`에 흘려 제품 pointer
     /// 경로를 그대로 탄다 — Zig 도메인 메서드를 직접 부르면 검증 대상인 capture 라우팅을 건너뛴다.
     private var isDividerSmokeMode: Bool {
@@ -4872,7 +4881,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 한 번 맞춘다(80×24 기본에서 실제 창 grid로). 일반 smoke는 자체 scripted resize를 쓰지만,
         // archive fixture는 첫 published pointer rect가 실제 view backing 좌표여야 하므로 같은 제품 resize를
         // 명시적으로 한 번 통과시킨다.
-        if !smokeMode || isAgentSessionArchiveSmokeMode {
+        if !smokeMode || isAgentSessionArchiveSmokeMode || isEditorSaveConflictSmokeMode {
             resizeAppSessionFromWindow()
         }
         if !smokeMode {
@@ -4889,6 +4898,16 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 return
             }
             agentSessionArchiveSmokeDriver = AgentSessionArchiveSmokeDriver(scenario: scenario)
+        }
+        // N1 훅(`MARU_NATIVE_EDITOR`)이 첫 프레임에 이미 문서를 열 수 있으니 루프 전에 설치한다 —
+        // 늦게 붙으면 「열리기 전 dirty」 검사가 그 프레임을 못 본다.
+        if isEditorSaveConflictSmokeMode {
+            guard let driver = EditorSaveConflictSmokeDriver() else {
+                exitCode = 1
+                DispatchQueue.main.async { NSApp.terminate(nil) }
+                return
+            }
+            editorSaveConflictSmokeDriver = driver
         }
         // R1's product fixture deliberately requests one real background capture. That makes the
         // generated checkpoint, rather than the input fixture, the authority for the second launch.
@@ -4931,7 +4950,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 꺼짐 — maru sessions list가 "인스턴스 없음"으로 접힌다). 소켓·스레드·collector·dispatch·auth는 전부 Zig.
         controlServerStarted = (maru_macos_control_server_start() == Self.statusOK)
 
-        if smokeMode && !isAgentSessionArchiveSmokeMode && !recoverySmoke && ProcessInfo.processInfo.environment["MARU_APP_INSTANCE_LEASE_SMOKE_HOLD"] != "1" {
+        // 이 모드에 dev 입력(`a\n`)이 가면 활성 pane이 편집기라 **그 글자가 문서에 들어간다** — 우리가
+        // 넣은 표식과 남의 입력을 못 가르게 되고, controlled PTY가 먼저 끝나 앱이 스모크 중간에 죽는다.
+        if smokeMode && !isAgentSessionArchiveSmokeMode && !isEditorSaveConflictSmokeMode && !recoverySmoke && ProcessInfo.processInfo.environment["MARU_APP_INSTANCE_LEASE_SMOKE_HOLD"] != "1" {
             if filePanelHookEnabled {
                 // FP11f cold helper/WKWebView Mermaid와 iframe→read→render→edit→save가 끝나기 전에 controlled
                 // PTY가 `a\n`을 받아 종료하지 않게 입력을 늦춘다. 일반 smoke는 기존 즉시 입력 동작을 유지한다.
@@ -5989,7 +6010,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // Ordinary controlled smoke intentionally starts at 80×24 and scripts its own resize.  The
         // archive fixture instead needs the real Metal view geometry before its first published
         // probe: a zero backing size has no clickable titlebar launcher or dock view slot.
-        let m = (smokeMode && !isAgentSessionArchiveSmokeMode)
+        let m = (smokeMode && !isAgentSessionArchiveSmokeMode && !isEditorSaveConflictSmokeMode)
             ? (widthPx: UInt32(0), heightPx: UInt32(0), scaleMilli: UInt32(0))
             : spawnMetricsForCurrentWindow()
         var config = MaruAppHostSessionConfig(
@@ -6697,6 +6718,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 닫을 창 처리(마지막 창이면 앱 종료 — 그 경우 아래 quick tick은 건너뛴다).
         for surface in toClose { closeWindowOrQuit(surface) }
         maybeRunAgentSessionArchiveSmoke()
+        maybeRunEditorSaveConflictSmoke()
         maybeRunDividerSmoke()
         maybeRunScrollbarSmokeEntry()
         maybeRunTabDragSmokeEntry()
@@ -11479,6 +11501,58 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// Drives the archive fixture through `MaruMetalTerminalView.mouseDown/up`, never by calling
     /// a Zig domain method directly. The only ABI reads are read-only published probes and the
     /// gate is one-way worker synchronization; opening the dock/disclosure remains normal pointer input.
+    private func maybeRunEditorSaveConflictSmoke() {
+        guard let driver = editorSaveConflictSmokeDriver, let surface = primary,
+              let session = surface.appSession, let view = surface.view,
+              let window = surface.window else { return }
+        withSurface(surface) {
+            driver.tick(
+                probe: {
+                    var out = MaruAppHostEditorSaveConflictSmokeProbe()
+                    guard maru_macos_app_session_editor_save_conflict_smoke_probe(session, &out) == Self.statusOK
+                    else { return nil }
+                    return .init(
+                        editorPresent: out.editor_present != 0,
+                        dirty: out.dirty != 0,
+                        overlayOpen: out.overlay_open != 0
+                    )
+                },
+                typeText: { text in
+                    // 입력기가 확정할 때 부르는 **그 자리**다. 평문 글자를 합성 `NSEvent`로 보내면
+                    // `interpretKeyEvents`가 입력 컨텍스트를 거치므로 이 프로세스에서 재현이 안 된다 —
+                    // 이 스모크가 증명하려는 것은 글자 경로가 아니라 `⌘S`다.
+                    guard view.window === window else { return false }
+                    view.insertText(text, replacementRange: NSRange(location: NSNotFound, length: 0))
+                    return true
+                },
+                pressKey: { key in self.dispatchEditorSaveConflictSmokeKey(key, in: view, window: window) }
+            )
+        }
+    }
+
+    /// `keyDown`의 chord 우회(`!chord.isEmpty` → `handleKeyDown`)를 그대로 타는 길이고, 물리
+    /// 키보드로 눌렀을 때와 같은 경로다. ANSI keyCode: `a`=0, `s`=1, `→`=124.
+    private func dispatchEditorSaveConflictSmokeKey(
+        _ key: EditorSaveConflictSmokeDriver.Key,
+        in view: MaruMetalTerminalView,
+        window: NSWindow
+    ) -> Bool {
+        let input: (characters: String, keyCode: UInt16) = switch key {
+        case .selectAll: ("a", 0)
+        case .caretToLineEnd: (String(UnicodeScalar(NSRightArrowFunctionKey)!), 124)
+        case .save: ("s", 1)
+        }
+        guard let event = NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: [.command],
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+            context: nil, characters: input.characters,
+            charactersIgnoringModifiers: input.characters,
+            isARepeat: false, keyCode: input.keyCode
+        ) else { return false }
+        view.keyDown(with: event)
+        return true
+    }
+
     private func maybeRunAgentSessionArchiveSmoke() {
         guard let driver = agentSessionArchiveSmokeDriver, let surface = primary,
               let session = surface.appSession, let view = surface.view, let window = surface.window else { return }
@@ -13056,6 +13130,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         let archiveSmokeStage = agentSessionArchiveSmokeDriver?.stage.rawValue ?? (isAgentSessionArchiveSmokeMode ? "not_started" : "disabled")
         let archiveSmokeFailure = agentSessionArchiveSmokeDriver?.failure ?? ""
         let archiveSmokeScenario = agentSessionArchiveSmokeDriver?.scenarioName ?? (isAgentSessionArchiveSmokeMode ? "invalid" : "disabled")
+        // `disabled`(모드 아님)와 `not_started`(모드인데 한 걸음도 못 갔다)를 가른다 — 게이트가
+        // 「이 스모크가 실제로 돌았나」를 이 한 줄로 판정하므로 둘이 같은 값이면 안 돈 것도 통과한다.
+        let editorSaveSmokeStage = editorSaveConflictSmokeDriver?.stage.rawValue
+            ?? (isEditorSaveConflictSmokeMode ? "not_started" : "disabled")
+        let editorSaveSmokeFailure = editorSaveConflictSmokeDriver?.failure ?? ""
+        let editorSaveSmokeScenario = editorSaveConflictSmokeDriver?.scenarioName
+            ?? (isEditorSaveConflictSmokeMode ? "invalid" : "disabled")
         let sortedPumpMs = browserResultPumpSamplesMs.sorted()
         let pumpP95Ms = sortedPumpMs.isEmpty ? 0 : sortedPumpMs[max(0, Int(ceil(Double(sortedPumpMs.count) * 0.95)) - 1)]
         let pumpMaxMs = sortedPumpMs.last ?? 0
@@ -13198,6 +13279,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         agent_session_archive_smoke_content_size=\(agentSessionArchiveSmokeContentSize)
         agent_session_archive_smoke_scroll_point=\(agentSessionArchiveSmokeScrollPoint)
         agent_session_archive_smoke_scenario=\(archiveSmokeScenario)
+        editor_save_conflict_smoke_stage=\(editorSaveSmokeStage)
+        editor_save_conflict_smoke_failure=\(editorSaveSmokeFailure)
+        editor_save_conflict_smoke_scenario=\(editorSaveSmokeScenario)
         agent_session_archive_smoke_fake_resume_verdict=\(archiveSmokeFakeResumeVerdict())
         agent_session_archive_smoke_reveal_allowed_count=\(agentSessionArchiveSmokeRevealAllowedCount)
         agent_session_archive_smoke_reveal_rejected_count=\(agentSessionArchiveSmokeRevealRejectedCount)

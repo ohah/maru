@@ -35592,3 +35592,75 @@ test "U2l 트리에서 연 네이티브 문서도 dirty 면 닫기를 묻는다 
     try testing.expect(fx.session.chrome_host.confirm.open);
     try testing.expectEqualStrings(maru.i18n.t(.app_close_unsaved), fx.session.chrome_host.confirm.message);
 }
+
+test "U2m 저장을 여러 번·실패를 섞어도 새지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator; // 이 allocator 가 누수·이중 해제를 잡는다
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    const io = std.testing.io;
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    pinUntitledBase(fx.session, root);
+
+    // ⑴ **성공을 여러 번** — 경로가 두 벌(Term·entry) 소유라 한 벌만 놓으면 여기서 누수·이중 해제다.
+    var i: usize = 0;
+    while (i < 3) : (i += 1) {
+        const t = try openUntitledInActivePane(fx.session);
+        try testing.expect(insertText(fx.session, t, "x\n"));
+        try testing.expect(!saveDocument(fx.session, t));
+        var name_buf: [32]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buf, "m{d}.txt", .{i});
+        fx.session.rename_input.clear();
+        try fx.session.rename_input.query.appendSlice(allocator, name);
+        settings_ops.commitRename(fx.session);
+        try testing.expect(t.rt.editor_path != null);
+        try testing.expect(t.file_entry != null);
+    }
+
+    // ⑵ **거절된 이름을 섞는다** — 실패 갈래가 방금 만든 복사본을 놓는지 본다.
+    {
+        const t = try openUntitledInActivePane(fx.session);
+        try testing.expect(insertText(fx.session, t, "y\n"));
+        for ([_][]const u8{ "../out.txt", "/abs.txt", "" }) |bad| {
+            try testing.expect(!saveDocument(fx.session, t));
+            fx.session.rename_input.clear();
+            try fx.session.rename_input.query.appendSlice(allocator, bad);
+            settings_ops.commitRename(fx.session);
+            try testing.expect(t.rt.editor_path == null);
+            try testing.expect(t.file_entry == null);
+        }
+        // 그 뒤에 성공해도 정상이다.
+        try testing.expect(!saveDocument(fx.session, t));
+        fx.session.rename_input.clear();
+        try fx.session.rename_input.query.appendSlice(allocator, "after-bad.txt");
+        settings_ops.commitRename(fx.session);
+        try testing.expect(t.rt.editor_path != null);
+    }
+
+    // ⑶ **덮어쓰기를 취소한 뒤 다시 저장** — 들고 있던 경로가 남아 다음 저장을 오염시키지 않는지.
+    {
+        try dir.dir.writeFile(io, .{ .sub_path = "over.txt", .data = "old\n" });
+        const t = try openUntitledInActivePane(fx.session);
+        try testing.expect(insertText(fx.session, t, "z\n"));
+        try testing.expect(!saveDocument(fx.session, t));
+        fx.session.rename_input.clear();
+        try fx.session.rename_input.query.appendSlice(allocator, "over.txt");
+        settings_ops.commitRename(fx.session);
+        fx.session.dispatchChromeAction(.confirm_cancel);
+        try testing.expectEqual(@as(usize, 0), fx.session.pending_untitled_save.path_len);
+        // 다른 이름으로 저장 — **취소한 경로에 쓰이면 안 된다**.
+        try testing.expect(!saveDocument(fx.session, t));
+        fx.session.rename_input.clear();
+        try fx.session.rename_input.query.appendSlice(allocator, "other.txt");
+        settings_ops.commitRename(fx.session);
+        try testing.expect(std.mem.endsWith(u8, t.rt.editor_path.?, "/other.txt"));
+        const untouched = try dir.dir.readFileAlloc(io, "over.txt", allocator, .limited(64));
+        defer allocator.free(untouched);
+        try testing.expectEqualStrings("old\n", untouched);
+    }
+
+    // ⑷ **저장한 문서를 열어 둔 채 세션이 끝난다** — 경로 두 벌과 entry 가 같은 teardown 을 지난다.
+}

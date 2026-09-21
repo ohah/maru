@@ -392,6 +392,77 @@ fn handleCompletion(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: s
     sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .result = std.json.Value{ .object = root } });
 }
 
+/// `textDocument/foldingRange`(§8.2j): `{` 로 끝나는 줄마다 짝 `}` 줄을 찾아 `startLine..(닫는 줄 - 1)`(tsgo·clangd 모양 — 접어도 `}` 가
+/// 보인다)을 낸다. 문서 첫 줄부터 이어지는 `import ` 줄이 둘 이상이면 `imports` 종류 하나를 더한다. **일부러 더러운 것**도 섞는다 — rust-analyzer
+/// 처럼 같은 시작줄의 중복(더 작은 것 하나), 문서 밖(`endLine = 줄 수 + 5`), 한 줄짜리 — 클라이언트의 검증(`fold_range.decode`)이 거른다.
+/// 문서에 `FOLDSTALL` 이면 답하지 않고, `FOLDERR` 면 `-32801 content modified` 오류, `FOLDEMPTY` 면 빈 배열.
+fn handleFoldingRange(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: std.json.Value) void {
+    var req_uri: []const u8 = "";
+    if (obj.get("params")) |p| if (p == .object) {
+        if (p.object.get("textDocument")) |td| if (td == .object) {
+            req_uri = str(td.object.get("uri")) orelse "";
+        };
+    };
+    const text = docText(req_uri);
+    if (std.mem.indexOf(u8, text, "FOLDSTALL") != null) return;
+    if (std.mem.indexOf(u8, text, "FOLDERR") != null) {
+        sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .@"error" = .{ .code = @as(i32, -32801), .message = "content modified" } });
+        return;
+    }
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var out: std.json.Array = .init(arena);
+    if (std.mem.indexOf(u8, text, "FOLDEMPTY") == null) {
+        var lines: std.ArrayList([]const u8) = .empty;
+        var it = std.mem.splitScalar(u8, text, '\n');
+        while (it.next()) |l| lines.append(arena, l) catch return;
+        const n = lines.items.len;
+        var imports: usize = 0;
+        while (imports < n and std.mem.startsWith(u8, lines.items[imports], "import ")) imports += 1;
+        if (imports >= 2) appendFold(arena, &out, 0, @intCast(imports - 1), "imports") catch return;
+        for (lines.items, 0..) |l, i| {
+            const t = std.mem.trimEnd(u8, l, " \t\r");
+            if (t.len == 0 or t[t.len - 1] != '{') continue;
+            var depth: usize = 0;
+            var j = i;
+            var close: ?usize = null;
+            while (j < n) : (j += 1) {
+                for (lines.items[j]) |b| {
+                    if (b == '{') depth += 1;
+                    if (b == '}') {
+                        depth -= 1;
+                        if (depth == 0) {
+                            close = j;
+                            break;
+                        }
+                    }
+                }
+                if (close != null) break;
+            }
+            const c = close orelse continue;
+            if (c <= i + 1) continue; // `{ }` 가 바로 다음 줄에 닫히면 한 줄짜리 — 서버도 안 낸다
+            appendFold(arena, &out, @intCast(i), @intCast(c - 1), null) catch return;
+            if (i == 0 or out.items.len == 1) {
+                // 첫 블록에는 rust-analyzer 처럼 같은 시작줄의 더 작은 중복을 하나 더 낸다.
+                appendFold(arena, &out, @intCast(i), @intCast(i + 1), null) catch return;
+            }
+        }
+        // 더러운 것 둘 — 문서 밖과 한 줄짜리.
+        appendFold(arena, &out, @intCast(n -| 1), @intCast(n + 5), null) catch return;
+        appendFold(arena, &out, 0, 0, "region") catch return;
+    }
+    sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .result = std.json.Value{ .array = out } });
+}
+
+fn appendFold(arena: std.mem.Allocator, out: *std.json.Array, start: i64, end: i64, kind: ?[]const u8) !void {
+    var o: std.json.ObjectMap = .empty;
+    try o.put(arena, "startLine", .{ .integer = start });
+    try o.put(arena, "endLine", .{ .integer = end });
+    if (kind) |k| try o.put(arena, "kind", .{ .string = k });
+    try out.append(.{ .object = o });
+}
+
 /// `textDocument/semanticTokens/range`·`full`(§8.2i): 요청 범위(full 이면 전부) 안의 식별자를 **이름 꼬리로** 분류해 relative 5-tuple 로 낸다 —
 /// `*_fn` → function(1) · `*_ty` → type(3) · `*_kw` → keyword(0) · `*_bogus` → bogusKind(4, 클라이언트가 모르는 종류) · 나머지 → variable(2).
 /// 문서에 `SEMSTALL` 이면 답하지 않고, `SEMERR` 면 `-32801 content modified` 오류.
@@ -704,6 +775,8 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
                     .codeActionProvider = if (std.c.getenv("MARU_FAKE_LSP_NOACTCAP") == null) .{ .codeActionKinds = [_][]const u8{"quickfix"}, .resolveProvider = true } else null,
                     // semantic tokens(§8.2i) — legend 다섯(하나는 클라이언트가 모르는 이름·`variable` 은 무색). `MARU_FAKE_LSP_SEMFULL=1` 이면 range 없이
                     // full 만(clangd 꼴), `MARU_FAKE_LSP_NOSEMCAP=1` 이면 provider 없음.
+                    // 접힘 3층(§8.2j) — `MARU_FAKE_LSP_NOFOLDCAP=1` 이면 provider 없음.
+                    .foldingRangeProvider = std.c.getenv("MARU_FAKE_LSP_NOFOLDCAP") == null,
                     .semanticTokensProvider = if (std.c.getenv("MARU_FAKE_LSP_NOSEMCAP") == null) .{
                         .legend = .{ .tokenTypes = [_][]const u8{ "keyword", "function", "variable", "type", "bogusKind" }, .tokenModifiers = [_][]const u8{"declaration"} },
                         .range = std.c.getenv("MARU_FAKE_LSP_SEMFULL") == null,
@@ -846,6 +919,10 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
     }
     if (std.mem.eql(u8, method, "codeAction/resolve")) {
         handleCodeActionResolve(allocator, obj, id.?);
+        return;
+    }
+    if (std.mem.eql(u8, method, "textDocument/foldingRange")) {
+        handleFoldingRange(allocator, obj, id.?);
         return;
     }
     if (std.mem.eql(u8, method, "textDocument/semanticTokens/range") or std.mem.eql(u8, method, "textDocument/semanticTokens/full")) {

@@ -22,11 +22,12 @@ pub const RequestId = union(enum) {
     code_action_resolve: u32,
     completion_resolve: u32,
     semantic_tokens: u32,
+    folding_range: u32,
 };
 /// 요청 id 는 **i32 안**이어야 한다(2026-09-20 실측): rust-analyzer·ruff 가 쓰는 Rust `lsp-server` 크레이트는 정수 id 를 i32 로만 읽고,
 /// 넘치면 그 메시지를 **알림으로 오인해 버린다**(`6_000_000_001` 짜리 completion 이 stderr 에 `unhandled notification` 으로만 남고 응답이
 /// 없었다 — hover·definition 만 i32 안이라 그 둘만 됐다). 종류마다 `id_span`(1e8) 칸을 갖고 seq 는 칸 안에서 돈다(`nextSeq`) —
-/// 가장 큰 칸(9e8+1e8-1) 도 i32 최대(2_147_483_647) 아래. `classify` 는 칸으로 가른다.
+/// 가장 큰 칸(11e8+1e8-1) 도 i32 최대(2_147_483_647) 아래. `classify` 는 칸으로 가른다.
 pub const id_span: u32 = 100_000_000;
 pub const initialize_id: u32 = 1;
 pub const shutdown_id: u32 = 2;
@@ -50,8 +51,10 @@ pub const code_action_resolve_id_base: u32 = 8 * id_span;
 pub const completion_resolve_id_base: u32 = 9 * id_span;
 /// `semanticTokens/range`·`full`(§8.2i)
 pub const semantic_tokens_id_base: u32 = 10 * id_span;
+/// `textDocument/foldingRange`(§8.2j)
+pub const folding_range_id_base: u32 = 11 * id_span;
 comptime {
-    std.debug.assert(@as(u64, semantic_tokens_id_base) + id_span - 1 <= std.math.maxInt(i32));
+    std.debug.assert(@as(u64, folding_range_id_base) + id_span - 1 <= std.math.maxInt(i32));
 }
 /// 종류별 seq 의 다음 값 — 칸 안에서 돈다(0 은 안 쓴다: 처음 보내는 요청이 `base + 1`).
 pub fn nextSeq(seq: u32) u32 {
@@ -62,7 +65,7 @@ pub fn nextSeq(seq: u32) u32 {
 fn requestIdOf(id_num: i64) ?RequestId {
     if (id_num == initialize_id) return .initialize;
     if (id_num == shutdown_id) return .shutdown;
-    if (id_num < hover_id_base or id_num >= @as(i64, semantic_tokens_id_base) + id_span) return null;
+    if (id_num < hover_id_base or id_num >= @as(i64, folding_range_id_base) + id_span) return null;
     const slot: u32 = @intCast(@divTrunc(id_num, id_span));
     const seq: u32 = @intCast(@mod(id_num, id_span));
     return switch (slot) {
@@ -76,6 +79,7 @@ fn requestIdOf(id_num: i64) ?RequestId {
         8 => .{ .code_action_resolve = seq },
         9 => .{ .completion_resolve = seq },
         10 => .{ .semantic_tokens = seq },
+        11 => .{ .folding_range = seq },
         else => null,
     };
 }
@@ -127,6 +131,11 @@ pub fn initializeRequest(allocator: std.mem.Allocator, root_uri: []const u8, pid
                         .formats = [_][]const u8{"relative"},
                         .multilineTokenSupport = false,
                         .overlappingTokenSupport = false,
+                    },
+                    // 접힘 3층(§8.2j) — 줄 접힘만, 종류 셋을 안다고 선언한다(쓰지는 않는다 — 서버가 종류 때문에 범위를 빼지 않게).
+                    .foldingRange = .{
+                        .lineFoldingOnly = true,
+                        .foldingRangeKind = .{ .valueSet = [_][]const u8{ "comment", "imports", "region" } },
                     },
                     .signatureHelp = .{
                         .contextSupport = true,
@@ -448,6 +457,16 @@ pub fn semanticTokensRangeRequest(allocator: std.mem.Allocator, seq: u32, uri: [
         .id = semantic_tokens_id_base + seq,
         .method = "textDocument/semanticTokens/range",
         .params = .{ .textDocument = .{ .uri = uri }, .range = range },
+    }, .{});
+}
+
+/// `textDocument/foldingRange`(§8.2j) — 문서 전체(범위 인자가 없다).
+pub fn foldingRangeRequest(allocator: std.mem.Allocator, seq: u32, uri: []const u8) error{OutOfMemory}![]u8 {
+    return std.json.Stringify.valueAlloc(allocator, .{
+        .jsonrpc = "2.0",
+        .id = folding_range_id_base + seq,
+        .method = "textDocument/foldingRange",
+        .params = .{ .textDocument = .{ .uri = uri } },
     }, .{});
 }
 
@@ -1189,7 +1208,27 @@ test "LSJ15 semanticTokens — initialize capability(range·full·표준 종류)
     defer p1.deinit();
     try testing.expect(classify(p1.value).response.id == .semantic_tokens and classify(p1.value).response.id.semantic_tokens == 3);
     try testing.expect(@as(u64, semantic_tokens_id_base) + id_span - 1 <= std.math.maxInt(i32));
-    var p2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":1100000000,\"result\":null}"); // 칸 밖
+    var p2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":1200000000,\"result\":null}"); // 칸 밖
     defer p2.deinit();
     try testing.expect(classify(p2.value) == .ignore);
+}
+
+test "LSJ16 foldingRange — initialize capability(lineFoldingOnly·종류 셋)·요청·id 칸(11e8)·classify·칸 밖 (§8.2j)" {
+    const a = testing.allocator;
+    const init = try initializeRequest(a, "file:///r", 42);
+    defer a.free(init);
+    try testing.expect(std.mem.indexOf(u8, init, "\"foldingRange\":{\"lineFoldingOnly\":true,\"foldingRangeKind\":{\"valueSet\":[\"comment\",\"imports\",\"region\"]}}") != null);
+    const fr = try foldingRangeRequest(a, 7, "file:///a.rs");
+    defer a.free(fr);
+    try testing.expect(std.mem.indexOf(u8, fr, "\"id\":1100000007,\"method\":\"textDocument/foldingRange\",\"params\":{\"textDocument\":{\"uri\":\"file:///a.rs\"}}") != null);
+    var p1 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":1100000007,\"result\":[]}");
+    defer p1.deinit();
+    try testing.expect(classify(p1.value).response.id == .folding_range and classify(p1.value).response.id.folding_range == 7);
+    try testing.expect(@as(u64, folding_range_id_base) + id_span - 1 <= std.math.maxInt(i32));
+    var p2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":1199999999,\"result\":null}"); // 칸 끝
+    defer p2.deinit();
+    try testing.expect(classify(p2.value).response.id == .folding_range and classify(p2.value).response.id.folding_range == 99999999);
+    var p3 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":1200000000,\"result\":null}"); // 칸 밖
+    defer p3.deinit();
+    try testing.expect(classify(p3.value) == .ignore);
 }

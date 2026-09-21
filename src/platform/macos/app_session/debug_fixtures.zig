@@ -1251,6 +1251,20 @@ pub fn applyForcedFormat(self: *AppSession) void {
     }
 }
 
+/// MARU_FORCE_FOLD_ALL=<indent|syntax|lsp> — 활성 편집기의 접힘 범위가 **그 층**에서 온 뒤 `fold_all` 을 한 번 부른다(캡처 전용, tooling §8.2j).
+/// 층은 서버 응답·파싱 완료로 뒤늦게 서므로 그때까지 매 프레임 되풀이하고, 한 번 접으면 다시 부르지 않는다(래치).
+pub fn applyForcedFoldAll(self: *AppSession) void {
+    const raw = std.c.getenv("MARU_FORCE_FOLD_ALL") orelse return;
+    if (self.debug_fold_all_done) return;
+    const want = std.meta.stringToEnum(editor_ops.FoldSource, std.mem.span(raw)) orelse return;
+    if (!self.surface_initialized or self.tabs.items.len == 0) return;
+    const term = pane_ops.activePane(self).activeTerm();
+    if (term.kind != .editor or term.rt.editor_doc == null) return;
+    if (term.rt.editor_fold_source != want) return;
+    if (self.chrome_host.notice.open) self.chrome_host.notice.dismiss();
+    if (editor_ops.foldAll(self)) self.debug_fold_all_done = true;
+}
+
 /// MARU_FORCE_RENAME_OPEN=1 — caret 자리에서 `rename_symbol` 을 불러 상자를 연 채 둔다(캡처 전용, tooling §8.2f). MARU_FORCE_RENAME=<이름> — 열고
 /// 그 이름으로 바꿔 곧바로 확정한다(요청이 나간다). 서버가 뜨기 전에는 상자가 안 열리므로 열릴 때까지 매 프레임 되풀이하고, 한 번 열리면
 /// 다시 부르지 않는다(래치). caret 훅의 래치도 함께 세운다(포맷 훅과 같은 이유).

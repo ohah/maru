@@ -30,6 +30,7 @@ const editor_format = @import("editor_format.zig");
 const editor_rename = @import("editor_rename.zig");
 const editor_completion = @import("editor_completion.zig");
 const editor_semantic = @import("editor_semantic.zig");
+const editor_fold_lsp = @import("editor_fold_lsp.zig");
 const editor_code_action = @import("editor_code_action.zig");
 
 pub const Phase = enum {
@@ -106,6 +107,9 @@ pub const Client = struct {
     /// semantic tokens(§8.2i) — legend 를 우리 색으로 옮긴 표를 든다(소유).
     semantic_seq: u32 = 0,
     semantic_caps: lsp.semantic.Caps = .{},
+    /// 접힘 3층(§8.2j) — `foldingRangeProvider`.
+    fold_seq: u32 = 0,
+    fold_supported: bool = false,
 
     fn deinit(self: *Client, allocator: std.mem.Allocator) void {
         if (self.proc) |*p| {
@@ -161,6 +165,8 @@ pub const State = struct {
     sent_code_action_resolves: u64 = 0,
     sent_semantic: u64 = 0,
     received_semantic: u64 = 0,
+    sent_folding: u64 = 0,
+    received_folding: u64 = 0,
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
         for (self.clients.items) |*c| c.deinit(allocator);
@@ -534,6 +540,7 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
                 c.code_action_caps = lsp.rpc.codeActionCapsFromResult(r.result); // §8.2h
                 c.semantic_caps.deinit(self.allocator); // 재시작이면 옛 표를 놓는다
                 c.semantic_caps = lsp.semantic.capsFromResult(self.allocator, r.result) catch .{}; // §8.2i
+                c.fold_supported = lsp.fold_range.supportedFromResult(r.result); // §8.2j
                 c.phase = .ready;
                 c.restarts = 0;
                 const msg = lsp.rpc.initializedNotification(self.allocator) catch return;
@@ -564,6 +571,10 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
                 // 어느 문서의 것인지는 seq 로 — 문서마다 대기 seq 하나(§8.2i).
                 // `is_error` 는 방어 — 오류 응답은 `result` 가 없어 `null` 만으로도 버려진다(적대적 3회차 C2: 등가).
                 if (termWaitingSemantic(self, c, seq)) |t| editor_semantic.onResponse(self, t, seq, r.result, r.is_error, c.encoding);
+            },
+            .folding_range => |seq| {
+                self.editor_lsp.received_folding += 1;
+                if (termWaitingFolding(self, c, seq)) |t| editor_fold_lsp.onResponse(self, t, seq, r.result, r.is_error);
             },
             .rename => |seq| {
                 self.editor_lsp.received_renames += 1;
@@ -1004,6 +1015,34 @@ fn termWaitingSemantic(self: *AppSession, c: *Client, seq: u32) ?*Term {
         }.pred) orelse continue;
         const t = loc.pane.terms.items[loc.term_index];
         if (t.rt.editor_semantic.waiting and t.rt.editor_semantic.waiting_seq == seq) return t;
+    }
+    return null;
+}
+
+/// `textDocument/foldingRange`(§8.2j) — 문서 전체. 보내기 전 `flushDocument`. 서버가 없거나 provider 가 없으면 `null`.
+pub fn requestFoldingRange(self: *AppSession, term: *Term) ?u32 {
+    const c = readyClientFor(self, term) orelse return null;
+    if (!c.fold_supported) return null;
+    flushDocument(self, c, term);
+    const d = c.findDoc(term.surfaceId()) orelse return null;
+    c.fold_seq = lsp.rpc.nextSeq(c.fold_seq);
+    const msg = lsp.rpc.foldingRangeRequest(self.allocator, c.fold_seq, d.uri) catch return null;
+    defer self.allocator.free(msg);
+    if (!send(self, c, msg)) return null;
+    self.editor_lsp.sent_folding += 1;
+    return c.fold_seq;
+}
+
+/// 이 클라이언트의 문서 중 접힘 `seq` 를 기다리는 편집기 Term.
+fn termWaitingFolding(self: *AppSession, c: *Client, seq: u32) ?*Term {
+    for (c.docs.items) |d| {
+        const loc = term_ops.findTermWhere(self, d.surface_id, struct {
+            fn pred(want: u64, t: *Term) bool {
+                return t.kind == .editor and t.surface.id == want;
+            }
+        }.pred) orelse continue;
+        const t = loc.pane.terms.items[loc.term_index];
+        if (t.rt.editor_fold_lsp.waiting and t.rt.editor_fold_lsp.waiting_seq == seq) return t;
     }
     return null;
 }

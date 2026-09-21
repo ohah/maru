@@ -272,8 +272,9 @@ pub fn renameCaretRect(self: *AppSession) ?chrome.draw.Rect {
                 .h = @intCast(ch),
             };
         },
-        // 심볼 상자(§8.2f) — 상자 rect 의 좌패딩 1칸 + query 폭이 caret(`input_box` 의 끝 caret 규약).
-        .symbol => {
+        // 심볼 상자(§8.2f)와 **이름 없는 문서의 저장 상자**(U2) — 상자 rect 의 좌패딩 1칸 + query 폭이
+        // caret(`input_box` 의 끝 caret 규약). 같은 컴포넌트라 caret 규약도 같다.
+        .symbol, .untitled_save => {
             const st = &self.chrome_host.rename_box;
             if (!st.open) return null;
             const rect = chrome.components.rename_box.boxRect(st, self.rename_input.query.items, self.buildChromeProps()) orelse return null;
@@ -1178,6 +1179,9 @@ pub fn startRename(self: *AppSession, target: RenameTarget) void {
         .group => |t| t.group_start, // 그룹 이름 = group_start 마커
         .file_tree => |t| if (t.edit_kind == .rename) std.fs.path.basename(t.path()) else null,
         .symbol => |t| editor_ops.rename_client.seedFor(self, t), // 낱말 그대로(§8.2f)
+        // **빈 편집기로 시작한다**(U2) — 계약이 「자동 이름 추론을 하지 않는다」고 정했다. 첫 줄로
+        // 파일명을 지어 주면 사용자가 안 정한 이름이 저장 위치가 된다.
+        .untitled_save => null,
     };
     if (seed) |s| self.rename_input.query.appendSlice(self.allocator, s) catch {};
     self.rename = target;
@@ -1200,12 +1204,18 @@ pub fn commitRename(self: *AppSession) void {
         editor_ops.rename_client.commit(self, target.symbol, text); // 요청을 보내고(또는 안 보내고) 닫는다(§8.2f)
         return;
     }
+    if (target == .untitled_save) {
+        // 다섯 판정(base·이름·이미 열림·있는 파일·쓰기)은 그쪽이 소유한다 — 여기서 풀면 이 함수가
+        // 두 문서 종류의 규칙을 함께 들게 된다.
+        app_session_mod.editor_untitled_save_ops.commit(self, target.untitled_save, text);
+        return;
+    }
     const old_name: []const u8 = switch (target) {
         .workspace => |t| t.custom_name orelse "",
         .pane => |p| p.custom_name orelse "",
         .term => |t| t.surface.custom_name orelse "",
         .group => |t| t.group_start orelse "",
-        .file_tree, .symbol => unreachable,
+        .file_tree, .symbol, .untitled_save => unreachable,
     };
     if (std.mem.eql(u8, old_name, text)) {
         closeRename(self);
@@ -1237,7 +1247,7 @@ pub fn commitRename(self: *AppSession) void {
             t.group_start = new_name orelse (self.allocator.dupe(u8, "") catch null);
             sidebar_ops.rebuildSidebar(self) catch {}; // 헤더 라벨 즉시 갱신
         },
-        .file_tree, .symbol => unreachable,
+        .file_tree, .symbol, .untitled_save => unreachable,
     }
     closeRename(self);
     self.workspaceChanged(.naming);

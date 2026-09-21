@@ -149,6 +149,17 @@ pub fn refreshAnchor(self: *AppSession, t: Target) bool {
     return true;
 }
 
+/// **caret 에 상자를 붙인다**(U2 — 이름 없는 문서 저장). 심볼 쪽은 낱말 첫 글자에 붙는데 이쪽은
+/// 가리킬 낱말이 없다 — 사용자가 보고 있는 자리가 caret 이다. 앵커를 프레임마다 다시 재는 이유는
+/// `refreshAnchor` 와 같다(스크롤·랩이 자리를 옮긴다).
+pub fn refreshCaretAnchor(self: *AppSession, surface_id: u64) bool {
+    const term = termFor(self, surface_id) orelse return false;
+    const sel = term.rt.editor_selection orelse return false;
+    const a = anchorAt(term, sel.focus) orelse return false;
+    self.chrome_host.rename_box.show(a.x, a.y, a.h);
+    return true;
+}
+
 pub const Anchor = struct { x: i32, y: i32, h: u32 };
 
 /// 문서 offset 의 셀(좌상단·높이) — 그려진 행 배열에서 잰다(§10 `caretRect` 와 같은 출처 `bodyAnchor`). 그 문서가 안 그려졌으면 null.

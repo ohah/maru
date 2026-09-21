@@ -2485,6 +2485,9 @@ const PendingConfirm = union(enum) {
     remote_file_tree_delete,
     /// 언어 서버 신뢰(§8.2a) — 주인 root 는 `editor_lsp.asking_root` 가 든다.
     lsp_trust,
+    /// 이름 없는 문서를 **있는 파일 위에** 저장할까(U2 — §3.11). 고른 경로는
+    /// `pending_untitled_save` 가 든다(오버레이가 하나뿐이라 상자를 닫고 확인을 띄우므로).
+    untitled_overwrite: u64,
 };
 
 const FilePanelDirtySyncAction = struct { surface_id: u64, request_id: u64 };
@@ -2718,6 +2721,9 @@ pub const RenameTarget = union(enum) {
     /// 편집기의 심볼(tooling §8.2f) — surface·낱말 범위·revision. 확정하면 `textDocument/rename` 을 보낸다. 포인터가 아니라 id 라
     /// Term 이 닫혀도 낡은 참조가 없다(확정 때 못 찾으면 그냥 닫힌다).
     symbol: editor_ops.rename_client.Target,
+    /// **이름 없는 문서에 이름을 붙인다**(U2 — §3.11). 값은 그 편집기의 `surface_id` 다(심볼과 같은
+    /// 이유로 포인터가 아니다 — 상자가 떠 있는 동안 Term 이 닫힐 수 있다).
+    untitled_save: u64,
 };
 
 pub const FileTreeEditKind = enum { create_file, create_directory, rename };
@@ -3070,6 +3076,9 @@ pub fn activeIndexAfterRemoval(active: usize, removed_index: usize, new_len: usi
 // **스레드**: 메인 스레드 전용(surface_id.zig·세션 트리와 같은 계약 — createTerm/destroyTerm/입력/resize/tick pump는
 // 전부 메인 이벤트다). 리더는 interactive 모드서 core에 직접 write(setProcessing)라 `routing`을 안 건드린다(§8A.2 독립).
 pub var app_runtime: app.AppRuntime = .{};
+
+/// U2 — 이름 없는 문서 저장(§3.11). 세션 필드 타입과 확인 수락이 이 모듈을 부른다.
+pub const editor_untitled_save_ops = @import("app_session/editor_untitled_save.zig");
 
 // P3-e3-4d 영속 세션 host 연결 — **앱 프로세스 전역**(창별이 아니라). 한 앱에 창을 여러 개 열어도 host 연결은 **하나**를
 // 공유한다(daemon은 serial serve라 연결이 앱당 하나여야 함 — 창마다 연결하면 두 번째 창이 handshake 타임아웃→in-process
@@ -5439,6 +5448,8 @@ pub const AppSession = struct {
     // 담고 확인 모달을 열며, confirm_accept가 executeClose로 실행하고 confirm_cancel이 버린다. 단일 출처: 어느 닫기
     // 경로였는지(cascade 정책이 경로마다 다름)를 기억해 확정 시 같은 함수를 다시 부른다.
     pending_confirm: PendingConfirm = .none,
+    /// 덮어쓰기 확인을 사이에 두고 **고른 이름을 들고 있는 자리**(U2 — 그 타입의 doc).
+    pending_untitled_save: editor_untitled_save_ops.Pending = .{},
     /// LSP seam 1단(§8.2a) — 클라이언트·신뢰 캐시·프롬프트 주인.
     editor_lsp: editor_ops.lsp_client.State = .{},
     /// 호버 박스 상태(tooling §8.2b) — 포인터 정지·요청 대기·열린 줄.
@@ -9792,6 +9803,8 @@ pub const AppSession = struct {
             // 굳혀 둔 대상을 **비운다** — 안 비우면 다음 확인이 옛 대상을 지울 수 있다.
             .remote_file_tree_delete => self.pending_remote_delete.name_len = 0,
             .lsp_trust => editor_ops.lsp_client.dismissTrustPrompt(self), // 프로그램이 닫은 것 — 기억하지 않고 다음에 다시 묻는다
+            // **취소는 무상태다**(§3.11) — 들고 있던 경로를 비운다. 안 비우면 다음 확인이 옛 경로에 쓴다.
+            .untitled_overwrite => self.pending_untitled_save = .{},
             .none, .close, .reset, .file_conflict_reload => {},
         }
         self.pending_confirm = .none;
@@ -12359,6 +12372,7 @@ pub const AppSession = struct {
                     .reset => settings_ops.resetAllSettings(self),
                     .paste => |target_id| self.confirmPendingPaste(target_id),
                     .close => |target| self.executeClose(target),
+                    .untitled_overwrite => editor_untitled_save_ops.confirmOverwrite(self),
                     .none => {},
                 }
             },
@@ -24356,6 +24370,11 @@ pub const AppSession = struct {
         try self.collectMarkerPreviewDraws(arena, &draws);
         // 심볼 이름 바꾸기 상자(tooling §8.2f) — 인라인 rename 의 심볼 대상일 때. 앵커는 프레임마다 다시 잰다(그 문서가 안 그려졌으면 이 프레임엔 없다).
         if (self.rename) |rt| if (rt == .symbol and editor_ops.rename_client.refreshAnchor(self, rt.symbol)) {
+            try self.chrome_host.collectRenameBoxDraws(try editor_ops.rename_client.boxText(self, arena), props, &tokens, arena, &draws);
+        };
+        // 이름 없는 문서의 저장 이름 상자(U2 — §3.11). **같은 컴포넌트·같은 규율**이고 앵커만 caret 이다
+        // (심볼은 낱말 첫 글자). 앵커를 프레임마다 다시 재는 이유도 같다 — 스크롤·랩이 자리를 옮긴다.
+        if (self.rename) |rt| if (rt == .untitled_save and editor_ops.rename_client.refreshCaretAnchor(self, rt.untitled_save)) {
             try self.chrome_host.collectRenameBoxDraws(try editor_ops.rename_client.boxText(self, arena), props, &tokens, arena, &draws);
         };
         // **리셋은 설정보다 앞이다.** 처음에 세팅 리셋 옆에 뒀다가 방금 넣은 값을 그 자리에서 지워

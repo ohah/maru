@@ -10397,7 +10397,7 @@ pub const AppSession = struct {
         if (slot >= self.sidebar_rows.items.len) return;
         const gh = switch (self.sidebar_rows.items[slot]) {
             .group_header => |h| h,
-            .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => return, // 목록/system 행은 별도 또는 inert
+            .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => return, // 목록/system 행은 별도 또는 inert
             .card => return,
         };
         if (gh.tab >= self.tabs.items.len) return;
@@ -12247,7 +12247,7 @@ pub const AppSession = struct {
     pub fn displaySlotOf(self: *const AppSession, tab_index: usize) ?usize {
         for (self.sidebar_rows.items, 0..) |row, slot| switch (row) {
             .card => |c| if (c.tab == tab_index) return slot,
-            .agent_toggle, .agent, .group_header, .recovered_sessions_header, .recovered_session => {},
+            .agent_toggle, .agent, .agent_pane, .group_header, .recovered_sessions_header, .recovered_session => {},
         };
         return null;
     }
@@ -14300,10 +14300,14 @@ pub const AppSession = struct {
                         } else if (chrome.components.sidebar.agentAt(self.sidebar_rows.items, slot)) |ag| {
                             // 에이전트 행: 우측 ✕ zone이면 **그 Term만 닫고**, 아니면 그 에이전트가 도는 자리로 이동한다
                             // (워크스페이스 → Pane → Term, §5). ✕는 호버 없이 고정 표시라 zone 판정만으로 가른다.
-                            if (sidebar_ops.sidebarCloseButtonAt(self, x_px)) {
+                            // tmux pane 행(RA7 조각 4)은 ✕ 가 없고 — Term 까지 가되 **그 pane 의 세션**을 «최근 세션» 으로
+                            // 기억해 에이전트 탭이 그 링을 보인다(결정 2 — tmux 조작은 없다).
+                            const pane_name = chrome.components.sidebar.paneNameAt(self.sidebar_rows.items, slot);
+                            if (pane_name == null and sidebar_ops.sidebarCloseButtonAt(self, x_px)) {
                                 agent_ops.closeAgentRow(self, ag.tab, ag.pane, ag.term);
                             } else {
                                 agent_ops.focusAgentRow(self, ag.tab, ag.pane, ag.term);
+                                if (pane_name) |pn| agent_ops.rememberPaneSession(self, ag.tab, ag.pane, ag.term, pn);
                             }
                         } else if (self.sidebar_rows.items[slot] == .recovered_session) {
                             const candidate = self.sidebar_rows.items[slot].recovered_session;
@@ -27708,6 +27712,136 @@ test "훅 원격 프레임: tmux pane 둘은 슬롯 둘 — 배지는 하나라�
     try std.testing.expectEqual(@as(usize, 2), session.remote_agent_panes.countFor(term.surfaceId()));
 }
 
+// [RA7 조각 4] **pane 슬롯이 둘이면 사이드바에 pane 행이 선다.** 에이전트 행 아래에 pane 이름 순으로 한 줄씩, 응답이 있으면
+// 2줄. 클릭은 Term 까지만 가되 그 pane 의 세션을 «최근 세션» 으로 기억한다(에이전트 탭이 그 링을 보인다). pane 이 하나면
+// 행을 안 편다(에이전트 행이 곧 그 pane).
+test "훅 원격 프레임: pane 슬롯이 둘이면 사이드바에 pane 행이 서고, 클릭은 그 pane 의 세션을 최근 세션으로 (RA7)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+    test_config_text = agent_hooks_on_config;
+    defer test_config_text = "";
+
+    var session: AppSession = .{ .allocator = a, .io = std.testing.io };
+    try session.init(io, a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_focused = false;
+    _ = try session.resize(1400, 900, 1000);
+
+    const term = pane_ops.activePane(&session).activeTerm();
+    var ch = maru.session.remote_agent_stream.Channel.init(0);
+    _ = ch.feed("{\"hello\":\"maru-agent-events\",\"v\":1}", 0);
+    term.agent_remote_channel = ch;
+    const nonce = "4331_7";
+    @memcpy(term.agent_remote_nonce[0..nonce.len], nonce);
+    term.agent_remote_nonce_len = nonce.len;
+    term.rt.observation.ssh_remote_dest_present = true;
+
+    const Row = chrome.components.sidebar.Row;
+    const countPaneRows = struct {
+        fn f(rows: []const Row) usize {
+            var n: usize = 0;
+            for (rows) |r| if (r == .agent_pane) {
+                n += 1;
+            };
+            return n;
+        }
+    }.f;
+
+    // pane 하나 — 행을 안 편다.
+    agent_ops.consumeRemoteAgentLines(&session, term, &.{
+        "{\"nonce\":\"4331_7\",\"pane\":\"%12\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"UserPromptSubmit\\\",\\\"session_id\\\":\\\"S-A\\\",\\\"prompt\\\":\\\"A 의 일\\\"}\"}",
+    }, 100);
+    try sidebar_ops.rebuildSidebar(&session);
+    try std.testing.expectEqual(@as(usize, 0), countPaneRows(session.sidebar_rows.items));
+
+    // pane 둘 — 이름 순(`%3` 이 `%12` 앞) 으로 두 행. **두 번째 pane 의 첫 이벤트는 프롬프트만**이라 에이전트 행의 줄 수(응답
+    // 없음 = 그대로)는 안 변한다 — 그러면 pane 행 수 비교만이 낡음을 잡는다(뮤턴트 M2: 그 비교를 지우면 여기서 0 행).
+    agent_ops.consumeRemoteAgentLines(&session, term, &.{
+        "{\"nonce\":\"4331_7\",\"pane\":\"%3\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"UserPromptSubmit\\\",\\\"session_id\\\":\\\"S-B\\\",\\\"prompt\\\":\\\"B 의 일\\\"}\"}",
+    }, 200);
+    // **재투영은 낡음 판정이 스스로 건다** — 손으로 `rebuildSidebar` 를 부르면 실기에서 행이 영영 안 서던 결함(두 번째 pane 의
+    // 첫 이벤트가 온 tick 에 재투영이 없었다)을 못 본다. 2 pane e2e 가 그것을 잡았다.
+    sidebar_ops.reprojectSidebarIfRowLinesStale(&session);
+    try std.testing.expectEqual(@as(usize, 2), countPaneRows(session.sidebar_rows.items));
+    for (session.sidebar_rows.items) |r| if (r == .agent_pane) try std.testing.expectEqual(@as(u8, 1), r.agent_pane.lines); // 둘 다 아직 응답이 없다
+
+    // A 의 턴 끝 — A 가 대표가 되며 에이전트 행(1→2)과 A 의 pane 행(1→2)이 **함께** 낡는다(어느 비교든 잡는다).
+    agent_ops.consumeRemoteAgentLines(&session, term, &.{
+        "{\"nonce\":\"4331_7\",\"pane\":\"%12\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"Stop\\\",\\\"session_id\\\":\\\"S-A\\\",\\\"last_assistant_message\\\":\\\"A 끝\\\"}\"}",
+    }, 300);
+    sidebar_ops.reprojectSidebarIfRowLinesStale(&session);
+    // B 의 턴 끝 — 대표가 A(응답 있음, 2줄) 에서 B(응답 있음, 2줄) 로 바뀌므로 **에이전트 행 줄 수는 그대로**고 B 의 pane 행만
+    // 1→2 다. 이번엔 `.agent_pane` 줄 수 비교만이 낡음을 잡는다(뮤턴트 M7: 그 비교를 지우면 B 행이 1줄로 남는다).
+    agent_ops.consumeRemoteAgentLines(&session, term, &.{
+        "{\"nonce\":\"4331_7\",\"pane\":\"%3\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"Stop\\\",\\\"session_id\\\":\\\"S-B\\\",\\\"last_assistant_message\\\":\\\"B 끝\\\"}\"}",
+    }, 400);
+    sidebar_ops.reprojectSidebarIfRowLinesStale(&session);
+    const rows = session.sidebar_rows.items;
+    try std.testing.expectEqual(@as(usize, 2), countPaneRows(rows));
+    var first: ?usize = null;
+    for (rows, 0..) |r, i| if (r == .agent_pane and first == null) {
+        first = i;
+    };
+    const p0 = rows[first.?].agent_pane;
+    const p1 = rows[first.? + 1].agent_pane;
+    try std.testing.expectEqualStrings("%3", p0.name[0..p0.name_len]);
+    try std.testing.expectEqualStrings("%12", p1.name[0..p1.name_len]);
+    try std.testing.expectEqual(@as(u8, 2), p0.lines); // B 의 응답
+    try std.testing.expectEqual(@as(u8, 2), p1.lines); // A 의 응답
+    try std.testing.expect(p1.last); // 마지막 pane 행이 묶음의 끝
+    try std.testing.expect(!rows[first.? - 1].agent.last); // 에이전트 행은 더 이상 마지막이 아니다
+    // 행이 인덱스 경로로 Term 을 가리킨다(클릭 라우팅).
+    try std.testing.expect(chrome.components.sidebar.agentAt(rows, first.?) != null);
+    try std.testing.expectEqualStrings("%3", chrome.components.sidebar.paneNameAt(rows, first.?).?);
+
+    // A 가 다음 턴을 연다 — A 는 running, 응답은 비고(1줄), 대표는 A.
+    agent_ops.consumeRemoteAgentLines(&session, term, &.{
+        "{\"nonce\":\"4331_7\",\"pane\":\"%12\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"UserPromptSubmit\\\",\\\"session_id\\\":\\\"S-A\\\",\\\"prompt\\\":\\\"A 의 다음 일\\\"}\"}",
+    }, 500);
+    sidebar_ops.reprojectSidebarIfRowLinesStale(&session);
+    try std.testing.expectEqual(@as(u8, 1), session.sidebar_rows.items[first.? + 1].agent_pane.lines);
+    try std.testing.expectEqualStrings("S-A", agent_ops.primaryHookSlot(&session, term).transcript.identity()); // 마지막 이벤트가 %12
+
+    // 클릭: 대표 슬롯이 그 pane 으로 바뀌고(대화 줄), «최근 세션» 이 그 pane 의 세션이 된다 — 에이전트 탭이 그 링을 본다.
+    agent_ops.rememberPaneSession(&session, p0.tab, p0.pane, p0.term, "%3");
+    try std.testing.expectEqualStrings("S-B", agent_ops.primaryHookSlot(&session, term).transcript.identity());
+    try std.testing.expectEqualStrings("S-B", session.last_agent_session orelse "");
+    agent_ops.rememberPaneSession(&session, p1.tab, p1.pane, p1.term, "%12");
+    try std.testing.expectEqualStrings("S-A", session.last_agent_session orelse "");
+
+    // **실제 마우스 경로**로도 같다 — 그리고 pane 행은 ✕ 가 없으니 ✕ 자리(오른쪽 끝)를 눌러도 Term 이 닫히지 않고
+    // 그 pane 의 세션이 최근 세션이 된다(`pane_name == null and 닫기영역` 조건 — 지우면 pane 행 클릭이 Term 을 닫는다).
+    const terms_before = pane_ops.activePane(&session).terms.items.len;
+    const close_x: f64 = sidebar_ops.sidebarColumns(&session).?.closeXRange(session.cell_width_px).start;
+    const rowY = struct {
+        fn f(s: *AppSession, row: usize) f64 {
+            const m = sidebar_ops.sidebarMetrics(s);
+            const top = chrome.components.sidebar.rowTop(s.sidebar_rows.items, row, s.sidebar_header_height_px, m, 0);
+            return @floatFromInt(top + @as(i64, @intCast(chrome.components.sidebar.rowHeight(s.sidebar_rows.items[row], m) / 2)));
+        }
+    }.f;
+    session.mouse(1, close_x, rowY(&session, first.?), 0, 0); // %3 행(첫 pane 행)의 ✕ 자리
+    session.mouse(3, close_x, rowY(&session, first.?), 0, 0);
+    try std.testing.expectEqual(terms_before, pane_ops.activePane(&session).terms.items.len); // 안 닫혔다
+    try std.testing.expectEqualStrings("S-B", session.last_agent_session orelse ""); // %3 = S-B
+    try std.testing.expectEqualStrings("S-B", agent_ops.primaryHookSlot(&session, term).transcript.identity());
+
+    // pane 행의 그리기 텍스트: 이름 + 상태 문구(그 슬롯의 상태 — B 는 idle, A 는 running), 2줄째는 응답.
+    const status_b = try sidebar_ops.paneStatusLineOwned(&session, &session.remote_agent_panes.find(term.surfaceId(), "%3").?.slot);
+    defer a.free(status_b);
+    try std.testing.expect(std.mem.indexOf(u8, status_b, maru.i18n.t(.sb_agent_idle)) != null);
+    const status_a = try sidebar_ops.paneStatusLineOwned(&session, &session.remote_agent_panes.find(term.surfaceId(), "%12").?.slot);
+    defer a.free(status_a);
+    try std.testing.expect(std.mem.indexOf(u8, status_a, maru.i18n.t(.sb_agent_idle)) == null);
+}
+
 // [AT3c] **원격 프레임이 봉인·스냅샷까지 닿는다.** 예전 `consumeRemoteAgentLines` 는 `applied` 를 버려 원격 Term 에
 // 봉인도 스냅샷도 없었다. 이 판정자는 위 캡처 규칙 판정자(`testApplyHookEvent`)보다 **한 층 위** — 실제 wire 프레임
 // (`{"nonce":…,"line":"claude\t{…}"}`)이 원격 소비자 → `TurnBatch` → `sealTurnCaptureNow` → `captureTurnSnapshot` 을
@@ -31599,7 +31733,7 @@ test "SG8a: projectRowsFrom(identity)가 recomputeVisibleTabs와 byte-identical 
         const want = expected[i];
         try std.testing.expectEqual(std.meta.activeTag(want), std.meta.activeTag(got));
         switch (want) {
-            .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => try std.testing.expect(false), // 이 fixture는 목록 행을 만들지 않는다
+            .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => try std.testing.expect(false), // 이 fixture는 목록 행을 만들지 않는다
             .card => |wc| {
                 try std.testing.expectEqual(wc.tab, got.card.tab);
                 try std.testing.expectEqual(wc.active, got.card.active);
@@ -33006,7 +33140,7 @@ test "GP4(a): pin_derived·sidebarRowShowsPin — 멤버 📌 억제·헤더 인
         .card => if (sidebar_ops.sidebarRowShowsPin(session, r)) {
             card_pins += 1;
         },
-        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
+        .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => {},
         .group_header => if (sidebar_ops.sidebarRowShowsPin(session, r)) {
             header_pins += 1;
         },
@@ -33413,7 +33547,7 @@ test "그룹핀 리뷰 #9: 그룹 먼저 고정 → 독립 top카드 개별 고�
         fn f(s: *AppSession, tab_index: usize) chrome.components.sidebar.Row {
             for (s.sidebar_rows.items) |r| switch (r) {
                 .card => |c| if (c.tab == tab_index) return r,
-                .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
+                .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => {},
                 .group_header => {},
             };
             unreachable;
@@ -33481,7 +33615,7 @@ test "그룹핀 리뷰 #9: 그룹 먼저 고정 → 독립 top카드 개별 고�
         .card => if (sidebar_ops.sidebarRowShowsPin(session, r)) {
             card_pins += 1;
         },
-        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
+        .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => {},
         .group_header => {},
     };
     try std.testing.expectEqual(@as(usize, 2), card_pins); // X1·X2만
@@ -33582,7 +33716,7 @@ test "SR4(a): 카드를 그룹 뒤 top카드 옆(gap)으로 드래그 → top_le
     // X를 TOP1 row(=그룹 뒤 gap의 top카드) 옆으로 드래그. 분류: 타겟 TOP1이 최상위 → 전이 의도 true(그룹 밖 gap).
     var top1_row: usize = 0;
     for (session.sidebar_rows.items, 0..) |row, s| switch (row) {
-        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
+        .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => {},
         .card => |c| if (c.tab == 2) {
             top1_row = s;
         },
@@ -33613,7 +33747,7 @@ test "SR4(a): 카드를 그룹 뒤 top카드 옆(gap)으로 드래그 → top_le
     tab_ops.recomputeVisibleTabs(session);
     var x_depth: u8 = 255;
     for (session.sidebar_rows.items) |row| switch (row) {
-        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
+        .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => {},
         .card => |c| if (c.tab == x_idx) {
             x_depth = c.depth;
         },
@@ -33647,7 +33781,7 @@ test "SR4(b): 카드를 그룹 안(멤버 카드)으로 드래그 → top_level=
     // X를 a1(멤버) row로 드래그 → 그룹 A 안(멤버). 분류: 타겟 a1이 멤버 → 전이 의도 false(그룹 안).
     var a1_row: usize = 0;
     for (session.sidebar_rows.items, 0..) |row, s| switch (row) {
-        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
+        .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => {},
         .card => |c| if (c.tab == 1) {
             a1_row = s;
         },
@@ -33730,7 +33864,7 @@ test "SR4(d): 고정 리전 인터리빙 — 고정 top카드를 고정 그룹 �
         try tab_ops.refreshDragPreview(session, 3, .{ .card = .{ .target_tab = 2, .top_level = true } }, 0, arena2.allocator());
         var hdrs: usize = 0;
         for (session.sidebar_preview_rows.items) |row| switch (row) {
-            .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
+            .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => {},
             .group_header => hdrs += 1,
             .card => {},
         };
@@ -33744,7 +33878,7 @@ test "SR4(d): 고정 리전 인터리빙 — 고정 top카드를 고정 그룹 �
     {
         var hdrs: usize = 0;
         for (session.sidebar_rows.items) |row| switch (row) {
-            .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
+            .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => {},
             .group_header => hdrs += 1,
             .card => {},
         };
@@ -33795,7 +33929,7 @@ test "SR4(e): VirtualLayout.top_level[] 가상화가 projectRowsCore 프리뷰 d
     // 프리뷰 고스트(X)가 depth 0(그룹 밖 최상위)로 투영되는가 — 가상 top_level[]이 pass1 depth를 몰았는지.
     var preview_depth: u8 = 255;
     for (session.sidebar_preview_rows.items) |row| switch (row) {
-        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
+        .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => {},
         .card => |c| if (c.tab == 3) {
             preview_depth = c.depth;
         },
@@ -33814,7 +33948,7 @@ test "SR4(e): VirtualLayout.top_level[] 가상화가 projectRowsCore 프리뷰 d
     };
     var confirmed_depth: u8 = 255;
     for (session.sidebar_rows.items) |row| switch (row) {
-        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
+        .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => {},
         .card => |c| if (c.tab == x_idx) {
             confirmed_depth = c.depth;
         },
@@ -33859,7 +33993,7 @@ test "SR5(a): 빈 gap 첫 인터리브 — 마지막 멤버 아래 경계 드롭
     // a1(t1) row + 그 row의 아래/위 경계 y(production과 같은 rowTop/rowHeight 누적).
     var a1_row: usize = 0;
     for (session.sidebar_rows.items, 0..) |row, s| switch (row) {
-        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
+        .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => {},
         .card => |c| if (c.tab == 1) {
             a1_row = s;
         },
@@ -33928,7 +34062,7 @@ test "SR5(b): 접힌 그룹 헤더 아래 경계 gap drop + skip 엣지(펼친 �
     var ha_row: usize = 0;
     var hb_row: usize = 0;
     for (session.sidebar_rows.items, 0..) |row, s| switch (row) {
-        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
+        .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => {},
         .group_header => |gh| {
             if (gh.tab == 0) ha_row = s;
             if (gh.tab == 2) hb_row = s;
@@ -34053,7 +34187,7 @@ test "SR5(d): pin × local_pinned × top_level 3축 공존 — 고정 그룹 안
     var saw_lp = false;
     var saw_top_card = false;
     for (session.sidebar_rows.items) |row| switch (row) {
-        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
+        .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => {},
         .card => |c| {
             if (c.tab == 1) {
                 saw_lp = c.local_pinned; // lp 카드 local_pinned 힌트
@@ -34316,7 +34450,7 @@ test "SG8b: none·자기 subtree 제자리 드롭 → identity + self.tabs 불�
 /// (원본 tab이 카드 row로 방출됐는가)과 depth 정확성을 함께 본다(카드 .tab=원본 인덱스, 프리뷰 가상순서도 동일).
 fn sg8cFindCardDepth(rows: []const chrome.components.sidebar.Row, tab: usize) ?u8 {
     for (rows) |row| switch (row) {
-        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
+        .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => {},
         .card => |c| if (c.tab == tab) return c.depth,
         .group_header => {},
     };
@@ -34327,7 +34461,7 @@ fn sg8cFindCardDepth(rows: []const chrome.components.sidebar.Row, tab: usize) ?u
 /// member_count·depth 단언용(헤더 .tab=마커 원본 인덱스).
 fn sg8cFindHeader(rows: []const chrome.components.sidebar.Row, tab: usize) ?chrome.components.sidebar.Row {
     for (rows) |row| switch (row) {
-        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
+        .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => {},
         .group_header => |h| if (h.tab == tab) return row,
         .card => {},
     };
@@ -34485,7 +34619,7 @@ test "SG8c: none plan 프리뷰 → preview_rows == 원본 rows·ghost range 비
         const want = live[i];
         try std.testing.expectEqual(std.meta.activeTag(want), std.meta.activeTag(got));
         switch (want) {
-            .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
+            .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => {},
             .card => |wc| {
                 try std.testing.expectEqual(wc.tab, got.card.tab);
                 try std.testing.expectEqual(wc.depth, got.card.depth);
@@ -34529,7 +34663,7 @@ test "code-review #6: 검색 중 접힌 그룹은 헤더도 펼침 표시(collap
     // 매치 카드(t1)가 접힘 무시하고 펼쳐 보인다.
     var saw_t1_card = false;
     for (session.sidebar_rows.items) |row| switch (row) {
-        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
+        .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => {},
         .card => |c| if (c.tab == 1) {
             saw_t1_card = true;
         },
@@ -34940,7 +35074,7 @@ test "SG5-3: create_sibling_group(형제 같은 depth) vs create_group(중첩 de
     var header_depths: [4]u8 = undefined;
     var hc: usize = 0;
     for (session.sidebar_rows.items) |row| switch (row) {
-        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
+        .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => {},
         .group_header => |gh| {
             if (hc < header_depths.len) header_depths[hc] = gh.depth;
             hc += 1;
@@ -35713,7 +35847,7 @@ test "GL3(a): 렌더 📌 — 로컬 pin 멤버 sidebarRowShowsPin=true·비pin 
     var card_pins: usize = 0;
     var header_pins: usize = 0;
     for (rows) |r| switch (r) {
-        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
+        .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => {},
         .card => if (sidebar_ops.sidebarRowShowsPin(session, r)) {
             card_pins += 1;
         },
@@ -35757,7 +35891,7 @@ test "GL3(a2): 공존 렌더 — 그룹째 고정 그룹 안 로컬 pin 멤버 =
     var header_pins: usize = 0;
     var member_pins: usize = 0;
     for (rows) |r| switch (r) {
-        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
+        .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => {},
         .group_header => if (sidebar_ops.sidebarRowShowsPin(session, r)) {
             header_pins += 1;
         },
@@ -35855,7 +35989,7 @@ test "GL3(d): 마커 카드 로컬 pin 뒤 렌더(§13.6.1) — 순서·hit-test
         var preview_ptrs: [8]*Tab = undefined;
         var pn: usize = 0;
         for (session.sidebar_preview_rows.items) |r| switch (r) {
-            .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
+            .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => {},
             .card => |c| {
                 preview_ptrs[pn] = pre[c.tab]; // 프리뷰 .tab = pre-move self.tabs 인덱스
                 pn += 1;
@@ -35873,7 +36007,7 @@ test "GL3(d): 마커 카드 로컬 pin 뒤 렌더(§13.6.1) — 순서·hit-test
         var commit_ptrs: [8]*Tab = undefined;
         var cn: usize = 0;
         for (session.sidebar_rows.items) |r| switch (r) {
-            .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
+            .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => {},
             .card => |c| {
                 commit_ptrs[cn] = session.tabs.items[c.tab]; // 확정 .tab = post-move self.tabs 인덱스
                 cn += 1;
@@ -35907,7 +36041,7 @@ test "GL3(d): 마커 카드 로컬 pin 뒤 렌더(§13.6.1) — 순서·hit-test
         var preview_ptrs: [8]*Tab = undefined;
         var pn: usize = 0;
         for (session.sidebar_preview_rows.items) |r| switch (r) {
-            .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
+            .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => {},
             .card => |c| {
                 preview_ptrs[pn] = pre[c.tab];
                 pn += 1;
@@ -35928,7 +36062,7 @@ test "GL3(d): 마커 카드 로컬 pin 뒤 렌더(§13.6.1) — 순서·hit-test
         var commit_ptrs: [8]*Tab = undefined;
         var cn: usize = 0;
         for (session.sidebar_rows.items) |r| switch (r) {
-            .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
+            .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => {},
             .card => |c| {
                 commit_ptrs[cn] = session.tabs.items[c.tab];
                 cn += 1;
@@ -36170,7 +36304,7 @@ test "GL4(a): 공존 keystone — 그룹째 고정이 로컬 pin 그룹을 전�
     var header_pins: usize = 0;
     var member_pins: usize = 0;
     for (rows) |r| switch (r) {
-        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
+        .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => {},
         .group_header => if (sidebar_ops.sidebarRowShowsPin(session, r)) {
             header_pins += 1;
         },
@@ -36200,7 +36334,7 @@ test "GL4(a): 공존 keystone — 그룹째 고정이 로컬 pin 그룹을 전�
     tab_ops.recomputeVisibleTabs(session);
     var member_pins_after: usize = 0;
     for (session.sidebar_rows.items) |r| switch (r) {
-        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
+        .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => {},
         .card => if (sidebar_ops.sidebarRowShowsPin(session, r)) {
             member_pins_after += 1;
         },
@@ -36283,7 +36417,7 @@ test "GL4(b): 중첩 — 자식 subgroup 안 leaf 로컬 pin float(부모→자�
     // 로컬 pin 📌: A 직접(t2)·자식 B(t5) 둘. 마커 카드·최상위·헤더는 억제.
     var member_pins: usize = 0;
     for (rows) |r| switch (r) {
-        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
+        .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => {},
         .card => |c| if (sidebar_ops.sidebarRowShowsPin(session, r)) {
             if (c.local_pinned) member_pins += 1;
         },
@@ -36362,7 +36496,7 @@ test "GL4(c): 회귀 매트릭스 — 로컬 pin이 그룹 색·rename·검색·
         // 매치 카드 t3(로컬 pin)이 접힘 무시하고 보이며, local_pinned 힌트·📌 유지.
         var saw_lp = false;
         for (session.sidebar_rows.items) |row| switch (row) {
-            .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
+            .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => {},
             .card => |c| if (c.tab == 2) { // t3 = float 후 self.tabs index2
                 saw_lp = true;
                 try std.testing.expect(c.local_pinned); // ★ 검색 중에도 로컬 pin 힌트
@@ -36447,7 +36581,7 @@ fn expectCardTopLevelPinned(session: *AppSession, tab: *Tab) !void {
     tab_ops.recomputeVisibleTabs(session);
     var found = false;
     for (session.sidebar_rows.items) |r| switch (r) {
-        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
+        .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => {},
         .card => |c| if (c.tab == idx) {
             found = true;
             try std.testing.expectEqual(@as(u8, 0), c.depth); // ★ 렌더 depth 0 = 최상위(그룹 흡수 없음)
@@ -36573,7 +36707,7 @@ test "pin매트릭스 #2(버그2 회귀): 그룹째 고정/해제 — 고정 멤
             tab_ops.recomputeVisibleTabs(s);
             var n: usize = 0;
             for (s.sidebar_rows.items) |r| switch (r) {
-                .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
+                .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => {},
                 .card => if (sidebar_ops.sidebarRowShowsPin(s, r)) {
                     n += 1;
                 },
@@ -36652,7 +36786,7 @@ test "pin매트릭스 #3(조합): 최상위 개별 pin + 그룹째 고정 + 멤�
     var card_pins: usize = 0;
     var header_pins: usize = 0;
     for (session.sidebar_rows.items) |r| switch (r) {
-        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
+        .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => {},
         .card => if (sidebar_ops.sidebarRowShowsPin(session, r)) {
             card_pins += 1;
         },
@@ -36778,7 +36912,7 @@ test "SG5-1: 그룹 통째 이동(tab_ops.moveGroupRange + sidebarGroupDropBound
 /// 표시 카드 row 인덱스를 tab 인덱스로 찾는다(그룹 드래그 경계 테스트가 커서 hit-test 대신 쓰는 헤드리스 헬퍼).
 fn cardRowOf(session: *AppSession, tab_idx: usize) usize {
     for (session.sidebar_rows.items, 0..) |row, s| switch (row) {
-        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
+        .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => {},
         .card => |c| if (c.tab == tab_idx) return s,
         .group_header => {},
     };
@@ -37029,7 +37163,7 @@ test "SR-PIN3: 고정 그룹은 다른 그룹에 nest 흡수 금지(Cmd nest여�
         tab_ops.recomputeVisibleTabs(session);
         var b_header_row: usize = 0;
         for (session.sidebar_rows.items, 0..) |row, s| switch (row) {
-            .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
+            .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => {},
             .group_header => |gh| if (gh.tab == 2) {
                 b_header_row = s;
             },
@@ -37062,7 +37196,7 @@ test "SR-PIN3: 고정 그룹은 다른 그룹에 nest 흡수 금지(Cmd nest여�
         tab_ops.recomputeVisibleTabs(session);
         var b_header_row: usize = 0;
         for (session.sidebar_rows.items, 0..) |row, s| switch (row) {
-            .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
+            .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => {},
             .group_header => |gh| if (gh.tab == 2) {
                 b_header_row = s;
             },
@@ -37173,7 +37307,7 @@ test "(3) 드래그 대상이 접힌 그룹이면 프리뷰=접힌 헤더만 (�
         var a_card_rows: usize = 0;
         var a_header_collapsed = false;
         for (session.sidebar_preview_rows.items) |row| switch (row) {
-            .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
+            .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => {},
             .group_header => |h| if (h.tab == 0) {
                 a_header_rows += 1;
                 a_header_collapsed = h.collapsed;
@@ -37211,7 +37345,7 @@ test "(3) 드래그 대상이 접힌 그룹이면 프리뷰=접힌 헤더만 (�
         try tab_ops.refreshDragPreview(session, 2, .{ .card = .{ .target_tab = target } }, 0, arena_state.allocator());
         var x_visible = false;
         for (session.sidebar_preview_rows.items) |row| switch (row) {
-            .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
+            .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => {},
             .card => |c| if (c.tab == 2) {
                 x_visible = true;
             },
@@ -37497,7 +37631,7 @@ test "SG5-4: 그룹을 다른 그룹 헤더에 드롭 → 중첩(depth+1) + subt
     tab_ops.recomputeVisibleTabs(session);
     var b_header_row: usize = 0;
     for (session.sidebar_rows.items, 0..) |row, s| switch (row) {
-        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
+        .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => {},
         .group_header => |gh| if (gh.tab == 4) {
             b_header_row = s;
         },
@@ -37520,7 +37654,7 @@ test "SG5-4: 그룹을 다른 그룹 헤더에 드롭 → 중첩(depth+1) + subt
     var hc: usize = 0;
     var prev_marker_ok = true;
     for (session.sidebar_rows.items) |row| switch (row) {
-        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
+        .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => {},
         .group_header => |gh| {
             if (hc < depths.len) depths[hc] = gh.depth;
             hc += 1;
@@ -46457,7 +46591,7 @@ fn sidebarCardDepth(session: *AppSession, tab: *Tab) ?u8 {
     };
     const ti = idx orelse return null;
     for (session.sidebar_rows.items) |row| switch (row) {
-        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
+        .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => {},
         .card => |c| if (c.tab == ti) return c.depth,
         .group_header => {},
     };
@@ -56378,7 +56512,7 @@ test "promotePaneToNewWorkspace: 그룹이 있으면 새 워크스페이스를 �
     var new_card_slot: ?usize = null;
     var first_header_slot: ?usize = null;
     for (session.sidebar_rows.items, 0..) |row, slot| switch (row) {
-        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
+        .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => {},
         .card => |c| if (c.tab == 1) {
             new_card_slot = slot;
             try std.testing.expectEqual(@as(u8, 0), c.depth); // 최상위 = 들여쓰기 0
@@ -56428,7 +56562,7 @@ test "promotePaneToNewWorkspace: 마지막 그룹이 접혀 있어도 새 워크
     var saw_header = false;
     var saw_grouped_member = false;
     for (session.sidebar_rows.items) |row| switch (row) {
-        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
+        .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => {},
         .card => |c| {
             if (c.tab == 1) {
                 saw_new_card = true;

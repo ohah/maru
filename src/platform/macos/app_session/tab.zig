@@ -812,7 +812,7 @@ pub fn sidebarGroupDropTargetTab(self: *AppSession, raw_row: usize, from: usize)
     if (len == 0) return null;
     switch (self.sidebar_rows.items[raw_row]) {
         .card => |c| return c.tab, // 그 카드 위치로 — 위치 파생이 소속을 정한다(같은 그룹/최상위)
-        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => return null, // 목록/system 행은 그룹 소속 판정 대상이 아니다
+        .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => return null, // 목록/system 행은 그룹 소속 판정 대상이 아니다
         .group_header => |h| {
             const m = h.tab; // 그룹 시작(마커) 탭 인덱스
             if (m >= len) return null;
@@ -1248,7 +1248,7 @@ pub fn visibleTab(self: *const AppSession, display_slot: usize) ?usize {
     if (display_slot >= self.sidebar_rows.items.len) return null;
     return switch (self.sidebar_rows.items[display_slot]) {
         .card => |c| c.tab,
-        .agent_toggle, .agent => null, // 선택 대상이 아님(각자 접기 토글·Term 이동으로 분기)
+        .agent_toggle, .agent, .agent_pane => null, // 선택 대상이 아님(각자 접기 토글·Term 이동으로 분기)
         .group_header => null, // 헤더 row는 탭이 아님 — 클릭 시 선택 아니라 접기 토글(SG3c)
         .recovered_sessions_header, .recovered_session => null, // system row는 일반 tab action 대상이 아니며 adopt는 전용 typed row 경로가 소유한다.
     };
@@ -2274,7 +2274,7 @@ pub fn groupNestPlan(self: *AppSession, raw_row: usize, m: usize) ?GroupNestPlan
     if (raw_row >= self.sidebar_rows.items.len) return null;
     const gh = switch (self.sidebar_rows.items[raw_row]) {
         .group_header => |h| h,
-        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => return null, // 목록/system 행 드롭은 그룹 경계 판정 대상이 아니다
+        .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => return null, // 목록/system 행 드롭은 그룹 경계 판정 대상이 아니다
         .card => return null, // 카드 드롭 = 형제 경계(SG5-1 보존)
     };
     const g = gh.tab;

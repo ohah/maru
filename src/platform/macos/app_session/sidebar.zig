@@ -188,7 +188,7 @@ pub fn sidebarCardRowFor(self: *const AppSession, raw_row: usize) usize {
     var r = raw_row;
     while (r < rows.len) : (r -= 1) {
         switch (rows[r]) {
-            .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
+            .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => {},
             else => return r,
         }
         if (r == 0) break;
@@ -208,7 +208,7 @@ pub fn sidebarCardDropTopLevel(self: *AppSession, raw_row: usize) bool {
     if (raw_row >= self.sidebar_rows.items.len) return false;
     return switch (self.sidebar_rows.items[raw_row]) {
         .card => |c| c.tab < self.tabs.items.len and tab_ops.enclosingGroupMarkerIndex(self, c.tab) == null, // 타겟이 최상위면 최상위 복귀
-        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => false, // 목록/system 행은 드롭 타겟이 아니다
+        .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => false, // 목록/system 행은 드롭 타겟이 아니다
         .group_header => false, // 헤더 드롭 = 그룹 안(멤버)
     };
 }
@@ -249,7 +249,7 @@ pub fn sidebarCardDropAfterGroup(self: *AppSession, raw_row: usize, from: usize,
             if (tab_ops.groupSubtreeEnd(self, tl, null, null) != c.tab + 1) return null; // c가 최상위 그룹의 마지막 원소 아님 → 일반 멤버 드롭
             break :blk .{ .m = tl, .j = c.tab + 1 }; // 위 가드가 j==c.tab+1 확립 → 재사용
         },
-        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => return null, // 목록/system 행은 그룹 gap 대상이 아니다
+        .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => return null, // 목록/system 행은 그룹 gap 대상이 아니다
         .group_header => |h| blk: {
             if (h.tab >= len) return null;
             if (!h.collapsed) return null; // 펼친 헤더 아래 경계 = 첫 멤버(모호) → skip(일반 헤더 드롭)
@@ -282,7 +282,7 @@ pub fn sidebarGroupDropBoundary(self: *AppSession, raw_row: usize, m: usize) ?us
     if (m >= len or raw_row >= self.sidebar_rows.items.len) return null;
     const target_tab: usize = switch (self.sidebar_rows.items[raw_row]) {
         .card => |c| c.tab,
-        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => return null, // 목록/system 행은 탭 인덱스 도메인이 아니다
+        .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => return null, // 목록/system 행은 탭 인덱스 도메인이 아니다
         .group_header => |h| h.tab,
     };
     if (target_tab >= len) return null;
@@ -647,7 +647,8 @@ pub fn sidebarSearchCaretRect(self: *AppSession) ?chrome.draw.Rect {
 pub fn reprojectSidebarIfRowLinesStale(self: *AppSession) void {
     if (self.sidebar_collapsed or self.chrome_minimal) return; // 그릴 자리가 없으면 볼 이유도 없다
     var stale = false;
-    for (self.sidebar_rows.items) |row| switch (row) {
+    const rows = self.sidebar_rows.items;
+    for (rows, 0..) |row, i| switch (row) {
         .card => |c| {
             if (c.tab >= self.tabs.items.len) continue;
             if (sidebarCardLines(self, self.tabs.items[c.tab]) != c.lines) {
@@ -663,6 +664,32 @@ pub fn reprojectSidebarIfRowLinesStale(self: *AppSession) void {
         .agent => |g| {
             if (g.tab >= self.tabs.items.len) continue;
             if (sidebarAgentRowLines(self, self.tabs.items[g.tab], .{ .pane = g.pane, .term = g.term }) != g.lines) {
+                stale = true;
+                break;
+            }
+            // **pane 행의 수도 낡는다**(RA7 조각 4). 이 행 뒤에 붙은 pane 행 수가 지금 슬롯 수(둘 이상일 때)와 다르면 —
+            // 두 번째 pane 의 첫 이벤트가 온 tick 이 그렇다 — 재투영한다. 실기(2 pane e2e)에서 행이 영영 안 서던 원인.
+            var following: usize = 0;
+            var j = i + 1;
+            while (j < rows.len and rows[j] == .agent_pane) : (j += 1) following += 1;
+            if (@import("agent.zig").remotePaneRowsFor(self, self.tabs.items[g.tab], .{ .pane = g.pane, .term = g.term }).count != following) {
+                stale = true;
+                break;
+            }
+        },
+        // pane 행도 같은 이유로 낡는다 — 응답이 오면 2줄이 되고, pane 이 늘거나 줄면 행 수 자체가 다르다(RA7 조각 4).
+        .agent_pane => |pr| {
+            if (pr.tab >= self.tabs.items.len) continue;
+            const pterm = agentTermOf(self.tabs.items[pr.tab], .{ .pane = pr.pane, .term = pr.term }) orelse {
+                stale = true;
+                break;
+            };
+            const entry = self.remote_agent_panes.find(pterm.surfaceId(), pr.name[0..pr.name_len]) orelse {
+                stale = true;
+                break;
+            };
+            const want: u8 = if (entry.slot.transcript.reply().len > 0) 2 else 1;
+            if (want != pr.lines) {
                 stale = true;
                 break;
             }
@@ -802,7 +829,7 @@ pub fn sidebarRenderRows(self: *const AppSession) []const chrome.components.side
 ///    위치 고정). 도메인은 sidebarRenderRows()(드래그 중 preview_rows).
 pub fn sidebarRowShowsPin(self: *const AppSession, row: chrome.components.sidebar.Row) bool {
     return switch (row) {
-        .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => false, // 목록/system 행은 pin 대상이 아니다.
+        .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => false, // 목록/system 행은 pin 대상이 아니다.
         .group_header => |gh| gh.tab < self.tabs.items.len and self.tabs.items[gh.tab].pinned,
         .card => |c| blk: {
             if (c.local_pinned) break :blk true; // 로컬 pin 멤버 📌(§13.6 선두 분기 — pin_derived 억제보다 우선)
@@ -1020,7 +1047,7 @@ pub fn rebuildSidebar(self: *AppSession) !void {
         // ghost 카드도 self.tabs pinned가 드래그 내내 불변이라 추적이 안정. 고정 그룹 0개면 flip이 없어 no-op(byte-identical).
         const row_pinned: ?bool = switch (row) {
             .card => |c| if (c.tab < self.tabs.items.len) self.tabs.items[c.tab].pinned else null,
-            .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => null,
+            .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => null,
             .group_header => |h| if (h.tab < self.tabs.items.len) self.tabs.items[h.tab].pinned else null,
         };
         if (row_pinned) |rp| {
@@ -1037,7 +1064,7 @@ pub fn rebuildSidebar(self: *AppSession) !void {
             .card => |c| if (c.tab < self.tabs.items.len and self.tabs.items[c.tab].top_level) {
                 current_group_color = 0;
             },
-            .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
+            .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => {},
             .group_header => {},
         }
         const orig = switch (row) {
@@ -1048,7 +1075,7 @@ pub fn rebuildSidebar(self: *AppSession) !void {
                 current_group_color = if (h.tab < self.tabs.items.len) self.tabs.items[h.tab].group_color else 0;
                 continue;
             },
-            .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => continue, // 목록/system 행은 per-card tint/accent 대상이 아니다.
+            .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => continue, // 목록/system 행은 per-card tint/accent 대상이 아니다.
         };
         // SG8d: 고스트 카드(preview_rows[ghost_lo,hi))는 아래 반투명 밴드+삽입선으로만 표시하고 per-card 배경 tint·
         // 불투명 accent 막대는 생략한다 — 불투명 막대가 "떠 있는" 반투명 고스트를 깨뜨리기 때문. current_group_color
@@ -1125,7 +1152,7 @@ pub fn rebuildSidebar(self: *AppSession) !void {
                 .group_header => |h| h.depth,
                 .card => |c| c.depth,
                 // 목록 행은 드래그 대상이 아니라 고스트가 될 수 없다 — 방어적으로 최상위 depth를 쓴다.
-                .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => 1,
+                .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => 1,
             };
             // nest 들여쓰기(기존 group_depth 반영) — 헤더 glyph indent (depth-1)*group_indent와 정렬. 형제/카드는 0(전폭).
             const indent_px: f32 = if (is_nest and ghost_depth > 1)
@@ -1144,7 +1171,7 @@ pub fn rebuildSidebar(self: *AppSession) !void {
                     scan -= 1;
                     const hit = switch (rows[scan]) {
                         .group_header => |h| h.depth == want, // 타깃 그룹 마커(depth == ghost_depth-1)
-                        .card, .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => false,
+                        .card, .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => false,
                     };
                     if (hit) {
                         pr = scan;
@@ -1504,7 +1531,7 @@ pub fn lowerSidebar(self: *AppSession, ops: []const chrome.draw.Op) void {
                 // 목록 행은 **배경 tint 소스가 없을 뿐** 밴드 자체는 그려야 한다. 예전 `continue`는 Zig에서 바깥
                 // for를 탈출해 밴드 op을 통째로 버렸고, 그 결과 에이전트 행 호버 하이라이트가 100% 사라졌다
                 // (code-review max — view()가 일부러 내는 밴드를 platform이 삼킨 것).
-                .agent_toggle, .agent, .recovered_sessions_header, .recovered_session => {},
+                .agent_toggle, .agent, .agent_pane, .recovered_sessions_header, .recovered_session => {},
                 .group_header => |h| {
                     // SG5-2: 그룹 헤더 밴드에 그룹 공통 색을 블렌드(카드 배경 tint와 **같은** blend 경로·같은 알파). 층
                     // 분리 — 그룹 색은 헤더 밴드·소속 카드 막대에만 실리고 개별 카드 background_color와 안 겹친다(서로 다른 row).
@@ -1826,6 +1853,17 @@ pub fn agentStatusLine(self: *AppSession, term: *Term) ![]const u8 {
     return std.fmt.allocPrint(self.allocator, "{s}" ++ flipped_marker, .{base});
 }
 
+/// tmux pane 행의 상태 문구(RA7 조각 4) — 그 **슬롯**의 훅 상태로 쓴다(Term 의 중재 결과가 아니다: 행마다 자기 pane 을 말한다).
+/// 마커·문구 규칙은 `agentStatusLineBase` 와 같다 — 한 목록에서 «행 앞이 상태» 라는 읽기 규칙이 하나로 유지된다.
+pub fn paneStatusLineOwned(self: *AppSession, slot: *const maru.session.session_model.HookSlot) ![]const u8 {
+    return switch (slot.state) {
+        .running => runningStatusLine(self, slot.tool.text()),
+        .blocked => std.fmt.allocPrint(self.allocator, "? {s}", .{maru.i18n.t(.sb_awaiting_input)}),
+        .idle => std.fmt.allocPrint(self.allocator, "\u{2713} {s}", .{maru.i18n.t(.sb_agent_idle)}),
+        .unknown => std.fmt.allocPrint(self.allocator, "\u{00b7} {s}", .{maru.i18n.t(.sb_agent_unknown)}),
+    };
+}
+
 fn agentStatusLineBase(self: *AppSession, term: *Term) ![]const u8 {
     return switch (term.agent_state) {
         // codex식 4칸 파형 "▁▅▇▃ 진행중"(단일 출처). 훅 모드면 **무엇을 하는 중인지**까지 붙는다.
@@ -2083,6 +2121,40 @@ pub fn buildSidebarTitleDrawList(self: *AppSession) !renderer.DrawList {
                 try card_running.append(self.allocator, if (aterm) |t| (t.agent_state == .running) else false);
                 try close_rows.append(self.allocator, aterm != null); // 에이전트 행 ✕ = 그 Term 닫기
                 try ages.append(self.allocator, try agentAgeOwned(self, aterm));
+                continue;
+            },
+            .agent_pane => |pr| {
+                // tmux pane 행(RA7 조각 4): «  %N  <상태 문구>» 한 줄 + (있으면) 그 pane 의 마지막 응답. 슬롯은 (surface, pane)
+                // 으로 **라이브 재조회**한다 — 행은 이름만 든다(에이전트 행이 인덱스만 드는 계약과 같다).
+                const ptab: ?*Tab = if (pr.tab < self.tabs.items.len) self.tabs.items[pr.tab] else null;
+                const pterm: ?*Term = if (ptab) |t| agentTermOf(t, .{ .pane = pr.pane, .term = pr.term }) else null;
+                const ind_n = @min(@as(usize, pr.depth) * @as(usize, group_indent_cols), indent_buf.len);
+                const ind = indent_buf[0..ind_n];
+                const pname = pr.name[0..pr.name_len];
+                const entry = if (pterm) |t| self.remote_agent_panes.find(t.surfaceId(), pname) else null;
+                if (entry) |e| {
+                    const status = try paneStatusLineOwned(self, &e.slot);
+                    defer self.allocator.free(status);
+                    // 보조줄 좌단(아이콘 뒤)에 맞춘다 — 에이전트 행의 보조줄과 같은 들여쓰기(indent + 2칸 + 1칸).
+                    try names.append(self.allocator, try std.fmt.allocPrint(self.allocator, "{s}   {s}  {s}", .{ ind, pname, status }));
+                    try status_lines.append(self.allocator, if (e.slot.transcript.reply().len > 0)
+                        try std.fmt.allocPrint(self.allocator, "{s}     {s}", .{ ind, e.slot.transcript.reply() })
+                    else
+                        try self.allocator.dupe(u8, ""));
+                    try card_running.append(self.allocator, e.slot.state == .running);
+                } else {
+                    try names.append(self.allocator, try std.fmt.allocPrint(self.allocator, "{s}   {s}", .{ ind, pname }));
+                    try status_lines.append(self.allocator, try self.allocator.dupe(u8, ""));
+                    try card_running.append(self.allocator, false);
+                }
+                try branch_lines.append(self.allocator, try self.allocator.dupe(u8, ""));
+                try path_lines.append(self.allocator, try self.allocator.dupe(u8, ""));
+                try agents.append(self.allocator, 0);
+                try inline_icons.append(self.allocator, coretext_frame_builder.icon_slot_reserve);
+                try pins.append(self.allocator, false);
+                try card_kinds.append(self.allocator, if (pterm) |t| t.agent_kind else .none);
+                try close_rows.append(self.allocator, false); // pane 행은 닫기 대상이 아니다(Term 이 아니다 — 결정 2)
+                try ages.append(self.allocator, try self.allocator.dupe(u8, ""));
                 continue;
             },
             .recovered_sessions_header => {

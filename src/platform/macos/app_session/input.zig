@@ -929,7 +929,7 @@ pub fn buildKeyHintBadges(self: *AppSession, props: chrome.ChromeProps, tokens: 
         for (brows, 0..) |row, s| {
             const abs = switch (row) {
                 .card => |c| c.tab,
-                .agent_toggle, .agent => continue, // 목록 행엔 ⌘숫자 배지가 없다
+                .agent_toggle, .agent, .agent_pane => continue, // 목록 행엔 ⌘숫자 배지가 없다
                 .group_header, .recovered_sessions_header, .recovered_session => continue, // system/header row엔 ⌘숫자 배지가 없다
             };
             if (abs >= 9) continue; // select_tab 0..8 → ⌘1~9만 바인딩이 있다

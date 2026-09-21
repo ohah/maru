@@ -91,6 +91,7 @@ echo "=== app.out (tail)"; tail -20 "$CAP_HOME/app.out"
 echo "=== std.log"; tail -40 "$CAP_HOME/.cache/maru/app.log" 2>/dev/null | grep -iE 'agent|hook|remote|snapshot|turn' | tail -25
 echo "=== remote events new files"; ls -la ~/.cache/maru/remote-agent-events/ | grep -v -f "$CAP_HOME/remote-events-before.txt" || true
 echo "=== /tmp/maru-turn idx"; ls -la /tmp/maru-turn-*.idx 2>/dev/null || echo none
-if [ "$PANES" != 0 ]; then echo "=== tmux servers left"; for sk in /tmp/maru-e2e-tmux.*; do [ -S "$sk" ] && { tmux -S "$sk" list-panes -a -F '#{session_name} #{pane_id} #{pane_current_command}' 2>/dev/null; tmux -S "$sk" kill-server 2>/dev/null; }; done; fi
+# 죽은 서버의 소켓 파일이 남아 있을 수 있다(이전 회차) — 그 `kill-server` 실패가 `set -e` 로 아래 절을 삼키지 않게 소켓을 지우고 넘어간다.
+if [ "$PANES" != 0 ]; then echo "=== tmux servers left"; for sk in /tmp/maru-e2e-tmux.*; do [ -S "$sk" ] || continue; tmux -S "$sk" list-panes -a -F '#{session_name} #{pane_id} #{pane_current_command}' 2>/dev/null || true; tmux -S "$sk" kill-server 2>/dev/null || rm -f "$sk"; done; fi
 echo "=== sidecars new"; for f in $(ls ~/.cache/maru/remote-agent-events/*.tmux 2>/dev/null); do b=$(basename "$f"); grep -qx "$b" "$CAP_HOME/remote-events-before.txt" || printf '%s\t%s\n' "$b" "$(tr '\t' ' ' < "$f")"; done
 echo "=== repo status"; "$GIT" -C "$MARU_REMOTE_SCM_REPO" status --short; cat "$MARU_REMOTE_SCM_REPO/capture1.txt" "$MARU_REMOTE_SCM_REPO/capture2.txt"

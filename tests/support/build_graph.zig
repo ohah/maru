@@ -13,8 +13,17 @@
 //! 여기서는 그 `paths()` 를 받아 **파일별로** 파싱한다 — `build_source.read()` 가 돌려주는
 //! 이어 붙인 텍스트는 유효한 Zig 파일이 아니라 `std.zig.Ast` 가 받지 못한다.
 //!
-//! **이 뷰가 못 하는 것.** 일부러 잘라 쓴 접두 매칭(`"pub fn scrollTextViewport("` 처럼)은
-//! 옮기면 뜻이 바뀐다. 그런 자리는 문자열 판정으로 남기고 이유를 그 자리에 적는다.
+//! **이 뷰가 못 하는 것 — 실제로 세어 보니 넷뿐이다.** 빌드 스크립트의 **제어 흐름과 선언**
+//! (`if (index % shard.count != shard.index) continue;` · `const x = b.option(` ·
+//! `fn isolateMacosProductTest(…) void`), 빌드 소스 안에 박힌 **셸/정규식 조각**
+//! (`^final_frame_ended=true$` · `stat -f '%i'`), **파일 이름**(`*.swift`·`*.json`),
+//! 그리고 중첩 struct 의 메서드 호출(`B3SettlementTest.add(b, …`)이다.
+//! 이건 「빌드 그래프」가 아니라 스크립트 본문이라, 담으려면 AST 전체를 노출해야 한다 —
+//! 그럴 거면 판정자가 `std.zig.Ast` 를 직접 쓰는 게 맞다(이 저장소가 이미 9곳에서 그렇게 한다).
+//!
+//! **「접두 매칭이라 못 옮긴다」는 대개 오해다.** `count(build, "boundary_step.dependOn(&run_")`
+//! 같은 자리는 `countDependenciesWithPrefix("boundary_step", "run_")` 로 **더 정확해진다** —
+//! 실제로 그 문자열은 여는 괄호 뒤에 줄바꿈이 든 자리 하나를 못 세고 있었다(222 vs 223).
 //!
 //! 이 저장소는 이미 `std.zig.Ast` 판정자를 여럿 갖고 있지만(`cli_purity`·`imports`·
 //! `i18n_literals` 등) 공유 헬퍼가 없어 각자 파서를 세운다. 빌드 그래프만큼은 여기로 모은다.
@@ -52,14 +61,36 @@ pub const Registration = struct {
 };
 
 /// 한 **변수 이름**에 대해 일어난 배선. 판정자가 `run_x.addArg("…")` 를 세던 것을 그대로 받는다.
+///
+/// **receiver 로 한 번이라도 등장하면 이 구조가 만들어진다.** 그래야 `varCalls` 의 `null` 이
+/// 「그런 변수가 없다」**만** 뜻하고, 「호출이 없다」는 빈 필드로 구분된다.
+/// 예전에는 `addArg`·`env`·`dependOn` 셋을 하는 변수만 담아서, `setCwd` 만 하는 run 변수가
+/// **존재 자체로 안 보였고** 그래서 「배관이 없다」는 틀린 결론이 나왔다(실측: 142건 중 배관이
+/// 있는 것을 45건이라 읽었는데 실제로는 85건이었다).
 pub const VarCalls = struct {
     name: []const u8,
     /// `x.addArg("…")` 의 인자.
     args: []const []const u8 = &.{},
-    /// `x.step.dependOn(&y.step)` 의 `y`.
+    /// `x.step.dependOn(&y.step)`·`x.dependOn(y)` 의 `y`.
     depends_on: []const []const u8 = &.{},
     /// `x.setEnvironmentVariable("K", …)` 의 K.
     envs: []const []const u8 = &.{},
+    /// `x.addArtifactArg(y)`·`addPrefixedArtifactArg(…, y)`·`addFileArg(…)` 의 대상 이름/경로.
+    artifact_args: []const []const u8 = &.{},
+    /// `x.setCwd(…)` 를 불렀는가.
+    cwd_set: bool = false,
+    /// **뷰가 이름만 알고 내용은 안 담은 호출들.** 이 목록이 비어 있지 않다는 사실 자체가
+    /// 「여기에 뷰가 모르는 배선이 있다」는 신호다 — 없는 것을 없다고 읽는 사고를 막는 자리다.
+    other: []const []const u8 = &.{},
+    file: []const u8 = "",
+};
+
+/// 호출 한 건의 **이름과 첫 문자열 인자**. receiver 가 제각각인 질문(`linkFramework("…")`)을 위해
+/// 최소한만 담는다 — 인자 전체를 담으면 뷰가 AST 의 두 번째 사본이 된다.
+pub const Call = struct {
+    method: []const u8,
+    receiver: ?[]const u8 = null,
+    first_arg: ?[]const u8 = null,
     file: []const u8 = "",
 };
 
@@ -68,6 +99,8 @@ pub const Graph = struct {
     steps: []const Step,
     registrations: []const Registration,
     vars: []const VarCalls,
+    /// 빌드 소스의 **모든 메서드 호출**(이름 + 첫 문자열 인자). `countCall` 이 쓴다.
+    calls: []const Call,
     /// `std.builtin.OptimizeMode.Debug` 처럼 **점으로 이어진 이름 경로**의 등장. 판정자가
     /// 그 문자열을 세던 자리를 받는다.
     field_paths: []const []const u8,
@@ -128,6 +161,35 @@ pub const Graph = struct {
         for (v.depends_on) |d| if (std.mem.eql(u8, d, target)) return true;
         return false;
     }
+
+    /// 그 변수가 매단 대상 **전부**. 판정자가 접두(`run_` 로 시작하는 것)나 개수를 직접 물을 때 쓴다 —
+    /// `count(build, "boundary_step.dependOn(&run_") >= 100` 같은 문자열 판정을 이것으로 옮긴다.
+    /// 그런 변수가 아예 없으면 빈 슬라이스다(`null` 과 구분하지 않는다 — 호출자가 묻는 것은 「몇을 매달았나」다).
+    pub fn dependenciesOf(self: Graph, var_name: []const u8) []const []const u8 {
+        const v = self.varCalls(var_name) orelse return &.{};
+        return v.depends_on;
+    }
+
+    /// `dependenciesOf` 중 접두가 맞는 것의 수.
+    pub fn countDependenciesWithPrefix(self: Graph, var_name: []const u8, prefix: []const u8) usize {
+        var n: usize = 0;
+        for (self.dependenciesOf(var_name)) |d| {
+            if (std.mem.startsWith(u8, d, prefix)) n += 1;
+        }
+        return n;
+    }
+
+    /// 메서드 이름과 **첫 문자열 인자**로 호출을 센다 — `linkFramework("UserNotifications")` 처럼
+    /// receiver 가 제각각이라 변수로 물을 수 없는 자리를 위해서다.
+    pub fn countCall(self: Graph, method: []const u8, first_arg: []const u8) usize {
+        var n: usize = 0;
+        for (self.calls) |c| {
+            if (!std.mem.eql(u8, c.method, method)) continue;
+            const a = c.first_arg orelse continue;
+            if (std.mem.eql(u8, a, first_arg)) n += 1;
+        }
+        return n;
+    }
 };
 
 /// 빌드 소스 전체를 파싱해 뷰를 만든다. 호출자는 `deinit` 한다.
@@ -144,6 +206,7 @@ pub fn parse(gpa: std.mem.Allocator) !Graph {
     var regs: std.ArrayList(Registration) = .empty;
     var vars: std.StringHashMap(VarCalls) = .init(a);
     var field_paths: std.ArrayList([]const u8) = .empty;
+    var calls: std.ArrayList(Call) = .empty;
 
     const files = try build_source.paths(gpa);
     defer build_source.freePaths(gpa, files);
@@ -155,7 +218,7 @@ pub fn parse(gpa: std.mem.Allocator) !Graph {
         var tree = try std.zig.Ast.parse(a, src, .zig);
         if (tree.errors.len != 0) return error.BuildSourceParseFailed;
 
-        try scanFile(a, &tree, owned_path, &steps, &regs, &vars, &field_paths);
+        try scanFile(a, &tree, owned_path, &steps, &regs, &vars, &field_paths, &calls);
     }
 
     return .{
@@ -169,6 +232,7 @@ pub fn parse(gpa: std.mem.Allocator) !Graph {
             break :blk try list.toOwnedSlice(a);
         },
         .field_paths = try field_paths.toOwnedSlice(a),
+        .calls = try calls.toOwnedSlice(a),
     };
 }
 
@@ -243,6 +307,7 @@ fn scanFile(
     regs: *std.ArrayList(Registration),
     vars: *std.StringHashMap(VarCalls),
     field_paths: *std.ArrayList([]const u8),
+    calls: *std.ArrayList(Call),
 ) !void {
     // ① 점으로 이어진 이름 경로 — `std.builtin.OptimizeMode.Debug`
     //    토큰열로 모은다(AST 노드로는 조각이 흩어져 오히려 복잡하다).
@@ -272,6 +337,18 @@ fn scanFile(
         const call = tree.fullCall(&buf, node) orelse continue;
         const callee = calleeName(tree, node) orelse continue;
 
+        // ② 모든 호출을 «이름 + 첫 문자열 인자» 로만 남긴다 — receiver 가 제각각인 질문을 위해서다.
+        const recv = receiverName(tree, node);
+        var first_arg: ?[]const u8 = null;
+        if (call.ast.params.len >= 1)
+            first_arg = try stringValue(a, tree, tree.firstToken(call.ast.params[0]));
+        try calls.append(a, .{
+            .method = callee,
+            .receiver = recv,
+            .first_arg = first_arg,
+            .file = file,
+        });
+
         if (std.mem.eql(u8, callee, "step") and call.ast.params.len >= 1) {
             // b.step("name", "desc")
             const name = (try stringValue(a, tree, tree.firstToken(call.ast.params[0]))) orelse continue;
@@ -279,35 +356,71 @@ fn scanFile(
             if (call.ast.params.len >= 2)
                 desc = try stringValue(a, tree, tree.firstToken(call.ast.params[1]));
             try steps.append(a, .{ .name = name, .description = desc });
-        } else if (std.mem.eql(u8, callee, "addProjectTest")) {
+            continue;
+        }
+        if (std.mem.eql(u8, callee, "addProjectTest")) {
             var r: Registration = .{ .var_name = boundVarName(tree, node), .file = file };
             for (call.ast.params) |p| try readRegistrationFields(a, tree, p, &r, 0);
             try regs.append(a, r);
-        } else if (std.mem.eql(u8, callee, "addArg") and call.ast.params.len == 1) {
-            const owner = receiverName(tree, node) orelse continue;
-            const v = try upsertVar(a, vars, owner, file);
-            if (try stringValue(a, tree, tree.firstToken(call.ast.params[0]))) |s|
-                try appendStr(a, &v.args, s);
+            continue;
+        }
+
+        // ③ **receiver 가 있으면 무조건 VarCalls 를 만든다.** 이것이 이 뷰의 핵심 규율이다 —
+        //    그래야 `varCalls` 의 null 이 「그런 변수가 없다」만 뜻한다. 예전에는 아래 세 갈래에
+        //    걸리는 호출만 담아서, `setCwd` 만 하는 변수가 존재 자체로 안 보였다.
+        const owner = recv orelse continue;
+        if (std.mem.eql(u8, owner, callee)) continue; // receiver 없는 평범한 함수 호출
+        const v = try upsertVar(a, vars, owner, file);
+
+        if (std.mem.eql(u8, callee, "addArg") and call.ast.params.len == 1) {
+            if (first_arg) |s| try appendStr(a, &v.args, s);
         } else if (std.mem.eql(u8, callee, "setEnvironmentVariable") and call.ast.params.len >= 1) {
-            const owner = receiverName(tree, node) orelse continue;
-            const v = try upsertVar(a, vars, owner, file);
-            if (try stringValue(a, tree, tree.firstToken(call.ast.params[0]))) |s|
-                try appendStr(a, &v.envs, s);
+            if (first_arg) |s| try appendStr(a, &v.envs, s);
         } else if (std.mem.eql(u8, callee, "dependOn") and call.ast.params.len == 1) {
-            const owner = receiverName(tree, node) orelse continue;
-            const v = try upsertVar(a, vars, owner, file);
-            // `&run_x.step` 의 run_x
-            const p = call.ast.params[0];
-            var tok = tree.firstToken(p);
-            const last = tree.lastToken(p);
-            while (tok <= last) : (tok += 1) {
-                if (tree.tokenTag(tok) == .identifier) {
-                    try appendStr(a, &v.depends_on, tree.tokenSlice(tok));
-                    break;
+            // `&run_x.step` 의 run_x · `session_host_x_step` 처럼 step 을 바로 주는 형태도 받는다
+            if (firstIdentIn(tree, call.ast.params[0])) |name|
+                try appendStr(a, &v.depends_on, name);
+        } else if (std.mem.eql(u8, callee, "setCwd")) {
+            v.cwd_set = true;
+        } else if (std.mem.eql(u8, callee, "addArtifactArg") or
+            std.mem.eql(u8, callee, "addPrefixedArtifactArg") or
+            std.mem.eql(u8, callee, "addFileArg"))
+        {
+            // 인자가 아티팩트 변수면 그 이름을, 경로 리터럴이면 그 경로를 담는다.
+            if (call.ast.params.len >= 1) {
+                const p = call.ast.params[call.ast.params.len - 1];
+                if (try firstStringIn(a, tree, p)) |s| {
+                    try appendStr(a, &v.artifact_args, s);
+                } else if (firstIdentIn(tree, p)) |name| {
+                    try appendStr(a, &v.artifact_args, name);
                 }
             }
+        } else {
+            // **담지 않은 호출은 이름만 남긴다.** 이 목록이 비어 있지 않다는 사실이
+            // 「여기 뷰가 모르는 배선이 있다」는 신호가 된다.
+            try appendStr(a, &v.other, callee);
         }
     }
+}
+
+/// 노드 안의 첫 identifier — `&run_x.step` 이면 `run_x`.
+fn firstIdentIn(tree: *const std.zig.Ast, node: std.zig.Ast.Node.Index) ?[]const u8 {
+    var tok = tree.firstToken(node);
+    const last = tree.lastToken(node);
+    while (tok <= last) : (tok += 1) {
+        if (tree.tokenTag(tok) == .identifier) return tree.tokenSlice(tok);
+    }
+    return null;
+}
+
+/// 노드 안의 첫 문자열 리터럴 값 — `b.path("tools/x.sh")` 이면 `tools/x.sh`.
+fn firstStringIn(a: std.mem.Allocator, tree: *const std.zig.Ast, node: std.zig.Ast.Node.Index) !?[]const u8 {
+    var tok = tree.firstToken(node);
+    const last = tree.lastToken(node);
+    while (tok <= last) : (tok += 1) {
+        if (try stringValue(a, tree, tok)) |s| return s;
+    }
+    return null;
 }
 
 /// `addProjectTest` 인자의 struct 리터럴을 재귀로 훑어 필드를 채운다.
@@ -438,4 +551,77 @@ test "빌드 그래프 뷰는 문자열 판정과 같은 값을 낸다 (B3-0.4 �
     const root_path = "src/platform/macos/session_host/generation_transport.zig";
     try std.testing.expectEqual(@as(usize, 15), countOccurrences(text, root_path));
     try std.testing.expectEqual(@as(usize, 12), g.countRegistrationsWithRoot(root_path));
+}
+
+test "receiver 가 있으면 VarCalls 가 «무조건» 생긴다 — null 은 「그런 변수가 없다」만 뜻한다" {
+    const a = std.testing.allocator;
+    var g = try parse(a);
+    defer g.deinit();
+
+    // `setCwd` 만 하는 run 변수도 보여야 한다. 예전 뷰는 이것을 놓쳐
+    // 「배관이 없다」는 틀린 결론을 냈다(142건 중 45건이라 읽었는데 실제는 85건).
+    const v = g.varCalls("run_macos_window_smoke_tests") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(v.cwd_set);
+
+    // 존재하지 않는 이름은 null 이다 — 이 둘이 구분되는 것이 이 확장의 요점이다.
+    try std.testing.expect(g.varCalls("run_this_name_does_not_exist_v1") == null);
+}
+
+test "dependenciesOf 는 접두·개수 질문을 문자열 없이 답한다" {
+    const a = std.testing.allocator;
+    var g = try parse(a);
+    defer g.deinit();
+
+    const text = try build_source.read(a);
+    defer a.free(text);
+
+    // 옛 방식: count(build, "boundary_step.dependOn(&run_") >= 100
+    // 새 방식: boundary_step 이 매단 것 중 `run_` 접두인 것
+    //
+    // **여기서 두 값이 갈리고, 그 갈림이 이 뷰의 존재 이유다.** 문자열은 222, 뷰는 223 이다.
+    // 차이 하나는 `build.zig` 의
+    //     boundary_step.dependOn(
+    //         &run_session_host_upgrade_component_failure_matrix_boundary_tests.step,
+    //     );
+    // 처럼 **여는 괄호 뒤에 줄바꿈이 든** 자리다 — 문자열 판정은 그 의존을 세지 못했다.
+    // 두 값을 모두 고정한다(한쪽만 두면 감시가 줄어든다).
+    const old_count = countOccurrences(text, "boundary_step.dependOn(&run_");
+    const new_count = g.countDependenciesWithPrefix("boundary_step", "run_");
+    try std.testing.expectEqual(@as(usize, 222), old_count);
+    try std.testing.expectEqual(@as(usize, 223), new_count);
+    try std.testing.expect(new_count > old_count); // 뷰가 더 본다 — 줄바꿈에 안 흔들린다
+
+    // 옛 방식: count(build, "sharded.dependOn(&run_") == 0
+    try std.testing.expectEqual(
+        countOccurrences(text, "sharded.dependOn(&run_"),
+        g.countDependenciesWithPrefix("sharded", "run_"),
+    );
+}
+
+test "countCall 은 receiver 가 제각각인 호출을 센다" {
+    const a = std.testing.allocator;
+    var g = try parse(a);
+    defer g.deinit();
+
+    const text = try build_source.read(a);
+    defer a.free(text);
+
+    // 옛 방식: count(build, "linkFramework(\"UserNotifications\"") >= 2
+    const old_count = countOccurrences(text, "linkFramework(\"UserNotifications\"");
+    const new_count = g.countCall("linkFramework", "UserNotifications");
+    try std.testing.expectEqual(old_count, new_count);
+    try std.testing.expect(new_count >= 2);
+}
+
+test "other 는 뷰가 모르는 배선을 신고한다" {
+    const a = std.testing.allocator;
+    var g = try parse(a);
+    defer g.deinit();
+
+    // 담지 않은 호출이 실제로 신고되는가 — 하나라도 있어야 이 장치가 살아 있다는 뜻이다.
+    var with_other: usize = 0;
+    for (g.vars) |v| {
+        if (v.other.len > 0) with_other += 1;
+    }
+    try std.testing.expect(with_other > 0);
 }

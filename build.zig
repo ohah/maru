@@ -5023,7 +5023,10 @@ pub fn build(b: *std.Build) void {
     // 「AST 뷰가 문자열 판정과 같은 값을 내는가」를 대조하므로, 안 돌면 뷰가 조용히 틀어진다.
     const build_graph_tests = addProjectTest(b, .{ .root_module = boundary_build_graph_mod });
     const run_build_graph_tests = b.addRunArtifact(build_graph_tests);
-    run_build_graph_tests.addArg("--maru-expect-tests=1");
+    // 개수 가드 — 뷰의 판정자가 조용히 사라지면 여기서 걸린다. 지금 다섯이다:
+    // ① B3-0.4 대조 ② receiver 가 있으면 VarCalls 가 무조건 생긴다
+    // ③ dependenciesOf 접두·개수 ④ countCall ⑤ other 가 모르는 배선을 신고한다
+    run_build_graph_tests.addArg("--maru-expect-tests=5");
     run_build_graph_tests.setCwd(b.path("."));
     const boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{

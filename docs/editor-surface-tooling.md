@@ -1158,6 +1158,31 @@ A9 `view()` 의 seek 가드(`expandLine` 가드와 이중 방어 — 하나만 �
 컴파일 오류가 3회차 일곱을 「생존」으로, nohup 의 `external_tty` 거짓 실패가 1회차 여섯을 「죽음」으로 찍었다 — 변이마다 원문 출력을 남기고 첫 FAIL 이
 의도한 판정자인지 읽었다. C1·C2·C7·C11·D3·D5·D6·D9 는 첫 꼴이 컴파일 오류(미사용 변수)라 의미 변이로 바꿔 다시 돌렸다.
 
+### 8.2o LSP 2단 ⑭ — 심볼 2층 `documentSymbol` (2026-09-22, 계획 공격 셋 뒤의 결정)
+
+**표시는 이미 셋 다 있다**([native-editor-ui.md](native-editor-ui.md) §7.5 — 밴드 체인 · `⇧⌘O` 피커 · 체인 마디의 형제 목록). 값이 **1층(tree-sitter)뿐**이라
+`symbol_kinds` 가 없는 문법(markdown·json·css·html)에서는 늘 비었고, C 계열의 `declarator` 사슬처럼 문법마다 규칙을 우리가 다시 적어야 했다. 이 조각은
+같은 목록을 **서버가 채우게** 한다 — semantic 2층(§8.2i)·접힘 3층(§8.2j)과 같은 층 규율이다.
+
+**실측(2026-09-22, 프로브 + 제품 프레임).** 넷 다 `documentSymbolProvider: true` 이고 **계층형 `DocumentSymbol[]`** 을 낸다(평탄 `SymbolInformation[]` 은 하나도 없었다):
+rust-analyzer 6 ms(`detail` 이 시그니처, `selectionRange` 가 이름) · tsgo 39 ms(클래스 안 메서드·생성자 파라미터까지 — `r` 은 생성자 **안**인데 형제로 온다) ·
+typescript-language-server 10 ms(**문서 순서가 아니다** — `c`·`Circle`·`s`·`Shape` 순) · clangd 0 ms(`struct` 필드 포함, `detail` 이 타입).
+
+| 축 | 결정 | 근거 |
+| --- | --- | --- |
+| **capability** | `textDocument.documentSymbol{dynamicRegistration: false, hierarchicalDocumentSymbolSupport: true, symbolKind.valueSet: 1..26}`. 서버의 `documentSymbolProvider`(bool·객체)가 없으면 2층은 없다 | LSP 3.17 |
+| **요청** | `textDocument/documentSymbol{textDocument}` — **범위가 없다**(문서 단위, `foldingRange` 와 같은 꼴), id `17e8+seq`. 시점: 서버가 ready 된 뒤 한 번, 그 뒤엔 편집이 조용해지고(120 ms) `dirty` 일 때. 한 번에 하나, version 을 단다 | §8.2j 와 같은 시계 |
+| **응답 → 목록** | `DocumentSymbol` 트리를 **문서 순서로 평탄화**한다: `range` → 전체 범위, `selectionRange` → 이름 범위, `start_row`, `depth` 는 **포함 관계로 다시 센다**(서버 nesting 을 그대로 믿지 않는다 — tsgo 가 생성자 안의 파라미터를 형제로 낸다), 정렬은 `(start asc, end desc)`(typescript-language-server 가 순서를 안 지킨다). `kind` 는 `SymbolKind` 정수를 **우리 어휘**로 접는다(표는 한 자리 — `lsp/symbols.zig`) | 실측 |
+| **자기 검산** | 이름 범위에서 읽은 **문서 글자 = 서버가 준 `name`** 일 때만 항목을 든다. 아니면 그 항목을 버린다(낡은 응답·인코딩 오류가 밴드에 「지금 어디」를 거짓으로 적지 못하게) | §7.5 「조용히 거짓말」 |
+| **편집 중** | **민다가 아니라 버린다** — 편집 통지가 오면 그 문서의 2층을 비우고 1층으로 돌아간다. 1층은 증분 파싱이라 즉시 옳고, 심볼 체인은 색과 달리 **틀리면 거짓말**이다(semantic 2층이 미는 것과 갈리는 자리) | §7.5 |
+| **어느 층이 이기나** | 2층이 있으면 **통째로** 2층이다(병합하지 않는다 — 항목이 두 배가 되고 어휘가 둘이 된다). 비었거나(`[]`·`null`) 없으면 1층 | 계획 공격 ① |
+| **상한** | 심볼 2,000 · 깊이 32 · 이름 256 byte. 넘으면 거기까지만 든다 | §8.2i 와 같은 규율 |
+| **하지 않는 것** | 평탄 `SymbolInformation[]`(세 서버 모두 안 낸다 — 오면 카운터만 올리고 1층 유지) · `workspace/symbol`(프로젝트 심볼) · `detail` 표시 · `tags`(deprecated 취소선) · 아웃라인 도크(도크 배관이 선행) · 미리보기(N2) | 다음 |
+
+**관측점**: `DSY1~`(순수: 평탄화·포함 depth·정렬·자기 검산·상한·utf-16) · `DSY4~`(제품 경계: ready 뒤 한 번 묻고 밴드 체인이 2층으로 서며, 편집하면 1층으로
+돌아갔다가 조용한 뒤 다시 묻는다; 낡은 version·provider 없음·빈 응답). 가짜 서버 표식은 `DSYNONE`(빈 목록)·`DSYFLAT`(평탄 꼴)·`DSYSTALL`(무응답),
+`MARU_FAKE_LSP_NOSYMCAP=1`(provider 없음).
+
 ### 8.3 관측 가능성과 민감정보
 
 editor event는 처음부터 하나의 domain schema를 공유하되 문서 원문을 기본 trace에 넣지 않는다.

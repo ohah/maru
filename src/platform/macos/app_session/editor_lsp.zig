@@ -33,6 +33,7 @@ const editor_semantic = @import("editor_semantic.zig");
 const editor_fold_lsp = @import("editor_fold_lsp.zig");
 const editor_references = @import("editor_references.zig");
 const editor_inlay = @import("editor_inlay.zig");
+const editor_symbols = @import("editor_symbols.zig");
 const editor_code_action = @import("editor_code_action.zig");
 
 pub const Phase = enum {
@@ -124,6 +125,9 @@ pub const Client = struct {
     save_caps: lsp.rpc.SaveCaps = .{},
     /// 인레이 힌트(§8.2n) — `inlayHintProvider`.
     inlay_seq: u32 = 0,
+    /// 심볼 2층(§8.2o).
+    symbols_seq: u32 = 0,
+    symbols_supported: bool = false,
     inlay_supported: bool = false,
 
     fn deinit(self: *Client, allocator: std.mem.Allocator) void {
@@ -189,6 +193,8 @@ pub const State = struct {
     received_inlay: u64 = 0,
     /// 서버의 `workspace/inlayHint/refresh` 를 받아 `null` 로 답한 수(§8.2n).
     inlay_refreshes: u64 = 0,
+    sent_symbols: u64 = 0,
+    received_symbols: u64 = 0,
     sent_configs: u64 = 0,
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
@@ -569,6 +575,7 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
                 c.declaration_supported = lsp.rpc.locationProviderSupported(r.result, .declaration);
                 c.save_caps = lsp.rpc.saveCapsFromResult(r.result); // §8.2k
                 c.inlay_supported = lsp.inlay.supportedFromResult(r.result); // §8.2n
+                c.symbols_supported = lsp.symbols.supportedFromResult(r.result); // §8.2o
                 c.phase = .ready;
                 c.restarts = 0;
                 const msg = lsp.rpc.initializedNotification(self.allocator) catch return;
@@ -608,6 +615,10 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
             .inlay_hint => |seq| {
                 self.editor_lsp.received_inlay += 1;
                 if (termWaitingInlay(self, c, seq)) |t| editor_inlay.onResponse(self, t, seq, r.result, r.is_error, c.encoding);
+            },
+            .document_symbol => |seq| {
+                self.editor_lsp.received_symbols += 1;
+                if (termWaitingSymbols(self, c, seq)) |t| editor_symbols.onResponse(self, t, seq, r.result, r.is_error, c.encoding);
             },
             .folding_range => |seq| {
                 self.editor_lsp.received_folding += 1;
@@ -1143,6 +1154,33 @@ fn forEachDocTerm(self: *AppSession, c: *Client, f: *const fn (*Term) void) void
         }.pred) orelse continue;
         f(loc.pane.terms.items[loc.term_index]);
     }
+}
+
+/// `textDocument/documentSymbol`(§8.2o) — 문서 단위. 서버가 없거나 provider 가 없으면 `null`(묻지 않는다).
+pub fn requestDocumentSymbols(self: *AppSession, term: *Term) ?u32 {
+    const c = readyClientFor(self, term) orelse return null;
+    if (!c.symbols_supported) return null;
+    flushDocument(self, c, term);
+    const d = c.findDoc(term.surfaceId()) orelse return null;
+    c.symbols_seq = lsp.rpc.nextSeq(c.symbols_seq);
+    const msg = lsp.rpc.documentSymbolRequest(self.allocator, c.symbols_seq, d.uri) catch return null;
+    defer self.allocator.free(msg);
+    if (!send(self, c, msg)) return null;
+    self.editor_lsp.sent_symbols += 1;
+    return c.symbols_seq;
+}
+
+fn termWaitingSymbols(self: *AppSession, c: *Client, seq: u32) ?*Term {
+    for (c.docs.items) |d| {
+        const loc = term_ops.findTermWhere(self, d.surface_id, struct {
+            fn pred(want: u64, t: *Term) bool {
+                return t.kind == .editor and t.surface.id == want;
+            }
+        }.pred) orelse continue;
+        const t = loc.pane.terms.items[loc.term_index];
+        if (t.rt.editor_symbols.waiting and t.rt.editor_symbols.waiting_seq == seq) return t;
+    }
+    return null;
 }
 
 fn termWaitingInlay(self: *AppSession, c: *Client, seq: u32) ?*Term {

@@ -911,12 +911,14 @@ pub const max_chain_depth: usize = 8;
 /// **pending 을 따로 보지 않는다.** 전체 파싱이 끊긴 동안은 트리가 없어 `symbols()` 가 빈 목록을 내고
 /// (구조가 보장한다), 증분이 끊긴 동안은 `ts_tree_edit` 로 offset 이 맞춰진 옛 트리가 편집 전 체인을
 /// 낸다 — 색이 편집 전 색으로 남는 것과 같은 저하다.
+/// `lsp_symbols` 는 **심볼 2층**(§8.2o) — `null` 이 아니면 1층 대신 그것을 쓴다. 두 층이 같은 타입이라 아래 걸음은 하나다.
 pub fn breadcrumb(
     self: *State,
     allocator: std.mem.Allocator,
     path: []const u8,
     source: []const u8,
     focus: usize,
+    lsp_symbols: ?[]const syntax.Provider.Symbol,
 ) []const u8 {
     // **버퍼를 맨 위에서 비운다.** 이르게 반환하는 길이 넷인데(provider 없음·목록 빔·체인 빔·범위
     // 벗어남) 비우기가 그 아래 있으면 **지난 프레임 체인이 버퍼에 살아 있다** — 그 상태에서 누가
@@ -926,17 +928,20 @@ pub fn breadcrumb(
     self.crumb_bounds.clearRetainingCapacity();
     self.crumb_syms.clearRetainingCapacity();
 
-    const prov = if (self.provider) |*p| p else return path;
-    prov.symbols(allocator, &self.symbols);
-    if (self.symbols.items.len == 0) return path;
+    const syms = if (lsp_symbols) |l| l else blk: {
+        const prov = if (self.provider) |*p| p else return path;
+        prov.symbols(allocator, &self.symbols);
+        break :blk self.symbols.items;
+    };
+    if (syms.len == 0) return path;
 
     var idx: [max_chain_depth]usize = undefined;
-    const n = syntax.Provider.chainAt(self.symbols.items, @intCast(@min(focus, std.math.maxInt(u32))), &idx);
+    const n = syntax.Provider.chainAt(syms, @intCast(@min(focus, std.math.maxInt(u32))), &idx);
     if (n == 0) return path;
 
     self.crumb.appendSlice(allocator, path) catch return path;
     for (idx[0..n]) |si| {
-        const sym = self.symbols.items[si];
+        const sym = syms[si];
         // **범위가 원본 밖이면 그리지 않는다.** 증분이 끊긴 동안은 옛 트리라 이론상 어긋날 수 있고,
         // 그 상태로 자르면 패닉이거나 엉뚱한 글자다 — 둘 다 "지금 어디" 라는 질문에 거짓말이다.
         if (sym.name_end > source.len or sym.name_start >= sym.name_end) return self.bailOut(path);
@@ -966,7 +971,7 @@ test "ES25 헤더 밴드가 커서가 든 심볼을 경로 뒤에 잇는다 (§7
     defer st.deinit(testing.allocator);
 
     const inside = std.mem.indexOf(u8, src, "_ = self").?;
-    const label = breadcrumb(&st, testing.allocator, "src/ui/widget.zig", src, inside);
+    const label = breadcrumb(&st, testing.allocator, "src/ui/widget.zig", src, inside, null);
     try testing.expectEqualStrings("src/ui/widget.zig \u{203A} Widget \u{203A} draw", label);
 
     // **바깥부터 안쪽으로** — 경로 다음이 바깥이다. 뒤집히면 breadcrumb 이 거꾸로 읽힌다.
@@ -978,7 +983,7 @@ test "ES25 헤더 밴드가 커서가 든 심볼을 경로 뒤에 잇는다 (§7
     const in_after = std.mem.indexOf(u8, src, "after() void").?;
     try testing.expectEqualStrings(
         "src/ui/widget.zig \u{203A} after",
-        breadcrumb(&st, testing.allocator, "src/ui/widget.zig", src, in_after),
+        breadcrumb(&st, testing.allocator, "src/ui/widget.zig", src, in_after, null),
     );
 }
 
@@ -990,19 +995,19 @@ test "ES26 체인이 없으면 경로가 글자 하나 안 바뀐다 — 조용�
     // ① grammar 가 없다 — provider 자체가 없다.
     var none = openParsed("아무 글", .none);
     defer none.deinit(testing.allocator);
-    try testing.expectEqualStrings(path, breadcrumb(&none, testing.allocator, path, "아무 글", 0));
+    try testing.expectEqualStrings(path, breadcrumb(&none, testing.allocator, path, "아무 글", 0, null));
 
     // ② 커서가 어느 심볼에도 안 든다 — 첫 줄은 import 라 심볼 밖이다.
     const src = "const std = @import(\"std\");\n\npub fn f() void {}\n";
     var st = openParsed(src, .zig);
     defer st.deinit(testing.allocator);
-    try testing.expectEqualStrings(path, breadcrumb(&st, testing.allocator, path, src, 3));
+    try testing.expectEqualStrings(path, breadcrumb(&st, testing.allocator, path, src, 3, null));
 
     // ③ 심볼 종류가 없는 언어(markdown) — 목록이 늘 빈다.
     const md = "# 제목\n\n본문\n";
     var m = openParsed(md, .markdown);
     defer m.deinit(testing.allocator);
-    try testing.expectEqualStrings(path, breadcrumb(&m, testing.allocator, path, md, 3));
+    try testing.expectEqualStrings(path, breadcrumb(&m, testing.allocator, path, md, 3, null));
 
     // ④ 전체 파싱이 예산에 끊긴 동안 — 트리가 없어 목록이 빈다.
     var big: std.ArrayList(u8) = .empty;
@@ -1013,7 +1018,7 @@ test "ES26 체인이 없으면 경로가 글자 하나 안 바뀐다 — 조용�
     defer cut.deinit(testing.allocator);
     if (cut.pending) {
         const off = std.mem.indexOf(u8, big.items, "_ = 3;").?;
-        try testing.expectEqualStrings(path, breadcrumb(&cut, testing.allocator, path, big.items, off));
+        try testing.expectEqualStrings(path, breadcrumb(&cut, testing.allocator, path, big.items, off, null));
     }
 }
 
@@ -1033,8 +1038,8 @@ test "ES27 체인 문자열은 프레임마다 다시 굳는다 — 저장소는
     defer st.deinit(testing.allocator);
     const path = "a.zig";
 
-    _ = breadcrumb(&st, testing.allocator, path, src, std.mem.indexOf(u8, src, "_ = self").?);
-    const second = breadcrumb(&st, testing.allocator, path, src, std.mem.indexOf(u8, src, "after() void").?);
+    _ = breadcrumb(&st, testing.allocator, path, src, std.mem.indexOf(u8, src, "_ = self").?, null);
+    const second = breadcrumb(&st, testing.allocator, path, src, std.mem.indexOf(u8, src, "after() void").?, null);
     try testing.expectEqualStrings("a.zig \u{203A} after", second);
 
     // 그리고 체인이 사라지면 **경로만** 남는다 — 지난 값이 살아남지 않는다.
@@ -1042,7 +1047,7 @@ test "ES27 체인 문자열은 프레임마다 다시 굳는다 — 저장소는
     // **offset 0 은 그 자리가 아니다.** `pub const Widget` 이 0에서 시작하므로 커서가 문서 맨 앞에
     // 있으면 실제로 `Widget` 안이다 — 판정자를 쓰다가 그것을 offset 0 으로 잡아 한 번 틀렸다.
     // 어느 심볼에도 안 드는 자리는 문서 끝이다(마지막 심볼의 끝 offset 은 배타적이다).
-    try testing.expectEqualStrings(path, breadcrumb(&st, testing.allocator, path, src, src.len));
+    try testing.expectEqualStrings(path, breadcrumb(&st, testing.allocator, path, src, src.len, null));
 }
 
 test "ES28 낡은 트리의 범위가 지금 원본 밖이면 체인을 그리지 않는다 (§7.5)" {
@@ -1063,7 +1068,7 @@ test "ES28 낡은 트리의 범위가 지금 원본 밖이면 체인을 그리�
     const path = "a.zig";
 
     // 온전한 원본이면 체인이 나온다 — 아래 대비의 기준선이다.
-    const full = breadcrumb(&st, testing.allocator, path, src, std.mem.indexOf(u8, src, "_ = self").?);
+    const full = breadcrumb(&st, testing.allocator, path, src, std.mem.indexOf(u8, src, "_ = self").?, null);
     try testing.expectEqualStrings("a.zig \u{203A} Widget \u{203A} drawTheWholeThing", full);
 
     // **원본이 줄어들면 경로만 남는다.** 옛 트리는 `drawTheWholeThing` 을 여전히 가리키는데 그 이름
@@ -1073,7 +1078,7 @@ test "ES28 낡은 트리의 범위가 지금 원본 밖이면 체인을 그리�
     // 아직 안쪽 함수 앞이라 체인에 안 들었고, 방어가 아니라 전제가 틀린 판정자였다.
     const name_pos = std.mem.indexOf(u8, src, "drawTheWholeThing").?;
     const shrunk = src[0 .. name_pos + 5]; // 이름 한가운데서 자른다 → name_end 가 원본 밖이다
-    try testing.expectEqualStrings(path, breadcrumb(&st, testing.allocator, path, shrunk, name_pos));
+    try testing.expectEqualStrings(path, breadcrumb(&st, testing.allocator, path, shrunk, name_pos, null));
 
     // 그리고 그 호출이 **버퍼에 옛 값을 남기지 않는다** — 다음 프레임이 그것을 그리면 안 된다.
     try testing.expectEqual(@as(usize, 0), st.crumb.items.len);
@@ -1094,24 +1099,24 @@ test "ES29 값을 못 만든 호출은 버퍼를 비워 둔다 — 옛 체인이
     defer st.deinit(testing.allocator);
 
     // 먼저 체인을 만들어 버퍼를 채운다.
-    _ = breadcrumb(&st, testing.allocator, "a.zig", src, std.mem.indexOf(u8, src, "_ = self").?);
+    _ = breadcrumb(&st, testing.allocator, "a.zig", src, std.mem.indexOf(u8, src, "_ = self").?, null);
     try testing.expect(st.crumb.items.len > 0);
 
     // ① 체인이 빈 자리(문서 끝) — 버퍼가 비어야 한다.
-    _ = breadcrumb(&st, testing.allocator, "a.zig", src, src.len);
+    _ = breadcrumb(&st, testing.allocator, "a.zig", src, src.len, null);
     try testing.expectEqual(@as(usize, 0), st.crumb.items.len);
 
     // ② provider 가 없는 상태 — 같은 규율이다.
     var none = openParsed("아무 글", .none);
     defer none.deinit(testing.allocator);
-    _ = breadcrumb(&none, testing.allocator, "b.txt", "아무 글", 0);
+    _ = breadcrumb(&none, testing.allocator, "b.txt", "아무 글", 0, null);
     try testing.expectEqual(@as(usize, 0), none.crumb.items.len);
 
     // ③ 심볼 종류가 없는 언어 — 같은 규율이다.
     const md = "# 제목\n\n본문\n";
     var m = openParsed(md, .markdown);
     defer m.deinit(testing.allocator);
-    _ = breadcrumb(&m, testing.allocator, "c.md", md, 3);
+    _ = breadcrumb(&m, testing.allocator, "c.md", md, 3, null);
     try testing.expectEqual(@as(usize, 0), m.crumb.items.len);
 }
 
@@ -1131,23 +1136,23 @@ test "ES33 체인을 못 만들면 마디 경계도 비운다 — 지난 프레�
     const path = "a.zig";
 
     // 먼저 체인을 만들어 경계를 채운다.
-    _ = breadcrumb(&st, testing.allocator, path, src, std.mem.indexOf(u8, src, "_ = self").?);
+    _ = breadcrumb(&st, testing.allocator, path, src, std.mem.indexOf(u8, src, "_ = self").?, null);
     try testing.expect(st.crumb_bounds.items.len > 0);
     try testing.expect(st.crumb_syms.items.len > 0);
 
     // **낡은 트리 갈래**(원본이 줄어 이름 범위가 밖) — `bailOut` 으로 나간다.
     const name_pos = std.mem.indexOf(u8, src, "drawTheWholeThing").?;
     const shrunk = src[0 .. name_pos + 5];
-    try testing.expectEqualStrings(path, breadcrumb(&st, testing.allocator, path, shrunk, name_pos));
+    try testing.expectEqualStrings(path, breadcrumb(&st, testing.allocator, path, shrunk, name_pos, null));
 
     // 경계·심볼 인덱스가 **함께** 비었다.
     try testing.expectEqual(@as(usize, 0), st.crumb_bounds.items.len);
     try testing.expectEqual(@as(usize, 0), st.crumb_syms.items.len);
 
     // 체인이 아예 없는 자리(문서 끝)에서도 같다.
-    _ = breadcrumb(&st, testing.allocator, path, src, std.mem.indexOf(u8, src, "_ = self").?);
+    _ = breadcrumb(&st, testing.allocator, path, src, std.mem.indexOf(u8, src, "_ = self").?, null);
     try testing.expect(st.crumb_bounds.items.len > 0);
-    _ = breadcrumb(&st, testing.allocator, path, src, src.len);
+    _ = breadcrumb(&st, testing.allocator, path, src, src.len, null);
     try testing.expectEqual(@as(usize, 0), st.crumb_bounds.items.len);
 }
 

@@ -845,6 +845,12 @@ fn handleInlayHint(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: st
         sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .result = null });
         return;
     }
+    // **힌트는 부른 문서에만 낸다** — 표식(`_hv` 또는 줄 끝 `RET`)이 없으면 빈 목록이다. 처음엔 `(` 가 있으면 무조건 `p:` 를 냈는데,
+    // 그러면 **다른 판정자**(SMT1 의 `int my_fn(int a_ty)`)의 색 열이 힌트 폭만큼 밀리고 힌트 도착이 비동기라 플레이크가 된다.
+    if (std.mem.indexOf(u8, text, "_hv") == null and std.mem.indexOf(u8, text, "RET") == null) {
+        sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .result = [0]u32{} });
+        return;
+    }
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();

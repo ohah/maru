@@ -1006,6 +1006,8 @@ MARU_FORCE_SCM_TURN_TREES=<oid>,<oid>,…  # 그 스냅샷에 **진짜 tree**를
                                # 그대로 잡힌다**(agent-turn-changes.md §2.4 가 커밋 0회로 실증)
 MARU_FORCE_SCM_TURNS_MISSED=<n> # 「기록하지 못한 턴 N개」 줄을 세운다 — 실제로는 다른 세션의 캡처와 겹쳐야 나는 값이라
                                # 헤드리스로는 재현할 방법이 없다
+MARU_FORCE_SYS_APPEARANCE_LATER=<light|dark>@<ms> # 앱이 뜬 뒤 <ms> 지나 시스템 외관을 한 번 바꾼다 — pane 안의 앱이 `?2031h` 를 보낸 **뒤**의
+                               # 색 구성 통지를 보려고(첫 frame 의 MARU_FORCE_SYS_APPEARANCE 는 그 전이다). theme.follow-system=true 필요
 MARU_FORCE_REMOTE_PANES=<n>[,<evicted>] # 활성 Term 을 원격 tmux pane n 개의 에이전트 Term 처럼(사이드바 pane 행) + 밀린 pane <evicted> 개의
                                # «+N pane 밀림» 고지 — 17개째가 밀리는 화면은 실기로 못 만든다(RA7 조각 5)
 MARU_FORCE_SCM_TURNS_EVICTED=1 # 「최근 세션에 밀려 이전 턴 기록이 사라졌습니다」 줄을 세운다 — 같은 이유로 헤드리스에서

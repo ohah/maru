@@ -442,6 +442,15 @@ pub const TerminalCore = struct {
     // 결) — 코어는 Color.default 추상만 알아 실제 RGB를 받는다. 주입 전 기본값은 어두운 테마 근사.
     default_fg_rgb: types.Rgb = .{ .r = 0xcc, .g = 0xcc, .b = 0xcc },
     default_bg_rgb: types.Rgb = .{ .r = 0x10, .g = 0x10, .b = 0x10 },
+    /// DECSET 2031 — 색 구성(라이트/다크) 통지 구독. 켜져 있으면 `setDefaultColors` 가 배경의 밝기 등급이 **바뀔 때**
+    /// `CSI ? 997 ; 1|2 n` 을 보낸다. 실측(2026-09-22): Claude Code 가 시작마다 `?2031h` 를 보내고 입력 파서에 `\?997;[12]n`
+    /// 분기를 갖는데 maru 가 DECRQM 에 0 으로 답해 그 기능이 통째로 안 쓰였다 — 라이브 테마 전환 뒤 앱이 옛 테마로 남았다.
+    color_scheme_notify: bool = false,
+    /// 마지막으로 앱에 알린(또는 처음 주입된) 배경의 밝기 등급. `null` 이면 아직 색이 한 번도 안 왔다 — 첫 주입은 통지가 아니다.
+    color_scheme_dark_seen: ?bool = null,
+    /// 지금까지 만든 `CSI ? 997 ; n` 수(질의 답 + 통지). 진단·판정자용 — 응답 버퍼는 리더가 비우므로 «만들었나» 를 따로 센다
+    /// (`sync_bsu_count` 와 같은 결).
+    color_scheme_reports: u32 = 0,
     // OSC 10/11 색 설정 override(null = theme 기본 사용). OSC 10이 전경, 11이 배경을 덮고 OSC 110/111이 리셋한다.
     // setDefaultColors(theme를 매 tick 주입)와 별개 필드라 주입이 set 값을 지우지 않는다. 렌더러 default 색은
     // app이 `override orelse theme`로 wiring하고(OSC 4 팔레트와 같은 결 — 코어가 override 보관, app이 소비),
@@ -737,6 +746,7 @@ pub const TerminalCore = struct {
         self.mouse_tracking = .none; // 9/1000/1002/1003 — 마우스 리포트 중단
         self.mouse_format = .x10; // 1006/1015/1016 — 마우스 인코딩 기본 복원
         self.kitty_flags = .{}; // kitty keyboard 스택·플래그 전부 비움
+        self.color_scheme_notify = false; // 2031 — 색 구성 통지 구독 해지(앱이 다시 켠다)
     }
 
     pub fn deinit(self: *TerminalCore) void {
@@ -1629,6 +1639,23 @@ pub const TerminalCore = struct {
     pub fn setDefaultColors(self: *TerminalCore, fg: types.Rgb, bg: types.Rgb) void {
         self.default_fg_rgb = fg;
         self.default_bg_rgb = bg;
+        // 색 구성 통지(2031): 배경의 밝기 **등급**이 바뀌었을 때만 — 같은 테마를 매 tick 다시 주입해도(활성 surface 의 프레임
+        // 빌드가 그렇게 한다) 등급이 같으면 조용하다. 첫 주입(`null`)은 «바뀜» 이 아니다.
+        const dark = isDarkBackground(bg);
+        const changed = if (self.color_scheme_dark_seen) |seen| seen != dark else false;
+        self.color_scheme_dark_seen = dark;
+        if (changed and self.color_scheme_notify) self.appendColorSchemeReport();
+    }
+
+    /// 지금 배경이 다크인가 — 상대 휘도(sRGB 계수) 0.5 미만. `null` 이면 아직 색이 주입되지 않았다.
+    pub fn colorSchemeIsDark(self: *const TerminalCore) bool {
+        return self.color_scheme_dark_seen orelse isDarkBackground(self.default_bg_rgb);
+    }
+
+    /// `CSI ? 997 ; 1 n`(다크) / `CSI ? 997 ; 2 n`(라이트) — `?996n` 질의의 답이자 2031 구독자에게 보내는 통지(같은 바이트).
+    pub fn appendColorSchemeReport(self: *TerminalCore) void {
+        self.color_scheme_reports +%= 1;
+        self.appendResponse(if (self.colorSchemeIsDark()) "\x1b[?997;1n" else "\x1b[?997;2n");
     }
 
     /// alt 화면에서 만들어진 placement 를 버린다. 본문: kitty.dropAltScreenPlacements.
@@ -12873,4 +12900,100 @@ test "kitty 락 밖 디코드 [PNG·적대]: o=z 로 한 겹 더 압축된 PNG �
     try std.testing.expectEqual(@as(usize, 0), core.kitty_pending_jobs.items.len);
     try std.testing.expect(!core.kitty_images.map.get(9).?.isPending());
     try std.testing.expectEqualStrings("\x1b_Gi=9;OK\x1b\\", core.pendingResponse());
+}
+
+
+/// 배경 색의 밝기 등급(2031/996). sRGB 상대 휘도(0.2126 R + 0.7152 G + 0.0722 B)가 절반 미만이면 다크. 경계값은 문서화된
+/// 선택이지 표준이 아니다 — 프리셋 실측: `maru`·`gruvbox-dark`·`dracula` 다크, `solarized-light`(#fdf6e3)·`one-light`(#fafafa) 라이트.
+pub fn isDarkBackground(bg: types.Rgb) bool {
+    const luma: u32 = 2126 * @as(u32, bg.r) + 7152 * @as(u32, bg.g) + 722 * @as(u32, bg.b); // × 10000
+    return luma < 10000 * 128;
+}
+
+test "2031 색 구성 통지: 구독하면 배경 밝기 등급이 바뀔 때만 CSI ? 997 ; n 을 보내고, 같은 색 재주입·첫 주입은 조용하다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 5 });
+    defer core.deinit();
+    const dark: types.Rgb = .{ .r = 0x10, .g = 0x10, .b = 0x10 };
+    const light: types.Rgb = .{ .r = 0xfd, .g = 0xf6, .b = 0xe3 }; // solarized-light
+    // 구독 전: 바뀌어도 조용하다.
+    core.setDefaultColors(.{ .r = 0xcc, .g = 0xcc, .b = 0xcc }, light);
+    try std.testing.expectEqualStrings("", core.pendingResponse());
+    // 구독 — DECRQM 이 «켜짐» 으로 답한다(0 이면 앱이 안 쓴다 — 1016 이 그래서 픽셀 마우스를 잃었던 사고와 같다).
+    try core.write("\x1b[?2031h\x1b[?2031$p");
+    try std.testing.expectEqualStrings("\x1b[?2031;1$y", core.pendingResponse());
+    core.clearResponse();
+    // 같은 등급(라이트) 재주입 — 매 tick 의 프레임 빌드가 그렇게 한다 — 조용하다.
+    core.setDefaultColors(.{ .r = 0x00, .g = 0x00, .b = 0x00 }, .{ .r = 0xfa, .g = 0xfa, .b = 0xfa });
+    try std.testing.expectEqualStrings("", core.pendingResponse());
+    // 다크로 바뀜 → 통지 1.
+    core.setDefaultColors(.{ .r = 0xcc, .g = 0xcc, .b = 0xcc }, dark);
+    try std.testing.expectEqualStrings("\x1b[?997;1n", core.pendingResponse());
+    core.clearResponse();
+    core.setDefaultColors(.{ .r = 0xcc, .g = 0xcc, .b = 0xcc }, dark); // 같은 등급 — 조용
+    try std.testing.expectEqualStrings("", core.pendingResponse());
+    core.setDefaultColors(.{ .r = 0x00, .g = 0x00, .b = 0x00 }, light);
+    try std.testing.expectEqualStrings("\x1b[?997;2n", core.pendingResponse());
+    core.clearResponse();
+    // 해지 뒤엔 바뀌어도 조용하고, DECRQM 은 «꺼짐».
+    try core.write("\x1b[?2031l");
+    core.setDefaultColors(.{ .r = 0xcc, .g = 0xcc, .b = 0xcc }, dark);
+    try core.write("\x1b[?2031$p");
+    try std.testing.expectEqualStrings("\x1b[?2031;2$y", core.pendingResponse());
+}
+
+test "2031 적대적: 구독이 첫 주입보다 앞서도 첫 주입은 조용하고, 해지 중의 전환은 되살아난 뒤 소급되지 않으며, alt 화면은 모드를 안 건드린다" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 5 });
+    defer core.deinit();
+    const dark: types.Rgb = .{ .r = 0x10, .g = 0x10, .b = 0x10 };
+    const light: types.Rgb = .{ .r = 0xfa, .g = 0xfa, .b = 0xfa };
+    // 구독 먼저, 색은 그 뒤 처음 주입 — «바뀜» 이 아니다(뮤턴트 C2: null 을 바뀜으로 보면 앱이 시작마다 헛통지를 받는다).
+    try core.write("\x1b[?2031h");
+    core.setDefaultColors(.{ .r = 0, .g = 0, .b = 0 }, light);
+    try std.testing.expectEqualStrings("", core.pendingResponse());
+    try std.testing.expectEqual(@as(u32, 0), core.color_scheme_reports);
+    // 해지 → 전환(조용) → 재구독: 그 사이의 전환은 소급 통지되지 않는다. 앱은 `?996n` 으로 지금 값을 묻는다.
+    try core.write("\x1b[?2031l");
+    core.setDefaultColors(.{ .r = 0xcc, .g = 0xcc, .b = 0xcc }, dark);
+    try core.write("\x1b[?2031h");
+    try std.testing.expectEqualStrings("", core.pendingResponse());
+    try core.write("\x1b[?996n");
+    try std.testing.expectEqualStrings("\x1b[?997;1n", core.pendingResponse());
+    core.clearResponse();
+    // alt 화면 진입·이탈은 모드와 무관(화면 귀속이 아니라 입력 모드다).
+    try core.write("\x1b[?1049h\x1b[?2031$p\x1b[?1049l\x1b[?2031$p");
+    try std.testing.expectEqualStrings("\x1b[?2031;1$y\x1b[?2031;1$y", core.pendingResponse());
+    core.clearResponse();
+    // 채널 가중치: 순수 초록(휘도 0.715)은 라이트, 순수 빨강(0.213)은 다크 — R 만 보거나 평균을 내면 갈린다(뮤턴트 C7).
+    core.setDefaultColors(.{ .r = 0, .g = 0, .b = 0 }, .{ .r = 0, .g = 0xff, .b = 0 });
+    try std.testing.expectEqualStrings("\x1b[?997;2n", core.pendingResponse());
+    core.clearResponse();
+    core.setDefaultColors(.{ .r = 0, .g = 0, .b = 0 }, .{ .r = 0xff, .g = 0, .b = 0 });
+    try std.testing.expectEqualStrings("\x1b[?997;1n", core.pendingResponse());
+}
+
+test "996 색 구성 질의: 구독과 무관하게 지금 등급으로 답하고, 첫 색 주입 전에도 답한다(기본 배경 = 다크)" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 5 });
+    defer core.deinit();
+    try core.write("\x1b[?996n"); // 주입 전 — 기본 배경(#101010)으로 답한다. 침묵은 앱을 블로킹 read 에 굳힌다.
+    try std.testing.expectEqualStrings("\x1b[?997;1n", core.pendingResponse());
+    core.clearResponse();
+    core.setDefaultColors(.{ .r = 0, .g = 0, .b = 0 }, .{ .r = 0xff, .g = 0xff, .b = 0xff });
+    try core.write("\x1b[?996n");
+    try std.testing.expectEqualStrings("\x1b[?997;2n", core.pendingResponse());
+    core.clearResponse();
+    // 경계: 회색 — 휘도 절반 기준. #808080 은 128/255 ≥ 0.5 → 라이트, #7f7f7f → 다크.
+    core.setDefaultColors(.{ .r = 0, .g = 0, .b = 0 }, .{ .r = 0x80, .g = 0x80, .b = 0x80 });
+    try core.write("\x1b[?996n");
+    try std.testing.expectEqualStrings("\x1b[?997;2n", core.pendingResponse());
+    core.clearResponse();
+    core.setDefaultColors(.{ .r = 0, .g = 0, .b = 0 }, .{ .r = 0x7f, .g = 0x7f, .b = 0x7f });
+    try core.write("\x1b[?996n");
+    try std.testing.expectEqualStrings("\x1b[?997;1n", core.pendingResponse());
+}
+
+test "2031 은 RIS 가 끈다 — 입력 모드 리셋과 같은 결" {
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 20, .rows = 5 });
+    defer core.deinit();
+    try core.write("\x1b[?2031h\x1bc\x1b[?2031$p");
+    try std.testing.expectEqualStrings("\x1b[?2031;2$y", core.pendingResponse());
 }

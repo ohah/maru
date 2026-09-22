@@ -173,6 +173,11 @@ const core_fields_v1 = [_]FieldSpec{
     .{ .tag = 96, .name = "osc99_body", .optional = true },
     .{ .tag = 97, .name = "osc99_id", .optional = true },
     .{ .tag = 98, .name = "osc99_active", .optional = true },
+    // 색 구성 통지(DECSET 2031, 2026-09-22). 구독 상태와 «마지막으로 본 등급» 이 handoff 를 건너야 업그레이드 뒤 첫 테마
+    // 주입이 통지로 오인되지 않는다(`color_scheme_dark_seen == null` 이면 첫 주입은 조용하다 — 같은 등급이면 어차피 조용).
+    .{ .tag = 100, .name = "color_scheme_notify", .optional = true },
+    .{ .tag = 101, .name = "color_scheme_dark_seen", .optional = true },
+    .{ .tag = 102, .name = "color_scheme_reports", .optional = true },
     .{ .tag = 72, .name = "charset_g0" },
     .{ .tag = 73, .name = "charset_g1" },
     .{ .tag = 74, .name = "charset_gl" },
@@ -1614,6 +1619,14 @@ test "handoff v1 exhaustive valid fixtures cover every stable core field and ree
     try candidate.write("\x1b[?1049halt-screen");
     // shell event queue의 공개 producer가 cap에 닿으면 마지막 event 대신 overflow latch를 보존한다.
     for (0..4097) |_| try candidate.write("\x1b]133;A\x07");
+    try observeNonDefaultCoreFields(&coverage, &baseline, &candidate);
+    try expectCanonicalCoreRoundTrip(&candidate);
+
+    // 색 구성 통지(2031, tag 100~102): 구독 → 라이트 주입(첫 주입 = seen 세팅) → 다크 주입(통지 1 = reports) — 셋 다 non-default.
+    try candidate.write("\x1b[?2031h");
+    candidate.setDefaultColors(.{ .r = 0xff, .g = 0xff, .b = 0xff }, .{ .r = 0xfd, .g = 0xf6, .b = 0xe3 });
+    candidate.setDefaultColors(.{ .r = 0xcc, .g = 0xcc, .b = 0xcc }, .{ .r = 0x10, .g = 0x10, .b = 0x10 });
+    candidate.clearResponse();
     try observeNonDefaultCoreFields(&coverage, &baseline, &candidate);
     try expectCanonicalCoreRoundTrip(&candidate);
 

@@ -206,8 +206,8 @@ test "모듈 주입을 실제로 담는가 — `&.{…}` 에서 멈춰 468건 �
     // **고치기 전 이 수는 1 이었다.** `.imports = &.{ .{ .name = "maru", … } }` 의 `&.{ … }` 는
     // struct init 도 call 도 아니라 재귀가 거기서 멈췄고, 모듈을 주입받는 등록이 전부
     // 「주입 없음」으로 보였다. 뷰가 «안 본다» 는 것을 뷰 자신은 못 신고하므로 수로 잠근다.
-    try std.testing.expectEqual(@as(usize, 466), with_imports);
-    try std.testing.expectEqual(@as(usize, 893), pairs);
+    try std.testing.expectEqual(@as(usize, 467), with_imports); // +1: `test-color-scheme-notify`(2031 코어 판정자 step, 2026-09-22)
+    try std.testing.expectEqual(@as(usize, 894), pairs);
 
     // 그 자리에서 모듈을 만드는가, 기존 모듈 변수를 이름으로 부르는가. 후자가 압도적이라는
     // 사실이 「등록을 표로 적을 때 `deps` 는 이름 목록으로 족한가」의 답이다.

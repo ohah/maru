@@ -129,8 +129,43 @@
 매 frame 주입되는 셀 메트릭을 그대로 흘리면 시그널 폭풍이 된다. 라이브 실측(오프스크린 캡처 하네스,
 `font.size` 8→22 A/B): 셀 8×18 → 13×29 로 두 경로가 **같은 값으로 함께** 움직였다.
 
-**남은 것**: in-band resize(`?2048`)와 color-scheme 통지(`?2031`)는 여전히 미구현이고 DECRQM이 0으로
-정직하게 답한다.
+**남은 것**: in-band resize(`?2048`)는 여전히 미구현이고 DECRQM이 0으로 정직하게 답한다. color-scheme 통지(`?2031`)는
+아래 절(2026-09-22)에서 구현했다.
+
+### 색 구성 통지 `?2031` / `?996n` (구현 2026-09-22)
+
+**재실측(터미널 코어 축, 2026-09-22)**: 이 터미널의 워크로드는 사실상 Claude Code·Codex(zsh 히스토리 최근 5,000줄: claude 103 ·
+codex 44, 살아 있는 pane 11개 전부 claude). claude 2.1.278 을 pty 에서 띄워 8초 캡처하니 시작마다 `?2031h`×2 · `?2004h` · `?1004h` ·
+`?1049h` · `CSI ? u` · `OSC 11;?`×2 · `CSI c`×4 를 보내고, 입력 파서(바이너리의 정규식)에 `\?997;[12]n` 분기가 있다 — **앱은 양쪽이 다
+되어 있고 maru 만 0(모름)으로 답해** 라이브 테마 전환 뒤 claude 화면이 옛 테마로 남았다(`theme.follow-system` — 사용자 결정: 테마를
+따라가는 것이 당연하다). `?2048` 은 바이너리에 참조만 있고 시작 8초 안엔 안 보냈다 — 보류.
+
+**프로토콜**(xterm/contour DEC 사적 모드 2031): `CSI ? 2031 h/l` 구독·해지, DECRQM `CSI ? 2031 $ p` → `CSI ? 2031 ; 1|2 $ y`,
+`CSI ? 996 n` 질의 → `CSI ? 997 ; 1 n`(다크)/`; 2 n`(라이트), 구독 중 등급이 바뀌면 같은 바이트를 스스로 보낸다.
+
+**구현**: 코어에 `color_scheme_notify`(모드)·`color_scheme_dark_seen`(마지막으로 본 등급, `null` = 첫 주입 전)·`color_scheme_reports`
+(만든 수 — 진단). 등급은 `isDarkBackground`(sRGB 상대 휘도 < 0.5 — 프리셋 실측: maru·gruvbox-dark·dracula 다크, solarized-light·
+one-light 라이트, 경계 #808080 라이트·#7f7f7f 다크). **통지의 출처는 `setDefaultColors`** 다 — 그 함수는 이미 (1) 활성 surface 의 프레임
+빌드가 매 tick, (2) reload·follow-system 전환이 `reapplyConfigPalette` → `set_default_colors` 명령으로 **모든 Term**(원격은 host wire) 에
+부른다. 등급이 바뀌었고 구독 중일 때만 만든다 — 같은 색 재주입·첫 주입은 조용. RIS 가 모드를 끈다(`resetInputModes`). handoff codec
+tag 100~102(optional — 구 host 호환) + inventory. 픽스처 `MARU_FORCE_SYS_APPEARANCE_LATER=<light|dark>@<ms>`.
+
+**판정자**: 코어 3(구독·등급 전환·재주입·해지·DECRQM / `?996n` 주입 전·경계 / RIS) + 배선 1(`test-terminal-gate` «터미널 2031»:
+`theme.follow-system` 으로 라이트→다크→(같은 값)→라이트 — 통지 1·1·2, 응답 버퍼는 리더가 비움). **자식 에코로는 못 본다** — `controlled_smoke`
+자식이 `printf '%s'` 로 되돌린 ESC 시퀀스를 코어가 명령으로 삼킨다.
+
+**실기 시도와 남은 물음**: 헤드리스(`MARU_SCREENSHOT`) 실행에서 pane 셸이 `CSI 6n`·`?2031$p`·`?996n` 을 보내고 12초 읽었는데 **아무
+바이트도 안 왔고, `MARU_PASTE=hello` 도 자식에 안 닿았다**(dd 1바이트 루프·python select 둘 다 0). 코드상 응답은 리더의 `out_buf` →
+POLLOUT 쓰기라 창 포커스와 무관해야 한다. 이 축의 열린 물음으로 남긴다 — «헤드리스 캡처 실행(호스트 미연결 폴백)에서 PTY 입력이
+자식에 닿는가». CI 스모크·e2e 는 전부 출력만 본다(claude `-p` 도 stdin 을 안 쓴다).
+
+**적대적 3회 (2026-09-22, PR 전)** — 1회차 코어 뮤턴트 9(C1 `changed` 반전 · C2 첫 주입도 통지 · C3 경계 `<=` · C4 996 극성 반전 · C5 RIS 가 안 끔 ·
+C6 DECRQM 0 · C7 휘도 R 만 · C8 구독 무시 · C10 996 무응답) **전부 잡힘** — 이를 위해 판정자 하나를 더했다(구독이 첫 주입보다 앞선 경우·
+해지 중 전환의 비소급·alt 화면 무관·순수 초록/빨강 채널 가중치)와 전용 step `test-color-scheme-notify`(변이 한 개에 전체 test 6 분을 안 쓴다).
+2회차 배선 뮤턴트 3(W1 `reapplyConfigPalette` 가 `set_default_colors` 안 밈 · W3 카운터 안 올림 · W5 명령 적용 무동작) 잡힘 + `test-macos-only`
+의 handoff 「모든 안정 필드가 non-default 로 한 번은 fixture 에 든다」 판정자가 **tag 100~102 누락을 잡아** fixture 를 더했다(구독 → 라이트
+→ 다크). 3회차 실데이터: 프리셋 16개 전부 이름(light/latte/dawn)과 등급이 맞는다(판정자 «터미널 2031 실데이터»); 구독하지 않은 두 번째
+Term 은 전환을 겪어도 통지 0; 사용자 config 는 지금 `theme.follow-system = false`·`preset = ghostty`(다크) — 켜야 값이 난다.
 
 kitty graphics의 unicode placeholder(`U=1`)는 이제 **파싱해 virtual placement로 등록만 하고**, 실제
 위치는 화면에 찍힌 U+10EEEE 셀이 정한다(렌더러 `placeholderAt`/`appendPlaceholderQuads`).

@@ -4972,7 +4972,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         const session_host_f3c1_sentinel = b.addExecutable(.{
             .name = "maru-session-host-f3c1-sentinel",
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_f3c1_sentinel.zig"),
+                .root_source_file = b.path("tests/session_host_completed_drain_preparation_sentinel.zig"),
                 .target = target,
                 .optimize = optimize,
                 .link_libc = true,
@@ -5087,7 +5087,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         const session_host_f3c2_sentinel = b.addExecutable(.{
             .name = "maru-session-host-f3c2-sentinel",
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_f3c2_sentinel.zig"),
+                .root_source_file = b.path("tests/session_host_semantic_take_sentinel.zig"),
                 .target = target,
                 .optimize = optimize,
                 .link_libc = true,
@@ -5128,7 +5128,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         const session_host_f3d_sentinel = b.addExecutable(.{
             .name = "maru-session-host-f3d-sentinel",
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_f3d_sentinel.zig"),
+                .root_source_file = b.path("tests/session_host_whole_turn_orchestration_sentinel.zig"),
                 .target = target,
                 .optimize = optimize,
             }),
@@ -5177,7 +5177,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         const session_host_f3e_sentinel = b.addExecutable(.{
             .name = "maru-session-host-f3e-sentinel",
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_f3e_sentinel.zig"),
+                .root_source_file = b.path("tests/session_host_hostile_revoke_transport_sentinel.zig"),
                 .target = target,
                 .optimize = optimize,
             }),
@@ -5802,7 +5802,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         const session_host_f3c0_sentinel = b.addExecutable(.{
             .name = "maru-session-host-f3c0-sentinel",
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_f3c0_sentinel.zig"),
+                .root_source_file = b.path("tests/session_host_typed_control_admission_sentinel.zig"),
                 .target = target,
                 .optimize = optimize,
                 .link_libc = true,
@@ -5827,7 +5827,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         const session_host_f3c0_codec_sentinel = b.addExecutable(.{
             .name = "maru-session-host-f3c0-codec-sentinel",
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_f3c0_codec_sentinel.zig"),
+                .root_source_file = b.path("tests/session_host_control_response_codec_sentinel.zig"),
                 .target = target,
                 .optimize = optimize,
                 .imports = &.{.{
@@ -5852,7 +5852,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         const session_host_f3c0_remote_sentinel = b.addExecutable(.{
             .name = "maru-session-host-f3c0-remote-sentinel",
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_f3c0_remote_sentinel.zig"),
+                .root_source_file = b.path("tests/session_host_remote_runtime_typed_controls_sentinel.zig"),
                 .target = target,
                 .optimize = optimize,
                 .link_libc = true,

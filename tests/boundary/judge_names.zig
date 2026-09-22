@@ -114,20 +114,13 @@ const slice_named = [_][]const u8{
     "tests/session_host_e3a_boundary.zig",
     "tests/session_host_e3b_boundary.zig",
     "tests/session_host_e3c_boundary.zig",
-    "tests/session_host_f3c0_codec_sentinel.zig",
-    "tests/session_host_f3c0_remote_sentinel.zig",
-    "tests/session_host_f3c0_sentinel.zig",
-    "tests/session_host_f3c1_sentinel.zig",
-    "tests/session_host_f3c2_sentinel.zig",
-    "tests/session_host_f3d_sentinel.zig",
-    "tests/session_host_f3e_sentinel.zig",
     "tests/session_host_p4_r3_screen_inbox_boundary.zig",
     "tests/session_host_s11_6_narrowed_boundary.zig",
     "tests/support/session_host_cr6d_pixel.zig",
 };
 
 /// 목록 길이. 줄을 지우면 이 수도 함께 줄여야 한다.
-const expected_entries: usize = 99;
+const expected_entries: usize = 92;
 
 /// 파일명 한 토막이 슬라이스 ID 인가 — **숫자와 글자가 섞였고 주제어가 아니면** 그렇다.
 /// `v1`·`v2` 는 픽스처의 버전 표시라 뺀다.

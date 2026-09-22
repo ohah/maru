@@ -1,4 +1,12 @@
-//! Non-test-runner sentinel for the F3c2 typed semantic take gate.
+//! **의미 take 가 얇은 채로 남는다** — `control_semantic_take` 와 resize·resync·복구 스냅숏
+//! 커밋 목적지가 제자리에 있고, take 래퍼가 네 필드를 그대로 드는지 comptime 으로 본다.
+//! 그리고 그 행동을 재는 테스트들이 실재하는지 이름으로 확인한다.
+//!
+//! **왜 실행 파일인가**: 컴파일 타임 필터가 걸린 Zig 테스트는 «0 개를 고르고도» 정상
+//! 종료한다. 그래서 필터 게이트는 비어 있어도 초록이다. 이 실행 파일이 그 게이트를
+//! 비지 않게 붙들고, 타입 모양이 사라지면 컴파일에서 죽는다.
+//!
+//! 계획 문서의 단계 라벨로는 **F3c2**.
 
 const std = @import("std");
 const pump = @import("client_external_pump");

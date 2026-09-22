@@ -1391,6 +1391,16 @@ P5 «없다» 에 expire 안 함 · P6 expire 가 «밀림» 자취로 · P8 7�
 `sweepStale` 의 `std.Io.Dir.openDirAbsolute` 가 상대경로에 **assert 로 abort** → base 가 절대경로가 아니면 영속을 끈다
 (`sessionDirAlloc` null·`sweepStale` 0, 판정자 추가). 로컬 게이트는 전부 절대 HOME 이라 못 봤다.
 
+**적대적 3회 더 (2026-09-22, 사용자 지시)** — 4회차(환경·경로): 경로에 따옴표·**끝 백슬래시**·개행·`=`·공백 왕복, `turn-rings` 자리에
+파일(`error.NotDir` 로 끝나고 안 죽음), 디렉터리 이름과 안의 id 불일치(통째로 삭제), 상대 base — 판정자 추가, 통과. 길이 0 `text` 는 쓸 때
+`empty` 로(되읽으면 `.text ""` 가 되어 `sameAs` 답이 달라진다 — 제품은 안 만들지만 막아 둠). 5회차(순서·상태): 되살린 링 머리와 같은 tree 가
+오면 dedup · 맵이 꽉 찬 채 되살리면 LRU 밀림 + 자취 · 밀린 뒤 디스크에서 다시 되살아남(자취 지워짐) — 판정자 추가, 통과. 6회차 뮤턴트:
+M6c 살아 있는 blob sweep · M6d blob 안 씀 · M6f id 불일치 무시 · M6g 상대 base 가드 제거 · M6h 잔해 안 지움 · M6b turn 뒤 snapshot 허용 ·
+M6i 링이 가리키는 turn 없어도 통과 잡힘; **M6e(`isSafeSessionId` 가 `/` 허용) 1차 생존** — `../evil` 이 앞 글자 `.` 규칙에 걸려 `/` 규칙이
+검증되지 않았다 → `a/../evil`·`a/b` 로 잡음; **M6a(인용 안 escape 따옴표 무시)는 판정자를 segfault 로 죽였다** — 원인은 판정자의
+결함: `adoptSealed` 가 소유권을 가져가는데 `errdefer turn.deinit` 이 남아 실패 경로에서 **이중 해제**(정상 경로에선 안 보인다) →
+지우고, 112 KB `Store` 둘을 스택 대신 힙에 → M6a 가 `FAIL (BadLine)` 로 깨끗이 잡힌다.
+
 ### ~~AT5 — 스냅샷 ref 고정~~ (폐기, 2026-08-23)
 
 **계약 §4.4가 이 단계를 통째로 없앴다.** git tree를 안 만들므로 `git gc`로부터 지킬 객체가 없고,

@@ -28290,6 +28290,25 @@ test "턴 스냅샷 영속 배선(AT7): 쓰고, 재시작한 창이 되살리고
     try std.testing.expectEqualStrings(sid, s2.turn_tree_checks[0].sessionId());
     // 두 번 되살리지 않는다(메모리가 더 새롭다).
     try std.testing.expect(!turn_ring_persist.maybeRestore(s2, sid));
+    // 되살린 링 머리와 같은 tree 가 첫 스냅샷으로 오면 **dedup** 된다(적대적 5회차 — 되살린 뒤 같은 tree 를 또 밀면 «빈 비교 행» 이
+    // 돌아온다). `Ring.push` 의 «같은 tree 연속은 안 넣는다» 가 되살린 항목에도 그대로 선다.
+    s2.turn_rings.findMut(sid).?.push(.{ .tree = "2222222222222222222222222222222222222222", .captured_s = 25 });
+    try std.testing.expectEqual(@as(usize, 2), s2.turn_rings.find(sid).?.len);
+    // 맵이 꽉 찬 채로 되살리면 가장 오래 안 쓴 세션이 밀리고 그 자취가 남는다(`ringFor` 와 같은 규칙).
+    {
+        var k: usize = 0;
+        var kb: [8]u8 = undefined;
+        while (k < maru.session.turn_snapshot.max_sessions) : (k += 1) {
+            _ = s2.turn_rings.ringFor(try std.fmt.bufPrint(&kb, "F{d}", .{k}), "mac1:/r").?;
+        }
+        try std.testing.expect(s2.turn_rings.find(sid) == null); // 되살린 것이 가장 오래돼 밀렸다
+        try std.testing.expect(s2.turn_rings.wasEvicted(sid));
+        // 디스크에 남아 있으니 다시 말하면 되살아난다 — 그리고 «밀림» 자취는 지워지고 F0 이 밀린다.
+        try std.testing.expect(turn_ring_persist.maybeRestore(s2, sid));
+        try std.testing.expect(!s2.turn_rings.wasEvicted(sid));
+        try std.testing.expect(s2.turn_rings.wasEvicted("F0"));
+        try std.testing.expectEqual(@as(usize, 2), s2.turn_rings.find(sid).?.len);
+    }
 
     // **옛 링에 대한 답은 적용하지 않는다**(적대적 3회차 R3b): 확인을 낸 뒤 링이 바뀌었으면(여기서는 새 턴이 쌓임) «없다» 가 와도
     // 접지 않고 지금 링으로 다시 묻는다 — 옛 저장소의 tree 를 새 저장소에 물어 멀쩡한 새 링을 접던 결함.

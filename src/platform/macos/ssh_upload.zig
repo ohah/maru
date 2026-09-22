@@ -474,6 +474,11 @@ pub const rename_script = remote_shell.path_assign ++ "exec \"" ++ watch_install
 /// **삭제 스크립트**(RF6c). `rename_script` 와 같은 자리·같은 규율 — 인자는 위치 인자로 간다.
 pub const delete_script = remote_shell.path_assign ++ "exec \"" ++ watch_install.remote_dir ++ "/" ++ watch_install.remote_binary ++ "\" rm \"$1\" \"$2\" \"$3\" \"$4\"";
 
+/// **쓰기 스크립트**(U3 — 판 15). `create_script` 와 같은 자리·같은 규율이고, 다른 것은 **내용이
+/// stdin 으로 간다는 것**뿐이다 — 그래서 호출자는 `runRemoteCapped`(stdin 을 닫는다)가 아니라
+/// `runRemoteScript`(stdin 바이트를 흘린다)를 쓴다.
+pub const write_script = remote_shell.path_assign ++ "exec \"" ++ watch_install.remote_dir ++ "/" ++ watch_install.remote_binary ++ "\" write \"$1\" \"$2\" \"$3\" \"$4\" \"$5\"";
+
 /// **만들기 스크립트**(RF6d). 같은 자리·같은 규율.
 pub const create_script = remote_shell.path_assign ++ "exec \"" ++ watch_install.remote_dir ++ "/" ++ watch_install.remote_binary ++ "\" mk \"$1\" \"$2\" \"$3\" \"$4\" \"$5\"";
 

@@ -1387,6 +1387,9 @@ P5 «없다» 에 expire 안 함 · P6 expire 가 «밀림» 자취로 · P8 7�
 낼 때의 링 머리를 들고 답이 왔을 때 비교, 다르면 지금 링으로 다시 묻는다(판정자 보강). R3c `applyTurnSummary` 뒤 `persist` 제거 1차 생존
 (판정자가 `persist` 를 직접 불렀다) → 요약 결과를 그 함수로 흘려 잡음. R3d 창 열 때 미리 안 되살림 · R3e 손상 시 디렉터리 안 지움 잡힘.
 `check-boundaries` 가 잡은 것: 순수 판정자의 **test 블록 밖 helper** 에 한국어 리터럴(원장 규율) → ASCII 로.
+**CI 가 잡은 것**: keep-alive 스모크(`macos-session-host-c4-quit-cancel-smoke`)가 `HOME=zig-out/…`(상대경로)로 앱을 띄우는데
+`sweepStale` 의 `std.Io.Dir.openDirAbsolute` 가 상대경로에 **assert 로 abort** → base 가 절대경로가 아니면 영속을 끈다
+(`sessionDirAlloc` null·`sweepStale` 0, 판정자 추가). 로컬 게이트는 전부 절대 HOME 이라 못 봤다.
 
 ### ~~AT5 — 스냅샷 ref 고정~~ (폐기, 2026-08-23)
 

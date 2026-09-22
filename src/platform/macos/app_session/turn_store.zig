@@ -31,8 +31,12 @@ pub fn isSafeSessionId(id: []const u8) bool {
     return true;
 }
 
-/// `<base>/turn-rings/<session-id>` — null 이면 id 가 안전하지 않다.
+/// `<base>/turn-rings/<session-id>` — null 이면 id 가 안전하지 않거나 base 가 절대경로가 아니다.
+///
+/// **base 는 절대경로여야 한다.** `std.Io.Dir.openDirAbsolute`·`renameAbsolute` 가 상대경로에 **assert 로 죽는다** — CI 의
+/// keep-alive 스모크가 `HOME` 을 상대경로로 주어 `sweepStale` 이 앱을 abort 시켰다(2026-09-22). 그런 환경에서는 영속을 그냥 끈다.
 pub fn sessionDirAlloc(a: std.mem.Allocator, base: []const u8, session_id: []const u8) ?[]u8 {
+    if (!std.fs.path.isAbsolute(base)) return null;
     if (!isSafeSessionId(session_id)) return null;
     return std.fmt.allocPrint(a, "{s}/{s}/{s}", .{ std.mem.trimEnd(u8, base, "/"), dir_rel, session_id }) catch null;
 }
@@ -257,6 +261,7 @@ pub fn restore(
 /// 시작 때 한 번 — `ring.v1` 이 `stale_after_s` 넘게 손 안 탄 세션 디렉터리를 지운다(계약 §6.4 ⑵). `now_s` 는 벽시계 초.
 /// 지운 수를 돌려준다(진단용).
 pub fn sweepStale(io: std.Io, base: []const u8, now_s: i64) usize {
+    if (!std.fs.path.isAbsolute(base)) return 0; // `sessionDirAlloc` 과 같은 이유 — 상대경로는 assert 로 죽는다
     var dbuf: [std.fs.max_path_bytes]u8 = undefined;
     const rings = std.fmt.bufPrint(&dbuf, "{s}/{s}", .{ std.mem.trimEnd(u8, base, "/"), dir_rel }) catch return 0;
     var dir = std.Io.Dir.openDirAbsolute(io, rings, .{ .iterate = true }) catch return 0;
@@ -378,7 +383,9 @@ test "턴 스냅샷 영속(AT7): 손상(잘린 manifest·바뀐 blob)은 세션 
     try testing.expect(load(io, a, base, "sess") == null);
     try testing.expect(!fileExists(io, mpath));
 
-    // 안전하지 않은 id 는 아예 안 만든다.
+    // 안전하지 않은 id 는 아예 안 만든다. base 가 상대경로여도(CI 스모크가 HOME 을 그렇게 준다) — 그때는 영속이 꺼진다(abort 대신).
+    try testing.expect(sessionDirAlloc(a, "zig-out/relative-home/.cache/maru", "sess") == null);
+    try testing.expectEqual(@as(usize, 0), sweepStale(io, "zig-out/relative-home/.cache/maru", 0));
     try testing.expect(sessionDirAlloc(a, base, "../evil") == null);
     try testing.expect(sessionDirAlloc(a, base, "a b") == null);
     try testing.expect(sessionDirAlloc(a, base, ".hidden") == null);

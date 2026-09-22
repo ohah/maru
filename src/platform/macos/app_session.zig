@@ -4256,6 +4256,54 @@ test "사용자 동작 실패 줄은 «무엇이·어디서·얼마나» 를 한
 pub const AppSession = struct {
     /// P4 C3b manifest-visible transaction의 성공 꼬리에서만 호출한다. 제품 owner가 아직 arm되지 않은 restore/build
     /// 단계는 의도적으로 no-op이며, overflow는 owner의 sticky integrity failure로 남아 후속 publish를 막는다.
+    /// **되살릴 문서의 신원 하나**(U4d) — 호스트+경로 또는 로컬 경로. 문자열을 **값으로** 든다:
+    /// 예약하는 자리(복원 트리 staging · dock prune)의 소유가 그 프레임에 끝나므로 슬라이스를 들면
+    /// 다음 tick 에 해제된 메모리를 읽는다.
+    pub const PendingRevival = struct {
+        kind: enum { remote, path },
+        dest_buf: [max_revival_field_bytes]u8 = undefined,
+        dest_len: usize = 0,
+        path_buf: [max_revival_field_bytes]u8 = undefined,
+        path_len: usize = 0,
+
+        pub fn doc(self: *const PendingRevival) maru.session.editor.backup.Doc {
+            return switch (self.kind) {
+                .remote => .{ .remote = .{
+                    .dest = self.dest_buf[0..self.dest_len],
+                    .path = self.path_buf[0..self.path_len],
+                } },
+                .path => .{ .path = .{ .path = self.path_buf[0..self.path_len] } },
+            };
+        }
+    };
+
+    /// 예약을 **한 프레임에 하나씩** 소비한다 — 사본이 최대 8 MiB 라 여럿을 한 프레임에 되살리면
+    /// 그 프레임이 통째로 I/O 가 된다(백업 쓰기와 같은 규율).
+    pub fn queueBackupRevival(self: *AppSession, doc: maru.session.editor.backup.Doc) void {
+        if (self.pending_backup_revivals.items.len >= max_pending_revivals) return;
+        var entry: PendingRevival = switch (doc) {
+            .remote => .{ .kind = .remote },
+            .path => .{ .kind = .path },
+            .untitled => return, // 번호로 되살리는 갈래는 U4c 다
+        };
+        switch (doc) {
+            .remote => |r| {
+                if (r.dest.len > entry.dest_buf.len or r.path.len > entry.path_buf.len) return;
+                @memcpy(entry.dest_buf[0..r.dest.len], r.dest);
+                entry.dest_len = r.dest.len;
+                @memcpy(entry.path_buf[0..r.path.len], r.path);
+                entry.path_len = r.path.len;
+            },
+            .path => |p| {
+                if (p.path.len > entry.path_buf.len) return;
+                @memcpy(entry.path_buf[0..p.path.len], p.path);
+                entry.path_len = p.path.len;
+            },
+            .untitled => unreachable,
+        }
+        self.pending_backup_revivals.append(self.allocator, entry) catch {};
+    }
+
     pub fn workspaceChanged(self: *AppSession, kind: maru.app.workspace_checkpoint_product.ChangeKind) void {
         if (!self.workspace_checkpoint_mutations_enabled) return;
         app_runtime.workspace_checkpoint.markChanged(kind) catch {};
@@ -5920,6 +5968,9 @@ pub const AppSession = struct {
     // confirm_accept가 allow_unsafe로 재제출(submitPaste)하고, confirm_cancel/새 모달이 비운다. items.len>0 = 보류 중.
     // pending_close/reset/quit과 배타(한 번에 한 모달 — showConfirmButtons가 열 때 비운다).
     pending_paste_confirm: std.ArrayList(u8) = .empty,
+    /// **되살릴 문서들**(U4d) — 복원 트리 staging·dock prune 이 예약하고 tick 이 하나씩 소비한다.
+    /// 그 자리들에는 아직/이미 pane 이 없어 Term 을 만들 수 없기 때문이다.
+    pending_backup_revivals: std.ArrayList(PendingRevival) = .empty,
     /// 위 payload 를 **어떤 bracketed 모드로 빚었는가**(적대적 15 회차 — 없으면 그 자리에서 다시 읽는다).
     ///
     /// **확인 모달은 창이 사람 시간만큼 넓다.** 모달이 뜬 동안 사용자가 읽고 고르는 몇 초 사이에
@@ -9727,6 +9778,13 @@ pub const AppSession = struct {
             self.executeClose(target);
         }
     }
+
+    /// 되살릴 신원의 문자열 상한(U4d) — 원격 경로도 로컬 경로도 `max_path_bytes` 안이다. 예약을 **값으로**
+    /// 들기 때문에 상한이 필요하고, 넘치면 **예약하지 않는다**(레코드는 남아 다음 기회를 기다린다).
+    const max_revival_field_bytes = std.fs.max_path_bytes;
+    /// 한 창이 한 번에 예약할 수 있는 되살리기 수. 손상된 workspace 가 record 를 잔뜩 실어도 탭이
+    /// 폭발하지 않게 가둔다(L2 는 `max_dock_entries` 로 이미 가두지만 그 값은 256 이다).
+    const max_pending_revivals = 8;
 
     /// 수락된 닫기가 한 번에 지울 백업 이름의 상한. 편집기 문서를 이보다 많이 **동시에 dirty 로
     /// 열어 둔 채 닫는** 일은 없고(도크 entry 상한이 그보다 훨씬 작다), 넘치면 **지우지 않고 남긴다** —
@@ -19891,6 +19949,7 @@ pub const AppSession = struct {
         editor_ops.hover_client.tick(self); // §8.2b: 포인터 정지 → 호버 요청/열기
         editor_ops.references_client.tick(self); // §8.2l: 「지금은 못 답한다」 뒤 되묻기
         editor_backup_ops.tick(self); // §3.10: 편집이 멎고 debounce 가 지났으면 미저장 내용을 백업한다
+        editor_backup_ops.drainRevivals(self); // §3.10(U4d): 신원을 잃은 문서를 이름 없는 문서로 — 프레임당 하나
         self.advancePendingAppQuitShutdown();
         // end-all target이 source-zero와 ready_remove까지 도달해 종료 승인을 게시한 frame은 더 이상
         // remote maintenance나 Term drain을 실행하지 않는다. 같은 frame의 후속 접근은 deinit이 소유할
@@ -23123,6 +23182,7 @@ pub const AppSession = struct {
         self.pane_palette_copies.deinit(self.allocator);
         if (self.url_buffer.len > 0) self.allocator.free(self.url_buffer);
         if (self.file_tree_external_open) |path| self.allocator.free(path);
+        self.pending_backup_revivals.deinit(self.allocator);
         if (self.config_path_buffer) |b| self.allocator.free(b);
         {
             var it = self.pending_pastes.valueIterator();

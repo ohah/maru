@@ -1726,6 +1726,12 @@ pub fn buildWorkspacePane(self: *AppSession, m: maru.session.workspace.Pane) !*P
         }
         pane.active_term = @min(pane.active_term, pane.terms.items.len - 1);
     }
+
+    // **U4d: 저쪽 신원 문서는 여기서 «예약»만 한다.** 되살리면 그것은 이름 없는 문서이고, 그 생성은
+    // **활성 pane** 에 붙는 일이라(`openUntitledInActivePane`) 아직 트리가 publish 되지 않은 이 시점에
+    // 할 수 없다. 그래서 신원을 세션에 적어 두고 **다음 tick 이 하나씩** 되살린다(백업 쓰기와 같은
+    // 「프레임당 하나」 규율 — 사본이 최대 8 MiB 다).
+    for (m.remote_doc_terms) |rt| self.queueBackupRevival(.{ .remote = .{ .dest = rt.dest, .path = rt.path } });
     return pane;
 }
 

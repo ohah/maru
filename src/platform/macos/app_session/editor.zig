@@ -39642,3 +39642,138 @@ test "U4c-8 새 이름 없는 문서는 checkpoint 를 «persisted_surface 로»
         app_session_mod.app_runtime.workspace_checkpoint.last_change_kind.?,
     );
 }
+
+// ── U4d: 신원을 잃은 문서를 이름 없는 문서로 ──────────────────────────────────
+
+test "U4d-3 저쪽에 저장한 문서는 workspace 에 «신원」으로 실린다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+
+    // 저쪽 신원 문서를 흉내 낸다(U3 의 채택 결과와 같은 상태 — 이름은 없고 원격 신원이 있다).
+    const t = try openUntitledInActivePane(fx.session);
+    t.rt.editor_untitled = null;
+    t.rt.editor_remote = .{
+        .dest = try allocator.dupe(u8, "me@host"),
+        .path = try allocator.dupe(u8, "/srv/doc.md"),
+    };
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const wtab = try tab_ops.captureWorkspaceTab(fx.session, arena.allocator(), tab_ops.activeTab(fx.session));
+    const wp = wtab.panes[0];
+    // **이름 없는 문서 record 가 아니라 원격 신원 record 다** — 번호가 없으므로.
+    try testing.expectEqual(@as(usize, 0), wp.untitled_terms.len);
+    try testing.expectEqual(@as(usize, 1), wp.remote_doc_terms.len);
+    try testing.expectEqualStrings("me@host", wp.remote_doc_terms[0].dest);
+    try testing.expectEqualStrings("/srv/doc.md", wp.remote_doc_terms[0].path);
+}
+
+test "U4d-4 저쪽 신원 문서는 새 이름 없는 문서로 되살아난다 — 알림과 함께, 프레임당 하나" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try pinBackupDir(&root_buf, &dir);
+    defer app_session_mod.editor_backup_ops.setDirForTest(null);
+
+    const lost: backup_rules.Doc = .{ .remote = .{ .dest = "me@host", .path = "/srv/doc.md" } };
+    const other: backup_rules.Doc = .{ .remote = .{ .dest = "me@host", .path = "/srv/two.md" } };
+    try plantBackup(allocator, root, lost, "remote work\n");
+    try plantBackup(allocator, root, other, "second one\n");
+
+    // 복원이 예약한 상태를 흉내 낸다(그 자리에는 pane 이 없어 Term 을 못 만든다).
+    fx.session.queueBackupRevival(lost);
+    fx.session.queueBackupRevival(other);
+    const pane = pane_ops.activePane(fx.session);
+    const before = pane.terms.items.len;
+
+    // **한 프레임에 하나** — 사본이 최대 8 MiB 라 여럿을 한 번에 되살리면 그 프레임이 통째로 I/O 다.
+    app_session_mod.editor_backup_ops.drainRevivals(fx.session);
+    try testing.expectEqual(before + 1, pane.terms.items.len);
+    const first = pane.terms.items[pane.terms.items.len - 1];
+    try testing.expectEqualStrings("remote work\n", first.rt.editor_doc.?.file.content);
+    // **새 이름 없는 문서다**: 번호가 있고 원격 신원은 없다(그 신원을 다시 세울 수 없다).
+    try testing.expect(first.rt.editor_untitled != null);
+    try testing.expect(first.rt.editor_remote == null);
+    try testing.expect(isDirty(first));
+    // **알린다** — 조용하면 「왜 이 탭이 생겼지」가 된다.
+    try testing.expect(fx.session.chrome_host.notice.open);
+    try testing.expectEqualStrings(maru.i18n.t(.editor_backup_revived), fx.session.chrome_host.notice.message);
+    // **옛 레코드는 소비된다** — 안 지우면 매 실행마다 또 되살아난다.
+    try testing.expect(!backupExists(root, lost));
+    try testing.expect(backupExists(root, other)); // 둘째는 아직 예약에 남아 있다
+
+    app_session_mod.editor_backup_ops.drainRevivals(fx.session);
+    try testing.expectEqual(before + 2, pane.terms.items.len);
+    try testing.expect(!backupExists(root, other));
+    // 되돌리기로 **빈 문서**로 갈 수 있다(한 편집으로 넣었으므로).
+    const second = pane.terms.items[pane.terms.items.len - 1];
+    try testing.expect(undoEdit(fx.session, second));
+    try testing.expectEqualStrings("", second.rt.editor_doc.?.file.content);
+}
+
+test "U4d-5 원본이 사라진 경로 문서도 같은 규칙으로 되살아난다 — 그 자리는 dock prune 이다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try pinBackupDir(&root_buf, &dir);
+    defer app_session_mod.editor_backup_ops.setDirForTest(null);
+
+    // 지난 실행이 그 경로의 미저장 편집을 남겼고, 그 사이 **파일이 지워졌다**.
+    var gone_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const gone = try std.fmt.bufPrint(&gone_buf, "{s}/deleted.txt", .{root});
+    const lost: backup_rules.Doc = .{ .path = .{ .path = gone, .disk_hash = 0 } };
+    try plantBackup(allocator, root, lost, "was in a file\n");
+
+    // dock prune 이 그 entry 를 버리는 자리를 제품 경로로 태운다.
+    var ids: maru.session.dock_panel.EntryIdAllocator = .{};
+    var panel = try maru.session.dock_panel.DockPanel.init(allocator, &ids);
+    defer panel.deinit();
+    try panel.restored.append(allocator, .{
+        .id = try ids.next(),
+        .path = try allocator.dupe(u8, gone),
+        .kind = .text,
+        .mode = .read,
+    });
+    const dropped = file_panel_ops.pruneInvalidRestoredFilePanelEntries(fx.session, &panel);
+    try testing.expectEqual(@as(usize, 1), dropped); // 파일이 없으니 버린다
+    try testing.expectEqual(@as(usize, 1), fx.session.pending_backup_revivals.items.len); // 그리고 예약한다
+
+    const pane = pane_ops.activePane(fx.session);
+    const before = pane.terms.items.len;
+    app_session_mod.editor_backup_ops.drainRevivals(fx.session);
+    try testing.expectEqual(before + 1, pane.terms.items.len);
+    const revived = pane.terms.items[pane.terms.items.len - 1];
+    try testing.expectEqualStrings("was in a file\n", revived.rt.editor_doc.?.file.content);
+    try testing.expect(revived.rt.editor_untitled != null);
+    try testing.expect(revived.rt.editor_path == null); // 그 경로로 다시 쓰지 않는다
+    try testing.expect(!backupExists(root, lost));
+}
+
+test "U4d-6 레코드가 없으면 아무것도 만들지 않는다 — 빈 탭을 만들 이유가 없다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    _ = try pinBackupDir(&root_buf, &dir);
+    defer app_session_mod.editor_backup_ops.setDirForTest(null);
+
+    const pane = pane_ops.activePane(fx.session);
+    const before = pane.terms.items.len;
+    fx.session.queueBackupRevival(.{ .remote = .{ .dest = "me@host", .path = "/srv/none.md" } });
+    app_session_mod.editor_backup_ops.drainRevivals(fx.session);
+    try testing.expectEqual(before, pane.terms.items.len);
+    try testing.expect(!fx.session.chrome_host.notice.open); // 되살린 것이 없으면 말할 것도 없다
+}

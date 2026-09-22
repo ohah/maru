@@ -12953,6 +12953,10 @@ test "미저장 백업: 종료가 굳히고 수락된 닫기가 지운다 — cl
     defer allocator.free(backup_rules_src);
     const host = try readZigFileZ(allocator, "src/platform/macos/MaruAppHost.swift");
     defer allocator.free(host);
+    const pane_src = try readZigFileZ(allocator, "src/platform/macos/app_session/pane.zig");
+    defer allocator.free(pane_src);
+    const panel_src = try readZigFileZ(allocator, "src/platform/macos/app_session/file_panel.zig");
+    defer allocator.free(panel_src);
     const abi = try readZigFileZ(allocator, "src/platform/macos/app_host_abi.zig");
     defer allocator.free(abi);
 
@@ -13039,9 +13043,24 @@ test "미저장 백업: 종료가 굳히고 수락된 닫기가 지운다 — cl
     try std.testing.expectEqual(@as(usize, 1), countOfB(backup_mod, "showNoticeKey(.editor_backup_restored)"));
     // 주석에는 `showConfirmButtons` 가 **근거로** 나오므로 「부르는 모양」만 센다.
     try std.testing.expectEqual(@as(usize, 0), countOfB(backup_mod, "self.showConfirm"));
-    // ⑾ **신원을 다시 확인한다** — 이름이 해시라 충돌하면 남의 문서를 조용히 되살린다.
+    // ⒀ **되살리기(U4d)는 입구 둘·소비 하나다.** 예약하는 자리는 복원 트리와 dock prune 이고(그 자리들에는
+    //    pane 이 아직/이미 없다), 소비는 tick 에서 **프레임당 하나**다. 소비가 예약 자리에 붙으면 pane 이
+    //    없어 Term 을 못 만들고, 여럿을 한 프레임에 되살리면 그 프레임이 통째로 I/O 다(사본 최대 8 MiB).
+    try std.testing.expectEqual(@as(usize, 1), countOfB(pane_src, "self.queueBackupRevival(.{ .remote = "));
+    try std.testing.expectEqual(@as(usize, 1), countOfB(panel_src, "self.queueBackupRevival(.{ .path = "));
+    try std.testing.expectEqual(@as(usize, 1), countOfB(session, "editor_backup_ops.drainRevivals(self)"));
+    try std.testing.expectEqual(@as(usize, 1), countOfB(backup_mod, "pub fn drainRevivals("));
+    try std.testing.expectEqual(@as(usize, 1), countOfB(backup_mod, "orderedRemove(0)"));
+    // **되살린 문서는 새 이름 없는 문서다** — 옛 신원을 다시 세우지 않는다(그 신원은 지금 못 세운다).
+    try std.testing.expectEqual(@as(usize, 1), countOfB(backup_mod, "editor_ops.openUntitledInActivePane(self)"));
+    try std.testing.expectEqual(@as(usize, 0), countOfB(backup_mod, "editor_remote = "));
+    // **알리고 소비한다** — 조용히 되살리면 「왜 이 탭이 생겼지」가 되고, 안 지우면 매 실행마다 또 생긴다.
+    try std.testing.expectEqual(@as(usize, 1), countOfB(backup_mod, "showNoticeKey(.editor_backup_revived)"));
+
+    // ⑾ **신원을 다시 확인한다 — 레코드를 읽는 «두 자리 모두»**(복원과 되살리기). 이름이 해시라 충돌하면
+    //    남의 문서를 조용히 되살린다. 한쪽만 확인하면 그 한쪽이 그 사고의 입구로 남는다.
     try std.testing.expectEqual(
-        @as(usize, 1),
+        @as(usize, 2),
         countOfB(backup_mod, "if (!std.mem.eql(u8, p.path, w.path)) return"),
     );
     // ⑿ **레코드를 소비하는 진입점은 둘이고 갈래가 갈려 있다**(U4c): 경로 문서는 여는 자리에서,

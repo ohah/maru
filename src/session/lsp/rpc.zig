@@ -29,6 +29,7 @@ pub const RequestId = union(enum) {
     declaration: u32,
     inlay_hint: u32,
     document_symbol: u32,
+    document_highlight: u32,
 };
 /// 요청 id 는 **i32 안**이어야 한다(2026-09-20 실측): rust-analyzer·ruff 가 쓰는 Rust `lsp-server` 크레이트는 정수 id 를 i32 로만 읽고,
 /// 넘치면 그 메시지를 **알림으로 오인해 버린다**(`6_000_000_001` 짜리 completion 이 stderr 에 `unhandled notification` 으로만 남고 응답이
@@ -69,8 +70,10 @@ pub const declaration_id_base: u32 = 15 * id_span;
 pub const inlay_hint_id_base: u32 = 16 * id_span;
 /// 심볼 2층(§8.2o).
 pub const document_symbol_id_base: u32 = 17 * id_span;
+/// 같은 낱말 강조(§8.2p).
+pub const document_highlight_id_base: u32 = 18 * id_span;
 comptime {
-    std.debug.assert(@as(u64, document_symbol_id_base) + id_span - 1 <= std.math.maxInt(i32));
+    std.debug.assert(@as(u64, document_highlight_id_base) + id_span - 1 <= std.math.maxInt(i32));
 }
 /// 종류별 seq 의 다음 값 — 칸 안에서 돈다(0 은 안 쓴다: 처음 보내는 요청이 `base + 1`).
 pub fn nextSeq(seq: u32) u32 {
@@ -81,7 +84,7 @@ pub fn nextSeq(seq: u32) u32 {
 fn requestIdOf(id_num: i64) ?RequestId {
     if (id_num == initialize_id) return .initialize;
     if (id_num == shutdown_id) return .shutdown;
-    if (id_num < hover_id_base or id_num >= @as(i64, document_symbol_id_base) + id_span) return null;
+    if (id_num < hover_id_base or id_num >= @as(i64, document_highlight_id_base) + id_span) return null;
     const slot: u32 = @intCast(@divTrunc(id_num, id_span));
     const seq: u32 = @intCast(@mod(id_num, id_span));
     return switch (slot) {
@@ -102,6 +105,7 @@ fn requestIdOf(id_num: i64) ?RequestId {
         15 => .{ .declaration = seq },
         16 => .{ .inlay_hint = seq },
         17 => .{ .document_symbol = seq },
+        18 => .{ .document_highlight = seq },
         else => null,
     };
 }
@@ -157,6 +161,7 @@ pub fn initializeRequest(allocator: std.mem.Allocator, root_uri: []const u8, pid
                     .references = .{ .dynamicRegistration = false }, // 참조 피커(§8.2l)
                     .inlayHint = .{ .dynamicRegistration = false }, // 인레이 힌트(§8.2n) — resolve 는 안 한다
                     // 심볼 2층(§8.2o) — 계층 꼴을 받는다(세 서버 모두 그것을 낸다). `symbolKind.valueSet` 은 「이 정수들을 안다」는 선언이다.
+                    .documentHighlight = .{ .dynamicRegistration = false }, // 같은 낱말 강조(§8.2p) — `kind` 는 안 쓴다
                     .documentSymbol = .{
                         .dynamicRegistration = false,
                         .hierarchicalDocumentSymbolSupport = true,
@@ -651,6 +656,16 @@ pub fn inlayHintRequest(allocator: std.mem.Allocator, seq: u32, uri: []const u8,
         .id = inlay_hint_id_base + seq,
         .method = "textDocument/inlayHint",
         .params = .{ .textDocument = .{ .uri = uri }, .range = range },
+    }, .{});
+}
+
+/// `textDocument/documentHighlight`(§8.2p) — caret 자리. 응답의 `kind` 는 쓰지 않는다.
+pub fn documentHighlightRequest(allocator: std.mem.Allocator, seq: u32, uri: []const u8, line: u32, character: u32) error{OutOfMemory}![]u8 {
+    return std.json.Stringify.valueAlloc(allocator, .{
+        .jsonrpc = "2.0",
+        .id = document_highlight_id_base + seq,
+        .method = "textDocument/documentHighlight",
+        .params = .{ .textDocument = .{ .uri = uri }, .position = .{ .line = line, .character = character } },
     }, .{});
 }
 
@@ -1465,7 +1480,7 @@ test "LSJ15 semanticTokens — initialize capability(range·full·표준 종류)
     defer p1.deinit();
     try testing.expect(classify(p1.value).response.id == .semantic_tokens and classify(p1.value).response.id.semantic_tokens == 3);
     try testing.expect(@as(u64, semantic_tokens_id_base) + id_span - 1 <= std.math.maxInt(i32));
-    var p2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":1800000000,\"result\":null}"); // 칸 밖(마지막 칸 17e8 의 다음)
+    var p2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":1900000000,\"result\":null}"); // 칸 밖(마지막 칸 18e8 의 다음)
     defer p2.deinit();
     try testing.expect(classify(p2.value) == .ignore);
 }
@@ -1485,7 +1500,7 @@ test "LSJ16 foldingRange — initialize capability(lineFoldingOnly·종류 셋)�
     var p2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":1199999999,\"result\":null}"); // 칸 끝
     defer p2.deinit();
     try testing.expect(classify(p2.value).response.id == .folding_range and classify(p2.value).response.id.folding_range == 99999999);
-    var p3 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":1800000000,\"result\":null}"); // 칸 밖(마지막 칸 17e8 의 다음)
+    var p3 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":1900000000,\"result\":null}"); // 칸 밖(마지막 칸 18e8 의 다음)
     defer p3.deinit();
     try testing.expect(classify(p3.value) == .ignore);
 }
@@ -1533,7 +1548,7 @@ test "LSJ18 references — capability·요청(includeDeclaration)·id 칸(12e8)�
     defer p1.deinit();
     try testing.expect(classify(p1.value).response.id == .references and classify(p1.value).response.id.references == 9);
     try testing.expect(@as(u64, references_id_base) + id_span - 1 <= std.math.maxInt(i32));
-    var p2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":1800000000,\"result\":null}"); // 칸 밖
+    var p2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":1900000000,\"result\":null}"); // 칸 밖
     defer p2.deinit();
     try testing.expect(classify(p2.value) == .ignore);
     // 결과 세 모양: Location[] · LocationLink[](selection range 우선) · 단일 Location; 모양 아닌 항목은 뺀다; null 은 빈 목록.

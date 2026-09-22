@@ -26,7 +26,8 @@ const std = @import("std");
 /// **ASCII 밖을 통째로 낱말로 치는 것은 근사다.** 한글 `안녕하세요`를 더블클릭하면 전체가 잡히는데,
 /// 형태소 경계를 아는 것이 옳지만 그것은 ICU 급 사전이 필요하다. CJK를 구분자로 치면 한 글자씩만
 /// 잡혀 훨씬 나쁘다 — 그래서 이쪽으로 근사한다(VSCode도 CJK를 한 덩어리로 잡는다).
-fn isWordByte(b: u8) bool {
+/// 낱말 글자인가(§5.1 — 낱말 경계의 단일 출처). 같은 낱말 강조(§8.2p)가 「caret 아래가 낱말인가」를 이 규칙으로 묻는다.
+pub fn isWordByte(b: u8) bool {
     return (b >= 'a' and b <= 'z') or (b >= 'A' and b <= 'Z') or
         (b >= '0' and b <= '9') or b == '_' or b == '$' or b >= 0x80;
 }

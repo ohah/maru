@@ -1200,6 +1200,29 @@ tick 이 아예 안 돈다(프레임 6개로 끝났다) — 2층 캡처는 `MARU
 편집하면 1층으로 돌아갔다가 조용한 뒤 다시 묻는다; 낡은 version·오류·provider 없음·빈 응답·평탄 꼴·문서 둘·1층이 비는 문서). 가짜 서버 표식은 `DSYNONE`(빈 목록)·`DSYFLAT`(평탄 꼴)·`DSYSTALL`(무응답)·`DSYERR`(`-32801`)·`DSYBAD`(이름이 문서와 다른 항목),
 `MARU_FAKE_LSP_NOSYMCAP=1`(provider 없음).
 
+### 8.2p LSP 2단 ⑮ — 같은 낱말 강조 `documentHighlight` (2026-09-23, 계획 공격 셋 뒤의 결정)
+
+**caret 아래 심볼이 이 문서 어디에 또 있나**를 서버에 묻고, 그 자리를 §5 스팬 층의 **또 하나의 마크 소스**로 깔아 준다. 검색(§5.1)과 다른 축이다 —
+검색은 **글자**를 찾고 이것은 **심볼**을 찾는다(주석·문자열 속 같은 글자는 안 걸린다).
+
+**실측(2026-09-23, 프로브).** 셋 다 `documentHighlightProvider: true`. rust-analyzer 247 ms(`kind` 가 **없는** 항목과 `2`(Read) 가 섞여 온다) ·
+tsgo 32 ms(`2`/`3` 로 읽기·쓰기를 가른다) · clangd 1 ms(전부 `1`(Text)). 즉 **`kind` 는 서버마다 있고 없고 다르다**.
+
+| 축 | 결정 | 근거 |
+| --- | --- | --- |
+| **capability** | `textDocument.documentHighlight{dynamicRegistration: false}`. 서버의 `documentHighlightProvider`(bool·객체)가 없으면 이 축은 없다 | LSP 3.17 |
+| **언제 묻나** | caret 아래가 **낱말일 때만**(`selection.wordRangeAt` — §5.1 이 「낱말 경계의 소유자」로 못 박은 그 함수, 새 규칙을 만들지 않는다). **선택이 있으면 안 묻는다**(그 칸은 선택 강조가 이긴다). caret 이 멈추고 150 ms, 편집 뒤에는 조용해진 뒤. 같은 `(version, 낱말 범위)` 면 다시 안 묻는다 | 계획 공격 ① |
+| **요청** | `textDocument/documentHighlight{textDocument, position}`, id `18e8+seq`. 한 번에 하나 | LSP 3.17 |
+| **응답** | `DocumentHighlight[]` → 문서 byte 범위 목록(정렬·중복 제거, 상한 500). **`kind` 는 안 쓴다** — 서버마다 없거나 다르고, 읽기·쓰기를 색으로 가르면 없는 서버에서 화면이 갈린다(다음) | 실측 |
+| **대조** | 요청 때의 `editor_lsp_version` **과** 요청 때의 **낱말 범위**가 지금과 같아야 든다 — caret 이 다른 낱말로 간 뒤 온 답은 그 낱말을 강조하는 거짓말이다 | §8.2b 와 같은 규율 |
+| **편집 중** | **버린다**(밀지 않는다) — 심볼 2층(§8.2o)과 같은 이유. 편집 뒤 조용해지면 caret 자리로 다시 묻는다 | §8.2o |
+| **그리기** | `frame.Props.occurrence_marks`(`search_marks` 와 같은 축). 색은 새 역할 `occurrence` 하나이고 테마에서 파생한다(`syntax_theme.occurrenceFromTheme` — diff·진단과 같은 계열). **우선순위: caret > 선택 > 검색 현재 > 검색 > 같은 낱말** — 가장 약하다 | §5.1·§4.1g |
+| **하지 않는 것** | 읽기/쓰기 색 구분(`kind`) · 서버 없을 때의 **낱말 기반 폴백**(검색 ⌘F 가 그 자리다) · 설정으로 끄기 · 미니맵 표시(§6) · 스크롤바 마커(§4.1a — 검색만) | 다음 |
+
+**관측점**: `DHL1~`(순수: 응답 → 범위 목록, 정렬·중복 제거·상한·utf-16·provider) · `DHL4~`(제품 경계: caret 이 낱말에 멈추면 묻고 마크가 서며,
+선택이 있으면 안 묻고, 편집하면 사라졌다가 조용한 뒤 다시; 낡은 version·낡은 낱말·빈 응답·provider 없음). 가짜 서버 표식 `DHLNONE`·`DHLSTALL`·`DHLERR`,
+`MARU_FAKE_LSP_NOHLCAP=1`.
+
 ### 8.3 관측 가능성과 민감정보
 
 editor event는 처음부터 하나의 domain schema를 공유하되 문서 원문을 기본 trace에 넣지 않는다.

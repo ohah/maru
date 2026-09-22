@@ -180,6 +180,9 @@ pub const Props = struct {
     /// **"보이는 줄 축"**이라 부른다. 컴포넌트는 접힘을 모르니 그 이름을 쓸 수 없을 뿐 **같은
     /// 것**이다 — §4.1g가 이 두 이름을 섞어 여러 번 틀린 이력이 있어 여기 적어 둔다.
     search_marks: ?[]const []const Mark = null,
+    /// **같은 낱말 강조**(§5.1a·§8.2p) — `search_marks` 와 같은 축·같은 byte 규칙. 배경 강조 넷 중 **가장 약해서** 선택·검색보다 **먼저**
+    /// 그린다(뒤에 그리는 것이 위에 얹힌다). 단일 편집기만 채운다(비교 뷰는 축이 다르다).
+    occurrence_marks: ?[]const []const Mark = null,
     /// **진단**(§5.4) — 줄마다의 밑줄 조각(`search_marks` 와 같은 축·같은 byte 규칙). 물결(지그재그)로 그린다.
     diag_marks: ?[]const []const diagnostic.Mark = null,
     /// 줄마다 gutter 마커의 severity(그 줄에서 **시작하는** 진단의 최고). `null` 항목은 마커 없음.
@@ -321,6 +324,8 @@ pub const mark_alpha: u8 = 87; // ≈34%
 /// 검색 결과 강조. 색 자체가 검색용(`search_match`)이라 선택처럼 진하게 얹지 않아도 눈에 띄고,
 /// **글자를 읽을 수 있어야** 다음 매치인지 판단할 수 있다 — 그래서 선택(45%)보다 옅다.
 pub const search_alpha: u8 = 92; // ≈36%
+/// 같은 낱말 강조의 알파(§5.1a) — **검색보다 흐리다**. 가장 약한 배경 강조라는 계약을 알파로도 지킨다(색은 `occurrence` 역할).
+pub const occurrence_alpha: u8 = 66; // ≈26%
 /// 현재 매치는 **더 진하다**. 같은 세기면 여럿 중 어느 것이 현재인지 색상만으로 구분해야 하는데,
 /// 테마에 따라 두 색이 가까울 수 있다(사용자 테마는 우리가 못 고른다).
 pub const search_current_alpha: u8 = 153; // ≈60%
@@ -740,7 +745,9 @@ pub fn build(props: Props, scratch: Scratch) Written {
     const band_ops = paintBands(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[bg.ops + cw.ops + gw.ops ..], scratch.count_scratch);
     // **선택은 밴드 뒤에 얹는다** — diff 줄 배경 위에 선택이 보여야지 그 반대면 선택한 줄이
     // 어느 것인지 흐려진다. 글자보다도 뒤라 알파로 얹어도 내용이 읽힌다.
-    const sel_ops = paintSelection(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[bg.ops + cw.ops + gw.ops + band_ops ..], scratch.count_scratch);
+    // **같은 낱말 강조가 먼저다**(§5.1a 우선순위 — 가장 약하다). 선택·검색이 그 위에 얹힌다.
+    const occ_ops = paintOccurrences(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[bg.ops + cw.ops + gw.ops + band_ops ..], scratch.count_scratch);
+    const sel_ops = paintSelection(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[bg.ops + cw.ops + gw.ops + band_ops + occ_ops ..], scratch.count_scratch);
     // **검색 결과는 선택 위에 얹는다.** 선택 안에서 검색하는 경우가 있고(§5.1의 "선택 영역 내에서만"이
     // 그 자리다), 그때 매치가 선택에 묻히면 검색이 아무 일도 안 한 것처럼 보인다.
     // **막대 몫을 남겨 둔다.** 검색 강조는 **줄당 개수에 상한이 없는 유일한 층**이고(선택은
@@ -769,7 +776,7 @@ pub fn build(props: Props, scratch: Scratch) Written {
     // **이 예약은 검색 층에만 걸린다.** 앞의 배경·본문·gutter·밴드·선택은 여전히 무예약이라,
     // 그쪽이 먼저 다 먹으면 막대는 그대로 굶는다(기존 상태이고 이 슬라이스가 만든 것이 아니다).
     // 검색만 예약하는 이유는 **줄당 개수에 상한이 없는 층이 그것뿐**이어서다.
-    const find_base = bg.ops + cw.ops + gw.ops + band_ops + sel_ops;
+    const find_base = bg.ops + cw.ops + gw.ops + band_ops + occ_ops + sel_ops;
     const find_room = (scratch.ops.len -| find_base) -| scrollbar_reserve_ops;
     const find_ops = paintSearch(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[find_base..][0..find_room], scratch.count_scratch);
 
@@ -1223,6 +1230,30 @@ fn columnOfOffset(line: []const u8, tab_width: u16, offset: u32, stop_col: u32, 
 /// **현재 매치만 갈라 다른 색으로 그린다.** 갈라 두 배열로 받지 않는 이유는 어긋남이다 — 목록이
 /// 둘이면 한쪽에만 있는 매치(색이 없다)나 양쪽에 있는 매치(두 번 칠해 더 진하다)가 날 수 있고,
 /// 둘 다 "검색이 이상하다"로 보인다. 하나에서 골라내면 그 상태가 표현 불가능하다.
+/// 같은 낱말 강조(§5.1a) — 검색과 같은 걸음이되 **한 색**이고 현재 항목 개념이 없다(caret 이 이미 그 자리를 말한다).
+fn paintOccurrences(props: Props, layout: geometry.Layout, visual: []const visual_map.VisualRow, out: []draw.Op, scratch_cols: []u8) usize {
+    const rows = props.occurrence_marks orelse return 0;
+    var n: usize = 0;
+    for (visual, 0..) |v, i| {
+        if (n >= out.len) break;
+        if (v.kind != .text) continue; // 위젯 행 — 문서 줄이 아니다(S1.5)
+        const idx = v.docIndex(props.first_line);
+        if (idx >= rows.len or idx >= props.lines.len) continue;
+        const marks = rows[idx];
+        if (marks.len == 0) continue;
+        n += paintRowMarks(props, layout, .{
+            .line = props.lines[idx],
+            .inlays = props.line_inlays.at(idx),
+            .row_start_col = v.start_col,
+            .y = props.rect.y + @as(i32, @intCast(i)) * @as(i32, props.cell_h_px),
+            .marks = marks,
+            .role = .occurrence,
+            .alpha = occurrence_alpha,
+        }, out[n..], scratch_cols);
+    }
+    return n;
+}
+
 fn paintSearch(props: Props, layout: geometry.Layout, visual: []const visual_map.VisualRow, out: []draw.Op, scratch_cols: []u8) usize {
     const rows = props.search_marks orelse return 0;
     var n: usize = 0;

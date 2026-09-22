@@ -153,6 +153,8 @@ pub const ColorRole = enum {
     drop_zone,
     search_match,
     search_match_current,
+    /// 같은 낱말 강조(§5.1a·§8.2p) — 배경 강조 넷 중 **가장 약하다**(선택·검색이 그 칸을 이긴다).
+    occurrence,
     selection,
     cursor,
     accent_bar, // U1(C4b 이후): maru accent — **테마-구동**(ThemeColors.accent). 프리셋별 시그니처 색(null이면 브랜드 앰버 폴백). 탭/포커스 언더바·사이드바 활성 좌측 막대·세팅 강조가 소비(U2).
@@ -396,6 +398,9 @@ pub const ThemeColors = struct {
     diagnostic_warning: Rgb = .{ .r = 220, .g = 180, .b = 60 },
     diagnostic_info: Rgb = .{ .r = 90, .g = 150, .b = 230 },
     diagnostic_hint: Rgb = .{ .r = 150, .g = 150, .b = 150 },
+    /// 같은 낱말 강조(§5.1a). 호출자가 `syntax_theme.occurrenceFromTheme(theme)` 를 넘긴다 — 진단·diff 와 같은 파생 계열이고,
+    /// **기본값이 있는 이유**도 같다(테스트·smoke 의 `ThemeColors` 리터럴이 이 값을 몰라도 되게).
+    occurrence: Rgb = .{ .r = 110, .g = 110, .b = 110 },
 };
 
 /// 한 테마 = 토큰 묶음. `Tokens.base(theme)`가 resolved 테마 색에서 15개 ColorRole을 채운다(C0 구현).
@@ -455,6 +460,7 @@ pub const Tokens = struct {
         palette.set(.drop_zone, theme.sidebar_active);
         palette.set(.search_match, theme.search_match);
         palette.set(.search_match_current, theme.search_match_current);
+        palette.set(.occurrence, theme.occurrence);
         palette.set(.selection, theme.selection);
         palette.set(.cursor, theme.cursor);
         palette.set(.accent_bar, theme.accent); // maru accent(테마-구동) — 프리셋별 시그니처 색. config.accent null이면 resolve가 브랜드 앰버(#dda15e)로 폴백. rich가 상속.

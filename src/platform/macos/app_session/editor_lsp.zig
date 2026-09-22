@@ -34,6 +34,7 @@ const editor_fold_lsp = @import("editor_fold_lsp.zig");
 const editor_references = @import("editor_references.zig");
 const editor_inlay = @import("editor_inlay.zig");
 const editor_symbols = @import("editor_symbols.zig");
+const editor_highlight = @import("editor_highlight.zig");
 const editor_code_action = @import("editor_code_action.zig");
 
 pub const Phase = enum {
@@ -128,6 +129,9 @@ pub const Client = struct {
     /// 심볼 2층(§8.2o).
     symbols_seq: u32 = 0,
     symbols_supported: bool = false,
+    /// 같은 낱말 강조(§8.2p).
+    highlight_seq: u32 = 0,
+    highlight_supported: bool = false,
     inlay_supported: bool = false,
 
     fn deinit(self: *Client, allocator: std.mem.Allocator) void {
@@ -195,6 +199,8 @@ pub const State = struct {
     inlay_refreshes: u64 = 0,
     sent_symbols: u64 = 0,
     received_symbols: u64 = 0,
+    sent_highlight: u64 = 0,
+    received_highlight: u64 = 0,
     sent_configs: u64 = 0,
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
@@ -576,6 +582,7 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
                 c.save_caps = lsp.rpc.saveCapsFromResult(r.result); // §8.2k
                 c.inlay_supported = lsp.inlay.supportedFromResult(r.result); // §8.2n
                 c.symbols_supported = lsp.symbols.supportedFromResult(r.result); // §8.2o
+                c.highlight_supported = lsp.highlight.supportedFromResult(r.result); // §8.2p
                 c.phase = .ready;
                 c.restarts = 0;
                 const msg = lsp.rpc.initializedNotification(self.allocator) catch return;
@@ -615,6 +622,10 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
             .inlay_hint => |seq| {
                 self.editor_lsp.received_inlay += 1;
                 if (termWaitingInlay(self, c, seq)) |t| editor_inlay.onResponse(self, t, seq, r.result, r.is_error, c.encoding);
+            },
+            .document_highlight => |seq| {
+                self.editor_lsp.received_highlight += 1;
+                if (termWaitingHighlight(self, c, seq)) |t| editor_highlight.onResponse(self, t, seq, r.result, r.is_error, c.encoding);
             },
             .document_symbol => |seq| {
                 self.editor_lsp.received_symbols += 1;
@@ -1168,6 +1179,37 @@ pub fn requestDocumentSymbols(self: *AppSession, term: *Term) ?u32 {
     if (!send(self, c, msg)) return null;
     self.editor_lsp.sent_symbols += 1;
     return c.symbols_seq;
+}
+
+/// `textDocument/documentHighlight`(§8.2p) — caret 자리. 서버가 없거나 provider 가 없으면 `null`(묻지 않는다).
+pub fn requestDocumentHighlight(self: *AppSession, term: *Term, line: u32, character_byte: u32) ?u32 {
+    const c = readyClientFor(self, term) orelse return null;
+    if (!c.highlight_supported) return null;
+    flushDocument(self, c, term);
+    const d = c.findDoc(term.surfaceId()) orelse return null;
+    const opened = term.rt.editor_doc orelse return null;
+    const ln = opened.file.lines.line(line) orelse return null;
+    const text = opened.file.content[ln.start..ln.contentEnd()];
+    const character = lsp.position.characterOf(text, character_byte, c.encoding);
+    c.highlight_seq = lsp.rpc.nextSeq(c.highlight_seq);
+    const msg = lsp.rpc.documentHighlightRequest(self.allocator, c.highlight_seq, d.uri, line, character) catch return null;
+    defer self.allocator.free(msg);
+    if (!send(self, c, msg)) return null;
+    self.editor_lsp.sent_highlight += 1;
+    return c.highlight_seq;
+}
+
+fn termWaitingHighlight(self: *AppSession, c: *Client, seq: u32) ?*Term {
+    for (c.docs.items) |d| {
+        const loc = term_ops.findTermWhere(self, d.surface_id, struct {
+            fn pred(want: u64, t: *Term) bool {
+                return t.kind == .editor and t.surface.id == want;
+            }
+        }.pred) orelse continue;
+        const t = loc.pane.terms.items[loc.term_index];
+        if (t.rt.editor_highlight.waiting and t.rt.editor_highlight.waiting_seq == seq) return t;
+    }
+    return null;
 }
 
 fn termWaitingSymbols(self: *AppSession, c: *Client, seq: u32) ?*Term {

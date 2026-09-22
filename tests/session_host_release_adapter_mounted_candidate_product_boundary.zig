@@ -1,3 +1,8 @@
+//! **마운트된 candidate 게이트는 호출자가 하나뿐이고, workflow 나 GitHub 에 기대지 않는다** —
+//! 제품 합성이 그 경계를 지키는지 소스로 본다.
+//!
+//! 계획 문서의 단계 라벨로는 **P5d**.
+
 const std = @import("std");
 const product = @import("release_adapter_p5d_candidate_product");
 

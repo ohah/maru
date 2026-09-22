@@ -45,10 +45,18 @@ Maru는 초기에 파일 이동을 최소화한다. 기존 `src/*.zig` 파일은
   목록은 도메인을 만질 때 한 줄씩 빠지고(위 「점진적으로」) 늘지는 않는다. 파일을 옮겼으면 그 줄과
   `expected_entries` 를 함께 줄인다 — 두 자리를 같이 고치게 한 것이 의도다.
 
-  **한 번에 한 주제씩 옮긴다.** 108(최초) → 106(reconnect worker 둘) → **103**(kernel cwd 셋).
-  kernel cwd 는 주제어가 이미 이름에 있고 `k1`·`k2`·`k3` 만 이력이던 자리라, 「무엇을 지키는지」만
-  채우면 됐다 — `…_authority_wire_` · `…_host_sampler_` · `…_product_gate_`.
-  **이름은 내용에서 나온다**: 셋을 열어 각자 무엇을 세는지 읽고 지었다.
+  **한 번에 한 주제씩 옮긴다.** 108(최초) → 106(reconnect worker 둘) → 103(kernel cwd 셋) →
+  **99**(release adapter P5d 넷).
+
+  **이름은 내용에서 나온다** — 그 주제의 파일을 전부 열어 각자 무엇을 세는지 읽고 짓는다.
+  - kernel cwd: 주제어가 이미 이름에 있고 `k1`·`k2`·`k3` 만 이력이라 「무엇을 지키는지」만 채웠다
+    (`…_authority_wire_` · `…_host_sampler_` · `…_product_gate_`).
+  - release adapter: `p5d` 를 떼기만 하면 `…_runner`·`…_workspace` 가 되는데 그 계열엔 이미
+    `…_candidate_baseline_runner` 가 있어 **무엇의 runner 인지**가 안 남는다. 제품 머리말을 읽어
+    P5d 가 「읽기 전용 candidate DMG 안의 CLI 를 CLI/SSH 하네스로 돌린다」임을 확인하고,
+    **테스트가 스스로 쓰는 말**(`mounted candidate`)로 지었다 — `…_cli_harness_runner` ·
+    `…_cli_harness_workspace` · `…_mounted_candidate_gate` · `…_mounted_candidate_product_boundary`.
+    **슬라이스 ID 를 떼는 것만으로 이름이 되지는 않는다.**
 
   **테스트 이름과 계획 문서의 슬라이스 ID 는 건드리지 않는다.** 거기서 그 ID 는 이력이다 —
   `docs/verification-matrix.md` 의 「CR6e-c1~c3c 완료」는 지금 코드 상태가 아니라 그때 무엇을

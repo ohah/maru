@@ -8418,6 +8418,37 @@ pub const AppSession = struct {
     /// base=`${XDG_CACHE_HOME:-$HOME/.cache}/maru`(discovery가 그 아래 `session-host/`를 씀). **allocator=`smp_allocator`**
     /// (앱 전역 자원 — routing/live_registry와 동일, 프로세스 수명이라 창 allocator를 안 씀). 경로 문자열은 transient(arena).
     pub fn ensureRemoteBackend(self: *AppSession) void {
+        self.ensureRemoteBackendImpl(false);
+    }
+
+    /// `ensureRemoteBackend` 와 같되 **retry 게이트를 무시**한다. 원격 spawn 이 `ConnectionClosed` 로 죽은 직후
+    /// 한 번 다시 붙어 보는 자리(`term.zig` createTerm)가 쓴다 — 실패 래치를 세운 직후라 게이트가 30 s 를
+    /// 막는데, 그 30 s 동안 연 Term 이 전부 in-process 로 떨어져 keep-alive 가 조용히 꺼졌다(2026-09-22 실측:
+    /// 복원할 runtime 이 없어 host 가 unattached idle 로 내려간 뒤 연 세션 10개 전부). 실패는 여기서도
+    /// 그대로 기록되고 게이트를 다시 민다.
+    pub fn ensureRemoteBackendNow(self: *AppSession) void {
+        self.ensureRemoteBackendImpl(true);
+    }
+
+    /// 죽은 spawn host 를 pool 에서 치운다. `ensureRemoteBackend` 는 «backend 있음 + spawn host 있음» 을 «이미
+    /// 붙어 있음» 으로 읽고 조기 반환하므로(살아 있는지는 보지 않는다), 이걸 안 하면 재접속·재시작이 **한 번도**
+    /// 시도되지 않는다. runtime 참조가 남아 항목을 못 지우면 spawn 지정만 푼다. 치웠으면 true.
+    pub fn evictDeadSpawnHost() bool {
+        if (!is_macos) return false;
+        const pool = if (app_remote_host_pool) |*p| p else return false;
+        const dead = pool.spawnHostId() orelse return false;
+        if (pool.remove(dead)) |_| {
+            return true;
+        } else |err| switch (err) {
+            error.HostInUse => {
+                pool.clearSpawnHost();
+                return true;
+            },
+            else => return false,
+        }
+    }
+
+    fn ensureRemoteBackendImpl(self: *AppSession, force_retry: bool) void {
         // 원격 host는 macOS 전용 — Linux ABI 컴파일에선 아래 블록이 comptime 가지치기돼 no-op이다.
         if (is_macos) {
             // poison 가능한 managed Client를 만들기 전에 process-global publisher를 먼저 고정한다. 이 순서가 current-first,
@@ -8445,7 +8476,7 @@ pub const AppSession = struct {
             // §6 L291: 이미 실패로 판명됐으면 바로 notice + in-process 폴백. **다만 영영은 아니다** —
             // `host_connect_retry_at_ms` 가 지나면 한 번 더 붙어 본다(위 그 변수의 이유). 그 전에는
             // 예전과 똑같이 즉시 반환해 창 여는 길을 안 막는다.
-            if (host_connect_failed) {
+            if (host_connect_failed and !force_retry) {
                 if (self.awakeMs() < host_connect_retry_at_ms) {
                     self.host_connect_notice_pending = true;
                     return;
@@ -8525,6 +8556,9 @@ pub const AppSession = struct {
                     return;
                 };
                 self.session_host_upgrade_notice_pending = connect_result.upgrade_notice;
+                // 승격도 성공이다 — 아래 신규 backend 경로와 똑같이 래치를 푼다. 안 풀면 `backendForNew` 가
+                // 이번 Term 을 in-process 로 열고 다음 Term 에서야 조기 반환이 푼다(한 Term 어긋남).
+                clearHostConnectFailure();
                 return;
             }
             // backend 하나가 host pool을 통해 old/current runtime을 host_id별로 라우팅한다.
@@ -43300,6 +43334,125 @@ test "R3 #3: host가 죽으면 createTerm이 in-process로 폴백한다(새 터�
         term_ops.destroyTerm(session, t_live); // 원격(죽은 host) — remove의 terminate RPC는 조용히 실패, client-side만 회수.
     } else {
         return error.SkipZigTest;
+    }
+}
+
+// 2026-09-22 실측: 복원할 runtime 이 없는 첫 실행에서 host 가 30 s 뒤 unattached idle 로 내려갔고, 그 뒤 연 세션
+// 10개 + `claude` 9개가 전부 **앱의 직계 자식 PTY**(in-process)였다 — `keep-alive-after-quit = true` 인데 앱을
+// 끄면 죽는 세션. 원인은 pool 이 죽은 spawn host id 를 계속 들고 있어 `ensureRemoteBackend` 가 «이미 붙어
+// 있음» 으로 조기 반환해 재접속·재시작이 **한 번도** 시도되지 않은 것(R3 #3 의 폴백은 설계대로 돌았다).
+// 이 판정자는 pool 모드에서 host 가 죽은 뒤 createTerm 이 ① 죽은 spawn host 를 pool 에서 치우고 ② 다시
+// 붙기를 시도했음을 고정한다. 여기서는 형제 `maru` 가 없어 재시작 자체는 실패하므로 in-process 로 떨어지는
+// 것이 맞고, «시도했다» 는 실패 단계가 `runtime_death`(죽은 RPC) 가 아니라 그 뒤 단계로 옮겨 간 것으로 본다.
+test "R3 #3b: pool 모드에서 host가 죽으면 죽은 spawn host를 치우고 다시 붙기를 시도한 뒤에야 in-process다" {
+    if (is_macos) {
+        const allocator = std.testing.allocator;
+        const io = std.Io.Threaded.global_single_threaded.io();
+
+        var base_buf: [96]u8 = undefined;
+        const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-r3-hp-{d}", .{std.c.getpid()}) catch return error.SkipZigTest;
+        _ = std.c.mkdir(base.ptr, 0o700);
+        var dir_buf: [160]u8 = undefined;
+        const dir = session_host.discovery.sessionHostDirPath(&dir_buf, base) catch return error.SkipZigTest;
+        var sock_buf: [224]u8 = undefined;
+        const socket = session_host.discovery.socketPathIn(&sock_buf, dir) catch return error.SkipZigTest;
+
+        const child = std.c.fork();
+        if (child < 0) return error.SkipZigTest;
+        if (child == 0) {
+            _ = std.c.setsid();
+            session_host.daemon.runSessionHost(std.heap.page_allocator, io, dir, socket) catch {};
+            std.c._exit(0);
+        }
+        var host_reaped = false;
+        defer {
+            if (!host_reaped) {
+                _ = std.c.kill(child, std.posix.SIG.KILL);
+                var status: c_int = undefined;
+                _ = std.c.waitpid(child, &status, 0);
+            }
+            _ = std.c.unlink(socket.ptr);
+            std.Io.Dir.cwd().deleteTree(std.testing.io, base) catch {};
+        }
+
+        var up = false;
+        var w: usize = 0;
+        while (w < 250) : (w += 1) {
+            if (session_host.client.Client.connect(allocator, socket, .gui)) |cl| {
+                var p = cl;
+                p.deinit();
+                up = true;
+                break;
+            } else |_| _ = usleep(20 * 1000);
+        }
+        try std.testing.expect(up);
+
+        const previous_keep_alive = app_keep_alive_after_quit;
+        app_keep_alive_after_quit = false;
+        defer app_keep_alive_after_quit = previous_keep_alive;
+        const session = try allocator.create(AppSession);
+        defer allocator.destroy(session);
+        try session.init(io, allocator, .{ .abi_version = abi_version, .cols = 40, .rows = 10, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+        defer session.deinit();
+        session.loaded_config.config.session.keep_alive_after_quit = true;
+        app_keep_alive_after_quit = true;
+
+        // pool 모드 backend — 제품의 `ensureRemoteBackend` 가 세우는 모양(adapter → pool → spawn host → backend).
+        var client = try session_host.client.Client.connect(allocator, socket, .gui);
+        const host_id = client.host_id;
+        const owned_adapter = try allocator.create(RemoteSessionAdapter);
+        var adapter_transferred = false;
+        errdefer if (!adapter_transferred) allocator.destroy(owned_adapter);
+        try RemoteSessionAdapter.initInPlace(owned_adapter, allocator, &client);
+        app_remote_host_pool = RemoteHostPool.init(allocator);
+        try app_remote_host_pool.?.addOwned(host_id, owned_adapter);
+        adapter_transferred = true;
+        try app_remote_host_pool.?.setSpawnHost(host_id);
+        app_remote_backend = try session_host.remote_term_backend.RemoteTermBackend.initWithPool(
+            allocator,
+            io,
+            &app_remote_host_pool.?,
+            session.runtime,
+        );
+        defer {
+            host_connect_failed = false;
+            host_connect_failure_stage = null;
+            host_connect_failure_error = null;
+            if (app_remote_backend) |*rb| {
+                rb.deinit();
+                app_remote_backend = null;
+            }
+            if (app_remote_host_pool) |*pool| {
+                pool.deinit();
+                app_remote_host_pool = null;
+            }
+        }
+
+        const t_live = try term_ops.createTerm(session, .{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 }, 16, "cat", "/bin/cat");
+        try std.testing.expect(t_live.surface.remote != null);
+        try std.testing.expect(!host_connect_failed);
+        try std.testing.expectEqual(host_id, app_remote_host_pool.?.spawnHostId().?);
+
+        _ = std.c.kill(child, std.posix.SIG.KILL);
+        var st: c_int = undefined;
+        _ = std.c.waitpid(child, &st, 0);
+        host_reaped = true;
+
+        // 죽은 뒤 createTerm: ① spawn host 가 치워졌고(runtime 참조가 남아 항목은 유지 → 지정만 풀림)
+        // ② 재시작을 시도했다(실패 단계가 죽은 RPC 의 `runtime_death` 가 아니다) ③ 그래서 in-process 다.
+        const t_fb = try term_ops.createTerm(session, .{ .command = "/bin/cat" }, .{ .cols = 40, .rows = 10 }, 16, "cat", "/bin/cat");
+        try std.testing.expect(t_fb.surface.remote == null);
+        try std.testing.expect(host_connect_failed);
+        try std.testing.expect(app_remote_host_pool.?.spawnHostId() == null);
+        try std.testing.expect(app_remote_host_pool.?.get(host_id) != null); // t_live 가 아직 참조한다
+        const stage = host_connect_failure_stage orelse return error.TestUnexpectedResult;
+        if (stage == .runtime_death) {
+            std.debug.print("재시작을 시도하지 않았다 — 실패 단계가 죽은 RPC 그대로다\n", .{});
+            return error.TestUnexpectedResult;
+        }
+
+        term_ops.destroyTerm(session, t_fb);
+        term_ops.destroyTerm(session, t_live);
     }
 }
 

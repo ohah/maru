@@ -511,13 +511,14 @@ test "CR0b 경계는 중립 schema와 단일 incident writer owner만 연다" {
     try std.testing.expectEqual(@as(usize, 0), count(shutdown_body, "maru_macos_incident_owner_shutdown()"));
     try std.testing.expectEqual(@as(usize, 0), count(shutdown_body, "maru_macos_remote_backend_settle()"));
     // 제품 정의가 파일 중간의 테스트 뒤에도 이어지므로 첫 test 이전 substring으로 자르면 실제 caller를 놓친다.
-    // 전체 source의 addOwned 여섯 호출은 기존 actual-host fixture 둘, bootstrap5 owned-pool fixture 하나,
-    // singleton rollback의 created/sibling/rejected 세 row뿐이고,
+    // 전체 source의 addOwned 일곱 호출은 기존 actual-host fixture 둘, bootstrap5 owned-pool fixture 하나,
+    // singleton rollback의 created/sibling/rejected 세 row, R3 #3b(죽은 spawn host 치우기) fixture 하나뿐이고,
     // managed 제품 entrypoint는 공용 transaction만 쓴다.
-    try std.testing.expectEqual(@as(usize, 6), count(app_session, ".addOwned("));
-    // current 제품 1, 기존 fixture 2, singleton rollback의 rejected row 1만 spawn host를 직접 선택한다.
-    try std.testing.expectEqual(@as(usize, 4), count(app_session, ".setSpawnHost("));
-    try std.testing.expectEqual(@as(usize, 1), count(app_session, "app_remote_host_pool.?.spawnHostId() == null"));
+    try std.testing.expectEqual(@as(usize, 7), count(app_session, ".addOwned("));
+    // current 제품 1, 기존 fixture 2, singleton rollback의 rejected row 1, R3 #3b fixture 1만 spawn host를 직접 선택한다.
+    try std.testing.expectEqual(@as(usize, 5), count(app_session, ".setSpawnHost("));
+    // bootstrap5 readiness 1 + R3 #3b 의 «치워졌다» 단언 1.
+    try std.testing.expectEqual(@as(usize, 2), count(app_session, "app_remote_host_pool.?.spawnHostId() == null"));
     // current promotion 1과 bootstrap5 settlement readiness의 backend-present conjunction 1이다.
     try std.testing.expectEqual(@as(usize, 2), count(app_session, "if (app_remote_backend != null and"));
     try std.testing.expectEqual(@as(usize, 1), count(app_session, "backend.promoteToSpawnAndAttach(&app_remote_host_pool.?)"));

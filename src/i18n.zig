@@ -664,6 +664,9 @@ const Table = struct {
     /// 문서가 저장 상한보다 커서 **미저장 백업을 멈췄다**(§3.10). 조용히 멈추면 사용자는 보호받고
     /// 있다고 오해한다 — 그래서 저하 칸에 남는다.
     editor_backup_paused: [:0]const u8,
+    /// 크래시로 잃었을 편집을 되살렸다는 **지나가는 알림**(§3.10 — 모달이 아니다). 복원 자체는
+    /// 묻지 않으므로, 이 한 줄이 없으면 사용자는 dirty 를 버그로 읽는다.
+    editor_backup_restored: [:0]const u8,
     /// 원격이 없어 fetch를 누를 수 없다는 진술. **왜 안 되는지 말한다** — 비활성만 두면 고장으로 읽힌다.
     scm_no_remote: [:0]const u8,
     /// fetch가 끝났고 새로 온 것이 없다. 실패와 구별해야 한다 — 그쪽은 stderr가 이유를 말한다.
@@ -1582,6 +1585,7 @@ const en: Table = .{
     .editor_counting_rows = "Counting rows…",
     .editor_columns_capped = "Long line: view capped (editor.max-columns)",
     .editor_backup_paused = "Large file: unsaved-edit backup paused",
+    .editor_backup_restored = "Restored unsaved edits from the last session",
     .scm_no_remote = "This repository has no remote",
     .scm_fetch_done = "Fetched from the remote",
     .scm_menu_push = "Type git push",
@@ -2326,6 +2330,7 @@ const ko: Table = .{
     .editor_counting_rows = "행 수 세는 중…",
     .editor_columns_capped = "긴 줄: 보기가 상한에 걸렸다 (editor.max-columns)",
     .editor_backup_paused = "큰 파일: 미저장 백업을 멈췄다",
+    .editor_backup_restored = "지난 세션의 저장하지 않은 편집을 되살렸습니다",
     .scm_no_remote = "이 저장소에는 원격이 없습니다",
     .scm_fetch_done = "원격에서 가져왔습니다",
     .scm_menu_push = "git push 넣기",

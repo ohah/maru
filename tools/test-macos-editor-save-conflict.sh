@@ -26,6 +26,10 @@ original='original-from-open
 '
 external='changed-by-another-process
 '
+# `restore-backup` 이 레코드에 심는 내용 — 디스크에도, 우리가 타이핑한 것에도 없는 글자여야
+# 「레코드에서 왔다」가 증명된다.
+restored='restored-from-backup
+'
 
 case "$root" in
     "$workspace"/zig-out/maru-editor-save-conflict-smoke) ;;
@@ -46,8 +50,12 @@ run_scenario() {
     rm -f "$ready"
     printf '%s' "$original" > "$document"
     # **백업 자리를 비우고 시작한다** — 앞 시나리오가 남긴 파일을 이 시나리오의 결과로 읽지 않는다
-    # (같은 문서라 이름이 같다).
-    rm -rf "$backups"
+    # (같은 문서라 이름이 같다). ⚠️ `restore-backup` 은 예외다: 그 시나리오는 **심어 둔 레코드**로
+    # 시작하고, 그 이름은 앞 시나리오(`quit-backup`)가 만든 것을 재사용한다(이름이 Wyhash 라 셸이
+    # 계산할 수 없다 — 그 의존을 아래에서 명시로 확인한다).
+    if [ "$scenario" != restore-backup ]; then
+        rm -rf "$backups"
+    fi
     HOME="$home" \
     CFFIXED_USER_HOME="$home" \
     MARU_SESSION_HOST_ROOT="$session_root" \
@@ -59,7 +67,28 @@ run_scenario() {
     "$app_path" &
     app_pid=$!
 
-    if [ "$scenario" != clean-save ] && [ "$scenario" != quit-backup ]; then
+    if [ "$scenario" = restore-backup ]; then
+        # **레코드를 미리 심는다** — 크래시 없이 「지난 세션이 남긴 것」을 만드는 유일한 길이다.
+        # 포맷은 `session/editor/backup.zig` 가 소유한다: 헤더 줄 → `key=value` 한 줄 → 빈 줄 → 원문.
+        # `disk-hash` 는 **빼고 쓴다** — 셸은 Wyhash 를 못 내고, 없으면 복원이 지금 디스크 지문을
+        # 그대로 둔다(그 갈래는 헤드리스 `U4b-2` 가 잰다).
+        # ⚠️ **이름은 앱이 계산한다**(Wyhash) — 셸이 맞출 수 없다. 그래서 `quit-backup` 이 **같은
+        # 문서로 방금 만든** 레코드 파일의 이름을 그대로 재사용해 내용만 덮어쓴다.
+        printf '%s' "$restored" > "$root/restored.txt"
+        bytes=$(wc -c < "$root/restored.txt" | tr -d ' ')
+        existing=$(ls "$backups" 2>/dev/null | head -1)
+        if [ -z "$existing" ]; then
+            echo "restore-backup needs the record name produced by quit-backup (run order matters)" >&2
+            exit 1
+        fi
+        {
+            printf 'maru.editor-backup.v1\n'
+            printf 'doc kind=path bytes=%s path="%s"\n' "$bytes" "$document"
+            printf '\n'
+            printf '%s' "$restored"
+        } > "$backups/$existing"
+    fi
+    if [ "$scenario" != clean-save ] && [ "$scenario" != quit-backup ] && [ "$scenario" != restore-backup ]; then
         # **드라이버가 부를 때까지 기다린다.** 편집기가 파일을 읽고 글자를 넣은 뒤에야 "밖에서
         # 바뀌었다"가 성립한다. 고정 sleep 은 기계에 따라 순서가 뒤집혀 무엇을 쟀는지 알 수 없다.
         waited=0
@@ -162,6 +191,22 @@ if [ "$(stat -f %Lp "$backups"/*.bak)" != 600 ]; then
     echo "backup record is not owner-only: $(stat -f %Lp "$backups"/*.bak)" >&2
     exit 1
 fi
+
+# U4b — 지난 세션의 백업이 있는 문서는 **묻지 않고 dirty 로** 열린다(§3.10).
+#
+# `quit-backup` 바로 뒤에 둔다: 레코드 **이름**이 Wyhash 라 셸이 계산할 수 없어, 그 시나리오가 방금
+# 만든 파일 이름에 내용을 덮어써서 심는다(그 의존은 위 `run_scenario` 가 명시로 확인한다).
+run_scenario restore-backup
+grep -Eq '^editor_save_conflict_smoke_scenario=restore-backup$' "$root/restore-backup.summary.txt"
+grep -Eq '^editor_save_conflict_smoke_failure=$' "$root/restore-backup.summary.txt"
+grep -Eq '^editor_save_conflict_smoke_stage=done$' "$root/restore-backup.summary.txt"
+# ⑴ **디스크는 그대로다** — 복원은 읽기다(파일을 덮지 않는다).
+printf '%s' "$original" > "$reference"
+cmp -s "$document" "$reference"
+# ⑵ **버퍼에 레코드의 내용이 있었다** — 종료 flush 가 그 버퍼를 다시 썼으므로, 남은 레코드에 그 글자가
+#    있다는 것이 곧 「앱이 레코드를 읽어 문서에 넣었다」는 증거다(드라이버는 dirty 만 볼 수 있다).
+grep -q 'restored-from-backup' "$backups"/*.bak
+! grep -q 'original-from-open' "$backups"/*.bak
 
 # C1b — **비교**를 고르면 아무것도 버리지 않는다: 디스크가 그대로다(비교가 섰다는 것은 앱 안의
 # probe 가 말한다 — 그 선택은 일부러 파일을 건드리지 않으므로 밖에서는 「그대로」만 보인다).

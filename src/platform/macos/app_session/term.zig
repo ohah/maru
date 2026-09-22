@@ -759,6 +759,10 @@ fn destroyTermWithAbandonBackend(
         self.pending_untitled_save = .{};
         self.chrome_host.confirm.dismiss();
     }
+    // **그 문서를 주제로 삼은 저장 충돌 비교를 실패로 만든다**(C1b). 비교 탭은 남지만 그 안의
+    // 「내 편집」은 사라졌다 — 새로 고침을 기다리면 tick 폴링이 `diff_ready` 를 건너뛰어 **영영** 옛
+    // 내용을 보여 준다(적대적 2회차).
+    app_session_mod.editor_conflict_ops.invalidateCompareFor(self, term);
     // **저장 충돌의 선택도 같은 이유로 접는다**(C1a — editor-surface.md §4). 여기는 한 술 더 뜬다:
     // 남겨 두면 그 선택이 **다음에 같은 surface id 를 받은 Term 의 문서를 덮어쓸** 수 있다.
     if (self.pending_confirm == .save_conflict and

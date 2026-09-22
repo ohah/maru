@@ -124,6 +124,28 @@ pub fn fillCompare(self: *AppSession, entry: *dock_panel.Entry) void {
     entry.diff_ready = true;
 }
 
+/// **그 문서를 주제로 삼은 저장 충돌 비교를 실패로 만든다** — 문서 Term 이 사라질 때 부른다.
+///
+/// ⚠️ **새로 고침을 기다릴 수 없다.** tick 폴링은 `diff_ready` 인 entry 를 건너뛰고, 파일이 또 바뀌지
+/// 않으면 `fileChanged` 도 오지 않는다 — 그러면 **사라진 편집이 「내 편집」으로 영영 남는다**
+/// (적대적 2회차에서 드러났다). 주제가 사라진 그 순간이 그것을 말할 유일한 자리다.
+pub fn invalidateCompareFor(self: *AppSession, term: *Term) void {
+    for (self.tabs.items) |tab| {
+        for (tab.panes.items) |pane| {
+            for (pane.terms.items) |t| {
+                const entry = t.file_entry orelse continue;
+                if (entry.kind != .diff or entry.diff_base != .save_conflict) continue;
+                if (entry.diff_buffer_surface_id != term.surface.id) continue;
+                editor_diff_ops.invalidate(self, t);
+                self.freeDiffContent(entry);
+                entry.diff_ready = false;
+                entry.diff_failed = true;
+                self.metal_dirty = true;
+            }
+        }
+    }
+}
+
 /// 그 entry 를 든 Term(비교 Term). 행 배열이 두 쪽을 빌리므로 내용을 갈기 전에 그 Term 의 캐시를 놓아야 한다.
 fn termForEntry(self: *AppSession, entry: *dock_panel.Entry) ?*Term {
     for (self.tabs.items) |tab| {

@@ -11869,6 +11869,8 @@ test "LSPB9 TS 계열 후보 셋 — PATH 에 typescript-language-server 만 있
             return c.term.rt.editor_diagnostics.lsp.items.len >= 1;
         }
     }.f));
+    // ⑷ TS 계열이라 `initialized` 뒤 설정 블롭(§8.2n 「서버 설정」 — 힌트를 켜는 `workspace/didChangeConfiguration`)이 한 번 나갔다.
+    try testing.expectEqual(@as(u64, 1), fx.session.editor_lsp.sent_configs);
 }
 
 test "LSPB2 서버가 없으면 상태바가 「설치」이고 누르면 새 탭에 설치 명령을 입력만 한다; 거부는 기억되고 다시 물을 수 있다; 끄면 아무것도 없다 (제품 경계, §8.2a·§8.1a)" {
@@ -12967,6 +12969,10 @@ test "INL9 인레이 힌트 — 서버가 ready 면 색 만들기 자리가 범�
     try testing.expect(f.ready());
     // ⑴ 첫 색 만들기 — 요청이 나간다(범위 0..1; 끝은 줄 수를 안 넘긴다). 대기 중엔 한 번만.
     term.rt.editor_first_line = 0;
+    var d0 = appendPaneFrame(s, f.leaf, term) orelse return error.EditorPaneDidNotDraw; // 힌트 전 폭 상한을 세워 둔다(L2)
+    d0.dl.deinit(allocator);
+    const width_before = scrollWidthCols(s, term, false);
+    try testing.expect(width_before >= 14);
     _ = syntaxColors(s, term);
     try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_inlay);
     try testing.expect(term.rt.editor_inlay.waiting);
@@ -12991,6 +12997,10 @@ test "INL9 인레이 힌트 — 서버가 ready 면 색 만들기 자리가 범�
     try testing.expect(drawnHasCodepoint(d.dl, ':'));
     try testing.expect(drawnHasText(d.dl, ": int"));
     try testing.expect(drawnHasText(d.dl, "p: 1"));
+    try testing.expect(drawnHasText(d.dl, "RET -> void")); // 줄 끝 힌트(contentEnd 에 선 것)도 그려진다
+    try testing.expectEqual(@as(u64, 0), s.editor_lsp.sent_configs); // C 는 설정 블롭이 없다(§8.2n — TS 계열만)
+    // L3 파생 — 가로 스크롤 상한은 힌트 폭(가장 넓은 줄의 합 11 = `p: ` 3 + ` -> void` 8)만큼 넓어진다(§4.1h).
+    try testing.expectEqual(width_before + 11, scrollWidthCols(s, term, false));
     try testing.expect(drawnRunRole(f.fx.session, d.dl, ": int", .syntax_comment));
     const geom = term.rt.editor_hit_geom;
     const cw: f64 = @floatFromInt(geom.cell_w_px);

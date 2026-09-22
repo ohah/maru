@@ -197,6 +197,8 @@ pub const editor = struct {
         pub const semantic = @import("session/lsp/semantic.zig");
         /// `foldingRange` 접힘 3층(tooling §8.2j · visual-mapping §4) — provider 파싱·응답 정렬/검증.
         pub const fold_range = @import("session/lsp/fold_range.zig");
+        /// 인레이 힌트(tooling §8.2n · visual-mapping §4.1h) — provider·응답 정제·편집 밀기.
+        pub const inlay = @import("session/lsp/inlay.zig");
     };
     /// S2: 병합 충돌 **마커 구간**(docs/editor-merge-conflicts.md §5). 순수 계산이라 여기 산다 —
     /// 줄 배열을 받아 구간을 내고, 그리기·동작은 위층이 붙인다.

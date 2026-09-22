@@ -110,6 +110,11 @@ pub fn main() void {
 }
 
 var answered = false;
+/// `initialized` 의 `params` 가 객체가 아니었다 — 그 뒤 전부 `ServerNotInitialized`(tsgo 꼴).
+var not_initialized = false;
+/// `INLREFRESH` — `srv-2`(`workspace/inlayHint/refresh`) 를 보냈나 · 클라이언트가 **result** 로 답했나.
+var refresh_sent = false;
+var refresh_answered = false;
 /// 마지막 didOpen/didChange 본문에 `NOHOVER` 가 있었다 — hover 가 `null` 을 낸다.
 var no_hover = false;
 /// 마지막 본문에 `MUTEHOVER` 가 있었다 — hover 요청에 **답하지 않는다**.
@@ -794,6 +799,102 @@ fn asLink(arena: std.mem.Allocator, loc: std.json.Value) !std.json.Value {
     return .{ .object = link };
 }
 
+/// `textDocument/inlayHint`(§8.2n 관측점): 요청 범위 안 줄마다 — `<name>_hv` 낱말 뒤에 타입 힌트 `: int`(kind 1, 조각 배열, padding 없음),
+/// `(` 바로 뒤 첫 인자 앞에 파라미터 힌트 `p:`(kind 2, `paddingRight`), 줄 끝에 `RET` 표식이 있으면 `-> void`(paddingLeft). 일부러 **뒤에서
+/// 앞으로** 낸다(클라이언트가 정렬하는지). 문서에 `INLSTALL` 이면 답하지 않고, `INLERR` 면 `-32801`, `INLNULL` 이면 `null`.
+fn handleInlayHint(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: std.json.Value) void {
+    var req_uri: []const u8 = "";
+    var lo: i64 = 0;
+    var hi: i64 = std.math.maxInt(i32);
+    if (obj.get("params")) |p| if (p == .object) {
+        if (p.object.get("textDocument")) |td| if (td == .object) {
+            req_uri = str(td.object.get("uri")) orelse "";
+        };
+        if (p.object.get("range")) |r| if (r == .object) {
+            if (r.object.get("start")) |st| if (st == .object) {
+                lo = int(st.object.get("line")) orelse 0;
+            };
+            if (r.object.get("end")) |en| if (en == .object) {
+                hi = int(en.object.get("line")) orelse hi;
+            };
+        };
+    };
+    const text = docText(req_uri);
+    if (std.mem.indexOf(u8, text, "INLSTALL") != null) return;
+    // `INLREFRESH` — rust-analyzer 꼴(§8.2n 실측): 첫 요청엔 `[]` 를 내고 곧 `workspace/inlayHint/refresh`(id `srv-2`) 를 보낸다. 그 뒤의 요청은
+    // 클라이언트가 그 요청에 **result 로 답한 뒤에만** 진짜 힌트를 낸다(거부하거나 안 답하면 영영 `[]`).
+    if (std.mem.indexOf(u8, text, "INLREFRESH") != null and !refresh_answered) {
+        sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .result = [0]u32{} });
+        if (!refresh_sent) {
+            refresh_sent = true;
+            sendJson(allocator, .{ .jsonrpc = "2.0", .id = "srv-2", .method = "workspace/inlayHint/refresh" });
+        }
+        return;
+    }
+    if (std.mem.indexOf(u8, text, "INLERR") != null) {
+        sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .@"error" = .{ .code = @as(i32, -32801), .message = "content modified" } });
+        return;
+    }
+    if (std.mem.indexOf(u8, text, "INLNULL") != null) {
+        sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .result = null });
+        return;
+    }
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var out: std.json.Array = .init(arena);
+    var line_no: i64 = 0;
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (it.next()) |line| : (line_no += 1) {
+        if (line_no < lo or line_no > hi) continue;
+        // 줄 끝 `RET` → `-> void`(paddingLeft).
+        if (std.mem.endsWith(u8, line, "RET")) out.append(hintValue(arena, line_no, line.len, "-> void", 1, true, false) catch return) catch return;
+        // `(` 뒤 첫 인자 앞 → `p:`(paddingRight).
+        if (std.mem.indexOfScalar(u8, line, '(')) |paren| if (paren + 1 < line.len and line[paren + 1] != ')') {
+            out.append(hintValue(arena, line_no, paren + 1, "p:", 2, false, true) catch return) catch return;
+        };
+        // `<name>_hv` 뒤 → `: int`(조각 배열).
+        var from: usize = 0;
+        while (std.mem.indexOfPos(u8, line, from, "_hv")) |at| {
+            from = at + 3;
+            if (at + 3 < line.len and isIdent(line[at + 3])) continue;
+            out.append(hintValue(arena, line_no, at + 3, ": int", 1, false, false) catch return) catch return;
+        }
+    }
+    // 뒤에서 앞으로.
+    var rev: std.json.Array = .init(arena);
+    var i: usize = out.items.len;
+    while (i > 0) : (i -= 1) rev.append(out.items[i - 1]) catch return;
+    sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .result = std.json.Value{ .array = rev } });
+}
+
+fn hintValue(arena: std.mem.Allocator, line_no: i64, character: usize, label: []const u8, kind: i64, pad_l: bool, pad_r: bool) !std.json.Value {
+    var pos: std.json.ObjectMap = .empty;
+    try pos.put(arena, "line", .{ .integer = line_no });
+    try pos.put(arena, "character", .{ .integer = @intCast(character) });
+    var h: std.json.ObjectMap = .empty;
+    try h.put(arena, "position", .{ .object = pos });
+    if (kind == 1) {
+        // 타입 힌트는 조각 배열로(rust-analyzer 꼴) — 첫 조각 `: `, 둘째 나머지.
+        var parts: std.json.Array = .init(arena);
+        var a: std.json.ObjectMap = .empty;
+        try a.put(arena, "value", .{ .string = label[0..@min(2, label.len)] });
+        try parts.append(.{ .object = a });
+        if (label.len > 2) {
+            var b: std.json.ObjectMap = .empty;
+            try b.put(arena, "value", .{ .string = label[2..] });
+            try parts.append(.{ .object = b });
+        }
+        try h.put(arena, "label", .{ .array = parts });
+    } else {
+        try h.put(arena, "label", .{ .string = label });
+    }
+    try h.put(arena, "kind", .{ .integer = kind });
+    if (pad_l) try h.put(arena, "paddingLeft", .{ .bool = true });
+    if (pad_r) try h.put(arena, "paddingRight", .{ .bool = true });
+    return .{ .object = h };
+}
+
 fn wordLocations(arena: std.mem.Allocator, text: []const u8, word: []const u8, uri: []const u8) !std.json.Array {
     var locs: std.json.Array = .init(arena);
     var line_no: i64 = 0;
@@ -903,12 +1004,16 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
     const id = obj.get("id");
     const method = str(obj.get("method")) orelse {
         // 응답 — 우리가 낸 `srv-1` 에 대한 것이면(거부여도) 「답을 받았다」.
-        if (str(id)) |i| if (std.mem.eql(u8, i, "srv-1")) {
-            answered = true;
-        };
+        if (str(id)) |i| {
+            if (std.mem.eql(u8, i, "srv-1")) answered = true;
+            if (std.mem.eql(u8, i, "srv-2") and obj.get("error") == null) refresh_answered = true;
+        }
         return;
     };
     if (std.mem.eql(u8, method, "initialize")) {
+        var inlay_caps: std.json.ObjectMap = .empty;
+        inlay_caps.put(allocator, "resolveProvider", .{ .bool = true }) catch return;
+        defer inlay_caps.deinit(allocator);
         var typedef_caps: std.json.ObjectMap = .empty;
         typedef_caps.put(allocator, "workDoneProgress", .{ .bool = false }) catch return;
         defer typedef_caps.deinit(allocator);
@@ -947,6 +1052,7 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
                     // 접힘 3층(§8.2j) — `MARU_FAKE_LSP_NOFOLDCAP=1` 이면 provider 없음.
                     .foldingRangeProvider = std.c.getenv("MARU_FAKE_LSP_NOFOLDCAP") == null,
                     .referencesProvider = true, // §8.2l
+                    .inlayHintProvider = if (std.c.getenv("MARU_FAKE_LSP_NOINLAYCAP") == null) std.json.Value{ .object = inlay_caps } else std.json.Value{ .bool = false }, // §8.2n — 객체 꼴; `NOINLAYCAP=1` 이면 없음
                     .implementationProvider = true, // §8.2m
                     .typeDefinitionProvider = if (std.c.getenv("MARU_FAKE_LSP_NOTYPEDEFCAP") == null) std.json.Value{ .object = typedef_caps } else std.json.Value{ .bool = false }, // 객체 꼴; `NOTYPEDEFCAP=1` 이면 false
                     .declarationProvider = std.c.getenv("MARU_FAKE_LSP_DECLCAP") != null, // 기본 없음(tsgo 꼴)
@@ -961,7 +1067,18 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
         return;
     }
     if (std.mem.eql(u8, method, "initialized")) {
+        // tsgo 꼴(§8.2a 되먹임 ⑦): `params` 가 객체가 아니면(`[]` 로 온 적이 있다) `initialized` 를 **거부**하고 그 뒤 모든 요청에
+        // `-32002 ServerNotInitialized`, 통지는 버린다 — 클라이언트가 `{}` 를 안 내면 판정자 전부가 빨개진다.
+        const params_ok = if (obj.get("params")) |pv| pv == .object else false;
+        if (!params_ok) {
+            not_initialized = true;
+            return;
+        }
         sendJson(allocator, .{ .jsonrpc = "2.0", .id = "srv-1", .method = "workspace/configuration", .params = .{ .items = [_]struct { section: []const u8 }{.{ .section = "fake" }} } });
+        return;
+    }
+    if (not_initialized) {
+        if (id) |i| sendJson(allocator, .{ .jsonrpc = "2.0", .id = i, .@"error" = .{ .code = @as(i32, -32002), .message = "ServerNotInitialized" } });
         return;
     }
     if (std.mem.eql(u8, method, "textDocument/signatureHelp")) {
@@ -1127,6 +1244,10 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
     }
     if (std.mem.eql(u8, method, "textDocument/references")) {
         handleReferences(allocator, obj, id.?);
+        return;
+    }
+    if (std.mem.eql(u8, method, "textDocument/inlayHint")) {
+        handleInlayHint(allocator, obj, id.?);
         return;
     }
     // 구현·타입 정의(§8.2m): 요청 자리 낱말의 위치를 **뒤에서 둘째까지**(구현 — 선언을 뺀 나머지) / **첫 것 하나**(타입 정의) `LocationLink[]` 로.

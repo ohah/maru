@@ -332,7 +332,7 @@ fn anchorFor(term: *Term, offset: usize) ?Anchor {
     const off = @min(offset, doc.file.content.len);
     const line_idx = doc.file.lines.lineAt(off);
     const line = doc.file.lines.line(line_idx) orelse return null;
-    const a = chrome.components.editor_view.hit.bodyAnchor(
+    const a = chrome.components.editor_view.hit.bodyAnchorWith(
         .{
             .body_x = geom.body_x,
             .body_y = geom.body_y,
@@ -347,6 +347,7 @@ fn anchorFor(term: *Term, offset: usize) ?Anchor {
         term.rt.editor_lines,
         line_idx,
         off -| line.start,
+        editor_ops.inlay_client.inlaysForLine(term, line_idx, geom.content_width), // 힌트 뒤(글리프 열)에 띄운다(§4.1h)
     ) orelse return null;
     return .{ .x = a.x_px, .y = a.y_px, .h = geom.cell_h_px };
 }

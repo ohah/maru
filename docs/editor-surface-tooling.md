@@ -424,7 +424,7 @@ TextMate, git staging, formatter는 LSP의 선행 조건이 아니다. 초기 sy
 
 **요청 id 는 i32 안(2026-09-20 실측 뒤의 결정).** 종류마다 `id_span = 1e8` 칸: hover `1e8+seq` · definition `2e8` · signatureHelp `3e8` · formatting `4e8` ·
 rename `5e8` · completion `6e8` · codeAction `7e8` · codeAction/resolve `8e8` · completionItem/resolve `9e8` · semanticTokens `10e8` · foldingRange `11e8` · references `12e8` · implementation `13e8` · typeDefinition `14e8` ·
-declaration `15e8`(`rpc.zig` 의 base 상수, `nextSeq` 가 칸 안에서 돌린다, `classify` 는 칸으로 가른다; 가장 큰 칸 15e8+1e8-1 = 1,599,999,999 < 2^31). 처음엔 `N×1e9+seq` 였고 JSON-RPC 로는 적법하지만, **rust-analyzer(와 ruff 등 Rust `lsp-server` 크레이트 서버)는 정수 id 를 i32 로만
+declaration `15e8` · inlayHint `16e8`(`rpc.zig` 의 base 상수, `nextSeq` 가 칸 안에서 돌린다, `classify` 는 칸으로 가른다; 가장 큰 칸 16e8+1e8-1 = 1,699,999,999 < 2^31). 처음엔 `N×1e9+seq` 였고 JSON-RPC 로는 적법하지만, **rust-analyzer(와 ruff 등 Rust `lsp-server` 크레이트 서버)는 정수 id 를 i32 로만
 읽어** 넘치는 요청을 **알림으로 오인해 버린다** — `6_000_000_001` 짜리 completion 이 stderr 에 `unhandled notification` 으로만 남고 응답이 없었다(hover·definition 만
 i32 안이라 그 둘만 됐다). 실 rust-analyzer 에 프레임을 그대로 재생해 잡았다(§8.2g-b 실측). 관측점 `LSJ13`(가장 큰 칸 끝 ≤ i32 최대 · seq 가 칸 안에서 돌고 0 을
 건너뜀 · 칸 경계 · 칸 밖은 무시). 아래 절들의 id 표기는 이 표를 따른다.
@@ -1101,6 +1101,23 @@ root 밖 행이 실제로 선다(§8.2l 「루트 밖」 제목·고르면 알�
 - **H2** 타입 정의 프롬프트가 구현의 키 — 타입 정의 둘이 피커를 여는 사례가 없었다 → 가짜 `REFTD2` 로 둘 → 「타입 정의 2개」.
 - 등가(주석·기록): **G2** 캡처 훅이 종류를 무시 — 판정 밖(캡처 전용) · **G3** provider 없는 가짜가 `-32600` 대신 답함 — 클라이언트가 그 method 를 **안 보내므로** 관측
   불가 · **G5** 가짜 `LocationLink` 에 `targetSelectionRange` 없음 — 파서가 `targetRange` 로 내려가 같은 위치.
+
+### 8.2n LSP 2단 ⑬ — 인레이 힌트 (2026-09-22, 계획 공격 셋 뒤의 결정)
+
+**계획 공격이 드러낸 것.** 렌더 쪽 결정(열 규칙·캐시·편집 결합)은 [visual-mapping §4.1h](native-editor-visual-mapping.md) 가 소유한다. 여기는 서버와의
+계약이다. **실측(2026-09-22)**: rust-analyzer `inlayHintProvider{resolveProvider}`, 로드 뒤 250 ms, 타입 힌트(`: Vec<i32>`·`: impl Iterator<Item = i32>`)·
+파라미터 힌트(`a:`·`b:`), `label` 이 **조각 배열**(`location` 포함)·`paddingRight`·`textEdits`·`data`; 로드 중엔 `-32801`; 범위 끝이 줄 수를 넘으면
+`-32603 Invalid offset` — 끝은 **마지막 줄까지**. tsgo: 설정(`workspace/didChangeConfiguration` 의 `typescript.inlayHints.*`)을 **줘야** 낸다 — 기본은
+`null`. clangd: `r:` 파라미터 힌트, `paddingRight`.
+
+| 축 | 결정 | 근거 |
+| --- | --- | --- |
+| **capability** | `textDocument.inlayHint{dynamicRegistration: false}`. 서버의 `inlayHintProvider`(bool·객체)를 읽는다 — 없으면 힌트 없음 | LSP 3.17 |
+| **서버 설정** | 언어 서버 표에 「설정 블롭」 칸: TS 계열은 `initialized` 뒤 `workspace/didChangeConfiguration{settings: {typescript: {inlayHints: {parameterNames: {enabled: "all"}, variableTypes, functionLikeReturnTypes}}}}` 를 한 번 보낸다(안 주면 tsgo 가 `null`). 다른 서버는 없음 | 실측 |
+| **요청** | `textDocument/inlayHint{range}`, id `16e8+seq`. 범위·시점은 semantic 2층(§8.2i)과 같다: 보이는 원본 줄 ± 20, 프레임마다 판정, 마지막 편집 뒤 120 ms, 한 번에 하나, version 을 단다. 끝은 `min(hi+1, 줄 수)`(반열림, 줄 수를 안 넘긴다) | `-32603` 실측 |
+| **응답** | version 다르면 버리고 다시; `-32801`·오류·`null` 은 버리고 조용 뒤 다시(배수 없음 — semantic 과 같다). 항목: `position`(줄, 서버 인코딩 글자) → 줄 안 byte(`position.offsetOf`), `label`(문자열 또는 조각 배열 — `value` 를 잇는다), `paddingLeft/Right` → 공백 하나, `kind` 는 안 쓴다. 정제·상한은 §4.1h. 상한 **2,000 힌트** | ② |
+| **편집 중** | 힌트용 shift(경계 = 뒤 — §4.1h). 범위를 모르는 편집(`undoGroupSpan` 이 `null` — 보통의 undo/redo 는 범위를 알아 민다)은 전부 버린다 | §4.1h |
+| **하지 않는 것** | resolve(`tooltip`·`location`) · 힌트 호버/클릭(정의로 이동) · `textEdits`(더블클릭 삽입) · `workspace/inlayHint/refresh` 서버 요청(거부 응답 — 다음) · 종류별 켜고 끄기 설정 · 미니맵(§6 그대로) | 다음 |
 
 ### 8.3 관측 가능성과 민감정보
 

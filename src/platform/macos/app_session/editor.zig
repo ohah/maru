@@ -94,6 +94,7 @@ pub const completion_client = @import("editor_completion.zig");
 pub const code_action_client = @import("editor_code_action.zig");
 pub const semantic_client = @import("editor_semantic.zig");
 pub const fold_lsp_client = @import("editor_fold_lsp.zig");
+pub const inlay_client = @import("editor_inlay.zig");
 /// 접힘 범위를 낸 층(§4 의 세 소스).
 pub const FoldSource = enum { indent, syntax, lsp };
 pub const workspace_edit_client = @import("editor_workspace_edit.zig");
@@ -600,6 +601,19 @@ pub fn headerBreadcrumb(self: *AppSession, term: *Term, path: []const u8) []cons
     return syntax_color.breadcrumb(&term.rt.editor_syntax, self.allocator, path, doc.file.content, focus);
 }
 
+/// 렌더에 넘길 줄별 가상 텍스트 창(§4.1h) — `syntaxColors` 와 같은 축(창 앞 줄부터 256줄). 줄당 폭 예산은 지난 프레임의 본문 열 수로(첫 프레임은 pane 폭 근사).
+fn inlayWindow(self: *AppSession, term: *Term, pane_rect: chrome_draw.Rect) chrome_editor.content.InlayWindow {
+    if (term.rt.editor_diff != null) return .{};
+    if (term.rt.editor_inlay.hints.items.items.len == 0) return .{ .generation = term.rt.editor_inlay.generation };
+    const first = term.rt.editor_first_line;
+    const axis_len = if (term.rt.editor_visible_numbers.len > 0) term.rt.editor_visible_numbers.len else term.rt.editor_lines.len;
+    if (first >= axis_len) return .{ .generation = term.rt.editor_inlay.generation };
+    const count = @min(@as(usize, 256), axis_len - first);
+    const drawn = term.rt.editor_drawn_content_cols;
+    const view_cols: u32 = if (drawn > 0) drawn else @intCast(@max(1, @divTrunc(pane_rect.w, @max(1, @as(i32, @intCast(self.cell_width_px))))));
+    return .{ .first = first, .rows = inlay_client.lineInlays(self, term, first, count, view_cols), .generation = term.rt.editor_inlay.generation };
+}
+
 fn syntaxColors(self: *AppSession, term: *Term) []const []const chrome_editor.content.ColorSpan {
     if (term.rt.editor_diff != null) return &.{};
     const doc = term.rt.editor_doc orelse return &.{};
@@ -648,6 +662,7 @@ fn syntaxColors(self: *AppSession, term: *Term) []const []const chrome_editor.co
         const first_src = syntax_color.sourceLineFor(term.rt.editor_visible_numbers, first) orelse first;
         const last_src = syntax_color.sourceLineFor(term.rt.editor_visible_numbers, first + count - 1) orelse (first + count - 1);
         semantic_client.tick(self, term, first_src, last_src);
+        inlay_client.tick(self, term, first_src, last_src); // 인레이 힌트(§8.2n) — 같은 창
     }
     return syntax_color.lineColorsWith(
         &term.rt.editor_syntax,
@@ -887,6 +902,8 @@ pub fn buildPaneOps(
     /// **줄마다의 전개 시작 힌트**(`lines` 와 같은 축). 가로로 민 상태에서 전개가 앞을 다시 걷지
     /// 않게 한다 — 비어 있으면 처음부터 걷고 **답은 같다**.
     line_seeks: []const ?chrome_editor.content.Seek,
+    /// 줄별 가상 텍스트 창(§4.1h — 인레이 힌트). 렌더 축.
+    line_inlays: chrome_editor.content.InlayWindow,
     /// 논리 줄마다의 **커서 자리**(줄 안 byte offset, 오름차순). `null`이면 커서가 없다.
     carets: ?[]const []const u32,
     /// 줄 **위**에 세울 위젯 행(S2 — 충돌 구간의 「고르기」 줄). `lines` 와 같은 축이다.
@@ -921,7 +938,7 @@ pub fn buildPaneOps(
     const inset: i32 = @intCast(chrome_editor.frame.content_inset_px);
     const inner: chrome_draw.Rect = .{ .x = 0, .y = 0, .w = rect.w -| chrome_editor.frame.content_inset_px * 2, .h = rect.h -| chrome_editor.frame.content_inset_px * 2 };
     const w = diff_frame.buildSide(
-        .{ .lines = lines, .first_col = first_col, .numbers = numbers, .total_lines = total_lines, .folds = folds, .content_max_cols = content_max_cols, .row_cache = row_cache, .selection_marks = selection_marks, .search_marks = search_marks, .search_current = search_current, .search_marker_lines = search_marker_lines, .search_marker_current = search_marker_current, .line_colors = line_colors, .line_seeks = line_seeks, .carets = carets, .widgets = widgets, .bands = bands, .minimap = minimap, .diag_marks = if (diag) |d| d.marks else null, .diag_markers = if (diag) |d| d.markers else null, .diag_lines = if (diag) |d| d.lines else &.{} },
+        .{ .lines = lines, .first_col = first_col, .numbers = numbers, .total_lines = total_lines, .folds = folds, .content_max_cols = content_max_cols, .row_cache = row_cache, .selection_marks = selection_marks, .search_marks = search_marks, .search_current = search_current, .search_marker_lines = search_marker_lines, .search_marker_current = search_marker_current, .line_colors = line_colors, .line_seeks = line_seeks, .line_inlays = line_inlays, .carets = carets, .widgets = widgets, .bands = bands, .minimap = minimap, .diag_marks = if (diag) |d| d.marks else null, .diag_markers = if (diag) |d| d.markers else null, .diag_lines = if (diag) |d| d.lines else &.{} },
         .{ .first_line = first_line, .first_piece = first_piece, .caret_visible = caret_visible, .caret_shape = caret_shape, .wrap = wrap, .tab_width = tab_width, .cell_w_px = cell_w_px, .cell_h_px = cell_h_px, .font_px = font_px },
         inner,
         // **배경만 뒤로 물린다.** 내용 op이 (0,0)에서 시작해야 셀 격자 양자화(`buildTextDrawList`가
@@ -1094,7 +1111,9 @@ pub fn hitTestBodyMode(comptime mode: chrome_editor.content.PointMode, term: *Te
     // **이 함수가 남기는 것은 두 가지뿐이다**: ⒜ 굳힌 값을 모아 넘기고 ⒝ 줄 안 byte 를 **문서
     // offset** 으로 바꾼다. ⒝ 는 문서 모델(session)을 알아야 해서 chrome 이 못 한다.
     const geom = term.rt.editor_hit_geom;
-    const p = chrome_editor.hit.bodyPointMode(
+    // **힌트 칸을 누르면 앵커 byte**(§4.1h) — 줄별 힌트는 렌더와 같은 예산으로(`inlaysForLine`). `editor_hit_lines` 는 원본 줄 번호다.
+    const InlayCtx = struct { t: *Term, cols: u32 };
+    const p = chrome_editor.hit.bodyPointModeWith(
         mode,
         .{
             .body_x = geom.body_x,
@@ -1110,6 +1129,12 @@ pub fn hitTestBodyMode(comptime mode: chrome_editor.content.PointMode, term: *Te
         term.rt.editor_lines,
         x_px,
         y_px,
+        InlayCtx{ .t = term, .cols = geom.content_width },
+        struct {
+            fn f(c: InlayCtx, src_line: usize) []const chrome_editor.content.Inlay {
+                return inlay_client.inlaysForLine(c.t, src_line, c.cols);
+            }
+        }.f,
     ) orelse return null;
 
     // ⑤ 줄 안 byte → 문서 offset. `Selection`이 문서 전체 offset을 요구한다.
@@ -1815,7 +1840,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     const pf = if (diff_state_opt) |st| blk: {
         // **상태 줄은 가로로 안 민다** — 한 줄짜리 문구라 밀면 화면에서 사라진다.
         // 한 줄짜리 상태 문구다 — 캐시가 아낄 것이 없다.
-        if (st.view != .compare) break :blk buildPaneOps(lines, null, null, lines.len, term.rt.editor_first_line, 0, 0, null, null, buildSelectionMarks(self, term), null, null, @as([]const u32, &.{}), null, syntaxColors(self, term), &.{}, buildCaretRows(self, term), &.{}, null, self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, null, null);
+        if (st.view != .compare) break :blk buildPaneOps(lines, null, null, lines.len, term.rt.editor_first_line, 0, 0, null, null, buildSelectionMarks(self, term), null, null, @as([]const u32, &.{}), null, syntaxColors(self, term), &.{}, .{}, buildCaretRows(self, term), &.{}, null, self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, null, null);
         // **좌우가 세로를 공유한다**(§3.5) — 행 배열이 이미 같은 길이라 같은 인덱스가 같은 높이다.
         // 가로는 각자다(§3.5의 그 규칙은 CM6가 "양쪽 줄 길이가 달라 한쪽을 따라가면 다른 쪽이
         // 엉뚱한 곳을 본다"고 적어 둔 근거에서 왔다) — 입력이 붙을 때 열별 `first_col`이 여기 온다.
@@ -1844,7 +1869,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
                 maru.i18n.t(.diff_read_failed)
             else
                 maru.i18n.t(.diff_loading);
-            break :blk buildPaneOps(status_line[0..1], null, null, 1, 0, 0, 0, null, null, null, null, null, @as([]const u32, &.{}), null, &.{}, &.{}, null, &.{}, null, false, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, null, null);
+            break :blk buildPaneOps(status_line[0..1], null, null, 1, 0, 0, 0, null, null, null, null, null, @as([]const u32, &.{}), null, &.{}, &.{}, .{}, null, &.{}, null, false, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, null, null);
         }
         break :blk buildMergePaneOps(self, term, st, draw_lines, wrap, pane_rect, scratch);
     } else blk: {
@@ -1859,7 +1884,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
         mm_drawn = if (mm) |m| m.input.top else null;
         // **진단**(§5.4) — 트리가 있으면 목록을 다시 채우고(구문 오류), 보이는 줄 축의 세 표로 편다. 끄면 없다.
         const diag = diagnosticViews(self, term, draw_lines.len);
-        break :blk buildPaneOps(draw_lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), fc, maxColsForRender(self, term, false), row_cache, buildSelectionMarks(self, term), find_marks, find_current, marker_lines, marker_current, syntaxColors(self, term), seek_buf[0..seek_n], buildCaretRows(self, term), conflictWidgets(self, term), conflictBands(term), self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, mm, diag);
+        break :blk buildPaneOps(draw_lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), fc, maxColsForRender(self, term, false), row_cache, buildSelectionMarks(self, term), find_marks, find_current, marker_lines, marker_current, syntaxColors(self, term), seek_buf[0..seek_n], inlayWindow(self, term, pane_rect), buildCaretRows(self, term), conflictWidgets(self, term), conflictBands(term), self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, mm, diag);
     };
     if (pf.ops_len == 0) return null;
     // **배치를 싣는다**(병합 모드가 아니면 지운다 — 옛 배치가 남으면 평범한 편집기에서 클릭이
@@ -5863,7 +5888,27 @@ fn scrollWidthCols(self: *AppSession, term: *Term, right: bool) u32 {
     // 이유는 뜻이다 — 「비교의 오른쪽 열은 자기 것」·「안 셌다는 안 셌다」.
     const max_cols = if (!right and own != 0) editor_merge_ops.widestCols(term, own) else own;
     if (max_cols == 0) return 0;
-    return max_cols +| self.loaded_config.config.editor.scroll_beyond_last_column;
+    // **L3 파생: 힌트 폭을 더한다**(§4.1h) — L2 상한은 문서만이라, 안 더하면 힌트가 오른쪽 밖으로 나가도 스크롤이 못 닿는다.
+    // 보이는 창의 줄만 본다(힌트는 그 범위로만 온다).
+    const extra: u32 = if (right or term.rt.editor_diff != null) 0 else inlayExtraCols(term);
+    return (max_cols +| extra) +| self.loaded_config.config.editor.scroll_beyond_last_column;
+}
+
+/// 보이는 창(렌더 축 256줄)에서 가장 넓은 힌트 폭 합.
+fn inlayExtraCols(term: *Term) u32 {
+    if (term.rt.editor_inlay.hints.items.items.len == 0) return 0;
+    const first = term.rt.editor_first_line;
+    const axis_len = if (term.rt.editor_visible_numbers.len > 0) term.rt.editor_visible_numbers.len else term.rt.editor_lines.len;
+    if (first >= axis_len) return 0;
+    const count = @min(@as(usize, 256), axis_len - first);
+    const cols: u32 = if (term.rt.editor_drawn_content_cols > 0) term.rt.editor_drawn_content_cols else 80;
+    var best: u32 = 0;
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        const src = syntax_color.sourceLineFor(term.rt.editor_visible_numbers, first + i) orelse (first + i);
+        best = @max(best, inlay_client.lineExtraCols(term, src, cols));
+    }
+    return best;
 }
 
 /// 렌더에 넘길 **가장 긴 줄의 열 수**(0 = 아직 안 셌다 → 막대 없음).
@@ -7772,7 +7817,7 @@ fn sendHelperAnchor(
     const off = @min(sel.focus, doc.file.content.len);
     const line_idx = doc.file.lines.lineAt(off);
     const line = doc.file.lines.line(line_idx) orelse return null;
-    const a = chrome_editor.hit.bodyAnchor(
+    const a = chrome_editor.hit.bodyAnchorWith(
         .{
             .body_x = geom.body_x,
             .body_y = geom.body_y,
@@ -7787,6 +7832,7 @@ fn sendHelperAnchor(
         term.rt.editor_lines,
         line_idx,
         off -| line.start,
+        inlay_client.inlaysForLine(term, line_idx, geom.content_width), // 힌트 뒤(글리프 열)에 띄운다(§4.1h)
     ) orelse return null;
     // **한 줄 아래**에 띄운다 — caret 줄 위에 겹치면 방금 고른 글자를 가린다. 화면 아래 끝이면
     // 컴포넌트의 `menuRect` 가 위로 당긴다(가장자리 clamp 는 그쪽 단일 출처다).
@@ -9122,6 +9168,7 @@ fn refreshAfterEdit(self: *AppSession, term: *Term, edit: ?syntax_color.EditSpan
     // semantic tokens 2층도 같은 자리에서 민다(§8.2i 「편집 중」) — 범위를 모르면 버린다.
     if (edit) |e| semantic_client.onEdit(self, term, e.start, e.old_end, e.new_end) else semantic_client.onEdit(self, term, null, 0, 0);
     fold_lsp_client.onEdit(self, term); // 3층은 조용 시계만(§8.2j 「편집 중」) — 범위는 아래 ⑵ 의 `dropFoldState` 가 놓는다
+    if (edit) |e| inlay_client.onEdit(self, term, e.start, e.old_end, e.new_end) else inlay_client.onEdit(self, term, null, 0, 0); // 힌트 밀기(§4.1h — 경계 = 뒤)
     if (edit) |e|
         syntax_color.onEditSpan(&term.rt.editor_syntax, doc.file.content, e, doc.file.lines)
     else
@@ -9456,6 +9503,7 @@ pub fn releaseEditorTerm(self: *AppSession, term: *Term) void {
     // 여기서 안 놓으면 `std.testing.allocator`가 못 보는 누수가 된다(`SYN10`이 그 자리를 잰다).
     term.rt.editor_syntax.deinit(self.allocator);
     term.rt.editor_semantic.deinit(self.allocator);
+    term.rt.editor_inlay.deinit(self.allocator); // 인레이 힌트도 문서와 함께(§8.2n)
     term.rt.editor_fold_lsp = .{}; // 3층 대기 상태도 문서와 함께(`editor_lsp_version = 0` 과 같은 자리) — 두 호출자 모두 곧 Term 을 부수므로 관측되지 않는다(적대적 C8: 등가), 규율로 둔다
     if (term.rt.editor_lines.len > 0) self.allocator.free(term.rt.editor_lines);
     term.rt.editor_lines = &.{};
@@ -9511,6 +9559,72 @@ const builtin = @import("builtin");
 /// 그린 셀 중에 이 코드포인트가 있는가 — 조합 글자가 **화면에 닿았는지**를 재는 유일한 방법이다.
 fn drawnHasCodepoint(dl: renderer.DrawList, cp: u21) bool {
     for (dl.cells) |c| if (c.codepoint == cp) return true;
+    return false;
+}
+
+/// 그 문자열이 **한 행에 이어서** 그려졌나(판정자 전용 — 셀은 (row, col) 로 흩어져 있으므로 행마다 열 순으로 모아 찾는다).
+fn drawnHasText(dl: renderer.DrawList, needle: []const u8) bool {
+    return drawnRunRoleImpl(dl, needle, null);
+}
+
+/// 그 문자열이 한 행에 이어서 그려졌고 **공백 아닌 모든 셀의 전경이 그 역할의 팔레트 색**인가(§4.1h — 힌트 칸은 `syntax_comment`).
+/// `isSyntaxColored` 와 같은 원칙: draw op 의 역할이 아니라 **lowering 된 셀 전경**을 팔레트와 맞춘다.
+fn drawnRunRole(self: *AppSession, dl: renderer.DrawList, needle: []const u8, role: chrome.tokens.ColorRole) bool {
+    return drawnRunRoleImpl(dl, needle, self.buildChromeTokens().get(role));
+}
+
+fn drawnRunRoleImpl(dl: renderer.DrawList, needle: []const u8, want: ?maru.terminal.Rgb) bool {
+    var rows: [512]u16 = undefined;
+    var nrows: usize = 0;
+    for (dl.cells) |c| {
+        var seen = false;
+        for (rows[0..nrows]) |r| if (r == c.row) {
+            seen = true;
+        };
+        if (!seen and nrows < rows.len) {
+            rows[nrows] = c.row;
+            nrows += 1;
+        }
+    }
+    for (rows[0..nrows]) |row| {
+        // 이 행의 셀을 열 순으로 모은다(최대 1024열). 같은 (row, col) 에 여러 셀이 오면 **나중 것**이 남는다(그리는 순서 = 덮는 순서).
+        var cps: [1024]u21 = undefined;
+        var fgs: [1024]maru.terminal.Color = undefined;
+        var maxc: usize = 0;
+        @memset(&cps, 0);
+        for (dl.cells) |c| if (c.row == row and c.col < cps.len) {
+            cps[c.col] = c.codepoint;
+            fgs[c.col] = c.style.foreground;
+            if (c.col + 1 > maxc) maxc = c.col + 1;
+        };
+        if (maxc < needle.len) continue;
+        var start: usize = 0;
+        while (start + needle.len <= maxc) : (start += 1) {
+            var ok = true;
+            for (needle, 0..) |b, k| if (cps[start + k] != b) {
+                ok = false;
+                break;
+            };
+            if (!ok) continue;
+            const w = want orelse return true;
+            var all = true;
+            for (needle, 0..) |b, k| {
+                if (b == ' ') continue; // 공백 셀은 전경이 안 실릴 수 있다
+                const rgb = switch (fgs[start + k]) {
+                    .rgb => |v| v,
+                    else => {
+                        all = false;
+                        break;
+                    },
+                };
+                if (!std.meta.eql(rgb, w)) {
+                    all = false;
+                    break;
+                }
+            }
+            if (all) return true;
+        }
+    }
     return false;
 }
 
@@ -12831,6 +12945,212 @@ test "REF4 provider 는 종류마다 따로 읽는다 — typeDefinition 만 없
     try testing.expect(refSettled(&f.fx));
     try testing.expect(s.chrome_host.reference_picker.open);
     try pressKey(&f.fx, .escape, .{});
+}
+
+/// INL 판정자용 대기 — 힌트 응답이 `n` 번 적용될 때까지.
+fn inlayApplied(f: *SmtFixture, want: u64) bool {
+    const Ctx = struct { t: *Term, n: u64 };
+    return pumpLspUntil(&f.fx, 3000, Ctx{ .t = f.term, .n = want }, struct {
+        fn g(c: Ctx) bool {
+            return c.t.rt.editor_inlay.applied >= c.n;
+        }
+    }.g);
+}
+
+test "INL9 인레이 힌트 — 서버가 ready 면 색 만들기 자리가 범위를 묻고 응답의 힌트가 정렬돼 들며 프레임에 그려진다(힌트 글자·dim 색·글리프 열 밀림·caret 은 힌트 뒤·힌트 칸 클릭은 앵커); 편집은 힌트를 밀고(경계=뒤) 120 ms 조용한 뒤 다시 묻는다; 낡은 version 은 버린다; 랩 행 수가 힌트 세대로 다시 선다 (제품 경계, §8.2n·§4.1h)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var f = (try SmtFixture.open(allocator, "in.c", "int a_hv = 1;\nadd(1, 2); RET\n")) orelse return error.SkipZigTest;
+    defer f.close(allocator);
+    const s = f.fx.session;
+    const term = f.term;
+    try testing.expect(f.ready());
+    // ⑴ 첫 색 만들기 — 요청이 나간다(범위 0..1; 끝은 줄 수를 안 넘긴다). 대기 중엔 한 번만.
+    term.rt.editor_first_line = 0;
+    _ = syntaxColors(s, term);
+    try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_inlay);
+    try testing.expect(term.rt.editor_inlay.waiting);
+    _ = syntaxColors(s, term);
+    try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_inlay);
+    // ⑵ 응답 — 셋(가짜는 뒤에서 앞으로 낸다 → 정렬돼 든다): `: int`@8 · `p:`(padRight → `p: `)@18 · `-> void`(padLeft → ` -> void`)@28.
+    try testing.expect(inlayApplied(&f, 1));
+    const hints = term.rt.editor_inlay.hints.items.items;
+    try testing.expectEqual(@as(usize, 3), hints.len);
+    try testing.expectEqual(@as(u32, 8), hints[0].offset);
+    try testing.expectEqualStrings(": int", hints[0].text);
+    try testing.expectEqual(@as(u32, 14 + 4), hints[1].offset);
+    try testing.expectEqualStrings("p: ", hints[1].text);
+    try testing.expectEqual(@as(u32, 14 + 14), hints[2].offset);
+    try testing.expectEqualStrings(" -> void", hints[2].text);
+    try testing.expectEqual(term.rt.editor_lsp_version, term.rt.editor_inlay.version);
+    try testing.expectEqual(@as(u64, 1), term.rt.editor_inlay.generation);
+    // ⑶ 프레임 — 힌트 글자가 그려지고(`: int`), 그 런은 dim(syntax_comment), `= 1;` 은 힌트 폭 5 만큼 밀린 열에 선다.
+    term.rt.editor_selection = .{ .anchor_start = 8, .anchor_end = 8, .focus = 8 }; // `a_hv|` — caret 은 힌트 뒤에 선다
+    var d = appendPaneFrame(s, f.leaf, term) orelse return error.EditorPaneDidNotDraw;
+    defer d.dl.deinit(allocator);
+    try testing.expect(drawnHasCodepoint(d.dl, ':'));
+    try testing.expect(drawnHasText(d.dl, ": int"));
+    try testing.expect(drawnHasText(d.dl, "p: 1"));
+    try testing.expect(drawnRunRole(f.fx.session, d.dl, ": int", .syntax_comment));
+    const geom = term.rt.editor_hit_geom;
+    const cw: f64 = @floatFromInt(geom.cell_w_px);
+    const left: f64 = @floatFromInt(geom.body_x + @as(i32, @intCast(geom.content_left_px)));
+    const top: f64 = @floatFromInt(geom.body_y);
+    // caret 자리 = 열 8 + 힌트 5 = 13 (글리프 ` ` 앞). 판정: hit-test 로 되짚는다 — 열 13 의 왼쪽 반 → offset 8, 힌트 칸(열 10) → 앵커 8, 열 7(`v`) → 7.
+    try testing.expectEqual(@as(?usize, 8), hitTestBody(term, left + 13 * cw + 1, top + 2));
+    try testing.expectEqual(@as(?usize, 8), hitTestBody(term, left + 10 * cw + 3, top + 2));
+    try testing.expectEqual(@as(?usize, 7), hitTestBody(term, left + 7 * cw + 1, top + 2));
+    try testing.expectEqual(@as(?usize, 9), hitTestBody(term, left + 13 * cw + cw - 1, top + 2)); // 열 13 의 오른쪽 반 → 9
+    // 둘째 줄: `add(` 4 열 + `p: ` 3 = `1` 이 열 7. 열 5(힌트 안) → 앵커 18(줄 안 4).
+    try testing.expectEqual(@as(?usize, 14 + 4), hitTestBody(term, left + 5 * cw + 2, top + @as(f64, @floatFromInt(geom.cell_h_px)) + 2));
+    // ⑷ 편집 — 앵커 8 에 `x` 를 넣으면 힌트가 밀린다(경계=뒤): 9. 120 ms 안엔 안 묻는다.
+    try testing.expect(insertText(s, term, "x"));
+    try testing.expectEqual(@as(u64, 1), term.rt.editor_inlay.shifted);
+    try testing.expectEqual(@as(u32, 9), term.rt.editor_inlay.hints.items.items[0].offset);
+    try testing.expectEqual(@as(u32, 19), term.rt.editor_inlay.hints.items.items[1].offset);
+    try testing.expectEqual(@as(u64, 2), term.rt.editor_inlay.generation);
+    _ = syntaxColors(s, term);
+    try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_inlay);
+    {
+        const t0 = s.awakeMs();
+        while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
+    }
+    _ = syntaxColors(s, term); // 조용해졌다 — 묻는다
+    try testing.expectEqual(@as(u64, 2), s.editor_lsp.sent_inlay);
+    // ⑸ 대기 중에 또 편집 — 응답의 version 이 낡아 버리고, 조용해진 뒤 다시 묻는다. (`a_hvx` 는 더 이상 `_hv` 낱말이 아니라 새 응답엔 그 힌트가 없다.)
+    try testing.expect(insertText(s, term, "y"));
+    try testing.expect(pumpLspUntil(&f.fx, 3000, term, struct {
+        fn g(t: *Term) bool {
+            return t.rt.editor_inlay.dropped_stale >= 1;
+        }
+    }.g));
+    try testing.expectEqual(@as(u64, 1), term.rt.editor_inlay.applied);
+    {
+        const t0 = s.awakeMs();
+        while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
+    }
+    _ = syntaxColors(s, term);
+    try testing.expectEqual(@as(u64, 3), s.editor_lsp.sent_inlay);
+    try testing.expect(inlayApplied(&f, 2));
+    try testing.expectEqual(@as(usize, 2), term.rt.editor_inlay.hints.items.items.len); // `p: `·` -> void` 만
+    // ⑹ undo — 묶음 범위를 안다(`undoGroupSpan`) → 버리지 않고 **민다**(둘이 그대로, `xy` 가 한 묶음이라 앞으로 두 칸); 조용 뒤 다시 묻어 `_hv` 힌트가 돌아온다.
+    // (판정자 초판은 「undo = 범위 없음 = 전부 버림」이라 적었다가 여기서 빨개졌다 — 범위를 모르는 것은 `undoGroupSpan` 이 `null` 일 때뿐이다.)
+    const gen_before_undo = term.rt.editor_inlay.generation;
+    s.dispatchAppAction(.editor_undo);
+    try testing.expectEqual(@as(usize, 2), term.rt.editor_inlay.hints.items.items.len);
+    try testing.expectEqual(@as(u32, 14 + 4), term.rt.editor_inlay.hints.items.items[0].offset); // `xy` 가 함께 빠졌다(§3.3 묶음)
+    try testing.expectEqual(@as(usize, 13 + 1 + 14 + 1), (term.rt.editor_doc orelse return error.NoDoc).file.content.len); // 원문 그대로(끝 개행 포함)
+    try testing.expect(term.rt.editor_inlay.generation > gen_before_undo);
+    {
+        const t0 = s.awakeMs();
+        while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
+    }
+    _ = syntaxColors(s, term);
+    try testing.expect(inlayApplied(&f, 3));
+    try testing.expectEqual(@as(usize, 3), term.rt.editor_inlay.hints.items.items.len); // `a_hv` 가 돌아와 `: int` 도 돌아왔다
+    try testing.expectEqual(@as(u32, 8), term.rt.editor_inlay.hints.items.items[0].offset);
+    // ⑺ 범위를 모르는 편집(`null`) → 전부 버리고 세대가 오른다(제품에서는 `undoGroupSpan` 이 `null` 일 때 — 오늘은 닿지 않는 갈래라 직접 부른다).
+    const gen_before_null = term.rt.editor_inlay.generation;
+    inlay_client.onEdit(s, term, null, 0, 0);
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_inlay.hints.items.items.len);
+    try testing.expectEqual(gen_before_null + 1, term.rt.editor_inlay.generation);
+}
+
+test "INL10 인레이 힌트 — provider 없으면 아무것도 안 묻고, 오류 응답은 버리고 조용한 뒤 다시 묻고, null 은 힌트 없음; 랩이 켜지면 힌트 폭만큼 행이 더 접힌다(힌트 세대 키) (제품 경계, §8.2n·§4.1h)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    _ = setenv("MARU_FAKE_LSP_NOINLAYCAP", "1", 1);
+    {
+        var f = (try SmtFixture.open(allocator, "nc.c", "int a_hv = 1;\n")) orelse return error.SkipZigTest;
+        defer f.close(allocator);
+        const s = f.fx.session;
+        const term = f.term;
+        try testing.expect(f.ready());
+        term.rt.editor_first_line = 0;
+        _ = syntaxColors(s, term);
+        try testing.expectEqual(@as(u64, 0), s.editor_lsp.sent_inlay);
+    }
+    _ = unsetenv("MARU_FAKE_LSP_NOINLAYCAP");
+    {
+        var f = (try SmtFixture.open(allocator, "er.c", "int a_hv = 1; // INLERR\n")) orelse return error.SkipZigTest;
+        defer f.close(allocator);
+        const s = f.fx.session;
+        const term = f.term;
+        try testing.expect(f.ready());
+        term.rt.editor_first_line = 0;
+        _ = syntaxColors(s, term);
+        try testing.expect(pumpLspUntil(&f.fx, 3000, term, struct {
+            fn g(t: *Term) bool {
+                return t.rt.editor_inlay.dropped_error >= 1;
+            }
+        }.g));
+        try testing.expect(!term.rt.editor_inlay.waiting and term.rt.editor_inlay.dirty);
+        _ = syntaxColors(s, term); // 곧바로는 안 묻는다(조용 시계)
+        try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_inlay);
+        try removeMarkerHover(s, term, " // INLERR");
+        {
+            const t0 = s.awakeMs();
+            while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
+        }
+        _ = syntaxColors(s, term);
+        try testing.expectEqual(@as(u64, 2), s.editor_lsp.sent_inlay);
+        try testing.expect(inlayApplied(&f, 1));
+        try testing.expectEqual(@as(usize, 1), term.rt.editor_inlay.hints.items.items.len);
+    }
+    // 랩 — 12열 창(본문)에서 `int a_hv = 1;`(13열)은 2행; 힌트 `: int`(5)를 더하면 18열 → 2행 그대로지만, 24열 창이면 힌트 없이 1행·힌트로 1행(18 ≤ 24).
+    // 폭을 바꾸지 않고 잰다: 힌트 전엔 1행, 힌트 뒤 줄이 창보다 길어지게 짧은 창을 만든다.
+    {
+        var f = (try SmtFixture.open(allocator, "wr.c", "int a_hv = 1;\n")) orelse return error.SkipZigTest;
+        defer f.close(allocator);
+        const s = f.fx.session;
+        const term = f.term;
+        try testing.expect(f.ready());
+        term.rt.editor_wrap = true;
+        // 좁은 pane: 본문 16열 정도 — gutter 를 빼고 `int a_hv = 1;` 13 은 1행, 힌트 포함 18 은 2행.
+        const narrow: maru.session.SplitRect = .{ .x = f.leaf.x, .y = f.leaf.y, .w = @intCast(s.cell_width_px * 26), .h = f.leaf.h };
+        term.rt.editor_first_line = 0;
+        var d0 = appendPaneFrame(s, narrow, term) orelse return error.EditorPaneDidNotDraw;
+        d0.dl.deinit(allocator);
+        const rows_before = term.rt.editor_hit_rows_len;
+        try testing.expect(inlayApplied(&f, 1));
+        var d1 = appendPaneFrame(s, narrow, term) orelse return error.EditorPaneDidNotDraw;
+        d1.dl.deinit(allocator);
+        try testing.expect(term.rt.editor_hit_rows_len > rows_before); // 힌트가 도착해 행이 늘었다(힌트 세대가 캐시를 다시 세게 했다)
+    }
+}
+
+test "INL11 인레이 힌트 — 서버의 `workspace/inlayHint/refresh` 는 거부하지 않고 `null` 로 답하며 다시 묻는다(rust-analyzer 는 색인 전 `[]` → 끝나면 refresh; 안 받으면 영영 빈 화면) (제품 경계, §8.2n)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var f = (try SmtFixture.open(allocator, "rf.c", "int a_hv = 1; INLREFRESH\n")) orelse return error.SkipZigTest;
+    defer f.close(allocator);
+    const s = f.fx.session;
+    const term = f.term;
+    try testing.expect(f.ready());
+    const rejected_before = s.editor_lsp.rejected_requests;
+    term.rt.editor_first_line = 0;
+    _ = syntaxColors(s, term);
+    try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_inlay);
+    // ⑴ 첫 응답은 `[]` → 적용 1(힌트 0). 곧 refresh 가 온다 → `null` 로 답하고(거부 수 그대로) dirty.
+    try testing.expect(inlayApplied(&f, 1));
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_inlay.hints.items.items.len);
+    try testing.expect(pumpLspUntil(&f.fx, 3000, s, struct {
+        fn g(a: *AppSession) bool {
+            return a.editor_lsp.inlay_refreshes >= 1;
+        }
+    }.g));
+    try testing.expectEqual(rejected_before, s.editor_lsp.rejected_requests);
+    try testing.expect(term.rt.editor_inlay.dirty);
+    // ⑵ 다음 프레임이 곧바로(조용 시계 없이) 다시 묻고 — 가짜는 우리 답을 받은 뒤라 진짜 힌트를 낸다.
+    _ = syntaxColors(s, term);
+    try testing.expectEqual(@as(u64, 2), s.editor_lsp.sent_inlay);
+    try testing.expect(inlayApplied(&f, 2));
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_inlay.hints.items.items.len);
+    try testing.expectEqualStrings(": int", term.rt.editor_inlay.hints.items.items[0].text);
+    try testing.expect(!term.rt.editor_inlay.dirty);
+    // ⑶ 다 든 뒤엔 또 안 묻는다.
+    _ = syntaxColors(s, term);
+    try testing.expectEqual(@as(u64, 2), s.editor_lsp.sent_inlay);
 }
 
 test "GOTO1 정의로 이동 — F12·⌘클릭이 서버 응답의 첫 항목으로 caret 을 옮기고 되돌아가기 표식을 쌓는다; ⌃-/⌃⇧- 로 뒤로·앞으로; 다른 파일은 열어서; root 밖·없음은 알림; 낡은 응답은 버린다 (제품 경계, §8.2c·§5.2)" {

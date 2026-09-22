@@ -142,6 +142,8 @@ pub const Props = struct {
     ///
     /// 열 기준이며 오름차순·비겹침이라는 계약은 `content.Row.colors`가 소유한다.
     line_colors: []const []const content.ColorSpan = &.{},
+    /// **줄별 가상 텍스트 창**(§4.1h — LSP 인레이 힌트). 렌더 축. 창 밖은 힌트 없음. `generation` 이 바뀌면 랩 행 수 캐시가 다시 센다.
+    line_inlays: content.InlayWindow = .{},
     /// 화면 맨 위에 올 논리 줄(0-based). 여기서부터 그리고, 줄 번호도 여기서 시작한다.
     first_line: usize,
     /// 첫 줄의 몇 번째 **조각**부터 그리는가. 랩이 켜졌을 때 화면이 줄 중간에서 시작하는 상태다
@@ -397,6 +399,8 @@ pub const RowCache = struct {
     content_width: u16 = 0,
     wrap: bool = false,
     tab_width: u8 = 0,
+    /// 힌트 세대(§4.1h) — 힌트가 도착하면 줄 폭이 늘어 행 수가 바뀐다. 키가 이것을 모르면 gutter 번호·스크롤바가 어긋난다.
+    inlay_generation: u64 = 0,
     /// 채워진 적이 있는가. 위 키가 우연히 0으로 맞는 첫 프레임을 유효로 읽지 않기 위한 플래그다.
     filled: bool = false,
     /// **조건이 갈려도 다시 세지 않는다**(§2.1 "저하 동작을 허용한다" — *"랩은 직전 결과를 쓴다"*).
@@ -452,8 +456,9 @@ pub const RowCache = struct {
     }
 
     /// 지금 그리는 조건에서 이 캐시를 그대로 쓸 수 있는가.
-    fn hits(self: *const RowCache, lines: []const []const u8, widgets: []const ?content.Widget, width: u16, wrap: bool, tab_width: u8) bool {
+    fn hits(self: *const RowCache, lines: []const []const u8, widgets: []const ?content.Widget, width: u16, wrap: bool, tab_width: u8, inlay_generation: u64) bool {
         return self.filled and
+            self.inlay_generation == inlay_generation and
             self.lines_ptr == @intFromPtr(lines.ptr) and
             self.lines_len == lines.len and
             self.widgets_ptr == @intFromPtr(widgets.ptr) and
@@ -510,13 +515,14 @@ fn widgetAt(props: Props, line: usize) ?content.Widget {
 /// `content.rowCount`를 직접 부르면 위젯을 빠뜨리기 쉽고, 빠뜨린 자리는 **문서 끝에서 그만큼 못
 /// 내려가는** 것으로만 드러난다 — 화면에서 바로 안 보이는 종류다.
 fn rowsOfLine(props: Props, layout: geometry.Layout, line: usize, scratch: []u8) content.RowCount {
-    return content.rowCount(
+    return content.rowCountWith(
         props.lines[line],
         props.tab_width,
         layout.content.width,
         props.wrap,
         if (widgetAt(props, line) != null) 1 else 0,
         scratch,
+        props.line_inlays.at(line),
     );
 }
 
@@ -543,6 +549,7 @@ pub fn build(props: Props, scratch: Scratch) Written {
             // **짧은 배열을 허용한다** — 없는 줄은 무색이다(위 `line_colors` 계약).
             .colors = if (li < props.line_colors.len) props.line_colors[li] else &.{},
             .caret_cols = caretColsFor(props, scratch.caret_cols, &caret_cols_used, li),
+            .inlays = props.line_inlays.at(li),
         };
     }
     const visual_budget = @min(props.visible_rows, scratch.visual_rows.len);
@@ -619,7 +626,7 @@ pub fn build(props: Props, scratch: Scratch) Written {
     const cache: ?*RowCache = blk: {
         const c = props.row_cache orelse break :blk null;
         if (c.prefix.len <= props.lines.len) break :blk null;
-        if (!c.hits(props.lines, props.line_widgets, layout.content.width, props.wrap, props.tab_width)) {
+        if (!c.hits(props.lines, props.line_widgets, layout.content.width, props.wrap, props.tab_width, props.line_inlays.generation)) {
             // **저하**: 드래그 중이면 옛 값을 그대로 쓴다(§2.1). 단 **줄 배열이 그대로일 때만**이다 —
             // 저하가 겨냥하는 것은 폭이 바뀌는 드래그이고, 그동안 문서의 줄 집합은 변하지 않는다.
             // 줄이 바뀌었는데 옛 접두합을 쓰면 그것은 "직전 결과"가 아니라 **다른 문서의 값**이다.
@@ -636,6 +643,7 @@ pub fn build(props: Props, scratch: Scratch) Written {
             c.content_width = layout.content.width;
             c.wrap = props.wrap;
             c.tab_width = props.tab_width;
+            c.inlay_generation = props.line_inlays.generation;
             c.filled = true;
             c.filled_upto = 0;
             c.prefix[0] = 0;
@@ -933,6 +941,7 @@ fn paintBands(props: Props, layout: geometry.Layout, visual: []const visual_map.
 
         n += paintRowMarks(props, layout, .{
             .line = line,
+            .inlays = props.line_inlays.at(idx),
             .row_start_col = row_start_col,
             .y = y,
             .marks = row_marks,
@@ -949,6 +958,8 @@ fn paintBands(props: Props, layout: geometry.Layout, visual: []const visual_map.
 /// 7칸 밀린 전례가 그것이다. 색과 세기만 다르고 나머지는 같다.
 const RowMarkPaint = struct {
     line: []const u8,
+    /// 이 줄의 가상 텍스트(§4.1h) — 열 변환이 힌트 폭을 안다.
+    inlays: []const content.Inlay = &.{},
     row_start_col: u32,
     y: i32,
     marks: []const Mark,
@@ -974,7 +985,7 @@ fn paintRowMarks(props: Props, layout: geometry.Layout, p: RowMarkPaint, out: []
         offsets[k * 2 + 1] = m.start + m.len;
     }
     // 화면 오른쪽 끝을 넘으면 멈춘다 — 그 뒤 마크는 어차피 아래에서 잘린다.
-    content.columnsAtOffsets(p.line, props.tab_width, offsets, offsets, p.row_start_col + layout.content.width); // 제자리 채우기
+    content.columnsAtOffsetsWith(p.line, props.tab_width, offsets, offsets, p.row_start_col + layout.content.width, p.inlays); // 제자리 채우기
     for (p.marks[0..max_pairs], 0..) |_, k| {
         if (n >= out.len) break;
         const start_col = offsets[k * 2];
@@ -1042,6 +1053,7 @@ fn paintDiagnostics(props: Props, layout: geometry.Layout, visual: []const visua
             const one = [_]Mark{.{ .start = dm.start, .len = dm.len }};
             n += paintRowMarks(props, layout, .{
                 .line = props.lines[idx],
+                .inlays = props.line_inlays.at(idx),
                 .row_start_col = v.start_col,
                 .y = props.rect.y + @as(i32, @intCast(i)) * @as(i32, props.cell_h_px),
                 .marks = &one,
@@ -1072,6 +1084,7 @@ fn paintSelection(props: Props, layout: geometry.Layout, visual: []const visual_
         if (sel[idx].len == 0) continue;
         n += paintRowMarks(props, layout, .{
             .line = props.lines[idx],
+            .inlays = props.line_inlays.at(idx),
             .row_start_col = v.start_col,
             .y = props.rect.y + @as(i32, @intCast(i)) * @as(i32, props.cell_h_px),
             .marks = sel[idx],
@@ -1124,7 +1137,7 @@ fn paintCarets(props: Props, layout: geometry.Layout, visual: []const visual_map
         const y = props.rect.y + @as(i32, @intCast(i)) * @as(i32, props.cell_h_px);
         for (offsets) |off| {
             if (n >= out.len) return n; // 예산 끝 — 막대 몫을 지킨다
-            const col = columnOfOffset(line, props.tab_width, off, row.start_col + layout.content.width);
+            const col = columnOfOffset(line, props.tab_width, off, row.start_col + layout.content.width, props.line_inlays.at(idx));
             if (col < row.start_col) continue; // 이 행보다 앞이다(랩)
             const on_screen = col - row.start_col;
             if (on_screen >= layout.content.width) continue; // 이 행보다 뒤다
@@ -1190,7 +1203,7 @@ fn caretColsFor(props: Props, store: []u32, used: *usize, line_idx: usize) []con
         // **줄 끝의 커서는 반전할 글자가 없다.** 빈 칸을 반전 목록에 넣으면 다음 줄의 훑기가
         // 헛돌 뿐이라 아예 안 넣는다.
         if (off >= line.len) continue;
-        store[used.*] = columnOfOffset(line, props.tab_width, off, std.math.maxInt(u32));
+        store[used.*] = columnOfOffset(line, props.tab_width, off, std.math.maxInt(u32), props.line_inlays.at(line_idx));
         used.* += 1;
     }
     return store[start..used.*];
@@ -1198,10 +1211,10 @@ fn caretColsFor(props: Props, store: []u32, used: *usize, line_idx: usize) []con
 
 /// 줄 안 byte offset이 몇 열인가. `columnsAtOffsets`를 하나짜리로 부르는 얇은 감쌈이다 —
 /// **열 계산을 여기서 다시 짜지 않는다**(§5.4: 하나의 픽셀-레이아웃 소스).
-fn columnOfOffset(line: []const u8, tab_width: u16, offset: u32, stop_col: u32) u32 {
+fn columnOfOffset(line: []const u8, tab_width: u16, offset: u32, stop_col: u32, inlays: []const content.Inlay) u32 {
     var one = [_]u32{offset};
     var out = [_]u32{0};
-    content.columnsAtOffsets(line, tab_width, &one, &out, stop_col);
+    content.columnsAtOffsetsWith(line, tab_width, &one, &out, stop_col, inlays);
     return out[0];
 }
 
@@ -1240,6 +1253,7 @@ fn paintSearch(props: Props, layout: geometry.Layout, visual: []const visual_map
             } else continue;
             n += paintRowMarks(props, layout, .{
                 .line = props.lines[idx],
+                .inlays = props.line_inlays.at(idx),
                 .row_start_col = v.start_col,
                 .y = props.rect.y + @as(i32, @intCast(i)) * @as(i32, props.cell_h_px),
                 .marks = marks[k .. k + 1],

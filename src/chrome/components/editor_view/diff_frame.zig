@@ -69,6 +69,8 @@ pub const Side = struct {
     /// **줄마다의 전개 시작 힌트**(`lines` 와 같은 축, 짧아도 된다). 비교 뷰는 안 쓴다 — 문서가
     /// 둘이라 체크포인트의 축(문서 줄 첨자)이 성립하지 않는다(폭 합 캐시와 같은 이유다).
     line_seeks: []const ?frame.content.Seek = &.{},
+    /// 줄별 가상 텍스트 창(§4.1h) — 단일 편집기만(비교 뷰는 힌트가 없다).
+    line_inlays: frame.content.InlayWindow = .{},
     /// gutter 자릿수를 정하는 **문서** 줄 수(행 수가 아니다). `null`이면 `lines.len`.
     total_lines: ?usize = null,
     /// 행마다의 줄 번호(`null` 항목 = 짝을 맞추려 넣은 빈 행). `null`이면 순차 번호.
@@ -291,6 +293,7 @@ pub fn buildSide(
         .minimap_px = mm_px,
         .line_colors = side.line_colors,
         .line_seeks = side.line_seeks,
+        .line_inlays = side.line_inlays,
         .lines = side.lines,
         .first_line = shared.first_line,
         .first_piece = shared.first_piece,

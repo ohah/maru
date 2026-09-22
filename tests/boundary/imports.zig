@@ -7495,18 +7495,27 @@ test "MP1 경계: 떠 있는 프리뷰의 도크 점프가 pane hit 보다 먼�
     const allocator = std.testing.allocator;
     const app_session = try readZigFileZ(allocator, "src/platform/macos/app_session.zig");
     defer allocator.free(app_session);
+    // 점프 «본문» 은 F18 이 그룹 파일로 옮겼다 — 순서를 재는 자리(위)와 본문이 하는 일(아래)이
+    // 이제 다른 파일에 산다. 둘 다 읽어 같은 판정을 유지한다.
+    const marker_view = try readZigFileZ(allocator, "src/platform/macos/app_session/marker_preview_view.zig");
+    defer allocator.free(marker_view);
 
     // 호출은 **한 자리**다 — 둘이 되면 어느 쪽이 먼저인지가 다시 불분명해진다.
-    try std.testing.expectEqual(@as(usize, 1), countOccurrences(app_session, "self.markerPreviewDockJumpAt(x_px, y_px)"));
+    //
+    // F18 이 이 메서드를 `app_session/marker_preview_view.zig` 로 옮겨 호출이 위임 형태가 됐다.
+    // **불변식(도크 점프가 pane hit 보다 먼저)은 그대로**이고 문법만 바뀌었다.
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(app_session, "marker_view_ops.markerPreviewDockJumpAt(self, x_px, y_px)"));
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(
         app_session,
-        "if (self.markerPreviewDockJumpAt(x_px, y_px)) return &.{};\n        const hit = pane_ops.paneTargetAt(self, x_px, y_px)",
+        "if (marker_view_ops.markerPreviewDockJumpAt(self, x_px, y_px)) return &.{};\n        const hit = pane_ops.paneTargetAt(self, x_px, y_px)",
     ));
 
     // **도크를 «연다» — 뷰만 바꾸지 않는다.** `enterDockView` 는 접힌 도크를 그대로 두므로 점프해도
     // 화면에 아무 변화가 없다(뷰는 바뀌었는데 안 보인다 — 「눌렀는데 아무 일도 없다」로 읽힌다).
     // `openDockTo` 가 presented·collapsed 를 함께 세우고 pane 을 다시 잰다(적대 8회차).
-    try std.testing.expectEqual(@as(usize, 1), countOccurrences(app_session, "dock_ops.openDockTo(self, .agent_activity)"));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(marker_view, "dock_ops.openDockTo(self, .agent_activity)"));
+    // 잘못된 쪽은 **두 파일 어디에도** 없어야 한다 — 본문이 어느 쪽으로 돌아와도 걸린다.
+    try std.testing.expectEqual(@as(usize, 0), countOccurrences(marker_view, "dock_ops.enterDockView(self, .agent_activity)"));
     try std.testing.expectEqual(@as(usize, 0), countOccurrences(app_session, "dock_ops.enterDockView(self, .agent_activity)"));
 }
 
@@ -11855,6 +11864,48 @@ fn containerMethodMarkerCount(
     return count;
 }
 
+/// `containerMethodMarkerCount` 의 **파일 스코프 함수** 판. 그룹 파일로 옮겨 간 함수는 더 이상
+/// `AppSession` 의 멤버가 아니라 최상위 `fn` 이라 컨테이너로 찾을 수 없다.
+fn fileFnMarkerCount(
+    allocator: std.mem.Allocator,
+    source: [:0]const u8,
+    fn_name: []const u8,
+    marker: []const u8,
+) !usize {
+    var tree = (try source_cache.ast(source)).*; // 파싱은 캐시가 소유한다
+    var fn_node: ?std.zig.Ast.Node.Index = null;
+    for (tree.rootDecls()) |decl| {
+        if (tree.nodeTag(decl) != .fn_decl) continue;
+        const proto = tree.nodeData(decl).node_and_node[0];
+        var buf: [1]std.zig.Ast.Node.Index = undefined;
+        const full = tree.fullFnProto(&buf, proto) orelse continue;
+        const name_token = full.name_token orelse continue;
+        if (!std.mem.eql(u8, tree.tokenSlice(name_token), fn_name)) continue;
+        if (fn_node != null) return error.TestUnexpectedResult; // 같은 이름이 둘이면 판정이 흐려진다
+        fn_node = decl;
+    }
+    const node = fn_node orelse return error.TestUnexpectedResult;
+    const marker_tokens = try tokenizeMarker(allocator, marker);
+    defer allocator.free(marker_tokens);
+    var count: usize = 0;
+    var cursor = tree.firstToken(node);
+    while (findTreeTokenSequence(&tree, cursor, tree.lastToken(node), marker, marker_tokens)) |found| {
+        count += 1;
+        cursor = found + @as(std.zig.Ast.TokenIndex, @intCast(marker_tokens.len));
+    }
+    return count;
+}
+
+fn expectFileFnMarkerCount(
+    allocator: std.mem.Allocator,
+    source: [:0]const u8,
+    fn_name: []const u8,
+    marker: []const u8,
+    expected: usize,
+) !void {
+    try std.testing.expectEqual(expected, try fileFnMarkerCount(allocator, source, fn_name, marker));
+}
+
 fn tokenizeMarker(allocator: std.mem.Allocator, marker: []const u8) ![]std.zig.Token.Loc {
     var tokens: std.ArrayList(std.zig.Token.Loc) = .empty;
     errdefer tokens.deinit(allocator);
@@ -12598,8 +12649,10 @@ test "마커 프리뷰: 여는 자리·그리는 자리·푸는 자리가 모두
     // **0 건만 세지 않는다.** 「`activePane` 이 없다」만 보면 그 함수가 pane 을 **아예 안 찾는**
     // 퇴행도 통과한다 — 그래서 **찾는 자리(`markerPreviewTarget`)가 있는지**도 함께 센다.
     const allocator = std.testing.allocator;
-    const app_session = try readZigFileZ(allocator, "src/platform/macos/app_session.zig");
-    defer allocator.free(app_session);
+    // F18 이 이 넷을 `app_session/marker_preview_view.zig` 로 옮겼다 — 컨테이너 메서드가 아니라
+    // 파일 스코프 함수가 됐으므로 파일 전체를 한 «컨테이너» 로 보고 센다.
+    const view = try readZigFileZ(allocator, "src/platform/macos/app_session/marker_preview_view.zig");
+    defer allocator.free(view);
 
     inline for (.{
         "pumpMarkerPreviewOpen",
@@ -12607,22 +12660,8 @@ test "마커 프리뷰: 여는 자리·그리는 자리·푸는 자리가 모두
         "collectMarkerPreviewDraws",
         "markerPreviewDockJumpAt",
     }) |method| {
-        try expectContainerMethodMarkerCount(
-            allocator,
-            app_session,
-            "AppSession",
-            method,
-            "pane_ops.activePane(",
-            0,
-        );
-        try expectContainerMethodMarkerCount(
-            allocator,
-            app_session,
-            "AppSession",
-            method,
-            "markerPreviewTarget(",
-            1,
-        );
+        try expectFileFnMarkerCount(allocator, view, method, "pane_ops.activePane(", 0);
+        try expectFileFnMarkerCount(allocator, view, method, "markerPreviewTarget(", 1);
     }
 }
 

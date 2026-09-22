@@ -27,6 +27,7 @@ const maru = @import("maru");
 const chrome = maru.chrome;
 const terminal = maru.terminal;
 const app_session_mod = @import("../app_session.zig");
+const status_bar_ops = @import("status_bar.zig");
 const AppSession = app_session_mod.AppSession;
 const setShellArgs = AppSession.setShellArgs;
 const macroRhsString = AppSession.macroRhsString;
@@ -1715,7 +1716,7 @@ pub fn openBranchMenu(self: *AppSession) void {
     var anchor_x: f64 = 0;
     var anchor_y: f64 = 0;
     var anchored = false;
-    for (self.statusBarTree().entries) |e| {
+    for (status_bar_ops.statusBarTree(self).entries) |e| {
         if (e.id != @intFromEnum(chrome.components.status_bar.ItemId.git_branch)) continue;
         anchor_x = e.rect.x;
         anchor_y = e.rect.y;

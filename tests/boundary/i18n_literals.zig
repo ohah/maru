@@ -150,7 +150,8 @@ const inventory = [_]Entry{
     // 31 = 29 + **재시도 경로의 영구 실패 둘**(적대적 검증). `HOME` 이 없을 때와 control socket 경로를
     // 못 만들 때다 — 설치 경로에 이미 있던 같은 문장의 짝이다. 사유 없이 빠져나가면 **매 tick 조용히
     // 다시 시도하는 막다른 길**이 되기 때문에 넣었다(§1.2 · 계약이 금지하는 그 모양).
-    .{ .path = "src/platform/macos/app_session.zig", .count = 53 },
+    .{ .path = "src/platform/macos/app_session.zig", .count = 43 },
+    .{ .path = "src/platform/macos/app_session/remote_agent.zig", .count = 10 },
     // 캡처 훅이 240 tick 안에 못 열었을 때 **왜** 못 열었는지 뱉는 한 줄이 늘었다(2026-09-01).
     // 표시가 아니라 **하니스 진단**이다 — 사용자는 이 문장을 볼 일이 없고, 조용히 포기하면
     // 틀린 그림이 PR 의 증거가 되기 때문에 넣었다(§7 셋째 갈래).

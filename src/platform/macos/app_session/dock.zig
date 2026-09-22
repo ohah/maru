@@ -19,6 +19,7 @@ const chrome = maru.chrome;
 const dock_panel = maru.session.dock_panel;
 const dock_layout = maru.session.dock_layout;
 const app_session_mod = @import("../app_session.zig");
+const status_bar_ops = @import("status_bar.zig");
 const AppSession = app_session_mod.AppSession;
 const term_ops = @import("term.zig");
 const git_ops = @import("git.zig");
@@ -169,7 +170,7 @@ pub fn dockGeometry(self: *const AppSession) dock_layout.Geometry {
         // 보인다(사용자 보고). 28pt는 그 띠의 **하한**으로 `computeTitlebarStripPx` 안에 그대로 살아 있고
         // (접힘이면 신호등 세로 높이인 30pt), 뷰와 무관하다는 계약도 그대로다.
         .titlebar_height_px = self.titlebar_strip_px,
-        .status_bar_px = self.statusBarHeightPx(),
+        .status_bar_px = status_bar_ops.statusBarHeightPx(self),
         .cell_width_px = self.cell_width_px,
         .cell_height_px = self.cell_height_px,
         .scale_milli = self.scale_milli,

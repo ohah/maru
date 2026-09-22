@@ -20,6 +20,7 @@ const maru = @import("maru");
 
 const chrome = maru.chrome;
 const app_session_mod = @import("../app_session.zig");
+const status_bar_ops = @import("status_bar.zig");
 const AppSession = app_session_mod.AppSession;
 const dock_list_scrollbar_min_thumb_px = app_session_mod.dock_list_scrollbar_min_thumb_px;
 const input_math = app_session_mod.input_math;
@@ -242,7 +243,7 @@ pub fn scrollWheel(self: *AppSession, delta_y: f64, delta_x: f64, precise: bool,
     // **오버레이가 열려 있으면 이 가드를 타지 않는다.** 아래 notice 처리는 "아무 입력으로나 닫힘"
     // 규율이라 휠도 토스트를 닫아야 하는데(그 주석이 옛 회귀를 적어 뒀다), 여기서 삼키면 토스트가
     // 뜬 채로 스크롤도 막히고 닫히지도 않는다. 알림 패널 휠 처리도 아래에 있다. `mouse()`와 같은 게이트다.
-    if (!self.anyOverlayOpen() and self.pointInStatusBar(x_px, y_px)) return;
+    if (!self.anyOverlayOpen() and status_bar_ops.pointInStatusBar(self, x_px, y_px)) return;
     // notice 토스트(비-인터랙티브 정보, 자동 닫힘 타이머 없음)는 **휠로도 닫는다** — 키(notice.handle)·클릭(mouse())과
     // 같은 "아무 입력으로나 닫힘" 규율을 휠까지 확장한다(옛날엔 아래 anyOverlayOpen이 휠을 삼키기만 해 토스트가 떠 있는
     // 동안 스크롤이 막힌 채 닫히지도 않았다). 휠은 소비한다(닫되 스크롤은 안 함 — 토스트 확인 제스처). notifications와

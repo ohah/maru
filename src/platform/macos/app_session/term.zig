@@ -28,6 +28,7 @@ const maru = @import("maru");
 
 const chrome = maru.chrome;
 const app_session_mod = @import("../app_session.zig");
+const marker_view_ops = @import("marker_preview_view.zig");
 const AppSession = app_session_mod.AppSession;
 const buildPastePreview = AppSession.buildPastePreview;
 const session_host = app_session_mod.session_host;
@@ -700,7 +701,7 @@ fn destroyTermWithAbandonBackend(
     // PNG 바이트가 세션 끝까지 남고, 열린 프리뷰는 다시 활성이 될 수 없는 pane 을 가리킨 채 픽셀을
     // 든다. 닫는 자리에서 텍스처 회수 표시도 함께 선다(`closeMarkerPreview`).
     if (self.marker_preview_open) |o| {
-        if (o.surface_id == surface_id) self.closeMarkerPreview();
+        if (o.surface_id == surface_id) marker_view_ops.closeMarkerPreview(self);
     }
     self.marker_preview.dropSurface(self.allocator, surface_id);
     // 원격 tmux pane 슬롯도 이 Term 의 것이다(RA7 조각 2) — surface 가 죽으면 그 슬롯을 비운다(밀림으로 세지 않는다).

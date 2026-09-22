@@ -16885,6 +16885,16 @@ fake notification sink는 payload·routing·bounded history TDD에 사용하지�
   100-runtime CPU/allocation budget을 통과해야 한다(P4 E3).
 - slow observer queue overflow 뒤 controller/PTY 진행 무정지.
 - 100 runtime의 attach/list/snapshot 메모리 상한과 첫 visible runtime latency artifact.
+  기준선은 실제 ReleaseFast host와 실제 PTY 100개를 먼저 안정 상태로 만든 뒤, **새 GUI connection 하나**가
+  runtime 1→100에 observer로 순차 재attach하는 구간만 잰다. runtime 생성 시간은 재접속 지연에 섞지 않는다.
+  artifact는 runtime별 attach 시작부터 initial snapshot `end_stream` 적용까지의 지연·snapshot byte·host RSS와
+  직전 phase barrier에서 과거 telemetry peak를 현재값으로 초기화한 뒤 ledger resident/shared와
+  slot queue/base/control/total의 phase baseline·peak 및 각 한도를 기록해 기존 점유와 재attach 증가분을 구분하고,
+  계측 RPC 시간은 제외한 attach+snapshot 원시 지연의 합으로
+  1·10·50·100번째 누적 시간과 전체 p50/p95/max를 validator가 다시 계산한다. 전체 wall clock도 별도로 남긴다.
+  이 값은 현재 제품의 eager 순차 기준선일 뿐 concurrent attach, visible-first,
+  byte-credit 또는 shared-memory 대안의 성능으로 해석하지 않는다. 대안은 같은 workload를 실제 제품 seam에
+  구현해 동일 artifact를 만들기 전에는 채택하거나 개선으로 주장하지 않는다.
 - runtime 0/client 0 host bounded 종료와 stale socket 회수.
 - SIGKILL GUI 뒤 host와 child pid/runtime/output 생존.
 - protocol old/new/unknown/oversize/partial frame.

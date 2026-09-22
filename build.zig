@@ -8590,7 +8590,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"P5b2b3"},
         });
         const run_p5b2b3_owner_tests = b.addRunArtifact(p5b2b3_owner_tests);
-        run_p5b2b3_owner_tests.addArg("--maru-expect-tests=3");
+        run_p5b2b3_owner_tests.addArg("--maru-expect-tests=4");
         session_host_p5b2b3_step.dependOn(&run_p5b2b3_owner_tests.step);
         const p5b2b3_client_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{

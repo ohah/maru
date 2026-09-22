@@ -7,7 +7,7 @@
 const std = @import("std");
 const connection_slot = @import("connection_slot");
 
-const schema_name = "maru.session-host-slow-observer-macos.v4";
+const schema_name = "maru.session-host-slow-observer-macos.v6";
 const scenario_name = "slow-observer-real-pty-rss";
 const build_mode = "ReleaseFast";
 const sample_api = "proc_pid_rusage:RUSAGE_INFO_V4";
@@ -102,6 +102,23 @@ const ScreenIdleScaleSample = struct {
     metadata_core_lock_acquisition_delta: u64,
 };
 
+const ReattachSample = struct {
+    ordinal: u32,
+    started_ns: u64,
+    attach_completed_ns: u64,
+    snapshot_completed_ns: u64,
+    latency_ns: u64,
+    cumulative_ns: u64,
+    snapshot_bytes: u64,
+    host_rss_bytes: u64,
+    ledger_resident_bytes: u64,
+    ledger_shared_bytes: u64,
+    ledger_peak_slot_queue_bytes: u64,
+    ledger_peak_slot_base_bytes: u64,
+    ledger_peak_slot_control_bytes: u64,
+    ledger_peak_slot_total_bytes: u64,
+};
+
 /// Flat top-level fields make the artifact easy to inspect in CI while RawSample remains a typed
 /// nested object. No field has a default: absent fields fail parsing, as do duplicate/unknown keys.
 const Artifact = struct {
@@ -129,6 +146,7 @@ const Artifact = struct {
     controller_clients: u32,
     slow_observer_clients: u32,
     healthy_observer_clients: u32,
+    reattach_observer_clients: u32,
     total_admitted: u32,
     stale_admission_count: u32,
     slow_connection_id: u64,
@@ -183,6 +201,34 @@ const Artifact = struct {
     idle_screen_owned_allocation_delta: u64,
     idle_screen_core_lock_acquisition_delta: u64,
     screen_idle_scale_samples: []const ScreenIdleScaleSample,
+    reattach_runtime_count: u32,
+    reattach_started_ns: u64,
+    reattach_ended_ns: u64,
+    reattach_first_complete_ns: u64,
+    reattach_tenth_complete_ns: u64,
+    reattach_fiftieth_complete_ns: u64,
+    reattach_hundredth_complete_ns: u64,
+    reattach_latency_median_ns: u64,
+    reattach_latency_p95_ns: u64,
+    reattach_latency_max_ns: u64,
+    reattach_total_snapshot_bytes: u64,
+    reattach_peak_rss_bytes: u64,
+    reattach_baseline_ledger_resident_bytes: u64,
+    reattach_baseline_ledger_shared_bytes: u64,
+    reattach_peak_ledger_resident_bytes: u64,
+    reattach_peak_ledger_shared_bytes: u64,
+    reattach_baseline_ledger_slot_queue_bytes: u64,
+    reattach_baseline_ledger_slot_base_bytes: u64,
+    reattach_baseline_ledger_slot_control_bytes: u64,
+    reattach_baseline_ledger_slot_total_bytes: u64,
+    reattach_peak_ledger_slot_queue_bytes: u64,
+    reattach_peak_ledger_slot_base_bytes: u64,
+    reattach_peak_ledger_slot_control_bytes: u64,
+    reattach_peak_ledger_slot_total_bytes: u64,
+    reattach_queue_cap_bytes: u64,
+    reattach_base_cap_bytes: u64,
+    reattach_slot_total_cap_bytes: u64,
+    reattach_samples: []const ReattachSample,
     metadata_change_runtime_count: u32,
     metadata_change_target_stream_count: u32,
     metadata_change_sampler_delta: u64,
@@ -365,7 +411,8 @@ fn validateArtifact(allocator: std.mem.Allocator, artifact: Artifact) !void {
         return error.InvalidIdentity;
     }
     if (artifact.controller_clients != 1 or artifact.slow_observer_clients != 1 or
-        artifact.healthy_observer_clients != 1 or artifact.total_admitted != 3 or
+        artifact.healthy_observer_clients != 1 or artifact.reattach_observer_clients != 1 or
+        artifact.total_admitted != 4 or
         artifact.stale_admission_count != 0)
     {
         return error.InvalidRoleCount;
@@ -415,6 +462,74 @@ fn validateArtifact(allocator: std.mem.Allocator, artifact: Artifact) !void {
             return error.InvalidScreenScaleEvidence;
         }
     }
+    if (artifact.reattach_runtime_count != 100 or artifact.reattach_samples.len != 100 or
+        artifact.reattach_started_ns == 0 or artifact.reattach_ended_ns < artifact.reattach_started_ns)
+        return error.InvalidReattachEvidence;
+    var reattach_latencies: [100]u64 = undefined;
+    var total_snapshot_bytes: u64 = 0;
+    var peak_rss: u64 = 0;
+    var peak_resident: u64 = 0;
+    var peak_shared: u64 = 0;
+    var peak_queue: u64 = 0;
+    var peak_base: u64 = 0;
+    var peak_control: u64 = 0;
+    var peak_slot: u64 = 0;
+    var measured_cumulative: u64 = 0;
+    for (artifact.reattach_samples, 0..) |sample, index| {
+        if (sample.ordinal != index + 1 or sample.started_ns < artifact.reattach_started_ns or
+            sample.started_ns > sample.attach_completed_ns or
+            sample.attach_completed_ns > sample.snapshot_completed_ns or
+            sample.snapshot_completed_ns > artifact.reattach_ended_ns or
+            sample.latency_ns != sample.snapshot_completed_ns - sample.started_ns or
+            sample.snapshot_bytes == 0 or
+            (index != 0 and sample.started_ns < artifact.reattach_samples[index - 1].snapshot_completed_ns) or
+            sample.ledger_resident_bytes > global_ledger_cap_bytes or
+            sample.ledger_shared_bytes > shared_ledger_cap_bytes or
+            sample.ledger_peak_slot_queue_bytes > per_slot_bytes or
+            sample.ledger_peak_slot_base_bytes > base_per_slot_bytes or
+            sample.ledger_peak_slot_control_bytes > per_slot_bytes or
+            sample.ledger_peak_slot_total_bytes > total_per_slot_bytes)
+            return error.InvalidReattachEvidence;
+        measured_cumulative = try std.math.add(u64, measured_cumulative, sample.latency_ns);
+        if (sample.cumulative_ns != measured_cumulative) return error.InvalidReattachEvidence;
+        reattach_latencies[index] = sample.latency_ns;
+        total_snapshot_bytes = try std.math.add(u64, total_snapshot_bytes, sample.snapshot_bytes);
+        peak_rss = @max(peak_rss, sample.host_rss_bytes);
+        peak_resident = @max(peak_resident, sample.ledger_resident_bytes);
+        peak_shared = @max(peak_shared, sample.ledger_shared_bytes);
+        peak_queue = @max(peak_queue, sample.ledger_peak_slot_queue_bytes);
+        peak_base = @max(peak_base, sample.ledger_peak_slot_base_bytes);
+        peak_control = @max(peak_control, sample.ledger_peak_slot_control_bytes);
+        peak_slot = @max(peak_slot, sample.ledger_peak_slot_total_bytes);
+    }
+    std.mem.sort(u64, &reattach_latencies, {}, std.sort.asc(u64));
+    if (artifact.reattach_first_complete_ns != artifact.reattach_samples[0].cumulative_ns or
+        artifact.reattach_tenth_complete_ns != artifact.reattach_samples[9].cumulative_ns or
+        artifact.reattach_fiftieth_complete_ns != artifact.reattach_samples[49].cumulative_ns or
+        artifact.reattach_hundredth_complete_ns != artifact.reattach_samples[99].cumulative_ns or
+        artifact.reattach_latency_median_ns != reattach_latencies[50] or
+        artifact.reattach_latency_p95_ns != reattach_latencies[p95Index(100)] or
+        artifact.reattach_latency_max_ns != reattach_latencies[99] or
+        artifact.reattach_total_snapshot_bytes != total_snapshot_bytes or
+        artifact.reattach_peak_rss_bytes != peak_rss or
+        artifact.reattach_peak_ledger_resident_bytes != peak_resident or
+        artifact.reattach_peak_ledger_shared_bytes != peak_shared or
+        artifact.reattach_peak_ledger_slot_queue_bytes != peak_queue or
+        artifact.reattach_peak_ledger_slot_base_bytes != peak_base or
+        artifact.reattach_peak_ledger_slot_control_bytes != peak_control or
+        artifact.reattach_peak_ledger_slot_total_bytes != peak_slot)
+        return error.InvalidReattachEvidence;
+    if (artifact.reattach_queue_cap_bytes != per_slot_bytes or
+        artifact.reattach_base_cap_bytes != base_per_slot_bytes or
+        artifact.reattach_slot_total_cap_bytes != total_per_slot_bytes)
+        return error.InvalidReattachEvidence;
+    if (artifact.reattach_baseline_ledger_resident_bytes > artifact.reattach_peak_ledger_resident_bytes or
+        artifact.reattach_baseline_ledger_shared_bytes > artifact.reattach_peak_ledger_shared_bytes or
+        artifact.reattach_baseline_ledger_slot_queue_bytes > artifact.reattach_peak_ledger_slot_queue_bytes or
+        artifact.reattach_baseline_ledger_slot_base_bytes > artifact.reattach_peak_ledger_slot_base_bytes or
+        artifact.reattach_baseline_ledger_slot_control_bytes > artifact.reattach_peak_ledger_slot_control_bytes or
+        artifact.reattach_baseline_ledger_slot_total_bytes > artifact.reattach_peak_ledger_slot_total_bytes)
+        return error.InvalidReattachEvidence;
     if (artifact.metadata_change_runtime_count != 100 or
         artifact.metadata_change_target_stream_count != 3 or
         artifact.metadata_change_sampler_delta != 1 or
@@ -662,7 +777,7 @@ fn validateArtifact(allocator: std.mem.Allocator, artifact: Artifact) !void {
         artifact.elapsed_ms == 0 or artifact.elapsed_ms > deadline_ms)
         return error.DeadlineExceeded;
     if (!artifact.child_reaped or artifact.child_exit_status != 0 or
-        artifact.client_fds_closed != 3 or artifact.final_active_clients != 0 or
+        artifact.client_fds_closed != 4 or artifact.final_active_clients != 0 or
         !artifact.host_graceful_stop or
         !artifact.host_reaped or artifact.host_exit_status != 0 or
         !artifact.socket_removed or !artifact.directory_removed)
@@ -779,6 +894,30 @@ const screen_idle_scale_fixture = [_]ScreenIdleScaleSample{
     .{ .runtime_count = 10, .observation_ns = std.time.ns_per_s, .cpu_total_delta_ns = 10_000_000, .snapshot_call_delta = 0, .delta_call_delta = 0, .owned_allocation_delta = 0, .core_lock_acquisition_delta = 0, .metadata_producer_visit_delta = 0, .metadata_materialization_delta = 0, .metadata_core_lock_acquisition_delta = 0 },
     .{ .runtime_count = 100, .observation_ns = std.time.ns_per_s, .cpu_total_delta_ns = 50_000_000, .snapshot_call_delta = 0, .delta_call_delta = 0, .owned_allocation_delta = 0, .core_lock_acquisition_delta = 0, .metadata_producer_visit_delta = 0, .metadata_materialization_delta = 0, .metadata_core_lock_acquisition_delta = 0 },
 };
+const reattach_fixture = blk: {
+    var out: [100]ReattachSample = undefined;
+    for (&out, 0..) |*sample, index| {
+        const started: u64 = 2_000_000_000 + index * 2_000_000;
+        const latency: u64 = (index + 1) * 10_000;
+        sample.* = .{
+            .ordinal = @intCast(index + 1),
+            .started_ns = started,
+            .attach_completed_ns = started + latency / 2,
+            .snapshot_completed_ns = started + latency,
+            .latency_ns = latency,
+            .cumulative_ns = (index + 1) * (index + 2) / 2 * 10_000,
+            .snapshot_bytes = 1024,
+            .host_rss_bytes = 100_000_000 + index * 1024,
+            .ledger_resident_bytes = 10_000_000,
+            .ledger_shared_bytes = 5_000_000,
+            .ledger_peak_slot_queue_bytes = 500_000,
+            .ledger_peak_slot_base_bytes = 500_000,
+            .ledger_peak_slot_control_bytes = 64,
+            .ledger_peak_slot_total_bytes = 1_000_000,
+        };
+    }
+    break :blk out;
+};
 
 fn goodArtifact() Artifact {
     return .{
@@ -804,7 +943,8 @@ fn goodArtifact() Artifact {
         .controller_clients = 1,
         .slow_observer_clients = 1,
         .healthy_observer_clients = 1,
-        .total_admitted = 3,
+        .reattach_observer_clients = 1,
+        .total_admitted = 4,
         .stale_admission_count = 0,
         .slow_connection_id = 22,
         .first_stall_connection_id = 22,
@@ -864,6 +1004,34 @@ fn goodArtifact() Artifact {
         .idle_screen_owned_allocation_delta = 0,
         .idle_screen_core_lock_acquisition_delta = 0,
         .screen_idle_scale_samples = &screen_idle_scale_fixture,
+        .reattach_runtime_count = 100,
+        .reattach_started_ns = 2_000_000_000,
+        .reattach_ended_ns = reattach_fixture[99].snapshot_completed_ns,
+        .reattach_first_complete_ns = reattach_fixture[0].cumulative_ns,
+        .reattach_tenth_complete_ns = reattach_fixture[9].cumulative_ns,
+        .reattach_fiftieth_complete_ns = reattach_fixture[49].cumulative_ns,
+        .reattach_hundredth_complete_ns = reattach_fixture[99].cumulative_ns,
+        .reattach_latency_median_ns = reattach_fixture[50].latency_ns,
+        .reattach_latency_p95_ns = reattach_fixture[94].latency_ns,
+        .reattach_latency_max_ns = reattach_fixture[99].latency_ns,
+        .reattach_total_snapshot_bytes = 100 * 1024,
+        .reattach_peak_rss_bytes = reattach_fixture[99].host_rss_bytes,
+        .reattach_baseline_ledger_resident_bytes = 9_000_000,
+        .reattach_baseline_ledger_shared_bytes = 4_000_000,
+        .reattach_peak_ledger_resident_bytes = 10_000_000,
+        .reattach_peak_ledger_shared_bytes = 5_000_000,
+        .reattach_baseline_ledger_slot_queue_bytes = 400_000,
+        .reattach_baseline_ledger_slot_base_bytes = 400_000,
+        .reattach_baseline_ledger_slot_control_bytes = 32,
+        .reattach_baseline_ledger_slot_total_bytes = 800_000,
+        .reattach_peak_ledger_slot_queue_bytes = 500_000,
+        .reattach_peak_ledger_slot_base_bytes = 500_000,
+        .reattach_peak_ledger_slot_control_bytes = 64,
+        .reattach_peak_ledger_slot_total_bytes = 1_000_000,
+        .reattach_queue_cap_bytes = per_slot_bytes,
+        .reattach_base_cap_bytes = base_per_slot_bytes,
+        .reattach_slot_total_cap_bytes = total_per_slot_bytes,
+        .reattach_samples = &reattach_fixture,
         .metadata_change_runtime_count = 100,
         .metadata_change_target_stream_count = 3,
         .metadata_change_sampler_delta = 1,
@@ -916,7 +1084,7 @@ fn goodArtifact() Artifact {
         .elapsed_ms = 1000,
         .child_reaped = true,
         .child_exit_status = 0,
-        .client_fds_closed = 3,
+        .client_fds_closed = 4,
         .final_active_clients = 0,
         .host_graceful_stop = true,
         .host_reaped = true,

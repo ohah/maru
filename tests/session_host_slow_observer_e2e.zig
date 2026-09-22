@@ -19,7 +19,7 @@ extern "c" fn getdtablesize() c_int;
 extern "c" fn arc4random_buf(buffer: *anyopaque, length: usize) void;
 extern "c" fn usleep(usec: c_uint) c_int;
 
-const schema_name = "maru.session-host-slow-observer-macos.v4";
+const schema_name = "maru.session-host-slow-observer-macos.v6";
 const scenario_name = "slow-observer-real-pty-rss";
 const build_mode = "ReleaseFast";
 const sample_api = "proc_pid_rusage:RUSAGE_INFO_V4";
@@ -80,6 +80,23 @@ const ScreenIdleScaleSample = struct {
     metadata_core_lock_acquisition_delta: u64,
 };
 
+const ReattachSample = struct {
+    ordinal: u32,
+    started_ns: u64,
+    attach_completed_ns: u64,
+    snapshot_completed_ns: u64,
+    latency_ns: u64,
+    cumulative_ns: u64,
+    snapshot_bytes: u64,
+    host_rss_bytes: u64,
+    ledger_resident_bytes: u64,
+    ledger_shared_bytes: u64,
+    ledger_peak_slot_queue_bytes: u64,
+    ledger_peak_slot_base_bytes: u64,
+    ledger_peak_slot_control_bytes: u64,
+    ledger_peak_slot_total_bytes: u64,
+};
+
 const ProcessIdentity = struct {
     pid: c.pid_t,
     uid: u32,
@@ -112,6 +129,7 @@ const Artifact = struct {
     controller_clients: u32,
     slow_observer_clients: u32,
     healthy_observer_clients: u32,
+    reattach_observer_clients: u32,
     total_admitted: u32,
     stale_admission_count: u32,
     slow_connection_id: u64,
@@ -164,6 +182,34 @@ const Artifact = struct {
     idle_screen_owned_allocation_delta: u64,
     idle_screen_core_lock_acquisition_delta: u64,
     screen_idle_scale_samples: []const ScreenIdleScaleSample,
+    reattach_runtime_count: u32,
+    reattach_started_ns: u64,
+    reattach_ended_ns: u64,
+    reattach_first_complete_ns: u64,
+    reattach_tenth_complete_ns: u64,
+    reattach_fiftieth_complete_ns: u64,
+    reattach_hundredth_complete_ns: u64,
+    reattach_latency_median_ns: u64,
+    reattach_latency_p95_ns: u64,
+    reattach_latency_max_ns: u64,
+    reattach_total_snapshot_bytes: u64,
+    reattach_peak_rss_bytes: u64,
+    reattach_baseline_ledger_resident_bytes: u64,
+    reattach_baseline_ledger_shared_bytes: u64,
+    reattach_peak_ledger_resident_bytes: u64,
+    reattach_peak_ledger_shared_bytes: u64,
+    reattach_baseline_ledger_slot_queue_bytes: u64,
+    reattach_baseline_ledger_slot_base_bytes: u64,
+    reattach_baseline_ledger_slot_control_bytes: u64,
+    reattach_baseline_ledger_slot_total_bytes: u64,
+    reattach_peak_ledger_slot_queue_bytes: u64,
+    reattach_peak_ledger_slot_base_bytes: u64,
+    reattach_peak_ledger_slot_control_bytes: u64,
+    reattach_peak_ledger_slot_total_bytes: u64,
+    reattach_queue_cap_bytes: u64,
+    reattach_base_cap_bytes: u64,
+    reattach_slot_total_cap_bytes: u64,
+    reattach_samples: []const ReattachSample,
     metadata_change_runtime_count: u32,
     metadata_change_target_stream_count: u32,
     metadata_change_sampler_delta: u64,
@@ -712,6 +758,88 @@ pub fn main(init: std.process.Init) !void {
     }
     if (scale_sample_index != scale_samples.len) return error.MissingScaleEvidence;
 
+    // Current eager/sequential baseline: one fresh GUI connection reattaches to every already
+    // running PTY and consumes each initial snapshot. Runtime creation is intentionally outside
+    // the measured interval.
+    stage = "100 runtime reattach connect";
+    const reattach_reset = try probe(
+        command_pair[0],
+        report_pair[0],
+        &sequence,
+        .reset_stall,
+        deadline_ns,
+        init.io,
+    );
+    if (@as(probe_wire.ReportKind, @enumFromInt(reattach_reset.kind)) != .reset_ack)
+        return error.ProbeProtocolError;
+    var reattach = try connectRetry(allocator, socket_path, deadline_ns, init.io);
+    var reattach_open = true;
+    const reattach_fd = reattach.fd;
+    defer if (reattach_open) reattach.deinit();
+    var reattach_samples: [100]ReattachSample = undefined;
+    var reattach_latencies: [100]u64 = undefined;
+    var reattach_total_snapshot_bytes: u64 = 0;
+    var reattach_peak_rss_bytes: u64 = 0;
+    var reattach_peak_ledger_resident_bytes: u64 = 0;
+    var reattach_peak_ledger_shared_bytes: u64 = 0;
+    var reattach_peak_ledger_slot_queue_bytes: u64 = 0;
+    var reattach_peak_ledger_slot_base_bytes: u64 = 0;
+    var reattach_peak_ledger_slot_control_bytes: u64 = 0;
+    var reattach_peak_ledger_slot_total_bytes: u64 = 0;
+    var reattach_measured_cumulative_ns: u64 = 0;
+    const reattach_started_ns = monotonicNow(init.io);
+    for (&scale_runtime_ids, 0..) |*scale_runtime_id, index| {
+        stage = "100 runtime reattach snapshot";
+        const attach_started_ns = monotonicNow(init.io);
+        const stream = try attachRuntime(allocator, &reattach, scale_runtime_id, "observer");
+        const attach_completed_ns = monotonicNow(init.io);
+        const snapshot = try reattach.readSnapshot(stream);
+        const snapshot_completed_ns = monotonicNow(init.io);
+        const resource = try takeSample(host_identity, init.io);
+        const ledger = try probe(
+            command_pair[0],
+            report_pair[0],
+            &sequence,
+            .snapshot,
+            deadline_ns,
+            init.io,
+        );
+        reattach_total_snapshot_bytes += snapshot.len;
+        reattach_peak_rss_bytes = @max(reattach_peak_rss_bytes, resource.ri_resident_size);
+        reattach_peak_ledger_resident_bytes = @max(reattach_peak_ledger_resident_bytes, ledger.resident_bytes);
+        reattach_peak_ledger_shared_bytes = @max(reattach_peak_ledger_shared_bytes, ledger.shared_bytes);
+        reattach_peak_ledger_slot_queue_bytes = @max(reattach_peak_ledger_slot_queue_bytes, ledger.peak_slot_queue_bytes);
+        reattach_peak_ledger_slot_base_bytes = @max(reattach_peak_ledger_slot_base_bytes, ledger.peak_slot_base_bytes);
+        reattach_peak_ledger_slot_control_bytes = @max(reattach_peak_ledger_slot_control_bytes, ledger.peak_slot_control_bytes);
+        reattach_peak_ledger_slot_total_bytes = @max(reattach_peak_ledger_slot_total_bytes, ledger.peak_slot_total_bytes);
+        const latency_ns = snapshot_completed_ns - attach_started_ns;
+        reattach_measured_cumulative_ns += latency_ns;
+        reattach_latencies[index] = latency_ns;
+        reattach_samples[index] = .{
+            .ordinal = @intCast(index + 1),
+            .started_ns = attach_started_ns,
+            .attach_completed_ns = attach_completed_ns,
+            .snapshot_completed_ns = snapshot_completed_ns,
+            .latency_ns = latency_ns,
+            // Exclude the RSS/ledger probes between operations: this is the sum of product
+            // attach+snapshot durations, not the wall time consumed by the measurement harness.
+            .cumulative_ns = reattach_measured_cumulative_ns,
+            .snapshot_bytes = snapshot.len,
+            .host_rss_bytes = resource.ri_resident_size,
+            .ledger_resident_bytes = ledger.resident_bytes,
+            .ledger_shared_bytes = ledger.shared_bytes,
+            .ledger_peak_slot_queue_bytes = ledger.peak_slot_queue_bytes,
+            .ledger_peak_slot_base_bytes = ledger.peak_slot_base_bytes,
+            .ledger_peak_slot_control_bytes = ledger.peak_slot_control_bytes,
+            .ledger_peak_slot_total_bytes = ledger.peak_slot_total_bytes,
+        };
+        allocator.free(snapshot);
+    }
+    const reattach_ended_ns = monotonicNow(init.io);
+    std.mem.sort(u64, &reattach_latencies, {}, std.sort.asc(u64));
+    reattach.deinit();
+    reattach_open = false;
+
     stage = "metadata change scale 100";
     const metadata_change_before = try probe(
         command_pair[0],
@@ -1070,8 +1198,8 @@ pub fn main(init: std.process.Init) !void {
     slow_open = false;
     healthy.deinit();
     healthy_open = false;
-    const client_fds_closed = countClosedFds(&.{ controller_fd, slow_fd, healthy_fd });
-    if (client_fds_closed != 3) return error.ClientFdCleanupFailed;
+    const client_fds_closed = countClosedFds(&.{ controller_fd, slow_fd, healthy_fd, reattach_fd });
+    if (client_fds_closed != 4) return error.ClientFdCleanupFailed;
 
     var final_report = child_report;
     while (final_report.active_clients != 0 or final_report.resident_bytes != 0 or
@@ -1186,6 +1314,7 @@ pub fn main(init: std.process.Init) !void {
         .controller_clients = 1,
         .slow_observer_clients = 1,
         .healthy_observer_clients = 1,
+        .reattach_observer_clients = 1,
         .total_admitted = @intCast(stalled.total_admitted),
         .stale_admission_count = @intCast(stalled.stale_client_observations),
         .slow_connection_id = 2,
@@ -1241,6 +1370,34 @@ pub fn main(init: std.process.Init) !void {
         .idle_screen_owned_allocation_delta = idle_wake_after.screen_owned_allocations - idle_wake_before.screen_owned_allocations,
         .idle_screen_core_lock_acquisition_delta = idle_wake_after.screen_core_lock_acquisitions - idle_wake_before.screen_core_lock_acquisitions,
         .screen_idle_scale_samples = &scale_samples,
+        .reattach_runtime_count = reattach_samples.len,
+        .reattach_started_ns = reattach_started_ns,
+        .reattach_ended_ns = reattach_ended_ns,
+        .reattach_first_complete_ns = reattach_samples[0].cumulative_ns,
+        .reattach_tenth_complete_ns = reattach_samples[9].cumulative_ns,
+        .reattach_fiftieth_complete_ns = reattach_samples[49].cumulative_ns,
+        .reattach_hundredth_complete_ns = reattach_samples[99].cumulative_ns,
+        .reattach_latency_median_ns = reattach_latencies[reattach_latencies.len / 2],
+        .reattach_latency_p95_ns = reattach_latencies[(reattach_latencies.len * 95 + 99) / 100 - 1],
+        .reattach_latency_max_ns = reattach_latencies[reattach_latencies.len - 1],
+        .reattach_total_snapshot_bytes = reattach_total_snapshot_bytes,
+        .reattach_peak_rss_bytes = reattach_peak_rss_bytes,
+        .reattach_baseline_ledger_resident_bytes = reattach_reset.resident_bytes,
+        .reattach_baseline_ledger_shared_bytes = reattach_reset.shared_bytes,
+        .reattach_peak_ledger_resident_bytes = reattach_peak_ledger_resident_bytes,
+        .reattach_peak_ledger_shared_bytes = reattach_peak_ledger_shared_bytes,
+        .reattach_baseline_ledger_slot_queue_bytes = reattach_reset.peak_slot_queue_bytes,
+        .reattach_baseline_ledger_slot_base_bytes = reattach_reset.peak_slot_base_bytes,
+        .reattach_baseline_ledger_slot_control_bytes = reattach_reset.peak_slot_control_bytes,
+        .reattach_baseline_ledger_slot_total_bytes = reattach_reset.peak_slot_total_bytes,
+        .reattach_peak_ledger_slot_queue_bytes = reattach_peak_ledger_slot_queue_bytes,
+        .reattach_peak_ledger_slot_base_bytes = reattach_peak_ledger_slot_base_bytes,
+        .reattach_peak_ledger_slot_control_bytes = reattach_peak_ledger_slot_control_bytes,
+        .reattach_peak_ledger_slot_total_bytes = reattach_peak_ledger_slot_total_bytes,
+        .reattach_queue_cap_bytes = session_host.connection_slot.per_slot_bytes,
+        .reattach_base_cap_bytes = session_host.connection_slot.base_per_slot_bytes,
+        .reattach_slot_total_cap_bytes = session_host.connection_slot.total_per_slot_bytes,
+        .reattach_samples = &reattach_samples,
         .metadata_change_runtime_count = 100,
         .metadata_change_target_stream_count = 3,
         .metadata_change_sampler_delta = metadata_change_after.metadata_sampler_changes - metadata_change_before.metadata_sampler_changes,

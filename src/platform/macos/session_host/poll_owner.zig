@@ -2346,6 +2346,66 @@ test "poll owner rolls back a batch when one reclaim is insufficient and retries
     try testing.expectEqual(@as(usize, 0), final.prepared_reclaim_bytes);
 }
 
+test "P5b2b3 actual socket rejects oversized attach without killing same-connection sibling" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    _ = process_seal_service.currentReadyIdentity() catch |err| switch (err) {
+        error.NotReady => ready: {
+            const pid = process_seal_service.currentProcessId();
+            const nonce = try process_seal_service.generateProcessNonce();
+            process_seal_service.commitReady(try process_seal_service.prepare(pid, nonce));
+            break :ready try process_seal_service.currentReadyIdentity();
+        },
+        else => return err,
+    };
+    var socket_root: ShortSocketRoot = .{};
+    try socket_root.init("actual-oversized-attach.sock");
+    defer socket_root.deinit();
+    var runtime_registry = registry.TerminalRuntimeRegistry.init(testing.allocator);
+    defer runtime_registry.deinit();
+    _ = try runtime_registry.register(0xAA, 80, 24);
+    _ = try runtime_registry.register(0xBB, 80, 24);
+    var server = try socket_server.SocketServer.bind(
+        testing.allocator,
+        socket_root.dir,
+        socket_root.socket,
+        0xB3,
+        &runtime_registry,
+    );
+    defer server.deinit();
+    server.host_status = .{ .manifest_capable = true };
+    var fake_runtime: server_mod.FakeRuntimeOps = .{};
+    server.runtime_ops = fake_runtime.ops();
+    var owner = try Owner.init(testing.allocator, testing.io, &server);
+    defer owner.deinit();
+    owner.next_cadence_ns = std.math.maxInt(u64);
+
+    const sibling = try connectAttachedTestClient(&owner, socket_root.socket, "observer");
+    defer _ = c.close(sibling.fd);
+    const admitted = owner.clients[sibling.index] orelse return error.TestUnexpectedResult;
+    try testing.expect(admitted.trackers.get(1) != null);
+    try testing.expectEqual(@as(usize, 1), owner.activeCount());
+
+    fake_runtime.snapshot_too_large = true;
+    try sendTestRequest(
+        sibling.fd,
+        .request,
+        3,
+        "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"bb\",\"mode\":\"observer\"}}",
+    );
+    try pumpUntilResponse(&owner, sibling.fd, "\"payload_too_large\"");
+
+    try testing.expect(owner.clients[sibling.index] != null);
+    try testing.expectEqual(@as(usize, 1), owner.activeCount());
+    try testing.expect(admitted.trackers.get(1) != null);
+    try testing.expect(admitted.trackers.get(2) == null);
+    try testing.expectEqual(@as(usize, 1), admitted.connection.attachmentCount());
+
+    try sendTestRequest(sibling.fd, .ping, 4, "P5B2B3-SIBLING-STILL-LIVE");
+    try pumpUntilResponse(&owner, sibling.fd, "P5B2B3-SIBLING-STILL-LIVE");
+    try testing.expect(owner.clients[sibling.index] != null);
+    try testing.expect(admitted.trackers.get(1) != null);
+}
+
 test "P5b2b3 poll owner preserves same-connection sibling through partial screen pressure" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
     _ = process_seal_service.currentReadyIdentity() catch |err| switch (err) {

@@ -51,6 +51,19 @@ Maru가 저장하는 것은 다시 시작하기 위한 **설명서**다.
 - **활성 탭이 브라우저면** 추가 필드 `active-browser="<record-index>"`로 몇 번째 `browser-term`이 활성인지 적는다. 구버전은 이 필드를 무시하고 `active-term`(비-브라우저 공간·clamp된 값)을 쓰므로 포커스만 이웃으로 떨어진다.
 - **placeholder 조건**: "persisted Term 수 0"의 정의에 브라우저 record를 **포함한다**. URL 있는 브라우저만 있는 pane은 이제 복원할 것이 있으므로 셸 placeholder를 받지 않는다(URL 없는 브라우저만 있으면 종전대로 placeholder).
 
+## 이름 없는 문서 영속 (U4c)
+
+**결정(2026-09-21·2026-09-22 사용자 결정)**: 이름 없는 문서(`untitled-N`)는 재시작 뒤 **내용과 함께** 돌아온다. 내용은 workspace 파일에 담지 않는다 — [문서 모델](native-editor-document-model.md) §3.10 의 **백업 레코드**가 이미 그것을 들고 있고, 같은 바이트를 두 곳에 두면 한쪽이 낡는다. 그래서 workspace 가 싣는 것은 **그 문서의 신원**뿐이다.
+
+### 포맷 — 브라우저와 **같은 규칙**
+
+`pane` 줄의 반복 필드 `untitled-term="<insert-after>:<number>"`. `insert-after` 는 그 문서 **앞에 있는 persisted(터미널+파일) Term 수**이고, 위 브라우저 절이 든 이유가 그대로 적용된다 — 인덱스 공간을 건드리면 **구버전이 창을 통째로 폴백한다**.
+
+- **신원은 번호다**(`u-<번호>.bak` 이 그 문서의 레코드다). ⚠️ **백업 파일 «이름»을 적지 않는다** — 이름은 L2 규칙(`session/editor/backup.zig`)에서 **파생**되는 값이라, 적어 두면 규칙이 바뀌는 순간 옛 workspace 가 자기 레코드를 못 찾는다. 이름은 번호에서 다시 만든다.
+- **레코드가 없으면 빈 문서로 돌아온다.** 한 번도 타이핑하지 않은 문서는 dirty 가 아니라 백업이 없는데, **탭 자체는 사용자가 만든 것**이라 돌아와야 한다.
+- **복원은 번호 발급기를 그 위로 올린다**(`untitled.Counter.observe`) — 안 올리면 새 문서가 `untitled-1` 로 시작해 복원된 것과 **같은 이름**이 된다(§3.11).
+- **구버전은 이 필드를 모르고 건너뛴다** → 그 창은 이름 없는 문서만 잃고 나머지는 그대로 복원한다. 반대로 **새 Maru 가 옛 파일을 읽으면** 그 필드가 없으니 「이름 없는 문서 없음」이다(조용히 — 마이그레이션 코드가 필요 없는 추가 필드다).
+
 ### 복원 시 로드 시점
 
 브라우저 Term의 WKWebView는 복원 즉시 존재하지 않는다 — `computeWebSurfaceTransitions`가 `created`를 내고 Swift가 붙인 **뒤**에야 navigate할 수 있다. 그래서 복원은 URL을 **Term에 pending으로 달아 두고**, 그 surface가 생성된 tick에 기존 주소창 navigate 경로(`takeWebAddrNavigate` 계열)로 흘려보낸다. 주소창 commit이 쓰는 단일 슬롯은 복원(여러 개 동시)에 못 쓰므로, pending은 **Term이 소유**하고 tick당 하나씩 빠진다.

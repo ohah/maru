@@ -747,6 +747,20 @@ pub fn createPaneFromFileTerm(self: *AppSession, m: maru.session.workspace.FileT
     return pane;
 }
 
+/// **되살린 이름 없는 문서 하나로** pane 을 만든다(U4c). 터미널도 파일도 없는 pane — 사용자가 편집기
+/// 탭만 두고 껐을 때다. 이 자리가 없으면 그 pane 은 `EmptyPane` 으로 떨어져 **그 창의 탭·split·frame 이
+/// 통째로 사라진다**(U1m 이 placeholder 로 막아 두었던 그 사고 — 이제 실물로 되살리므로 placeholder 가
+/// 필요 없다).
+pub fn createPaneFromUntitledTerm(self: *AppSession, number: u32) !*Pane {
+    const pane = try self.allocator.create(Pane);
+    errdefer self.allocator.destroy(pane);
+    pane.* = .{};
+    const term = try editor_ops.createRestoredUntitledTerm(self, number);
+    errdefer term_ops.destroyTerm(self, term);
+    try pane.terms.append(self.allocator, term);
+    return pane;
+}
+
 pub fn paneHasWebBrowser(pane: *Pane) bool {
     for (pane.terms.items) |t| if (termIsWebBrowser(t)) return true;
     return false;
@@ -1616,18 +1630,25 @@ pub fn dockDividerAtPoint(self: *const AppSession, x_px: f64, y_px: f64) bool {
 /// pane은 항상 Term >= 1이어야 하므로(모델 불변식) 시퀀스가 비면 `EmptyPane`이다.
 pub fn buildWorkspacePane(self: *AppSession, m: maru.session.workspace.Pane) !*Pane {
     const total = m.surfaces.len + m.file_terms.len;
-    if (total == 0) return error.EmptyPane;
+    // **이름 없는 문서만 있는 pane 도 비어 있지 않다**(U4c) — 그 record 가 되살릴 것을 들고 있다.
+    // 여기서 `EmptyPane` 을 내면 그 창의 탭·split·frame 이 통째로 사라진다.
+    if (total == 0 and m.untitled_terms.len == 0) return error.EmptyPane;
 
-    // pane 생성은 surface 하나가 필요하다. 터미널이 하나도 없는(파일 Term만인) pane은 첫 파일로 만든다.
+    // pane 생성은 Term 하나가 필요하다. 터미널이 하나도 없으면 첫 파일로, 그것도 없으면 **첫 이름 없는
+    // 문서**로 만든다(U4c — 씨로 쓴 record 는 아래 삽입 루프가 건너뛴다).
     var pane: *Pane = undefined;
     var next_surface: usize = 0;
     var seeded_file = false;
+    var seeded_untitled = false;
     if (m.surfaces.len > 0) {
         pane = try createPaneFromSurface(self, m.surfaces[0]);
         next_surface = 1;
-    } else {
+    } else if (m.file_terms.len > 0) {
         pane = try createPaneFromFileTerm(self, m.file_terms[0]);
         seeded_file = true;
+    } else {
+        pane = try createPaneFromUntitledTerm(self, m.untitled_terms[0].number);
+        seeded_untitled = true;
     }
     errdefer destroyPane(self, pane);
     pane.custom_name = try self.dupeCustomName(m.custom_name); // pane 사용자 rename 복원(errdefer destroyPane가 free)
@@ -1682,6 +1703,26 @@ pub fn buildWorkspacePane(self: *AppSession, m: maru.session.workspace.Pane) !*P
             } else if (at <= pane.active_term) {
                 pane.active_term += 1;
             }
+        }
+        pane.active_term = @min(pane.active_term, pane.terms.items.len - 1);
+    }
+
+    // **U4c: 이름 없는 문서를 되살린다** — 브라우저와 같은 자리·같은 순서 규칙(뒤에서부터 끼운다).
+    // 내용은 **여기서 넣지 않는다**: `finishAttach` 의 꼬리가 백업 레코드를 보고 한 편집으로 넣는다
+    // (U4b 와 같은 한 자리). 레코드가 없으면 빈 문서로 돌아오는 것이 맞다 — 탭 자체는 사용자가 만든 것이다.
+    if (m.untitled_terms.len > 0) {
+        var ui = m.untitled_terms.len;
+        while (ui > 0) {
+            ui -= 1;
+            if (seeded_untitled and ui == 0) break; // 씨로 이미 만든 그 record 다
+            const ut = m.untitled_terms[ui];
+            const at = @min(ut.insert_after, pane.terms.items.len);
+            const term = editor_ops.createRestoredUntitledTerm(self, ut.number) catch continue; // 그 record 만 버린다
+            pane.terms.insert(self.allocator, at, term) catch {
+                term_ops.destroyTerm(self, term);
+                continue;
+            };
+            if (at <= pane.active_term) pane.active_term += 1;
         }
         pane.active_term = @min(pane.active_term, pane.terms.items.len - 1);
     }

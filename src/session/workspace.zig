@@ -119,6 +119,17 @@ pub const BrowserTerm = struct {
     url: []const u8,
 };
 
+/// U4c 이름 없는 문서 record. **신원은 번호 하나**다 — 내용은 §3.10 의 백업 레코드가 들고
+/// (`u-<번호>.bak`), 그 파일 이름은 이 번호에서 **파생**된다. 이름을 여기 적으면 규칙이 바뀌는 순간
+/// 옛 workspace 가 자기 레코드를 못 찾는다(단일 출처는 `session/editor/backup.zig` 다).
+///
+/// `insert_after` 는 `BrowserTerm` 과 **같은 뜻·같은 이유**다(인덱스 공간을 건드리지 않는다 —
+/// 건드리면 구버전이 창을 통째로 폴백한다).
+pub const UntitledTerm = struct {
+    insert_after: usize,
+    number: u32,
+};
+
 pub const Pane = struct {
     active_term: usize = 0,
     // 사용자 지정 이름(rename). Pane은 자동 제목 출처가 없어 custom_name 하나뿐(""=없음). 탭바 좌측 라벨 세그먼트로 표시.
@@ -128,6 +139,8 @@ pub const Pane = struct {
     file_terms: []const FileTerm = &.{},
     /// 이 pane의 브라우저 Term들(등장 순서 = 같은 insert_after 안에서의 상대 순서). WP-P.
     browser_terms: []const BrowserTerm = &.{},
+    /// 이 pane 의 이름 없는 문서들(U4c — 등장 순서 = 같은 `insert_after` 안에서의 상대 순서).
+    untitled_terms: []const UntitledTerm = &.{},
     /// 활성 탭이 브라우저면 그 record 인덱스(`browser_terms` 안 위치). null=활성이 브라우저 아님.
     /// 구버전 리더는 이 필드를 무시하고 `active_term`(비-브라우저 공간)을 쓰므로 포커스만 이웃으로 떨어진다.
     active_browser: ?usize = null,
@@ -496,6 +509,7 @@ fn writePane(w: *std.Io.Writer, pane: Pane) !void {
     // 어긋나 복원 시 그 창 전체가 fail-close된다. 여기 검사는 잘못된 입력을 그대로 흘리지 않기 위한 두 번째 방어다.
     for (pane.file_terms) |ft| if (ft.kind != .diff) try writeFileTerm(w, ft);
     for (pane.browser_terms) |bt| try writeBrowserTerm(w, bt);
+    for (pane.untitled_terms) |ut| try writeUntitledTerm(w, ut);
     if (pane.active_browser) |ab| try w.print(" active-browser={d}", .{ab});
     try w.writeAll("\n");
     for (pane.surfaces) |s| try writeSurface(w, s);
@@ -515,6 +529,12 @@ fn writeBrowserTerm(w: *std.Io.Writer, bt: BrowserTerm) !void {
     try w.print(" browser-term=\"{d}:{d}:", .{ bt.insert_after, bt.url.len });
     try writeEscaped(w, bt.url);
     try w.writeByte('"');
+}
+
+/// `untitled-term="<insert-after>:<number>"`(U4c). 값이 숫자 둘이라 self-delimiting 길이 접두가 필요 없다 —
+/// 그래도 따옴표를 쓰는 이유는 형제 record 들과 **같은 모양**이어야 리더가 한 규칙으로 읽기 때문이다.
+fn writeUntitledTerm(w: *std.Io.Writer, ut: UntitledTerm) !void {
+    try w.print(" untitled-term=\"{d}:{d}\"", .{ ut.insert_after, ut.number });
 }
 
 fn writeSurface(w: *std.Io.Writer, s: Surface) !void {
@@ -935,6 +955,18 @@ fn parsePane(a: std.mem.Allocator, lines: *LineIter, limits: *ParseLimits) Parse
         };
         try browser_terms.append(a, parsed);
     }
+    // U4c 이름 없는 문서(반복 필드). 브라우저와 **같은 규율**: 인덱스 공간을 안 건드리므로 검증도 분리된다.
+    var untitled_terms: std.ArrayList(UntitledTerm) = .empty;
+    for (f.fields) |field| {
+        if (!std.mem.eql(u8, field.key, "untitled-term")) continue;
+        if (!field.is_quoted or untitled_terms.items.len >= max_dock_entries) return error.BadLine;
+        const encoded = try unescapeQuoted(a, field.raw);
+        const parsed = parseUntitledTerm(encoded) catch |err| switch (err) {
+            error.UnsupportedDockValue => continue, // 번호 0 등 — 그 record 만 버린다(창은 살린다)
+            error.BadLine => return error.BadLine,
+        };
+        try untitled_terms.append(a, parsed);
+    }
     const active_browser: ?usize = if (f.find("active-browser") != null)
         try f.getUint("active-browser", usize, 0)
     else
@@ -949,10 +981,12 @@ fn parsePane(a: std.mem.Allocator, lines: *LineIter, limits: *ParseLimits) Parse
         .surfaces = try surfaces.toOwnedSlice(a),
         .file_terms = try file_terms.toOwnedSlice(a),
         .browser_terms = try browser_terms.toOwnedSlice(a),
+        .untitled_terms = try untitled_terms.toOwnedSlice(a),
         .active_browser = active_browser,
     };
     try validatePaneFileTerms(pane);
     try validatePaneBrowserTerms(pane);
+    try validatePaneUntitledTerms(pane);
     return pane;
 }
 
@@ -969,6 +1003,28 @@ fn validatePaneBrowserTerms(pane: Pane) ParseError!void {
         if (bt.url.len == 0) return error.BadLine;
     }
     if (pane.active_browser) |ab| if (ab >= pane.browser_terms.len) return error.BadLine;
+}
+
+/// U4c 불변식: `insert_after <= persisted_total`(브라우저와 같다) + **번호는 0 이 아니다**
+/// (`untitled.Counter` 는 1 부터 낸다 — 0 은 「아직 아무것도 안 냈다」라서 문서의 번호가 될 수 없다).
+fn validatePaneUntitledTerms(pane: Pane) ParseError!void {
+    if (pane.untitled_terms.len == 0) return;
+    const persisted_total = pane.surfaces.len + pane.file_terms.len;
+    for (pane.untitled_terms) |ut| {
+        if (ut.insert_after > persisted_total) return error.BadLine;
+        if (ut.number == 0) return error.BadLine;
+    }
+}
+
+/// `untitled-term="<insert-after>:<number>"`(U4c).
+fn parseUntitledTerm(encoded: []const u8) DockEntryParseError!UntitledTerm {
+    var pos: usize = 0;
+    const after_raw = dockEntryPart(encoded, &pos) orelse return error.BadLine;
+    const insert_after = std.fmt.parseInt(usize, after_raw, 10) catch return error.BadLine;
+    if (pos > encoded.len) return error.BadLine;
+    const number = std.fmt.parseInt(u32, encoded[pos..], 10) catch return error.BadLine;
+    if (number == 0) return error.UnsupportedDockValue; // 0 은 번호가 아니다 — 그 record 만 버린다
+    return .{ .insert_after = insert_after, .number = number };
 }
 
 /// `browser-term="<insert-after>:<url-byte-len>:<url>"`. file-term과 같은 self-delimiting 파싱.
@@ -2843,4 +2899,61 @@ test "window 줄의 last-agent-session (AT7): 있으면 인용해 쓰고 되읽�
     var parsed = try parse(a, text);
     defer parsed.deinit();
     try std.testing.expectEqualStrings("0f6c1a2e-1111-4222-8333-444455556666", parsed.workspace.windows[0].last_agent_session);
+}
+
+test "U4c-6 untitled-term 은 번호만 왕복하고 인덱스 공간을 안 건드린다" {
+    // U4c 핵심 계약: 이름 없는 문서는 **번호만** 저장하고 `insert_after`(앞의 persisted Term 수)를 쓴다 —
+    // 내용은 §3.10 의 백업 레코드가 들고, 파일 이름은 그 번호에서 **파생**된다(여기 적지 않는다).
+    const a = std.testing.allocator;
+    const text =
+        "maru.workspace.v1\nwindow tabs=1 active-tab=0\n" ++
+        "tab panes=1 active-pane=0 custom-name=\"\"\n" ++
+        "tree-node leaf pane=0\n" ++
+        "pane surfaces=1 active-term=0 custom-name=\"\" file-term=\"1:markdown:read:9:/tmp/a.md\" " ++
+        "untitled-term=\"1:7\"\n" ++
+        "surface custom-name=\"\" title=\"\" cwd=\"\" command=\"\" cols=80 rows=24\n";
+    var parsed = try parse(a, text);
+    defer parsed.deinit();
+    const pane = parsed.workspace.windows[0].tabs[0].panes[0];
+    try std.testing.expectEqual(@as(usize, 1), pane.file_terms[0].index); // 파일 인덱스 그대로
+    try std.testing.expectEqual(@as(usize, 1), pane.untitled_terms.len);
+    try std.testing.expectEqual(@as(usize, 1), pane.untitled_terms[0].insert_after);
+    try std.testing.expectEqual(@as(u32, 7), pane.untitled_terms[0].number);
+
+    const out = try serialize(a, parsed.workspace);
+    defer a.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "untitled-term=\"1:7\"") != null);
+    // **파일 이름을 적지 않는다** — 그 규칙은 L2 백업 모듈이 소유한다(적으면 두 벌이 된다).
+    try std.testing.expect(std.mem.indexOf(u8, out, ".bak") == null);
+    var again = try parse(a, out);
+    defer again.deinit();
+    try std.testing.expectEqual(@as(u32, 7), again.workspace.windows[0].tabs[0].panes[0].untitled_terms[0].number);
+}
+
+test "U4c-7 잘못된 untitled-term 은 record 만 버리거나 창을 폴백한다 · 옛 파일은 조용히 «없음»" {
+    const a = std.testing.allocator;
+    const head =
+        "maru.workspace.v1\nwindow tabs=1 active-tab=0\n" ++
+        "tab panes=1 active-pane=0 custom-name=\"\"\n" ++
+        "tree-node leaf pane=0\n";
+    const tail = "surface custom-name=\"\" title=\"\" cwd=\"\" command=\"\" cols=80 rows=24\n";
+
+    // 번호 0 = 발급기가 낸 적 없는 값(1 부터 낸다) → 그 record 만 버린다(창은 살린다).
+    var zero = try parse(a, head ++ "pane surfaces=1 active-term=0 custom-name=\"\" untitled-term=\"0:0\"\n" ++ tail);
+    defer zero.deinit();
+    try std.testing.expectEqual(@as(usize, 0), zero.workspace.windows[0].tabs[0].panes[0].untitled_terms.len);
+    try std.testing.expectEqual(@as(usize, 1), zero.workspace.windows[0].tabs[0].panes[0].surfaces.len);
+
+    // insert_after 가 persisted_total(1)을 넘으면 자리를 만들 수 없다 → 그 창 fail-close(브라우저와 같은 규율).
+    try std.testing.expectError(error.BadLine, parse(a, head ++
+        "pane surfaces=1 active-term=0 custom-name=\"\" untitled-term=\"5:3\"\n" ++ tail));
+    // 숫자가 아니면 그 창 fail-close(손상 입력을 그대로 흘리지 않는다).
+    try std.testing.expectError(error.BadLine, parse(a, head ++
+        "pane surfaces=1 active-term=0 custom-name=\"\" untitled-term=\"0:x\"\n" ++ tail));
+
+    // **옛 파일**: 그 필드가 아예 없다 → 「이름 없는 문서 없음」이고 창은 그대로다(추가 필드라 마이그레이션 없음).
+    var old = try parse(a, head ++ "pane surfaces=1 active-term=0 custom-name=\"\"\n" ++ tail);
+    defer old.deinit();
+    try std.testing.expectEqual(@as(usize, 0), old.workspace.windows[0].tabs[0].panes[0].untitled_terms.len);
+    try std.testing.expectEqual(@as(usize, 1), old.workspace.windows[0].tabs[0].panes[0].surfaces.len);
 }

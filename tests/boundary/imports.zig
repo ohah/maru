@@ -12678,15 +12678,27 @@ test "이름 없는 문서: 이름을 붙이는 자리는 하나, workspace 제�
     const allocator = std.testing.allocator;
 
     {
-        // ⑴ **이름은 한 자리에서만 붙는다.** 두 번째 setter 가 생기면 번호 발급과 이름 짓기가 갈려
-        //    한쪽이 낡는다(발급기를 안 쓰고 이름만 짓는 경로가 실제로 쉽게 생긴다).
+        // ⑴ **이름을 붙이는 자리는 둘이고, «각각 발급기를 지난다».** U4c 가 두 번째를 더했다(복원 —
+        //    workspace 가 실어 온 번호로 만든다). 이 판정자가 막으려는 것은 **발급기를 안 쓰고 이름만
+        //    짓는 경로**이므로, 자리 수와 함께 **발급기 호출 둘**(새 번호 `next()` · 되살린 번호
+        //    `observe()`)을 센다 — 셋째 자리가 생기면 여기서 빨개진다.
         const editor = try readZigFileZ(allocator, "src/platform/macos/app_session/editor.zig");
         defer allocator.free(editor);
         var set: usize = 0;
         var i: usize = 0;
         const needle = "term.rt.editor_untitled = maru.session.editor.untitled.Name.init(";
         while (std.mem.indexOfPos(u8, editor, i, needle)) |at| : (i = at + needle.len) set += 1;
-        try std.testing.expectEqual(@as(usize, 1), set);
+        try std.testing.expectEqual(@as(usize, 2), set);
+        var issued: usize = 0;
+        var j: usize = 0;
+        const next_needle = "app_runtime.untitled_docs.next()";
+        while (std.mem.indexOfPos(u8, editor, j, next_needle)) |at| : (j = at + next_needle.len) issued += 1;
+        try std.testing.expectEqual(@as(usize, 1), issued);
+        var observed: usize = 0;
+        var k: usize = 0;
+        const observe_needle = "app_runtime.untitled_docs.observe(number)";
+        while (std.mem.indexOfPos(u8, editor, k, observe_needle)) |at| : (k = at + observe_needle.len) observed += 1;
+        try std.testing.expectEqual(@as(usize, 1), observed);
     }
 
     {
@@ -12697,14 +12709,23 @@ test "이름 없는 문서: 이름을 붙이는 자리는 하나, workspace 제�
         defer allocator.free(tab);
         var hits: usize = 0;
         var i: usize = 0;
-        // `term` 과 `t` 두 이름을 쓰므로 공통 꼬리만 본다.
+        // `term` 과 `t` 두 이름을 쓰므로 **조건식**만 본다. ⚠️ U4c 로 두 자리가 하는 일이 갈렸다 —
+        // 캡처는 이제 **record 를 만들고**(더는 제외가 아니다) 활성 셈은 여전히 건너뛴다. 그래서 세는
+        // 것을 「같은 문장」에서 **「같은 조건」**으로 옮긴다: 조건이 갈리면 저장과 활성 셈이 다른 Term 을
+        // 가리켜 복원 후 엉뚱한 탭이 활성이 된다(그것이 이 판정자가 막는 사고다).
         const needle = ".kind == .editor and ";
         while (std.mem.indexOfPos(u8, tab, i, needle)) |at| : (i = at + needle.len) {
             const rest = tab[at + needle.len ..];
-            if (std.mem.startsWith(u8, rest, "term.file_entry == null) continue;")) hits += 1;
+            if (std.mem.startsWith(u8, rest, "term.file_entry == null)")) hits += 1;
             if (std.mem.startsWith(u8, rest, "t.file_entry == null) continue;")) hits += 1;
         }
         try std.testing.expectEqual(@as(usize, 2), hits);
+        // 그리고 **각 자리가 자기 일을 한다**: 캡처는 record 하나를 만들고, 활성 셈은 건너뛴다.
+        var appended: usize = 0;
+        var ai: usize = 0;
+        const append_needle = "try untitled_terms.append(arena, .{";
+        while (std.mem.indexOfPos(u8, tab, ai, append_needle)) |at| : (ai = at + append_needle.len) appended += 1;
+        try std.testing.expectEqual(@as(usize, 1), appended);
     }
 }
 
@@ -13004,9 +13025,11 @@ test "미저장 백업: 종료가 굳히고 수락된 닫기가 지운다 — cl
 
     // ⑻ **지문은 «레코드의 것»을 싣는다** — 지금 디스크의 지문으로 덮으면 첫 저장이 CAS 를 통과해
     //    외부 변경을 조용히 지운다(그것이 §3.10 이 막으려던 손실이고, VSCode #15749 가 남긴 그 결함이다).
+    //    U4c 로 갈래가 둘이 되며(경로·이름 없는 문서) 그 줄이 `switch` 안으로 들어갔다 — **이식하는
+    //    자리는 여전히 하나**이고, 이름 없는 문서에는 볼 디스크가 없어 지문도 없다.
     try std.testing.expectEqual(
         @as(usize, 1),
-        countOfB(backup_mod, "if (parsed.doc.path.disk_hash) |h| term.rt.editor_doc.?.disk_hash = h;"),
+        countOfB(backup_mod, "if (p.disk_hash) |h| term.rt.editor_doc.?.disk_hash = h;"),
     );
     try std.testing.expectEqual(@as(usize, 0), countOfB(backup_mod, "disk_hash = editor_ops.contentHash("));
     // ⑼ **지우는 자리는 둘뿐이다**(신원으로 · 이름으로). 읽다가 손상을 만난 자리는 **지우지 않는다** —
@@ -13019,8 +13042,14 @@ test "미저장 백업: 종료가 굳히고 수락된 닫기가 지운다 — cl
     // ⑾ **신원을 다시 확인한다** — 이름이 해시라 충돌하면 남의 문서를 조용히 되살린다.
     try std.testing.expectEqual(
         @as(usize, 1),
-        countOfB(backup_mod, "if (!std.mem.eql(u8, p.path, path)) return"),
+        countOfB(backup_mod, "if (!std.mem.eql(u8, p.path, w.path)) return"),
     );
+    // ⑿ **레코드를 소비하는 진입점은 둘이고 갈래가 갈려 있다**(U4c): 경로 문서는 여는 자리에서,
+    //    이름 없는 문서는 **되살리는 자리에서만**. 하나로 합치면 새로 만든 빈 문서가 옛 번호의
+    //    레코드를 삼킨다(번호는 재시작마다 1 부터 난다).
+    try std.testing.expectEqual(@as(usize, 1), countOfB(backup_mod, "pub fn restoreIfAny("));
+    try std.testing.expectEqual(@as(usize, 1), countOfB(backup_mod, "pub fn restoreUntitled("));
+    try std.testing.expectEqual(@as(usize, 1), countOfB(editor, "editor_backup_ops.restoreUntitled(self, term)"));
 }
 
 test "저장 실패 문구 표는 «둘이고 그 이유가 적혀 있다»" {

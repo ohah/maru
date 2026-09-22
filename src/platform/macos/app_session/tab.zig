@@ -1302,6 +1302,8 @@ pub fn captureWorkspaceTab(self: *AppSession, arena: std.mem.Allocator, tab: *Ta
         // persisted Term 수"라 기존 인덱스 값을 하나도 바꾸지 않는다 — 구버전 리더가 창을 폴백하지 않는 이유다
         // (docs/workspace-restore.md §WP-P).
         var browser_terms: std.ArrayList(maru.session.workspace.BrowserTerm) = .empty;
+        // U4c 이름 없는 문서 record(브라우저와 같은 규율 — 인덱스 공간 밖).
+        var untitled_terms: std.ArrayList(maru.session.workspace.UntitledTerm) = .empty;
         var active_browser: ?usize = null;
         var persisted_index: usize = 0;
         for (pane.terms.items, 0..) |term, term_i| {
@@ -1331,7 +1333,19 @@ pub fn captureWorkspaceTab(self: *AppSession, arena: std.mem.Allocator, tab: *Ta
             //
             // 이름 없는 문서를 **실제로 되살리는** 일은 U4 다(백업 id 를 창 상태에 싣는다). 그때
             // 이 자리에 전용 갈래가 생기고, 아래 `restored_active` 의 같은 조건도 함께 고쳐야 한다.
-            if (term.kind == .editor and term.file_entry == null) continue;
+            if (term.kind == .editor and term.file_entry == null) {
+                // **U4c: 이름 없는 문서는 «신원(번호)»만 싣는다.** 내용은 §3.10 의 백업 레코드가 들고
+                // 있고(`u-<번호>.bak`), 같은 바이트를 두 곳에 두면 한쪽이 낡는다. 인덱스 공간은
+                // 브라우저와 같은 이유로 건드리지 않는다(`insert_after` — 건드리면 구버전이 창을 통째로
+                // 폴백한다). **저쪽 신원 문서는 여기 안 든다**(번호가 없다 — 그 갈래는 U4d 다).
+                if (term.rt.editor_untitled) |u| {
+                    try untitled_terms.append(arena, .{
+                        .insert_after = persisted_index,
+                        .number = u.n,
+                    });
+                }
+                continue;
+            }
             if (term.kind == .web) {
                 // 브라우저: 관측된 현재 URL을 싣는다. URL이 없거나(아직 아무것도 안 띄운 빈 패널) 주소창
                 // navigate 상한을 넘으면(큰 data: URI — 한 줄 길이·512 필드 cap 위협) **저장하지 않는다**.
@@ -1397,7 +1411,9 @@ pub fn captureWorkspaceTab(self: *AppSession, arena: std.mem.Allocator, tab: *Ta
         // WP-P: URL 있는 브라우저도 이제 복원되므로 **같은 이유로** 세어야 한다(docs/workspace-restore.md
         // §WP-P). 안 그러면 브라우저만 있던 pane이 브라우저 + 안 열었던 셸 탭으로 되살아난다.
         // URL 없는 브라우저만 있는 pane은 여전히 복원할 것이 0이라 종전대로 placeholder를 받는다.
-        if (surfaces.items.len == 0 and file_terms.items.len == 0 and browser_terms.items.len == 0) {
+        if (surfaces.items.len == 0 and file_terms.items.len == 0 and browser_terms.items.len == 0 and
+            untitled_terms.items.len == 0)
+        {
             const c = &pane.terms.items[0].surface.core; // sentinel이어도 size 유효(1×1)
             try surfaces.append(arena, .{
                 .custom_name = try arena.dupe(u8, ""),
@@ -1425,7 +1441,10 @@ pub fn captureWorkspaceTab(self: *AppSession, arena: std.mem.Allocator, tab: *Ta
             // **도크 entry 없는 편집기 Term도 앞자리로 세지 않는다** — 위 capture 가 자리를 만들지
             // 않았으므로 여기서 세면 `active-term` 이 한 칸 밀려 복원 후 엉뚱한 탭이 활성이 된다
             // (`kind == .web` 비교라 컴파일러가 안 잡는다 — 그래서 조건을 **capture 와 같은 문장으로**
-            // 적는다). 이름 없는 문서 복원이 붙을 때(U4) 두 자리를 함께 고친다.
+            // 적는다). ⚠️ **U4c 가 붙은 뒤에도 이 `continue` 는 그대로다** — 이름 없는 문서는
+            // `untitled-term` 반복 필드로 나가 **인덱스 공간 밖**에 있기 때문이다(브라우저와 같다).
+            // 그 대가는 브라우저와 같은 것 하나: 활성이 이름 없는 문서면 복원 포커스가 이웃 persisted
+            // Term 으로 떨어진다(브라우저는 `active-browser` 를 더해 그것을 고쳤다 — 필요해지면 같은 모양으로 더한다).
             if (t.kind == .editor and t.file_entry == null) continue;
             if (t.kind != .web) restored_active += 1;
         }
@@ -1445,6 +1464,7 @@ pub fn captureWorkspaceTab(self: *AppSession, arena: std.mem.Allocator, tab: *Ta
             .surfaces = try surfaces.toOwnedSlice(arena),
             .file_terms = try file_terms.toOwnedSlice(arena),
             .browser_terms = try browser_terms.toOwnedSlice(arena),
+            .untitled_terms = try untitled_terms.toOwnedSlice(arena),
             .active_browser = active_browser,
         });
     }

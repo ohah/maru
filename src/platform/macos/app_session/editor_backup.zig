@@ -249,20 +249,43 @@ pub fn dropName(self: *AppSession, name: []const u8) void {
 /// **이름 없는 문서와 저쪽 신원 문서는 대상이 아니다**(U4c) — 그 둘은 「어느 창이 되살리나」와
 /// 디렉터리 훑기가 함께 필요하다.
 pub fn restoreIfAny(self: *AppSession, term: *Term) void {
-    const path = term.rt.editor_path orelse return;
+    // **경로가 있는 문서만이다.** 이름 없는 문서를 여기서 받으면 **새로 만든 빈 문서**가 옛 번호의
+    // 레코드를 조용히 삼킨다(번호는 재시작마다 1 부터 다시 난다 — U4b-7 이 그 사고를 못 박는다).
+    // 그래서 이름 없는 문서는 **되살리는 자리 하나**(`restoreUntitled` — workspace 가 번호를 실어 온
+    // 그 자리)에서만 복원한다. 저쪽 신원 문서는 아직 대상이 아니다(U4d).
     if (term.rt.editor_remote != null) return;
+    const path = term.rt.editor_path orelse return;
+    restoreFromRecord(self, term, .{ .path = .{ .path = path } });
+}
+
+/// **되살린 이름 없는 문서의 내용을 넣는다**(U4c). 부르는 자리는 `createRestoredUntitledTerm` 하나 —
+/// workspace 가 실어 온 번호가 곧 그 문서의 신원이고, **새로 만든 문서는 이 길로 오지 않는다**.
+pub fn restoreUntitled(self: *AppSession, term: *Term) void {
+    const name = term.rt.editor_untitled orelse return;
+    restoreFromRecord(self, term, .{ .untitled = name.n });
+}
+
+fn restoreFromRecord(self: *AppSession, term: *Term, want: backup.Doc) void {
     const doc = term.rt.editor_doc orelse return;
 
-    const record = read(self, .{ .path = .{ .path = path } }) orelse return;
+    const record = read(self, want) orelse return;
     defer self.allocator.free(record.bytes);
     var parsed = record.parsed;
     defer parsed.deinit(self.allocator);
 
-    // **신원을 다시 확인한다** — 이름은 해시라 충돌이 가능하고, 남의 문서를 되살리는 것은
-    // 「조용히 다른 내용으로 연다」가 된다.
-    switch (parsed.doc) {
-        .path => |p| if (!std.mem.eql(u8, p.path, path)) return,
-        else => return,
+    // **신원을 다시 확인한다** — 이름은 해시라 충돌이 가능하고(경로), 번호는 파일 이름에 그대로
+    // 들어가지만 **레코드가 말하는 신원**과 다를 수 있다(손으로 옮긴 파일). 남의 내용을 되살리는 것은
+    // 「조용히 다른 문서로 연다」가 된다.
+    switch (want) {
+        .path => |w| switch (parsed.doc) {
+            .path => |p| if (!std.mem.eql(u8, p.path, w.path)) return,
+            else => return,
+        },
+        .untitled => |n| switch (parsed.doc) {
+            .untitled => |m| if (m != n) return,
+            else => return,
+        },
+        .remote => return, // 위에서 걸렀다 — 여기 오면 갈래가 갈린 것이다
     }
     // **적대적 입력으로 본다**(§3.8 — 문서 내용은 신뢰 입력이 아니다). 레코드는 앱 전용 자리에 있지만
     // 파일이고, 우리가 쓴 것과 다른 바이트가 들어 있을 수 있다. 여는 경로는 UTF-8 을 검증하는데
@@ -292,7 +315,13 @@ pub fn restoreIfAny(self: *AppSession, term: *Term) void {
 
     // **지문은 레코드의 것이다** — 「내가 마지막으로 본 디스크」. 지금 디스크의 지문으로 덮으면 첫
     // 저장이 CAS 를 통과해 **외부 변경을 조용히 지운다**(그것이 §3.10 이 막으려던 그 손실이다).
-    if (parsed.doc.path.disk_hash) |h| term.rt.editor_doc.?.disk_hash = h;
+    // 이름 없는 문서에는 볼 디스크가 없어 지문도 없다(`null` 그대로 — U2 가 이름이 붙는 순간 세운다).
+    switch (parsed.doc) {
+        .path => |p| {
+            if (p.disk_hash) |h| term.rt.editor_doc.?.disk_hash = h;
+        },
+        else => {},
+    }
     dropDoc(self, parsed.doc);
     term.rt.editor_backup_on_disk = false;
     // **알림 한 줄**(모달이 아니다) — 크래시를 몰랐던 사용자는 dirty 를 버그로 읽는다.

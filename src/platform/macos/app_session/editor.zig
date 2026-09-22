@@ -2287,6 +2287,34 @@ pub fn openPathInActivePane(self: *AppSession, path: []const u8) OpenFileError!*
     return term;
 }
 
+/// **되살린 이름 없는 문서**를 만든다(U4c — workspace 가 실어 온 번호로). 활성 pane 에 붙이지도,
+/// 포커스하지도 않는다: 복원은 `insert_after` 자리에 직접 끼우기 때문이다(`pane.buildWorkspacePane`).
+///
+/// **번호를 새로 내지 않고 받는다** — 그것이 이 함수가 형제(`openUntitledInActivePane`)와 다른 유일한
+/// 점이다. 그리고 **발급기를 그 번호 위로 올린다**(`Counter.observe`): 안 올리면 복원 뒤 새 문서가
+/// `untitled-1` 로 시작해 되살린 것과 **같은 이름**이 된다(§3.11).
+///
+/// 내용은 여기서 넣지 않는다 — `finishAttach` 의 꼬리가 백업 레코드를 보고 한 편집으로 넣는다(U4b).
+pub fn createRestoredUntitledTerm(self: *AppSession, number: u32) OpenFileError!*Term {
+    app_session_mod.app_runtime.untitled_docs.observe(number);
+
+    var prepared = try prepareUntitled(self);
+    errdefer prepared.deinit(self.allocator);
+
+    const term = createEditorTerm(self) catch return error.OutOfMemory;
+    errdefer term_ops.destroyTerm(self, term);
+
+    // **이름을 먼저 세운다** — `finishAttach` 의 꼬리가 복원을 부를 때 그 신원이 있어야 한다
+    // (없으면 그 문서는 백업을 못 찾는다).
+    term.rt.editor_untitled = maru.session.editor.untitled.Name.init(number);
+    finishAttach(self, term, prepared);
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    // **내용은 여기서 넣는다** — `finishAttach` 의 꼬리(경로 문서의 그 자리)가 아니다: 그쪽으로 보내면
+    // **새로 만든 빈 문서**도 옛 번호의 레코드를 삼킨다(번호는 재시작마다 1 부터 난다).
+    app_session_mod.editor_backup_ops.restoreUntitled(self, term);
+    return term;
+}
+
 /// 활성 pane 에 **이름 없는 편집기**(빈 문서)를 열고 그 탭으로 포커스한다 — `New Editor Tab`
 /// (U1, docs/plans/editor-untitled.md). `openPathInActivePane` 의 형제라 **여기에 둔다**: 3단계
 /// (준비 → 만들기·붙이기 → 포커스)와 errdefer 규율이 한 글자도 다르지 않다.
@@ -2318,6 +2346,10 @@ pub fn openUntitledInActivePane(self: *AppSession) (OpenFileError || error{Untit
     finishAttach(self, term, prepared);
     term.rt.editor_selection = editor_selection.Selection.at(0);
     self.focusTerm(pane.terms.items.len - 1);
+    // **workspace 가 이 문서를 싣기 시작했다**(U4c) — 그래서 만드는 것이 checkpoint 를 더럽혀야 한다.
+    // 안 알리면 새 탭이 다음 저장까지 파일에 없고, 그 사이 크래시하면 **레코드는 남았는데 그것을
+    // 되살릴 창 기록이 없다**(U1 때는 실리는 것이 없어 알릴 것도 없었다).
+    self.workspaceChanged(.persisted_surface);
     self.metal_dirty = true;
     return term;
 }
@@ -36188,20 +36220,19 @@ test "U1l 창이 둘이어도 이름이 겹치지 않는다 — 발급기가 앱
     };
 }
 
-test "U1m 이름 없는 문서만 있는 pane 은 «기본 셸 하나»로 복원된다 — 창을 잃지 않는다" {
+test "U1m 이름 없는 문서만 있는 pane 은 «그 문서로» 복원된다 — placeholder 가 아니다(U4c 가 고쳤다)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var fx = try UntitledFixture.init(allocator, false, true);
     defer fx.deinit(allocator);
 
-    // **이것은 알려진 한계를 못 박는 판정자다.** 이름 없는 문서는 아직 저장 시퀀스에 없으므로(U4 가
-    // 붙인다) 그것만 있는 pane 은 복원할 것이 0 이고, 저장이 **기본 셸 placeholder 하나**를 넣는다
-    // (web-only pane 과 같은 자리). 한계인 것은 맞지만 **창을 잃는 것과는 다르다** — 여기서 자리 수가
-    // 0 이 되면 `buildWorkspacePane` 이 `EmptyPane` 으로 복원을 통째로 중단해 그 창의 탭·split·frame 이
-    // 다음 checkpoint 에서 영구히 사라진다. 그래서 「하나」를 센다.
+    // **이 판정자는 U1 에서 「알려진 한계」였다**: 이름 없는 문서가 저장 시퀀스에 없어 그것만 있는 pane 은
+    // 복원할 것이 0 이었고, 저장이 **기본 셸 placeholder 하나**를 넣어 창을 잃는 것만 막았다.
+    // **U4c 가 그 한계를 없앴다** — 이제 `untitled-term` record 가 실리고, 복원은 그 record 로 pane 의
+    // 씨를 뿌린다. 그래서 placeholder 는 **없어야** 한다: 있으면 사용자가 만든 적 없는 셸 탭이 돌아온다.
     const pane = pane_ops.activePane(fx.session);
-    _ = try openUntitledInActivePane(fx.session);
-    // 터미널들을 걷어내 pane 에 이름 없는 문서만 남긴다.
+    const created = try openUntitledInActivePane(fx.session);
+    const number = created.rt.editor_untitled.?.n;
     var i: usize = pane.terms.items.len;
     while (i > 0) {
         i -= 1;
@@ -36210,17 +36241,24 @@ test "U1m 이름 없는 문서만 있는 pane 은 «기본 셸 하나»로 복�
         }
     }
     try testing.expectEqual(@as(usize, 1), pane.terms.items.len);
-    try testing.expect(pane.terms.items[0].rt.editor_untitled != null);
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const wtab = try tab_ops.captureWorkspaceTab(fx.session, arena.allocator(), tab_ops.activeTab(fx.session));
     const wp = wtab.panes[0];
-    // 편집기는 안 실린다(U1g) — 대신 **기본 셸 placeholder 하나**가 선다. 0 이면 창을 잃는다.
-    try testing.expectEqual(@as(usize, 1), wp.surfaces.len);
+    // ⑴ **placeholder 가 없다** ⑵ **record 하나가 그 번호를 들고 있다**.
+    try testing.expectEqual(@as(usize, 0), wp.surfaces.len);
     try testing.expectEqual(@as(usize, 0), wp.file_terms.len);
-    try testing.expectEqualStrings("", wp.surfaces[0].command); // 기본 로그인 셸(placeholder)
-    try testing.expect(wp.active_term < wp.surfaces.len + wp.file_terms.len);
+    try testing.expectEqual(@as(usize, 1), wp.untitled_terms.len);
+    try testing.expectEqual(number, wp.untitled_terms[0].number);
+    try testing.expectEqual(@as(usize, 0), wp.untitled_terms[0].insert_after);
+
+    // ⑶ **되살리면 그 문서 하나짜리 pane 이다** — `EmptyPane` 으로 떨어지면 그 창을 통째로 잃는다.
+    const restored = try pane_ops.buildWorkspacePane(fx.session, wp);
+    defer pane_ops.destroyPane(fx.session, restored);
+    try testing.expectEqual(@as(usize, 1), restored.terms.items.len);
+    try testing.expectEqual(.editor, restored.terms.items[0].kind);
+    try testing.expectEqual(number, restored.terms.items[0].rt.editor_untitled.?.n);
 }
 
 test "U1n 조합(IME)도 바로 받는다 — 커서가 서 있는 것의 다른 얼굴이다" {
@@ -39438,4 +39476,169 @@ test "U4b-9 적대적 레코드 둘은 무시된다 — UTF-8 이 아닌 내용,
     const t2 = try openRestored(&fx, path2);
     try testing.expectEqualStrings("small\n", t2.rt.editor_doc.?.file.content);
     try testing.expect(!isDirty(t2));
+}
+
+// ── U4c: 이름 없는 문서가 돌아온다 ─────────────────────────────────────────────
+
+test "U4c-1 이름 없는 문서가 번호와 내용으로 돌아온다 — dirty 로" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try pinBackupDir(&root_buf, &dir);
+    defer app_session_mod.editor_backup_ops.setDirForTest(null);
+
+    // ⑴ 문서를 만들고 타이핑한 뒤 **백업이 서기까지** 간다(그것이 재시작이 볼 상태다).
+    const created = try openUntitledInActivePane(fx.session);
+    const number = created.rt.editor_untitled.?.n;
+    try testing.expect(insertText(fx.session, created, "unsaved draft\n"));
+    expireBackupClock(created);
+    app_session_mod.editor_backup_ops.tick(fx.session);
+    try testing.expect(backupExists(root, .{ .untitled = number }));
+
+    // ⑵ 창을 저장하고(캡처) 그 모델로 pane 을 되살린다.
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const wtab = try tab_ops.captureWorkspaceTab(fx.session, arena.allocator(), tab_ops.activeTab(fx.session));
+    const wp = wtab.panes[0];
+    try testing.expectEqual(@as(usize, 1), wp.untitled_terms.len);
+    try testing.expectEqual(number, wp.untitled_terms[0].number);
+
+    const restored = try pane_ops.buildWorkspacePane(fx.session, wp);
+    defer pane_ops.destroyPane(fx.session, restored);
+    var found: ?*Term = null;
+    for (restored.terms.items) |t| {
+        if (t.kind == .editor and t.rt.editor_untitled != null) found = t;
+    }
+    const doc = found orelse return error.TestUnexpectedResult;
+    // ⑶ **번호와 내용이 함께 돌아왔고 dirty 다** — 저장한 적이 없으니 dirty 가 맞다.
+    try testing.expectEqual(number, doc.rt.editor_untitled.?.n);
+    try testing.expectEqualStrings("unsaved draft\n", doc.rt.editor_doc.?.file.content);
+    try testing.expect(isDirty(doc));
+    // ⑷ **소비한 레코드는 사라진다**(다음 실행이 또 되살리지 않게) — 그리고 되살린 편집이 다시 보호된다.
+    try testing.expect(doc.rt.editor_backup_dirty);
+}
+
+test "U4c-2 복원이 번호 발급기를 그 위로 올린다 — 새 문서가 겹치지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+
+    // 재시작 직후를 흉내 낸다: 발급기는 비었고 workspace 가 `untitled-9` 를 실어 왔다.
+    const restored = try createRestoredUntitledTerm(fx.session, 9);
+    defer term_ops.destroyTerm(fx.session, restored);
+    try testing.expectEqual(@as(u32, 9), restored.rt.editor_untitled.?.n);
+    // **다음 번호는 10 이다** — 안 올리면 새 문서가 `untitled-1` 로 시작해 되살린 것과 같은 이름이 된다.
+    const fresh = try openUntitledInActivePane(fx.session);
+    try testing.expectEqual(@as(u32, 10), fresh.rt.editor_untitled.?.n);
+}
+
+test "U4c-3 레코드가 없으면 빈 문서로 돌아온다 — 탭은 사용자가 만든 것이다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    _ = try pinBackupDir(&root_buf, &dir);
+    defer app_session_mod.editor_backup_ops.setDirForTest(null);
+
+    const restored = try createRestoredUntitledTerm(fx.session, 3);
+    defer term_ops.destroyTerm(fx.session, restored);
+    try testing.expectEqual(@as(u32, 3), restored.rt.editor_untitled.?.n);
+    try testing.expectEqualStrings("", restored.rt.editor_doc.?.file.content);
+    try testing.expect(!isDirty(restored)); // 되살릴 편집이 없으면 dirty 도 아니다
+}
+
+test "U4c-4 섞인 pane 의 순서가 보존된다 — 이름 없는 문서는 인덱스 공간 밖이다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+
+    // pane = [터미널(seed), 이름 없는 문서] — 편집기를 나중에 열었으므로 뒤다.
+    const pane = pane_ops.activePane(fx.session);
+    const terminals_before = pane.terms.items.len;
+    const created = try openUntitledInActivePane(fx.session);
+    const number = created.rt.editor_untitled.?.n;
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const wtab = try tab_ops.captureWorkspaceTab(fx.session, arena.allocator(), tab_ops.activeTab(fx.session));
+    const wp = wtab.panes[0];
+    // **터미널 자리 수가 그대로다**(인덱스 공간을 안 건드렸다) 그리고 record 는 그 뒤를 가리킨다.
+    try testing.expectEqual(terminals_before, wp.surfaces.len);
+    try testing.expectEqual(@as(usize, 1), wp.untitled_terms.len);
+    try testing.expectEqual(terminals_before, wp.untitled_terms[0].insert_after);
+
+    const restored = try pane_ops.buildWorkspacePane(fx.session, wp);
+    defer pane_ops.destroyPane(fx.session, restored);
+    try testing.expectEqual(terminals_before + 1, restored.terms.items.len);
+    // **자리도 그대로다** — 마지막이 그 문서다.
+    const last = restored.terms.items[restored.terms.items.len - 1];
+    try testing.expectEqual(.editor, last.kind);
+    try testing.expectEqual(number, last.rt.editor_untitled.?.n);
+    for (restored.terms.items[0 .. restored.terms.items.len - 1]) |t| {
+        try testing.expect(t.kind != .editor);
+    }
+}
+
+test "U4c-5 되살린 문서만 레코드를 삼킨다 — 새로 만든 문서는 빈 문서다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try pinBackupDir(&root_buf, &dir);
+    defer app_session_mod.editor_backup_ops.setDirForTest(null);
+
+    // 지난 실행이 `untitled-1` 레코드를 남겼다(workspace 는 그것을 안 싣고 있다 — 창을 정상으로 닫았거나
+    // 복원이 꺼져 있었다). **새로 만드는 문서도 번호 1 을 받는다** — 그때 삼키면 남의 내용이 새 문서에 뜬다.
+    try plantBackup(allocator, root, .{ .untitled = 1 }, "from a past session\n");
+    const fresh = try openUntitledInActivePane(fx.session);
+    try testing.expectEqual(@as(u32, 1), fresh.rt.editor_untitled.?.n);
+    try testing.expectEqualStrings("", fresh.rt.editor_doc.?.file.content);
+    try testing.expect(backupExists(root, .{ .untitled = 1 })); // 안 삼켰으니 그대로 있다
+
+    // **되살리는 자리는 삼킨다** — 같은 번호, 다른 진입점.
+    const restored = try createRestoredUntitledTerm(fx.session, 1);
+    defer term_ops.destroyTerm(fx.session, restored);
+    try testing.expectEqualStrings("from a past session\n", restored.rt.editor_doc.?.file.content);
+    try testing.expect(!backupExists(root, .{ .untitled = 1 }));
+}
+
+test "U4c-8 새 이름 없는 문서는 checkpoint 를 «persisted_surface 로» 더럽힌다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+
+    // 앱 전역 checkpoint 를 이 테스트 동안만 무장한다(그 관례는 P4 C3b 판정자가 세웠다).
+    const saved = app_session_mod.app_runtime.workspace_checkpoint;
+    defer app_session_mod.app_runtime.workspace_checkpoint = saved;
+    app_session_mod.app_runtime.workspace_checkpoint = .{};
+    try app_session_mod.app_runtime.workspace_checkpoint.arm(.{
+        .debounce_ns = 500_000_000,
+        .retry_initial_ns = 1_000_000_000,
+        .retry_max_ns = 30_000_000_000,
+    }, false);
+    const saved_gate = fx.session.workspace_checkpoint_mutations_enabled;
+    defer fx.session.workspace_checkpoint_mutations_enabled = saved_gate;
+    fx.session.workspace_checkpoint_mutations_enabled = true;
+
+    // ⚠️ **개수가 아니라 «종류」를 잰다.** 이 경로는 Term 생성·포커스로도 checkpoint 를 건드리므로
+    // 「revision 이 늘었나」는 신호를 지워도 참이다(적대적 검증에서 그 변이가 살아남았다). 마지막 종류가
+    // `persisted_surface` 인 것 — 즉 **이 문서가 실린다는 사실을 알렸는가** — 가 이 판정자의 축이다.
+    _ = try openUntitledInActivePane(fx.session);
+    try testing.expectEqual(
+        maru.app.workspace_checkpoint_product.ChangeKind.persisted_surface,
+        app_session_mod.app_runtime.workspace_checkpoint.last_change_kind.?,
+    );
 }

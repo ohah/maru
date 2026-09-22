@@ -12902,7 +12902,6 @@ test "kitty 락 밖 디코드 [PNG·적대]: o=z 로 한 겹 더 압축된 PNG �
     try std.testing.expectEqualStrings("\x1b_Gi=9;OK\x1b\\", core.pendingResponse());
 }
 
-
 /// 배경 색의 밝기 등급(2031/996). sRGB 상대 휘도(0.2126 R + 0.7152 G + 0.0722 B)가 절반 미만이면 다크. 경계값은 문서화된
 /// 선택이지 표준이 아니다 — 프리셋 실측: `maru`·`gruvbox-dark`·`dracula` 다크, `solarized-light`(#fdf6e3)·`one-light`(#fafafa) 라이트.
 pub fn isDarkBackground(bg: types.Rgb) bool {

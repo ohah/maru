@@ -195,9 +195,104 @@ Phase 5 세 번째 슬라이스(신뢰 UI 경로)는 `maru-app://`를 안정적 
 - 이식: WebView2(별도 HWND)·Wayland에서 모달 오버레이 합성 모델이 macOS와 달라 재결정 필요.
 - async resize jitter(§3).
 
-## 13. 미래: CEF native webview-backend plugin (이번 범위 밖)
+## 13. Chromium 백엔드 (OSR sidecar — 실측 2026-09-23, 도입 미확정)
 
-WKWebView(WebKit)는 시스템 프레임워크라 의존성이 없지만 Chromium 호환·CDP 생태계 검증이 제약된다. 미래에 CEF를 대안 백엔드로 둘 수 있으나, 기본 maru는 WKWebView만 써 의존성 0을 유지한다.
+WKWebView(WebKit)는 시스템 프레임워크라 의존성이 없지만 Chromium 호환·CDP 생태계 검증이 제약된다. Chromium을 대안 백엔드로 둘 수 있으나, 기본 maru는 WKWebView만 써 의존성 0을 유지한다.
+
+> **이 절은 두 층으로 읽는다.** §13.1 은 **OSR(off-screen rendering) + sidecar** 축이고 PoC 로 실측한 것이다. §13.2 이후(옛 서술)는 **on-screen CEF**(child NSWindow / 앱에 링크하는 plugin ABI)를 전제로 쓰였고, 그 전제에서만 유효한 제약이 섞여 있다. **둘을 섞어 읽으면 막힌 길로 읽힌다** — §13.1 이 뒤집은 것을 그 절이 명시한다. 엔진 중립 계약(`browser.*` wire·불투명 `ref`·host-mediated MCP 분기)은 두 축 모두에서 그대로다.
+
+### 13.1 OSR + sidecar — PoC 실측
+
+**동기**: 웹 pane 을 터미널 pane 안의 **픽셀**로 만들어 관리 지점을 줄이는 것. WKWebView 가 NSView 라서 생긴 빚(§4 firstResponder 전쟁, §5 chrome 인터랙션 가로채기, §3 divider seam 통과)이 **원인째** 사라진다 — NSView 가 없으면 responder chain 에 참가하지 않고, 마우스가 우리 Metal 뷰에 **먼저** 오므로 「통과시킨다」는 개념 자체가 없다.
+
+**핵심 구분 — 소속은 안 바뀐다.** 바뀌는 것은 **매체**다.
+
+| | 소속(논리) | 매체(물리) |
+|---|---|---|
+| 현행 | web Term = pane 트리 슬롯 | **WKWebView = NSView** |
+| (A) 기각 | 터미널 Term | kitty 이미지 |
+| **(B) 이 축** | web Term = pane 슬롯 **(그대로)** | **OSR 픽셀 = GPU quad** |
+
+(A)는 웹을 터미널 코어에 밀어넣어 스크롤백·터미널 선택·kitty 저장소 320MB 한도·세션호스트 투영을 타게 되므로 **하지 않는다**. (B)가 성립하는 근거는 구조가 이미 그렇게 돼 있다는 것이다 — `live_pty.zig` 의 `LiveSurface` 는 `.terminal`/`.web`/`.editor` union 이고 **web arm 은 PTY 도 reader 도 없다**. OSR 로 바꿔도 이 관계는 한 줄도 안 바뀐다.
+
+> **함정**: 같은 자리 주석이 *"arm 태그로 `Term.kind` 를 파생하지 말 것"* 이라고 경고한다(§7 종료 묘비가 `.web` arm 을 쓰면서 `kind` 는 `.terminal`). OSR 분기를 arm 으로 가르면 묘비가 웹으로 샌다.
+
+**kitty 프로토콜은 경유하지 않는다.** kitty graphics 는 PTY 라는 바이트 파이프를 건너기 위한 인코딩(base64·청킹·image_id 수명)이다. 내부 웹뷰는 같은 프로세스 안이라 그 세금을 낼 이유가 없다. 쓰는 것은 프로토콜이 아니라 **도착지** — `metal_frame.zig` 의 `GpuImage` / `image_backdrop`(layer 5) 경로다. 실측 근거: 터미널 브라우저(kitty 로 웹을 그리는 TUI)를 손님으로 받았을 때 프레임당 5.6MB·초당 25~40MB 가 코어→렌더를 지났고([io-render-present.md] §10.6), 그 비용을 깎느라 수정 넷을 넣었다. OSR 경로에서는 그 표가 통째로 0 이 된다.
+
+#### PoC 결과 (`scratchpad/cef-osr-poc`, CEF 146 / Chromium 146)
+
+![CEF OSR 이 IOSurface 로 건너온 프레임 — 창 없이 1280x720, BGRA, ad-hoc 서명](images/web-panel-osr-iosurface.png)
+
+위 그림은 **창 없이** `on_accelerated_paint` 로 건너온 IOSurface 의 픽셀을 그대로 꺼낸 것이다(보여주려고 `IOSurfaceLock` → PPM 덤프; 실제 경로엔 이 CPU 복사가 없다). 그라디언트 텍스트·둥근 카드·그림자·**한글 폰트 폴백**까지 Chromium 합성 품질이 그대로다.
+
+| 측정 | 값 |
+|---|---|
+| 프레임률 | **62.8 fps** (`windowless_frame_rate=60` 설정대로) |
+| surface | **1280x720, stride 5120** (`get_view_rect` 가 준 크기, 패딩 없음) |
+| 포맷 | `format=1` = **BGRA** — Metal 텍스처로 바로 감쌀 수 있다 |
+| damage | 전체가 아니라 **실제 변경 영역만**(324x324·440x440 …) |
+| 버퍼 | 프레임마다 다른 IOSurface(고유 16+ 관측) — **단일 버퍼가 아니라 tearing 구조가 아니다** |
+| 서명 | **`Signature=adhoc`, `TeamIdentifier=not set`** 로 렌더러까지 전부 동작 |
+
+**두 가정이 다 참이었다**: ⑴ ad-hoc + non-hardened 로 CEF 가 (렌더러 포함) 돈다 ⑵ `on_accelerated_paint` 가 IOSurface 를 주고 멀티버퍼라 동기화 문제가 없다.
+
+#### PoC 가 넘은 함정 여섯 (구현에서 똑같이 만난다)
+
+| # | 증상 | 원인·해법 |
+|---|---|---|
+| 1 | `uchar.h not found` | Zig translate-c 가 `__has_include(<uchar.h>)` 를 참으로 보고 파일은 못 찾는다 → `char16_t`/`char32_t` 만 담은 shim 헤더를 include path 앞에 둔다 |
+| 2 | `CefClient_0_CToCpp called with invalid version -1` | **`cef_api_hash(CEF_API_VERSION, 0)` 을 다른 어떤 CEF 함수보다 먼저** 부른다(`cef_api_hash.h`: 첫 호출 이후 값 변경은 무시). `999999`(실험)가 아니라 그 빌드의 정식 버전(146 → `14600`)으로 고정한다 |
+| 3 | `... is not an absolute path. Defaulting to empty` | CEF 는 `framework_dir_path`·`main_bundle_path`·`browser_subprocess_path` 가 모두 **절대경로**여야 받는다 |
+| 4 | **렌더러만 조용히 안 뜬다** | `resources_dir_path`·`locales_dir_path` 미설정. gpu·network·storage helper 는 뜨는데 renderer 만 안 떠서 `ERR_ABORTED` 로 보인다 — **가장 오래 헤맨 자리** |
+| 5 | `install_name_tool: larger updated load commands do not fit` | 빌드에 `headerpad_max_install_names = true` 가 필요하다(suji `build.zig` 가 같은 이유로 같은 일을 한다) |
+| 6 | `.app` 번들에서 렌더러가 안 뜸 | `browser_subprocess_path` 를 **자기 자신**으로 둔 비-번들 구조에서는 즉시 떴다. 번들 layout 배선은 **미해결**(아래) |
+
+#### 이 축이 뒤집은 것 (§13.2 이후 옛 서술 대비)
+
+| 옛 서술 | 실측 |
+|---|---|
+| **z-order 역전** — CEF child NSWindow 가 모달을 가린다 | **소멸.** OSR 픽셀은 우리 Metal 레이어 *안*에 들어온다. `seam_edges`(ABI v103)·`divider_grab_*_pt`(v136)·`WebPanelHitTestGeometry`·drop-zone 임시 통과·하이라이트 최상위 이관·`modal_cells_start` sentinel 한계까지 **함께 불필요**해진다 |
+| **native backend plugin ABI 가 필요** | **불필요.** sidecar 프로세스 경계가 곧 ABI 다. renderer/platform/window 를 직접 만지지 않으므로 특별 권한 plugin 을 설계할 이유가 없다 |
+| **공증이 blocker** | **아니다.** ad-hoc 서명으로 렌더러까지 동작하고, Homebrew **formula** 로 받은 산출물과 `curl` 로 받은 GitHub Release asset 에는 `com.apple.quarantine` 이 **안 붙는다**(cask 는 붙는다 — 실측으로 갈렸다). Developer ID($99/년)는 dmg/cask 채널을 열 때 필요한 것이지 이 축의 전제가 아니다 |
+| **Library Validation 이 기본 사용자 보안까지 약화** | sidecar 는 별도 실행 파일이라 메인 바이너리에 dylib 를 링크하지 않는다 |
+| **JIT entitlement 를 메인/helper 중 어디에?** | sidecar 에만. hardened runtime 을 켜지 않으면 요구 자체가 없다 |
+| **CEF prebuilt ~120~150MB** | **실측 301MB** (바이너리 200MB + Resources 79MB + Libraries 22MB). arm64 단일, 이미 스트립됨, `__text` 만 176MB 라 더 줄일 여지가 없다. locale 정리 + swiftshader 제거로 ~240MB. 참고: Electron Framework 182MB, `Google Chrome.app` 1.4GB |
+
+#### 구조와 배포
+
+```
+Maru.app (190MB, Chromium 0 바이트)
+  └─ spawn (링크 아님)
+       maru-web-host  ── CEF browser process + helper 4
+         제어 : spawn 시 상속한 socketpair (control plane 공개 표면과 분리)
+         픽셀 : IOSurface mach port → MTLDevice.makeTexture(descriptor:iosurface:plane:)
+                → GpuImage / image_backdrop
+```
+
+- **기본 앱은 190MB 그대로**, 웹 백엔드를 켠 사용자만 ~240MB 를 받는다. §13.2 가 *"기본 앱에 CEF 를 넣지 않고 필요할 때 받는 선택 백엔드"* 라고 적고도 plugin ABI 로 표현 못 해 막혔던 그 형태가, 프로세스 경계로는 그냥 성립한다.
+- 배포는 **GitHub Releases + 매니페스트 한 겹**(`cef_version`·`chromium_version`·`maru_backend_abi`·`platform`·`arch`·`sha256`). maru 는 이미 거기서 dmg 를 주므로 새 인프라가 0 이고, 나중에 R2 로 옮겨도 앱 업데이트가 필요 없다. CEF 조달 파이프라인(Spotify CDN → 빌드)은 suji `release.yml` 에 검증된 선례가 있다.
+- **Homebrew 는 formula 로**(cask 아님). 앱은 `~/Library/Application Support/Maru/backends/…` 와 brew prefix **두 자리를 찾기만** 하고, 누가 설치했는지 모르게 둔다.
+- 최신 CEF 는 **154.0.23 / Chromium 154** (공식 빌드 인덱스 기준). suji 가 받아둔 것은 146 이다.
+
+#### 분업 — WKWebView 는 남는다
+
+WKWebView 는 **OSR 을 제공하지 않는다**. macOS SDK 의 WebKit 공개 헤더 전체에 `IOSurface`·`offscreen rendering`·`windowless` 매치가 **0 건**이고, 렌더 결과를 꺼내는 공개 API 는 비동기 `takeSnapshotWithConfiguration` 하나뿐이다(WebContent 프로세스가 remote layer tree 로 넘기므로 `layer.render(in:)` 도 빈 화면). 따라서 **두 합성 모델의 공존은 선택이 아니라 구조상 강제**다.
+
+- `.markdown`(신뢰 — `maru-app://`, 파일 패널, CM6) → **WKWebView 유지**. 네이티브 IME 가 실제로 중요하고, firstResponder 계약(§4.1 4g-0~4g-4)이 이미 완성돼 있으며, 시스템 프레임워크라 배포 비용이 0 이다.
+- `.browser`(비신뢰 — 워크스페이스 브라우저·팝업, `trust=.untrusted`) → **OSR 후보**. §4.1 이 기록한 포커스 버그 5 개가 전부 이 자리에서 났고, OSR term 은 firstResponder 게임에 참가하지 않는다.
+- 침습은 한 군데다: `terminalOwnsInput`(= `anyModalOverlayOpen ∪ addr_edit ∪ rename ∪ sidebar_search`)에 **「활성 term 이 OSR web term」** 한 항을 더한다. 4g-3 이 이미 단일 출처로 모아둔 자리라 한 줄이다.
+
+#### 남은 미해결 (도입 전 필수)
+
+1. **`.app` 번들 배선** — 비-번들에서는 떴지만 번들 layout 에서는 렌더러가 안 떴다(함정 6). sidecar 가 `.app` 이어야 하는지 자체가 설계 선택이고, 필요하다면 suji `bundle_macos.zig`(helper 별 entitlements 포함)에 선례가 있다.
+2. **원격 세션호스트** — IOSurface mach port 는 **같은 기계 안에서만** 유효하다. SSH 너머 host 면 제로카피가 불가능하고, 거기서는 터미널 브라우저가 낸 비용(압축·인코딩·16 MiB 투영 상한)이 그대로 돌아온다. 웹 pane 을 로컬 전용으로 못 박을지 원격 폴백을 설계할지 **미정**이고, 이 결정이 범위를 가장 크게 가른다.
+3. **프로세스 회계** — 비활성 탭의 `zero rect + hidden` 보존 계약(§2)이 OSR 에서는 「렌더를 멈춘다」여야지 「프로세스를 든 채 논다」가 되면 안 된다. 탭 20 개 워크스페이스 복원 시 실측이 필요하다.
+4. **입력 합성** — 좌표 판정 후 `send_mouse_click_event`/`send_key_event`/`send_mouse_wheel_event` 주입, `OnCursorChange` → `NSCursor`, 컨텍스트 메뉴·툴팁·DnD, 그리고 **IME**. 「다투는 주체가 둘에서 하나로 주는」 대신 「우리가 전부 소유하는」 일로 바뀐다. 주입 좌표와 페이지 hit-test 정합(deviceScaleFactor·`get_view_rect`·페이지 줌 3 중 환산)은 아직 검증하지 않았다.
+5. **접근성** — 페이지 a11y 는 CDP `getFullAXTree` 로 온다. 지금 WKWebView 에서 주입으로 우회하던 문제([control-plane-browser-session.md] §9.5.4)가 이 축에서는 함께 풀린다.
+
+### 13.2 이하 — on-screen CEF 전제의 옛 서술 (보존)
+
+> 아래는 **CEF 를 child NSWindow 로 붙이고 앱에 링크하는** 전제에서 쓰였다. z-order·plugin ABI·공증·Library Validation·JIT·용량 항목은 §13.1 표가 정정한다. **엔진 중립 계약과 host-mediated MCP 분기**(다른 문서들이 `§13` 으로 가리키는 것)는 두 축 모두에서 그대로 유효하다.
 
 **plugin이라는 말의 경계**: 사용자가 원하는 제품 형태는 "기본 앱에 CEF를 넣지 않고 필요할 때 받는 선택 백엔드"다. 이 방향은 맞다. 다만 현재 maru의 일반 plugin/Wasm 경계는 domain event + action facade만 허용하고 renderer/platform/window를 직접 만지지 못하므로 CEF를 표현할 수 없다. CEF는 모달 Metal 오버레이 z-order 조율(renderer)·NSWindow/CefWindow 마운트(platform)·per-pane 좌표(레이아웃)를 요구한다. 따라서 이름은 plugin이어도 **일반 Wasm/action plugin이 아니라 별도 권한의 native webview-backend plugin ABI**가 필요하다.
 

@@ -12637,6 +12637,11 @@ test "REF2 구현·타입 정의·선언 — 팔레트 명령이 같은 피커�
     try testing.expectEqual(sent0, s.editor_lsp.sent_references);
     try testing.expectEqual(@as(u64, 1), s.editor_references.notified_unsupported);
     try testing.expect(s.chrome_host.notice.open);
+    {
+        var nb: [128]u8 = undefined;
+        const want = maru.i18n.format(&nb, maru.i18n.t(.nav_unsupported), &.{.{ .s = "Go to Declaration" }});
+        try testing.expectEqualStrings(want, s.chrome_host.notice.message); // 어느 명령인지 문구에 든다(적대적 E4)
+    }
     s.chrome_host.notice.dismiss();
     // ⑷ 종류가 다른 응답은 버린다 — 구현을 기다리는 동안 references 의 응답(같은 seq 값)이 오면 무시.
     term.rt.editor_selection = .{ .anchor_start = 5, .anchor_end = 5, .focus = 5 };
@@ -12658,6 +12663,86 @@ test "REF2 구현·타입 정의·선언 — 팔레트 명령이 같은 피커�
     try testing.expect(s.chrome_host.notice.open);
     try testing.expectEqualStrings(maru.i18n.t(.impl_none), s.chrome_host.notice.message);
     s.chrome_host.notice.dismiss();
+    // ⑷ʺ 타입 정의 피커의 프롬프트·없음 문구는 타입 정의의 것이고 구현·참조의 것과 **글자가 다르다** — **두 언어 표 모두**(적대적 F5: 한국어 표만
+    //     바꾼 변이가 영문 표 비교를 통과했다). 그리고 프롬프트는 실제로 타입 정의의 키로 뜬다(H2).
+    inline for (.{ maru.i18n.Lang.en, maru.i18n.Lang.ko }) |l| {
+        try testing.expect(!std.mem.eql(u8, maru.i18n.tIn(l, .typedef_none), maru.i18n.tIn(l, .impl_none)));
+        try testing.expect(!std.mem.eql(u8, maru.i18n.tIn(l, .typedef_none), maru.i18n.tIn(l, .ref_none)));
+        try testing.expect(!std.mem.eql(u8, maru.i18n.tIn(l, .decl_none), maru.i18n.tIn(l, .impl_none)));
+        try testing.expect(!std.mem.eql(u8, maru.i18n.tIn(l, .typedef_prompt), maru.i18n.tIn(l, .impl_prompt)));
+        try testing.expect(!std.mem.eql(u8, maru.i18n.tIn(l, .typedef_prompt), maru.i18n.tIn(l, .ref_prompt)));
+        try testing.expect(!std.mem.eql(u8, maru.i18n.tIn(l, .decl_prompt), maru.i18n.tIn(l, .impl_prompt)));
+    }
+    // 타입 정의 둘 → 피커의 프롬프트가 「타입 정의 2개」다: 가짜의 typeDefinition 은 첫 것 하나라, `REFTD2` 표식으로 둘을 내게 한다.
+    term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };
+    try testing.expect(insertText(s, term, "// REFTD2\n"));
+    try testing.expect(pumpLspUntil(&f.fx, 3000, term, struct {
+        fn g(t: *Term) bool {
+            var b: [32]u8 = undefined;
+            const want = std.fmt.bufPrint(&b, "fake: {d}", .{t.rt.editor_lsp_version}) catch return false;
+            return t.rt.editor_diagnostics.lsp.items.len >= 1 and std.mem.eql(u8, t.rt.editor_diagnostics.lsp.items[0].message, want);
+        }
+    }.g));
+    term.rt.editor_selection = .{ .anchor_start = 16, .anchor_end = 16, .focus = 16 };
+    s.dispatchAppAction(.goto_type_definition);
+    try testing.expect(refSettled(&f.fx));
+    try testing.expect(s.chrome_host.reference_picker.open);
+    {
+        var pb: [64]u8 = undefined;
+        const want = maru.i18n.format(&pb, maru.i18n.t(.typedef_prompt), &.{.{ .s = "2" }});
+        try testing.expectEqualStrings(want, s.chrome_host.reference_picker.prompt);
+    }
+    try pressKey(&f.fx, .escape, .{});
+    try removeMarkerHover(s, term, "// REFTD2\n");
+    // ⑷‴ 되물을 수 있는 오류(-32801)는 **구현에서도** 되묻고(종류를 든 채), 상한 뒤 문구는 구현의 것이다(적대적 E2·E6).
+    term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };
+    try testing.expect(insertText(s, term, "// REFBUSY\n"));
+    try testing.expect(pumpLspUntil(&f.fx, 3000, term, struct {
+        fn g(t: *Term) bool {
+            var b: [32]u8 = undefined;
+            const want = std.fmt.bufPrint(&b, "fake: {d}", .{t.rt.editor_lsp_version}) catch return false;
+            return t.rt.editor_diagnostics.lsp.items.len >= 1 and std.mem.eql(u8, t.rt.editor_diagnostics.lsp.items[0].message, want);
+        }
+    }.g));
+    term.rt.editor_selection = .{ .anchor_start = 16, .anchor_end = 16, .focus = 16 }; // `int zz;` 의 zz
+    const none_busy = s.editor_references.notified_none;
+    s.dispatchAppAction(.goto_implementation);
+    {
+        const t0 = s.awakeMs();
+        while (s.awakeMs() - t0 < 8000 and s.editor_references.notified_none == none_busy) {
+            _ = try s.tick();
+            _ = usleep(5_000);
+        }
+    }
+    try testing.expectEqual(none_busy + 1, s.editor_references.notified_none);
+    try testing.expectEqual(@as(u8, references_client.max_retries), s.editor_references.retries);
+    try testing.expectEqual(maru.session.editor.lsp.rpc.LocationKind.implementation, s.editor_references.waiting_kind); // 되묻기가 종류를 들었다
+    try testing.expectEqualStrings(maru.i18n.t(.impl_none), s.chrome_host.notice.message); // 상한 뒤 문구도 구현의 것
+    s.chrome_host.notice.dismiss();
+    // ⑷⁗ 되묻기 예약이 익었는데 **요청을 못 보내면**(서버가 꺼졌다 — `lsp.enabled = false`) 그 알림도 구현의 문구다(적대적 E2 — 상한 경로와 다른 갈래).
+    s.dispatchAppAction(.goto_implementation);
+    {
+        const t0 = s.awakeMs();
+        while (s.awakeMs() - t0 < 3000 and s.editor_references.retry_at_ms == 0) {
+            lsp_client.pump(s);
+            _ = usleep(5_000);
+        }
+    }
+    try testing.expect(s.editor_references.retry_at_ms > 0); // 첫 -32801 뒤 예약이 섰다
+    s.loaded_config.config.lsp.enabled = false;
+    const none_e2 = s.editor_references.notified_none;
+    {
+        const t0 = s.awakeMs();
+        while (s.awakeMs() - t0 < 3000 and s.editor_references.notified_none == none_e2) {
+            _ = try s.tick();
+            _ = usleep(5_000);
+        }
+    }
+    s.loaded_config.config.lsp.enabled = true;
+    try testing.expectEqual(none_e2 + 1, s.editor_references.notified_none);
+    try testing.expectEqualStrings(maru.i18n.t(.impl_none), s.chrome_host.notice.message);
+    s.chrome_host.notice.dismiss();
+    try removeMarkerHover(s, term, "// REFBUSY\n");
     // ⑸ 서버가 **없으면**(`lsp.enabled = false`) 「미지원」 알림이 아니라 무동작 — 다른 LSP 명령과 같은 규율(적대적 B3).
     s.loaded_config.config.lsp.enabled = false;
     defer s.loaded_config.config.lsp.enabled = true;
@@ -12686,6 +12771,34 @@ test "REF3 선언 — provider 를 내는 서버(`MARU_FAKE_LSP_DECLCAP=1`)에�
     try testing.expectEqual(@as(u64, 0), s.editor_references.notified_unsupported);
     try testing.expect(refSettled(&f.fx));
     try testing.expectEqual(@as(usize, 4), term.rt.editor_selection.?.focus);
+}
+
+test "REF4 provider 는 종류마다 따로 읽는다 — typeDefinition 만 없는 서버(`MARU_FAKE_LSP_NOTYPEDEFCAP=1`)에서 구현은 되고 타입 정의는 「지원하지 않습니다」 (제품 경계, §8.2m; 적대적 F2)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    _ = setenv("MARU_FAKE_LSP_NOTYPEDEFCAP", "1", 1);
+    defer _ = unsetenv("MARU_FAKE_LSP_NOTYPEDEFCAP");
+    var f = (try SmtFixture.open(allocator, "td.c", "int zz;\nint zzz;\n  zz = zz + 1;\n")) orelse return error.SkipZigTest;
+    defer f.close(allocator);
+    const s = f.fx.session;
+    const term = f.term;
+    try testing.expect(f.ready());
+    term.rt.editor_selection = .{ .anchor_start = 5, .anchor_end = 5, .focus = 5 };
+    const sent0 = s.editor_lsp.sent_references;
+    s.dispatchAppAction(.goto_type_definition);
+    try testing.expectEqual(sent0, s.editor_lsp.sent_references);
+    try testing.expectEqual(@as(u64, 1), s.editor_references.notified_unsupported);
+    {
+        var nb: [128]u8 = undefined;
+        const want = maru.i18n.format(&nb, maru.i18n.t(.nav_unsupported), &.{.{ .s = "Go to Type Definition" }});
+        try testing.expectEqualStrings(want, s.chrome_host.notice.message);
+    }
+    s.chrome_host.notice.dismiss();
+    s.dispatchAppAction(.goto_implementation); // 구현은 provider 가 있다 — 요청이 나간다
+    try testing.expectEqual(sent0 + 1, s.editor_lsp.sent_references);
+    try testing.expect(refSettled(&f.fx));
+    try testing.expect(s.chrome_host.reference_picker.open);
+    try pressKey(&f.fx, .escape, .{});
 }
 
 test "GOTO1 정의로 이동 — F12·⌘클릭이 서버 응답의 첫 항목으로 caret 을 옮기고 되돌아가기 표식을 쌓는다; ⌃-/⌃⇧- 로 뒤로·앞으로; 다른 파일은 열어서; root 밖·없음은 알림; 낡은 응답은 버린다 (제품 경계, §8.2c·§5.2)" {

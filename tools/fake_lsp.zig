@@ -752,6 +752,10 @@ fn handleLocationKind(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id:
         };
     };
     const text = docText(req_uri);
+    if (std.mem.indexOf(u8, text, "REFBUSY") != null) { // 참조와 같은 「지금은 못 답한다」(§8.2m — 되묻기는 종류를 든 채)
+        sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .@"error" = .{ .code = @as(i32, -32801), .message = "content modified" } });
+        return;
+    }
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -770,7 +774,12 @@ fn handleLocationKind(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id:
                 var i: usize = 1;
                 while (i < mine.items.len) : (i += 1) out.append(asLink(arena, mine.items[i]) catch return) catch return;
             },
-            .first_one => if (mine.items.len > 0) out.append(asLink(arena, mine.items[0]) catch return) catch return,
+            .first_one => {
+                // `REFTD2` 표식이면 둘(피커의 종류별 프롬프트를 재게) — 아니면 첫 것 하나.
+                const n: usize = if (std.mem.indexOf(u8, text, "REFTD2") != null) @min(2, mine.items.len) else @min(1, mine.items.len);
+                var i: usize = 0;
+                while (i < n) : (i += 1) out.append(asLink(arena, mine.items[i]) catch return) catch return;
+            },
         }
     }
     sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .result = std.json.Value{ .array = out } });
@@ -900,6 +909,9 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
         return;
     };
     if (std.mem.eql(u8, method, "initialize")) {
+        var typedef_caps: std.json.ObjectMap = .empty;
+        typedef_caps.put(allocator, "workDoneProgress", .{ .bool = false }) catch return;
+        defer typedef_caps.deinit(allocator);
         var sync_caps: std.json.ObjectMap = .empty;
         var save_opts: std.json.ObjectMap = .empty;
         save_opts.put(allocator, "includeText", .{ .bool = true }) catch return;
@@ -936,7 +948,7 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
                     .foldingRangeProvider = std.c.getenv("MARU_FAKE_LSP_NOFOLDCAP") == null,
                     .referencesProvider = true, // §8.2l
                     .implementationProvider = true, // §8.2m
-                    .typeDefinitionProvider = .{ .workDoneProgress = false }, // 객체 꼴
+                    .typeDefinitionProvider = if (std.c.getenv("MARU_FAKE_LSP_NOTYPEDEFCAP") == null) std.json.Value{ .object = typedef_caps } else std.json.Value{ .bool = false }, // 객체 꼴; `NOTYPEDEFCAP=1` 이면 false
                     .declarationProvider = std.c.getenv("MARU_FAKE_LSP_DECLCAP") != null, // 기본 없음(tsgo 꼴)
                     .semanticTokensProvider = if (std.c.getenv("MARU_FAKE_LSP_NOSEMCAP") == null) .{
                         .legend = .{ .tokenTypes = [_][]const u8{ "keyword", "function", "variable", "type", "bogusKind" }, .tokenModifiers = [_][]const u8{"declaration"} },

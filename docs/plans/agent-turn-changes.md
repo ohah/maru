@@ -1358,8 +1358,8 @@ agent-hooks` 를 돌린다 — 지금은 `~/.local/bin/maru`, 09-03 빌드)가 �
 | K | `last-agent-session` 이 이미 밀린·지워진 세션이면 | 파일이 없으면 «관측한 턴 없음» — 지금과 같다. 있는데 tree 가 없으면 B |
 | L | 텍스트 manifest 에 경로·제목의 개행·따옴표 | `workspace.v1` 이 이미 `custom-name="…"` 인용 규칙을 갖는다 — 그 인코더를 공유한다(새 인용 규칙을 만들지 않는다) |
 
-**미결(사용자 확인)**: ⑴ 위치 `~/.cache/maru/turn-rings/` 와 TTL 7일 ⑵ C 의 «하나라도 손상이면 세션 통째로» ⑶ «최근 세션» 을
-`workspace.v1` 에 두는 것(창 상태) — 대안은 turn-rings 안의 `last` 파일(창과 무관).
+**사용자 결정(2026-09-22)**: ⑴ 위치 `~/.cache/maru/turn-rings/` · TTL **7일** ⑵ 손상·소실은 **세션 통째로 접는다**(C) ⑶ «최근 세션» 은
+**`workspace.v1` 의 window 줄**(창 상태).
 
 ### ~~AT5 — 스냅샷 ref 고정~~ (폐기, 2026-08-23)
 

@@ -563,6 +563,30 @@ pub const Store = struct {
     /// ⑷ `push` 가 dedup 으로 거절한다(봉인·발급 **직후**라 그 순간 고아가 된다).
     ///
     /// 넷을 질문 하나로 덮는다 — 「이 캡처를 아직 가리키는 스냅샷이 있나」.
+    /// 디스크에서 되살린 봉인 턴을 **새 id 로** 들인다(AT7 — 계약 §6.2: id 는 창 수명이라 옛 값을 잇지 않는다).
+    /// 소유권을 가져간다 — 실패해도 호출자가 다시 `deinit` 하지 않게 여기서 처리한다. `seal` 과 같은 자리 고르기.
+    pub fn adoptSealed(self: *Store, gpa: std.mem.Allocator, turn: Turn) Id {
+        var owned = turn;
+        if (!owned.hasEvidence()) {
+            owned.deinit(gpa);
+            return 0;
+        }
+        owned.edited_count = owned.countEdited();
+        const id = self.next_id;
+        self.next_id += 1;
+        var victim: *SealedSlot = &self.sealed[0];
+        for (&self.sealed) |*s| {
+            if (s.id == 0) {
+                victim = s;
+                break;
+            }
+            if (s.id < victim.id) victim = s;
+        }
+        if (victim.id != 0) victim.turn.deinit(gpa);
+        victim.* = .{ .id = id, .turn = owned };
+        return id;
+    }
+
     pub fn sweep(self: *Store, gpa: std.mem.Allocator, live: []const Id) void {
         for (&self.sealed) |*s| {
             if (s.id == 0) continue;

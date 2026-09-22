@@ -90,6 +90,7 @@ test {
     // 테스트 빌드에서 facade/module ownership과 lowering API drift를 컴파일 시점에 잡는다.
     _ = @import("chrome/lab.zig");
     _ = @import("chrome/chrome_draw_lowering.zig");
+    _ = @import("app_session/turn_store.zig"); // AT7: 턴 링 디스크 저장소의 판정자(배선 전에는 여기서만 분석된다)
 }
 pub const agent_session_archive_view = maru.session.agent_session_archive_view;
 pub const metal_frame = renderer.metal_frame; // §8: metal_frame이 renderer로 이주 — maru.renderer barrel 경유(중립 frame DTO)

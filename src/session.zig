@@ -110,6 +110,7 @@ pub const git_write_command = @import("session/git_write_command.zig"); // 쓰�
 pub const git_locate = @import("session/git_locate.zig");
 pub const turn_snapshot = @import("session/turn_snapshot.zig"); // 에이전트 턴 경계 스냅샷 정책(§6.1, 순수)
 pub const turn_capture = @import("session/turn_capture.zig"); // 턴이 만진 파일의 그림자 사본 보관 정책(§4.4, 순수)
+pub const turn_persist = @import("session/turn_persist.zig"); // AT7: 턴 링·봉인 턴의 디스크 모양(순수)
 pub const shell_bracket = @import("session/shell_bracket.zig"); // 에이전트 셸이 돌던 구간(AT3b-1, 순수 — Pre/Post 로 열고 닫는다)
 pub const repo_path = @import("session/repo_path.zig"); // 저장소 루트 안쪽 상대경로 판정(심층 방어 — 순수)
 pub const diff_payload = @import("session/diff_payload.zig"); // E1: diff 본문 페이로드 상한·binary 정책(순수) // git 실행 파일 후보 열거(설치 여부 판정 — shim 회피)

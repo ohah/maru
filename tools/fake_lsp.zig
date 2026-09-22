@@ -820,6 +820,12 @@ fn handleInlayHint(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: st
         };
     };
     const text = docText(req_uri);
+    // rust-analyzer 꼴: 범위 끝 줄이 문서 줄 수를 넘으면 `-32603`(클라이언트가 끝을 마지막 줄로 clamp 해야 한다 — §8.2n).
+    const nlines: i64 = @intCast(std.mem.count(u8, text, "\n") + 1);
+    if (hi >= nlines) {
+        sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .@"error" = .{ .code = @as(i32, -32603), .message = "range end past document end" } });
+        return;
+    }
     if (std.mem.indexOf(u8, text, "INLSTALL") != null) return;
     // `INLREFRESH` — rust-analyzer 꼴(§8.2n 실측): 첫 요청엔 `[]` 를 내고 곧 `workspace/inlayHint/refresh`(id `srv-2`) 를 보낸다. 그 뒤의 요청은
     // 클라이언트가 그 요청에 **result 로 답한 뒤에만** 진짜 힌트를 낸다(거부하거나 안 답하면 영영 `[]`).

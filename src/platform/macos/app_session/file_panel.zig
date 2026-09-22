@@ -1216,7 +1216,7 @@ pub fn enqueueRemoteFileTreeCreate(self: *AppSession, target: FileTreeEditTarget
 /// 원격 이름 변경 작업(RF6b). RF4 의 파일 열기와 같은 모양이다 — 사용자 조작 단발이라 큐가 필요 없고,
 /// **로컬 변경 백엔드를 안 탄다**(§2.4 — 그쪽은 휴지통 staging·롤백·에디터 잠금이 로컬 파일시스템
 /// 의미에 묶여 있어, 원격 경로가 들어가면 같은 철자의 로컬 파일이 대상이 된다).
-pub const RemoteMutationKind = enum { rename, delete, create_file, create_directory };
+pub const RemoteMutationKind = enum { rename, delete, create_file, create_directory, write_file };
 
 /// 변경 한 건이 쓸 **목적지 한 쌍**. `diff_remote_dest` 와 같은 규율로 **요청할 때 박는다**
 /// (적대적 검증 5 회차 — 예전에는 보낼 때 세션에서 읽었다). 삭제는 그 사이에 **확인 모달**이
@@ -1261,6 +1261,12 @@ pub const RemoteRenameJob = struct {
     /// 행이 들고 있던 신원 — 저쪽이 이것과 다르면 **안 옮기고** stale 로 답한다(§2.3 ⑶).
     dev: u64,
     ino: u64,
+    /// `.write_file` 이 보낼 **문서 바이트**(그 외 종류에서는 빈 슬라이스). 소유는 job 이고 위
+    /// `defer` 가 나머지 문자열과 같은 자리에서 놓는다.
+    bytes: []u8 = &.{},
+    /// `.write_file` 이 **덮어써도 되는가**. 거짓이면 헬퍼의 비대체 rename 이 `collision` 을 준다 —
+    /// 로컬 `stat` 으로 미리 묻지 않는 이유가 그것이다(그 사이가 창이다).
+    overwrite: bool = false,
 };
 
 pub const RemoteRenameOutcome = struct {
@@ -1365,6 +1371,7 @@ fn remoteRenameWorker(job: *RemoteRenameJob) void {
         allocator.free(job.new_name);
         allocator.free(job.old_name);
         allocator.free(job.parent);
+        if (job.bytes.len > 0) allocator.free(job.bytes);
         allocator.destroy(job);
     }
     var out: []u8 = &.{};
@@ -1399,6 +1406,17 @@ fn remoteRenameWorker(job: *RemoteRenameJob) void {
             ssh_upload.create_script,
             &.{ job.parent, job.old_name, if (job.kind == .create_directory) "d" else "f", dev_text, ino_text },
             remote_file_mutation.max_wire_bytes,
+            &out,
+        ) catch -1,
+        // ⚠️ **여기만 `runRemoteScript` 다.** 형제 셋이 쓰는 `runRemoteCapped` 는 자식 **stdin 을 닫으므로**
+        // 내용을 실을 수 없다(U3). 돌려주는 것은 같다: 종료 코드와 결말 wire.
+        .write_file => ssh_upload.runRemoteScript(
+            allocator,
+            job.ctl,
+            job.dest,
+            ssh_upload.write_script,
+            &.{ job.parent, job.old_name, if (job.overwrite) "o" else "x", dev_text, ino_text },
+            job.bytes,
             &out,
         ) catch -1,
     };

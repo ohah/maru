@@ -57,7 +57,7 @@ extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_
 /// 판 14: wire 도 명령도 그대로인데 **보내는 값의 뜻이 달라진다**(계획 §29) — 본문이 `text` 없는
 /// 배열이면 예전 판은 결과 레코드를 통째로 버려 `found=false` 를 보냈다. 낡은 헬퍼를 그대로 두면
 /// **같은 파일을 로컬로 열 때와 원격으로 열 때가 갈린다**(계약 §2.3). 그래서 판을 올려 갈아 끼운다.
-pub const version_line = "maru-remote-watch 14\n";
+pub const version_line = "maru-remote-watch 15\n";
 
 /// **판 2 부터는 내지 않는다**(RW7d — 한도에서 폴링으로 내려간다). 상수를 남겨 두는 이유는 원격에
 /// 아직 **판 1 바이너리가 도는 경우**가 있어서다 — 그쪽은 여전히 이 코드로 나가고, 앱은 그것을
@@ -167,6 +167,16 @@ pub fn main(init: std.process.Init) !void {
     // **같은 축**이다 — 부모를 열어 그 신원을 다시 재고, **배타 생성**으로 만든다
     // (`O_CREAT|O_EXCL` / `mkdirat`). 배타가 계약인 이유는 이름 변경과 같다: 덮어쓰면 남의 파일이
     // 조용히 사라진다. 미리 「있나」를 물으면 그 사이가 창이라, 커널이 판정하게 둔다.
+    // **바이트를 쓴다**(U3 — 판 15). `mk` 는 빈 파일만 만들므로 문서 저장에는 그것이 없었다.
+    // 인자는 `mk` 와 같은 축(부모·이름·기대 신원) + **모드**이고, 내용은 **stdin** 으로 온다.
+    if (std.mem.eql(u8, root, "write")) {
+        const parent = args.next() orelse return exitWith(exit_unsupported);
+        const name = args.next() orelse return exitWith(exit_unsupported);
+        const mode = args.next() orelse return exitWith(exit_unsupported);
+        const dev_text = args.next() orelse return exitWith(exit_unsupported);
+        const ino_text = args.next() orelse return exitWith(exit_unsupported);
+        return runWrite(io, init.gpa, parent, name, mode, dev_text, ino_text);
+    }
     if (std.mem.eql(u8, root, "mk")) {
         const parent = args.next() orelse return exitWith(exit_unsupported);
         const name = args.next() orelse return exitWith(exit_unsupported);
@@ -439,6 +449,124 @@ fn runCreate(
         else => .io,
     }, "create failed");
 }
+
+/// **stdin 의 바이트를 그 자리에 쓴다**(U3 — 이름 없는 문서를 저쪽에 저장한다).
+///
+/// **두 모드가 서로 다른 것을 지킨다.**
+/// - `x`(exclusive — 첫 저장): **남의 파일을 덮지 않는다.** 임시 이름에 받고 `renameNoReplace` 로
+///   바꾼다 — 그 원자 연산이 곧 「없을 때만」이고, 미리 `stat` 으로 물으면 그 사이가 창이다.
+/// - `o`(overwrite — 사용자가 「덮어쓴다」고 답한 뒤): 평범한 `rename` 으로 **바꿔 끼운다**. 임시
+///   이름을 쓰는 이유는 여기서 더 크다 — 채널이 끊겨도 **있던 내용이 반쪽으로 남지 않는다**.
+///
+/// **상한은 backstop 이다.** 부르는 쪽(편집기)이 8 MiB 에서 이미 거절하므로, 여기 한도는 「그 약속이
+/// 깨졌을 때 남의 서버 디스크를 채우지 않는다」를 위한 것이다. 넘으면 **쓰다 만 것을 지우고 말한다**.
+fn runWrite(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    parent: []const u8,
+    name: []const u8,
+    mode: []const u8,
+    dev_text: []const u8,
+    ino_text: []const u8,
+) void {
+    if (parent.len == 0 or parent[0] != '/') return putMvResult(.invalid, "parent is not absolute");
+    if (!mvNameIsSafe(name)) return putMvResult(.invalid, "unsafe name");
+    const overwrite = if (std.mem.eql(u8, mode, "o")) true else if (std.mem.eql(u8, mode, "x")) false else return putMvResult(.invalid, "bad mode");
+    const want_dev = std.fmt.parseInt(u64, dev_text, 10) catch return putMvResult(.invalid, "bad identity");
+    const want_ino = std.fmt.parseInt(u64, ino_text, 10) catch return putMvResult(.invalid, "bad identity");
+
+    var dir = std.Io.Dir.cwd().openDir(io, parent, .{}) catch |err| {
+        return putMvResult(mvOutcomeForOpen(err), "opendir failed");
+    };
+    defer dir.close(io);
+
+    // **부모의 신원을 다시 잰다** — `mk` 와 같은 이유·같은 자리다(그 사이 부모가 갈렸으면 엉뚱한 곳이다).
+    const parent_stat = rawFstat(dir.handle) orelse return putMvResult(.io, "fstat failed");
+    if (parent_stat.dev != want_dev or parent_stat.ino != want_ino)
+        return putMvResult(.stale, "parent identity changed");
+
+    // 임시 이름은 **그 디렉터리 안**이어야 한다(`rename` 은 파일시스템을 넘지 못한다). 점 접두로
+    // 목록에서 눈에 덜 띄게 하고, pid 를 섞어 같은 부모에 둘이 붙어도 안 겹치게 한다.
+    var tmp_buf: [rfls_max_name_bytes]u8 = undefined;
+    const tmp_name = std.fmt.bufPrint(&tmp_buf, ".maru-write-{d}.tmp", .{std.c.getpid()}) catch
+        return putMvResult(.io, "temp name too long");
+    const tmp_z = gpa.dupeZ(u8, tmp_name) catch return putMvResult(.io, "out of memory");
+    defer gpa.free(tmp_z);
+
+    const tmp_fd = std.c.openat(dir.handle, tmp_z.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true }, @as(std.c.mode_t, 0o644));
+    if (tmp_fd < 0) {
+        return putMvResult(switch (std.posix.errno(tmp_fd)) {
+            .ACCES, .PERM, .ROFS => .denied,
+            .NOENT => .not_found,
+            else => .io,
+        }, "temp create failed");
+    }
+    // 여기부터 **어느 갈래로 나가도 임시 파일을 지운다** — 남기면 다음 저장이 「이미 있다」를 만난다.
+    var tmp_live = true;
+    defer if (tmp_live) {
+        _ = std.c.close(tmp_fd);
+        _ = std.c.unlinkat(dir.handle, tmp_z.ptr, 0);
+    };
+
+    var total: usize = 0;
+    var buf: [64 * 1024]u8 = undefined;
+    while (true) {
+        const rc = std.posix.system.read(0, &buf, buf.len);
+        const n: isize = @bitCast(rc);
+        if (n < 0) return putMvResult(.io, "read failed");
+        if (n == 0) break;
+        const got: usize = @intCast(n);
+        total += got;
+        if (total > write_max_bytes) return putMvResult(.invalid, "too large");
+        var left = got;
+        while (left > 0) {
+            const wr = std.posix.system.write(tmp_fd, buf[got - left ..].ptr, left);
+            const w: isize = @bitCast(wr);
+            if (w <= 0) return putMvResult(.io, "write failed");
+            left -= @intCast(w);
+        }
+    }
+    // **내용을 먼저 굳힌다.** 굳히지 않고 이름을 바꾸면 크래시 뒤에 「이름은 있는데 속은 빈」 파일이 남는다.
+    if (std.c.fsync(tmp_fd) != 0) return putMvResult(.io, "fsync failed");
+    if (std.c.close(tmp_fd) != 0) return putMvResult(.io, "close failed");
+    tmp_live = false;
+    var unlink_tmp = true;
+    defer if (unlink_tmp) {
+        _ = std.c.unlinkat(dir.handle, tmp_z.ptr, 0);
+    };
+
+    const name_z = gpa.dupeZ(u8, name) catch return putMvResult(.io, "out of memory");
+    defer gpa.free(name_z);
+
+    if (overwrite) {
+        // **평범한 `rename` 이 곧 교체다** — 사용자가 「덮어쓴다」고 답한 뒤이므로 여기서 다시 막지
+        // 않는다. 원자적이라 읽는 쪽은 옛 내용이나 새 내용 중 하나만 본다(반쪽은 없다).
+        const rc = std.c.renameat(dir.handle, tmp_z.ptr, dir.handle, name_z.ptr);
+        if (rc != 0) {
+            return putMvResult(switch (std.posix.errno(rc)) {
+                .ACCES, .PERM, .ROFS => .denied,
+                .NOENT => .not_found,
+                else => .io,
+            }, "rename failed");
+        }
+        unlink_tmp = false;
+        return putMvResult(.ok, null);
+    }
+    switch (renameNoReplace(dir.handle, tmp_z.ptr, name_z.ptr)) {
+        .ok => {
+            unlink_tmp = false;
+            putMvResult(.ok, null);
+        },
+        .exists => putMvResult(.collision, "name exists"),
+        .denied => putMvResult(.denied, "rename denied"),
+        .not_found => putMvResult(.not_found, "parent gone"),
+        .unsupported => putMvResult(.unsupported, "no non-replacing rename"),
+        .io => putMvResult(.io, "rename failed"),
+    }
+}
+
+/// 헬퍼가 받아 주는 바이트 상한(backstop) — 부르는 쪽 약속(8 MiB)이 깨졌을 때의 그물이다.
+const write_max_bytes: usize = 16 * 1024 * 1024;
 
 const RenameResult = enum { ok, exists, denied, not_found, unsupported, io };
 

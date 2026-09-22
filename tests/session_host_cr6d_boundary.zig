@@ -308,7 +308,12 @@ test "CR6d v2b0b는 preflight 뒤 전체 inventory를 Zig 판정자에 exact onc
     try std.testing.expectEqual(@as(usize, 1), count(producer, "maximumWindowCount = 256"));
     try std.testing.expectEqual(@as(usize, 0), count(producer, ".write(to:"));
     try std.testing.expectEqual(@as(usize, 1), count(swift, "session_host_input_smoke_candidate_failure="));
-    try std.testing.expectEqual(@as(usize, 1), count(build, "MARU_SESSION_HOST_CR6D_CANDIDATE_CONTEXT_PROBE"));
+    var graph = try build_graph.parse(allocator);
+    defer graph.deinit();
+    // 환경변수 주입도 **구조로** 센다 — `countCall` 은 receiver 를 안 가리고 그 호출 자체를
+    // 세므로, run 변수 이름이 바뀌어도 죽지 않는다. 실측으로 이 이름은 빌드 소스에 1번
+    // 나오는데 그게 전부 `setEnvironmentVariable` 이라 두 값이 같다.
+    try std.testing.expectEqual(@as(usize, 1), graph.countCall("setEnvironmentVariable", "MARU_SESSION_HOST_CR6D_CANDIDATE_CONTEXT_PROBE"));
     try std.testing.expectEqual(@as(usize, 1), count(swift, "MARU_SESSION_HOST_CR6D_CANDIDATE_CONTEXT_PROBE"));
     const context_probe = between(
         swift,

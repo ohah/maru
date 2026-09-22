@@ -1,5 +1,8 @@
 const std = @import("std");
 const build_source = @import("support/build_source.zig");
+/// 빌드 등록을 **문자열이 아니라 구조로** 본다. 모듈 배선이 필요 없다 — 이 파일은 모듈 루트가
+/// 아니라 상대 경로로 `tests/support/` 를 볼 수 있다(`tests/boundary/` 아래는 그게 안 된다).
+const build_graph = @import("support/build_graph.zig");
 
 fn count(haystack: []const u8, needle: []const u8) usize {
     var total: usize = 0;
@@ -42,7 +45,12 @@ test "C3-3b5 common close progress boundary는 RED inventory와 dormant caller�
     // 두 daemon과 process singleton을 쓰는 제품 검증은 b5 전용 exact-one artifact에서만 필수 실행한다.
     // broad filter는 exact marker로 그 한 행만 건너뛰고 나머지 일곱 synthetic 행을 같은 artifact에서 유지한다.
     try std.testing.expectEqual(@as(usize, 1), count(backend_source, "MARU_SESSION_HOST_WINDOW_CLOSE_MULTIHOST"));
-    try std.testing.expectEqual(@as(usize, 3), count(build, "MARU_SESSION_HOST_WINDOW_CLOSE_MULTIHOST"));
+    var graph = try build_graph.parse(allocator);
+    defer graph.deinit();
+    // 환경변수 주입도 **구조로** 센다 — `countCall` 은 receiver 를 안 가리고 그 호출 자체를
+    // 세므로, run 변수 이름이 바뀌어도 죽지 않는다. 실측으로 이 이름은 빌드 소스에 3번
+    // 나오는데 그게 전부 `setEnvironmentVariable` 이라 두 값이 같다.
+    try std.testing.expectEqual(@as(usize, 3), graph.countCall("setEnvironmentVariable", "MARU_SESSION_HOST_WINDOW_CLOSE_MULTIHOST"));
     try std.testing.expectEqual(@as(usize, 3), count(build, "\"C3-3b5 remote backend"));
     try std.testing.expectEqual(@as(usize, 3), count(build, "event_c3_3b5_remote_backend_module"));
     try std.testing.expectEqual(@as(usize, 7), count(build, "previous_actual_host_run"));

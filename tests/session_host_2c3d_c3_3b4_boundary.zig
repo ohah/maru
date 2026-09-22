@@ -1,5 +1,8 @@
 const std = @import("std");
 const build_source = @import("support/build_source.zig");
+/// 빌드 등록을 **문자열이 아니라 구조로** 본다. 모듈 배선이 필요 없다 — 이 파일은 모듈 루트가
+/// 아니라 상대 경로로 `tests/support/` 를 볼 수 있다(`tests/boundary/` 아래는 그게 안 된다).
+const build_graph = @import("support/build_graph.zig");
 
 test "C3-3b4 product semantic pump boundary는 sole caller와 raw source zero를 고정한다" {
     const allocator = std.testing.allocator;
@@ -54,11 +57,13 @@ test "C3-3b4 product semantic pump boundary는 sole caller와 raw source zero를
         @as(usize, 1),
         count(backend, "std.c.getenv(\"MARU_SESSION_HOST_REMOTE_BACKEND_REAL_HOST\")"),
     );
-    try std.testing.expectEqual(
-        @as(usize, 2),
-        count(build, "\"MARU_SESSION_HOST_REMOTE_BACKEND_REAL_HOST\""),
-    );
-    try std.testing.expectEqual(@as(usize, 1), count(build, "\"MARU_C3B4_PROOF_LOSS\""));
+    var graph = try build_graph.parse(allocator);
+    defer graph.deinit();
+    // 환경변수 주입도 **구조로** 센다 — `countCall` 은 receiver 를 안 가리고 그 호출 자체를
+    // 세므로, run 변수 이름이 바뀌어도 죽지 않는다. 실측으로 이 이름은 빌드 소스에 2번
+    // 나오는데 그게 전부 `setEnvironmentVariable` 이라 두 값이 같다.
+    try std.testing.expectEqual(@as(usize, 2), graph.countCall("setEnvironmentVariable", "MARU_SESSION_HOST_REMOTE_BACKEND_REAL_HOST"));
+    try std.testing.expectEqual(@as(usize, 1), graph.countCall("setEnvironmentVariable", "MARU_C3B4_PROOF_LOSS"));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "std.c.getenv(\"MARU_C3B4_PROOF_LOSS\")"));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "fresh-artifact-v1"));
 }

@@ -66,7 +66,10 @@ test "CR6e-a2 경계는 exact AppKit fixture root와 반복 raw artifact만 연�
     // 스텝 선언을 **구조로** 센다 — 문자열은 설명문·인자에 적힌 같은 이름도 세고,
     // 더 긴 이름의 앞부분에도 걸린다.
     try std.testing.expectEqual(@as(usize, 1), graph.countSteps("macos-session-host-cr6e-recovery-baseline"));
-    try std.testing.expectEqual(@as(usize, 1), count(build, "MARU_SESSION_HOST_CR6E_RECOVERY_BASELINE_ARTIFACT"));
+    // 환경변수 주입도 **구조로** 센다 — `countCall` 은 receiver 를 안 가리고 그 호출 자체를
+    // 세므로, run 변수 이름이 바뀌어도 죽지 않는다. 실측으로 이 이름은 빌드 소스에 1번
+    // 나오는데 그게 전부 `setEnvironmentVariable` 이라 두 값이 같다.
+    try std.testing.expectEqual(@as(usize, 1), graph.countCall("setEnvironmentVariable", "MARU_SESSION_HOST_CR6E_RECOVERY_BASELINE_ARTIFACT"));
     // Capture root validation and native-wake handshake root allowlist each name the exact root.
     try std.testing.expectEqual(@as(usize, 2), count(swift, "\"session-host-cr6e-home\""));
     try std.testing.expectEqual(@as(usize, 1), count(swift, "private var isSessionHostRecoveryBaselineMode: Bool"));

@@ -268,6 +268,11 @@ fn applyPlan(self: *AppSession, items: []Item) Outcome {
             for (item.open) |o| {
                 if (o.changes.items.len == 0) continue;
                 // 일괄 경로 — 이유는 여기서 버린다(§3.9d: 파일마다 알림을 띄우지 않는다). 성공만 센다.
+                //
+                // ⚠️ **저쪽 문서는 건너뛴다**(U3). 그 저장은 **왕복**이고 in-flight 가 하나뿐이라, 여기서
+                // 걸면 첫 파일만 나가고 나머지는 「바쁘다」 알림을 **파일마다** 띄운다 — §3.9d 가 이
+                // 경로에서 막으려던 바로 그것이다. 저장이 안 된 문서는 **dirty 로 남아** 표식이 말한다.
+                if (o.term.rt.editor_remote != null) continue;
                 if (editor_ops.isDirty(o.term)) {
                     if (editor_ops.saveDocument(self, o.term)) |_| {
                         st.saved_files += 1;

@@ -1349,7 +1349,7 @@ pub fn applyForcedReplaceSave(self: *AppSession) void {
         // 이 픽스처는 **경로가 있는 문서**에 편집기 Term 으로 서므로 이 셋은 올 수 없다. 그래도
         // `else` 로 뭉개지 않는다 — 뭉개면 나중에 진짜 이유가 하나 늘었을 때 그것이 「알 수 없음」으로
         // 조용히 빠진다(§3.9d 가 막으려는 바로 그것이다).
-        error.AskName, error.NotAnEditor, error.ReadOnly => return,
+        error.AskName, error.NotAnEditor, error.ReadOnly, error.Handled => return,
         else => {
             self.showNoticeKey(editor_ops.saveFailureNoticeKey(@errorCast(e)));
             return;

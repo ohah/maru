@@ -98,6 +98,23 @@ pub const fold_lsp_client = @import("editor_fold_lsp.zig");
 pub const FoldSource = enum { indent, syntax, lsp };
 pub const workspace_edit_client = @import("editor_workspace_edit.zig");
 
+/// **저쪽 파일의 신원**(U3 — §3.11). 저장 목적지가 원격일 때 문서가 드는 값이고, `editor_path`
+/// (이쪽)와 **배타**다.
+///
+/// **둘 다 owned 다.** 목적지는 요청할 때 박는 규율(`RemoteEndpoint`)과 같은 이유로 들고 있어야
+/// 한다 — 나중에 세션에서 읽으면 그 사이 활성 pane 이 다른 호스트로 바뀌어 **남의 기계에 쓴다**.
+/// 경로는 저쪽 절대 경로이고 **로컬 파일시스템에 넘기지 않는다**(ssh-integration.md §9.4).
+pub const RemoteDoc = struct {
+    dest: []u8,
+    path: []u8,
+
+    pub fn deinit(self: *RemoteDoc, allocator: std.mem.Allocator) void {
+        allocator.free(self.dest);
+        allocator.free(self.path);
+        self.* = .{ .dest = &.{}, .path = &.{} };
+    }
+};
+
 pub const Opened = struct {
     /// 열린 문서. **읽어 온 bytes를 빌리지 않고 소유한다**(N2 — `edit_doc.EditableFile`).
     ///
@@ -7222,7 +7239,9 @@ pub fn writeDocumentBytes(
 /// 실패·외부 변경·상한 초과가 한 개의 `false` 로 뭉개졌고, 디스패치는 그 `false` 마저 버렸다.
 ///
 /// `AskName` 은 실패가 아니다 — **이름 없는 문서**라 물어야 한다는 뜻이고(§3.11) 상자는 이미 떴다.
-pub const SaveError = AppSession.FilePanelWriteError || error{ NotAnEditor, ReadOnly, AskName };
+/// `Handled` 도 실패가 아니다 — **저쪽 파일**이라 이 함수 밖에서 끝난다는 뜻이다(U3): 왕복이
+/// 나갔거나, 못 나간 이유를 **그쪽이 이미 말했다**. 그 문서는 결말이 `ok` 로 올 때 clean 이 된다.
+pub const SaveError = AppSession.FilePanelWriteError || error{ NotAnEditor, ReadOnly, AskName, Handled };
 
 /// 저장이 **「연 뒤 바뀌었나」를 묻는가**(C1a — editor-surface.md §4).
 ///
@@ -7253,6 +7272,12 @@ fn saveDocumentGuarded(self: *AppSession, term: *Term, guard: SaveGuard) SaveErr
     // ⚠️ **나머지 실패는 아직 조용하다**(읽기 전용·쓰기 실패·외부 충돌). 그것을 이유별로 올리는 일은
     // 반환형을 오류 합집합으로 바꾸는 별개 슬라이스다(계획 C0) — 여기서 절반만 고치면 「어떤 실패는
     // 말하고 어떤 실패는 안 한다」가 규칙처럼 굳는다.
+    // **저쪽 파일이면 저쪽으로 간다**(U3 — §3.11 「저장한 뒤 그 문서는 저쪽의 그 파일이다」).
+    // 사용자가 이미 그 자리를 골랐으므로 **다시 묻지 않고** 덮어쓴다.
+    if (term.rt.editor_remote != null) {
+        _ = app_session_mod.editor_untitled_save_ops.saveRemoteAgain(self, term);
+        return error.Handled;
+    }
     if (term.rt.editor_untitled != null) {
         // **이름을 묻는다**(U2 — §3.11). 저장은 그 상자를 확정한 뒤에 일어나므로 여기서는 거짓이다 —
         // 「지금 저장했다」가 아니다. 물을 수 없으면 그쪽이 이유를 말한다.
@@ -9460,6 +9485,9 @@ pub fn releaseEditorTerm(self: *AppSession, term: *Term) void {
     if (term.rt.editor_row_cache.prefix.len > 0) self.allocator.free(term.rt.editor_row_cache.prefix);
     term.rt.editor_row_cache = .{ .prefix = &.{} };
     term.rt.editor_path = null;
+    // **저쪽 신원도 같은 자리에서 놓는다**(U3) — 경로와 배타이므로 수명도 같은 곳에서 끝난다.
+    if (term.rt.editor_remote) |*r| r.deinit(self.allocator);
+    term.rt.editor_remote = null;
     // 이름 없는 문서 표식도 같은 자리에서 비운다(할당이 없어 놓을 것은 없지만, 「이 Term 의 편집기
     // 상태를 놓는다」가 이 함수의 일이다 — 위 `editor_drawn_*` 과 같은 규율).
     term.rt.editor_untitled = null;
@@ -37651,6 +37679,122 @@ test "C1a-11 다시 읽기도 «물은 그 문서»에만 간다 — 활성 추�
     // ⑵ **남의 문서는 그대로다** — 활성으로 추정하면 여기서 `MINE2` 가 통째로 날아간다.
     try testing.expectEqualStrings("MINE2r2\n", t2.rt.editor_doc.?.file.content);
     try testing.expect(isDirty(t2));
+}
+
+test "U3-1 로컬 pane 에서는 «어디에»를 묻지 않는다 — 바로 이름 상자다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(std.testing.io, &root_buf)];
+    pinUntitledBase(fx.session, root);
+
+    const t = try openUntitledInActivePane(fx.session);
+    try testing.expect(insertText(fx.session, t, "x"));
+    try testing.expectError(error.AskName, saveDocument(fx.session, t));
+
+    // **물음이 없다** — 저쪽이 없으면 고를 것이 없고, 못 쓸 선택지를 보여 주지 않는다.
+    try testing.expect(!fx.session.chrome_host.confirm.open);
+    try testing.expect(fx.session.pending_confirm == .none);
+    // 이름 상자가 바로 떴다(오늘까지의 그 동작).
+    try testing.expect(fx.session.rename != null);
+    // 보류에 목적지가 없다 — 이쪽이라는 뜻이다.
+    try testing.expect(fx.session.pending_untitled_save.remote == null);
+    settings_ops.closeRename(fx.session);
+}
+
+test "U3-2 저쪽 저장의 결말이 갈린다 — ok 는 «저쪽의 그 파일», 실패는 이름도 안 붙는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+
+    // **전송 없이 태우는 수직**이다(RF6b 판정자와 같은 규율) — 결말은 제품 드레인 그 자체라 직접
+    // 부른다. 전송 실물(헬퍼 `write` 계약)은 원격 왕복 게이트가 소유한다.
+    const t = try openUntitledInActivePane(fx.session);
+    try testing.expect(insertText(fx.session, t, "mine"));
+    const save = &fx.session.pending_untitled_save;
+
+    const pinFor = struct {
+        fn f(s: *AppSession, term: *Term, path: []const u8) void {
+            var pin: app_session_mod.editor_untitled_save_ops.RemotePin = .{};
+            const dest = "user@host";
+            @memcpy(pin.dest_buf[0..dest.len], dest);
+            pin.dest_len = dest.len;
+            const ctl = "/tmp/ctl";
+            @memcpy(pin.ctl_buf[0..ctl.len], ctl);
+            pin.ctl_len = ctl.len;
+            const base = std.fs.path.dirname(path).?;
+            @memcpy(pin.base_buf[0..base.len], base);
+            pin.base_len = base.len;
+            s.pending_untitled_save = .{ .surface_id = term.surface.id, .remote = pin, .path_len = path.len };
+            @memcpy(s.pending_untitled_save.path_buf[0..path.len], path);
+        }
+    }.f;
+
+    // ⑴ **실패는 이름도 안 붙인다**(U2 와 같은 규율) — dirty·이름 없는 상태 그대로.
+    for ([_]maru.session.remote_file_mutation.Outcome{ .stale, .denied, .io, .unsupported, .invalid, .not_found }) |bad| {
+        pinFor(fx.session, t, "/srv/app/notes.md");
+        app_session_mod.editor_untitled_save_ops.finishRemoteWrite(fx.session, bad);
+        try testing.expect(t.rt.editor_untitled != null); // 여전히 이름 없다
+        try testing.expect(t.rt.editor_remote == null); // 신원도 안 붙었다
+        try testing.expect(isDirty(t));
+        try testing.expect(fx.session.chrome_host.notice.open); // 그리고 **말했다**
+        fx.session.chrome_host.notice.dismiss();
+        try testing.expectEqual(@as(usize, 0), save.path_len); // 보류를 비웠다
+    }
+
+    // ⑵ **`collision` 은 묻는다** — 보류를 그대로 들고 확인을 띄운다(경로를 잃으면 수락이 쓸 곳을 잃는다).
+    pinFor(fx.session, t, "/srv/app/notes.md");
+    app_session_mod.editor_untitled_save_ops.finishRemoteWrite(fx.session, .collision);
+    try testing.expect(fx.session.chrome_host.confirm.open);
+    try testing.expect(fx.session.pending_confirm == .untitled_remote_overwrite);
+    try testing.expect(save.path_len > 0); // 경로를 들고 있다
+    try testing.expect(t.rt.editor_untitled != null); // 아직 이름 없다
+    fx.session.dispatchChromeAction(.confirm_cancel);
+    try testing.expectEqual(@as(usize, 0), save.path_len); // 취소는 무상태다
+
+    // ⑶ **`ok` 면 저쪽의 그 파일이 된다** — 이름을 버리고 신원을 들고 clean 이다.
+    pinFor(fx.session, t, "/srv/app/notes.md");
+    app_session_mod.editor_untitled_save_ops.finishRemoteWrite(fx.session, .ok);
+    try testing.expect(t.rt.editor_untitled == null);
+    const r = t.rt.editor_remote orelse return error.NoRemoteIdentity;
+    try testing.expectEqualStrings("user@host", r.dest);
+    try testing.expectEqualStrings("/srv/app/notes.md", r.path);
+    try testing.expect(!isDirty(t));
+    // ⚠️ **로컬 경로와 배타다** — 둘 다 있으면 「어디에 쓸지」가 둘이 된다.
+    try testing.expect(t.rt.editor_path == null);
+}
+
+test "U3-3 저쪽 파일의 다음 ⌘S 는 묻지 않는다 — 이름도 목적지도" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+
+    const t = try openUntitledInActivePane(fx.session);
+    try testing.expect(insertText(fx.session, t, "mine"));
+    // 저쪽 신원을 직접 세운다(위 ⑶ 이 그 자리를 이미 잰다).
+    t.rt.editor_remote = .{
+        .dest = try allocator.dupe(u8, "user@host"),
+        .path = try allocator.dupe(u8, "/srv/app/notes.md"),
+    };
+    t.rt.editor_untitled = null;
+    try testing.expect(insertText(fx.session, t, "!"));
+
+    // ⑴ **`⌘S` 는 이름을 묻지 않는다** — `AskName` 이 아니라 `Handled` 다(이 함수 밖에서 끝났다).
+    //    소켓이 없으므로 그 자리에서 「못 했다」로 끝나지만, **묻지 않았다**는 것이 이 줄의 값이다.
+    try testing.expectError(error.Handled, saveDocument(fx.session, t));
+    try testing.expect(fx.session.rename == null); // 이름 상자가 안 떴다
+    try testing.expect(fx.session.pending_confirm != .untitled_where); // 목적지도 안 물었다
+
+    // ⑵ **저장이 안 됐으니 dirty 로 남는다** — 그것이 이 경로의 신호다(§3.9d).
+    try testing.expect(isDirty(t));
+    // **일괄 저장이 저쪽 문서를 건너뛴다**는 것은 경계 판정자가 센다(그 경로를 단위로 몰려면 LSP
+    // workspace edit 한 벌이 필요하고, 그 비용으로 얻는 것이 「그 줄이 있다」뿐이다).
 }
 
 test "C1b-1 비교는 «디스크 ↔ 내 편집» 탭을 열고 답은 아직 안 한 것이다" {

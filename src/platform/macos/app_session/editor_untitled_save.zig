@@ -17,8 +17,54 @@ const editor_ops = @import("editor.zig");
 const pane_ops = @import("pane.zig");
 const term_ops = @import("term.zig");
 const settings_ops = @import("settings.zig");
+const git_ops = @import("git.zig");
 const file_panel_ops = @import("file_panel.zig");
 const workspace_ops = @import("workspace.zig");
+
+/// **저쪽 목적지를 굳힌 값**(U3). 목록·diff·쓰기가 같은 판정을 공유하도록 `remoteScmTargetFor` 가
+/// 주는 셋을 그대로 든다 — 목적지·control socket·**저쪽 cwd(= base)**.
+///
+/// **왜 굳히나**: 물음과 이름 상자 사이에 사용자가 pane 을 옮길 수 있다. 그때 세션에서 다시 읽으면
+/// **남의 기계에 쓴다**(`RemoteEndpoint` 가 같은 이유로 같은 모양을 쓴다).
+pub const RemotePin = struct {
+    dest_buf: [git_ops.max_remote_dest_bytes]u8 = undefined,
+    dest_len: usize = 0,
+    ctl_buf: [std.fs.max_path_bytes]u8 = undefined,
+    ctl_len: usize = 0,
+    base_buf: [std.fs.max_path_bytes]u8 = undefined,
+    base_len: usize = 0,
+
+    pub fn dest(self: *const RemotePin) []const u8 {
+        return self.dest_buf[0..self.dest_len];
+    }
+    pub fn ctl(self: *const RemotePin) []const u8 {
+        return self.ctl_buf[0..self.ctl_len];
+    }
+    pub fn base(self: *const RemotePin) []const u8 {
+        return self.base_buf[0..self.base_len];
+    }
+};
+
+/// 활성 pane 의 **터미널** Term 이 원격이면 그 목적지를 굳힌다(U3). 로컬이면 `null` — 그때는 묻지
+/// 않는다(못 쓸 선택지를 보여 주면 고른 뒤에 실패한다).
+///
+/// ⚠️ **편집기 Term 을 묻지 않는다.** 그것은 sentinel surface 라 관측이 늘 비어 있어(판정자 U2D)
+/// SSH pane 에서도 언제나 「이쪽」이 나온다. 그래서 그 pane 의 **터미널** Term 을 고른다.
+pub fn pinRemote(self: *AppSession) ?RemotePin {
+    if (comptime builtin.os.tag != .macos) return null;
+    if (!self.surface_initialized or self.tabs.items.len == 0) return null;
+    const pane = pane_ops.activePane(self);
+    var out: RemotePin = .{};
+    for (pane.terms.items) |t| {
+        if (t.kind != .terminal) continue;
+        const target = git_ops.remoteScmTargetFor(self, t, &out.dest_buf, &out.ctl_buf, &out.base_buf) orelse continue;
+        out.dest_len = target.dest.len;
+        out.ctl_len = target.ctl.len;
+        out.base_len = target.cwd.len;
+        return out;
+    }
+    return null;
+}
 
 /// 확인을 사이에 두고 **고른 이름을 들고 있는 자리**. 오버레이는 한 번에 하나뿐이라 이름 상자를 닫고
 /// 확인을 띄우므로, 그 사이 경로를 어딘가 둬야 한다 — 안 두면 확인을 수락한 순간 쓸 곳을 잃는다.
@@ -29,6 +75,9 @@ pub const Pending = struct {
     surface_id: u64 = 0,
     path_buf: [std.fs.max_path_bytes]u8 = undefined,
     path_len: usize = 0,
+    /// **저쪽에 저장하는 중이면** 굳힌 목적지(U3). `null` 이면 이쪽이다 — 목적지는 이름을 받기
+    /// **전에** 정해지고(base 가 그것에 달렸다) 이름 상자·확인을 지나 쓰기까지 이 값이 따라간다.
+    remote: ?RemotePin = null,
 
     pub fn path(self: *const Pending) []const u8 {
         return self.path_buf[0..self.path_len];
@@ -38,6 +87,19 @@ pub const Pending = struct {
 /// 이름 없는 문서의 `⌘S` — 이름을 묻는다(§3.11). 물을 수 없으면 **그 이유를 말하고** 거짓을 준다.
 pub fn begin(self: *AppSession, term: *Term) bool {
     if (term.rt.editor_untitled == null) return false;
+    // **저쪽이 있으면 먼저 어디에 쓸지 묻는다**(U3 — §3.11 「저장 — 어디에」). 목적지가 base 를 정하므로
+    // 이름보다 **앞**이다: 이름을 먼저 받으면 무엇을 기준으로 검증할지 모르는 채로 받는다.
+    if (pinRemote(self)) |pin| {
+        self.pending_untitled_save = .{ .surface_id = term.surface.id, .remote = pin };
+        // `primary` = **저쪽**이다(그 pane 이 저쪽이라 물음이 떴다) — `primary` 가 곧 Enter 이므로
+        // 「기본값이 pane 을 따른다」는 **자리 순서**로 세운다(editor-surface.md §4 의 그 규칙).
+        self.showConfirmChoiceKeys(
+            .{ .untitled_where = term.surface.id },
+            .editor_save_where,
+            .{ .primary = .btn_save_there, .alternate = .btn_save_here, .cancel = .common_cancel },
+        );
+        return true;
+    }
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     if (baseDir(self, &buf) == null) {
         // **어디에 쓸지 모르는 채로 쓰지 않는다.** 트리 루트도 없고 활성 pane 의 cwd 도 못 쓰는 상태
@@ -47,6 +109,30 @@ pub fn begin(self: *AppSession, term: *Term) bool {
     }
     settings_ops.startRename(self, .{ .untitled_save = term.surface.id });
     return true;
+}
+
+/// 「저쪽에 저장한다」를 골랐다(U3) — 굳힌 목적지를 그대로 들고 이름 상자를 연다.
+pub fn chooseThere(self: *AppSession, surface_id: u64) void {
+    const p = self.pending_untitled_save;
+    if (p.surface_id != surface_id or p.remote == null) return;
+    const term = termFor(self, surface_id) orelse return;
+    if (term.rt.editor_untitled == null) return;
+    settings_ops.startRename(self, .{ .untitled_save = surface_id });
+}
+
+/// 「이 기계에 저장한다」를 골랐다 — 굳힌 목적지를 **버리고** 이쪽 base 로 간다.
+pub fn chooseHere(self: *AppSession, surface_id: u64) void {
+    const p = self.pending_untitled_save;
+    if (p.surface_id != surface_id) return;
+    self.pending_untitled_save = .{};
+    const term = termFor(self, surface_id) orelse return;
+    if (term.rt.editor_untitled == null) return;
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (baseDir(self, &buf) == null) {
+        self.showNoticeKey(.editor_untitled_no_base);
+        return;
+    }
+    settings_ops.startRename(self, .{ .untitled_save = surface_id });
 }
 
 /// base 디렉터리 — **세 단계**다: 파일 트리의 첫 루트 → 활성 pane 의 작업 디렉터리 → 워크스페이스
@@ -142,6 +228,23 @@ pub fn commit(self: *AppSession, surface_id: u64, text: []const u8) void {
     const term = termFor(self, surface_id) orelse return;
     if (term.rt.editor_untitled == null) return; // 그 사이 이름이 붙었다
 
+    // **저쪽이면 base 가 그 호스트의 cwd 다**(U3). 이름 규칙은 **같은 순수 함수**가 판정한다 —
+    // `resolve` 는 파일시스템을 만지지 않으므로(어휘적 정규화 + `underRoot`) 저쪽 경로에도 그대로 선다.
+    if (self.pending_untitled_save.remote) |pin| {
+        if (self.pending_untitled_save.surface_id != surface_id) return;
+        var rpath_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const rabs = resolve(pin.base(), std.mem.trim(u8, text, " \t"), &rpath_buf) orelse {
+            self.showNoticeKey(.editor_untitled_bad_name);
+            return;
+        };
+        // 고른 경로를 같은 자리에 굳혀 둔다 — 결말이 올 때까지 들고 있어야 그 문서에 이름을 붙일 수 있다.
+        self.pending_untitled_save.path_len = rabs.len;
+        @memcpy(self.pending_untitled_save.path_buf[0..rabs.len], rabs);
+        // **첫 저장은 비대체다** — 있으면 저쪽이 `collision` 로 답하고 그때 묻는다(로컬 `stat` 으로
+        // 미리 묻지 않는 이유: 그 사이가 창이고, 애초에 이 기계의 파일을 보게 된다).
+        enqueueRemoteWrite(self, term, false);
+        return;
+    }
     var base_buf: [std.fs.max_path_bytes]u8 = undefined;
     const base = baseDir(self, &base_buf) orelse {
         self.showNoticeKey(.editor_untitled_no_base);
@@ -180,6 +283,150 @@ pub fn commit(self: *AppSession, surface_id: u64, text: []const u8) void {
             self.showConfirmKeys(.{ .untitled_overwrite = surface_id }, .editor_untitled_overwrite, .{});
         },
     }
+}
+
+/// 굳힌 목적지·경로로 **저쪽에 쓴다**(U3). 바이트는 문서에서 **지금** 뜬다 — 상자·확인이 떠 있는
+/// 동안에도 사용자는 계속 칠 수 있고, 그때 보낼 것은 **누른 시점의 내용**이다(§4 의 그 규칙과 같은 자리).
+fn enqueueRemoteWrite(self: *AppSession, term: *Term, overwrite: bool) void {
+    const pin = self.pending_untitled_save.remote orelse return;
+    const p = self.pending_untitled_save;
+    if (p.path_len == 0) return;
+    const doc = term.rt.editor_doc orelse return;
+    const bytes = doc.file.saveBytes(self.allocator) catch {
+        self.showNoticeKey(.app_save_failed);
+        return;
+    };
+    defer self.allocator.free(bytes);
+    // **상한은 이쪽과 같다**(§3.11) — 저쪽이 더 크게 받는다고 해서 여기서 느슨해지면 「저쪽엔
+    // 저장되는데 이쪽엔 안 되는 문서」가 생긴다.
+    if (bytes.len > maru.session.file_panel_bridge.max_file_bytes) {
+        self.showNoticeKey(.app_save_too_large);
+        return;
+    }
+    var endpoint: file_panel_ops.RemoteEndpoint = .{};
+    @memcpy(endpoint.dest_buf[0..pin.dest_len], pin.dest());
+    endpoint.dest_len = pin.dest_len;
+    @memcpy(endpoint.ctl_buf[0..pin.ctl_len], pin.ctl());
+    endpoint.ctl_len = pin.ctl_len;
+    const parent = std.fs.path.dirname(p.path()) orelse "/";
+    const name = std.fs.path.basename(p.path());
+    _ = file_panel_ops.beginRemoteWrite(self, endpoint, parent, name, bytes, overwrite);
+}
+
+/// **저쪽 쓰기의 결말**(U3). 성공이면 그 문서는 **저쪽의 그 파일**이 된다(§3.11 의 그 결정) — 이름을
+/// 버리고 신원을 들고 clean 이 된다. 실패면 **이름도 안 붙고 dirty 로 남는다**(U2 와 같은 규율:
+/// 「이름은 정해졌는데 내용은 없는」 중간 상태를 만들지 않는다).
+pub fn finishRemoteWrite(self: *AppSession, outcome: maru.session.remote_file_mutation.Outcome) void {
+    const p = self.pending_untitled_save;
+    const pin = p.remote orelse return;
+    const term = termFor(self, p.surface_id) orelse {
+        self.pending_untitled_save = .{};
+        return;
+    };
+    switch (outcome) {
+        .ok => {
+            self.pending_untitled_save = .{};
+            // 첫 저장이면 신원을 붙이고, 이미 저쪽 파일이면 **같은 값을 다시 세운다**(같은 길을 쓰는
+            // 대가이고, clean 판정은 어느 쪽이든 여기서 한 번만 일어난다).
+            adoptRemote(self, term, pin.dest(), p.path());
+        },
+        // **저쪽에 그 이름이 이미 있다** — 비대체 rename 이 그것을 판정했다(미리 묻지 않는 이유가 그것이다).
+        // 보류를 **그대로 들고** 확인을 띄운다: 수락하면 같은 경로에 덮어쓴다.
+        .collision => self.showConfirmKeys(
+            .{ .untitled_remote_overwrite = p.surface_id },
+            .editor_remote_save_exists,
+            .{},
+        ),
+        .stale, .not_found => {
+            self.pending_untitled_save = .{};
+            self.showNoticeKey(.editor_remote_save_stale);
+        },
+        .unsupported => {
+            self.pending_untitled_save = .{};
+            self.showNoticeKey(.editor_remote_save_unsupported);
+        },
+        .invalid => {
+            self.pending_untitled_save = .{};
+            self.showNoticeKey(.editor_untitled_bad_name);
+        },
+        .denied, .io => {
+            self.pending_untitled_save = .{};
+            self.showNoticeKey(.editor_remote_save_failed);
+        },
+    }
+}
+
+/// **이미 저쪽 파일인 문서의 `⌘S`**(U3). 목적지·경로가 문서에 있으므로 묻지 않고 그대로 덮어쓴다 —
+/// 「저장했는데 또 물어본다」를 남기지 않는 것이 이 신원의 이유다.
+///
+/// **보류를 그 값으로 세운다**: 결말 소비처가 같은 자리를 읽으므로(`finishRemoteWrite`) 첫 저장과
+/// 이후 저장이 **같은 길**을 쓴다 — 두 길이면 한쪽이 낡는다.
+pub fn saveRemoteAgain(self: *AppSession, term: *Term) bool {
+    const r = term.rt.editor_remote orelse return false;
+    if (r.path.len == 0 or r.path.len > std.fs.max_path_bytes) return false;
+    var pin: RemotePin = .{};
+    if (r.dest.len > pin.dest_buf.len) return false;
+    @memcpy(pin.dest_buf[0..r.dest.len], r.dest);
+    pin.dest_len = r.dest.len;
+    // control socket 은 **지금** 다시 구한다 — 목적지는 문서의 것이지만 소켓은 세션의 것이고,
+    // 끊겼다면 여기서 멈추는 것이 맞다(살아 있는지 확인하는 자리가 그 함수다).
+    const failed = struct {
+        fn f(s: *AppSession) bool {
+            s.showNoticeKey(.editor_remote_save_failed);
+            return false;
+        }
+    }.f;
+    const home_z = std.c.getenv("HOME") orelse return failed(self);
+    const home = std.mem.span(home_z);
+    if (home.len == 0) return failed(self);
+    const ctl = maru.cli.ssh.controlSocketPath(self.allocator, home, r.dest) catch return failed(self);
+    defer self.allocator.free(ctl);
+    if (ctl.len > pin.ctl_buf.len) return failed(self);
+    _ = std.Io.Dir.cwd().statFile(self.io, ctl, .{ .follow_symlinks = false }) catch return failed(self);
+    @memcpy(pin.ctl_buf[0..ctl.len], ctl);
+    pin.ctl_len = ctl.len;
+    // base 는 그 경로의 부모다(이번에는 이름을 묻지 않으므로 base 를 검증에 쓰지 않는다).
+    const parent = std.fs.path.dirname(r.path) orelse "/";
+    @memcpy(pin.base_buf[0..parent.len], parent);
+    pin.base_len = parent.len;
+
+    self.pending_untitled_save = .{ .surface_id = term.surface.id, .remote = pin, .path_len = r.path.len };
+    @memcpy(self.pending_untitled_save.path_buf[0..r.path.len], r.path);
+    enqueueRemoteWrite(self, term, true);
+    return true;
+}
+
+/// 저쪽 덮어쓰기 확인을 수락했다(U3) — 같은 경로에 **덮어쓰기 모드**로 다시 보낸다.
+pub fn confirmRemoteOverwrite(self: *AppSession, surface_id: u64) void {
+    const p = self.pending_untitled_save;
+    if (p.surface_id != surface_id or p.remote == null or p.path_len == 0) return;
+    const term = termFor(self, surface_id) orelse {
+        self.pending_untitled_save = .{};
+        return;
+    };
+    enqueueRemoteWrite(self, term, true);
+}
+
+/// 그 문서를 **저쪽의 그 파일**로 만든다. 이름(untitled)을 버리고 신원을 들고 clean 이 된다.
+fn adoptRemote(self: *AppSession, term: *Term, dest: []const u8, path: []const u8) void {
+    const doc = term.rt.editor_doc orelse return;
+    const owned_dest = self.allocator.dupe(u8, dest) catch {
+        self.showNoticeKey(.editor_untitled_written_not_adopted);
+        return;
+    };
+    const owned_path = self.allocator.dupe(u8, path) catch {
+        self.allocator.free(owned_dest);
+        self.showNoticeKey(.editor_untitled_written_not_adopted);
+        return;
+    };
+    if (term.rt.editor_remote) |*old| old.deinit(self.allocator);
+    term.rt.editor_remote = .{ .dest = owned_dest, .path = owned_path };
+    // **이름과 배타다** — 이 순서(신원을 세운 뒤 이름을 버린다)여야 중간 프레임에 둘 다 없는 문서가 없다.
+    term.rt.editor_untitled = null;
+    // **clean 이다** — 저쪽이 `ok` 를 줬고 그 내용이 곧 저쪽 파일이다. 「그 사이 더 친 것」은 dirty 로
+    // 남는 것이 맞다(§1 의 「저장 중 재편집」과 같은 규칙).
+    term.rt.editor_doc.?.saved_hash = editor_ops.contentHash(doc.file.content);
+    self.metal_dirty = true;
 }
 
 /// 덮어쓰기 확인을 수락했다.

@@ -1862,6 +1862,16 @@ const TermRuntime = struct {
     /// **글자를 값으로 든다**(할당이 아니다). 탭 라벨은 빌린 슬라이스로 나가므로(`termLabel`)
     /// 부르는 자리에서 포맷하면 그 버퍼의 수명이 없다 — 그 규칙은 `session.editor.untitled` 가 안다.
     editor_untitled: ?maru.session.editor.untitled.Name = null,
+    /// **저쪽 파일이다**(U3 — §3.11 「저장한 뒤 그 문서는 저쪽의 그 파일이다」). 저장 목적지가 원격일
+    /// 때의 신원: 호스트(`dest`)와 **저쪽 절대 경로**. 소유는 Term 이고 해제는 `releaseEditorTerm` 이
+    /// `editor_path` 와 같은 자리에서 한다.
+    ///
+    /// ⚠️ **`editor_path` 와 배타다** — 둘 다 있으면 「어디에 쓸지」가 둘이 된다. 배타는 이 필드가
+    /// optional 인 것만으로는 안 서므로(둘 다 non-null 이 타입상 가능하다) **판정자가 센다**.
+    ///
+    /// ⚠️ **읽기 전용 미러의 `remote_origin_*` 과 다른 값이다.** 그쪽은 「어디서 내려받았나」를 화면에
+    /// 적기 위한 표시용이고 그 문서는 못 쓴다. 이쪽은 **쓰는 자리**다.
+    editor_remote: ?editor_ops.RemoteDoc = null,
     /// **구문 강조 상태**(§5.3 1층 — tree-sitter 트리와 그 파생 색). 위 셋과 **같은 묶음**이라
     /// 함께 살고 함께 죽는다(`releaseEditorTerm`). grammar가 없으면 안이 비어 있고, 그러면 그
     /// 문서는 끝까지 무색이다 — 실패가 아니라 저하다(§5).
@@ -2516,6 +2526,11 @@ const PendingConfirm = union(enum) {
     /// 이름 없는 문서를 **있는 파일 위에** 저장할까(U2 — §3.11). 고른 경로는
     /// `pending_untitled_save` 가 든다(오버레이가 하나뿐이라 상자를 닫고 확인을 띄우므로).
     untitled_overwrite: u64,
+    /// **어디에 저장할까**(U3 — §3.11 「저장 — 어디에」): 이 기계 / 붙어 있는 그 호스트. 굳힌
+    /// 목적지는 `pending_untitled_save.remote` 가 든다(오버레이가 하나뿐이라 물음 → 이름 상자 순서다).
+    untitled_where: u64,
+    /// **저쪽에 그 이름이 이미 있다** — 덮어쓸까(U3). 경로·목적지는 같은 보류가 그대로 들고 있다.
+    untitled_remote_overwrite: u64,
     /// 저장하려는데 **파일이 밖에서 바뀌었다** — 덮어쓸까 다시 읽을까(C1a — editor-surface.md §4).
     ///
     /// **들고 있는 것은 surface id 하나뿐이다.** 내용을 들고 있으면 상자가 떠 있는 동안 친 글자가
@@ -9931,7 +9946,8 @@ pub const AppSession = struct {
             .remote_file_tree_delete => self.pending_remote_delete.name_len = 0,
             .lsp_trust => editor_ops.lsp_client.dismissTrustPrompt(self), // 프로그램이 닫은 것 — 기억하지 않고 다음에 다시 묻는다
             // **취소는 무상태다**(§3.11) — 들고 있던 경로를 비운다. 안 비우면 다음 확인이 옛 경로에 쓴다.
-            .untitled_overwrite => self.pending_untitled_save = .{},
+            // U3 의 두 물음도 같은 자리에서 같은 이유로 비운다(목적지·경로를 함께 들고 있다).
+            .untitled_overwrite, .untitled_where, .untitled_remote_overwrite => self.pending_untitled_save = .{},
             // **저장 충돌의 취소는 아무 일도 안 한다**(§4) — 디스크도 버퍼도 그대로다. 들고 있는
             // 것이 surface id 하나라 비울 것도 없다.
             .none, .close, .reset, .file_conflict_reload, .save_conflict => {},
@@ -10842,7 +10858,8 @@ pub const AppSession = struct {
             .editor_save => blk: {
                 const term = pane_ops.activePane(self).activeTerm();
                 editor_ops.saveDocument(self, term) catch |e| switch (e) {
-                    error.AskName, error.NotAnEditor => break :blk,
+                    // `Handled` 는 실패가 아니다 — 저쪽 파일이라 이 함수 밖에서 끝난다(U3). 결말이 말한다.
+                    error.AskName, error.NotAnEditor, error.Handled => break :blk,
                     // ⚠️ **충돌은 알리는 자리가 아니라 «묻는» 자리다**(C1a — editor-surface.md §4).
                     // C0 은 이유를 올렸을 뿐 「아무것도 저장하지 않았다」로 끝냈고, 그러면 사용자는
                     // 편집을 든 채 손으로 내용을 옮겨야 한다. 여기만 묻는다 — 닫기-저장은 자기
@@ -12539,6 +12556,9 @@ pub const AppSession = struct {
                     .paste => |target_id| self.confirmPendingPaste(target_id),
                     .close => |target| self.executeClose(target),
                     .untitled_overwrite => editor_untitled_save_ops.confirmOverwrite(self),
+                    // **`primary` = 저쪽**(U3) — 그 pane 이 저쪽이라 물음이 떴으므로 기본이 그것이다.
+                    .untitled_where => |surface_id| editor_untitled_save_ops.chooseThere(self, surface_id),
+                    .untitled_remote_overwrite => |surface_id| editor_untitled_save_ops.confirmRemoteOverwrite(self, surface_id),
                     // **`primary` = 비교**(C1b — §4). 셋 중 **아무것도 버리지 않는 유일한 선택**이라
                     // 여기 둔다: 상자는 열 때 `primary` 에 포커스를 두므로 Enter 가 이것을 실행한다.
                     .save_conflict => |surface_id| editor_conflict_ops.confirmCompare(self, surface_id),
@@ -12560,6 +12580,9 @@ pub const AppSession = struct {
                                 file_panel_ops.abortStaleFilePanelClose(self);
                         }
                     } else self.cancelPendingConfirm();
+                } else if (owner == .untitled_where) {
+                    // **`alternate` = 이쪽**(U3) — 굳힌 목적지를 버리고 로컬 base 로 간다.
+                    editor_untitled_save_ops.chooseHere(self, owner.untitled_where);
                 } else if (owner == .save_conflict) {
                     // **`alternate` = 덮어쓰기**(C1b 가 `primary` 를 비교로 올렸다 — §4). CAS 를
                     // 건너뛰는 그 길이고, 부르는 자리는 이것 하나다.

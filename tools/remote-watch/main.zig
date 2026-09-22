@@ -481,9 +481,16 @@ fn runWrite(
     defer dir.close(io);
 
     // **부모의 신원을 다시 잰다** — `mk` 와 같은 이유·같은 자리다(그 사이 부모가 갈렸으면 엉뚱한 곳이다).
-    const parent_stat = rawFstat(dir.handle) orelse return putMvResult(.io, "fstat failed");
-    if (parent_stat.dev != want_dev or parent_stat.ino != want_ino)
-        return putMvResult(.stale, "parent identity changed");
+    //
+    // ⚠️ **둘이 0 이면 「비교할 과거가 없다」다.** 트리 편집은 목록이 준 신원을 들고 오지만, 문서 저장
+    // (U3)은 목록을 거치지 않고 **관측된 cwd** 를 base 로 쓰므로 그 값이 없다. 없는 것을 0 과 비교하면
+    // 모든 저장이 `stale` 이 된다 — 이름 없는 문서가 디스크 지문이 없어 CAS 를 건너뛰는 것과 같은
+    // 자리·같은 이유다(§3.11). 유효한 inode 는 0 이 아니므로 이 관문은 실제 신원을 안 삼킨다.
+    if (want_dev != 0 or want_ino != 0) {
+        const parent_stat = rawFstat(dir.handle) orelse return putMvResult(.io, "fstat failed");
+        if (parent_stat.dev != want_dev or parent_stat.ino != want_ino)
+            return putMvResult(.stale, "parent identity changed");
+    }
 
     // 임시 이름은 **그 디렉터리 안**이어야 한다(`rename` 은 파일시스템을 넘지 못한다). 점 접두로
     // 목록에서 눈에 덜 띄게 하고, pid 를 섞어 같은 부모에 둘이 붙어도 안 겹치게 한다.

@@ -12690,18 +12690,39 @@ test "이름 없는 문서 저장: 디스크에 쓰는 자리 둘, 이름을 붙
     //    덮어쓰기가 자기 확인을 무시하고 다시 충돌로 거절된다.
     try std.testing.expectEqual(@as(usize, 1), countOf(save, "editor_ops.writeDocumentBytes(self, abs, bytes, null)"));
 
-    // ⑵ **이름을 지우는 자리는 하나다**(경로가 붙는 그 순간). 둘이 되면 한쪽이 낡아 문서가 영원히
+    // ⑵ **이름을 지우는 자리는 「경로·신원이 붙는 그 순간」뿐이고, 지금 둘이다**(U3 로 하나 늘었다):
+    //    이쪽 채택(`editor_path` 를 세운다)과 저쪽 채택(`editor_remote` 를 세운다). 그 둘은 **배타**이고
+    //    각자 자기 값을 세운 뒤 이름을 버린다 — 자리가 그 둘 말고 늘면 한쪽이 낡아 문서가 영원히
     //    「저장 안 한 문서」로 남거나 반대로 이름 없는 문서가 이름을 잃는다.
-    try std.testing.expectEqual(@as(usize, 1), countOf(save, "term.rt.editor_untitled = null"));
+    try std.testing.expectEqual(@as(usize, 2), countOf(save, "term.rt.editor_untitled = null"));
 
-    // ⑶ **들고 있던 경로를 비우는 자리는 둘이다** — 수락(그 함수 머리)과 취소(`cancelPendingConfirm`).
-    //    수락 쪽만 비우면 취소한 경로가 남아 다음 저장을 오염시킨다(U2m ⑶ 이 그 증상을 잰다).
-    try std.testing.expectEqual(@as(usize, 1), countOf(save, "self.pending_untitled_save = .{}"));
+    // ⑶ **들고 있던 경로는 그 물음이 끝나면 비어 있다.** 수락(그 함수 머리)과 취소
+    //    (`cancelPendingConfirm`)가 그 둘이고, 수락 쪽만 비우면 취소한 경로가 남아 다음 저장을
+    //    오염시킨다(U2m ⑶ 이 그 증상을 잰다).
+    //
+    //    ⚠️ **개수로 세지 않는다**(U3 로 갈래가 늘며 그 숫자가 뜻을 잃었다 — 9 가 됐다). 대신
+    //    **그 자리**를 센다: 수락의 머리 한 줄이다.
+    try std.testing.expectEqual(@as(usize, 1), countOf(save,
+        \\    const p = self.pending_untitled_save;
+        \\    self.pending_untitled_save = .{};
+        \\    if (p.path_len == 0) return;
+    ));
+    // U3 의 결말도 같은 규율이다: **`collision` 만 들고 있고**(수락이 그 경로에 쓴다) 나머지 갈래는
+    //    전부 비운다 — 안 비우면 다음 저장이 남의 경로를 물려받는다.
+    const finish_at = std.mem.indexOf(u8, save, "pub fn finishRemoteWrite(") orelse return error.TestUnexpectedResult;
+    const finish_end = std.mem.indexOfPos(u8, save, finish_at + 1, "\npub fn ") orelse save.len;
+    const finish = save[finish_at..finish_end];
+    try std.testing.expectEqual(@as(usize, 6), countOf(finish, "self.pending_untitled_save = .{};"));
+    const collision_at = std.mem.indexOf(u8, finish, ".collision =>") orelse return error.TestUnexpectedResult;
+    const collision_end = std.mem.indexOfPos(u8, finish, collision_at, ".stale, .not_found =>") orelse finish.len;
+    try std.testing.expectEqual(@as(usize, 0), countOf(finish[collision_at..collision_end], "pending_untitled_save = .{}"));
     const app_session = try readZigFileZ(allocator, "src/platform/macos/app_session.zig");
     defer allocator.free(app_session);
+    // 취소 갈래는 **셋이 한 줄을 공유한다**(U3 가 둘을 더했다) — 같은 보류를 같은 이유로 비우므로
+    // 자리를 갈라 두면 한쪽이 낡는다.
     try std.testing.expectEqual(
         @as(usize, 1),
-        countOf(app_session, ".untitled_overwrite => self.pending_untitled_save = .{}"),
+        countOf(app_session, ".untitled_overwrite, .untitled_where, .untitled_remote_overwrite => self.pending_untitled_save = .{}"),
     );
 
     // ⑷ **실패 문구는 「쓰기 앞」과 「쓰기 뒤」로 갈린다.** 쓰기 뒤의 실패에 「저장하지 못했습니다」를
@@ -12710,9 +12731,13 @@ test "이름 없는 문서 저장: 디스크에 쓰는 자리 둘, 이름을 붙
     //
     //    쓰기 앞 둘: `saveBytes` 실패(뭉갠 문구 하나) · 쓰기 자체 실패(**이유별 문구** — C0 이 그것을
     //    올렸으므로 여기서 다시 뭉개면 C0 을 지우는 셈이다). 쓰기 뒤 셋: 경로 복사 둘 · entry 붙이기.
-    try std.testing.expectEqual(@as(usize, 1), countOf(save, "showNoticeKey(.app_save_failed)"));
+    // U3 로 **하나 늘었다**: 저쪽 저장도 보낼 바이트를 먼저 만들고, 그 실패는 이쪽과 **같은 이유**라
+    // 같은 문구를 쓴다(목적지가 다르다고 「바이트를 못 만들었다」가 달라지지 않는다).
+    try std.testing.expectEqual(@as(usize, 2), countOf(save, "showNoticeKey(.app_save_failed)"));
     try std.testing.expectEqual(@as(usize, 2), countOf(save, "saveFailureNoticeKey"));
-    try std.testing.expectEqual(@as(usize, 3), countOf(save, "showNoticeKey(.editor_untitled_written_not_adopted)"));
+    // U3 로 **둘 늘었다**: 저쪽 채택도 신원 두 조각(목적지·경로)을 복사하고, 그 실패는 **쓰기 뒤**라
+    // 같은 문구를 쓴다 — 「저장하지 못했습니다」로 쓰면 거짓이다(저쪽 파일은 이미 있다).
+    try std.testing.expectEqual(@as(usize, 5), countOf(save, "showNoticeKey(.editor_untitled_written_not_adopted)"));
 
     // ⑸ **NUL 검사는 경로를 «푼 뒤»에 한 번** — 푸는 앞에서 이름만 보면 base 쪽 NUL 이 새고, 두 번
     //    적으면 한쪽이 낡는다.
@@ -12790,6 +12815,55 @@ test "저장 충돌: 묻는 자리 하나 · CAS 를 건너뛰는 길 하나 · 
     // ⑸ **다시 읽기의 실패 표는 «따로»다** — 읽기 실패에 쓰기 문구를 쓰면 사용자가 할 일이 어긋난다.
     try std.testing.expectEqual(@as(usize, 1), countOf3(conflict, "pub fn reloadFailureNoticeKey("));
     try std.testing.expectEqual(@as(usize, 0), countOf3(conflict, "error.Unreadable => .editor_save_gone"));
+}
+
+test "저쪽 저장: 쓰는 종류 하나 · 일괄은 건너뛴다 · 신원은 경로와 배타다" {
+    // **계약**: docs/native-editor-document-model.md §3.11 「저장 — 어디에」(U3).
+    const allocator = std.testing.allocator;
+    const save = try readZigFileZ(allocator, "src/platform/macos/app_session/editor_untitled_save.zig");
+    defer allocator.free(save);
+    const panel = try readZigFileZ(allocator, "src/platform/macos/app_session/file_panel.zig");
+    defer allocator.free(panel);
+    const bulk = try readZigFileZ(allocator, "src/platform/macos/app_session/editor_workspace_edit.zig");
+    defer allocator.free(bulk);
+    const editor = try readZigFileZ(allocator, "src/platform/macos/app_session/editor.zig");
+    defer allocator.free(editor);
+    const helper = try readZigFileZ(allocator, "tools/remote-watch/main.zig");
+    defer allocator.free(helper);
+
+    const countOf4 = struct {
+        fn f(hay: []const u8, needle: []const u8) usize {
+            var n: usize = 0;
+            var i: usize = 0;
+            while (std.mem.indexOfPos(u8, hay, i, needle)) |at| : (i = at + needle.len) n += 1;
+            return n;
+        }
+    }.f;
+
+    // ⑴ **바이트를 싣는 자리는 하나다.** 형제 셋은 `runRemoteCapped`(stdin 을 닫는다)를 쓰고, 이 갈래만
+    //    `runRemoteScript` 다 — 그 둘을 섞으면 내용이 조용히 사라지거나 형제가 stdin 을 열게 된다.
+    try std.testing.expectEqual(@as(usize, 1), countOf4(panel, "ssh_upload.runRemoteScript("));
+    try std.testing.expectEqual(@as(usize, 1), countOf4(panel, "pub fn beginRemoteWrite("));
+    try std.testing.expectEqual(@as(usize, 1), countOf4(save, "file_panel_ops.beginRemoteWrite(self, endpoint, parent, name, bytes, overwrite)"));
+    // ⑵ **일괄 저장은 저쪽 문서를 건너뛴다** — 왕복은 in-flight 가 하나뿐이라 걸면 파일마다 「바쁘다」가
+    //    뜬다(§3.9d 가 그 경로에서 막으려던 것). 런타임으로 몰려면 LSP workspace edit 한 벌이 필요해
+    //    **그 줄의 존재와 근거**를 센다.
+    try std.testing.expectEqual(@as(usize, 1), countOf4(bulk, "if (o.term.rt.editor_remote != null) continue;"));
+    try std.testing.expect(std.mem.indexOf(u8, bulk, "in-flight 가 하나뿐이라") != null);
+    // ⑶ **저쪽 신원은 로컬 경로와 배타다** — 배타는 타입이 못 세우므로(둘 다 optional) 해제 자리와
+    //    세우는 자리를 센다: 세우는 곳은 채택 하나, 놓는 곳은 `releaseEditorTerm` 하나.
+    try std.testing.expectEqual(@as(usize, 1), countOf4(save, "term.rt.editor_remote = .{ .dest = owned_dest, .path = owned_path }"));
+    try std.testing.expectEqual(@as(usize, 1), countOf4(editor, "if (term.rt.editor_remote) |*r| r.deinit(self.allocator);"));
+    try std.testing.expect(std.mem.indexOf(u8, save, "term.rt.editor_untitled = null") != null);
+    // ⑷ **헬퍼는 「신원이 없으면」 stale 로 접지 않는다** — 문서 저장은 목록을 거치지 않아 비교할 과거가
+    //    없다(이름 없는 문서의 디스크 지문과 같은 자리·같은 이유). 그 관문이 사라지면 **모든 저쪽 저장이
+    //    stale** 이 된다.
+    try std.testing.expectEqual(@as(usize, 1), countOf4(helper, "if (want_dev != 0 or want_ino != 0) {"));
+    try std.testing.expect(std.mem.indexOf(u8, helper, "비교할 과거가 없다") != null);
+    // ⑸ **원자 교체**: 두 모드가 각자 다른 것을 지킨다(비대체 rename / 평범한 rename), 그리고 임시
+    //    파일은 어느 갈래로 나가도 지운다.
+    try std.testing.expectEqual(@as(usize, 1), countOf4(helper, "renameNoReplace(dir.handle, tmp_z.ptr, name_z.ptr)"));
+    try std.testing.expectEqual(@as(usize, 2), countOf4(helper, "unlink_tmp = false;"));
 }
 
 test "저장 실패 문구 표는 «둘이고 그 이유가 적혀 있다»" {

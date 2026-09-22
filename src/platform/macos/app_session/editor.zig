@@ -96,6 +96,7 @@ pub const semantic_client = @import("editor_semantic.zig");
 pub const fold_lsp_client = @import("editor_fold_lsp.zig");
 pub const inlay_client = @import("editor_inlay.zig");
 pub const symbols_client = @import("editor_symbols.zig");
+pub const highlight_client = @import("editor_highlight.zig");
 /// 접힘 범위를 낸 층(§4 의 세 소스).
 pub const FoldSource = enum { indent, syntax, lsp };
 pub const workspace_edit_client = @import("editor_workspace_edit.zig");
@@ -677,6 +678,7 @@ fn syntaxColors(self: *AppSession, term: *Term) []const []const chrome_editor.co
         semantic_client.tick(self, term, first_src, last_src);
         inlay_client.tick(self, term, first_src, last_src); // 인레이 힌트(§8.2n) — 같은 창
         symbols_client.tick(self, term); // 심볼 2층(§8.2o) — 문서 단위라 창과 무관하다
+        highlight_client.tick(self, term); // 같은 낱말 강조(§8.2p) — caret 자리라 역시 창과 무관하다
     }
     return syntax_color.lineColorsWith(
         &term.rt.editor_syntax,
@@ -908,6 +910,8 @@ pub fn buildPaneOps(
     /// 논리 줄마다의 **검색 결과**(§5.1)와 그 중 현재 매치. `null`이면 검색이 닫혀 있거나
     /// 이 Term이 검색 대상이 아니다(활성이 아닌 pane — 그쪽까지 칠하면 어디를 검색 중인지 흐려진다).
     search_marks: ?[]const []const chrome_editor.frame.Mark,
+    /// 같은 낱말 강조(§5.1a·§8.2p) — 단일 편집기만(비교·상태 줄은 `null`).
+    occurrence_marks: ?[]const []const chrome_editor.frame.Mark,
     search_current: ?chrome_editor.frame.CurrentMatch,
     /// 검색 결과가 있는 **보이는 줄** 전체와 그 중 현재 매치(§4.1a 막대 마커). 위 `search_marks` 는
     /// 화면 안만 담아 **화면 밖 매치를 말하지 못한다** — 그 답이 이 목록의 존재 이유다.
@@ -955,7 +959,7 @@ pub fn buildPaneOps(
     const inset: i32 = @intCast(chrome_editor.frame.content_inset_px);
     const inner: chrome_draw.Rect = .{ .x = 0, .y = 0, .w = rect.w -| chrome_editor.frame.content_inset_px * 2, .h = rect.h -| chrome_editor.frame.content_inset_px * 2 };
     const w = diff_frame.buildSide(
-        .{ .lines = lines, .first_col = first_col, .numbers = numbers, .total_lines = total_lines, .folds = folds, .content_max_cols = content_max_cols, .row_cache = row_cache, .selection_marks = selection_marks, .search_marks = search_marks, .search_current = search_current, .search_marker_lines = search_marker_lines, .search_marker_current = search_marker_current, .line_colors = line_colors, .line_seeks = line_seeks, .line_inlays = line_inlays, .carets = carets, .widgets = widgets, .bands = bands, .minimap = minimap, .diag_marks = if (diag) |d| d.marks else null, .diag_markers = if (diag) |d| d.markers else null, .diag_lines = if (diag) |d| d.lines else &.{} },
+        .{ .lines = lines, .first_col = first_col, .numbers = numbers, .total_lines = total_lines, .folds = folds, .content_max_cols = content_max_cols, .row_cache = row_cache, .selection_marks = selection_marks, .occurrence_marks = occurrence_marks, .search_marks = search_marks, .search_current = search_current, .search_marker_lines = search_marker_lines, .search_marker_current = search_marker_current, .line_colors = line_colors, .line_seeks = line_seeks, .line_inlays = line_inlays, .carets = carets, .widgets = widgets, .bands = bands, .minimap = minimap, .diag_marks = if (diag) |d| d.marks else null, .diag_markers = if (diag) |d| d.markers else null, .diag_lines = if (diag) |d| d.lines else &.{} },
         .{ .first_line = first_line, .first_piece = first_piece, .caret_visible = caret_visible, .caret_shape = caret_shape, .wrap = wrap, .tab_width = tab_width, .cell_w_px = cell_w_px, .cell_h_px = cell_h_px, .font_px = font_px },
         inner,
         // **배경만 뒤로 물린다.** 내용 op이 (0,0)에서 시작해야 셀 격자 양자화(`buildTextDrawList`가
@@ -1857,7 +1861,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     const pf = if (diff_state_opt) |st| blk: {
         // **상태 줄은 가로로 안 민다** — 한 줄짜리 문구라 밀면 화면에서 사라진다.
         // 한 줄짜리 상태 문구다 — 캐시가 아낄 것이 없다.
-        if (st.view != .compare) break :blk buildPaneOps(lines, null, null, lines.len, term.rt.editor_first_line, 0, 0, null, null, buildSelectionMarks(self, term), null, null, @as([]const u32, &.{}), null, syntaxColors(self, term), &.{}, .{}, buildCaretRows(self, term), &.{}, null, self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, null, null);
+        if (st.view != .compare) break :blk buildPaneOps(lines, null, null, lines.len, term.rt.editor_first_line, 0, 0, null, null, buildSelectionMarks(self, term), null, null, null, @as([]const u32, &.{}), null, syntaxColors(self, term), &.{}, .{}, buildCaretRows(self, term), &.{}, null, self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, null, null);
         // **좌우가 세로를 공유한다**(§3.5) — 행 배열이 이미 같은 길이라 같은 인덱스가 같은 높이다.
         // 가로는 각자다(§3.5의 그 규칙은 CM6가 "양쪽 줄 길이가 달라 한쪽을 따라가면 다른 쪽이
         // 엉뚱한 곳을 본다"고 적어 둔 근거에서 왔다) — 입력이 붙을 때 열별 `first_col`이 여기 온다.
@@ -1886,7 +1890,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
                 maru.i18n.t(.diff_read_failed)
             else
                 maru.i18n.t(.diff_loading);
-            break :blk buildPaneOps(status_line[0..1], null, null, 1, 0, 0, 0, null, null, null, null, null, @as([]const u32, &.{}), null, &.{}, &.{}, .{}, null, &.{}, null, false, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, null, null);
+            break :blk buildPaneOps(status_line[0..1], null, null, 1, 0, 0, 0, null, null, null, null, null, null, @as([]const u32, &.{}), null, &.{}, &.{}, .{}, null, &.{}, null, false, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, null, null);
         }
         break :blk buildMergePaneOps(self, term, st, draw_lines, wrap, pane_rect, scratch);
     } else blk: {
@@ -1901,7 +1905,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
         mm_drawn = if (mm) |m| m.input.top else null;
         // **진단**(§5.4) — 트리가 있으면 목록을 다시 채우고(구문 오류), 보이는 줄 축의 세 표로 편다. 끄면 없다.
         const diag = diagnosticViews(self, term, draw_lines.len);
-        break :blk buildPaneOps(draw_lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), fc, maxColsForRender(self, term, false), row_cache, buildSelectionMarks(self, term), find_marks, find_current, marker_lines, marker_current, syntaxColors(self, term), seek_buf[0..seek_n], inlayWindow(self, term), buildCaretRows(self, term), conflictWidgets(self, term), conflictBands(term), self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, mm, diag);
+        break :blk buildPaneOps(draw_lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), fc, maxColsForRender(self, term, false), row_cache, buildSelectionMarks(self, term), find_marks, buildOccurrenceMarks(self, term), find_current, marker_lines, marker_current, syntaxColors(self, term), seek_buf[0..seek_n], inlayWindow(self, term), buildCaretRows(self, term), conflictWidgets(self, term), conflictBands(term), self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, mm, diag);
     };
     if (pf.ops_len == 0) return null;
     // **배치를 싣는다**(병합 모드가 아니면 지운다 — 옛 배치가 남으면 평범한 편집기에서 클릭이
@@ -4578,6 +4582,58 @@ fn buildFindMarks(self: *AppSession, term: *Term, matches: []const maru.session.
             // 것과 모르고 두는 것은 다르다**(적대적 검증 2026-08-23이 죽은 가지로 확인).
             if (w >= buf.len) break;
             buf[w] = .{ .start = matches[mi].start, .len = matches[mi].len };
+            w += 1;
+        }
+        if (w > from) rows[i] = buf[from..w];
+    }
+    return rows;
+}
+
+/// 같은 낱말 강조(§5.1a·§8.2p)의 **렌더 축 마크** — `buildFindMarks` 와 같은 걸음이고 저장소만 다르다. 강조가 없으면 `null`.
+fn buildOccurrenceMarks(self: *AppSession, term: *Term) ?[]const []const chrome_editor.frame.Mark {
+    if (term.rt.editor_diff != null) return null;
+    const doc = term.rt.editor_doc orelse return null;
+    const spans = highlight_client.spans(term);
+    if (spans.len == 0) return null;
+    const numbers = term.rt.editor_visible_numbers;
+    const visible = term.rt.editor_visible_lines;
+    const folded = visible.len > 0 and numbers.len > 0;
+    const lines_len = if (visible.len > 0) visible.len else term.rt.editor_lines.len;
+    if (lines_len == 0) return null;
+
+    if (term.rt.editor_highlight_marks.len < lines_len) {
+        const grown = self.allocator.alloc([]const chrome_editor.frame.Mark, lines_len) catch return null;
+        if (term.rt.editor_highlight_marks.len > 0) self.allocator.free(term.rt.editor_highlight_marks);
+        term.rt.editor_highlight_marks = grown;
+    }
+    if (term.rt.editor_highlight_mark_buf.len < spans.len) {
+        const grown = self.allocator.alloc(chrome_editor.frame.Mark, spans.len) catch return null;
+        if (term.rt.editor_highlight_mark_buf.len > 0) self.allocator.free(term.rt.editor_highlight_mark_buf);
+        term.rt.editor_highlight_mark_buf = grown;
+    }
+    const rows = term.rt.editor_highlight_marks[0..lines_len];
+    const buf = term.rt.editor_highlight_mark_buf;
+    @memset(rows, &.{});
+
+    // 문서 byte 범위 → (줄, 줄 안 byte). 강조는 문서 순서라 줄 커서를 되돌릴 일이 없다.
+    var si: usize = 0;
+    var w: usize = 0;
+    for (0..lines_len) |i| {
+        const doc_line: u32 = if (folded) blk: {
+            if (i >= numbers.len) continue;
+            break :blk (numbers[i] orelse continue) - 1;
+        } else @intCast(i);
+        const ln = doc.file.lines.line(doc_line) orelse continue;
+        while (si < spans.len and spans[si].end <= ln.start) si += 1;
+        const from = w;
+        var probe = si;
+        while (probe < spans.len and spans[probe].start < ln.contentEnd()) : (probe += 1) {
+            if (w >= buf.len) break;
+            // **줄 안으로 자른다** — 여러 줄에 걸친 강조(서버가 낼 수 있다)는 줄마다 조각으로 선다.
+            const lo = @max(spans[probe].start, @as(u32, @intCast(ln.start)));
+            const hi = @min(spans[probe].end, @as(u32, @intCast(ln.contentEnd())));
+            if (hi <= lo) continue;
+            buf[w] = .{ .start = lo - @as(u32, @intCast(ln.start)), .len = hi - lo };
             w += 1;
         }
         if (w > from) rows[i] = buf[from..w];
@@ -9235,6 +9291,7 @@ fn refreshAfterEdit(self: *AppSession, term: *Term, edit: ?syntax_color.EditSpan
     // 이미 갱신해 두었다(줄 배열 `editor_lines`와는 다른 축이다).
     // semantic tokens 2층도 같은 자리에서 민다(§8.2i 「편집 중」) — 범위를 모르면 버린다.
     if (edit) |e| semantic_client.onEdit(self, term, e.start, e.old_end, e.new_end) else semantic_client.onEdit(self, term, null, 0, 0);
+    highlight_client.onEdit(self, term); // 같은 낱말 강조도 **버린다**(§8.2p — 낡은 범위는 엉뚱한 자리를 칠한다)
     symbols_client.onEdit(self, term); // 심볼 2층은 **버린다**(§8.2o — 낡은 체인은 「지금 어디」에 거짓말이다)
     fold_lsp_client.onEdit(self, term); // 3층은 조용 시계만(§8.2j 「편집 중」) — 범위는 아래 ⑵ 의 `dropFoldState` 가 놓는다
     if (edit) |e| inlay_client.onEdit(self, term, e.start, e.old_end, e.new_end) else inlay_client.onEdit(self, term, null, 0, 0); // 힌트 밀기(§4.1h — 경계 = 뒤)
@@ -9364,6 +9421,11 @@ fn dropSelectionState(self: *AppSession, term: *Term) void {
     if (term.rt.editor_find_mark_buf.len > 0) self.allocator.free(term.rt.editor_find_mark_buf);
     term.rt.editor_find_marks = &.{};
     term.rt.editor_find_mark_buf = &.{};
+    // 같은 낱말 강조의 마크도 **같은 단위**다(§8.2p — 문서와 함께 산다).
+    if (term.rt.editor_highlight_marks.len > 0) self.allocator.free(term.rt.editor_highlight_marks);
+    if (term.rt.editor_highlight_mark_buf.len > 0) self.allocator.free(term.rt.editor_highlight_mark_buf);
+    term.rt.editor_highlight_marks = &.{};
+    term.rt.editor_highlight_mark_buf = &.{};
     term.rt.editor_diagnostics.deinit(self.allocator); // 진단 층(§5.4)도 같은 단위다
     if (term.rt.editor_lsp_root) |r| self.allocator.free(r); // LSP root(§8.2a)
     term.rt.editor_lsp_root = null;
@@ -9574,6 +9636,7 @@ pub fn releaseEditorTerm(self: *AppSession, term: *Term) void {
     term.rt.editor_semantic.deinit(self.allocator);
     term.rt.editor_inlay.deinit(self.allocator); // 인레이 힌트도 문서와 함께(§8.2n)
     term.rt.editor_symbols.deinit(self.allocator); // 심볼 2층도(§8.2o)
+    term.rt.editor_highlight.deinit(self.allocator); // 같은 낱말 강조도(§8.2p)
     term.rt.editor_fold_lsp = .{}; // 3층 대기 상태도 문서와 함께(`editor_lsp_version = 0` 과 같은 자리) — 두 호출자 모두 곧 Term 을 부수므로 관측되지 않는다(적대적 C8: 등가), 규율로 둔다
     if (term.rt.editor_lines.len > 0) self.allocator.free(term.rt.editor_lines);
     term.rt.editor_lines = &.{};
@@ -13505,6 +13568,174 @@ test "DSY5 심볼 2층 — provider 가 없으면 묻지 않고, 빈 목록·평
         try testing.expect(symbolsApplied(&f, 1));
         try testing.expectEqual(@as(usize, 1), f.term.rt.editor_symbols.list.items.len);
         try testing.expect(f.term.rt.editor_symbols.decoded.name_mismatch >= 1);
+    }
+}
+
+/// DHL 판정자용 대기 — 강조가 `n` 번 적용될 때까지.
+fn highlightApplied(f: *SmtFixture, want: u64) bool {
+    const Ctx = struct { t: *Term, n: u64 };
+    return pumpLspUntil(&f.fx, 3000, Ctx{ .t = f.term, .n = want }, struct {
+        fn g(c: Ctx) bool {
+            return c.t.rt.editor_highlight.applied >= c.n;
+        }
+    }.g);
+}
+
+test "DHL3 같은 낱말 강조 — caret 이 낱말에 멈추면 묻고 응답 범위가 마크로 서며(가장 약한 배경), 선택이 있으면 묻지 않고, 다른 낱말로 가면 사라지고 다시 묻는다 (제품 경계, §8.2p·§5.1a)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    // `alpha` 가 둘, 부분 일치 `alphax` 가 하나(가짜도 낱말 경계를 본다 — 그것이 검색과 갈리는 자리다).
+    var f = (try SmtFixture.open(allocator, "hl.c", "int alpha = 1;\nint beta = alpha + alphax;\n")) orelse return error.SkipZigTest;
+    defer f.close(allocator);
+    const s = f.fx.session;
+    const term = f.term;
+    try testing.expect(f.ready());
+    const content = term.rt.editor_doc.?.file.content;
+    const first = std.mem.indexOf(u8, content, "alpha").?;
+    // ⑴ caret 이 낱말 위 — 조용해지면 한 번 묻는다(그 전엔 안 묻는다).
+    term.rt.editor_selection = .{ .anchor_start = first + 1, .anchor_end = first + 1, .focus = first + 1 };
+    highlight_client.onCaretMove(s, term);
+    _ = syntaxColors(s, term);
+    try testing.expectEqual(@as(u64, 0), s.editor_lsp.sent_highlight); // 150 ms 조용 전
+    {
+        const t0 = s.awakeMs();
+        while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
+    }
+    _ = syntaxColors(s, term);
+    try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_highlight);
+    try testing.expect(highlightApplied(&f, 1));
+    // ⑵ 범위 둘 — `alphax` 는 없다(낱말 경계).
+    const spans = highlight_client.spans(term);
+    try testing.expectEqual(@as(usize, 2), spans.len);
+    try testing.expectEqualStrings("alpha", content[spans[0].start..spans[0].end]);
+    try testing.expectEqualStrings("alpha", content[spans[1].start..spans[1].end]);
+    try testing.expect(spans[0].start < spans[1].start);
+    // ⑶ 마크가 렌더 축으로 선다 — 둘째 줄의 마크는 그 줄 안 byte 다.
+    const rows = buildOccurrenceMarks(s, term) orelse return error.NoOccurrenceMarks;
+    try testing.expectEqual(@as(usize, 1), rows[0].len);
+    try testing.expectEqual(@as(u32, 4), rows[0][0].start);
+    try testing.expectEqual(@as(u32, 5), rows[0][0].len);
+    try testing.expectEqual(@as(usize, 1), rows[1].len);
+    try testing.expectEqual(@as(u32, 11), rows[1][0].start);
+    // ⑷ **선택이 생기면** 묻지도 그리지도 않는다(그 칸은 선택이 이긴다).
+    term.rt.editor_selection = .{ .anchor_start = first, .anchor_end = first + 5, .focus = first + 5 };
+    try testing.expect(highlight_client.wordAtCaret(term) == null);
+    try testing.expectEqual(@as(usize, 0), highlight_client.spans(term).len);
+    _ = syntaxColors(s, term);
+    try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_highlight);
+    try testing.expect(buildOccurrenceMarks(s, term) == null);
+    // ⑸ 다른 낱말로 가면 옛 강조는 곧바로 사라지고(대조 실패), 조용해진 뒤 새로 묻는다.
+    const beta = std.mem.indexOf(u8, content, "beta").?;
+    term.rt.editor_selection = .{ .anchor_start = beta + 1, .anchor_end = beta + 1, .focus = beta + 1 };
+    highlight_client.onCaretMove(s, term);
+    try testing.expectEqual(@as(usize, 0), highlight_client.spans(term).len);
+    {
+        const t0 = s.awakeMs();
+        while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
+    }
+    _ = syntaxColors(s, term);
+    try testing.expectEqual(@as(u64, 2), s.editor_lsp.sent_highlight);
+    try testing.expect(highlightApplied(&f, 2));
+    try testing.expectEqual(@as(usize, 1), highlight_client.spans(term).len); // `beta` 는 하나
+    // ⑹ 같은 낱말에 머무는 동안엔 또 안 묻는다.
+    _ = syntaxColors(s, term);
+    try testing.expectEqual(@as(u64, 2), s.editor_lsp.sent_highlight);
+    // ⑺ 편집하면 **버린다** — 그 뒤 조용해지면 다시 묻는다.
+    try testing.expect(insertText(s, term, "x"));
+    try testing.expectEqual(@as(usize, 0), highlight_client.spans(term).len);
+    try testing.expect(term.rt.editor_highlight.cleared >= 1);
+    {
+        const t0 = s.awakeMs();
+        while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
+    }
+    _ = syntaxColors(s, term);
+    try testing.expectEqual(@as(u64, 3), s.editor_lsp.sent_highlight);
+}
+
+test "DHL4 같은 낱말 강조 — provider 가 없으면 묻지 않고, 빈 응답·오류는 강조 없음이며, 낡은 낱말로 온 답은 버린다 (제품 경계, §8.2p)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    // ⑴ provider 없음.
+    {
+        _ = setenv("MARU_FAKE_LSP_NOHLCAP", "1", 1);
+        defer _ = unsetenv("MARU_FAKE_LSP_NOHLCAP");
+        var f = (try SmtFixture.open(allocator, "nh.c", "int alpha = 1;\n")) orelse return error.SkipZigTest;
+        defer f.close(allocator);
+        const s = f.fx.session;
+        try testing.expect(f.ready());
+        const at = std.mem.indexOf(u8, f.term.rt.editor_doc.?.file.content, "alpha").? + 1;
+        f.term.rt.editor_selection = .{ .anchor_start = at, .anchor_end = at, .focus = at };
+        const t0 = s.awakeMs();
+        while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
+        _ = syntaxColors(s, f.term);
+        try testing.expectEqual(@as(u64, 0), s.editor_lsp.sent_highlight);
+        try testing.expectEqual(@as(usize, 0), highlight_client.spans(f.term).len);
+    }
+    // ⑵ 빈 응답(`DHLNONE`) — 강조 없음이고 카운터로 갈린다.
+    {
+        var f = (try SmtFixture.open(allocator, "hn.c", "int alpha = 1; // DHLNONE\n")) orelse return error.SkipZigTest;
+        defer f.close(allocator);
+        const s = f.fx.session;
+        try testing.expect(f.ready());
+        const at = std.mem.indexOf(u8, f.term.rt.editor_doc.?.file.content, "alpha").? + 1;
+        f.term.rt.editor_selection = .{ .anchor_start = at, .anchor_end = at, .focus = at };
+        const t0 = s.awakeMs();
+        while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
+        _ = syntaxColors(s, f.term);
+        try testing.expect(pumpLspUntil(&f.fx, 3000, f.term, struct {
+            fn g(t: *Term) bool {
+                return t.rt.editor_highlight.applied_empty >= 1;
+            }
+        }.g));
+        try testing.expectEqual(@as(usize, 0), highlight_client.spans(f.term).len);
+        try testing.expect(buildOccurrenceMarks(s, f.term) == null);
+    }
+    // ⑶ 오류(`DHLERR`) — 버리고 곧바로 되묻지 않는다.
+    {
+        var f = (try SmtFixture.open(allocator, "he.c", "int alpha = 1; // DHLERR\n")) orelse return error.SkipZigTest;
+        defer f.close(allocator);
+        const s = f.fx.session;
+        try testing.expect(f.ready());
+        const at = std.mem.indexOf(u8, f.term.rt.editor_doc.?.file.content, "alpha").? + 1;
+        f.term.rt.editor_selection = .{ .anchor_start = at, .anchor_end = at, .focus = at };
+        {
+            const t0 = s.awakeMs();
+            while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
+        }
+        _ = syntaxColors(s, f.term);
+        try testing.expect(pumpLspUntil(&f.fx, 3000, f.term, struct {
+            fn g(t: *Term) bool {
+                return t.rt.editor_highlight.dropped_error >= 1;
+            }
+        }.g));
+        _ = syntaxColors(s, f.term);
+        try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_highlight);
+    }
+    // ⑷ **낡은 낱말** — 요청이 나간 뒤 caret 을 옮기면 그 답은 지금 낱말을 말하지 않는다: 버린다.
+    {
+        var f = (try SmtFixture.open(allocator, "hw.c", "int alpha = 1;\nint beta = 2;\n")) orelse return error.SkipZigTest;
+        defer f.close(allocator);
+        const s = f.fx.session;
+        const term = f.term;
+        try testing.expect(f.ready());
+        const content = term.rt.editor_doc.?.file.content;
+        const at = std.mem.indexOf(u8, content, "alpha").? + 1;
+        term.rt.editor_selection = .{ .anchor_start = at, .anchor_end = at, .focus = at };
+        {
+            const t0 = s.awakeMs();
+            while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
+        }
+        _ = syntaxColors(s, term);
+        try testing.expect(term.rt.editor_highlight.waiting);
+        const beta = std.mem.indexOf(u8, content, "beta").? + 1;
+        term.rt.editor_selection = .{ .anchor_start = beta, .anchor_end = beta, .focus = beta }; // 답이 오기 전에 옮긴다
+        try testing.expect(pumpLspUntil(&f.fx, 3000, term, struct {
+            fn g(t: *Term) bool {
+                return t.rt.editor_highlight.dropped_word >= 1;
+            }
+        }.g));
+        try testing.expectEqual(@as(usize, 0), highlight_client.spans(term).len);
+        try testing.expectEqual(@as(u64, 0), term.rt.editor_highlight.applied);
     }
 }
 

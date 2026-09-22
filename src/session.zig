@@ -200,6 +200,7 @@ pub const editor = struct {
         /// 인레이 힌트(tooling §8.2n · visual-mapping §4.1h) — provider·응답 정제·편집 밀기.
         pub const inlay = @import("session/lsp/inlay.zig");
         pub const symbols = @import("session/lsp/symbols.zig");
+        pub const highlight = @import("session/lsp/highlight.zig");
     };
     /// S2: 병합 충돌 **마커 구간**(docs/editor-merge-conflicts.md §5). 순수 계산이라 여기 산다 —
     /// 줄 배열을 받아 구간을 내고, 그리기·동작은 위층이 붙인다.

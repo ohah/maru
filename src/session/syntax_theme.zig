@@ -184,6 +184,25 @@ pub fn diagnosticsFromTheme(theme: appearance.ResolvedTheme) DiagnosticColors {
     };
 }
 
+/// 같은 낱말 강조 색(§5.1a) — **검색 강조와 갈려야** 「찾은 것」과 「그냥 따라온 것」을 눈으로 가를 수 있다. 검색이 테마의 강조색인 것과 달리
+/// 이쪽은 **바탕에 가까운 중립색**(ANSI 8 을 바탕 쪽으로 당긴다)이다: 가장 약한 배경 강조라는 계약(§5.1a 우선순위)을 색으로도 지킨다.
+pub fn occurrenceFromTheme(theme: appearance.ResolvedTheme) color.Rgb {
+    const a = ansi(theme, 8);
+    const bg = theme.background;
+    return .{
+        .r = mix8(a.r, bg.r),
+        .g = mix8(a.g, bg.g),
+        .b = mix8(a.b, bg.b),
+    };
+}
+
+/// 두 색을 **바탕 쪽으로 45 %** 섞는다(정수 산술 — 파생 색 셋이 전부 이 층에서 계산된다).
+fn mix8(c: u8, bg: u8) u8 {
+    const ci: u16 = c;
+    const bi: u16 = bg;
+    return @intCast((ci * 55 + bi * 45) / 100);
+}
+
 /// 폰트 패밀리가 CSS/JS 문자열에 안전하게 넣을 수 있는 문자만 쓰는지(주입 방어). 번들·시스템 폰트명은
 /// 영문자·숫자·공백·하이픈뿐이라 이걸로 충분하고, 그 외 문자가 있으면 var를 안 내보내 app.css 폴백을 쓴다.
 fn isSafeFontFamily(family: []const u8) bool {

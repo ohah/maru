@@ -55,6 +55,7 @@ pub fn tokensFor(appearance: config.appearance.ResolvedAppearance) chrome.Tokens
         .diff_added = diff_colors.added,
         .diff_removed = diff_colors.removed,
         // 진단 색(§5.4) — diff 와 같은 파생 계열.
+        .occurrence = session.syntax_theme.occurrenceFromTheme(t), // 같은 낱말 강조(§5.1a)
         .diagnostic_error = diag_colors.err,
         .diagnostic_warning = diag_colors.warning,
         .diagnostic_info = diag_colors.info,

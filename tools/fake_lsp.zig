@@ -802,6 +802,76 @@ fn asLink(arena: std.mem.Allocator, loc: std.json.Value) !std.json.Value {
 /// `textDocument/inlayHint`(§8.2n 관측점): 요청 범위 안 줄마다 — `<name>_hv` 낱말 뒤에 타입 힌트 `: int`(kind 1, 조각 배열, padding 없음),
 /// `(` 바로 뒤 첫 인자 앞에 파라미터 힌트 `p:`(kind 2, `paddingRight`), 줄 끝에 `RET` 표식이 있으면 `-> void`(paddingLeft). 일부러 **뒤에서
 /// 앞으로** 낸다(클라이언트가 정렬하는지). 문서에 `INLSTALL` 이면 답하지 않고, `INLERR` 면 `-32801`, `INLNULL` 이면 `null`.
+/// `textDocument/documentHighlight`(§8.2p) — 요청 자리의 **낱말**과 같은 글자를 문서에서 찾아 낸다(주석·문자열도 가리지 않는다 — 가짜다).
+/// `kind` 는 **일부러 섞는다**(없음·2·3) — 클라이언트가 그것을 안 쓰는지 본다. 표식: `DHLNONE` 빈 목록 · `DHLSTALL` 무응답 · `DHLERR` `-32801`.
+fn handleDocumentHighlight(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: std.json.Value) void {
+    var req_uri: []const u8 = "";
+    var line_no: i64 = 0;
+    var ch: i64 = 0;
+    if (obj.get("params")) |p| if (p == .object) {
+        if (p.object.get("textDocument")) |td| if (td == .object) {
+            req_uri = str(td.object.get("uri")) orelse "";
+        };
+        if (p.object.get("position")) |ps| if (ps == .object) {
+            line_no = int(ps.object.get("line")) orelse 0;
+            ch = int(ps.object.get("character")) orelse 0;
+        };
+    };
+    const text = docText(req_uri);
+    if (std.mem.indexOf(u8, text, "DHLSTALL") != null) return;
+    if (std.mem.indexOf(u8, text, "DHLERR") != null) {
+        sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .@"error" = .{ .code = @as(i32, -32801), .message = "content modified" } });
+        return;
+    }
+    if (std.mem.indexOf(u8, text, "DHLNONE") != null) {
+        sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .result = [0]u32{} });
+        return;
+    }
+    // 요청 줄에서 그 자리의 낱말을 끊어 낸다.
+    var it0 = std.mem.splitScalar(u8, text, '\n');
+    var i: i64 = 0;
+    const line = while (it0.next()) |l| : (i += 1) {
+        if (i == line_no) break l;
+    } else return;
+    const at: usize = @intCast(@max(0, @min(ch, @as(i64, @intCast(line.len)))));
+    if (at >= line.len or !isIdent(line[at])) {
+        sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .result = [0]u32{} });
+        return;
+    }
+    var lo = at;
+    while (lo > 0 and isIdent(line[lo - 1])) lo -= 1;
+    var hi = at;
+    while (hi < line.len and isIdent(line[hi])) hi += 1;
+    const word = line[lo..hi];
+
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var out: std.json.Array = .init(arena);
+    var row: i64 = 0;
+    var it = std.mem.splitScalar(u8, text, '\n');
+    var kind_turn: i64 = 0;
+    while (it.next()) |l| : (row += 1) {
+        var from: usize = 0;
+        while (std.mem.indexOfPos(u8, l, from, word)) |found| {
+            from = found + word.len;
+            const left_ok = found == 0 or !isIdent(l[found - 1]);
+            const right_ok = found + word.len >= l.len or !isIdent(l[found + word.len]);
+            if (!left_ok or !right_ok) continue; // 낱말 경계 — 부분 일치는 아니다
+            var r: std.json.ObjectMap = .empty;
+            r.put(arena, "start", posValue(arena, row, found) catch return) catch return;
+            r.put(arena, "end", posValue(arena, row, found + word.len) catch return) catch return;
+            var h: std.json.ObjectMap = .empty;
+            h.put(arena, "range", .{ .object = r }) catch return;
+            // 0 → kind 없음, 1 → 2(Read), 2 → 3(Write) 를 돌아가며(실서버 셋의 모양을 섞는다).
+            if (@mod(kind_turn, 3) != 0) h.put(arena, "kind", .{ .integer = 1 + @mod(kind_turn, 3) }) catch return;
+            kind_turn += 1;
+            out.append(.{ .object = h }) catch return;
+        }
+    }
+    sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .result = std.json.Value{ .array = out } });
+}
+
 /// `textDocument/documentSymbol`(§8.2o) — 문서의 `fn <name>(` 과 `struct <name> {` 을 심볼로 낸다. **계층**으로 내되 tsgo 꼴로 **순서를 섞고**
 /// (뒤에서 앞으로) 자식 하나를 형제로 흘린다 — 클라이언트가 정렬·포함 재계산을 하는지 본다. 표식: `DSYNONE` 빈 목록 · `DSYFLAT` 평탄 꼴 ·
 /// `DSYSTALL` 무응답 · `DSYERR` `-32801` · `DSYBAD` 이름이 문서와 다른 항목 하나를 섞는다.
@@ -1143,6 +1213,7 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
                     .foldingRangeProvider = std.c.getenv("MARU_FAKE_LSP_NOFOLDCAP") == null,
                     .referencesProvider = true, // §8.2l
                     .documentSymbolProvider = std.c.getenv("MARU_FAKE_LSP_NOSYMCAP") == null, // 심볼 2층(§8.2o)
+                    .documentHighlightProvider = std.c.getenv("MARU_FAKE_LSP_NOHLCAP") == null, // 같은 낱말 강조(§8.2p)
                     .inlayHintProvider = if (std.c.getenv("MARU_FAKE_LSP_NOINLAYCAP") == null) std.json.Value{ .object = inlay_caps } else std.json.Value{ .bool = false }, // §8.2n — 객체 꼴; `NOINLAYCAP=1` 이면 없음
                     .implementationProvider = true, // §8.2m
                     .typeDefinitionProvider = if (std.c.getenv("MARU_FAKE_LSP_NOTYPEDEFCAP") == null) std.json.Value{ .object = typedef_caps } else std.json.Value{ .bool = false }, // 객체 꼴; `NOTYPEDEFCAP=1` 이면 false
@@ -1335,6 +1406,10 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
     }
     if (std.mem.eql(u8, method, "textDocument/references")) {
         handleReferences(allocator, obj, id.?);
+        return;
+    }
+    if (std.mem.eql(u8, method, "textDocument/documentHighlight")) {
+        handleDocumentHighlight(allocator, obj, id orelse .null);
         return;
     }
     if (std.mem.eql(u8, method, "textDocument/documentSymbol")) {

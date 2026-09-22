@@ -2196,6 +2196,11 @@ const TermRuntime = struct {
     editor_inlay: editor_ops.inlay_client.State = .{},
     /// 심볼 2층(§8.2o) — 서버가 준 목록과 그 version. 비어 있으면 1층을 쓴다.
     editor_symbols: editor_ops.symbols_client.State = .{},
+    /// 같은 낱말 강조(§8.2p) — caret 아래 낱말의 다른 자리. 비어 있으면 강조가 없다.
+    editor_highlight: editor_ops.highlight_client.State = .{},
+    /// 그 강조의 **렌더 축 마크**(줄별) — `editor_find_marks` 와 같은 꼴·같은 수명(프레임마다 다시 채운다).
+    editor_highlight_marks: [][]const maru.chrome.components.editor_view.frame.Mark = &.{},
+    editor_highlight_mark_buf: []maru.chrome.components.editor_view.frame.Mark = &.{},
     /// 진단 층(§5.4) — 목록(첫 출처: 구문 오류)과 렌더 표. `editor_syntax` 와 같은 단위로 산다.
     editor_diagnostics: editor_ops.diagnostics.State = .{},
     /// LSP 문서 version(§8.2a) — 편집마다 오른다. 0 은 「아직 서버에 안 열었다」.

@@ -244,7 +244,30 @@ attributes dictionary 에 담는다. 그 사본을 만드는 `maru_font_without_
 - **실측(red→green)**: 정상은 4,000회에 **272~384 KB**(16회 측정, 중앙값 304 KB, 1초 미만). `CFRelease` 를
   되돌리면 **72,024,112 B** — 상한 4MB 가 정상 최대치의 **10.7배**·누수 신호의 **1/17** 지점에 있다.
 
-### face 재사용 캐시는 보류한다 (2026-08-18)
+### face 재사용 캐시를 다시 열었다 (2026-09-23) — 아래 2026-08-18 보류를 대체한다
+
+보류의 요구("착수한다면 **재측정이 첫 단계**")를 실제 세션 프로파일로 채웠고, 그 숫자가 보류 근거를 뒤집었다.
+
+- **재측정(2026-09-23, ReleaseFast, 사용자 workspace, Claude Code 가 42 Hz 로 다시 그리는 실제 세션)**:
+  네이티브 셰이핑 시간의 **93 %** 가 글자 모양이 아니라 폰트 객체를 매 호출 다시 만들고 버리는 일이었다 —
+  `maru_apply_cascade_list` 39 % + `CTFontCreateCopyWithSymbolicTraits`(styled face) 33 % + `_CFRelease` 17 % +
+  `maru_create_primary_font` 3.6 %, 정작 `CTLineCreateWithAttributedString` 은 **3.9 %**. 옛 보류 문서가 가정한
+  "CPU 1~2 %" 가 아니라 **앱 busy CPU 의 약 1/4** 이었다(셰이핑 전체가 tick 의 57 %).
+- **구현**(`coretext_smoke.m` 의 `MaruFontSetEntry`): 설정 서명(`maru_shape_cache_config_signature` — family·
+  size·fallback·bold·italic·ligature)을 키로 primary(+cascade)·styled face 셋·이름·속성을 슬롯 넷에 들고,
+  호출자에게는 `CFRetain` 한 사본을 준다. **소유 vs 대여 모델은 손대지 않았다** — 보류 근거 ③(커서 슬롯이
+  face 폰트를 빌려 쓴다)이 겨눈 그 자리를 피하려고, 캐시는 face 넷만 알고 호출 끝의 해제 루프는 그대로다.
+- **A/B 실측**: 활성 32 세션(2 Hz 출력 픽스처), 앱+host 둘 다 교체, 40 s × 8 쌍 순서 교대 — **8/8 쌍에서 낮고
+  중앙값 −22.5 %**(3875 → 3005 ms/40 s). 프로파일 확인: cascade·styled face 생성 표본 **0**, 네이티브 셰이핑
+  전체가 busy 의 2.7 %(이전 28 %).
+- **남는 위험(무효화)**: 사용자가 실행 중에 폰트를 설치·교체하면 캐시가 옛 face 를 들고 있을 수 있다. 매
+  프레임 다시 만들던 때는 공짜로 따라갔다. 항목이 넷뿐이라 설정을 바꾸면 곧 밀려나고,
+  `maru_macos_coretext_shape_font_cache_reset()` 이 명시적 비우기를 연다. 폰트 설치 알림을 구독하지는 않는다.
+- **판정자**: `coretext_smoke.zig` 의 `FC1` — ① 같은 설정 두 번째 호출은 적중(미적중 증가 0) ② 적중 경로의
+  셰이핑 레코드가 미적중 경로와 **전부 같다**(캐시를 끄고 한 번 더 찍어 대조) ③ 적중 항목이 face 를 둘 이상
+  들고 있다(bold 가 실제로 캐시에 있다). 돌연변이 셋(lookup 무력화·store 무력화·styled face 만 제외) 빨강.
+
+### face 재사용 캐시는 보류한다 (2026-08-18) — 위 절이 대체했다
 
 같은 설정이면 face 해석 결과가 같은데도 shape 호출마다 다시 해석한다. 이걸 캐시하는 구현을 실제로 만들어
 보고 **접었다**(닫힌 PR #2363). 다시 착수할 사람이 같은 길을 처음부터 되짚지 않게 근거를 남긴다.

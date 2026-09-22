@@ -722,6 +722,150 @@ static bool maru_shape_cache_enabled = true;
 static bool maru_shape_cache_force_hash = false; // 테스트: 해시를 상수로 — 충돌 경로(전체 비교)를 강제
 static os_unfair_lock maru_shape_cache_lock = OS_UNFAIR_LOCK_INIT;
 
+// ── 폰트 집합 캐시 ──────────────────────────────────────────────────────────────────────────────
+//
+// **왜**: 실제 세션 프로파일(2026-09-23, 활성 12 세션 · Claude Code 가 42 Hz 로 다시 그림)에서 네이티브
+// 셰이핑 시간의 **93 %** 가 글자 모양을 잡는 일이 아니라 **폰트 객체를 매 호출 다시 만들고 버리는 일**이었다:
+// `maru_apply_cascade_list` 39 % + `CTFontCreateCopyWithSymbolicTraits`(styled face) 33 % +
+// `_CFRelease` 17 % + `maru_create_primary_font` 3.6 %, 정작 `CTLineCreateWithAttributedString` 은 3.9 %.
+// 셰이핑 **결과**는 이미 `maru_shape_cache` 가 재사용하는데, 그 캐시를 맞히든 말든 폰트는 매번 새로 만들었다.
+//
+// 같은 설정이면 같은 폰트다 — 설정 서명(`maru_shape_cache_config_signature`: family·size·fallback·bold·
+// italic·ligature)을 키로 primary(+cascade)·styled face 셋·이름·속성을 들고 있는다. 호출자는 hit 에서
+// `CFRetain` 한 사본을 받고 기존처럼 끝에서 놓는다 — 소유 규율(호출 끝에 release)이 그대로라 누수 경로가 안 는다.
+//
+// **무효화**: 설정이 바뀌면 서명이 바뀌어 새 항목이다. 사용자가 그 사이 폰트를 *설치/교체*하면 캐시가 옛 폰트를
+//들고 있을 수 있다 — 매 프레임 다시 만들던 때는 공짜로 따라갔다. 항목이 넷뿐이라 설정을 바꾸면 곧 밀려나고,
+// `maru_macos_coretext_shape_font_cache_reset()` 이 명시적 비우기를 연다(설정 변경·테스트).
+#define MARU_FONTSET_SLOTS 4
+#define MARU_FONTSET_FACES 4
+
+typedef struct {
+    uint64_t signature; // 0 = 빈 슬롯
+    uint32_t last_used;
+    uint32_t requested_matched;
+    CTFontRef fonts[MARU_FONTSET_FACES];  // 0 = primary(+cascade), 1..3 = bold/italic/bold-italic
+    CFStringRef names[MARU_FONTSET_FACES];
+    CFDictionaryRef primary_attributes;   // ligature 는 서명에 있으므로 항목마다 하나면 된다
+} MaruFontSetEntry;
+
+static MaruFontSetEntry maru_fontsets[MARU_FONTSET_SLOTS];
+static uint32_t maru_fontset_clock = 0;
+static uint64_t maru_fontset_hits = 0;
+static uint64_t maru_fontset_misses = 0;
+static uint64_t maru_fontset_last_faces = 0; // 마지막 적중 항목이 들고 있던 face 수(판정자가 «bold 가 캐시에 있다» 를 본다)
+static bool maru_fontset_enabled = true;
+static os_unfair_lock maru_fontset_lock = OS_UNFAIR_LOCK_INIT;
+
+static void maru_fontset_release_entry_locked(MaruFontSetEntry *entry) {
+    for (int i = 0; i < MARU_FONTSET_FACES; i++) {
+        if (entry->fonts[i] != NULL) CFRelease(entry->fonts[i]);
+        if (entry->names[i] != NULL) CFRelease(entry->names[i]);
+        entry->fonts[i] = NULL;
+        entry->names[i] = NULL;
+    }
+    if (entry->primary_attributes != NULL) CFRelease(entry->primary_attributes);
+    entry->primary_attributes = NULL;
+    entry->signature = 0;
+}
+
+/// hit 이면 1 을 돌려주고 `out_*` 을 **retain 한 사본**으로 채운다(호출자가 놓는다).
+static int maru_fontset_lookup(
+    uint64_t signature,
+    CTFontRef out_fonts[MARU_FONTSET_FACES],
+    CFStringRef out_names[MARU_FONTSET_FACES],
+    CFDictionaryRef *out_primary_attributes,
+    uint32_t *out_requested_matched
+) {
+    if (!maru_fontset_enabled || signature == 0) return 0;
+    os_unfair_lock_lock(&maru_fontset_lock);
+    for (int slot = 0; slot < MARU_FONTSET_SLOTS; slot++) {
+        MaruFontSetEntry *entry = &maru_fontsets[slot];
+        if (entry->signature != signature || entry->fonts[0] == NULL) continue;
+        entry->last_used = ++maru_fontset_clock;
+        for (int i = 0; i < MARU_FONTSET_FACES; i++) {
+            out_fonts[i] = entry->fonts[i] != NULL ? (CTFontRef)CFRetain(entry->fonts[i]) : NULL;
+            out_names[i] = entry->names[i] != NULL ? (CFStringRef)CFRetain(entry->names[i]) : NULL;
+        }
+        *out_primary_attributes = entry->primary_attributes != NULL
+            ? (CFDictionaryRef)CFRetain(entry->primary_attributes)
+            : NULL;
+        *out_requested_matched = entry->requested_matched;
+        uint64_t faces = 0;
+        for (int i = 0; i < MARU_FONTSET_FACES; i++)
+            if (entry->fonts[i] != NULL) faces++;
+        maru_fontset_last_faces = faces;
+        maru_fontset_hits++;
+        os_unfair_lock_unlock(&maru_fontset_lock);
+        return 1;
+    }
+    maru_fontset_misses++;
+    os_unfair_lock_unlock(&maru_fontset_lock);
+    return 0;
+}
+
+/// 이번 호출이 만든 폰트를 캐시에 남긴다(캐시가 자기 retain 을 든다). 이미 같은 서명이 있으면 빠진 face 만 채운다.
+static void maru_fontset_store(
+    uint64_t signature,
+    CTFontRef fonts[MARU_FONTSET_FACES],
+    CFStringRef names[MARU_FONTSET_FACES],
+    CFDictionaryRef primary_attributes,
+    uint32_t requested_matched
+) {
+    if (!maru_fontset_enabled || signature == 0 || fonts[0] == NULL) return;
+    os_unfair_lock_lock(&maru_fontset_lock);
+    MaruFontSetEntry *target = NULL;
+    for (int slot = 0; slot < MARU_FONTSET_SLOTS; slot++) {
+        if (maru_fontsets[slot].signature == signature) { target = &maru_fontsets[slot]; break; }
+    }
+    if (target == NULL) {
+        for (int slot = 0; slot < MARU_FONTSET_SLOTS; slot++) {
+            if (maru_fontsets[slot].signature == 0) { target = &maru_fontsets[slot]; break; }
+        }
+    }
+    if (target == NULL) { // 가장 오래 안 쓴 것을 민다
+        target = &maru_fontsets[0];
+        for (int slot = 1; slot < MARU_FONTSET_SLOTS; slot++)
+            if (maru_fontsets[slot].last_used < target->last_used) target = &maru_fontsets[slot];
+        maru_fontset_release_entry_locked(target);
+    }
+    target->signature = signature;
+    target->last_used = ++maru_fontset_clock;
+    target->requested_matched = requested_matched;
+    for (int i = 0; i < MARU_FONTSET_FACES; i++) {
+        if (fonts[i] != NULL && target->fonts[i] == NULL) target->fonts[i] = (CTFontRef)CFRetain(fonts[i]);
+        if (names[i] != NULL && target->names[i] == NULL) target->names[i] = (CFStringRef)CFRetain(names[i]);
+    }
+    if (primary_attributes != NULL && target->primary_attributes == NULL)
+        target->primary_attributes = (CFDictionaryRef)CFRetain(primary_attributes);
+    os_unfair_lock_unlock(&maru_fontset_lock);
+}
+
+void maru_macos_coretext_shape_font_cache_reset(void) {
+    os_unfair_lock_lock(&maru_fontset_lock);
+    for (int slot = 0; slot < MARU_FONTSET_SLOTS; slot++) maru_fontset_release_entry_locked(&maru_fontsets[slot]);
+    maru_fontset_hits = 0;
+    maru_fontset_misses = 0;
+    maru_fontset_last_faces = 0;
+    os_unfair_lock_unlock(&maru_fontset_lock);
+}
+
+void maru_macos_coretext_shape_font_cache_set_enabled(uint32_t enabled) {
+    os_unfair_lock_lock(&maru_fontset_lock);
+    maru_fontset_enabled = enabled != 0;
+    if (!maru_fontset_enabled)
+        for (int slot = 0; slot < MARU_FONTSET_SLOTS; slot++) maru_fontset_release_entry_locked(&maru_fontsets[slot]);
+    os_unfair_lock_unlock(&maru_fontset_lock);
+}
+
+void maru_macos_coretext_shape_font_cache_stats(uint64_t *out_hits, uint64_t *out_misses, uint64_t *out_last_faces) {
+    os_unfair_lock_lock(&maru_fontset_lock);
+    if (out_hits) *out_hits = maru_fontset_hits;
+    if (out_misses) *out_misses = maru_fontset_misses;
+    if (out_last_faces) *out_last_faces = maru_fontset_last_faces;
+    os_unfair_lock_unlock(&maru_fontset_lock);
+}
+
 static uint64_t maru_shape_cache_hash_bytes(const uint8_t *bytes, size_t len) {
     if (maru_shape_cache_force_hash) return 0x1234;
     uint64_t h = 0xcbf29ce484222325ull;
@@ -1624,15 +1768,37 @@ void maru_macos_coretext_shape_draw_list(
             return;
         }
 
-        CTFontRef primary_font = maru_create_primary_font(
-            requested_font_family,
-            requested_font_family_len,
-            requested_font_size,
-            &result->requested_font_matched
-        );
-        if (primary_font == NULL) {
-            result->status = 2;
-            return;
+        // **폰트 집합 캐시를 폰트를 만들기 전에 본다**(아래 «접은 기록» 의 재개 근거). 서명은 입력만으로
+        // 정해지므로 hit 이면 `maru_create_primary_font`·cascade·styled face 생성을 통째로 건너뛴다.
+        const uint64_t cache_signature = maru_shape_cache_config_signature(
+            requested_font_family, requested_font_family_len, requested_font_size,
+            fallback_families, fallback_families_len, bold_family, bold_family_len,
+            italic_family, italic_family_len, ligatures_enabled);
+        CTFontRef cached_fonts[MARU_FONTSET_FACES] = { NULL, NULL, NULL, NULL };
+        CFStringRef cached_names[MARU_FONTSET_FACES] = { NULL, NULL, NULL, NULL };
+        CFDictionaryRef cached_attributes = NULL;
+        uint32_t cached_matched = 0;
+        const bool fontset_hit =
+            maru_fontset_lookup(cache_signature, cached_fonts, cached_names, &cached_attributes, &cached_matched) != 0 &&
+            cached_fonts[0] != NULL && cached_names[0] != NULL && cached_attributes != NULL;
+
+        CTFontRef primary_font = NULL;
+        if (!fontset_hit) {
+            if (cached_attributes != NULL) { CFRelease(cached_attributes); cached_attributes = NULL; }
+            for (int i = 0; i < MARU_FONTSET_FACES; i++) {
+                if (cached_fonts[i] != NULL) { CFRelease(cached_fonts[i]); cached_fonts[i] = NULL; }
+                if (cached_names[i] != NULL) { CFRelease(cached_names[i]); cached_names[i] = NULL; }
+            }
+            primary_font = maru_create_primary_font(
+                requested_font_family,
+                requested_font_family_len,
+                requested_font_size,
+                &result->requested_font_matched
+            );
+            if (primary_font == NULL) {
+                result->status = 2;
+                return;
+            }
         }
         result->primary_font_found = 1;
 
@@ -1642,6 +1808,12 @@ void maru_macos_coretext_shape_draw_list(
         // **비용: cascade 폰트를 shape 호출(출력/dirty 프레임)마다 재구성한다.** 같은 설정이면 결과가 같으니
         // 캐시할 여지가 있다 — 아래는 그 여지를 2026-08-18에 실제로 만들어 보고 **접은** 기록이다. 다시
         // 착수할 사람이 같은 길을 처음부터 되짚지 않게 남긴다(당시 구현: 닫힌 PR #2363).
+        //
+        // **2026-09-23: ②의 «재측정» 을 실제로 해서 이 보류를 뒤집었다** — 아래 세 항목은 그때의 기록으로
+        // 남기고, 결론만 바뀌었다(`docs/font-strategy.md` "face 재사용 캐시를 다시 열었다"가 단일 출처).
+        // 실제 세션 프로파일에서 네이티브 셰이핑의 93 % 가 폰트 생성·해제였고(CTLine 은 3.9 %), 활성 32 세션
+        // A/B 8 쌍 전부에서 앱 CPU 중앙값 −22.5 % 였다. ③의 소유권 경고는 캐시가 face 넷만 알고 커서 슬롯의
+        // «빌려 쓴다» 규약과 해제 루프를 건드리지 않는 설계로 피했다.
         //
         // 1. **이건 메모리 문제가 아니다.** 한때 "프레임마다 새 CTFont를 만들면 CoreText 전역 캐시가 상한
         //    없이 자란다"고 진단했으나, 격리 하네스로 기각됐다 — 참조만 맞으면 인스턴스 churn 자체는
@@ -1656,24 +1828,40 @@ void maru_macos_coretext_shape_draw_list(
         //    over-release로 죽은 이력이 있다(headless tick 테스트 signal TRAP).
         //
         // 판단 근거의 단일 출처는 docs/font-strategy.md "셰이핑 경로의 메모리 소유권"이다.
-        if (fallback_families != NULL && fallback_families_len > 0) {
-            CTFontRef with_cascade = maru_apply_cascade_list(
-                primary_font, fallback_families, fallback_families_len, requested_font_size);
-            if (with_cascade != NULL) {
+        //
+        // **2026-09-23: 위 «접은 기록» 의 ①은 그대로 두고 ②를 실측해 다시 열었다.** 실제 세션 프로파일에서
+        // 네이티브 셰이핑의 93 % 가 폰트 생성·해제였다(cascade 39 % + styled face 33 % + CFRelease 17 %,
+        // 정작 CTLine 은 3.9 %). ③의 소유권 경고는 **설계로 피한다** — 캐시는 face 넷(0..3)만 들고 호출자에게는
+        // `CFRetain` 한 사본을 준다. 커서 슬롯(4~7)의 «빌려 쓴다» 규약과 아래 해제 루프는 한 줄도 바뀌지 않는다.
+        CFStringRef primary_name = NULL;
+        CFDictionaryRef attributes = NULL;
+        if (fontset_hit) {
+            primary_font = cached_fonts[0]; // 소유권을 지역 변수로 옮긴다 — 끝에서 한 번만 놓는다
+            primary_name = cached_names[0];
+            attributes = cached_attributes;
+            result->requested_font_matched = cached_matched;
+            cached_fonts[0] = NULL;
+            cached_names[0] = NULL;
+            cached_attributes = NULL;
+        } else {
+            if (fallback_families != NULL && fallback_families_len > 0) {
+                CTFontRef with_cascade = maru_apply_cascade_list(
+                    primary_font, fallback_families, fallback_families_len, requested_font_size);
+                if (with_cascade != NULL) {
+                    CFRelease(primary_font);
+                    primary_font = with_cascade;
+                }
+            }
+            primary_name = CTFontCopyPostScriptName(primary_font);
+            attributes = maru_create_shape_attributes(primary_font, ligatures_enabled != 0);
+            if (attributes == NULL) {
+                if (primary_name != NULL) {
+                    CFRelease(primary_name);
+                }
                 CFRelease(primary_font);
-                primary_font = with_cascade;
+                result->status = 3;
+                return;
             }
-        }
-
-        CFStringRef primary_name = CTFontCopyPostScriptName(primary_font);
-        CFDictionaryRef attributes = maru_create_shape_attributes(primary_font, ligatures_enabled != 0);
-        if (attributes == NULL) {
-            if (primary_name != NULL) {
-                CFRelease(primary_name);
-            }
-            CFRelease(primary_font);
-            result->status = 3;
-            return;
         }
 
         // 스타일 face 캐시(F2-3): index = (bold?1:0)|(italic?2:0). 0=regular(primary), 1=bold, 2=italic, 3=bold-italic.
@@ -1686,14 +1874,20 @@ void maru_macos_coretext_shape_draw_list(
         // (실측: headless tick 테스트가 signal TRAP — 로컬 CI 게이트가 잡았다). 커서 run 을 처음 만날 때
         // face 슬롯의 폰트를 빌리고 이름만 retain 해 채운다.
         maru_shape_diag_font_ns = maru_shape_diag_now() - diag_t_font0;
-        const uint64_t cache_signature = maru_shape_cache_config_signature(
-            requested_font_family, requested_font_family_len, requested_font_size,
-            fallback_families, fallback_families_len, bold_family, bold_family_len,
-            italic_family, italic_family_len, ligatures_enabled);
         CTFontRef styled_fonts[8] = { primary_font, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
         CFStringRef styled_names[8] = { primary_name, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
         CFDictionaryRef styled_attrs[8] = { attributes, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
         bool styled_attempted[8] = { true, false, false, false, false, false, false, false };
+        // 캐시가 준 styled face(1..3)를 미리 꽂는다. `styled_attempted` 는 false 로 두어 **run 속성은 평소대로**
+        // 그 자리에서 만들고(합자 유무가 슬롯마다 다르다) 폰트 생성만 건너뛴다. 소유권은 지역 변수 몫이라
+        // 아래 해제 루프가 그대로 한 번씩 놓는다.
+        for (int face = 1; face < MARU_FONTSET_FACES; face++) {
+            if (cached_fonts[face] == NULL) continue;
+            styled_fonts[face] = cached_fonts[face];
+            styled_names[face] = cached_names[face];
+            cached_fonts[face] = NULL;
+            cached_names[face] = NULL;
+        }
 
         // [run 셰이핑] 예전에는 **셀 하나마다** CTLine을 만들었다. CTLine 생성은 호출당 고정비(속성 조회·
         // typesetter 생성·폰트 캐스케이드 준비)가 커서, 글리프 수가 같아도 호출 수가 시간을 지배한다 —
@@ -2012,6 +2206,12 @@ void maru_macos_coretext_shape_draw_list(
                 : 6;
         }
 
+        // 이번 호출이 세운 face 를 캐시에 남긴다(캐시는 자기 retain 을 든다 — 아래 해제 루프는 그대로 돈다).
+        {
+            CTFontRef store_fonts[MARU_FONTSET_FACES] = { primary_font, styled_fonts[1], styled_fonts[2], styled_fonts[3] };
+            CFStringRef store_names[MARU_FONTSET_FACES] = { primary_name, styled_names[1], styled_names[2], styled_names[3] };
+            maru_fontset_store(cache_signature, store_fonts, store_names, attributes, result->requested_font_matched);
+        }
         CFRelease(attributes);
         // styled face 캐시(1~3) 정리 — index 0(regular)은 primary_font/primary_name/attributes라 아래에서 따로 푼다(F2-3).
         // 슬롯 8 개를 정리한다. **커서 슬롯(4~7)은 face 폰트를 face 슬롯과 공유**하므로 폰트는 face

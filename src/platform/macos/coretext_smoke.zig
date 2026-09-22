@@ -12,6 +12,9 @@ const coretext_bridge = @import("coretext_smoke_bridge.zig");
 // shape/raster native bridge 시그니처는 coretext_smoke_bridge.zig가 단일 출처로 소유한다.
 // Metal smoke와 같은 선언을 공유해 ABI 드리프트를 한 곳에서만 관리한다.
 const maru_macos_coretext_shape_draw_list = coretext_bridge.maru_macos_coretext_shape_draw_list;
+const maru_macos_coretext_shape_font_cache_stats = coretext_bridge.maru_macos_coretext_shape_font_cache_stats;
+const maru_macos_coretext_shape_font_cache_reset = coretext_bridge.maru_macos_coretext_shape_font_cache_reset;
+const maru_macos_coretext_shape_font_cache_set_enabled = coretext_bridge.maru_macos_coretext_shape_font_cache_set_enabled;
 const maru_macos_coretext_smoke_rasterize_glyph = coretext_bridge.maru_macos_coretext_smoke_rasterize_glyph;
 
 const artifact_dir = "zig-out/maru-macos-coretext-smoke";
@@ -1196,6 +1199,120 @@ test "macOS CoreText smoke summary reports shaping atlas and raster boundary" {
     try std.testing.expect(std.mem.indexOf(u8, summary, "drawlist_renderer_rasterizer=coretext_glyph_rasterizer\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "primary_font_name=Menlo-Regular\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "first_fallback_font_name=AppleColorEmoji\n") != null);
+}
+
+test "FC1 폰트 집합 캐시: 같은 설정의 두 번째 셰이핑은 폰트를 다시 만들지 않고 결과도 같다" {
+    // **왜**: 실제 세션 프로파일(2026-09-23, 활성 세션 · Claude Code 가 42 Hz 로 다시 그림)에서 네이티브
+    // 셰이핑 시간의 **93 %** 가 글자 모양이 아니라 **폰트 객체를 매 호출 다시 만들고 버리는 일**이었다
+    // (cascade 39 % + styled face 33 % + CFRelease 17 %, CTLine 은 3.9 %). 셰이핑 «결과» 캐시는 이미 있었지만
+    // 그것이 맞든 말든 폰트는 새로 만들었다. 이 판정자는 두 가지를 함께 고정한다 —
+    //   ① 같은 설정의 두 번째 호출은 **캐시 적중**(폰트 생성 0),
+    //   ② 적중 경로의 **셰이핑 결과가 미적중 경로와 글리프까지 같다**(캐시가 그림을 바꾸지 않는다).
+    // ②가 없으면 캐시가 엉뚱한 face 를 돌려줘도 ①은 초록이다.
+    const allocator = std.testing.allocator;
+    const appearance = try config.resolveAppearance(.{});
+
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 32, .rows = 1 });
+    defer core.deinit();
+    core.clearDirty();
+    // **굵은 글자를 반드시 넣는다**(적대적 검증: 이게 없으면 캐시가 face 1 을 안 만들어, «primary 자리에
+    // bold 를 돌려준다» 는 돌연변이가 아무것도 바꾸지 않고 살아남았다). SGR 1 로 face 1 을 강제한다.
+    try core.write("\x1b[1mBold\x1b[0m Maru 가나 fi");
+
+    var draw_list = try renderer.buildDrawList(allocator, core.snapshot());
+    defer draw_list.deinit(allocator);
+    var font_registry = renderer.FontIdentityRegistry.init(allocator);
+    defer font_registry.deinit();
+    const shaper = coretext_shaper.CoreTextDrawListShaper{
+        .appearance = appearance,
+        .shape_draw_list = maru_macos_coretext_shape_draw_list,
+    };
+
+    maru_macos_coretext_shape_font_cache_reset();
+    var hits0: u64 = 0;
+    var misses0: u64 = 0;
+    var faces0: u64 = 0;
+    maru_macos_coretext_shape_font_cache_stats(&hits0, &misses0, &faces0);
+    try std.testing.expectEqual(@as(u64, 0), hits0);
+    try std.testing.expectEqual(@as(u64, 0), misses0);
+
+    var first = try shaper.shape(allocator, draw_list, &font_registry);
+    defer first.deinit(allocator);
+    var hits1: u64 = 0;
+    var misses1: u64 = 0;
+    var faces1: u64 = 0;
+    maru_macos_coretext_shape_font_cache_stats(&hits1, &misses1, &faces1);
+    try std.testing.expectEqual(@as(u64, 0), hits1); // 첫 호출은 미적중이어야 한다(캐시를 비웠으므로)
+    try std.testing.expect(misses1 >= 1);
+
+    var second = try shaper.shape(allocator, draw_list, &font_registry);
+    defer second.deinit(allocator);
+    var hits2: u64 = 0;
+    var misses2: u64 = 0;
+    var faces2: u64 = 0;
+    maru_macos_coretext_shape_font_cache_stats(&hits2, &misses2, &faces2);
+    // **적중한 항목이 face 를 둘 이상 들고 있어야 한다**(regular + bold). 안 그러면 «캐시가 엉뚱한 face 를
+    // 돌려준다» 는 돌연변이가 아무것도 안 바꿔 아래 ②가 공허하다(적대적 검증에서 실제로 살아남았다).
+    if (faces2 < 2) {
+        std.debug.print("캐시 항목의 face 가 {d} 개뿐이다 — bold 가 안 잡혔다\n", .{faces2});
+        return error.TestUnexpectedResult;
+    }
+    // ① 두 번째는 적중이고, 미적중은 늘지 않는다 — 폰트를 다시 만들지 않았다는 뜻이다.
+    try std.testing.expect(hits2 > hits1);
+    try std.testing.expectEqual(misses1, misses2);
+
+    // ② 적중 경로의 결과가 미적중 경로와 같다(레코드 전체).
+    //
+    // **돌연변이 기록**(적대적 검증 2026-09-23): ①lookup 무력화 → 빨강, ②store 무력화 → 빨강,
+    // ③styled face 만 캐시 제외 → 빨강(`faces` 단언이 잡는다). 반면 «캐시가 primary 자리에 bold 를
+    // 돌려준다» 는 **살아남는다** — 그 자리에서 실제로 CTLine 을 태우는 것은 `primary_attributes`(폰트를
+    // 품은 속성 사전)이고 `fonts[0]` 포인터는 styled face 를 파생할 때만 쓰이기 때문이다. 판정자의 구멍이
+    // 아니라 코드의 구조라 여기 적어 둔다 — 다음 사람이 같은 돌연변이를 만들고 «판정자가 약하다» 고
+    // 오해하지 않게.
+    //    **face 가 둘 이상인지 먼저 확인한다** — regular 만 나오면 «primary 자리에 bold 를 돌려준다» 같은
+    //    돌연변이가 아무것도 안 바꿔 이 절이 공허해진다(적대적 검증에서 실제로 살아남았다).
+    var distinct_fonts: usize = 0;
+    var seen: [8]u32 = @splat(std.math.maxInt(u32));
+    for (first.runs.glyphs) |glyph| {
+        var known = false;
+        for (seen[0..distinct_fonts]) |id| {
+            if (id == glyph.font_id) known = true;
+        }
+        if (!known and distinct_fonts < seen.len) {
+            seen[distinct_fonts] = glyph.font_id;
+            distinct_fonts += 1;
+        }
+    }
+    if (distinct_fonts < 2) {
+        std.debug.print("face 가 {d} 종뿐이다 — bold 가 안 잡혔으면 이 판정자는 공허하다\n", .{distinct_fonts});
+        return error.TestUnexpectedResult;
+    }
+    try std.testing.expectEqual(first.runs.glyphs.len, second.runs.glyphs.len);
+    try std.testing.expect(first.runs.glyphs.len != 0);
+    // **레코드 전체를 견준다.** glyph_id·font_id 만 보면 같은 패밀리의 regular/bold 는 ASCII 글리프 id 가
+    // 같고 이름도 그대로라 «엉뚱한 face 를 돌려준다» 가 통과했다(적대적 검증 2회차). 래스터 크기까지
+    // 포함한 레코드 동등성이 그 바꿔치기를 잡는다.
+    for (first.runs.glyphs, second.runs.glyphs) |a, b| {
+        if (!std.meta.eql(a, b)) {
+            std.debug.print("적중 경로가 다른 레코드를 냈다: {any} vs {any}\n", .{ a, b });
+            return error.TestUnexpectedResult;
+        }
+    }
+
+    // ③ 캐시를 끄면 다시 미적중 경로다 — «캐시가 실제로 그 일을 한다» 의 양성 대조.
+    maru_macos_coretext_shape_font_cache_set_enabled(0);
+    defer maru_macos_coretext_shape_font_cache_set_enabled(1);
+    var third = try shaper.shape(allocator, draw_list, &font_registry);
+    defer third.deinit(allocator);
+    var hits3: u64 = 0;
+    var misses3: u64 = 0;
+    var faces3: u64 = 0;
+    maru_macos_coretext_shape_font_cache_stats(&hits3, &misses3, &faces3);
+    try std.testing.expectEqual(hits2, hits3);
+    try std.testing.expectEqual(first.runs.glyphs.len, third.runs.glyphs.len);
+    for (first.runs.glyphs, third.runs.glyphs) |a, c| {
+        try std.testing.expect(std.meta.eql(a, c));
+    }
 }
 
 test "CoreText draw-list shaper normalizes synthesized box glyph to codepoint cache key" {

@@ -91,8 +91,10 @@ test "CR3c C1 경계는 Client replacement와 RemoteGeneration 승격의 단일 
     // 스텝 선언을 **구조로** 센다 — 문자열은 설명문·인자에 적힌 같은 이름도 세고,
     // 더 긴 이름의 앞부분에도 걸린다.
     try std.testing.expectEqual(@as(usize, 1), graph.countSteps("test-session-host-cr3c-c1"));
-    try std.testing.expectEqual(@as(usize, 1), count(build, ".filters = &.{\"CR3c C1은\"}"));
-    try std.testing.expectEqual(@as(usize, 1), count(build, ".filters = &.{\"CR3c C1 경계는\"}"));
+    // 필터도 **구조로** 센다 — 문자열은 `.filters = &.{ "A", "B" }` 처럼 여럿을 묶은 형태를
+    // 놓치고 공백 한 칸에도 흔들린다. 실측으로 지금 두 값은 같다(각 1).
+    try std.testing.expectEqual(@as(usize, 1), graph.countRegistrationsWithFilter("CR3c C1은"));
+    try std.testing.expectEqual(@as(usize, 1), graph.countRegistrationsWithFilter("CR3c C1 경계는"));
 
     for ([_][]const u8{
         "publishUnavailableAfterAttachmentRetirement(",

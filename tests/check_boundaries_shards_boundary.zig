@@ -4,6 +4,9 @@
 //! 빼거나 옵션 없는 로컬 실행을 부분 실행으로 바꾸면 여기서 걸린다(실측 2026-09-06: 직렬 810초가 PR 임계 경로였다).
 const std = @import("std");
 const build_source = @import("support/build_source.zig");
+/// 빌드 등록을 **문자열이 아니라 구조로** 본다. 모듈 배선이 필요 없다 — 이 파일은 모듈 루트가
+/// 아니라 상대 경로로 `tests/support/` 를 볼 수 있다(`tests/boundary/` 아래는 그게 안 된다).
+const build_graph = @import("support/build_graph.zig");
 
 fn count(haystack: []const u8, needle: []const u8) usize {
     var total: usize = 0;
@@ -35,8 +38,12 @@ test "check-boundaries runs as four index shards behind one aggregate check that
     try std.testing.expectEqual(@as(usize, 1), count(build, "selects no steps"));
     try std.testing.expectEqual(@as(usize, 1), count(build, "\"check-boundaries shard {d}/{d}: {d} of {d} steps\\n\""));
     // 등록은 여전히 boundary_step 하나에 매달린다 — 샤드 스텝에 직접 등록하는 자리는 없다.
-    try std.testing.expectEqual(@as(usize, 0), count(build, "sharded.dependOn(&run_"));
-    try std.testing.expect(count(build, "boundary_step.dependOn(&run_") >= 100);
+    var graph = try build_graph.parse(allocator);
+    defer graph.deinit();
+    // 매달기도 **구조로** 센다 — 접두 매칭을 문자열로 하면 여는 괄호 뒤 줄바꿈이 든 자리를
+    // 놓친다(이 저장소에 실제로 하나 있다: 문자열 203 · 뷰 204).
+    try std.testing.expectEqual(@as(usize, 0), graph.countDependenciesWithPrefix("sharded", "run_"));
+    try std.testing.expect(graph.countDependenciesWithPrefix("boundary_step", "run_") >= 100);
 
     // 워크플로: 샤드 매트릭스 넷(fail-fast 끔), 샤드마다 -Dboundary-shard, 집계 잡의 이름과 합 검사.
     try std.testing.expectEqual(@as(usize, 1), count(workflow, "  check-boundaries-shard:\n"));

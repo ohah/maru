@@ -234,6 +234,20 @@ pub const Graph = struct {
         return false;
     }
 
+    /// 그 변수에 **그 인자가 몇 번** 붙었나.
+    ///
+    /// `hasArg` 가 아니라 이것을 쓰는 이유는 `countSteps` 와 같다 — 옮겨 오는 문자열 판정이
+    /// `count(build, "run_x.addArg(\"--maru-expect-tests=2\")") == 1` 이었고, 그 `== 1` 은
+    /// 「붙었다」뿐 아니라 **한 번만 붙었다**도 지키고 있었다.
+    pub fn countArgs(self: Graph, var_name: []const u8, arg: []const u8) usize {
+        const v = self.varCalls(var_name) orelse return 0;
+        var n: usize = 0;
+        for (v.args) |a| if (std.mem.eql(u8, a, arg)) {
+            n += 1;
+        };
+        return n;
+    }
+
     pub fn dependsOn(self: Graph, var_name: []const u8, target: []const u8) bool {
         const v = self.varCalls(var_name) orelse return false;
         for (v.depends_on) |d| if (std.mem.eql(u8, d, target)) return true;

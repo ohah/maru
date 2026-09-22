@@ -83,5 +83,6 @@ test "U5 restore postcommit fault vocabulary is closed and absent from the produ
     // 스텝 선언을 **구조로** 센다 — 문자열은 설명문·인자에 적힌 같은 이름도 센다.
     try std.testing.expectEqual(@as(usize, 1), graph.countSteps("test-session-host-upgrade-restore-postcommit-failure-matrix"));
     try std.testing.expect(count(build, "run_session_host_restore_postcommit_tests.addArg(\"--maru-expect-tests=2\")") == 1);
-    try std.testing.expect(count(build, "session_host_restore_postcommit_step.dependOn(&run_session_host_restore_postcommit_tests.step)") == 1);
+    // 매달기도 **구조로** 본다 — 문자열은 `.step` 이 붙었는지·줄바꿈이 들었는지에 흔들린다.
+    try std.testing.expect(graph.dependsOn("session_host_restore_postcommit_step", "run_session_host_restore_postcommit_tests"));
 }

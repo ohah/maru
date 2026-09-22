@@ -2,6 +2,9 @@ const std = @import("std");
 /// 스캐너가 보는 walker 경로를 POSIX 구분자로 정규화한다(정본: tests/support/posix_walk.zig).
 const posixWalk = @import("support/posix_walk.zig").posixWalk;
 const build_source = @import("support/build_source.zig");
+/// 빌드 등록을 **문자열이 아니라 구조로** 본다. 모듈 배선이 필요 없다 — 이 파일은 모듈 루트가
+/// 아니라 상대 경로로 `tests/support/` 를 볼 수 있다(`tests/boundary/` 아래는 그게 안 된다).
+const build_graph = @import("support/build_graph.zig");
 
 const max_source_bytes = 16 * 1024 * 1024;
 
@@ -863,14 +866,14 @@ test "CR2e-e3a1 경계는 candidate base resident ledger와 final zero를 고정
         "const session_host_cr2e_e3a1_step = b.step(",
     ));
     try std.testing.expectEqual(@as(usize, 2), count(build_gate, ".filters = &.{\"CR2e-e3a1\"}"));
-    try std.testing.expectEqual(@as(usize, 1), count(
-        build_gate,
-        "run_cr2e_e3a1_tests.addArg(\"--maru-expect-tests=2\")",
-    ));
-    try std.testing.expectEqual(@as(usize, 1), count(
-        build_gate,
-        "run_cr2e_e3a1_boundary_tests.addArg(\"--maru-expect-tests=1\")",
-    ));
+    var graph = try build_graph.parse(allocator);
+    defer graph.deinit();
+    // 실행 인자도 **구조로** 센다 — 문자열은 호출이 줄바꿈되거나 receiver 이름이
+    // 바뀌면 죽고, 그 죽음이 「인자가 없다」와 구분되지 않는다.
+    try std.testing.expectEqual(@as(usize, 1), graph.countArgs("run_cr2e_e3a1_tests", "--maru-expect-tests=2"));
+    // 실행 인자도 **구조로** 센다 — 문자열은 호출이 줄바꿈되거나 receiver 이름이
+    // 바뀌면 죽고, 그 죽음이 「인자가 없다」와 구분되지 않는다.
+    try std.testing.expectEqual(@as(usize, 1), graph.countArgs("run_cr2e_e3a1_boundary_tests", "--maru-expect-tests=1"));
 }
 
 test "CR2e-e3a2 경계는 fixed resident budget과 ReleaseFast child RSS artifact를 고정한다" {

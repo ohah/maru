@@ -1369,7 +1369,7 @@ fn emitInlays(inlays: []const Inlay, next: *usize, at: usize, col: *usize, range
         if (in.at != at) continue; // 지나간 자리(seek 뒤·중복 방어) — 폭도 안 센다
         const shown = in.text;
         if (col.* >= range.stop()) {
-            col.* += shown.len; // 등가(적대적 A10 — 호출자는 여기서 곧 멈춘다); 열 규칙의 뜻으로 둔다
+            // col.* += shown.len; // 등가(적대적 A10 — 호출자는 여기서 곧 멈춘다); 열 규칙의 뜻으로 둔다
             continue;
         }
         const from = if (col.* < range.start) @min(shown.len, range.start - col.*) else 0;
@@ -1427,6 +1427,10 @@ test "INL2 가상 텍스트 — 가로로 밀린 창·좁은 창에서 힌트는
     try testing.expectEqualStrings("ec<i32> = 1;", r1.text);
     try testing.expectEqual(@as(u32, 8), c1.items[0].start_col);
     try testing.expectEqual(@as(u32, 15), c1.items[0].end_col);
+    // 힌트 줄에는 seek 를 **안 쓴다**(체크포인트는 문서 열이라 힌트 폭을 모른다 — 적대적 A8): byte 6·열 6 의 seek 를 줘도 같은 답.
+    var c1s: InlayColsBuf = .{};
+    const r1s = expandLine("let v = 1;", 4, &out, .{ .start = 8, .count = test_max_cols, .seek = .{ .byte = 6, .col = 6 } }, &inl, &c1s);
+    try testing.expectEqualStrings("ec<i32> = 1;", r1s.text);
     // 9열 창: `let v: Ve` 까지 — 힌트가 오른쪽에서 잘린다.
     var c2: InlayColsBuf = .{};
     const r2 = expandLine("let v = 1;", 4, &out, .{ .start = 0, .count = 9 }, &inl, &c2);

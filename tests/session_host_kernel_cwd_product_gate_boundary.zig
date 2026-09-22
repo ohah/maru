@@ -1,4 +1,7 @@
-//! Session-host kernel cwd K3 actual-product parity and consumer-boundary inventory.
+//! **제품 게이트** — parity 를 «실제 daemon» 으로 재는지(`testing_api`·`test_only`·`writeArtifact`
+//! 가 아닌지), 그 게이트가 빌드에 제대로 매달렸는지, 커널 축이 소비자 재고에 남아 있는지.
+//!
+//! 계획 문서의 단계 라벨로는 **K3**(`docs/plans/session-host-kernel-cwd.md`).
 
 const std = @import("std");
 const build_source = @import("support/build_source.zig");

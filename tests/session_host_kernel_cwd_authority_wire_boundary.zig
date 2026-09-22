@@ -1,4 +1,7 @@
-//! Session-host kernel cwd parity K1 ownership boundary.
+//! **cwd 의 권위와 배선** — host 가 observation 에 넣은 paired cwd 가 단독 출처이고,
+//! GUI 쪽은 제 손으로 프로세스 cwd syscall 을 부르지 않는다.
+//!
+//! 계획 문서의 단계 라벨로는 **K1**(`docs/plans/session-host-kernel-cwd.md`).
 
 const std = @import("std");
 

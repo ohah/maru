@@ -5980,7 +5980,7 @@ pub fn build(b: *std.Build) void {
     }
     const session_host_kernel_cwd_k1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/session_host_kernel_cwd_k1_boundary.zig"),
+            .root_source_file = b.path("tests/session_host_kernel_cwd_authority_wire_boundary.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -6031,7 +6031,7 @@ pub fn build(b: *std.Build) void {
     }
     const session_host_kernel_cwd_k2_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/session_host_kernel_cwd_k2_boundary.zig"),
+            .root_source_file = b.path("tests/session_host_kernel_cwd_host_sampler_boundary.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -6050,7 +6050,7 @@ pub fn build(b: *std.Build) void {
     session_host_kernel_cwd_k3_step.dependOn(session_host_kernel_cwd_k2_step);
     const session_host_kernel_cwd_k3_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/session_host_kernel_cwd_k3_boundary.zig"),
+            .root_source_file = b.path("tests/session_host_kernel_cwd_product_gate_boundary.zig"),
             .target = target,
             .optimize = optimize,
         }),

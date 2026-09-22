@@ -13617,6 +13617,14 @@ test "DHL3 같은 낱말 강조 — caret 이 낱말에 멈추면 묻고 응답 
     try testing.expectEqual(@as(u32, 5), rows[0][0].len);
     try testing.expectEqual(@as(usize, 1), rows[1].len);
     try testing.expectEqual(@as(u32, 11), rows[1][0].start);
+    // ⑶-b **caret 이 낱말 끝 바로 뒤여도 그 낱말이다**(타이핑 뒤의 보통 자리 — 실서버 캡처가 잡은 갈래).
+    {
+        const after = first + 5; // `alpha|`
+        term.rt.editor_selection = .{ .anchor_start = after, .anchor_end = after, .focus = after };
+        const w = highlight_client.wordAtCaret(term) orelse return error.NoWordAtCaretEnd;
+        try testing.expectEqual(@as(u32, @intCast(first)), w.start);
+        try testing.expectEqual(@as(usize, 2), highlight_client.spans(term).len); // 같은 낱말이라 들고 있던 답 그대로
+    }
     // ⑷ **선택이 생기면** 묻지도 그리지도 않는다(그 칸은 선택이 이긴다).
     term.rt.editor_selection = .{ .anchor_start = first, .anchor_end = first + 5, .focus = first + 5 };
     try testing.expect(highlight_client.wordAtCaret(term) == null);

@@ -52,10 +52,19 @@ pub fn wordAtCaret(term: *Term) ?struct { start: u32, end: u32 } {
     const sel = term.rt.editor_selection orelse return null;
     if (sel.anchor_start != sel.anchor_end) return null; // 선택이 있다 — 그 칸은 선택이 이긴다
     if (term.rt.editor_extra_selections.len > 0) return null; // 멀티커서도 같은 이유(§9.1)
-    const w = maru.session.editor.selection.wordRangeAt(doc.file.content, @min(sel.focus, doc.file.content.len));
+    const content = doc.file.content;
+    const focus = @min(sel.focus, content.len);
+    // **caret 이 낱말에 «닿아» 있으면 그 낱말이다.** 타이핑·이동 뒤 caret 은 보통 낱말 **끝 바로 뒤**에 선다(`scale|`) — 그 자리에서
+    // 강조가 꺼지면 「멈추면 뜬다」가 사실상 성립하지 않는다(실서버 캡처가 잡았다). 뒤를 먼저 보고, 아니면 앞 글자를 본다.
+    const probe: usize = if (focus < content.len and maru.session.editor.selection.isWordByte(content[focus]))
+        focus
+    else if (focus > 0 and maru.session.editor.selection.isWordByte(content[focus - 1]))
+        focus - 1
+    else
+        return null;
+    const w = maru.session.editor.selection.wordRangeAt(content, probe);
     if (w.hi <= w.lo) return null;
-    // 낱말 글자로 이루어졌을 때만 — 공백·구두점 덩어리는 심볼이 아니다.
-    if (!maru.session.editor.selection.isWordByte(doc.file.content[w.lo])) return null;
+    if (!maru.session.editor.selection.isWordByte(content[w.lo])) return null;
     return .{ .start = @intCast(w.lo), .end = @intCast(w.hi) };
 }
 

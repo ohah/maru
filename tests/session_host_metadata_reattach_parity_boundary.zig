@@ -2,6 +2,9 @@
 
 const std = @import("std");
 const build_source = @import("support/build_source.zig");
+/// 빌드 등록을 **문자열이 아니라 구조로** 본다. 모듈 배선이 필요 없다 — 이 파일은 모듈 루트가
+/// 아니라 상대 경로로 `tests/support/` 를 볼 수 있다(`tests/boundary/` 아래는 그게 안 된다).
+const build_graph = @import("support/build_graph.zig");
 
 fn read(allocator: std.mem.Allocator, path: []const u8, limit: usize) ![]u8 {
     return std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(limit));
@@ -37,7 +40,11 @@ test "P3-e4d-1 metadata parity uses actual daemon runtimes and no test wire" {
     const body = tail[0..end];
 
     try std.testing.expectEqual(@as(usize, 1), count(runtime, marker));
-    try std.testing.expectEqual(@as(usize, 1), count(build, "test-session-host-metadata-reattach-parity"));
+    var graph = try build_graph.parse(allocator);
+    defer graph.deinit();
+    // 스텝 선언을 **구조로** 센다 — 문자열은 설명문·인자에 적힌 같은 이름도 세고,
+    // 더 긴 이름의 앞부분에도 걸린다.
+    try std.testing.expectEqual(@as(usize, 1), graph.countSteps("test-session-host-metadata-reattach-parity"));
     try std.testing.expectEqual(@as(usize, 1), count(build, "P3-e4d-1 actual metadata events stay isolated"));
     try std.testing.expectEqual(@as(usize, 1), count(ssot, "P3-e4d-1은 multi-runtime event 격리"));
     try std.testing.expectEqual(@as(usize, 1), count(matrix, "P3-e4d-1 metadata isolation·reattach parity"));

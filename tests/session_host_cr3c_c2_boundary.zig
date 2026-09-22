@@ -1,6 +1,9 @@
 const std = @import("std");
 const posixWalk = @import("support/posix_walk.zig").posixWalk;
 const build_source = @import("support/build_source.zig");
+/// 빌드 등록을 **문자열이 아니라 구조로** 본다. 모듈 배선이 필요 없다 — 이 파일은 모듈 루트가
+/// 아니라 상대 경로로 `tests/support/` 를 볼 수 있다(`tests/boundary/` 아래는 그게 안 된다).
+const build_graph = @import("support/build_graph.zig");
 
 fn count(haystack: []const u8, needle: []const u8) usize {
     var total: usize = 0;
@@ -157,7 +160,11 @@ test "CR3c C2 경계는 matching RemoteGeneration 뒤 retired Client 회수만 �
         "test \"CR3c C1은",
     );
     try std.testing.expectEqual(@as(usize, 1), count(c2_fixture, "try executor.completeJob(&owner,"));
-    try std.testing.expectEqual(@as(usize, 1), count(build, "\"test-session-host-cr3c-c2\""));
+    var graph = try build_graph.parse(allocator);
+    defer graph.deinit();
+    // 스텝 선언을 **구조로** 센다 — 문자열은 설명문·인자에 적힌 같은 이름도 세고,
+    // 더 긴 이름의 앞부분에도 걸린다.
+    try std.testing.expectEqual(@as(usize, 1), graph.countSteps("test-session-host-cr3c-c2"));
     try std.testing.expectEqual(@as(usize, 1), count(build, ".filters = &.{\"CR3c C2는\"}"));
     try std.testing.expectEqual(@as(usize, 1), count(build, ".filters = &.{\"CR3c C2 경계는\"}"));
     try std.testing.expectEqual(@as(usize, 1), count(build, "CR3c C2 ordered RemoteGeneration and retired Client reclaim gates"));

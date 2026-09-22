@@ -3,6 +3,9 @@
 const std = @import("std");
 const posixWalk = @import("support/posix_walk.zig").posixWalk;
 const build_source = @import("support/build_source.zig");
+/// 빌드 등록을 **문자열이 아니라 구조로** 본다. 모듈 배선이 필요 없다 — 이 파일은 모듈 루트가
+/// 아니라 상대 경로로 `tests/support/` 를 볼 수 있다(`tests/boundary/` 아래는 그게 안 된다).
+const build_graph = @import("support/build_graph.zig");
 
 test "CR6e-a1 경계는 stalled peer raw artifact만 열고 자동 reconnect를 배선하지 않는다" {
     const allocator = std.testing.allocator;
@@ -15,7 +18,11 @@ test "CR6e-a1 경계는 stalled peer raw artifact만 열고 자동 reconnect를 
     const app = try read(allocator, "src/platform/macos/app_session.zig");
     defer allocator.free(app);
 
-    try std.testing.expectEqual(@as(usize, 1), count(build, "test-session-host-cr6e-baseline-macos"));
+    var graph = try build_graph.parse(allocator);
+    defer graph.deinit();
+    // 스텝 선언을 **구조로** 센다 — 문자열은 설명문·인자에 적힌 같은 이름도 세고,
+    // 더 긴 이름의 앞부분에도 걸린다.
+    try std.testing.expectEqual(@as(usize, 1), graph.countSteps("test-session-host-cr6e-baseline-macos"));
     try std.testing.expectEqual(@as(usize, 2), count(build, "session-host-cr6e-baseline-macos.json"));
     try std.testing.expectEqual(@as(usize, 2), count(harness, "connectExistingHostUntilObserved"));
     try std.testing.expectEqual(@as(usize, 0), try countProductIdentifiersExcept(
@@ -54,7 +61,11 @@ test "CR6e-a2 경계는 exact AppKit fixture root와 반복 raw artifact만 연�
     const soak = try read(allocator, "tools/perf/session-host-cr6e-soak.sh");
     defer allocator.free(soak);
 
-    try std.testing.expectEqual(@as(usize, 1), count(build, "\"macos-session-host-cr6e-recovery-baseline\""));
+    var graph = try build_graph.parse(allocator);
+    defer graph.deinit();
+    // 스텝 선언을 **구조로** 센다 — 문자열은 설명문·인자에 적힌 같은 이름도 세고,
+    // 더 긴 이름의 앞부분에도 걸린다.
+    try std.testing.expectEqual(@as(usize, 1), graph.countSteps("macos-session-host-cr6e-recovery-baseline"));
     try std.testing.expectEqual(@as(usize, 1), count(build, "MARU_SESSION_HOST_CR6E_RECOVERY_BASELINE_ARTIFACT"));
     // Capture root validation and native-wake handshake root allowlist each name the exact root.
     try std.testing.expectEqual(@as(usize, 2), count(swift, "\"session-host-cr6e-home\""));

@@ -91,7 +91,7 @@ const client_reflection_owners = [_]ClientReflectionOwnerProof{
 const external_digests = @import("external_source_digests.zig");
 /// **`build.zig` 한 파일이 아니라 빌드 소스 전체**를 읽는다 — 등록이 `build/` 아래로 갈렸다.
 /// 이 파일 안에는 이미 `build_source` 라는 **지역 변수**가 있어 import 는 `_mod` 를 붙여 받는다.
-const build_source_mod = @import("build_source");
+const build_source_mod = build_graph.source;
 /// 빌드 등록을 **문자열이 아니라 구조로** 본다. 문자열 판정은 등록이 다른 파일로 옮겨가거나
 /// 공백 한 칸이 달라져도 죽고, «등록이 아닌 자리»까지 세는 일이 실제로 있었다(아래 §root 참조).
 const build_graph = @import("build_graph");

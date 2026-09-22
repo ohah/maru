@@ -216,7 +216,7 @@ test "모듈 주입을 실제로 담는가 — `&.{…}` 에서 멈춰 468건 �
     // (`shell_gate_ledger`·`wake_latency_budget`·`pinned_language`)이 각자 만들던 모듈을
     // `boundary_scan_modules` 가 대신 준다 — `build_source` 는 그렇게 셋에서 하나가 됐다.
     try std.testing.expectEqual(@as(usize, 5), inline_create);
-    try std.testing.expectEqual(@as(usize, 888), by_var);
+    try std.testing.expectEqual(@as(usize, 889), by_var); // +1: 위 `test-color-scheme-notify` 의 `shutdown_wire_contract_mod`
 
     // 이름과 모듈이 **짝으로** 들어왔는지 확인한다 — 가장 많이 쓰이는 짝으로.
     // 이름만 담던 예전에는 물을 수 없던 질문이다.

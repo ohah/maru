@@ -17,7 +17,7 @@ const std = @import("std");
 /// **`build.zig` 한 파일이 아니라 빌드 소스 전체**를 읽는다 — 등록이 `build/` 아래로 갈렸다.
 /// `tests/boundary/` 는 자기 파일이 모듈 루트라 상대 경로로 `tests/support/` 를 못 봐서,
 /// `build.zig` 가 이 모듈을 주입한다(`imports.zig`·`shell_gate_ledger.zig` 와 같은 형태).
-const build_source = @import("build_source");
+const build_source = @import("build_graph").source;
 
 /// 경계 판정자들이 쓰는 그 읽기다(`imports.zig` 와 같은 형태) — 못 읽으면 조용히 넘어가지 않고
 /// 무엇을 못 읽었는지 찍고 실패한다.

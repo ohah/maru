@@ -1,5 +1,8 @@
 const std = @import("std");
 const build_source = @import("support/build_source.zig");
+/// 빌드 등록을 **문자열이 아니라 구조로** 본다. 모듈 배선이 필요 없다 — 이 파일은 모듈 루트가
+/// 아니라 상대 경로로 `tests/support/` 를 볼 수 있다(`tests/boundary/` 아래는 그게 안 된다).
+const build_graph = @import("support/build_graph.zig");
 
 test "CR6f idle soak is continuous actual-host evidence isolated from user session state" {
     const allocator = std.testing.allocator;
@@ -31,9 +34,8 @@ test "CR6f idle soak is continuous actual-host evidence isolated from user sessi
         "return error.MissingFinalWake",
         "return error.IncompleteCleanup",
     }) |needle| try std.testing.expect(std.mem.indexOf(u8, validator, needle) != null);
-    try std.testing.expect(std.mem.indexOf(
-        u8,
-        build,
-        "test-session-host-cr6f-idle-soak-macos",
-    ) != null);
+    var graph = try build_graph.parse(allocator);
+    defer graph.deinit();
+    // 스텝 선언을 **구조로** 본다 — 문자열은 더 긴 이름의 앞부분에도 걸린다.
+    try std.testing.expect(graph.step("test-session-host-cr6f-idle-soak-macos") != null);
 }

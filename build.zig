@@ -105,7 +105,7 @@ const boundary_scans: []const BoundaryScan = &.{
     // 84개 판정자가 소스 트리를 걷고 스캔한다 — 실행이 시간의 본체라(로컬 Debug 40초 → ReleaseSafe 7초,
     // CI 84초) 안전 검사는 유지한 채 최적화한다. 제품 코드를 컴파일하지 않는 std 전용 판정자라 모드가 검사
     // 의미를 바꾸지 않는다(빌드 모드로 분기하는 코드 없음, 실측 2026-09-06).
-    .{ .root = "tests/boundary/imports.zig", .deps = &.{ "build_source", "build_graph" }, .optimize = .ReleaseSafe },
+    .{ .root = "tests/boundary/imports.zig", .deps = &.{"build_graph"}, .optimize = .ReleaseSafe },
 
     // chrome 셀 텍스트의 grapheme cluster 규율(CG1) — 셀을 만드는 함수가 문자열을 codepoint 단위로 디코드하면
     // NFD가 자모로 흩어진다(docs/grapheme-clustering.md §3.1a). import 경계와 같은 결의 소스 스캔이라 같은 step에 건다.
@@ -178,7 +178,7 @@ const boundary_scans: []const BoundaryScan = &.{
 
     // 기본 `test` 그래프에 셸 단계가 **조용히** 늘지 않는가. 늘면 그 스크립트가 안 도는 호스트에서
     // 게이트가 통째로 빨개지고, 그 잡음에 진짜 실패가 묻힌다(§2m.111 — 실제로 22 커밋 동안 그랬다).
-    .{ .root = "tests/boundary/shell_gate_ledger.zig", .deps = &.{"build_source"} },
+    .{ .root = "tests/boundary/shell_gate_ledger.zig", .deps = &.{"build_graph"} },
 
     // 머지 충돌 마커가 커밋되지 않는가. 코드였다면 `zig build` 가 즉시 잡지만(문법 오류), 문서·스크립트는
     // 깨져도 조용하다 — 실제로 `docs/file-explorer.md` 에 하나가 커밋된 채 남아 있었다.
@@ -188,7 +188,7 @@ const boundary_scans: []const BoundaryScan = &.{
     // validator·아래 awk 검증에 각자 적혀 있는데, validator 는 독립 실행 파일이라 import 를 못 하고
     // awk 는 셸 문자열이라 상수를 못 참조한다 — **컴파일러가 못 잡는 자리**다. 셋이 갈리면 "어느
     // 게이트는 통과하고 어느 게이트는 죽는" 상태가 된다.
-    .{ .root = "tests/boundary/wake_latency_budget.zig", .deps = &.{"build_source"} },
+    .{ .root = "tests/boundary/wake_latency_budget.zig", .deps = &.{"build_graph"} },
 
     // i18n 3차 방어: 표에 **아무도 안 쓰는 키**가 남지 않는가. 1차(파라미터 타입)·2차(리터럴 개수)는
     // "화면 문자열이 키를 거치는가"를 보지만, 되돌린 작업의 잔해로 남은 키는 둘 다 통과한다 — 실제로
@@ -5170,26 +5170,37 @@ pub fn build(b: *std.Build) void {
     const replay_step = b.step("test-replay", "Replay committed trace fixtures against golden screens (MARU_UPDATE_GOLDEN=1 to refresh)");
     replay_step.dependOn(&run_replay_fixture_tests.step);
 
-    // 「빌드 소스」를 보는 두 얼굴 — 문자열(`build_source`)과 구조(`build_graph`).
-    // **모듈은 하나씩만 만든다**: 같은 파일이 두 모듈의 루트가 되면 Zig 가 거절하므로
-    // `build_graph` 는 `build_source` 를 상대 경로가 아니라 **모듈로** 받는다.
-    // 그리고 이 주입이 없으면 `build_graph.zig` 는 어느 바이너리에도 안 들어가 컴파일조차 안 된다.
-    const boundary_build_source_mod = b.createModule(.{
-        .root_source_file = b.path("tests/support/build_source.zig"),
-        .target = target,
-        .optimize = .ReleaseSafe,
-    });
+    // 「빌드 소스」를 보는 **모듈 하나**. 문자열 얼굴(`build_source.zig`)은 이 파일이 상대 경로로
+    // 품고 `build_graph.source` 로 재수출하므로, 모듈은 하나면 된다.
+    //
+    // **왜 하나로 줄였나.** 둘이던 시절 `build_graph.zig` 는 `build_source` 를 **모듈 이름으로**
+    // 받아야 했고(같은 파일이 두 모듈의 루트가 되면 Zig 가 거절한다), 그러면 그 파일을 쓰려는
+    // 판정자마다 `build.zig` 에 주입 배선이 필요했다. 상대 경로로 바꾸니 `tests/*_boundary.zig`
+    // 45 개가 배선 없이 `@import("support/build_graph.zig")` 로 바로 쓴다 — 이관의 전제다.
+    //
+    // 이 모듈이 필요한 쪽은 `tests/boundary/` 아래 셋뿐이다(자기 파일이 모듈 루트라 상대 경로로
+    // `tests/support/` 를 못 본다). 그리고 이 주입이 없으면 `build_graph.zig` 는 어느 바이너리에도
+    // 안 들어가 컴파일조차 안 된다.
     const boundary_build_graph_mod = b.createModule(.{
         .root_source_file = b.path("tests/support/build_graph.zig"),
         .target = target,
         .optimize = .ReleaseSafe,
-        .imports = &.{.{ .name = "build_source", .module = boundary_build_source_mod }},
     });
 
     // **뷰 자신의 판정자를 돌린다.** 모듈로 «주입만» 하면 그 파일의 test 는 실행되지 않는다
-    // (다른 모듈의 test 는 root 에서 자동으로 딸려 오지 않는다 — 실측). 그 파일의 test 는
+    // (다른 모듈의 test 는 root 에서 자동으로 딸려 오지 않는다 — 실측). 그 판정자는
     // 「AST 뷰가 문자열 판정과 같은 값을 내는가」를 대조하므로, 안 돌면 뷰가 조용히 틀어진다.
-    const build_graph_tests = addProjectTest(b, .{ .root_module = boundary_build_graph_mod });
+    //
+    // **판정자는 뷰와 다른 파일에 있다**(`build_graph_judges.zig`). 뷰를 상대 경로로 가져다 쓰는
+    // 판정자가 여럿이라, 판정자가 뷰 안에 있으면 그 바이너리마다 테스트가 여덟 개씩 늘어 각
+    // 등록의 `--maru-expect-tests` 가 전부 깨진다(실측: 어떤 판정자가 1 개에서 9 개가 됐다).
+    const build_graph_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/support/build_graph_judges.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+        }),
+    });
     const run_build_graph_tests = b.addRunArtifact(build_graph_tests);
     // 개수 가드 — 뷰의 판정자가 조용히 사라지면 여기서 걸린다. 지금 여덟이다:
     // ① B3-0.4 대조 ② receiver 가 있으면 VarCalls 가 무조건 생긴다
@@ -5236,7 +5247,6 @@ pub fn build(b: *std.Build) void {
     // 같은 파일을 다른 `optimize` 로 둘 넣으면 조용히 틀린 쪽을 쓴다. 셋뿐이라 막지 않았고,
     // 길어지면 그때 막는다(`ra_mac_modules` 는 `StringHashMap.put` 이라 반대로 뒤가 이긴다).
     const boundary_scan_modules: []const std.Build.Module.Import = &.{
-        .{ .name = "build_source", .module = boundary_build_source_mod },
         .{ .name = "build_graph", .module = boundary_build_graph_mod },
         .{ .name = "i18n_table", .module = b.createModule(.{
             .root_source_file = b.path("src/i18n.zig"),

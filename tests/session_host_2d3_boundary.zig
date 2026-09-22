@@ -1,5 +1,8 @@
 const std = @import("std");
 const build_source = @import("support/build_source.zig");
+/// 빌드 등록을 **문자열이 아니라 구조로** 본다. 모듈 배선이 필요 없다 — 이 파일은 모듈 루트가
+/// 아니라 상대 경로로 `tests/support/` 를 볼 수 있다(`tests/boundary/` 아래는 그게 안 된다).
+const build_graph = @import("support/build_graph.zig");
 
 const max_source_bytes = 16 * 1024 * 1024;
 
@@ -37,7 +40,11 @@ test "CR3a-2d3 경계는 terminal drain continuation과 제품 proof-loss owner�
     try std.testing.expectEqual(@as(usize, 1), count(runner, "const stage_prefix = \"--maru-2d3-proof-stage=\";"));
     try std.testing.expectEqual(@as(usize, 0), count(registry, "pub fn commitTerminalCleanupNoFail("));
     try std.testing.expectEqual(@as(usize, 1), count(client_slot, "pub fn tryDeinitWithTerminalCleanup(self: *ClientSlot) DeinitOutcome {"));
-    try std.testing.expectEqual(@as(usize, 1), count(build, "\"test-session-host-2d3\""));
+    var graph = try build_graph.parse(allocator);
+    defer graph.deinit();
+    // 스텝 선언을 **구조로** 센다 — 문자열은 설명문·인자에 적힌 같은 이름도 세고,
+    // 더 긴 이름의 앞부분에도 걸린다.
+    try std.testing.expectEqual(@as(usize, 1), graph.countSteps("test-session-host-2d3"));
 }
 
 fn sliceBetween(source: []const u8, start: []const u8, end: []const u8) ?[]const u8 {

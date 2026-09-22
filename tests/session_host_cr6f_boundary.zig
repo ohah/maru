@@ -1,5 +1,8 @@
 const std = @import("std");
 const build_source = @import("support/build_source.zig");
+/// 빌드 등록을 **문자열이 아니라 구조로** 본다. 모듈 배선이 필요 없다 — 이 파일은 모듈 루트가
+/// 아니라 상대 경로로 `tests/support/` 를 볼 수 있다(`tests/boundary/` 아래는 그게 안 된다).
+const build_graph = @import("support/build_graph.zig");
 
 test "CR6f output wake keeps reader publication separate from owner-thread delta production" {
     const allocator = std.testing.allocator;
@@ -31,7 +34,11 @@ test "CR6f output wake keeps reader publication separate from owner-thread delta
     try std.testing.expectEqual(@as(usize, 1), count(socket_server, "pub const delta_tick_ms: i32 = 20"));
     try std.testing.expectEqual(@as(usize, 1), count(daemon, "manager.enableOutputWake()"));
     try std.testing.expectEqual(@as(usize, 1), count(restore, "manager.enableOutputWake()"));
-    try std.testing.expectEqual(@as(usize, 1), count(build, "\"test-session-host-cr6f\""));
+    var graph = try build_graph.parse(allocator);
+    defer graph.deinit();
+    // 스텝 선언을 **구조로** 센다 — 문자열은 설명문·인자에 적힌 같은 이름도 세고,
+    // 더 긴 이름의 앞부분에도 걸린다.
+    try std.testing.expectEqual(@as(usize, 1), graph.countSteps("test-session-host-cr6f"));
 }
 
 fn count(haystack: []const u8, needle: []const u8) usize {

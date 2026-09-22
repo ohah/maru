@@ -1,5 +1,8 @@
 const std = @import("std");
 const build_source = @import("support/build_source.zig");
+/// 빌드 등록을 **문자열이 아니라 구조로** 본다. 모듈 배선이 필요 없다 — 이 파일은 모듈 루트가
+/// 아니라 상대 경로로 `tests/support/` 를 볼 수 있다(`tests/boundary/` 아래는 그게 안 된다).
+const build_graph = @import("support/build_graph.zig");
 
 const max_source_bytes = 16 * 1024 * 1024;
 
@@ -35,7 +38,11 @@ test "CR3a-2d2 경계는 aggregate terminal handoff와 typed teardown owner를 �
         count(generation, ".terminal_handoff => {"),
     );
     // CR5b-2b의 host-wide retirement commit도 동일 typed terminal handoff를 소비한다.
-    try std.testing.expectEqual(@as(usize, 1), count(build, "\"test-session-host-2d2\""));
+    var graph = try build_graph.parse(allocator);
+    defer graph.deinit();
+    // 스텝 선언을 **구조로** 센다 — 문자열은 설명문·인자에 적힌 같은 이름도 세고,
+    // 더 긴 이름의 앞부분에도 걸린다.
+    try std.testing.expectEqual(@as(usize, 1), graph.countSteps("test-session-host-2d2"));
     // 최종 gate는 contract/registry/attachment/slot/product 다섯 owner category를 각각 등록한다.
     try std.testing.expectEqual(@as(usize, 5), count(build, "session_host_2d2_step,"));
 }

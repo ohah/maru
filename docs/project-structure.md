@@ -322,20 +322,39 @@ graph.hasArg("run_b3_0_4_tests", "--maru-expect-tests=8")
 graph.dependsOn("run_b3_0_4_tests", "run_b3_strict_cleanup_tests")
 ```
 
+**쓰는 법은 상대 경로 한 줄이다.**
+
+```zig
+const build_graph = @import("support/build_graph.zig");
+```
+
+`tests/*_boundary.zig` 는 모듈 루트가 아니라 상대 경로로 `tests/support/` 를 본다 — **배선이 필요 없다.**
+`tests/boundary/` 아래만 자기 파일이 모듈 루트라 그게 안 되고, 그 셋은 `boundary_scans` 표의
+`.deps = &.{"build_graph"}` 로 모듈을 주입받아 문자열 얼굴도 `build_graph.source` 로 받는다.
+
 규율 넷이다.
 
-- **모듈로 주입해야 산다.** `build_graph.zig` 를 아무도 `@import` 하지 않으면 어느 바이너리에도
-  안 들어가 **컴파일조차 되지 않는다.** `build.zig` 가 판정자에 모듈로 준다.
+- **모듈은 하나다.** `build_graph.zig` 가 `build_source.zig` 를 **상대 경로로 품고**
+  `pub const source` 로 재수출한다. 둘을 각각 모듈로 만들면 같은 파일이 두 모듈의 루트가 되어
+  Zig 가 거절하고(`file exists in modules 'build_source' and 'build_graph'`), 그걸 피하려면
+  뷰를 쓰는 판정자마다 `build.zig` 에 주입 배선이 필요해진다.
+- **뷰의 판정자는 뷰와 다른 파일에 둔다**(`build_graph_judges.zig`). Zig 는 상대 임포트한 파일의
+  `test` 를 그 바이너리에 함께 넣으므로, 판정자가 뷰 안에 있으면 **뷰를 쓰는 판정자마다 테스트가
+  여덟 개씩 늘고** 그 등록의 `--maru-expect-tests` 가 전부 깨진다(실측: 어떤 판정자가 1 → 9).
 - **주입만으로는 그 파일의 test 가 안 돈다**(다른 모듈의 test 는 root 에서 딸려 오지 않는다 — 실측).
-  뷰 자신의 판정자를 돌리려면 그 모듈을 root 로 하는 등록이 **따로** 있어야 한다.
-- **모듈은 하나만 만든다.** 같은 파일이 두 모듈의 루트가 되면 Zig 가 거절한다
-  (`file exists in modules 'build_source' and 'build_graph'`). `build_graph` 는 `build_source` 를
-  상대 경로가 아니라 **모듈로** 받는다.
-- **옮길 때는 두 값을 다 남긴다.** 문자열이 세던 수와 뷰가 세는 수가 다르면(위 15 vs 12) 한쪽만
-  남기는 순간 감시가 줄어든다. 둘을 함께 고정하고 차이의 이유를 그 자리에 적는다.
+  뷰의 판정자를 돌리려면 그 파일을 root 로 하는 등록이 **따로** 있어야 한다.
+- **옮길 때는 세던 성질을 다 옮긴다.** `count(build, "test-…") == 1` 은 존재뿐 아니라 **선언이
+  하나**라는 것도 지키고 있었다 — `step() != null` 로만 바꾸면 그 절반이 조용히 사라지므로
+  `countSteps(…) == 1` 로 옮긴다. 값이 갈리면(위 15 vs 12) 둘을 함께 고정하고 이유를 적는다.
 
-**이관은 아직 진행 중이다** — 178자리 중 9자리가 뷰로 갔다. 나머지는 그 도메인을 만질 때 옮긴다.
-구조로 옮기면 뜻이 바뀌는 자리(일부러 잘라 쓴 접두 매칭 8자리)는 **문자열로 남기고 이유를 적는다**.
+**이관은 진행 중이다** — 빌드 소스를 문자열로 재던 145자리 중 31자리(「이 스텝이 있는가」 전부)가
+뷰로 갔고 114자리가 남았다. 남은 것의 결은 이렇다: 매달기 18 · 실행·인자 16 · 파일 경로 13 ·
+제어 흐름과 선언 11 · 필터 8 · 환경변수 8 · 박힌 셸·정규식 5. **제어 흐름·선언과 박힌 셸·정규식은
+안 옮긴다** — 그건 빌드 「그래프」가 아니라 스크립트 본문이라, 담으려면 AST 전체를 노출해야 한다.
+
+**왜 옮기는지는 실측으로 보인다.** `test-session-host-kernel-cwd-k3` 스텝 이름을
+`…-k3-extra` 로 바꿔 보면 옛 문자열 판정은 **여전히 1 을 세어 통과하고**(접두가 걸린다) 뷰는
+0 을 세어 실패한다. 그 31자리 중 6자리가 그 형태의 따옴표 없는 매칭이었다.
 
 ### 같은 모양이 스무 번이면 **표**로 적는다
 
@@ -407,10 +426,11 @@ graph.rows                                                               // 필�
 
 새 판정자가 빌드 등록을 셀 때 문자열이 꼭 필요하면 `build_source.read(allocator)`(널 종료가 필요하면 `readZ`)를 쓴다.
 `tests/boundary/` 아래는 자기 파일이 모듈 루트라 상대 경로로 `tests/support/` 를 못 보므로,
-`build.zig` 가 `build_source` 를 **모듈로 주입**한다 — 표에서는 그 행에 `.deps = &.{"build_source"}`
-를 적으면 된다(`imports.zig`·`shell_gate_ledger.zig`·`wake_latency_budget.zig` 가 그 형태).
+`build.zig` 가 **`build_graph` 를 모듈로 주입**하고 문자열 얼굴은 `build_graph.source` 로 받는다 —
+표에서는 그 행에 `.deps = &.{"build_graph"}` 를 적으면 된다
+(`imports.zig`·`shell_gate_ledger.zig`·`wake_latency_budget.zig` 가 그 형태).
 
-**읽는 길은 하나다.** 판정자 93자리가 전부 `build_source` 를 거치고, `"build.zig"` 라는 리터럴이
+**읽는 길은 하나다.** 빌드 소스를 읽는 판정자가 전부 `build_source`(또는 그것을 재수출하는 `build_graph`)를 거치고, `"build.zig"` 라는 리터럴이
 남은 곳은 둘뿐이다 — 정의 자신(`build_source.zig`)과 링크 검사 대상 경로를 모으는
 `tests/doc_links/links.zig`(읽어서 세는 자리가 아니다). **두 벌을 만들지 않는다** — 한쪽만
 남겨 두면 다음에 등록을 옮길 때 그 한쪽만 조용히 깨지고, 그것이 이 저장소가 반복해서 당한 형태다

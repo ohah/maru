@@ -28,7 +28,7 @@
 //!   - 인터프리터 이름이 `sh`·`bash` 가 아니면 못 본다(`python3` 등은 이 원장의 대상이 아니다).
 
 const std = @import("std");
-const build_source = @import("build_source");
+const build_source = @import("build_graph").source;
 
 /// 이 단계가 **어느 호스트에서 도는가**.
 const Reach = enum {

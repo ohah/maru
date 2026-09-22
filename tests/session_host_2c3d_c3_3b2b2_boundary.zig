@@ -4,6 +4,9 @@ const std = @import("std");
 /// 스캐너가 보는 walker 경로를 POSIX 구분자로 정규화한다(정본: tests/support/posix_walk.zig).
 const posixWalk = @import("support/posix_walk.zig").posixWalk;
 const build_source = @import("support/build_source.zig");
+/// 빌드 등록을 **문자열이 아니라 구조로** 본다. 모듈 배선이 필요 없다 — 이 파일은 모듈 루트가
+/// 아니라 상대 경로로 `tests/support/` 를 볼 수 있다(`tests/boundary/` 아래는 그게 안 된다).
+const build_graph = @import("support/build_graph.zig");
 
 test "C3-3b2b2 pure preparation recipe boundary" {
     const allocator = std.testing.allocator;
@@ -255,10 +258,11 @@ test "C3-3b2b2 pure preparation recipe boundary" {
         runtime,
         "runtime_metadata_wire.classifyAndMaterializeEvent(",
     ));
-    try std.testing.expectEqual(@as(usize, 1), count(
-        build,
-        "\"test-session-host-2c3d-c3-3b2b2\"",
-    ));
+    var graph = try build_graph.parse(allocator);
+    defer graph.deinit();
+    // 스텝 선언을 **구조로** 센다 — 문자열은 설명문·인자에 적힌 같은 이름도 세고,
+    // 더 긴 이름의 앞부분에도 걸린다.
+    try std.testing.expectEqual(@as(usize, 1), graph.countSteps("test-session-host-2c3d-c3-3b2b2"));
     const b2b2_build_start = std.mem.indexOf(
         u8,
         build,

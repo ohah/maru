@@ -3,6 +3,9 @@
 const std = @import("std");
 const posixWalk = @import("support/posix_walk.zig").posixWalk;
 const build_source = @import("support/build_source.zig");
+/// 빌드 등록을 **문자열이 아니라 구조로** 본다. 모듈 배선이 필요 없다 — 이 파일은 모듈 루트가
+/// 아니라 상대 경로로 `tests/support/` 를 볼 수 있다(`tests/boundary/` 아래는 그게 안 된다).
+const build_graph = @import("support/build_graph.zig");
 
 test "CR6d 진단은 앱 초기화 뒤에도 하네스 stderr를 유지한다" {
     const allocator = std.testing.allocator;
@@ -187,7 +190,11 @@ test "CR6d 경계는 exact recovered screen probe와 actual AppKit input smoke�
 
     // v2a의 판정자는 기본 test graph에 고정된 순수 consumer다. 실제 AppKit producer가 붙기 전에도
     // identity/세대/anchor/PPM digest와 관심 영역 계약이 사라지거나 파일 I/O를 직접 열 수 없다.
-    try std.testing.expectEqual(@as(usize, 1), count(build, "\"test-session-host-cr6d-pixel-validator\""));
+    var graph = try build_graph.parse(allocator);
+    defer graph.deinit();
+    // 스텝 선언을 **구조로** 센다 — 문자열은 설명문·인자에 적힌 같은 이름도 세고,
+    // 더 긴 이름의 앞부분에도 걸린다.
+    try std.testing.expectEqual(@as(usize, 1), graph.countSteps("test-session-host-cr6d-pixel-validator"));
     try std.testing.expectEqual(@as(usize, 1), count(build, "run_session_host_cr6d_pixel_tests.addArg(\"--maru-expect-tests=8\");"));
     try std.testing.expectEqual(@as(usize, 1), count(build, "test_step.dependOn(&run_session_host_cr6d_pixel_tests.step);"));
     try std.testing.expectEqual(@as(usize, 1), count(pixel_test, "checkAllAllocationFailures"));
@@ -375,10 +382,11 @@ test "CR6d AppKit child는 TCC responsible identity를 앱 번들에 귀속한�
     try std.testing.expectEqual(@as(usize, 1), count(gate, "/usr/bin/diff -qr zig-out/Maru.app"));
     try std.testing.expectEqual(@as(usize, 1), count(gate, "/usr/bin/codesign --verify --strict"));
     try std.testing.expectEqual(@as(usize, 1), count(gate, "\"/tmp/maru-macos-app/Maru.app\""));
-    try std.testing.expectEqual(@as(usize, 1), count(
-        build,
-        "\"build-macos-session-host-cr6c-appkit-smoke-harness\"",
-    ));
+    var graph = try build_graph.parse(allocator);
+    defer graph.deinit();
+    // 스텝 선언을 **구조로** 센다 — 문자열은 설명문·인자에 적힌 같은 이름도 세고,
+    // 더 긴 이름의 앞부분에도 걸린다.
+    try std.testing.expectEqual(@as(usize, 1), graph.countSteps("build-macos-session-host-cr6c-appkit-smoke-harness"));
     try std.testing.expectEqual(@as(usize, 1), count(
         build,
         "install_session_host_cr6c_appkit_harness.step.dependOn(&session_host_cr6c_appkit_harness.step)",

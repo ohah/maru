@@ -321,10 +321,10 @@ fn charAt(content: []const u8, off: usize) bool {
     };
 }
 
-const Anchor = struct { x: i32, y: i32, h: u32 };
+pub const Anchor = struct { x: i32, y: i32, h: u32 };
 
 /// 낱말 첫 글자 셀의 좌상단(창 좌표)과 높이 — 헬퍼와 같은 출처(`bodyAnchor`, 렌더가 굳힌 행 배열). 안 그려졌으면 `null`.
-fn anchorFor(term: *Term, offset: usize) ?Anchor {
+pub fn anchorFor(term: *Term, offset: usize) ?Anchor {
     const rows_len = term.rt.editor_hit_rows_len;
     if (rows_len == 0) return null;
     const doc = term.rt.editor_doc orelse return null;

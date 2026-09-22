@@ -1,4 +1,6 @@
-//! Session-host kernel cwd parity K2 product ownership boundary.
+//! **커널 cwd 샘플러는 host 가 소유한다** — 유계로 돌고 metadata 로만 보인다.
+//!
+//! 계획 문서의 단계 라벨로는 **K2**(`docs/plans/session-host-kernel-cwd.md`).
 
 const std = @import("std");
 

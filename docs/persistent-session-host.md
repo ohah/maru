@@ -338,6 +338,12 @@ GUI 0 host-backed 알림은 host가 bounded journal과 stable route를 소유하
 
      **새 RPC를 추가할 때의 함정**: "RPC 왕복을 사이에 두고 `observer_generation`이 그대로인지 확인한다"는 형태를
      쓰지 않는다. 출력이 흐르는 터미널에서 그 조건은 거의 항상 거짓이라, 가져온 결과를 매번 버린다.
+
+     **와이어의 값은 상수다(2026-09-22)**: 같은 이유로 host 는 이 값을 metadata JSON 에 싣지 않는다(§10 wire 표). 출력
+     revision 이 JSON 에 있으면 `change_token` 이 출력마다 올라 내용 없는 metadata 이벤트가 batch 마다 나갔고, 앱은
+     매번 «의미 변화» 로 판정해(`metadataEqualsCurrent` 가 이 필드를 비교한다) role 7개 할당·observation 교체·settle 까지
+     다 했다. core 의 실제 값은 producer preflight(`source_changed`)가 계속 본다 — 그 자리는 «core 안 필드가 바뀌었을지
+     모른다» 를 lock-free 로 아는 데 쓰이고, 바뀐 게 없으면 canonical 바이트가 같아 token 은 그대로다.
 - **관측에 싣는 값은 반드시 bounded여야 한다.** metadata JSON이 `max_control_json`을 넘으면 attach 응답과 metadata
   이벤트가 **영구히 실패**해 그 runtime에 접속할 수 없게 된다. OSC 52의 Pc(target)는 파서가 길이를 제한하지 않으므로
   host가 잘라서 싣고, 큰 클립보드 텍스트는 관측이 아니라 RPC로 빼되 그마저 넘치면 `too_large`로 알린다(조용한 유실 금지).
@@ -10289,7 +10295,7 @@ release workflow/runner 준비 PR은 component fixture를 이유로 제품 gate�
               | process.name | UTF-8, 최대 128 bytes, fixed `ForegroundProcessName` |
               | ssh_remote_dest | optional UTF-8 string |
               | semantic_state | wire `u8`; known `0...command`, 그 밖의 u8은 `.unknown`으로 normalize |
-              | observer_generation | `u64` |
+              | observer_generation | `u64` — **와이어에서는 상수(`server.wire_observer_generation`)**. core 의 출력 revision 은 producer preflight 에만 쓰고 JSON 에 싣지 않는다: 실리면 출력 batch 마다 내용 없는 `runtime.metadata` 이벤트가 나가 앱이 batch 마다 봉인 준비 파이프라인을 통째로 돌린다(활성 32 세션 앱 busy CPU 의 절반 — 2026-09-22 실측, host 만 바꿔 앱 CPU −33 %). 앱 관찰기의 «화면이 바뀌었나» 는 화면 batch 누적 수와 `metadata_revision` 으로 잰다(`Term.agent_output_batches`). 판정자: `test-metadata-output-revision`(출력만 → token 불변·materialize 는 1회·다음 cadence 0회, 제목 → token 전진), `AW6`(앱 신호). |
               | bell_count, clipboard_write_seq, clipboard_read_seq | **full `u64`**; 기존 `observation_wire`의 u32 제한 제거 |
               | title_generation | `u32` |
               | cols, rows | `u16` |

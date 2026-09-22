@@ -225,6 +225,15 @@ pub fn observationWireValid(observation: RuntimeObservation) bool {
     return aggregate <= protocol.max_control_json;
 }
 
+/// 와이어 `observer_generation` 의 값. **출력 revision 은 metadata 가 아니다** — 이 필드가 출력마다 오르는
+/// 실제 값으로 실리면 canonical JSON 이 출력 batch 마다 달라져 `change_token` 이 오르고, 내용이 하나도 안 바뀐
+/// `runtime.metadata` 이벤트가 batch 마다 나간다. 앱은 그 이벤트마다 봉인된 준비 파이프라인(DTO 할당·role 7개·
+/// 씰·검증 ×5·settle)을 통째로 돌리고 나서야 «같다» 를 안다 — 활성 32 세션에서 앱 busy CPU 의 절반이었다
+/// (2026-09-22 실측: host 만 바꿔 앱 CPU −33 %, 4/4 쌍). 필드는 와이어 호환을 위해 남기고 값만 고정한다.
+/// core 의 실제 generation 은 producer preflight(`RuntimeManager.cachedObservationOp` 의 `source_changed`)가
+/// 계속 쓴다 — 거기가 «core 안 필드가 바뀌었을지 모른다» 를 싸게 아는 자리다.
+pub const wire_observer_generation: u64 = 0;
+
 pub fn canonicalizeObservation(
     allocator: std.mem.Allocator,
     observation: RuntimeObservation,

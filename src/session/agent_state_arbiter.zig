@@ -307,7 +307,9 @@ pub const ScanSkip = struct {
     hook_child_count: u32 = 0,
     screen: State = .unknown,
     idle_confirmations: u8 = 0,
-    /// 화면 내용이 그대로인가(TerminalCore write seq 가 안 움직였다).
+    /// 볼 것이 그대로인가 — 화면 batch 가 더 오지 않았고 관측 revision(제목·진행률이 사는 곳)도 그대로다.
+    /// 예전엔 TerminalCore write seq(`observer_generation`)였는데 그 값은 host 가 출력마다 metadata 이벤트를
+    /// 보내야만 닿았다(`session_model.Term.agent_output_batches` 의 근거).
     generation_same: bool = false,
     output_active: bool = false,
     /// `Stabilizer` 가 근거 만료를 확인해야 한다고 말하는가.

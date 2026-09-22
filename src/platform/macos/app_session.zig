@@ -21209,6 +21209,7 @@ pub const AppSession = struct {
                         // 알림 폴링이 «먼저 볼 Term» 을 고르는 힌트(session_model 의 필드 주석 참고). 여기서만 세우고
                         // 내리는 것은 확인한 쪽이다. 조용한 Term 은 이 표시가 서지 않아 폴링 대상에서 빠진다.
                         term.output_since_notify_check = true;
+                        term.agent_output_batches +%= ds.output_events;
                         term.agent_last_output_ms = self.awakeMs();
                         term.agent_last_output_wall_ns = @intCast(std.Io.Clock.real.now(self.io).nanoseconds);
                         // 커서 blink 리셋은 **활성 surface 자신의 출력**에만 반응한다 — 아래 drain_summary는 모든
@@ -26624,7 +26625,8 @@ test "AK1: 에이전트 종류가 바뀌면 지난 프로세스의 관측이 통
     term.agent_screen_rule = "live_prompt";
     term.agent_screen_origin = .hook;
     term.agent_screen_seq = 42;
-    term.agent_screen_generation = 7;
+    term.agent_scan_batches = 7;
+    term.agent_scan_revision = 3;
     term.agent_last_output_ms = 12345;
     // C2 의 연속 셈을 실제로 올려 둔다(리셋이 안 되면 다음 관측 하나로 뒤집힌다).
     _ = term.agent_arbiter.arbitrate(.{ .hook = .running, .screen_visible_idle = true, .screen_seq = 1 });
@@ -26640,7 +26642,8 @@ test "AK1: 에이전트 종류가 바뀌면 지난 프로세스의 관측이 통
     try std.testing.expectEqualStrings("", term.agent_screen_rule);
     try std.testing.expectEqual(maru.session.agent_state_arbiter.Origin.screen, term.agent_screen_origin);
     try std.testing.expectEqual(@as(u64, 0), term.agent_screen_seq);
-    try std.testing.expectEqual(@as(u64, 0), term.agent_screen_generation);
+    try std.testing.expectEqual(@as(u64, 0), term.agent_scan_batches);
+    try std.testing.expectEqual(@as(u64, 0), term.agent_scan_revision);
     try std.testing.expectEqual(@as(u64, 0), term.agent_last_output_ms);
     try std.testing.expectEqual(@as(usize, 0), term.hook.transcript.owned.reply().len);
 
@@ -80139,7 +80142,7 @@ test "AW1 훅이 blocked 여도 화면에 승인 chrome 이 없으면 배지가 
     // ① 승인 대기 — 훅이 그렇게 말했고 화면에도 그 chrome 이 있다.
     term.hook.state = .blocked;
     try surface.core.write("\x1b[2J\x1b[H  Would you like to proceed?\r\n❯ 1. Yes\r\n  2. No\r\n");
-    term.rt.observation.observer_generation +%= 1;
+    term.agent_output_batches +%= 1;
     agent_ops.pollAgentState(session, term, false);
     try std.testing.expect(term.agent_screen_visible_blocker);
     try std.testing.expectEqual(maru.session.agent_observer.State.blocked, term.agent_state);
@@ -80148,7 +80151,7 @@ test "AW1 훅이 blocked 여도 화면에 승인 chrome 이 없으면 배지가 
     //    `blocked` 다. 화면에서 chrome 이 사라지는 것이 유일한 근거이고, C1 이 그것으로 푼다.
     try surface.core.write("\r\n" ** 60);
     try surface.core.write("● 작업을 시작합니다\r\n  esc to interrupt\r\n");
-    term.rt.observation.observer_generation +%= 1;
+    term.agent_output_batches +%= 1;
     agent_ops.pollAgentState(session, term, false);
     try std.testing.expect(!term.agent_screen_visible_blocker);
     try std.testing.expectEqual(maru.session.agent_observer.State.blocked, term.hook.state); // 훅은 여전히
@@ -80193,7 +80196,7 @@ test "AW3 훅 소스가 끊기면 훅 자리도 버린다 — 돌아왔을 때 �
     try std.testing.expectEqual(maru.session.agent_hook_mode.Mode.hook, agent_ops.agentHookMode(session, term));
     const surface = session.term_backend.surfaceFor(term.rt.handle) orelse return error.SkipZigTest;
     try surface.core.write("\x1b[2J\x1b[H  작업이 끝났습니다\r\n\r\n❯ \r\n");
-    term.rt.observation.observer_generation +%= 1;
+    term.agent_output_batches +%= 1;
     agent_ops.pollAgentState(session, term, false);
     try std.testing.expectEqual(maru.session.agent_observer.State.idle, term.agent_state);
     try std.testing.expectEqualStrings("B0", term.agent_state_rule);
@@ -80234,7 +80237,7 @@ test "AW5 작업 중(출력이 계속 있음)에는 chrome idle 이 훅의 runni
     // **다른 것은 이것뿐이다: 매 회차 출력이 있다.** 실제로도 스피너가 회전하므로 PTY 출력이 끊기지 않는다.
     var i: usize = 0;
     while (i < 6) : (i += 1) {
-        term.rt.observation.observer_generation +%= 1;
+        term.agent_output_batches +%= 1;
         term.agent_last_output_ms = session.awakeMs();
         agent_ops.pollAgentState(session, term, false);
         try std.testing.expect(term.agent_screen_visible_idle);
@@ -80243,6 +80246,61 @@ test "AW5 작업 중(출력이 계속 있음)에는 chrome idle 이 훅의 runni
         try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state);
         try std.testing.expectEqualStrings("B", term.agent_state_rule);
     }
+}
+
+test "AW6 관찰기 재스캔 신호는 화면 batch·관측 revision 이고 observer_generation 은 아니다 (제품 경로)" {
+    // **왜**: host 는 이제 `observer_generation` 을 와이어 상수로 보낸다(출력마다 metadata 이벤트를 만들던 값 —
+    // `server.wire_observer_generation` 의 근거). 관찰기가 그 값을 계속 보면 «바뀐 게 없다» 로 굳어 화면 스캔을
+    // 영영 건너뛴다. 이 판정자는 세 신호를 제품 경로에서 따로 고정한다: 화면 batch ↑ → 스캔, revision ↑ → 스캔,
+    // observer_generation ↑ 만으로는 스캔 안 함(그 값은 죽은 신호다). `agent_screen_seq` 가 실제 스캔 수다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const term = tab_ops.activeTab(session).activeTerm();
+    term.agent_kind = .codex;
+    term.rt.observation.availability = .current;
+    const surface = session.term_backend.surfaceFor(term.rt.handle) orelse return error.SkipZigTest;
+    // idle chrome — skip 은 화면이 idle 일 때만 성립하므로(ScanSkip) 여기서 출발한다. 출력 시각은 0 = output_active 아님.
+    try surface.core.write("\x1b[2J\x1b[H  작업이 끝났습니다\r\n\r\n› \r\n  Context 2% used\r\n");
+    term.agent_output_batches +%= 1;
+    agent_ops.pollAgentState(session, term, false);
+    try std.testing.expect(term.agent_screen_visible_idle);
+    const seq_idle = term.agent_screen_seq;
+    try std.testing.expect(seq_idle != 0);
+
+    // ① 신호 없음 → 건너뛴다.
+    agent_ops.pollAgentState(session, term, false);
+    try std.testing.expectEqual(seq_idle, term.agent_screen_seq);
+
+    // ② 화면 batch 가 왔다 → 다시 읽는다.
+    term.agent_output_batches +%= 1;
+    agent_ops.pollAgentState(session, term, false);
+    try std.testing.expectEqual(seq_idle + 1, term.agent_screen_seq);
+    agent_ops.pollAgentState(session, term, false);
+    try std.testing.expectEqual(seq_idle + 1, term.agent_screen_seq);
+
+    // ③ 관측 revision 이 올랐다(제목·OSC 9;4 진행률이 오는 길) → 다시 읽는다.
+    term.rt.observation.revision +%= 1;
+    agent_ops.pollAgentState(session, term, false);
+    try std.testing.expectEqual(seq_idle + 2, term.agent_screen_seq);
+    agent_ops.pollAgentState(session, term, false);
+    try std.testing.expectEqual(seq_idle + 2, term.agent_screen_seq);
+
+    // ④ observer_generation 만 올랐다 → 신호가 아니다. 예전 코드는 여기서 스캔했다 — 그 값은 host 가 출력마다
+    //    metadata 이벤트를 보내야만 닿았고, 이제 그 이벤트는 없다.
+    term.rt.observation.observer_generation +%= 1;
+    agent_ops.pollAgentState(session, term, false);
+    try std.testing.expectEqual(seq_idle + 2, term.agent_screen_seq);
 }
 
 test "AW2 훅이 running 에 멈춰도 화면 idle 이 연속 3회면 턴이 닫힌다 — 출력이 없어도 (§1.1 C2 · 제품 경로)" {
@@ -80272,7 +80330,7 @@ test "AW2 훅이 running 에 멈춰도 화면 idle 이 연속 3회면 턴이 닫
     // 훅은 running 에 멈췄다(codex 오류 턴 — `Stop` 도 `StopFailure` 도 오지 않는다).
     term.hook.state = .running;
     try surface.core.write("\x1b[2J\x1b[H  작업이 끝났습니다\r\n\r\n› \r\n  Context 2% used\r\n");
-    term.rt.observation.observer_generation +%= 1;
+    term.agent_output_batches +%= 1;
 
     // 1회차 — 화면은 idle 이지만 훅을 아직 못 덮는다.
     agent_ops.pollAgentState(session, term, false);
@@ -80339,7 +80397,7 @@ test "에이전트 화면이 running → idle이 되는 순간 작업트리가 �
 
     // ① 실행 중: 실행 footer가 보인다(실측 규칙 `working_footer`).
     try surface.core.write("\x1b[2J\x1b[H● 파일을 고치는 중\r\n  Working... esc to interrupt\r\n");
-    term.rt.observation.observer_generation +%= 1;
+    term.agent_output_batches +%= 1;
     agent_ops.pollAgentState(session, term, false);
     try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state);
     try std.testing.expectEqual(@as(usize, 0), turnRingLenForTest(session)); // 아직 턴이 안 끝났다
@@ -80349,7 +80407,7 @@ test "에이전트 화면이 running → idle이 되는 순간 작업트리가 �
     //    출력이 흘러 지난 footer가 꼬리 밖으로 밀려나야 한다(안 밀면 지운 화면인데도 옛 footer가 계속 잡힌다).
     try surface.core.write("\r\n" ** 60);
     try surface.core.write("───────────────────────────────────────\r\n❯ \r\n");
-    term.rt.observation.observer_generation +%= 1;
+    term.agent_output_batches +%= 1;
     agent_ops.pollAgentState(session, term, false);
     try std.testing.expectEqual(maru.session.agent_observer.State.idle, term.agent_state);
 

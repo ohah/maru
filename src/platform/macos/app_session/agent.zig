@@ -978,7 +978,8 @@ pub fn resetAgentObservationForKindChange(term: *Term) void {
     term.agent_screen_seq = 0;
     term.agent_arbiter.reset();
     term.agent_stabilizer.reset();
-    term.agent_screen_generation = 0;
+    term.agent_scan_batches = 0;
+    term.agent_scan_revision = 0;
     term.agent_last_output_ms = 0;
     term.hook.transcript.reset();
 }
@@ -2956,7 +2957,10 @@ pub fn pollAgentState(self: *AppSession, term: *Term, displayed: bool) void {
     };
     const observation = &term.rt.observation;
     if (observation.availability != .current) return;
-    const generation = observation.observer_generation;
+    // «바뀐 게 없나» 는 화면 batch 누적 수와 관측 revision 으로 잰다 — `observer_generation` 은 보지 않는다.
+    // 그 값은 출력 revision 이고 host 와이어에서는 상수다(`server.wire_observer_generation` 의 근거).
+    const batches = term.agent_output_batches;
+    const revision = observation.revision;
     const now_ms = self.awakeMs();
     const activity_age_ms = now_ms -| term.agent_last_output_ms;
     const output_active = term.agent_last_output_ms != 0 and activity_age_ms <= agent_activity_window_ms;
@@ -2970,14 +2974,15 @@ pub fn pollAgentState(self: *AppSession, term: *Term, displayed: bool) void {
         .hook_child_count = agg.child_count,
         .screen = term.agent_screen_state,
         .idle_confirmations = term.agent_arbiter.idle_confirmations,
-        .generation_same = generation == term.agent_screen_generation,
+        .generation_same = batches == term.agent_scan_batches and revision == term.agent_scan_revision,
         .output_active = output_active,
         .expiry_probe = term.agent_stabilizer.needsExpiryProbe(),
     }).canSkip()) return;
     const screen = self.backendFor(term).dumpRecentText(term.rt.handle, self.allocator, agent_screen_tail_rows, agent_screen_tail_bytes) catch null;
     defer if (screen) |owned| self.allocator.free(owned);
 
-    term.agent_screen_generation = generation;
+    term.agent_scan_batches = batches;
+    term.agent_scan_revision = revision;
     const detection = maru.session.agent_observer.detect(agent, .{
         .screen = screen orelse "",
         .osc_title = observation.window_title.items,

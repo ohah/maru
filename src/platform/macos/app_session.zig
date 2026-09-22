@@ -1522,6 +1522,10 @@ pub fn termLabel(term: *const Term) []const u8 {
         // 사용자 rename 이 있으면 그게 우선인 것은 다른 경로와 같다(`pickLabel` 단일 해석).
         const auto_name: []const u8 = if (term.rt.editor_path) |p|
             std.fs.path.basename(p)
+            // **저쪽 파일도 파일 이름이다**(U3 — §3.11). 여기 없으면 탭이 「편집기」로 떨어져, 바로 위
+            // 주석이 경고한 상태(여러 개를 열면 이름이 전부 같다)가 저쪽 문서에서 되살아난다.
+        else if (term.rt.editor_remote) |*r|
+            std.fs.path.basename(r.path)
         else if (term.rt.editor_untitled) |*u|
             u.text()
         else

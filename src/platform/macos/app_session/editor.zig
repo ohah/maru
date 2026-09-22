@@ -37769,6 +37769,84 @@ test "U3-2 저쪽 저장의 결말이 갈린다 — ok 는 «저쪽의 그 파�
     try testing.expect(t.rt.editor_path == null);
 }
 
+test "U3-5 저쪽 이름도 «같은 규칙»으로 거른다 — 절대 경로·`..`·NUL 은 base 를 못 벗어난다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+
+    const t = try openUntitledInActivePane(fx.session);
+    try testing.expect(insertText(fx.session, t, "x"));
+
+    // 저쪽 목적지를 굳혀 둔다(물음까지는 U3-1 이 잰다). base 는 **저쪽 경로**다.
+    var pin: app_session_mod.editor_untitled_save_ops.RemotePin = .{};
+    const dest = "user@host";
+    @memcpy(pin.dest_buf[0..dest.len], dest);
+    pin.dest_len = dest.len;
+    const ctl = "/tmp/nope-ctl";
+    @memcpy(pin.ctl_buf[0..ctl.len], ctl);
+    pin.ctl_len = ctl.len;
+    const base = "/srv/app";
+    @memcpy(pin.base_buf[0..base.len], base);
+    pin.base_len = base.len;
+
+    // **거절되는 이름들** — 이쪽과 같은 순수 함수가 판정한다(`resolve`). 각 판에서 보류의 경로가
+    // 비어 있어야 한다: 채워졌다면 그 이름이 통과해 **저쪽 base 밖으로 나갈** 경로가 굳은 것이다.
+    const bad = [_][]const u8{
+        "/etc/passwd", // 절대 경로는 base 를 무시한다
+        "../escape.md", // `..` 는 푼 결과로 막는다
+        "a/../../escape.md", // 갈아입은 `..` 도
+        "sub/", // 끝이 구분자면 파일 이름이 없다
+        "", // 빈 이름
+        "nul\x00.md", // NUL 은 syscall 이 끊어 **다른 파일**을 가리킨다
+    };
+    for (bad) |name| {
+        fx.session.pending_untitled_save = .{ .surface_id = t.surface.id, .remote = pin };
+        fx.session.chrome_host.notice.dismiss();
+        app_session_mod.editor_untitled_save_ops.commit(fx.session, t.surface.id, name);
+        try testing.expectEqual(@as(usize, 0), fx.session.pending_untitled_save.path_len);
+        try testing.expect(t.rt.editor_remote == null); // 아무것도 붙지 않았다
+        try testing.expect(t.rt.editor_untitled != null);
+        try testing.expect(fx.session.chrome_host.notice.open); // 그리고 **말했다**
+    }
+
+    // **받는 이름**: base 아래의 상대 경로가 그 아래로 풀린다.
+    //
+    // ⚠️ **여기서는 제품 문(`commit`)을 태우지 않는다** — 그 갈래는 통과하면 **실제 `ssh` 를 띄운다**
+    // (실측: 판정자가 DNS 를 조회했다). 왕복은 실물 게이트(`test-remote-file-mutation`)가 소유하고,
+    // 이 줄이 재는 것은 **규칙이 이쪽과 같은 함수**라는 것이다 — 위 여섯 갈래가 그 함수를 제품 문으로
+    // 태워 이미 못박았으므로, 받는 갈래만 순수하게 본다.
+    var ok_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const resolved = app_session_mod.editor_untitled_save_ops.resolve(base, "sub/notes.md", &ok_buf);
+    try testing.expectEqualStrings("/srv/app/sub/notes.md", resolved.?);
+    fx.session.pending_untitled_save = .{};
+}
+
+test "U3-4 저쪽 파일의 탭은 «그 파일 이름»이다 — 「편집기」로 떨어지지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+
+    const t = try openUntitledInActivePane(fx.session);
+    // 이름 없는 동안에는 `untitled-N` 이다(U1 이 그 자리를 잰다).
+    try testing.expect(std.mem.startsWith(u8, app_session_mod.termLabel(t), "untitled-"));
+
+    t.rt.editor_remote = .{
+        .dest = try allocator.dupe(u8, "user@host"),
+        .path = try allocator.dupe(u8, "/srv/app/notes.md"),
+    };
+    t.rt.editor_untitled = null;
+
+    // ⚠️ **여기가 회귀 자리다**: 경로도 이름도 없으면 라벨이 「편집기」로 떨어져, 저쪽 문서를 둘
+    //    열면 탭이 **둘 다 같은 이름**이 된다(파일 Term 이 파일 이름을 쓰는 그 이유).
+    try testing.expectEqualStrings("notes.md", app_session_mod.termLabel(t));
+    // 그리고 **밴드는 없다**(entry 가 없다 — 주면 저쪽 경로가 로컬 축으로 샌다).
+    try testing.expect(t.file_entry == null);
+    // 컨트롤 플레인도 경로를 만들어 내지 않는다.
+    try testing.expect(editor_diff_ops.editorMeta(t).path == null);
+}
+
 test "U3-3 저쪽 파일의 다음 ⌘S 는 묻지 않는다 — 이름도 목적지도" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;

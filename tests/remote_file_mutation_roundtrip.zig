@@ -345,6 +345,139 @@ test "헬퍼 mk 왕복: 부모 신원이 맞아야 만들고, 배타라 덮어�
     }
 }
 
+/// **`write` 러너** — 형제들과 달리 내용이 **stdin** 으로 간다(U3). `std.process.run` 은 stdin 을 못
+/// 주므로 `sh` 로 파일을 물려 준다: `"$BIN" write … < body > out`. 그 우회가 곧 이 갈래의 사실이다.
+fn runWrite(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    bin: []const u8,
+    parent: []const u8,
+    name: []const u8,
+    mode: []const u8,
+    dev: u64,
+    ino: u64,
+    body: []const u8,
+) !mutation.Parsed {
+    var tmp_buf: [96]u8 = undefined;
+    const tmp = try std.fmt.bufPrint(&tmp_buf, "/tmp/maru-rfwrite-io.{d}", .{std.c.getpid()});
+    var body_buf: [96]u8 = undefined;
+    const body_path = try std.fmt.bufPrint(&body_buf, "{s}.body", .{tmp});
+    var out_buf: [96]u8 = undefined;
+    const out_path = try std.fmt.bufPrint(&out_buf, "{s}.out", .{tmp});
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = body_path, .data = body });
+    defer std.Io.Dir.cwd().deleteFile(io, body_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, out_path) catch {};
+
+    var dev_buf: [24]u8 = undefined;
+    var ino_buf: [24]u8 = undefined;
+    const dev_text = try std.fmt.bufPrint(&dev_buf, "{d}", .{dev});
+    const ino_text = try std.fmt.bufPrint(&ino_buf, "{d}", .{ino});
+    const run = try std.process.run(gpa, io, .{ .argv = &.{
+        "/bin/sh",
+        "-c",
+        "exec \"$1\" write \"$2\" \"$3\" \"$4\" \"$5\" \"$6\" < \"$7\" > \"$8\"",
+        "fixture",
+        bin,
+        parent,
+        name,
+        mode,
+        dev_text,
+        ino_text,
+        body_path,
+        out_path,
+    } });
+    defer gpa.free(run.stdout);
+    defer gpa.free(run.stderr);
+    switch (run.term) {
+        .exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
+        else => return error.TestUnexpectedResult,
+    }
+    const out = try std.Io.Dir.cwd().readFileAlloc(io, out_path, gpa, .limited(4096));
+    defer gpa.free(out);
+    const parsed = try mutation.parse(out);
+    return .{ .outcome = parsed.outcome, .message = &.{} };
+}
+
+test "헬퍼 write 왕복: 내용이 stdin 으로 가고, 비대체가 남의 파일을 지키며, 덮어쓰기는 원자다 (U3)" {
+    const bin = helperBin() orelse return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    var dir_buf: [64]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&dir_buf, "/tmp/maru-rfwrite-rt.{d}", .{std.c.getpid()});
+    try sh(gpa, io,
+        \\set -eu
+        \\rm -rf "$1"
+        \\mkdir -p "$1"
+        \\printf theirs > "$1/taken.txt"
+    , dir);
+    defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+    const id = try listSelf(gpa, io, bin, dir);
+
+    // ── ① **새 파일에 내용이 들어간다**(`mk` 는 빈 파일만 만들었다 — 그 구멍이 이 하위 명령의 이유다).
+    {
+        const got = try runWrite(gpa, io, bin, dir, "notes.md", "x", id.dev, id.ino, "hello\nbody\n");
+        try std.testing.expectEqual(mutation.Outcome.ok, got.outcome);
+        var p: [128]u8 = undefined;
+        const path = try std.fmt.bufPrint(&p, "{s}/notes.md", .{dir});
+        const body = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(64));
+        defer gpa.free(body);
+        try std.testing.expectEqualStrings("hello\nbody\n", body);
+    }
+
+    // ── ② **비대체(`x`)는 남의 파일을 지킨다** — `collision` 이고 내용이 그대로다.
+    {
+        const got = try runWrite(gpa, io, bin, dir, "taken.txt", "x", id.dev, id.ino, "mine");
+        try std.testing.expectEqual(mutation.Outcome.collision, got.outcome);
+        var p: [128]u8 = undefined;
+        const path = try std.fmt.bufPrint(&p, "{s}/taken.txt", .{dir});
+        const kept = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(64));
+        defer gpa.free(kept);
+        try std.testing.expectEqualStrings("theirs", kept);
+    }
+
+    // ── ③ **덮어쓰기(`o`)는 바꿔 끼운다** — 사용자가 답한 뒤의 그 모드다.
+    {
+        const got = try runWrite(gpa, io, bin, dir, "taken.txt", "o", id.dev, id.ino, "mine");
+        try std.testing.expectEqual(mutation.Outcome.ok, got.outcome);
+        var p: [128]u8 = undefined;
+        const path = try std.fmt.bufPrint(&p, "{s}/taken.txt", .{dir});
+        const now = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(64));
+        defer gpa.free(now);
+        try std.testing.expectEqualStrings("mine", now);
+    }
+
+    // ── ④ **신원이 0·0 이면 「비교할 과거가 없다」** — 문서 저장이 그 자리다(목록을 거치지 않는다).
+    //     여기서 `stale` 이 나오면 **모든 저쪽 저장이** 그렇게 된다.
+    {
+        const got = try runWrite(gpa, io, bin, dir, "no-identity.txt", "x", 0, 0, "ok");
+        try std.testing.expectEqual(mutation.Outcome.ok, got.outcome);
+    }
+
+    // ── ⑤ **신원이 어긋나면 안 쓴다**(0·0 이 아닌 값을 주면 그 관문은 살아 있다).
+    {
+        const got = try runWrite(gpa, io, bin, dir, "nope.txt", "x", id.dev, id.ino +% 1, "x");
+        try std.testing.expectEqual(mutation.Outcome.stale, got.outcome);
+        var p: [128]u8 = undefined;
+        const path = try std.fmt.bufPrint(&p, "{s}/nope.txt", .{dir});
+        try std.testing.expect(std.Io.Dir.cwd().statFile(io, path, .{}) catch null == null);
+    }
+
+    // ── ⑥ **이름·모드가 이름·모드일 수 없으면 invalid** — 그리고 **임시 파일을 남기지 않는다**
+    //     (남기면 다음 저장이 「이미 있다」를 만난다).
+    {
+        try std.testing.expectEqual(mutation.Outcome.invalid, (try runWrite(gpa, io, bin, dir, "..", "x", id.dev, id.ino, "x")).outcome);
+        try std.testing.expectEqual(mutation.Outcome.invalid, (try runWrite(gpa, io, bin, dir, "a/b", "x", id.dev, id.ino, "x")).outcome);
+        try std.testing.expectEqual(mutation.Outcome.invalid, (try runWrite(gpa, io, bin, dir, "ok.txt", "z", id.dev, id.ino, "x")).outcome);
+        var d = try std.Io.Dir.cwd().openDir(io, dir, .{ .iterate = true });
+        defer d.close(io);
+        var it = d.iterate();
+        while (try it.next(io)) |e| {
+            try std.testing.expect(!std.mem.startsWith(u8, e.name, ".maru-write-"));
+        }
+    }
+}
+
 test "헬퍼 mv: 절대경로가 아니면 wire 오류로 완결된다 — 침묵이 아니다 (RF6a)" {
     const bin = helperBin() orelse return error.SkipZigTest;
     const gpa = std.testing.allocator;

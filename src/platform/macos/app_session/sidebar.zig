@@ -18,6 +18,7 @@ const maru = @import("maru");
 
 const chrome = maru.chrome;
 const app_session_mod = @import("../app_session.zig");
+const status_bar_ops = @import("status_bar.zig");
 const AppSession = app_session_mod.AppSession;
 const DropPlan = AppSession.DropPlan;
 const GroupNestPlan = AppSession.GroupNestPlan;
@@ -794,7 +795,7 @@ pub fn sidebarViewportPx(backing_height_px: u32, header_height_px: u32, status_b
 /// 빼고"라는 조합을 각자 다시 적지 않게 한다 — 그렇게 흩어져 있다가 한 곳이 상태바를 빠뜨린 것이 이 함수가
 /// 생긴 이유다.
 pub fn sidebarViewport(self: *const AppSession) SidebarViewport {
-    return sidebarViewportPx(self.backing_height_px, self.sidebar_header_height_px, self.statusBarHeightPx());
+    return sidebarViewportPx(self.backing_height_px, self.sidebar_header_height_px, status_bar_ops.statusBarHeightPx(self));
 }
 
 /// 사이드바 콘텐츠(표시 카드 전체 높이)가 뷰포트를 넘는 양(backing px). 0이면 스크롤 불필요.

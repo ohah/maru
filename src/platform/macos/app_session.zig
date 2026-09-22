@@ -6,6 +6,9 @@ pub const editor_diff_ops = @import("app_session/editor_diff.zig");
 pub const editor_merge_ops = @import("app_session/editor_merge.zig");
 const term_ops = @import("app_session/term.zig");
 const git_ops = @import("app_session/git.zig");
+const remote_agent_ops = @import("app_session/remote_agent.zig");
+const marker_view_ops = @import("app_session/marker_preview_view.zig");
+const status_bar_ops = @import("app_session/status_bar.zig");
 const agent_ops = @import("app_session/agent.zig");
 const notification_ops = @import("app_session/notification.zig");
 pub const input_ops = @import("app_session/input.zig");
@@ -114,17 +117,17 @@ pub const marker_preview_decode_key: usize = std.math.maxInt(usize);
 
 /// 붙여넣기를 기다리지 **않을** 때 마커 관찰을 돌리는 주기(tick). 60 Hz 기준 0.5 초다.
 /// 그 사이에 하는 일은 `staged` → `sent` 전이와 인덱스 인계뿐이라 늦어도 기능이 안 깨진다.
-const idle_marker_scan_ticks: u32 = 30;
+pub const idle_marker_scan_ticks: u32 = 30;
 const agent_image_scan_backend = @import("agent_image_scan_backend.zig"); // IG1-e: 갤러리 스캔 워커
 const agent_body_search_backend = @import("agent_body_search_backend.zig"); // BS1: 본문 검색 워커
-const agent_image_decode_backend = @import("agent_image_decode_backend.zig"); // IG3-d: 갤러리 디코드 워커 // IG1: 이미지 갤러리 도크 뷰(docs/agent-image-gallery.md)
+pub const agent_image_decode_backend = @import("agent_image_decode_backend.zig"); // IG3-d: 갤러리 디코드 워커 // IG1: 이미지 갤러리 도크 뷰(docs/agent-image-gallery.md)
 pub const file_tree_dock_ops = @import("app_session/file_tree_dock.zig"); // 파일 탐색기 트리 component 배선(FT1)
 pub const accessibility = @import("app_session/accessibility.zig"); // 발행된 tree 의 접근성 서술자를 ABI 스냅숏으로 굳힌다 — docs/chrome-interaction-migration.md §3
 const file_panel_ops = @import("app_session/file_panel.zig");
-const pane_ops = @import("app_session/pane.zig");
+pub const pane_ops = @import("app_session/pane.zig");
 const dock_ops = @import("app_session/dock.zig"); // F5: 도크 일반(view·레이아웃·스크롤바) // F4: pane·split·divider // F2: 파일 탐색기·파일 패널 // F1+F3 병합: 에이전트 세션 기록 도크 // E1: 스크롤백 Find(⌘F) 본문 분리(docs/app-session-decomposition.md)
 const quick_terminal_geometry = @import("quick_terminal_geometry.zig"); // quick 패널 보임/숨김 사각형 순수 기하(세션 없이 단위 테스트)
-const ssh_upload = @import("ssh_upload.zig"); // 드롭 파일 → maru ssh control socket 업로드(3b 실행)
+pub const ssh_upload = @import("ssh_upload.zig"); // 드롭 파일 → maru ssh control socket 업로드(3b 실행)
 const remote_watch_mod = @import("remote_watch.zig"); // 원격 감시 채널(RW3 — 긴 수명 ssh exec 하나)
 // find 오버레이는 chrome 컴포넌트(maru.chrome.components.find)로 이주(C1a). UI 상태(query/current/count)는
 // chrome_host.find가, 매치 리스트(terminal.Match)는 session(find_matches)이 소유한다 — chrome은 terminal 무참조.
@@ -1211,21 +1214,21 @@ pub const scm_row_capacity: usize = 128;
 pub const scm_log_limit_initial: u32 = 200;
 // **치수는 중립 잎이 소유한다**(`maru.status_bar_metrics`). 여기 있던 동안 Windows 가 볼 수 없었고,
 // 베끼면 "바 높이" 가 두 곳이 되어 한쪽만 고칠 때 두 OS 의 작업영역이 갈린다(그 파일 헤더가 근거).
-const status_bar_metrics = maru.status_bar_metrics;
+pub const status_bar_metrics = maru.status_bar_metrics;
 const status_bar_height_pt: u32 = status_bar_metrics.height_pt;
 /// 상태바 좌/우 가장자리 안쪽 여백·항목 간격(논리 pt). 높이와 같은 이유로 폰트 독립이다.
-const status_bar_edge_pad_pt: u32 = status_bar_metrics.edge_pad_pt;
-const status_bar_gap_pt: u32 = status_bar_metrics.gap_pt;
+pub const status_bar_edge_pad_pt: u32 = status_bar_metrics.edge_pad_pt;
+pub const status_bar_gap_pt: u32 = status_bar_metrics.gap_pt;
 /// 상태바 **상단 경계선** 두께(논리 pt). 배경 띠 **안쪽 맨 위**에 그으므로 `dock_layout`이 깎아 둔
 /// 높이는 그대로다 — 선을 추가한다고 작업영역이 줄지 않는다.
-const status_bar_border_pt: u32 = status_bar_metrics.border_pt;
+pub const status_bar_border_pt: u32 = status_bar_metrics.border_pt;
 /// 호버 배경이 항목 좌우로 넓어지는 여백(논리 pt, 한쪽). 글자에 딱 붙은 배경은 답답해 보인다.
 /// **항목 간격(gap)보다 두 배 이상 작아야** 이웃 호버끼리 겹치지 않는다(4×2 < 12).
-const status_bar_item_pad_pt: u32 = status_bar_metrics.item_pad_pt;
+pub const status_bar_item_pad_pt: u32 = status_bar_metrics.item_pad_pt;
 /// 상태바 텍스트 위아래 여백(논리 pt, 한쪽). 바 높이가 이 값으로 텍스트 행에서 파생된다 — 아래 참고.
 const status_bar_v_pad_pt: u32 = status_bar_metrics.v_pad_pt;
 /// 상태바 좌측 항목 상한. 지금은 브랜치·경로 둘이고, 늘릴 때 이 값과 우선순위 순서를 함께 본다.
-const max_status_bar_left_items: usize = 2;
+pub const max_status_bar_left_items: usize = 2;
 /// 상태바 우측 항목 상한.
 // blocked·running·알림 + 편집기 **넷**(커서 위치·저하·읽기 전용·줄바꿈) + 리소스. 편집기 넷은
 // 활성 pane이 편집기일 때만 실리므로 평소에는 넷만 쓴다.
@@ -1233,7 +1236,7 @@ const max_status_bar_left_items: usize = 2;
 // **무관하게** 사라진다 — 실측으로 2,500px가 남은 채로 빠졌고, 그것은 `status-bar.md` §3이 정한
 // 폭 규칙이 아니라 배열 상한이라 화면만 봐서는 "폭이 모자랐나 보다"로 읽힌다(그 문서가 금지한
 // 조용한 절단이다). **후보 원장에서 되짚어** 다음 항목이 붙을 때 이 값을 잊지 못하게 한다.
-const max_status_bar_right_items: usize = chrome.components.status_bar.right_candidates.len;
+pub const max_status_bar_right_items: usize = chrome.components.status_bar.right_candidates.len;
 
 // 런타임 폰트 크기 조절(⌘+/⌘-/⌘0). step = ⌘+/⌘- 한 번에 1pt(Ghostty 기본과 동일). 클램프 범위는 보수적으로
 // [6, 72]pt — appearance resolver는 [1,512]를 허용하지만 6pt 미만은 글자가 안 읽히고 72pt 초과는 grid가
@@ -1254,16 +1257,16 @@ pub const scrollbar_alpha_full: u8 = 0xFF; // 활성/hover/드래그
 
 /// 상태바 리소스 표본 주기. 에이전트 폴링(0.5s)보다 **느리게** 둔다 — 메모리·CPU는 초 단위로 움직이고,
 /// 더 자주 재도 사람이 못 읽는다(docs/status-bar.md §6 "비용과 게이트").
-const resource_poll_interval_ms: u32 = 1000;
+pub const resource_poll_interval_ms: u32 = 1000;
 /// 한 Term 트리에서 가져올 표본 상한. 폭주 방어 — fork 폭탄이나 깊은 트리가 tick을 붙잡지 않게 한다.
-const max_resource_samples_per_term: usize = 48;
+pub const max_resource_samples_per_term: usize = 48;
 /// 한 번의 폴링이 담을 수 있는 **전체** 표본 수. 예전에는 `pollResourceUsage` 안에 `* 4`(192)로
 /// 박혀 있었고, 그 상한에 닿으면 뒤쪽 탭은 표본을 아예 못 받아 **총합에서도 빠졌다** — 화면에는
 /// 「합이 안 맞는다」로만 보인다(2026-09-21 실측: 머리글 17.4 GB vs 보이는 행 합 2.5 GB).
 ///
 /// **이름을 붙여 단일 출처로 둔다.** 배열과 판정자가 같은 상수를 봐야 한 쪽만 줄었을 때 빨개진다 —
 /// 적대적 검증에서 실제로 산술을 두 번 적어 두는 바람에 배열을 되돌려도 판정자가 통과했다.
-const max_resource_samples: usize = max_resource_rows * 16;
+pub const max_resource_samples: usize = max_resource_rows * 16;
 /// 리소스 팝오버가 띄우는 최대 행 수(= 최대 Term 수). 라벨은 공유 버퍼(`context_menu_items_buf`)를 쓰므로
 /// 그 크기를 넘으면 버퍼 밖에 쓴다 — 아래 comptime이 그걸 막는다.
 ///
@@ -1273,11 +1276,11 @@ const max_resource_samples: usize = max_resource_rows * 16;
 ///
 /// 상한을 창 하나가 현실적으로 가질 수 있는 Term 수까지 연다. 화면 높이를 넘으면 그때 잘리는데,
 /// 그 자름은 **정렬 뒤**라 큰 것부터 남고 남은 몫은 꼬리 행이 합계로 보여 준다.
-const max_resource_rows: usize = 64;
+pub const max_resource_rows: usize = 64;
 /// 한 행 문자열의 바이트 상한. `탭 › 팬`(UTF-8, 한 글자 최대 3바이트) + 고정 폭 숫자 + 구분자.
-const resource_row_max_bytes: usize = 256;
+pub const resource_row_max_bytes: usize = 256;
 /// 행에서 **이름이 쓸 수 있는 표시 칸**. 숫자 열은 고정 폭이라(§4.1) 이름만 예산을 먹는다. 넘치면 EAW 절단.
-const resource_row_name_cols: u32 = 28;
+pub const resource_row_name_cols: u32 = 28;
 /// 팝오버 앞머리의 **고를 수 없는** 줄 수: ⓪ 제목+합계 ① 열 이름. 레퍼런스 화면이 그 둘을 가졌고,
 /// 없으면 우클릭 메뉴 한 줄과 구별되지 않는다(사용자 지적). 선택·클릭·강조가 이 줄들을 건너뛴다.
 pub const resource_header_rows: usize = 2;
@@ -1288,19 +1291,19 @@ pub const resource_header_rows: usize = 2;
 /// ⚠️ 이 상수는 **버퍼 크기**이지 그때그때의 꼬리 수가 아니다. 실제로 서는 꼬리는 0·1·2 전부 가능하므로
 /// (앱 표본 실패·host 미연결) `showWithFooters`에는 **센 값**을 넘긴다 — 상수를 넘기면 살아 있는 탭 행이
 /// 선택 불가가 된다(`resource_usage.partitionPinned`가 그 산술을 소유하고 테스트가 단언한다).
-const resource_footer_rows: usize = 2;
+pub const resource_footer_rows: usize = 2;
 /// 앱 자신 행의 그룹 키. Term surface_id와 절대 겹치지 않아야 해서 최대값을 센티넬로 쓴다 — id는 1부터
 /// 증가하며 재사용하지 않으므로(session-local) 이 값에 도달하지 않는다.
-const resource_app_key: u64 = std.math.maxInt(u64);
+pub const resource_app_key: u64 = std.math.maxInt(u64);
 /// 세션 호스트 데몬 행의 그룹 키. 앱 키 바로 아래를 쓴다(같은 이유로 surface_id와 안 겹친다).
-const resource_host_key: u64 = std.math.maxInt(u64) - 1;
+pub const resource_host_key: u64 = std.math.maxInt(u64) - 1;
 /// 한 번에 셀 host 데몬 수. 보통 1이고, **업그레이드 중에만** 구/신 host가 잠깐 함께 산다
 /// (docs/session-host-upgrade.md §5). 여유를 조금 두되 상한을 둔다 — 이 배열은 Term 표본과 같은
 /// 고정 버퍼를 나눠 쓰므로 무한정 가져가면 탭 표본이 밀린다. 여럿이면 한 행에 **합계**로 나온다.
-const max_resource_host_samples: usize = 4;
+pub const max_resource_host_samples: usize = 4;
 /// 팝오버 꼬리에 붙는 고정 행의 키 — **여기 적힌 순서가 화면 순서**다(세션 호스트 → 앱). 표본을 얻은
 /// 순서로 두면 같은 화면이 실행마다 위아래가 바뀐다.
-const resource_pinned_keys = [_]u64{ resource_host_key, resource_app_key };
+pub const resource_pinned_keys = [_]u64{ resource_host_key, resource_app_key };
 comptime {
     if (resource_pinned_keys.len != resource_footer_rows)
         @compileError("pinned resource keys must match resource_footer_rows");
@@ -1328,17 +1331,17 @@ fn agentAgeCols() u32 {
 
 /// 앱 자신 행 라벨. **"모든 창 공유"를 이름에 박는다** — 창이 여럿이면 각 창이 같은 값을 보여주므로,
 /// 두 창의 숫자를 더하면 이중으로 잡힌다는 사실이 화면에서 드러나야 한다(§4.1의 남는 결함).
-fn resourceAppLabel() []const u8 {
+pub fn resourceAppLabel() []const u8 {
     return maru.i18n.t(.app_shared_all_windows);
 }
 
-fn resourceHostLabel() []const u8 {
+pub fn resourceHostLabel() []const u8 {
     return maru.i18n.t(.app_session_host_shared);
 }
 
 /// `bytes`를 표시 칸 `max_cols` 안으로 줄여 `buf`에 쓴다(EAW 기준 — 한글 한 자 2칸). 넘치면 끝에 `…`.
 /// `overlay_input.truncateToCols`는 arena를 받는데 여기는 tick 경로라 할당을 피한다 — 같은 규칙을 버퍼에 쓴다.
-fn truncateColsInto(buf: []u8, bytes: []const u8, max_cols: u32) []const u8 {
+pub fn truncateColsInto(buf: []u8, bytes: []const u8, max_cols: u32) []const u8 {
     if (chrome.components.overlay_input.displayCols(bytes) <= max_cols) {
         const n = @min(bytes.len, buf.len);
         @memcpy(buf[0..n], bytes[0..n]);
@@ -1367,19 +1370,19 @@ fn truncateColsInto(buf: []u8, bytes: []const u8, max_cols: u32) []const u8 {
 }
 
 /// `src`를 `dst`에 담기는 만큼만 복사하고 쓴 바이트 수를 돌려준다(고정 버퍼 조립용 — 넘치면 자른다).
-fn copyClamped(dst: []u8, src: []const u8) usize {
+pub fn copyClamped(dst: []u8, src: []const u8) usize {
     const n = @min(dst.len, src.len);
     @memcpy(dst[0..n], src[0..n]);
     return n;
 }
 /// 팝오버가 **열려 있는 동안**의 표본 주기. 닫힘(1초)보다 당긴다 — 열어 두고 보는데 값이 안 변하면 멈춘 줄 안다.
 /// 더 당기지 않는 이유: CPU%는 차분이라 창이 짧을수록 값이 튀고, 사람이 못 읽는 속도로 재면 syscall만 는다.
-const resource_open_poll_interval_ms: u32 = 500;
+pub const resource_open_poll_interval_ms: u32 = 500;
 
 /// 단조 시계(ms). CPU%는 차분이라 **tick 개수가 아니라 벽시계**로 재야 한다 — 프레임 루프가 흔들리면
 /// `ticks/hz`가 실제 경과와 어긋나고, 하필 머신이 바쁠 때(= 사용자가 CPU%를 보는 때) 틀린다.
 /// Zig 0.16은 `std.time.Timer`·`nanoTimestamp`가 없다(src/session/control_bridge.zig `monotonicMs`와 같은 관례).
-fn monotonicMs() u64 {
+pub fn monotonicMs() u64 {
     var ts: std.c.timespec = undefined;
     _ = std.c.clock_gettime(.MONOTONIC, &ts);
     return @as(u64, @intCast(ts.sec)) * 1000 + @as(u64, @intCast(ts.nsec)) / std.time.ns_per_ms;
@@ -3780,7 +3783,7 @@ var test_narrowed_cols_override: ?u16 = null;
 /// 판정 자체는 `RemoteRuntime` 이 `runtime.resized` 가 올 때 해 둔다 — 여기서 창 크기와 견주면
 /// 사용자가 창을 넓히는 동안 host 확정 전까지 참이 되어 **폰이 없어도 표시가 번쩍인다**.
 /// 이 함수는 그 결과를 읽기만 한다.
-fn activeTermNarrowedCols(self: *AppSession) ?u16 {
+pub fn activeTermNarrowedCols(self: *AppSession) ?u16 {
     if (builtin.is_test) if (test_narrowed_cols_override) |value| return value;
     if (!is_macos) return null;
     // **활성 surface 가 없을 수 있다**(창을 비우는 경로). `activeSurface()` 는 그때 패닉한다.
@@ -7998,39 +8001,6 @@ pub const AppSession = struct {
         }
     }
 
-    /// 창 바닥 상태표시줄의 backing px 높이. `dock_layout`이 이 값으로 작업영역을 깎고(S1 seam), 렌더러가
-    /// 같은 값으로 사이드바 배경 strip·셀 scissor를 끊는다(S2a ABI). 접힘·도크 상태와 무관하게 항상 선다 —
-    /// 조건부로 만들면 바 높이가 프레임마다 달라져 터미널 grid가 출렁인다.
-    /// 상태바 좌/우 가장자리 안쪽 여백(px). 사이드바 카드 여백과 같은 급으로 두되 pt 독립이다.
-    fn statusBarEdgePadPx(self: *const AppSession) u32 {
-        return layout_math.ptToPx(status_bar_edge_pad_pt, self.scale_milli);
-    }
-
-    /// 상태바 항목 사이 간격(px). 아이콘+텍스트 묶음끼리 붙어 보이지 않을 만큼만 띄운다.
-    fn statusBarGapPx(self: *const AppSession) u32 {
-        return layout_math.ptToPx(status_bar_gap_pt, self.scale_milli);
-    }
-
-    pub fn statusBarHeightPx(self: *const AppSession) u32 {
-        // quick terminal은 chrome을 의도적으로 걷어낸 모드다 — `paneBarHeightPx`가 0을 돌려 탭 바를
-        // 통째로 끄는 것과 같은 규율. §2 "항상 선다"는 도크·사이드바 **토글**(프레임마다 바뀌어
-        // grid가 출렁이는 것)을 막는 규칙이고, 세션 생성 시 고정되는 이 모드는 그 대상이 아니다.
-        if (self.chrome_minimal) return 0;
-        // 사용자가 끈 경우도 같은 자리에서 0으로 만든다 — 게이트가 여기 하나뿐이라 작업영역·도크·사이드바
-        // 뷰포트·strip·scissor가 전부 자동으로 따라온다(§5.4의 소비처 목록을 손댈 필요가 없다).
-        if (!self.loaded_config.config.status_bar.show) return 0;
-        // **텍스트 행에 여백을 더한 높이와 고정 하한 중 큰 쪽.** 상단 타이틀바 띠(`computeTitlebarStripPx`)가
-        // 쓰는 `@max(cell_height_px, 최소 pt)`와 같은 패턴이다.
-        //
-        // 고정 높이만 쓰면 두 가지가 깨진다: (1) 기본 폰트에서 22px 바에 18px 행이라 위아래 2px밖에 안 남아
-        // 빡빡하고(사용자 지적), (2) 폰트를 키워 셀이 바보다 커지면 `(h -| cell_height) / 2`가 0으로 포화돼
-        // **글자가 바 아래로 넘친다**(창 밖). 텍스트가 터미널 셀 높이를 쓰는 이상 바가 그걸 담아야 한다.
-        //
-        // 그래도 **하한은 폰트 독립**이라 작은 폰트에서 바가 실처럼 얇아지지 않는다 — 도크 view bar가 폰트
-        // 파생만으로 오르내리던 회귀(실측 53px↔80px)를 피한 이유가 그 하한이다.
-        return status_bar_metrics.heightPx(self.cell_height_px, self.scale_milli);
-    }
-
     pub fn pointerGestureIs(self: *const AppSession, comptime tag: std.meta.Tag(PointerGestureOwner)) bool {
         return std.meta.activeTag(self.pointer_gesture_owner) == tag;
     }
@@ -8096,7 +8066,7 @@ pub const AppSession = struct {
         // 상태바도 창 높이를 먹으므로 bottom으로 흡수한다 — 여기서 더하면 `gridFromBacking` 호출부 셋(spawn
         // config·메트릭 재계산·resize)이 한 번에 정합한다. 각 호출부에서 따로 빼면 하나만 빠뜨려도 spawn grid와
         // 실제 pane grid가 어긋난다(그 정합이 이 함수의 존재 이유다).
-        p.bottom +|= self.statusBarHeightPx();
+        p.bottom +|= status_bar_ops.statusBarHeightPx(self);
         const g = dock_ops.dockGeometry(self);
         if (g.dock.w > 0) switch (self.dock.side) {
             .right => p.right +|= g.divider.w + g.dock.w,
@@ -13923,11 +13893,11 @@ pub const AppSession = struct {
         // **오버레이가 열려 있으면 이 가드를 타지 않는다.** 모달은 결정 게이트라(아래 confirm/notice 처리가
         // 그 계약을 갖는다) 상태바 항목이 그 뒤에서 도크·패널을 여는 것은 단일-오버레이 불변식 위반이다.
         // 이 가드가 그 처리보다 **앞에** 있으므로 여기서 직접 비켜 줘야 한다(scrollWheel은 모달 검사 뒤라 무관).
-        if (kind == 1 and !self.anyOverlayOpen() and self.pointInStatusBar(x_px, y_px)) {
+        if (kind == 1 and !self.anyOverlayOpen() and status_bar_ops.pointInStatusBar(self, x_px, y_px)) {
             // 바 위 down은 여전히 삼킨다(터미널 선택이 시작되면 안 된다). 다만 클릭 가능한 항목 위라면
             // 삼키기 **전에** 실행한다 — 상태바가 조작 지점이 되는 지점이다.
-            if (self.statusBarItemAt(x_px, y_px)) |id| {
-                if (statusBarItemClickable(id)) self.activateStatusBarItem(id);
+            if (status_bar_ops.statusBarItemAt(self, x_px, y_px)) |id| {
+                if (status_bar_ops.statusBarItemClickable(id)) status_bar_ops.activateStatusBarItem(self, id);
             }
             return;
         }
@@ -15733,7 +15703,7 @@ pub const AppSession = struct {
         // **바이트가 우리를 거치는 유일한 자리**라 로컬·원격 가리지 않고 프리뷰 스테이징에 실어 둔다(§4.2).
         // 원격이어도 그 임시 PNG는 **이쪽 기기에 있다** — 업로드되는 것은 사본이므로 디코드는 로컬에서 된다.
         // 실패는 삼킨다: 프리뷰가 안 되는 것이 붙여넣기를 막을 이유가 아니다.
-        self.stageMarkerPreviewImage(active_term, temp_path, bytes);
+        marker_view_ops.stageMarkerPreviewImage(self, active_term, temp_path, bytes);
         if (active_term.surface.remote == null) {
             // **로컬은 여기서 consume하지 않는다** — Swift가 임시 PNG 경로를 bracketed paste로 보내야
             // TUI가 `[Image #N]`으로 바꾼다(§4.1).
@@ -15755,7 +15725,7 @@ pub const AppSession = struct {
             const surface_id = term.surface.id;
             var visible: std.ArrayList(u32) = .empty;
             defer visible.deinit(self.allocator);
-            self.collectMarkerNumbers(term, .viewport, &visible) catch return;
+            marker_view_ops.collectMarkerNumbers(self, term, .viewport, &visible) catch return;
             const owned = self.allocator.dupe(u8, path) catch return;
             // 바이트는 안 든다 — 디코드가 경로로 읽는다. 예산(§4.2)도 그만큼 덜 문다.
             marker_preview_ops.onImagePasted(&self.marker_preview, self.allocator, surface_id, visible.items, &.{}, owned) catch {
@@ -15778,401 +15748,16 @@ pub const AppSession = struct {
         return false;
     }
 
-    /// 붙여넣은 PNG를 마커 프리뷰 스테이징에 건다(§4.2). **paste가 나가기 전에** 불려야 한다 —
-    /// 관찰 기준선이 마커가 뜬 뒤에 찍히면 그 마커가 「새로 나타난 것」이 아니게 되어 영영 안 묶인다.
-    fn stageMarkerPreviewImage(self: *AppSession, term: *Term, temp_path: []const u8, bytes: []const u8) void {
-        const surface_id = term.surface.id;
-        var visible: std.ArrayList(u32) = .empty;
-        defer visible.deinit(self.allocator);
-        self.collectMarkerNumbers(term, .viewport, &visible) catch return;
-        const png = self.allocator.dupe(u8, bytes) catch return;
-        const path = self.allocator.dupe(u8, temp_path) catch {
-            self.allocator.free(png);
-            return;
-        };
-        marker_preview_ops.onImagePasted(&self.marker_preview, self.allocator, surface_id, visible.items, png, path) catch {
-            self.allocator.free(png);
-            self.allocator.free(path);
-        };
-    }
-
-    /// Cmd+클릭이 마커 위였나 — 맞으면 프리뷰를 토글하고 참을 돌린다(클릭 소비).
-    ///
-    /// **기록에 없는 N이면 아무 일도 안 한다**(§3.1) — 화면에 글자로 쓰인 `[Image #1]`은 우리 것이
-    /// 아니므로 클릭을 먹지 않고 링크 경로로 흘려보낸다.
-    fn toggleMarkerPreviewAt(self: *AppSession, term: *Term, surface_id: u64, cell: maru.session.layout_math.CellHit) bool {
-        if (term.kind != .terminal) return false;
-        // **뷰포트 전부를 후보로 본다.** 전송된 마커는 커서 위(대화 영역)로 올라가므로 커서 블록만
-        // 보면 영영 못 찾는다(사용자 제보 2026-09-14 — 「채팅창에 올라간 건 안 열린다」).
-        var hits: std.ArrayList(maru.session.agent_image_markers.Hit) = .empty;
-        defer hits.deinit(self.allocator);
-        self.collectMarkerHits(term, .viewport, &hits) catch return false;
-        // `CellHit.row`는 **이미 뷰포트 행**이고 마커 스캔도 뷰포트 행으로 답한다 — 변환이 없다.
-        const m = maru.session.agent_image_markers.hitAt(hits.items, cell.row, cell.col) orelse return false;
-        // ⚠️ **소스는 「어디에 있나」가 아니라 「누가 답할 수 있나」로 고른다.**
-        //
-        // 한 판에서는 범위(커서 블록 안/밖)로 갈랐는데 그것이 **회귀를 냈다**(사용자 제보): 커서
-        // 블록 스캔은 스크롤된 뷰포트에서 **빈 목록**이라(§3.3) 전송 전 마커까지 인덱스로 보내졌고,
-        // 인덱스는 **갤러리 도크를 연 적이 있어야** 채워지므로(`refreshForFocus`) 아무것도 안 열렸다.
-        // 범위는 같은 번호가 두 곳에 있을 때의 **동점 규칙**이지 게이트가 아니다.
-        //
-        // 그래서 **스테이징을 먼저 묻는다.** 거기 있으면 이번 실행에 우리가 직접 실어 둔 것이라
-        // 가장 확실하고, 전송된 뒤에도 `sent` 로 남아 있다(§4.2 A11). 없을 때만 인덱스로 간다.
-        const staged_known = if (self.marker_preview.stagingFor(surface_id)) |st| st.lookup(m.n) != null else false;
-        if (diag_gate.maruDebugEnabled()) marker_preview_diag.info(
-            "click n={d} row={d} col={d} staged={} surface={d}",
-            .{ m.n, m.row, m.start_col, staged_known, surface_id },
-        );
-        if (!staged_known) return self.toggleSentMarkerPreview(surface_id, m, hits.items, self.viewportScrolled(term));
-        const next = marker_preview_ops.toggle(&self.marker_preview, self.marker_preview_open, surface_id, m);
-        const changed = (next == null) != (self.marker_preview_open == null) or
-            (next != null and self.marker_preview_open != null and next.?.n != self.marker_preview_open.?.n);
-        if (!changed) return next != null or self.marker_preview_open != null;
-        // **닫는 길에서 텍스처 회수 표시를 세운다**(§5). 안 세우면 다시 열 때 그 한 장이 빈다.
-        if (self.marker_preview_open) |*o| o.deinit(self.allocator);
-        self.marker_preview_open = next;
-        self.metal_dirty = true;
-        return next != null;
-    }
-
-    /// 열린 프리뷰의 앵커를 재검증하고 디코드를 편다 — tick마다.
-    fn pumpMarkerPreviewOpen(self: *AppSession) void {
-        const open = &(self.marker_preview_open orelse return);
-        if (!self.surface_initialized or self.tabs.items.len == 0) {
-            self.closeMarkerPreview();
-            return;
-        }
-        // **그 프리뷰가 속한 pane 을 찾는다** — 활성 pane 이 아닐 수 있다(`markerPreviewTarget`).
-        // 이름이 `target` 이 아닌 것은 이 함수 아래에 디코드 **목표 변**(`target`)이 이미 있어서다.
-        const owner = self.markerPreviewTarget() orelse return; // 다른 탭이다 — 그리지도 닫지도 않는다
-        const term = owner.term;
-        if (term.kind != .terminal) return;
-        // **앵커 재검증**(§3) — TUI가 그 자리를 덮어도 통보가 없으므로 매 프레임 확인한다. 어긋나면
-        // **따라가고**(같은 N 이 화면에 있다), 그 N 이 아예 없을 때만 조용히 닫는다(2026-09-15 개정 —
-        // 좌표 고정은 리페인트마다 프리뷰를 죽여 「눌러도 안 열린다」가 됐다. `reanchor` 주석이 계측과
-        // 근거를 들고 있다).
-        //
-        // ⚠️ **`viewport` 로 본다.** 한 판에서는 `cursor_block` 이었는데, 전송된 마커는 커서 블록 **밖**이라
-        // 매번 「앵커가 사라졌다」로 판정돼 **열리자마자 다음 tick 에 닫혔다**(사용자 제보 — 「전송 후는
-        // 여전히 안 된다」). 여는 쪽은 뷰포트 전체를 보는데 재검증만 좁게 보면 둘이 어긋난다.
-        // **규율**: 여는 스캔과 유지하는 스캔은 **같은 범위**여야 한다.
-        var hits: std.ArrayList(maru.session.agent_image_markers.Hit) = .empty;
-        defer hits.deinit(self.allocator);
-        self.collectMarkerHits(term, .viewport, &hits) catch return;
-        switch (marker_preview_ops.reanchor(open.*, hits.items)) {
-            .unchanged => {},
-            .moved => |h| {
-                // 좌표만 따라간다 — 이미지·디코드 상태는 **그대로**다(같은 마커, 같은 그림).
-                open.row = h.row;
-                open.start_col = h.start_col;
-                open.end_col = h.end_col;
-                self.metal_dirty = true;
-                if (diag_gate.maruDebugEnabled()) marker_preview_diag.info(
-                    "reanchor n={d} -> row={d} col={d}",
-                    .{ open.n, h.row, h.start_col },
-                );
-            },
-            .lost => {
-                // 그 번호가 화면에서 아예 사라졌다 — 따라갈 자리가 없어 닫는다(§3).
-                if (diag_gate.maruDebugEnabled()) marker_preview_diag.info(
-                    "closed n={d} reason=marker-gone",
-                    .{open.n},
-                );
-                self.closeMarkerPreview();
-                return;
-            },
-        }
-        if (open.pixels.len > 0 or open.failed) return;
-        if (open.decode_generation != 0) return;
-        // 디코드를 **한 번만** 건다. 결과는 `agent_activity_decode_backend` 의 take 루프가 가져간다.
-        const backend = &(self.agent_activity_decode_backend orelse return);
-        // 목표 변은 workspace 절반이면 충분하다(§2.3) — 원본을 통째로 올릴 이유가 없다.
-        const target: u32 = @max(256, self.backing_width_px / 2);
-        if (open.sent_hit_index) |hit_index| {
-            // **전송된 것** — 트랜스크립트 안의 base64 구간을 푼다(갤러리와 같은 잡).
-            const indexed = self.agent_activity.hits.items;
-            if (hit_index >= indexed.len) {
-                open.failed = true; // 인덱스가 다시 만들어져 자리가 밀렸다
-                return;
-            }
-            const h = indexed[hit_index];
-            // **그 자리가 여전히 같은 이미지인가.** 인덱스가 다시 만들어지면 배열 인덱스는 남의 것을
-            // 가리킬 수 있다 — 내용 키가 어긋나면 **틀린 그림 대신 못 연다**로 접는다.
-            if (h.file_index != open.sent_file_index or h.data_offset != open.sent_data_offset) {
-                open.failed = true;
-                return;
-            }
-            const path = self.agent_activity.chain.get(h.file_index) orelse {
-                open.failed = true;
-                return;
-            };
-            // **원격이면 그 구간을 저쪽에서 당겨온다**(P3 · RAV6). 저쪽 오프셋을 이쪽 `openFile` 에
-            // 넘기면 같은 모양의 로컬 경로가 열려 **남의 그림**이 뜬다 — 갤러리가 §13.6 N1 에서
-            // 잡은 그 사고이고, 여기서도 같은 규율을 진다.
-            //
-            // 목적지는 **활성 Term 의 관측**에서 온다(업로드·SCM·갤러리 스캔과 같은 출처 — 두 벌을
-            // 만들지 않는다). 원격인데 못 얻으면 **안 건다**: 로컬로 떨어뜨리면 위 사고가 난다.
-            var remote_ctx: ?@TypeOf(self.remoteUploadContextFor(term).?) = null;
-            defer if (remote_ctx) |ctx| ctx.deinit(self.allocator);
-            var remote: ?agent_image_decode_backend.Backend.RemoteTarget = null;
-            if (self.agent_activity.source_remote) {
-                remote_ctx = self.remoteUploadContextFor(term);
-                const ctx = remote_ctx orelse {
-                    open.failed = true;
-                    return;
-                };
-                remote = .{ .ctl = ctx.ctl, .dest = ctx.dest };
-            }
-            if (backend.submit(path, h.data_offset, h.data_len, target, marker_preview_decode_key, remote)) |gen| {
-                open.decode_generation = gen;
-                if (diag_gate.maruDebugEnabled()) marker_preview_diag.info(
-                    "decode sent n={d} hit={d} file={d} off={d} gen={d}",
-                    .{ open.n, hit_index, h.file_index, h.data_offset, gen },
-                );
-            }
-            return;
-        }
-        // **전송 전** — maru 가 저장한 그 파일을 그대로 푼다(base64 단계가 없다).
-        const st = self.marker_preview.stagingFor(open.surface_id) orelse return;
-        const e = st.lookup(open.n) orelse return;
-        if (e.path.len == 0) {
-            open.failed = true;
-            return;
-        }
-        const size = std.Io.Dir.cwd().statFile(self.io, e.path, .{}) catch {
-            open.failed = true;
-            return;
-        };
-        const len: u32 = std.math.cast(u32, size.size) orelse {
-            open.failed = true;
-            return;
-        };
-        if (backend.submitRawFile(e.path, len, target, marker_preview_decode_key)) |gen| {
-            open.decode_generation = gen;
-            if (diag_gate.maruDebugEnabled()) marker_preview_diag.info(
-                "decode staged n={d} path={s} gen={d}",
-                .{ open.n, e.path, gen },
-            );
-        }
-    }
-
-    /// 열린 프리뷰를 프레임에 싣는다. 자리는 `image_preview.place`가, 픽셀 채널은 갤러리와 같은
-    /// `gpu_images`가 소유한다(§2.1·§2.3).
-    fn appendMarkerPreviewImage(
-        self: *AppSession,
-        images: *[]renderer.metal_frame.GpuImage,
-        uploads: *[]renderer.metal_frame.GpuImageUpload,
-        pixels: *[]u8,
-        /// `pixels` 가 호출자 소유인지. kitty 픽셀은 프레임마다 AppSession 재사용 버퍼를 가리킬 수 있는데,
-        /// 아래 `marker_preview_ops.appendGpuImage` 는 `pixels.*` 를 **free 하고 교체**한다 — 그대로 넘기면
-        /// 남의 버퍼를 해제한다. 그래서 **실제로 건드리기 직전에** owned 사본으로 승격한다(조기 반환
-        /// 경로는 승격하지 않는다 — 미리보기가 닫힌 프레임에서 수 MB 를 헛복사하지 않기 위해서다).
-        pixels_owned: *bool,
-        live_ids: *std.ArrayList(u32),
-    ) void {
-        const open = &(self.marker_preview_open orelse return);
-        const target = self.markerPreviewTarget() orelse {
-            open.uploaded = false; // 다른 탭이라 이 프레임엔 안 실린다
-            return;
-        };
-        const place = self.markerPreviewPlacement(target, open.*) orelse {
-            open.uploaded = false;
-            return;
-        };
-        // **테두리를 여기서 그린다 — 이미지와 같은 프레임 자리다.** 예전에는 chrome draws 조립부에서
-        // 넣었는데, `gpu_quads` 는 **매 프레임 비워지는데 그 조립부는 매 프레임 돌지 않는다**. 그래서
-        // 테두리가 유지되지 않았다 — Cmd 를 누르면 단축키 힌트 때문에 chrome 이 다시 조립돼 살아나고,
-        // 떼면 그 프레임부터 quad 가 비어 사라졌다(사용자 제보 2026-09-14).
-        // **규율**: 매 프레임 있어야 하는 것은 매 프레임 도는 자리에서 넣는다 — 이미지(`gpu_images`)가
-        // 이미 그 자리를 쓰고 있었고, 테두리만 다른 생명주기에 얹은 것이 어긋남의 원인이었다.
-        self.appendMarkerPreviewFrameQuads(place, open.sent_hit_index != null);
-        if (open.pixels.len == 0) {
-            open.uploaded = false; // 아직 안 풀렸다 — 「안 그리고 나가는 길」이라 표시를 되돌린다(§5)
-            return; // 테두리(자리)는 이미 그렸다
-        }
-        // 여기서부터 pixels 를 free/교체한다 — 비소유면 지금 승격한다(위 pixels_owned 주석). 실패(OOM)면 이번
-        // 프레임엔 미리보기를 안 싣는다(`uploaded` 가 안 올라가 다음 프레임에 다시 온다).
-        if (!self.promoteKgPixelsOwned(pixels, pixels_owned)) return;
-        marker_preview_ops.appendGpuImage(open, self.allocator, place, images, uploads, pixels, live_ids);
-    }
-
     /// 그 term 의 화면이 **스크롤돼 있나**(= 지금 보이는 것이 live bottom 이 아니다).
     ///
     /// 원격이면 host 가 그 사실을 협상 못 했을 수 있다(`viewport_scrolled_known`) — 그때는
     /// **스크롤된 것으로 친다**(fail-closed). 모르면서 안 잘렸다고 가정하면 A31 이 되살아난다.
-    fn viewportScrolled(self: *AppSession, term: *Term) bool {
+    pub fn viewportScrolled(self: *AppSession, term: *Term) bool {
         term.surface.lockCore(self.io);
         defer term.surface.unlockCore(self.io);
         const snap = term.surface.renderSnapshot();
         if (!snap.viewport_scrolled_known) return true;
         return snap.viewport_scrolled;
-    }
-
-    /// **전송된** 마커를 토글한다 — 픽셀은 갤러리 인덱스(트랜스크립트)에서 온다(§4.4).
-    ///
-    /// 인덱스가 그 N을 모르면 **열지 않는다**. 화면에 글자로 쓰인 `[Image #N]`과 구분할 방법이 그것뿐이고
-    /// (§3.1), 틀린 그림을 자신 있게 띄우는 것보다 안 뜨는 편이 낫다.
-    fn toggleSentMarkerPreview(
-        self: *AppSession,
-        surface_id: u64,
-        m: maru.session.agent_image_markers.Hit,
-        screen_hits: []const maru.session.agent_image_markers.Hit,
-        scrolled: bool,
-    ) bool {
-        if (self.marker_preview_open) |c| {
-            if (c.surface_id == surface_id and c.n == m.n and c.row == m.row and c.start_col == m.start_col) {
-                self.closeMarkerPreview();
-                return true;
-            }
-        }
-        const found = self.findSentMarkerHit(m, screen_hits, scrolled) orelse {
-            // 인덱스가 아직 없다 — 갤러리 도크를 한 번도 안 열었으면 비어 있다(`refreshForFocus`).
-            // **이번 클릭은 조용히 실패**하되 스캔을 걸어 다음 번엔 답할 수 있게 한다.
-            agent_activity_ops.refresh(self, false);
-            return false;
-        };
-        const h = self.agent_activity.hits.items[found];
-        if (self.marker_preview_open) |*o| o.deinit(self.allocator);
-        self.marker_preview_open = .{
-            .surface_id = surface_id,
-            .n = m.n,
-            .row = m.row,
-            .start_col = m.start_col,
-            .end_col = m.end_col,
-            .sent_hit_index = found,
-            .sent_file_index = h.file_index,
-            .sent_data_offset = h.data_offset,
-        };
-        self.metal_dirty = true;
-        return true;
-    }
-
-    /// 갤러리 인덱스에서 그 마커 번호의 이미지를 찾는다. **최근 것이 이긴다** — Codex는 N이 메시지
-    /// 안에서만 유일해 같은 번호가 여럿일 수 있는데(§4.3), 화면에서 누른 것은 대개 최근 대화다.
-    fn findSentMarkerHit(
-        self: *AppSession,
-        m: maru.session.agent_image_markers.Hit,
-        screen_hits: []const maru.session.agent_image_markers.Hit,
-        scrolled: bool,
-    ) ?usize {
-        if (m.n == 0) return null;
-        // **화면에서 뒤에서 몇 번째인가**를 세어 인덱스에서도 같은 순번을 고른다.
-        //
-        // 그냥 「가장 최근 것」을 고르면 Codex 에서 틀린 그림이 뜬다 — N 이 메시지마다 1 로 돌아가므로
-        // (§4.3) 대화가 길면 `#1` 이 수십 개이고, 화면 **위쪽**(오래된) 마커를 눌러도 최근 것이 열린다.
-        // §3.1 이 「틀린 이미지를 자신 있게 보여주는 것이 아무것도 안 보여주는 것보다 나쁘다」고 한 그것이다.
-        //
-        // 화면의 마커도 인덱스의 이미지도 **시간순**이라, 뒤에서부터 세면 맞는다.
-        // **§4.2 가 금한 「순서로 세기」와는 다른 축이다** — 그쪽은 빈 번호를 건너뛰는 스테이징
-        // 순번이었고, 이것은 같은 번호의 **발생 순서**다.
-        //
-        // ⚠️ **다만 화면이 스크롤돼 «최근 쪽»이 잘려 나가면 이 셈이 무너진다**(적대적 A31). 위로
-        // 스크롤해 오래된 마커만 보이는 상태에서 그것을 누르면 `from_end = 0` 이 되어 인덱스의
-        // **가장 최근** 것을 집는다 — A21 이 고치려던 그 결함이 그대로 되살아난다.
-        // 그래서 아래 `ambiguous` 게이트가 있다.
-        var from_end: usize = 0;
-        var seen_click = false;
-        var i = screen_hits.len;
-        while (i > 0) {
-            i -= 1;
-            const sh = screen_hits[i];
-            if (sh.n != m.n) continue;
-            if (sh.row == m.row and sh.start_col == m.start_col) {
-                seen_click = true;
-                break;
-            }
-            from_end += 1;
-        }
-        if (!seen_click) return null;
-
-        const hits = self.agent_activity.hits.items;
-        // 같은 번호가 인덱스에 **하나뿐이면** 셈이 필요 없다 — 스크롤 여부와 무관하게 그것이 답이다.
-        // Claude 는 N 이 프로세스 누적이라(§4.3) 대개 이 길로 간다.
-        var same_n: usize = 0;
-        for (hits) |h| {
-            if (h.kind.isImage() and h.marker_n == m.n) same_n += 1;
-        }
-        if (same_n == 0) return null;
-        // 여럿인데 화면이 잘려 있으면 **열지 않는다.** 틀린 그림을 자신 있게 띄우는 것보다 낫다(§3.1).
-        if (same_n > 1 and scrolled) return null;
-
-        var skipped: usize = 0;
-        var j = hits.len;
-        while (j > 0) {
-            j -= 1;
-            const h = hits[j];
-            if (!h.kind.isImage()) continue;
-            if (h.marker_n != m.n) continue;
-            if (skipped == from_end) return j;
-            skipped += 1;
-        }
-        return null;
-    }
-
-    /// 프리뷰의 배경·테두리 quad 두 장. 바깥을 테두리 색으로 채우고 안쪽을 배경색으로 덮어 테를 만든다
-    /// (quad 하나가 `border_widths` 를 안 받는 경로라 — 셰이더 분기를 늘리지 않는다).
-    fn appendMarkerPreviewFrameQuads(
-        self: *AppSession,
-        place: chrome.components.image_preview.Placement,
-        /// 「도크에서 보기」가 가능한가 — 전송된 마커에만 자리가 있다(§2.3). 참일 때만 모서리 표식을
-        /// 그린다. 없는 길을 알리는 표식은 **거짓말**이고, 눌러도 아무 일이 없으면 고장으로 읽힌다.
-        dock_jump: bool,
-    ) void {
-        const tk = self.buildChromeTokens();
-        const border = packOpaqueRgb(tk.palette.get(.focus_accent));
-        // **불투명하게 둔다.** 사이드바 같은 chrome 은 `chromeQuadBg` 로 `window.opacity` 를 함께 먹어
-        // 창이 반투명하면 같이 비쳐야 맞지만, 팝업은 **떠 있는 것**이라 뒤가 비치면 그림이 배경 글자와
-        // 섞여 읽히지 않는다(사용자 제보 2026-09-14). 그래서 창 투명도를 따르지 않는다.
-        const bg = packOpaqueRgb(tk.palette.get(.surface_bg));
-        const b: f32 = @floatFromInt(chrome.components.image_preview.border_px);
-        const bx: f32 = @floatFromInt(place.box.x);
-        const by: f32 = @floatFromInt(place.box.y);
-        const bw: f32 = @floatFromInt(place.box.w);
-        const bh: f32 = @floatFromInt(place.box.h);
-        // **뒤판** — 상자 전체를 불투명하게 깐다(`image_backdrop`: 터미널 셀 앞·그림 뒤).
-        //
-        // 한때는 「셀보다 위이면서 이미지보다 아래인 자리가 없다」고 적고 테두리만 그렸다. 그 진단은
-        // 맞았지만 결론이 틀렸다 — 없으면 **여는 것이 정공법**이었고(문서가 그렇게 적어 두기까지 했다),
-        // 그 자리가 없는 동안 사용자는 디코드를 기다리는 빈 액자와 투명 PNG 뒤로 **터미널 글자가 비치는**
-        // 화면을 봤다(제보 2026-09-15). 이제 렌더러가 그 패스를 가지므로 판을 깐다.
-        self.appendSolidQuad(bx, by, bw, bh, bg, renderer.metal_frame.quad_layer.image_backdrop);
-        // 테두리 네 변은 **그림 위**(layer 1)에 남는다 — 그림이 판을 꽉 채우므로 액자는 그 앞이라야 보인다.
-        self.appendSolidQuad(bx, by, bw, b, border, 1); // 위
-        self.appendSolidQuad(bx, by + bh - b, bw, b, border, 1); // 아래
-        self.appendSolidQuad(bx, by + b, b, bh - 2 * b, border, 1); // 왼쪽
-        self.appendSolidQuad(bx + bw - b, by + b, b, bh - 2 * b, border, 1); // 오른쪽
-        // **우하단 모서리 표식** — 「여기 눌러 도크에서 볼 것이 있다」. 테두리와 같은 색·이어진
-        // 덩어리라 「모서리가 두껍다」로 읽힌다(흔한 모서리 접힘 관용구). 글자를 못 쓰는 이유는
-        // `image_preview.dock_jump_mark_px` 주석에 있다 — `gpu_glyphs` 는 이 자리에서 못 채운다.
-        if (dock_jump) {
-            const mark: f32 = @floatFromInt(chrome.components.image_preview.dock_jump_mark_px);
-            // 자리 판정은 `image_preview.dockMarkFits` 가 한다(순수 — 적대 6회차에 뺐다).
-            if (chrome.components.image_preview.dockMarkFits(place.box.w, place.box.h)) {
-                self.appendSolidQuad(bx + bw - b - mark, by + bh - b - mark, mark, mark, border, 1);
-            }
-        }
-    }
-
-    /// 「도크에서 보기」 — 프리뷰 상자를 누르면 갤러리의 크게 보기로 간다(§2.3).
-    ///
-    /// **판정은 `image_preview.dockJumpTarget` 이 한다**(순수). 여기는 배선만이다 — 도크를 열고,
-    /// 그 자리를 크게 열고, 프리뷰를 닫는다. 셋이 이어져 있어 부수효과로 남으면 「어느 조건에서
-    /// 점프하는가」를 판정자가 물을 수 없으므로 조건을 저쪽에 두었다.
-    fn markerPreviewDockJumpAt(self: *AppSession, x_px: f64, y_px: f64) bool {
-        const open = self.marker_preview_open orelse return false;
-        if (!self.surface_initialized or self.tabs.items.len == 0) return false;
-        const target = self.markerPreviewTarget() orelse return false;
-        if (target.term.kind != .terminal) return false;
-        const place = self.markerPreviewPlacement(target, open) orelse return false;
-        const hit_index = chrome.components.image_preview.dockJumpTarget(open.sent_hit_index, place.box, x_px, y_px) orelse return false;
-        // **도크를 연다** — 접혀 있거나 다른 뷰를 보고 있을 수 있다. `enterDockView` 만 부르면 뷰만
-        // 바뀌고 화면에는 아무 변화가 없다(접힌 채로 남는다).
-        dock_ops.openDockTo(self, .agent_activity);
-        agent_activity_ops.openAt(self, hit_index);
-        // 프리뷰는 닫는다 — 같은 그림이 도크에서 더 크게 떠 있는데 위에 겹쳐 둘 이유가 없다.
-        self.closeMarkerPreview();
-        self.metal_dirty = true;
-        return true;
     }
 
     /// 열린 프리뷰가 **속한 pane** — 활성 pane 이 아닐 수 있다.
@@ -16187,135 +15772,13 @@ pub const AppSession = struct {
     /// 못 찾으면 null 이다 — 다른 **탭**으로 갔거나 그 pane 이 사라진 경우다. 그때는 그리지 않되
     /// 닫지도 않는다(탭을 돌아오면 그대로 보인다 — 기존 동작).
     /// 열린 프리뷰가 속한 pane 과 그 leaf 사각.
-    const MarkerPreviewOwner = struct { term: *Term, leaf: maru.session.SplitRect };
-
-    fn markerPreviewTarget(self: *AppSession) ?MarkerPreviewOwner {
-        const open = self.marker_preview_open orelse return null;
-        if (!self.surface_initialized or self.tabs.items.len == 0) return null;
-        self.pane_target_rects_scratch.clearRetainingCapacity();
-        tab_ops.activeTabLeafRects(self, self.allocator, self.termRect(), &self.pane_target_rects_scratch) catch return null;
-        for (self.pane_target_rects_scratch.items) |lr| {
-            const t = lr.leaf.activeTerm();
-            if (t.surface.id == open.surface_id) return .{ .term = t, .leaf = lr.rect };
-        }
-        return null;
-    }
-
-    /// 열린 프리뷰의 자리 — 그리는 쪽과 안내를 얹는 쪽이 **같은 계산**을 쓰게 하는 단일 출처다.
-    fn markerPreviewPlacement(
-        self: *AppSession,
-        owner: MarkerPreviewOwner,
-        open: marker_preview_ops.Open,
-    ) ?chrome.components.image_preview.Placement {
-        const anchor_rect = self.markerAnchorRect(owner, open);
-        const p = chrome.props.ChromeProps{ .metrics = self.buildCellMetrics() };
-        // 아직 못 푼 동안에도 **자리는 잡아 둔다** — 클릭했는데 아무것도 안 뜨면 「먹혔나」로 읽힌다.
-        const w: u32 = if (open.width > 0) open.width else 24 * @max(p.metrics.cell_width_px, 1);
-        const h: u32 = if (open.height > 0) open.height else @max(p.metrics.cell_height_px, 1);
-        return chrome.components.image_preview.place(anchor_rect, w, h, p);
-    }
-
-    /// 열린 프리뷰의 **테두리와 실패 안내**를 chrome ops에 싣는다. 픽셀은 `gpu_images`가 따로 싣는다
-    /// (갤러리 §5.4 분업). 문구는 여기서 i18n에서 고른다 — 컴포넌트는 `ui.language`를 모른다.
-    /// 열린 프리뷰의 **실패 안내 글자**만 chrome ops 에 싣는다. 배경·테두리는 `appendMarkerPreviewFrameQuads`
-    /// 가 프레임 조립에서 그린다 — 이 조립부는 **매 프레임 돌지 않아** quad 를 넣으면 유지되지 않는다
-    /// (위 주석의 사고). 글자는 chrome draws 의 생명주기를 따르므로 여기 남는다.
-    pub fn collectMarkerPreviewDraws(
-        self: *AppSession,
-        arena: std.mem.Allocator,
-        out: *std.ArrayList(chrome.draw.ChromeDraw),
-    ) !void {
-        const open = self.marker_preview_open orelse return;
-        if (!open.failed) return; // 안내가 필요한 경우는 「못 풀었다」 하나뿐이다
-        const target = self.markerPreviewTarget() orelse return;
-        const place = self.markerPreviewPlacement(target, open) orelse return;
-        const p = chrome.props.ChromeProps{ .metrics = self.buildCellMetrics() };
-        const tk = self.buildChromeTokens();
-        var ops: std.ArrayList(chrome.draw.Op) = .empty;
-        try chrome.components.image_preview.view(
-            place,
-            maru.i18n.t(.app_marker_preview_undecodable),
-            p,
-            &tk,
-            arena,
-            &ops,
-        );
-        if (ops.items.len > 0) try out.append(arena, .{
-            .layer = chrome.components.image_preview.layer,
-            .ops = ops.items,
-        });
-    }
-
-    /// 마커 span의 화면 사각형(px) — 셀 → px 변환은 여기서 한다(배치 모듈은 px만 안다).
-    /// ⚠️ **그 프리뷰가 «속한» pane 의 leaf 에서 뽑는다.** `self.termRect()` 는 모든 pane 을 합친
-    /// 터미널 영역이라 분할하면 오른쪽·아래 pane 의 origin 이 통째로 빠지고(제보 2026-09-15),
-    /// 활성 pane 의 leaf 를 쓰면 **비활성 pane 에 뜬 프리뷰**가 엉뚱한 자리를 가리킨다
-    /// (제보 2026-09-20 — `markerPreviewTarget` 주석). 마커 좌표는 그 pane 격자 기준이다.
-    ///
-    /// **owner 를 인자로 받는다 — 여기서 다시 찾지 않는다.** 찾는 일(`activeTabLeafRects`)은 할당을
-    /// 하는데, 호출자가 이미 한 것을 프레임마다 두세 번 되풀이하고 있었다(적대 1회차).
-    fn markerAnchorRect(self: *AppSession, owner: MarkerPreviewOwner, open: marker_preview_ops.Open) chrome.draw.Rect {
-        const rect = pane_ops.paneTermRect(self, owner.leaf);
-        const m = self.buildCellMetrics();
-        const cw = @max(m.cell_width_px, 1);
-        const ch = @max(m.cell_height_px, 1);
-        const cols = open.end_col -| open.start_col;
-        return .{
-            .x = @as(i32, @intCast(rect.x)) + @as(i32, open.start_col) * @as(i32, @intCast(cw)),
-            .y = @as(i32, @intCast(rect.y)) + @as(i32, open.row) * @as(i32, @intCast(ch)),
-            .w = @as(u32, cols) * cw,
-            .h = ch,
-        };
-    }
-
-    /// 프리뷰를 닫는 **단일 자리** — 픽셀을 놓고 회수 표시를 세운다(§5).
-    pub fn closeMarkerPreview(self: *AppSession) void {
-        if (self.marker_preview_open) |*o| o.deinit(self.allocator);
-        self.marker_preview_open = null;
-        self.metal_dirty = true;
-    }
-
-    /// tick마다 마커 프리뷰 상태를 화면에 맞춘다(§4.2). 대기 중인 붙여넣기가 없고 스테이징도 비어
-    /// 있으면 **화면을 읽지 않는다** — 관찰이 걸리지 않은 세션에 비용을 물리지 않는다.
-    fn pollMarkerPreview(self: *AppSession) void {
-        if (self.marker_preview.pending.items.len == 0 and self.marker_preview.slots.items.len == 0) return;
-        // ⚠️ **매 tick 화면을 풀지 않는다.** 이 함수는 뷰포트 전체를 UTF-8 로 풀고 마커를 훑는데,
-        // 60 Hz 로 돌면 셀 수천 개를 초당 수십 번 변환한다 — §3.2 가 「스캔은 수식키를 누른 동안에만」
-        // 이라고 세운 규율을 관찰 폴링만 비껴가고 있었다(적대적 3회차).
-        //
-        // 붙여넣기를 기다리는 동안(`pending`)은 매 tick 봐야 한다 — 마커는 42 ms 안에 뜬다(§10).
-        // 기다릴 것이 없으면 `syncVisible`(전송 감지)만 남는데 그것은 늦어도 기능이 안 깨지므로
-        // **드물게** 본다. 픽셀은 `sent` 로 옮겨도 계속 들고 있기 때문이다(§4.2 A11).
-        const waiting = self.marker_preview.pending.items.len > 0;
-        if (!waiting) {
-            self.marker_preview_idle_tick +%= 1;
-            if (self.marker_preview_idle_tick % idle_marker_scan_ticks != 0) return;
-        }
-        if (!self.surface_initialized or self.tabs.items.len == 0) return;
-        const term = pane_ops.activePane(self).activeTerm();
-        if (term.kind != .terminal or term.rt.ended_placeholder) return;
-        const surface_id = term.surface.id;
-        var visible: std.ArrayList(u32) = .empty;
-        defer visible.deinit(self.allocator);
-        self.collectMarkerNumbers(term, .viewport, &visible) catch return;
-        const pending_before = self.marker_preview.pending.items.len;
-        marker_preview_ops.observe(&self.marker_preview, self.allocator, surface_id, visible.items) catch {};
-        // **묶임은 여기서만 일어난다** — 어느 N 에 어느 파일이 들어갔는지는 사후에 재구성할 수 없다.
-        if (diag_gate.maruDebugEnabled() and self.marker_preview.pending.items.len != pending_before) {
-            if (self.marker_preview.stagingFor(surface_id)) |st| for (st.entries.items) |e|
-                marker_preview_diag.info(
-                    "staged n={d} phase={s} bytes={d} path={s}",
-                    .{ e.n, @tagName(e.phase), e.png.len, e.path },
-                );
-        }
-        self.releaseIndexedStaging(surface_id);
-    }
+    pub const MarkerPreviewOwner = struct { term: *Term, leaf: maru.session.SplitRect };
 
     /// 인덱스가 같은 이미지를 받았으면 스테이징은 픽셀을 **놓는다**(§4.4).
     ///
     /// 안 놓으면 같은 그림이 두 곳에 산다 — 상한(§4.2)이 언젠가 거두지만 그때까지 스크린샷 한 장이
     /// 수 MB 씩 중복이다. 설계는 처음부터 `indexed` 로 넘기라고 적었는데 배선이 빠져 있었다.
-    fn releaseIndexedStaging(self: *AppSession, surface_id: u64) void {
+    pub fn releaseIndexedStaging(self: *AppSession, surface_id: u64) void {
         const st = self.marker_preview.stagingFor(surface_id) orelse return;
         if (st.entries.items.len == 0) return;
         var i = st.entries.items.len;
@@ -16323,7 +15786,7 @@ pub const AppSession = struct {
             i -= 1;
             const e = st.entries.items[i];
             if (e.phase != .sent) continue; // 아직 입력창에 있으면 인덱스가 알 리 없다
-            if (!self.indexHasMarker(e.n)) continue;
+            if (!marker_view_ops.indexHasMarker(self, e.n)) continue;
             // 열려 있는 프리뷰가 이 항목을 보고 있으면 그대로 둔다 — 그리는 중에 픽셀을 빼면 빈다.
             if (self.marker_preview_open) |o| {
                 if (o.sent_hit_index == null and o.n == e.n and o.surface_id == surface_id) continue;
@@ -16336,45 +15799,6 @@ pub const AppSession = struct {
             );
             st.release(self.allocator, e.n);
         }
-    }
-
-    /// 인덱스가 그 마커 번호의 이미지를 들고 있나.
-    fn indexHasMarker(self: *AppSession, n: u32) bool {
-        if (n == 0) return false;
-        for (self.agent_activity.hits.items) |h| {
-            if (h.kind.isImage() and h.marker_n == n) return true;
-        }
-        return false;
-    }
-
-    /// 그 term의 화면에서 마커 N을 모은다.
-    ///
-    /// ⚠️ **관찰은 `viewport` 로 넓게 본다.** 한 판에서는 `cursor_block` 을 썼는데, 그 스코프는 스크롤된
-    /// 뷰포트에서 **빈 목록**이라(§3.3) 새 N 을 못 보고 그 장이 영영 안 묶였다. 관찰은 「새로 나타난 것」
-    /// 차분이라 범위가 넓어도 정확하다 — 오히려 스크롤·원격에 강하다. **락 아래에서** 읽는다 — 스냅샷이 코어 메모리를 alias한다
-    /// (hover 경로가 `lockCore`를 잡는 것과 같은 규율).
-    fn collectMarkerNumbers(
-        self: *AppSession,
-        term: *Term,
-        scope: maru.session.agent_image_markers.Scope,
-        out: *std.ArrayList(u32),
-    ) !void {
-        var hits: std.ArrayList(maru.session.agent_image_markers.Hit) = .empty;
-        defer hits.deinit(self.allocator);
-        try self.collectMarkerHits(term, scope, &hits);
-        try maru.session.agent_image_markers.numbersOf(self.allocator, hits.items, out);
-    }
-
-    /// 그 term의 화면에서 마커를 셀 열까지 함께 모은다.
-    fn collectMarkerHits(
-        self: *AppSession,
-        term: *Term,
-        scope: maru.session.agent_image_markers.Scope,
-        out: *std.ArrayList(maru.session.agent_image_markers.Hit),
-    ) !void {
-        term.surface.lockCore(self.io);
-        defer term.surface.unlockCore(self.io);
-        try maru.session.agent_image_markers.scan(self.allocator, term.surface.renderSnapshot(), scope, out);
     }
 
     fn nextUserActionId(self: *AppSession) u64 {
@@ -16686,7 +16110,7 @@ pub const AppSession = struct {
     ///
     /// `seen_this_tick` 은 **이번 tick 에 이 목적지를 쓰는 Term 이 있었나**다. 없으면 회수한다 — 마지막
     /// 원격 pane 이 닫혔는데 자식이 남으면 그것이 곧 «ssh 가 하나 늘어난 채 안 죽는» 누수다.
-    const RemoteAgentHost = struct {
+    pub const RemoteAgentHost = struct {
         /// 스트리머. **설치가 끝난 뒤에야 뜬다** — `pid == 0` 이면 아직 안 띄운 것이다.
         stream: ssh_upload.Stream = .{ .pid = 0, .out_fd = -1 },
         pending: std.ArrayListUnmanaged(u8) = .empty,
@@ -16763,168 +16187,15 @@ pub const AppSession = struct {
         const retry_base_ms: u64 = 1_000;
         /// 개행 없이 쌓을 수 있는 상한. 스트리머의 한 줄 상한(128 KiB)과 같은 값이어야 «저쪽이 보낼 수
         /// 있는 가장 긴 줄» 을 이쪽이 못 받는 일이 안 생긴다.
-        const pending_max = maru.session.remote_agent_stream.max_line_bytes;
+        pub const pending_max = maru.session.remote_agent_stream.max_line_bytes;
         /// 한 tick 에 쥐고 있을 수 있는 총량. 넘으면 **읽기를 멈춘다** — 버리는 것이 아니라 파이프에
         /// 남겨 둔다(그러면 저쪽이 파이프 가득참으로 밀리고, 우리는 다음 tick 에 이어 읽는다).
         /// 버리면 이벤트가 조용히 사라지고, 안 멈추면 폭주 구간에서 이 버퍼가 무한히 자란다.
-        const pending_soft_cap = 4 * pending_max;
+        pub const pending_soft_cap = 4 * pending_max;
     };
 
-    /// 원격 에이전트 이벤트 채널을 **한 tick 만큼** 돌린다([계획](../../../docs/plans/remote-agent-state.md) RA5).
-    ///
-    /// 세 일을 순서대로 한다: ① 원격 Term 을 훑어 그 목적지의 채널을 보장하고 pane nonce 를 세운다,
-    /// ② 각 목적지의 자식 stdout 을 논블로킹으로 훑어 **완성된 줄만** 그 목적지의 Term 들에 먹인다,
-    /// ③ 이번 tick 에 아무 Term 도 안 쓴 목적지를 회수한다.
-    ///
-    /// **전송은 host 당 하나, 파싱 상태는 Term 당 하나다.** 한 목적지에 pane 이 셋이면 ssh 자식은 하나이고
-    /// `Channel` 은 셋이다 — 각 Term 이 자기 hello·침묵 시한을 따로 재고 자기 nonce 만 먹는다. 전송을 Term
-    /// 당 두면 `MaxSessions` 에 걸리고(pane 5 개가 상한), 파싱 상태를 host 당 두면 한 Term 의 강등이 같은
-    /// 호스트의 남의 Term 까지 끌고 내려간다.
-    ///
-    /// **읽기가 UI 를 안 멈춘다.** fd 를 `O_NONBLOCK` 으로 두고 읽을 것이 없으면 즉시 돌아온다.
-    pub fn pumpRemoteAgentChannels(self: *AppSession) void {
-        if (!is_macos) return;
-
-        // **게이트가 꺼져 있으면 축 자체를 접는다.** 두 이유가 있고 둘째가 더 무겁다.
-        //
-        // ① 사용자가 «에이전트 훅을 쓰지 않겠다» 고 한 것이다. 그런데도 목적지마다 `ssh` 를 띄우고
-        //    원격에서 스트리머를 돌리는 것은 그 뜻을 정면으로 어긴다.
-        // ② **더 나쁜 것은 소스가 둘이 되는 것이다.** 게이트가 꺼지면 `modeFor` 는 `.observe` 를 주고
-        //    그 가지는 `pollAgentState` 가 `agent_state` 를 쓴다 — 그런데 채널을 계속 돌리면 원격
-        //    소비자도 `applyHookEvent` 로 **같은 자리**에 쓴다. 계약 §1 이 금지한 «한 Term 두 소스» 이고,
-        //    증상은 «배지가 가끔 틀림» 이라 재현되지 않는다.
-        if (!self.loaded_config.config.sidebar.agent_hooks) {
-            self.closeAllRemoteAgentHosts();
-            return;
-        }
-        if (self.remote_agent_hosts.count() == 0 and self.tabs.items.len == 0) return;
-
-        const now_ms = self.awakeMs();
-        {
-            var it = self.remote_agent_hosts.valueIterator();
-            while (it.next()) |h| h.seen_this_tick = false;
-        }
-
-        // ① 원격 Term 마다 목적지 채널을 보장한다.
-        for (self.tabs.items) |tab| {
-            for (tab.panes.items) |pane| {
-                for (pane.terms.items) |term| {
-                    if (!term.rt.live_initialized or term.rt.terminated) continue;
-                    const ctx = self.remoteUploadContextFor(term) orelse {
-                        // **원격이 아니게 된 Term 에서는 채널을 떼어 낸다.** 안 떼면 `modeFor` 가
-                        // «채널이 열렸다» 를 맨 먼저 보므로 그 pane 은 ssh 를 빠져나온 뒤에도 **소스
-                        // 없이 훅 모드에 갇힌다** — 거기서 로컬 에이전트를 띄워도 배지가 안 선다.
-                        //
-                        // ⚠️ **관측이 최신일 때만 판정한다.** `remoteUploadContextFor` 는 재접속 중의
-                        // `stale` 에서도 null 을 준다 — 그 순간을 «원격이 아니다» 로 읽으면 잠깐 끊길
-                        // 때마다 채널이 끊기고 배지가 깜빡인다.
-                        if (term.rt.observation.availability == .current and
-                            !term.rt.observation.ssh_remote_dest_present)
-                        {
-                            term.agent_remote_channel = null;
-                            term.agent_remote_nonce_len = 0;
-                        }
-                        continue;
-                    };
-                    defer ctx.deinit(self.allocator);
-                    self.ensureRemoteAgentTerm(term, ctx, now_ms);
-                }
-            }
-        }
-
-        // ② 목적지마다 읽어 그 목적지의 Term 들에 먹인다.
-        var hosts = self.remote_agent_hosts.iterator();
-        while (hosts.next()) |entry| {
-            const dest = entry.key_ptr.*;
-            const host = entry.value_ptr;
-            self.drainRemoteAgentHost(dest, host, now_ms);
-        }
-
-        // ③ 이번 tick 에 아무도 안 쓴 목적지를 회수한다. **자식을 먼저 죽이고 표에서 뗀다** — 순서를
-        // 뒤집으면 키를 잃어 자식을 영영 못 죽인다.
-        var dead: [8][]const u8 = undefined;
-        var dead_n: usize = 0;
-        var scan = self.remote_agent_hosts.iterator();
-        while (scan.next()) |entry| {
-            if (entry.value_ptr.seen_this_tick) continue;
-            if (dead_n == dead.len) break; // 다음 tick 에 마저 회수한다(한 tick 에 여덟이면 충분하다)
-            dead[dead_n] = entry.key_ptr.*;
-            dead_n += 1;
-        }
-        for (dead[0..dead_n]) |key| self.closeRemoteAgentHost(key);
-    }
-
-    /// 이 Term 의 pane nonce 를 세우고, 그 목적지의 채널·파싱 상태를 보장한다.
-    fn ensureRemoteAgentTerm(self: *AppSession, term: *Term, ctx: RemoteUpload, now_ms: u64) void {
-        const hc = maru.session.agent_hook_command;
-
-        // **nonce 는 이 Term 이 원격에 실어 보낸 그 값이어야 한다.** 만드는 곳을 하나로 둔다 — `maru ssh`
-        // 는 pane 셸 env 에서 읽고 이쪽은 같은 두 값을 Term 에서 읽는다(둘 다 `formatRemotePaneNonce`).
-        // 출처가 둘이라 **굳히면 안 된다** — 한쪽이 움직이면 굳은 값은 영영 어긋나고, 그 Term 은 자기
-        // 이벤트를 하나도 못 받는다(2026-09-07 실측: 열 세션 중 둘만 떴다). 그래서 매 tick 다시 세우고
-        // 달라지면 따라간다. 세울 수 없는 순간(재부착 중 registry 공백)에는 **들고 있던 값을 지키고**,
-        // 처음부터 없었을 때만 물러난다 — 지우면 그 tick 의 이벤트를 통째로 버린다.
-        {
-            var buf: [hc.remote_pane_nonce_max]u8 = undefined;
-            if (agent_ops.remotePaneNonceFor(term, &buf)) |nonce| {
-                const cur = term.agent_remote_nonce[0..term.agent_remote_nonce_len];
-                if (!std.mem.eql(u8, cur, nonce)) {
-                    if (cur.len != 0) self.reportRemoteNonceRebind(ctx.dest, cur, nonce);
-                    @memcpy(term.agent_remote_nonce[0..nonce.len], nonce);
-                    term.agent_remote_nonce_len = @intCast(nonce.len);
-                }
-            } else if (term.agent_remote_nonce_len == 0) return;
-        }
-
-        const gop = self.remote_agent_hosts.getOrPut(self.allocator, ctx.dest) catch return;
-        if (!gop.found_existing) {
-            // 키를 우리가 소유한다 — `ctx` 는 이 호출이 끝나면 해제된다.
-            const key = self.allocator.dupe(u8, ctx.dest) catch {
-                _ = self.remote_agent_hosts.remove(ctx.dest);
-                return;
-            };
-            gop.key_ptr.* = key;
-            gop.value_ptr.* = .{};
-            // **먼저 훅을 깐다**(RA3). 그 기계의 maru 가 그 기계의 락으로 자기 설정을 고친다 — 로컬이
-            // 원격 파일을 직접 고치면 그 기계의 claude·codex 와 경합하고, 그 파일은 사용자의 다른 설정을
-            // 함께 담는다.
-            self.spawnRemoteHookInstall(gop.value_ptr, ctx);
-        }
-        gop.value_ptr.seen_this_tick = true;
-
-        // 끝난 목적지에는 **파싱 상태도 새로 안 연다** — 열면 hello 를 5 초 기다렸다 `no_hello` 로 닫히는
-        // 헛도는 채널이 Term 마다 생긴다.
-        if (gop.value_ptr.stopped) return;
-        // **설치가 끝나기 전에는 채널도 안 연다.** 열면 hello 시한 5 초가 설치 왕복과 겹쳐, 느린 링크에서
-        // 「설치는 됐는데 채널은 이미 죽은」 상태가 된다.
-        if (!gop.value_ptr.stream_started) return;
-        // **침묵으로 죽은 채널을 되살린다.** 하트비트는 5 초, 침묵 시한은 15 초라 세 번 놓치면 채널이
-        // `silent` 로 닫히는데 — 그것은 EOF 가 아니라 **재시작 트리거가 없고**, 아래는 `null` 일 때만
-        // 열어서 그 Term 은 스트리머가 멀쩡한데도 영영 못 받는다(적대적 검증 9 회차).
-        //
-        // **`saw_hello` 일 때만 되살린다.** `no_hello`·`noise_overflow` 는 제한 서버(`ForceCommand`)를
-        // 가리는 신호라 되살리면 5 초마다 열고 닫는 헛돌이가 된다 — 그 둘은 `saw_hello` 가 false 다.
-        // ⚠️ **값으로 먼저 묻고 나서 지운다.** `if (opt) |*ch|` 로 optional 안을 가리킨 채 그 자리에
-        // `null` 을 넣으면 자기가 보던 것을 무효화한다.
-        const channel_dead = if (gop.value_ptr.saw_hello)
-            (if (term.agent_remote_channel) |ch| ch.isClosed() else false)
-        else
-            false;
-        if (channel_dead) term.agent_remote_channel = null;
-        if (term.agent_remote_channel == null) {
-            // **이 목적지가 이미 `hello` 를 봤으면 그 상태로 연다.** 그 줄은 연결 시작에 한 번뿐이라,
-            // 뒤늦게 여는 채널을 `waiting_hello` 로 두면 5 초 뒤 죽는다 — 그리고 죽은 채널도 분배
-            // 셈에는 들어가 「열을 다 먹였는데 하나도 안 맞는다」가 된다(2026-09-10 실측).
-            const ras = maru.session.remote_agent_stream;
-            term.agent_remote_channel = if (gop.value_ptr.saw_hello)
-                ras.Channel.initOpen(now_ms)
-            else
-                ras.Channel.init(now_ms);
-        }
-    }
-
     /// 원격 훅 설치를 한 번 띄운다(결과는 다음 tick 들에서 논블로킹으로 읽는다).
-    fn spawnRemoteHookInstall(self: *AppSession, host: *RemoteAgentHost, ctx: RemoteUpload) void {
+    pub fn spawnRemoteHookInstall(self: *AppSession, host: *RemoteAgentHost, ctx: RemoteUpload) void {
         const ah = maru.cli.agent_hooks;
         const hc = maru.session.agent_hook_command;
 
@@ -16956,7 +16227,7 @@ pub const AppSession = struct {
     }
 
     /// 설치 자식의 stdout 을 논블로킹으로 훑는다. EOF 면 결과를 판정하고, 성공이면 **그때 스트리머를 띄운다**.
-    fn pumpRemoteHookInstall(self: *AppSession, dest: []const u8, host: *RemoteAgentHost, now_ms: u64) void {
+    pub fn pumpRemoteHookInstall(self: *AppSession, dest: []const u8, host: *RemoteAgentHost, now_ms: u64) void {
         const ah = maru.cli.agent_hooks;
         const st = host.install orelse return;
         if (host.install_started_ms == 0) host.install_started_ms = now_ms;
@@ -17045,7 +16316,7 @@ pub const AppSession = struct {
 
     /// 스트리머를 한 번 띄운다. **설치 완료와 재시도가 같은 길을 탄다** — 두 길로 두면 한쪽만 커서를
     /// 넘기거나 한쪽만 논블로킹을 거는 어긋남이 생긴다.
-    fn spawnStreamerFor(self: *AppSession, dest: []const u8, host: *RemoteAgentHost, ctl: []const u8) void {
+    pub fn spawnStreamerFor(self: *AppSession, dest: []const u8, host: *RemoteAgentHost, ctl: []const u8) void {
         // 이어읽기 커서를 조립한다(RA5-a). 처음 띄울 때는 비어 있어 처음부터 읽는다 — 그것이 「앱을
         // 새로 켰다」이고, 배지를 세우려면 최근 이벤트를 다시 읽어야 한다.
         var spec: std.ArrayListUnmanaged(u8) = .empty;
@@ -17106,28 +16377,12 @@ pub const AppSession = struct {
         host.last_line_ms = now_ms; // 침묵은 **이제부터** 잰다
         host.retry_at_ms = 0;
         host.saw_hello = false;
-        self.clearRemoteAgentChannels(dest);
+        remote_agent_ops.clearRemoteAgentChannels(self, dest);
         host.pending.clearRetainingCapacity();
     }
 
-    /// 이 목적지의 Term 채널을 **버린다**(닫는 게 아니라 지운다).
-    ///
-    /// 새 스트리머는 `hello` 를 처음부터 다시 보내므로, 옛 채널을 들고 있으면 그 줄을 `.ignored` 로
-    /// 넘기거나(이미 `.open`) 아예 못 본다(이미 `.closed`). 지워야 다음 tick 이 새 상태로 연다.
-    fn clearRemoteAgentChannels(self: *AppSession, dest: []const u8) void {
-        for (self.tabs.items) |tab| {
-            for (tab.panes.items) |pane| {
-                for (pane.terms.items) |term| {
-                    if (!term.rt.observation.ssh_remote_dest_present) continue;
-                    if (!std.mem.eql(u8, term.rt.observation.ssh_remote_dest.items, dest)) continue;
-                    term.agent_remote_channel = null;
-                }
-            }
-        }
-    }
-
     /// 선에서 온 커서를 기억한다(RA5-a 로컬 절반). **host 소유**라 Term 마다가 아니라 여기 한 곳이다.
-    fn recordRemoteCursors(self: *AppSession, host: *RemoteAgentHost, lines: []const []const u8, now_ms: u64) void {
+    pub fn recordRemoteCursors(self: *AppSession, host: *RemoteAgentHost, lines: []const []const u8, now_ms: u64) void {
         const ras = maru.session.remote_agent_stream;
         for (lines) |line| {
             if (!host.saw_hello) {
@@ -17167,163 +16422,12 @@ pub const AppSession = struct {
         }
     }
 
-    /// 한 목적지의 자식 stdout 을 훑어 **완성된 줄만** 그 목적지의 Term 들에 먹인다.
-    fn drainRemoteAgentHost(self: *AppSession, dest: []const u8, host: *RemoteAgentHost, now_ms: u64) void {
-        if (host.stopped) return;
-        // 설치가 아직이면 그것부터 훑는다 — 끝나면 그 안에서 스트리머가 뜬다.
-        if (!host.install_done) {
-            // **설치를 못 띄웠으면 다시 띄운다.** `spawnRemoteHookInstall` 은 `ctx`(dest + **ctl**)를 받는데
-            // 이 경로에는 `ctl` 이 없어 `HOME` 에서 다시 만든다 — 그 배선이 없어서 #3374 가 이 자리를
-            // 남겼었다. 예약이 없거나 아직 때가 아니면 그대로 기다린다.
-            if (host.install == null) {
-                if (host.retry_at_ms == 0 or now_ms < host.retry_at_ms) return;
-                host.retry_at_ms = 0; // 예약을 먼저 지운다 — 아래에서 굳히면 매 tick 다시 오면 안 된다
-                const home = std.c.getenv("HOME") orelse {
-                    std.log.scoped(.agent).warn("HOME 이 없어 원격 훅 설치를 다시 못 띄운다 dest={s}", .{dest});
-                    host.stopped = true;
-                    return;
-                };
-                const ctl = maru.cli.ssh.controlSocketPath(self.allocator, std.mem.span(home), dest) catch |err| {
-                    if (controlPathErrorIsPermanent(err)) {
-                        std.log.scoped(.agent).warn("control socket 경로가 규격을 넘는다 — 원격 배지는 안 선다 dest={s}", .{dest});
-                        host.stopped = true;
-                        return;
-                    }
-                    self.scheduleStreamerRetry(dest, host, "control socket 경로를 못 만들었다");
-                    return;
-                };
-                defer self.allocator.free(ctl);
-                const dest_buf = self.allocator.dupe(u8, dest) catch {
-                    self.scheduleStreamerRetry(dest, host, "목적지 이름을 못 담았다");
-                    return;
-                };
-                defer self.allocator.free(dest_buf);
-                self.spawnRemoteHookInstall(host, .{ .dest = dest_buf, .ctl = ctl });
-                return;
-            }
-            self.pumpRemoteHookInstall(dest, host, now_ms);
-            return;
-        }
-        if (!host.stream_started) {
-            // 예약된 재시도가 있으면 그때 다시 띄운다(RA5-b). 없으면 예전처럼 물러난다.
-            if (host.retry_at_ms == 0 or now_ms < host.retry_at_ms) return;
-            // ⚠️ **예약을 먼저 지운다.** 아래 둘은 「영원히 안 된다」이고(설치 경로도 같은 조건에서
-            // `stopped` 를 세운다), 예약을 남긴 채 빠져나가면 때가 이미 지났으므로 **매 tick 다시
-            // 시도한다** — 로그도 notice 도 없이 영원히다(적대적 검증이 잡았다).
-            host.retry_at_ms = 0;
-            const home = std.c.getenv("HOME") orelse {
-                std.log.scoped(.agent).warn("HOME 이 없어 원격 이벤트 채널을 못 연다 dest={s}", .{dest});
-                host.stopped = true;
-                return;
-            };
-            const ctl = maru.cli.ssh.controlSocketPath(self.allocator, std.mem.span(home), dest) catch |err| {
-                if (controlPathErrorIsPermanent(err)) {
-                    std.log.scoped(.agent).warn("control socket 경로가 규격을 넘는다 — 원격 배지는 안 선다 dest={s}", .{dest});
-                    host.stopped = true;
-                    return;
-                }
-                self.scheduleStreamerRetry(dest, host, "control socket 경로를 못 만들었다");
-                return;
-            };
-            defer self.allocator.free(ctl);
-            self.spawnStreamerFor(dest, host, ctl);
-            return;
-        }
-        var buf: [16 * 1024]u8 = undefined;
-        var eof = false;
-        while (host.pending.items.len < RemoteAgentHost.pending_soft_cap) {
-            const n = std.c.read(host.stream.out_fd, &buf, buf.len);
-            if (n > 0) {
-                host.pending.appendSlice(self.allocator, buf[0..@intCast(n)]) catch break;
-                // 개행 없이 한 줄 상한을 넘겼다 — 줄이 아니라 잡음이다. 꼬리를 버리고 사유를 남긴다.
-                if (host.pending.items.len > RemoteAgentHost.pending_max and
-                    std.mem.indexOfScalar(u8, host.pending.items, '\n') == null)
-                {
-                    // **표시가 아니라 진단이다**(i18n §7 — 원장에 그 사실을 적어 두었다).
-                    std.log.scoped(.agent).warn("원격 이벤트 채널: 개행 없는 잡음이 한 줄 상한을 넘었다 — 꼬리를 버린다 dest={s}", .{dest});
-                    host.pending.clearRetainingCapacity();
-                }
-                continue;
-            }
-            if (n == 0) {
-                eof = true;
-                break;
-            }
-            break; // EAGAIN 을 포함한 그 밖 — 이번 tick 은 여기까지다
-        }
-
-        // 완성된 줄을 **남김없이** 훑는다(64 개씩 나눠 먹인다 — 스택에 든 배열이라 크기를 못 박는다).
-        // 한 tick 상한을 두면 폭주 구간에서 꼬리가 계속 밀려 «배지가 몇 초 늦게 뜬다» 가 된다.
-        var lines: [64][]const u8 = undefined;
-        var consumed: usize = 0;
-        while (true) {
-            var count: usize = 0;
-            while (count < lines.len) {
-                const rest = host.pending.items[consumed..];
-                const nl = std.mem.indexOfScalar(u8, rest, '\n') orelse break;
-                lines[count] = rest[0..nl];
-                count += 1;
-                consumed += nl + 1;
-            }
-            if (count == 0) break;
-            // **줄이 왔다 = 채널이 산다.** 재시도 예산을 되돌린다(적대적 검증 3 회차).
-            //
-            // 안 되돌리면 `retries` 가 **오직 증가만** 해서, 슬립·빌드로 며칠에 걸쳐 여섯 번 끊긴
-            // 목적지가 그 뒤로 영영 안 붙는다 — 재접속을 넣고도 오늘 이전과 같은 상태가 된다.
-            // 예산은 「연달아 실패한 횟수」여야지 「살아온 동안의 총합」이면 안 된다.
-            host.retries = 0;
-            // **Term 에 먹이기 전에** 커서를 건진다 — 먹이는 쪽은 Term 마다 돌고 커서는 host 소유다.
-            host.last_line_ms = now_ms; // 하트비트도 줄이다 — 살아 있다는 증거다
-            self.recordRemoteCursors(host, lines[0..count], now_ms);
-            self.feedRemoteAgentTerms(dest, lines[0..count], now_ms);
-        }
-        if (consumed > 0) {
-            const rest_len = host.pending.items.len - consumed;
-            std.mem.copyForwards(u8, host.pending.items[0..rest_len], host.pending.items[consumed..]);
-            host.pending.shrinkRetainingCapacity(rest_len);
-        }
-
-        // **줄이 안 와도 시간은 간다.** `Channel` 의 hello 시한(5 초)·침묵 시한(15 초)은 `tick` 에서만
-        // 판정되는데, 그것을 «줄이 왔을 때» 에만 부르면 **정확히 아무것도 안 오는 경우**에 안 불린다 —
-        // 즉 죽은 채널이 영영 `open` 으로 남아 그 Term 은 훅 모드에 갇힌다(관측도 훅도 아닌 상태다).
-        // 계획이 «사망 감지는 하트비트로만 한다» 로 못박은 자리가 여기다.
-        if (!eof) {
-            self.tickRemoteAgentTerms(dest, now_ms);
-            // **조용하면 스트림이 죽은 것으로 본다**(적대적 검증 13 회차). 하트비트는 5 초마다 오므로
-            // 시한을 넘긴 침묵은 정상이 아니다. 그런데 자식이 **좀비**면 `read` 가 0 을 안 줘 EOF 가 영영
-            // 안 나고, 그때 채널만 되살리면 15 초마다 죽었다 살아나는 **조용한 헛돌이**가 된다.
-            //
-            // 다시 띄우는 것이 옳다: 좀비가 죽고, `onStreamerStarted` 가 채널을 다 버려 새 `hello` 를 보고,
-            // **`--resume=` 이 그 사이 스풀에 쌓인 것까지 받는다** — 되살리기로는 못 하는 일이다.
-            const silence = maru.session.remote_agent_stream.silence_deadline_ms;
-            if (host.last_line_ms != 0 and now_ms -| host.last_line_ms >= silence) {
-                ssh_upload.stopAgentEvents(host.stream);
-                host.stream = .{ .pid = 0, .out_fd = -1 };
-                host.stream_started = false;
-                host.last_line_ms = 0;
-                self.scheduleStreamerRetry(dest, host, "원격 이벤트가 조용하다");
-            }
-            return;
-        }
-        // **EOF 는 조용하지 않다.** 채널을 닫으면 다음 `agentHookMode` 가 관측 모드로 강등한다(§1.2) —
-        // 그 전이가 곧 사용자가 보는 «훅이 죽었다» 다. 그리고 이 목적지는 **다시 안 띄운다**.
-        self.feedRemoteAgentTerms(dest, &.{}, now_ms);
-        ssh_upload.stopAgentEvents(host.stream);
-        host.stream = .{ .pid = 0, .out_fd = -1 };
-        host.stream_started = false;
-
-        // **EOF 는 「영원히 안 된다」가 아니다**(RA5-b). 슬립·네트워크 끊김·원격 프로세스 교체로도 나고,
-        // 그때 ControlMaster 는 멀쩡한 경우가 많다(실측). 예전에는 여기서 `stopped` 를 세워 앱을 껐다
-        // 켜기 전까지 그 목적지가 죽었다 — 사용자에게는 「어느 순간부터 배지가 안 뜬다」로만 보였다.
-        self.scheduleStreamerRetry(dest, host, "원격 이벤트 채널이 끝났다");
-    }
-
     /// **nonce 를 통째로** 담는 상한 — `<70 자> ` 열둘 + 여유.
     ///
     /// 뒤 8 자만 담았더니 벽에 부딪혔다(2026-09-11): `mine` 에 event 의 꼬리가 분명히 있는데 「가까운 짝」이
     /// 안 잡혔다. 꼬리가 같으면 앞도 같아야 하는데(`runtime_id` 는 랜덤 128 비트) 그렇지 않았고, **자른
     /// 값으로는 어디가 갈렸는지 못 본다** — 그래서 통째로 남긴다.
-    const term_nonce_tail_buf: usize = 71 * 12;
+    pub const term_nonce_tail_buf: usize = 71 * 12;
 
     /// **nonce 를 통째로** 이어 붙인다(인스턴스 칸 포함).
     ///
@@ -17331,7 +16435,7 @@ pub const AppSession = struct {
     /// 안 맞고, #3484 의 「가까운 짝」 꼬리표마저 안 붙었다. 그 둘이 동시에 참이려면 그 Term 에서
     /// 비교 자체가 안 일어나야 하는데, `fed` 에 들었고 채널도 열려 있다 — **인스턴스 칸을 못 보는 것이
     /// 마지막 눈가림이었다.** 넘치면 조용히 자른다(진단이 판정을 밀어내면 안 된다).
-    fn appendTermNonceTail(buf: *[term_nonce_tail_buf]u8, len: *usize, nonce: []const u8) void {
+    pub fn appendTermNonceTail(buf: *[term_nonce_tail_buf]u8, len: *usize, nonce: []const u8) void {
         const tail = nonce;
         const need = tail.len + @intFromBool(len.* != 0);
         if (len.* + need > buf.len) return;
@@ -17347,7 +16451,7 @@ pub const AppSession = struct {
     /// 이 자리는 한 `catch` 로 둘을 뭉개고 있었다 — 경로가 규격(103 바이트)을 넘는 것은 dest 가 그대로인
     /// 한 안 바뀌지만, **할당 실패는 지금만**이다. 뭉개면 메모리가 잠깐 모자랐다는 이유로 그 목적지
     /// 배지가 앱 수명 내내 죽는다.
-    fn controlPathErrorIsPermanent(err: maru.cli.ssh.ControlPathError) bool {
+    pub fn controlPathErrorIsPermanent(err: maru.cli.ssh.ControlPathError) bool {
         // **`else` 를 안 쓴다.** 그러면 이 집합에 사유가 하나 늘 때 컴파일이 깨져, 그것이 「영원히」인지
         // 「지금만」인지 사람이 고르게 된다 — `else` 는 새 사유를 조용히 재시도 쪽으로 삼켜, 영원히 안
         // 되는 것에 예산 여섯을 쓰고 로그만 시끄러워진다.
@@ -17365,7 +16469,7 @@ pub const AppSession = struct {
     ///
     /// 예산은 `recordRemoteCursors` 옆에서 되돌린다(줄이 오면 = 채널이 산다). 그래서 이 값은 「연달아
     /// 실패한 횟수」이지 「살아온 동안의 총합」이 아니다.
-    fn scheduleStreamerRetry(self: *AppSession, dest: []const u8, host: *RemoteAgentHost, why: []const u8) void {
+    pub fn scheduleStreamerRetry(self: *AppSession, dest: []const u8, host: *RemoteAgentHost, why: []const u8) void {
         if (host.retries >= RemoteAgentHost.retry_max) {
             std.log.scoped(.agent).warn("{s} — 계속 실패해 관측 모드로 내린다 dest={s}", .{ why, dest });
             host.stopped = true;
@@ -17379,20 +16483,6 @@ pub const AppSession = struct {
             "{s} — {d} ms 뒤 다시 띄운다({d}/{d}) dest={s}",
             .{ why, backoff, host.retries, RemoteAgentHost.retry_max, dest },
         );
-    }
-
-    /// 줄이 없어도 그 목적지의 채널들에 **시간이 갔음을 알린다**(hello·침묵 시한 판정).
-    fn tickRemoteAgentTerms(self: *AppSession, dest: []const u8, now_ms: u64) void {
-        for (self.tabs.items) |tab| {
-            for (tab.panes.items) |pane| {
-                for (pane.terms.items) |term| {
-                    var ch = &(term.agent_remote_channel orelse continue);
-                    if (!term.rt.observation.ssh_remote_dest_present) continue;
-                    if (!std.mem.eql(u8, term.rt.observation.ssh_remote_dest.items, dest)) continue;
-                    ch.tick(now_ms);
-                }
-            }
-        }
     }
 
     /// **이벤트는 왔는데 아무 Term 도 안 가져갔다**를 알린다.
@@ -17437,7 +16527,7 @@ pub const AppSession = struct {
     /// 굳어 있던 pane nonce 가 지금 신원과 달라 갈아끼웠다. **이 줄이 뜨면 그 Term 은 그 전까지 자기
     /// 이벤트를 하나도 못 받고 있었다** — `orphan agent nonce` 의 원인 쪽이다. 둘이 같은 재현에서 나오면
     /// 「재부착으로 handle→runtime 매핑이 움직였다」가 확정된다.
-    fn reportRemoteNonceRebind(self: *AppSession, dest: []const u8, old: []const u8, new: []const u8) void {
+    pub fn reportRemoteNonceRebind(self: *AppSession, dest: []const u8, old: []const u8, new: []const u8) void {
         self.remote_nonce_rebinds +|= 1;
         // **진동하면 다른 로그를 묻는다.** registry 가 오가면 매 tick 갈아끼울 수 있어, 진단 값이 있는
         // 앞쪽만 말하고 뒤는 셈에만 남긴다 — 몇 번 났는지는 `remote_nonce_rebinds` 가 들고 있다.
@@ -17449,7 +16539,7 @@ pub const AppSession = struct {
         );
     }
 
-    fn reportOrphanNonce(self: *AppSession, dest: []const u8, lines_len: usize, fed: usize, with_nonce: usize, open_channels: usize, mine: []const u8) void {
+    pub fn reportOrphanNonce(self: *AppSession, dest: []const u8, lines_len: usize, fed: usize, with_nonce: usize, open_channels: usize, mine: []const u8) void {
         if (lines_len == 0 or fed == 0) return; // 분배 자체가 없었으면 이 축이 아니다
         // ⚠️ **이번 분배에서 이벤트를 하나도 못 봤으면 말할 게 없다.** `unmatched_*` 는 한 번 담기면
         // 남아 있어, 그대로 찍으면 **과거 tick 의 event 와 이번 tick 의 `mine` 을 나란히** 보여준다 —
@@ -17514,7 +16604,7 @@ pub const AppSession = struct {
     /// 와도 배지가 조용히 안 뜨고, 사용자에게는 「감지가 안 된다」로만 보인다. 나머지 모양은
     /// `MARU_DEBUG` 뒤에 둔다 — 정상 동작에서도 로컬 Term 은 늘 걸러지므로 사실 자체가 이상이
     /// 아니다. 어느 조건에서 걸렸는지가 함께 나오므로 원인 축이 바로 갈린다.
-    fn reportRemoteFeedShape(
+    pub fn reportRemoteFeedShape(
         self: *AppSession,
         dest: []const u8,
         lines_len: usize,
@@ -17541,103 +16631,6 @@ pub const AppSession = struct {
             "remote feed: dest={s} fed={d} skipped(no_channel={d} no_dest={d} other_dest={d})",
             .{ dest, fed, no_channel, no_dest, other_dest },
         );
-    }
-
-    /// 한 목적지의 Term 들에 줄을 먹인다. `lines` 가 비면 **EOF 를 알리는 호출**이다.
-    ///
-    /// **왜 세는가.** 이벤트가 정확히 와도 Term 에 안 붙으면 배지는 조용히 안 뜬다 — 스트리머가
-    /// pane 열을 정확히 구분해 보내는데도 사이드바에서 둘만 잡히는 일이 실제로 있었다(2026-09-06).
-    /// 그때 「어느 조건에서 걸리는지」를 아무도 말하지 않아 로컬 앱 상태를 못 보는 쪽에서는 추측만
-    /// 반복됐다. 그래서 조건별로 세고, **아무도 못 받으면** 기본 레벨로 알린다(계약 §1.2 의 결).
-    fn feedRemoteAgentTerms(self: *AppSession, dest: []const u8, lines: []const []const u8, now_ms: u64) void {
-        self.remote_nonce_matched = 0;
-        self.remote_events_seen = 0;
-        var fed: usize = 0;
-        var with_nonce: usize = 0;
-        // **몇이 실제로 먹을 수 있나.** `fed` 는 「분배 후보였다」일 뿐이고, 채널이 `hello` 관문을 못
-        // 지났거나 닫혔으면 그 Term 은 이벤트를 **아예 못 본다** — 그러면 미매칭 기록조차 안 남아
-        // 「열을 다 먹였는데 하나도 안 맞는다」로만 보인다(2026-09-11 실측).
-        var open_channels: usize = 0;
-        var mine_buf: [term_nonce_tail_buf]u8 = undefined;
-        var mine_len: usize = 0;
-        var no_channel: usize = 0;
-        var no_dest: usize = 0;
-        var other_dest: usize = 0;
-        defer self.reportRemoteFeedShape(dest, lines.len, fed, no_channel, no_dest, other_dest);
-        defer self.reportOrphanNonce(dest, lines.len, fed, with_nonce, open_channels, mine_buf[0..mine_len]);
-        for (self.tabs.items) |tab| {
-            for (tab.panes.items) |pane| {
-                for (pane.terms.items) |term| {
-                    if (term.agent_remote_channel == null) {
-                        no_channel += 1;
-                        continue;
-                    }
-                    if (!term.rt.observation.ssh_remote_dest_present) {
-                        no_dest += 1;
-                        continue;
-                    }
-                    if (!std.mem.eql(u8, term.rt.observation.ssh_remote_dest.items, dest)) {
-                        other_dest += 1;
-                        continue;
-                    }
-                    fed += 1;
-                    if (term.agent_remote_channel) |ch| {
-                        if (ch.isOpen()) open_channels += 1;
-                    }
-                    if (term.agent_remote_nonce_len != 0) {
-                        with_nonce += 1;
-                        // **앱이 든 신원을 모은다.** orphan 이 뜰 때 「내가 뭘 들고 있었나」가 없으면
-                        // 원격에서 손으로 대조하는 수밖에 없다(2026-09-07·09 에 세 번 그랬다). pane
-                        // 부분 뒤 8 자면 한 줄에 열이 들어가고 구분에도 충분하다.
-                        appendTermNonceTail(&mine_buf, &mine_len, term.agent_remote_nonce[0..term.agent_remote_nonce_len]);
-                    }
-                    if (lines.len > 0)
-                        agent_ops.consumeRemoteAgentLines(self, term, lines, now_ms)
-                    else
-                        term.agent_remote_channel.?.eof();
-                }
-            }
-        }
-    }
-
-    /// 모든 목적지의 자식을 끝내고 Term 들의 채널도 뗀다(게이트 off, 그리고 `deinit`).
-    ///
-    /// **채널까지 떼는 것이 요점이다.** 자식만 죽이고 `Channel` 을 남기면 그 Term 은 `modeFor` 에서
-    /// 계속 «채널이 열렸다» 로 읽혀 훅 모드에 갇힌다 — 게이트를 껐는데 배지가 안 풀리는 모양이 된다.
-    fn closeAllRemoteAgentHosts(self: *AppSession) void {
-        if (self.remote_agent_hosts.count() == 0) return;
-        var it = self.remote_agent_hosts.iterator();
-        while (it.next()) |entry| {
-            if (entry.value_ptr.install) |st| ssh_upload.stopAgentEvents(st);
-            ssh_upload.stopAgentEvents(entry.value_ptr.stream);
-            entry.value_ptr.pending.deinit(self.allocator);
-            entry.value_ptr.install_out.deinit(self.allocator);
-            self.allocator.free(entry.key_ptr.*);
-        }
-        self.remote_agent_hosts.clearRetainingCapacity();
-        for (self.tabs.items) |tab| {
-            for (tab.panes.items) |pane| {
-                for (pane.terms.items) |term| {
-                    term.agent_remote_channel = null;
-                    term.agent_remote_nonce_len = 0;
-                }
-            }
-        }
-    }
-
-    /// 한 목적지의 자식을 끝내고 표에서 뗀다.
-    fn closeRemoteAgentHost(self: *AppSession, dest: []const u8) void {
-        const entry = self.remote_agent_hosts.fetchRemove(dest) orelse return;
-        var host = entry.value;
-        if (host.install) |st| ssh_upload.stopAgentEvents(st);
-        ssh_upload.stopAgentEvents(host.stream);
-        host.pending.deinit(self.allocator);
-        host.install_out.deinit(self.allocator);
-        // 커서 키는 우리가 dupe 했다 — 표를 버리기 전에 되돌려준다.
-        var ck = host.cursors.keyIterator();
-        while (ck.next()) |k| self.allocator.free(k.*);
-        host.cursors.deinit(self.allocator);
-        self.allocator.free(entry.key);
     }
 
     pub fn remoteUploadContextFor(self: *AppSession, term: *Term) ?RemoteUpload {
@@ -18250,8 +17243,8 @@ pub const AppSession = struct {
         // 세운다 — 매 이동 재투영은 낭비다.
         {
             const next: ?chrome.components.status_bar.ItemId = blk: {
-                const id = self.statusBarItemAt(x_px, y_px) orelse break :blk null;
-                break :blk if (statusBarItemClickable(id)) id else null;
+                const id = status_bar_ops.statusBarItemAt(self, x_px, y_px) orelse break :blk null;
+                break :blk if (status_bar_ops.statusBarItemClickable(id)) id else null;
             };
             if (next != self.status_bar_hovered) {
                 self.status_bar_hovered = next;
@@ -18260,7 +17253,7 @@ pub const AppSession = struct {
             if (next != null) return .link; // 누를 수 있다는 신호(Cmd+hover URL과 같은 손 모양)
             // 항목 밖이어도 **바 안이면 chrome이다.** 그냥 흘려보내면 아래 터미널 분류가 iBeam을 주는데,
             // 클릭은 삼켜지므로(바 위 down은 선택을 시작하지 않는다) "글자를 고를 수 있다"는 거짓 신호가 된다.
-            if (self.pointInStatusBar(x_px, y_px)) return .default;
+            if (status_bar_ops.pointInStatusBar(self, x_px, y_px)) return .default;
         }
         // 파일 헤더 mode 선택기도 같은 자리에서 매 이동 갱신한다(밴드 밖으로 나가면 null이라 stale 강조가 안 남는다).
         self.setHoveredFileHeaderMode(self.fileHeaderModeHoverAt(x_px, y_px));
@@ -18596,13 +17589,13 @@ pub const AppSession = struct {
         // 링크로 오인돼 탭 전환을 삼킨다(hover는 그 영역에서 밑줄을 지우므로 비대칭까지 생긴다).
         // **떠 있는 프리뷰가 먼저다.** 프리뷰는 pane 위에 겹쳐 있으므로 pane hit 로 내려보내면
         // 그 아래 셀의 마커 토글이 먼저 먹고 상자 클릭이 영영 안 온다. `paneTargetAt` **앞**이다.
-        if (self.markerPreviewDockJumpAt(x_px, y_px)) return &.{};
+        if (marker_view_ops.markerPreviewDockJumpAt(self, x_px, y_px)) return &.{};
         const hit = pane_ops.paneTargetAt(self, x_px, y_px) orelse return &.{};
         const cell = pane_ops.paneCellAtExact(self, hit.surface, hit.rect, x_px, y_px) orelse return &.{};
         // **마커가 먼저다**(계약 §2.2). 마커 판정은 문자열이라 `stat` 없이 끝나고, 링크는 존재 검증까지
         // 가므로 순서를 뒤집으면 헛 `stat`이 붙는다. 마커를 소비했으면 빈 슬라이스를 돌려 Swift가
         // 아무것도 열지 않게 한다 — 클릭은 우리가 먹었다.
-        if (self.toggleMarkerPreviewAt(hit.term, hit.surface.id, cell)) return &.{};
+        if (marker_view_ops.toggleMarkerPreviewAt(self, hit.term, hit.surface.id, cell)) return &.{};
         if (self.url_buffer.len > 0) {
             self.allocator.free(self.url_buffer);
             self.url_buffer = &.{};
@@ -19404,209 +18397,6 @@ pub const AppSession = struct {
         return self.last_summary;
     }
 
-    /// 세션 host 데몬 자신의 표본을 채우고 개수를 돌려준다. 출처는 **앱 전역** 원격 backend다 — 창마다가
-    /// 아니라 프로세스마다 하나라(§10) 어느 창에서 물어도 같은 host를 가리키고, 그래서 그 값이
-    /// "모든 창 공유" 행이 된다. keep-alive가 꺼져 있거나 host 연결에 실패했으면 0이고 행이 서지 않는다.
-    ///
-    /// ⚠️ backend 포인터를 **밖으로 내보내지 않는다.** `RemoteSessionBackend`는 non-macOS에서 `void`라
-    /// 호출을 `if (is_macos)` **안**에서 끝내야 그 갈래가 comptime에 통째로 잘린다(기존 `backendFor`와 같은 꼴).
-    fn hostResourceSamples(self: *AppSession, out: []maru.session.resource_usage.Sample) usize {
-        _ = self;
-        if (is_macos) {
-            if (app_remote_backend) |*rb| return rb.hostProcessSamples(out);
-        }
-        return 0;
-    }
-
-    /// 이 창의 터미널 프로세스 표본을 모아 리소스 표시를 갱신한다(docs/status-bar.md §4.1).
-    ///
-    /// **창 단위로 귀속되는 것만 센다** — 다만 앱 자신과 세션 host 데몬은 예외다(앱 전역이라 창이 둘이면
-    /// 같은 값이 두 번 표시되는 것을 알면서도, 가장 큰 소비자를 어느 화면에서도 못 보게 두지 않으려고
-    /// "모든 창 공유" 행 둘로 낸다). 웹 콘텐츠는 여전히 뺀다(비문서 심볼이 필요하다).
-    ///
-    /// **host-backed 터미널도 이제 센다** — host가 관측에 실어 보낸 `child_pid`를 뿌리로 앱이 직접 트리를
-    /// 훑는다(§4.1 "host-backed 터미널도 센다"). 예전 주석은 "backend가 0을 돌려줘 자연히 빠진다"였다.
-    ///
-    /// 상태바가 안 보이면(설정 off·quick terminal) **아예 재지 않는다** — 안 보이는 UI에 syscall을 쓰지 않는다.
-    fn pollResourceUsage(self: *AppSession) void {
-        self.resource_poll_ticks += 1;
-        const interval_ms = if (self.resource_menu_open) resource_open_poll_interval_ms else resource_poll_interval_ms;
-        if (self.resource_poll_ticks < self.ticksForMs(interval_ms)) return;
-        self.resource_poll_ticks = 0;
-        if (!self.surface_initialized) return;
-        if (self.statusBarHeightPx() == 0) { // 단일 게이트: chrome_minimal + status-bar.show
-            // 팝오버는 그 항목에 앵커돼 있다 — 항목이 사라졌는데 목록만 남으면 누른 적 없는 자리에 뜬
-            // 유령이 된다(브랜치 메뉴가 "앵커 없으면 열지 않는다"로 막은 문제의 **열린 뒤** 판).
-            if (self.resource_menu_open) settings_ops.closeContextMenu(self);
-            self.clearResourceReading();
-            return;
-        }
-
-        // **행 수와 함께 큰다.** 예전엔 `* 4`(192 개)였는데, 그 상한에 닿으면 뒤 탭은 표본을 아예 못 받아
-        // **총합에서도 빠졌다** — 「합이 안 맞는다」의 둘째 원인이고, 행만 늘리면 안 고쳐진다.
-        var samples: [max_resource_samples]maru.session.resource_usage.Sample = undefined;
-        var groups: [max_resource_rows + resource_footer_rows]maru.session.resource_usage.Group = undefined;
-        var n: usize = 0;
-        var group_n: usize = 0;
-        // **앱 자신을 먼저 넣는다**(§4.1). 뒤에 넣으면 탭이 많을 때 공유 고정 버퍼에 자리가 없다 — 앞에 넣어도
-        // 각 그룹이 자기 `start`를 기록하므로 탭 행 계산은 그대로다. 그리고 이 표본은 **자기 그룹을 하나 갖는다**:
-        // 합계(=`samples` 전체)에 들어가면서 팝오버 꼬리 행의 값도 같은 산술에서 나온다.
-        if (maru.pty.selfResourceSample()) |own| {
-            samples[0] = .{ .pid = own.pid, .footprint_bytes = own.footprint_bytes, .cpu_ns = own.cpu_ns };
-            n = 1;
-            groups[0] = .{ .key = resource_app_key, .start = 0, .len = 1 };
-            group_n = 1;
-        }
-        // **세션 호스트도 같은 자리에서 센다**(§4.1). 앱과 같은 이유다 — keep-alive를 켜면 터미널이 host
-        // 프로세스 안에 살고, 그 데몬 자신의 오버헤드는 어느 화면에도 안 나오던 값이었다. 여기서도 **트리를
-        // 훑지 않는다**: 자식들은 아래 Term 행이 각자 세므로 트리를 훑으면 같은 바이트를 두 번 센다.
-        // 앱 표본 바로 뒤(앞쪽)에 넣는 이유도 앱과 같다 — 탭이 많을 때 뒤에는 자리가 없다.
-        {
-            const room = @min(max_resource_host_samples, samples.len - n);
-            const host_n = self.hostResourceSamples(samples[n..][0..room]);
-            if (host_n > 0 and group_n < groups.len) {
-                groups[group_n] = .{ .key = resource_host_key, .start = n, .len = host_n };
-                group_n += 1;
-                n += host_n;
-            }
-        }
-        for (self.tabs.items) |tab| {
-            for (tab.panes.items) |pane| {
-                for (pane.terms.items) |term| {
-                    if (term.kind != .terminal) continue;
-                    if (!term.rt.live_initialized or term.rt.terminated) continue;
-                    if (n >= samples.len) break;
-                    const start = n;
-                    const room = @min(max_resource_samples_per_term, samples.len - n);
-                    n += self.backendFor(term).resourceSamples(term.rt.handle, samples[n..][0..room]);
-                    // 표본이 0이어도 **행은 남긴다** — 탭은 존재하므로(값만 `—`). 행 상한을 넘으면 더 담지
-                    // 않는다(공유 라벨 버퍼 크기 — comptime 가드가 상한을 못 박는다).
-                    if (group_n < groups.len) {
-                        groups[group_n] = .{ .key = term.surfaceId(), .start = start, .len = n - start };
-                        group_n += 1;
-                    }
-                }
-            }
-        }
-
-        // 앱·호스트 표본까지 실패했고 터미널도 없다(웹 탭만) — 0을 그리지 않고 항목을 내린다.
-        if (n == 0) {
-            self.clearResourceReading();
-            return;
-        }
-
-        const reading = self.resource_meter.updateGrouped(
-            self.allocator,
-            samples[0..n],
-            monotonicMs(),
-            groups[0..group_n],
-            &self.resource_rows,
-        ) orelse {
-            self.resource_rows_len = 0;
-            // 첫 표본·긴 공백 — CPU%를 낼 수 없으면 **항목 자체를 내지 않는다**(메모리만 먼저 그리면 폭이
-            // 변해 좌측 경로가 흔들린다).
-            self.clearResourceReading();
-            return;
-        };
-
-        self.resource_rows_len = @min(group_n, self.resource_rows.len);
-
-        // **표시 문자열을 행보다 먼저 확정한다.** 팝오버 머리글이 이 버퍼에서 합계를 읽으므로
-        // (§4.2 "합계는 상태바 항목과 **같은 값**을 쓴다 — 다른 숫자를 두 곳에 두면 어느 쪽이 맞는지
-        // 물어야 한다"), 갱신 **전에** 행을 다시 그리면 머리글만 한 tick 뒤처진다. 예전 순서가 그랬고,
-        // 총합이 느리게 움직이던 동안에는 두 숫자가 대개 같아 보여 드러나지 않았다 — 세션 호스트가
-        // 합계에 들어오면서 초 단위로 크게 움직이자 실측 캡처에서 **머리글 516 MB vs 띠 532 MB**로 보였다.
-        var buf: [maru.session.resource_usage.text_max_bytes]u8 = undefined;
-        const text = maru.session.resource_usage.format(&buf, reading);
-        const text_changed = !(text.len == self.resource_text_len and
-            std.mem.eql(u8, text, self.resource_text_buf[0..self.resource_text_len]));
-        if (text_changed) {
-            @memcpy(self.resource_text_buf[0..text.len], text);
-            self.resource_text_len = text.len;
-        }
-        self.resource_reading = reading;
-        if (self.resource_menu_open) self.refreshResourceMenuRows(); // 열려 있으면 값만 다시 그린다(순서·개수 고정)
-
-        // **글자가 바뀔 때만** 재렌더한다. 원값은 매초 흔들려도 표시가 같으면 다시 그릴 이유가 없다
-        // (매초 전체 재렌더는 배터리에 그대로 실린다).
-        //
-        // 단 **팝오버가 열려 있으면 함께 그린다** — 방금 행 값을 다시 조립했는데 총합 문자열이 같다는
-        // 이유로 건너뛰면 그 라벨이 화면에 도달하지 못한다. 열렸을 때 주기를 500ms로 당긴 이유가
-        // "값이 안 변하면 멈춘 것처럼 보인다"(§4.2)인데, 옛 순서는 바로 그 경우에 화면을 안 고쳤다.
-        if (!text_changed and !self.resource_menu_open) return;
-        self.metal_dirty = true;
-    }
-
-    /// 리소스 팝오버를 연다 — 상태바 항목에 앵커한 탭별 목록(docs/status-bar.md §6 "리소스 팝오버").
-    ///
-    /// **열 때 행 집합과 순서를 정하고 닫힐 때까지 얼린다.** 무거운 순으로 정렬하는데 갱신마다 다시 정렬하면
-    /// 누르려던 줄이 손가락 밑에서 다른 탭이 되고, `context_menu.show()`를 다시 부르면 선택도 0으로 튕긴다.
-    /// 캡처 하니스(`debug_fixtures.applyForcedResourceMenu`)도 부르므로 `pub` 이다.
-    pub fn openResourceMenu(self: *AppSession) void {
-        if (self.resource_rows_len == 0) {
-            self.showNoticeKey(.app_no_measured_terminal);
-            return;
-        }
-        // **앵커가 있어야 연다** — 브랜치 메뉴와 같은 규율(바가 사라진 뒤 열면 창 바닥에 붙는다).
-        var anchor_x: f64 = 0;
-        var anchor_y: f64 = 0;
-        var anchored = false;
-        for (self.statusBarTree().entries) |e| {
-            if (e.id != @intFromEnum(chrome.components.status_bar.ItemId.resource)) continue;
-            anchor_x = e.rect.x;
-            anchor_y = e.rect.y;
-            anchored = true;
-        }
-        if (!anchored) return;
-
-        // 무거운 순 정렬 — 값이 없는 행(표본 0)은 뒤로. **공유 행 둘은 넣지 않는다**(정렬 밖 고정,
-        // 아래에서 맨 뒤에 붙인다). 가르는 산술은 순수 모듈이 소유하고 테스트가 단언한다 —
-        // 실제로 서는 꼬리 수가 0·1·2로 갈리는데 그것을 여기서 다시 세면 화면에서만 드러난다.
-        var order: [max_resource_rows + resource_footer_rows]usize = undefined;
-        var pinned: [resource_pinned_keys.len]usize = undefined;
-        const part = maru.session.resource_usage.partitionPinned(
-            self.resource_rows[0..self.resource_rows_len],
-            &resource_pinned_keys,
-            &order,
-            &pinned,
-        );
-        const count = part.sortable;
-        const Ctx = struct {
-            rows: []const maru.session.resource_usage.GroupReading,
-            fn heavier(ctx: @This(), a: usize, b: usize) bool {
-                const av = if (ctx.rows[a].reading) |r| r.footprint_bytes else 0;
-                const bv = if (ctx.rows[b].reading) |r| r.footprint_bytes else 0;
-                return av > bv;
-            }
-        };
-        std.sort.pdq(usize, order[0..count], Ctx{ .rows = self.resource_rows[0..self.resource_rows_len] }, Ctx.heavier);
-
-        settings_ops.closeContextMenu(self);
-        self.resource_menu_len = 0;
-        for (order[0..count]) |row_index| {
-            if (self.resource_menu_len >= max_resource_rows) break;
-            self.resource_menu_keys[self.resource_menu_len] = self.resource_rows[row_index].key;
-            self.resource_menu_len += 1;
-        }
-        // 공유 행은 **잘리는 상한 뒤**에 붙는다 — 탭이 넘쳐도 사라지지 않는다(§4.1 "항상 있으므로 항상 보여야").
-        // 꼬리 수는 **실제로 붙은 개수**다(상수가 아니다) — host가 없거나 앱 표본이 실패하면 하나만 선다.
-        for (pinned[0..part.pinned_len]) |row_index| {
-            self.resource_menu_keys[self.resource_menu_len] = self.resource_rows[row_index].key;
-            self.resource_menu_len += 1;
-        }
-        const footer: usize = part.pinned_len;
-        self.resource_menu_open = true;
-        self.refreshResourceMenuRows();
-        self.chrome_host.context_menu.showWithFooters(
-            @intFromFloat(anchor_x),
-            @intFromFloat(anchor_y),
-            resource_header_rows + self.resource_menu_len,
-            resource_header_rows,
-            footer,
-        );
-        self.metal_dirty = true;
-    }
-
     /// 에이전트 개수 항목을 눌렀을 때 — **그 에이전트로 간다**(docs/status-bar.md §4).
     ///
     /// 옛 동작은 우측 `agent_sessions` 도크를 여는 것이었는데, 그 도크는 "현재 열려 있는 Term의 보조 목록이
@@ -19663,7 +18453,7 @@ pub const AppSession = struct {
         var anchor_x: f64 = 0;
         var anchor_y: f64 = 0;
         var anchored = false;
-        for (self.statusBarTree().entries) |e| {
+        for (status_bar_ops.statusBarTree(self).entries) |e| {
             if (e.id != @intFromEnum(want_id)) continue;
             anchor_x = e.rect.x;
             anchor_y = e.rect.y;
@@ -19782,119 +18572,6 @@ pub const AppSession = struct {
         }
         used += copyClamped(out[used..], age);
         return out[0..used];
-    }
-
-    /// 얼린 행 순서 그대로 **값만** 다시 조립한다(`show`를 다시 부르지 않는다 — 선택이 리셋된다).
-    fn refreshResourceMenuRows(self: *AppSession) void {
-        const ru = maru.session.resource_usage;
-        self.buildResourceHeaderRows();
-        for (0..self.resource_menu_len) |i| {
-            const key = self.resource_menu_keys[i];
-            // 이 행의 최신 값을 키로 찾는다. 그 사이 탭이 죽었으면 못 찾는다 → `—`(갈 곳이 아님을 보인다).
-            var reading: ?ru.Reading = null;
-            for (self.resource_rows[0..self.resource_rows_len]) |row| {
-                if (row.key == key) {
-                    reading = row.reading;
-                    break;
-                }
-            }
-            self.context_menu_items_buf[resource_header_rows + i] = self.formatResourceRow(i, key, reading);
-        }
-        self.context_menu_items_len = resource_header_rows + self.resource_menu_len;
-    }
-
-    /// 앞머리 두 줄 — ⓪ `리소스  <창 합계>` ① `이름 … 메모리   CPU`. 합계는 상태바 항목과 **같은 값**을
-    /// 쓴다(다른 숫자를 두 곳에 두면 어느 쪽이 맞는지 물어야 한다).
-    fn buildResourceHeaderRows(self: *AppSession) void {
-        const ru = maru.session.resource_usage;
-        const cols = chrome.components.overlay_input.displayCols;
-
-        // 머리글 버퍼는 **행 슬롯 뒤**에 온다. 행은 탭(max_resource_rows) + 앱(resource_footer_rows)까지
-        // 쓰므로, 예전처럼 `[max_resource_rows]`를 제목으로 쓰면 **12번째 탭 행과 제목이 같은 버퍼**를
-        // 나눠 쓴다(행이 꽉 찬 창에서만 드러나는 종류의 손상).
-        const title = &self.resource_menu_text[max_resource_rows + resource_footer_rows];
-        var used: usize = copyClamped(title[0..], maru.i18n.t(.col_resource));
-        if (self.resource_text_len > 0) {
-            var pad = resource_row_name_cols -| cols(maru.i18n.t(.col_resource));
-            while (pad > 0 and used < title.len) : (pad -= 1) {
-                title[used] = ' ';
-                used += 1;
-            }
-            used += copyClamped(title[used..], "  ");
-            used += copyClamped(title[used..], self.resource_text_buf[0..self.resource_text_len]);
-        }
-        self.context_menu_items_buf[0] = title[0..used];
-
-        const head = &self.resource_menu_text[max_resource_rows + resource_footer_rows + 1];
-        var n: usize = copyClamped(head[0..], maru.i18n.t(.col_name));
-        var pad2 = resource_row_name_cols -| cols(maru.i18n.t(.col_name));
-        while (pad2 > 0 and n < head.len) : (pad2 -= 1) {
-            head[n] = ' ';
-            n += 1;
-        }
-        n += copyClamped(head[n..], "  ");
-        // 값 줄과 **같은 칸**에서 끝나는 열 이름(순수 모듈이 폭 규약을 함께 소유한다).
-        var head_buf: [ru.header_max_bytes]u8 = undefined;
-        n += copyClamped(head[n..], ru.formatHeader(&head_buf));
-        self.context_menu_items_buf[1] = head[0..n];
-    }
-
-    /// 한 행 = `탭 › 팬` + 고정 폭 숫자. 라벨 조립은 **알림과 같은 함수**(`notificationLocation`)를 쓴다 —
-    /// 구분자 규약이 앱 전체에서 하나여야 하고, 두 라벨이 같을 때 하나만 쓰는 처리도 거기 있다.
-    /// 패딩은 **EAW 표시 칸** 기준이다(한글 한 자 = 2칸) — 글자 수로 채우면 한글 탭에서 열이 어긋난다.
-    fn formatResourceRow(self: *AppSession, slot: usize, key: u64, reading: ?maru.session.resource_usage.Reading) []const u8 {
-        const ru = maru.session.resource_usage;
-        var loc_buf: [notification_location_buf_len]u8 = undefined;
-        const label = self.resourceRowLabel(&loc_buf, key);
-
-        var value_buf: [ru.text_max_bytes]u8 = undefined;
-        const value: []const u8 = if (reading) |r| ru.format(&value_buf, r) else "—";
-
-        // 이름 예산 = 전체 폭에서 숫자 열과 간격을 뺀 만큼. 넘치면 EAW 절단(`…`).
-        var name_buf: [resource_row_max_bytes]u8 = undefined;
-        const shown = truncateColsInto(&name_buf, label, resource_row_name_cols);
-        const name_cols = chrome.components.overlay_input.displayCols(shown);
-
-        var out = &self.resource_menu_text[slot];
-        var used: usize = 0;
-        used += copyClamped(out[used..], shown);
-        var pad = resource_row_name_cols -| name_cols;
-        while (pad > 0 and used < out.len) : (pad -= 1) {
-            out[used] = ' ';
-            used += 1;
-        }
-        used += copyClamped(out[used..], "  ");
-        used += copyClamped(out[used..], value);
-        return out[0..used];
-    }
-
-    /// 이 행이 가리키는 Term의 `탭 › 팬` 라벨. 못 찾으면(그 사이 닫힘) 마지막으로 알던 이름이 없으므로 물음표.
-    fn resourceRowLabel(self: *AppSession, buf: []u8, key: u64) []const u8 {
-        // 공유 행 둘은 Term이 아니다 — 탭 목록에서 못 찾는 게 정상이라 먼저 가른다(§4.1).
-        if (key == resource_app_key) return resourceAppLabel();
-        if (key == resource_host_key) return resourceHostLabel();
-        for (self.tabs.items) |tab| {
-            for (tab.panes.items) |pane| {
-                for (pane.terms.items) |term| {
-                    if (term.surfaceId() != key) continue;
-                    return notificationLocation(buf, tab, term);
-                }
-            }
-        }
-        return maru.i18n.t(.app_closed_tab);
-    }
-
-    fn clearResourceReading(self: *AppSession) void {
-        if (self.resource_reading == null and self.resource_text_len == 0) return;
-        self.resource_reading = null;
-        self.resource_text_len = 0;
-        self.metal_dirty = true;
-    }
-
-    /// 상태바가 그릴 리소스 문자열. 없으면 null(항목 없음).
-    fn resourceText(self: *const AppSession) ?[]const u8 {
-        if (self.resource_text_len == 0) return null;
-        return self.resource_text_buf[0..self.resource_text_len];
     }
 
     /// 파일 전체를 arena에 읽는다(없거나 크면 null). 상태줄 스크립트·settings.json처럼 작은 파일 전용.
@@ -20988,7 +19665,7 @@ pub const AppSession = struct {
         scm_dock_ops.drainCommitFiles(self); // 펼친 커밋의 파일 목록을 싣는다(P4b)
         scm_dock_ops.pumpCommitFiles(self); // 펼쳤는데 아직 못 읽었으면 읽기를 건다(P4b·P5 공용 슬롯)
         scm_dock_ops.pumpTurnSummaries(self); // 턴 줄의 `N개 파일`을 하나씩 채운다(같은 슬롯을 쓴다)
-        self.pollResourceUsage(); // 상태바 리소스 표본 — 자체 주기(1s), 상태바가 안 보이면 아예 안 잰다
+        status_bar_ops.pollResourceUsage(self); // 상태바 리소스 표본 — 자체 주기(1s), 상태바가 안 보이면 아예 안 잰다
         debug_fixtures.applyForcedResourceMenu(self); // 캡처 전용: 리소스 팝오버 — 위 표본을 곧바로 보게 뒤에 둔다
         debug_fixtures.applyForcedAgentMenu(self); // 캡처 전용: 에이전트 개수 팝오버(running|blocked)
         self.revalidateHoverLink(); // 커서가 멈춘 채 레이아웃이 바뀌었으면 stale 링크 밑줄을 내린다(hover는 마우스 이벤트로만 갱신됨)
@@ -21083,8 +19760,8 @@ pub const AppSession = struct {
         // 마커 프리뷰: 붙여넣은 PNG에 **새로 나타난 N**을 묶고, 화면에서 사라진 것을 `sent`로 옮긴다(§4.2).
         // 활성 term 하나만 본다 — 비활성 pane의 화면은 이 tick에 바뀌지 않았거나, 바뀌었어도 그 pane이
         // 활성이 될 때 따라잡는다(관찰 창이 2초라 충분하다).
-        self.pollMarkerPreview();
-        self.pumpMarkerPreviewOpen();
+        marker_view_ops.pollMarkerPreview(self);
+        marker_view_ops.pumpMarkerPreviewOpen(self);
         editor_ops.lsp_client.pump(self); // §8.2a: 서버 읽기·문서 동기화 — 스레드 없이 tick 에서
         editor_ops.hover_client.tick(self); // §8.2b: 포인터 정지 → 호버 요청/열기
         editor_ops.references_client.tick(self); // §8.2l: 「지금은 못 답한다」 뒤 되묻기
@@ -21512,7 +20189,7 @@ pub const AppSession = struct {
             if (builtin.os.tag == .macos) {
                 const sb_colors: metal_frame.CellColors = .{ .default_fg = self.appearance.theme.foreground };
                 if (ft_on) ft_s1 = std.Io.Clock.awake.now(self.io).nanoseconds; // 사이드바 카드 끝 = 상태바 시작
-                self.collectStatusBarItems(&collected, pane_ops.paneFrameBuilder(self), sb_colors);
+                status_bar_ops.collectStatusBarItems(self, &collected, pane_ops.paneFrameBuilder(self), sb_colors);
                 if (ft_on) ft_s2 = std.Io.Clock.awake.now(self.io).nanoseconds; // 상태바 끝 = 헤더/검색 시작
             }
             var sidebar_header_frame: ?renderer.RenderFrame = null;
@@ -21556,9 +20233,9 @@ pub const AppSession = struct {
             // 위 layer2 drop과 값이 같아 지금은 중복이지만, status_bar_layer가 바뀌어도 짝이 남도록 둔다.
             // 모달·스크롤바가 상태바를 덮는 것은 **버킷이 정한다**(bottom이 over 아래) — 배열 순서가 아니다.
             // 배열 순서가 painter 순서인 것은 **같은 버킷 안**(탭 밴드·상태바 배경·호버)에서만이다.
-            self.appendStatusBarBackground();
-            self.appendStatusBarHover(); // 클릭 가능한 항목 위 호버 배경(배경 바로 뒤 = 같은 bottom 버킷 안에서 위)
-            self.appendStatusBarTopBorder(); // 상단 경계선 — 호버 **뒤**라야 호버한 항목 위에서 선이 안 끊긴다
+            status_bar_ops.appendStatusBarBackground(self);
+            status_bar_ops.appendStatusBarHover(self); // 클릭 가능한 항목 위 호버 배경(배경 바로 뒤 = 같은 bottom 버킷 안에서 위)
+            status_bar_ops.appendStatusBarTopBorder(self); // 상단 경계선 — 호버 **뒤**라야 호버한 항목 위에서 선이 안 끊긴다
             notification_ops.appendNotificationBadge(self); // 종 우상단 빨강 원형 배지(안 읽음 있을 때만, 펼침 헤더)
             pane_ops.appendPaneScrollbars(self); // 모든 pane 우측 thumb(스크롤백 있을 때만) — 활성=fade/hover, 비활성=faint
             sidebar_ops.appendSidebarScrollbar(self); // 사이드바 우측 thumb(워크스페이스 카드가 뷰포트 넘칠 때만) — 단일 트랙 fade
@@ -22481,7 +21158,7 @@ pub const AppSession = struct {
                 // 이 최적화가 없애려던 비용을 그대로 되살렸다). 둘 다 `pixels.*` 를 free 하고 교체하는 경로라
                 // 재사용 버퍼를 그대로 넘기면 **남의 것을 free** 한다.
                 agent_activity_ops.appendGpuImages(self, &kg_images, &kg_uploads, &kg_pixels, &kg_pixels_owned, &kg_live_ids);
-                self.appendMarkerPreviewImage(&kg_images, &kg_uploads, &kg_pixels, &kg_pixels_owned, &kg_live_ids);
+                marker_view_ops.appendMarkerPreviewImage(self, &kg_images, &kg_uploads, &kg_pixels, &kg_pixels_owned, &kg_live_ids);
                 agent_activity_ops.appendHoverQuad(self); // 갤러리 호버 판(이미지보다 뒤 layer)
                 notification_ops.appendBellFlashQuad(self); // 시각 벨(bell.visual): flash 중이면 전경색 반투명 full-screen quad를 맨 위에(F2-4)
                 if (ft_on) ft_rep = std.Io.Clock.awake.now(self.io).nanoseconds; // 조립 끝 = replace(투영) 시작
@@ -23640,443 +22317,6 @@ pub const AppSession = struct {
         }
     }
 
-    /// 펼침 헤더 종 우상단 알림 배지의 **빨강 원형 quad**(layer 4 — 사이드바 bg strip 뒤·헤더 글리프 앞)를 self.gpu_quads에
-    /// 1개 append한다. 그 원 위에 올라갈 흰 숫자는 appendBellAndBadge가 헤더 frame 셀(col=notificationBadgeCol)로 둔다 —
-    /// cell↔quad가 같은 col에서 만나 어긋나지 않는다. 안 읽은 알림이 없거나 헤더가 안 그려지는 폭/상태면 무동작.
-    /// **접힘은 제외**한다(접힘 헤더는 터미널 위에 그려져 layer 4 quad가 터미널 셀에 가려 안 보임 — 접힘은 텍스트 배지 유지).
-    /// per-frame: renderFrame이 dropQuadsByLayer(4) 직후 호출(헤더 frame의 흰 숫자와 같은 주기로 갱신).
-    /// 상태표시줄 항목을 수집한다(SB1-S3b: 좌측 git 브랜치). 폭은 **셀로 재고 px로 넘긴다** —
-    /// `chrome.components.status_bar`가 px로 배치하고(우측 정렬이 셀 경계가 아니라 창 가장자리에 붙어야
-    /// 한다), 항목마다 자기 frame을 px origin에 놓는다. 실패는 무시한다(항목 없이 빈 바 — 세션을 안 죽인다).
-    /// 발행된 tree를 비운다(항목이 하나도 없을 때). **조기 반환 경로가 이걸 안 하면 옛 tree가 남아,
-    /// 항목이 사라진 뒤에도 그 자리를 누르면 없어진 항목의 액션이 돈다** — 보이지 않는 것이 눌리는 셈이다.
-    /// 호버도 함께 지운다(가리키는 항목이 없다).
-    fn clearStatusBarTree(self: *AppSession) void {
-        self.status_bar_entry_count = 0;
-        self.status_bar_hovered = null;
-    }
-
-    fn collectStatusBarItems(self: *AppSession, collected: *std.ArrayList(CollectedPane), builder: coretext_frame_builder.CoreTextFrameBuilder, colors: metal_frame.CellColors) void {
-        const h = self.statusBarHeightPx();
-        if (h == 0 or self.cell_width_px == 0 or self.backing_width_px == 0) {
-            self.clearStatusBarTree();
-            return;
-        }
-
-        const term = pane_ops.activePane(self).activeTerm();
-        const bar_cols: u16 = @intCast(@min(self.backing_width_px / self.cell_width_px, std.math.maxInt(u16)));
-        const fg: terminal.Color = .{ .rgb = self.appearance.theme.foreground };
-        const icon_fg: terminal.Color = .{ .rgb = self.mutedForeground() };
-
-        // 좌측 항목을 **순서대로** 만든다. 폭이 모자라면 `status_bar.compute`가 **뒤쪽부터** 버리므로,
-        // 배열 순서가 곧 우선순위다 — 브랜치가 경로보다 짧고 자주 바뀌므로 앞에 둔다.
-        var frames: [max_status_bar_left_items]?renderer.DrawList = .{null} ** max_status_bar_left_items;
-        var widths: [max_status_bar_left_items]u32 = .{0} ** max_status_bar_left_items;
-        // 폭 배열과 **같은 순서**의 의미 id. 슬롯의 `index`로 되짚어 발행한다 — 인덱스를 id로 쓰면 항목이
-        // 하나 빠질 때 남은 것의 id가 밀려 "누른 것과 실행된 것"이 갈린다.
-        var left_ids: [max_status_bar_left_items]chrome.components.status_bar.ItemId = undefined;
-        var n: usize = 0;
-        defer for (frames[0..n]) |*maybe| {
-            if (maybe.*) |*dl| dl.deinit(self.allocator);
-        };
-
-        // ① git 브랜치 — repo 안일 때만 존재한다.
-        if (git_ops.termGitBranch(self, term)) |branch| {
-            if (branch.len > 0) {
-                if (self.buildStatusBarItem(icons.codepoint(.git_branch), branch, bar_cols, fg, icon_fg, .plain)) |dl| {
-                    frames[n] = dl;
-                    widths[n] = @as(u32, dl.size.cols) * self.cell_width_px;
-                    left_ids[n] = .git_branch;
-                    n += 1;
-                }
-            }
-        }
-
-        // ② 작업 경로 — **repo 밖에서도 그린다**. 사이드바 카드는 "repo 안일 때만 폴더줄"이지만(카드는 repo
-        // 맥락을 보여주는 자리다), 상태바는 "지금 어디에 있나"가 목적이라 repo 밖 cwd가 오히려 유용하다.
-        // 경로 파생은 `sidebarCwdPath`(HOME 경계를 정확히 지켜 `~`로 줄인다)를 재사용한다 — 다시 구현하지 않는다.
-        if (sidebarCwdPath(self, term)) |path| {
-            defer self.allocator.free(path);
-            if (path.len > 0 and n < max_status_bar_left_items) {
-                if (self.buildStatusBarItem(icons.codepoint(.folder), path, bar_cols, fg, icon_fg, .path)) |dl| {
-                    frames[n] = dl;
-                    widths[n] = @as(u32, dl.size.cols) * self.cell_width_px;
-                    left_ids[n] = .cwd;
-                    n += 1;
-                }
-            }
-        } else |_| {}
-
-        // 우측 — 안 읽은 알림 수. 0이면 항목 자체가 없다(사이드바 종 배지와 같은 전제).
-        // 좌측과 **독립 배열**이다: `status_bar.compute`가 우측을 먼저 배치하고 좌측이 그 좌단을 넘지 않게
-        // 자른다(S3a "부딪히면 우측을 먼저 지킨다"). 이 항목이 붙는 순간 그 규칙이 처음으로 실제로 작동한다.
-        var right_frames: [max_status_bar_right_items]?renderer.DrawList = .{null} ** max_status_bar_right_items;
-        var right_widths: [max_status_bar_right_items]u32 = .{0} ** max_status_bar_right_items;
-        var right_ids: [max_status_bar_right_items]chrome.components.status_bar.ItemId = undefined;
-        var rn: usize = 0;
-        defer for (right_frames[0..rn]) |*maybe| {
-            if (maybe.*) |*dl| dl.deinit(self.allocator);
-        };
-        // 영속 세션 강등도 데이터 보존 경고라 같은 자리를 다툰다 — 체크포인트 실패보다 **먼저** 넣어
-        // 가장 오른쪽에 서고 가장 오래 살아남는다. 이 상태가 보이는 동안 새 Term 은 앱과 함께 죽는데,
-        // notice 는 첫 폴백 때 한 번 뜨고 아무 키에나 닫혀 사라진다(status-bar.md §4.3).
-        if (is_macos and host_connect_failed) {
-            const danger: terminal.Color = .{ .rgb = self.appearance.theme.palette[1] orelse self.appearance.theme.accent };
-            if (self.buildStatusBarItem(
-                // **`hourglass` 를 쓰지 않는다.** §4 가 막힌 에이전트를 «모양으로» 구분한다고 정했고 그
-                // 모양이 모래시계다 — 같은 모양을 다른 뜻으로 재사용하면 그 규칙이 무너진다. `host` 는
-                // 이 상태가 가리키는 대상 그 자체이고 아직 UI 어디에도 쓰이지 않았다.
-                icons.codepoint(.host),
-                maru.i18n.t(.status_session_not_persisted),
-                bar_cols,
-                danger,
-                danger,
-                .plain,
-            )) |dl| {
-                right_frames[rn] = dl;
-                right_widths[rn] = @as(u32, dl.size.cols) * self.cell_width_px;
-                right_ids[rn] = .session_host_disconnected;
-                rn += 1;
-            }
-        }
-        // checkpoint 실패는 데이터 보존 경고라 우측 최우선이다. 성공 commit 전까지 필드가 유지되므로
-        // 프레임이 바뀌어도 사라지지 않는 비모달 상태다.
-        const checkpoint_failure_text: ?[]const u8 = switch (self.workspace_checkpoint_failure) {
-            1 => maru.i18n.t(.ws_checkpoint_capture_failed),
-            2 => maru.i18n.t(.ws_checkpoint_write_failed),
-            else => null,
-        };
-        if (checkpoint_failure_text) |text| {
-            const danger: terminal.Color = .{ .rgb = self.appearance.theme.palette[1] orelse self.appearance.theme.accent };
-            if (self.buildStatusBarItem(null, text, bar_cols, danger, danger, .plain)) |dl| {
-                right_frames[rn] = dl;
-                right_widths[rn] = @as(u32, dl.size.cols) * self.cell_width_px;
-                right_ids[rn] = .workspace_checkpoint_failure;
-                rn += 1;
-            }
-        }
-
-        // **폰이 세션을 좁혀 두었으면 그 사실을 말한다**(S11-6). 위 두 경고보다 **나중에** 넣는다 —
-        // 삽입 순서가 곧 생존 순위라(먼저 넣을수록 오른쪽에 서고 오래 남는다), 데이터 보존
-        // 경고가 이 «사실 전달» 보다 먼저 밀려나면 안 된다(적대적 검증 4회차). 창은 그대로인데 내용이 갑자기
-        // 좁게 리플로우되면 사용자는 그것을 **버그로 읽는다** — 계약이 「아무 신호 없이 줄이지
-        // 않는다」인 이유다. 이것은 사건이 아니라 **폰이 붙어 있는 동안 지속되는 상태**라 상태줄이
-        // 성격에 맞는다(한 번 뜨고 마는 알림이 아니다).
-        if (activeTermNarrowedCols(self)) |narrowed| {
-            var text_buf: [48]u8 = undefined;
-            const text = maru.i18n.format(&text_buf, maru.i18n.t(.status_viewport_narrowed), &.{.{ .d = @intCast(narrowed) }});
-            // 경고가 아니라 **사실 전달**이라 danger 색을 안 쓴다 — 폰이 붙은 것은 정상 동작이다.
-            const narrowed_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
-            if (self.buildStatusBarItem(
-                // **새 자산이다** — `host` 를 빌려 쓰면 그 모양이 「host 강등」과 「폰이 좁혔다」
-                // 둘을 뜻하게 되어 §4 의 「한 모양 한 뜻」이 무너진다.
-                icons.codepoint(.phone),
-                text,
-                bar_cols,
-                narrowed_fg,
-                narrowed_fg,
-                .plain,
-            )) |dl| {
-                right_frames[rn] = dl;
-                right_widths[rn] = @as(u32, dl.size.cols) * self.cell_width_px;
-                right_ids[rn] = .viewport_narrowed;
-                rn += 1;
-            }
-        }
-
-        // 우측 배열은 **앞이 더 오른쪽**이다(compute가 오른쪽 끝에서 왼쪽으로 쌓는다). 시급한 순서로 놓는다:
-        // blocked(사람을 기다림) → running(알아서 굴러감) → 알림(누적 카운터).
-        //
-        // blocked는 **모양으로** 구분한다(모래시계 + 강조색). 색만 다르면 "저 강조색이 무슨 뜻인지"를 배워야
-        // 하고, running과 같은 아이콘을 쓰면 개수가 무엇의 개수인지 모호해진다.
-        const agents = agent_ops.tallyAgents(self);
-        if (agents.blocked > 0) {
-            var blocked_buf: [16]u8 = undefined;
-            const text = std.fmt.bufPrint(&blocked_buf, "{d}", .{@min(agents.blocked, 99)}) catch "";
-            // 테마 accent(브랜드 강조) — danger는 파괴적 동작용이라 과하다. 새 색 역할을 만들지 않는다.
-            const accent: terminal.Color = .{ .rgb = self.appearance.theme.accent };
-            if (text.len > 0) {
-                if (self.buildStatusBarItem(icons.codepoint(.hourglass), text, bar_cols, accent, accent, .plain)) |dl| {
-                    right_frames[rn] = dl;
-                    right_widths[rn] = @as(u32, dl.size.cols) * self.cell_width_px;
-                    right_ids[rn] = .blocked_agents;
-                    rn += 1;
-                }
-            }
-        }
-        if (agents.running > 0 and rn < max_status_bar_right_items) {
-            const kind = agents.running_kind;
-            var agent_buf: [16]u8 = undefined;
-            const text = std.fmt.bufPrint(&agent_buf, "{d}", .{@min(agents.running, 99)}) catch "";
-            // **종류를 모르면 아이콘을 안 그린다.** 예전에는 `.none` 에 sparkle 을 썼는데 그것은 claude
-            // 아이콘이라, 「모른다」를 「claude 다」로 단정하는 거짓말이 된다. 실제로 그 한 줄이 진단을
-            // 망쳤다(2026-09-05): 원격 pane 의 `agent_kind` 가 안 세워진 상태였는데 화면은 claude 로
-            // 보여, 사용자가 「codex 인데 claude 로 나온다」로 읽고 **엉뚱한 축을 한참 팠다**.
-            //
-            // **provider 중립 아이콘은 두지 않는다** — 그것을 만들려면 새 SVG 자산과 빌드 생성기가
-            // 필요하고, 그 비용은 이 자리가 정당화하지 못한다. 아이콘이 없어도 blocked(모래시계)와는
-            // **모양으로 갈리므로** 위 주석의 규율("running 과 같은 아이콘을 쓰면 개수가 무엇의 개수인지
-            // 모호해진다")은 그대로 지켜진다.
-            const icon: ?u21 = if (kind == .none) null else agentIconCodepoint(kind);
-            if (text.len > 0 and rn < max_status_bar_right_items) {
-                if (self.buildStatusBarItem(icon, text, bar_cols, fg, icon_fg, .plain)) |dl| {
-                    right_frames[rn] = dl;
-                    right_widths[rn] = @as(u32, dl.size.cols) * self.cell_width_px;
-                    right_ids[rn] = .running_agents;
-                    rn += 1;
-                }
-            }
-        }
-        if (self.notification_unread > 0 and rn < max_status_bar_right_items) {
-            var count_buf: [16]u8 = undefined;
-            const count = std.fmt.bufPrint(&count_buf, "{d}", .{self.notification_unread}) catch "";
-            if (count.len > 0) {
-                if (self.buildStatusBarItem(icons.codepoint(.bell), count, bar_cols, fg, icon_fg, .plain)) |dl| {
-                    right_frames[rn] = dl;
-                    right_widths[rn] = @as(u32, dl.size.cols) * self.cell_width_px;
-                    right_ids[rn] = .notifications;
-                    rn += 1;
-                }
-            }
-        }
-
-        // **편집기 pane이 활성일 때만 나오는 넷**(native-editor-layering.md §2.2). 상태바는 창 전폭 띠라
-        // 늘 떠 있으면 터미널을 쓰는 동안에도 기존 항목을 밀어낸다 — 그래서 조건부다.
-        //
-        // 배열 순서 = 버려지는 순서다(뒤가 먼저 사라진다). **커서 위치 → 저하 → 읽기 전용 → 줄바꿈** 순으로 넣어
-        // "축소가 일어났다"는 사실이 가장 오래 남게 한다(§2.2: 조용히 줄어들면 사용자는 버그로 읽는다).
-        // 리소스보다는 **앞**이다 — 리소스가 가장 먼저 사라져야 한다는 아래 계약을 그대로 둔다.
-        if (rn < max_status_bar_right_items and self.surface_initialized and self.tabs.items.len > 0) {
-            const active_term = pane_ops.activePane(self).activeTerm();
-            if (active_term.kind == .editor) {
-                // ⓪ 커서 위치(줄:열). §2.2 표의 첫 항목이라 **가장 오래 살아남아야 한다** — 우측
-                //    묶음은 먼저 더한 것이 오른쪽에 서고 뒤로 갈수록 먼저 버려지므로 맨 앞에 둔다.
-                //    선택이 없으면 항목 자체가 없다(읽기 전용이라 caret이 늘 있지는 않다).
-                if (editor_ops.diffCursorPosition(active_term)) |pos| {
-                    if (rn < max_status_bar_right_items) {
-                        var buf: [48]u8 = undefined;
-                        // **형식은 `editor_ops` 가 소유한다** — 여기 묻어 두면 판정자가 글자를
-                        // 못 읽는다(트리 항목은 id 와 사각만 든다).
-                        const text = editor_ops.formatDiffCursor(&buf, pos);
-                        if (text) |txt| if (self.buildStatusBarItem(null, txt, bar_cols, fg, icon_fg, .plain)) |dl| {
-                            // 단일 편집기와 **같은 가드** — 잘린 숫자는 다른 값으로 읽힌다.
-                            // 이 글도 ASCII(`L`·` `·숫자·`:`·`-`·`+`)뿐이라 byte 수 = 셀 수다.
-                            if (dl.size.cols >= txt.len) {
-                                right_frames[rn] = dl;
-                                right_widths[rn] = @as(u32, dl.size.cols) * self.cell_width_px;
-                                right_ids[rn] = .editor_cursor;
-                                rn += 1;
-                            } else {
-                                var truncated = dl;
-                                truncated.deinit(self.allocator);
-                            }
-                        };
-                    }
-                } else if (editor_ops.cursorPosition(active_term)) |pos| {
-                    if (rn < max_status_bar_right_items) {
-                        var buf: [48]u8 = undefined;
-                        // 상한을 넘으면 `+`를 붙인다 — 그 너머는 세지 않았다는 사실을 숨기지 않는다.
-                        const text = if (pos.truncated)
-                            std.fmt.bufPrint(&buf, "{d}:{d}+", .{ pos.line, pos.column }) catch null
-                        else
-                            std.fmt.bufPrint(&buf, "{d}:{d}", .{ pos.line, pos.column }) catch null;
-                        if (text) |t| if (self.buildStatusBarItem(null, t, bar_cols, fg, icon_fg, .plain)) |dl| {
-                            // **숫자는 잘리면 안 된다** — 리소스가 같은 이유로 같은 가드를 갖는다
-                            //  (아래). 잘린 `199999:7` → `19999…`는 **다른 값으로 읽힌다**.
-                            //
-                            // 판정 기준은 다르다: 이 텍스트는 ASCII(숫자·`:`·`+`)뿐이라 **byte 수 = 셀
-                            // 수**인데, 리소스는 `·`가 2바이트라 그 등식이 깨져 `text_cols` 상수를 든다.
-                            if (dl.size.cols >= t.len) {
-                                right_frames[rn] = dl;
-                                right_widths[rn] = @as(u32, dl.size.cols) * self.cell_width_px;
-                                right_ids[rn] = .editor_cursor;
-                                rn += 1;
-                            } else {
-                                // **버린 것은 푼다.** `defer`가 도는 대상은 배열에 실린 것뿐이라
-                                // (`right_frames[0..rn]`), 여기서 안 풀면 좁은 창에서 편집기를 보는
-                                // 동안 **프레임마다** cells·overlays·grapheme_pool이 샌다.
-                                var truncated = dl;
-                                truncated.deinit(self.allocator);
-                            }
-                        };
-                    }
-                }
-                // ① 저하: 행 수를 아직 다 못 셌다 → 스크롤바가 실제보다 짧다(§2.1).
-                if (active_term.rt.editor_row_cache.countingIncomplete() and rn < max_status_bar_right_items) {
-                    if (self.buildStatusBarItem(icons.codepoint(.hourglass), maru.i18n.t(.editor_counting_rows), bar_cols, fg, icon_fg, .plain)) |dl| {
-                        right_frames[rn] = dl;
-                        right_widths[rn] = @as(u32, dl.size.cols) * self.cell_width_px;
-                        right_ids[rn] = .editor_degraded;
-                        rn += 1;
-                    }
-                }
-                // ①-b 저하: **가로 보기가 상한에 걸렸다**(`editor.max-columns` — §3.8). 그 너머 글자는
-                // 그려지지 않는데 화면만 보면 「더 안 밀린다」로만 보여 **버그로 읽힌다**. VSCode 가
-                // 같은 자리에서 *"Rendering paused for long line for performance reasons. This can be
-                // configured via `editor.stopRenderingLineAfter`"* 로 알리는 것과 같은 몫이다 — 그쪽은
-                // 그 줄 hover 이고 우리는 상태바다(우리에겐 저하를 모으는 자리가 이미 있다).
-                //
-                // **판정은 「셈이 상한에서 멈췄나」 하나다.** 그 값이 곧 갈 수 있는 끝이므로(가로 위치의
-                // 상한이 `max_cols - 보이는 열`이다) 상한에 닿았다는 것과 잘렸다는 것이 같은 사실이다.
-                if (active_term.rt.editor_max_cols >= active_term.rt.editor_max_columns and
-                    active_term.rt.editor_max_cols > 0 and
-                    rn < max_status_bar_right_items)
-                {
-                    if (self.buildStatusBarItem(icons.codepoint(.hourglass), maru.i18n.t(.editor_columns_capped), bar_cols, fg, icon_fg, .plain)) |dl| {
-                        right_frames[rn] = dl;
-                        right_widths[rn] = @as(u32, dl.size.cols) * self.cell_width_px;
-                        right_ids[rn] = .editor_degraded;
-                        rn += 1;
-                    }
-                }
-                // ①-c **언어 서버 상태**(tooling §8.2a): 서버 이름표가 있는 문서에만. 저하 계열이라 여기(앞쪽).
-                if (rn < max_status_bar_right_items) {
-                    if (editor_ops.lsp_client.statusFor(self, active_term)) |view| {
-                        var lsp_buf: [128]u8 = undefined;
-                        if (editor_ops.lsp_client.statusText(view, &lsp_buf)) |text| {
-                            const icon: ?u21 = switch (view.phase) {
-                                .ready => null,
-                                .missing, .denied, .failed => icons.codepoint(.bell),
-                                .asking, .starting, .restarting => icons.codepoint(.hourglass),
-                            };
-                            if (self.buildStatusBarItem(icon, text, bar_cols, fg, icon_fg, .plain)) |dl| {
-                                right_frames[rn] = dl;
-                                right_widths[rn] = @as(u32, dl.size.cols) * self.cell_width_px;
-                                right_ids[rn] = .editor_lsp;
-                                rn += 1;
-                            }
-                        }
-                    }
-                }
-                // ② 읽기 전용: **그 문서가 실제로 읽기 전용일 때만** 뜬다(§2.2 — 2026-09-03 정정).
-                //
-                // **오래 조건 없이 그렸다.** 그 문장("N1 편집기는 전부 읽기 전용이다")은 N1 시절의
-                // 것이고, **N2 가 편집을 세우면서(2026-08-25) 거짓이 됐다** — 글자가 들어가는 편집기
-                // 옆에서 사용자가 「읽기 전용」을 읽었다. 이 항목의 존재 이유가 *"사용자는 「왜 안
-                // 써지지」를 묻는다"* 인데 정확히 반대로 오해를 만들고 있었다.
-                //
-                // **판정자가 아니라 캡처가 잡았다** — 상태바 판정자는 항목이 **있는지**만 재고 그것이
-                // **참인지**는 안 쟀다(#3126·#3143 의 화면을 찍고서야 dirty 점과 나란히 뜬 것이 보였다).
-                const doc_read_only = if (active_term.rt.editor_doc) |*d| d.file.read_only else false;
-                if (doc_read_only and rn < max_status_bar_right_items) {
-                    if (self.buildStatusBarItem(null, maru.i18n.t(.editor_readonly), bar_cols, fg, icon_fg, .plain)) |dl| {
-                        right_frames[rn] = dl;
-                        right_widths[rn] = @as(u32, dl.size.cols) * self.cell_width_px;
-                        right_ids[rn] = .editor_readonly;
-                        rn += 1;
-                    }
-                }
-                // ③ 줄바꿈: 파일이 쓰던 것을 그대로 말한다(저장이 되돌릴 값이기도 하다 — 문서 모델 §3.5).
-                // ③ 언어: 이 문서에 **무엇이 색을 입히고 있는가**를 말한다(`status-bar.md` 「언어 항목」).
-                // **줄바꿈보다 앞이다** — 이 배열 순서가 곧 **버려지는 순서**이고, 언어는 *"이 파일이
-                // 무엇인가"* 라 줄바꿈보다 자주 쓰인다.
-                //
-                // **`Grammar` 를 쓴다 — `Language` 가 아니다.** 그 열거는 주석 문법으로 묶은 것이라
-                // `c_like` 가 `"C-like"` 를 내고 `Makefile`·`Dockerfile` 을 `shell` 로 묶는다.
-                //
-                // **`none` 이면 말하지 않는다** — 그때 "Plain Text" 라고 적으면 강조가 없는 이유를
-                // 설명하는 대신 가린다(줄바꿈 `none` 을 안 적는 것과 같은 규율).
-                // **이 상한 검사는 오늘 도달하지 않는다**(2026-09-07 변이 검사 — 지워도 판정자가
-                // 안 잡는 것이 정상이다). 상한이 `right_candidates.len` 이고 각 항목은 **한 번씩만**
-                // 들어가므로 `rn` 이 그 값을 넘을 수 없다. 그럼에도 두는 이유는 **배열 경계 방어**이고,
-                // 나머지 항목들이 전부 같은 모양을 쓴다 — 여기만 빼면 그 관례가 깨진다.
-                if (rn < max_status_bar_right_items) {
-                    if (active_term.rt.editor_grammar.displayName()) |text| {
-                        if (self.buildStatusBarItem(null, text, bar_cols, fg, icon_fg, .plain)) |dl| {
-                            right_frames[rn] = dl;
-                            right_widths[rn] = @as(u32, dl.size.cols) * self.cell_width_px;
-                            right_ids[rn] = .editor_language;
-                            rn += 1;
-                        }
-                    }
-                }
-                // **인코딩은 넣지 않는다**: 이 편집기는 UTF-8만 열므로(같은 절) 그 자리는 늘 같은 값이고,
-                // 폭을 다투는 띠에서 변하지 않는 값은 자리만 먹는다. 다른 인코딩이 열리는 날 함께 넣는다.
-                if (active_term.rt.editor_doc) |*doc| {
-                    if (rn < max_status_bar_right_items) {
-                        // `none`(줄바꿈이 하나도 없는 파일)은 **말하지 않는다** — 그때 "LF"라고 적으면
-                        // 파일에 없는 사실을 단정하는 것이고, 저장이 되돌릴 값도 없다.
-                        const eol: ?[]const u8 = switch (doc.file.format.dominant_ending) {
-                            .lf => "LF",
-                            .crlf => "CRLF",
-                            .none => null,
-                        };
-                        if (eol) |text| if (self.buildStatusBarItem(null, text, bar_cols, fg, icon_fg, .plain)) |dl| {
-                            right_frames[rn] = dl;
-                            right_widths[rn] = @as(u32, dl.size.cols) * self.cell_width_px;
-                            right_ids[rn] = .editor_eol;
-                            rn += 1;
-                        };
-                    }
-                }
-            }
-        }
-
-        // 리소스는 **배열 마지막**(= 가장 왼쪽)이다. 폭이 모자라면 뒤부터 버려지므로 가장 먼저 사라져야 한다 —
-        // 막힌 에이전트가 리소스 숫자에 밀려 없어지면 안 된다(docs/status-bar.md §6 "자리").
-        // 아이콘이 없다(등록부가 닫혀 있어 SVG 추가가 필요하다 — 숫자가 쓸모 있다고 확인된 뒤로 미룬다).
-        if (self.resourceText()) |res_text| {
-            if (rn < max_status_bar_right_items) {
-                if (self.buildStatusBarItem(null, res_text, bar_cols, fg, icon_fg, .plain)) |dl| {
-                    // **숫자는 잘리면 안 된다.** 좁은 창에서 텍스트 예산(바 폭의 1/3)이 모자라면 빌더가
-                    // 말줄임하는데(`appendEllipsizedTitle`), 이름과 달리 잘린 숫자는 **다른 값으로 읽힌다**
-                    // ("512 MB ·…"). 온전히 못 담으면 항목을 통째로 내린다 — 부재가 오독보다 낫다.
-                    // 판정은 빌더가 되돌려준 실제 폭으로 한다(예산 산술을 여기서 다시 구현하지 않는다).
-                    if (dl.size.cols >= maru.session.resource_usage.text_cols) {
-                        right_frames[rn] = dl;
-                        right_widths[rn] = @as(u32, dl.size.cols) * self.cell_width_px;
-                        right_ids[rn] = .resource;
-                        rn += 1;
-                    } else {
-                        var truncated = dl;
-                        truncated.deinit(self.allocator);
-                    }
-                }
-            }
-        }
-
-        if (n == 0 and rn == 0) {
-            self.clearStatusBarTree();
-            return;
-        }
-
-        var left_buf: [max_status_bar_left_items]chrome.components.status_bar.Slot = undefined;
-        var right_buf: [max_status_bar_right_items]chrome.components.status_bar.Slot = undefined;
-        // 배치와 발행이 **같은 Metrics**를 봐야 한다 — 갈리면 그린 자리와 판정 자리가 어긋난다.
-        const bar_metrics: chrome.components.status_bar.Metrics = .{
-            .bar_x = 0,
-            .bar_y = self.backing_height_px -| h,
-            .bar_w = self.backing_width_px,
-            .bar_h = h,
-            .edge_pad_px = self.statusBarEdgePadPx(),
-            .gap_px = self.statusBarGapPx(),
-        };
-        const layout = chrome.components.status_bar.compute(
-            bar_metrics,
-            widths[0..n],
-            right_widths[0..rn],
-            &left_buf,
-            &right_buf,
-        );
-
-        // **상호작용 tree 발행** — 배치가 정한 슬롯을 그대로 낸다. 보이는 자리와 눌리는 자리가 같아지고,
-        // 자리를 못 얻은 항목은 tree에 없다(안 보이면 눌리지도 않는다).
-        self.publishStatusBarTree(bar_metrics, layout, left_ids[0..n], right_ids[0..rn]);
-
-        // 세로 중앙: 홀수 나머지는 위로 — 바의 첫/마지막 행은 quad AA 가장자리라 한 행 어둡다(#1910 캡처).
-        const origin_y = (self.backing_height_px -| h) + ((h -| self.cell_height_px) / 2);
-        for (layout.left) |slot| {
-            const dl = frames[slot.index] orelse continue;
-            frames[slot.index] = null; // 소유권을 collectShaped로 넘긴다(위 defer가 두 번 해제하지 않게)
-            self.collectShaped(collected, dl, builder, .{ .status_bar = .{ .origin_x = slot.x, .origin_y = origin_y, .colors = colors } });
-        }
-        for (layout.right) |slot| {
-            const dl = right_frames[slot.index] orelse continue;
-            right_frames[slot.index] = null;
-            self.collectShaped(collected, dl, builder, .{ .status_bar = .{ .origin_x = slot.x, .origin_y = origin_y, .colors = colors } });
-        }
-    }
-
     pub fn setWorkspaceCheckpointFailure(self: *AppSession, failure: u32) void {
         const normalized: u32 = if (failure <= 2) failure else 2;
         if (self.workspace_checkpoint_failure == normalized) return;
@@ -24089,163 +22329,12 @@ pub const AppSession = struct {
     /// 항목 하나를 DrawList로. 텍스트 상한은 바 폭의 1/3 — 한 항목이 바를 독차지하지 않게 하고 우측 자리를
     /// 남긴다(S3d 이후). 실패는 null(그 항목만 빠지고 나머지는 그대로 선다).
     /// 항목 텍스트의 성격. **기본값을 두지 않는다** — 새 항목을 더할 때 잘리는 방식을 고르게 강제한다.
-    const StatusBarItemKind = enum {
+    pub const StatusBarItemKind = enum {
         /// 이름·개수 등. 넘치면 끝을 "…"로 자른다(선두가 곧 식별자다).
         plain,
         /// 경로. 끝을 자르면 **잎(현재 디렉터리)이 먼저 사라져** "지금 어디에 있나"라는 목적을 잃는다.
         path,
     };
-
-    fn buildStatusBarItem(self: *AppSession, icon: ?u21, text: []const u8, bar_cols: u16, fg: terminal.Color, icon_fg: terminal.Color, kind: StatusBarItemKind) ?renderer.DrawList {
-        const max_text_cols: u16 = @max(1, bar_cols / 3);
-        // 경로는 컴포넌트 단위로 먼저 줄인다. 예산을 아는 곳이 여기뿐이라 여기서 한다 — 호출부가 따로
-        // 계산하면 줄인 폭과 그리는 폭이 갈린다. wide_icon predicate는 null이다(경로에 등록 아이콘이 올 수
-        // 없고, pane 라벨 폭 계산도 같은 선례를 쓴다).
-        var path_buf: [1024]u8 = undefined;
-        const shown = switch (kind) {
-            .plain => text,
-            .path => chrome.text_layout.elidePathMiddle(text, max_text_cols, null, &path_buf),
-        };
-        return coretext_frame_builder.buildStatusBarItemDrawList(self.allocator, icon, shown, max_text_cols, fg, icon_fg) catch null;
-    }
-
-    /// 배치된 슬롯을 상호작용 tree로 발행한다. 좌/우를 한 tree에 담는다 — 판정은 "어느 항목인가" 하나라
-    /// 나눌 이유가 없다. 발행 실패(버퍼 부족)는 tree를 비워 **아무것도 안 눌리게** 한다: 잘못된 항목이
-    /// 눌리는 것보다 안 눌리는 편이 낫다.
-    fn publishStatusBarTree(
-        self: *AppSession,
-        bar_metrics: chrome.components.status_bar.Metrics,
-        layout: chrome.components.status_bar.Layout,
-        left_ids: []const chrome.components.status_bar.ItemId,
-        right_ids: []const chrome.components.status_bar.ItemId,
-    ) void {
-        self.status_bar_entry_count = 0;
-        self.status_bar_generation +|= 1;
-
-        var written: usize = 0;
-        inline for (.{ .{ layout.left, left_ids }, .{ layout.right, right_ids } }) |pair| {
-            const slots = pair[0];
-            const ids = pair[1];
-            if (written >= self.status_bar_entry_scratch.len) break;
-            const t = chrome.components.status_bar.publish(
-                bar_metrics,
-                slots,
-                ids,
-                layout_math.ptToPx(status_bar_item_pad_pt, self.scale_milli),
-                self.status_bar_generation,
-                self.status_bar_entry_scratch[written..],
-            ) catch {
-                self.status_bar_entry_count = 0;
-                return;
-            };
-            written += t.entries.len;
-        }
-        self.status_bar_entry_count = written;
-
-        // **새 tree에 없는 hover는 지운다.** `chrome/ui/interaction.zig`의 `reconcile`이 하는 일과 같다 —
-        // 안 하면 항목이 사라졌다 다시 나타날 때(알림을 읽어 0이 됐다가 새 알림이 오는 경우) 포인터가
-        // 그 자리에 없는데도 호버가 칠해진다. 포인터가 창 밖으로 나가 `hoverCursor`가 더는 안 불리는
-        // 경우도 같은 부류다.
-        if (self.status_bar_hovered) |id| {
-            var still_there = false;
-            for (self.statusBarTree().entries) |entry| {
-                if (entry.id == @intFromEnum(id)) still_there = true;
-            }
-            if (!still_there) self.status_bar_hovered = null;
-        }
-    }
-
-    /// 발행된 tree(슬라이스 view). 호출자가 hit-test·hover에 쓴다.
-    pub fn statusBarTree(self: *const AppSession) chrome.ui.tree.UiRectTree {
-        return .{
-            .entries = self.status_bar_entry_scratch[0..self.status_bar_entry_count],
-            .generation = self.status_bar_generation,
-        };
-    }
-
-    /// 포인터 아래 상태표시줄 항목. 없으면 null. **rect는 배치가 정한 그대로**라 보이는 자리와 눌리는
-    /// 자리가 같다(#1925가 바 전체에 대해 보장하는 것을 항목 단위로 좁힌 것).
-    fn statusBarItemAt(self: *const AppSession, x_px: f64, y_px: f64) ?chrome.components.status_bar.ItemId {
-        for (self.statusBarTree().entries) |entry| {
-            const r = entry.rect;
-            if (x_px >= r.x and x_px < r.x + r.width and y_px >= r.y and y_px < r.y + r.height) {
-                return @enumFromInt(entry.id);
-            }
-        }
-        return null;
-    }
-
-    /// 호버 중인 항목의 배경. 배경 quad **바로 뒤**에 넣어 같은 bottom 버킷 안에서 위에 오게 한다
-    /// (버킷 안 순서 = painter 순서). 없으면 무동작이라 호버가 없을 때는 quad가 하나도 안 는다.
-    fn appendStatusBarHover(self: *AppSession) void {
-        const id = self.status_bar_hovered orelse return;
-        for (self.statusBarTree().entries) |entry| {
-            if (entry.id != @intFromEnum(id)) continue;
-            self.appendSolidQuad(
-                entry.rect.x,
-                entry.rect.y,
-                entry.rect.width,
-                entry.rect.height,
-                // 사이드바 행 호버와 같은 톤 — 상태바만의 색을 새로 만들지 않는다.
-                self.chromeQuadBg(sidebar_ops.sidebarRowHoverBg(self)),
-                status_bar_layer,
-            );
-            return;
-        }
-    }
-
-    /// 항목 클릭 — **이미 있는 표면을 여는 것만** 한다. 새 UI를 지어내지 않는다.
-    /// 브랜치는 열 대상이 아직 없어(브랜치 목록 UI 부재) 클릭해도 아무 일도 하지 않는다 — 호버도 안 준다.
-    fn activateStatusBarItem(self: *AppSession, id: chrome.components.status_bar.ItemId) void {
-        switch (id) {
-            .notifications => notification_ops.openNotificationPanel(self),
-            // **그 에이전트로 간다**(§4). 옛 동작(기록 도크 열기)은 누른 것과 다른 것을 가리켰다.
-            .running_agents => self.openAgentMenu(false),
-            .blocked_agents => self.openAgentMenu(true),
-            .cwd => dock_ops.openDockTo(self, .explorer),
-            // **표시 전용이다.** 폰이 떠나면 host 가 크기를 되돌리며 저절로 사라지므로 여기서
-            // 사용자가 할 일이 없다 — 누를 수 있게 보이면 아무 일도 안 하는 자리가 된다.
-            .viewport_narrowed => {},
-            .git_branch => settings_ops.requestBranchMenu(self, .switch_branch), // 로컬 브랜치 목록을 띄운다(고르면 터미널에 git switch 주입)
-            // 리소스는 v1에서 **표시 전용**이다. 탭별 내역 패널은 이 숫자가 쓸모 있다고 확인된 뒤에 정한다
-            // (docs/status-bar.md §6) — 열 대상이 없으니 아래 clickable도 false라 호버도 주지 않는다.
-            .resource => self.openResourceMenu(), // 탭별 내역 팝오버(§6) — 이 항목에 앵커한다
-            // 편집기 넷은 **표시 전용**이다. 열 대상이 없다 — 읽기 전용을 눌러 편집을 켜는 길은 N2가
-            // 만들고(그 전에 누르면 아무 일도 안 일어난다), 저하·줄바꿈은 상태 진술이지 컨트롤이 아니다.
-            // 영속 세션 강등은 **표시 전용**이다. 다시 잇는 동작은 실제 socket reconnect(CR4)가 소유하므로
-            // 여기서 만들지 않는다 — 지금 붙이면 선행 gate 우회다(implementation-plan.md CR 절).
-            // **언어도 표시 전용이다** — 문법을 사용자가 고르는 개념이 아직 없다(`grammarForPath`
-            // 위에 override 층이 필요하고 그건 별도 조각이다). 열 대상이 없으므로 호버도 안 준다.
-            .editor_lsp => editor_ops.lsp_client.activateStatus(self), // 없음 → 설치 명령 입력 · 거부됨 → 다시 묻기 · 실패 → 재시작(§8.2a)
-            .editor_degraded, .editor_readonly, .editor_eol, .editor_cursor, .editor_language, .workspace_checkpoint_failure, .session_host_disconnected => {},
-        }
-        self.metal_dirty = true;
-    }
-
-    /// 클릭 가능한 항목인가. 열 대상이 없는 항목은 호버도 주지 않는다 — 눌리는 것처럼 보이는데 아무
-    /// 일도 안 일어나는 편이 아무 표시도 없는 것보다 나쁘다.
-    fn statusBarItemClickable(id: chrome.components.status_bar.ItemId) bool {
-        return switch (id) {
-            // 브랜치도 이제 누를 수 있다 — 목록이 생겼다(§6에서 내려온 항목).
-            .notifications, .running_agents, .blocked_agents, .cwd, .git_branch => true,
-            .resource => true, // 누르면 탭별 내역 팝오버가 뜬다
-            .viewport_narrowed => false, // 표시 전용 — 열 대상이 없다
-            // 열 대상이 없으므로 호버도 주지 않는다 — 눌리는 것처럼 보이는데 아무 일도 안 하는 편이
-            // 아무 표시도 없는 것보다 나쁘다(이 함수의 계약).
-            .editor_lsp => true, // 설치·다시 묻기·재시작이 있다(§8.2a)
-            .editor_degraded, .editor_readonly, .editor_eol, .editor_cursor, .editor_language, .workspace_checkpoint_failure, .session_host_disconnected => false,
-        };
-    }
-
-    /// 포인터가 창 바닥 상태표시줄 위인가. **렌더 rect와 같은 산술**을 쓴다(`appendStatusBarBackground`와 한 쌍) —
-    /// 갈리면 보이는 자리와 눌리는 자리가 어긋난다. 상태바는 창 전폭이라 사이드바 아래 구간도 포함한다.
-    pub fn pointInStatusBar(self: *const AppSession, x_px: f64, y_px: f64) bool {
-        const h = self.statusBarHeightPx();
-        if (h == 0 or self.backing_width_px == 0) return false;
-        const top: f64 = @floatFromInt(self.backing_height_px -| h);
-        return y_px >= top and y_px < @as(f64, @floatFromInt(self.backing_height_px)) and
-            x_px >= 0 and x_px < @as(f64, @floatFromInt(self.backing_width_px));
-    }
 
     /// 상태바 배경 quad의 layer = **2(bottom)**. `.m`의 버킷팅은 `2→bottom, 0→under, 4→header, 그 밖→over`다.
     ///
@@ -24257,54 +22346,7 @@ pub const AppSession = struct {
     /// bottom은 터미널 레이어 맨 처음이라 그 뒤의 모든 것(strip·터미널 셀·항목 텍스트·사이드바 셀)이 위에
     /// 그려진다. 상태바 띠를 침범할 수 있는 것들은 이미 막혀 있다: 터미널 grid는 S2b가 짧게 만들었고,
     /// 사이드바 strip은 S2a가 띠 위에서 끊고, 사이드바 셀은 S2b가 scissor로 자른다. 그래서 bottom이 옳다.
-    const status_bar_layer: u32 = 2;
-
-    /// 창 바닥 상태표시줄 배경(창 전폭). **조건 없이 매 프레임 넣는다** — 도크·사이드바 상태와 무관하게 바가 늘
-    /// 서 있어야 `dock_layout`이 깎아 둔 자리와 화면이 일치한다(조건부로 만들면 깎인 자리에 아무것도 없는 프레임이
-    /// 생긴다). 항목(글자·아이콘)은 S3에서 이 배경 위에 올린다.
-    fn appendStatusBarBackground(self: *AppSession) void {
-        const h = self.statusBarHeightPx();
-        if (h == 0 or self.backing_width_px == 0 or self.backing_height_px == 0) return;
-        const y = self.backing_height_px -| h;
-        self.appendSolidQuad(
-            0,
-            @floatFromInt(y),
-            @floatFromInt(self.backing_width_px),
-            @floatFromInt(h),
-            // 사이드바 톤을 따르되 **구분은 되게** — 사이드바 색을 터미널 배경 반대 방향으로 한 단계 옮긴다
-            // (`tokens.statusBarBg`). 예전엔 사이드바와 **같은 색**이라 경계가 안 보였다(사용자 제보).
-            // window.opacity는 그대로 반영한다(straight-alpha quad 경로).
-            self.chromeQuadBg(packOpaqueRgb(chrome.tokens.statusBarBg(
-                self.appearance.theme.sidebar_background,
-                self.appearance.theme.background,
-            ))),
-            status_bar_layer,
-        );
-    }
-
-    /// 상태바 **상단 경계선**. 띠 **안쪽 맨 위**에 겹쳐 그린다 — 바 밖에 그리면 터미널 마지막 행을 덮고,
-    /// 높이를 늘리면 작업영역이 줄어든다(§4.0). 바가 선보다 얇으면 바 높이로 clamp해 밖으로 새지 않는다.
-    ///
-    /// **호출 순서가 계약이다**: 항목 호버 배경(`appendStatusBarHover`)은 슬롯이 바 전체 높이라 선과 같은
-    /// 자리를 칠한다. 같은 bottom 버킷 안에서는 배열 순서가 painter 순서라, 호버 **뒤에** 내지 않으면
-    /// 호버한 항목 위에서만 선이 끊긴다.
-    fn appendStatusBarTopBorder(self: *AppSession) void {
-        const h = self.statusBarHeightPx();
-        if (h == 0 or self.backing_width_px == 0 or self.backing_height_px == 0) return;
-        const border_h = @min(layout_math.ptToPx(status_bar_border_pt, self.scale_milli), h);
-        if (border_h == 0) return;
-        self.appendSolidQuad(
-            0,
-            @floatFromInt(self.backing_height_px -| h),
-            @floatFromInt(self.backing_width_px),
-            @floatFromInt(border_h),
-            self.chromeQuadBg(packOpaqueRgb(chrome.tokens.statusBarBorder(
-                self.appearance.theme.sidebar_background,
-                self.appearance.theme.background,
-            ))),
-            status_bar_layer,
-        );
-    }
+    pub const status_bar_layer: u32 = 2;
 
     /// 헤더의 두 줄은 **서로 다른 밴드**에 놓이므로 draw list도 나뉜다(docs/file-explorer.md §3.5).
     ///
@@ -24619,7 +22661,7 @@ pub const AppSession = struct {
             try self.chrome_host.collectContextMenuDraws(settings_ops.contextMenuItems(self), props, &tokens, arena, &draws); // 항목 라벨 주입(platform 소유, 동적)
         }
         // 마커 이미지 프리뷰의 테두리·안내(픽셀은 gpu_images가 따로 싣는다 — 갤러리 §5.4 분업).
-        try self.collectMarkerPreviewDraws(arena, &draws);
+        try marker_view_ops.collectMarkerPreviewDraws(self, arena, &draws);
         // 심볼 이름 바꾸기 상자(tooling §8.2f) — 인라인 rename 의 심볼 대상일 때. 앵커는 프레임마다 다시 잰다(그 문서가 안 그려졌으면 이 프레임엔 없다).
         if (self.rename) |rt| if (rt == .symbol and editor_ops.rename_client.refreshAnchor(self, rt.symbol)) {
             try self.chrome_host.collectRenameBoxDraws(try editor_ops.rename_client.boxText(self, arena), props, &tokens, arena, &draws);
@@ -25036,7 +23078,7 @@ pub const AppSession = struct {
         self.upload_results.deinit(self.allocator);
         // 원격 이벤트 채널의 자식(ssh)을 **전부 끝낸다**. 남기면 GUI 를 껐는데 ssh 가 목적지 수만큼
         // 살아 있는 누수다 — 그 자식은 stdin 이 /dev/null 이라 부모가 죽어도 스스로 안 끝난다.
-        self.closeAllRemoteAgentHosts();
+        remote_agent_ops.closeAllRemoteAgentHosts(self);
         self.remote_agent_hosts.deinit(self.allocator);
         // 인앱 업데이트 체크 스레드를 join한다(이전 busy-spin 대신 — CPU를 안 쓰고 OS가 대기). 이 스레드가
         // self.update_*·self.allocator를 건드리므로 self 해제 전에 반드시 끝나야 한다. CLOEXEC으로 curl pipe가
@@ -26356,21 +24398,21 @@ test "원격 채널을 tick 이 직접 드레인한다 — 반 줄로 끊겨 와
     const head = "{\"hello\":\"maru-agent-events\",\"v\":1}\n" ++
         "{\"nonce\":\"4331_7\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"UserPro";
     try std.testing.expect(std.c.write(fds[1], head.ptr, head.len) > 0);
-    session.drainRemoteAgentHost(dest, host, 100);
+    remote_agent_ops.drainRemoteAgentHost(&session, dest, host, 100);
     try std.testing.expectEqual(maru.session.remote_agent_stream.State.open, term.agent_remote_channel.?.state);
     try std.testing.expect(term.agent_state != .running); // 아직 줄이 안 끝났다
 
     // ② 나머지 반 줄이 오면 그때 배지가 선다 — 꼬리를 버렸다면 여기서 영영 안 선다.
     const tail = "mptSubmit\\\",\\\"prompt\\\":\\\"질문\\\"}\"}\n";
     try std.testing.expect(std.c.write(fds[1], tail.ptr, tail.len) > 0);
-    session.drainRemoteAgentHost(dest, host, 200);
+    remote_agent_ops.drainRemoteAgentHost(&session, dest, host, 200);
     try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state);
     // 그리고 그 Term 은 **훅 모드**다 — 로컬 로그 파일은 하나도 없는데도.
     try std.testing.expectEqual(maru.session.agent_hook_mode.Mode.hook, agent_ops.agentHookMode(&session, term));
 
     // ③ 자식이 죽으면(EOF) 조용히 넘어가지 않는다 — 채널이 닫히고 모드가 관측으로 내려간다.
     _ = std.c.close(fds[1]);
-    session.drainRemoteAgentHost(dest, host, 300);
+    remote_agent_ops.drainRemoteAgentHost(&session, dest, host, 300);
     try std.testing.expectEqual(maru.session.remote_agent_stream.Closed.eof, term.agent_remote_channel.?.closed_reason.?);
     try std.testing.expectEqual(maru.session.agent_hook_mode.Mode.observe, agent_ops.agentHookMode(&session, term));
     // **EOF 는 「영원히 안 된다」가 아니다**(RA5-b). 예전에는 여기서 `stopped` 를 세워 앱을 껐다 켜기
@@ -26381,7 +24423,7 @@ test "원격 채널을 tick 이 직접 드레인한다 — 반 줄로 끊겨 와
     try std.testing.expect(host.retry_at_ms > 300); // 지금이 아니라 나중이다
     // 원래 걱정(틱마다 fork 하는 접속 폭주)은 **백오프가 갚는다** — 아직 때가 아니면 안 띄운다.
     const scheduled = host.retry_at_ms;
-    session.drainRemoteAgentHost(dest, host, 400);
+    remote_agent_ops.drainRemoteAgentHost(&session, dest, host, 400);
     try std.testing.expectEqual(scheduled, host.retry_at_ms); // 예약이 그대로다 = 안 띄웠다
     try std.testing.expectEqual(maru.session.remote_agent_stream.Closed.eof, term.agent_remote_channel.?.closed_reason.?);
 
@@ -26396,10 +24438,10 @@ test "원격 채널을 tick 이 직접 드레인한다 — 반 줄로 끊겨 와
     _ = std.c.fcntl(dead_fds[0], std.c.F.SETFL, dfl | @as(c_int, @bitCast(std.posix.O{ .NONBLOCK = true })));
     host.stream_started = true;
     host.stream = .{ .pid = 0, .out_fd = dead_fds[0] };
-    session.drainRemoteAgentHost(dest, host, 5_000);
+    remote_agent_ops.drainRemoteAgentHost(&session, dest, host, 5_000);
     try std.testing.expect(host.stopped);
 
-    session.closeRemoteAgentHost(dest);
+    remote_agent_ops.closeRemoteAgentHost(&session, dest);
     try std.testing.expectEqual(@as(usize, 0), session.remote_agent_hosts.count());
 }
 
@@ -26439,12 +24481,12 @@ test "ssh 를 빠져나온 pane 은 채널을 놓는다 — 안 놓으면 소스
     // ① 재접속 중(관측이 stale)에는 **안 놓는다** — 여기서 놓으면 끊길 때마다 배지가 깜빡인다.
     term.rt.observation.availability = .stale;
     term.rt.observation.ssh_remote_dest_present = false;
-    session.pumpRemoteAgentChannels();
+    remote_agent_ops.pumpRemoteAgentChannels(&session);
     try std.testing.expect(term.agent_remote_channel != null);
 
     // ② 관측이 최신인데 목적지가 없다 = **원격이 아니게 됐다.** 그때 놓는다.
     term.rt.observation.availability = .current;
-    session.pumpRemoteAgentChannels();
+    remote_agent_ops.pumpRemoteAgentChannels(&session);
     try std.testing.expect(term.agent_remote_channel == null);
     try std.testing.expectEqual(@as(u8, 0), term.agent_remote_nonce_len);
     try std.testing.expectEqual(maru.session.agent_hook_mode.Mode.observe, agent_ops.agentHookMode(&session, term));
@@ -26489,11 +24531,11 @@ test "원격에 maru 가 없으면 축을 안 열고 사유를 남긴다 — 그
     const reply = "Welcome to Ubuntu\n" ++ maru.cli.agent_hooks.no_maru_marker ++ "\n";
     try std.testing.expect(std.c.write(fds[1], reply.ptr, reply.len) > 0);
     // 아직 EOF 가 아니다 — 결론을 내리지 않는다(자식이 더 쓸 수 있다).
-    session.drainRemoteAgentHost(dest, host, 100);
+    remote_agent_ops.drainRemoteAgentHost(&session, dest, host, 100);
     try std.testing.expect(!host.install_done);
 
     _ = std.c.close(fds[1]); // 자식이 끝났다
-    session.drainRemoteAgentHost(dest, host, 200);
+    remote_agent_ops.drainRemoteAgentHost(&session, dest, host, 200);
     try std.testing.expect(host.install_done);
     try std.testing.expect(host.stopped); // 축을 안 연다
     try std.testing.expect(!host.stream_started); // 스트리머를 안 띄운다
@@ -26501,10 +24543,10 @@ test "원격에 maru 가 없으면 축을 안 열고 사유를 남긴다 — 그
     try std.testing.expectEqual(maru.session.agent_hook_mode.Mode.observe, agent_ops.agentHookMode(&session, term));
 
     // **다시 두드리지 않는다.** 다음 tick 이 와도 새 자식을 안 띄운다.
-    session.drainRemoteAgentHost(dest, host, 300);
+    remote_agent_ops.drainRemoteAgentHost(&session, dest, host, 300);
     try std.testing.expect(host.install == null);
 
-    session.closeRemoteAgentHost(dest);
+    remote_agent_ops.closeRemoteAgentHost(&session, dest);
 }
 
 test "stdout 을 안 닫는 원격은 시한으로 끝낸다 — 안 그러면 축이 영영 «설치 중» 이고 자식이 남는다" {
@@ -26545,20 +24587,20 @@ test "stdout 을 안 닫는 원격은 시한으로 끝낸다 — 안 그러면 �
     const host = session.remote_agent_hosts.getPtr(dest).?;
 
     // 시한 안에서는 기다린다 — 느린 링크를 성급히 포기하지 않는다.
-    session.drainRemoteAgentHost(dest, host, 1);
+    remote_agent_ops.drainRemoteAgentHost(&session, dest, host, 1);
     try std.testing.expect(!host.install_done);
-    session.drainRemoteAgentHost(dest, host, ah.install_deadline_ms - 1);
+    remote_agent_ops.drainRemoteAgentHost(&session, dest, host, ah.install_deadline_ms - 1);
     try std.testing.expect(!host.install_done);
 
     // 시한을 넘기면 **끝낸다**: 자식을 놓고, 축을 안 열고, 다시 안 두드린다.
-    session.drainRemoteAgentHost(dest, host, ah.install_deadline_ms + 1);
+    remote_agent_ops.drainRemoteAgentHost(&session, dest, host, ah.install_deadline_ms + 1);
     try std.testing.expect(host.install_done);
     try std.testing.expect(host.install == null); // 자식을 거뒀다
     try std.testing.expect(host.stopped); // 축을 안 연다
     try std.testing.expect(!host.stream_started); // 스트리머를 안 띄운다
     try std.testing.expectEqual(maru.session.agent_hook_mode.Mode.observe, agent_ops.agentHookMode(&session, term));
 
-    session.closeRemoteAgentHost(dest);
+    remote_agent_ops.closeRemoteAgentHost(&session, dest);
 }
 
 test "AK2: `pollAgentKinds` 가 종류 전환에서 리셋을 **실제로 부른다** (제품 경로)" {
@@ -26723,7 +24765,7 @@ test "RF3: 세울 수 없는 순간에도 원격 Term 이 들고 있던 nonce �
 
     var dest = [_]u8{ 'o', 'p', 'e', 'n', 'C', 'l', 'a', 'w' };
     var ctl = [_]u8{'/'};
-    session.ensureRemoteAgentTerm(term, .{ .dest = &dest, .ctl = &ctl }, 1);
+    remote_agent_ops.ensureRemoteAgentTerm(session, term, .{ .dest = &dest, .ctl = &ctl }, 1);
 
     try std.testing.expectEqualStrings(mine, term.agent_remote_nonce[0..term.agent_remote_nonce_len]);
     try std.testing.expectEqual(@as(u32, 0), session.remote_nonce_rebinds); // 갈아낀 적 없다
@@ -26802,7 +24844,7 @@ test "RF3: detached 이벤트가 실제로 흘러도 orphan 을 말하지 않는
     term.agent_remote_nonce_len = mine.len;
 
     session.unmatched_reported = false;
-    session.feedRemoteAgentTerms("openClaw", &.{
+    remote_agent_ops.feedRemoteAgentTerms(session, "openClaw", &.{
         "{\"nonce\":\"host_aaaa_bbbb_t27\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"Stop\\\"}\"}",
     }, 1);
 
@@ -26851,7 +24893,7 @@ test "RS1: 할당이 실패하면 제품 경로에서도 재시도로 간다 —
     var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
     const saved_alloc = session.allocator;
     session.allocator = failing.allocator();
-    session.drainRemoteAgentHost("openClaw", &host, 1000);
+    remote_agent_ops.drainRemoteAgentHost(session, "openClaw", &host, 1000);
     session.allocator = saved_alloc;
 
     try std.testing.expect(!host.stopped); // 굳히지 않았다
@@ -26893,7 +24935,7 @@ test "RS1: 규격을 넘는 경로는 제품 경로에서도 굳는다 — 헬�
     host.stream_started = false; // 스트리머는 아직이며
     host.retry_at_ms = 1; // 다시 띄울 때가 지났다
 
-    session.drainRemoteAgentHost("openClaw", &host, 1000);
+    remote_agent_ops.drainRemoteAgentHost(session, "openClaw", &host, 1000);
 
     // 「영원히」쪽이므로 **굳고**, 재시도 예산은 안 쓴다.
     try std.testing.expect(host.stopped);
@@ -26927,13 +24969,13 @@ test "RS2: 예약이 없으면 설치를 다시 안 띄운다 — 매 tick ssh �
     host.install = null; // 띄운 것도 없고
     host.retry_at_ms = 0; // 예약도 없다
 
-    session.drainRemoteAgentHost("openClaw", &host, 1_000);
+    remote_agent_ops.drainRemoteAgentHost(session, "openClaw", &host, 1_000);
     try std.testing.expect(host.install == null); // 안 띄웠다
     try std.testing.expectEqual(@as(u8, 0), host.retries); // 예산도 안 썼다
 
     // 예약이 있어도 **때가 아니면** 안 띄운다.
     host.retry_at_ms = 9_999;
-    session.drainRemoteAgentHost("openClaw", &host, 1_000);
+    remote_agent_ops.drainRemoteAgentHost(session, "openClaw", &host, 1_000);
     try std.testing.expect(host.install == null);
     try std.testing.expectEqual(@as(u64, 9_999), host.retry_at_ms); // 예약을 지우지도 않았다
 }
@@ -26996,13 +25038,13 @@ test "RF3: 신원이 그대로면 nonce 를 갈아끼우지 않는다" {
     var dest = [_]u8{ 'o', 'p', 'e', 'n', 'C', 'l', 'a', 'w' };
     var ctl = [_]u8{'/'};
 
-    session.ensureRemoteAgentTerm(term, .{ .dest = &dest, .ctl = &ctl }, 1);
+    remote_agent_ops.ensureRemoteAgentTerm(session, term, .{ .dest = &dest, .ctl = &ctl }, 1);
     const first = try a.dupe(u8, term.agent_remote_nonce[0..term.agent_remote_nonce_len]);
     defer a.free(first);
     try std.testing.expect(first.len > 0);
     try std.testing.expectEqual(@as(u32, 0), session.remote_nonce_rebinds); // 처음 세우는 것은 재바인딩이 아니다
 
-    session.ensureRemoteAgentTerm(term, .{ .dest = &dest, .ctl = &ctl }, 2);
+    remote_agent_ops.ensureRemoteAgentTerm(session, term, .{ .dest = &dest, .ctl = &ctl }, 2);
     try std.testing.expectEqualStrings(first, term.agent_remote_nonce[0..term.agent_remote_nonce_len]);
     try std.testing.expectEqual(@as(u32, 0), session.remote_nonce_rebinds); // 두 번째도 조용하다
 }
@@ -27029,7 +25071,7 @@ test "RF3: 굳어 있던 옛 nonce 는 지금 신원으로 갈아끼운다" {
 
     var dest = [_]u8{ 'o', 'p', 'e', 'n', 'C', 'l', 'a', 'w' };
     var ctl = [_]u8{'/'};
-    session.ensureRemoteAgentTerm(term, .{ .dest = &dest, .ctl = &ctl }, 1);
+    remote_agent_ops.ensureRemoteAgentTerm(session, term, .{ .dest = &dest, .ctl = &ctl }, 1);
 
     const now = term.agent_remote_nonce[0..term.agent_remote_nonce_len];
     try std.testing.expect(!std.mem.eql(u8, stale, now)); // 옛 값을 더 이상 들고 있지 않다
@@ -27075,7 +25117,7 @@ test "RA5: 침묵으로 죽은 채널은 되살리고, 제한 서버로 죽은 �
         try std.testing.expect(ch.isClosed());
         term.agent_remote_channel = ch;
 
-        session.ensureRemoteAgentTerm(term, .{ .dest = &dest, .ctl = &ctl }, 100);
+        remote_agent_ops.ensureRemoteAgentTerm(session, term, .{ .dest = &dest, .ctl = &ctl }, 100);
 
         var now = &(term.agent_remote_channel orelse return error.NoChannel);
         if (saw_hello) {
@@ -27115,12 +25157,12 @@ test "RA5: 침묵으로 죽은 채널은 되살리고, 제한 서버로 죽은 �
         host.last_line_ms = 1_000;
 
         // 시한 안이면 가만히 둔다.
-        session.drainRemoteAgentHost("openClaw", &host, 1_000 + silence - 1);
+        remote_agent_ops.drainRemoteAgentHost(session, "openClaw", &host, 1_000 + silence - 1);
         try std.testing.expect(host.stream_started);
         try std.testing.expectEqual(@as(u8, 0), host.retries);
 
         // 넘기면 좀비를 접고 다시 띄울 것을 예약한다.
-        session.drainRemoteAgentHost("openClaw", &host, 1_000 + silence);
+        remote_agent_ops.drainRemoteAgentHost(session, "openClaw", &host, 1_000 + silence);
         try std.testing.expect(!host.stream_started);
         try std.testing.expectEqual(@as(u8, 1), host.retries);
         try std.testing.expect(host.retry_at_ms > 0);
@@ -27194,7 +25236,7 @@ test "RA5: 재접속하면 죽은 채널을 버린다 — 백오프가 성공해
     dead.eof();
     term.agent_remote_channel = dead;
 
-    session.clearRemoteAgentChannels("openClaw");
+    remote_agent_ops.clearRemoteAgentChannels(session, "openClaw");
     try std.testing.expect(term.agent_remote_channel == null); // 지웠다 — 다음 tick 이 새로 연다
 }
 test "RA5: 다른 목적지의 채널은 안 건드린다" {
@@ -27217,7 +25259,7 @@ test "RA5: 다른 목적지의 채널은 안 건드린다" {
     try term.rt.observation.ssh_remote_dest.appendSlice(a, "other");
     term.agent_remote_channel = maru.session.remote_agent_stream.Channel.initOpen(0);
 
-    session.clearRemoteAgentChannels("openClaw");
+    remote_agent_ops.clearRemoteAgentChannels(session, "openClaw");
     try std.testing.expect(term.agent_remote_channel != null); // 남의 목적지다
 }
 test "RA5: 이미 hello 를 본 목적지에 뒤늦게 생긴 Term 은 죽은 채널을 안 받는다" {
@@ -27248,7 +25290,7 @@ test "RA5: 이미 hello 를 본 목적지에 뒤늦게 생긴 Term 은 죽은 �
     gop.value_ptr.stream_started = true;
     gop.value_ptr.saw_hello = true;
 
-    session.ensureRemoteAgentTerm(term, .{ .dest = &dest, .ctl = &ctl }, 1);
+    remote_agent_ops.ensureRemoteAgentTerm(session, term, .{ .dest = &dest, .ctl = &ctl }, 1);
 
     // 뒤늦게 열린 채널이 **바로 이벤트를 낸다** — `waiting_hello` 로 열면 5 초 뒤 죽는다.
     var ch = &(term.agent_remote_channel orelse return error.NoChannelOpened);
@@ -27282,7 +25324,7 @@ test "RA5: 아직 hello 전인 목적지에는 예전대로 기다리는 채널�
     gop.value_ptr.stream_started = true;
     gop.value_ptr.saw_hello = false; // 아직 못 봤다
 
-    session.ensureRemoteAgentTerm(term, .{ .dest = &dest, .ctl = &ctl }, 1);
+    remote_agent_ops.ensureRemoteAgentTerm(session, term, .{ .dest = &dest, .ctl = &ctl }, 1);
 
     var ch = &(term.agent_remote_channel orelse return error.NoChannelOpened);
     try std.testing.expect(ch.feed("{\"nonce\":\"host_a_b\",\"line\":\"x\"}", 2) == .ignored);
@@ -27355,7 +25397,7 @@ test "RF8: 이벤트를 하나도 못 본 분배에서는 orphan 을 말하지 �
     term.agent_remote_nonce_len = mine.len;
 
     // ① 남의 이벤트가 와서 미매칭이 기록되고 보고된다.
-    session.feedRemoteAgentTerms("openClaw", &.{
+    remote_agent_ops.feedRemoteAgentTerms(session, "openClaw", &.{
         "{\"nonce\":\"host_bbbb_other\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"Stop\\\"}\"}",
     }, 1);
     try std.testing.expect(session.unmatched_reported);
@@ -27363,7 +25405,7 @@ test "RF8: 이벤트를 하나도 못 본 분배에서는 orphan 을 말하지 �
 
     // ② 다음 분배는 **하트비트만** — 이벤트가 하나도 없다.
     session.unmatched_reported = false; // 다시 말할 수 있는 상태로 두고
-    session.feedRemoteAgentTerms("openClaw", &.{"{\"hb\":1}"}, 2);
+    remote_agent_ops.feedRemoteAgentTerms(session, "openClaw", &.{"{\"hb\":1}"}, 2);
 
     try std.testing.expectEqual(@as(usize, 0), session.remote_events_seen);
     // **말하지 않았다** — 과거 값을 이번 목록과 나란히 찍으면 착시가 된다.
@@ -27399,7 +25441,7 @@ test "AK3: 훅이 provider 를 말하면 그때부터 훅이 이긴다 — 그 �
     try std.testing.expect(!term.agent_kind_from_hook);
 
     // 우리 것인 훅 줄이 오면 **그때부터** 훅이 이긴다.
-    session.feedRemoteAgentTerms("openClaw", &.{
+    remote_agent_ops.feedRemoteAgentTerms(session, "openClaw", &.{
         "{\"nonce\":\"host_aaaa_mine\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"Stop\\\"}\"}",
     }, 1);
 
@@ -27432,7 +25474,7 @@ test "RF7: 이벤트를 본 횟수를 센다 — 「비교가 안 일어난다�
     term.agent_remote_nonce_len = mine.len;
 
     // 이벤트 둘을 흘린다 — 하나는 우리 것, 하나는 남의 것.
-    session.feedRemoteAgentTerms("openClaw", &.{
+    remote_agent_ops.feedRemoteAgentTerms(session, "openClaw", &.{
         "{\"nonce\":\"host_aaaa_mine\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"Stop\\\"}\"}",
         "{\"nonce\":\"host_bbbb_other\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"Stop\\\"}\"}",
     }, 1);
@@ -27464,7 +25506,7 @@ test "RF7: 채널이 관문 앞이면 이벤트를 아예 못 본다 — 그것�
     @memcpy(term.agent_remote_nonce[0..mine.len], mine);
     term.agent_remote_nonce_len = mine.len;
 
-    session.feedRemoteAgentTerms("openClaw", &.{
+    remote_agent_ops.feedRemoteAgentTerms(session, "openClaw", &.{
         "{\"nonce\":\"host_aaaa_mine\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"Stop\\\"}\"}",
     }, 1);
 
@@ -27619,7 +25661,7 @@ test "RF2: 이벤트가 왔는데 아무 Term 도 안 가져가면 두 nonce 를
     // 그런데 **다른 nonce** 로 이벤트가 온다 — 주인이 없다.
     session.unmatched_reported = false;
     session.unmatched_event_nonce_len = 0;
-    session.feedRemoteAgentTerms("openClaw", &.{
+    remote_agent_ops.feedRemoteAgentTerms(session, "openClaw", &.{
         "{\"nonce\":\"host_bbbb_other\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"Stop\\\"}\"}",
     }, 1);
 
@@ -27655,7 +25697,7 @@ test "RF2: 주인을 찾으면 셈이 서고, 다시 끊기면 또 말할 수 �
     term.agent_remote_nonce_len = mine.len;
 
     // 주인이 있는 이벤트 — 셈이 선다.
-    session.feedRemoteAgentTerms("openClaw", &.{
+    remote_agent_ops.feedRemoteAgentTerms(session, "openClaw", &.{
         "{\"nonce\":\"host_aaaa_mine\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"Stop\\\"}\"}",
     }, 1);
     try std.testing.expect(session.remote_nonce_matched > 0);
@@ -27684,7 +25726,7 @@ test "RF1: 분배가 어느 조건에서 걸렸는지 센다 — 이벤트가 �
     // ① 채널이 없다 — 세 조건 중 첫째에서 걸린다.
     term.agent_remote_channel = null;
     session.last_remote_feed_shape = std.math.maxInt(u64);
-    session.feedRemoteAgentTerms("openClaw", &.{"{\"nonce\":\"x\",\"line\":\"claude\\t{}\"}"}, 1);
+    remote_agent_ops.feedRemoteAgentTerms(session, "openClaw", &.{"{\"nonce\":\"x\",\"line\":\"claude\\t{}\"}"}, 1);
     try std.testing.expect(session.last_remote_feed_shape != std.math.maxInt(u64));
     const only_no_channel = session.last_remote_feed_shape;
     try std.testing.expectEqual(@as(u64, 0), only_no_channel >> 48); // fed == 0
@@ -27693,7 +25735,7 @@ test "RF1: 분배가 어느 조건에서 걸렸는지 센다 — 이벤트가 �
     // ② 채널은 있는데 dest 를 모른다 — 둘째에서 걸린다.
     term.agent_remote_channel = maru.session.remote_agent_stream.Channel.init(0);
     term.rt.observation.ssh_remote_dest_present = false;
-    session.feedRemoteAgentTerms("openClaw", &.{"{\"nonce\":\"x\",\"line\":\"claude\\t{}\"}"}, 2);
+    remote_agent_ops.feedRemoteAgentTerms(session, "openClaw", &.{"{\"nonce\":\"x\",\"line\":\"claude\\t{}\"}"}, 2);
     const only_no_dest = session.last_remote_feed_shape;
     try std.testing.expectEqual(@as(u64, 0), only_no_dest >> 48);
     try std.testing.expect((only_no_dest & 0xFFFF0000) >> 16 > 0); // no_dest > 0
@@ -27701,7 +25743,7 @@ test "RF1: 분배가 어느 조건에서 걸렸는지 센다 — 이벤트가 �
     // ③ dest 는 아는데 다른 목적지다 — 셋째에서 걸린다.
     term.rt.observation.ssh_remote_dest_present = true;
     try term.rt.observation.ssh_remote_dest.appendSlice(a, "otherHost");
-    session.feedRemoteAgentTerms("openClaw", &.{"{\"nonce\":\"x\",\"line\":\"claude\\t{}\"}"}, 3);
+    remote_agent_ops.feedRemoteAgentTerms(session, "openClaw", &.{"{\"nonce\":\"x\",\"line\":\"claude\\t{}\"}"}, 3);
     const only_other = session.last_remote_feed_shape;
     try std.testing.expectEqual(@as(u64, 0), only_other >> 48);
     try std.testing.expect((only_other & 0xFFFF) > 0); // other_dest > 0
@@ -27726,9 +25768,9 @@ test "RF1: 같은 모양이 이어지면 다시 말하지 않는다" {
     });
     defer session.deinit();
 
-    session.feedRemoteAgentTerms("openClaw", &.{"{\"nonce\":\"x\",\"line\":\"claude\\t{}\"}"}, 1);
+    remote_agent_ops.feedRemoteAgentTerms(session, "openClaw", &.{"{\"nonce\":\"x\",\"line\":\"claude\\t{}\"}"}, 1);
     const first = session.last_remote_feed_shape;
-    session.feedRemoteAgentTerms("openClaw", &.{"{\"nonce\":\"x\",\"line\":\"claude\\t{}\"}"}, 2);
+    remote_agent_ops.feedRemoteAgentTerms(session, "openClaw", &.{"{\"nonce\":\"x\",\"line\":\"claude\\t{}\"}"}, 2);
     try std.testing.expectEqual(first, session.last_remote_feed_shape); // 그대로다
 }
 
@@ -27747,7 +25789,7 @@ test "RF1: EOF 를 알리는 호출은 분배로 세지 않는다" {
     });
     defer session.deinit();
 
-    session.feedRemoteAgentTerms("openClaw", &.{}, 1);
+    remote_agent_ops.feedRemoteAgentTerms(session, "openClaw", &.{}, 1);
     try std.testing.expectEqual(std.math.maxInt(u64), session.last_remote_feed_shape); // 안 건드린다
 }
 
@@ -28521,7 +26563,7 @@ test "훅 게이트를 끄면 원격 축도 접힌다 — 안 접으면 한 Term
 
     // 게이트를 끈다 → 다음 펌프가 **자식도 채널도** 거둔다.
     session.loaded_config.config.sidebar.agent_hooks = false;
-    session.pumpRemoteAgentChannels();
+    remote_agent_ops.pumpRemoteAgentChannels(&session);
     try std.testing.expectEqual(@as(usize, 0), session.remote_agent_hosts.count());
     // 채널까지 떼야 한다 — 남기면 `modeFor` 가 계속 «채널이 열렸다» 로 읽어 훅 모드에 갇힌다.
     try std.testing.expect(term.agent_remote_channel == null);
@@ -28568,15 +26610,15 @@ test "아무것도 안 오는 원격 채널은 시한이 지나면 스스로 닫
     const host = session.remote_agent_hosts.getPtr(dest).?;
 
     // hello 시한 안에서는 아직 기다린다 — 성급히 닫으면 MOTD 가 긴 서버를 못 쓴다.
-    session.drainRemoteAgentHost(dest, host, ras.hello_deadline_ms - 1);
+    remote_agent_ops.drainRemoteAgentHost(&session, dest, host, ras.hello_deadline_ms - 1);
     try std.testing.expectEqual(ras.State.waiting_hello, term.agent_remote_channel.?.state);
 
     // 시한을 넘기면 **줄이 하나도 안 왔는데도** 닫히고 사유가 남는다.
-    session.drainRemoteAgentHost(dest, host, ras.hello_deadline_ms);
+    remote_agent_ops.drainRemoteAgentHost(&session, dest, host, ras.hello_deadline_ms);
     try std.testing.expectEqual(ras.Closed.no_hello, term.agent_remote_channel.?.closed_reason.?);
     try std.testing.expectEqual(maru.session.agent_hook_mode.Mode.observe, agent_ops.agentHookMode(&session, term));
 
-    session.closeRemoteAgentHost(dest);
+    remote_agent_ops.closeRemoteAgentHost(&session, dest);
 }
 
 test "원격 nonce 는 로컬 훅 이름과 같은 두 값에서 나온다 — 조립기가 하나여야 귀속이 산다" {
@@ -33933,7 +31975,7 @@ test "그룹핀 리뷰 #7: 드래그 중 sidebarMaxScroll이 preview_rows(더 �
     // 드래그 프리뷰 활성 → sidebarRenderRows()=preview_rows(길음) 기준 → 스크롤 가능(240-160=80).
     session.sidebar_drag_preview = .{ .origin = 0, .origin_len = 1, .plan = .none, .cursor_y = 0, .ghost_lo = 0, .ghost_hi = 0 };
     // 240(6행) - 뷰포트. 숫자를 박지 않고 식으로 둬 상태바 높이가 바뀌어도 의도가 유지되게 한다.
-    const sb_viewport: u32 = (200 - session.statusBarHeightPx()) - session.sidebar_header_height_px;
+    const sb_viewport: u32 = (200 - status_bar_ops.statusBarHeightPx(session)) - session.sidebar_header_height_px;
     try std.testing.expectEqual(240 - sb_viewport, sidebar_ops.sidebarMaxScroll(session)); // ★ 옛 버그면 sidebar_rows(3행)로 0 → 스크롤 불가
     session.sidebar_drag_preview = null; // teardown(preview_rows는 deinit이 정리)
 }
@@ -40600,7 +38642,7 @@ test "window padding insets only the cell grid, not chrome (termRect/paneBarRect
     try std.testing.expectEqual(session.sidebar_width_px, r.x);
     try std.testing.expectEqual(@as(u32, 0), r.y);
     try std.testing.expectEqual(@as(u32, 800), r.w);
-    try std.testing.expectEqual(600 - session.statusBarHeightPx(), r.h);
+    try std.testing.expectEqual(600 - status_bar_ops.statusBarHeightPx(session), r.h);
 
     // 탭 바: leaf rect 상단·사이드바 경계에 붙는다(padding inset 없음 — chrome은 가장자리까지).
     const bar = pane_ops.paneBarRect(session, r).?;
@@ -40614,7 +38656,7 @@ test "window padding insets only the cell grid, not chrome (termRect/paneBarRect
     try std.testing.expectEqual(session.sidebar_width_px + 8, g.x); // 좌 = 사이드바 + pad_x
     try std.testing.expectEqual(bar_h + 4, g.y); // 상 = 탭 바 + pad_y
     try std.testing.expectEqual(@as(u32, 800 - 16), g.w); // 폭 = backing − 사이드바 − 2·pad_x
-    try std.testing.expectEqual((600 - session.statusBarHeightPx()) -| bar_h -| 8, g.h); // 높이 = backing − 상태바 − 바 − 2·pad_y
+    try std.testing.expectEqual((600 - status_bar_ops.statusBarHeightPx(session)) -| bar_h -| 8, g.h); // 높이 = backing − 상태바 − 바 − 2·pad_y
 
     // padding 0이면 grid도 inset 없음(탭 바만 뺀 영역).
     session.window_padding_px = .{};
@@ -40622,7 +38664,7 @@ test "window padding insets only the cell grid, not chrome (termRect/paneBarRect
     try std.testing.expectEqual(session.sidebar_width_px, g0.x);
     try std.testing.expectEqual(bar_h, g0.y);
     try std.testing.expectEqual(@as(u32, 800), g0.w);
-    try std.testing.expectEqual((600 - session.statusBarHeightPx()) -| bar_h, g0.h); // padding 0이어도 상태바는 빠진다
+    try std.testing.expectEqual((600 - status_bar_ops.statusBarHeightPx(session)) -| bar_h, g0.h); // padding 0이어도 상태바는 빠진다
 }
 
 // 비대칭 window padding(left≠right, top≠bottom) 회귀: paneTermRect가 좌상으로 left/top만큼만 들이고 폭/높이를
@@ -40656,7 +38698,7 @@ test "asymmetric window padding insets paneTermRect by left/top and grid by left
     try std.testing.expectEqual(bar_h + 4, g.y);
     // 폭은 left+right(30), 높이는 바 + top+bottom(12)만큼 줄어든다.
     try std.testing.expectEqual(@as(u32, 800 - 30), g.w);
-    try std.testing.expectEqual((600 - session.statusBarHeightPx()) -| bar_h -| 12, g.h); // backing − 상태바 − 바 − (pad_top+pad_bottom)
+    try std.testing.expectEqual((600 - status_bar_ops.statusBarHeightPx(session)) -| bar_h -| 12, g.h); // backing − 상태바 − 바 − (pad_top+pad_bottom)
 
     // gridFromBacking도 비대칭 합(left+right=30, top+bottom=12)을 grid에서 뺀다(좌우·상하 대칭 가정 없이).
     // 800px term 폭(사이드바 뺀) 기준 cell 8px: (800−30)/8=96 cols, (600−12)/18=32 rows.
@@ -56169,7 +54211,7 @@ test "sidebar reserves a scrollbar gutter and publishes its scrollbar as a decla
 
     // ③ 넘치게 만들면 track과 thumb이 **선언된 tree로** 나온다(host가 quad를 손으로 만들지 않는다).
     //    뷰포트를 줄이는 쪽이 확실하다 — 탭을 늘리면 fixture 사정에 기대게 된다.
-    session.backing_height_px = session.sidebar_header_height_px + session.statusBarHeightPx() + sidebar_ops.sidebarMetrics(session).line_h;
+    session.backing_height_px = session.sidebar_header_height_px + status_bar_ops.statusBarHeightPx(session) + sidebar_ops.sidebarMetrics(session).line_h;
     if (sidebar_ops.sidebarMaxScroll(session) == 0) return error.SidebarFixtureDoesNotOverflow;
     sidebar_ops.buildSidebarScrollTree(session);
     const snapshot = sidebar_ops.sidebarScrollTree(session);
@@ -56423,7 +54465,7 @@ test "dragging the sidebar scrollbar scrolls the sidebar and leaves the dock lis
     const content_h = chrome.components.sidebar.contentHeight(sidebar_ops.sidebarRenderRows(session), sidebar_ops.sidebarMetrics(session));
     const viewport_h = content_h / 2;
     if (viewport_h <= sidebar_ops.sidebar_scrollbar_min_thumb_px * 2) return error.SidebarFixtureTooShort;
-    session.backing_height_px = session.sidebar_header_height_px + session.statusBarHeightPx() + viewport_h;
+    session.backing_height_px = session.sidebar_header_height_px + status_bar_ops.statusBarHeightPx(session) + viewport_h;
     if (sidebar_ops.sidebarMaxScroll(session) == 0) return error.SidebarFixtureDoesNotOverflow;
 
     sidebar_ops.buildSidebarScrollTree(session);
@@ -65605,14 +63647,14 @@ test "SB1: 상태바 높이는 텍스트 행 + 여백을 담고, 하한은 폰�
     _ = try session.resize(1000, 700, 1000);
 
     const pad2 = 2 * layout_math.ptToPx(status_bar_v_pad_pt, session.scale_milli);
-    try std.testing.expect(session.statusBarHeightPx() >= session.cell_height_px + pad2);
-    try std.testing.expect(session.statusBarHeightPx() >= layout_math.ptToPx(status_bar_height_pt, session.scale_milli));
+    try std.testing.expect(status_bar_ops.statusBarHeightPx(session) >= session.cell_height_px + pad2);
+    try std.testing.expect(status_bar_ops.statusBarHeightPx(session) >= layout_math.ptToPx(status_bar_height_pt, session.scale_milli));
 
     // 폰트를 키워 셀이 하한을 넘겨도 바가 따라 커진다 — 안 그러면 글자가 바 아래로 넘친다.
     var i: usize = 0;
     while (i < 12) : (i += 1) session.dispatchAppAction(.increase_font_size);
     try std.testing.expect(session.cell_height_px > layout_math.ptToPx(status_bar_height_pt, session.scale_milli));
-    try std.testing.expect(session.statusBarHeightPx() >= session.cell_height_px + pad2);
+    try std.testing.expect(status_bar_ops.statusBarHeightPx(session) >= session.cell_height_px + pad2);
 }
 
 // SB1-S3d: **상태바 배경은 터미널 레이어(bottom)여야 한다.** 항목 텍스트가 `pane_frames`를 타고 터미널
@@ -65769,11 +63811,11 @@ test "DSB3 비교 뷰에서도 상태바 커서 항목이 뜬다 — 제품 경�
     }
     const builder = pane_ops.paneFrameBuilder(session);
     const colors: metal_frame.CellColors = .{ .default_fg = session.appearance.theme.foreground };
-    session.collectStatusBarItems(&collected, builder, colors);
+    status_bar_ops.collectStatusBarItems(session, &collected, builder, colors);
 
     const Id = chrome.components.status_bar.ItemId;
     var cursor_at: ?usize = null;
-    for (session.statusBarTree().entries, 0..) |e, i| {
+    for (status_bar_ops.statusBarTree(session).entries, 0..) |e, i| {
         if (@as(Id, @enumFromInt(e.id)) == .editor_cursor) cursor_at = i;
     }
     // ⑴ **뜬다** — 전에는 `cursorPosition` 이 비교에서 `null` 을 내 이 항목이 없었다.
@@ -65783,9 +63825,9 @@ test "DSB3 비교 뷰에서도 상태바 커서 항목이 뜬다 — 제품 경�
     term.rt.editor_diff_selection = null;
     for (collected.items) |*c| c.deinit(allocator);
     collected.clearRetainingCapacity();
-    session.collectStatusBarItems(&collected, builder, colors);
+    status_bar_ops.collectStatusBarItems(session, &collected, builder, colors);
     var gone = true;
-    for (session.statusBarTree().entries) |e| {
+    for (status_bar_ops.statusBarTree(session).entries) |e| {
         if (@as(Id, @enumFromInt(e.id)) == .editor_cursor) gone = false;
     }
     try std.testing.expect(gone);
@@ -65835,9 +63877,9 @@ test "DSB6 숫자가 잘리면 아예 안 낸다 — 비교 뷰 커서 항목의
     defer session.backing_width_px = saved_width;
 
     // ⑴ **넓으면 뜬다** — 아래 대조가 「원래 안 뜬다」가 아니게 한다.
-    session.collectStatusBarItems(&collected, builder, colors);
+    status_bar_ops.collectStatusBarItems(session, &collected, builder, colors);
     var wide_has = false;
-    for (session.statusBarTree().entries) |e| {
+    for (status_bar_ops.statusBarTree(session).entries) |e| {
         if (@as(Id, @enumFromInt(e.id)) == .editor_cursor) wide_has = true;
     }
     try std.testing.expect(wide_has);
@@ -65846,9 +63888,9 @@ test "DSB6 숫자가 잘리면 아예 안 낸다 — 비교 뷰 커서 항목의
     session.backing_width_px = session.cell_width_px * 3;
     for (collected.items) |*c| c.deinit(allocator);
     collected.clearRetainingCapacity();
-    session.collectStatusBarItems(&collected, builder, colors);
+    status_bar_ops.collectStatusBarItems(session, &collected, builder, colors);
     var narrow_has = false;
-    for (session.statusBarTree().entries) |e| {
+    for (status_bar_ops.statusBarTree(session).entries) |e| {
         if (@as(Id, @enumFromInt(e.id)) == .editor_cursor) narrow_has = true;
     }
     try std.testing.expect(!narrow_has);
@@ -65875,23 +63917,23 @@ test "SBL4 상태바 LSP 항목 — 서버가 없으면 「설치」 항목이 �
     _ = editor_ops.openPathInActivePane(session, "src/platform/macos/session_host_notification_route.c") catch
         return error.SkipZigTest;
     editor_ops.lsp_client.pump(session); // tick 이 하는 일 — 클라이언트가 「없음」이 된다
-    session.collectStatusBarItems(&collected, builder, colors);
+    status_bar_ops.collectStatusBarItems(session, &collected, builder, colors);
 
     const Id = chrome.components.status_bar.ItemId;
     var lsp_rect: ?chrome.ui.layout.UiRect = null;
-    for (session.statusBarTree().entries) |e| if (@as(Id, @enumFromInt(e.id)) == .editor_lsp) {
+    for (status_bar_ops.statusBarTree(session).entries) |e| if (@as(Id, @enumFromInt(e.id)) == .editor_lsp) {
         lsp_rect = e.rect;
     };
     const r = lsp_rect orelse return error.NoLspItem; // ⑴ 뜬다
     try std.testing.expect(r.width > 0 and r.height > 0);
-    try std.testing.expect(AppSession.statusBarItemClickable(.editor_lsp)); // ⑵ 누를 수 있다(호버도 준다)
+    try std.testing.expect(status_bar_ops.statusBarItemClickable(.editor_lsp)); // ⑵ 누를 수 있다(호버도 준다)
 
     // ⑶ 포인터로 누른다 — 제품과 같은 진입점. 새 탭이 하나 늘고 설치 명령이 그 탭에 입력된다(Enter 는 사용자).
     session.surface_initialized = true;
     const tabs_before = session.tabs.items.len;
     const cx: f64 = @floatCast(r.x + r.width / 2);
     const cy: f64 = @floatCast(r.y + r.height / 2);
-    try std.testing.expect(session.pointInStatusBar(cx, cy));
+    try std.testing.expect(status_bar_ops.pointInStatusBar(session, cx, cy));
     session.mouse(1, cx, cy, 0, 0);
     try std.testing.expectEqual(tabs_before + 1, session.tabs.items.len);
 }
@@ -65916,12 +63958,12 @@ test "SBL3 상태바 언어 항목 — 뜨고, 자리가 맞고, 표시 전용�
 
     const editor_term = editor_ops.openPathInActivePane(session, "src/session/editor/selection.zig") catch
         return error.SkipZigTest;
-    session.collectStatusBarItems(&collected, builder, colors);
+    status_bar_ops.collectStatusBarItems(session, &collected, builder, colors);
 
     const Id = chrome.components.status_bar.ItemId;
     var lang_at: ?usize = null;
     var eol_at: ?usize = null;
-    for (session.statusBarTree().entries, 0..) |e, i| switch (@as(Id, @enumFromInt(e.id))) {
+    for (status_bar_ops.statusBarTree(session).entries, 0..) |e, i| switch (@as(Id, @enumFromInt(e.id))) {
         .editor_language => lang_at = i,
         .editor_eol => eol_at = i,
         else => {},
@@ -65937,18 +63979,18 @@ test "SBL3 상태바 언어 항목 — 뜨고, 자리가 맞고, 표시 전용�
     // ⑵ **자리는 줄바꿈과 읽기 전용 사이다** — 화면 x 로 잰다(계약이 정한 규율: "더하는 순서"는
     //    구현이고 계약은 좌우다). 읽기 전용은 쓸 수 있는 문서라 안 뜨므로 줄바꿈만 본다.
     if (eol_at) |eol_i| {
-        const entries = session.statusBarTree().entries;
+        const entries = status_bar_ops.statusBarTree(session).entries;
         try std.testing.expect(entries[eol_i].rect.x < entries[lang_at.?].rect.x);
     }
 
     // ⑶ **표시 전용이다** — 열 대상이 없으므로 호버도 주지 않는다. 같은 파일이라 구조체 안
     //    private 함수를 이름으로 부를 수 있다.
-    try std.testing.expect(!AppSession.statusBarItemClickable(.editor_language));
+    try std.testing.expect(!status_bar_ops.statusBarItemClickable(.editor_language));
 
     // ⑷ **상한을 지킨다** — 우측 항목 수가 후보 수를 넘지 않는다. 상한 검사를 뺀 변이가 여기서 죽는다.
     {
         var right_n: usize = 0;
-        for (session.statusBarTree().entries) |e| {
+        for (status_bar_ops.statusBarTree(session).entries) |e| {
             const id = @as(Id, @enumFromInt(e.id));
             if (id != .git_branch and id != .cwd) right_n += 1;
         }
@@ -65959,9 +64001,9 @@ test "SBL3 상태바 언어 항목 — 뜨고, 자리가 맞고, 표시 전용�
     editor_term.rt.editor_grammar = .none;
     for (collected.items) |*c| c.deinit(allocator);
     collected.clearRetainingCapacity();
-    session.collectStatusBarItems(&collected, builder, colors);
+    status_bar_ops.collectStatusBarItems(session, &collected, builder, colors);
     var lang_after: ?usize = null;
-    for (session.statusBarTree().entries, 0..) |e, i| {
+    for (status_bar_ops.statusBarTree(session).entries, 0..) |e, i| {
         if (@as(Id, @enumFromInt(e.id)) == .editor_language) lang_after = i;
     }
     try std.testing.expect(lang_after == null);
@@ -65993,9 +64035,9 @@ test "SB-MAXCOL: 가로 보기가 상한에 걸리면 상태바가 «알린다»
     const editor_term = editor_ops.openPathInActivePane(session, "src/session/editor/selection.zig") catch return error.SkipZigTest;
     editor_term.rt.editor_wrap = false;
 
-    session.collectStatusBarItems(&collected, builder, colors);
+    status_bar_ops.collectStatusBarItems(session, &collected, builder, colors);
     var capped_seen = false;
-    for (session.statusBarTree().entries) |e| {
+    for (status_bar_ops.statusBarTree(session).entries) |e| {
         const id: chrome.components.status_bar.ItemId = @enumFromInt(e.id);
         if (id == .editor_degraded) capped_seen = true;
     }
@@ -66009,9 +64051,9 @@ test "SB-MAXCOL: 가로 보기가 상한에 걸리면 상태바가 «알린다»
     editor_ops.applyConfigTabWidth(session);
     for (collected.items) |*c| c.deinit(allocator);
     collected.clearRetainingCapacity();
-    session.collectStatusBarItems(&collected, builder, colors);
+    status_bar_ops.collectStatusBarItems(session, &collected, builder, colors);
     var still_seen = false;
-    for (session.statusBarTree().entries) |e| {
+    for (status_bar_ops.statusBarTree(session).entries) |e| {
         const id: chrome.components.status_bar.ItemId = @enumFromInt(e.id);
         if (id == .editor_degraded) still_seen = true;
     }
@@ -66037,8 +64079,8 @@ test "SB1: 편집기 pane이 활성일 때만 편집기 항목이 뜨고, 순서
     const colors: metal_frame.CellColors = .{ .default_fg = session.appearance.theme.foreground };
 
     // ① 터미널이 활성이면 **하나도** 안 나온다.
-    session.collectStatusBarItems(&collected, builder, colors);
-    for (session.statusBarTree().entries) |e| {
+    status_bar_ops.collectStatusBarItems(session, &collected, builder, colors);
+    for (status_bar_ops.statusBarTree(session).entries) |e| {
         const id: chrome.components.status_bar.ItemId = @enumFromInt(e.id);
         try std.testing.expect(id != .editor_readonly and id != .editor_eol and id != .editor_degraded);
     }
@@ -66047,11 +64089,11 @@ test "SB1: 편집기 pane이 활성일 때만 편집기 항목이 뜨고, 순서
     const editor_term = editor_ops.openPathInActivePane(session, "src/session/editor/selection.zig") catch return error.SkipZigTest;
     for (collected.items) |*c| c.deinit(allocator);
     collected.clearRetainingCapacity();
-    session.collectStatusBarItems(&collected, builder, colors);
+    status_bar_ops.collectStatusBarItems(session, &collected, builder, colors);
 
     var readonly_at: ?usize = null;
     var eol_at: ?usize = null;
-    for (session.statusBarTree().entries, 0..) |e, i| {
+    for (status_bar_ops.statusBarTree(session).entries, 0..) |e, i| {
         switch (@as(chrome.components.status_bar.ItemId, @enumFromInt(e.id))) {
             .editor_readonly => readonly_at = i,
             .editor_eol => eol_at = i,
@@ -66068,10 +64110,10 @@ test "SB1: 편집기 pane이 활성일 때만 편집기 항목이 뜨고, 순서
     editor_term.rt.editor_doc.?.file.read_only = true;
     for (collected.items) |*c| c.deinit(allocator);
     collected.clearRetainingCapacity();
-    session.collectStatusBarItems(&collected, builder, colors);
+    status_bar_ops.collectStatusBarItems(session, &collected, builder, colors);
     readonly_at = null;
     eol_at = null;
-    for (session.statusBarTree().entries, 0..) |e, i| {
+    for (status_bar_ops.statusBarTree(session).entries, 0..) |e, i| {
         switch (@as(chrome.components.status_bar.ItemId, @enumFromInt(e.id))) {
             .editor_readonly => readonly_at = i,
             .editor_eol => eol_at = i,
@@ -66081,7 +64123,7 @@ test "SB1: 편집기 pane이 활성일 때만 편집기 항목이 뜨고, 순서
     try std.testing.expect(readonly_at != null);
     // 줄바꿈은 그 **왼쪽**이다 = 먼저 버려진다. 트리 순서가 곧 화면 좌우이므로 x로 본다.
     if (eol_at) |eol_i| {
-        const entries = session.statusBarTree().entries;
+        const entries = status_bar_ops.statusBarTree(session).entries;
         try std.testing.expect(entries[eol_i].rect.x < entries[readonly_at.?].rect.x);
     }
 
@@ -66089,7 +64131,7 @@ test "SB1: 편집기 pane이 활성일 때만 편집기 항목이 뜨고, 순서
     //     "더하는 순서"는 구현이고 계약은 좌우다(위 ③ 과 같은 규율).
     {
         var lang_at: ?usize = null;
-        for (session.statusBarTree().entries, 0..) |e, i| {
+        for (status_bar_ops.statusBarTree(session).entries, 0..) |e, i| {
             if (@as(chrome.components.status_bar.ItemId, @enumFromInt(e.id)) == .editor_language) lang_at = i;
         }
         // 픽스처가 `selection.zig` 를 열었으므로 문법이 있다 — 항목이 **떠야** 한다.
@@ -66098,7 +64140,7 @@ test "SB1: 편집기 pane이 활성일 때만 편집기 항목이 뜨고, 순서
             maru.session.editor.language.Grammar.zig,
             editor_term.rt.editor_grammar,
         );
-        const entries = session.statusBarTree().entries;
+        const entries = status_bar_ops.statusBarTree(session).entries;
         try std.testing.expect(entries[lang_at.?].rect.x < entries[readonly_at.?].rect.x); // 읽기 전용보다 왼쪽
         if (eol_at) |eol_i| {
             try std.testing.expect(entries[eol_i].rect.x < entries[lang_at.?].rect.x); // 줄바꿈보다는 오른쪽
@@ -66112,11 +64154,11 @@ test "SB1: 편집기 pane이 활성일 때만 편집기 항목이 뜨고, 순서
     editor_term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };
     for (collected.items) |*c| c.deinit(allocator);
     collected.clearRetainingCapacity();
-    session.collectStatusBarItems(&collected, builder, colors);
+    status_bar_ops.collectStatusBarItems(session, &collected, builder, colors);
 
     var cursor_at: ?usize = null;
     var group_x: ?f32 = null; // 커서를 뺀 편집기 항목들의 가장 오른쪽 x
-    for (session.statusBarTree().entries, 0..) |e, i| {
+    for (status_bar_ops.statusBarTree(session).entries, 0..) |e, i| {
         switch (@as(chrome.components.status_bar.ItemId, @enumFromInt(e.id))) {
             .editor_cursor => cursor_at = i,
             .editor_degraded, .editor_readonly, .editor_eol => {
@@ -66126,7 +64168,7 @@ test "SB1: 편집기 pane이 활성일 때만 편집기 항목이 뜨고, 순서
         }
     }
     try std.testing.expect(cursor_at != null);
-    const entries = session.statusBarTree().entries;
+    const entries = status_bar_ops.statusBarTree(session).entries;
     try std.testing.expect(entries[cursor_at.?].rect.x > group_x.?);
 }
 
@@ -66151,12 +64193,12 @@ test "SB1: 조립된 우측 항목은 전부 우측 후보 원장 안에 있다"
     const builder = pane_ops.paneFrameBuilder(session);
     const colors: metal_frame.CellColors = .{ .default_fg = session.appearance.theme.foreground };
     _ = editor_ops.openPathInActivePane(session, "src/session/editor/selection.zig") catch return error.SkipZigTest;
-    session.collectStatusBarItems(&collected, builder, colors);
+    status_bar_ops.collectStatusBarItems(session, &collected, builder, colors);
 
     const sb = chrome.components.status_bar;
-    const bar_mid = session.statusBarTree().entries.len;
+    const bar_mid = status_bar_ops.statusBarTree(session).entries.len;
     try std.testing.expect(bar_mid > 0); // 아무것도 안 실렸으면 아래가 항진명제다
-    for (session.statusBarTree().entries) |e| {
+    for (status_bar_ops.statusBarTree(session).entries) |e| {
         const id: sb.ItemId = @enumFromInt(e.id);
         if (id == .git_branch or id == .cwd) continue; // 좌측 전용
         var found = false;
@@ -66194,7 +64236,7 @@ test "SB1: 상태바 경로 항목은 끝이 아니라 중간을 생략한다" {
 
     // 경로가 실제로 바까지 흐른다(항목이 tree에 선다).
     var cwd_entry: ?chrome.ui.tree.RectEntry = null;
-    for (session.statusBarTree().entries) |e| {
+    for (status_bar_ops.statusBarTree(session).entries) |e| {
         if (e.id == @intFromEnum(chrome.components.status_bar.ItemId.cwd)) cwd_entry = e;
     }
     const entry = cwd_entry orelse return error.CwdItemMissing;
@@ -66203,7 +64245,7 @@ test "SB1: 상태바 경로 항목은 끝이 아니라 중간을 생략한다" {
     // 전제: 이 경로는 항목 예산(bar_cols/3)을 넘는다. 안 넘으면 생략이 안 일어나 검증이 비어 버린다.
     try std.testing.expect(chrome.text_layout.displayCols(long_path, null) > @max(1, bar_cols / 3));
 
-    var dl = session.buildStatusBarItem(icons.codepoint(.folder), long_path, bar_cols, black, black, .path) orelse return error.ItemMissing;
+    var dl = status_bar_ops.buildStatusBarItem(session, icons.codepoint(.folder), long_path, bar_cols, black, black, .path) orelse return error.ItemMissing;
     defer dl.deinit(allocator);
 
     // 셀 codepoint를 이어 붙여 실제로 그려질 글자를 읽는다.
@@ -66222,7 +64264,7 @@ test "SB1: 상태바 경로 항목은 끝이 아니라 중간을 생략한다" {
     // **호출부가 실제로 .path를 넘기는지**까지 본다. 위 단언은 `.path`로 직접 부른 결과라, 호출부가
     // `.plain`으로 되돌아가도 안 죽는다(뮤테이션으로 확인했다). 발행된 rect 폭으로 대조한다 —
     // 끝을 자르면 예산을 꽉 채우고, 컴포넌트로 줄이면 경계에서 끊겨 그보다 좁다.
-    var plain = session.buildStatusBarItem(icons.codepoint(.folder), long_path, bar_cols, black, black, .plain) orelse return error.ItemMissing;
+    var plain = status_bar_ops.buildStatusBarItem(session, icons.codepoint(.folder), long_path, bar_cols, black, black, .plain) orelse return error.ItemMissing;
     defer plain.deinit(allocator);
     const plain_w: u32 = @as(u32, plain.size.cols) * session.cell_width_px;
     const pad = layout_math.ptToPx(status_bar_item_pad_pt, session.scale_milli);
@@ -66256,7 +64298,7 @@ test "SB1: reload로 status-bar.show를 끄면 pane 크기도 새 값으로 다�
     _ = try session.resize(1000, 700, 1000);
     _ = try session.tick();
 
-    const bar_on = session.statusBarHeightPx();
+    const bar_on = status_bar_ops.statusBarHeightPx(session);
     try std.testing.expect(bar_on > 0); // 전제: 기본은 켜짐
     const pad_on = session.gridPadding().bottom;
 
@@ -66280,7 +64322,7 @@ test "SB1: reload로 status-bar.show를 끄면 pane 크기도 새 값으로 다�
     settings_ops.reloadConfig(session);
     _ = try session.tick();
 
-    try std.testing.expectEqual(@as(u32, 0), session.statusBarHeightPx()); // 껐다
+    try std.testing.expectEqual(@as(u32, 0), status_bar_ops.statusBarHeightPx(session)); // 껐다
     // pane 재측정이 **새** 값을 썼는지: bottom padding이 바 높이만큼 줄었어야 한다.
     try std.testing.expectEqual(pad_on - bar_on, session.gridPadding().bottom);
     // 그리고 grid도 그만큼 늘었다(셸이 실제로 행을 받는다).
@@ -66332,7 +64374,7 @@ test "SB1: 브랜치 메뉴는 상태바를 덮지 않는다" {
 
     // 메뉴 x를 추정하지 않고 **훑는다** — 앵커는 브랜치 항목 유무·사이드바 클램프에 따라 달라진다.
     // (처음엔 화면 한가운데를 찔렀는데 가로로 빗나가 아무 데서도 안 잡히는 헛 테스트였다. vacuity 가드가 잡았다.)
-    const h = session.statusBarHeightPx();
+    const h = status_bar_ops.statusBarHeightPx(session);
     try std.testing.expect(h > 0);
     const bar_top = session.backing_height_px -| h;
     const props = session.buildChromeProps();
@@ -67275,7 +65317,7 @@ test "SB-R: 리소스 항목은 첫 표본에 안 뜨고 두 번째 표본부터
     defer session.deinit();
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
 
-    try std.testing.expect(session.resourceText() == null); // 아직 아무 표본도 없다
+    try std.testing.expect(status_bar_ops.resourceText(session) == null); // 아직 아무 표본도 없다
 
     // 실 프로세스 표본은 시각마다 다르므로 **Meter를 직접** 태운다(순수 계약을 여기서 다시 검증하지 않고,
     // 세션이 그 결과를 문자열·재렌더로 이어 붙이는지만 본다).
@@ -67294,7 +65336,7 @@ test "SB-R: 리소스 항목은 첫 표본에 안 뜨고 두 번째 표본부터
     const text = ru.format(&buf, reading);
     @memcpy(session.resource_text_buf[0..text.len], text);
     session.resource_text_len = text.len;
-    const shown = session.resourceText() orelse return error.TestExpectedText;
+    const shown = status_bar_ops.resourceText(session) orelse return error.TestExpectedText;
     try std.testing.expectEqualStrings("  512 MB ·   10%", shown);
 
     // 상태바가 실제로 그 항목을 **그린다**(상태만 보면 렌더가 무시해도 통과한다).
@@ -67317,17 +65359,17 @@ test "SB-A: 폴링이 앱 자신을 표본에 넣고 합계에 반영한다" {
     });
     defer session.deinit();
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
-    try std.testing.expect(session.statusBarHeightPx() > 0); // 전제: 게이트가 열려 있다
+    try std.testing.expect(status_bar_ops.statusBarHeightPx(session) > 0); // 전제: 게이트가 열려 있다
 
     // 두 번 재야 CPU 차분이 나온다(첫 표본은 값 없음). 주기 도달을 강제한다.
     // **사이를 띄운다** — 두 폴링이 같은 밀리초에 들어가면 `gap_ms == 0`이라 Meter가 나눌 수 없어
     // null을 돌려주고, 이 테스트는 기능이 멀쩡해도 실패한다(첫 작성에서 실제로 그렇게 실패했다).
     session.resource_poll_ticks = std.math.maxInt(u32) / 2;
-    session.pollResourceUsage();
+    status_bar_ops.pollResourceUsage(session);
     const start_ms = monotonicMs();
     while (monotonicMs() -| start_ms < 5) _ = usleep(1_000); // 파일 상단 extern 선언 재사용(std에 Thread.sleep 없음)
     session.resource_poll_ticks = std.math.maxInt(u32) / 2;
-    session.pollResourceUsage();
+    status_bar_ops.pollResourceUsage(session);
 
     // 앱 행이 **자기 그룹**으로 서 있다. 이 스모크 세션에는 산 터미널이 없으므로 앱이 유일한 행이다 —
     // 즉 예전 규칙("터미널이 없으면 항목 없음")이 뒤집혔다는 것도 함께 고정한다(§4.1).
@@ -67363,12 +65405,12 @@ test "SB-R: 같은 표시가 나오면 metal_dirty를 세우지 않는다" {
 
     // 기준선 + 값 하나를 만든다.
     session.resource_poll_ticks = std.math.maxInt(u32) / 2;
-    session.pollResourceUsage();
+    status_bar_ops.pollResourceUsage(session);
     var spin: u64 = monotonicMs();
     while (monotonicMs() == spin) spin = monotonicMs();
     session.resource_poll_ticks = std.math.maxInt(u32) / 2;
-    session.pollResourceUsage();
-    const first = session.resourceText() orelse return error.TestExpectedResourceText;
+    status_bar_ops.pollResourceUsage(session);
+    const first = status_bar_ops.resourceText(session) orelse return error.TestExpectedResourceText;
 
     // 같은 표시가 다시 나오는 상황을 만든다 — 표시 문자열을 그대로 두고 폴링을 한 번 더 돌린다.
     // (실 표본이 조금 달라도 반올림 뒤 같은 글자면 재렌더가 없어야 한다.)
@@ -67380,9 +65422,9 @@ test "SB-R: 같은 표시가 나오면 metal_dirty를 세우지 않는다" {
     spin = monotonicMs();
     while (monotonicMs() == spin) spin = monotonicMs();
     session.resource_poll_ticks = std.math.maxInt(u32) / 2;
-    session.pollResourceUsage();
+    status_bar_ops.pollResourceUsage(session);
 
-    const now = session.resourceText() orelse return error.TestExpectedResourceText;
+    const now = status_bar_ops.resourceText(session) orelse return error.TestExpectedResourceText;
     if (now.len == kept_len and std.mem.eql(u8, now, kept[0..kept_len])) {
         // 글자가 같다 → 재렌더 없음이 계약이다.
         try std.testing.expect(!session.metal_dirty);
@@ -67427,7 +65469,7 @@ test "SB-A: 앱 행은 무거운 순 정렬 밖에서 맨 아래 고정이고 �
     session.resource_text_len = text.len;
     try std.testing.expect(try statusBarHasText(allocator, session, "512"));
 
-    session.openResourceMenu();
+    status_bar_ops.openResourceMenu(session);
     try std.testing.expect(session.resource_menu_open);
     try std.testing.expectEqual(@as(usize, 3), session.resource_menu_len);
     // 탭은 무거운 순(222 → 111), 앱은 **그 뒤**다.
@@ -67472,16 +65514,16 @@ test "SB-T: 팝오버 머리글 합계는 상태바 띠와 같은 tick의 값이
     });
     defer session.deinit();
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
-    try std.testing.expect(session.statusBarHeightPx() > 0);
+    try std.testing.expect(status_bar_ops.statusBarHeightPx(session) > 0);
 
     // 두 번 재야 CPU 차분이 나온다(첫 표본은 값 없음). 사이를 띄우지 않으면 `gap_ms == 0`이라
     // Meter가 나눌 수 없어 기능이 멀쩡해도 실패한다(SB-A가 같은 이유로 그렇게 적혀 있다).
     session.resource_poll_ticks = std.math.maxInt(u32) / 2;
-    session.pollResourceUsage();
+    status_bar_ops.pollResourceUsage(session);
     const start_ms = monotonicMs();
     while (monotonicMs() -| start_ms < 5) _ = usleep(1_000);
     session.resource_poll_ticks = std.math.maxInt(u32) / 2;
-    session.pollResourceUsage();
+    status_bar_ops.pollResourceUsage(session);
     try std.testing.expect(session.resource_text_len > 0);
 
     // **앵커는 렌더 경로가 발행한다** — `statusBarTree()`는 읽기만 하므로 한 번 그려야 rect 가 생기고,
@@ -67489,7 +65531,7 @@ test "SB-T: 팝오버 머리글 합계는 상태바 띠와 같은 tick의 값이
     // 알 수 없으니 리소스 항목이 반드시 갖는 `%` 로 확인한다.
     try std.testing.expect(try statusBarHasText(allocator, session, "%"));
 
-    session.openResourceMenu();
+    status_bar_ops.openResourceMenu(session);
     try std.testing.expect(session.resource_menu_open);
 
     // **표시 문자열을 일부러 낡게 만든다.** 다음 폴링이 머리글을 이 낡은 값으로 그리면(옛 순서) 아래
@@ -67500,10 +65542,10 @@ test "SB-T: 팝오버 머리글 합계는 상태바 띠와 같은 tick의 값이
 
     while (monotonicMs() -| start_ms < 15) _ = usleep(1_000);
     session.resource_poll_ticks = std.math.maxInt(u32) / 2;
-    session.pollResourceUsage();
+    status_bar_ops.pollResourceUsage(session);
 
     // 띠가 그리는 문자열과 머리글이 **같은 값**을 담는다.
-    const shown = session.resourceText() orelse return error.TestExpectedText;
+    const shown = status_bar_ops.resourceText(session) orelse return error.TestExpectedText;
     try std.testing.expect(!std.mem.eql(u8, shown, stale)); // 폴링이 실제로 갱신했다(전제)
     try std.testing.expect(std.mem.indexOf(u8, session.context_menu_items_buf[0], shown) != null);
 }
@@ -67543,7 +65585,7 @@ test "SB-H: 세션 호스트 행도 정렬 밖 고정이고 꼬리 수는 실제
     session.resource_text_len = text.len;
     try std.testing.expect(try statusBarHasText(allocator, session, "512"));
 
-    session.openResourceMenu();
+    status_bar_ops.openResourceMenu(session);
     try std.testing.expect(session.resource_menu_open);
     try std.testing.expectEqual(@as(usize, 4), session.resource_menu_len);
     // 탭은 무거운 순(222 → 111), 그 뒤가 고정 행 **둘**이고 순서는 키 배열대로(호스트 → 앱)다.
@@ -67596,7 +65638,7 @@ test "SB-P: 열린 뒤 값이 바뀌어도 행 순서와 개수가 그대로다"
     // **앵커는 렌더 경로가 발행한다** — `statusBarTree()`는 읽기만 한다. 실제로 한 번 그려야 rect가 생긴다.
     try std.testing.expect(try statusBarHasText(allocator, session, "512"));
 
-    session.openResourceMenu();
+    status_bar_ops.openResourceMenu(session);
     try std.testing.expect(session.resource_menu_open);
     try std.testing.expectEqual(@as(usize, 2), session.resource_menu_len);
     // 머리글 2줄(제목·열 이름)이 앞에 붙는다 — 행 인덱스는 그만큼 밀린다.
@@ -67610,7 +65652,7 @@ test "SB-P: 열린 뒤 값이 바뀌어도 행 순서와 개수가 그대로다"
 
     // 값이 뒤집혀도(111이 무거워져도) **순서는 그대로**여야 한다.
     session.resource_rows[0] = .{ .key = 111, .reading = .{ .footprint_bytes = 9_000, .cpu_permille = 0 } };
-    session.refreshResourceMenuRows();
+    status_bar_ops.refreshResourceMenuRows(session);
     try std.testing.expectEqual(@as(u64, 222), session.resource_menu_keys[0]);
     try std.testing.expectEqual(@as(usize, 2), session.resource_menu_len);
     try std.testing.expectEqual(resource_header_rows + 2, session.context_menu_items_len);
@@ -67640,13 +65682,13 @@ test "SB-P: 열린 채 상태바가 숨으면 팝오버도 닫힌다" {
     @memcpy(session.resource_text_buf[0..text.len], text);
     session.resource_text_len = text.len;
     try std.testing.expect(try statusBarHasText(allocator, session, "512"));
-    session.openResourceMenu();
+    status_bar_ops.openResourceMenu(session);
     try std.testing.expect(session.resource_menu_open);
 
     // 설정으로 상태바를 끈다(quick terminal 전환도 같은 게이트).
     session.chrome_minimal = true;
     session.resource_poll_ticks = std.math.maxInt(u32) / 2;
-    session.pollResourceUsage();
+    status_bar_ops.pollResourceUsage(session);
 
     try std.testing.expect(!session.resource_menu_open);
     try std.testing.expect(!session.chrome_host.context_menu.open);
@@ -67689,7 +65731,7 @@ test "SB-P: 두 번째 행을 고르면 그 탭으로 간다(머리글만큼 밀
     session.focusTerm(0);
     try std.testing.expectEqual(first_id, pane.activeTerm().surfaceId()); // 전제
 
-    session.openResourceMenu();
+    status_bar_ops.openResourceMenu(session);
     // 무거운 순이라 0번 행 = first_id, 1번 행 = second_id. 그 **1번 행**을 고른다.
     session.chrome_host.context_menu.selected = resource_header_rows + 1;
     settings_ops.acceptContextMenu(session);
@@ -67721,13 +65763,13 @@ test "SB-P: 사라진 탭 행은 숫자 대신 값 없음으로 바뀐다" {
     @memcpy(session.resource_text_buf[0..text.len], text);
     session.resource_text_len = text.len;
     try std.testing.expect(try statusBarHasText(allocator, session, "512"));
-    session.openResourceMenu();
+    status_bar_ops.openResourceMenu(session);
     try std.testing.expect(session.resource_menu_open); // 앵커를 못 얻으면 아래 버퍼는 미초기화다(전제)
     try std.testing.expect(std.mem.indexOf(u8, session.context_menu_items_buf[resource_header_rows], "100 MB") != null);
 
     // 그 Term이 사라진다(표본에서 빠짐) — 행은 남되 값이 없어야 한다.
     session.resource_rows_len = 0;
-    session.refreshResourceMenuRows();
+    status_bar_ops.refreshResourceMenuRows(session);
     try std.testing.expectEqual(resource_header_rows + 1, session.context_menu_items_len); // 행은 유지(인덱스가 밀리면 안 된다)
     try std.testing.expect(std.mem.indexOf(u8, session.context_menu_items_buf[resource_header_rows], "—") != null);
     try std.testing.expect(std.mem.indexOf(u8, session.context_menu_items_buf[resource_header_rows], "100 MB") == null);
@@ -67810,20 +65852,20 @@ test "SB-R: 폴링 두 번이면 실제 backend 표본으로 표시가 생긴다
     session.resource_poll_ticks = std.math.maxInt(u32) / 2;
     _ = try session.tick();
     try std.testing.expectEqual(@as(u32, 0), session.resource_poll_ticks); // 주기 도달 → 폴링이 카운터를 리셋했다
-    try std.testing.expect(session.resourceText() == null); // 첫 표본은 기준선이라 표시가 없다
+    try std.testing.expect(status_bar_ops.resourceText(session) == null); // 첫 표본은 기준선이라 표시가 없다
 
     // 두 번째 표본은 벽시계가 흘러야 값이 된다 — Meter가 gap>0을 요구하므로 1ms라도 지나게 한다.
     var spin: u64 = monotonicMs();
     while (monotonicMs() == spin) spin = monotonicMs();
 
     session.resource_poll_ticks = std.math.maxInt(u32) / 2;
-    session.pollResourceUsage();
+    status_bar_ops.pollResourceUsage(session);
 
     // **표시가 반드시 생겨야 한다.** 처음엔 "못 잡으면 null도 정상"이라는 예외를 뒀는데, 그러면 seam을
     // 끊어 표본을 0으로 만들어도 테스트가 통과한다(뮤테이션으로 확인했다) — 배선을 못 지키는 테스트다.
     // 스모크 세션은 실제로 PTY 자식을 띄우므로 표본이 잡힌다. 언젠가 그 전제가 깨지면 여기서 시끄럽게
     // 실패하는 편이 조용히 눈감는 것보다 낫다.
-    const text = session.resourceText() orelse return error.TestExpectedResourceText;
+    const text = status_bar_ops.resourceText(session) orelse return error.TestExpectedResourceText;
     try std.testing.expectEqual(maru.session.resource_usage.text_cols, try std.unicode.utf8CountCodepoints(text));
     try std.testing.expect(session.resource_reading != null);
 }
@@ -67893,7 +65935,7 @@ fn cursorItemPublished(
         for (collected.items) |*c| c.deinit(allocator);
         collected.deinit(allocator);
     }
-    session.collectStatusBarItems(&collected, pane_ops.paneFrameBuilder(session), colors);
+    status_bar_ops.collectStatusBarItems(session, &collected, pane_ops.paneFrameBuilder(session), colors);
     for (session.status_bar_entry_scratch[0..session.status_bar_entry_count]) |entry| {
         if (entry.id == @intFromEnum(chrome.components.status_bar.ItemId.editor_cursor)) return true;
     }
@@ -67932,7 +65974,7 @@ test "SB-R: 폭이 모자라면 잘린 숫자 대신 항목을 내린다" {
             collected.deinit(allocator);
         }
         const colors: metal_frame.CellColors = .{ .default_fg = session.appearance.theme.foreground };
-        session.collectStatusBarItems(&collected, pane_ops.paneFrameBuilder(session), colors);
+        status_bar_ops.collectStatusBarItems(session, &collected, pane_ops.paneFrameBuilder(session), colors);
         var resource_published = false;
         for (session.status_bar_entry_scratch[0..session.status_bar_entry_count]) |entry| {
             if (entry.id == @intFromEnum(chrome.components.status_bar.ItemId.resource)) {
@@ -67954,7 +65996,7 @@ test "SB-R: 폭이 모자라면 잘린 숫자 대신 항목을 내린다" {
             collected.deinit(allocator);
         }
         const colors: metal_frame.CellColors = .{ .default_fg = session.appearance.theme.foreground };
-        session.collectStatusBarItems(&collected, pane_ops.paneFrameBuilder(session), colors);
+        status_bar_ops.collectStatusBarItems(session, &collected, pane_ops.paneFrameBuilder(session), colors);
         var resource_published = false;
         for (session.status_bar_entry_scratch[0..session.status_bar_entry_count]) |entry| {
             if (entry.id == @intFromEnum(chrome.components.status_bar.ItemId.resource)) {
@@ -67987,14 +66029,14 @@ test "SB-R: 상태바가 숨겨져 있으면 표본을 재지 않고 표시도 �
     session.resource_text_len = 3;
     @memcpy(session.resource_text_buf[0..3], "abc");
     session.resource_reading = .{ .footprint_bytes = 1, .cpu_permille = 1 };
-    try std.testing.expect(session.resourceText() != null);
+    try std.testing.expect(status_bar_ops.resourceText(session) != null);
 
     // 상태바를 끈다 → 다음 폴링이 표시를 지운다(0을 그리지 않고 항목을 내린다).
     session.chrome_minimal = true;
-    try std.testing.expectEqual(@as(u32, 0), session.statusBarHeightPx()); // 전제
+    try std.testing.expectEqual(@as(u32, 0), status_bar_ops.statusBarHeightPx(session)); // 전제
     session.resource_poll_ticks = std.math.maxInt(u32) / 2; // 주기 도달을 강제
-    session.pollResourceUsage();
-    try std.testing.expect(session.resourceText() == null);
+    status_bar_ops.pollResourceUsage(session);
+    try std.testing.expect(status_bar_ops.resourceText(session) == null);
 }
 
 /// 상태바를 **실제 렌더 경로**(`collectStatusBarItems`)로 그려 `needle`의 코드포인트가 모두 셀에 있는지 본다.
@@ -68006,7 +66048,7 @@ fn statusBarHasText(allocator: std.mem.Allocator, session: *AppSession, needle: 
         collected.deinit(allocator);
     }
     const colors: metal_frame.CellColors = .{ .default_fg = session.appearance.theme.foreground };
-    session.collectStatusBarItems(&collected, pane_ops.paneFrameBuilder(session), colors);
+    status_bar_ops.collectStatusBarItems(session, &collected, pane_ops.paneFrameBuilder(session), colors);
 
     var it = (std.unicode.Utf8View.init(needle) catch return false).iterator();
     while (it.nextCodepoint()) |cp| {
@@ -68047,7 +66089,7 @@ test "SB1: 브랜치 목록 요청 중 상태바가 사라지면 메뉴를 열�
     session.loaded_config.config.status_bar.show = false;
     session.metal_dirty = true;
     _ = try session.tick();
-    try std.testing.expectEqual(@as(u32, 0), session.statusBarHeightPx()); // 전제: 바가 사라졌다
+    try std.testing.expectEqual(@as(u32, 0), status_bar_ops.statusBarHeightPx(session)); // 전제: 바가 사라졌다
 
     settings_ops.openBranchMenu(session);
     try std.testing.expect(!session.branch_menu_open);
@@ -68167,17 +66209,17 @@ test "SB1: status-bar.show=false면 바가 사라지고 작업영역이 그만�
     _ = notification_ops.pushNotificationHistory(session, "MARU", "t", 0);
     _ = try session.tick();
 
-    const bar_h = session.statusBarHeightPx();
+    const bar_h = status_bar_ops.statusBarHeightPx(session);
     try std.testing.expect(bar_h > 0); // 전제: 기본값은 켜짐이다
     const term_h_on = session.termRect().h;
-    try std.testing.expect(session.statusBarTree().entries.len > 0);
+    try std.testing.expect(status_bar_ops.statusBarTree(session).entries.len > 0);
 
     session.loaded_config.config.status_bar.show = false;
     session.metal_dirty = true;
     _ = try session.tick();
 
-    try std.testing.expectEqual(@as(u32, 0), session.statusBarHeightPx());
-    try std.testing.expectEqual(@as(usize, 0), session.statusBarTree().entries.len); // 안 보이면 눌리지도 않는다
+    try std.testing.expectEqual(@as(u32, 0), status_bar_ops.statusBarHeightPx(session));
+    try std.testing.expectEqual(@as(usize, 0), status_bar_ops.statusBarTree(session).entries.len); // 안 보이면 눌리지도 않는다
     try std.testing.expectEqual(term_h_on + bar_h, session.termRect().h); // 먹었던 높이가 그대로 돌아온다
 }
 
@@ -68202,7 +66244,7 @@ test "P4 C3c checkpoint 실패 상태표시줄은 프레임 사이 유지되고 
     _ = try session.tick();
     const failure_id = @intFromEnum(chrome.components.status_bar.ItemId.workspace_checkpoint_failure);
     var seen = false;
-    for (session.statusBarTree().entries) |entry| if (entry.id == failure_id) {
+    for (status_bar_ops.statusBarTree(session).entries) |entry| if (entry.id == failure_id) {
         seen = true;
         break;
     };
@@ -68212,7 +66254,7 @@ test "P4 C3c checkpoint 실패 상태표시줄은 프레임 사이 유지되고 
     session.chrome_dirty = true;
     _ = try session.tick();
     seen = false;
-    for (session.statusBarTree().entries) |entry| if (entry.id == failure_id) {
+    for (status_bar_ops.statusBarTree(session).entries) |entry| if (entry.id == failure_id) {
         seen = true;
         break;
     };
@@ -68220,7 +66262,7 @@ test "P4 C3c checkpoint 실패 상태표시줄은 프레임 사이 유지되고 
 
     session.setWorkspaceCheckpointFailure(0);
     _ = try session.tick();
-    for (session.statusBarTree().entries) |entry| try std.testing.expect(entry.id != failure_id);
+    for (status_bar_ops.statusBarTree(session).entries) |entry| try std.testing.expect(entry.id != failure_id);
 }
 
 // SB1: **quick terminal(chrome_minimal)에는 상태바가 서지 않는다.** 이 모드는 chrome을 의도적으로
@@ -68243,14 +66285,14 @@ test "SB1: quick terminal(chrome_minimal)에는 상태바가 서지 않는다" {
     _ = try session.resize(1000, 700, 1000);
     _ = notification_ops.pushNotificationHistory(session, "MARU", "t", 0);
     _ = try session.tick();
-    try std.testing.expect(session.statusBarHeightPx() > 0); // 전제: 일반 창에는 선다
+    try std.testing.expect(status_bar_ops.statusBarHeightPx(session) > 0); // 전제: 일반 창에는 선다
 
     session.chrome_minimal = true;
     session.metal_dirty = true;
     _ = try session.tick();
 
-    try std.testing.expectEqual(@as(u32, 0), session.statusBarHeightPx());
-    try std.testing.expectEqual(@as(usize, 0), session.statusBarTree().entries.len);
+    try std.testing.expectEqual(@as(u32, 0), status_bar_ops.statusBarHeightPx(session));
+    try std.testing.expectEqual(@as(usize, 0), status_bar_ops.statusBarTree(session).entries.len);
 }
 
 // SB1: **상태바 높이는 spawn grid에 그대로 흡수돼야 한다.** 흡수는 `gridPadding()`의 bottom 한 곳에서만
@@ -68274,7 +66316,7 @@ test "SB1: 상태바 높이 변화가 spawn grid padding에 그대로 흡수된�
     _ = try session.resize(1000, 700, 1000);
     _ = try session.tick();
 
-    const bar0 = session.statusBarHeightPx();
+    const bar0 = status_bar_ops.statusBarHeightPx(session);
     const bottom0 = session.gridPadding().bottom;
     try std.testing.expect(bottom0 >= bar0); // 애초에 흡수돼 있다
 
@@ -68282,7 +66324,7 @@ test "SB1: 상태바 높이 변화가 spawn grid padding에 그대로 흡수된�
     while (i < 8) : (i += 1) session.adjustFontSize(font_size_step);
     _ = try session.tick();
 
-    const bar1 = session.statusBarHeightPx();
+    const bar1 = status_bar_ops.statusBarHeightPx(session);
     const bottom1 = session.gridPadding().bottom;
     try std.testing.expect(bar1 > bar0); // 전제: 폰트를 키우면 바가 실제로 두꺼워진다
     try std.testing.expectEqual(bar1 - bar0, bottom1 - bottom0); // 증가분이 그대로 흡수된다
@@ -68310,7 +66352,7 @@ test "SB1: 실제 크기 변화가 있는 resize는 상태바 호버를 비운�
     _ = try session.tick();
 
     var target: ?chrome.ui.tree.RectEntry = null;
-    for (session.statusBarTree().entries) |e| {
+    for (status_bar_ops.statusBarTree(session).entries) |e| {
         if (e.id == @intFromEnum(chrome.components.status_bar.ItemId.notifications)) target = e;
     }
     const item = target orelse return error.NotificationItemMissing;
@@ -68347,7 +66389,7 @@ test "SB1: 항목이 없는 상태바 구간은 텍스트 커서를 주지 않�
     _ = try session.resize(1000, 700, 1000);
     _ = try session.tick();
 
-    const h = session.statusBarHeightPx();
+    const h = status_bar_ops.statusBarHeightPx(session);
     const cy: f64 = @floatFromInt(session.backing_height_px - h / 2);
 
     // **빈 x를 가정하지 않고 찾는다.** 예전에는 "바 한가운데는 비어 있다"고 가정했는데, 그 가정은 스모크
@@ -68364,7 +66406,7 @@ test "SB1: 항목이 없는 상태바 구간은 텍스트 커서를 주지 않�
         var x: u32 = 0;
         while (x < session.backing_width_px) : (x += step) {
             const fx: f64 = @floatFromInt(x);
-            if (session.statusBarItemAt(fx, cy) == null) break :blk fx;
+            if (status_bar_ops.statusBarItemAt(session, fx, cy) == null) break :blk fx;
         }
         // 바가 항목으로 완전히 덮이면 이 테스트가 볼 것이 없다 — 조용히 통과시키지 않고 실패로 말한다.
         return error.StatusBarHasNoEmptyRegion;
@@ -68391,7 +66433,7 @@ test "SB-AG: 에이전트가 하나면 메뉴 없이 그 Term으로 점프한다
     _ = tab_ops.switchTab(session, 1);
     try std.testing.expect(term_ops.activeSurfaceConst(session).id != target_id);
 
-    session.activateStatusBarItem(.running_agents);
+    status_bar_ops.activateStatusBarItem(session, .running_agents);
 
     // 메뉴를 띄우지 않고 바로 갔다 — 하나뿐인데 목록을 한 번 더 띄우면 클릭만 는다.
     try std.testing.expect(!session.agent_menu_open);
@@ -68419,7 +66461,7 @@ test "SB-AG: 제목·열 이름·값이 같은 칸에서 끝난다" {
         t.agent_last_output_ms = session.awakeMs();
     }
     try std.testing.expect(try statusBarHasText(allocator, session, "2"));
-    session.activateStatusBarItem(.running_agents);
+    status_bar_ops.activateStatusBarItem(session, .running_agents);
     try std.testing.expect(session.agent_menu_open);
 
     // 네 줄(제목·열 이름·행 2개)의 **표시 칸 폭**이 모두 같아야 한다 — 끝이 맞는다는 뜻이다.
@@ -68454,7 +66496,7 @@ test "SB-AG: 막힘은 오래 기다린 순, 실행 중은 탭 순서로 목록�
     // 상태바 항목이 서야 앵커가 생긴다 — 실제로 한 번 그린다.
     for ([_]*Term{ t0, t1, t2 }) |t| t.agent_state = .blocked;
     try std.testing.expect(try statusBarHasText(allocator, session, "3"));
-    session.activateStatusBarItem(.blocked_agents);
+    status_bar_ops.activateStatusBarItem(session, .blocked_agents);
     try std.testing.expect(session.agent_menu_open);
     try std.testing.expectEqual(@as(usize, 3), session.agent_menu_len);
     // 오래 기다린 순 — t2(10s) → t1(20s) → t0(30s). 맨 위가 Enter 한 번의 대상이다.
@@ -68466,7 +66508,7 @@ test "SB-AG: 막힘은 오래 기다린 순, 실행 중은 탭 순서로 목록�
     // 같은 값인데 실행 중이면 **탭 순서**다 — 시간이 아니라 위치가 기준이다.
     for ([_]*Term{ t0, t1, t2 }) |t| t.agent_state = .running;
     try std.testing.expect(try statusBarHasText(allocator, session, "3"));
-    session.activateStatusBarItem(.running_agents);
+    status_bar_ops.activateStatusBarItem(session, .running_agents);
     try std.testing.expect(session.agent_menu_open);
     try std.testing.expectEqual(t0.surfaceId(), session.agent_menu_keys[0]);
     try std.testing.expectEqual(t1.surfaceId(), session.agent_menu_keys[1]);
@@ -68509,7 +66551,7 @@ test "SB1: 상태바로 도크를 열면 pane 레이아웃도 함께 갱신된�
     session.last_resize_size = .{ .cols = 1, .rows = 1 };
     const before = session.active_pane_rect;
 
-    session.activateStatusBarItem(.cwd);
+    status_bar_ops.activateStatusBarItem(session, .cwd);
 
     try std.testing.expect(session.dock.presented);
     try std.testing.expect(!session.dock.collapsed);
@@ -68538,7 +66580,7 @@ test "SB1: notice가 떠 있으면 상태바 휠이 그것을 닫는 처리를 �
     _ = try session.tick();
 
     // 바 한가운데 좌표(항목이 없어도 바 안이면 가드 대상이다).
-    const h = session.statusBarHeightPx();
+    const h = status_bar_ops.statusBarHeightPx(session);
     const cx: f64 = @floatFromInt(session.backing_width_px / 2);
     const cy: f64 = @floatFromInt(session.backing_height_px - h / 2);
 
@@ -68570,7 +66612,7 @@ test "SB1: 상태바로 들어와도 다른 영역의 hover 해제가 먼저 돈
     _ = notification_ops.pushNotificationHistory(session, "MARU", "t", 0);
     _ = try session.tick();
     var target: ?chrome.ui.tree.RectEntry = null;
-    for (session.statusBarTree().entries) |e| {
+    for (status_bar_ops.statusBarTree(session).entries) |e| {
         if (e.id == @intFromEnum(chrome.components.status_bar.ItemId.notifications)) target = e;
     }
     const item = target orelse return error.NotificationItemMissing;
@@ -68611,7 +66653,7 @@ test "SB1: 확인 모달이 열려 있으면 상태바 클릭이 항목을 실�
     _ = notification_ops.pushNotificationHistory(session, "MARU", "t", 0);
     _ = try session.tick();
     var target: ?chrome.ui.tree.RectEntry = null;
-    for (session.statusBarTree().entries) |e| {
+    for (status_bar_ops.statusBarTree(session).entries) |e| {
         if (e.id == @intFromEnum(chrome.components.status_bar.ItemId.notifications)) target = e;
     }
     const item = target orelse return error.NotificationItemMissing;
@@ -68733,7 +66775,7 @@ test "SB1: 상태바 hit-test는 그려진 rect와 같은 자리를 가리킨다
         const full_w: f32 = @floatFromInt(session.backing_width_px);
         var bar: ?metal_frame.GpuQuad = null;
         for (session.gpu_quads.items) |q| {
-            if (q.w == full_w and q.h == @as(f32, @floatFromInt(session.statusBarHeightPx()))) bar = q;
+            if (q.w == full_w and q.h == @as(f32, @floatFromInt(status_bar_ops.statusBarHeightPx(session)))) bar = q;
         }
         const q = bar orelse return error.StatusBarQuadMissing;
 
@@ -68743,17 +66785,17 @@ test "SB1: 상태바 hit-test는 그려진 rect와 같은 자리를 가리킨다
         const bottom: f64 = top + @as(f64, @floatCast(q.h));
 
         // 안쪽 — 위/아래 경계 행과 좌/우 끝까지 전부 바로 친다.
-        try std.testing.expect(session.pointInStatusBar(left, top));
-        try std.testing.expect(session.pointInStatusBar(right - 1, bottom - 1));
-        try std.testing.expect(session.pointInStatusBar((left + right) / 2, (top + bottom) / 2));
+        try std.testing.expect(status_bar_ops.pointInStatusBar(session, left, top));
+        try std.testing.expect(status_bar_ops.pointInStatusBar(session, right - 1, bottom - 1));
+        try std.testing.expect(status_bar_ops.pointInStatusBar(session, (left + right) / 2, (top + bottom) / 2));
         // **사이드바 아래 구간도 바다**(전폭) — 휠 가드를 사이드바 판정보다 먼저 둔 이유가 이것이다.
         if (session.sidebar_width_px > 2) {
-            try std.testing.expect(session.pointInStatusBar(@floatFromInt(session.sidebar_width_px / 2), top + 1));
+            try std.testing.expect(status_bar_ops.pointInStatusBar(session, @floatFromInt(session.sidebar_width_px / 2), top + 1));
         }
 
         // 바깥 — 바로 위 한 행과 우측 밖. 여기까지 삼키면 터미널·사이드바 입력을 먹는다.
-        try std.testing.expect(!session.pointInStatusBar((left + right) / 2, top - 1));
-        try std.testing.expect(!session.pointInStatusBar(right, top + 1));
+        try std.testing.expect(!status_bar_ops.pointInStatusBar(session, (left + right) / 2, top - 1));
+        try std.testing.expect(!status_bar_ops.pointInStatusBar(session, right, top + 1));
     }
 }
 
@@ -68773,7 +66815,7 @@ test "SB1-S2b: 상태바 배경이 창 전폭으로 매 프레임 선다(bottom 
     _ = try session.resize(1000, 700, 1000);
     _ = try session.tick();
 
-    const h = session.statusBarHeightPx();
+    const h = status_bar_ops.statusBarHeightPx(session);
     try std.testing.expect(h > 0);
 
     // **기하로 찾는다.** bottom 버킷은 값 2 하나뿐이라 탭 밴드와 레이어를 공유한다 — 레이어만으로는
@@ -68825,7 +66867,7 @@ test "SB1-S2b: 상태바 상단에 경계선이 서고 배경보다 뒤에 그�
     _ = try session.resize(1000, 700, 1000);
     _ = try session.tick();
 
-    const h = session.statusBarHeightPx();
+    const h = status_bar_ops.statusBarHeightPx(session);
     try std.testing.expect(h > 0);
     const border_h = layout_math.ptToPx(status_bar_border_pt, session.scale_milli);
     try std.testing.expect(border_h > 0 and border_h < h);
@@ -68864,8 +66906,8 @@ test "SB1-S2b: 상태바 상단에 경계선이 서고 배경보다 뒤에 그�
         for (collected.items) |*c| c.deinit(allocator);
         collected.deinit(allocator);
     }
-    session.collectStatusBarItems(&collected, pane_ops.paneFrameBuilder(session), .{ .default_fg = session.appearance.theme.foreground });
-    const tree = session.statusBarTree();
+    status_bar_ops.collectStatusBarItems(session, &collected, pane_ops.paneFrameBuilder(session), .{ .default_fg = session.appearance.theme.foreground });
+    const tree = status_bar_ops.statusBarTree(session);
     if (tree.entries.len == 0) return error.StatusBarTreeEmpty;
     session.status_bar_hovered = @enumFromInt(tree.entries[0].id);
     session.metal_dirty = true; // chrome을 다시 짓게 한다(안 그러면 앞 프레임 quad가 그대로 남는다)
@@ -68905,7 +66947,7 @@ test "SB1-S2a: metalFrame의 상태바 높이는 dock_layout 권위와 같다" {
 
     try std.testing.expectEqual(dock_ops.dockGeometry(session).status_bar.h, session.metalFrame().status_bar_height_px);
     // S2b가 높이를 세웠다 — 이제 실제 값이 나가고, 위 단언이 그 값이 `dock_layout` 권위와 같음을 보장한다.
-    try std.testing.expectEqual(session.statusBarHeightPx(), session.metalFrame().status_bar_height_px);
+    try std.testing.expectEqual(status_bar_ops.statusBarHeightPx(session), session.metalFrame().status_bar_height_px);
     try std.testing.expect(session.metalFrame().status_bar_height_px > 0);
 }
 
@@ -76405,7 +74447,7 @@ test "dock list viewport ends exactly where the status bar begins" {
         _ = try session.resize(1400, h, 1000);
         const g = dock_ops.dockGeometry(session);
         if (g.tree_content.h == 0) continue;
-        try std.testing.expect(session.statusBarHeightPx() > 0);
+        try std.testing.expect(status_bar_ops.statusBarHeightPx(session) > 0);
         // 목록 바닥이 상태바 시작과 같다: 겹치지도, 사이에 빈 띠를 남기지도 않는다.
         try std.testing.expectEqual(g.status_bar.y, g.tree_content.y + g.tree_content.h);
         // 그리고 상태바는 창 바닥까지다.
@@ -84309,7 +82351,7 @@ test "[적대] 재사용 버퍼 소유권: 비소유 픽셀을 갤러리에 넘�
         var live: std.ArrayList(u32) = .empty;
         defer live.deinit(allocator);
         try std.testing.expect(session.marker_preview_open == null);
-        session.appendMarkerPreviewImage(&images, &uploads, &pixels, &owned, &live);
+        marker_view_ops.appendMarkerPreviewImage(session, &images, &uploads, &pixels, &owned, &live);
         try std.testing.expect(!owned); // 조기 반환 — 승격 없음
         try std.testing.expect(pixels.ptr == room.ptr);
     }
@@ -90984,18 +89026,18 @@ test "원격 커서는 hello 뒤의 줄만 믿는다 — 제한 서버 출력으
     // ── ① `hello` **전**에 커서 모양의 줄이 와도 안 믿는다(제한 서버가 낼 수 있는 출력이다).
     const before = "{\"cur\":\"t7\",\"at\":999999}\n";
     try std.testing.expect(std.c.write(fds[1], before.ptr, before.len) > 0);
-    session.drainRemoteAgentHost(dest, host, 100);
+    remote_agent_ops.drainRemoteAgentHost(&session, dest, host, 100);
     try std.testing.expectEqual(@as(usize, 0), host.cursors.count());
 
     // ── ② `hello` 뒤의 같은 모양은 믿는다.
     const after = "{\"hello\":\"maru-agent-events\",\"v\":1}\n" ++ "{\"cur\":\"t7\",\"at\":68}\n";
     try std.testing.expect(std.c.write(fds[1], after.ptr, after.len) > 0);
-    session.drainRemoteAgentHost(dest, host, 200);
+    remote_agent_ops.drainRemoteAgentHost(&session, dest, host, 200);
     try std.testing.expectEqual(@as(usize, 1), host.cursors.count());
     try std.testing.expectEqual(@as(u64, 68), host.cursors.get("t7").?.offset);
 
     _ = std.c.close(fds[1]);
-    session.closeRemoteAgentHost(dest);
+    remote_agent_ops.closeRemoteAgentHost(&session, dest);
 }
 
 test "원격 채널을 다시 띄우면 죽은 스트림의 반 줄을 안 물려준다" {
@@ -91036,10 +89078,10 @@ test "원격 채널을 다시 띄우면 죽은 스트림의 반 줄을 안 물�
     // ① 개행 없이 끊긴 꼬리를 남긴 채 자식이 죽는다.
     const half = "{\"hello\":\"maru-agent-eve";
     try std.testing.expect(std.c.write(fds[1], half.ptr, half.len) > 0);
-    session.drainRemoteAgentHost(dest, host, 100);
+    remote_agent_ops.drainRemoteAgentHost(&session, dest, host, 100);
     try std.testing.expect(host.pending.items.len > 0); // 꼬리가 남아 있다
     _ = std.c.close(fds[1]);
-    session.drainRemoteAgentHost(dest, host, 200); // EOF → 재시도 예약
+    remote_agent_ops.drainRemoteAgentHost(&session, dest, host, 200); // EOF → 재시도 예약
 
     // ② 다시 띄운다(제품과 같은 자리를 지나되 ssh 는 안 띄운다 — 파이프로 대신한다).
     var fds2: [2]c_int = undefined;
@@ -91054,12 +89096,12 @@ test "원격 채널을 다시 띄우면 죽은 스트림의 반 줄을 안 물�
     // ③ 새 스트림의 `hello` 가 **온전히** 읽힌다 — 꼬리가 남았다면 앞이 붙어 안 읽힌다.
     const fresh = "{\"hello\":\"maru-agent-events\",\"v\":1}\n" ++ "{\"cur\":\"t7\",\"at\":42}\n";
     try std.testing.expect(std.c.write(fds2[1], fresh.ptr, fresh.len) > 0);
-    session.drainRemoteAgentHost(dest, host, 300);
+    remote_agent_ops.drainRemoteAgentHost(&session, dest, host, 300);
     try std.testing.expect(host.saw_hello);
     try std.testing.expectEqual(@as(u64, 42), host.cursors.get("t7").?.offset);
 
     _ = std.c.close(fds2[1]);
-    session.closeRemoteAgentHost(dest);
+    remote_agent_ops.closeRemoteAgentHost(&session, dest);
 }
 
 test "원격 폴더줄은 훅이 알려 준 cwd 를 쓴다 — OSC 7 이 멈춘 구간을 메운다" {
@@ -91350,7 +89392,7 @@ test "SB1-S11-6: 제품 getter 가 진짜 remote runtime 의 좁힘 값을 집�
     }
     const builder = pane_ops.paneFrameBuilder(session);
     const colors: metal_frame.CellColors = .{ .default_fg = session.appearance.theme.foreground };
-    session.collectStatusBarItems(&collected, builder, colors);
+    status_bar_ops.collectStatusBarItems(session, &collected, builder, colors);
 
     var text: std.ArrayList(u8) = .empty;
     defer text.deinit(allocator);
@@ -91388,7 +89430,7 @@ test "SB1-S11-6: 폰이 좁혀 두면 상태줄에 그 항목이 실제로 조�
 
     const hasItem = struct {
         fn f(s: *AppSession) bool {
-            for (s.statusBarTree().entries) |e| {
+            for (status_bar_ops.statusBarTree(s).entries) |e| {
                 const id: sb.ItemId = @enumFromInt(e.id);
                 if (id == .viewport_narrowed) return true;
             }
@@ -91398,7 +89440,7 @@ test "SB1-S11-6: 폰이 좁혀 두면 상태줄에 그 항목이 실제로 조�
 
     // **안 좁혀졌으면 항목이 없다** — 이 기능을 안 쓰는 창의 상태줄은 예전과 같아야 한다.
     test_narrowed_cols_override = null;
-    session.collectStatusBarItems(&collected, builder, colors);
+    status_bar_ops.collectStatusBarItems(session, &collected, builder, colors);
     try std.testing.expect(!hasItem(session));
 
     // **좁혀졌으면 실제로 조립된다.** 지금까지 이 축은 규칙만 재고 «그려지는가» 는 안 쟀다.
@@ -91406,7 +89448,7 @@ test "SB1-S11-6: 폰이 좁혀 두면 상태줄에 그 항목이 실제로 조�
     defer test_narrowed_cols_override = null;
     for (collected.items) |*c| c.deinit(allocator);
     collected.clearRetainingCapacity();
-    session.collectStatusBarItems(&collected, builder, colors);
+    status_bar_ops.collectStatusBarItems(session, &collected, builder, colors);
     try std.testing.expect(hasItem(session));
 }
 
@@ -92257,8 +90299,8 @@ test "MP: 분할하면 프리뷰 앵커가 **그 pane** 원점을 따른다 — 
     // **세션에 실어 둔다** — 앵커는 「그 프리뷰가 속한 pane」에서 원점을 뽑으므로(비활성 pane 도
     // 그려야 한다, 2026-09-20) 열린 상태가 세션에 있어야 그 pane 을 찾는다.
     session.marker_preview_open = open;
-    defer session.closeMarkerPreview();
-    const single = session.markerAnchorRect(session.markerPreviewTarget().?, open);
+    defer marker_view_ops.closeMarkerPreview(session);
+    const single = marker_view_ops.markerAnchorRect(session, marker_view_ops.markerPreviewTarget(session).?, open);
     // 단일 pane 이면 leaf 가 곧 터미널 영역이라 둘이 같다 — 여기서는 옛 코드도 맞았다.
     try std.testing.expectEqual(@as(i32, @intCast(full.x)) + @as(i32, marker.start_col) * @as(i32, @intCast(session.cell_width_px)), single.x);
 
@@ -92267,7 +90309,7 @@ test "MP: 분할하면 프리뷰 앵커가 **그 pane** 원점을 따른다 — 
     term = pane_ops.activePane(session).activeTerm();
     open.surface_id = term.surface.id;
     session.marker_preview_open.?.surface_id = open.surface_id;
-    const right = session.markerAnchorRect(session.markerPreviewTarget().?, open);
+    const right = marker_view_ops.markerAnchorRect(session, marker_view_ops.markerPreviewTarget(session).?, open);
     try std.testing.expectEqual(single.y, right.y); // 같은 행이므로 세로는 그대로
     // 오른쪽 pane 의 원점은 창 절반보다 오른쪽이다 — 옛 코드는 `single.x` 그대로였다.
     try std.testing.expect(right.x >= @as(i32, @intCast(full.x + full.w / 2)));
@@ -92278,7 +90320,7 @@ test "MP: 분할하면 프리뷰 앵커가 **그 pane** 원점을 따른다 — 
     term = pane_ops.activePane(session).activeTerm();
     open.surface_id = term.surface.id;
     session.marker_preview_open.?.surface_id = open.surface_id;
-    const bottom = session.markerAnchorRect(session.markerPreviewTarget().?, open);
+    const bottom = marker_view_ops.markerAnchorRect(session, marker_view_ops.markerPreviewTarget(session).?, open);
     try std.testing.expectEqual(right.x, bottom.x); // 가로는 오른쪽 열 그대로
     try std.testing.expect(bottom.y >= @as(i32, @intCast(full.y + full.h / 2)));
     try std.testing.expect(bottom.y + @as(i32, @intCast(bottom.h)) <= @as(i32, @intCast(full.y + full.h)));
@@ -92312,8 +90354,8 @@ test "MP: 프리뷰는 **뒤판 quad**를 낸다 — 그림 뒤로 터미널 글
         .width = 200,
         .height = 120,
     };
-    defer session.closeMarkerPreview();
-    const place = session.markerPreviewPlacement(session.markerPreviewTarget().?, session.marker_preview_open.?) orelse
+    defer marker_view_ops.closeMarkerPreview(session);
+    const place = marker_view_ops.markerPreviewPlacement(session, marker_view_ops.markerPreviewTarget(session).?, session.marker_preview_open.?) orelse
         return error.TestUnexpectedResult;
 
     session.gpu_quads.clearRetainingCapacity();
@@ -92327,7 +90369,7 @@ test "MP: 프리뷰는 **뒤판 quad**를 낸다 — 그림 뒤로 터미널 글
     var live: std.ArrayList(u32) = .empty;
     defer live.deinit(allocator);
     // **프레임 조립이 부르는 바로 그 함수**다 — 여기서 안 나가면 화면에도 없다.
-    session.appendMarkerPreviewImage(&images, &uploads, &pixels, &owned, &live);
+    marker_view_ops.appendMarkerPreviewImage(session, &images, &uploads, &pixels, &owned, &live);
 
     var backdrop: ?renderer.metal_frame.GpuQuad = null;
     for (session.gpu_quads.items) |q| {
@@ -92380,7 +90422,7 @@ test "MP: 뒤판은 **프레임마다 비워진다** — 안 그러면 프리뷰
         .width = 200,
         .height = 120,
     };
-    defer session.closeMarkerPreview();
+    defer marker_view_ops.closeMarkerPreview(session);
 
     var seen: [3]usize = undefined;
     for (&seen) |*slot| {
@@ -92440,7 +90482,7 @@ test "MP: **비활성 pane** 의 프리뷰도 그려진다 — 클릭은 그 pan
         .width = 200,
         .height = 120,
     };
-    defer session.closeMarkerPreview();
+    defer marker_view_ops.closeMarkerPreview(session);
 
     session.gpu_quads.clearRetainingCapacity();
     var images: []renderer.metal_frame.GpuImage = &.{};
@@ -92452,7 +90494,7 @@ test "MP: **비활성 pane** 의 프리뷰도 그려진다 — 클릭은 그 pan
     var owned = false;
     var live: std.ArrayList(u32) = .empty;
     defer live.deinit(allocator);
-    session.appendMarkerPreviewImage(&images, &uploads, &pixels, &owned, &live);
+    marker_view_ops.appendMarkerPreviewImage(session, &images, &uploads, &pixels, &owned, &live);
 
     var backdrop: ?renderer.metal_frame.GpuQuad = null;
     for (session.gpu_quads.items) |q| {

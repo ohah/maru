@@ -18,6 +18,7 @@ const maru = @import("maru");
 
 const chrome = maru.chrome;
 const app_session_mod = @import("../app_session.zig");
+const status_bar_ops = @import("status_bar.zig");
 const AppSession = app_session_mod.AppSession;
 const Pane = app_session_mod.Pane;
 const settings_ops = @import("settings.zig");
@@ -1587,7 +1588,7 @@ pub fn applyForcedCommitWheel(self: *AppSession) void {
 pub fn applyForcedBranchMenu(self: *AppSession) void {
     if (self.branch_menu_open) return;
     if (std.c.getenv("MARU_FORCE_BRANCH_MENU") == null) return;
-    for (self.statusBarTree().entries) |e| {
+    for (status_bar_ops.statusBarTree(self).entries) |e| {
         if (e.id != @intFromEnum(chrome.components.status_bar.ItemId.git_branch)) continue;
         settings_ops.requestBranchMenu(self, .switch_branch);
         break;
@@ -1625,9 +1626,9 @@ pub fn applyForcedScmView(self: *AppSession) void {
 pub fn applyForcedResourceMenu(self: *AppSession) void {
     if (self.resource_menu_open) return;
     if (std.c.getenv("MARU_FORCE_RESOURCE_MENU") == null) return;
-    for (self.statusBarTree().entries) |e| {
+    for (status_bar_ops.statusBarTree(self).entries) |e| {
         if (e.id != @intFromEnum(chrome.components.status_bar.ItemId.resource)) continue;
-        self.openResourceMenu();
+        status_bar_ops.openResourceMenu(self);
         break;
     }
 }
@@ -1640,7 +1641,7 @@ pub fn applyForcedAgentMenu(self: *AppSession) void {
     const raw = std.c.getenv("MARU_FORCE_AGENT_MENU") orelse return;
     const want_blocked = std.mem.eql(u8, std.mem.span(raw), "blocked");
     const want_id: chrome.components.status_bar.ItemId = if (want_blocked) .blocked_agents else .running_agents;
-    for (self.statusBarTree().entries) |e| {
+    for (status_bar_ops.statusBarTree(self).entries) |e| {
         if (e.id != @intFromEnum(want_id)) continue;
         self.openAgentMenu(want_blocked);
         break;

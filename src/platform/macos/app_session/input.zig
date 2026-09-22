@@ -19,6 +19,7 @@ const maru = @import("maru");
 const chrome = maru.chrome;
 const terminal = maru.terminal;
 const app_session_mod = @import("../app_session.zig");
+const status_bar_ops = @import("status_bar.zig");
 const AppSession = app_session_mod.AppSession;
 const input_ops = app_session_mod.input_ops;
 const web_ops = app_session_mod.web_ops;
@@ -925,7 +926,7 @@ pub fn buildKeyHintBadges(self: *AppSession, props: chrome.ChromeProps, tokens: 
         const header_h: i64 = @intCast(self.sidebar_header_height_px);
         // 배지 뷰포트 하단도 상태바 위에서 끝난다 — 주석이 말하는 "render scissor와 정합"의 그 scissor가
         // 이 스택에서 상태바만큼 짧아졌으므로(같은 값), 여기만 창 바닥이면 상태바 뒤 배지를 계속 그린다.
-        const vp_bottom: i64 = @intCast(self.backing_height_px -| self.statusBarHeightPx());
+        const vp_bottom: i64 = @intCast(self.backing_height_px -| status_bar_ops.statusBarHeightPx(self));
         // SG8d: 카드 드래그 중이면 배지도 고스트 레이아웃(preview_rows)을 따라간다 — 렌더 도메인 단일화(놓친 소비자 이주).
         const brows = sidebar_ops.sidebarRenderRows(self);
         for (brows, 0..) |row, s| {

@@ -18,6 +18,7 @@ const maru = @import("maru");
 
 const chrome = maru.chrome;
 const app_session_mod = @import("../app_session.zig");
+const remote_agent_ops = @import("remote_agent.zig");
 const AppSession = app_session_mod.AppSession;
 const term_ops = @import("term.zig");
 const git_ops = @import("git.zig");
@@ -1008,7 +1009,7 @@ pub fn pollAgentKinds(self: *AppSession) void {
     // 자리: tick 마다가 아니라 **이 throttle 뒤**다. 매 tick 부르면 원격 Term 마다 회차당 힙 할당 둘
     // (`dest` dupe + control socket 경로)이 60 fps 로 돈다 — 로컬 훅은 이미 이 게이트 뒤에 있으므로
     // 원격만 앞서 달릴 이유가 없고, 그동안 온 바이트는 파이프가 들고 있다(64 KiB).
-    self.pumpRemoteAgentChannels();
+    remote_agent_ops.pumpRemoteAgentChannels(self);
     // 모든 pane × 모든 Term을 보되 syscall은 ≈0.5s로 throttle한다. 화면에 카드/탭바가 실제로 보이는 탭만
     // 상태 변화 시 dirty해, background observer가 불필요한 프레임을 만들지 않는다.
     for (self.tabs.items, 0..) |tab, ti| {

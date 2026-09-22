@@ -1786,7 +1786,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const cr3b_r2a_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr3b_r2a_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_detached_tombstone_boundary.zig"),
                 .target = target,
                 .optimize = cr3b_r2a_optimize,
             }),
@@ -1855,7 +1855,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const cr3b_r2b_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr3b_r2b_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_cleanup_handle_move_boundary.zig"),
                 .target = target,
                 .optimize = cr3b_r2b_optimize,
             }),
@@ -1905,7 +1905,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const cr3b_r2c_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr3b_r2c_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_client_node_publication_boundary.zig"),
                 .target = target,
                 .optimize = cr3b_r2c_optimize,
             }),
@@ -1955,7 +1955,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const cr3b_r3_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr3b_r3_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_oldest_tick_reclaim_boundary.zig"),
                 .target = target,
                 .optimize = cr3b_r3_optimize,
             }),
@@ -4496,7 +4496,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         });
         B3SettlementTest.add(b, session_host_cr3b_r1_step, cr3b_r1_host_adapter_module, "CR3b R1 HostAdapter", 1);
         const cr3b_r1_boundary_module = b.createModule(.{
-            .root_source_file = b.path("tests/session_host_cr3b_r1_boundary.zig"),
+            .root_source_file = b.path("tests/session_host_admission_close_boundary.zig"),
             .target = target,
             .optimize = b3_optimize,
         });

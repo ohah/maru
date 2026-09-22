@@ -756,6 +756,8 @@ fn walkPoint(
         if (in_w > 0) {
             const in_lo = (col -| screen_col0) * cell_w_px;
             const in_hi = ((col + in_w) -| screen_col0) * cell_w_px;
+            // (이 break 는 **등가 뮤턴트**다 — 적대적 A5: 없애도 힌트 안 클릭은 `return i`, 밖이면 다음 걸음이 행 끝에서 끊겨 루프 뒤
+            //  `return i` 로 같은 값이다. 뜻으로 둔다 — 「걸친 힌트는 이 행에서 끝난다」.)
             if (col + in_w > row_end_col) break; // 이 행을 넘어간다
             if (click_px < in_hi and click_px >= in_lo) return i;
             col += in_w;
@@ -1169,6 +1171,7 @@ pub fn expandLine(bytes: []const u8, tab_width: u16, out: []u8, range: ColRange,
     // **호출자가 준 자리에서 시작한다**(`seek`). 아래 루프가 하는 일은 「`start` 까지 지나가고 그
     // 뒤를 만든다」인데, 지나가는 부분은 **아무것도 내보내지 않으므로** 그 자리를 이미 아는 호출자는
     // 건너뛰어도 된다. 조건 둘을 여기서 **다시 확인한다** — 넘겨 짚으면 탭스톱이 어긋난다.
+    // `view()` 도 힌트 줄엔 seek 를 안 넘긴다(이중 방어 — 적대적 A8·A9: 하나만 지우면 등가, 둘 다 지우면 밀린 창에서 열이 힌트 폭만큼 튄다).
     if (inlays.len == 0) if (range.seek) |sk| {
         if (sk.col <= range.start and sk.byte <= bytes.len) {
             i = sk.byte;
@@ -1366,7 +1369,7 @@ fn emitInlays(inlays: []const Inlay, next: *usize, at: usize, col: *usize, range
         if (in.at != at) continue; // 지나간 자리(seek 뒤·중복 방어) — 폭도 안 센다
         const shown = in.text;
         if (col.* >= range.stop()) {
-            col.* += shown.len;
+            col.* += shown.len; // 등가(적대적 A10 — 호출자는 여기서 곧 멈춘다); 열 규칙의 뜻으로 둔다
             continue;
         }
         const from = if (col.* < range.start) @min(shown.len, range.start - col.*) else 0;

@@ -13161,6 +13161,70 @@ test "INL11 인레이 힌트 — 서버의 `workspace/inlayHint/refresh` 는 거
     // ⑶ 다 든 뒤엔 또 안 묻는다.
     _ = syntaxColors(s, term);
     try testing.expectEqual(@as(u64, 2), s.editor_lsp.sent_inlay);
+    // ⑷ refresh 뒤의 되묻기가 **오류**로 답하면(`INLERR` 도 함께) — version·창이 그대로라도 `dirty` 가 남아 조용 뒤 또 묻는다(적대적 C4:
+    //    오류에 dirty 를 안 세우면 refresh 가 헛돌아 힌트가 영영 낡는다).
+    {
+        var g = (try SmtFixture.open(allocator, "rf2.c", "int b_hv = 1; INLREFRESH INLERR\n")) orelse return error.SkipZigTest;
+        defer g.close(allocator);
+        const t2 = g.term;
+        const s2 = g.fx.session; // 다른 세션·다른 가짜 서버
+        try testing.expect(g.ready());
+        t2.rt.editor_first_line = 0;
+        _ = syntaxColors(s2, t2);
+        try testing.expect(inlayApplied(&g, 1)); // `[]`
+        try testing.expect(pumpLspUntil(&g.fx, 3000, s2, struct {
+            fn h(a: *AppSession) bool {
+                return a.editor_lsp.inlay_refreshes >= 1;
+            }
+        }.h));
+        _ = syntaxColors(s2, t2); // refresh → 되묻기 → 오류
+        try testing.expect(pumpLspUntil(&g.fx, 3000, t2, struct {
+            fn h(t: *Term) bool {
+                return t.rt.editor_inlay.dropped_error >= 1;
+            }
+        }.h));
+        try testing.expect(t2.rt.editor_inlay.dirty);
+        const t0 = s2.awakeMs();
+        while (s2.awakeMs() - t0 < 200) _ = usleep(10_000);
+        const before = s2.editor_lsp.sent_inlay;
+        _ = syntaxColors(s2, t2);
+        try testing.expectEqual(before + 1, s2.editor_lsp.sent_inlay);
+    }
+}
+
+test "INL13 인레이 힌트 — 창(보이는 줄 ± 20)이 덮이지 않은 곳으로 스크롤하면 version 이 같아도 다시 묻고, 덮인 안에서는 안 묻는다 (제품 경계, §8.2n 적대적 C2)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    // 400 줄 — 색 예산 256 줄 + 여유 20 을 넘어야 「안 덮인 창」이 생긴다.
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(allocator);
+    var i: usize = 0;
+    var line_buf: [32]u8 = undefined;
+    while (i < 400) : (i += 1) try body.appendSlice(allocator, try std.fmt.bufPrint(&line_buf, "int v{d}_hv = {d};\n", .{ i, i }));
+    var f = (try SmtFixture.open(allocator, "sc.c", body.items)) orelse return error.SkipZigTest;
+    defer f.close(allocator);
+    const s = f.fx.session;
+    const term = f.term;
+    try testing.expect(f.ready());
+    term.rt.editor_first_line = 0;
+    _ = syntaxColors(s, term);
+    try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_inlay);
+    try testing.expect(inlayApplied(&f, 1));
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_inlay.covered_lo);
+    try testing.expectEqual(@as(usize, 275), term.rt.editor_inlay.covered_hi); // 0 + 256 - 1 + 20
+    // 덮인 안(같은 창)에선 안 묻는다.
+    _ = syntaxColors(s, term);
+    try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_inlay);
+    // 밖으로 스크롤 — version 은 그대로인데 다시 묻는다.
+    term.rt.editor_first_line = 300;
+    _ = syntaxColors(s, term);
+    try testing.expectEqual(@as(u64, 2), s.editor_lsp.sent_inlay);
+    try testing.expect(inlayApplied(&f, 2));
+    try testing.expectEqual(@as(usize, 280), term.rt.editor_inlay.covered_lo);
+    try testing.expectEqual(@as(usize, 400), term.rt.editor_inlay.covered_hi); // 끝은 마지막 줄 첨자(400 줄 + 빈 꼬리 줄 = 401 줄)까지
+    // 든 힌트는 새 창의 것뿐(300 번대 `_hv`) — 첫 창 것은 갈렸다.
+    try testing.expect(term.rt.editor_inlay.hints.items.items.len >= 100);
+    try testing.expect(term.rt.editor_inlay.hints.items.items[0].offset >= 280 * 10);
 }
 
 test "GOTO1 정의로 이동 — F12·⌘클릭이 서버 응답의 첫 항목으로 caret 을 옮기고 되돌아가기 표식을 쌓는다; ⌃-/⌃⇧- 로 뒤로·앞으로; 다른 파일은 열어서; root 밖·없음은 알림; 낡은 응답은 버린다 (제품 경계, §8.2c·§5.2)" {

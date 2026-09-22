@@ -12991,6 +12991,36 @@ test "미저장 백업: 종료가 굳히고 수락된 닫기가 지운다 — cl
     );
     // **캐시가 아니다**(§3.10 — 지우면 편집이 사라진다).
     try std.testing.expectEqual(@as(usize, 0), countOfB(backup_mod, ".cache/maru"));
+
+    // ⑺ **되살리는 자리도 하나다**(U4b) — 제품이 문서를 붙이는 함수의 **꼬리**에서만 부른다. 그 앞에서
+    //    부르면 줄 인덱스·문법이 아직 없어 「한 편집으로 넣기」가 안 되고, 두 자리에서 부르면 한 문서를
+    //    두 번 되살린다.
+    try std.testing.expectEqual(@as(usize, 1), countOfB(editor, "editor_backup_ops.restoreIfAny(self, term)"));
+    const attach_tail = std.mem.indexOf(u8, editor, "ensureMaxCols(term, false);") orelse
+        return error.TestUnexpectedResult;
+    const restore_at = std.mem.indexOf(u8, editor, "editor_backup_ops.restoreIfAny(self, term)") orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(attach_tail < restore_at);
+
+    // ⑻ **지문은 «레코드의 것»을 싣는다** — 지금 디스크의 지문으로 덮으면 첫 저장이 CAS 를 통과해
+    //    외부 변경을 조용히 지운다(그것이 §3.10 이 막으려던 손실이고, VSCode #15749 가 남긴 그 결함이다).
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOfB(backup_mod, "if (parsed.doc.path.disk_hash) |h| term.rt.editor_doc.?.disk_hash = h;"),
+    );
+    try std.testing.expectEqual(@as(usize, 0), countOfB(backup_mod, "disk_hash = editor_ops.contentHash("));
+    // ⑼ **지우는 자리는 둘뿐이다**(신원으로 · 이름으로). 읽다가 손상을 만난 자리는 **지우지 않는다** —
+    //    사용자가 손으로 꺼낼 마지막 기회다.
+    try std.testing.expectEqual(@as(usize, 2), countOfB(backup_mod, "deleteFile(self.io, path) catch {}"));
+    // ⑽ **알림은 한 줄이고 모달이 아니다** — 열 때 묻는 규칙은 재시작 복원에서 앞의 물음을 취소한다.
+    try std.testing.expectEqual(@as(usize, 1), countOfB(backup_mod, "showNoticeKey(.editor_backup_restored)"));
+    // 주석에는 `showConfirmButtons` 가 **근거로** 나오므로 「부르는 모양」만 센다.
+    try std.testing.expectEqual(@as(usize, 0), countOfB(backup_mod, "self.showConfirm"));
+    // ⑾ **신원을 다시 확인한다** — 이름이 해시라 충돌하면 남의 문서를 조용히 되살린다.
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOfB(backup_mod, "if (!std.mem.eql(u8, p.path, path)) return"),
+    );
 }
 
 test "저장 실패 문구 표는 «둘이고 그 이유가 적혀 있다»" {

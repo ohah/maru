@@ -2194,6 +2194,12 @@ pub fn finishAttach(self: *AppSession, term: *Term, prepared: Prepared) void {
     // 결과를 버리지 않고 든다 — 뒤이은 접기·펼치기가 그 덕에 정수 max 로 끝난다(§4.1c 트리거 ⑷).
     ensureLineCols(self, term);
     ensureMaxCols(term, false);
+
+    // **지난 세션이 남긴 미저장 편집을 여기서 되살린다**(§3.10 — U4b). 이 함수의 꼬리인 이유 둘:
+    // ⑴ 제품이 문서를 붙이는 자리가 **여기 하나**다(파일 entry · `MARU_NATIVE_EDITOR` 훅 · 이름 없는
+    // 문서가 모두 지난다) ⑵ 되살리는 것을 **한 편집**으로 넣으려면 줄 인덱스·문법이 이미 서 있어야
+    // 한다(위 전부). 이름 없는 문서는 그 안에서 걸러진다(경로가 없으면 이 슬라이스의 대상이 아니다).
+    app_session_mod.editor_backup_ops.restoreIfAny(self, term);
 }
 
 /// config가 정한 탭 폭(§9 — `editor.tab-width`).
@@ -39156,4 +39162,280 @@ test "U4a-13 한 프레임은 한 문서만 쓰고, 종료는 전부 쓴다" {
     // ⑶ **종료는 이 제한을 쓰지 않는다** — 화면이 없고 전부 굳혀야 한다.
     app_session_mod.editor_backup_ops.flushAll(fx.session);
     for (ids) |id| try testing.expect(backupExists(root, id));
+}
+
+// ── U4b: 되살린다(§3.10 — 조용히, dirty 로) ────────────────────────────────────
+
+/// 이 신원의 레코드를 **손으로 심는다** — 「지난 세션이 남긴 것」을 크래시 없이 만드는 유일한 길이다.
+fn plantBackup(allocator: std.mem.Allocator, root: []const u8, doc: backup_rules.Doc, content: []const u8) !void {
+    const bytes = try backup_rules.encode(allocator, doc, content);
+    defer allocator.free(bytes);
+    var name_buf: [backup_rules.max_file_name_len]u8 = undefined;
+    const name = backup_rules.fileName(&name_buf, doc);
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ root, name });
+    var af = try std.Io.Dir.cwd().createFileAtomic(std.testing.io, path, .{ .replace = true, .make_path = true });
+    defer af.deinit(std.testing.io);
+    var buf: [4096]u8 = undefined;
+    var w = af.file.writer(std.testing.io, &buf);
+    try w.interface.writeAll(bytes);
+    try w.interface.flush();
+    try af.replace(std.testing.io);
+}
+
+/// 그 파일을 **제품 경로로** 연다(`preparePath` → `finishAttach` — 복원 후크가 사는 그 길).
+fn openRestored(fx: *UntitledFixture, path: []const u8) !*Term {
+    return openPathInActivePane(fx.session, path);
+}
+
+test "U4b-1 지난 세션의 편집이 조용히 되살아난다 — dirty 로, 알림 한 줄과 함께" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try pinBackupDir(&root_buf, &dir);
+    defer app_session_mod.editor_backup_ops.setDirForTest(null);
+
+    try dir.dir.writeFile(std.testing.io, .{ .sub_path = "doc.txt", .data = "disk\n" });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/doc.txt", .{root});
+    const doc: backup_rules.Doc = .{ .path = .{ .path = path, .disk_hash = contentHash("disk\n") } };
+    try plantBackup(allocator, root, doc, "my unsaved work\n");
+
+    const t = try openRestored(&fx, path);
+    // ⑴ **내용이 내 편집이다** ⑵ **dirty 다**(디스크는 그대로이므로) ⑶ **묻지 않았다**.
+    try testing.expectEqualStrings("my unsaved work\n", t.rt.editor_doc.?.file.content);
+    try testing.expect(isDirty(t));
+    try testing.expect(!fx.session.chrome_host.confirm.open);
+    // ⑷ **알림 한 줄** — 모달이 아니다.
+    try testing.expect(fx.session.chrome_host.notice.open);
+    try testing.expectEqualStrings(maru.i18n.t(.editor_backup_restored), fx.session.chrome_host.notice.message);
+    // ⑸ **디스크는 안 건드렸다**(복원은 읽기다).
+    const on_disk = try dir.dir.readFileAlloc(std.testing.io, "doc.txt", allocator, .limited(4096));
+    defer allocator.free(on_disk);
+    try testing.expectEqualStrings("disk\n", on_disk);
+    // ⑹ **소비한 레코드는 사라진다** — 안 지우면 다음 실행이 같은 것을 또 되살린다.
+    try testing.expect(!backupExists(root, doc));
+}
+
+test "U4b-2 디스크가 그 사이 바뀌어도 «묻지 않는다» — 첫 저장이 충돌로 갈린다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try pinBackupDir(&root_buf, &dir);
+    defer app_session_mod.editor_backup_ops.setDirForTest(null);
+
+    // 디스크는 **밖에서 바뀌었다**(레코드가 기억하는 것은 `v0`, 지금 파일은 `v1`).
+    try dir.dir.writeFile(std.testing.io, .{ .sub_path = "c.txt", .data = "v1\n" });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/c.txt", .{root});
+    try plantBackup(allocator, root, .{ .path = .{ .path = path, .disk_hash = contentHash("v0\n") } }, "mine\n");
+
+    const t = try openRestored(&fx, path);
+    try testing.expectEqualStrings("mine\n", t.rt.editor_doc.?.file.content);
+    // ⑴ **열 때는 안 묻는다** — 확인이 겹치면 앞의 것이 조용히 취소된다(그 실측이 이 결정의 근거다).
+    try testing.expect(!fx.session.chrome_host.confirm.open);
+    // ⑵ **묻는 자리는 저장이다** — 레코드의 지문을 들고 있으므로 CAS 가 갈라낸다.
+    try testing.expectError(error.ExternalConflict, saveDocument(fx.session, t));
+    // ⑶ 그리고 **디스크는 그대로다** — 거절이 곧 보존이다.
+    const on_disk = try dir.dir.readFileAlloc(std.testing.io, "c.txt", allocator, .limited(4096));
+    defer allocator.free(on_disk);
+    try testing.expectEqualStrings("v1\n", on_disk);
+}
+
+test "U4b-3 되돌리기가 디스크 내용을 되살린다 — 한 편집으로 넣었으므로" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try pinBackupDir(&root_buf, &dir);
+    defer app_session_mod.editor_backup_ops.setDirForTest(null);
+
+    try dir.dir.writeFile(std.testing.io, .{ .sub_path = "u.txt", .data = "on disk\n" });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/u.txt", .{root});
+    try plantBackup(allocator, root, .{ .path = .{ .path = path, .disk_hash = contentHash("on disk\n") } }, "restored\n");
+
+    const t = try openRestored(&fx, path);
+    try testing.expectEqualStrings("restored\n", t.rt.editor_doc.?.file.content);
+    // **되돌릴 수 있다** — 통짜 교체였다면 이 줄이 거짓이다.
+    try testing.expect(undoEdit(fx.session, t));
+    try testing.expectEqualStrings("on disk\n", t.rt.editor_doc.?.file.content);
+    try testing.expect(!isDirty(t)); // 디스크와 같아졌으니 clean 이다
+}
+
+test "U4b-4 내용이 같으면 되살릴 것이 없다 — clean 이고 알림도 없고 레코드는 걷힌다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try pinBackupDir(&root_buf, &dir);
+    defer app_session_mod.editor_backup_ops.setDirForTest(null);
+
+    try dir.dir.writeFile(std.testing.io, .{ .sub_path = "same.txt", .data = "same\n" });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/same.txt", .{root});
+    const doc: backup_rules.Doc = .{ .path = .{ .path = path, .disk_hash = contentHash("same\n") } };
+    try plantBackup(allocator, root, doc, "same\n");
+
+    const t = try openRestored(&fx, path);
+    try testing.expect(!isDirty(t));
+    try testing.expect(!fx.session.chrome_host.notice.open); // 되살린 것이 없으면 말할 것도 없다
+    try testing.expect(!backupExists(root, doc)); // 그래도 걷는다 — 다음 실행이 또 보지 않게
+}
+
+test "U4b-5 손상·잘린 레코드는 무시하고 파일을 그대로 연다 — 그리고 «지우지 않는다»" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try pinBackupDir(&root_buf, &dir);
+    defer app_session_mod.editor_backup_ops.setDirForTest(null);
+
+    try dir.dir.writeFile(std.testing.io, .{ .sub_path = "b.txt", .data = "intact\n" });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/b.txt", .{root});
+    const doc: backup_rules.Doc = .{ .path = .{ .path = path, .disk_hash = contentHash("intact\n") } };
+    // 쓰다가 죽은 레코드: 머리말이 선언한 길이보다 본문이 짧다.
+    const full = try backup_rules.encode(allocator, doc, "half written\n");
+    defer allocator.free(full);
+    var name_buf: [backup_rules.max_file_name_len]u8 = undefined;
+    const name = backup_rules.fileName(&name_buf, doc);
+    var rec_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const rec_path = try std.fmt.bufPrint(&rec_buf, "{s}/{s}", .{ root, name });
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = rec_path, .data = full[0 .. full.len - 3] });
+
+    const t = try openRestored(&fx, path);
+    try testing.expectEqualStrings("intact\n", t.rt.editor_doc.?.file.content);
+    try testing.expect(!isDirty(t));
+    try testing.expect(!fx.session.chrome_host.notice.open);
+    // **남긴다** — 사용자가 손으로 꺼낼 마지막 기회다(지우는 것은 성공적으로 소비했을 때뿐이다).
+    try testing.expect(backupExists(root, doc));
+}
+
+test "U4b-6 다른 경로의 레코드는 되살리지 않는다 — 이름은 해시라 충돌할 수 있다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try pinBackupDir(&root_buf, &dir);
+    defer app_session_mod.editor_backup_ops.setDirForTest(null);
+
+    try dir.dir.writeFile(std.testing.io, .{ .sub_path = "mine.txt", .data = "mine on disk\n" });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/mine.txt", .{root});
+    // **내 이름 자리에 남의 레코드를 심는다**(해시 충돌을 흉내 낸다) — 신원 재확인이 없으면 이것이
+    // 조용히 「다른 내용으로 열기」가 된다.
+    const other: backup_rules.Doc = .{ .path = .{ .path = "/somewhere/else.txt", .disk_hash = 0 } };
+    const bytes = try backup_rules.encode(allocator, other, "not mine\n");
+    defer allocator.free(bytes);
+    var mine_name: [backup_rules.max_file_name_len]u8 = undefined;
+    const name = backup_rules.fileName(&mine_name, .{ .path = .{ .path = path } });
+    var rec_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const rec_path = try std.fmt.bufPrint(&rec_buf, "{s}/{s}", .{ root, name });
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = rec_path, .data = bytes });
+
+    const t = try openRestored(&fx, path);
+    try testing.expectEqualStrings("mine on disk\n", t.rt.editor_doc.?.file.content);
+    try testing.expect(!isDirty(t));
+}
+
+test "U4b-7 이름 없는 문서를 열 때는 건드리지 않는다 — 그 갈래는 이 슬라이스가 아니다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try pinBackupDir(&root_buf, &dir);
+    defer app_session_mod.editor_backup_ops.setDirForTest(null);
+
+    // 다음 번호의 이름 없는 문서 레코드를 미리 심어 둔다.
+    try plantBackup(allocator, root, .{ .untitled = 1 }, "from a past session\n");
+    const t = try openUntitledInActivePane(fx.session);
+    try testing.expectEqual(@as(u32, 1), t.rt.editor_untitled.?.n);
+    // **빈 문서 그대로다** — 되살리는 것은 U4c 가 workspace 키와 함께 한다.
+    try testing.expectEqualStrings("", t.rt.editor_doc.?.file.content);
+    try testing.expect(!isDirty(t));
+    try testing.expect(backupExists(root, .{ .untitled = 1 })); // 그리고 안 지운다
+}
+
+test "U4b-8 되살린 문서는 다시 보호된다 — 시계가 서고 다음 만기에 레코드가 돌아온다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try pinBackupDir(&root_buf, &dir);
+    defer app_session_mod.editor_backup_ops.setDirForTest(null);
+
+    try dir.dir.writeFile(std.testing.io, .{ .sub_path = "again.txt", .data = "d\n" });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/again.txt", .{root});
+    const doc: backup_rules.Doc = .{ .path = .{ .path = path, .disk_hash = contentHash("d\n") } };
+    try plantBackup(allocator, root, doc, "kept\n");
+
+    const t = try openRestored(&fx, path);
+    try testing.expect(!backupExists(root, doc)); // 소비됐다
+    // 되살린 편집도 **미저장 편집**이다 — 다시 크래시가 와도 잃지 않아야 한다.
+    try testing.expect(t.rt.editor_backup_dirty);
+    expireBackupClock(t);
+    app_session_mod.editor_backup_ops.tick(fx.session);
+    try testing.expect(backupExists(root, doc));
+}
+
+test "U4b-9 적대적 레코드 둘은 무시된다 — UTF-8 이 아닌 내용, 저장 상한을 넘는 내용" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try pinBackupDir(&root_buf, &dir);
+    defer app_session_mod.editor_backup_ops.setDirForTest(null);
+
+    // ⑴ **UTF-8 이 아닌 내용** — 여는 경로는 그것을 막지만(§3.5) **편집 경로는 안 막는다**.
+    try dir.dir.writeFile(std.testing.io, .{ .sub_path = "x.txt", .data = "clean\n" });
+    var p1: [std.fs.max_path_bytes]u8 = undefined;
+    const path1 = try std.fmt.bufPrint(&p1, "{s}/x.txt", .{root});
+    try plantBackup(allocator, root, .{ .path = .{ .path = path1 } }, "bad \xff\xfe bytes\n");
+    const t1 = try openRestored(&fx, path1);
+    try testing.expectEqualStrings("clean\n", t1.rt.editor_doc.?.file.content);
+    try testing.expect(!isDirty(t1));
+    try testing.expect(std.unicode.utf8ValidateSlice(t1.rt.editor_doc.?.file.content));
+
+    // ⑵ **저장 상한을 넘는 내용** — 되살리면 저장도 못 하는 dirty 가 된다.
+    try dir.dir.writeFile(std.testing.io, .{ .sub_path = "y.txt", .data = "small\n" });
+    var p2: [std.fs.max_path_bytes]u8 = undefined;
+    const path2 = try std.fmt.bufPrint(&p2, "{s}/y.txt", .{root});
+    const big = try allocator.alloc(u8, backup_rules.pause_bytes + 1);
+    defer allocator.free(big);
+    @memset(big, 'a');
+    try plantBackup(allocator, root, .{ .path = .{ .path = path2 } }, big);
+    const t2 = try openRestored(&fx, path2);
+    try testing.expectEqualStrings("small\n", t2.rt.editor_doc.?.file.content);
+    try testing.expect(!isDirty(t2));
 }

@@ -17,6 +17,7 @@ const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
 const Term = app_session_mod.Term;
 const editor_ops = @import("editor.zig");
+const editor_selection = maru.session.editor.selection;
 const backup = maru.session.editor.backup;
 
 /// **테스트 주입 자리**(비공개 — `test_config_text` 와 같은 관례). 실제 자리는 앱 전역이므로 이
@@ -237,4 +238,89 @@ pub fn dropName(self: *AppSession, name: []const u8) void {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir, name }) catch return;
     std.Io.Dir.cwd().deleteFile(self.io, path) catch {};
+}
+
+/// **지난 세션이 남긴 미저장 편집을 되살린다**(§3.10 — U4b). 조용히, dirty 로, **한 편집으로**.
+///
+/// 묻지 않는 이유는 계약에 있다: 복원은 디스크를 건드리지 않고, 레코드의 지문을 문서에 실어 주므로
+/// **첫 저장이 §4 의 CAS 에 걸려** 덮어쓰기·다시 로드·비교를 묻는다. 열 때 묻는 규칙은 재시작 복원에서
+/// 물음이 겹쳐 앞의 것이 조용히 취소된다(`showConfirmButtons` 가 `cancelPendingConfirm` 을 부른다).
+///
+/// **이름 없는 문서와 저쪽 신원 문서는 대상이 아니다**(U4c) — 그 둘은 「어느 창이 되살리나」와
+/// 디렉터리 훑기가 함께 필요하다.
+pub fn restoreIfAny(self: *AppSession, term: *Term) void {
+    const path = term.rt.editor_path orelse return;
+    if (term.rt.editor_remote != null) return;
+    const doc = term.rt.editor_doc orelse return;
+
+    const record = read(self, .{ .path = .{ .path = path } }) orelse return;
+    defer self.allocator.free(record.bytes);
+    var parsed = record.parsed;
+    defer parsed.deinit(self.allocator);
+
+    // **신원을 다시 확인한다** — 이름은 해시라 충돌이 가능하고, 남의 문서를 되살리는 것은
+    // 「조용히 다른 내용으로 연다」가 된다.
+    switch (parsed.doc) {
+        .path => |p| if (!std.mem.eql(u8, p.path, path)) return,
+        else => return,
+    }
+    // **적대적 입력으로 본다**(§3.8 — 문서 내용은 신뢰 입력이 아니다). 레코드는 앱 전용 자리에 있지만
+    // 파일이고, 우리가 쓴 것과 다른 바이트가 들어 있을 수 있다. 여는 경로는 UTF-8 을 검증하는데
+    // (`document.zig` → `error.NotUtf8`) **편집 경로는 검증하지 않는다** — IME·붙여넣기가 UTF-8 이기
+    // 때문이다. 그래서 여기서 막는다: 아니면 손상 레코드와 같은 대우(무시하고 파일 그대로)다.
+    if (!std.unicode.utf8ValidateSlice(parsed.content)) return;
+    // **되쓸 수 없는 내용은 되살리지 않는다** — 저장 상한을 넘는 문서는 `⌘S` 가 `TooLarge` 라, 되살리면
+    // 「지울 수도 저장할 수도 없는 dirty」가 된다(레코드 상한은 그보다 조금 크다).
+    if (parsed.content.len > backup.pause_bytes) return;
+    // 내용이 이미 같으면 되살릴 것이 없다 — 레코드만 걷는다(다음 실행이 또 보지 않게).
+    if (std.mem.eql(u8, parsed.content, doc.file.content)) {
+        dropDoc(self, parsed.doc);
+        return;
+    }
+
+    // **커서를 먼저 세운다** — 파일을 열 때 커서는 클릭이 세우므로(그 규칙은 `openPathInActivePane`
+    // 의 주석이 소유한다) 지금은 없고, 편집은 커서 없이 들어가지 않는다.
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    var changes = [_]maru.session.editor.delta.Change{.{
+        .start = 0,
+        .end = doc.file.content.len,
+        .text = parsed.content,
+    }};
+    // **한 편집이다** — 통짜로 문서를 갈아치우면 `⌘Z` 로 디스크 내용에 돌아갈 길이 없다(C1a 의
+    // 「다시 로드」가 같은 이유로 편집이 됐다). 실패하면 **레코드를 남긴다**: 다음 기회에 또 시도한다.
+    if (!editor_ops.applyEditAsOne(self, term, &changes)) return;
+
+    // **지문은 레코드의 것이다** — 「내가 마지막으로 본 디스크」. 지금 디스크의 지문으로 덮으면 첫
+    // 저장이 CAS 를 통과해 **외부 변경을 조용히 지운다**(그것이 §3.10 이 막으려던 그 손실이다).
+    if (parsed.doc.path.disk_hash) |h| term.rt.editor_doc.?.disk_hash = h;
+    dropDoc(self, parsed.doc);
+    term.rt.editor_backup_on_disk = false;
+    // **알림 한 줄**(모달이 아니다) — 크래시를 몰랐던 사용자는 dirty 를 버그로 읽는다.
+    self.showNoticeKey(.editor_backup_restored);
+}
+
+const ReadRecord = struct { bytes: []u8, parsed: backup.Parsed };
+
+/// 이 신원의 레코드를 읽는다. 없거나 **손상·잘림이면 `null`** — 그때는 파일을 그대로 연다(조용히).
+fn read(self: *AppSession, doc: backup.Doc) ?ReadRecord {
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = dirPath(&dir_buf) orelse return null;
+    var name_buf: [backup.max_file_name_len]u8 = undefined;
+    const name = backup.fileName(&name_buf, doc);
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir, name }) catch return null;
+
+    const bytes = std.Io.Dir.cwd().readFileAlloc(
+        self.io,
+        path,
+        self.allocator,
+        .limited(backup.max_record_bytes),
+    ) catch return null;
+    const parsed = backup.parse(self.allocator, bytes) catch {
+        // **손상 레코드는 지우지 않는다** — 사용자가 손으로 꺼낼 마지막 기회다(§3.10 의 「소스가 평문으로
+        // 남는다」가 그 기회를 전제한다). 지우는 것은 **성공적으로 소비했을 때**뿐이다.
+        self.allocator.free(bytes);
+        return null;
+    };
+    return .{ .bytes = bytes, .parsed = parsed };
 }

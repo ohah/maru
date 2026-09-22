@@ -160,7 +160,9 @@ pub fn initializeRequest(allocator: std.mem.Allocator, root_uri: []const u8, pid
                     .documentSymbol = .{
                         .dynamicRegistration = false,
                         .hierarchicalDocumentSymbolSupport = true,
-                        .symbolKind = .{ .valueSet = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26 } },
+                        // **`u8` 배열은 JSON 문자열이 된다**(Zig `Stringify` 의 규칙) — tsgo 가 `cannot unmarshal JSON string into []SymbolKind` 로
+                        // `initialize` 를 통째로 거부했고 세션 전체가 죽었다(2026-09-22 tee 실측 — `initialized` params 사고와 같은 부류). `i32` 로 낸다.
+                        .symbolKind = .{ .valueSet = [_]i32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26 } },
                     },
                     // 구현·타입 정의·선언(§8.2m) — 같은 피커. `linkSupport` 로 `LocationLink[]` 를 받는다(tsgo 가 그것을 낸다).
                     .implementation = .{ .dynamicRegistration = false, .linkSupport = true },

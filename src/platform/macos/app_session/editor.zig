@@ -33499,13 +33499,14 @@ pub fn recomputeSymbolPicker(self: *AppSession) void {
         return;
     };
     const st = &term.rt.editor_syntax;
-    const prov = if (st.provider) |*p| p else {
-        self.symbol_picker_rows.clear(self.allocator);
-        self.chrome_host.symbol_picker.setResultCount(0);
-        return;
-    };
-    // **2층이 유효하면 그것**(§8.2o · §7.5) — 목록이 같은 타입이라 피커는 층을 모른다.
+    // **2층이 유효하면 그것**(§8.2o · §7.5) — 목록이 같은 타입이라 피커는 층을 모른다. **1층 provider 를 먼저 요구하지 않는다**:
+    // 문법이 아예 없는 언어(grammar 없음)도 서버만 있으면 이 축이 선다(§7.5 — 「grammar 도 서버도 없을 때만 빈다」).
     const syms = symbols_client.list(term) orelse blk: {
+        const prov = if (st.provider) |*p| p else {
+            self.symbol_picker_rows.clear(self.allocator);
+            self.chrome_host.symbol_picker.setResultCount(0);
+            return;
+        };
         prov.symbols(self.allocator, &st.symbols);
         break :blk st.symbols.items;
     };
@@ -33540,6 +33541,12 @@ pub fn symbolPickerReadiness(self: *AppSession) SymbolPickerReadiness {
     if (term.kind != .editor) return .not_editor;
     _ = term.rt.editor_doc orelse return .not_editor;
     const st = &term.rt.editor_syntax;
+    // **2층이 있으면 1층 상태를 안 본다**(§8.2o) — 문법이 없거나 아직 파싱 중이어도 서버 목록으로 연다.
+    if (symbols_client.list(term) != null) {
+        if (self.symbol_picker_rows.rows.items.len == 0 and
+            self.chrome_host.symbol_picker.input.query.items.len == 0) return .none;
+        return .ready;
+    }
     // **pending 을 먼저 본다.** 그 동안은 트리가 없어 목록이 비는데, 그것을 「없다」로 부르면
     // 읽는 중인 파일에 거짓말한다(§7.5 — 두 상태가 같은 신호다).
     if (st.pending) return .pending;

@@ -169,13 +169,24 @@ fn walk(
         };
         const full = rangeOf(o.get("range"), content, lines, enc) orelse continue;
         const sel = rangeOf(o.get("selectionRange"), content, lines, enc) orelse full;
-        // **자기 검산**: 이름 범위의 문서 글자가 서버 이름과 같아야 든다(§8.2o).
-        if (sel.lo > sel.hi or sel.hi > content.len or !std.mem.eql(u8, content[sel.lo..sel.hi], name)) {
+        // **자기 검산**: 이름 범위의 문서 글자가 서버 이름과 같아야 든다(§8.2o). 같지 않으면 **그 심볼 범위 안에서 이름을 찾아** 쓰고,
+        // 거기에도 없으면 버린다 — tsgo 는 생성자의 `selectionRange` 를 **빈 범위**로 낸다(실측 2026-09-22: `2:4-2:4`).
+        const named: ?ByteRange = blk: {
+            if (sel.lo < sel.hi and sel.hi <= content.len and std.mem.eql(u8, content[sel.lo..sel.hi], name)) break :blk sel;
+            if (full.hi <= content.len and full.lo <= full.hi) {
+                if (std.mem.indexOf(u8, content[full.lo..full.hi], name)) |at| break :blk .{ .lo = full.lo + at, .hi = full.lo + at + name.len };
+            }
+            break :blk null;
+        };
+        if (named == null) {
             out.name_mismatch += 1;
-        } else if (full.lo <= sel.lo and sel.hi <= full.hi) {
+        } else if (blk: {
+            const nm = named.?;
+            break :blk full.lo <= nm.lo and nm.hi <= full.hi;
+        }) {
             try out.items.append(allocator, .{
-                .name_start = @intCast(sel.lo),
-                .name_end = @intCast(sel.hi),
+                .name_start = @intCast(named.?.lo),
+                .name_end = @intCast(named.?.hi),
                 .start = @intCast(full.lo),
                 .end = @intCast(full.hi),
                 .start_row = rowOf(o.get("range")) orelse 0,
@@ -289,6 +300,27 @@ test "DSY2 서버 nesting 을 믿지 않는다 — 형제로 온 «안쪽» 항�
     try testing.expectEqual(@as(u16, 1), out.items.items[1].depth);
     try testing.expectEqualStrings("r", content[out.items.items[2].name_start..out.items.items[2].name_end]);
     try testing.expectEqual(@as(u16, 2), out.items.items[2].depth); // **형제로 왔지만 생성자 안이다**
+}
+
+test "DSY6 이름 범위가 쓸모없을 때 — 빈 selectionRange(tsgo 의 생성자)는 심볼 범위 안에서 이름을 찾아 쓰고, 거기에도 없으면 버린다 (§8.2o)" {
+    const a = testing.allocator;
+    const content = "class C {\n    constructor(private sides: number) {}\n}\n";
+    var lines = try line_index.build(a, content);
+    defer lines.deinit();
+    // tsgo 실측: `selectionRange` 가 **빈 범위**(2:4-2:4)다. 둘째는 그 범위 안에도 이름이 없다.
+    var p = try parse(a,
+        \\[{"name":"constructor","kind":9,"range":{"start":{"line":1,"character":4},"end":{"line":1,"character":41}},
+        \\  "selectionRange":{"start":{"line":1,"character":4},"end":{"line":1,"character":4}}},
+        \\ {"name":"nowhere","kind":12,"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":9}},
+        \\  "selectionRange":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}}}]
+    );
+    defer p.deinit();
+    var out: Symbols = .{};
+    defer out.deinit(a);
+    try decode(a, p.value, content, lines, .utf16, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.items.len);
+    try testing.expectEqualStrings("constructor", content[out.items.items[0].name_start..out.items.items[0].name_end]);
+    try testing.expectEqual(@as(u64, 1), out.name_mismatch); // `nowhere` 는 버렸다
 }
 
 test "DSY3 provider·평탄 꼴·빈 응답 — bool·객체·거짓·없음, SymbolInformation 은 버리고 세며, 상한 (§8.2o)" {

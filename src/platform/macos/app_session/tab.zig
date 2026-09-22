@@ -1304,6 +1304,8 @@ pub fn captureWorkspaceTab(self: *AppSession, arena: std.mem.Allocator, tab: *Ta
         var browser_terms: std.ArrayList(maru.session.workspace.BrowserTerm) = .empty;
         // U4c 이름 없는 문서 record(브라우저와 같은 규율 — 인덱스 공간 밖).
         var untitled_terms: std.ArrayList(maru.session.workspace.UntitledTerm) = .empty;
+        // U4d 저쪽 신원 문서 record(같은 규율 — 되살리면 이름 없는 문서가 된다).
+        var remote_doc_terms: std.ArrayList(maru.session.workspace.RemoteDocTerm) = .empty;
         var active_browser: ?usize = null;
         var persisted_index: usize = 0;
         for (pane.terms.items, 0..) |term, term_i| {
@@ -1342,6 +1344,15 @@ pub fn captureWorkspaceTab(self: *AppSession, arena: std.mem.Allocator, tab: *Ta
                     try untitled_terms.append(arena, .{
                         .insert_after = persisted_index,
                         .number = u.n,
+                    });
+                } else if (term.rt.editor_remote) |r| {
+                    // **U4d: 저쪽에 저장한 문서는 «호스트와 원격 경로»가 신원이다.** 그것을 안 실으면
+                    // 그 탭이 사라지고 백업 레코드를 **아무도 소비하지 않는다**. 되살리면 신원을 다시
+                    // 세울 수 없어(재시작엔 control socket 이 없다) **새 번호를 받는 이름 없는 문서**가 된다.
+                    try remote_doc_terms.append(arena, .{
+                        .insert_after = persisted_index,
+                        .dest = try arena.dupe(u8, r.dest),
+                        .path = try arena.dupe(u8, r.path),
                     });
                 }
                 continue;
@@ -1412,7 +1423,7 @@ pub fn captureWorkspaceTab(self: *AppSession, arena: std.mem.Allocator, tab: *Ta
         // §WP-P). 안 그러면 브라우저만 있던 pane이 브라우저 + 안 열었던 셸 탭으로 되살아난다.
         // URL 없는 브라우저만 있는 pane은 여전히 복원할 것이 0이라 종전대로 placeholder를 받는다.
         if (surfaces.items.len == 0 and file_terms.items.len == 0 and browser_terms.items.len == 0 and
-            untitled_terms.items.len == 0)
+            untitled_terms.items.len == 0 and remote_doc_terms.items.len == 0)
         {
             const c = &pane.terms.items[0].surface.core; // sentinel이어도 size 유효(1×1)
             try surfaces.append(arena, .{
@@ -1465,6 +1476,7 @@ pub fn captureWorkspaceTab(self: *AppSession, arena: std.mem.Allocator, tab: *Ta
             .file_terms = try file_terms.toOwnedSlice(arena),
             .browser_terms = try browser_terms.toOwnedSlice(arena),
             .untitled_terms = try untitled_terms.toOwnedSlice(arena),
+            .remote_doc_terms = try remote_doc_terms.toOwnedSlice(arena),
             .active_browser = active_browser,
         });
     }

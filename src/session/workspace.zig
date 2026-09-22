@@ -130,6 +130,15 @@ pub const UntitledTerm = struct {
     number: u32,
 };
 
+/// U4d 저쪽에 저장한 문서 record. **신원은 호스트와 원격 경로**다(로컬 경로도 dock entry 도 없다).
+/// 되살리면 **새 번호를 받는 이름 없는 문서**가 된다 — 그 신원을 재시작 시점에 다시 세울 수 없기 때문이다
+/// (docs/workspace-restore.md 「저쪽에 저장한 문서 영속」).
+pub const RemoteDocTerm = struct {
+    insert_after: usize,
+    dest: []const u8,
+    path: []const u8,
+};
+
 pub const Pane = struct {
     active_term: usize = 0,
     // 사용자 지정 이름(rename). Pane은 자동 제목 출처가 없어 custom_name 하나뿐(""=없음). 탭바 좌측 라벨 세그먼트로 표시.
@@ -141,6 +150,8 @@ pub const Pane = struct {
     browser_terms: []const BrowserTerm = &.{},
     /// 이 pane 의 이름 없는 문서들(U4c — 등장 순서 = 같은 `insert_after` 안에서의 상대 순서).
     untitled_terms: []const UntitledTerm = &.{},
+    /// 이 pane 의 저쪽 신원 문서들(U4d — 되살리면 이름 없는 문서가 된다).
+    remote_doc_terms: []const RemoteDocTerm = &.{},
     /// 활성 탭이 브라우저면 그 record 인덱스(`browser_terms` 안 위치). null=활성이 브라우저 아님.
     /// 구버전 리더는 이 필드를 무시하고 `active_term`(비-브라우저 공간)을 쓰므로 포커스만 이웃으로 떨어진다.
     active_browser: ?usize = null,
@@ -510,6 +521,7 @@ fn writePane(w: *std.Io.Writer, pane: Pane) !void {
     for (pane.file_terms) |ft| if (ft.kind != .diff) try writeFileTerm(w, ft);
     for (pane.browser_terms) |bt| try writeBrowserTerm(w, bt);
     for (pane.untitled_terms) |ut| try writeUntitledTerm(w, ut);
+    for (pane.remote_doc_terms) |rt| try writeRemoteDocTerm(w, rt);
     if (pane.active_browser) |ab| try w.print(" active-browser={d}", .{ab});
     try w.writeAll("\n");
     for (pane.surfaces) |s| try writeSurface(w, s);
@@ -535,6 +547,16 @@ fn writeBrowserTerm(w: *std.Io.Writer, bt: BrowserTerm) !void {
 /// 그래도 따옴표를 쓰는 이유는 형제 record 들과 **같은 모양**이어야 리더가 한 규칙으로 읽기 때문이다.
 fn writeUntitledTerm(w: *std.Io.Writer, ut: UntitledTerm) !void {
     try w.print(" untitled-term=\"{d}:{d}\"", .{ ut.insert_after, ut.number });
+}
+
+/// `remote-doc-term="<insert-after>:<dest-byte-len>:<dest>:<path-byte-len>:<path>"`(U4d). `file-term` 과
+/// 같은 self-delimiting 규칙이라 `:`·공백·따옴표가 든 값도 escape 없이 왕복한다.
+fn writeRemoteDocTerm(w: *std.Io.Writer, rt: RemoteDocTerm) !void {
+    try w.print(" remote-doc-term=\"{d}:{d}:", .{ rt.insert_after, rt.dest.len });
+    try writeEscaped(w, rt.dest);
+    try w.print(":{d}:", .{rt.path.len});
+    try writeEscaped(w, rt.path);
+    try w.writeByte('"');
 }
 
 fn writeSurface(w: *std.Io.Writer, s: Surface) !void {
@@ -967,6 +989,18 @@ fn parsePane(a: std.mem.Allocator, lines: *LineIter, limits: *ParseLimits) Parse
         };
         try untitled_terms.append(a, parsed);
     }
+    // U4d 저쪽 신원 문서(반복 필드) — 위 둘과 같은 규율.
+    var remote_doc_terms: std.ArrayList(RemoteDocTerm) = .empty;
+    for (f.fields) |field| {
+        if (!std.mem.eql(u8, field.key, "remote-doc-term")) continue;
+        if (!field.is_quoted or remote_doc_terms.items.len >= max_dock_entries) return error.BadLine;
+        const encoded = try unescapeQuoted(a, field.raw);
+        const parsed = parseRemoteDocTerm(encoded) catch |err| switch (err) {
+            error.UnsupportedDockValue => continue, // 빈 호스트·빈 경로 — 그 record 만 버린다
+            error.BadLine => return error.BadLine,
+        };
+        try remote_doc_terms.append(a, parsed);
+    }
     const active_browser: ?usize = if (f.find("active-browser") != null)
         try f.getUint("active-browser", usize, 0)
     else
@@ -982,11 +1016,13 @@ fn parsePane(a: std.mem.Allocator, lines: *LineIter, limits: *ParseLimits) Parse
         .file_terms = try file_terms.toOwnedSlice(a),
         .browser_terms = try browser_terms.toOwnedSlice(a),
         .untitled_terms = try untitled_terms.toOwnedSlice(a),
+        .remote_doc_terms = try remote_doc_terms.toOwnedSlice(a),
         .active_browser = active_browser,
     };
     try validatePaneFileTerms(pane);
     try validatePaneBrowserTerms(pane);
     try validatePaneUntitledTerms(pane);
+    try validatePaneRemoteDocTerms(pane);
     return pane;
 }
 
@@ -1014,6 +1050,37 @@ fn validatePaneUntitledTerms(pane: Pane) ParseError!void {
         if (ut.insert_after > persisted_total) return error.BadLine;
         if (ut.number == 0) return error.BadLine;
     }
+}
+
+/// U4d 불변식: `insert_after <= persisted_total` + 호스트·경로가 비어 있지 않다.
+fn validatePaneRemoteDocTerms(pane: Pane) ParseError!void {
+    if (pane.remote_doc_terms.len == 0) return;
+    const persisted_total = pane.surfaces.len + pane.file_terms.len;
+    for (pane.remote_doc_terms) |rt| {
+        if (rt.insert_after > persisted_total) return error.BadLine;
+        if (rt.dest.len == 0 or rt.path.len == 0) return error.BadLine;
+    }
+}
+
+/// `remote-doc-term="<insert-after>:<dest-len>:<dest>:<path-len>:<path>"`(U4d).
+fn parseRemoteDocTerm(encoded: []const u8) DockEntryParseError!RemoteDocTerm {
+    var pos: usize = 0;
+    const after_raw = dockEntryPart(encoded, &pos) orelse return error.BadLine;
+    const insert_after = std.fmt.parseInt(usize, after_raw, 10) catch return error.BadLine;
+    const dest_len_raw = dockEntryPart(encoded, &pos) orelse return error.BadLine;
+    const dest_len = std.fmt.parseInt(usize, dest_len_raw, 10) catch return error.BadLine;
+    if (pos + dest_len > encoded.len) return error.BadLine;
+    const dest = encoded[pos .. pos + dest_len];
+    pos += dest_len;
+    if (pos >= encoded.len or encoded[pos] != ':') return error.BadLine;
+    pos += 1;
+    const path_len_raw = dockEntryPart(encoded, &pos) orelse return error.BadLine;
+    const path_len = std.fmt.parseInt(usize, path_len_raw, 10) catch return error.BadLine;
+    if (pos + path_len != encoded.len) return error.BadLine; // self-delimiting
+    const path = encoded[pos..];
+    if (dest.len == 0 or path.len == 0) return error.UnsupportedDockValue;
+    if (!std.unicode.utf8ValidateSlice(dest) or !std.unicode.utf8ValidateSlice(path)) return error.BadLine;
+    return .{ .insert_after = insert_after, .dest = dest, .path = path };
 }
 
 /// `untitled-term="<insert-after>:<number>"`(U4c).
@@ -2956,4 +3023,60 @@ test "U4c-7 잘못된 untitled-term 은 record 만 버리거나 창을 폴백한
     defer old.deinit();
     try std.testing.expectEqual(@as(usize, 0), old.workspace.windows[0].tabs[0].panes[0].untitled_terms.len);
     try std.testing.expectEqual(@as(usize, 1), old.workspace.windows[0].tabs[0].panes[0].surfaces.len);
+}
+
+test "U4d-1 remote-doc-term 은 호스트·경로를 왕복한다 — 값 안의 `:` 도 self-delimiting 으로 살아남는다" {
+    const a = std.testing.allocator;
+    // 경로에 `:` 와 공백을 넣는다 — 길이를 앞에 두는 규칙이 없으면 필드 경계가 깨진다.
+    const text =
+        "maru.workspace.v1\nwindow tabs=1 active-tab=0\n" ++
+        "tab panes=1 active-pane=0 custom-name=\"\"\n" ++
+        "tree-node leaf pane=0\n" ++
+        "pane surfaces=1 active-term=0 custom-name=\"\" " ++
+        "remote-doc-term=\"1:9:me@host:1:13:/srv/a b:c.md\"\n" ++
+        "surface custom-name=\"\" title=\"\" cwd=\"\" command=\"\" cols=80 rows=24\n";
+    var parsed = try parse(a, text);
+    defer parsed.deinit();
+    const pane = parsed.workspace.windows[0].tabs[0].panes[0];
+    try std.testing.expectEqual(@as(usize, 1), pane.remote_doc_terms.len);
+    try std.testing.expectEqual(@as(usize, 1), pane.remote_doc_terms[0].insert_after);
+    try std.testing.expectEqualStrings("me@host:1", pane.remote_doc_terms[0].dest);
+    try std.testing.expectEqualStrings("/srv/a b:c.md", pane.remote_doc_terms[0].path);
+
+    const out = try serialize(a, parsed.workspace);
+    defer a.free(out);
+    var again = try parse(a, out);
+    defer again.deinit();
+    const rt = again.workspace.windows[0].tabs[0].panes[0].remote_doc_terms[0];
+    try std.testing.expectEqualStrings("me@host:1", rt.dest);
+    try std.testing.expectEqualStrings("/srv/a b:c.md", rt.path);
+    // **백업 파일 이름을 안 적는다** — 신원에서 파생한다(이름 없는 문서 절과 같은 규칙).
+    try std.testing.expect(std.mem.indexOf(u8, out, ".bak") == null);
+}
+
+test "U4d-2 잘못된 remote-doc-term 은 record 만 버리거나 창을 폴백한다 · 옛 파일은 조용히 «없음»" {
+    const a = std.testing.allocator;
+    const head =
+        "maru.workspace.v1\nwindow tabs=1 active-tab=0\n" ++
+        "tab panes=1 active-pane=0 custom-name=\"\"\n" ++
+        "tree-node leaf pane=0\n";
+    const tail = "surface custom-name=\"\" title=\"\" cwd=\"\" command=\"\" cols=80 rows=24\n";
+
+    // 빈 호스트 = 신원이 아니다 → 그 record 만 버린다(창은 살린다).
+    var kept = try parse(a, head ++ "pane surfaces=1 active-term=0 custom-name=\"\" remote-doc-term=\"0:0::4:/a/b\"\n" ++ tail);
+    defer kept.deinit();
+    try std.testing.expectEqual(@as(usize, 0), kept.workspace.windows[0].tabs[0].panes[0].remote_doc_terms.len);
+    try std.testing.expectEqual(@as(usize, 1), kept.workspace.windows[0].tabs[0].panes[0].surfaces.len);
+
+    // 길이가 실제와 안 맞으면(자기-구획 위반) 그 창 fail-close — 남는 바이트를 추측하지 않는다.
+    try std.testing.expectError(error.BadLine, parse(a, head ++
+        "pane surfaces=1 active-term=0 custom-name=\"\" remote-doc-term=\"0:7:me@host:9:/a/b\"\n" ++ tail));
+    // insert_after 가 persisted_total(1)을 넘으면 자리를 만들 수 없다.
+    try std.testing.expectError(error.BadLine, parse(a, head ++
+        "pane surfaces=1 active-term=0 custom-name=\"\" remote-doc-term=\"5:7:me@host:4:/a/b\"\n" ++ tail));
+
+    // **옛 파일**: 필드가 없으면 「없음」이고 창은 그대로다.
+    var old = try parse(a, head ++ "pane surfaces=1 active-term=0 custom-name=\"\"\n" ++ tail);
+    defer old.deinit();
+    try std.testing.expectEqual(@as(usize, 0), old.workspace.windows[0].tabs[0].panes[0].remote_doc_terms.len);
 }

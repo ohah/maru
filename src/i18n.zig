@@ -667,6 +667,9 @@ const Table = struct {
     /// 크래시로 잃었을 편집을 되살렸다는 **지나가는 알림**(§3.10 — 모달이 아니다). 복원 자체는
     /// 묻지 않으므로, 이 한 줄이 없으면 사용자는 dirty 를 버그로 읽는다.
     editor_backup_restored: [:0]const u8,
+    /// **신원을 잃은 문서를 이름 없는 문서로 되살렸다**(§3.10 — U4d). 조용히 하면 사용자는 「왜 이
+    /// 탭이 생겼지」를 묻는다: 이쪽은 U4b 의 조용한 복원과 달리 **신원이 바뀐다**.
+    editor_backup_revived: [:0]const u8,
     /// 원격이 없어 fetch를 누를 수 없다는 진술. **왜 안 되는지 말한다** — 비활성만 두면 고장으로 읽힌다.
     scm_no_remote: [:0]const u8,
     /// fetch가 끝났고 새로 온 것이 없다. 실패와 구별해야 한다 — 그쪽은 stderr가 이유를 말한다.
@@ -1586,6 +1589,7 @@ const en: Table = .{
     .editor_columns_capped = "Long line: view capped (editor.max-columns)",
     .editor_backup_paused = "Large file: unsaved-edit backup paused",
     .editor_backup_restored = "Restored unsaved edits from the last session",
+    .editor_backup_revived = "Recovered unsaved edits into a new untitled document (its original is unavailable)",
     .scm_no_remote = "This repository has no remote",
     .scm_fetch_done = "Fetched from the remote",
     .scm_menu_push = "Type git push",
@@ -2331,6 +2335,7 @@ const ko: Table = .{
     .editor_columns_capped = "긴 줄: 보기가 상한에 걸렸다 (editor.max-columns)",
     .editor_backup_paused = "큰 파일: 미저장 백업을 멈췄다",
     .editor_backup_restored = "지난 세션의 저장하지 않은 편집을 되살렸습니다",
+    .editor_backup_revived = "원본을 찾을 수 없어 저장하지 않은 편집을 새 이름 없는 문서로 되살렸습니다",
     .scm_no_remote = "이 저장소에는 원격이 없습니다",
     .scm_fetch_done = "원격에서 가져왔습니다",
     .scm_menu_push = "git push 넣기",

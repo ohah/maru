@@ -353,3 +353,54 @@ fn read(self: *AppSession, doc: backup.Doc) ?ReadRecord {
     };
     return .{ .bytes = bytes, .parsed = parsed };
 }
+
+/// **신원을 잃은 문서를 이름 없는 문서로 되살린다**(U4d). 입구는 둘이고 규칙은 하나다 —
+/// ⑴ 저쪽에 저장한 문서(재시작엔 control socket 이 없어 그 신원을 못 세운다)
+/// ⑵ 원본이 사라진 경로 문서(그 경로는 아예 열리지 않는다).
+///
+/// **새 번호를 받는다** — 그 문서는 「지난 실행에서 이름이 없던 것」이 아니라 **신원을 잃은 것**이라
+/// 옛 번호가 없다. 그리고 **알린다**: 조용히 하면 사용자는 「왜 이 탭이 생겼지」를 묻는다(U4b 의 조용한
+/// 복원과 다른 이유는 신원이 바뀐다는 점이다).
+///
+/// 레코드가 없거나 읽히지 않으면 **아무것도 만들지 않는다**(빈 탭을 만들 이유가 없다).
+pub fn reviveAsUntitled(self: *AppSession, lost: backup.Doc) void {
+    const record = read(self, lost) orelse return;
+    defer self.allocator.free(record.bytes);
+    var parsed = record.parsed;
+    defer parsed.deinit(self.allocator);
+
+    // 신원 재확인 — 이름이 해시라 남의 레코드를 되살리면 조용히 다른 내용이 뜬다.
+    switch (lost) {
+        .remote => |w| switch (parsed.doc) {
+            .remote => |r| if (!std.mem.eql(u8, r.dest, w.dest) or !std.mem.eql(u8, r.path, w.path)) return,
+            else => return,
+        },
+        .path => |w| switch (parsed.doc) {
+            .path => |p| if (!std.mem.eql(u8, p.path, w.path)) return,
+            else => return,
+        },
+        .untitled => return, // 그 갈래는 U4c 가 번호로 되살린다(여기 오면 갈래가 갈린 것이다)
+    }
+    // U4b 와 같은 적대적 게이트 — 레코드는 신뢰 입력이 아니다(§3.8).
+    if (!std.unicode.utf8ValidateSlice(parsed.content)) return;
+    if (parsed.content.len > backup.pause_bytes) return;
+    if (parsed.content.len == 0) {
+        dropDoc(self, lost); // 되살릴 내용이 없으면 레코드만 걷는다
+        return;
+    }
+
+    const term = editor_ops.openUntitledInActivePane(self) catch return;
+    var changes = [_]maru.session.editor.delta.Change{.{ .start = 0, .end = 0, .text = parsed.content }};
+    if (!editor_ops.applyEditAsOne(self, term, &changes)) return; // 못 넣었으면 레코드를 남긴다
+    dropDoc(self, lost);
+    self.showNoticeKey(.editor_backup_revived);
+}
+
+/// 예약된 되살리기를 **한 프레임에 하나** 소비한다(U4d). 예약은 복원 트리 staging 과 dock prune 이
+/// 넣는다 — 그 자리들에는 pane 이 아직/이미 없어 Term 을 만들 수 없기 때문이다.
+pub fn drainRevivals(self: *AppSession) void {
+    if (self.pending_backup_revivals.items.len == 0) return;
+    // **앞에서부터 하나** — 예약 순서가 곧 탭 순서다(뒤에서 빼면 순서가 뒤집힌다).
+    const entry = self.pending_backup_revivals.orderedRemove(0);
+    reviveAsUntitled(self, entry.doc());
+}

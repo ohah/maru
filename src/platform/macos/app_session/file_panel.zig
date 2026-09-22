@@ -3238,14 +3238,23 @@ pub fn pruneInvalidRestoredFilePanelEntries(self: *AppSession, panel: *dock_pane
             continue;
         };
         const expected_kind = entryKindForOpenKind(open_kind);
+        var file_gone = false;
         const valid = std.fs.path.isAbsolute(entry.path) and
             std.unicode.utf8ValidateSlice(entry.path) and
             expected_kind == entry.kind and
             blk: {
-                const stat = std.Io.Dir.cwd().statFile(self.io, entry.path, .{}) catch break :blk false;
+                const stat = std.Io.Dir.cwd().statFile(self.io, entry.path, .{}) catch {
+                    file_gone = true;
+                    break :blk false;
+                };
                 break :blk stat.kind == .file;
             };
         if (!valid) {
+            // **U4d: 원본이 사라진 자리가 여기다.** 그 문서의 미저장 편집이 백업에 남아 있으면 그것을
+            // **이름 없는 문서로** 되살린다 — 여기서 버리고 끝내면 그 레코드를 **아무도 소비하지 않는다**.
+            // 지금 만들지 않고 예약만 하는 이유: 이 자리는 복원 staging 이라 pane 도 Term 도 아직 없다.
+            // **파일이 사라진 경우만**이다(종류가 안 맞거나 경로가 이상한 것은 파일이 그대로 있다).
+            if (file_gone) self.queueBackupRevival(.{ .path = .{ .path = entry.path } });
             const removed = panel.restored.orderedRemove(current_index);
             self.allocator.free(removed.path);
             continue;

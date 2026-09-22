@@ -302,6 +302,49 @@ test "DSY2 서버 nesting 을 믿지 않는다 — 형제로 온 «안쪽» 항�
     try testing.expectEqual(@as(u16, 2), out.items.items[2].depth); // **형제로 왔지만 생성자 안이다**
 }
 
+test "DSY7 같은 byte 에서 시작하면 «넓은 것(바깥)»이 먼저다 — 체인이 뒤집히면 「지금 어디」가 거꾸로 읽힌다 (§8.2o 적대적 A2)" {
+    const a = testing.allocator;
+    const content = "class C { inner() {} }\n";
+    var lines = try line_index.build(a, content);
+    defer lines.deinit();
+    // 둘 다 character 0 에서 시작한다(부모는 줄 끝까지, 자식은 짧게) — 서버는 **좁은 것을 먼저** 낸다.
+    var p = try parse(a,
+        \\[{"name":"C","kind":5,"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":10}},
+        \\  "selectionRange":{"start":{"line":0,"character":6},"end":{"line":0,"character":7}}},
+        \\ {"name":"C","kind":5,"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":22}},
+        \\  "selectionRange":{"start":{"line":0,"character":6},"end":{"line":0,"character":7}}}]
+    );
+    defer p.deinit();
+    var out: Symbols = .{};
+    defer out.deinit(a);
+    try decode(a, p.value, content, lines, .utf16, &out);
+    try testing.expectEqual(@as(usize, 2), out.items.items.len);
+    // **넓은 것이 먼저** — 그래야 `chainAt` 이 바깥부터 쌓고 depth 가 0 → 1 이 된다.
+    try testing.expectEqual(@as(u32, 22), out.items.items[0].end);
+    try testing.expectEqual(@as(u16, 0), out.items.items[0].depth);
+    try testing.expectEqual(@as(u32, 10), out.items.items[1].end);
+    try testing.expectEqual(@as(u16, 1), out.items.items[1].depth);
+}
+
+test "DSY8 유효한 selectionRange 는 «범위 안 첫 등장»을 이긴다 — 주석·문자열에 같은 이름이 앞서 있어도 선언 자리를 가리킨다 (§8.2o 적대적 A11)" {
+    const a = testing.allocator;
+    const content = "/* add */ int add(void) {}\n";
+    var lines = try line_index.build(a, content);
+    defer lines.deinit();
+    const decl = std.mem.lastIndexOf(u8, content, "add").?; // 선언 자리(주석 속 것이 아니다)
+    var p = try parse(a,
+        \\[{"name":"add","kind":12,"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":26}},
+        \\  "selectionRange":{"start":{"line":0,"character":14},"end":{"line":0,"character":17}}}]
+    );
+    defer p.deinit();
+    var out: Symbols = .{};
+    defer out.deinit(a);
+    try decode(a, p.value, content, lines, .utf16, &out);
+    try testing.expectEqual(@as(usize, 1), out.items.items.len);
+    try testing.expectEqual(@as(u32, @intCast(decl)), out.items.items[0].name_start); // 주석 속 3 이 아니다
+    try testing.expectEqual(@as(u64, 0), out.name_mismatch);
+}
+
 test "DSY6 이름 범위가 쓸모없을 때 — 빈 selectionRange(tsgo 의 생성자)는 심볼 범위 안에서 이름을 찾아 쓰고, 거기에도 없으면 버린다 (§8.2o)" {
     const a = testing.allocator;
     const content = "class C {\n    constructor(private sides: number) {}\n}\n";

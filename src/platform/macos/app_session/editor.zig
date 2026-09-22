@@ -13379,17 +13379,22 @@ test "DSY4 심볼 2층 — 서버가 ready 면 문서 단위로 한 번 묻고, 
     try testing.expectEqualStrings("function", syms[0].kind); // SymbolKind 12 → 우리 어휘
     try testing.expectEqual(term.rt.editor_lsp_version, term.rt.editor_symbols.version);
     try testing.expect(symbols_client.list(term) != null);
-    // ⑶ 밴드 체인이 2층으로 선다 — caret 이 `beta` 본문 안이면 그 이름이 붙는다.
-    // 가짜의 범위는 **그 줄**이다(§ 가짜 doc) — caret 을 `beta` 선언 줄 안에 둔다.
-    const inside = std.mem.indexOf(u8, term.rt.editor_doc.?.file.content, "int b").?;
-    term.rt.editor_selection = .{ .anchor_start = inside, .anchor_end = inside, .focus = inside };
-    const crumb = headerBreadcrumb(s, term, "sy.c");
-    try testing.expect(std.mem.endsWith(u8, crumb, "beta"));
+    // ⑶ 밴드 체인이 **2층으로** 선다. 두 층이 다른 답을 내는 자리를 고른다: 가짜의 범위는 **그 줄**이고 1층(C)의 함수 범위는 **본문 전체**라,
+    //    caret 을 본문 줄에 두면 2층은 체인이 없고(경로만) 1층은 함수 이름을 붙인다. 선언 줄에서는 2층도 이름을 붙인다 — 둘 다 잰다.
+    const body = std.mem.indexOf(u8, term.rt.editor_doc.?.file.content, "return b").?;
+    term.rt.editor_selection = .{ .anchor_start = body, .anchor_end = body, .focus = body };
+    try testing.expectEqualStrings("sy.c", headerBreadcrumb(s, term, "sy.c")); // 2층: 그 줄 밖이라 체인 없음
+    const decl = std.mem.indexOf(u8, term.rt.editor_doc.?.file.content, "int b").?;
+    term.rt.editor_selection = .{ .anchor_start = decl, .anchor_end = decl, .focus = decl };
+    try testing.expect(std.mem.endsWith(u8, headerBreadcrumb(s, term, "sy.c"), "beta"));
     // ⑷ 편집 — **버린다**(§8.2o). 그 프레임의 체인은 1층이 답하고, 2층 목록은 비어 있다.
     try testing.expect(insertText(s, term, "x"));
     try testing.expectEqual(@as(u64, 1), term.rt.editor_symbols.cleared_by_edit);
     try testing.expectEqual(@as(usize, 0), term.rt.editor_symbols.list.items.len);
     try testing.expect(symbols_client.list(term) == null);
+    // 그 사이의 체인은 **1층**이 답한다 — 본문 줄에서도 함수 이름이 붙는다(2층이었다면 경로뿐이다).
+    term.rt.editor_selection = .{ .anchor_start = body, .anchor_end = body, .focus = body };
+    try testing.expect(std.mem.endsWith(u8, headerBreadcrumb(s, term, "sy.c"), "beta"));
     _ = syntaxColors(s, term); // 120 ms 안엔 안 묻는다
     try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_symbols);
     {
@@ -13403,6 +13408,29 @@ test "DSY4 심볼 2층 — 서버가 ready 면 문서 단위로 한 번 묻고, 
     // ⑸ 다 든 뒤엔 또 안 묻는다.
     _ = syntaxColors(s, term);
     try testing.expectEqual(@as(u64, 2), s.editor_lsp.sent_symbols);
+    // ⑹ **대기 중에 편집** — 그 응답은 낡은 version 이라 버린다(들면 밴드가 옛 자리를 말한다). 조용 뒤 다시 물어 든다.
+    term.rt.editor_symbols.dirty = true;
+    {
+        const t0 = s.awakeMs();
+        while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
+    }
+    _ = syntaxColors(s, term);
+    try testing.expectEqual(@as(u64, 3), s.editor_lsp.sent_symbols);
+    try testing.expect(term.rt.editor_symbols.waiting);
+    try testing.expect(insertText(s, term, "y")); // 응답이 오기 전에 편집
+    try testing.expect(pumpLspUntil(&f.fx, 3000, term, struct {
+        fn g(t: *Term) bool {
+            return t.rt.editor_symbols.dropped_stale >= 1;
+        }
+    }.g));
+    try testing.expect(symbols_client.list(term) == null); // 낡은 응답은 안 들었다
+    {
+        const t0 = s.awakeMs();
+        while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
+    }
+    _ = syntaxColors(s, term);
+    try testing.expect(symbolsApplied(&f, 3));
+    try testing.expect(symbols_client.list(term) != null);
 }
 
 test "DSY5 심볼 2층 — provider 가 없으면 묻지 않고, 빈 목록·평탄 꼴·이름이 문서와 다른 항목은 1층을 그대로 두며, 낡은 version 응답은 버린다 (제품 경계, §8.2o)" {
@@ -13448,7 +13476,27 @@ test "DSY5 심볼 2층 — provider 가 없으면 묻지 않고, 빈 목록·평
         }.g));
         try testing.expect(symbols_client.list(f.term) == null);
     }
-    // ⑷ 이름이 문서와 다른 항목(`DSYBAD`) — 그 항목만 버리고 나머지는 든다(자기 검산).
+    // ⑷ 오류 응답(`DSYERR`) — 버리고 `dirty`, **곧바로 되묻지 않는다**(조용 시계를 되감는다). 조용해지면 다시 묻는다.
+    {
+        var f = (try SmtFixture.open(allocator, "er.c", "fn alpha(int a) { return a; } // DSYERR\n")) orelse return error.SkipZigTest;
+        defer f.close(allocator);
+        const s = f.fx.session;
+        try testing.expect(f.ready());
+        _ = syntaxColors(s, f.term);
+        try testing.expect(pumpLspUntil(&f.fx, 3000, f.term, struct {
+            fn g(t: *Term) bool {
+                return t.rt.editor_symbols.dropped_error >= 1;
+            }
+        }.g));
+        try testing.expect(f.term.rt.editor_symbols.dirty);
+        _ = syntaxColors(s, f.term); // 곧바로는 안 묻는다
+        try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_symbols);
+        const t0 = s.awakeMs();
+        while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
+        _ = syntaxColors(s, f.term);
+        try testing.expectEqual(@as(u64, 2), s.editor_lsp.sent_symbols);
+    }
+    // ⑸ 이름이 문서와 다른 항목(`DSYBAD`) — 그 항목만 버리고 나머지는 든다(자기 검산).
     {
         var f = (try SmtFixture.open(allocator, "bad.c", "fn alpha(int a) { return a; } // DSYBAD\n")) orelse return error.SkipZigTest;
         defer f.close(allocator);
@@ -13458,6 +13506,66 @@ test "DSY5 심볼 2층 — provider 가 없으면 묻지 않고, 빈 목록·평
         try testing.expectEqual(@as(usize, 1), f.term.rt.editor_symbols.list.items.len);
         try testing.expect(f.term.rt.editor_symbols.decoded.name_mismatch >= 1);
     }
+}
+
+test "DSY9 심볼 2층 — 한 서버에 문서가 둘이면 응답은 «그 seq 를 기다린 Term» 에만 든다(다른 문서의 대기를 깨지 않는다) (제품 경계, §8.2o)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    // A: 답하지 않는 문서(`DSYSTALL`) — 계속 대기. B: 보통 문서 — 응답이 온다. 같은 세션·같은 서버다.
+    var f = (try SmtFixture.open(allocator, "a.c", "fn alpha(int a) { return a; } // DSYSTALL\n")) orelse return error.SkipZigTest;
+    defer f.close(allocator);
+    const s = f.fx.session;
+    const term_a = f.term;
+    try testing.expect(f.ready());
+    _ = syntaxColors(s, term_a);
+    try testing.expect(term_a.rt.editor_symbols.waiting); // A 는 답을 못 받는다
+    const root = f.root_buf[0..f.root_len];
+    try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "b.c", .data = "fn beta(int b) { return b; }\n" });
+    const path_b = try std.fs.path.join(allocator, &.{ root, "b.c" });
+    defer allocator.free(path_b);
+    const term_b = try openPathInActivePane(s, path_b);
+    const Ctx = struct { fx: *PaneFixture, t: *Term };
+    try testing.expect(pumpLspUntil(&f.fx, 5000, Ctx{ .fx = &f.fx, .t = term_b }, struct {
+        fn g(c: Ctx) bool {
+            return c.t.rt.editor_lsp_version != 0;
+        }
+    }.g));
+    _ = syntaxColors(s, term_b);
+    try testing.expect(pumpLspUntil(&f.fx, 3000, Ctx{ .fx = &f.fx, .t = term_b }, struct {
+        fn g(c: Ctx) bool {
+            return c.t.rt.editor_symbols.applied >= 1;
+        }
+    }.g));
+    // **B 만 들었다** — A 는 여전히 대기이고 목록이 비어 있다(seq 를 안 맞추면 A 가 B 의 답을 먹는다).
+    try testing.expect(symbols_client.list(term_b) != null);
+    try testing.expect(term_a.rt.editor_symbols.waiting);
+    try testing.expectEqual(@as(usize, 0), term_a.rt.editor_symbols.list.items.len);
+    try testing.expectEqual(@as(u64, 0), term_a.rt.editor_symbols.applied);
+}
+
+test "DSY10 심볼 2층 — 1층이 비는 문서에서도 피커가 선다(주석 속 이름: 문법은 심볼 0, 서버는 1) (제품 경계, §8.2o·§7.5)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    // C 문법에는 심볼이 없다(전부 주석) — 가짜는 `fn ` 을 보고 하나 낸다. 이름 범위가 주석 안이라 자기 검산도 통과한다.
+    var f = (try SmtFixture.open(allocator, "cm.c", "// fn alpha(int a) {\n")) orelse return error.SkipZigTest;
+    defer f.close(allocator);
+    const s = f.fx.session;
+    const term = f.term;
+    try testing.expect(f.ready());
+    _ = syntaxColors(s, term);
+    try testing.expect(symbolsApplied(&f, 1));
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_symbols.list.items.len);
+    // 1층은 비어 있다 — 두 층이 여기서 갈린다.
+    {
+        const prov = if (term.rt.editor_syntax.provider) |*p| p else return error.NoProvider;
+        prov.symbols(allocator, &term.rt.editor_syntax.symbols);
+        try testing.expectEqual(@as(usize, 0), term.rt.editor_syntax.symbols.items.len);
+    }
+    recomputeSymbolPicker(s);
+    try testing.expectEqual(@as(usize, 1), s.symbol_picker_rows.rows.items.len);
+    try testing.expectEqual(SymbolPickerReadiness.ready, symbolPickerReadiness(s));
+    toggleSymbolPicker(s);
+    try testing.expect(s.chrome_host.symbol_picker.open); // 1층만 보면 「심볼 없음」으로 안 열린다
 }
 
 test "GOTO1 정의로 이동 — F12·⌘클릭이 서버 응답의 첫 항목으로 caret 을 옮기고 되돌아가기 표식을 쌓는다; ⌃-/⌃⇧- 로 뒤로·앞으로; 다른 파일은 열어서; root 밖·없음은 알림; 낡은 응답은 버린다 (제품 경계, §8.2c·§5.2)" {

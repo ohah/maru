@@ -1420,6 +1420,32 @@ test "LSJ14 initialize 가 completionItem.labelDetailsSupport 를 선언한다 (
     try testing.expect(std.mem.indexOf(u8, block, "\"documentationFormat\":[\"markdown\",\"plaintext\"]") != null);
 }
 
+test "LSJ20 capability 의 JSON «모양» — symbolKind.valueSet 은 정수 배열이고 initialized 의 params 는 객체다(둘 다 문자열·배열로 나가 tsgo 세션을 죽였다) (§8.2o·§8.2a)" {
+    // **이 판정자는 「모양」을 잰다.** 가짜 서버는 무엇이든 받아 주므로 값 자체를 구조로 확인해야 한다 —
+    // `[_]u8{…}` 은 Zig 가 **JSON 문자열**로 내고(tsgo: `cannot unmarshal JSON string into []SymbolKind`),
+    // `.{}`(빈 튜플)는 **`[]`** 로 나간다(tsgo: `cannot unmarshal JSON array into InitializedParams`). 둘 다 세션 전체를 죽였다.
+    const a = testing.allocator;
+    const init = try initializeRequest(a, "file:///r", 1);
+    defer a.free(init);
+    var p = try parse(a, init);
+    defer p.deinit();
+    const caps = p.value.object.get("params").?.object.get("capabilities").?;
+    const ds = caps.object.get("textDocument").?.object.get("documentSymbol").?;
+    try testing.expect(ds.object.get("hierarchicalDocumentSymbolSupport").?.bool);
+    const vs = ds.object.get("symbolKind").?.object.get("valueSet").?;
+    try testing.expect(vs == .array); // **문자열이면 여기서 죽는다**
+    try testing.expectEqual(@as(usize, 26), vs.array.items.len);
+    for (vs.array.items, 1..) |v, want| {
+        try testing.expect(v == .integer);
+        try testing.expectEqual(@as(i64, @intCast(want)), v.integer);
+    }
+    const msg = try initializedNotification(a);
+    defer a.free(msg);
+    var q = try parse(a, msg);
+    defer q.deinit();
+    try testing.expect(q.value.object.get("params").? == .object); // **`[]` 면 여기서 죽는다**
+}
+
 test "LSJ15 semanticTokens — initialize capability(range·full·표준 종류)·요청 둘의 id 칸(10e8)·classify (§8.2i)" {
     const a = testing.allocator;
     const init = try initializeRequest(a, "file:///r", 1);

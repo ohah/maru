@@ -44,6 +44,8 @@ pub const State = struct {
 };
 
 /// 이 Term 의 2층이 **지금 문서에 유효한가**. 소비자(밴드 체인·피커·형제 목록)가 층을 고르는 유일한 물음이다.
+/// (`version` 검사는 **이중 방어**다 — 적대적 B6: 편집이 목록을 비우고 낡은 응답은 `onResponse` 가 decode 전에 버리므로 「목록이 차 있는데
+/// version 이 낡은」 상태가 오늘은 못 생긴다. 뜻으로 둔다 — 이 함수 하나만 읽고도 「지금 문서의 것인가」를 알 수 있어야 한다.)
 pub fn fresh(term: *Term) bool {
     const st = &term.rt.editor_symbols;
     return st.list.items.len > 0 and st.version != 0 and st.version == term.rt.editor_lsp_version;
@@ -130,6 +132,6 @@ pub fn onEdit(self: *AppSession, term: *Term) void {
         st.cleared_by_edit += 1;
         self.metal_dirty = true;
     }
-    st.version = 0;
+    st.version = 0; // 이중 방어(적대적 B2 — 위 비움만으로 `fresh` 는 이미 거짓이다; version 은 단조 증가라 되돌아오지 않는다)
     st.dirty = true;
 }

@@ -3205,7 +3205,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         const event_c3_3b2b0_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path(
-                    "tests/session_host_2c3d_c3_3b2b0_boundary.zig",
+                    "tests/session_host_observation_exact_capacity_boundary.zig",
                 ),
                 .target = target,
                 .optimize = b3_optimize,
@@ -3290,7 +3290,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         const event_c3_3b2b1_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path(
-                    "tests/session_host_2c3d_c3_3b2b1_boundary.zig",
+                    "tests/session_host_trusted_preparation_seal_boundary.zig",
                 ),
                 .target = target,
                 .optimize = b3_optimize,
@@ -3368,7 +3368,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         const event_c3_3b2b2_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path(
-                    "tests/session_host_2c3d_c3_3b2b2_boundary.zig",
+                    "tests/session_host_pure_preparation_recipe_boundary.zig",
                 ),
                 .target = target,
                 .optimize = b3_optimize,
@@ -3511,7 +3511,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const event_c3_3b2b3_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_2c3d_c3_3b2b3_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_immutable_pending_preparation_boundary.zig"),
                 .target = target,
                 .optimize = b3_optimize,
             }),
@@ -3637,7 +3637,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const event_c3_3b3_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_2c3d_c3_3b3_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_atomic_settlement_boundary.zig"),
                 .target = target,
                 .optimize = b3_optimize,
             }),
@@ -3650,7 +3650,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         boundary_step.dependOn(&run_event_c3_3b3_boundary_tests.step);
 
         const event_c3_3b5_module = b.createModule(.{
-            .root_source_file = b.path("tests/session_host_2c3d_c3_3b5_red.zig"),
+            .root_source_file = b.path("tests/session_host_close_progress_contract.zig"),
             .target = target,
             .optimize = b3_optimize,
             .imports = &.{
@@ -3731,7 +3731,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const event_c3_3b5_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_2c3d_c3_3b5_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_close_progress_boundary.zig"),
                 .target = target,
                 .optimize = b3_optimize,
             }),
@@ -3859,7 +3859,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         );
         const event_c3_3b4_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_2c3d_c3_3b4_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_semantic_pump_boundary.zig"),
                 .target = target,
                 .optimize = b3_optimize,
             }),
@@ -4165,7 +4165,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
             3,
         );
         const event_2c3e_c1_boundary_module = b.createModule(.{
-            .root_source_file = b.path("tests/session_host_2c3e_c1_boundary.zig"),
+            .root_source_file = b.path("tests/session_host_decoder_borrow_scope_boundary.zig"),
             .target = target,
             .optimize = b3_optimize,
         });
@@ -4198,7 +4198,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
             12,
         );
         const event_2c3e_c2_boundary_module = b.createModule(.{
-            .root_source_file = b.path("tests/session_host_2c3e_c2_boundary.zig"),
+            .root_source_file = b.path("tests/session_host_rpc_typed_decoder_boundary.zig"),
             .target = target,
             .optimize = b3_optimize,
         });
@@ -4210,7 +4210,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
             1,
         );
         const event_2c3e_c3_boundary_module = b.createModule(.{
-            .root_source_file = b.path("tests/session_host_2c3e_c3_boundary.zig"),
+            .root_source_file = b.path("tests/session_host_rx_first_cadence_boundary.zig"),
             .target = target,
             .optimize = b3_optimize,
         });
@@ -4254,7 +4254,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
             1,
         );
         const event_c3_3c_boundary_module = b.createModule(.{
-            .root_source_file = b.path("tests/session_host_2c3d_c3_3c_boundary.zig"),
+            .root_source_file = b.path("tests/session_host_socket_source_zero_boundary.zig"),
             .target = target,
             .optimize = b3_optimize,
         });
@@ -4304,7 +4304,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
             11,
         );
         const event_c3_3b6_boundary_module = b.createModule(.{
-            .root_source_file = b.path("tests/session_host_2c3d_c3_3b6_boundary.zig"),
+            .root_source_file = b.path("tests/session_host_shutdown_layering_boundary.zig"),
             .target = target,
             .optimize = b3_optimize,
         });
@@ -4522,7 +4522,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const control_c1_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_2c3c_c1_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_control_facade_typed_boundary.zig"),
                 .target = target,
                 .optimize = b3_optimize,
             }),
@@ -4576,7 +4576,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const event_c1_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_2c3d_c1_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_event_facade_closed_boundary.zig"),
                 .target = target,
                 .optimize = b3_optimize,
             }),
@@ -4623,7 +4623,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const event_c2_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_2c3d_c2_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_release_leaf_owned_boundary.zig"),
                 .target = target,
                 .optimize = b3_optimize,
             }),
@@ -4654,7 +4654,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const event_c3_1_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_2c3d_c3_1_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_inline_attachment_event_boundary.zig"),
                 .target = target,
                 .optimize = b3_optimize,
             }),
@@ -4702,7 +4702,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const event_c3_2_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_2c3d_c3_2_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_purge_first_drain_boundary.zig"),
                 .target = target,
                 .optimize = b3_optimize,
             }),
@@ -4733,7 +4733,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const event_c3_3_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_2c3d_c3_3_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_confirmed_poison_boundary.zig"),
                 .target = target,
                 .optimize = b3_optimize,
             }),
@@ -4764,7 +4764,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const event_c3_3a1_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_2c3d_c3_3a1_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_event_authority_boundary.zig"),
                 .target = target,
                 .optimize = b3_optimize,
             }),
@@ -4795,7 +4795,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const event_c3_3a2_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_2c3d_c3_3a2_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_dormant_final_admission_boundary.zig"),
                 .target = target,
                 .optimize = b3_optimize,
             }),
@@ -4809,7 +4809,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const event_c3_3a3_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_2c3d_c3_3a3_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_revoke_ordering_activation_boundary.zig"),
                 .target = target,
                 .optimize = b3_optimize,
             }),
@@ -4865,7 +4865,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const event_c3_3b1_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_2c3d_c3_3b1_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_correlation_event_ordering_boundary.zig"),
                 .target = target,
                 .optimize = b3_optimize,
             }),
@@ -5037,7 +5037,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const event_c3_3b2a_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_2c3d_c3_3b2a_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_process_seal_migration_boundary.zig"),
                 .target = target,
                 .optimize = b3_optimize,
             }),

@@ -3,8 +3,10 @@
 //! **왜 있나.** [파일·폴더 네이밍 컨벤션](../docs/project-structure.md)은 「폴더가 domain,
 //! 파일명이 그 안의 한 책임을 표현한다」고 정한다. 제품은 그 규칙을 거의 다 지키는데
 //! (`src/platform/macos/session_host/` 393 개 중 슬라이스 ID 이름은 12 개, 3%) 판정자는
-//! 106 개가 `session_host_2c3d_c3_3b2b3_boundary.zig` 처럼 **그걸 만든 작업 회차**로 이름이 붙어
-//! 있다. 슬라이스 ID 는 책임이 아니라 이력이라, 구현이 끝나면 파일명이 아무것도 안 알려준다.
+//! 처음 셀 때 **108 개**가 `session_host_2d1_boundary.zig` 처럼 **그걸 만든 작업 회차**로 이름이
+//! 붙어 있었다. 슬라이스 ID 는 책임이 아니라 이력이라, 구현이 끝나면 파일명이 아무것도 안 알려준다.
+//!
+//! **지금 남은 수는 아래 `expected_entries` 가 단일 출처다** — 여기 산문에 수를 또 적으면 갈린다.
 //!
 //! **규칙만 적어 두면 안 지켜진다.** 그래서 지금 있는 것을 목록으로 못 박고, 그 목록에 **없는**
 //! 파일이 슬라이스 ID 이름이면 여기서 빨개진다. 목록은 도메인을 만질 때 한 줄씩 빠지고
@@ -29,30 +31,6 @@ const slice_named = [_][]const u8{
     "tests/fixtures/session_host_pre_p5b3_v2_provenance.zig",
     "tests/session_host_2b2e_integration_sentinel.zig",
     "tests/session_host_2b3_sentinel.zig",
-    "tests/session_host_2c3c_c1_boundary.zig",
-    "tests/session_host_2c3d_c1_boundary.zig",
-    "tests/session_host_2c3d_c2_boundary.zig",
-    "tests/session_host_2c3d_c3_1_boundary.zig",
-    "tests/session_host_2c3d_c3_2_boundary.zig",
-    "tests/session_host_2c3d_c3_3_boundary.zig",
-    "tests/session_host_2c3d_c3_3a1_boundary.zig",
-    "tests/session_host_2c3d_c3_3a2_boundary.zig",
-    "tests/session_host_2c3d_c3_3a3_boundary.zig",
-    "tests/session_host_2c3d_c3_3b1_boundary.zig",
-    "tests/session_host_2c3d_c3_3b2a_boundary.zig",
-    "tests/session_host_2c3d_c3_3b2b0_boundary.zig",
-    "tests/session_host_2c3d_c3_3b2b1_boundary.zig",
-    "tests/session_host_2c3d_c3_3b2b2_boundary.zig",
-    "tests/session_host_2c3d_c3_3b2b3_boundary.zig",
-    "tests/session_host_2c3d_c3_3b3_boundary.zig",
-    "tests/session_host_2c3d_c3_3b4_boundary.zig",
-    "tests/session_host_2c3d_c3_3b5_boundary.zig",
-    "tests/session_host_2c3d_c3_3b5_red.zig",
-    "tests/session_host_2c3d_c3_3b6_boundary.zig",
-    "tests/session_host_2c3d_c3_3c_boundary.zig",
-    "tests/session_host_2c3e_c1_boundary.zig",
-    "tests/session_host_2c3e_c2_boundary.zig",
-    "tests/session_host_2c3e_c3_boundary.zig",
     "tests/session_host_2c4_boundary.zig",
     "tests/session_host_2d1_boundary.zig",
     "tests/session_host_2d2_boundary.zig",
@@ -120,7 +98,7 @@ const slice_named = [_][]const u8{
 };
 
 /// 목록 길이. 줄을 지우면 이 수도 함께 줄여야 한다.
-const expected_entries: usize = 92;
+const expected_entries: usize = 68;
 
 /// 파일명 한 토막이 슬라이스 ID 인가 — **숫자와 글자가 섞였고 주제어가 아니면** 그렇다.
 /// `v1`·`v2` 는 픽스처의 버전 표시라 뺀다.

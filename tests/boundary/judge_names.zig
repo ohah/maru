@@ -3,7 +3,7 @@
 //! **왜 있나.** [파일·폴더 네이밍 컨벤션](../docs/project-structure.md)은 「폴더가 domain,
 //! 파일명이 그 안의 한 책임을 표현한다」고 정한다. 제품은 그 규칙을 거의 다 지키는데
 //! (`src/platform/macos/session_host/` 393 개 중 슬라이스 ID 이름은 12 개, 3%) 판정자는
-//! 108 개가 `session_host_2c3d_c3_3b2b3_boundary.zig` 처럼 **그걸 만든 작업 회차**로 이름이 붙어
+//! 106 개가 `session_host_2c3d_c3_3b2b3_boundary.zig` 처럼 **그걸 만든 작업 회차**로 이름이 붙어
 //! 있다. 슬라이스 ID 는 책임이 아니라 이력이라, 구현이 끝나면 파일명이 아무것도 안 알려준다.
 //!
 //! **규칙만 적어 두면 안 지켜진다.** 그래서 지금 있는 것을 목록으로 못 박고, 그 목록에 **없는**
@@ -102,8 +102,6 @@ const slice_named = [_][]const u8{
     "tests/session_host_cr6d_boundary.zig",
     "tests/session_host_cr6d_pixel.zig",
     "tests/session_host_cr6e_boundary.zig",
-    "tests/session_host_cr6e_c1_boundary.zig",
-    "tests/session_host_cr6e_c2_boundary.zig",
     "tests/session_host_cr6e_c3a_boundary.zig",
     "tests/session_host_cr6e_c3b_boundary.zig",
     "tests/session_host_cr6e_c3c_boundary.zig",
@@ -136,7 +134,7 @@ const slice_named = [_][]const u8{
 };
 
 /// 목록 길이. 줄을 지우면 이 수도 함께 줄여야 한다.
-const expected_entries: usize = 108;
+const expected_entries: usize = 106;
 
 /// 파일명 한 토막이 슬라이스 ID 인가 — **숫자와 글자가 섞였고 주제어가 아니면** 그렇다.
 /// `v1`·`v2` 는 픽스처의 버전 표시라 뺀다.

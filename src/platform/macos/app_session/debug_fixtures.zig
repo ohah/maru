@@ -1281,6 +1281,19 @@ pub fn applyForcedEditorHover(self: *AppSession) void {
     _ = editor_ops.hover_client.showAtCaret(self);
 }
 
+/// MARU_FORCE_SYMBOL_PICKER=1 — `⇧⌘O` 심볼 피커를 연 채 둔다(캡처 전용, §7.5 · tooling §8.2o). 2층을 찍으려면 **서버 응답을 기다려야** 하므로
+/// 심볼 2층이 든 뒤에만 연다(`MARU_FORCE_SYMBOL_PICKER=1층` 이면 그 기다림 없이 곧바로 — 두 층을 나란히 찍는 자리).
+pub fn applyForcedSymbolPicker(self: *AppSession) void {
+    const raw = std.c.getenv("MARU_FORCE_SYMBOL_PICKER") orelse return;
+    if (self.chrome_host.symbol_picker.open) return;
+    const term = pane_ops.activePane(self).activeTerm();
+    if (term.kind != .editor) return;
+    const want_lsp = !std.mem.eql(u8, std.mem.span(raw), "1층");
+    if (want_lsp and editor_ops.symbols_client.list(term) == null) return; // 2층이 아직 — 다음 프레임에 다시
+    if (self.chrome_host.notice.open) self.chrome_host.notice.dismiss();
+    self.dispatchAppAction(.toggle_symbol_picker);
+}
+
 /// MARU_FORCE_EDITOR_GOTO_DEF=1 — caret 자리에서 `goto_definition` 을 부른다(캡처 전용, tooling §8.2c). 서버가 뜨기 전에는 요청이 안 나가므로
 /// 매 프레임 되풀이하고, 한 번 움직이거나 알림을 냈으면 손을 뗀다. 작업 공간 복원 알림은 먼저 내린다(hover 훅과 같은 이유).
 pub fn applyForcedEditorGotoDef(self: *AppSession) void {

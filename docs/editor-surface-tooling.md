@@ -1173,13 +1173,22 @@ typescript-language-server 10 ms(**문서 순서가 아니다** — `c`·`Circle
 | **capability** | `textDocument.documentSymbol{dynamicRegistration: false, hierarchicalDocumentSymbolSupport: true, symbolKind.valueSet: 1..26}`. 서버의 `documentSymbolProvider`(bool·객체)가 없으면 2층은 없다 | LSP 3.17 |
 | **요청** | `textDocument/documentSymbol{textDocument}` — **범위가 없다**(문서 단위, `foldingRange` 와 같은 꼴), id `17e8+seq`. 시점: 서버가 ready 된 뒤 한 번, 그 뒤엔 편집이 조용해지고(120 ms) `dirty` 일 때. 한 번에 하나, version 을 단다 | §8.2j 와 같은 시계 |
 | **응답 → 목록** | `DocumentSymbol` 트리를 **문서 순서로 평탄화**한다: `range` → 전체 범위, `selectionRange` → 이름 범위, `start_row`, `depth` 는 **포함 관계로 다시 센다**(서버 nesting 을 그대로 믿지 않는다 — tsgo 가 생성자 안의 파라미터를 형제로 낸다), 정렬은 `(start asc, end desc)`(typescript-language-server 가 순서를 안 지킨다). `kind` 는 `SymbolKind` 정수를 **우리 어휘**로 접는다(표는 한 자리 — `lsp/symbols.zig`) | 실측 |
-| **자기 검산** | 이름 범위에서 읽은 **문서 글자 = 서버가 준 `name`** 일 때만 항목을 든다. 아니면 그 항목을 버린다(낡은 응답·인코딩 오류가 밴드에 「지금 어디」를 거짓으로 적지 못하게) | §7.5 「조용히 거짓말」 |
+| **자기 검산** | 이름 범위에서 읽은 **문서 글자 = 서버가 준 `name`** 일 때만 항목을 든다. 아니면 **그 심볼 `range` 안에서 이름을 찾아** 쓰고(tsgo 는 생성자의 `selectionRange` 를 빈 범위로 낸다), 거기에도 없으면 버린다(낡은 응답·인코딩 오류가 밴드에 「지금 어디」를 거짓으로 적지 못하게) | §7.5 「조용히 거짓말」 · 실측 |
 | **편집 중** | **민다가 아니라 버린다** — 편집 통지가 오면 그 문서의 2층을 비우고 1층으로 돌아간다. 1층은 증분 파싱이라 즉시 옳고, 심볼 체인은 색과 달리 **틀리면 거짓말**이다(semantic 2층이 미는 것과 갈리는 자리) | §7.5 |
 | **어느 층이 이기나** | 2층이 있으면 **통째로** 2층이다(병합하지 않는다 — 항목이 두 배가 되고 어휘가 둘이 된다). 비었거나(`[]`·`null`) 없으면 1층 | 계획 공격 ① |
 | **상한** | 심볼 2,000 · 깊이 32 · 이름 256 byte. 넘으면 거기까지만 든다 | §8.2i 와 같은 규율 |
 | **하지 않는 것** | 평탄 `SymbolInformation[]`(세 서버 모두 안 낸다 — 오면 카운터만 올리고 1층 유지) · `workspace/symbol`(프로젝트 심볼) · `detail` 표시 · `tags`(deprecated 취소선) · 아웃라인 도크(도크 배관이 선행) · 미리보기(N2) | 다음 |
 
-**관측점**: `DSY1~`(순수: 평탄화·포함 depth·정렬·자기 검산·상한·utf-16) · `DSY4~`(제품 경계: ready 뒤 한 번 묻고 밴드 체인이 2층으로 서며, 편집하면 1층으로
+**구현이 계약에 되먹인 것(2026-09-22).** ① **`symbolKind.valueSet` 을 `u8` 배열로 냈더니 JSON 문자열이 됐고**(Zig `Stringify` 의 규칙) tsgo 가
+`cannot unmarshal JSON string into []SymbolKind` 로 **`initialize` 를 통째로 거부**해 세션 전체가 죽었다 — 진단도 힌트도 안 왔다. `i32` 로 고쳤다.
+**같은 부류의 두 번째 사고**(§8.2a 의 `initialized` params `[]`)이고, 둘 다 `MARU_LSP_SERVER_OVERRIDE` 의 `tee` 래퍼로 와이어를 떠서 잡았다 —
+**capability 를 늘릴 때는 제품이 실제로 보낸 프레임을 한 번 읽는다**가 규율이다. ② **`selectionRange` 가 빈 범위인 서버가 있다**(tsgo 의
+생성자: `2:4-2:4`) → 자기 검산이 그 항목을 통째로 버렸다. 이름을 **그 심볼 `range` 안에서 찾아** 쓰고, 거기에도 없을 때만 버린다(위 표 정정).
+③ **1층 provider 를 전제하지 않는다** — 피커의 「연다/못 연다」 판정과 행 만들기가 `st.provider` 를 먼저 요구해서, 문법이 없는 언어에서는 2층이
+있어도 안 열렸다. 2층이 유효하면 1층 상태를 안 본다. ④ 캡처 harness: 강제 상태 훅이 없으면 앱이 **유휴로 프레임을 멈춰** 서버 응답 뒤의
+tick 이 아예 안 돈다(프레임 6개로 끝났다) — 2층 캡처는 `MARU_FORCE_EDITOR_CARET` 같은 훅과 함께 찍는다.
+
+**관측점**: `DSY1~DSY3`·`DSY6`(순수: 평탄화·포함 depth·정렬·자기 검산·빈 `selectionRange` 회복·provider·평탄 꼴·상한) · `DSY4~`(제품 경계: ready 뒤 한 번 묻고 밴드 체인이 2층으로 서며, 편집하면 1층으로
 돌아갔다가 조용한 뒤 다시 묻는다; 낡은 version·provider 없음·빈 응답). 가짜 서버 표식은 `DSYNONE`(빈 목록)·`DSYFLAT`(평탄 꼴)·`DSYSTALL`(무응답),
 `MARU_FAKE_LSP_NOSYMCAP=1`(provider 없음).
 

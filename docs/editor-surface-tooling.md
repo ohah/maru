@@ -1138,8 +1138,20 @@ root 밖 행이 실제로 선다(§8.2l 「루트 밖」 제목·고르면 알�
 
 **관측점**: `INL1~INL5`(순수 `content`: 전개·열·hit·행 수·런 색) · `INL6~INL8`(순수 `inlay`: decode·provider·shift) · `INL9`(제품 경계: 요청 창·정렬·프레임
 글자·dim 색·hit·caret·편집 밀기·120 ms·낡은 version·undo 는 밀기·`null` 은 비움·L3 폭) · `INL10`(provider 없음·오류 되묻기·null·랩 행 증가) ·
-`INL11`(refresh 를 `null` 로 답하고 되묻기) · `LSPB9` ⑷(TS 설정 블롭 1회) · `LSJ*`(id 칸 16e8). 가짜 서버 표식 `INLSTALL`·`INLERR`·`INLNULL`·`INLREFRESH`,
-`MARU_FAKE_LSP_NOINLAYCAP=1`, 범위 끝이 줄 수를 넘으면 `-32603`(rust-analyzer 꼴).
+`INL11`(refresh 를 `null` 로 답하고 되묻기 · refresh 뒤 오류에도 `dirty`) · `INL12`(순수: 랩 경계에 걸친 힌트에서 행 시작이 머문다 · cluster 안 앵커는
+전개·열 둘 다 버린다) · `INL13`(창 밖 스크롤이면 version 이 같아도 되묻고 덮인 안에선 안 묻는다) · `LSPB9` ⑷(TS 설정 블롭 1회) · `LSJ*`(id 칸 16e8).
+가짜 서버 표식 `INLSTALL`·`INLERR`·`INLNULL`·`INLREFRESH`, `MARU_FAKE_LSP_NOINLAYCAP=1`, 범위 끝이 줄 수를 넘으면 `-32603`(rust-analyzer 꼴),
+`initialized` 의 `params` 가 객체가 아니면 `ServerNotInitialized`(tsgo 꼴).
+
+**적대적 검증(2026-09-22, 1~6회차 · 변이 54)**: 1회차 순수 `content` 14 → 생존 6 · 2회차 순수 `inlay` 11 → 0 · 3회차 제품 `editor_inlay` 15 → 0 ·
+4회차 배선 13 → 2 · 5회차 재실행 16 → 5 · 6회차 재실행 2 → 0. **결함 하나를 잡았다**: A11 「행 시작 걸음이 걸친 힌트에서 머물지 않는다」가
+살아남아 판정자를 세우니(`INL12`) **제품이 빨갰다** — `inlayColsAt` 가 지나가며 첨자를 올려, 머무는 행에서 다음 행이 같은 힌트를 다시 못 먹고
+힌트 폭만큼 앞 byte 에서 시작했다(`abcd: intefgh` 6열 랩의 셋째 행이 `h` 가 아니라 줄 끝). 걸치면 첨자도 되돌린다(A13 이 그 회귀). 판정자 보강
+아홉: `INL2` seek(A8) · `INL9` 줄 예산 셋(C7·C14·C15)·줄 끝 힌트 열(C8)·그려진 caret 막대 열(D10)·호버 앵커 열(D7)·L3 폭(C11) · `INL10` 행 수 캐시
+세대(D3) · `INL13`(C2). **등가 셋**(코드 주석): A5 hit 걸음의 행 끝 break(없어도 루프 뒤 `return i`) · A10 화면 밖 힌트 폭 누적(호출자가 곧 멈춘다) ·
+A9 `view()` 의 seek 가드(`expandLine` 가드와 이중 방어 — 하나만 지우면 등가). 러너 오탐 둘을 겪었다(§ 검증 도구부터 검증): 내가 도중에 넣은 판정자의
+컴파일 오류가 3회차 일곱을 「생존」으로, nohup 의 `external_tty` 거짓 실패가 1회차 여섯을 「죽음」으로 찍었다 — 변이마다 원문 출력을 남기고 첫 FAIL 이
+의도한 판정자인지 읽었다. C1·C2·C7·C11·D3·D5·D6·D9 는 첫 꼴이 컴파일 오류(미사용 변수)라 의미 변이로 바꿔 다시 돌렸다.
 
 ### 8.3 관측 가능성과 민감정보
 

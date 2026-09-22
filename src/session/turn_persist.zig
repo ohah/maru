@@ -449,7 +449,7 @@ fn sampleTurn(gpa: std.mem.Allocator) !turn_capture.Turn {
     var t: turn_capture.Turn = .{ .shell_calls = 2 };
     try t.entries.append(gpa, .{ .path = try gpa.dupe(u8, "src/a.zig"), .trigger = .edit, .before = .{ .text = try gpa.dupe(u8, "old\n") }, .after = .{ .text = try gpa.dupe(u8, "new \"q\"\n") }, .before_trusted = true });
     try t.entries.append(gpa, .{ .path = try gpa.dupe(u8, "big.bin"), .trigger = .read, .before = .{ .folded = .{ .hash = 0xabc, .size = 5_000_000, .why = .too_large } }, .after = .{ .unknown = .budget } });
-    try t.entries.append(gpa, .{ .path = try gpa.dupe(u8, "새 파일.md"), .trigger = .edit, .before = .absent, .after = .{ .text = try gpa.dupe(u8, "old\n") }, .shell_diff = true });
+    try t.entries.append(gpa, .{ .path = try gpa.dupe(u8, "new file.md"), .trigger = .edit, .before = .absent, .after = .{ .text = try gpa.dupe(u8, "old\n") }, .shell_diff = true });
     return t;
 }
 
@@ -490,7 +490,7 @@ test "turn_persist: 링 + 봉인 턴이 텍스트를 지나 같은 모양으로 
     try testing.expect(std.mem.startsWith(u8, text, header ++ "\nsession id=\"S-01\" repo=\"mac:/r/ep o/\" missed=4 history-evicted=1\n"));
     try testing.expect(std.mem.indexOf(u8, text, "snapshot tree=\"aaaa\"") != null);
     try testing.expect(std.mem.indexOf(u8, text, "title=\"제목 \\\"인용\\\"\\n둘째 줄\"") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "entry path=\"새 파일.md\" trigger=edit before=absent after=blob:") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "entry path=\"new file.md\" trigger=edit before=absent after=blob:") != null);
     // 사본 본문은 텍스트에 없다.
     try testing.expect(std.mem.indexOf(u8, text, "new \"q\"") == null);
 

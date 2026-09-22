@@ -23,6 +23,8 @@ pub const ChangeKind = enum(u8) {
     dock,
     explorer_roots,
     scm_base,
+    /// 에이전트 탭이 보이는 «최근 세션» 이 바뀜(AT7 — window 줄의 `last-agent-session`).
+    agent_session,
     runtime_binding,
     window_frame,
     active_window,

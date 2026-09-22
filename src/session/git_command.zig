@@ -146,7 +146,14 @@ pub const Kind = enum {
     /// diff 본문 한쪽(원본)을 통째로: `git show <spec>`. spec은 `blobSpec`이 만든 `HEAD:<경로>` 또는 `:<경로>`다.
     /// **worktree 쪽은 이 경로로 읽지 않는다** — 디스크 파일을 그대로 읽으면 되고, git을 한 번 덜 띄운다.
     show_blob,
+    /// 되살린 턴 링의 tree 들이 **아직 있나**(AT7 — 계약 §6.3): `git show --format= --no-patch <tree>…`. 하나라도 없으면
+    /// exit 128 이라 **한 번에** 답이 난다(`rev-parse` 는 없는 40-hex 도 되돌려 주고, `cat-file -e` 는 인자를 하나만
+    /// 받는다 — 실측 2026-09-22). 출력은 각 tree 의 최상위 목록뿐이라 작다. rev 들은 `arg` 에 공백으로 붙여 넘긴다(≤ `tree_exists_max`).
+    tree_exists,
 };
+
+/// `tree_exists` 가 한 번에 묻는 tree 수 상한 — 링 용량(`turn_snapshot.capacity`)과 같다. argv 예약(kind 별 최대 10)에 든다.
+pub const tree_exists_max: usize = 8;
 
 /// 워크트리 하나. 문자열은 전부 `text`를 빌린다(할당 없음).
 pub const Worktree = struct {
@@ -1009,6 +1016,21 @@ pub fn build(kind: Kind, git_exe: []const u8, repo: []const u8, arg: ?[]const u8
             buf[n] = arg orelse "";
             n += 1;
         },
+        .tree_exists => {
+            buf[n] = "show";
+            n += 1;
+            buf[n] = "--format=";
+            n += 1;
+            buf[n] = "--no-patch";
+            n += 1;
+            var it = std.mem.tokenizeScalar(u8, arg orelse "", ' ');
+            var k: usize = 0;
+            while (it.next()) |rev| : (k += 1) {
+                if (k >= tree_exists_max) break;
+                buf[n] = rev;
+                n += 1;
+            }
+        },
     }
     return buf[0..n];
 }
@@ -1798,4 +1820,23 @@ test "원격 파일 읽기: 원격에서 자르고, 절대경로만 받는다 (R
     // dest·socket 검증도 같은 자리를 지난다.
     try std.testing.expect(buildRemoteFileRead("/srv/app", .{ .dest = "-oProxyCommand=id", .control_path = "/tmp/ctl" }, &buf, &cmd) == null);
     try std.testing.expect(buildRemoteFileRead("/srv/app", .{ .dest = "user@host", .control_path = "ctl" }, &buf, &cmd) == null);
+}
+
+test "tree_exists: tree 들을 각각의 인자로 싣고 상한을 넘기지 않는다 (AT7)" {
+    var buf: [max_argv][]const u8 = undefined;
+    const argv = build(.tree_exists, "/usr/bin/git", "/repo", "aaaa111 bbbb222 cccc333", &buf);
+    var seen: usize = 0;
+    var show_at: ?usize = null;
+    for (argv, 0..) |a, i| {
+        if (std.mem.eql(u8, a, "show")) show_at = i;
+        if (std.mem.eql(u8, a, "aaaa111") or std.mem.eql(u8, a, "bbbb222") or std.mem.eql(u8, a, "cccc333")) seen += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), seen);
+    try std.testing.expect(show_at != null);
+    try std.testing.expectEqualStrings("--format=", argv[show_at.? + 1]);
+    try std.testing.expectEqualStrings("--no-patch", argv[show_at.? + 2]);
+    // 9개를 주면 8개까지만.
+    const nine = "a1 a2 a3 a4 a5 a6 a7 a8 a9";
+    const argv9 = build(.tree_exists, "/usr/bin/git", "/repo", nine, &buf);
+    try std.testing.expectEqualStrings("a8", argv9[argv9.len - 1]);
 }

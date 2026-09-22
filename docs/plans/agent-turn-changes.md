@@ -1361,6 +1361,33 @@ agent-hooks` 를 돌린다 — 지금은 `~/.local/bin/maru`, 09-03 빌드)가 �
 **사용자 결정(2026-09-22)**: ⑴ 위치 `~/.cache/maru/turn-rings/` · TTL **7일** ⑵ 손상·소실은 **세션 통째로 접는다**(C) ⑶ «최근 세션» 은
 **`workspace.v1` 의 window 줄**(창 상태).
 
+**구현 ✅ (2026-09-22)** — 조각 1 `session/turn_persist.zig`(순수: `Manifest` ↔ `ring.v1` 텍스트, `SideRef` 로 사본 본문을 blob 해시로 치환,
+`Store.adoptSealed` 로 새 id, 손상은 통째로 거절 — 판정자 3) · 조각 2 `app_session/turn_store.zig`(0700/0600 · 임시 → rename · blob 있으면
+건너뜀 · manifest 가 안 가리키는 blob sweep · 손상 시 디렉터리째 삭제 · 7일 sweep · 안전한 세션 id 만 — 판정자 3, 실제 tmp 디렉터리) ·
+조각 3 배선 `app_session/turn_ring_persist.zig`(봉인 tick·`markFiles` 뒤 `persist`, 스냅샷 결과의 `ringFor` 앞 `maybeRestore`,
+`RingMap.adopt/expire/wasExpired`, git 러너의 `submitTreeCheck`(`show --format= --no-patch <tree>…` — 실측: `rev-parse` 는 없는 40-hex 도
+되돌리고 `cat-file -e` 는 인자 하나만 받는다) 결과가 «없다» 면 세션 통째로 + «저장된 턴 기록이 오래되어 사라졌습니다»(`scm_turns_expired`),
+`workspace.v1` window 줄 `last-agent-session`(`rememberAgentSession` 이 `workspaceChanged(.agent_session)` — 이것 없이는 체크포인트가
+안 돈다: 실기 1회차가 잡았다), 창 열 때 «최근 세션» 미리 되살리기 + 7일 sweep; 테스트는 `test_allow`·`test_base` 게이트 — 배선 판정자 1).
+**실기(`MARU_E2E_RESTART=1`)**: 첫 실행에서 claude 한 턴 → `turn-rings/<sid>/ring.v1`(2 스냅샷, 원격이라 사본은 `unknown:remote`) →
+앱을 껐다 켬(같은 HOME) → `last-agent-session` 이 창 상태로 돌아와 링이 첫 이벤트 전에 되살아남 → 같은 세션(`claude -c`)이 한 턴 더 →
+에이전트 탭에 **두 턴이 순서대로**(«2개 파일 · ✎ 2» 13:05 아래, «1개 파일 · ✎ 1» 13:08 위), `ring.v1` 3 스냅샷.
+실기가 잡은 것 둘: ⓐ `last-agent-session` 이 안 적혔다 — 체크포인트는 `workspaceChanged(kind)` 로만 돌아 새 `ChangeKind.agent_session`
+이 필요했다. ⓑ 첫 e2e 설계(재시작 뒤 새 `claude -p`)는 **새 세션 id** 라 링이 갈렸다 — 그것도 설계대로의 동작이고, 되살리기 증명에는
+`claude -c`(같은 세션) 가 맞다.
+
+**적대적 3회 (2026-09-22, 머지 전)** — 1회차 뮤턴트 P1 blob 해시 검증 안 함 · P2 손상 manifest 안 지움 · P4 되살린 뒤 tree 확인 안 걺 ·
+P5 «없다» 에 expire 안 함 · P6 expire 가 «밀림» 자취로 · P8 7일 sweep 이 mtime 안 봄 잡힘; **P3 되살릴 때 새 id 를 안 붙임 생존** — 새 창의
+첫 id(1)가 옛 id(1)와 **우연히 같았다** → 창 1 에 버릴 턴을 먼저 들여 id 를 2 로 만들어 잡음; **P7 `adopt` 가 있는 항목을 덮음** 은 배선
+판정자가 `maybeRestore` 의 앞 가드에서 끝나 못 보고 순수 `RingMap.adopt` 판정자가 잡는다(전체 test). 2회차 실측(공격 H): `save` 가 1 MiB
+사본 8개에 20~36 ms, manifest 만 12 ms — **fsync 가 아니라 Debug 빌드의 Wyhash 8 MiB** 였다(`writeAtomic` 2 KB 118 µs·`fileExists` ×16
+128 µs·sweep 14 µs); 실제 턴(사본 중앙값 7.8 KB·경로 2)은 1 ms 아래라 워커로 옮기지 않는다, fsync 는 둔다. 임시 파일 이름에 pid 를 붙였다
+(두 창이 같은 세션을 쓰면 같은 임시 파일을 서로 rename 해 갔다 — §6.5). 3회차: **R3b 옛 링에 대한 tree 확인 답을 그대로 적용** — 확인을 낸 뒤
+저장소가 바뀌어 링이 갈렸거나 새 턴이 쌓였으면 «없다» 가 와도 옛 링의 답이라, 그대로 적용하면 멀쩡한 새 링을 접었다 → `PendingCheck` 가
+낼 때의 링 머리를 들고 답이 왔을 때 비교, 다르면 지금 링으로 다시 묻는다(판정자 보강). R3c `applyTurnSummary` 뒤 `persist` 제거 1차 생존
+(판정자가 `persist` 를 직접 불렀다) → 요약 결과를 그 함수로 흘려 잡음. R3d 창 열 때 미리 안 되살림 · R3e 손상 시 디렉터리 안 지움 잡힘.
+`check-boundaries` 가 잡은 것: 순수 판정자의 **test 블록 밖 helper** 에 한국어 리터럴(원장 규율) → ASCII 로.
+
 ### ~~AT5 — 스냅샷 ref 고정~~ (폐기, 2026-08-23)
 
 **계약 §4.4가 이 단계를 통째로 없앴다.** git tree를 안 만들므로 `git gc`로부터 지킬 객체가 없고,

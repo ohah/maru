@@ -21,6 +21,7 @@ const metal_frame = app_session_mod.metal_frame;
 const terminal = maru.terminal; // Page/Home/End 키 이벤트 타입
 const dock_ops = @import("dock.zig");
 const git_ops = @import("git.zig");
+const turn_ring_persist = @import("turn_ring_persist.zig"); // AT7: 링이 바뀌면 디스크도
 const agent_ops = @import("agent.zig");
 const scroll_ops = @import("scroll.zig"); // 목록 스크롤 상한(스크롤바 기하의 max_offset)
 const term_ops = @import("term.zig"); // 명령 주입 대상(활성 터미널) 판정 — P6b
@@ -563,6 +564,14 @@ fn activeTurnRingEvicted(self: *AppSession) bool {
     return self.turn_rings.wasEvicted(identity);
 }
 
+/// 활성 세션의 기록이 **오래되어 사라졌나**(AT7 — 디스크에서 되살렸는데 tree 가 이미 gc 됐다). «밀림» 과 다른 사실이라 다른 문구.
+/// 링이 다시 섰으면(새 턴) 자취가 지워지므로 링이 **없을 때만** 묻는다 — `activeTurnRingEvicted` 와 같은 규율.
+fn activeTurnRingExpired(self: *AppSession) bool {
+    const identity = git_ops.activeOrLastSessionIdentity(self);
+    if (identity.len == 0) return false;
+    return self.turn_rings.wasExpired(identity);
+}
+
 /// 활성 Term 에 **에이전트는 붙어 있는데 신원이 없나**. 그 조합이 곧 «훅 모드가 아니다» 다(§6.1).
 fn agentPresentWithoutIdentity(self: *AppSession) bool {
     if (!self.surface_initialized) return false;
@@ -667,6 +676,8 @@ fn projectAgentTurns(self: *AppSession, arena: std.mem.Allocator) ?Projection {
                 maru.i18n.t(.scm_turns_need_hooks)
             else if (evicted)
                 maru.i18n.t(.scm_turns_evicted)
+            else if (active_ring == null and activeTurnRingExpired(self))
+                maru.i18n.t(.scm_turns_expired)
             else
                 maru.i18n.t(.scm_no_turns),
         };
@@ -2829,12 +2840,12 @@ pub fn pumpCommitFiles(self: *AppSession) void {
 ///   「이 기계의 기록」으로 읽히고 그 자리는 RS7-0 이 비워 두기로 했다.
 /// - 원격 링 — **그 기계**의 control socket 으로 간다(활성 저장소와 무관하다 — tree 는 거기에만 있다). 소켓이
 ///   없으면 `.unavailable` — 로컬로 떨어뜨리면 원격 경로를 로컬 git 에 넘긴다(RS2 1회차의 그 함정).
-const TurnReadTarget = union(enum) {
+pub const TurnReadTarget = union(enum) {
     read: struct { repo: []const u8, remote: ?maru.session.git_command.Remote },
     unavailable,
 };
 
-fn turnReadTarget(self: *AppSession, identity: []const u8, ctl_buf: []u8) TurnReadTarget {
+pub fn turnReadTarget(self: *AppSession, identity: []const u8, ctl_buf: []u8) TurnReadTarget {
     const key = self.turn_rings.repoFor(identity);
     const machine = maru.session.turn_snapshot.machineOf(key);
     if (machine.len == 0) {
@@ -2935,7 +2946,7 @@ pub fn pumpTurnSummaries(self: *AppSession) void {
 
 /// 요약 결과를 링에 적는다. **실패해도 «읽었다»로 표시한다** — 안 그러면 같은 턴을 매 tick 다시 물어
 /// 프로세스를 무한히 띄운다. 그때 수는 0이고, 화면은 0을 그리지 않으므로 그 줄만 요약 없이 선다.
-fn applyTurnSummary(self: *AppSession, ok: bool, text: []const u8) void {
+pub fn applyTurnSummary(self: *AppSession, ok: bool, text: []const u8) void {
     self.scm_turn_summary_inflight = 0;
     const head = self.scm_turn_summary_head orelse return;
     var count: u32 = 0;
@@ -2951,6 +2962,7 @@ fn applyTurnSummary(self: *AppSession, ok: bool, text: []const u8) void {
     if (self.scm_turn_summary_session) |sid| {
         const joined: ?u32 = if (ok) joinedEditedCount(self, head, sid, text) else null;
         if (self.turn_rings.findMut(sid)) |ring| ring.markFiles(head, count, joined);
+        turn_ring_persist.persist(self, sid); // 파일 수·`✎` 가 뒤늦게 왔다 — 디스크도 따라간다(AT7)
     }
     self.allocator.free(head);
     self.scm_turn_summary_head = null;

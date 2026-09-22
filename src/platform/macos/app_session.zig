@@ -6447,6 +6447,10 @@ pub const AppSession = struct {
     /// **힙을 든다** — 이웃 `turn_rings` 가 고정 배열인 것은 스냅샷이 고정 크기이기 때문이고, 파일 내용은
     /// 길이가 무계다. 해제는 `Store.sweep` 이 **도달성**으로 한다(`ring.push` 직후 한 자리에서).
     turn_captures: maru.session.turn_capture.Store = .{},
+    /// AT7: 되살린 링의 tree 존재 확인이 걸린 세션들(한 번에 하나 낸다). 창 수명.
+    turn_tree_checks: [maru.session.turn_snapshot.max_sessions]@import("app_session/turn_ring_persist.zig").PendingCheck = @splat(.{}),
+    /// AT7: 7일 sweep 은 창당 한 번.
+    turn_rings_swept: bool = false,
     /// 턴 스냅샷용 임시 index 경로. **저장소 밖**이어야 한다(안에 두면 자기가 스냅샷에 잡힌다).
     turn_index_path: ?[]u8 = null,
     /// 요청 시점에 봉인해 둔 캡처 id. `turn_snapshot_key` 와 **같은 자리·같은 이유**다(수확 때 다시
@@ -28143,6 +28147,120 @@ test "훅 원격 프레임: 슬롯 상한에 밀린 pane 은 «+N pane 밀림» 
     };
     try std.testing.expectEqual(max_panes, pane_rows);
     try std.testing.expectEqual(@as(u16, 1), (noticeRow(session.sidebar_rows.items) orelse return error.NoNoticeRow).agent_pane.more);
+}
+
+// [AT7 조각 3] **턴 스냅샷 영속 배선** — 봉인·push 뒤 `persist` 가 디스크에 쓰고, 새 창(재시작)의 첫 조회가 같은 링·같은 사본을
+// 되살리며, tree 확인이 «없다» 로 오면 세션을 통째로 접고 에이전트 탭이 «오래되어 사라졌다» 를 말한다. 창을 열 때 «최근 세션» 은
+// 첫 이벤트 전에 미리 되살아난다.
+test "턴 스냅샷 영속 배선(AT7): 쓰고, 재시작한 창이 되살리고, tree 가 없으면 통째로 접으며 «사라졌다» 로 말한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    const turn_ring_persist = @import("app_session/turn_ring_persist.zig");
+    const turn_store = @import("app_session/turn_store.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var base_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base = base_buf[0..try tmp.dir.realPath(io, &base_buf)];
+    turn_ring_persist.test_allow = true;
+    turn_ring_persist.test_base = base;
+    defer {
+        turn_ring_persist.test_allow = false;
+        turn_ring_persist.test_base = null;
+    }
+    const sid = "0f6c1a2e-aaaa-4bbb-8ccc-ddddeeeeffff";
+
+    // 창 1: 봉인된 사본 + 링 두 칸 → persist.
+    {
+        const s1 = try initSmokeSessionSized(a);
+        defer a.destroy(s1);
+        defer s1.deinit();
+        // 먼저 버릴 턴 하나를 들여 **id 가 1 이 아니게** 한다 — 되살린 창의 새 id 가 우연히 옛 id 와 같으면 «새 id 로 바꾼다» 가
+        // 검증되지 않는다(적대적 1회차 뮤턴트 P3 가 그 우연으로 살아남았다).
+        const filler: maru.session.turn_capture.Turn = .{ .shell_calls = 1 };
+        _ = s1.turn_captures.adoptSealed(a, filler);
+        var turn: maru.session.turn_capture.Turn = .{ .shell_calls = 1 };
+        try turn.entries.append(a, .{ .path = try a.dupe(u8, "src/x.zig"), .trigger = .edit, .before = .{ .text = try a.dupe(u8, "A\n") }, .after = .{ .text = try a.dupe(u8, "B\n") }, .before_trusted = true });
+        const cid = s1.turn_captures.adoptSealed(a, turn);
+        try std.testing.expectEqual(@as(u64, 2), cid);
+        // 저장소 키는 **다른 기계**(`mac1:`)로 둔다 — 그 기계의 소켓이 없어 tree 확인이 실제 git 으로 나가지 않는다(판정자가 답을 심는다).
+        const ring = s1.turn_rings.ringFor(sid, "mac1:/repo/one").?;
+        ring.push(.{ .tree = "1111111111111111111111111111111111111111", .captured_s = 10 });
+        ring.push(.{ .tree = "2222222222222222222222222222222222222222", .captured_s = 20, .title = "두 번째 턴", .turn_key = "t-2", .capture_id = cid });
+        turn_ring_persist.persist(s1, sid);
+        // 파일 수·`✎` 는 **뒤늦게 온다**(요약 결과) — 그 자리(`applyTurnSummary`)도 디스크에 써야 재시작 뒤 «N개 파일» 이 남는다
+        // (적대적 3회차 R3c: 그 호출을 지우면 파일에 files-known=0 이 남는다).
+        s1.scm_turn_summary_head = try a.dupe(u8, "2222222222222222222222222222222222222222");
+        s1.scm_turn_summary_session = try a.dupe(u8, sid);
+        scm_dock_ops.applyTurnSummary(s1, true, ":100644 100644 aaaa bbbb M\tsrc/x.zig\n1\t1\tsrc/x.zig\n");
+        var mp: [std.fs.max_path_bytes]u8 = undefined;
+        const mpath = try std.fmt.bufPrint(&mp, "{s}/{s}/{s}/{s}", .{ base, turn_store.dir_rel, sid, turn_store.manifest_name });
+        try std.testing.expect((std.Io.Dir.cwd().statFile(io, mpath, .{}) catch null) != null);
+    }
+
+    // 창 2(재시작): «최근 세션» 이 창 상태로 돌아오면 첫 이벤트 전에 링이 선다.
+    const s2 = try initSmokeSessionSized(a);
+    defer a.destroy(s2);
+    defer s2.deinit();
+    s2.git_backend = try git_backend_mod.Backend.init(s2.io);
+    git_ops.rememberAgentSession(s2, sid);
+    try std.testing.expect(s2.turn_rings.find(sid) == null);
+    turn_ring_persist.onWindowRestored(s2);
+    const r2 = s2.turn_rings.find(sid) orelse return error.NotRestored;
+    try std.testing.expectEqual(@as(usize, 2), r2.len);
+    try std.testing.expectEqualStrings("2222222222222222222222222222222222222222", r2.latest().?.oid());
+    try std.testing.expectEqualStrings("두 번째 턴", r2.latest().?.titleText());
+    try std.testing.expect(r2.latest().?.files_known);
+    try std.testing.expectEqualStrings("mac1:/repo/one", s2.turn_rings.repoFor(sid));
+    try std.testing.expectEqual(@as(u64, 1), r2.latest().?.capture_id); // 새 창의 첫 id — 옛 2 가 아니다
+    const rt = s2.turn_captures.sealedTurn(r2.latest().?.capture_id) orelse return error.NoCapture;
+    try std.testing.expectEqualStrings("B\n", rt.entries.items[0].after.?.text);
+    try std.testing.expectEqual(@as(u32, 1), rt.edited_count);
+    // tree 확인이 걸렸다(아직 안 냈다 — 저장소가 없어 갈 데가 없다).
+    try std.testing.expectEqualStrings(sid, s2.turn_tree_checks[0].sessionId());
+    // 두 번 되살리지 않는다(메모리가 더 새롭다).
+    try std.testing.expect(!turn_ring_persist.maybeRestore(s2, sid));
+
+    // **옛 링에 대한 답은 적용하지 않는다**(적대적 3회차 R3b): 확인을 낸 뒤 링이 바뀌었으면(여기서는 새 턴이 쌓임) «없다» 가 와도
+    // 접지 않고 지금 링으로 다시 묻는다 — 옛 저장소의 tree 를 새 저장소에 물어 멀쩡한 새 링을 접던 결함.
+    {
+        const c = &s2.turn_tree_checks[0];
+        c.submitted = true;
+        @memcpy(c.latest[0..40], "2222222222222222222222222222222222222222");
+        c.latest_len = 40;
+        s2.turn_rings.findMut(sid).?.push(.{ .tree = "3333333333333333333333333333333333333333", .captured_s = 30 });
+        var stale: git_backend_mod.TreeCheckResult = .{ .session_len = sid.len, .ok = false };
+        @memcpy(stale.session[0..sid.len], sid);
+        try std.testing.expect(s2.git_backend.?.testInjectTreeCheckResult(stale));
+        turn_ring_persist.pump(s2);
+        try std.testing.expect(s2.turn_rings.find(sid) != null); // 안 접혔다
+        try std.testing.expect(!s2.turn_rings.wasExpired(sid));
+        try std.testing.expectEqualStrings(sid, s2.turn_tree_checks[0].sessionId()); // 다시 묻는다
+        try std.testing.expect(!s2.turn_tree_checks[0].submitted);
+        // 다시 낸 것처럼 머리를 맞춰 둔다(저장소가 없어 실제로는 못 낸다).
+        c.submitted = true;
+        @memcpy(c.latest[0..40], "3333333333333333333333333333333333333333");
+        c.latest_len = 40;
+    }
+
+    // tree 가 없다는 답 → 세션 통째로: 링·자취·디스크. 에이전트 탭의 빈 이유는 «사라졌다».
+    var res: git_backend_mod.TreeCheckResult = .{ .session_len = sid.len, .ok = false };
+    @memcpy(res.session[0..sid.len], sid);
+    try std.testing.expect(s2.git_backend.?.testInjectTreeCheckResult(res));
+    turn_ring_persist.pump(s2);
+    try std.testing.expect(s2.turn_rings.find(sid) == null);
+    try std.testing.expect(s2.turn_rings.wasExpired(sid));
+    try std.testing.expect(!s2.turn_rings.wasEvicted(sid));
+    try std.testing.expectEqual(@as(usize, 0), s2.turn_tree_checks[0].len);
+    var mp2: [std.fs.max_path_bytes]u8 = undefined;
+    const mpath2 = try std.fmt.bufPrint(&mp2, "{s}/{s}/{s}/{s}", .{ base, turn_store.dir_rel, sid, turn_store.manifest_name });
+    try std.testing.expect((std.Io.Dir.cwd().statFile(io, mpath2, .{}) catch null) == null);
+    // 디스크가 사라졌으니 다시 되살아나지도 않는다.
+    try std.testing.expect(!turn_ring_persist.maybeRestore(s2, sid));
+
+    // «사라졌다» 는 그 세션이 다시 말하면(새 링) 지워진다.
+    _ = s2.turn_rings.ringFor(sid, "mac1:/repo/one").?;
+    try std.testing.expect(!s2.turn_rings.wasExpired(sid));
 }
 
 // [RA7 조각 5 — 적대적 3회차] **원격 Term 둘이 한 카드에 있어도 pane 행·고지는 각자 것이다.** 낡음 판정의 «에이전트 행 뒤에 붙은

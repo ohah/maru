@@ -12990,8 +12990,15 @@ test "INL9 인레이 힌트 — 서버가 ready 면 색 만들기 자리가 범�
     try testing.expectEqualStrings(" -> void", hints[2].text);
     try testing.expectEqual(term.rt.editor_lsp_version, term.rt.editor_inlay.version);
     try testing.expectEqual(@as(u64, 1), term.rt.editor_inlay.generation);
+    // 줄 예산(§4.1h 「화면 폭의 절반」): 16열 창이면 예산 8 — 둘째 줄은 `p: `(3) 만 들고 ` -> void`(8) 는 뺀다(렌더·hit·L3 폭 셋이 같은 예산).
+    try testing.expectEqual(@as(u32, 3), inlay_client.lineExtraCols(term, 1, 16));
+    try testing.expectEqual(@as(usize, 1), inlay_client.inlaysForLine(term, 1, 16).len);
+    try testing.expectEqual(@as(usize, 1), inlay_client.lineInlays(s, term, 0, 2, 16)[1].len);
+    try testing.expectEqual(@as(u32, 11), inlay_client.lineExtraCols(term, 1, 80));
+    try testing.expectEqual(@as(usize, 2), inlay_client.lineInlays(s, term, 0, 2, 80)[1].len);
     // ⑶ 프레임 — 힌트 글자가 그려지고(`: int`), 그 런은 dim(syntax_comment), `= 1;` 은 힌트 폭 5 만큼 밀린 열에 선다.
     term.rt.editor_selection = .{ .anchor_start = 8, .anchor_end = 8, .focus = 8 }; // `a_hv|` — caret 은 힌트 뒤에 선다
+    s.gpu_quads.clearRetainingCapacity(); // caret 막대 quad 를 이 프레임 것만으로 본다
     var d = appendPaneFrame(s, f.leaf, term) orelse return error.EditorPaneDidNotDraw;
     defer d.dl.deinit(allocator);
     try testing.expect(drawnHasCodepoint(d.dl, ':'));
@@ -13006,6 +13013,18 @@ test "INL9 인레이 힌트 — 서버가 ready 면 색 만들기 자리가 범�
     const cw: f64 = @floatFromInt(geom.cell_w_px);
     const left: f64 = @floatFromInt(geom.body_x + @as(i32, @intCast(geom.content_left_px)));
     const top: f64 = @floatFromInt(geom.body_y);
+    // **그려진 caret 막대**(기본 `bar`, 폭 `caret_width_px`)가 열 13 에 선다 — 힌트 뒤(적대적 D10: 프레임의 caret 열이 힌트를 모르면 8 열).
+    {
+        const want_x: f32 = @floatFromInt(geom.body_x + @as(i32, @intCast(geom.content_left_px)) + 13 * @as(i32, @intCast(geom.cell_w_px)));
+        const thick: f32 = @floatFromInt(chrome_editor.frame.caret_width_px);
+        var found = false;
+        for (s.gpu_quads.items) |q| if (q.w == thick and q.h == @as(f32, @floatFromInt(geom.cell_h_px)) and q.x == want_x) {
+            found = true;
+        };
+        try testing.expect(found);
+    }
+    // 호버 앵커(§8.2b — `bodyAnchorWith`)도 힌트 뒤 글리프 열이다: byte 9(`=`)는 열 14(적대적 D7: hit 저장소를 안 넘기면 9).
+    try testing.expectEqual(geom.body_x + @as(i32, @intCast(geom.content_left_px)) + 14 * @as(i32, @intCast(geom.cell_w_px)), (hover_client.anchorFor(term, 9) orelse return error.NoAnchor).x);
     // caret 자리 = 열 8 + 힌트 5 = 13 (글리프 ` ` 앞). 판정: hit-test 로 되짚는다 — 열 13 의 왼쪽 반 → offset 8, 힌트 칸(열 10) → 앵커 8, 열 7(`v`) → 7.
     try testing.expectEqual(@as(?usize, 8), hitTestBody(term, left + 13 * cw + 1, top + 2));
     try testing.expectEqual(@as(?usize, 8), hitTestBody(term, left + 10 * cw + 3, top + 2));
@@ -13013,6 +13032,15 @@ test "INL9 인레이 힌트 — 서버가 ready 면 색 만들기 자리가 범�
     try testing.expectEqual(@as(?usize, 9), hitTestBody(term, left + 13 * cw + cw - 1, top + 2)); // 열 13 의 오른쪽 반 → 9
     // 둘째 줄: `add(` 4 열 + `p: ` 3 = `1` 이 열 7. 열 5(힌트 안) → 앵커 18(줄 안 4).
     try testing.expectEqual(@as(?usize, 14 + 4), hitTestBody(term, left + 5 * cw + 2, top + @as(f64, @floatFromInt(geom.cell_h_px)) + 2));
+    // 둘째 줄 끝 힌트 ` -> void`(열 17..25) 안을 누르면 앵커 = 줄 끝 byte 28. (hit 만 보면 줄 끝 너머 클릭과 답이 같아 못 가르지만 — 적대적 C8 등가 —
+    // hit 저장소(`inlaysForLine`)는 호버·시그니처 앵커의 열 계산에도 쓰이므로 줄 끝 byte 의 열이 힌트 **뒤** 25 여야 한다.)
+    try testing.expectEqual(@as(?usize, 14 + 14), hitTestBody(term, left + 20 * cw + 2, top + @as(f64, @floatFromInt(geom.cell_h_px)) + 2));
+    {
+        const end_off = [_]u32{14};
+        var end_col = [_]u32{0};
+        chrome_editor.content.columnsAtOffsetsWith("add(1, 2); RET", 4, &end_off, &end_col, std.math.maxInt(u32), inlay_client.inlaysForLine(term, 1, 80));
+        try testing.expectEqual(@as(u32, 25), end_col[0]);
+    }
     // ⑷ 편집 — 앵커 8 에 `x` 를 넣으면 힌트가 밀린다(경계=뒤): 9. 120 ms 안엔 안 묻는다.
     try testing.expect(insertText(s, term, "x"));
     try testing.expectEqual(@as(u64, 1), term.rt.editor_inlay.shifted);

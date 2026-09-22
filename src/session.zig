@@ -164,6 +164,9 @@ pub const editor = struct {
     /// 모른다**.
     pub const column = @import("session/editor/column.zig");
     pub const document = @import("session/editor/document.zig");
+    /// 미저장 편집의 **백업 레코드**(§3.10) — 레코드 모양·파일 이름·주기 정책. 파일을 여는 일은
+    /// platform 이 하고(`app_session/editor_backup.zig`) 이 모듈은 규칙만 안다.
+    pub const backup = @import("session/editor/backup.zig");
     /// 읽어 온 bytes를 문서 + 논리행 인덱스로 묶는다 — 뷰가 필요로 하는 것을 한 번에 준다.
     pub const open = @import("session/editor/open.zig");
     /// N1.5: diff 본문의 줄 대응(§7 — git은 두 쪽 전문만 주고 대응은 여기서 만든다).

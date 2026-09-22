@@ -280,7 +280,7 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 185: CR6d-v2b0b extends the read-only input probe with terminal byte/screen generation counters
 // and adds one synchronous transcript-to-canonical-evidence leaf. Raw inventories are borrowed
 // only for the call; Zig owns reduction and absent-target publication.
-pub const abi_version: u32 = 187;
+pub const abi_version: u32 = 188;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -1237,7 +1237,11 @@ pub const max_status_bar_left_items: usize = 2;
 // **무관하게** 사라진다 — 실측으로 2,500px가 남은 채로 빠졌고, 그것은 `status-bar.md` §3이 정한
 // 폭 규칙이 아니라 배열 상한이라 화면만 봐서는 "폭이 모자랐나 보다"로 읽힌다(그 문서가 금지한
 // 조용한 절단이다). **후보 원장에서 되짚어** 다음 항목이 붙을 때 이 값을 잊지 못하게 한다.
-pub const max_status_bar_right_items: usize = chrome.components.status_bar.right_candidates.len;
+// ⚠️ **id 하나에 항목이 여럿 실리는 갈래가 있다**(2026-09-22 — U4a 가 세 번째를 더하며 드러났다):
+// `editor_degraded` 는 **저하를 모으는 칸**이라 같은 프레임에 셋이 들어갈 수 있다(행 수 세는 중 ·
+// 가로 상한 · **백업 멈춤**). 후보 원장은 id 당 하나를 세므로 그 둘만큼 모자라고, 모자라면 위 문단이
+// 적은 그 사고(폭과 무관한 조용한 절단)가 **꽉 찬 화면에서만** 난다 — 그래서 여기서 되짚어 더한다.
+pub const max_status_bar_right_items: usize = chrome.components.status_bar.right_candidates.len + 2;
 
 // 런타임 폰트 크기 조절(⌘+/⌘-/⌘0). step = ⌘+/⌘- 한 번에 1pt(Ghostty 기본과 동일). 클램프 범위는 보수적으로
 // [6, 72]pt — appearance resolver는 [1,512]를 허용하지만 6pt 미만은 글자가 안 읽히고 72pt 초과는 grid가
@@ -2170,6 +2174,16 @@ const TermRuntime = struct {
     /// ⚠️ **읽기 전용 미러의 `remote_origin_*` 과 다른 값이다.** 그쪽은 「어디서 내려받았나」를 화면에
     /// 적기 위한 표시용이고 그 문서는 못 쓴다. 이쪽은 **쓰는 자리**다.
     editor_remote: ?editor_ops.RemoteDoc = null,
+    /// **미저장 편집의 백업 시계**(§3.10) — 편집이 있었고 아직 안 쓴 상태이면 `dirty`, 그 만기가
+    /// `due_ns` 다. 정책(주기·임계)은 L2 `session.editor.backup` 이 알고, 이 셋은 그 시계의 자리다.
+    editor_backup_dirty: bool = false,
+    editor_backup_due_ns: i128 = 0,
+    /// **지금 디스크에 이 문서의 백업이 있다.** 지우는 자리가 「있는 것만 지우도록」 이 값을 본다 —
+    /// 없는 파일을 지우려 드는 syscall 을 프레임마다 내지 않는다.
+    editor_backup_on_disk: bool = false,
+    /// **백업을 멈췄다**(문서가 저장 상한보다 크다 — §3.10). 상태바 저하 칸이 이 값을 읽는다:
+    /// 조용히 멈추면 사용자는 보호받고 있다고 오해한다.
+    editor_backup_paused: bool = false,
     /// **구문 강조 상태**(§5.3 1층 — tree-sitter 트리와 그 파생 색). 위 셋과 **같은 묶음**이라
     /// 함께 살고 함께 죽는다(`releaseEditorTerm`). grammar가 없으면 안이 비어 있고, 그러면 그
     /// 문서는 끝까지 무색이다 — 실패가 아니라 저하다(§5).
@@ -3440,6 +3454,9 @@ pub const editor_untitled_save_ops = @import("app_session/editor_untitled_save.z
 
 /// C1a — 저장 충돌의 선택(editor-surface.md §4). 확인 수락·alternate 가 이 모듈을 부른다.
 pub const editor_conflict_ops = @import("app_session/editor_conflict.zig");
+
+/// U4a — 미저장 편집의 백업(§3.10). 편집 통지·tick 만기·저장/닫기의 지우기·종료 flush 가 부른다.
+pub const editor_backup_ops = @import("app_session/editor_backup.zig");
 
 // P3-e3-4d 영속 세션 host 연결 — **앱 프로세스 전역**(창별이 아니라). 한 앱에 창을 여러 개 열어도 host 연결은 **하나**를
 // 공유한다(daemon은 serial serve라 연결이 앱당 하나여야 함 — 창마다 연결하면 두 번째 창이 handshake 타임아웃→in-process
@@ -9518,28 +9535,39 @@ pub const AppSession = struct {
     ///
     /// 이 문이 없어서 `⌘W` 한 번에 **저장 안 한 편집이 조용히 사라졌다** — 되돌릴 방법이 없는 종류다.
     pub fn scopeHasUnsavedEditor(self: *AppSession, scope: CloseScope) bool {
-        const paneDirty = struct {
-            fn f(pane: *Pane) bool {
-                for (pane.terms.items) |t| if (editor_ops.isDirty(t)) return true;
-                return false;
+        var dirty: usize = 0;
+        forEachTermInScope(self, scope, &dirty, struct {
+            fn f(n: *usize, t: *Term) void {
+                if (editor_ops.isDirty(t)) n.* += 1;
             }
-        }.f;
-        const tabDirty = struct {
-            fn f(tab: *Tab) bool {
-                for (tab.panes.items) |p| if (paneDirty(p)) return true;
-                return false;
-            }
-        }.f;
-        return switch (scope) {
-            .none => false,
-            .term => editor_ops.isDirty(pane_ops.activePane(self).activeTerm()),
-            .pane => paneDirty(pane_ops.activePane(self)),
-            .tab => |idx| tabDirty(self.tabs.items[idx]),
-            .session => blk: {
-                for (self.tabs.items) |t| if (tabDirty(t)) break :blk true;
-                break :blk false;
+        }.f);
+        return dirty != 0;
+    }
+
+    /// **이 범위가 teardown 할 Term 들** — 「무엇이 닫히나」의 단일 출처다(§3.10 이 백업 지우기를 여기에
+    /// 얹으며 세웠다). dirty 판정·이름 없는 문서 판정·백업 지우기가 **같은 집합**을 봐야 한다:
+    /// 갈리면 「묻고 닫는 대상」과 「지우는 대상」이 어긋나, 안 닫힌 문서의 백업이 사라지거나 그 반대가
+    /// 된다. 예전에는 술어마다 pane/tab 순회를 자기 안에 다시 적고 있었다.
+    ///
+    /// **조기 종료가 없다.** Term 수는 한 자릿수~십수이고, 조기 종료를 두면 「전부/하나라도/각각」을
+    /// 세 벌로 적게 된다 — 그 셋이 갈리는 것이 이 함수가 막으려는 사고다.
+    pub fn forEachTermInScope(
+        self: *AppSession,
+        scope: CloseScope,
+        ctx: anytype,
+        comptime f: fn (@TypeOf(ctx), *Term) void,
+    ) void {
+        switch (scope) {
+            .none => {},
+            .term => f(ctx, pane_ops.activePane(self).activeTerm()),
+            .pane => for (pane_ops.activePane(self).terms.items) |t| f(ctx, t),
+            .tab => |idx| for (self.tabs.items[idx].panes.items) |p| {
+                for (p.terms.items) |t| f(ctx, t);
             },
-        };
+            .session => for (self.tabs.items) |tab| {
+                for (tab.panes.items) |p| for (p.terms.items) |t| f(ctx, t);
+            },
+        }
     }
 
     /// 이 범위의 저장 안 한 편집이 **전부 이름 없는 문서**인가(§3.11 「닫기와 백업」).
@@ -9557,34 +9585,16 @@ pub const AppSession = struct {
     /// 두었는데, 호출자가 이미 같은 것을 물어서 **도달할 수 없는 방어**였고 네 범위 중 하나만 규칙이
     /// 달랐다(적대적 3회차의 변이가 살아남아 드러났다).
     pub fn scopeUnsavedIsAllUntitled(self: *AppSession, scope: CloseScope) bool {
-        const paneAll = struct {
-            fn f(pane: *Pane) bool {
-                for (pane.terms.items) |t| {
-                    if (!editor_ops.isDirty(t)) continue;
-                    if (t.rt.editor_untitled == null) return false;
-                }
-                return true;
+        // 범위가 없으면 거짓이다 — 이 함수 혼자로는 판정하지 않는다는 위 규칙을 값으로 지킨다
+        // (집합이 비면 「전부 그렇다」가 공허하게 참이 된다).
+        if (std.meta.activeTag(scope) == .none) return false;
+        var named: usize = 0;
+        forEachTermInScope(self, scope, &named, struct {
+            fn f(n: *usize, t: *Term) void {
+                if (editor_ops.isDirty(t) and t.rt.editor_untitled == null) n.* += 1;
             }
-        }.f;
-        const tabAll = struct {
-            fn f(tab: *Tab) bool {
-                for (tab.panes.items) |p| if (!paneAll(p)) return false;
-                return true;
-            }
-        }.f;
-        return switch (scope) {
-            .none => false,
-            .term => blk: {
-                const t = pane_ops.activePane(self).activeTerm();
-                break :blk !editor_ops.isDirty(t) or t.rt.editor_untitled != null;
-            },
-            .pane => paneAll(pane_ops.activePane(self)),
-            .tab => |idx| tabAll(self.tabs.items[idx]),
-            .session => blk: {
-                for (self.tabs.items) |t| if (!tabAll(t)) break :blk false;
-                break :blk true;
-            },
-        };
+        }.f);
+        return named == 0;
     }
 
     /// 보류 대상이 실제 닫을 Term들에 실행 중 명령이 있나 — resolveCloseScope(cascade 단일 출처)로 범위를 풀고 검사.
@@ -9682,10 +9692,54 @@ pub const AppSession = struct {
         }
     }
 
+    /// 수락된 닫기가 한 번에 지울 백업 이름의 상한. 편집기 문서를 이보다 많이 **동시에 dirty 로
+    /// 열어 둔 채 닫는** 일은 없고(도크 entry 상한이 그보다 훨씬 작다), 넘치면 **지우지 않고 남긴다** —
+    /// 남은 백업은 다음 실행의 복원 후보일 뿐이고, 반대로 안 닫힌 문서의 백업을 지우면 그것이 손실이다.
+    const max_close_backup_drops = 64;
+
     /// 보류한 닫기를 실제 실행 — confirm_accept(확정)와 requestClose의 "명령 없음" 즉시 경로가 공유한다.
     /// resolveCloseScope(cascade 단일 출처)로 범위를 풀어 그 범위의 leaf teardown으로 디스패치한다 — 판정
     /// (closeTargetHasRunningJob)과 정확히 같은 cascade를 타므로 "묻고 닫는 대상"이 항상 일치한다.
     pub fn executeClose(self: *AppSession, target: PendingClose) void {
+        // **사용자가 수락한 닫기다 — 이 범위의 백업은 사라진다**(§3.10). 확인 문구가 「이 내용은
+        // 사라집니다」라고 약속했으므로 남기면 그 문구가 거짓이 된다. **앱 종료는 이 길로 오지
+        // 않는다** — 그쪽은 남겨서 다음 실행이 되살린다(§3.11).
+        //
+        // **이름을 먼저 뜨고 파일은 닫은 «뒤에» 지운다.** 신원의 문자열은 Term 이 소유하므로
+        // teardown 뒤에 읽으면 해제된 메모리다. 그리고 닫기는 **막힐 수 있다**(보호된 파일 패널) —
+        // 미리 지우면 안 닫힌 문서의 백업이 사라진다. `defer` 가 그 두 조건을 한 번에 만족시킨다.
+        var drop_names: [max_close_backup_drops][maru.session.editor.backup.max_file_name_len]u8 = undefined;
+        var drop_lens: [max_close_backup_drops]u8 = undefined;
+        var drop_count: usize = 0;
+        const Capture = struct {
+            names: *[max_close_backup_drops][maru.session.editor.backup.max_file_name_len]u8,
+            lens: *[max_close_backup_drops]u8,
+            count: *usize,
+        };
+        var capture = Capture{ .names = &drop_names, .lens = &drop_lens, .count = &drop_count };
+        // ⚠️ **에이전트 행 ✕의 좁은 두 범위는 건너뛴다.** `CloseScope` 는 인덱스를 안 실으므로
+        // `.term`·`.pane` 은 **활성** pane 기준으로 풀리는데, 그 ✕ 가 닫는 것은 활성과 무관한 Term 이다
+        // (아래 인덱스 경로가 그래서 따로 있다). 그 범위를 활성 기준으로 훑으면 **닫지도 않은 문서의
+        // 백업을 지운다**. 건너뛰어도 빠지는 것은 없다: 그 둘은 「그 에이전트 Term 하나」이거나
+        // 「그것만 있던 pane」이라 편집기 문서가 들어 있을 수 없다. `.tab`·`.session` 은 인덱스로 풀려
+        // (활성을 안 본다) 그대로 정확하다.
+        const drop_scope: CloseScope = switch (target) {
+            .agent_term => switch (self.resolveCloseScope(target)) {
+                .term, .pane => .none,
+                else => |scope| scope,
+            },
+            else => self.resolveCloseScope(target),
+        };
+        forEachTermInScope(self, drop_scope, &capture, struct {
+            fn f(c: *Capture, t: *Term) void {
+                if (c.count.* >= max_close_backup_drops) return;
+                const name = editor_backup_ops.fileNameIfOnDisk(t, &c.names[c.count.*]) orelse return;
+                c.lens[c.count.*] = @intCast(name.len);
+                c.count.* += 1;
+            }
+        }.f);
+        defer for (0..drop_count) |i| editor_backup_ops.dropName(self, drop_names[i][0..drop_lens[i]]);
+
         // 에이전트 행 ✕는 **활성과 무관한 Term**이라 활성 기준 closeActiveTerm/closeActivePane을 쓸 수 없다 —
         // 인덱스 경로로 직접 닫고, 캐스케이드(마지막 Term→pane→탭)는 closeTermAt이 처리한다.
         if (target == .agent_term) {
@@ -19800,6 +19854,7 @@ pub const AppSession = struct {
         editor_ops.lsp_client.pump(self); // §8.2a: 서버 읽기·문서 동기화 — 스레드 없이 tick 에서
         editor_ops.hover_client.tick(self); // §8.2b: 포인터 정지 → 호버 요청/열기
         editor_ops.references_client.tick(self); // §8.2l: 「지금은 못 답한다」 뒤 되묻기
+        editor_backup_ops.tick(self); // §3.10: 편집이 멎고 debounce 가 지났으면 미저장 내용을 백업한다
         self.advancePendingAppQuitShutdown();
         // end-all target이 source-zero와 ready_remove까지 도달해 종료 승인을 게시한 frame은 더 이상
         // remote maintenance나 Term drain을 실행하지 않는다. 같은 frame의 후속 접근은 deinit이 소유할

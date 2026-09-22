@@ -23,6 +23,12 @@ final class EditorSaveConflictSmokeDriver {
         case conflictReload = "conflict-reload"
         /// 충돌 상자에서 **비교**(`Y` — `primary`) — 비교가 서고 **디스크는 그대로**여야 한다(C1b).
         case conflictCompare = "conflict-compare"
+        /// 저장하지 않고 **앱을 종료한다** — 미저장 내용이 백업에 남아야 한다(U4a, §3.10).
+        ///
+        /// **debounce 가 만기되기 전에 끝낸다**(타이핑 직후 종료) — 그래서 파일이 있다면 그것을 쓴 것은
+        /// tick 이 아니라 **종료 경로의 flush** 다. 헤드리스 판정자는 그 함수를 직접 부르므로
+        /// 「제품 종료가 그것을 부르는가」는 이 프로세스 안에서만 관측된다.
+        case quitBackup = "quit-backup"
 
         init?(environment: [String: String] = ProcessInfo.processInfo.environment) {
             guard let raw = environment["MARU_EDITOR_SAVE_CONFLICT_SMOKE_SCENARIO"] else { return nil }
@@ -75,6 +81,10 @@ final class EditorSaveConflictSmokeDriver {
         /// 일부러 디스크를 건드리지 않으므로 파일만 보면 아무 일도 안 한 것과 구별되지 않는다.
         let compareReady: Bool
     }
+
+    /// **지금 앱을 종료해야 하나.** `quit-backup` 만 참이 된다 — 그 시나리오의 판정은 종료 경로에
+    /// 있으므로, 스모크 시간(20 초)을 기다리면 그 사이 debounce 가 만기돼 **무엇이 썼는지** 갈리지 않는다.
+    var wantsPromptQuit: Bool { scenario == .quitBackup && stage == .done }
 
     private(set) var stage: Stage = .notStarted
     private(set) var failure: String = ""
@@ -160,6 +170,10 @@ final class EditorSaveConflictSmokeDriver {
             case .cleanSave:
                 stage = .saved
                 guard pressKey(.save) else { return fail("save_key_refused") }
+            case .quitBackup:
+                // **저장하지 않는다.** 이 시나리오가 재는 것은 「저장 안 한 것이 남는가」다 —
+                // 종료는 호스트가 이 `done` 을 보고 곧바로 요청한다(debounce 전에).
+                stage = .done
             case .externalConflict, .conflictOverwrite, .conflictReload, .conflictCompare:
                 // 신호를 못 남기면 기다릴 상대가 없다 — budget 을 태우지 말고 바로 말한다.
                 guard announceReady() else { return fail("ready_signal_unwritable") }
@@ -204,6 +218,8 @@ final class EditorSaveConflictSmokeDriver {
                 guard p.overlayOpen else { return fail("no_notice_after_conflict") }
                 // ⑶ **편집이 살아 있다** — dirty 로 남아야 한다.
                 guard p.dirty else { return fail("conflict_left_document_clean") }
+            case .quitBackup:
+                return fail("unexpected_saved_stage") // 이 시나리오는 저장하지 않는다
             case .cleanSave:
                 // 대조군: 저장이 되고 **조용하다**. 이 갈래가 없으면 「전부 거절」도 통과한다.
                 guard now.contains(Self.typed_marker) else { return fail("clean_save_did_not_write") }
@@ -231,7 +247,7 @@ final class EditorSaveConflictSmokeDriver {
                 //    버리지 않는 선택이라 그 둘이 함께 참이어야 한다.
                 guard p.compareReady else { return fail("compare_did_not_open") }
                 guard now == contentOnDisk else { return fail("compare_touched_disk") }
-            case .externalConflict, .cleanSave:
+            case .externalConflict, .cleanSave, .quitBackup:
                 return fail("unexpected_answer_stage")
             }
             stage = .done

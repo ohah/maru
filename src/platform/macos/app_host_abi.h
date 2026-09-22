@@ -9,7 +9,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 187u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 188u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -1464,6 +1464,11 @@ int32_t maru_macos_app_session_serialize_workspace(
     int32_t frame_w,
     int32_t frame_h
 );
+/* v188: 이 창의 편집기 문서 중 **미저장 편집이 있는 것**의 백업을 지금 굳힌다(문서 모델 §3.10).
+   debounce 만으로는 종료 직전 몇 초의 편집이 빠지므로, 종료 경로가 teardown «전에» 창마다 한 번 부른다.
+   실패는 돌려주지 않는다(사용자는 이미 종료를 골랐고 띄울 화면이 없다) — 조용한 보호이므로 실패도 조용하다. */
+int32_t maru_macos_app_session_flush_editor_backups(MaruAppHostSession *session);
+
 /* 앱 전역 checkpoint 연속 실패를 이 창의 비모달 status bar에 투영한다. 0=clear, 1=capture, 2=write. */
 void maru_macos_app_session_set_workspace_checkpoint_failure(MaruAppHostSession *session, uint32_t failure);
 void maru_macos_app_session_enable_workspace_checkpoint_mutations(MaruAppHostSession *session);

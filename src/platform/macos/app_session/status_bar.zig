@@ -710,6 +710,17 @@ pub fn collectStatusBarItems(self: *AppSession, collected: *std.ArrayList(Collec
                     rn += 1;
                 }
             }
+            // ①-b2 저하: **미저장 백업이 멈췄다**(§3.10 — 문서가 저장 상한보다 크다). 조용히 멈추면
+            // 사용자는 보호받고 있다고 오해하므로 저하 칸에 남긴다. 같은 칸의 위 둘과 같은 모양이고,
+            // 「멈췄다」는 백업 tick 이 그 판정을 한 뒤에만 참이다(`editor_backup_paused`).
+            if (active_term.rt.editor_backup_paused and rn < max_status_bar_right_items) {
+                if (buildStatusBarItem(self, icons.codepoint(.hourglass), maru.i18n.t(.editor_backup_paused), bar_cols, fg, icon_fg, .plain)) |dl| {
+                    right_frames[rn] = dl;
+                    right_widths[rn] = @as(u32, dl.size.cols) * self.cell_width_px;
+                    right_ids[rn] = .editor_degraded;
+                    rn += 1;
+                }
+            }
             // ①-c **언어 서버 상태**(tooling §8.2a): 서버 이름표가 있는 문서에만. 저하 계열이라 여기(앞쪽).
             if (rn < max_status_bar_right_items) {
                 if (editor_ops.lsp_client.statusFor(self, active_term)) |view| {

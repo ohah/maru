@@ -489,6 +489,17 @@ surface ... runtime-handle="<32 lowercase host-id>:<32 lowercase runtime-id>" ru
   ([status-bar.md](status-bar.md) §4.3). 자동 복구가 아니라 사용자 개시라 위 두 이유와 충돌하지 않는다.
   **이미 in-process로 열린 Term은 옮기지 않는다** — 옮기는 시늉은 "이어진 세션" 오인을 만들고, 그건 복원
   경로가 loud-fail로 막는 바로 그 손실이다. 재연결이 고치는 것은 **앞으로 열 Term**이다.
+  **다만 «앞으로 열 Term» 은 죽은 host 를 치우고 한 번 다시 붙어 본 뒤에야 in-process 다**(2026-09-22). host 가
+  죽는 흔한 이유는 사고가 아니라 «붙은 게 없어 30 s 뒤 스스로 내려감»(`connection_turn.unattached_idle_deadline_ns`
+  — 복원할 runtime 이 없던 첫 실행)이고, 그 뒤 새 Term 은 host 를 다시 띄우면 keep-alive 그대로다. 실측(사용자
+  workspace, keep-alive on): 그 상태에서 연 세션 10개 + `claude` 9개가 전부 앱의 직계 자식 PTY 였다. 원인은 pool 이
+  죽은 spawn host id 를 계속 들고 있어 `ensureRemoteBackend` 가 «backend 있음 + spawn host 있음» 을 «이미 붙어 있음»
+  으로 읽고 조기 반환한 것 — 위 30 s 재시도도 이 조기 반환에 막혀 **한 번도 launch 로 가지 않았다**. 그래서
+  `createTerm` 의 `runtime_death` 폴백은 ① `evictDeadSpawnHost`(참조가 남으면 `clearSpawnHost` 로 지정만 풂) ②
+  `ensureRemoteBackendNow`(retry 게이트 무시, 실패는 그대로 기록) ③ 새 host 에 다시 spawn, 그것도 실패해야 in-process
+  다. 위 두 이유와 충돌하지 않는다: 새 Term 의 fresh spawn 은 이중 attach 를 만들 수 없고(⑴), 오히려 in-process 와
+  원격이 섞이는 폭을 줄인다(⑵). 판정자 `R3 #3b`(pool 모드, 실제 host 를 죽인 뒤 spawn host 가 치워지고 실패 단계가
+  `runtime_death` 너머로 옮겨 감) · 실제 앱에서 ⌘T 로 새 host 가 뜨고 새 셸이 그 host 의 자식임을 확인했다.
 - Window를 닫거나 Workspace/Term을 다른 Window로 옮기는 것은 먼저 하나의 layout transaction으로 source/target을 검증한
   뒤 manifest 위치만 바꾼다. 성공한 이동은 `runtime-handle`, child pid, scrollback을 바꾸지 않는다.
 - app-wide Quit은 모든 Window의 GUI subscription을 끊는 detach다. 비마지막 Window/Workspace/Term의 명시적 close는 기존

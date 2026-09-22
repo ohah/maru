@@ -597,6 +597,29 @@ pub fn createTerm(
                 (err == error.ConnectionClosed or err == error.WriteFailed or err == error.UnsupportedSpawnContract);
             if (!remote_dead) return err;
             self.markHostConnectFailedError(.runtime_death, err);
+            // **in-process 로 가기 전에 한 번 다시 붙는다.** host 가 죽는 흔한 이유는 사고가 아니라 «붙은 게
+            // 없어 30 s 뒤 스스로 내려감»(복원할 runtime 이 없던 첫 실행)이고, 그 뒤 새 Term 은 host 를 다시
+            // 띄우면 keep-alive 그대로다. 죽은 spawn host 를 pool 에서 치워야 `ensureRemoteBackend` 의
+            // «이미 붙어 있음» 조기 반환을 지나 launch/connect 로 간다. 그것도 실패하면 아래 폴백 그대로.
+            if (app_session_mod.AppSession.evictDeadSpawnHost()) {
+                self.ensureRemoteBackendNow();
+                if (!app_session_mod.host_connect_failed) {
+                    if (app_session_mod.app_remote_backend) |*rb| {
+                        be = rb.backend();
+                        if (be.spawn(.{
+                            .handle = id,
+                            .request = req,
+                            .size = size,
+                            .queue_capacity = queue_capacity,
+                            .initial_config = runtime_config,
+                        })) |respawned| {
+                            break :surface respawned;
+                        } else |retry_err| {
+                            self.markHostConnectFailedError(.runtime_death, retry_err);
+                        }
+                    }
+                }
+            }
             be = termBackend(self); // errdefer·이후 단계가 in-process backend를 쓰도록 갱신.
             break :surface try be.spawn(.{
                 .handle = id,

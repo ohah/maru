@@ -340,6 +340,14 @@ pub fn HostPool(comptime Adapter: type) type {
             return self.spawn_host_id;
         }
 
+        /// spawn host 지정만 푼다 — 항목은 남긴다. 죽은 host 에 아직 runtime 참조가 남아 `remove` 가
+        /// `HostInUse` 일 때 쓴다: 그 항목은 각 runtime 의 펌프가 read_error 로 정리하고, 새 Term 은
+        /// 다른 host 를 띄워 붙어야 하므로 «spawn host 없음» 만 먼저 만든다.
+        pub fn clearSpawnHost(self: *Self) void {
+            self.requireOwner();
+            self.spawn_host_id = null;
+        }
+
         pub fn retain(self: *Self, host_id: u128) !*Adapter {
             try self.ensureOwner();
             const entry = self.entries.getPtr(host_id) orelse return error.UnknownHost;

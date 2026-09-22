@@ -8522,9 +8522,10 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
     defer allocator.free(pool);
 
     // 두 제품 caller는 managed publication으로 전환했고 singleton rollback fixture 3개, C3-3b6 fixture 2개,
-    // bootstrap5 owned-pool settlement fixture 1개만 legacy init을 쓴다.
+    // bootstrap5 owned-pool settlement fixture 1개, R3 #3b(죽은 spawn host 치우고 재시작 시도) fixture 1개만
+    // legacy init을 쓴다.
     try std.testing.expectEqual(
-        @as(usize, 6),
+        @as(usize, 7),
         countOccurrences(app, "RemoteSessionAdapter.initInPlace("),
     );
     try std.testing.expectEqual(

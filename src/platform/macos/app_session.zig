@@ -2194,6 +2194,8 @@ const TermRuntime = struct {
     editor_fold_lsp: editor_ops.fold_lsp_client.State = .{},
     /// 인레이 힌트(§8.2n · §4.1h) — 문서 절대 byte 의 힌트와 렌더용 줄별 창. `editor_syntax` 와 같은 단위로 산다.
     editor_inlay: editor_ops.inlay_client.State = .{},
+    /// 심볼 2층(§8.2o) — 서버가 준 목록과 그 version. 비어 있으면 1층을 쓴다.
+    editor_symbols: editor_ops.symbols_client.State = .{},
     /// 진단 층(§5.4) — 목록(첫 출처: 구문 오류)과 렌더 표. `editor_syntax` 와 같은 단위로 산다.
     editor_diagnostics: editor_ops.diagnostics.State = .{},
     /// LSP 문서 version(§8.2a) — 편집마다 오른다. 0 은 「아직 서버에 안 열었다」.

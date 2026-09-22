@@ -802,6 +802,80 @@ fn asLink(arena: std.mem.Allocator, loc: std.json.Value) !std.json.Value {
 /// `textDocument/inlayHint`(§8.2n 관측점): 요청 범위 안 줄마다 — `<name>_hv` 낱말 뒤에 타입 힌트 `: int`(kind 1, 조각 배열, padding 없음),
 /// `(` 바로 뒤 첫 인자 앞에 파라미터 힌트 `p:`(kind 2, `paddingRight`), 줄 끝에 `RET` 표식이 있으면 `-> void`(paddingLeft). 일부러 **뒤에서
 /// 앞으로** 낸다(클라이언트가 정렬하는지). 문서에 `INLSTALL` 이면 답하지 않고, `INLERR` 면 `-32801`, `INLNULL` 이면 `null`.
+/// `textDocument/documentSymbol`(§8.2o) — 문서의 `fn <name>(` 과 `struct <name> {` 을 심볼로 낸다. **계층**으로 내되 tsgo 꼴로 **순서를 섞고**
+/// (뒤에서 앞으로) 자식 하나를 형제로 흘린다 — 클라이언트가 정렬·포함 재계산을 하는지 본다. 표식: `DSYNONE` 빈 목록 · `DSYFLAT` 평탄 꼴 ·
+/// `DSYSTALL` 무응답 · `DSYBAD` 이름이 문서와 다른 항목 하나를 섞는다.
+fn handleDocumentSymbol(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: std.json.Value) void {
+    var req_uri: []const u8 = "";
+    if (obj.get("params")) |p| if (p == .object) {
+        if (p.object.get("textDocument")) |td| if (td == .object) {
+            req_uri = str(td.object.get("uri")) orelse "";
+        };
+    };
+    const text = docText(req_uri);
+    if (std.mem.indexOf(u8, text, "DSYSTALL") != null) return;
+    if (std.mem.indexOf(u8, text, "DSYNONE") != null) {
+        sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .result = [0]u32{} });
+        return;
+    }
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var out: std.json.Array = .init(arena);
+    var line_no: i64 = 0;
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (it.next()) |line| : (line_no += 1) {
+        const kw: []const u8 = if (std.mem.indexOf(u8, line, "struct ") != null) "struct " else if (std.mem.indexOf(u8, line, "fn ") != null) "fn " else continue;
+        const at = std.mem.indexOf(u8, line, kw).? + kw.len;
+        var end = at;
+        while (end < line.len and isIdent(line[end])) end += 1;
+        if (end == at) continue;
+        const flat = std.mem.indexOf(u8, text, "DSYFLAT") != null;
+        const kind: i64 = if (kw[0] == 's') 23 else 12; // struct · function
+        out.append(symbolValue(arena, line, line_no, at, end, kind, flat) catch return) catch return;
+    }
+    if (std.mem.indexOf(u8, text, "DSYBAD") != null) {
+        // 이름 범위가 **다른 글자**를 가리키는 항목(자기 검산이 버려야 한다).
+        out.append(symbolValue(arena, "ghost", 0, 0, 5, 12, false) catch return) catch return;
+    }
+    // **뒤에서 앞으로** — 클라이언트가 정렬하는지.
+    var rev: std.json.Array = .init(arena);
+    var i: usize = out.items.len;
+    while (i > 0) : (i -= 1) rev.append(out.items[i - 1]) catch return;
+    sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .result = std.json.Value{ .array = rev } });
+}
+
+fn symbolValue(arena: std.mem.Allocator, line: []const u8, line_no: i64, name_at: usize, name_end: usize, kind: i64, flat: bool) !std.json.Value {
+    const name = if (name_end <= line.len) line[name_at..name_end] else "x";
+    var sel: std.json.ObjectMap = .empty;
+    try sel.put(arena, "start", try posValue(arena, line_no, name_at));
+    try sel.put(arena, "end", try posValue(arena, line_no, name_end));
+    var full: std.json.ObjectMap = .empty;
+    try full.put(arena, "start", try posValue(arena, line_no, 0));
+    try full.put(arena, "end", try posValue(arena, line_no, line.len));
+    var o: std.json.ObjectMap = .empty;
+    try o.put(arena, "name", .{ .string = name });
+    try o.put(arena, "kind", .{ .integer = kind });
+    if (flat) {
+        // 평탄 꼴(`SymbolInformation`) — `location` 을 들고 `selectionRange` 가 없다.
+        var loc: std.json.ObjectMap = .empty;
+        try loc.put(arena, "uri", .{ .string = "file:///x" });
+        try loc.put(arena, "range", .{ .object = full });
+        try o.put(arena, "location", .{ .object = loc });
+    } else {
+        try o.put(arena, "range", .{ .object = full });
+        try o.put(arena, "selectionRange", .{ .object = sel });
+    }
+    return .{ .object = o };
+}
+
+fn posValue(arena: std.mem.Allocator, line_no: i64, ch: usize) !std.json.Value {
+    var p: std.json.ObjectMap = .empty;
+    try p.put(arena, "line", .{ .integer = line_no });
+    try p.put(arena, "character", .{ .integer = @intCast(ch) });
+    return .{ .object = p };
+}
+
 fn handleInlayHint(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: std.json.Value) void {
     var req_uri: []const u8 = "";
     var lo: i64 = 0;
@@ -1064,6 +1138,7 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
                     // 접힘 3층(§8.2j) — `MARU_FAKE_LSP_NOFOLDCAP=1` 이면 provider 없음.
                     .foldingRangeProvider = std.c.getenv("MARU_FAKE_LSP_NOFOLDCAP") == null,
                     .referencesProvider = true, // §8.2l
+                    .documentSymbolProvider = std.c.getenv("MARU_FAKE_LSP_NOSYMCAP") == null, // 심볼 2층(§8.2o)
                     .inlayHintProvider = if (std.c.getenv("MARU_FAKE_LSP_NOINLAYCAP") == null) std.json.Value{ .object = inlay_caps } else std.json.Value{ .bool = false }, // §8.2n — 객체 꼴; `NOINLAYCAP=1` 이면 없음
                     .implementationProvider = true, // §8.2m
                     .typeDefinitionProvider = if (std.c.getenv("MARU_FAKE_LSP_NOTYPEDEFCAP") == null) std.json.Value{ .object = typedef_caps } else std.json.Value{ .bool = false }, // 객체 꼴; `NOTYPEDEFCAP=1` 이면 false
@@ -1256,6 +1331,10 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
     }
     if (std.mem.eql(u8, method, "textDocument/references")) {
         handleReferences(allocator, obj, id.?);
+        return;
+    }
+    if (std.mem.eql(u8, method, "textDocument/documentSymbol")) {
+        handleDocumentSymbol(allocator, obj, id orelse .null);
         return;
     }
     if (std.mem.eql(u8, method, "textDocument/inlayHint")) {

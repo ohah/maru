@@ -95,6 +95,7 @@ pub const code_action_client = @import("editor_code_action.zig");
 pub const semantic_client = @import("editor_semantic.zig");
 pub const fold_lsp_client = @import("editor_fold_lsp.zig");
 pub const inlay_client = @import("editor_inlay.zig");
+pub const symbols_client = @import("editor_symbols.zig");
 /// 접힘 범위를 낸 층(§4 의 세 소스).
 pub const FoldSource = enum { indent, syntax, lsp };
 pub const workspace_edit_client = @import("editor_workspace_edit.zig");
@@ -598,7 +599,8 @@ pub fn headerBreadcrumb(self: *AppSession, term: *Term, path: []const u8) []cons
     const doc = term.rt.editor_doc orelse return path;
     const sel = term.rt.editor_selection orelse return path;
     const focus = @min(sel.focus, doc.file.content.len);
-    return syntax_color.breadcrumb(&term.rt.editor_syntax, self.allocator, path, doc.file.content, focus);
+    // **2층이 유효하면 그것**(§8.2o) — 편집이 나면 2층이 비고 1층으로 돌아간다.
+    return syntax_color.breadcrumb(&term.rt.editor_syntax, self.allocator, path, doc.file.content, focus, symbols_client.list(term));
 }
 
 /// 렌더에 넘길 줄별 가상 텍스트 창(§4.1h) — `syntaxColors` 와 같은 축(창 앞 줄부터 256줄). 줄당 폭 예산은 지난 프레임의 본문 열 수로(첫 프레임은 pane 폭 근사).
@@ -674,6 +676,7 @@ fn syntaxColors(self: *AppSession, term: *Term) []const []const chrome_editor.co
         const last_src = syntax_color.sourceLineFor(term.rt.editor_visible_numbers, first + count - 1) orelse (first + count - 1);
         semantic_client.tick(self, term, first_src, last_src);
         inlay_client.tick(self, term, first_src, last_src); // 인레이 힌트(§8.2n) — 같은 창
+        symbols_client.tick(self, term); // 심볼 2층(§8.2o) — 문서 단위라 창과 무관하다
     }
     return syntax_color.lineColorsWith(
         &term.rt.editor_syntax,
@@ -9232,6 +9235,7 @@ fn refreshAfterEdit(self: *AppSession, term: *Term, edit: ?syntax_color.EditSpan
     // 이미 갱신해 두었다(줄 배열 `editor_lines`와는 다른 축이다).
     // semantic tokens 2층도 같은 자리에서 민다(§8.2i 「편집 중」) — 범위를 모르면 버린다.
     if (edit) |e| semantic_client.onEdit(self, term, e.start, e.old_end, e.new_end) else semantic_client.onEdit(self, term, null, 0, 0);
+    symbols_client.onEdit(self, term); // 심볼 2층은 **버린다**(§8.2o — 낡은 체인은 「지금 어디」에 거짓말이다)
     fold_lsp_client.onEdit(self, term); // 3층은 조용 시계만(§8.2j 「편집 중」) — 범위는 아래 ⑵ 의 `dropFoldState` 가 놓는다
     if (edit) |e| inlay_client.onEdit(self, term, e.start, e.old_end, e.new_end) else inlay_client.onEdit(self, term, null, 0, 0); // 힌트 밀기(§4.1h — 경계 = 뒤)
     if (edit) |e|
@@ -9569,6 +9573,7 @@ pub fn releaseEditorTerm(self: *AppSession, term: *Term) void {
     term.rt.editor_syntax.deinit(self.allocator);
     term.rt.editor_semantic.deinit(self.allocator);
     term.rt.editor_inlay.deinit(self.allocator); // 인레이 힌트도 문서와 함께(§8.2n)
+    term.rt.editor_symbols.deinit(self.allocator); // 심볼 2층도(§8.2o)
     term.rt.editor_fold_lsp = .{}; // 3층 대기 상태도 문서와 함께(`editor_lsp_version = 0` 과 같은 자리) — 두 호출자 모두 곧 Term 을 부수므로 관측되지 않는다(적대적 C8: 등가), 규율로 둔다
     if (term.rt.editor_lines.len > 0) self.allocator.free(term.rt.editor_lines);
     term.rt.editor_lines = &.{};
@@ -13335,6 +13340,124 @@ test "INL13 인레이 힌트 — 창(보이는 줄 ± 20)이 덮이지 않은 �
     // 든 힌트는 새 창의 것뿐(300 번대 `_hv`) — 첫 창 것은 갈렸다.
     try testing.expect(term.rt.editor_inlay.hints.items.items.len >= 100);
     try testing.expect(term.rt.editor_inlay.hints.items.items[0].offset >= 280 * 10);
+}
+
+/// DSY 판정자용 대기 — 2층이 `n` 번 적용될 때까지.
+fn symbolsApplied(f: *SmtFixture, want: u64) bool {
+    const Ctx = struct { t: *Term, n: u64 };
+    return pumpLspUntil(&f.fx, 3000, Ctx{ .t = f.term, .n = want }, struct {
+        fn g(c: Ctx) bool {
+            return c.t.rt.editor_symbols.applied >= c.n;
+        }
+    }.g);
+}
+
+test "DSY4 심볼 2층 — 서버가 ready 면 문서 단위로 한 번 묻고, 밴드 체인·피커가 2층 목록으로 선다(순서를 우리가 세운다); 편집하면 «버리고» 1층으로 돌아갔다가 조용한 뒤 다시 묻는다 (제품 경계, §8.2o·§7.5)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    // 가짜는 `fn <name>(`·`struct <name> {` 을 심볼로 내고 **뒤에서 앞으로** 낸다. 1층(C 문법)도 함수를 심볼로 내므로 두 층이 **같은 자리**를 말한다 —
+    // 갈라 보려고 가짜만 아는 이름(`struct` 행)을 둔다: C 문법 1층은 `struct Box` 를 심볼로 내지만 **이름 범위**가 달라 체인 글자가 같다. 그래서
+    // 「2층인가」는 카운터와 목록 길이로 가른다.
+    var f = (try SmtFixture.open(allocator, "sy.c", "fn alpha(int a) {\n  return a;\n}\nfn beta(int b) {\n  return b;\n}\n")) orelse return error.SkipZigTest;
+    defer f.close(allocator);
+    const s = f.fx.session;
+    const term = f.term;
+    try testing.expect(f.ready());
+    // ⑴ 첫 프레임 — 문서 단위로 한 번 묻는다(범위 인자가 없다). 대기 중엔 한 번만.
+    _ = syntaxColors(s, term);
+    try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_symbols);
+    try testing.expect(term.rt.editor_symbols.waiting);
+    _ = syntaxColors(s, term);
+    try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_symbols);
+    // ⑵ 응답 — **문서 순서로 정렬돼** 든다(가짜는 뒤에서 앞으로 낸다).
+    try testing.expect(symbolsApplied(&f, 1));
+    const syms = term.rt.editor_symbols.list.items;
+    try testing.expectEqual(@as(usize, 2), syms.len);
+    try testing.expect(syms[0].start < syms[1].start);
+    try testing.expectEqualStrings("alpha", f.term.rt.editor_doc.?.file.content[syms[0].name_start..syms[0].name_end]);
+    try testing.expectEqualStrings("beta", f.term.rt.editor_doc.?.file.content[syms[1].name_start..syms[1].name_end]);
+    try testing.expectEqualStrings("function", syms[0].kind); // SymbolKind 12 → 우리 어휘
+    try testing.expectEqual(term.rt.editor_lsp_version, term.rt.editor_symbols.version);
+    try testing.expect(symbols_client.list(term) != null);
+    // ⑶ 밴드 체인이 2층으로 선다 — caret 이 `beta` 본문 안이면 그 이름이 붙는다.
+    // 가짜의 범위는 **그 줄**이다(§ 가짜 doc) — caret 을 `beta` 선언 줄 안에 둔다.
+    const inside = std.mem.indexOf(u8, term.rt.editor_doc.?.file.content, "int b").?;
+    term.rt.editor_selection = .{ .anchor_start = inside, .anchor_end = inside, .focus = inside };
+    const crumb = headerBreadcrumb(s, term, "sy.c");
+    try testing.expect(std.mem.endsWith(u8, crumb, "beta"));
+    // ⑷ 편집 — **버린다**(§8.2o). 그 프레임의 체인은 1층이 답하고, 2층 목록은 비어 있다.
+    try testing.expect(insertText(s, term, "x"));
+    try testing.expectEqual(@as(u64, 1), term.rt.editor_symbols.cleared_by_edit);
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_symbols.list.items.len);
+    try testing.expect(symbols_client.list(term) == null);
+    _ = syntaxColors(s, term); // 120 ms 안엔 안 묻는다
+    try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_symbols);
+    {
+        const t0 = s.awakeMs();
+        while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
+    }
+    _ = syntaxColors(s, term); // 조용해졌다 — 다시 묻는다
+    try testing.expectEqual(@as(u64, 2), s.editor_lsp.sent_symbols);
+    try testing.expect(symbolsApplied(&f, 2));
+    try testing.expect(symbols_client.list(term) != null);
+    // ⑸ 다 든 뒤엔 또 안 묻는다.
+    _ = syntaxColors(s, term);
+    try testing.expectEqual(@as(u64, 2), s.editor_lsp.sent_symbols);
+}
+
+test "DSY5 심볼 2층 — provider 가 없으면 묻지 않고, 빈 목록·평탄 꼴·이름이 문서와 다른 항목은 1층을 그대로 두며, 낡은 version 응답은 버린다 (제품 경계, §8.2o)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    // ⑴ provider 없음 — 요청이 0.
+    {
+        _ = setenv("MARU_FAKE_LSP_NOSYMCAP", "1", 1);
+        defer _ = unsetenv("MARU_FAKE_LSP_NOSYMCAP");
+        var f = (try SmtFixture.open(allocator, "ns.c", "fn alpha(int a) { return a; }\n")) orelse return error.SkipZigTest;
+        defer f.close(allocator);
+        try testing.expect(f.ready());
+        _ = syntaxColors(f.fx.session, f.term);
+        try testing.expectEqual(@as(u64, 0), f.fx.session.editor_lsp.sent_symbols);
+        try testing.expect(symbols_client.list(f.term) == null);
+    }
+    // ⑵ 빈 목록(`DSYNONE`) — 1층을 그대로 두고, 답은 받았으니 되묻지 않는다.
+    {
+        var f = (try SmtFixture.open(allocator, "no.c", "fn alpha(int a) { return a; } // DSYNONE\n")) orelse return error.SkipZigTest;
+        defer f.close(allocator);
+        const s = f.fx.session;
+        try testing.expect(f.ready());
+        _ = syntaxColors(s, f.term);
+        try testing.expect(pumpLspUntil(&f.fx, 3000, f.term, struct {
+            fn g(t: *Term) bool {
+                return t.rt.editor_symbols.applied_empty >= 1;
+            }
+        }.g));
+        try testing.expect(symbols_client.list(f.term) == null); // 1층이 답한다
+        _ = syntaxColors(s, f.term);
+        try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_symbols);
+    }
+    // ⑶ 평탄 꼴(`DSYFLAT`) — 이름 범위가 없어 통째로 버린다(카운터로 보인다).
+    {
+        var f = (try SmtFixture.open(allocator, "fl.c", "fn alpha(int a) { return a; } // DSYFLAT\n")) orelse return error.SkipZigTest;
+        defer f.close(allocator);
+        try testing.expect(f.ready());
+        _ = syntaxColors(f.fx.session, f.term);
+        try testing.expect(pumpLspUntil(&f.fx, 3000, f.term, struct {
+            fn g(t: *Term) bool {
+                return t.rt.editor_symbols.decoded.flat_dropped >= 1;
+            }
+        }.g));
+        try testing.expect(symbols_client.list(f.term) == null);
+    }
+    // ⑷ 이름이 문서와 다른 항목(`DSYBAD`) — 그 항목만 버리고 나머지는 든다(자기 검산).
+    {
+        var f = (try SmtFixture.open(allocator, "bad.c", "fn alpha(int a) { return a; } // DSYBAD\n")) orelse return error.SkipZigTest;
+        defer f.close(allocator);
+        try testing.expect(f.ready());
+        _ = syntaxColors(f.fx.session, f.term);
+        try testing.expect(symbolsApplied(&f, 1));
+        try testing.expectEqual(@as(usize, 1), f.term.rt.editor_symbols.list.items.len);
+        try testing.expect(f.term.rt.editor_symbols.decoded.name_mismatch >= 1);
+    }
 }
 
 test "GOTO1 정의로 이동 — F12·⌘클릭이 서버 응답의 첫 항목으로 caret 을 옮기고 되돌아가기 표식을 쌓는다; ⌃-/⌃⇧- 로 뒤로·앞으로; 다른 파일은 열어서; root 밖·없음은 알림; 낡은 응답은 버린다 (제품 경계, §8.2c·§5.2)" {
@@ -33381,10 +33504,14 @@ pub fn recomputeSymbolPicker(self: *AppSession) void {
         self.chrome_host.symbol_picker.setResultCount(0);
         return;
     };
-    prov.symbols(self.allocator, &st.symbols);
+    // **2층이 유효하면 그것**(§8.2o · §7.5) — 목록이 같은 타입이라 피커는 층을 모른다.
+    const syms = symbols_client.list(term) orelse blk: {
+        prov.symbols(self.allocator, &st.symbols);
+        break :blk st.symbols.items;
+    };
     symbol_picker.filter(
         self.allocator,
-        st.symbols.items,
+        syms,
         doc.file.content,
         self.chrome_host.symbol_picker.input.query.items,
         symbolLabelCols(self),

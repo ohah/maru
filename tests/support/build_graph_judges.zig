@@ -242,9 +242,9 @@ test "표도 등록이다 — 루프 한 줄 뒤의 스무 건을 세어 둔다"
     var g = try parse(a);
     defer g.deinit();
 
-    // 판정자 스무 개가 `boundary_scans` 표에 있고, 그 표를 도는 루프가 전부 매단다.
+    // 판정자 스물한 개가 `boundary_scans` 표에 있고, 그 표를 도는 루프가 전부 매단다.
     // 호출만 보는 눈에는 「매다는 줄 하나」로 보이므로, 개수는 여기서 지킨다.
-    try std.testing.expectEqual(@as(usize, 20), g.countTableRows("boundary_scans"));
+    try std.testing.expectEqual(@as(usize, 21), g.countTableRows("boundary_scans"));
 
     // 표에 «있다» 를 경로로 직접 묻는다 — 행을 지우면 여기서 걸린다.
     try std.testing.expect(g.tableHas("boundary_scans", "root", "tests/boundary/imports.zig"));
@@ -262,7 +262,7 @@ test "표도 등록이다 — 루프 한 줄 뒤의 스무 건을 세어 둔다"
         } else default_optimize += 1;
     }
     try std.testing.expectEqual(@as(usize, 1), explicit_optimize); // imports.zig 만 .ReleaseSafe
-    try std.testing.expectEqual(@as(usize, 19), default_optimize);
+    try std.testing.expectEqual(@as(usize, 20), default_optimize);
 
     // 모듈을 주입받는 행 셋. 이름이 `boundary_scan_modules` 에 없으면 빌드가 죽으므로
     // 여기서는 **이름이 그대로 남아 있는지**만 본다.

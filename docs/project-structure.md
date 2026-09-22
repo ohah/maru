@@ -30,6 +30,25 @@ Maru는 초기에 파일 이동을 최소화한다. 기존 `src/*.zig` 파일은
 - 이름이 한 파일뿐인 범용 leaf(`color.zig`, `width.zig` 등)와 executable entrypoint는 억지로
   한-file 폴더를 만들지 않는다. 둘 이상의 협력 구현 파일이 생기거나 책임 경계가 분명해지는 즉시
   위 namespace 규칙을 적용한다.
+- **판정자 이름에 작업 슬라이스 ID 를 쓰지 않는다.** `session_host_2c3d_c3_3b2b3_boundary.zig` 의
+  `2c3d-c3-3b2b3` 은 그 파일이 지키는 **책임**이 아니라 그걸 만든 **작업 회차**다. 구현이 끝나면
+  그 ID 가 가리키던 맥락이 사라지고 파일명이 아무것도 안 알려준다. 무엇을 지키는지로 이름 짓는다
+  (`session_host_reconnect_worker_owner_boundary.zig`).
+
+  실측(2026-09-22): 제품 `src/platform/macos/session_host/` 393 개 중 슬라이스 ID 이름은 **12 개(3%)**
+  인데 판정자는 **108 개**다. 규칙 위반이 테스트 쪽에만 몰려 있다. 그리고 그 108 개가 보는 제품
+  파일 중 **57 개를 둘 이상의 슬라이스가 본다**(`remote_runtime.zig` 39 · `client_slot.zig` 35) —
+  제품 하나를 고칠 때 어느 판정자가 깨질지 파일명으로는 알 수 없다는 뜻이다.
+
+  **규칙만 적어 두면 안 지켜지므로 원장을 둔다**: [`tests/boundary/judge_names.zig`](../tests/boundary/judge_names.zig)
+  가 지금 있는 108 개를 목록으로 못 박고, 목록에 **없는** 파일이 슬라이스 ID 이름이면 실패한다.
+  목록은 도메인을 만질 때 한 줄씩 빠지고(위 「점진적으로」) 늘지는 않는다. 파일을 옮겼으면 그 줄과
+  `expected_entries` 를 함께 줄인다 — 두 자리를 같이 고치게 한 것이 의도다.
+
+  **테스트 이름과 계획 문서의 슬라이스 ID 는 건드리지 않는다.** 거기서 그 ID 는 이력이다 —
+  `docs/verification-matrix.md` 의 「CR6e-c1~c3c 완료」는 지금 코드 상태가 아니라 그때 무엇을
+  했는지를 적은 문장이라, 지우면 가리킬 대상을 잃는다. 라벨 전체는 저장소에 약 4,300 자리 있고
+  (src 1,580 · docs 1,519 · tests 721 · build 485) 그걸 없애는 것은 별개의 큰 결정이다.
 
 ## 소스 구조
 

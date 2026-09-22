@@ -180,6 +180,11 @@ const boundary_scans: []const BoundaryScan = &.{
     // 게이트가 통째로 빨개지고, 그 잡음에 진짜 실패가 묻힌다(§2m.111 — 실제로 22 커밋 동안 그랬다).
     .{ .root = "tests/boundary/shell_gate_ledger.zig", .deps = &.{"build_graph"} },
 
+    // 판정자 파일 이름이 **작업 슬라이스 ID** 로 붙지 않는가. 네이밍 컨벤션은 「파일명이 그 안의
+    // 한 책임을 표현한다」인데 판정자 108 개가 그걸 어기고 있다(제품은 3% 만 어긴다). 규칙만
+    // 적어 두면 다음 슬라이스가 또 만든다 — 원장을 못 박아 **줄어들기만** 하게 한다.
+    .{ .root = "tests/boundary/judge_names.zig" },
+
     // 머지 충돌 마커가 커밋되지 않는가. 코드였다면 `zig build` 가 즉시 잡지만(문법 오류), 문서·스크립트는
     // 깨져도 조용하다 — 실제로 `docs/file-explorer.md` 에 하나가 커밋된 채 남아 있었다.
     .{ .root = "tests/boundary/conflict_markers.zig" },

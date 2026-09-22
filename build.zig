@@ -4304,7 +4304,7 @@ pub fn build(b: *std.Build) void {
         });
         const run_turn_capture_wiring = b.addRunArtifact(turn_capture_wiring_tests);
         // **개수 가드** — 필터가 아무것도 안 고르는 회귀는 실제로 CI 를 통과한 적이 있다(위 `test-remote-activity-vertical`).
-        run_turn_capture_wiring.addArg("--maru-expect-tests=62");
+        run_turn_capture_wiring.addArg("--maru-expect-tests=65");
         run_turn_capture_wiring.setCwd(b.path("."));
         b.step("test-agent-turn-capture", "Run the agent turn capture wiring judges only (AT3/AT4/AT3b)").dependOn(&run_turn_capture_wiring.step);
         macos_only_test_step.dependOn(&run_turn_capture_wiring.step);

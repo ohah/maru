@@ -48,35 +48,21 @@ test "K3 kernel cwd parity uses an actual daemon and canonical AppSession consum
     // 더 긴 이름의 앞부분에도 걸린다.
     try std.testing.expectEqual(@as(usize, 1), graph.countSteps("test-session-host-kernel-cwd-k3"));
     try std.testing.expectEqual(@as(usize, 1), count(build, "K3 actual daemon kernel cwd survives detach"));
-    try std.testing.expectEqual(@as(usize, 1), count(
-        build,
-        "session_host_kernel_cwd_k3_step.dependOn(session_host_legacy_metadata_consumers_step);",
-    ));
-    try std.testing.expectEqual(@as(usize, 1), count(
-        build,
-        // cwd 축 판정자는 `boundary_scans` 표의 한 행이라 등록마다 이름을 갖지 않는다 —
-        // 표에서 자리로 찾아 받은 지역 이름이 `cwd_axis_scan` 이다(build.zig `boundaryScanIndex`).
-        "session_host_kernel_cwd_k3_step.dependOn(&cwd_axis_scan.step);",
-    ));
+    // 매달기도 **구조로** 본다 — 문자열은 `.step` 이 붙었는지·줄바꿈이 들었는지에 흔들린다.
+    try std.testing.expect(graph.dependsOn("session_host_kernel_cwd_k3_step", "session_host_legacy_metadata_consumers_step"));
+    // cwd 축 판정자는 `boundary_scans` 표의 한 행이라 등록마다 이름을 갖지 않는다 —
+    // 표에서 자리로 찾아 받은 지역 이름이 `cwd_axis_scan` 이다(build.zig `boundaryScanIndex`).
+    try std.testing.expect(graph.dependsOn("session_host_kernel_cwd_k3_step", "cwd_axis_scan"));
     // `test-session-host` 는 k3 를 **스텝째 의존하지 않는다** — 스텝 의존은 모드를 몰라 k3 의 Debug·ReleaseFast
     // 두 모드를 다 물려받고, `-Doptimize=Debug` 잡이 ReleaseFast 까지 컴파일했다(2026-09-06 CI 실측). 대신 k3 의
     // run 을 직접 붙이되 두-모드 루프 안 product run 은 잡의 모드로 거른다. 옛 형태는 0 으로 잠근다.
-    try std.testing.expectEqual(@as(usize, 0), count(
-        build,
-        "session_host_step.dependOn(session_host_kernel_cwd_k3_step);",
-    ));
+    try std.testing.expect(!graph.dependsOn("session_host_step", "session_host_kernel_cwd_k3_step"));
     try std.testing.expectEqual(@as(usize, 1), count(
         build,
         "if (k3_optimize == optimize) session_host_step.dependOn(&run_session_host_kernel_cwd_k3_product_tests.step);",
     ));
-    try std.testing.expectEqual(@as(usize, 1), count(
-        build,
-        "session_host_step.dependOn(&run_session_host_kernel_cwd_k3_boundary_tests.step);",
-    ));
-    try std.testing.expectEqual(@as(usize, 1), count(
-        build,
-        "session_host_step.dependOn(&cwd_axis_scan.step);",
-    ));
+    try std.testing.expect(graph.dependsOn("session_host_step", "run_session_host_kernel_cwd_k3_boundary_tests"));
+    try std.testing.expect(graph.dependsOn("session_host_step", "cwd_axis_scan"));
     try std.testing.expectEqual(@as(usize, 1), count(plan, "K3 - 제품 parity gate (완료)"));
     try std.testing.expectEqual(@as(usize, 1), count(matrix, "K3 actual daemon kernel cwd parity: 구현"));
     try std.testing.expectEqual(@as(usize, 1), count(contract, "host-backed kernel cwd parity도 K1~K3로 구현됐다"));

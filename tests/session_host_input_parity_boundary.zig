@@ -39,7 +39,8 @@ test "P4 input parity 경계는 AppSession 관측에서 actual host reader PTY�
     // 스텝 선언을 **구조로** 센다 — 문자열은 설명문·인자에 적힌 같은 이름도 세고,
     // 더 긴 이름의 앞부분에도 걸린다.
     try std.testing.expectEqual(@as(usize, 1), graph.countSteps("test-session-host-input-parity"));
-    try std.testing.expectEqual(@as(usize, 1), count(build, "session_host_input_parity_step.dependOn(session_host_e2c_step);"));
+    // 매달기도 **구조로** 본다 — 문자열은 `.step` 이 붙었는지·줄바꿈이 들었는지에 흔들린다.
+    try std.testing.expect(graph.dependsOn("session_host_input_parity_step", "session_host_e2c_step"));
     try std.testing.expect(std.mem.indexOf(u8, persistent, "고빈도 1003 hover와 selection autoscroll은") != null);
     try std.testing.expect(std.mem.indexOf(u8, plan, "P4 parity micro-gate (완료)") != null);
     try std.testing.expect(std.mem.indexOf(u8, verification, "P4 input parity micro-gate: 구현.") != null);

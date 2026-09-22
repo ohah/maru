@@ -186,17 +186,22 @@ test "CR6d 경계는 exact recovered screen probe와 actual AppKit input smoke�
     try std.testing.expectEqual(@as(usize, 1), count(gate, "session_host_input_smoke_source_record_cleared=true"));
     try std.testing.expectEqual(@as(usize, 1), count(gate, "MARU_SESSION_HOST_CR6D_INPUT_SOURCE_RESTORE_EXE"));
     try std.testing.expectEqual(@as(usize, 1), count(gate, "run_session_host_cr6d_boundary_tests.addArg(\"--maru-expect-tests=4\");"));
-    try std.testing.expectEqual(@as(usize, 1), count(build, "run_session_host_cr6d_global_boundary_tests.addArg(\"--maru-expect-tests=4\");"));
+    var graph = try build_graph.parse(allocator);
+    defer graph.deinit();
+    // 실행 인자도 **구조로** 센다 — 문자열은 호출이 줄바꿈되거나 receiver 이름이
+    // 바뀌면 죽고, 그 죽음이 「인자가 없다」와 구분되지 않는다.
+    try std.testing.expectEqual(@as(usize, 1), graph.countArgs("run_session_host_cr6d_global_boundary_tests", "--maru-expect-tests=4"));
 
     // v2a의 판정자는 기본 test graph에 고정된 순수 consumer다. 실제 AppKit producer가 붙기 전에도
     // identity/세대/anchor/PPM digest와 관심 영역 계약이 사라지거나 파일 I/O를 직접 열 수 없다.
-    var graph = try build_graph.parse(allocator);
-    defer graph.deinit();
     // 스텝 선언을 **구조로** 센다 — 문자열은 설명문·인자에 적힌 같은 이름도 세고,
     // 더 긴 이름의 앞부분에도 걸린다.
     try std.testing.expectEqual(@as(usize, 1), graph.countSteps("test-session-host-cr6d-pixel-validator"));
-    try std.testing.expectEqual(@as(usize, 1), count(build, "run_session_host_cr6d_pixel_tests.addArg(\"--maru-expect-tests=8\");"));
-    try std.testing.expectEqual(@as(usize, 1), count(build, "test_step.dependOn(&run_session_host_cr6d_pixel_tests.step);"));
+    // 실행 인자도 **구조로** 센다 — 문자열은 호출이 줄바꿈되거나 receiver 이름이
+    // 바뀌면 죽고, 그 죽음이 「인자가 없다」와 구분되지 않는다.
+    try std.testing.expectEqual(@as(usize, 1), graph.countArgs("run_session_host_cr6d_pixel_tests", "--maru-expect-tests=8"));
+    // 매달기도 **구조로** 본다 — 문자열은 `.step` 이 붙었는지·줄바꿈이 들었는지에 흔들린다.
+    try std.testing.expect(graph.dependsOn("test_step", "run_session_host_cr6d_pixel_tests"));
     try std.testing.expectEqual(@as(usize, 1), count(pixel_test, "checkAllAllocationFailures"));
     inline for (.{ "before_digest", "marked_digest", "runtime_id", "surface_id", "first_rect" }) |field| {
         try std.testing.expect(count(pixel_validator, field) > 0);

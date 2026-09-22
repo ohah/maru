@@ -105,7 +105,13 @@ test "kernel cleanup fault gate observes real errno and keeps injection test-onl
     defer graph.deinit();
     // 스텝 선언을 **구조로** 본다 — 문자열은 더 긴 이름의 앞부분에도 걸린다.
     try std.testing.expect(graph.step("test-session-host-upgrade-kernel-cleanup-faults") != null);
-    try std.testing.expect(std.mem.indexOf(u8, build, "run_kernel_cleanup_component_tests.addArg(\"--maru-expect-tests=1\")") != null);
-    try std.testing.expect(std.mem.indexOf(u8, build, "run_kernel_cleanup_process_tests.addArg(\"--maru-expect-tests=1\")") != null);
-    try std.testing.expect(std.mem.indexOf(u8, build, "run_kernel_cleanup_boundary_tests.addArg(\"--maru-expect-tests=1\")") != null);
+    // 실행 인자도 **구조로** 센다 — 문자열은 호출이 줄바꿈되거나 receiver 이름이
+    // 바뀌면 죽고, 그 죽음이 「인자가 없다」와 구분되지 않는다.
+    try std.testing.expectEqual(@as(usize, 1), graph.countArgs("run_kernel_cleanup_component_tests", "--maru-expect-tests=1"));
+    // 실행 인자도 **구조로** 센다 — 문자열은 호출이 줄바꿈되거나 receiver 이름이
+    // 바뀌면 죽고, 그 죽음이 「인자가 없다」와 구분되지 않는다.
+    try std.testing.expectEqual(@as(usize, 1), graph.countArgs("run_kernel_cleanup_process_tests", "--maru-expect-tests=1"));
+    // 실행 인자도 **구조로** 센다 — 문자열은 호출이 줄바꿈되거나 receiver 이름이
+    // 바뀌면 죽고, 그 죽음이 「인자가 없다」와 구분되지 않는다.
+    try std.testing.expectEqual(@as(usize, 1), graph.countArgs("run_kernel_cleanup_boundary_tests", "--maru-expect-tests=1"));
 }

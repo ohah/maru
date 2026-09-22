@@ -3,6 +3,9 @@
 //! 배선하면 여기서 걸린다(실측 2026-09-06: 단일 프로세스 355초가 file explorer 잡의 임계 경로였다).
 const std = @import("std");
 const build_source = @import("support/build_source.zig");
+/// 빌드 등록을 **문자열이 아니라 구조로** 본다. 모듈 배선이 필요 없다 — 이 파일은 모듈 루트가
+/// 아니라 상대 경로로 `tests/support/` 를 볼 수 있다(`tests/boundary/` 아래는 그게 안 된다).
+const build_graph = @import("support/build_graph.zig");
 
 fn count(haystack: []const u8, needle: []const u8) usize {
     var total: usize = 0;
@@ -36,9 +39,12 @@ test "AppSession suite runs as index shards and fresh process judges wait for ev
     try std.testing.expectEqual(@as(usize, 1), count(build, "run_macos_app_host_abi_shards.addFileArg(b.path(\"tools/run-test-shards.sh\"));"));
     try std.testing.expectEqual(@as(usize, 1), count(build, "run_macos_app_host_abi_shards.addArtifactArg(macos_app_host_abi_tests);"));
     // **fresh 프로세스 판정자 사슬의 머리는 샤드 스텝 뒤에 돈다.** 겹치면 CoreText 캐시·signal/seal/daemon 네임스페이스가 충돌한다.
-    try std.testing.expectEqual(@as(usize, 1), count(build, "run_macos_external_tty_fresh_tests.step.dependOn(&run_macos_app_host_abi_shards.step);"));
+    var graph = try build_graph.parse(allocator);
+    defer graph.deinit();
+    // 매달기도 **구조로** 본다 — 문자열은 `.step` 이 붙었는지·줄바꿈이 들었는지에 흔들린다.
+    try std.testing.expect(graph.dependsOn("run_macos_external_tty_fresh_tests", "run_macos_app_host_abi_shards"));
     // `test` 스텝(macOS)도 샤드 스텝에 의존한다.
-    try std.testing.expectEqual(@as(usize, 1), count(build, "test_step.dependOn(&run_macos_app_host_abi_shards.step);"));
+    try std.testing.expect(graph.dependsOn("test_step", "run_macos_app_host_abi_shards"));
     // 래퍼: 샤드마다 MARU_TEST_SHARD 를 심고, 전부 기다린 뒤 하나라도 실패하면 실패한다.
     try std.testing.expectEqual(@as(usize, 1), count(wrapper, "MARU_TEST_SHARD=\"$i/$n\" \"$bin\" \"$@\""));
     try std.testing.expectEqual(@as(usize, 1), count(wrapper, "run-test-shards: shard $i/$n exited with $r"));
@@ -55,7 +61,7 @@ test "AppSession suite runs as index shards and fresh process judges wait for ev
     // 그 모듈은 샤드 안에서 **안** 돈다 — 옛 `MARU_TEST_KEEP_PREFIX` 배선이 돌아오면 겹침이 되살아난다.
     try std.testing.expectEqual(@as(usize, 0), count(build, "MARU_TEST_KEEP_PREFIX"));
     // fresh 사슬의 꼬리가 그 스텝이고, top-level 은 그것을 기다린다.
-    try std.testing.expectEqual(@as(usize, 1), count(build, "test_macos_app_host_abi_step.dependOn(&run_macos_shutdown_admin_fresh_tests.step);"));
+    try std.testing.expect(graph.dependsOn("test_macos_app_host_abi_step", "run_macos_shutdown_admin_fresh_tests"));
 
     // 러너: 선택 규칙은 **이름 해시** mod n 이고, 빈 샤드는 빨개진다. 문서도 같은 이름을 안다.
     //

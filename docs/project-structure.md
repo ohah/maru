@@ -30,8 +30,9 @@ Maru는 초기에 파일 이동을 최소화한다. 기존 `src/*.zig` 파일은
 - 이름이 한 파일뿐인 범용 leaf(`color.zig`, `width.zig` 등)와 executable entrypoint는 억지로
   한-file 폴더를 만들지 않는다. 둘 이상의 협력 구현 파일이 생기거나 책임 경계가 분명해지는 즉시
   위 namespace 규칙을 적용한다.
-- **판정자 이름에 작업 슬라이스 ID 를 쓰지 않는다.** `session_host_2c3d_c3_3b2b3_boundary.zig` 의
-  `2c3d-c3-3b2b3` 은 그 파일이 지키는 **책임**이 아니라 그걸 만든 **작업 회차**다. 구현이 끝나면
+- **판정자 이름에 작업 슬라이스 ID 를 쓰지 않는다.** `session_host_2c3d_c3_3b2b3_boundary.zig`(옮겨져
+  지금은 `…_immutable_pending_preparation_boundary.zig`)의 `2c3d-c3-3b2b3` 은 그 파일이 지키는
+  **책임**이 아니라 그걸 만든 **작업 회차**다. 구현이 끝나면
   그 ID 가 가리키던 맥락이 사라지고 파일명이 아무것도 안 알려준다. 무엇을 지키는지로 이름 짓는다
   (`session_host_reconnect_worker_owner_boundary.zig`).
 

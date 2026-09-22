@@ -16,7 +16,7 @@ fn count(haystack: []const u8, needle: []const u8) usize {
 
 test "C3-3b5 common close progress boundary는 RED inventory와 dormant caller를 고정한다" {
     const allocator = std.testing.allocator;
-    const red_source = try readSource(allocator, "tests/session_host_2c3d_c3_3b5_red.zig");
+    const red_source = try readSource(allocator, "tests/session_host_close_progress_contract.zig");
     defer allocator.free(red_source);
     const runtime_source = try readSource(allocator, "src/platform/macos/session_host/remote_runtime.zig");
     defer allocator.free(runtime_source);

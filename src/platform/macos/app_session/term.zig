@@ -612,6 +612,9 @@ pub fn createTerm(
                             .queue_capacity = queue_capacity,
                             .initial_config = runtime_config,
                         })) |respawned| {
+                            // 죽음 → 재시작 → 성공이 한 createTerm 안에서 끝났다. 위 mark 가 걸어 둔
+                            // «host 연결 실패» notice 는 이제 거짓이라 내린다(래치는 ensure 가 이미 풀었다).
+                            self.host_connect_notice_pending = false;
                             break :surface respawned;
                         } else |retry_err| {
                             self.markHostConnectFailedError(.runtime_death, retry_err);

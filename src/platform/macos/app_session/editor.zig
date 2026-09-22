@@ -37795,12 +37795,50 @@ test "C1b-4 문서 Term 이 사라지면 비교는 «실패»다 — 없는 버�
     }
     term_ops.closeTermAt(s, s.app_window.active_tab, pane, idx);
 
-    // 다음 새로 고침에서 **실패로 표시된다**(옛 두 쪽을 그대로 보여 주지 않는다).
+    // ⚠️ **새로 고침을 기다리지 않는다.** tick 폴링은 `diff_ready` 인 entry 를 건너뛰고 파일이 또
+    //    바뀌지 않으면 `fileChanged` 도 안 온다 — 기다리면 사라진 편집이 **영영** 보인다(적대적 2회차).
+    try testing.expect(entry.diff_failed);
+    try testing.expect(!entry.diff_ready);
+    try testing.expectEqual(@as(usize, 0), entry.diff_modified.len);
+    // 그 뒤 새로 고침이 와도 여전히 실패다(주제가 없다).
     s.requestDiffContent(entry);
     try testing.expect(entry.diff_failed);
     try testing.expect(!entry.diff_ready);
     try testing.expectEqual(@as(usize, 0), entry.diff_original.len);
     try testing.expectEqual(@as(usize, 0), entry.diff_modified.len);
+}
+
+test "C1b-5 파일이 사라지면 비교도 비운다 — 낡은 두 쪽을 들고 「실패」라고만 말하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const c = try ConflictFixture.init(allocator, "vanish.txt", "base\n");
+    defer c.deinit(allocator);
+    const s = c.fx.session;
+
+    try testing.expect(insertText(s, c.term, "MINE"));
+    try c.writeOutside("vanish.txt", "THEIRS\n");
+    c.pressSave();
+    try c.pressEnter();
+    const diff_term = @import("git.zig").diffTermFor(s, c.path, .save_conflict) orelse return error.NoCompareTerm;
+    const entry = diff_term.file_entry orelse return error.NoEntry;
+    try testing.expect(entry.diff_ready);
+
+    // **파일을 지운다** — 왼쪽(디스크)을 읽을 수 없다. 문서 Term 은 그대로 있으므로 이 갈래는
+    // teardown 무효화가 아니라 **채움 자신의 실패 갈래**를 지난다.
+    try c.dir.dir.deleteFile(std.testing.io, "vanish.txt");
+    s.requestDiffContent(entry);
+
+    try testing.expect(entry.diff_failed);
+    try testing.expect(!entry.diff_ready);
+    // ⚠️ **두 쪽이 비었다.** 실패하면서 낡은 내용을 들고 있으면 화면은 있지도 않은 비교를 계속 보여 준다.
+    try testing.expectEqual(@as(usize, 0), entry.diff_original.len);
+    try testing.expectEqual(@as(usize, 0), entry.diff_modified.len);
+    // 그리기도 그 상태에서 죽지 않는다(행 배열이 놓인 버퍼를 빌린 채 남으면 여기서 깨진다).
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 600 };
+    if (appendPaneFrame(s, leaf, diff_term)) |drawn| {
+        var d = drawn;
+        d.dl.deinit(allocator);
+    }
 }
 
 test "C1a-8 다시 읽기는 «그 파일의 형식»을 따른다 — 다음 저장이 BOM·개행을 조용히 갈지 않는다" {

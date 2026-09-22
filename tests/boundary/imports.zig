@@ -12774,8 +12774,19 @@ test "저장 충돌: 묻는 자리 하나 · CAS 를 건너뛰는 길 하나 · 
     );
     // ⑷-c **두 쪽은 해제하는 쪽과 같은 할당기로 만든다** — 소유자 표시 필드를 더하면 규칙이 둘이 된다.
     try std.testing.expectEqual(@as(usize, 1), countOf3(conflict, "const alloc = git_backend_mod.worker_allocator;"));
-    // ⑷-d **실패 갈래에서도 옛 두 쪽을 놓는다** — 안 놓으면 사라진 문서의 편집이 계속 보인다.
-    try std.testing.expectEqual(@as(usize, 1), countOf3(conflict, "self.freeDiffContent(entry);"));
+    // ⑷-d **두 쪽을 놓는 자리는 «둘이고 각자 이유가 다르다»**(적대적 2·3회차).
+    //    ⓐ `fillCompare` 의 머리 — **실패로 끝나는 갈래에서도** 낡은 내용이 남지 않게(파일이 지워진 자리).
+    //    ⓑ `invalidateCompareFor` — 문서 Term 이 사라지는 **그 순간**. 새로 고침을 기다리면 tick 폴링이
+    //       `diff_ready` 를 건너뛰어 사라진 편집이 영영 「내 편집」으로 남는다.
+    //    둘 중 하나가 사라지면 그 부류가 되살아난다 — 그래서 개수를 못박는다.
+    try std.testing.expectEqual(@as(usize, 2), countOf3(conflict, "self.freeDiffContent(entry);"));
+    try std.testing.expectEqual(@as(usize, 1), countOf3(conflict, "pub fn invalidateCompareFor("));
+    const term_src = try readZigFileZ(allocator, "src/platform/macos/app_session/term.zig");
+    defer allocator.free(term_src);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOf3(term_src, "editor_conflict_ops.invalidateCompareFor(self, term);"),
+    );
     // ⑸ **다시 읽기의 실패 표는 «따로»다** — 읽기 실패에 쓰기 문구를 쓰면 사용자가 할 일이 어긋난다.
     try std.testing.expectEqual(@as(usize, 1), countOf3(conflict, "pub fn reloadFailureNoticeKey("));
     try std.testing.expectEqual(@as(usize, 0), countOf3(conflict, "error.Unreadable => .editor_save_gone"));

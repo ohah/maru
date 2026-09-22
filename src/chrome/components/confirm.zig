@@ -435,6 +435,75 @@ test "confirm three choices expose stable primary alternate cancel actions" {
     try std.testing.expectEqual(Action.cancelled, handle(.{ .key = .escape }, &s).?);
 }
 
+test "confirm four choices: extra 자리가 키·순회·클릭에 다 서고, 없으면 그 자리가 아예 없다" {
+    const Rgb = @import("../../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    const p = props.ChromeProps{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 40, .backing_width_px = 1200, .backing_height_px = 600 } };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const four = Choices{ .primary = "비교", .alternate = "덮어쓰기", .cancel = "계속 편집", .extra = "다시 읽기" };
+
+    // ⑴ **글자 키**가 그 자리를 실행한다. `Y`·`D`·`N` 과 겹치지 않는 `R` 이다.
+    var s = State{};
+    s.showChoices("충돌", four);
+    try std.testing.expect(s.has_extra);
+    try std.testing.expectEqualStrings("다시 읽기", s.extra_label);
+    try std.testing.expectEqual(Action.extra, handle(.{ .key = .char, .codepoint = 'r' }, &s).?);
+
+    // ⑵ **순회가 네 자리를 돈다**(그려진 순서) — 건너뛰면 포커스가 보이지 않는 버튼에 얹힌다.
+    s.showChoices("충돌", four);
+    try std.testing.expect(handle(.{ .key = .right }, &s) == null);
+    try std.testing.expectEqual(Focus.alternate, s.focused);
+    try std.testing.expect(handle(.{ .key = .right }, &s) == null);
+    try std.testing.expectEqual(Focus.extra, s.focused);
+    try std.testing.expect(handle(.{ .key = .right }, &s) == null);
+    try std.testing.expectEqual(Focus.cancel, s.focused);
+    try std.testing.expect(handle(.{ .key = .left }, &s) == null);
+    try std.testing.expectEqual(Focus.extra, s.focused); // 왼쪽도 같은 순서를 되돌아온다
+    try std.testing.expectEqual(Action.extra, handle(.{ .key = .enter }, &s).?);
+
+    // ⑶ **Esc 는 여전히 취소다** — 네 번째 자리를 만든 이유가 그것이다(`cancel` 에 행동을 못 놓는다).
+    s.showChoices("충돌", four);
+    try std.testing.expectEqual(Action.cancelled, handle(.{ .key = .escape }, &s).?);
+
+    // ⑷ **그려지고, 그 자리를 클릭하면 같은 Action 이다**(view↔hitTest 단일 레이아웃).
+    s.showChoices("충돌", four);
+    _ = handle(.{ .key = .right }, &s); // alternate
+    _ = handle(.{ .key = .right }, &s); // extra ← 포커스를 옮겨 accent 로 찾는다
+    var out: std.ArrayList(draw.Op) = .empty;
+    try view(&s, p, &tk, arena, &out);
+    var extra_rect: ?draw.Rect = null;
+    var fills: usize = 0;
+    for (out.items) |op| switch (op) {
+        .fill => |f| {
+            fills += 1;
+            if (f.role == .focus_accent) extra_rect = f.rect;
+        },
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 4), fills); // 버튼 넷이 다 배경을 깐다
+    const er = extra_rect.?;
+    const cx = @as(f64, @floatFromInt(er.x)) + @as(f64, @floatFromInt(er.w)) / 2.0;
+    const cy = @as(f64, @floatFromInt(er.y)) + @as(f64, @floatFromInt(er.h)) / 2.0;
+    try std.testing.expectEqual(@as(?Action, .extra), buttonAtPoint(&s, p, &tk, cx, cy));
+
+    // ⑸ **세 갈래에는 그 자리가 아예 없다** — 라벨도 비고, `R` 도 안 먹고, 배경도 셋만 깔린다.
+    var three = State{};
+    three.showChoices("종료", .{ .primary = "종료", .alternate = "종료 및 세션 끝내기", .cancel = "취소" });
+    try std.testing.expect(!three.has_extra);
+    try std.testing.expectEqualStrings("", three.extra_label);
+    try std.testing.expectEqual(@as(?Action, null), handle(.{ .key = .char, .codepoint = 'r' }, &three));
+    var out3: std.ArrayList(draw.Op) = .empty;
+    try view(&three, p, &tk, arena, &out3);
+    var fills3: usize = 0;
+    for (out3.items) |op| switch (op) {
+        .fill => fills3 += 1,
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 3), fills3);
+}
+
 test "confirm view: 닫힘이면 ops 0, 열림이면 패널(quad)+accent 기본 버튼+메시지·버튼·키 텍스트" {
     const Rgb = @import("../../color.zig").Rgb;
     const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };

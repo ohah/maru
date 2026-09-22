@@ -4600,6 +4600,7 @@ fn editorLineColors(
         file.color_spans.items,
         4,
         first_line,
+        &.{}, // CLI 편집기에는 인레이 힌트가 없다(§4.1h — 네이티브 편집기만)
     );
 }
 

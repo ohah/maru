@@ -1143,6 +1143,11 @@ root 밖 행이 실제로 선다(§8.2l 「루트 밖」 제목·고르면 알�
 가짜 서버 표식 `INLSTALL`·`INLERR`·`INLNULL`·`INLREFRESH`, `MARU_FAKE_LSP_NOINLAYCAP=1`, 범위 끝이 줄 수를 넘으면 `-32603`(rust-analyzer 꼴),
 `initialized` 의 `params` 가 객체가 아니면 `ServerNotInitialized`(tsgo 꼴).
 
+**캡처가 잡은 마지막 결함(2026-09-22, 사용자 지적).** 실서버 캡처에서 `console.log(...data: s.area(), c.area())` 의 `a` 만 색이 달랐다 —
+`syntax_colors` 가 byte→열을 힌트 없이 환산해 **색만 힌트 폭만큼 왼쪽으로** 밀려 있었다(1층 tree-sitter·2층 semantic tokens 둘 다 — 병합 뒤
+한 번 환산하므로 자리는 하나였다). `columnsAtOffsetsWith` 로 바꿨고(§4.1h 「규칙 하나」), 줄 예산을 재는 본문 열 수는 세 소비자(렌더 창·색·L3 폭)가
+`inlayViewCols` 하나를 쓴다. 판정자: `INL9` 가 힌트 뒤 `1` 의 색 **열**(11 + 5 = 16)을 못 박는다 — 변이로 빨개지는 것을 확인했다.
+
 **적대적 검증(2026-09-22, 1~6회차 · 변이 54)**: 1회차 순수 `content` 14 → 생존 6 · 2회차 순수 `inlay` 11 → 0 · 3회차 제품 `editor_inlay` 15 → 0 ·
 4회차 배선 13 → 2 · 5회차 재실행 16 → 5 · 6회차 재실행 2 → 0. **결함 하나를 잡았다**: A11 「행 시작 걸음이 걸친 힌트에서 머물지 않는다」가
 살아남아 판정자를 세우니(`INL12`) **제품이 빨갰다** — `inlayColsAt` 가 지나가며 첨자를 올려, 머무는 행에서 다음 행이 같은 힌트를 다시 못 먹고

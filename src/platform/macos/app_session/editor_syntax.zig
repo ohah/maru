@@ -333,7 +333,7 @@ pub fn lineColors(
     /// 그 표의 `null` 이 무슨 뜻인가(`NullAxis`).
     null_axis: NullAxis,
 ) []const []const content.ColorSpan {
-    return lineColorsInto(self, &self.bufs, allocator, doc_content, line_idx, first_line, line_count, tab_width, visible_numbers, null_axis, &.{});
+    return lineColorsInto(self, &self.bufs, allocator, doc_content, line_idx, first_line, line_count, tab_width, visible_numbers, null_axis, &.{}, &.{});
 }
 
 /// `lineColors` + **2층 스팬**(semantic tokens, §8.2i — 문서 순서, byte, 우리 색 역할). 1층 스팬 뒤에 문서 순서로 섞여 「마지막이 이긴다」로
@@ -349,8 +349,10 @@ pub fn lineColorsWith(
     visible_numbers: []const ?u32,
     null_axis: NullAxis,
     extra: []const maru.session.editor.lsp.semantic.Span,
+    /// 줄별 가상 텍스트(§4.1h) — **렌더 축**(창 앞 줄부터), 짧은 배열 허용. 색의 열은 힌트 뒤 글리프 열이다.
+    line_inlays: []const []const content.Inlay,
 ) []const []const content.ColorSpan {
-    return lineColorsInto(self, &self.bufs, allocator, doc_content, line_idx, first_line, line_count, tab_width, visible_numbers, null_axis, extra);
+    return lineColorsInto(self, &self.bufs, allocator, doc_content, line_idx, first_line, line_count, tab_width, visible_numbers, null_axis, extra, line_inlays);
 }
 
 /// **미니맵 창**의 색(§6.1) — 본문과 같은 규칙, 다른 저장소. 반환 슬라이스는 `first_line` 기준 상대 첨자다.
@@ -365,7 +367,7 @@ pub fn minimapColors(
     visible_numbers: []const ?u32,
     null_axis: NullAxis,
 ) []const []const content.ColorSpan {
-    return lineColorsInto(self, &self.minimap_bufs, allocator, doc_content, line_idx, first_line, line_count, tab_width, visible_numbers, null_axis, &.{}); // 미니맵은 1층만(§6 — 전 문서)
+    return lineColorsInto(self, &self.minimap_bufs, allocator, doc_content, line_idx, first_line, line_count, tab_width, visible_numbers, null_axis, &.{}, &.{}); // 미니맵은 1층만·힌트 없음(§6 — 전 문서)
 }
 
 /// `.empty` 축에서 구간의 **첫 내용 줄**(문서 축, 0-based). 전부 빈 줄이면 null.
@@ -401,6 +403,7 @@ fn lineColorsInto(
     visible_numbers: []const ?u32,
     null_axis: NullAxis,
     extra: []const maru.session.editor.lsp.semantic.Span,
+    line_inlays: []const []const content.Inlay,
 ) []const []const content.ColorSpan {
     const p = &(self.provider orelse return &.{});
     if (line_count == 0) return &.{};
@@ -479,6 +482,7 @@ fn lineColorsInto(
         bufs.byte_spans.items,
         tab_width,
         first_line,
+        line_inlays,
     );
 }
 
@@ -1158,7 +1162,7 @@ test "ES40 2층 병합 — semantic 스팬은 겹친 자리만 1층을 덮고, �
     const x_at: u32 = @intCast(std.mem.indexOf(u8, doc.content, "x").?);
     const f_at: u32 = @intCast(std.mem.indexOf(u8, doc.content, "f()").?);
     const extra = [_]Span{ .{ .start = x_at, .end = x_at + 1, .role = .type_name }, .{ .start = f_at, .end = f_at + 1, .role = .keyword }, .{ .start = 100, .end = 101, .role = .string } }; // 셋째는 문서 밖(창 밖)
-    const colors = lineColorsWith(&st, testing.allocator, doc.content, doc.lines, 0, 2, 4, &.{}, .inherit, &extra);
+    const colors = lineColorsWith(&st, testing.allocator, doc.content, doc.lines, 0, 2, 4, &.{}, .inherit, &extra, &.{});
     try testing.expect(colors.len >= 2);
     var x_role: ?tokens.ColorRole = null;
     var const_role: ?tokens.ColorRole = null;

@@ -602,16 +602,27 @@ pub fn headerBreadcrumb(self: *AppSession, term: *Term, path: []const u8) []cons
 }
 
 /// 렌더에 넘길 줄별 가상 텍스트 창(§4.1h) — `syntaxColors` 와 같은 축(창 앞 줄부터 256줄). 줄당 폭 예산은 지난 프레임의 본문 열 수로(첫 프레임은 pane 폭 근사).
-fn inlayWindow(self: *AppSession, term: *Term, pane_rect: chrome_draw.Rect) chrome_editor.content.InlayWindow {
-    if (term.rt.editor_diff != null) return .{};
-    if (term.rt.editor_inlay.hints.items.items.len == 0) return .{ .generation = term.rt.editor_inlay.generation };
+/// 힌트 줄 예산(§4.1h — 화면 폭의 절반)을 재는 **본문 열 수**. 지난 프레임이 그린 값이 있으면 그것, 없으면 80 —
+/// **세 소비자(렌더 창·색 구간·L3 폭)가 같은 값을 써야** 한 프레임 안에서 답이 갈리지 않는다.
+fn inlayViewCols(term: *Term) u32 {
+    const drawn = term.rt.editor_drawn_content_cols;
+    return if (drawn > 0) drawn else 80;
+}
+
+/// 이 프레임의 줄별 힌트(렌더 축, 창 앞 줄부터). **저장소를 공유한다** — 부른 쪽이 곧바로 쓰고, 다음 호출이 갈아 끼운다.
+fn inlayRows(self: *AppSession, term: *Term) []const []const chrome_editor.content.Inlay {
+    if (term.rt.editor_diff != null) return &.{};
+    if (term.rt.editor_inlay.hints.items.items.len == 0) return &.{};
     const first = term.rt.editor_first_line;
     const axis_len = if (term.rt.editor_visible_numbers.len > 0) term.rt.editor_visible_numbers.len else term.rt.editor_lines.len;
-    if (first >= axis_len) return .{ .generation = term.rt.editor_inlay.generation };
+    if (first >= axis_len) return &.{};
     const count = @min(@as(usize, 256), axis_len - first);
-    const drawn = term.rt.editor_drawn_content_cols;
-    const view_cols: u32 = if (drawn > 0) drawn else @intCast(@max(1, @divTrunc(pane_rect.w, @max(1, @as(i32, @intCast(self.cell_width_px))))));
-    return .{ .first = first, .rows = inlay_client.lineInlays(self, term, first, count, view_cols), .generation = term.rt.editor_inlay.generation };
+    return inlay_client.lineInlays(self, term, first, count, inlayViewCols(term));
+}
+
+fn inlayWindow(self: *AppSession, term: *Term) chrome_editor.content.InlayWindow {
+    if (term.rt.editor_diff != null) return .{};
+    return .{ .first = term.rt.editor_first_line, .rows = inlayRows(self, term), .generation = term.rt.editor_inlay.generation };
 }
 
 fn syntaxColors(self: *AppSession, term: *Term) []const []const chrome_editor.content.ColorSpan {
@@ -677,6 +688,9 @@ fn syntaxColors(self: *AppSession, term: *Term) []const []const chrome_editor.co
         term.rt.editor_visible_numbers,
         .inherit,
         semantic_client.spans(term),
+        // **색 구간도 byte→열 환산이다**(§4.1h 「규칙 하나」) — 힌트를 안 넘기면 힌트가 선 줄의 색이 힌트 폭만큼 왼쪽으로 밀려
+        // 글자마다 이웃의 색을 받는다(2026-09-22 캡처: `s.area()` 의 `a` 만 다른 색). caret·선택·검색은 이미 같은 규칙을 지난다.
+        inlayRows(self, term),
     );
 }
 
@@ -1884,7 +1898,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
         mm_drawn = if (mm) |m| m.input.top else null;
         // **진단**(§5.4) — 트리가 있으면 목록을 다시 채우고(구문 오류), 보이는 줄 축의 세 표로 편다. 끄면 없다.
         const diag = diagnosticViews(self, term, draw_lines.len);
-        break :blk buildPaneOps(draw_lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), fc, maxColsForRender(self, term, false), row_cache, buildSelectionMarks(self, term), find_marks, find_current, marker_lines, marker_current, syntaxColors(self, term), seek_buf[0..seek_n], inlayWindow(self, term, pane_rect), buildCaretRows(self, term), conflictWidgets(self, term), conflictBands(term), self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, mm, diag);
+        break :blk buildPaneOps(draw_lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), fc, maxColsForRender(self, term, false), row_cache, buildSelectionMarks(self, term), find_marks, find_current, marker_lines, marker_current, syntaxColors(self, term), seek_buf[0..seek_n], inlayWindow(self, term), buildCaretRows(self, term), conflictWidgets(self, term), conflictBands(term), self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, mm, diag);
     };
     if (pf.ops_len == 0) return null;
     // **배치를 싣는다**(병합 모드가 아니면 지운다 — 옛 배치가 남으면 평범한 편집기에서 클릭이
@@ -4559,7 +4573,11 @@ fn visualRowColAt(term: *Term, x_px: f64, y_px: f64) ?struct { row: u32, col: u3
     const rows_len = term.rt.editor_hit_rows_len;
     if (rows_len == 0) return null;
     const geom = term.rt.editor_hit_geom;
-    const p = chrome_editor.hit.bodyPoint(
+    // **클릭 → byte 는 힌트를 안다**(§4.1h — caret·호버와 같은 걸음). 열 선택의 **축**은 문서 열이지만(아래), 어느 글자를 눌렀는지는
+    // 화면이 정한다 — 힌트를 모르면 힌트가 선 줄에서 힌트 폭만큼 앞 글자를 잡는다.
+    const InlayCtx = struct { t: *Term, cols: u32 };
+    const p = chrome_editor.hit.bodyPointModeWith(
+        .caret,
         .{
             .body_x = geom.body_x,
             .body_y = geom.body_y,
@@ -4574,10 +4592,19 @@ fn visualRowColAt(term: *Term, x_px: f64, y_px: f64) ?struct { row: u32, col: u3
         term.rt.editor_lines,
         x_px,
         y_px,
+        InlayCtx{ .t = term, .cols = geom.content_width },
+        struct {
+            fn f(c: InlayCtx, src_line: usize) []const chrome_editor.content.Inlay {
+                return inlay_client.inlaysForLine(c.t, src_line, c.cols);
+            }
+        }.f,
     ) orelse return null;
 
     // 줄 안 byte → 시각 열. **`columnsAtOffsets` 하나를 쓴다** — 열을 여기서 다시 세면 화면과 갈리는
     // 두 번째 출처가 생긴다(`ColumnMap.columnOf` 가 같은 함수를 부른다).
+    //
+    // **여기는 힌트를 안 센다**(§4.1h 「문서 열 소비자 셋」): 열 선택의 사각형은 문서 열이고, 되돌리는 쪽(`ProductColumnMap.columnOf`)도
+    // 문서 열이라 둘이 같은 축이어야 한다. 힌트를 더하면 고른 열이 문서에서 힌트 폭만큼 밀린다.
     const line_text = if (p.line < term.rt.editor_lines.len) term.rt.editor_lines[p.line] else "";
     var offs = [_]u32{@intCast(@min(p.byte_in_line, line_text.len))};
     var cols = [_]u32{0};
@@ -5901,7 +5928,7 @@ fn inlayExtraCols(term: *Term) u32 {
     const axis_len = if (term.rt.editor_visible_numbers.len > 0) term.rt.editor_visible_numbers.len else term.rt.editor_lines.len;
     if (first >= axis_len) return 0;
     const count = @min(@as(usize, 256), axis_len - first);
-    const cols: u32 = if (term.rt.editor_drawn_content_cols > 0) term.rt.editor_drawn_content_cols else 80;
+    const cols: u32 = inlayViewCols(term);
     var best: u32 = 0;
     var i: usize = 0;
     while (i < count) : (i += 1) {
@@ -13009,6 +13036,15 @@ test "INL9 인레이 힌트 — 서버가 ready 면 색 만들기 자리가 범�
     // L3 파생 — 가로 스크롤 상한은 힌트 폭(가장 넓은 줄의 합 11 = `p: ` 3 + ` -> void` 8)만큼 넓어진다(§4.1h).
     try testing.expectEqual(width_before + 11, scrollWidthCols(s, term, false));
     try testing.expect(drawnRunRole(f.fx.session, d.dl, ": int", .syntax_comment));
+    // **힌트 뒤의 문서 색도 글리프 열에 선다**(§4.1h 「규칙 하나」 — 색 구간도 byte→열 환산이다). `int a_hv: int = 1;` 에서 `1` 의 글리프
+    // 열은 11 + 힌트 5 = 16 이다: 색 구간이 문서 열로 오면 11 에 서서 힌트 칸에 가리고 글자 `1` 은 무색이 된다(2026-09-22 캡처가 잡은 결함 —
+    // `s.area()` 의 `a` 만 다른 색이었다). **열을 못 박는다** — 「어딘가에 number 색이 있다」는 둘째 줄의 숫자로도 참이라 못 가른다.
+    {
+        const c = syntaxColors(s, term);
+        try testing.expectEqual(maru.chrome.tokens.ColorRole.syntax_number, roleAt(c, 0, 16, 17) orelse return error.NoNumberColorAtGlyphColumn);
+        try testing.expectEqual(@as(?maru.chrome.tokens.ColorRole, null), roleAt(c, 0, 11, 12)); // 옛 문서 열에는 없다
+        try testing.expectEqual(maru.chrome.tokens.ColorRole.syntax_type_name, roleAt(c, 0, 0, 3) orelse return error.NoTypeColor); // 힌트 앞은 그대로
+    }
     const geom = term.rt.editor_hit_geom;
     const cw: f64 = @floatFromInt(geom.cell_w_px);
     const left: f64 = @floatFromInt(geom.body_x + @as(i32, @intCast(geom.content_left_px)));
@@ -13030,6 +13066,9 @@ test "INL9 인레이 힌트 — 서버가 ready 면 색 만들기 자리가 범�
     try testing.expectEqual(@as(?usize, 8), hitTestBody(term, left + 10 * cw + 3, top + 2));
     try testing.expectEqual(@as(?usize, 7), hitTestBody(term, left + 7 * cw + 1, top + 2));
     try testing.expectEqual(@as(?usize, 9), hitTestBody(term, left + 13 * cw + cw - 1, top + 2)); // 열 13 의 오른쪽 반 → 9
+    // **열 선택의 축은 문서 열이다**(§4.1h 「문서 열 소비자 셋」) — 클릭은 힌트를 알아 글리프 byte 를 집고(열 13 = `a_hv` 뒤), 그 byte 의
+    // 문서 열 8 을 낸다. 클릭이 힌트를 모르면 byte 가 힌트 폭만큼 앞이라 열도 밀린다.
+    try testing.expectEqual(@as(u32, 8), (visualRowColAt(term, left + 13 * cw + 1, top + 2) orelse return error.NoColumn).col);
     // 둘째 줄: `add(` 4 열 + `p: ` 3 = `1` 이 열 7. 열 5(힌트 안) → 앵커 18(줄 안 4).
     try testing.expectEqual(@as(?usize, 14 + 4), hitTestBody(term, left + 5 * cw + 2, top + @as(f64, @floatFromInt(geom.cell_h_px)) + 2));
     // 둘째 줄 끝 힌트 ` -> void`(열 17..25) 안을 누르면 앵커 = 줄 끝 byte 28. (hit 만 보면 줄 끝 너머 클릭과 답이 같아 못 가르지만 — 적대적 C8 등가 —

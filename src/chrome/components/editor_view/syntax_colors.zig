@@ -73,6 +73,9 @@ pub const Scratch = struct {
 ///
 /// **`leading_empty` 는 창 앞에 붙일 빈 줄 수다.** 렌더 축이 0 부터 시작하는데 창이 중간부터일 때
 /// 그 앞을 무색으로 채운다 — 짧은 배열도 허용되므로(그 자리 `frame.zig` 계약) 창 뒤는 안 채운다.
+/// `line_inlays` 는 **`lines` 와 같은 축**(창 앞 줄부터)의 줄별 가상 텍스트다(§4.1h). 짧은 배열·빈 슬라이스를 허용한다 — 힌트가 없으면
+/// 옛 답과 같다. **색 구간도 byte→열 환산이라 같은 규칙을 지나야 한다**: 안 그러면 힌트가 선 줄에서 색이 힌트 폭만큼 왼쪽으로 밀려
+/// 글자마다 이웃의 색을 받는다(2026-09-22 캡처가 잡았다 — `s.area()` 의 `a` 만 다른 색이었다).
 pub fn lineColors(
     self: *Scratch,
     allocator: std.mem.Allocator,
@@ -81,6 +84,7 @@ pub fn lineColors(
     spans: []const ByteSpan,
     tab_width: u16,
     leading_empty: usize,
+    line_inlays: []const []const content.Inlay,
 ) []const []const content.ColorSpan {
     self.flat.clearRetainingCapacity();
     self.bounds.clearRetainingCapacity();
@@ -89,7 +93,7 @@ pub fn lineColors(
     self.bounds.ensureTotalCapacity(allocator, lines.len) catch return &.{};
 
     var si: usize = 0; // spans 를 앞으로만 훑는다
-    for (lines) |ln| {
+    for (lines, 0..) |ln, li| {
         const lo: usize = ln.start;
         const hi: usize = @min(@as(usize, ln.end), doc.len);
         const start_flat = self.flat.items.len;
@@ -97,7 +101,8 @@ pub fn lineColors(
             while (si < spans.len and spans[si].end <= lo) si += 1;
             var sj = si;
             while (sj < spans.len and spans[sj].start < hi) sj += 1;
-            if (sj > si) appendLine(self, allocator, doc[lo..hi], spans[si..sj], lo, tab_width);
+            const inl: []const content.Inlay = if (li < line_inlays.len) line_inlays[li] else &.{};
+            if (sj > si) appendLine(self, allocator, doc[lo..hi], spans[si..sj], lo, tab_width, inl);
         }
         self.bounds.appendAssumeCapacity(.{ start_flat, self.flat.items.len });
     }
@@ -134,8 +139,12 @@ fn appendLine(
     spans: []const ByteSpan,
     line_start: usize,
     tab_width: u16,
+    inlays: []const content.Inlay,
 ) void {
-    const width = content.lineColumnsUpTo(line_bytes, tab_width, @intCast(max_color_cols));
+    // **힌트 폭까지 센다** — 색 구간의 열은 전개 열(힌트 포함)이라, 폭이 문서만이면 줄 끝 쪽 토큰이 상한에 걸려 무색이 된다.
+    var inlay_cols: u32 = 0;
+    for (inlays) |in| inlay_cols +|= @intCast(in.text.len);
+    const width = content.lineColumnsUpTo(line_bytes, tab_width, @intCast(max_color_cols)) +| inlay_cols;
     if (width == 0) return;
     const w: usize = @min(width, max_color_cols);
 
@@ -162,7 +171,7 @@ fn appendLine(
     }
     self.offs.shrinkRetainingCapacity(uniq);
     self.cols.resize(allocator, uniq) catch return;
-    content.columnsAtOffsets(line_bytes, tab_width, self.offs.items, self.cols.items, @intCast(w));
+    content.columnsAtOffsetsWith(line_bytes, tab_width, self.offs.items, self.cols.items, @intCast(w), inlays);
 
     for (spans) |sp| {
         const sb = relStart(sp, line_start, line_bytes.len);
@@ -224,7 +233,7 @@ test "겹친 스팬은 뒤엣것이 이긴다" {
         .{ .start = 6, .end = 7, .role = .syntax_property },
         .{ .start = 6, .end = 7, .role = .syntax_type_name },
     };
-    const out = lineColors(&s, a, doc, &lines, &spans, 4, 0);
+    const out = lineColors(&s, a, doc, &lines, &spans, 4, 0, &.{});
     try std.testing.expectEqual(@as(usize, 1), out.len);
     try std.testing.expectEqual(@as(usize, 1), out[0].len);
     try std.testing.expectEqual(tokens.ColorRole.syntax_type_name, out[0][0].role);
@@ -244,7 +253,7 @@ test "CRLF 문서에서 줄 경계는 호출자가 준 것을 그대로 쓴다" 
         .{ .start = 4, .end = 6 },
     };
     const spans = [_]ByteSpan{.{ .start = 4, .end = 6, .role = .syntax_string }};
-    const out = lineColors(&s, a, doc, &lines, &spans, 4, 0);
+    const out = lineColors(&s, a, doc, &lines, &spans, 4, 0, &.{});
     try std.testing.expectEqual(@as(usize, 2), out.len);
     try std.testing.expectEqual(@as(usize, 0), out[0].len); // 첫 줄은 무색
     try std.testing.expectEqual(@as(usize, 1), out[1].len);
@@ -261,7 +270,7 @@ test "탭은 열을 늘린다 — 바이트가 아니라 표시 열로 칠한다
     const doc = "\tab";
     const lines = [_]LineBounds{.{ .start = 0, .end = 3 }};
     const spans = [_]ByteSpan{.{ .start = 1, .end = 3, .role = .syntax_keyword }};
-    const out = lineColors(&s, a, doc, &lines, &spans, 4, 0);
+    const out = lineColors(&s, a, doc, &lines, &spans, 4, 0, &.{});
     try std.testing.expectEqual(@as(usize, 1), out[0].len);
     try std.testing.expectEqual(@as(u32, 4), out[0][0].start_col);
     try std.testing.expectEqual(@as(u32, 6), out[0][0].end_col);
@@ -280,7 +289,7 @@ test "창 앞의 빈 줄과 여러 줄에 걸친 토큰" {
     };
     // 둘째~셋째 줄에 걸친 토큰(주석·문자열이 그렇다).
     const spans = [_]ByteSpan{.{ .start = 3, .end = 8, .role = .syntax_comment }};
-    const out = lineColors(&s, a, doc, &lines, &spans, 4, 1);
+    const out = lineColors(&s, a, doc, &lines, &spans, 4, 1, &.{});
     try std.testing.expectEqual(@as(usize, 3), out.len);
     try std.testing.expectEqual(@as(usize, 0), out[0].len); // leading_empty
     try std.testing.expectEqual(@as(u32, 2), out[1][0].end_col);
@@ -297,19 +306,19 @@ test "창 앞의 빈 줄을 다시 안 채워도 지난 프레임의 색이 안 
     const bounds = [_]LineBounds{.{ .start = 0, .end = 12 }};
     const spans = [_]ByteSpan{.{ .start = 0, .end = 5, .role = .syntax_keyword }};
 
-    const first = lineColors(&sc, a, doc, &bounds, &spans, 4, 3);
+    const first = lineColors(&sc, a, doc, &bounds, &spans, 4, 3, &.{});
     try std.testing.expectEqual(@as(usize, 4), first.len);
     try std.testing.expect(first[3].len > 0);
 
     // 창이 두 줄 내려간다. 이제 3·4 는 창 앞이고 **무색이어야 한다**.
-    const second = lineColors(&sc, a, doc, &bounds, &spans, 4, 5);
+    const second = lineColors(&sc, a, doc, &bounds, &spans, 4, 5, &.{});
     try std.testing.expectEqual(@as(usize, 6), second.len);
     try std.testing.expectEqual(@as(usize, 0), second[3].len);
     try std.testing.expectEqual(@as(usize, 0), second[4].len);
     try std.testing.expect(second[5].len > 0);
 
     // 다시 위로. 아래로 갈 때 채워 둔 칸이 그대로 무색이어야 한다(여기가 기억을 쓰는 자리다).
-    const third = lineColors(&sc, a, doc, &bounds, &spans, 4, 1);
+    const third = lineColors(&sc, a, doc, &bounds, &spans, 4, 1, &.{});
     try std.testing.expectEqual(@as(usize, 2), third.len);
     try std.testing.expectEqual(@as(usize, 0), third[0].len);
     try std.testing.expect(third[1].len > 0);

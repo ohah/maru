@@ -47,7 +47,7 @@ macOS 로컬 shell 1개 surface
 - [세션 컨트롤 플레인 Phase·검증·코드 위치](plans/control-plane.md)
 - [네이티브 편집기 구현 계획](plans/native-editor.md) — [여러 뷰 축 실측·선례 원장](plans/native-editor-multi-view.md)(같은 파일 두 곳 보기·병합 편집기·Split in Group)
 - [에디터 Surface 단계 계획](plans/editor-surface.md)
-- [이름 없는 문서(untitled) 구현 계획](plans/editor-untitled.md) — 파일 없이 여는 편집기(U1~U3·U4a~U4c — 백업·복원)와 저장 실패 이유·충돌 선택(C0·C1a·C1b)
+- [이름 없는 문서(untitled) 구현 계획](plans/editor-untitled.md) — **끝났다(2026-09-23)**. 파일 없이 여는 편집기(U1~U3)·미저장 편집의 백업과 복원(U4a~U4d)·저장 실패 이유와 충돌 선택(C0·C1a·C1b). 계약은 문서 모델 §3.10·§3.11 과 editor-surface §4, 포맷은 workspace-restore 가 소유한다
 - [소스 컨트롤 도크 2판 단계 계획](plans/scm-dock.md)
 - [원격 SCM 단계 계획(RS1~RS7 — 원격 저장소 읽기·쓰기·히스토리)](plans/remote-scm.md)
 - [원격 감시 단계 계획(RW1~RW5 — 저쪽에서 바뀌면 도크가 안다)](plans/remote-watch.md)

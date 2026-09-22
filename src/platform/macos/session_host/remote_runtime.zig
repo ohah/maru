@@ -16006,8 +16006,11 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
             // 그 커밋이 이 pin 을 안 올려 main 의 `mise run check` 가 빨갰다(§8.2h 조각의 게이트에서 실측: Debug 11712 · ReleaseFast 11664).
             // 2026-09-20 kitty 매체 전송(`KittyGraphicsCommand` 에 `data_size`·`data_offset`·`internal_id` — `TerminalCore.kitty_chunk_cmd` 안):
             // Debug +16 · ReleaseFast +0(기존 패딩에 들어감) — `test-session-host-2c3d-c3-3b2b3` 에서 실측.
+            // 2026-09-22 색 구성 통지(DECSET 2031 / DSR 996 — `08a5eb717`, `TerminalCore` 의 구독 상태):
+            // **Debug +0(기존 패딩) · ReleaseFast +16** — 그 커밋이 이 pin 을 안 올려 main 의 `zig build test` 가
+            // 빨갰다. 둘의 델타가 또 갈렸다(위 두 사례와 같은 이유) — 한쪽을 보고 다른 쪽을 적지 않는다.
             .Debug => 11728,
-            .ReleaseFast => 11664,
+            .ReleaseFast => 11680,
             else => unreachable,
         },
         // ⚠️ 이 두 값은 **이 트리에서 측정할 수 없다.** `remote_runtime` 은 배럴이 macOS 에서만 열어서
@@ -16023,7 +16026,8 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
     const expected_runtime_remainder: usize = switch (builtin.os.tag) {
         .macos => switch (builtin.mode) {
             .Debug => 8992, // 2026-09-20 kitty 매체 전송 +16(위 표와 같은 델타 — 실측)
-            .ReleaseFast => 8928,
+            // 2026-09-22 색 구성 통지(`08a5eb717`): Debug +0 · ReleaseFast +16 — 위 전체 크기와 같은 델타(실측).
+            .ReleaseFast => 8944,
             else => unreachable,
         },
         // 위와 같은 이유로 측정 불가 — 원래 값 그대로다.
@@ -19612,8 +19616,9 @@ test "CR2a RemoteGeneration field inventory는 generation owner 열두 개만 �
             // 2026-09-19 `48f89bc10`(한국어 preedit 앵커) 뒤 둘 다 +16 — 위 `C3-3b2b3` 의 표와 함께 움직인다(경계 판정자가 둘을 센다).
             // 2026-09-20 kitty 매체 전송(`KittyGraphicsCommand` 에 `data_size`·`data_offset`·`internal_id` — `TerminalCore.kitty_chunk_cmd` 안):
             // Debug +16 · ReleaseFast +0(기존 패딩에 들어감) — `test-session-host-2c3d-c3-3b2b3` 에서 실측.
+            // 2026-09-22 색 구성 통지(DECSET 2031 / DSR 996 — `08a5eb717`): Debug +0 · ReleaseFast +16(실측).
             .Debug => 11728,
-            .ReleaseFast => 11664,
+            .ReleaseFast => 11680,
             else => unreachable,
         },
         // ⚠️ 이 두 값은 **이 트리에서 측정할 수 없다.** `remote_runtime` 은 배럴이 macOS 에서만 열어서

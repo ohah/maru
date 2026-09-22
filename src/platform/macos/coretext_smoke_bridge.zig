@@ -148,6 +148,12 @@ pub extern fn maru_macos_coretext_shape_cache_stats(
     out_uncacheable: *u64,
 ) void;
 
+/// 폰트 집합 캐시(설정 서명 → primary(+cascade)·styled face·속성). 셰이핑 **결과** 캐시와 별개다 — 그쪽이
+/// 맞아도 폰트는 매 호출 다시 만들고 있었다(2026-09-23 실측: 네이티브 셰이핑의 93 %).
+pub extern fn maru_macos_coretext_shape_font_cache_stats(out_hits: *u64, out_misses: *u64, out_last_faces: *u64) void;
+pub extern fn maru_macos_coretext_shape_font_cache_reset() void;
+pub extern fn maru_macos_coretext_shape_font_cache_set_enabled(enabled: u32) void;
+
 pub extern fn maru_macos_coretext_smoke_rasterize_glyph(
     requested_font_family: [*]const u8,
     requested_font_family_len: usize,

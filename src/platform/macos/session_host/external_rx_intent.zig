@@ -2324,7 +2324,7 @@ pub fn resetDestroyedForOuterTurn(handle: *ExternalRxIntentHandle) bool {
     return true;
 }
 
-test "f3d destroyed intent tombstone resets only from exact authenticated state" {
+test "whole turn destroyed intent tombstone resets only from exact authenticated state" {
     var handle: ExternalRxIntentHandle = .{
         .saved_self_addr = undefined,
         .lifecycle = .destroyed,
@@ -2337,7 +2337,7 @@ test "f3d destroyed intent tombstone resets only from exact authenticated state"
     try std.testing.expect(handlePristine(&handle));
 }
 
-test "f3d destroyed intent tombstone rejects forged fields and digest" {
+test "whole turn destroyed intent tombstone rejects forged fields and digest" {
     var handle: ExternalRxIntentHandle = .{
         .saved_self_addr = undefined,
         .lifecycle = .destroyed,

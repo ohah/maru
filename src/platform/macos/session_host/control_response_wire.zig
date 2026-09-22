@@ -380,7 +380,7 @@ const canonical_authority = recovery.ControlAuthority{
     .recovery_epoch = 5,
 };
 
-test "f3c0 control wire encodes typed requests and keeps recovery authority local" {
+test "typed control admission control wire encodes typed requests and keeps recovery authority local" {
     var buffer: [160]u8 = undefined;
     const resize = try encodeRequest(&buffer, .{ .resize = .{
         .stream_id = 7,
@@ -444,7 +444,7 @@ fn expectExactParamsBoundary(request: WireRequest) !void {
     );
 }
 
-test "f3c0 control wire request encoding is exact-bound and rejects noncanonical input" {
+test "typed control admission control wire request encoding is exact-bound and rejects noncanonical input" {
     const resize: ControlRequest = .{ .resize = .{
         .stream_id = 7,
         .cols = 80,
@@ -477,7 +477,7 @@ test "f3c0 control wire request encoding is exact-bound and rejects noncanonical
     } }));
 }
 
-test "f3c0 control wire strictly decodes resize and resync responses" {
+test "typed control admission control wire strictly decodes resize and resync responses" {
     const expectation: ControlExpectation = .{ .resize = .{ .client_sequence = 11 } };
     try std.testing.expectEqual(ResizeReply.stale, try decodeResizeResponse(
         std.testing.allocator,
@@ -574,7 +574,7 @@ fn checkResyncResponseAllocationFailure(allocator: std.mem.Allocator) !void {
     ) catch |err| return err;
 }
 
-test "f3c0 control wire response decoder survives every allocation failure" {
+test "typed control admission control wire response decoder survives every allocation failure" {
     try std.testing.checkAllAllocationFailures(
         std.testing.allocator,
         checkResizeResponseAllocationFailure,

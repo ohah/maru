@@ -13,7 +13,7 @@ const pump = @import("client_external_pump");
 
 pub fn main() !void {
     comptime {
-        if (pump.f3c1_contract_version != 2)
+        if (pump.completed_drain_contract_version != 2)
             @compileError("F3c1 preparation contract version drifted");
         if (!@hasField(pump.ExternalRxTurnScratch, "whole_drain_permit") or
             !@hasField(pump.ExternalRxTurnScratch, "control_semantic_verdict") or
@@ -80,7 +80,7 @@ pub fn main() !void {
         const name = tokenizer.next();
         if (name.tag != .string_literal) continue;
         const literal = source_z[name.loc.start + 1 .. name.loc.end - 1];
-        if (std.mem.startsWith(u8, literal, "f3c1 ")) behavior_tests += 1;
+        if (std.mem.startsWith(u8, literal, "completed drain ")) behavior_tests += 1;
     }
     if (behavior_tests < 9)
         return error.F3c1BehaviorGateEmpty;

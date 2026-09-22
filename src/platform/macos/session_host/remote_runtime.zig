@@ -8270,7 +8270,7 @@ test "2c4 generation arm은 pointer-free capability projection만 반환한다" 
     try testing.expectEqual(client.wire_major, capabilities.wire_major);
 }
 
-test "f3c0 remote runtime resize reply preserves stale size and uses host-clamped applied size" {
+test "typed control admission remote runtime resize reply preserves stale size and uses host-clamped applied size" {
     try std.testing.expectEqual(
         control_response_wire.ResizeReply.stale,
         try decodeResizeReply(std.testing.allocator, "{\"result\":{\"stale\":true}}", 7),
@@ -8301,7 +8301,7 @@ test "f3c0 remote runtime resize reply preserves stale size and uses host-clampe
     );
 }
 
-test "f3c0 remote runtime resync maps valid malformed error and OOM without drift" {
+test "typed control admission remote runtime resync maps valid malformed error and OOM without drift" {
     var valid_client = client_mod.Client{
         .allocator = std.testing.allocator,
         .fd = -1,
@@ -18926,7 +18926,7 @@ test "remote runtime: link decode OOM은 소유 메모리를 회수하고 connec
     try testing.checkAllAllocationFailures(testing.allocator, Runner.run, .{});
 }
 
-test "f3c0 remote runtime requestResync makes the host push a fresh snapshot (desync 복구)" {
+test "typed control admission remote runtime requestResync makes the host push a fresh snapshot (desync 복구)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     const io = testing.io;

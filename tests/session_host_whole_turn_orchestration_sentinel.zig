@@ -22,13 +22,13 @@ pub fn main() !void {
     const begin = std.mem.indexOf(
         u8,
         source,
-        "// MARU_F3D_PRODUCT_ORCHESTRATION_BEGIN",
+        "// MARU_WHOLE_TURN_ORCHESTRATION_BEGIN",
     ) orelse return error.F3dProductBoundaryMissing;
     const end = std.mem.indexOfPos(
         u8,
         source,
         begin,
-        "// MARU_F3D_PRODUCT_ORCHESTRATION_END",
+        "// MARU_WHOLE_TURN_ORCHESTRATION_END",
     ) orelse return error.F3dProductBoundaryMissing;
     const body = source[begin..end];
     for ([_][]const u8{
@@ -49,10 +49,10 @@ pub fn main() !void {
         return error.F3dProductBoundaryExpanded;
 
     for ([_][]const u8{
-        "f3d product pump consumes resize response in the source turn",
-        "f3d product pump consumes malformed response into terminal cleanup",
-        "f3d product pump consumes resync ACK into awaiting snapshot",
-        "f3d response payload cleanup callback owner drift terminalizes and quarantines",
+        "whole turn product pump consumes resize response in the source turn",
+        "whole turn product pump consumes malformed response into terminal cleanup",
+        "whole turn product pump consumes resync ACK into awaiting snapshot",
+        "whole turn response payload cleanup callback owner drift terminalizes and quarantines",
     }) |test_name| if (count(source, test_name) != 1)
         return error.F3dBehaviorGateMissing;
 }

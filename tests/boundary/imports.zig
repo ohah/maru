@@ -7287,7 +7287,7 @@ test "f2 control correlation reducer stays dependency neutral" {
         );
 }
 
-test "f3c0 control wire is the typed product codec without drain capability" {
+test "typed control admission control wire is the typed product codec without drain capability" {
     const allocator = std.testing.allocator;
     const codec = try readZigFileZ(
         allocator,
@@ -7414,7 +7414,7 @@ test "recovery integration contract keeps future ledger generation out of contro
     try std.testing.expect(std.mem.indexOf(u8, pump, "spec.request.resync.recovery_key") == null);
     try std.testing.expectEqual(
         @as(usize, 1),
-        std.mem.count(u8, pump, "test \"f3c0 recovery integration contract"),
+        std.mem.count(u8, pump, "test \"typed control admission recovery integration contract"),
     );
 
     const awaiting = betweenMarkers(
@@ -7941,7 +7941,7 @@ test "스크롤 목록 host 는 글자 뷰포트를 컴포넌트에서 받아 �
     try std.testing.expectEqual(@as(usize, 0), countOccurrences(owner, "self.collectMeasuredTextFromCache("));
 }
 
-test "f3c1 semantic producer remains private with one f3d product callsite" {
+test "completed drain semantic producer remains private with one whole turn product callsite" {
     const allocator = std.testing.allocator;
     const pump = try readZigFileZ(
         allocator,
@@ -7960,7 +7960,7 @@ test "f3c1 semantic producer remains private with one f3d product callsite" {
     );
 }
 
-test "f3c1 terminal binding and consumer remain private with one f3d product callsite" {
+test "completed drain terminal binding and consumer remain private with one whole turn product callsite" {
     const allocator = std.testing.allocator;
     const pump = try readZigFileZ(
         allocator,

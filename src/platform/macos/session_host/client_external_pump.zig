@@ -547,9 +547,9 @@ fn controlGenerationMatches(
         .untracked => !kind.requiresController() and expected == 0,
     };
 }
-pub const f3c1_contract_version: u16 = 2;
+pub const completed_drain_contract_version: u16 = 2;
 pub const integration_2b2e_contract_version: u16 = 2;
-pub const f3c2_contract_version: u16 = 1;
+pub const semantic_take_contract_version: u16 = 1;
 
 pub const PreparedAttachmentAuthority = struct {
     role: AttachmentRole,
@@ -20547,7 +20547,7 @@ pub const ExternalPumpStorage = struct {
             preparation,
         );
         var completed_control_orchestrated = false;
-        // MARU_F3D_PRODUCT_ORCHESTRATION_BEGIN
+        // MARU_WHOLE_TURN_ORCHESTRATION_BEGIN
         if (result.terminal == null and scratch.lifecycle != .terminal) {
             switch (preparation) {
                 .drained => |summary| {
@@ -20573,7 +20573,7 @@ pub const ExternalPumpStorage = struct {
                 .terminal, .without_drain => {},
             }
         }
-        // MARU_F3D_PRODUCT_ORCHESTRATION_END
+        // MARU_WHOLE_TURN_ORCHESTRATION_END
         var tx_authority_prepared = false;
         if (result.terminal == null and scratch.lifecycle != .terminal) {
             switch (preparation) {
@@ -28356,7 +28356,7 @@ test "S11-6 조용한 소켓에서 관측자의 선언이 실제로 나간다 �
     try std.testing.expectEqual(TeardownResult.cleaned, teardownForTest(&storage));
 }
 
-test "f3c0 f3c1 completed control defers pending TX to a fresh authority turn" {
+test "typed control admission completed drain completed control defers pending TX to a fresh authority turn" {
     const Probe = struct {
         var wire: []const u8 = &.{};
         var exposed_len: usize = 0;
@@ -28849,7 +28849,7 @@ fn pumpF3dActualResponse(
     );
 }
 
-test "f3d product pump consumes resize response in the source turn" {
+test "whole turn product pump consumes resize response in the source turn" {
     var fixture = try TestClient.init();
     defer fixture.deinitPeer();
     var storage: ExternalPumpStorage = .{};
@@ -28881,7 +28881,7 @@ test "f3d product pump consumes resize response in the source turn" {
     try std.testing.expect(ExternalPumpStorage.controlSemanticDestinationsPristine(scratch));
 }
 
-test "f3d product pump consumes malformed response into terminal cleanup" {
+test "whole turn product pump consumes malformed response into terminal cleanup" {
     var fixture = try TestClient.init();
     defer fixture.deinitPeer();
     var storage: ExternalPumpStorage = .{};
@@ -28909,7 +28909,7 @@ test "f3d product pump consumes malformed response into terminal cleanup" {
     try std.testing.expect(ExternalPumpStorage.controlSemanticDestinationsPristine(scratch));
 }
 
-test "f3d product pump consumes resync ACK into awaiting snapshot" {
+test "whole turn product pump consumes resync ACK into awaiting snapshot" {
     var fixture = try TestClient.init();
     defer fixture.deinitPeer();
     var storage: ExternalPumpStorage = .{};
@@ -28945,7 +28945,7 @@ test "f3d product pump consumes resync ACK into awaiting snapshot" {
     try std.testing.expect(ExternalPumpStorage.controlSemanticDestinationsPristine(scratch));
 }
 
-test "f3e injected turn suppresses TX across revoke boundaries and transport retries" {
+test "hostile revoke injected turn suppresses TX across revoke boundaries and transport retries" {
     const Apply = struct {
         fn run(
             _: *anyopaque,
@@ -29165,7 +29165,7 @@ test "f3e injected turn suppresses TX across revoke boundaries and transport ret
     }
 }
 
-test "f3e socketpair orders response revoke and FIN without writable TX" {
+test "hostile revoke socketpair orders response revoke and FIN without writable TX" {
     const Case = enum { response_then_revoke, revoke_then_response, response_then_fin };
     inline for (std.meta.tags(Case)) |case| {
         var fixture = try TestClient.init();
@@ -29256,7 +29256,7 @@ test "f3e socketpair orders response revoke and FIN without writable TX" {
     }
 }
 
-test "f3e socketpair rejects incomplete frames and bounds one byte drip" {
+test "hostile revoke socketpair rejects incomplete frames and bounds one byte drip" {
     const incomplete_wire = try framing.encodeFrame(
         std.testing.allocator,
         .{
@@ -29467,7 +29467,7 @@ fn checkF3eOrchestrationAllocationFailure(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(TeardownResult.cleaned, teardownForTest(&storage));
 }
 
-test "f3e allocation fail index restores the common owner graph" {
+test "hostile revoke allocation fail index restores the common owner graph" {
     try std.testing.checkAllAllocationFailures(
         std.testing.allocator,
         checkF3eOrchestrationAllocationFailure,
@@ -29475,7 +29475,7 @@ test "f3e allocation fail index restores the common owner graph" {
     );
 }
 
-test "f3e bounded stress preserves common final zero" {
+test "hostile revoke bounded stress preserves common final zero" {
     for (0..64) |iteration| {
         var fixture = try TestClient.init();
         defer fixture.deinitPeer();
@@ -29528,7 +29528,7 @@ test "f3e bounded stress preserves common final zero" {
     }
 }
 
-test "f3c2 resize plan publishes first baseline and newer full state" {
+test "semantic take resize plan publishes first baseline and newer full state" {
     comptime {
         _ = ExternalPumpStorage.prepareResizeSemanticCommitUnderHeldLease;
         _ = ExternalPumpStorage.preparedResizeSemanticCommitCurrent;
@@ -29557,7 +29557,7 @@ test "f3c2 resize plan publishes first baseline and newer full state" {
     try std.testing.expectEqual(ResizeSemanticDisposition.publish_new, newer.disposition);
 }
 
-test "f3c2 destination range matrix accepts adjacent and rejects overlap escape and overflow" {
+test "semantic take destination range matrix accepts adjacent and rejects overlap escape and overflow" {
     try std.testing.expect(!rangesOverlap(100, 20, 120, 10));
     try std.testing.expect(rangesOverlap(100, 20, 119, 10));
     try std.testing.expect(rangesOverlap(119, 10, 100, 20));
@@ -29583,7 +29583,7 @@ test "f3c2 destination range matrix accepts adjacent and rejects overlap escape 
     ));
 }
 
-test "f3c2 resize plan preserves older and equal identical full state" {
+test "semantic take resize plan preserves older and equal identical full state" {
     const current: OwnerResizeState = .{ .current = .{
         .event = .{ .runtime_id = 0xaa, .cols = 80, .rows = 24, .resize_generation = 5 },
         .pending = true,
@@ -29600,7 +29600,7 @@ test "f3c2 resize plan preserves older and equal identical full state" {
     );
 }
 
-test "f3c2 resize plan classifies equivocation and target mismatch as protocol terminal" {
+test "semantic take resize plan classifies equivocation and target mismatch as protocol terminal" {
     const current: OwnerResizeState = .{ .current = .{
         .event = .{ .runtime_id = 0xaa, .cols = 80, .rows = 24, .resize_generation = 5 },
         .pending = false,
@@ -29624,7 +29624,7 @@ test "f3c2 resize plan classifies equivocation and target mismatch as protocol t
     try std.testing.expectEqual(ResizeSemanticDisposition.protocol_terminal, wrong_target.disposition);
 }
 
-test "f3c2 resize semantic take publishes full state and cleans response" {
+test "semantic take resize semantic take publishes full state and cleans response" {
     var fixture = try TestClient.init();
     defer fixture.deinitPeer();
     var storage: ExternalPumpStorage = .{};
@@ -29675,7 +29675,7 @@ test "f3c2 resize semantic take publishes full state and cleans response" {
     );
 }
 
-test "f3c2 resize rejects coherently resealed response receipt splice" {
+test "semantic take resize rejects coherently resealed response receipt splice" {
     var fixture = try TestClient.init();
     defer fixture.deinitPeer();
     var storage: ExternalPumpStorage = .{};
@@ -29733,7 +29733,7 @@ test "f3c2 resize rejects coherently resealed response receipt splice" {
     );
 }
 
-test "f3c2 older and equal resize success consume owners exactly once while preserving current" {
+test "semantic take older and equal resize success consume owners exactly once while preserving current" {
     const cases = [_]struct {
         payload: []const u8,
     }{
@@ -29807,7 +29807,7 @@ test "f3c2 older and equal resize success consume owners exactly once while pres
     }
 }
 
-test "f3c2 maximum correlation response succeeds before later admission exhausts" {
+test "semantic take maximum correlation response succeeds before later admission exhausts" {
     var fixture = try TestClient.init();
     defer fixture.deinitPeer();
     var storage: ExternalPumpStorage = .{};
@@ -29886,7 +29886,7 @@ test "f3c2 maximum correlation response succeeds before later admission exhausts
     try std.testing.expect(std.meta.eql(correlation_before, storage.control_correlation));
 }
 
-test "f3c2 maximum request ID succeeds on wire then next admission emits no wire" {
+test "semantic take maximum request ID succeeds on wire then next admission emits no wire" {
     var fixture = try TestClient.init();
     defer fixture.deinitPeer();
     var storage: ExternalPumpStorage = .{};
@@ -29967,7 +29967,7 @@ test "f3c2 maximum request ID succeeds on wire then next admission emits no wire
     try std.testing.expect(posix.errno(-1) == .AGAIN);
 }
 
-test "f3c1 actual resize, resync and declare_viewport responses prepare typed pairs" {
+test "completed drain actual resize, resync and declare_viewport responses prepare typed pairs" {
     const cases = [_]struct {
         request_kind: client_pump.ControlKind,
         payload: []const u8,
@@ -31318,7 +31318,7 @@ test "2b2e integration binds one and retires sixty three candidates at the fixed
     try std.testing.expectEqual(TeardownResult.cleaned, teardownForTest(&storage));
 }
 
-test "f3c1 stale malformed error and OOM prepare terminal without source mutation" {
+test "completed drain stale malformed error and OOM prepare terminal without source mutation" {
     const cases = [_]struct { payload: []const u8, reason: client_pump.TerminalReason }{
         .{ .payload = "{\"result\":{\"stale\":true}}", .reason = .protocol_error },
         .{ .payload = "{\"result\":", .reason = .protocol_error },
@@ -31369,7 +31369,7 @@ test "f3c1 stale malformed error and OOM prepare terminal without source mutatio
     try std.testing.expectEqual(WholeTurnReleaseResult.released, storage.releaseWholeTurnLease(&lease));
 }
 
-test "f3c1 permit verdict tamper copy and pair splice fail closed" {
+test "completed drain permit verdict tamper copy and pair splice fail closed" {
     var fixture = try TestClient.init();
     defer fixture.deinitPeer();
     var storage: ExternalPumpStorage = .{};
@@ -31454,7 +31454,7 @@ test "f3c1 permit verdict tamper copy and pair splice fail closed" {
     );
 }
 
-test "f3c1 exhausted policy or incomplete parser cannot mint preparation" {
+test "completed drain exhausted policy or incomplete parser cannot mint preparation" {
     const blockers = [_]F3c1PolicyBlock{
         .frame_budget,
         .read_budget,
@@ -31493,7 +31493,7 @@ test "f3c1 exhausted policy or incomplete parser cannot mint preparation" {
     }
 }
 
-test "f3c1 coherent completed reseal during decode cannot mint terminal authority" {
+test "completed drain coherent completed reseal during decode cannot mint terminal authority" {
     var probe = AllocatorCallbackProbe{ .parent = std.testing.allocator };
     var fixture = try TestClient.initWithAllocator(probe.allocator());
     defer fixture.deinitPeer();
@@ -31546,7 +31546,7 @@ test "f3c1 coherent completed reseal during decode cannot mint terminal authorit
     try std.testing.expectEqual(WholeTurnReleaseResult.released, storage.releaseWholeTurnLease(&lease));
 }
 
-test "f3c1 terminal binding actual stale malformed and OOM clean exactly once" {
+test "completed drain terminal binding actual stale malformed and OOM clean exactly once" {
     const cases = [_]struct {
         payload: []const u8,
         expected_reason: client_pump.TerminalReason,
@@ -31627,7 +31627,7 @@ test "f3c1 terminal binding actual stale malformed and OOM clean exactly once" {
     }
 }
 
-test "f3c1 terminal binding tamper copy splice and replay fail closed" {
+test "completed drain terminal binding tamper copy splice and replay fail closed" {
     var failing = F3c1FailAllocator{ .parent = std.testing.allocator };
     var fixture = try TestClient.initWithAllocator(failing.allocator());
     defer fixture.deinitPeer();
@@ -31780,7 +31780,7 @@ test "f3c1 terminal binding tamper copy splice and replay fail closed" {
     try std.testing.expectEqual(WholeTurnReleaseResult.released, other_storage.releaseWholeTurnLease(&other_lease));
 }
 
-test "f3c1 terminal binding rejects non-pristine destinations without mutation" {
+test "completed drain terminal binding rejects non-pristine destinations without mutation" {
     var fixture = try TestClient.init();
     defer fixture.deinitPeer();
     var storage: ExternalPumpStorage = .{};
@@ -31855,7 +31855,7 @@ test "f3c1 terminal binding rejects non-pristine destinations without mutation" 
     try std.testing.expectEqual(WholeTurnReleaseResult.released, storage.releaseWholeTurnLease(&lease));
 }
 
-test "f3c1 terminal binding max generation is absorbing and cleans payload" {
+test "completed drain terminal binding max generation is absorbing and cleans payload" {
     var fixture = try TestClient.init();
     defer fixture.deinitPeer();
     var storage: ExternalPumpStorage = .{};
@@ -31890,7 +31890,7 @@ test "f3c1 terminal binding max generation is absorbing and cleans payload" {
     try std.testing.expectEqual(WholeTurnReleaseResult.released, storage.releaseWholeTurnLease(&lease));
 }
 
-test "f3c1 terminal binding callback drift quarantines and consumer reentry is rejected" {
+test "completed drain terminal binding callback drift quarantines and consumer reentry is rejected" {
     const cases = [_]struct {
         mode: AllocatorCallbackProbe.Mode,
         expected: ConsumeControlSemanticTerminalResult,
@@ -32006,7 +32006,7 @@ fn pumpF3bBufferedRevoke(
     );
 }
 
-test "f3c0 recovery integration contract control admission never predicts a ledger token generation" {
+test "typed control admission recovery integration contract control admission never predicts a ledger token generation" {
     var fixture = try TestClient.init();
     defer fixture.deinitPeer();
     var storage: ExternalPumpStorage = .{};
@@ -32047,7 +32047,7 @@ test "f3c0 recovery integration contract control admission never predicts a ledg
     try std.testing.expect(std.mem.indexOf(u8, queued, "token_generation") == null);
 }
 
-test "f3c0 resync admission rejects a foreign recovery epoch before wire publication" {
+test "typed control admission resync admission rejects a foreign recovery epoch before wire publication" {
     var fixture = try TestClient.init();
     defer fixture.deinitPeer();
     var storage: ExternalPumpStorage = .{};
@@ -32540,7 +32540,7 @@ test "f3b corrupt persisted cleanup tags fail closed before pointer recovery" {
     }
 }
 
-test "f3d response payload cleanup callback owner drift terminalizes and quarantines" {
+test "whole turn response payload cleanup callback owner drift terminalizes and quarantines" {
     resetCrossOwnerQuarantineForTest();
     defer resetCrossOwnerQuarantineForTest();
     var allocator_probe = AllocatorCallbackProbe{ .parent = std.testing.allocator };
@@ -32859,7 +32859,7 @@ fn checkF2ControlAdmissionAllocationFailure(
     }
 }
 
-test "f3c0 typed control admission preserves every owner at every allocation fail index" {
+test "typed control admission typed control admission preserves every owner at every allocation fail index" {
     try std.testing.checkAllAllocationFailures(
         std.testing.allocator,
         checkF2ControlAdmissionAllocationFailure,
@@ -32941,7 +32941,7 @@ test "f2 response ownership preserves final zero at every allocation fail index"
     );
 }
 
-test "f3c0 typed product control publishes exact socket completion" {
+test "typed control admission typed product control publishes exact socket completion" {
     const Probe = struct {
         fn read(
             _: *anyopaque,
@@ -46211,7 +46211,7 @@ test "D1 drained deadline terminalizes only after evidence cleanup" {
     );
 }
 
-test "f3c2 projected resync candidate zero preserves source and final bytes" {
+test "semantic take projected resync candidate zero preserves source and final bytes" {
     var fixture = try TestClient.init();
     defer fixture.deinitPeer();
     var storage: ExternalPumpStorage = .{};
@@ -46260,7 +46260,7 @@ test "f3c2 projected resync candidate zero preserves source and final bytes" {
     try std.testing.expectEqual(WholeTurnReleaseResult.released, storage.releaseWholeTurnLease(&lease));
 }
 
-test "f3c2 resync wrapper rejects coherent copy splice cross-owner and optional tag flip" {
+test "semantic take resync wrapper rejects coherent copy splice cross-owner and optional tag flip" {
     var fixture = try TestClient.init();
     defer fixture.deinitPeer();
     var storage: ExternalPumpStorage = .{};
@@ -46791,7 +46791,7 @@ fn checkF3c2DetachedFixtureAllocationFailure(allocator: std.mem.Allocator) !void
     aggregate_fixture.deinit();
 }
 
-test "f3c2 detached recovery fixture restores every owner at allocation fail index" {
+test "semantic take detached recovery fixture restores every owner at allocation fail index" {
     try std.testing.checkAllAllocationFailures(
         std.testing.allocator,
         checkF3c2DetachedFixtureAllocationFailure,
@@ -46799,7 +46799,7 @@ test "f3c2 detached recovery fixture restores every owner at allocation fail ind
     );
 }
 
-test "f3c2 resync candidate one rejects actual-token ABA then atomically consumes ACK and snapshot" {
+test "semantic take resync candidate one rejects actual-token ABA then atomically consumes ACK and snapshot" {
     var fixture = try TestClient.init();
     defer fixture.deinitPeer();
     var storage: ExternalPumpStorage = .{};
@@ -46928,7 +46928,7 @@ test "f3c2 resync candidate one rejects actual-token ABA then atomically consume
     try std.testing.expectEqual(WholeTurnReleaseResult.released, storage.releaseWholeTurnLease(&lease));
 }
 
-test "f3c2 response cleanup reentry is busy and payload frees exactly once" {
+test "semantic take response cleanup reentry is busy and payload frees exactly once" {
     resetCrossOwnerQuarantineForTest();
     defer resetCrossOwnerQuarantineForTest();
     // Nested admission deliberately latches bounded process quarantine. Keep those retained
@@ -47092,35 +47092,35 @@ fn checkF3c2ResyncCallbackDrift(
     try std.testing.expectEqual(free_before + 3, allocator_probe.free_count);
 }
 
-test "f3c2 resync cleanup quarantines aggregate pointer drift without blessing stale digest" {
+test "semantic take resync cleanup quarantines aggregate pointer drift without blessing stale digest" {
     try checkF3c2ResyncCallbackDrift(
         .resync_aggregate_pointer_drift,
         false,
     );
 }
 
-test "f3c2 resync cleanup rejects coherently resealed aggregate pointer drift" {
+test "semantic take resync cleanup rejects coherently resealed aggregate pointer drift" {
     try checkF3c2ResyncCallbackDrift(
         .resync_aggregate_pointer_reseal_drift,
         true,
     );
 }
 
-test "f3c2 resync cleanup rejects coherently resealed binding source drift" {
+test "semantic take resync cleanup rejects coherently resealed binding source drift" {
     try checkF3c2ResyncCallbackDrift(
         .resync_binding_pointer_reseal_drift,
         true,
     );
 }
 
-test "f3c2 resync cleanup rejects coherently resealed disposition destination drift" {
+test "semantic take resync cleanup rejects coherently resealed disposition destination drift" {
     try checkF3c2ResyncCallbackDrift(
         .resync_disposition_pointer_reseal_drift,
         true,
     );
 }
 
-test "f3c2 resync cleanup quarantines ledger authority drift" {
+test "semantic take resync cleanup quarantines ledger authority drift" {
     try checkF3c2ResyncCallbackDrift(
         .resync_ledger_authority_drift,
         // Once any pointer-bearing authority drifts, cleanup must not bless even an otherwise
@@ -47129,7 +47129,7 @@ test "f3c2 resync cleanup quarantines ledger authority drift" {
     );
 }
 
-test "f3c2 retirement callback cannot redirect response payload or allocator to 0x1" {
+test "semantic take retirement callback cannot redirect response payload or allocator to 0x1" {
     resetCrossOwnerQuarantineForTest();
     defer resetCrossOwnerQuarantineForTest();
     var allocator_probe = AllocatorCallbackProbe{ .parent = std.heap.c_allocator };
@@ -47207,7 +47207,7 @@ test "f3c2 retirement callback cannot redirect response payload or allocator to 
     );
 }
 
-test "f3c2 resync semantic candidate capacity consumes one bind and all cleanup dispositions" {
+test "semantic take resync semantic candidate capacity consumes one bind and all cleanup dispositions" {
     var fixture = try TestClient.init();
     defer fixture.deinitPeer();
     var storage: ExternalPumpStorage = .{};
@@ -47298,7 +47298,7 @@ test "f3c2 resync semantic candidate capacity consumes one bind and all cleanup 
     );
 }
 
-test "f3c2 post-ACK aggregate cannot replay a sealed resync transition" {
+test "semantic take post-ACK aggregate cannot replay a sealed resync transition" {
     var fixture = try TestClient.init();
     defer fixture.deinitPeer();
     var storage: ExternalPumpStorage = .{};
@@ -47587,7 +47587,7 @@ fn f3dSameDrainResponseAndSnapshotFixture() !void {
     );
 }
 
-test "f3c2 projected resync digest binds final lifecycle" {
+test "semantic take projected resync digest binds final lifecycle" {
     var candidate: ProjectedRecoverySnapshotCommit = .{
         .saved_self_addr = 1,
         .storage_addr = 2,
@@ -47604,7 +47604,7 @@ test "f3c2 projected resync digest binds final lifecycle" {
     ));
 }
 
-test "f3c2 resync success sends duplicate wire to unsolicited protocol terminal" {
+test "semantic take resync success sends duplicate wire to unsolicited protocol terminal" {
     var fixture = try TestClient.init();
     defer fixture.deinitPeer();
     var storage: ExternalPumpStorage = .{};
@@ -47685,7 +47685,7 @@ test "f3c2 resync success sends duplicate wire to unsolicited protocol terminal"
     try expectF2FinalZero(&storage);
 }
 
-test "f3c2 maximum resync correlation retires without wrap and blocks next admission" {
+test "semantic take maximum resync correlation retires without wrap and blocks next admission" {
     var fixture = try TestClient.init();
     defer fixture.deinitPeer();
     var storage: ExternalPumpStorage = .{};

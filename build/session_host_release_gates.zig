@@ -4949,7 +4949,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
                 .link_libc = true,
                 .imports = &.{.{ .name = "maru", .module = maru_mod }},
             }),
-            .filters = &.{"f3c1"},
+            .filters = &.{"completed drain"},
         });
         const run_external_pump_f3c1_tests = b.addRunArtifact(
             external_pump_f3c1_tests,
@@ -5069,7 +5069,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
                 .link_libc = true,
                 .imports = &.{.{ .name = "maru", .module = maru_mod }},
             }),
-            .filters = &.{"f3c2"},
+            .filters = &.{"semantic take"},
         });
         const run_external_pump_f3c2_tests = b.addRunArtifact(
             external_pump_f3c2_tests,
@@ -5118,7 +5118,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
                 .link_libc = true,
                 .imports = &.{.{ .name = "maru", .module = maru_mod }},
             }),
-            .filters = &.{"f3d"},
+            .filters = &.{"whole turn"},
         });
         const run_external_pump_f3d_tests = b.addRunArtifact(
             external_pump_f3d_tests,
@@ -5152,7 +5152,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
                 .target = target,
                 .optimize = optimize,
             }),
-            .filters = &.{"f3e"},
+            .filters = &.{"hostile revoke"},
         });
         const run_client_pump_f3e_tests = b.addRunArtifact(client_pump_f3e_tests);
         run_client_pump_f3e_tests.addArg("--maru-expect-tests=1");
@@ -5167,7 +5167,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
                 .link_libc = true,
                 .imports = &.{.{ .name = "maru", .module = maru_mod }},
             }),
-            .filters = &.{"f3e"},
+            .filters = &.{"hostile revoke"},
         });
         const run_external_pump_f3e_tests = b.addRunArtifact(external_pump_f3e_tests);
         // The external-pump root imports the pure planner module, so its filtered
@@ -5748,7 +5748,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
                 .optimize = optimize,
                 .imports = &.{.{ .name = "maru", .module = maru_mod }},
             }),
-            .filters = &.{"f3c0"},
+            .filters = &.{"typed control admission"},
         });
         const run_control_wire_f3c0_tests = b.addRunArtifact(
             control_wire_f3c0_tests,
@@ -5764,7 +5764,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
                 .link_libc = true,
                 .imports = &.{.{ .name = "maru", .module = maru_mod }},
             }),
-            .filters = &.{"f3c0"},
+            .filters = &.{"typed control admission"},
         });
         const run_remote_runtime_f3c0_tests = b.addRunArtifact(
             remote_runtime_f3c0_tests,
@@ -5780,7 +5780,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
                 .link_libc = true,
                 .imports = &.{.{ .name = "maru", .module = maru_mod }},
             }),
-            .filters = &.{"f3c0"},
+            .filters = &.{"typed control admission"},
         });
         const run_external_pump_f3c0_tests = b.addRunArtifact(
             external_pump_f3c0_tests,

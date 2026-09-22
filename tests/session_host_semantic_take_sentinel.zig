@@ -13,7 +13,7 @@ const pump = @import("client_external_pump");
 
 pub fn main() !void {
     comptime {
-        if (pump.f3c2_contract_version != 1)
+        if (pump.semantic_take_contract_version != 1)
             @compileError("F3c2 semantic take contract version drifted");
         for (.{
             "control_semantic_take",
@@ -54,23 +54,23 @@ pub fn main() !void {
     defer std.heap.page_allocator.free(intent_source);
 
     const required_behavior_names = [_][]const u8{
-        "f3c2 older and equal resize success consume owners exactly once while preserving current",
-        "f3c2 resize rejects coherently resealed response receipt splice",
-        "f3c2 destination range matrix accepts adjacent and rejects overlap escape and overflow",
-        "f3c2 resync wrapper rejects coherent copy splice cross-owner and optional tag flip",
-        "f3c2 detached recovery fixture restores every owner at allocation fail index",
-        "f3c2 resync candidate one rejects actual-token ABA then atomically consumes ACK and snapshot",
-        "f3c2 response cleanup reentry is busy and payload frees exactly once",
-        "f3c2 resync cleanup quarantines aggregate pointer drift without blessing stale digest",
-        "f3c2 resync cleanup rejects coherently resealed aggregate pointer drift",
-        "f3c2 resync cleanup rejects coherently resealed binding source drift",
-        "f3c2 resync cleanup rejects coherently resealed disposition destination drift",
-        "f3c2 resync cleanup quarantines ledger authority drift",
-        "f3c2 retirement callback cannot redirect response payload or allocator to 0x1",
-        "f3c2 resync semantic candidate capacity consumes one bind and all cleanup dispositions",
-        "f3c2 resync success sends duplicate wire to unsolicited protocol terminal",
-        "f3c2 maximum resync correlation retires without wrap and blocks next admission",
-        "f3c2 maximum request ID succeeds on wire then next admission emits no wire",
+        "semantic take older and equal resize success consume owners exactly once while preserving current",
+        "semantic take resize rejects coherently resealed response receipt splice",
+        "semantic take destination range matrix accepts adjacent and rejects overlap escape and overflow",
+        "semantic take resync wrapper rejects coherent copy splice cross-owner and optional tag flip",
+        "semantic take detached recovery fixture restores every owner at allocation fail index",
+        "semantic take resync candidate one rejects actual-token ABA then atomically consumes ACK and snapshot",
+        "semantic take response cleanup reentry is busy and payload frees exactly once",
+        "semantic take resync cleanup quarantines aggregate pointer drift without blessing stale digest",
+        "semantic take resync cleanup rejects coherently resealed aggregate pointer drift",
+        "semantic take resync cleanup rejects coherently resealed binding source drift",
+        "semantic take resync cleanup rejects coherently resealed disposition destination drift",
+        "semantic take resync cleanup quarantines ledger authority drift",
+        "semantic take retirement callback cannot redirect response payload or allocator to 0x1",
+        "semantic take resync semantic candidate capacity consumes one bind and all cleanup dispositions",
+        "semantic take resync success sends duplicate wire to unsolicited protocol terminal",
+        "semantic take maximum resync correlation retires without wrap and blocks next admission",
+        "semantic take maximum request ID succeeds on wire then next admission emits no wire",
     };
     var required_behavior_found = [_]bool{false} ** required_behavior_names.len;
     var tokenizer = std.zig.Tokenizer.init(source_z);
@@ -82,7 +82,7 @@ pub fn main() !void {
         const name = tokenizer.next();
         if (name.tag != .string_literal) continue;
         const literal = source_z[name.loc.start + 1 .. name.loc.end - 1];
-        if (std.mem.startsWith(u8, literal, "f3c2 ")) behavior_tests += 1;
+        if (std.mem.startsWith(u8, literal, "semantic take ")) behavior_tests += 1;
         for (required_behavior_names, 0..) |required_name, index| {
             if (std.mem.eql(u8, literal, required_name)) {
                 required_behavior_found[index] = true;

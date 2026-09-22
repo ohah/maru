@@ -674,7 +674,7 @@ test "f3a HUP cross product never weakens a sealed stronger cause" {
     }
 }
 
-test "f3e pure hostile matrix seals response revoke HUP control progress and deadline precedence" {
+test "hostile revoke pure hostile matrix seals response revoke HUP control progress and deadline precedence" {
     const controls = std.meta.tags(F3ControlProgress);
     for ([_]bool{ false, true }) |completed| {
         for ([_]bool{ false, true }) |revoked| {

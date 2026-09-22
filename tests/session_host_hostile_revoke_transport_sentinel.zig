@@ -37,15 +37,15 @@ pub fn main() !void {
     defer allocator.free(product);
 
     const pure_name =
-        "f3e pure hostile matrix seals response revoke HUP control progress and deadline precedence";
+        "hostile revoke pure hostile matrix seals response revoke HUP control progress and deadline precedence";
     if (count(planner, pure_name) != 1) return error.F3ePureGateMissing;
 
     for ([_][]const u8{
-        "f3e injected turn suppresses TX across revoke boundaries and transport retries",
-        "f3e socketpair orders response revoke and FIN without writable TX",
-        "f3e socketpair rejects incomplete frames and bounds one byte drip",
-        "f3e allocation fail index restores the common owner graph",
-        "f3e bounded stress preserves common final zero",
+        "hostile revoke injected turn suppresses TX across revoke boundaries and transport retries",
+        "hostile revoke socketpair orders response revoke and FIN without writable TX",
+        "hostile revoke socketpair rejects incomplete frames and bounds one byte drip",
+        "hostile revoke allocation fail index restores the common owner graph",
+        "hostile revoke bounded stress preserves common final zero",
     }) |test_name| {
         if (count(product, test_name) != 1) return error.F3eProductGateMissing;
     }

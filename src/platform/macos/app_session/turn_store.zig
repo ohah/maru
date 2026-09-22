@@ -306,8 +306,13 @@ test "턴 스냅샷 영속(AT7): 쓰고 되읽으면 같은 링·같은 사본�
     var base_buf: [std.fs.max_path_bytes]u8 = undefined;
     const base = base_buf[0..try tmp.dir.realPath(io, &base_buf)];
 
-    var store: turn_capture.Store = .{};
-    defer store.deinit(a);
+    // `Store` 는 112 KB 라 스택에 두지 않는다(적대적 6회차 — 두 개를 스택에 두니 test 함수 진입에서 guard page 를 밟았다).
+    const store = try a.create(turn_capture.Store);
+    store.* = .{};
+    defer {
+        store.deinit(a);
+        a.destroy(store);
+    }
     const id1 = store.adoptSealed(a, try sampleTurn(a));
     var entry: turn_snapshot.RingMap.Entry = .{ .id_len = 36 };
     @memcpy(entry.id[0..36], "0f6c1a2e-1111-4222-8333-444455556666");
@@ -326,9 +331,13 @@ test "턴 스냅샷 영속(AT7): 쓰고 되읽으면 같은 링·같은 사본�
     // 되읽기
     var m = load(io, a, base, entry.sessionId()) orelse return error.NoManifest;
     defer m.deinit(a);
-    var store2: turn_capture.Store = .{};
-    defer store2.deinit(a);
-    const restored = restore(io, a, base, &m, &store2) orelse return error.RestoreFailed;
+    const store2 = try a.create(turn_capture.Store);
+    store2.* = .{};
+    defer {
+        store2.deinit(a);
+        a.destroy(store2);
+    }
+    const restored = restore(io, a, base, &m, store2) orelse return error.RestoreFailed;
     try testing.expectEqualStrings("t1", restored.ring.latest().?.oid());
     try testing.expectEqualStrings("첫 턴", restored.ring.latest().?.titleText());
     const rt = store2.sealedTurn(restored.ring.latest().?.capture_id).?;
@@ -353,8 +362,13 @@ test "턴 스냅샷 영속(AT7): 손상(잘린 manifest·바뀐 blob)은 세션 
     defer tmp.cleanup();
     var base_buf: [std.fs.max_path_bytes]u8 = undefined;
     const base = base_buf[0..try tmp.dir.realPath(io, &base_buf)];
-    var store: turn_capture.Store = .{};
-    defer store.deinit(a);
+    // `Store` 는 112 KB 라 스택에 두지 않는다(적대적 6회차 — 두 개를 스택에 두니 test 함수 진입에서 guard page 를 밟았다).
+    const store = try a.create(turn_capture.Store);
+    store.* = .{};
+    defer {
+        store.deinit(a);
+        a.destroy(store);
+    }
     const id1 = store.adoptSealed(a, try sampleTurn(a));
     var entry: turn_snapshot.RingMap.Entry = .{ .id_len = 4 };
     @memcpy(entry.id[0..4], "sess");
@@ -368,9 +382,13 @@ test "턴 스냅샷 영속(AT7): 손상(잘린 manifest·바뀐 blob)은 세션 
     const bpath = blobPath(&bp, sdir, turn_persist.blobHash("one\n")).?;
     try writeAtomic(io, bpath, "one!"); // 같은 길이, 다른 해시
     var m = load(io, a, base, "sess") orelse return error.NoManifest;
-    var store2: turn_capture.Store = .{};
-    defer store2.deinit(a);
-    try testing.expect(restore(io, a, base, &m, &store2) == null);
+    const store2 = try a.create(turn_capture.Store);
+    store2.* = .{};
+    defer {
+        store2.deinit(a);
+        a.destroy(store2);
+    }
+    try testing.expect(restore(io, a, base, &m, store2) == null);
     m.deinit(a);
     try testing.expectEqual(@as(turn_capture.Id, 1), store2.next_id); // 아무것도 안 들였다
     try testing.expect(!fileExists(io, bpath)); // 디렉터리째 사라졌다
@@ -383,10 +401,37 @@ test "턴 스냅샷 영속(AT7): 손상(잘린 manifest·바뀐 blob)은 세션 
     try testing.expect(load(io, a, base, "sess") == null);
     try testing.expect(!fileExists(io, mpath));
 
+    // 디렉터리 이름과 안의 id 가 다르면(남의 파일이 옮겨졌다) 통째로.
+    try save(io, a, base, &entry, &.{.{ .id = id1, .turn = store.sealedTurn(id1).? }});
+    const other = sessionDirAlloc(a, base, "other").?;
+    defer a.free(other);
+    mkdir0700(other);
+    var op: [std.fs.max_path_bytes]u8 = undefined;
+    const opath = try std.fmt.bufPrint(&op, "{s}/{s}", .{ other, manifest_name });
+    const sess_manifest = (try std.Io.Dir.cwd().openFile(io, mpath, .{}));
+    const sess_text = try a.alloc(u8, @intCast((try sess_manifest.stat(io)).size));
+    defer a.free(sess_text);
+    _ = try sess_manifest.readPositionalAll(io, sess_text, 0);
+    sess_manifest.close(io);
+    try writeAtomic(io, opath, sess_text); // id="sess" 인 파일이 other/ 에
+    try testing.expect(load(io, a, base, "other") == null);
+    try testing.expect(!fileExists(io, opath));
+    // `turn-rings` 자리에 파일이 있으면(사용자가 만든 잔해) 쓰기는 오류로 끝나고 죽지 않는다.
+    var tmp2 = std.testing.tmpDir(.{});
+    defer tmp2.cleanup();
+    var b2: [std.fs.max_path_bytes]u8 = undefined;
+    const base2 = b2[0..try tmp2.dir.realPath(io, &b2)];
+    var fp: [std.fs.max_path_bytes]u8 = undefined;
+    try writeAtomic(io, try std.fmt.bufPrint(&fp, "{s}/{s}", .{ base2, dir_rel }), "not a dir");
+    try testing.expectError(error.NotDir, save(io, a, base2, &entry, &.{.{ .id = id1, .turn = store.sealedTurn(id1).? }}));
+    try testing.expect(load(io, a, base2, "sess") == null);
+    try testing.expectEqual(@as(usize, 0), sweepStale(io, base2, 0));
     // 안전하지 않은 id 는 아예 안 만든다. base 가 상대경로여도(CI 스모크가 HOME 을 그렇게 준다) — 그때는 영속이 꺼진다(abort 대신).
     try testing.expect(sessionDirAlloc(a, "zig-out/relative-home/.cache/maru", "sess") == null);
     try testing.expectEqual(@as(usize, 0), sweepStale(io, "zig-out/relative-home/.cache/maru", 0));
     try testing.expect(sessionDirAlloc(a, base, "../evil") == null);
+    try testing.expect(sessionDirAlloc(a, base, "a/../evil") == null); // 앞 글자 규칙이 아니라 `/` 자체가 거절돼야 한다(뮤턴트 M6e)
+    try testing.expect(sessionDirAlloc(a, base, "a/b") == null);
     try testing.expect(sessionDirAlloc(a, base, "a b") == null);
     try testing.expect(sessionDirAlloc(a, base, ".hidden") == null);
 }
@@ -399,8 +444,13 @@ test "턴 스냅샷 영속(AT7): 7일 넘게 손 안 탄 세션 디렉터리와 
     defer tmp.cleanup();
     var base_buf: [std.fs.max_path_bytes]u8 = undefined;
     const base = base_buf[0..try tmp.dir.realPath(io, &base_buf)];
-    var store: turn_capture.Store = .{};
-    defer store.deinit(a);
+    // `Store` 는 112 KB 라 스택에 두지 않는다(적대적 6회차 — 두 개를 스택에 두니 test 함수 진입에서 guard page 를 밟았다).
+    const store = try a.create(turn_capture.Store);
+    store.* = .{};
+    defer {
+        store.deinit(a);
+        a.destroy(store);
+    }
     const id1 = store.adoptSealed(a, try sampleTurn(a));
     var entry: turn_snapshot.RingMap.Entry = .{ .id_len = 5 };
     @memcpy(entry.id[0..5], "fresh");

@@ -79,7 +79,9 @@ fn sideRef(side: turn_capture.Side) SideRef {
     return switch (side) {
         .absent => .absent,
         .empty => .empty,
-        .text => |t| .{ .blob = .{ .hash = blobHash(t), .len = t.len } },
+        // 길이 0 의 `text` 는 제품이 만들지 않지만(`capture_file.readSide` 는 0 바이트를 `.empty` 로 준다) 혹시 오면 `empty` 로 —
+        // 되읽으면 `.text ""` 가 아니라 `.empty` 가 되어 `Side.sameAs` 의 답이 달라지기 때문이다(적대적 6회차).
+        .text => |t| if (t.len == 0) .empty else .{ .blob = .{ .hash = blobHash(t), .len = t.len } },
         .folded => |f| .{ .folded = .{ .hash = f.hash, .size = f.size, .why = f.why } },
         .unknown => |u| .{ .unknown = u },
     };
@@ -447,7 +449,8 @@ const testing = std.testing;
 
 fn sampleTurn(gpa: std.mem.Allocator) !turn_capture.Turn {
     var t: turn_capture.Turn = .{ .shell_calls = 2 };
-    try t.entries.append(gpa, .{ .path = try gpa.dupe(u8, "src/a.zig"), .trigger = .edit, .before = .{ .text = try gpa.dupe(u8, "old\n") }, .after = .{ .text = try gpa.dupe(u8, "new \"q\"\n") }, .before_trusted = true });
+    // 경로에 따옴표·백슬래시(끝에!)·개행·`=`·공백 — 인용 규칙이 하나라도 새면 여기서 깨진다(적대적 4회차).
+    try t.entries.append(gpa, .{ .path = try gpa.dupe(u8, "src/a \"q\"=x\n\\"), .trigger = .edit, .before = .{ .text = try gpa.dupe(u8, "old\n") }, .after = .{ .text = try gpa.dupe(u8, "new \"q\"\n") }, .before_trusted = true });
     try t.entries.append(gpa, .{ .path = try gpa.dupe(u8, "big.bin"), .trigger = .read, .before = .{ .folded = .{ .hash = 0xabc, .size = 5_000_000, .why = .too_large } }, .after = .{ .unknown = .budget } });
     try t.entries.append(gpa, .{ .path = try gpa.dupe(u8, "new file.md"), .trigger = .edit, .before = .absent, .after = .{ .text = try gpa.dupe(u8, "old\n") }, .shell_diff = true });
     return t;
@@ -465,11 +468,16 @@ const MemBlobs = struct {
 
 test "turn_persist: 링 + 봉인 턴이 텍스트를 지나 같은 모양으로 돌아온다 — 새 id, 같은 순서, 같은 side (AT7)" {
     const a = testing.allocator;
-    var store: turn_capture.Store = .{};
-    defer store.deinit(a);
-    var turn = try sampleTurn(a);
-    errdefer turn.deinit(a);
-    const id = store.adoptSealed(a, turn);
+    // `Store` 는 112 KB 라 스택에 두지 않는다(적대적 6회차 — 두 개를 스택에 두니 test 함수 진입에서 guard page 를 밟았다).
+    const store = try a.create(turn_capture.Store);
+    store.* = .{};
+    defer {
+        store.deinit(a);
+        a.destroy(store);
+    }
+    // `adoptSealed` 가 소유권을 가져간다 — 여기에 `errdefer turn.deinit` 을 두면 판정자가 중간에 실패할 때 **이중 해제**로 segfault 가
+    // 나 실패 이유가 가려진다(적대적 6회차 뮤턴트 M6a 가 그 길로 죽었다).
+    const id = store.adoptSealed(a, try sampleTurn(a));
     try testing.expect(id != 0);
 
     var entry: turn_snapshot.RingMap.Entry = .{ .id_len = 4, .repo_len = 12, .used = 1 };
@@ -515,15 +523,19 @@ test "turn_persist: 링 + 봉인 턴이 텍스트를 지나 같은 모양으로 
     defer blobs.map.deinit();
     try blobs.map.put(blobHash("old\n"), "old\n");
     try blobs.map.put(blobHash("new \"q\"\n"), "new \"q\"\n");
-    var store2: turn_capture.Store = .{};
-    defer store2.deinit(a);
-    const restored = try restore(a, &parsed, &store2, .{ .ctx = &blobs, .fetch = MemBlobs.fetch });
+    const store2 = try a.create(turn_capture.Store);
+    store2.* = .{};
+    defer {
+        store2.deinit(a);
+        a.destroy(store2);
+    }
+    const restored = try restore(a, &parsed, store2, .{ .ctx = &blobs, .fetch = MemBlobs.fetch });
     const new_id = restored.ring.latest().?.capture_id;
     try testing.expect(new_id != 0);
     const rt = store2.sealedTurn(new_id).?;
     try testing.expectEqual(@as(u32, 2), rt.shell_calls);
     try testing.expectEqual(@as(usize, 3), rt.entries.items.len);
-    try testing.expectEqualStrings("src/a.zig", rt.entries.items[0].path);
+    try testing.expectEqualStrings("src/a \"q\"=x\n\\", rt.entries.items[0].path);
     try testing.expectEqualStrings("old\n", rt.entries.items[0].before.text);
     try testing.expectEqualStrings("new \"q\"\n", rt.entries.items[0].after.?.text);
     try testing.expect(rt.entries.items[0].before_trusted);
@@ -545,21 +557,33 @@ test "turn_persist: 손상은 통째로 거절한다 — 헤더·잘린 줄·모
     try testing.expectError(error.BadLine, parse(a, header ++ "\nsession id=\"x\" repo=\"\" missed=0 history-evicted=0\nturn capture=1 shell-calls=0 remote=0 entries=2\nentry path=\"p\" trigger=edit before=absent after=none shell-diff=0 before-trusted=0\n"));
     // 링이 capture=7 을 가리키는데 turn 줄이 없다
     try testing.expectError(error.BadValue, parse(a, header ++ "\nsession id=\"x\" repo=\"\" missed=0 history-evicted=0\nsnapshot tree=\"a\" surface=0 captured=0 kind=0 files=0 files-known=0 edited=0 edited-known=0 capture=7 turn=\"\" title=\"\"\n"));
+    // turn 뒤에 snapshot 이 오면 순서 위반(쓰는 쪽은 절대 그렇게 안 쓴다) — 통째로.
+    try testing.expectError(error.BadLine, parse(a, header ++ "\nsession id=\"x\" repo=\"\" missed=0 history-evicted=0\nturn capture=1 shell-calls=0 remote=0 entries=0\nsnapshot tree=\"a\" surface=0 captured=0 kind=0 files=0 files-known=0 edited=0 edited-known=0 capture=0 turn=\"\" title=\"\"\n"));
     // 파싱은 되지만 blob 이 없다 → restore 가 아무것도 안 들인다
     var parsed = try parse(a, header ++ "\nsession id=\"x\" repo=\"\" missed=0 history-evicted=0\nsnapshot tree=\"a\" surface=0 captured=0 kind=0 files=0 files-known=0 edited=0 edited-known=0 capture=7 turn=\"\" title=\"\"\nturn capture=7 shell-calls=0 remote=0 entries=1\nentry path=\"p\" trigger=edit before=blob:1:3 after=none shell-diff=0 before-trusted=0\n");
     defer parsed.deinit(a);
     var blobs: MemBlobs = .{ .map = .init(a) };
     defer blobs.map.deinit();
-    var store: turn_capture.Store = .{};
-    defer store.deinit(a);
-    try testing.expectError(error.BlobMissing, restore(a, &parsed, &store, .{ .ctx = &blobs, .fetch = MemBlobs.fetch }));
+    // `Store` 는 112 KB 라 스택에 두지 않는다(적대적 6회차 — 두 개를 스택에 두니 test 함수 진입에서 guard page 를 밟았다).
+    const store = try a.create(turn_capture.Store);
+    store.* = .{};
+    defer {
+        store.deinit(a);
+        a.destroy(store);
+    }
+    try testing.expectError(error.BlobMissing, restore(a, &parsed, store, .{ .ctx = &blobs, .fetch = MemBlobs.fetch }));
     try testing.expectEqual(@as(turn_capture.Id, 1), store.next_id); // 아무것도 안 들였다
 }
 
 test "turn_persist: 링이 안 가리키는 턴은 안 적고, 상한을 넘는 snapshot 줄은 거절한다" {
     const a = testing.allocator;
-    var store: turn_capture.Store = .{};
-    defer store.deinit(a);
+    // `Store` 는 112 KB 라 스택에 두지 않는다(적대적 6회차 — 두 개를 스택에 두니 test 함수 진입에서 guard page 를 밟았다).
+    const store = try a.create(turn_capture.Store);
+    store.* = .{};
+    defer {
+        store.deinit(a);
+        a.destroy(store);
+    }
     const orphan = store.adoptSealed(a, try sampleTurn(a));
     var entry: turn_snapshot.RingMap.Entry = .{ .id_len = 1 };
     entry.id[0] = 's';

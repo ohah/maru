@@ -548,24 +548,315 @@ const background_image_id: u32 = 0xFFFF_FFFF;
 /// not put filesystem work on the render or key-input path.
 pub const AgentSessionArchiveScope = enum { workspace, project, all };
 
+// ── test 픽스처 ──────────────────────────────────────────────────────────────
+//
+// **여기 있는 것은 `AppSession` 의 API 가 아니다.** 아홉 모두 `self` 를 안 받는 정적 함수이고
+// 제품 경로에서 한 번도 안 불린다 — `test "…"` 본문이 부르는 **검증 장치**다. 그런데도
+// `AppSession = struct { … }` 안에 살고 있어서, 그 타입의 공개 표면을 읽는 사람에게 제품
+// 메서드처럼 보였다(실측: test 가 부르는 `AppSession` 비공개 메서드 91 개 중 아홉이 이것).
+//
+// **파일 밖이 아니라 파일 스코프로 옮긴다.** 이들이 만지는 것은 `app_process_incident_owner` ·
+// `app_incident_testing` · `app_remote_host_pool` 같은 **파일 스코프 전역**이라, 다른 파일로
+// 빼면 그것들이 전부 `pub` 이 되어야 한다. 여기서는 `pub` 순증이 **0** 이다.
+//
+// 파일 총 줄 수는 안 변한다. 변하는 것은 **제품 타입이 검증 장치를 더 이상 안 들고 있다**는 것이다.
+
+fn testCR0bCurrentManagedPublication() !void {
+    if (comptime !is_macos) return error.SkipZigTest;
+    try RemoteSessionAdapter.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var host_pool = RemoteHostPool.init(allocator);
+    defer host_pool.deinit();
+    const adapter = try allocator.create(RemoteSessionAdapter);
+    var pool_owns_adapter = false;
+    errdefer if (!pool_owns_adapter) allocator.destroy(adapter);
+    var source: session_host.client.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0xA001,
+        .parser = session_host.framing.FrameParser.init(allocator),
+    };
+    try AppSession.publishManagedRemoteAdapter(&host_pool, adapter, allocator, &source);
+    pool_owns_adapter = true;
+    try std.testing.expect(host_pool.get(0xA001) == adapter);
+    try std.testing.expectEqual(
+        @intFromEnum(maru.observability.incident_binding_contract.HostClass.current),
+        adapter.slot.logicalClientConst().incident_binding.host_class_raw,
+    );
+}
+
+fn testCR0bRestoreFirstSiblingPreservation() !void {
+    if (comptime !is_macos) return error.SkipZigTest;
+    try RemoteSessionAdapter.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var host_pool = RemoteHostPool.init(allocator);
+    defer host_pool.deinit();
+    const previous = try allocator.create(RemoteSessionAdapter);
+    var previous_owned = false;
+    errdefer if (!previous_owned) allocator.destroy(previous);
+    var previous_source: session_host.client.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0xA002,
+        .wire_major = session_host.protocol.version_major - 1,
+        .screen_codec_version = session_host.screen_stream.codec_version - 1,
+        .parser = session_host.framing.FrameParser.initForMajor(allocator, session_host.protocol.version_major - 1),
+    };
+    try AppSession.publishManagedRemoteAdapter(&host_pool, previous, allocator, &previous_source);
+    previous_owned = true;
+
+    const current = try allocator.create(RemoteSessionAdapter);
+    var current_owned = false;
+    errdefer if (!current_owned) allocator.destroy(current);
+    var current_source: session_host.client.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0xA003,
+        .parser = session_host.framing.FrameParser.init(allocator),
+    };
+    try AppSession.publishManagedRemoteAdapter(&host_pool, current, allocator, &current_source);
+    current_owned = true;
+    try std.testing.expect(host_pool.get(0xA002) == previous);
+    try std.testing.expect(host_pool.get(0xA003) == current);
+}
+
+fn testCR0bDuplicateFailureAtomicity() !void {
+    if (comptime !is_macos) return error.SkipZigTest;
+    try RemoteSessionAdapter.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var host_pool = RemoteHostPool.init(allocator);
+    defer host_pool.deinit();
+    const existing = try allocator.create(RemoteSessionAdapter);
+    var existing_owned = false;
+    errdefer if (!existing_owned) allocator.destroy(existing);
+    var first_source: session_host.client.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0xA004,
+        .parser = session_host.framing.FrameParser.init(allocator),
+    };
+    try AppSession.publishManagedRemoteAdapter(&host_pool, existing, allocator, &first_source);
+    existing_owned = true;
+
+    const rejected = try allocator.create(RemoteSessionAdapter);
+    defer allocator.destroy(rejected);
+    var second_source: session_host.client.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0xA004,
+        .parser = session_host.framing.FrameParser.init(allocator),
+    };
+    defer second_source.deinit();
+    const source_before = second_source;
+    try std.testing.expectError(error.DuplicateHost, AppSession.publishManagedRemoteAdapter(&host_pool, rejected, allocator, &second_source));
+    try std.testing.expect(host_pool.get(0xA004) == existing);
+    try std.testing.expect(std.mem.eql(u8, std.mem.asBytes(&source_before), std.mem.asBytes(&second_source)));
+}
+
+fn testCR0bInitFailureAbortReuse() !void {
+    if (comptime !is_macos) return error.SkipZigTest;
+    try RemoteSessionAdapter.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var host_pool = RemoteHostPool.init(allocator);
+    defer host_pool.deinit();
+    const adapter = try allocator.create(RemoteSessionAdapter);
+    var pool_owns_adapter = false;
+    errdefer if (!pool_owns_adapter) allocator.destroy(adapter);
+    var invalid_source: session_host.client.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0xA005,
+        .screen_codec_version = session_host.screen_stream.codec_version + 1,
+        .parser = session_host.framing.FrameParser.init(allocator),
+    };
+    defer invalid_source.deinit();
+    const source_before = invalid_source;
+    try std.testing.expectError(error.UnsupportedProtocol, AppSession.publishManagedRemoteAdapter(&host_pool, adapter, allocator, &invalid_source));
+    try std.testing.expect(host_pool.get(0xA005) == null);
+    try std.testing.expect(std.mem.eql(u8, std.mem.asBytes(&source_before), std.mem.asBytes(&invalid_source)));
+
+    var valid_source: session_host.client.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0xA005,
+        .parser = session_host.framing.FrameParser.init(allocator),
+    };
+    try AppSession.publishManagedRemoteAdapter(&host_pool, adapter, allocator, &valid_source);
+    pool_owns_adapter = true;
+    try std.testing.expect(host_pool.get(0xA005) == adapter);
+}
+
+fn testCR0bSingletonClaimRollback() !void {
+    if (comptime !is_macos) return error.SkipZigTest;
+    try RemoteSessionAdapter.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var incumbent = session_host.remote_term_backend.RemoteTermBackend.initAttachOnlyWithPool(
+        allocator,
+        std.testing.io,
+        @ptrFromInt(@alignOf(RemoteHostPool)),
+        @ptrFromInt(@alignOf(app.SurfaceRuntime)),
+    );
+    try incumbent.claimProductSingleton();
+    defer incumbent.deinit();
+    var deinit_trace: RemoteSessionAdapter.testing_api.DeinitTrace = .{};
+    RemoteSessionAdapter.testing_api.arm(&deinit_trace);
+    defer RemoteSessionAdapter.testing_api.disarm();
+    // 아래 assertion이나 claim 자체가 RED가 되어도 test process의 global backend/pool을 다음 test에 넘기지 않는다.
+    // backend가 borrowed pool을 참조하므로 항상 backend를 먼저 정산한 뒤 pool을 파괴한다.
+    defer {
+        if (app_remote_backend) |*backend| {
+            backend.deinit();
+            app_remote_backend = null;
+        }
+        if (app_remote_host_pool) |*pool| {
+            pool.deinit();
+            app_remote_host_pool = null;
+        }
+    }
+
+    // current-first topology: claim 실패는 방금 만든 backend와 created pool 전체를 회수한다.
+    app_remote_host_pool = RemoteHostPool.init(allocator);
+    var current_source: RemoteSessionClient = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0xA006,
+        .parser = session_host.framing.FrameParser.init(allocator),
+    };
+    const current = try allocator.create(RemoteSessionAdapter);
+    var current_owned = false;
+    errdefer if (!current_owned) allocator.destroy(current);
+    try RemoteSessionAdapter.initInPlace(current, allocator, &current_source);
+    errdefer if (!current_owned) current.deinit();
+    try app_remote_host_pool.?.addOwned(0xA006, current);
+    current_owned = true;
+    app_remote_backend = session_host.remote_term_backend.RemoteTermBackend.initAttachOnlyWithPool(
+        allocator,
+        std.testing.io,
+        &app_remote_host_pool.?,
+        @ptrFromInt(@alignOf(app.SurfaceRuntime)),
+    );
+    try std.testing.expect(!AppSession.claimInstalledRemoteBackend(true, 0xA006));
+    try std.testing.expect(app_remote_backend == null and app_remote_host_pool == null);
+    try std.testing.expectEqual(@as(usize, 1), deinit_trace.len);
+    try std.testing.expectEqual(@as(u128, 0xA006), deinit_trace.host_ids[0]);
+    deinit_trace = .{};
+
+    // restore-first sibling topology: 기존 pool/row는 보존하고 실패한 신규 row만 회수한다.
+    app_remote_host_pool = RemoteHostPool.init(allocator);
+    var sibling_source: RemoteSessionClient = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0xA007,
+        .parser = session_host.framing.FrameParser.init(allocator),
+    };
+    const sibling = try allocator.create(RemoteSessionAdapter);
+    var sibling_owned = false;
+    errdefer if (!sibling_owned) allocator.destroy(sibling);
+    try RemoteSessionAdapter.initInPlace(sibling, allocator, &sibling_source);
+    errdefer if (!sibling_owned) sibling.deinit();
+    try app_remote_host_pool.?.addOwned(0xA007, sibling);
+    sibling_owned = true;
+    var rejected_source: RemoteSessionClient = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0xA008,
+        .parser = session_host.framing.FrameParser.init(allocator),
+    };
+    const rejected = try allocator.create(RemoteSessionAdapter);
+    var rejected_owned = false;
+    errdefer if (!rejected_owned) allocator.destroy(rejected);
+    try RemoteSessionAdapter.initInPlace(rejected, allocator, &rejected_source);
+    errdefer if (!rejected_owned) rejected.deinit();
+    try app_remote_host_pool.?.addOwned(0xA008, rejected);
+    rejected_owned = true;
+    // 실제 restore-first -> current 제품 경로와 같이 신규 current row를 spawn host로 게시한 뒤 claim한다.
+    // rollback은 row뿐 아니라 이 선택 marker도 함께 회수해야 한다.
+    try app_remote_host_pool.?.setSpawnHost(0xA008);
+    app_remote_backend = session_host.remote_term_backend.RemoteTermBackend.initAttachOnlyWithPool(
+        allocator,
+        std.testing.io,
+        &app_remote_host_pool.?,
+        @ptrFromInt(@alignOf(app.SurfaceRuntime)),
+    );
+    try std.testing.expect(!AppSession.claimInstalledRemoteBackend(false, 0xA008));
+    try std.testing.expect(app_remote_backend == null);
+    try std.testing.expect(app_remote_host_pool.?.get(0xA007) == sibling);
+    try std.testing.expect(app_remote_host_pool.?.get(0xA008) == null);
+    try std.testing.expect(app_remote_host_pool.?.spawnHostId() == null);
+    try std.testing.expectEqual(@as(usize, 1), deinit_trace.len);
+    try std.testing.expectEqual(@as(u128, 0xA008), deinit_trace.host_ids[0]);
+    app_remote_host_pool.?.deinit();
+    app_remote_host_pool = null;
+    try std.testing.expectEqual(@as(usize, 2), deinit_trace.len);
+    try std.testing.expectEqual(@as(u128, 0xA007), deinit_trace.host_ids[1]);
+}
+
+fn beginIncidentBootstrapTest(directory_fd: std.c.fd_t) !void {
+    try RemoteSessionAdapter.initializeProcessRuntime();
+    incident_publication_port.publication_port_testing_api.reset();
+    app_process_incident_owner = .{};
+    app_reconnect_product_coordinator = .{};
+    app_process_incident_nonce = 0;
+    app_process_incident_owner_thread.store(0, .release);
+    app_process_incident_termination_consumed.store(0, .release);
+    app_incident_testing.directory_fd = directory_fd;
+    app_incident_testing.stop_after_bootstrap = true;
+}
+
+fn endIncidentBootstrapTest() void {
+    app_incident_testing.stop_after_bootstrap = false;
+    app_incident_testing.directory_fd = -1;
+    if (app_process_incident_owner.publisher() != null) {
+        incident_publication_port.revokePublicationPort(&app_process_incident_owner) catch unreachable;
+        _ = app_process_incident_owner.shutdown() catch unreachable;
+    }
+    app_process_incident_owner = .{};
+    if (app_reconnect_product_coordinator.ready)
+        app_reconnect_product_coordinator.shutdownAndDeinit() catch unreachable;
+    app_reconnect_product_coordinator = .{};
+    app_process_incident_nonce = 0;
+    app_process_incident_owner_thread.store(0, .release);
+    app_process_incident_termination_consumed.store(0, .release);
+    incident_publication_port.publication_port_testing_api.reset();
+}
+
+fn incidentBootstrapTestDirectory() !struct { dir: std.testing.TmpDir, fd: std.c.fd_t } {
+    var tmp = std.testing.tmpDir(.{});
+    try std.testing.expectEqual(@as(c_int, 0), std.c.fchmod(tmp.dir.handle, 0o700));
+    const fd = std.c.dup(tmp.dir.handle);
+    if (fd < 0) {
+        tmp.cleanup();
+        return error.TestUnexpectedResult;
+    }
+    try std.testing.expectEqual(@as(c_int, 0), std.c.fcntl(fd, std.c.F.SETFD, @as(c_int, std.c.FD_CLOEXEC)));
+    return .{ .dir = tmp, .fd = fd };
+}
+
+fn markProcessIncidentWriterFailedForTest() !void {
+    if (!builtin.is_test) unreachable;
+    try session_host.app_process_incident_owner.AppProcessIncidentOwner.testing_api.markWriterFailed(
+        &app_process_incident_owner,
+    );
+}
+
 test "CR0b AppSession publication은 current adapter를 shared transaction으로 게시한다" {
-    try AppSession.testCR0bCurrentManagedPublication();
+    try testCR0bCurrentManagedPublication();
 }
 
 test "CR0b AppSession publication은 restore-first sibling을 current 게시 뒤에도 보존한다" {
-    try AppSession.testCR0bRestoreFirstSiblingPreservation();
+    try testCR0bRestoreFirstSiblingPreservation();
 }
 
 test "CR0b AppSession publication은 duplicate host 실패에서 기존 row와 source를 보존한다" {
-    try AppSession.testCR0bDuplicateFailureAtomicity();
+    try testCR0bDuplicateFailureAtomicity();
 }
 
 test "CR0b AppSession publication은 init 실패 permit을 abort하고 capacity를 재사용한다" {
-    try AppSession.testCR0bInitFailureAbortReuse();
+    try testCR0bInitFailureAbortReuse();
 }
 
 test "CR0b AppSession publication은 singleton claim 실패에서 created pool과 sibling row를 정확히 원복한다" {
-    try AppSession.testCR0bSingletonClaimRollback();
+    try testCR0bSingletonClaimRollback();
 }
 
 test "archive scope admits only canonical cwd beneath the exact root boundary" {
@@ -8703,236 +8994,6 @@ pub const AppSession = struct {
         host_pool.commitOwnedPublication(adapter, &permit);
     }
 
-    fn testCR0bCurrentManagedPublication() !void {
-        if (comptime !is_macos) return error.SkipZigTest;
-        try RemoteSessionAdapter.initializeProcessRuntime();
-        const allocator = std.testing.allocator;
-        var host_pool = RemoteHostPool.init(allocator);
-        defer host_pool.deinit();
-        const adapter = try allocator.create(RemoteSessionAdapter);
-        var pool_owns_adapter = false;
-        errdefer if (!pool_owns_adapter) allocator.destroy(adapter);
-        var source: session_host.client.Client = .{
-            .allocator = allocator,
-            .fd = -1,
-            .host_id = 0xA001,
-            .parser = session_host.framing.FrameParser.init(allocator),
-        };
-        try publishManagedRemoteAdapter(&host_pool, adapter, allocator, &source);
-        pool_owns_adapter = true;
-        try std.testing.expect(host_pool.get(0xA001) == adapter);
-        try std.testing.expectEqual(
-            @intFromEnum(maru.observability.incident_binding_contract.HostClass.current),
-            adapter.slot.logicalClientConst().incident_binding.host_class_raw,
-        );
-    }
-
-    fn testCR0bRestoreFirstSiblingPreservation() !void {
-        if (comptime !is_macos) return error.SkipZigTest;
-        try RemoteSessionAdapter.initializeProcessRuntime();
-        const allocator = std.testing.allocator;
-        var host_pool = RemoteHostPool.init(allocator);
-        defer host_pool.deinit();
-        const previous = try allocator.create(RemoteSessionAdapter);
-        var previous_owned = false;
-        errdefer if (!previous_owned) allocator.destroy(previous);
-        var previous_source: session_host.client.Client = .{
-            .allocator = allocator,
-            .fd = -1,
-            .host_id = 0xA002,
-            .wire_major = session_host.protocol.version_major - 1,
-            .screen_codec_version = session_host.screen_stream.codec_version - 1,
-            .parser = session_host.framing.FrameParser.initForMajor(allocator, session_host.protocol.version_major - 1),
-        };
-        try publishManagedRemoteAdapter(&host_pool, previous, allocator, &previous_source);
-        previous_owned = true;
-
-        const current = try allocator.create(RemoteSessionAdapter);
-        var current_owned = false;
-        errdefer if (!current_owned) allocator.destroy(current);
-        var current_source: session_host.client.Client = .{
-            .allocator = allocator,
-            .fd = -1,
-            .host_id = 0xA003,
-            .parser = session_host.framing.FrameParser.init(allocator),
-        };
-        try publishManagedRemoteAdapter(&host_pool, current, allocator, &current_source);
-        current_owned = true;
-        try std.testing.expect(host_pool.get(0xA002) == previous);
-        try std.testing.expect(host_pool.get(0xA003) == current);
-    }
-
-    fn testCR0bDuplicateFailureAtomicity() !void {
-        if (comptime !is_macos) return error.SkipZigTest;
-        try RemoteSessionAdapter.initializeProcessRuntime();
-        const allocator = std.testing.allocator;
-        var host_pool = RemoteHostPool.init(allocator);
-        defer host_pool.deinit();
-        const existing = try allocator.create(RemoteSessionAdapter);
-        var existing_owned = false;
-        errdefer if (!existing_owned) allocator.destroy(existing);
-        var first_source: session_host.client.Client = .{
-            .allocator = allocator,
-            .fd = -1,
-            .host_id = 0xA004,
-            .parser = session_host.framing.FrameParser.init(allocator),
-        };
-        try publishManagedRemoteAdapter(&host_pool, existing, allocator, &first_source);
-        existing_owned = true;
-
-        const rejected = try allocator.create(RemoteSessionAdapter);
-        defer allocator.destroy(rejected);
-        var second_source: session_host.client.Client = .{
-            .allocator = allocator,
-            .fd = -1,
-            .host_id = 0xA004,
-            .parser = session_host.framing.FrameParser.init(allocator),
-        };
-        defer second_source.deinit();
-        const source_before = second_source;
-        try std.testing.expectError(error.DuplicateHost, publishManagedRemoteAdapter(&host_pool, rejected, allocator, &second_source));
-        try std.testing.expect(host_pool.get(0xA004) == existing);
-        try std.testing.expect(std.mem.eql(u8, std.mem.asBytes(&source_before), std.mem.asBytes(&second_source)));
-    }
-
-    fn testCR0bInitFailureAbortReuse() !void {
-        if (comptime !is_macos) return error.SkipZigTest;
-        try RemoteSessionAdapter.initializeProcessRuntime();
-        const allocator = std.testing.allocator;
-        var host_pool = RemoteHostPool.init(allocator);
-        defer host_pool.deinit();
-        const adapter = try allocator.create(RemoteSessionAdapter);
-        var pool_owns_adapter = false;
-        errdefer if (!pool_owns_adapter) allocator.destroy(adapter);
-        var invalid_source: session_host.client.Client = .{
-            .allocator = allocator,
-            .fd = -1,
-            .host_id = 0xA005,
-            .screen_codec_version = session_host.screen_stream.codec_version + 1,
-            .parser = session_host.framing.FrameParser.init(allocator),
-        };
-        defer invalid_source.deinit();
-        const source_before = invalid_source;
-        try std.testing.expectError(error.UnsupportedProtocol, publishManagedRemoteAdapter(&host_pool, adapter, allocator, &invalid_source));
-        try std.testing.expect(host_pool.get(0xA005) == null);
-        try std.testing.expect(std.mem.eql(u8, std.mem.asBytes(&source_before), std.mem.asBytes(&invalid_source)));
-
-        var valid_source: session_host.client.Client = .{
-            .allocator = allocator,
-            .fd = -1,
-            .host_id = 0xA005,
-            .parser = session_host.framing.FrameParser.init(allocator),
-        };
-        try publishManagedRemoteAdapter(&host_pool, adapter, allocator, &valid_source);
-        pool_owns_adapter = true;
-        try std.testing.expect(host_pool.get(0xA005) == adapter);
-    }
-
-    fn testCR0bSingletonClaimRollback() !void {
-        if (comptime !is_macos) return error.SkipZigTest;
-        try RemoteSessionAdapter.initializeProcessRuntime();
-        const allocator = std.testing.allocator;
-        var incumbent = session_host.remote_term_backend.RemoteTermBackend.initAttachOnlyWithPool(
-            allocator,
-            std.testing.io,
-            @ptrFromInt(@alignOf(RemoteHostPool)),
-            @ptrFromInt(@alignOf(app.SurfaceRuntime)),
-        );
-        try incumbent.claimProductSingleton();
-        defer incumbent.deinit();
-        var deinit_trace: RemoteSessionAdapter.testing_api.DeinitTrace = .{};
-        RemoteSessionAdapter.testing_api.arm(&deinit_trace);
-        defer RemoteSessionAdapter.testing_api.disarm();
-        // 아래 assertion이나 claim 자체가 RED가 되어도 test process의 global backend/pool을 다음 test에 넘기지 않는다.
-        // backend가 borrowed pool을 참조하므로 항상 backend를 먼저 정산한 뒤 pool을 파괴한다.
-        defer {
-            if (app_remote_backend) |*backend| {
-                backend.deinit();
-                app_remote_backend = null;
-            }
-            if (app_remote_host_pool) |*pool| {
-                pool.deinit();
-                app_remote_host_pool = null;
-            }
-        }
-
-        // current-first topology: claim 실패는 방금 만든 backend와 created pool 전체를 회수한다.
-        app_remote_host_pool = RemoteHostPool.init(allocator);
-        var current_source: RemoteSessionClient = .{
-            .allocator = allocator,
-            .fd = -1,
-            .host_id = 0xA006,
-            .parser = session_host.framing.FrameParser.init(allocator),
-        };
-        const current = try allocator.create(RemoteSessionAdapter);
-        var current_owned = false;
-        errdefer if (!current_owned) allocator.destroy(current);
-        try RemoteSessionAdapter.initInPlace(current, allocator, &current_source);
-        errdefer if (!current_owned) current.deinit();
-        try app_remote_host_pool.?.addOwned(0xA006, current);
-        current_owned = true;
-        app_remote_backend = session_host.remote_term_backend.RemoteTermBackend.initAttachOnlyWithPool(
-            allocator,
-            std.testing.io,
-            &app_remote_host_pool.?,
-            @ptrFromInt(@alignOf(app.SurfaceRuntime)),
-        );
-        try std.testing.expect(!claimInstalledRemoteBackend(true, 0xA006));
-        try std.testing.expect(app_remote_backend == null and app_remote_host_pool == null);
-        try std.testing.expectEqual(@as(usize, 1), deinit_trace.len);
-        try std.testing.expectEqual(@as(u128, 0xA006), deinit_trace.host_ids[0]);
-        deinit_trace = .{};
-
-        // restore-first sibling topology: 기존 pool/row는 보존하고 실패한 신규 row만 회수한다.
-        app_remote_host_pool = RemoteHostPool.init(allocator);
-        var sibling_source: RemoteSessionClient = .{
-            .allocator = allocator,
-            .fd = -1,
-            .host_id = 0xA007,
-            .parser = session_host.framing.FrameParser.init(allocator),
-        };
-        const sibling = try allocator.create(RemoteSessionAdapter);
-        var sibling_owned = false;
-        errdefer if (!sibling_owned) allocator.destroy(sibling);
-        try RemoteSessionAdapter.initInPlace(sibling, allocator, &sibling_source);
-        errdefer if (!sibling_owned) sibling.deinit();
-        try app_remote_host_pool.?.addOwned(0xA007, sibling);
-        sibling_owned = true;
-        var rejected_source: RemoteSessionClient = .{
-            .allocator = allocator,
-            .fd = -1,
-            .host_id = 0xA008,
-            .parser = session_host.framing.FrameParser.init(allocator),
-        };
-        const rejected = try allocator.create(RemoteSessionAdapter);
-        var rejected_owned = false;
-        errdefer if (!rejected_owned) allocator.destroy(rejected);
-        try RemoteSessionAdapter.initInPlace(rejected, allocator, &rejected_source);
-        errdefer if (!rejected_owned) rejected.deinit();
-        try app_remote_host_pool.?.addOwned(0xA008, rejected);
-        rejected_owned = true;
-        // 실제 restore-first -> current 제품 경로와 같이 신규 current row를 spawn host로 게시한 뒤 claim한다.
-        // rollback은 row뿐 아니라 이 선택 marker도 함께 회수해야 한다.
-        try app_remote_host_pool.?.setSpawnHost(0xA008);
-        app_remote_backend = session_host.remote_term_backend.RemoteTermBackend.initAttachOnlyWithPool(
-            allocator,
-            std.testing.io,
-            &app_remote_host_pool.?,
-            @ptrFromInt(@alignOf(app.SurfaceRuntime)),
-        );
-        try std.testing.expect(!claimInstalledRemoteBackend(false, 0xA008));
-        try std.testing.expect(app_remote_backend == null);
-        try std.testing.expect(app_remote_host_pool.?.get(0xA007) == sibling);
-        try std.testing.expect(app_remote_host_pool.?.get(0xA008) == null);
-        try std.testing.expect(app_remote_host_pool.?.spawnHostId() == null);
-        try std.testing.expectEqual(@as(usize, 1), deinit_trace.len);
-        try std.testing.expectEqual(@as(u128, 0xA008), deinit_trace.host_ids[0]);
-        app_remote_host_pool.?.deinit();
-        app_remote_host_pool = null;
-        try std.testing.expectEqual(@as(usize, 2), deinit_trace.len);
-        try std.testing.expectEqual(@as(u128, 0xA007), deinit_trace.host_ids[1]);
-    }
-
     /// workspace가 가리키는 host가 current spawn host와 다르면 지원하는 N-1 endpoint를 조회해 pool에 추가한다.
     /// 조회는 host를 새로 띄우지 않고 hello의 exact host_id가 저장 binding과 일치할 때만 publish한다.
     pub fn ensureRestoreHostAdapter(self: *AppSession, wanted_host_id: u128) RestoreHostOutcome {
@@ -9116,54 +9177,6 @@ pub const AppSession = struct {
         if (std.c.fstat(fd, &stat) != 0 or !std.posix.S.ISDIR(stat.mode) or stat.uid != std.c.getuid() or
             std.c.fchmod(fd, 0o700) != 0) return error.InvalidOwner;
         return fd;
-    }
-
-    fn beginIncidentBootstrapTest(directory_fd: std.c.fd_t) !void {
-        try RemoteSessionAdapter.initializeProcessRuntime();
-        incident_publication_port.publication_port_testing_api.reset();
-        app_process_incident_owner = .{};
-        app_reconnect_product_coordinator = .{};
-        app_process_incident_nonce = 0;
-        app_process_incident_owner_thread.store(0, .release);
-        app_process_incident_termination_consumed.store(0, .release);
-        app_incident_testing.directory_fd = directory_fd;
-        app_incident_testing.stop_after_bootstrap = true;
-    }
-
-    fn endIncidentBootstrapTest() void {
-        app_incident_testing.stop_after_bootstrap = false;
-        app_incident_testing.directory_fd = -1;
-        if (app_process_incident_owner.publisher() != null) {
-            incident_publication_port.revokePublicationPort(&app_process_incident_owner) catch unreachable;
-            _ = app_process_incident_owner.shutdown() catch unreachable;
-        }
-        app_process_incident_owner = .{};
-        if (app_reconnect_product_coordinator.ready)
-            app_reconnect_product_coordinator.shutdownAndDeinit() catch unreachable;
-        app_reconnect_product_coordinator = .{};
-        app_process_incident_nonce = 0;
-        app_process_incident_owner_thread.store(0, .release);
-        app_process_incident_termination_consumed.store(0, .release);
-        incident_publication_port.publication_port_testing_api.reset();
-    }
-
-    fn incidentBootstrapTestDirectory() !struct { dir: std.testing.TmpDir, fd: std.c.fd_t } {
-        var tmp = std.testing.tmpDir(.{});
-        try std.testing.expectEqual(@as(c_int, 0), std.c.fchmod(tmp.dir.handle, 0o700));
-        const fd = std.c.dup(tmp.dir.handle);
-        if (fd < 0) {
-            tmp.cleanup();
-            return error.TestUnexpectedResult;
-        }
-        try std.testing.expectEqual(@as(c_int, 0), std.c.fcntl(fd, std.c.F.SETFD, @as(c_int, std.c.FD_CLOEXEC)));
-        return .{ .dir = tmp, .fd = fd };
-    }
-
-    fn markProcessIncidentWriterFailedForTest() !void {
-        if (!builtin.is_test) unreachable;
-        try session_host.app_process_incident_owner.AppProcessIncidentOwner.testing_api.markWriterFailed(
-            &app_process_incident_owner,
-        );
     }
 
     /// keep-alive host 연결 실패를 기록한다(§6 L291) — 프로세스 전역 flag(이후 창은 재시도 없이 폴백)와 이 창의 notice
@@ -82702,11 +82715,11 @@ test "탭 제목은 running 마커와 본문을 같은 기준으로 가른다" {
 
 test "CR0b GUI current first는 managed adapter 전에 process owner를 한 번 설치한다" {
     if (!is_macos) return error.SkipZigTest;
-    var directory = try AppSession.incidentBootstrapTestDirectory();
+    var directory = try incidentBootstrapTestDirectory();
     defer directory.dir.cleanup();
     defer _ = std.c.close(directory.fd);
-    try AppSession.beginIncidentBootstrapTest(directory.fd);
-    defer AppSession.endIncidentBootstrapTest();
+    try beginIncidentBootstrapTest(directory.fd);
+    defer endIncidentBootstrapTest();
     var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     session.ensureRemoteBackend();
     const publisher = app_process_incident_owner.publisher() orelse return error.TestUnexpectedResult;
@@ -82736,11 +82749,11 @@ test "CR0b GUI current first는 managed adapter 전에 process owner를 한 번 
 
 test "CR0b GUI restore first 뒤 current는 같은 process owner를 쓴다" {
     if (!is_macos) return error.SkipZigTest;
-    var directory = try AppSession.incidentBootstrapTestDirectory();
+    var directory = try incidentBootstrapTestDirectory();
     defer directory.dir.cleanup();
     defer _ = std.c.close(directory.fd);
-    try AppSession.beginIncidentBootstrapTest(directory.fd);
-    defer AppSession.endIncidentBootstrapTest();
+    try beginIncidentBootstrapTest(directory.fd);
+    defer endIncidentBootstrapTest();
     var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     try std.testing.expectEqual(AppSession.RestoreHostOutcome.ready, session.ensureRestoreHostAdapter(0xA001));
     const restored = app_process_incident_owner.publisher() orelse return error.TestUnexpectedResult;
@@ -82752,11 +82765,11 @@ test "CR0b GUI restore first 뒤 current는 같은 process owner를 쓴다" {
 
 test "CR0b GUI multiple window와 adapter는 process owner를 재사용한다" {
     if (!is_macos) return error.SkipZigTest;
-    var directory = try AppSession.incidentBootstrapTestDirectory();
+    var directory = try incidentBootstrapTestDirectory();
     defer directory.dir.cleanup();
     defer _ = std.c.close(directory.fd);
-    try AppSession.beginIncidentBootstrapTest(directory.fd);
-    defer AppSession.endIncidentBootstrapTest();
+    try beginIncidentBootstrapTest(directory.fd);
+    defer endIncidentBootstrapTest();
     var first_window: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     var second_window: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     first_window.ensureRemoteBackend();
@@ -82773,11 +82786,11 @@ test "CR0b bootstrap 4 GUI child는 실제 bootstrap transcript를 게시한다"
     // app_session root/import sentinel 3개와 이 named child 한 개를 담은
     // bootstrap4 전용 artifact에서만 fresh-process transcript를 게시한다.
     if (builtin.test_functions.len != 4) return;
-    var directory = try AppSession.incidentBootstrapTestDirectory();
+    var directory = try incidentBootstrapTestDirectory();
     defer directory.dir.cleanup();
     defer _ = std.c.close(directory.fd);
-    try AppSession.beginIncidentBootstrapTest(directory.fd);
-    defer AppSession.endIncidentBootstrapTest();
+    try beginIncidentBootstrapTest(directory.fd);
+    defer endIncidentBootstrapTest();
     var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     session.ensureRemoteBackend();
     const publisher = app_process_incident_owner.publisher() orelse return error.TestUnexpectedResult;
@@ -82797,11 +82810,11 @@ test "CR0b bootstrap 4 GUI child는 실제 bootstrap transcript를 게시한다"
 
 test "CR0b AppHost incident ABI prerequisite는 조기 foreign 호출을 거부하고 joined replay를 닫는다" {
     if (!is_macos) return error.SkipZigTest;
-    var directory = try AppSession.incidentBootstrapTestDirectory();
+    var directory = try incidentBootstrapTestDirectory();
     defer directory.dir.cleanup();
     defer _ = std.c.close(directory.fd);
-    try AppSession.beginIncidentBootstrapTest(directory.fd);
-    defer AppSession.endIncidentBootstrapTest();
+    try beginIncidentBootstrapTest(directory.fd);
+    defer endIncidentBootstrapTest();
     // pristine 호출은 exact-once latch를 소비하지 않아 이후 실제 owner를 종료할 수 있어야 한다.
     try std.testing.expectEqual(
         IncidentOwnerTerminationOutcome.inactive,
@@ -82932,14 +82945,14 @@ test "CR0b AppHost incident ABI prerequisite는 조기 foreign 호출을 거부�
 
 test "CR0b AppHost incident ABI prerequisite는 runtime 오류를 degraded outcome으로 보존한다" {
     if (!is_macos) return error.SkipZigTest;
-    var directory = try AppSession.incidentBootstrapTestDirectory();
+    var directory = try incidentBootstrapTestDirectory();
     defer directory.dir.cleanup();
     defer _ = std.c.close(directory.fd);
-    try AppSession.beginIncidentBootstrapTest(directory.fd);
-    defer AppSession.endIncidentBootstrapTest();
+    try beginIncidentBootstrapTest(directory.fd);
+    defer endIncidentBootstrapTest();
     var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     session.ensureRemoteBackend();
-    try AppSession.markProcessIncidentWriterFailedForTest();
+    try markProcessIncidentWriterFailedForTest();
     try std.testing.expectEqual(
         IncidentOwnerTerminationOutcome.degraded,
         shutdownProcessIncidentOwner(),
@@ -82952,11 +82965,11 @@ test "CR0b AppHost incident ABI prerequisite는 runtime 오류를 degraded outco
 
 test "CR0b AppHost incident ABI prerequisite는 active lease timeout을 detached backing으로 보존한다" {
     if (!is_macos) return error.SkipZigTest;
-    var directory = try AppSession.incidentBootstrapTestDirectory();
+    var directory = try incidentBootstrapTestDirectory();
     defer directory.dir.cleanup();
     defer _ = std.c.close(directory.fd);
-    try AppSession.beginIncidentBootstrapTest(directory.fd);
-    defer AppSession.endIncidentBootstrapTest();
+    try beginIncidentBootstrapTest(directory.fd);
+    defer endIncidentBootstrapTest();
     var session: AppSession = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     session.ensureRemoteBackend();
     const runtime = app_process_incident_owner.runtime.?;

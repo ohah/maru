@@ -173,7 +173,7 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
 }
 
 test "ABI v185 notification release end-all and cold route values match the C header" {
-    try std.testing.expectEqual(@as(u32, 187), abi_version);
+    try std.testing.expectEqual(@as(u32, 188), abi_version);
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @intFromEnum(AppInstanceLeaseResult.acquired));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_HELD), @intFromEnum(AppInstanceLeaseResult.held));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_UNSAFE), @intFromEnum(AppInstanceLeaseResult.unsafe));
@@ -3151,6 +3151,17 @@ pub export fn maru_macos_app_session_serialize_workspace(
     };
     ptr_out.* = if (text.len > 0) text.ptr else null;
     len_out.* = text.len;
+    return @intFromEnum(Status.ok);
+}
+
+/// **종료 직전 미저장 백업을 굳힌다**(§3.10 — U4a). debounce 만으로는 마지막 몇 초의 편집이 빠지므로
+/// 종료 경로가 만기를 기다리지 않고 한 번 부른다. 창마다 부른다(문서는 창이 들고 있다).
+///
+/// **실패를 돌려주지 않는다.** 한 문서를 못 썼다는 사실로 종료를 막을 수는 없고(사용자는 이미 종료를
+/// 골랐다), 그 자리에 띄울 화면도 없다 — 백업은 조용한 보호이고 그 실패도 조용하다.
+pub export fn maru_macos_app_session_flush_editor_backups(session: ?*AppSession) c_int {
+    const app_session = session orelse return @intFromEnum(Status.null_out);
+    session_mod.editor_backup_ops.flushAll(app_session);
     return @intFromEnum(Status.ok);
 }
 

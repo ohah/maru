@@ -1791,14 +1791,15 @@ pub fn build(b: *std.Build) void {
     // 그쪽은 `zig build test` 가 돈다.
     const macos_editor_untitled_tests = addProjectTest(b, .{
         .root_module = macos_app_host_abi_tests.root_module,
-        .filters = &.{ "U1", "U2", "C0", "C1a", "C1b", "U3-" }, // `SYNU1` 도 걸린다(부분 일치) — 아래 개수가 그것을 포함한다
+        .filters = &.{ "U1", "U2", "C0", "C1a", "C1b", "U3-", "U4a-" }, // `SYNU1` 도 걸린다(부분 일치) — 아래 개수가 그것을 포함한다
     });
     const run_macos_editor_untitled_tests = b.addRunArtifact(macos_editor_untitled_tests);
-    // 90 = 앞의 66(U1a~U1r 열여덟 + C0a~C0c 셋 + U2 일가 + SYNU1 + 부분 일치 + `test_0` 다섯)에
-    //      **C1a-1~C1a-11 열하나 + C1b-1~C1b-5 다섯 + U3-1~U3-8 여덟**을 더한 값이다(C1a — 저장 충돌의 선택).
-    run_macos_editor_untitled_tests.addArg("--maru-expect-tests=90");
+    // 101 = 앞의 90(U1a~U1r 열여덟 + C0a~C0c 셋 + U2 일가 + SYNU1 + 부분 일치 + `test_0` 다섯 +
+    //       C1a-1~C1a-11 열하나 + C1b-1~C1b-5 다섯 + U3-1~U3-8 여덟)에
+    //       **U4a-1~U4a-13 열셋**을 더한 값이다(U4a — 미저장 편집의 백업, §3.10).
+    run_macos_editor_untitled_tests.addArg("--maru-expect-tests=103");
     // ⚠️ **그리고 실제로 돌았는가** — 전부 macOS 가 아니면 `SkipZigTest` 다.
-    run_macos_editor_untitled_tests.addArg("--maru-expect-passed=90");
+    run_macos_editor_untitled_tests.addArg("--maru-expect-passed=103");
     run_macos_editor_untitled_tests.setCwd(b.path("."));
     const untitled_step = b.step(
         "test-editor-untitled",
@@ -1817,15 +1818,16 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
             .imports = &.{.{ .name = "shutdown_wire_contract", .module = shutdown_wire_contract_mod }},
         }),
-        .filters = &.{ "UT1", "UT2", "UT3", "UT4" },
+        .filters = &.{ "UT1", "UT2", "UT3", "UT4", "UB" }, // UB = 백업 레코드 규칙(§3.10 — U4a)
     });
     attachPngCodec(b, untitled_rule_tests.root_module); // maru 루트를 세우는 자리는 전부 이걸 부른다
     untitled_rule_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
     const run_untitled_rule_tests = b.addRunArtifact(untitled_rule_tests);
-    // 25 = UT1~UT4 넷 + 이 그래프의 이름 없는 test 블록들(필터와 무관하게 컴파일된다).
-    run_untitled_rule_tests.addArg("--maru-expect-tests=25");
+    // 35 = UT1~UT4 넷 + **UB1~UB10 열**(백업 레코드 규칙 — §3.10) + 이 그래프의 이름 없는 test
+    //      블록들(필터와 무관하게 컴파일된다).
+    run_untitled_rule_tests.addArg("--maru-expect-tests=35");
     // ⚠️ **필터가 0 개를 골랐어도 「돌았다」로 읽히지 않게** 통과 수까지 못박는다(순수라 SKIP 이 없다).
-    run_untitled_rule_tests.addArg("--maru-expect-passed=25");
+    run_untitled_rule_tests.addArg("--maru-expect-passed=35");
     run_untitled_rule_tests.setCwd(b.path("."));
     untitled_step.dependOn(&run_untitled_rule_tests.step);
 

@@ -221,7 +221,7 @@ pub fn confirmReload(self: *AppSession, surface_id: u64) void {
     term.rt.editor_doc.?.file.format = fresh.file.format;
     // **이제 clean 이다.** 사용자가 「디스크를 받아들였다」고 답했고 내용이 그것과 같다 — 편집으로
     // 넣었다는 이유로 dirty 로 남으면 화면이 그 답과 어긋난다.
-    term.rt.editor_doc.?.saved_hash = editor_ops.contentHash(fresh.file.content);
+    app_session_mod.editor_backup_ops.markClean(self, term, fresh.file.content, null);
     term.rt.editor_doc.?.disk_hash = fresh.disk_hash;
     // 구문 트리·LSP 통지·줄 인덱스는 **편집 경로가 이미 한다** — `applyEditAsOne` 이 `refreshAfterEdit`
     // 를 지나므로(그 함수 주석: 「제품의 편집 경로 여섯이 전부 이 함수를 지난다」) 여기서 다시 부르면

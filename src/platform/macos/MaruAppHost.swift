@@ -4458,6 +4458,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// 아카이브 fixture와 같은 이유로 자기 env 게이트를 따로 둔다: 일반 PTY smoke가 이 문서 열기와
     /// 합성 저장을 얻으면 안 된다.
     private var editorSaveConflictSmokeDriver: EditorSaveConflictSmokeDriver?
+    /// `quit-backup` 시나리오의 종료 요청은 **한 번만** 나간다(재진입 terminate 금지).
+    private var editorSaveConflictSmokeQuitRequested = false
     private var isEditorSaveConflictSmokeMode: Bool {
         smokeMode && ProcessInfo.processInfo.environment["MARU_EDITOR_SAVE_CONFLICT_SMOKE"] == "1"
     }
@@ -5118,6 +5120,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 그 뒤엔 primary(=windows.first)가 nil이 된다. surface 객체는 캡처로 살아 있어 close가 채운 요약을 읽는다.
         let mainSurface = windows.first
         terminationTiming.record(.teardown, elapsedNs: measureElapsedNs {
+            // 미저장 편집의 백업을 **teardown 앞에서** 굳힌다(문서 모델 §3.10). debounce 만으로는 종료
+            // 직전 몇 초의 편집이 빠지고, teardown 뒤에는 문서가 이미 해제돼 쓸 내용이 없다. 시간은
+            // quit_teardown 에 포함된다 — 새 요약 줄을 만들지 않고 실제 비용을 같은 자리에 싣는다.
+            for surface in windows {
+                guard let session = surface.appSession else { continue }
+                _ = maru_macos_app_session_flush_editor_backups(session)
+            }
             shutdownAppSession(preserveWebPanelsFor: mainSurface)
         })
         // 모든 AppSession이 자기 runtime을 remove/detach한 뒤 app-global backend/pool/client를 exact once 정산한다.
@@ -11528,6 +11537,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 },
                 pressKey: { key in self.dispatchEditorSaveConflictSmokeKey(key, in: view, window: window) }
             )
+        }
+        // **`quit-backup` 은 그 자리에서 종료한다**(U4a). 스모크 시간(20 초)을 기다리면 그 사이 백업
+        // debounce 가 만기돼 「누가 썼는가」가 갈리지 않는다 — 타이핑 직후 종료해야 파일의 존재가 곧
+        // **종료 경로가 flush 를 불렀다**는 증거다. 스모크 모드의 `applicationShouldTerminate` 는
+        // 확인 모달 없이 `.terminateNow` 라(무인 계측) 이 길이 곧 `applicationWillTerminate` 다.
+        if driver.wantsPromptQuit, !editorSaveConflictSmokeQuitRequested {
+            editorSaveConflictSmokeQuitRequested = true
+            DispatchQueue.main.async { NSApp.terminate(nil) }
         }
     }
 

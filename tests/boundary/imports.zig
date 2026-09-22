@@ -12909,6 +12909,89 @@ test "저쪽 저장: 쓰는 종류 하나 · 일괄은 건너뛴다 · 신원은
     try std.testing.expectEqual(@as(usize, 2), countOf4(helper, "unlink_tmp = false;"));
 }
 
+test "미저장 백업: 종료가 굳히고 수락된 닫기가 지운다 — clean 이 되는 자리는 하나다" {
+    // **계약**: docs/native-editor-document-model.md §3.10(U4a).
+    //
+    // 이 판정자가 지키는 것은 **자리**다. 값(무엇이 쓰이고 지워지나)은 `U4a-1`~`U4a-11` 과
+    // `UB1`~`UB10` 이 실제 파일로 재고, 여기서는 **그 값이 도달하는 배선**을 센다 — 배선은 한 줄이라
+    // 지워도 런타임 판정자가 초록일 수 있다(종료 flush 가 그 부류다: 헤드리스로는 함수를 직접 부르므로
+    // 제품 종료 경로가 그것을 안 불러도 안 걸린다).
+    const allocator = std.testing.allocator;
+    const editor = try readZigFileZ(allocator, "src/platform/macos/app_session/editor.zig");
+    defer allocator.free(editor);
+    const conflict = try readZigFileZ(allocator, "src/platform/macos/app_session/editor_conflict.zig");
+    defer allocator.free(conflict);
+    const save = try readZigFileZ(allocator, "src/platform/macos/app_session/editor_untitled_save.zig");
+    defer allocator.free(save);
+    const session = try readZigFileZ(allocator, "src/platform/macos/app_session.zig");
+    defer allocator.free(session);
+    const backup_mod = try readZigFileZ(allocator, "src/platform/macos/app_session/editor_backup.zig");
+    defer allocator.free(backup_mod);
+    const backup_rules_src = try readZigFileZ(allocator, "src/session/editor/backup.zig");
+    defer allocator.free(backup_rules_src);
+    const host = try readZigFileZ(allocator, "src/platform/macos/MaruAppHost.swift");
+    defer allocator.free(host);
+    const abi = try readZigFileZ(allocator, "src/platform/macos/app_host_abi.zig");
+    defer allocator.free(abi);
+
+    const countOfB = struct {
+        fn f(hay: []const u8, needle: []const u8) usize {
+            var n: usize = 0;
+            var i: usize = 0;
+            while (std.mem.indexOfPos(u8, hay, i, needle)) |at| : (i = at + needle.len) n += 1;
+            return n;
+        }
+    }.f;
+
+    // ⑴ **clean 이 되는 자리는 `markClean` 하나다.** 저장 해시를 직접 대입하는 제품 코드가 다시 생기면
+    //    그 문서는 「저장했는데 백업이 남는다」 — 그 백업이 다음 실행에서 되살아난다. 넷은 각각
+    //    보통 저장 · 다시 읽기 · 저쪽 채택 · 이름이 붙는 저장이다(둘이 한 파일에 있다).
+    try std.testing.expectEqual(@as(usize, 0), countOfB(editor, "editor_doc.?.saved_hash = "));
+    try std.testing.expectEqual(@as(usize, 0), countOfB(conflict, "editor_doc.?.saved_hash = "));
+    try std.testing.expectEqual(@as(usize, 0), countOfB(save, "editor_doc.?.saved_hash = "));
+    try std.testing.expectEqual(@as(usize, 1), countOfB(editor, "editor_backup_ops.markClean(self, term, saved_content, null)"));
+    try std.testing.expectEqual(@as(usize, 1), countOfB(conflict, "editor_backup_ops.markClean(self, term, fresh.file.content, null)"));
+    try std.testing.expectEqual(@as(usize, 2), countOfB(save, "editor_backup_ops.markClean(self, term, "));
+    // **신원이 바뀌는 둘은 옛 신원을 먼저 뜬다** — 새 이름으로는 옛 파일을 지울 수 없다.
+    try std.testing.expectEqual(@as(usize, 2), countOfB(save, "editor_backup_ops.identity(term)"));
+
+    // ⑵ **편집 통지와 만기 검사는 각각 한 자리다** — 통지가 둘이면 시계가 갈리고, tick 이 없으면
+    //    백업은 종료에만 생긴다(크래시에 무용 — §3.10 이 debounce 를 요구한 이유).
+    try std.testing.expectEqual(@as(usize, 1), countOfB(editor, "editor_backup_ops.noteEdit(self, term)"));
+    try std.testing.expectEqual(@as(usize, 1), countOfB(session, "editor_backup_ops.tick(self)"));
+
+    // ⑶ **수락된 닫기가 지운다 — 이름으로, 닫힌 뒤에.** 신원 문자열은 Term 이 소유하므로 teardown 뒤에
+    //    읽으면 해제된 메모리이고, 미리 지우면 **막힌 닫기**(보호된 파일 패널)에서 안 닫힌 문서의
+    //    백업이 사라진다. 그래서 자리는 `defer` 하나다.
+    try std.testing.expectEqual(@as(usize, 1), countOfB(session, "defer for (0..drop_count) |i| editor_backup_ops.dropName("));
+    try std.testing.expectEqual(@as(usize, 1), countOfB(session, "editor_backup_ops.fileNameIfOnDisk(t, "));
+    // **묻는 대상과 지우는 대상이 같은 집합이다** — 범위 순회가 하나뿐인 것으로 그것을 못박는다.
+    try std.testing.expectEqual(@as(usize, 1), countOfB(session, "pub fn forEachTermInScope("));
+    try std.testing.expectEqual(@as(usize, 3), countOfB(session, "forEachTermInScope(self, "));
+
+    // ⑷ **종료 경로가 flush 를 부르고, teardown «앞»이다.** 뒤면 문서가 이미 해제돼 쓸 내용이 없다.
+    const flush_at = std.mem.indexOf(u8, host, "maru_macos_app_session_flush_editor_backups(session)") orelse
+        return error.TestUnexpectedResult;
+    const teardown_at = std.mem.indexOf(u8, host, "shutdownAppSession(preserveWebPanelsFor: mainSurface)") orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(flush_at < teardown_at);
+    try std.testing.expectEqual(@as(usize, 1), countOfB(abi, "pub export fn maru_macos_app_session_flush_editor_backups("));
+
+    // ⑸ **임계는 새 숫자가 아니라 저장 상한이다**(§3.10) — 숫자를 손으로 적으면 상한이 바뀔 때 갈린다.
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOfB(backup_rules_src, "pub const pause_bytes: usize = file_panel_bridge.max_file_bytes;"),
+    );
+    // ⑹ **자리를 «조립하는» 자리는 하나다** — 둘이면 쓰는 자리와 지우는 자리가 갈린다. 문서 주석에도
+    //    같은 글자가 있으므로 **포맷 문자열**을 센다(주석까지 세면 설명을 더하는 것이 판정자를 깨뜨린다).
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOfB(backup_mod, "\"{s}/Library/Application Support/maru/editor-backups\""),
+    );
+    // **캐시가 아니다**(§3.10 — 지우면 편집이 사라진다).
+    try std.testing.expectEqual(@as(usize, 0), countOfB(backup_mod, ".cache/maru"));
+}
+
 test "저장 실패 문구 표는 «둘이고 그 이유가 적혀 있다»" {
     // **계약**: docs/native-editor-document-model.md §3.9d.
     //

@@ -7309,7 +7309,8 @@ fn saveDocumentGuarded(self: *AppSession, term: *Term, guard: SaveGuard) SaveErr
     // 유지한다") 지금 내용이 방금 쓴 것과 다를 수 있고, 그러면 dirty로 남는 것이 **맞다**.
     // 그래서 저장 시작 시점이 아니라 **끝난 뒤**의 내용을 재면 안 된다 — `saved_bytes`가 그것을
     // 위해 남아 있다.
-    term.rt.editor_doc.?.saved_hash = contentHash(saved_content);
+    // **백업도 여기서 사라진다**(§3.10) — clean 이 되는 순간을 그 모듈이 한 자리로 모은다(신원은 그대로다).
+    app_session_mod.editor_backup_ops.markClean(self, term, saved_content, null);
     // **디스크 지문도 갱신한다** — 방금 쓴 것이 곧 파일 내용이다. 안 갱신하면 두 번째 저장이 자기가
     // 쓴 것을 「남이 바꿨다」로 읽는다.
     term.rt.editor_doc.?.disk_hash = contentHash(bytes);
@@ -9089,6 +9090,9 @@ pub const max_conflict_regions: usize = 256;
 
 fn refreshAfterEdit(self: *AppSession, term: *Term, edit: ?syntax_color.EditSpan) error{OutOfMemory}!void {
     lsp_client.noteEdited(term); // §8.2a: version 이 오르면 다음 tick 이 didChange 를 보낸다
+    // §3.10: 백업 시계를 되감는다. **여기가 유일한 자리다** — 아래 주석이 적듯 제품의 편집 경로
+    // 여섯이 전부 이 함수를 지나므로, 통지도 한 곳이면 된다.
+    app_session_mod.editor_backup_ops.noteEdit(self, term);
     // **가로 위치를 먼저 떠 둔다** — 아래 ⑷ 가 그것을 0 으로 되돌린다. `defer` 안에서 뜨면
     // 늦다: `rebuildVisible` 이 같은 폐기를 **먼저** 불러 그때는 이미 0 이다(실측으로 걸렸다).
     const kept_col = term.rt.editor_first_col;
@@ -38293,4 +38297,397 @@ test "C0c 디스크 지문의 수명 — 두 번째 저장이 자기가 쓴 것�
     try testing.expect(u.rt.editor_path != null);
     // 이름이 붙은 뒤에는 **지문이 선다** — 안 서면 그 문서는 영영 충돌을 못 본다.
     try testing.expect(u.rt.editor_doc.?.disk_hash != null);
+}
+
+// ── U4a: 미저장 편집의 백업(§3.10) ─────────────────────────────────────────────
+//
+// **자리를 주입한다**(`setDirForTest`) — 주입 없이 재면 사용자의 실제 백업 디렉터리에 쓴다. 그 사고는
+// 이미 한 번 있었다(테스트가 실 config 를 덮어썼다).
+//
+// **시계는 제품이 세운 값을 쓴다**: `noteEdit` 가 미래로 세운 만기를 tick 이 존중하는지 먼저 재고
+// (「만기 전에는 없다」), 그다음 그 필드를 과거로 돌려 만기를 흉내 낸다. 벽시계를 기다리지 않는다.
+
+const backup_rules = maru.session.editor.backup;
+
+/// 백업 디렉터리를 이 테스트 전용으로 박고, 그 절대 경로를 돌려준다.
+fn pinBackupDir(buf: []u8, dir: *std.testing.TmpDir) ![]const u8 {
+    const root = buf[0..try dir.dir.realPath(std.testing.io, buf)];
+    app_session_mod.editor_backup_ops.setDirForTest(root);
+    return root;
+}
+
+fn backupExists(root: []const u8, doc: backup_rules.Doc) bool {
+    var name_buf: [backup_rules.max_file_name_len]u8 = undefined;
+    const name = backup_rules.fileName(&name_buf, doc);
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ root, name }) catch return false;
+    _ = std.Io.Dir.cwd().statFile(std.testing.io, path, .{}) catch return false;
+    return true;
+}
+
+fn readBackup(allocator: std.mem.Allocator, root: []const u8, doc: backup_rules.Doc) ![]u8 {
+    var name_buf: [backup_rules.max_file_name_len]u8 = undefined;
+    const name = backup_rules.fileName(&name_buf, doc);
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ root, name });
+    return std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .limited(backup_rules.max_record_bytes));
+}
+
+/// 만기를 **지금**으로 돌린다 — 제품이 세운 시계를 벽시계 없이 만기시키는 유일한 손잡이다.
+fn expireBackupClock(term: *Term) void {
+    term.rt.editor_backup_due_ns = 0;
+}
+
+test "U4a-1 편집은 곧 백업이 아니다 — 만기 전에는 없고, 만기 뒤에 생긴다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try pinBackupDir(&root_buf, &dir);
+    defer app_session_mod.editor_backup_ops.setDirForTest(null);
+
+    const t = try openUntitledInActivePane(fx.session);
+    const doc: backup_rules.Doc = .{ .untitled = t.rt.editor_untitled.?.n };
+    try testing.expect(insertText(fx.session, t, "hello"));
+    // 편집 통지가 시계를 **미래로** 세웠다 — debounce 가 그것이다.
+    try testing.expect(t.rt.editor_backup_dirty);
+    try testing.expect(t.rt.editor_backup_due_ns > 0);
+    app_session_mod.editor_backup_ops.tick(fx.session);
+    try testing.expect(!backupExists(root, doc)); // 아직 아니다
+    try testing.expect(t.rt.editor_backup_dirty); // 그리고 잊지도 않았다
+
+    expireBackupClock(t);
+    app_session_mod.editor_backup_ops.tick(fx.session);
+    try testing.expect(backupExists(root, doc));
+    try testing.expect(!t.rt.editor_backup_dirty);
+    try testing.expect(t.rt.editor_backup_on_disk);
+}
+
+test "U4a-2 레코드는 그 문서다 — 신원과 내용이 되읽힌다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try pinBackupDir(&root_buf, &dir);
+    defer app_session_mod.editor_backup_ops.setDirForTest(null);
+
+    const t = try openUntitledInActivePane(fx.session);
+    const n = t.rt.editor_untitled.?.n;
+    try testing.expect(insertText(fx.session, t, "line one\nline \"two\"\n"));
+    expireBackupClock(t);
+    app_session_mod.editor_backup_ops.tick(fx.session);
+
+    const bytes = try readBackup(allocator, root, .{ .untitled = n });
+    defer allocator.free(bytes);
+    var parsed = try backup_rules.parse(allocator, bytes);
+    defer parsed.deinit(allocator);
+    try testing.expectEqual(n, parsed.doc.untitled);
+    try testing.expectEqualStrings(t.rt.editor_doc.?.file.content, parsed.content);
+}
+
+test "U4a-3 저장하면 사라진다 — 미저장 편집이 없으니 백업도 없다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try pinBackupDir(&root_buf, &dir);
+    defer app_session_mod.editor_backup_ops.setDirForTest(null);
+    try dir.dir.writeFile(std.testing.io, .{ .sub_path = "doc.txt", .data = "one\n" });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/doc.txt", .{root});
+
+    const t = try openPathInActivePane(fx.session, path);
+    t.rt.editor_selection = editor_selection.Selection.at(0); // 파일을 열면 커서는 클릭이 세운다
+    try testing.expect(insertText(fx.session, t, "x"));
+    expireBackupClock(t);
+    app_session_mod.editor_backup_ops.tick(fx.session);
+    try testing.expect(backupExists(root, .{ .path = .{ .path = path } }));
+
+    try saveDocument(fx.session, t);
+    try testing.expect(!backupExists(root, .{ .path = .{ .path = path } }));
+    try testing.expect(!t.rt.editor_backup_on_disk);
+}
+
+test "U4a-4 undo 로 clean 이 되면 지운다 — 디스크와 같은 내용을 dirty 로 되살리지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try pinBackupDir(&root_buf, &dir);
+    defer app_session_mod.editor_backup_ops.setDirForTest(null);
+    try dir.dir.writeFile(std.testing.io, .{ .sub_path = "u.txt", .data = "base\n" });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/u.txt", .{root});
+
+    const t = try openPathInActivePane(fx.session, path);
+    t.rt.editor_selection = editor_selection.Selection.at(0); // 파일을 열면 커서는 클릭이 세운다
+    try testing.expect(insertText(fx.session, t, "x"));
+    expireBackupClock(t);
+    app_session_mod.editor_backup_ops.tick(fx.session);
+    try testing.expect(backupExists(root, .{ .path = .{ .path = path } }));
+
+    try testing.expect(undoEdit(fx.session, t));
+    try testing.expect(!isDirty(t)); // 저장 시점 내용으로 돌아왔다
+    expireBackupClock(t);
+    app_session_mod.editor_backup_ops.tick(fx.session);
+    try testing.expect(!backupExists(root, .{ .path = .{ .path = path } }));
+}
+
+test "U4a-5 큰 문서는 백업하지 않고 그 사실을 남긴다 — 조용히 멈추지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try pinBackupDir(&root_buf, &dir);
+    defer app_session_mod.editor_backup_ops.setDirForTest(null);
+
+    // 저장 상한보다 **한 바이트 큰** 문서 — 그 문서는 저장도 못 한다(`TooLarge`).
+    const big = try allocator.alloc(u8, backup_rules.pause_bytes + 1);
+    defer allocator.free(big);
+    @memset(big, 'a');
+    try dir.dir.writeFile(std.testing.io, .{ .sub_path = "big.txt", .data = big });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/big.txt", .{root});
+
+    const t = try openPathInActivePane(fx.session, path);
+    t.rt.editor_selection = editor_selection.Selection.at(0); // 파일을 열면 커서는 클릭이 세운다
+    try testing.expect(insertText(fx.session, t, "x"));
+    expireBackupClock(t);
+    app_session_mod.editor_backup_ops.tick(fx.session);
+    try testing.expect(!backupExists(root, .{ .path = .{ .path = path } }));
+    // **화면에 남는다** — 상태바 저하 칸이 이 값을 읽는다.
+    try testing.expect(t.rt.editor_backup_paused);
+}
+
+test "U4a-6 이름이 붙으면 옛 신원의 백업이 사라진다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try pinBackupDir(&root_buf, &dir);
+    defer app_session_mod.editor_backup_ops.setDirForTest(null);
+    pinUntitledBase(fx.session, root);
+
+    const t = try openUntitledInActivePane(fx.session);
+    const n = t.rt.editor_untitled.?.n;
+    try testing.expect(insertText(fx.session, t, "body\n"));
+    expireBackupClock(t);
+    app_session_mod.editor_backup_ops.tick(fx.session);
+    try testing.expect(backupExists(root, .{ .untitled = n }));
+
+    try testing.expectError(error.AskName, saveDocument(fx.session, t));
+    try fx.session.rename_input.query.appendSlice(allocator, "named.txt");
+    settings_ops.commitRename(fx.session);
+    try testing.expect(t.rt.editor_path != null);
+    // **옛 이름의 파일이 남으면** 다음 실행이 이미 저장된 문서를 「이름 없는 dirty」로 되살린다.
+    try testing.expect(!backupExists(root, .{ .untitled = n }));
+}
+
+test "U4a-7 비교 뷰는 백업하지 않는다 — 편집이 아니다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    const t = try openUntitledInActivePane(fx.session);
+    try testing.expect(app_session_mod.editor_backup_ops.identity(t) != null);
+    t.rt.editor_diff = .{};
+    try testing.expect(app_session_mod.editor_backup_ops.identity(t) == null);
+    t.rt.editor_diff = null;
+}
+
+test "U4a-8 수락된 닫기는 지우고, 앱 종료는 남긴다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try pinBackupDir(&root_buf, &dir);
+    defer app_session_mod.editor_backup_ops.setDirForTest(null);
+
+    // ⑴ **앱 종료는 남긴다** — 만기를 기다리지 않고 굳히고, 지우지 않는다.
+    const keep = try openUntitledInActivePane(fx.session);
+    const keep_n = keep.rt.editor_untitled.?.n;
+    try testing.expect(insertText(fx.session, keep, "survives"));
+    app_session_mod.editor_backup_ops.flushAll(fx.session); // 만기 전인데도 쓴다
+    try testing.expect(backupExists(root, .{ .untitled = keep_n }));
+
+    // ⑵ **수락된 닫기는 지운다** — 확인이 「이 내용은 사라집니다」라고 약속한 그 경로다.
+    fx.session.executeClose(.active_term);
+    try testing.expect(!backupExists(root, .{ .untitled = keep_n }));
+}
+
+test "U4a-9 저장이 끝나도 여전히 dirty 면 보호를 놓지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try pinBackupDir(&root_buf, &dir);
+    defer app_session_mod.editor_backup_ops.setDirForTest(null);
+
+    const t = try openUntitledInActivePane(fx.session);
+    const n = t.rt.editor_untitled.?.n;
+    try testing.expect(insertText(fx.session, t, "first"));
+    expireBackupClock(t);
+    app_session_mod.editor_backup_ops.tick(fx.session);
+    try testing.expect(backupExists(root, .{ .untitled = n }));
+
+    // 저장이 끝났고 그 내용이 곧 문서다 — clean 이라 백업이 사라진다.
+    app_session_mod.editor_backup_ops.markClean(fx.session, t, "first", null);
+    try testing.expect(!backupExists(root, .{ .untitled = n }));
+
+    // **쓰는 동안 더 쳤다**(file-panel §1) — 저장이 굳힌 것은 그 이전 내용이다.
+    try testing.expect(insertText(fx.session, t, " more"));
+    app_session_mod.editor_backup_ops.markClean(fx.session, t, "first", null);
+    try testing.expect(isDirty(t));
+    // 지우고 끝내지 않고 **다음 만기를 세운다** — 방금 친 것이 보호 밖으로 나가지 않는다.
+    try testing.expect(t.rt.editor_backup_dirty);
+    expireBackupClock(t);
+    app_session_mod.editor_backup_ops.tick(fx.session);
+    try testing.expect(backupExists(root, .{ .untitled = n }));
+}
+
+test "U4a-10 쓸 수 없으면 다음 만기에 다시 시도한다 — 한 번 실패로 포기하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_root = root_buf[0..try dir.dir.realPath(std.testing.io, &root_buf)];
+    // **파일을 디렉터리 자리로 박는다** — 자리를 만들 수 없으니 쓰기가 실패한다.
+    try dir.dir.writeFile(std.testing.io, .{ .sub_path = "blocked", .data = "" });
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const blocked = try std.fmt.bufPrint(&dir_buf, "{s}/blocked", .{tmp_root});
+    app_session_mod.editor_backup_ops.setDirForTest(blocked);
+    defer app_session_mod.editor_backup_ops.setDirForTest(null);
+
+    const t = try openUntitledInActivePane(fx.session);
+    try testing.expect(insertText(fx.session, t, "x"));
+    expireBackupClock(t);
+    app_session_mod.editor_backup_ops.tick(fx.session);
+    try testing.expect(!t.rt.editor_backup_on_disk);
+    // **다시 시도한다** — dirty 가 서 있고 만기가 미래다(같은 프레임에 무한 재시도하지 않는다).
+    try testing.expect(t.rt.editor_backup_dirty);
+    try testing.expect(t.rt.editor_backup_due_ns > 0);
+}
+
+test "U4a-11 백업 파일은 소유자만 읽는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try pinBackupDir(&root_buf, &dir);
+    defer app_session_mod.editor_backup_ops.setDirForTest(null);
+
+    const t = try openUntitledInActivePane(fx.session);
+    const n = t.rt.editor_untitled.?.n;
+    try testing.expect(insertText(fx.session, t, "secret"));
+    expireBackupClock(t);
+    app_session_mod.editor_backup_ops.tick(fx.session);
+
+    var name_buf: [backup_rules.max_file_name_len]u8 = undefined;
+    const name = backup_rules.fileName(&name_buf, .{ .untitled = n });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ root, name });
+    const st = try std.Io.Dir.cwd().statFile(std.testing.io, path, .{});
+    // `0600` — 소스가 평문으로 남으므로 권한이 계약이다(§3.10).
+    try testing.expectEqual(@as(std.posix.mode_t, 0o600), st.permissions.toMode() & 0o777);
+}
+
+test "U4a-12 에이전트 행 ✕ 는 활성 문서의 백업을 지우지 않는다 — 닫지도 않은 문서다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try pinBackupDir(&root_buf, &dir);
+    defer app_session_mod.editor_backup_ops.setDirForTest(null);
+
+    // 활성 pane 에 **둘**이 있다: 원래 Term 과 방금 연 편집기(활성).
+    const t = try openUntitledInActivePane(fx.session);
+    const n = t.rt.editor_untitled.?.n;
+    try testing.expect(insertText(fx.session, t, "keep me"));
+    expireBackupClock(t);
+    app_session_mod.editor_backup_ops.tick(fx.session);
+    try testing.expect(backupExists(root, .{ .untitled = n }));
+
+    // **사이드바 행 ✕** — 활성과 무관한 Term(인덱스 0)을 닫는다. `CloseScope` 는 인덱스를 안 실으므로
+    // 그 범위(`.term`)를 활성 기준으로 풀면 **이 편집기**를 지운다: 닫히지도 않았는데.
+    const pane = pane_ops.activePane(fx.session);
+    try testing.expect(pane.terms.items.len > 1);
+    fx.session.executeClose(.{ .agent_term = .{ .tab = 0, .pane = 0, .term = 0 } });
+    try testing.expect(backupExists(root, .{ .untitled = n }));
+}
+
+test "U4a-13 한 프레임은 한 문서만 쓰고, 종료는 전부 쓴다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try pinBackupDir(&root_buf, &dir);
+    defer app_session_mod.editor_backup_ops.setDirForTest(null);
+
+    // 문서 셋이 **같은 프레임에** 만기가 된다.
+    const a = try openUntitledInActivePane(fx.session);
+    const b = try openUntitledInActivePane(fx.session);
+    const c = try openUntitledInActivePane(fx.session);
+    const ids = [_]maru.session.editor.backup.Doc{
+        .{ .untitled = a.rt.editor_untitled.?.n },
+        .{ .untitled = b.rt.editor_untitled.?.n },
+        .{ .untitled = c.rt.editor_untitled.?.n },
+    };
+    for ([_]*Term{ a, b, c }) |t| {
+        try testing.expect(insertText(fx.session, t, "x"));
+        expireBackupClock(t);
+    }
+
+    // ⑴ **프레임 하나에 하나** — 사본이 최대 8 MiB 라 겹치면 그 프레임이 통째로 I/O 가 된다.
+    app_session_mod.editor_backup_ops.tick(fx.session);
+    var written: usize = 0;
+    for (ids) |id| {
+        if (backupExists(root, id)) written += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), written);
+    // ⑵ 다음 프레임이 다음 문서를 쓴다 — 미뤄지는 것은 프레임 하나다.
+    app_session_mod.editor_backup_ops.tick(fx.session);
+    written = 0;
+    for (ids) |id| {
+        if (backupExists(root, id)) written += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), written);
+    // ⑶ **종료는 이 제한을 쓰지 않는다** — 화면이 없고 전부 굳혀야 한다.
+    app_session_mod.editor_backup_ops.flushAll(fx.session);
+    for (ids) |id| try testing.expect(backupExists(root, id));
 }

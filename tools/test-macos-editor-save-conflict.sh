@@ -39,10 +39,15 @@ test -x "$app_path"
 rm -rf "$root"
 mkdir -p "$home"
 
+backups="$home/Library/Application Support/maru/editor-backups"
+
 run_scenario() {
     scenario=$1
     rm -f "$ready"
     printf '%s' "$original" > "$document"
+    # **백업 자리를 비우고 시작한다** — 앞 시나리오가 남긴 파일을 이 시나리오의 결과로 읽지 않는다
+    # (같은 문서라 이름이 같다).
+    rm -rf "$backups"
     HOME="$home" \
     CFFIXED_USER_HOME="$home" \
     MARU_SESSION_HOST_ROOT="$session_root" \
@@ -54,7 +59,7 @@ run_scenario() {
     "$app_path" &
     app_pid=$!
 
-    if [ "$scenario" != clean-save ]; then
+    if [ "$scenario" != clean-save ] && [ "$scenario" != quit-backup ]; then
         # **드라이버가 부를 때까지 기다린다.** 편집기가 파일을 읽고 글자를 넣은 뒤에야 "밖에서
         # 바뀌었다"가 성립한다. 고정 sleep 은 기계에 따라 순서가 뒤집혀 무엇을 쟀는지 알 수 없다.
         waited=0
@@ -130,6 +135,33 @@ grep -Eq '^editor_save_conflict_smoke_scenario=conflict-reload$' "$root/conflict
 grep -Eq '^editor_save_conflict_smoke_failure=$' "$root/conflict-reload.summary.txt"
 grep -Eq '^editor_save_conflict_smoke_stage=done$' "$root/conflict-reload.summary.txt"
 cmp -s "$document" "$reference"
+
+# U4a — **저장하지 않고 종료**하면 미저장 내용이 백업에 남는다(§3.10).
+#
+# 이 시나리오의 값은 **누가 썼는가**에 있다: 드라이버가 타이핑 직후 종료를 요청하므로 debounce(2초)가
+# 만기되지 않았고, 따라서 파일이 있다면 그것은 tick 이 아니라 **종료 경로의 flush** 다. 헤드리스
+# 판정자는 그 함수를 직접 부르므로 이 배선은 앱 프로세스 안에서만 관측된다.
+run_scenario quit-backup
+grep -Eq '^editor_save_conflict_smoke_scenario=quit-backup$' "$root/quit-backup.summary.txt"
+grep -Eq '^editor_save_conflict_smoke_failure=$' "$root/quit-backup.summary.txt"
+grep -Eq '^editor_save_conflict_smoke_stage=done$' "$root/quit-backup.summary.txt"
+# ⑴ **저장은 한 번도 안 했다** — 원본 파일이 열었을 때 그대로다(백업은 저장이 아니다).
+printf '%s' "$original" > "$reference"
+cmp -s "$document" "$reference"
+# ⑵ **백업이 정확히 하나 있다**(문서당 하나 — §3.10).
+if [ "$(ls -1 "$backups" 2>/dev/null | wc -l | tr -d ' ')" != 1 ]; then
+    echo "expected exactly one backup record in $backups" >&2
+    ls -la "$backups" >&2 || true
+    exit 1
+fi
+# ⑶ **그 안에 미저장 내용이 있다** — 본문은 escape 없이 그대로 실리므로 밖에서 셀 수 있다.
+grep -q 'xyz' "$backups"/*.bak
+grep -q 'original-from-open' "$backups"/*.bak
+# ⑷ **소유자만 읽는다**(§3.10 — 소스가 평문으로 남는다).
+if [ "$(stat -f %Lp "$backups"/*.bak)" != 600 ]; then
+    echo "backup record is not owner-only: $(stat -f %Lp "$backups"/*.bak)" >&2
+    exit 1
+fi
 
 # C1b — **비교**를 고르면 아무것도 버리지 않는다: 디스크가 그대로다(비교가 섰다는 것은 앱 안의
 # probe 가 말한다 — 그 선택은 일부러 파일을 건드리지 않으므로 밖에서는 「그대로」만 보인다).

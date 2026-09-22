@@ -433,6 +433,9 @@ pub fn confirmRemoteOverwrite(self: *AppSession, surface_id: u64) void {
 /// 그 문서를 **저쪽의 그 파일**로 만든다. 이름(untitled)을 버리고 신원을 들고 clean 이 된다.
 fn adoptRemote(self: *AppSession, term: *Term, dest: []const u8, path: []const u8) void {
     const doc = term.rt.editor_doc orelse return;
+    // **신원이 바뀌기 «전에» 떠 둔다**(§3.10) — 아래에서 이름을 버리면 옛 백업 파일의 이름을 더는
+    // 만들 수 없다. 그러면 저쪽에 저장한 뒤에도 `untitled-N` 백업이 남아 다음 실행에서 되살아난다.
+    const prev_backup = app_session_mod.editor_backup_ops.identity(term);
     const owned_dest = self.allocator.dupe(u8, dest) catch {
         self.showNoticeKey(.editor_untitled_written_not_adopted);
         return;
@@ -447,8 +450,8 @@ fn adoptRemote(self: *AppSession, term: *Term, dest: []const u8, path: []const u
     // **이름과 배타다** — 이 순서(신원을 세운 뒤 이름을 버린다)여야 중간 프레임에 둘 다 없는 문서가 없다.
     term.rt.editor_untitled = null;
     // **clean 이다** — 저쪽이 `ok` 를 줬고 그 내용이 곧 저쪽 파일이다. 「그 사이 더 친 것」은 dirty 로
-    // 남는 것이 맞다(§1 의 「저장 중 재편집」과 같은 규칙).
-    term.rt.editor_doc.?.saved_hash = editor_ops.contentHash(doc.file.content);
+    // 남는 것이 맞다(§1 의 「저장 중 재편집」과 같은 규칙). 백업은 **옛 신원으로** 지운다.
+    app_session_mod.editor_backup_ops.markClean(self, term, doc.file.content, prev_backup);
     self.metal_dirty = true;
 }
 
@@ -525,9 +528,10 @@ fn writeAndAdopt(self: *AppSession, term: *Term, abs: []const u8, overwriting: b
         return;
     };
 
+    const prev_backup = app_session_mod.editor_backup_ops.identity(term); // 이름이 붙기 «전»의 신원
     term.rt.editor_path = owned;
     term.rt.editor_untitled = null; // **배타다**(§3.11) — 안 지우면 영원히 「저장 안 한 문서」다
-    term.rt.editor_doc.?.saved_hash = editor_ops.contentHash(saved_content);
+    app_session_mod.editor_backup_ops.markClean(self, term, saved_content, prev_backup);
     // ⚠️ **디스크 지문도 여기서 처음 선다**(§3.9d). 이름 없는 문서는 볼 디스크가 없어 `null` 이었고,
     // 이름이 붙는 이 순간이 그 값을 얻는 유일한 자리다 — 안 세우면 **그 문서는 영영 외부 변경을 못
     // 본다**(저장할 때 비교할 과거가 없다). 적대적 3회차에서 잡았다: U2 로 만든 문서만 C0·C1 의

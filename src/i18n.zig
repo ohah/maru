@@ -116,6 +116,16 @@ const Table = struct {
     /// 이쪽은 읽기라 사용자가 할 일이 다르다. 뭉개지 않는다: 지워진 것과 글자가 아닌 것과 너무 커진
     /// 것은 서로 다른 상황이다.
     /// 비교 탭을 열지 못했다(C1b) — 조용히 아무 일도 안 하면 사용자는 버튼이 죽은 줄 안다.
+    /// U3 — 저쪽 저장. 실패는 **이유별**로 말한다(§3.9d 와 같은 규율) — 원격 편집의 결말 어휘를
+    /// 그대로 받아 옮긴다.
+    editor_remote_save_failed: [:0]const u8,
+    editor_remote_save_exists: [:0]const u8,
+    editor_remote_save_stale: [:0]const u8,
+    editor_remote_save_unsupported: [:0]const u8,
+    /// 목적지를 묻는 상자와 그 두 버튼.
+    editor_save_where: [:0]const u8,
+    btn_save_here: [:0]const u8,
+    btn_save_there: [:0]const u8,
     editor_compare_failed: [:0]const u8,
     editor_reload_gone: [:0]const u8,
     editor_reload_not_text: [:0]const u8,
@@ -1096,6 +1106,13 @@ const en: Table = .{
     .editor_save_gone = "The file is no longer there, so it cannot be saved.",
     .editor_save_external_conflict = "The file changed outside, so nothing was saved. Your edits are still here.",
     .editor_save_conflict_choose = "The file changed outside. Overwrite discards that change; Reload discards what you just typed (undo brings it back).",
+    .editor_remote_save_failed = "Could not save to the remote host. Your edits are still here.",
+    .editor_remote_save_exists = "That name already exists on the remote host. Overwrite it?",
+    .editor_remote_save_stale = "That folder changed on the remote host, so nothing was saved.",
+    .editor_remote_save_unsupported = "The remote host is missing the helper needed to save there.",
+    .editor_save_where = "Where should this be saved?",
+    .btn_save_here = "This machine",
+    .btn_save_there = "The remote host",
     .editor_compare_failed = "The comparison could not be opened. Your edits are still here.",
     .editor_reload_gone = "The file is no longer readable, so it was not reloaded. Your edits are still here.",
     .editor_reload_not_text = "The file on disk is no longer UTF-8 text, so it was not reloaded. Your edits are still here.",
@@ -1832,6 +1849,13 @@ const ko: Table = .{
     .editor_save_gone = "그 파일이 더 이상 없어서 저장할 수 없습니다",
     .editor_save_external_conflict = "파일이 외부에서 바뀌어 아무것도 저장하지 않았습니다. 편집한 내용은 그대로 있습니다",
     .editor_save_conflict_choose = "파일이 외부에서 바뀌었습니다. 덮어쓰면 그 변경이, 다시 읽으면 방금 친 것이 사라집니다(되돌리기로 돌아옵니다)",
+    .editor_remote_save_failed = "원격 호스트에 저장하지 못했습니다. 편집한 내용은 그대로 있습니다",
+    .editor_remote_save_exists = "저쪽에 그 이름이 이미 있습니다. 덮어쓸까요?",
+    .editor_remote_save_stale = "저쪽 폴더가 바뀌어 아무것도 저장하지 않았습니다",
+    .editor_remote_save_unsupported = "저쪽에 저장에 필요한 도우미가 없습니다",
+    .editor_save_where = "어디에 저장할까요?",
+    .btn_save_here = "이 기계",
+    .btn_save_there = "원격 호스트",
     .editor_compare_failed = "비교를 열지 못했습니다. 편집한 내용은 그대로 있습니다",
     .editor_reload_gone = "그 파일을 더 이상 읽을 수 없어 다시 읽지 못했습니다. 편집한 내용은 그대로 있습니다",
     .editor_reload_not_text = "디스크의 파일이 UTF-8 글자가 아니어서 다시 읽지 못했습니다. 편집한 내용은 그대로 있습니다",

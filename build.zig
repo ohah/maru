@@ -1791,14 +1791,14 @@ pub fn build(b: *std.Build) void {
     // 그쪽은 `zig build test` 가 돈다.
     const macos_editor_untitled_tests = addProjectTest(b, .{
         .root_module = macos_app_host_abi_tests.root_module,
-        .filters = &.{ "U1", "U2", "C0", "C1a", "C1b" }, // `SYNU1` 도 걸린다(부분 일치) — 아래 개수가 그것을 포함한다
+        .filters = &.{ "U1", "U2", "C0", "C1a", "C1b", "U3-" }, // `SYNU1` 도 걸린다(부분 일치) — 아래 개수가 그것을 포함한다
     });
     const run_macos_editor_untitled_tests = b.addRunArtifact(macos_editor_untitled_tests);
-    // 82 = 앞의 66(U1a~U1r 열여덟 + C0a~C0c 셋 + U2 일가 + SYNU1 + 부분 일치 + `test_0` 다섯)에
-    //      **C1a-1~C1a-11 열하나 + C1b-1~C1b-5 다섯**을 더한 값이다(C1a — 저장 충돌의 선택).
-    run_macos_editor_untitled_tests.addArg("--maru-expect-tests=82");
+    // 85 = 앞의 66(U1a~U1r 열여덟 + C0a~C0c 셋 + U2 일가 + SYNU1 + 부분 일치 + `test_0` 다섯)에
+    //      **C1a-1~C1a-11 열하나 + C1b-1~C1b-5 다섯 + U3-1~U3-3 셋**을 더한 값이다(C1a — 저장 충돌의 선택).
+    run_macos_editor_untitled_tests.addArg("--maru-expect-tests=85");
     // ⚠️ **그리고 실제로 돌았는가** — 전부 macOS 가 아니면 `SkipZigTest` 다.
-    run_macos_editor_untitled_tests.addArg("--maru-expect-passed=82");
+    run_macos_editor_untitled_tests.addArg("--maru-expect-passed=85");
     run_macos_editor_untitled_tests.setCwd(b.path("."));
     const untitled_step = b.step(
         "test-editor-untitled",

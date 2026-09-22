@@ -1310,6 +1310,67 @@ pub fn enqueueRemoteFileTreeRename(self: *AppSession, target: FileTreeEditTarget
     return true;
 }
 
+/// **문서 바이트를 저쪽 경로에 쓴다**(U3). `beginRemoteRename` 과 같은 job·같은 워커·같은 결말
+/// wire 를 쓰고 다른 것은 셋이다: 내용이 **stdin** 으로 가고, **덮어쓸지**를 싣고, **부모 신원이
+/// 없다**(0·0 — 목록을 거치지 않았으므로 비교할 과거가 없다; 헬퍼가 그 뜻으로 읽는다).
+pub fn beginRemoteWrite(
+    self: *AppSession,
+    endpoint: RemoteEndpoint,
+    parent: []const u8,
+    name: []const u8,
+    bytes: []const u8,
+    overwrite: bool,
+) bool {
+    if (comptime builtin.os.tag != .macos) return false;
+    if (endpoint.dest_len == 0 or endpoint.ctl_len == 0) {
+        self.showNoticeKey(.editor_remote_save_failed);
+        return false;
+    }
+    if (self.remote_rename_inflight) {
+        self.showNoticeKey(.fp_remote_file_busy);
+        return false;
+    }
+    const job = self.allocator.create(RemoteRenameJob) catch return false;
+    job.* = .{
+        .session = self,
+        .kind = .write_file,
+        .parent = &.{},
+        .old_name = &.{},
+        .new_name = &.{},
+        .dest = &.{},
+        .ctl = &.{},
+        .dev = 0,
+        .ino = 0,
+        .overwrite = overwrite,
+    };
+    var ok = false;
+    defer if (!ok) {
+        self.allocator.free(job.ctl);
+        self.allocator.free(job.dest);
+        self.allocator.free(job.new_name);
+        self.allocator.free(job.old_name);
+        self.allocator.free(job.parent);
+        if (job.bytes.len > 0) self.allocator.free(job.bytes);
+        self.allocator.destroy(job);
+    };
+    job.parent = self.allocator.dupe(u8, parent) catch return false;
+    // 헬퍼의 인자 순서를 형제들과 맞춘다 — 이름은 `old_name` 자리에 간다(`mk` 도 그 자리를 쓴다).
+    job.old_name = self.allocator.dupe(u8, name) catch return false;
+    job.dest = self.allocator.dupe(u8, endpoint.dest()) catch return false;
+    job.ctl = self.allocator.dupe(u8, endpoint.ctl()) catch return false;
+    job.bytes = self.allocator.dupe(u8, bytes) catch return false;
+
+    self.remote_rename_inflight = true;
+    const thread = std.Thread.spawn(.{}, remoteRenameWorker, .{job}) catch {
+        self.remote_rename_inflight = false;
+        self.showNoticeKey(.editor_remote_save_failed);
+        return false;
+    };
+    thread.detach();
+    ok = true;
+    return true;
+}
+
 /// 원격 트리 행의 이름을 바꾼다(RF6b). 이름 검증은 **로컬과 같은 순수 함수**를 쓴다
 /// (`file_tree_mutation.validateName`) — 규칙이 두 벌이면 한쪽만 고쳐진다.
 pub fn beginRemoteRename(self: *AppSession, kind: RemoteMutationKind, endpoint: RemoteEndpoint, parent: []const u8, old_name: []const u8, new_name: []const u8, dev: u64, ino: u64) void {
@@ -1437,6 +1498,8 @@ fn remoteMutationFailedKey(kind: RemoteMutationKind) maru.i18n.Key {
         .rename => .fp_remote_rename_failed,
         .delete => .fp_remote_delete_failed,
         .create_file, .create_directory => .fp_remote_create_failed,
+        // **문서 저장은 트리 편집이 아니다**(U3) — 그 문구는 편집기의 것이다.
+        .write_file => .editor_remote_save_failed,
     };
 }
 
@@ -1448,6 +1511,12 @@ pub fn finishRemoteRename(self: *AppSession, result: RemoteRenameOutcome) void {
     };
     // 삭제는 「이미 있다」가 없다 — 같은 코드가 **안 빈 디렉터리**를 뜻한다(헬퍼가 `AT_REMOVEDIR`
     // 로만 지우므로). 한 코드가 두 뜻이라 여기서 종류로 가른다.
+    // ⚠️ **문서 저장의 결말은 «편집기»가 소비한다**(U3). 트리를 다시 읽는 것이 아니라 그 문서에
+    // 이름·신원을 붙이고 clean 으로 만드는 일이라, 아래 트리 갈래들과 섞으면 한쪽이 낡는다.
+    if (result.kind == .write_file) {
+        app_session_mod.editor_untitled_save_ops.finishRemoteWrite(self, outcome);
+        return;
+    }
     if (result.kind == .create_file or result.kind == .create_directory) {
         switch (outcome) {
             .ok => invalidateRemoteExplorerExpanded(self),

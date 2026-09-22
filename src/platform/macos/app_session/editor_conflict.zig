@@ -176,7 +176,7 @@ pub fn confirmOverwrite(self: *AppSession, surface_id: u64) void {
     editor_ops.overwriteDocument(self, term) catch |e| switch (e) {
         // 덮어쓰기는 CAS 를 건너뛰므로 충돌이 다시 올 수 없다. 나머지 이유는 §3.9d 의 그 표가 말한다 —
         // 여기서 문구를 다시 고르면 표가 둘이 된다.
-        error.AskName, error.NotAnEditor, error.ReadOnly => {},
+        error.AskName, error.NotAnEditor, error.ReadOnly, error.Handled => {},
         else => self.showNoticeKey(editor_ops.saveFailureNoticeKey(@errorCast(e))),
     };
 }

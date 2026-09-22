@@ -3169,20 +3169,20 @@ pub fn register(b: *std.Build, ctx: Context) void {
             run_candidate_baseline_workspace_tests.setCwd(b.path("."));
             session_host_release_adapter_candidate_baseline_workspace_step.dependOn(&run_candidate_baseline_workspace_tests.step);
             const p5d_workspace_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_p5d_workspace.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{.{ .name = "release_adapter_pre_publish_workspace", .module = baseline_workspace_root_mod }} });
-            const p5d_workspace_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_p5d_workspace.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{.{ .name = "release_adapter_p5d_workspace", .module = p5d_workspace_mod }} }) });
+            const p5d_workspace_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_cli_harness_workspace.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{.{ .name = "release_adapter_p5d_workspace", .module = p5d_workspace_mod }} }) });
             const run_p5d_workspace_tests = b.addRunArtifact(p5d_workspace_tests);
             run_p5d_workspace_tests.addArg("--maru-expect-tests=6");
             run_p5d_workspace_tests.setCwd(b.path("."));
             session_host_release_adapter_p5d_runner_step.dependOn(&run_p5d_workspace_tests.step);
             const p5d_runner_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_p5d_runner.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "bounded_process", .module = bounded_mod }, .{ .name = "release_adapter_p5d_workspace", .module = p5d_workspace_mod } } });
-            const p5d_runner_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_p5d_runner.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{.{ .name = "release_adapter_p5d_runner", .module = p5d_runner_mod }} }) });
+            const p5d_runner_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_cli_harness_runner.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{.{ .name = "release_adapter_p5d_runner", .module = p5d_runner_mod }} }) });
             const run_p5d_runner_tests = b.addRunArtifact(p5d_runner_tests);
             run_p5d_runner_tests.addArg("--maru-expect-tests=6");
             run_p5d_runner_tests.setCwd(b.path("."));
             session_host_release_adapter_p5d_runner_step.dependOn(&run_p5d_runner_tests.step);
             const p5d_release_evidence_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_evidence.zig"), .target = target, .optimize = composition_optimize, .imports = &.{.{ .name = "release_manifest", .module = manifest_mod }} });
             const p5d_candidate_gate_mod = b.createModule(.{ .root_source_file = b.path("src/platform/macos/session_host/release_adapter_p5d_candidate_gate.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_adapter_p5d_runner", .module = p5d_runner_mod }, .{ .name = "release_adapter_dmg_authority", .module = dmg_authority_mod }, .{ .name = "release_adapter_files", .module = files_mod }, .{ .name = "release_evidence", .module = p5d_release_evidence_mod } } });
-            const p5d_candidate_gate_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_p5d_candidate_gate.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_adapter_p5d_candidate_gate", .module = p5d_candidate_gate_mod }, .{ .name = "release_adapter_dmg_authority", .module = dmg_authority_mod }, .{ .name = "release_evidence", .module = p5d_release_evidence_mod } } }) });
+            const p5d_candidate_gate_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_mounted_candidate_gate.zig"), .target = target, .optimize = composition_optimize, .link_libc = true, .imports = &.{ .{ .name = "release_adapter_p5d_candidate_gate", .module = p5d_candidate_gate_mod }, .{ .name = "release_adapter_dmg_authority", .module = dmg_authority_mod }, .{ .name = "release_evidence", .module = p5d_release_evidence_mod } } }) });
             const run_p5d_candidate_gate_tests = b.addRunArtifact(p5d_candidate_gate_tests);
             run_p5d_candidate_gate_tests.addArg("--maru-expect-tests=6");
             run_p5d_candidate_gate_tests.setCwd(b.path("."));
@@ -3218,7 +3218,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
                     &b.addInstallArtifact(p5d_candidate_cli, .{ .dest_sub_path = "maru-session-host-release-p5d-candidate" }).step,
                 );
             }
-            const p5d_candidate_product_boundary_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_p5d_candidate_product_boundary.zig"), .target = target, .optimize = composition_optimize, .imports = &.{.{ .name = "release_adapter_p5d_candidate_product", .module = p5d_candidate_product_mod }} }) });
+            const p5d_candidate_product_boundary_tests = addProjectTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/session_host_release_adapter_mounted_candidate_product_boundary.zig"), .target = target, .optimize = composition_optimize, .imports = &.{.{ .name = "release_adapter_p5d_candidate_product", .module = p5d_candidate_product_mod }} }) });
             const run_p5d_candidate_product_boundary_tests = b.addRunArtifact(p5d_candidate_product_boundary_tests);
             run_p5d_candidate_product_boundary_tests.addArg("--maru-expect-tests=1");
             run_p5d_candidate_product_boundary_tests.setCwd(b.path("."));

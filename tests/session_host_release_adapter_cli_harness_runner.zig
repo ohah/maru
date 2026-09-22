@@ -1,4 +1,7 @@
-//! The P5d parent owns bounded execution and scratch cleanup on every terminal path.
+//! **CLI/SSH 하네스의 바깥 실행 주인** — 유계 프로세스 그룹 하나를 닫힌 환경으로 띄우고,
+//! **모든 종료 경로에서** 자기가 만든 scratch 를 지운다(성공·실패·타임아웃·정리 실패).
+//!
+//! 계획 문서의 단계 라벨로는 **P5d**.
 
 const std = @import("std");
 const runner = @import("release_adapter_p5d_runner");

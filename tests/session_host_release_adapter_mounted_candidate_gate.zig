@@ -1,3 +1,9 @@
+//! **마운트된 candidate DMG 안의 CLI 를 그대로 실행하고, 서명된 leaf 를 한 번만 공표한다** —
+//! candidate 가 실행 전후로 바뀌면 거절하고, 자식이 실패하면 아무것도 공표하지 않으며,
+//! 이미 찬 evidence 자리를 덮어쓰지 않는다.
+//!
+//! 계획 문서의 단계 라벨로는 **P5d**.
+
 const std = @import("std");
 const subject = @import("release_adapter_p5d_candidate_gate");
 const dmg = @import("release_adapter_dmg_authority");

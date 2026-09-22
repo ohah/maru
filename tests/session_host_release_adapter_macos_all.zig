@@ -84,8 +84,8 @@ test {
     _ = @import("session_host_release_adapter_candidate_published_cleanup_command.zig");
     _ = @import("session_host_release_adapter_pre_publish_product.zig");
     _ = @import("session_host_release_adapter_pre_publish_workspace.zig");
-    _ = @import("session_host_release_adapter_p5d_workspace.zig");
-    _ = @import("session_host_release_adapter_p5d_runner.zig");
+    _ = @import("session_host_release_adapter_cli_harness_workspace.zig");
+    _ = @import("session_host_release_adapter_cli_harness_runner.zig");
     _ = @import("session_host_release_adapter_predecessor_evidence_identity.zig");
     _ = @import("session_host_release_adapter_summary.zig");
     _ = @import("session_host_release_adapter_summary_publication.zig");

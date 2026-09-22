@@ -1,4 +1,7 @@
-//! P5d release runs use one descriptor-owned scratch root and never clean ambient app state.
+//! **릴리스 실행 하나가 쓰는 scratch 루트는 하나이고 descriptor 가 소유한다** — 주변 앱 상태를
+//! 정리하지 않고, 심볼릭 링크를 따라가지 않으며, 남의 경로 이름과 재시도 권한을 보존한다.
+//!
+//! 계획 문서의 단계 라벨로는 **P5d**.
 
 const std = @import("std");
 const p5d = @import("release_adapter_p5d_workspace");

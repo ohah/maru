@@ -471,12 +471,17 @@ pub fn build(
             while (src_i < row.bytes.len and src_col < start_col) {
                 // **byte 앞의 힌트를 먼저 지난다**(§4.1h). 걸치면 **머문다**(표기처럼 잘라 그리는 부류) — `start_byte_col` 이 힌트 앞 열로 남고,
                 // hit 의 걸음이 같은 자리에서 같은 힌트를 다시 먹는다.
-                const in_w = inlayColsAt(row.inlays, &src_inlay, src_i);
+                // **걸치면 첨자도 되돌린다** — `inlayColsAt` 는 지나가며 `src_inlay` 를 올리는데, 머무는 행에서 그대로 두면 다음 행의
+                // 걸음이 같은 힌트를 다시 못 먹어 그 폭만큼 앞 byte 에서 시작한다(INL12 가 잡았다: `abcd: intefgh` 6열 랩의 셋째 행이
+                // `h` 가 아니라 줄 끝이었다).
+                var peek = src_inlay;
+                const in_w = inlayColsAt(row.inlays, &peek, src_i);
                 if (in_w > 0) {
                     if (src_col + in_w > start_col) break;
+                    src_inlay = peek;
                     src_col += in_w;
                     if (src_col >= start_col) break;
-                }
+                } else src_inlay = peek;
                 const st = stepColumn(row.bytes, src_i, src_col, props.tab_width);
                 if (st.next_col > start_col) {
                     // 걸쳤다. 렌더가 잘라 그리는 종류면 여기 머물고, 버리는 종류면 지나간다.
@@ -1508,6 +1513,45 @@ test "INL5 가상 텍스트 — 그리기: 힌트 칸은 syntax_comment 런, car
         jl += run.text.len;
     }
     try testing.expectEqualStrings("a:1)", joined[0..jl]);
+}
+
+test "INL12 가상 텍스트 — 랩 경계에 걸친 힌트: 행 시작 걸음은 힌트 앞에 머물고(start_byte_col < start_col) 다음 행은 글리프에서 시작한다; cluster 안에 앵커된 힌트는 전개·열 둘 다 버린다 (§4.1h 적대적 A11·A12)" {
+    // `abcdefgh` + byte 4 앞 `: int`(5) → `abcd: intefgh`(13열). 6열 랩: `abcd: ` | `intefg` | `h` — 둘째 행 시작은 힌트 **안**(걸침)이다.
+    const inl = [_]Inlay{.{ .at = 4, .text = ": int" }};
+    const rows = [_]Row{.{ .bytes = "abcdefgh", .inlays = &inl }};
+    const layout = geometry.compute(80, 10, .{});
+    const narrow = geometry.compute(@intCast(layout.contentLeft() + 6), 10, .{});
+    var p = testProps(narrow, &rows);
+    p.wrap = true;
+    var ops: [4]draw.Op = undefined;
+    var scratch: [128]u8 = undefined;
+    var runs: [12]draw.Run = undefined;
+    const w = build(p, &ops, &scratch, &runs, &test_visual);
+    try testing.expectEqual(@as(usize, 3), w.visual_rows);
+    // 둘째 행: byte 4 의 힌트에 걸쳤다 — **머문다**(§4.1h 「걸치면 머문다」): start_byte 4, start_byte_col 4 < start_col 6.
+    try testing.expectEqual(@as(usize, 4), test_visual[1].start_byte);
+    try testing.expectEqual(@as(u32, 4), test_visual[1].start_byte_col);
+    try testing.expectEqual(@as(u32, 6), test_visual[1].start_col);
+    // 셋째 행: `h`(byte 7) 에서, 열 12.
+    try testing.expectEqual(@as(usize, 7), test_visual[2].start_byte);
+    try testing.expectEqual(@as(u32, 12), test_visual[2].start_byte_col);
+    // 둘째 행의 런: 힌트 꼬리 `int` 는 주석색, 그 뒤 `efg` 는 무색 — 열이 힌트 폭만큼 어긋나면 갈림이 틀린다.
+    try testing.expectEqualStrings("int", ops[1].text.runs[0].text);
+    try testing.expectEqual(tokens.ColorRole.syntax_comment, ops[1].text.runs[0].role.?);
+    try testing.expectEqualStrings("efg", ops[1].text.runs[1].text);
+    try testing.expect(ops[1].text.runs[1].role == null);
+    // cluster 안 앵커(`a한b` 의 byte 2 — `한` 의 가운데): 전개는 힌트를 내지 않고, 열도 그 폭을 세지 않는다(둘이 같은 답).
+    const mid = [_]Inlay{.{ .at = 2, .text = ": x" }};
+    var out: [32]u8 = undefined;
+    var cb: InlayColsBuf = .{};
+    const r = expandLine("a\xed\x95\x9cb", 4, &out, .{ .count = test_max_cols }, &mid, &cb);
+    try testing.expectEqualStrings("a\xed\x95\x9cb", r.text);
+    try testing.expectEqual(@as(usize, 0), cb.len);
+    const offs = [_]u32{4};
+    var cols = [_]u32{0};
+    columnsAtOffsetsWith("a\xed\x95\x9cb", 4, &offs, &cols, std.math.maxInt(u32), &mid);
+    try testing.expectEqual(@as(u32, 3), cols[0]); // a 1 + 한 2
+    try testing.expectEqual(@as(usize, 4), byteAtPointWith("a\xed\x95\x9cb", 4, 0, 0, 0, 80, 3 * 10 + 2, 10, &mid)); // 열 3 의 왼쪽 반 → b
 }
 
 test "expandTabs: 탭이 없으면 원본을 그대로 빌려준다" {

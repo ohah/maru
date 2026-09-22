@@ -7514,6 +7514,10 @@ test "MP1 경계: 떠 있는 프리뷰의 도크 점프가 pane hit 보다 먼�
     // 화면에 아무 변화가 없다(뷰는 바뀌었는데 안 보인다 — 「눌렀는데 아무 일도 없다」로 읽힌다).
     // `openDockTo` 가 presented·collapsed 를 함께 세우고 pane 을 다시 잰다(적대 8회차).
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(marker_view, "dock_ops.openDockTo(self, .agent_activity)"));
+    // **app_session.zig 쪽은 0 이다.** 이 줄이 없으면 F18 이 구멍을 낸다 — 추출 전에는 이 파일의
+    // 개수가 1 이라 «둘째가 생기면» 빨개졌는데, 감시 대상만 옮기면 이 파일은 무제한이 된다
+    // (적대적 검증이 뮤테이션으로 실제로 확인했다: 다른 자리에 심은 호출이 안 잡혔다).
+    try std.testing.expectEqual(@as(usize, 0), countOccurrences(app_session, "dock_ops.openDockTo(self, .agent_activity)"));
     // 잘못된 쪽은 **두 파일 어디에도** 없어야 한다 — 본문이 어느 쪽으로 돌아와도 걸린다.
     try std.testing.expectEqual(@as(usize, 0), countOccurrences(marker_view, "dock_ops.enterDockView(self, .agent_activity)"));
     try std.testing.expectEqual(@as(usize, 0), countOccurrences(app_session, "dock_ops.enterDockView(self, .agent_activity)"));

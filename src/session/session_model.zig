@@ -192,8 +192,17 @@ pub fn Model(comptime Rt: type) type {
             /// 옛 provider 색으로 굳거나 아예 안 선다(2026-09-13 실측). 그래서 「받은 적이 있나」로 잰다.
             agent_kind_from_hook: bool = false,
             agent_stabilizer: agent_observer.Stabilizer = .{},
-            /// observer가 마지막으로 읽은 TerminalCore write sequence와 마지막 PTY activity 시각(ms, awake clock).
-            agent_screen_generation: u64 = 0,
+            /// 이 Term 에 적용된 화면 batch 의 누적 수(`drainAvailable().output_events` 합). 관찰기의 «화면이
+            /// 바뀌었나» 신호다. 예전엔 관측의 `observer_generation`(core write seq)을 썼는데, 그 값은 host 가
+            /// **출력마다** metadata 이벤트를 보내야만 앱에 닿았다 — 그 이벤트가 활성 32 세션 앱 CPU 의 절반이었다
+            /// (2026-09-22). 화면 batch 는 어차피 오는 신호라 공짜다. in-process·host 두 backend 가 같은
+            /// `DrainSummary` 로 낸다.
+            agent_output_batches: u64 = 0,
+            /// 관찰기가 마지막으로 스캔했을 때의 `(agent_output_batches, observation.revision)`. 둘 다 그대로면
+            /// 화면도 metadata(제목·OSC 9;4 진행률 — 관찰기가 읽는 다른 두 입력)도 안 바뀐 것이라 스캔을 건너뛴다.
+            agent_scan_batches: u64 = 0,
+            agent_scan_revision: u64 = 0,
+            /// 마지막 PTY activity 시각(ms, awake clock).
             agent_last_output_ms: u64 = 0,
             /// 마지막 출력의 **wall clock** 시각(ns, 0=없음). `agent_last_output_ms`는 awake clock이라 시스템이
             /// 잠든 동안 멈춰, 사이드바 활동 시각이 잠자기를 통째로 건너뛴 값을 보여준다(밤새 재운 뒤 "3m"). 경과

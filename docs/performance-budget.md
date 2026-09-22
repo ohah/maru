@@ -340,6 +340,20 @@ ReleaseFast 앱의 메인 스레드 최대 항목이 그 memcpy 였다(`sample` 
   (`max_owners_per_frame`) 물었고, 같은 프레임 안 캐시(#3813)가 그것을 15× 줄였다(ktrace 11,096 → 718 / 10 s). CPU 이득은
   A/B 로 ≈0.25%p — 「시스템콜 수 × 마이크로벤치 비용」으로 예측한 1%p 의 1/4 이었다. 이득은 A/B 실측으로만 말한다.
 
+**발견(2026-09-22) — 활성 부하에서 앱 busy CPU 의 절반은 «내용 없는 metadata 이벤트» 였다.** 활성 32 세션(2 Hz 출력)
+ReleaseFast 앱의 busy 표본(커널 대기 제외)을 호출자별로 귀속하면 `drainObservationEvents` 48–53 %, blake3 36–38 %,
+사이드바 `gethostname` 3–4 %, 화면 batch 적용 3.5 % 였다. 원인은 `observer_generation`(core 의 출력 revision)이 observation
+JSON 에 실려 출력 batch 마다 `change_token` 이 올랐고, 앱이 그 이벤트마다 `metadataEqualsCurrent`(이 필드를 비교)로
+«의미 변화» 를 판정해 role 7개 할당·observation 교체·settle 을 통째로 돌린 것이다. 인과는 세 겹으로 확인했다: host
+diff 로그(1 세션 30 s 에 JSON 변경 59회 중 58회가 이 필드 하나), 필드를 상수화한 host 로 변경 59 → 4, 같은 앱에
+host 만 바꾼 A/B 4쌍 전부 앱 CPU 감소(중앙값 **−33 %**; host 는 변화 없음 — observation 작업이 host busy 의 1.4 %).
+처방은 와이어 값 상수화 + 관찰기 신호 교체(`docs/persistent-session-host.md` §10 wire 표). 두 가지를 같이 적는다:
+① 이 수치는 metadata 가 전혀 안 바뀌는 출력의 상한이다 — 실제 에이전트 세션은 도구 실행마다 foreground 목록이
+바뀌어(정당한 이벤트) 그만큼 남는다. ② 첫 인과 실험은 «효과 없음» 이었는데, bash+`sleep` 픽스처가 줄마다 자식을
+만들어 foreground 가 진짜로 바뀌었기 때문이다 — 픽스처의 부수 효과를 먼저 의심한다. 그 전에 시도한 프레임 봉인
+자기검증 최적화(사본 대조)는 12쌍 −6 % 로 작아 보류했다: 「씰 종류가 아니라 씰 파이프라인이 왜 이렇게 자주
+도는가」가 답이었다.
+
 실제 AppKit CR6e-a2 v2 반복 artifact는 ReleaseFast 앱 5회 모두 attach 뒤 handshake 출력에서 native handler exact 증가를
 관측했고, handler 진입부터 normal tick의 Metal frame 뒤 screen probe까지 15.528·23.325·23.954·24.151·24.627ms였다.
 다섯 행 모두 60ms 안이며 fd 6→6, child 0, daemon/socket/host artifact cleanup을 함께 통과했다. 이 하위 값은 host가

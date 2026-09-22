@@ -2470,6 +2470,10 @@ pub const RuntimeManager = struct {
             const next_materialization_count = self.observation_materializations +| 1;
             var observation = try observationOp(self, runtime_id, self.allocator);
             defer observation.deinit(self.allocator);
+            // preflight 기준은 core 의 **실제** generation 이어야 한다 — 와이어 상수를 기준으로 저장하면 다음
+            // cadence 마다 «바뀜» 으로 읽혀 idle runtime N 개가 100 ms 마다 JSON 을 다시 만든다(E2c 가 막은 것).
+            const core_observer_generation = observation.observer_generation;
+            observation.observer_generation = server.wire_observer_generation;
             const canonical = server.canonicalizeObservation(self.allocator, observation) catch |err| switch (err) {
                 error.InvalidObservation => return error.InvalidObservation,
                 error.OutOfMemory => return error.OutOfMemory,
@@ -2488,7 +2492,7 @@ pub const RuntimeManager = struct {
             settled = true;
             self.observation_materializations = next_materialization_count;
             record.refreshed_at_ns = now_ns;
-            record.observer_generation = observation.observer_generation;
+            record.observer_generation = core_observer_generation;
             record.title_generation = observation.title_generation;
             record.foreground_generation = foreground_generation;
             record.cwd_generation = if (self.kernel_cwd_cache.get(handle)) |cache| cache.generation else 0;
@@ -5308,8 +5312,12 @@ test "P4 E2b runtime manager shares one canonical observation per cadence epoch"
     _ = try ops.cached_observation(ops.ctx, rid, .{ .cadence_epoch = 99 });
     try std.testing.expectEqual(@as(u64, 1), mgr.fixtureObservationMaterializations());
 
+    // source change 는 **metadata** 변경이어야 token 이 오른다. 예전엔 평문 «changed» 로 충분했는데 그건
+    // `observer_generation`(출력 revision)이 JSON 에 실려 있었기 때문이고, 그 필드는 이제 와이어 상수다
+    // (출력만으로 token 이 오르면 batch 마다 내용 없는 이벤트가 나간다 — 「출력만으로는 metadata change_token 이
+    // 오르지 않는다」 판정자). 여기서는 제목을 바꾼다.
     surface.lockCore(std.testing.io);
-    surface.core.write("changed") catch |err| {
+    surface.core.write("\x1b]2;changed-title\x07") catch |err| {
         surface.unlockCore(std.testing.io);
         return err;
     };
@@ -5319,6 +5327,81 @@ test "P4 E2b runtime manager shares one canonical observation per cadence epoch"
     try std.testing.expectEqual(@as(u64, 2), mgr.fixtureObservationMaterializations());
     _ = try ops.cached_observation(ops.ctx, rid, .fresh);
     try std.testing.expectEqual(@as(u64, 3), mgr.fixtureObservationMaterializations());
+}
+
+test "출력만으로는 metadata change_token 이 오르지 않는다 — 제목이 바뀌면 오른다" {
+    // **왜**: `observer_generation` 은 출력 revision 이다. 그 값이 JSON 에 실리면 출력 batch 마다 내용 없는
+    // `runtime.metadata` 이벤트가 나가고 앱은 batch 마다 봉인 파이프라인을 통째로 돈다(활성 32 세션 앱 busy
+    // CPU 의 절반 — 2026-09-22 실측). 이 판정자는 «출력 → materialize 는 하되(preflight) token 은 그대로,
+    // 진짜 metadata 변경 → token 전진» 을 host 제품 경로에서 고정한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var host_registry = reg.TerminalRuntimeRegistry.init(allocator);
+    defer host_registry.deinit();
+    var mgr: RuntimeManager = undefined;
+    mgr.init(allocator, std.testing.io, &host_registry, null);
+    defer mgr.deinit();
+    const ops = mgr.runtimeOps();
+    const rid = try ops.spawn(ops.ctx, .{ .argv = &.{"/bin/cat"}, .cwd = null, .cols = 24, .rows = 6 });
+    defer ops.terminate(ops.ctx, rid);
+    mgr.fixtureEnableObservationPerformanceEvidence();
+
+    // E2c 와 같은 이유로 source 가 가라앉을 때까지 훑는다(갓 spawn 한 cat 은 pgid·cwd 가 아직 움직인다).
+    var epoch: u64 = 1;
+    _ = try ops.cached_observation(ops.ctx, rid, .{ .cadence_epoch = epoch });
+    while (epoch < 16) {
+        epoch += 1;
+        mgr.fixtureEnableObservationPerformanceEvidence();
+        _ = try ops.cached_observation(ops.ctx, rid, .{ .cadence_epoch = epoch });
+        if (mgr.fixtureObservationMaterializations() == 0) break;
+    } else return error.TestUnexpectedResult;
+    const settled = try ops.cached_observation(ops.ctx, rid, .{ .cadence_epoch = epoch });
+    const token_before = settled.change_token;
+    // 와이어 값은 상수다 — 출력 revision 이 새어 나가면 아래 두 단언보다 먼저 여기서 걸린다.
+    try std.testing.expect(std.mem.indexOf(u8, settled.canonical_json, "\"observer_generation\":0,") != null);
+
+    const handle = mgr.handleFor(rid) orelse return error.TestUnexpectedResult;
+    const surface = mgr.backend_impl.surfaceFor(handle) orelse return error.TestUnexpectedResult;
+
+    // ① 텍스트 출력만 — core 는 generation 을 올리고 producer 는 materialize 하지만(preflight 는 실제 값을
+    //    본다) canonical 바이트가 같아 token 은 그대로다. 두 번 반복해 «한 번 우연히 같음» 이 아님을 본다.
+    for ([_][]const u8{ "line one\r\n", "line two\r\n" }) |text| {
+        mgr.fixtureEnableObservationPerformanceEvidence();
+        surface.lockCore(std.testing.io);
+        surface.core.write(text) catch |err| {
+            surface.unlockCore(std.testing.io);
+            return err;
+        };
+        surface.unlockCore(std.testing.io);
+        epoch += 1;
+        const after_output = try ops.cached_observation(ops.ctx, rid, .{ .cadence_epoch = epoch });
+        try std.testing.expectEqual(@as(u64, 1), mgr.fixtureObservationMaterializations());
+        try std.testing.expectEqual(token_before, after_output.change_token);
+    }
+    // 같은 revision(token) 의 바이트는 같다 — 앱은 «같은 revision 에 다른 바이트» 를 protocol 위반으로 poison 한다.
+    // 그리고 출력이 없는 다음 cadence 는 materialize 도 하지 않는다 — preflight 기준을 와이어 상수로 저장하는
+    // 돌연변이는 여기서 걸린다(출력 뒤 core generation ≠ 0 이라 cadence 마다 «바뀜» 으로 읽는다; E2c 는
+    // 출력 없는 runtime 만 훑어 generation 0 == 상수 0 이라 그 돌연변이를 못 본다 — 적대적 검증 2026-09-22).
+    epoch += 1;
+    mgr.fixtureEnableObservationPerformanceEvidence();
+    const again = try ops.cached_observation(ops.ctx, rid, .{ .cadence_epoch = epoch });
+    try std.testing.expectEqual(@as(u64, 0), mgr.fixtureObservationMaterializations());
+    try std.testing.expectEqual(token_before, again.change_token);
+    try std.testing.expectEqualStrings(settled.canonical_json, again.canonical_json);
+
+    // ② 제목(OSC 2) — 진짜 metadata 변경은 token 을 올린다. 양성 대조: ①이 «token 이 영영 안 오름» 으로
+    //    공허하게 통과하는 것을 막는다.
+    surface.lockCore(std.testing.io);
+    surface.core.write("\x1b]2;metadata changed\x07") catch |err| {
+        surface.unlockCore(std.testing.io);
+        return err;
+    };
+    surface.unlockCore(std.testing.io);
+    epoch += 1;
+    const after_title = try ops.cached_observation(ops.ctx, rid, .{ .cadence_epoch = epoch });
+    try std.testing.expect(after_title.change_token != token_before);
+    try std.testing.expect(std.mem.indexOf(u8, after_title.canonical_json, "metadata changed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, after_title.canonical_json, "\"observer_generation\":0,") != null);
 }
 
 test "P4 E2c observation materialization follows runtime source changes at 1 10 100 scale" {

@@ -5639,6 +5639,27 @@ pub fn build(b: *std.Build) void {
     run_session_host_e2c_boundary_tests.setCwd(b.path("."));
     session_host_e2c_step.dependOn(&run_session_host_e2c_boundary_tests.step);
     boundary_step.dependOn(&run_session_host_e2c_boundary_tests.step);
+    // 출력 revision 은 metadata 가 아니다 — 출력만으로는 change_token 이 오르지 않고, 제목이 바뀌면 오른다.
+    // host 제품 경로(RuntimeManager + 실제 /bin/cat runtime)에서 고정한다.
+    const metadata_output_revision_step = b.step(
+        "test-metadata-output-revision",
+        "Output alone must not advance the metadata change token; a real metadata change must",
+    );
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |mode| {
+        const metadata_output_revision_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/runtime_manager.zig"),
+                .target = target,
+                .optimize = mode,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"출력만으로는 metadata change_token"},
+        });
+        const run_metadata_output_revision = b.addRunArtifact(metadata_output_revision_tests);
+        run_metadata_output_revision.addArg("--maru-expect-tests=1");
+        metadata_output_revision_step.dependOn(&run_metadata_output_revision.step);
+    }
+    session_host_e2c_step.dependOn(metadata_output_revision_step);
     const session_host_e3a_step = b.step(
         "test-session-host-e3a",
         "Verify P4 E3a screen-change token gating in Debug and ReleaseFast",

@@ -37822,6 +37822,125 @@ test "U3-5 저쪽 이름도 «같은 규칙»으로 거른다 — 절대 경로�
     fx.session.pending_untitled_save = .{};
 }
 
+test "U3-6 왕복이 도는 동안 두 번째 저장은 «첫 요청의 보류를 지우지 않는다»" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+
+    const t = try openUntitledInActivePane(fx.session);
+    try testing.expect(insertText(fx.session, t, "x"));
+
+    // 첫 요청이 **나간 상태**를 만든다: 보류에 목적지·경로가 있고 왕복이 in-flight 다.
+    var pin: app_session_mod.editor_untitled_save_ops.RemotePin = .{};
+    const dest = "user@host";
+    @memcpy(pin.dest_buf[0..dest.len], dest);
+    pin.dest_len = dest.len;
+    const base = "/srv/app";
+    @memcpy(pin.base_buf[0..base.len], base);
+    pin.base_len = base.len;
+    const first = "/srv/app/first.md";
+    fx.session.pending_untitled_save = .{ .surface_id = t.surface.id, .remote = pin, .path_len = first.len };
+    @memcpy(fx.session.pending_untitled_save.path_buf[0..first.len], first);
+    fx.session.remote_rename_inflight = true;
+    // ⚠️ **나가는 모든 길에서 내려야 한다.** 세션 teardown 은 이 플래그가 참인 동안 **결말을 기다리며
+    // 회전한다**(`deinit` 의 spin-wait) — 판정자에는 그 결말을 낼 워커가 없으므로, 단언이 하나 실패해
+    // 일찍 빠져나가면 **fixture 가 영원히 100 % CPU 로 돈다**(실측: 이 판정자를 변이로 깨뜨렸을 때
+    // 고아 프로세스가 1 시간 40 분을 돌았다). `defer` 가 그 자리다.
+    defer fx.session.remote_rename_inflight = false;
+
+    // ⚠️ **여기서 또 저장을 시작하면** 보류가 새 물음의 것으로 덮인다 — 그러면 첫 요청의 결말이
+    //    왔을 때 **엉뚱한 경로**(또는 빈 경로)를 그 문서의 신원으로 붙인다. 거절해야 한다.
+    //
+    //    **이 판정자가 재는 것은 관문의 «관측 가능한 결과» 셋**이다: 거절(`AskName`) · 보류가 그대로 ·
+    //    그리고 **말했다**. 덮어쓰는 갈래 자체(`pinRemote` 가 성공해 상자를 띄우는 자리)는 **살아 있는
+    //    control socket** 이 있어야 서므로 이 픽스처가 만들 수 없다 — 그 자리는 실물 절차가 본다.
+    try testing.expectError(error.AskName, saveDocument(fx.session, t));
+    try testing.expectEqualStrings(first, fx.session.pending_untitled_save.path());
+    try testing.expect(fx.session.pending_untitled_save.remote != null);
+    // 그리고 **말한다** — 조용히 아무 일도 안 하면 사용자는 `⌘S` 가 죽은 줄 안다.
+    try testing.expect(fx.session.chrome_host.notice.open);
+    // 물음도 안 떴다(그 상자가 보류를 덮는 자리다).
+    try testing.expect(fx.session.pending_confirm != .untitled_where);
+
+    // 첫 결말이 오면 **그 경로로** 붙는다(플래그는 위 `defer` 가 내린다).
+    app_session_mod.editor_untitled_save_ops.finishRemoteWrite(fx.session, .ok);
+    const r = t.rt.editor_remote orelse return error.NoRemoteIdentity;
+    try testing.expectEqualStrings(first, r.path);
+}
+
+test "U3-7 결말은 «종류»로 갈린다 — 트리 편집의 답이 문서 신원을 붙이지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+
+    const t = try openUntitledInActivePane(fx.session);
+    try testing.expect(insertText(fx.session, t, "x"));
+
+    // 저쪽 저장이 결말을 기다리는 상태를 만든다.
+    var pin: app_session_mod.editor_untitled_save_ops.RemotePin = .{};
+    const dest = "user@host";
+    @memcpy(pin.dest_buf[0..dest.len], dest);
+    pin.dest_len = dest.len;
+    const path = "/srv/app/notes.md";
+    fx.session.pending_untitled_save = .{ .surface_id = t.surface.id, .remote = pin, .path_len = path.len };
+    @memcpy(fx.session.pending_untitled_save.path_buf[0..path.len], path);
+
+    // ⚠️ **트리 편집의 결말이 그 슬롯으로 온다**(하나를 공유한다). 종류로 안 가르면 **쓰지도 않은
+    //    파일의 신원**이 문서에 붙는다 — 사용자는 저장한 적이 없는데 저장됐다고 보게 된다.
+    file_panel_ops.finishRemoteRename(fx.session, .{ .outcome = .ok, .kind = .rename });
+    try testing.expect(t.rt.editor_remote == null); // 신원이 안 붙었다
+    try testing.expect(t.rt.editor_untitled != null); // 이름도 그대로다
+    try testing.expectEqualStrings(path, fx.session.pending_untitled_save.path()); // 보류도 그대로다
+
+    file_panel_ops.finishRemoteRename(fx.session, .{ .outcome = .ok, .kind = .create_file });
+    try testing.expect(t.rt.editor_remote == null);
+    file_panel_ops.finishRemoteRename(fx.session, .{ .outcome = .ok, .kind = .delete });
+    try testing.expect(t.rt.editor_remote == null);
+
+    // **문서 저장의 결말만** 그 문서를 바꾼다.
+    file_panel_ops.finishRemoteRename(fx.session, .{ .outcome = .ok, .kind = .write_file });
+    const r = t.rt.editor_remote orelse return error.NoRemoteIdentity;
+    try testing.expectEqualStrings(path, r.path);
+    try testing.expect(!isDirty(t));
+}
+
+test "U3-8 저쪽 저장도 «같은 상한»에서 멈춘다 — 저쪽이 더 크게 받아도" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+
+    // 상한을 한 바이트 넘기는 문서 — U2z 와 같은 판이고 **목적지만 다르다**.
+    const cap = maru.session.file_panel_bridge.max_file_bytes;
+    const big = try allocator.alloc(u8, cap + 1);
+    defer allocator.free(big);
+    @memset(big, 'a');
+
+    const t = try openUntitledInActivePane(fx.session);
+    try testing.expect(insertText(fx.session, t, big));
+
+    var pin: app_session_mod.editor_untitled_save_ops.RemotePin = .{};
+    const dest = "user@host";
+    @memcpy(pin.dest_buf[0..dest.len], dest);
+    pin.dest_len = dest.len;
+    const base = "/srv/app";
+    @memcpy(pin.base_buf[0..base.len], base);
+    pin.base_len = base.len;
+    fx.session.pending_untitled_save = .{ .surface_id = t.surface.id, .remote = pin };
+
+    // ⚠️ **저쪽 전송 상한(16 MiB)이 더 크다고 여기서 느슨해지면** 「저쪽엔 저장되는데 이쪽엔 안 되는
+    //    문서」가 생긴다 — 이쪽으로 옮기는 순간 모든 `⌘S` 가 조용히 실패한다(U2z 가 막은 그 부류).
+    //    그리고 상한을 넘으면 **왕복을 아예 시작하지 않는다**(남의 서버로 8 MiB 를 보내고 거절당하지 않는다).
+    app_session_mod.editor_untitled_save_ops.commit(fx.session, t.surface.id, "big.md");
+    try testing.expect(!fx.session.remote_rename_inflight); // 요청이 안 나갔다
+    try testing.expect(t.rt.editor_remote == null); // 신원도 안 붙었다
+    try testing.expect(t.rt.editor_untitled != null);
+    try testing.expect(fx.session.chrome_host.notice.open); // 그리고 **말했다**
+    try testing.expect(std.mem.startsWith(u8, &fx.session.notice_message_buf, maru.i18n.t(.app_save_too_large)));
+}
+
 test "U3-4 저쪽 파일의 탭은 «그 파일 이름»이다 — 「편집기」로 떨어지지 않는다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;

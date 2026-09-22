@@ -1369,7 +1369,7 @@ fn emitInlays(inlays: []const Inlay, next: *usize, at: usize, col: *usize, range
         if (in.at != at) continue; // 지나간 자리(seek 뒤·중복 방어) — 폭도 안 센다
         const shown = in.text;
         if (col.* >= range.stop()) {
-            // col.* += shown.len; // 등가(적대적 A10 — 호출자는 여기서 곧 멈춘다); 열 규칙의 뜻으로 둔다
+            col.* += shown.len; // 등가(적대적 A10 — 호출자는 여기서 곧 멈춘다); 열 규칙의 뜻으로 둔다
             continue;
         }
         const from = if (col.* < range.start) @min(shown.len, range.start - col.*) else 0;

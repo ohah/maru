@@ -551,6 +551,14 @@ pane 행 `"   %0  ✓ 대기중"` 이 13칸 — 들여쓰기 3→1, 이름 뒤 2
 자취 안 지움) 1차 생존** → N3 은 Term 수 대신 `pending_confirm` 을 보게, N5 는 밀린 채로 drop 하게 판정자를 고쳐 잡음; N7(`rememberPaneSession`
 의 빈 이름 가드 제거)은 **동치 뮤턴트**(`findMut("")` 가 어차피 null) — 가드는 문서용으로 남긴다. 실기 2 pane e2e: `%0 ✓ 대기중 / 완료했습니다.`
 두 행 온전(`/tmp/pane-notice-e2e-tmux2.png`), 헤드리스 3 pane + 2 밀림: `%2·%3·%4` 행 + «+2 pane 밀림»(`/tmp/pane-notice-3,2.png`).
+**적대적 3회 반복(2026-09-22, 머지 전)**: 1회차 뮤턴트 R1 자취를 희생자 대신 신참 surface 에 · R2 자취 링 안 돎 · R3 `forgetEvicted` 가
+이름 무시 · R4 고지 텍스트가 `more` 안 읽음(판정자가 **그려지는 글자** `+`·`2` 까지 보게 보강) 잡힘, **R5 `PaneRows` 용량이 상한(고지 자리
+없음) 생존** → «pane 17 개 = 살아 있는 16 + 고지 1» 경계 판정자를 더해 잡음(Debug 에서 index out of bounds). 2회차 픽스처 경계
+`1,1`·`0,3`·`abc`·`100` 무사, **`16,1`·`16,5` 가 정수 오버플로로 abort**(`max_panes - (n + evicted)` — 크래시 리포트
+`debug.FullPanic.integerOverflow ← maybeDebugOpenSettings`) → `evicted` 를 `max_panes - n` 으로 자름; `8,8` 그림 = `%8..%15` 8 행 +
+«+8 pane 밀림». 3회차 판정자 «원격 Term 둘의 pane 행과 밀림 고지는 서로 섞이지 않는다»(카드 하나에 원격 Term 둘, pane 3+2, 한쪽만 밀림;
+바뀐 게 없는 tick 에 `metal_dirty` 가 안 선다) + 뮤턴트 R6 낡음 판정의 pane 행 셈이 다음 에이전트 행에서 안 멈춤 · R7 `evictedFor` 가
+surface 를 안 가름 잡힘. 캡처 게이트 60.
 
 **착수 전 적대적 공격 (2026-09-21)**
 

@@ -28076,6 +28076,26 @@ test "훅 원격 프레임: 슬롯 상한에 밀린 pane 은 «+N pane 밀림» 
     try std.testing.expectEqual(@as(usize, 2), session.remote_agent_panes.evictedFor(term.surfaceId()));
     sidebar_ops.reprojectSidebarIfRowLinesStale(&session);
     try std.testing.expectEqual(@as(u16, 2), (noticeRow(session.sidebar_rows.items) orelse return error.NoNoticeRow).agent_pane.more);
+    // **그려지는 글자까지** 본다(적대적 2회차) — 고지 행의 이름줄에 `+` 와 그 수(`2`)가 실린다. 행 모델의 `more` 가 맞아도 그리기가
+    // 다른 값을 찍으면(뮤턴트 R4: 고지 텍스트가 `more` 를 안 읽음) 사용자는 틀린 수를 본다.
+    {
+        var dl = try sidebar_ops.buildSidebarTitleDrawList(&session);
+        defer dl.deinit(a);
+        var nidx: usize = 0;
+        for (session.sidebar_rows.items, 0..) |r, k| if (r == .agent_pane and r.agent_pane.name_len == 0) {
+            nidx = k;
+        };
+        var saw_plus = false;
+        var saw_two = false;
+        for (dl.cells) |c| {
+            if (c.row / coretext_frame_builder.sidebar_line_base != nidx) continue;
+            if ((c.row % coretext_frame_builder.sidebar_line_base) % 4 != 0) continue; // 이름줄만
+            if (c.codepoint == '+') saw_plus = true;
+            if (c.codepoint == '2') saw_two = true;
+        }
+        try std.testing.expect(saw_plus);
+        try std.testing.expect(saw_two);
+    }
 
     // 둘 다 돌아온다(그 자리엔 다른 surface 의 가장 오래된 것들이 밀린다). 자취가 지워져 고지가 사라지고 pane 행 둘.
     agent_ops.consumeRemoteAgentLines(&session, term, &.{
@@ -28105,6 +28125,121 @@ test "훅 원격 프레임: 슬롯 상한에 밀린 pane 은 «+N pane 밀림» 
     try std.testing.expectEqual(@as(usize, 0), session.remote_agent_panes.evictedFor(term.surfaceId()));
     sidebar_ops.reprojectSidebarIfRowLinesStale(&session);
     try std.testing.expect(noticeRow(session.sidebar_rows.items) == null);
+
+    // **꽉 찬 경계**(적대적 2회차, 뮤턴트 R5): 한 Term 이 pane 17 개 — 살아 있는 행 16 + 고지 1 = 17 행. 행 배열이 상한(16)만
+    // 잡혀 있으면 여기서 넘친다(Debug 에서 패닉, 릴리스에서 이웃 메모리).
+    i = 0;
+    while (i < max_panes + 1) : (i += 1) {
+        const name = try std.fmt.bufPrint(&buf, "%p{d}", .{i});
+        _ = session.remote_agent_panes.slotFor(term.surfaceId(), name, 2000 + i).?;
+    }
+    try std.testing.expectEqual(max_panes, session.remote_agent_panes.countFor(term.surfaceId()));
+    try std.testing.expectEqual(@as(usize, 1), session.remote_agent_panes.evictedFor(term.surfaceId()));
+    sidebar_ops.reprojectSidebarIfRowLinesStale(&session);
+    pane_rows = 0;
+    for (session.sidebar_rows.items) |r| if (r == .agent_pane and r.agent_pane.name_len > 0) {
+        pane_rows += 1;
+    };
+    try std.testing.expectEqual(max_panes, pane_rows);
+    try std.testing.expectEqual(@as(u16, 1), (noticeRow(session.sidebar_rows.items) orelse return error.NoNoticeRow).agent_pane.more);
+}
+
+// [RA7 조각 5 — 적대적 3회차] **원격 Term 둘이 한 카드에 있어도 pane 행·고지는 각자 것이다.** 낡음 판정의 «에이전트 행 뒤에 붙은
+// pane 행 수» 셈은 다음 `.agent` 행에서 멈춰야 한다 — 안 그러면 두 번째 Term 의 pane 행이 첫 Term 의 것으로 세어져 매 tick 재투영하거나,
+// 반대로 어긋난 행 수를 «맞다» 고 읽는다. 고지도 surface 별 자취라 한쪽에만 선다.
+test "훅 원격 프레임: 원격 Term 둘의 pane 행과 밀림 고지는 서로 섞이지 않는다 (RA7 조각 5)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+    test_config_text = agent_hooks_on_config;
+    defer test_config_text = "";
+
+    var session: AppSession = .{ .allocator = a, .io = std.testing.io };
+    try session.init(io, a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_focused = false;
+    _ = try session.resize(1400, 900, 1000);
+
+    const t1 = pane_ops.activePane(&session).activeTerm();
+    try pane_ops.newTermInActivePane(&session);
+    const t2 = pane_ops.activePane(&session).activeTerm();
+    try std.testing.expect(t1 != t2);
+    const wire = struct {
+        fn f(t: *Term, nonce: []const u8) void {
+            var ch = maru.session.remote_agent_stream.Channel.init(0);
+            _ = ch.feed("{\"hello\":\"maru-agent-events\",\"v\":1}", 0);
+            t.agent_remote_channel = ch;
+            @memcpy(t.agent_remote_nonce[0..nonce.len], nonce);
+            t.agent_remote_nonce_len = @intCast(nonce.len);
+            t.rt.observation.ssh_remote_dest_present = true;
+        }
+    }.f;
+    wire(t1, "11_1");
+    wire(t2, "22_2");
+    // t1: pane 셋, t2: pane 둘.
+    agent_ops.consumeRemoteAgentLines(&session, t1, &.{
+        "{\"nonce\":\"11_1\",\"pane\":\"%0\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"UserPromptSubmit\\\",\\\"session_id\\\":\\\"A0\\\",\\\"prompt\\\":\\\"x\\\"}\"}",
+        "{\"nonce\":\"11_1\",\"pane\":\"%1\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"UserPromptSubmit\\\",\\\"session_id\\\":\\\"A1\\\",\\\"prompt\\\":\\\"x\\\"}\"}",
+        "{\"nonce\":\"11_1\",\"pane\":\"%2\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"UserPromptSubmit\\\",\\\"session_id\\\":\\\"A2\\\",\\\"prompt\\\":\\\"x\\\"}\"}",
+    }, 100);
+    agent_ops.consumeRemoteAgentLines(&session, t2, &.{
+        "{\"nonce\":\"22_2\",\"pane\":\"%5\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"UserPromptSubmit\\\",\\\"session_id\\\":\\\"B5\\\",\\\"prompt\\\":\\\"y\\\"}\"}",
+        "{\"nonce\":\"22_2\",\"pane\":\"%6\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"UserPromptSubmit\\\",\\\"session_id\\\":\\\"B6\\\",\\\"prompt\\\":\\\"y\\\"}\"}",
+    }, 110);
+    sidebar_ops.reprojectSidebarIfRowLinesStale(&session);
+
+    // 에이전트 행마다 뒤에 붙은 pane 행을 센다 — t1 은 3, t2 는 2, 그리고 이름이 그 Term 의 것이다.
+    const Row = chrome.components.sidebar.Row;
+    const countAfter = struct {
+        fn f(rows: []const Row, term_index: usize, out_names: *[8][]const u8) usize {
+            var n: usize = 0;
+            var k: usize = 0;
+            while (k < rows.len) : (k += 1) {
+                if (rows[k] != .agent or rows[k].agent.term != term_index) continue;
+                var j = k + 1;
+                while (j < rows.len and rows[j] == .agent_pane) : (j += 1) {
+                    if (n < out_names.len) out_names[n] = rows[j].agent_pane.name[0..rows[j].agent_pane.name_len];
+                    n += 1;
+                }
+                return n;
+            }
+            return n;
+        }
+    }.f;
+    var names1: [8][]const u8 = undefined;
+    var names2: [8][]const u8 = undefined;
+    const pane = pane_ops.activePane(&session);
+    const ti1 = std.mem.indexOfScalar(*Term, pane.terms.items, t1).?;
+    const ti2 = std.mem.indexOfScalar(*Term, pane.terms.items, t2).?;
+    try std.testing.expectEqual(@as(usize, 3), countAfter(session.sidebar_rows.items, ti1, &names1));
+    try std.testing.expectEqual(@as(usize, 2), countAfter(session.sidebar_rows.items, ti2, &names2));
+    try std.testing.expectEqualStrings("%0", names1[0]);
+    try std.testing.expectEqualStrings("%5", names2[0]);
+    // 안정: 아무것도 안 바뀐 tick 에 낡음 판정이 재투영하지 않는다(행 수 셈이 다음 에이전트 행에서 멈춘다는 증거).
+    session.metal_dirty = false;
+    sidebar_ops.reprojectSidebarIfRowLinesStale(&session);
+    try std.testing.expect(!session.metal_dirty); // 재투영했다면 dirty 를 세운다
+
+    // t1 의 `%0` 만 밀리게 — 다른 surface 가 남은 칸(16 - 5 = 11)을 채우고 하나 더. 고지는 t1 에만.
+    var buf: [16]u8 = undefined;
+    var i: usize = 0;
+    while (i < 12) : (i += 1) {
+        const name = try std.fmt.bufPrint(&buf, "%f{d}", .{i});
+        _ = session.remote_agent_panes.slotFor(777_777, name, 500 + i).?;
+    }
+    try std.testing.expectEqual(@as(usize, 1), session.remote_agent_panes.evictedFor(t1.surfaceId()));
+    try std.testing.expectEqual(@as(usize, 0), session.remote_agent_panes.evictedFor(t2.surfaceId()));
+    sidebar_ops.reprojectSidebarIfRowLinesStale(&session);
+    try std.testing.expectEqual(@as(usize, 3), countAfter(session.sidebar_rows.items, ti1, &names1)); // pane 2 + 고지 1
+    try std.testing.expectEqual(@as(usize, 0), names1[2].len); // 마지막이 고지(이름 없음)
+    try std.testing.expectEqual(@as(usize, 2), countAfter(session.sidebar_rows.items, ti2, &names2)); // t2 는 그대로, 고지 없음
+    try std.testing.expect(names2[1].len > 0);
 }
 
 // [AT3c] **원격 프레임이 봉인·스냅샷까지 닿는다.** 예전 `consumeRemoteAgentLines` 는 `applied` 를 버려 원격 Term 에

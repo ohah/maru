@@ -1057,13 +1057,23 @@ pub fn reapplyForcedScmHover(self: *AppSession) void {
 /// MARU_FORCE_SYS_APPEARANCE_LATER=<light|dark>@<ms> — 앱이 뜬 뒤 <ms> 지나서 시스템 외관을 한 번 바꾼다(2031 색 구성 통지의 실기
 /// 검증 — 첫 frame 의 `MARU_FORCE_SYS_APPEARANCE` 는 pane 안의 앱이 `?2031h` 를 보내기 **전**이라 통지를 볼 수 없다). config
 /// `theme.follow-system=true` 가 필요하다. 매 tick 불리고 한 번만 발사한다.
+/// ⚠️ **`awakeMs()` 는 부팅 기준 단조 시계다** — 그 값을 지연과 직접 비교하면 첫 tick 에 이미 참이라 «나중에» 가 «즉시» 가 된다.
+/// 실측(2026-09-22): 그 실수로 외관 전환이 pane 의 앱이 `?2031h` 를 보내기 전에 일어나, 통지가 안 오는 것이 **제품 결함처럼 보였다**.
+/// 첫 호출 시각을 기준으로 잡는다.
+var appearance_later_base_ms: ?u64 = null;
+
 pub fn reapplyForcedAppearanceLater(self: *AppSession) void {
     if (self.debug_sys_appearance_later_fired) return;
     const raw = std.c.getenv("MARU_FORCE_SYS_APPEARANCE_LATER") orelse return;
     const spec = std.mem.span(raw);
     const at = std.mem.indexOfScalar(u8, spec, '@') orelse return;
     const delay_ms = std.fmt.parseInt(u64, spec[at + 1 ..], 10) catch return;
-    if (self.awakeMs() < delay_ms) return;
+    const now = self.awakeMs();
+    const base = appearance_later_base_ms orelse blk: {
+        appearance_later_base_ms = now;
+        break :blk now;
+    };
+    if (now -| base < delay_ms) return;
     self.debug_sys_appearance_later_fired = true;
     self.setSystemAppearance(std.mem.eql(u8, spec[0..at], "dark"));
 }

@@ -804,7 +804,7 @@ fn asLink(arena: std.mem.Allocator, loc: std.json.Value) !std.json.Value {
 /// 앞으로** 낸다(클라이언트가 정렬하는지). 문서에 `INLSTALL` 이면 답하지 않고, `INLERR` 면 `-32801`, `INLNULL` 이면 `null`.
 /// `textDocument/documentSymbol`(§8.2o) — 문서의 `fn <name>(` 과 `struct <name> {` 을 심볼로 낸다. **계층**으로 내되 tsgo 꼴로 **순서를 섞고**
 /// (뒤에서 앞으로) 자식 하나를 형제로 흘린다 — 클라이언트가 정렬·포함 재계산을 하는지 본다. 표식: `DSYNONE` 빈 목록 · `DSYFLAT` 평탄 꼴 ·
-/// `DSYSTALL` 무응답 · `DSYBAD` 이름이 문서와 다른 항목 하나를 섞는다.
+/// `DSYSTALL` 무응답 · `DSYERR` `-32801` · `DSYBAD` 이름이 문서와 다른 항목 하나를 섞는다.
 fn handleDocumentSymbol(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: std.json.Value) void {
     var req_uri: []const u8 = "";
     if (obj.get("params")) |p| if (p == .object) {
@@ -814,6 +814,10 @@ fn handleDocumentSymbol(allocator: std.mem.Allocator, obj: std.json.ObjectMap, i
     };
     const text = docText(req_uri);
     if (std.mem.indexOf(u8, text, "DSYSTALL") != null) return;
+    if (std.mem.indexOf(u8, text, "DSYERR") != null) {
+        sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .@"error" = .{ .code = @as(i32, -32801), .message = "content modified" } });
+        return;
+    }
     if (std.mem.indexOf(u8, text, "DSYNONE") != null) {
         sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .result = [0]u32{} });
         return;

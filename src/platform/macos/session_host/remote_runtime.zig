@@ -16006,8 +16006,13 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
             // 그 커밋이 이 pin 을 안 올려 main 의 `mise run check` 가 빨갰다(§8.2h 조각의 게이트에서 실측: Debug 11712 · ReleaseFast 11664).
             // 2026-09-20 kitty 매체 전송(`KittyGraphicsCommand` 에 `data_size`·`data_offset`·`internal_id` — `TerminalCore.kitty_chunk_cmd` 안):
             // Debug +16 · ReleaseFast +0(기존 패딩에 들어감) — `test-session-host-2c3d-c3-3b2b3` 에서 실측.
+            // 2026-09-22 U4a 미저장 백업(`ee4eed394`): ReleaseFast **+16** · Debug +0. 그 슬라이스가 더한 것은
+            // `TermRuntime` 필드 넷과 i18n 키 하나이고, **어느 쪽이 이 16 바이트인지는 확정하지 않았다**(값은 실측이다).
+            // `zig build test` 의 이 판정자가 `expected 11664, found 11680` 으로 잡았다. ⚠️ **그 PR 은 초록이었다** —
+            // 이 pin 을 도는 것은 `zig build test` 뿐이고, PR 의 session-host 잡은 바뀐 파일이 `editor` 축이라
+            // 영역 게이팅으로 스킵됐다. 로컬 `mise run check` 도 그 artifact 를 ReleaseFast 로 돌지 않아 초록이었다.
             .Debug => 11728,
-            .ReleaseFast => 11664,
+            .ReleaseFast => 11680,
             else => unreachable,
         },
         // ⚠️ 이 두 값은 **이 트리에서 측정할 수 없다.** `remote_runtime` 은 배럴이 macOS 에서만 열어서
@@ -16023,7 +16028,7 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
     const expected_runtime_remainder: usize = switch (builtin.os.tag) {
         .macos => switch (builtin.mode) {
             .Debug => 8992, // 2026-09-20 kitty 매체 전송 +16(위 표와 같은 델타 — 실측)
-            .ReleaseFast => 8928,
+            .ReleaseFast => 8944, // 2026-09-22 U4a +16(위 표와 같은 델타 — 실측)
             else => unreachable,
         },
         // 위와 같은 이유로 측정 불가 — 원래 값 그대로다.

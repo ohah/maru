@@ -378,7 +378,7 @@ TextMate, git staging, formatter는 LSP의 선행 조건이 아니다. 초기 sy
 | 축 | 결정 | 근거 |
 | --- | --- | --- |
 | **범위(1단)** | transport(Content-Length·JSON-RPC 2.0) · 수명(`initialize`/`initialized`/`shutdown`/`exit`, 죽으면 backoff 재시작 1·2·4s 세 번) · `didOpen`/`didChange`(**Full sync**, 프레임당 한 번 최신 본문)/`didClose` · `publishDiagnostics` → §5.4 의 목록에 `.lsp` 출처로 합침 · 신뢰 프롬프트·기억 · 상태바 항목 · 설치 안내 | 진단이 오늘 표시 자리를 갖는 유일한 결과다. completion·hover·definition·semantic tokens·inlay 는 2단(표시 자리 §8.2·§8.3 이 먼저) |
-| **하지 않는 것(1단)** | 서버→클라이언트 요청(`workspace/applyEdit`·`executeCommand`·`showDocument`·파일 생성/이름/삭제·`workspace/configuration`)은 **전부 거부**(`MethodNotFound` 응답) · 증분 동기화 · 여러 root · ~~`didSave`~~(**2026-09-21 §8.2k 에서 섰다** — 「진단은 didChange 로 온다」가 rust-analyzer 실측에 뒤집혔다: rustc 진단은 저장에만 다시 돈다) | §8.2 「기본 거부하고 method 별 승인」— 승인 UI 가 없으니 1단은 거부만 |
+| **하지 않는 것(1단)** | 서버→클라이언트 요청(`workspace/applyEdit`·`executeCommand`·`showDocument`·파일 생성/이름/삭제·`workspace/configuration`)은 **전부 거부**(`MethodNotFound` 응답 — 예외 하나: `workspace/inlayHint/refresh` 는 2026-09-22 §8.2n 에서 `null` 로 받는다) · 증분 동기화 · 여러 root · ~~`didSave`~~(**2026-09-21 §8.2k 에서 섰다** — 「진단은 didChange 로 온다」가 rust-analyzer 실측에 뒤집혔다: rustc 진단은 저장에만 다시 돈다) | §8.2 「기본 거부하고 method 별 승인」— 승인 UI 가 없으니 1단은 거부만 |
 | **서버 찾기** | 언어(§3.7a `Grammar`) → 실행 파일 이름 **내장 표**: zig→`zls` · c/cpp→`clangd` · typescript/javascript/tsx→**후보 셋을 차례로**(2026-09-20 사용자 결정 「tsgo 도 되어야」): `tsgo --lsp --stdio`(TypeScript 7 네이티브 — `@typescript/native-preview`) → `typescript-language-server --stdio`(TS 5 계열) → `tsc --lsp --stdio`(`npm i -g typescript`@7 의 `tsc` 가 같은 네이티브 LSP; TS 5 의 `tsc` 는 `--lsp` 를 몰라 곧 죽고 backoff 뒤 「실패」로 선다). PATH 에 있는 **첫 후보**를 고르고 세션 동안 기억한다(`(root, exe)` 키); 하나도 없으면 첫 후보의 이름·설치 명령으로 「없음」. 「없음」인 채 다른 후보가 설치되면 다음 gate 가 그것으로 바꾼다 · rust→`rust-analyzer` · python→`pyright-langserver --stdio` · go→`gopls` · 나머지 없음. **PATH 만** 본다(`/usr/bin/env` 로 execve — PATH 탐색은 env(1)). 설치 명령도 같은 표(brew·npm) | §8.1a 「내장 기본값 + config override」— override 는 2단(설정 키가 언어 수 × 2 라 표시 슬라이스가 커진다; 1단은 내장 표만, `lsp.enabled` 토글 하나) |
 | **신뢰** | 파일을 열어 서버가 필요하고 PATH 에 있으면 **confirm 모달**: 「이 저장소에서 ‹서버›를 실행할까요? 서버는 저장소의 설정·빌드를 읽고 실행할 수 있습니다」 — 허용/거부. 답은 `~/.config/maru/lsp-trust`(줄마다 `allow\t‹root›` / `deny\t‹root›`)에 **root 별로** 기억. 거부하면 그 root 에서는 안 묻고 안 띄운다 — 상태바 항목을 누르면 다시 묻는다 | §8.1 「trusted workspace 확인」. zls 는 build_on_save 로 `zig build`(빌드 스크립트 실행), TS 서버는 node_modules 플러그인 — 저장소를 열기만 해도 코드가 도는 것을 사용자가 알고 허락해야 한다. 거부를 기억하는 이유는 「열 때마다 묻는 모달」이 곧 사용자를 허용으로 몰기 때문 |
 | **root** | 그 Term 의 문서가 속한 **워크스페이스 root**(파일 트리의 root — `withinNavRoot` 가 쓰는 그것). 서버는 `(root, 언어)` 마다 하나. root 밖 문서는 서버를 안 띄운다 | §8.2 「root 밖 URI」 규칙의 전제 — 경계가 root 다 |
@@ -428,6 +428,13 @@ declaration `15e8` · inlayHint `16e8`(`rpc.zig` 의 base 상수, `nextSeq` 가 
 읽어** 넘치는 요청을 **알림으로 오인해 버린다** — `6_000_000_001` 짜리 completion 이 stderr 에 `unhandled notification` 으로만 남고 응답이 없었다(hover·definition 만
 i32 안이라 그 둘만 됐다). 실 rust-analyzer 에 프레임을 그대로 재생해 잡았다(§8.2g-b 실측). 관측점 `LSJ13`(가장 큰 칸 끝 ≤ i32 최대 · seq 가 칸 안에서 돌고 0 을
 건너뜀 · 칸 경계 · 칸 밖은 무시). 아래 절들의 id 표기는 이 표를 따른다.
+
+**`initialized` 의 `params` 는 빈 객체 `{}` 다(2026-09-22 실측 뒤의 정정).** 1단부터 `.{}`(빈 튜플)로 적어 **`[]` 로 나가고 있었다.** rust-analyzer·clangd·
+typescript-language-server 는 받아 줘서 안 보였는데, **tsgo 는 `InvalidParams: cannot unmarshal JSON array into InitializedParams` 로 거부한 뒤 그 뒤 모든
+통지·요청을 `ServerNotInitialized` 로 버린다** — 제품에서 tsgo 는 진단·접힘·힌트 무엇도 낸 적이 없었고, 이 문서의 tsgo 「실측」은 전부 프로브 스크립트
+(`initialized{}` 를 바르게 낸다)로 잰 것이라 갈림을 못 봤다(「못 쟀다」 줄이 결함을 숨기는 자리 — 서버별 프레임 재생만이 제품을 잰다). 인레이 캡처(§8.2n)에서
+`MARU_LSP_SERVER_OVERRIDE` 에 `tee` 래퍼를 끼워 **와이어를 그대로 떠서** 잡았다. 가짜 서버가 이제 tsgo 꼴로 엄격하다(`params` 가 객체가 아니면
+`ServerNotInitialized`) — 되돌리면 LSP 판정자 15개가 빨개진다(변이 D11).
 
 ### 8.2b LSP 2단 ① — 호버 박스와 진단 메시지 (2026-09-17, 계획 공격 뒤의 결정)
 
@@ -1112,12 +1119,27 @@ root 밖 행이 실제로 선다(§8.2l 「루트 밖」 제목·고르면 알�
 
 | 축 | 결정 | 근거 |
 | --- | --- | --- |
-| **capability** | `textDocument.inlayHint{dynamicRegistration: false}`. 서버의 `inlayHintProvider`(bool·객체)를 읽는다 — 없으면 힌트 없음 | LSP 3.17 |
+| **capability** | `textDocument.inlayHint{dynamicRegistration: false}` · `workspace.inlayHint{refreshSupport: true}`. 서버의 `inlayHintProvider`(bool·객체)를 읽는다 — 없으면 힌트 없음 | LSP 3.17 · 실측 ① |
+| **refresh** | 서버 → 클라이언트 `workspace/inlayHint/refresh` 는 **받는다**(§8.2a 「전부 거부」의 예외): `result: null` 로 답하고 그 클라이언트의 모든 편집기 힌트를 `dirty` 로 — 지금 힌트는 그대로 두고(깜빡임 없이) 다음 프레임에 다시 묻는다. 대기 중이면 그 응답이 든 뒤 한 번 더 묻는다 | 실측 ① |
 | **서버 설정** | 언어 서버 표에 「설정 블롭」 칸: TS 계열은 `initialized` 뒤 `workspace/didChangeConfiguration{settings: {typescript: {inlayHints: {parameterNames: {enabled: "all"}, variableTypes, functionLikeReturnTypes}}}}` 를 한 번 보낸다(안 주면 tsgo 가 `null`). 다른 서버는 없음 | 실측 |
 | **요청** | `textDocument/inlayHint{range}`, id `16e8+seq`. 범위·시점은 semantic 2층(§8.2i)과 같다: 보이는 원본 줄 ± 20, 프레임마다 판정, 마지막 편집 뒤 120 ms, 한 번에 하나, version 을 단다. 끝은 `min(hi+1, 줄 수)`(반열림, 줄 수를 안 넘긴다) | `-32603` 실측 |
 | **응답** | version 다르면 버리고 다시; `-32801`·오류·`null` 은 버리고 조용 뒤 다시(배수 없음 — semantic 과 같다). 항목: `position`(줄, 서버 인코딩 글자) → 줄 안 byte(`position.offsetOf`), `label`(문자열 또는 조각 배열 — `value` 를 잇는다), `paddingLeft/Right` → 공백 하나, `kind` 는 안 쓴다. 정제·상한은 §4.1h. 상한 **2,000 힌트** | ② |
 | **편집 중** | 힌트용 shift(경계 = 뒤 — §4.1h). 범위를 모르는 편집(`undoGroupSpan` 이 `null` — 보통의 undo/redo 는 범위를 알아 민다)은 전부 버린다 | §4.1h |
-| **하지 않는 것** | resolve(`tooltip`·`location`) · 힌트 호버/클릭(정의로 이동) · `textEdits`(더블클릭 삽입) · `workspace/inlayHint/refresh` 서버 요청(거부 응답 — 다음) · 종류별 켜고 끄기 설정 · 미니맵(§6 그대로) | 다음 |
+| **하지 않는 것** | resolve(`tooltip`·`location`) · 힌트 호버/클릭(정의로 이동) · `textEdits`(더블클릭 삽입) · 종류별 켜고 끄기 설정 · 미니맵(§6 그대로) | 다음 |
+
+**구현이 계약에 되먹인 것(2026-09-22).** ① **refresh 없이는 rust-analyzer 힌트가 영영 안 온다** — 첫 캡처가 빈 화면이었다: 서버가 뜬 직후의 첫
+요청에 rust-analyzer 는 오류가 아니라 **빈 배열 `[]`** 을 내고(색인 전), 색인이 끝나면 `workspace/inlayHint/refresh` 를 보낸다. 초판은 refresh 를
+「다음」으로 미루고 거부했으므로 `[]` 가 정답으로 들어 다시 묻지 않았다. 계약을 바꿨다(위 「refresh」 행) — 프로브가 8 s 를 기다렸다 물어 못 본 갈림이다.
+② **tsgo 는 제품에서 죽어 있었다**(§8.2a 「`initialized` 의 `params`」) — 설정 블롭이 아니라 그 앞 통지가 문제였다. 고친 뒤 캡처: `r: 1`·`s: 2`·`...data:`
+파라미터 힌트와 tsgo 의 접힘 마커가 처음으로 제품에 섰다. ③ **보통의 undo/redo 는 범위를 안다**(`undoGroupSpan`) — 「범위 모름 = 전부 버림」은
+`null` 일 때뿐이고 판정자 초판이 그 반대를 적었다가 빨개졌다(위 「편집 중」 행 정정). ④ **`diff_frame.Side.line_inlays` 가 `frame.Props` 로 안 넘어가고
+있었다** — 순수 판정자(INL1~5)는 `content` 를 직접 불러 초록이었고, 제품 경계 `INL9` 의 첫 실행이 잡았다(판정자는 제품 경계를 넘어야 한다). ⑤ 와이어를
+보는 법: `MARU_LSP_SERVER_OVERRIDE=<tee 래퍼>` 로 서버 stdin/stdout 을 파일에 떠 두면 프로브와 제품의 차이가 바로 보인다(stderr 는 로그에 없다).
+
+**관측점**: `INL1~INL5`(순수 `content`: 전개·열·hit·행 수·런 색) · `INL6~INL8`(순수 `inlay`: decode·provider·shift) · `INL9`(제품 경계: 요청 창·정렬·프레임
+글자·dim 색·hit·caret·편집 밀기·120 ms·낡은 version·undo 는 밀기·`null` 은 비움·L3 폭) · `INL10`(provider 없음·오류 되묻기·null·랩 행 증가) ·
+`INL11`(refresh 를 `null` 로 답하고 되묻기) · `LSPB9` ⑷(TS 설정 블롭 1회) · `LSJ*`(id 칸 16e8). 가짜 서버 표식 `INLSTALL`·`INLERR`·`INLNULL`·`INLREFRESH`,
+`MARU_FAKE_LSP_NOINLAYCAP=1`, 범위 끝이 줄 수를 넘으면 `-32603`(rust-analyzer 꼴).
 
 ### 8.3 관측 가능성과 민감정보
 

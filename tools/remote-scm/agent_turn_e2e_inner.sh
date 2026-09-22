@@ -11,6 +11,7 @@
 #
 # 사용: sh tools/remote-scm/agent_turn_e2e.sh /tmp/agent-turn-e2e.png
 #       MARU_E2E_TMUX_PANES=1|2 sh tools/remote-scm/agent_turn_e2e.sh <out.png>   # 원격 tmux 안(사용자 플로우) · 한 세션에 pane 둘(RA7)
+#       MARU_E2E_RESTART=1 sh tools/remote-scm/agent_turn_e2e.sh <out.png>         # 한 턴 뒤 앱을 껐다 켜고 같은 세션이 한 턴 더(AT7 영속) → <out>-restart.png
 # 결과: 스크린샷(에이전트 탭 «N개 파일 · ✎ AI 편집 N»), 원격 훅 로그(`~/.cache/maru/remote-agent-events/<pid>_<pane>.ndjson`),
 #       원격 임시 index(`/tmp/maru-turn-<hash>.idx`), 하네스 저장소의 `git status`(index 불변), `settings.json` mtime(재설치 무변경).
 # 2026-09-21 실기 결과는 계획 AT3d «수동 검증» 절에 있다.
@@ -41,7 +42,9 @@ WAIT_HOOKS="i=0; until grep -q '\"PreToolUse\"' \$HOME/.claude/settings.json; do
 CLAUDE_BIN="export PATH=\$HOME/.local/bin:\$PATH; claude_bin=\$(command -v claude || echo \$HOME/.local/bin/claude)"
 PROMPT1='Use the Edit tool to change the text \"line 1\" to \"line 1 edited by maru e2e\" in capture1.txt, then use the Write tool to overwrite capture2.txt with exactly one line: written by maru e2e. Do not run any shell commands and do not explain.'
 PROMPT2='Use the Write tool to create capture3.txt with exactly one line: pane two wrote this. Do not run any shell commands and do not explain.'
-TURN1="\$claude_bin -p '$PROMPT1' --permission-mode acceptEdits --allowedTools Edit,Write,Read 2>&1 | tail -5; echo claude-done"
+# `MARU_E2E_RESTART=1`(AT7): 두 번째 실행의 pane 은 같은 `maru ssh` 로 들어가 **다른 턴**(capture3)을 돌린다(원격 = 이 Mac 이라 마커 파일을
+# 공유한다). 두 번째 그림의 턴 목록에 첫 실행의 턴(디스크에서 되살림)과 새 턴이 **순서대로** 서야 한다 — 되살리기와 이어 붙기를 한 그림이 증명한다.
+TURN1="if [ -e $CAP_HOME/turn-ran ]; then echo 'restart: second turn (AT7 restore check)'; \$claude_bin -c -p '$PROMPT2' --permission-mode acceptEdits --allowedTools Edit,Write,Read 2>&1 | tail -5; echo claude-done-restart; else : > $CAP_HOME/turn-ran; \$claude_bin -p '$PROMPT1' --permission-mode acceptEdits --allowedTools Edit,Write,Read 2>&1 | tail -5; echo claude-done; fi"
 TURN2="\$claude_bin -p '$PROMPT2' --permission-mode acceptEdits --allowedTools Edit,Write,Read 2>&1 | tail -5; echo claude-done-2"
 SSH_T=""
 if [ "$PANES" = 0 ]; then
@@ -62,6 +65,8 @@ else
   REMOTE_CMD="$REMOTE_CMD; exec tmux -S \$SOCK attach -t e2e"
 fi
 REMOTE_B64=$(printf '%s' "$REMOTE_CMD" | base64 | tr -d '\n')
+# `MARU_E2E_RESTART=1`(AT7): 첫 그림을 찍은 뒤 앱을 **껐다 켠다**(같은 HOME — `workspace.v1`·`turn-rings/` 가 남는다). 두 번째 실행의
+# pane 은 claude 를 다시 돌리지 않고(마커) 그냥 기다린다 — 그래야 두 번째 그림의 턴 목록이 **디스크에서 되살린 것**임이 분명하다.
 cat > "$CAP_HOME/pane.sh" <<WRAP
 #!/bin/sh
 exec $ROOT/zig-out/bin/maru ssh $SSH_T -p $MARU_REMOTE_SCM_PORT -i $MARU_REMOTE_SCM_KEY -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes $MARU_REMOTE_SCM_DEST 'sh -c "\$(printf %s $REMOTE_B64 | base64 -D)"'
@@ -86,6 +91,18 @@ env -u CLAUDE_CODE_CHILD_SESSION -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT \
   MARU_SCREENSHOT="$SHOT" MARU_SCREENSHOT_DELAY_MS=170000 \
   "$APP" > "$CAP_HOME/app.out" 2>&1 || echo "app exit: $?"
 cp "$SHOT" "${OUT%.png}.ppm" 2>/dev/null && python3 "$ROOT/tools/remote-scm/ppm_to_png.py" "$SHOT" "$OUT" || echo "no screenshot"
+if [ "${MARU_E2E_RESTART:-0}" = 1 ]; then
+  echo "=== restart (AT7): turn-rings before"; ls -la "$CAP_HOME/.cache/maru/turn-rings/"*/ 2>/dev/null || echo none
+  grep -o 'last-agent-session="[^"]*"' "$CAP_HOME/Library/Application Support/maru/workspace.v1" || echo "no last-agent-session in workspace.v1"
+  SHOT2=$CAP_HOME/shot2.ppm
+  env -u CLAUDE_CODE_CHILD_SESSION -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT \
+    HOME="$CAP_HOME" CFFIXED_USER_HOME="$CAP_HOME" \
+    MARU_FORCE_SCM=1 MARU_FORCE_SCM_TAB=agent \
+    MARU_SCREENSHOT="$SHOT2" MARU_SCREENSHOT_DELAY_MS=150000 \
+    "$APP" > "$CAP_HOME/app2.out" 2>&1 || echo "app2 exit: $?"
+  cp "$SHOT2" "${OUT%.png}-restart.ppm" 2>/dev/null && python3 "$ROOT/tools/remote-scm/ppm_to_png.py" "$SHOT2" "${OUT%.png}-restart.png" || echo "no restart screenshot"
+  echo "=== restart std.log"; tail -40 "$CAP_HOME/.cache/maru/app.log" 2>/dev/null | grep -iE 'turn|ring|persist|expire' | tail -10
+fi
 echo "settings.json after: $(stat -f '%Sm' $HOME/.claude/settings.json) events=$(python3 -c 'import json,os;print(sorted(json.load(open(os.path.expanduser("~/.claude/settings.json")))["hooks"].keys()))')"
 echo "=== app.out (tail)"; tail -20 "$CAP_HOME/app.out"
 echo "=== std.log"; tail -40 "$CAP_HOME/.cache/maru/app.log" 2>/dev/null | grep -iE 'agent|hook|remote|snapshot|turn' | tail -25

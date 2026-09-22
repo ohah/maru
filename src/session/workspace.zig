@@ -236,6 +236,9 @@ pub const Window = struct {
     explorer: ExplorerPersistedState = .{},
     /// 저장소별 비교 기준(§3.5). 빈 목록이면 전부 기본값(`origin/HEAD`)이다.
     scm_bases: []const ScmBase = &.{},
+    /// 이 창의 에이전트 탭이 마지막으로 보인 **에이전트 세션 신원**(AT7 — 계약 §6.2). 빈 문자열이면 없음(키 생략).
+    /// 창 상태의 일부라 여기 둔다 — 창 A 의 탭이 창 B 의 세션을 보이면 안 된다(사용자 결정 2026-09-22).
+    last_agent_session: []const u8 = "",
     tabs: []const Tab,
 };
 
@@ -363,6 +366,12 @@ fn writeWindow(w: *std.Io.Writer, win: Window) !void {
             try w.print("{d}:", .{root.len});
             try writeEscaped(w, root);
         }
+        try w.writeByte('"');
+    }
+    // 최근 에이전트 세션(AT7) — 빈 값은 키를 생략한다(additive · 옛 파일 고정점).
+    if (win.last_agent_session.len != 0) {
+        try w.writeAll(" last-agent-session=\"");
+        try writeEscaped(w, win.last_agent_session);
         try w.writeByte('"');
     }
     // 저장소별 비교 기준(§3.5) — 탐색기 root와 같은 인코딩(길이 접두 + escape)이라 커서를 공유한다.
@@ -656,7 +665,10 @@ fn parseWindow(a: std.mem.Allocator, lines: *LineIter, limits: *ParseLimits) Par
     // 기억이 사라지면 사용자는 기본값 화면을 보고 다시 고르면 되지만, 깨진 값을 실으면 다음 실행이
     // 그 값을 argv에 넣는다. 잃는 쪽이 안전한 쪽이다.
     const scm_bases = parseScmBases(a, f.find("scm-bases"));
-    return .{ .active_tab = active_tab, .active = active, .frame = frame, .dock = dock_with_presented, .explorer = .{ .roots = explorer_roots }, .scm_bases = scm_bases, .tabs = try tabs.toOwnedSlice(a) };
+    // 최근 에이전트 세션(AT7): 없으면 빈 값. 상한을 넘는 값은 손상으로 보지 않고 **버린다** — 잃는 쪽이 안전하다(기준 목록과 같은 판단).
+    const last_agent_session_raw = try f.getQuoted(a, "last-agent-session", "");
+    const last_agent_session = if (last_agent_session_raw.len <= 64) last_agent_session_raw else "";
+    return .{ .active_tab = active_tab, .active = active, .frame = frame, .dock = dock_with_presented, .explorer = .{ .roots = explorer_roots }, .scm_bases = scm_bases, .last_agent_session = last_agent_session, .tabs = try tabs.toOwnedSlice(a) };
 }
 
 const ExplorerRootsParse = struct { roots: ?[]const []const u8, valid: bool };
@@ -2815,4 +2827,20 @@ test "diff 파일 Term은 저장되지 않고 파일에서 읽히지도 않는�
     // 손으로 diff를 적어 넣어도 읽지 않는다(복원 못 할 상태를 파일이 만들지 못하게).
     try std.testing.expect(parseEntryKindName("diff") == null);
     try std.testing.expect(parseEntryKindName("markdown") != null);
+}
+
+test "window 줄의 last-agent-session (AT7): 있으면 인용해 쓰고 되읽으며, 비면 키를 생략한다" {
+    const a = std.testing.allocator;
+    const with = [_]Window{.{ .tabs = &.{}, .last_agent_session = "0f6c1a2e-1111-4222-8333-444455556666" }};
+    const text = try serialize(a, .{ .windows = &with });
+    defer a.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, " last-agent-session=\"0f6c1a2e-1111-4222-8333-444455556666\"") != null);
+    const without = [_]Window{.{ .tabs = &.{} }};
+    const none = try serialize(a, .{ .windows = &without });
+    defer a.free(none);
+    try std.testing.expect(std.mem.indexOf(u8, none, "last-agent-session") == null);
+
+    var parsed = try parse(a, text);
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("0f6c1a2e-1111-4222-8333-444455556666", parsed.workspace.windows[0].last_agent_session);
 }

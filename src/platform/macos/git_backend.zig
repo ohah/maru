@@ -197,6 +197,9 @@ const State = struct {
     /// 슬롯을 공유하면 그때마다 한쪽이 취소돼 "가끔 스냅샷이 안 찍히는" 상태가 된다.
     snapshot_inflight: usize = 0,
     snapshot_result: ?SnapshotResult = null,
+    /// AT7 — 되살린 턴 링의 tree 존재 확인. 슬롯 하나(한 세션씩 — 복원은 드물다).
+    tree_check_inflight: usize = 0,
+    tree_check_result: ?TreeCheckResult = null,
     branches_inflight: usize = 0,
     branches_result: ?BranchesResult = null,
     ignore_inflight: usize = 0,
@@ -434,6 +437,17 @@ pub const SnapshotResult = struct {
     pub fn deinit(self: *SnapshotResult, allocator: std.mem.Allocator) void {
         allocator.free(self.tree);
         self.* = .{};
+    }
+};
+
+/// 되살린 턴 링의 tree 존재 확인 결과(AT7). `ok` 가 거짓이면 **하나라도** 없는 것이다 — 어느 것인지는 묻지 않는다(세션 통째로).
+pub const TreeCheckResult = struct {
+    session: [64]u8 = undefined,
+    session_len: usize = 0,
+    ok: bool = false,
+
+    pub fn sessionId(self: *const TreeCheckResult) []const u8 {
+        return self.session[0..self.session_len];
     }
 };
 
@@ -1292,6 +1306,84 @@ pub const Backend = struct {
         return result;
     }
 
+    /// 되살린 링의 tree 들이 아직 있나(AT7). `trees` 는 공백으로 붙인 hex rev 들(≤ `git_command.tree_exists_max`) — 하나라도
+    /// hex 가 아니면 거절한다(§6 심층 방어, `isRevKey` 와 같은 이유). 슬롯이 차 있으면 `false` — 호출자가 다음 tick 에 다시 낸다.
+    pub fn submitTreeCheck(
+        self: *Backend,
+        git_exe: []const u8,
+        repo: []const u8,
+        trees: []const u8,
+        session_id: []const u8,
+        remote: ?git_command.Remote,
+    ) bool {
+        if (session_id.len == 0 or session_id.len > 64) return false;
+        var it = std.mem.tokenizeScalar(u8, trees, ' ');
+        var n: usize = 0;
+        while (it.next()) |part| : (n += 1) {
+            if (!git_command.isHexRev(part)) return false;
+        }
+        if (n == 0 or n > git_command.tree_exists_max) return false;
+        const state = self.state orelse return false;
+        state.mutex.lockUncancelable(state.io);
+        if (state.shutting_down or state.tree_check_inflight > 0 or state.tree_check_result != null) {
+            state.mutex.unlock(state.io);
+            return false;
+        }
+        state.tree_check_inflight += 1;
+        _ = state.refs.fetchAdd(1, .monotonic);
+        state.mutex.unlock(state.io);
+
+        const job = state.allocator.create(TreeCheckJob) catch return self.abandonTreeCheck();
+        job.* = .{ .state = state, .git_exe = &.{}, .repo = &.{}, .trees = &.{} };
+        @memcpy(job.session[0..session_id.len], session_id);
+        job.session_len = session_id.len;
+        job.git_exe = state.allocator.dupe(u8, git_exe) catch return self.releaseTreeCheckJob(job);
+        job.repo = state.allocator.dupe(u8, repo) catch return self.releaseTreeCheckJob(job);
+        job.trees = state.allocator.dupe(u8, trees) catch return self.releaseTreeCheckJob(job);
+        if (remote) |r| {
+            job.remote_dest = state.allocator.dupe(u8, r.dest) catch return self.releaseTreeCheckJob(job);
+            job.remote_ctl = state.allocator.dupe(u8, r.control_path) catch return self.releaseTreeCheckJob(job);
+        }
+        const thread = std.Thread.spawn(.{}, treeCheckWorker, .{job}) catch return self.releaseTreeCheckJob(job);
+        thread.detach();
+        return true;
+    }
+
+    fn releaseTreeCheckJob(self: *Backend, job: *TreeCheckJob) bool {
+        const state = job.state;
+        job.freeAll();
+        state.allocator.destroy(job);
+        return self.abandonTreeCheck();
+    }
+
+    fn abandonTreeCheck(self: *Backend) bool {
+        const state = self.state orelse return false;
+        state.mutex.lockUncancelable(state.io);
+        state.tree_check_inflight -= 1;
+        state.mutex.unlock(state.io);
+        state.release();
+        return false;
+    }
+
+    /// 판정자 전용 — tree 확인 결과를 **git 없이** 심는다(AT7 배선 판정: 결과가 오면 세션을 통째로 접는가). 제품 경로는 안 부른다.
+    pub fn testInjectTreeCheckResult(self: *Backend, res: TreeCheckResult) bool {
+        const state = self.state orelse return false;
+        state.mutex.lockUncancelable(state.io);
+        defer state.mutex.unlock(state.io);
+        if (state.tree_check_result != null) return false;
+        state.tree_check_result = res;
+        return true;
+    }
+
+    pub fn takeTreeCheckResult(self: *Backend) ?TreeCheckResult {
+        const state = self.state orelse return null;
+        state.mutex.lockUncancelable(state.io);
+        defer state.mutex.unlock(state.io);
+        const result = state.tree_check_result orelse return null;
+        state.tree_check_result = null;
+        return result;
+    }
+
     /// 완료된 diff 본문의 소유권을 넘긴다. frame tick에서 불러도 syscall이 없다.
     pub fn takeDiffResult(self: *Backend) ?DiffResult {
         const state = self.state orelse return null;
@@ -1341,6 +1433,50 @@ const SnapshotJob = struct {
         return .{ .dest = self.remote_dest, .control_path = self.remote_ctl };
     }
 };
+
+const TreeCheckJob = struct {
+    state: *State,
+    git_exe: []u8,
+    repo: []u8,
+    trees: []u8,
+    session: [64]u8 = undefined,
+    session_len: usize = 0,
+    remote_dest: []u8 = &.{},
+    remote_ctl: []u8 = &.{},
+
+    fn remoteTarget(self: *const TreeCheckJob) ?git_command.Remote {
+        if (self.remote_dest.len == 0 or self.remote_ctl.len == 0) return null;
+        return .{ .dest = self.remote_dest, .control_path = self.remote_ctl };
+    }
+
+    fn freeAll(self: *TreeCheckJob) void {
+        const a = self.state.allocator;
+        if (self.remote_ctl.len > 0) a.free(self.remote_ctl);
+        if (self.remote_dest.len > 0) a.free(self.remote_dest);
+        if (self.trees.len > 0) a.free(self.trees);
+        if (self.repo.len > 0) a.free(self.repo);
+        if (self.git_exe.len > 0) a.free(self.git_exe);
+    }
+};
+
+fn treeCheckWorker(job: *TreeCheckJob) void {
+    const state = job.state;
+    var result: TreeCheckResult = .{ .session_len = job.session_len };
+    @memcpy(result.session[0..job.session_len], job.session[0..job.session_len]);
+    // 출력은 안 본다 — exit 0 이면 전부 있고, 128 이면 하나라도 없다(`git_command.Kind.tree_exists`).
+    if (runOn(state.allocator, job.remoteTarget(), .tree_exists, job.git_exe, job.repo, job.trees)) |out| {
+        state.allocator.free(out.bytes);
+        result.ok = true;
+    } else |_| {}
+    job.freeAll();
+    state.allocator.destroy(job);
+
+    state.mutex.lockUncancelable(state.io);
+    if (!state.shutting_down and state.tree_check_result == null) state.tree_check_result = result;
+    state.tree_check_inflight -= 1;
+    state.mutex.unlock(state.io);
+    state.release();
+}
 
 fn snapshotWorker(job: *SnapshotJob) void {
     const state = job.state;

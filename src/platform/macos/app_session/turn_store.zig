@@ -57,9 +57,15 @@ fn ensureDirs(base: []const u8, session_dir: []const u8) void {
 }
 
 /// 파일 하나를 임시 → rename 으로 갈아 끼운다(0600). 부분 파일이 다음 시작에 읽히지 않게.
+///
+/// **비용 실측**(2026-09-22, 적대적 2회차 — 계획 AT7 공격 H): 이 함수 자체는 2 KB 에 118 µs(rename·fsync 포함). `save` 전체가 1 MiB 사본
+/// 8개로 20~36 ms 나온 것은 **Debug 빌드의 Wyhash 8 MiB**(`fromRing` 이 blob 이름을 만든다)였고 fsync 는 아니었다 — 실제 턴(사본 중앙값
+/// 7.8 KB · 턴당 경로 2)에서는 1 ms 아래다. 그래서 fsync 는 둔다(`writeExecutableFile` 과 같은 규율 — rename 만 남고 데이터가 비는
+/// 전원 차단을 막는다).
 fn writeAtomic(io: std.Io, path: []const u8, body: []const u8) !void {
+    // 임시 이름에 pid 를 붙인다 — 같은 세션을 두 창이 쓰면(`--resume` 둘, §6.5) 같은 임시 파일을 서로 rename 해 간다.
     var tmp_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const tmp_path = std.fmt.bufPrint(&tmp_buf, "{s}.maru-tmp", .{path}) catch return error.BadPath;
+    const tmp_path = std.fmt.bufPrint(&tmp_buf, "{s}.maru-tmp.{d}", .{ path, std.c.getpid() }) catch return error.BadPath;
     std.Io.Dir.cwd().deleteFile(io, tmp_path) catch {};
     {
         const file = try std.Io.Dir.cwd().createFile(io, tmp_path, .{ .truncate = true, .permissions = @enumFromInt(0o600) });

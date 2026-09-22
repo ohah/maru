@@ -432,6 +432,9 @@ pub const RingMap = struct {
     evicted: [max_evicted]Id = @splat(.{}),
     /// 다음에 자취를 쓸 자리.
     evicted_next: usize = 0,
+    /// «기록이 오래되어 사라진» 세션 자취(AT7 — 되살린 링의 tree 가 이미 gc 됨). `evicted` 와 다른 말이라 다른 자리.
+    expired: [max_evicted]Id = @splat(.{}),
+    expired_next: usize = 0,
 
     /// 그 세션의 링(**없으면 만든다**). 자리가 없으면 가장 오래 안 쓴 것을 버리고 그 자리를 쓴다.
     ///
@@ -460,6 +463,7 @@ pub const RingMap = struct {
         // 화면이 「밀려났다」와 「지금 여기 있다」를 동시에 말하고, 그냥 지우면 새 턴이 쌓인 뒤 잃은
         // 기록을 **영영 말하지 못한다**(`Ring.history_evicted`).
         const returning = self.forgetEvicted(session_id);
+        _ = self.forgetExpired(session_id); // 새 턴이 쌓이면 «사라졌다» 는 더 이상 화면이 할 말이 아니다
         slot.* = .{ .id_len = session_id.len, .used = self.tick };
         @memcpy(slot.id[0..session_id.len], session_id);
         setRepo(slot, repo);
@@ -471,6 +475,16 @@ pub const RingMap = struct {
         if (repo.len == 0 or repo.len > max_repo_len) return; // 못 담으면 아예 기억하지 않는다
         @memcpy(e.repo[0..repo.len], repo);
         e.repo_len = repo.len;
+    }
+
+    /// 그 세션의 항목 통째(링 + 저장소 키). 영속화가 쓴다(AT7) — `find` 와 같은 «만들지 않는다» 규율.
+    pub fn entry(self: *const RingMap, session_id: []const u8) ?*const Entry {
+        if (session_id.len == 0) return null;
+        for (&self.entries) |*e| {
+            if (e.used == 0) continue;
+            if (std.mem.eql(u8, e.sessionId(), session_id)) return e;
+        }
+        return null;
     }
 
     /// 그 세션의 링(**만들지 않는다**). 화면이 쓴다 — 그리기만 하는 자리가 맵을 늘리면 안 된다.
@@ -540,6 +554,54 @@ pub const RingMap = struct {
     pub fn wasEvicted(self: *const RingMap, session_id: []const u8) bool {
         if (session_id.len == 0) return false;
         return self.evictedIndex(session_id) != null;
+    }
+
+    /// 디스크에서 되살린 항목을 **그대로** 들인다(AT7). 이미 있으면 안 덮는다(메모리가 더 새롭다) — `false`. 자리는
+    /// `ringFor` 와 같은 규칙(가장 오래 안 쓴 것부터 밀고 자취를 남긴다). 되살린 세션이 «밀렸던» 자취에 있으면 그 자취를
+    /// 지운다 — 기록이 돌아왔으니 «밀려났다» 는 더 이상 사실이 아니다(`history_evicted` 는 파일에 적힌 값을 믿는다).
+    pub fn adopt(self: *RingMap, incoming: Entry) bool {
+        const sid = incoming.sessionId();
+        if (sid.len == 0 or sid.len > max_session_id_len) return false;
+        if (self.findEntry(sid) != null) return false;
+        self.tick +|= 1;
+        const slot = self.victim();
+        if (slot.used != 0) self.noteEvicted(slot.sessionId());
+        _ = self.forgetEvicted(sid);
+        _ = self.forgetExpired(sid);
+        slot.* = incoming;
+        slot.used = self.tick;
+        return true;
+    }
+
+    /// 세션 항목을 **자취 없이** 버린다 — 밀린 것이 아니라 «기록이 오래되어 사라졌다»(tree 가 gc 됨, AT7). 그 사실은
+    /// `expired` 자취에 남겨 화면이 「원래 없었다」와 가른다.
+    pub fn expire(self: *RingMap, session_id: []const u8) void {
+        if (self.findEntry(session_id)) |e| e.* = .{};
+        if (session_id.len == 0 or session_id.len > max_session_id_len) return;
+        if (self.expiredIndex(session_id) != null) return;
+        const e = &self.expired[self.expired_next];
+        @memcpy(e.buf[0..session_id.len], session_id);
+        e.len = session_id.len;
+        self.expired_next = (self.expired_next + 1) % max_evicted;
+    }
+
+    pub fn wasExpired(self: *const RingMap, session_id: []const u8) bool {
+        if (session_id.len == 0) return false;
+        return self.expiredIndex(session_id) != null;
+    }
+
+    fn forgetExpired(self: *RingMap, session_id: []const u8) bool {
+        const i = self.expiredIndex(session_id) orelse return false;
+        self.expired[i].len = 0;
+        return true;
+    }
+
+    fn expiredIndex(self: *const RingMap, session_id: []const u8) ?usize {
+        for (&self.expired, 0..) |*e, i| {
+            if (e.len == 0) continue;
+            if (std.mem.eql(u8, e.slice(), session_id)) return i;
+        }
+        return null;
     }
 
     /// 밀려난 신원을 자취에 남긴다. **이미 있으면 다시 넣지 않는다** — 같은 신원이 두 자리를 먹으면 남의
@@ -1060,4 +1122,41 @@ test "세션 맵: 저장소 경로가 상한을 넘으면 기억하지 않고 �
     // 기억하지 못했으므로 «바뀌었다» 를 판정할 근거가 없다 — 잘라 담아 남의 저장소를 같다고 보는 것보다 낫다.
     const again = map.ringFor("sess", "/other").?;
     try std.testing.expectEqual(@as(usize, 1), again.len);
+}
+
+test "RingMap.adopt/expire (AT7): 되살린 항목은 그대로 들어오고, 있으면 안 덮으며, 만료는 자취 없이 버리고 «사라졌다» 로 남는다" {
+    var map: RingMap = .{};
+    var e: RingMap.Entry = .{ .id_len = 3, .repo_len = 5 };
+    @memcpy(e.id[0..3], "S-1");
+    @memcpy(e.repo[0..5], "/repo");
+    e.ring.push(.{ .tree = "t1" });
+    e.ring.push(.{ .tree = "t2" });
+    e.ring.history_evicted = true;
+    try testing.expect(map.adopt(e));
+    try testing.expectEqual(@as(usize, 2), map.find("S-1").?.len);
+    try testing.expect(map.find("S-1").?.history_evicted);
+    try testing.expectEqualStrings("/repo", map.repoFor("S-1"));
+    // 이미 있으면 안 덮는다 — 메모리 쪽이 더 새롭다.
+    var e2 = e;
+    e2.ring.push(.{ .tree = "t3" });
+    try testing.expect(!map.adopt(e2));
+    try testing.expectEqual(@as(usize, 2), map.find("S-1").?.len);
+    // 만료: 항목이 사라지고 «밀림» 이 아니라 «사라짐» 자취.
+    map.expire("S-1");
+    try testing.expect(map.find("S-1") == null);
+    try testing.expect(map.wasExpired("S-1"));
+    try testing.expect(!map.wasEvicted("S-1"));
+    // 그 세션이 다시 말하면(새 링) 자취가 지워진다.
+    _ = map.ringFor("S-1", "/repo").?;
+    try testing.expect(!map.wasExpired("S-1"));
+    // 되살리기가 «밀림» 자취를 지운다: 밀린 뒤 디스크에서 돌아온 세션.
+    var i: usize = 0;
+    var buf: [8]u8 = undefined;
+    while (i < max_sessions) : (i += 1) {
+        _ = map.ringFor(std.fmt.bufPrint(&buf, "X{d}", .{i}) catch unreachable, "/r").?;
+    }
+    try testing.expect(map.wasEvicted("S-1"));
+    try testing.expect(map.adopt(e));
+    try testing.expect(!map.wasEvicted("S-1"));
+    try testing.expect(map.find("S-1").?.history_evicted); // 파일에 적힌 값 그대로
 }

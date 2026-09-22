@@ -21,6 +21,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 const maru = @import("maru");
 const scm_dock_ops = @import("scm_dock.zig"); // 고른 비교 기준을 세션에 되싣는다(§3.5 P7b)
+const git_ops = @import("git.zig"); // AT7: «최근 세션» 되싣기
+const turn_ring_persist = @import("turn_ring_persist.zig"); // AT7: 창을 열 때 «최근 세션» 링 되살리기·7일 sweep
 const session_host = @import("../session_host.zig");
 
 const chrome = maru.chrome;
@@ -530,7 +532,9 @@ pub fn captureWorkspaceWindow(self: *AppSession, arena: std.mem.Allocator, is_ac
     for (scm_bases, self.scm_base_entries[0..self.scm_base_len]) |*out, entry| {
         out.* = .{ .repo = try arena.dupe(u8, entry.repo), .base = try arena.dupe(u8, entry.base) };
     }
-    return .{ .active_tab = self.app_window.active_tab, .active = is_active, .frame = frame, .tabs = try tabs.toOwnedSlice(arena), .dock = dock, .explorer = .{ .roots = explorer_roots }, .scm_bases = scm_bases };
+    // «최근 세션» 도 창 상태다(AT7 — 계약 §6.2): 에이전트 탭이 재시작 뒤에도 같은 세션의 턴 목록을 보이게.
+    const last_agent_session: []const u8 = if (self.last_agent_session) |sid| try arena.dupe(u8, sid) else "";
+    return .{ .active_tab = self.app_window.active_tab, .active = is_active, .frame = frame, .tabs = try tabs.toOwnedSlice(arena), .dock = dock, .explorer = .{ .roots = explorer_roots }, .scm_bases = scm_bases, .last_agent_session = last_agent_session };
 }
 
 /// 이 창의 workspace 블록(헤더 없는 `window …` 텍스트)을 직렬화해 세션-소유 버퍼로 돌려준다(R5 저장 ABI).
@@ -609,6 +613,9 @@ pub fn applyWorkspaceWindow(self: *AppSession, win: maru.session.workspace.Windo
     for (win.scm_bases) |entry| {
         if (!scm_dock_ops.rememberScmBase(self, entry.repo, entry.base)) break; // 상한을 넘으면 거기서 멈춘다
     }
+    // «최근 세션» 을 되싣고 그 링을 디스크에서 미리 되살린다(AT7) — 첫 훅 이벤트 전에도 에이전트 탭이 선다. 7일 sweep 도 이때.
+    if (win.last_agent_session.len > 0) git_ops.rememberAgentSession(self, win.last_agent_session);
+    turn_ring_persist.onWindowRestored(self);
     if (win.explorer.roots) |roots| {
         var validated: [file_tree.max_roots]file_tree_backend.ValidatedRoot = undefined;
         var validated_len: usize = 0;

@@ -26,6 +26,7 @@ const git_command = app_session_mod.git_command;
 const git_status = maru.session.git_status; // check-ignore 출력 파서(순수 계층)
 const layout_math = app_session_mod.layout_math;
 const scm_dock_ops = @import("scm_dock.zig");
+const turn_ring_persist = @import("turn_ring_persist.zig"); // AT7: 봉인 뒤 쓰기·첫 턴 전 되살리기·tree 확인
 const dock_ops = @import("dock.zig");
 const ssh_upload = @import("../ssh_upload.zig"); // 원격 감시자 spawn(RW3)
 const remote_watch_mod = @import("../remote_watch.zig"); // 감시 채널 상태·줄 파싱(RW3)
@@ -962,6 +963,7 @@ pub fn drainGitStatus(self: *AppSession) void {
             .pick_base => scm_dock_ops.openBaseMenu(self),
         }
     }
+    turn_ring_persist.pump(self); // AT7: 되살린 링의 tree 확인(걸기·거두기)
     while (backend.takeSnapshotResult()) |taken| {
         var snapshot = taken;
         // **"언제·누가"는 여기서 붙인다**(P5). 링은 순서만 알지 시간을 모르고, 에이전트 종류는 그 turn을
@@ -979,6 +981,8 @@ pub fn drainGitStatus(self: *AppSession) void {
             // **요청할 때 붙들어 둔 저장소**를 쓴다 — 여기서 `git_repo` 를 다시 읽으면 그 사이 다른
             // 워크트리로 옮겼을 때 멀쩡한 링을 «저장소가 바뀌었다» 로 비운다(적대적 검증 3회차).
             const repo = self.turn_snapshot_repo orelse "";
+            // **첫 턴이면 디스크부터 본다**(AT7) — 재시작 전 기록이 있으면 그 뒤에 이어 붙는다. 이미 메모리에 있으면 무동작.
+            _ = turn_ring_persist.maybeRestore(self, identity);
             if (self.turn_rings.ringFor(identity, repo)) |ring| {
                 ring.push(.{
                     .tree = snapshot.tree,
@@ -997,6 +1001,7 @@ pub fn drainGitStatus(self: *AppSession) void {
         }
         // **링이 바뀌는 유일한 tick 지점이 여기다** — 그래서 사본 정리도 여기 한 자리에 둔다.
         sweepTurnCaptures(self);
+        if (identity.len > 0) turn_ring_persist.persist(self, identity); // 봉인 = 쓰기(계약 §6.4)
         self.turn_snapshot_key_len = 0;
         self.turn_snapshot_title_len = 0;
         self.turn_snapshot_capture = 0;
@@ -1565,6 +1570,7 @@ pub fn rememberAgentSession(self: *AppSession, identity: []const u8) void {
     const owned = self.allocator.dupe(u8, identity) catch return;
     if (self.last_agent_session) |old_sid| self.allocator.free(old_sid);
     self.last_agent_session = owned;
+    self.workspaceChanged(.agent_session); // 창 상태다(AT7) — 체크포인트가 `last-agent-session` 을 적는다
 }
 
 /// 목록·비교가 볼 **세션 신원**. 활성 Term 에 에이전트가 있으면 그것이고, 없으면 **직전에 본 세션**이다.

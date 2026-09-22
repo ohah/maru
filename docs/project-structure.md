@@ -46,7 +46,7 @@ Maru는 초기에 파일 이동을 최소화한다. 기존 `src/*.zig` 파일은
   `expected_entries` 를 함께 줄인다 — 두 자리를 같이 고치게 한 것이 의도다.
 
   **한 번에 한 주제씩 옮긴다.** 108(최초) → 106(reconnect worker 둘) → 103(kernel cwd 셋) →
-  **99**(release adapter P5d 넷).
+  99(release adapter P5d 넷) → **92**(센티넬 일곱).
 
   **이름은 내용에서 나온다** — 그 주제의 파일을 전부 열어 각자 무엇을 세는지 읽고 짓는다.
   - kernel cwd: 주제어가 이미 이름에 있고 `k1`·`k2`·`k3` 만 이력이라 「무엇을 지키는지」만 채웠다
@@ -57,6 +57,13 @@ Maru는 초기에 파일 이동을 최소화한다. 기존 `src/*.zig` 파일은
     **테스트가 스스로 쓰는 말**(`mounted candidate`)로 지었다 — `…_cli_harness_runner` ·
     `…_cli_harness_workspace` · `…_mounted_candidate_gate` · `…_mounted_candidate_product_boundary`.
     **슬라이스 ID 를 떼는 것만으로 이름이 되지는 않는다.**
+  - 센티넬 일곱: 주제어가 **아예 없었다** — `f3c0`·`f3d` 를 떼면 `sentinel` 만 남는다. 일곱을
+    전부 읽고 각자 무엇을 못 박는지로 지었다(`control_response_codec` · `typed_control_admission` ·
+    `completed_drain_preparation` · `semantic_take` · `whole_turn_orchestration` ·
+    `hostile_revoke_transport` · `remote_runtime_typed_controls`).
+    옮기면서 **머리말에 「왜 실행 파일인가」를 적었다** — 컴파일 타임 필터가 걸린 Zig 테스트는
+    0 개를 고르고도 정상 종료하므로 필터 게이트는 비어 있어도 초록이고, 이 실행 파일들이 그
+    게이트를 비지 않게 붙든다. 일곱 중 그 이유를 적고 있던 것은 하나뿐이었다.
 
   **테스트 이름과 계획 문서의 슬라이스 ID 는 건드리지 않는다.** 거기서 그 ID 는 이력이다 —
   `docs/verification-matrix.md` 의 「CR6e-c1~c3c 완료」는 지금 코드 상태가 아니라 그때 무엇을

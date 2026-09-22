@@ -1750,11 +1750,11 @@ pub fn build(b: *std.Build) void {
     // 스텝이라, 아래 탐색기 gate 와 **같은 이유**로 전용 step 을 둔다(빠른 되먹임).
     const macos_terminal_gate_tests = addProjectTest(b, .{
         .root_module = macos_app_host_abi_tests.root_module,
-        .filters = &.{"TIG5"}, // TIG1~3 은 `test-editor` 가, TIG4 는 `test-editor-chord-menu` 가 돈다
+        .filters = &.{ "TIG5", "터미널 2031" }, // TIG1~3 은 `test-editor` 가, TIG4 는 `test-editor-chord-menu` 가 돈다. «터미널 2031» = 색 구성 통지가 자식 PTY 까지 닿는 판정자
     });
     const run_macos_terminal_gate_tests = b.addRunArtifact(macos_terminal_gate_tests);
-    // 6 = TIG5 하나 + 각 모듈이 자동 생성하는 `test_0` 다섯(필터와 무관하게 늘 컴파일된다).
-    run_macos_terminal_gate_tests.addArg("--maru-expect-tests=6");
+    // 8 = TIG5 하나 + «터미널 2031» 둘(배선·실데이터) + 각 모듈이 자동 생성하는 `test_0` 다섯(필터와 무관하게 늘 컴파일된다).
+    run_macos_terminal_gate_tests.addArg("--maru-expect-tests=8");
     run_macos_terminal_gate_tests.setCwd(b.path("."));
     const macos_terminal_gate_step = b.step(
         "test-terminal-gate",
@@ -4044,6 +4044,23 @@ pub fn build(b: *std.Build) void {
     const run_marker_preview_tests = b.addRunArtifact(marker_preview_tests);
     run_marker_preview_tests.addArg("--maru-expect-tests=89"); // MP1 31 + 도크 점프 5 + CSP1(popup_box) 9 + context_menu 10 + dropdown 6 회귀 + 이름 없는 블록 + CSP1(popup_box) 7 + context_menu 회귀 10 + 이름 없는 블록 + 이 그래프의 이름 없는 test 블록들(필터와 무관하게 컴파일된다)
     b.step("test-marker-preview", "Run the terminal image-marker preview core judges only (MP1 filter)").dependOn(&run_marker_preview_tests.step);
+
+    // 색 구성 통지(DECSET 2031 / DSR 996)의 코어 판정자만 — 위 `test-marker-preview` 와 같은 이유(변이 한 개에 전체 test 6 분을 안 쓴다).
+    const color_scheme_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/maru.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "shutdown_wire_contract", .module = shutdown_wire_contract_mod }},
+        }),
+        .filters = &.{ "2031", "996 색 구성" },
+    });
+    attachPngCodec(b, color_scheme_tests.root_module);
+    color_scheme_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
+    const run_color_scheme_tests = b.addRunArtifact(color_scheme_tests);
+    run_color_scheme_tests.addArg("--maru-expect-tests=25"); // 4 + 이 그래프의 이름 없는 test 블록들(필터와 무관하게 컴파일된다 — `test-marker-preview` 와 같다)
+    b.step("test-color-scheme-notify", "Run the DECSET 2031 / DSR 996 color-scheme core judges only").dependOn(&run_color_scheme_tests.step);
 
     // 병합 충돌 **stage 규칙**만(S3a). `git_command` 의 지정자 판정자가 `test-editor` 그래프에
     // **없어서**(실측) 그 이름만 돌리면 변이가 전부 「살아남음」으로 나온다 — 그렇다고 `test` 전체를

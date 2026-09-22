@@ -6813,6 +6813,8 @@ pub const AppSession = struct {
     turn_tree_checks: [maru.session.turn_snapshot.max_sessions]@import("app_session/turn_ring_persist.zig").PendingCheck = @splat(.{}),
     /// AT7: 7일 sweep 은 창당 한 번.
     turn_rings_swept: bool = false,
+    /// 픽스처 `MARU_FORCE_SYS_APPEARANCE_LATER` 가 발사됐나(한 번만).
+    debug_sys_appearance_later_fired: bool = false,
     /// 턴 스냅샷용 임시 index 경로. **저장소 밖**이어야 한다(안에 두면 자기가 스냅샷에 잡힌다).
     turn_index_path: ?[]u8 = null,
     /// 요청 시점에 봉인해 둔 캡처 id. `turn_snapshot_key` 와 **같은 자리·같은 이유**다(수확 때 다시
@@ -19658,6 +19660,7 @@ pub const AppSession = struct {
         agent_ops.pollAgentKinds(self); // 포그라운드 프로세스(claude/codex) polling — throttled, 각 Term agent_kind 갱신
         debug_fixtures.reapplyForcedAgentStates(self); // 캡처 전용: 폴링이 되돌린 강제 상태를 다시 세운다(env 미설정이면 무동작)
         debug_fixtures.reapplyForcedSidebarHover(self); // 캡처 전용: 포인터 이동이 지운 강제 카드 호버를 다시 세운다(같은 이유)
+        debug_fixtures.reapplyForcedAppearanceLater(self); // 캡처 전용: 지연된 시스템 외관 전환(2031 실기)
         debug_fixtures.applyForcedTabCount(self); // 캡처 전용: 탭 바를 넘치게 해 ‹› 를 띄운다(한 번만)
         debug_fixtures.reapplyForcedTabHover(self); // 캡처 전용: 탭 바 버튼 배경은 호버해야 얹힌다(같은 이유)
         // 캡처 전용: 원격 pane 상태를 **유지**한다 — 진짜 로컬 셸이 OSC 7 로 되돌리기 때문이다.
@@ -68298,6 +68301,119 @@ test "terminal IME preedit replaces the visible cell on every marked transaction
         const visible_codepoint = snapshot.cells[base_cell_index].codepoint;
         surface.unlockCore(session.io);
         try std.testing.expectEqual(codepoint, visible_codepoint);
+    }
+}
+
+// [2031] **색 구성 통지가 자식 PTY 까지 닿는다.** 코어 판정자는 응답 버퍼까지만 본다 — 여기서는 자식(`controlled_smoke` 셸)이
+// stdin 으로 받은 것을 그대로 에코하므로(`Maru app input:<line>`), `theme.follow-system` 의 외관 전환이 `reapplyConfigPalette`
+// → `set_default_colors` 명령 → 코어 → PTY 로 흘러 **자식이 `CSI ? 997 ; 1 n` 을 읽었는지** 화면으로 본다.
+test "터미널 2031: follow-system 외관 전환이 구독한 자식 PTY 에 CSI ? 997 ; n 으로 닿는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    // follow-system 켜고 라이트 프리셋으로 시작 — 아래서 다크로 바꾼다.
+    test_config_text = "theme.follow-system = true\ntheme.preset-light = solarized-light\ntheme.preset-dark = maru\n";
+    defer test_config_text = "";
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 6,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+    session.setSystemAppearance(false); // 라이트
+    _ = try session.tick();
+    const surface = term_ops.activeSurface(session);
+    {
+        var i: usize = 0;
+        var seen = false;
+        while (i < 400) : (i += 1) {
+            const dump = try surface.core.dumpUtf8(allocator);
+            defer allocator.free(dump);
+            if (std.mem.indexOf(u8, dump, "Maru app shell") != null) {
+                seen = true;
+                break;
+            }
+            _ = try session.tick();
+        }
+        try std.testing.expect(seen);
+    }
+    // 자식이 `?2031h` 를 보낸 것처럼 코어를 구독시킨다(출력 경로 — 코어 write). 그리고 라이트 등급을 «본» 상태로.
+    surface.lockCore(session.io);
+    surface.core.write("\x1b[?2031h") catch {};
+    surface.core.clearResponse();
+    try std.testing.expect(surface.core.color_scheme_notify);
+    try std.testing.expect(!surface.core.colorSchemeIsDark()); // solarized-light 가 이미 주입됐다(프레임 빌드·reload)
+    surface.unlockCore(session.io);
+
+    // 외관을 다크로 — follow-system 이 `maru` 프리셋으로 교체하고 모든 Term 에 set_default_colors 를 민다.
+    session.setSystemAppearance(true);
+    var i: usize = 0;
+    while (i < 20) : (i += 1) _ = try session.tick();
+    // 코어가 다크를 «봤고», 통지를 **한 번** 만들었고, 응답 버퍼는 리더가 비웠다(PTY 로 흘렀다 — CPR·DA 와 같은 길).
+    // 자식 에코로는 못 본다: 자식이 `printf '%s'` 로 되돌린 ESC 시퀀스를 코어가 명령으로 삼켜 화면에 안 찍힌다.
+    surface.lockCore(session.io);
+    const dark_now = surface.core.colorSchemeIsDark();
+    const reports = surface.core.color_scheme_reports;
+    const pending = surface.core.pendingResponse().len;
+    surface.unlockCore(session.io);
+    try std.testing.expect(dark_now);
+    try std.testing.expectEqual(@as(u32, 1), reports);
+    try std.testing.expectEqual(@as(usize, 0), pending);
+    // 같은 외관을 다시 알려도(AppKit 의 잦은 통지) 통지가 또 나가지 않는다.
+    session.setSystemAppearance(true);
+    i = 0;
+    while (i < 5) : (i += 1) _ = try session.tick();
+    surface.lockCore(session.io);
+    const reports_again = surface.core.color_scheme_reports;
+    surface.unlockCore(session.io);
+    try std.testing.expectEqual(@as(u32, 1), reports_again);
+    // 라이트로 되돌리면 두 번째 통지.
+    session.setSystemAppearance(false);
+    i = 0;
+    while (i < 20) : (i += 1) _ = try session.tick();
+    surface.lockCore(session.io);
+    const reports_back = surface.core.color_scheme_reports;
+    const light_now = !surface.core.colorSchemeIsDark();
+    surface.unlockCore(session.io);
+    try std.testing.expectEqual(@as(u32, 2), reports_back);
+    try std.testing.expect(light_now);
+
+    // **구독하지 않은 Term 은 조용하다** — 같은 창의 두 번째 Term(구독 없음)은 전환을 두 번 겪고도 통지 0.
+    try pane_ops.newTermInActivePane(session);
+    const t2 = pane_ops.activePane(session).activeTerm();
+    session.setSystemAppearance(true);
+    i = 0;
+    while (i < 20) : (i += 1) _ = try session.tick();
+    t2.surface.lockCore(session.io);
+    const t2_reports = t2.surface.core.color_scheme_reports;
+    const t2_dark = t2.surface.core.colorSchemeIsDark();
+    t2.surface.unlockCore(session.io);
+    try std.testing.expectEqual(@as(u32, 0), t2_reports);
+    try std.testing.expect(t2_dark); // 색은 받았다 — 통지만 안 만든다
+    surface.lockCore(session.io);
+    const reports_third = surface.core.color_scheme_reports;
+    surface.unlockCore(session.io);
+    try std.testing.expectEqual(@as(u32, 3), reports_third); // 구독한 첫 Term 은 세 번째 통지
+}
+
+// [2031 실데이터] **모든 프리셋의 밝기 등급이 이름과 맞는다.** 등급 함수(휘도 < 0.5)는 문서화된 선택이라, 실제 16 프리셋에서 «light·latte·
+// dawn» 이 라이트로, 나머지가 다크로 갈리는지 실측한다 — 한 프리셋이라도 어긋나면 그 테마 사용자는 반대 통지를 받는다.
+test "터미널 2031 실데이터: theme.preset 16개의 배경 밝기 등급이 이름(light/latte/dawn)과 맞는다" {
+    const theme_mod = config_mod.theme;
+    inline for (@typeInfo(theme_mod.ThemePreset).@"enum".fields) |f| {
+        const preset: theme_mod.ThemePreset = @enumFromInt(f.value);
+        const colors = theme_mod.presetColors(preset);
+        const bg = try config_mod.appearance.parseHexColor(colors.background);
+        const dark = maru.terminal.core.isDarkBackground(.{ .r = bg.r, .g = bg.g, .b = bg.b });
+        const expect_light = std.mem.indexOf(u8, f.name, "light") != null or std.mem.indexOf(u8, f.name, "latte") != null or std.mem.indexOf(u8, f.name, "dawn") != null;
+        if (dark == expect_light) {
+            std.debug.print("preset {s}: bg {s} classified dark={}\n", .{ f.name, colors.background, dark });
+            return error.PresetClassMismatch;
+        }
     }
 }
 

@@ -1054,6 +1054,20 @@ pub fn reapplyForcedScmHover(self: *AppSession) void {
 /// - 정수 — 그 표시 슬롯(범위 밖은 마지막으로 clamp).
 ///
 /// env 미설정이면 무동작.
+/// MARU_FORCE_SYS_APPEARANCE_LATER=<light|dark>@<ms> — 앱이 뜬 뒤 <ms> 지나서 시스템 외관을 한 번 바꾼다(2031 색 구성 통지의 실기
+/// 검증 — 첫 frame 의 `MARU_FORCE_SYS_APPEARANCE` 는 pane 안의 앱이 `?2031h` 를 보내기 **전**이라 통지를 볼 수 없다). config
+/// `theme.follow-system=true` 가 필요하다. 매 tick 불리고 한 번만 발사한다.
+pub fn reapplyForcedAppearanceLater(self: *AppSession) void {
+    if (self.debug_sys_appearance_later_fired) return;
+    const raw = std.c.getenv("MARU_FORCE_SYS_APPEARANCE_LATER") orelse return;
+    const spec = std.mem.span(raw);
+    const at = std.mem.indexOfScalar(u8, spec, '@') orelse return;
+    const delay_ms = std.fmt.parseInt(u64, spec[at + 1 ..], 10) catch return;
+    if (self.awakeMs() < delay_ms) return;
+    self.debug_sys_appearance_later_fired = true;
+    self.setSystemAppearance(std.mem.eql(u8, spec[0..at], "dark"));
+}
+
 pub fn reapplyForcedSidebarHover(self: *AppSession) void {
     const raw = std.c.getenv("MARU_FORCE_SIDEBAR_HOVER") orelse return;
     const rows = self.sidebar_rows.items.len;

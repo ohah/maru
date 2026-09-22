@@ -146,8 +146,11 @@ pub fn maybeDebugOpenSettings(self: *AppSession) void {
     if (std.c.getenv("MARU_FORCE_REMOTE_PANES")) |raw| {
         const spec = std.mem.span(raw);
         var parts = std.mem.splitScalar(u8, spec, ',');
-        const n = @min(std.fmt.parseInt(usize, parts.next() orelse "2", 10) catch 2, maru.session.remote_pane_table.max_panes);
-        const evicted = std.fmt.parseInt(usize, parts.next() orelse "0", 10) catch 0;
+        const max_panes = maru.session.remote_pane_table.max_panes;
+        const n = @min(std.fmt.parseInt(usize, parts.next() orelse "2", 10) catch 2, max_panes);
+        // 살아 있는 n + 밀린 evicted 가 상한을 넘으면 이 Term 의 pane 끼리 서로 밀어 셈이 어긋나고, 아래 `foreign` 이 음수로
+        // 넘친다(적대적 2회차 — `16,1` 이 정수 오버플로로 abort). 상한 안으로 자른다.
+        const evicted = @min(std.fmt.parseInt(usize, parts.next() orelse "0", 10) catch 0, max_panes - n);
         const t = pane_ops.activePane(self).activeTerm();
         t.agent_kind = .claude;
         t.agent_kind_from_hook = true;
@@ -170,7 +173,7 @@ pub fn maybeDebugOpenSettings(self: *AppSession) void {
             }
         }
         // 다른 surface 로 남은 칸을 채우고 <evicted> 개를 더 넣어 이 Term 의 가장 오래된 pane 부터 민다.
-        const foreign = maru.session.remote_pane_table.max_panes - (n + evicted) + evicted;
+        const foreign = max_panes - (n + evicted) + evicted;
         i = 0;
         while (i < foreign) : (i += 1) {
             const name = std.fmt.bufPrint(&buf, "%{d}", .{i}) catch break;

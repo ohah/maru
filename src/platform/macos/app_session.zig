@@ -276,7 +276,7 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 185: CR6d-v2b0b extends the read-only input probe with terminal byte/screen generation counters
 // and adds one synchronous transcript-to-canonical-evidence leaf. Raw inventories are borrowed
 // only for the call; Zig owns reduction and absent-target publication.
-pub const abi_version: u32 = 186;
+pub const abi_version: u32 = 187;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -2414,6 +2414,10 @@ pub const EditorSaveConflictSmokeProbe = extern struct {
     editor_present: u32 = 0,
     dirty: u32 = 0,
     overlay_open: u32 = 0,
+    /// **저장 충돌 비교가 서 있나**(C1b) — `.save_conflict` 기준 비교 Term 이 있고 두 쪽이 채워졌나.
+    /// 「비교를 골랐다」의 유일한 밖에서 보이는 결과다: 탭은 앱 안에만 있고 디스크에는 아무 일도
+    /// 일어나지 않는다(그것이 이 선택의 계약이다).
+    compare_ready: u32 = 0,
 };
 
 pub const PendingClose = union(enum) {
@@ -4417,14 +4421,33 @@ pub const AppSession = struct {
     /// **자동화가 아니다.** 스모크는 파일 열기를 공개 ABI 로 하고 저장을 **실제 키 이벤트**로 한다 —
     /// 이 함수는 그 결과를 밖에서 볼 창 하나다. 그것이 없으면 스모크가 「눌렀다」까지만 알고 **무엇이
     /// 일어났는지** 모른다(그러면 아무것도 증명하지 않는다).
+    /// 위 probe 의 한 조각. **활성 Term 과 무관하게** 창 전체에서 찾는다 — 비교를 열면 그 탭이
+    /// 초점을 받으므로 활성만 보면 「문서가 아니다」밖에 알 수 없다.
+    fn saveConflictCompareReady(self: *AppSession) u32 {
+        for (self.tabs.items) |tab| {
+            for (tab.panes.items) |pane| {
+                for (pane.terms.items) |t| {
+                    const entry = t.file_entry orelse continue;
+                    if (entry.kind != .diff or entry.diff_base != .save_conflict) continue;
+                    if (entry.diff_ready) return 1;
+                }
+            }
+        }
+        return 0;
+    }
+
     pub fn editorSaveConflictSmokeProbe(self: *AppSession) EditorSaveConflictSmokeProbe {
         if (!self.surface_initialized or self.tabs.items.len == 0) return .{};
         const term = pane_ops.activePane(self).activeTerm();
-        if (term.kind != .editor or term.rt.editor_doc == null) return .{ .overlay_open = @intFromBool(self.anyOverlayOpen()) };
+        if (term.kind != .editor or term.rt.editor_doc == null) return .{
+            .overlay_open = @intFromBool(self.anyOverlayOpen()),
+            .compare_ready = self.saveConflictCompareReady(),
+        };
         return .{
             .editor_present = 1,
             .dirty = @intFromBool(editor_ops.isDirty(term)),
             .overlay_open = @intFromBool(self.anyOverlayOpen()),
+            .compare_ready = self.saveConflictCompareReady(),
         };
     }
     /// 본문 분리: app_session/term.zig(F16). ABI가 직접 부르므로 진입만 남긴다.
@@ -9924,13 +9947,12 @@ pub const AppSession = struct {
         primary: maru.i18n.Key,
         alternate: maru.i18n.Key,
         cancel: maru.i18n.Key = .common_cancel,
-        /// 열 때 포커스를 어디에 두나. **기본은 `primary`** 다(Enter = 확정 — 컴포넌트의 오랜 계약).
+        /// **네 번째 자리**(행동이 셋인 상자만). `cancel` 은 Esc·바깥 클릭의 갈래라 행동을 못 놓는다 —
+        /// 그 자리에 놓으면 Esc 가 그것을 실행한다(§4).
         ///
-        /// ⚠️ **파괴적인 선택이 둘인 상자는 그 기본이 함정이다**(C1a — §4). 저장 충돌은 `primary`
-        /// (덮어쓰기)도 `alternate`(다시 읽기)도 무언가를 버리므로, 무심한 Enter 가 그것을 실행하면
-        /// 확인 상자가 아니라 지뢰다. 그때만 `cancel` 에 둔다 — C1b 가 안전한 선택(비교)을
-        /// `primary` 로 올리면 이 예외는 사라진다.
-        focus: chrome.components.confirm.Focus = .confirm,
+        /// ⚠️ **`primary` 에는 아무것도 버리지 않는 선택만 둔다.** 상자는 열 때 `primary` 에 포커스를
+        /// 두므로 Enter 가 그것을 실행한다 — 파괴적인 것을 거기 두면 확인 상자가 아니라 지뢰다.
+        extra: ?maru.i18n.Key = null,
     };
 
     /// 키로 확인 대화상자를 연다(docs/i18n.md §7.2 1차) — 리터럴을 넘기면 컴파일되지 않는다.
@@ -9947,8 +9969,8 @@ pub const AppSession = struct {
             .primary = maru.i18n.t(choices.primary),
             .alternate = maru.i18n.t(choices.alternate),
             .cancel = maru.i18n.t(choices.cancel),
+            .extra = if (choices.extra) |k| maru.i18n.t(k) else null,
         });
-        self.chrome_host.confirm.focused = choices.focus;
     }
 
     /// 문장을 **미리 만든** 확인 대화상자(서버 이름 같은 값이 든다 — §8.2a 신뢰 프롬프트). 버튼은 키.
@@ -11506,6 +11528,11 @@ pub const AppSession = struct {
 
     /// 그 entry의 두 쪽을 백엔드에 요청한다. 실패해도 조용히 두지 않고 `diff_failed`로 남긴다.
     pub fn requestDiffContent(self: *AppSession, entry: *dock_panel.Entry) void {
+        // ⚠️ **저장 충돌 비교는 git 을 안 부른다**(C1b — editor-surface.md §4). 여기서 가르지 않으면
+        // 아래가 `diff_repo` 없음을 보고 **실패로 표시**하고, 파일이 또 바뀌었을 때는 그 비교를
+        // **git 내용으로 덮는다**. 새로 고치는 자리 둘(`fileChanged`·tick 폴링)이 전부 이 함수를
+        // 지나므로 **가르는 자리는 이 한 곳**이다.
+        if (entry.diff_base == .save_conflict) return editor_conflict_ops.fillCompare(self, entry);
         entry.diff_ready = false;
         entry.diff_failed = false;
         entry.diff_truncated = false;
@@ -12507,9 +12534,9 @@ pub const AppSession = struct {
                     .paste => |target_id| self.confirmPendingPaste(target_id),
                     .close => |target| self.executeClose(target),
                     .untitled_overwrite => editor_untitled_save_ops.confirmOverwrite(self),
-                    // **`primary` = 덮어쓰기**(C1a — §4). 이 상자만 포커스를 `cancel` 에 두고 여는
-                    // 이유가 그것이다: Enter 가 이 갈래를 실행하면 바깥 변경이 사라진다.
-                    .save_conflict => |surface_id| editor_conflict_ops.confirmOverwrite(self, surface_id),
+                    // **`primary` = 비교**(C1b — §4). 셋 중 **아무것도 버리지 않는 유일한 선택**이라
+                    // 여기 둔다: 상자는 열 때 `primary` 에 포커스를 두므로 Enter 가 이것을 실행한다.
+                    .save_conflict => |surface_id| editor_conflict_ops.confirmCompare(self, surface_id),
                     .none => {},
                 }
             },
@@ -12529,10 +12556,18 @@ pub const AppSession = struct {
                         }
                     } else self.cancelPendingConfirm();
                 } else if (owner == .save_conflict) {
-                    // **`alternate` = 다시 읽기**(C1a — §4). 되돌릴 수 있는 편집으로 넣으므로
-                    // `⌘Z` 가 방금 친 것을 되살린다.
-                    editor_conflict_ops.confirmReload(self, owner.save_conflict);
+                    // **`alternate` = 덮어쓰기**(C1b 가 `primary` 를 비교로 올렸다 — §4). CAS 를
+                    // 건너뛰는 그 길이고, 부르는 자리는 이것 하나다.
+                    editor_conflict_ops.confirmOverwrite(self, owner.save_conflict);
                 }
+                self.metal_dirty = true;
+            },
+            .confirm_extra => {
+                const owner = self.pending_confirm;
+                self.pending_confirm = .none;
+                // **네 번째 자리 = 다시 읽기**(C1b — §4). 되돌릴 수 있는 편집으로 넣으므로 `⌘Z` 가
+                // 방금 친 것을 되살린다. `cancel` 에 놓을 수 없는 이유는 그것이 Esc 라서다.
+                if (owner == .save_conflict) editor_conflict_ops.confirmReload(self, owner.save_conflict);
                 self.metal_dirty = true;
             },
             .confirm_cancel => { // Esc/N — 보류한 동작(닫기/리셋/종료/붙여넣기/grant)을 버린다.
@@ -13919,6 +13954,7 @@ pub const AppSession = struct {
                     self.dispatchChromeAction(switch (act) {
                         .confirmed => .confirm_accept,
                         .alternate => .confirm_alternate,
+                        .extra => .confirm_extra,
                         .cancelled => .confirm_cancel,
                     });
                 }

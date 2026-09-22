@@ -92,6 +92,8 @@ const Table = struct {
     git_path_outside_repo: [:0]const u8,
     git_submodule_no_diff: [:0]const u8,
     dock_merge_stages: [:0]const u8,
+    /// 저장 충돌 비교 탭의 기준 이름(C1b) — git 기준이 아니라 「디스크 ↔ 내 편집」이다.
+    dock_save_conflict: [:0]const u8,
     editor_conflict_accept_current: [:0]const u8,
     editor_conflict_accept_incoming: [:0]const u8,
     editor_conflict_accept_both: [:0]const u8,
@@ -113,6 +115,8 @@ const Table = struct {
     /// 「다시 읽기」가 실패한 이유 셋 + 나머지(C1a). **저장 실패 표와 다른 표다** — 그쪽은 쓰기이고
     /// 이쪽은 읽기라 사용자가 할 일이 다르다. 뭉개지 않는다: 지워진 것과 글자가 아닌 것과 너무 커진
     /// 것은 서로 다른 상황이다.
+    /// 비교 탭을 열지 못했다(C1b) — 조용히 아무 일도 안 하면 사용자는 버튼이 죽은 줄 안다.
+    editor_compare_failed: [:0]const u8,
     editor_reload_gone: [:0]const u8,
     editor_reload_not_text: [:0]const u8,
     editor_reload_too_large: [:0]const u8,
@@ -268,6 +272,7 @@ const Table = struct {
     btn_quit_end_session: [:0]const u8,
     btn_reset: [:0]const u8,
     btn_reload: [:0]const u8,
+    btn_compare: [:0]const u8,
     btn_overwrite: [:0]const u8,
     /// 저장 충돌의 **취소**. 「취소」라고만 하면 *무엇이* 취소인지 모른다 — 저장이 취소된 것이지
     /// 편집이 취소된 것이 아니다(C1a — editor-surface.md §4).
@@ -1076,6 +1081,7 @@ const en: Table = .{
     .git_path_outside_repo = "Paths outside the repository are not opened",
     .git_submodule_no_diff = "Submodules do not show a diff",
     .dock_merge_stages = "3-way merge",
+    .dock_save_conflict = "Disk ↔ your edits",
     .editor_conflict_accept_current = "Accept Current",
     .editor_conflict_accept_incoming = "Accept Incoming",
     .editor_conflict_accept_both = "Accept Both",
@@ -1090,6 +1096,7 @@ const en: Table = .{
     .editor_save_gone = "The file is no longer there, so it cannot be saved.",
     .editor_save_external_conflict = "The file changed outside, so nothing was saved. Your edits are still here.",
     .editor_save_conflict_choose = "The file changed outside. Overwrite discards that change; Reload discards what you just typed (undo brings it back).",
+    .editor_compare_failed = "The comparison could not be opened. Your edits are still here.",
     .editor_reload_gone = "The file is no longer readable, so it was not reloaded. Your edits are still here.",
     .editor_reload_not_text = "The file on disk is no longer UTF-8 text, so it was not reloaded. Your edits are still here.",
     .editor_reload_too_large = "The file on disk grew past the size this editor can open, so it was not reloaded. Your edits are still here.",
@@ -1231,6 +1238,7 @@ const en: Table = .{
     .btn_quit_end_session = "Quit and end sessions",
     .btn_reset = "Reset",
     .btn_reload = "Reload",
+    .btn_compare = "Compare",
     .btn_overwrite = "Overwrite",
     .btn_keep_editing = "Keep editing",
     .btn_move_to_trash = "Move to Trash",
@@ -1809,6 +1817,7 @@ const ko: Table = .{
     .git_path_outside_repo = "저장소 밖을 가리키는 경로는 열지 않습니다",
     .git_submodule_no_diff = "하위 모듈은 비교를 표시하지 않습니다",
     .dock_merge_stages = "3-way 병합",
+    .dock_save_conflict = "디스크 ↔ 내 편집",
     .editor_conflict_accept_current = "현재 것 채택",
     .editor_conflict_accept_incoming = "들어온 것 채택",
     .editor_conflict_accept_both = "둘 다 채택",
@@ -1823,6 +1832,7 @@ const ko: Table = .{
     .editor_save_gone = "그 파일이 더 이상 없어서 저장할 수 없습니다",
     .editor_save_external_conflict = "파일이 외부에서 바뀌어 아무것도 저장하지 않았습니다. 편집한 내용은 그대로 있습니다",
     .editor_save_conflict_choose = "파일이 외부에서 바뀌었습니다. 덮어쓰면 그 변경이, 다시 읽으면 방금 친 것이 사라집니다(되돌리기로 돌아옵니다)",
+    .editor_compare_failed = "비교를 열지 못했습니다. 편집한 내용은 그대로 있습니다",
     .editor_reload_gone = "그 파일을 더 이상 읽을 수 없어 다시 읽지 못했습니다. 편집한 내용은 그대로 있습니다",
     .editor_reload_not_text = "디스크의 파일이 UTF-8 글자가 아니어서 다시 읽지 못했습니다. 편집한 내용은 그대로 있습니다",
     .editor_reload_too_large = "디스크의 파일이 편집기가 열 수 있는 크기를 넘어 다시 읽지 못했습니다. 편집한 내용은 그대로 있습니다",
@@ -1964,6 +1974,7 @@ const ko: Table = .{
     .btn_quit_end_session = "종료 및 세션 끝내기",
     .btn_reset = "초기화",
     .btn_reload = "다시 읽기",
+    .btn_compare = "비교",
     .btn_overwrite = "덮어쓰기",
     .btn_keep_editing = "계속 편집",
     .btn_move_to_trash = "휴지통으로 이동",

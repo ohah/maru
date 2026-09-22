@@ -11514,7 +11514,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                     return .init(
                         editorPresent: out.editor_present != 0,
                         dirty: out.dirty != 0,
-                        overlayOpen: out.overlay_open != 0
+                        overlayOpen: out.overlay_open != 0,
+                        compareReady: out.compare_ready != 0
                     )
                 },
                 typeText: { text in
@@ -11541,11 +11542,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         case .selectAll: ("a", 0)
         case .caretToLineEnd: (String(UnicodeScalar(NSRightArrowFunctionKey)!), 124)
         case .save: ("s", 1)
-        // 확인 상자의 버튼 글자(`[Y]`/`[D]`) — `chrome.components.confirm` 이 라벨에 적어 두는 그 키다.
-        // ANSI keyCode: `y`=16, `d`=2. **Cmd 를 함께 보내는 이유**는 아래 주석과 같다: 합성 `NSEvent`
+        // 확인 상자의 버튼 글자 — `chrome.components.confirm` 이 라벨에 적어 두는 그 키다. C1b 가
+        // `primary` 를 **비교**로 올렸으므로 덮어쓰기는 `[D]`, 다시 읽기는 네 번째 자리 `[R]` 이다.
+        // ANSI keyCode: `d`=2, `r`=15. **Cmd 를 함께 보내는 이유**는 아래 주석과 같다: 합성 `NSEvent`
         // 로는 평키가 `interpretKeyEvents` 를 지나지 않아 이 프로세스에서 재현되지 않는다.
-        case .answerOverwrite: ("y", 16)
-        case .answerReload: ("d", 2)
+        case .answerOverwrite: ("d", 2)
+        case .answerReload: ("r", 15)
+        case .answerCompare: ("y", 16)
         }
         guard let event = NSEvent.keyEvent(
             with: .keyDown, location: .zero, modifierFlags: [.command],

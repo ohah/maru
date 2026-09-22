@@ -135,6 +135,11 @@ pub const DiffBase = enum {
     /// 에이전트 타임라인의 **완료된 턴 하나**: `스냅샷[K+1] ↔ 스냅샷[K]`(P5). 양쪽 다 tree라
     /// 작업트리가 어떻게 바뀌든 그 비교는 고정된다 — `turn`(마지막 스냅샷 ↔ 작업트리)과 **다른 기준**이다.
     turn_range,
+    /// **저장 충돌의 두 쪽**: `디스크 ↔ 내 편집`(C1a·C1b — editor-surface.md §4). 위 여섯과 달리
+    /// **git 을 부르지 않는다** — 왼쪽은 그 순간의 파일 바이트이고 오른쪽은 편집기 버퍼의 사본이다.
+    /// 그래서 `diff_repo` 도 `diff_rel_path` 도 필요 없고, 채우는 자리가 따로 있다
+    /// (`AppSession.requestDiffContent` 가 이 갈래를 머리에서 가른다).
+    save_conflict,
     /// 병합 충돌 중인 파일: `HEAD ↔ 작업트리`. index에 stage 0이 없어 `:<경로>`를 못 읽으므로(실측) 왼쪽을
     /// HEAD로 잡는다 — 그러면 작업트리의 충돌 표시를 그대로 볼 수 있다.
     conflict,
@@ -152,6 +157,8 @@ pub const DiffBase = enum {
             // **`3-way` 는 그대로 둔다** — git·VS Code·JetBrains 가 공통으로 쓰는 낱말이라 옮기면
             // 그 관례와 끊긴다. 뒤의 보통명사만 옮긴다(`3-way 병합`).
             .merge_stages => i18n.t(.dock_merge_stages),
+            // **git 이 아닌 유일한 기준** — 「디스크 ↔ 내 편집」이라 그렇게 적는다(§4).
+            .save_conflict => i18n.t(.dock_save_conflict),
         };
     }
 };
@@ -274,6 +281,12 @@ pub const Entry = struct {
     /// `.turn_range` 기준의 **오른쪽 tree**(P5). 왼쪽은 아래 `diff_commit_oid`가 든다 — 두 기준이
     /// "왼쪽 rev"라는 같은 자리를 공유하고, 오른쪽이 있는 기준만 이 값을 더 든다.
     diff_right_oid: []u8 = &.{},
+    /// `.save_conflict` 기준의 **오른쪽 주인**: 그 두 쪽 중 「내 편집」을 든 문서 Term 의 surface id.
+    ///
+    /// ⚠️ **경로로 찾지 않는다**(C1b — editor-surface.md §4). 문서 Term 은 `file_entry` 가 없을 수도
+    /// 있고(`openPathInActivePane` 로 연 것), 같은 경로를 다시 열면 **다른 Term** 이다. 그 Term 이
+    /// 없으면 비교는 **실패로 표시된다** — 주제가 사라졌기 때문이다. 다른 기준에서는 0 이다.
+    diff_buffer_surface_id: u64 = 0,
     /// `.commit` 기준이 비교할 **커밋 OID**(P4b). 왼쪽은 `<oid>^:<경로>`, 오른쪽은 `<oid>:<경로>`다.
     /// 다른 기준에서는 비어 있다 — 그 값들은 목록 읽기가 준 merge-base·스냅샷 tree를 쓴다.
     diff_commit_oid: []u8 = &.{},

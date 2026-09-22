@@ -17,10 +17,12 @@ final class EditorSaveConflictSmokeDriver {
         case externalConflict = "external-conflict"
         /// 밖에서 바뀌지 않은 파일에 `⌘S` — 조용히 저장되어야 한다(대조군).
         case cleanSave = "clean-save"
-        /// 충돌 상자에서 **덮어쓰기**(`Y`) — 내 편집이 디스크에 있어야 한다(C1a).
+        /// 충돌 상자에서 **덮어쓰기**(`D` — `alternate`) — 내 편집이 디스크에 있어야 한다(C1a).
         case conflictOverwrite = "conflict-overwrite"
-        /// 충돌 상자에서 **다시 읽기**(`D`) — 디스크는 그대로이고 문서가 clean 이어야 한다(C1a).
+        /// 충돌 상자에서 **다시 읽기**(`R`) — 디스크는 그대로이고 문서가 clean 이어야 한다(C1a).
         case conflictReload = "conflict-reload"
+        /// 충돌 상자에서 **비교**(`Y` — `primary`) — 비교가 서고 **디스크는 그대로**여야 한다(C1b).
+        case conflictCompare = "conflict-compare"
 
         init?(environment: [String: String] = ProcessInfo.processInfo.environment) {
             guard let raw = environment["MARU_EDITOR_SAVE_CONFLICT_SMOKE_SCENARIO"] else { return nil }
@@ -59,6 +61,9 @@ final class EditorSaveConflictSmokeDriver {
         case answerOverwrite
         /// 확인 상자의 **다시 읽기**.
         case answerReload
+        /// 확인 상자의 **비교**(`primary`). Enter 도 같은 갈래지만 **평키는 합성으로 재현되지 않으므로**
+        /// 그 버튼의 글자를 누른다.
+        case answerCompare
     }
 
     /// 호스트가 Zig 에서 읽어 주는 세 사실. 「편집기가 붙었나 · 편집이 남았나 · 무언가 떠 있나」.
@@ -66,6 +71,9 @@ final class EditorSaveConflictSmokeDriver {
         let editorPresent: Bool
         let dirty: Bool
         let overlayOpen: Bool
+        /// 저장 충돌 비교가 서 있나(C1b). **「비교」의 유일한 밖에서 보이는 결과**다 — 그 선택은
+        /// 일부러 디스크를 건드리지 않으므로 파일만 보면 아무 일도 안 한 것과 구별되지 않는다.
+        let compareReady: Bool
     }
 
     private(set) var stage: Stage = .notStarted
@@ -152,7 +160,7 @@ final class EditorSaveConflictSmokeDriver {
             case .cleanSave:
                 stage = .saved
                 guard pressKey(.save) else { return fail("save_key_refused") }
-            case .externalConflict, .conflictOverwrite, .conflictReload:
+            case .externalConflict, .conflictOverwrite, .conflictReload, .conflictCompare:
                 // 신호를 못 남기면 기다릴 상대가 없다 — budget 을 태우지 말고 바로 말한다.
                 guard announceReady() else { return fail("ready_signal_unwritable") }
                 stage = .awaitingExternalChange
@@ -170,13 +178,19 @@ final class EditorSaveConflictSmokeDriver {
             guard let now = diskContent() else { return fail("document_vanished_after_save") }
             guard let p = probe() else { return fail("probe_gone_after_save") }
             switch scenario {
-            case .conflictOverwrite, .conflictReload:
-                // 두 시나리오의 **공통 전제**: 저장이 멈추고 상자가 떴다. 그것까지는
+            case .conflictOverwrite, .conflictReload, .conflictCompare:
+                // 세 시나리오의 **공통 전제**: 저장이 멈추고 상자가 떴다. 그것까지는
                 // `external-conflict` 가 이미 재므로 여기서는 전제만 확인하고 답을 누른다.
                 if now != contentOnDisk { return fail("overwrote_external_change") }
                 guard p.overlayOpen else { return fail("no_notice_after_conflict") }
+                // **비교는 아직 아무것도 열려 있지 않다** — 그래야 아래에서 「열렸다」가 뜻을 갖는다.
+                if scenario == .conflictCompare, p.compareReady { return fail("compare_already_open") }
                 stage = .answered
-                let key: Key = scenario == .conflictOverwrite ? .answerOverwrite : .answerReload
+                let key: Key = switch scenario {
+                case .conflictOverwrite: .answerOverwrite
+                case .conflictReload: .answerReload
+                default: .answerCompare
+                }
                 guard pressKey(key) else { return fail("answer_key_refused") }
                 // ⚠️ **여기서 돌아간다.** 이 `switch` 아래에는 `.saved` 의 공통 꼬리(`stage = .done`)가
                 // 있어서, 안 돌아가면 답을 누른 그 tick 에 곧바로 `done` 이 되고 `.answered` 검사가
@@ -212,6 +226,11 @@ final class EditorSaveConflictSmokeDriver {
                 // **디스크는 그대로**(다시 읽기는 읽기다) 그리고 **문서는 clean** 이다.
                 guard now == contentOnDisk else { return fail("reload_touched_disk") }
                 if p.dirty { return fail("reload_left_dirty") }
+            case .conflictCompare:
+                // ⑴ **비교가 섰다**(두 쪽이 채워졌다) ⑵ **디스크는 그대로다** — 「비교」는 아무것도
+                //    버리지 않는 선택이라 그 둘이 함께 참이어야 한다.
+                guard p.compareReady else { return fail("compare_did_not_open") }
+                guard now == contentOnDisk else { return fail("compare_touched_disk") }
             case .externalConflict, .cleanSave:
                 return fail("unexpected_answer_stage")
             }

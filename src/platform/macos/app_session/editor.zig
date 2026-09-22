@@ -37301,7 +37301,7 @@ const ConflictFixture = struct {
     }
 };
 
-test "C1a-1 저장 충돌은 «알리지 않고 묻는다» — 두 행동과 계속 편집, 그리고 포커스는 취소에 선다" {
+test "C1a-1 저장 충돌은 «알리지 않고 묻는다» — 행동 셋과 계속 편집, 그리고 Enter 는 아무것도 안 지운다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     const c = try ConflictFixture.init(allocator, "ask.txt", "v0\n");
@@ -37315,19 +37315,24 @@ test "C1a-1 저장 충돌은 «알리지 않고 묻는다» — 두 행동과 �
     // ⑴ 알림이 아니라 확인이다.
     try testing.expect(!s.chrome_host.notice.open);
     try testing.expect(s.chrome_host.confirm.open);
-    // ⑵ **세 자리가 다 찼다** — 두 행동 + 계속 편집. 하나라도 비면 사용자는 고를 것을 못 본다.
+    // ⑵ **네 자리가 다 찼다** — 행동 셋 + 계속 편집. 하나라도 비면 사용자는 고를 것을 못 본다.
     try testing.expect(s.chrome_host.confirm.has_alternate);
-    try testing.expectEqualStrings(maru.i18n.t(.btn_overwrite), s.chrome_host.confirm.confirm_label);
-    try testing.expectEqualStrings(maru.i18n.t(.btn_reload), s.chrome_host.confirm.alternate_label);
+    try testing.expect(s.chrome_host.confirm.has_extra);
+    try testing.expectEqualStrings(maru.i18n.t(.btn_compare), s.chrome_host.confirm.confirm_label);
+    try testing.expectEqualStrings(maru.i18n.t(.btn_overwrite), s.chrome_host.confirm.alternate_label);
+    try testing.expectEqualStrings(maru.i18n.t(.btn_reload), s.chrome_host.confirm.extra_label);
     try testing.expectEqualStrings(maru.i18n.t(.btn_keep_editing), s.chrome_host.confirm.cancel_label);
-    // ⑶ **포커스가 취소다.** 이 상자의 두 행동은 **둘 다 무언가를 버리므로**, 컴포넌트 기본값
-    //    (`primary`)이면 무심한 Enter 가 바깥 변경을 지운다. 여기가 그 예외의 유일한 근거다.
-    try testing.expectEqual(chrome.components.confirm.Focus.cancel, s.chrome_host.confirm.focused);
+    // ⑶ **`primary` 는 비교다** — 셋 중 아무것도 버리지 않는 유일한 선택이고, 상자는 열 때 `primary` 에
+    //    포커스를 두므로 그 자리에 파괴적인 것을 놓으면 무심한 Enter 가 그것을 실행한다.
+    try testing.expectEqual(chrome.components.confirm.Focus.confirm, s.chrome_host.confirm.focused);
     // ⑷ **문구가 양쪽을 다 말한다** — 무엇이 사라지는지 안 적으면 사용자는 모르고 고른다.
     try testing.expect(std.mem.startsWith(u8, &s.confirm_message_buf, maru.i18n.t(.editor_save_conflict_choose)));
 
-    // ⑸ **그래서 Enter 는 아무것도 안 지운다.** 포커스가 취소에 있으므로 `confirm.handle` 이 Enter 를
-    //    취소로 읽는다 — 상자는 닫히고 디스크는 그대로다. 포커스가 `primary` 이던 변이는 여기서 죽는다.
+    // ⑸ **그래서 Enter 는 아무것도 안 지운다.** 포커스가 비교에 있으므로 Enter 는 **비교를 연다** —
+    //    디스크도 버퍼도 그대로고 문서는 dirty 로 남는다. 파괴적인 것을 `primary` 로 옮긴 변이는
+    //    여기서 죽는다.
+    const buffer_before = try allocator.dupe(u8, c.term.rt.editor_doc.?.file.content);
+    defer allocator.free(buffer_before);
     try c.pressEnter();
     try testing.expect(!s.chrome_host.confirm.open);
     {
@@ -37335,6 +37340,7 @@ test "C1a-1 저장 충돌은 «알리지 않고 묻는다» — 두 행동과 �
         defer allocator.free(on_disk);
         try testing.expectEqualStrings("outside\n", on_disk);
     }
+    try testing.expectEqualStrings(buffer_before, c.term.rt.editor_doc.?.file.content);
     try testing.expect(isDirty(c.term));
 }
 
@@ -37381,7 +37387,7 @@ test "C1a-3 덮어쓰기는 실제로 쓴다 — 두 번째 충돌에도, 그리
     try testing.expect(insertText(s, c.term, "b"));
     // **그리고 파일이 또 바뀐다.** CAS 를 건너뛰지 않으면 여기서 같은 물음이 되풀이돼 영영 저장 못 한다.
     try c.writeOutside("ow.txt", "outside2\n");
-    try c.answer('y');
+    try c.answer('d'); // **덮어쓰기는 `alternate`(D)** — C1b 가 `primary` 를 비교로 올렸다
 
     try testing.expect(!s.chrome_host.confirm.open);
     try testing.expect(!isDirty(c.term)); // 썼으니 clean
@@ -37408,7 +37414,7 @@ test "C1a-4 다시 읽기는 clean 이고, 되돌리기가 방금 친 것을 되
     defer allocator.free(mine);
     try c.writeOutside("rl.txt", "outside\n");
     c.pressSave();
-    try c.answer('d');
+    try c.answer('r'); // **다시 읽기는 네 번째 자리(R)**
 
     try testing.expect(!s.chrome_host.confirm.open);
     // ⑴ **디스크 내용이 들어왔다.**
@@ -37452,7 +37458,7 @@ test "C1a-5 다시 읽기가 실패하면 이유별로 말하고 편집은 남�
     // **글자가 아닌 파일로 바꾼다** — 다시 읽기가 이것을 문서에 넣으면 안 된다.
     try c.writeOutside("bad.txt", "\xff\xfe binary\n");
     c.pressSave();
-    try c.answer('d');
+    try c.answer('r');
 
     try testing.expect(s.chrome_host.notice.open);
     try testing.expect(std.mem.startsWith(u8, &s.notice_message_buf, maru.i18n.t(.editor_reload_not_text)));
@@ -37586,7 +37592,7 @@ test "C1a-10 재진입: 두 문서가 잇달아 충돌해도 답은 «마지막�
     pane.active_term = back;
 
     // ⑷ **덮어쓰기는 두 번째 문서에만 간다.**
-    try c.answer('y');
+    try c.answer('d'); // **덮어쓰기는 `alternate`(D)** — C1b 가 `primary` 를 비교로 올렸다
     {
         const two = try c.diskText(allocator, "two.txt");
         defer allocator.free(two);
@@ -37637,7 +37643,7 @@ test "C1a-11 다시 읽기도 «물은 그 문서»에만 간다 — 활성 추�
         if (pane.terms.items[idx] == t2) break;
     }
     pane.active_term = idx;
-    try c.answer('d');
+    try c.answer('r'); // **다시 읽기는 네 번째 자리(R)**
 
     // ⑴ **물은 문서**가 디스크를 받아들였다.
     try testing.expectEqualStrings("r1-outside\n", c.term.rt.editor_doc.?.file.content);
@@ -37645,6 +37651,156 @@ test "C1a-11 다시 읽기도 «물은 그 문서»에만 간다 — 활성 추�
     // ⑵ **남의 문서는 그대로다** — 활성으로 추정하면 여기서 `MINE2` 가 통째로 날아간다.
     try testing.expectEqualStrings("MINE2r2\n", t2.rt.editor_doc.?.file.content);
     try testing.expect(isDirty(t2));
+}
+
+test "C1b-1 비교는 «디스크 ↔ 내 편집» 탭을 열고 답은 아직 안 한 것이다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const c = try ConflictFixture.init(allocator, "cmp.txt", "base\n");
+    defer c.deinit(allocator);
+    const s = c.fx.session;
+
+    try testing.expect(insertText(s, c.term, "MINE"));
+    const mine = try allocator.dupe(u8, c.term.rt.editor_doc.?.file.content);
+    defer allocator.free(mine);
+    try c.writeOutside("cmp.txt", "THEIRS\n");
+    c.pressSave();
+    // **Enter = 비교**(`primary`) — 그 자리에 안전한 선택을 둔 결과다.
+    try c.pressEnter();
+
+    // ⑴ 비교 Term 이 섰고 기준이 저장 충돌이다.
+    const diff_term = @import("git.zig").diffTermFor(s, c.path, .save_conflict) orelse return error.NoCompareTerm;
+    const entry = diff_term.file_entry orelse return error.NoEntry;
+    try testing.expectEqual(maru.session.dock_panel.DiffBase.save_conflict, entry.diff_base);
+    try testing.expect(entry.diff_ready);
+    // ⑵ **왼쪽이 디스크, 오른쪽이 내 편집**이다(git 비교와 같은 방향). 뒤집히면 사용자가 배운 방향이 깨진다.
+    try testing.expectEqualStrings("THEIRS\n", entry.diff_original);
+    try testing.expectEqualStrings(mine, entry.diff_modified);
+    // ⑶ **주인은 surface id 로 든다** — 경로로 찾으면 entry 없는 문서 Term 을 놓친다.
+    try testing.expectEqual(c.term.surface.id, entry.diff_buffer_surface_id);
+    // ⑷ **답은 아직 안 했다** — 디스크도 버퍼도 그대로이고 문서는 dirty 다.
+    {
+        const on_disk = try c.diskText(allocator, "cmp.txt");
+        defer allocator.free(on_disk);
+        try testingExpectEqualStringsC1b(on_disk);
+    }
+    try testing.expectEqualStrings(mine, c.term.rt.editor_doc.?.file.content);
+    try testing.expect(isDirty(c.term));
+    try testing.expect(s.pending_confirm == .none);
+    // ⑸ **git 을 안 부른다** — 이 기준으로 백엔드에 요청이 나가면 저장소 없음으로 실패했을 것이다.
+    try testing.expect(!entry.diff_failed);
+    try testing.expectEqual(@as(u64, 0), entry.diff_request_id);
+}
+
+fn testingExpectEqualStringsC1b(on_disk: []const u8) !void {
+    try testing.expectEqualStrings("THEIRS\n", on_disk);
+}
+
+test "C1b-2 파일이 또 바뀌면 두 쪽이 «함께» 새로워진다 — git 내용으로 덮이지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const c = try ConflictFixture.init(allocator, "again.txt", "base\n");
+    defer c.deinit(allocator);
+    const s = c.fx.session;
+
+    try testing.expect(insertText(s, c.term, "M1"));
+    try c.writeOutside("again.txt", "T1\n");
+    c.pressSave();
+    try c.pressEnter();
+    const diff_term = @import("git.zig").diffTermFor(s, c.path, .save_conflict) orelse return error.NoCompareTerm;
+    const entry = diff_term.file_entry orelse return error.NoEntry;
+    try testing.expectEqualStrings("T1\n", entry.diff_original);
+
+    // **밖에서 또 바뀌고 나도 더 친다.** 제품의 감시 경로가 부르는 그 함수를 그대로 부른다 —
+    // `fileChanged` 와 tick 폴링이 전부 이 함수를 지난다.
+    try testing.expect(insertText(s, c.term, "M2"));
+    try c.writeOutside("again.txt", "T2\n");
+    s.requestDiffContent(entry);
+
+    // ⑴ **두 쪽이 함께 새로워졌다** — 한쪽만 새로워지면 화면이 두 시점을 섞어 보여 준다.
+    try testing.expect(entry.diff_ready);
+    try testing.expect(!entry.diff_failed);
+    try testing.expectEqualStrings("T2\n", entry.diff_original);
+    try testing.expectEqualStrings(c.term.rt.editor_doc.?.file.content, entry.diff_modified);
+
+    // ⑵ **여러 번 새로 고쳐도 죽지 않는다**(행 배열이 옛 버퍼를 빌린 채 남으면 여기서 깨진다).
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 600 };
+    {
+        var drawn = appendPaneFrame(s, leaf, diff_term) orelse return error.CompareDidNotDraw;
+        drawn.dl.deinit(allocator);
+    }
+    s.requestDiffContent(entry);
+    {
+        var drawn = appendPaneFrame(s, leaf, diff_term) orelse return error.CompareDidNotDraw;
+        drawn.dl.deinit(allocator);
+    }
+}
+
+test "C1b-3 다시 열면 내용이 갱신된다 — 첫 비교를 두 번째 저장 시도가 보지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const c = try ConflictFixture.init(allocator, "reopen.txt", "base\n");
+    defer c.deinit(allocator);
+    const s = c.fx.session;
+
+    try testing.expect(insertText(s, c.term, "A"));
+    try c.writeOutside("reopen.txt", "X\n");
+    c.pressSave();
+    try c.pressEnter();
+    const first = @import("git.zig").diffTermFor(s, c.path, .save_conflict) orelse return error.NoCompareTerm;
+    const entry = first.file_entry orelse return error.NoEntry;
+    try testing.expectEqualStrings("X\n", entry.diff_original);
+
+    // **두 번째 저장 시도** — 그 사이 양쪽이 또 바뀌었다.
+    const pane = pane_ops.activePane(s);
+    var idx: usize = pane.terms.items.len;
+    while (idx > 0) {
+        idx -= 1;
+        if (pane.terms.items[idx] == c.term) break;
+    }
+    pane.active_term = idx;
+    try testing.expect(insertText(s, c.term, "B"));
+    try c.writeOutside("reopen.txt", "Y\n");
+    s.dispatchAppAction(.editor_save);
+    try c.pressEnter();
+
+    // ⑴ **같은 탭을 쓰고**(하나만 생긴다) ⑵ **내용이 갱신됐다**.
+    const again = @import("git.zig").diffTermFor(s, c.path, .save_conflict) orelse return error.NoCompareTerm;
+    try testing.expectEqual(first, again);
+    try testing.expectEqualStrings("Y\n", entry.diff_original);
+    try testing.expectEqualStrings(c.term.rt.editor_doc.?.file.content, entry.diff_modified);
+}
+
+test "C1b-4 문서 Term 이 사라지면 비교는 «실패»다 — 없는 버퍼를 내 편집이라고 보여 주지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const c = try ConflictFixture.init(allocator, "subject.txt", "base\n");
+    defer c.deinit(allocator);
+    const s = c.fx.session;
+
+    try testing.expect(insertText(s, c.term, "MINE"));
+    try c.writeOutside("subject.txt", "THEIRS\n");
+    c.pressSave();
+    try c.pressEnter();
+    const diff_term = @import("git.zig").diffTermFor(s, c.path, .save_conflict) orelse return error.NoCompareTerm;
+    const entry = diff_term.file_entry orelse return error.NoEntry;
+    try testing.expect(entry.diff_ready);
+
+    // **문서 탭을 닫는다** — 비교의 주제가 사라졌다.
+    const pane = pane_ops.activePane(s);
+    var idx: usize = pane.terms.items.len;
+    while (idx > 0) {
+        idx -= 1;
+        if (pane.terms.items[idx] == c.term) break;
+    }
+    term_ops.closeTermAt(s, s.app_window.active_tab, pane, idx);
+
+    // 다음 새로 고침에서 **실패로 표시된다**(옛 두 쪽을 그대로 보여 주지 않는다).
+    s.requestDiffContent(entry);
+    try testing.expect(entry.diff_failed);
+    try testing.expect(!entry.diff_ready);
+    try testing.expectEqual(@as(usize, 0), entry.diff_original.len);
+    try testing.expectEqual(@as(usize, 0), entry.diff_modified.len);
 }
 
 test "C1a-8 다시 읽기는 «그 파일의 형식»을 따른다 — 다음 저장이 BOM·개행을 조용히 갈지 않는다" {
@@ -37660,7 +37816,7 @@ test "C1a-8 다시 읽기는 «그 파일의 형식»을 따른다 — 다음 �
     // **밖에서 형식까지 바뀌었다** — BOM 이 붙고 CRLF 가 됐다.
     try c.writeOutside("fmt.txt", "\xef\xbb\xbfouter\r\n");
     c.pressSave();
-    try c.answer('d');
+    try c.answer('r');
 
     // ⑴ 내용은 BOM 을 뗀 그것이고, **형식은 새 파일의 것**이다.
     try testing.expectEqualStrings("outer\r\n", c.term.rt.editor_doc.?.file.content);

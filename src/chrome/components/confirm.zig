@@ -681,6 +681,52 @@ test "confirm view: 좁은 창에서 버튼 배경이 패널(quad) 밖으로 안
     };
 }
 
+test "confirm view: 네 버튼도 좁은 창에서 패널 밖으로 안 넘친다 — 줄어드는 순서는 뒤에서부터" {
+    const Rgb = @import("../../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // 저장 충돌 상자의 실제 문구·라벨(한국어) — CJK 는 두 칸이라 폭이 가장 불리한 판이다.
+    const msg = "파일이 외부에서 바뀌었습니다. 덮어쓰면 그 변경이, 다시 읽으면 방금 친 것이 사라집니다(되돌리기로 돌아옵니다)";
+    const four = Choices{ .primary = "비교", .alternate = "덮어쓰기", .cancel = "계속 편집", .extra = "다시 읽기" };
+
+    // ⑴ **실측**: backing 500px(cw=8 → 62칸)까지는 **넷이 다 그려진다**. 그 아래로는 뒤 버튼이
+    //    생략되고(키는 살아 있다) **어느 폭에서도 패널 밖으로 넘치지 않는다** — 넘치면 rasterize 격자가
+    //    커져 사이드바·터미널을 침범한다(두 버튼 판의 그 회귀와 같은 부류).
+    for ([_]u32{ 2560, 1600, 1200, 900, 700, 500, 360, 200 }) |w| {
+        const p = props.ChromeProps{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 40, .backing_width_px = w, .backing_height_px = 600 } };
+        var s = State{};
+        s.showChoices(msg, four);
+        var out: std.ArrayList(draw.Op) = .empty;
+        try view(&s, p, &tk, arena, &out);
+        var panel_right: i32 = 0;
+        var buttons: usize = 0;
+        for (out.items) |op| {
+            switch (op) {
+                .quad => |q| panel_right = q.rect.x + @as(i32, @intCast(q.rect.w)),
+                .fill => buttons += 1,
+                else => {},
+            }
+        }
+        try std.testing.expect(panel_right > 0);
+        for (out.items) |op| {
+            if (op == .fill) {
+                try std.testing.expect(op.fill.rect.x + @as(i32, @intCast(op.fill.rect.w)) <= panel_right);
+            }
+        }
+        if (w >= 500) try std.testing.expectEqual(@as(usize, 4), buttons);
+    }
+
+    // ⑵ **줄어들어도 키는 그대로다.** 버튼이 생략된 폭에서도 `R`·Esc 가 그 갈래를 실행한다 —
+    //    그리기와 판정이 갈린 자리가 없어야 한다(생략은 그리기의 사정이다).
+    var narrow = State{};
+    narrow.showChoices(msg, four);
+    try std.testing.expectEqual(Action.extra, handle(.{ .key = .char, .codepoint = 'r' }, &narrow).?);
+    narrow.showChoices(msg, four);
+    try std.testing.expectEqual(Action.cancelled, handle(.{ .key = .escape }, &narrow).?);
+}
+
 test "confirm buttonAtPoint: 그려진 버튼 중심 클릭이 같은 Action — view↔hitTest 단일 레이아웃 일치" {
     const Rgb = @import("../../color.zig").Rgb;
     const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };

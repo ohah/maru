@@ -74,6 +74,25 @@ pub fn bodyPoint(
     return bodyPointMode(.caret, geom, rows, row_lines, lines, x_px, y_px);
 }
 
+/// `bodyPointMode` + 가상 텍스트(§4.1h) — `inlays_of(ctx, source_line)` 이 그 줄의 힌트를 준다(힌트 칸을 누르면 앵커 byte).
+pub fn bodyPointModeWith(
+    comptime mode: content.PointMode,
+    geom: Geometry,
+    rows: []const visual_map.VisualRow,
+    row_lines: []const u32,
+    lines: []const []const u8,
+    x_px: f64,
+    y_px: f64,
+    ctx: anytype,
+    comptime inlays_of: fn (@TypeOf(ctx), usize) []const content.Inlay,
+) ?Point {
+    return bodyPointImpl(mode, geom, rows, row_lines, lines, x_px, y_px, ctx, inlays_of);
+}
+
+fn noInlays(_: void, _: usize) []const content.Inlay {
+    return &.{};
+}
+
 /// `bodyPoint` 에 판정 뜻을 고르는 변형 — `.cluster` 는 포인터 **아래의 글자**(호버, tooling §8.2b). 나머지 네 단계는 같다.
 pub fn bodyPointMode(
     comptime mode: content.PointMode,
@@ -83,6 +102,20 @@ pub fn bodyPointMode(
     lines: []const []const u8,
     x_px: f64,
     y_px: f64,
+) ?Point {
+    return bodyPointImpl(mode, geom, rows, row_lines, lines, x_px, y_px, {}, noInlays);
+}
+
+fn bodyPointImpl(
+    comptime mode: content.PointMode,
+    geom: Geometry,
+    rows: []const visual_map.VisualRow,
+    row_lines: []const u32,
+    lines: []const []const u8,
+    x_px: f64,
+    y_px: f64,
+    ctx: anytype,
+    comptime inlays_of: fn (@TypeOf(ctx), usize) []const content.Inlay,
 ) ?Point {
     if (rows.len == 0) return null;
     // **행 배열과 줄 표는 같은 축이다.** 길이가 갈리면 아래 인덱싱이 엉뚱한 줄을 집는다.
@@ -132,8 +165,8 @@ pub fn bodyPointMode(
 
     const text = lines[source_line];
     const off_in_line = (switch (mode) {
-        .caret => content.byteAtPoint,
-        .cluster => content.clusterAtPoint,
+        .caret => content.byteAtPointWith,
+        .cluster => content.clusterAtPointWith,
     })(
         text,
         geom.tab_width,
@@ -147,6 +180,7 @@ pub fn bodyPointMode(
         // 판정자 15 개가 하나도 못 잡았다.
         @intCast(rel_x_raw - content_left_px),
         geom.cell_w_px,
+        inlays_of(ctx, source_line),
     );
     return .{ .row = row_i, .line = source_line, .byte_in_line = off_in_line };
 }
@@ -298,6 +332,19 @@ pub fn bodyAnchor(
     line: usize,
     byte_in_line: usize,
 ) ?Anchor {
+    return bodyAnchorWith(geom, rows, row_lines, lines, line, byte_in_line, &.{});
+}
+
+/// `bodyAnchor` + 가상 텍스트(§4.1h) — 그 줄의 힌트를 주면 자리가 힌트 뒤(글리프 열)로 온다. 안 주면 상자가 힌트 폭만큼 왼쪽에 선다.
+pub fn bodyAnchorWith(
+    geom: Geometry,
+    rows: []const visual_map.VisualRow,
+    row_lines: []const u32,
+    lines: []const []const u8,
+    line: usize,
+    byte_in_line: usize,
+    inlays: []const content.Inlay,
+) ?Anchor {
     if (rows.len == 0) return null;
     if (row_lines.len < rows.len) return null; // 두 축이 갈린 상태 — `bodyPoint` 와 같은 거절
     if (line >= lines.len) return null;
@@ -325,7 +372,7 @@ pub fn bodyAnchor(
     // 어차피 변에 묶이므로, 그 너머의 정확한 열을 알 필요가 없다(`columnsAtOffsets` 는 멈춘 열을
     // 남은 자리에 채운다). `expandTabs` 가 같은 이유로 같은 상한을 쓴다.
     const stop_col: u32 = v.start_col +| @as(u32, geom.content_width) +| 1;
-    content.columnsAtOffsets(text, geom.tab_width, &one, &out, stop_col);
+    content.columnsAtOffsetsWith(text, geom.tab_width, &one, &out, stop_col, inlays);
     const col = out[0];
 
     // 행 안에서 몇 칸째인가. 앞 조각/가로 스크롤 밖이면 0 칸(왼쪽 변).

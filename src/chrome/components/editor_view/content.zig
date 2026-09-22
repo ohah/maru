@@ -71,7 +71,47 @@ pub const Row = struct {
     /// 열→byte 체크포인트 중 `first_col` 이하인 마지막 것이다 — 그래야 전개 비용이 **밀린 거리가
     /// 아니라 화면 폭**에 비례한다. 규칙과 조건은 `Seek` 가 소유한다.
     seek: ?Seek = null,
+    /// **이 줄의 가상 텍스트**(visual-mapping §4.1h — LSP 인레이 힌트). `at` 오름차순, 같은 `at` 은 순서대로. `text` 는 호스트가 **ASCII 출력 가능
+    /// 문자로 정제하고 상한을 적용한** 것이라 `1byte = 1열` 이다. byte `at` 의 글리프 **앞** 열을 차지하고, `at == bytes.len` 이면 줄 끝에 선다.
+    /// 비어 있으면 이 줄은 옛 길(힌트 없는 걸음)을 byte 단위로 그대로 탄다.
+    inlays: []const Inlay = &.{},
 };
+
+/// 가상 텍스트 하나(§4.1h). 문서 byte 가 아니다 — 열만 차지한다.
+pub const Inlay = struct {
+    /// 줄 안 byte offset. 이 byte 의 글리프 앞에 선다(`bytes.len` 이면 줄 끝).
+    at: u32,
+    /// ASCII 출력 가능 문자만(호스트가 정제). 폭 = 길이.
+    text: []const u8,
+};
+
+/// 줄별 힌트의 **창**(§4.1h) — 힌트는 보이는 범위로만 오므로 문서 전체 배열이 아니라 창 하나다. `rows[i]` 는 렌더 축 줄 `first + i` 의 힌트.
+/// 창 밖 줄은 힌트 없음. `generation` 은 응답·밀기·비움마다 오른다(`frame.RowCache` 키).
+pub const InlayWindow = struct {
+    first: usize = 0,
+    rows: []const []const Inlay = &.{},
+    generation: u64 = 0,
+
+    pub fn at(self: InlayWindow, line: usize) []const Inlay {
+        if (line < self.first or line - self.first >= self.rows.len) return &.{};
+        return self.rows[line - self.first];
+    }
+};
+
+/// 전개가 낸 **힌트 칸 범위**(전개 결과 텍스트의 열 기준 — `ColorSpan` 과 같은 축). `writeRuns` 가 이 칸을 `syntax_comment` 로 낸다.
+pub const InlayCols = struct { start_col: u32, end_col: u32 };
+
+/// 줄당 힌트 칸 범위 저장소 상한 — 넘치는 힌트는 색 없이(본문색) 그려지지만 자리는 차지한다.
+pub const max_inlay_cols_per_row: usize = 32;
+
+/// `inlays[next..]` 중 byte `at` 에 선 것들의 **폭 합**을 세고 `next` 를 지나간다(`columnsAtOffsets`·hit·랩 행 시작의 걸음이 쓴다).
+fn inlayColsAt(inlays: []const Inlay, next: *usize, at: usize) u32 {
+    var w: u32 = 0;
+    while (next.* < inlays.len and inlays[next.*].at <= at) : (next.* += 1) {
+        if (inlays[next.*].at == at) w += @intCast(inlays[next.*].text.len);
+    }
+    return w;
+}
 
 /// 한 색 구간. `end_col`은 **배타적**이다.
 pub const ColorSpan = struct {
@@ -125,10 +165,15 @@ pub const text_role: tokens.ColorRole = .surface_fg;
 /// 처음에는 그냥 `written >= out_runs.len`에서 멈췄는데, 그러면 꼬리를 쓸 칸이 없어 **줄 끝이
 /// 조용히 사라졌다** — `HL14`가 그것을 잡았고, 위 주석은 코드가 안 하는 일을 적고 있었다.
 fn writeRuns(text: []const u8, start_col: u32, colors: []const ColorSpan, caret_cols: []const u32, out_runs: []draw.Run) usize {
+    return writeRunsWith(text, start_col, colors, caret_cols, &.{}, out_runs);
+}
+
+/// `writeRuns` + **힌트 칸**(§4.1h) — 그 칸은 구문 색이 무엇이든 `syntax_comment` 로 낸다(caret 반전이 그 위에 선다).
+fn writeRunsWith(text: []const u8, start_col: u32, colors: []const ColorSpan, caret_cols: []const u32, inlay_cols: []const InlayCols, out_runs: []draw.Run) usize {
     if (out_runs.len == 0) return 0;
     // **색이 없고 반전할 칸도 없으면 한 run이다.** 흔한 경우(grammar 없음·무색 줄, 막대 커서)라
     // 걷지 않고 빠져나간다.
-    if (colors.len == 0 and caret_cols.len == 0) {
+    if (colors.len == 0 and caret_cols.len == 0 and inlay_cols.len == 0) {
         out_runs[0] = .{ .text = text };
         return 1;
     }
@@ -140,13 +185,14 @@ fn writeRuns(text: []const u8, start_col: u32, colors: []const ColorSpan, caret_
     var cursor: usize = 0; // colors 를 앞으로만 훑는다 — 줄당 한 번 지나간다
     // **반전 칸도 앞으로만 훑는다** — `colors`와 같은 이유다(줄당 한 번 지나간다).
     var caret_cursor: usize = 0;
-    var seg_role: ?tokens.ColorRole = roleAtWithCaret(colors, &cursor, caret_cols, &caret_cursor, col);
+    var inlay_cursor: usize = 0;
+    var seg_role: ?tokens.ColorRole = roleAtWithInlay(colors, &cursor, caret_cols, &caret_cursor, inlay_cols, &inlay_cursor, col);
 
     while (i < text.len) {
         const base = text_layout.decodeCodepoint(text, i);
         const end = @min(text_layout.clusterEndAfter(text, i, base.advance), text.len);
         const n = @max(1, end - i);
-        const role = roleAtWithCaret(colors, &cursor, caret_cols, &caret_cursor, col);
+        const role = roleAtWithInlay(colors, &cursor, caret_cols, &caret_cursor, inlay_cols, &inlay_cursor, col);
         if (role != seg_role) {
             if (i > seg_start) {
                 // **마지막 칸은 꼬리 몫이다.** 여기서 다 쓰면 남은 글자를 실을 자리가 없다.
@@ -171,6 +217,23 @@ fn writeRuns(text: []const u8, start_col: u32, colors: []const ColorSpan, caret_
         written = 1;
     }
     return written;
+}
+
+/// caret > 힌트 > 구문 색(§4.1h). 힌트 칸 커서도 앞으로만 간다.
+fn roleAtWithInlay(
+    colors: []const ColorSpan,
+    cursor: *usize,
+    caret_cols: []const u32,
+    caret_cursor: *usize,
+    inlay_cols: []const InlayCols,
+    inlay_cursor: *usize,
+    col: u32,
+) ?tokens.ColorRole {
+    const base = roleAtWithCaret(colors, cursor, caret_cols, caret_cursor, col);
+    if (base == .terminal_bg) return base; // caret 반전이 이긴다
+    while (inlay_cursor.* < inlay_cols.len and inlay_cols[inlay_cursor.*].end_col <= col) inlay_cursor.* += 1;
+    if (inlay_cursor.* < inlay_cols.len and col >= inlay_cols[inlay_cursor.*].start_col and col < inlay_cols[inlay_cursor.*].end_col) return .syntax_comment;
+    return base;
 }
 
 /// `col`을 덮는 구간의 역할. `cursor`는 **뒤로 가지 않는다** — 한 줄을 한 번만 지나간다.
@@ -279,8 +342,10 @@ pub fn build(
         // 긴 줄 하나가 프레임 전체를 지우던 결함(#2086)이 랩에서 되살아나지 않게 하는 자리다.
         // **랩에서는 힌트를 안 쓴다** — 랩은 `first_col` 이 0 이라 건너뛸 것이 없고, 조각 나누기가
         // 줄 처음부터의 누적에 기대기 때문이다.
-        const seek = if (props.wrap) null else row.seek;
-        const r = expandTabs(row.bytes, props.tab_width, text_scratch[scratch_used..], .{ .start = props.first_col, .count = expand_cols, .seek = seek });
+        // **힌트가 있는 줄은 seek 를 안 쓴다**(§4.1h — 체크포인트는 문서 열이라 힌트 폭을 모른다).
+        const seek = if (props.wrap or row.inlays.len > 0) null else row.seek;
+        var inlay_cols: InlayColsBuf = .{};
+        const r = expandLine(row.bytes, props.tab_width, text_scratch[scratch_used..], .{ .start = props.first_col, .count = expand_cols, .seek = seek }, row.inlays, &inlay_cols);
         const expanded = r.text;
         // **탭이 없으면 scratch를 쓰지 않았다.** 그때도 길이를 더하면 저장소가 실제보다 빨리 차서
         // 아래쪽 줄이 근거 없이 OutOfSpace로 죽고, 호출자에게 보고하는 `bytes`도 과대해진다.
@@ -377,6 +442,7 @@ pub fn build(
         // 고쳐도 비용이 그대로다 — 실측으로 그렇게 드러났다(전개 0.28ms 인데 `content.build` 25ms).
         var src_i: usize = 0;
         var src_col: u32 = 0;
+        var src_inlay: usize = 0;
         if (seek) |sk| {
             if (sk.byte <= row.bytes.len) {
                 src_i = sk.byte;
@@ -403,6 +469,14 @@ pub fn build(
             // 머무는 경우 `src_col`이 `start_col`보다 작게 남는데, 그 값이 `start_byte_col`로 실려
             // **탭스톱 계산의 시작점**이 된다(탭 폭은 줄 절대 열로 정해진다).
             while (src_i < row.bytes.len and src_col < start_col) {
+                // **byte 앞의 힌트를 먼저 지난다**(§4.1h). 걸치면 **머문다**(표기처럼 잘라 그리는 부류) — `start_byte_col` 이 힌트 앞 열로 남고,
+                // hit 의 걸음이 같은 자리에서 같은 힌트를 다시 먹는다.
+                const in_w = inlayColsAt(row.inlays, &src_inlay, src_i);
+                if (in_w > 0) {
+                    if (src_col + in_w > start_col) break;
+                    src_col += in_w;
+                    if (src_col >= start_col) break;
+                }
                 const st = stepColumn(row.bytes, src_i, src_col, props.tab_width);
                 if (st.next_col > start_col) {
                     // 걸쳤다. 렌더가 잘라 그리는 종류면 여기 머물고, 버리는 종류면 지나간다.
@@ -450,7 +524,7 @@ pub fn build(
             if (run_used >= runs.len or op_count >= out.len) continue;
 
             const run_start = run_used;
-            run_used += writeRuns(text, @max(src_col, start_col), row.colors, row.caret_cols, runs[run_used..]);
+            run_used += writeRunsWith(text, @max(src_col, start_col), row.colors, row.caret_cols, inlay_cols.slice(), runs[run_used..]);
             const run_slice = runs[run_start..run_used];
 
             out[op_count] = .{
@@ -519,6 +593,11 @@ pub const count_scratch_bytes: usize = 64 * 1024;
 /// 못 내려간다** — 화면에서 바로 안 보이는 종류의 어긋남이라, 기본값을 주지 않고 **모든 호출자가
 /// 고르게** 한다(안 고르면 컴파일이 깨진다).
 pub fn rowCount(bytes: []const u8, tab_width: u16, view_cols: u16, wrap: bool, widget_rows: u32, scratch: []u8) RowCount {
+    return rowCountWith(bytes, tab_width, view_cols, wrap, widget_rows, scratch, &.{});
+}
+
+/// `rowCount` + 가상 텍스트(§4.1h) — 힌트가 있으면 원본을 그대로 세지 않고 전개해 센다.
+pub fn rowCountWith(bytes: []const u8, tab_width: u16, view_cols: u16, wrap: bool, widget_rows: u32, scratch: []u8, inlays: []const Inlay) RowCount {
     if (!wrap or view_cols == 0) return .{ .rows = 1 + widget_rows };
 
     // **전개가 원본과 같으면 저장소를 쓰지 않는다.** 탭도 §3.8 표기도 없으면 `expandTabs`가 만들
@@ -528,14 +607,14 @@ pub fn rowCount(bytes: []const u8, tab_width: u16, view_cols: u16, wrap: bool, w
     // **이게 없으면 긴 비ASCII 줄에서 조각 수가 조용히 적게 나온다**: 6만 자 한글 줄이 8KB 저장소로
     // **60행**, 넉넉한 저장소로 **1,305행**이었다(실측 — 21배). 세로 스크롤이 그 줄의 5%까지만
     // 닿는다는 뜻이다(적대적 검증 2026-08-16).
-    if (std.mem.indexOfScalar(u8, bytes, '\t') == null and !hazard.containsAny(bytes)) {
+    if (inlays.len == 0 and std.mem.indexOfScalar(u8, bytes, '\t') == null and !hazard.containsAny(bytes)) {
         var plain = visual_map.pieces(bytes, view_cols, wrap);
         var m: u32 = 0;
         while (plain.next()) |_| m += 1;
         return .{ .rows = @max(m, 1) + widget_rows };
     }
 
-    const r = expandTabs(bytes, tab_width, scratch, .{ .count = std.math.maxInt(u32) });
+    const r = expandLine(bytes, tab_width, scratch, .{ .count = std.math.maxInt(u32) }, inlays, null);
     var it = visual_map.pieces(r.text, view_cols, wrap);
     var n: u32 = 0;
     while (it.next()) |_| n += 1;
@@ -610,7 +689,17 @@ pub fn byteAtPoint(
     x_px: i32,
     cell_w_px: u16,
 ) usize {
-    return walkPoint(.caret, bytes, tab_width, start_byte, start_byte_col, screen_col0, row_cols, x_px, cell_w_px);
+    return walkPoint(.caret, bytes, tab_width, start_byte, start_byte_col, screen_col0, row_cols, x_px, cell_w_px, &.{});
+}
+
+/// `byteAtPoint` + 가상 텍스트(§4.1h) — 힌트 칸을 누르면 앵커 byte(caret 은 힌트 뒤에 선다).
+pub fn byteAtPointWith(bytes: []const u8, tab_width: u16, start_byte: usize, start_byte_col: u32, screen_col0: u32, row_cols: u32, x_px: i32, cell_w_px: u16, inlays: []const Inlay) usize {
+    return walkPoint(.caret, bytes, tab_width, start_byte, start_byte_col, screen_col0, row_cols, x_px, cell_w_px, inlays);
+}
+
+/// `clusterAtPoint` + 가상 텍스트(§4.1h).
+pub fn clusterAtPointWith(bytes: []const u8, tab_width: u16, start_byte: usize, start_byte_col: u32, screen_col0: u32, row_cols: u32, x_px: i32, cell_w_px: u16, inlays: []const Inlay) usize {
+    return walkPoint(.cluster, bytes, tab_width, start_byte, start_byte_col, screen_col0, row_cols, x_px, cell_w_px, inlays);
 }
 
 /// 포인터 판정의 두 뜻(§4.1g). `caret` 은 글자 **사이**(중점 반올림 — 클릭·드래그), `cluster` 는 포인터 아래의 **글자**
@@ -628,7 +717,7 @@ pub fn clusterAtPoint(
     x_px: i32,
     cell_w_px: u16,
 ) usize {
-    return walkPoint(.cluster, bytes, tab_width, start_byte, start_byte_col, screen_col0, row_cols, x_px, cell_w_px);
+    return walkPoint(.cluster, bytes, tab_width, start_byte, start_byte_col, screen_col0, row_cols, x_px, cell_w_px, &.{});
 }
 
 fn walkPoint(
@@ -641,6 +730,7 @@ fn walkPoint(
     row_cols: u32,
     x_px: i32,
     cell_w_px: u16,
+    inlays: []const Inlay,
 ) usize {
     if (cell_w_px == 0 or bytes.len == 0) return @min(start_byte, bytes.len);
     // 행 왼쪽 밖은 **그 행의 시작**이다(줄 시작이 아니다 — 랩된 두 번째 행부터 둘이 다르다).
@@ -652,7 +742,19 @@ fn walkPoint(
 
     var i = @min(start_byte, bytes.len);
     var col = start_byte_col;
+    // 이 행 시작 앞의 힌트는 지나간다(폭은 `start_byte_col` 에 이미 들어 있다 — `view()` 의 행 시작 걸음과 같은 규칙).
+    var next_inlay: usize = 0;
+    while (next_inlay < inlays.len and inlays[next_inlay].at < i) next_inlay += 1;
     while (i < bytes.len) {
+        // **byte i 앞의 힌트 칸**(§4.1h): 그 안을 누르면 앵커 byte i. 잘라 들어온 힌트(행 시작에 걸침)는 왼쪽이 화면 0 에 붙는다.
+        const in_w = inlayColsAt(inlays, &next_inlay, i);
+        if (in_w > 0) {
+            const in_lo = (col -| screen_col0) * cell_w_px;
+            const in_hi = ((col + in_w) -| screen_col0) * cell_w_px;
+            if (col + in_w > row_end_col) break; // 이 행을 넘어간다
+            if (click_px < in_hi and click_px >= in_lo) return i;
+            col += in_w;
+        }
         // **탭스톱은 절대 열로 센다** — 그래서 `col`이 화면 0열이 아니라 진짜 열이어야 한다.
         const st = stepColumn(bytes, i, col, tab_width);
         if (st.next_col > row_end_col) break; // 이 행을 넘어간다 — 행 끝이다
@@ -894,6 +996,11 @@ pub fn lineColumnsUpTo(bytes: []const u8, tab_width: u16, limit: u32) u32 {
 /// 순서**를 말하는 것이고 이것은 **메모리 정렬**이다 — 한국어로 둘 다 "정렬"이라 예전 주석은 뒤
 /// 문장이 앞 계약을 뒤집는 것처럼 읽혔다.
 pub fn columnsAtOffsets(bytes: []const u8, tab_width: u16, offsets: []align(1) const u32, out: []align(1) u32, stop_col: u32) void {
+    columnsAtOffsetsWith(bytes, tab_width, offsets, out, stop_col, &.{});
+}
+
+/// `columnsAtOffsets` + 가상 텍스트(§4.1h): byte b 의 열은 b 앞에 선 힌트 **뒤**(글리프 열)다. `inlays` 가 비면 옛 길과 같다.
+pub fn columnsAtOffsetsWith(bytes: []const u8, tab_width: u16, offsets: []align(1) const u32, out: []align(1) u32, stop_col: u32, inlays: []const Inlay) void {
     // **계약을 지키지 않으면 소리 내어 죽는다.** 오름차순이 아니면 이 함수는 틀린 열을 조용히 내고,
     // 강조가 엉뚱한 글자 위에 선다 — 크래시도 테스트 실패도 없이 화면만 틀린다. 지금 유일한 생산자
     // (`session/editor/intraline`)는 이 성질을 무작위 테스트로 지키지만, `row_marks`에 다른 생산자가
@@ -907,11 +1014,14 @@ pub fn columnsAtOffsets(bytes: []const u8, tab_width: u16, offsets: []align(1) c
     var col: u32 = 0;
     var i: usize = 0;
     var next: usize = 0;
-    while (next < offsets.len and offsets[next] <= 0) : (next += 1) out[next] = 0;
+    var next_inlay: usize = 0;
+    col += inlayColsAt(inlays, &next_inlay, 0);
+    while (next < offsets.len and offsets[next] <= 0) : (next += 1) out[next] = col;
     while (i < bytes.len and next < offsets.len) {
         const s = stepColumn(bytes, i, col, tab_width); // 규칙은 한 곳에만 있다
         i = s.next_byte;
         col = s.next_col;
+        col += inlayColsAt(inlays, &next_inlay, i); // 다음 byte 앞의 힌트 — 그 byte 의 열은 힌트 뒤다
         while (next < offsets.len and offsets[next] <= i) : (next += 1) out[next] = col;
         if (col >= stop_col) break;
     }
@@ -1002,6 +1112,13 @@ pub const ColRange = struct {
 };
 
 pub fn expandTabs(bytes: []const u8, tab_width: u16, out: []u8, range: ColRange) Expanded {
+    return expandLine(bytes, tab_width, out, range, &.{}, null);
+}
+
+/// `expandTabs` + **가상 텍스트**(§4.1h). `inlays` 가 비면 `expandTabs` 와 byte 단위로 같은 길이다(원본 대여·seek 포함). 힌트가 있으면 원본을
+/// 빌려주지 않고 seek 도 안 쓴다(seek 는 문서 열의 체크포인트라 힌트 폭을 모른다). 힌트 칸의 열 범위는 `inlay_cols_out` 에 적는다(전개 텍스트의
+/// 열 기준 — `range.start` 를 뺀 화면 열이 아니라 **줄 절대 열**이다; `writeRuns` 는 `start_col` 부터 세므로 그 축이 맞는다).
+pub fn expandLine(bytes: []const u8, tab_width: u16, out: []u8, range: ColRange, inlays: []const Inlay, inlay_cols_out: ?*InlayColsBuf) Expanded {
     // **판정에도 상한이 있어야 한다.** 탭·위험 문자가 없으면 원본을 빌려주는 최적화는 유지하되,
     // 그 판정을 **줄 전체가 아니라 화면에 닿을 만큼만** 본다. 초판은 상한이 없어 `indexOfScalar`와
     // `containsAny`(UTF-8 디코드)가 줄 끝까지 갔고, minified JS처럼 한 줄이 수 MB인 파일에서 매
@@ -1030,7 +1147,7 @@ pub fn expandTabs(bytes: []const u8, tab_width: u16, out: []u8, range: ColRange)
     // ⑶이 없으면 **2칸 글자가 오른쪽 경계에 걸칠 때 통째로 넘어가고 렌더러가 반쪽을 그린다**
     // (실측: 마지막 셀에 한글 왼쪽 절반이 남았다). 상한을 루프에만 두고 이 길에는 두지 않았던 것이
     // 원인이며, 랩이 켜졌을 때는 `visual_map`이 뒤에서 다시 잘라 가려져 있었다.
-    if (range.start == 0 and
+    if (inlays.len == 0 and range.start == 0 and
         std.mem.indexOfScalar(u8, head, '\t') == null and
         !hazard.containsAny(head) and
         isAsciiOnly(head))
@@ -1047,15 +1164,22 @@ pub fn expandTabs(bytes: []const u8, tab_width: u16, out: []u8, range: ColRange)
     // **호출자가 준 자리에서 시작한다**(`seek`). 아래 루프가 하는 일은 「`start` 까지 지나가고 그
     // 뒤를 만든다」인데, 지나가는 부분은 **아무것도 내보내지 않으므로** 그 자리를 이미 아는 호출자는
     // 건너뛰어도 된다. 조건 둘을 여기서 **다시 확인한다** — 넘겨 짚으면 탭스톱이 어긋난다.
-    if (range.seek) |sk| {
+    if (inlays.len == 0) if (range.seek) |sk| {
         if (sk.col <= range.start and sk.byte <= bytes.len) {
             i = sk.byte;
             col = sk.col;
         }
-    }
+    };
+    var next_inlay: usize = 0;
 
     while (i < bytes.len) {
         expand_steps += 1;
+        // **byte i 앞에 선 힌트를 먼저 낸다**(§4.1h). ASCII 문자열이라 §3.8 표기와 같은 규칙으로 경계에서 잘라 그린다.
+        if (next_inlay < inlays.len and inlays[next_inlay].at <= i) {
+            const r_in = emitInlays(inlays, &next_inlay, i, &col, range, out, &used, inlay_cols_out);
+            if (r_in) |trunc| return trunc;
+            if (col >= range.stop()) break;
+        }
         // **보이지 않을 부분은 만들지 않는다.** 렌더러가 `max_cols`로 자르므로 그 너머는 화면에
         // 닿지 않는다 — 여기서 멈추면 비용이 **줄 길이가 아니라 화면 폭에 비례**한다.
         //
@@ -1214,7 +1338,47 @@ pub fn expandTabs(bytes: []const u8, tab_width: u16, out: []u8, range: ColRange)
         col += w;
         i += n;
     }
+    // 줄 끝에 선 힌트(`at == bytes.len`).
+    if (next_inlay < inlays.len and i >= bytes.len) {
+        if (emitInlays(inlays, &next_inlay, bytes.len, &col, range, out, &used, inlay_cols_out)) |trunc| return trunc;
+    }
     return .{ .text = out[0..used], .scratch_used = used };
+}
+
+/// 줄당 힌트 칸 범위 저장소.
+pub const InlayColsBuf = struct {
+    items: [max_inlay_cols_per_row]InlayCols = undefined,
+    len: usize = 0,
+    pub fn slice(self: *const InlayColsBuf) []const InlayCols {
+        return self.items[0..self.len];
+    }
+};
+
+/// `at` 에 선 힌트들을 `[range.start, range.stop())` 안에서 잘라 `out` 에 내고 열을 민다. 저장소가 모자라면 절단 결과를 돌려준다.
+fn emitInlays(inlays: []const Inlay, next: *usize, at: usize, col: *usize, range: ColRange, out: []u8, used: *usize, cols_out: ?*InlayColsBuf) ?Expanded {
+    while (next.* < inlays.len and inlays[next.*].at <= at) : (next.* += 1) {
+        const in = inlays[next.*];
+        if (in.at != at) continue; // 지나간 자리(seek 뒤·중복 방어) — 폭도 안 센다
+        const shown = in.text;
+        if (col.* >= range.stop()) {
+            col.* += shown.len;
+            continue;
+        }
+        const from = if (col.* < range.start) @min(shown.len, range.start - col.*) else 0;
+        const to = @min(shown.len, range.stop() - col.*);
+        if (to > from) {
+            const part = shown[from..to];
+            if (used.* + part.len > out.len) return .{ .text = out[0..used.*], .scratch_used = used.*, .truncated = true };
+            @memcpy(out[used.*..][0..part.len], part);
+            if (cols_out) |cb| if (cb.len < cb.items.len) {
+                cb.items[cb.len] = .{ .start_col = @intCast(col.* + from), .end_col = @intCast(col.* + to) };
+                cb.len += 1;
+            };
+            used.* += part.len;
+        }
+        col.* += shown.len;
+    }
+    return null;
 }
 
 const testing = std.testing;
@@ -1225,6 +1389,126 @@ var test_visual: [64]visual_map.VisualRow = undefined;
 /// 테스트용 열 상한. 아래 케이스는 전부 짧아서 상한에 닿지 않으므로, 이 값은 "상한이 없을 때와 같다"를
 /// 뜻한다 — 상한 자체의 동작은 전용 테스트가 따로 본다.
 const test_max_cols: u16 = 999;
+
+test "INL1 가상 텍스트 — 전개가 byte 앞·줄 끝에 힌트를 끼우고 열 범위를 적으며, 같은 byte 여럿은 순서대로; 힌트 없는 줄은 원본을 빌려준다 (§4.1h)" {
+    var out: [64]u8 = undefined;
+    const inl = [_]Inlay{ .{ .at = 5, .text = ": i32" }, .{ .at = 5, .text = " " }, .{ .at = 11, .text = " -> u8" } };
+    var cols: InlayColsBuf = .{};
+    const r = expandLine("let v = 1;x", 4, &out, .{ .count = test_max_cols }, &inl, &cols);
+    try testing.expectEqualStrings("let v: i32  = 1;x -> u8", r.text);
+    try testing.expect(r.scratch_used > 0); // 힌트가 있으면 원본을 빌려주지 않는다
+    try testing.expectEqual(@as(usize, 3), cols.len);
+    try testing.expectEqual(@as(u32, 5), cols.items[0].start_col);
+    try testing.expectEqual(@as(u32, 10), cols.items[0].end_col);
+    try testing.expectEqual(@as(u32, 10), cols.items[1].start_col);
+    try testing.expectEqual(@as(u32, 11), cols.items[1].end_col);
+    try testing.expectEqual(@as(u32, 17), cols.items[2].start_col); // `x` 뒤 = 줄 끝
+    try testing.expectEqual(@as(u32, 23), cols.items[2].end_col);
+    // 힌트 없음 → `expandTabs` 와 같은 길(원본 대여).
+    const r0 = expandLine("let v = 1;x", 4, &out, .{ .count = test_max_cols }, &.{}, null);
+    try testing.expectEqual(@as(usize, 0), r0.scratch_used);
+    try testing.expectEqualStrings("let v = 1;x", r0.text);
+}
+
+test "INL2 가상 텍스트 — 가로로 밀린 창·좁은 창에서 힌트는 §3.8 표기처럼 잘라 그린다 (§4.1h)" {
+    var out: [64]u8 = undefined;
+    const inl = [_]Inlay{.{ .at = 5, .text = ": Vec<i32>" }};
+    // 시작 8열: `let v: Vec<i32> = 1;` 에서 8열부터 → `Vec<i32> = 1;`
+    var c1: InlayColsBuf = .{};
+    const r1 = expandLine("let v = 1;", 4, &out, .{ .start = 8, .count = test_max_cols }, &inl, &c1);
+    try testing.expectEqualStrings("ec<i32> = 1;", r1.text);
+    try testing.expectEqual(@as(u32, 8), c1.items[0].start_col);
+    try testing.expectEqual(@as(u32, 15), c1.items[0].end_col);
+    // 9열 창: `let v: Ve` 까지 — 힌트가 오른쪽에서 잘린다.
+    var c2: InlayColsBuf = .{};
+    const r2 = expandLine("let v = 1;", 4, &out, .{ .start = 0, .count = 9 }, &inl, &c2);
+    try testing.expectEqualStrings("let v: Ve", r2.text);
+    try testing.expectEqual(@as(u32, 9), c2.items[0].end_col);
+}
+
+test "INL3 가상 텍스트 — columnsAtOffsetsWith: byte 의 열은 그 앞 힌트 뒤(글리프 열), 줄 끝 힌트 뒤가 줄 끝 열; 힌트 없으면 옛 답 (§4.1h)" {
+    const inl = [_]Inlay{ .{ .at = 4, .text = "a:" }, .{ .at = 7, .text = "b:" }, .{ .at = 9, .text = " -> i32" } };
+    // "add(1, 2)" — byte 4 는 `1`, 7 은 `2`, 9 는 줄 끝.
+    const offs = [_]u32{ 0, 4, 5, 7, 9, 20 };
+    var cols = [_]u32{0} ** 6;
+    columnsAtOffsetsWith("add(1, 2)", 4, &offs, &cols, std.math.maxInt(u32), &inl);
+    try testing.expectEqual(@as(u32, 0), cols[0]);
+    try testing.expectEqual(@as(u32, 6), cols[1]); // `add(` 4 + `a:` 2
+    try testing.expectEqual(@as(u32, 7), cols[2]);
+    try testing.expectEqual(@as(u32, 11), cols[3]); // `add(a:1, ` 9 + `b:` 2
+    try testing.expectEqual(@as(u32, 20), cols[4]); // `add(a:1, b:2)` 13 + ` -> i32` 7
+    try testing.expectEqual(@as(u32, 20), cols[5]);
+    var plain = [_]u32{0} ** 6;
+    columnsAtOffsets("add(1, 2)", 4, &offs, &plain, std.math.maxInt(u32));
+    try testing.expectEqual(@as(u32, 4), plain[1]);
+    try testing.expectEqual(@as(u32, 9), plain[4]);
+    // 힌트가 byte 0 에 서면 byte 0 의 열도 힌트 뒤다.
+    const head = [_]Inlay{.{ .at = 0, .text = "r:" }};
+    const o0 = [_]u32{ 0, 1 };
+    var c0 = [_]u32{ 0, 0 };
+    columnsAtOffsetsWith("xy", 4, &o0, &c0, std.math.maxInt(u32), &head);
+    try testing.expectEqual(@as(u32, 2), c0[0]);
+    try testing.expectEqual(@as(u32, 3), c0[1]);
+}
+
+test "INL4 가상 텍스트 — byteAtPointWith: 힌트 칸을 누르면 앵커 byte, 글리프는 밀린 자리에서 답한다; rowCountWith 는 힌트 폭만큼 더 접는다 (§4.1h)" {
+    const inl = [_]Inlay{.{ .at = 4, .text = "a:" }};
+    // "add(1)" 셀 8px: 열 0..3 `add(`, 4..5 `a:`, 6 `1`, 7 `)`.
+    try testing.expectEqual(@as(usize, 4), byteAtPointWith("add(1)", 4, 0, 0, 0, 80, 4 * 8 + 3, 8, &inl)); // 힌트 첫 칸 → 앵커
+    try testing.expectEqual(@as(usize, 4), byteAtPointWith("add(1)", 4, 0, 0, 0, 80, 5 * 8 + 7, 8, &inl)); // 힌트 둘째 칸 → 앵커
+    try testing.expectEqual(@as(usize, 5), byteAtPointWith("add(1)", 4, 0, 0, 0, 80, 6 * 8 + 6, 8, &inl)); // `1` 의 오른쪽 반 → 그 뒤
+    try testing.expectEqual(@as(usize, 4), byteAtPointWith("add(1)", 4, 0, 0, 0, 80, 6 * 8 + 1, 8, &inl)); // `1` 의 왼쪽 반 → 앞(= 앵커)
+    try testing.expectEqual(@as(usize, 4), byteAtPoint("add(1)", 4, 0, 0, 0, 80, 4 * 8 + 3, 8)); // 힌트 없으면 `1` 의 왼쪽 반 → 4 (같은 답, 다른 이유)
+    try testing.expectEqual(@as(usize, 5), byteAtPoint("add(1)", 4, 0, 0, 0, 80, 4 * 8 + 6, 8));
+    // 랩 행 수: 10열 창에 `add(1)` 6열 → 1행, 힌트 `: ImplTrait`(11) 를 더하면 17열 → 2행.
+    var scratch: [64]u8 = undefined;
+    const long = [_]Inlay{.{ .at = 6, .text = ": ImplTrait" }};
+    try testing.expectEqual(@as(u32, 1), rowCountWith("add(1)", 4, 10, true, 0, &scratch, &.{}).rows);
+    try testing.expectEqual(@as(u32, 2), rowCountWith("add(1)", 4, 10, true, 0, &scratch, &long).rows);
+}
+
+test "INL5 가상 텍스트 — 그리기: 힌트 칸은 syntax_comment 런, caret 반전이 그 위에 이기고, 구문 색은 글리프 열에서 그대로 (§4.1h)" {
+    const layout = geometry.compute(80, 10, .{});
+    const inl = [_]Inlay{.{ .at = 4, .text = "a:" }};
+    const colors = [_]ColorSpan{.{ .start_col = 6, .end_col = 7, .role = .syntax_number }}; // `1` 의 글리프 열(호스트가 columnsAtOffsetsWith 로 옮긴 것)
+    const carets = [_]u32{5};
+    const rows = [_]Row{.{ .bytes = "add(1)", .inlays = &inl, .colors = &colors, .caret_cols = &carets }};
+    var ops: [4]draw.Op = undefined;
+    var scratch: [128]u8 = undefined;
+    var runs: [8]draw.Run = undefined;
+    const w = build(testProps(layout, &rows), &ops, &scratch, &runs, &test_visual);
+    try testing.expectEqual(@as(usize, 1), w.ops);
+    const rs = ops[0].text.runs;
+    // `add(` 본문색 · `a` 힌트색 · `:` caret 반전 · `1` number · `)` 본문색
+    try testing.expectEqual(@as(usize, 5), rs.len);
+    try testing.expectEqualStrings("add(", rs[0].text);
+    try testing.expect(rs[0].role == null);
+    try testing.expectEqualStrings("a", rs[1].text);
+    try testing.expectEqual(tokens.ColorRole.syntax_comment, rs[1].role.?);
+    try testing.expectEqualStrings(":", rs[2].text);
+    try testing.expectEqual(tokens.ColorRole.terminal_bg, rs[2].role.?);
+    try testing.expectEqualStrings("1", rs[3].text);
+    try testing.expectEqual(tokens.ColorRole.syntax_number, rs[3].role.?);
+    try testing.expectEqualStrings(")", rs[4].text);
+    // 랩 행 시작: 4열 창에서 `add(` | `a:1)` — 둘째 행의 start_byte 는 4(힌트 앞), start_byte_col 4.
+    const narrow = geometry.compute(@intCast(layout.contentLeft() + 4), 10, .{});
+    var p = testProps(narrow, &rows);
+    p.wrap = true;
+    var ops2: [4]draw.Op = undefined;
+    var runs2: [8]draw.Run = undefined;
+    const w2 = build(p, &ops2, &scratch, &runs2, &test_visual);
+    try testing.expectEqual(@as(usize, 2), w2.ops);
+    try testing.expectEqual(@as(usize, 4), test_visual[1].start_byte);
+    try testing.expectEqual(@as(u32, 4), test_visual[1].start_byte_col);
+    // 둘째 행의 런을 이으면 `a:1)` — 힌트·caret·number 로 갈려 있다.
+    var joined: [16]u8 = undefined;
+    var jl: usize = 0;
+    for (ops2[1].text.runs) |run| {
+        @memcpy(joined[jl..][0..run.text.len], run.text);
+        jl += run.text.len;
+    }
+    try testing.expectEqualStrings("a:1)", joined[0..jl]);
+}
 
 test "expandTabs: 탭이 없으면 원본을 그대로 빌려준다" {
     var out: [32]u8 = undefined;

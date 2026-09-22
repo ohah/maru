@@ -32,6 +32,7 @@ const editor_completion = @import("editor_completion.zig");
 const editor_semantic = @import("editor_semantic.zig");
 const editor_fold_lsp = @import("editor_fold_lsp.zig");
 const editor_references = @import("editor_references.zig");
+const editor_inlay = @import("editor_inlay.zig");
 const editor_code_action = @import("editor_code_action.zig");
 
 pub const Phase = enum {
@@ -121,6 +122,9 @@ pub const Client = struct {
     fold_supported: bool = false,
     /// 저장 통지(§8.2k) — `textDocumentSync.save`.
     save_caps: lsp.rpc.SaveCaps = .{},
+    /// 인레이 힌트(§8.2n) — `inlayHintProvider`.
+    inlay_seq: u32 = 0,
+    inlay_supported: bool = false,
 
     fn deinit(self: *Client, allocator: std.mem.Allocator) void {
         if (self.proc) |*p| {
@@ -181,6 +185,11 @@ pub const State = struct {
     sent_folding: u64 = 0,
     received_folding: u64 = 0,
     sent_saves: u64 = 0,
+    sent_inlay: u64 = 0,
+    received_inlay: u64 = 0,
+    /// 서버의 `workspace/inlayHint/refresh` 를 받아 `null` 로 답한 수(§8.2n).
+    inlay_refreshes: u64 = 0,
+    sent_configs: u64 = 0,
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
         for (self.clients.items) |*c| c.deinit(allocator);
@@ -559,11 +568,17 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
                 c.type_definition_supported = lsp.rpc.locationProviderSupported(r.result, .type_definition);
                 c.declaration_supported = lsp.rpc.locationProviderSupported(r.result, .declaration);
                 c.save_caps = lsp.rpc.saveCapsFromResult(r.result); // §8.2k
+                c.inlay_supported = lsp.inlay.supportedFromResult(r.result); // §8.2n
                 c.phase = .ready;
                 c.restarts = 0;
                 const msg = lsp.rpc.initializedNotification(self.allocator) catch return;
                 defer self.allocator.free(msg);
                 _ = send(self, c, msg);
+                // 서버별 설정 블롭(§8.2n 「서버 설정」) — TS 계열은 힌트를 켜야 낸다. `initialized` 뒤 한 번.
+                if (lsp.rpc.didChangeConfigurationFor(self.allocator, c.server.language_id) catch null) |cfg| {
+                    defer self.allocator.free(cfg);
+                    if (send(self, c, cfg)) self.editor_lsp.sent_configs += 1;
+                }
                 self.metal_dirty = true;
             },
             .shutdown => {
@@ -589,6 +604,10 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
                 // 어느 문서의 것인지는 seq 로 — 문서마다 대기 seq 하나(§8.2i).
                 // `is_error` 는 방어 — 오류 응답은 `result` 가 없어 `null` 만으로도 버려진다(적대적 3회차 C2: 등가).
                 if (termWaitingSemantic(self, c, seq)) |t| editor_semantic.onResponse(self, t, seq, r.result, r.is_error, c.encoding);
+            },
+            .inlay_hint => |seq| {
+                self.editor_lsp.received_inlay += 1;
+                if (termWaitingInlay(self, c, seq)) |t| editor_inlay.onResponse(self, t, seq, r.result, r.is_error, c.encoding);
             },
             .folding_range => |seq| {
                 self.editor_lsp.received_folding += 1;
@@ -642,7 +661,17 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
             if (std.mem.eql(u8, n.method, "textDocument/publishDiagnostics")) onPublishDiagnostics(self, c, n.params);
         },
         .request => |q| {
-            // §8.2a 「하지 않는 것」 — 전부 거부.
+            // §8.2n — `workspace/inlayHint/refresh` 는 받는다: `null` 로 답하고 이 클라이언트의 모든 편집기 힌트를 다시 묻게 한다.
+            if (std.mem.eql(u8, q.method, lsp.rpc.inlay_refresh_method)) {
+                self.editor_lsp.inlay_refreshes += 1;
+                const ok = lsp.rpc.nullResult(self.allocator, q.id) catch return;
+                defer self.allocator.free(ok);
+                _ = send(self, c, ok);
+                forEachDocTerm(self, c, editor_inlay.onRefresh);
+                self.metal_dirty = true;
+                return;
+            }
+            // §8.2a 「하지 않는 것」 — 나머지는 전부 거부.
             self.editor_lsp.rejected_requests += 1;
             const msg = lsp.rpc.methodNotFound(self.allocator, q.id) catch return;
             defer self.allocator.free(msg);
@@ -1081,6 +1110,52 @@ pub fn requestSemanticTokens(self: *AppSession, term: *Term, full: bool, lo: usi
     if (!send(self, c, msg)) return null;
     self.editor_lsp.sent_semantic += 1;
     return c.semantic_seq;
+}
+
+/// `textDocument/inlayHint`(보이는 원본 줄 `[lo, hi]` — 끝은 줄 수를 안 넘긴다)(§8.2n). 보내기 전 `flushDocument`. 서버가 없거나 provider 가 없으면 `null`.
+pub fn requestInlayHints(self: *AppSession, term: *Term, lo: usize, hi: usize) ?u32 {
+    const c = readyClientFor(self, term) orelse return null;
+    if (!c.inlay_supported) return null;
+    flushDocument(self, c, term);
+    const d = c.findDoc(term.surfaceId()) orelse return null;
+    const opened = term.rt.editor_doc orelse return null;
+    const line_count = opened.file.lines.lineCount();
+    const end_line: u32 = @intCast(@min(hi + 1, line_count -| 1)); // 반열림이되 줄 수를 안 넘긴다(rust-analyzer 는 넘기면 -32603)
+    const end_char: u32 = if (hi + 1 < line_count) 0 else blk: {
+        const last = opened.file.lines.line(line_count - 1) orelse break :blk 0;
+        break :blk @intCast(last.contentEnd() - last.start);
+    };
+    c.inlay_seq = lsp.rpc.nextSeq(c.inlay_seq);
+    const msg = lsp.rpc.inlayHintRequest(self.allocator, c.inlay_seq, d.uri, .{ .start = .{ .line = @intCast(lo), .character = 0 }, .end = .{ .line = end_line, .character = end_char } }) catch return null;
+    defer self.allocator.free(msg);
+    if (!send(self, c, msg)) return null;
+    self.editor_lsp.sent_inlay += 1;
+    return c.inlay_seq;
+}
+
+/// 이 클라이언트의 문서마다 편집기 Term 을 찾아 `f` 를 부른다.
+fn forEachDocTerm(self: *AppSession, c: *Client, f: *const fn (*Term) void) void {
+    for (c.docs.items) |d| {
+        const loc = term_ops.findTermWhere(self, d.surface_id, struct {
+            fn pred(want: u64, t: *Term) bool {
+                return t.kind == .editor and t.surface.id == want;
+            }
+        }.pred) orelse continue;
+        f(loc.pane.terms.items[loc.term_index]);
+    }
+}
+
+fn termWaitingInlay(self: *AppSession, c: *Client, seq: u32) ?*Term {
+    for (c.docs.items) |d| {
+        const loc = term_ops.findTermWhere(self, d.surface_id, struct {
+            fn pred(want: u64, t: *Term) bool {
+                return t.kind == .editor and t.surface.id == want;
+            }
+        }.pred) orelse continue;
+        const t = loc.pane.terms.items[loc.term_index];
+        if (t.rt.editor_inlay.waiting and t.rt.editor_inlay.waiting_seq == seq) return t;
+    }
+    return null;
 }
 
 /// 이 클라이언트의 문서 중 `seq` 를 기다리는 편집기 Term.

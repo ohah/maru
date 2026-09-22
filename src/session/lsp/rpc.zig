@@ -27,11 +27,12 @@ pub const RequestId = union(enum) {
     implementation: u32,
     type_definition: u32,
     declaration: u32,
+    inlay_hint: u32,
 };
 /// 요청 id 는 **i32 안**이어야 한다(2026-09-20 실측): rust-analyzer·ruff 가 쓰는 Rust `lsp-server` 크레이트는 정수 id 를 i32 로만 읽고,
 /// 넘치면 그 메시지를 **알림으로 오인해 버린다**(`6_000_000_001` 짜리 completion 이 stderr 에 `unhandled notification` 으로만 남고 응답이
 /// 없었다 — hover·definition 만 i32 안이라 그 둘만 됐다). 종류마다 `id_span`(1e8) 칸을 갖고 seq 는 칸 안에서 돈다(`nextSeq`) —
-/// 가장 큰 칸(15e8+1e8-1) 도 i32 최대(2_147_483_647) 아래. `classify` 는 칸으로 가른다.
+/// 가장 큰 칸(16e8+1e8-1) 도 i32 최대(2_147_483_647) 아래. `classify` 는 칸으로 가른다.
 pub const id_span: u32 = 100_000_000;
 pub const initialize_id: u32 = 1;
 pub const shutdown_id: u32 = 2;
@@ -63,8 +64,10 @@ pub const references_id_base: u32 = 12 * id_span;
 pub const implementation_id_base: u32 = 13 * id_span;
 pub const type_definition_id_base: u32 = 14 * id_span;
 pub const declaration_id_base: u32 = 15 * id_span;
+/// `textDocument/inlayHint`(§8.2n)
+pub const inlay_hint_id_base: u32 = 16 * id_span;
 comptime {
-    std.debug.assert(@as(u64, declaration_id_base) + id_span - 1 <= std.math.maxInt(i32));
+    std.debug.assert(@as(u64, inlay_hint_id_base) + id_span - 1 <= std.math.maxInt(i32));
 }
 /// 종류별 seq 의 다음 값 — 칸 안에서 돈다(0 은 안 쓴다: 처음 보내는 요청이 `base + 1`).
 pub fn nextSeq(seq: u32) u32 {
@@ -75,7 +78,7 @@ pub fn nextSeq(seq: u32) u32 {
 fn requestIdOf(id_num: i64) ?RequestId {
     if (id_num == initialize_id) return .initialize;
     if (id_num == shutdown_id) return .shutdown;
-    if (id_num < hover_id_base or id_num >= @as(i64, declaration_id_base) + id_span) return null;
+    if (id_num < hover_id_base or id_num >= @as(i64, inlay_hint_id_base) + id_span) return null;
     const slot: u32 = @intCast(@divTrunc(id_num, id_span));
     const seq: u32 = @intCast(@mod(id_num, id_span));
     return switch (slot) {
@@ -94,6 +97,7 @@ fn requestIdOf(id_num: i64) ?RequestId {
         13 => .{ .implementation = seq },
         14 => .{ .type_definition = seq },
         15 => .{ .declaration = seq },
+        16 => .{ .inlay_hint = seq },
         else => null,
     };
 }
@@ -147,6 +151,7 @@ pub fn initializeRequest(allocator: std.mem.Allocator, root_uri: []const u8, pid
                         .overlappingTokenSupport = false,
                     },
                     .references = .{ .dynamicRegistration = false }, // 참조 피커(§8.2l)
+                    .inlayHint = .{ .dynamicRegistration = false }, // 인레이 힌트(§8.2n) — resolve 는 안 한다
                     // 구현·타입 정의·선언(§8.2m) — 같은 피커. `linkSupport` 로 `LocationLink[]` 를 받는다(tsgo 가 그것을 낸다).
                     .implementation = .{ .dynamicRegistration = false, .linkSupport = true },
                     .typeDefinition = .{ .dynamicRegistration = false, .linkSupport = true },
@@ -165,14 +170,27 @@ pub fn initializeRequest(allocator: std.mem.Allocator, root_uri: []const u8, pid
                         },
                     },
                 },
-                .workspace = .{ .applyEdit = false, .configuration = false, .workspaceFolders = false },
+                // `inlayHint.refreshSupport` — rust-analyzer 는 색인이 끝나기 전엔 `[]` 를 내고 끝나면 `workspace/inlayHint/refresh` 를
+                // 보낸다(§8.2n 실측 2026-09-22). 이것을 안 받으면 서버가 뜬 뒤 연 파일의 힌트가 **영영** 안 온다.
+                .workspace = .{ .applyEdit = false, .configuration = false, .workspaceFolders = false, .inlayHint = .{ .refreshSupport = true } },
             },
         },
     }, .{});
 }
 
+/// 서버 → 클라이언트 요청 `workspace/inlayHint/refresh`(§8.2n) — 받으면 `nullResult` 로 답하고 힌트를 다시 묻는다.
+pub const inlay_refresh_method = "workspace/inlayHint/refresh";
+
+/// 서버 요청에 대한 **빈 성공 응답**(`result: null`) — refresh 류 요청의 유일한 답.
+pub fn nullResult(allocator: std.mem.Allocator, id: std.json.Value) error{OutOfMemory}![]u8 {
+    return std.json.Stringify.valueAlloc(allocator, .{ .jsonrpc = "2.0", .id = id, .result = null }, .{});
+}
+
+/// `initialized` — `params` 는 **빈 객체 `{}`** 여야 한다(`InitializedParams`). 초판은 `.{}`(빈 튜플) 이라 `[]` 로 나갔고 tsgo 가
+/// *"cannot unmarshal JSON array into InitializedParams"* 로 거부한 뒤 **모든 것을 `ServerNotInitialized` 로 버렸다** — 2026-09-22 인레이
+/// 캡처에서 tee 로 잡았다(§8.2a 되먹임 ⑦). 너그러운 서버(rust-analyzer·clangd·typescript-language-server)는 그것을 받아 줘 그동안 안 보였다.
 pub fn initializedNotification(allocator: std.mem.Allocator) error{OutOfMemory}![]u8 {
-    return std.json.Stringify.valueAlloc(allocator, .{ .jsonrpc = "2.0", .method = "initialized", .params = .{} }, .{});
+    return std.json.Stringify.valueAlloc(allocator, .{ .jsonrpc = "2.0", .method = "initialized", .params = struct {}{} }, .{});
 }
 
 pub fn didOpen(allocator: std.mem.Allocator, uri: []const u8, language_id: []const u8, version: i64, text: []const u8) error{OutOfMemory}![]u8 {
@@ -612,6 +630,34 @@ pub fn locationsFromResult(allocator: std.mem.Allocator, result: ?std.json.Value
         else => {},
     }
     return try out.toOwnedSlice(allocator);
+}
+
+/// `textDocument/inlayHint`(§8.2n) — 보이는 줄 범위. 끝은 반열림이되 **줄 수를 안 넘긴다**(rust-analyzer 는 넘기면 `-32603`).
+pub fn inlayHintRequest(allocator: std.mem.Allocator, seq: u32, uri: []const u8, range: LspRange) error{OutOfMemory}![]u8 {
+    return std.json.Stringify.valueAlloc(allocator, .{
+        .jsonrpc = "2.0",
+        .id = inlay_hint_id_base + seq,
+        .method = "textDocument/inlayHint",
+        .params = .{ .textDocument = .{ .uri = uri }, .range = range },
+    }, .{});
+}
+
+/// 서버별 설정 블롭(§8.2n 「서버 설정」) — `initialized` 뒤 한 번 보내는 `workspace/didChangeConfiguration`. 없으면 `null`.
+/// TS 계열: 힌트를 켠다(안 주면 tsgo 가 `null` 을 낸다 — 실측 2026-09-22).
+pub fn didChangeConfigurationFor(allocator: std.mem.Allocator, language_id: []const u8) error{OutOfMemory}!?[]u8 {
+    const ts = std.mem.eql(u8, language_id, "typescript") or std.mem.eql(u8, language_id, "typescriptreact") or std.mem.eql(u8, language_id, "javascript");
+    if (!ts) return null;
+    const hints = .{
+        .parameterNames = .{ .enabled = "all" },
+        .variableTypes = .{ .enabled = true },
+        .functionLikeReturnTypes = .{ .enabled = true },
+        .propertyDeclarationTypes = .{ .enabled = true },
+    };
+    return try std.json.Stringify.valueAlloc(allocator, .{
+        .jsonrpc = "2.0",
+        .method = "workspace/didChangeConfiguration",
+        .params = .{ .settings = .{ .typescript = .{ .inlayHints = hints }, .javascript = .{ .inlayHints = hints } } },
+    }, .{});
 }
 
 /// `textDocument/foldingRange`(§8.2j) — 문서 전체(범위 인자가 없다).
@@ -1371,7 +1417,7 @@ test "LSJ15 semanticTokens — initialize capability(range·full·표준 종류)
     defer p1.deinit();
     try testing.expect(classify(p1.value).response.id == .semantic_tokens and classify(p1.value).response.id.semantic_tokens == 3);
     try testing.expect(@as(u64, semantic_tokens_id_base) + id_span - 1 <= std.math.maxInt(i32));
-    var p2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":1600000000,\"result\":null}"); // 칸 밖(마지막 칸 15e8 의 다음)
+    var p2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":1700000000,\"result\":null}"); // 칸 밖(마지막 칸 16e8 의 다음)
     defer p2.deinit();
     try testing.expect(classify(p2.value) == .ignore);
 }
@@ -1391,7 +1437,7 @@ test "LSJ16 foldingRange — initialize capability(lineFoldingOnly·종류 셋)�
     var p2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":1199999999,\"result\":null}"); // 칸 끝
     defer p2.deinit();
     try testing.expect(classify(p2.value).response.id == .folding_range and classify(p2.value).response.id.folding_range == 99999999);
-    var p3 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":1600000000,\"result\":null}"); // 칸 밖(마지막 칸 15e8 의 다음)
+    var p3 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":1700000000,\"result\":null}"); // 칸 밖(마지막 칸 16e8 의 다음)
     defer p3.deinit();
     try testing.expect(classify(p3.value) == .ignore);
 }
@@ -1439,7 +1485,7 @@ test "LSJ18 references — capability·요청(includeDeclaration)·id 칸(12e8)�
     defer p1.deinit();
     try testing.expect(classify(p1.value).response.id == .references and classify(p1.value).response.id.references == 9);
     try testing.expect(@as(u64, references_id_base) + id_span - 1 <= std.math.maxInt(i32));
-    var p2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":1600000000,\"result\":null}"); // 칸 밖
+    var p2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":1700000000,\"result\":null}"); // 칸 밖
     defer p2.deinit();
     try testing.expect(classify(p2.value) == .ignore);
     // 결과 세 모양: Location[] · LocationLink[](selection range 우선) · 단일 Location; 모양 아닌 항목은 뺀다; null 은 빈 목록.

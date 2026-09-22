@@ -91,10 +91,10 @@ run_scenario() {
     wait "$app_pid"
     test -f "$summary"
     cp "$summary" "$root/$scenario.summary.txt"
-    if [ "$scenario" = conflict-reload ]; then
-        # **다시 읽기는 읽기다** — 앱이 그 파일에 한 글자도 쓰지 않았어야 한다.
+    if [ "$scenario" = conflict-reload ] || [ "$scenario" = conflict-compare ]; then
+        # **다시 읽기·비교는 읽기다** — 앱이 그 파일에 한 글자도 쓰지 않았어야 한다.
         if [ "$(stat -f %Fm "$document")" != "$mtime_before" ]; then
-            echo "reload wrote to the file (mtime moved): $scenario" >&2
+            echo "this choice wrote to the file (mtime moved): $scenario" >&2
             exit 1
         fi
     fi
@@ -129,4 +129,12 @@ run_scenario conflict-reload
 grep -Eq '^editor_save_conflict_smoke_scenario=conflict-reload$' "$root/conflict-reload.summary.txt"
 grep -Eq '^editor_save_conflict_smoke_failure=$' "$root/conflict-reload.summary.txt"
 grep -Eq '^editor_save_conflict_smoke_stage=done$' "$root/conflict-reload.summary.txt"
+cmp -s "$document" "$reference"
+
+# C1b — **비교**를 고르면 아무것도 버리지 않는다: 디스크가 그대로다(비교가 섰다는 것은 앱 안의
+# probe 가 말한다 — 그 선택은 일부러 파일을 건드리지 않으므로 밖에서는 「그대로」만 보인다).
+run_scenario conflict-compare
+grep -Eq '^editor_save_conflict_smoke_scenario=conflict-compare$' "$root/conflict-compare.summary.txt"
+grep -Eq '^editor_save_conflict_smoke_failure=$' "$root/conflict-compare.summary.txt"
+grep -Eq '^editor_save_conflict_smoke_stage=done$' "$root/conflict-compare.summary.txt"
 cmp -s "$document" "$reference"

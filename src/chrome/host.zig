@@ -64,6 +64,8 @@ pub const HostAction = union(enum) {
     notifications_clear_all, // 하단 "모두 지우기" — platform이 히스토리 전체 삭제
     confirm_accept, // 확인 모달 Enter/Y — platform이 보류한 닫기(pending_close)를 실행
     confirm_alternate, // 세 갈래 확인의 보조 선택(예: dirty 파일 변경사항 버리기)
+    confirm_extra, // 네 갈래 확인의 **세 번째 행동**(예: 저장 충돌의 「다시 읽기」) — `cancel` 은 Esc 라 행동을 못 놓는다
+
     confirm_cancel, // 확인 모달 Esc/N — platform이 보류한 닫기를 버린다
     settings_close, // 세팅 모달 Esc/바깥클릭 — platform이 hide
     settings_toggle, // 세팅 행 Space/Enter/toggle 클릭 — platform이 rows[selected] 활성(bool flip·number 편집·enum/font 팝업 열기·text 편집·color picker·keybind 녹음)
@@ -343,6 +345,7 @@ pub const ChromeHost = struct {
                     return switch (confirm.handle(k, &self.confirm) orelse return .none) {
                         .confirmed => .confirm_accept,
                         .alternate => .confirm_alternate,
+                        .extra => .confirm_extra,
                         .cancelled => .confirm_cancel,
                     };
                 }

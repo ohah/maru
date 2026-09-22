@@ -9846,7 +9846,9 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                             confirm_state.dismiss();
                             pending_close_id = null;
                         },
-                        .alternate => {},
+                        // **네 번째 자리는 이 경로에 아직 없다**(저장 충돌은 macOS 편집기의 것이다).
+                        // `alternate` 와 같이 무동작으로 둔다 — 새 행동이 생기면 여기도 함께 정한다.
+                        .alternate, .extra => {},
                     };
                     continue;
                 }
@@ -10314,7 +10316,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         if (maru.chrome.components.confirm.buttonAtPoint(&confirm_state, confirmProps(client_w, client_h, cell_w, cell_h, sidebar_w), &chrome_tokens, @floatFromInt(m.x_px), @floatFromInt(m.y_px))) |action| switch (action) {
                             .confirmed => confirm_pending_click = .confirmed,
                             .cancelled => confirm_pending_click = .cancelled,
-                            .alternate => {},
+                            .alternate, .extra => {},
                         };
                     }
                     continue;
@@ -11702,7 +11704,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                     confirm_state.dismiss();
                     pending_close_id = null;
                 },
-                .alternate => {},
+                .alternate, .extra => {},
             }
         }
         // ── 확인 모달은 **가장 위**다 (W8.16b) ─────────────────────────────────────────

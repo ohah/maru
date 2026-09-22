@@ -15,13 +15,18 @@ const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
 const Term = app_session_mod.Term;
 const editor_ops = @import("editor.zig");
+const editor_diff_ops = @import("editor_diff.zig");
+const git_ops = @import("git.zig");
+const git_backend_mod = @import("../git_backend.zig");
+const pane_ops = @import("pane.zig");
 const term_ops = @import("term.zig");
+const dock_panel = maru.session.dock_panel;
 
-/// 저장이 충돌로 멈췄다 — 두 행동과 「계속 편집」을 띄운다.
+/// 저장이 충돌로 멈췄다 — **행동 셋과 「계속 편집」**을 띄운다(§4).
 ///
-/// **포커스는 `cancel` 이다.** 이 상자의 두 행동은 **둘 다 무언가를 버리므로**, 열 때 포커스를
-/// `primary` 에 두는 컴포넌트 기본값을 쓰면 무심한 Enter 가 그것을 실행한다(§4 — C1b 가 안전한
-/// 선택인 비교를 `primary` 로 올리면 이 예외는 사라진다).
+/// **`primary` 는 비교다.** 셋 중 **아무것도 버리지 않는 유일한 선택**이고, 상자는 열 때 `primary` 에
+/// 포커스를 두므로 **Enter 가 안전하다**. 파괴적인 둘은 `alternate`(덮어쓰기)·`extra`(다시 읽기)에
+/// 서고, `cancel`(Esc·바깥 클릭)은 아무 일도 안 한다 — 그 자리에 행동을 놓을 수 없는 이유가 그것이다.
 pub fn ask(self: *AppSession, term: *Term) void {
     // 편집기 문서가 아니면 물을 것이 없다 — 이 자리에 오는 길은 `saveDocument` 의 `ExternalConflict`
     // 하나뿐이고 그것은 문서가 있을 때만 난다. 그래도 확인해 둔다: 상자가 뜨면 **키를 먹으므로**
@@ -30,8 +35,112 @@ pub fn ask(self: *AppSession, term: *Term) void {
     self.showConfirmChoiceKeys(
         .{ .save_conflict = term.surface.id },
         .editor_save_conflict_choose,
-        .{ .primary = .btn_overwrite, .alternate = .btn_reload, .cancel = .btn_keep_editing, .focus = .cancel },
+        .{
+            .primary = .btn_compare,
+            .alternate = .btn_overwrite,
+            .extra = .btn_reload,
+            .cancel = .btn_keep_editing,
+        },
     );
+}
+
+/// 「비교」 — **두 쪽을 그 자리에서 연다**(§4). `primary` 라 Enter 가 이것을 실행한다.
+///
+/// ⚠️ **답은 아직 «안 한» 것이다.** 상자를 닫고 탭을 열 뿐 **디스크도 버퍼도 그대로**이고 문서는
+/// dirty 로 남는다 — 사용자는 보고 나서 다시 `⌘S` 를 눌러 고른다. 상자를 비교 위에 띄워 둘 수는
+/// 없다: 모달이 그 화면을 읽지 못하게 막는다.
+pub fn confirmCompare(self: *AppSession, surface_id: u64) void {
+    const term = term_ops.termBySurfaceId(self, surface_id) orelse return;
+    if (term.kind != .editor) return;
+    if (term.rt.editor_doc == null) return;
+    const path = term.rt.editor_path orelse return;
+    openCompare(self, term, path) catch {
+        // 탭을 못 열었으면 **그 사실을 말한다** — 조용히 아무 일도 안 하면 사용자는 버튼이 죽은 줄 안다.
+        self.showNoticeKey(.editor_compare_failed);
+    };
+}
+
+/// 저장 충돌 비교 Term 을 열고(있으면 그것을 쓰고) 두 쪽을 **다시** 채운다.
+///
+/// **이미 열린 비교는 `openDiffTerm` 이 활성화만 하고 돌아간다** — 그래서 두 번째 저장 시도가 첫
+/// 번째의 비교를 보여 준다. 여기서는 열든 재사용하든 **채움을 한 번 더** 지난다.
+fn openCompare(self: *AppSession, term: *Term, path: []const u8) !void {
+    const existing = git_ops.diffTermFor(self, path, .save_conflict);
+    const diff_term = existing orelse blk: {
+        const opened = try pane_ops.openFileTermInActivePane(self, path, .diff);
+        const entry = opened.term.file_entry orelse return error.NoEntry;
+        entry.diff_base = .save_conflict;
+        break :blk opened.term;
+    };
+    if (existing != null) _ = self.activateExistingFileTerm(diff_term);
+    const entry = diff_term.file_entry orelse return error.NoEntry;
+    // **주인은 surface id 로 든다** — 경로로 다시 찾으면 entry 가 없는 문서 Term 을 놓친다(§4).
+    entry.diff_buffer_surface_id = term.surface.id;
+    self.requestDiffContent(entry);
+    editor_diff_ops.markRequested(self, diff_term);
+    self.metal_dirty = true;
+}
+
+/// 저장 충돌 비교의 **두 쪽을 채운다** — 왼쪽은 그 순간의 디스크 바이트, 오른쪽은 편집기 버퍼의 사본.
+///
+/// **`requestDiffContent` 가 머리에서 이것으로 갈린다.** 그 함수는 `diff_repo` 가 비면 실패로 표시하고
+/// git 을 부르는데, 이 비교에는 저장소가 없다. 새로 고치는 자리 둘(`fileChanged`·tick 폴링)이 전부 그
+/// 함수를 지나므로 **가르는 자리도 하나**다.
+///
+/// **두 쪽을 `worker_allocator` 로 만든다** — 해제하는 쪽(`freeDiffContent`)이 그것으로 풀기 때문이다.
+/// 소유자 표시 필드를 새로 더하면 해제 규칙이 둘이 되고, 둘이 되면 한쪽이 낡는다.
+pub fn fillCompare(self: *AppSession, entry: *dock_panel.Entry) void {
+    entry.diff_ready = false;
+    entry.diff_failed = false;
+    entry.diff_truncated = false;
+    entry.diff_request_id = 0;
+    // ⚠️ **옛 두 쪽을 먼저 놓는다 — 실패로 끝나는 갈래에서도.** 남겨 두면 문서 탭을 닫은 뒤에도
+    // **사라진 편집이 「내 편집」으로 계속 보인다**(판정자 C1b-4 가 그것을 잡았다). 행 배열이 그
+    // 버퍼를 빌리므로 `invalidate` 가 **먼저** 와야 한다(git 결과 처리와 같은 순서·같은 이유).
+    if (termForEntry(self, entry)) |t| editor_diff_ops.invalidate(self, t);
+    self.freeDiffContent(entry);
+
+    // **주제가 사라졌으면 실패다** — 그 문서 Term 이 없으면 「내 편집」이라고 보여 줄 것이 없다.
+    const owner = term_ops.termBySurfaceId(self, entry.diff_buffer_surface_id) orelse {
+        entry.diff_failed = true;
+        return;
+    };
+    const doc = owner.rt.editor_doc orelse {
+        entry.diff_failed = true;
+        return;
+    };
+    const alloc = git_backend_mod.worker_allocator;
+    const disk = readDiskSide(self, entry.path, alloc) catch {
+        entry.diff_failed = true;
+        return;
+    };
+    const mine = alloc.dupe(u8, doc.file.content) catch {
+        alloc.free(disk);
+        entry.diff_failed = true;
+        return;
+    };
+    entry.diff_original = disk;
+    entry.diff_modified = mine;
+    entry.diff_ready = true;
+}
+
+/// 그 entry 를 든 Term(비교 Term). 행 배열이 두 쪽을 빌리므로 내용을 갈기 전에 그 Term 의 캐시를 놓아야 한다.
+fn termForEntry(self: *AppSession, entry: *dock_panel.Entry) ?*Term {
+    for (self.tabs.items) |tab| {
+        for (tab.panes.items) |pane| {
+            for (pane.terms.items) |t| {
+                if (t.file_entry == entry) return t;
+            }
+        }
+    }
+    return null;
+}
+
+/// 왼쪽 쪽(디스크)을 읽는다 — **비교는 못 읽는 파일에서도 실패로 서야 한다**(지워졌을 수 있다).
+fn readDiskSide(self: *AppSession, path: []const u8, alloc: std.mem.Allocator) ![]u8 {
+    var fresh = try editor_ops.openPath(self.io, self.allocator, path);
+    defer fresh.deinit(self.allocator);
+    return alloc.dupe(u8, fresh.file.content);
 }
 
 /// 「덮어쓰기」 — **CAS 를 건너뛰고** 지금 버퍼를 쓴다.

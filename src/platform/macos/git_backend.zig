@@ -1728,7 +1728,9 @@ fn diffWorker(job: *Job) void {
         const side: git_command.BlobSide = switch (target.base) {
             .staged, .conflict => .head,
             // `.commit`·`.turn_range`는 위에서 이미 돌려보냈다 — 여기 오면 그 자체가 버그다.
-            .unstaged, .untracked, .commit, .turn_range, .merge_stages => .index,
+            // `.save_conflict` 은 **git 을 부르지 않는다**(세션이 직접 채운다) — 여기 오면 그 자체가
+            // 버그다. `.index` 로 떨어뜨리면 그 버그가 「index 내용이 왼쪽에 뜬다」로 조용히 나타난다.
+            .unstaged, .untracked, .commit, .turn_range, .merge_stages, .save_conflict => .index,
         };
         if (blobSide(state.allocator, job, side)) |out| {
             result.original = out.bytes;

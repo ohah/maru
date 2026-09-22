@@ -12719,7 +12719,7 @@ test "이름 없는 문서 저장: 디스크에 쓰는 자리 둘, 이름을 붙
     try std.testing.expectEqual(@as(usize, 1), countOf(save, "std.mem.indexOfScalar(u8, norm, 0)"));
 }
 
-test "저장 충돌: 묻는 자리 하나 · CAS 를 건너뛰는 길 하나 · 포커스 예외의 근거" {
+test "저장 충돌: 묻는 자리 하나 · CAS 를 건너뛰는 길 하나 · primary 는 아무것도 안 버린다" {
     // **계약**: docs/editor-surface.md §4(C1a).
     //
     // **허용된 자리를 센다.** 「CAS 를 늘 건너뛰지 않는다」류의 부재 판정은 그 갈래를 아예 안 만든
@@ -12757,11 +12757,25 @@ test "저장 충돌: 묻는 자리 하나 · CAS 를 건너뛰는 길 하나 · 
     // ⑶ **두 저장이 같은 꼬리를 쓴다** — 쓰는 자리가 갈리면 지문 갱신·clean 판정·LSP 통지 중 하나가 낡는다.
     try std.testing.expectEqual(@as(usize, 1), countOf3(editor, "fn saveDocumentGuarded("));
     try std.testing.expectEqual(@as(usize, 1), countOf3(editor, "try writeDocumentBytes(self, path, bytes, switch (guard)"));
-    // ⑷ **포커스를 취소에 두는 자리는 하나이고 그 근거가 적혀 있다.** 근거가 사라지면 다음 사람이
-    //    「일관성」을 이유로 기본값으로 되돌리고, 그러면 Enter 가 바깥 변경을 지운다.
-    try std.testing.expectEqual(@as(usize, 1), countOf3(conflict, ".focus = .cancel"));
-    try std.testing.expect(std.mem.indexOf(u8, conflict, "둘 다 무언가를 버리므로") != null);
-    try std.testing.expect(std.mem.indexOf(u8, app_session, "파괴적인 선택이 둘인 상자는 그 기본이 함정이다") != null);
+    // ⑷ **`primary` 에는 아무것도 버리지 않는 선택만 선다**(C1b). 상자는 열 때 `primary` 에 포커스를
+    //    두므로 Enter 가 그것을 실행한다 — 파괴적인 것을 그 자리로 올리는 변이가 여기서 죽는다.
+    //    ⚠️ **네 번째 자리가 있는 이유도 함께 센다**: `cancel` 은 Esc 라 행동을 못 놓는다.
+    try std.testing.expectEqual(@as(usize, 1), countOf3(conflict, ".primary = .btn_compare,"));
+    try std.testing.expectEqual(@as(usize, 1), countOf3(conflict, ".alternate = .btn_overwrite,"));
+    try std.testing.expectEqual(@as(usize, 1), countOf3(conflict, ".extra = .btn_reload,"));
+    try std.testing.expectEqual(@as(usize, 0), countOf3(conflict, ".focus = "));
+    try std.testing.expect(std.mem.indexOf(u8, conflict, "아무것도 버리지 않는 유일한 선택") != null);
+    try std.testing.expect(std.mem.indexOf(u8, app_session, "아무것도 버리지 않는 선택만 둔다") != null);
+    // ⑷-b **비교는 git 을 안 부른다** — 가르는 자리는 `requestDiffContent` 머리 하나다(새로 고치는
+    //      자리 둘이 전부 그 함수를 지난다).
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOf3(app_session, "if (entry.diff_base == .save_conflict) return editor_conflict_ops.fillCompare(self, entry);"),
+    );
+    // ⑷-c **두 쪽은 해제하는 쪽과 같은 할당기로 만든다** — 소유자 표시 필드를 더하면 규칙이 둘이 된다.
+    try std.testing.expectEqual(@as(usize, 1), countOf3(conflict, "const alloc = git_backend_mod.worker_allocator;"));
+    // ⑷-d **실패 갈래에서도 옛 두 쪽을 놓는다** — 안 놓으면 사라진 문서의 편집이 계속 보인다.
+    try std.testing.expectEqual(@as(usize, 1), countOf3(conflict, "self.freeDiffContent(entry);"));
     // ⑸ **다시 읽기의 실패 표는 «따로»다** — 읽기 실패에 쓰기 문구를 쓰면 사용자가 할 일이 어긋난다.
     try std.testing.expectEqual(@as(usize, 1), countOf3(conflict, "pub fn reloadFailureNoticeKey("));
     try std.testing.expectEqual(@as(usize, 0), countOf3(conflict, "error.Unreadable => .editor_save_gone"));

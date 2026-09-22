@@ -76,7 +76,7 @@ test "CR2a 경계는 generation field 열두 개와 stable shell exclusion을 �
     // 네 값은 `RemoteRuntime` 이 커질 때마다 함께 움직인다. macOS 둘은 **실측**이고, linux 둘은 이
     // 모듈이 macOS 전용이라(session_host.zig 배럴) 이 트리에서 컴파일되지 않아 잴 수 없다.
     try std.testing.expectEqual(@as(usize, 2), count(runtime, ".Debug => 11728,"));
-    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".ReleaseFast => 11664,"));
+    try std.testing.expectEqual(@as(usize, 2), count(runtime, ".ReleaseFast => 11680,"));
     try std.testing.expectEqual(@as(usize, 2), count(runtime, ".Debug => 11328,"));
     try std.testing.expectEqual(@as(usize, 2), count(runtime, ".ReleaseFast => 11280,"));
 }

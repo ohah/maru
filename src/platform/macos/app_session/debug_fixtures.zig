@@ -1282,13 +1282,13 @@ pub fn applyForcedEditorHover(self: *AppSession) void {
 }
 
 /// MARU_FORCE_SYMBOL_PICKER=1 — `⇧⌘O` 심볼 피커를 연 채 둔다(캡처 전용, §7.5 · tooling §8.2o). 2층을 찍으려면 **서버 응답을 기다려야** 하므로
-/// 심볼 2층이 든 뒤에만 연다(`MARU_FORCE_SYMBOL_PICKER=1층` 이면 그 기다림 없이 곧바로 — 두 층을 나란히 찍는 자리).
+/// 심볼 2층이 든 뒤에만 연다(`MARU_FORCE_SYMBOL_PICKER=layer1` 이면 그 기다림 없이 곧바로 — 두 층을 나란히 찍는 자리).
 pub fn applyForcedSymbolPicker(self: *AppSession) void {
     const raw = std.c.getenv("MARU_FORCE_SYMBOL_PICKER") orelse return;
     if (self.chrome_host.symbol_picker.open) return;
     const term = pane_ops.activePane(self).activeTerm();
     if (term.kind != .editor) return;
-    const want_lsp = !std.mem.eql(u8, std.mem.span(raw), "1층");
+    const want_lsp = !std.mem.eql(u8, std.mem.span(raw), "layer1"); // 값은 ASCII 로 둔다(§7 i18n 원장 — 코드에 한국어 리터럴을 늘리지 않는다)
     if (want_lsp and editor_ops.symbols_client.list(term) == null) return; // 2층이 아직 — 다음 프레임에 다시
     if (self.chrome_host.notice.open) self.chrome_host.notice.dismiss();
     self.dispatchAppAction(.toggle_symbol_picker);

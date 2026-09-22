@@ -13150,10 +13150,15 @@ test "INL10 인레이 힌트 — provider 없으면 아무것도 안 묻고, 오
         var d0 = appendPaneFrame(s, narrow, term) orelse return error.EditorPaneDidNotDraw;
         d0.dl.deinit(allocator);
         const rows_before = term.rt.editor_hit_rows_len;
+        const total_before = term.rt.editor_total_visual_rows;
         try testing.expect(inlayApplied(&f, 1));
         var d1 = appendPaneFrame(s, narrow, term) orelse return error.EditorPaneDidNotDraw;
         d1.dl.deinit(allocator);
-        try testing.expect(term.rt.editor_hit_rows_len > rows_before); // 힌트가 도착해 행이 늘었다(힌트 세대가 캐시를 다시 세게 했다)
+        try testing.expect(term.rt.editor_hit_rows_len > rows_before); // 힌트가 도착해 행이 늘었다
+        // **행 수 캐시(`RowCache`)도 힌트 세대로 다시 섰다** — 그린 행(`hit_rows`)은 캐시 없이 세지만 문서 전체 행 수(스크롤 상한·gutter 축)는
+        // 캐시가 답한다(적대적 D3: 세대를 키에서 빼면 여기가 옛 1행에 머문다).
+        try testing.expectEqual(total_before + 1, term.rt.editor_total_visual_rows);
+        try testing.expectEqual(@as(u64, 1), term.rt.editor_row_cache.inlay_generation);
     }
 }
 

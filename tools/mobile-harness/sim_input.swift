@@ -40,7 +40,6 @@ func post(_ t: CGEventType, _ p: CGPoint) {
     CGEvent(mouseEventSource: nil, mouseType: t, mouseCursorPosition: p, mouseButton: .left)?.post(tap: .cghidEventTap)
 }
 
-guard let win = simulatorFrame() else { print("시뮬레이터 창을 못 찾았다"); exit(3) }
 // ── 창 → 기기 사상 (M8) ─────────────────────────────────────────────────────
 //
 // **재서 안다.** 창 안에서 기기 화면이 어디에 어떤 배율로 놓이는지는 창 크기·제목줄·시뮬레이터
@@ -59,8 +58,8 @@ struct Calibration {
 // `#filePath` 는 이 소스의 자리라 어디서 불러도 같다.
 let calPath = (#filePath as NSString).deletingLastPathComponent + "/out/sim_input_cal.txt"
 
-func loadCalibration() -> Calibration? {
-    guard let text = try? String(contentsOfFile: calPath, encoding: .utf8) else { return nil }
+func loadCalibration(at path: String = calPath) -> Calibration? {
+    guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
     // **개행까지 쪼갠다.** 공백만으로 쪼개면 마지막 항이 `"1.5\n"` 이 되어 `Double(_:)` 가 nil 을
     // 내고, 그러면 **보정을 해 두고도 「없다」** 가 된다 — 자가 검사가 첫 실행에서 이걸 잡았다.
     let f = text.split(whereSeparator: { $0 == " " || $0 == "\n" || $0 == "\r" }).compactMap { Double($0) }
@@ -81,10 +80,10 @@ func toWindow(_ c: Calibration, _ p: CGPoint) -> CGPoint {
     CGPoint(x: c.offX + c.scaleX * p.x, y: c.offY + c.scaleY * p.y)
 }
 
-func saveCalibration(_ c: Calibration) {
-    let dir = (calPath as NSString).deletingLastPathComponent
+func saveCalibration(_ c: Calibration, at path: String = calPath) {
+    let dir = (path as NSString).deletingLastPathComponent
     try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-    try? "\(c.offX) \(c.offY) \(c.scaleX) \(c.scaleY)\n".write(toFile: calPath, atomically: true, encoding: .utf8)
+    try? "\(c.offX) \(c.offY) \(c.scaleX) \(c.scaleY)\n".write(toFile: path, atomically: true, encoding: .utf8)
 }
 
 func run(_ cmd: String) -> String {
@@ -164,14 +163,20 @@ if mode == "selftest" {
     check("표본 밖 점도 맞는다", abs(back.x - w(probe).x) < 1e-9 && abs(back.y - w(probe).y) < 1e-9, "\(back) vs \(w(probe))")
     // 두 점이 같으면 못 푼다 — 0 으로 나누는 값을 저장하면 그 뒤 모든 손짓이 NaN 이다.
     check("같은 두 점은 거절한다", solve(win0: w(d0), dev0: d0, win1: w(d0), dev1: d0) == nil, "")
-    // 파일 왕복 — 적은 것을 그대로 읽는가(자릿수를 잃으면 조용히 빗나간다).
-    saveCalibration(c)
-    let r = loadCalibration()
+    // 파일 왕복 — 실제 사용자의 보정 파일은 보존하고 이 검사 소유의 임시 파일만 쓴다.
+    let testPath = FileManager.default.temporaryDirectory
+        .appendingPathComponent("maru-sim-input-selftest-\(UUID().uuidString).txt").path
+    saveCalibration(c, at: testPath)
+    let r = loadCalibration(at: testPath)
     check("파일에 적고 그대로 읽는다", r != nil && abs(r!.scaleX - c.scaleX) < 1e-9 && abs(r!.offY - c.offY) < 1e-9, r.map { "\($0)" } ?? "없음")
-    try? FileManager.default.removeItem(atPath: calPath) // 판정용 값을 남기지 않는다
+    try? FileManager.default.removeItem(atPath: testPath)
     print(bad == 0 ? "selftest: 전부 통과" : "selftest: \(bad) 건 실패")
     exit(bad == 0 ? 0 : 1)
 }
+
+// 자가 검사는 창 없이 순수 좌표 사상만 검증한다. 실제 입력 경로는 기존처럼
+// 창이 없으면 어떤 CGEvent도 게시하지 않고 멈춘다.
+guard let win = simulatorFrame() else { print("시뮬레이터 창을 못 찾았다"); exit(3) }
 
 if mode == "calibrate" {
     // **두 점이면 축마다 배율과 오프셋이 풀린다.** 창 안쪽으로 넉넉히 들어간 두 점을 골라

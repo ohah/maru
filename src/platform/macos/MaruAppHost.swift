@@ -4304,6 +4304,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var sessionHostCandidateNewSelfNonNSAppCountMax = 0
     private var sessionHostCandidateNewSelfNonNSAppLayer: Int32 = 0
     private var sessionHostCandidateNewSelfNonNSAppBounds: SessionHostIMECandidateObservation.Bounds?
+    private var sessionHostCandidateNewSelfNSAppCountMax = 0
+    private var sessionHostCandidateNewSelfNSAppLayer: Int32 = 0
+    private var sessionHostCandidateNewSelfNSAppBounds: SessionHostIMECandidateObservation.Bounds?
+    private var sessionHostCandidatePTYInputChanged = false
+    private var sessionHostCandidateCommittedCallbacksChanged = false
+    private var sessionHostCandidateScreenGenerationChanged = false
+    private var sessionHostCandidateOptionReturnRepeatCount: UInt32 = 0
     private var sessionHostCandidateFailure = ""
     private var sessionHostCandidateAdmissionValidated = false
     private var sessionHostCandidateComposeKeyIndex = 0
@@ -4372,9 +4379,18 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     // Observe only physical progress keys; never consume them or bypass the normal IME transaction.
     func observeSessionHostManualInputKey(_ event: NSEvent, view: MaruMetalTerminalView) {
-        guard isSessionHostManualInputSmokeMode, !event.isARepeat,
+        guard isSessionHostManualInputSmokeMode,
               sessionHostInputSmokeOwnsGlobalKeyboardFocus(view: view) else { return }
         let chord = event.modifierFlags.intersection([.command, .control, .option, .shift])
+        if event.isARepeat {
+            if sessionHostInputSmokeStage == 2, sessionHostCandidatePhase == 1,
+               event.keyCode == 36, chord == [.option] {
+                if sessionHostCandidateOptionReturnRepeatCount < UInt32.max {
+                    sessionHostCandidateOptionReturnRepeatCount += 1
+                }
+            }
+            return
+        }
         if sessionHostInputSmokeStage == 3 {
             // A screen substring may already exist while the last syllable is still marked.
             // Require the user's most recent physical key to be an unmodified Return instead.
@@ -11201,7 +11217,18 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                     let newSelfNonNSApp = newRows.filter {
                         $0.owner.pid == getpid() && !appWindowIDs.contains($0.id)
                     }
+                    let newSelfNSApp = newRows.filter {
+                        $0.owner.pid == getpid() && appWindowIDs.contains($0.id)
+                    }
                     sessionHostCandidateOpenedWindowCountMax = max(sessionHostCandidateOpenedWindowCountMax, opened.windows.count)
+                    // Compare only boolean axes for a failed test. Zig still owns the immutable
+                    // counter verdict and no raw values or input text leave this process.
+                    sessionHostCandidatePTYInputChanged = sessionHostCandidatePTYInputChanged ||
+                        before.counters.pty_input_bytes != opened.counters.pty_input_bytes
+                    sessionHostCandidateCommittedCallbacksChanged = sessionHostCandidateCommittedCallbacksChanged ||
+                        before.counters.committed_text_callbacks != opened.counters.committed_text_callbacks
+                    sessionHostCandidateScreenGenerationChanged = sessionHostCandidateScreenGenerationChanged ||
+                        before.counters.base_screen_generation != opened.counters.base_screen_generation
                     sessionHostCandidateNewIDCountMax = max(sessionHostCandidateNewIDCountMax, newRows.count)
                     sessionHostCandidateNewExternalCountMax = max(
                         sessionHostCandidateNewExternalCountMax,
@@ -11210,9 +11237,24 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                     sessionHostCandidateNewSelfNonNSAppCountMax = max(
                         sessionHostCandidateNewSelfNonNSAppCountMax, newSelfNonNSApp.count
                     )
-                    if newSelfNonNSApp.count == 1, let window = newSelfNonNSApp.first {
+                    if sessionHostCandidateNewSelfNonNSAppCountMax > 1 {
+                        sessionHostCandidateNewSelfNonNSAppBounds = nil
+                        sessionHostCandidateNewSelfNonNSAppLayer = 0
+                    } else if newSelfNonNSApp.count == 1, let window = newSelfNonNSApp.first {
                         sessionHostCandidateNewSelfNonNSAppLayer = window.layer
                         sessionHostCandidateNewSelfNonNSAppBounds = window.bounds
+                    }
+                    // Diagnostic only. The reducer still rejects every app-owned window; the
+                    // bounds help distinguish a visible IME panel from an unrelated app window.
+                    sessionHostCandidateNewSelfNSAppCountMax = max(
+                        sessionHostCandidateNewSelfNSAppCountMax, newSelfNSApp.count
+                    )
+                    if sessionHostCandidateNewSelfNSAppCountMax > 1 {
+                        sessionHostCandidateNewSelfNSAppBounds = nil
+                        sessionHostCandidateNewSelfNSAppLayer = 0
+                    } else if newSelfNSApp.count == 1, let window = newSelfNSApp.first {
+                        sessionHostCandidateNewSelfNSAppLayer = window.layer
+                        sessionHostCandidateNewSelfNSAppBounds = window.bounds
                     }
                     do {
                         selectedRequest = try observation.captureRequest(before: before, opened: opened)
@@ -13461,6 +13503,17 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         session_host_input_smoke_candidate_new_self_non_nsapp_y=\(sessionHostCandidateNewSelfNonNSAppBounds?.y ?? 0)
         session_host_input_smoke_candidate_new_self_non_nsapp_w=\(sessionHostCandidateNewSelfNonNSAppBounds?.w ?? 0)
         session_host_input_smoke_candidate_new_self_non_nsapp_h=\(sessionHostCandidateNewSelfNonNSAppBounds?.h ?? 0)
+        session_host_input_smoke_candidate_new_self_nsapp_max=\(sessionHostCandidateNewSelfNSAppCountMax)
+        session_host_input_smoke_candidate_new_self_nsapp_bounds_present=\(sessionHostCandidateNewSelfNSAppBounds != nil)
+        session_host_input_smoke_candidate_new_self_nsapp_layer=\(sessionHostCandidateNewSelfNSAppLayer)
+        session_host_input_smoke_candidate_new_self_nsapp_x=\(sessionHostCandidateNewSelfNSAppBounds?.x ?? 0)
+        session_host_input_smoke_candidate_new_self_nsapp_y=\(sessionHostCandidateNewSelfNSAppBounds?.y ?? 0)
+        session_host_input_smoke_candidate_new_self_nsapp_w=\(sessionHostCandidateNewSelfNSAppBounds?.w ?? 0)
+        session_host_input_smoke_candidate_new_self_nsapp_h=\(sessionHostCandidateNewSelfNSAppBounds?.h ?? 0)
+        session_host_input_smoke_candidate_pty_input_changed=\(sessionHostCandidatePTYInputChanged)
+        session_host_input_smoke_candidate_committed_callbacks_changed=\(sessionHostCandidateCommittedCallbacksChanged)
+        session_host_input_smoke_candidate_screen_generation_changed=\(sessionHostCandidateScreenGenerationChanged)
+        session_host_input_smoke_candidate_option_return_repeat_count=\(sessionHostCandidateOptionReturnRepeatCount)
         session_host_input_smoke_manual_input=\(isSessionHostManualInputSmokeMode)
         session_host_input_smoke_manual_return_observed=\(sessionHostManualReturnObserved)
         session_host_input_smoke_callback_has_marked_text=\(sessionHostCallbackHasMarkedText.map { String($0) } ?? "unobserved")

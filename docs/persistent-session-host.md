@@ -6164,8 +6164,13 @@ schema·counter가 잘못된 경우는 `failed`로 즉시 끝낸다. 재시도 �
 exact-once이고, 재시도 가능한 것은 v2b1의 게시 전 capture-select ABI뿐이다.
 test-only 실패 진단은 이 미분류 RED를 구분하도록 baseline/opened window 개수, 신규 ID 수의 최대값,
 그중 앱 밖 소유 PID의 신규 ID 수의 최대값, 앱 PID이되 `NSApp.windows`에 없는 신규 ID 수의 최대값,
-그 신규 창 하나의 layer·bounds와 시도 횟수만 숫자로 남길 수 있다. 이는 후보 선택이나 게시의
+앱 PID이면서 `NSApp.windows`에 있는 신규 ID 수의 최대값, 각 분류의 신규 창 최대값이 정확히 하나일 때의
+layer·bounds 및 시도 횟수만 숫자로 남길 수 있다. 두 분류의 수치 진단은 권위 없는 실패 분석이며,
+앱 PID 창을 후보로 허용한다는 뜻이 아니다. 이는 후보 선택이나 게시의
 권위가 아니며 window ID·PID·제목·문자열·raw inventory는 실패 artifact에 남기지 않는다.
+`CounterMutation` 실패의 축을 가리기 위해 before/opened의 PTY 입력·commit callback·base-screen 세대가
+각각 달라졌는지의 불리언과 수동 Option-Return 반복 keyDown 횟수만 같은 test-only summary에 남길 수 있다.
+원시 카운터 값·입력 내용은 남기지 않으며 이 진단으로 불변식이나 후보 선별 조건을 완화하지 않는다.
 캡처 직전·직후 동일 window ID/PID와 Apple code-signing identity를 다시 검증한다. receipt는 v2a와 같은 runtime/surface,
 candidate window ID/owner identity/bounds, `firstRect`, capture digest와 capture-complete
 상태를 결속한다. AppKit `firstRect`와 Quartz bounds는 원점 규약이 다르므로 직접 비교하지 않는다. display ID,

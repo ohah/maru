@@ -674,6 +674,22 @@ opened 최대 17창, 신규 ID 최대 1개, 외부 PID 신규 ID 최대 0개였�
 속하는지와 layer·bounds를 숫자로만 확인하는 후속 진단을 넣었으며, 아직 이 진단의 제품 회차는 없다.
 따라서 현 `외부 PID + Apple 서명` 필터가 후보를 배제했을 가능성은 높지만, 새 앱 PID 창이 후보창이라는
 동일성은 아직 입증되지 않았고 v2b1은 RED다.
+같은 전용 앱의 다음 수동 회차는 실제 후보 목록 표시를 다시 확인했고, v2a 제품 pixel gate와 입력·source
+복원을 다시 통과했다. 첫 후보 요청 뒤 30번 조회하는 동안 baseline 17창, opened 최대 18창,
+신규 ID 최대 1개, 외부 PID 신규 0개, 앱 PID이되 `NSApp.windows` 밖의 신규 0개였다.
+즉 유일한 신규 ID는 앱 PID의 `NSApp.windows`에 속했지만, 이 수치만으로 OS 후보 목록과 동일하다고
+판정하거나 현 reducer의 외부 PID 조건을 완화하지 않는다. 후속 진단은 이 분류의 단일 신규 창의
+layer·bounds만 숫자로 기록하여 후보 anchor 및 화면상 후보 위치와 대조한다. 새 제품 빌드·권한 승인 후의
+재실측 전까지 이 후속 진단은 검증되지 않았고 v2b1은 계속 RED다.
+같은 날 새 진단 빌드의 첫 실행은 전용 Screen Recording 권한 승인 전 `screen-recording-not-provisioned`로
+끝나 후보 입력을 시작하지 않았다. 승인 후 동일 서명 재실행은 첫 후보 조회에서 `CounterMutation`으로 즉시
+끝났다(선택 시도 1, baseline/opened 18/18, 신규 ID 0, committed callback 최종 3). 따라서 이번 회차는
+새 앱 PID 창의 layer·bounds를 측정하지 못했으며, 직전 `CandidateMissing` 회차의 원인을 닫지 않는다.
+카운터 변화의 축(PTY·commit·base-screen)과 두 번째 입력의 추가 Return 여부를 분리하기 전에는
+후보 필터나 불변식을 완화하지 않는다.
+사용자는 이 회차에서 후보 목록은 보지 못했지만 한자 변경은 보았다고 확인했다. 이는 후보창 생성·소멸이
+증명된 회차가 아니며, Option-Return이 문서 상태를 바꿨을 가능성과 반복 keyDown 여부를 별도로 가려야 한다.
+후속 test-only 진단은 원시 값 없이 세 카운터 변경 여부와 Option-Return 반복 횟수를 기록한다.
 v2b0은 Screen Recording preflight를 source/HID mutation보다 먼저 수행하고 후보 요청 전후 전체 on-screen window inventory
 snapshot(시점당 최대 256, cap+1은 drop 없이 실패)을 pure reducer에 넘긴다. reducer의 차집합에서
 title·후보 문자열·pixel을 제외한 ID/owner PID·bundle ID/Apple signing validity·signing identifier/layer/bounds/TIS source ID만

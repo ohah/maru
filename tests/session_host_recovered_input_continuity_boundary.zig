@@ -268,6 +268,17 @@ test "CR6d 경계는 exact recovered screen probe와 actual AppKit input smoke�
     try std.testing.expectEqual(@as(usize, 1), count(pixel_validator, "before.status_bar_height_px != marked.status_bar_height_px"));
     try std.testing.expectEqual(@as(usize, 1), count(swift, "session_host_input_smoke_candidate_new_external_max="));
     try std.testing.expectEqual(@as(usize, 1), count(swift, "session_host_input_smoke_candidate_new_self_non_nsapp_max="));
+    try std.testing.expectEqual(@as(usize, 1), count(swift, "session_host_input_smoke_candidate_new_self_nsapp_max="));
+    try std.testing.expectEqual(@as(usize, 1), count(swift, "session_host_input_smoke_candidate_new_self_nsapp_bounds_present="));
+    try std.testing.expectEqual(@as(usize, 1), count(swift, "session_host_input_smoke_candidate_new_self_nsapp_layer="));
+    try std.testing.expectEqual(@as(usize, 1), count(swift, "if sessionHostCandidateNewSelfNSAppCountMax > 1"));
+    try std.testing.expectEqual(@as(usize, 1), count(swift, "if sessionHostCandidateNewSelfNonNSAppCountMax > 1"));
+    inline for (.{ "x", "y", "w", "h" }) |axis| {
+        try std.testing.expectEqual(@as(usize, 1), count(swift, "session_host_input_smoke_candidate_new_self_nsapp_" ++ axis ++ "="));
+    }
+    inline for (.{ "pty_input_changed", "committed_callbacks_changed", "screen_generation_changed", "option_return_repeat_count" }) |axis| {
+        try std.testing.expectEqual(@as(usize, 1), count(swift, "session_host_input_smoke_candidate_" ++ axis ++ "="));
+    }
     inline for (.{ "before_digest", "marked_digest", "runtime_id", "surface_id", "first_rect" }) |field| {
         try std.testing.expect(count(pixel_validator, field) > 0);
     }

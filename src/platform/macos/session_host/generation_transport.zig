@@ -2660,6 +2660,18 @@ test "CR3a-2c3b internal rpc substrate local invariant fail-stop is authenticate
         try std.testing.expect(!stderr_truncated);
         try expectB36FailStopTranscript(case_id, nonce, stage_bytes[0..stage_len]);
         const unsigned_status: c_uint = @bitCast(status);
+        // case 4 (rearm permit drift) 는 panic 이 아니라 `fatalIntegrity(.proof_loss)` 로 죽는다.
+        // `finishRpcResponseOwnedUnderOwner` 가 commit 직전에 `reusableRearmReady` 로 같은 조건
+        // (`permit.exactFor`)을 먼저 보고 거기서 `_exit(86)` 하기 때문에, commit 안의
+        // "RPC response reusable rearm permit mismatch" panic 에는 이 경로로 닿지 않는다
+        // (그 panic 은 reuse correction 경로에서 여전히 산다 — 아래 hostile case ≥ 4).
+        // 테스트 빌드는 fatalIntegrity 사유를 안 찍으므로 확인할 수 있는 것은 종료 코드 86 이다.
+        // 인증은 위의 nonce + stage 기록이 이미 했다.
+        if (case_id == 4) {
+            try std.testing.expect(c.W.IFEXITED(unsigned_status));
+            try std.testing.expectEqual(@as(u8, 86), c.W.EXITSTATUS(unsigned_status));
+            continue;
+        }
         if (c.W.IFEXITED(unsigned_status)) {
             const exit_code = c.W.EXITSTATUS(unsigned_status);
             try std.testing.expect(exit_code != 0 and exit_code != 126 and exit_code != 127);
@@ -2669,7 +2681,6 @@ test "CR3a-2c3b internal rpc substrate local invariant fail-stop is authenticate
         const expected_panic = switch (case_id) {
             1, 2 => "RPC response reusable rearm preflight drifted",
             3 => "invalid RPC response transition permit",
-            4 => "RPC response reusable rearm permit mismatch",
             else => unreachable,
         };
         try std.testing.expect(std.mem.indexOf(

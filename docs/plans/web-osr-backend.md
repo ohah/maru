@@ -73,7 +73,8 @@ sidecar 는 maru 앱 프로세스마다 **하나**다. CEF 는 `root_cache_path`
 **Mermaid helper 선례를 따른다(사용자 결정 2026-09-24, W1 착수 전 공격 #4)** — 계획 초안의 socketpair 대신:
 
 - maru 가 sidecar 를 spawn 하고 그 **stdin 으로 명령**, **stdout 으로 알림**을 받는다. frame 모양·상한·방향은
-  순수 Zig codec [`src/session/web_sidecar_protocol.zig`](../../src/session/web_sidecar_protocol.zig) 하나가
+  순수 Zig codec [`src/session/web_sidecar/`](../../src/session/web_sidecar/)(`wire`·`message`·`fields`·`codec`·`stream`·`text` —
+  `session.web_sidecar` 네임스페이스)이
   소유한다(길이 접두 + `MWEB` + 버전 + tag, 빅엔디언, 고정 저장소 스트리밍 decoder). CEF 없이 일반 CI 에서 단위
   시험이 돈다(W1a).
 - 첫 frame 은 maru 의 `hello`(instance·nonce), sidecar 는 같은 값을 `hello_ack` 로 돌려준다 — 「내가 띄운 그

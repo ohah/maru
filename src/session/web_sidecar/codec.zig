@@ -1,178 +1,36 @@
-//! 웹 OSR sidecar(`maru-web-host`) 제어 채널의 단일 codec(W1a).
-//!
-//! maru 는 sidecar 를 spawn 하고 그 stdin 으로 명령을, stdout 으로 알림을 받는다(Mermaid helper 와 같은 틀 —
-//! docs/plans/web-osr-backend.md C2). 픽셀은 이 채널을 지나지 않는다(C3 — IOSurface). 양쪽은 이 모듈이
-//! encode/decode 한 frame 만 운반해야 endian·상한·닫힌 enum 판단이 한 곳에 남는다.
-//!
-//! sidecar 는 신뢰할 수 없는 웹을 띄우는 프로세스 트리의 뿌리라, maru 쪽 decoder 는 sidecar 가 보낸 바이트를
-//! 공격 입력으로 다룬다 — 고정 저장소, 상한 초과·방향 위반·닫힌 필드 위반은 전부 거절한다.
+//! 웹 OSR sidecar 제어 채널의 frame 조립·해체(W1a). 방향 확인은 받는 쪽 `stream.zig` 가 한다.
 
 const std = @import("std");
+const wire = @import("wire.zig");
+const message_mod = @import("message.zig");
+const fields = @import("fields.zig");
 
-pub const magic = "MWEB".*;
-/// maru 와 sidecar 는 따로 설치될 수 있다(D8 — formula 가 sidecar 만 올릴 수 있다). 그래서 Mermaid 처럼
-/// 「항상 같은 버전」을 전제하지 않고, 버전이 다르면 첫 frame(hello)에서 `UnsupportedVersion` 으로 드러난다.
-pub const version: u16 = 1;
-
-/// maru 가 보내는 URL 상한. 사용자가 친 주소·링크를 싣는 자리라 이 크기면 넉넉하고, 고정 decoder 저장소를
-/// 작게 둔다. 이보다 긴 URL(큰 data: URL 등)은 maru 가 보내지 않는다.
-pub const max_url_bytes: usize = 32 * 1024;
-/// sidecar 가 보내는 글(제목·실패 설명) 상한. sidecar 는 `clampUtf8` 로 잘라서 보낸다.
-pub const max_text_bytes: usize = 4 * 1024;
-pub const max_frame_bytes: usize = 34 * 1024;
-pub const max_retained_bytes: usize = max_frame_bytes + prefix_len;
-
-/// view 크기 상한(DIP). 5K 화면 전체의 두 배를 넘는 view 는 없다.
-pub const max_view_extent: u32 = 16 * 1024;
-pub const min_scale: f32 = 0.5;
-pub const max_scale: f32 = 8.0;
-
-const prefix_len = 4;
-const common_len = magic.len + @sizeOf(u16) + @sizeOf(u8);
-
-/// 0~31 은 maru → sidecar, 32~ 는 sidecar → maru. 받는 쪽은 `StreamingDecoder` 의 방향으로 거꾸로 온
-/// frame 을 거절한다.
-pub const Tag = enum(u8) {
-    hello = 0,
-    create_browser = 1,
-    destroy_browser = 2,
-    resize = 3,
-    set_hidden = 4,
-    set_focus = 5,
-    navigate = 6,
-    shutdown = 7,
-
-    hello_ack = 32,
-    browser_created = 33,
-    browser_closed = 34,
-    title_changed = 35,
-    load_finished = 36,
-    renderer_gone = 37,
-    failure = 38,
-
-    pub fn direction(self: Tag) Direction {
-        return if (@intFromEnum(self) < 32) .to_sidecar else .to_maru;
-    }
-};
-
-pub const Direction = enum { to_sidecar, to_maru };
-
-pub const RendererGoneReason = enum(u8) {
-    abnormal = 0,
-    killed = 1,
-    crashed = 2,
-    out_of_memory = 3,
-    launch_failed = 4,
-};
-
-pub const FailureCode = enum(u8) {
-    /// 같은 프로필을 다른 프로세스가 쥐고 있다(CEF process singleton — §13.1 exit 24).
-    profile_in_use = 0,
-    cef_initialize_failed = 1,
-    browser_create_failed = 2,
-    unknown_browser = 3,
-    duplicate_browser = 4,
-    /// sidecar 가 maru 의 frame 을 풀지 못했다. 이 뒤 sidecar 는 채널을 닫는다.
-    protocol_violation = 5,
-};
-
-pub const BrowserId = u64;
-
-pub const Hello = struct {
-    instance: u64,
-    nonce: u64,
-};
-
-pub const ViewSize = struct {
-    width: u32,
-    height: u32,
-    scale: f32,
-};
-
-pub const CreateBrowser = struct {
-    browser: BrowserId,
-    size: ViewSize,
-    hidden: bool,
-    url: []const u8,
-};
-
-pub const Resize = struct {
-    browser: BrowserId,
-    size: ViewSize,
-};
-
-pub const BrowserFlag = struct {
-    browser: BrowserId,
-    value: bool,
-};
-
-pub const Navigate = struct {
-    browser: BrowserId,
-    url: []const u8,
-};
-
-pub const BrowserText = struct {
-    browser: BrowserId,
-    text: []const u8,
-};
-
-pub const LoadFinished = struct {
-    browser: BrowserId,
-    http_status: i32,
-};
-
-pub const RendererGone = struct {
-    browser: BrowserId,
-    reason: RendererGoneReason,
-};
-
-/// `browser` 가 0 이면 브라우저에 묶이지 않은 실패(초기화·프로필)다.
-pub const Failure = struct {
-    browser: BrowserId,
-    code: FailureCode,
-    detail: []const u8,
-};
-
-pub const Message = union(Tag) {
-    hello: Hello,
-    create_browser: CreateBrowser,
-    destroy_browser: BrowserId,
-    resize: Resize,
-    set_hidden: BrowserFlag,
-    set_focus: BrowserFlag,
-    navigate: Navigate,
-    shutdown: void,
-
-    hello_ack: Hello,
-    browser_created: BrowserId,
-    browser_closed: BrowserId,
-    title_changed: BrowserText,
-    load_finished: LoadFinished,
-    renderer_gone: RendererGone,
-    failure: Failure,
-};
-
-pub const Error = error{
-    OutputTooSmall,
-    FrameTooLarge,
-    UrlTooLarge,
-    EmptyUrl,
-    TextTooLarge,
-    InvalidUtf8,
-    InvalidMagic,
-    UnsupportedVersion,
-    UnknownTag,
-    WrongDirection,
-    UnknownReason,
-    UnknownFailureCode,
-    InvalidBool,
-    InvalidBrowserId,
-    InvalidViewSize,
-    InvalidLength,
-    TrailingBytes,
-    RetainedInputOverflow,
-    IncompleteFrame,
-};
+const Cursor = wire.Cursor;
+const ReadCursor = wire.ReadCursor;
+const Error = wire.Error;
+const magic = wire.magic;
+const version = wire.version;
+const prefix_len = wire.prefix_len;
+const common_len = wire.common_len;
+const max_frame_bytes = wire.max_frame_bytes;
+const max_url_bytes = wire.max_url_bytes;
+const max_text_bytes = wire.max_text_bytes;
+const Message = message_mod.Message;
+const Tag = message_mod.Tag;
+const ViewSize = message_mod.ViewSize;
+const RendererGoneReason = message_mod.RendererGoneReason;
+const FailureCode = message_mod.FailureCode;
+const max_view_extent = fields.max_view_extent;
+const writeBrowser = fields.writeBrowser;
+const readBrowser = fields.readBrowser;
+const writeSize = fields.writeSize;
+const readSize = fields.readSize;
+const readBool = fields.readBool;
+const readHello = fields.readHello;
+const writeUrl = fields.writeUrl;
+const readUrl = fields.readUrl;
+const writeText = fields.writeText;
+const readText = fields.readText;
 
 /// Caller-owned output 에 frame 을 만든다. 성공 반환값만큼만 pipe 에 써야 한다.
 pub fn encode(message: Message, out: []u8) Error!usize {
@@ -284,215 +142,6 @@ pub fn decodeExact(frame: []const u8) Error!Message {
     return message;
 }
 
-/// pipe 의 partial/concatenated read 를 받아 frame 경계를 복원하고, `direction` 이 아닌 frame 을 거절한다.
-/// `next` 가 반환한 slice 는 다음 `feed`/`next` 전까지만 유효하다. 고정 저장소라 공격 입력에도 allocation 이 없다.
-/// 오류가 한 번 나면 frame 경계를 믿을 수 없으므로 받는 쪽은 **채널을 닫는다**(재동기화하지 않는다).
-pub const StreamingDecoder = struct {
-    direction: Direction,
-    retained: [max_retained_bytes]u8 = undefined,
-    len: usize = 0,
-    delivered_len: usize = 0,
-
-    pub fn init(direction: Direction) StreamingDecoder {
-        return .{ .direction = direction };
-    }
-
-    pub fn feed(self: *StreamingDecoder, bytes: []const u8) Error!void {
-        self.compactDelivered();
-        if (bytes.len > self.retained.len - self.len) return error.RetainedInputOverflow;
-        @memcpy(self.retained[self.len..][0..bytes.len], bytes);
-        self.len += bytes.len;
-    }
-
-    pub fn next(self: *StreamingDecoder) Error!?Message {
-        self.compactDelivered();
-        if (self.len < prefix_len) return null;
-        const payload_len = std.mem.readInt(u32, self.retained[0..prefix_len], .big);
-        const total_len = std.math.add(usize, prefix_len, payload_len) catch return error.FrameTooLarge;
-        if (total_len > max_frame_bytes) return error.FrameTooLarge;
-        if (self.len < total_len) return null;
-        const message = try decodeExact(self.retained[0..total_len]);
-        if (std.meta.activeTag(message).direction() != self.direction) return error.WrongDirection;
-        self.delivered_len = total_len;
-        return message;
-    }
-
-    /// 채널이 닫혔을 때 부른다. frame 중간에서 끊겼으면 `IncompleteFrame`.
-    pub fn finish(self: *StreamingDecoder) Error!void {
-        self.compactDelivered();
-        if (self.len != 0) return error.IncompleteFrame;
-    }
-
-    fn compactDelivered(self: *StreamingDecoder) void {
-        if (self.delivered_len == 0) return;
-        const remaining = self.len - self.delivered_len;
-        std.mem.copyForwards(u8, self.retained[0..remaining], self.retained[self.delivered_len..self.len]);
-        self.len = remaining;
-        self.delivered_len = 0;
-    }
-};
-
-/// `text` 를 `max` 바이트 안의 가장 긴 UTF-8 접두로 자른다(글자 중간에서 자르지 않는다). sidecar 가 페이지
-/// 제목처럼 길이를 통제할 수 없는 글을 `max_text_bytes` 로 줄일 때 쓴다. `text` 는 유효한 UTF-8 이어야 한다.
-pub fn clampUtf8(text: []const u8, max: usize) []const u8 {
-    if (text.len <= max) return text;
-    var end = max;
-    // 이어지는 바이트(10xxxxxx) 위에서 끝나지 않게, 글자의 첫 바이트까지 물러난다.
-    while (end > 0 and (text[end] & 0xC0) == 0x80) end -= 1;
-    return text[0..end];
-}
-
-fn writeBrowser(cursor: *Cursor, browser: BrowserId) Error!void {
-    if (browser == 0) return error.InvalidBrowserId;
-    try cursor.writeU64(browser);
-}
-
-fn readBrowser(cursor: *ReadCursor) Error!BrowserId {
-    const browser = try cursor.readU64();
-    if (browser == 0) return error.InvalidBrowserId;
-    return browser;
-}
-
-fn validSize(size: ViewSize) bool {
-    if (size.width == 0 or size.width > max_view_extent) return false;
-    if (size.height == 0 or size.height > max_view_extent) return false;
-    // NaN 은 두 비교가 모두 거짓이라 여기서 걸린다.
-    return size.scale >= min_scale and size.scale <= max_scale;
-}
-
-fn writeSize(cursor: *Cursor, size: ViewSize) Error!void {
-    if (!validSize(size)) return error.InvalidViewSize;
-    try cursor.writeU32(size.width);
-    try cursor.writeU32(size.height);
-    try cursor.writeU32(@bitCast(size.scale));
-}
-
-fn readSize(cursor: *ReadCursor) Error!ViewSize {
-    const size: ViewSize = .{
-        .width = try cursor.readU32(),
-        .height = try cursor.readU32(),
-        .scale = @bitCast(try cursor.readU32()),
-    };
-    if (!validSize(size)) return error.InvalidViewSize;
-    return size;
-}
-
-fn readBool(cursor: *ReadCursor) Error!bool {
-    return switch (try cursor.readByte()) {
-        0 => false,
-        1 => true,
-        else => error.InvalidBool,
-    };
-}
-
-fn readHello(cursor: *ReadCursor) Error!Hello {
-    return .{ .instance = try cursor.readU64(), .nonce = try cursor.readU64() };
-}
-
-fn writeUrl(cursor: *Cursor, url: []const u8) Error!void {
-    if (url.len == 0) return error.EmptyUrl;
-    if (url.len > max_url_bytes) return error.UrlTooLarge;
-    if (!std.unicode.utf8ValidateSlice(url)) return error.InvalidUtf8;
-    try cursor.writeU32(@intCast(url.len));
-    try cursor.writeBytes(url);
-}
-
-fn readUrl(cursor: *ReadCursor) Error![]const u8 {
-    const len = try cursor.readU32();
-    if (len == 0) return error.EmptyUrl;
-    if (len > max_url_bytes) return error.UrlTooLarge;
-    const url = try cursor.readBytes(len);
-    if (!std.unicode.utf8ValidateSlice(url)) return error.InvalidUtf8;
-    return url;
-}
-
-fn writeText(cursor: *Cursor, text: []const u8) Error!void {
-    if (text.len > max_text_bytes) return error.TextTooLarge;
-    if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidUtf8;
-    try cursor.writeU32(@intCast(text.len));
-    try cursor.writeBytes(text);
-}
-
-fn readText(cursor: *ReadCursor) Error![]const u8 {
-    const len = try cursor.readU32();
-    if (len > max_text_bytes) return error.TextTooLarge;
-    const text = try cursor.readBytes(len);
-    if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidUtf8;
-    return text;
-}
-
-const Cursor = struct {
-    bytes: []u8,
-    pos: usize = 0,
-
-    fn init(bytes: []u8) Cursor {
-        return .{ .bytes = bytes };
-    }
-
-    fn skip(self: *Cursor, len: usize) Error!void {
-        _ = try self.reserve(len);
-    }
-
-    fn writeByte(self: *Cursor, value: u8) Error!void {
-        (try self.reserve(1))[0] = value;
-    }
-
-    fn writeU16(self: *Cursor, value: u16) Error!void {
-        std.mem.writeInt(u16, (try self.reserve(2))[0..2], value, .big);
-    }
-
-    fn writeU32(self: *Cursor, value: u32) Error!void {
-        std.mem.writeInt(u32, (try self.reserve(4))[0..4], value, .big);
-    }
-
-    fn writeU64(self: *Cursor, value: u64) Error!void {
-        std.mem.writeInt(u64, (try self.reserve(8))[0..8], value, .big);
-    }
-
-    fn writeBytes(self: *Cursor, value: []const u8) Error!void {
-        @memcpy(try self.reserve(value.len), value);
-    }
-
-    fn reserve(self: *Cursor, len: usize) Error![]u8 {
-        if (len > self.bytes.len -| self.pos) return error.OutputTooSmall;
-        const start = self.pos;
-        self.pos += len;
-        return self.bytes[start..self.pos];
-    }
-};
-
-const ReadCursor = struct {
-    bytes: []const u8,
-    pos: usize = 0,
-
-    fn init(bytes: []const u8) ReadCursor {
-        return .{ .bytes = bytes };
-    }
-
-    fn readByte(self: *ReadCursor) Error!u8 {
-        return (try self.readBytes(1))[0];
-    }
-
-    fn readU16(self: *ReadCursor) Error!u16 {
-        return std.mem.readInt(u16, (try self.readBytes(2))[0..2], .big);
-    }
-
-    fn readU32(self: *ReadCursor) Error!u32 {
-        return std.mem.readInt(u32, (try self.readBytes(4))[0..4], .big);
-    }
-
-    fn readU64(self: *ReadCursor) Error!u64 {
-        return std.mem.readInt(u64, (try self.readBytes(8))[0..8], .big);
-    }
-
-    fn readBytes(self: *ReadCursor, len: usize) Error![]const u8 {
-        if (len > self.bytes.len -| self.pos) return error.InvalidLength;
-        const start = self.pos;
-        self.pos += len;
-        return self.bytes[start..self.pos];
-    }
-};
-
 // 가장 큰 frame(create_browser + URL 상한)이 frame 상한 안에 든다 — 상수를 바꿔 이 둘이 어긋나면 컴파일이 멈춘다.
 comptime {
     const largest = prefix_len + common_len + 8 + 12 + 1 + 4 + max_url_bytes;
@@ -561,50 +210,6 @@ test "every message round trips" {
     try std.testing.expectEqual(@as(u64, 0), failure.failure.browser);
     try std.testing.expectEqual(FailureCode.profile_in_use, failure.failure.code);
     try std.testing.expectEqualStrings("프로필 사용 중", failure.failure.detail);
-}
-
-test "tags split by direction at 32" {
-    inline for (std.meta.fields(Tag)) |field| {
-        const tag: Tag = @enumFromInt(field.value);
-        const expected: Direction = if (field.value < 32) .to_sidecar else .to_maru;
-        try std.testing.expectEqual(expected, tag.direction());
-    }
-}
-
-test "streaming decoder accepts one-byte reads and concatenated frames" {
-    var first: [64]u8 = undefined;
-    var second: [64]u8 = undefined;
-    const first_len = try encode(.{ .browser_created = 5 }, &first);
-    const second_len = try encode(.{ .title_changed = .{ .browser = 5, .text = "제목" } }, &second);
-
-    var decoder = StreamingDecoder.init(.to_maru);
-    for (first[0..first_len], 0..) |byte, i| {
-        try decoder.feed(&.{byte});
-        const maybe = try decoder.next();
-        if (i + 1 < first_len) try std.testing.expect(maybe == null) else try std.testing.expectEqual(@as(u64, 5), maybe.?.browser_created);
-    }
-    var combined: [128]u8 = undefined;
-    @memcpy(combined[0..second_len], second[0..second_len]);
-    @memcpy(combined[second_len..][0..first_len], first[0..first_len]);
-    try decoder.feed(combined[0 .. second_len + first_len]);
-    try std.testing.expectEqualStrings("제목", (try decoder.next()).?.title_changed.text);
-    try std.testing.expectEqual(@as(u64, 5), (try decoder.next()).?.browser_created);
-    try std.testing.expect((try decoder.next()) == null);
-    try decoder.finish();
-}
-
-test "streaming decoder rejects frames travelling the wrong way" {
-    var encoded: [64]u8 = undefined;
-    // sidecar 가 maru 에게 명령을 보내는 척하면 maru 쪽 decoder 가 거절한다 — 그 반대도.
-    const command_len = try encode(.{ .destroy_browser = 1 }, &encoded);
-    var at_maru = StreamingDecoder.init(.to_maru);
-    try at_maru.feed(encoded[0..command_len]);
-    try std.testing.expectError(error.WrongDirection, at_maru.next());
-
-    const event_len = try encode(.{ .browser_closed = 1 }, &encoded);
-    var at_sidecar = StreamingDecoder.init(.to_sidecar);
-    try at_sidecar.feed(encoded[0..event_len]);
-    try std.testing.expectError(error.WrongDirection, at_sidecar.next());
 }
 
 test "decoder rejects malformed header, trailing bytes and truncation" {
@@ -714,21 +319,6 @@ test "decode rejects shapes encode refuses to build" {
     try std.testing.expectError(error.UrlTooLarge, decodeExact(handFrame(&frame, .navigate, body[0 .. 12 + max_url_bytes + 1])));
 }
 
-test "streaming decoder rejects oversized declaration and EOF mid-frame" {
-    var decoder = StreamingDecoder.init(.to_sidecar);
-    var prefix: [4]u8 = undefined;
-    std.mem.writeInt(u32, &prefix, max_frame_bytes, .big);
-    try decoder.feed(&prefix);
-    try std.testing.expectError(error.FrameTooLarge, decoder.next());
-
-    decoder = StreamingDecoder.init(.to_sidecar);
-    var encoded: [64]u8 = undefined;
-    const len = try encode(.{ .destroy_browser = 1 }, &encoded);
-    try decoder.feed(encoded[0 .. len - 1]);
-    try std.testing.expect((try decoder.next()) == null);
-    try std.testing.expectError(error.IncompleteFrame, decoder.finish());
-}
-
 test "every single-byte corruption of a valid frame decodes or errors without crashing" {
     var encoded: [256]u8 = undefined;
     const len = try encode(.{ .create_browser = .{ .browser = 42, .size = test_size, .hidden = true, .url = "https://maru.dev/" } }, &encoded);
@@ -743,15 +333,4 @@ test "every single-byte corruption of a valid frame decodes or errors without cr
             } else |_| {}
         }
     }
-}
-
-test "clampUtf8 never splits a character" {
-    try std.testing.expectEqualStrings("abc", clampUtf8("abc", 8));
-    try std.testing.expectEqualStrings("가", clampUtf8("가나", 5)); // 한글은 3바이트 — 5 에서 자르면 둘째 글자 중간
-    try std.testing.expectEqualStrings("가나", clampUtf8("가나", 6));
-    try std.testing.expectEqualStrings("", clampUtf8("가", 2));
-    const long = "제목" ** 1000;
-    const clamped = clampUtf8(long, max_text_bytes);
-    try std.testing.expect(clamped.len <= max_text_bytes);
-    try std.testing.expect(std.unicode.utf8ValidateSlice(clamped));
 }

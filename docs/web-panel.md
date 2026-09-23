@@ -229,7 +229,8 @@ WKWebView(WebKit)는 시스템 프레임워크라 의존성이 없지만 Chromiu
 
 > | 측정 | CEF 146 | **CEF 154** |
 > |---|---|---|
-> | 프레임률(`windowless_frame_rate=60`) | 62.8 fps | **62.7 fps** |
+> | CEF 가 그리는 빈도(`windowless_frame_rate=60`) | 62.8 fps | **62.7 fps** |
+> | **maru pane 에 보이는 빈도** | — | **초당 2~8 회**(아래 「남은 미해결」 10 — 6 차 적대적 검증) |
 > | surface / 포맷 | 1280x720 stride 5120, BGRA | **같음** |
 > | 버퍼 풀 | 고유 IOSurface 16+ | **16** |
 > | damage | 변경 영역만 | **변경 영역만**(10x10·54x89 …, 첫 프레임만 전체) |
@@ -340,7 +341,7 @@ WKWebView(WebKit)는 시스템 프레임워크라 의존성이 없지만 Chromiu
 
 **함께 드러난 기존 문제(OSR 고유 아님, 코드로만 확인)**: 브라우저 웹은 편집 가능 문맥이 아니라(`webContextIsEditable` 은 파일 패널 편집기만 참) `resolveWeb` 이 ⌘Z 를 `editor_undo` 앱 액션으로 판정하고, 그 액션은 활성 Term 이 편집기일 때만 일한다 — 웹 입력창의 ⌘Z 가 먹힌다. WKWebView 브라우저도 같은 경로다(실기 미확인).
 
-**154 로 다시 잰 결과(2026-09-23)** — 위 11 시나리오에 IME·hover 를 더해 **23 항목 전부 통과**했다. 새로 판정한 것:
+**154 로 다시 잰 결과(2026-09-23)** — 위 11 시나리오에 IME·hover 를 더해 **23 항목 전부 통과**했다. 팝업 합성을 넣은 뒤에는 maru 입력 경로로 `<select>` 를 열고 항목을 고르는 2 항목을 더해 다시 돌렸다(25 항목 중 23 통과 — 나머지 둘(조합 중 다른 pane 클릭 확정·새 창 적중)은 **다른 세션이 앱을 띄워 포커스를 가져간** 간섭으로 앱이 비활성이 된 탓이고, 같은 코드의 직전 실행에서는 통과했다). 새로 판정한 것:
 - **한글 IME** — 조합 중 글자가 `ㅇ → 아 → 안` 으로 **웹 입력창 안에** 보이고(`ime_set_composition`), space 로 확정되면 `compositionend "안 "` 이 온다. **조합 중 다른 pane 을 누르면 웹에 확정된다**(`compositionend "아"`) — 확정은 키 대상이 바뀔 때 보내는 `ime_finish_composing_text` 가 맡고, 마우스 경로의 `commitMarkedTextIfComposing` 은 터미널 preedit 가 비어 있어 PTY 로 새는 글자가 없다(코드 확인).
 - **hover 커서** — 입력창 위에서 I-beam(`CT_IBEAM`), 밖으로 나가면 mouse leave 와 기본 커서.
 - 한 번 실패로 보였던 「토스트 뒤 클릭」은 **시험 순서 탓**이었다 — 앞 단계의 스크롤로 버튼이 40px 올라가 빈 곳을 눌렀다(덤프로 확인). 스크롤을 원위치하는 단계를 넣자 통과했다.
@@ -442,6 +443,7 @@ WKWebView 는 **OSR 을 제공하지 않는다**. macOS SDK 의 WebKit 공개 �
 | ⑦ | 소유 버퍼 링과 반납 | 공사 | 중 |
 | ⑧ | `<select>` 팝업 합성 | **PoC 로 해결 확인**(154). 146 에서는 안 열림 — 알려진 문제 | 소 |
 | ⑨ | JS 대화상자·파일 선택 | 실측 후 결정 | 소 |
+| ⑩ | **새 프레임 신호 → maru 다시 그리기** | 연결(⑦ 의 「슬롯 준비」 신호와 같은 자리) | 소 |
 
 1. **`.app` 번들 배선** — 비-번들에서는 떴지만 번들 layout 에서는 렌더러가 안 떴다(함정 6). CEF 는 macOS 번들에서 helper 앱을 정해진 이름으로 요구한다. suji `bundle_macos.zig` 가 `{name} Helper`·`Helper (GPU)`·`Helper (Renderer)`·`Helper (Plugin)` 네 번들을 만들고 helper 바이너리를 메인 바이너리의 **hardlink** 로 둔다(codesign 이 symlink 는 거부한다) — 확인한 선례다. sidecar 가 `.app` 이어야 하는지는 여전히 설계 선택이다.
 2. **원격 세션호스트** — IOSurface mach port 는 같은 기계 안에서만 유효하다. 다만 **웹 pane 은 PTY 가 없는 pane 슬롯**이라 브라우저를 원격 host 에서 돌릴 이유가 없다. **결정안: 브라우저 sidecar 는 항상 maru 앱이 도는 기계에서 돈다.** 그러면 터미널 세션이 SSH 너머에 있어도 제로카피가 유지된다. 이 결정으로 남는 것:
@@ -462,6 +464,7 @@ WKWebView 는 **OSR 을 제공하지 않는다**. macOS SDK 의 WebKit 공개 �
    - **146(suji 가 받아 둔 것) — 알려진 문제**: 클릭·Space·Alt+↓·`showPicker()` 모두 안 열린다(올바른 덤프로 확인, 덤프 최신성은 같은 덤프의 버튼 카운터로 보장). 팝업 콜백·`PET_POPUP` 은 0 건이고, select 클릭 뒤에만 Blink 가 **네이티브 NSMenu 경로(external popup)** 를 띄울 때 보내는 합성 mouseup 이 찍힌다(`external_popup_menu.cc` 의 macOS 분기) — 창이 없어 메뉴가 못 뜬 것이다. 우회로 `appearance: base-select` 는 146 에서도 열리고 선택까지 된다.
    - **원인은 확정하지 못했다.** CEF 는 창 없는 브라우저에서 renderer 가 external popup 을 끄는데(`chrome_content_renderer_client_cef.cc`), Chromium 은 웹 설정을 보낼 때마다 그 값을 `should_disable_external_popups` 로 덮어쓰고(`web_view_impl.cc`) 그 설정은 `ForbidExternalPopupMenus()` 로만 켜진다 — CEF 는 146(`3ca6a87` 트리 전체)·154(`062ebe4`)·master 모두 이 함수를 부르지 않는다. 그래서 3 차 검증까지는 이 덮어쓰기를 146 의 원인으로 적었는데, **154 도 CEF·Blink 해당 코드가 같은데 내부 팝업 경로를 탄다** — 이 가설은 버전 차이를 설명하지 못한다. 확인된 것은 관측(146 은 네이티브 경로, 154 는 내부 경로)뿐이다.
 9. **JS 대화상자·파일 선택(목록에서 빠져 있었다)** — `alert`/`confirm` 과 `<input type=file>` 은 CEF 기본 구현이 있다(`on_jsdialog` 가 0 을 돌려주면 기본 대화상자). 창 없는 모드에서 기본 구현이 어디에 어떻게 뜨는지는 **실측 전**이다. maru chrome 모달로 받는 쪽이 모달 게이트(위 「호스트가 라우팅을 든다」)와 맞는다.
+10. **새 프레임이 와도 maru 가 다시 그리지 않는다(6 차 적대적 검증에서 발견)** — maru 는 **자기 프레임이 바뀌거나 다시 그리기 요청이 있을 때만** 그린다. 웹 픽셀은 PTY 를 지나지 않으므로 maru 는 새 웹 프레임이 온 것을 모른다. 실측(154, 데모 pane): CEF 는 초당 약 60 프레임을 그리는데(페이지 애니메이션) **maru 의 그리기는 유휴 때 초당 2~8 회, 시험 중에도 1~8 회**였다 — pane 에 보이는 웹은 사실상 그 빈도로만 바뀌고, 클릭·타이핑 결과도 다음 다시 그리기까지 늦게 보인다. 표의 「62.7 fps」는 CEF 가 그리는 빈도이지 **보이는 빈도가 아니었다.** 해법은 ⑦ 의 「슬롯 k 준비됨」 신호를 maru 가 받으면 그 창에 다시 그리기를 요청하는 것이다(보이는 web Term 이 있을 때만 — 가려진 탭은 ③ 대로 CEF 쪽 렌더를 멈춘다).
 
 ### 13.2 이하 — on-screen CEF 전제의 옛 서술 (보존)
 

@@ -478,11 +478,35 @@ pub fn findCodexByThreadId(io: std.Io, root: std.Io.Dir, suffix: []const u8, out
                 while ((files.next(io) catch break)) |f| {
                     if (f.kind != .file and f.kind != .unknown) continue;
                     if (!std.mem.endsWith(u8, f.name, suffix)) continue;
+                    // **id 앞은 구분자여야 한다**(`isCodexRolloutOf` 와 같은 규칙) — 안 그러면 `…-Xabc123.jsonl` 이
+                    // `abc123` 의 것으로 읽혀, 재부팅 부활(RB2)이 **남의 세션**의 권한 모드로 재개 플래그를 만든다.
+                    const at = f.name.len - suffix.len;
+                    if (at != 0 and f.name[at - 1] != '-') continue;
                     const written = std.fmt.bufPrint(out, "{s}/{s}/{s}/{s}", .{ y.name, mo.name, d.name, f.name }) catch return null;
                     return written;
                 }
             }
         }
+    }
+    return null;
+}
+
+/// claude 대화 파일을 **세션 id 로** 찾는다 — `projects/*/<id>.jsonl`(RB2 재부팅 부활).
+///
+/// 작업 디렉터리로 폴더 이름(slug)을 다시 만들지 않는 이유: claude 의 규칙은 `realpath(cwd)` 의 **영숫자 아닌
+/// 모든 문자**를 `-` 로 바꾸고 200 자를 넘으면 잘라 해시를 붙인다(2026-09-24 설치본 2.1.280 코드에서 확인). 그
+/// 규칙을 흉내 내면 밑줄·공백·한글·`~`·심볼릭 링크·긴 경로에서 **있는 파일을 못 찾는다**(코드 리뷰가 잡았다).
+/// id 는 전역에서 유일하므로 폴더를 훑으면 규칙 없이 찾는다. `file_name` 은 `<id>.jsonl`, 반환은
+/// `projects` 기준 상대 경로(`<폴더>/<id>.jsonl`)다. 서브에이전트 기록(`<id>/…` 하위)은 이름이 달라 안 걸린다.
+pub fn findClaudeById(io: std.Io, projects: std.Io.Dir, file_name: []const u8, out: []u8) ?[]const u8 {
+    var dirs = projects.iterate();
+    while ((dirs.next(io) catch return null)) |d| {
+        if (!mayBeDir(d.kind)) continue;
+        var dir = projects.openDir(io, d.name, .{}) catch continue;
+        defer dir.close(io);
+        const st = dir.statFile(io, file_name, .{}) catch continue;
+        if (st.kind != .file) continue;
+        return std.fmt.bufPrint(out, "{s}/{s}", .{ d.name, file_name }) catch null;
     }
     return null;
 }
@@ -951,4 +975,39 @@ test "RB2-5 readTail: 중간에서 잘라 읽으면 잘린 첫 줄을 버리고,
     try std.testing.expectEqualStrings("", readTail(io, tmp.dir, "t.jsonl", &tiny));
     // 없는 파일은 빈 값(계약 1).
     try std.testing.expectEqualStrings("", readTail(io, tmp.dir, "missing.jsonl", &big));
+}
+
+test "RB2-12 claude 대화 파일은 id 로 찾는다 — 폴더 이름(slug) 규칙과 무관하게" {
+    // claude 는 영숫자 아닌 문자를 전부 `-` 로 바꾸고 긴 경로는 해시를 붙인다 — 그 규칙을 흉내 내지 않는다.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    try tmp.dir.createDirPath(io, "projects/-Users-me-my-project");
+    try tmp.dir.createDirPath(io, "projects/-Users-me-x-1a2b3c/abc");
+    try tmp.dir.writeFile(io, .{ .sub_path = "projects/-Users-me-x-1a2b3c/abc.jsonl", .data = "{}\n" });
+    // 서브에이전트 기록(`<id>/…` 하위)은 이름이 달라 원래 안 걸린다 — 그래도 하나 둔다.
+    try tmp.dir.writeFile(io, .{ .sub_path = "projects/-Users-me-x-1a2b3c/abc/abc.jsonl", .data = "{}\n" });
+    // 이름이 `<id>.jsonl` 인 **디렉터리**는 대화 파일이 아니다.
+    try tmp.dir.createDirPath(io, "projects/-Users-me-y/dirid.jsonl");
+    var projects = try tmp.dir.openDir(io, "projects", .{ .iterate = true });
+    defer projects.close(io);
+    var out: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("-Users-me-x-1a2b3c/abc.jsonl", findClaudeById(io, projects, "abc.jsonl", &out).?);
+    try std.testing.expect(findClaudeById(io, projects, "missing.jsonl", &out) == null);
+    try std.testing.expect(findClaudeById(io, projects, "dirid.jsonl", &out) == null);
+}
+
+test "RB2-13 codex rollout 은 id 앞이 구분자일 때만 그 세션의 것이다" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    try tmp.dir.createDirPath(io, "s/2026/09/23");
+    try tmp.dir.writeFile(io, .{ .sub_path = "s/2026/09/23/rollout-2026-09-23T01-02-03-xabc123.jsonl", .data = "{}\n" });
+    var root = try tmp.dir.openDir(io, "s", .{ .iterate = true });
+    defer root.close(io);
+    var out: [256]u8 = undefined;
+    // `…-xabc123` 은 `abc123` 의 것이 아니다(남의 세션의 끝부분으로 재개 플래그를 만들면 안 된다).
+    try std.testing.expect(findCodexByThreadId(io, root, "abc123.jsonl", &out) == null);
+    try tmp.dir.writeFile(io, .{ .sub_path = "s/2026/09/23/rollout-2026-09-23T01-02-04-abc123.jsonl", .data = "{}\n" });
+    try std.testing.expectEqualStrings("2026/09/23/rollout-2026-09-23T01-02-04-abc123.jsonl", findCodexByThreadId(io, root, "abc123.jsonl", &out).?);
 }

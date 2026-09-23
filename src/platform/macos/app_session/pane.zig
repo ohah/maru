@@ -52,6 +52,7 @@ const tabTitleBody = @import("tab.zig").tabTitleBody;
 const Model = app_session_mod.Model;
 const barMetrics = app_session_mod.barMetrics;
 const commandName = app_session_mod.commandName;
+const resolveConfiguredShell = app_session_mod.resolveConfiguredShell; // RB2: 재개 래핑을 받는 셸인지 판정
 const agent_ops = @import("agent.zig"); // RB2: 재부팅 부활이 에이전트 대화를 이어간다
 const coretext_bridge = app_session_mod.coretext_bridge;
 const sentinelBgCell = app_session_mod.sentinelBgCell;
@@ -276,6 +277,13 @@ pub fn dividerAtPoint(self: *AppSession, x_px: f64, y_px: f64) ?struct { seg: ch
 /// 전파해 현행 fail-close를 유지한다 — 일시 실패를 placeholder로 굳히면 살아 있는 runtime을 영구히 잃는다.
 /// pane 진입점과 term 진입점이 이 함수를 공유해 분기가 한 곳에만 있다.
 pub fn createRestoredTerm(self: *AppSession, sm: maru.session.workspace.Surface) !*Term {
+    const term = try createRestoredTermInner(self, sm);
+    // RB2: 저장 파일이 알던 이어갈 에이전트를 **보류 신원**으로 옮긴다(재접속·부활 모두). 묘비는 그 안에서 도는 것이 없다.
+    if (!term.rt.ended_placeholder) agent_ops.rememberSavedResume(term, sm.agent_resume);
+    return term;
+}
+
+fn createRestoredTermInner(self: *AppSession, sm: maru.session.workspace.Surface) !*Term {
     // RB1: **재부팅이 증명된 복원**은 host 에 묻지 않는다 — 파일을 쓴 뒤 커널이 새로 떴으므로 그 파일이 가리키는
     // 모든 프로세스가 죽었다. 묘비·attach 보다 **먼저** 보는 이유가 그것이다(docs/workspace-restore.md 「재부팅
     // 뒤 부활(RB)」). identity 가 없는 surface(in-process 로 만든 칸)는 원래 아래 `restoreSpawn` 으로 새로 뜨지만,
@@ -348,7 +356,15 @@ fn createRebootRevivedTerm(self: *AppSession, sm: maru.session.workspace.Surface
     const spawn = try rebootRevivalSpawn(self, sm, &launch, &parser);
     errdefer clearRestoreRuntimeIdentity(self);
     const cfg = self.new_tab_config;
-    const term = try term_ops.createTerm(self, spawn.req, spawn.size, cfg.queue_capacity, spawn.title, spawn.command);
+    const term = createRevivedTermOrFail(self, spawn, cfg.queue_capacity) catch |err| {
+        // **그 칸만 강등한다**(코드 리뷰). 재부팅 전에는 같은 파일이 묘비로 복원됐는데, 부활은 모든 칸을 새로 띄우므로
+        // host 의 runtime 상한·fd 고갈 같은 spawn 실패 하나가 **창 전체**를 잃게 했다. full handle 이 있으면 예전처럼
+        // 묘비(⏎ 로 다시 시작)로 두고, 없으면(legacy bare·in-process 칸) 묘비로 표현할 수 없어 그대로 올린다.
+        if (err == error.OutOfMemory or sm.runtime_host_id.len == 0 or sm.runtime_id.len == 0) return err;
+        clearRestoreRuntimeIdentity(self);
+        recordEndedPlaceholder(self, true);
+        return try createEndedPlaceholderTerm(self, sm.title, sm.cwd, sm.command, spawn.size, sm.runtime_host_id, sm.runtime_id);
+    };
     // 알림 수는 **성공한 뒤에만** 센다. 창 apply 가 뒤에서 실패하면 `RestoreAccountingSnapshot` 이 되돌린다.
     AppSession.reboot_revived_pending +|= 1;
     switch (spawn.agent) {
@@ -360,11 +376,25 @@ fn createRebootRevivedTerm(self: *AppSession, sm: maru.session.workspace.Surface
 }
 
 /// 저장 cwd 로 **실제로 spawn 할 수 있는가** — 형식(`usableRestoreCwd`)에 더해 디렉터리가 지금 있는지까지 본다.
-fn restoreCwdReachable(self: *AppSession, cwd: []const u8) bool {
+/// 판정자가 spawn 실패를 흉내 내는 자리(부활 칸의 묘비 강등을 재기 위해). 제품 컴파일에서는 늘 거짓이다.
+pub var test_fail_next_revived_spawn: bool = false;
+
+fn createRevivedTermOrFail(self: *AppSession, spawn: RebootRevivalSpawn, queue_capacity: usize) !*Term {
+    if (builtin.is_test and test_fail_next_revived_spawn) {
+        test_fail_next_revived_spawn = false;
+        return error.SpawnFailed;
+    }
+    return term_ops.createTerm(self, spawn.req, spawn.size, queue_capacity, spawn.title, spawn.command);
+}
+
+/// 이 경로로 **chdir 할 수 있는가**(디렉터리이고 검색 권한이 있다). 읽기 권한은 요구하지 않는다 — spawn 은 검색
+/// 권한만 쓴다(예전 판은 디렉터리를 열어 봐서 `d-wx` 디렉터리를 「사라졌다」로 읽었다, 코드 리뷰).
+pub fn restoreCwdReachable(cwd: []const u8) bool {
     const path = usableRestoreCwd(cwd) orelse return false;
-    var dir = std.Io.Dir.openDirAbsolute(self.io, path, .{}) catch return false;
-    dir.close(self.io);
-    return true;
+    var z: [std.fs.max_path_bytes + 2]u8 = undefined;
+    // 끝 `/` 는 「디렉터리여야 한다」를 커널이 판정하게 한다(파일이면 ENOTDIR).
+    const zpath = std.fmt.bufPrintZ(&z, "{s}/", .{path}) catch return false;
+    return std.c.access(zpath.ptr, std.posix.X_OK) == 0;
 }
 
 /// 재부팅 부활 Term 하나의 spawn 요청(RB1·RB2). **spawn 은 하지 않는다** — 판정자가 provider 를 실제로 띄우지
@@ -399,15 +429,19 @@ pub fn rebootRevivalSpawn(
     };
     const ar = sm.agent_resume orelse return out;
     out.agent = .missed;
-    // claude 는 대화를 **작업 디렉터리별로** 찾는다 — 저장 cwd 로 spawn 하지 못하면(그 디렉터리가 사라졌다)
-    // 재개가 엉뚱한 프로젝트에서 「대화 없음」으로 끝난다. 그때는 이어가지 않는다.
-    // ⚠️ 두 번 틀렸던 자리다(판정자 RB2-8 이 둘 다 잡았다): ⑴ `out.req.cwd == null` 은 `spawnRequest` 가 기본 cwd 를
-    // 미리 채워 저장 cwd 가 사라져도 거짓이다. ⑵ `usableRestoreCwd` 는 **형식만** 보는 이른 필터다 — 없는 디렉터리도
-    // 통과시키고, 실제 폴백은 자식의 chdir 실패에서 조용히 일어난다. 그래서 디렉터리를 **실제로 열어** 본다.
-    if (ar.provider == .claude and !restoreCwdReachable(self, sm.cwd)) return out;
-    parser.* = maru.session.agent_session_archive.Parser.init(self.allocator, ar.provider);
-    const target = agent_ops.rebootResumeTarget(self, ar, sm.cwd, parser) orelse return out;
-    try launch.apply(self, target, &out.req);
+    // 재개 래핑을 못 받는 셸이면 이어가지 않는다(띄우면 칸이 곧바로 닫힌다) — 셸만 뜨고 「못 이어간 수」에 센다.
+    if (!agent_ops.shellSupportsResumeWrap(resolveConfiguredShell(self.loaded_config.config.shell.command))) return out;
+    const found = agent_ops.rebootResumeTarget(self, ar, parser) orelse return out;
+    // **작업 디렉터리는 대화가 기록한 곳이 먼저다.** 에이전트가 실제로 쓴 디렉터리이고, 셸이 마지막으로 알린 cwd 는
+    // 그와 다를 수 있다(`cd x && claude`, OSC 7 을 안 내는 셸). 둘 다 없으면 기본 자리 — **그것 때문에 이어가기를
+    // 포기하지는 않는다**: 대화는 id 로 찾았고, provider 가 그 자리에서 판단한다(예전 판은 cwd 가 사라지면
+    // 「대화 파일을 못 찾음」으로 셌다, 코드 리뷰).
+    if (restoreCwdReachable(found.transcript_cwd)) {
+        out.req.cwd = found.transcript_cwd;
+    } else if (restoreCwdReachable(sm.cwd)) {
+        out.req.cwd = sm.cwd;
+    }
+    try launch.apply(self, found.target, &out.req);
     out.title = ar.provider.label();
     out.command = launch.argv[0];
     out.agent = .resumed;

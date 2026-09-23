@@ -648,6 +648,7 @@ pub const AgentResumeLaunch = struct {
     /// `req` 의 실행 대상을 provider 재개로 바꾼다. **cwd 는 건드리지 않는다** — 호출자가 spawn 작업 디렉터리로만
     /// 넘긴다(명령 문자열에 넣으면 셸 메타문자가 명령으로 재해석될 여지가 생긴다).
     pub fn apply(self: *AgentResumeLaunch, session: *AppSession, target: agent_session_archive.ResumeTarget, req: *maru.pty.SpawnRequest) !void {
+        errdefer self.argv = &.{};
         // argv 조립은 **OS 중립 층**이 소유한다. 여기서 조립하면 "기록된 권한 모드를 그대로 되살린다" 는
         // 규칙이 macOS 파일에만 살아, 다른 플랫폼이 재개를 붙일 때 조용히 빠진다.
         const args = agent_session_archive.resumeArgvFor(target, &self.argv_buf);
@@ -676,6 +677,9 @@ pub const AgentResumeLaunch = struct {
         // 는다. 셸이 이 인자를 못 받으면 그 셸이 에러를 내고 PTY 화면에 그대로 뜬다 — 조용히
         // 실패하지 않으므로 사용자가 원인을 본다.
         const shell = resolveConfiguredShell(session.loaded_config.config.shell.command);
+        // `-l -i -c "…; exec …"` 를 못 받는 셸(tcsh·csh 는 `-l` 을 단독 인자로만 받는다)이면 **띄우지 않는다** —
+        // 띄우면 셸이 곧바로 죽어 칸이 닫힌다(코드 리뷰). 호출자가 그 사실을 알린다.
+        if (!shellSupportsResumeWrap(shell)) return error.UnsupportedResumeShell;
         self.shell_command = try buildResumeShellCommand(session.allocator, args, shell);
         req.command = shell;
         // `-i`가 필요하다: PATH를 `.zshrc`에 두는 환경이 흔하고 zsh는 `-l`만으로는 그 파일을 읽지
@@ -686,6 +690,17 @@ pub const AgentResumeLaunch = struct {
         req.login = true;
     }
 };
+
+/// 재개 셸 래핑(`<shell> -l -i -c "<argv>; exec <shell> -l -i"`)을 받는 셸인가. POSIX 계열과 fish 는 받는다.
+/// tcsh·csh 는 `-l` 을 단독 인자로만 받고 POSIX `;`·따옴표 규칙도 달라 받지 못한다 — 모르는 셸도 받지 않는 쪽이
+/// 안전하다(띄우면 칸이 곧바로 닫힌다).
+pub fn shellSupportsResumeWrap(shell: []const u8) bool {
+    const base = std.fs.path.basename(shell);
+    for ([_][]const u8{ "zsh", "bash", "sh", "fish", "dash", "ksh" }) |ok| {
+        if (std.mem.eql(u8, base, ok)) return true;
+    }
+    return false;
+}
 
 /// Archive에서 고른 provider-native session을 새 terminal 탭으로 재개한다. transcript를 터미널에 paste하지
 /// 않고, 사용자 로그인 셸에 **인용된 provider argv 한 줄**을 넘긴다(조립은 `AgentResumeLaunch`).
@@ -719,54 +734,82 @@ pub fn resumeAgentSessionInNewTerm(self: *AppSession, record: *const agent_sessi
     self.focusTerm(pane.terms.items.len - 1);
 }
 
+/// 재부팅 부활(RB2)이 이어갈 대화의 **재개 대상**과 그 대화가 기록한 작업 디렉터리.
+pub const RebootResume = struct {
+    target: agent_session_archive.ResumeTarget,
+    /// 대화 파일이 기록한 cwd(claude 만 줄마다 싣는다). `parser` 버퍼를 빌린다. 없으면 "".
+    transcript_cwd: []const u8,
+};
+
 /// 재부팅 부활(RB2)이 이어갈 대화의 **마지막 권한 모드·모델**을 대화 파일 끝부분에서 읽어 재개 대상을 만든다
 /// (docs/workspace-restore.md 「재부팅 뒤 부활(RB)」 에이전트 이어가기 1·2).
 ///
 /// **대화 파일을 못 찾으면 null — 이어가지 않는다.** provider 가 거절할 세션을 열어 오류 화면을 남기지 않고, 호출자는
 /// 셸만 띄운다. 파일이 있으면 끝부분에서 모드·모델을 못 찾아도 재개한다(플래그 없이 provider 기본값 — 도크 규칙).
 ///
-/// 경로는 사이드바 대화 줄과 **같은 계산**이다: claude 는 `<설정>/projects/<cwd slug>/<id>.jsonl`, codex 는
-/// `~/.codex/sessions` 아래 `rollout-*-<id>.jsonl`. 끝부분 읽기도 같은 `readTail` 이다(잘린 첫 줄 규칙의 주인).
-/// 모델은 `parser` 버퍼를 빌리므로 `parser` 가 spawn 까지 살아 있어야 한다.
+/// 파일은 **세션 id 로** 찾는다 — claude 는 `<설정>/projects/*/<id>.jsonl`(slug 규칙을 흉내 내지 않는다), codex 는
+/// `$CODEX_HOME/sessions` 아래 `rollout-*-<id>.jsonl`. 끝부분 읽기는 대화 줄과 같은 `readTail` 이고, 모드를 못 찾으면
+/// `resume_tail_steps` 대로 넓혀 다시 읽는다. 모델·cwd 는 `parser` 버퍼를 빌리므로 `parser` 가 spawn 까지 살아야 한다.
 pub fn rebootResumeTarget(
     self: *AppSession,
     ar: maru.session.workspace.AgentResume,
-    cwd: []const u8,
     parser: *agent_session_archive.Parser,
-) ?agent_session_archive.ResumeTarget {
+) ?RebootResume {
     const tr = maru.session.agent_transcript;
     if (!ar.valid()) return null; // reader 가 이미 걸렀지만, 이 값은 실행 인자가 되므로 문 앞에서 한 번 더
-    var path_buf: [2048]u8 = undefined;
-    var name_buf: [tr.max_name_bytes]u8 = undefined;
-    const dir_path, const name = switch (ar.provider) {
-        .claude => .{
-            claudeProjectDirPath(cwd, &path_buf) orelse return null,
-            std.fmt.bufPrint(&name_buf, "{s}.jsonl", .{ar.session_id}) catch return null,
-        },
-        .codex => .{ codexSessionsRootPath(&path_buf) orelse return null, "" },
-    };
-    const dir = openAgentDirAbsolute(self, dir_path, .{}) orelse return null;
-    defer dir.close(self.io);
-    var found_buf: [tr.max_name_bytes]u8 = undefined;
-    const file_name = switch (ar.provider) {
-        .claude => name,
-        .codex => blk: {
-            var suffix_buf: [tr.max_identity_bytes + 8]u8 = undefined;
-            const suffix = std.fmt.bufPrint(&suffix_buf, "{s}.jsonl", .{ar.session_id}) catch return null;
-            break :blk tr.findCodexByThreadId(self.io, dir, suffix, &found_buf) orelse return null;
-        },
-    };
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_path = switch (ar.provider) {
+        .claude => claudeProjectsRootPath(&root_buf),
+        .codex => codexSessionsRootPath(&root_buf),
+    } orelse return null;
+    const root = openAgentDirAbsolute(self, root_path, .{ .iterate = true }) orelse return null;
+    defer root.close(self.io);
+    var name_buf: [agent_session_archive.max_session_id_bytes + 8]u8 = undefined;
+    const name = std.fmt.bufPrint(&name_buf, "{s}.jsonl", .{ar.session_id}) catch return null;
+    var found_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const rel = switch (ar.provider) {
+        .claude => tr.findClaudeById(self.io, root, name, &found_buf),
+        .codex => tr.findCodexByThreadId(self.io, root, name, &found_buf),
+    } orelse return null;
     // 파일이 **있는지**가 재개 여부를 가른다 — `readTail` 은 없는 파일과 빈 끝부분을 똑같이 빈 값으로 준다.
-    _ = dir.statFile(self.io, file_name, .{}) catch return null;
-    const tail_buf = self.allocator.alloc(u8, agent_session_archive.resume_tail_bytes) catch return null;
-    defer self.allocator.free(tail_buf);
-    agent_session_archive.feedResumeTail(parser, tr.readTail(self.io, dir, file_name, tail_buf));
+    const st = root.statFile(self.io, rel, .{}) catch return null;
+    for (agent_session_archive.resume_tail_steps) |step| {
+        const want: usize = @intCast(@min(@as(u64, step), st.size));
+        parser.* = agent_session_archive.Parser.init(self.allocator, ar.provider);
+        const tail_buf = self.allocator.alloc(u8, @max(want, 1)) catch return null;
+        defer self.allocator.free(tail_buf);
+        agent_session_archive.feedResumeTail(parser, tr.readTail(self.io, root, rel, tail_buf[0..want]));
+        // 모드를 찾았거나 파일 전체를 읽었으면 멈춘다. 못 찾으면 다음 크기로 — 마지막 턴의 큰 도구 출력이 모드 줄을
+        // 밀어낸 경우다(그대로 두면 기록보다 넓은 provider 기본 권한으로 연다).
+        if (parser.permission != .unknown or want >= st.size) break;
+    }
     return .{
-        .provider = ar.provider,
-        .session_id = ar.session_id,
-        .permission = parser.permission,
-        .model = parser.model,
+        .target = .{
+            .provider = ar.provider,
+            .session_id = ar.session_id,
+            .permission = parser.permission,
+            .model = parser.model,
+        },
+        .transcript_cwd = parser.cwd,
     };
+}
+
+/// 저장 파일이 이 칸에 대해 알던 이어갈 에이전트를 **보류 신원**으로 옮겨 둔다(RB2). 복원이 부른다.
+pub fn rememberSavedResume(term: *Term, ar: ?maru.session.workspace.AgentResume) void {
+    const value = ar orelse {
+        term.rt.saved_resume_provider = null;
+        term.rt.saved_resume_id_len = 0;
+        return;
+    };
+    if (!value.valid() or value.session_id.len > term.rt.saved_resume_id_buf.len) return;
+    @memcpy(term.rt.saved_resume_id_buf[0..value.session_id.len], value.session_id);
+    term.rt.saved_resume_id_len = @intCast(value.session_id.len);
+    term.rt.saved_resume_provider = value.provider;
+}
+
+fn forgetSavedResume(term: *Term) void {
+    term.rt.saved_resume_provider = null;
+    term.rt.saved_resume_id_len = 0;
 }
 
 /// 이 Term 에서 재부팅 뒤 **이어갈 에이전트**(RB2 — docs/workspace-restore.md 「재부팅 뒤 부활(RB)」 저장 조건).
@@ -786,10 +829,14 @@ pub fn resumableAgentOf(self: *AppSession, term: *Term) ?maru.session.workspace.
         .none => return null,
     };
     if (term.agent_kind_from_hook or isRemoteAgentPane(term) or app_session_mod.termCwdIsRemote(term)) return null;
-    const out: maru.session.workspace.AgentResume = .{
-        .provider = provider,
-        .session_id = primaryHookSlot(self, term).transcript.identity(),
-    };
+    const live = primaryHookSlot(self, term).transcript.identity();
+    // **살아 있는 신원이 이긴다.** 아직 없으면(훅이 다시 알려 주기 전) 저장 파일이 알던 보류 신원을 싣는다 — 같은
+    // 종류일 때만. 안 그러면 그 사이 찍힌 checkpoint 가 파일이 알던 값을 지운다.
+    const id: []const u8 = if (live.len > 0) live else if (term.rt.saved_resume_provider == provider)
+        term.rt.saved_resume_id_buf[0..term.rt.saved_resume_id_len]
+    else
+        "";
+    const out: maru.session.workspace.AgentResume = .{ .provider = provider, .session_id = id };
     return if (out.valid()) out else null;
 }
 
@@ -1095,6 +1142,14 @@ pub fn noteAgentKind(self: *AppSession, term: *Term, kind: AgentKind, displayed:
     const prev = term.agent_kind;
     term.agent_kind = kind;
     if (kind == prev) return;
+    // **에이전트가 끝나거나 다른 종류로 바뀌면 그 세션의 신원을 버린다**(RB2 코드 리뷰). 신원은 종류가 바뀌어도
+    // 남도록 설계됐는데(`Cache.reset` 은 신원을 안 지운다), 그러면 같은 칸에서 새로 띄운 세션이 **옛 세션의 id** 로
+    // 저장돼 재부팅 뒤 엉뚱한 대화를 이어간다. 없음 → 에이전트는 지우지 않는다 — 훅의 `SessionStart` 가 프로세스
+    // 판정보다 먼저 올 수 있어, 지우면 방금 받은 새 신원을 잃는다.
+    if (prev != .none) {
+        term.hook.transcript.setIdentity("");
+        forgetSavedResume(term);
+    }
     // RB2: 저장되는 `agent-resume` 이 이 값에 달려 있다 — 정상 종료 없이 전원이 꺼져도 마지막 쌍이 파일에
     // 있으려면 바뀌는 순간 checkpoint 를 더럽혀야 한다.
     self.workspaceChanged(.agent_session);
@@ -1314,6 +1369,10 @@ pub fn agentIdentityFromStatuslineFile(self: *AppSession, term: *Term, buf: []u8
     const a = arena_state.allocator();
     const base = sessionCacheBase(a) orelse return null;
     const path = std.fmt.allocPrint(a, "{s}/{s}/{d}", .{ base, sl.session_dir_rel, term.surfaceId() }) catch return null;
+    // **이 실행이 시작한 뒤에 쓰인 파일만** 믿는다. 이 훅은 거둬들였고 파일 이름이 surface id(실행마다 1 부터)라,
+    // 옛 실행이 남긴 파일은 **다른 칸의 신원**이다 — 그것을 채택하면 재부팅 뒤 엉뚱한 대화를 이어간다(코드 리뷰).
+    const st = std.Io.Dir.cwd().statFile(self.io, path, .{}) catch return null;
+    if (st.mtime.nanoseconds < app_session_mod.process_start_ns) return null;
     const raw = readFileAlloc(self.io, a, path) orelse return null;
     const trimmed = std.mem.trim(u8, raw, " \t\r\n");
     if (!sl.plausibleIdentity(trimmed)) return null;
@@ -2059,10 +2118,23 @@ fn claudeProjectDirPath(cwd: []const u8, out: []u8) ?[]const u8 {
     return std.fmt.bufPrint(out, "{s}/projects/{s}", .{ claude_dir, slug }) catch null;
 }
 
-/// codex 가 대화(rollout)를 쌓는 뿌리(`~/.codex/sessions`) — 대화 줄과 재부팅 부활이 공유한다.
+/// codex 가 대화(rollout)를 쌓는 뿌리(`$CODEX_HOME/sessions`, 없으면 `~/.codex/sessions`) — 대화 줄과 재부팅
+/// 부활이 공유한다. `CODEX_HOME` 규칙은 훅 설치와 **같은 함수**(`agent_hook_install.configDir`)다 — 예전엔 여기만
+/// `~/.codex` 로 박혀 있어 `CODEX_HOME` 사용자의 대화를 못 찾았다(코드 리뷰).
 fn codexSessionsRootPath(out: []u8) ?[]const u8 {
-    const home_z = std.c.getenv("HOME") orelse return null;
-    return std.fmt.bufPrint(out, "{s}/.codex/sessions", .{std.mem.span(home_z)}) catch null;
+    const env_value = if (std.c.getenv("CODEX_HOME")) |v| std.mem.span(v) else null;
+    const home = if (std.c.getenv("HOME")) |v| std.mem.span(v) else null;
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = maru.session.agent_hook_install.configDir(.codex, &dir_buf, env_value, home) orelse return null;
+    return std.fmt.bufPrint(out, "{s}/sessions", .{dir}) catch null;
+}
+
+/// claude 가 대화를 쌓는 뿌리(`<claude 설정>/projects`). 재부팅 부활은 그 아래를 **세션 id 로** 찾는다
+/// (`agent_transcript.findClaudeById` — slug 규칙을 흉내 내지 않는다).
+fn claudeProjectsRootPath(out: []u8) ?[]const u8 {
+    var claude_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const claude_dir = settings_ops.claudeConfigDir(&claude_dir_buf) orelse return null;
+    return std.fmt.bufPrint(out, "{s}/projects", .{claude_dir}) catch null;
 }
 
 /// claude: 작업 디렉터리를 인코딩한 디렉터리의 **직속** 파일만 본다 — 서브에이전트 기록은 `<세션 id>/` 하위에

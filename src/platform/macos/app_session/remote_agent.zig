@@ -79,6 +79,9 @@ pub fn pumpRemoteAgentChannels(self: *AppSession) void {
                     {
                         term.agent_remote_channel = null;
                         term.agent_remote_nonce_len = 0;
+                        // **원격 훅이 세운 종류 래치도 푼다.** 안 풀면 로컬 프로세스 판정이 영영 꺼진 채라(`remote_owns_kind`)
+                        // 이 칸에서 띄운 로컬 에이전트가 배지도, 재부팅 뒤 이어가기(RB2)도 못 얻는다(코드 리뷰).
+                        term.agent_kind_from_hook = false;
                     }
                     continue;
                 };

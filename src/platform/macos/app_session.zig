@@ -2752,6 +2752,13 @@ const TermRuntime = struct {
     /// staged graph에서만 발급하며, handle이 같아도 다른 manifest 슬롯으로 action을 splice하지 못하게 한다.
     /// `runtime_reconcile.max_runtime_bindings == 4096`이라 u16 sentinel 안에 닫힌다.
     ended_manifest_index: u16 = std.math.maxInt(u16),
+    /// 저장 파일이 이 칸에 대해 알던 **이어갈 에이전트**(RB2 — 「보류 신원」). 복원이 `agent-resume` 에서 옮겨 두고,
+    /// 캡처가 **살아 있는 신원이 아직 없을 때만** 대신 싣는다. 이것이 없으면 재접속(같은 부팅의 재실행)이나 재부팅
+    /// 부활 직후, 훅이 신원을 다시 알려 주기 전에 찍힌 checkpoint 가 파일이 알던 값을 지운다(코드 리뷰가 잡았다).
+    /// 에이전트가 끝나거나 다른 종류로 바뀌면 버린다(`noteAgentKind`) — 그 뒤의 세션은 다른 세션이다.
+    saved_resume_provider: ?maru.session.agent_session_archive.Provider = null,
+    saved_resume_id_buf: [maru.session.agent_session_archive.max_session_id_bytes]u8 = undefined,
+    saved_resume_id_len: u8 = 0,
     /// **커널 cwd 폴백 캐시(Term별)** — OSC 7이 빈 Term의 cwd를 `proc_pidinfo`로 물어본 결과
     /// (docs/editor-surface-dock.md §3.5). `proc_pidinfo`는 syscall이라 매 프레임 부를 수 없어 저주기로만
     /// 갱신하고 그 사이에는 이 값을 그대로 쓴다. 경로 길이는 `PATH_MAX`로 정해져 있으므로 인라인 배열이다 —
@@ -3836,6 +3843,9 @@ pub fn appKeepAlivePolicyValue() bool {
 // 오인 방지). 첫 창의 ensureRemoteBackend가 실패하면 켠다 → 이후 창은 재시도(각 3s backoff) 없이 바로 in-process + 같은
 // notice(host가 정말 죽었으면 창마다 재시도 낭비 방지). 프로세스 전역 상태라 module-var.
 pub var host_connect_failed: bool = false;
+/// 이 프로세스가 **시작한 시각**(벽시계 ns). 상태줄 신원 파일이 이 실행이 쓴 것인지 가르는 데 쓴다 — 그 훅은
+/// 거둬들였고 파일 이름이 surface id(실행마다 1 부터)라, 옛 실행이 남긴 파일은 **엉뚱한 칸의 신원**이다(RB2 코드 리뷰).
+pub var process_start_ns: i96 = 0;
 
 /// **다시 시도해도 되는 시각**(`awakeMs` 기준). `host_connect_failed` 는 「지금 원격을 고르지 않는다」이지
 /// 「영영 포기한다」가 아니어야 한다 — 그 둘을 가르는 것이 이 값이다.
@@ -7874,6 +7884,7 @@ pub const AppSession = struct {
         allocator: std.mem.Allocator,
         raw_config: SessionConfig,
     ) !void {
+        if (process_start_ns == 0) process_start_ns = @intCast(std.Io.Clock.real.now(io).nanoseconds);
         const config = try normalizeConfig(raw_config);
         if (is_macos) try RemoteSessionAdapter.initializeProcessRuntime();
 
@@ -9063,6 +9074,9 @@ pub const AppSession = struct {
     /// 버려지므로 복원 자리에서 직접 못 한다 — `maru_macos_workspace_checkpoint_arm` 이 이 값을 한 번 소비한다.
     /// 안 하면 부활한 실행이 저장 전에 죽었을 때 다음 실행이 **또** 부활해 같은 셸을 겹쳐 띄운다.
     pub var reboot_revival_checkpoint_dirty: bool = false;
+    /// 이 프로세스의 재부팅 증명 판정(RB1). **한 번만** 내린다 — 창마다 따로 판정하면, 첫 창이 부활하며 쓴 「이번
+    /// 부팅에 부활함」 표식(`recordRevivedThisBoot`)을 다음 창이 읽고 증명을 거둬 창끼리 갈린다. null = 아직 안 내림.
+    pub var reboot_proven_decision: ?bool = null;
     /// 그 실패의 **원래 reason**. 특히 연결 실패는 `host_gone` 이 아니면 reason 을 **버리고** 접는다 —
     /// 죽은 host 가 왜 `host_gone` 으로 안 갈렸는지가 그래서 안 보였다.
     pub var restore_host_reason: []const u8 = "-";
@@ -9529,6 +9543,17 @@ pub const AppSession = struct {
     /// 알림의 존재 이유다: 새 셸을 원래 세션의 연속으로 보이게 하지 않는다.
     fn showPendingRebootRevivalNotice(self: *AppSession) void {
         if (AppSession.reboot_revived_pending == 0) return;
+        // **복원이 다 끝난 뒤에** 띄운다 — 추가 창의 apply 사이에도 tick 이 돌아(`createTerminalWindow` 가
+        // `renderTick` 을 부른다) 창마다 나눠 떴다(코드 리뷰). checkpoint 무장이 「모든 창 복원 끝」의 앱 전역 신호다.
+        if (!app_runtime.workspace_checkpoint.armed) return;
+        // host 연결 실패 알림이 이긴다(업그레이드 알림과 같은 규칙) — 알림 자리는 하나라 덮으면 「유지 안 됨」과 그
+        // 이유가 사라진다. 부활한 칸은 화면에 이미 보이므로 이 알림을 버려도 잃는 사실이 없다.
+        if (self.host_connect_notice_pending or host_connect_failed) {
+            AppSession.reboot_revived_pending = 0;
+            AppSession.reboot_agents_resumed_pending = 0;
+            AppSession.reboot_agents_missed_pending = 0;
+            return;
+        }
         const count = AppSession.reboot_revived_pending;
         const resumed = AppSession.reboot_agents_resumed_pending;
         const missed = AppSession.reboot_agents_missed_pending;
@@ -24945,12 +24970,14 @@ test "ssh 를 빠져나온 pane 은 채널을 놓는다 — 안 놓으면 소스
     term.agent_kind = .none;
     term.agent_hook_log_present = false;
     try std.testing.expectEqual(maru.session.agent_hook_mode.Mode.hook, agent_ops.agentHookMode(&session, term));
+    term.agent_kind_from_hook = true; // 원격 훅이 종류를 세웠다(래치)
 
     // ① 재접속 중(관측이 stale)에는 **안 놓는다** — 여기서 놓으면 끊길 때마다 배지가 깜빡인다.
     term.rt.observation.availability = .stale;
     term.rt.observation.ssh_remote_dest_present = false;
     remote_agent_ops.pumpRemoteAgentChannels(&session);
     try std.testing.expect(term.agent_remote_channel != null);
+    try std.testing.expect(term.agent_kind_from_hook); // 재접속 중에는 래치도 그대로
 
     // ② 관측이 최신인데 목적지가 없다 = **원격이 아니게 됐다.** 그때 놓는다.
     term.rt.observation.availability = .current;
@@ -24958,6 +24985,9 @@ test "ssh 를 빠져나온 pane 은 채널을 놓는다 — 안 놓으면 소스
     try std.testing.expect(term.agent_remote_channel == null);
     try std.testing.expectEqual(@as(u8, 0), term.agent_remote_nonce_len);
     try std.testing.expectEqual(maru.session.agent_hook_mode.Mode.observe, agent_ops.agentHookMode(&session, term));
+    // RB2 코드 리뷰: 원격 훅 래치도 푼다 — 안 풀면 로컬 프로세스 판정이 영영 꺼져 이 칸의 로컬 에이전트가 배지도,
+    // 재부팅 뒤 이어가기도 못 얻는다.
+    try std.testing.expect(!term.agent_kind_from_hook);
 }
 
 test "원격에 maru 가 없으면 축을 안 열고 사유를 남긴다 — 그리고 그 목적지를 다시 안 두드린다" {
@@ -42487,6 +42517,7 @@ const RebootRestoreFixture = struct {
         AppSession.reboot_agents_resumed_pending = 0;
         AppSession.reboot_agents_missed_pending = 0;
         AppSession.reboot_revival_checkpoint_dirty = false;
+        AppSession.reboot_proven_decision = null; // 판정은 프로세스당 한 번 — 판정자마다 새 프로세스처럼
     }
 
     /// 재접속 게이트는 keep-alive 일 때만 열린다 — 꺼져 있으면 `createTerm` 이 identity 를 무시하고 평범히 spawn
@@ -42507,6 +42538,16 @@ const RebootRestoreFixture = struct {
         AppSession.reboot_agents_resumed_pending = 0;
         AppSession.reboot_agents_missed_pending = 0;
         AppSession.reboot_revival_checkpoint_dirty = false;
+        AppSession.reboot_proven_decision = null;
+        // 부활이 쓴 「이번 부팅에 부활함」 표식과 그 디렉터리를 치운다(아래 rmdir 은 빈 디렉터리만 지운다).
+        {
+            var mbuf: [96]u8 = undefined;
+            const xdg: [*:0]const u8 = @ptrCast(&f.xdg_buf);
+            if (std.fmt.bufPrintZ(&mbuf, "{s}/maru/reboot-revived", .{std.mem.span(xdg)})) |m| {
+                _ = std.c.unlink(m.ptr);
+                if (std.fmt.bufPrintZ(&mbuf, "{s}/maru", .{std.mem.span(xdg)})) |d| _ = std.c.rmdir(d.ptr) else |_| {}
+            } else |_| {}
+        }
         workspace_ops.test_boot_session = f.prev_boot;
         host_connect_failed = f.prev_host_connect_failed;
         if (f.had_prev) {
@@ -42609,7 +42650,13 @@ test "RB1-4 재부팅이 증명되면 live·묘비·legacy 모두 attach·묘비
         try std.testing.expectEqualStrings("", saved.runtime_id);
     }
 
-    // 알림은 앱에 한 번 — 첫 창이 합계를 띄우고 비우면 다른 창은 아무것도 안 띄운다.
+    // 알림은 앱에 한 번 — **모든 창 복원이 끝난 뒤**(checkpoint 무장)에야 띄운다. 그 전의 tick 은 수를 건드리지 않는다.
+    const saved_checkpoint = app_runtime.workspace_checkpoint;
+    app_runtime.workspace_checkpoint = .{};
+    defer app_runtime.workspace_checkpoint = saved_checkpoint;
+    session.showPendingRebootRevivalNotice();
+    try std.testing.expectEqual(@as(u32, 3), AppSession.reboot_revived_pending);
+    try app_runtime.workspace_checkpoint.arm(.{ .debounce_ns = 500_000_000, .retry_initial_ns = 1_000_000_000, .retry_max_ns = 30_000_000_000 }, false);
     session.showPendingRebootRevivalNotice();
     try std.testing.expectEqual(@as(u32, 0), AppSession.reboot_revived_pending);
 }
@@ -42690,6 +42737,7 @@ test "RB1-7 커널 부팅 신원은 형식이 맞는 UUID 로 읽히고 두 번 
 
 const rb2_claude_id = "0f6c1a2e-1111-4222-8333-444455556666";
 const rb2_codex_id = "019a0c11-2222-7333-8444-555566667777";
+const rb2_claude_big_id = "22222222-3333-4444-8555-666666666666";
 
 /// RB2 판정자 공용: 환경변수 하나를 바꾸고 되돌린다(고정 버퍼 — defer 에서 할당하지 않는다).
 const Rb2EnvGuard = struct {
@@ -42795,7 +42843,7 @@ test "RB2-7 캡처는 이어갈 에이전트를 복사해 싣는다 — Term 의
     try std.testing.expect(plain.tabs[0].panes[0].surfaces[0].agent_resume == null);
 }
 
-test "RB2-8 재부팅 부활 요청: 대화 파일이 있으면 그 칸에서 기록된 모드·모델로 이어가고, 없으면 셸만" {
+test "RB2-8 재부팅 부활 요청: 대화 파일을 id 로 찾아 기록된 모드·모델·작업 디렉터리로 이어가고, 없으면 셸만" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const a = std.testing.allocator;
     const io = std.testing.io;
@@ -42803,42 +42851,40 @@ test "RB2-8 재부팅 부활 요청: 대화 파일이 있으면 그 칸에서 �
     defer tmp.cleanup();
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
-    var zbuf: [std.fs.max_path_bytes]u8 = undefined;
 
-    // claude: `CLAUDE_CONFIG_DIR/projects/<"/tmp" 의 slug>/<id>.jsonl`. 끝의 모드·모델이 이겨야 한다.
-    var slug_buf: [256]u8 = undefined;
-    const slug = maru.session.agent_transcript.claudeDirName("/tmp", &slug_buf).?;
-    var rel_buf: [512]u8 = undefined;
-    const claude_dir = try std.fmt.bufPrint(&rel_buf, "claude/projects/{s}", .{slug});
-    try tmp.dir.createDirPath(io, claude_dir);
-    var file_buf: [600]u8 = undefined;
+    // claude: 폴더 이름이 **어떤 slug 규칙과도 맞지 않는** 곳에 둔다 — 찾기는 id 로 한다(claude 는 영숫자 아닌
+    // 문자를 전부 `-` 로 바꾸고 긴 경로에 해시를 붙인다; 코드 리뷰). 줄마다 claude 가 쓴 cwd 가 실린다.
+    try tmp.dir.createDirPath(io, "claude/projects/-weird_Dir-x1y2");
     try tmp.dir.writeFile(io, .{
-        .sub_path = try std.fmt.bufPrint(&file_buf, "{s}/{s}.jsonl", .{ claude_dir, rb2_claude_id }),
-        .data = "{\"sessionId\":\"" ++ rb2_claude_id ++ "\",\"type\":\"user\",\"permissionMode\":\"plan\",\"message\":{\"role\":\"user\",\"text\":\"a\"}}\n" ++
-            "{\"sessionId\":\"" ++ rb2_claude_id ++ "\",\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"model\":\"claude-opus-4-1\",\"text\":\"b\"}}\n" ++
-            "{\"sessionId\":\"" ++ rb2_claude_id ++ "\",\"type\":\"user\",\"permissionMode\":\"bypassPermissions\",\"message\":{\"role\":\"user\",\"text\":\"c\"}}\n",
+        .sub_path = "claude/projects/-weird_Dir-x1y2/" ++ rb2_claude_id ++ ".jsonl",
+        .data = "{\"sessionId\":\"" ++ rb2_claude_id ++ "\",\"cwd\":\"/tmp\",\"type\":\"user\",\"permissionMode\":\"plan\",\"message\":{\"role\":\"user\",\"text\":\"a\"}}\n" ++
+            "{\"sessionId\":\"" ++ rb2_claude_id ++ "\",\"cwd\":\"/tmp\",\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"model\":\"claude-opus-4-1\",\"text\":\"b\"}}\n" ++
+            "{\"sessionId\":\"" ++ rb2_claude_id ++ "\",\"cwd\":\"/tmp\",\"type\":\"user\",\"permissionMode\":\"bypassPermissions\",\"message\":{\"role\":\"user\",\"text\":\"c\"}}\n",
     });
-    // 사라진 cwd 의 slug 에도 같은 대화 파일을 둔다 — 파일은 있는데 그 디렉터리로 spawn 할 수 없는 경우다.
-    // 가드가 없으면 claude 가 기본 자리에서 떠 「대화 없음」으로 끝나는 칸을 「이어감」으로 센다.
-    var gone_slug_buf: [256]u8 = undefined;
-    const gone_slug = maru.session.agent_transcript.claudeDirName("/no/such/maru-rb2-dir", &gone_slug_buf).?;
-    var gone_rel_buf: [512]u8 = undefined;
-    const gone_dir = try std.fmt.bufPrint(&gone_rel_buf, "claude/projects/{s}", .{gone_slug});
-    try tmp.dir.createDirPath(io, gone_dir);
-    var gone_file_buf: [600]u8 = undefined;
+    // 마지막 모드 줄 뒤로 도구 출력이 2 MiB 넘게 쌓인 대화 — 끝 1 MiB 에는 모드가 없다. 넓혀 읽어야 `plan` 을 찾는다
+    // (못 찾으면 플래그 없이 provider 기본값 — 기록보다 넓은 권한일 수 있다; 코드 리뷰 실측 6/300).
+    {
+        var big: std.ArrayList(u8) = .empty;
+        defer big.deinit(a);
+        try big.appendSlice(a, "{\"sessionId\":\"" ++ rb2_claude_big_id ++ "\",\"cwd\":\"/tmp\",\"type\":\"user\",\"permissionMode\":\"plan\",\"message\":{\"role\":\"user\",\"text\":\"a\"}}\n");
+        const filler = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"" ++ ("x" ** 1000) ++ "\"}}\n";
+        for (0..2200) |_| try big.appendSlice(a, filler);
+        try tmp.dir.writeFile(io, .{ .sub_path = "claude/projects/-weird_Dir-x1y2/" ++ rb2_claude_big_id ++ ".jsonl", .data = big.items });
+    }
+    // codex: `CODEX_HOME/sessions/YYYY/MM/DD/rollout-…-<id>.jsonl`. HOME 에는 두지 않는다 — `CODEX_HOME` 을 따라야 한다.
+    try tmp.dir.createDirPath(io, "codexhome/sessions/2026/09/23");
     try tmp.dir.writeFile(io, .{
-        .sub_path = try std.fmt.bufPrint(&gone_file_buf, "{s}/{s}.jsonl", .{ gone_dir, rb2_claude_id }),
-        .data = "{\"sessionId\":\"" ++ rb2_claude_id ++ "\",\"type\":\"user\",\"permissionMode\":\"plan\",\"message\":{\"role\":\"user\",\"text\":\"a\"}}\n",
-    });
-    // codex: `HOME/.codex/sessions/YYYY/MM/DD/rollout-…-<id>.jsonl`. 끝부분에 session_meta 가 없어도 읽혀야 한다.
-    try tmp.dir.createDirPath(io, "home/.codex/sessions/2026/09/23");
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "home/.codex/sessions/2026/09/23/rollout-2026-09-23T01-02-03-" ++ rb2_codex_id ++ ".jsonl",
+        .sub_path = "codexhome/sessions/2026/09/23/rollout-2026-09-23T01-02-03-" ++ rb2_codex_id ++ ".jsonl",
         .data = "{\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-y\",\"approval_policy\":\"never\",\"sandbox_policy\":{\"type\":\"danger-full-access\"}}}\n",
     });
+    try tmp.dir.createDirPath(io, "home");
 
+    var zbuf: [std.fs.max_path_bytes]u8 = undefined;
     var claude_env = try Rb2EnvGuard.set("CLAUDE_CONFIG_DIR", try std.fmt.bufPrintZ(&zbuf, "{s}/claude", .{root}));
     defer claude_env.restore();
+    var codex_zbuf: [std.fs.max_path_bytes]u8 = undefined;
+    var codex_env = try Rb2EnvGuard.set("CODEX_HOME", try std.fmt.bufPrintZ(&codex_zbuf, "{s}/codexhome", .{root}));
+    defer codex_env.restore();
     var home_zbuf: [std.fs.max_path_bytes]u8 = undefined;
     var home_env = try Rb2EnvGuard.set("HOME", try std.fmt.bufPrintZ(&home_zbuf, "{s}/home", .{root}));
     defer home_env.restore();
@@ -42847,21 +42893,25 @@ test "RB2-8 재부팅 부활 요청: 대화 파일이 있으면 그 칸에서 �
     defer a.destroy(session);
     defer session.deinit();
 
-    const Case = struct { sm: maru.session.workspace.Surface, want: []const u8, agent: @TypeOf(@as(pane_ops.RebootRevivalSpawn, undefined).agent) };
+    const Agent = @TypeOf(@as(pane_ops.RebootRevivalSpawn, undefined).agent);
+    const Case = struct { sm: maru.session.workspace.Surface, want: []const u8, agent: Agent, cwd: []const u8 = "/tmp" };
     const base: maru.session.workspace.Surface = .{ .cwd = "/tmp", .command = "/bin/zsh", .cols = 80, .rows = 24 };
     var claude_sm = base;
     claude_sm.agent_resume = .{ .provider = .claude, .session_id = rb2_claude_id };
+    var big_sm = base;
+    big_sm.agent_resume = .{ .provider = .claude, .session_id = rb2_claude_big_id };
     var codex_sm = base;
     codex_sm.agent_resume = .{ .provider = .codex, .session_id = rb2_codex_id };
     var missing_sm = base;
     missing_sm.agent_resume = .{ .provider = .claude, .session_id = "11111111-2222-4333-8444-555555555555" };
-    var gone_cwd_sm = claude_sm; // 그 cwd 의 slug 에 대화 파일은 있지만 디렉터리 자체가 사라졌다
+    var gone_cwd_sm = claude_sm; // 셸이 마지막으로 알린 cwd 는 사라졌다 — 대화가 기록한 cwd 로 이어간다
     gone_cwd_sm.cwd = "/no/such/maru-rb2-dir";
     const cases = [_]Case{
         .{ .sm = claude_sm, .want = "'claude' '--resume' '" ++ rb2_claude_id ++ "' '--permission-mode' 'bypassPermissions' '--model' 'claude-opus-4-1'; exec ", .agent = .resumed },
+        .{ .sm = big_sm, .want = "'claude' '--resume' '" ++ rb2_claude_big_id ++ "' '--permission-mode' 'plan'; exec ", .agent = .resumed },
         .{ .sm = codex_sm, .want = "'codex' 'resume' '" ++ rb2_codex_id ++ "' '--ask-for-approval' 'never' '--sandbox' 'danger-full-access' '--model' 'gpt-y'; exec ", .agent = .resumed },
+        .{ .sm = gone_cwd_sm, .want = "'claude' '--resume' '" ++ rb2_claude_id ++ "' ", .agent = .resumed },
         .{ .sm = missing_sm, .want = "", .agent = .missed },
-        .{ .sm = gone_cwd_sm, .want = "", .agent = .missed },
         .{ .sm = base, .want = "", .agent = .none },
     };
     for (cases) |case| {
@@ -42876,7 +42926,7 @@ test "RB2-8 재부팅 부활 요청: 대화 파일이 있으면 그 칸에서 �
             try std.testing.expectEqualStrings("-c", spawn.req.args[2]);
             try std.testing.expect(std.mem.startsWith(u8, spawn.req.args[3], case.want));
             try std.testing.expect(spawn.req.login);
-            try std.testing.expectEqualStrings("/tmp", spawn.req.cwd.?); // cwd 는 명령 문자열이 아니라 작업 디렉터리로
+            try std.testing.expectEqualStrings(case.cwd, spawn.req.cwd.?); // cwd 는 명령 문자열이 아니라 작업 디렉터리로
             try std.testing.expectEqualStrings(launch.argv[0], spawn.command);
         } else {
             // 이어가지 않으면 **평범한 새 셸**이다 — 부활 요청이 provider 흔적을 남기지 않는다.
@@ -42885,6 +42935,19 @@ test "RB2-8 재부팅 부활 요청: 대화 파일이 있으면 그 칸에서 �
             const plain = pane_ops.restoreSpawn(session, base).req;
             try std.testing.expectEqualStrings(plain.command, spawn.req.command);
         }
+    }
+
+    // 재개 래핑을 못 받는 셸(tcsh 는 `-l` 을 단독 인자로만 받는다)이면 이어가지 않는다 — 띄우면 칸이 곧바로 닫힌다.
+    const prev_shell = session.loaded_config.config.shell.command;
+    defer session.loaded_config.config.shell.command = prev_shell;
+    session.loaded_config.config.shell.command = "/bin/tcsh";
+    {
+        var launch: agent_ops.AgentResumeLaunch = .{};
+        defer launch.deinit(a);
+        var parser: maru.session.agent_session_archive.Parser = undefined;
+        const spawn = try pane_ops.rebootRevivalSpawn(session, claude_sm, &launch, &parser);
+        try std.testing.expectEqual(Agent.missed, spawn.agent);
+        try std.testing.expect(launch.shell_command == null);
     }
     pane_ops.clearRestoreRuntimeIdentity(session);
 }
@@ -42977,7 +43040,11 @@ test "RB2-9 재부팅 증명 복원만 이어간다 — 수를 세어 알리고,
             // in-process 로 만든 칸도 이어간다 — 계약의 「한 규칙」. 예전 판은 이 칸을 「이어가지 않는다」로 굳혀
             // keep-alive 를 끈 사용자는 재부팅 뒤 에이전트가 영영 안 이어졌다(적대적 검증이 잡았다).
             try std.testing.expectEqualStrings("claude", terms[2].surface.command.?);
-            // 알림은 셋을 모두 싣고 비운다.
+            // 알림은 셋을 모두 싣고 비운다(모든 창 복원이 끝난 뒤 — checkpoint 무장).
+            const saved_checkpoint = app_runtime.workspace_checkpoint;
+            app_runtime.workspace_checkpoint = .{};
+            defer app_runtime.workspace_checkpoint = saved_checkpoint;
+            try app_runtime.workspace_checkpoint.arm(.{ .debounce_ns = 500_000_000, .retry_initial_ns = 1_000_000_000, .retry_max_ns = 30_000_000_000 }, false);
             session.showPendingRebootRevivalNotice();
             try std.testing.expectEqual(@as(u32, 0), AppSession.reboot_agents_resumed_pending);
             try std.testing.expectEqual(@as(u32, 0), AppSession.reboot_agents_missed_pending);
@@ -43068,12 +43135,237 @@ test "RB2-11 관측 경로(상태줄 파일)로 신원이 바뀌어도 checkpoin
     session.workspace_checkpoint_mutations_enabled = true;
     defer session.workspace_checkpoint_mutations_enabled = false;
 
+    // 이 실행이 시작하기 **전에** 쓰인 파일은 옛 실행의 것이다(파일 이름이 surface id — 실행마다 1 부터). 믿지 않는다.
+    const prev_start = process_start_ns;
+    defer process_start_ns = prev_start;
+    process_start_ns = std.math.maxInt(i96);
+    agent_ops.refreshAgentSessionIdentity(session, term);
+    try std.testing.expectEqualStrings("", term.hook.transcript.identity());
+    try std.testing.expectEqual(@as(u64, 0), app_runtime.workspace_checkpoint.change_revision);
+    process_start_ns = 0;
+
     agent_ops.refreshAgentSessionIdentity(session, term);
     try std.testing.expectEqualStrings(rb2_claude_id, term.hook.transcript.identity()); // 대조군: 신원이 실제로 바뀌었다
     try std.testing.expectEqual(@as(u64, 1), app_runtime.workspace_checkpoint.change_revision);
     // 같은 신원을 다시 읽으면 아무것도 안 한다 — 매 폴링마다 더럽히면 checkpoint 가 쉬지 않는다.
     agent_ops.refreshAgentSessionIdentity(session, term);
     try std.testing.expectEqual(@as(u64, 1), app_runtime.workspace_checkpoint.change_revision);
+}
+
+test "RB1-9 같은 부팅에서는 두 번 부활하지 않는다 — 저장이 막혀도 「이번 부팅에 부활함」 표식이 막는다" {
+    // 복원이 불완전하면(explorer root 하나가 사라짐 등) Swift 는 모든 저장을 건너뛴다 — 파일은 옛 부팅 값을 그대로
+    // 들고 있다. 표식이 없으면 같은 부팅의 다음 실행이 또 부활해 같은 셸·같은 `claude --resume` 을 겹쳐 띄운다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    var fx: RebootRestoreFixture = .{};
+    try fx.enter(rb1_boot_now);
+    defer fx.leave();
+    for (0..2) |launch_no| {
+        AppSession.reboot_proven_decision = null; // 새 프로세스처럼
+        AppSession.reboot_revived_pending = 0;
+        const session = try initSmokeSessionSized(a);
+        defer a.destroy(session);
+        defer session.deinit();
+        fx.armKeepAlive();
+        defer fx.disarmKeepAlive();
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        var win = try workspace_ops.captureWorkspaceWindow(session, arena.allocator(), false, null);
+        const surfaces = rb1Surfaces(false);
+        const panes = [_]maru.session.workspace.Pane{.{ .surfaces = &surfaces }};
+        const tree = [_]maru.session.workspace.TreeNode{.{ .leaf = 0 }};
+        const tabs = [_]maru.session.workspace.Tab{.{ .tree = &tree, .panes = &panes }};
+        win.tabs = &tabs;
+        win.boot_session = rb1_boot_old; // 저장이 막혀 파일은 그대로다
+        try workspace_ops.applySavedWorkspaceWindow(session, &.{win}, 0);
+        const terms = session.tabs.items[0].panes.items[0].terms.items;
+        if (launch_no == 0) {
+            try std.testing.expectEqual(@as(u32, 2), AppSession.reboot_revived_pending);
+            try std.testing.expect(!terms[1].rt.ended_placeholder);
+        } else {
+            // 두 번째 실행: 부활하지 않는다 — 옛 handle 은 지금 규칙대로 묘비(첫 실행의 runtime 은 Recovered Sessions 에 남는다).
+            try std.testing.expectEqual(@as(u32, 0), AppSession.reboot_revived_pending);
+            try std.testing.expect(terms[1].rt.ended_placeholder);
+        }
+    }
+}
+
+test "RB1-11 창이 여럿이어도 판정은 한 번 — 첫 창이 쓴 표식이 다음 창의 부활을 막지 않는다" {
+    // 창마다 `AppSession` 이 따로 복원한다. 첫 창이 부활하며 「이번 부팅에 부활함」 표식을 쓰므로, 판정을 창마다
+    // 새로 내리면 둘째 창은 표식을 보고 증명을 거둬 **묘비**로 복원된다 — 한 실행 안에서 창끼리 갈린다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    var fx: RebootRestoreFixture = .{};
+    try fx.enter(rb1_boot_now);
+    defer fx.leave();
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const surfaces = rb1Surfaces(false);
+    const panes = [_]maru.session.workspace.Pane{.{ .surfaces = &surfaces }};
+    const tree = [_]maru.session.workspace.TreeNode{.{ .leaf = 0 }};
+    const tabs = [_]maru.session.workspace.Tab{.{ .tree = &tree, .panes = &panes }};
+    const windows = [_]maru.session.workspace.Window{
+        .{ .tabs = &tabs, .boot_session = rb1_boot_old },
+        .{ .tabs = &tabs, .boot_session = rb1_boot_old },
+    };
+    for (0..2) |index| {
+        const session = try initSmokeSessionSized(a);
+        defer a.destroy(session);
+        defer session.deinit();
+        fx.armKeepAlive();
+        defer fx.disarmKeepAlive();
+        try workspace_ops.applySavedWorkspaceWindow(session, &windows, index);
+        const terms = session.tabs.items[0].panes.items[0].terms.items;
+        try std.testing.expect(!terms[1].rt.ended_placeholder); // 두 창 모두 부활
+    }
+    try std.testing.expectEqual(@as(u32, 4), AppSession.reboot_revived_pending);
+}
+
+test "RB2-17 작업 디렉터리 판정은 chdir 할 수 있는가다 — 검색 권한만 있고 읽기 권한이 없어도 된다" {
+    // spawn 은 검색 권한만 쓴다. 디렉터리를 **열어** 보면 `d-wx` 디렉터리를 「사라졌다」로 읽는다(코드 리뷰).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    try tmp.dir.createDirPath(io, "search-only");
+    try tmp.dir.writeFile(io, .{ .sub_path = "plain-file", .data = "x" });
+    var zbuf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_z = try std.fmt.bufPrintZ(&zbuf, "{s}/search-only", .{root});
+    try std.testing.expectEqual(@as(c_int, 0), std.c.chmod(dir_z.ptr, 0o311));
+    defer _ = std.c.chmod(dir_z.ptr, 0o755);
+    var pbuf: [std.fs.max_path_bytes]u8 = undefined;
+    try std.testing.expect(pane_ops.restoreCwdReachable(dir_z));
+    try std.testing.expect(!pane_ops.restoreCwdReachable(try std.fmt.bufPrint(&pbuf, "{s}/plain-file", .{root})));
+    try std.testing.expect(!pane_ops.restoreCwdReachable(try std.fmt.bufPrint(&pbuf, "{s}/missing", .{root})));
+    try std.testing.expect(!pane_ops.restoreCwdReachable(""));
+    try std.testing.expect(!pane_ops.restoreCwdReachable("relative/dir"));
+}
+
+test "RB1-10 부활 알림은 모든 창 복원이 끝난 뒤 한 번이고, host 연결 실패 알림을 덮지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    defer session.deinit();
+    const saved_checkpoint = app_runtime.workspace_checkpoint;
+    defer app_runtime.workspace_checkpoint = saved_checkpoint;
+    const prev_failed = host_connect_failed;
+    defer host_connect_failed = prev_failed;
+    defer AppSession.reboot_revived_pending = 0;
+
+    // **떠 있는 문구로 잰다** — 수만 보면 「버림」과 「띄움」이 둘 다 0 이라 구분이 안 된다(변이 검사가 잡았다).
+    const sentinel = "host-connect-failure-sentinel";
+    // ① 무장 전(창 복원 사이의 tick): 띄우지도 비우지도 않는다 — 창마다 나눠 뜨면 안 된다.
+    app_runtime.workspace_checkpoint = .{};
+    host_connect_failed = false;
+    session.showNotice(sentinel);
+    AppSession.reboot_revived_pending = 2;
+    session.showPendingRebootRevivalNotice();
+    try std.testing.expectEqual(@as(u32, 2), AppSession.reboot_revived_pending);
+    try std.testing.expectEqualStrings(sentinel, session.chrome_host.notice.message);
+    // ② 무장 뒤 + host 연결 실패: 버린다 — 알림 자리가 하나라 덮으면 「유지 안 됨」과 그 이유가 사라진다.
+    try app_runtime.workspace_checkpoint.arm(.{ .debounce_ns = 500_000_000, .retry_initial_ns = 1_000_000_000, .retry_max_ns = 30_000_000_000 }, false);
+    host_connect_failed = true;
+    session.showPendingRebootRevivalNotice();
+    try std.testing.expectEqual(@as(u32, 0), AppSession.reboot_revived_pending);
+    try std.testing.expectEqualStrings(sentinel, session.chrome_host.notice.message);
+    // ③ 무장 뒤 + 정상: 띄우고 비운다(대조군 — 문구가 실제로 바뀐다).
+    host_connect_failed = false;
+    AppSession.reboot_revived_pending = 1;
+    session.showPendingRebootRevivalNotice();
+    try std.testing.expectEqual(@as(u32, 0), AppSession.reboot_revived_pending);
+    try std.testing.expect(!std.mem.eql(u8, sentinel, session.chrome_host.notice.message));
+}
+
+test "RB2-14 보류 신원: 살아 있는 신원이 없을 때만 저장 파일이 알던 값을 싣고, 에이전트가 바뀌면 버린다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    defer session.deinit();
+    const term = pane_ops.activePane(session).activeTerm();
+    agent_ops.rememberSavedResume(term, .{ .provider = .claude, .session_id = rb2_claude_id });
+    term.hook.transcript.setIdentity("");
+
+    // 에이전트가 아직 안 보이면(재접속 직후) 싣지 않는다 — 종류가 맞을 때만.
+    term.agent_kind = .none;
+    try std.testing.expect(agent_ops.resumableAgentOf(session, term) == null);
+    agent_ops.noteAgentKind(session, term, .claude, false); // 없음 → claude: 보류 신원을 지우지 않는다
+    try std.testing.expectEqualStrings(rb2_claude_id, agent_ops.resumableAgentOf(session, term).?.session_id);
+    // 살아 있는 신원이 이긴다.
+    term.hook.transcript.setIdentity("ffffffff-ffff-4fff-8fff-ffffffffffff");
+    try std.testing.expectEqualStrings("ffffffff-ffff-4fff-8fff-ffffffffffff", agent_ops.resumableAgentOf(session, term).?.session_id);
+    // 에이전트가 끝나면 신원도 보류 신원도 버린다 — 같은 칸에서 새로 띄운 세션이 옛 id 로 저장되면 안 된다.
+    agent_ops.noteAgentKind(session, term, .none, false);
+    try std.testing.expectEqualStrings("", term.hook.transcript.identity());
+    agent_ops.noteAgentKind(session, term, .claude, false);
+    try std.testing.expect(agent_ops.resumableAgentOf(session, term) == null);
+    // 다른 종류로 바뀌어도 버린다(claude 의 id 를 codex 로 저장하면 안 된다).
+    agent_ops.rememberSavedResume(term, .{ .provider = .claude, .session_id = rb2_claude_id });
+    term.hook.transcript.setIdentity(rb2_claude_id);
+    agent_ops.noteAgentKind(session, term, .codex, false);
+    try std.testing.expectEqualStrings("", term.hook.transcript.identity());
+    try std.testing.expect(agent_ops.resumableAgentOf(session, term) == null);
+}
+
+test "RB2-15 보류 신원은 복원이 옮긴다 — 재부팅이 아닌 재실행에서도 checkpoint 가 파일이 알던 값을 안 지운다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    var fx: RebootRestoreFixture = .{};
+    try fx.enter(rb1_boot_now);
+    defer fx.leave();
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    defer session.deinit();
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var win = try workspace_ops.captureWorkspaceWindow(session, arena.allocator(), false, null);
+    const surfaces = [_]maru.session.workspace.Surface{.{ .cwd = "/tmp", .command = "/bin/zsh", .agent_resume = .{ .provider = .claude, .session_id = rb2_claude_id }, .cols = 80, .rows = 24 }};
+    const panes = [_]maru.session.workspace.Pane{.{ .surfaces = &surfaces }};
+    const tree = [_]maru.session.workspace.TreeNode{.{ .leaf = 0 }};
+    const tabs = [_]maru.session.workspace.Tab{.{ .tree = &tree, .panes = &panes }};
+    win.tabs = &tabs;
+    win.boot_session = rb1_boot_now; // 같은 부팅의 재실행
+    try workspace_ops.applySavedWorkspaceWindow(session, &.{win}, 0);
+    const term = session.tabs.items[0].panes.items[0].terms.items[0];
+    term.agent_kind = .claude; // 그 칸에서 에이전트가 계속 돈다 — 훅이 신원을 아직 다시 알려 주지 않았다
+    term.hook.transcript.setIdentity("");
+    const captured = try workspace_ops.captureWorkspaceWindow(session, arena.allocator(), false, null);
+    try std.testing.expectEqualStrings(rb2_claude_id, captured.tabs[0].panes[0].surfaces[0].agent_resume.?.session_id);
+}
+
+test "RB2-16 부활 칸의 spawn 이 실패하면 그 칸만 묘비로 강등하고 창은 살린다" {
+    // 부활은 모든 칸을 새로 띄우므로 host runtime 상한·fd 고갈 하나가 창 전체를 잃게 했다(재부팅 전에는 묘비로 복원되던
+    // 파일이다 — 코드 리뷰).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    var fx: RebootRestoreFixture = .{};
+    try fx.enter(rb1_boot_now);
+    defer fx.leave();
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    defer session.deinit();
+    fx.armKeepAlive();
+    defer fx.disarmKeepAlive();
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var win = try workspace_ops.captureWorkspaceWindow(session, arena.allocator(), false, null);
+    const surfaces = rb1Surfaces(false);
+    const panes = [_]maru.session.workspace.Pane{.{ .surfaces = &surfaces }};
+    const tree = [_]maru.session.workspace.TreeNode{.{ .leaf = 0 }};
+    const tabs = [_]maru.session.workspace.Tab{.{ .tree = &tree, .panes = &panes }};
+    win.tabs = &tabs;
+    win.boot_session = rb1_boot_old;
+    pane_ops.test_fail_next_revived_spawn = true; // 첫 부활 칸(surfaces[1])의 spawn 을 실패시킨다
+    defer pane_ops.test_fail_next_revived_spawn = false;
+    try workspace_ops.applySavedWorkspaceWindow(session, &.{win}, 0);
+    const terms = session.tabs.items[0].panes.items[0].terms.items;
+    try std.testing.expectEqual(@as(usize, 4), terms.len); // 창은 살았다
+    try std.testing.expect(terms[1].rt.ended_placeholder); // 그 칸만 묘비(⏎ 로 다시 시작)
+    try std.testing.expect(!terms[2].rt.ended_placeholder); // 다음 칸은 정상 부활
+    try std.testing.expectEqual(@as(u32, 1), AppSession.reboot_revived_pending);
 }
 
 test "legacy bare runtime-id Gone은 host 없는 tombstone으로 승격하지 않는다" {

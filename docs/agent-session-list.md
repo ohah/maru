@@ -313,7 +313,8 @@ search/scope가 부분 snapshot을 완전한 결과처럼 보이게 해서는 �
     소유한다 — macOS 파일에서 조립하면 다른 플랫폼이 재개를 붙일 때 이 규칙이 조용히 빠진다. 재부팅 뒤 부활
     ([workspace-restore.md](workspace-restore.md) 「재부팅 뒤 부활(RB)」)도 **같은 조립**(`resumeArgvFor`)과 같은 셸
     래핑(`AgentResumeLaunch`)을 쓴다 — 그쪽은 대화 파일의 끝부분만 읽으므로 `Parsed` 전체 대신 입력 넷
-    (provider·세션 id·모드·모델)만 넘긴다.
+    (provider·세션 id·모드·모델)만 넘긴다. 셸 래핑을 못 받는 셸(tcsh·csh — `-l` 을 단독 인자로만 받는다)이면 띄우지
+    않고 오류를 낸다(도크는 재개 실패 알림) — 띄우면 셸이 곧바로 죽어 탭이 닫혔다.
   - **되살리지 못하는 것**: Codex `workspace-write`의 하위 설정(쓰기 가능 root 목록·네트워크 허용)은 CLI
     플래그 하나로 표현되지 않아 config 축으로 남는다. 샌드박스 종류까지만 충실하다.
 - resume은 **모델도 그대로 되살린다**. 두 provider 다 플래그가 있다(`claude --model <이름|별칭>`,

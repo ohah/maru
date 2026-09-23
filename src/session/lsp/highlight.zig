@@ -103,7 +103,7 @@ fn parse(a: std.mem.Allocator, text: []const u8) !std.json.Parsed(std.json.Value
     return std.json.parseFromSlice(std.json.Value, a, text, .{});
 }
 
-test "DHL1 응답 → 범위: 문서 순서로 정렬하고 같은 범위는 한 번만, 빈 범위·kind 는 버리며 utf-16 글자를 byte 로 (§8.2p)" {
+test "OCH1 응답 → 범위: 문서 순서로 정렬하고 같은 범위는 한 번만, 빈 범위·kind 는 버리며 utf-16 글자를 byte 로 (§8.2p)" {
     const a = testing.allocator;
     const content = "let area = 1;\nfn 가area() {}\n";
     var lines = try line_index.build(a, content);
@@ -113,6 +113,7 @@ test "DHL1 응답 → 범위: 문서 순서로 정렬하고 같은 범위는 한
         \\[{"range":{"start":{"line":1,"character":4},"end":{"line":1,"character":8}},"kind":3},
         \\ {"range":{"start":{"line":0,"character":4},"end":{"line":0,"character":8}},"kind":2},
         \\ {"range":{"start":{"line":0,"character":4},"end":{"line":0,"character":8}}},
+        \\ {"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":13}}},
         \\ {"range":{"start":{"line":0,"character":2},"end":{"line":0,"character":2}}},
         \\ 7, {"range":{}}]
     );
@@ -120,17 +121,20 @@ test "DHL1 응답 → 범위: 문서 순서로 정렬하고 같은 범위는 한
     var out: Spans = .{};
     defer out.deinit(a);
     try decode(a, p.value, content, lines, .utf16, &out);
-    try testing.expectEqual(@as(usize, 2), out.items.items.len);
-    try testing.expectEqual(@as(u32, 4), out.items.items[0].start);
-    try testing.expectEqual(@as(u32, 8), out.items.items[0].end);
-    try testing.expectEqualStrings("area", content[out.items.items[0].start..out.items.items[0].end]);
+    // **정렬은 시작 순이다**(끝 순이 아니다): (0,13) 이 (4,8) 보다 앞선다 — 둘은 두 기준이 서로 다른 답을 내는 쌍이다(적대적 A6).
+    try testing.expectEqual(@as(usize, 3), out.items.items.len);
+    try testing.expectEqual(@as(u32, 0), out.items.items[0].start);
+    try testing.expectEqual(@as(u32, 13), out.items.items[0].end);
+    try testing.expectEqual(@as(u32, 4), out.items.items[1].start);
+    try testing.expectEqual(@as(u32, 8), out.items.items[1].end);
+    try testing.expectEqualStrings("area", content[out.items.items[2].start..out.items.items[2].end]);
     // 둘째 줄: utf-16 으로 `fn `(3) + `가`(1) 뒤가 글자 4 — byte 로는 3 + 3 = 6 이다.
     try testing.expectEqualStrings("area", content[out.items.items[1].start..out.items.items[1].end]);
 }
 
-test "DHL2 provider·빈 응답·상한 — bool·객체·거짓·없음, null 과 배열 아님은 강조 없음 (§8.2p)" {
+test "OCH2 provider·빈 응답·상한 — bool·객체·거짓·없음, null 과 배열 아님은 강조 없음 (§8.2p)" {
     const a = testing.allocator;
-    const content = "x\n";
+    const content = "x" ** 600 ++ "\n";
     var lines = try line_index.build(a, content);
     defer lines.deinit();
     {
@@ -169,15 +173,18 @@ test "DHL2 provider·빈 응답·상한 — bool·객체·거짓·없음, null �
         var buf: std.ArrayList(u8) = .empty;
         defer buf.deinit(a);
         try buf.appendSlice(a, "[");
+        // **서로 다른 범위**여야 상한이 보인다 — 같은 범위만 주면 중복 제거가 하나로 만들어 상한을 아무 값으로 바꿔도 초록이다(적대적 A5).
         var i: usize = 0;
         while (i < max_spans + 10) : (i += 1) {
             if (i > 0) try buf.appendSlice(a, ",");
-            try buf.appendSlice(a, "{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":1}}}");
+            var one: [128]u8 = undefined;
+            const txt = try std.fmt.bufPrint(&one, "{{\"range\":{{\"start\":{{\"line\":0,\"character\":{d}}},\"end\":{{\"line\":0,\"character\":{d}}}}}}}", .{ i, i + 1 });
+            try buf.appendSlice(a, txt);
         }
         try buf.appendSlice(a, "]");
         var p = try parse(a, buf.items);
         defer p.deinit();
         try decode(a, p.value, content, lines, .utf16, &out);
-        try testing.expectEqual(@as(usize, 1), out.items.items.len); // 전부 같은 범위라 중복 제거로 하나
+        try testing.expectEqual(max_spans, out.items.items.len);
     }
 }

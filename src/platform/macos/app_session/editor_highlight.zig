@@ -84,15 +84,10 @@ pub fn tick(self: *AppSession, term: *Term) void {
     if (st.waiting) return;
     if (term.rt.editor_diff != null) return; // 비교 뷰는 축이 다르다(§5.1a)
     if (term.rt.editor_lsp_version == 0) return;
-    const w = wordAtCaret(term) orelse {
-        // 낱말 밖(또는 선택 중)으로 옮겼다 — 들고 있던 강조를 버린다.
-        if (st.spans.items.items.len > 0) {
-            st.spans.clear();
-            st.cleared += 1;
-            self.metal_dirty = true;
-        }
-        return;
-    };
+    // **낱말 밖(또는 선택 중)에서는 비우지 않는다.** 그리기는 `spans()` 의 낱말 대조가 이미 가리고, 캐시를 남겨 두면 같은 낱말로
+    // 돌아왔을 때 **요청 없이** 곧바로 다시 선다. 처음엔 여기서 비웠는데, 그러면 `version`·`word_*` 키가 남아 `fresh` 가 참이라
+    // **다시 묻지도 않고 목록은 빈** 상태가 되어 그 낱말의 강조가 영영 안 떴다(적대적 B9 가 드러냈다).
+    const w = wordAtCaret(term) orelse return;
     const fresh = st.version == term.rt.editor_lsp_version and st.word_start == w.start and st.word_end == w.end;
     if (fresh) return; // 이 낱말의 답을 이미 들고 있다
     const now = self.awakeMs();

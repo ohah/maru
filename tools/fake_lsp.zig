@@ -110,6 +110,8 @@ pub fn main() void {
 }
 
 var answered = false;
+/// `initialize` 에서 협상한 위치 인코딩이 utf-16 인가(기본은 utf-8 — 클라이언트가 먼저 제안한다). documentHighlight 가 자리를 이 단위로 읽고 낸다.
+var negotiated_utf16 = false;
 /// `initialized` 의 `params` 가 객체가 아니었다 — 그 뒤 전부 `ServerNotInitialized`(tsgo 꼴).
 var not_initialized = false;
 /// `INLREFRESH` — `srv-2`(`workspace/inlayHint/refresh`) 를 보냈나 · 클라이언트가 **result** 로 답했나.
@@ -671,6 +673,19 @@ fn readFileC(arena: std.mem.Allocator, path: []const u8) ?[]u8 {
     return buf[0..len];
 }
 
+/// byte 열의 **utf-16 단위 수**(가짜의 documentHighlight 가 자리를 낼 때 쓴다).
+fn utf16Units(bytes: []const u8) usize {
+    var units: usize = 0;
+    var i: usize = 0;
+    while (i < bytes.len) {
+        const n = std.unicode.utf8ByteSequenceLength(bytes[i]) catch 1;
+        const cp = std.unicode.utf8Decode(bytes[i..@min(i + n, bytes.len)]) catch 0xFFFD;
+        units += if (cp > 0xFFFF) 2 else 1;
+        i += @max(1, n);
+    }
+    return units;
+}
+
 fn isIdent(b: u8) bool {
     return std.ascii.isAlphanumeric(b) or b == '_' or b >= 0x80;
 }
@@ -833,7 +848,20 @@ fn handleDocumentHighlight(allocator: std.mem.Allocator, obj: std.json.ObjectMap
     const line = while (it0.next()) |l| : (i += 1) {
         if (i == line_no) break l;
     } else return;
-    const at: usize = @intCast(@max(0, @min(ch, @as(i64, @intCast(line.len)))));
+    // **`character` 는 협상한 단위다**(utf-8 이면 byte, utf-16 이면 utf-16 글자). utf-16 이면 byte 로 환산해서 본다 —
+    // ASCII 픽스처만 쓰면 이 환산이 보이지 않아 클라이언트의 utf-16 변환 결함이 숨는다(적대적 C4, `MARU_FAKE_LSP_UTF16=1` 로 잰다).
+    const at: usize = if (!negotiated_utf16) @intCast(@max(0, @min(ch, @as(i64, @intCast(line.len))))) else blk: {
+        var units: i64 = 0;
+        var bi: usize = 0;
+        while (bi < line.len) {
+            if (units >= ch) break :blk bi;
+            const n = std.unicode.utf8ByteSequenceLength(line[bi]) catch 1;
+            const cp = std.unicode.utf8Decode(line[bi..@min(bi + n, line.len)]) catch 0xFFFD;
+            units += if (cp > 0xFFFF) 2 else 1; // surrogate pair 는 둘
+            bi += @max(1, n);
+        }
+        break :blk line.len;
+    };
     if (at >= line.len or !isIdent(line[at])) {
         sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .result = [0]u32{} });
         return;
@@ -859,8 +887,11 @@ fn handleDocumentHighlight(allocator: std.mem.Allocator, obj: std.json.ObjectMap
             const right_ok = found + word.len >= l.len or !isIdent(l[found + word.len]);
             if (!left_ok or !right_ok) continue; // 낱말 경계 — 부분 일치는 아니다
             var r: std.json.ObjectMap = .empty;
-            r.put(arena, "start", posValue(arena, row, found) catch return) catch return;
-            r.put(arena, "end", posValue(arena, row, found + word.len) catch return) catch return;
+            // **자리도 utf-16 단위로 낸다** — 받는 쪽(`character`)과 내는 쪽이 같은 단위여야 한다(실서버 규약).
+            const lo_u = if (negotiated_utf16) utf16Units(l[0..found]) else found;
+            const hi_u = if (negotiated_utf16) utf16Units(l[0 .. found + word.len]) else found + word.len;
+            r.put(arena, "start", posValue(arena, row, lo_u) catch return) catch return;
+            r.put(arena, "end", posValue(arena, row, hi_u) catch return) catch return;
             var h: std.json.ObjectMap = .empty;
             h.put(arena, "range", .{ .object = r }) catch return;
             // 0 → kind 없음, 1 → 2(Read), 2 → 3(Write) 를 돌아가며(실서버 셋의 모양을 섞는다).
@@ -1193,6 +1224,7 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
         };
         // `MARU_FAKE_LSP_UTF16=1` 이면 제안과 무관하게 utf-16 을 고른다 — 클라이언트의 byte ↔ character 변환을 제품 경계에서 재는 데 쓴다.
         const force_utf16 = std.c.getenv("MARU_FAKE_LSP_UTF16") != null;
+        negotiated_utf16 = !(utf8 and !force_utf16); // 협상 결과를 기억한다 — 자리를 읽고 내는 처리기가 같은 단위를 쓴다
         sendJson(allocator, .{
             .jsonrpc = "2.0",
             .id = id.?,

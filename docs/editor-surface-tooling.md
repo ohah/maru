@@ -1219,7 +1219,7 @@ tsgo 32 ms(`2`/`3` 로 읽기·쓰기를 가른다) · clangd 1 ms(전부 `1`(Te
 | **그리기** | `frame.Props.occurrence_marks`(`search_marks` 와 같은 축). 색은 새 역할 `occurrence` 하나이고 테마에서 파생한다(`syntax_theme.occurrenceFromTheme` — diff·진단과 같은 계열). **우선순위: caret > 선택 > 검색 현재 > 검색 > 같은 낱말** — 가장 약하다 | §5.1·§4.1g |
 | **하지 않는 것** | 읽기/쓰기 색 구분(`kind`) · 서버 없을 때의 **낱말 기반 폴백**(검색 ⌘F 가 그 자리다) · 설정으로 끄기 · 미니맵 표시(§6) · 스크롤바 마커(§4.1a — 검색만) | 다음 |
 
-**관측점**: `DHL1~`(순수: 응답 → 범위 목록, 정렬·중복 제거·상한·utf-16·provider) · `DHL4~`(제품 경계: caret 이 낱말에 멈추면 묻고 마크가 서며,
+**관측점**: `OCH1~`(순수: 응답 → 범위 목록, 정렬·중복 제거·상한·utf-16·provider) · `OCH4~`(제품 경계: caret 이 낱말에 멈추면 묻고 마크가 서며,
 선택이 있으면 안 묻고, 편집하면 사라졌다가 조용한 뒤 다시; 낡은 version·낡은 낱말·빈 응답·provider 없음). 가짜 서버 표식 `DHLNONE`·`DHLSTALL`·`DHLERR`,
 `MARU_FAKE_LSP_NOHLCAP=1`.
 

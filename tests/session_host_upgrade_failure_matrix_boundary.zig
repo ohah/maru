@@ -5,6 +5,17 @@ fn contains(haystack: []const u8, needle: []const u8) bool {
     return std.mem.indexOf(u8, haystack, needle) != null;
 }
 
+/// 줄 맨 앞(들여쓰기 0)의 `test "` 만 센다 — 러너가 컴파일하는 최상위 test 선언이 그것이다.
+/// 문자열·주석 안에 적힌 `test "` 는 줄 맨 앞에 오지 않으므로 세지 않는다.
+fn countTopLevelTests(source: []const u8) usize {
+    var n: usize = 0;
+    var lines = std.mem.splitScalar(u8, source, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, line, "test \"")) n += 1;
+    }
+    return n;
+}
+
 test "U5 first failure matrix keeps every process and product rollback leaf" {
     const process = try std.Io.Dir.cwd().readFileAlloc(
         std.testing.io,
@@ -32,19 +43,32 @@ test "U5 first failure matrix keeps every process and product rollback leaf" {
         "U3 second exec syscall failure closes slots and resumes committed N owner",
         "U3 rollback self-image promotion failure keeps runtime committed and withdraws upgrade capability",
     };
-    for (required_process_cases) |name| try std.testing.expect(contains(process, name));
+    // 이름이 파일 «어딘가» 에 있는 것이 아니라 **test 선언** 으로 있어야 한다.
+    for (required_process_cases) |name| {
+        const declaration = try std.fmt.allocPrint(std.testing.allocator, "test \"{s}\"", .{name});
+        defer std.testing.allocator.free(declaration);
+        try std.testing.expect(contains(process, declaration));
+    }
+    // 그리고 파일의 test 선언 수가 목록 길이와 **같다** — 목록에 없는 test 가 몰래 늘거나 줄지 않는다.
+    // 이 둘이 합쳐지면 «목록 = 파일의 test 전부» 다(이름은 서로 다르다).
+    try std.testing.expectEqual(required_process_cases.len, countTopLevelTests(process));
 
     try std.testing.expect(contains(build, "test-session-host-upgrade-failure-matrix"));
     try std.testing.expect(contains(build, "session_host_upgrade_failure_process_tests"));
-    // **숫자를 그 아티팩트에 못 박는다.** 예전에는 `build.zig` 전체에서 `--maru-expect-tests=14`
-    // 를 문자열로 찾았는데, 정작 이 게이트의 대상은 **15** 였고 그 14 는 **무관한 아티팩트**의
-    // 것이었다 — 즉 이 단언은 지키겠다는 것을 지키지 않은 채 통과하고 있었다. 그 아티팩트의
-    // 숫자가 바뀌어도 아무도 몰랐을 것이고, 실제로 그 무관한 숫자가 바뀌자 비로소 드러났다
-    // (2026-09-02). 호출자와 인자를 함께 적어 남의 숫자로는 못 맞게 한다.
-    try std.testing.expect(contains(
-        build,
-        "run_session_host_upgrade_failure_process_tests.addArg(\"--maru-expect-tests=15\")",
-    ));
+    // **숫자를 글자로 못 박지 않고 목록에서 계산한다.** 호출자와 인자를 함께 적는 것은 그대로다
+    // (2026-09-02 에 `build.zig` 전체에서 `=14` 를 찾던 단언이 **무관한 아티팩트**의 14 로 통과하던
+    // 것을 막으려고 넣었다).
+    //
+    // 그런데 그때 이 아티팩트의 수를 **15** 로 적었다. 이 파일은 07-24 부터 지금까지 test 가 줄곧
+    // **14** 개이고, 바로 위 목록도 14 개다. 이 판정자는 `check-boundaries`(CI)에서 빌드 소스의
+    // «글자» 만 봤고, 실제 수를 세는 `test-session-host-upgrade-failure-matrix` 는 CI 밖이라
+    // `expected 15, compiled 14` 로 3 주 가까이 빨간 채 아무도 못 봤다(2026-09-23 발견).
+    // 목록 길이에서 만들면 목록·파일·빌드 기대값 셋이 다시 어긋날 수 없다.
+    const expected_arg = std.fmt.comptimePrint(
+        "run_session_host_upgrade_failure_process_tests.addArg(\"--maru-expect-tests={d}\")",
+        .{required_process_cases.len},
+    );
+    try std.testing.expect(contains(build, expected_arg));
     try std.testing.expect(contains(build, "failure_matrix_step.dependOn(&run_session_host_product_rollback_tests.step)"));
     try std.testing.expect(contains(build, "failure_matrix_step.dependOn(&run_session_host_nonempty_rollback_tests.step)"));
 }

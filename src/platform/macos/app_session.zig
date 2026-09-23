@@ -12876,7 +12876,7 @@ pub const AppSession = struct {
     /// `planImageUploads` 는 GpuImage 와 이미지를 id 로 짝짓고 업로드에 이미지의 id 를 싣으므로 둘 다 전역
     /// id 여야 한다. 사본은 작은 구조체 복사다(픽셀은 코어 alias 그대로 — 호출자가 그 surface 락을 쥔 동안만 유효).
     /// OOM 이면 빈 목록(이번 프레임 그 surface 이미지 생략 — 다음 프레임 재시도).
-    fn remapKittyImages(self: *AppSession, surface_key: usize, images: []const terminal.KittyImageView, live: *std.ArrayList(u32)) []terminal.KittyImageView {
+    fn remapKittyImages(self: *AppSession, surface_key: u64, images: []const terminal.KittyImageView, live: *std.ArrayList(u32)) []terminal.KittyImageView {
         const out = self.allocator.alloc(terminal.KittyImageView, images.len) catch return &.{};
         for (images, out) |img, *o| {
             o.* = img;
@@ -12906,7 +12906,7 @@ pub const AppSession = struct {
             if (lr.leaf == active_pane) continue;
             if (lr.leaf.activeTerm().kind != .terminal) continue; // web·편집기 pane 엔 kitty 가 없다
             const pane_surface = lr.leaf.activeTerm().surface;
-            const key: usize = @intFromPtr(pane_surface);
+            const key: u64 = pane_surface.id;
             pane_surface.lockCore(self.io);
             defer pane_surface.unlockCore(self.io);
             const snap = pane_surface.renderSnapshot();
@@ -21397,7 +21397,7 @@ pub const AppSession = struct {
                     const snap = active_surface.renderSnapshot();
                     // K4c: 살아있는 이미지 id 집합(보이는 surface 들의 저장소, 전역 id). Swift가 이 집합에 없는
                     // 텍스처를 evict. 활성 surface 를 먼저 resolve 해 원래 id 우선권을 활성 pane 이 갖게 한다.
-                    const active_key: usize = @intFromPtr(active_surface);
+                    const active_key: u64 = active_surface.id; // 비재사용 id — 포인터는 주소 재사용으로 옛 매핑을 이어받는다
                     const active_images = self.remapKittyImages(active_key, snap.images, &kg_live_ids);
                     defer self.allocator.free(active_images);
                     // **U=1 virtual placement 도 그릴 것이 있다.** 일반 placement 가 0 이어도 화면의

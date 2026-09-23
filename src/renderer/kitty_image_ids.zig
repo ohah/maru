@@ -17,9 +17,12 @@
 const std = @import("std");
 
 pub const Key = struct {
-    /// surface 를 구별하는 값(주소 등). 같은 프레임 안에서만 유일하면 된다 — 닫힌 surface 는 그 프레임에
-    /// 안 보이므로 `endFrame` 이 매핑을 놓아주고, 같은 주소가 재사용돼도 새 매핑으로 시작한다.
-    surface: usize,
+    /// surface 의 **재사용되지 않는** 식별자(`Surface.id` — `SurfaceIdAllocator` 가 단조 증가로 발급).
+    /// **포인터를 쓰면 안 된다**: surface 가 닫히고 같은 주소에 새 surface 가 두 프레임 사이에 할당되면 새
+    /// surface 가 옛 매핑(같은 전역 id)을 그대로 이어받는다. 그때 새 이미지가 `id 1·generation 1` 처럼 옛
+    /// 것과 같은 generation 이면(코어마다 1 부터라 가장 흔하다) 업로드 기록이 「이미 올렸다」고 답해 **옛
+    /// surface 의 그림이 보인다**. 비재사용 id 는 새 surface 를 늘 새 키로 만든다.
+    surface: u64,
     local: u32,
 };
 

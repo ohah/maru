@@ -203,6 +203,8 @@ WKWebView(WebKit)는 시스템 프레임워크라 의존성이 없지만 Chromiu
 
 ### 13.1 OSR + sidecar — PoC 실측
 
+> **구현 계획은 [웹 OSR 백엔드 구현 계획](plans/web-osr-backend.md)이 소유한다**(결정·계약·단계 W1~W8·검증). 이 절은 그 계획의 근거인 실측 기록이다.
+
 **동기 — 「빚 갚기」가 아니다(2026-09-23 정정).** 이 절의 초안은 §4 firstResponder 전쟁·§5 chrome 가로채기·§3 divider seam 을 「갚아야 할 빚」으로 앞세웠다. **그 전제는 실측으로 흔들렸다** — 최근 커밋 200 개에서 web-panel·firstResponder·포커스·seam 관련 수정이 **0 건**이다. 4g-0~4g-4 가 흩어진 패치를 통합한 뒤 그 축은 **수렴했다**. 빚이 계속 쌓인다는 관찰은 사실이 아니므로 그것을 근거로 삼지 않는다.
 
 **실제 동기는 하나다: Chromium 을 pane «안에» 넣는 길.** WKWebView 는 OSR 을 제공하지 않고(SDK 전수 검색 — §13.1 「분업」), windowed CEF 는 child NSWindow 라 모달을 가리고 좌표·space 추종이 따라붙는다(§13.2, suji 17-A→17-B 후퇴). **픽셀로 받는 것 말고 길이 없다.** 그래서 판단 질문은 「빚을 갚을까」가 아니라 **「Chromium 인앱 surface 가 필요한가」**이고, 필요 없다면 지금 WKWebView 가 맞다(의존성 0·IME·접근성이 공짜다).

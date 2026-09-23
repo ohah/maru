@@ -62,6 +62,7 @@ macOS 로컬 shell 1개 surface
 - [에이전트 이미지 갤러리 구현 계획](plans/agent-image-gallery.md)
 - [사이드바 그룹 단계 분해](plans/sidebar-groups.md)
 - [웹 패널 구현 계획](plans/web-panel.md)
+- [웹 OSR 백엔드 구현 계획(W1~W8 — `.browser` 를 CEF 창 없는 렌더링 sidecar 로)](plans/web-osr-backend.md) — **계획, 사용자 결정 다섯(D1~D5)이 열려 있다**
 - [다국어(i18n) 구현 계획](plans/i18n.md)
 - [모바일 플랫폼 구현 계획](plans/mobile-platform.md)
 - [Metal UI 구현·검증 순서](plans/metal-ui-layout.md)

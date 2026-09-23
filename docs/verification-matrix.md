@@ -690,6 +690,15 @@ layer·bounds만 숫자로 기록하여 후보 anchor 및 화면상 후보 위�
 사용자는 이 회차에서 후보 목록은 보지 못했지만 한자 변경은 보았다고 확인했다. 이는 후보창 생성·소멸이
 증명된 회차가 아니며, Option-Return이 문서 상태를 바꿨을 가능성과 반복 keyDown 여부를 별도로 가려야 한다.
 후속 test-only 진단은 원시 값 없이 세 카운터 변경 여부와 Option-Return 반복 횟수를 기록한다.
+2026-09-23 후속 실앱 회차에서는 사용자가 후보 목록 표시와 한자 변경을 확인했다. 첫 후보 요청 뒤
+31회 조회한 inventory는 baseline 17창/opened 최대 18창, 신규 ID 최대 1개, 외부 PID 신규 0개,
+앱 PID이면서 `NSApp.windows`에 속한 신규 1개였다. 그 신규 창은 WindowServer layer 20,
+Quartz bounds `(652,306,89,266)`이고 PTY 입력·commit callback·base-screen 세대 변경은 모두 false,
+Option-Return 반복 keyDown은 0이었다. 같은 회차의 v2a `first_rect`는 AppKit `(668,798,8,18)`이며
+주 display Quartz 높이 1080을 적용하면 해당 anchor는 Quartz y=264~282, 신규 창의 상단과 24pt 떨어지고
+x=668~676이 신규 창 x=652~741 안에 들어간다. 이 좌표·시점·사용자 관찰은 신규 앱 소유 창이 후보창이라는
+강한 근거지만, 단일 open 회차로 5회 Escape-close·owner identity를 증명하지는 못한다. 기존 외부 PID
+reducer가 `candidate-window-timeout`으로 실패했으므로 v2b1은 여전히 RED이며 소유 정책 변경은 사용자 논의가 필요하다.
 v2b0은 Screen Recording preflight를 source/HID mutation보다 먼저 수행하고 후보 요청 전후 전체 on-screen window inventory
 snapshot(시점당 최대 256, cap+1은 drop 없이 실패)을 pure reducer에 넘긴다. reducer의 차집합에서
 title·후보 문자열·pixel을 제외한 ID/owner PID·bundle ID/Apple signing validity·signing identifier/layer/bounds/TIS source ID만

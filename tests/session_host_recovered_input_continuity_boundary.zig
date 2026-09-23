@@ -41,6 +41,27 @@ test "CR6d 진단은 앱 초기화 뒤에도 하네스 stderr를 유지한다" {
     try std.testing.expectEqual(@as(usize, 1), count(swift, "candidate-option-as-meta"));
 }
 
+test "CR6d 수동 TCC 요청은 preflight 실패 뒤 input source 변경 전에만 일어난다" {
+    const allocator = std.testing.allocator;
+    const swift = try read(allocator, "src/platform/macos/MaruAppHost.swift");
+    defer allocator.free(swift);
+    const preflight = between(
+        swift,
+        "guard CGPreflightScreenCaptureAccess() else {",
+        "sessionHostCandidateObservation = SessionHostIMECandidateObservation()",
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), count(swift, "CGRequestScreenCaptureAccess()"));
+    try std.testing.expectEqual(@as(usize, 1), count(preflight, "if isSessionHostManualInputSmokeMode {\n                    sessionHostInputSmokeScreenCaptureRequestAttempted = true\n                    _ = CGRequestScreenCaptureAccess()\n                }"));
+    try std.testing.expectEqual(@as(usize, 1), count(preflight, "failSessionHostInputSmoke(\"screen-recording-not-provisioned\")"));
+    try std.testing.expectEqual(@as(usize, 1), count(swift, "session_host_input_smoke_screen_capture_request_attempted=\\(sessionHostInputSmokeScreenCaptureRequestAttempted)"));
+    const request = std.mem.indexOf(u8, preflight, "CGRequestScreenCaptureAccess()") orelse return error.TestUnexpectedResult;
+    const failure = std.mem.indexOf(u8, preflight, "failSessionHostInputSmoke(\"screen-recording-not-provisioned\")") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(request < failure);
+    const source_change = std.mem.indexOf(u8, swift, "guard prepareSessionHostInputSmokeInputSource()") orelse return error.TestUnexpectedResult;
+    const preflight_start = std.mem.indexOf(u8, swift, "guard CGPreflightScreenCaptureAccess() else {") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(preflight_start < source_change);
+}
+
 test "CR6d 경계는 exact recovered screen probe와 actual AppKit input smoke만 연다" {
     const allocator = std.testing.allocator;
     const build = try build_source.read(allocator);
@@ -185,12 +206,12 @@ test "CR6d 경계는 exact recovered screen probe와 actual AppKit input smoke�
     try std.testing.expectEqual(@as(usize, 1), count(gate, "session_host_input_smoke_post_event_access=true"));
     try std.testing.expectEqual(@as(usize, 1), count(gate, "session_host_input_smoke_source_record_cleared=true"));
     try std.testing.expectEqual(@as(usize, 1), count(gate, "MARU_SESSION_HOST_CR6D_INPUT_SOURCE_RESTORE_EXE"));
-    try std.testing.expectEqual(@as(usize, 1), count(gate, "run_session_host_cr6d_boundary_tests.addArg(\"--maru-expect-tests=5\");"));
+    try std.testing.expectEqual(@as(usize, 1), count(gate, "run_session_host_cr6d_boundary_tests.addArg(\"--maru-expect-tests=6\");"));
     var graph = try build_graph.parse(allocator);
     defer graph.deinit();
     // 실행 인자도 **구조로** 센다 — 문자열은 호출이 줄바꿈되거나 receiver 이름이
     // 바뀌면 죽고, 그 죽음이 「인자가 없다」와 구분되지 않는다.
-    try std.testing.expectEqual(@as(usize, 1), graph.countArgs("run_session_host_cr6d_global_boundary_tests", "--maru-expect-tests=5"));
+    try std.testing.expectEqual(@as(usize, 1), graph.countArgs("run_session_host_cr6d_global_boundary_tests", "--maru-expect-tests=6"));
 
     // v2a의 판정자는 기본 test graph에 고정된 순수 consumer다. 실제 AppKit producer가 붙기 전에도
     // identity/세대/anchor/PPM digest와 관심 영역 계약이 사라지거나 파일 I/O를 직접 열 수 없다.

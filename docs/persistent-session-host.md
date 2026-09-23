@@ -6012,7 +6012,15 @@ CR6d의 AppKit child는 실행 파일을 테스트 러너가 직접 `execve`하�
 LaunchServices의 새 인스턴스로 열어 종료까지 기다린다. Screen Recording TCC는 요청 프로세스뿐 아니라
 responsible process도 판정하므로 SSH·터미널 테스트 러너가 직접 낳은 앱은 사용자가 `Maru.app`에 부여한 권한과
 다른 귀속으로 거부될 수 있다. 하네스가 준비한 격리 환경은 LaunchServices child에 그대로 전달하며, 앱의 실제
-PID·frontmost PID와 결과는 기존 summary 및 artifact로 판정한다. 이 예외는 Screen Recording과 전역 HID를 함께
+PID·frontmost PID와 결과는 기존 summary 및 artifact로 판정한다. 수동 입력 스모크에서
+Screen Recording preflight가 실패하면 이 서명된 앱 프로세스가
+`CGRequestScreenCaptureAccess()`를 한 번 호출해 OS에 권한을 요청한다. OS 대화상자 표시는 TCC 상태에 달려 있다.
+그 회차는 요청 결과와 무관하게
+`screen-recording-not-provisioned`로 종료하며, 사용자가 허용한 뒤 새 회차에서 preflight를 다시 확인한다.
+summary의 `session_host_input_smoke_screen_capture_request_attempted`는 호출 시도 여부만 기록하며,
+OS 대화상자의 표시나 승인 여부를 대신 증명하지 않는다.
+비수동 스모크는 요청창을 띄우지 않는다. 어느 쪽도 system-global input source·HID·후보 inventory를
+권한 확인 전에 변경하거나 읽지 않는다. 이 예외는 Screen Recording과 전역 HID를 함께
 검증하는 CR6d에만 적용하며, 제품에 테스트 전용 launch 진입점을 추가하지 않는다. 격리 HOME·config·artifact는
 macOS의 Documents 폴더 권한을 테스트 전제에 섞지 않도록 `/tmp` 아래의 CR6d 전용 루트에 두고, 웹 자산은 실제
 앱 번들 리소스를 사용한다. 실행할 서명된 앱 번들도 byte-preserving 방식으로 같은 `/tmp` 전용 부모에 staging해

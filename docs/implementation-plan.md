@@ -1291,7 +1291,8 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    후보 목록을 연 뒤 OS-owned window와 anchor의 screen-space 관계를 캡처하는 별도 opt-in gate다. Screen Recording 권한,
    잠금 해제된 WindowServer, 전면 앱이 없으면 `not_provisioned`로 실패하며 v2a나 좌표 비교로 대체하지 않는다. v2b는
    **v2b0 window-authority 관측 → v2b1 제품 gate** 두 merge slice로 닫는다. v2b0은 source 전환이나 HID 게시 전에
-   `CGPreflightScreenCaptureAccess()`를 확인하고, 같은 recovered view에서 후보 요청 직전/직후의 on-screen window inventory를
+   `CGPreflightScreenCaptureAccess()`를 확인한다. 수동 스모크만 preflight 실패 시 서명된 앱에서 OS에 권한을
+   한 번 요청하고 그 회차를 RED로 끝내며, 비수동 스모크는 요청하지 않는다. 승인 뒤 새 회차에서만 같은 recovered view의 후보 요청 직전/직후 on-screen window inventory를
    수집한다. producer는 후보처럼 보이는 행을 선필터하지 않고 각 시점의 전체 on-screen inventory를 reducer에 넘긴다.
    snapshot은 최대 256 window이며 cap+1은 일부를 버리지 않고 `failed`다. 새 window의 `CGWindowID`, owner PID·bundle ID,
    Apple code-signing validity·signing identifier, layer,

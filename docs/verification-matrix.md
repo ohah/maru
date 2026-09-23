@@ -640,7 +640,9 @@ v2b0b는 별도 Swift opt-in producer가 title 없는 전체 inventory 5 triplet
 bounded JSON과 사전 고정한 absent target을 Zig에 빌려준다. Zig entrypoint 하나가 schema/window/byte cap, 기존 pure
 reducer·series validator와 same-directory inode→`link(2)` canonical 배타 게시를 소유한다. raw inventory 중간 파일,
 Swift-side 후보 판정, 장수명 child, ABI 재시도·부분 artifact는 허용하지 않는다. preflight 실패는 source/HID mutation 0인
-`not_provisioned`이며 Zig ABI 자체는 `passed`/`failed`만 반환한다. 이 행의 green은 v2b1 pixel gate를 닫지 않는다.
+`not_provisioned`이며 Zig ABI 자체는 `passed`/`failed`만 반환한다. 수동 입력 스모크만 이 실패 지점에서
+서명된 앱 자신의 `CGRequestScreenCaptureAccess()`를 한 번 호출하고 같은 회차를 RED로 끝낸다. 비수동 스모크는
+권한을 요청하지 않으며, 승인 후 새 회차의 preflight 통과만 green이다. 이 행의 green은 v2b1 pixel gate를 닫지 않는다.
 v2b0은 Screen Recording preflight를 source/HID mutation보다 먼저 수행하고 후보 요청 전후 전체 on-screen window inventory
 snapshot(시점당 최대 256, cap+1은 drop 없이 실패)을 pure reducer에 넘긴다. reducer의 차집합에서
 title·후보 문자열·pixel을 제외한 ID/owner PID·bundle ID/Apple signing validity·signing identifier/layer/bounds/TIS source ID만

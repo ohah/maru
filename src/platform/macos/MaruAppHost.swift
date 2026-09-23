@@ -4261,6 +4261,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var sessionHostInputSmokeGlobalSourceSelected = false
     private var sessionHostInputSmokeGlobalSourceRestored = false
     private var sessionHostInputSmokePostEventAccess = false
+    private var sessionHostInputSmokeScreenCaptureRequestAttempted = false
     private var sessionHostInputSmokeSourceRecordCleared = false
     private var sessionHostInputSmokeAppActive = false
     private var sessionHostInputSmokeFirstResponder = false
@@ -10851,6 +10852,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             // HID posting. Refuse before changing the global input source so a missing Screen
             // Recording grant cannot leave any system mutation behind.
             guard CGPreflightScreenCaptureAccess() else {
+                // Only the explicit manual smoke asks from the signed app. Still fail this run:
+                // a new launch must prove the grant before any global input-source mutation.
+                if isSessionHostManualInputSmokeMode {
+                    sessionHostInputSmokeScreenCaptureRequestAttempted = true
+                    _ = CGRequestScreenCaptureAccess()
+                }
                 failSessionHostInputSmoke("screen-recording-not-provisioned")
                 return
             }
@@ -13361,6 +13368,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         session_host_input_smoke_global_source_selected=\(sessionHostInputSmokeGlobalSourceSelected)
         session_host_input_smoke_global_source_restored=\(sessionHostInputSmokeGlobalSourceRestored)
         session_host_input_smoke_post_event_access=\(sessionHostInputSmokePostEventAccess)
+        session_host_input_smoke_screen_capture_request_attempted=\(sessionHostInputSmokeScreenCaptureRequestAttempted)
         session_host_input_smoke_source_record_cleared=\(sessionHostInputSmokeSourceRecordCleared)
         session_host_input_smoke_app_active=\(sessionHostInputSmokeAppActive)
         session_host_input_smoke_first_responder=\(sessionHostInputSmokeFirstResponder)

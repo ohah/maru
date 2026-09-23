@@ -5161,6 +5161,13 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_b3_6_runtime_tests.addArg("--maru-expect-tests=2");
         run_b3_6_runtime_tests.setCwd(b.path("."));
         session_host_b3_6_step.dependOn(&run_b3_6_runtime_tests.step);
+        // **CI 편입.** 이 run 은 `test-session-host-b3-6` 에만 매달려 있어 CI 가 한 번도 돌리지
+        // 않았다 — 집계는 같은 테스트를 `skip-in-aggregate-v1` 로 건너뛰므로 CI 에서는 늘 «조용히
+        // 초록» 이었고, 그 사이 case 4 가 6 주(#3879) · peer matrix 가 flake(#3884) 로 빨갰다.
+        // 집계 run 이 이 격리 run 을 선행 조건으로 물어 `test-session-host` 가 함께 돌린다.
+        // **잡의 모드와 같은 run 만** 문다 — 두 모드를 다 물리면 `-Doptimize=Debug` 잡이 ReleaseFast
+        // 까지 컴파일한다(k3 에서 CI 실측). CI 는 Debug 잡과 ReleaseFast 잡을 따로 돌리므로 둘 다 덮인다.
+        if (b3_optimize == optimize) run_session_host_tests.step.dependOn(&run_b3_6_runtime_tests.step);
 
         const b3_6_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
@@ -5424,6 +5431,9 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_b3_4_5_reuse_correction_tests.addArg("--maru-expect-tests=5");
         run_b3_4_5_reuse_correction_tests.setCwd(b.path("."));
         session_host_b3_4_5_step.dependOn(&run_b3_4_5_reuse_correction_tests.step);
+        // **CI 편입** — 위 `run_b3_6_runtime_tests` 와 같은 이유·같은 규칙(잡의 모드와 같은 run 만).
+        // 집계는 이 테스트를 `MARU_SESSION_HOST_RPC_REUSE_EXEC=skip-in-aggregate-v1` 로 건너뛴다.
+        if (b3_optimize == optimize) run_session_host_tests.step.dependOn(&run_b3_4_5_reuse_correction_tests.step);
 
         const b3_4_5_product_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{

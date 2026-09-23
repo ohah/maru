@@ -4428,7 +4428,7 @@ fn drawnDocLines(term: *const Term) usize {
 ///
 /// **접힘 경로는 우연히 안전했다**(`rebuildVisible`이 부르는 `invalidateFoldDerived`가 0을 놓는다).
 /// 우연에 기대지 않으려고 여기서 명시한다.
-fn setEditorTop(self: *AppSession, term: *Term, line: usize, reason: []const u8) void {
+pub fn setEditorTop(self: *AppSession, term: *Term, line: usize, reason: []const u8) void {
     // **누가 화면을 굴렸나**(제보 조사 2026-09-12 — 입력할 때마다 스크롤된다). 스크롤은 여러
     // 경로가 세우므로, 값만 봐서는 «타이핑이 굴렸는지» 를 못 가른다.
     if (diag_gate.maruDebugEnabled() and term.rt.editor_first_line != line) {
@@ -14146,6 +14146,20 @@ test "STK7 sticky scroll 1층 — 스크롤하면 바깥부터 머리줄이 실�
     try testing.expect(std.mem.indexOf(u8, r2, "13") != null);
     try testing.expectEqual(@as(usize, 2), term.rt.editor_sticky.drawn_len);
     try testing.expectEqual(sticky_client.Source.syntax, term.rt.editor_sticky.source);
+    // **경계선이 실제로 GPU quad 로 내려간다**(2px, `divider` 색) — 프레임 op 만 보면 pane lowering 이 버리는 op(`rule`)도 초록이다
+    // (캡처에서 픽셀로 쟀을 때 경계가 없었다). 높이도 잰다 — 1px 은 셰이더 AA 에 지워져 화면에 없었다.
+    {
+        fx.session.gpu_quads.clearRetainingCapacity();
+        _ = try paneRowText(fx.session, term, 0, &buf);
+        const want = fx.session.buildChromeTokens().get(.divider);
+        var found = false;
+        for (fx.session.gpu_quads.items) |q| {
+            if (q.h != 2) continue;
+            const rgb: maru.terminal.Rgb = .{ .r = @intCast((q.fill_color0 >> 16) & 0xFF), .g = @intCast((q.fill_color0 >> 8) & 0xFF), .b = @intCast(q.fill_color0 & 0xFF) };
+            if (std.meta.eql(rgb, want)) found = true;
+        }
+        try testing.expect(found);
+    }
 
     // 호버·⌘클릭은 고정 행에서 안 뜬다(가려진 본문 글자를 가리키지 않는다).
     const geom = term.rt.editor_hit_geom;

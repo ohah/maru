@@ -972,9 +972,11 @@ fn paintSticky(props: Props, layout: geometry.Layout, scratch: Scratch, keep_fro
     }, scratch.ops[w..], scratch.text_bytes[bytes_used + cwr.bytes ..], scratch.runs[runs_used + cwr.runs ..]);
     w += gw.ops;
 
-    // ③ 경계선 — 마지막 고정 행의 아래 가장자리.
-    if (w < scratch.ops.len) {
-        scratch.ops[w] = .{ .rule = .{ .from = .{ .x = props.rect.x, .y = y1 - 1 }, .to = .{ .x = x1, .y = y1 - 1 }, .role = .divider } };
+    // ③ 경계선 — 마지막 고정 행의 아래 가장자리 **2px**. **quad 로 낸다** — 편집기 pane 의 lowering 은 `rule` 을 안 그린다(캡처에서
+    //    픽셀로 쟀다: 경계 열이 전부 바탕색이었다). 그리고 **1px 은 안 보인다** — quad 셰이더의 SDF 가장자리 AA(`maru_metal_shader.h`
+    //    `1 − smoothstep(−aa, aa, d)`)가 높이 1px 사각을 지웠다(1px 캡처: 선 없음 · 2px: 두 행이 `divider` 색).
+    if (w < scratch.ops.len and x1 > props.rect.x) {
+        scratch.ops[w] = .{ .quad = .{ .rect = .{ .x = props.rect.x, .y = y1 - 2, .w = @intCast(x1 - props.rect.x), .h = 2 }, .fill_role = .divider } };
         w += 1;
     }
     return w;
@@ -2526,10 +2528,10 @@ test "STK6 프레임 — 고정 행은 본문 글자·번호·덧칠을 걷고 �
     for (ops) |op| {
         if (op == .quad and op.quad.fill_role == .selection) try testing.expect(op.quad.rect.y >= 2 * ch);
     }
-    // 경계선이 마지막 고정 행 아래에 있다.
+    // 경계선이 마지막 고정 행 아래에 있다(2px quad — pane lowering 은 `rule` 을 안 그리고 1px quad 는 AA 에 지워진다).
     var rule = false;
     for (ops) |op| {
-        if (op == .rule and op.rule.from.y == 2 * ch - 1 and op.rule.to.y == 2 * ch - 1) rule = true;
+        if (op == .quad and op.quad.fill_role == .divider and op.quad.rect.y == 2 * ch - 2 and op.quad.rect.h == 2) rule = true;
     }
     try testing.expect(rule);
     // 막대는 남는다(본문 폭 밖).

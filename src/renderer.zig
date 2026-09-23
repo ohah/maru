@@ -10,6 +10,7 @@ pub const legacy_diagonal_glyph = @import("renderer/legacy_diagonal_glyph.zig");
 pub const icon_glyph = @import("renderer/icon_glyph.zig"); // maru chrome 아이콘(빌드타임 SVG→coverage, Plane 15 PUA 0xF0000~) 합성·다운스케일. 중립.
 pub const draw_list = @import("renderer/draw_list.zig");
 pub const frame_probe = @import("renderer/frame_probe.zig");
+pub const kitty_image_ids = @import("renderer/kitty_image_ids.zig"); // kitty 이미지 id → 창 전체에서 겹치지 않는 u32(보이는 pane 여럿을 같은 텍스처 캐시에). 중립.
 pub const font_identity = @import("renderer/font_identity.zig");
 pub const glyph_atlas = @import("renderer/glyph_atlas.zig");
 pub const glyph_frame = @import("renderer/glyph_frame.zig");

@@ -157,6 +157,8 @@ fn appendWordSteps(allocator: std.mem.Allocator, content: []const u8, lines: Lin
             try out.append(allocator, .{ .start = @intCast(w.lo), .end = @intCast(w.hi) });
         }
     }
+    // 공백뿐인 줄 — **오늘 등가다**(적대적 2회차 A9b): 그 줄을 떠나 다음 단계로 넘어가는 자리에서 줄 단계의 「줄 전체」가 같은 범위를
+    // 끼운다. 두는 이유는 VS Code 의 낱말 provider 와 같은 단계를 **원천 쪽에서** 내기 위해서다(줄 단계 규칙이 바뀌어도 남는다).
     const row = lines.lineAt(query);
     if (lines.line(row)) |ln| {
         const text = content[ln.start..ln.contentEnd()];

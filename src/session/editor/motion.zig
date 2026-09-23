@@ -19,6 +19,7 @@
 //! 세지 않고 **호출자가 준 열↔offset 변환**을 받는다(`ColumnMap`). 그래야 두 번째 출처가 안 생긴다.
 
 const std = @import("std");
+const brackets = @import("brackets.zig");
 const selection = @import("selection.zig");
 const line_index = @import("line_index.zig");
 
@@ -123,81 +124,18 @@ pub fn goalAt(bytes: []const u8, line: line_index.Line, offset: usize, map: Colu
 
 // ── 판정자 ────────────────────────────────────────────────────────────────────
 
-/// 괄호 짝으로 점프 — caret 이 **붙어 있는** 괄호의 짝 **시작 offset**
-/// ([문서 모델](../../../docs/native-editor-document-model.md) §3.9c).
+/// 괄호 짝으로 점프 — caret 이 **닿은** 괄호의 짝 **시작 offset**
+/// ([문서 모델](../../../docs/native-editor-document-model.md) §3.9c). **grammar 없는 문서의 저하**다 — 트리가 있으면 제품이
+/// `brackets.Tree` 출처로 같은 `brackets.jumpTarget` 을 부른다(문자열·주석 속 괄호가 빠진다).
 ///
 /// **대상은 괄호 셋뿐이다.** `pairs.zig` 의 `default_pairs` 에는 따옴표도 있지만 여는 것과 닫는 것이
-/// 같아 **깊이를 못 세고**, 문자열의 시작과 끝을 grammar 없이 못 가른다. 자동 닫기는 틀려도 친 자리에서
-/// 바로 보이지만 점프는 **화면 밖으로 데려간다**.
+/// 같아 **깊이를 못 세고**, 문자열의 시작과 끝을 grammar 없이 못 가른다.
 ///
-/// **caret 앞 byte 를 먼저 보고, 그 다음 뒤 byte 를 본다.** 둘 다 괄호면 앞이 이기고, **앞의 짝이 없으면
-/// 거기서 끝난다** — 뒤를 다시 보지 않는다. VSCode `matchBracket` 이 caret 을 품는 괄호를 앞에서부터
-/// 훑어 첫 번째를 쓰는 것과 같은 답이다.
-///
-/// **왕복은 보장하지 않는다**(§3.9c) — `((a))` 의 바깥에서 눌러 안으로 들어가면 되돌아올 때 안쪽 짝을
-/// 만난다. VSCode 도 같다.
-///
-/// **byte 로 세도 UTF-8 이 안 깨진다** — 괄호는 ASCII 이고 연속 byte 는 `0x80`–`0xBF` 라 겹치지 않는다.
+/// **caret 뒤 byte 를 먼저, 그것에 짝이 없으면 앞 byte 를 본다** — VS Code 실측(§3.9c 2026-09-24 정정). 판정은
+/// `brackets.zig` 한 곳이 소유하고 짝 괄호 **강조**(visual-mapping §5.1b)도 그것을 쓴다 — 강조가 가리키는 쌍과 점프가 가는
+/// 곳이 갈리면 안 된다.
 pub fn matchingBracket(bytes: []const u8, offset: usize) ?usize {
-    const at = @min(offset, bytes.len);
-    if (at > 0) {
-        if (bracketJump(bytes, at - 1)) |found| return found;
-        // **앞이 괄호였는데 짝이 없으면 뒤를 안 본다.** 그 판단은 `bracketJump` 가 아니라 여기 있다 —
-        // 그쪽은 "이 자리에서 갈 곳"만 답하고 우선순위는 이 함수가 갖는다.
-        if (isBracket(bytes[at - 1])) return null;
-    }
-    if (at < bytes.len) return bracketJump(bytes, at);
-    return null;
-}
-
-const open_brackets = "([{";
-const close_brackets = ")]}";
-
-fn isBracket(c: u8) bool {
-    return std.mem.indexOfScalar(u8, open_brackets, c) != null or
-        std.mem.indexOfScalar(u8, close_brackets, c) != null;
-}
-
-/// `bytes[pos]` 가 괄호면 그 짝의 시작 offset. 아니거나 짝이 없으면 `null`.
-///
-/// **같은 종류만 센다.** `([)` 같은 어긋난 중첩을 grammar 없이 고쳐 읽을 길이 없고, 다른 종류를 세면
-/// `(` 의 짝을 **못 찾는다**. 문자열 안 괄호도 그래서 못 가르는데, 그 대가는 "안 움직임"으로 떨어진다
-/// (`print("(")` 의 첫 `(` 는 깊이가 0 으로 안 돌아온다) — 엉뚱한 곳으로 데려가는 것보다 낫다.
-fn bracketJump(bytes: []const u8, pos: usize) ?usize {
-    const c = bytes[pos];
-    if (std.mem.indexOfScalar(u8, open_brackets, c)) |k| {
-        const close = close_brackets[k];
-        // **자기 자리부터 센다.** `depth = 1` 로 시작해 `pos + 1` 부터 훑어도 답이 같다(그 변이가
-        // 살아남는 것이 정상이다 — 첫 회에 `bytes[pos] == c` 라 곧바로 1 이 된다). 이 모양인 이유는
-        // 아래 닫는 갈래와 **대칭**이기 때문이다: 둘 다 "자기 자리를 포함해 훑는다" 한 문장으로 읽힌다.
-        var depth: usize = 0;
-        var i = pos;
-        while (i < bytes.len) : (i += 1) {
-            if (bytes[i] == c) {
-                depth += 1;
-            } else if (bytes[i] == close) {
-                depth -= 1;
-                if (depth == 0) return i;
-            }
-        }
-        return null;
-    }
-    if (std.mem.indexOfScalar(u8, close_brackets, c)) |k| {
-        const open = open_brackets[k];
-        var depth: usize = 0;
-        var i = pos + 1;
-        while (i > 0) {
-            i -= 1;
-            if (bytes[i] == c) {
-                depth += 1;
-            } else if (bytes[i] == open) {
-                depth -= 1;
-                if (depth == 0) return i;
-            }
-        }
-        return null;
-    }
-    return null;
+    return brackets.jumpTarget(brackets.Plain{ .bytes = bytes }, bytes.len, offset);
 }
 
 const testing = std.testing;
@@ -208,7 +146,7 @@ test "BR1 caret 이 붙은 괄호의 짝 시작으로 간다 — 양옆·중첩�
     try testing.expectEqual(@as(?usize, 2), M("(a)", 0));
     // caret 앞 byte 가 괄호
     try testing.expectEqual(@as(?usize, 0), M("(a)", 3));
-    // 앞이 이긴다 — `(a|)` 는 앞의 'a' 가 괄호가 아니므로 뒤의 ')' 를 쓴다
+    // `(a|)` 는 뒤의 ')' 에 닿았다 — 닫는 괄호에 닿으면 여는 괄호 앞으로
     try testing.expectEqual(@as(?usize, 0), M("(a)", 2));
     // **중첩은 깊이를 센다** — 안쪽 짝에서 멈추면 1 이 나온다
     try testing.expectEqual(@as(?usize, 4), M("((a))", 0));
@@ -220,16 +158,18 @@ test "BR1 caret 이 붙은 괄호의 짝 시작으로 간다 — 양옆·중첩�
     try testing.expectEqual(@as(?usize, 4), M("[a{b}c]", 3));
 }
 
-test "BR2 짝이 없으면 null 이고, 앞을 골랐으면 뒤를 다시 안 본다 (§3.9c)" {
+test "BR2 짝이 없으면 null 이고, 둘 다 닿으면 뒤가 이긴다 — 뒤에 짝이 없을 때만 앞 (§3.9c 2026-09-24 정정)" {
     const M = matchingBracket;
     try testing.expectEqual(@as(?usize, null), M("(a", 0)); // 안 닫혔다
     try testing.expectEqual(@as(?usize, null), M("a)", 2)); // 안 열렸다
-    // **`)|(` 는 앞의 ')' 를 골라 거기서 끝난다.** 뒤의 '(' 를 다시 보면 여기서 1 이 나오는데,
-    // 그러면 「caret 이 붙어 있는 괄호」가 아니라 「짝이 있는 아무 괄호」가 대상이 된다.
-    try testing.expectEqual(@as(?usize, null), M(")(", 1));
-    // **`)(` 로는 못 가른다** — 뒤의 '(' 도 짝이 없어 어느 쪽을 봐도 null 이다(변이 B3 가 그렇게
-    // 살아남았다). 뒤에 짝을 줘야 「앞에서 끝냈나」가 관측된다.
-    try testing.expectEqual(@as(?usize, null), M(")(a)", 1));
+    try testing.expectEqual(@as(?usize, null), M(")(", 1)); // 둘 다 짝이 없다
+    // **`)|(a)` 는 뒤의 '(' 로 간다**(3). 초판은 「앞을 골랐으면 끝」이라 null 이었고 그것이 VS Code 와 달랐다 —
+    // 닿은 괄호 중 **짝이 있는** 것이 후보다(실측 `a)(b)` offset 2 → `[2,4]`).
+    try testing.expectEqual(@as(?usize, 3), M(")(a)", 1));
+    // 뒤가 이긴다 — 앞 ')' 의 짝(0)이 아니라 뒤 '(' 의 짝 닫는 괄호 앞(5)
+    try testing.expectEqual(@as(?usize, 5), M("(a)(b)", 3));
+    // 뒤 '(' 가 안 닫혔으면 앞 ')' — 닫는 괄호에 닿았으니 여는 괄호 앞(0)
+    try testing.expectEqual(@as(?usize, 0), M("(a)(", 3));
     // 괄호가 아닌 자리에서는 아무 일도 안 한다 — 감싸는 괄호를 찾지 않는다(§3.9c)
     try testing.expectEqual(@as(?usize, null), M("(abc)", 2));
 }
@@ -241,19 +181,19 @@ test "BR3 문자열 안 괄호는 못 가르고 그 대가는 안 움직임이�
     // 따옴표 자신은 대상이 아니다 — 여는 것과 닫는 것이 같아 깊이를 못 센다
     try testing.expectEqual(@as(?usize, null), matchingBracket("\"ab\"", 0));
     // **`"ab"` 로는 못 가른다** — 따옴표를 대상에 넣어도 깊이가 0 으로 안 돌아와 결과가 같은 null 이다
-    // (변이 B6 가 그렇게 살아남았다). **따옴표 바로 뒤에 괄호를 둬야** 갈린다: 대상에 넣으면 앞의
-    // '"' 를 골라 거기서 끝나 버려 뒤의 '(' 를 못 본다.
+    // (변이 B6 가 그렇게 살아남았다). 따옴표 **앞**에 선 caret 이 갈라 준다: 대상에 넣으면 뒤의 '"'
+    // 가 짝(끝 '"')을 가져 그리로 간다.
+    try testing.expectEqual(@as(?usize, null), matchingBracket("\"(a)\"", 0));
     try testing.expectEqual(@as(?usize, 3), matchingBracket("\"(a)\"", 1));
 }
 
-test "BR4 왕복은 보장하지 않는다 — 중첩에서 안쪽 짝을 만난다 (§3.9c)" {
-    // **이 판정자는 「고쳐야 할 결함」이 아니라 계약을 못박는다.** VSCode 도 같은 답을 내고,
-    // 왕복을 지키려면 「어느 쪽 괄호로 왔는지」를 상태로 들어야 한다.
+test "BR4 중첩에서도 왕복하고, 빈 쌍 안에서는 여는 괄호 앞으로 간다 (§3.9c 2026-09-24 정정)" {
+    // **초판은 이 판정자가 반대를 못박았다** — 「안쪽 짝(1)으로 간다 · 빈 쌍은 제자리 · VSCode 도 같다」. jsdom 에 띄운
+    // monaco 0.56 편집기가 둘 다 뒤집었다: `((a))` 0 → 4 → 0, `{}` 1 → 0.
     const first = matchingBracket("((a))", 0).?;
     try testing.expectEqual(@as(usize, 4), first);
-    try testing.expectEqual(@as(?usize, 1), matchingBracket("((a))", first)); // 0 이 아니다
-    // 빈 쌍 안에서는 제자리다
-    try testing.expectEqual(@as(?usize, 1), matchingBracket("{}", 1));
+    try testing.expectEqual(@as(?usize, 0), matchingBracket("((a))", first)); // 뒤의 바깥 ')' 가 이긴다
+    try testing.expectEqual(@as(?usize, 0), matchingBracket("{}", 1)); // 두 괄호에 다 닿았다 → 여는 괄호 앞
 }
 
 test "BR5 offset 이 문서 끝을 넘어도 안전하고, UTF-8 을 안 깬다 (§3.9c)" {

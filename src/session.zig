@@ -238,6 +238,8 @@ pub const editor = struct {
     pub const smart_select = @import("session/editor/smart_select.zig");
     /// sticky scroll 의 고정할 줄 고르기(visual-mapping §4.1i) — 스코프 목록 + 줄→화면 행 두 함수. 출처·접힘·줄바꿈은 위층이 안다.
     pub const sticky = @import("session/editor/sticky.zig");
+    /// 짝 괄호 판정(visual-mapping §5.1b · document-model §3.9c) — 강조와 점프가 같이 쓴다. 출처(트리·글자 훑기)와 고르는 규칙(뒤 먼저)이 여기 있다.
+    pub const brackets = @import("session/editor/brackets.zig");
     /// N2: 편집 가능한 문서 — 버퍼(§3.0)와 소비처가 읽는 평탄한 축을 한 소유자에게 묶는다.
     /// `open`(읽기 전용, bytes를 빌린다)의 편집판이다.
     pub const edit_doc = @import("session/editor/edit_doc.zig");

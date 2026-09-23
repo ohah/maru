@@ -98,6 +98,10 @@ const Slot = struct {
     fold_kinds: []const []const u8 = &.{},
     /// 심볼로 볼 노드 종류(§7.5). 비면 그 언어는 심볼 목록이 없다.
     symbol_kinds: []const []const u8 = &.{},
+    /// **글이 괄호를 담는 언어인가**(visual-mapping §5.1b ⓑ). 참이면 긴 잎(HTML `text`) 속 괄호 글자를 그 잎 안에서 짝짓는다. 거짓이면 긴 잎
+    /// 속 괄호는 문자열·주석에 적힌 글자다(코드 괄호는 늘 자기 토큰이다). **마크다운은 거짓이다** — 블록 grammar 가 본문·목록·코드 펜스의
+    /// 괄호를 이름 없는 토큰으로 낸다(실측 `SYN45`), 그래서 ⓐ 갈래가 잡는다.
+    prose_brackets: bool = false,
 };
 
 /// **지원 언어의 관문은 이 함수 하나다.** 처음에는 grammar를 고르는 `switch`와 쿼리 캐시를 고르는
@@ -106,7 +110,7 @@ const Slot = struct {
 /// (뮤턴트 생존). 규칙이 두 곳에 있으면 갈리고, 갈려도 안 보인다. 늘리는 자리도 여기 하나다.
 fn slotFor(lang: Language) ?Slot {
     inline for (grammar_table, 0..) |g, i| {
-        if (g.lang == lang) return .{ .language = g.get(), .query_cell = &query_cells[i], .scm = g.scm, .fold_kinds = g.fold_kinds, .symbol_kinds = g.symbol_kinds };
+        if (g.lang == lang) return .{ .language = g.get(), .query_cell = &query_cells[i], .scm = g.scm, .fold_kinds = g.fold_kinds, .symbol_kinds = g.symbol_kinds, .prose_brackets = g.prose_brackets };
     }
     return null;
 }
@@ -130,6 +134,8 @@ const GrammarEntry = struct {
     /// 것이 무엇인가"* 를 묻는다 — 블록은 접히지만 심볼이 아니고, 한 줄짜리 선언은 심볼이지만
     /// 접히지 않는다. 한 목록으로 겸하면 둘 중 하나가 늘 틀린다.
     symbol_kinds: []const []const u8 = &.{},
+    /// 글이 괄호를 담는 언어(§5.1b ⓑ) — `Slot.prose_brackets` 로 옮겨진다.
+    prose_brackets: bool = false,
 };
 
 // 종류 이름은 grammar 가 정한다(`ts_node_type`). 아래는 **접었을 때 의미가 있는 것**만 골랐고,
@@ -166,7 +172,7 @@ const grammar_table = [_]GrammarEntry{
     .{ .lang = .kotlin, .get = tree_sitter_kotlin, .scm = kotlin_highlights, .fold_kinds = &.{ "class_body", "function_body", "control_structure_body", "statements", "value_arguments", "function_value_parameters", "when_expression", "lambda_literal" }, .symbol_kinds = &.{ "function_declaration", "class_declaration", "object_declaration" } },
     .{ .lang = .bash, .get = tree_sitter_bash, .scm = bash_highlights, .fold_kinds = &.{ "compound_statement", "do_group", "if_statement", "case_statement", "function_definition", "subshell" }, .symbol_kinds = &.{"function_definition"} },
     .{ .lang = .css, .get = tree_sitter_css, .scm = css_highlights, .fold_kinds = &.{ "block", "keyframe_block_list", "declaration" }, .symbol_kinds = &.{} },
-    .{ .lang = .html, .get = tree_sitter_html, .scm = html_highlights, .fold_kinds = &.{ "element", "script_element", "style_element" }, .symbol_kinds = &.{} },
+    .{ .lang = .html, .get = tree_sitter_html, .scm = html_highlights, .fold_kinds = &.{ "element", "script_element", "style_element" }, .symbol_kinds = &.{}, .prose_brackets = true },
 };
 
 /// 쿼리 캐시 칸 — 표와 **같은 색인**이다. 언어마다 하나이고 프로세스 수명이다(아래 `queryFor`).
@@ -707,6 +713,132 @@ pub const Provider = struct {
             try out.append(allocator, .{ .start = s, .end = e });
             if (out.items.len >= max_enclosing) break;
         }
+    }
+
+    /// 괄호 한 쌍(visual-mapping §5.1b) — 두 괄호 **글자**의 문서 절대 byte(`open < close`).
+    pub const BracketPair = struct { open: u32, close: u32 };
+
+    /// 형제 하나에서 짝지을 수 있는 괄호의 깊이 상한(종류마다). 형제 목록 안의 중첩은 보통 몇 단이고(안쪽 쌍은 자식 노드로 내려간다),
+    /// 넘치면 그 쌍을 못 찾은 것으로 친다 — 틀린 쌍을 내는 것보다 낫다.
+    pub const max_sibling_depth: usize = 64;
+
+    /// **byte `i` 의 글자가 괄호 토큰이면 그 짝**(§5.1b ⓐ). 괄호 토큰 = 이름 없는 잎이고 그 글자들 안의 괄호가 **정확히 하나**(`(` 도, Zig
+    /// `.{` · Bash `$(` 도). 짝은 **같은 부모의 형제**에서 같은 종류를 깊이로 센다 — 문자열·주석 속 글자는 긴 잎의 일부라 여기서 `null` 이다.
+    /// 트리가 없으면 `null`. `source` 는 트리를 만든 그 내용이어야 한다.
+    pub fn bracketTokenPair(self: *Provider, source: []const u8, i: u32) ?BracketPair {
+        const tree = self.tree orelse return null;
+        if (i >= source.len) return null;
+        const node = c.ts_node_descendant_for_byte_range(c.ts_tree_root_node(tree), i, i + 1);
+        const tok = tokenBracket(node, source) orelse return null;
+        if (tok.at != i) return null; // 토큰이 이 글자를 덮지만 그 괄호는 다른 자리다(방어 — 한 토큰에 괄호는 하나뿐)
+        const parent = c.ts_node_parent(node);
+        if (c.ts_node_is_null(parent)) return null;
+        return pairAmongChildren(parent, source, .{ .token = i });
+    }
+
+    /// **byte `i`(또는 caret `i` 가 그 안에 선) 글 잎**(§5.1b ⓑ)의 범위 — 글이 괄호를 담는 언어(`prose_brackets`)에서 이름 있는 잎만.
+    /// 짝짓기는 호출자가 이 범위 **안에서만** 글자 훑기로 한다. 그 밖이면 `null`.
+    pub fn proseLeafAt(self: *Provider, i: u32) ?ByteRange {
+        if (!self.slot.prose_brackets) return null;
+        const tree = self.tree orelse return null;
+        const node = c.ts_node_descendant_for_byte_range(c.ts_tree_root_node(tree), i, i + 1);
+        if (c.ts_node_is_null(node) or c.ts_node_child_count(node) != 0 or !c.ts_node_is_named(node)) return null;
+        const s = c.ts_node_start_byte(node);
+        const e = c.ts_node_end_byte(node);
+        if (!(s <= i and i < e)) return null;
+        return .{ .start = s, .end = e };
+    }
+
+    /// **caret `pos` 를 품는 가장 안쪽 괄호 토큰 쌍**(§5.1b — VS Code `findEnclosingBrackets`). caret 이 든 가장 깊은 노드부터 조상으로 올라가며
+    /// 형제 괄호 쌍 중 `open < pos ≤ close` 인 것을 찾는다(여는 괄호 바로 앞·닫는 괄호 바로 뒤는 품지 않는다). 한 층 안에서는 여는 자리가 가장
+    /// 뒤인 것이 가장 안쪽이다 — 형제 쌍은 서로 겹치지 않거나 포개진다. 트리가 없거나 없으면 `null`.
+    pub fn enclosingBracketTokens(self: *Provider, source: []const u8, pos: u32) ?BracketPair {
+        const tree = self.tree orelse return null;
+        var node = c.ts_node_descendant_for_byte_range(c.ts_tree_root_node(tree), pos, pos);
+        var steps: usize = 0;
+        while (!c.ts_node_is_null(node) and steps < max_enclosing) : ({
+            node = c.ts_node_parent(node);
+            steps += 1;
+        }) {
+            if (c.ts_node_child_count(node) == 0) continue;
+            if (pairAmongChildren(node, source, .{ .enclosing = pos })) |p| return p;
+        }
+        return null;
+    }
+
+    /// 괄호 토큰 하나 — 그 괄호 글자의 자리와 종류(`([{` 의 색인)·방향.
+    const TokenBracket = struct { at: u32, kind: u2, open: bool };
+
+    /// `node` 가 괄호 토큰이면 그 괄호(§5.1b ⓐ). 이름 없는 잎 · 폭 1~3 · 괄호 글자 정확히 하나.
+    fn tokenBracket(node: c.TSNode, source: []const u8) ?TokenBracket {
+        if (c.ts_node_is_null(node)) return null;
+        if (c.ts_node_child_count(node) != 0 or c.ts_node_is_named(node)) return null;
+        const s = c.ts_node_start_byte(node);
+        const e = c.ts_node_end_byte(node);
+        // 폭 0(`MISSING` — 오류 복구가 끼운 없는 토큰)은 짝이 아니다. 긴 이름 없는 잎(키워드 등)은 괄호를 안 담는다.
+        if (e <= s or e - s > 3 or e > source.len) return null;
+        var found: ?TokenBracket = null;
+        for (source[s..e], 0..) |ch, k| {
+            const b = bracketOf(ch) orelse continue;
+            if (found != null) return null; // 둘 이상(`((` 등) — 어느 괄호인지 못 정한다
+            found = .{ .at = s + @as(u32, @intCast(k)), .kind = b.kind, .open = b.open };
+        }
+        return found;
+    }
+
+    fn bracketOf(ch: u8) ?struct { kind: u2, open: bool } {
+        return switch (ch) {
+            '(' => .{ .kind = 0, .open = true },
+            ')' => .{ .kind = 0, .open = false },
+            '[' => .{ .kind = 1, .open = true },
+            ']' => .{ .kind = 1, .open = false },
+            '{' => .{ .kind = 2, .open = true },
+            '}' => .{ .kind = 2, .open = false },
+            else => null,
+        };
+    }
+
+    /// 형제 짝짓기가 찾는 것 — 한 토큰의 짝, 또는 caret 을 품는 가장 안쪽 쌍.
+    const Want = union(enum) { token: u32, enclosing: u32 };
+
+    /// `parent` 의 자식들을 앞에서부터 한 번 지나며 괄호 토큰을 종류별 스택으로 짝짓는다. 커서로 걷는다 — `ts_node_prev_sibling` 은 부모부터
+    /// 다시 세므로 큰 형제 목록(수만 원소 JSON 배열)에서 곱으로 붙는다.
+    fn pairAmongChildren(parent: c.TSNode, source: []const u8, want: Want) ?BracketPair {
+        var cursor = c.ts_tree_cursor_new(parent);
+        defer c.ts_tree_cursor_delete(&cursor);
+        if (!c.ts_tree_cursor_goto_first_child(&cursor)) return null;
+        var stacks: [3][max_sibling_depth]u32 = undefined;
+        var depth = [3]usize{ 0, 0, 0 };
+        // 스택이 넘친 종류는 그 뒤로 짝을 믿을 수 없다 — 그 종류는 더 짝짓지 않는다.
+        var overflow = [3]bool{ false, false, false };
+        var best: ?BracketPair = null;
+        while (true) {
+            const child = c.ts_tree_cursor_current_node(&cursor);
+            if (tokenBracket(child, source)) |b| {
+                const k: usize = b.kind;
+                if (!overflow[k]) {
+                    if (b.open) {
+                        if (depth[k] == max_sibling_depth) {
+                            overflow[k] = true;
+                        } else {
+                            stacks[k][depth[k]] = b.at;
+                            depth[k] += 1;
+                        }
+                    } else if (depth[k] > 0) {
+                        depth[k] -= 1;
+                        const pair: BracketPair = .{ .open = stacks[k][depth[k]], .close = b.at };
+                        switch (want) {
+                            .token => |t| if (pair.open == t or pair.close == t) return pair,
+                            .enclosing => |pos| if (pair.open < pos and pos <= pair.close) {
+                                if (best == null or pair.open > best.?.open) best = pair;
+                            },
+                        }
+                    }
+                }
+            }
+            if (!c.ts_tree_cursor_goto_next_sibling(&cursor)) break;
+        }
+        return best;
     }
 
     /// 접을 수 있는 **줄 범위** 하나(§4 — 접힘의 tree-sitter 층).
@@ -2260,4 +2392,105 @@ test "SYN27 이름 없는 노드는 심볼이 아니다 — zig 익명 test 블�
     const in_anon = @as(u32, @intCast(std.mem.indexOf(u8, src, "_ = 1").?));
     var chain: [4]usize = undefined;
     try std.testing.expectEqual(@as(usize, 0), Provider.chainAt(list.items, in_anon, &chain));
+}
+
+test "SYN44 괄호 토큰의 짝·문자열 속 괄호·감싸는 쌍 — 코드 언어 열여섯 (visual-mapping §5.1b ⓐⓒ)" {
+    // 표본마다 셋을 잰다: ① 호출 괄호의 짝(양쪽에서), ② 문자열 속 '(' 는 괄호 토큰이 아니고 글 잎도 아니다(ⓒ), ③ 그 문자열 속 자리를
+    // 품는 가장 안쪽 쌍이 ①이다. `open` 은 끝 글자가 여는 괄호인 유일한 조각, `close` 는 첫 글자가 닫는 괄호인 유일한 조각, `inner` 는 첫
+    // 글자가 문자열 속 '(' 인 유일한 조각. **Zig `.{` · Bash `$(`** 는 괄호가 다른 글자와 붙은 토큰이다 — 「한 글자 잎」만 보면 여기서 깨진다.
+    const samples = [_]struct { lang: Language, src: []const u8, open: []const u8, close: []const u8, inner: []const u8 }{
+        .{ .lang = .zig, .src = "const a = f(.{ \"(\", x });\n", .open = ".{", .close = "})", .inner = "(\"," },
+        .{ .lang = .json, .src = "{\"k\": [\"(\", 1]}\n", .open = "[", .close = "]}", .inner = "(\"," },
+        .{ .lang = .javascript, .src = "f(\"(\", [x]);\n", .open = "f(", .close = ");", .inner = "(\"," },
+        .{ .lang = .typescript, .src = "f(\"(\", [x]);\n", .open = "f(", .close = ");", .inner = "(\"," },
+        .{ .lang = .tsx, .src = "f(\"(\", [x]);\n", .open = "f(", .close = ");", .inner = "(\"," },
+        .{ .lang = .c, .src = "int m(void) { f(\"(\", a[0]); }\n", .open = "f(", .close = "); }", .inner = "(\"," },
+        .{ .lang = .cpp, .src = "int m() { f(\"(\", a[0]); }\n", .open = "f(", .close = "); }", .inner = "(\"," },
+        .{ .lang = .python, .src = "f(\"(\", [x])\n", .open = "f(", .close = ")\n", .inner = "(\"," },
+        .{ .lang = .go, .src = "package m\n\nfunc g() { f(\"(\", x) }\n", .open = "f(", .close = ") }", .inner = "(\"," },
+        .{ .lang = .rust, .src = "fn g() { f(\"(\", [x]); }\n", .open = "f(", .close = "); }", .inner = "(\"," },
+        .{ .lang = .java, .src = "class A { void g() { f(\"(\", x); } }\n", .open = "f(", .close = "); }", .inner = "(\"," },
+        .{ .lang = .ruby, .src = "f(\"(\", [x])\n", .open = "f(", .close = ")\n", .inner = "(\"," },
+        .{ .lang = .php, .src = "<?php f(\"(\", [$x]);\n", .open = "f(", .close = ");", .inner = "(\"," },
+        .{ .lang = .kotlin, .src = "fun g() { f(\"(\", x) }\n", .open = "f(", .close = ") }", .inner = "(\"," },
+        .{ .lang = .bash, .src = "echo $(printf \"(\")\n", .open = "$(", .close = ")\n", .inner = "(\")" },
+        .{ .lang = .css, .src = "a { b: f(\"(\", 1); }\n", .open = "f(", .close = "); }", .inner = "(\"," },
+    };
+    for (samples) |s| {
+        errdefer std.debug.print("SYN44 언어 {s}\n", .{@tagName(s.lang)});
+        var prov = Provider.init(s.src, s.lang, 0) orelse return error.NoProvider;
+        defer prov.deinit();
+        const o: u32 = @intCast(std.mem.indexOf(u8, s.src, s.open).? + s.open.len - 1);
+        const cl: u32 = @intCast(std.mem.indexOf(u8, s.src, s.close).?);
+        const in: u32 = @intCast(std.mem.indexOf(u8, s.src, s.inner).?);
+        const want: Provider.BracketPair = .{ .open = o, .close = cl };
+        try std.testing.expectEqual(@as(?Provider.BracketPair, want), prov.bracketTokenPair(s.src, o));
+        try std.testing.expectEqual(@as(?Provider.BracketPair, want), prov.bracketTokenPair(s.src, cl));
+        try std.testing.expectEqual(@as(?Provider.BracketPair, null), prov.bracketTokenPair(s.src, in));
+        try std.testing.expectEqual(@as(?Provider.ByteRange, null), prov.proseLeafAt(in)); // 코드 언어 — 글 잎이 없다
+        try std.testing.expectEqual(@as(?Provider.BracketPair, want), prov.enclosingBracketTokens(s.src, in));
+        try std.testing.expectEqual(@as(?Provider.BracketPair, want), prov.enclosingBracketTokens(s.src, in + 1));
+    }
+}
+
+test "SYN45 글 속 괄호 — 마크다운은 토큰, HTML 본문은 글 잎 (visual-mapping §5.1b ⓐⓑ)" {
+    // **마크다운 블록 grammar 는 괄호를 토큰으로 낸다** — 본문 `inline` · 목록 · 코드 펜스 · 코드 스팬 모두(실측). 그래서 글 잎 갈래가 필요
+    // 없다. 계획은 「마크다운 본문은 긴 잎 하나」라 가정했는데 노드 사슬을 찍어 보니 `[`·`]`·`(`·`)` 가 `inline` 의 이름 없는 자식이었다.
+    const md = "# 제목\n\n본문 [링크](url) 과 (괄호\n\n```js\nf(a)\n```\n";
+    var pm = Provider.init(md, .markdown, 0) orelse return error.NoProvider;
+    defer pm.deinit();
+    const lb: u32 = @intCast(std.mem.indexOf(u8, md, "[").?);
+    const rb: u32 = @intCast(std.mem.indexOf(u8, md, "]").?);
+    try std.testing.expectEqual(@as(?Provider.BracketPair, .{ .open = lb, .close = rb }), pm.bracketTokenPair(md, lb));
+    const lp: u32 = rb + 1; // `](url)` 의 '('
+    const rp: u32 = @intCast(std.mem.indexOf(u8, md, ")").?);
+    try std.testing.expectEqual(@as(?Provider.BracketPair, .{ .open = lp, .close = rp }), pm.bracketTokenPair(md, rp));
+    const lone: u32 = @intCast(std.mem.indexOf(u8, md, "(괄호").?);
+    try std.testing.expectEqual(@as(?Provider.BracketPair, null), pm.bracketTokenPair(md, lone)); // 안 닫혔다
+    const f_open: u32 = @intCast(std.mem.indexOf(u8, md, "f(").? + 1);
+    try std.testing.expectEqual(@as(?Provider.BracketPair, .{ .open = f_open, .close = f_open + 2 }), pm.bracketTokenPair(md, f_open)); // 코드 펜스
+    try std.testing.expectEqual(@as(?Provider.ByteRange, null), pm.proseLeafAt(lb)); // 마크다운은 글 잎 표시가 없다
+
+    // **HTML 본문은 긴 잎(`text`)이다** — 괄호 토큰이 없고, 글 잎 범위가 그 괄호를 품는다.
+    const html = "<p>보기 (a) 끝</p>\n";
+    var ph = Provider.init(html, .html, 0) orelse return error.NoProvider;
+    defer ph.deinit();
+    const hp: u32 = @intCast(std.mem.indexOf(u8, html, "(a)").?);
+    try std.testing.expectEqual(@as(?Provider.BracketPair, null), ph.bracketTokenPair(html, hp));
+    const leaf = ph.proseLeafAt(hp) orelse return error.NoProseLeaf;
+    try std.testing.expect(leaf.start <= hp and hp + 2 < leaf.end); // 쌍 전체가 잎 안
+    try std.testing.expect(leaf.end - leaf.start > 3);
+
+    // **코드 언어는 글 잎이 없다** — 같은 모양의 긴 잎(주석)이어도 `prose_brackets` 가 거짓이면 `null`(그 안의 괄호는 적힌 글자다).
+    const js = "// 보기 (a) 끝\nx;\n";
+    var pj = Provider.init(js, .javascript, 0) orelse return error.NoProvider;
+    defer pj.deinit();
+    try std.testing.expectEqual(@as(?Provider.ByteRange, null), pj.proseLeafAt(@intCast(std.mem.indexOf(u8, js, "(a)").?)));
+}
+
+test "SYN46 짝 없는 괄호·가장 안쪽 쌍·트리가 없을 때 (visual-mapping §5.1b)" {
+    // 안 닫힌 '(' — 오류 복구가 폭 0 인 `MISSING` ')' 를 끼워도 그것은 짝이 아니다.
+    const broken = "const a = f(1;\n";
+    var p1 = Provider.init(broken, .zig, 0) orelse return error.NoProvider;
+    defer p1.deinit();
+    const o: u32 = @intCast(std.mem.indexOf(u8, broken, "(").?);
+    try std.testing.expectEqual(@as(?Provider.BracketPair, null), p1.bracketTokenPair(broken, o));
+
+    // 가장 안쪽 — 같은 형제 목록 안에서 여는 자리가 가장 뒤인 쌍, 그리고 조상보다 자식이 먼저.
+    const nested = "f(g(a), [b])\n";
+    var p2 = Provider.init(nested, .javascript, 0) orelse return error.NoProvider;
+    defer p2.deinit();
+    const g_open: u32 = @intCast(std.mem.indexOf(u8, nested, "g(").? + 1);
+    const a_at: u32 = @intCast(std.mem.indexOf(u8, nested, "a)").?);
+    try std.testing.expectEqual(@as(?Provider.BracketPair, .{ .open = g_open, .close = a_at + 1 }), p2.enclosingBracketTokens(nested, a_at));
+    const b_at: u32 = @intCast(std.mem.indexOf(u8, nested, "b]").?);
+    try std.testing.expectEqual(@as(?Provider.BracketPair, .{ .open = b_at - 1, .close = b_at + 1 }), p2.enclosingBracketTokens(nested, b_at));
+    const comma: u32 = @intCast(std.mem.indexOf(u8, nested, ", ").?);
+    try std.testing.expectEqual(@as(?Provider.BracketPair, .{ .open = 1, .close = @intCast(nested.len - 2) }), p2.enclosingBracketTokens(nested, comma));
+    // 여는 괄호 바로 앞·닫는 괄호 바로 뒤는 품지 않는다(`open < pos ≤ close`)
+    try std.testing.expectEqual(@as(?Provider.BracketPair, null), p2.enclosingBracketTokens(nested, 1));
+    try std.testing.expectEqual(@as(?Provider.BracketPair, null), p2.enclosingBracketTokens(nested, @intCast(nested.len - 1)));
+
+    // 범위 밖 byte 는 없다
+    try std.testing.expectEqual(@as(?Provider.BracketPair, null), p2.bracketTokenPair(nested, 999));
 }

@@ -744,8 +744,17 @@ jobs:
     #
     # 대가는 명시적이고, 이번에 더 커진다: main이 초록이어도 릴리스 직전에 이 잡이 처음 빨개질 수 있다.
     # 그래서 **릴리스 전에 반드시 한 번 돌린다**(`gh workflow run ci.yml`). 얻는 것은 main push마다
-    # macOS 러너 14분과, main 그룹 캐시 항목 하나(약 500MB × 최신 2개)다 — 아래 저장 스텝이 push
-    # 이벤트에서만 저장하므로 수동 실행은 복원만 하고 캐시를 늘리지 않는다.
+    # macOS 러너 14분이다.
+    #
+    # **캐시는 수동 실행에서도 저장한다(2026-09-23).** 예전에는 «저장은 push 에서만, 수동 실행은 복원만»
+    # 이었는데, 이 잡은 push 에서 **돌지 않으므로** 저장하는 쪽이 아예 없었다 — 이 키로 저장된 캐시는
+    # 0 개였고(`gh api …/actions/caches?key=zig-v2-macOS-sessionhost-releasefast`), 매 실행이 콜드
+    # 컴파일이었다. 로컬 실측으로 이 잡 시간의 약 90%가 컴파일(101 스텝·합 1,102초, 가장 무거운 테스트
+    # 바이너리 120초·7GB)이고, 같은 구조의 Debug 잡은 캐시로 컴파일이 36% 줄었다.
+    # 대가: 이 그룹에 캐시 항목이 **하나** 생긴다(아래 prune 으로 3GB 이내). 쌓이지는 않는다 —
+    # `cache-cleanup.yml` 이 CI 가 main 에서 끝날 때마다 그룹마다 최신 1개만 남긴다.
+    # **테스트가 실패해도 저장한다**(`!cancelled()`) — 컴파일 산출물은 테스트 결과와 무관하게 다음 실행에
+    # 쓸모가 있다. 다만 20분 제한에 걸려 잡이 취소되면 저장 스텝까지 가지 못한다.
     #
     # ⚠️ 이 잡은 branch protection의 필수 체크가 **아니다**(PR에서 안 돌던 때 함께 뺐다). 필수인데
     # 실행되지 않으면 PR이 영영 pending으로 막히므로, 다시 필수로 올리려면 실행 조건부터 되돌려야 한다.
@@ -782,10 +791,10 @@ jobs:
       - name: Verify session host and live-upgrade fixtures
         run: zig build test-session-host -Doptimize=ReleaseFast
       - name: 저장 전에 캐시를 예산 안으로 줄인다
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        if: ${{ !cancelled() && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
         run: sh tools/ci/prune-zig-cache.sh 3072
-      - name: Save Zig cache (main만 — PR은 읽기만 한다)
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Save Zig cache (main만 — 수동 실행 포함, 테스트 실패여도)
+        if: ${{ !cancelled() && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |

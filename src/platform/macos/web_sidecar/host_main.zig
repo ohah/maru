@@ -1,0 +1,122 @@
+//! `maru-web-host` — CEF 브라우저 프로세스(W1b, docs/plans/web-osr-backend.md C1·C2).
+//!
+//! maru 가 `maru-web-host --profile-dir=<절대 경로>` 로 띄운다. 흐름:
+//! ① stdin/stdout 을 프로토콜 전용으로 떼어 낸다(`stdio.zig`) ② 첫 frame `hello` 를 받아 같은 값으로 `hello_ack`
+//! ③ 프레임워크를 dlopen 하고 CEF 를 초기화한다 ④ 읽기 스레드가 명령을 받아 UI 스레드에 넘긴다(`inbox.zig`)
+//! ⑤ `shutdown` 또는 stdin EOF(maru 가 사라졌다)면 메시지 루프를 끝내고 CEF 를 내린다.
+//! 프로세스는 샌드박스 밖이다 — 신뢰할 수 없는 웹은 샌드박스 안 helper 가 그린다(`helper_main.zig`).
+
+const std = @import("std");
+const protocol = @import("web_sidecar_protocol");
+const cef = @import("cef.zig");
+const c = cef.c;
+const object = @import("object.zig");
+const library = @import("library.zig");
+const layout = @import("layout.zig");
+const stdio = @import("stdio.zig");
+const events = @import("events.zig");
+const inbox_mod = @import("inbox.zig");
+const dispatch = @import("dispatch.zig");
+const app = @import("app.zig");
+const settings_mod = @import("settings.zig");
+
+/// 종료 코드. maru 는 이 값으로 알림을 못 받은 실패(채널이 없거나 닫힌 뒤)를 가른다.
+pub const ExitCode = enum(u8) {
+    ok = 0,
+    stdio_unavailable = 10,
+    handshake_failed = 11,
+    bad_arguments = 12,
+    framework_unavailable = 13,
+    cef_initialize_failed = 14,
+    reader_thread_failed = 15,
+};
+
+// CEF 콜백·읽기 스레드가 닿아야 해서 전역이다(프로세스에 하나).
+var g_api: library.Api = undefined;
+var g_inbox: inbox_mod.Inbox = undefined;
+var g_writer: events.Writer = undefined;
+var g_dispatcher: dispatch.Dispatcher = undefined;
+var g_task: c.cef_task_t = undefined;
+
+pub fn main(init: std.process.Init) u8 {
+    return @intFromEnum(run(init));
+}
+
+fn run(init: std.process.Init) ExitCode {
+    const channels = stdio.take() catch return .stdio_unavailable;
+    g_writer = .{ .fd = channels.events };
+    g_dispatcher = .{ .writer = &g_writer, .handler = .{ .context = undefined, .browser_command = &dispatch.rejectBrowserCommand } };
+
+    const hello = g_dispatcher.readHello(channels.commands) catch return .handshake_failed;
+    g_writer.send(.{ .hello_ack = hello }) catch return .handshake_failed;
+
+    const argv = init.minimal.args.vector;
+    const profile_dir = profileDir(argv) orelse return fail(.bad_arguments, .cef_initialize_failed, "--profile-dir=<절대 경로> 가 없다");
+    ensurePrivateDir(profile_dir) catch return fail(.bad_arguments, .cef_initialize_failed, "프로필 디렉터리를 만들지 못했다");
+
+    var dir_buf: layout.PathBuf = undefined;
+    const install_dir = layout.executableDir(&dir_buf) catch return fail(.framework_unavailable, .cef_initialize_failed, "실행 파일 경로를 못 구했다");
+    var framework_buf: layout.PathBuf = undefined;
+    const framework = layout.join(&framework_buf, install_dir, layout.framework_dir_name ++ "/" ++ layout.framework_binary_name) catch
+        return fail(.framework_unavailable, .cef_initialize_failed, "경로가 너무 길다");
+    g_api = library.load(framework) catch return fail(.framework_unavailable, .cef_initialize_failed, "프레임워크를 못 열었다");
+    _ = g_api.api_hash(cef.api_version, 0);
+
+    var settings = settings_mod.build(&g_api, .{ .install_dir = install_dir, .profile_dir = profile_dir }) catch
+        return fail(.bad_arguments, .cef_initialize_failed, "경로가 너무 길다");
+    var main_args: c.cef_main_args_t = .{ .argc = @intCast(argv.len), .argv = @ptrCast(@constCast(argv.ptr)) };
+    if (g_api.initialize(&main_args, &settings, app.get(&g_api), null) == 0) {
+        return fail(.cef_initialize_failed, .cef_initialize_failed, "cef_initialize 가 실패했다");
+    }
+
+    g_inbox = .{ .io = init.io };
+    g_task = object.zeroed(c.cef_task_t);
+    object.staticRefCounted(&g_task.base);
+    g_task.execute = &drainTask;
+    const reader = std.Thread.spawn(.{}, inbox_mod.readLoop, .{ channels.commands, &g_inbox, &wakeUiThread }) catch {
+        g_api.shutdown();
+        return fail(.reader_thread_failed, .cef_initialize_failed, "읽기 스레드를 못 띄웠다");
+    };
+    // 스레드는 fd 가 닫힐 때까지 막혀 있다 — 프로세스가 끝나며 함께 사라진다.
+    reader.detach();
+    // hello 와 한 읽기에 딸려 온 명령이 decoder 에 남아 있을 수 있다 — 루프 첫 task 로 처리한다.
+    wakeUiThread();
+
+    g_api.run_message_loop();
+    g_api.shutdown();
+    return .ok;
+}
+
+/// 읽기 스레드에서 부른다 — CEF UI 스레드에 상자를 비우는 task 를 올린다.
+fn wakeUiThread() void {
+    _ = g_api.post_task(c.TID_UI, &g_task);
+}
+
+fn drainTask(_: [*c]c.cef_task_t) callconv(.c) void {
+    if (g_dispatcher.drain(&g_inbox) == .quit) g_api.quit_message_loop();
+}
+
+/// 알릴 수 있으면 알리고 종료 코드를 돌려준다.
+fn fail(code: ExitCode, failure: protocol.message.FailureCode, detail: []const u8) ExitCode {
+    g_writer.send(.{ .failure = .{ .browser = 0, .code = failure, .detail = detail } }) catch {};
+    return code;
+}
+
+fn profileDir(argv: []const [*:0]const u8) ?[:0]const u8 {
+    const prefix = "--profile-dir=";
+    for (argv[1..]) |raw| {
+        const arg = std.mem.span(raw);
+        if (std.mem.startsWith(u8, arg, prefix)) {
+            const value = arg[prefix.len..];
+            if (value.len == 0 or value[0] != '/') return null;
+            return value;
+        }
+    }
+    return null;
+}
+
+/// 프로필은 쿠키를 푸는 키가 공개값인 자리라(D7 — mock keychain) 소유자만 읽게 0700 으로 만든다.
+fn ensurePrivateDir(path: [:0]const u8) error{MkdirFailed}!void {
+    if (std.c.mkdir(path, 0o700) == 0) return;
+    if (std.c._errno().* != @intFromEnum(std.c.E.EXIST)) return error.MkdirFailed;
+}

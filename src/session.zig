@@ -125,20 +125,7 @@ pub const agent_selection = @import("session/agent_selection.zig"); // 파일 �
 pub const mermaid_protocol = @import("session/mermaid_protocol.zig"); // FP10c1: parent/helper가 공유하는 bounded wire codec SSOT
 pub const mermaid_coordinator = @import("session/mermaid_coordinator.zig"); // FP10c1: 앱 전역 queue/capability/deadline/failure 정책 SSOT
 pub const mermaid_theme = @import("session/mermaid_theme.zig"); // 터미널 색상 테마 → mermaid 팔레트 파생(순수, per-render)
-pub const web_sidecar = struct {
-    /// frame 머리(길이 접두·`MWEB`·버전)·상한·오류 집합·바이트 커서.
-    pub const wire = @import("session/web_sidecar/wire.zig");
-    /// tag·방향(0~31 은 maru → sidecar, 32~ 는 sidecar → maru)·메시지 구조체.
-    pub const message = @import("session/web_sidecar/message.zig");
-    /// 닫힌 필드 규칙 — browser id·view 크기·bool·URL·글.
-    pub const fields = @import("session/web_sidecar/fields.zig");
-    /// encode / decodeExact.
-    pub const codec = @import("session/web_sidecar/codec.zig");
-    /// StreamingDecoder — 받는 쪽이 방향까지 확인한다.
-    pub const stream = @import("session/web_sidecar/stream.zig");
-    /// clampUtf8 — sidecar 가 제목을 글자 중간에서 자르지 않고 줄인다.
-    pub const text = @import("session/web_sidecar/text.zig");
-}; // W1a: 웹 OSR sidecar 제어 채널 bounded wire codec SSOT(docs/plans/web-osr-backend.md C2)
+pub const web_sidecar = @import("session/web_sidecar/root.zig"); // W1a: 웹 OSR sidecar 제어 채널 bounded wire codec SSOT(docs/plans/web-osr-backend.md C2)
 pub const file_tree = @import("session/file_tree.zig"); // FP7: OS-중립 파일 트리 snapshot·접힘·멀티루트·최근 파일 모델
 pub const file_tree_navigation = @import("session/file_tree_navigation.zig"); // 파일 트리 transient selection·키보드 탐색·scroll 순수 정책
 pub const file_tree_mutation = @import("session/file_tree_mutation.zig"); // 파일 트리 변경 이름·root·dirty 보호·path remap 순수 정책

@@ -84,8 +84,10 @@ sidecar 는 maru 앱 프로세스마다 **하나**다. CEF 는 `root_cache_path`
   sidecar 가 보낸 바이트를 공격 입력으로 다룬다(sidecar 는 신뢰할 수 없는 웹을 띄우는 프로세스 트리의 뿌리다).
   decode 오류가 한 번 나면 채널을 닫는다(decoder 도 잠긴다 — 이후 같은 오류만 돌려준다). 읽는 쪽은 `feed` 가 받은 만큼만 넣고
   `next` 로 비운 뒤 나머지를 넣는다(조각을 통째로 받던 판은 정상 스트림에서도 넘쳤다 — 적대 검증).
-- **stdout 보호**: sidecar 는 시작하자마자 원래 stdout 을 프로토콜 전용 fd 로 복제하고 fd 1 을 stderr 로 돌린다 —
-  Chromium·helper 가 stdout 에 무엇을 찍어도 frame 이 깨지지 않게(찍는지는 W1b 에서 잰다).
+- **stdout 보호**: sidecar 는 시작하자마자 원래 stdin·stdout 을 CLOEXEC 사본으로 옮기고(helper 에게 새지 않게) fd 0 은
+  `/dev/null`, fd 1 은 stderr 로 돌린다 — Chromium·helper 가 stdout 에 무엇을 찍어도 frame 이 깨지지 않게. W1b 실측에서는
+  초기화~종료 동안 stdout·stderr 모두 0 바이트였다(WARNING 수준). 알림 쓰기는 SIGPIPE 를 무시해 maru 가 먼저 사라져도
+  신호로 죽지 않고 쓰기 오류로 안다.
 - sidecar 는 이 채널을 **그리기 콜백과 독립**으로, **읽기 스레드**에서 읽고 명령이 올 때만 `cef_post_task` 로 UI
   스레드에 넘긴다. 16ms 폴링은 정적 페이지 유휴에도 CPU 0.3~0.4 % 를 썼다(실측). PoC 는 그리기 콜백에서만 읽어서
   숨긴 탭에 「다시 보여라」 명령조차 못 전달했다(§13.1 「남은 미해결」 3).
@@ -198,7 +200,7 @@ control plane `browser.*` 게이트는 엔진 중립이라 바뀌지 않는다(�
 | 단계 | 내용 | 완료 판정 |
 |---|---|---|
 | **W1a** 제어 채널 codec | C2 의 wire codec(순수 Zig, CEF 없음) | 황금 바이트·왕복·방향 거절·닫힌 필드·상한 ±1·손으로 지은 공격 frame·한 바이트 변조 전수 — **구현됨**. 처음 적은 「변이 8 개가 모두 걸림」은 내가 고른 8 개에 대해서만 맞았다 — 적대 검증에서 한 줄 변이 20 개가 살아남았고, 그중 `feed` 가 조각을 통째로만 받아 **정상 스트림에서도 채널을 닫는** 결함이 나왔다(반쯤 온 큰 frame 뒤 16KB 조각). `feed` 는 받은 만큼만 받고 수를 돌려주게, 오류는 잠기게, 저장소는 가장 큰 frame 하나 크기로, 제목·URL 의 제어 문자는 거절(sidecar 는 `replaceControl`)하게 고치고 경계·스트리밍 시험을 더했다 — 대표 변이 11 개 중 10 개가 걸리고 남은 하나는 동작이 같은 변이다 |
-| **W1b** sidecar 뼈대 | SDK 받기 스크립트(bz2 — `zig fetch` 불가, 실측), opt-in 빌드 스텝, `maru-web-host`·`maru-web-helper`(C1), 제어 채널 배선(C2 — 읽기 스레드·stdout 보호·EOF 종료) | helper 전부 `sandbox_check` 1, maru(부모)가 죽으면 sidecar·helper 가 모두 사라짐, stdout 오염 없음 |
+| **W1b** sidecar 뼈대 | SDK 받기 스크립트(bz2 — `zig fetch` 불가, 실측), opt-in 빌드 스텝, `maru-web-host`·`maru-web-helper`(C1), 제어 채널 배선(C2 — 읽기 스레드·stdout 보호·EOF 종료) | helper 전부 `sandbox_check` 1, maru(부모)가 죽으면 sidecar·helper 가 모두 사라짐, stdout 오염 없음 — **구현됨**: `mise run web-sidecar-judge` 5 판정 통과(3 회 연속). helper 는 GPU·네트워크·저장소 셋이고 1 초 시점에 모두 샌드박스 안(막 fork 된 순간은 exec 전이라 판정자가 안정될 때까지 본다). 초기화~종료 동안 Chromium 이 stdout·stderr 에 0 바이트(WARNING 수준). 판정자를 변이 9 개로 공격 — helper 샌드박스 생략·`no_sandbox=1`·stdout 보호 제거·알림 채널 잡바이트·EOF 무시·ack nonce 오류·shutdown 무시가 모두 FAIL 로 걸린다(처음엔 shutdown 무시에서 판정자가 멈췄다 — 모든 읽기에 기한을 걸어 고쳤다) |
 | **W1c** 브라우저 | 생성·파괴·이동·크기·숨김, 브라우저 N 개, 프로필(C7·D7) | 숨긴 뒤에도 명령 수신, 브라우저 N 개가 따로 그려지고 입력이 대상에만, 재시작 뒤 로그인 유지, 같은 프로필 두 번째 실행은 `profile_in_use` |
 | **W2** 픽셀 파이프라인 | 소유 링·세대(C3), port 전달·검증, 크기 변경 | 찢어짐 0, 새 프레임 수신률, 세대 전환과 옛 프레임 유지, 제3자 거부 — 헤드리스 판정자(opt-in CI 잡, §4) |
 | **W3** maru 통합 | `.web` Term 의 OSR 백엔드(C4), 백엔드 선택 config(기본 WKWebView — D2), 보이는 Term 만, 창별 rect, 새 프레임 다시 그리기. WKWebView `browserDataStore` 영속화(D6 — 엔진 중립이라 OSR 과 독립으로 먼저 낼 수 있다) | pane 100% 채움, 보이는 빈도(애니메이션 페이지에서 CEF 빈도에 근접), 정적 페이지에서 추가 부담 0 control-plane `browser_storage` 권한이 영속 쿠키에 닿는 범위 재검토(D6 — control-plane-browser-review D4) |

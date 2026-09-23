@@ -699,7 +699,7 @@ pub const Provider = struct {
         while (!c.ts_node_is_null(node)) : (node = c.ts_node_parent(node)) {
             const s = c.ts_node_start_byte(node);
             const e = c.ts_node_end_byte(node);
-            if (s > lo or e < hi) continue; // 조상이면 품는다 — 어긋나면 그 단은 버린다(방어)
+            if (s > lo or e < hi) continue; // 조상이면 품는다 — 어긋나면 그 단은 버린다(방어 · 적대적 1회차 T3: 등가)
             if (out.items.len > 0) {
                 const last = out.items[out.items.len - 1];
                 if (last.start == s and last.end == e) continue;

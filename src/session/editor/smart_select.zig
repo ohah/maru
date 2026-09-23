@@ -104,7 +104,8 @@ pub fn buildChain(
     }
     try appendWordSteps(allocator, content, lines, @min(query, len), &cand);
 
-    // 기준을 품는 것만 — 안쪽부터(시작이 늦은 것 먼저, 같으면 끝이 이른 것 먼저).
+    // 기준을 품는 것만 — 안쪽부터(시작이 늦은 것 먼저, 같으면 끝이 이른 것 먼저). **이 거름은 결과에 등가다**(적대적 1회차 A1):
+    // 사슬은 기준에서 시작해 「앞 단계를 품는 것」만 이으므로 기준을 안 품는 후보는 어차피 못 든다. 두는 이유는 비용 — 정렬할 것을 줄인다.
     var keep: usize = 0;
     for (cand.items) |r| {
         if (!r.contains(b)) continue;
@@ -118,7 +119,7 @@ pub fn buildChain(
     defer chain.deinit(allocator);
     try chain.append(allocator, b);
     for (cand.items) |r| {
-        if (chain.items.len >= max_steps) break;
+        if (chain.items.len >= max_steps) break; // 결과에 등가(A10) — 아래 줄 단계 루프가 같은 상한으로 다시 자른다. 여기는 비용
         if (r.strictlyContains(chain.items[chain.items.len - 1])) try chain.append(allocator, r);
     }
 

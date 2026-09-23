@@ -508,10 +508,13 @@ pub fn resumeArgvFor(target: ResumeTarget, out: *[max_resume_argv][]const u8) []
     return out[0..n];
 }
 
-/// 재부팅 부활(RB2)이 대화 파일에서 읽는 것은 **파일 끝부분**뿐이다 — 복원은 창을 그리기 전에 돌고 대화 파일은
-/// 수백 MB 일 수 있다. 재개가 이어야 할 것은 **마지막** 권한 모드와 모델이므로 끝부분에 있다(도크 규칙: 마지막에
-/// 본 값이 이긴다). 끝부분에 없으면 unknown·빈 모델로 남고, 그러면 플래그 없이 provider 기본값으로 연다.
-pub const resume_tail_bytes: usize = 1024 * 1024;
+/// 재부팅 부활(RB2)이 대화 파일에서 읽는 끝부분의 크기 — **작은 것부터 넓힌다**. 복원은 창을 그리기 전에 돌고
+/// 대화 파일은 수백 MB 일 수 있어 전체를 읽지 않는다. 재개가 이어야 할 것은 **마지막** 권한 모드와 모델이다.
+///
+/// 1 MiB 하나로 멈추면 안 된다 — 마지막 턴이 도구 출력을 크게 남기면 모드 줄이 그 앞으로 밀린다(2026-09-24 실측:
+/// codex 끝 300 개 중 6 개가 마지막 `turn_context` 뒤로 1.2~2.9 MiB). 그때 플래그 없이 열면 provider 기본값이
+/// **기록보다 넓은 권한**일 수 있다. 그래서 모드를 못 찾으면 다음 크기로 다시 읽는다. 끝까지 못 찾으면 unknown.
+pub const resume_tail_steps = [_]usize{ 1024 * 1024, 4 * 1024 * 1024, 16 * 1024 * 1024 };
 
 /// 끝부분의 **온전한 줄들**을 `parser` 에 먹인다. 결과는 `parser.permission`·`parser.model` 이다(모델은 parser
 /// 버퍼를 빌리므로 parser 가 사는 동안만 유효).
@@ -522,7 +525,15 @@ pub const resume_tail_bytes: usize = 1024 * 1024;
 ///   그것이 없으면 세션을 버린다. 필요한 두 값(`turn_context` 의 모드·모델)은 그것 없이도 읽힌다.
 pub fn feedResumeTail(parser: *Parser, tail: []const u8) void {
     var it = std.mem.splitScalar(u8, tail, '\n');
-    while (it.next()) |line| parser.consumeLine(line);
+    while (it.next()) |line| {
+        // **값이 있을 수 있는 줄만** JSON 으로 연다 — 나머지(도구 출력·대화 본문)는 필요 없고, 그 파싱이 비용의
+        // 대부분이었다(끝부분 1 MiB 에 칸당 2~3 ms). 사이드바 대화 줄(`parseClaudeTail`)과 같은 거르기다.
+        const wanted = switch (parser.provider) {
+            .claude => std.mem.indexOf(u8, line, "\"permissionMode\"") != null or std.mem.indexOf(u8, line, "\"model\"") != null,
+            .codex => std.mem.indexOf(u8, line, "\"turn_context\"") != null,
+        };
+        if (wanted) parser.consumeLine(line);
+    }
 }
 
 /// RFC 3339 UTC 시각(`YYYY-MM-DDTHH:MM:SS[.fff]Z`)을 Unix epoch 나노초로 바꾼다. 형태가 조금이라도

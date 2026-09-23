@@ -601,13 +601,49 @@ pub fn serializeWorkspaceWindow(self: *AppSession, is_active: bool, frame: ?maru
 /// title/command는 정적 기본(셸이 OSC 0/2로 곧 재설정)·size는 모델값(이후 resize가 창에 맞게 보정). 새 탭들을
 /// 먼저 다 빌드한 뒤 기존 탭을 teardown하고 swap한다 — 빌드 실패면 새 것만 정리하고 기존 live 모델 또는 deferred
 /// 빈 상태를 보존한다. 빈 모델은 live 세션에선 무동작, deferred 세션에선 오류다. 빈 cwd spawn은 기본 cwd를 쓴다.
+/// 「이번 부팅에 이미 부활했다」 표식의 파일 이름(캐시 디렉터리 아래). 내용은 부활한 부팅의 UUID 다.
+const reboot_revived_marker = "reboot-revived";
+
+/// **이번 부팅에 이미 부활했는가**(RB1 코드 리뷰). 부활 뒤 checkpoint 가 새 `boot-session` 을 실어야 다음 실행이 또
+/// 부활하지 않는데, 복원이 불완전하면(explorer root 하나가 사라짐 등) Swift 가 **모든 저장을 건너뛴다** — 그러면 파일은
+/// 옛 부팅 값을 그대로 들고 있고 같은 부팅의 다음 실행이 **또** 부활해, 같은 셸과 같은 `claude --resume` 을 겹쳐 띄운다.
+/// 그래서 부활한 순간 이 표식을 따로 쓴다(`recordRevivedThisBoot`) — workspace 저장이 막혀도 쓰인다.
+fn alreadyRevivedThisBoot(self: *AppSession, current: []const u8) bool {
+    if (!maru.session.workspace.isBootSessionId(current)) return false;
+    var arena = std.heap.ArenaAllocator.init(self.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const base = AppSession.sessionCacheBase(a) orelse return false;
+    const path = std.fmt.allocPrint(a, "{s}/{s}", .{ base, reboot_revived_marker }) catch return false;
+    const raw = std.Io.Dir.cwd().readFileAlloc(self.io, path, a, .limited(128)) catch return false;
+    return std.ascii.eqlIgnoreCase(std.mem.trim(u8, raw, " \t\r\n"), current);
+}
+
+/// 지금 부팅에 부활했다고 적는다. 실패는 조용히 넘긴다 — 못 적으면 예전처럼 저장이 막힌 경우에만 다시 부활한다.
+fn recordRevivedThisBoot(self: *AppSession) void {
+    const current = currentBootSession();
+    if (!maru.session.workspace.isBootSessionId(current)) return;
+    var arena = std.heap.ArenaAllocator.init(self.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const base = AppSession.sessionCacheBase(a) orelse return;
+    std.Io.Dir.cwd().createDirPath(self.io, base) catch return;
+    const path = std.fmt.allocPrint(a, "{s}/{s}", .{ base, reboot_revived_marker }) catch return;
+    std.Io.Dir.cwd().writeFile(self.io, .{ .sub_path = path, .data = current }) catch return;
+}
+
 /// 저장 파일의 창 하나를 적용한다 — 시작 복원의 진입점(ABI `maru_macos_app_session_apply_workspace_window`).
 ///
 /// 창 하나가 아니라 **목록 전체**를 받는 이유는 재부팅 증명(RB1)이다. 창마다 `AppSession` 이 따로 복원하므로 자기
 /// 창의 `boot-session` 만 보면 창끼리 답이 갈릴 수 있다. ABI 가 창마다 파일 전체를 다시 파싱하므로 같은 텍스트면
 /// 모든 창이 같은 답을 얻는다. 플래그는 apply 동안만 산다 — 이 창 밖의 Term 생성(새 탭·`⏎`)으로 새지 않게.
 pub fn applySavedWorkspaceWindow(self: *AppSession, windows: []const maru.session.workspace.Window, index: usize) !void {
-    self.restore_reboot_proven = maru.session.workspace.rebootProven(windows, currentBootSession());
+    self.restore_reboot_proven = AppSession.reboot_proven_decision orelse blk: {
+        const current = currentBootSession();
+        const proven = maru.session.workspace.rebootProven(windows, current) and !alreadyRevivedThisBoot(self, current);
+        AppSession.reboot_proven_decision = proven;
+        break :blk proven;
+    };
     defer self.restore_reboot_proven = false;
     return applyWorkspaceWindow(self, windows[index]);
 }
@@ -836,7 +872,10 @@ pub fn applyWorkspaceWindow(self: *AppSession, win: maru.session.workspace.Windo
     // RB1: 이 창에서 재부팅 부활이 있었으면 checkpoint 를 무장하자마자 더럽힌다(`reboot_revival_checkpoint_dirty`
     // 주석). 새 파일이 지금 부팅의 `boot-session` 과 새 handle 을 실어야 다음 실행이 또 부활하지 않는다.
     const revived = AppSession.reboot_revived_pending - revived_before;
-    if (revived > 0) AppSession.reboot_revival_checkpoint_dirty = true;
+    if (revived > 0) {
+        AppSession.reboot_revival_checkpoint_dirty = true;
+        recordRevivedThisBoot(self); // 저장이 막혀도 같은 부팅에서 두 번 부활하지 않게
+    }
     self.workspace_restore_dropped = std.math.lossyCast(u32, dropped);
     // **왜 저장을 건너뛰었는지 남긴다.** 지금까지 이 판정은 어디에도 찍히지 않아, 사용자가 「탭 배치가
     // 매번 사라진다」고 해도 파일 상태로 역산해야 했다(2026-09-19 실측 — 그 역산에 하루가 걸렸다).

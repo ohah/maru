@@ -34,6 +34,7 @@ const linkSessionHostNotificationAdapter = support.linkSessionHostNotificationAd
 const attachPngCodec = support.attachPngCodec;
 const session_host_gates = @import("build/session_host_gates.zig");
 const session_host_release_gates = @import("build/session_host_release_gates.zig");
+const web_sidecar_build = @import("build/web_sidecar.zig");
 
 /// 실제 제품 바이너리를 실행하는 테스트는 workspace와 session-host namespace를 한 root에 묶는다.
 /// 제품 바이너리는 `builtin.is_test == false`라 이 주입이 없으면 실제 `/tmp/maru-<uid>`를 사용한다.
@@ -8742,6 +8743,10 @@ pub fn build(b: *std.Build) void {
         .boundary_step = boundary_step,
         .session_host_step = session_host_step,
     });
+
+    // 웹 OSR sidecar(W1b) 등록은 `build/web_sidecar.zig` 가 소유한다 — CEF 없는 시험은 기본 test 에,
+    // sidecar 실행 파일은 `-Dcef-sdk` 가 있을 때만 `web-sidecar` 스텝에.
+    web_sidecar_build.register(b, .{ .target = target, .optimize = optimize, .test_step = test_step });
 
     // Opt-in external oracle: validates committed goldens against system libvterm.
     // Intentionally NOT wired into the default `test` step or `mise run check` so

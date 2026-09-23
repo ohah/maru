@@ -19,19 +19,19 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     const argv_c: [*c][*c]u8 = @ptrCast(@constCast(argv.ptr));
 
     var dir_buf: layout.PathBuf = undefined;
-    const dir = layout.executableDir(&dir_buf) catch return fail("실행 파일 경로를 못 구했다");
+    const dir = layout.executableDir(&dir_buf) catch return fail("cannot resolve the executable path");
 
     var sandbox_path: layout.PathBuf = undefined;
-    const sandbox_lib = layout.join(&sandbox_path, dir, layout.sandbox_library_rel) catch return fail("경로가 너무 길다");
-    const sandbox_handle = std.c.dlopen(sandbox_lib, .{ .NOW = true, .LOCAL = true }) orelse return fail("libcef_sandbox 를 못 열었다");
-    const sandbox_symbol = std.c.dlsym(sandbox_handle, "cef_sandbox_initialize") orelse return fail("cef_sandbox_initialize 가 없다");
+    const sandbox_lib = layout.join(&sandbox_path, dir, layout.sandbox_library_rel) catch return fail("path too long");
+    const sandbox_handle = std.c.dlopen(sandbox_lib, .{ .NOW = true, .LOCAL = true }) orelse return fail("cannot open libcef_sandbox");
+    const sandbox_symbol = std.c.dlsym(sandbox_handle, "cef_sandbox_initialize") orelse return fail("cef_sandbox_initialize is missing");
     const sandbox_initialize: SandboxInitialize = @ptrCast(@alignCast(sandbox_symbol));
     // 돌려받는 문맥은 프로세스가 끝날 때까지 쥔다 — 풀면 샌드박스가 풀린다.
-    if (sandbox_initialize(argc, argv_c) == null) return fail("샌드박스를 켜지 못했다");
+    if (sandbox_initialize(argc, argv_c) == null) return fail("sandbox initialization failed");
 
     var framework_path: layout.PathBuf = undefined;
-    const framework = layout.join(&framework_path, dir, layout.framework_dir_name ++ "/" ++ layout.framework_binary_name) catch return fail("경로가 너무 길다");
-    const api = library.load(framework) catch return fail("프레임워크를 못 열었다");
+    const framework = layout.join(&framework_path, dir, layout.framework_dir_name ++ "/" ++ layout.framework_binary_name) catch return fail("path too long");
+    const api = library.load(framework) catch return fail("cannot open the CEF framework");
 
     // 다른 어떤 CEF 호출보다 먼저 API 버전을 등록한다(첫 호출 뒤의 값은 무시된다 — cef_api_hash.h).
     _ = api.api_hash(cef.api_version, 0);

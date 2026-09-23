@@ -354,6 +354,18 @@ host 만 바꾼 A/B 4쌍 전부 앱 CPU 감소(중앙값 **−33 %**; host 는 �
 자기검증 최적화(사본 대조)는 12쌍 −6 % 로 작아 보류했다: 「씰 종류가 아니라 씰 파이프라인이 왜 이렇게 자주
 도는가」가 답이었다.
 
+**발견(2026-09-23) — 이벤트가 없다는 걸 확인하는 데 앱 busy 의 19 % 를 썼다.** 위 metadata 이벤트를 없앤 뒤
+다시 재니 `drainObservationEvents` 가 여전히 앱 busy 의 19 % 였는데, 그 안에서 이벤트 준비(`prepare`·`settle`)는
+**0** 이었다 — 프레임마다 runtime 마다(최대 16) `purgeEndedStream`·`takeGenerationEvent` 가 **각각** 소유 lease
+(`beginGenerationRequestOwner`)·클린업 레지스트리(`exactEntry`)·stream permit·incident 포트를 거친 뒤에야 «없음» 을
+알았다. 처방: 어느 Client 큐에든 이벤트가 **추가될 때만** 오르는 전역 세대(`client.generation_event_enqueue_epoch`)와
+runtime 의 generation 번호를 함께 기억해, 둘 다 그대로이고 준비된 이벤트가 없으면 그 의례를 통째로 건너뛴다
+(`RemoteRuntime.idle_drain_epoch`). 값은 포인터도 lease 도 건너지 않는 u64 라 신뢰 경계를 넓히지 않는다. 틀릴 수
+있는 방향은 «추가했는데 세대를 안 올린 자리» 하나라, `tests/event_enqueue_epoch_boundary.zig` 가 session_host 의
+모든 `pending_events.append(` 를 감싸는 함수까지 따라가 «제품이 부르는 자리는 `appendBufferedEvent` 하나이고 그
+안에서 append 뒤에 올린다» 를 고정한다. 결과: `drainObservationEvents` 19.1 % → **0.8 %**, A/B(활성 32 세션,
+유효 7쌍) 6/7 낮음·중앙값 **−21 %**(`sample` 로 먼저 잡은 상한 19 % 와 같은 크기).
+
 실제 AppKit CR6e-a2 v2 반복 artifact는 ReleaseFast 앱 5회 모두 attach 뒤 handshake 출력에서 native handler exact 증가를
 관측했고, handler 진입부터 normal tick의 Metal frame 뒤 screen probe까지 15.528·23.325·23.954·24.151·24.627ms였다.
 다섯 행 모두 60ms 안이며 fd 6→6, child 0, daemon/socket/host artifact cleanup을 함께 통과했다. 이 하위 값은 host가

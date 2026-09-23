@@ -1616,6 +1616,9 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "resetUiFrameStampForTest" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "pollReadableThisFrame" },
                 .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "", .name = "poll_syscalls_for_test" },
+                // 빈 드레인 건너뛰기(2026-09-23): 어느 Client 큐든 이벤트가 **추가될 때만** 오르는 전역 세대.
+                // RemoteRuntime 이 마지막 «없음» 때의 값과 같으면 lease 의례를 건너뛴다. 포인터 없는 u64 하나다.
+                .{ .parent = "root", .kind = "var", .visibility = "pub", .modifier = "", .name = "generation_event_enqueue_epoch" },
             },
         },
         .{

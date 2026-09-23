@@ -2774,6 +2774,11 @@ pub const RemoteRuntime = struct {
     // front item while the outer drain still holds a copied value for that item.
     blocking_flush_active: bool = false,
     pending_event_owner: pending_event_owner_mod.PendingEventOwner,
+    /// 마지막으로 «내 stream 에 이벤트 없음» 을 **깨끗이** 확인한 순간의 `(enqueue 세대, generation 번호)`.
+    /// 둘 다 그대로면 그 결론도 그대로라 드레인의 lease 의례를 건너뛴다(`client.generation_event_enqueue_epoch`).
+    /// 0 은 «확인한 적 없음».
+    idle_drain_epoch: u64 = 0,
+    idle_drain_generation: u64 = 0,
     close_authority: remote_close_authority.CloseAuthority = .{},
     shutdown_attempt_authority: shutdown_attempt_authority_mod.ShutdownAttemptAuthority = .{},
     shutdown_current_admin: shutdown_current_admin_mod.CurrentAdminCoordinator = .{},
@@ -5736,10 +5741,13 @@ pub const RemoteRuntime = struct {
     /// 병합을 먼저 붙이면 이득 0 인 복잡도만 남는다.
     var observation_drain_calls: u64 = 0;
     var observation_events_settled: u64 = 0;
+    /// 빈 확인을 건너뛴 드레인 수(`idle_drain_epoch`). drain_calls 와의 비가 곧 이 최적화가 한 일이다.
+    var observation_drains_skipped: u64 = 0;
 
     pub const ObservationEventCounters = struct {
         drain_calls: u64,
         events_settled: u64,
+        drains_skipped: u64,
         /// 이벤트당 다이제스트 횟수·바이트. 세는 자리는 `event_cleanup_seal`(모든 관측 다이제스트가
         /// 통과하는 단일 지점)이고, `pending_event_preparation` 을 경유해 읽는다 — 그 모듈은 이미 seal
         /// 을 import 하므로 **닫힌 import 집합이 넓어지지 않는다**. GUI 에 새 session_host 심볼을
@@ -5768,6 +5776,7 @@ pub const RemoteRuntime = struct {
         return .{
             .drain_calls = @atomicLoad(u64, &observation_drain_calls, .monotonic),
             .events_settled = @atomicLoad(u64, &observation_events_settled, .monotonic),
+            .drains_skipped = @atomicLoad(u64, &observation_drains_skipped, .monotonic),
             .digest_calls = seal.calls,
             .digest_input_bytes = seal.input_bytes,
             .seals = frame_seal.seals,
@@ -5867,6 +5876,21 @@ pub const RemoteRuntime = struct {
         comptime hook: ?GenerationDrainHook,
     ) client_mod.ClientError!EventDrain {
         var result: EventDrain = .{};
+        // **빈 확인을 건너뛴다** — 마지막 «없음» 이후 어떤 Client 큐에도 이벤트가 추가되지 않았고(enqueue 세대),
+        // 이 runtime 의 generation 도 그대로면(재접속이면 Client 가 바뀐다) 결론은 여전히 «없음» 이다. 준비된
+        // 이벤트가 남아 있으면(`pending_lifecycle != idle`) 건너뛰지 않는다. 판정자 훅이 있는 경로는 늘 끝까지 돈다.
+        const enqueue_epoch = client_mod.generation_event_enqueue_epoch.load(.acquire);
+        const generation_number = self.generation_owner.slot.currentGeneration() catch
+            @panic("runtime generation slot lost current generation authority");
+        if (hook == null and
+            self.idle_drain_epoch != 0 and
+            self.idle_drain_epoch == enqueue_epoch and
+            self.idle_drain_generation == generation_number and
+            self.pending_event_owner.lifecycle_raw == @intFromEnum(pending_event_owner_mod.PendingLifecycle.idle))
+        {
+            _ = @atomicRmw(u64, &observation_drains_skipped, .Add, 1, .monotonic);
+            return result;
+        }
         while (true) {
             const generation = &self.currentGeneration().attachment.generation;
             const pending_lifecycle = std.enums.fromInt(
@@ -5899,7 +5923,14 @@ pub const RemoteRuntime = struct {
             }
             switch (self.takeGenerationEventWithManagedPoison(generation) catch |err|
                 return mapGenerationEventError(err)) {
-                .idle => return result,
+                .idle => {
+                    // 깨끗한 «없음» 만 기억한다 — Busy·AdminBusy·오류는 여기 오지 않아 다음 프레임에 다시 묻는다.
+                    // 기억하는 세대는 **드레인 시작 때 읽은 값**이다: 드레인 중에 추가된 이벤트가 있으면 다음
+                    // 프레임의 세대가 더 커서 건너뛰지 않는다.
+                    self.idle_drain_epoch = enqueue_epoch;
+                    self.idle_drain_generation = generation_number;
+                    return result;
+                },
                 .ended_pending => return error.AdminBusy,
                 .taken => {},
             }
@@ -10156,6 +10187,161 @@ test "CR3a-2c3a generation revoke partial wire poisons the RemoteRuntime connect
     );
     try std.testing.expectEqual(remote_attachment.Role.observer, rr.currentGeneration().attachment.statePtr().role);
     try std.testing.expectError(error.Unauthorized, rr.sendInputNonBlocking("late"));
+    rr.surface.deinit();
+}
+
+test "ID1 빈 드레인은 새 이벤트가 없을 때만 건너뛰고, 남의 stream 이벤트·내 이벤트·generation 변화에는 다시 묻는다" {
+    try host_adapter_mod.HostAdapter.initializeProcessRuntime();
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const response = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .response, .request_id = 1 },
+        "{\"result\":{\"stream_id\":7,\"controller_generation\":3," ++
+            "\"granted\":{\"observe\":true,\"input\":true,\"resize\":true}," ++
+            "\"controller_busy\":false,\"metadata_revision\":0,\"metadata\":null}}",
+    );
+    defer allocator.free(response);
+    var records: std.ArrayListUnmanaged(u8) = .empty;
+    defer records.deinit(allocator);
+    const meta = try screen_stream.encodeScreenMeta(
+        allocator,
+        .{ .kind = .screen_meta, .generation = 1 },
+        .{ .cols = 1, .rows = 1, .cursor = .{} },
+    );
+    defer allocator.free(meta);
+    try screen_stream.appendRecord(&records, allocator, meta);
+    var runs = [_]screen_stream.Run{.{ .grapheme = "x", .width = 1, .count = 1 }};
+    const row = try screen_stream.encodeRow(
+        allocator,
+        .{ .kind = .row, .generation = 1 },
+        .{ .row_index = 0, .runs = &runs },
+    );
+    defer allocator.free(row);
+    try screen_stream.appendRecord(&records, allocator, row);
+    const snapshot = try framing.encodeFrame(
+        allocator,
+        .{
+            .kind = .snapshot_chunk,
+            .stream_id = 7,
+            .flags = protocol.Flags.end_stream,
+        },
+        records.items,
+    );
+    defer allocator.free(snapshot);
+    const Peer = struct {
+        fn run(fd: c.fd_t, response_wire: []const u8, snapshot_wire: []const u8) void {
+            defer _ = c.close(fd);
+            const peer_allocator = std.heap.page_allocator;
+            const request = readPeerFrame(fd, peer_allocator) catch return;
+            defer peer_allocator.free(request.payload);
+            socket_server.writeAll(fd, response_wire) catch return;
+            socket_server.writeAll(fd, snapshot_wire) catch return;
+        }
+    };
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    var peer = try std.Thread.spawn(.{}, Peer.run, .{ fds[1], response, snapshot });
+    var client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+        .attachment_capabilities = .{ .peer_attach_generation = true },
+        .metadata_support = .supported,
+        .compatibility_profile = @import("compatibility.zig").profileForMajor(
+            protocol.version_major,
+        ).?,
+    };
+    var adapter: host_adapter_mod.HostAdapter = undefined;
+    try host_adapter_mod.HostAdapter.initInPlace(&adapter, allocator, &client);
+    defer adapter.deinit();
+    var rr: RemoteRuntime = undefined;
+    try rr.initializeGenerationOwner(
+        .{ .generation = &adapter },
+        allocator,
+        std.testing.io,
+        .{ .cols = 1, .rows = 1 },
+    );
+    defer rr.deinitGenerationOwnerAndScreenSource();
+    rr.pending_event_owner = .{};
+    rr.runtime_lifetime = .{};
+    try rr.initializePendingEventOwner();
+    rr.allocator = allocator;
+    rr.io = std.testing.io;
+    rr.runtime_id_hex = "000000000000000000000000000000aa".*;
+    rr.currentGeneration().resize_seq = 0;
+    rr.currentGeneration().resize_generation = 0;
+    rr.currentGeneration().resize_baseline_present = false;
+    rr.direct_input = .empty;
+    rr.input_batches = .{};
+    rr.direct_input_offset = 0;
+    rr.pending_controls = .empty;
+    rr.blocking_flush_active = false;
+    rr.currentGeneration().pump_ended = false;
+    rr.currentGeneration().resync_needed = false;
+    rr.currentGeneration().observation = .{};
+    defer rr.direct_input.deinit(allocator);
+    defer rr.pending_controls.deinit(allocator);
+    try rr.attachAndAssemble(1, .{ .cols = 1, .rows = 1 });
+    peer.join();
+
+    // **왜**: 프레임마다 runtime 마다 「내 stream 에 이벤트가 있나」를 묻는 의례(소유 lease·클린업 레지스트리·
+    // stream permit·incident 포트)가 활성 32 세션에서 앱 busy CPU 의 19 % 였고, 거의 전부 «없음» 이었다.
+    // 건너뛰기의 유일한 위험은 **할 일이 있는데 건너뛰는 것**이다. 그래서 세 방향을 모두 연다:
+    // ① 아무 일 없으면 건너뛴다 ② **다른 stream** 에 이벤트가 들어와도 한 번은 다시 묻는다(내 것일 수도 있으니)
+    // ③ **내 stream** 에 이벤트가 들어오면 반드시 받는다 — 여기서는 ended 라 드레인이 ended 를 돌려줘야 한다.
+    const skipped = struct {
+        fn now() u64 {
+            return RemoteRuntime.observationEventCounters().drains_skipped;
+        }
+    };
+
+    // 첫 드레인은 끝까지 돈다(기억이 없다) — 깨끗한 «없음» 을 기억한다.
+    const s0 = skipped.now();
+    const first = try rr.drainObservationEvents();
+    try std.testing.expect(!first.ended);
+    try std.testing.expectEqual(s0, skipped.now());
+    try std.testing.expect(rr.idle_drain_epoch != 0);
+
+    // ① 아무 것도 안 들어왔다 → 건너뛴다.
+    _ = try rr.drainObservationEvents();
+    try std.testing.expectEqual(s0 + 1, skipped.now());
+
+    // ② 남의 stream(99)에 이벤트가 들어왔다 → 세대가 올라 한 번은 다시 묻는다(건너뛰지 않는다). 내 것은 없으니
+    //    «없음» 을 새 세대로 다시 기억하고, 그 다음은 다시 건너뛴다.
+    const epoch_before = client_mod.generation_event_enqueue_epoch.load(.acquire);
+    try rr.testingClient().bufferGenerationEventForTest(99, "{\"event\":\"runtime.ended\"}");
+    try std.testing.expect(client_mod.generation_event_enqueue_epoch.load(.acquire) > epoch_before);
+    const after_sibling = try rr.drainObservationEvents();
+    try std.testing.expect(!after_sibling.ended);
+    try std.testing.expectEqual(s0 + 1, skipped.now()); // 건너뛰지 않았다
+    _ = try rr.drainObservationEvents();
+    try std.testing.expectEqual(s0 + 2, skipped.now()); // 이제 다시 건너뛴다
+
+    // ⑤ **준비된 이벤트가 남아 있으면** 세대가 같아도 건너뛰지 않는다. 드레인 밖에서도 이벤트가 준비될 수
+    //    있다(`preparePendingEventForClose`) — 건너뛰면 그 close 가 영영 정산되지 않는다. 적대적 검증에서 이
+    //    가드를 지운 돌연변이가 살아남아 더했다. 여기서는 정산할 실체가 없으니 드레인이 ProtocolError 로
+    //    돌아오는 것까지가 «건너뛰지 않았다» 의 증거다.
+    rr.pending_event_owner.lifecycle_raw = @intFromEnum(pending_event_owner_mod.PendingLifecycle.prepared);
+    try std.testing.expectError(error.ProtocolError, rr.drainObservationEvents());
+    try std.testing.expectEqual(s0 + 2, skipped.now());
+    rr.pending_event_owner.lifecycle_raw = @intFromEnum(pending_event_owner_mod.PendingLifecycle.idle);
+
+    // ④ generation 번호가 다르면(재접속으로 Client 가 바뀐 경우) 세대가 같아도 건너뛰지 않는다.
+    rr.idle_drain_generation +%= 1;
+    _ = try rr.drainObservationEvents();
+    try std.testing.expectEqual(s0 + 2, skipped.now());
+
+    // ③ 내 stream(7)에 ended 가 들어왔다 → 반드시 받는다.
+    try rr.testingClient().bufferGenerationEventForTest(7, "{\"event\":\"runtime.ended\"}");
+    const mine = try rr.drainObservationEvents();
+    try std.testing.expect(mine.ended);
+    try std.testing.expectEqual(s0 + 2, skipped.now());
+
     rr.surface.deinit();
 }
 
@@ -16011,8 +16197,9 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
             // `zig build test` 의 이 판정자가 `expected 11664, found 11680` 으로 잡았다. ⚠️ **그 PR 은 초록이었다** —
             // 이 pin 을 도는 것은 `zig build test` 뿐이고, PR 의 session-host 잡은 바뀐 파일이 `editor` 축이라
             // 영역 게이팅으로 스킵됐다. 로컬 `mise run check` 도 그 artifact 를 ReleaseFast 로 돌지 않아 초록이었다.
-            .Debug => 11728,
-            .ReleaseFast => 11680,
+            .Debug => 11744,
+            // 2026-09-23 빈 드레인 건너뛰기(`idle_drain_epoch`·`idle_drain_generation`, u64 둘): Debug +16 · ReleaseFast +16(실측).
+            .ReleaseFast => 11696,
             else => unreachable,
         },
         // ⚠️ 이 두 값은 **이 트리에서 측정할 수 없다.** `remote_runtime` 은 배럴이 macOS 에서만 열어서
@@ -16027,8 +16214,8 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
     };
     const expected_runtime_remainder: usize = switch (builtin.os.tag) {
         .macos => switch (builtin.mode) {
-            .Debug => 8992, // 2026-09-20 kitty 매체 전송 +16(위 표와 같은 델타 — 실측)
-            .ReleaseFast => 8944, // 2026-09-22 U4a +16(위 표와 같은 델타 — 실측)
+            .Debug => 9008, // 2026-09-23 빈 드레인 건너뛰기 +16(위 표와 같은 델타 — 실측)
+            .ReleaseFast => 8960, // 2026-09-23 빈 드레인 건너뛰기 +16(위 표와 같은 델타 — 실측)
             else => unreachable,
         },
         // 위와 같은 이유로 측정 불가 — 원래 값 그대로다.
@@ -19617,8 +19804,8 @@ test "CR2a RemoteGeneration field inventory는 generation owner 열두 개만 �
             // 2026-09-19 `48f89bc10`(한국어 preedit 앵커) 뒤 둘 다 +16 — 위 `C3-3b2b3` 의 표와 함께 움직인다(경계 판정자가 둘을 센다).
             // 2026-09-20 kitty 매체 전송(`KittyGraphicsCommand` 에 `data_size`·`data_offset`·`internal_id` — `TerminalCore.kitty_chunk_cmd` 안):
             // Debug +16 · ReleaseFast +0(기존 패딩에 들어감) — `test-session-host-2c3d-c3-3b2b3` 에서 실측.
-            .Debug => 11728,
-            .ReleaseFast => 11680, // 2026-09-22 U4a +16 — 위 사본과 «같은 값이어야 한다»(CR2a 가 둘을 센다)
+            .Debug => 11744,
+            .ReleaseFast => 11696, // 2026-09-23 빈 드레인 건너뛰기 +16 — 위 사본과 «같은 값이어야 한다»(CR2a 가 둘을 센다)
             else => unreachable,
         },
         // ⚠️ 이 두 값은 **이 트리에서 측정할 수 없다.** `remote_runtime` 은 배럴이 macOS 에서만 열어서

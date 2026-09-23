@@ -6981,6 +6981,25 @@ pub fn build(b: *std.Build) void {
     recipe_cache_step.dependOn(&run_recipe_cache.step);
     boundary_step.dependOn(&run_recipe_cache.step);
 
+    // 빈 드레인 건너뛰기의 전제 — 이벤트를 큐에 넣는 모든 제품 자리가 enqueue 세대를 올린다.
+    const event_enqueue_epoch_step = b.step(
+        "test-event-enqueue-epoch",
+        "Every product site that enqueues a Client event bumps the enqueue epoch",
+    );
+    const event_enqueue_epoch_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/event_enqueue_epoch_boundary.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_event_enqueue_epoch = b.addRunArtifact(event_enqueue_epoch_tests);
+    run_event_enqueue_epoch.addArg("--maru-expect-tests=1");
+    run_event_enqueue_epoch.addArg("--maru-expect-passed=1");
+    run_event_enqueue_epoch.setCwd(b.path("."));
+    event_enqueue_epoch_step.dependOn(&run_event_enqueue_epoch.step);
+    boundary_step.dependOn(&run_event_enqueue_epoch.step);
+
     const preflight_reason_step = b.step(
         "test-preflight-reject-reason",
         "Preflight rejection records the child exit status (eight paths shared one name)",

@@ -14028,6 +14028,8 @@ pub const Client = struct {
             return error.OutOfMemory;
         };
         self.pending_event_bytes += event.payload.len;
+        // 큐에 이벤트가 **생긴** 순간 — 비어 있던 stream 도 이제 할 일이 있을 수 있다(`generation_event_enqueue_epoch`).
+        _ = generation_event_enqueue_epoch.fetchAdd(1, .release);
     }
 
     /// stream 배치를 잇는 다음 stream frame을 준다. 우선순위: `call`이 버퍼한 frame → parser에 남은 완성 frame → 소켓 read.
@@ -21294,6 +21296,20 @@ test "client ended event replaces same-stream metadata at exact event cap" {
 var ui_frame_stamp: std.atomic.Value(u64) = .init(0);
 
 /// 프레임 하나가 시작됐다. 메인 스레드가 부른다.
+/// 어느 Client 든 `pending_events` 에 이벤트가 **추가될 때마다** 오르는 프로세스 전역 세대.
+///
+/// **왜**: `RemoteRuntime.drainObservationEvents` 는 프레임마다 runtime 마다(최대 16) 「내 stream 에 이벤트가
+/// 있나」를 묻는데, 그 물음이 소유 lease·클린업 레지스트리·stream permit·incident 포트까지 다 거친 뒤에야
+/// «없음» 을 안다. #3850 뒤로 실제 이벤트가 거의 없어져 활성 32 세션에서 그 **빈 확인**이 앱 busy CPU 의 19 %
+/// 였다(2026-09-23 `sample`). 이 세대가 그대로면 마지막으로 «없음» 을 확인한 뒤 어떤 큐에도 새 이벤트가
+/// 안 들어왔다는 뜻이고, 그러면 결론도 그대로다(제거는 할 일을 만들지 않는다).
+///
+/// **포인터도 lease 도 건너지 않는 값**이라 신뢰 경계를 넓히지 않는다. 틀릴 수 있는 방향은 «추가했는데
+/// 올리지 않은 자리» 하나뿐이고, 그러면 이벤트가 다음 추가까지 늦는다 — 그래서 올리는 자리를 경계 판정자가
+/// 센다(`pending_events.append(` 제품 호출 수 == 올리는 자리 수). Client 가 통째로 바뀌는 경우(재접속)는
+/// runtime 쪽이 generation 번호를 함께 기억해 가른다.
+pub var generation_event_enqueue_epoch: std.atomic.Value(u64) = .init(1);
+
 pub fn advanceUiFrameStamp() void {
     _ = ui_frame_stamp.fetchAdd(1, .monotonic);
 }

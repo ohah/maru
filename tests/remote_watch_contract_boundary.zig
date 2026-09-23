@@ -65,6 +65,22 @@ test "원격 감시자는 libc 상수로 디렉터리를 판정하지 않는다"
     try std.testing.expect(std.mem.indexOf(u8, code, "last_signal") != null);
     // 사유 없는 종료가 되살아나면 빨개진다 — 그 침묵이 정확히 이 계약이 막는 것이다.
     try std.testing.expect(std.mem.indexOf(u8, poll_body, "exitWith(exit_unsupported)") == null);
+
+    // ⚠️ **「이 루트를 git 으로 못 본다」를 「이 호스트가 못 한다」와 가른다**(2026-09-22 실측).
+    //    git 의 `128` 은 저장소가 아니거나 소유권이 거부된 경우인데, 옛 판은 그것을
+    //    `exit_unsupported` 로 내보냈다. 그러면 앱이 **호스트를 탓한다** — 화면에도 로그에도
+    //    「이 원격은 감시를 못 한다」고 나온다. 실측에서 원격은 macOS 25.5.0 · git 2.50.1 로
+    //    멀쩡했고, 같은 호스트의 저장소 폴더에서는 같은 명령이 `exit=0` 이었다. 사용자는 엉뚱한
+    //    곳(원격·SSH·설치)을 의심하게 되고, 정작 고칠 곳은 「어느 폴더를 열었나」였다.
+    try std.testing.expect(std.mem.indexOf(u8, poll_body, "last_exit == 128) exitNoRepoWhy(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, code, "exit_no_repo: u8 = 4") != null);
+    // 사유는 **여기서도** 남긴다 — 종료 코드만으로는 어느 루트가 문제인지 모른다(그 부재 때문에
+    // 이 결함을 로그로 못 짚고 원격에서 손으로 재현해야 했다).
+    try std.testing.expect(std.mem.indexOf(u8, code, "fn exitNoRepoWhy(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, code, "maru-remote-watch: no-repo - ") != null);
+    // **판이 올라야 원격 바이너리가 갈린다.** 옛 판이 깔린 원격은 계속 `unsupported` 를 내므로,
+    // 판을 안 올리면 이 수정이 그 호스트에 영영 닿지 않는다(설치 쪽이 이름에 판을 박는다).
+    try std.testing.expect(std.mem.indexOf(u8, code, "maru-remote-watch 16") != null);
     // ⚠️ **다이제스트는 도크가 읽는 것과 «같은 범위» 여야 한다**(§11.3). `status` 하나만 보면 다른
     // 곳에서 만든 브랜치·워크트리를 못 잡아 inotify 보다 좁아진다 — 셋을 합쳐도 0.04 s 다(실측).
     const reads = try bodyOf(src, "const digest_reads = [_][]const []const u8{", "\n};", 2048);

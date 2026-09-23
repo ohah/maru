@@ -36,6 +36,12 @@ pub const max_pending: usize = 4 * 1024;
 /// 같아야 한다 — 경계 test 가 센다.
 pub const exit_watch_limit: c_int = 2;
 pub const exit_unsupported: c_int = 3;
+/// **이 루트를 git 으로 볼 수 없다**(저장소가 아니거나 소유권 거부 — git 이 `128` 로 끊는 경우).
+/// `exit_unsupported` 와 **갈라야 한다**: 그쪽은 호스트의 성질이고 이쪽은 **루트의 성질**이다.
+/// 2026-09-22 실측이 그 차이를 보여 줬다 — 원격은 macOS 25.5.0 · git 2.50.1 로 멀쩡했고, 같은
+/// 호스트의 저장소 폴더에서는 같은 명령이 `exit=0` 이었다. 탐색기가 연 폴더가 저장소가 아니었을 뿐인데
+/// 화면과 로그는 「이 호스트는 감시를 못 한다」고 말했다.
+pub const exit_no_repo: c_int = 4;
 
 /// 그 종료 코드가 **다시 시도해도 소용없는** 것인가(RW5).
 ///
@@ -46,7 +52,17 @@ pub const exit_unsupported: c_int = 3;
 /// 그래도 목록에 남긴다: 원격에 **판 1 바이너리가 도는 동안**은 그쪽이 여전히 그 코드로 나가고,
 /// 그때 재시도하면 5 초마다 ssh 자식이 뜬다(RW5 가 없앤 폭주). 판이 갈리면 다음 설치에서 바뀐다.
 pub fn isPermanent(exit_code: c_int) bool {
-    return exit_code == exit_watch_limit or exit_code == exit_unsupported;
+    return exit_code == exit_watch_limit or exit_code == exit_unsupported or exit_code == exit_no_repo;
+}
+
+/// 그 종료 코드가 **루트의 성질**인가(호스트가 아니라). 참이면 사용자가 폴더를 바꾸는 것으로 풀리고,
+/// 화면도 호스트가 아니라 **그 폴더**를 말해야 한다.
+///
+/// 이 구분이 없던 동안 화면은 「이 원격은 변경을 감시하지 못합니다」였고, 안내는 「폴더를 접었다
+/// 펴세요」였다. 둘 다 사실이 아니었다 — 원격은 멀쩡했고, 접었다 펴도 루트 문자열이 그대로라
+/// `.gave_up` 이 유지돼 자동 갱신은 안 돌아왔다(`switchRoot` 는 **루트가 바뀔 때만** 판단을 놓는다).
+pub fn isRootScoped(exit_code: c_int) bool {
+    return exit_code == exit_no_repo;
 }
 
 /// 원격에 감시자가 **심겨 있는가**(RW2c). RW2a 가 계약을, RW2b 가 페이로드를 만들어 두고도 «아무도
@@ -223,6 +239,34 @@ pub fn takeChanges(pending: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allo
 }
 
 const testing = std.testing;
+
+test "종료 코드의 «뜻»이 행동을 가른다 — 호스트의 성질과 루트의 성질" {
+    // 이 둘은 **행동을 정하는 순수 함수**다. `isPermanent` 가 거짓이면 앱이 5 초마다 ssh 자식을
+    // 띄우고(실측 30 초에 7 번), `isRootScoped` 가 거짓이면 화면이 멀쩡한 호스트를 탓한다.
+    // 적대적 검증 2026-09-22: 소스를 글자로만 재던 판정자들은 이 둘을 **각각 뒤집어도 통과**했다 —
+    // 값을 아무도 안 봤기 때문이다.
+
+    // ⑴ 다시 시도해도 소용없는 셋은 전부 영구다. 하나라도 빠지면 그 코드에서 폭주가 되살아난다.
+    for ([_]c_int{ exit_watch_limit, exit_unsupported, exit_no_repo }) |code| {
+        try std.testing.expect(isPermanent(code));
+    }
+    // 그 밖은 영구가 아니다 — 일시적 끊김(슬립·네트워크)까지 포기하면 자동 갱신이 영영 안 돌아온다.
+    for ([_]c_int{ 0, 1, 5, 127, 128 }) |code| {
+        try std.testing.expect(!isPermanent(code));
+    }
+
+    // ⑵ **루트의 성질은 `exit_no_repo` «하나뿐»이다.** 넓히면 호스트 문제까지 「폴더를 바꾸세요」로
+    //    안내하게 되고, 좁히면(항상 false) 다시 호스트를 탓한다.
+    try std.testing.expect(isRootScoped(exit_no_repo));
+    for ([_]c_int{ exit_watch_limit, exit_unsupported, 0, 1, 128 }) |code| {
+        try std.testing.expect(!isRootScoped(code));
+    }
+
+    // ⑶ 세 코드는 **서로 달라야** 갈린다. 같은 값이 되면 위 판정이 조용히 무의미해진다.
+    try std.testing.expect(exit_watch_limit != exit_unsupported);
+    try std.testing.expect(exit_unsupported != exit_no_repo);
+    try std.testing.expect(exit_watch_limit != exit_no_repo);
+}
 
 test "완결된 `change` 줄만 세고 부분 줄은 남긴다" {
     const a = testing.allocator;

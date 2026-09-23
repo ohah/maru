@@ -7108,6 +7108,38 @@ pub fn build(b: *std.Build) void {
     restore_reason_step.dependOn(&run_restore_reason.step);
     boundary_step.dependOn(&run_restore_reason.step);
 
+    // 감시 채널 **모듈 자신의** 판정자. 종료 코드의 뜻(`isPermanent`·`isRootScoped`)은 소스를 글자로
+    // 재는 경계 판정자가 **값을 안 보기 때문에** 따로 돌려야 한다 — 적대적 검증 2026-09-22 에서 그 둘을
+    // 각각 뒤집어도 경계 판정자가 전부 통과했다(행동이 바뀌는데 아무도 안 봤다).
+    const remote_watch_module_step = b.step(
+        "test-remote-watch-module",
+        "Remote watch channel module judges (exit-code meaning decides behavior)",
+    );
+    const remote_watch_module_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/remote_watch.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "maru", .module = maru_mod },
+                .{ .name = "syntax", .module = syntax_mod },
+            },
+        }),
+    });
+    const run_remote_watch_module = b.addRunArtifact(remote_watch_module_tests);
+    // **`--maru-expect-tests`(컴파일 수)로 센다.** `--maru-expect-passed` 는 이 그래프에서 못 쓴다 —
+    // `ssh_upload` 의 실물 sshd 하네스가 딸려 오는데 그것이 **환경마다 다른 수로 skip** 되기 때문이다
+    // (로컬 9 통과/2 skip · CI 8 통과/3 skip — 2026-09-23 실측). 컴파일 수는 skip 과 무관해 흔들리지 않고,
+    // 이 가드가 답해야 할 질문(「판정자가 이 바이너리에 골라졌나」)에도 그쪽이 맞다.
+    //
+    // ⚠️ `MARU_TEST_KEEP_ONLY_PREFIX` 로 좁히는 길은 **막혀 있다.** 그 env 는 `envPrefix` 가
+    // `builtin.os.tag != .macos` 에서 `null` 을 돌려주므로 **리눅스에서 통째로 무시**된다 —
+    // `check-boundaries` 는 리눅스 러너라, 필터를 건 줄 알았는데 11 개가 전부 돌아 다시 빨갰다.
+    run_remote_watch_module.addArg("--maru-expect-tests=11");
+    run_remote_watch_module.setCwd(b.path("."));
+    remote_watch_module_step.dependOn(&run_remote_watch_module.step);
+    boundary_step.dependOn(&run_remote_watch_module.step);
+
     const remote_watch_contract_step = b.step(
         "test-remote-watch-contract",
         "Remote watcher source contracts (no libc dir constants, stdin in the wait, limit is reported)",

@@ -345,7 +345,15 @@ fn remoteWatchTarget(self: *AppSession) ?WatchTarget {
 
 /// 감시가 안 서는 원격을 **화면이 말한다**(RW6·§2.5). 문구가 뷰마다 다른 이유는 사용자가 다음에 할
 /// 일이 다르기 때문이다 — 소스 컨트롤은 「직접 새로고침」, 탐색기는 「폴더를 접었다 펴라」다.
-fn watchGaveUpNoticeKey(owner: WatchOwner) maru.i18n.Key {
+fn watchGaveUpNoticeKey(owner: WatchOwner, why: c_int) maru.i18n.Key {
+    // **루트의 문제면 루트를 말한다.** 옛 문구(「이 **원격**은 …」)는 사실이 아니었고, 안내
+    // (「폴더를 접었다 펴세요」)는 **통하지도 않았다** — `switchRoot` 는 루트 **문자열**이 바뀔 때만
+    // 판단을 놓으므로, 같은 폴더를 접었다 펴도 `.gave_up` 이 그대로 남는다(2026-09-22 실측).
+    // 그래서 새 문구는 실제로 풀리는 길만 안내한다: **다른(저장소) 폴더를 열거나 손으로 새로고침**.
+    if (remote_watch_mod.isRootScoped(why)) return switch (owner) {
+        .source_control => .scm_remote_watch_no_repo,
+        .explorer => .fp_remote_watch_no_repo,
+    };
     return switch (owner) {
         .source_control => .scm_remote_watch_gave_up,
         .explorer => .fp_remote_watch_gave_up,
@@ -467,7 +475,7 @@ pub fn pumpRemoteWatch(self: *AppSession) void {
                     "cannot install the remote watcher for this host — auto refresh off dest={s}",
                     .{dest},
                 );
-                self.showNoticeKey(watchGaveUpNoticeKey(target.owner)); // RW6 — 조용히 내리지 않는다
+                self.showNoticeKey(watchGaveUpNoticeKey(target.owner, remote_watch_mod.exit_unsupported)); // RW6 — 조용히 내리지 않는다
                 return;
             },
         }
@@ -535,9 +543,22 @@ pub fn pumpRemoteWatch(self: *AppSession) void {
             self.remote_watch.phase = .gave_up;
             // 문구는 **영어다** — 이 파일의 i18n 원장은 0 이고(번역 대상 레이어), 이것은 UI 가 아니라
             // 진단 로그다. 원장을 올려 예외를 만드느니 로그를 영어로 두는 편이 그 게이트를 안 흐린다.
-            std.log.scoped(.scm).warn(
-                "remote watcher cannot run on this host (exit={d}) — auto refresh off, falling back to manual refresh dest={s}",
-                .{ why, dest },
+            //
+            // ⚠️ **호스트를 탓하기 전에 루트인지 본다**(2026-09-22 실측). 저장소가 아닌 폴더를 탐색기로
+            // 열면 git 이 `128` 로 끊기는데, 옛 판은 그것을 `unsupported` 로 내보내 이 줄이
+            // 「이 **호스트**가 감시를 못 한다」고 말했다. 원격은 macOS 25.5.0 · git 2.50.1 로 멀쩡했고
+            // 같은 호스트의 저장소 폴더에서는 `exit=0` 이었다 — 사용자가 엉뚱한 곳을 고치러 간다.
+            //
+            // **경로도 싣는다.** 옛 줄은 `dest` 만 남겨, 어느 폴더가 문제인지 로그로는 알 수 없었다
+            // (그 부재 때문에 이 결함을 로그로 못 짚고 원격에서 손으로 재현해야 했다).
+            if (remote_watch_mod.isRootScoped(why)) {
+                std.log.scoped(.scm).warn(
+                    "remote watch off for this folder — not a git repository or git refused it (exit={d}) dest={s} root={s}",
+                    .{ why, dest, target.root },
+                );
+            } else std.log.scoped(.scm).warn(
+                "remote watcher cannot run on this host (exit={d}) — auto refresh off, falling back to manual refresh dest={s} root={s}",
+                .{ why, dest, target.root },
             );
             // **조용히 내리지 않는다**(RW6). 로그는 사용자가 안 본다 — 화면에는 「어느 순간부터 도크가
             // 안 바뀐다」로만 보이고, 그러면 감시가 꺼진 것이 아니라 저장소가 안 바뀐 것으로 읽는다.
@@ -545,7 +566,7 @@ pub fn pumpRemoteWatch(self: *AppSession) void {
             //
             // ⚠️ **여기 한 번뿐이다.** `.gave_up` 은 위 switch 가 곧장 return 하는 흡수 상태라 이 줄에
             // 두 번 닿을 수 없고, 대상이 바뀌어 `rememberGitRepoDest` 가 채널을 놓아야 풀린다.
-            self.showNoticeKey(watchGaveUpNoticeKey(target.owner));
+            self.showNoticeKey(watchGaveUpNoticeKey(target.owner, why));
         } else {
             self.remote_watch.phase = .backoff;
             self.remote_watch.retry_at_ns = now + remote_watch_mod.retry_ns;

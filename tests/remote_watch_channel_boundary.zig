@@ -185,15 +185,23 @@ test "포기했으면 «화면이» 말한다 — 로그는 사용자가 안 본
     // 「어느 순간부터 도크가 안 바뀐다」로만 보이고 저장소가 안 바뀐 것으로 읽힌다.
     // **주인마다 문구가 다르다**(RF5a) — 사용자가 다음에 할 일이 다르기 때문이다. 선택자 하나가
     // 그 갈래를 소유하고, 두 키가 다 살아 있어야 한다.
-    try std.testing.expect(std.mem.indexOf(u8, pump, "showNoticeKey(watchGaveUpNoticeKey(target.owner))") != null);
-    const notice_fn = try bodyOf(git, "fn watchGaveUpNoticeKey(", "\n}\n", 1024);
+    try std.testing.expect(std.mem.indexOf(u8, pump, "showNoticeKey(watchGaveUpNoticeKey(target.owner") != null);
+    const notice_fn = try bodyOf(git, "fn watchGaveUpNoticeKey(", "\n}\n", 2048);
     try std.testing.expect(std.mem.indexOf(u8, notice_fn, ".scm_remote_watch_gave_up") != null);
     try std.testing.expect(std.mem.indexOf(u8, notice_fn, ".fp_remote_watch_gave_up") != null);
+
+    // **「호스트가 못 한다」와 「이 폴더가 저장소가 아니다」를 가른다**(2026-09-22 실측). 옛 문구는
+    // 멀쩡한 원격(macOS 25.5.0 · git 2.50.1)을 탓했고, 안내(「폴더를 접었다 펴세요」)는 통하지도
+    // 않았다 — `switchRoot` 는 루트 **문자열**이 바뀔 때만 판단을 놓으므로 같은 폴더를 접었다 펴도
+    // `.gave_up` 이 남는다. 선택자가 **사유**를 보고 갈라야 하고, 네 키가 모두 살아 있어야 한다.
+    try std.testing.expect(std.mem.indexOf(u8, notice_fn, "isRootScoped(why)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, notice_fn, ".scm_remote_watch_no_repo") != null);
+    try std.testing.expect(std.mem.indexOf(u8, notice_fn, ".fp_remote_watch_no_repo") != null);
 
     // ⚠️ **영구 실패에서만 말한다.** 일시적 끊김(슬립·네트워크)에도 띄우면 배너가 잔소리가 되고,
     // 그러면 사용자가 배너 자체를 무시하게 된다 — 정작 영구 실패일 때 안 읽힌다.
     const permanent = try bodyOf(pump, "if (remote_watch_mod.isPermanent(why)) {", "\n        } else {", 4096);
-    try std.testing.expect(std.mem.indexOf(u8, permanent, "showNoticeKey(watchGaveUpNoticeKey(target.owner))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, permanent, "showNoticeKey(watchGaveUpNoticeKey(target.owner") != null);
     const transient = try bodyOf(pump, "\n        } else {", "\n        }\n", 4096);
     const transient_code = try stripComments(allocator, transient);
     defer allocator.free(transient_code);
@@ -304,7 +312,7 @@ test "설치 계약이 «죽은 계약» 이 아니다 — 제품이 실제로 �
     const unsup = try bodyOf(pump, ".unsupported => {", "\n            },", 1024);
     try std.testing.expect(std.mem.indexOf(u8, unsup, "phase = .gave_up") != null);
     // 포기했으면 **화면이 말한다**(RW6 과 같은 규율).
-    try std.testing.expect(std.mem.indexOf(u8, unsup, "showNoticeKey(watchGaveUpNoticeKey(target.owner))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, unsup, "showNoticeKey(watchGaveUpNoticeKey(target.owner") != null);
     // ⚠️ **틱에서는 ssh 를 «안» 부른다**(8 회차). `runRemoteScript` 에 마감이 없어, 틱에서 부르면
     // 원격이 멈출 때 **UI 가 통째로 선다**(실측: 정상 왕복도 로컬호스트에서 10 ms).
     const begin2 = try bodyOf(app, "pub fn beginWatchInstall(", "\n    }\n", 4096);

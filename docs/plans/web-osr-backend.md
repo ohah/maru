@@ -84,6 +84,8 @@ sidecar 는 maru 앱 프로세스마다 **하나**다. CEF 는 `root_cache_path`
   sidecar 가 보낸 바이트를 공격 입력으로 다룬다(sidecar 는 신뢰할 수 없는 웹을 띄우는 프로세스 트리의 뿌리다).
   decode 오류가 한 번 나면 채널을 닫는다(decoder 도 잠긴다 — 이후 같은 오류만 돌려준다). 읽는 쪽은 `feed` 가 받은 만큼만 넣고
   `next` 로 비운 뒤 나머지를 넣는다(조각을 통째로 받던 판은 정상 스트림에서도 넘쳤다 — 적대 검증).
+- `failure.detail` 과 sidecar 의 stderr 문구는 **진단용 영어**다(i18n 원장 규칙 — docs/i18n.md §7). 사용자에게 보일 문구는 maru 가
+  `failure.code` 로 i18n 해서 만든다(W3).
 - **stdout 보호**: sidecar 는 시작하자마자 원래 stdin·stdout 을 CLOEXEC 사본으로 옮기고(helper 에게 새지 않게) fd 0 은
   `/dev/null`, fd 1 은 stderr 로 돌린다 — Chromium·helper 가 stdout 에 무엇을 찍어도 frame 이 깨지지 않게. W1b 실측에서는
   초기화~종료 동안 stdout·stderr 모두 0 바이트였다(WARNING 수준). 알림 쓰기는 SIGPIPE 를 무시해 maru 가 먼저 사라져도

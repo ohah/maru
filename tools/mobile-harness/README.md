@@ -46,7 +46,8 @@ swift tools/mobile-harness/sim_input.swift calibrate   # 앱을 띄워 두고 �
 
 **보정은 스스로를 확인하고 나서 저장한다** — 푼 사상으로 셋째 점을 보내고 앱이 그 자리를 받았는지
 본다(2pt 안). 안 맞으면 **저장하지 않는다**: 틀린 값을 적어 두면 그 뒤 모든 손짓이 조용히 빗나간다.
-`selftest` 는 시뮬레이터 없이 도는 판정이라 `doc_claims.sh` 가 함께 돌린다. **macOS 가 아니면
+`selftest` 는 시뮬레이터 창 조회보다 먼저 실행하며, 파일 왕복도 별도 임시 파일에서 검사해
+사용자의 실제 보정 파일을 읽거나 지우지 않는다. `doc_claims.sh` 가 함께 돌린다. **macOS 가 아니면
 건너뛴다고 말한다** — 이 스크립트는 `CGEvent`·`CGWindowList` 를 쓰므로 다른 OS 에서는 안 돈다
 (처음에 `swift` 존재로 갈랐다가 CI(ubuntu)에서 붉었다: 거기도 swift 는 있고 CoreGraphics 만
 없어서 **돌긴 돌고 아무것도 안 뱉었다**). 조용히 안 도는 게이트는 게이트가 아니다.

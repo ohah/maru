@@ -1048,8 +1048,9 @@ pub const GpuGlyph = extern struct {
 pub const GpuImage = extern struct {
     // 그릴 이미지(K2d가 image_id로 MTLTexture를 찾는다).
     image_id: u32,
-    // 목적지 사각형(터미널-로컬 backing px — col/row × 셀크기 + 셀내 오프셋). 화면 위로 벗어난 앵커는
-    // dest_y가 음수일 수 있다(렌더러가 클립). origin_x/y는 split panel 픽셀 오프셋(K2c 배선에서 채움).
+    // 목적지 사각형(터미널-로컬 backing px — col/row × 셀크기 + 셀내 오프셋). 위로 밀린 앵커·넘치는 placement 도
+    // 뷰포트로 잘린 뒤라 음수·넘침이 없다(`clipToViewport` — 렌더러 이미지 패스에는 scissor 가 없어 CPU 가 자른다).
+    // origin_x/y는 split panel 픽셀 오프셋(K2c 배선에서 채움).
     dest_x: f32,
     dest_y: f32,
     dest_w: f32,
@@ -1070,6 +1071,30 @@ pub const GpuImage = extern struct {
 /// `GpuImage.pass`에서 z<bg_limit이면 셀 배경보다 뒤(0). 베이스: kitty graphics protocol z-index 의미를
 /// Ghostty가 세 구간으로 나눈 경계(동작 비교) — minInt(i32)/2.
 const kitty_z_bg_limit: i32 = @divTrunc(std.math.minInt(i32), 2);
+
+/// 이미지 quad 를 **자기 터미널 뷰포트**(0,0)~(view_w,view_h) 로 자른다. UV 도 같은 비율로 줄여 남은 부분의
+/// 그림이 늘어나지 않게 한다. 렌더러의 이미지 패스(`MARU_DRAW_IMAGES`)에는 scissor 가 없어서, 안 자르면
+/// 뷰포트에 걸친 부분이 **옆 pane·도크 위로**(오른쪽·아래로 넘칠 때), **pane 탭 바 위로**(스크롤로 위로
+/// 밀렸을 때) 그려진다. split 으로 pane 이 좁아졌는데 placement 가 원래 열 수를 유지하면 실제로 그렇게 됐다.
+/// 렌더러 ABI 를 건드리지 않고 CPU 에서 잘라 scissor 와 같은 결과를 낸다. 남는 게 없으면 false.
+fn clipToViewport(g: *GpuImage, view_w: f32, view_h: f32) bool {
+    const x0 = @max(g.dest_x, 0);
+    const y0 = @max(g.dest_y, 0);
+    const x1 = @min(g.dest_x + g.dest_w, view_w);
+    const y1 = @min(g.dest_y + g.dest_h, view_h);
+    if (x1 <= x0 or y1 <= y0) return false;
+    const du = (g.src_u1 - g.src_u0) / g.dest_w;
+    const dv = (g.src_v1 - g.src_v0) / g.dest_h;
+    g.src_u0 += (x0 - g.dest_x) * du;
+    g.src_u1 -= (g.dest_x + g.dest_w - x1) * du;
+    g.src_v0 += (y0 - g.dest_y) * dv;
+    g.src_v1 -= (g.dest_y + g.dest_h - y1) * dv;
+    g.dest_x = x0;
+    g.dest_y = y0;
+    g.dest_w = x1 - x0;
+    g.dest_h = y1 - y0;
+    return true;
+}
 
 /// kitty graphics placement(뷰포트 상대 셀 좌표) 목록을 GPU 드로우 프리미티브 GpuImage로 환산한다.
 /// 셀 메트릭(cell_width_px/height_px)으로 목적지 픽셀 사각형을, 이미지 픽셀 크기로 source UV를 정한다.
@@ -1137,7 +1162,7 @@ pub fn buildGpuImages(
         if (dest_x + dest_w <= 0 or dest_y + dest_h <= 0 or dest_x >= view_w or dest_y >= view_h) continue;
 
         const pass: u32 = if (p.z < kitty_z_bg_limit) 0 else if (p.z < 0) 1 else 2;
-        try out.append(allocator, .{
+        var gi: GpuImage = .{
             .image_id = p.image_id,
             .dest_x = dest_x,
             .dest_y = dest_y,
@@ -1149,7 +1174,9 @@ pub fn buildGpuImages(
             .src_v1 = @as(f32, @floatFromInt(sy + sh)) / tex_h,
             .z = p.z,
             .pass = pass,
-        });
+        };
+        if (!clipToViewport(&gi, view_w, view_h)) continue;
+        try out.append(allocator, gi);
     }
 
     // unicode placeholder 셀 → 타일 quad(일반 placement 와 같은 목록에 넣어 z/pass 정렬을 공유한다).
@@ -1263,6 +1290,12 @@ fn findImage(images: []const terminal.KittyImageView, image_id: u32) ?terminal.K
         if (img.image_id == image_id) return img;
     }
     return null;
+}
+
+/// 여러 surface 의 이미지를 합친 뒤 다시 (pass, z) 순으로 맞춘다. 렌더러는 이 순서를 전제로 텍스트-앞 패스의
+/// 시작(`image_above_start`)을 자르므로, 비활성 pane 이미지를 뒤에 붙이고 정렬하지 않으면 패스가 섞인다.
+pub fn sortGpuImages(images: []GpuImage) void {
+    std.sort.pdq(GpuImage, images, {}, lessGpuImage);
 }
 
 fn lessGpuImage(_: void, a: GpuImage, b: GpuImage) bool {
@@ -3177,7 +3210,7 @@ test "buildGpuImages: z-pass 분류와 (pass,z) 정렬" {
     try std.testing.expectEqual(@as(u32, 2), out[2].pass); // above_text 마지막
 }
 
-test "buildGpuImages: 화면 밖은 cull, 위로 걸친 건 음수 dest_y로 유지, 없는 이미지는 skip" {
+test "buildGpuImages: 화면 밖은 cull, 위로 걸친 건 뷰포트로 잘림(UV 보정), 없는 이미지는 skip" {
     const images = [_]terminal.KittyImageView{.{ .image_id = 1, .width = 10, .height = 10, .bpp = 4, .generation = 1, .pixels = &test_pixels_present }};
     // (a) 완전히 화면 위(row=-10, 높이 10셀? 여기선 자동크기 10px라 dest_y=-200, +10 <= 0) → cull
     const above = [_]terminal.KittyPlacement{.{ .image_id = 1, .placement_id = 1, .row = -10, .col = 0, .z = 0 }};
@@ -3185,18 +3218,37 @@ test "buildGpuImages: 화면 밖은 cull, 위로 걸친 건 음수 dest_y로 유
     defer std.testing.allocator.free(out_a);
     try std.testing.expectEqual(@as(usize, 0), out_a.len);
 
-    // (b) 위로 일부만 걸침(row=-1, rows=3 → dest_y=-20, dest_h=60 → 화면과 겹침) → 유지(dest_y 음수)
+    // (b) 위로 일부만 걸침(row=-1, rows=3 → dest_y=-20, dest_h=60 → 화면과 겹침) → 유지하되 **뷰포트로 잘린다**.
+    //     옛 계약은 dest_y=-20 을 그대로 넘기고 「렌더러가 클립」한다고 했지만, 렌더러 이미지 패스엔 scissor 가
+    //     없어 위 20px 가 pane 탭 바 위에 그려졌다. 이제 dest 는 [0,40) 이고 V 도 위 1/3 을 버린다.
     const partial = [_]terminal.KittyPlacement{.{ .image_id = 1, .placement_id = 1, .row = -1, .col = 0, .rows = 3, .columns = 2, .z = 0 }};
     const out_b = try buildGpuImages(std.testing.allocator, &partial, &images, .{ .cols = 10, .rows = 6 }, 10, 20, &.{}, &.{}, &.{});
     defer std.testing.allocator.free(out_b);
     try std.testing.expectEqual(@as(usize, 1), out_b.len);
-    try std.testing.expectEqual(@as(f32, -20), out_b[0].dest_y);
+    try std.testing.expectEqual(@as(f32, 0), out_b[0].dest_y);
+    try std.testing.expectEqual(@as(f32, 40), out_b[0].dest_h);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0 / 3.0), out_b[0].src_v0, 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), out_b[0].src_v1, 1e-5);
 
     // (c) 없는 image_id → skip
     const missing = [_]terminal.KittyPlacement{.{ .image_id = 99, .placement_id = 1, .row = 0, .col = 0, .z = 0 }};
     const out_c = try buildGpuImages(std.testing.allocator, &missing, &images, .{ .cols = 10, .rows = 6 }, 10, 20, &.{}, &.{}, &.{});
     defer std.testing.allocator.free(out_c);
     try std.testing.expectEqual(@as(usize, 0), out_c.len);
+}
+
+test "buildGpuImages: 오른쪽·아래로 넘치는 placement 는 자기 뷰포트까지만 — 옆 pane·도크를 덮지 않는다" {
+    // 실측(2026-09-23): split 으로 pane 이 좁아졌는데 placement 가 원래 열 수(90열)를 유지해 오른쪽 도크 위까지
+    // 그려졌다. 뷰포트 10x6 셀(100x120px)에 20x10 셀(200x200px) placement 를 놓으면 오른쪽 절반·아래가 잘린다.
+    const images = [_]terminal.KittyImageView{.{ .image_id = 1, .width = 10, .height = 10, .bpp = 4, .generation = 1, .pixels = &test_pixels_present }};
+    const wide = [_]terminal.KittyPlacement{.{ .image_id = 1, .placement_id = 1, .row = 0, .col = 0, .columns = 20, .rows = 10, .z = 0 }};
+    const out = try buildGpuImages(std.testing.allocator, &wide, &images, .{ .cols = 10, .rows = 6 }, 10, 20, &.{}, &.{}, &.{});
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqual(@as(usize, 1), out.len);
+    try std.testing.expectEqual(@as(f32, 100), out[0].dest_w); // 200 → 뷰포트 폭 100
+    try std.testing.expectEqual(@as(f32, 120), out[0].dest_h); // 200 → 뷰포트 높이 120
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), out[0].src_u1, 1e-5); // 오른쪽 절반 버림 — 그림이 늘어나지 않는다
+    try std.testing.expectApproxEqAbs(@as(f32, 0.6), out[0].src_v1, 1e-5); // 120/200
 }
 
 // --- kitty graphics K2c: 이미지 업로드 플래너(generation 기반 dedup) ---

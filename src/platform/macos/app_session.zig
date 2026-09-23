@@ -97,6 +97,7 @@ test {
 }
 pub const agent_session_archive_view = maru.session.agent_session_archive_view;
 pub const metal_frame = renderer.metal_frame; // §8: metal_frame이 renderer로 이주 — maru.renderer barrel 경유(중립 frame DTO)
+const kitty_image_ids = renderer.kitty_image_ids; // 보이는 pane 여럿의 kitty id 를 겹치지 않는 u32 로(텍스처 캐시가 창 하나)
 const shell_integration = @import("shell_integration.zig");
 pub const global_hotkey = @import("global_hotkey.zig");
 pub const command_catalog = @import("command_catalog.zig");
@@ -545,6 +546,8 @@ const max_clipboard_read_bytes: usize = 16 * 1000 * 1000;
 // 배경 이미지(window.background-image, F2-1)용 예약 kitty image id — kg 텍스처 캐시·live_ids에서 배경 이미지를
 // 가리킨다. u32 최댓값이라 kitty 프로그램 id(보통 작은 값)와 충돌 가능성이 낮다(충돌 시 텍스처 슬롯 공유 — 드묾).
 const background_image_id: u32 = 0xFFFF_FFFF;
+/// kitty 가 아닌 소비자가 텍스처 캐시에 쓰는 고정 id — 전역 id 매핑이 이 번호를 kitty 이미지에 주지 않는다.
+const kitty_reserved_ids = [_]u32{background_image_id};
 
 /// Archive scope owns only display filtering.  It never changes the scanner's
 /// candidate set, so changing scope/search is immediately reversible and does
@@ -6345,6 +6348,9 @@ pub const AppSession = struct {
     // 비교해 바뀐 것만 업로드 채널에 싣는다(이미지당 개별 텍스처·upload-once). Swift 렌더러 텍스처 캐시의
     // Zig측 미러 — 둘이 desync하면(렌더러 재생성 등) 그 이미지는 다음 transmit까지 안 그려질 뿐이다.
     kitty_uploaded: std.AutoHashMapUnmanaged(u32, u64) = .{},
+    /// (surface, 로컬 kitty id) → 전역 id. 화면에 보이는 pane 여럿의 이미지를 **같은** 텍스처 캐시·업로드 기록에
+    /// 올리므로 키가 겹치면 안 된다(renderer/kitty_image_ids.zig). pane 하나면 원래 id 그대로라 동작 무변화.
+    kitty_ids: kitty_image_ids.KittyImageIds = .{},
     // 배경 이미지(window.background-image, F2-1) 디코드 캐시. config 경로가 바뀔 때만 파일을 읽어 PNG를 RGBA(또는
     // RGB)로 디코드해 둔다. 매 frame 디코드 안 함 — pixels는 generation으로 1회 업로드(kg_uploads), GpuImage는 매
     // frame 풀-윈도 pass-0으로 붙인다. 빈 경로면 width=0(배경 없음). destroy에서 pixels·path_cache 해제.
@@ -12866,6 +12872,88 @@ pub const AppSession = struct {
     /// kitty graphics(K4c): kitty_uploaded(렌더러 업로드 generation 미러)를 live id 집합으로 prune한다 —
     /// live가 아닌(저장소에서 빠진/Swift가 텍스처를 evict할) image_id를 dedup 상태에서도 제거해, 다시
     /// 활성화되면 planImageUploads가 재업로드하게 한다. id 수가 작아 선형 검색으로 충분하다.
+    /// surface 의 이미지 목록을 **전역 id 로 바꾼 사본**으로 만들고, 그 전역 id 를 live 집합에 넣는다.
+    /// `planImageUploads` 는 GpuImage 와 이미지를 id 로 짝짓고 업로드에 이미지의 id 를 싣으므로 둘 다 전역
+    /// id 여야 한다. 사본은 작은 구조체 복사다(픽셀은 코어 alias 그대로 — 호출자가 그 surface 락을 쥔 동안만 유효).
+    /// OOM 이면 빈 목록(이번 프레임 그 surface 이미지 생략 — 다음 프레임 재시도).
+    fn remapKittyImages(self: *AppSession, surface_key: usize, images: []const terminal.KittyImageView, live: *std.ArrayList(u32)) []terminal.KittyImageView {
+        const out = self.allocator.alloc(terminal.KittyImageView, images.len) catch return &.{};
+        for (images, out) |img, *o| {
+            o.* = img;
+            o.image_id = self.kitty_ids.resolve(self.allocator, .{ .surface = surface_key, .local = img.image_id }, &kitty_reserved_ids) catch img.image_id;
+            live.append(self.allocator, o.image_id) catch {};
+        }
+        return out;
+    }
+
+    /// 화면에 split 으로 함께 보이는 **비활성** terminal pane 의 kitty 이미지를 이번 프레임 목록에 합친다.
+    /// 옛 동작은 활성 pane 하나만 모아 비활성 pane 이미지가 안 보였고(텍스처도 evict), 다시 활성화해야 재업로드됐다.
+    /// 픽셀 복사(`planImageUploads`)가 코어 메모리를 읽으므로 **그 surface 락 안에서** 한다. 버퍼는 surface 마다
+    /// 임시로 만들어 기존 버퍼 뒤에 잇고 offset 을 민다(배경 이미지 합류와 같은 패턴). 다 합친 뒤 (pass, z) 로
+    /// 다시 정렬한다 — 렌더러가 그 순서로 패스 경계를 자른다.
+    fn appendVisibleInactiveKittyImages(
+        self: *AppSession,
+        leaves: []const PaneTree.LeafRect,
+        active_pane: anytype,
+        kg_images: *[]metal_frame.GpuImage,
+        kg_uploads: *[]metal_frame.GpuImageUpload,
+        kg_pixels: *[]u8,
+        kg_pixels_owned: *bool,
+        live: *std.ArrayList(u32),
+    ) void {
+        var appended = false;
+        for (leaves) |lr| {
+            if (lr.leaf == active_pane) continue;
+            if (lr.leaf.activeTerm().kind != .terminal) continue; // web·편집기 pane 엔 kitty 가 없다
+            const pane_surface = lr.leaf.activeTerm().surface;
+            const key: usize = @intFromPtr(pane_surface);
+            pane_surface.lockCore(self.io);
+            defer pane_surface.unlockCore(self.io);
+            const snap = pane_surface.renderSnapshot();
+            const imgs = self.remapKittyImages(key, snap.images, live);
+            defer self.allocator.free(imgs);
+            if (!needsKittyImagePass(snap)) continue;
+            const built = metal_frame.buildGpuImages(self.allocator, snap.placements, snap.images, snap.size, self.cell_width_px, self.cell_height_px, snap.cells, snap.graphemes, snap.virtual_placements) catch continue;
+            defer self.allocator.free(built);
+            if (built.len == 0) continue;
+            const t = pane_ops.paneTermRect(self, lr.rect); // 텍스트와 같은 origin(바 아래)
+            for (built) |*gi| {
+                gi.origin_x = t.x;
+                gi.origin_y = t.y;
+                gi.image_id = self.kitty_ids.resolve(self.allocator, .{ .surface = key, .local = gi.image_id }, &kitty_reserved_ids) catch gi.image_id;
+            }
+            // 업로드 계획 — 이 surface 락 안에서 픽셀을 임시 버퍼로 복사한다.
+            var ibuf: []u8 = &.{};
+            var icap: usize = 0;
+            defer if (icap > 0) self.allocator.free(ibuf);
+            const plan = metal_frame.planImageUploads(self.allocator, built, imgs, &self.kitty_uploaded, &ibuf, &icap) catch continue;
+            defer self.allocator.free(plan.uploads);
+            // 이미지·업로드·픽셀을 기존 목록 뒤에 잇는다.
+            const new_images = std.mem.concat(self.allocator, metal_frame.GpuImage, &.{ kg_images.*, built }) catch continue;
+            self.allocator.free(kg_images.*);
+            kg_images.* = new_images;
+            appended = true;
+            if (plan.uploads.len == 0) continue;
+            if (!self.promoteKgPixelsOwned(kg_pixels, kg_pixels_owned)) continue;
+            const base = kg_pixels.len;
+            const new_pixels = std.mem.concat(self.allocator, u8, &.{ kg_pixels.*, plan.pixels }) catch continue;
+            const new_uploads = self.allocator.alloc(metal_frame.GpuImageUpload, kg_uploads.len + plan.uploads.len) catch {
+                self.allocator.free(new_pixels);
+                continue;
+            };
+            @memcpy(new_uploads[0..kg_uploads.len], kg_uploads.*);
+            for (plan.uploads, new_uploads[kg_uploads.len..]) |up, *dst| {
+                dst.* = up;
+                dst.pixels_offset = base + up.pixels_offset;
+            }
+            self.allocator.free(kg_pixels.*);
+            self.allocator.free(kg_uploads.*);
+            kg_pixels.* = new_pixels;
+            kg_uploads.* = new_uploads;
+        }
+        if (appended) metal_frame.sortGpuImages(kg_images.*);
+    }
+
     fn pruneKittyUploaded(self: *AppSession, live_ids: []const u32) void {
         var to_remove: std.ArrayList(u32) = .empty;
         defer to_remove.deinit(self.allocator);
@@ -21271,9 +21359,11 @@ pub const AppSession = struct {
             // (사이드바·탭바)을 커밋한다 — 안 그러면 web 활성 시 chrome이 stale로 남고 metal_dirty가 안 내려가 스핀한다.
             // terminal이면 `!activeTermIsTerminal()`=false라 조건이 `pane_frames.items.len > 0`으로 접혀 byte-identical.
             if ((pane_frames.items.len > 0 or !term_ops.activeTermIsTerminal(self)) and !active_failed) {
-                // kitty graphics(K2d): 활성 surface(이 frame을 만든 surface)의 placement를 GpuImage로 환산하고,
-                // generation이 바뀐 이미지만 업로드 채널로 만든다. dest origin은 활성 panel의 픽셀 origin(사이드바
-                // 폭·탭 바 아래)으로 박아 터미널 sub-rect에 그려지게 한다. 비활성 panel 이미지는 후속(단일 활성 기준).
+                // kitty graphics(K2d): **화면에 보이는** terminal pane 들의 placement를 GpuImage로 환산하고,
+                // generation이 바뀐 이미지만 업로드 채널로 만든다. dest origin은 각 panel의 픽셀 origin(사이드바
+                // 폭·탭 바 아래)으로 박아 자기 터미널 sub-rect에 그려지게 한다. 활성 pane 을 먼저, 그다음 split 으로
+                // 함께 보이는 비활성 pane 을 모은다. 안 보이는 pane(다른 워크스페이스 탭·pane 안 뒤쪽 Term)은 모으지
+                // 않으므로 그 텍스처는 옛처럼 live 집합에서 빠져 evict 된다. id 는 `kitty_ids` 로 전역화한다.
                 var kg_images: []metal_frame.GpuImage = &.{};
                 var kg_uploads: []metal_frame.GpuImageUpload = &.{};
                 var kg_pixels: []u8 = &.{};
@@ -21288,6 +21378,7 @@ pub const AppSession = struct {
                 defer kg_live_ids.deinit(self.allocator);
                 // [4e-2, §6] 활성 Term이 web이면 kitty 이미지 경로를 건너뛴다(sentinel엔 placement 없음) — terminal이면
                 // activeTerminalSurface()=activeSurface()라 옛 `if (self.surface_initialized)`와 byte-identical.
+                self.kitty_ids.beginFrame();
                 if (term_ops.activeTerminalSurface(self)) |active_surface| {
                     // 코어 변경(setCellMetrics·setDefaultColors)과 kitty 이미지 읽기(snap.placements/images는
                     // 코어 alias)는 모두 락 아래(docs/io-render-threading.md PR3 — 리더 core.write와 경합 방지).
@@ -21304,11 +21395,11 @@ pub const AppSession = struct {
                     // OSC 10/11 색 질의 응답용 theme 전경/배경 RGB도 주입(코어는 Color.default 추상만 알아 실제 색 필요).
                     active_surface.core.setDefaultColors(self.appearance.theme.foreground, self.appearance.theme.background);
                     const snap = active_surface.renderSnapshot();
-                    // K4c: 살아있는 이미지 id 집합(활성 surface 저장소). Swift가 이 집합에 없는 텍스처를 evict.
-                    for (snap.images) |img| kg_live_ids.append(self.allocator, img.image_id) catch {};
-                    // kitty_uploaded를 같은 집합으로 prune — 텍스처가 evict된(=live 아님) 이미지는 dedup 상태에서도
-                    // 빼, 다시 활성화되면 재업로드되게(Swift 캐시와 동기). 멀티 surface 전환 시 정합.
-                    self.pruneKittyUploaded(kg_live_ids.items);
+                    // K4c: 살아있는 이미지 id 집합(보이는 surface 들의 저장소, 전역 id). Swift가 이 집합에 없는
+                    // 텍스처를 evict. 활성 surface 를 먼저 resolve 해 원래 id 우선권을 활성 pane 이 갖게 한다.
+                    const active_key: usize = @intFromPtr(active_surface);
+                    const active_images = self.remapKittyImages(active_key, snap.images, &kg_live_ids);
+                    defer self.allocator.free(active_images);
                     // **U=1 virtual placement 도 그릴 것이 있다.** 일반 placement 가 0 이어도 화면의
                     // placeholder 셀이 타일을 만들므로, 옛 `placements.len > 0` 가드는 그 경로를 통째로
                     // 건너뛰었다 — 헤드리스 판정자는 `buildGpuImages` 를 직접 불러 이 가드를 안 밟는다(적대적
@@ -21319,11 +21410,12 @@ pub const AppSession = struct {
                         for (kg_images) |*gi| {
                             gi.origin_x = active_origin_x;
                             gi.origin_y = active_origin_y;
+                            gi.image_id = self.kitty_ids.resolve(self.allocator, .{ .surface = active_key, .local = gi.image_id }, &kitty_reserved_ids) catch gi.image_id;
                         }
                         if (kg_images.len > 0) {
                             if (ft_on and ft_img1 == ft_start) ft_img1 = std.Io.Clock.awake.now(self.io).nanoseconds; // buildGpuImages 끝 = 업로드 계획 시작
                             // 픽셀은 AppSession 버퍼에 쌓는다(할당 0) — uploads 만 새로 만든다.
-                            if (metal_frame.planImageUploads(self.allocator, kg_images, snap.images, &self.kitty_uploaded, &self.kitty_pixels_buf, &self.kitty_pixels_cap)) |plan| {
+                            if (metal_frame.planImageUploads(self.allocator, kg_images, active_images, &self.kitty_uploaded, &self.kitty_pixels_buf, &self.kitty_pixels_cap)) |plan| {
                                 kg_uploads = plan.uploads;
                                 kg_pixels = plan.pixels;
                                 kg_pixels_owned = false;
@@ -21332,6 +21424,14 @@ pub const AppSession = struct {
                         }
                     }
                 }
+                // 화면에 split 으로 함께 보이는 비활성 terminal pane 의 이미지. 활성 Term 이 web 이어도 옆 terminal
+                // pane 은 보이므로 활성 블록 밖에서 돈다.
+                if (leaf_rects.items.len > 1) self.appendVisibleInactiveKittyImages(leaf_rects.items, active_pane, &kg_images, &kg_uploads, &kg_pixels, &kg_pixels_owned, &kg_live_ids);
+                // kitty_uploaded를 live 집합으로 prune — 텍스처가 evict된(=live 아님) 이미지는 dedup 상태에서도
+                // 빼, 다시 보이면 재업로드되게(Swift 캐시와 동기). 매핑이 놓아준 전역 id 도 여기서 빠진다(live 아님) —
+                // 그 id 가 나중에 다른 이미지에 재배정될 때 옛 generation 으로 업로드를 건너뛰는 일을 막는다.
+                _ = self.kitty_ids.endFrame(self.allocator) catch &.{};
+                self.pruneKittyUploaded(kg_live_ids.items);
                 // **락 밖**에서 host 로 보낸다. 위 주입은 원격일 때 로컬 거울에만 닿으므로 진짜 코어가
                 // 있는 host 에도 맞춰야 한다 — 바뀔 때만 나가고, 코어 락을 쥔 채 RPC 를 걸지 않는다.
                 self.syncRemoteCellMetrics();
@@ -23456,6 +23556,7 @@ pub const AppSession = struct {
         self.gpu_shadows.deinit(self.allocator);
         self.gpu_glyphs.deinit(self.allocator);
         self.kitty_uploaded.deinit(self.allocator);
+        self.kitty_ids.deinit(self.allocator);
         // 재사용 버퍼는 **할당받은 크기로** 돌려준다(길이는 마지막 프레임 사용량일 뿐이라 다르다).
         if (self.kitty_pixels_cap > 0) self.allocator.free(self.kitty_pixels_buf.ptr[0..self.kitty_pixels_cap]);
         // F2-1 배경 이미지 디코드 캐시 — owned 픽셀·경로 문자열(빈 경로면 empty라 무해).
@@ -90985,6 +91086,62 @@ test "원격 탐색기 미러 정리: 오래된 것만 지우고 우리 하위 �
 /// 안 밟아서 초록이었다 — 화면 캡처(적대적 검증 R2)가 잡았다.
 fn needsKittyImagePass(snap: maru.terminal.RenderSnapshot) bool {
     return snap.placements.len > 0 or snap.virtual_placements.len > 0;
+}
+
+test "kitty: split 으로 함께 보이는 비활성 pane 의 이미지도 그린다 — 같은 로컬 id 는 전역 id 로 갈린다" {
+    // **사용자 관측 2026-09-23**: split 두 pane 에 각각 이미지를 두면 비활성 쪽이 비어 보였다(활성 surface 만
+    // 모으고 비활성 텍스처는 evict). 고치면서 생기는 함정도 함께 잰다: 두 pane 의 앱이 **같은 id** 를 쓰면
+    // 텍스처 캐시·업로드 기록(맨 id 키)이 겹쳐 한쪽이 다른 쪽 그림을 보인다 — terminal-browser 는 id 를 고정해 쓴다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // splitActivePane = 실 PTY/CoreText
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+
+    const left = term_ops.activeSurface(session);
+    try pane_ops.splitActivePane(session, .horizontal);
+    const right = term_ops.activeSurface(session); // 새 pane 이 활성
+    try std.testing.expect(left != right);
+
+    // 2x2 RGBA, 양쪽 다 **i=7**. c/r 로 셀 크기를 고정해 배치를 결정적으로 만든다.
+    const apc = "\x1b_Ga=T,f=32,s=2,v=2,i=7,c=2,r=1,q=2;/wAA//8AAP//AAD//wAA/w==\x1b\\";
+    try left.core.write(apc);
+    try right.core.write(apc);
+
+    _ = try session.tick();
+    const drawn = session.metal_buffer.gpu_images;
+    try std.testing.expectEqual(@as(usize, 2), drawn.len); // 옛 동작: 1(활성만)
+    try std.testing.expect(drawn[0].image_id != drawn[1].image_id); // 같은 로컬 7 → 다른 전역 id
+    // 활성 pane 이 원래 id 를 갖는다 — pane 하나일 때와 같은 id 라 단일 pane 동작이 안 바뀐다.
+    var has_original = false;
+    var has_fresh = false;
+    for (drawn) |gi| {
+        if (gi.image_id == 7) has_original = true;
+        if (gi.image_id >= kitty_image_ids.fresh_base) has_fresh = true;
+    }
+    try std.testing.expect(has_original and has_fresh);
+    // 각자 **자기 pane 원점**에 — 같은 곳에 겹쳐 그리면 안 된다.
+    try std.testing.expect(drawn[0].origin_x != drawn[1].origin_x);
+    // 둘 다 업로드됐다(업로드 기록이 겹쳐 한쪽이 건너뛰면 한쪽 텍스처가 없다).
+    try std.testing.expect(session.kitty_uploaded.contains(drawn[0].image_id));
+    try std.testing.expect(session.kitty_uploaded.contains(drawn[1].image_id));
+
+    // 두 번째 프레임: 매핑이 안정해야 한다(바뀌면 매 프레임 재업로드).
+    const ids_before = [2]u32{ drawn[0].image_id, drawn[1].image_id };
+    session.metal_dirty = true;
+    _ = try session.tick();
+    const again = session.metal_buffer.gpu_images;
+    try std.testing.expectEqual(@as(usize, 2), again.len);
+    try std.testing.expect((again[0].image_id == ids_before[0] and again[1].image_id == ids_before[1]) or
+        (again[0].image_id == ids_before[1] and again[1].image_id == ids_before[0]));
 }
 
 test "kitty 이미지 패스 게이트는 U=1 virtual placement 도 센다" {

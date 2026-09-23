@@ -21,6 +21,7 @@
 | 제품 모양 | OSR 은 **`.web` Term 의 백엔드**로 둔다. 터미널 surface 에 kitty 이미지를 붙이는 실험 모양은 쓰지 않는다 | 「웹이 포커스인가」 판정 하나에 백엔드(WKWebView / CEF)만 갈리게 해야 분기가 둘로 늘지 않는다(§13.1 「분업」) |
 | 분업 | `.markdown`(신뢰 — 파일 패널·CM6)은 **WKWebView 유지**. OSR 후보는 `.browser` 뿐 | §13.1 「분업」 — WKWebView 는 OSR 을 주지 않아 공존이 구조상 강제다 |
 | **D1 브라우저 위치** | 브라우저 sidecar 는 **항상 maru 앱이 도는 기계**에서 돈다 — 터미널 세션이 SSH 너머 원격이어도 마찬가지다(사용자 결정 2026-09-23) | 화면이 같은 기계 안에서 IOSurface 로 넘어와 지금까지의 실측(60fps·찢어짐 0)이 그대로 성립하고, 서버에 CEF 를 깔 필요가 없다. 원격에서 돌리면 매 프레임 네트워크 전송이 필요해 설계가 달라진다. 대가: 원격 `localhost` 는 D3(포트 전달), 다른 기기(모바일 등) 표시는 범위 밖. 지금의 WKWebView 도 같은 모양이라 퇴행은 없다 |
+| **D6 프로필 유지** | `.browser` 의 로그인·쿠키·저장소는 **재시작 뒤에도 유지**한다(사용자 결정 2026-09-24). 탭끼리 공유하고 신뢰 저장소(`.markdown`)와는 격리한다. **엔진 중립** — WKWebView 의 ephemeral `browserDataStore` 도 영속 저장소로 바꾼다 | 지금은 앱을 끄면 로그인이 풀린다(§「untrusted 패널 격리」). 문서에 재시작 때 지워야 할 근거는 없었다(ephemeral 근거는 탭 간 공유·신뢰 격리뿐). CEF 쪽 비용은 D7 |
 
 ### 열린 결정 (착수 전·단계 진입 전에 사용자가 정한다)
 
@@ -30,6 +31,8 @@
 | D3 | 원격 `localhost` 포트 전달 | 후속. [SSH 클라이언트](../ssh-client.md) §3 이 포트 포워딩을 「안 하는 것」으로 못박았다 — 넓히는 결정이 따로 필요 | 없음(후속) |
 | D4 | 팝업(`<select>`) 합성 위치 | **maru 렌더러가 팝업을 별도 quad 로** — sidecar 합성은 본 화면 사본 때문에 복사가 한 번 더 든다 | W6 |
 | D5 | 우클릭 메뉴 | chrome 메뉴(일관성) vs NSMenu(네이티브 관용) — W6 진입 때 정한다 | W6 |
+| D7 | CEF 쿠키 암호화 키(Keychain) | **`--use-mock-keychain`** — 진짜 Keychain 은 항목 이름이 Chromium 브라우저와 같은 「Chromium Safe Storage」이고, formula 소스 빌드는 업그레이드마다 서명이 바뀌어 허용 창이 반복될 수 있으며, 거부·실패하면 쿠키가 조용히 저장되지 않는다(실측). 대가: 디스크 위 쿠키 보호가 파일 권한(프로필 디렉터리 0700)뿐 | W1 |
+| D8 | dmg(서명·공증 universal)·Intel 사용자에게 CEF 공급 | 후보: formula 를 따로 설치하게 안내 / 앱이 첫 사용 때 내려받아 검증(sha256)해 사용자 디렉터리에 둔다. dmg 는 hardened runtime 이지만 sidecar 는 별도 프로세스라 라이브러리 검증과 무관 — 실측 전 | W7 |
 
 ## 1. 구조
 
@@ -51,8 +54,11 @@ sidecar 는 maru 앱 프로세스마다 **하나**다. CEF 는 `root_cache_path`
 
 ### C1. 배치와 샌드박스
 
-- `libexec/maru-web/` 아래 `maru-web-host`, `maru-web-helper`, `Chromium Embedded Framework.framework` 를 둔다. 심볼릭
-  링크는 샌드박스가 실제 경로로 풀어 막으므로 **실제 파일**이어야 한다.
+- `libexec/maru-web/` 아래 `maru-web-host`, `maru-web-helper`, `Chromium Embedded Framework.framework` 를 둔다. 디렉터리
+  **안의** 심볼릭 링크는 샌드박스가 실제 경로로 풀어 막으므로 **실제 파일**이어야 한다(바깥을 가리키는 프레임워크 링크로
+  helper 가 못 여는 것을 실측). 경로 앞쪽의 brew `opt/` 링크는 괜찮다(실측).
+- `maru-web-host` 도 프레임워크를 **실행 파일 기준 상대 경로**로 부른다(`@executable_path` 또는 `dlopen`). PoC 의 브라우저
+  프로세스는 SDK 절대 경로로 링크돼 있었다(§13.1 「남은 미해결」 1).
 - helper 는 `main()` 첫머리에서 `libcef_sandbox.dylib` 를 `dlopen` 해 `cef_sandbox_initialize` 를 부르고, **그 뒤에**
   프레임워크를 `dlopen` 해 `cef_execute_process` 로 넘긴다. 프레임워크를 링크 시점에 붙이거나 실행 파일 하나를 helper
   로 겸용하면 GPU 프로세스가 죽는다(§13.1 「남은 미해결」 1 — 세 가지 배치를 실측으로 갈랐다).
@@ -75,7 +81,8 @@ sidecar 는 maru 앱 프로세스마다 **하나**다. CEF 는 `root_cache_path`
   다른 맞바꾸기를 거절한다 — PoC 시험 구현은 두 값을 따로 둬서 전환 순간의 겹침이 논리적으로 가능했다. 새 세대의 첫
   프레임이 올 때까지 maru 는 **옛 프레임을 계속** 보인다(전환 직후 빈 장 0.19 % 실측).
 - **port 전달**: maru 가 받는 port 를 열고(이름은 세대마다 무작위), sidecar 가 보낸 메시지의 audit token 으로 **자기가
-  spawn 한 sidecar 인지** 확인한다 — pid 와 **pid 버전**까지 비교한다(pid 재사용 경합 차단). IOSurface port 를 bootstrap
+  spawn 한 sidecar 인지** 확인한다 — pid 와 **pid 버전**까지 비교한다(pid 재사용 경합 차단 — 실측은 pid 까지, pid 버전은
+  설계이며 W2 에서 잰다). IOSurface port 를 bootstrap
   이름에 직접 등록하지 않는다(누구나 픽셀을 읽고, 등록자가 죽어도 surface 가 남는다 — §13.1 「버퍼 소유권」).
 - 복사는 GPU blit(제품), 바뀐 영역만(선택 최적화 — 슬롯별 최신성을 추적할 때만).
 - **판정자**: 매 프레임 화면 전체 색을 바꾸는 페이지로 「한 장의 윗줄·가운데·아랫줄 색이 다르면 찢어짐」 0, 새
@@ -125,6 +132,11 @@ maru chrome 모달로 받는다(모달 게이트와 같은 자리).
 - 안 보이는 탭은 `was_hidden(1)` — 그리기는 멈추지만 **JS 타이머는 느려질 뿐 계속 돈다**. 오래 안 본 탭은 브라우저를
   닫는다(폼 입력·스크롤을 잃는 대가).
 - 비용: 브라우저당 렌더러 +1, phys_footprint 약 +66MB(3 개까지 선형 실측).
+- **프로필(D6·D7)**: `root_cache_path`·`cache_path` 를 **maru 전용 경로**(번들 ID 별, 0700)로 준다 — 비우면 CEF 기본 경로를
+  다른 CEF 앱과 나눠 singleton(exit 24)에 걸린다. 모든 브라우저가 그 프로필 하나를 공유한다(탭 간 로그인). 비워도 154 는
+  디스크에 쓴다(실측 — 「비우면 메모리」 전제가 틀림). 판정자: 재시작 뒤 쿠키·`localStorage` 유지, Keychain 접근 0.
+- maru 앱 인스턴스가 둘(개발 빌드와 설치본 등)이면 번들 ID 가 달라 프로필도 갈린다 — 같은 번들 ID 로 둘을 띄우면 뒤의
+  sidecar 가 singleton 에 걸리므로 그때는 웹 pane 을 「다른 maru 가 쓰는 중」으로 보인다.
 
 ### C8. 보안
 
@@ -134,6 +146,8 @@ control plane `browser.*` 게이트는 엔진 중립이라 바뀌지 않는다(�
 ### C9. 배포
 
 - CEF 는 기본 앱(Maru.app)에 넣지 않는다. formula 가 `libexec/maru-web/` 을 설치하고 maru 는 그 자리를 찾기만 한다.
+- [배포](../distribution.md) 의 다른 채널 — 서명·공증 universal `.dmg`(와 cask) — 와 **Intel(x86_64)** 사용자에게 줄 경로는 D8.
+  CEF 는 macOS x86_64 배포본도 있지만 크기·동작은 재지 않았다.
 - 매니페스트: `cef_version`·`chromium_version`·`maru_backend_abi`·`platform`·`arch`·`sha256`. CEF 154 minimal 배포본은
   arm64 약 132MB 압축, 설치 후 프레임워크 323MB(locale·swiftshader 정리 후 약 258MB).
 
@@ -143,13 +157,13 @@ control plane `browser.*` 게이트는 엔진 중립이라 바뀌지 않는다(�
 
 | 단계 | 내용 | 완료 판정 |
 |---|---|---|
-| **W1** sidecar 뼈대 | `maru-web-host`·`maru-web-helper`(C1), 제어 채널(C2), 브라우저 생성·파괴·이동, 브라우저 N 개 | helper 전부 `sandbox_check` 1, 숨긴 뒤에도 명령 수신, 브라우저 N 개가 따로 그려지고 입력이 대상에만 |
-| **W2** 픽셀 파이프라인 | 소유 링·세대(C3), port 전달·검증, 크기 변경 | 찢어짐 0, 새 프레임 수신률, 세대 전환과 옛 프레임 유지, 제3자 거부 — 헤드리스 판정자로 CI 에 |
-| **W3** maru 통합 | `.web` Term 의 OSR 백엔드(C4), 백엔드 선택 config(D2 에 따라 기본값), 보이는 Term 만, 창별 rect, 새 프레임 다시 그리기 | pane 100% 채움, 보이는 빈도(애니메이션 페이지에서 CEF 빈도에 근접), 정적 페이지에서 추가 부담 0 |
+| **W1** sidecar 뼈대 | `maru-web-host`·`maru-web-helper`(C1), 제어 채널(C2), 브라우저 생성·파괴·이동, 브라우저 N 개, 프로필(C7·D7) | helper 전부 `sandbox_check` 1, 숨긴 뒤에도 명령 수신, 브라우저 N 개가 따로 그려지고 입력이 대상에만, 재시작 뒤 로그인 유지 |
+| **W2** 픽셀 파이프라인 | 소유 링·세대(C3), port 전달·검증, 크기 변경 | 찢어짐 0, 새 프레임 수신률, 세대 전환과 옛 프레임 유지, 제3자 거부 — 헤드리스 판정자(opt-in CI 잡, §4) |
+| **W3** maru 통합 | `.web` Term 의 OSR 백엔드(C4), 백엔드 선택 config(D2 에 따라 기본값), 보이는 Term 만, 창별 rect, 새 프레임 다시 그리기. WKWebView `browserDataStore` 영속화(D6 — 엔진 중립이라 OSR 과 독립으로 먼저 낼 수 있다) | pane 100% 채움, 보이는 빈도(애니메이션 페이지에서 CEF 빈도에 근접), 정적 페이지에서 추가 부담 0 |
 | **W4** 입력 | C5 여섯 축, IME, 편집 명령, 커서 | 앱 안 시험기(25 항목 — §13.1 「pane 안 실측」)를 opt-in smoke 로 저장소에. IME 는 진짜 키 이벤트로 |
 | **W5** 대화상자·파일·권한 | C6 전부 | `alert`·`confirm`·`prompt`·파일 선택(내용 읽기까지)·권한 거부/허용. 카메라·마이크 권한 귀속을 장치 있는 기계에서 확인 |
 | **W6** 팝업·툴팁·드래그·메뉴 | `<select>` 팝업(D4), 툴팁, 드래그 시작·드롭, 우클릭 메뉴(D5), IME 후보창 위치 | 팝업 표시·선택·닫힘 복원, 드래그 콜백 도착 |
-| **W7** 배포 | formula, 매니페스트, 설치 감지, 버전 올림 절차 | 깨끗한 기계에서 설치 → 실행 → 샌드박스 판정자 |
+| **W7** 배포 | formula, 매니페스트, 설치 감지, 버전 올림 절차, dmg·Intel 공급(D8) | 깨끗한 기계에서 설치 → 실행 → 샌드박스 판정자 |
 | **W8** 접근성 | Chromium 접근성 트리(`on_accessibility_tree_change`)로 NSAccessibility 계층을 짓는다. VoiceOver 켜졌을 때만 켠다 | VoiceOver 로 페이지 읽기. D2 에 따라 출시 조건 |
 
 후속(단계 밖): 제스처 근사(핀치·스와이프·관성 phase), 원격 `localhost`(D3), 탭 폐기 정책 튜닝, 다른 사이트가 섞일 때의
@@ -173,6 +187,7 @@ control plane `browser.*` 게이트는 엔진 중립이라 바뀌지 않는다(�
 | 카메라·마이크 권한 귀속 미확인 | W5 에서 장치 있는 기계·제품 빌드로 확인. Maru.app 귀속이면 Info.plist 문구 |
 | 숨긴 탭도 JS 가 돈다 | 탭 폐기 정책(C7) |
 | 브라우저당 약 66MB | 처음 보일 때 생성, 오래 안 본 탭 폐기 |
+| 쿠키가 조용히 저장되지 않음(Keychain 실패) | D7 — mock keychain 이면 Keychain 을 건드리지 않는다. W1 판정자가 재시작 뒤 유지를 본다 |
 | `bootstrap_register` 는 폐기 예정 API | 받는 port 를 알리는 경로를 W2 에서 확정(대안: spawn 때 넘기는 특수 port) |
 | VoiceOver 가 가장 큰 공사 | D2 — 선택형 백엔드로 먼저 출시 |
 

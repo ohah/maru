@@ -203,7 +203,11 @@ WKWebView(WebKit)는 시스템 프레임워크라 의존성이 없지만 Chromiu
 
 ### 13.1 OSR + sidecar — PoC 실측
 
-**동기**: 웹 pane 을 터미널 pane 안의 **픽셀**로 만들어 관리 지점을 줄이는 것. WKWebView 가 NSView 라서 생긴 빚(§4 firstResponder 전쟁, §5 chrome 인터랙션 가로채기, §3 divider seam 통과)이 **원인째** 사라진다 — NSView 가 없으면 responder chain 에 참가하지 않고, 마우스가 우리 Metal 뷰에 **먼저** 오므로 「통과시킨다」는 개념 자체가 없다.
+**동기 — 「빚 갚기」가 아니다(2026-09-23 정정).** 이 절의 초안은 §4 firstResponder 전쟁·§5 chrome 가로채기·§3 divider seam 을 「갚아야 할 빚」으로 앞세웠다. **그 전제는 실측으로 흔들렸다** — 최근 커밋 200 개에서 web-panel·firstResponder·포커스·seam 관련 수정이 **0 건**이다. 4g-0~4g-4 가 흩어진 패치를 통합한 뒤 그 축은 **수렴했다**. 빚이 계속 쌓인다는 관찰은 사실이 아니므로 그것을 근거로 삼지 않는다.
+
+**실제 동기는 하나다: Chromium 을 pane «안에» 넣는 길.** WKWebView 는 OSR 을 제공하지 않고(SDK 전수 검색 — §13.1 「분업」), windowed CEF 는 child NSWindow 라 모달을 가리고 좌표·space 추종이 따라붙는다(§13.2, suji 17-A→17-B 후퇴). **픽셀로 받는 것 말고 길이 없다.** 그래서 판단 질문은 「빚을 갚을까」가 아니라 **「Chromium 인앱 surface 가 필요한가」**이고, 필요 없다면 지금 WKWebView 가 맞다(의존성 0·IME·접근성이 공짜다).
+
+경계 문제가 **덤으로** 사라지는 것은 사실이다 — NSView 가 없으면 responder chain 에 참가하지 않고, 마우스가 우리 Metal 뷰에 **먼저** 오므로 「통과시킨다」는 개념 자체가 없다. 다만 그것은 이 축의 **근거가 아니라 부수 효과**다.
 
 **핵심 구분 — 소속은 안 바뀐다.** 바뀌는 것은 **매체**다.
 
@@ -247,6 +251,61 @@ WKWebView(WebKit)는 시스템 프레임워크라 의존성이 없지만 Chromiu
 | 5 | `install_name_tool: larger updated load commands do not fit` | 빌드에 `headerpad_max_install_names = true` 가 필요하다(suji `build.zig` 가 같은 이유로 같은 일을 한다) |
 | 6 | `.app` 번들에서 렌더러가 안 뜸 | `browser_subprocess_path` 를 **자기 자신**으로 둔 비-번들 구조에서는 즉시 떴다. 번들 layout 배선은 **미해결**(아래) |
 
+#### 입력 주입 — 실측 (PoC, 2026-09-23)
+
+「우리 → CEF」 방향도 PoC 로 확인했다. 버튼·입력창·긴 스크롤이 있는 페이지를 띄우고 주입한 뒤 **렌더된 프레임을 덤프해 눈으로 판정**했다.
+
+![입력 주입 실측 — 클릭 3 회로 카운터 3, 입력창 포커스 링, 타이핑 "Hello CEF"](images/web-panel-osr-input.png)
+
+| 주입 | 호출 | 프레임에서 확인된 것 |
+|---|---|---|
+| 클릭 ×3 | `send_mouse_click_event(ev, MBT_LEFT, down/up, count)` | 버튼 라벨 「3번 클릭됨」, 카운터 **3** |
+| 포커스 | 입력창 좌표 클릭 | 분홍 **포커스 링 + box-shadow** 렌더 |
+| 타이핑 | `send_key_event` ×3 단(`RAWKEYDOWN`→`CHAR`→`KEYUP`) × 9 자 | 입력창 「Hello CEF」, 캐럿, JS 가 `value: "Hello CEF" (9자)` |
+| 휠 | `send_mouse_wheel_event(ev, 0, -400)` | 스크롤 이동(300px·600px 마커 상승, 스크롤바 위치 변화) |
+
+**CEF 만으로 전부 됐다 — CDP 를 섞을 필요가 없었다.** terminal-browser 가 Enter·붙여넣기를 CDP 로 우회한 것(`input.ts` 의 `Input.dispatchKeyEvent`)은 **Electron API 사정**이지 OSR 의 제약이 아니다.
+
+**실측이 추론 하나를 잡았다**: 첫 시도에서 클릭이 카운터 0 이었다. 좌표를 (140,196) 으로 찍었는데 버튼은 y=132~184 — 빗나갔고 **아무 일도 일어나지 않았다(오류도 로그도 없다)**. 렌더된 프레임에서 실제 위치를 읽어 (128,158) 로 고치니 즉시 동작했다. 좌표계 자체는 단순하다(**view 좌표 그대로**, `deviceScaleFactor=1` 기준 변환 불요) — 위험한 것은 변환이 아니라 **틀려도 조용하다는 것**이다.
+
+#### terminal-browser 에서 가를 것 — 판별자 하나
+
+> **clean-room**: 아래는 [references.md] 의 `terminal-browser` 를 **착상·계약 수준**에서 읽은 결과다. 코드 표현을 가져오지 않으며, 파일명은 판단 근거의 출처 표시다.
+
+**판별자**: 그 코드가 ⑴ **웹을 픽셀로 다루는 데 본질적**인가, ⑵ **터미널 「밖」에 있어서 낸 세금**인가. maru 는 터미널이므로 ⑵ 를 따라 내면 손해다.
+
+**따라할 것 (⑴ — 본질적)**
+
+| 착상 | 출처 | 왜 우리도 필요한가 |
+|---|---|---|
+| **OSR 3 단 폴백** | `page/offscreen.ts`·`paint.ts` (`presentTexture`→`presentShmFrame`→`presentBitmap`) | GPU 경로가 실패해도 그림이 나와야 한다. 우리도 `on_accelerated_paint` 가 안 오면 `on_paint`(CPU) 로 떨어지는 길이 필요하다 |
+| **damage rect 부분 갱신** | 같은 파일의 `damageOf(info)` | PoC 실측에서 실제로 전체(1280x720)가 아니라 **변경 영역만** 왔다(324x324·440x440 …). 텍스처를 매 프레임 통째로 올리지 않는 규율이고, [io-render-present.md] §10.6 이 깎으려던 비용과 같은 자리다 |
+| **프레임 coalescing** | `BitmapPresenter`(`unionRect` 로 damage 합치고 지연 드레인) | maru tick(60Hz, config 30~120)과 CEF 프레임률이 어긋날 때 프레임을 버리지 않고 합쳐 그린다 |
+| **버퍼 반납 규율** | `presentTexture` 의 `finally { texture.release() }`, shm 의 `released` 콜백 | 빌린 버퍼를 안 돌려주면 CEF 풀이 마른다 |
+
+**버릴 것 (⑵ — 터미널 밖에 있어서 낸 세금)**
+
+| 저쪽 코드 | 저쪽이 만든 이유 | 우리가 안 만드는 근거(실측) |
+|---|---|---|
+| `nextClickCount()` | 터미널 마우스 프로토콜에 클릭 횟수가 없다 | **`send_mouse_click_event` 가 `int clickCount` 를 직접 받는다**(헤더 확인 + 주입 동작 확인). `NSEvent.clickCount` 를 그대로 넘긴다 |
+| `wheelRemainderX/Y` + `/40` tick 변환 | Electron `sendInputEvent` 가 tick 단위다 | **`send_mouse_wheel_event(ev, deltaX, deltaY)` 는 tick 이 아니라 delta 다**(헤더 확인 + `dy=-400` 으로 스크롤 확인). `scrollingDeltaY` 를 그대로 준다 |
+| `superHeld` modifier 추적 | escape 시퀀스에서 modifier 가 유실된다 | `NSEvent.modifierFlags` 가 그대로 있다 |
+| `pinchScale > 1 ? 1 : -1` | 핀치를 wheel tick 으로 뭉개야 했다 | 우리는 `magnification` 실수를 갖는다(**단 CEF 쪽 대응은 미검증 — 아래 「남은 미해결」**) |
+| Enter·붙여넣기를 CDP 로 | Electron `sendInputEvent` 가 그 경우를 못 다룬다 | **CEF `send_key_event` 3 단으로 충분했다**(실측). 먼저 CEF 로 시도하고 막히는 것만 CDP 로 간다 — 처음부터 두 채널을 섞으면 어디서 새는지 모른다 |
+| `a=q` 능력 감지, `CSI 14t` pane 픽셀 조회 | 남의 터미널에게 물어야 한다 | **우리가 그 터미널이다.** pane rect 는 내부 값이다 |
+| kitty 인코딩 전체 | PTY 를 건너야 한다 | 같은 기계의 IOSurface 직결. [io-render-present.md] §10.6 의 5.6MB/frame·25~40MB/s 가 그 세금의 실측치다 |
+| `pixel-react` (React reconciler 로 TUI 렌더) | TUI 를 직접 그려야 한다 | **Zig + Metal 이 이미 있다** |
+| Electron 런타임 | TypeScript 프로젝트라서 | Node 런타임은 우리에게 순수 부채. CEF 는 C API 라 `@cImport` 직결(suji 선례) |
+| `terminals/*.ts` 의 AppleScript 조작 | 남의 터미널 창을 열어야 한다 | [terminal-compatibility-policy.md] 가 이미 **위험으로 기록**했다(`TERM_PROGRAM` 위장이 남의 앱 자동화 표면을 빌리는 문제) |
+
+**판단 보류 (결정에 실측이 더 필요)**
+
+| 항목 | 무엇을 확인해야 정해지나 |
+|---|---|
+| GPU 경로 실패 시 **거부할지 폴백할지** | 저쪽은 macOS 에서 shared texture 가 없으면 `throw` 로 **실행을 거부**한다(`initOffscreenMode`). 우리는 초기 불안정을 감안해 폴백이 맞아 보이나, CPU 경로의 실제 프레임 비용을 재봐야 한다 |
+| 컨텍스트 메뉴를 **chrome 으로 그릴지 NSMenu 로 띄울지** | 저쪽은 TUI 라 직접 그렸다(`ui/context-menu.tsx`). 우리는 chrome 컴포넌트가 있어 재사용하면 일관되지만, 네이티브 메뉴 관용과 어긋나는 비용을 재야 한다 |
+| 제스처(핀치·스와이프·관성) 근사 품질 | maru 에 `magnify:`·`swipe:`·`momentumPhase` 코드가 **0 줄**이다(실측). CEF 쪽 수용 형태(`send_touch_event` vs ctrl+wheel)와 질감 손실을 함께 재야 한다 |
+
 #### 이 축이 뒤집은 것 (§13.2 이후 옛 서술 대비)
 
 | 옛 서술 | 실측 |
@@ -287,7 +346,7 @@ WKWebView 는 **OSR 을 제공하지 않는다**. macOS SDK 의 WebKit 공개 �
 1. **`.app` 번들 배선** — 비-번들에서는 떴지만 번들 layout 에서는 렌더러가 안 떴다(함정 6). sidecar 가 `.app` 이어야 하는지 자체가 설계 선택이고, 필요하다면 suji `bundle_macos.zig`(helper 별 entitlements 포함)에 선례가 있다.
 2. **원격 세션호스트** — IOSurface mach port 는 **같은 기계 안에서만** 유효하다. SSH 너머 host 면 제로카피가 불가능하고, 거기서는 터미널 브라우저가 낸 비용(압축·인코딩·16 MiB 투영 상한)이 그대로 돌아온다. 웹 pane 을 로컬 전용으로 못 박을지 원격 폴백을 설계할지 **미정**이고, 이 결정이 범위를 가장 크게 가른다.
 3. **프로세스 회계** — 비활성 탭의 `zero rect + hidden` 보존 계약(§2)이 OSR 에서는 「렌더를 멈춘다」여야지 「프로세스를 든 채 논다」가 되면 안 된다. 탭 20 개 워크스페이스 복원 시 실측이 필요하다.
-4. **입력 합성** — 좌표 판정 후 `send_mouse_click_event`/`send_key_event`/`send_mouse_wheel_event` 주입, `OnCursorChange` → `NSCursor`, 컨텍스트 메뉴·툴팁·DnD, 그리고 **IME**. 「다투는 주체가 둘에서 하나로 주는」 대신 「우리가 전부 소유하는」 일로 바뀐다. 주입 좌표와 페이지 hit-test 정합(deviceScaleFactor·`get_view_rect`·페이지 줌 3 중 환산)은 아직 검증하지 않았다.
+4. **입력 합성** — 클릭·키·휠은 **실측으로 동작을 확인했다**(위 「입력 주입」). 남은 것은 ⑴ **제스처 3 종**(핀치·스와이프·관성 phase) — maru 에 0 줄이고 CEF 에 1:1 대응이 없어 근사해야 한다 ⑵ `on_cursor_change` → `NSCursor`, `on_tooltip`, `start_dragging`/`update_drag_cursor` ⑶ **IME** — CEF 가 `ime_set_composition`/`ime_commit_text`/`ime_finish_composing_text`/`ime_cancel_composition` 과 `on_ime_composition_range_changed`(character_bounds → 후보창 위치)를 주므로 **새로 발명하는 것이 아니라** 기존 `NSTextInputClient`(+`terminal/preedit.zig`) 경로의 **목적지를 분기**하는 일이다. 다만 가장 민감한 코드라 spike 가 선행해야 한다(§4d 규율).
 5. **접근성** — 페이지 a11y 는 CDP `getFullAXTree` 로 온다. 지금 WKWebView 에서 주입으로 우회하던 문제([control-plane-browser-session.md] §9.5.4)가 이 축에서는 함께 풀린다.
 
 ### 13.2 이하 — on-screen CEF 전제의 옛 서술 (보존)

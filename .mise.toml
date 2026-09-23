@@ -164,6 +164,19 @@ run = "zig build macos-mermaid-helper-build"
 description = "Run the isolated Mermaid helper lifecycle smoke"
 run = "zig build macos-mermaid-helper-smoke"
 
+[tasks.web-sidecar-sdk]
+description = "Fetch and verify the pinned CEF SDK for the web OSR sidecar (opt-in; prints the SDK path)"
+run = "sh tools/cef-sdk-fetch.sh"
+
+[tasks.web-sidecar]
+description = "Build maru-web-host/helper and the W1b judge into zig-out/web-sidecar (opt-in; fetches the CEF SDK)"
+run = 'zig build web-sidecar -Dcef-sdk="$(sh tools/cef-sdk-fetch.sh)"'
+
+[tasks.web-sidecar-judge]
+description = "Run the W1b judge against a real maru-web-host (handshake, helper sandbox, clean shutdown, parent death)"
+depends = ["web-sidecar"]
+run = 'profile=$(mktemp -d) && trap "rm -rf \"$profile\"" EXIT && zig-out/web-sidecar/maru-web-judge "$PWD/zig-out/web-sidecar" "$profile"'
+
 [tasks.macos-editor-smoke]
 description = "Run the MergeView WKWebView gate with a visible window"
 run = "zig build macos-editor-smoke"

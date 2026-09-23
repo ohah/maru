@@ -745,7 +745,8 @@ pub fn build(props: Props, scratch: Scratch) Written {
     const band_ops = paintBands(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[bg.ops + cw.ops + gw.ops ..], scratch.count_scratch);
     // **선택은 밴드 뒤에 얹는다** — diff 줄 배경 위에 선택이 보여야지 그 반대면 선택한 줄이
     // 어느 것인지 흐려진다. 글자보다도 뒤라 알파로 얹어도 내용이 읽힌다.
-    // **같은 낱말 강조가 먼저다**(§5.1a 우선순위 — 가장 약하다). 선택·검색이 그 위에 얹힌다.
+    // **같은 낱말 강조가 먼저다**(§5.1a 우선순위 — 가장 약하다). 선택·검색이 그 위에 얹힌다. (선택과의 순서는 오늘 관측되지 않는다 —
+    // 선택이 있으면 강조를 안 그려 둘이 공존하지 않는다: 적대적 C7 등가. 검색은 어느 쪽이든 그 뒤다. 순서는 뜻으로 둔다.)
     const occ_ops = paintOccurrences(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[bg.ops + cw.ops + gw.ops + band_ops ..], scratch.count_scratch);
     const sel_ops = paintSelection(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[bg.ops + cw.ops + gw.ops + band_ops + occ_ops ..], scratch.count_scratch);
     // **검색 결과는 선택 위에 얹는다.** 선택 안에서 검색하는 경우가 있고(§5.1의 "선택 영역 내에서만"이

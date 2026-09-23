@@ -75,7 +75,7 @@ host PID·runtime ID·child PID 불변, 강제 종료 전후 출력·scrollback 
 증명한다(`zig build macos-session-host-r7-integration-smoke`). 하네스는 테스트가 만든 exact PID·socket·manifest만 정리하며 사용자의 기본 HOME/session-host
 namespace를 열거하거나 삭제하지 않는다. 구조화 artifact는 세 actual `host_id/runtime_id/host_pid/child_pid` 행과
 topology, historical·detached output, scrollback, replacement spawn 0을 남긴다. PR CI의
-`keep-alive recovered session macOS` job에도 같은 task를 연결했다.
+`AppKit smokes macOS` job(2026-09-24 전 이름 `keep-alive recovered session macOS`)에도 같은 task를 연결했다.
 
 ### R7-5 checkpoint backup re-arm
 

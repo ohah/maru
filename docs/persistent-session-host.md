@@ -81,7 +81,7 @@ control-plane, PTY 종료 정책과 책임이 겹치지 않도록 소유권·ID�
 > 블로커로 세어 우선순위를 잘못 매기는 일이 **반복해서** 일어났다(바로 아래 「옛 목록에 남아 있던 셋」
 > 문단이 같은 사고를 기록한다). 항목을 지울 때는 **무엇이 적혀 있었는지**를 남긴다.
 >
-> ✅ **켠 경로를 CI 가 검증한다(2026-08-27 — `session-host-keepalive-macos`).** 하루 전까지 이 자리에는
+> ✅ **켠 경로를 CI 가 검증한다(2026-08-27 — `session-host-keepalive-macos`, 2026-09-24 부터 `appkit-smokes-macos` 의 스텝).** 하루 전까지 이 자리에는
 > 「그 스모크는 실 AppKit 창이 필요해 CI 에서 못 돈다」고 적혀 있었는데, **한 번도 시도한 적이 없는
 > 가정이었다** — `macos-app-smoke`·`window-smoke` 는 ci.yml 이력에 없다. 실제로 재 보니 러너에
 > `WindowServer` 가 살아 있고(pid 145) `macos-session-host-recovery-smoke` 가 **통과한다**. 실측 **2분 14초**로

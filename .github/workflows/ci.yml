@@ -468,114 +468,6 @@ jobs:
             .zig-cache
             ~/.cache/zig
           key: zig-v2-${{ runner.os }}-file-explorer-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
-  agent-session-archive-macos:
-    name: agent session archive macOS
-    needs: changes
-    # **왜 새 잡인가.** 이 스모크는 2026-09-15 까지 `mise` 태스크로만 있었고 CI 어디에서도 안 돌았다.
-    # 그 사이 `font-scale-rects` 24pt 조합이 `timeout_enterAgentSessions` 로 죽어 `set -e` 로 멈췄고,
-    # 뒤따르는 시나리오 넷(`reveal-recheck-pointer` · `claude-resume-pointer` 포함)이 **아무도 안 돌리는
-    # 상태**로 남아 있었다 — 그 중 하나는 직전 PR 이 붙인 재개 argv 판정자였다. 손으로 돌려야만 보이는
-    # 게이트는 결국 안 돌고, 안 도는 게이트는 없는 것과 같다.
-    #
-    # **기존 잡에 스텝으로 얹지 않는다.** 앱 번들을 이미 만드는 `keep-alive` 잡에 붙이면 +40초로 가장
-    # 싸지만, 그러면 이 영역 회귀가 「keep-alive 가 빨갛다」로 보고된다. 그 오인은 이 저장소가 이미
-    # 겪었다(도크 골든이 "file explorer" 이름으로 보고돼 플래키로 오해받았다). 잡 이름이 곧 귀책이다.
-    #
-    # **wall-clock 은 안 늘어난다.** macOS 잡은 병렬이고 임계경로는 `file explorer`(실측 15분 41초)다.
-    # 이 잡은 번들 빌드 + 스모크 40.5초(실측, 웜 캐시 로컬)로 그 그늘에 들어간다.
-    if: ${{ github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') }}
-    runs-on: macos-15
-    # keep-alive 잡과 같은 20분. 그쪽이 같은 번들 빌드에 스모크 다섯을 돌고 실측 4분 58초이므로
-    # 여유가 충분하다. hang 은 계속 유한하게 닫는다.
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          persist-credentials: false
-      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
-        with:
-          version: 2026.2.7
-          sha256: f8becf318705e1bd91227ed0efee4f9fd988d1d5c66bb48e996f030792a0d3b7 # macos-arm64 binary
-          cache_save: false
-      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: |
-            .zig-cache
-            ~/.cache/zig
-          key: zig-v2-${{ runner.os }}-agent-session-archive-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
-          restore-keys: |
-            zig-v2-${{ runner.os }}-agent-session-archive-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-
-            zig-v2-${{ runner.os }}-agent-session-archive-
-      # 앱 번들 빌드가 `web:build` 를 타므로 웹 의존성이 먼저 있어야 한다(keep-alive 잡과 같은 이유·같은 명령).
-      - name: 웹 의존성 설치
-        run: bun install --cwd web --frozen-lockfile
-      # 격리 HOME 의 cold AppKit 프로세스 15개가 synthetic·redacted JSONL 만 읽는다 — 실제 provider
-      # 바이너리·계정·네트워크·사용자 이력에는 닿지 않는다(docs/plans/agent-session-list.md AS4-c).
-      # 판정은 fake provider 가 남긴 verdict 와 rect JSON 이고 summary 에 원문·세션 id·경로는 안 남는다.
-      - name: 에이전트 세션 기록 도크 스모크
-        run: mise run macos-agent-session-archive-smoke
-      # 실패하면 **어느 시나리오가 어디서 멈췄는지**가 summary 에 있다(`..._stage` · `..._failure`).
-      # 캡처 PPM 도 함께 올린다 — 시각 계약이 깨진 경우 그림 없이는 원인을 못 가른다.
-      - name: Upload agent session archive smoke artifacts
-        if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: maru-agent-session-archive-smoke
-          path: zig-out/maru-agent-session-archive-smoke
-          if-no-files-found: warn
-          retention-days: 14
-
-  editor-save-conflict-macos:
-    name: editor save conflict macOS
-    needs: changes
-    # **왜 새 잡인가.** 바로 위 `agent session archive macOS` 가 그 이유를 이미 적어 두었다: 잡 이름이
-    # 곧 귀책이라, 번들을 이미 만드는 잡에 얹으면 편집기 저장 회귀가 「그 잡이 빨갛다」로 보고된다.
-    # 그리고 손으로만 도는 게이트는 결국 안 돈다.
-    #
-    # **이 스모크만 보는 것**: `⌘S` 가 `keyDown` 의 chord 우회를 지나 저장 디스패치에 닿는가, 그리고
-    # 밖에서 바뀐 파일을 **안 덮는가**(docs/native-editor-document-model.md §3.9d 「판정」). 헤드리스
-    # 판정자는 그 둘을 볼 수 없다 — 하나는 AppKit 키 배달이고 하나는 디스크의 사실이다.
-    #
-    # **wall-clock 은 안 늘어난다**: macOS 잡은 병렬이고 임계경로는 `file explorer` 다. 이 잡은 번들
-    # 빌드 + 스모크 두 판(실측 약 30초, 웜 캐시 로컬)으로 그 그늘에 들어간다.
-    if: ${{ github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') }}
-    runs-on: macos-15
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          persist-credentials: false
-      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
-        with:
-          version: 2026.2.7
-          sha256: f8becf318705e1bd91227ed0efee4f9fd988d1d5c66bb48e996f030792a0d3b7 # macos-arm64 binary
-          cache_save: false
-      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: |
-            .zig-cache
-            ~/.cache/zig
-          key: zig-v2-${{ runner.os }}-editor-save-conflict-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-${{ github.sha }}
-          restore-keys: |
-            zig-v2-${{ runner.os }}-editor-save-conflict-${{ hashFiles('build.zig.zon', 'tools/ci/prune-zig-cache.sh') }}-
-            zig-v2-${{ runner.os }}-editor-save-conflict-
-      # 앱 번들 빌드가 `web:build` 를 타므로 웹 의존성이 먼저 있어야 한다(위 잡들과 같은 이유·같은 명령).
-      - name: 웹 의존성 설치
-        run: bun install --cwd web --frozen-lockfile
-      # 격리 HOME 의 cold AppKit 프로세스 둘이 **자기가 만든 텍스트 파일 하나**만 읽고 쓴다. 사용자
-      # 파일·네트워크·실제 HOME 에는 닿지 않고, summary 에는 단계 이름과 시나리오 이름만 남는다.
-      - name: 편집기 저장 충돌 스모크
-        run: mise run macos-editor-save-conflict-smoke
-      # 실패하면 **어디서 멈췄는지**가 summary 에 있다(`editor_save_conflict_smoke_stage` · `_failure`).
-      - name: Upload editor save-conflict smoke artifacts
-        if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: maru-editor-save-conflict-smoke
-          path: zig-out/maru-editor-save-conflict-smoke
-          if-no-files-found: warn
-          retention-days: 14
-
   session-host-macos-debug:
     name: session host macOS (Debug)
     needs: changes
@@ -677,25 +569,48 @@ jobs:
       - name: Verify bundled CLI over harness-owned localhost OpenSSH
         run: zig build test-session-host-p5d -Doptimize=ReleaseFast -j1
 
-  session-host-keepalive-macos:
-    name: keep-alive recovered session macOS
+  appkit-smokes-macos:
+    name: AppKit smokes macOS
     needs: changes
-    # **keep-alive 를 실제로 켜고 도는 유일한 CI 잡이다.** `session.keep-alive-after-quit = true` 인 홈에서
-    # 앱을 두 번 띄워, 1차가 남긴 host runtime 을 2차가 목록에서 찾아 클릭하고 그 원격 터미널을 세운 뒤,
-    # 1차 셸이 남긴 표식이 보이는지까지 본다 — 즉 「GUI 를 껐다 켜도 **같은 프로세스**에 다시 붙는다」는
-    # keep-alive 의 핵심 계약을 실 AppKit 창으로 end-to-end 검증한다.
+    # **실제 AppKit 앱을 띄우는 스모크를 한 잡에서 돈다(2026-09-24 병합).** 예전에는 세 잡이었다 —
+    # `keep-alive recovered session macOS` · `agent session archive macOS` · `editor save conflict macOS`.
+    # 셋 다 같은 `macos-app-bundle` 에 기대는데 캐시가 없어(두 잡의 복원 스텝은 저장하는 쪽이 없어 늘
+    # 빈손이었다) **각자 앱을 콜드로 빌드했다** — 잡마다 약 4분이 빌드이고 스모크 자체는 30초~2분이다
+    # (PR run 35881373275 로그 실측).
     #
-    # **오래 «CI 에서 못 돈다» 고 적혀 있었는데 시도한 적이 없었다**(`macos-app-smoke`·`window-smoke` 는
-    # ci.yml 이력에 없다). 실제로 재 보니 러너에 WindowServer 가 살아 있고(pid 145) 이 스모크가 통과한다.
-    # 실측 **2분 14초**로 macOS 잡 중 가장 싸다(slow observer 1m46s, bundled CLI 7m09s, Debug 8m01s,
-    # file explorer 14m04s) — 병렬이라 wall-clock 영향도 사실상 없다.
+    # **왜 합치나 — 병목은 실행 시간이 아니라 macOS 러너 대기다.** 공개 저장소의 macOS 동시 실행은 5개다.
+    # 최근 PR 15회의 CI 벽시계 중앙값 29분 중 가장 긴 잡은 17분이고, macOS 잡 대기가 중앙값 15분이었다
+    # (main push 하나가 macOS 잡 8개를 띄우고, 그 뒤 PR 이 줄을 선다). 합치면 빌드가 한 번이라
+    # PR 의 macOS 잡이 4 → 2, main push 가 8 → 6 이 되고, 러너 시간은 PR 당 약 17 → 11분이다.
+    # 이 잡(약 11~12분)은 `file explorer`(약 17분)보다 짧아 임계경로는 그대로다.
     #
-    # 복구 스모크는 **정상 종료 → 재실행 → 재접속**을, R1 스모크는 ended checkpoint의 반복 게시를,
-    # R7 스모크는 live runtime 3개의 최신 2-window checkpoint 뒤 **GUI SIGKILL → 재실행**을 덮는다.
-    # GUI 부재 중 알림(OS 배너)은 여전히 덮지 않는다.
+    # **「잡 이름이 곧 귀책」 — 예전에 따로 둔 이유를 이렇게 지킨다.** 두 잡은 「번들을 만드는 잡에 얹으면
+    # 그 영역 회귀가 다른 잡이 빨갛다로 보고된다」는 이유로 따로 섰다(도크 골든이 "file explorer" 이름으로
+    # 보고돼 플래키로 오해받은 일이 있었다). 그래서:
+    #   · 잡 이름을 특정 기능이 아닌 **「AppKit smokes」** 로 한다 — 빨간 잡이 어느 한 기능을 지목하지 않는다.
+    #   · 스모크 스텝마다 **`!cancelled()`** 를 달아 앞 스모크가 실패해도 뒤 스모크가 돈다. 실패 신호가
+    #     스텝 이름으로 따로 남고, 「`set -e` 로 멈춰 뒤 시나리오 넷이 아무도 안 돌던」 일이 잡 경계에서
+    #     다시 생기지 않는다.
+    #   · 아티팩트 업로드는 **자기 스모크가 실패했을 때만** 돈다(`steps.<id>.outcome`).
+    #
+    # 스모크별로 덮는 것:
+    #   · keep-alive — `session.keep-alive-after-quit = true` 인 홈에서 앱을 두 번 띄워 「GUI 를 껐다 켜도
+    #     **같은 프로세스**에 다시 붙는다」를 실 AppKit 창으로 end-to-end 검증하는 유일한 CI 경로다. 복구
+    #     스모크는 정상 종료 → 재실행 → 재접속을, R1 은 ended checkpoint 의 반복 게시를, R7 은 live runtime
+    #     3개의 최신 2-window checkpoint 뒤 GUI SIGKILL → 재실행을 덮는다. GUI 부재 중 알림(OS 배너)은
+    #     덮지 않는다. **오래 «CI 에서 못 돈다» 고 적혀 있었는데 시도한 적이 없었다** — 러너에
+    #     WindowServer 가 살아 있고(pid 145) 통과한다(2026-08-27).
+    #   · 에이전트 세션 기록 도크 — 2026-09-15 까지 `mise` 태스크로만 있어 CI 어디에서도 안 돌았고, 그 사이
+    #     `font-scale-rects` 24pt 조합이 `timeout_enterAgentSessions` 로 죽어 뒤 시나리오 넷이 아무도 안 도는
+    #     상태로 남아 있었다. 손으로 돌려야만 보이는 게이트는 결국 안 돈다.
+    #   · 편집기 저장 충돌 — `⌘S` 가 `keyDown` 의 chord 우회를 지나 저장 디스패치에 닿는가, 밖에서 바뀐
+    #     파일을 **안 덮는가**(docs/native-editor-document-model.md §3.9d 「판정」). 헤드리스 판정자는 그
+    #     둘을 볼 수 없다 — 하나는 AppKit 키 배달이고 하나는 디스크의 사실이다.
     if: ${{ github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') }}
     runs-on: macos-15
-    timeout-minutes: 20
+    # 세 잡이 각 20분이었다. 합친 실측 예상은 11~12분(콜드 번들 빌드 한 번 + 스모크 합)이라 30분이면
+    # 여유가 있고, hang 은 계속 유한하게 닫는다.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -711,27 +626,66 @@ jobs:
         run: zig build test-session-host-cross-uid-macos
       # 앱 번들 빌드가 `web:build` 를 타므로 웹 의존성이 먼저 있어야 한다 — 이걸 빠뜨린 첫 시도가
       # `unresolved_import` 로 죽었다(AppKit 과 무관한 실패였다). 기존 web job 과 같은 명령을 쓴다.
+      # 앞 스텝이 실패해도 돈다 — 뒤 스모크 전부가 이 스텝에 기댄다.
       - name: 웹 의존성 설치
+        if: ${{ !cancelled() }}
         run: bun install --cwd web --frozen-lockfile
       # 이 스모크가 단언하는 항목(build.zig): stage=2(두 번째 실행까지 감) · row_present(살아남은 세션을
       # 목록에서 찾음) · click_dispatched(실제 클릭) · remote_published(원격 터미널이 섬) ·
       # marker_present(**1 차 셸이 남긴 표식이 2 차에서 보임 = 같은 프로세스에 재접속**) · before/after_capture
       # (그 화면을 렌더해 캡처) · attach 뒤 handshake로 PTY가 낸 async marker · 실제 DispatchSourceRead
       # handler 증가 · handler tick→Metal frame 뒤 screen probe 60ms 이내.
+      # 앱 번들은 이 스텝이 처음 빌드하고, 뒤 스모크들은 같은 번들을 재사용한다.
       - name: keep-alive recovered-session 스모크
+        if: ${{ !cancelled() }}
         run: mise run macos-session-host-recovery-smoke
       # 저장된 ended tombstone을 실제 AppKit 제품이 capture→atomic checkpoint한 결과로 다시 두 번
       # 띄운다. 두 실행 모두 셸 child 0이어야 하므로 unit의 restoreSpawn sentinel보다 강한 제품 경계다.
       - name: durable tombstone 다회 재실행 스모크
+        if: ${{ !cancelled() }}
         run: mise run macos-session-host-r1-tombstone-smoke
       # 원자적 incremental checkpoint commit 뒤 첫 GUI만 SIGKILL한다. 두 번째 실제 AppKit 실행에서
       # 2 Window·3 workspace, exact host/runtime/child PID, scrollback, GUI 부재 중 출력을 검증한다.
       - name: 최신 멀티 창 checkpoint 강제 종료 복원 스모크
+        if: ${{ !cancelled() }}
         run: mise run macos-session-host-r7-integration-smoke
       # 실제 AppKit terminateLater 경로에서 final checkpoint 성공과 권한 실패를 모두 실행한다.
       # 성공은 앱 종료, 실패는 앱과 이전 완전본 보존이며 각 reply가 exact once여야 한다.
       - name: checkpoint Quit 성공·취소 스모크
+        if: ${{ !cancelled() }}
         run: mise run macos-session-host-c4-quit-cancel-smoke
+      # 격리 HOME 의 cold AppKit 프로세스 15개가 synthetic·redacted JSONL 만 읽는다 — 실제 provider
+      # 바이너리·계정·네트워크·사용자 이력에는 닿지 않는다(docs/plans/agent-session-list.md AS4-c).
+      # 판정은 fake provider 가 남긴 verdict 와 rect JSON 이고 summary 에 원문·세션 id·경로는 안 남는다.
+      - name: 에이전트 세션 기록 도크 스모크
+        id: agent_session_archive
+        if: ${{ !cancelled() }}
+        run: mise run macos-agent-session-archive-smoke
+      # 실패하면 **어느 시나리오가 어디서 멈췄는지**가 summary 에 있다(`..._stage` · `..._failure`).
+      # 캡처 PPM 도 함께 올린다 — 시각 계약이 깨진 경우 그림 없이는 원인을 못 가른다.
+      - name: Upload agent session archive smoke artifacts
+        if: ${{ !cancelled() && steps.agent_session_archive.outcome == 'failure' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: maru-agent-session-archive-smoke
+          path: zig-out/maru-agent-session-archive-smoke
+          if-no-files-found: warn
+          retention-days: 14
+      # 격리 HOME 의 cold AppKit 프로세스 둘이 **자기가 만든 텍스트 파일 하나**만 읽고 쓴다. 사용자
+      # 파일·네트워크·실제 HOME 에는 닿지 않고, summary 에는 단계 이름과 시나리오 이름만 남는다.
+      - name: 편집기 저장 충돌 스모크
+        id: editor_save_conflict
+        if: ${{ !cancelled() }}
+        run: mise run macos-editor-save-conflict-smoke
+      # 실패하면 **어디서 멈췄는지**가 summary 에 있다(`editor_save_conflict_smoke_stage` · `_failure`).
+      - name: Upload editor save-conflict smoke artifacts
+        if: ${{ !cancelled() && steps.editor_save_conflict.outcome == 'failure' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: maru-editor-save-conflict-smoke
+          path: zig-out/maru-editor-save-conflict-smoke
+          if-no-files-found: warn
+          retention-days: 14
 
   session-host-macos-releasefast:
     name: session host macOS (ReleaseFast)

@@ -35,7 +35,7 @@ test "session host Debug job owns the measured 35 minute completion budget" {
     const bundled_job = try jobBody(
         workflow,
         "  session-host-bundled-cli-macos:\n",
-        "  session-host-keepalive-macos:\n",
+        "  appkit-smokes-macos:\n",
     );
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, debug_job, "    timeout-minutes:"));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, debug_job, "    timeout-minutes: 35\n"));

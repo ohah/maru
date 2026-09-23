@@ -285,3 +285,20 @@ test "SSEL5 교차하는 후보는 안쪽 순서로 하나만 — 사슬은 언�
     try testing.expectEqual(@as(u32, 4), out.items[1].start);
     try testing.expectEqual(@as(u32, 10), out.items[1].end);
 }
+
+test "SSEL20 사슬 상한 — 후보가 아무리 많아도 한 커서의 사슬은 max_steps 다 (§8.2q)" {
+    const a = testing.allocator;
+    // 서로 다른 중첩 범위를 상한보다 많이 준다(같은 범위만 주면 사슬이 중복을 거르므로 상한이 안 보인다).
+    const n = max_steps + 100;
+    const content = try a.alloc(u8, 2 * n + 2);
+    defer a.free(content);
+    @memset(content, ' ');
+    var provided: std.ArrayList(Range) = .empty;
+    defer provided.deinit(a);
+    var i: u32 = 0;
+    while (i < n) : (i += 1) try provided.append(a, .{ .start = @intCast(n - i), .end = @intCast(n + 2 + i) });
+    var out: std.ArrayList(Range) = .empty;
+    defer out.deinit(a);
+    try chainFor(a, content, .{ .start = @intCast(n + 1), .end = @intCast(n + 1) }, @intCast(n + 1), provided.items, &out);
+    try testing.expectEqual(max_steps, out.items.len);
+}

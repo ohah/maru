@@ -13949,6 +13949,113 @@ test "SSEL13 선택 확장의 멀티 커서 — 커서마다 사슬로 넓히고
     try testing.expectEqual(@as(u64, 2), s.editor_lsp.sent_selection_range);
     try testing.expect(smartApplied(&f, 3));
     try testing.expectEqualStrings("return alpha + beta;", smartSelected(term));
+
+    // **primary 는 제자리를 지킨다** — 뒤쪽 커서(`beta`)가 primary 면 넓힌 뒤에도 그 커서가 primary 다(문서 순서로 모아도 짝을 잃지 않는다).
+    smartCaret(term, b);
+    const extras2 = try allocator.alloc(editor_selection.Selection, 1);
+    extras2[0] = editor_selection.Selection.at(a);
+    term.rt.editor_extra_selections = extras2;
+    try pressKey(&f.fx, .arrow_right, smart_mods);
+    try testing.expect(smartApplied(&f, 4));
+    try testing.expectEqualStrings("beta", smartSelected(term));
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_extra_selections.len);
+    const ex2 = term.rt.editor_extra_selections[0];
+    try testing.expectEqualStrings("alpha", content[ex2.start()..ex2.end()]);
+}
+
+test "SSEL16 선택 확장 — 빈 caret 이 낱말 끝 바로 뒤(`alpha|`)면 그 낱말의 시작으로 묻는다: 첫 걸음이 그 낱말이고 둘째가 서버 범위다 (제품 경계, §8.2q 실측 ②)" {
+    // 실서버 tsgo 는 낱말 끝 바로 뒤에서 그 식별자를 건너뛴다. caret 자리 그대로 물으면 가짜 서버는 공백을 보고 낱말을 못 준다 —
+    // 이 판정자는 **물은 자리가 낱말 시작인지**를 잰다(자리를 caret 으로 되돌리는 변이가 여기서 죽는다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var f = (try SmtFixture.open(allocator, "sx.c", smart_src)) orelse return error.SkipZigTest;
+    defer f.close(allocator);
+    const term = f.term;
+    try testing.expect(f.ready());
+    const at = std.mem.indexOf(u8, term.rt.editor_doc.?.file.content, "alpha").? + "alpha".len; // `alpha|`
+    smartCaret(term, at);
+    try pressKey(&f.fx, .arrow_right, smart_mods);
+    try testing.expect(smartApplied(&f, 1));
+    try testing.expectEqualStrings("alpha", smartSelected(term));
+    try pressKey(&f.fx, .arrow_right, smart_mods);
+    try testing.expectEqualStrings("alpha + beta;", smartSelected(term)); // 서버 모양
+}
+
+test "SSEL17 선택 확장 — utf-16 을 협상한 서버에 비ASCII 뒤 낱말의 자리를 글자 단위로 묻고 답을 byte 로 되읽는다 (제품 경계, §8.2q)" {
+    // 가짜 서버는 기본 utf-8 이라 ASCII 픽스처로는 byte = 글자다. `가나다라` 는 byte 12 · utf-16 4 — 환산을 빼면 물은 자리가 8 글자 밀려
+    // `beta` 에 떨어지고, 서버 범위가 기준을 안 품어 1층(`alpha + beta`, `;` 없음)으로 간다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    _ = setenv("MARU_FAKE_LSP_UTF16", "1", 1);
+    defer _ = unsetenv("MARU_FAKE_LSP_UTF16");
+    var f = (try SmtFixture.open(allocator, "su.c", "int f(int a) {\n  return /*가나다라*/ alpha + beta;\n}\n")) orelse return error.SkipZigTest;
+    defer f.close(allocator);
+    const term = f.term;
+    try testing.expect(f.ready());
+    const at = std.mem.indexOf(u8, term.rt.editor_doc.?.file.content, "alpha").? + 2;
+    smartCaret(term, at);
+    try pressKey(&f.fx, .arrow_right, smart_mods);
+    try testing.expect(smartApplied(&f, 1));
+    try testing.expectEqualStrings("alpha", smartSelected(term));
+    try pressKey(&f.fx, .arrow_right, smart_mods);
+    try testing.expectEqualStrings("alpha + beta;", smartSelected(term));
+}
+
+test "SSEL18 선택 확장 뒤 타이핑은 새 undo 묶음이다 — 되돌리면 확장 전 타이핑은 남는다 (제품 경계, §8.2q · §3.3)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "su.txt", "\n");
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, term, "alpha beta")); // 타이핑 묶음 하나
+    // caret 은 `beta|` — 확장하면 `beta` 가 선다(서버 없음 → 낱말 단계).
+    try pressKey(&fx, .arrow_right, smart_mods);
+    const c = term.rt.editor_doc.?.file.content;
+    const sel = term.rt.editor_selection.?;
+    try testing.expectEqualStrings("beta", c[sel.start()..sel.end()]);
+    try testing.expect(insertText(fx.session, term, "X")); // 선택을 갈아 끼운다
+    try testing.expectEqualStrings("alpha X\n", term.rt.editor_doc.?.file.content);
+    try testing.expect(undoEdit(fx.session, term));
+    try testing.expectEqualStrings("alpha beta\n", term.rt.editor_doc.?.file.content); // 확장 전 타이핑은 남는다
+}
+
+test "SSEL19 선택 확장은 primary caret 을 드러낸다 — 화면 밖 줄에서 넓히면 그 줄로 스크롤한다 (제품 경계, §8.2q)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "sr.txt", "alpha beta\n" ** 300);
+    fx.session.surface_initialized = true;
+    fx.session.backing_width_px = 1200;
+    fx.session.backing_height_px = 800;
+    const leaf = activeLeafRectForTest(fx.session) orelse return error.NoLeaf;
+    var d = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+    d.dl.deinit(allocator);
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_first_line);
+    // 250 번째 줄의 `beta` 안에 caret 을 **드러내지 않고** 세운다(클릭이 아닌 경로 — 화면 밖).
+    const line = term.rt.editor_doc.?.file.lines.line(250) orelse return error.NoLine;
+    term.rt.editor_selection = editor_selection.Selection.at(line.start + 7);
+    try pressKey(&fx, .arrow_right, smart_mods);
+    const sel = term.rt.editor_selection.?;
+    try testing.expectEqualStrings("beta", term.rt.editor_doc.?.file.content[sel.start()..sel.end()]);
+    try testing.expect(term.rt.editor_first_line > 200); // 250 줄이 보이도록 내려갔다
+}
+
+test "SSEL21 비교 뷰에서는 팔레트로 불러도 선택을 안 바꾼다 — 축이 둘이라 이 기능 밖이다 (제품 경계, §8.2q · visual-mapping §4.1g)" {
+    // 키는 `needs_editable` 로 비교 뷰에서 컨텍스트가 지지만(`SSEL14`) 팔레트 명령은 그 표를 안 지난다 — 이 가드가 유일한 문이다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "sd.txt", "alpha beta\n");
+    term.rt.editor_selection = editor_selection.Selection.at(2);
+    term.rt.editor_diff = .{}; // 비교 상태만 세운다 — 이 가드를 지나기에 충분하다(OCH4 와 같은 수법)
+    defer term.rt.editor_diff = null;
+    fx.session.dispatchAppAction(.expand_selection);
+    try testing.expectEqual(@as(usize, 2), term.rt.editor_selection.?.start());
+    try testing.expectEqual(@as(usize, 2), term.rt.editor_selection.?.end());
+    try testing.expectEqual(@as(u64, 0), term.rt.editor_smart_select.applied);
 }
 
 test "OCH4 같은 낱말 강조 — provider 가 없으면 묻지 않고, 빈 응답·오류는 강조 없음이며, 낡은 낱말로 온 답은 버린다 (제품 경계, §8.2p)" {

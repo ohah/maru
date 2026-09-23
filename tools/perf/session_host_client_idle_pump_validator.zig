@@ -65,6 +65,7 @@ const ScaleSample = struct {
     cpu_total_delta_ns: u64,
     selected_owner_count: u64,
     pump_delta_count: u64,
+    quiet_pump_skip_count: u64,
     timestamp_seal_count: u64,
     client_slot_registry_visit_count: u64,
     socket_read_attempt_count: u64,
@@ -94,6 +95,7 @@ const Artifact = struct {
     marker_max_frame_elapsed_ns: u64,
     marker_selected_owner_count: u64,
     marker_pump_delta_count: u64,
+    marker_quiet_pump_skip_count: u64,
     marker_timestamp_seal_count: u64,
     host_reaped: bool,
     client_fds_closed: bool,
@@ -128,8 +130,12 @@ fn validateArtifact(artifact: Artifact) !void {
         if (sample.cpu_total_delta_ns > idle_client_cpu_cap_ns) return error.ScaleRowCpuOverCap;
         const expected_selected_owner_count: u64 =
             @as(u64, @min(expected_runtime_count, max_owners_per_frame)) * idle_frame_count;
+        // idle 에서는 probe 한 owner 만 펌프하고, 나머지 선택은 전부 «할 일 없음» 이 증명돼 건너뛴다
+        // (`quietPumpProven`, 2026-09-23 — 활성 32 세션 조용한 펌프 51,141번 중 출력 0). 건너뛰기가
+        // 풀리면 pump 가 frame 수를 넘어 여기서 빨개진다.
         if (sample.selected_owner_count != expected_selected_owner_count or
-            sample.pump_delta_count != expected_selected_owner_count or
+            sample.pump_delta_count != idle_frame_count or
+            sample.pump_delta_count + sample.quiet_pump_skip_count != sample.selected_owner_count or
             sample.timestamp_seal_count != sample.pump_delta_count or
             sample.metadata_event_count != 0 or sample.screen_event_count != 0 or
             sample.ended_event_count != 0)
@@ -188,11 +194,14 @@ fn validateMarker(artifact: Artifact) !void {
         artifact.marker_frame_count - @as(u32, @intCast(marker_sample_count)))
         return error.MarkerWakeAccountingMismatch;
 
-    // Pump deltas track selected owners, with at most one extra entry per frame.
-    if (artifact.marker_pump_delta_count < artifact.marker_selected_owner_count)
+    // Pump deltas track the selected owners that were not proven quiet, with at most one extra
+    // entry per frame. A skip is never counted for an owner that also pumped.
+    if (artifact.marker_quiet_pump_skip_count > artifact.marker_selected_owner_count)
+        return error.MarkerQuietSkipAboveOwners;
+    const marker_pumped_owners = artifact.marker_selected_owner_count - artifact.marker_quiet_pump_skip_count;
+    if (artifact.marker_pump_delta_count < marker_pumped_owners)
         return error.MarkerPumpDeltaBelowOwners;
-    if (artifact.marker_pump_delta_count >
-        artifact.marker_selected_owner_count + artifact.marker_frame_count)
+    if (artifact.marker_pump_delta_count > marker_pumped_owners + artifact.marker_frame_count)
         return error.MarkerPumpDeltaAboveOwners;
     if (artifact.marker_pump_delta_count != artifact.marker_timestamp_seal_count)
         return error.MarkerSealCountMismatch;
@@ -256,10 +265,10 @@ pub fn main(init: std.process.Init) !void {
 
 test "P4 E3c validator rejects inferred counter, latency, and cleanup drift" {
     const rows = [_]ScaleSample{
-        .{ .runtime_count = 1, .frame_count = 60, .observation_ns = std.time.ns_per_s, .cpu_user_delta_ns = 1, .cpu_system_delta_ns = 2, .cpu_total_delta_ns = 3, .selected_owner_count = 60, .pump_delta_count = 60, .timestamp_seal_count = 60, .client_slot_registry_visit_count = 0, .socket_read_attempt_count = 0 },
-        .{ .runtime_count = 10, .frame_count = 60, .observation_ns = std.time.ns_per_s, .cpu_user_delta_ns = 2, .cpu_system_delta_ns = 3, .cpu_total_delta_ns = 5, .selected_owner_count = 600, .pump_delta_count = 600, .timestamp_seal_count = 600, .client_slot_registry_visit_count = 0, .socket_read_attempt_count = 0 },
-        .{ .runtime_count = 15, .frame_count = 60, .observation_ns = std.time.ns_per_s, .cpu_user_delta_ns = 3, .cpu_system_delta_ns = 4, .cpu_total_delta_ns = 7, .selected_owner_count = 900, .pump_delta_count = 900, .timestamp_seal_count = 900, .client_slot_registry_visit_count = 0, .socket_read_attempt_count = 0 },
-        .{ .runtime_count = 100, .frame_count = 60, .observation_ns = std.time.ns_per_s, .cpu_user_delta_ns = 4, .cpu_system_delta_ns = 5, .cpu_total_delta_ns = 9, .selected_owner_count = 960, .pump_delta_count = 960, .timestamp_seal_count = 960, .client_slot_registry_visit_count = 0, .socket_read_attempt_count = 0 },
+        .{ .runtime_count = 1, .frame_count = 60, .observation_ns = std.time.ns_per_s, .cpu_user_delta_ns = 1, .cpu_system_delta_ns = 2, .cpu_total_delta_ns = 3, .selected_owner_count = 60, .pump_delta_count = 60, .quiet_pump_skip_count = 0, .timestamp_seal_count = 60, .client_slot_registry_visit_count = 0, .socket_read_attempt_count = 0 },
+        .{ .runtime_count = 10, .frame_count = 60, .observation_ns = std.time.ns_per_s, .cpu_user_delta_ns = 2, .cpu_system_delta_ns = 3, .cpu_total_delta_ns = 5, .selected_owner_count = 600, .pump_delta_count = 60, .quiet_pump_skip_count = 540, .timestamp_seal_count = 60, .client_slot_registry_visit_count = 0, .socket_read_attempt_count = 0 },
+        .{ .runtime_count = 15, .frame_count = 60, .observation_ns = std.time.ns_per_s, .cpu_user_delta_ns = 3, .cpu_system_delta_ns = 4, .cpu_total_delta_ns = 7, .selected_owner_count = 900, .pump_delta_count = 60, .quiet_pump_skip_count = 840, .timestamp_seal_count = 60, .client_slot_registry_visit_count = 0, .socket_read_attempt_count = 0 },
+        .{ .runtime_count = 100, .frame_count = 60, .observation_ns = std.time.ns_per_s, .cpu_user_delta_ns = 4, .cpu_system_delta_ns = 5, .cpu_total_delta_ns = 9, .selected_owner_count = 960, .pump_delta_count = 60, .quiet_pump_skip_count = 900, .timestamp_seal_count = 60, .client_slot_registry_visit_count = 0, .socket_read_attempt_count = 0 },
     };
     // 전부 1ms — p95 도 max 도 상한 아래다.
     var latency_samples = [_]u64{std.time.ns_per_ms} ** marker_sample_count;
@@ -287,6 +296,7 @@ test "P4 E3c validator rejects inferred counter, latency, and cleanup drift" {
         .marker_max_frame_elapsed_ns = 1,
         .marker_selected_owner_count = 16,
         .marker_pump_delta_count = 16,
+        .marker_quiet_pump_skip_count = 0,
         .marker_timestamp_seal_count = 16,
         .host_reaped = true,
         .client_fds_closed = true,
@@ -340,6 +350,19 @@ test "P4 E3c validator rejects inferred counter, latency, and cleanup drift" {
                 }
             }.f,
         },
+        .{ .name = "quiet skips above owners", .want = error.MarkerQuietSkipAboveOwners, .apply = struct {
+            fn f(a: *Artifact) void {
+                a.marker_quiet_pump_skip_count = a.marker_selected_owner_count + 1;
+            }
+        }.f },
+        // 건너뛴 owner 는 펌프 하한에서 빠진다 — 그러나 건너뛰기를 세고도 펌프가 그만큼 늘면 둘 다 센 것이다.
+        .{ .name = "skip also pumped", .want = error.MarkerPumpDeltaAboveOwners, .apply = struct {
+            fn f(a: *Artifact) void {
+                a.marker_quiet_pump_skip_count = a.marker_selected_owner_count;
+                a.marker_pump_delta_count = a.marker_frame_count + 1;
+                a.marker_timestamp_seal_count = a.marker_pump_delta_count;
+            }
+        }.f },
         .{ .name = "pump delta below owners", .want = error.MarkerPumpDeltaBelowOwners, .apply = struct {
             fn f(a: *Artifact) void {
                 a.marker_pump_delta_count = a.marker_selected_owner_count - 1;
@@ -456,4 +479,14 @@ test "P4 E3c validator rejects inferred counter, latency, and cleanup drift" {
     drifted_rows[2] = rows[2];
     drifted_rows[2].cpu_system_delta_ns += 1; // 합이 안 맞는다
     try std.testing.expectError(error.ScaleRowCpuSplitMismatch, validateArtifact(artifact));
+    // idle 에서 조용한 owner 건너뛰기가 풀리면(옛 동작: 선택한 owner 전부 펌프) 빨개진다.
+    drifted_rows[2] = rows[2];
+    drifted_rows[2].pump_delta_count = drifted_rows[2].selected_owner_count;
+    drifted_rows[2].timestamp_seal_count = drifted_rows[2].selected_owner_count;
+    drifted_rows[2].quiet_pump_skip_count = 0;
+    try std.testing.expectError(error.InvalidIdleCounters, validateArtifact(artifact));
+    // 건너뛴 수와 펌프 수가 선택 수를 설명하지 못하면 빨개진다.
+    drifted_rows[2] = rows[2];
+    drifted_rows[2].quiet_pump_skip_count -= 1;
+    try std.testing.expectError(error.InvalidIdleCounters, validateArtifact(artifact));
 }

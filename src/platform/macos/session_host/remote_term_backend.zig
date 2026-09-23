@@ -3384,6 +3384,10 @@ pub const RemoteTermBackend = struct {
         self.not_live_skip_reported = false;
     }
 
+    fn orderRuntimeHandle(key: RuntimeHandle, item: RuntimeHandle) std.math.Order {
+        return std.math.order(key, item);
+    }
+
     pub fn maintenanceEventTick(self: *RemoteTermBackend) void {
         // 프레임 도장을 올린다 — 이 tick 안에서 같은 host Client 에 두 번째 «비었나» 질문이 poll 을 건너뛴다(`client.zig`).
         client_mod.advanceUiFrameStamp();
@@ -3479,9 +3483,20 @@ pub const RemoteTermBackend = struct {
             const entry = self.runtimes.get(handle) orelse
                 process_seal.fatalIntegrity(.proof_loss);
             client_idle_pump_evidence.recordSelectedOwner();
+            // **할 일이 없다고 증명된 조용한 owner 는 펌프하지 않는다.** 선택과 round-robin 커서는 그대로 두고
+            // (계약: 16-owner cap·quiet 진행), 결과만 idle 펌프와 같은 빈 요약으로 남긴다. probe 와 priority owner 는
+            // 늘 펌프한다. 증명 조건은 `backend_api.quietPumpProven` 이 진다 — 모르면 펌프한다.
+            const handle_index = std.sort.binarySearch(RuntimeHandle, handles[0..handle_count], handle, orderRuntimeHandle) orelse
+                process_seal.fatalIntegrity(.proof_loss);
+            const proven_quiet = !priority[handle_index] and
+                !(builtin.is_test and B5TestState.event_pump_hook != null) and
+                RemoteRuntime.backend_api.quietPumpProven(entry.runtime);
+            if (proven_quiet) client_idle_pump_evidence.recordQuietPumpSkipped();
             RemoteRuntime.backend_api.storeFrameSummary(
                 entry.runtime,
-                if (builtin.is_test and B5TestState.event_pump_hook != null)
+                if (proven_quiet)
+                    .{}
+                else if (builtin.is_test and B5TestState.event_pump_hook != null)
                     B5TestState.event_pump_hook.?(handle, entry.runtime)
                 else
                     drainRemoteNow(entry.runtime),

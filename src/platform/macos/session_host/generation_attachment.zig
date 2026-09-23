@@ -1899,6 +1899,14 @@ pub const GenerationAttachment = struct {
         ) catch @panic("generation transport terminalization failed");
     }
 
+    /// 이미 빌려 둔 화면 배치도, 실패한 해제도 없는가 — 펌프가 소켓·큐 없이 스스로 할 일이 없다는 뜻이다
+    /// (runtime 의 조용한 펌프 증명 `quietPumpProven`). live 가 아니면 모른다(false).
+    pub fn screenPumpDrained(self: *const GenerationAttachment) bool {
+        if (!self.isLive()) return false;
+        const payload = if (self.payload) |*value| value else return false;
+        return payload.preflightPayloadOnlyDeinit() == .ready;
+    }
+
     fn payloadMut(self: *GenerationAttachment) *remote_attachment.RemoteAttachment {
         if (!self.isLive()) panicNotLive(self, "payloadMut");
         return if (self.payload) |*payload| payload else @panic("generation attachment payload missing");

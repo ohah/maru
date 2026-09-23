@@ -524,6 +524,7 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .name = "screenRecoveryState", .receiver_type = immutable, .class = .observation },
         .{ .name = "hasBufferedRuntimeWork", .receiver_type = immutable, .class = .observation },
         .{ .name = "hasAnyBufferedRuntimeWork", .receiver_type = immutable, .class = .observation },
+        .{ .name = "quietPumpProven", .receiver_type = immutable, .class = .observation },
     };
     try expectClientReceiverManifest(allocator, source, &manifest);
     const guarded = [_]ClientGuardProof{
@@ -1619,6 +1620,11 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 // 빈 드레인 건너뛰기(2026-09-23): 어느 Client 큐든 이벤트가 **추가될 때만** 오르는 전역 세대.
                 // RemoteRuntime 이 마지막 «없음» 때의 값과 같으면 lease 의례를 건너뛴다. 포인터 없는 u64 하나다.
                 .{ .parent = "root", .kind = "var", .visibility = "pub", .modifier = "", .name = "generation_event_enqueue_epoch" },
+                // 조용한 owner 펌프 건너뛰기(2026-09-23): 이번 프레임에 이 stream 의 펌프가 반드시 idle 인가를 한 번의
+                // 읽기 전용 판정으로 답한다(소켓 캐시·버퍼·복구·밀린 전송). 버퍼 검사는 기존 공개 판정과 같은 몸통을 쓴다.
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "bufferedRuntimeWorkFor" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "quietPumpProven" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "currentUiFrameStampForTest" },
             },
         },
         .{
@@ -2222,6 +2228,8 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "managedPoisonWillPublishFirst" },
                 .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "consumeManagedPoison" },
                 .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "terminalizeManagedPoisonNoFail" },
+                // 조용한 owner 펌프 건너뛰기(2026-09-23): Client.quietPumpProven 을 현재 Client 에 빌려 묻는 읽기 전용 통로.
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "currentQuietPumpProven" },
             },
         },
     };

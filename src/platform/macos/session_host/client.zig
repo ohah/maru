@@ -7749,6 +7749,10 @@ pub const Client = struct {
         const operation_fence_held = try self.ensureUsable();
         defer if (operation_fence_held) self.endPublicMutation();
         if (stream_id == 0) return error.ProtocolError;
+        return self.bufferedRuntimeWorkFor(stream_id);
+    }
+
+    fn bufferedRuntimeWorkFor(self: *const Client, stream_id: u64) bool {
         for (self.pending_events.items) |pending|
             if (pending.header.stream_id == stream_id) return true;
         for (self.screen_inbox.pending_batches.items) |pending|
@@ -7756,6 +7760,27 @@ pub const Client = struct {
         for (self.screen_inbox.pending_stream.items) |pending|
             if (pending.header.stream_id == stream_id) return true;
         return false;
+    }
+
+    /// 이 stream 의 펌프가 **이번 프레임에 반드시 idle 로 끝나는가** — Client 쪽 절반.
+    ///
+    /// **왜**: `RemoteTermBackend.maintenanceEventTick` 은 프레임마다 16 슬롯을 채우려고 할 일 없는 runtime 까지
+    /// 펌프했다. 활성 32 세션에서 그 «조용한» 펌프가 tick 당 14회, 51,141번 중 출력 0번이었고(2026-09-23 계수),
+    /// 매번 소유 lease·최종 admission·capability digest 를 거친 뒤에야 idle 을 알았다. probe 가 소켓을 비울 때까지
+    /// 읽고 나면 같은 프레임의 poll 은 캐시(`socket_empty_at_frame`)가 막으므로, 아래가 모두 참이면 그 펌프가
+    /// 할 수 있는 일은 없다: 소켓은 이번 프레임에 이미 비었다고 확인됐고, 이 stream 에 버퍼된 이벤트·배치가
+    /// 없고, 복구 요청이 걸려 있지 않고, 보낼 프레임이 밀려 있지 않다. 하나라도 모르면 false — 펌프한다.
+    /// poison 된 연결은 `unusable` 도 함께 서므로(`markPoisonedForDeferredCleanup`·`poisonAndTakeFd`)
+    /// `ensureUsable` 이 오류로 돌려보내고, 호출자는 그 오류를 «모름» 으로 받아 펌프한다.
+    pub fn quietPumpProven(self: *const Client, stream_id: u64) ClientError!bool {
+        const operation_fence_held = try self.ensureUsable();
+        defer if (operation_fence_held) self.endPublicMutation();
+        if (stream_id == 0) return error.ProtocolError;
+        if (self.pending_outbound != null) return false;
+        const frame = ui_frame_stamp.load(.monotonic);
+        if (frame == 0 or self.socket_empty_at_frame != frame) return false;
+        if (self.screen_inbox.recovery.state(stream_id) != .valid) return false;
+        return !self.bufferedRuntimeWorkFor(stream_id);
     }
 
     pub fn hasAnyBufferedRuntimeWork(self: *const Client) ClientError!bool {
@@ -21312,6 +21337,12 @@ pub var generation_event_enqueue_epoch: std.atomic.Value(u64) = .init(1);
 
 pub fn advanceUiFrameStamp() void {
     _ = ui_frame_stamp.fetchAdd(1, .monotonic);
+}
+
+/// 판정자 전용 — 지금 프레임 도장(«이 프레임에 소켓이 비었다» 를 흉내 낼 때 쓴다).
+pub fn currentUiFrameStampForTest() u64 {
+    if (!builtin.is_test) @compileError("test-only");
+    return ui_frame_stamp.load(.monotonic);
 }
 
 /// 판정자 전용 — 도장을 0 으로 되돌려 캐시를 끈다(다른 판정자에 새지 않게).

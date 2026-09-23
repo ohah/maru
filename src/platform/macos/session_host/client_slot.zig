@@ -13369,6 +13369,20 @@ pub const ClientSlot = struct {
             return mapCurrentBorrowError(err);
     }
 
+    pub fn currentQuietPumpProven(
+        self: *ClientSlot,
+        expected_generation: u64,
+        stream_id: u64,
+    ) client_mod.ClientError!bool {
+        const Operation = struct {
+            fn run(target_stream_id: u64, client: *client_mod.Client) client_mod.ClientError!bool {
+                return client.quietPumpProven(target_stream_id);
+            }
+        };
+        return self.withCurrent(expected_generation, stream_id, Operation.run) catch |err|
+            return mapCurrentBorrowError(err);
+    }
+
     pub fn currentHasBufferedRuntimeWork(
         self: *ClientSlot,
         expected_generation: u64,

@@ -36,6 +36,7 @@ const ScaleSample = struct {
     cpu_total_delta_ns: u64,
     selected_owner_count: u64,
     pump_delta_count: u64,
+    quiet_pump_skip_count: u64,
     timestamp_seal_count: u64,
     client_slot_registry_visit_count: u64,
     socket_read_attempt_count: u64,
@@ -68,6 +69,7 @@ const Artifact = struct {
     marker_max_frame_elapsed_ns: u64,
     marker_selected_owner_count: u64,
     marker_pump_delta_count: u64,
+    marker_quiet_pump_skip_count: u64,
     marker_timestamp_seal_count: u64,
     host_reaped: bool,
     client_fds_closed: bool,
@@ -306,6 +308,7 @@ test "P4 E3c actual generation-backed GUI client idle pump emits strict scale ev
                 (after.system_time_ns - before.system_time_ns),
             .selected_owner_count = counters.selected_owners,
             .pump_delta_count = counters.pump_delta_entries,
+            .quiet_pump_skip_count = counters.quiet_pumps_skipped,
             .timestamp_seal_count = counters.timestamp_seals,
             .client_slot_registry_visit_count = counters.client_slot_registry_visits,
             .socket_read_attempt_count = counters.socket_read_attempts,
@@ -335,6 +338,7 @@ test "P4 E3c actual generation-backed GUI client idle pump emits strict scale ev
     var marker_max_frame_elapsed_ns: u64 = 0;
     var marker_selected_owners: u64 = 0;
     var marker_pump_deltas: u64 = 0;
+    var marker_quiet_skips: u64 = 0;
     var marker_seals: u64 = 0;
     for (&marker_latencies, &marker_frame_turns) |*latency, *turns| {
         try settle(&evidence_owner, &backend, &pumps);
@@ -368,6 +372,7 @@ test "P4 E3c actual generation-backed GUI client idle pump emits strict scale ev
         const round_counters = try evidence_owner.snapshot();
         marker_selected_owners += round_counters.selected_owners;
         marker_pump_deltas += round_counters.pump_delta_entries;
+        marker_quiet_skips += round_counters.quiet_pumps_skipped;
         marker_seals += round_counters.timestamp_seals;
     }
 
@@ -413,6 +418,7 @@ test "P4 E3c actual generation-backed GUI client idle pump emits strict scale ev
         .marker_max_frame_elapsed_ns = marker_max_frame_elapsed_ns,
         .marker_selected_owner_count = marker_selected_owners,
         .marker_pump_delta_count = marker_pump_deltas,
+        .marker_quiet_pump_skip_count = marker_quiet_skips,
         .marker_timestamp_seal_count = marker_seals,
         .host_reaped = host_reaped,
         .client_fds_closed = client_fds_closed,

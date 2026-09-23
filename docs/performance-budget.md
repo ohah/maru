@@ -324,6 +324,13 @@ wall time과 분리된 raw process CPU 25ms다. 이 값은 첫 RED 최대 4.926m
 nominal 1초 창에서 한 코어 2.5%를 넘는 idle 회귀를 닫는다. registry/socket 값은 단순 관측 필드가 아니라 최초
 실측이 기각한 원인의 재도입을 막는 hard gate다.
 
+**선택과 펌프는 다르다(2026-09-23).** 16-owner cap 과 quiet round-robin 선택·커서는 그대로지만, 선택된 조용한
+owner 는 `quietPumpProven`(이번 프레임에 소켓이 이미 비었고, 자기 stream 에 버퍼·복구 요청이 없고, 밀린 전송·입력·
+resync·드레인 밖 준비 이벤트·빌려 둔 배치가 없다)이 참이면 펌프하지 않고 빈 요약만 남긴다. 그래서 idle 계수 계약은
+`selected = runtime 수(최대 16) × 60`, **`pump = 60`(프레임당 probe 하나)**, `pump + quiet_pump_skip = selected`,
+`seal = pump` 다. 건너뛰기가 풀리면 pump 가 60 을 넘어 `InvalidIdleCounters` 로 빨개진다. 마커 쪽은
+`pump ≥ selected − skip`, `pump ≤ selected − skip + frame` 이다. probe 와 priority owner 는 늘 펌프한다.
+
 **정정(2026-09-20) — 위 「4,096 registry scan 가설 기각」은 계수기의 사각이 만든 오판이었다.** `registry visit`
 계수기(`client_idle_pump_evidence.recordRegistryVisit`)는 `clientSlotRegistryEntry` **한 루프**만 센다. 실제로 tick 마다
 돌던 스캔은 `beginRegisteredNodeOperation` 안의 다른 `for (client_slot_registry)` 였고, 그 루프는 세지 않았다. 게다가
@@ -387,6 +394,18 @@ runtime 의 generation 번호를 함께 기억해, 둘 다 그대로이고 준�
 생긴다. 착수하면 present 구분(키 없음 → 지금의 힌트·바닥 폴링 유지)과 그 판정자를 넣는다. ③ 이득은 위 11.5 % 가 상한이고
 8쌍+ A/B 와 알림 지연(metadata 주기 안인가)을 함께 재야 말할 수 있다. 같은 표본에서 `baseValid`(RPC 권위 자기검증)
 42 중 20 이 이 pull 에서 나오므로, 그쪽 중복 검증 제거(≈1 %p)는 이 처방 뒤에 다시 잰다.
+
+**발견(2026-09-23) — 16 슬롯을 채우는 «조용한» 펌프는 출력이 0 이었다.** `maintenanceEventTick` 은 probe 하나를
+펌프한 뒤 priority owner 와 round-robin 의 조용한 owner 로 16 슬롯을 채운다. 활성 32 세션(2 Hz)에서 임시 계수기로
+3,600 tick 을 세자 tick 당 펌프 약 16.8회 중 조용한 owner 펌프가 14.2회였고 **51,141번 중 출력 0번**이었다. probe 가
+공유 소켓을 비울 때까지 읽고 나면 같은 프레임의 poll 은 캐시(`socket_empty_at_frame`)가 막으므로(poll 실측: 실제 «비었음»
+tick 당 1회, 캐시 적중 약 15회), 조용한 펌프는 소유 lease·최종 admission·capability digest 를 거친 뒤 idle 을 알 뿐이었다.
+처방: 선택·커서·16-owner cap 은 그대로 두고, `quietPumpProven`(위 E3c 절)이 참인 조용한 owner 는 펌프 대신 빈 요약을
+남긴다. 판정은 모르면 false 라 틀릴 수 있는 방향은 «펌프한다» 뿐이다(판정자 QP1, 조건 7개 각각의 돌연변이가 빨강).
+결과: `sample` 귀속 `maintenanceEventTick` busy 172 → 102(이전 앱 busy 의 약 9 %). A/B 는 두 번 쟀다 — 무조건 건너뛰는
+실험판 8쌍 −10.2 %(7/8), 최종판 8쌍 −19.4 %(8/8). 정확한 조건판이 실험판보다 더 건너뛸 수는 없으니 두 번째 값은 회차
+잡음으로 보고, 이득은 귀속과 맞는 **약 −10 %** 로 적는다. host CPU 는 두 번 모두 변화 없음. idle(E3c)에서는 프레임당
+probe 하나만 펌프한다(100 runtime: 선택 960 / 펌프 60 / 건너뜀 900), 마커 턴·지연은 계약 안(턴 최대 4, 최대 42 ms).
 
 실제 AppKit CR6e-a2 v2 반복 artifact는 ReleaseFast 앱 5회 모두 attach 뒤 handshake 출력에서 native handler exact 증가를
 관측했고, handler 진입부터 normal tick의 Metal frame 뒤 screen probe까지 15.528·23.325·23.954·24.151·24.627ms였다.

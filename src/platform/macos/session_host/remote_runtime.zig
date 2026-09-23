@@ -3582,6 +3582,30 @@ pub const RemoteRuntime = struct {
             };
         }
 
+        /// 이 runtime 의 펌프가 **이번 프레임에 반드시 idle 로 끝나는가**(`Client.quietPumpProven` 이 왜를 적는다).
+        /// runtime 쪽 절반: 보낼 입력·제어·기록이 없고, resync 요청이 없고, 드레인 밖에서 준비된 이벤트가 없고
+        /// (#3890 ⑤ — 건너뛰면 그 close 가 정산되지 않는다), attachment 에 빌려 둔 배치가 없다. 어느 하나라도
+        /// 확인 못 하면 false 다 — 틀릴 수 있는 방향은 «펌프한다» 쪽뿐이다.
+        pub fn quietPumpProven(runtime: *RemoteRuntime) bool {
+            runtime.admitRuntimeOperation() catch return false;
+            if (runtime.blocking_flush_active or runtime.direct_input.items.len != 0 or
+                runtime.pending_controls.items.len != 0 or runtime.input_batches.records.items.len != 0)
+                return false;
+            if (runtime.pending_event_owner.lifecycle_raw != @intFromEnum(pending_event_owner_mod.PendingLifecycle.idle))
+                return false;
+            const generation = runtime.currentGeneration();
+            if (generation.resync_needed) return false;
+            const attachment = switch (generation.attachment) {
+                .legacy => return false,
+                .generation => |*value| value,
+            };
+            if (!attachment.screenPumpDrained()) return false;
+            return switch (generation.connection) {
+                .legacy => false,
+                .generation => |adapter| adapter.quietPumpProven(generation.attachment.streamId()) catch false,
+            };
+        }
+
         pub fn hasImmediateFrameWork(runtime: *const RemoteRuntime) bool {
             runtime.admitRuntimeOperation() catch return false;
             const generation = runtime.currentGenerationConst();
@@ -10343,6 +10367,161 @@ test "ID1 빈 드레인은 새 이벤트가 없을 때만 건너뛰고, 남의 s
     try std.testing.expectEqual(s0 + 2, skipped.now());
 
     rr.surface.deinit();
+}
+
+test "QP1 조용한 owner 펌프는 할 일이 없다고 증명될 때만 건너뛰고, 조건 하나라도 모르면 펌프한다" {
+    try host_adapter_mod.HostAdapter.initializeProcessRuntime();
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const response = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .response, .request_id = 1 },
+        "{\"result\":{\"stream_id\":7,\"controller_generation\":3," ++
+            "\"granted\":{\"observe\":true,\"input\":true,\"resize\":true}," ++
+            "\"controller_busy\":false,\"metadata_revision\":0,\"metadata\":null}}",
+    );
+    defer allocator.free(response);
+    var records: std.ArrayListUnmanaged(u8) = .empty;
+    defer records.deinit(allocator);
+    const meta = try screen_stream.encodeScreenMeta(
+        allocator,
+        .{ .kind = .screen_meta, .generation = 1 },
+        .{ .cols = 1, .rows = 1, .cursor = .{} },
+    );
+    defer allocator.free(meta);
+    try screen_stream.appendRecord(&records, allocator, meta);
+    var runs = [_]screen_stream.Run{.{ .grapheme = "x", .width = 1, .count = 1 }};
+    const row = try screen_stream.encodeRow(
+        allocator,
+        .{ .kind = .row, .generation = 1 },
+        .{ .row_index = 0, .runs = &runs },
+    );
+    defer allocator.free(row);
+    try screen_stream.appendRecord(&records, allocator, row);
+    const snapshot = try framing.encodeFrame(
+        allocator,
+        .{
+            .kind = .snapshot_chunk,
+            .stream_id = 7,
+            .flags = protocol.Flags.end_stream,
+        },
+        records.items,
+    );
+    defer allocator.free(snapshot);
+    const Peer = struct {
+        fn run(fd: c.fd_t, response_wire: []const u8, snapshot_wire: []const u8) void {
+            defer _ = c.close(fd);
+            const peer_allocator = std.heap.page_allocator;
+            const request = readPeerFrame(fd, peer_allocator) catch return;
+            defer peer_allocator.free(request.payload);
+            socket_server.writeAll(fd, response_wire) catch return;
+            socket_server.writeAll(fd, snapshot_wire) catch return;
+        }
+    };
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    var peer = try std.Thread.spawn(.{}, Peer.run, .{ fds[1], response, snapshot });
+    var client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+        .attachment_capabilities = .{ .peer_attach_generation = true },
+        .metadata_support = .supported,
+        .compatibility_profile = @import("compatibility.zig").profileForMajor(
+            protocol.version_major,
+        ).?,
+    };
+    var adapter: host_adapter_mod.HostAdapter = undefined;
+    try host_adapter_mod.HostAdapter.initInPlace(&adapter, allocator, &client);
+    defer adapter.deinit();
+    var rr: RemoteRuntime = undefined;
+    try rr.initializeGenerationOwner(
+        .{ .generation = &adapter },
+        allocator,
+        std.testing.io,
+        .{ .cols = 1, .rows = 1 },
+    );
+    defer rr.deinitGenerationOwnerAndScreenSource();
+    rr.pending_event_owner = .{};
+    rr.runtime_lifetime = .{};
+    try rr.initializePendingEventOwner();
+    rr.allocator = allocator;
+    rr.io = std.testing.io;
+    rr.runtime_id_hex = "000000000000000000000000000000aa".*;
+    rr.currentGeneration().resize_seq = 0;
+    rr.currentGeneration().resize_generation = 0;
+    rr.currentGeneration().resize_baseline_present = false;
+    rr.direct_input = .empty;
+    rr.input_batches = .{};
+    rr.direct_input_offset = 0;
+    rr.pending_controls = .empty;
+    rr.blocking_flush_active = false;
+    rr.currentGeneration().pump_ended = false;
+    rr.currentGeneration().resync_needed = false;
+    rr.currentGeneration().observation = .{};
+    defer rr.direct_input.deinit(allocator);
+    defer rr.pending_controls.deinit(allocator);
+    try rr.attachAndAssemble(1, .{ .cols = 1, .rows = 1 });
+    peer.join();
+    defer rr.surface.deinit();
+
+    // **왜**: 활성 32 세션에서 프레임마다 16 슬롯을 채우는 «조용한» 펌프가 tick 당 14회, 51,141번 중 출력 0번이었다
+    // (2026-09-23 계수). 건너뛰기의 유일한 위험은 **할 일이 있는데 건너뛰는 것**이라, 증명 조건을 하나씩 뒤집어
+    // 각각이 «펌프한다» 로 돌아서는지 본다. 도장은 프로세스 전역이라 먼저 끄고 끝나면 되돌린다.
+    client_mod.resetUiFrameStampForTest();
+    defer client_mod.resetUiFrameStampForTest();
+    const qp_client = rr.testingClient();
+    const proven = RemoteRuntime.backend_api.quietPumpProven;
+
+    // 도장이 없으면(프레임 루프 밖) «같은 프레임» 이 성립하지 않는다.
+    try std.testing.expect(!proven(&rr));
+    client_mod.advanceUiFrameStamp();
+    // 이 프레임에 소켓이 비었다는 기록이 없다 — 펌프가 소켓을 읽을 수 있다.
+    try std.testing.expect(!proven(&rr));
+    qp_client.socket_empty_at_frame = client_mod.currentUiFrameStampForTest();
+    // 기준: 모든 조건이 참이면 건너뛴다.
+    try std.testing.expect(proven(&rr));
+
+    // 다음 프레임에는 다시 물어야 한다(지난 프레임의 «비었다» 는 이번 프레임의 증거가 아니다).
+    client_mod.advanceUiFrameStamp();
+    try std.testing.expect(!proven(&rr));
+    qp_client.socket_empty_at_frame = client_mod.currentUiFrameStampForTest();
+    try std.testing.expect(proven(&rr));
+
+    // runtime 쪽: 보낼 입력·resync 요청·드레인 밖에서 준비된 이벤트·진행 중인 blocking flush.
+    try rr.direct_input.append(allocator, 'x');
+    try std.testing.expect(!proven(&rr));
+    rr.direct_input.clearRetainingCapacity();
+    rr.currentGeneration().resync_needed = true;
+    try std.testing.expect(!proven(&rr));
+    rr.currentGeneration().resync_needed = false;
+    rr.pending_event_owner.lifecycle_raw = @intFromEnum(pending_event_owner_mod.PendingLifecycle.prepared);
+    try std.testing.expect(!proven(&rr));
+    rr.pending_event_owner.lifecycle_raw = @intFromEnum(pending_event_owner_mod.PendingLifecycle.idle);
+    rr.blocking_flush_active = true;
+    try std.testing.expect(!proven(&rr));
+    rr.blocking_flush_active = false;
+    try std.testing.expect(proven(&rr));
+
+    // Client 쪽: 이 stream 의 복구 요청, 연결 poison.
+    _ = try qp_client.screen_inbox.recovery.invalidate(7);
+    try std.testing.expect(!proven(&rr));
+    qp_client.screen_inbox.recovery.remove(7);
+    try std.testing.expect(proven(&rr));
+
+    // 남의 stream 에 쌓인 일은 이 펌프의 일이 아니다 — 그건 그 owner 의 priority 가 진다.
+    try qp_client.bufferGenerationEventForTest(99, "{\"event\":\"runtime.ended\"}");
+    try std.testing.expect(proven(&rr));
+    // 내 stream 에 쌓이면 반드시 펌프한다.
+    try qp_client.bufferGenerationEventForTest(7, "{\"event\":\"runtime.ended\"}");
+    try std.testing.expect(!proven(&rr));
+    // 연결 poison 은 `unusable` 을 함께 세워 `ensureUsable` 이 오류를 내고, runtime 쪽은 그 오류를 «모름» 으로
+    // 받아 펌프한다. 여기서 poison 을 걸려면 테스트 전용 poison 통로를 하나 더 열어야 해서(C3-3 경계가 그 통로의
+    // 사용처를 고정한다) 이 판정자는 그 갈래를 세지 않는다.
 }
 
 test "CR3a-2c3d C3-2 product drain purges ended generation before screen progress" {

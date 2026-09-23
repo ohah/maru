@@ -16,6 +16,9 @@ const split_tree = @import("split_tree.zig");
 // 기준 ref의 형태 판정은 **git 명령을 만드는 쪽이 소유한다**(§3.5). 여기서 규칙을 다시 쓰면 저장이 받는
 // 값과 실행이 받는 값이 갈린다 — 같은 L2 계층이라 그대로 부른다.
 const git_command = @import("git_command.zig");
+// RB2: 재개할 에이전트의 provider 이름과 세션 id 토큰 규칙은 세션 기록 도크가 소유한다 — 이 값은 실행 인자가
+// 되므로 쓰는 쪽·읽는 쪽이 **같은 규칙**을 써야 한다(docs/workspace-restore.md 「재부팅 뒤 부활(RB)」).
+const agent_session_archive = @import("agent_session_archive.zig");
 const writeEscaped = @import("../text_escape.zig").writeEscaped; // 따옴표 값 escape 단일 출처(trace/snapshot과 공유)
 
 pub const header = "maru.workspace.v1";
@@ -88,6 +91,25 @@ pub const Surface = struct {
     // 키 부재는 live다. ended는 마지막 host/runtime identity를 버리지 않는 durable tombstone이며 full handle 없이는
     // 유효하지 않다. 이 상태는 PTY를 직렬화하지 않고 restore side effect를 막는 manifest 지시다.
     runtime_state: RuntimeState = .live,
+    /// 이 Term 에서 **로컬 에이전트가 돌고 있었다면** 그 provider 와 세션 id(RB2 — docs/workspace-restore.md
+    /// 「재부팅 뒤 부활(RB)」). 재부팅이 증명된 복원만 이 값으로 대화를 이어간다. 그 밖의 복원은 읽기만 한다.
+    ///
+    /// P1 이 지운 옛 `agent-kind`·`agent-session` 과는 **다른 키**다 — 이름이 비슷해도 그 값은 몇 달 전 파일에 남은
+    /// 다른 계약의 것이라, 읽으면 그때의 세션을 지금 이어가게 된다.
+    agent_resume: ?AgentResume = null,
+};
+
+/// 재개할 에이전트 대화 하나(RB2). 권한 모드·모델은 싣지 않는다 — 이어갈 때 대화 파일에서 다시 읽는다(도크 재개와
+/// 같은 파서·같은 `resumeArgv`, 규칙이 두 자리에서 갈리지 않게).
+pub const AgentResume = struct {
+    provider: agent_session_archive.Provider,
+    session_id: []const u8,
+
+    /// 쓸 수 있는 값인가 — 세션 id 는 실행 인자가 되므로 도크의 argv 토큰 규칙(`isResumableSessionId`)을 지나야
+    /// 한다. writer 와 reader 가 이 한 함수를 쓴다.
+    pub fn valid(self: AgentResume) bool {
+        return agent_session_archive.isResumableSessionId(self.session_id);
+    }
 };
 
 /// split leaf 한 칸(panel) — 가로 탭으로 여러 Term을 들 수 있다(탭→pane 모델). active-term = 보이는 Term.
@@ -643,6 +665,13 @@ fn writeSurface(w: *std.Io.Writer, s: Surface) !void {
             return error.InvalidRuntimeIdentity;
         try w.writeAll(" runtime-state=\"ended\"");
     }
+    // RB2: 형식이 맞을 때만 쓴다. 틀린 값을 쓰면 reader 가 어차피 버리므로 쓰지 않는 쪽이 파일을 거짓 없이 둔다.
+    // id 는 `[A-Za-z0-9._-]` 라 escape 할 문자가 없지만, 규칙이 바뀌어도 줄이 깨지지 않게 escape 를 거친다.
+    if (s.agent_resume) |ar| if (ar.valid()) {
+        try w.print(" agent-resume=\"{s}:", .{@tagName(ar.provider)});
+        try writeEscaped(w, ar.session_id);
+        try w.writeByte('"');
+    };
     try w.print(" cols={d} rows={d}\n", .{ s.cols, s.rows });
 }
 
@@ -1257,9 +1286,26 @@ fn parseSurface(a: std.mem.Allocator, lines: *LineIter, limits: *ParseLimits) Pa
         .runtime_host_id = runtime_host_id,
         .runtime_id = runtime_id,
         .runtime_state = runtime_state,
+        .agent_resume = try parseAgentResume(a, f),
         .cols = cols,
         .rows = rows,
     };
+}
+
+/// `agent-resume="<provider>:<session-id>"`(RB2). **못 읽으면 없는 것**이다 — 따옴표 없음·중복·모르는 provider·
+/// 토큰 규칙 위반 모두. `runtime-state` 처럼 checkpoint 를 거부하지 않는 이유는 이 키가 동작을 켜기만 하기
+/// 때문이다: 없으면 셸만 뜨고(지금 동작), BadLine 을 올리면 그 **창 전체**를 잃는다.
+fn parseAgentResume(a: std.mem.Allocator, f: LineFields) std.mem.Allocator.Error!?AgentResume {
+    const field = f.find("agent-resume") orelse return null;
+    if (!field.is_quoted or f.count("agent-resume") != 1) return null;
+    const value = f.getQuoted(a, "agent-resume", "") catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null,
+    };
+    const colon = std.mem.indexOfScalar(u8, value, ':') orelse return null;
+    const provider = std.meta.stringToEnum(agent_session_archive.Provider, value[0..colon]) orelse return null;
+    const resume_value: AgentResume = .{ .provider = provider, .session_id = value[colon + 1 ..] };
+    return if (resume_value.valid()) resume_value else null;
 }
 
 fn validPersistentId(id: []const u8) bool {
@@ -3076,6 +3122,65 @@ test "RB1-2 깨진 boot-session 은 «없음»으로 읽고 창의 나머지는 
     var parsed = try parse(a, lower);
     defer parsed.deinit();
     try std.testing.expectEqualStrings("a7c9924a-6cb1-4c6b-b004-95d26c1eba3d", parsed.workspace.windows[0].boot_session);
+}
+
+test "RB2-1 surface 줄의 agent-resume: 형식이 맞으면 provider·id 를 왕복하고, 틀리면 쓰지 않는다" {
+    const a = std.testing.allocator;
+    const id = "0f6c1a2e-1111-4222-8333-444455556666";
+    const surfaces = [_]Surface{
+        .{ .cwd = "/repo", .command = "/bin/zsh", .cols = 80, .rows = 24, .agent_resume = .{ .provider = .claude, .session_id = id } },
+        .{ .cwd = "/repo", .command = "/bin/zsh", .cols = 80, .rows = 24, .agent_resume = .{ .provider = .codex, .session_id = "rollout.name_2" } },
+        // 인자 파서가 플래그로 읽는 모양·빈 값 — 쓰지 않는다.
+        .{ .cwd = "/repo", .command = "/bin/zsh", .cols = 80, .rows = 24, .agent_resume = .{ .provider = .claude, .session_id = "-x" } },
+        .{ .cwd = "/repo", .command = "/bin/zsh", .cols = 80, .rows = 24, .agent_resume = .{ .provider = .claude, .session_id = "" } },
+        .{ .cwd = "/repo", .command = "/bin/zsh", .cols = 80, .rows = 24 },
+    };
+    const panes = [_]Pane{.{ .surfaces = &surfaces }};
+    const tree = [_]TreeNode{.{ .leaf = 0 }};
+    const tabs = [_]Tab{.{ .tree = &tree, .panes = &panes }};
+    const text = try serialize(a, .{ .windows = &.{.{ .tabs = &tabs }} });
+    defer a.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, " agent-resume=\"claude:" ++ id ++ "\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, " agent-resume=\"codex:rollout.name_2\"") != null);
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, text, "agent-resume"));
+
+    var parsed = try parse(a, text);
+    defer parsed.deinit();
+    const got = parsed.workspace.windows[0].tabs[0].panes[0].surfaces;
+    try std.testing.expectEqual(agent_session_archive.Provider.claude, got[0].agent_resume.?.provider);
+    try std.testing.expectEqualStrings(id, got[0].agent_resume.?.session_id);
+    try std.testing.expectEqual(agent_session_archive.Provider.codex, got[1].agent_resume.?.provider);
+    try std.testing.expectEqualStrings("rollout.name_2", got[1].agent_resume.?.session_id);
+    for (got[2..]) |s| try std.testing.expect(s.agent_resume == null);
+}
+
+test "RB2-2 깨진 agent-resume 은 «없음»으로 읽고 surface 의 나머지는 그대로 복원한다" {
+    // 대조군으로 같은 줄의 cwd·runtime-handle 이 살아남는지 본다 — 「창이 통째로 기본값」도 null 을 준다.
+    const a = std.testing.allocator;
+    const cases = [_][]const u8{
+        "agent-resume=claude:abc", // 따옴표 없음
+        "agent-resume=\"gemini:abc\"", // 모르는 provider
+        "agent-resume=\"claude\"", // 구분자 없음
+        "agent-resume=\"claude:-rf\"", // 플래그 모양 id
+        "agent-resume=\"claude:a b\"", // 토큰 밖 문자
+        "agent-resume=\"claude:\"", // 빈 id
+        "agent-resume=\"claude:a\" agent-resume=\"claude:b\"", // 중복
+        // P1 이 지운 옛 키 — 값이 멀쩡해 보여도 **읽지 않는다**.
+        "agent-kind=\"claude\" agent-session=\"0f6c1a2e-1111-4222-8333-444455556666\"",
+    };
+    for (cases) |field| {
+        const text = try std.fmt.allocPrint(a, "maru.workspace.v1\nwindow tabs=1 active-tab=0\n" ++
+            "tab panes=1 active-pane=0 custom-name=\"\"\ntree-node leaf pane=0\npane surfaces=1 active-term=0 custom-name=\"\"\n" ++
+            "surface custom-name=\"\" title=\"\" cwd=\"/repo\" command=\"\" " ++
+            "runtime-handle=\"1234567890abcdef1234567890abcdef:fedcba0987654321fedcba0987654321\" {s} cols=80 rows=24\n", .{field});
+        defer a.free(text);
+        var parsed = try parse(a, text);
+        defer parsed.deinit();
+        const s = parsed.workspace.windows[0].tabs[0].panes[0].surfaces[0];
+        try std.testing.expect(s.agent_resume == null);
+        try std.testing.expectEqualStrings("/repo", s.cwd);
+        try std.testing.expectEqualStrings("fedcba0987654321fedcba0987654321", s.runtime_id);
+    }
 }
 
 test "RB1-3 rebootProven: 유효한 값이 하나 이상이고 전부 지금과 다를 때만 참" {

@@ -309,8 +309,11 @@ search/scope가 부분 snapshot을 완전한 결과처럼 보이게 해서는 �
     앞 줄에서 본 옛 값을 남기지도 않는다: 그러면 "그때 그 모드"라며 낡은 권한으로 재개한다.
   - argv에 나가는 것은 **enum에서 나온 우리 리터럴**이지 transcript 문자열이 아니다. 문자열을 그대로
     흘리면 위의 "parse한 내용은 실행 인자로 넣지 않는다"가 깨지고, provider가 철자를 바꾸는 날 재개가
-    통째로 실패한다. 매핑은 OS-중립 층(`session/agent_session_archive.zig`의 `resumeArgv`)이 소유한다 —
-    macOS 파일에서 조립하면 다른 플랫폼이 재개를 붙일 때 이 규칙이 조용히 빠진다.
+    통째로 실패한다. 매핑은 OS-중립 층(`session/agent_session_archive.zig`의 `resumeArgv` → `resumeArgvFor`)이
+    소유한다 — macOS 파일에서 조립하면 다른 플랫폼이 재개를 붙일 때 이 규칙이 조용히 빠진다. 재부팅 뒤 부활
+    ([workspace-restore.md](workspace-restore.md) 「재부팅 뒤 부활(RB)」)도 **같은 조립**(`resumeArgvFor`)과 같은 셸
+    래핑(`AgentResumeLaunch`)을 쓴다 — 그쪽은 대화 파일의 끝부분만 읽으므로 `Parsed` 전체 대신 입력 넷
+    (provider·세션 id·모드·모델)만 넘긴다.
   - **되살리지 못하는 것**: Codex `workspace-write`의 하위 설정(쓰기 가능 root 목록·네트워크 허용)은 CLI
     플래그 하나로 표현되지 않아 config 축으로 남는다. 샌드박스 종류까지만 충실하다.
 - resume은 **모델도 그대로 되살린다**. 두 provider 다 플래그가 있다(`claude --model <이름|별칭>`,

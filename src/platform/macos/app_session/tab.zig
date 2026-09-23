@@ -65,6 +65,7 @@ const TabRef = app_session_mod.TabRef;
 const Term = app_session_mod.Term;
 const addr_nav_url_cap = app_session_mod.addr_nav_url_cap;
 const agentFlagUtf8 = @import("agent.zig").agentFlagUtf8;
+const agent_ops = @import("agent.zig"); // RB2: 캡처가 이어갈 에이전트를 묻는다(`resumableAgentOf`)
 const blendRgb = app_session_mod.blendRgb;
 const clampMoveToGroup = app_session_mod.clampMoveToGroup;
 const dock_ops = @import("dock.zig");
@@ -1409,6 +1410,12 @@ pub fn captureWorkspaceTab(self: *AppSession, arena: std.mem.Allocator, tab: *Ta
                 .runtime_host_id = runtime_host_id,
                 .runtime_id = runtime_id,
                 .runtime_state = runtime_state,
+                // RB2: 로컬 에이전트가 돌고 있으면 그 provider·세션 id(조건은 `resumableAgentOf`). 신원은 Term 버퍼를
+                // 빌리므로 arena 로 복사한다 — checkpoint 는 캡처 뒤 백그라운드에서 직렬화한다.
+                .agent_resume = if (agent_ops.resumableAgentOf(self, term)) |ar| .{
+                    .provider = ar.provider,
+                    .session_id = try arena.dupe(u8, ar.session_id),
+                } else null,
                 .cols = observed_size.cols,
                 .rows = observed_size.rows,
             });

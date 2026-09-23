@@ -23,7 +23,8 @@ pub const ChangeKind = enum(u8) {
     dock,
     explorer_roots,
     scm_base,
-    /// 에이전트 탭이 보이는 «최근 세션» 이 바뀜(AT7 — window 줄의 `last-agent-session`).
+    /// 에이전트 탭이 보이는 «최근 세션» 이 바뀜(AT7 — window 줄의 `last-agent-session`), 또는 Term 에서 도는
+    /// 에이전트의 종류·신원이 바뀜(RB2 — surface 줄의 `agent-resume`).
     agent_session,
     runtime_binding,
     window_frame,

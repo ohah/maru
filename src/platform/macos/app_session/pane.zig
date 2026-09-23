@@ -52,6 +52,7 @@ const tabTitleBody = @import("tab.zig").tabTitleBody;
 const Model = app_session_mod.Model;
 const barMetrics = app_session_mod.barMetrics;
 const commandName = app_session_mod.commandName;
+const agent_ops = @import("agent.zig"); // RB2: 재부팅 부활이 에이전트 대화를 이어간다
 const coretext_bridge = app_session_mod.coretext_bridge;
 const sentinelBgCell = app_session_mod.sentinelBgCell;
 const usableRestoreCwd = app_session_mod.usableRestoreCwd;
@@ -331,18 +332,83 @@ fn hasRuntimeIdentity(sm: maru.session.workspace.Surface) bool {
 /// `restore_runtime_host_id`/`restore_runtime_id` 채널에 세우고 `createTerm` 이 그 채널을 보고 **옛 runtime 에
 /// 붙으려 한다**. 사본으로 비우면 채널이 빈 채로 닿아 `createTerm` 이 새 Term 과 똑같이 spawn 한다(keep-alive 면
 /// 새 host 에, 아니면 in-process). cwd·크기 규칙은 in-process 복원과 **같은 함수**라 갈라지지 않는다.
+///
+/// **에이전트가 돌던 Term 이면 그 대화를 이어간다**(RB2). spawn 요청의 실행 대상만 provider 재개로 바꾸고 나머지
+/// (cwd·크기·ZDOTDIR)는 같다 — 셸 래핑은 세션 기록 도크의 재개와 같은 `AgentResumeLaunch` 다. 대화 파일을 못
+/// 찾으면 셸만 띄우고 「못 이어간 수」에 센다.
 fn createRebootRevivedTerm(self: *AppSession, sm: maru.session.workspace.Surface) !*Term {
+    // `launch` 와 `parser` 는 spawn 이 끝날 때까지 제자리에 살아야 한다 — `req.args` 가 `launch` 의 버퍼를,
+    // 재개 대상의 모델이 `parser` 의 버퍼를 가리킨다.
+    var launch: agent_ops.AgentResumeLaunch = .{};
+    defer launch.deinit(self.allocator);
+    var parser: maru.session.agent_session_archive.Parser = undefined;
+    const spawn = try rebootRevivalSpawn(self, sm, &launch, &parser);
+    errdefer clearRestoreRuntimeIdentity(self);
+    const cfg = self.new_tab_config;
+    const term = try term_ops.createTerm(self, spawn.req, spawn.size, cfg.queue_capacity, spawn.title, spawn.command);
+    // 알림 수는 **성공한 뒤에만** 센다. 창 apply 가 뒤에서 실패하면 `RestoreAccountingSnapshot` 이 되돌린다.
+    AppSession.reboot_revived_pending +|= 1;
+    switch (spawn.agent) {
+        .none => {},
+        .resumed => AppSession.reboot_agents_resumed_pending +|= 1,
+        .missed => AppSession.reboot_agents_missed_pending +|= 1,
+    }
+    return term;
+}
+
+/// 저장 cwd 로 **실제로 spawn 할 수 있는가** — 형식(`usableRestoreCwd`)에 더해 디렉터리가 지금 있는지까지 본다.
+fn restoreCwdReachable(self: *AppSession, cwd: []const u8) bool {
+    const path = usableRestoreCwd(cwd) orelse return false;
+    var dir = std.Io.Dir.openDirAbsolute(self.io, path, .{}) catch return false;
+    dir.close(self.io);
+    return true;
+}
+
+/// 재부팅 부활 Term 하나의 spawn 요청(RB1·RB2). **spawn 은 하지 않는다** — 판정자가 provider 를 실제로 띄우지
+/// 않고(진짜 계정 세션이 열린다) 요청만 잴 수 있게 `createTerm` 과 떼어 두었다.
+pub const RebootRevivalSpawn = struct {
+    req: maru.pty.SpawnRequest,
+    size: terminal.Size,
+    title: []const u8,
+    command: []const u8,
+    /// 이 Term 의 에이전트 이어가기 결과. `none` = 이어갈 에이전트가 없었다.
+    agent: enum { none, resumed, missed },
+};
+
+pub fn rebootRevivalSpawn(
+    self: *AppSession,
+    sm: maru.session.workspace.Surface,
+    launch: *agent_ops.AgentResumeLaunch,
+    parser: *maru.session.agent_session_archive.Parser,
+) !RebootRevivalSpawn {
     var fresh = sm;
     fresh.runtime_host_id = "";
     fresh.runtime_id = "";
     fresh.runtime_state = .live;
     const rs = restoreSpawn(self, fresh);
-    errdefer clearRestoreRuntimeIdentity(self);
     const cfg = self.new_tab_config;
-    const term = try term_ops.createTerm(self, rs.req, rs.size, cfg.queue_capacity, "Maru", commandName(cfg.command_kind));
-    // 알림 수는 **성공한 뒤에만** 센다. 창 apply 가 뒤에서 실패하면 `RestoreAccountingSnapshot` 이 되돌린다.
-    AppSession.reboot_revived_pending +|= 1;
-    return term;
+    var out: RebootRevivalSpawn = .{
+        .req = rs.req,
+        .size = rs.size,
+        .title = "Maru",
+        .command = commandName(cfg.command_kind),
+        .agent = .none,
+    };
+    const ar = sm.agent_resume orelse return out;
+    out.agent = .missed;
+    // claude 는 대화를 **작업 디렉터리별로** 찾는다 — 저장 cwd 로 spawn 하지 못하면(그 디렉터리가 사라졌다)
+    // 재개가 엉뚱한 프로젝트에서 「대화 없음」으로 끝난다. 그때는 이어가지 않는다.
+    // ⚠️ 두 번 틀렸던 자리다(판정자 RB2-8 이 둘 다 잡았다): ⑴ `out.req.cwd == null` 은 `spawnRequest` 가 기본 cwd 를
+    // 미리 채워 저장 cwd 가 사라져도 거짓이다. ⑵ `usableRestoreCwd` 는 **형식만** 보는 이른 필터다 — 없는 디렉터리도
+    // 통과시키고, 실제 폴백은 자식의 chdir 실패에서 조용히 일어난다. 그래서 디렉터리를 **실제로 열어** 본다.
+    if (ar.provider == .claude and !restoreCwdReachable(self, sm.cwd)) return out;
+    parser.* = maru.session.agent_session_archive.Parser.init(self.allocator, ar.provider);
+    const target = agent_ops.rebootResumeTarget(self, ar, sm.cwd, parser) orelse return out;
+    try launch.apply(self, target, &out.req);
+    out.title = ar.provider.label();
+    out.command = launch.argv[0];
+    out.agent = .resumed;
+    return out;
 }
 
 /// per-pane 가로 탭 바의 backing 픽셀 높이. 높이 자체는 도크 뷰 스위처와 공유하는 `chromeBarHeightPx`가

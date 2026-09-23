@@ -927,3 +927,28 @@ test "codex rollout 이름 판정: 접미사이고 앞이 구분자여야 한다
     // id 만으로 된 이름도 받는다(이름 규칙이 바뀌어도 id 가 맞으면 그 파일이다).
     try testing.expect(isCodexRolloutOf("abc-123.jsonl", "abc-123"));
 }
+
+test "RB2-5 readTail: 중간에서 잘라 읽으면 잘린 첫 줄을 버리고, 파일 전체면 첫 줄을 지킨다" {
+    // 이 규칙의 주인은 이 함수 하나다 — 대화 줄(`refresh*Transcript`)과 재부팅 부활(`feedResumeTail`)이 함께 쓴다.
+    // 잘린 조각이 **그 자체로 온전한 JSON** 이어도 버려야 한다(그 값은 이 세션의 것이 아닐 수 있다).
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    const body = "{\"a\":1}\n{\"b\":2}\n{\"c\":3}\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "t.jsonl", .data = body });
+
+    // 끝 12 바이트 = `":2}\n{"c":3}\n` 의 꼴 — 첫 줄은 조각이라 버리고 `{"c":3}` 부터.
+    var small: [12]u8 = undefined;
+    try std.testing.expectEqualStrings("{\"c\":3}\n", readTail(io, tmp.dir, "t.jsonl", &small));
+    // 첫 줄 경계에 정확히 걸린 경우도 조각으로 본다(시작이 0 이 아니면 첫 줄이 온전한지 알 길이 없다).
+    var exact: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("{\"c\":3}\n", readTail(io, tmp.dir, "t.jsonl", &exact));
+    // 버퍼가 파일보다 크면 전체 — 첫 줄을 지킨다.
+    var big: [64]u8 = undefined;
+    try std.testing.expectEqualStrings(body, readTail(io, tmp.dir, "t.jsonl", &big));
+    // 개행 없는 조각뿐이면 빈 값.
+    var tiny: [3]u8 = undefined;
+    try std.testing.expectEqualStrings("", readTail(io, tmp.dir, "t.jsonl", &tiny));
+    // 없는 파일은 빈 값(계약 1).
+    try std.testing.expectEqualStrings("", readTail(io, tmp.dir, "missing.jsonl", &big));
+}

@@ -67,7 +67,20 @@ claude·codex가 돌던 Term은 그 대화를 이어간다. 스크롤백·화면
     그대로 초록).
   - 변이: 판정 함수를 `true`로 · identity 비우기 제거 · ended 갈래 누락 — 각각 한 판정자가 죽어야 한다.
 
-## RB2 — 에이전트 대화를 이어간다
+## RB2 — 에이전트 대화를 이어간다 (완료)
+
+**구현하며 계획과 달라진 것**(계약은 그대로다 — 계약 문서에는 4번 조건과 공유 자리 이름만 더했다):
+- 「첫 줄은 잘렸을 수 있어 버린다」를 새 입구에 두지 않았다 — 그 규칙은 사이드바 대화 줄이 이미 쓰는
+  `agent_transcript.readTail` 이 소유하고 있었다. 두 벌이면 갈리므로 `feedResumeTail` 은 온전한 줄만 먹이고,
+  `readTail` 에 그 규칙의 판정자(RB2-5)를 붙였다(없었다).
+- 저장 cwd 가 사라진 claude Term 은 이어가지 않는 조건을 더했다. 첫 판의 가드(`req.cwd == null`)는
+  `spawnRequest` 가 기본 cwd 를 미리 채워 영영 거짓이었고, 둘째 판(`usableRestoreCwd`)은 형식만 보는 필터라 없는
+  디렉터리를 통과시켰다 — 판정자 RB2-8 이 둘 다 잡았다. 디렉터리를 실제로 연다.
+- 종류가 바뀔 때의 뒷정리를 `noteAgentKind` 로 떼어 냈다. `pollAgentKinds` 는 진짜 포그라운드 프로세스를 읽어
+  판정자가 종류 변화를 흉내 낼 수 없었다(이름이 `claude` 인 실행 파일을 테스트가 만들 수 없다 — 복사한 시스템
+  바이너리는 커널이 죽이고, 심볼릭 링크는 원래 이름으로 보인다).
+- 부활 요청 조립(`rebootRevivalSpawn`)을 `createTerm` 과 떼어 냈다 — 판정자가 진짜 `claude` 를 띄우지 않고(계정
+  세션이 열린다) 요청만 잰다. 끝까지 도는 판정자는 도크 스모크의 가짜 provider 자리를 `/usr/bin/true` 로 쓴다.
 
 - **포맷**: `workspace.Surface`에 `agent_resume: ?{provider, session_id}`. writer는 있을 때만
   `agent-resume="claude:<id>"`. reader는 provider·토큰 규칙 위반을 **없는 것**으로.

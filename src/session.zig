@@ -236,6 +236,8 @@ pub const editor = struct {
     pub const occurrence = @import("session/editor/occurrence.zig");
     /// 구조 기반 선택 확장의 사슬 세우기(tooling §8.2q) — 서버·tree-sitter 후보 + 낱말·줄·문서 단계. 어느 원천을 쓸지는 위층이 정한다.
     pub const smart_select = @import("session/editor/smart_select.zig");
+    /// sticky scroll 의 고정할 줄 고르기(visual-mapping §4.1i) — 스코프 목록 + 줄→화면 행 두 함수. 출처·접힘·줄바꿈은 위층이 안다.
+    pub const sticky = @import("session/editor/sticky.zig");
     /// N2: 편집 가능한 문서 — 버퍼(§3.0)와 소비처가 읽는 평탄한 축을 한 소유자에게 묶는다.
     /// `open`(읽기 전용, bytes를 빌린다)의 편집판이다.
     pub const edit_doc = @import("session/editor/edit_doc.zig");

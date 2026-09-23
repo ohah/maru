@@ -14146,6 +14146,17 @@ test "STK7 sticky scroll 1층 — 스크롤하면 바깥부터 머리줄이 실�
     try testing.expect(std.mem.indexOf(u8, r2, "13") != null);
     try testing.expectEqual(@as(usize, 2), term.rt.editor_sticky.drawn_len);
     try testing.expectEqual(sticky_client.Source.syntax, term.rt.editor_sticky.source);
+    // **머리줄에 구문 색이 있다**(적대적 1회차 P18 — 글자만 재면 색을 빼도 초록이었다).
+    {
+        const leaf = activeLeafRectForTest(fx.session) orelse return error.NoLeaf;
+        var d = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+        defer d.dl.deinit(allocator);
+        var colored = false;
+        for (d.dl.cells) |c| {
+            if (c.row == 0 and isSyntaxColored(fx.session, c)) colored = true;
+        }
+        try testing.expect(colored);
+    }
     // **경계선이 실제로 GPU quad 로 내려간다**(2px, `divider` 색) — 프레임 op 만 보면 pane lowering 이 버리는 op(`rule`)도 초록이다
     // (캡처에서 픽셀로 쟀을 때 경계가 없었다). 높이도 잰다 — 1px 은 셰이더 AA 에 지워져 화면에 없었다.
     {
@@ -14181,16 +14192,38 @@ test "STK7 sticky scroll 1층 — 스크롤하면 바깥부터 머리줄이 실�
     const r1b = try paneRowText(fx.session, term, 1, &buf1);
     try testing.expect(std.mem.indexOf(u8, r1b, "pub fn f()") == null);
 
-    // 고정 행 클릭 — `pub fn f` 행(칸 1)을 누르면 그 줄·누른 열로 가고 그 줄이 행 1 에 온다(부모 아래).
+    // 고정 행 클릭 — `pub fn f` 행(칸 1)을 누르면 그 줄·누른 열로 가고 그 줄이 행 1 에 온다(부모 아래). 누르기 전에 줄 20 에 한 글자 친다
+    // (undo 묶음을 재려고 — 적대적 1회차 P20) · 여분 커서를 하나 둔다(클릭이 정리하는지 — P19).
     term.rt.editor_selection = editor_selection.Selection.at(line20.start);
+    try testing.expect(insertText(fx.session, term, "Q"));
     _ = try paneRowText(fx.session, term, 0, &buf);
     try testing.expectEqual(@as(usize, 2), term.rt.editor_sticky.drawn_len);
+    {
+        const extras = try allocator.alloc(editor_selection.Selection, 1);
+        extras[0] = editor_selection.Selection.at(term.rt.editor_doc.?.file.lines.line(30).?.start);
+        term.rt.editor_extra_selections = extras;
+    }
     const x_col8: f64 = @floatFromInt(@as(i64, geom.body_x) + @as(i64, geom.content_left_px) + @as(i64, geom.cell_w_px) * 8 + 1);
     try testing.expect(beginBodySelection(fx.session, pane_ops.activePane(fx.session), x_col8, y_row(geom, 1), 0));
     const line1 = term.rt.editor_doc.?.file.lines.line(1).?;
     try testing.expectEqual(line1.start + 8, term.rt.editor_selection.?.focus); // `    pub ` 다음 — `fn` 앞
     try testing.expect(term.rt.editor_selection.?.isEmpty());
     try testing.expectEqual(@as(usize, 0), term.rt.editor_first_line); // 줄 1 이 행 1 에
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_extra_selections.len); // 여분 커서는 정리된다(본문 클릭과 같다)
+    // 클릭 뒤 타이핑은 새 undo 묶음이다 — 되돌리면 클릭 전의 `Q` 는 남는다.
+    try testing.expect(insertText(fx.session, term, "Z"));
+    try testing.expect(undoEdit(fx.session, term));
+    try testing.expect(std.mem.indexOf(u8, term.rt.editor_doc.?.file.content, "Q") != null);
+    try testing.expect(std.mem.indexOf(u8, term.rt.editor_doc.?.file.content, "Z") == null);
+
+    // **더블클릭도 머리줄로 간다** — 가려진 본문 줄의 낱말을 고르지 않는다(적대적 1회차 P17).
+    setEditorTop(fx.session, term, 10, "test");
+    term.rt.editor_selection = editor_selection.Selection.at(line20.start);
+    _ = try paneRowText(fx.session, term, 0, &buf);
+    try testing.expectEqual(@as(usize, 2), term.rt.editor_sticky.drawn_len);
+    try testing.expect(selectWordOrLineAt(fx.session, pane_ops.activePane(fx.session), false, x_col8, y_row(geom, 0), 0));
+    try testing.expect(term.rt.editor_selection.?.isEmpty());
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_doc.?.file.lines.lineAt(term.rt.editor_selection.?.focus));
 
     // 설정으로 끈다.
     setEditorTop(fx.session, term, 10, "test");
@@ -14251,6 +14284,57 @@ test "STK9 sticky scroll — 서버 심볼(2층)이 오면 그것이 출처다(1
     try testing.expect(symbols_client.list(f.term) != null);
     _ = try paneRowText(f.fx.session, f.term, 0, &buf);
     try testing.expectEqual(sticky_client.Source.lsp, f.term.rt.editor_sticky.source);
+}
+
+test "STK11 비교 뷰로 바꾸면 고정 행 판정이 사라진다 — 마지막 단일 편집기 프레임의 머리줄이 클릭·호버를 가로채지 않는다 (제품 경계, §4.1i)" {
+    // 비교 뷰는 `compute` 를 안 부르므로 `drawn_len` 이 남는다(적대적 1회차 P3 을 따지다 발견한 결함).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "sd.zig", sticky_src);
+    fx.session.surface_initialized = true;
+    fx.session.backing_width_px = 1200;
+    fx.session.backing_height_px = 800;
+    var buf: [256]u8 = undefined;
+    _ = try paneRowText(fx.session, term, 0, &buf);
+    setEditorTop(fx.session, term, 10, "test");
+    term.rt.editor_selection = editor_selection.Selection.at(term.rt.editor_doc.?.file.lines.line(20).?.start);
+    _ = try paneRowText(fx.session, term, 0, &buf);
+    try testing.expectEqual(@as(usize, 2), term.rt.editor_sticky.drawn_len);
+    const geom = term.rt.editor_hit_geom;
+    const y0: f64 = @floatFromInt(@as(i64, geom.body_y) + 1);
+    try testing.expect(sticky_client.rowAt(term, y0) != null); // 대조군
+    term.rt.editor_diff = .{}; // 비교 상태만 세운다(OCH4 · SSEL21 과 같은 수법)
+    defer term.rt.editor_diff = null;
+    try testing.expect(sticky_client.rowAt(term, y0) == null);
+}
+
+test "STK14 ⌘클릭은 고정 행에서 정의로 가지 않는다 — 흘려보내 보통 클릭이 머리줄로 간다 (제품 경계, §4.1i)" {
+    // 서버가 있어야 잰다 — 없으면 가드가 없어도 `false` 라 변이가 살았다(적대적 1회차 P12). 심볼 capability 를 끈 가짜 서버로 1층(C 함수)이
+    // 머리줄을 세우게 하고, 정의 요청은 서버로 나가게 한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    _ = setenv("MARU_FAKE_LSP_NOSYMCAP", "1", 1);
+    defer _ = unsetenv("MARU_FAKE_LSP_NOSYMCAP");
+    var f = (try SmtFixture.open(allocator, "sd.c", "int f(int a) {\n" ++ ("  a = a + 1;\n" ** 100) ++ "}\n")) orelse return error.SkipZigTest;
+    defer f.close(allocator);
+    try testing.expect(f.ready());
+    const s = f.fx.session;
+    const term = f.term;
+    var buf: [256]u8 = undefined;
+    _ = try paneRowText(s, term, 0, &buf);
+    setEditorTop(s, term, 10, "test");
+    term.rt.editor_selection = editor_selection.Selection.at(term.rt.editor_doc.?.file.lines.line(60).?.start);
+    const r0 = try paneRowText(s, term, 0, &buf);
+    try testing.expect(std.mem.indexOf(u8, r0, "int f(int a) {") != null);
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_sticky.drawn_len);
+    const geom = term.rt.editor_hit_geom;
+    const x_a: f64 = @floatFromInt(@as(i64, geom.body_x) + @as(i64, geom.content_left_px) + @as(i64, geom.cell_w_px) * 2 + 1); // 본문 줄의 `a`
+    const y0: f64 = @floatFromInt(@as(i64, geom.body_y) + 1);
+    const y2: f64 = @floatFromInt(@as(i64, geom.body_y) + @as(i64, geom.cell_h_px) * 2 + 1);
+    try testing.expect(!definition_client.gotoDefinitionAtPointer(s, term, x_a, y0)); // 고정 행 — 흘려보낸다
+    try testing.expect(definition_client.gotoDefinitionAtPointer(s, term, x_a, y2)); // 대조군 — 본문 행은 정의 요청이 나간다
 }
 
 test "OCH4 같은 낱말 강조 — provider 가 없으면 묻지 않고, 빈 응답·오류는 강조 없음이며, 낡은 낱말로 온 답은 버린다 (제품 경계, §8.2p)" {

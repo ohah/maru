@@ -440,33 +440,53 @@ pub const max_resume_argv: usize = 9;
 /// 그 경우 provider 가 스스로 거절하고, **재개가 끝나도 터미널은 남으므로** 사용자가 그 오류를 보고
 /// 바로 다시 친다 — 조용히 사라지지 않는다.
 pub fn resumeArgv(parsed: *const Parsed, out: *[max_resume_argv][]const u8) [][]const u8 {
+    return resumeArgvFor(.{
+        .provider = parsed.provider,
+        .session_id = parsed.session_id,
+        .permission = parsed.permission,
+        .model = parsed.model,
+    }, out);
+}
+
+/// 재개 argv 의 입력 넷. `Parsed` 전체가 없는 자리도 **같은 조립**을 쓰게 하려고 떼어 냈다 — 재부팅 부활(RB2)은
+/// 대화 파일의 끝부분만 읽으므로 제목·요약·cwd 가 없다. 조립 규칙이 두 벌이면 「기록된 대로 되살린다」가 한쪽에서
+/// 조용히 빠진다.
+pub const ResumeTarget = struct {
+    provider: Provider,
+    session_id: []const u8,
+    permission: Permission = .unknown,
+    model: []const u8 = "",
+};
+
+/// `resumeArgv` 의 본체. 규칙은 위 주석 그대로다(모르는 모드·빈 모델이면 플래그를 안 붙인다).
+pub fn resumeArgvFor(target: ResumeTarget, out: *[max_resume_argv][]const u8) [][]const u8 {
     var n: usize = 0;
-    switch (parsed.provider) {
+    switch (target.provider) {
         .claude => {
             out[0] = "claude";
             out[1] = "--resume";
-            out[2] = parsed.session_id;
+            out[2] = target.session_id;
             n = 3;
-            if (parsed.permission == .claude) {
-                if (parsed.permission.claude.flagValue()) |value| {
+            if (target.permission == .claude) {
+                if (target.permission.claude.flagValue()) |value| {
                     out[n] = "--permission-mode";
                     out[n + 1] = value;
                     n += 2;
                 }
             }
-            if (parsed.model.len > 0) {
+            if (target.model.len > 0) {
                 out[n] = "--model";
-                out[n + 1] = parsed.model;
+                out[n + 1] = target.model;
                 n += 2;
             }
         },
         .codex => {
             out[0] = "codex";
             out[1] = "resume";
-            out[2] = parsed.session_id;
+            out[2] = target.session_id;
             n = 3;
-            if (parsed.permission == .codex) {
-                const policy = parsed.permission.codex;
+            if (target.permission == .codex) {
+                const policy = target.permission.codex;
                 if (policy.approval) |approval| {
                     out[n] = "--ask-for-approval";
                     out[n + 1] = approval.flagValue();
@@ -478,14 +498,31 @@ pub fn resumeArgv(parsed: *const Parsed, out: *[max_resume_argv][]const u8) [][]
                     n += 2;
                 }
             }
-            if (parsed.model.len > 0) {
+            if (target.model.len > 0) {
                 out[n] = "--model";
-                out[n + 1] = parsed.model;
+                out[n + 1] = target.model;
                 n += 2;
             }
         },
     }
     return out[0..n];
+}
+
+/// 재부팅 부활(RB2)이 대화 파일에서 읽는 것은 **파일 끝부분**뿐이다 — 복원은 창을 그리기 전에 돌고 대화 파일은
+/// 수백 MB 일 수 있다. 재개가 이어야 할 것은 **마지막** 권한 모드와 모델이므로 끝부분에 있다(도크 규칙: 마지막에
+/// 본 값이 이긴다). 끝부분에 없으면 unknown·빈 모델로 남고, 그러면 플래그 없이 provider 기본값으로 연다.
+pub const resume_tail_bytes: usize = 1024 * 1024;
+
+/// 끝부분의 **온전한 줄들**을 `parser` 에 먹인다. 결과는 `parser.permission`·`parser.model` 이다(모델은 parser
+/// 버퍼를 빌리므로 parser 가 사는 동안만 유효).
+///
+/// - 끝부분은 `agent_transcript.readTail` 로 읽는다 — 「중간에서 잘라 읽었으면 첫 줄을 버린다」는 **그 함수 하나가
+///   소유한다**(대화 줄과 같은 규칙; 두 벌이면 갈린다). 여기서는 다시 자르지 않는다.
+/// - `finish` 를 거치지 않는다. codex 는 `session_meta` 가 파일 **머리**에만 있어 끝부분에는 없고, `finish` 는
+///   그것이 없으면 세션을 버린다. 필요한 두 값(`turn_context` 의 모드·모델)은 그것 없이도 읽힌다.
+pub fn feedResumeTail(parser: *Parser, tail: []const u8) void {
+    var it = std.mem.splitScalar(u8, tail, '\n');
+    while (it.next()) |line| parser.consumeLine(line);
 }
 
 /// RFC 3339 UTC 시각(`YYYY-MM-DDTHH:MM:SS[.fff]Z`)을 Unix epoch 나노초로 바꾼다. 형태가 조금이라도
@@ -1184,6 +1221,55 @@ test "Codex 권한 모드: turn_context 의 두 축을 함께 읽어 argv 에 �
     try std.testing.expectEqualStrings("never", argv[4]);
     try std.testing.expectEqualStrings("--sandbox", argv[5]);
     try std.testing.expectEqualStrings("danger-full-access", argv[6]);
+}
+
+test "RB2-3 끝부분 먹이기: 마지막 권한 모드·모델이 이긴다" {
+    const a = std.testing.allocator;
+    // 잘린 첫 줄을 버리는 것은 `agent_transcript.readTail` 이 소유한다(그쪽 판정자) — 여기는 온전한 줄만 받는다.
+    const tail =
+        \\{"sessionId":"c-1","type":"user","permissionMode":"plan","message":{"role":"user","text":"x"}}
+        \\{"sessionId":"c-1","type":"user","permissionMode":"default","message":{"role":"user","text":"y"}}
+        \\{"sessionId":"c-1","type":"assistant","message":{"role":"assistant","model":"claude-opus-4-1","text":"z"}}
+        \\{"sessionId":"c-1","type":"user","permissionMode":"bypassPermissions","message":{"role":"user","text":"w"}}
+    ;
+    var p = Parser.init(a, .claude);
+    feedResumeTail(&p, tail);
+    try std.testing.expectEqual(Permission{ .claude = .bypassPermissions }, p.permission);
+    try std.testing.expectEqualStrings("claude-opus-4-1", p.model);
+
+    // 모드·모델 줄이 끝부분에 없으면 unknown·빈 모델 — 그러면 플래그 없이 provider 기본값으로 연다(도크 규칙).
+    var none = Parser.init(a, .claude);
+    feedResumeTail(&none, "{\"sessionId\":\"c-1\",\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"text\":\"z\"}}");
+    try std.testing.expectEqual(Permission.unknown, none.permission);
+    try std.testing.expectEqualStrings("", none.model);
+}
+
+test "RB2-4 codex 끝부분은 session_meta 없이도 모드·모델을 읽고, 도크와 같은 argv 를 만든다" {
+    const a = std.testing.allocator;
+    const tail =
+        \\{"type":"turn_context","payload":{"model":"gpt-x","approval_policy":"on-request","sandbox_policy":{"type":"workspace-write"}}}
+        \\{"type":"event_msg","payload":{"type":"user_message","message":"요청"}}
+        \\{"type":"turn_context","payload":{"model":"gpt-y","approval_policy":"never","sandbox_policy":{"type":"danger-full-access"}}}
+    ;
+    var p = Parser.init(a, .codex);
+    feedResumeTail(&p, tail);
+    try std.testing.expectEqual(Permission{ .codex = .{ .approval = .never, .sandbox = .danger_full_access } }, p.permission);
+    try std.testing.expectEqualStrings("gpt-y", p.model);
+
+    // 같은 입력 넷이면 `Parsed` 경로(도크)와 `ResumeTarget` 경로(부활)가 **바이트까지 같은** argv 를 낸다.
+    const full =
+        \\{"type":"session_meta","payload":{"id":"x-1","cwd":"/repo","thread_source":"user"}}
+        \\{"type":"event_msg","payload":{"type":"user_message","message":"요청"}}
+        \\{"type":"turn_context","payload":{"model":"gpt-y","approval_policy":"never","sandbox_policy":{"type":"danger-full-access"}}}
+    ;
+    var parsed = (try parse(a, .codex, full)).?;
+    defer parsed.deinit(a);
+    var dock_buf: [max_resume_argv][]const u8 = undefined;
+    const dock = resumeArgv(&parsed, &dock_buf);
+    var revive_buf: [max_resume_argv][]const u8 = undefined;
+    const revive = resumeArgvFor(.{ .provider = .codex, .session_id = "x-1", .permission = p.permission, .model = p.model }, &revive_buf);
+    try std.testing.expectEqual(dock.len, revive.len);
+    for (dock, revive) |x, y| try std.testing.expectEqualStrings(x, y);
 }
 
 test "Codex 권한 모드: 못 읽은 축은 채워 넣지 않는다" {

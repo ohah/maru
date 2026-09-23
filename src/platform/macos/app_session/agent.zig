@@ -628,35 +628,39 @@ pub fn captureTurnSnapshot(self: *AppSession, surface_id: u64, facts: TurnFacts,
     if (title.len > 0) @memcpy(self.turn_snapshot_title[0..title.len], title);
 }
 
-/// Archive에서 고른 provider-native session을 새 terminal 탭으로 재개한다. transcript를 터미널에 paste하지
-/// 않고, 사용자 로그인 셸에 **인용된 provider argv 한 줄**을 넘긴다(조립은 `buildResumeShellCommand`).
-/// 그 argv는 세션 id뿐 아니라 **기록된 권한 모드**까지 싣는다 — 규칙은 OS-중립 층의 `resumeArgv`가 소유한다.
-pub fn resumeAgentSessionInNewTerm(self: *AppSession, record: *const agent_session_archive_backend.Record) !void {
-    const pane = pane_ops.activePane(self);
-    const size = layout_math.gridFromRectPx(self.cell_width_px, self.cell_height_px, self.active_pane_rect.w, self.active_pane_rect.h);
-    var cfg = self.new_tab_config;
-    cfg.size = size;
-    // ZDOTDIR은 **새 탭과 같은 지점**(`shellIntegrationZdotdir`)에서 얻는다. 예전에는 여기만 보관 필드
-    // (`new_tab_zdotdir`)를 직접 읽었는데, 그 함수는 캐시의 `.zshenv`가 사라졌으면 다시 써 주는 자가 복구를
-    // 한다(앱 시작 때 한 번만 도는 `setupZsh`의 산출물이라 캐시 정리에 그대로 노출된다). 직접 읽으면 캐시가
-    // 비워진 뒤 **재개 탭만** 셸 통합이 통째로 빠져, provider를 끝내고 프롬프트로 돌아와도 그 탭은 OSC 7·
-    // OSC 133을 영영 보내지 않는다.
-    var req = spawnRequest(cfg, self.loaded_config.config.term, self.loaded_config.config.shell, self.loaded_config.config.env, self.shellIntegrationZdotdir(), self.new_tab_ssh_bin);
-    const provider_command: []const u8 = record.parsed.provider.label();
-    // argv 조립은 **OS 중립 층**이 소유한다. 여기서 조립하면 "기록된 권한 모드를 그대로 되살린다" 는
-    // 규칙이 macOS 파일에만 살아, 다른 플랫폼이 재개를 붙일 때 조용히 빠진다.
-    var argv_buf: [agent_session_archive.max_resume_argv][]const u8 = undefined;
-    const args = agent_session_archive.resumeArgv(&record.parsed, &argv_buf);
-    // The isolated AppKit fixture supplies one absolute fake executable so it can prove the
-    // provider-native argv without starting a real account session or depending on the build
-    // runner's inherited PATH.  That seam stays a direct exec with no shell wrapper.
-    var shell_command: ?[]u8 = null;
-    defer if (shell_command) |owned| self.allocator.free(owned);
-    if (agent_dock.archiveSmokeFakeProviderExecutable(record.parsed.provider)) |fake_executable| {
-        req.command = fake_executable;
-        req.args = args[1..];
-        req.login = false;
-    } else {
+/// provider 재개를 spawn 요청에 싣는 **조립과 그 저장소**. 세션 기록 도크의 재개(새 탭)와 재부팅 부활(RB2 —
+/// 원래 칸)이 이 하나를 쓴다 — 셸 래핑·ZDOTDIR·PATH 규칙이 두 자리에서 갈리지 않게.
+///
+/// `req.args` 가 이 안의 버퍼를 가리키므로 **spawn 이 끝날 때까지 이 값이 제자리에 살아 있어야 한다**(지역
+/// 변수로 두고 `defer deinit` — 옮기지 않는다).
+pub const AgentResumeLaunch = struct {
+    argv_buf: [agent_session_archive.max_resume_argv][]const u8 = undefined,
+    shell_args: [4][]const u8 = undefined,
+    shell_command: ?[]u8 = null,
+    /// 조립된 provider argv(`argv[0]` 이 provider 실행 파일 이름). 탭 제목·command 이름에 쓴다.
+    argv: []const []const u8 = &.{},
+
+    pub fn deinit(self: *AgentResumeLaunch, allocator: std.mem.Allocator) void {
+        if (self.shell_command) |owned| allocator.free(owned);
+        self.shell_command = null;
+    }
+
+    /// `req` 의 실행 대상을 provider 재개로 바꾼다. **cwd 는 건드리지 않는다** — 호출자가 spawn 작업 디렉터리로만
+    /// 넘긴다(명령 문자열에 넣으면 셸 메타문자가 명령으로 재해석될 여지가 생긴다).
+    pub fn apply(self: *AgentResumeLaunch, session: *AppSession, target: agent_session_archive.ResumeTarget, req: *maru.pty.SpawnRequest) !void {
+        // argv 조립은 **OS 중립 층**이 소유한다. 여기서 조립하면 "기록된 권한 모드를 그대로 되살린다" 는
+        // 규칙이 macOS 파일에만 살아, 다른 플랫폼이 재개를 붙일 때 조용히 빠진다.
+        const args = agent_session_archive.resumeArgvFor(target, &self.argv_buf);
+        self.argv = args;
+        // The isolated AppKit fixture supplies one absolute fake executable so it can prove the
+        // provider-native argv without starting a real account session or depending on the build
+        // runner's inherited PATH.  That seam stays a direct exec with no shell wrapper.
+        if (agent_dock.archiveSmokeFakeProviderExecutable(target.provider)) |fake_executable| {
+            req.command = fake_executable;
+            req.args = args[1..];
+            req.login = false;
+            return;
+        }
         // 제품 경로는 **사용자 로그인 셸을 거쳐** provider를 찾는다. 예전에는 `/usr/bin/env claude`를
         // 직접 exec했는데, 그러면 provider를 **부모 프로세스의 PATH에서만** 찾는다. 터미널에서 띄운
         // 앱은 셸 PATH를 상속해 우연히 동작했지만 Dock/Finder에서 띄운 앱은 실패했다 — GUI 앱이
@@ -671,22 +675,122 @@ pub fn resumeAgentSessionInNewTerm(self: *AppSession, record: *const agent_sessi
         // 바로 그 실패**(Dock에서 PATH 못 찾음)로 되돌아가는 것이고, 경로가 둘이 되어 유지보수만
         // 는다. 셸이 이 인자를 못 받으면 그 셸이 에러를 내고 PTY 화면에 그대로 뜬다 — 조용히
         // 실패하지 않으므로 사용자가 원인을 본다.
-        const shell = resolveConfiguredShell(self.loaded_config.config.shell.command);
-        shell_command = try buildResumeShellCommand(self.allocator, args, shell);
+        const shell = resolveConfiguredShell(session.loaded_config.config.shell.command);
+        self.shell_command = try buildResumeShellCommand(session.allocator, args, shell);
         req.command = shell;
         // `-i`가 필요하다: PATH를 `.zshrc`에 두는 환경이 흔하고 zsh는 `-l`만으로는 그 파일을 읽지
         // 않는다. 일반 새 탭은 이미 대화형 로그인 셸이므로 이 경로가 오히려 나머지 탭과 동작을
         // 일치시킨다.
-        req.args = &[_][]const u8{ "-l", "-i", "-c", shell_command.? };
+        self.shell_args = .{ "-l", "-i", "-c", self.shell_command.? };
+        req.args = &self.shell_args;
         req.login = true;
     }
+};
+
+/// Archive에서 고른 provider-native session을 새 terminal 탭으로 재개한다. transcript를 터미널에 paste하지
+/// 않고, 사용자 로그인 셸에 **인용된 provider argv 한 줄**을 넘긴다(조립은 `AgentResumeLaunch`).
+/// 그 argv는 세션 id뿐 아니라 **기록된 권한 모드**까지 싣는다 — 규칙은 OS-중립 층의 `resumeArgv`가 소유한다.
+pub fn resumeAgentSessionInNewTerm(self: *AppSession, record: *const agent_session_archive_backend.Record) !void {
+    const pane = pane_ops.activePane(self);
+    const size = layout_math.gridFromRectPx(self.cell_width_px, self.cell_height_px, self.active_pane_rect.w, self.active_pane_rect.h);
+    var cfg = self.new_tab_config;
+    cfg.size = size;
+    // ZDOTDIR은 **새 탭과 같은 지점**(`shellIntegrationZdotdir`)에서 얻는다. 예전에는 여기만 보관 필드
+    // (`new_tab_zdotdir`)를 직접 읽었는데, 그 함수는 캐시의 `.zshenv`가 사라졌으면 다시 써 주는 자가 복구를
+    // 한다(앱 시작 때 한 번만 도는 `setupZsh`의 산출물이라 캐시 정리에 그대로 노출된다). 직접 읽으면 캐시가
+    // 비워진 뒤 **재개 탭만** 셸 통합이 통째로 빠져, provider를 끝내고 프롬프트로 돌아와도 그 탭은 OSC 7·
+    // OSC 133을 영영 보내지 않는다.
+    var req = spawnRequest(cfg, self.loaded_config.config.term, self.loaded_config.config.shell, self.loaded_config.config.env, self.shellIntegrationZdotdir(), self.new_tab_ssh_bin);
+    const provider_command: []const u8 = record.parsed.provider.label();
+    var launch: AgentResumeLaunch = .{};
+    defer launch.deinit(self.allocator);
+    try launch.apply(self, .{
+        .provider = record.parsed.provider,
+        .session_id = record.parsed.session_id,
+        .permission = record.parsed.permission,
+        .model = record.parsed.model,
+    }, &req);
     // cwd는 **명령 문자열에 넣지 않고** spawn 작업 디렉터리로만 전달한다 — 셸 메타문자가 명령으로
     // 재해석될 여지를 두지 않는다.
     if (usableRestoreCwd(record.parsed.cwd)) |cwd| req.cwd = cwd;
-    const term = try term_ops.createTerm(self, req, size, cfg.queue_capacity, provider_command, args[0]);
+    const term = try term_ops.createTerm(self, req, size, cfg.queue_capacity, provider_command, launch.argv[0]);
     errdefer term_ops.destroyTerm(self, term);
     try pane.terms.append(self.allocator, term);
     self.focusTerm(pane.terms.items.len - 1);
+}
+
+/// 재부팅 부활(RB2)이 이어갈 대화의 **마지막 권한 모드·모델**을 대화 파일 끝부분에서 읽어 재개 대상을 만든다
+/// (docs/workspace-restore.md 「재부팅 뒤 부활(RB)」 에이전트 이어가기 1·2).
+///
+/// **대화 파일을 못 찾으면 null — 이어가지 않는다.** provider 가 거절할 세션을 열어 오류 화면을 남기지 않고, 호출자는
+/// 셸만 띄운다. 파일이 있으면 끝부분에서 모드·모델을 못 찾아도 재개한다(플래그 없이 provider 기본값 — 도크 규칙).
+///
+/// 경로는 사이드바 대화 줄과 **같은 계산**이다: claude 는 `<설정>/projects/<cwd slug>/<id>.jsonl`, codex 는
+/// `~/.codex/sessions` 아래 `rollout-*-<id>.jsonl`. 끝부분 읽기도 같은 `readTail` 이다(잘린 첫 줄 규칙의 주인).
+/// 모델은 `parser` 버퍼를 빌리므로 `parser` 가 spawn 까지 살아 있어야 한다.
+pub fn rebootResumeTarget(
+    self: *AppSession,
+    ar: maru.session.workspace.AgentResume,
+    cwd: []const u8,
+    parser: *agent_session_archive.Parser,
+) ?agent_session_archive.ResumeTarget {
+    const tr = maru.session.agent_transcript;
+    if (!ar.valid()) return null; // reader 가 이미 걸렀지만, 이 값은 실행 인자가 되므로 문 앞에서 한 번 더
+    var path_buf: [2048]u8 = undefined;
+    var name_buf: [tr.max_name_bytes]u8 = undefined;
+    const dir_path, const name = switch (ar.provider) {
+        .claude => .{
+            claudeProjectDirPath(cwd, &path_buf) orelse return null,
+            std.fmt.bufPrint(&name_buf, "{s}.jsonl", .{ar.session_id}) catch return null,
+        },
+        .codex => .{ codexSessionsRootPath(&path_buf) orelse return null, "" },
+    };
+    const dir = openAgentDirAbsolute(self, dir_path, .{}) orelse return null;
+    defer dir.close(self.io);
+    var found_buf: [tr.max_name_bytes]u8 = undefined;
+    const file_name = switch (ar.provider) {
+        .claude => name,
+        .codex => blk: {
+            var suffix_buf: [tr.max_identity_bytes + 8]u8 = undefined;
+            const suffix = std.fmt.bufPrint(&suffix_buf, "{s}.jsonl", .{ar.session_id}) catch return null;
+            break :blk tr.findCodexByThreadId(self.io, dir, suffix, &found_buf) orelse return null;
+        },
+    };
+    // 파일이 **있는지**가 재개 여부를 가른다 — `readTail` 은 없는 파일과 빈 끝부분을 똑같이 빈 값으로 준다.
+    _ = dir.statFile(self.io, file_name, .{}) catch return null;
+    const tail_buf = self.allocator.alloc(u8, agent_session_archive.resume_tail_bytes) catch return null;
+    defer self.allocator.free(tail_buf);
+    agent_session_archive.feedResumeTail(parser, tr.readTail(self.io, dir, file_name, tail_buf));
+    return .{
+        .provider = ar.provider,
+        .session_id = ar.session_id,
+        .permission = parser.permission,
+        .model = parser.model,
+    };
+}
+
+/// 이 Term 에서 재부팅 뒤 **이어갈 에이전트**(RB2 — docs/workspace-restore.md 「재부팅 뒤 부활(RB)」 저장 조건).
+/// 넷을 **모두** 만족할 때만 값이 있다:
+/// - 포그라운드에서 로컬 claude·codex 가 돌고 있다(`agent_kind` — 프로세스 트리 판정).
+/// - 원격이 아니다. ssh 채널이 열렸거나(`isRemoteAgentPane`), cwd 가 원격이거나, 종류를 **원격 훅**이 세웠으면
+///   (`agent_kind_from_hook` — 원격 경로에서만 서는 래치다) 그 에이전트는 **저쪽 기계**에서 돈다. 여기서 이어가면
+///   엉뚱한 기계에서 연다.
+/// - 세션 신원이 있다 — 사이드바 에이전트 목록이 쓰는 **같은 신원**(훅 `SessionStart`·자식 env).
+/// - 신원이 argv 토큰 규칙을 지난다(`AgentResume.valid` — 이 값은 실행 인자가 된다).
+/// 묘비는 그 안에서 도는 것이 없으므로 제외한다.
+pub fn resumableAgentOf(self: *AppSession, term: *Term) ?maru.session.workspace.AgentResume {
+    if (term.rt.ended_placeholder) return null;
+    const provider: agent_session_archive.Provider = switch (term.agent_kind) {
+        .claude => .claude,
+        .codex => .codex,
+        .none => return null,
+    };
+    if (term.agent_kind_from_hook or isRemoteAgentPane(term) or app_session_mod.termCwdIsRemote(term)) return null;
+    const out: maru.session.workspace.AgentResume = .{
+        .provider = provider,
+        .session_id = primaryHookSlot(self, term).transcript.identity(),
+    };
+    return if (out.valid()) out else null;
 }
 
 pub fn tallyAgents(self: *const AppSession) AgentTally {
@@ -985,6 +1089,24 @@ pub fn resetAgentObservationForKindChange(term: *Term) void {
     term.hook.transcript.reset();
 }
 
+/// 프로세스 트리가 판정한 에이전트 종류를 Term 에 세운다 — **바뀌었을 때의 뒷정리가 이 한 자리다**(`pollAgentKinds`
+/// 에서 떼어 냈다: 그 함수는 진짜 포그라운드 프로세스를 읽어 판정자가 종류 변화를 흉내 낼 수 없다).
+pub fn noteAgentKind(self: *AppSession, term: *Term, kind: AgentKind, displayed: bool) void {
+    const prev = term.agent_kind;
+    term.agent_kind = kind;
+    if (kind == prev) return;
+    // RB2: 저장되는 `agent-resume` 이 이 값에 달려 있다 — 정상 종료 없이 전원이 꺼져도 마지막 쌍이 파일에
+    // 있으려면 바뀌는 순간 checkpoint 를 더럽혀야 한다.
+    self.workspaceChanged(.agent_session);
+    if (displayed) self.metal_dirty = true; // 보이는 Term의 에이전트 변화만 재렌더
+    if (diag_gate.maruDebugEnabled()) std.log.scoped(.agent).info("agent: {s}", .{@tagName(kind)});
+    // 새 프로세스의 대화를 이전 세션 것과 섞지 않는다. 응답 줄이 사라지면 행 줄 수도
+    // 바뀌므로 **재투영까지** 해야 한다 — metal_dirty만으로는 행 높이가 옛 값으로 남는다.
+    const had_reply_kind = term.hook.transcript.owned.reply().len > 0;
+    resetAgentObservationForKindChange(term);
+    if (had_reply_kind) sidebar_ops.rebuildSidebar(self) catch {};
+}
+
 pub fn pollAgentKinds(self: *AppSession) void {
     self.agent_poll_ticks += 1;
     self.agent_observer_poll_ticks += 1;
@@ -1058,18 +1180,9 @@ pub fn pollAgentKinds(self: *AppSession) void {
                 // 그 모양이었다. 훅이 오면 그때부터 훅이 이긴다(아래 `agent_kind_from_hook`).
                 const remote_owns_kind = term.agent_kind_from_hook;
                 if ((periodic_kind_probe or pgid_changed) and foreground_available and !remote_owns_kind) {
-                    const prev = term.agent_kind;
-                    term.agent_kind = classifyAgentProcesses(term.rt.observation.foreground_processes.items);
-                    if (diag_gate.maruDebugEnabled()) std.log.scoped(.agentdiag).info("kind={s} pgid_changed={} live={} term=0x{x}", .{ @tagName(term.agent_kind), pgid_changed, term.rt.live_initialized, @intFromPtr(term) });
-                    if (term.agent_kind != prev) {
-                        if (displayed) self.metal_dirty = true; // 보이는 Term의 에이전트 변화만 재렌더
-                        if (diag_gate.maruDebugEnabled()) std.log.scoped(.agent).info("agent: {s}", .{@tagName(term.agent_kind)});
-                        // 새 프로세스의 대화를 이전 세션 것과 섞지 않는다. 응답 줄이 사라지면 행 줄 수도
-                        // 바뀌므로 **재투영까지** 해야 한다 — metal_dirty만으로는 행 높이가 옛 값으로 남는다.
-                        const had_reply_kind = term.hook.transcript.owned.reply().len > 0;
-                        resetAgentObservationForKindChange(term);
-                        if (had_reply_kind) sidebar_ops.rebuildSidebar(self) catch {};
-                    }
+                    const kind = classifyAgentProcesses(term.rt.observation.foreground_processes.items);
+                    if (diag_gate.maruDebugEnabled()) std.log.scoped(.agentdiag).info("kind={s} pgid_changed={} live={} term=0x{x}", .{ @tagName(kind), pgid_changed, term.rt.live_initialized, @intFromPtr(term) });
+                    noteAgentKind(self, term, kind, displayed);
                 }
                 // **원격 채널이 열린 Term 도 들어온다.** ssh 너머의 프로세스 트리는 로컬에서 안 보여
                 // `agent_kind` 가 영영 `.none` 이라, `!= .none` 만으로 막으면 원격 축은 판정 함수까지
@@ -1858,6 +1971,7 @@ pub fn refreshAgentSessionIdentity(self: *AppSession, term: *Term) void {
     cache.reset();
     cache.setIdentity(value);
     self.metal_dirty = true;
+    self.workspaceChanged(.agent_session); // RB2: 저장되는 `agent-resume` 의 신원이 바뀌었다
 }
 
 /// 훅 payload 가 밝힌 **세션 신원**을 채택한다(AT1).
@@ -1900,6 +2014,7 @@ fn adoptHookSessionIdentity(self: *AppSession, slot: *HookSlot, ev: maru.session
     cache.reset();
     cache.setIdentity(value);
     self.metal_dirty = true;
+    self.workspaceChanged(.agent_session); // RB2: 저장되는 `agent-resume` 의 신원이 바뀌었다
 }
 
 /// 이미지 갤러리가 읽을 파일을 훅 payload 에서 채택한다(docs/agent-image-gallery.md §4.4).
@@ -1933,6 +2048,23 @@ fn adoptHookImageSource(self: *AppSession, slot: *HookSlot, ev: maru.session.age
     agent_activity_ops.onSourceChanged(self);
 }
 
+/// claude 가 이 작업 디렉터리의 대화를 쌓는 디렉터리(`<claude 설정>/projects/<cwd slug>`). 대화 줄과 재부팅
+/// 부활(RB2)이 **같은 계산**을 쓴다 — 두 벌이면 한쪽만 slug 규칙을 따라가다 서로 다른 파일을 본다.
+fn claudeProjectDirPath(cwd: []const u8, out: []u8) ?[]const u8 {
+    const tr = maru.session.agent_transcript;
+    var claude_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const claude_dir = settings_ops.claudeConfigDir(&claude_dir_buf) orelse return null;
+    var slug_buf: [1024]u8 = undefined;
+    const slug = tr.claudeDirName(cwd, &slug_buf) orelse return null;
+    return std.fmt.bufPrint(out, "{s}/projects/{s}", .{ claude_dir, slug }) catch null;
+}
+
+/// codex 가 대화(rollout)를 쌓는 뿌리(`~/.codex/sessions`) — 대화 줄과 재부팅 부활이 공유한다.
+fn codexSessionsRootPath(out: []u8) ?[]const u8 {
+    const home_z = std.c.getenv("HOME") orelse return null;
+    return std.fmt.bufPrint(out, "{s}/.codex/sessions", .{std.mem.span(home_z)}) catch null;
+}
+
 /// claude: 작업 디렉터리를 인코딩한 디렉터리의 **직속** 파일만 본다 — 서브에이전트 기록은 `<세션 id>/` 하위에
 /// 쌓이므로 그것만으로 배제된다(§7.3). 대화가 갱신됐으면 true.
 pub fn refreshClaudeTranscript(self: *AppSession, term: *Term, cwd: []const u8) bool {
@@ -1942,12 +2074,8 @@ pub fn refreshClaudeTranscript(self: *AppSession, term: *Term, cwd: []const u8) 
     // 새 터미널에 직전 세션의 대화를 붙이고(사용자 제보) 같은 cwd의 두 에이전트가 서로의 대화를 물게 했다.
     // 추측으로 틀린 대화를 보여주느니 비우는 편이 낫다는 계약 1과도 어긋났다 — 그래서 폴백을 없앴다(§7.2).
     if (cache.identity_len == 0) return false;
-    var claude_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const claude_dir = settings_ops.claudeConfigDir(&claude_dir_buf) orelse return false;
-    var slug_buf: [1024]u8 = undefined;
-    const slug = tr.claudeDirName(cwd, &slug_buf) orelse return false;
     var path_buf: [2048]u8 = undefined;
-    const dir_path = std.fmt.bufPrint(&path_buf, "{s}/projects/{s}", .{ claude_dir, slug }) catch return false;
+    const dir_path = claudeProjectDirPath(cwd, &path_buf) orelse return false;
     const dir = openAgentDirAbsolute(self, dir_path, .{}) orelse return false;
     defer dir.close(self.io);
 
@@ -1988,10 +2116,8 @@ pub fn refreshCodexTranscript(self: *AppSession, term: *Term, cwd: []const u8) b
     const cache = &term.hook.transcript;
     _ = cwd; // 신원으로 파일을 확정하므로 cwd 대조가 필요 없다(그 값이 곧 그 세션이다)
     if (cache.identity_len == 0) return false; // claude와 같은 이유로 폴백 없음(§7.2)
-    const home_z = std.c.getenv("HOME") orelse return false;
-    const home = std.mem.span(home_z);
     var path_buf: [2048]u8 = undefined;
-    const root_path = std.fmt.bufPrint(&path_buf, "{s}/.codex/sessions", .{home}) catch return false;
+    const root_path = codexSessionsRootPath(&path_buf) orelse return false;
     const root = openAgentDirAbsolute(self, root_path, .{}) orelse return false;
     defer root.close(self.io);
 

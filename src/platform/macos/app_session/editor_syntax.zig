@@ -397,7 +397,7 @@ fn lastContentLine(visible_numbers: []const ?u32, first_line: usize, last_line: 
     return null;
 }
 
-fn lineColorsInto(
+pub fn lineColorsInto(
     self: *State,
     bufs: *ColorBufs,
     allocator: std.mem.Allocator,

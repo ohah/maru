@@ -2242,6 +2242,8 @@ const TermRuntime = struct {
     editor_smart_select: editor_ops.smart_select_client.State = .{},
     /// sticky scroll(visual-mapping §4.1i) — 스코프 캐시·이번 프레임의 머리줄·지난 프레임에 그린 줄(클릭·호버가 읽는다).
     editor_sticky: editor_ops.sticky_client.State = .{},
+    /// 짝 괄호 강조(visual-mapping §5.1b) — 이번 키의 쌍과 렌더 축 마크. 키가 같으면 다시 세지 않는다.
+    editor_brackets: editor_ops.brackets_client.State = .{},
     /// 그 강조의 **렌더 축 마크**(줄별) — `editor_find_marks` 와 같은 꼴·같은 수명(프레임마다 다시 채운다).
     editor_highlight_marks: [][]const maru.chrome.components.editor_view.frame.Mark = &.{},
     editor_highlight_mark_buf: []maru.chrome.components.editor_view.frame.Mark = &.{},

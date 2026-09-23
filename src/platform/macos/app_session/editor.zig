@@ -99,6 +99,8 @@ pub const symbols_client = @import("editor_symbols.zig");
 pub const highlight_client = @import("editor_highlight.zig");
 pub const smart_select_client = @import("editor_smart_select.zig");
 pub const sticky_client = @import("editor_sticky.zig");
+/// 짝 괄호(visual-mapping §5.1b · document-model §3.9c) — 강조 마크와 점프가 같은 출처 고르기를 쓴다.
+pub const brackets_client = @import("editor_brackets.zig");
 /// 접힘 범위를 낸 층(§4 의 세 소스).
 pub const FoldSource = enum { indent, syntax, lsp };
 pub const workspace_edit_client = @import("editor_workspace_edit.zig");
@@ -891,6 +893,41 @@ fn caretShape(self: *AppSession) chrome_editor.frame.CaretShape {
     };
 }
 
+/// 커서에서 나오는 본문 장식(§5.1b) — `buildPaneOps` 가 frame 에 그대로 옮긴다. 기본값은 「없음」이다(비교 뷰·상태 줄).
+pub const Decorations = struct {
+    line_highlight: chrome_editor.frame.LineHighlight = .none,
+    selection_empty: bool = true,
+    active_line: ?usize = null,
+    bracket_marks: ?[]const []const chrome_editor.frame.Mark = null,
+};
+
+/// 단일 편집기의 장식(§5.1b). 현재 줄은 **설정과 선택**만 보고(포커스와 무관 — VS Code 의 테두리 규칙에 포커스 조건이 없다), 짝 괄호는
+/// 포커스까지 본다(`brackets_client.modeFor`). 활성 줄 번호는 primary caret 의 줄을 **보이는 줄 축**으로 옮긴 것이다.
+fn paneDecorations(self: *AppSession, term: *Term) Decorations {
+    const mode: chrome_editor.frame.LineHighlight = switch (self.loaded_config.config.editor.render_line_highlight) {
+        .none => .none,
+        .gutter => .gutter,
+        .line => .line,
+        .all => .all,
+    };
+    var empty = true;
+    var it = selections(term);
+    while (it.next()) |sel| {
+        if (!sel.isEmpty()) {
+            empty = false;
+            break;
+        }
+    }
+    const active: ?usize = blk: {
+        const doc = term.rt.editor_doc orelse break :blk null;
+        const sel = term.rt.editor_selection orelse break :blk null;
+        const doc_line: u32 = @intCast(doc.file.lines.lineAt(@min(sel.focus, doc.file.content.len)));
+        const axis_len = if (term.rt.editor_visible_lines.len > 0) term.rt.editor_visible_lines.len else term.rt.editor_lines.len;
+        break :blk sticky_client.visibleOf(if (term.rt.editor_visible_lines.len > 0) term.rt.editor_visible_numbers else &.{}, doc_line, axis_len);
+    };
+    return .{ .line_highlight = mode, .selection_empty = empty, .active_line = active, .bracket_marks = brackets_client.marks(self, term) };
+}
+
 pub fn buildPaneOps(
     lines: []const []const u8,
     numbers: ?[]const ?u32,
@@ -957,6 +994,8 @@ pub fn buildPaneOps(
     diag: ?diagnostics.Views,
     /// sticky scroll 머리줄(§4.1i) — 단일 편집기만(나머지는 빈 목록).
     sticky: []const chrome_editor.frame.StickyLine,
+    /// 현재 줄·활성 줄 번호·짝 괄호(§5.1b) — 단일 편집기만(나머지는 `.{}` = 없음).
+    deco: Decorations,
 ) PaneFrame {
     // **내용은 뷰 사각에서 한 겹 들어간다**(`frame.content_inset_px`) — 배경은 그대로 전체를 덮는다.
     // 활성 pane 포커스 테두리가 셀 **위** 층에 그려져서, 여백이 없으면 첫 글자 행과 스크롤바를 덮는다
@@ -964,7 +1003,7 @@ pub fn buildPaneOps(
     const inset: i32 = @intCast(chrome_editor.frame.content_inset_px);
     const inner: chrome_draw.Rect = .{ .x = 0, .y = 0, .w = rect.w -| chrome_editor.frame.content_inset_px * 2, .h = rect.h -| chrome_editor.frame.content_inset_px * 2 };
     const w = diff_frame.buildSide(
-        .{ .lines = lines, .first_col = first_col, .numbers = numbers, .total_lines = total_lines, .folds = folds, .content_max_cols = content_max_cols, .row_cache = row_cache, .selection_marks = selection_marks, .occurrence_marks = occurrence_marks, .search_marks = search_marks, .search_current = search_current, .search_marker_lines = search_marker_lines, .search_marker_current = search_marker_current, .line_colors = line_colors, .line_seeks = line_seeks, .line_inlays = line_inlays, .carets = carets, .widgets = widgets, .bands = bands, .minimap = minimap, .diag_marks = if (diag) |d| d.marks else null, .diag_markers = if (diag) |d| d.markers else null, .diag_lines = if (diag) |d| d.lines else &.{}, .sticky = sticky },
+        .{ .lines = lines, .first_col = first_col, .numbers = numbers, .total_lines = total_lines, .folds = folds, .content_max_cols = content_max_cols, .row_cache = row_cache, .selection_marks = selection_marks, .occurrence_marks = occurrence_marks, .search_marks = search_marks, .search_current = search_current, .search_marker_lines = search_marker_lines, .search_marker_current = search_marker_current, .line_colors = line_colors, .line_seeks = line_seeks, .line_inlays = line_inlays, .carets = carets, .widgets = widgets, .bands = bands, .minimap = minimap, .diag_marks = if (diag) |d| d.marks else null, .diag_markers = if (diag) |d| d.markers else null, .diag_lines = if (diag) |d| d.lines else &.{}, .sticky = sticky, .line_highlight = deco.line_highlight, .selection_empty = deco.selection_empty, .active_line = deco.active_line, .bracket_marks = deco.bracket_marks },
         .{ .first_line = first_line, .first_piece = first_piece, .caret_visible = caret_visible, .caret_shape = caret_shape, .wrap = wrap, .tab_width = tab_width, .cell_w_px = cell_w_px, .cell_h_px = cell_h_px, .font_px = font_px },
         inner,
         // **배경만 뒤로 물린다.** 내용 op이 (0,0)에서 시작해야 셀 격자 양자화(`buildTextDrawList`가
@@ -1866,7 +1905,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     const pf = if (diff_state_opt) |st| blk: {
         // **상태 줄은 가로로 안 민다** — 한 줄짜리 문구라 밀면 화면에서 사라진다.
         // 한 줄짜리 상태 문구다 — 캐시가 아낄 것이 없다.
-        if (st.view != .compare) break :blk buildPaneOps(lines, null, null, lines.len, term.rt.editor_first_line, 0, 0, null, null, buildSelectionMarks(self, term), null, null, null, @as([]const u32, &.{}), null, syntaxColors(self, term), &.{}, .{}, buildCaretRows(self, term), &.{}, null, self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, null, null, &.{});
+        if (st.view != .compare) break :blk buildPaneOps(lines, null, null, lines.len, term.rt.editor_first_line, 0, 0, null, null, buildSelectionMarks(self, term), null, null, null, @as([]const u32, &.{}), null, syntaxColors(self, term), &.{}, .{}, buildCaretRows(self, term), &.{}, null, self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, null, null, &.{}, .{});
         // **좌우가 세로를 공유한다**(§3.5) — 행 배열이 이미 같은 길이라 같은 인덱스가 같은 높이다.
         // 가로는 각자다(§3.5의 그 규칙은 CM6가 "양쪽 줄 길이가 달라 한쪽을 따라가면 다른 쪽이
         // 엉뚱한 곳을 본다"고 적어 둔 근거에서 왔다) — 입력이 붙을 때 열별 `first_col`이 여기 온다.
@@ -1895,7 +1934,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
                 maru.i18n.t(.diff_read_failed)
             else
                 maru.i18n.t(.diff_loading);
-            break :blk buildPaneOps(status_line[0..1], null, null, 1, 0, 0, 0, null, null, null, null, null, null, @as([]const u32, &.{}), null, &.{}, &.{}, .{}, null, &.{}, null, false, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, null, null, &.{});
+            break :blk buildPaneOps(status_line[0..1], null, null, 1, 0, 0, 0, null, null, null, null, null, null, @as([]const u32, &.{}), null, &.{}, &.{}, .{}, null, &.{}, null, false, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, null, null, &.{}, .{});
         }
         break :blk buildMergePaneOps(self, term, st, draw_lines, wrap, pane_rect, scratch);
     } else blk: {
@@ -1910,7 +1949,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
         mm_drawn = if (mm) |m| m.input.top else null;
         // **진단**(§5.4) — 트리가 있으면 목록을 다시 채우고(구문 오류), 보이는 줄 축의 세 표로 편다. 끄면 없다.
         const diag = diagnosticViews(self, term, draw_lines.len);
-        break :blk buildPaneOps(draw_lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), fc, maxColsForRender(self, term, false), row_cache, buildSelectionMarks(self, term), find_marks, buildOccurrenceMarks(self, term), find_current, marker_lines, marker_current, syntaxColors(self, term), seek_buf[0..seek_n], inlayWindow(self, term), buildCaretRows(self, term), conflictWidgets(self, term), conflictBands(term), self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, mm, diag, sticky_client.compute(self, term, pane_rect, wrap));
+        break :blk buildPaneOps(draw_lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), fc, maxColsForRender(self, term, false), row_cache, buildSelectionMarks(self, term), find_marks, buildOccurrenceMarks(self, term), find_current, marker_lines, marker_current, syntaxColors(self, term), seek_buf[0..seek_n], inlayWindow(self, term), buildCaretRows(self, term), conflictWidgets(self, term), conflictBands(term), self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, mm, diag, sticky_client.compute(self, term, pane_rect, wrap), paneDecorations(self, term));
     };
     if (pf.ops_len == 0) return null;
     // **배치를 싣는다**(병합 모드가 아니면 지운다 — 옛 배치가 남으면 평범한 편집기에서 클릭이
@@ -3355,7 +3394,8 @@ fn movedOffset(
         // 사용자가 자기 자리를 잃는다.
         .bracket_match => blk: {
             goal.* = .none;
-            break :blk editor_motion.matchingBracket(content, focus) orelse focus;
+            // 강조(§5.1b)와 **같은 출처**다 — 트리가 있으면 트리(문자열·주석 속 괄호가 빠진다), 없으면 글자 훑기.
+            break :blk brackets_client.jumpTarget(term, content, focus) orelse focus;
         },
         .line_end => blk: {
             // **줄 끝은 목표를 `line_end`로 세운다** — End 뒤에 아래로 내려가면 계속 줄 끝을 따라간다.
@@ -3958,7 +3998,7 @@ fn buildSelectionMarks(self: *AppSession, term: *Term) ?[]const []const chrome_e
 }
 
 /// 보이는 줄 인덱스 → 원본 문서 줄. 번호 표는 1-based이고, 표에 없는 자리는 그릴 수 없다.
-fn visibleDocLine(
+pub fn visibleDocLine(
     doc: Opened,
     numbers: []const ?u32,
     visible: []const []const u8,
@@ -9436,6 +9476,7 @@ fn dropSelectionState(self: *AppSession, term: *Term) void {
     if (term.rt.editor_highlight_mark_buf.len > 0) self.allocator.free(term.rt.editor_highlight_mark_buf);
     term.rt.editor_highlight_marks = &.{};
     term.rt.editor_highlight_mark_buf = &.{};
+    term.rt.editor_brackets.deinit(self.allocator); // 짝 괄호 쌍·마크(§5.1b)도 같은 단위다
     term.rt.editor_diagnostics.deinit(self.allocator); // 진단 층(§5.4)도 같은 단위다
     if (term.rt.editor_lsp_root) |r| self.allocator.free(r); // LSP root(§8.2a)
     term.rt.editor_lsp_root = null;
@@ -41045,4 +41086,217 @@ test "U4d-6 레코드가 없으면 아무것도 만들지 않는다 — 빈 탭�
     app_session_mod.editor_backup_ops.drainRevivals(fx.session);
     try testing.expectEqual(before, pane.terms.items.len);
     try testing.expect(!fx.session.chrome_host.notice.open); // 되살린 것이 없으면 말할 것도 없다
+}
+
+// ── 현재 줄 강조·짝 괄호 강조 — 제품 경계(visual-mapping §5.1b) ──────────────────────────────
+
+/// 판정자용: 한 프레임을 그리고 그 GPU quad 중 **테두리 색이 `role` 이고 테두리가 불투명한** 것들. 프레임 op 이 아니라 lowering 을 지난 quad 를
+/// 센다 — pane lowering 이 버리는 op(`rule`)·알파가 한 벌인 quad(테두리까지 10%)도 op 으로는 초록이다(§4.1i 되먹임 ①·`BRK8`).
+fn boxedQuads(self: *AppSession, term: *Term, role: chrome.tokens.ColorRole, out: []renderer.metal_frame.GpuQuad) ![]renderer.metal_frame.GpuQuad {
+    self.gpu_quads.clearRetainingCapacity();
+    const leaf = activeLeafRectForTest(self) orelse return error.NoLeaf;
+    var d = appendPaneFrame(self, leaf, term) orelse return error.EditorPaneDidNotDraw;
+    d.dl.deinit(self.allocator);
+    const want = self.buildChromeTokens().get(role);
+    var n: usize = 0;
+    for (self.gpu_quads.items) |q| {
+        if (q.border_color >> 24 != 0xFF) continue;
+        const rgb: maru.terminal.Rgb = .{ .r = @intCast((q.border_color >> 16) & 0xFF), .g = @intCast((q.border_color >> 8) & 0xFF), .b = @intCast(q.border_color & 0xFF) };
+        if (!std.meta.eql(rgb, want)) continue;
+        if (n == out.len) break;
+        out[n] = q;
+        n += 1;
+    }
+    return out[0..n];
+}
+
+/// 판정자용: 추가 커서를 통째로 갈아 끼운다(소유는 Term — `clearExtraSelections` 가 푼다).
+fn setExtraSelections(self: *AppSession, term: *Term, extras: []const editor_selection.Selection) !void {
+    clearExtraSelections(self, term);
+    term.rt.editor_extra_selections = try self.allocator.dupe(editor_selection.Selection, extras);
+}
+
+fn openBracketFixture(fx: *PaneFixture, allocator: std.mem.Allocator, name: []const u8, data: []const u8) !*Term {
+    const io = std.testing.io;
+    try fx.dir.dir.writeFile(io, .{ .sub_path = name, .data = data });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, name });
+    defer allocator.free(path);
+    // **언어 서버를 끈다** — 켜 두면 TS 문서를 여는 순간 「서버를 설치할까요」 확인 모달이 떠 **키를 가져간다**(`⇧⌘\` 가 `moveCarets` 에
+    // 닿지 않았다 — 실측). 이 판정자들이 재는 것은 괄호이고 서버가 아니다.
+    fx.session.loaded_config.config.lsp.enabled = false;
+    const term = try openPathInActivePane(fx.session, path);
+    fx.session.surface_initialized = true;
+    fx.session.backing_width_px = 1200;
+    fx.session.backing_height_px = 800;
+    _ = try fx.session.tick();
+    // 트리를 끝까지 판다(작은 문서라 한 번이면 되지만, 여는 파싱이 끊겼으면 여기서 잇는다).
+    var rounds: usize = 0;
+    while (term.rt.editor_syntax.pending and rounds < 50) : (rounds += 1) _ = try fx.session.tick();
+    return term;
+}
+
+test "BRP1 짝 괄호 — 트리로 판정해 문자열 속 '(' 가 아니라 호출 괄호에 상자 둘, 점프도 같은 곳으로 (제품 경계, §5.1b · §3.9c)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    // **두 출처가 갈리는 표본**: 끝 ')' 뒤에서 글자 훑기는 문자열 속 '(' (3) 을 짝으로 세고, 트리는 호출 괄호 (1) 를 안다.
+    const src = "f(\"(\", x);\n";
+    const term = try openBracketFixture(&fx, allocator, "b.ts", src);
+    try testing.expect(term.rt.editor_syntax.provider != null and !term.rt.editor_syntax.pending);
+    try testing.expect(!fx.session.anyOverlayOpen()); // 키를 가져갈 모달이 없다(아래 ⇧⌘\ 가 제품 경로로 간다)
+    term.rt.editor_selection = editor_selection.Selection.at(9); // 끝 ')'(8) 뒤
+    var got: [16]renderer.metal_frame.GpuQuad = undefined;
+    const boxes = try boxedQuads(fx.session, term, .bracket_match_border, &got);
+    try testing.expectEqual(@as(usize, 2), boxes.len);
+    const g = term.rt.editor_hit_geom;
+    const col_x = struct {
+        fn at(geom: anytype, col: i32) f32 {
+            return @floatFromInt(@as(i32, geom.body_x) + @as(i32, @intCast(geom.content_left_px)) + col * @as(i32, geom.cell_w_px));
+        }
+    };
+    var xs = [2]f32{ boxes[0].x, boxes[1].x };
+    std.mem.sort(f32, &xs, {}, std.sort.asc(f32));
+    try testing.expectEqual(col_x.at(g, 1), xs[0]);
+    try testing.expectEqual(col_x.at(g, 8), xs[1]);
+    // 채움은 10% 초록, 테두리는 불투명 1px
+    try testing.expectEqual(@as(u32, chrome_editor.frame.bracket_match_alpha), boxes[0].fill_color0 >> 24);
+    try testing.expectEqual(@as(f32, 1), boxes[0].border_widths[0]);
+
+    // ⇧⌘\ — 강조가 가리킨 그 '(' 로 간다(글자 훑기였다면 3)
+    _ = try fx.session.handleKeyEvent(.{ .key = .{ .char = '\\' }, .modifiers = .{ .command = true, .shift = true } });
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_selection.?.focus);
+}
+
+test "BRP2 모드와 포커스 — always 는 감싸는 쌍, near 는 닿은 것만, never·포커스 없음은 없다 (제품 경계, §5.1b)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const src = "g(ab, c);\n";
+    const term = try openBracketFixture(&fx, allocator, "m.ts", src);
+    term.rt.editor_selection = editor_selection.Selection.at(3); // `ab` 가운데 — 닿은 괄호가 없다
+    var got: [16]renderer.metal_frame.GpuQuad = undefined;
+    try testing.expectEqual(@as(usize, 2), (try boxedQuads(fx.session, term, .bracket_match_border, &got)).len); // always(기본) — 감싸는 (1,7)
+    fx.session.loaded_config.config.editor.match_brackets = .near;
+    try testing.expectEqual(@as(usize, 0), (try boxedQuads(fx.session, term, .bracket_match_border, &got)).len);
+    term.rt.editor_selection = editor_selection.Selection.at(2); // `(|ab` — 닿았다
+    try testing.expectEqual(@as(usize, 2), (try boxedQuads(fx.session, term, .bracket_match_border, &got)).len);
+    fx.session.loaded_config.config.editor.match_brackets = .never;
+    try testing.expectEqual(@as(usize, 0), (try boxedQuads(fx.session, term, .bracket_match_border, &got)).len);
+    fx.session.loaded_config.config.editor.match_brackets = .always;
+    fx.session.window_focused = false; // 창이 key 가 아니다 — VS Code `hasWidgetFocus`
+    try testing.expectEqual(@as(usize, 0), (try boxedQuads(fx.session, term, .bracket_match_border, &got)).len);
+    fx.session.window_focused = true;
+    try testing.expectEqual(@as(usize, 2), (try boxedQuads(fx.session, term, .bracket_match_border, &got)).len);
+}
+
+test "BRP3 커서 — 빈 선택만 보고, 같은 괄호는 한 번, 100 개를 넘으면 없다; 키가 같으면 다시 세지 않는다 (제품 경계, §5.1b)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const src = "a(1);\nb(2);\n";
+    const term = try openBracketFixture(&fx, allocator, "c.ts", src);
+    var got: [16]renderer.metal_frame.GpuQuad = undefined;
+    // primary 는 선택(괄호에 닿아도 안 본다), 나머지 하나는 빈 caret — 그 쌍만
+    term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 2 }; // `a(` 선택 — focus 가 '(' 뒤
+    try setExtraSelections(fx.session, term, &.{editor_selection.Selection.at(8)}); // `b(|2`
+    const one = try boxedQuads(fx.session, term, .bracket_match_border, &got);
+    try testing.expectEqual(@as(usize, 2), one.len);
+    try testing.expect(one[0].y > @as(f32, @floatFromInt(term.rt.editor_hit_geom.body_y))); // 둘째 줄의 쌍이다
+    // 같은 괄호에 닿은 커서 둘 — 상자는 여전히 둘
+    term.rt.editor_selection = editor_selection.Selection.at(7);
+    try testing.expectEqual(@as(usize, 2), (try boxedQuads(fx.session, term, .bracket_match_border, &got)).len);
+    // 키가 같으면 안 센다 — 같은 상태로 한 번 더 그려도 `computed` 가 그대로다
+    const before = term.rt.editor_brackets.computed;
+    _ = try boxedQuads(fx.session, term, .bracket_match_border, &got);
+    try testing.expectEqual(before, term.rt.editor_brackets.computed);
+    term.rt.editor_selection = editor_selection.Selection.at(1); // `a|(` — 자리가 바뀌면 다시 센다
+    const moved = try boxedQuads(fx.session, term, .bracket_match_border, &got);
+    try testing.expectEqual(before + 1, term.rt.editor_brackets.computed);
+    try testing.expectEqual(@as(usize, 4), moved.len); // 두 줄의 쌍 둘
+    // 101 개면 없다
+    var many: [brackets_client.max_cursors]editor_selection.Selection = undefined;
+    for (&many) |*m| m.* = editor_selection.Selection.at(1);
+    try setExtraSelections(fx.session, term, &many);
+    try testing.expectEqual(@as(usize, 0), (try boxedQuads(fx.session, term, .bracket_match_border, &got)).len);
+}
+
+test "BRP4 grammar 없는 문서 — 닿은 괄호는 글자 훑기로 서고, 감싸는 쌍은 안 찾는다 (제품 경계, §5.1b · §3.9c)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try openBracketFixture(&fx, allocator, "p.txt", "(abc)\n");
+    try testing.expect(term.rt.editor_syntax.provider == null);
+    var got: [16]renderer.metal_frame.GpuQuad = undefined;
+    term.rt.editor_selection = editor_selection.Selection.at(1);
+    try testing.expectEqual(@as(usize, 2), (try boxedQuads(fx.session, term, .bracket_match_border, &got)).len);
+    term.rt.editor_selection = editor_selection.Selection.at(2); // 괄호 안이지만 닿지 않았다 — always 여도 없다
+    try testing.expectEqual(@as(usize, 0), (try boxedQuads(fx.session, term, .bracket_match_border, &got)).len);
+}
+
+test "LHP1 현재 줄 — caret 줄에 2px 테두리 상자, 포커스와 무관, 선택이 있으면 본문 상자 없음, gutter·none (제품 경계, §5.1b)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try openBracketFixture(&fx, allocator, "l.txt", "one\ntwo\nthree\nfour\n");
+    const line2 = term.rt.editor_doc.?.file.lines.line(2).?;
+    term.rt.editor_selection = editor_selection.Selection.at(line2.start + 1); // 첫 줄이 아니다
+    var got: [16]renderer.metal_frame.GpuQuad = undefined;
+    const boxes = try boxedQuads(fx.session, term, .line_highlight, &got);
+    try testing.expectEqual(@as(usize, 1), boxes.len);
+    const g = term.rt.editor_hit_geom;
+    try testing.expectEqual(@as(f32, @floatFromInt(g.body_y + 2 * @as(i32, g.cell_h_px))), boxes[0].y);
+    try testing.expectEqual(@as(f32, @floatFromInt(@as(i32, g.body_x) + @as(i32, @intCast(g.content_left_px)))), boxes[0].x);
+    try testing.expectEqual(@as(f32, 2), boxes[0].border_widths[0]);
+    try testing.expectEqual(@as(u32, 0), boxes[0].fill_color0 >> 24); // 채움 없음
+    // 포커스와 무관 — VS Code 의 테두리 규칙에는 포커스 조건이 없다
+    fx.session.window_focused = false;
+    try testing.expectEqual(@as(usize, 1), (try boxedQuads(fx.session, term, .line_highlight, &got)).len);
+    fx.session.window_focused = true;
+    // 선택이 있으면 본문 상자는 없다
+    term.rt.editor_selection = .{ .anchor_start = line2.start, .anchor_end = line2.start, .focus = line2.start + 3 };
+    try testing.expectEqual(@as(usize, 0), (try boxedQuads(fx.session, term, .line_highlight, &got)).len);
+    // gutter — 선택과 무관, 원점은 pane 왼쪽
+    fx.session.loaded_config.config.editor.render_line_highlight = .gutter;
+    const gb = try boxedQuads(fx.session, term, .line_highlight, &got);
+    try testing.expectEqual(@as(usize, 1), gb.len);
+    try testing.expectEqual(@as(f32, @floatFromInt(g.body_x)), gb[0].x);
+    fx.session.loaded_config.config.editor.render_line_highlight = .none;
+    try testing.expectEqual(@as(usize, 0), (try boxedQuads(fx.session, term, .line_highlight, &got)).len);
+}
+
+test "LHP2 활성 줄 번호 — primary caret 줄의 번호만 본문 글자색, 접혀도 보이는 줄 축으로 옮긴다 (제품 경계, §5.1b ⑤)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try openBracketFixture(&fx, allocator, "n.txt", "a\nb\nc\nd\ne\n");
+    const line3 = term.rt.editor_doc.?.file.lines.line(3).?;
+    term.rt.editor_selection = editor_selection.Selection.at(line3.start);
+    const tk = fx.session.buildChromeTokens();
+    const leaf = activeLeafRectForTest(fx.session) orelse return error.NoLeaf;
+    var d = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+    defer d.dl.deinit(allocator);
+    const content_col: u16 = @intCast(term.rt.editor_hit_geom.content_left_px / term.rt.editor_hit_geom.cell_w_px);
+    var active_rows: usize = 0;
+    var active_row: u16 = 0;
+    for (d.dl.cells) |c| {
+        if (c.col >= content_col or c.codepoint < '0' or c.codepoint > '9') continue;
+        const rgb = switch (c.style.foreground) {
+            .rgb => |v| v,
+            else => continue,
+        };
+        if (std.meta.eql(rgb, tk.get(chrome_editor.gutter.active_line_number_role)) and !std.meta.eql(rgb, tk.get(chrome_editor.gutter.line_number_role))) {
+            active_rows += 1;
+            active_row = c.row;
+        }
+    }
+    try testing.expectEqual(@as(usize, 1), active_rows); // 번호 한 자리(4)
+    try testing.expectEqual(@as(u16, 3), active_row);
 }

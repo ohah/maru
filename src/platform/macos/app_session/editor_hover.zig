@@ -306,6 +306,8 @@ pub fn pointerOffset(term: *Term, x_px: f64, y_px: f64) ?usize {
     const left: f64 = @floatFromInt(geom.body_x);
     if (x_px < left) return null;
     // **글자 아래**(`.cluster`)다 — 클릭의 중점 반올림(caret)을 쓰면 셀 오른쪽 절반에서 다음 글자가 잡힌다(HOVB1 실측: 1 → 2).
+    // 고정 행 위에서는 안 뜬다(§4.1i) — 히트 스냅숏은 그 아래 가려진 본문 줄을 가리킨다.
+    if (editor_ops.sticky_client.rowAt(term, y_px) != null) return null;
     const off = editor_ops.hitTestBodyMode(.cluster, term, x_px, y_px) orelse return null;
     const doc = term.rt.editor_doc orelse return null;
     if (!charAt(doc.file.content, off)) return null;

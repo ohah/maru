@@ -53,6 +53,8 @@ pub const Side = struct {
     search_marks: ?[]const []const frame.Mark = null,
     /// 같은 낱말 강조(§5.1a) — 단일 편집기만 채운다(비교 뷰는 축이 다르다).
     occurrence_marks: ?[]const []const frame.Mark = null,
+    /// sticky scroll(§4.1i) — 단일 편집기만(비교 뷰는 빈 목록).
+    sticky: []const frame.StickyLine = &.{},
     /// 진단(§5.4) — 줄마다의 밑줄 조각·gutter severity·마커 줄. 단일 편집기만 채운다(비교 뷰의 열은 문서가 아니다).
     diag_marks: ?[]const []const frame.diagnostic.Mark = null,
     diag_markers: ?[]const ?frame.diagnostic.Level = null,
@@ -308,6 +310,7 @@ pub fn buildSide(
         .selection_marks = side.selection_marks,
         .search_marks = side.search_marks,
         .occurrence_marks = side.occurrence_marks,
+        .sticky = side.sticky,
         .diag_marks = side.diag_marks,
         .diag_markers = side.diag_markers,
         .diag_lines = side.diag_lines,

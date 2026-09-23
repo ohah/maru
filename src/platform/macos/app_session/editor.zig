@@ -98,6 +98,7 @@ pub const inlay_client = @import("editor_inlay.zig");
 pub const symbols_client = @import("editor_symbols.zig");
 pub const highlight_client = @import("editor_highlight.zig");
 pub const smart_select_client = @import("editor_smart_select.zig");
+pub const sticky_client = @import("editor_sticky.zig");
 /// 접힘 범위를 낸 층(§4 의 세 소스).
 pub const FoldSource = enum { indent, syntax, lsp };
 pub const workspace_edit_client = @import("editor_workspace_edit.zig");
@@ -954,6 +955,8 @@ pub fn buildPaneOps(
     minimap: ?diff_frame.MinimapSide,
     /// 진단 표(§5.4) — 단일 편집기만.
     diag: ?diagnostics.Views,
+    /// sticky scroll 머리줄(§4.1i) — 단일 편집기만(나머지는 빈 목록).
+    sticky: []const chrome_editor.frame.StickyLine,
 ) PaneFrame {
     // **내용은 뷰 사각에서 한 겹 들어간다**(`frame.content_inset_px`) — 배경은 그대로 전체를 덮는다.
     // 활성 pane 포커스 테두리가 셀 **위** 층에 그려져서, 여백이 없으면 첫 글자 행과 스크롤바를 덮는다
@@ -961,7 +964,7 @@ pub fn buildPaneOps(
     const inset: i32 = @intCast(chrome_editor.frame.content_inset_px);
     const inner: chrome_draw.Rect = .{ .x = 0, .y = 0, .w = rect.w -| chrome_editor.frame.content_inset_px * 2, .h = rect.h -| chrome_editor.frame.content_inset_px * 2 };
     const w = diff_frame.buildSide(
-        .{ .lines = lines, .first_col = first_col, .numbers = numbers, .total_lines = total_lines, .folds = folds, .content_max_cols = content_max_cols, .row_cache = row_cache, .selection_marks = selection_marks, .occurrence_marks = occurrence_marks, .search_marks = search_marks, .search_current = search_current, .search_marker_lines = search_marker_lines, .search_marker_current = search_marker_current, .line_colors = line_colors, .line_seeks = line_seeks, .line_inlays = line_inlays, .carets = carets, .widgets = widgets, .bands = bands, .minimap = minimap, .diag_marks = if (diag) |d| d.marks else null, .diag_markers = if (diag) |d| d.markers else null, .diag_lines = if (diag) |d| d.lines else &.{} },
+        .{ .lines = lines, .first_col = first_col, .numbers = numbers, .total_lines = total_lines, .folds = folds, .content_max_cols = content_max_cols, .row_cache = row_cache, .selection_marks = selection_marks, .occurrence_marks = occurrence_marks, .search_marks = search_marks, .search_current = search_current, .search_marker_lines = search_marker_lines, .search_marker_current = search_marker_current, .line_colors = line_colors, .line_seeks = line_seeks, .line_inlays = line_inlays, .carets = carets, .widgets = widgets, .bands = bands, .minimap = minimap, .diag_marks = if (diag) |d| d.marks else null, .diag_markers = if (diag) |d| d.markers else null, .diag_lines = if (diag) |d| d.lines else &.{}, .sticky = sticky },
         .{ .first_line = first_line, .first_piece = first_piece, .caret_visible = caret_visible, .caret_shape = caret_shape, .wrap = wrap, .tab_width = tab_width, .cell_w_px = cell_w_px, .cell_h_px = cell_h_px, .font_px = font_px },
         inner,
         // **배경만 뒤로 물린다.** 내용 op이 (0,0)에서 시작해야 셀 격자 양자화(`buildTextDrawList`가
@@ -1863,7 +1866,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     const pf = if (diff_state_opt) |st| blk: {
         // **상태 줄은 가로로 안 민다** — 한 줄짜리 문구라 밀면 화면에서 사라진다.
         // 한 줄짜리 상태 문구다 — 캐시가 아낄 것이 없다.
-        if (st.view != .compare) break :blk buildPaneOps(lines, null, null, lines.len, term.rt.editor_first_line, 0, 0, null, null, buildSelectionMarks(self, term), null, null, null, @as([]const u32, &.{}), null, syntaxColors(self, term), &.{}, .{}, buildCaretRows(self, term), &.{}, null, self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, null, null);
+        if (st.view != .compare) break :blk buildPaneOps(lines, null, null, lines.len, term.rt.editor_first_line, 0, 0, null, null, buildSelectionMarks(self, term), null, null, null, @as([]const u32, &.{}), null, syntaxColors(self, term), &.{}, .{}, buildCaretRows(self, term), &.{}, null, self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, null, null, &.{});
         // **좌우가 세로를 공유한다**(§3.5) — 행 배열이 이미 같은 길이라 같은 인덱스가 같은 높이다.
         // 가로는 각자다(§3.5의 그 규칙은 CM6가 "양쪽 줄 길이가 달라 한쪽을 따라가면 다른 쪽이
         // 엉뚱한 곳을 본다"고 적어 둔 근거에서 왔다) — 입력이 붙을 때 열별 `first_col`이 여기 온다.
@@ -1892,7 +1895,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
                 maru.i18n.t(.diff_read_failed)
             else
                 maru.i18n.t(.diff_loading);
-            break :blk buildPaneOps(status_line[0..1], null, null, 1, 0, 0, 0, null, null, null, null, null, null, @as([]const u32, &.{}), null, &.{}, &.{}, .{}, null, &.{}, null, false, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, null, null);
+            break :blk buildPaneOps(status_line[0..1], null, null, 1, 0, 0, 0, null, null, null, null, null, null, @as([]const u32, &.{}), null, &.{}, &.{}, .{}, null, &.{}, null, false, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, null, null, &.{});
         }
         break :blk buildMergePaneOps(self, term, st, draw_lines, wrap, pane_rect, scratch);
     } else blk: {
@@ -1907,7 +1910,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
         mm_drawn = if (mm) |m| m.input.top else null;
         // **진단**(§5.4) — 트리가 있으면 목록을 다시 채우고(구문 오류), 보이는 줄 축의 세 표로 편다. 끄면 없다.
         const diag = diagnosticViews(self, term, draw_lines.len);
-        break :blk buildPaneOps(draw_lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), fc, maxColsForRender(self, term, false), row_cache, buildSelectionMarks(self, term), find_marks, buildOccurrenceMarks(self, term), find_current, marker_lines, marker_current, syntaxColors(self, term), seek_buf[0..seek_n], inlayWindow(self, term), buildCaretRows(self, term), conflictWidgets(self, term), conflictBands(term), self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, mm, diag);
+        break :blk buildPaneOps(draw_lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), fc, maxColsForRender(self, term, false), row_cache, buildSelectionMarks(self, term), find_marks, buildOccurrenceMarks(self, term), find_current, marker_lines, marker_current, syntaxColors(self, term), seek_buf[0..seek_n], inlayWindow(self, term), buildCaretRows(self, term), conflictWidgets(self, term), conflictBands(term), self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, mm, diag, sticky_client.compute(self, term, pane_rect, wrap));
     };
     if (pf.ops_len == 0) return null;
     // **배치를 싣는다**(병합 모드가 아니면 지운다 — 옛 배치가 남으면 평범한 편집기에서 클릭이
@@ -2528,7 +2531,7 @@ fn scrollPieces(self: *AppSession, term: *Term, delta_rows: i32, total_lines: us
 
 /// 그 논리 줄이 지금 폭에서 몇 조각인가(최소 1). 렌더와 **같은 함수**를 부른다 — 여기서 따로 세면
 /// 화면과 스크롤이 갈린다.
-fn piecesOfLine(term: *Term, line: usize, content_cols: u16) u32 {
+pub fn piecesOfLine(term: *Term, line: usize, content_cols: u16) u32 {
     const lines = editorLines(term);
     if (line >= lines.len or content_cols == 0) return 1;
     var scratch: [chrome_editor.content.count_scratch_bytes]u8 = undefined; // 렌더와 같은 크기
@@ -4715,6 +4718,8 @@ fn visualRowColAt(term: *Term, x_px: f64, y_px: f64) ?struct { row: u32, col: u3
 pub fn beginBodySelection(self: *AppSession, pane: *Pane, x_px: f64, y_px: f64, mods: i32) bool {
     const term = pane.activeTerm();
     if (term.kind != .editor) return false;
+    // **고정 행은 본문이 아니다**(§4.1i) — 그 행을 누르면 그 머리줄로 간다. 히트 스냅숏은 본문 행 그대로라 여기서 먼저 가른다.
+    if (sticky_client.click(self, term, x_px, y_px)) return true;
     const off = hitTestBody(term, x_px, y_px) orelse return false;
     logHitSnapshotDiag(self, term, y_px, off);
     // 클릭 한 번이 멀티커서를 정리한다 — 안 그러면 사용자가 커서를 없앨 방법이 없다(§9.1).
@@ -5402,6 +5407,8 @@ pub fn selectWordOrLineAt(self: *AppSession, pane: *Pane, whole_line: bool, x_px
     // 막대 위 더블클릭이 **진행 중인 막대 드래그를 취소하고** 본문 선택을 연다(실측). 결정표의
     // *"막대 위 클릭은 상위가 먼저 가져간다"*가 kind에 따라 갈리면 그것은 규칙이 아니다.
     if (pointOnEditorScrollbar(term, x_px, y_px)) return false;
+    // 고정 행의 더블·세 번 클릭도 그 머리줄로 간다(가려진 본문 줄의 낱말을 고르지 않는다 — §4.1i).
+    if (sticky_client.click(self, term, x_px, y_px)) return true;
     const off = hitTestBody(term, x_px, y_px) orelse return false;
     const doc = term.rt.editor_doc orelse return false;
 
@@ -9641,6 +9648,7 @@ pub fn releaseEditorTerm(self: *AppSession, term: *Term) void {
     term.rt.editor_symbols.deinit(self.allocator); // 심볼 2층도(§8.2o)
     term.rt.editor_highlight.deinit(self.allocator); // 같은 낱말 강조도(§8.2p)
     term.rt.editor_smart_select.deinit(self.allocator); // 선택 확장 사슬도(§8.2q)
+    term.rt.editor_sticky.deinit(self.allocator); // sticky scroll 도(§4.1i)
     term.rt.editor_fold_lsp = .{}; // 3층 대기 상태도 문서와 함께(`editor_lsp_version = 0` 과 같은 자리) — 두 호출자 모두 곧 Term 을 부수므로 관측되지 않는다(적대적 C8: 등가), 규율로 둔다
     if (term.rt.editor_lines.len > 0) self.allocator.free(term.rt.editor_lines);
     term.rt.editor_lines = &.{};
@@ -14063,6 +14071,161 @@ test "SSEL21 비교 뷰에서는 팔레트로 불러도 선택을 안 바꾼다 
     try testing.expectEqual(@as(usize, 2), term.rt.editor_selection.?.start());
     try testing.expectEqual(@as(usize, 2), term.rt.editor_selection.?.end());
     try testing.expectEqual(@as(u64, 0), term.rt.editor_smart_select.applied);
+}
+
+/// 판정자용: 그 pane 을 한 번 그려 **행 `row` 의 글자**(gutter 번호 포함, 열 순서)를 돌려준다 — 실제로 그려진 셀을 읽는다.
+fn paneRowText(self: *AppSession, term: *Term, row: u16, buf: []u8) ![]const u8 {
+    const leaf = activeLeafRectForTest(self) orelse return error.NoLeaf;
+    var d = appendPaneFrame(self, leaf, term) orelse return error.EditorPaneDidNotDraw;
+    defer d.dl.deinit(self.allocator);
+    var cps: [512]u21 = undefined;
+    var cols: [512]u16 = undefined;
+    var n: usize = 0;
+    for (d.dl.cells) |c| {
+        if (c.row != row or n >= cps.len) continue;
+        cps[n] = c.codepoint;
+        cols[n] = c.col;
+        n += 1;
+    }
+    // 열 순서로(셀 순서가 열 순서라는 보장이 없다).
+    var i: usize = 1;
+    while (i < n) : (i += 1) {
+        var j = i;
+        while (j > 0 and cols[j - 1] > cols[j]) : (j -= 1) {
+            std.mem.swap(u16, &cols[j - 1], &cols[j]);
+            std.mem.swap(u21, &cps[j - 1], &cps[j]);
+        }
+    }
+    var w: usize = 0;
+    var prev: ?u16 = null;
+    for (cps[0..n], cols[0..n]) |cp, col| {
+        if (prev) |p| {
+            var gap = col -| (p + 1);
+            while (gap > 0 and w < buf.len) : (gap -= 1) {
+                buf[w] = ' ';
+                w += 1;
+            }
+        }
+        prev = col;
+        if (w >= buf.len) break;
+        buf[w] = if (cp < 0x80) @intCast(cp) else '?';
+        w += 1;
+    }
+    return buf[0..w];
+}
+
+/// sticky 판정자 문서 — `A`(0~103) 안에 `f`(1~102), 본문 100 줄. **화면보다 길어야 한다** — 다 들어가면 스크롤 상한이 0 이라
+/// `setEditorTop` 이 프레임에서 0 으로 되돌아가, 0·1 행이 머리줄이 아니라 **본문 1·2 줄**로 같은 글자를 보여 판정자가 헛초록이었다(처음 판).
+const sticky_src = "const A = struct {\n    pub fn f() void {\n" ++ ("        _ = 1;\n" ** 100) ++ "    }\n};\n";
+
+test "STK7 sticky scroll 1층 — 스크롤하면 바깥부터 머리줄이 실제로 그려지고, caret 을 덮을 칸부터 걷히며, 고정 행을 누르면 그 줄로 가 자기 칸에 온다; 호버·⌘클릭은 고정 행에서 안 뜨고 설정으로 끈다 (제품 경계, §4.1i)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "st.zig", sticky_src);
+    fx.session.surface_initialized = true;
+    fx.session.backing_width_px = 1200;
+    fx.session.backing_height_px = 800;
+    var buf: [256]u8 = undefined;
+    _ = try paneRowText(fx.session, term, 0, &buf); // 기하를 굳힌다
+    // 맨 위가 10 번째 줄(`_ = 1;`)이고 caret 은 화면 아래쪽.
+    setEditorTop(fx.session, term, 10, "test");
+    const line20 = term.rt.editor_doc.?.file.lines.line(20).?;
+    term.rt.editor_selection = editor_selection.Selection.at(line20.start);
+    const r0 = try paneRowText(fx.session, term, 0, &buf);
+    try testing.expectEqual(@as(usize, 10), term.rt.editor_first_line); // 스크롤이 섰다(0·1 행이 본문 1·2 줄이 아니다)
+    try testing.expect(std.mem.indexOf(u8, r0, "const A = struct {") != null);
+    try testing.expect(std.mem.indexOf(u8, r0, " 1 ") != null or std.mem.startsWith(u8, std.mem.trimStart(u8, r0, " "), "1 ")); // 번호도 머리줄의 것(1)
+    var buf1: [256]u8 = undefined;
+    const r1 = try paneRowText(fx.session, term, 1, &buf1);
+    try testing.expect(std.mem.indexOf(u8, r1, "pub fn f() void {") != null);
+    var buf2: [256]u8 = undefined;
+    const r2 = try paneRowText(fx.session, term, 2, &buf2);
+    try testing.expect(std.mem.indexOf(u8, r2, "_ = 1;") != null); // 그 아래는 본문(줄 13)
+    try testing.expect(std.mem.indexOf(u8, r2, "13") != null);
+    try testing.expectEqual(@as(usize, 2), term.rt.editor_sticky.drawn_len);
+    try testing.expectEqual(sticky_client.Source.syntax, term.rt.editor_sticky.source);
+
+    // 호버·⌘클릭은 고정 행에서 안 뜬다(가려진 본문 글자를 가리키지 않는다).
+    const geom = term.rt.editor_hit_geom;
+    const x_word: f64 = @floatFromInt(@as(i64, geom.body_x) + @as(i64, geom.content_left_px) + @as(i64, geom.cell_w_px) * 8 + 1); // 8 열 — 본문 줄 12 의 `_`(9 열은 공백이라 대조군이 성립하지 않는다)
+    const y_row = struct {
+        fn at(g: anytype, r: usize) f64 {
+            return @floatFromInt(@as(i64, g.body_y) + @as(i64, g.cell_h_px) * @as(i64, @intCast(r)) + 1);
+        }
+    }.at;
+    try testing.expect(hover_client.pointerOffset(term, x_word, y_row(geom, 0)) == null);
+    try testing.expect(hover_client.pointerOffset(term, x_word, y_row(geom, 2)) != null); // 대조군 — 본문 행은 뜬다
+    try testing.expect(!definition_client.gotoDefinitionAtPointer(fx.session, term, x_word, y_row(geom, 1)));
+
+    // caret 을 덮지 않는다 — caret 이 칸 1(줄 11)에 오면 칸 1 부터 걷힌다.
+    const line11 = term.rt.editor_doc.?.file.lines.line(11).?;
+    term.rt.editor_selection = editor_selection.Selection.at(line11.start);
+    _ = try paneRowText(fx.session, term, 0, &buf);
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_sticky.drawn_len);
+    const r1b = try paneRowText(fx.session, term, 1, &buf1);
+    try testing.expect(std.mem.indexOf(u8, r1b, "pub fn f()") == null);
+
+    // 고정 행 클릭 — `pub fn f` 행(칸 1)을 누르면 그 줄·누른 열로 가고 그 줄이 행 1 에 온다(부모 아래).
+    term.rt.editor_selection = editor_selection.Selection.at(line20.start);
+    _ = try paneRowText(fx.session, term, 0, &buf);
+    try testing.expectEqual(@as(usize, 2), term.rt.editor_sticky.drawn_len);
+    const x_col8: f64 = @floatFromInt(@as(i64, geom.body_x) + @as(i64, geom.content_left_px) + @as(i64, geom.cell_w_px) * 8 + 1);
+    try testing.expect(beginBodySelection(fx.session, pane_ops.activePane(fx.session), x_col8, y_row(geom, 1), 0));
+    const line1 = term.rt.editor_doc.?.file.lines.line(1).?;
+    try testing.expectEqual(line1.start + 8, term.rt.editor_selection.?.focus); // `    pub ` 다음 — `fn` 앞
+    try testing.expect(term.rt.editor_selection.?.isEmpty());
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_first_line); // 줄 1 이 행 1 에
+
+    // 설정으로 끈다.
+    setEditorTop(fx.session, term, 10, "test");
+    term.rt.editor_selection = editor_selection.Selection.at(line20.start);
+    fx.session.loaded_config.config.editor.sticky_scroll = false;
+    defer fx.session.loaded_config.config.editor.sticky_scroll = true;
+    const r0off = try paneRowText(fx.session, term, 0, &buf);
+    try testing.expect(std.mem.indexOf(u8, r0off, "const A") == null);
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_sticky.drawn_len);
+}
+
+test "STK8 sticky scroll — 심볼이 없으면 접힘 범위(들여쓰기)로 대신한다 (제품 경계, §4.1i)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "st.txt", "section:\n" ++ ("  item\n" ** 100) ++ "end\n"); // 화면보다 길게(STK7 과 같은 이유)
+    fx.session.surface_initialized = true;
+    fx.session.backing_width_px = 1200;
+    fx.session.backing_height_px = 800;
+    var buf: [256]u8 = undefined;
+    _ = try paneRowText(fx.session, term, 0, &buf);
+    try testing.expect(term.rt.editor_fold_ranges.len > 0); // 들여쓰기 접힘이 섰다(픽스처가 뜻을 가진다)
+    setEditorTop(fx.session, term, 5, "test");
+    term.rt.editor_selection = editor_selection.Selection.at(term.rt.editor_doc.?.file.lines.line(20).?.start);
+    const r0 = try paneRowText(fx.session, term, 0, &buf);
+    try testing.expect(std.mem.indexOf(u8, r0, "section:") != null);
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_sticky.drawn_len); // 실제로 그렸다(본문 첫 줄이 우연히 같은 글자가 아니다)
+    try testing.expectEqual(@as(usize, 5), term.rt.editor_first_line);
+    try testing.expectEqual(sticky_client.Source.fold, term.rt.editor_sticky.source);
+}
+
+test "STK9 sticky scroll — 서버 심볼(2층)이 오면 그것이 출처다(1층보다 먼저) (제품 경계, §4.1i)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var f = (try SmtFixture.open(allocator, "sk.c", "fn alpha(int a) {\n  return a;\n}\nfn beta(int b) {\n  return b;\n}\n")) orelse return error.SkipZigTest;
+    defer f.close(allocator);
+    try testing.expect(f.ready());
+    // 서버 심볼이 들 때까지 프레임을 돌린다(심볼 2층은 프레임 tick 이 묻는다).
+    var buf: [256]u8 = undefined;
+    var tries: usize = 0;
+    while (tries < 300 and symbols_client.list(f.term) == null) : (tries += 1) {
+        _ = try paneRowText(f.fx.session, f.term, 0, &buf);
+        lsp_client.pump(f.fx.session);
+        _ = usleep(10_000);
+    }
+    try testing.expect(symbols_client.list(f.term) != null);
+    _ = try paneRowText(f.fx.session, f.term, 0, &buf);
+    try testing.expectEqual(sticky_client.Source.lsp, f.term.rt.editor_sticky.source);
 }
 
 test "OCH4 같은 낱말 강조 — provider 가 없으면 묻지 않고, 빈 응답·오류는 강조 없음이며, 낡은 낱말로 온 답은 버린다 (제품 경계, §8.2p)" {

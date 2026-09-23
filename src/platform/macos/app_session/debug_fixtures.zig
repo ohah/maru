@@ -1294,6 +1294,22 @@ pub fn applyForcedSymbolPicker(self: *AppSession) void {
     self.dispatchAppAction(.toggle_symbol_picker);
 }
 
+/// MARU_FORCE_SMART_SELECT=<N> — caret 자리에서 선택 확장을 N 번(캡처 전용, tooling §8.2q). 키(`⌃⇧⌘→`)는 헤드리스로 못 누르므로 같은 명령을 부른다.
+/// LSP 가 켜져 있으면 **서버가 그 문서를 연 뒤에** 시작한다(그 전엔 1층만 선다 — 서버 축을 찍으려는 캡처가 1층을 찍는다). 꺼져 있으면 곧바로(1층을
+/// 찍는 자리). 첫 걸음이 나간 순간 caret 훅의 래치를 세운다 — 안 그러면 다음 프레임의 caret 훅이 선택을 caret 으로 되돌린다(정의로 이동 훅과 같은 이유).
+pub fn applyForcedSmartSelect(self: *AppSession) void {
+    const raw = std.c.getenv("MARU_FORCE_SMART_SELECT") orelse return;
+    const want = std.fmt.parseInt(u64, std.mem.span(raw), 10) catch return;
+    const term = pane_ops.activePane(self).activeTerm();
+    if (term.kind != .editor) return;
+    const st = &term.rt.editor_smart_select;
+    if (st.applied >= want or st.waiting) return;
+    if (self.chrome_host.notice.open) self.chrome_host.notice.dismiss();
+    if (self.loaded_config.config.lsp.enabled and editor_ops.lsp_client.readyClientFor(self, term) == null) return;
+    self.debug_diff_caret_keys_done = true;
+    _ = editor_ops.smart_select_client.run(self, term, true);
+}
+
 /// MARU_FORCE_EDITOR_GOTO_DEF=1 — caret 자리에서 `goto_definition` 을 부른다(캡처 전용, tooling §8.2c). 서버가 뜨기 전에는 요청이 안 나가므로
 /// 매 프레임 되풀이하고, 한 번 움직이거나 알림을 냈으면 손을 뗀다. 작업 공간 복원 알림은 먼저 내린다(hover 훅과 같은 이유).
 pub fn applyForcedEditorGotoDef(self: *AppSession) void {

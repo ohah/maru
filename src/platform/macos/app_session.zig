@@ -20009,6 +20009,7 @@ pub const AppSession = struct {
         debug_fixtures.applyForcedEditorHover(self); // 캡처 전용: 호버는 포인터 정지로만 뜬다(§8.2b)
         debug_fixtures.applyForcedEditorGotoDef(self); // 캡처 전용: 정의로 이동(§8.2c)
         debug_fixtures.applyForcedSymbolPicker(self); // 캡처 전용: 심볼 피커(§7.5 · §8.2o)
+        debug_fixtures.applyForcedSmartSelect(self); // 캡처 전용: 선택 확장(§8.2q)
         debug_fixtures.applyForcedReferences(self); // 캡처 전용: 참조 피커(§8.2l)
         debug_fixtures.applyForcedParamHints(self); // 캡처 전용: 시그니처 힌트(§8.2d)
         debug_fixtures.applyForcedFormat(self); // 캡처 전용: 문서 포맷(§8.2e)

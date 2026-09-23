@@ -261,7 +261,7 @@ WKWebView(WebKit)는 시스템 프레임워크라 의존성이 없지만 Chromiu
 | tearing 안전의 근거 | 멀티버퍼 | **콜백 안에서 복사한다는 것** + 우리 버퍼의 생산·소비 순서 규약 |
 | 프로세스 경계 | IOSurface global id | **`IOSurfaceLookup(global id)` 는 다른 프로세스에서 NULL**(실측). `IOSurfaceCreateMachPort` → mach port 로 넘겨 `IOSurfaceLookupFromMachPort` 해야 건너간다(실측, PoC 는 `bootstrap_register`/`bootstrap_look_up`) |
 
-**제품 설계(미구현)**: sidecar 가 **자기 소유 IOSurface 링**(N 슬롯)을 만들어 **시작 때 한 번** mach port 로 넘기고, 이후에는 「슬롯 k 준비됨」 신호만 보낸다. maru 는 그 슬롯을 샘플링한 GPU 작업이 끝나면 **반납**을 알리고, sidecar 는 반납된 슬롯에만 쓴다. PoC 는 소유 surface **하나**에 콜백 안에서 복사할 뿐이라 계약 위반은 고쳤지만 **tearing 은 여전히 가능하다**(maru 가 읽는 중에 다음 프레임이 쓸 수 있다). **port 를 넘기는 길 — PoC 방식은 보안 구멍이다(2 차 적대적 검증).** PoC 는 sidecar 가 bootstrap 에 이름을 등록하고 maru 가 그 이름으로 찾는다. 그러면 **이름만 알면 같은 사용자의 아무 프로세스나** 브라우저 픽셀을 읽는다 — 화면 기록 권한(TCC) 없이. 실측: 이 절의 독립 검증기(`verify.c`)가 maru 와 무관한 프로세스로 정확히 그렇게 읽었다. 그렇다고 「spawn 때 상속한 socketpair 로 넘긴다」(이 절 초안)도 **안 된다** — Unix 소켓(`SCM_RIGHTS`)은 fd 만 나르고 mach port 는 못 나른다. 제품은 **방향을 뒤집는다**: maru 가 받는 쪽 port 를 열고, 들어온 mach 메시지의 audit token(보낸 pid)이 **자기가 spawn 한 sidecar** 인지 확인한 뒤에만 IOSurface port 를 받는다. 받는 쪽 port 를 sidecar 에 알리는 경로(bootstrap 이름 rendezvous 등)와 그 이름이 노출돼도 되는지는 spike 에서 확정한다.
+**제품 설계(미구현)**: sidecar 가 **자기 소유 IOSurface 링**(N 슬롯)을 만들어 **시작 때 한 번** mach port 로 넘기고, 이후에는 「슬롯 k 준비됨」 신호만 보낸다. maru 는 그 슬롯을 샘플링한 GPU 작업이 끝나면 **반납**을 알리고, sidecar 는 반납된 슬롯에만 쓴다. PoC 는 소유 surface **하나**에 콜백 안에서 복사할 뿐이라 계약 위반은 고쳤지만 **tearing 은 여전히 가능하다**(maru 가 읽는 중에 다음 프레임이 쓸 수 있다). **port 를 넘기는 길 — PoC 방식은 보안 구멍이다(2 차 적대적 검증).** PoC 는 sidecar 가 bootstrap 에 이름을 등록하고 maru 가 그 이름으로 찾는다. 그러면 **이름만 알면 같은 사용자의 아무 프로세스나** 브라우저 픽셀을 읽는다 — 화면 기록 권한(TCC) 없이. 실측: 이 절의 독립 검증기(`verify.c`)가 maru 와 무관한 프로세스로 정확히 그렇게 읽었다. 또 **등록한 프로세스가 죽어도 이름이 남아 옛 IOSurface 를 붙잡는다** — 같은 이름으로 다시 띄운 sidecar 는 등록이 조용히 실패하고, 읽는 쪽은 죽은 프로세스의 마지막 화면을 계속 받는다(실측: 이 때문에 ⑧ 조사의 초기 덤프 판정이 전부 무효였다). 그렇다고 「spawn 때 상속한 socketpair 로 넘긴다」(이 절 초안)도 **안 된다** — Unix 소켓(`SCM_RIGHTS`)은 fd 만 나르고 mach port 는 못 나른다. 제품은 **방향을 뒤집는다**: maru 가 받는 쪽 port 를 열고, 들어온 mach 메시지의 audit token(보낸 pid)이 **자기가 spawn 한 sidecar** 인지 확인한 뒤에만 IOSurface port 를 받는다. 받는 쪽 port 를 sidecar 에 알리는 경로(bootstrap 이름 rendezvous 등)와 그 이름이 노출돼도 되는지는 spike 에서 확정한다.
 
 #### 입력 주입 — 실측 (PoC, 2026-09-23)
 
@@ -408,7 +408,7 @@ WKWebView 는 **OSR 을 제공하지 않는다**. macOS SDK 의 WebKit 공개 �
 
 #### 남은 미해결 (도입 전 필수) — 막는 것은 없다
 
-**불가능하다고 판정된 항목은 없다.** 물리적으로 넘을 수 없는 것은 「기계를 건너 GPU 메모리를 공유하는 것」 하나이고, 그것은 ②의 결정으로 피한다. 나머지는 연결 작업, 선례가 있는 공사, 결정, 품질 손실을 감수하는 근사 중 하나다 — **단 ⑧ 은 원인을 몰라 아직 분류할 수 없다**(2 차 적대적 검증에서 실측으로 드러났다). 아래 분류는 **적대적으로 한 번 공격한 뒤** 남긴 것이다 — 처음 분류에서 「연결만」이라 했던 ⑥, 「손실은 핀치뿐」이라 했던 ④⑴, 「원격은 결정 하나로 사라진다」고 했던 ②가 과장이었고, ⑧⑨는 목록에서 빠져 있었다.
+**불가능하다고 판정된 항목은 없다.** 물리적으로 넘을 수 없는 것은 「기계를 건너 GPU 메모리를 공유하는 것」 하나이고, 그것은 ②의 결정으로 피한다. 나머지는 연결 작업, 선례가 있는 공사, 결정, 품질 손실을 감수하는 근사 중 하나다 — ⑧ 은 원인을 찾은 **알려진 문제**(CEF 결함)로 두고 지금은 고치지 않는다. 아래 분류는 **적대적으로 한 번 공격한 뒤** 남긴 것이다 — 처음 분류에서 「연결만」이라 했던 ⑥, 「손실은 핀치뿐」이라 했던 ④⑴, 「원격은 결정 하나로 사라진다」고 했던 ②가 과장이었고, ⑧⑨는 목록에서 빠져 있었다.
 
 | # | 항목 | 부류 | 크기 |
 |---|---|---|---|
@@ -419,7 +419,7 @@ WKWebView 는 **OSR 을 제공하지 않는다**. macOS SDK 의 WebKit 공개 �
 | ⑤ | 접근성(VoiceOver) | 공사 | **대** |
 | ⑥ | 크기 전파 | ⑦과 묶인 공사 | 중 |
 | ⑦ | 소유 버퍼 링과 반납 | 공사 | 중 |
-| ⑧ | 팝업 위젯(`<select>` 가 안 열림) | **원인 미확인** → spike | 미정 |
+| ⑧ | 기본 `<select>` 가 안 열림 | **알려진 문제**(CEF 결함) — 보류 | 우회 소 / 근본 중 |
 | ⑨ | JS 대화상자·파일 선택 | 실측 후 결정 | 소 |
 
 1. **`.app` 번들 배선** — 비-번들에서는 떴지만 번들 layout 에서는 렌더러가 안 떴다(함정 6). CEF 는 macOS 번들에서 helper 앱을 정해진 이름으로 요구한다. suji `bundle_macos.zig` 가 `{name} Helper`·`Helper (GPU)`·`Helper (Renderer)`·`Helper (Plugin)` 네 번들을 만들고 helper 바이너리를 메인 바이너리의 **hardlink** 로 둔다(codesign 이 symlink 는 거부한다) — 확인한 선례다. sidecar 가 `.app` 이어야 하는지는 여전히 설계 선택이다.
@@ -436,7 +436,12 @@ WKWebView 는 **OSR 을 제공하지 않는다**. macOS SDK 의 WebKit 공개 �
 5. **접근성(VoiceOver) — 가장 큰 공사.** 옛 서술 「CDP `getFullAXTree` 로 온다, 함께 풀린다」는 **에이전트가 읽는 트리**에만 맞다([control-plane-browser-session.md] §9.5.4 의 우회는 이 축에서 풀린다). **스크린리더에는 반대다** — WKWebView 는 접근성을 공짜로 주지만 OSR 픽셀에는 접근성 정보가 없다. 헤더(`set_accessibility_state`)가 명시한다: 창 없는 브라우저는 접근성이 **트리만(TreeOnly)** 켜지고 **플랫폼 접근성 객체를 만들지 않으며**, 클라이언트가 `on_accessibility_tree_change`·`on_accessibility_location_change` 로 직접 만들 수 있다. 즉 Chromium 접근성 트리를 받아 **NSAccessibility 요소 계층을 우리가 지어 붙여야** 한다. 헤더는 클라이언트가 스크린리더를 감지해 이 함수를 부르라고 하고, macOS 의 감지 예로 `AXEnhancedUserStructure` 속성을 든다(그 예는 창 있는 모드 문단에 있다). 트리 계산은 비용이 들므로 VoiceOver 가 켜졌을 때만 켠다.
 6. **크기 전파 — ⑦과 묶인다.** pane 크기가 바뀌면 `was_resized()`, 레티나 배율이 바뀌면 `notify_screen_info_changed()` 를 부르는 것 자체는 한 줄이다. 그러나 ⑦의 **소유 링은 view 크기에 묶여** 있어 크기가 바뀌면 링을 다시 만들어 다시 공유해야 하고, 드래그 리사이즈 중에는 그것이 초당 수십 번이 된다. 링을 넉넉한 크기로 잡고 부분 사각형만 쓰거나, 세대(generation)를 붙여 재할당을 늦추고 그동안은 옛 프레임을 늘여 보이는 방식(§3 의 async resize jitter 와 같은 자리)이 필요하다. 실험 배선은 이 경로가 없어 split 뒤 이미지가 옛 크기로 **잘려** 보였다(뷰포트 crop 덕에 옆 pane 은 안 덮었다).
 7. **소유 버퍼 링과 반납** — 위 「버퍼 소유권」. PoC 는 단일 버퍼라 tearing 이 가능하다. 3 슬롯이면 되지만 **GPU 완료 시점**을 지켜야 한다 — sidecar 는 blit 이 GPU 에서 끝난 뒤에 「준비」를 보내고, maru 는 그 슬롯을 샘플링한 command buffer 가 **완료된 뒤**(`addCompletedHandler`)에 「반납」을 보낸다. 인코딩 시점에 반납하면 GPU 가 아직 읽는 슬롯을 덮는다.
-8. **팝업 위젯 — `<select>` 가 안 열린다(실측, 목록에서 빠져 있었다)** — 헤더 계약상 창 없는 모드의 팝업은 본 화면과 따로 온다(`on_popup_show`·`on_popup_size` 로 위치, `PET_POPUP` 타입 paint 로 픽셀). 그래서 처음엔 「합성 안 하면 안 보인다」로 적었는데, **실측은 더 나빴다**: 페이지에 `<select>` 를 두고 클릭·간격 둔 클릭·Space·Alt+↓ 를 넣었더니 이벤트는 페이지까지 갔지만(`mousedown`·`keydown` 도달) **`on_popup_show` 도 `PET_POPUP` 프레임도 오지 않았고 드롭다운이 열리지 않았다.** 네이티브 메뉴가 떴다면 sidecar 메인 스레드가 메뉴 추적에 묶여 프레임이 멈췄을 텐데 프레임은 계속 나왔다. **원인 미확인**이고 도입 전에 풀어야 할 기능 공백이다. 또 PoC 는 paint 타입을 가르지 않고 모든 가속 프레임을 본 화면 버퍼로 복사하므로, 팝업 프레임이 오기 시작하면 **본 화면을 덮어쓴다** — 타입별 버퍼가 필요하다. 팝업 안 휠 스크롤에는 `get_screen_point` 구현도 필요하다(휠 API 헤더 주석).
+8. **기본 `<select>` 가 안 열린다 — 알려진 문제(CEF 결함, 보류)** — 클릭·Space·Alt+↓·`showPicker()` 모두 드롭다운이 안 뜬다(실측, GPU·CPU 그리기 모두). 원인은 소스로 확인했다:
+   - macOS Chromium 의 `<select>` 는 브라우저가 띄우는 **네이티브 NSMenu**(external popup)와 Chromium 이 그리는 **내부 팝업** 둘 중 하나로 열린다. 창 없는 모드에는 NSMenu 를 붙일 창이 없어서, CEF 는 브라우저를 만들 때 renderer 에서 external popup 을 끈다(`chrome_content_renderer_client_cef.cc` 의 `SetUseExternalPopupMenus(web_view, !config.is_windowless)`).
+   - 그런데 Chromium 은 웹 설정을 적용할 때마다 그 값을 `should_disable_external_popups` 로 **덮어쓰고**(`web_view_impl.cc` 의 `ApplyWebPreferences`), 그 설정은 `WebContents::ForbidExternalPopupMenus()` 를 불러야만 켜진다(`web_contents_impl.cc` 의 `ComputeWebPreferences`). **CEF 는 146 도 master 도 이 함수를 부르지 않는다**(코드 검색 0 건 — 같은 검색으로 `SetUseExternalPopupMenus` 는 잡힌다). 그래서 끈 값이 되돌아가고 네이티브 경로를 탔다가 아무것도 안 뜬다.
+   - 실측 근거: select 클릭 뒤에만 Blink 가 external popup 을 띄울 때 보내는 **합성 mouseup** 이 페이지에 찍힌다(`external_popup_menu.cc` 의 macOS 분기). 버튼 클릭 뒤에는 없다. `on_popup_show`·`PET_POPUP` 프레임은 0 건이다.
+   - **우회(확인됨)**: `appearance: base-select` 인 select 는 목록을 페이지 안에 그리므로 열리고 항목 선택(`change`)까지 된다. 모든 페이지에 주입하면 당장 쓸 수 있지만 사이트가 의도한 select 모양이 바뀐다.
+   - **근본(미검증)**: 창 없는 브라우저를 만들 때 `ForbidExternalPopupMenus()` 를 불러 브라우저 수명 동안 쥐는 CEF 수정 — CEF 자체 빌드나 업스트림 반영이 필요하다. 고쳐지면 팝업이 `on_popup_show`·`PET_POPUP` 으로 오므로 본 화면 위 합성이 따라온다(팝업 안 휠 스크롤에는 `get_screen_point` 도 필요 — 휠 API 헤더 주석). PoC 는 이제 팝업 프레임을 본 화면 버퍼에 쓰지 않는다.
 9. **JS 대화상자·파일 선택(목록에서 빠져 있었다)** — `alert`/`confirm` 과 `<input type=file>` 은 CEF 기본 구현이 있다(`on_jsdialog` 가 0 을 돌려주면 기본 대화상자). 창 없는 모드에서 기본 구현이 어디에 어떻게 뜨는지는 **실측 전**이다. maru chrome 모달로 받는 쪽이 모달 게이트(위 「호스트가 라우팅을 든다」)와 맞는다.
 
 ### 13.2 이하 — on-screen CEF 전제의 옛 서술 (보존)

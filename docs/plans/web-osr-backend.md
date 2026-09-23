@@ -70,12 +70,27 @@ sidecar 는 maru 앱 프로세스마다 **하나**다. CEF 는 `root_cache_path`
 
 ### C2. 제어 채널
 
-- spawn 때 상속한 socketpair 하나, 길이 접두 프레임. control plane 공개 표면과 분리한다.
-- sidecar 는 이 채널을 **그리기 콜백과 독립**으로 읽는다(UI 스레드 fd 감시나 `cef_post_delayed_task`). PoC 는 그리기
-  콜백에서만 읽어서 숨긴 탭에 「다시 보여라」 명령조차 못 전달했다(§13.1 「남은 미해결」 3).
-- 브라우저 식별자는 maru 의 web Term surface id 로 한다(sidecar 안의 CEF browser id 와 매핑).
+**Mermaid helper 선례를 따른다(사용자 결정 2026-09-24, W1 착수 전 공격 #4)** — 계획 초안의 socketpair 대신:
+
+- maru 가 sidecar 를 spawn 하고 그 **stdin 으로 명령**, **stdout 으로 알림**을 받는다. frame 모양·상한·방향은
+  순수 Zig codec [`src/session/web_sidecar_protocol.zig`](../../src/session/web_sidecar_protocol.zig) 하나가
+  소유한다(길이 접두 + `MWEB` + 버전 + tag, 빅엔디언, 고정 저장소 스트리밍 decoder). CEF 없이 일반 CI 에서 단위
+  시험이 돈다(W1a).
+- 첫 frame 은 maru 의 `hello`(instance·nonce), sidecar 는 같은 값을 `hello_ack` 로 돌려준다 — 「내가 띄운 그
+  sidecar 인가」. maru 와 sidecar 는 따로 설치될 수 있어(D8) 버전이 다르면 첫 frame 에서 `UnsupportedVersion` 으로
+  드러난다 — maru 는 「sidecar 버전 불일치」로 보인다.
+- tag 0~31 은 maru → sidecar, 32~ 는 sidecar → maru. 받는 쪽 decoder 는 **거꾸로 온 frame 을 거절**한다. maru 쪽은
+  sidecar 가 보낸 바이트를 공격 입력으로 다룬다(sidecar 는 신뢰할 수 없는 웹을 띄우는 프로세스 트리의 뿌리다).
+  decode 오류가 한 번 나면 채널을 닫는다.
+- **stdout 보호**: sidecar 는 시작하자마자 원래 stdout 을 프로토콜 전용 fd 로 복제하고 fd 1 을 stderr 로 돌린다 —
+  Chromium·helper 가 stdout 에 무엇을 찍어도 frame 이 깨지지 않게(찍는지는 W1b 에서 잰다).
+- sidecar 는 이 채널을 **그리기 콜백과 독립**으로, **읽기 스레드**에서 읽고 명령이 올 때만 `cef_post_task` 로 UI
+  스레드에 넘긴다. 16ms 폴링은 정적 페이지 유휴에도 CPU 0.3~0.4 % 를 썼다(실측). PoC 는 그리기 콜백에서만 읽어서
+  숨긴 탭에 「다시 보여라」 명령조차 못 전달했다(§13.1 「남은 미해결」 3).
+- **stdin EOF = maru 가 사라졌다** — sidecar 는 브라우저를 모두 닫고 종료한다(고아 Chromium 방지, W1b 판정자).
+- 브라우저 식별자는 maru 의 web Term surface id(0 은 예약)로 한다(sidecar 안의 CEF browser id 와 매핑).
 - **W8 자리**: 메시지 종류는 늘릴 수 있게 둔다 — W8 이 접근성 트리·위치 변경(sidecar → maru)과 접근성 동작(누르기·포커스,
-  maru → sidecar)을 **새 메시지로 더하기만** 하면 되게 한다. W1~W7 계약을 바꾸지 않는 추가형 단계다.
+  maru → sidecar)을 **새 tag 로 더하기만** 하면 되게 한다. W1~W7 계약을 바꾸지 않는 추가형 단계다.
 
 ### C3. 픽셀 — 소유 링과 전달
 
@@ -163,9 +178,26 @@ control plane `browser.*` 게이트는 엔진 중립이라 바뀌지 않는다(�
 
 각 단계는 작은 슬라이스로 쪼개 PR 하나에 하나씩 올린다. 판정자를 먼저 세우고 구현한다.
 
+**W1 착수 전 공격(2026-09-24)** — 코드 전에 계획을 공격해 고친 것:
+
+| # | 계획 | 공격 결과 | 조치 |
+|---|---|---|---|
+| 1 | SDK 를 빌드가 가져온다 | CEF 는 `.tar.bz2` 로만 배포되고 `zig fetch` 는 bz2 를 못 푼다(`unknown file type` — gz 는 성공, 실측) | 받기 스크립트가 해시 확인 뒤 캐시에 풀고 빌드는 `-Dcef-sdk` 로 받는다(W1b) |
+| 2 | — | 런타임 의존성 기본 0 규칙 | [프로젝트 규칙](../project-rules.md) 예외 ③ 으로 기록 |
+| 3 | — | 헤더 반입은 「레퍼런스 소스 복사 금지」와 부딪힌다 | 헤더도 받은 SDK 에서 쓴다 |
+| 4 | socketpair | Mermaid helper 가 파이프 + Zig codec 선례 — 프로토콜을 CEF 없이 CI 에서 시험할 수 있고 stdin EOF 로 부모 사망을 안다 | C2 를 그 틀로(사용자 결정) |
+| 5 | 폴링 또는 fd 감시 | 16ms 폴링은 유휴에도 CPU 0.3~0.4 % | 읽기 스레드 + `cef_post_task` |
+| 6 | — | 부모가 죽었을 때 고아 Chromium 판정자가 없었다 | W1b 판정자에 추가 |
+| 7 | W1 한 덩어리 | 「PR 하나에 슬라이스 하나」 | W1a·W1b·W1c 로 나눔 |
+
+그대로 선 것(같은 날 재실측): 번들 없는 배치의 샌드박스(brew `opt/` 링크 경로 포함), mock keychain 재시작 유지,
+브라우저 N 개, 숨긴 뒤 명령 수신, 같은 프로필 두 번째 실행의 singleton(exit 24).
+
 | 단계 | 내용 | 완료 판정 |
 |---|---|---|
-| **W1** sidecar 뼈대 | `maru-web-host`·`maru-web-helper`(C1), 제어 채널(C2), 브라우저 생성·파괴·이동, 브라우저 N 개, 프로필(C7·D7) | helper 전부 `sandbox_check` 1, 숨긴 뒤에도 명령 수신, 브라우저 N 개가 따로 그려지고 입력이 대상에만, 재시작 뒤 로그인 유지 |
+| **W1a** 제어 채널 codec | C2 의 wire codec(순수 Zig, CEF 없음) | 황금 바이트·왕복·방향 거절·닫힌 필드·상한 ±1·손으로 지은 공격 frame·한 바이트 변조 전수, 변이 8 개가 모두 시험에 걸림 — **구현됨** |
+| **W1b** sidecar 뼈대 | SDK 받기 스크립트(bz2 — `zig fetch` 불가, 실측), opt-in 빌드 스텝, `maru-web-host`·`maru-web-helper`(C1), 제어 채널 배선(C2 — 읽기 스레드·stdout 보호·EOF 종료) | helper 전부 `sandbox_check` 1, maru(부모)가 죽으면 sidecar·helper 가 모두 사라짐, stdout 오염 없음 |
+| **W1c** 브라우저 | 생성·파괴·이동·크기·숨김, 브라우저 N 개, 프로필(C7·D7) | 숨긴 뒤에도 명령 수신, 브라우저 N 개가 따로 그려지고 입력이 대상에만, 재시작 뒤 로그인 유지, 같은 프로필 두 번째 실행은 `profile_in_use` |
 | **W2** 픽셀 파이프라인 | 소유 링·세대(C3), port 전달·검증, 크기 변경 | 찢어짐 0, 새 프레임 수신률, 세대 전환과 옛 프레임 유지, 제3자 거부 — 헤드리스 판정자(opt-in CI 잡, §4) |
 | **W3** maru 통합 | `.web` Term 의 OSR 백엔드(C4), 백엔드 선택 config(기본 WKWebView — D2), 보이는 Term 만, 창별 rect, 새 프레임 다시 그리기. WKWebView `browserDataStore` 영속화(D6 — 엔진 중립이라 OSR 과 독립으로 먼저 낼 수 있다) | pane 100% 채움, 보이는 빈도(애니메이션 페이지에서 CEF 빈도에 근접), 정적 페이지에서 추가 부담 0 control-plane `browser_storage` 권한이 영속 쿠키에 닿는 범위 재검토(D6 — control-plane-browser-review D4) |
 | **W4** 입력 | C5 여섯 축, IME, 편집 명령, 커서 | 앱 안 시험기(25 항목 — §13.1 「pane 안 실측」)를 opt-in smoke 로 저장소에. IME 는 진짜 키 이벤트로 |

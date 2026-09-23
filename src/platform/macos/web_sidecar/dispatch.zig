@@ -70,7 +70,7 @@ pub const Dispatcher = struct {
             }
             // ③ 상자에서 더 꺼낸다.
             const taken = inbox.take(&self.carry);
-            if (taken.overflow) return self.violation("명령이 상자 상한을 넘었다");
+            if (taken.overflow) return self.violation("command inbox overflow");
             self.carry_len = taken.len;
             if (taken.len == 0) {
                 // maru 가 사라졌다 — 알릴 곳이 없으니 조용히 끝낸다. frame 중간에서 끊겼어도 마찬가지다.
@@ -82,7 +82,7 @@ pub const Dispatcher = struct {
     fn handle(self: *Dispatcher, message: Message) Outcome {
         switch (message) {
             .shutdown => return .quit,
-            .hello => return self.violation("hello 가 두 번 왔다"),
+            .hello => return self.violation("second hello"),
             .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate => {
                 self.handler.browser_command(self.handler.context, message, self.writer);
                 return .keep_running;
@@ -110,7 +110,7 @@ pub fn rejectBrowserCommand(_: *anyopaque, message: Message, writer: *events.Wri
         else => 0,
     };
     const code: protocol.message.FailureCode = if (message == .create_browser) .browser_create_failed else .unknown_browser;
-    writer.send(.{ .failure = .{ .browser = browser, .code = code, .detail = "브라우저는 W1c 에서 붙는다" } }) catch {};
+    writer.send(.{ .failure = .{ .browser = browser, .code = code, .detail = "browsers are not implemented yet (W1c)" } }) catch {};
 }
 
 // ── 시험: 파이프 두 개로 maru 쪽을 흉내 낸다 ───────────────────────────────────────────────

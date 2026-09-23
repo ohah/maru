@@ -1583,8 +1583,45 @@ fn detectLaunchCwdIsRoot(io: std.Io) bool {
 /// 프로세스 수명 내내 고정이라 안전했던 패턴이다 — 코드 리뷰 지적). 같은 파일의 `termCwd(self, term, buf)`가
 /// 쓰는 관행을 따라 out-buffer로 두면 그 제약이 주석이 아니라 시그니처가 된다. 조회 실패면 빈 문자열이고,
 /// 그때 `hostIsLocal`은 보수적으로 원격을 택한다(§9.2).
+///
+/// **한 프레임 안에서만 재사용한다(2026-09-23).** 위 «캐시하지 않는다» 의 근거는 **프로세스 수명** 캐시가
+/// 이름이 바뀐 뒤에도 옛 값을 굳힌 것이었다 — 그 결함은 그대로 막는다. 프레임마다 도장이 바뀌면 다시
+/// 조회하므로 낡을 수 있는 폭은 한 프레임(16 ms)이고, 다음 프레임에 새 이름을 본다. 한편 «초당 2 ms 안쪽» 은
+/// 마이크로벤치 × 호출 수 추정이었는데, 실측은 달랐다: 활성 32 세션에서 사이드바가 카드마다·프레임마다
+/// 여러 번 닿아 `gethostname` 이 **앱 busy CPU 의 10 %** 였다(`sample` 귀속 — reproject 가 매 프레임 모든
+/// 카드의 줄 수를 다시 재며 `termGitBranch`→`termCwd`→`termCwdIsRemote` 를 탄다). 도장이 0 이면(tick 이
+/// 없는 판정자·CLI) 캐시가 안 켜진다 — 예전과 똑같이 매번 조회한다.
 pub fn localHostname(buf: *[std.posix.HOST_NAME_MAX]u8) []const u8 {
-    return std.posix.gethostname(buf) catch "";
+    const frame = hostname_frame_stamp;
+    if (frame != 0 and hostname_memo_frame == frame) {
+        @memcpy(buf[0..hostname_memo_len], hostname_memo[0..hostname_memo_len]);
+        return buf[0..hostname_memo_len];
+    }
+    if (builtin.is_test) hostname_queries_for_test += 1;
+    const name = if (builtin.is_test and hostname_source_for_test != null)
+        hostname_source_for_test.?(buf)
+    else
+        std.posix.gethostname(buf) catch "";
+    if (frame != 0) {
+        @memcpy(hostname_memo[0..name.len], name);
+        hostname_memo_len = name.len;
+        hostname_memo_frame = frame;
+    }
+    return name;
+}
+
+/// 프레임 도장 — `AppSession.tick` 머리에서 한 번 전진한다. 창이 여럿이면 창마다 전진하는데, 그것은
+/// 조회를 더 자주 할 뿐이라 정확성 쪽으로만 기운다.
+var hostname_frame_stamp: u64 = 0;
+var hostname_memo_frame: u64 = 0;
+var hostname_memo: [std.posix.HOST_NAME_MAX]u8 = undefined;
+var hostname_memo_len: usize = 0;
+var hostname_queries_for_test: u64 = 0;
+var hostname_source_for_test: ?*const fn (*[std.posix.HOST_NAME_MAX]u8) []const u8 = null;
+
+pub fn advanceHostnameFrame() void {
+    hostname_frame_stamp +%= 1;
+    if (hostname_frame_stamp == 0) hostname_frame_stamp = 1; // 0 은 «tick 없음» 이라 건너뛴다
 }
 
 /// 이 Term이 보고한 cwd가 **원격**인가 — 표시(폴더줄·상태바)와 안전(cwd 상속·경로 resolve·git 조회)이 공유하는
@@ -19929,6 +19966,7 @@ pub const AppSession = struct {
     }
 
     pub fn tick(self: *AppSession) !FrameSummary {
+        advanceHostnameFrame(); // 이 프레임의 hostname 은 한 번만 조회한다(`localHostname` 의 근거)
         // macOS 제품 실행은 실제 CoreText shaper/rasterizer로 frame을 만든다(fake backend
         // 아님). 그래야 summary의 glyph/atlas 통계가 실제 rasterized glyph를 반영하고, 이후
         // 제품 Metal view가 같은 RenderFrame을 그대로 그릴 수 있다. CoreText는 platform
@@ -24456,6 +24494,83 @@ const agent_hooks_off_config = "sidebar.agent-hooks = false\n";
 /// 조용히 폴백하지 않는다). 그 notice 가 오버레이 한 줄을 차지해 **keep-alive 와 무관한** test 들의
 /// 화면 단언을 밀어낸다(WP-F1 웹 검색·SB1 상태바). 그 test 들이 재려던 것을 재게 하려면 명시적으로 끈다.
 const keep_alive_off_config = "session.keep-alive-after-quit = false\n";
+
+test "HN1 hostname 은 한 프레임 안에서만 재사용하고 다음 프레임엔 바뀐 이름을 본다" {
+    // **왜**: 사이드바가 카드마다·프레임마다 `termCwdIsRemote` 에 여러 번 닿아 `gethostname` 이 활성 32 세션에서
+    // 앱 busy CPU 의 10 % 였다(2026-09-23 `sample`). 그런데 예전 **프로세스 수명** 캐시는 이름이 바뀐 뒤
+    // (Wi-Fi 전환·슬립 복귀로 `box.local` ↔ `box.lan`) 옛 값을 굳혀 **로컬 세션을 통째로 원격으로 오판**했다
+    // (사용자 보고 2026-08-13). 이 판정자는 두 쪽을 함께 고정한다 — 같은 프레임 안에서는 한 번만 조회하고,
+    // **다음 프레임에는 바뀐 이름으로 판정이 따라간다**. 뒤쪽이 없으면 수명 캐시로 되돌아가도 초록이다.
+    const Fake = struct {
+        var name: []const u8 = "box.local";
+        fn get(buf: *[std.posix.HOST_NAME_MAX]u8) []const u8 {
+            @memcpy(buf[0..name.len], name);
+            return buf[0..name.len];
+        }
+    };
+    const saved_stamp = hostname_frame_stamp;
+    const saved_memo_frame = hostname_memo_frame;
+    hostname_source_for_test = Fake.get;
+    defer {
+        hostname_source_for_test = null;
+        hostname_frame_stamp = saved_stamp;
+        hostname_memo_frame = saved_memo_frame;
+    }
+    Fake.name = "box.local";
+
+    var term: Term = .{};
+    term.kind = .terminal;
+    term.rt.observation.availability = .current;
+    try term.rt.observation.cwd.appendSlice(std.testing.allocator, "/Users/me/p");
+    defer term.rt.observation.cwd.deinit(std.testing.allocator);
+    try term.rt.observation.cwd_host.appendSlice(std.testing.allocator, "box.local");
+    defer term.rt.observation.cwd_host.deinit(std.testing.allocator);
+
+    // ① 도장 0(tick 없음) — 캐시가 꺼져 매번 조회한다(판정자·CLI 의 예전 동작).
+    hostname_frame_stamp = 0;
+    hostname_memo_frame = 0;
+    const q0 = hostname_queries_for_test;
+    try std.testing.expect(!termCwdIsRemote(&term));
+    try std.testing.expect(!termCwdIsRemote(&term));
+    try std.testing.expectEqual(q0 + 2, hostname_queries_for_test);
+
+    // ② 한 프레임 안의 여러 번은 한 번 조회다.
+    advanceHostnameFrame();
+    const q1 = hostname_queries_for_test;
+    for (0..8) |_| try std.testing.expect(!termCwdIsRemote(&term));
+    try std.testing.expectEqual(q1 + 1, hostname_queries_for_test);
+
+    // ③ 이름이 바뀌었다(`box.local` → `box.lan`). **같은 프레임**에서는 옛 값이지만(허용한 폭),
+    //    다음 프레임에는 새 이름으로 판정한다 — 보고된 authority 가 `box.local` 이니 이제 원격이다.
+    Fake.name = "box.lan";
+    try std.testing.expect(!termCwdIsRemote(&term)); // 같은 프레임 — 한 프레임만큼 늦는다
+    advanceHostnameFrame();
+    try std.testing.expect(termCwdIsRemote(&term)); // 다음 프레임 — 바뀐 이름을 봤다
+    try std.testing.expectEqual(q1 + 2, hostname_queries_for_test);
+
+    // ④ 이름이 돌아오면 다음 프레임에 로컬로 돌아온다(굳지 않는다).
+    Fake.name = "box.local";
+    advanceHostnameFrame();
+    try std.testing.expect(!termCwdIsRemote(&term));
+
+    // ⑤ **제품의 tick 이 도장을 전진시킨다.** 위 ①~④는 도장을 손으로 넘겼다 — tick 의 호출이 빠져도
+    //    초록이었다(적대적 검증: 그 돌연변이가 살아남았다). 빠지면 도장이 0 에 머물러 캐시가 영영 안 켜진다
+    //    — 틀리지는 않지만 이 최적화가 조용히 사라진다.
+    if (builtin.os.tag != .macos) return;
+    const session = try std.testing.allocator.create(AppSession);
+    defer std.testing.allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), std.testing.allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    const before_tick = hostname_frame_stamp;
+    _ = try session.tick();
+    try std.testing.expect(hostname_frame_stamp != before_tick);
+}
 
 test "원격 pane 은 로그 파일 없이도 훅 모드로 선다 — 채널이 그 증거다" {
     // 계약 §11.1: ssh 너머는 `agent_kind` 가 영영 `none` 이고 로컬 로그 파일도 없다. 그 둘로 판정하면

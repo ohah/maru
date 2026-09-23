@@ -21,12 +21,14 @@ pub const remote_dir = "$HOME/.cache/maru";
 /// 판 11 = 활동 wire 판 2(RAV7b — `head_bytes` · `resume_offset`) ·
 /// 판 12 = `activity --from`(RAV7b-3 — 이어읽기) + 활동 wire 판 3(`resumed_from`) ·
 /// 판 14 = 본문을 못 읽어도 **결말은 붙인다**(계획 §29 — 같은 파일에서 로컬과 원격이 갈리지 않게) ·
-/// 판 15 = `write`(U3 — 이름 없는 문서를 저쪽에 저장한다; `mk` 는 빈 파일만 만들었다).
-pub const version_line = "maru-remote-watch 15";
+/// 판 15 = `write`(U3 — 이름 없는 문서를 저쪽에 저장한다; `mk` 는 빈 파일만 만들었다) ·
+/// 판 16 = **저장소가 아닌 루트를 「호스트 미지원」과 가른다**(`exit_no_repo`). 옛 판은 그 둘을
+/// 한 코드로 내보내 앱이 멀쩡한 호스트를 탓했다 — 판을 올려야 원격 바이너리가 갈린다.
+pub const version_line = "maru-remote-watch 16";
 
 /// 원격에 놓일 파일 이름. **판을 이름에 박는다** — 안 그러면 옛 판이 깔린 원격에서 새 maru 가
 /// 「이미 있다」로 읽고 조용히 옛 감시자를 쓴다.
-pub const remote_binary = "maru-remote-watch-15";
+pub const remote_binary = "maru-remote-watch-16";
 
 /// ⑴ **이미 있고 «돌아가는가»**. 파일 존재만 보면 아키텍처가 틀린 바이너리나 잘린 파일을 「설치됨」
 /// 으로 읽는다 — 그러면 감시가 조용히 안 된다. **실행해 보는 것**이 그 둘을 함께 가른다.

@@ -57,7 +57,7 @@ extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_
 /// 판 14: wire 도 명령도 그대로인데 **보내는 값의 뜻이 달라진다**(계획 §29) — 본문이 `text` 없는
 /// 배열이면 예전 판은 결과 레코드를 통째로 버려 `found=false` 를 보냈다. 낡은 헬퍼를 그대로 두면
 /// **같은 파일을 로컬로 열 때와 원격으로 열 때가 갈린다**(계약 §2.3). 그래서 판을 올려 갈아 끼운다.
-pub const version_line = "maru-remote-watch 15\n";
+pub const version_line = "maru-remote-watch 16\n";
 
 /// **판 2 부터는 내지 않는다**(RW7d — 한도에서 폴링으로 내려간다). 상수를 남겨 두는 이유는 원격에
 /// 아직 **판 1 바이너리가 도는 경우**가 있어서다 — 그쪽은 여전히 이 코드로 나가고, 앱은 그것을
@@ -65,6 +65,17 @@ pub const version_line = "maru-remote-watch 15\n";
 pub const exit_watch_limit: u8 = 2;
 /// 감시 API 자체를 못 열었다(플랫폼 미지원 등). 호출자는 설치를 실패로 보고 현행 동작을 유지한다.
 pub const exit_unsupported: u8 = 3;
+
+/// **이 루트에서 git 을 쓸 수 없다** — 저장소가 아니거나(`fatal: not a git repository`), 소유권 거부
+/// (`dubious ownership`) 처럼 git 이 `128` 로 끊는 경우다. 폴링 갈래(macOS·BSD)는 git 다이제스트가
+/// 유일한 변경 감지 수단이라 여기서 더 갈 수 없다.
+///
+/// **`exit_unsupported` 와 갈라야 하는 이유**: 그쪽은 「이 **호스트**가 감시를 못 한다」는 뜻이고,
+/// 앱은 그 말을 그대로 사용자에게 옮긴다(`cannot run on this host`). 그런데 2026-09-22 실측에서
+/// 원격은 멀쩡한 macOS 25.5.0 · git 2.50.1 이었고, 탐색기가 연 폴더가 저장소가 아니었을 뿐이다 —
+/// 같은 원격의 저장소 폴더에서는 같은 명령이 `exit=0` 이다. 호스트를 탓하면 사용자가 엉뚱한 곳을
+/// 고치러 간다.
+pub const exit_no_repo: u8 = 4;
 
 /// 한 번에 등록할 디렉터리 상한. **넘으면 폴링으로 내려간다**(RW7d) — 넘는 순간 이 프로그램이 아는
 /// 것은 「전부는 못 본다」뿐이고, 반쪽을 최신인 척 보여 주는 것이 최악이기 때문이다(계획 §6).
@@ -237,6 +248,17 @@ fn exitWith(code: u8) noreturn {
 /// 2026-09-07 실측: 같은 저장소·같은 인자로 어떤 때는 15 초 넘게 정상 감시하고 어떤 때는 즉시 3 으로
 /// 나갔다. 가설 넷(저장소 아님 · git 앞머리 토큰 · 30 초 마감 · 디렉터리 상한)을 세워 **넷 다 실측에
 /// 반증**됐고, 그 사이 좁힐 수단이 하나도 없었다 — stderr 에 한 글자도 없기 때문이다.
+/// `exit_no_repo` 도 **왜인지 남긴다** — `exitUnsupportedWhy` 와 같은 이유다. 이 줄이 없으면 앱
+/// 로그에는 종료 코드만 남고, 어느 경로가 문제인지 사람이 원격에서 손으로 재현해야 한다.
+fn exitNoRepoWhy(why: []const u8) noreturn {
+    const sys = std.posix.system;
+    const head = "maru-remote-watch: no-repo - ";
+    _ = sys.write(2, head.ptr, head.len);
+    _ = sys.write(2, why.ptr, why.len);
+    _ = sys.write(2, "\n", 1);
+    exitWith(exit_no_repo);
+}
+
 fn exitUnsupportedWhy(why: []const u8) noreturn {
     const sys = std.posix.system;
     const head = "maru-remote-watch: unsupported - ";
@@ -1091,6 +1113,10 @@ fn watchPoll(gpa: std.mem.Allocator, root: []const u8, git_prefix: []const []con
     if (first.state != .ok) {
         // **왜 실패했는지까지 싣는다.** 자식의 stderr 는 `/dev/null` 이라 이 숫자가 유일한 단서다.
         // git 은 저장소가 아니면 128, 실행 파일을 못 찾으면 우리가 127 로 끝낸다(`execvp` 뒤 `_exit`).
+        // **git 의 `128` 은 「이 루트를 git 으로 볼 수 없다」이지 「호스트가 못 한다」가 아니다.**
+        // 저장소가 아니거나 소유권이 거부된 경우이고, 같은 호스트의 다른 폴더에서는 멀쩡히 돈다.
+        // 두 가지를 한 코드로 뭉치면 앱이 호스트를 탓하고, 사용자는 원격을 의심하게 된다.
+        if (last_signal < 0 and last_exit == 128) exitNoRepoWhy("git cannot use this root - git exit 128");
         var buf: [96]u8 = undefined;
         const text = if (last_signal >= 0)
             std.fmt.bufPrint(&buf, "first git digest read failed - killed by signal {d}", .{last_signal})

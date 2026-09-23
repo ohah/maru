@@ -93,6 +93,8 @@ test "dependenciesOf 는 접두·개수 질문을 문자열 없이 답한다" {
     // 새 방식: boundary_step 이 매단 것 중 `run_` 접두인 것
     //
     // **여기서 두 값이 갈리고, 그 갈림이 이 뷰의 존재 이유다.** 문자열은 204, 뷰는 205 다.
+    // (+1: `test-remote-watch-module` — 감시 채널 모듈 자신의 판정자, 2026-09-23. 종료 코드의
+    //  «뜻» 은 소스를 글자로 재는 경계 판정자가 값을 안 봐서 따로 돌려야 한다.)
     // 차이 하나는 `build.zig` 의
     //     boundary_step.dependOn(
     //         &run_session_host_upgrade_component_failure_matrix_boundary_tests.step,
@@ -107,8 +109,8 @@ test "dependenciesOf 는 접두·개수 질문을 문자열 없이 답한다" {
     const old_count = countOccurrences(text, "boundary_step.dependOn(&run_");
     const new_count = g.countDependenciesWithPrefix("boundary_step", "run_");
     // +1(2026-09-23): `test-event-enqueue-epoch`(빈 드레인 건너뛰기의 전제를 지키는 경계 판정자).
-    try std.testing.expectEqual(@as(usize, 204), old_count);
-    try std.testing.expectEqual(@as(usize, 205), new_count);
+    try std.testing.expectEqual(@as(usize, 205), old_count);
+    try std.testing.expectEqual(@as(usize, 206), new_count);
     try std.testing.expect(new_count > old_count); // 뷰가 더 본다 — 줄바꿈에 안 흔들린다
 
     // 옛 방식: count(build, "sharded.dependOn(&run_") == 0
@@ -207,8 +209,8 @@ test "모듈 주입을 실제로 담는가 — `&.{…}` 에서 멈춰 468건 �
     // **고치기 전 이 수는 1 이었다.** `.imports = &.{ .{ .name = "maru", … } }` 의 `&.{ … }` 는
     // struct init 도 call 도 아니라 재귀가 거기서 멈췄고, 모듈을 주입받는 등록이 전부
     // 「주입 없음」으로 보였다. 뷰가 «안 본다» 는 것을 뷰 자신은 못 신고하므로 수로 잠근다.
-    try std.testing.expectEqual(@as(usize, 467), with_imports); // +1: `test-color-scheme-notify`(2031 코어 판정자 step, 2026-09-22)
-    try std.testing.expectEqual(@as(usize, 894), pairs);
+    try std.testing.expectEqual(@as(usize, 468), with_imports); // +1: `test-remote-watch-module`(2026-09-23), +1: `test-color-scheme-notify`(2026-09-22)
+    try std.testing.expectEqual(@as(usize, 896), pairs); // +2: `test-remote-watch-module` 이 `maru`·`syntax` 둘을 주입한다(2026-09-23)
 
     // 그 자리에서 모듈을 만드는가, 기존 모듈 변수를 이름으로 부르는가. 후자가 압도적이라는
     // 사실이 「등록을 표로 적을 때 `deps` 는 이름 목록으로 족한가」의 답이다.
@@ -217,7 +219,7 @@ test "모듈 주입을 실제로 담는가 — `&.{…}` 에서 멈춰 468건 �
     // (`shell_gate_ledger`·`wake_latency_budget`·`pinned_language`)이 각자 만들던 모듈을
     // `boundary_scan_modules` 가 대신 준다 — `build_source` 는 그렇게 셋에서 하나가 됐다.
     try std.testing.expectEqual(@as(usize, 5), inline_create);
-    try std.testing.expectEqual(@as(usize, 889), by_var); // +1: 위 `test-color-scheme-notify` 의 `shutdown_wire_contract_mod`
+    try std.testing.expectEqual(@as(usize, 891), by_var); // +2: `test-remote-watch-module` 의 `maru`·`syntax`(2026-09-23), +1: `test-color-scheme-notify` 의 `shutdown_wire_contract_mod`
 
     // 이름과 모듈이 **짝으로** 들어왔는지 확인한다 — 가장 많이 쓰이는 짝으로.
     // 이름만 담던 예전에는 물을 수 없던 질문이다.
@@ -234,8 +236,8 @@ test "모듈 주입을 실제로 담는가 — `&.{…}` 에서 멈춰 468건 �
             if (std.mem.eql(u8, m, "maru_mod")) maru_to_maru_mod += 1;
         }
     }
-    try std.testing.expectEqual(@as(usize, 265), maru_any);
-    try std.testing.expectEqual(@as(usize, 264), maru_to_maru_mod);
+    try std.testing.expectEqual(@as(usize, 266), maru_any); // +1: `test-remote-watch-module`(2026-09-23)
+    try std.testing.expectEqual(@as(usize, 265), maru_to_maru_mod); // +1: `test-remote-watch-module`(2026-09-23)
 }
 
 test "표도 등록이다 — 루프 한 줄 뒤의 스무 건을 세어 둔다" {

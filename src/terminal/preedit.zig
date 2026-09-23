@@ -243,6 +243,12 @@ pub const Overlay = struct {
                 cursorLinear(base.size, base.cursor),
                 base.ambiguous_wide,
             );
+            // A carried glyph may overwrite the continuation of an old wide base cell on an
+            // earlier row. Repair every touched scratch row, not just the new preedit row.
+            var carry_row = base.cursor.row;
+            while (carry_row <= row) : (carry_row += 1) {
+                clearTruncatedWideBase(self.cells[@as(usize, carry_row) * cols ..][0..cols]);
+            }
         }
 
         var style = cursorStyle(row_cells, cursor_col);
@@ -417,10 +423,12 @@ fn drawCarryLinear(
 
 fn clearTruncatedWideBase(row: []types.Cell) void {
     if (row.len == 0) return;
-    const last = row.len - 1;
-    if (row[last].width == 2 and !row[last].continuation) row[last] = .{};
     var i: usize = 0;
     while (i < row.len) : (i += 1) {
+        if (row[i].width == 2 and (i + 1 == row.len or !row[i + 1].continuation)) {
+            row[i] = .{};
+            continue;
+        }
         if (!row[i].continuation) continue;
         if (i == 0 or row[i - 1].width != 2) row[i] = .{};
     }
@@ -556,6 +564,24 @@ test "preedit anchor wraps to the next row" {
     try std.testing.expectEqual(@as(u21, 'a'), out.cells[3].codepoint);
     try std.testing.expectEqual(@as(u21, 'b'), out.cells[4].codepoint);
     try std.testing.expectEqual(@as(u21, 'x'), out.cells[5].codepoint);
+}
+
+test "preedit anchor cross-row carry removes a displaced wide base lead" {
+    var cells = [_]types.Cell{.{}} ** 8;
+    cells[2] = .{ .codepoint = 0xD55C, .width = 2 };
+    cells[3] = .{ .width = 0, .continuation = true };
+    var overlay = Overlay.init(std.testing.allocator);
+    defer overlay.deinit();
+    try overlay.replace("x");
+
+    const base = baseSnapshot(&cells, 4, 2, .{ .row = 0, .col = 3 });
+    overlay.noteCommitted(CommitBase.fromSnapshot(base), "ab");
+    const out = overlay.compose(base);
+    try std.testing.expectEqual(@as(u21, 0), out.cells[2].codepoint);
+    try std.testing.expectEqual(@as(u21, 'a'), out.cells[3].codepoint);
+    try std.testing.expectEqual(@as(u21, 'b'), out.cells[4].codepoint);
+    try std.testing.expectEqual(@as(u21, 0xD55C), base.cells[2].codepoint);
+    try std.testing.expect(base.cells[3].continuation);
 }
 
 test "preedit anchor fails closed when a wide carry glyph would straddle rows" {

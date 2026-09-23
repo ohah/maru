@@ -3351,8 +3351,8 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"preedit anchor"},
         });
         const run_session_host_cr6d_preedit_anchor_tests = b.addRunArtifact(session_host_cr6d_preedit_anchor_tests);
-        // Seven named anchor contracts plus terminal.zig's anonymous facade test block.
-        run_session_host_cr6d_preedit_anchor_tests.addArg("--maru-expect-tests=8");
+        // Eight named anchor contracts plus terminal.zig's anonymous facade test block.
+        run_session_host_cr6d_preedit_anchor_tests.addArg("--maru-expect-tests=9");
         run_session_host_cr6d_preedit_anchor_tests.setCwd(b.path("."));
         session_host_cr6d_preedit_incremental_step.dependOn(&run_session_host_cr6d_preedit_anchor_tests.step);
         const session_host_cr6d_pixel_verify_mod = b.createModule(.{

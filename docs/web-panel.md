@@ -345,7 +345,7 @@ WKWebView(WebKit)는 시스템 프레임워크라 의존성이 없지만 Chromiu
 - **hover 커서** — 입력창 위에서 I-beam(`CT_IBEAM`), 밖으로 나가면 mouse leave 와 기본 커서.
 - 한 번 실패로 보였던 「토스트 뒤 클릭」은 **시험 순서 탓**이었다 — 앞 단계의 스크롤로 버튼이 40px 올라가 빈 곳을 눌렀다(덤프로 확인). 스크롤을 원위치하는 단계를 넣자 통과했다.
 
-**시험기 한계와 방법**: 입력기(IMK)는 앱 안에서 만든 합성 NSEvent 를 **조합하지 않는다**(실측 — 입력 문맥의 입력기를 한국어로 바꿔도 `d`·`k`·`s` 가 그대로 들어갔다). IME 는 진짜 키 이벤트(`CGEvent`)를 **maru 프로세스에만**(`postToPid` — 다른 앱으로 새지 않는다) 보내고, 입력기는 시스템이 아니라 **그 view 의 입력 문맥에서만**(`inputContext.selectedKeyboardInputSource`) 바꿔 판정했다. AppKit 이 합성 이벤트를 view 로 보내지 않은 단계(up 없는 down 뒤의 새 down·mouseMoved·스크롤)는 view 메서드를 직접 불러 판정했다. `<select>` 팝업의 화면 합성은 아직 없어 pane 안에서는 열려도 보이지 않는다(⑧).
+**시험기 한계와 방법**: 입력기(IMK)는 앱 안에서 만든 합성 NSEvent 를 **조합하지 않는다**(실측 — 입력 문맥의 입력기를 한국어로 바꿔도 `d`·`k`·`s` 가 그대로 들어갔다). IME 는 진짜 키 이벤트(`CGEvent`)를 **maru 프로세스에만**(`postToPid` — 다른 앱으로 새지 않는다) 보내고, 입력기는 시스템이 아니라 **그 view 의 입력 문맥에서만**(`inputContext.selectedKeyboardInputSource`) 바꿔 판정했다. AppKit 이 합성 이벤트를 view 로 보내지 않은 단계(up 없는 down 뒤의 새 down·mouseMoved·스크롤)는 view 메서드를 직접 불러 판정했다. `<select>` 팝업은 이 시험 뒤 합성을 넣어 pane 안에서도 보이게 됐다(⑧).
 
 #### terminal-browser 에서 가를 것 — 판별자 하나
 
@@ -440,7 +440,7 @@ WKWebView 는 **OSR 을 제공하지 않는다**. macOS SDK 의 WebKit 공개 �
 | ⑤ | 접근성(VoiceOver) | 공사 | **대** |
 | ⑥ | 크기 전파 | ⑦과 묶인 공사 | 중 |
 | ⑦ | 소유 버퍼 링과 반납 | 공사 | 중 |
-| ⑧ | `<select>` 팝업 합성 | 연결(154). 146 에서는 안 열림 — 알려진 문제 | 소~중 |
+| ⑧ | `<select>` 팝업 합성 | **PoC 로 해결 확인**(154). 146 에서는 안 열림 — 알려진 문제 | 소 |
 | ⑨ | JS 대화상자·파일 선택 | 실측 후 결정 | 소 |
 
 1. **`.app` 번들 배선** — 비-번들에서는 떴지만 번들 layout 에서는 렌더러가 안 떴다(함정 6). CEF 는 macOS 번들에서 helper 앱을 정해진 이름으로 요구한다. suji `bundle_macos.zig` 가 `{name} Helper`·`Helper (GPU)`·`Helper (Renderer)`·`Helper (Plugin)` 네 번들을 만들고 helper 바이너리를 메인 바이너리의 **hardlink** 로 둔다(codesign 이 symlink 는 거부한다) — 확인한 선례다. sidecar 가 `.app` 이어야 하는지는 여전히 설계 선택이다.
@@ -458,7 +458,7 @@ WKWebView 는 **OSR 을 제공하지 않는다**. macOS SDK 의 WebKit 공개 �
 6. **크기 전파 — ⑦과 묶인다.** pane 크기가 바뀌면 `was_resized()`, 레티나 배율이 바뀌면 `notify_screen_info_changed()` 를 부르는 것 자체는 한 줄이다. 그러나 ⑦의 **소유 링은 view 크기에 묶여** 있어 크기가 바뀌면 링을 다시 만들어 다시 공유해야 하고, 드래그 리사이즈 중에는 그것이 초당 수십 번이 된다. 링을 넉넉한 크기로 잡고 부분 사각형만 쓰거나, 세대(generation)를 붙여 재할당을 늦추고 그동안은 옛 프레임을 늘여 보이는 방식(§3 의 async resize jitter 와 같은 자리)이 필요하다. 실험 배선은 이 경로가 없어 split 뒤 이미지가 옛 크기로 **잘려** 보였다(뷰포트 crop 덕에 옆 pane 은 안 덮었다).
 7. **소유 버퍼 링과 반납** — 위 「버퍼 소유권」. PoC 는 단일 버퍼라 tearing 이 가능하다. 3 슬롯이면 되지만 **GPU 완료 시점**을 지켜야 한다 — sidecar 는 blit 이 GPU 에서 끝난 뒤에 「준비」를 보내고, maru 는 그 슬롯을 샘플링한 command buffer 가 **완료된 뒤**(`addCompletedHandler`)에 「반납」을 보낸다. 인코딩 시점에 반납하면 GPU 가 아직 읽는 슬롯을 덮는다.
 8. **`<select>` 팝업 — 154 에서는 합성만 남고, 146 에서는 안 열린다(버전 의존)**
-   - **154(최신 안정판, 제품 대상)**: 기본 `<select>` 를 누르면 `on_popup_show(1)` 과 위치(`on_popup_size` — select 바로 아래 53x91 DIP), `PET_POPUP` 프레임(106x182 px, 레티나 2 배)이 온다. 열린 팝업에서 키보드로 항목을 고르면 값이 바뀌고(`change`) 팝업이 닫힌다(`show=0`). `showPicker()` 로도 열린다(실측). **남은 일은 그 프레임을 본 화면 위에 합성하는 것** — 본 화면과 팝업 버퍼가 따로 바뀌므로 둘을 따로 들고 팝업을 늘 위에 그린다. 팝업 안 휠 스크롤에는 `get_screen_point` 도 필요하다(휠 API 헤더 주석, PoC 는 구현했다). PoC 는 팝업 프레임을 본 화면 버퍼에 쓰지 않도록만 막아 두었다(아직 화면에는 안 보인다).
+   - **154(최신 안정판, 제품 대상)**: 기본 `<select>` 를 누르면 `on_popup_show(1)` 과 위치(`on_popup_size` — select 바로 아래 53x91 DIP), `PET_POPUP` 프레임(106x182 px, 레티나 2 배)이 온다. 열린 팝업에서 키보드로 항목을 고르면 값이 바뀌고(`change`) 팝업이 닫힌다(`show=0`). `showPicker()` 로도 열린다(실측). **합성을 PoC 에 넣어 화면에 나오는 것까지 확인했다(2026-09-23)** — sidecar 가 본 화면 사본을 따로 들고, 팝업이 떠 있으면 공유 surface 의 팝업 자리(`on_popup_size` 의 DIP × scale)에 `PET_POPUP` 픽셀을 덧그리며, 본 화면이 바뀔 때마다 다시 덧그리고, 닫히면(`show=0`) 그 자리를 본 화면 사본으로 되돌린다. 실측: 목록(첫째·둘째·셋째)이 select 바로 아래 그려지고, 마우스로 항목을 누르면 값이 바뀌며(CEF 가 view 좌표 클릭을 팝업으로 넘긴다 — 우리 쪽 hit-test 변경 없음), Esc 로 닫으면 그 자리가 복원된다. maru pane 이 쓰는 공유 surface 에서도 같게 그려진다. 합성을 sidecar 에 둔 것은 렌더러 ABI 를 안 바꾸려는 PoC 선택이다 — 제품에서는 maru 렌더러가 팝업을 별도 quad 로 올리는 쪽(복사 1 회 절약)과 비교해 정한다. 팝업 안 휠 스크롤에는 `get_screen_point` 도 필요하다(휠 API 헤더 주석, PoC 는 구현했다).
    - **146(suji 가 받아 둔 것) — 알려진 문제**: 클릭·Space·Alt+↓·`showPicker()` 모두 안 열린다(올바른 덤프로 확인, 덤프 최신성은 같은 덤프의 버튼 카운터로 보장). 팝업 콜백·`PET_POPUP` 은 0 건이고, select 클릭 뒤에만 Blink 가 **네이티브 NSMenu 경로(external popup)** 를 띄울 때 보내는 합성 mouseup 이 찍힌다(`external_popup_menu.cc` 의 macOS 분기) — 창이 없어 메뉴가 못 뜬 것이다. 우회로 `appearance: base-select` 는 146 에서도 열리고 선택까지 된다.
    - **원인은 확정하지 못했다.** CEF 는 창 없는 브라우저에서 renderer 가 external popup 을 끄는데(`chrome_content_renderer_client_cef.cc`), Chromium 은 웹 설정을 보낼 때마다 그 값을 `should_disable_external_popups` 로 덮어쓰고(`web_view_impl.cc`) 그 설정은 `ForbidExternalPopupMenus()` 로만 켜진다 — CEF 는 146(`3ca6a87` 트리 전체)·154(`062ebe4`)·master 모두 이 함수를 부르지 않는다. 그래서 3 차 검증까지는 이 덮어쓰기를 146 의 원인으로 적었는데, **154 도 CEF·Blink 해당 코드가 같은데 내부 팝업 경로를 탄다** — 이 가설은 버전 차이를 설명하지 못한다. 확인된 것은 관측(146 은 네이티브 경로, 154 는 내부 경로)뿐이다.
 9. **JS 대화상자·파일 선택(목록에서 빠져 있었다)** — `alert`/`confirm` 과 `<input type=file>` 은 CEF 기본 구현이 있다(`on_jsdialog` 가 0 을 돌려주면 기본 대화상자). 창 없는 모드에서 기본 구현이 어디에 어떻게 뜨는지는 **실측 전**이다. maru chrome 모달로 받는 쪽이 모달 게이트(위 「호스트가 라우팅을 든다」)와 맞는다.

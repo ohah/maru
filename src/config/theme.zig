@@ -1187,6 +1187,11 @@ pub const EditorConfig = struct {
     /// 미니맵 폭(**셀**). 기본 15 셀 ≈ 120px @ 8px 셀 — VS Code 의 기본 폭 120px 과 같은 값. 본문이 40 열보다
     /// 좁아지면 미니맵이 **접힌다**(0px) — 그 규칙은 chrome 의 `minimap.widthPx` 가 소유한다.
     minimap_width: u32 = 15,
+    /// **sticky scroll**(§4.1i — docs/native-editor-visual-mapping.md). 스크롤하면 화면 맨 위 줄이 속한 스코프의 머리줄을 본문 위쪽에
+    /// 고정한다. VS Code `editor.stickyScroll.enabled` 와 같은 기본(켬).
+    sticky_scroll: bool = true,
+    /// 고정할 줄의 상한 — 편집기 높이의 25% 도 넘지 않는다(§4.1i). VS Code `editor.stickyScroll.maxLineCount` 와 같은 기본 5.
+    sticky_scroll_max_lines: u32 = 5,
     /// **진단 표시**(visual-mapping §5.4) — 물결 밑줄·gutter 글리프·막대/미니맵 마커·F8 이동을 한꺼번에 켜고 끈다. 지금의
     /// 출처는 구문 오류(tree-sitter)라 타이핑 중에도 밑줄이 뜬다 — 거슬리면 끈다.
     diagnostics: bool = true,
@@ -1202,7 +1207,7 @@ pub const EditorConfig = struct {
     /// 명령만 남는다(VS Code `editor.quickSuggestions` 와 같은 관계).
     quick_suggestions: bool = true,
 
-    pub const schema = .{ // 키: editor.wrap · editor.tab-width · editor.cursor-shape · editor.scroll-beyond-last-column · editor.cursor-surrounding-lines · editor.cursor-surrounding-columns · editor.minimap · editor.minimap-width · editor.diagnostics · editor.hover · editor.hover-delay · editor.parameter-hints · editor.quick-suggestions
+    pub const schema = .{ // 키: editor.wrap · editor.tab-width · editor.cursor-shape · editor.scroll-beyond-last-column · editor.cursor-surrounding-lines · editor.cursor-surrounding-columns · editor.minimap · editor.minimap-width · editor.sticky-scroll · editor.sticky-scroll-max-lines · editor.diagnostics · editor.hover · editor.hover-delay · editor.parameter-hints · editor.quick-suggestions
         // **둘 다 설정 GUI에 뜬다.** `wrap`은 한때 `hidden`이었는데(*"편집기가 제품 화면에 배선되기
         // 전이라 토글해도 아무 일이 없어 버그로 보인다"*) 값이 렌더에 닿으면서 벗겼다 —
         // `schema.zig`의 "editor.wrap은 설정 UI에 뜬다"가 그 사실을 잰다. 탭 폭도 같은 조건을
@@ -1231,6 +1236,9 @@ pub const EditorConfig = struct {
         // 미니맵 둘(§6.1). 폭의 하한 4 는 「run 이 보이는 최소」, 상한 60 은 그 위가 본문을 잡아먹는다는 판단이다.
         .minimap = Meta{ .doc = .cfg_editor_minimap, .widget = .toggle, .section = .editor },
         .minimap_width = Meta{ .key_seg = "minimap-width", .doc = .cfg_editor_minimap_width, .range = .{ 4, 60 }, .widget = .number, .section = .editor },
+        // sticky scroll 둘(§4.1i). 상한 10 — 그 위는 25% 규칙이 어차피 자른다(40 행 화면에서 10).
+        .sticky_scroll = Meta{ .key_seg = "sticky-scroll", .doc = .cfg_editor_sticky_scroll, .widget = .toggle, .section = .editor },
+        .sticky_scroll_max_lines = Meta{ .key_seg = "sticky-scroll-max-lines", .doc = .cfg_editor_sticky_scroll_max_lines, .range = .{ 1, 10 }, .widget = .number, .section = .editor },
         .diagnostics = Meta{ .doc = .cfg_editor_diagnostics, .widget = .toggle, .section = .editor },
         .hover = Meta{ .doc = .cfg_editor_hover, .widget = .toggle, .section = .editor },
         // 상한 5000 — 그 위는 「안 뜬다」와 구별이 안 된다. 0 은 「바로」다.

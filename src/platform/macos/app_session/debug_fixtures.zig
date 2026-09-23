@@ -1243,6 +1243,18 @@ pub fn applyForcedEditorCaret(self: *AppSession) void {
     self.metal_dirty = true;
 }
 
+/// 강제된 **편집기 세로 스크롤**(캡처 전용, `MARU_FORCE_EDITOR_TOP=<줄>`, 1-based) — 그 줄이 화면 맨 위에 오게 한다(sticky scroll 을 찍는
+/// 자리 — §4.1i). 매 프레임 같은 자리로 세우고, 상한 clamp 는 제품 경로(`setEditorTop`)가 그대로 건다.
+pub fn applyForcedEditorTop(self: *AppSession) void {
+    const raw = std.c.getenv("MARU_FORCE_EDITOR_TOP") orelse return;
+    const want = std.fmt.parseInt(usize, std.mem.span(raw), 10) catch return;
+    if (want == 0) return;
+    const term = pane_ops.activePane(self).activeTerm();
+    if (term.kind != .editor or term.rt.editor_doc == null) return;
+    if (term.rt.editor_first_line == want - 1) return;
+    editor_ops.setEditorTop(self, term, want - 1, "debug-force-top");
+}
+
 pub fn maybeDebugOpenFilePanel(self: *AppSession) void {
     if (self.debug_file_panel_opened or !self.dock_initialized) return;
     const raw = std.c.getenv("MARU_FILE_PANEL") orelse return;

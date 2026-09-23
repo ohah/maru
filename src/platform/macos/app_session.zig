@@ -20008,6 +20008,7 @@ pub const AppSession = struct {
         debug_fixtures.reapplyForcedScmHover(self); // 캡처 전용: 행 동작(`+`/`−`)은 호버해야 보인다
         debug_fixtures.applyForcedCommitMessage(self); // 캡처 전용: 편집은 클릭·키보드로만 시작된다(한 번만)
         debug_fixtures.applyForcedEditorCaret(self); // 캡처 전용: 선택은 클릭으로만 생긴다
+        debug_fixtures.applyForcedEditorTop(self); // 캡처 전용: 세로 스크롤(sticky scroll — §4.1i)
         debug_fixtures.applyForcedEditorHover(self); // 캡처 전용: 호버는 포인터 정지로만 뜬다(§8.2b)
         debug_fixtures.applyForcedEditorGotoDef(self); // 캡처 전용: 정의로 이동(§8.2c)
         debug_fixtures.applyForcedSymbolPicker(self); // 캡처 전용: 심볼 피커(§7.5 · §8.2o)

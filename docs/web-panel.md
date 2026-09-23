@@ -230,7 +230,7 @@ WKWebView(WebKit)는 시스템 프레임워크라 의존성이 없지만 Chromiu
 > | 측정 | CEF 146 | **CEF 154** |
 > |---|---|---|
 > | CEF 가 그리는 빈도(`windowless_frame_rate=60`) | 62.8 fps | **62.7 fps** |
-> | **maru pane 에 보이는 빈도** | — | **초당 2~8 회**(아래 「남은 미해결」 10 — 6 차 적대적 검증) |
+> | **maru pane 에 보이는 빈도** | — | **초당 2~8 회** → seed 확인 훅으로 **~53 회**(아래 「남은 미해결」 10) |
 > | surface / 포맷 | 1280x720 stride 5120, BGRA | **같음** |
 > | 버퍼 풀 | 고유 IOSurface 16+ | **16** |
 > | damage | 변경 영역만 | **변경 영역만**(10x10·54x89 …, 첫 프레임만 전체) |
@@ -272,7 +272,7 @@ WKWebView(WebKit)는 시스템 프레임워크라 의존성이 없지만 Chromiu
 
 | | 옛 서술 | 정정 |
 |---|---|---|
-| 복사 | 0 | PTY·인코딩·CPU 업로드는 0. **콜백 안 복사 1 회/프레임**은 남는다(PoC 는 CPU `memcpy`, 제품은 GPU blit) |
+| 복사 | 0 | PTY·인코딩·CPU 업로드는 0. **콜백 안 복사 1 회/프레임**은 남는다(PoC 는 CPU `memcpy`, 제품은 GPU blit). **PoC 는 지금 2 회다** — ⑧ 팝업 합성 때문에 바뀐 영역을 본 화면 사본에도 한 번 더 복사한다(7 차 적대적 검증). 합성을 maru 렌더러로 옮기면 1 회로 돌아간다 |
 | tearing 안전의 근거 | 멀티버퍼 | **콜백 안에서 복사한다는 것** + 우리 버퍼의 생산·소비 순서 규약 |
 | 프로세스 경계 | IOSurface global id | **`IOSurfaceLookup(global id)` 는 다른 프로세스에서 NULL**(실측). `IOSurfaceCreateMachPort` → mach port 로 넘겨 `IOSurfaceLookupFromMachPort` 해야 건너간다(실측, PoC 는 `bootstrap_register`/`bootstrap_look_up`) |
 
@@ -412,7 +412,7 @@ Maru.app (190MB, Chromium 0 바이트)
                 → GpuImage / image_backdrop
 ```
 
-- **sidecar 는 하나, 브라우저는 N 개다.** CEF 는 `root_cache_path` 단위 process singleton 이라 같은 경로로 두 번째 인스턴스를 띄우면 즉시 끝난다(exit 21/24 실측). 경로를 pane 마다 달리하면 뜨기는 하지만(헤더 계약상 singleton 은 그 경로 기준이다) **프로필이 갈라져 쿠키·로그인·저장소가 pane 끼리 공유되지 않는다** — 브라우저로서 틀린 동작이라 택하지 않는다.
+- **sidecar 는 하나, 브라우저는 N 개다(설계 — PoC 는 브라우저를 하나만 만들었고 한 프로세스의 N 개는 재지 않았다).** CEF 는 `root_cache_path` 단위 process singleton 이라 같은 경로로 두 번째 인스턴스를 띄우면 즉시 끝난다(exit 21/24 실측). 경로를 pane 마다 달리하면 뜨기는 하지만(헤더 계약상 singleton 은 그 경로 기준이다) **프로필이 갈라져 쿠키·로그인·저장소가 pane 끼리 공유되지 않는다** — 브라우저로서 틀린 동작이라 택하지 않는다.
 
 - **기본 앱은 190MB 그대로**, 웹 백엔드를 켠 사용자만 ~258MB(154 기준, 146 은 ~235MB)를 받는다. §13.2 가 *"기본 앱에 CEF 를 넣지 않고 필요할 때 받는 선택 백엔드"* 라고 적고도 plugin ABI 로 표현 못 해 막혔던 그 형태가, 프로세스 경계로는 그냥 성립한다.
 - 배포는 **GitHub Releases + 매니페스트 한 겹**(`cef_version`·`chromium_version`·`maru_backend_abi`·`platform`·`arch`·`sha256`). maru 는 이미 거기서 dmg 를 주므로 새 인프라가 0 이고, 나중에 R2 로 옮겨도 앱 업데이트가 필요 없다. CEF 조달 파이프라인(Spotify CDN → 빌드)은 suji `release.yml` 에 검증된 선례가 있다.
@@ -443,7 +443,7 @@ WKWebView 는 **OSR 을 제공하지 않는다**. macOS SDK 의 WebKit 공개 �
 | ⑦ | 소유 버퍼 링과 반납 | 공사 | 중 |
 | ⑧ | `<select>` 팝업 합성 | **PoC 로 해결 확인**(154). 146 에서는 안 열림 — 알려진 문제 | 소 |
 | ⑨ | JS 대화상자·파일 선택 | 실측 후 결정 | 소 |
-| ⑩ | **새 프레임 신호 → maru 다시 그리기** | 연결(⑦ 의 「슬롯 준비」 신호와 같은 자리) | 소 |
+| ⑩ | **새 프레임 신호 → maru 다시 그리기** | 연결 — **PoC 로 해결 확인**(seed 확인, 초당 ~53 회) | 소 |
 
 1. **`.app` 번들 배선** — 비-번들에서는 떴지만 번들 layout 에서는 렌더러가 안 떴다(함정 6). CEF 는 macOS 번들에서 helper 앱을 정해진 이름으로 요구한다. suji `bundle_macos.zig` 가 `{name} Helper`·`Helper (GPU)`·`Helper (Renderer)`·`Helper (Plugin)` 네 번들을 만들고 helper 바이너리를 메인 바이너리의 **hardlink** 로 둔다(codesign 이 symlink 는 거부한다) — 확인한 선례다. sidecar 가 `.app` 이어야 하는지는 여전히 설계 선택이다.
 2. **원격 세션호스트** — IOSurface mach port 는 같은 기계 안에서만 유효하다. 다만 **웹 pane 은 PTY 가 없는 pane 슬롯**이라 브라우저를 원격 host 에서 돌릴 이유가 없다. **결정안: 브라우저 sidecar 는 항상 maru 앱이 도는 기계에서 돈다.** 그러면 터미널 세션이 SSH 너머에 있어도 제로카피가 유지된다. 이 결정으로 남는 것:
@@ -464,7 +464,7 @@ WKWebView 는 **OSR 을 제공하지 않는다**. macOS SDK 의 WebKit 공개 �
    - **146(suji 가 받아 둔 것) — 알려진 문제**: 클릭·Space·Alt+↓·`showPicker()` 모두 안 열린다(올바른 덤프로 확인, 덤프 최신성은 같은 덤프의 버튼 카운터로 보장). 팝업 콜백·`PET_POPUP` 은 0 건이고, select 클릭 뒤에만 Blink 가 **네이티브 NSMenu 경로(external popup)** 를 띄울 때 보내는 합성 mouseup 이 찍힌다(`external_popup_menu.cc` 의 macOS 분기) — 창이 없어 메뉴가 못 뜬 것이다. 우회로 `appearance: base-select` 는 146 에서도 열리고 선택까지 된다.
    - **원인은 확정하지 못했다.** CEF 는 창 없는 브라우저에서 renderer 가 external popup 을 끄는데(`chrome_content_renderer_client_cef.cc`), Chromium 은 웹 설정을 보낼 때마다 그 값을 `should_disable_external_popups` 로 덮어쓰고(`web_view_impl.cc`) 그 설정은 `ForbidExternalPopupMenus()` 로만 켜진다 — CEF 는 146(`3ca6a87` 트리 전체)·154(`062ebe4`)·master 모두 이 함수를 부르지 않는다. 그래서 3 차 검증까지는 이 덮어쓰기를 146 의 원인으로 적었는데, **154 도 CEF·Blink 해당 코드가 같은데 내부 팝업 경로를 탄다** — 이 가설은 버전 차이를 설명하지 못한다. 확인된 것은 관측(146 은 네이티브 경로, 154 는 내부 경로)뿐이다.
 9. **JS 대화상자·파일 선택(목록에서 빠져 있었다)** — `alert`/`confirm` 과 `<input type=file>` 은 CEF 기본 구현이 있다(`on_jsdialog` 가 0 을 돌려주면 기본 대화상자). 창 없는 모드에서 기본 구현이 어디에 어떻게 뜨는지는 **실측 전**이다. maru chrome 모달로 받는 쪽이 모달 게이트(위 「호스트가 라우팅을 든다」)와 맞는다.
-10. **새 프레임이 와도 maru 가 다시 그리지 않는다(6 차 적대적 검증에서 발견)** — maru 는 **자기 프레임이 바뀌거나 다시 그리기 요청이 있을 때만** 그린다. 웹 픽셀은 PTY 를 지나지 않으므로 maru 는 새 웹 프레임이 온 것을 모른다. 실측(154, 데모 pane): CEF 는 초당 약 60 프레임을 그리는데(페이지 애니메이션) **maru 의 그리기는 유휴 때 초당 2~8 회, 시험 중에도 1~8 회**였다 — pane 에 보이는 웹은 사실상 그 빈도로만 바뀌고, 클릭·타이핑 결과도 다음 다시 그리기까지 늦게 보인다. 표의 「62.7 fps」는 CEF 가 그리는 빈도이지 **보이는 빈도가 아니었다.** 해법은 ⑦ 의 「슬롯 k 준비됨」 신호를 maru 가 받으면 그 창에 다시 그리기를 요청하는 것이다(보이는 web Term 이 있을 때만 — 가려진 탭은 ③ 대로 CEF 쪽 렌더를 멈춘다).
+10. **새 프레임이 와도 maru 가 다시 그리지 않는다(6 차 적대적 검증에서 발견)** — maru 는 **자기 프레임이 바뀌거나 다시 그리기 요청이 있을 때만** 그린다. 웹 픽셀은 PTY 를 지나지 않으므로 maru 는 새 웹 프레임이 온 것을 모른다. 실측(154, 데모 pane): CEF 는 초당 약 60 프레임을 그리는데(페이지 애니메이션) **maru 의 그리기는 유휴 때 초당 2~8 회, 시험 중에도 1~8 회**였다 — pane 에 보이는 웹은 사실상 그 빈도로만 바뀌고, 클릭·타이핑 결과도 다음 다시 그리기까지 늦게 보인다. 표의 「62.7 fps」는 CEF 가 그리는 빈도이지 **보이는 빈도가 아니었다.** 해법은 ⑦ 의 「슬롯 k 준비됨」 신호를 maru 가 받으면 그 창에 다시 그리기를 요청하는 것이다(보이는 web Term 이 있을 때만 — 가려진 탭은 ③ 대로 CEF 쪽 렌더를 멈춘다). **신호 채널 없는 더 작은 형태를 실측했다(7 차 적대적 검증)**: maru 가 매 tick OSR 텍스처의 IOSurface seed(쓰기 잠금을 풀 때마다 커진다)를 확인해 바뀌었으면 다시 그린다. 같은 데모 pane·입력 없음·애니메이션 페이지로 12 초씩 쟀더니 **그리기 초당 1.7 → 52.6 회**, maru CPU **약 1.5 → 3.7 %** 였다. 링을 도입하면 그 「준비」 신호가 이 확인을 대신한다.
 
 ### 13.2 이하 — on-screen CEF 전제의 옛 서술 (보존)
 

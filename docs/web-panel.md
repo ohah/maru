@@ -225,6 +225,8 @@ WKWebView(WebKit)는 시스템 프레임워크라 의존성이 없지만 Chromiu
 
 #### PoC 결과 (`scratchpad/cef-osr-poc`, CEF 146 / Chromium 146)
 
+> **최신 안정판 재확인(2026-09-23)**: 아래 수치는 suji 가 받아 둔 146 으로 쟀다. 제품은 최신 안정판(154.0.23 / Chromium 154)으로 가므로 같은 PoC 를 154 minimal 배포본(sha1 검증)으로 다시 빌드해 창 없는 실행·IOSurface 가속 paint·입력 주입·`<select>`(⑧)를 재확인했다. API 버전은 `15400` 이다. **⑧ 은 154 에서 결과가 달랐다**(아래 「남은 미해결」 8). 프레임률 등 수치 표는 146 값 그대로다.
+
 ![CEF OSR 이 IOSurface 로 건너온 프레임 — 창 없이 1280x720, BGRA, ad-hoc 서명](images/web-panel-osr-iosurface.png)
 
 위 그림은 **창 없이** `on_accelerated_paint` 로 건너온 IOSurface 의 픽셀을 그대로 꺼낸 것이다(보여주려고 `IOSurfaceLock` → PPM 덤프했다. 이 덤프용 복사는 표시 경로에 없다 — 표시 경로에 남는 복사 1 회는 아래 「버퍼 소유권」). 그라디언트 텍스트·둥근 카드·그림자·**한글 폰트 폴백**까지 Chromium 합성 품질이 그대로다.
@@ -306,7 +308,7 @@ WKWebView(WebKit)는 시스템 프레임워크라 의존성이 없지만 Chromiu
 
 `terminalOwnsInput` 이 `find` 를 포함하는 것(`modalInputRole` 의 `routes_text`)도 그대로 따른다. 반대로 `fileContentMenuHoldsWebFocus` 예외는 **WKWebView 전용**이다 — WebKit 이 포커스 없는 문서의 선택을 안 그리는 것을 피하려는 것이고, 그 메뉴는 파일 패널(`.markdown`, 아래 「분업」에서 WKWebView 로 남는 쪽)에만 뜬다. OSR 대상(`.browser`)과 겹치지 않으므로 옮기지 않는다. blur 된 CEF 페이지가 선택을 어떻게 그리는지는 **재지 않았다**.
 
-**적대적 시험기로 확인한 것.** 이 셸은 화면 녹화·접근성 권한이 없어 CGEvent 를 합성할 수 없어서, 앱 안에서 NSEvent 를 만들어 `NSApp.sendEvent` 로 넣는 시험기를 만들었다(AppKit 의 실제 경로 — 창 hitTest·performKeyEquivalent·메뉴·keyDown). 판정은 세 곳의 교차다: maru 가 보낸 것, CEF 가 받은 것, **페이지가 받은 DOM 이벤트**(페이지가 `document.title` 로 흘린 관측점).
+**적대적 시험기로 확인한 것.** 이 셸은 **화면 기록 권한이 없어** 화면 캡처를 못 했다. 접근성·이벤트 합성 권한은 **있었다**(`AXIsProcessTrusted`·`CGPreflightPostEventAccess` 참 — 4 차 적대적 검증에서 확인. 초안의 「CGEvent 를 합성할 수 없다」는 시도하지 않은 추론이었다). CGEvent 대신 앱 안에서 NSEvent 를 만들어 `NSApp.sendEvent` 로 넣는 시험기를 택했다(AppKit 의 실제 경로 — 창 hitTest·performKeyEquivalent·메뉴·keyDown). 판정은 세 곳의 교차다: maru 가 보낸 것, CEF 가 받은 것, **페이지가 받은 DOM 이벤트**(페이지가 `document.title` 로 흘린 관측점).
 
 | 시나리오 | 결과 |
 |---|---|
@@ -330,6 +332,8 @@ WKWebView(WebKit)는 시스템 프레임워크라 의존성이 없지만 Chromiu
 
 #### terminal-browser 에서 가를 것 — 판별자 하나
 
+> **스냅샷(4 차 적대적 검증에서 고정)**: 아래 파일·함수 인용은 **`b16b857`(2026-09-08, #104 직전)** 기준이다. upstream `179d87e`「Terminal electron port (#104)」(2026-09-14)가 렌더·입력·`terminals/` 코드(약 4.3 만 줄)를 지우고 외부 패키지 `@zenbu-labs/pixel` 로 옮겨서, **지금 `references/terminal-browser` 클론(`ff8f170`)에는 `page/paint.ts`·`input.ts`·`offscreen.ts`·`terminals/` 가 없다.** 「키를 PTY 로 받아 스스로 디코드」 행만 #104 이후(`ff8f170`)를 읽었다.
+>
 > **clean-room**: 아래는 [references.md] 의 `terminal-browser` 를 **착상·계약 수준**에서 읽은 결과다. 코드 표현을 가져오지 않으며, 파일명은 판단 근거의 출처 표시다.
 
 **판별자**: 그 코드가 ⑴ **웹을 픽셀로 다루는 데 본질적**인가, ⑵ **터미널 「밖」에 있어서 낸 세금**인가. maru 는 터미널이므로 ⑵ 를 따라 내면 손해다.
@@ -357,7 +361,7 @@ WKWebView(WebKit)는 시스템 프레임워크라 의존성이 없지만 Chromiu
 | kitty 인코딩 전체 | PTY 를 건너야 한다 | 같은 기계의 IOSurface 직결. [io-render-present.md] §10.6 의 5.6MB/frame·25~40MB/s 가 그 세금의 실측치다 |
 | `pixel-react` (React reconciler 로 TUI 렌더) | TUI 를 직접 그려야 한다 | **Zig + Metal 이 이미 있다** |
 | Electron 런타임 | TypeScript 프로젝트라서 | Node 런타임은 우리에게 순수 부채. CEF 는 C API 라 `@cImport` 직결(suji 선례) |
-| `terminals/*.ts` 의 AppleScript 조작 | 남의 터미널 창을 열어야 한다 | [terminal-compatibility-policy.md] 가 이미 **위험으로 기록**했다(`TERM_PROGRAM` 위장이 남의 앱 자동화 표면을 빌리는 문제) |
+| `terminals/*.ts` 의 AppleScript 조작(#104 에서 upstream 도 지웠다) | 남의 터미널 창을 열어야 한다 | [terminal-compatibility-policy.md] 가 이미 **위험으로 기록**했다(`TERM_PROGRAM` 위장이 남의 앱 자동화 표면을 빌리는 문제) |
 
 **판단 보류 (결정에 실측이 더 필요)**
 
@@ -395,7 +399,7 @@ Maru.app (190MB, Chromium 0 바이트)
 - **기본 앱은 190MB 그대로**, 웹 백엔드를 켠 사용자만 ~240MB 를 받는다. §13.2 가 *"기본 앱에 CEF 를 넣지 않고 필요할 때 받는 선택 백엔드"* 라고 적고도 plugin ABI 로 표현 못 해 막혔던 그 형태가, 프로세스 경계로는 그냥 성립한다.
 - 배포는 **GitHub Releases + 매니페스트 한 겹**(`cef_version`·`chromium_version`·`maru_backend_abi`·`platform`·`arch`·`sha256`). maru 는 이미 거기서 dmg 를 주므로 새 인프라가 0 이고, 나중에 R2 로 옮겨도 앱 업데이트가 필요 없다. CEF 조달 파이프라인(Spotify CDN → 빌드)은 suji `release.yml` 에 검증된 선례가 있다.
 - **Homebrew 는 formula 로**(cask 아님). 앱은 `~/Library/Application Support/Maru/backends/…` 와 brew prefix **두 자리를 찾기만** 하고, 누가 설치했는지 모르게 둔다.
-- 최신 CEF 는 **154.0.23 / Chromium 154** (공식 빌드 인덱스 기준). suji 가 받아둔 것은 146 이다.
+- 최신 CEF 는 **154.0.23 / Chromium 154** (공식 빌드 인덱스 stable 채널 기준, 2026-09-23 재확인). suji 가 받아둔 것은 146 이고, **제품은 최신 안정판으로 간다** — ⑧ 이 버전에 따라 갈렸다.
 
 #### 분업 — WKWebView 는 남는다
 
@@ -408,7 +412,7 @@ WKWebView 는 **OSR 을 제공하지 않는다**. macOS SDK 의 WebKit 공개 �
 
 #### 남은 미해결 (도입 전 필수) — 막는 것은 없다
 
-**불가능하다고 판정된 항목은 없다.** 물리적으로 넘을 수 없는 것은 「기계를 건너 GPU 메모리를 공유하는 것」 하나이고, 그것은 ②의 결정으로 피한다. 나머지는 연결 작업, 선례가 있는 공사, 결정, 품질 손실을 감수하는 근사 중 하나다 — ⑧ 은 원인을 찾은 **알려진 문제**(CEF 결함)로 두고 지금은 고치지 않는다. 아래 분류는 **적대적으로 한 번 공격한 뒤** 남긴 것이다 — 처음 분류에서 「연결만」이라 했던 ⑥, 「손실은 핀치뿐」이라 했던 ④⑴, 「원격은 결정 하나로 사라진다」고 했던 ②가 과장이었고, ⑧⑨는 목록에서 빠져 있었다.
+**불가능하다고 판정된 항목은 없다.** 물리적으로 넘을 수 없는 것은 「기계를 건너 GPU 메모리를 공유하는 것」 하나이고, 그것은 ②의 결정으로 피한다. 나머지는 연결 작업, 선례가 있는 공사, 결정, 품질 손실을 감수하는 근사 중 하나다 — ⑧ 은 146 에서만 막혔고 **최신 안정판(154)에서는 연결 작업**이다(4 차 적대적 검증). 아래 분류는 **적대적으로 한 번 공격한 뒤** 남긴 것이다 — 처음 분류에서 「연결만」이라 했던 ⑥, 「손실은 핀치뿐」이라 했던 ④⑴, 「원격은 결정 하나로 사라진다」고 했던 ②가 과장이었고, ⑧⑨는 목록에서 빠져 있었다.
 
 | # | 항목 | 부류 | 크기 |
 |---|---|---|---|
@@ -419,7 +423,7 @@ WKWebView 는 **OSR 을 제공하지 않는다**. macOS SDK 의 WebKit 공개 �
 | ⑤ | 접근성(VoiceOver) | 공사 | **대** |
 | ⑥ | 크기 전파 | ⑦과 묶인 공사 | 중 |
 | ⑦ | 소유 버퍼 링과 반납 | 공사 | 중 |
-| ⑧ | 기본 `<select>` 가 안 열림 | **알려진 문제**(CEF 결함) — 보류 | 우회 소 / 근본 중 |
+| ⑧ | `<select>` 팝업 합성 | 연결(154). 146 에서는 안 열림 — 알려진 문제 | 소~중 |
 | ⑨ | JS 대화상자·파일 선택 | 실측 후 결정 | 소 |
 
 1. **`.app` 번들 배선** — 비-번들에서는 떴지만 번들 layout 에서는 렌더러가 안 떴다(함정 6). CEF 는 macOS 번들에서 helper 앱을 정해진 이름으로 요구한다. suji `bundle_macos.zig` 가 `{name} Helper`·`Helper (GPU)`·`Helper (Renderer)`·`Helper (Plugin)` 네 번들을 만들고 helper 바이너리를 메인 바이너리의 **hardlink** 로 둔다(codesign 이 symlink 는 거부한다) — 확인한 선례다. sidecar 가 `.app` 이어야 하는지는 여전히 설계 선택이다.
@@ -436,12 +440,10 @@ WKWebView 는 **OSR 을 제공하지 않는다**. macOS SDK 의 WebKit 공개 �
 5. **접근성(VoiceOver) — 가장 큰 공사.** 옛 서술 「CDP `getFullAXTree` 로 온다, 함께 풀린다」는 **에이전트가 읽는 트리**에만 맞다([control-plane-browser-session.md] §9.5.4 의 우회는 이 축에서 풀린다). **스크린리더에는 반대다** — WKWebView 는 접근성을 공짜로 주지만 OSR 픽셀에는 접근성 정보가 없다. 헤더(`set_accessibility_state`)가 명시한다: 창 없는 브라우저는 접근성이 **트리만(TreeOnly)** 켜지고 **플랫폼 접근성 객체를 만들지 않으며**, 클라이언트가 `on_accessibility_tree_change`·`on_accessibility_location_change` 로 직접 만들 수 있다. 즉 Chromium 접근성 트리를 받아 **NSAccessibility 요소 계층을 우리가 지어 붙여야** 한다. 헤더는 클라이언트가 스크린리더를 감지해 이 함수를 부르라고 하고, macOS 의 감지 예로 `AXEnhancedUserStructure` 속성을 든다(그 예는 창 있는 모드 문단에 있다). 트리 계산은 비용이 들므로 VoiceOver 가 켜졌을 때만 켠다.
 6. **크기 전파 — ⑦과 묶인다.** pane 크기가 바뀌면 `was_resized()`, 레티나 배율이 바뀌면 `notify_screen_info_changed()` 를 부르는 것 자체는 한 줄이다. 그러나 ⑦의 **소유 링은 view 크기에 묶여** 있어 크기가 바뀌면 링을 다시 만들어 다시 공유해야 하고, 드래그 리사이즈 중에는 그것이 초당 수십 번이 된다. 링을 넉넉한 크기로 잡고 부분 사각형만 쓰거나, 세대(generation)를 붙여 재할당을 늦추고 그동안은 옛 프레임을 늘여 보이는 방식(§3 의 async resize jitter 와 같은 자리)이 필요하다. 실험 배선은 이 경로가 없어 split 뒤 이미지가 옛 크기로 **잘려** 보였다(뷰포트 crop 덕에 옆 pane 은 안 덮었다).
 7. **소유 버퍼 링과 반납** — 위 「버퍼 소유권」. PoC 는 단일 버퍼라 tearing 이 가능하다. 3 슬롯이면 되지만 **GPU 완료 시점**을 지켜야 한다 — sidecar 는 blit 이 GPU 에서 끝난 뒤에 「준비」를 보내고, maru 는 그 슬롯을 샘플링한 command buffer 가 **완료된 뒤**(`addCompletedHandler`)에 「반납」을 보낸다. 인코딩 시점에 반납하면 GPU 가 아직 읽는 슬롯을 덮는다.
-8. **기본 `<select>` 가 안 열린다 — 알려진 문제(CEF 결함, 보류)** — 클릭·Space·Alt+↓·`showPicker()` 모두 드롭다운이 안 뜬다(실측 — 네 경우 모두 올바른 덤프로 확인했고, 덤프가 최신인지는 같은 덤프의 버튼 카운터로 보장했다. CPU 그리기 모드에서도 팝업 콜백 0 건). 원인은 소스로 좁혔다:
-   - macOS Chromium 의 `<select>` 는 브라우저가 띄우는 **네이티브 NSMenu**(external popup)와 Chromium 이 그리는 **내부 팝업** 둘 중 하나로 열린다. 창 없는 모드에는 NSMenu 를 붙일 창이 없어서, CEF 는 브라우저를 만들 때 renderer 에서 external popup 을 끈다(`chrome_content_renderer_client_cef.cc` 의 `SetUseExternalPopupMenus(web_view, !config.is_windowless)`).
-   - 그런데 Chromium 은 웹 설정을 적용할 때마다 그 값을 `should_disable_external_popups` 로 **덮어쓰고**(`web_view_impl.cc` 의 `ApplyWebPreferences`), 그 설정은 `WebContents::ForbidExternalPopupMenus()` 를 불러야만 켜진다(`web_contents_impl.cc` 의 `ComputeWebPreferences`). **CEF 는 이 함수를 부르지 않는다** — 146 커밋(`3ca6a87`) 트리 전체 `git grep` 0 건, master 코드 검색 0 건이고, 같은 검색으로 `SetUseExternalPopupMenus` 는 잡힌다. Chromium 에 넣는 CEF 패치에도 이 덮어쓰기를 막는 것이 없다. 덮어쓰기는 브라우저가 웹 설정을 보낼 때마다(`UpdateWebPreferences` → `ApplyWebPreferences`) 일어난다. **우리 실행에서 어느 시점에 되돌아갔는지는 재지 않았다** — 확인된 것은 경로의 존재와 결과(아래 근거대로 네이티브 경로를 탔다)다.
-   - 실측 근거: select 클릭 뒤에만 Blink 가 external popup 을 띄울 때 보내는 **합성 mouseup** 이 페이지에 찍힌다(`external_popup_menu.cc` 의 macOS 분기). 버튼 클릭 뒤에는 없다. `on_popup_show`·`PET_POPUP` 프레임은 0 건이다.
-   - **우회(확인됨)**: `appearance: base-select` 인 select 는 목록을 페이지 안에 그리므로 열리고 항목 선택(`change`)까지 된다. 모든 페이지에 주입하면 당장 쓸 수 있지만 사이트가 의도한 select 모양이 바뀐다.
-   - **근본(미검증)**: 창 없는 브라우저를 만들 때 `ForbidExternalPopupMenus()` 를 불러 브라우저 수명 동안 쥐는 CEF 수정 — CEF 자체 빌드나 업스트림 반영이 필요하다. 고쳐지면 팝업이 `on_popup_show`·`PET_POPUP` 으로 올 것으로 **예상**하고(내부 팝업 경로), 그러면 본 화면 위 합성이 따라온다(팝업 안 휠 스크롤에는 `get_screen_point` 도 필요 — 휠 API 헤더 주석). PoC 는 이제 팝업 프레임을 본 화면 버퍼에 쓰지 않는다.
+8. **`<select>` 팝업 — 154 에서는 합성만 남고, 146 에서는 안 열린다(버전 의존)**
+   - **154(최신 안정판, 제품 대상)**: 기본 `<select>` 를 누르면 `on_popup_show(1)` 과 위치(`on_popup_size` — select 바로 아래 53x91 DIP), `PET_POPUP` 프레임(106x182 px, 레티나 2 배)이 온다. 열린 팝업에서 키보드로 항목을 고르면 값이 바뀌고(`change`) 팝업이 닫힌다(`show=0`). `showPicker()` 로도 열린다(실측). **남은 일은 그 프레임을 본 화면 위에 합성하는 것** — 본 화면과 팝업 버퍼가 따로 바뀌므로 둘을 따로 들고 팝업을 늘 위에 그린다. 팝업 안 휠 스크롤에는 `get_screen_point` 도 필요하다(휠 API 헤더 주석, PoC 는 구현했다). PoC 는 팝업 프레임을 본 화면 버퍼에 쓰지 않도록만 막아 두었다(아직 화면에는 안 보인다).
+   - **146(suji 가 받아 둔 것) — 알려진 문제**: 클릭·Space·Alt+↓·`showPicker()` 모두 안 열린다(올바른 덤프로 확인, 덤프 최신성은 같은 덤프의 버튼 카운터로 보장). 팝업 콜백·`PET_POPUP` 은 0 건이고, select 클릭 뒤에만 Blink 가 **네이티브 NSMenu 경로(external popup)** 를 띄울 때 보내는 합성 mouseup 이 찍힌다(`external_popup_menu.cc` 의 macOS 분기) — 창이 없어 메뉴가 못 뜬 것이다. 우회로 `appearance: base-select` 는 146 에서도 열리고 선택까지 된다.
+   - **원인은 확정하지 못했다.** CEF 는 창 없는 브라우저에서 renderer 가 external popup 을 끄는데(`chrome_content_renderer_client_cef.cc`), Chromium 은 웹 설정을 보낼 때마다 그 값을 `should_disable_external_popups` 로 덮어쓰고(`web_view_impl.cc`) 그 설정은 `ForbidExternalPopupMenus()` 로만 켜진다 — CEF 는 146(`3ca6a87` 트리 전체)·154(`062ebe4`)·master 모두 이 함수를 부르지 않는다. 그래서 3 차 검증까지는 이 덮어쓰기를 146 의 원인으로 적었는데, **154 도 CEF·Blink 해당 코드가 같은데 내부 팝업 경로를 탄다** — 이 가설은 버전 차이를 설명하지 못한다. 확인된 것은 관측(146 은 네이티브 경로, 154 는 내부 경로)뿐이다.
 9. **JS 대화상자·파일 선택(목록에서 빠져 있었다)** — `alert`/`confirm` 과 `<input type=file>` 은 CEF 기본 구현이 있다(`on_jsdialog` 가 0 을 돌려주면 기본 대화상자). 창 없는 모드에서 기본 구현이 어디에 어떻게 뜨는지는 **실측 전**이다. maru chrome 모달로 받는 쪽이 모달 게이트(위 「호스트가 라우팅을 든다」)와 맞는다.
 
 ### 13.2 이하 — on-screen CEF 전제의 옛 서술 (보존)

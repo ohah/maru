@@ -6008,9 +6008,10 @@ original source로 복원하고 marked text를 비운 뒤 CR6c와 같은 실제 
 drift, marker 0/2+, stale historical replay, 직접 ABI input 호출은 실패다. 이 gate는 IME·clipboard 연속성을 닫지만
 stalled socket/backoff, 장시간 soak와 성능 예산은 이 CR6d 계약 밖이며 CR6e가 소유한다.
 
-CR6d의 AppKit child는 실행 파일을 테스트 러너가 직접 `execve`하지 않고, 완성된 `Maru.app` 번들을
+CR6d의 AppKit child는 실행 파일을 테스트 러너가 직접 `execve`하지 않고, 제품 `Maru.app`의
+실행 파일·리소스를 그대로 담은 격리 테스트 번들을
 LaunchServices의 새 인스턴스로 열어 종료까지 기다린다. Screen Recording TCC는 요청 프로세스뿐 아니라
-responsible process도 판정하므로 SSH·터미널 테스트 러너가 직접 낳은 앱은 사용자가 `Maru.app`에 부여한 권한과
+responsible process도 판정하므로 SSH·터미널 테스트 러너가 직접 낳은 앱은 사용자가 앱에 부여한 권한과
 다른 귀속으로 거부될 수 있다. 하네스가 준비한 격리 환경은 LaunchServices child에 그대로 전달하며, 앱의 실제
 PID·frontmost PID와 결과는 기존 summary 및 artifact로 판정한다. 수동 입력 스모크에서
 Screen Recording preflight가 실패하면 이 서명된 앱 프로세스가
@@ -6023,14 +6024,25 @@ OS 대화상자의 표시나 승인 여부를 대신 증명하지 않는다.
 권한 확인 전에 변경하거나 읽지 않는다. 이 예외는 Screen Recording과 전역 HID를 함께
 검증하는 CR6d에만 적용하며, 제품에 테스트 전용 launch 진입점을 추가하지 않는다. 격리 HOME·config·artifact는
 macOS의 Documents 폴더 권한을 테스트 전제에 섞지 않도록 `/tmp` 아래의 CR6d 전용 루트에 두고, 웹 자산은 실제
-앱 번들 리소스를 사용한다. 실행할 서명된 앱 번들도 byte-preserving 방식으로 같은 `/tmp` 전용 부모에 staging해
-LaunchServices가 저장소의 Documents 경로를 열지 않게 한다. 이미 staging된 앱이 새 제품 번들과 recursive byte
-comparison으로 같으면 그 bundle inode를 보존해 동일 빌드에 부여된 TCC code requirement를 불필요하게 폐기하지
-않는다. 내용이 다를 때만 staging 앱을 교체하며, staging 전후 code-sign 검증이 실패하면 앱을 열지 않는다.
+앱 번들 리소스를 사용한다. 제품 앱은 그대로 두고 사용자의 `~/Applications/MaruCR6DInputSmoke.app`에
+복사한 **CR6d 전용 테스트 번들**의
+`CFBundleIdentifier`를 `dev.maru.apphost.cr6d-input-smoke`, `CFBundleDisplayName`을 `Maru CR6D Test`로
+바꾼 뒤 바깥 번들을 ad-hoc 재서명한다. 권한 설정에서 실사용 Maru와 구분하고, staging을 strict/deep 검증한 뒤
+LaunchServices에 그 exact URL을 등록하고, ID lookup이 같은 경로로 돌아와야 앱을 연다. `/tmp`의 새 번들 ID는
+실제로 TCC 설정의 `kLSApplicationNotFoundErr`와 preflight 거부를 낳았으므로 사용하지 않는다. 앱 경로만
+사용자 Applications에 두고 격리 HOME·config·artifact 및 runtime cwd는 계속 `/tmp` 전용 루트다.
+서명 전에는 제품 번들과 byte equality여야 한다. 재서명은 메인 실행 파일의 signature blob도 바꿀 수 있으므로,
+서명 뒤에는 내부 helper·리소스 byte equality와 strict/deep signature를 다시 확인한다. 전용 ID는 이 opt-in fixture 외의 제품·배포 경로에
+들어가지 않는다. 이렇게 해야 실사용 `dev.maru.apphost`의 Screen Recording 권한을 테스트 빌드의 CDHash 변화로
+오염시키거나 초기화하지 않는다. 새 빌드의 테스트 번들은 다시 승인해야 할 수 있다. 같은 제품 빌드에서 만들어진
+전용 번들이 기존 staging 결과와 recursive byte comparison으로 같으면 그 bundle inode를 보존한다. 다를 때만
+전용 staging 앱을 교체하며, 원본·staging 전후 strict/deep code-sign 검증, 전용 bundle ID와 서명 전
+제품 번들 byte equality가 실패하면 앱을 열지 않는다. 테스트 전용 식별자로 얻은 권한·증거는 배포용 서명 신원의
+권한 검증을 대신하지 않는다.
 로컬 TCC 승인 뒤 재검증은 `build-macos-session-host-cr6c-appkit-smoke-harness`로 하네스만
 `zig-out/bin`에 설치할 수 있다. 이 단계는 제품 app bundle build·copy·sign에 의존하지 않으므로 이미 승인한 staging
 app의 ad-hoc CDHash를 바꾸지 않는다. 제품 코드가 바뀌었다면 이 우회 경로로 낡은 앱을 통과시켜서는 안 되며,
-정상 gate로 새 앱을 staging한 뒤 새 CDHash에 권한을 승인해야 한다.
+정상 gate로 새 전용 앱을 staging한 뒤 새 CDHash에 권한을 승인해야 한다.
 LaunchServices child에는 하네스만 소비하는 원본 app/product/restore-helper 실행파일 경로를 전달하지 않는다. 제품
 child가 실제로 소비하는 격리 root·config·summary·smoke mode만 상속해 불필요한 Documents TCC 요청을 막는다.
 또한 `open`을 실행하기 전에 child working directory를 `/`로 닫아 하네스의 저장소 cwd가 앱의 파일 접근 귀속으로

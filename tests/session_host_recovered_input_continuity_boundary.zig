@@ -62,6 +62,46 @@ test "CR6d 수동 TCC 요청은 preflight 실패 뒤 input source 변경 전에�
     try std.testing.expect(preflight_start < source_change);
 }
 
+test "CR6d 전용 TCC 식별자는 제품 앱과 권한을 보존하고 검증된 staging에만 쓰인다" {
+    const allocator = std.testing.allocator;
+    const stage = try read(allocator, "tools/session-host/stage-cr6d-input-app.sh");
+    defer allocator.free(stage);
+    const registration = try read(allocator, "tools/session-host/register-cr6d-input-app.swift");
+    defer allocator.free(registration);
+    const build = try build_source.read(allocator);
+    defer allocator.free(build);
+    const ci = try read(allocator, ".github/workflows/ci.yml");
+    defer allocator.free(ci);
+    const gate = between(build, "const session_host_cr6d_appkit_step =", "const macos_app_smoke_step =") orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), count(gate, "tools/session-host/stage-cr6d-input-app.sh"));
+    try std.testing.expectEqual(@as(usize, 1), count(gate, "Applications/MaruCR6DInputSmoke.app"));
+    try std.testing.expectEqual(@as(usize, 0), count(stage, "tccutil"));
+    try std.testing.expectEqual(@as(usize, 1), count(stage, "if [ -L \"$target_app\" ]; then"));
+    try std.testing.expectEqual(@as(usize, 3), count(stage, "dev.maru.apphost.cr6d-input-smoke"));
+    try std.testing.expectEqual(@as(usize, 1), count(stage, "Set :CFBundleDisplayName Maru CR6D Test"));
+    try std.testing.expectEqual(@as(usize, 2), count(stage, "swift tools/session-host/register-cr6d-input-app.swift \"$target_app\""));
+    try std.testing.expectEqual(@as(usize, 1), count(registration, "LSRegisterURL(appURL as CFURL, true)"));
+    try std.testing.expectEqual(@as(usize, 1), count(registration, "NSWorkspace.shared.urlForApplication(withBundleIdentifier: expectedID)"));
+    try std.testing.expectEqual(@as(usize, 1), count(stage, "codesign --verify --strict --deep \"$source_app\""));
+    try std.testing.expectEqual(@as(usize, 1), count(stage, "diff -qr \"$source_app\" \"$candidate_app\""));
+    try std.testing.expectEqual(@as(usize, 1), count(stage, "codesign --force --sign - \"$candidate_app\""));
+    try std.testing.expectEqual(@as(usize, 1), count(stage, "codesign --verify --strict --deep \"$candidate_app\""));
+    try std.testing.expectEqual(@as(usize, 1), count(stage, "diff -qr \"$source_app/Contents/Helpers\" \"$candidate_app/Contents/Helpers\""));
+    try std.testing.expectEqual(@as(usize, 1), count(stage, "diff -qr \"$source_app/Contents/Resources\" \"$candidate_app/Contents/Resources\""));
+    const product_verify = std.mem.indexOf(u8, stage, "codesign --verify --strict --deep \"$source_app\"") orelse return error.TestUnexpectedResult;
+    const source_equal = std.mem.indexOf(u8, stage, "diff -qr \"$source_app\" \"$candidate_app\"") orelse return error.TestUnexpectedResult;
+    const bundle_id_change = std.mem.indexOf(u8, stage, "Set :CFBundleIdentifier") orelse return error.TestUnexpectedResult;
+    const candidate_sign = std.mem.indexOf(u8, stage, "codesign --force --sign - \"$candidate_app\"") orelse return error.TestUnexpectedResult;
+    const candidate_verify = std.mem.indexOf(u8, stage, "codesign --verify --strict --deep \"$candidate_app\"") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(product_verify < source_equal);
+    try std.testing.expect(source_equal < bundle_id_change);
+    try std.testing.expect(bundle_id_change < candidate_sign);
+    try std.testing.expect(candidate_sign < candidate_verify);
+    try std.testing.expectEqual(@as(usize, 1), count(ci, "CR6d 전용 테스트 번들 staging 무권한 검증"));
+    try std.testing.expectEqual(@as(usize, 2), count(ci, "sh tools/session-host/stage-cr6d-input-app.sh zig-out/Maru.app \"$HOME/Applications/MaruCR6DInputSmoke.app\""));
+}
+
 test "CR6d 경계는 exact recovered screen probe와 actual AppKit input smoke만 연다" {
     const allocator = std.testing.allocator;
     const build = try build_source.read(allocator);
@@ -206,12 +246,12 @@ test "CR6d 경계는 exact recovered screen probe와 actual AppKit input smoke�
     try std.testing.expectEqual(@as(usize, 1), count(gate, "session_host_input_smoke_post_event_access=true"));
     try std.testing.expectEqual(@as(usize, 1), count(gate, "session_host_input_smoke_source_record_cleared=true"));
     try std.testing.expectEqual(@as(usize, 1), count(gate, "MARU_SESSION_HOST_CR6D_INPUT_SOURCE_RESTORE_EXE"));
-    try std.testing.expectEqual(@as(usize, 1), count(gate, "run_session_host_cr6d_boundary_tests.addArg(\"--maru-expect-tests=6\");"));
+    try std.testing.expectEqual(@as(usize, 1), count(gate, "run_session_host_cr6d_boundary_tests.addArg(\"--maru-expect-tests=7\");"));
     var graph = try build_graph.parse(allocator);
     defer graph.deinit();
     // 실행 인자도 **구조로** 센다 — 문자열은 호출이 줄바꿈되거나 receiver 이름이
     // 바뀌면 죽고, 그 죽음이 「인자가 없다」와 구분되지 않는다.
-    try std.testing.expectEqual(@as(usize, 1), graph.countArgs("run_session_host_cr6d_global_boundary_tests", "--maru-expect-tests=6"));
+    try std.testing.expectEqual(@as(usize, 1), graph.countArgs("run_session_host_cr6d_global_boundary_tests", "--maru-expect-tests=7"));
 
     // v2a의 판정자는 기본 test graph에 고정된 순수 consumer다. 실제 AppKit producer가 붙기 전에도
     // identity/세대/anchor/PPM digest와 관심 영역 계약이 사라지거나 파일 I/O를 직접 열 수 없다.
@@ -446,10 +486,10 @@ test "CR6d AppKit child는 TCC responsible identity를 앱 번들에 귀속한�
     ) != null);
     try std.testing.expectEqual(@as(usize, 0), count(gate, "MARU_WEB_APP_ROOT"));
     try std.testing.expectEqual(@as(usize, 1), count(gate, "MARU_MACOS_APP_SMOKE_MS\", \"60000"));
-    try std.testing.expectEqual(@as(usize, 1), count(gate, "/usr/bin/ditto zig-out/Maru.app"));
-    try std.testing.expectEqual(@as(usize, 1), count(gate, "/usr/bin/diff -qr zig-out/Maru.app"));
+    try std.testing.expectEqual(@as(usize, 1), count(gate, "sh tools/session-host/stage-cr6d-input-app.sh zig-out/Maru.app"));
     try std.testing.expectEqual(@as(usize, 1), count(gate, "/usr/bin/codesign --verify --strict"));
-    try std.testing.expectEqual(@as(usize, 1), count(gate, "\"/tmp/maru-macos-app/Maru.app\""));
+    try std.testing.expectEqual(@as(usize, 1), count(gate, "session_host_cr6d_fixture.addArg(session_host_cr6d_test_app)"));
+    try std.testing.expectEqual(@as(usize, 1), count(gate, "run_session_host_cr6d_appkit.setEnvironmentVariable(\n            \"MARU_SESSION_HOST_CR6D_APP_BUNDLE\",\n            session_host_cr6d_test_app"));
     var graph = try build_graph.parse(allocator);
     defer graph.deinit();
     // 스텝 선언을 **구조로** 센다 — 문자열은 설명문·인자에 적힌 같은 이름도 세고,

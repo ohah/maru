@@ -1324,6 +1324,9 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    동기식 Zig C ABI에 빌려준다. Zig가 schema/window/byte cap을 선검증하고 기존 pure reducer·series validator와 canonical
    writer를 직접 소유한다. raw inventory 중간 파일, Swift 선택 규칙 복제, 장수명 helper, ABI retry/부분 publication은 0이다.
    Screen Recording preflight 실패는 ABI 호출과 source/HID mutation 0인 AppKit smoke의 typed `not_provisioned`로 끝나며,
+   실제 제품 실행 파일·리소스를 쓰되 Screen Recording TCC는 실사용 Maru와 분리된
+   `dev.maru.apphost.cr6d-input-smoke` 테스트 번들에 귀속한다. 이 번들은 사용자 Applications에
+   staging·LaunchServices 등록해 TCC의 ID lookup을 선검증한다. 원본 앱과 그 권한은 변경하지 않는다.
    Zig ABI 자체는 `passed`/`failed`만 반환한다. v2b0b green은 v2b1 단일-window
    pixel capture를 완료로 승격하지 않는다. **v2b1 구현 중:** 첫 opened inventory의 완전본은 기존 Zig reducer가
    exact candidate window ID를 고른 뒤에만 Swift ScreenCaptureKit adapter로 돌아간다. adapter는 그 ID 하나의

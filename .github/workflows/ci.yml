@@ -639,6 +639,20 @@ jobs:
       - name: keep-alive recovered-session 스모크
         if: ${{ !cancelled() }}
         run: mise run macos-session-host-recovery-smoke
+      # TCC를 요청하지 않고도 제품 번들 보존, 전용 ID/서명, 동일 빌드의 inode 재사용을
+      # 실제 macOS codesign으로 확인한다. WindowServer 권한/후보창 판정은 로컬 수동 gate다.
+      - name: CR6d 전용 테스트 번들 staging 무권한 검증
+        run: |
+          set -eu
+          product_before=$(codesign -dv --verbose=4 zig-out/Maru.app 2>&1 | sed -n 's/^CDHash=//p')
+          test -n "$product_before"
+          sh tools/session-host/stage-cr6d-input-app.sh zig-out/Maru.app "$HOME/Applications/MaruCR6DInputSmoke.app"
+          staged_inode=$(/usr/bin/stat -f '%i' "$HOME/Applications/MaruCR6DInputSmoke.app")
+          sh tools/session-host/stage-cr6d-input-app.sh zig-out/Maru.app "$HOME/Applications/MaruCR6DInputSmoke.app"
+          test "$staged_inode" = "$(/usr/bin/stat -f '%i' "$HOME/Applications/MaruCR6DInputSmoke.app")"
+          test "$product_before" = "$(codesign -dv --verbose=4 zig-out/Maru.app 2>&1 | sed -n 's/^CDHash=//p')"
+          test "$('/usr/libexec/PlistBuddy' -c 'Print :CFBundleIdentifier' "$HOME/Applications/MaruCR6DInputSmoke.app/Contents/Info.plist")" = dev.maru.apphost.cr6d-input-smoke
+          codesign --verify --strict --deep "$HOME/Applications/MaruCR6DInputSmoke.app"
       # 저장된 ended tombstone을 실제 AppKit 제품이 capture→atomic checkpoint한 결과로 다시 두 번
       # 띄운다. 두 실행 모두 셸 child 0이어야 하므로 unit의 restoreSpawn sentinel보다 강한 제품 경계다.
       - name: durable tombstone 다회 재실행 스모크

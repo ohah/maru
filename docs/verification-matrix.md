@@ -643,6 +643,14 @@ Swift-side 후보 판정, 장수명 child, ABI 재시도·부분 artifact는 허
 `not_provisioned`이며 Zig ABI 자체는 `passed`/`failed`만 반환한다. 수동 입력 스모크만 이 실패 지점에서
 서명된 앱 자신의 `CGRequestScreenCaptureAccess()`를 한 번 호출하고 같은 회차를 RED로 끝낸다. 비수동 스모크는
 권한을 요청하지 않으며, 승인 후 새 회차의 preflight 통과만 green이다. 이 행의 green은 v2b1 pixel gate를 닫지 않는다.
+권한 충돌 방지를 위해 CR6d fixture는 제품 실행 파일·리소스가 같은 전용 번들 ID
+`dev.maru.apphost.cr6d-input-smoke`로만 LaunchServices 실행한다. 제품 `dev.maru.apphost`의 TCC 기록은
+초기화하거나 변경하지 않는다. 제품 번들의 서명 전 byte equality, 전용 번들의 code-sign·ID,
+서명 뒤 내부 helper·리소스 equality와 사용자 Applications의 exact LaunchServices ID lookup을 검증하며,
+이 증거는 배포 서명 신원의 권한 동작을 대신하지 않는다.
+CI macOS keep-alive 잡은 제품 bundle build 뒤 전용 staging을 두 번 수행하여 서명·전용 ID·제품 CDHash 불변·
+동일 빌드 staging inode 보존을 무권한으로 검증한다. 실제 Screen Recording TCC와 IME 후보 픽셀은
+잠금 해제된 로컬 Aqua 수동 gate가 별도로 닫는다.
 v2b0은 Screen Recording preflight를 source/HID mutation보다 먼저 수행하고 후보 요청 전후 전체 on-screen window inventory
 snapshot(시점당 최대 256, cap+1은 drop 없이 실패)을 pure reducer에 넘긴다. reducer의 차집합에서
 title·후보 문자열·pixel을 제외한 ID/owner PID·bundle ID/Apple signing validity·signing identifier/layer/bounds/TIS source ID만

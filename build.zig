@@ -3249,16 +3249,21 @@ pub fn build(b: *std.Build) void {
             "Run actual AppKit recovered-session IME and OS clipboard continuity smoke",
         );
         const session_host_cr6d_home = "/tmp/maru-macos-app/session-host-cr6d-home";
+        const session_host_cr6d_user_home = b.graph.environ_map.get("HOME") orelse @panic("CR6d staging requires HOME");
+        if (!std.fs.path.isAbsolute(session_host_cr6d_user_home) or std.mem.eql(u8, session_host_cr6d_user_home, "/"))
+            @panic("CR6d staging requires an absolute user home");
+        const session_host_cr6d_test_app = b.fmt("{s}/Applications/MaruCR6DInputSmoke.app", .{session_host_cr6d_user_home});
         const session_host_cr6d_fixture = b.addSystemCommand(&.{
-            "sh", "-eu", "-c",
+            "sh",         "-eu", "-c",
             "root=/tmp/maru-macos-app/session-host-cr6d-home; " ++
-                "app=/tmp/maru-macos-app/Maru.app; " ++
+                "app=\"$1\"; " ++
                 "rm -rf \"$root\"; mkdir -p \"$root/captures\" \"$root/.config/maru\"; " ++
                 "printf '%s\\n' 'session.keep-alive-after-quit = true' 'input.option-as-meta = false' > \"$root/.config/maru/config\"; " ++
-                "if test -d \"$app\" && /usr/bin/diff -qr zig-out/Maru.app \"$app\" >/dev/null; then :; " ++
-                "else rm -rf \"$app\"; /usr/bin/ditto zig-out/Maru.app \"$app\"; fi; " ++
+                "sh tools/session-host/stage-cr6d-input-app.sh zig-out/Maru.app \"$app\"; " ++
                 "/usr/bin/codesign --verify --strict \"$app\"",
+            "cr6d-stage",
         });
+        session_host_cr6d_fixture.addArg(session_host_cr6d_test_app);
         session_host_cr6d_fixture.setCwd(b.path("."));
         const run_session_host_cr6d_appkit = b.addRunArtifact(session_host_cr6c_appkit_harness);
         run_session_host_cr6d_appkit.setCwd(b.path("."));
@@ -3268,7 +3273,7 @@ pub fn build(b: *std.Build) void {
         );
         run_session_host_cr6d_appkit.setEnvironmentVariable(
             "MARU_SESSION_HOST_CR6D_APP_BUNDLE",
-            "/tmp/maru-macos-app/Maru.app",
+            session_host_cr6d_test_app,
         );
         run_session_host_cr6d_appkit.setEnvironmentVariable(
             "MARU_SESSION_HOST_CR6C_PRODUCT_EXE",
@@ -3310,7 +3315,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"CR6d"},
         });
         const run_session_host_cr6d_boundary_tests = b.addRunArtifact(session_host_cr6d_boundary_tests);
-        run_session_host_cr6d_boundary_tests.addArg("--maru-expect-tests=6");
+        run_session_host_cr6d_boundary_tests.addArg("--maru-expect-tests=7");
         run_session_host_cr6d_boundary_tests.setCwd(b.path("."));
         run_session_host_cr6d_appkit.step.dependOn(&run_session_host_cr6d_boundary_tests.step);
         const session_host_cr6d_preedit_incremental_tests = addProjectTest(b, .{
@@ -5405,7 +5410,7 @@ pub fn build(b: *std.Build) void {
         .filters = &.{"CR6d"},
     });
     const run_session_host_cr6d_global_boundary_tests = b.addRunArtifact(session_host_cr6d_global_boundary_tests);
-    run_session_host_cr6d_global_boundary_tests.addArg("--maru-expect-tests=6");
+    run_session_host_cr6d_global_boundary_tests.addArg("--maru-expect-tests=7");
     run_session_host_cr6d_global_boundary_tests.setCwd(b.path("."));
     boundary_step.dependOn(&run_session_host_cr6d_global_boundary_tests.step);
     const session_host_cr6e_boundary_tests = addProjectTest(b, .{

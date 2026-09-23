@@ -2180,6 +2180,22 @@ test "SYN42 조상 범위 — 안쪽부터 뿌리까지, 같은 범위는 한 �
         try std.testing.expect(has_expr);
         try std.testing.expectEqual(@as(u32, 0), out.items[out.items.len - 1].start); // 마지막은 뿌리
     }
+    // **부모가 자식과 같은 범위면 한 번만** — 끝 개행이 없는 문서는 뿌리와 그 선언이 같은 byte 를 덮는다. 위 세 픽스처에는 그런 쌍이 없어
+    // 거름을 빼도 초록이었다(적대적 2회차 T1b) — 그 쌍이 **실제로 있는지** 먼저 단언하고 잰다.
+    {
+        const src = "const x = 1;";
+        var prov = Provider.init(src, .zig, 0) orelse return error.NoProvider;
+        defer prov.deinit();
+        const root = c.ts_tree_root_node(prov.tree.?);
+        const first = c.ts_node_child(root, 0);
+        try std.testing.expectEqual(c.ts_node_start_byte(root), c.ts_node_start_byte(first));
+        try std.testing.expectEqual(c.ts_node_end_byte(root), c.ts_node_end_byte(first));
+        const one: u32 = @intCast(std.mem.indexOfScalar(u8, src, '1').?);
+        try prov.enclosingRanges(allocator, one, one + 1, &out);
+        for (out.items[1..], 0..) |r, i| try std.testing.expect(!(r.start == out.items[i].start and r.end == out.items[i].end));
+        try std.testing.expectEqual(@as(u32, 0), out.items[out.items.len - 1].start);
+        try std.testing.expectEqual(@as(u32, src.len), out.items[out.items.len - 1].end);
+    }
     // 트리가 없으면 빈 목록(끊긴 여는 파싱 · 상한 초과 — §2.1a). 앞 내용이 남아 있어도 비운다.
     var empty = Provider.init("", .zig, 0) orelse return error.NoProvider;
     defer empty.deinit();

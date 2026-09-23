@@ -2188,6 +2188,27 @@ test "SYN42 조상 범위 — 안쪽부터 뿌리까지, 같은 범위는 한 �
     try std.testing.expectEqual(@as(usize, 0), out.items.len);
 }
 
+test "SYN43 조상 범위 상한 — 아주 깊은 트리에서도 max_enclosing 에서 멈춘다 (tooling §8.2q)" {
+    const allocator = std.testing.allocator;
+    // `(` 를 상한보다 깊게 겹친 식 — 단마다 서로 다른 범위다.
+    var src: std.ArrayList(u8) = .empty;
+    defer src.deinit(allocator);
+    try src.appendSlice(allocator, "const x = ");
+    var i: usize = 0;
+    while (i < Provider.max_enclosing + 50) : (i += 1) try src.append(allocator, '(');
+    try src.append(allocator, '1');
+    i = 0;
+    while (i < Provider.max_enclosing + 50) : (i += 1) try src.append(allocator, ')');
+    try src.appendSlice(allocator, ";\n");
+    var prov = Provider.init(src.items, .zig, 0) orelse return error.NoProvider;
+    defer prov.deinit();
+    const one: u32 = @intCast(std.mem.indexOfScalar(u8, src.items, '1').?);
+    var out: std.ArrayList(Provider.ByteRange) = .empty;
+    defer out.deinit(allocator);
+    try prov.enclosingRanges(allocator, one, one + 1, &out);
+    try std.testing.expectEqual(Provider.max_enclosing, out.items.len);
+}
+
 test "SYN27 이름 없는 노드는 심볼이 아니다 — zig 익명 test 블록이 목록에 안 든다" {
     // **이름 없는 심볼은 심볼이 아니다**(§7.5) — 목록의 항목은 이름을 가져야 클릭할 수 있다.
     // 그 규율은 `symbolNameNode` 가 null 을 내면 건너뛰는 한 줄인데, **표본에 이름 없는 노드가

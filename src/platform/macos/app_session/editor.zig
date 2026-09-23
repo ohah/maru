@@ -13571,7 +13571,7 @@ test "DSY5 심볼 2층 — provider 가 없으면 묻지 않고, 빈 목록·평
     }
 }
 
-/// DHL 판정자용 대기 — 강조가 `n` 번 적용될 때까지.
+/// OCH 판정자용 대기 — 강조가 `n` 번 적용될 때까지.
 fn highlightApplied(f: *SmtFixture, want: u64) bool {
     const Ctx = struct { t: *Term, n: u64 };
     return pumpLspUntil(&f.fx, 3000, Ctx{ .t = f.term, .n = want }, struct {
@@ -13581,7 +13581,7 @@ fn highlightApplied(f: *SmtFixture, want: u64) bool {
     }.g);
 }
 
-test "DHL3 같은 낱말 강조 — caret 이 낱말에 멈추면 묻고 응답 범위가 마크로 서며(가장 약한 배경), 선택이 있으면 묻지 않고, 다른 낱말로 가면 사라지고 다시 묻는다 (제품 경계, §8.2p·§5.1a)" {
+test "OCH3 같은 낱말 강조 — caret 이 낱말에 멈추면 묻고 응답 범위가 마크로 서며(가장 약한 배경), 선택이 있으면 묻지 않고, 다른 낱말로 가면 사라지고 다시 묻는다 (제품 경계, §8.2p·§5.1a)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     // `alpha` 가 둘, 부분 일치 `alphax` 가 하나(가짜도 낱말 경계를 본다 — 그것이 검색과 갈리는 자리다).
@@ -13625,6 +13625,39 @@ test "DHL3 같은 낱말 강조 — caret 이 낱말에 멈추면 묻고 응답 
         try testing.expectEqual(@as(u32, @intCast(first)), w.start);
         try testing.expectEqual(@as(usize, 2), highlight_client.spans(term).len); // 같은 낱말이라 들고 있던 답 그대로
     }
+    // ⑶-c **낱말 밖으로 갔다가 돌아오면 요청 없이 다시 선다**(적대적 B9 가 드러낸 결함 — 비우면 `fresh` 때문에 영영 안 떴다).
+    {
+        const space = std.mem.indexOf(u8, content, "=").?; // 낱말에 **닿지 않는** 자리(양옆이 공백인 `=`)
+        term.rt.editor_selection = .{ .anchor_start = space, .anchor_end = space, .focus = space };
+        _ = syntaxColors(s, term);
+        try testing.expectEqual(@as(usize, 0), highlight_client.spans(term).len); // 낱말 밖 — 안 그린다
+        const sent_before = s.editor_lsp.sent_highlight;
+        term.rt.editor_selection = .{ .anchor_start = first + 1, .anchor_end = first + 1, .focus = first + 1 };
+        _ = syntaxColors(s, term);
+        try testing.expectEqual(@as(usize, 2), highlight_client.spans(term).len); // 돌아오면 그대로 뜬다
+        try testing.expectEqual(sent_before, s.editor_lsp.sent_highlight); // **다시 묻지 않는다**
+    }
+    // ⑶-d **프레임에 실제로 그려진다** — 마크 빌더를 직접 부르는 것만으로는 「배선이 붙었나」를 못 잰다(적대적 C5). 그려진 quad 에서
+    //    `occurrence` 색·알파를 세고(둘), 그 알파가 **검색보다 흐린지**(C8)까지 본다.
+    {
+        s.gpu_quads.clearRetainingCapacity();
+        var d = appendPaneFrame(s, f.leaf, term) orelse return error.EditorPaneDidNotDraw;
+        d.dl.deinit(allocator);
+        const want = s.buildChromeTokens().get(.occurrence);
+        var n: usize = 0;
+        for (s.gpu_quads.items) |q| {
+            const alpha: u8 = @intCast(q.fill_color0 >> 24);
+            if (alpha != chrome_editor.frame.occurrence_alpha) continue;
+            const rgb: maru.terminal.Rgb = .{
+                .r = @intCast((q.fill_color0 >> 16) & 0xFF),
+                .g = @intCast((q.fill_color0 >> 8) & 0xFF),
+                .b = @intCast(q.fill_color0 & 0xFF),
+            };
+            if (std.meta.eql(rgb, want)) n += 1;
+        }
+        try testing.expectEqual(@as(usize, 2), n);
+        try testing.expect(chrome_editor.frame.occurrence_alpha < chrome_editor.frame.search_alpha);
+    }
     // ⑷ **선택이 생기면** 묻지도 그리지도 않는다(그 칸은 선택이 이긴다).
     term.rt.editor_selection = .{ .anchor_start = first, .anchor_end = first + 5, .focus = first + 5 };
     try testing.expect(highlight_client.wordAtCaret(term) == null);
@@ -13648,10 +13681,12 @@ test "DHL3 같은 낱말 강조 — caret 이 낱말에 멈추면 묻고 응답 
     // ⑹ 같은 낱말에 머무는 동안엔 또 안 묻는다.
     _ = syntaxColors(s, term);
     try testing.expectEqual(@as(u64, 2), s.editor_lsp.sent_highlight);
-    // ⑺ 편집하면 **버린다** — 그 뒤 조용해지면 다시 묻는다.
+    // ⑺ 편집하면 **버린다** — 저장소 자체가 비어야 한다(`spans()` 의 version 대조에 가려지지 않게). 그 뒤 조용해지면 다시 묻는다.
+    const cleared_before = term.rt.editor_highlight.cleared;
     try testing.expect(insertText(s, term, "x"));
     try testing.expectEqual(@as(usize, 0), highlight_client.spans(term).len);
-    try testing.expect(term.rt.editor_highlight.cleared >= 1);
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_highlight.spans.items.items.len);
+    try testing.expectEqual(cleared_before + 1, term.rt.editor_highlight.cleared);
     {
         const t0 = s.awakeMs();
         while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
@@ -13660,7 +13695,7 @@ test "DHL3 같은 낱말 강조 — caret 이 낱말에 멈추면 묻고 응답 
     try testing.expectEqual(@as(u64, 3), s.editor_lsp.sent_highlight);
 }
 
-test "DHL4 같은 낱말 강조 — provider 가 없으면 묻지 않고, 빈 응답·오류는 강조 없음이며, 낡은 낱말로 온 답은 버린다 (제품 경계, §8.2p)" {
+test "OCH4 같은 낱말 강조 — provider 가 없으면 묻지 않고, 빈 응답·오류는 강조 없음이며, 낡은 낱말로 온 답은 버린다 (제품 경계, §8.2p)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     // ⑴ provider 없음.
@@ -13719,7 +13754,50 @@ test "DHL4 같은 낱말 강조 — provider 가 없으면 묻지 않고, 빈 �
         _ = syntaxColors(s, f.term);
         try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_highlight);
     }
-    // ⑷ **낡은 낱말** — 요청이 나간 뒤 caret 을 옮기면 그 답은 지금 낱말을 말하지 않는다: 버린다.
+    // ⑷ **비교 뷰에서는 묻지도 그리지도 않는다**(§5.1a — 축이 다르다).
+    {
+        var f = (try SmtFixture.open(allocator, "hd.c", "int alpha = 1;\nint beta = alpha;\n")) orelse return error.SkipZigTest;
+        defer f.close(allocator);
+        const s = f.fx.session;
+        try testing.expect(f.ready());
+        const at = std.mem.indexOf(u8, f.term.rt.editor_doc.?.file.content, "alpha").? + 1;
+        f.term.rt.editor_selection = .{ .anchor_start = at, .anchor_end = at, .focus = at };
+        f.term.rt.editor_diff = .{}; // 비교 상태만 세운다 — 이 가드를 지나기에 충분하다
+        defer f.term.rt.editor_diff = null;
+        {
+            const t0 = s.awakeMs();
+            while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
+        }
+        highlight_client.tick(s, f.term);
+        try testing.expectEqual(@as(u64, 0), s.editor_lsp.sent_highlight);
+        try testing.expect(buildOccurrenceMarks(s, f.term) == null);
+    }
+    // ⑸ **utf-16 자리로 묻는다** — 비ASCII 가 앞에 있으면 byte 와 글자 수가 갈린다(가짜도 utf-16 으로 읽고 낸다).
+    {
+        // **utf-16 을 협상하게** 한다(가짜는 기본이 utf-8 — 클라이언트가 먼저 제안한다). GOTO2 와 같은 방법이다.
+        _ = setenv("MARU_FAKE_LSP_UTF16", "1", 1);
+        defer _ = unsetenv("MARU_FAKE_LSP_UTF16");
+        // 비ASCII 는 **낱말 밖**(문자열 안)에 둔다 — 붙여 두면 가짜(와 서버)가 `가나다라alpha` 를 한 낱말로 본다.
+        var f = (try SmtFixture.open(allocator, "hu.c", "int x = \"가나다라\"; int alpha = 1;\nint beta = alpha;\n")) orelse return error.SkipZigTest;
+        defer f.close(allocator);
+        const s = f.fx.session;
+        const term = f.term;
+        try testing.expect(f.ready());
+        const content = term.rt.editor_doc.?.file.content;
+        const at = std.mem.indexOf(u8, content, "alpha").? + 1; // 첫 줄의 `alpha` 안 — 앞에 비ASCII 12 byte(=utf-16 4 글자)라 byte 29 · 글자 21 로 갈린다
+        term.rt.editor_selection = .{ .anchor_start = at, .anchor_end = at, .focus = at };
+        {
+            const t0 = s.awakeMs();
+            while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
+        }
+        _ = syntaxColors(s, term);
+        try testing.expect(highlightApplied(&f, 1));
+        const sp = highlight_client.spans(term);
+        try testing.expectEqual(@as(usize, 2), sp.len); // byte 를 그대로 보내면 가짜가 낱말 밖을 봐 빈 목록이다
+        try testing.expectEqualStrings("alpha", content[sp[0].start..sp[0].end]);
+        try testing.expectEqualStrings("alpha", content[sp[1].start..sp[1].end]);
+    }
+    // ⑹ **낡은 낱말** — 요청이 나간 뒤 caret 을 옮기면 그 답은 지금 낱말을 말하지 않는다: 버린다.
     {
         var f = (try SmtFixture.open(allocator, "hw.c", "int alpha = 1;\nint beta = 2;\n")) orelse return error.SkipZigTest;
         defer f.close(allocator);

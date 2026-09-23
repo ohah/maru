@@ -24,6 +24,8 @@ pub const Capture = struct {
     cursor_screen: ScreenRect,
     /// NSTextInputClient.firstRect(forCharacterRange:)가 같은 frame에서 반환한 값이다.
     first_rect: ScreenRect,
+    /// 제품 Metal frame이 소유한 창 바닥 상태표시줄 높이. 이 strip만 비교에서 제외한다.
+    status_bar_height_px: u32,
     ppm: []const u8,
 };
 
@@ -68,6 +70,7 @@ pub fn validate(allocator: std.mem.Allocator, before: Capture, marked: Capture) 
         return Error.IdentityMismatch;
     if (marked.frame_generation <= before.frame_generation) return Error.GenerationMismatch;
     if (!validRect(before.cursor) or !std.meta.eql(before.cursor, marked.cursor) or
+        before.status_bar_height_px != marked.status_bar_height_px or
         !validScreenRect(before.cursor_screen) or !validScreenRect(marked.cursor_screen) or
         !validScreenRect(before.first_rect) or !validScreenRect(marked.first_rect))
         return Error.InvalidGeometry;
@@ -89,7 +92,9 @@ pub fn validate(allocator: std.mem.Allocator, before: Capture, marked: Capture) 
     defer marked_image.deinit(allocator);
     if (before_image.width != marked_image.width or before_image.height != marked_image.height)
         return Error.CaptureSizeMismatch;
-    if (!rectFits(before.cursor, before_image.width, before_image.height)) return Error.InvalidGeometry;
+    if (before.status_bar_height_px >= before_image.height) return Error.InvalidGeometry;
+    const comparison_bottom = before_image.height - before.status_bar_height_px;
+    if (!rectFits(before.cursor, before_image.width, comparison_bottom)) return Error.InvalidGeometry;
 
     const interest_w = std.math.mul(u32, before.cursor.w, 2) catch return Error.InvalidGeometry;
     const interest = Rect{
@@ -105,7 +110,7 @@ pub fn validate(allocator: std.mem.Allocator, before: Capture, marked: Capture) 
     var max_x: u32 = 0;
     var max_y: u32 = 0;
     var y: u32 = 0;
-    while (y < marked_image.height) : (y += 1) {
+    while (y < comparison_bottom) : (y += 1) {
         var x: u32 = 0;
         while (x < marked_image.width) : (x += 1) {
             if (std.meta.eql(before_image.pixelAt(x, y), marked_image.pixelAt(x, y))) continue;

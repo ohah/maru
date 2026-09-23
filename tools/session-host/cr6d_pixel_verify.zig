@@ -10,6 +10,7 @@ const Snapshot = struct {
     cursor: pixel.Rect,
     cursor_screen: pixel.ScreenRect,
     first_rect: pixel.ScreenRect,
+    status_bar_height_px: u32,
 };
 
 const Receipt = struct {
@@ -23,7 +24,7 @@ fn parseReceipt(allocator: std.mem.Allocator, bytes: []const u8) !std.json.Parse
         .duplicate_field_behavior = .@"error",
         .ignore_unknown_fields = false,
     }) catch return error.InvalidReceipt;
-    if (!std.mem.eql(u8, parsed.value.schema, "maru.session-host-cr6d-ime-pixel.v1")) {
+    if (!std.mem.eql(u8, parsed.value.schema, "maru.session-host-cr6d-ime-pixel.v2")) {
         parsed.deinit();
         return error.InvalidReceipt;
     }
@@ -47,6 +48,7 @@ pub fn validateArtifacts(
         .cursor = before.cursor,
         .cursor_screen = before.cursor_screen,
         .first_rect = before.first_rect,
+        .status_bar_height_px = before.status_bar_height_px,
         .ppm = before_ppm,
     }, .{
         .runtime_id = marked.runtime_id,
@@ -55,6 +57,7 @@ pub fn validateArtifacts(
         .cursor = marked.cursor,
         .cursor_screen = marked.cursor_screen,
         .first_rect = marked.first_rect,
+        .status_bar_height_px = marked.status_bar_height_px,
         .ppm = marked_ppm,
     });
 }
@@ -81,14 +84,32 @@ pub fn main(init: std.process.Init) !void {
 
 test "CR6d-v2a receipt parser rejects unknown duplicate and stale schema fields" {
     const good =
-        \\{"schema":"maru.session-host-cr6d-ime-pixel.v1","before":{"runtime_id":"0123456789abcdef0123456789abcdef","surface_id":1,"frame_generation":1,"cursor":{"x":0,"y":0,"w":1,"h":1},"cursor_screen":{"x":1,"y":2,"w":3,"h":4},"first_rect":{"x":1,"y":2,"w":3,"h":4}},"marked":{"runtime_id":"0123456789abcdef0123456789abcdef","surface_id":1,"frame_generation":2,"cursor":{"x":0,"y":0,"w":1,"h":1},"cursor_screen":{"x":1,"y":2,"w":3,"h":4},"first_rect":{"x":1,"y":2,"w":3,"h":4}}}
+        \\{"schema":"maru.session-host-cr6d-ime-pixel.v2","before":{"runtime_id":"0123456789abcdef0123456789abcdef","surface_id":1,"frame_generation":1,"cursor":{"x":0,"y":0,"w":1,"h":1},"cursor_screen":{"x":1,"y":2,"w":3,"h":4},"first_rect":{"x":1,"y":2,"w":3,"h":4},"status_bar_height_px":0},"marked":{"runtime_id":"0123456789abcdef0123456789abcdef","surface_id":1,"frame_generation":2,"cursor":{"x":0,"y":0,"w":1,"h":1},"cursor_screen":{"x":1,"y":2,"w":3,"h":4},"first_rect":{"x":1,"y":2,"w":3,"h":4},"status_bar_height_px":0}}
     ;
     var parsed = try parseReceipt(std.testing.allocator, good);
     parsed.deinit();
+    const old_schema = std.mem.replaceOwned(
+        u8,
+        std.testing.allocator,
+        good,
+        "maru.session-host-cr6d-ime-pixel.v2",
+        "maru.session-host-cr6d-ime-pixel.v1",
+    ) catch unreachable;
+    defer std.testing.allocator.free(old_schema);
+    try std.testing.expectError(error.InvalidReceipt, parseReceipt(std.testing.allocator, old_schema));
+    const missing_strip = std.mem.replaceOwned(
+        u8,
+        std.testing.allocator,
+        good,
+        ",\"status_bar_height_px\":0",
+        "",
+    ) catch unreachable;
+    defer std.testing.allocator.free(missing_strip);
+    try std.testing.expectError(error.InvalidReceipt, parseReceipt(std.testing.allocator, missing_strip));
     const unknown = good[0 .. good.len - 1] ++ ",\"unknown\":1}";
     try std.testing.expectError(error.InvalidReceipt, parseReceipt(std.testing.allocator, unknown));
     const duplicate =
-        \\{"schema":"maru.session-host-cr6d-ime-pixel.v1","schema":"old"}
+        \\{"schema":"maru.session-host-cr6d-ime-pixel.v2","schema":"old"}
     ;
     try std.testing.expectError(error.InvalidReceipt, parseReceipt(std.testing.allocator, duplicate));
     const stale =
@@ -99,7 +120,7 @@ test "CR6d-v2a receipt parser rejects unknown duplicate and stale schema fields"
 
 test "CR6d-v2a receipt fields drive the independent pixel verdict" {
     const receipt =
-        \\{"schema":"maru.session-host-cr6d-ime-pixel.v1","before":{"runtime_id":"0123456789abcdef0123456789abcdef","surface_id":7,"frame_generation":10,"cursor":{"x":1,"y":0,"w":1,"h":1},"cursor_screen":{"x":101,"y":200,"w":10,"h":20},"first_rect":{"x":101,"y":200,"w":10,"h":20}},"marked":{"runtime_id":"0123456789abcdef0123456789abcdef","surface_id":7,"frame_generation":11,"cursor":{"x":1,"y":0,"w":1,"h":1},"cursor_screen":{"x":101,"y":200,"w":10,"h":20},"first_rect":{"x":101,"y":200,"w":10,"h":20}}}
+        \\{"schema":"maru.session-host-cr6d-ime-pixel.v2","before":{"runtime_id":"0123456789abcdef0123456789abcdef","surface_id":7,"frame_generation":10,"cursor":{"x":1,"y":0,"w":1,"h":1},"cursor_screen":{"x":101,"y":200,"w":10,"h":20},"first_rect":{"x":101,"y":200,"w":10,"h":20},"status_bar_height_px":0},"marked":{"runtime_id":"0123456789abcdef0123456789abcdef","surface_id":7,"frame_generation":11,"cursor":{"x":1,"y":0,"w":1,"h":1},"cursor_screen":{"x":101,"y":200,"w":10,"h":20},"first_rect":{"x":101,"y":200,"w":10,"h":20},"status_bar_height_px":0}}
     ;
     const black = "\x00\x00\x00";
     const white = "\xff\xff\xff";

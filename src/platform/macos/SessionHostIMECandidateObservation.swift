@@ -108,6 +108,8 @@ final class SessionHostIMECandidateObservation {
         case malformedWindow
         case invalidOutput
         case transcriptTooLarge
+        case candidateNotReady
+        case candidateTimeout
         case rejected(UInt32)
     }
 
@@ -190,6 +192,11 @@ final class SessionHostIMECandidateObservation {
             maru_macos_session_host_ime_candidate_capture_select(
                 bytes.bindMemory(to: UInt8.self).baseAddress, data.count, &selected
             )
+        }
+        // Only the Zig reducer can classify a complete inventory as temporarily absent.
+        // The AppKit caller owns the finite retry budget, never a second selection heuristic.
+        if status == MaruAppHostIMECandidateCaptureSelectionNotReady.rawValue {
+            throw Failure.candidateNotReady
         }
         guard status == 0,
               let row = opened.windows.first(where: { $0.id == selected.window_id }),

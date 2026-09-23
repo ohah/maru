@@ -601,8 +601,9 @@ GitHub `CI` workflow는 `mise run check`와 외부 오라클 실행 후 `tests/a
 - `시스템 한계에 가까움`: 순수 headless 테스트만으로는 실제 화면이나 하드웨어 동작을 완전히 증명하기 어렵다. 대신 내부 snapshot, screenshot, 수동 산출물을 함께 남긴다.
 
 Session host IME 시각 증거는 현재 `CR6d-v2a 제품 preedit 픽셀`과 `CR6d-v2b OS 후보창 픽셀` 두 행으로
-분리해 추적한다. v2a는 기존 recovered Term의 조합 전/첫 marked callback 뒤 제품 Metal PPM, cursor rect와
-`firstRect` screen rect를 한 receipt에 결속한다. v2b는 실제 Apple Korean IME 후보 목록과 anchor의 화면 관계를
+분리해 추적한다. v2a는 기존 recovered Term의 조합 전/첫 marked callback 뒤 제품 Metal PPM, cursor rect,
+`firstRect` screen rect와 두 frame의 `status_bar_height_px`를 한 receipt에 결속한다. 독립 갱신되는 창 바닥
+상태표시줄만 비교에서 빼고 터미널·탭·사이드바의 cursor 두 cell 밖 변화 0은 유지한다. v2b는 실제 Apple Korean IME 후보 목록과 anchor의 화면 관계를
 OS capture로 증명한다. v2a는 v2b를 대신하지 않으며, v2b의 Screen Recording 권한·잠금 해제 WindowServer·exact
 frontmost PID 부재는 `not_provisioned`다. v2a의 첫-key 전/첫-marked 뒤 one-shot capture 생산자,
 strict JSON receipt와 별도 PPM 판정 실행 파일은 구현됐고 순수 판정·Swift type-check·경계 gate를 통과했다.
@@ -619,15 +620,15 @@ recovery 2/input 4, historical·IME·clipboard 각 1, marked 8/insert 2, post-ev
 recovery 2/input 4, historical·clipboard 각 1까지 도달했지만 frontmost가 `loginwindow`여서
 `global-keyboard-focus`로 중단됐다. IME callback·post-event preflight·후보 관측에 도달하지 않았으므로
 이 회차는 권한 승인이나 후보 판정의 통과·실패 증거가 아니다. v2b1 단일-window capture/판정자는
-구현됐으며 Zig reducer가 첫 opened inventory에서 고른 ID 하나를 ScreenCaptureKit이 캡처한다.
+구현됐으며 Zig reducer가 첫 후보 포함 opened inventory에서 고른 ID 하나를 ScreenCaptureKit이 캡처한다.
 캡처 전후 ID/PID/서명/geometry를 재검증하고 digest·pixel size를 5회 open/close·anchor·복원 증거에
 결속한다. Debug·ReleaseFast focused 판정 12+12, Swift typecheck와 app build는 통과했다.
 2026-09-23 제품 회차는 복구까지 도달했지만 전면 PID가 `loginwindow`여서
 `global-keyboard-focus`에서 중단됐다. IME 입력·후보창 캡처에 도달하지 않았으므로 v2b1 제품 gate는 미완료다.
 추가 적대적 감사에서 후보창 단계의 전역 HID 송신이 first responder만 확인하던 경계를 발견했다. 공통 송신 leaf에
 exact-frontmost PID·앱 active·first responder 재확인을 추가했고, 회귀 boundary는 수정 전 실패·수정 후 3/3 통과했다.
-이 수정의 Swift typecheck와 `macos-app-bundle` build·strict code-sign 검증도 통과했다. `/tmp` 승인 앱은 보존했으며,
-새 제품 앱의 staging·TCC 승인·실측은 남아 있다. 기존 승인 앱을 수정본의 통과 증거로 쓰지 않는다.
+이 수정의 Swift typecheck와 `macos-app-bundle` build·strict code-sign 검증도 통과했다. 당시 `/tmp` 승인 앱은
+보존했으며, 그 앱을 수정본의 통과 증거로 쓰지 않는다. 이후 전용 test-ID 제품 회차는 아래에서 별도로 추적한다.
 2026-09-16 PR #3783 Linux `check`는 후보 관측 게시자 테스트의 libc 의존성 미선언으로 Debug·ReleaseFast
 컴파일에서 실패했다. 두 focused test root에 libc 의존성을 명시했고 macOS Debug·ReleaseFast 10+10은 재통과했다.
 수정 커밋 `8c8b7b5de`의 Linux CI 실행 `35076110758` 필수 `check`는 5분 3초에 통과했다.
@@ -640,7 +641,8 @@ v2b0b는 별도 Swift opt-in producer가 title 없는 전체 inventory 5 triplet
 bounded JSON과 사전 고정한 absent target을 Zig에 빌려준다. Zig entrypoint 하나가 schema/window/byte cap, 기존 pure
 reducer·series validator와 same-directory inode→`link(2)` canonical 배타 게시를 소유한다. raw inventory 중간 파일,
 Swift-side 후보 판정, 장수명 child, ABI 재시도·부분 artifact는 허용하지 않는다. preflight 실패는 source/HID mutation 0인
-`not_provisioned`이며 Zig ABI 자체는 `passed`/`failed`만 반환한다. 수동 입력 스모크만 이 실패 지점에서
+`not_provisioned`이며 v2b0b 최종 게시 ABI는 `passed`/`failed`만 반환한다. v2b1의 게시 전 capture-select ABI만
+검증된 신규 외부 후보 0개를 `not_ready`로 구분한다. 수동 입력 스모크만 이 실패 지점에서
 서명된 앱 자신의 `CGRequestScreenCaptureAccess()`를 한 번 호출하고 같은 회차를 RED로 끝낸다. 비수동 스모크는
 권한을 요청하지 않으며, 승인 후 새 회차의 preflight 통과만 green이다. 이 행의 green은 v2b1 pixel gate를 닫지 않는다.
 권한 충돌 방지를 위해 CR6d fixture는 제품 실행 파일·리소스가 같은 전용 번들 ID
@@ -651,6 +653,27 @@ Swift-side 후보 판정, 장수명 child, ABI 재시도·부분 artifact는 허
 CI macOS keep-alive 잡은 제품 bundle build 뒤 전용 staging을 두 번 수행하여 서명·전용 ID·제품 CDHash 불변·
 동일 빌드 staging inode 보존을 무권한으로 검증한다. 실제 Screen Recording TCC와 IME 후보 픽셀은
 잠금 해제된 로컬 Aqua 수동 gate가 별도로 닫는다.
+2026-09-23 전용 앱 실측은 Screen Recording preflight, recovered Term의 물리 `한글`·Return,
+historical/IME/clipboard 각 1, source 복원을 통과했다. 후보 요청 뒤 사용자는 OS 후보 목록을 잠깐 보았으나
+세 run-loop tick 뒤 단일 inventory를 읽는 생산자는 `CandidateMissing`이었다. 이것은 후보창 픽셀 성공이 아니라
+조회 시점과 OS 창 수명/owner 사이의 미분류 RED다. 승인된 후속 검증은 첫 조회를 늦추지 않고 같은 baseline에서
+전체 inventory를 bounded 재수집하되 `CandidateMissing`만 재시도하고 ambiguity·신원/카운터 오류는 즉시 실패한다.
+최대 60 tick/monotonic 1초 제한, 임시 raw inventory 비게시, 최종 5-row exact-once 게시와 실제 재실측이
+모두 확인되기 전에는 v2b1 gate를 green으로 바꾸지 않는다.
+2026-09-23 최신 전용 test-ID 회차는 현재 빌드의 TCC 서명 해시와 허용 기록 일치를 확인한 뒤 실제
+`한글`·Return과 첫 marked frame까지 도달했다. v2a receipt v2는 제품 Metal frame이 실은 상태표시줄 높이
+26px을 before/marked에 각각 결속했고 두 960×600 PPM의 독립 pixel-verify를 통과했다. 이전 회차의
+`PixelOutsideInterest`는 커서 밖 상태표시줄 메모리 숫자 변경 503px 때문이었고, 이제 그 하단 26px만 제외한다.
+그러나 v2b1은 첫 후보 요청 뒤 `candidate-window-timeout`, 관측 row 0으로 여전히 RED다. 수동 키 gate와
+사용자 관찰로 Option-Return 입력 및 OS 후보창 표시까지 확인됐으므로, 실패는 후보창 생성 자체가 아니라
+WindowServer inventory의 새 외부 ID 판정 경계다. 새 창 누락·기존 ID 재사용·관측 필터 여부는 아직 미분류다.
+후속 test-only 수치 진단은 원문·owner·ID를 남기지 않고 baseline/opened 창 개수와 신규 ID 최대치만 기록한다.
+같은 서명으로 승인받은 2026-09-23 재회차에서 Option-Return 뒤 32번 조회하는 동안 baseline 16창,
+opened 최대 17창, 신규 ID 최대 1개, 외부 PID 신규 ID 최대 0개였고 사용자에게 후보창이 보였다.
+수동 안내는 기존 `NSWindow`의 subview이므로 새 창을 만들지 않는다. 신규 앱 PID 창이 `NSApp.windows`에
+속하는지와 layer·bounds를 숫자로만 확인하는 후속 진단을 넣었으며, 아직 이 진단의 제품 회차는 없다.
+따라서 현 `외부 PID + Apple 서명` 필터가 후보를 배제했을 가능성은 높지만, 새 앱 PID 창이 후보창이라는
+동일성은 아직 입증되지 않았고 v2b1은 RED다.
 v2b0은 Screen Recording preflight를 source/HID mutation보다 먼저 수행하고 후보 요청 전후 전체 on-screen window inventory
 snapshot(시점당 최대 256, cap+1은 drop 없이 실패)을 pure reducer에 넘긴다. reducer의 차집합에서
 title·후보 문자열·pixel을 제외한 ID/owner PID·bundle ID/Apple signing validity·signing identifier/layer/bounds/TIS source ID만

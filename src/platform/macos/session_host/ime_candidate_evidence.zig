@@ -292,6 +292,9 @@ pub fn selectCaptureCandidate(
     const raw = parsed.value;
     if (!std.mem.eql(u8, raw.schema, "maru.session-host-cr6d-ime-candidate-selection.v1"))
         return error.InvalidTranscript;
+    // The retryable absence verdict must never conceal an input or screen mutation. The final
+    // five-row publisher still proves the full before/open/close counter conjunction later.
+    if (!Counters.eql(raw.before.counters, raw.opened.counters)) return error.CounterMutation;
     const candidate = try reduceTriplet(raw.app_pid, .{
         .before = raw.before.windows,
         .opened = raw.opened.windows,
@@ -882,6 +885,30 @@ test "v2b1 capture selection is reducer-owned and rejects ambiguous inventories"
     const selected = try selectCaptureCandidate(std.testing.allocator, bytes.written());
     try std.testing.expectEqual(candidate_fixture.id, selected.window_id);
     try std.testing.expectEqual(candidate_fixture.owner.pid, selected.owner_pid);
+
+    // A missing OS window is the only observation that may be sampled again. Even when no
+    // window has appeared yet, screen/input mutation must not be hidden behind that absence.
+    opened.windows = &.{stable};
+    bytes.clearRetainingCapacity();
+    json = .{ .writer = &bytes.writer, .options = .{} };
+    try json.write(CaptureSelectionTranscript{
+        .schema = "maru.session-host-cr6d-ime-candidate-selection.v1",
+        .app_pid = 999,
+        .before = snapshot,
+        .opened = opened,
+    });
+    try std.testing.expectError(error.CandidateMissing, selectCaptureCandidate(std.testing.allocator, bytes.written()));
+    opened.counters.pty_input_bytes += 1;
+    bytes.clearRetainingCapacity();
+    json = .{ .writer = &bytes.writer, .options = .{} };
+    try json.write(CaptureSelectionTranscript{
+        .schema = "maru.session-host-cr6d-ime-candidate-selection.v1",
+        .app_pid = 999,
+        .before = snapshot,
+        .opened = opened,
+    });
+    try std.testing.expectError(error.CounterMutation, selectCaptureCandidate(std.testing.allocator, bytes.written()));
+    opened.counters = snapshot.counters;
 
     var sibling = candidate_fixture;
     sibling.id += 1;

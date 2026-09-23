@@ -4282,6 +4282,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         let cursor: PixelRect
         let cursorScreen: CGRect
         let firstRect: CGRect
+        let statusBarHeightPx: UInt32
     }
     private var sessionHostInputPixelPhase: UInt32 = 0
     private var sessionHostInputPixelBefore: SessionHostInputPixelSnapshot?
@@ -4294,6 +4295,15 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var sessionHostCandidatePixelError: String?
     private var sessionHostCandidatePhase: UInt32 = 0
     private var sessionHostCandidateWaitTicks: UInt32 = 0
+    private var sessionHostCandidateSelectAttempts: UInt32 = 0
+    private var sessionHostCandidateSelectStartedAtNs: UInt64 = 0
+    private var sessionHostCandidateBeforeWindowCount = 0
+    private var sessionHostCandidateOpenedWindowCountMax = 0
+    private var sessionHostCandidateNewIDCountMax = 0
+    private var sessionHostCandidateNewExternalCountMax = 0
+    private var sessionHostCandidateNewSelfNonNSAppCountMax = 0
+    private var sessionHostCandidateNewSelfNonNSAppLayer: Int32 = 0
+    private var sessionHostCandidateNewSelfNonNSAppBounds: SessionHostIMECandidateObservation.Bounds?
     private var sessionHostCandidateFailure = ""
     private var sessionHostCandidateAdmissionValidated = false
     private var sessionHostCandidateComposeKeyIndex = 0
@@ -4374,7 +4384,15 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
            (sessionHostCandidatePhase == 1 && event.keyCode == 36 && chord == [.option] ||
             sessionHostCandidatePhase == 2 && event.keyCode == 53 && chord.isEmpty) {
             sessionHostManualCandidateKey = event.keyCode
-            sessionHostCandidateWaitTicks = 3
+            if sessionHostCandidatePhase == 1 {
+                // The candidate may live for only a few frames. Start the bounded observation
+                // after this physical key rather than sleeping through the first three frames.
+                sessionHostCandidateSelectStartedAtNs = DispatchTime.now().uptimeNanoseconds
+                sessionHostCandidateSelectAttempts = 0
+                sessionHostCandidateWaitTicks = 0
+            } else {
+                sessionHostCandidateWaitTicks = 3
+            }
         }
     }
 
@@ -10680,14 +10698,19 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         )
         let cursorScreen = window.convertToScreen(view.convert(local, to: nil))
         let summary = surface.latestFrameSummary
-        guard summary.surface_id != 0, surface.lastDrawnGeneration != 0 else { return nil }
+        var metalFrame = MaruAppHostMetalFrame()
+        guard let session = surface.appSession,
+              maru_macos_app_session_metal_frame(session, &metalFrame) == Self.statusOK,
+              summary.surface_id != 0, surface.lastDrawnGeneration != 0,
+              metalFrame.generation == surface.lastDrawnGeneration else { return nil }
         return .init(
             runtimeId: runtimeId,
             surfaceId: summary.surface_id,
             frameGeneration: surface.lastDrawnGeneration,
             cursor: .init(x: UInt32(x), y: UInt32(y), w: UInt32(w), h: UInt32(h)),
             cursorScreen: cursorScreen,
-            firstRect: reportedFirstRect
+            firstRect: reportedFirstRect,
+            statusBarHeightPx: metalFrame.status_bar_height_px
         )
     }
 
@@ -10714,10 +10737,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 "cursor": pixelRect(value.cursor),
                 "cursor_screen": rect(value.cursorScreen),
                 "first_rect": rect(value.firstRect),
+                "status_bar_height_px": value.statusBarHeightPx,
             ]
         }
         let object: [String: Any] = [
-            "schema": "maru.session-host-cr6d-ime-pixel.v1",
+            "schema": "maru.session-host-cr6d-ime-pixel.v2",
             "before": snapshot(before),
             "marked": snapshot(marked),
         ]
@@ -11137,6 +11161,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 }
                 guard view.sessionHostCandidateTargetReady(), view.hasMarkedText() else { return false }
                 sessionHostCandidateBefore = try observation.capture(counters: counters, anchor: anchor)
+                sessionHostCandidateBeforeWindowCount = sessionHostCandidateBefore?.windows.count ?? 0
                 if isSessionHostManualInputSmokeMode {
                     sessionHostManualCandidateKey = nil
                     sessionHostCandidatePhase = 1
@@ -11147,16 +11172,57 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                     keyCode: 36, view: view, flags: .maskAlternate
                 ) else { throw SessionHostIMECandidateObservation.Failure.windowServerUnavailable }
                 sessionHostCandidatePhase = 1
-                sessionHostCandidateWaitTicks = 3
+                sessionHostCandidateSelectStartedAtNs = DispatchTime.now().uptimeNanoseconds
+                sessionHostCandidateSelectAttempts = 0
+                sessionHostCandidateWaitTicks = 0
             case 1:
                 if isSessionHostManualInputSmokeMode {
                     guard sessionHostManualCandidateKey == 36 else { return false }
                 }
-                if sessionHostCandidateOpened == nil {
-                    sessionHostCandidateOpened = try observation.capture(counters: counters, anchor: anchor)
+                guard let before = sessionHostCandidateBefore else {
+                    throw SessionHostIMECandidateObservation.Failure.malformedWindow
                 }
-                guard let before = sessionHostCandidateBefore,
-                      let opened = sessionHostCandidateOpened else {
+                var selectedRequest: SessionHostIMECandidateObservation.CaptureRequest?
+                if sessionHostCandidateOpened == nil {
+                    let now = DispatchTime.now().uptimeNanoseconds
+                    guard sessionHostCandidateSelectStartedAtNs != 0,
+                          now >= sessionHostCandidateSelectStartedAtNs,
+                          now - sessionHostCandidateSelectStartedAtNs < 1_000_000_000,
+                          sessionHostCandidateSelectAttempts < 60 else {
+                        throw SessionHostIMECandidateObservation.Failure.candidateTimeout
+                    }
+                    sessionHostCandidateSelectAttempts += 1
+                    let opened = try observation.capture(counters: counters, anchor: anchor)
+                    // Diagnostic counts only: selection and every eligibility decision stay in Zig.
+                    // No owner name, PID, window ID, title, or raw inventory enters the summary.
+                    let baselineIDs = Set(before.windows.map(\.id))
+                    let newRows = opened.windows.filter { !baselineIDs.contains($0.id) }
+                    let appWindowIDs = Set(NSApp.windows.compactMap { UInt32(exactly: $0.windowNumber) })
+                    let newSelfNonNSApp = newRows.filter {
+                        $0.owner.pid == getpid() && !appWindowIDs.contains($0.id)
+                    }
+                    sessionHostCandidateOpenedWindowCountMax = max(sessionHostCandidateOpenedWindowCountMax, opened.windows.count)
+                    sessionHostCandidateNewIDCountMax = max(sessionHostCandidateNewIDCountMax, newRows.count)
+                    sessionHostCandidateNewExternalCountMax = max(
+                        sessionHostCandidateNewExternalCountMax,
+                        newRows.filter { $0.owner.pid != getpid() }.count
+                    )
+                    sessionHostCandidateNewSelfNonNSAppCountMax = max(
+                        sessionHostCandidateNewSelfNonNSAppCountMax, newSelfNonNSApp.count
+                    )
+                    if newSelfNonNSApp.count == 1, let window = newSelfNonNSApp.first {
+                        sessionHostCandidateNewSelfNonNSAppLayer = window.layer
+                        sessionHostCandidateNewSelfNonNSAppBounds = window.bounds
+                    }
+                    do {
+                        selectedRequest = try observation.captureRequest(before: before, opened: opened)
+                    } catch SessionHostIMECandidateObservation.Failure.candidateNotReady {
+                        // No retained inventory, no publication, and no candidate ID selected.
+                        return false
+                    }
+                    sessionHostCandidateOpened = opened
+                }
+                guard sessionHostCandidateOpened != nil else {
                     throw SessionHostIMECandidateObservation.Failure.malformedWindow
                 }
                 if observation.rows.isEmpty, sessionHostCandidatePixelEvidence == nil {
@@ -11171,7 +11237,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                         failSessionHostInputSmoke("candidate-pixel-capture-not-provisioned")
                         return false
                     }
-                    let request = try observation.captureRequest(before: before, opened: opened)
+                    guard let request = selectedRequest else {
+                        throw SessionHostIMECandidateObservation.Failure.malformedWindow
+                    }
                     sessionHostCandidatePixelPending = true
                     Task { @MainActor [weak self] in
                         guard let self else { return }
@@ -11209,6 +11277,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 try observation.append(before: before, opened: opened, closed: closed)
                 sessionHostCandidateBefore = nil
                 sessionHostCandidateOpened = nil
+                sessionHostCandidateSelectAttempts = 0
+                sessionHostCandidateSelectStartedAtNs = 0
                 if observation.rows.count < SessionHostIMECandidateObservation.requiredObservationCount {
                     sessionHostCandidatePhase = 0
                     sessionHostCandidateComposeKeyIndex = 0
@@ -11247,6 +11317,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             case .malformedWindow: sessionHostCandidateFailure = "malformed-window"
             case .invalidOutput: sessionHostCandidateFailure = "invalid-output"
             case .transcriptTooLarge: sessionHostCandidateFailure = "transcript-too-large"
+            case .candidateNotReady: sessionHostCandidateFailure = "candidate-not-ready-unhandled"
+            case .candidateTimeout: sessionHostCandidateFailure = "candidate-window-timeout"
             case .rejected(let status): sessionHostCandidateFailure = "rejected-\(status)"
             }
             failSessionHostInputSmoke("candidate-observation-failed")
@@ -13377,6 +13449,18 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         session_host_input_smoke_candidate_failure=\(sessionHostCandidateFailure)
         session_host_input_smoke_candidate_phase=\(sessionHostCandidatePhase)
         session_host_input_smoke_candidate_rows=\(sessionHostCandidateObservation?.rows.count ?? 0)
+        session_host_input_smoke_candidate_select_attempts=\(sessionHostCandidateSelectAttempts)
+        session_host_input_smoke_candidate_before_windows=\(sessionHostCandidateBeforeWindowCount)
+        session_host_input_smoke_candidate_opened_windows_max=\(sessionHostCandidateOpenedWindowCountMax)
+        session_host_input_smoke_candidate_new_ids_max=\(sessionHostCandidateNewIDCountMax)
+        session_host_input_smoke_candidate_new_external_max=\(sessionHostCandidateNewExternalCountMax)
+        session_host_input_smoke_candidate_new_self_non_nsapp_max=\(sessionHostCandidateNewSelfNonNSAppCountMax)
+        session_host_input_smoke_candidate_new_self_non_nsapp_bounds_present=\(sessionHostCandidateNewSelfNonNSAppBounds != nil)
+        session_host_input_smoke_candidate_new_self_non_nsapp_layer=\(sessionHostCandidateNewSelfNonNSAppLayer)
+        session_host_input_smoke_candidate_new_self_non_nsapp_x=\(sessionHostCandidateNewSelfNonNSAppBounds?.x ?? 0)
+        session_host_input_smoke_candidate_new_self_non_nsapp_y=\(sessionHostCandidateNewSelfNonNSAppBounds?.y ?? 0)
+        session_host_input_smoke_candidate_new_self_non_nsapp_w=\(sessionHostCandidateNewSelfNonNSAppBounds?.w ?? 0)
+        session_host_input_smoke_candidate_new_self_non_nsapp_h=\(sessionHostCandidateNewSelfNonNSAppBounds?.h ?? 0)
         session_host_input_smoke_manual_input=\(isSessionHostManualInputSmokeMode)
         session_host_input_smoke_manual_return_observed=\(sessionHostManualReturnObserved)
         session_host_input_smoke_callback_has_marked_text=\(sessionHostCallbackHasMarkedText.map { String($0) } ?? "unobserved")

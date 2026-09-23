@@ -876,6 +876,12 @@ typedef enum MaruAppHostIMECandidateObservationResult {
     MaruAppHostIMECandidateObservationPassed = 0,
     MaruAppHostIMECandidateObservationFailed = 1,
 } MaruAppHostIMECandidateObservationResult;
+/* 게시 ABI와 달리, capture-select만 검증된 후보 부재를 bounded 재관측 신호로 돌려준다. */
+typedef enum MaruAppHostIMECandidateCaptureSelectionResult {
+    MaruAppHostIMECandidateCaptureSelectionPassed = 0,
+    MaruAppHostIMECandidateCaptureSelectionFailed = 1,
+    MaruAppHostIMECandidateCaptureSelectionNotReady = 2,
+} MaruAppHostIMECandidateCaptureSelectionResult;
 typedef struct MaruAppHostIMECandidateCaptureSelection {
     uint32_t window_id;
     int32_t owner_pid;

@@ -246,12 +246,12 @@ test "CR6d 경계는 exact recovered screen probe와 actual AppKit input smoke�
     try std.testing.expectEqual(@as(usize, 1), count(gate, "session_host_input_smoke_post_event_access=true"));
     try std.testing.expectEqual(@as(usize, 1), count(gate, "session_host_input_smoke_source_record_cleared=true"));
     try std.testing.expectEqual(@as(usize, 1), count(gate, "MARU_SESSION_HOST_CR6D_INPUT_SOURCE_RESTORE_EXE"));
-    try std.testing.expectEqual(@as(usize, 1), count(gate, "run_session_host_cr6d_boundary_tests.addArg(\"--maru-expect-tests=7\");"));
+    try std.testing.expectEqual(@as(usize, 1), count(gate, "run_session_host_cr6d_boundary_tests.addArg(\"--maru-expect-tests=8\");"));
     var graph = try build_graph.parse(allocator);
     defer graph.deinit();
     // 실행 인자도 **구조로** 센다 — 문자열은 호출이 줄바꿈되거나 receiver 이름이
     // 바뀌면 죽고, 그 죽음이 「인자가 없다」와 구분되지 않는다.
-    try std.testing.expectEqual(@as(usize, 1), graph.countArgs("run_session_host_cr6d_global_boundary_tests", "--maru-expect-tests=7"));
+    try std.testing.expectEqual(@as(usize, 1), graph.countArgs("run_session_host_cr6d_global_boundary_tests", "--maru-expect-tests=8"));
 
     // v2a의 판정자는 기본 test graph에 고정된 순수 consumer다. 실제 AppKit producer가 붙기 전에도
     // identity/세대/anchor/PPM digest와 관심 영역 계약이 사라지거나 파일 I/O를 직접 열 수 없다.
@@ -260,10 +260,14 @@ test "CR6d 경계는 exact recovered screen probe와 actual AppKit input smoke�
     try std.testing.expectEqual(@as(usize, 1), graph.countSteps("test-session-host-cr6d-pixel-validator"));
     // 실행 인자도 **구조로** 센다 — 문자열은 호출이 줄바꿈되거나 receiver 이름이
     // 바뀌면 죽고, 그 죽음이 「인자가 없다」와 구분되지 않는다.
-    try std.testing.expectEqual(@as(usize, 1), graph.countArgs("run_session_host_cr6d_pixel_tests", "--maru-expect-tests=8"));
+    try std.testing.expectEqual(@as(usize, 1), graph.countArgs("run_session_host_cr6d_pixel_tests", "--maru-expect-tests=10"));
     // 매달기도 **구조로** 본다 — 문자열은 `.step` 이 붙었는지·줄바꿈이 들었는지에 흔들린다.
     try std.testing.expect(graph.dependsOn("test_step", "run_session_host_cr6d_pixel_tests"));
     try std.testing.expectEqual(@as(usize, 1), count(pixel_test, "checkAllAllocationFailures"));
+    try std.testing.expectEqual(@as(usize, 1), count(swift, "statusBarHeightPx: metalFrame.status_bar_height_px"));
+    try std.testing.expectEqual(@as(usize, 1), count(pixel_validator, "before.status_bar_height_px != marked.status_bar_height_px"));
+    try std.testing.expectEqual(@as(usize, 1), count(swift, "session_host_input_smoke_candidate_new_external_max="));
+    try std.testing.expectEqual(@as(usize, 1), count(swift, "session_host_input_smoke_candidate_new_self_non_nsapp_max="));
     inline for (.{ "before_digest", "marked_digest", "runtime_id", "surface_id", "first_rect" }) |field| {
         try std.testing.expect(count(pixel_validator, field) > 0);
     }
@@ -444,6 +448,29 @@ test "CR6d v2b1은 Zig가 고른 한 window만 캡처하고 복원 뒤 receipt�
     const publish = std.mem.indexOf(u8, completion, "publishSessionHostCandidatePixel(view: view)") orelse return error.TestUnexpectedResult;
     try std.testing.expect(view_restore < source_restore and source_restore < publish);
     try std.testing.expectEqual(@as(usize, 1), count(host, "session-host-cr6d-ime-candidate-pixel.json"));
+}
+
+test "CR6d v2b1 후보 부재만 유한 재관측하고 최종 게시를 재시도하지 않는다" {
+    const allocator = std.testing.allocator;
+    const host = try read(allocator, "src/platform/macos/MaruAppHost.swift");
+    defer allocator.free(host);
+    const producer = try read(allocator, "src/platform/macos/SessionHostIMECandidateObservation.swift");
+    defer allocator.free(producer);
+    const header = try read(allocator, "src/platform/macos/app_host_abi.h");
+    defer allocator.free(header);
+    const abi = try read(allocator, "src/platform/macos/app_host_abi.zig");
+    defer allocator.free(abi);
+    const method = between(host, "    private func runSessionHostCandidateObservation(", "    private func sessionHostInputSmokeOwnsGlobalKeyboardFocus(") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), count(method, "sessionHostCandidateSelectAttempts < 60"));
+    try std.testing.expectEqual(@as(usize, 1), count(method, "now - sessionHostCandidateSelectStartedAtNs < 1_000_000_000"));
+    try std.testing.expectEqual(@as(usize, 1), count(method, "catch SessionHostIMECandidateObservation.Failure.candidateNotReady"));
+    try std.testing.expectEqual(@as(usize, 1), count(method, "sessionHostCandidateOpened = opened"));
+    try std.testing.expectEqual(@as(usize, 1), count(method, "observation.publish("));
+    try std.testing.expectEqual(@as(usize, 1), count(header, "MaruAppHostIMECandidateCaptureSelectionNotReady = 2"));
+    try std.testing.expectEqual(@as(usize, 1), count(producer, "throw Failure.candidateNotReady"));
+    const selector = between(abi, "pub export fn maru_macos_session_host_ime_candidate_capture_select(", "/// CR6d-v2b0b의 exact-once") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), count(selector, "err == error.CandidateMissing"));
+    try std.testing.expectEqual(@as(usize, 1), count(selector, "IMECandidateCaptureSelectionResult.not_ready"));
 }
 
 test "CR6d AppKit child는 TCC responsible identity를 앱 번들에 귀속한다" {

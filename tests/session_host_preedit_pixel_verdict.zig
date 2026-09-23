@@ -14,8 +14,39 @@ fn capture(ppm: []const u8, generation: u64) subject.Capture {
         .cursor = .{ .x = 1, .y = 0, .w = 1, .h = 1 },
         .cursor_screen = .{ .x = 101, .y = 200, .w = 10, .h = 20 },
         .first_rect = .{ .x = 101, .y = 200, .w = 10, .h = 20 },
+        .status_bar_height_px = 0,
         .ppm = ppm,
     };
+}
+
+test "CR6d-v2a ignores only the frame-owned bottom status bar strip" {
+    const before = "P6\n4 3\n255\n" ++ black ** 12;
+    const marked = "P6\n4 3\n255\n" ++ black ++ white ** 2 ++ black ** 5 ++ white ++ black ** 3;
+    var b = capture(before, 10);
+    var m = capture(marked, 11);
+    b.status_bar_height_px = 1;
+    m.status_bar_height_px = 1;
+    const result = try subject.validate(std.testing.allocator, b, m);
+    try std.testing.expectEqual(@as(usize, 2), result.changed_pixels);
+    try std.testing.expectEqual(subject.Rect{ .x = 1, .y = 0, .w = 2, .h = 1 }, result.changed_bounds);
+
+    const other_chrome = "P6\n4 3\n255\n" ++ black ++ white ** 2 ++ black ** 3 ++ white ++ black ** 5;
+    m.ppm = other_chrome;
+    try std.testing.expectError(error.PixelOutsideInterest, subject.validate(std.testing.allocator, b, m));
+}
+
+test "CR6d-v2a rejects changed or out-of-frame status bar geometry" {
+    const before = "P6\n4 3\n255\n" ++ black ** 12;
+    const marked = "P6\n4 3\n255\n" ++ black ++ white ++ black ** 10;
+    var b = capture(before, 10);
+    var m = capture(marked, 11);
+    b.status_bar_height_px = 1;
+    try std.testing.expectError(error.InvalidGeometry, subject.validate(std.testing.allocator, b, m));
+    m.status_bar_height_px = 3;
+    try std.testing.expectError(error.InvalidGeometry, subject.validate(std.testing.allocator, b, m));
+    m.status_bar_height_px = 1;
+    b.status_bar_height_px = 3;
+    try std.testing.expectError(error.InvalidGeometry, subject.validate(std.testing.allocator, b, m));
 }
 
 test "CR6d-v2a accepts a same-surface marked pixel beginning in the cursor cell" {

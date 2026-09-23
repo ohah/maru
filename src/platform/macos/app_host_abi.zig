@@ -91,6 +91,11 @@ pub const IMECandidateObservationResult = enum(u32) {
     passed = c.MaruAppHostIMECandidateObservationPassed,
     failed = c.MaruAppHostIMECandidateObservationFailed,
 };
+pub const IMECandidateCaptureSelectionResult = enum(u32) {
+    passed = c.MaruAppHostIMECandidateCaptureSelectionPassed,
+    failed = c.MaruAppHostIMECandidateCaptureSelectionFailed,
+    not_ready = c.MaruAppHostIMECandidateCaptureSelectionNotReady,
+};
 
 const LeaseSlot = if (builtin.os.tag == .macos)
     struct {
@@ -1441,17 +1446,20 @@ pub export fn maru_macos_session_host_ime_candidate_capture_select(
     transcript_len: usize,
     out_selection: ?*c.MaruAppHostIMECandidateCaptureSelection,
 ) u32 {
-    const transcript = transcript_ptr orelse return @intFromEnum(IMECandidateObservationResult.failed);
-    const out = out_selection orelse return @intFromEnum(IMECandidateObservationResult.failed);
+    const transcript = transcript_ptr orelse return @intFromEnum(IMECandidateCaptureSelectionResult.failed);
+    const out = out_selection orelse return @intFromEnum(IMECandidateCaptureSelectionResult.failed);
     out.* = std.mem.zeroes(c.MaruAppHostIMECandidateCaptureSelection);
     if (transcript_len == 0 or transcript_len > ime_candidate_evidence.max_transcript_bytes)
-        return @intFromEnum(IMECandidateObservationResult.failed);
+        return @intFromEnum(IMECandidateCaptureSelectionResult.failed);
     const selected = ime_candidate_evidence.selectCaptureCandidate(
         allocator,
         transcript[0..transcript_len],
     ) catch |err| {
+        // Only a fully parsed, validated inventory with no eligible new window is retryable.
+        // The caller has a finite monotonic budget; ambiguity and mutation remain hard failures.
+        if (err == error.CandidateMissing) return @intFromEnum(IMECandidateCaptureSelectionResult.not_ready);
         std.debug.print("session_host_ime_candidate_capture_select_error={s}\n", .{@errorName(err)});
-        return @intFromEnum(IMECandidateObservationResult.failed);
+        return @intFromEnum(IMECandidateCaptureSelectionResult.failed);
     };
     out.* = .{
         .window_id = selected.window_id,
@@ -1462,7 +1470,7 @@ pub export fn maru_macos_session_host_ime_candidate_capture_select(
         .w = selected.w,
         .h = selected.h,
     };
-    return @intFromEnum(IMECandidateObservationResult.passed);
+    return @intFromEnum(IMECandidateCaptureSelectionResult.passed);
 }
 
 /// CR6d-v2b0b의 exact-once 판정/게시 leaf. Swift는 complete raw transcript를 동기 호출 동안만
@@ -1560,6 +1568,39 @@ test "CR6d-v2b0b observation ABI rejects invalid borrows and publishes no partia
         error.FileNotFound,
         tmp.dir.access(std.testing.io, "candidate.json", .{}),
     );
+}
+
+test "CR6d-v2b1 capture selection distinguishes absent candidate from invalid transcript" {
+    try std.testing.expectEqual(@as(u32, c.MaruAppHostIMECandidateCaptureSelectionNotReady), @intFromEnum(IMECandidateCaptureSelectionResult.not_ready));
+    const empty_windows = &[_]ime_candidate_evidence.Window{};
+    const snapshot = .{
+        .windows = empty_windows,
+        .counters = ime_candidate_evidence.Counters{
+            .pty_input_bytes = 0,
+            .committed_text_callbacks = 0,
+            .base_screen_generation = 0,
+        },
+        .anchor_appkit = ime_candidate_evidence.Rect{ .x = 0, .y = 0, .w = 1, .h = 1 },
+        .displays = &[_]u32{},
+    };
+    var bytes: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer bytes.deinit();
+    var json: std.json.Stringify = .{ .writer = &bytes.writer, .options = .{} };
+    try json.write(.{
+        .schema = "maru.session-host-cr6d-ime-candidate-selection.v1",
+        .app_pid = @as(i32, 999),
+        .before = snapshot,
+        .opened = snapshot,
+    });
+    var selected = std.mem.zeroes(c.MaruAppHostIMECandidateCaptureSelection);
+    try std.testing.expectEqual(@as(u32, c.MaruAppHostIMECandidateCaptureSelectionNotReady), maru_macos_session_host_ime_candidate_capture_select(
+        bytes.written().ptr,
+        bytes.written().len,
+        &selected,
+    ));
+    try std.testing.expectEqual(@as(u32, 0), selected.window_id);
+    const invalid = "{}";
+    try std.testing.expectEqual(@as(u32, c.MaruAppHostIMECandidateObservationFailed), maru_macos_session_host_ime_candidate_capture_select(invalid.ptr, invalid.len, &selected));
 }
 
 /// Reads the published divider grab band and this drag's coalescing instrumentation for the

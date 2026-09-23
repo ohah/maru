@@ -6119,9 +6119,13 @@ Metal capture에 포함되지 않으므로 v2a green을 후보창 픽셀 완료�
 목록을 연 뒤 OS-owned window와 anchor의 screen-space 관계를 캡처한다. Screen Recording 권한, 잠금 해제된
 WindowServer, exact frontmost PID가 없으면 pass/skip이 아니라 `not_provisioned` artifact이며 v2a나 좌표 비교로
 대체하지 않는다. v2a 생산자는 첫 물리 key 전에 `before-ime`, 첫 `setMarkedText` callback 뒤 다음 key 전에
-`first-marked` 제품 PPM을 찍고 `maru.session-host-cr6d-ime-pixel.v1` receipt를 atomic no-overwrite로 게시한다.
-별도 `maru-session-host-cr6d-pixel-verify`가 strict schema, exact P6, runtime/surface/세대/좌표와 cursor 두 cell 밖
-변화 0을 다시 판정한다. v2a·v2b0b·v2b1의 구현 진행과 실제 제품 회차 결과는
+`first-marked` 제품 PPM을 찍고 `maru.session-host-cr6d-ime-pixel.v2` receipt를 atomic no-overwrite로 게시한다.
+receipt는 두 제품 Metal frame의 `status_bar_height_px`를 각각 결속한다. 검증기는 두 높이가 같고 캡처 안에
+들어오는지 확인한 다음, 그 높이만큼의 **창 바닥 상태표시줄**을 비교에서 제외한다. 터미널·탭·사이드바를
+포함한 나머지 영역에서는 cursor 두 cell 밖 변화 0을 유지한다. 이는 독립적으로 갱신되는 메모리 숫자가
+IME 증거를 무효화하지 않게 하는 범위 수정이며, cursor 안의 실제 marked 픽셀 변화와 anchor 검사는 그대로다.
+별도 `maru-session-host-cr6d-pixel-verify`가 strict schema, exact P6, runtime/surface/세대/좌표와 이 범위를
+다시 판정한다. v2a·v2b0b·v2b1의 구현 진행과 실제 제품 회차 결과는
 [검증 매트릭스의 session host IME 시각 증거](verification-matrix.md)를 단일 출처로 둔다.
 
 v2b는 곧바로 owner 이름을 하드코딩하지 않는다. **v2b0 window-authority 관측**이 먼저 Screen Recording preflight를
@@ -6150,6 +6154,18 @@ owner identity가 실제 Apple Korean IME와 결속된다는 증거가 없으면
 캡처한다. ScreenCaptureKit의 `SCWindow`가 window ID·owning application·layer·frame을 제공하고 단일 window filter를 지원하는
 공개 계약을 사용한다([SCWindow](https://developer.apple.com/documentation/screencapturekit/scwindow),
 [desktopIndependentWindow](https://developer.apple.com/documentation/screencapturekit/sccontentfilter/init(desktopindependentwindow:))).
+후보 요청 뒤 WindowServer inventory가 OS 창 게시보다 먼저 실행될 수 있으므로, test-only capture-select ABI는
+엄격히 파싱·검증한 inventory에서 **새 외부 후보가 0개인 경우만** `not_ready`를 돌려준다. Swift는 같은 `before`
+inventory를 유지하고 `opened` 전체 inventory를 매번 새로 수집해 최대 60번의 app run-loop tick 또는 monotonic
+1초 중 먼저 도달한 때까지만 재시도한다. 첫 조회를 세 tick 늦추지 않는다. 후보가 2개 이상이거나 owner·서명·geometry·
+schema·counter가 잘못된 경우는 `failed`로 즉시 끝낸다. 재시도 중 수집한 raw inventory는 메모리에서만 소멸하고
+최종 성공한 `opened` 하나만 5회 lifecycle row에 사용한다. 제한 시간 안에 후보가 없으면 `failed`이며,
+`not_provisioned`나 성공으로 정규화하지 않는다. v2b0b의 최종 observation 게시 ABI는 여전히 `passed`/`failed`
+exact-once이고, 재시도 가능한 것은 v2b1의 게시 전 capture-select ABI뿐이다.
+test-only 실패 진단은 이 미분류 RED를 구분하도록 baseline/opened window 개수, 신규 ID 수의 최대값,
+그중 앱 밖 소유 PID의 신규 ID 수의 최대값, 앱 PID이되 `NSApp.windows`에 없는 신규 ID 수의 최대값,
+그 신규 창 하나의 layer·bounds와 시도 횟수만 숫자로 남길 수 있다. 이는 후보 선택이나 게시의
+권위가 아니며 window ID·PID·제목·문자열·raw inventory는 실패 artifact에 남기지 않는다.
 캡처 직전·직후 동일 window ID/PID와 Apple code-signing identity를 다시 검증한다. receipt는 v2a와 같은 runtime/surface,
 candidate window ID/owner identity/bounds, `firstRect`, capture digest와 capture-complete
 상태를 결속한다. AppKit `firstRect`와 Quartz bounds는 원점 규약이 다르므로 직접 비교하지 않는다. display ID,

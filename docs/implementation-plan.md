@@ -1285,7 +1285,9 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    record 소멸을 executable oracle로 고정한다. **CR6d-v2a 조합 픽셀 증거**는 같은 복구 view에서 첫 물리 한글 key 전과
    첫 `setMarkedText` 반영 뒤의 실제 제품 CAMetalLayer 프레임을 one-shot PPM으로 각각 캡처한다. 두 capture는 같은
    runtime·surface·cursor rect와 `firstRect(forCharacterRange:)` 반환 rect를 구조화 receipt에 결속하고, cursor 관심 영역의
-   픽셀이 달라졌으며 marked frame의 비배경 bounding box가 cursor cell에서 시작하는지를 판정한다. callback 횟수나 좌표
+   픽셀이 달라졌으며 marked frame의 비배경 bounding box가 cursor cell에서 시작하는지를 판정한다. 두 제품 frame의
+   동일한 `status_bar_height_px`를 receipt에 결속해 창 바닥 상태표시줄만 비교에서 제외하고, 그 밖의 cursor 두 cell
+   밖 변화 0은 유지한다. callback 횟수나 좌표
    단위 테스트만으로 픽셀 통과를 대신하지 않는다. 이 행은 Maru가 그린 preedit와 입력기 anchor를 증명하지만 OS가 별도
    window로 그리는 후보 목록 자체를 캡처했다고 주장하지 않는다. **CR6d-v2b 후보창 픽셀 증거**는 실제 Apple Korean IME
    후보 목록을 연 뒤 OS-owned window와 anchor의 screen-space 관계를 캡처하는 별도 opt-in gate다. Screen Recording 권한,
@@ -1322,14 +1324,16 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    **v2b0b 제품 배선은 doc-first로 다음 경계를 고정한다.** 별도 Swift producer가 title 없는 전체 inventory의
    `before/opened/closed` 5묶음을 메모리에만 모으고, 완성 뒤 한 번만 bounded JSON+고정된 absent output pathname을
    동기식 Zig C ABI에 빌려준다. Zig가 schema/window/byte cap을 선검증하고 기존 pure reducer·series validator와 canonical
-   writer를 직접 소유한다. raw inventory 중간 파일, Swift 선택 규칙 복제, 장수명 helper, ABI retry/부분 publication은 0이다.
+   writer를 직접 소유한다. raw inventory 중간 파일, Swift 선택 규칙 복제, 장수명 helper, publication ABI retry/부분 publication은 0이다.
    Screen Recording preflight 실패는 ABI 호출과 source/HID mutation 0인 AppKit smoke의 typed `not_provisioned`로 끝나며,
    실제 제품 실행 파일·리소스를 쓰되 Screen Recording TCC는 실사용 Maru와 분리된
    `dev.maru.apphost.cr6d-input-smoke` 테스트 번들에 귀속한다. 이 번들은 사용자 Applications에
    staging·LaunchServices 등록해 TCC의 ID lookup을 선검증한다. 원본 앱과 그 권한은 변경하지 않는다.
-   Zig ABI 자체는 `passed`/`failed`만 반환한다. v2b0b green은 v2b1 단일-window
-   pixel capture를 완료로 승격하지 않는다. **v2b1 구현 중:** 첫 opened inventory의 완전본은 기존 Zig reducer가
-   exact candidate window ID를 고른 뒤에만 Swift ScreenCaptureKit adapter로 돌아간다. adapter는 그 ID 하나의
+   v2b0b publication ABI는 `passed`/`failed`만 반환한다. v2b0b green은 v2b1 단일-window
+   pixel capture를 완료로 승격하지 않는다. **v2b1 구현 중:** 첫 후보 포함 opened inventory의 완전본은 기존 Zig reducer가
+   exact candidate window ID를 고른 뒤에만 Swift ScreenCaptureKit adapter로 돌아간다. capture-select ABI는
+   검증된 inventory의 신규 외부 후보 0개만 `not_ready`로 분류하고 같은 baseline에서 최대 60 run-loop tick/monotonic
+   1초 동안 opened inventory를 다시 수집한다. 모호함·신원/카운터 오류는 즉시 실패하며 publication은 재시도하지 않는다. adapter는 그 ID 하나의
    `SCWindow`만 filter에 넣고 캡처 전후 window ID/PID/frame과 Apple signing identity를 재검증한다. 이미지 bytes는
    파일로 남기지 않고 digest·pixel size만 bounded evidence로 Zig에 빌려주며, 최종 5-row series·close·cleanup이 모두
    통과한 뒤 기존 observation artifact와 별도의 absent-target v2b1 canonical receipt를 게시한다. v2b0 reducer를

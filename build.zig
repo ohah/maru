@@ -3315,7 +3315,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"CR6d"},
         });
         const run_session_host_cr6d_boundary_tests = b.addRunArtifact(session_host_cr6d_boundary_tests);
-        run_session_host_cr6d_boundary_tests.addArg("--maru-expect-tests=7");
+        run_session_host_cr6d_boundary_tests.addArg("--maru-expect-tests=8");
         run_session_host_cr6d_boundary_tests.setCwd(b.path("."));
         run_session_host_cr6d_appkit.step.dependOn(&run_session_host_cr6d_boundary_tests.step);
         const session_host_cr6d_preedit_incremental_tests = addProjectTest(b, .{
@@ -4648,7 +4648,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_session_host_cr6d_pixel_tests = b.addRunArtifact(session_host_cr6d_pixel_tests);
-    run_session_host_cr6d_pixel_tests.addArg("--maru-expect-tests=8");
+    run_session_host_cr6d_pixel_tests.addArg("--maru-expect-tests=10");
     test_step.dependOn(&run_session_host_cr6d_pixel_tests.step);
     const session_host_cr6d_pixel_step = b.step(
         "test-session-host-cr6d-pixel-validator",
@@ -5410,7 +5410,7 @@ pub fn build(b: *std.Build) void {
         .filters = &.{"CR6d"},
     });
     const run_session_host_cr6d_global_boundary_tests = b.addRunArtifact(session_host_cr6d_global_boundary_tests);
-    run_session_host_cr6d_global_boundary_tests.addArg("--maru-expect-tests=7");
+    run_session_host_cr6d_global_boundary_tests.addArg("--maru-expect-tests=8");
     run_session_host_cr6d_global_boundary_tests.setCwd(b.path("."));
     boundary_step.dependOn(&run_session_host_cr6d_global_boundary_tests.step);
     const session_host_cr6e_boundary_tests = addProjectTest(b, .{

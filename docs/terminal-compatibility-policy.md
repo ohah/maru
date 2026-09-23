@@ -278,6 +278,11 @@ v1 기본 정책:
 
 자동 command restore는 구현 전에 다시 논의한다. 이 결정은 UX가 아니라 안전 문제다.
 
+**에이전트 대화 이어가기는 command restore가 아니다**(2026-09-23 사용자 결정). 재부팅이 증명된 복원에서만, Term마다
+저장한 provider·세션 id로 그 대화를 이어간다 — 실행하는 것은 관측한 command 문자열이 아니라 **우리가 조립한
+provider-native resume argv**이고, 세션 id는 argv 토큰 규칙을 지난 값만 쓴다. 단일 출처는
+[workspace-restore.md](workspace-restore.md) 「재부팅 뒤 부활(RB)」이다.
+
 용어:
 
 - `shell_entry`: pane을 다시 열 때 시작할 기본 shell argv다. 예: `["zsh", "-l"]`.

@@ -39,6 +39,7 @@ macOS 로컬 shell 1개 surface
 - [터미널 입력 인코딩과 VT 프로토콜 구현 이력](plans/terminal-input-and-protocols.md)
 - [메뉴바와 커맨드 팝업(Action 카탈로그) 구현 계획](plans/menu-and-command-palette.md)
 - [9·10단계 — Workspace restore와 Plugin/Wasm 구현 계획](plans/workspace-restore.md)
+- [재부팅 뒤 부활 구현 계획(RB0~RB2 — 껐다 켜면 터미널이 cwd에서 다시 뜨고 에이전트 대화가 이어진다)](plans/reboot-revival.md)
 - [백로그 — New Window와 chrome 고급화 (설계 근거 보존)](plans/new-window-and-chrome.md)
 - [에이전트 세션 기록 도크 구현 계획](plans/agent-session-dock.md)
 - [원격 에이전트 상태(배지·대화 줄) 구현 계획](plans/remote-agent-state.md)
@@ -1617,7 +1618,10 @@ pre-publication 실패는 topology/projection mutation 0이며 host terminate/sp
 ## Provider session continuity 잔여 제거(persistent-session P1, 완료)
 
 Claude/Codex provider-native resume/fork는 제품 경로로 되살리지 않는다. P1에서 legacy workspace typed field/parser,
-restore 설정 alias, 과거 hook/mapping cleanup과 전용 환경변수 차단을 제거했다.
+restore 설정 alias, 과거 hook/mapping cleanup과 전용 환경변수 차단을 제거했다. **이후 예외 하나가 생겼다** —
+재부팅이 증명된 복원은 Term마다 저장한 provider·세션 id로 대화를 이어간다(2026-09-23 사용자 결정, 새 키
+`agent-resume` — P1이 지운 옛 키는 계속 읽지 않는다). 계약은 [workspace-restore.md](workspace-restore.md)
+「재부팅 뒤 부활(RB)」, 단계는 [재부팅 뒤 부활 계획](plans/reboot-revival.md)이 소유한다.
 
 - provider continuity 호환과 같은 loader branch의 dead notification alias를 제거했고 세 설정 key는 일반 unknown-key
   진단으로 돌린다. 구 workspace의 미지 scalar는 일반 key-addressed 규칙으로 무시하되 독립

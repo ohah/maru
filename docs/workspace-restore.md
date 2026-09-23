@@ -11,8 +11,10 @@ workspace restore는 "실행 중이던 shell process를 그대로 냉동했다�
 > 이 설명은 선언적 restore의 기본 계약이다. 현재 opt-in
 > [영속 터미널 세션 호스트](persistent-session-host.md)는 별도 `maru-sessiond`가 live PTY·child·`TerminalCore`를
 > 계속 소유하고 새 GUI가 `runtime-handle`로 attach하는 경로까지 구현했다. 이때도 GUI가 process를 직렬화하는 것은 아니며
-> 연속성은 host와 runtime이 살아 있을 때만 성립한다. host/runtime 종료 뒤 provider resume/fork나 동일 세션 복구는
-> 제공하지 않으며, 새 shell을 여는 동작을 기존 실행 세션의 연속으로 설명하지 않는다.
+> 연속성은 host와 runtime이 살아 있을 때만 성립한다. host/runtime 종료 뒤 동일 세션 복구는 제공하지 않으며,
+> 새 shell을 여는 동작을 기존 실행 세션의 연속으로 설명하지 않는다. **예외는 하나다** — 재부팅이 증명된 복원은
+> 터미널을 새 셸로 되살리고 돌던 에이전트 대화를 이어간다(아래 「재부팅 뒤 부활(RB)」). 그때도 「새로 시작했다」를
+> 알림으로 밝힌다.
 
 Maru가 저장하는 것은 다시 시작하기 위한 **설명서**다.
 
@@ -111,7 +113,8 @@ workspace restore와 persistent-session attach는 서로 대체하지 않는다.
 | 같은 `host_id/runtime_id`가 살아 있음 | 새 shell을 spawn하지 않고 기존 runtime에 attach |
 | host가 runtime 부재를 긍정 응답하거나 dead owner lease로 host 종료를 검증함 | 자동 fresh spawn 금지. **그 Term만 종료 placeholder로 두고 나머지 surface·split·탭은 정상 복원한다.** 영구 부재(`PersistentRuntimeGone`)로 분류된 경우에만이며 placeholder는 마지막 제목·위치와 `⏎` 안내를 화면에 남긴다 |
 | endpoint 미발견·지원 범위 밖 protocol·timeout | runtime이 살아 있을 수 있으므로 unavailable로 fail-close. ended로 저장하거나 새 shell로 위장하지 않음 |
-| host 종료·재부팅이 긍정적으로 검증됨 | 기존 handle은 ended. 사용자가 새 shell을 열 수는 있지만 동일 session continuation 아님 |
+| 재부팅이 증명됨(파일의 `boot-session` ≠ 지금 부팅) | attach·probe·묘비 없이 **저장된 cwd에서 새 셸**. 로컬 에이전트가 돌던 Term은 그 대화를 이어간다. 복원 뒤 「새로 시작했다」 알림 한 번(아래 「재부팅 뒤 부활(RB)」) |
+| 재부팅 증명 없이 host 종료가 긍정적으로 검증됨 | 기존 handle은 ended. 사용자가 `⏎`로 새 shell을 열 수는 있지만 동일 session continuation 아님 |
 | host에만 runtime이 남음 | 삭제하지 않음. primary Window의 `Recovered Sessions`에 노출하고 사용자의 explicit adopt만 허용 |
 
 현재 `maru.workspace.v1`의 terminal `runtime-handle`은 구현됐다. writer는
@@ -352,14 +355,101 @@ workspace restore가 이것을 자동 재실행하면 위험하다.
 - repo별 기본 command는 사용자가 `startup_recipe`로 명시한 경우에만 실행 후보가 된다.
 - destructive할 수 있는 `startup_recipe` 자동 실행은 나중에 confirmation이나 allowlist가 필요하다.
 
-## 에이전트 세션은 자동 복원하지 않는다
+## 에이전트 세션은 재부팅 뒤에만 이어간다
 
-Workspace restore는 provider 세션 id·트랜스크립트·argv를 수집하지 않으며 claude/codex를 자동 resume/fork하지
-않는다. 에이전트는 계정·권한·네트워크·외부 세션 상태를 가진 대화형 프로그램이므로, 사용자가 명시하지 않은 재실행은
-일반 명령 재실행 금지와 같은 경계를 따른다. 복원되는 것은 해당 Term의 `shell_entry`, cwd, 레이아웃뿐이다.
+Workspace restore는 트랜스크립트·argv를 수집하지 않는다. 에이전트는 계정·권한·네트워크·외부 세션 상태를 가진
+대화형 프로그램이므로, 사용자가 명시하지 않은 재실행은 일반 명령 재실행 금지와 같은 경계를 따른다 — **재부팅이
+증명된 복원 하나만 예외다**(2026-09-23 사용자 결정, 아래 「재부팅 뒤 부활(RB)」). 그 예외를 위해 저장하는 것은
+Term 하나당 **provider와 세션 id 한 쌍**(`agent-resume`)뿐이고, 권한 모드·모델은 저장하지 않고 이어갈 때 대화
+파일에서 다시 읽는다. 재부팅이 아닌 복원에서는 그 쌍을 읽기만 하고 아무것도 실행하지 않는다 — 살아 있는 host
+runtime에 다시 붙거나 묘비를 만드는 지금 규칙 그대로다. 창 줄의 `last-agent-session`(AT7 — [에이전트 턴
+변경분](agent-turn-changes.md))도 세션 id지만 **턴 링을 화면에 되살리는 표시용 신원**이고 아무것도 실행하지 않는다.
+실행의 근거가 되는 것은 Term 줄의 `agent-resume` 하나다 — 둘을 섞으면 「창에서 마지막으로 본 세션」을 엉뚱한
+Term에서 이어가게 된다.
 
-구버전 workspace의 provider 관련 scalar는 전용 typed model 없이 일반 미지 scalar로 건너뛴다. 새 저장에는 해당 scalar가
-나오지 않는 read-old/write-new 방식이므로 한 번 저장하면 자연스럽게 사라진다. 관련 옛 설정 이름도 일반 unknown key다.
+**구버전 provider scalar는 계속 읽지 않는다.** P1이 제거한 `agent-kind`·`agent-session`·`agent-arg`·`agent-argc`는
+일반 미지 scalar로 건너뛴다 — 이름이 비슷해도 그 값은 몇 달 전 파일에 남은 **다른 계약**의 것이라, 읽으면 그때의
+세션을 지금 이어가게 된다. 새 키는 이름부터 다르다(`agent-resume`). 새 저장에는 옛 scalar가 나오지 않는
+read-old/write-new 방식이므로 한 번 저장하면 자연스럽게 사라진다. 관련 옛 설정 이름도 일반 unknown key다.
+
+## 재부팅 뒤 부활(RB)
+
+**결정(2026-09-23 사용자 결정)**: 맥을 껐다 켠 뒤의 첫 복원에서 ⑴ 모든 터미널 Term이 **저장된 cwd에서 새 셸로**
+자동으로 뜨고 ⑵ 그 Term에서 **로컬 claude·codex가 돌고 있었으면 그 대화를 이어간다.** 스크롤백·화면 내용·일반
+명령은 되살리지 않는다. 단계 분해는 [재부팅 뒤 부활 계획](plans/reboot-revival.md)이 소유한다.
+
+이 절이 뒤집는 것은 두 규칙이다 — 「영구 부재 Term은 묘비로 두고 `⏎`만이 되살린다」([영속 세션 호스트](persistent-session-host.md)
+§7)와 「에이전트를 자동으로 이어가지 않는다」(위 절). 둘 다 **재부팅이 증명된 복원에서만** 뒤집히고, 그 밖의
+복원은 한 줄도 바뀌지 않는다.
+
+### 재부팅의 증명 — `boot-session`
+
+- **쓰기**: checkpoint는 모든 `window` 줄에 `boot-session="<uuid>"`를 싣는다. 값은 macOS `kern.bootsessionuuid` —
+  커널이 **부팅할 때마다 새로 만드는** UUID(36자, `8-4-4-4-12` 16진)다. 읽지 못하면 키를 생략한다.
+- **읽기**: 파일의 `window` 줄 가운데 **유효한 값이 하나 이상** 있고 그 값이 **전부 지금 부팅의 값과 다르면**
+  「재부팅 증명」이다. 키가 없으면(옛 파일·그때 못 읽음) 증명이 없고, 지금 부팅의 값을 못 읽어도 증명이 없다.
+  증명이 없으면 이 절 전체가 꺼지고 위 표의 나머지 행이 그대로 적용된다. 재부팅 증명은 **위 표의 다른 행보다 먼저**
+  본다 — 증명된 복원은 host에 묻지 않는다.
+- **형식이 깨진 값은 그 키가 없는 것으로 읽는다.** `runtime-state`처럼 checkpoint 전체를 거부하지 않는 이유는 이
+  키가 **동작을 켜기만** 하기 때문이다 — 없을 때 떨어지는 곳이 지금의 안전한 동작(묘비·`⏎`)이라, 파일을 통째로
+  버리는 것이 오히려 더 많이 잃는다.
+- **왜 「host가 없다」로 판정하지 않나.** 영구 부재 판정은 재부팅이 아니어도 난다 — 2026-09-23 실측으로 43일 동안
+  재부팅하지 않은 기계의 앱 로그에 `demoted=12`와 `demoted=1`이 있었다(빌드가 바뀌어 옛 host를 건너뛴 직후).
+  그 판정을 근거로 새 셸을 자동으로 띄우면 **살아 있을 수 있는 세션 옆에 새 셸을 겹친다** — `⏎` 규칙이 막으려던
+  바로 그 일이다. 부팅 UUID가 다르다는 것은 「그 파일을 쓴 뒤 커널이 새로 떴다」이고, 따라서 **그 파일이 가리키는
+  모든 프로세스가 죽었다**는 증명이다.
+- **왜 부팅 시각이 아니라 UUID인가.** `kern.boottime`은 벽시계 값이라 시계 조정에 흔들린다. UUID는 같음·다름만
+  말하고 그 밖의 해석이 없다.
+
+### 부활 규칙
+
+재부팅이 증명된 복원에서:
+
+- **host identity가 있는 터미널 Term**(`runtime-handle` live·`runtime-state="ended"` 묘비·legacy bare `runtime-id`
+  모두): attach·probe를 하지 않고 묘비도 만들지 않는다. **저장된 cwd에서 새 셸**을 띄운다 — cwd 규칙은
+  `restoreSpawn`과 같다(존재하는 절대 디렉터리일 때만, 아니면 기본 자리). 새 runtime은 지금의 backend 규칙대로
+  만든다(keep-alive면 새 host). 묘비도 되살리는 이유는 사용자가 원한 것이 「껐다 켜면 전부 돌아온다」이기 때문이다.
+- **host identity가 없는 터미널 Term**(in-process로 만든 것): 이미 새 셸로 뜬다 — 변화 없음. 그래서 이 절은
+  keep-alive 설정과 무관하게 **한 규칙**이다. 에이전트 이어가기도 in-process Term에 똑같이 적용된다.
+- **원격 cwd**는 원래 저장하지 않으므로(빈 값) 기본 자리에서 뜬다. 파일·브라우저·이름 없는 문서 Term은 각자의
+  기존 규칙 그대로다.
+- **복원이 끝나면 앱에 알림을 한 번 띄운다**(창마다가 아니다) — 「재부팅으로 이전 터미널이 끝나 N개를 새로 시작했습니다」, 이어간
+  에이전트 수와 못 이어간 수를 함께. 새 셸을 원래 세션의 연속으로 보이게 하지 않는다는 원칙은 이 알림이 지킨다.
+- **부활 직후 checkpoint를 더럽힌다.** 새 파일이 지금 부팅의 `boot-session`과 새 handle을 실어야, 부활한 실행이
+  저장 전에 죽었을 때 다음 실행이 **또** 부활해 같은 셸을 겹쳐 띄우지 않는다. debounce 안에 죽는 좁은 창은 남는다 —
+  그때 keep-alive면 첫 실행이 만든 runtime은 사라지지 않고 `Recovered Sessions`에 뜬다(삭제하지 않는다는 기존 규칙),
+  in-process면 앱과 함께 이미 끝났다.
+
+### 에이전트 이어가기 — `agent-resume`
+
+- **저장**: `surface` 줄의 scalar `agent-resume="<provider>:<session-id>"`. provider는 `claude`·`codex`. 다음을
+  **모두** 만족할 때만 싣고, 아니면 키를 생략한다.
+  - 그 Term의 포그라운드에서 **로컬** claude·codex가 돌고 있다(`agent_kind`).
+  - 세션 신원이 확보됐다 — 훅 `SessionStart` 또는 자식 env(`CLAUDE_CODE_SESSION_ID`·`CODEX_THREAD_ID`).
+    사이드바 에이전트 목록이 쓰는 **같은 신원**이다(`primaryHookSlot(…).transcript.identity()`).
+  - Term이 원격이 아니다(ssh 채널이 열린 Term은 에이전트가 **저쪽 기계**에서 돈다 — 여기서 이어가면 엉뚱한
+    기계에서 연다).
+  - 신원이 세션 기록 도크의 argv 토큰 규칙(`isResumableSessionId`)을 통과한다. 이 값은 실행 인자가 되므로 쓰는
+    쪽과 읽는 쪽이 **같은 규칙**을 쓴다.
+  - 묘비 Term은 싣지 않는다(그 안에서 도는 것이 없다).
+- **갱신**: (`agent_kind`, 신원) 쌍이 바뀌면 checkpoint를 더럽힌다. 정상 재부팅은 종료 checkpoint가 마지막 쌍을
+  싣지만, **전원이 그냥 꺼지면** 종료 checkpoint가 없으므로 그 전에 이미 파일에 있어야 한다.
+- **읽기 검증**: provider가 둘 중 하나가 아니거나 id가 토큰 규칙을 어기면 **그 키가 없는 것으로** 읽는다(셸만 뜬다).
+  `boot-session`과 같은 이유로 checkpoint 전체를 거부하지 않는다.
+- **이어가기(재부팅이 증명됐을 때만)**:
+  1. 대화 파일을 찾는다 — claude는 `<claude 설정 디렉터리>/projects/<cwd slug>/<id>.jsonl`, codex는
+     `~/.codex/sessions` 아래 `rollout-*-<id>.jsonl`. 사이드바가 대화 줄을 찾는 **같은 조회**를 쓴다. **파일이
+     없으면 이어가지 않는다** — provider가 거절할 세션을 열어 오류 화면을 남기지 않고, 셸만 띄운 뒤 알림의
+     「못 이어간 수」에 센다.
+  2. 파일 **끝부분 최대 1 MiB**만 읽어 마지막 권한 모드와 모델을 얻는다. 세션 기록 도크의 재개와 **같은 파서·
+     같은 `resumeArgv`**를 쓴다 — 「기록된 대로 되살린다」는 규칙이 두 자리에서 갈리지 않게([에이전트 세션
+     기록 도크](agent-session-list.md) §5). 끝에서 1 MiB 안에 그 줄이 없으면 플래그를 안 붙인다(도크 규칙:
+     모르면 provider 기본값). 전체를 읽지 않는 이유는 복원이 **창을 그리기 전에** 도는데 대화 파일이 수백 MB일 수
+     있기 때문이다.
+  3. 도크 재개와 **같은 셸 래핑**으로 띄운다 — `<shell> -l -i -c "<provider argv>; exec <shell> -l -i"`, cwd는 spawn
+     작업 디렉터리로만 넘긴다. 에이전트를 끝내면 그 Term은 셸로 돌아온다.
+- **알려진 한계**: 훅이 꺼져 있고 자식 env로도 신원을 못 잡은 세션은 이어가지 않는다(셸만). claude는 대화 파일을
+  cwd slug로 찾으므로, 에이전트가 돌던 중에 Term의 cwd가 에이전트의 작업 디렉터리와 달라졌다면 못 찾는다.
 상태 표시는 [에이전트 상태 감지](agent-session.md)가 단일 출처이며 host/runtime 종료를 provider 경로로 복구하지 않는다.
 
 ## command 관련 용어

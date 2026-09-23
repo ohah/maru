@@ -633,7 +633,7 @@ fn syntaxColors(self: *AppSession, term: *Term) []const []const chrome_editor.co
     const doc = term.rt.editor_doc orelse return &.{};
 
     // **끊긴 파싱을 이 프레임 몫만큼 이어 판다**(§2.1a). 여는 파싱이 한 프레임에 안 끝나는 문서가
-    // 있으므로(690KB `build.zig` 실측 ~50ms) 프레임마다 예산만큼만 판다. 아직 남았으면 **다음 프레임을
+    // 있으므로(`build.zig` 675KB 가 `ReleaseFast` 에서 22.5ms — §2.1a 실측, 4ms 로 여섯 라운드) 프레임마다 예산만큼만 판다. 아직 남았으면 **다음 프레임을
     // 부른다** — 그러지 않으면 idle skip이 도는 순간 파싱이 거기서 멈춰 색이 영영 안 온다.
     //
     // **여기 두는 이유**: 이 함수가 색을 만드는 유일한 자리이고 프레임마다 불린다. 별도 tick 훅을
@@ -9300,7 +9300,8 @@ fn refreshAfterEdit(self: *AppSession, term: *Term, edit: ?syntax_color.EditSpan
     else
         // **`null`은 "안 바뀌었다"가 아니라 "범위를 모른다"이다.** 이 함수는 편집 뒤에만 불리므로
         // 통지를 건너뛰면 트리가 낡은 채로 남아 **색이 옛 문서를 가리킨다**. 범위를 못 만드는
-        // 경로(undo·redo — 한 번에 항목 여럿)는 전체를 다시 파는 쪽이 정확하다.
+        // 경로(`spanFromInverse` 의 방어 갈래 · 범위 모르는 항목이 낀 undo 묶음 — 보통의 undo 는 `undoGroupSpan` 이
+        // 범위를 만든다)는 전체를 다시 파는 쪽이 정확하다.
         syntax_color.reparse(&term.rt.editor_syntax, doc.file.content);
 
     // ⑷⑸⑹은 **실패할 수 없는 연산이고, ⑵⑶이 실패해도 반드시 돌아야 한다.**
@@ -32925,6 +32926,74 @@ test "ES37 여는 경로가 예산을 건다 — 프레임 하나를 통째로 �
 
     const prov = fx.term.rt.editor_syntax.provider orelse return error.NoProvider;
     try testing.expectEqual(syntax_color.frame_parse_budget_ns, prov.budget_ns);
+}
+
+test "ES41 여는 파싱이 끊긴 채 편집이 오면 처음부터 다시 판다 — 거짓 구문 오류가 안 서고 이어 팔 것도 안 남는다 (§2.1a)" {
+    // **제품 경계에서 잰다**(`SYN41` 은 층): 편집은 `insertText` → `refreshAfterEdit` → `onEditSpan` 을 타고, 진단은
+    // 프레임(`appendPaneFrame` 의 `diagnosticViews`)이 채운다. 그 프레임에서 진단이 **`syntaxColors` 보다 먼저** 트리를
+    // 읽으므로(끊긴 파싱을 이어 파는 자리가 `syntaxColors` 다) 틀린 트리의 오류가 목록에 들어가고, 이어 파는 동안에는
+    // 「트리가 없으면 직전 목록 유지」 규칙 때문에 **파싱이 끝날 때까지 남는다**. 제품에서 이 순서를 밟는 것은 백업
+    // 복원이다 — 여는 파싱(4ms 예산)이 끊긴 채로 곧바로 문서 전체를 갈아 끼운다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    _ = insertText(fx.session, fx.term, "pub fn f() void { const s = \"abc\"; _ = s; }\n" ** 200);
+    const doc = fx.term.rt.editor_doc orelse return error.NoDoc;
+    // 여는 경로를 **1ns 예산**으로 다시 태운다 — 끊긴 상태를 기계 속도와 무관하게 만든다(`openBudgeted` 가 판정자에 여는 문).
+    fx.term.rt.editor_syntax.deinit(allocator);
+    fx.term.rt.editor_syntax = syntax_color.openBudgeted(doc.file.content, .zig, 1);
+    if (!fx.term.rt.editor_syntax.pending) return error.SkipZigTest;
+
+    // 앞머리에 한 줄 — 이미 읽힌 범위 안이고 **길이가 바뀐다**(같은 길이면 reset 이 없어도 트리가 맞아 이 판정자가 늘 초록이다).
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    _ = insertText(fx.session, fx.term, "// memo\n");
+
+    // ⑴ **이어 팔 것이 안 남는다.** 편집 경로는 예산 없이 끝까지 팠다 — `pending` 이 남으면 다음 프레임이
+    //    방금 맞게 판 트리를 버리고 다시 나눠 판다(그동안 무색).
+    try testing.expect(!fx.term.rt.editor_syntax.pending);
+    try testing.expect(fx.term.rt.editor_syntax.provider.?.tree != null);
+
+    // ⑵ **거짓 구문 오류가 없다** — 문서는 올바른 Zig 다. 프레임 하나를 돌려 진단을 채운다.
+    var d = appendPaneFrame(fx.session, .{ .x = 100, .y = 50, .w = 800, .h = 600 }, fx.term) orelse return error.NoFrame;
+    d.dl.deinit(allocator);
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_diagnostics.raw.items.len);
+}
+
+test "ES42 여는 파싱이 끊긴 채 범위를 모르는 편집이 오면 — 통째로 다시 파는 입구(`reparse`)도 처음부터 파고 이어 팔 것을 안 남긴다 (§2.1a)" {
+    // `ES41` 의 짝 — `refreshAfterEdit` 는 편집 범위가 `null` 이면 `onEditSpan` 이 아니라 **`reparse`**(`setSource`)로 간다.
+    // 입구가 다르므로 reset 과 `pending` 내리기도 따로 잰다. **undo 로는 여기 안 닿는다**(적대적 3회차: 처음엔 undo 로 쟀는데
+    // `reparse` 변이가 살았다 — undo 도 `undoGroupSpan` 으로 범위를 만든다). `null` 은 `spanFromInverse` 의 방어 갈래(역연산이
+    // 비었거나 앞뒤가 뒤집혔다 — `EDIT6` 의 반쯤 만든 역연산)에서 온다. 그래서 델타를 직접 적용하고 `null` 을 넘긴다
+    // (`refreshAfterEdit` 가 제품의 유일한 편집 통지 자리다 — 앵커 판정자가 같은 수법을 쓴다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    _ = insertText(fx.session, fx.term, "pub fn f() void { const s = \"abc\"; _ = s; }\n" ** 200);
+    const doc = fx.term.rt.editor_doc orelse return error.NoDoc;
+    fx.term.rt.editor_syntax.deinit(allocator);
+    fx.term.rt.editor_syntax = syntax_color.openBudgeted(doc.file.content, .zig, 1);
+    if (!fx.term.rt.editor_syntax.pending) return error.SkipZigTest;
+
+    // 앞머리에 한 줄 — 이미 읽힌 범위 안이고 **길이가 바뀐다**.
+    var sels = maru.session.editor.selection.Selections.init((try allocator.alloc(editor_selection.Selection, 1))[0..1], 0);
+    sels.items[0] = editor_selection.Selection.at(0);
+    defer allocator.free(sels.items);
+    const changes = [_]maru.session.editor.delta.Change{.{ .start = 0, .end = 0, .text = "// memo\n" }};
+    var inv = try fx.term.rt.editor_doc.?.file.apply(.{ .changes = &changes }, &sels);
+    inv.deinit();
+    refreshAfterEdit(fx.session, fx.term, null) catch {};
+
+    try testing.expect(!fx.term.rt.editor_syntax.pending);
+    try testing.expect(fx.term.rt.editor_syntax.provider.?.tree != null);
+    var d = appendPaneFrame(fx.session, .{ .x = 100, .y = 50, .w = 800, .h = 600 }, fx.term) orelse return error.NoFrame;
+    d.dl.deinit(allocator);
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_diagnostics.raw.items.len);
 }
 
 test "ES24 문서와 줄 배열이 갈리면 승격하지 않는다 — 엉뚱한 줄이 접힌다" {

@@ -17,10 +17,11 @@ Maru에서 작업하는 모든 에이전트와 개발자는 이 규칙을 따른
 ## 의존성
 
 - 런타임 의존성(`build.zig.zon`의 `dependencies`)은 기본 0으로 둔다. 새 런타임 의존성을 추가하려면 먼저 사용자와 논의한다.
-  - **현재 예외 3건.**
+  - **현재 예외 4건.**
   - **예외 ①: tree-sitter**(편집기 syntax 1층 — 2026-08-09 사용자 논의를 거친 결정, [native-editor-visual-mapping.md](native-editor-visual-mapping.md) §5.3). 코어와 언어별 grammar가 바이너리에 링크되므로 라이선스·attribution은 [third-party 라이선스](third-party-licenses.md)가, 번들 언어 목록은 [네이티브 편집기 구현 계획](plans/native-editor.md)이 소유한다. **"기본 0"의 규율은 그대로다** — 이 예외가 다음 의존성의 선례가 되지 않는다.
   - **예외 ②: wuffs**(PNG 디코드 — 2026-09-14 사용자 논의를 거친 결정, [터미널 입력·프로토콜 계획](plans/terminal-input-and-protocols.md) §kitty graphics PNG). 판단 근거는 **이 코드가 다루는 것이 신뢰 경계 밖의 바이너리**라는 점이다 — PTY·원격이 보내는 PNG 를 우리가 손으로 파싱하면 OOB·정수 넘침을 앞으로 계속 우리가 지켜야 한다. wuffs 는 메모리 안전이 언어 차원에서 증명되는 코덱 전용 언어의 산출물이고, Ghostty 도 같은 선택을 했다. 대가는 **한 번 내는 크기 비용**이다(실측: wasm 배포물 brotli 53 KB → 88 KB). exe·wasm 양쪽에 링크되므로 라이선스 동봉 의무는 [third-party 라이선스](third-party-licenses.md)가 소유한다.
   - **예외 ③: PCRE2**(편집기 정규식 찾기·바꾸기 — 2026-09-28 사용자 논의를 거친 결정, [시각 매핑 §5.1](native-editor-visual-mapping.md)). lookaround·역참조와 캡처 바꾸기를 자체 엔진 없이 제공한다. 8-bit 정적 링크·JIT 비활성·매치 한도를 적용하며, 배포 라이선스는 [third-party 라이선스](third-party-licenses.md)가 소유한다.
+  - **예외 ④: CEF(Chromium Embedded Framework)**(웹 OSR 백엔드 — 2026-09-24 사용자 논의를 거친 결정, [웹 OSR 백엔드 구현 계획](plans/web-osr-backend.md)). `build.zig.zon` 의존성은 아니지만(배포본이 `.tar.bz2` 라 `zig fetch` 가 못 푼다 — 실측) 사용자 기계에 설치되는 외부 코드라 이 규칙의 취지에 든다. **maru 앱에는 링크하지 않고** 별도 sidecar 프로세스(`maru-web-host`·`maru-web-helper`)만 쓴다. 빌드는 **opt-in** 이다 — SDK 는 받기 스크립트가 해시를 확인해 캐시에 두고, 기본 `zig build`·`mise run check` 는 CEF 없이 돈다. 헤더도 저장소에 넣지 않는다. 버전은 154.0.23 에 고정하고 올릴 때 회귀 시험을 다시 돈다. 대가는 설치 크기(프레임워크 약 323MB)와 브라우저당 메모리(약 66MB)다. 라이선스·attribution 은 배포 단계(W7)에서 [third-party 라이선스](third-party-licenses.md)가 소유한다. **"기본 0"의 규율은 그대로다.**
 - **CI 는 의존성을 내려받지 않는다.** `build.zig.zon` 의 모든 의존성 tarball 은 `vendor/zig-packages/<hash>.tar.gz` 로 저장소에 있고, Zig 를 설치하는 모든 CI 스텝 바로 다음에 `tools/ci/prime-zig-packages.sh` 가 그것을 Zig 전역 패키지 캐시에 채운다(Zig 0.16 은 `<global_cache>/p/<hash>.tar.gz` 가 있으면 받지 않는다). 외부 다운로드가 끊겨 잡이 빨개지는 일(2026-09-29 `HttpConnectionClosing`)을 원리상 없애기 위해서다. 의존성을 추가·변경·삭제하면 `sh tools/ci/vendor-zig-packages.sh` 로 사본을 맞춘다 — 빠지거나 남으면 check-boundaries(`ci_zig_package_prime_boundary`)와 CI 의 채우기 스텝이 실패한다.
 - dev/test/CI 의존성(외부 오라클의 libvterm, Ghostty libghostty-vt, Alacritty alacritty_terminal 등)은 opt-in으로만 쓰고 기본 `mise run check` 경로에 넣지 않는다.
 - 외부 reference를 추가하거나 필수 의존성으로 승격하는 규칙은 [레퍼런스와 공개 명세](references.md)·[오라클 비교 테스트 전략](oracle-testing.md)을 단일 출처로 둔다.

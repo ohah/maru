@@ -42918,15 +42918,19 @@ test "RB2-9 재부팅 증명 복원만 이어간다 — 수를 세어 알리고,
     var fake_env = try Rb2EnvGuard.set("MARU_AGENT_SESSION_ARCHIVE_SMOKE_FAKE_CLAUDE", "/usr/bin/true");
     defer fake_env.restore();
 
-    for ([_]bool{ true, false }) |proven| {
+    // keep-alive 를 끈 경우도 잰다 — 계약은 「keep-alive 와 무관한 한 규칙」이다(docs/workspace-restore.md
+    // 「재부팅 뒤 부활(RB)」). in-process 로 만든 칸은 host identity 가 없어도 `agent-resume` 이 있으면 이어간다.
+    const Case = struct { proven: bool, keep_alive: bool };
+    for ([_]Case{ .{ .proven = true, .keep_alive = true }, .{ .proven = true, .keep_alive = false }, .{ .proven = false, .keep_alive = true } }) |case| {
+        const proven = case.proven;
         var fx: RebootRestoreFixture = .{};
         try fx.enter(rb1_boot_now);
         defer fx.leave();
         const session = try initSmokeSessionSized(a);
         defer a.destroy(session);
         defer session.deinit();
-        fx.armKeepAlive();
-        defer fx.disarmKeepAlive();
+        if (case.keep_alive) fx.armKeepAlive();
+        defer if (case.keep_alive) fx.disarmKeepAlive();
 
         var arena = std.heap.ArenaAllocator.init(a);
         defer arena.deinit();
@@ -42962,14 +42966,17 @@ test "RB2-9 재부팅 증명 복원만 이어간다 — 수를 세어 알리고,
         try workspace_ops.applySavedWorkspaceWindow(session, &.{win}, 0);
         const terms = session.tabs.items[0].panes.items[0].terms.items;
         if (proven) {
-            // host identity 가 있던 둘만 부활로 센다. 그 가운데 대화 파일이 있는 하나만 이어간다.
-            try std.testing.expectEqual(@as(u32, 2), AppSession.reboot_revived_pending);
-            try std.testing.expectEqual(@as(u32, 1), AppSession.reboot_agents_resumed_pending);
+            // host identity 가 있던 둘 + identity 없이 에이전트만 적힌 칸(in-process 로 만든 칸) 하나가 부활한다.
+            // 대화 파일이 있는 둘(0·2)은 이어가고, 없는 하나(1)는 셸만.
+            try std.testing.expectEqual(@as(u32, 3), AppSession.reboot_revived_pending);
+            try std.testing.expectEqual(@as(u32, 2), AppSession.reboot_agents_resumed_pending);
             try std.testing.expectEqual(@as(u32, 1), AppSession.reboot_agents_missed_pending);
             try std.testing.expectEqualStrings("claude", terms[0].surface.command.?);
             try std.testing.expect(!terms[1].rt.ended_placeholder);
-            // identity 없는 칸은 원래 새 셸로 뜨는 경로다 — 부활이 아니므로 이어가지도 않는다.
-            try std.testing.expect(!std.mem.eql(u8, "claude", terms[2].surface.command orelse ""));
+            try std.testing.expect(!std.mem.eql(u8, "claude", terms[1].surface.command orelse ""));
+            // in-process 로 만든 칸도 이어간다 — 계약의 「한 규칙」. 예전 판은 이 칸을 「이어가지 않는다」로 굳혀
+            // keep-alive 를 끈 사용자는 재부팅 뒤 에이전트가 영영 안 이어졌다(적대적 검증이 잡았다).
+            try std.testing.expectEqualStrings("claude", terms[2].surface.command.?);
             // 알림은 셋을 모두 싣고 비운다.
             session.showPendingRebootRevivalNotice();
             try std.testing.expectEqual(@as(u32, 0), AppSession.reboot_agents_resumed_pending);

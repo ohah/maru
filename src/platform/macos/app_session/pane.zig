@@ -278,8 +278,11 @@ pub fn dividerAtPoint(self: *AppSession, x_px: f64, y_px: f64) ?struct { seg: ch
 pub fn createRestoredTerm(self: *AppSession, sm: maru.session.workspace.Surface) !*Term {
     // RB1: **재부팅이 증명된 복원**은 host 에 묻지 않는다 — 파일을 쓴 뒤 커널이 새로 떴으므로 그 파일이 가리키는
     // 모든 프로세스가 죽었다. 묘비·attach 보다 **먼저** 보는 이유가 그것이다(docs/workspace-restore.md 「재부팅
-    // 뒤 부활(RB)」). identity 가 없는 surface 는 원래 아래 `restoreSpawn` 으로 새로 뜨므로 이 갈래가 필요 없다.
-    if (self.restore_reboot_proven and hasRuntimeIdentity(sm)) return createRebootRevivedTerm(self, sm);
+    // 뒤 부활(RB)」). identity 가 없는 surface(in-process 로 만든 칸)는 원래 아래 `restoreSpawn` 으로 새로 뜨지만,
+    // **이어갈 에이전트가 적혀 있으면** 이 갈래로 온다 — 계약은 keep-alive 와 무관한 한 규칙이다. 예전 판은 identity
+    // 만 봐서 keep-alive 를 끈 사용자는 재부팅 뒤 에이전트가 영영 안 이어졌다(적대적 검증이 잡았다).
+    if (self.restore_reboot_proven and (hasRuntimeIdentity(sm) or sm.agent_resume != null))
+        return createRebootRevivedTerm(self, sm);
     if (sm.runtime_state == .ended) {
         recordEndedPlaceholder(self, false);
         // 이미 완전하게 표현된 tombstone은 attach/probe/spawn 경계에 들어가지 않는다. restoreSpawn도 호출하지 않아

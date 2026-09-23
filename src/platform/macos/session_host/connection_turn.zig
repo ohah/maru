@@ -4111,11 +4111,16 @@ test "tick tells its four partial_timeout sites apart by name" {
         reactor: *slot_mod.ReactorCore,
         client: *Client,
 
-        fn open(id: u64) !@This() {
+        /// **호출자가 놓은 자리에서 바로 초기화한다 — 값으로 돌려주지 않는다.** `Client` 가
+        /// `registry_value`·`subscriptions` 의 **주소**를 들고 있으므로, 예전처럼 지역 `self` 를
+        /// 만들어 `return self` 하면 `Client` 는 사라진 스택 프레임을 가리킨 채 남는다. Debug 에서는
+        /// 그 자리가 우연히 그대로 남아 통과했고, ReleaseFast 에서는 스택이 재사용돼 **매번 SEGV**
+        /// 로 죽었다(단독 실행 3/3 · CI 수동 실행 집계 588 번째).
+        fn open(self: *@This(), id: u64) !void {
             var fds: [2]c_int = undefined;
             if (c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds) != 0)
                 return error.TestUnexpectedResult;
-            var self: @This() = .{
+            self.* = .{
                 .fds = fds,
                 .registry_value = registry.TerminalRuntimeRegistry.init(testing.allocator),
                 .subscriptions = subscription_identity.Table.init(testing.allocator),
@@ -4131,7 +4136,6 @@ test "tick tells its four partial_timeout sites apart by name" {
                 &self.subscriptions,
                 .{ .now_ns = 100 },
             );
-            return self;
         }
 
         /// hello 를 흘려 넣어 핸드셰이크를 끝낸다 — 그래야 첫 갈래(핸드셰이크 데드라인)가
@@ -4160,7 +4164,8 @@ test "tick tells its four partial_timeout sites apart by name" {
 
     // ① 핸드셰이크를 끝내지 않은 채 데드라인을 넘긴다.
     {
-        var fx = try Fixture.open(901);
+        var fx: Fixture = undefined;
+        try fx.open(901);
         defer fx.close();
         fx.client.tick(100 + handshake_deadline_ns);
         try testing.expect(fx.client.isClosing());
@@ -4170,7 +4175,8 @@ test "tick tells its four partial_timeout sites apart by name" {
 
     // ② 구독이 0 인 연결을 유휴로 거둔다 — 넷 중 **이것만 정상**이다.
     {
-        var fx = try Fixture.open(902);
+        var fx: Fixture = undefined;
+        try fx.open(902);
         defer fx.close();
         try fx.shakeHands();
         try testing.expectEqual(@as(usize, 0), fx.client.connection.attachmentCount());
@@ -4182,7 +4188,8 @@ test "tick tells its four partial_timeout sites apart by name" {
 
     // ③ 쓰기가 정체한다 — client 가 안 빼간다(배압). 유휴(30 s) 보다 **먼저** 걸려야 한다.
     {
-        var fx = try Fixture.open(903);
+        var fx: Fixture = undefined;
+        try fx.open(903);
         defer fx.close();
         try fx.shakeHands();
         const slot = try fx.reactor.get(fx.client.admission);
@@ -4196,7 +4203,8 @@ test "tick tells its four partial_timeout sites apart by name" {
 
     // ④ 읽기가 정체한다 — client 가 안 보낸다. ③ 과 의심할 쪽이 정반대라 이름이 달라야 한다.
     {
-        var fx = try Fixture.open(904);
+        var fx: Fixture = undefined;
+        try fx.open(904);
         defer fx.close();
         try fx.shakeHands();
         const slot = try fx.reactor.get(fx.client.admission);

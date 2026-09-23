@@ -13813,9 +13813,12 @@ test "SSEL10 선택 확장 — caret 을 안 옮기는 편집도 사슬을 버�
     inv.deinit();
     refreshAfterEdit(s, term, null) catch {};
     try testing.expectEqualStrings("alpha + beta;", smartSelected(term)); // 선택은 제자리
-    // 축소 — 옛 사슬로 좁히면 안 된다(버렸다): 제자리.
+    // 축소 — 옛 사슬로 좁히면 안 된다(버렸다): 제자리이고 **서버에 묻지도 않는다**(적대적 1회차 D20: 상태 없는 축소가 사슬을 세우면
+    // 답이 오는 순간 **넓힌다** — 답이 비동기라 선택만 보면 그 순간엔 제자리로 보여 변이가 살았다).
     try pressKey(&f.fx, .arrow_left, smart_mods);
     try testing.expectEqualStrings("alpha + beta;", smartSelected(term));
+    try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_selection_range);
+    try testing.expect(!term.rt.editor_smart_select.waiting);
     // 확장은 지금 선택에서 새로 묻는다.
     try pressKey(&f.fx, .arrow_right, smart_mods);
     try testing.expectEqual(@as(u64, 2), s.editor_lsp.sent_selection_range);
@@ -13847,10 +13850,14 @@ test "SSEL11 선택 확장의 1층 — provider 없음 · 빈 범위(clangd 주�
         try pressKey(&f.fx, .arrow_right, smart_mods);
         try testing.expectEqual(cs.want_sent, s.editor_lsp.sent_selection_range);
         if (std.mem.indexOf(u8, cs.src, "SSRSTALL") != null) {
-            // 무응답 — 500 ms 가 지나면 프레임 tick 이 1층으로 세운다.
+            // 무응답 — **계약의 500 ms** 가 지나면 프레임 tick 이 1층으로 세운다. 상수를 읽어 기다리면 상수가 바뀌어도 판정자가 따라가
+            // 초록이다(적대적 1회차 D21) — 계약 값을 여기 적고 **그 전에는 안 선다**도 잰다.
             try testing.expectEqual(@as(u64, 0), term.rt.editor_smart_select.applied);
             const t0 = s.awakeMs();
-            while (s.awakeMs() - t0 < smart_select_client.timeout_ms + 80) _ = usleep(10_000);
+            while (s.awakeMs() - t0 < 300) _ = usleep(10_000);
+            _ = syntaxColors(s, term);
+            try testing.expectEqual(@as(u64, 0), term.rt.editor_smart_select.timeout_fallback); // 300 ms — 아직
+            while (s.awakeMs() - t0 < 580) _ = usleep(10_000);
             _ = syntaxColors(s, term);
             try testing.expectEqual(@as(u64, 1), term.rt.editor_smart_select.timeout_fallback);
         }

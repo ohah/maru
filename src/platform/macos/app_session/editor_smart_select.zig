@@ -236,6 +236,10 @@ fn buildAll(self: *AppSession, term: *Term, cur: []const Selection, server: ?*co
 }
 
 /// 1층 — tree-sitter 조상 범위. **트리가 있고 이어 파는 중이 아닐 때만**(§8.2q · layering §2.1a).
+///
+/// **`pending` 가드는 오늘 등가다**(적대적 1회차 D3) — #3886 뒤로 「`pending` 이면 트리가 없다」가 성립한다(여는 파싱은 트리를 버리고
+/// 시작하고, 끊긴 동안 편집이 오면 끝까지 판 뒤 `pending` 을 내린다). 그래도 두는 이유는 뜻이다: 다시 파는 중인 트리는 읽지 않는다 —
+/// 예산을 든 증분(끊기면 옛 트리로 그린다)이 제품에 들어오는 날 이 줄이 그 창을 막는다.
 fn layer1(self: *AppSession, term: *Term, lo: u32, hi: u32, out: *std.ArrayList(ByteRange)) error{OutOfMemory}!void {
     out.clearRetainingCapacity();
     if (term.rt.editor_syntax.pending) return;
@@ -278,6 +282,8 @@ fn step(self: *AppSession, term: *Term, primary_pos: usize, delta: i32) void {
         return;
     };
     std.mem.sort(Selection, st.key_sels.items, {}, docOrder);
+    // 합쳐져 수가 줄면 상태를 버린다. **오늘 등가다**(적대적 1회차 D9) — 다음 키의 「사슬 수 = 커서 수」 대조가 한 번 더 거른다. 두 곳에
+    // 두는 이유는 뜻이다: 여기는 「짝을 잃었다」를 그 자리에서 말하고, 저기는 어떤 경로로 짝이 어긋나도 막는다.
     st.has_state = merged.len == n;
     st.applied += 1;
 

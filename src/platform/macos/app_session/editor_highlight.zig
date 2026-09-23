@@ -82,7 +82,9 @@ pub fn spans(term: *Term) []const highlight.Span {
 pub fn tick(self: *AppSession, term: *Term) void {
     const st = &term.rt.editor_highlight;
     if (st.waiting) return;
-    if (term.rt.editor_diff != null) return; // 비교 뷰는 축이 다르다(§5.1a)
+    // 비교 뷰는 축이 다르다(§5.1a). **이중 방어다** — `editor_lsp.readyClientFor` 도 비교 뷰를 거절하므로 이 줄이 없어도 요청은 안 나간다
+    // (적대적 B10: 등가). 둔 이유는 뜻이다 — 이 함수만 읽고도 「비교 뷰에서는 안 한다」를 알 수 있어야 한다.
+    if (term.rt.editor_diff != null) return;
     if (term.rt.editor_lsp_version == 0) return;
     // **낱말 밖(또는 선택 중)에서는 비우지 않는다.** 그리기는 `spans()` 의 낱말 대조가 이미 가리고, 캐시를 남겨 두면 같은 낱말로
     // 돌아왔을 때 **요청 없이** 곧바로 다시 선다. 처음엔 여기서 비웠는데, 그러면 `version`·`word_*` 키가 남아 `fresh` 가 참이라

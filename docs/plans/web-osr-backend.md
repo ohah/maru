@@ -71,6 +71,8 @@ sidecar 는 maru 앱 프로세스마다 **하나**다. CEF 는 `root_cache_path`
 - sidecar 는 이 채널을 **그리기 콜백과 독립**으로 읽는다(UI 스레드 fd 감시나 `cef_post_delayed_task`). PoC 는 그리기
   콜백에서만 읽어서 숨긴 탭에 「다시 보여라」 명령조차 못 전달했다(§13.1 「남은 미해결」 3).
 - 브라우저 식별자는 maru 의 web Term surface id 로 한다(sidecar 안의 CEF browser id 와 매핑).
+- **W8 자리**: 메시지 종류는 늘릴 수 있게 둔다 — W8 이 접근성 트리·위치 변경(sidecar → maru)과 접근성 동작(누르기·포커스,
+  maru → sidecar)을 **새 메시지로 더하기만** 하면 되게 한다. W1~W7 계약을 바꾸지 않는 추가형 단계다.
 
 ### C3. 픽셀 — 소유 링과 전달
 

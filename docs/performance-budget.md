@@ -366,6 +366,28 @@ runtime 의 generation 번호를 함께 기억해, 둘 다 그대로이고 준�
 안에서 append 뒤에 올린다» 를 고정한다. 결과: `drainObservationEvents` 19.1 % → **0.8 %**, A/B(활성 32 세션,
 유효 7쌍) 6/7 낮음·중앙값 **−21 %**(`sample` 로 먼저 잡은 상한 19 % 와 같은 크기).
 
+**발견(2026-09-23, 미착수) — 남은 동기 RPC 는 알림 pull 하나이고, 앱 busy 의 11.5 % 다.** 위 처방 뒤 같은 부하(활성 32
+세션, 2 Hz)의 `sample` 에서 busy 표본 안의 `callDecoded` 는 **전부**(88/88) `pollRemoteNotification`
+(`src/platform/macos/app_session/notification.zig`)의 `runtime.notification` pull 아래에 있었다 — 앱 busy 91/790(11.5 %),
+그중 blake3 봉인이 59. 같은 호출이 메인 스레드를 host 응답 대기로 20 s 중 약 435 ms(2.2 %) 세운다(read 256·poll 91
+표본; CPU 가 아니라 프레임 지연 쪽 비용). 출력 힌트(`output_since_notify_check`)가 선 Term 이 있으면 tick 마다 한 번
+묻기 때문에, 출력하는 세션이 많으면 tick 속도에서 포화한다(RPC 횟수 자체는 세지 않았다 — 추정). host 쪽 절감분도
+아직 재지 않았다. 부수로 드러난 지연 결함: OSC 9/777 은 화면을 안 바꿀 수 있어 힌트가 안 서고, 그때는 100 ms 바닥
+순회가 Term 을 **한 칸씩** 돌므로 세션 32개면 최악 약 3.2 s 늦는다. 힌트는 탭 순서상 첫 Term 이 가져가 앞쪽이 계속
+출력하면 뒤쪽은 바닥 순회에만 기댄다.
+
+처방 초안(구현하지 않음): host notification journal 의 **GUI 미확인 개수**를 metadata 스칼라로 싣고, 앱은 그 값이 0보다
+클 때만 pull 한다. 적대적 검증에서 나온 조건 셋을 함께 적는다. ① `clipboard_write_seq` 식 **seq 는 안 된다** — clipboard
+커서는 재접속 때 지난 값을 건너뛰도록 첫 관측으로 초기화하지만, 알림은 재접속한 앱이 **미확인 행을 받아야** 한다.
+상태값(개수)이어야 여러 건 적체·`notifications.osc` 꺼짐·훅 모드에서 비우기도 같은 조건으로 풀린다. ② metadata 는
+모르는 스칼라를 흘려보내므로(`drainUnknownScalar`, [session-host-upgrade.md](session-host-upgrade.md) §3) major 는 안 올린다.
+그러나 신 앱 ↔ 구 host 에서 키가 없으면 0 이 남고, 개수 0 은 «없음» 이라 **pull 이 멈춰 그 세션의 OSC 알림이 조용히
+사라진다**. 이 조합은 exec 업그레이드가 실패하거나(§7 예약 초과는 문서가 인정한 정상 실패, 활성 세션이 많을수록 잦다)
+현재 빌드 host 가 이미 있어 스캔을 건너뛸 때(`host_connect.zig` 2026-09-05 기록) 복원이 옛 host 의 runtime 을 다시 붙이며
+생긴다. 착수하면 present 구분(키 없음 → 지금의 힌트·바닥 폴링 유지)과 그 판정자를 넣는다. ③ 이득은 위 11.5 % 가 상한이고
+8쌍+ A/B 와 알림 지연(metadata 주기 안인가)을 함께 재야 말할 수 있다. 같은 표본에서 `baseValid`(RPC 권위 자기검증)
+42 중 20 이 이 pull 에서 나오므로, 그쪽 중복 검증 제거(≈1 %p)는 이 처방 뒤에 다시 잰다.
+
 실제 AppKit CR6e-a2 v2 반복 artifact는 ReleaseFast 앱 5회 모두 attach 뒤 handshake 출력에서 native handler exact 증가를
 관측했고, handler 진입부터 normal tick의 Metal frame 뒤 screen probe까지 15.528·23.325·23.954·24.151·24.627ms였다.
 다섯 행 모두 60ms 안이며 fd 6→6, child 0, daemon/socket/host artifact cleanup을 함께 통과했다. 이 하위 값은 host가

@@ -42,9 +42,12 @@ pub fn select(
         if (stack.items.len > 0 and stack.items[stack.items.len - 1].head == s.head) continue;
         const d = stack.items.len;
         try stack.append(allocator, s);
-        if (d != out.items.len) continue; // 조상 칸이 안 섰다 — 이 깊이는 설 수 없다
+        // 조상 칸이 안 섰다 — 이 깊이는 설 수 없다. **오늘 등가다**(적대적 1회차 S4): 부모가 안 선 까닭(마지막 본문 줄이 칸 위로 갔다 ·
+        // 머리줄이 숨었다)은 품긴 자식에게도 그대로라 자식도 칸 조건을 못 맞춘다. 뜻으로 둔다(바깥이 없는 안쪽은 세우지 않는다).
+        if (d != out.items.len) continue;
         const hr = rows.headRow(s.head) orelse continue; // 머리줄이 숨었다(접힌 스코프 안)
-        // **머리줄이 아직 칸 d 에 안 올라왔다** — 뒤의 스코프는 머리줄이 더 아래라(오름차순) 칸 조건을 더 못 맞춘다: 멈춘다.
+        // **머리줄이 아직 칸 d 에 안 올라왔다** — 뒤의 스코프는 머리줄이 더 아래라(오름차순) 칸 조건을 더 못 맞춘다: 멈춘다. 결과에는 등가
+        // (적대적 1회차 S6 — `continue` 로 바꿔도 뒤가 안 선다), 비용의 길이다.
         if (hr >= @as(i64, @intCast(d))) break;
         const lr = rows.lastRow(s.end - 1) orelse continue;
         if (@as(i64, @intCast(d)) <= lr) {
@@ -75,6 +78,8 @@ const testing = std.testing;
 /// 판정자용 행 함수 — 줄바꿈 없음, 맨 위 줄 `top`, `hidden` 줄은 숨음, `pieces` 는 줄마다 조각 수(없으면 1).
 const TestRows = struct {
     top: u32,
+    /// 맨 위 줄 안에서 이미 올라간 조각 수(§4.1d 의 조각 오프셋).
+    first_piece: i64 = 0,
     hidden: []const u32 = &.{},
     wrap: []const struct { line: u32, pieces: u32 } = &.{},
 
@@ -100,7 +105,7 @@ const TestRows = struct {
                 if (!self.isHidden(l)) r -= self.piecesOf(l);
             }
         }
-        return r;
+        return r - self.first_piece;
     }
     pub fn headRow(self: TestRows, line: u32) ?i64 {
         if (self.isHidden(line)) return null;
@@ -151,6 +156,12 @@ test "STK2 세 줄 미만은 후보가 아니고, 머리줄이 같은 중첩은 
     // [0,1] 은 두 줄 — 후보 아님. [3, 20] 과 [3, 15] 는 머리줄이 같다 — 바깥 하나만, 안쪽의 자식 [5, 12] 는 그 아래 칸.
     const scopes = [_]Scope{ .{ .head = 0, .end = 1 }, .{ .head = 3, .end = 20 }, .{ .head = 3, .end = 15 }, .{ .head = 5, .end = 12 } };
     try expectPicks(&scopes, .{ .top = 8 }, 5, &.{ 3, 5 });
+    // **두 줄 스코프는 줄바꿈 뒤에도 안 선다** — 머리줄(0)이 세 조각이고 한 조각 올라가 있으면 칸 조건(머리 첫 조각 −1 < 0 ≤ 마지막 조각 1)은
+    // 맞는다. 세 줄 규칙이 없으면 여기서 [0, 1] 이 선다 — 줄바꿈이 없으면 칸 규칙이 대신 막아 이 규칙이 안 보였다(적대적 1회차 S1).
+    const two = [_]Scope{.{ .head = 0, .end = 1 }};
+    try expectPicks(&two, .{ .top = 0, .first_piece = 1, .wrap = &.{.{ .line = 0, .pieces = 3 }} }, 5, &.{});
+    const three = [_]Scope{.{ .head = 0, .end = 2 }};
+    try expectPicks(&three, .{ .top = 0, .first_piece = 1, .wrap = &.{.{ .line = 0, .pieces = 3 }} }, 5, &.{0}); // 대조군 — 세 줄이면 선다
 }
 
 test "STK3 숨은 줄 — 접힌 스코프 안의 머리줄은 안 서고, 끝 줄이 숨으면 그 앞의 보이는 줄로 잰다 (§4.1i)" {

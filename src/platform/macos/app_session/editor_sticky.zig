@@ -54,7 +54,9 @@ pub fn compute(self: *AppSession, term: *Term, pane_rect: maru.chrome.draw.Rect,
     st.drawn_len = 0;
     const cfg = self.loaded_config.config.editor;
     if (!cfg.sticky_scroll) return &.{};
-    if (term.rt.editor_diff != null or term.rt.editor_merge != null) return &.{}; // 비교 뷰·병합 판(§4.1i)
+    // 비교 뷰·병합 판(§4.1i). **오늘 등가다**(적대적 1회차 P3) — 이 함수를 부르는 자리(`appendPaneFrame` 의 단일 편집기 갈래)가 그 뷰에서는
+    // 안 돈다. 그래서 `drawn_len` 이 남는 문제는 `rowAt` 이 따로 막는다.
+    if (term.rt.editor_diff != null or term.rt.editor_merge != null) return &.{};
     const doc = term.rt.editor_doc orelse return &.{};
     const ch: u32 = @max(self.cell_height_px, 1);
     const visible_rows: usize = pane_rect.h / ch;
@@ -151,17 +153,23 @@ fn refreshScopes(self: *AppSession, term: *Term) error{OutOfMemory}!void {
 /// 심볼 → 스코프 — 머리줄은 **이름 줄**(`name_start`), 끝은 `end − 1` 의 줄(닫는 줄).
 fn fromSymbols(self: *AppSession, st: *State, doc: anytype, list: []const Symbol, key: State.Key) error{OutOfMemory}!void {
     st.scopes.clearRetainingCapacity();
-    const len = doc.file.content.len;
     for (list) |sym| {
-        if (sym.end <= sym.start) continue;
-        const head: u32 = @intCast(doc.file.lines.lineAt(@min(sym.name_start, len)));
-        const end: u32 = @intCast(doc.file.lines.lineAt(@min(sym.end - 1, len)));
-        if (end < head) continue;
-        try st.scopes.append(self.allocator, .{ .head = head, .end = end });
+        const sc = symbolScope(doc.file.lines, doc.file.content.len, sym) orelse continue;
+        try st.scopes.append(self.allocator, sc);
     }
     sticky.sortScopes(st.scopes.items);
     st.source = key.source;
     st.key = key;
+}
+
+/// 심볼 하나 → 스코프(§4.1i). 머리줄은 **이름 줄**(`name_start` — 데코레이터·주석이 아니라), 끝은 **`end − 1` 의 줄**(`end` 는 배타 — 다음
+/// 줄 0 열에서 끝나는 범위도 닫는 줄에서 끝난다). 빈 범위·뒤집힌 범위는 `null`.
+pub fn symbolScope(lines: maru.session.editor.line_index.LineIndex, content_len: usize, sym: Symbol) ?sticky.Scope {
+    if (sym.end <= sym.start) return null;
+    const head: u32 = @intCast(lines.lineAt(@min(sym.name_start, content_len)));
+    const end: u32 = @intCast(lines.lineAt(@min(sym.end - 1, content_len)));
+    if (end < head) return null;
+    return .{ .head = head, .end = end };
 }
 
 /// 줄 → 화면 행(§4.1i). 접힘은 `editor_visible_numbers`, 줄바꿈은 렌더와 같은 `piecesOfLine` 이 안다.
@@ -260,6 +268,9 @@ fn lowerBound(numbers: []const ?u32, want: u32) ?usize {
 pub fn rowAt(term: *Term, y_px: f64) ?usize {
     const st = &term.rt.editor_sticky;
     if (st.drawn_len == 0) return null;
+    // **비교 뷰·병합 판에서는 고정 행이 없다** — 그 뷰는 `compute` 를 안 부르므로 `drawn_len` 이 마지막 단일 편집기 프레임의 값으로 남는다.
+    // 이 줄이 없으면 같은 Term 을 비교 뷰로 바꾼 뒤 위쪽 행의 클릭·호버·⌘클릭이 옛 머리줄로 가로채였다(적대적 1회차 P3 을 따지다 발견 — STK11).
+    if (term.rt.editor_diff != null or term.rt.editor_merge != null) return null;
     if (!std.math.isFinite(y_px)) return null;
     const geom = term.rt.editor_hit_geom;
     if (geom.cell_h_px == 0) return null;
@@ -325,4 +336,23 @@ test "STK10 보이는 줄 찾기 — 접힌 줄은 없고, 값 없는 칸(정렬
     try testing.expectEqual(@as(?usize, 7), visibleOf(&.{}, 7, 20));
     try testing.expectEqual(@as(?usize, null), visibleOf(&.{}, 20, 20));
     try testing.expectEqual(@as(?usize, 19), lastVisibleAtOrBefore(&.{}, 50, 20));
+}
+
+test "STK13 심볼 → 스코프 — 머리줄은 이름 줄(데코레이터가 아니라), 끝은 end−1 의 줄(다음 줄 0 열에서 끝나도 닫는 줄) (§4.1i)" {
+    const content = "@dec\nclass A {\n  x\n}\nnext\n";
+    var lines = try maru.session.editor.line_index.build(testing.allocator, content);
+    defer lines.deinit();
+    const name: u32 = @intCast(std.mem.indexOf(u8, content, "A {").?);
+    const close_nl: u32 = @intCast(std.mem.indexOf(u8, content, "}").? + 1); // `}` 다음(개행)
+    const next: u32 = @intCast(std.mem.indexOf(u8, content, "next").?); // 다음 줄 0 열
+    const base: Symbol = .{ .name_start = name, .name_end = name + 1, .start = 0, .end = close_nl, .start_row = 0, .depth = 0, .kind = "class_declaration" };
+    const a = symbolScope(lines, content.len, base).?;
+    try testing.expectEqual(@as(u32, 1), a.head); // 이름 줄(0 번 줄 `@dec` 가 아니다)
+    try testing.expectEqual(@as(u32, 3), a.end);
+    var to_next = base;
+    to_next.end = next; // 범위가 다음 줄 0 열에서 끝난다(서버가 그렇게 내기도 한다)
+    try testing.expectEqual(@as(u32, 3), symbolScope(lines, content.len, to_next).?.end);
+    var empty = base;
+    empty.end = empty.start;
+    try testing.expect(symbolScope(lines, content.len, empty) == null);
 }

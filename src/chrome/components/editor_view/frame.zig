@@ -986,6 +986,7 @@ fn paintSticky(props: Props, layout: geometry.Layout, scratch: Scratch, keep_fro
 fn occludeTop(op: draw.Op, y0: i32, y1: i32, x1: i32) ?draw.Op {
     switch (op) {
         .text => |t| {
+            // 가로 한계(`x1`)는 오늘 등가다(적대적 1회차 F3) — 본문 폭 밖(막대·미니맵)에는 글자 op 가 없다. 그 층이 글자를 내는 날의 방어다.
             if (t.origin.y >= y0 and t.origin.y < y1 and t.origin.x < x1) return null;
             return op;
         },
@@ -2549,6 +2550,14 @@ test "STK6 프레임 — 고정 행은 본문 글자·번호·덧칠을 걷고 �
         if (std.meta.eql(op, bar)) bar_kept = true;
     }
     try testing.expect(bar_kept);
+
+    // **가로 스크롤을 따른다** — 본문이 2 열 밀렸으면 머리줄도 2 열 밀린다(적대적 1회차 F5 — 가로 스크롤 픽스처가 없었다).
+    var bufs3: TestBuffers = .{};
+    var hprops = props;
+    hprops.first_col = 2;
+    const hw = build(hprops, bufs3.scratch());
+    var bh: [128]u8 = undefined;
+    try testing.expectEqualStrings("ass A {", rowText(bufs3.ops[0..hw.ops], 0, ch, content_x, 1 << 20, &bh));
 }
 
 test "문서가 화면에 다 들어가면 막대가 없다" {

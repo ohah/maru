@@ -263,8 +263,52 @@ pub const Window = struct {
     /// 이 창의 에이전트 탭이 마지막으로 보인 **에이전트 세션 신원**(AT7 — 계약 §6.2). 빈 문자열이면 없음(키 생략).
     /// 창 상태의 일부라 여기 둔다 — 창 A 의 탭이 창 B 의 세션을 보이면 안 된다(사용자 결정 2026-09-22).
     last_agent_session: []const u8 = "",
+    /// 이 파일을 쓸 때의 **부팅 신원**(macOS `kern.bootsessionuuid`, RB1 — docs/workspace-restore.md 「재부팅 뒤
+    /// 부활(RB)」). 빈 문자열이면 없음(키 생략 — 옛 파일 고정점). 창마다 같은 값을 싣는다: 창마다 `AppSession` 이
+    /// 따로 복원하므로 판정은 창 목록 전체로 한다(`rebootProven`).
+    ///
+    /// 형식이 깨진 값은 reader 가 **빈 값으로** 읽는다 — 이 키는 동작을 켜기만 하므로, 없을 때 떨어지는 곳이
+    /// 지금의 안전한 동작(묘비·`⏎`)이다. checkpoint 를 통째로 거부하는 쪽이 더 많이 잃는다.
+    boot_session: []const u8 = "",
     tabs: []const Tab,
 };
+
+/// `boot_session` 한 값의 길이 — UUID 정규형 `8-4-4-4-12`.
+pub const boot_session_len: usize = 36;
+
+/// 부팅 신원의 **형식**만 본다(쓰는 쪽·읽는 쪽이 같은 함수를 쓴다 — 규칙이 두 벌이면 갈린다).
+/// 16진은 대소문자를 가리지 않는다: 커널은 대문자로 주지만 손으로 고친 파일이 소문자여도 같은 UUID 다.
+pub fn isBootSessionId(text: []const u8) bool {
+    if (text.len != boot_session_len) return false;
+    for (text, 0..) |c, i| {
+        const dash = i == 8 or i == 13 or i == 18 or i == 23;
+        if (dash) {
+            if (c != '-') return false;
+        } else if (!std.ascii.isHex(c)) return false;
+    }
+    return true;
+}
+
+/// **재부팅이 증명됐는가**(RB1). 파일의 창 가운데 유효한 `boot_session` 이 하나 이상 있고 그 값이 **전부**
+/// `current` 와 다를 때만 참이다.
+///
+/// 거짓이 되는 모양을 일부러 넓게 둔다 — 참은 「host 에 묻지 않고 새 셸을 띄운다」를 켜므로, 확신이 없으면
+/// 지금의 경로(attach·묘비)로 떨어지는 것이 안전하다:
+/// - `current` 를 못 읽었다(빈 값·형식 불량) — 비교할 기준이 없다.
+/// - 어느 창에도 값이 없다 — 옛 파일이거나 그때 못 읽었다.
+/// - 한 창이라도 같다 — 그 창은 이번 부팅에 쓰였으므로 그 파일이 가리키는 프로세스가 살아 있을 수 있다.
+///
+/// UUID 비교는 대소문자를 가리지 않는다(`isBootSessionId` 와 같은 판단).
+pub fn rebootProven(windows: []const Window, current: []const u8) bool {
+    if (!isBootSessionId(current)) return false;
+    var saw_valid = false;
+    for (windows) |win| {
+        if (!isBootSessionId(win.boot_session)) continue;
+        saw_valid = true;
+        if (std.ascii.eqlIgnoreCase(win.boot_session, current)) return false;
+    }
+    return saw_valid;
+}
 
 /// 저장 단위(최근 세션 1개). 창 N개.
 pub const Workspace = struct {
@@ -398,6 +442,9 @@ fn writeWindow(w: *std.Io.Writer, win: Window) !void {
         try writeEscaped(w, win.last_agent_session);
         try w.writeByte('"');
     }
+    // 부팅 신원(RB1) — 형식이 맞을 때만 쓴다. 틀린 값을 쓰면 reader 가 어차피 버리므로, 쓰지 않는 것이
+    // 파일을 거짓 없이 둔다(빈 값과 같은 뜻). UUID 는 escape 할 문자가 없다(`isBootSessionId` 가 보장).
+    if (isBootSessionId(win.boot_session)) try w.print(" boot-session=\"{s}\"", .{win.boot_session});
     // 저장소별 비교 기준(§3.5) — 탐색기 root와 같은 인코딩(길이 접두 + escape)이라 커서를 공유한다.
     if (win.scm_bases.len != 0) {
         try w.print(" scm-bases=\"{d}:", .{win.scm_bases.len});
@@ -710,7 +757,18 @@ fn parseWindow(a: std.mem.Allocator, lines: *LineIter, limits: *ParseLimits) Par
     // 최근 에이전트 세션(AT7): 없으면 빈 값. 상한을 넘는 값은 손상으로 보지 않고 **버린다** — 잃는 쪽이 안전하다(기준 목록과 같은 판단).
     const last_agent_session_raw = try f.getQuoted(a, "last-agent-session", "");
     const last_agent_session = if (last_agent_session_raw.len <= 64) last_agent_session_raw else "";
-    return .{ .active_tab = active_tab, .active = active, .frame = frame, .dock = dock_with_presented, .explorer = .{ .roots = explorer_roots }, .scm_bases = scm_bases, .last_agent_session = last_agent_session, .tabs = try tabs.toOwnedSlice(a) };
+    // 부팅 신원(RB1): **못 읽으면 없는 것**이다 — 따옴표 없음·중복·형식 불량 모두. 이 키는 동작을 켜기만 하므로
+    // 버리면 지금의 안전한 동작으로 떨어지고, `getQuoted` 의 BadLine 을 그대로 올리면 **창 전체**를 잃는다.
+    const boot_session: []const u8 = blk: {
+        const field = f.find("boot-session") orelse break :blk "";
+        if (!field.is_quoted or f.count("boot-session") != 1) break :blk "";
+        const value = f.getQuoted(a, "boot-session", "") catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => break :blk "",
+        };
+        break :blk if (isBootSessionId(value)) value else "";
+    };
+    return .{ .active_tab = active_tab, .active = active, .frame = frame, .dock = dock_with_presented, .explorer = .{ .roots = explorer_roots }, .scm_bases = scm_bases, .last_agent_session = last_agent_session, .boot_session = boot_session, .tabs = try tabs.toOwnedSlice(a) };
 }
 
 const ExplorerRootsParse = struct { roots: ?[]const []const u8, valid: bool };
@@ -2966,6 +3024,83 @@ test "window 줄의 last-agent-session (AT7): 있으면 인용해 쓰고 되읽�
     var parsed = try parse(a, text);
     defer parsed.deinit();
     try std.testing.expectEqualStrings("0f6c1a2e-1111-4222-8333-444455556666", parsed.workspace.windows[0].last_agent_session);
+}
+
+test "RB1-1 window 줄의 boot-session: 형식이 맞으면 인용해 쓰고 되읽으며, 비거나 틀리면 키를 안 쓴다" {
+    const a = std.testing.allocator;
+    const uuid = "A7C9924A-6CB1-4C6B-B004-95D26C1EBA3D";
+    const with = [_]Window{.{ .tabs = &.{}, .boot_session = uuid }};
+    const text = try serialize(a, .{ .windows = &with });
+    defer a.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, " boot-session=\"" ++ uuid ++ "\"") != null);
+    var parsed = try parse(a, text);
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings(uuid, parsed.workspace.windows[0].boot_session);
+
+    // 빈 값 → 키 생략(옛 파일 byte 고정점). 형식이 틀린 값도 **쓰지 않는다** — reader 가 어차피 버린다.
+    for ([_][]const u8{ "", "not-a-uuid", uuid[0..35] }) |bad| {
+        const win = [_]Window{.{ .tabs = &.{}, .boot_session = bad }};
+        const out = try serialize(a, .{ .windows = &win });
+        defer a.free(out);
+        try std.testing.expect(std.mem.indexOf(u8, out, "boot-session") == null);
+    }
+}
+
+test "RB1-2 깨진 boot-session 은 «없음»으로 읽고 창의 나머지는 그대로 복원한다" {
+    // 이 키는 동작을 켜기만 하므로 BadLine 으로 창을 잃으면 안 된다(docs/workspace-restore.md 「재부팅 뒤 부활(RB)」).
+    // 대조군으로 같은 줄의 active-tab 이 살아남는지 함께 본다 — 「창이 통째로 기본값」도 빈 boot_session 을 준다.
+    const a = std.testing.allocator;
+    const cases = [_][]const u8{
+        "boot-session=A7C9924A-6CB1-4C6B-B004-95D26C1EBA3D", // 따옴표 없음
+        "boot-session=\"A7C9924A-6CB1-4C6B-B004-95D26C1EBA3\"", // 35자
+        "boot-session=\"G7C9924A-6CB1-4C6B-B004-95D26C1EBA3D\"", // 16진 아님
+        "boot-session=\"A7C9924A_6CB1-4C6B-B004-95D26C1EBA3D\"", // 구분자 자리
+        "boot-session=\"A7C9924A-6CB1-4C6B-B004-95D26C1EBA3D\" boot-session=\"A7C9924A-6CB1-4C6B-B004-95D26C1EBA3D\"", // 중복
+    };
+    for (cases) |field| {
+        const text = try std.fmt.allocPrint(a, "maru.workspace.v1\nwindow tabs=2 active-tab=1 {s}\n" ++
+            "tab panes=1 active-pane=0 custom-name=\"\"\ntree-node leaf pane=0\npane surfaces=1 active-term=0 custom-name=\"\"\n" ++
+            "surface custom-name=\"\" title=\"\" cwd=\"\" command=\"\" cols=80 rows=24\n" ++
+            "tab panes=1 active-pane=0 custom-name=\"\"\ntree-node leaf pane=0\npane surfaces=1 active-term=0 custom-name=\"\"\n" ++
+            "surface custom-name=\"\" title=\"\" cwd=\"\" command=\"\" cols=80 rows=24\n", .{field});
+        defer a.free(text);
+        var parsed = try parse(a, text);
+        defer parsed.deinit();
+        const win = parsed.workspace.windows[0];
+        try std.testing.expectEqualStrings("", win.boot_session);
+        try std.testing.expectEqual(@as(usize, 1), win.active_tab);
+        try std.testing.expectEqual(@as(usize, 2), win.tabs.len);
+    }
+    // 소문자 16진은 같은 UUID 다 — 손으로 고친 파일도 읽는다.
+    const lower = "maru.workspace.v1\nwindow tabs=0 active-tab=0 boot-session=\"a7c9924a-6cb1-4c6b-b004-95d26c1eba3d\"\n";
+    var parsed = try parse(a, lower);
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("a7c9924a-6cb1-4c6b-b004-95d26c1eba3d", parsed.workspace.windows[0].boot_session);
+}
+
+test "RB1-3 rebootProven: 유효한 값이 하나 이상이고 전부 지금과 다를 때만 참" {
+    const now = "A7C9924A-6CB1-4C6B-B004-95D26C1EBA3D";
+    const old = "11111111-2222-3333-4444-555555555555";
+    const w = struct {
+        fn of(v: []const u8) Window {
+            return .{ .tabs = &.{}, .boot_session = v };
+        }
+    }.of;
+    // 참: 한 창·여러 창 모두 옛 부팅. 값이 없는 창이 섞여도 유효한 값이 전부 옛것이면 참이다.
+    try std.testing.expect(rebootProven(&.{w(old)}, now));
+    try std.testing.expect(rebootProven(&.{ w(old), w(old) }, now));
+    try std.testing.expect(rebootProven(&.{ w(""), w(old) }, now));
+    // 거짓: 키 없음(옛 파일) · 창 하나라도 지금 부팅 · 지금 값을 못 읽음 · 창 0 개.
+    try std.testing.expect(!rebootProven(&.{w("")}, now));
+    try std.testing.expect(!rebootProven(&.{w(now)}, now));
+    try std.testing.expect(!rebootProven(&.{ w(old), w(now) }, now));
+    try std.testing.expect(!rebootProven(&.{w(old)}, ""));
+    try std.testing.expect(!rebootProven(&.{w(old)}, "garbage"));
+    try std.testing.expect(!rebootProven(&.{}, now));
+    // 같음은 대소문자를 가리지 않는다 — 소문자로 적힌 지금 부팅을 「다르다」로 읽으면 살아 있는 세션 옆에 셸을 겹친다.
+    try std.testing.expect(!rebootProven(&.{w("a7c9924a-6cb1-4c6b-b004-95d26c1eba3d")}, now));
+    // 형식이 틀린 값은 「다르다」의 근거가 되지 않는다(없는 것과 같다).
+    try std.testing.expect(!rebootProven(&.{w("not-a-uuid")}, now));
 }
 
 test "U4c-6 untitled-term 은 번호만 왕복하고 인덱스 공간을 안 건드린다" {

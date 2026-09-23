@@ -198,7 +198,8 @@ quick은 영구히 checkpoint 대상이 아니며 host orphan을 막기 위해 i
 live→ended로 **처음** 전이한 실행은 exact `runtime-handle + runtime-state="ended"`를 저장한다. 그 전이는
 `dropped` 래치를 세우지 않는다(위 「네 번째 범주」). 이미 durable ended로 저장된 다음 실행도 완전히 표현된
 상태라 정상 checkpoint로 반복 보존한다. 강등 수는 버리지 않고 진단 한 줄로 남긴다 —
-`workspace restore accounting: dropped={d} demoted={d} latch={s}`.
+`workspace restore accounting: dropped={d} demoted={d} revived={d} latch={s}`(`revived`는 재부팅 부활로 새 셸을 띄운 수 —
+아래 「재부팅 뒤 부활(RB)」).
 
 시작 host는 workspace 텍스트를 **AppSession 생성 전** Zig parser로 preflight한다(ABI v142,
 `workspace_window_count(session=NULL)`). 복원할 Window가 하나 이상이면 각 AppSession을

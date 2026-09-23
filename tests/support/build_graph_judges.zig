@@ -92,7 +92,7 @@ test "dependenciesOf 는 접두·개수 질문을 문자열 없이 답한다" {
     // 옛 방식: count(build, "boundary_step.dependOn(&run_") >= 100
     // 새 방식: boundary_step 이 매단 것 중 `run_` 접두인 것
     //
-    // **여기서 두 값이 갈리고, 그 갈림이 이 뷰의 존재 이유다.** 문자열은 203, 뷰는 204 다.
+    // **여기서 두 값이 갈리고, 그 갈림이 이 뷰의 존재 이유다.** 문자열은 204, 뷰는 205 다.
     // 차이 하나는 `build.zig` 의
     //     boundary_step.dependOn(
     //         &run_session_host_upgrade_component_failure_matrix_boundary_tests.step,
@@ -106,8 +106,9 @@ test "dependenciesOf 는 접두·개수 질문을 문자열 없이 답한다" {
     // 「등록이 사라졌다」로 읽지 않는다.
     const old_count = countOccurrences(text, "boundary_step.dependOn(&run_");
     const new_count = g.countDependenciesWithPrefix("boundary_step", "run_");
-    try std.testing.expectEqual(@as(usize, 203), old_count);
-    try std.testing.expectEqual(@as(usize, 204), new_count);
+    // +1(2026-09-23): `test-event-enqueue-epoch`(빈 드레인 건너뛰기의 전제를 지키는 경계 판정자).
+    try std.testing.expectEqual(@as(usize, 204), old_count);
+    try std.testing.expectEqual(@as(usize, 205), new_count);
     try std.testing.expect(new_count > old_count); // 뷰가 더 본다 — 줄바꿈에 안 흔들린다
 
     // 옛 방식: count(build, "sharded.dependOn(&run_") == 0

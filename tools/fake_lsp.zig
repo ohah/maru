@@ -903,6 +903,103 @@ fn handleDocumentHighlight(allocator: std.mem.Allocator, obj: std.json.ObjectMap
     sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .result = std.json.Value{ .array = out } });
 }
 
+/// `textDocument/selectionRange`(§8.2q) — 위치마다 사슬 하나: **그 자리 낱말 → 낱말부터 그 줄 끝까지 → 문서 전체**. 가운데 단계는
+/// tree-sitter 도 낱말 단계도 안 만드는 모양이라 판정자가 「서버 답이 쓰였다」를 가린다. 자리는 **협상한 단위**로 읽고 낸다.
+/// 표식: `SSRNONE` 위치마다 빈 범위 하나(부모 없음 — clangd 주석 꼴) · `SSRSTALL` 무응답 · `SSRERR` `-32801` · `SSRSHORT` 위치보다 하나 적게.
+fn handleSelectionRange(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: std.json.Value) void {
+    var req_uri: []const u8 = "";
+    var positions: []const std.json.Value = &.{};
+    if (obj.get("params")) |p| if (p == .object) {
+        if (p.object.get("textDocument")) |td| if (td == .object) {
+            req_uri = str(td.object.get("uri")) orelse "";
+        };
+        if (p.object.get("positions")) |ps| if (ps == .array) {
+            positions = ps.array.items;
+        };
+    };
+    const text = docText(req_uri);
+    if (std.mem.indexOf(u8, text, "SSRSTALL") != null) return;
+    if (std.mem.indexOf(u8, text, "SSRERR") != null) {
+        sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .@"error" = .{ .code = @as(i32, -32801), .message = "content modified" } });
+        return;
+    }
+    const none = std.mem.indexOf(u8, text, "SSRNONE") != null;
+    const short = std.mem.indexOf(u8, text, "SSRSHORT") != null;
+
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // 문서 끝 자리(마지막 줄 · 그 줄의 길이).
+    var last_row: i64 = 0;
+    var last_len: usize = 0;
+    {
+        var it = std.mem.splitScalar(u8, text, '\n');
+        var row: i64 = 0;
+        while (it.next()) |l| : (row += 1) {
+            last_row = row;
+            last_len = if (negotiated_utf16) utf16Units(l) else l.len;
+        }
+    }
+    var out: std.json.Array = .init(arena);
+    for (positions, 0..) |pv, pi| {
+        if (short and pi + 1 == positions.len) break;
+        if (pv != .object) continue;
+        const line_no = int(pv.object.get("line")) orelse 0;
+        const ch = int(pv.object.get("character")) orelse 0;
+        var it0 = std.mem.splitScalar(u8, text, '\n');
+        var i: i64 = 0;
+        const line = while (it0.next()) |l| : (i += 1) {
+            if (i == line_no) break l;
+        } else "";
+        const at = byteAtUnits(line, ch);
+        const at_u = if (negotiated_utf16) utf16Units(line[0..at]) else at;
+        if (none) {
+            out.append(rangeNode(arena, line_no, at_u, line_no, at_u, null) catch return) catch return;
+            continue;
+        }
+        const doc_node = rangeNode(arena, 0, 0, last_row, last_len, null) catch return;
+        var outer = doc_node;
+        if (at < line.len and isIdent(line[at])) {
+            var lo = at;
+            while (lo > 0 and isIdent(line[lo - 1])) lo -= 1;
+            var hi = at;
+            while (hi < line.len and isIdent(line[hi])) hi += 1;
+            const lo_u = if (negotiated_utf16) utf16Units(line[0..lo]) else lo;
+            const hi_u = if (negotiated_utf16) utf16Units(line[0..hi]) else hi;
+            const end_u = if (negotiated_utf16) utf16Units(line) else line.len;
+            if (end_u > hi_u) outer = rangeNode(arena, line_no, lo_u, line_no, end_u, outer) catch return; // 낱말부터 줄 끝까지
+            outer = rangeNode(arena, line_no, lo_u, line_no, hi_u, outer) catch return; // 낱말
+        }
+        out.append(outer) catch return;
+    }
+    sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .result = std.json.Value{ .array = out } });
+}
+
+fn rangeNode(arena: std.mem.Allocator, l0: i64, c0: usize, l1: i64, c1: usize, parent: ?std.json.Value) !std.json.Value {
+    var r: std.json.ObjectMap = .empty;
+    try r.put(arena, "start", try posValue(arena, l0, c0));
+    try r.put(arena, "end", try posValue(arena, l1, c1));
+    var n: std.json.ObjectMap = .empty;
+    try n.put(arena, "range", .{ .object = r });
+    if (parent) |pnode| try n.put(arena, "parent", pnode);
+    return .{ .object = n };
+}
+
+/// 협상한 단위의 `character` → 그 줄의 byte(utf-8 이면 그대로, utf-16 이면 글자를 세며 환산 — surrogate pair 는 둘).
+fn byteAtUnits(line: []const u8, ch: i64) usize {
+    if (!negotiated_utf16) return @intCast(@max(0, @min(ch, @as(i64, @intCast(line.len)))));
+    var units: i64 = 0;
+    var bi: usize = 0;
+    while (bi < line.len) {
+        if (units >= ch) return bi;
+        const n = std.unicode.utf8ByteSequenceLength(line[bi]) catch 1;
+        const cp = std.unicode.utf8Decode(line[bi..@min(bi + n, line.len)]) catch 0xFFFD;
+        units += if (cp > 0xFFFF) 2 else 1;
+        bi += @max(1, n);
+    }
+    return line.len;
+}
+
 /// `textDocument/documentSymbol`(§8.2o) — 문서의 `fn <name>(` 과 `struct <name> {` 을 심볼로 낸다. **계층**으로 내되 tsgo 꼴로 **순서를 섞고**
 /// (뒤에서 앞으로) 자식 하나를 형제로 흘린다 — 클라이언트가 정렬·포함 재계산을 하는지 본다. 표식: `DSYNONE` 빈 목록 · `DSYFLAT` 평탄 꼴 ·
 /// `DSYSTALL` 무응답 · `DSYERR` `-32801` · `DSYBAD` 이름이 문서와 다른 항목 하나를 섞는다.
@@ -1246,6 +1343,7 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
                     .referencesProvider = true, // §8.2l
                     .documentSymbolProvider = std.c.getenv("MARU_FAKE_LSP_NOSYMCAP") == null, // 심볼 2층(§8.2o)
                     .documentHighlightProvider = std.c.getenv("MARU_FAKE_LSP_NOHLCAP") == null, // 같은 낱말 강조(§8.2p)
+                    .selectionRangeProvider = std.c.getenv("MARU_FAKE_LSP_NOSRCAP") == null, // 구조 기반 선택 확장(§8.2q)
                     .inlayHintProvider = if (std.c.getenv("MARU_FAKE_LSP_NOINLAYCAP") == null) std.json.Value{ .object = inlay_caps } else std.json.Value{ .bool = false }, // §8.2n — 객체 꼴; `NOINLAYCAP=1` 이면 없음
                     .implementationProvider = true, // §8.2m
                     .typeDefinitionProvider = if (std.c.getenv("MARU_FAKE_LSP_NOTYPEDEFCAP") == null) std.json.Value{ .object = typedef_caps } else std.json.Value{ .bool = false }, // 객체 꼴; `NOTYPEDEFCAP=1` 이면 false
@@ -1442,6 +1540,10 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
     }
     if (std.mem.eql(u8, method, "textDocument/documentHighlight")) {
         handleDocumentHighlight(allocator, obj, id orelse .null);
+        return;
+    }
+    if (std.mem.eql(u8, method, "textDocument/selectionRange")) {
+        handleSelectionRange(allocator, obj, id orelse .null);
         return;
     }
     if (std.mem.eql(u8, method, "textDocument/documentSymbol")) {

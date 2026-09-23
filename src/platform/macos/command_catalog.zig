@@ -112,6 +112,8 @@ pub const entries = [_]Entry{
     .{ .action = .goto_implementation, .key = "goto_implementation", .title = "Editor: Go to Implementation" },
     .{ .action = .goto_type_definition, .key = "goto_type_definition", .title = "Editor: Go to Type Definition" },
     .{ .action = .goto_declaration, .key = "goto_declaration", .title = "Editor: Go to Declaration" },
+    .{ .action = .expand_selection, .key = "expand_selection", .title = "Editor: Expand Selection" },
+    .{ .action = .shrink_selection, .key = "shrink_selection", .title = "Editor: Shrink Selection" },
     .{ .action = .navigate_back, .key = "navigate_back", .title = "Editor: Go Back" },
     .{ .action = .navigate_forward, .key = "navigate_forward", .title = "Editor: Go Forward" },
     .{ .action = .trigger_parameter_hints, .key = "trigger_parameter_hints", .title = "Editor: Trigger Parameter Hints" },

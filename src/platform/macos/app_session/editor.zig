@@ -97,6 +97,7 @@ pub const fold_lsp_client = @import("editor_fold_lsp.zig");
 pub const inlay_client = @import("editor_inlay.zig");
 pub const symbols_client = @import("editor_symbols.zig");
 pub const highlight_client = @import("editor_highlight.zig");
+pub const smart_select_client = @import("editor_smart_select.zig");
 /// 접힘 범위를 낸 층(§4 의 세 소스).
 pub const FoldSource = enum { indent, syntax, lsp };
 pub const workspace_edit_client = @import("editor_workspace_edit.zig");
@@ -679,6 +680,7 @@ fn syntaxColors(self: *AppSession, term: *Term) []const []const chrome_editor.co
         inlay_client.tick(self, term, first_src, last_src); // 인레이 힌트(§8.2n) — 같은 창
         symbols_client.tick(self, term); // 심볼 2층(§8.2o) — 문서 단위라 창과 무관하다
         highlight_client.tick(self, term); // 같은 낱말 강조(§8.2p) — caret 자리라 역시 창과 무관하다
+        smart_select_client.tick(self, term); // 선택 확장의 서버 대기 시간 초과(§8.2q)
     }
     return syntax_color.lineColorsWith(
         &term.rt.editor_syntax,
@@ -3433,7 +3435,7 @@ fn caretMargin(want: u32, visible: usize) usize {
     return @min(@as(usize, want), (visible - 1) / 2);
 }
 
-fn revealPrimaryCaret(self: *AppSession, term: *Term) void {
+pub fn revealPrimaryCaret(self: *AppSession, term: *Term) void {
     // **순서를 바꾼 변이는 살아남는 것이 정상이다**(7회차 T6): 두 축이 서로의 값을 안 읽는다 —
     // 가로는 렌더가 굳힌 `content_width` 와 `max_cols` 를, 세로는 줄 배열과 `first_line` 을 본다.
     // 그래도 세로를 먼저 적는 이유는 뜻이다 — 접힌 줄을 펴는 쪽이 세로이고, 그것이 「어느 줄이
@@ -9638,6 +9640,7 @@ pub fn releaseEditorTerm(self: *AppSession, term: *Term) void {
     term.rt.editor_inlay.deinit(self.allocator); // 인레이 힌트도 문서와 함께(§8.2n)
     term.rt.editor_symbols.deinit(self.allocator); // 심볼 2층도(§8.2o)
     term.rt.editor_highlight.deinit(self.allocator); // 같은 낱말 강조도(§8.2p)
+    term.rt.editor_smart_select.deinit(self.allocator); // 선택 확장 사슬도(§8.2q)
     term.rt.editor_fold_lsp = .{}; // 3층 대기 상태도 문서와 함께(`editor_lsp_version = 0` 과 같은 자리) — 두 호출자 모두 곧 Term 을 부수므로 관측되지 않는다(적대적 C8: 등가), 규율로 둔다
     if (term.rt.editor_lines.len > 0) self.allocator.free(term.rt.editor_lines);
     term.rt.editor_lines = &.{};
@@ -13704,6 +13707,248 @@ test "OCH3 같은 낱말 강조 — caret 이 낱말에 멈추면 묻고 응답 
     }
     _ = syntaxColors(s, term);
     try testing.expectEqual(@as(u64, 3), s.editor_lsp.sent_highlight);
+}
+
+/// 선택 확장 판정자(§8.2q)의 공통 — 지금 primary 가 고른 글자.
+fn smartSelected(term: *Term) []const u8 {
+    const sel = term.rt.editor_selection orelse return "";
+    const c = term.rt.editor_doc.?.file.content;
+    return c[sel.start()..sel.end()];
+}
+fn smartApplied(f: *SmtFixture, want: u64) bool {
+    const Ctx = struct { t: *Term, n: u64 };
+    return pumpLspUntil(&f.fx, 3000, Ctx{ .t = f.term, .n = want }, struct {
+        fn g(c: Ctx) bool {
+            return c.t.rt.editor_smart_select.applied >= c.n;
+        }
+    }.g);
+}
+fn smartReceived(f: *SmtFixture, want: u64) bool {
+    const Ctx = struct { s: *AppSession, n: u64 };
+    return pumpLspUntil(&f.fx, 3000, Ctx{ .s = f.fx.session, .n = want }, struct {
+        fn g(c: Ctx) bool {
+            return c.s.editor_lsp.received_selection_range >= c.n;
+        }
+    }.g);
+}
+const smart_mods: maru.terminal.input.ModifierSet = .{ .control = true, .shift = true, .command = true };
+fn smartCaret(term: *Term, at: usize) void {
+    term.rt.editor_selection = editor_selection.Selection.at(at);
+    if (term.rt.editor_extra_selections.len > 0) testing.allocator.free(term.rt.editor_extra_selections);
+    term.rt.editor_extra_selections = &.{};
+}
+/// 선택 확장 픽스처 문서 — `alpha + beta` 는 tree-sitter 의 이항식이고, 가짜 서버는 「낱말부터 줄 끝까지」(`alpha + beta;`)를 낸다.
+/// 둘째 걸음의 모양으로 **어느 원천이 쓰였는지** 가린다.
+const smart_src = "int f(int a) {\n  return alpha + beta;\n}\n";
+
+test "SSEL9 선택 확장 — ⌃⇧⌘→ 가 키 경로로 서버에 한 번 묻고 커서를 한 걸음씩 넓히며(낱말 → 서버 범위 → 줄), ⌃⇧⌘← 는 지나온 길로 좁혀 기준에서 멈춘다; caret 이 움직이면 다시 묻는다 (제품 경계, §8.2q)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var f = (try SmtFixture.open(allocator, "ss.c", smart_src)) orelse return error.SkipZigTest;
+    defer f.close(allocator);
+    const s = f.fx.session;
+    const term = f.term;
+    try testing.expect(f.ready());
+    const content = term.rt.editor_doc.?.file.content;
+    const at = std.mem.indexOf(u8, content, "alpha").? + 2;
+    smartCaret(term, at);
+    // **메뉴 keyEquivalent 층보다 먼저 편집기가 가진다** — Swift `performKeyEquivalent` 가 이 답을 따른다.
+    try testing.expect(s.editorOwnsChord(.{ .key = .arrow_right, .modifiers = smart_mods }));
+    try testing.expect(s.editorOwnsChord(.{ .key = .arrow_left, .modifiers = smart_mods }));
+
+    try pressKey(&f.fx, .arrow_right, smart_mods);
+    try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_selection_range);
+    try testing.expect(smartApplied(&f, 1));
+    try testing.expectEqualStrings("alpha", smartSelected(term));
+    try testing.expectEqual(term.rt.editor_selection.?.end(), term.rt.editor_selection.?.focus); // anchor = 시작, focus = 끝
+    try pressKey(&f.fx, .arrow_right, smart_mods);
+    try testing.expectEqualStrings("alpha + beta;", smartSelected(term)); // 서버 모양(tree-sitter 는 `;` 없이)
+    try pressKey(&f.fx, .arrow_right, smart_mods);
+    try testing.expectEqualStrings("return alpha + beta;", smartSelected(term)); // 줄 단계 — 앞뒤 공백 뺀 줄
+    try pressKey(&f.fx, .arrow_right, smart_mods);
+    try testing.expectEqualStrings("  return alpha + beta;", smartSelected(term)); // 줄 전체
+    try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_selection_range); // 사슬이 있는 동안은 다시 안 묻는다
+
+    // 축소 — 지나온 길로, 기준(빈 caret)에서 멈춘다.
+    try pressKey(&f.fx, .arrow_left, smart_mods);
+    try testing.expectEqualStrings("return alpha + beta;", smartSelected(term));
+    try pressKey(&f.fx, .arrow_left, smart_mods);
+    try pressKey(&f.fx, .arrow_left, smart_mods);
+    try testing.expectEqualStrings("alpha", smartSelected(term));
+    try pressKey(&f.fx, .arrow_left, smart_mods);
+    try pressKey(&f.fx, .arrow_left, smart_mods);
+    try testing.expectEqual(at, term.rt.editor_selection.?.start());
+    try testing.expectEqual(at, term.rt.editor_selection.?.end());
+
+    // caret 이 움직이면 사슬을 버리고 다시 묻는다.
+    const beta = std.mem.indexOf(u8, content, "beta").? + 1;
+    smartCaret(term, beta);
+    try pressKey(&f.fx, .arrow_right, smart_mods);
+    try testing.expectEqual(@as(u64, 2), s.editor_lsp.sent_selection_range);
+    try testing.expect(smartApplied(&f, 10)); // 앞의 걸음 아홉(확장 넷 · 축소 다섯) + 이것
+    try testing.expectEqualStrings("beta", smartSelected(term));
+}
+
+test "SSEL10 선택 확장 — caret 을 안 옮기는 편집도 사슬을 버린다: 축소는 제자리, 확장은 다시 묻는다 (제품 경계, §8.2q — VS Code 의 구멍)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var f = (try SmtFixture.open(allocator, "se.c", smart_src)) orelse return error.SkipZigTest;
+    defer f.close(allocator);
+    const s = f.fx.session;
+    const term = f.term;
+    try testing.expect(f.ready());
+    const at = std.mem.indexOf(u8, term.rt.editor_doc.?.file.content, "alpha").? + 2;
+    smartCaret(term, at);
+    try pressKey(&f.fx, .arrow_right, smart_mods);
+    try testing.expect(smartApplied(&f, 1));
+    try pressKey(&f.fx, .arrow_right, smart_mods);
+    try testing.expectEqualStrings("alpha + beta;", smartSelected(term));
+    // caret **뒤**에 줄을 넣는다 — 선택은 그대로 서 있다(편집기 이동·포맷이 caret 을 안 옮기는 경우와 같은 꼴). 통지는 편집 초크 포인트로.
+    const len_before = term.rt.editor_doc.?.file.content.len;
+    var sels = maru.session.editor.selection.Selections.init((try allocator.alloc(editor_selection.Selection, 1))[0..1], 0);
+    sels.items[0] = editor_selection.Selection.at(0);
+    defer allocator.free(sels.items);
+    const changes = [_]maru.session.editor.delta.Change{.{ .start = len_before, .end = len_before, .text = "int g;\n" }};
+    var inv = try term.rt.editor_doc.?.file.apply(.{ .changes = &changes }, &sels);
+    inv.deinit();
+    refreshAfterEdit(s, term, null) catch {};
+    try testing.expectEqualStrings("alpha + beta;", smartSelected(term)); // 선택은 제자리
+    // 축소 — 옛 사슬로 좁히면 안 된다(버렸다): 제자리.
+    try pressKey(&f.fx, .arrow_left, smart_mods);
+    try testing.expectEqualStrings("alpha + beta;", smartSelected(term));
+    // 확장은 지금 선택에서 새로 묻는다.
+    try pressKey(&f.fx, .arrow_right, smart_mods);
+    try testing.expectEqual(@as(u64, 2), s.editor_lsp.sent_selection_range);
+}
+
+test "SSEL11 선택 확장의 1층 — provider 없음 · 빈 범위(clangd 주석 꼴) · 오류 · 짧은 배열 · 무응답 500 ms · 여는 파싱 중이면 트리를 안 쓴다 (제품 경계, §8.2q)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const Case = struct { name: []const u8, src: []const u8, nocap: bool, want_sent: u64 };
+    const cases = [_]Case{
+        .{ .name = "n1.c", .src = smart_src, .nocap = true, .want_sent = 0 },
+        .{ .name = "n2.c", .src = smart_src ++ "// SSRNONE\n", .nocap = false, .want_sent = 1 },
+        .{ .name = "n3.c", .src = smart_src ++ "// SSRERR\n", .nocap = false, .want_sent = 1 },
+        .{ .name = "n4.c", .src = smart_src ++ "// SSRSHORT\n", .nocap = false, .want_sent = 1 },
+        .{ .name = "n5.c", .src = smart_src ++ "// SSRSTALL\n", .nocap = false, .want_sent = 1 },
+    };
+    for (cases) |cs| {
+        if (cs.nocap) _ = setenv("MARU_FAKE_LSP_NOSRCAP", "1", 1);
+        defer if (cs.nocap) {
+            _ = unsetenv("MARU_FAKE_LSP_NOSRCAP");
+        };
+        var f = (try SmtFixture.open(allocator, cs.name, cs.src)) orelse return error.SkipZigTest;
+        defer f.close(allocator);
+        const s = f.fx.session;
+        const term = f.term;
+        try testing.expect(f.ready());
+        const at = std.mem.indexOf(u8, term.rt.editor_doc.?.file.content, "alpha").? + 2;
+        smartCaret(term, at);
+        try pressKey(&f.fx, .arrow_right, smart_mods);
+        try testing.expectEqual(cs.want_sent, s.editor_lsp.sent_selection_range);
+        if (std.mem.indexOf(u8, cs.src, "SSRSTALL") != null) {
+            // 무응답 — 500 ms 가 지나면 프레임 tick 이 1층으로 세운다.
+            try testing.expectEqual(@as(u64, 0), term.rt.editor_smart_select.applied);
+            const t0 = s.awakeMs();
+            while (s.awakeMs() - t0 < smart_select_client.timeout_ms + 80) _ = usleep(10_000);
+            _ = syntaxColors(s, term);
+            try testing.expectEqual(@as(u64, 1), term.rt.editor_smart_select.timeout_fallback);
+        }
+        try testing.expect(smartApplied(&f, 1));
+        try testing.expectEqualStrings("alpha", smartSelected(term));
+        try pressKey(&f.fx, .arrow_right, smart_mods);
+        try testing.expectEqualStrings("alpha + beta", smartSelected(term)); // tree-sitter 의 이항식(서버 모양 `;` 이 아니다)
+        if (std.mem.indexOf(u8, cs.src, "SSRNONE") != null) try testing.expectEqual(@as(u64, 1), term.rt.editor_smart_select.layer1_only);
+        if (std.mem.indexOf(u8, cs.src, "SSRERR") != null or std.mem.indexOf(u8, cs.src, "SSRSHORT") != null)
+            try testing.expectEqual(@as(u64, 1), term.rt.editor_smart_select.dropped_error);
+    }
+}
+
+test "SSEL15 선택 확장의 1층은 여는 파싱이 끊긴 동안 트리를 안 쓴다 — 낱말 다음이 곧 줄 단계다 (제품 경계, §8.2q · layering §2.1a)" {
+    // 끊긴 동안 트리는 없거나(§2.1a) 틀릴 수 있었다(#3886). **1ns 예산으로 끊으려면 문서가 첫 콜백보다 길어야 한다** — 세 줄짜리로는
+    // 첫 콜백 전에 다 파서 이 판정자가 조용히 SKIP 이었다(처음 판).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    _ = setenv("MARU_FAKE_LSP_NOSRCAP", "1", 1);
+    defer _ = unsetenv("MARU_FAKE_LSP_NOSRCAP");
+    var f = (try SmtFixture.open(allocator, "n6.c", smart_src ++ "int z;\n" ** 400)) orelse return error.SkipZigTest;
+    defer f.close(allocator);
+    const term = f.term;
+    try testing.expect(f.ready());
+    const doc = term.rt.editor_doc orelse return error.NoDoc;
+    term.rt.editor_syntax.deinit(allocator);
+    term.rt.editor_syntax = syntax_color.openBudgeted(doc.file.content, .c, 1);
+    try testing.expect(term.rt.editor_syntax.pending); // 끊겼다 — 아니면 이 판정자가 잴 것이 없다
+    const at = std.mem.indexOf(u8, doc.file.content, "alpha").? + 2;
+    smartCaret(term, at);
+    try pressKey(&f.fx, .arrow_right, smart_mods);
+    try testing.expectEqualStrings("alpha", smartSelected(term));
+    try pressKey(&f.fx, .arrow_right, smart_mods);
+    try testing.expectEqualStrings("return alpha + beta;", smartSelected(term)); // tree-sitter 라면 `alpha + beta`
+}
+
+test "SSEL12 선택 확장의 대기 — 기다리는 동안 누른 키는 순 걸음으로 쌓여 답이 오면 한 번에 옮기고, 그사이 caret 이 움직이면 답을 버린다 (제품 경계, §8.2q)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var f = (try SmtFixture.open(allocator, "sw.c", smart_src)) orelse return error.SkipZigTest;
+    defer f.close(allocator);
+    const s = f.fx.session;
+    const term = f.term;
+    try testing.expect(f.ready());
+    const content = term.rt.editor_doc.?.file.content;
+    const at = std.mem.indexOf(u8, content, "alpha").? + 2;
+    // ⑴ 확장 · 확장 · 확장 · 축소 = 순 두 걸음 — 답이 오기 전에 다 누른다.
+    smartCaret(term, at);
+    try pressKey(&f.fx, .arrow_right, smart_mods);
+    try pressKey(&f.fx, .arrow_right, smart_mods);
+    try pressKey(&f.fx, .arrow_right, smart_mods);
+    try pressKey(&f.fx, .arrow_left, smart_mods);
+    try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_selection_range); // 기다리는 동안은 다시 안 묻는다
+    try testing.expect(smartApplied(&f, 1));
+    try testing.expectEqualStrings("alpha + beta;", smartSelected(term));
+    // ⑵ 낡은 답 — 묻고 나서 caret 을 옮기면 그 답은 버린다(선택은 옮긴 자리 그대로).
+    const beta = std.mem.indexOf(u8, content, "beta").? + 1;
+    smartCaret(term, beta);
+    try pressKey(&f.fx, .arrow_right, smart_mods);
+    try testing.expectEqual(@as(u64, 2), s.editor_lsp.sent_selection_range);
+    smartCaret(term, at);
+    try testing.expect(smartReceived(&f, 2));
+    try testing.expectEqual(@as(u64, 1), term.rt.editor_smart_select.dropped_stale);
+    try testing.expectEqual(at, term.rt.editor_selection.?.start());
+    try testing.expectEqual(at, term.rt.editor_selection.?.end());
+}
+
+test "SSEL13 선택 확장의 멀티 커서 — 커서마다 사슬로 넓히고, 겹치면 합쳐 하나가 되며 다음 키는 합친 선택에서 새로 묻는다 (제품 경계, §8.2q)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var f = (try SmtFixture.open(allocator, "sm.c", smart_src)) orelse return error.SkipZigTest;
+    defer f.close(allocator);
+    const s = f.fx.session;
+    const term = f.term;
+    try testing.expect(f.ready());
+    const content = term.rt.editor_doc.?.file.content;
+    const a = std.mem.indexOf(u8, content, "alpha").? + 2;
+    const b = std.mem.indexOf(u8, content, "beta").? + 1;
+    smartCaret(term, a);
+    const extras = try allocator.alloc(editor_selection.Selection, 1);
+    extras[0] = editor_selection.Selection.at(b);
+    term.rt.editor_extra_selections = extras;
+    try pressKey(&f.fx, .arrow_right, smart_mods);
+    try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_selection_range); // 커서 둘이 한 요청
+    try testing.expect(smartApplied(&f, 1));
+    try testing.expectEqualStrings("alpha", smartSelected(term));
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_extra_selections.len);
+    const ex = term.rt.editor_extra_selections[0];
+    try testing.expectEqualStrings("beta", content[ex.start()..ex.end()]);
+    // 다음 걸음 — `alpha + beta;` 가 `beta;` 를 품어 둘이 합쳐진다.
+    try pressKey(&f.fx, .arrow_right, smart_mods);
+    try testing.expectEqualStrings("alpha + beta;", smartSelected(term));
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_extra_selections.len);
+    // 합쳐져 짝을 잃었다 — 다음 키는 합친 선택에서 새로 묻는다.
+    try pressKey(&f.fx, .arrow_right, smart_mods);
+    try testing.expectEqual(@as(u64, 2), s.editor_lsp.sent_selection_range);
+    try testing.expect(smartApplied(&f, 3));
+    try testing.expectEqualStrings("return alpha + beta;", smartSelected(term));
 }
 
 test "OCH4 같은 낱말 강조 — provider 가 없으면 묻지 않고, 빈 응답·오류는 강조 없음이며, 낡은 낱말로 온 답은 버린다 (제품 경계, §8.2p)" {

@@ -172,6 +172,9 @@ pub const Action = union(enum) {
     goto_implementation,
     goto_type_definition,
     goto_declaration,
+    /// 구조 기반 선택 확장·축소(tooling §8.2q — `⌃⇧⌘→`·`⌃⇧⌘←`, VS Code `editor.action.smartSelect.expand/shrink`).
+    expand_selection,
+    shrink_selection,
     /// 이동 스택 뒤로/앞으로(visual-mapping §5.2 — `⌃-`·`⌃⇧-`, 편집기 Term 에서만).
     navigate_back,
     navigate_forward,
@@ -335,6 +338,8 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "goto_implementation")) return .goto_implementation;
     if (std.mem.eql(u8, value, "goto_type_definition")) return .goto_type_definition;
     if (std.mem.eql(u8, value, "goto_declaration")) return .goto_declaration;
+    if (std.mem.eql(u8, value, "expand_selection")) return .expand_selection;
+    if (std.mem.eql(u8, value, "shrink_selection")) return .shrink_selection;
     if (std.mem.eql(u8, value, "navigate_back")) return .navigate_back;
     if (std.mem.eql(u8, value, "navigate_forward")) return .navigate_forward;
     if (std.mem.eql(u8, value, "trigger_parameter_hints")) return .trigger_parameter_hints;

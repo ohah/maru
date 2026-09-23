@@ -35,7 +35,8 @@
 
 - **이 문서의 규칙은** provider 파일·훅에 의존하지 않는다 — kind·state를 화면과 process tree만으로 정한다.
   훅이 없는 Term은 이것만으로 살고, 훅이 있는 Term에서는 권위표의 C1·C2가 이 판정을 쓴다
-- provider session id를 저장하거나 자동 resume/fork하는 workspace restore
+- provider session id를 저장하거나 자동 resume/fork하는 workspace restore — **예외는 재부팅이 증명된 복원 하나**다.
+  그 규칙은 이 관측 계층이 아니라 [workspace-restore.md](workspace-restore.md) 「재부팅 뒤 부활(RB)」이 소유한다
 - 에이전트 내부 단계, tool call, API 대기 원인을 정확히 복원하는 기능
 
 관측 모드는 터미널 밖의 private 상태를 읽지 않는 대신 설치가 필요 없고, 같은 cwd의 여러 세션·중첩 프로세스·
@@ -65,7 +66,9 @@ provider 포맷 변경에 결합되지 않는다. 그 상태는 **화면에 드�
 
 [영속 터미널 세션 호스트](persistent-session-host.md)가 구현되면 Claude/Codex가 이어지는 이유는 provider session ID를
 저장·resume/fork해서가 아니라, 그 프로세스가 붙은 동일 PTY runtime을 `maru-sessiond`가 계속 소유하기 때문이다.
-host 또는 agent process가 끝나면 그 실행 세션도 끝난 것이며 provider 복구는 하지 않는다.
+host 또는 agent process가 끝나면 그 실행 세션도 끝난 것이며 provider 복구는 하지 않는다. 예외는 재부팅이 증명된
+복원뿐이다 — 그때는 Term마다 저장한 provider·세션 id로 대화를 이어간다([workspace-restore.md](workspace-restore.md)
+「재부팅 뒤 부활(RB)」).
 
 provider session continuity용 workspace typed field/parser, restore 설정 alias, 과거 hook cleanup은 persistent-session P1에서
 제거했다. live foreground process/screen observer와 `Term.agent_kind/agent_state`는 session restore가 아니므로 유지한다.

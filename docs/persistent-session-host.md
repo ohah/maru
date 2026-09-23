@@ -171,9 +171,12 @@ prefix key, status line, copy mode, 설정 언어, command language, tmux wire �
     할 수 있는 것은 **자기 원격 지속성에 tmux 가 필요 없게 만드는 것**뿐이다.
 - 재부팅·전원 종료를 건너 실제 OS 프로세스를 보존하는 것.
 - `maru-sessiond` crash·강제 종료 또는 terminal child 종료 뒤 동일 실행 세션을 복구하는 것. host/runtime이 끝나면
-  그 Maru runtime도 끝난 것이며 자동 대체 spawn을 하지 않는다.
-- Claude/Codex provider session id·transcript·argv를 저장해 resume/fork하는 것. 영속성은 provider 복원이 아니라
-  **같은 살아 있는 PTY/process를 계속 소유**하는 데서만 나온다.
+  그 Maru runtime도 끝난 것이며 자동 대체 spawn을 하지 않는다. **예외: 재부팅이 증명된 복원**은 새 셸을 자동으로
+  띄운다 — 동일 세션 복구가 아니라 「새로 시작했다」를 알리는 부활이다([workspace-restore.md](workspace-restore.md)
+  「재부팅 뒤 부활(RB)」이 단일 출처).
+- Claude/Codex transcript·argv를 저장해 resume/fork하는 것. 영속성은 provider 복원이 아니라
+  **같은 살아 있는 PTY/process를 계속 소유**하는 데서만 나온다. **예외: 재부팅이 증명된 복원**은 Term마다 저장한
+  provider·세션 id 한 쌍으로 그 대화를 이어간다(같은 절).
 - tmux server/socket/control-mode 프로토콜과 호환되는 것.
 - v1에서 여러 writable client가 동시에 한 PTY에 입력하는 것. 여러 사람이 함께 쓰는 collaborative input, 사용자별 cursor,
   입력 병합·귀속·승인/revoke UX는 실제 수요가 확인될 때 별도 설계한다.
@@ -714,7 +717,8 @@ dirty file editor는 session host가 보호하지 못한다. `Quit Maru`도 기�
 - runtime 0개·client 0개가 되면 bounded idle grace 뒤 종료할 수 있다. 그렇게 스스로 물러나는 host는 socket·manifest·
   owner.lock을 먼저 내리고 빈 registry directory까지 회수한다(`removeEmptyHostDirectories`).
 - macOS login session 종료·재부팅·전원 종료 뒤에는 살아 있음을 약속하지 않는다.
-- host/runtime 종료 뒤 provider resume/fork나 동일 runtime 복구는 시도하지 않는다.
+- host/runtime 종료 뒤 동일 runtime 복구는 시도하지 않는다. provider 이어가기는 재부팅이 증명된 복원에서만 한다
+  ([workspace-restore.md](workspace-restore.md) 「재부팅 뒤 부활(RB)」).
 
 **죽은 host의 잔여 entry는 상한을 쓰지 않는다.** `SIGKILL`·crash·로그아웃으로 죽은 host는 실행할 cleanup 코드가 없어
 자기 registry entry를 회수하지 못하고(위 "보장 범위" 규정), 그 잔여물은 다음 실행에서도 그대로 남는다. 따라서 잔여
@@ -818,7 +822,8 @@ sequenceDiagram
 7. host의 `runtime_not_found`/`stale_host` 응답, dead owner lease 등 **영구 부재의 긍정적 증거**가 있으면 종료
    placeholder로 표시한다. endpoint 미발견·지원 범위 밖 protocol·timeout은 unavailable로 fail-close한다.
    placeholder는 `runtime-state="ended"`와 마지막 `runtime-handle`을 함께 저장해 재실행 횟수와 무관하게 유지한다.
-   provider resume/fork나 마지막 command 자동 재실행은 없다.
+   마지막 command 자동 재실행은 없다. **재부팅이 증명된 복원은 이 단계에 오지 않는다** — host에 묻지 않고 새 셸을
+   띄우며 로컬 에이전트 대화를 이어간다([workspace-restore.md](workspace-restore.md) 「재부팅 뒤 부활(RB)」).
 8. host에는 있지만 manifest에 bind되지 않은 runtime은 삭제하지 않고 `Recovered Sessions`에 노출한다.
 9. 같은 runtime을 manifest의 두 writable Term 슬롯에 bind하면 잘못된 파일로 거부한다. 한 runtime의 canonical writable placement는 하나다.
 
@@ -6366,7 +6371,8 @@ destroy하지 않는다. frame turn 하나가 여러 CR5 mutation 단계를 건�
 **7의 durable per-Term ended placeholder는 P4 R1에서 구현됐다** — exact handle이 영구 부재로 분류된 runtime만 그 Term을 읽기 전용 placeholder로 두고
 나머지 surface·split·탭·창 frame은 정상 복원한다. placeholder 화면에는 마지막 제목·위치와 `⏎` 안내가 **화면 콘텐츠로**
 남고(notice는 아무 키에나 닫히므로 그것만으로는 복구 방법이 사라진다), `⏎`가 그 pane 슬롯을 **제자리 교체**해 마지막
-cwd에서 새 셸을 시작한다. 자동 fresh spawn은 없다 — `⏎`가 유일한 승격 경로이고 다른 키·수식자 조합으로는 되살아나지
+cwd에서 새 셸을 시작한다. 자동 fresh spawn은 없다(재부팅이 증명된 복원은 묘비를 만들지 않으므로 이 규칙 밖이다 —
+workspace-restore.md 「재부팅 뒤 부활(RB)」) — `⏎`가 유일한 승격 경로이고 다른 키·수식자 조합으로는 되살아나지
 않는다. capture는 exact handle/state를 owned 상태에서 다시 쓰며, parse→apply→capture를 두 cycle 반복하는 자동
 fixture가 restoreSpawn/attach/probe/spawn 공통 진입점 0과 dropped 0을 고정한다. 실제 signed app process의 반복
 Quit/relaunch E2E는 별도 제품 gate로 남는다. 9의 manifest 전역 중복 검증은

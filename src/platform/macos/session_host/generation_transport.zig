@@ -7391,10 +7391,13 @@ fn runB36CoalescedDuplicateCase() !void {
     var complete = false;
     const peer = try std.Thread.spawn(.{}, Peer.run, .{ harness.fds[1], &complete });
     harness.fds[1] = -1;
-    defer {
+    var peer_joined = false;
+    // 피어를 멈추게 하는 순서: 우리 쪽 소켓을 닫아 피어의 read 를 풀고, 그다음 join 한다.
+    // 이미 써 둔 요청 바이트는 shutdown 뒤에도 피어가 끝까지 읽는다.
+    defer if (!peer_joined) {
         if (harness.slot_initialized) _ = c.shutdown(harness.slot.logicalClient().fd, c.SHUT.RDWR);
         peer.join();
-    }
+    };
     try executePreparedRpcSubstrate(&harness.owner.transport, harness.receipt);
     try std.testing.expect(harness.owner.transport.rpc_response.pristineExact());
     try harness.request_free.expectExecutionFinalZero();
@@ -7434,6 +7437,14 @@ fn runB36CoalescedDuplicateCase() !void {
         if (receipt.len == 2) duplicate_payload_frees += 1;
     }
     try std.testing.expectEqual(@as(usize, 1), duplicate_payload_frees);
+    // **피어를 join 한 «뒤에» 본다.** 예전에는 join 이 defer 안이라 이 확인보다 늦게 돌았고,
+    // 피어 스레드가 두 번째 요청을 다 읽고 `complete` 를 세우기 전에 메인이 먼저 도착하면
+    // 떨어졌다(두 모드 바이너리를 30 회씩 돌려 60 회 중 2 회). 피어가 `complete` 를 세우기 직전에
+    // 50ms 지연을 넣자 두 모드 모두 매번 재현됐고, 이 순서로 고치자 지연이 있어도 통과했다.
+    // join 이 happens-before 를 주므로 두 스레드가 plain bool 을 나누는 경쟁도 함께 사라진다.
+    if (harness.slot_initialized) _ = c.shutdown(harness.slot.logicalClient().fd, c.SHUT.RDWR);
+    peer.join();
+    peer_joined = true;
     try std.testing.expect(complete);
 }
 

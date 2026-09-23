@@ -4,6 +4,7 @@
 //! ① stdin/stdout 을 프로토콜 전용으로 떼어 낸다(`stdio.zig`) ② 첫 frame `hello` 를 받아 같은 값으로 `hello_ack`
 //! ③ 프레임워크를 dlopen 하고 CEF 를 초기화한다 ④ 읽기 스레드가 명령을 받아 UI 스레드에 넘긴다(`inbox.zig`)
 //! ⑤ `shutdown` 또는 stdin EOF(maru 가 사라졌다)면 메시지 루프를 끝내고 CEF 를 내린다.
+//! `failure.detail`·stderr 문구는 **진단용 영어**다 — 사용자에게 보일 문구는 maru 가 `failure.code` 로 i18n 해서 만든다(W3).
 //! 프로세스는 샌드박스 밖이다 — 신뢰할 수 없는 웹은 샌드박스 안 helper 가 그린다(`helper_main.zig`).
 
 const std = @import("std");
@@ -51,22 +52,22 @@ fn run(init: std.process.Init) ExitCode {
     g_writer.send(.{ .hello_ack = hello }) catch return .handshake_failed;
 
     const argv = init.minimal.args.vector;
-    const profile_dir = profileDir(argv) orelse return fail(.bad_arguments, .cef_initialize_failed, "--profile-dir=<절대 경로> 가 없다");
-    ensurePrivateDir(profile_dir) catch return fail(.bad_arguments, .cef_initialize_failed, "프로필 디렉터리를 만들지 못했다");
+    const profile_dir = profileDir(argv) orelse return fail(.bad_arguments, .cef_initialize_failed, "missing --profile-dir=<absolute path>");
+    ensurePrivateDir(profile_dir) catch return fail(.bad_arguments, .cef_initialize_failed, "cannot create the profile directory");
 
     var dir_buf: layout.PathBuf = undefined;
-    const install_dir = layout.executableDir(&dir_buf) catch return fail(.framework_unavailable, .cef_initialize_failed, "실행 파일 경로를 못 구했다");
+    const install_dir = layout.executableDir(&dir_buf) catch return fail(.framework_unavailable, .cef_initialize_failed, "cannot resolve the executable path");
     var framework_buf: layout.PathBuf = undefined;
     const framework = layout.join(&framework_buf, install_dir, layout.framework_dir_name ++ "/" ++ layout.framework_binary_name) catch
-        return fail(.framework_unavailable, .cef_initialize_failed, "경로가 너무 길다");
-    g_api = library.load(framework) catch return fail(.framework_unavailable, .cef_initialize_failed, "프레임워크를 못 열었다");
+        return fail(.framework_unavailable, .cef_initialize_failed, "path too long");
+    g_api = library.load(framework) catch return fail(.framework_unavailable, .cef_initialize_failed, "cannot open the CEF framework");
     _ = g_api.api_hash(cef.api_version, 0);
 
     var settings = settings_mod.build(&g_api, .{ .install_dir = install_dir, .profile_dir = profile_dir }) catch
-        return fail(.bad_arguments, .cef_initialize_failed, "경로가 너무 길다");
+        return fail(.bad_arguments, .cef_initialize_failed, "path too long");
     var main_args: c.cef_main_args_t = .{ .argc = @intCast(argv.len), .argv = @ptrCast(@constCast(argv.ptr)) };
     if (g_api.initialize(&main_args, &settings, app.get(&g_api), null) == 0) {
-        return fail(.cef_initialize_failed, .cef_initialize_failed, "cef_initialize 가 실패했다");
+        return fail(.cef_initialize_failed, .cef_initialize_failed, "cef_initialize failed");
     }
 
     g_inbox = .{ .io = init.io };
@@ -75,7 +76,7 @@ fn run(init: std.process.Init) ExitCode {
     g_task.execute = &drainTask;
     const reader = std.Thread.spawn(.{}, inbox_mod.readLoop, .{ channels.commands, &g_inbox, &wakeUiThread }) catch {
         g_api.shutdown();
-        return fail(.reader_thread_failed, .cef_initialize_failed, "읽기 스레드를 못 띄웠다");
+        return fail(.reader_thread_failed, .cef_initialize_failed, "cannot start the command reader thread");
     };
     // 스레드는 fd 가 닫힐 때까지 막혀 있다 — 프로세스가 끝나며 함께 사라진다.
     reader.detach();

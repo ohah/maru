@@ -14207,7 +14207,8 @@ test "STK8 sticky scroll — 심볼이 없으면 접힘 범위(들여쓰기)로 
     const allocator = testing.allocator;
     var fx = try PaneFixture.init(allocator);
     defer fx.deinit(allocator);
-    const term = try undoFixture(&fx, allocator, "st.txt", "section:\n" ++ ("  item\n" ** 100) ++ "end\n"); // 화면보다 길게(STK7 과 같은 이유)
+    // 접힘 스코프는 머리 0 · 숨는 마지막 1..100 → 끝 줄 101(`end` — 닫는 줄, VS Code 와 같다). 뒤에 평문 100 줄을 둬 끝 근처까지 굴릴 수 있게 한다.
+    const term = try undoFixture(&fx, allocator, "st.txt", "section:\n" ++ ("  item\n" ** 100) ++ "end\n" ++ ("tail\n" ** 100));
     fx.session.surface_initialized = true;
     fx.session.backing_width_px = 1200;
     fx.session.backing_height_px = 800;
@@ -14221,6 +14222,16 @@ test "STK8 sticky scroll — 심볼이 없으면 접힘 범위(들여쓰기)로 
     try testing.expectEqual(@as(usize, 1), term.rt.editor_sticky.drawn_len); // 실제로 그렸다(본문 첫 줄이 우연히 같은 글자가 아니다)
     try testing.expectEqual(@as(usize, 5), term.rt.editor_first_line);
     try testing.expectEqual(sticky_client.Source.fold, term.rt.editor_sticky.source);
+    // **끝 경계** — 마지막 본문 줄(100)이 맨 위에 있으면 아직 선다; 한 줄 더 굴리면(맨 위가 `end`) 떨어진다. 끝을 `last_hidden` 으로 잡으면
+    // (닫는 줄을 빼면) 한 줄 먼저 떨어진다.
+    term.rt.editor_selection = editor_selection.Selection.at(term.rt.editor_doc.?.file.lines.line(150).?.start);
+    setEditorTop(fx.session, term, 100, "test");
+    _ = try paneRowText(fx.session, term, 0, &buf);
+    try testing.expectEqual(@as(usize, 100), term.rt.editor_first_line);
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_sticky.drawn_len);
+    setEditorTop(fx.session, term, 101, "test");
+    _ = try paneRowText(fx.session, term, 0, &buf);
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_sticky.drawn_len);
 }
 
 test "STK9 sticky scroll — 서버 심볼(2층)이 오면 그것이 출처다(1층보다 먼저) (제품 경계, §4.1i)" {

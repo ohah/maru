@@ -304,3 +304,25 @@ pub fn click(self: *AppSession, term: *Term, x_px: f64, y_px: f64) bool {
     self.metal_dirty = true;
     return true;
 }
+
+const testing = std.testing;
+
+test "STK10 보이는 줄 찾기 — 접힌 줄은 없고, 값 없는 칸(정렬로 끼운 빈 줄)은 건너뛰며, 「이하의 마지막 보이는 줄」 (§4.1i)" {
+    // 문서 줄 0·1·2 가 보이고 3..9 가 접혔으며(머리 2) 10·11 이 보인다. 값 없는 칸이 하나 끼었다. 1-based.
+    const numbers = [_]?u32{ 1, 2, 3, null, 11, 12 };
+    try testing.expectEqual(@as(?usize, 0), visibleOf(&numbers, 0, numbers.len));
+    try testing.expectEqual(@as(?usize, 2), visibleOf(&numbers, 2, numbers.len));
+    try testing.expectEqual(@as(?usize, null), visibleOf(&numbers, 5, numbers.len)); // 접혔다
+    try testing.expectEqual(@as(?usize, 4), visibleOf(&numbers, 10, numbers.len)); // 값 없는 칸 뒤
+    try testing.expectEqual(@as(?usize, 5), visibleOf(&numbers, 11, numbers.len));
+    try testing.expectEqual(@as(?usize, null), visibleOf(&numbers, 12, numbers.len)); // 문서 밖
+    // 이하의 마지막 보이는 줄.
+    try testing.expectEqual(@as(?usize, 2), lastVisibleAtOrBefore(&numbers, 7, numbers.len)); // 접힌 줄 → 머리
+    try testing.expectEqual(@as(?usize, 4), lastVisibleAtOrBefore(&numbers, 10, numbers.len));
+    try testing.expectEqual(@as(?usize, 5), lastVisibleAtOrBefore(&numbers, 40, numbers.len));
+    try testing.expectEqual(@as(?usize, 0), lastVisibleAtOrBefore(&numbers, 0, numbers.len));
+    // 접힘이 없으면 두 축이 같다.
+    try testing.expectEqual(@as(?usize, 7), visibleOf(&.{}, 7, 20));
+    try testing.expectEqual(@as(?usize, null), visibleOf(&.{}, 20, 20));
+    try testing.expectEqual(@as(?usize, 19), lastVisibleAtOrBefore(&.{}, 50, 20));
+}

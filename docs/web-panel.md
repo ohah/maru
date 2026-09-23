@@ -225,7 +225,19 @@ WKWebView(WebKit)는 시스템 프레임워크라 의존성이 없지만 Chromiu
 
 #### PoC 결과 (`scratchpad/cef-osr-poc`, CEF 146 / Chromium 146)
 
-> **최신 안정판 재확인(2026-09-23)**: 아래 수치는 suji 가 받아 둔 146 으로 쟀다. 제품은 최신 안정판(154.0.23 / Chromium 154)으로 가므로 같은 PoC 를 154 minimal 배포본(sha1 검증)으로 다시 빌드해 창 없는 실행·IOSurface 가속 paint·입력 주입·`<select>`(⑧)를 재확인했다. API 버전은 `15400` 이다. **⑧ 은 154 에서 결과가 달랐다**(아래 「남은 미해결」 8). OSR 관련 헤더(렌더·접근성 핸들러, macOS 타입)는 146 과 차이가 없고 브라우저 헤더는 문장부호 한 곳만 다르다 — 이 절이 인용한 헤더 계약은 154 에서도 그대로다. 154 는 프레임워크의 `libEGL`·`libGLESv2` 가 빠지고 `libvulkan` 이 들어와 146 PoC 의 라이브러리 링크 목록은 그대로 못 쓴다. 프레임률 등 수치 표와 아래 「pane 안 실측」은 146 값이다.
+> **최신 안정판 재확인(2026-09-23)**: 아래 수치는 suji 가 받아 둔 146 으로 쟀다. 제품은 최신 안정판(154.0.23 / Chromium 154)으로 가므로 같은 PoC 를 154 minimal 배포본(sha1 검증)으로 다시 빌드해 창 없는 실행·IOSurface 가속 paint·입력 주입·`<select>`(⑧)를 재확인했다. API 버전은 `15400` 이다. **⑧ 은 154 에서 결과가 달랐다**(아래 「남은 미해결」 8). OSR 관련 헤더(렌더·접근성 핸들러, macOS 타입)는 146 과 차이가 없고 브라우저 헤더는 문장부호 한 곳만 다르다 — 이 절이 인용한 헤더 계약은 154 에서도 그대로다. 154 는 프레임워크의 `libEGL`·`libGLESv2` 가 빠지고 `libvulkan` 이 들어와 146 PoC 의 라이브러리 링크 목록은 그대로 못 쓴다. 아래 수치 표는 146 값이고, **154 로 다시 잰 값**은 다음과 같다(모두 같은 결론):
+
+> | 측정 | CEF 146 | **CEF 154** |
+> |---|---|---|
+> | 프레임률(`windowless_frame_rate=60`) | 62.8 fps | **62.7 fps** |
+> | surface / 포맷 | 1280x720 stride 5120, BGRA | **같음** |
+> | 버퍼 풀 | 고유 IOSurface 16+ | **16** |
+> | damage | 변경 영역만 | **변경 영역만**(10x10·54x89 …, 첫 프레임만 전체) |
+> | ad-hoc 서명으로 렌더러까지 | 동작 | **동작**(`Signature=adhoc`, `TeamIdentifier=not set`) |
+> | 입력 주입(클릭 ×3·포커스·타이핑·휠) | 화면 반영 | **화면 반영**(「3번 클릭됨」·「Hello CEF」 9 자·스크롤) |
+> | 같은 캐시 경로 두 번째 인스턴스 | exit 21/24 | **exit 24**(「Opening in existing browser session」) |
+> | 기본 `<select>` | 안 열림 | **열림**(⑧) |
+> | pane 안 입력 계약(아래) | 11 시나리오 통과 | **23 항목 통과** — IME·hover 커서 포함 |
 
 ![CEF OSR 이 IOSurface 로 건너온 프레임 — 창 없이 1280x720, BGRA, ad-hoc 서명](images/web-panel-osr-iosurface.png)
 
@@ -284,7 +296,7 @@ WKWebView(WebKit)는 시스템 프레임워크라 의존성이 없지만 Chromiu
 
 #### pane 안 실측 — 터미널 프로토콜 없이 직접 라우팅 (2026-09-23)
 
-위 「입력 주입」은 PoC 가 스스로 주입한 것이다. 이어서 **실제 maru pane 안에** 띄우고 사용자 입력을 넣었다(**CEF 146** 으로 쟀다 — 154 로는 PoC 단독 항목만 재확인했다). 실험 배선은 **제품 모양이 아니다** — 브라우저 픽셀을 pane 에 올리는 기하만 빌리려고 터미널 surface 에 kitty placement(1x1 더미, 로컬 id 7000~7999)를 두고, 렌더러가 그 id 의 텍스처를 sidecar IOSurface 로 바꿔 끼웠다(위 표의 (A) 모양을 **측정 장치로만** 썼다). 입력은 PTY 를 거치지 않는다 — Swift 가 NSEvent 를 그 이미지 rect 로 hit-test 해 sidecar 로 직접 보낸다.
+위 「입력 주입」은 PoC 가 스스로 주입한 것이다. 이어서 **실제 maru pane 안에** 띄우고 사용자 입력을 넣었다(처음엔 CEF 146 으로 쟀고, **154 로 전부 다시 쟀다** — 아래 시험기 절). 실험 배선은 **제품 모양이 아니다** — 브라우저 픽셀을 pane 에 올리는 기하만 빌리려고 터미널 surface 에 kitty placement(1x1 더미, 로컬 id 7000~7999)를 두고, 렌더러가 그 id 의 텍스처를 sidecar IOSurface 로 바꿔 끼웠다(위 표의 (A) 모양을 **측정 장치로만** 썼다). 입력은 PTY 를 거치지 않는다 — Swift 가 NSEvent 를 그 이미지 rect 로 hit-test 해 sidecar 로 직접 보낸다.
 
 | 항목 | 결과 |
 |---|---|
@@ -328,7 +340,12 @@ WKWebView(WebKit)는 시스템 프레임워크라 의존성이 없지만 Chromiu
 
 **함께 드러난 기존 문제(OSR 고유 아님, 코드로만 확인)**: 브라우저 웹은 편집 가능 문맥이 아니라(`webContextIsEditable` 은 파일 패널 편집기만 참) `resolveWeb` 이 ⌘Z 를 `editor_undo` 앱 액션으로 판정하고, 그 액션은 활성 Term 이 편집기일 때만 일한다 — 웹 입력창의 ⌘Z 가 먹힌다. WKWebView 브라우저도 같은 경로다(실기 미확인).
 
-**시험기 한계**: 입력기를 한글로 둘 수 없어 IME 새 동작(조합 중 다른 곳 클릭 → 확정)은 판정 못 했다. AppKit 이 합성 이벤트를 view 로 보내지 않은 단계(up 없는 down 뒤의 새 down·mouseMoved·스크롤)는 view 메서드를 직접 불러 판정했다.
+**154 로 다시 잰 결과(2026-09-23)** — 위 11 시나리오에 IME·hover 를 더해 **23 항목 전부 통과**했다. 새로 판정한 것:
+- **한글 IME** — 조합 중 글자가 `ㅇ → 아 → 안` 으로 **웹 입력창 안에** 보이고(`ime_set_composition`), space 로 확정되면 `compositionend "안 "` 이 온다. **조합 중 다른 pane 을 누르면 웹에 확정된다**(`compositionend "아"`) — 확정은 키 대상이 바뀔 때 보내는 `ime_finish_composing_text` 가 맡고, 마우스 경로의 `commitMarkedTextIfComposing` 은 터미널 preedit 가 비어 있어 PTY 로 새는 글자가 없다(코드 확인).
+- **hover 커서** — 입력창 위에서 I-beam(`CT_IBEAM`), 밖으로 나가면 mouse leave 와 기본 커서.
+- 한 번 실패로 보였던 「토스트 뒤 클릭」은 **시험 순서 탓**이었다 — 앞 단계의 스크롤로 버튼이 40px 올라가 빈 곳을 눌렀다(덤프로 확인). 스크롤을 원위치하는 단계를 넣자 통과했다.
+
+**시험기 한계와 방법**: 입력기(IMK)는 앱 안에서 만든 합성 NSEvent 를 **조합하지 않는다**(실측 — 입력 문맥의 입력기를 한국어로 바꿔도 `d`·`k`·`s` 가 그대로 들어갔다). IME 는 진짜 키 이벤트(`CGEvent`)를 **maru 프로세스에만**(`postToPid` — 다른 앱으로 새지 않는다) 보내고, 입력기는 시스템이 아니라 **그 view 의 입력 문맥에서만**(`inputContext.selectedKeyboardInputSource`) 바꿔 판정했다. AppKit 이 합성 이벤트를 view 로 보내지 않은 단계(up 없는 down 뒤의 새 down·mouseMoved·스크롤)는 view 메서드를 직접 불러 판정했다. `<select>` 팝업의 화면 합성은 아직 없어 pane 안에서는 열려도 보이지 않는다(⑧).
 
 #### terminal-browser 에서 가를 것 — 판별자 하나
 

@@ -3780,7 +3780,7 @@ fn initializeTestSessionKeepAlive(parsed: config_mod.ParsedConfig) void {
     // 기본값이 false 라 같은 fixture 가 같은 값을 받았다). 정책을 보는 test 는 설정 텍스트로 값을
     // 명시하거나(그러면 아래 파싱 경로를 그대로 탄다) 미러를 직접 세우고, 제품 기본값 자체는
     // `설정 줄이 없으면 내장 기본값이 그대로 정책이 된다 (G3 선결)`(설정을 주되 그 줄만 뺀다)와
-    // config 계층 test, CI 잡 `keep-alive recovered session macOS` 가 지킨다.
+    // config 계층 test, CI 잡 `AppKit smokes macOS` 의 keep-alive 스모크가 지킨다.
     const seeded = if (test_config_text.len == 0) false else parsed.config.session.keep_alive_after_quit;
     _ = app_keep_alive_bootstrap_owner.initialize(.{
         .value = seeded,
@@ -58857,7 +58857,7 @@ fn initSmokeSessionSized(allocator: std.mem.Allocator) !*AppSession {
     // 정산이 어긋나고 `fatalProofLoss`(종료 코드 86)로 죽는다 — CI 가 그렇게 잡았다(CR2d4).
     //
     // 「기본값이 켜진 상태」 자체는 전용 자리가 본다: 단위는 `설정 줄이 없으면 내장 기본값이 그대로
-    // 정책이 된다 (G3 선결)`, 제품 경로는 CI 잡 `keep-alive recovered session macOS` 다.
+    // 정책이 된다 (G3 선결)`, 제품 경로는 CI 잡 `AppKit smokes macOS` 의 keep-alive 스모크다.
     const saved_config_text = test_config_text;
     test_config_text = keep_alive_off_config;
     defer test_config_text = saved_config_text;

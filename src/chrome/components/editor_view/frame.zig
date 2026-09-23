@@ -183,6 +183,9 @@ pub const Props = struct {
     /// **같은 낱말 강조**(§5.1a·§8.2p) — `search_marks` 와 같은 축·같은 byte 규칙. 배경 강조 넷 중 **가장 약해서** 선택·검색보다 **먼저**
     /// 그린다(뒤에 그리는 것이 위에 얹힌다). 단일 편집기만 채운다(비교 뷰는 축이 다르다).
     occurrence_marks: ?[]const []const Mark = null,
+    /// **sticky scroll**(§4.1i) — 본문 위쪽 행을 **덮을** 머리줄들(바깥부터). 본문은 그대로 그리고 그 행에 걸린 op 만 걷어 낸다 — 스크롤
+    /// 계산·막대·히트는 안 바뀐다. 비면 없다.
+    sticky: []const StickyLine = &.{},
     /// **진단**(§5.4) — 줄마다의 밑줄 조각(`search_marks` 와 같은 축·같은 byte 규칙). 물결(지그재그)로 그린다.
     diag_marks: ?[]const []const diagnostic.Mark = null,
     /// 줄마다 gutter 마커의 severity(그 줄에서 **시작하는** 진단의 최고). `null` 항목은 마커 없음.
@@ -285,6 +288,18 @@ pub const MinimapInput = struct {
 /// 바뀐 **글자** 범위(그 줄 안 바이트). `session/editor/intraline.zig`가 계산하고, 무엇이 한 글자인지는
 /// 그 호출자가 cluster 경계로 정한다 — 여기서는 이미 정해진 범위를 열로 옮겨 칠하기만 한다.
 pub const Mark = struct { start: u32, len: u32 };
+
+/// sticky scroll(§4.1i)의 머리줄 하나 — 본문 위쪽 한 행을 덮는다. 구문 색만 싣는다(인레이·선택·검색·진단·caret 은 안 그린다).
+pub const StickyLine = struct {
+    /// gutter 에 그대로 서는 줄 번호(1-based).
+    number: usize,
+    /// 그 줄의 글자(줄바꿈 제외). 한 행으로 자른다 — 랩이어도 첫 조각만.
+    bytes: []const u8,
+    colors: []const content.ColorSpan = &.{},
+};
+
+/// 한 프레임에 덮을 수 있는 머리줄의 상한 — 설정 상한(`editor.sticky-scroll-max-lines` 10)과 같다.
+pub const sticky_max_rows: usize = 10;
 
 /// 지금 네비게이션이 가리키는 검색 결과 — 줄(`search_marks`와 **같은 축**)과 그 줄 안 시작 byte.
 ///
@@ -884,11 +899,14 @@ pub fn build(props: Props, scratch: Scratch) Written {
     else
         scrollbar.HorizontalWritten{ .ops = 0 };
 
+    // **`occ_ops` 를 빼면 안 된다**(§5.1a — `OCH5`): 뒤 층의 자리(`find_base`)가 이미 그 몫을 세므로, 여기서 빠지면 강조 수만큼
+    // 끝 op(막대·미니맵)가 잘린다 — 강조가 선 동안 막대가 사라졌다(2026-09-23 발견).
+    const body_ops = bg.ops + cw.ops + gw.ops + sw.ops + band_ops + occ_ops + sel_ops + find_ops + diag_ops + caret_ops + mm_ops + hw.ops;
     return .{
         .total_visual_rows = total_visual,
         .max_top_line = max_top.line,
         .max_top_piece = max_top.piece,
-        .ops = bg.ops + cw.ops + gw.ops + sw.ops + band_ops + sel_ops + find_ops + diag_ops + caret_ops + mm_ops + hw.ops,
+        .ops = paintSticky(props, layout, scratch, bg.ops, body_ops, visual_budget, cw.bytes + gw.bytes, cw.runs + gw.runs),
         .visual_rows = cw.visual_rows,
         .truncated = cw.truncated_rows > 0 or gw.dropped_rows > 0,
         .scrollbar = sw.geometry,
@@ -901,6 +919,114 @@ pub fn build(props: Props, scratch: Scratch) Written {
 /// `chrome_draw_lowering.appendBackgroundQuadsWithTerminalOpacity`). 밴드는 바탕이 아니라 바탕 위에
 /// 얹는 표시라 글자와 같은 취급이 맞다 — 투명한 창에서 바탕이 옅어질수록 밴드도 함께 옅어지면
 /// "어느 줄이 바뀌었나"가 창 설정에 따라 사라진다.
+/// **sticky scroll**(§4.1i) — 본문 위쪽 `n` 행을 덮는다. ① 배경(`keep_from` 앞) 뒤의 op 중 그 행 · gutter+본문 폭에 걸린 것을 걷는다
+/// (글자는 버리고, 사각은 영역 아래로 자르고, 세로 규칙선도 자른다) ② 머리줄을 본문과 같은 함수(`content`·`gutter`)로 그 자리에 그린다
+/// — 줄바꿈 없이, 가로 스크롤은 본문을 따른다 ③ 마지막 행 아래에 경계선. 막대·미니맵은 본문 폭 밖이라 그대로 남는다.
+/// 돌려주는 값은 **전체 op 수**다.
+fn paintSticky(props: Props, layout: geometry.Layout, scratch: Scratch, keep_from: usize, end: usize, visual_budget: usize, bytes_used: usize, runs_used: usize) usize {
+    const n: usize = @min(props.sticky.len, @min(visual_budget, sticky_max_rows));
+    if (n == 0) return end;
+    const ch: i32 = @intCast(props.cell_h_px);
+    const cw: i32 = @intCast(props.cell_w_px);
+    const y0 = props.rect.y;
+    const y1 = y0 + @as(i32, @intCast(n)) * ch;
+    const x1 = props.rect.x + (@as(i32, layout.content.start) + @as(i32, layout.content.width)) * cw;
+
+    // ① 걷기 — 순서를 지키며 앞으로 당긴다.
+    var w: usize = keep_from;
+    for (scratch.ops[keep_from..end]) |op| {
+        if (occludeTop(op, y0, y1, x1)) |kept| {
+            scratch.ops[w] = kept;
+            w += 1;
+        }
+    }
+
+    // ② 머리줄 — 본문과 같은 함수로.
+    var rows: [sticky_max_rows]content.Row = undefined;
+    for (props.sticky[0..n], 0..) |sl, i| rows[i] = .{ .bytes = sl.bytes, .colors = sl.colors };
+    var vis: [sticky_max_rows]visual_map.VisualRow = undefined;
+    if (bytes_used > scratch.text_bytes.len or runs_used > scratch.runs.len) return w;
+    const cwr = content.build(.{
+        .layout = layout,
+        .rows = rows[0..n],
+        .wrap = false, // 한 행으로 자른다 — 랩이어도 첫 조각만(§4.1i)
+        .first_col = props.first_col,
+        .first_piece = 0,
+        .tab_width = props.tab_width,
+        .cell_w_px = props.cell_w_px,
+        .cell_h_px = props.cell_h_px,
+        .origin_px = .{ .x = props.rect.x, .y = props.rect.y },
+        .font_px = props.font_px,
+    }, scratch.ops[w..], scratch.text_bytes[bytes_used..], scratch.runs[runs_used..], vis[0..n]);
+    w += cwr.ops;
+    var grows: [sticky_max_rows]gutter.Row = undefined;
+    const vn = @min(cwr.visual_rows, n);
+    for (0..vn) |i| grows[i] = .{ .number = props.sticky[vis[i].line].number, .visual_row = @intCast(i) };
+    const gw = gutter.build(.{
+        .layout = layout,
+        .rows = grows[0..vn],
+        .cell_w_px = props.cell_w_px,
+        .cell_h_px = props.cell_h_px,
+        .origin_px = .{ .x = props.rect.x, .y = props.rect.y },
+        .font_px = props.font_px,
+    }, scratch.ops[w..], scratch.text_bytes[bytes_used + cwr.bytes ..], scratch.runs[runs_used + cwr.runs ..]);
+    w += gw.ops;
+
+    // ③ 경계선 — 마지막 고정 행의 아래 가장자리.
+    if (w < scratch.ops.len) {
+        scratch.ops[w] = .{ .rule = .{ .from = .{ .x = props.rect.x, .y = y1 - 1 }, .to = .{ .x = x1, .y = y1 - 1 }, .role = .divider } };
+        w += 1;
+    }
+    return w;
+}
+
+/// 고정 영역(`[y0, y1)` · 왼쪽 끝부터 `x1` 까지)에 걸린 op 를 걷는다 — `null` 이면 버린다.
+fn occludeTop(op: draw.Op, y0: i32, y1: i32, x1: i32) ?draw.Op {
+    switch (op) {
+        .text => |t| {
+            if (t.origin.y >= y0 and t.origin.y < y1 and t.origin.x < x1) return null;
+            return op;
+        },
+        .quad => |q| {
+            var q2 = q;
+            q2.rect = clipBelow(q.rect, y0, y1, x1) orelse return null;
+            return .{ .quad = q2 };
+        },
+        .fill => |f| {
+            var f2 = f;
+            f2.rect = clipBelow(f.rect, y0, y1, x1) orelse return null;
+            return .{ .fill = f2 };
+        },
+        .border => |b| {
+            var b2 = b;
+            b2.rect = clipBelow(b.rect, y0, y1, x1) orelse return null;
+            return .{ .border = b2 };
+        },
+        .rule => |r| {
+            const lo_x = @min(r.from.x, r.to.x);
+            if (lo_x >= x1) return op;
+            const top = @min(r.from.y, r.to.y);
+            const bottom = @max(r.from.y, r.to.y);
+            if (bottom < y0 or top >= y1) return op;
+            if (top == bottom) return null; // 가로 규칙선이 영역 안에 있다
+            if (bottom < y1) return null;
+            var r2 = r;
+            if (r.from.y < r.to.y) r2.from.y = y1 else r2.to.y = y1;
+            return .{ .rule = r2 };
+        },
+        .swatch, .clip => return op,
+    }
+}
+
+/// 사각을 영역 **아래**로 자른다. 영역과 안 겹치면 그대로, 영역 안에 다 들면 `null`.
+fn clipBelow(r: draw.Rect, y0: i32, y1: i32, x1: i32) ?draw.Rect {
+    if (r.x >= x1) return r;
+    const bottom = r.y + @as(i32, @intCast(r.h));
+    if (bottom <= y0 or r.y >= y1) return r;
+    if (bottom <= y1) return null;
+    return .{ .x = r.x, .y = y1, .w = r.w, .h = @intCast(bottom - y1) };
+}
+
 fn paintBands(props: Props, layout: geometry.Layout, visual: []const visual_map.VisualRow, out: []draw.Op, scratch_cols: []u8) usize {
     const bands = props.row_bands orelse return 0;
     var n: usize = 0;
@@ -2310,6 +2436,117 @@ test "막대 길이는 뷰 사각이 아니라 보이는 행 수로 판정한다
     props.visible_rows = 11; // rect.h(320px / 16 = 20행)보다 작다
     const w = build(props, bufs.scratch());
     try testing.expect(w.scrollbar != null);
+}
+
+test "OCH5 같은 낱말 강조가 서도 막대가 안 잘린다 — 표식 하나가 op 를 정확히 하나 늘리고 마지막 op 는 막대다 (§5.1a)" {
+    // **합계에서 `occ_ops` 가 빠져 있었다**(2026-09-23 발견): 뒤 층의 자리(`find_base`)는 강조 몫을 세는데 반환하는 `ops` 는 안 세서,
+    // 강조가 N 개면 **맨 끝 op N 개**(막대·미니맵의 끝)가 잘렸다 — 강조가 선 동안 세로 막대가 사라진다. `OCH3` 는 강조 quad 만 셌다.
+    var bufs: TestBuffers = .{};
+    var many: [15][]const u8 = undefined;
+    for (&many) |*l| l.* = "alpha beta";
+    var props = testProps(&many, false);
+    props.visible_rows = 11; // 막대가 선다(`막대 길이는 …` 과 같은 조건)
+    const plain = build(props, bufs.scratch());
+    try testing.expect(plain.scrollbar != null);
+    const last_plain = bufs.ops[plain.ops - 1];
+
+    var bufs2: TestBuffers = .{};
+    const row0 = [_]Mark{.{ .start = 0, .len = 5 }};
+    var rows: [15][]const Mark = undefined;
+    for (&rows) |*r| r.* = &.{};
+    rows[0] = &row0;
+    props.occurrence_marks = &rows;
+    const marked = build(props, bufs2.scratch());
+    try testing.expectEqual(plain.ops + 1, marked.ops);
+    // 마지막 op 는 그대로 막대다(잘렸다면 강조 quad 나 그 앞 op 가 끝에 선다).
+    try testing.expect(std.meta.eql(last_plain, bufs2.ops[marked.ops - 1]));
+}
+
+/// 판정자용: 행 `row` 의 글자 op 들을 x 순서로 이어 붙인다(gutter 번호와 본문을 가르려고 `x_min`·`x_max` 로 거른다).
+fn rowText(ops: []const draw.Op, row: i32, cell_h: i32, x_min: i32, x_max: i32, buf: []u8) []const u8 {
+    var n: usize = 0;
+    var x_seen: i32 = std.math.minInt(i32);
+    while (true) {
+        // 다음으로 오른쪽에 있는 글자 op 하나를 고른다(op 순서가 x 순서라는 보장이 없어서).
+        var best: ?draw.Op.Text = null;
+        for (ops) |op| {
+            if (op != .text) continue;
+            const t = op.text;
+            if (t.origin.y != row * cell_h or t.origin.x < x_min or t.origin.x >= x_max or t.origin.x <= x_seen) continue;
+            if (best == null or t.origin.x < best.?.origin.x) best = t;
+        }
+        const b = best orelse break;
+        x_seen = b.origin.x;
+        for (b.runs) |r| {
+            const k = @min(r.text.len, buf.len - n);
+            @memcpy(buf[n..][0..k], r.text[0..k]);
+            n += k;
+        }
+    }
+    return buf[0..n];
+}
+
+test "STK6 프레임 — 고정 행은 본문 글자·번호·덧칠을 걷고 머리줄과 번호를 그 자리에 그리며, 그 아래 본문과 막대는 그대로다 (§4.1i)" {
+    var bufs: TestBuffers = .{};
+    var many: [30][]const u8 = undefined;
+    const names = [_][]const u8{ "l01", "l02", "l03", "l04", "l05", "l06", "l07", "l08", "l09", "l10", "l11", "l12", "l13", "l14", "l15", "l16", "l17", "l18", "l19", "l20", "l21", "l22", "l23", "l24", "l25", "l26", "l27", "l28", "l29", "l30" };
+    for (&many, names) |*l, nm| l.* = nm;
+    var props = testProps(&many, false);
+    props.first_line = 10; // 화면 맨 위가 11 번째 줄
+    props.visible_rows = 11; // 막대가 선다
+    props.line_numbers = null;
+    // 행 0 에 선택 한 줄(본문 덧칠) — 고정 행 아래로 잘려 사라져야 한다.
+    const sel_row = [_]Mark{.{ .start = 0, .len = 3 }};
+    var sel: [30][]const Mark = undefined;
+    for (&sel) |*r| r.* = &.{};
+    sel[10] = &sel_row;
+    props.selection_marks = &sel;
+    const sticky = [_]StickyLine{ .{ .number = 1, .bytes = "class A {" }, .{ .number = 3, .bytes = "  fn f() {" } };
+    props.sticky = &sticky;
+    const w = build(props, bufs.scratch());
+    const ops = bufs.ops[0..w.ops];
+    const ch: i32 = 16;
+    const layout = geometry.compute(props.total_cols, props.total_lines, .{});
+    const content_x: i32 = @as(i32, layout.content.start) * 8;
+    var b0: [128]u8 = undefined;
+    var b1: [128]u8 = undefined;
+    var b2: [128]u8 = undefined;
+    // 행 0·1 은 머리줄이다(본문 `l11`·`l12` 가 아니다).
+    try testing.expectEqualStrings("class A {", rowText(ops, 0, ch, content_x, 1 << 20, &b0));
+    try testing.expectEqualStrings("  fn f() {", rowText(ops, 1, ch, content_x, 1 << 20, &b1));
+    // 행 2 는 본문 그대로(`l13`).
+    try testing.expectEqualStrings("l13", rowText(ops, 2, ch, content_x, 1 << 20, &b2));
+    // gutter 번호도 머리줄의 것이다(1 · 3) — 본문 번호(11 · 12)는 걷혔다.
+    var g0: [32]u8 = undefined;
+    var g1: [32]u8 = undefined;
+    try testing.expect(std.mem.indexOf(u8, rowText(ops, 0, ch, 0, content_x, &g0), "1") != null);
+    try testing.expect(std.mem.indexOf(u8, rowText(ops, 0, ch, 0, content_x, &g0), "11") == null);
+    try testing.expect(std.mem.indexOf(u8, rowText(ops, 1, ch, 0, content_x, &g1), "3") != null);
+    // 선택 quad 는 고정 영역 안이라 사라졌다.
+    for (ops) |op| {
+        if (op == .quad and op.quad.fill_role == .selection) try testing.expect(op.quad.rect.y >= 2 * ch);
+    }
+    // 경계선이 마지막 고정 행 아래에 있다.
+    var rule = false;
+    for (ops) |op| {
+        if (op == .rule and op.rule.from.y == 2 * ch - 1 and op.rule.to.y == 2 * ch - 1) rule = true;
+    }
+    try testing.expect(rule);
+    // 막대는 남는다(본문 폭 밖).
+    try testing.expect(w.scrollbar != null);
+    const plain_props = blk: {
+        var p = props;
+        p.sticky = &.{};
+        break :blk p;
+    };
+    var bufs2: TestBuffers = .{};
+    const plain = build(plain_props, bufs2.scratch());
+    var bar_kept = false;
+    const bar = bufs2.ops[plain.ops - 1];
+    for (ops) |op| {
+        if (std.meta.eql(op, bar)) bar_kept = true;
+    }
+    try testing.expect(bar_kept);
 }
 
 test "문서가 화면에 다 들어가면 막대가 없다" {

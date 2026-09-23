@@ -3121,7 +3121,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
     }
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/session_host_b3_1_boundary.zig"),
+            .root_source_file = b.path("tests/session_host_rpc_authority_leaf_boundary.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -3134,7 +3134,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
     boundary_step.dependOn(&run_b3_1_boundary_tests.step);
     const b3_2_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/session_host_b3_2_boundary.zig"),
+            .root_source_file = b.path("tests/session_host_private_destination_admission_boundary.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -3147,7 +3147,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
     boundary_step.dependOn(&run_b3_2_boundary_tests.step);
     const b3_3_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/session_host_b3_3_boundary.zig"),
+            .root_source_file = b.path("tests/session_host_progress_execute_wrapper_boundary.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -3160,7 +3160,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
     boundary_step.dependOn(&run_b3_3_boundary_tests.step);
     const b3_4_5_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/session_host_b3_4_5_boundary.zig"),
+            .root_source_file = b.path("tests/session_host_transition_permit_boundary.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -5164,7 +5164,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const b3_6_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_b3_6_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_rpc_substrate_strict_path_boundary.zig"),
                 .target = target,
                 .optimize = b3_optimize,
             }),

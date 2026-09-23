@@ -31,6 +31,8 @@ pub const Row = struct {
     /// 진단 마커(§5.4) — 이 줄에서 **시작하는** 진단의 최고 severity. `null` 이면 `leading_margin` 칸이 빈다. 랩 이어짐 행에는
     /// 호출자가 `null` 을 준다(번호와 같은 규칙).
     marker: ?diagnostic.Level = null,
+    /// **primary caret 의 줄**(visual-mapping §5.1b ⑤) — 번호를 본문 글자색(`active_line_number_role`)으로 한 단계 밝힌다. 번호가 서는 행에만.
+    active: bool = false,
 };
 
 /// gutter 접힘 칸에 그릴 표식. **늘 그린다 — hover가 아니다.**
@@ -84,6 +86,9 @@ pub const Props = struct {
 /// 줄 번호 색. 본문보다 흐리게 둔다 — 주요 편집기가 줄 번호를 눈에 덜 띄게 만드는 방식이 **크기가
 /// 아니라 색**이고(§4.1), 셀 경로에서는 색이 셀마다 이미 있어 공짜다.
 pub const line_number_role: tokens.ColorRole = .muted_fg;
+/// primary caret 줄의 번호 색(§5.1b) — 본문 글자색. VS Code 가 `editorLineNumber.activeForeground`(다크 `#c6c6c6` 대 보통 `#858585`)로 그
+/// 줄 번호만 밝히는 것과 같은 자리다.
+pub const active_line_number_role: tokens.ColorRole = .surface_fg;
 
 /// 줄 번호를 담는 최대 자릿수. `usize`를 십진으로 찍을 때 필요한 상한이며, 이보다 긴 문서는 없다.
 pub const max_digits = 20; // 호출자가 gutter 몫을 떼어 둘 때 쓴다(lab.zig 참고)
@@ -224,7 +229,7 @@ pub fn build(props: Props, out: []draw.Op, text_scratch: []u8, runs: []draw.Run)
                 .y = props.origin_px.y + @as(i32, row.visual_row) * @as(i32, props.cell_h_px),
             },
             .runs = run_slice,
-            .role = line_number_role,
+            .role = if (row.active) active_line_number_role else line_number_role,
             .max_cols = field_cols,
             .font_px = props.font_px,
             .line_height_px = props.cell_h_px,

@@ -155,6 +155,12 @@ pub const ColorRole = enum {
     search_match_current,
     /// 같은 낱말 강조(§5.1a·§8.2p) — 배경 강조 넷 중 **가장 약하다**(선택·검색이 그 칸을 이긴다).
     occurrence,
+    /// 현재 줄 테두리(§5.1b) — 바탕에 아주 가까운 중립색(VS Code `editor.lineHighlightBorder` 와 같은 비율).
+    line_highlight,
+    /// 짝 괄호 상자의 테두리(§5.1b).
+    bracket_match_border,
+    /// 짝 괄호 상자의 채움(§5.1b) — 알파로 얹는다(VS Code `editorBracketMatch.background` = `#0064001a`).
+    bracket_match,
     selection,
     cursor,
     accent_bar, // U1(C4b 이후): maru accent — **테마-구동**(ThemeColors.accent). 프리셋별 시그니처 색(null이면 브랜드 앰버 폴백). 탭/포커스 언더바·사이드바 활성 좌측 막대·세팅 강조가 소비(U2).
@@ -401,6 +407,12 @@ pub const ThemeColors = struct {
     /// 같은 낱말 강조(§5.1a). 호출자가 `syntax_theme.occurrenceFromTheme(theme)` 를 넘긴다 — 진단·diff 와 같은 파생 계열이고,
     /// **기본값이 있는 이유**도 같다(테스트·smoke 의 `ThemeColors` 리터럴이 이 값을 몰라도 되게).
     occurrence: Rgb = .{ .r = 110, .g = 110, .b = 110 },
+    /// 현재 줄 테두리·짝 괄호 테두리(§5.1b). 호출자가 `syntax_theme.lineHighlightFromTheme`·`bracketMatchBorderFromTheme` 을 넘긴다 — 기본값이 있는
+    /// 이유는 `occurrence` 와 같다.
+    line_highlight: Rgb = .{ .r = 40, .g = 40, .b = 40 },
+    bracket_match_border: Rgb = .{ .r = 130, .g = 130, .b = 130 },
+    /// 짝 괄호 채움(§5.1b) — **테마와 무관한 상수**다. VS Code 도 다크·라이트·고대비 다크가 같은 `#006400`(알파 `1a`)이다.
+    bracket_match: Rgb = .{ .r = 0, .g = 100, .b = 0 },
 };
 
 /// 한 테마 = 토큰 묶음. `Tokens.base(theme)`가 resolved 테마 색에서 15개 ColorRole을 채운다(C0 구현).
@@ -461,6 +473,9 @@ pub const Tokens = struct {
         palette.set(.search_match, theme.search_match);
         palette.set(.search_match_current, theme.search_match_current);
         palette.set(.occurrence, theme.occurrence);
+        palette.set(.line_highlight, theme.line_highlight);
+        palette.set(.bracket_match_border, theme.bracket_match_border);
+        palette.set(.bracket_match, theme.bracket_match);
         palette.set(.selection, theme.selection);
         palette.set(.cursor, theme.cursor);
         palette.set(.accent_bar, theme.accent); // maru accent(테마-구동) — 프리셋별 시그니처 색. config.accent null이면 resolve가 브랜드 앰버(#dda15e)로 폴백. rich가 상속.

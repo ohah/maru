@@ -1083,6 +1083,14 @@ pub const SidebarConfig = struct {
 /// 정보보다 행 수가 중요한 사용자에게 되돌릴 길이 없으면 안 된다. 끄면 높이가 0이 되어 작업영역·도크·
 /// 사이드바 뷰포트가 그만큼 되돌아온다 — 게이트가 `statusBarHeightPx` 하나라 소비처가 자동으로 따라온다.
 /// 네이티브 파일 편집기(N1) 표시 옵션. loader가 `editor.*` 키로 파싱(스키마-주도).
+/// 현재 줄 강조(visual-mapping §5.1b) — VS Code `editor.renderLineHighlight` 와 같은 값. `line` 은 본문 상자(선택이 전부 비었을 때만),
+/// `gutter` 는 gutter 상자(선택과 무관), `all` 은 둘 다.
+pub const RenderLineHighlight = enum { none, gutter, line, all };
+
+/// 짝 괄호 강조(visual-mapping §5.1b) — VS Code `editor.matchBrackets` 와 같은 값. `near` 는 caret 에 닿은 괄호의 쌍만, `always` 는 닿은
+/// 괄호가 없으면 caret 을 품는 가장 안쪽 쌍까지.
+pub const MatchBrackets = enum { never, near, always };
+
 pub const EditorConfig = struct {
     /// 본문 폭을 넘는 줄을 다음 시각 행으로 접을지
     /// ([native-editor-visual-mapping.md](../../docs/native-editor-visual-mapping.md) §4 세로 축).
@@ -1192,6 +1200,10 @@ pub const EditorConfig = struct {
     sticky_scroll: bool = true,
     /// 고정할 줄의 상한 — 편집기 높이의 25% 도 넘지 않는다(§4.1i). VS Code `editor.stickyScroll.maxLineCount` 와 같은 기본 5.
     sticky_scroll_max_lines: u32 = 5,
+    /// **현재 줄 강조**(§5.1b). VS Code `editor.renderLineHighlight` 와 같은 기본(`line`) — 기본 테마의 모양(2px 테두리)이다.
+    render_line_highlight: RenderLineHighlight = .line,
+    /// **짝 괄호 강조**(§5.1b). VS Code `editor.matchBrackets` 와 같은 기본(`always`).
+    match_brackets: MatchBrackets = .always,
     /// **진단 표시**(visual-mapping §5.4) — 물결 밑줄·gutter 글리프·막대/미니맵 마커·F8 이동을 한꺼번에 켜고 끈다. 지금의
     /// 출처는 구문 오류(tree-sitter)라 타이핑 중에도 밑줄이 뜬다 — 거슬리면 끈다.
     diagnostics: bool = true,
@@ -1207,7 +1219,7 @@ pub const EditorConfig = struct {
     /// 명령만 남는다(VS Code `editor.quickSuggestions` 와 같은 관계).
     quick_suggestions: bool = true,
 
-    pub const schema = .{ // 키: editor.wrap · editor.tab-width · editor.cursor-shape · editor.scroll-beyond-last-column · editor.cursor-surrounding-lines · editor.cursor-surrounding-columns · editor.minimap · editor.minimap-width · editor.sticky-scroll · editor.sticky-scroll-max-lines · editor.diagnostics · editor.hover · editor.hover-delay · editor.parameter-hints · editor.quick-suggestions
+    pub const schema = .{ // 키: editor.wrap · editor.tab-width · editor.cursor-shape · editor.scroll-beyond-last-column · editor.cursor-surrounding-lines · editor.cursor-surrounding-columns · editor.minimap · editor.minimap-width · editor.sticky-scroll · editor.sticky-scroll-max-lines · editor.render-line-highlight · editor.match-brackets · editor.diagnostics · editor.hover · editor.hover-delay · editor.parameter-hints · editor.quick-suggestions
         // **둘 다 설정 GUI에 뜬다.** `wrap`은 한때 `hidden`이었는데(*"편집기가 제품 화면에 배선되기
         // 전이라 토글해도 아무 일이 없어 버그로 보인다"*) 값이 렌더에 닿으면서 벗겼다 —
         // `schema.zig`의 "editor.wrap은 설정 UI에 뜬다"가 그 사실을 잰다. 탭 폭도 같은 조건을
@@ -1239,6 +1251,9 @@ pub const EditorConfig = struct {
         // sticky scroll 둘(§4.1i). 상한 10 — 그 위는 25% 규칙이 어차피 자른다(40 행 화면에서 10).
         .sticky_scroll = Meta{ .key_seg = "sticky-scroll", .doc = .cfg_editor_sticky_scroll, .widget = .toggle, .section = .editor },
         .sticky_scroll_max_lines = Meta{ .key_seg = "sticky-scroll-max-lines", .doc = .cfg_editor_sticky_scroll_max_lines, .range = .{ 1, 10 }, .widget = .number, .section = .editor },
+        // 현재 줄·짝 괄호(§5.1b) — VS Code 와 같은 값 이름이라 설정 파일을 옮겨 적을 수 있다.
+        .render_line_highlight = Meta{ .key_seg = "render-line-highlight", .doc = .cfg_editor_render_line_highlight, .widget = .dropdown, .section = .editor },
+        .match_brackets = Meta{ .key_seg = "match-brackets", .doc = .cfg_editor_match_brackets, .widget = .dropdown, .section = .editor },
         .diagnostics = Meta{ .doc = .cfg_editor_diagnostics, .widget = .toggle, .section = .editor },
         .hover = Meta{ .doc = .cfg_editor_hover, .widget = .toggle, .section = .editor },
         // 상한 5000 — 그 위는 「안 뜬다」와 구별이 안 된다. 0 은 「바로」다.

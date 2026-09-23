@@ -186,6 +186,14 @@ pub const Props = struct {
     /// **sticky scroll**(§4.1i) — 본문 위쪽 행을 **덮을** 머리줄들(바깥부터). 본문은 그대로 그리고 그 행에 걸린 op 만 걷어 낸다 — 스크롤
     /// 계산·막대·히트는 안 바뀐다. 비면 없다.
     sticky: []const StickyLine = &.{},
+    /// **현재 줄 강조**(visual-mapping §5.1b) — caret 이 선 시각 행을 2px 테두리 상자로 두른다(`carets` 가 자리를 준다). `none` 이면 없다.
+    line_highlight: LineHighlight = .none,
+    /// 모든 커서의 선택이 비었는가 — 본문 상자는 그때만 선다(gutter 상자는 무관, VS Code `_selectionIsEmpty`).
+    selection_empty: bool = true,
+    /// primary caret 의 줄(`carets`·`lines` 와 같은 축의 첨자) — 그 줄 번호를 밝힌다(§5.1b ⑤). `null` 이면 없다.
+    active_line: ?usize = null,
+    /// **짝 괄호 상자**(§5.1b) — 줄마다 괄호 글자 마크(`search_marks` 와 같은 축·같은 byte 규칙, 줄 안 오름차순·중복 없음).
+    bracket_marks: ?[]const []const Mark = null,
     /// **진단**(§5.4) — 줄마다의 밑줄 조각(`search_marks` 와 같은 축·같은 byte 규칙). 물결(지그재그)로 그린다.
     diag_marks: ?[]const []const diagnostic.Mark = null,
     /// 줄마다 gutter 마커의 severity(그 줄에서 **시작하는** 진단의 최고). `null` 항목은 마커 없음.
@@ -619,6 +627,13 @@ pub fn build(props: Props, scratch: Scratch) Written {
             if (idx < markers.len) g.marker = markers[idx];
         }
     }
+    // primary caret 의 줄 번호(§5.1b ⑤) — 번호가 서는 행(그 줄의 첫 조각)만.
+    if (props.active_line) |al| {
+        for (grows) |*g| {
+            if (g.number == null) continue;
+            if (scratch.visual_rows[g.visual_row].docIndex(props.first_line) == al) g.active = true;
+        }
+    }
     const gw = gutter.build(.{
         .layout = layout,
         .rows = grows,
@@ -762,8 +777,10 @@ pub fn build(props: Props, scratch: Scratch) Written {
     // 어느 것인지 흐려진다. 글자보다도 뒤라 알파로 얹어도 내용이 읽힌다.
     // **같은 낱말 강조가 먼저다**(§5.1a 우선순위 — 가장 약하다). 선택·검색이 그 위에 얹힌다. (선택과의 순서는 오늘 관측되지 않는다 —
     // 선택이 있으면 강조를 안 그려 둘이 공존하지 않는다: 적대적 C7 등가. 검색은 어느 쪽이든 그 뒤다. 순서는 뜻으로 둔다.)
-    const occ_ops = paintOccurrences(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[bg.ops + cw.ops + gw.ops + band_ops ..], scratch.count_scratch);
-    const sel_ops = paintSelection(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[bg.ops + cw.ops + gw.ops + band_ops + occ_ops ..], scratch.count_scratch);
+    // **현재 줄 상자는 밴드 뒤·다른 강조 앞이다**(§5.1b) — 테두리뿐이라 무엇도 가리지 않고, 강조들이 그 안에 얹힌다.
+    const lh_ops = paintLineHighlight(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[bg.ops + cw.ops + gw.ops + band_ops ..]);
+    const occ_ops = paintOccurrences(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[bg.ops + cw.ops + gw.ops + band_ops + lh_ops ..], scratch.count_scratch);
+    const sel_ops = paintSelection(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[bg.ops + cw.ops + gw.ops + band_ops + lh_ops + occ_ops ..], scratch.count_scratch);
     // **검색 결과는 선택 위에 얹는다.** 선택 안에서 검색하는 경우가 있고(§5.1의 "선택 영역 내에서만"이
     // 그 자리다), 그때 매치가 선택에 묻히면 검색이 아무 일도 안 한 것처럼 보인다.
     // **막대 몫을 남겨 둔다.** 검색 강조는 **줄당 개수에 상한이 없는 유일한 층**이고(선택은
@@ -792,14 +809,19 @@ pub fn build(props: Props, scratch: Scratch) Written {
     // **이 예약은 검색 층에만 걸린다.** 앞의 배경·본문·gutter·밴드·선택은 여전히 무예약이라,
     // 그쪽이 먼저 다 먹으면 막대는 그대로 굶는다(기존 상태이고 이 슬라이스가 만든 것이 아니다).
     // 검색만 예약하는 이유는 **줄당 개수에 상한이 없는 층이 그것뿐**이어서다.
-    const find_base = bg.ops + cw.ops + gw.ops + band_ops + occ_ops + sel_ops;
+    const find_base = bg.ops + cw.ops + gw.ops + band_ops + lh_ops + occ_ops + sel_ops;
     const find_room = (scratch.ops.len -| find_base) -| scrollbar_reserve_ops;
     const find_ops = paintSearch(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[find_base..][0..find_room], scratch.count_scratch);
 
     // **커서는 검색 위, 막대 앞이다.** 위 예약과 같은 이유로 막대 몫을 남기고, 커서도 줄당 개수에
     // 상한이 없으므로(만 개까지) 남은 자리 안에서만 그린다 — `paintCarets`가 넘으면 자른다.
     // **진단 밑줄은 검색 위·커서 아래**(§5.4) — 검색 강조가 배경이고 밑줄은 그 위에 선다. 같은 예약 규칙.
-    const diag_base = find_base + find_ops;
+    // **짝 괄호 상자는 검색 위·진단 아래**(§5.1b) — caret 이 선 자리의 상태라 검색 강조에 묻히면 안 된다. 같은 예약 규칙(막대 몫을 남긴다).
+    const brk_base = find_base + find_ops;
+    const brk_room = (scratch.ops.len -| brk_base) -| scrollbar_reserve_ops;
+    const brk_ops = paintBrackets(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[brk_base..][0..brk_room], scratch.count_scratch);
+
+    const diag_base = brk_base + brk_ops;
     const diag_room = (scratch.ops.len -| diag_base) -| scrollbar_reserve_ops;
     const diag_ops = paintDiagnostics(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[diag_base..][0..diag_room], scratch.count_scratch);
 
@@ -901,7 +923,8 @@ pub fn build(props: Props, scratch: Scratch) Written {
 
     // **`occ_ops` 를 빼면 안 된다**(§5.1a — `OCH5`): 뒤 층의 자리(`find_base`)가 이미 그 몫을 세므로, 여기서 빠지면 강조 수만큼
     // 끝 op(막대·미니맵)가 잘린다 — 강조가 선 동안 막대가 사라졌다(2026-09-23 발견).
-    const body_ops = bg.ops + cw.ops + gw.ops + sw.ops + band_ops + occ_ops + sel_ops + find_ops + diag_ops + caret_ops + mm_ops + hw.ops;
+    // 현재 줄(`lh_ops`)·짝 괄호(`brk_ops`)도 같은 이유로 빠지면 안 된다(`LHL5`).
+    const body_ops = bg.ops + cw.ops + gw.ops + sw.ops + band_ops + lh_ops + occ_ops + sel_ops + find_ops + brk_ops + diag_ops + caret_ops + mm_ops + hw.ops;
     return .{
         .total_visual_rows = total_visual,
         .max_top_line = max_top.line,
@@ -1104,6 +1127,8 @@ const RowMarkPaint = struct {
     alpha: u8,
     /// `fill` 은 셀 전체를 칠하고(선택·검색), `zigzag` 는 셀 아래에 물결 밑줄을 낸다(진단 §5.4).
     shape: enum { fill, zigzag } = .fill,
+    /// `fill` 에 테두리를 두른다(짝 괄호 상자 §5.1b) — 불투명 1px. `null` 이면 채움만.
+    border_role: ?tokens.ColorRole = null,
 };
 
 /// 지그재그 밑줄 한 셀의 조각 수 — 반 셀 폭 조각 둘이 위·아래로 번갈아 선다(§5.4).
@@ -1144,6 +1169,9 @@ fn paintRowMarks(props: Props, layout: geometry.Layout, p: RowMarkPaint, out: []
                     .rect = .{ .x = x, .y = p.y, .w = (to - from) * props.cell_w_px, .h = props.cell_h_px },
                     .fill_role = p.role,
                     .alpha = p.alpha,
+                    .border_role = p.border_role,
+                    .border_alpha = if (p.border_role != null) 0xFF else null,
+                    .border_widths = if (p.border_role != null) .{ bracket_match_border_px, bracket_match_border_px, bracket_match_border_px, bracket_match_border_px } else .{ 0, 0, 0, 0 },
                 } };
                 n += 1;
             },
@@ -1274,10 +1302,9 @@ fn paintCarets(props: Props, layout: geometry.Layout, visual: []const visual_map
         const y = props.rect.y + @as(i32, @intCast(i)) * @as(i32, props.cell_h_px);
         for (offsets) |off| {
             if (n >= out.len) return n; // 예산 끝 — 막대 몫을 지킨다
-            const col = columnOfOffset(line, props.tab_width, off, row.start_col + layout.content.width, props.line_inlays.at(idx));
-            if (col < row.start_col) continue; // 이 행보다 앞이다(랩)
-            const on_screen = col - row.start_col;
-            if (on_screen >= layout.content.width) continue; // 이 행보다 뒤다
+            const at = caretOnRow(props, layout, row, idx, line, off) orelse continue;
+            const col = at.col;
+            const on_screen = at.on_screen;
             const x = props.rect.x +
                 @as(i32, @intCast((@as(u32, layout.contentLeft()) + on_screen) * props.cell_w_px));
             // **`block`·`underline`은 글자 폭을 덮는다** — 한글·이모지는 두 칸이라 한 칸만 칠하면
@@ -1314,6 +1341,98 @@ fn paintCarets(props: Props, layout: geometry.Layout, visual: []const visual_map
     return n;
 }
 
+/// caret 하나가 **이 시각 행에** 서는가 — 서면 그 열(`col`, 줄 기준)과 화면 열(`on_screen`, 본문 기준). 랩이면 조각마다, 아니면 가로로 보이는
+/// 폭 안일 때만 선다. **caret 그리기와 현재 줄 강조(§5.1b)가 같이 쓴다** — 랩 경계에서 둘이 다른 행을 고르면 상자와 caret 이 갈린다.
+fn caretOnRow(props: Props, layout: geometry.Layout, row: visual_map.VisualRow, idx: usize, line: []const u8, off: u32) ?struct { col: u32, on_screen: u32 } {
+    const col = columnOfOffset(line, props.tab_width, off, row.start_col + layout.content.width, props.line_inlays.at(idx));
+    if (col < row.start_col) return null; // 이 행보다 앞이다(랩)
+    const on_screen = col - row.start_col;
+    if (on_screen >= layout.content.width) return null; // 이 행보다 뒤다
+    return .{ .col = col, .on_screen = on_screen };
+}
+
+/// **현재 줄 강조**(visual-mapping §5.1b) — caret 이 선 시각 행마다 2px 테두리 상자(채움 없음). `line`·`all` 의 본문 상자는 선택이 전부 비었을
+/// 때만, `gutter`·`all` 의 gutter 상자는 늘. `all` 이면 gutter 상자의 오른쪽 변이 없어 두 상자가 이어 보인다(VS Code `current-line-margin-both`).
+///
+/// **어느 행인가**: 랩이면 caret 을 그리는 그 조각(`caretOnRow` — 같은 함수), 랩이 아니면 그 줄의 행 — 가로로 굴려 caret 이 화면 밖이어도
+/// 줄은 강조된다(VS Code 는 가로 위치와 무관하게 커서의 줄을 칠한다). **본문 상자의 좌·우 변**: 가로로 굴렸으면 왼쪽 변은 화면 밖이고, 가장 긴
+/// 줄이 화면을 넘는데 끝까지 안 굴렸으면 오른쪽 변도 밖이다(VS Code 상자 폭 `max(scrollWidth, contentWidth)`).
+fn paintLineHighlight(props: Props, layout: geometry.Layout, visual: []const visual_map.VisualRow, out: []draw.Op) usize {
+    const content_box = (props.line_highlight == .line or props.line_highlight == .all) and props.selection_empty;
+    const gutter_box = props.line_highlight == .gutter or props.line_highlight == .all;
+    if (!content_box and !gutter_box) return 0;
+    const rows = props.carets orelse return 0;
+    const b = line_highlight_border_px;
+    const left: u16 = if (props.wrap or props.first_col == 0) b else 0;
+    const scrollable = showsHorizontalBar(props.wrap, props.content_max_cols, layout.content.width);
+    const right: u16 = if (scrollable and props.first_col + layout.content.width < props.content_max_cols.?) 0 else b;
+    const cw: u32 = props.cell_w_px;
+    var n: usize = 0;
+    for (visual, 0..) |row, i| {
+        if (n + 2 > out.len) break; // 상자 둘(gutter·본문)이 한 행의 최대다
+        if (row.kind != .text) continue; // 위젯 행 — 문서 줄이 아니다(S1.5)
+        const idx = row.docIndex(props.first_line);
+        if (idx >= rows.len or idx >= props.lines.len) continue;
+        const offsets = rows[idx];
+        if (offsets.len == 0) continue;
+        const here = if (!props.wrap) true else blk: {
+            for (offsets) |off| {
+                if (caretOnRow(props, layout, row, idx, props.lines[idx], off) != null) break :blk true;
+            }
+            break :blk false;
+        };
+        if (!here) continue;
+        const y = props.rect.y + @as(i32, @intCast(i)) * @as(i32, props.cell_h_px);
+        if (gutter_box) {
+            out[n] = .{ .quad = .{
+                .rect = .{ .x = props.rect.x, .y = y, .w = @as(u32, layout.gutterWidth()) * cw, .h = props.cell_h_px },
+                .fill_role = .line_highlight,
+                .alpha = 0,
+                .border_role = .line_highlight,
+                .border_alpha = 0xFF,
+                .border_widths = .{ b, if (content_box) 0 else b, b, b },
+            } };
+            n += 1;
+        }
+        if (content_box) {
+            out[n] = .{ .quad = .{
+                .rect = .{ .x = props.rect.x + @as(i32, layout.contentLeft()) * @as(i32, @intCast(cw)), .y = y, .w = @as(u32, layout.content.width) * cw, .h = props.cell_h_px },
+                .fill_role = .line_highlight,
+                .alpha = 0,
+                .border_role = .line_highlight,
+                .border_alpha = 0xFF,
+                .border_widths = .{ b, right, b, left },
+            } };
+            n += 1;
+        }
+    }
+    return n;
+}
+
+/// **짝 괄호 상자**(§5.1b) — 괄호 글자 칸마다 10% 채움 + 1px 테두리. 열 계산은 선택·검색과 같은 `paintRowMarks` 한 곳이다(§4.1c).
+fn paintBrackets(props: Props, layout: geometry.Layout, visual: []const visual_map.VisualRow, out: []draw.Op, scratch_cols: []u8) usize {
+    const rows = props.bracket_marks orelse return 0;
+    var n: usize = 0;
+    for (visual, 0..) |v, i| {
+        if (n >= out.len) break;
+        if (v.kind != .text) continue;
+        const idx = v.docIndex(props.first_line);
+        if (idx >= rows.len or idx >= props.lines.len) continue;
+        if (rows[idx].len == 0) continue;
+        n += paintRowMarks(props, layout, .{
+            .line = props.lines[idx],
+            .inlays = props.line_inlays.at(idx),
+            .row_start_col = v.start_col,
+            .y = props.rect.y + @as(i32, @intCast(i)) * @as(i32, props.cell_h_px),
+            .marks = rows[idx],
+            .role = .bracket_match,
+            .alpha = bracket_match_alpha,
+            .border_role = .bracket_match_border,
+        }, out[n..], scratch_cols);
+    }
+    return n;
+}
+
 /// 커서 막대 폭(px). **셀 폭과 무관한 상수다** — 폰트를 키워도 커서가 뚱뚱해지지 않는다.
 /// `underline`의 두께도 같은 값을 쓴다 — 둘 다 "선 하나"이고 두께가 갈릴 이유가 없다.
 pub const caret_width_px: u32 = 2;
@@ -1321,6 +1440,17 @@ pub const caret_width_px: u32 = 2;
 /// caret 모양. 값 이름은 터미널 `cursor.shape`(`config.theme.CursorShape`)와 **같다** — 이 컴포넌트는
 /// config를 안 들여오므로(chrome은 L3) 이름만 맞추고 제품이 옮겨 담는다.
 pub const CaretShape = enum { bar, block, underline };
+
+/// 현재 줄 강조의 자리(§5.1b) — 값 이름은 `editor.render-line-highlight`(VS Code `renderLineHighlight`)와 같다. chrome 은 config 를 안
+/// 들여오므로 제품이 옮겨 담는다(`CaretShape` 와 같은 규율).
+pub const LineHighlight = enum { none, gutter, line, all };
+
+/// 현재 줄 테두리 두께(px) — VS Code `current-line-exact { border: 2px }`. 1px 은 quad 셰이더의 가장자리 AA 가 지운다(§4.1i 되먹임 ①).
+pub const line_highlight_border_px: u16 = 2;
+/// 짝 괄호 상자의 테두리 두께(px) — VS Code `.bracket-match { border: 1px }`.
+pub const bracket_match_border_px: u16 = 1;
+/// 짝 괄호 상자의 채움 알파 — VS Code `#0064001a` 의 `1a`.
+pub const bracket_match_alpha: u8 = 0x1a;
 
 /// 한 줄의 **블록 caret 열들**을 저장소에 담아 그 조각을 돌려준다. `block`이 아니거나 커서가
 /// 안 보이는 순간이면 빈 조각이다 — 그때는 본문이 반전할 것이 없다.
@@ -4395,4 +4525,236 @@ test "CRT8 랩과 스크롤이 함께 걸려도 caret 은 한 번만, 제 조각
     try std.testing.expectEqual(@as(usize, 1), n);
     // 그리고 **둘째 조각**(화면 둘째 행)에 선다 — 첫 조각에 서면 10 칸 앞이다.
     try std.testing.expectEqual(@as(i32, 16), y);
+}
+
+// ── 현재 줄 강조·짝 괄호 상자(visual-mapping §5.1b) ─────────────────────────────────────────
+
+/// 판정자용: `line_highlight` 역할의 상자들(op 순서대로).
+fn lineBoxes(ops: []const draw.Op, out: []draw.Op.Quad) []draw.Op.Quad {
+    var n: usize = 0;
+    for (ops) |op| {
+        if (op != .quad or op.quad.border_role != .line_highlight) continue;
+        if (n == out.len) break;
+        out[n] = op.quad;
+        n += 1;
+    }
+    return out[0..n];
+}
+
+test "LHL1 line — caret 줄의 본문 폭 상자 하나, 2px 테두리·채움 없음; 선택이 있으면 없고 none 이면 없다 (§5.1b)" {
+    const lines = [_][]const u8{ "alpha", "beta", "gamma" };
+    // **첫 줄이 아닌 줄**에 caret — 행 0 이면 「caret 줄」과 「첫 행」이 겹쳐 y 를 안 더한 변이가 산다.
+    const caret_rows = [_][]const u32{ &.{}, &.{2}, &.{} };
+    var props = testProps(&lines, false);
+    props.carets = &caret_rows;
+    props.line_highlight = .line;
+    var bufs: TestBuffers = .{};
+    const w = build(props, bufs.scratch());
+    var got: [8]draw.Op.Quad = undefined;
+    const boxes = lineBoxes(bufs.ops[0..w.ops], &got);
+    try testing.expectEqual(@as(usize, 1), boxes.len);
+    const layout = geometry.compute(props.total_cols, props.total_lines, .{});
+    try testing.expectEqual(@as(i32, 16), boxes[0].rect.y);
+    try testing.expectEqual(@as(i32, layout.content.start) * 8, boxes[0].rect.x);
+    try testing.expectEqual(@as(u32, layout.content.width) * 8, boxes[0].rect.w);
+    try testing.expectEqual(@as(u32, 16), boxes[0].rect.h);
+    try testing.expectEqual([4]u16{ 2, 2, 2, 2 }, boxes[0].border_widths);
+    try testing.expectEqual(@as(u8, 0), boxes[0].alpha); // 채움 없음 — 기본 테마의 모양
+    try testing.expectEqual(@as(?u8, 0xFF), boxes[0].border_alpha);
+
+    props.selection_empty = false; // 선택이 하나라도 있으면 본문 상자는 없다
+    var b2: TestBuffers = .{};
+    const w2 = build(props, b2.scratch());
+    try testing.expectEqual(@as(usize, 0), lineBoxes(b2.ops[0..w2.ops], &got).len);
+
+    props.selection_empty = true;
+    props.line_highlight = .none;
+    var b3: TestBuffers = .{};
+    const w3 = build(props, b3.scratch());
+    try testing.expectEqual(@as(usize, 0), lineBoxes(b3.ops[0..w3.ops], &got).len);
+}
+
+test "LHL2 gutter·all — gutter 상자는 선택과 무관하고, all 이면 gutter 상자의 오른쪽 변이 없다 (§5.1b)" {
+    const lines = [_][]const u8{ "alpha", "beta", "gamma" };
+    const caret_rows = [_][]const u32{ &.{}, &.{0}, &.{} };
+    var props = testProps(&lines, false);
+    props.carets = &caret_rows;
+    const layout = geometry.compute(props.total_cols, props.total_lines, .{});
+    var got: [8]draw.Op.Quad = undefined;
+
+    props.line_highlight = .gutter;
+    props.selection_empty = false; // gutter 상자는 선택이 있어도 선다
+    var b1: TestBuffers = .{};
+    const w1 = build(props, b1.scratch());
+    const g = lineBoxes(b1.ops[0..w1.ops], &got);
+    try testing.expectEqual(@as(usize, 1), g.len);
+    try testing.expectEqual(@as(i32, 0), g[0].rect.x);
+    try testing.expectEqual(@as(u32, layout.gutterWidth()) * 8, g[0].rect.w);
+    try testing.expectEqual([4]u16{ 2, 2, 2, 2 }, g[0].border_widths); // 본문 상자가 없으니 오른쪽 변이 있다
+
+    props.line_highlight = .all;
+    props.selection_empty = true;
+    var b2: TestBuffers = .{};
+    const w2 = build(props, b2.scratch());
+    const both = lineBoxes(b2.ops[0..w2.ops], &got);
+    try testing.expectEqual(@as(usize, 2), both.len);
+    try testing.expectEqual([4]u16{ 2, 0, 2, 2 }, both[0].border_widths); // 이어 보인다
+    try testing.expectEqual(@as(i32, layout.content.start) * 8, both[1].rect.x);
+
+    props.selection_empty = false; // all + 선택 → gutter 만, 그리고 오른쪽 변이 돌아온다
+    var b3: TestBuffers = .{};
+    const w3 = build(props, b3.scratch());
+    const only = lineBoxes(b3.ops[0..w3.ops], &got);
+    try testing.expectEqual(@as(usize, 1), only.len);
+    try testing.expectEqual([4]u16{ 2, 2, 2, 2 }, only[0].border_widths);
+}
+
+test "LHL3 커서가 여럿이면 줄마다, 랩이면 caret 이 선 그 조각만 — caret 과 같은 행 (§5.1b)" {
+    // 랩: 본문 폭을 넘는 줄 하나 — caret 을 **가운데 조각**에 둔다(첫·끝 조각이면 「첫 행」·「마지막 행」 규칙과 겹친다).
+    const long = "a" ** 120;
+    const lines = [_][]const u8{ "top", long, "end" };
+    var props = testProps(&lines, true);
+    const layout = geometry.compute(props.total_cols, props.total_lines, .{});
+    const mid: u32 = layout.content.width + 3; // 둘째 조각 안
+    const caret_rows = [_][]const u32{ &.{0}, &.{mid}, &.{} };
+    props.carets = &caret_rows;
+    props.line_highlight = .line;
+    var bufs: TestBuffers = .{};
+    const w = build(props, bufs.scratch());
+    var got: [8]draw.Op.Quad = undefined;
+    const boxes = lineBoxes(bufs.ops[0..w.ops], &got);
+    try testing.expectEqual(@as(usize, 2), boxes.len); // 0 줄 · 1 줄의 둘째 조각
+    try testing.expectEqual(@as(i32, 0), boxes[0].rect.y);
+    try testing.expectEqual(@as(i32, 2 * 16), boxes[1].rect.y); // 행 1 = 1 줄 첫 조각, 행 2 = 둘째 조각
+    // caret 막대가 선 행과 같다
+    var caret_y: ?i32 = null;
+    for (bufs.ops[0..w.ops]) |op| {
+        if (op == .quad and op.quad.fill_role == .cursor and op.quad.rect.y != 0) caret_y = op.quad.rect.y;
+    }
+    try testing.expectEqual(@as(?i32, boxes[1].rect.y), caret_y);
+
+    // 조각 경계 — caret 열이 정확히 폭이면 다음 조각 머리에 선다(caret 과 같은 규칙)
+    const edge = [_][]const u32{ &.{}, &.{layout.content.width}, &.{} };
+    props.carets = &edge;
+    var b2: TestBuffers = .{};
+    const w2 = build(props, b2.scratch());
+    const e = lineBoxes(b2.ops[0..w2.ops], &got);
+    try testing.expectEqual(@as(usize, 1), e.len);
+    try testing.expectEqual(@as(i32, 2 * 16), e[0].rect.y);
+}
+
+test "LHL4 가로 스크롤 — 굴렸으면 왼쪽 변 없음, 긴 줄 끝까지 안 굴렸으면 오른쪽 변 없음; caret 이 가로로 밖이어도 줄은 강조 (§5.1b ③)" {
+    const long = "b" ** 200;
+    const lines = [_][]const u8{ "x", long };
+    const caret_rows = [_][]const u32{ &.{}, &.{0} }; // 줄 머리 — 굴리면 화면 밖
+    var props = testProps(&lines, false);
+    props.carets = &caret_rows;
+    props.line_highlight = .line;
+    props.content_max_cols = 200;
+    const layout = geometry.compute(props.total_cols, props.total_lines, .{});
+    var got: [8]draw.Op.Quad = undefined;
+
+    // 굴리지 않음: 왼쪽 있음, 오른쪽 없음(긴 줄이 화면 밖으로 이어진다)
+    var b1: TestBuffers = .{};
+    const w1 = build(props, b1.scratch());
+    const a = lineBoxes(b1.ops[0..w1.ops], &got);
+    try testing.expectEqual(@as(usize, 1), a.len);
+    try testing.expectEqual([4]u16{ 2, 0, 2, 2 }, a[0].border_widths);
+
+    // 가운데: 둘 다 없음 — caret(0 열)은 화면 밖인데 상자는 선다
+    props.first_col = 30;
+    var b2: TestBuffers = .{};
+    const w2 = build(props, b2.scratch());
+    const m = lineBoxes(b2.ops[0..w2.ops], &got);
+    try testing.expectEqual(@as(usize, 1), m.len);
+    try testing.expectEqual([4]u16{ 2, 0, 2, 0 }, m[0].border_widths);
+
+    // 끝까지: 오른쪽이 돌아온다
+    props.first_col = 200 - layout.content.width;
+    var b3: TestBuffers = .{};
+    const w3 = build(props, b3.scratch());
+    const z = lineBoxes(b3.ops[0..w3.ops], &got);
+    try testing.expectEqual([4]u16{ 2, 2, 2, 0 }, z[0].border_widths);
+
+    // 랩이면 가로 축이 없다 — 늘 네 변
+    props.first_col = 0;
+    props.wrap = true;
+    var b4: TestBuffers = .{};
+    const w4 = build(props, b4.scratch());
+    try testing.expectEqual([4]u16{ 2, 2, 2, 2 }, lineBoxes(b4.ops[0..w4.ops], &got)[0].border_widths);
+}
+
+test "LHL5 상자·괄호가 서도 막대가 안 잘린다 — op 합계에 두 층이 다 든다 (§5.1b · OCH5 와 같은 자리)" {
+    var many: [15][]const u8 = undefined;
+    for (&many) |*l| l.* = "f(alpha)";
+    var props = testProps(&many, false);
+    props.visible_rows = 11; // 막대가 선다
+    var b0: TestBuffers = .{};
+    const p0 = build(props, b0.scratch());
+    try testing.expect(p0.scrollbar != null);
+    const last_plain = b0.ops[p0.ops - 1];
+
+    var caret_rows: [15][]const u32 = undefined;
+    for (&caret_rows) |*r| r.* = &.{};
+    caret_rows[2] = &.{2};
+    const marks = [_]Mark{ .{ .start = 1, .len = 1 }, .{ .start = 7, .len = 1 } };
+    var brk: [15][]const Mark = undefined;
+    for (&brk) |*r| r.* = &.{};
+    brk[2] = &marks;
+    props.carets = &caret_rows;
+    props.line_highlight = .all;
+    props.bracket_marks = &brk;
+    var b1: TestBuffers = .{};
+    const p1 = build(props, b1.scratch());
+    // 상자 둘(gutter·본문) + 괄호 둘 + caret 하나 = 다섯이 정확히 늘고, 마지막 op 는 그대로 막대다
+    try testing.expectEqual(p0.ops + 5, p1.ops);
+    try testing.expect(std.meta.eql(last_plain, b1.ops[p1.ops - 1]));
+}
+
+test "LHL6 primary caret 줄의 번호만 본문 글자색 — 다른 번호는 muted, 랩 이어짐 행엔 번호가 없다 (§5.1b ⑤)" {
+    const lines = [_][]const u8{ "one", "two", "three", "four" };
+    var props = testProps(&lines, false);
+    props.active_line = 2; // 첫 줄이 아니다
+    var bufs: TestBuffers = .{};
+    const w = build(props, bufs.scratch());
+    const layout = geometry.compute(props.total_cols, props.total_lines, .{});
+    const content_x = @as(i32, layout.content.start) * 8;
+    var active: usize = 0;
+    var muted: usize = 0;
+    for (bufs.ops[0..w.ops]) |op| {
+        if (op != .text or op.text.origin.x >= content_x) continue; // gutter 글자만
+        if (op.text.role == gutter.active_line_number_role) {
+            active += 1;
+            try testing.expectEqual(@as(i32, 2 * 16), op.text.origin.y);
+        } else if (op.text.role == gutter.line_number_role) muted += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), active);
+    try testing.expectEqual(@as(usize, 3), muted);
+}
+
+test "BRK9 괄호 상자 — 그 글자 칸에 10% 채움 + 불투명 1px 테두리, 열은 탭을 지나 선다 (§5.1b)" {
+    const lines = [_][]const u8{ "x", "\tf(a)" };
+    const marks = [_]Mark{ .{ .start = 2, .len = 1 }, .{ .start = 4, .len = 1 } };
+    const brk = [_][]const Mark{ &.{}, &marks };
+    var props = testProps(&lines, false);
+    props.bracket_marks = &brk;
+    var bufs: TestBuffers = .{};
+    const w = build(props, bufs.scratch());
+    const layout = geometry.compute(props.total_cols, props.total_lines, .{});
+    var seen: usize = 0;
+    for (bufs.ops[0..w.ops]) |op| {
+        if (op != .quad or op.quad.fill_role != .bracket_match) continue;
+        const q = op.quad;
+        try testing.expectEqual(bracket_match_alpha, q.alpha);
+        try testing.expectEqual(@as(?tokens.ColorRole, .bracket_match_border), q.border_role);
+        try testing.expectEqual(@as(?u8, 0xFF), q.border_alpha);
+        try testing.expectEqual([4]u16{ 1, 1, 1, 1 }, q.border_widths);
+        try testing.expectEqual(@as(i32, 16), q.rect.y);
+        try testing.expectEqual(@as(u32, 8), q.rect.w);
+        // 탭(기본 폭)을 지난 열 — `(` 는 탭 + 'f' 뒤, `)` 는 그 두 칸 뒤
+        const want_col: i32 = @as(i32, layout.content.start) + @as(i32, default_tab_width) + (if (seen == 0) @as(i32, 1) else 3);
+        try testing.expectEqual(want_col * 8, q.rect.x);
+        seen += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), seen);
 }

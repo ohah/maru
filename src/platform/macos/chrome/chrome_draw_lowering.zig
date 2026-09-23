@@ -473,7 +473,7 @@ pub fn appendBackgroundQuadsWithTerminalOpacity(
             //
             // 컴포넌트마다 폭을 0으로 맞추게 하면 한 곳만 빠뜨려도 같은 링이 돌아온다. **모순된 조합을
             // 여기서 한 번 정규화한다** — 색이 없으면 그릴 테두리가 없다는 뜻이고, 그 해석은 하나뿐이다.
-            const border = if (quad.border_role) |role| packRgba(tk.get(role), quad.alpha) else 0;
+            const border = if (quad.border_role) |role| packRgba(tk.get(role), quad.border_alpha orelse quad.alpha) else 0;
             const border_widths: [4]u16 = if (quad.border_role == null) .{ 0, 0, 0, 0 } else quad.border_widths;
             out.append(allocator, .{
                 // Component draw coordinates are local to the dock content. Text receives the
@@ -1059,4 +1059,37 @@ test "색 없는 테두리는 폭이 0으로 정규화된다(투명한 띠가 �
     appendBackgroundQuads(allocator, &.{draws}, &tk, 0, 0, &quads, 0);
     try std.testing.expectEqual(@as(usize, 1), quads.items.len);
     try std.testing.expectEqualSlices(f32, &.{ 0, 0, 0, 0 }, &quads.items[0].border_widths);
+}
+
+test "BRK8 테두리 알파는 채움과 따로 간다 — border_alpha 가 없으면 alpha 를 같이 쓴다 (visual-mapping §5.1b)" {
+    // 짝 괄호 상자는 10% 채움 + 불투명 테두리다. 알파가 하나뿐이면 테두리도 10% 가 되어 **상자가 안 보인다** — 채움만 흐린 초록 얼룩이 된다.
+    const allocator = std.testing.allocator;
+    const tk = chrome.tokens.Tokens.rich(.{
+        .diff_added = .{ .r = 64, .g = 160, .b = 64 },
+        .diff_removed = .{ .r = 176, .g = 64, .b = 64 },
+        .foreground = .{ .r = 1, .g = 2, .b = 3 },
+        .sidebar_background = .{ .r = 4, .g = 5, .b = 6 },
+        .sidebar_foreground = .{ .r = 7, .g = 8, .b = 9 },
+        .sidebar_active = .{ .r = 10, .g = 11, .b = 12 },
+        .search_match = .{ .r = 13, .g = 14, .b = 15 },
+        .search_match_current = .{ .r = 16, .g = 17, .b = 18 },
+        .selection = .{ .r = 19, .g = 20, .b = 21 },
+        .cursor = .{ .r = 22, .g = 23, .b = 24 },
+        .terminal_background = .{ .r = 22, .g = 23, .b = 24 },
+        .accent = .{ .r = 25, .g = 26, .b = 27 },
+    });
+    var quads: std.ArrayList(metal_frame.GpuQuad) = .empty;
+    defer quads.deinit(allocator);
+    const draws = chrome.draw.ChromeDraw{
+        .layer = .sidebar,
+        .ops = &.{
+            .{ .quad = .{ .rect = .{ .x = 0, .y = 0, .w = 8, .h = 16 }, .fill_role = .bracket_match, .alpha = 26, .border_role = .bracket_match_border, .border_alpha = 0xFF, .border_widths = .{ 1, 1, 1, 1 } } },
+            .{ .quad = .{ .rect = .{ .x = 0, .y = 0, .w = 8, .h = 16 }, .fill_role = .bracket_match, .alpha = 26, .border_role = .bracket_match_border, .border_widths = .{ 1, 1, 1, 1 } } },
+        },
+    };
+    appendBackgroundQuads(allocator, &.{draws}, &tk, 0, 0, &quads, 0);
+    try std.testing.expectEqual(@as(usize, 2), quads.items.len);
+    try std.testing.expectEqual(@as(u32, 26), quads.items[0].fill_color0 >> 24);
+    try std.testing.expectEqual(@as(u32, 0xFF), quads.items[0].border_color >> 24);
+    try std.testing.expectEqual(@as(u32, 26), quads.items[1].border_color >> 24); // 없으면 채움과 같다(지금까지의 모양)
 }

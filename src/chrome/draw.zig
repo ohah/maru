@@ -194,6 +194,9 @@ pub const Op = union(enum) {
         fill_role_end: ?tokens.ColorRole = null, // gradient 끝 색(null=solid)
         gradient: GradientKind = .solid,
         alpha: u8 = 0xFF,
+        /// 테두리만의 알파. `null` 이면 `alpha` 를 같이 쓴다(지금까지의 모양). 채움은 흐리게·테두리는 또렷하게 그릴 때 연다 —
+        /// 짝 괄호 상자(10% 채움 + 불투명 테두리)·현재 줄 상자(채움 0 + 테두리, visual-mapping §5.1b)가 그렇다.
+        border_alpha: ?u8 = null,
         /// 이 quad를 잘라야 할 뷰포트(published tree의 `effective_clip`을 **그대로** 전달한 값).
         /// 컴포넌트는 교차를 계산하지 않는다 — 자르는 일은 backend 몫이고, 그래야 잘린 변의 radius/border
         /// 보정 같은 세부를 컴포넌트마다 반복하지 않는다. `null`이면 클리핑 없음.

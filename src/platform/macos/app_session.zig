@@ -5757,6 +5757,11 @@ pub const AppSession = struct {
     restore_runtime_host_id: []const u8 = "",
     restore_runtime_id: []const u8 = "",
     restore_runtime_force_attach: bool = false,
+    /// 이번 창 apply 가 **재부팅이 증명된 복원**인가(RB1 — docs/workspace-restore.md 「재부팅 뒤 부활(RB)」).
+    /// 참이면 `createRestoredTerm` 이 host identity 가 있는 Term 도 attach·probe·묘비 없이 저장 cwd 에서 새 셸로
+    /// 띄운다. apply ABI 가 파일의 창 목록 **전체**로 판정해 apply 동안만 세우고 곧바로 내린다 — 창마다 따로
+    /// 판정하면 창끼리 답이 갈릴 수 있다.
+    restore_reboot_proven: bool = false,
     // P4 §6 L291: keep-alive인데 host 연결 실패로 in-process 폴백했을 때 첫 tick에 사용자에게 notice로 알린다("유지 안 됨").
     // ensureRemoteBackend가 실패하면 켜고, showPendingHostConnectNotice가 한 번 표시하고 끈다.
     host_connect_notice_pending: bool = false,
@@ -9041,6 +9046,15 @@ pub const AppSession = struct {
     /// 죽었다. 풀 문제인지·프로토콜인지·연결 실패인지 **물어볼 수가 없어** 하루 종일 엉뚱한 곳을 팠다.
     /// 오늘 같은 병을 여섯 번 고쳤는데(`collect_fail_site`·close `site=`·`digest site`) 여기만 남아 있었다.
     pub var restore_host_site: []const u8 = "-";
+    /// 재부팅 증명 복원으로 **새 셸을 띄운** 터미널 수(RB1). 창마다가 아니라 **앱 전역**이다 — 알림을 창 수만큼
+    /// 띄우지 않고 한 번에 합쳐 알리기 위해서다. 시작 복원은 모든 창을 한 main-thread 호출(`restoreWorkspace`)
+    /// 안에서 적용하므로 첫 tick 이 올 때는 이미 전부 더해져 있다. 창 apply 가 실패하면
+    /// `RestoreAccountingSnapshot` 이 그 창의 몫을 되돌린다.
+    pub var reboot_revived_pending: u32 = 0;
+    /// 재부팅 부활이 있었으니 **checkpoint 를 무장하자마자 더럽혀야 한다**(RB1). 무장 전의 `markChanged` 는
+    /// 버려지므로 복원 자리에서 직접 못 한다 — `maru_macos_workspace_checkpoint_arm` 이 이 값을 한 번 소비한다.
+    /// 안 하면 부활한 실행이 저장 전에 죽었을 때 다음 실행이 **또** 부활해 같은 셸을 겹쳐 띄운다.
+    pub var reboot_revival_checkpoint_dirty: bool = false;
     /// 그 실패의 **원래 reason**. 특히 연결 실패는 `host_gone` 이 아니면 reason 을 **버리고** 접는다 —
     /// 죽은 host 가 왜 `host_gone` 으로 안 갈렸는지가 그래서 안 보였다.
     pub var restore_host_reason: []const u8 = "-";
@@ -9502,20 +9516,33 @@ pub const AppSession = struct {
         self.showNoticeFmt(.app_ended_placeholder, &.{.{ .d = @intCast(count) }});
     }
 
+    /// 재부팅 증명 복원으로 새 셸을 띄운 수를 **앱에 한 번** 알린다(RB1). 창마다 불리지만 수가 앱 전역이라
+    /// 먼저 본 창이 합계를 띄우고 비운다 — 창이 셋이어도 알림은 하나다. 「새로 시작했다」를 밝히는 것이 이
+    /// 알림의 존재 이유다: 새 셸을 원래 세션의 연속으로 보이게 하지 않는다.
+    fn showPendingRebootRevivalNotice(self: *AppSession) void {
+        if (AppSession.reboot_revived_pending == 0) return;
+        const count = AppSession.reboot_revived_pending;
+        AppSession.reboot_revived_pending = 0;
+        self.showNoticeFmt(.app_reboot_revived, &.{.{ .d = @intCast(count) }});
+    }
+
     pub const RestoreAccountingSnapshot = struct {
         notice: u32,
         dropped: u32,
+        revived: u32,
 
         pub fn capture(session: *const AppSession) RestoreAccountingSnapshot {
             return .{
                 .notice = session.ended_placeholder_notice_pending,
                 .dropped = session.ended_placeholder_demoted_pending,
+                .revived = AppSession.reboot_revived_pending,
             };
         }
 
         pub fn restore(snapshot: RestoreAccountingSnapshot, session: *AppSession) void {
             session.ended_placeholder_notice_pending = snapshot.notice;
             session.ended_placeholder_demoted_pending = snapshot.dropped;
+            AppSession.reboot_revived_pending = snapshot.revived;
         }
     };
 
@@ -19811,6 +19838,7 @@ pub const AppSession = struct {
         self.showPendingAgentHookTrustNotice(); // 계약 §2.1: codex 신뢰 값이 낡아 훅이 안 도는 상태를 알린다.
         self.showPendingObserverAttachNotice(); // §9: controller를 못 얻고 observer로 붙었으면 입력이 안 되는 이유를 알린다.
         self.showPendingEndedPlaceholderNotice(); // §7: 종료 placeholder로 복원한 자리가 있으면 첫 tick에 한 번 알린다.
+        self.showPendingRebootRevivalNotice(); // RB1: 재부팅으로 새로 시작한 터미널이 있으면 앱에 한 번 알린다.
         scroll_ops.applyDragAutoscroll(self); // 드래그가 grid 밖에 머무는 동안 frame-loop tick마다 한 줄씩 스크롤+확장
         // 편집기 본문 선택도 같은 자리에서 굴린다(§4.1g). 소유자가 다르므로 함수가 갈리고, 스크롤
         // 단위도 다르다(터미널은 grid 행, 편집기는 논리 줄).
@@ -42380,6 +42408,228 @@ test "durable tombstone restore는 attach와 spawn 없이 placeholder를 직접 
     try std.testing.expectEqualStrings("second-cycle-sentinel", second.restore_runtime_host_id);
     try std.testing.expectEqualStrings("second-cycle-sentinel", second.restore_runtime_id);
     try std.testing.expectEqual(@as(u32, 0), second.takeWorkspaceRestoreDropped());
+}
+
+/// RB1 판정자 공용 셋업: host registry 조회가 실제 사용자 캐시에 닿지 않게 `XDG_CACHE_HOME` 을 짧은 임시
+/// 경로로 돌린다(묘비 복원 테스트와 같은 규율 — 긴 경로는 소켓 경로 상한에 걸린다).
+const RebootRestoreFixture = struct {
+    xdg_buf: [64]u8 = undefined,
+    prev_buf: [std.fs.max_path_bytes]u8 = undefined,
+    prev_len: usize = 0,
+    had_prev: bool = false,
+    prev_keep: bool = false,
+    prev_host_connect_failed: bool = false,
+    prev_boot: []const u8 = "",
+
+    fn enter(f: *RebootRestoreFixture, boot_now: []const u8) !void {
+        const xdg = std.fmt.bufPrintZ(&f.xdg_buf, "/tmp/maru-rb1-{d}", .{std.c.getpid()}) catch return error.SkipZigTest;
+        _ = std.c.mkdir(xdg.ptr, 0o700);
+        if (std.c.getenv("XDG_CACHE_HOME")) |p| {
+            const v = std.mem.span(p);
+            if (v.len < f.prev_buf.len) {
+                @memcpy(f.prev_buf[0..v.len], v);
+                f.prev_buf[v.len] = 0;
+                f.prev_len = v.len;
+                f.had_prev = true;
+            }
+        }
+        try std.testing.expectEqual(@as(c_int, 0), setenv("XDG_CACHE_HOME", xdg.ptr, 1));
+        // 연결 실패 래치가 서 있으면 `backendForNew` 가 **진짜 host 를 띄우려** 한다 — 테스트는 in-process 로 가야 한다.
+        f.prev_host_connect_failed = host_connect_failed;
+        host_connect_failed = false;
+        f.prev_boot = workspace_ops.test_boot_session;
+        workspace_ops.test_boot_session = boot_now;
+        AppSession.reboot_revived_pending = 0;
+        AppSession.reboot_revival_checkpoint_dirty = false;
+    }
+
+    /// 재접속 게이트는 keep-alive 일 때만 열린다 — 꺼져 있으면 `createTerm` 이 identity 를 무시하고 평범히 spawn
+    /// 하므로 「묘비가 안 됐다」가 재부팅 갈래 덕인지 구분이 안 된다(「identity 비우기」를 지워도 초록이 된다).
+    /// **세션을 만든 뒤에** 켠다: `initSmokeSessionSized` 가 keep-alive 를 끈다. 그리고 **`deinit` 전에** 되돌린다
+    /// (`disarmKeepAlive` 를 세션 defer 뒤에 건다) — 켠 채 `deinit` 하면 앱 종료 시퀀스를 돌려 죽는다.
+    fn armKeepAlive(f: *RebootRestoreFixture) void {
+        f.prev_keep = app_keep_alive_after_quit;
+        app_keep_alive_after_quit = true;
+    }
+
+    fn disarmKeepAlive(f: *RebootRestoreFixture) void {
+        app_keep_alive_after_quit = f.prev_keep;
+    }
+
+    fn leave(f: *RebootRestoreFixture) void {
+        AppSession.reboot_revived_pending = 0;
+        AppSession.reboot_revival_checkpoint_dirty = false;
+        workspace_ops.test_boot_session = f.prev_boot;
+        host_connect_failed = f.prev_host_connect_failed;
+        if (f.had_prev) {
+            _ = setenv("XDG_CACHE_HOME", f.prev_buf[0..f.prev_len :0].ptr, 1);
+        } else {
+            _ = unsetenv("XDG_CACHE_HOME");
+        }
+        const xdg: [*:0]const u8 = @ptrCast(&f.xdg_buf);
+        _ = std.c.rmdir(xdg); // 복원은 조회만 한다 — 빈 디렉터리 정리
+    }
+};
+
+const rb1_boot_now = "A7C9924A-6CB1-4C6B-B004-95D26C1EBA3D";
+const rb1_boot_old = "11111111-2222-3333-4444-555555555555";
+
+/// host identity 모양 셋(live handle·묘비·legacy bare)과 identity 없는 것 하나. 셋 다 어느 registry 에도 없는 host 를
+/// 가리킨다 — 재부팅이 아니면 live 는 묘비가 되고, 재부팅이면 넷 다 새 셸이어야 한다.
+fn rb1Surfaces(with_legacy: bool) [4]maru.session.workspace.Surface {
+    return .{
+        .{ .title = "declarative", .cwd = "/tmp", .command = "/bin/zsh", .cols = 80, .rows = 24 },
+        .{
+            .title = "was-live",
+            .cwd = "/tmp",
+            .command = "/bin/zsh",
+            .runtime_host_id = "1234567890abcdef1234567890abcdef",
+            .runtime_id = "fedcba0987654321fedcba0987654321",
+            .cols = 80,
+            .rows = 24,
+        },
+        .{
+            .title = "already-ended",
+            .cwd = "/tmp",
+            .command = "/bin/zsh",
+            .runtime_host_id = "1234567890abcdef1234567890abcdef",
+            .runtime_id = "0123456789abcdef0123456789abcdef",
+            .runtime_state = .ended,
+            .cols = 80,
+            .rows = 24,
+        },
+        if (with_legacy) .{
+            .title = "legacy-bare",
+            .cwd = "/tmp",
+            .command = "/bin/zsh",
+            .runtime_id = "abcdefabcdefabcdefabcdefabcdefab",
+            .cols = 80,
+            .rows = 24,
+        } else .{ .title = "declarative-2", .cwd = "/tmp", .command = "/bin/zsh", .cols = 80, .rows = 24 },
+    };
+}
+
+test "RB1-4 재부팅이 증명되면 live·묘비·legacy 모두 attach·묘비 없이 새 셸로 뜨고, 앱에 한 번 알린다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    var fx: RebootRestoreFixture = .{};
+    try fx.enter(rb1_boot_now);
+    defer fx.leave();
+
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    defer session.deinit();
+    fx.armKeepAlive();
+    defer fx.disarmKeepAlive();
+
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var win = try workspace_ops.captureWorkspaceWindow(session, arena.allocator(), false, null);
+    const surfaces = rb1Surfaces(true);
+    const panes = [_]maru.session.workspace.Pane{.{ .surfaces = &surfaces }};
+    const tree = [_]maru.session.workspace.TreeNode{.{ .leaf = 0 }};
+    const tabs = [_]maru.session.workspace.Tab{.{ .tree = &tree, .panes = &panes }};
+    win.tabs = &tabs;
+    win.boot_session = rb1_boot_old; // 이 파일은 옛 부팅에 쓰였다
+
+    try workspace_ops.applySavedWorkspaceWindow(session, &.{win}, 0);
+    const terms = session.tabs.items[0].panes.items[0].terms.items;
+    try std.testing.expectEqual(@as(usize, 4), terms.len);
+    for (terms) |t| {
+        try std.testing.expect(!t.rt.ended_placeholder); // 묘비 0
+        try std.testing.expect(t.surface.remote == null); // 옛 host 에 붙지 않았다(새 셸)
+    }
+    // identity 가 있던 셋만 센다 — identity 없는 surface 는 원래 새 셸이다(부활이 아니다).
+    try std.testing.expectEqual(@as(u32, 3), AppSession.reboot_revived_pending);
+    try std.testing.expectEqual(@as(u32, 0), session.ended_placeholder_notice_pending);
+    try std.testing.expectEqual(@as(u32, 0), workspace_ops.takeWorkspaceRestoreDropped(session));
+    // 무장하자마자 더럽힐 표식 — 새 파일이 지금 부팅을 실어야 다음 실행이 또 부활하지 않는다.
+    try std.testing.expect(AppSession.reboot_revival_checkpoint_dirty);
+    // 플래그는 apply 동안만 산다 — 새 탭·⏎ 로 새면 안 된다.
+    try std.testing.expect(!session.restore_reboot_proven);
+    // 재부팅 부활은 identity 채널을 비운 채 spawn 했다(옛 runtime 을 가리키는 채널이 남지 않는다).
+    try std.testing.expectEqualStrings("", session.restore_runtime_host_id);
+    try std.testing.expectEqualStrings("", session.restore_runtime_id);
+
+    // 새 checkpoint 는 지금 부팅을 싣고, 부활한 Term 에는 옛 identity 도 묘비 표식도 없다.
+    var captured_arena = std.heap.ArenaAllocator.init(a);
+    defer captured_arena.deinit();
+    const captured = try workspace_ops.captureWorkspaceWindow(session, captured_arena.allocator(), false, null);
+    try std.testing.expectEqualStrings(rb1_boot_now, captured.boot_session);
+    for (captured.tabs[0].panes[0].surfaces) |saved| {
+        try std.testing.expectEqual(maru.session.workspace.RuntimeState.live, saved.runtime_state);
+        try std.testing.expectEqualStrings("", saved.runtime_id);
+    }
+
+    // 알림은 앱에 한 번 — 첫 창이 합계를 띄우고 비우면 다른 창은 아무것도 안 띄운다.
+    session.showPendingRebootRevivalNotice();
+    try std.testing.expectEqual(@as(u32, 0), AppSession.reboot_revived_pending);
+}
+
+test "RB1-5 재부팅 증명이 없으면 지금 경로 그대로 — 사라진 host 의 live handle 은 묘비가 된다" {
+    // 대조군. 세 모양을 한 파일에서 잰다: 키 없음(옛 파일) · 같은 부팅 · 지금 값을 못 읽음. legacy bare 는 증명 없는
+    // 경로에서 fail-close 가 계약이라(위 테스트) 여기 넣지 않는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const cases = [_]struct { file: []const u8, now: []const u8 }{
+        .{ .file = "", .now = rb1_boot_now },
+        .{ .file = rb1_boot_now, .now = rb1_boot_now },
+        .{ .file = rb1_boot_old, .now = "" },
+    };
+    for (cases) |case| {
+        var fx: RebootRestoreFixture = .{};
+        try fx.enter(case.now);
+        defer fx.leave();
+
+        const session = try initSmokeSessionSized(a);
+        defer a.destroy(session);
+        defer session.deinit();
+        fx.armKeepAlive();
+        defer fx.disarmKeepAlive();
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        var win = try workspace_ops.captureWorkspaceWindow(session, arena.allocator(), false, null);
+        const surfaces = rb1Surfaces(false);
+        const panes = [_]maru.session.workspace.Pane{.{ .surfaces = &surfaces }};
+        const tree = [_]maru.session.workspace.TreeNode{.{ .leaf = 0 }};
+        const tabs = [_]maru.session.workspace.Tab{.{ .tree = &tree, .panes = &panes }};
+        win.tabs = &tabs;
+        win.boot_session = case.file;
+
+        try workspace_ops.applySavedWorkspaceWindow(session, &.{win}, 0);
+        const terms = session.tabs.items[0].panes.items[0].terms.items;
+        try std.testing.expect(!terms[0].rt.ended_placeholder);
+        try std.testing.expect(terms[1].rt.ended_placeholder); // 사라진 host → 묘비(지금 규칙)
+        try std.testing.expect(terms[2].rt.ended_placeholder); // durable 묘비 그대로
+        try std.testing.expectEqual(@as(u32, 0), AppSession.reboot_revived_pending);
+        try std.testing.expect(!AppSession.reboot_revival_checkpoint_dirty);
+    }
+}
+
+test "RB1-6 창 apply 가 실패하면 부활 수도 되돌린다 — 존재하지 않은 알림이 남지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    defer session.deinit();
+    AppSession.reboot_revived_pending = 0;
+    defer AppSession.reboot_revived_pending = 0;
+    // apply 가 쓰는 같은 snapshot/restore 조합으로 앱 전역 수가 함께 되돌아가는지 고정한다.
+    const accounting = AppSession.RestoreAccountingSnapshot.capture(session);
+    AppSession.reboot_revived_pending += 2;
+    accounting.restore(session);
+    try std.testing.expectEqual(@as(u32, 0), AppSession.reboot_revived_pending);
+}
+
+test "RB1-7 커널 부팅 신원은 형식이 맞는 UUID 로 읽히고 두 번 읽어도 같다" {
+    // 테스트 컴파일의 `currentBootSession` 은 커널을 안 읽으므로(바이트 대조가 흔들리지 않게), 커널 읽기 자체는 여기서 잰다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var b1: [maru.session.workspace.boot_session_len]u8 = undefined;
+    var b2: [maru.session.workspace.boot_session_len]u8 = undefined;
+    const first = workspace_ops.readKernelBootSession(&b1) orelse return error.TestUnexpectedResult;
+    const second = workspace_ops.readKernelBootSession(&b2) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(maru.session.workspace.isBootSessionId(first));
+    try std.testing.expectEqualStrings(first, second);
 }
 
 test "legacy bare runtime-id Gone은 host 없는 tombstone으로 승격하지 않는다" {

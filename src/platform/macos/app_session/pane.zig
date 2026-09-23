@@ -275,6 +275,10 @@ pub fn dividerAtPoint(self: *AppSession, x_px: f64, y_px: f64) ?struct { seg: ch
 /// 전파해 현행 fail-close를 유지한다 — 일시 실패를 placeholder로 굳히면 살아 있는 runtime을 영구히 잃는다.
 /// pane 진입점과 term 진입점이 이 함수를 공유해 분기가 한 곳에만 있다.
 pub fn createRestoredTerm(self: *AppSession, sm: maru.session.workspace.Surface) !*Term {
+    // RB1: **재부팅이 증명된 복원**은 host 에 묻지 않는다 — 파일을 쓴 뒤 커널이 새로 떴으므로 그 파일이 가리키는
+    // 모든 프로세스가 죽었다. 묘비·attach 보다 **먼저** 보는 이유가 그것이다(docs/workspace-restore.md 「재부팅
+    // 뒤 부활(RB)」). identity 가 없는 surface 는 원래 아래 `restoreSpawn` 으로 새로 뜨므로 이 갈래가 필요 없다.
+    if (self.restore_reboot_proven and hasRuntimeIdentity(sm)) return createRebootRevivedTerm(self, sm);
     if (sm.runtime_state == .ended) {
         recordEndedPlaceholder(self, false);
         // 이미 완전하게 표현된 tombstone은 attach/probe/spawn 경계에 들어가지 않는다. restoreSpawn도 호출하지 않아
@@ -312,6 +316,33 @@ pub fn createRestoredTerm(self: *AppSession, sm: maru.session.workspace.Surface)
             sm.runtime_id,
         );
     };
+}
+
+/// 이 surface 가 host runtime 을 가리키는가 — live handle·묘비(`ended`)·legacy bare `runtime-id` 셋 다. 셋 중 무엇이든
+/// 재부팅 뒤에는 **같은 이유로** 죽었다(RB1). `runtime_state` 는 보지 않는다: 묘비도 되살린다는 것이 사용자 결정이다
+/// (「껐다 켜면 전부 돌아온다」). `ended` 는 writer 가 full handle 없이는 안 쓰므로 identity 검사만으로 덮인다.
+fn hasRuntimeIdentity(sm: maru.session.workspace.Surface) bool {
+    return sm.runtime_host_id.len > 0 or sm.runtime_id.len > 0;
+}
+
+/// 재부팅 뒤 부활(RB1): 저장된 cwd 에서 **새 셸**을 띄운다. attach·probe·묘비가 없다.
+///
+/// identity 를 비운 사본을 `restoreSpawn` 에 넘기는 것이 핵심이다 — `restoreSpawn` 은 받은 identity 를
+/// `restore_runtime_host_id`/`restore_runtime_id` 채널에 세우고 `createTerm` 이 그 채널을 보고 **옛 runtime 에
+/// 붙으려 한다**. 사본으로 비우면 채널이 빈 채로 닿아 `createTerm` 이 새 Term 과 똑같이 spawn 한다(keep-alive 면
+/// 새 host 에, 아니면 in-process). cwd·크기 규칙은 in-process 복원과 **같은 함수**라 갈라지지 않는다.
+fn createRebootRevivedTerm(self: *AppSession, sm: maru.session.workspace.Surface) !*Term {
+    var fresh = sm;
+    fresh.runtime_host_id = "";
+    fresh.runtime_id = "";
+    fresh.runtime_state = .live;
+    const rs = restoreSpawn(self, fresh);
+    errdefer clearRestoreRuntimeIdentity(self);
+    const cfg = self.new_tab_config;
+    const term = try term_ops.createTerm(self, rs.req, rs.size, cfg.queue_capacity, "Maru", commandName(cfg.command_kind));
+    // 알림 수는 **성공한 뒤에만** 센다. 창 apply 가 뒤에서 실패하면 `RestoreAccountingSnapshot` 이 되돌린다.
+    AppSession.reboot_revived_pending +|= 1;
+    return term;
 }
 
 /// per-pane 가로 탭 바의 backing 픽셀 높이. 높이 자체는 도크 뷰 스위처와 공유하는 `chromeBarHeightPx`가

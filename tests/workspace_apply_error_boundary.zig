@@ -55,14 +55,17 @@ test "창 적용 실패는 create_failed 뒤에 원래 오류를 남긴다" {
 
     // ① **오류를 삼키지 않는다.** `catch return …` 한 줄로 접으면 열일곱이 다시 하나가 된다 —
     //    그게 오늘 다섯 번 반복된 데이터 손실의 원인을 못 찾게 만든 자리다.
-    const swallow = "applyWorkspaceWindow(parsed.workspace.windows[window_index]) catch return";
+    //    RB1 부터 호출은 창 목록 전체를 넘기는 `applySavedWorkspaceWindow` 다(재부팅 증명을 창 목록 전체로
+    //    판정하려고). 옛 호출 모양의 문자열로 찾으면 새 호출에 대해 이 검사가 **눈이 멀므로** 이름이 바뀌면
+    //    여기도 함께 바뀐다 — 아래 `ApplyCallMissing` 이 그 어긋남을 시끄럽게 알린다.
+    const swallow = "applySavedWorkspaceWindow(app_session, parsed.workspace.windows, window_index) catch return";
     if (std.mem.indexOf(u8, body, swallow) != null) {
         std.debug.print("오류를 이름 없이 삼킨다 — 열일곱이 하나로 접힌다\n", .{});
         return error.ErrorSwallowed;
     }
 
     // ② **원래 오류 이름을 싣는다.** 「적용이 실패했다」까지는 자리일 뿐이고, 그 이름이 곧 이유다.
-    const apply_at = std.mem.indexOf(u8, body, "applyWorkspaceWindow(") orelse
+    const apply_at = std.mem.indexOf(u8, body, "applySavedWorkspaceWindow(") orelse
         return error.ApplyCallMissing;
     const tail = body[apply_at..];
     try std.testing.expect(std.mem.indexOf(u8, tail, "@errorName(err)") != null);

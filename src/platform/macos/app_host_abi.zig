@@ -479,6 +479,34 @@ test "P4 C3c checkpoint ABI drives one app-global capture and write generation" 
     try std.testing.expect(!session_mod.app_runtime.workspace_checkpoint.isDirty());
 }
 
+test "RB1-8 재부팅 부활이 있었으면 checkpoint 무장이 initial_dirty 없이도 첫 capture 를 낸다 — 한 번만" {
+    // 복원 자리의 `markChanged` 는 무장 전이라 버려진다. 이 표식이 없으면 부활한 실행이 저장 전에 죽었을 때 다음
+    // 실행이 **또** 부활해 같은 셸을 겹쳐 띄운다(docs/workspace-restore.md 「재부팅 뒤 부활(RB)」).
+    const saved = session_mod.app_runtime.workspace_checkpoint;
+    defer session_mod.app_runtime.workspace_checkpoint = saved;
+    const saved_flag = AppSession.reboot_revival_checkpoint_dirty;
+    defer AppSession.reboot_revival_checkpoint_dirty = saved_flag;
+
+    // 대조군: 표식이 없으면 initial_dirty=0 무장은 아무것도 안 낸다.
+    session_mod.app_runtime.workspace_checkpoint = .{};
+    AppSession.reboot_revival_checkpoint_dirty = false;
+    try std.testing.expectEqual(@as(c_int, 0), maru_macos_workspace_checkpoint_arm(0));
+    try std.testing.expect(!session_mod.app_runtime.workspace_checkpoint.isDirty());
+    var effect: c.MaruWorkspaceCheckpointEffect = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), maru_macos_workspace_checkpoint_tick(0, &effect));
+    try std.testing.expectEqual(@as(c_int, 0), maru_macos_workspace_checkpoint_tick(500 * std.time.ns_per_ms, &effect));
+    try std.testing.expectEqual(@as(u32, c.MARU_WORKSPACE_CHECKPOINT_EFFECT_NONE), effect.kind);
+
+    // 표식이 있으면 initial_dirty=0 이어도 debounce 뒤 capture 가 나온다. 표식은 소비된다.
+    session_mod.app_runtime.workspace_checkpoint = .{};
+    AppSession.reboot_revival_checkpoint_dirty = true;
+    try std.testing.expectEqual(@as(c_int, 0), maru_macos_workspace_checkpoint_arm(0));
+    try std.testing.expect(!AppSession.reboot_revival_checkpoint_dirty);
+    try std.testing.expectEqual(@as(c_int, 0), maru_macos_workspace_checkpoint_tick(0, &effect));
+    try std.testing.expectEqual(@as(c_int, 0), maru_macos_workspace_checkpoint_tick(500 * std.time.ns_per_ms, &effect));
+    try std.testing.expectEqual(@as(u32, c.MARU_WORKSPACE_CHECKPOINT_EFFECT_CAPTURE), effect.kind);
+}
+
 test "P4 C4 checkpoint ABI exposes final capture cancel and detach effects" {
     const saved = session_mod.app_runtime.workspace_checkpoint;
     session_mod.app_runtime.workspace_checkpoint = .{};
@@ -3210,11 +3238,15 @@ fn writeWorkspaceCheckpointEffect(
 }
 
 pub export fn maru_macos_workspace_checkpoint_arm(initial_dirty: u32) c_int {
+    // RB1: 재부팅 부활이 있었으면 무장하자마자 더럽힌다 — 복원 자리의 `markChanged` 는 무장 전이라 버려졌다.
+    // 한 번 소비한다(무장은 프로세스당 한 번이다).
+    const revival_dirty = AppSession.reboot_revival_checkpoint_dirty;
+    AppSession.reboot_revival_checkpoint_dirty = false;
     session_mod.app_runtime.workspace_checkpoint.arm(.{
         .debounce_ns = 500 * std.time.ns_per_ms,
         .retry_initial_ns = std.time.ns_per_s,
         .retry_max_ns = 30 * std.time.ns_per_s,
-    }, initial_dirty != 0) catch return @intFromEnum(Status.invalid_config);
+    }, initial_dirty != 0 or revival_dirty) catch return @intFromEnum(Status.invalid_config);
     return @intFromEnum(Status.ok);
 }
 
@@ -3406,7 +3438,8 @@ pub export fn maru_macos_app_session_apply_workspace_window(
     var parsed = maru.session.workspace.parse(app_session.allocator, tp[0..text_len]) catch return @intFromEnum(Status.invalid_config);
     defer parsed.deinit(); // apply가 cwd 슬라이스를 spawn에 다 쓴 뒤 arena 해제(안전)
     if (window_index >= parsed.workspace.windows.len) return @intFromEnum(Status.invalid_config);
-    app_session.applyWorkspaceWindow(parsed.workspace.windows[window_index]) catch |err| {
+    // RB1: 재부팅 증명은 창 목록 **전체**로 판정한다 — 그래서 한 창이 아니라 목록과 인덱스를 넘긴다.
+    session_mod.workspace_ops.applySavedWorkspaceWindow(app_session, parsed.workspace.windows, window_index) catch |err| {
         // 「복원할 게 없음」은 실패 묶음에서 먼저 뺀다 — 아래 진단은 **무엇이 죽었는지** 를 적는 자리라,
         // 죽은 것이 없는 사건을 같이 실으면 로그가 거짓을 말한다.
         if (err == error.EmptyWorkspace) return @intFromEnum(Status.workspace_empty);

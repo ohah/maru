@@ -517,6 +517,46 @@ pub fn windowTitle(self: *AppSession) []const u8 {
     return term.rt.observation.window_title.items;
 }
 
+extern "c" fn sysctlbyname(name: [*:0]const u8, oldp: ?*anyopaque, oldlenp: *usize, newp: ?*anyopaque, newlen: usize) c_int;
+
+/// 커널이 **이번 부팅에** 만든 UUID(`kern.bootsessionuuid`)를 `buf` 에 읽는다(RB1 — docs/workspace-restore.md
+/// 「재부팅 뒤 부활(RB)」). 부팅마다 새로 생기므로, 파일에 적힌 값과 다르면 그 파일을 쓴 뒤 커널이 새로 떴다는
+/// 뜻이다. 못 읽거나 형식이 틀리면 null — 그러면 재부팅을 **증명하지 못한 것**으로 두어 지금의 경로로 떨어진다.
+///
+/// 부팅 시각(`kern.boottime`)을 쓰지 않는 이유: 그 값은 벽시계라 시계 조정에 흔들린다. UUID 는 같음·다름만 말한다.
+pub fn readKernelBootSession(buf: *[maru.session.workspace.boot_session_len]u8) ?[]const u8 {
+    // `sysctlbyname` 은 Darwin 에만 있다 — 다른 타깃의 테스트 컴파일에서 참조조차 안 되게 comptime 으로 끊는다.
+    if (builtin.os.tag != .macos) return null;
+    // 커널은 NUL 을 포함해 돌려준다(37 바이트). 한 칸 큰 버퍼로 받아 그 끝을 떼어 낸다.
+    var raw: [maru.session.workspace.boot_session_len + 1]u8 = undefined;
+    var len: usize = raw.len;
+    if (sysctlbyname("kern.bootsessionuuid", &raw, &len, null, 0) != 0) return null;
+    const text = std.mem.sliceTo(raw[0..len], 0);
+    if (!maru.session.workspace.isBootSessionId(text)) return null;
+    @memcpy(buf[0..text.len], text);
+    return buf[0..text.len];
+}
+
+/// 테스트가 넣는 부팅 신원. 테스트 컴파일은 커널 값을 **읽지 않는다** — 읽으면 캡처 결과가 기계·부팅마다 달라져
+/// 바이트 대조 판정자가 흔들리고, 무엇보다 「지금 부팅」을 테스트가 고를 수 없다. 커널 읽기 자체는
+/// `readKernelBootSession` 을 직접 부르는 판정자가 따로 잰다.
+pub var test_boot_session: []const u8 = "";
+
+var boot_session_buf: [maru.session.workspace.boot_session_len]u8 = undefined;
+var boot_session_cached: ?[]const u8 = null;
+var boot_session_read = false;
+
+/// 이번 프로세스가 보는 부팅 신원(없으면 ""). 부팅 신원은 프로세스 수명 동안 바뀌지 않으므로 한 번만 읽는다 —
+/// checkpoint 캡처가 창마다·변경마다 부르는 자리라 sysctl 을 매번 태울 이유가 없다.
+pub fn currentBootSession() []const u8 {
+    if (builtin.is_test) return test_boot_session;
+    if (!boot_session_read) {
+        boot_session_read = true;
+        boot_session_cached = readKernelBootSession(&boot_session_buf);
+    }
+    return boot_session_cached orelse "";
+}
+
 pub fn captureWorkspaceWindow(self: *AppSession, arena: std.mem.Allocator, is_active: bool, frame: ?maru.session.workspace.Frame) !maru.session.workspace.Window {
     var tabs: std.ArrayList(maru.session.workspace.Tab) = .empty;
     for (self.tabs.items) |tab| try tabs.append(arena, try tab_ops.captureWorkspaceTab(self, arena, tab));
@@ -534,7 +574,9 @@ pub fn captureWorkspaceWindow(self: *AppSession, arena: std.mem.Allocator, is_ac
     }
     // «최근 세션» 도 창 상태다(AT7 — 계약 §6.2): 에이전트 탭이 재시작 뒤에도 같은 세션의 턴 목록을 보이게.
     const last_agent_session: []const u8 = if (self.last_agent_session) |sid| try arena.dupe(u8, sid) else "";
-    return .{ .active_tab = self.app_window.active_tab, .active = is_active, .frame = frame, .tabs = try tabs.toOwnedSlice(arena), .dock = dock, .explorer = .{ .roots = explorer_roots }, .scm_bases = scm_bases, .last_agent_session = last_agent_session };
+    // 부팅 신원(RB1): 다음 실행이 「이 파일을 쓴 뒤 재부팅됐나」를 판정할 근거다. 모든 창에 같은 값을 싣는다.
+    const boot_session = try arena.dupe(u8, currentBootSession());
+    return .{ .active_tab = self.app_window.active_tab, .active = is_active, .frame = frame, .tabs = try tabs.toOwnedSlice(arena), .dock = dock, .explorer = .{ .roots = explorer_roots }, .scm_bases = scm_bases, .last_agent_session = last_agent_session, .boot_session = boot_session };
 }
 
 /// 이 창의 workspace 블록(헤더 없는 `window …` 텍스트)을 직렬화해 세션-소유 버퍼로 돌려준다(R5 저장 ABI).
@@ -559,6 +601,17 @@ pub fn serializeWorkspaceWindow(self: *AppSession, is_active: bool, frame: ?maru
 /// title/command는 정적 기본(셸이 OSC 0/2로 곧 재설정)·size는 모델값(이후 resize가 창에 맞게 보정). 새 탭들을
 /// 먼저 다 빌드한 뒤 기존 탭을 teardown하고 swap한다 — 빌드 실패면 새 것만 정리하고 기존 live 모델 또는 deferred
 /// 빈 상태를 보존한다. 빈 모델은 live 세션에선 무동작, deferred 세션에선 오류다. 빈 cwd spawn은 기본 cwd를 쓴다.
+/// 저장 파일의 창 하나를 적용한다 — 시작 복원의 진입점(ABI `maru_macos_app_session_apply_workspace_window`).
+///
+/// 창 하나가 아니라 **목록 전체**를 받는 이유는 재부팅 증명(RB1)이다. 창마다 `AppSession` 이 따로 복원하므로 자기
+/// 창의 `boot-session` 만 보면 창끼리 답이 갈릴 수 있다. ABI 가 창마다 파일 전체를 다시 파싱하므로 같은 텍스트면
+/// 모든 창이 같은 답을 얻는다. 플래그는 apply 동안만 산다 — 이 창 밖의 Term 생성(새 탭·`⏎`)으로 새지 않게.
+pub fn applySavedWorkspaceWindow(self: *AppSession, windows: []const maru.session.workspace.Window, index: usize) !void {
+    self.restore_reboot_proven = maru.session.workspace.rebootProven(windows, currentBootSession());
+    defer self.restore_reboot_proven = false;
+    return applyWorkspaceWindow(self, windows[index]);
+}
+
 pub fn applyWorkspaceWindow(self: *AppSession, win: maru.session.workspace.Window) !void {
     if (win.tabs.len == 0) {
         if (!self.surface_initialized) return error.EmptyWorkspace;
@@ -583,6 +636,7 @@ pub fn applyWorkspaceWindow(self: *AppSession, win: maru.session.workspace.Windo
     // 실패하면 Swift가 이미 checkpoint 차단 래치를 세우므로 신호가 중복이고, errdefer 롤백과 순서를 다툴 이유도 없다.
     var dropped: usize = 0;
     const demoted_before = self.ended_placeholder_demoted_pending;
+    const revived_before = AppSession.reboot_revived_pending;
     dropped += file_panel_ops.pruneInvalidRestoredFilePanelEntries(self, &new_dock);
     // FP16 2-2r: 여기서 소유를 목록으로 옮긴다. 이후 단계(파일 트리·watcher·rows)는 dock 구조가 아니라
     // 이 목록을 소비하고, 실제 배치(어느 pane의 Term이 되나)는 탭이 생긴 뒤에 정한다.
@@ -663,7 +717,9 @@ pub fn applyWorkspaceWindow(self: *AppSession, win: maru.session.workspace.Windo
     for (win.tabs) |tab_model| {
         new_tabs.appendAssumeCapacity(try tab_ops.buildWorkspaceTab(self, tab_model));
     }
-    try assignEndedManifestOrdinals(new_tabs.items, win);
+    // 재부팅 부활(RB1)은 `ended` surface 를 묘비가 아니라 새 셸로 세웠으므로 짝 맞출 묘비가 없다 — 그 경우
+    // 이 단계를 건너뛴다. 안 건너뛰면 「ended 인데 묘비가 없다」를 손상으로 읽어 창 전체가 실패한다.
+    if (!self.restore_reboot_proven) try assignEndedManifestOrdinals(new_tabs.items, win);
 
     // 2) swap이 실패하지 않게 컬렉션 capacity를 미리 잡는다(teardown 뒤 append가 무실패여야 half-state가 없다).
     // FP16 2-2r: 탭이 다 생긴 지금이 배치 시점이다. staged 목록의 entry를 **활성 워크스페이스의 활성 pane**에
@@ -777,12 +833,16 @@ pub fn applyWorkspaceWindow(self: *AppSession, win: maru.session.workspace.Windo
     // 재부팅으로 저장된 29 개가 전부 죽은 host 를 가리키자 29 가 여기 더해져 래치가 섰고, 래치가 저장을
     // 막아 파일이 안 바뀌고, 안 바뀌니 다음 실행도 같은 29 개를 만나 다시 래치가 서는 교착이 됐다.
     const demoted = self.ended_placeholder_demoted_pending - demoted_before;
+    // RB1: 이 창에서 재부팅 부활이 있었으면 checkpoint 를 무장하자마자 더럽힌다(`reboot_revival_checkpoint_dirty`
+    // 주석). 새 파일이 지금 부팅의 `boot-session` 과 새 handle 을 실어야 다음 실행이 또 부활하지 않는다.
+    const revived = AppSession.reboot_revived_pending - revived_before;
+    if (revived > 0) AppSession.reboot_revival_checkpoint_dirty = true;
     self.workspace_restore_dropped = std.math.lossyCast(u32, dropped);
     // **왜 저장을 건너뛰었는지 남긴다.** 지금까지 이 판정은 어디에도 찍히지 않아, 사용자가 「탭 배치가
     // 매번 사라진다」고 해도 파일 상태로 역산해야 했다(2026-09-19 실측 — 그 역산에 하루가 걸렸다).
-    if (dropped > 0 or demoted > 0) std.log.info(
-        "workspace restore accounting: dropped={d} demoted={d} latch={s}",
-        .{ dropped, demoted, if (dropped > 0) "set" else "clear" },
+    if (dropped > 0 or demoted > 0 or revived > 0) std.log.info(
+        "workspace restore accounting: dropped={d} demoted={d} revived={d} latch={s}",
+        .{ dropped, demoted, revived, if (dropped > 0) "set" else "clear" },
     );
     if (builtin.mode == .Debug) assertPinnedPrefixRuntime(self); // 복원 후 불변식 확인(디버그)
 }

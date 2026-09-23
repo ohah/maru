@@ -32,7 +32,17 @@ claude·codex가 돌던 Term은 그 대화를 이어간다. 스크롤백·화면
   terminal-compatibility-policy.md·implementation-plan.md(P1 절).
 - verification-matrix.md에 RB 행(계획).
 
-## RB1 — 재부팅을 증명하고 새 셸을 띄운다
+## RB1 — 재부팅을 증명하고 새 셸을 띄운다 (완료)
+
+**구현하며 계획과 달라진 것 셋**(계약은 그대로다):
+- 「부활 직후 checkpoint를 더럽힌다」는 복원 자리에서 할 수 없었다 — checkpoint는 복원이 **끝난 뒤** 무장되고
+  무장 전의 `markChanged`는 버려진다. 그래서 앱 전역 표식(`AppSession.reboot_revival_checkpoint_dirty`)을 세우고
+  `maru_macos_workspace_checkpoint_arm`이 한 번 소비해 `initial_dirty`에 OR 한다.
+- 묘비(`ended`)를 되살리면 복원 끝의 `assignEndedManifestOrdinals`(파일의 `ended`마다 짝이 되는 묘비 Term을
+  요구한다)가 「ended인데 묘비가 없다」를 손상으로 읽어 창 전체를 실패시켰다. 재부팅 증명일 때 그 단계를 건너뛴다 —
+  짝 맞출 묘비가 원래 없다.
+- 판정자의 keep-alive는 **세션을 만든 뒤에** 켜야 한다 — 테스트 하니스(`initSmokeSessionSized`)가 keep-alive를
+  끄고, 꺼진 채면 `createTerm`이 identity를 무시해 「identity를 비우지 않는다」 변이가 살아남는다(실제로 그랬다).
 
 - **`boot-session` 읽기**: OS 중립 층은 값을 모른다 — macOS 층이 `sysctlbyname("kern.bootsessionuuid")`로 읽어
   넘긴다. 형식 검사(36자, `8-4-4-4-12` 16진)는 순수 층 하나가 소유한다(쓰는 쪽·읽는 쪽이 같은 함수).

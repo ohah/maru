@@ -230,6 +230,10 @@ src/
   renderer/             Metal-first renderer internals, future WebGPU backend boundary, font layout, font identity registry, persistent renderer state, glyph atlas, frame stats
   platform/             OS별 process/window/input bridge
     macos/              AppKit/Metal/CoreText smoke bridge, Swift app host app shell, Swift/Zig C ABI 계약, workspace_checkpoint_file.zig(P4 C2: parent-fd 결속 fixed temp→atomic rename, typed failure·crash fixture; capture/coordinator/AppKit 비소유), control_socket.zig(1b: 컨트롤 플레인 unix socket bind/accept/peer-cred/hello + A2a `serveReadOnly` per-connection read-only serve 함수(`readInto`+`Framer`→`dispatchReadOnly`→응답+`\n`) + poll-gated accept·read-timeout 헬퍼(A2b용) — macOS-gated 테스트), control_server.zig(**A2b 라이브 서버**: 앱-전역 소켓+accept 스레드+메인 marshal 큐(`ControlRequestQueue`·`PendingRequest`, generic·AppSession 비의존, §8.8 lock-order 준수) — macOS-gated 테스트), app_host_abi.zig(A2b start/drain/stop ABI + collectSessionsInto 멀티창 조립·auth(metadata:self)·dispatch 배선), app_session.zig 안 A1 컨트롤 플레인 per-session collector(collectSessionInto/collectSession — 실 트리→중립 SurfaceDto[]+membership, private 자산 재사용 위해 세션 모듈에 co-locate)
+    macos/web_sidecar/  웹 OSR sidecar(W1b — plans/web-osr-backend.md). `host_main.zig`(`maru-web-host` — CEF 브라우저 프로세스, 샌드박스 밖)·
+                        `helper_main.zig`(`maru-web-helper` — 샌드박스를 먼저 켜고 프레임워크를 연다)·`library.zig`(프레임워크 dlopen 함수 표)·
+                        `stdio.zig`(프로토콜 fd 분리)·`inbox.zig`(읽기 스레드)·`dispatch.zig`(명령 처리 — CEF 없이 기본 test 에서 시험)·
+                        `app`·`settings`·`layout`·`object`·`cef`. CEF 헤더는 저장소에 없고 `-Dcef-sdk` 가 있을 때만 빌드한다(build/web_sidecar.zig).
     session_host.zig     P3 barrel(protocol·framing·screen_stream·registry·server·socket_server re-export + test 집약, test module은 socket용 link_libc). 구현은 session_host/에 목적별로.
     session_host/        P3 진행: entrypoint.zig(hidden `__session-host` CLI command의 launcher/main 공용 단일 출처),
                         protocol.zig(`MRSH` 32-byte header·kind/flag·error 어휘 codec — **구현됨, P3-a**),
@@ -554,6 +558,8 @@ graph.rows                                                               // 필�
 ```text
 tools/
   perf/                 로컬 성능 예산 측정 harness
+  cef-sdk-fetch.sh      웹 OSR sidecar 의 CEF SDK 를 받아 sha256 확인 뒤 캐시에 푼다(opt-in — `zig fetch` 는 .tar.bz2 를 못 푼다)
+  web_sidecar_judge/    실제 `maru-web-host` 를 maru 처럼 띄워 W1b 완료 판정을 잰다(`mise run web-sidecar-judge`)
   agent-turn-tool-mix.py  에이전트 턴의 도구 구성(캡처 트리거 없는 턴·셸 편집만 있는 턴·배경 호출)을 provider 트랜스크립트에서 잰다 — 훅 로그는 큐라 지워지므로 이것이 AT3b 수치의 재측정 도구다(plans/agent-turn-changes.md)
   ci/                   CI 파이프라인 헬퍼. `changed-areas.sh`가 "이 diff는 어떤 CI 축을 실행해야 하는가"의 단일 출처이고 `changed-areas.test.sh`(=`mise run ci:changed-areas-check`)가 그 분류를 실제 git diff로 고정한다
 ```

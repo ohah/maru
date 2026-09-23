@@ -1236,6 +1236,42 @@ tsgo 32 ms(`2`/`3` 로 읽기·쓰기를 가른다) · clangd 1 ms(전부 `1`(Te
 선택이 있으면 안 묻고, 편집하면 사라졌다가 조용한 뒤 다시; 낡은 version·낡은 낱말·빈 응답·provider 없음). 가짜 서버 표식 `DHLNONE`·`DHLSTALL`·`DHLERR`,
 `MARU_FAKE_LSP_NOHLCAP=1`.
 
+### 8.2q LSP 2단 ⑯ — 구조 기반 선택 확장 `selectionRange` (2026-09-23, 적대적 검증 아홉 회차 뒤의 결정)
+
+**선택을 구문 단위로 한 단계씩 넓히고 좁힌다** — 낱말 → 식 → 문장 → 블록 → 함수 → 파일. VS Code 의 `editor.action.smartSelect.expand/shrink` 와
+같은 기능이다. [native-editor](native-editor.md) §12 가 「계약 밖 — 소비처만 없다」로 두고 **상태 모양**(커서마다 범위 스택 + 인덱스, `Selection` 밖,
+커서가 움직이면 버린다)을 미리 적어 둔 그 항목이고, 이 절이 그것을 계약 안으로 올린다.
+
+**실측(2026-09-23, 프로브).** 셋 다 `selectionRangeProvider: true` · 위치 **여럿을 한 요청**에 넣으면 위치 수만큼 답한다(tsgo 38 ms · clangd 1 ms ·
+rust-analyzer 2 ms, 5표본 17~59 ms). ① **clangd 는 주석·전처리 줄에서 빈 범위 하나만** 준다(부모 없음 — 주석 셋·`#include` 에서 전부; 연산자 사이
+공백·문자열·`}` 뒤는 사슬이 온다, Apple clangd 17). tsgo 는 같은 자리에서 본문·함수로 곧장 간다. ② **caret 이 낱말 끝 바로 뒤**(`a|`)면 **tsgo 는
+그 식별자를 건너뛰고** 바깥 식부터 준다 — clangd·rust-analyzer 는 식별자부터 준다. 낱말 **시작**(`|a`)으로 물으면 셋이 같다. ③ 문서 밖 위치가 하나
+섞이면 clangd(`-32001`)·rust-analyzer(`-32603`)는 **요청 통째로** 오류를 낸다(tsgo 는 답한다) — caret 이 설 수 있는 자리(주석·줄 끝 공백·빈 줄·EOF)
+에서는 오류 0.
+
+| 축 | 결정 | 근거 |
+| --- | --- | --- |
+| **capability** | `textDocument.selectionRange{dynamicRegistration: false}`. 서버의 `selectionRangeProvider`(bool·객체)가 없으면 서버 축은 없고 1층만 쓴다 | LSP 3.17 |
+| **트리거** | `expand_selection` — `⌃⇧⌘→` · `shrink_selection` — `⌃⇧⌘←`(VS Code mac 주 키) · 팔레트 「Editor: Expand Selection / Shrink Selection」. `needs_editable = true` — 비교 뷰에서는 컨텍스트가 지고 지금 동작(`⌃` 무시 → `⇧⌘→` 줄 끝 선택)으로 떨어진다. 읽기 전용 파일은 `read_only` 가 다른 축이라 동작한다. **VS Code 보조 키 `⌃⇧→` 는 안 맨다** — macOS 시스템 단축키 둘(82·249)이 그 chord 에 켜져 있고 가로채는지는 실측으로 못 가렸다 | [키 계약](key-input-and-shortcuts.md) 「`⌃⇧⌘←/→`」 |
+| **기준 자리(커서마다)** | 선택이 있으면 **그 선택**. 빈 caret 이 낱말에 **닿아** 있으면(§8.2p `wordAtCaret` 규칙 — 뒤 글자, 아니면 앞 글자) **그 낱말의 시작**으로 묻는다. 아니면 caret 자리 | 실측 ② |
+| **단계의 원천** | ⑴ **서버** — 한 요청에 커서 전부의 위치(id `19e8+seq`), 응답 `SelectionRange[]` 의 `parent` 사슬을 평탄화(위치당 상한 256) · ⑵ **tree-sitter** — `Provider.enclosingRanges`(기준 범위를 품는 노드부터 뿌리까지, byte 로만 읽는다) · ⑶ **낱말** — 하위 낱말(`_` 경계·소문자→대문자 전환) · 낱말(`selection.wordRangeAt` — [visual-mapping](native-editor-visual-mapping.md) §5.1 이 낱말 경계의 소유자) · 공백뿐인 줄 · **문서 전체**. 셋을 모아 **품는 순서로** 사슬을 세우고(안쪽부터, 앞 단계를 품고 같지 않은 것만 — 어긋난 범위는 버린다) 기준 범위보다 넓은 것만 남긴다 | VS Code `provideSelectionRanges` 의 동작 |
+| **1층을 쓰는 때** | 커서마다: 준비된 서버가 없거나 provider 가 없거나 · 오류·시간 초과 · **서버 사슬에 기준 범위보다 넓은 것이 하나도 없을 때**(실측 ① — clangd 주석). tree-sitter 는 **트리가 있고 `editor_syntax.pending` 이 거짓일 때만** — 여는 파싱이 끊긴 동안 트리는 없거나(§2.1a) 틀릴 수 있었다(#3886) | 실측 ① · [layering](native-editor-layering.md) §2.1a |
+| **줄 단계** | 한 단계가 **다른 줄로 넘어갈 때** 그 앞 단계의 줄들을 「앞뒤 공백을 뺀 줄」과 「줄 전체」로 한 번씩 끼운다(앞 단계를 품고 다음 단계에 품기는 것만) | VS Code `selectLeadingAndTrailingWhitespace`(기본 켬)의 동작 |
+| **대기** | 첫 키에 서버에 묻고 답을 기다린다(실측 17~59 ms). 기다리는 동안 더 누른 키는 **순 걸음**(확장 +1 · 축소 −1)으로 쌓았다가 답이 오면 한 번에 옮긴다. 답은 **보낼 때의 (`editor_lsp_version`, 선택들)** 이 지금과 같을 때만 든다 — 다르면 버린다. **500 ms** 안에 안 오면 1층으로 세우고 늦은 답은 버린다(서버가 멈춰도 키가 죽지 않는다) | 실측 · 계획 공격 |
+| **상태** | Term 의 `editor_smart_select` — 커서마다 범위 스택 + 인덱스, 그리고 **세운 뒤의 (`editor_lsp_version`, 선택들)**. 다음 키에서 그 둘이 지금과 같고 스택 수가 커서 수와 같을 때만 잇는다 — 아니면 지금 선택에서 새로 세운다. 이 한 대조가 「커서가 움직였다」와 「caret 을 안 옮기는 편집(포맷 등)」을 둘 다 잡는다(`refreshAfterEdit` 가 version 을 늘 올린다) | native-editor §12 · 적대적 1회차 「구멍」 |
+| **멀티 커서** | 커서마다 스택. 옮긴 뒤 `selection.mergeOverlapping`(맞닿아도 합친다 — maru 규칙, VS Code 는 겹칠 때만)을 거치고 **합친 뒤의 선택**을 저장한다 — 합쳐져 수가 줄면 다음 키는 새로 세운다 | [문서 모델](native-editor-document-model.md) §3.2 |
+| **옮긴 뒤** | anchor = 범위 시작, focus = 끝 · `breakUndoGroup` · `revealPrimaryCaret`. 축소는 인덱스 −1, 0 에서는 제자리 · 상태가 없으면 축소는 무동작 | VS Code |
+| **하지 않는 것** | 보조 키 `⌃⇧→` · 비교 뷰(축이 둘 — [visual-mapping](native-editor-visual-mapping.md) §4.1g) · 설정(하위 낱말·줄 단계 끄기) · 메뉴 항목 · 괄호 기반 provider(1층 tree-sitter 가 그 자리다) | 다음 |
+
+**VS Code 와 다른 점(의도).** ① 빈 caret 이 낱말 끝에 닿으면 **낱말 시작으로 묻는다**(실측 ② — 그대로 물으면 tsgo 에서만 식별자가 빠진다). ② 서버가 기준보다
+넓은 범위를 안 주면 **그 커서에 한해 tree-sitter 로 채운다**(VS Code 는 provider 가 있으면 괄호 provider 도 안 붙여 clangd 주석에서 낱말 → 줄 → 파일로
+건너뛴다). ③ **편집도 상태를 버린다**(VS Code 는 커서 이벤트만 들어 caret 을 안 옮기는 편집 뒤에도 옛 사슬로 축소한다). ④ 멀티 커서 합치기는 maru 의
+맞닿음 규칙. ⑤ **500 ms 시간 초과**(VS Code 는 끝없이 기다린다). ⑥ 비교 뷰 미지원.
+
+**관측점**: 판정자 `SSEL*`(순수: 사슬 세우기 · 하위 낱말 · 줄 단계 · 응답 평탄화 · utf-16 · 상한 · provider) · 제품 경계(키 → 선택, 대기·순 걸음, 낡은
+답 버림, 시간 초과 폴백, 편집·이동 무효화, 멀티 커서 합치기, 비교 뷰 양보, 병합 판 무동작). 카운터 `editor_smart_select.{sent, applied, dropped_stale,
+timeout_fallback, layer1_only}`. 가짜 서버 표식 `SSRNONE`·`SSRSTALL`·`SSRERR`, `MARU_FAKE_LSP_NOSRCAP=1`.
+
 ### 8.3 관측 가능성과 민감정보
 
 editor event는 처음부터 하나의 domain schema를 공유하되 문서 원문을 기본 trace에 넣지 않는다.

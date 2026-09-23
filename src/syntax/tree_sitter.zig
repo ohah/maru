@@ -680,6 +680,35 @@ pub const Provider = struct {
         return n;
     }
 
+    /// 선택 확장의 한 단계(tooling §8.2q) — 문서 절대 byte `[start, end)`.
+    pub const ByteRange = struct { start: u32, end: u32 };
+
+    /// 한 caret 이 쌓을 수 있는 조상 범위의 상한(§8.2q). 깊은 트리(수천 단 중첩)에서 한 번의 키가 끝없이 걷지 않게.
+    pub const max_enclosing: usize = 256;
+
+    /// **`[lo, hi)` 를 품는 노드부터 뿌리까지**, 안쪽부터 바깥 순서로(tooling §8.2q — 구조 기반 선택 확장의 1층).
+    /// 같은 범위의 노드가 겹치면(부모가 자식과 같은 byte 를 덮는다) 한 번만 낸다. 트리가 없으면 빈 목록.
+    ///
+    /// **byte 로만 읽는다** — 행·열(`ts_node_start_point`)은 쓰지 않는다: 편집 통지가 옛 끝의 행·열을 근사로 넘기므로
+    /// (`editor_syntax.onEditSpan`) 점 좌표는 편집 뒤에 어긋날 수 있다. byte 는 정확하다.
+    pub fn enclosingRanges(self: *Provider, allocator: std.mem.Allocator, lo: u32, hi: u32, out: *std.ArrayList(ByteRange)) error{OutOfMemory}!void {
+        out.clearRetainingCapacity();
+        const tree = self.tree orelse return;
+        const root = c.ts_tree_root_node(tree);
+        var node = c.ts_node_descendant_for_byte_range(root, lo, hi);
+        while (!c.ts_node_is_null(node)) : (node = c.ts_node_parent(node)) {
+            const s = c.ts_node_start_byte(node);
+            const e = c.ts_node_end_byte(node);
+            if (s > lo or e < hi) continue; // 조상이면 품는다 — 어긋나면 그 단은 버린다(방어)
+            if (out.items.len > 0) {
+                const last = out.items[out.items.len - 1];
+                if (last.start == s and last.end == e) continue;
+            }
+            try out.append(allocator, .{ .start = s, .end = e });
+            if (out.items.len >= max_enclosing) break;
+        }
+    }
+
     /// 접을 수 있는 **줄 범위** 하나(§4 — 접힘의 tree-sitter 층).
     pub const FoldSpan = struct {
         /// 접어도 보이는 줄(화살표가 여기 선다).
@@ -2118,7 +2147,48 @@ test "SYN41 끊긴 여는 파싱 뒤 문서가 바뀌면 처음부터 다시 판
     try std.testing.expectEqualStrings(std.mem.span(want3), std.mem.span(got3));
 }
 
-test "SYN27이름 없는 노드는 심볼이 아니다 — zig 익명 test 블록이 목록에 안 든다" {
+test "SYN42 조상 범위 — 안쪽부터 뿌리까지, 같은 범위는 한 번, 트리 없으면 빈 목록 (tooling §8.2q)" {
+    // **되는가를 먼저 잰다**(구현 전 반증 실험): 저장소가 한 번도 안 부른 `ts_node_parent`·`ts_node_descendant_for_byte_range`
+    // 로 세 언어에서 사슬이 서는지. 식별자 하나를 품는 사슬이 **그 식별자 → 식 → … → 뿌리** 로 커지는지 본다.
+    const allocator = std.testing.allocator;
+    const Case = struct { lang: Language, src: []const u8, expr: []const u8 };
+    const cases = [_]Case{
+        .{ .lang = .zig, .src = "pub fn f(a: u32) u32 {\n    return a + 1;\n}\n", .expr = "a + 1" },
+        .{ .lang = .typescript, .src = "function f(a: number) {\n  return a + 1;\n}\n", .expr = "a + 1" },
+        .{ .lang = .c, .src = "int f(int a) {\n  return a + 1;\n}\n", .expr = "a + 1" },
+    };
+    var out: std.ArrayList(Provider.ByteRange) = .empty;
+    defer out.deinit(allocator);
+    for (cases) |cs| {
+        var prov = Provider.init(cs.src, cs.lang, 0) orelse return error.NoProvider;
+        defer prov.deinit();
+        const at: u32 = @intCast(std.mem.indexOf(u8, cs.src, cs.expr).?);
+        try prov.enclosingRanges(allocator, at, at + 1, &out); // `a` 한 글자(식별자)
+        try std.testing.expect(out.items.len >= 4); // a → a + 1 → return 문 → … → 뿌리(단 수는 문법마다 다르다)
+        try std.testing.expectEqual(at, out.items[0].start);
+        try std.testing.expectEqual(at + 1, out.items[0].end);
+        // 안쪽부터 바깥 — 매 단계가 앞 단계를 품고 **같지 않다**.
+        for (out.items[1..], 0..) |r, i| {
+            const prev = out.items[i];
+            try std.testing.expect(r.start <= prev.start and r.end >= prev.end);
+            try std.testing.expect(!(r.start == prev.start and r.end == prev.end));
+        }
+        var has_expr = false; // 이항식 노드가 사슬에 있다
+        for (out.items) |r| {
+            if (r.start == at and r.end == at + cs.expr.len) has_expr = true;
+        }
+        try std.testing.expect(has_expr);
+        try std.testing.expectEqual(@as(u32, 0), out.items[out.items.len - 1].start); // 마지막은 뿌리
+    }
+    // 트리가 없으면 빈 목록(끊긴 여는 파싱 · 상한 초과 — §2.1a). 앞 내용이 남아 있어도 비운다.
+    var empty = Provider.init("", .zig, 0) orelse return error.NoProvider;
+    defer empty.deinit();
+    try out.append(allocator, .{ .start = 9, .end = 9 });
+    try empty.enclosingRanges(allocator, 0, 0, &out);
+    try std.testing.expectEqual(@as(usize, 0), out.items.len);
+}
+
+test "SYN27 이름 없는 노드는 심볼이 아니다 — zig 익명 test 블록이 목록에 안 든다" {
     // **이름 없는 심볼은 심볼이 아니다**(§7.5) — 목록의 항목은 이름을 가져야 클릭할 수 있다.
     // 그 규율은 `symbolNameNode` 가 null 을 내면 건너뛰는 한 줄인데, **표본에 이름 없는 노드가
     // 없으면 그 줄을 지워도 아무 판정자가 안 죽는다**(뮤테이션에서 실제로 살아남았다).

@@ -449,7 +449,14 @@ pub const Provider = struct {
     /// §5.3이 *"통지가 없으면 증분 파싱이 성립하지 않아 매번 전체 재파싱이 된다"*고 적은 그 자리다.
     ///
     /// **상한을 넘으면 트리를 버린다**(그 뒤 질의는 빈 목록이다).
+    ///
+    /// **끊긴 파싱을 먼저 버린다**(§2.1a 계약 — *"재개 도중 문서가 바뀌면 `ts_parser_reset`"*). 이 입구는 **새 내용**을
+    /// 들고 오는데, 여는 파싱이 예산에 끊겨 있으면 파서가 그 반쯤 판 상태를 **이 원문에 이어 판다** — 이미 읽은 앞부분이
+    /// 길이가 바뀌게 달라졌으면 byte 위치가 어긋나 트리가 틀린다(오류 노드가 서고 노드가 엉뚱한 byte 를 가리킨다 — `SYN41`).
+    /// **`setSourceBudgeted` 에는 넣지 않는다**: 이어 파는 방법이 바로 그 함수를 **같은 인자로 다시 부르기**라서, 거기서
+    /// 버리면 큰 파일은 프레임마다 처음부터 다시 파다 영영 안 끝난다(`SYN15` 의 재개 루프가 그 변이를 잡는다).
     pub fn setSource(self: *Provider, source: []const u8) void {
+        c.ts_parser_reset(self.parser);
         _ = self.setSourceBudgeted(source, 0);
     }
 
@@ -477,7 +484,12 @@ pub const Provider = struct {
 
     /// 예산을 든 증분 파싱(§2.1a). 끊기면 **옛 트리로 계속 그린다** — 편집 전 색이지만 무색보다 낫고,
     /// 다음 프레임에 재개한다.
+    ///
+    /// **끊긴 파싱을 먼저 버린다**(`setSource` 와 같은 이유 — 편집은 언제나 새 내용이다). 제품이 밟는 자리는 「옛 트리 없음」
+    /// 갈래다: 여는 파싱이 끊긴 채로 백업 복원이 문서 전체를 갈아 끼운다. 예산을 든 증분이 끊긴 뒤 다음 편집이 오는 경우도
+    /// 같다(반쯤 판 것은 **편집 전** 내용이다) — 둘 다 `SYN41` 이 잰다.
     pub fn onEditBudgeted(self: *Provider, source: []const u8, e: Edit, budget_ns: u64) void {
+        c.ts_parser_reset(self.parser);
         const old_tree = self.tree orelse {
             _ = self.setSourceBudgeted(source, budget_ns);
             return;
@@ -2026,7 +2038,87 @@ test "SYN26 예산에 끊긴 전체 파싱 동안 심볼 목록은 비어 있다
     try std.testing.expectEqual(@as(usize, 400), list.items.len);
 }
 
-test "SYN27 이름 없는 노드는 심볼이 아니다 — zig 익명 test 블록이 목록에 안 든다" {
+test "SYN41 끊긴 여는 파싱 뒤 문서가 바뀌면 처음부터 다시 판다 — 반쯤 판 상태를 새 문서에 이어 붙이지 않는다 (§2.1a)" {
+    // **§2.1a 계약의 셋째 줄이다**: *"재개 도중 문서가 바뀌면 `ts_parser_reset` 하고 새 내용으로 다시 시작한다."*
+    // 파서는 끊긴 파싱을 **자기 안에 들고 있다가** 다음 호출에서 이어 판다 — 그때 넘긴 원문이 달라도 그대로 잇는다
+    // (`api.h` 의 `ts_parser_reset` 주석). 그래서 이미 읽은 앞부분이 **길이가 바뀌게** 달라지면 byte 위치가 어긋나
+    // 트리가 틀린다(오류 노드가 서고 노드가 엉뚱한 byte 를 가리킨다). 백업 복원이 그 경로다 — 여는 파싱이 끊긴 채로
+    // 문서 전체를 갈아 끼운다(`editor_backup.restoreFromRecord`).
+    //
+    // **편집은 길이를 바꿔야 한다.** 길이가 같은 변경(숫자 하나)은 위치가 안 어긋나 reset 이 없어도 같은 트리가 나온다
+    // (실측 2026-09-23: 같은 길이 0/6, 삽입·삭제 9/9 틀어짐) — 그 픽스처로는 이 판정자가 늘 초록이다.
+    const allocator = std.testing.allocator;
+    var src: std.ArrayList(u8) = .empty;
+    defer src.deinit(allocator);
+    var i: usize = 0;
+    while (i < 400) : (i += 1) try src.print(allocator, "pub fn f{d}() void {{ _ = {d}; }}\n", .{ i, i });
+
+    var prov = Provider.init("", .zig, 0) orelse return error.SkipZigTest;
+    defer prov.deinit();
+    // 1ns 예산 = 첫 콜백에서 끊긴다(`SYN26` 과 같은 수법 — 기계 속도에 안 기댄다).
+    if (prov.setSourceBudgeted(src.items, 1) == .done) return error.SkipZigTest;
+
+    // 앞머리에 한 줄을 넣는다 — 이미 읽힌 범위 안이고 길이가 바뀐다.
+    const memo = "// memo\n";
+    var edited: std.ArrayList(u8) = .empty;
+    defer edited.deinit(allocator);
+    try edited.appendSlice(allocator, memo);
+    try edited.appendSlice(allocator, src.items);
+    prov.onEdit(edited.items, .{
+        .start_byte = 0,
+        .old_end_byte = 0,
+        .new_end_byte = memo.len,
+        .start_point = .{ .row = 0, .column = 0 },
+        .old_end_point = .{ .row = 0, .column = 0 },
+        .new_end_point = .{ .row = 1, .column = 0 },
+    });
+
+    var fresh = Provider.init(edited.items, .zig, 0) orelse return error.NoProvider;
+    defer fresh.deinit();
+    const got_tree = prov.tree orelse return error.NoTree; // 예산 없는 편집 경로는 끝까지 판다
+    const want_tree = fresh.tree orelse return error.NoTree;
+    const got_root = c.ts_tree_root_node(got_tree);
+    try std.testing.expect(!c.ts_node_has_error(got_root));
+    // **새로 판 트리와 모양이 같다** — 오류가 없다는 것만으로는 노드가 엉뚱한 byte 를 가리키는 틀림을 못 거른다.
+    const got = c.ts_node_string(got_root);
+    defer std.c.free(got);
+    const want = c.ts_node_string(c.ts_tree_root_node(want_tree));
+    defer std.c.free(want);
+    try std.testing.expectEqualStrings(std.mem.span(want), std.mem.span(got));
+    try std.testing.expectEqual(c.ts_node_start_byte(c.ts_node_child(c.ts_tree_root_node(want_tree), 0)), c.ts_node_start_byte(c.ts_node_child(got_root, 0)));
+
+    // **통째로 다시 파는 입구(`setSource` — 범위를 모르는 편집이 `reparse` 로 온다)도 같다.** 다시 끊어 놓고 다른 원문으로 판다.
+    var prov2 = Provider.init("", .zig, 0) orelse return error.NoProvider;
+    defer prov2.deinit();
+    if (prov2.setSourceBudgeted(src.items, 1) == .done) return error.SkipZigTest;
+    prov2.setSource(edited.items);
+    const got2 = c.ts_node_string(c.ts_tree_root_node(prov2.tree orelse return error.NoTree));
+    defer std.c.free(got2);
+    try std.testing.expectEqualStrings(std.mem.span(want), std.mem.span(got2));
+
+    // **예산을 든 증분이 끊긴 뒤 다음 편집**(트리가 있는 갈래). 첫 편집(앞머리 `// memo`)을 1ns 로 끊으면 옛 트리가 남고
+    // 파서는 그 편집의 반쯤 판 상태를 든다. 이어서 둘째 편집(앞머리에 한 줄 더)이 오면 새 내용으로 처음부터 판다.
+    var prov3 = Provider.init(src.items, .zig, 0) orelse return error.NoProvider;
+    defer prov3.deinit();
+    const first: Edit = .{ .start_byte = 0, .old_end_byte = 0, .new_end_byte = memo.len, .start_point = .{ .row = 0, .column = 0 }, .old_end_point = .{ .row = 0, .column = 0 }, .new_end_point = .{ .row = 1, .column = 0 } };
+    prov3.onEditBudgeted(edited.items, first, 1);
+    if (prov3.tree == null) return error.NoTree; // 끊겨도 옛 트리로 그린다(§2.1a)
+    const memo2 = "// again\n";
+    var edited2: std.ArrayList(u8) = .empty;
+    defer edited2.deinit(allocator);
+    try edited2.appendSlice(allocator, memo2);
+    try edited2.appendSlice(allocator, edited.items);
+    prov3.onEdit(edited2.items, .{ .start_byte = 0, .old_end_byte = 0, .new_end_byte = memo2.len, .start_point = .{ .row = 0, .column = 0 }, .old_end_point = .{ .row = 0, .column = 0 }, .new_end_point = .{ .row = 1, .column = 0 } });
+    var fresh3 = Provider.init(edited2.items, .zig, 0) orelse return error.NoProvider;
+    defer fresh3.deinit();
+    const got3 = c.ts_node_string(c.ts_tree_root_node(prov3.tree orelse return error.NoTree));
+    defer std.c.free(got3);
+    const want3 = c.ts_node_string(c.ts_tree_root_node(fresh3.tree orelse return error.NoTree));
+    defer std.c.free(want3);
+    try std.testing.expectEqualStrings(std.mem.span(want3), std.mem.span(got3));
+}
+
+test "SYN27이름 없는 노드는 심볼이 아니다 — zig 익명 test 블록이 목록에 안 든다" {
     // **이름 없는 심볼은 심볼이 아니다**(§7.5) — 목록의 항목은 이름을 가져야 클릭할 수 있다.
     // 그 규율은 `symbolNameNode` 가 null 을 내면 건너뛰는 한 줄인데, **표본에 이름 없는 노드가
     // 없으면 그 줄을 지워도 아무 판정자가 안 죽는다**(뮤테이션에서 실제로 살아남았다).

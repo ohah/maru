@@ -227,12 +227,16 @@ pub fn spanFromInverse(inverse_changes: []const maru.session.editor.delta.Change
 
 /// 문서가 통째로 바뀌었다 — 전체를 다시 판다.
 ///
-/// **undo·redo가 이 길로 온다.** 그 경로는 한 번에 **여러 항목**을 되돌리는데, 각 적용이 그 뒤
-/// offset을 밀므로 범위를 나이브하게 합치면 어긋난 통지가 된다. 틀린 트리보다 **한 번 더 파는
-/// 것**이 낫고, undo는 타이핑보다 훨씬 드물다(154KB에서 5ms — 키 입력마다 드는 값이 아니다).
+/// **범위를 모르는 편집이 이 길로 온다**(`refreshAfterEdit` 의 `edit == null`). 이 주석은 「undo·redo 가 이 길로 온다」고 적고 있었지만
+/// 지금의 undo·redo 는 `undoGroupSpan` 이 묶음 전체를 감싸는 범위를 만들어 `onEditSpan` 으로 간다(2026-09-23 실측 — `ES42` 적대적 3회차에서 undo 로
+/// 이 입구를 재려던 판정자가 이 길을 한 번도 안 지났다). 남은 것은 `spanFromInverse` 가 `null` 을 내는 방어 갈래(역연산이
+/// 비었거나 앞뒤가 뒤집혔다)와 묶음 안에 범위를 못 만든 항목이 낀 undo 다. 틀린 트리보다 **한 번 더 파는 것**이 낫다.
 pub fn reparse(self: *State, source: []const u8) void {
     const p = &(self.provider orelse return);
     p.setSource(source);
+    // **이어 팔 것이 안 남는다** — 예산 없이 끝까지 팠다(끊긴 여는 파싱은 `setSource` 가 버렸다). 남겨 두면 다음 프레임의
+    // `resumeParse` 가 방금 맞게 판 트리를 버리고 처음부터 다시 나눠 판다(그동안 무색 · 진단은 직전 목록) — `ES41`.
+    self.pending = false;
 }
 
 /// 편집을 provider에 알린다. 행·열은 **편집 후** 줄 인덱스에서 채운다.
@@ -264,6 +268,8 @@ pub fn onEditSpan(
         .old_end_point = at,
         .new_end_point = to,
     });
+    // `reparse` 와 같다 — `onEdit` 은 예산이 없어 끝까지 판다(옛 트리가 없던 여는 도중이면 처음부터). 이어 팔 것이 없다.
+    self.pending = false;
 }
 
 fn pointOf(idx: maru.session.editor.line_index.LineIndex, offset: usize) syntax.Point {

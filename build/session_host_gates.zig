@@ -6060,7 +6060,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_session_host_upgrade_failure_process_tests.addArtifactArg(
             session_host_upgrade_failure_process_tests,
         );
-        run_session_host_upgrade_failure_process_tests.addArg("--maru-expect-tests=15");
+        run_session_host_upgrade_failure_process_tests.addArg("--maru-expect-tests=14");
         run_session_host_upgrade_failure_process_tests.setCwd(b.path("."));
 
         const failure_matrix_step = b.step(

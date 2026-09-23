@@ -9,6 +9,8 @@ const std = @import("std");
 pub const Counters = struct {
     selected_owners: u64 = 0,
     pump_delta_entries: u64 = 0,
+    /// 선택됐지만 할 일이 없다고 증명돼 펌프하지 않은 owner(`quietPumpProven`). selected = pump 한 owner + 이것.
+    quiet_pumps_skipped: u64 = 0,
     timestamp_seals: u64 = 0,
     client_slot_registry_visits: u64 = 0,
     socket_read_attempts: u64 = 0,
@@ -75,6 +77,11 @@ pub fn recordSelectedOwner() void {
 pub fn recordPumpDelta() void {
     const owner = active() orelse return;
     increment(&owner.counters.pump_delta_entries);
+}
+
+pub fn recordQuietPumpSkipped() void {
+    const owner = active() orelse return;
+    increment(&owner.counters.quiet_pumps_skipped);
 }
 
 pub fn recordTimestampSeal() void {

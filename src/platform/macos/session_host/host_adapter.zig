@@ -719,6 +719,10 @@ pub const HostAdapter = struct {
         return self.slot.currentHasBufferedRuntimeWork(self.slot.connectionGeneration(), stream_id);
     }
 
+    pub fn quietPumpProven(self: *HostAdapter, stream_id: u64) client_mod.ClientError!bool {
+        return self.slot.currentQuietPumpProven(self.slot.connectionGeneration(), stream_id);
+    }
+
     pub fn hasAnyBufferedRuntimeWork(self: *HostAdapter) client_mod.ClientError!bool {
         return self.slot.currentHasAnyBufferedRuntimeWork(self.slot.connectionGeneration());
     }

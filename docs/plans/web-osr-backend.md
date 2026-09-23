@@ -31,7 +31,7 @@
 | D3 | 원격 `localhost` 포트 전달 | 후속. [SSH 클라이언트](../ssh-client.md) §3 이 포트 포워딩을 「안 하는 것」으로 못박았다 — 넓히는 결정이 따로 필요 | 없음(후속) |
 | D4 | 팝업(`<select>`) 합성 위치 | **maru 렌더러가 팝업을 별도 quad 로** — sidecar 합성은 본 화면 사본 때문에 복사가 한 번 더 든다 | W6 |
 | D5 | 우클릭 메뉴 | chrome 메뉴(일관성) vs NSMenu(네이티브 관용) — W6 진입 때 정한다 | W6 |
-| D7 | CEF 쿠키 암호화 키(Keychain) | **`--use-mock-keychain`** — 진짜 Keychain 은 항목 이름이 Chromium 브라우저와 같은 「Chromium Safe Storage」이고, formula 소스 빌드는 업그레이드마다 서명이 바뀌어 허용 창이 반복될 수 있으며, 거부·실패하면 쿠키가 조용히 저장되지 않는다(실측). 대가: 디스크 위 쿠키 보호가 파일 권한(프로필 디렉터리 0700)뿐 | W1 |
+| D7 | CEF 쿠키 암호화 키(Keychain) | **`--use-mock-keychain`** — 진짜 Keychain 은 항목 이름이 Chromium 브라우저와 같은 「Chromium Safe Storage」이고, formula 소스 빌드는 업그레이드마다 서명이 바뀌어 허용 창이 반복될 수 있으며, 거부·실패하면 쿠키가 조용히 저장되지 않는다(실측). 대가: 쿠키 파일을 푸는 키가 Chromium 에 박힌 공개값이라, 같은 사용자 권한으로 도는 프로그램이면 누구나 파일을 읽어 로그인 쿠키를 꺼낼 수 있다(보호는 파일 권한 0700 — 다른 계정만 막는다). **서명을 Developer ID 로 고정해도** 업그레이드마다의 재허용은 사라지지만(ad-hoc 서명의 지정 요구사항은 빌드마다 바뀌는 cdhash 임을 실측) 항목 이름 충돌은 남는다 — CEF 헤더에 이름을 바꾸는 설정이 없다 | W1 |
 | D8 | dmg(서명·공증 universal)·Intel 사용자에게 CEF 공급 | 후보: formula 를 따로 설치하게 안내 / 앱이 첫 사용 때 내려받아 검증(sha256)해 사용자 디렉터리에 둔다. dmg 는 hardened runtime 이지만 sidecar 는 별도 프로세스라 라이브러리 검증과 무관 — 실측 전 | W7 |
 
 ## 1. 구조

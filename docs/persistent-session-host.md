@@ -6135,7 +6135,7 @@ candidate window ID/owner identity/bounds, `firstRect`, capture digest와 captur
 상태를 결속한다. AppKit `firstRect`와 Quartz bounds는 원점 규약이 다르므로 직접 비교하지 않는다. display ID,
 `NSScreen.frame`, `CGDisplayBounds`를 함께 싣고 두 point-space display 크기가 같은지 확인한 뒤 pure converter 하나가 Quartz
 좌상단 원점으로 정규화한다. backing scale은 이 변환에 기여하지 않으므로 receipt 권위에서 제외한다. 음수 origin·좌우/상하
-multi-display fixture가 같은 변환을 검증한다. candidate bounds는 같은 display에서 v2b0의
+multi-display fixture가 같은 변환을 검증한다. candidate bounds 전체가 caret display의 Quartz bounds 안에 있어야 하고, 같은 display에서 v2b0의
 5회 관측이 정한 위/아래 placement별 anchor band에 있어야 하고, 화면 가장자리의 정상적인 위쪽 flip을 허용한다. 관측 전에
 임의 pixel 거리 상한을 만들지 않는다. 판정 뒤에는
 candidate window 부재, original input source, exact first responder와 restore record 소멸을 확인한다. 전체 화면 diff,

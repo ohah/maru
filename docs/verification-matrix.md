@@ -618,7 +618,12 @@ recovery 2/input 4, historical·IME·clipboard 각 1, marked 8/insert 2, post-ev
 진단 앱의 잠금 해제·exact-frontmost 회차에서 실패 분기 실측이 남아 있다. 2026-09-16 진단 앱 재실행은
 recovery 2/input 4, historical·clipboard 각 1까지 도달했지만 frontmost가 `loginwindow`여서
 `global-keyboard-focus`로 중단됐다. IME callback·post-event preflight·후보 관측에 도달하지 않았으므로
-이 회차는 권한 승인이나 후보 판정의 통과·실패 증거가 아니다. v2b1 단일-window capture/판정자는 구현 전이다.
+이 회차는 권한 승인이나 후보 판정의 통과·실패 증거가 아니다. v2b1 단일-window capture/판정자는
+구현됐으며 Zig reducer가 첫 opened inventory에서 고른 ID 하나를 ScreenCaptureKit이 캡처한다.
+캡처 전후 ID/PID/서명/geometry를 재검증하고 digest·pixel size를 5회 open/close·anchor·복원 증거에
+결속한다. Debug·ReleaseFast focused 판정 12+12, Swift typecheck와 app build는 통과했다.
+2026-09-23 제품 회차는 복구까지 도달했지만 전면 PID가 `loginwindow`여서
+`global-keyboard-focus`에서 중단됐다. IME 입력·후보창 캡처에 도달하지 않았으므로 v2b1 제품 gate는 미완료다.
 추가 적대적 감사에서 후보창 단계의 전역 HID 송신이 first responder만 확인하던 경계를 발견했다. 공통 송신 leaf에
 exact-frontmost PID·앱 active·first responder 재확인을 추가했고, 회귀 boundary는 수정 전 실패·수정 후 3/3 통과했다.
 이 수정의 Swift typecheck와 `macos-app-bundle` build·strict code-sign 검증도 통과했다. `/tmp` 승인 앱은 보존했으며,
@@ -645,7 +650,7 @@ generation이 변하면 RED다. AppKit/Quartz 좌표는 display ID·두 point-sp
 converter 하나로 Quartz 좌상단 원점에 정규화한다. backing scale은 무관한 권위 필드로 싣지 않으며 음수 origin·좌우/상하
 multi-display fixture로 닫는다. v2b1은 그 identity와 새 window
 ID를 캡처 직전·직후 PID/signing identity와 함께 재검증해 단일 OS window capture를 만들고, v2a runtime/surface/`firstRect`, candidate bounds와 digest를 strict receipt로
-결속한다. 후보가 다른 display이거나 v2b0이 관측한 위/아래 placement별 anchor band 밖이면 실패하되 화면 가장자리의 정상
+결속한다. 후보 bounds 전체가 caret display의 Quartz bounds 밖이거나 v2b0이 관측한 위/아래 placement별 anchor band 밖이면 실패하되 화면 가장자리의 정상
 flip은 허용한다. 임의 거리 상한은 관측 전에 정하지 않는다. window 소멸·input source·first responder·restore
 record 정산까지 gate에 포함한다. pure RED gate는 producer 선필터·inventory cap+1, duplicate/new-but-persistent/
 unsigned·non-Apple/PID·signing drift/close 부재/screen mutation과 multi-display 좌표 변이를 먼저 거부한다. 전체 화면 diff,

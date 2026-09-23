@@ -100,6 +100,11 @@ const allowlist = [_]Allowed{
         .function = "drawCells",
         .reason = "IME preedit 오버레이: 확정 전 텍스트를 base snapshot 위 scratch에 codepoint 단위로 임시 렌더한다 — 셀 저장이 아니라 표시 전용이고, 주 타깃 한글 IME가 완성형(NFC) marked text를 보내 실사용 증상이 없다(docs/grapheme-clustering.md §4.7의 '의도된 한계').",
     },
+    .{
+        .file = "terminal/preedit.zig",
+        .function = "drawCarryLinear",
+        .reason = "IME commit echo 이전의 client-local scratch carry를 행 경계까지 임시 렌더한다. drawCells와 동일한 NFC 중심 한계이며 canonical 셀 저장이나 chrome 텍스트 경로가 아니다(docs/grapheme-clustering.md §4.7).",
+    },
 };
 
 fn readSource(allocator: std.mem.Allocator, path: []const u8) ![]u8 {

@@ -16376,9 +16376,11 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
             // `zig build test` 의 이 판정자가 `expected 11664, found 11680` 으로 잡았다. ⚠️ **그 PR 은 초록이었다** —
             // 이 pin 을 도는 것은 `zig build test` 뿐이고, PR 의 session-host 잡은 바뀐 파일이 `editor` 축이라
             // 영역 게이팅으로 스킵됐다. 로컬 `mise run check` 도 그 artifact 를 ReleaseFast 로 돌지 않아 초록이었다.
-            .Debug => 11744,
             // 2026-09-23 빈 드레인 건너뛰기(`idle_drain_epoch`·`idle_drain_generation`, u64 둘): Debug +16 · ReleaseFast +16(실측).
-            .ReleaseFast => 11696,
+            // 2026-09-26 이 필드를 유지한 main에 IME echo carry의 lazy descriptor를 합쳐 재측정:
+            // Debug +32 · ReleaseFast +16. payload 자체는 조합할 때만 할당한다.
+            .Debug => 11776,
+            .ReleaseFast => 11712,
             else => unreachable,
         },
         // ⚠️ 이 두 값은 **이 트리에서 측정할 수 없다.** `remote_runtime` 은 배럴이 macOS 에서만 열어서
@@ -16393,8 +16395,8 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
     };
     const expected_runtime_remainder: usize = switch (builtin.os.tag) {
         .macos => switch (builtin.mode) {
-            .Debug => 9008, // 2026-09-23 빈 드레인 건너뛰기 +16(위 표와 같은 델타 — 실측)
-            .ReleaseFast => 8960, // 2026-09-23 빈 드레인 건너뛰기 +16(위 표와 같은 델타 — 실측)
+            .Debug => 9040, // 2026-09-26 idle-drain 필드와 IME echo carry를 합친 재측정(위 표와 같은 델타)
+            .ReleaseFast => 8976, // 같은 재측정에서 PendingEventOwner를 뺀 값
             else => unreachable,
         },
         // 위와 같은 이유로 측정 불가 — 원래 값 그대로다.
@@ -19983,8 +19985,9 @@ test "CR2a RemoteGeneration field inventory는 generation owner 열두 개만 �
             // 2026-09-19 `48f89bc10`(한국어 preedit 앵커) 뒤 둘 다 +16 — 위 `C3-3b2b3` 의 표와 함께 움직인다(경계 판정자가 둘을 센다).
             // 2026-09-20 kitty 매체 전송(`KittyGraphicsCommand` 에 `data_size`·`data_offset`·`internal_id` — `TerminalCore.kitty_chunk_cmd` 안):
             // Debug +16 · ReleaseFast +0(기존 패딩에 들어감) — `test-session-host-2c3d-c3-3b2b3` 에서 실측.
-            .Debug => 11744,
-            .ReleaseFast => 11696, // 2026-09-23 빈 드레인 건너뛰기 +16 — 위 사본과 «같은 값이어야 한다»(CR2a 가 둘을 센다)
+            // 2026-09-26 빈 드레인 필드와 IME echo carry descriptor를 함께 재측정(위 사본과 같은 값).
+            .Debug => 11776,
+            .ReleaseFast => 11712,
             else => unreachable,
         },
         // ⚠️ 이 두 값은 **이 트리에서 측정할 수 없다.** `remote_runtime` 은 배럴이 macOS 에서만 열어서

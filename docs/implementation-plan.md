@@ -1307,7 +1307,7 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    않는다. 음수 origin·좌우/상하 multi-display를 fixture로 닫는다. v2b1은 v2b0에서 고정한 exact owner identity와 새 window ID를 다시
    검증한 뒤 그 window만 캡처하고, 캡처 직전·직후 같은 window ID/PID/signing identity를 다시 확인한다. 같은 receipt에
    v2a의 exact runtime·surface, `firstRect`, candidate bounds, capture digest를
-   결속한다. 후보 bounds는 같은 display 안에서 v2b0 반복 관측으로 정한 위/아래 placement별 anchor band 안이어야 하며,
+   결속한다. 후보 bounds 전체가 caret이 속한 display의 Quartz bounds 안에 있어야 하고, 같은 display 안에서 v2b0 반복 관측으로 정한 위/아래 placement별 anchor band 안이어야 하며,
    화면 가장자리에서 OS가 위로 뒤집는 배치를 실패로 오인하지 않는다. 임의 거리 상한은 구현 전에 정하지 않는다. 후보 window
    소멸과 입력 source/first responder 복원까지 성공해야 pass다. 전체 화면 전후 pixel diff, owner-name substring, 창 제목,
    AX 텍스트나 좌표만으로 후보창을 골라서는 안 된다. v2b0은 exact 5개 open/close row만 가진 16 KiB 이하
@@ -1324,7 +1324,12 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    writer를 직접 소유한다. raw inventory 중간 파일, Swift 선택 규칙 복제, 장수명 helper, ABI retry/부분 publication은 0이다.
    Screen Recording preflight 실패는 ABI 호출과 source/HID mutation 0인 AppKit smoke의 typed `not_provisioned`로 끝나며,
    Zig ABI 자체는 `passed`/`failed`만 반환한다. v2b0b green은 v2b1 단일-window
-   pixel capture를 완료로 승격하지 않는다.
+   pixel capture를 완료로 승격하지 않는다. **v2b1 구현 중:** 첫 opened inventory의 완전본은 기존 Zig reducer가
+   exact candidate window ID를 고른 뒤에만 Swift ScreenCaptureKit adapter로 돌아간다. adapter는 그 ID 하나의
+   `SCWindow`만 filter에 넣고 캡처 전후 window ID/PID/frame과 Apple signing identity를 재검증한다. 이미지 bytes는
+   파일로 남기지 않고 digest·pixel size만 bounded evidence로 Zig에 빌려주며, 최종 5-row series·close·cleanup이 모두
+   통과한 뒤 기존 observation artifact와 별도의 absent-target v2b1 canonical receipt를 게시한다. v2b0 reducer를
+   Swift에서 복제하거나 새 window 전부를 캡처하는 fallback은 두지 않는다.
    CR6e는 세 gate로 나눈다. **CR6e-a1 transport baseline**은 제품 deadline-aware
    exact-host issuer에 실제 Unix peer의 accept 후 hello 무응답과 transient connect backoff를 주입하고, absolute deadline,
    attempt/wait 수, elapsed, fd/RSS를 strict-schema raw artifact로 남긴다. **CR6e-a2 recovery baseline**은 반복 CR6c

@@ -4288,6 +4288,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var sessionHostCandidateObservation: SessionHostIMECandidateObservation?
     private var sessionHostCandidateBefore: SessionHostIMECandidateObservation.Snapshot?
     private var sessionHostCandidateOpened: SessionHostIMECandidateObservation.Snapshot?
+    private var sessionHostCandidatePixelPending = false
+    private var sessionHostCandidatePixelEvidence: SessionHostIMECandidatePixelCapture.Evidence?
+    private var sessionHostCandidatePixelError: String?
     private var sessionHostCandidatePhase: UInt32 = 0
     private var sessionHostCandidateWaitTicks: UInt32 = 0
     private var sessionHostCandidateFailure = ""
@@ -10977,6 +10980,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 failSessionHostInputSmoke("global-input-source-restore")
                 return
             }
+            guard publishSessionHostCandidatePixel(view: view) else {
+                failSessionHostInputSmoke("candidate-pixel-receipt")
+                return
+            }
             restoreSessionHostInputSmokePasteboard()
             sessionHostInputSmokeStage = 4
             sessionHostInputSmokeRetries = 0
@@ -10989,6 +10996,41 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             ))
         default:
             break
+        }
+    }
+
+    private func publishSessionHostCandidatePixel(view: MaruMetalTerminalView) -> Bool {
+        guard let observation = sessionHostCandidateObservation,
+              let capture = sessionHostCandidatePixelEvidence,
+              let frame = sessionHostInputPixelMarked,
+              let rawRoot = ProcessInfo.processInfo.environment["MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT"] else {
+            return false
+        }
+        let root = URL(fileURLWithPath: rawRoot).standardizedFileURL
+        guard root.lastPathComponent == "session-host-cr6d-home",
+              root.deletingLastPathComponent().lastPathComponent == "maru-macos-app" else { return false }
+        let target = root.appendingPathComponent(
+            "session-host-cr6d-ime-candidate-pixel.json", isDirectory: false
+        ).standardizedFileURL
+        guard target.deletingLastPathComponent() == root else { return false }
+        let recordAbsent = sessionHostInputSmokeSourceRecordURL.map {
+            !FileManager.default.fileExists(atPath: $0.path)
+        } ?? false
+        do {
+            try observation.publishPixel(
+                sourceID: SessionHostInputSourcePolicy.korean2SetSourceID,
+                outputURL: target, capture: capture,
+                runtimeID: frame.runtimeId, surfaceID: frame.surfaceId,
+                frameGeneration: frame.frameGeneration, firstRect: frame.firstRect,
+                inputSourceRestored: sessionHostInputSmokeViewSourceRestored &&
+                    sessionHostInputSmokeGlobalSourceRestored,
+                firstResponderRestored: view.window?.firstResponder === view,
+                restoreRecordAbsent: recordAbsent && sessionHostInputSmokeSourceRecordCleared
+            )
+            return true
+        } catch {
+            sessionHostCandidatePixelError = String(describing: error)
+            return false
         }
     }
 
@@ -11103,7 +11145,39 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 if isSessionHostManualInputSmokeMode {
                     guard sessionHostManualCandidateKey == 36 else { return false }
                 }
-                sessionHostCandidateOpened = try observation.capture(counters: counters, anchor: anchor)
+                if sessionHostCandidateOpened == nil {
+                    sessionHostCandidateOpened = try observation.capture(counters: counters, anchor: anchor)
+                }
+                guard let before = sessionHostCandidateBefore,
+                      let opened = sessionHostCandidateOpened else {
+                    throw SessionHostIMECandidateObservation.Failure.malformedWindow
+                }
+                if observation.rows.isEmpty, sessionHostCandidatePixelEvidence == nil {
+                    if let failure = sessionHostCandidatePixelError {
+                        sessionHostCandidateFailure = failure
+                        failSessionHostInputSmoke("candidate-pixel-capture-failed")
+                        return false
+                    }
+                    if sessionHostCandidatePixelPending { return false }
+                    guard #available(macOS 14.0, *) else {
+                        sessionHostCandidateFailure = "screen-capture-kit-not-provisioned"
+                        failSessionHostInputSmoke("candidate-pixel-capture-not-provisioned")
+                        return false
+                    }
+                    let request = try observation.captureRequest(before: before, opened: opened)
+                    sessionHostCandidatePixelPending = true
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        do {
+                            self.sessionHostCandidatePixelEvidence = try await
+                                SessionHostIMECandidatePixelCapture.capture(request: request)
+                        } catch {
+                            self.sessionHostCandidatePixelError = String(describing: error)
+                        }
+                        self.sessionHostCandidatePixelPending = false
+                    }
+                    return false
+                }
                 if isSessionHostManualInputSmokeMode {
                     sessionHostManualCandidateKey = nil
                     sessionHostCandidatePhase = 2

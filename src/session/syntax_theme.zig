@@ -196,6 +196,29 @@ pub fn occurrenceFromTheme(theme: appearance.ResolvedTheme) color.Rgb {
     };
 }
 
+/// 현재 줄 테두리 색(visual-mapping §5.1b) — 바탕을 본문색 쪽으로 **6 %** 당긴다. VS Code 기본 테마의 `editor.lineHighlightBorder` 가 그
+/// 비율이다: 다크(바탕 `#1e1e1e`·본문 `#d4d4d4`)에서 `#282828`, 라이트(`#ffffff`·`#000000`)에서 `#eeeeee` ≈ 6 %. 바탕색이 다른 테마에서도
+/// 「바탕보다 조금 밝은(어두운) 선」이 되도록 상수가 아니라 비율로 옮긴다.
+pub fn lineHighlightFromTheme(theme: appearance.ResolvedTheme) color.Rgb {
+    const bg = theme.background;
+    const fg = theme.foreground;
+    return .{ .r = toward(bg.r, fg.r, 6), .g = toward(bg.g, fg.g, 6), .b = toward(bg.b, fg.b, 6) };
+}
+
+/// 짝 괄호 상자 테두리(§5.1b) — 본문색 55 : 바탕 45(`mix8`). VS Code 다크 기본 `#888`(같은 바탕·본문에서 이 식은 `#828282`)에 가깝다.
+pub fn bracketMatchBorderFromTheme(theme: appearance.ResolvedTheme) color.Rgb {
+    const bg = theme.background;
+    const fg = theme.foreground;
+    return .{ .r = mix8(fg.r, bg.r), .g = mix8(fg.g, bg.g), .b = mix8(fg.b, bg.b) };
+}
+
+/// `from` 을 `to` 쪽으로 `pct` % 옮긴다(정수 산술 — 반올림).
+fn toward(from: u8, to: u8, pct: u16) u8 {
+    const f: i32 = from;
+    const t: i32 = to;
+    return @intCast(f + @divTrunc((t - f) * @as(i32, pct) + (if (t >= f) @as(i32, 50) else -50), 100));
+}
+
 /// 두 색을 **바탕 쪽으로 45 %** 섞는다(정수 산술 — 파생 색 셋이 전부 이 층에서 계산된다).
 fn mix8(c: u8, bg: u8) u8 {
     const ci: u16 = c;
@@ -563,4 +586,32 @@ test "SC8 property 는 function 과, attribute 는 keyword 와 갈린다 — 기
     try testing.expect(!std.meta.eql(oc.attribute, dc.attribute));
     try testing.expect(std.meta.eql(oc.function, dc.function));
     try testing.expect(std.meta.eql(oc.keyword, dc.keyword));
+}
+
+test "LHC1 현재 줄 테두리는 바탕을 본문색 쪽으로 6 % — VS Code 기본 테마의 값이 나온다; 괄호 테두리는 55:45 (visual-mapping §5.1b)" {
+    var t: appearance.ResolvedTheme = .{
+        .background = .{ .r = 0x1e, .g = 0x1e, .b = 0x1e },
+        .foreground = .{ .r = 0xd4, .g = 0xd4, .b = 0xd4 },
+        .cursor = .{ .r = 0xff, .g = 0xff, .b = 0xff },
+        .selection = .{ .r = 0x33, .g = 0x44, .b = 0x55 },
+        .search_match = .{ .r = 0x55, .g = 0x4a, .b = 0x1a },
+        .search_match_current = .{ .r = 0x99, .g = 0x77, .b = 0x22 },
+        .sidebar_background = .{ .r = 0x28, .g = 0x28, .b = 0x28 },
+        .sidebar_active = .{ .r = 0x40, .g = 0x40, .b = 0x40 },
+        .sidebar_foreground = .{ .r = 0xe8, .g = 0xe8, .b = 0xe8 },
+        .accent = .{ .r = 0xdd, .g = 0xa1, .b = 0x5e },
+        .min_contrast = 0,
+    };
+    // 다크 기본(#1e1e1e · #d4d4d4) → VS Code `#282828` 과 1 안쪽(#292929)
+    const dark = lineHighlightFromTheme(t);
+    try std.testing.expectEqual(color.Rgb{ .r = 0x29, .g = 0x29, .b = 0x29 }, dark);
+    try std.testing.expectEqual(color.Rgb{ .r = 0x82, .g = 0x82, .b = 0x82 }, bracketMatchBorderFromTheme(t));
+    // 라이트(#ffffff · #000000) → 방향이 뒤집혀 **어두워진다**(VS Code `#eeeeee`)
+    t.background = .{ .r = 0xff, .g = 0xff, .b = 0xff };
+    t.foreground = .{ .r = 0x00, .g = 0x00, .b = 0x00 };
+    try std.testing.expectEqual(color.Rgb{ .r = 0xf0, .g = 0xf0, .b = 0xf0 }, lineHighlightFromTheme(t));
+    // 채널마다 따로 — 색 있는 바탕에서 한 채널만 움직이지 않는다
+    t.background = .{ .r = 0x00, .g = 0x80, .b = 0xff };
+    t.foreground = .{ .r = 0xff, .g = 0x80, .b = 0x00 };
+    try std.testing.expectEqual(color.Rgb{ .r = 0x0f, .g = 0x80, .b = 0xf0 }, lineHighlightFromTheme(t));
 }

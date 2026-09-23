@@ -13316,6 +13316,16 @@ test "INL11 인레이 힌트 — 서버의 `workspace/inlayHint/refresh` 는 거
     const s = f.fx.session;
     const term = f.term;
     try testing.expect(f.ready());
+    // **스냅숏 전에 모든 서버의 시작 요청이 거절되기를 기다린다.** `PaneFixture` 가 늘 `doc.zig` 를 열어
+    // 두므로 이 세션에는 clangd(`rf.c`) 말고 zls(`doc.zig`) 가짜 서버도 뜬다. 가짜는 `initialized` 마다
+    // `workspace/configuration` 을 하나 보내고 우리는 그것을 거절한다. `ready()` 는 `rf.c` 의 진단만 기다리므로
+    // zls 쪽 거절은 스냅숏 앞뒤 어디에나 올 수 있었고, 뒤에 오면 아래 「거부 수 그대로」가 1→2 로 떨어졌다
+    // (CI · 로컬 순차 30 회 중 1 회 · 8 병렬 48 회 중 2 회). 「2」를 박지 않고 클라이언트 수로 기다린다.
+    try testing.expect(pumpLspUntil(&f.fx, 3000, s, struct {
+        fn g(a: *AppSession) bool {
+            return a.editor_lsp.rejected_requests >= a.editor_lsp.clients.items.len;
+        }
+    }.g));
     const rejected_before = s.editor_lsp.rejected_requests;
     term.rt.editor_first_line = 0;
     _ = syntaxColors(s, term);

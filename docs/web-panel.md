@@ -225,7 +225,7 @@ WKWebView(WebKit)는 시스템 프레임워크라 의존성이 없지만 Chromiu
 
 #### PoC 결과 (`scratchpad/cef-osr-poc`, CEF 146 / Chromium 146)
 
-> **최신 안정판 재확인(2026-09-23)**: 아래 수치는 suji 가 받아 둔 146 으로 쟀다. 제품은 최신 안정판(154.0.23 / Chromium 154)으로 가므로 같은 PoC 를 154 minimal 배포본(sha1 검증)으로 다시 빌드해 창 없는 실행·IOSurface 가속 paint·입력 주입·`<select>`(⑧)를 재확인했다. API 버전은 `15400` 이다. **⑧ 은 154 에서 결과가 달랐다**(아래 「남은 미해결」 8). 프레임률 등 수치 표는 146 값 그대로다.
+> **최신 안정판 재확인(2026-09-23)**: 아래 수치는 suji 가 받아 둔 146 으로 쟀다. 제품은 최신 안정판(154.0.23 / Chromium 154)으로 가므로 같은 PoC 를 154 minimal 배포본(sha1 검증)으로 다시 빌드해 창 없는 실행·IOSurface 가속 paint·입력 주입·`<select>`(⑧)를 재확인했다. API 버전은 `15400` 이다. **⑧ 은 154 에서 결과가 달랐다**(아래 「남은 미해결」 8). OSR 관련 헤더(렌더·접근성 핸들러, macOS 타입)는 146 과 차이가 없고 브라우저 헤더는 문장부호 한 곳만 다르다 — 이 절이 인용한 헤더 계약은 154 에서도 그대로다. 154 는 프레임워크의 `libEGL`·`libGLESv2` 가 빠지고 `libvulkan` 이 들어와 146 PoC 의 라이브러리 링크 목록은 그대로 못 쓴다. 프레임률 등 수치 표와 아래 「pane 안 실측」은 146 값이다.
 
 ![CEF OSR 이 IOSurface 로 건너온 프레임 — 창 없이 1280x720, BGRA, ad-hoc 서명](images/web-panel-osr-iosurface.png)
 
@@ -284,7 +284,7 @@ WKWebView(WebKit)는 시스템 프레임워크라 의존성이 없지만 Chromiu
 
 #### pane 안 실측 — 터미널 프로토콜 없이 직접 라우팅 (2026-09-23)
 
-위 「입력 주입」은 PoC 가 스스로 주입한 것이다. 이어서 **실제 maru pane 안에** 띄우고 사용자 입력을 넣었다. 실험 배선은 **제품 모양이 아니다** — 브라우저 픽셀을 pane 에 올리는 기하만 빌리려고 터미널 surface 에 kitty placement(1x1 더미, 로컬 id 7000~7999)를 두고, 렌더러가 그 id 의 텍스처를 sidecar IOSurface 로 바꿔 끼웠다(위 표의 (A) 모양을 **측정 장치로만** 썼다). 입력은 PTY 를 거치지 않는다 — Swift 가 NSEvent 를 그 이미지 rect 로 hit-test 해 sidecar 로 직접 보낸다.
+위 「입력 주입」은 PoC 가 스스로 주입한 것이다. 이어서 **실제 maru pane 안에** 띄우고 사용자 입력을 넣었다(**CEF 146** 으로 쟀다 — 154 로는 PoC 단독 항목만 재확인했다). 실험 배선은 **제품 모양이 아니다** — 브라우저 픽셀을 pane 에 올리는 기하만 빌리려고 터미널 surface 에 kitty placement(1x1 더미, 로컬 id 7000~7999)를 두고, 렌더러가 그 id 의 텍스처를 sidecar IOSurface 로 바꿔 끼웠다(위 표의 (A) 모양을 **측정 장치로만** 썼다). 입력은 PTY 를 거치지 않는다 — Swift 가 NSEvent 를 그 이미지 rect 로 hit-test 해 sidecar 로 직접 보낸다.
 
 | 항목 | 결과 |
 |---|---|
@@ -380,7 +380,7 @@ WKWebView(WebKit)는 시스템 프레임워크라 의존성이 없지만 Chromiu
 | **공증이 blocker** | **아니다.** ad-hoc 서명으로 렌더러까지 동작하고, Homebrew **formula** 로 받은 산출물과 `curl` 로 받은 GitHub Release asset 에는 `com.apple.quarantine` 이 **안 붙는다**(cask 는 붙는다 — 실측으로 갈렸다). Developer ID($99/년)는 dmg/cask 채널을 열 때 필요한 것이지 이 축의 전제가 아니다 |
 | **Library Validation 이 기본 사용자 보안까지 약화** | sidecar 는 별도 실행 파일이라 메인 바이너리에 dylib 를 링크하지 않는다 |
 | **JIT entitlement 를 메인/helper 중 어디에?** | sidecar 에만. hardened runtime 을 켜지 않으면 요구 자체가 없다 |
-| **CEF prebuilt ~120~150MB** | **실측 301MB** (바이너리 200MB + Resources 79MB + Libraries 22MB). arm64 단일, 이미 스트립됨, `__text` 만 176MB 라 더 줄일 여지가 없다. locale 정리 + swiftshader 제거로 ~240MB. 참고: Electron Framework 182MB, `Google Chrome.app` 1.4GB |
+| **CEF prebuilt ~120~150MB** | **실측 146: 301MB / 154: 323MB** (프레임워크 전체, `du` MiB — 바이너리 200/225 + Resources 79/82 + Libraries 23/17). arm64 단일, 이미 스트립됨, `__text` 만 168/186 MiB 라 더 줄일 여지가 없다(초안의 「176MB」는 146 값의 10 진 표기였다). locale(`.lproj` 220 개, ~49MB — 쓰는 몇 개만 남긴다) + swiftshader(16MB) 제거로 **146 ~235MB / 154 ~258MB**. 참고(같은 기준): terminal-browser 가 받은 Electron Framework 는 바이너리 182MB·전체 272MB — 초안은 Electron **바이너리**를 CEF **전체**와 나란히 놓아 기준이 어긋났다(5 차 적대적 검증). `Google Chrome.app` 1.4GB |
 
 #### 구조와 배포
 
@@ -396,7 +396,7 @@ Maru.app (190MB, Chromium 0 바이트)
 
 - **sidecar 는 하나, 브라우저는 N 개다.** CEF 는 `root_cache_path` 단위 process singleton 이라 같은 경로로 두 번째 인스턴스를 띄우면 즉시 끝난다(exit 21/24 실측). 경로를 pane 마다 달리하면 뜨기는 하지만(헤더 계약상 singleton 은 그 경로 기준이다) **프로필이 갈라져 쿠키·로그인·저장소가 pane 끼리 공유되지 않는다** — 브라우저로서 틀린 동작이라 택하지 않는다.
 
-- **기본 앱은 190MB 그대로**, 웹 백엔드를 켠 사용자만 ~240MB 를 받는다. §13.2 가 *"기본 앱에 CEF 를 넣지 않고 필요할 때 받는 선택 백엔드"* 라고 적고도 plugin ABI 로 표현 못 해 막혔던 그 형태가, 프로세스 경계로는 그냥 성립한다.
+- **기본 앱은 190MB 그대로**, 웹 백엔드를 켠 사용자만 ~258MB(154 기준, 146 은 ~235MB)를 받는다. §13.2 가 *"기본 앱에 CEF 를 넣지 않고 필요할 때 받는 선택 백엔드"* 라고 적고도 plugin ABI 로 표현 못 해 막혔던 그 형태가, 프로세스 경계로는 그냥 성립한다.
 - 배포는 **GitHub Releases + 매니페스트 한 겹**(`cef_version`·`chromium_version`·`maru_backend_abi`·`platform`·`arch`·`sha256`). maru 는 이미 거기서 dmg 를 주므로 새 인프라가 0 이고, 나중에 R2 로 옮겨도 앱 업데이트가 필요 없다. CEF 조달 파이프라인(Spotify CDN → 빌드)은 suji `release.yml` 에 검증된 선례가 있다.
 - **Homebrew 는 formula 로**(cask 아님). 앱은 `~/Library/Application Support/Maru/backends/…` 와 brew prefix **두 자리를 찾기만** 하고, 누가 설치했는지 모르게 둔다.
 - 최신 CEF 는 **154.0.23 / Chromium 154** (공식 빌드 인덱스 stable 채널 기준, 2026-09-23 재확인). suji 가 받아둔 것은 146 이고, **제품은 최신 안정판으로 간다** — ⑧ 이 버전에 따라 갈렸다.

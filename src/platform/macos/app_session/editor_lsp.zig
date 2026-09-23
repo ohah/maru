@@ -35,6 +35,7 @@ const editor_references = @import("editor_references.zig");
 const editor_inlay = @import("editor_inlay.zig");
 const editor_symbols = @import("editor_symbols.zig");
 const editor_highlight = @import("editor_highlight.zig");
+const editor_smart_select = @import("editor_smart_select.zig");
 const editor_code_action = @import("editor_code_action.zig");
 
 pub const Phase = enum {
@@ -132,6 +133,9 @@ pub const Client = struct {
     /// 같은 낱말 강조(§8.2p).
     highlight_seq: u32 = 0,
     highlight_supported: bool = false,
+    /// 구조 기반 선택 확장(§8.2q).
+    selection_range_seq: u32 = 0,
+    selection_range_supported: bool = false,
     inlay_supported: bool = false,
 
     fn deinit(self: *Client, allocator: std.mem.Allocator) void {
@@ -201,6 +205,8 @@ pub const State = struct {
     received_symbols: u64 = 0,
     sent_highlight: u64 = 0,
     received_highlight: u64 = 0,
+    sent_selection_range: u64 = 0,
+    received_selection_range: u64 = 0,
     sent_configs: u64 = 0,
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
@@ -583,6 +589,7 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
                 c.inlay_supported = lsp.inlay.supportedFromResult(r.result); // §8.2n
                 c.symbols_supported = lsp.symbols.supportedFromResult(r.result); // §8.2o
                 c.highlight_supported = lsp.highlight.supportedFromResult(r.result); // §8.2p
+                c.selection_range_supported = lsp.selection_range.supportedFromResult(r.result); // §8.2q
                 c.phase = .ready;
                 c.restarts = 0;
                 const msg = lsp.rpc.initializedNotification(self.allocator) catch return;
@@ -626,6 +633,10 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
             .document_highlight => |seq| {
                 self.editor_lsp.received_highlight += 1;
                 if (termWaitingHighlight(self, c, seq)) |t| editor_highlight.onResponse(self, t, seq, r.result, r.is_error, c.encoding);
+            },
+            .selection_range => |seq| {
+                self.editor_lsp.received_selection_range += 1;
+                if (termWaitingSelectionRange(self, c, seq)) |t| editor_smart_select.onResponse(self, t, seq, r.result, r.is_error, c.encoding);
             },
             .document_symbol => |seq| {
                 self.editor_lsp.received_symbols += 1;
@@ -1208,6 +1219,44 @@ fn termWaitingHighlight(self: *AppSession, c: *Client, seq: u32) ?*Term {
         }.pred) orelse continue;
         const t = loc.pane.terms.items[loc.term_index];
         if (t.rt.editor_highlight.waiting and t.rt.editor_highlight.waiting_seq == seq) return t;
+    }
+    return null;
+}
+
+/// 구조 기반 선택 확장(§8.2q) — 커서 전부의 **물을 자리**(문서 byte)를 한 요청에. 준비된 서버가 없거나 provider 가 없으면 `null`.
+pub fn requestSelectionRange(self: *AppSession, term: *Term, queries: []const u32) ?u32 {
+    const c = readyClientFor(self, term) orelse return null;
+    if (!c.selection_range_supported) return null;
+    if (queries.len == 0) return null;
+    flushDocument(self, c, term);
+    const d = c.findDoc(term.surfaceId()) orelse return null;
+    const opened = term.rt.editor_doc orelse return null;
+    const positions = self.allocator.alloc(lsp.rpc.Position, queries.len) catch return null;
+    defer self.allocator.free(positions);
+    for (queries, positions) |q, *p| {
+        const off = @min(@as(usize, q), opened.file.content.len);
+        const line = opened.file.lines.lineAt(off);
+        const ln = opened.file.lines.line(line) orelse return null;
+        const text = opened.file.content[ln.start..ln.contentEnd()];
+        p.* = .{ .line = @intCast(line), .character = lsp.position.characterOf(text, @intCast(@min(off - ln.start, text.len)), c.encoding) };
+    }
+    c.selection_range_seq = lsp.rpc.nextSeq(c.selection_range_seq);
+    const msg = lsp.rpc.selectionRangeRequest(self.allocator, c.selection_range_seq, d.uri, positions) catch return null;
+    defer self.allocator.free(msg);
+    if (!send(self, c, msg)) return null;
+    self.editor_lsp.sent_selection_range += 1;
+    return c.selection_range_seq;
+}
+
+fn termWaitingSelectionRange(self: *AppSession, c: *Client, seq: u32) ?*Term {
+    for (c.docs.items) |d| {
+        const loc = term_ops.findTermWhere(self, d.surface_id, struct {
+            fn pred(want: u64, t: *Term) bool {
+                return t.kind == .editor and t.surface.id == want;
+            }
+        }.pred) orelse continue;
+        const t = loc.pane.terms.items[loc.term_index];
+        if (t.rt.editor_smart_select.waiting and t.rt.editor_smart_select.waiting_seq == seq) return t;
     }
     return null;
 }

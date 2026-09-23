@@ -305,6 +305,11 @@ pub const editor_context_bindings = [_]EditorContextBinding{
     // 으로 편집기 포커스에서는 편집기가 이긴다. 갚는 수단은 팔레트와 앱 메뉴 둘 다 남는다.
     .{ .chord = .{ .modifiers = .{ .command = true, .option = true }, .key = .arrow_up }, .action = .add_cursor_above, .needs_editable = true },
     .{ .chord = .{ .modifiers = .{ .command = true, .option = true }, .key = .arrow_down }, .action = .add_cursor_below, .needs_editable = true },
+    // `⌃⇧⌘→`·`⌃⇧⌘←` — 구조 기반 선택 확장·축소(tooling §8.2q, VS Code mac 주 키). **첫 `⌃⌘` 조합**이라 `ETX4` ⑵ 가
+    // `allowed_control_command` 로 받는다(키 문서 그 문단 — 전역·터미널·메뉴·AppKit 표준 바인딩·시스템 단축키 어디에도 없다).
+    // `needs_editable = true` — 비교 뷰에서는 컨텍스트가 지고 지금 동작(`⌃` 무시 → `⇧⌘→`)으로 떨어진다(비교 뷰는 축이 둘이라 이 기능 밖).
+    .{ .chord = .{ .modifiers = .{ .control = true, .shift = true, .command = true }, .key = .arrow_right }, .action = .expand_selection, .needs_editable = true },
+    .{ .chord = .{ .modifiers = .{ .control = true, .shift = true, .command = true }, .key = .arrow_left }, .action = .shrink_selection, .needs_editable = true },
 };
 
 pub const default_app_bindings = [_]AppBinding{
@@ -1232,7 +1237,15 @@ test "ETX4 편집기 컨텍스트 기본키가 전역 표를 안 오염시킨다
         .{ .key = .{ .char = '_' }, .action = .navigate_forward }, // ⌃⇧- (US 자판 `_`)
         .{ .key = .{ .char = ' ' }, .action = .trigger_suggest }, // ⌃Space — VS Code editor.action.triggerSuggest(§8.2g)
     };
+    //   ⑵ʹ **`⌃⌘` 조합**(2026-09-23, `⌃⇧⌘→/←` 선택 확장·축소 — tooling §8.2q, 사용자 결정). ⑵ 가 `⌃` 를 막던 근거(제어문자)는
+    //      ⑷ 가 적었듯 터미널 Term 의 것이다. 그래서 ⑵ 에 `⌃` 가 낄 수 있되 **이 목록에 근거와 함께** 서고, ⑵ 의 나머지 조건
+    //      (`⌘` 필수 · 편집 가능 요구)은 그대로이며, 전역·터미널 매크로 표에 같은 chord 가 없어야 한다.
+    const allowed_control_command = [_]Exception{
+        .{ .key = .arrow_right, .action = .expand_selection }, // ⌃⇧⌘→ — VS Code editor.action.smartSelect.expand
+        .{ .key = .arrow_left, .action = .shrink_selection }, // ⌃⇧⌘← — VS Code editor.action.smartSelect.shrink
+    };
     var exceptions: usize = 0;
+    var control_command_chords: usize = 0;
     var bare_function_keys: usize = 0;
     var control_chords: usize = 0;
     for (editor_context_bindings) |b| {
@@ -1258,8 +1271,21 @@ test "ETX4 편집기 컨텍스트 기본키가 전역 표를 안 오염시킨다
             try std.testing.expect(matched_c);
             continue;
         }
+        if (b.chord.modifiers.command and b.chord.modifiers.control) {
+            // ⑵ʹ — 목록에 서야 하고, 전역·터미널 표에 같은 chord 가 없어야 하며, 편집 가능한 문서를 요구한다.
+            control_command_chords += 1;
+            for (default_app_bindings) |g| try std.testing.expect(!g.chord.eql(b.chord));
+            for (default_terminal_bindings) |t| try std.testing.expect(!t.chord.eql(b.chord));
+            var matched_cc = false;
+            for (allowed_control_command) |a| {
+                if (b.chord.key.eql(a.key) and std.meta.eql(b.action, a.action)) matched_cc = true;
+            }
+            try std.testing.expect(matched_cc);
+            try std.testing.expect(b.needs_editable);
+            continue;
+        }
         exceptions += 1;
-        // **`⌘` 는 반드시 끼고 `⌃` 는 안 낀다** — `⌘` 가 없으면 터미널 Meta 를, `⌃` 는 제어문자를 뺏는다.
+        // **`⌘` 는 반드시 끼고 `⌃` 는 안 낀다** — `⌘` 가 없으면 터미널 Meta 를, `⌃` 는 제어문자를 뺏는다(`⌃⌘` 는 위 ⑵ʹ).
         try std.testing.expect(b.chord.modifiers.command and !b.chord.modifiers.control);
         var matched = false;
         for (allowed) |a| {
@@ -1272,6 +1298,7 @@ test "ETX4 편집기 컨텍스트 기본키가 전역 표를 안 오염시킨다
     try std.testing.expectEqual(allowed.len, exceptions);
     try std.testing.expectEqual(@as(usize, 7), bare_function_keys); // F7 · ⇧F7 · F8 · ⇧F8 · F12 · ⇧F12 · F2 — 늘리려면 그 절에 전수 대조를 적는다
     try std.testing.expectEqual(@as(usize, 4), control_chords); // ⌃- · ⌃⇧- · ⌃⇧_ · ⌃Space — ⑷, 늘리려면 allowed_control 에 근거와 함께
+    try std.testing.expectEqual(allowed_control_command.len, control_command_chords); // ⌃⇧⌘→ · ⌃⇧⌘← — ⑵ʹ
     try std.testing.expect(editor_context_bindings.len > 0);
 
     // **`⌘D` 는 전역 표에서 안 없어진다** — 터미널·브라우저·파일 Term 이 그것으로 화면을 나눈다.
@@ -1797,6 +1824,22 @@ test "FKB6 ⌃-·⌃⇧-(·⌃⇧_) 은 편집기 컨텍스트에서 뒤로/앞�
     var buf: [terminal.input.encoded_key_buffer_len]u8 = undefined;
     const r = try resolver.resolve(back, &buf, .{});
     try std.testing.expect(r == .terminal_input);
+}
+
+test "SSEL14 ⌃⇧⌘→·⌃⇧⌘← 는 편집기 컨텍스트에서 확장·축소 — 비교 뷰에서는 컨텍스트가 지고 전역에도 없어 편집기 이동으로 떨어진다 (tooling §8.2q, ETX4 ⑵ʹ)" {
+    const resolver = KeyBindingResolver{};
+    const right: terminal.KeyEvent = .{ .key = .arrow_right, .modifiers = .{ .control = true, .shift = true, .command = true } };
+    const left: terminal.KeyEvent = .{ .key = .arrow_left, .modifiers = .{ .control = true, .shift = true, .command = true } };
+    for ([_]terminal.KeyEvent{ right, left }, [_]action_mod.Action{ .expand_selection, .shrink_selection }) |ev, want| {
+        const e = resolver.resolveEditorDetailed(ev, false);
+        try std.testing.expect(e == .editor_context_action);
+        try std.testing.expectEqual(want, e.editor_context_action);
+        // 비교 뷰 — `needs_editable = true` 라 컨텍스트가 지고, 전역 표에 없으니 편집기 키 경로로(지금의 `⇧⌘→` 중복 동작).
+        try std.testing.expect(resolver.resolveEditorDetailed(ev, true) == .editor);
+    }
+    // **`⌃` 가 빠지면 이 액션이 아니다** — `⇧⌘→`(줄 끝까지 선택)는 그대로 편집기 이동이다(키가 겹치지 않는다).
+    const shift_cmd: terminal.KeyEvent = .{ .key = .arrow_right, .modifiers = .{ .shift = true, .command = true } };
+    try std.testing.expect(resolver.resolveEditorDetailed(shift_cmd, false) == .editor);
 }
 
 test "FKB5 F7·⇧F7·F8·⇧F8 은 편집기 컨텍스트에서 다음/이전 충돌·진단으로 풀리고, 비교 뷰에서도 산다 (S5·§5.4)" {

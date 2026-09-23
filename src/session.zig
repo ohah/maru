@@ -201,6 +201,8 @@ pub const editor = struct {
         pub const inlay = @import("session/lsp/inlay.zig");
         pub const symbols = @import("session/lsp/symbols.zig");
         pub const highlight = @import("session/lsp/highlight.zig");
+        /// 구조 기반 선택 확장의 서버 축(tooling §8.2q) — provider · `SelectionRange[]` 평탄화.
+        pub const selection_range = @import("session/lsp/selection_range.zig");
     };
     /// S2: 병합 충돌 **마커 구간**(docs/editor-merge-conflicts.md §5). 순수 계산이라 여기 산다 —
     /// 줄 배열을 받아 구간을 내고, 그리기·동작은 위층이 붙인다.
@@ -232,6 +234,8 @@ pub const editor = struct {
     /// N2: "다음 일치 추가"가 커서를 놓을 자리(§9.1). 대소문자를 가리고 씨앗이 낱말이면 경계를
     /// 본다 — `find`(⌘F)와 일부러 다른 규칙이고, 그 근거는 모듈 머리말이 든다.
     pub const occurrence = @import("session/editor/occurrence.zig");
+    /// 구조 기반 선택 확장의 사슬 세우기(tooling §8.2q) — 서버·tree-sitter 후보 + 낱말·줄·문서 단계. 어느 원천을 쓸지는 위층이 정한다.
+    pub const smart_select = @import("session/editor/smart_select.zig");
     /// N2: 편집 가능한 문서 — 버퍼(§3.0)와 소비처가 읽는 평탄한 축을 한 소유자에게 묶는다.
     /// `open`(읽기 전용, bytes를 빌린다)의 편집판이다.
     pub const edit_doc = @import("session/editor/edit_doc.zig");

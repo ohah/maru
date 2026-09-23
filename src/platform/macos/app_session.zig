@@ -2238,6 +2238,8 @@ const TermRuntime = struct {
     editor_symbols: editor_ops.symbols_client.State = .{},
     /// 같은 낱말 강조(§8.2p) — caret 아래 낱말의 다른 자리. 비어 있으면 강조가 없다.
     editor_highlight: editor_ops.highlight_client.State = .{},
+    /// 구조 기반 선택 확장(tooling §8.2q) — 커서마다 사슬 + 인덱스, 세운 뒤의 (version, 선택들), 서버 대기. `Selection` 밖이다(native-editor §12).
+    editor_smart_select: editor_ops.smart_select_client.State = .{},
     /// 그 강조의 **렌더 축 마크**(줄별) — `editor_find_marks` 와 같은 꼴·같은 수명(프레임마다 다시 채운다).
     editor_highlight_marks: [][]const maru.chrome.components.editor_view.frame.Mark = &.{},
     editor_highlight_mark_buf: []maru.chrome.components.editor_view.frame.Mark = &.{},
@@ -11048,6 +11050,8 @@ pub const AppSession = struct {
             .goto_implementation => _ = editor_ops.references_client.gotoLocationsAtCaret(self, .implementation), // §8.2m
             .goto_type_definition => _ = editor_ops.references_client.gotoLocationsAtCaret(self, .type_definition),
             .goto_declaration => _ = editor_ops.references_client.gotoLocationsAtCaret(self, .declaration),
+            .expand_selection => _ = editor_ops.smart_select_client.runActive(self, true), // §8.2q
+            .shrink_selection => _ = editor_ops.smart_select_client.runActive(self, false),
             .navigate_back => _ = editor_ops.navigateBack(self), // §5.2 — 갈 곳이 없으면 무동작
             .navigate_forward => _ = editor_ops.navigateForward(self),
             .trigger_parameter_hints => _ = editor_ops.signature_client.triggerManual(self), // §8.2d

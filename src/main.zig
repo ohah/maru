@@ -14511,27 +14511,42 @@ fn readSidecar(io: std.Io, allocator: std.mem.Allocator, dir: std.Io.Dir, nonce:
     return dir.readFileAlloc(io, name, allocator, .limited(4096)) catch null;
 }
 
-fn tmuxResolveNonce(allocator: std.mem.Allocator, obs: maru.session.remote_tmux_route.Observed) ?[]u8 {
-    const rt = maru.session.remote_tmux_route;
-    const socket = obs.socket orelse return null;
-    const pane = obs.pane orelse return null;
+/// 한 조회의 결과. 귀속(`nonce`)과 **지금 그 서버에 있는 pane 목록**(`panes`, 줄바꿈 구분 원문)을 함께
+/// 돌려준다 — 둘 다 같은 `/bin/sh` 한 번에서 나오므로 **포크가 늘지 않는다**(RA7 가지치기).
+///
+/// 각 칸은 따로 `null` 일 수 있다: 귀속이 모호해도 pane 목록은 성할 수 있고, 그 반대도 된다.
+/// 둘 다 호출자 소유다.
+const TmuxLookup = struct { nonce: ?[]u8 = null, panes: ?[]u8 = null };
 
-    const script = rt.lookupScript(allocator, socket, pane) catch return null;
+fn tmuxResolveNonce(allocator: std.mem.Allocator, obs: maru.session.remote_tmux_route.Observed) TmuxLookup {
+    const rt = maru.session.remote_tmux_route;
+    const socket = obs.socket orelse return .{};
+    const pane = obs.pane orelse return .{};
+
+    const script = rt.lookupScript(allocator, socket, pane) catch return .{};
     defer allocator.free(script);
-    const out = runShellCapture(allocator, script) catch return null;
+    const out = runShellCapture(allocator, script) catch return .{};
     defer allocator.free(out);
+
+    // **pane 구획은 귀속과 따로 산다.** 클라이언트가 모호해 귀속을 포기해도 「무엇이 아직 있나」는
+    // 성한 사실이고, 그것으로 죽은 슬롯을 지우는 것은 옳다.
+    const panes: ?[]u8 = if (rt.panesSection(out)) |sec| (allocator.dupe(u8, sec) catch null) else null;
+    errdefer if (panes) |pp| allocator.free(pp);
 
     var buf: [16]rt.Client = undefined;
     const clients = rt.parseClients(out, &buf) orelse {
         // 표식이 왔다 = 그 기계에 `tmux` 가 없다. **물어보지도 못했다**로 접는다.
         _ = rt.route(.{ .pane = pane, .socket = socket, .lookup_ran = false }, &.{});
-        return null;
+        return .{ .panes = panes }; // 표식이면 `panesSection` 도 null 이다 — 모양만 맞춘다
     };
-    return switch (rt.route(.{ .pane = pane, .socket = socket }, clients)) {
-        .resolved => |n| allocator.dupe(u8, n) catch null,
-        // **조용히 하나 고르지 않는다.** 여럿이면 귀속을 포기하고 원래 이름으로 둔다 — 그 편이
-        // «남의 pane 배지가 흔들리는» 것보다 낫다(계획: 규칙을 명시한다).
-        .ambiguous, .detached, .unresolved, .direct => null,
+    return .{
+        .nonce = switch (rt.route(.{ .pane = pane, .socket = socket }, clients)) {
+            .resolved => |n| allocator.dupe(u8, n) catch null,
+            // **조용히 하나 고르지 않는다.** 여럿이면 귀속을 포기하고 원래 이름으로 둔다 — 그 편이
+            // «남의 pane 배지가 흔들리는» 것보다 낫다(계획: 규칙을 명시한다).
+            .ambiguous, .detached, .unresolved, .direct => null,
+        },
+        .panes = panes,
     };
 }
 
@@ -14769,6 +14784,10 @@ fn runAgentEvents(
         last_lookup_ms: u64 = 0,
         asked: bool = false,
     };
+    // **마지막으로 선에 실은 pane 목록**(RA7 가지치기). 바뀔 때만 보낸다 — 조회는 nonce 마다 도는데
+    // 목록은 그 기계 전체의 것이라, 안 거르면 같은 줄이 nonce 수만큼 곱해져 선을 채운다.
+    var last_panes: std.ArrayListUnmanaged(u8) = .empty;
+    defer last_panes.deinit(allocator);
     var routes: std.StringHashMapUnmanaged(RouteCache) = .empty;
     defer {
         var rit = routes.iterator();
@@ -14949,7 +14968,24 @@ fn runAgentEvents(
                 }
                 // 좌표가 바뀌었거나 시한이 지났다(또는 처음이다) — 한 번 묻는다.
                 if (rgop.value_ptr.resolved) |r| allocator.free(r);
-                rgop.value_ptr.resolved = tmuxResolveNonce(allocator, obs);
+                const look = tmuxResolveNonce(allocator, obs);
+                rgop.value_ptr.resolved = look.nonce;
+                // **같은 조회에 얹혀 온 pane 목록**(RA7). 바뀌었을 때만 선에 싣는다.
+                if (look.panes) |raw| {
+                    defer allocator.free(raw);
+                    var wire: std.ArrayListUnmanaged(u8) = .empty;
+                    defer wire.deinit(allocator);
+                    if (ae.panesWireFrom(&wire, allocator, raw) catch null) |list| {
+                        if (!std.mem.eql(u8, last_panes.items, list)) {
+                            frame.clearRetainingCapacity();
+                            if (ae.formatPanes(&frame, allocator, list)) |_| {
+                                stdout.writeAll(frame.items) catch {};
+                                last_panes.clearRetainingCapacity();
+                                last_panes.appendSlice(allocator, list) catch last_panes.clearRetainingCapacity();
+                            } else |_| {}
+                        }
+                    }
+                }
                 rgop.value_ptr.last_lookup_ms = now_ms;
                 rgop.value_ptr.asked = true;
                 allocator.free(rgop.value_ptr.seen_sidecar);

@@ -77,6 +77,13 @@ pub const Frame = union(enum) {
     /// 「앱을 새로 켰다」와 「채널만 죽었다 살아났다」를 갈라야 하기 때문이다 — 앞은 다시 읽어야 배지가
     /// 서고, 뒤는 다시 읽으면 완료 알림이 재생된다. 로컬 기억은 앱과 함께 죽으므로 그 구분이 저절로 선다.
     cursor: struct { name: []const u8, offset: u64 },
+    /// **지금 그 원격에 있는 tmux pane 전부**(공백 구분 `%N` 목록). 로컬은 이 목록에 없는 pane 슬롯을
+    /// 버린다([계획](../../docs/plans/remote-agent-state.md) RA7).
+    ///
+    /// 이 프레임이 **있어야만** 지운다. 안 오면(구버전 원격·tmux 없음·조회 실패) 예전과 같이 아무것도
+    /// 안 지운다 — 침묵은 「모른다」이지 「없다」가 아니다. 그래서 wire 버전을 안 올린다: 구버전 로컬은
+    /// 모르는 줄로 버리고, 신버전 로컬은 프레임이 올 때만 움직인다.
+    panes: struct { list: []const u8 },
     /// 이 줄에서 얻을 것이 없다(잡음·모르는 모양).
     ignored,
 };
@@ -86,6 +93,7 @@ pub fn parseFrame(line: []const u8) Frame {
     if (line.len == 0 or line.len > max_line_bytes) return .ignored;
     if (std.mem.startsWith(u8, line, "{\"hb\":")) return .heartbeat;
     if (std.mem.startsWith(u8, line, "{\"cur\":")) return parseCursor(line);
+    if (std.mem.startsWith(u8, line, "{\"panes\":")) return parsePanes(line);
     const nonce = jsonStringField(line, "\"nonce\":\"") orelse return .ignored;
     const raw = jsonStringField(line, "\"line\":\"") orelse return .ignored;
     // nonce 를 **다시 검증한다.** 이 값이 «어느 Term 인가» 를 정하므로, 선 위에서 바뀌었을 가능성을
@@ -106,6 +114,41 @@ pub fn parseFrame(line: []const u8) Frame {
         break :blk p;
     };
     return .{ .event = .{ .nonce = nonce, .line = raw, .pane = pane } };
+}
+
+/// pane 목록 프레임을 푼다. **빌려 가리킨다** — 호출자가 다음 줄을 읽기 전에 소비해야 한다(`event` 규율).
+///
+/// 토큰을 **다시 검증한다.** 이 값이 「무엇을 지울 것인가」를 정하므로 선 위에서 바뀌었을 가능성을 그냥
+/// 믿지 않는다(`event` 의 `pane` 축과 같은 규율). 다만 **이상한 토큰 하나가 프레임을 죽이지는 않는다** —
+/// 그러면 잡음 한 글자가 가지치기를 통째로 막아, 죽은 행이 영영 남는 쪽으로 조용히 되돌아간다.
+/// 대신 **하나도 안 남으면 `.ignored`** 다: 빈 목록은 「pane 이 없다」가 아니라 「못 읽었다」이고,
+/// 그것을 「없다」로 읽으면 살아 있는 행을 전부 지운다.
+fn parsePanes(line: []const u8) Frame {
+    const list = jsonStringField(line, "\"panes\":\"") orelse return .ignored;
+    if (list.len == 0) return .ignored;
+    var any = false;
+    var it = std.mem.splitScalar(u8, list, ' ');
+    while (it.next()) |tok| {
+        if (tok.len == 0) continue;
+        if (tok.len > max_pane_bytes or !isTmuxPaneToken(tok)) continue;
+        any = true;
+    }
+    if (!any) return .ignored;
+    return .{ .panes = .{ .list = list } };
+}
+
+/// 목록 문자열에 그 pane 이 들어 있나. **토큰 단위로** 본다 — 부분문자열로 보면 `%2` 가 `%20` 에 걸려
+/// 죽은 pane 이 살아남는다(이 결함 하나가 기능의 목적을 정확히 무효로 만든다).
+pub fn paneListContains(list: []const u8, pane: []const u8) bool {
+    var it = std.mem.splitScalar(u8, list, ' ');
+    while (it.next()) |tok| {
+        // **빈 토큰을 건너뛰는 것이 「빈 이름은 어디에도 없다」의 유일한 방어다**(적대적 검증 2 회차).
+        // 앞에 `if (pane.len == 0) return false;` 를 두고 있었는데 지워도 동작이 같았다 — 이 줄이 이미
+        // 막고 있었기 때문이다. 죽은 가드는 다음 사람에게 «저기가 막는다» 는 거짓 신호를 준다.
+        if (tok.len == 0) continue;
+        if (std.mem.eql(u8, tok, pane)) return true;
+    }
+    return false;
 }
 
 /// 커서 프레임을 푼다. **이름을 다시 검증한다** — 이 값이 「어느 로그인가」를 정하므로 선 위에서
@@ -318,6 +361,60 @@ test "RA5: 아직 hello 전이면 예전대로 기다린다 — 잡음을 이벤
     try std.testing.expect(fresh.feed("{\"nonce\":\"host_a_b\",\"line\":\"x\"}", 1) == .ignored);
 }
 
+test "RA7 살아 있는 pane 목록 프레임을 푼다 — 로컬이 이 목록으로 죽은 슬롯을 버린다" {
+    const f = parseFrame("{\"panes\":\"%0 %7 %8\"}");
+    try std.testing.expect(f == .panes);
+    try std.testing.expectEqualStrings("%0 %7 %8", f.panes.list);
+    try std.testing.expect(paneListContains(f.panes.list, "%7"));
+    try std.testing.expect(!paneListContains(f.panes.list, "%20"));
+}
+
+test "RA7 pane 목록: 이상한 토큰 하나가 프레임을 죽이지 않는다 — 죽으면 가지치기가 통째로 멎는다" {
+    // 잡음이 섞여도 성한 토큰이 하나라도 있으면 산다. 프레임을 통째로 버리면 죽은 행이 영영 남는
+    // 쪽으로 조용히 되돌아간다 — 이 기능이 고치려는 바로 그 상태다.
+    const f = parseFrame("{\"panes\":\"%0 junk %7\"}");
+    try std.testing.expect(f == .panes);
+    // 성한 토큰은 그대로 «살아 있다» 로 읽히고,
+    try std.testing.expect(paneListContains(f.panes.list, "%0"));
+    try std.testing.expect(paneListContains(f.panes.list, "%7"));
+    // 목록에 없는 pane 은 여전히 «없다» 다 — 잡음이 섞였다고 가지치기가 무뎌지면 안 된다.
+    try std.testing.expect(!paneListContains(f.panes.list, "%20"));
+    // (잡음 토큰 자체는 대조 대상이 아니다. 슬롯 이름은 `event` 의 `pane` 축을 거쳐 오므로 늘 `%N` 이고,
+    //  `junk` 와 같은 이름을 가진 슬롯은 존재할 수 없다.)
+}
+
+test "RA7 pane 목록 대조는 토큰 단위다 — 부분문자열로 보면 죽은 pane 이 살아남는다" {
+    // **적대적 검증 1 회차가 연 구멍이다.** `paneListContains` 를 `indexOf` 로 바꿔도 이 파일의 다른
+    // 판정자는 아무도 안 빨개졌다 — 함수가 사는 층에 방어가 없었다(테이블 층 판정자만 잡았다).
+    //
+    // 실물이 바로 이 모양이다: tmux 서버가 재시작하면 번호가 `%0` 부터 다시 매겨져 살아 있는 `%2` 와
+    // 죽은 `%20` 이 함께 있을 수 있다. 부분문자열로 보면 `%20` 이 «목록에 있다» 로 읽혀 **영영 안 지워진다.**
+    try std.testing.expect(!paneListContains("%2 %3", "%20"));
+    try std.testing.expect(!paneListContains("%20 %21", "%2"));
+    // 접두가 아니라 **온전히 같을 때만** 산다.
+    try std.testing.expect(paneListContains("%2 %20", "%2"));
+    try std.testing.expect(paneListContains("%2 %20", "%20"));
+    // 빈 이름은 어떤 목록에도 없다 — `event` 의 pane 축이 비면 Term 인라인 슬롯 몫이다.
+    // **이중 공백을 쓴다**: 그래야 분해가 빈 토큰을 내놓아 그것을 건너뛰는 방어를 실제로 지나간다
+    // (2 회차에서 «%0 %1» 로 재니 그 자리가 안 돌아 변이가 안 잡혔다).
+    try std.testing.expect(!paneListContains("%0  %1", ""));
+    try std.testing.expect(!paneListContains("  ", ""));
+    try std.testing.expect(paneListContains("%0  %1", "%1")); // 빈 토큰이 뒤를 가리지 않는다
+}
+
+test "RA7 pane 목록: 읽을 게 하나도 없으면 «모른다» 다 — «없다» 로 읽으면 살아 있는 행을 지운다" {
+    // 빈 목록·잡음뿐인 목록·키 자체가 없는 줄은 전부 `.ignored` 다. 여기서 `.panes` 를 돌려주면
+    // 호출자가 그 surface 의 pane 슬롯을 **전부** 버린다.
+    try std.testing.expect(parseFrame("{\"panes\":\"\"}") == .ignored);
+    try std.testing.expect(parseFrame("{\"panes\":\"junk nope\"}") == .ignored);
+    // **상한을 넘긴 토큰은 모양이 성해도 안 센다**(적대적 검증 3 회차가 연 자리). `isTmuxPaneToken` 은
+    // 길이를 안 보므로, 이 검사가 빠지면 `%111…1` 하나가 `any` 를 켜서 **실재하는 pane 이 하나도 없는
+    // 목록이 «유효» 가 된다** — 그 목록으로 가지치기하면 그 surface 의 행이 전부 사라진다.
+    // (슬롯 이름은 `max_pane_len` 을 넘을 수 없으므로 그 토큰과 같은 이름의 슬롯은 존재하지 않는다.)
+    try std.testing.expect(parseFrame("{\"panes\":\"%" ++ ("1" ** max_pane_bytes) ++ "\"}") == .ignored);
+    try std.testing.expect(parseFrame("{\"panes\":}") == .ignored);
+}
+
 test "RA7 pane 축이 실려 오면 프레임에 담긴다 — nonce 와 따로 나른다" {
     const f = parseFrame("{\"nonce\":\"host_00000000000000000000000000000001_00000000000000000000000000000002\",\"line\":\"claude\\t{}\",\"pane\":\"%27\"}");
     try std.testing.expectEqualStrings("%27", f.event.pane);
@@ -468,6 +565,7 @@ test "RA4 가 실제로 뱉은 wire 를 그대로 먹는다 — 두 층의 계�
         switch (ch.feed(line, now)) {
             .heartbeat => beats += 1,
             .cursor => {}, // 이 판정자는 이어읽기를 안 본다 — RA5-a 전용 test 가 따로 있다
+            .panes => {}, // 가지치기도 안 본다 — RA7 전용 test 가 따로 있다
             .event => |e| {
                 events += 1;
                 var out: std.ArrayListUnmanaged(u8) = .empty;

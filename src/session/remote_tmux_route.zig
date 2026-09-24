@@ -57,6 +57,17 @@ pub const Route = union(enum) {
 /// 이 표식을 받으면 `lookup_ran = false` 로 접어 **「진짜 detached」와 가른다**.
 pub const no_tmux_marker = "!maru-no-tmux";
 
+/// 조회 출력의 **두 구획을 가르는 표식.** 위는 클라이언트 줄(귀속), 아래는 그 tmux 서버에 **지금 있는
+/// pane 목록**(RA7 가지치기)이다.
+///
+/// 한 조회에 얹는 이유는 **fork 를 안 늘리기 위해서**다. 역조회는 이미 `/bin/sh` 하나를 포크해 그 안에서
+/// tmux 를 두 번 부르므로 세 번째 호출은 그 셸 안에서 는다. 따로 물으면 스트리머가 주기마다 포크해야 하고,
+/// 그러면 **조용한 호스트가 지금 내는 0 이 깨진다**(조회는 로그가 자랐을 때만 돈다 — `main.zig` 의
+/// «새 바이트 없으면 건너뛴다»).
+///
+/// `%` 로 시작하지 않아 pane 토큰과 안 섞이고, nonce 클래스가 `@` 를 안 받아 클라이언트 줄과도 안 섞인다.
+pub const panes_marker = "@maru-panes";
+
 /// 훅이 남긴 **옆 파일**(`<nonce>.tmux`)의 내용을 읽는다.
 ///
 /// 형식은 `<$TMUX>\t<$TMUX_PANE>\n` 한 줄이다. tmux 밖이면 두 칸이 다 비어 있고, 그때는 `null` 을
@@ -102,7 +113,8 @@ pub fn lookupScript(allocator: std.mem.Allocator, socket: []const u8, pane: []co
         \\tmux -S '{s}' list-clients -t "$s" -F '#{{client_pid}}' 2>/dev/null | while IFS= read -r p; do
         \\if [ -r "/proc/$p/environ" ]; then tr '\0' '\n' < "/proc/$p/environ" | sed -n 's/^LC_MARU_PANE=//p' | head -1;
         \\else ps -E -p "$p" 2>/dev/null | tr ' ' '\n' | sed -n 's/^LC_MARU_PANE=//p' | head -1; fi; echo; done; done
-    , .{ no_tmux_marker, socket, pane, socket });
+        \\echo '{s}'; tmux -S '{s}' list-panes -a -F '#{{pane_id}}' 2>/dev/null
+    , .{ no_tmux_marker, socket, pane, socket, panes_marker, socket });
 }
 
 /// 스크립트 출력을 클라이언트 목록으로 접는다.
@@ -120,10 +132,27 @@ pub fn parseClients(out: []const u8, buf: []Client) ?[]const Client {
         // 더 있는 것처럼 보여 `ambiguous` 로 잘못 접힌다.
         if (lines.peek() == null and raw.len == 0) break;
         const nonce = std.mem.trim(u8, raw, " \t\r");
+        // **pane 구획은 클라이언트가 아니다.** 표식 아래는 `%3` 같은 pane 이름인데 그것을 nonce 로 세면
+        // 클라이언트가 여럿인 것처럼 보여 귀속이 통째로 `ambiguous` 로 접힌다(= 배지가 안 선다).
+        if (std.mem.eql(u8, nonce, panes_marker)) break;
         buf[n] = .{ .nonce = if (nonce.len == 0) null else nonce };
         n += 1;
     }
     return buf[0..n];
+}
+
+/// 조회 출력에서 **pane 구획만** 돌려준다(표식 다음 줄부터 끝까지, 줄바꿈 구분 원문 그대로).
+///
+/// `null` 은 **「모른다」**다 — 그 기계에 tmux 가 없거나(표식), 구버전 스크립트라 구획이 아예 없거나,
+/// 출력이 잘렸다는 뜻이다. **그때는 아무것도 지우면 안 된다**: 한 번의 잘못된 «없음» 이 살아 있는 행을
+/// 전부 지운다. 빈 구획도 같은 뜻으로 접는다 — tmux 가 살아 있는데 pane 이 0 개일 수는 없으므로 빈 것은
+/// 조회 실패다(서버가 그 사이 죽었거나 출력이 잘렸다).
+pub fn panesSection(out: []const u8) ?[]const u8 {
+    if (std.mem.indexOf(u8, out, no_tmux_marker) != null) return null;
+    const at = std.mem.indexOf(u8, out, panes_marker) orelse return null;
+    const rest = out[at + panes_marker.len ..];
+    const trimmed = std.mem.trim(u8, rest, " \t\r\n");
+    return if (trimmed.len == 0) null else trimmed;
 }
 
 /// tmux 관측치와 역조회 결과로 라우팅을 정한다.
@@ -266,6 +295,48 @@ test "parseClients: tmux 가 없으면 목록이 아니라 «물어보지도 못
     // 그 경우 호출자는 `lookup_ran = false` 로 접고, 그것이 **detached 와 갈린다**.
     try testing.expectEqual(Route.unresolved, route(.{ .pane = "%9", .socket = "/s", .lookup_ran = false }, &.{}));
     try testing.expectEqual(Route.detached, route(.{ .pane = "%9", .socket = "/s", .lookup_ran = true }, &.{}));
+}
+
+test "panesSection: 표식 아래가 지금 있는 pane 이다 — 클라이언트 줄과 섞이지 않는다" {
+    // 한 조회에 두 구획이 실린다. 위(클라이언트)는 «누구에게 귀속하나», 아래(pane)는 «무엇이 아직 있나» 다.
+    const out = "nonce-a\n" ++ panes_marker ++ "\n%0\n%7\n%20\n";
+
+    var buf: [4]Client = undefined;
+    const clients = parseClients(out, &buf).?;
+    // **하나여야 한다.** 표식에서 안 멈추면 pane 셋까지 클라이언트로 세어 `ambiguous` 가 되고,
+    // 그러면 귀속이 통째로 포기돼 배지가 안 선다.
+    try std.testing.expectEqual(@as(usize, 1), clients.len);
+    try std.testing.expectEqualStrings("nonce-a", clients[0].nonce.?);
+
+    try std.testing.expectEqualStrings("%0\n%7\n%20", panesSection(out).?);
+}
+
+test "panesSection: 모르는 것과 없는 것을 가른다 — 잘못된 «없음» 하나가 살아 있는 행을 전부 지운다" {
+    // ⑴ tmux 가 그 기계에 없다 — 물어보지도 못했다.
+    try std.testing.expect(panesSection(no_tmux_marker ++ "\n") == null);
+    // ⑴' **표식이 있으면 그 아래가 무엇이든 못 믿는다**(적대적 검증 3 회차가 연 자리). 지금 스크립트는
+    //    표식 뒤에 `exit 0` 이라 둘이 함께 오지 않지만, 그 사실은 **여기가 아니라 저쪽**에 있다 —
+    //    스크립트가 바뀌어 둘이 함께 오는 날 이 검사가 없으면 **없는 tmux 의 pane 목록**을 믿는다.
+    try std.testing.expect(panesSection(no_tmux_marker ++ "\n" ++ panes_marker ++ "\n%0\n") == null);
+    // ⑵ 구버전 스크립트라 구획 자체가 없다.
+    try std.testing.expect(panesSection("nonce-a\n") == null);
+    // ⑶ 표식은 왔는데 아래가 비었다 — tmux 가 살아 있으면 pane 이 0 개일 수 없으므로 **조회 실패**다.
+    //    이것을 «pane 이 없다» 로 읽으면 그 호스트의 행이 전부 사라진다.
+    try std.testing.expect(panesSection("nonce-a\n" ++ panes_marker ++ "\n") == null);
+    try std.testing.expect(panesSection("nonce-a\n" ++ panes_marker ++ "\n   \n") == null);
+}
+
+test "lookupScript: pane 구획을 같은 셸 안에서 묻는다 — 포크를 늘리지 않는다" {
+    const script = try lookupScript(std.testing.allocator, "/tmp/sock", "%3");
+    defer std.testing.allocator.free(script);
+    // 표식과 목록 조회가 **한 스크립트 안에** 있어야 한다. 따로 물으면 스트리머가 주기마다 포크한다.
+    try std.testing.expect(std.mem.indexOf(u8, script, "echo '" ++ panes_marker ++ "'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "list-panes -a -F '#{pane_id}'") != null);
+    // 같은 소켓에 물어야 한다 — 기본 소켓으로 물으면 남의 서버의 pane 을 «살아 있다» 로 읽는다.
+    var it = std.mem.splitSequence(u8, script, "-S '/tmp/sock'");
+    var n: usize = 0;
+    while (it.next()) |_| n += 1;
+    try std.testing.expectEqual(@as(usize, 4), n); // 조각 4 = 등장 3회(display·list-clients·list-panes)
 }
 
 test "lookupScript: 소켓과 pane 을 그대로 싣고, tmux 가 없으면 표식으로 말한다" {

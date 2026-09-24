@@ -23,6 +23,8 @@
 const std = @import("std");
 const command = @import("../session/agent_hook_command.zig");
 const hook_event = @import("../session/agent_hook_event.zig");
+// wire 상한을 **소비자에게서 빌려 온다**(RA7) — 아래 `max_pane_wire_bytes` 참조.
+const remote_agent_stream = @import("../session/remote_agent_stream.zig");
 
 /// 채널이 열리면 **가장 먼저** 보내는 줄.
 ///
@@ -153,6 +155,58 @@ pub fn formatEvent(
 /// `255` 를 이미 쓰고 다중화 경합으로도 255 가 난다. 어느 경우에도 stderr 는 비어 있었다).
 pub fn formatHeartbeat(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, seq: u64) !void {
     try out.print(allocator, "{{\"hb\":{d}}}\n", .{seq});
+}
+
+/// **지금 이 기계에 있는 tmux pane 전부**: `{"panes":"%0 %7 %8"}`([계획](../../docs/plans/remote-agent-state.md) RA7).
+///
+/// 로컬은 이 목록에 없는 pane 슬롯을 버린다. 그전까지 로컬에는 「이 pane 이 사라졌다」를 받는 경로가
+/// 아예 없어서, tmux 서버가 재시작해 pane 번호가 `%0` 으로 리셋되면 옛 세대의 이름이 **앱이 사는 동안
+/// 영원히** 남았다(2026-09-24 실측).
+///
+/// **목록은 역조회에 얹혀 온다.** 따로 묻지 않는 이유는 포크를 안 늘리기 위해서다 — 역조회는 로그가
+/// 자랐을 때만 돌므로 조용한 호스트는 지금 tmux 프로세스를 하나도 안 띄운다(`main.zig` 의 «새 바이트
+/// 없으면 건너뛴다»). 주기마다 물으면 그 0 이 깨진다.
+///
+/// **이스케이프하지 않는다** — 토큰이 `%` + 숫자뿐이라 JSON 문자열에 그대로 실린다. 그 모양이 아닌 것은
+/// 애초에 싣지 않는다(`isPaneToken`).
+///
+/// ⚠️ **빈 목록은 안 싣는다**(호출자가 지킨다). 빈 목록이 「pane 이 없다」로 읽히면 로컬이 살아 있는 행을
+/// **전부** 지운다 — 조회 실패가 곧 삭제가 되면 안 된다. 침묵은 「모른다」이지 「없다」가 아니다.
+pub fn formatPanes(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, panes: []const u8) !void {
+    try out.print(allocator, "{{\"panes\":\"{s}\"}}\n", .{panes});
+}
+
+/// tmux pane 이름의 모양(`%` + 숫자). 선에 싣기 전에 거른다 — 잡음이 섞이면 로컬이 그 토큰만 버리지만,
+/// 애초에 안 보내는 쪽이 선이 짧고 「무엇이 살아 있나」의 뜻도 흐려지지 않는다.
+pub fn isPaneToken(p: []const u8) bool {
+    if (p.len < 2 or p.len > max_pane_wire_bytes or p[0] != '%') return false;
+    for (p[1..]) |c| if (c < '0' or c > '9') return false;
+    return true;
+}
+
+/// 한 토큰의 상한. **소비자에게서 그대로 가져온다** — 두 곳에 숫자를 적으면 이쪽이 커졌을 때
+/// 「싣기는 하는데 저쪽이 말없이 버리는」 토큰이 생기고, 그것은 pane 하나가 영영 안 지워지는 모양으로만
+/// 드러나 찾기 어렵다. 값을 빌려 오면 그 드리프트가 **구조적으로 불가능**하다.
+pub const max_pane_wire_bytes: usize = remote_agent_stream.max_pane_bytes;
+
+/// 줄바꿈 구분 `tmux list-panes` 출력을 **공백 구분 wire 목록**으로 접는다. 성한 토큰이 하나도 없으면
+/// `null` — 그때는 프레임을 안 보낸다(위 경고).
+pub fn panesWireFrom(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, raw: []const u8) !?[]const u8 {
+    const start = out.items.len;
+    var it = std.mem.splitScalar(u8, raw, '\n');
+    var n: usize = 0;
+    while (it.next()) |line| {
+        const tok = std.mem.trim(u8, line, " \t\r");
+        if (!isPaneToken(tok)) continue;
+        if (n != 0) try out.append(allocator, ' ');
+        try out.appendSlice(allocator, tok);
+        n += 1;
+    }
+    if (n == 0) {
+        out.shrinkRetainingCapacity(start);
+        return null;
+    }
+    return out.items[start..];
 }
 
 /// 커서 한 조각: `{"cur":"<이름>","at":<offset>}`([계획](../../docs/plans/remote-agent-state.md) RA5-a).
@@ -303,6 +357,45 @@ test "RA7 pane 을 주면 프레임에 실리고, 비면 키 자체가 없다" {
     out.clearRetainingCapacity();
     try formatEvent(&out, testing.allocator, "4331_7", "claude\tx", "");
     try testing.expect(std.mem.indexOf(u8, out.items, "pane") == null);
+}
+
+test "RA7 panesWireFrom: 줄바꿈 출력을 공백 목록으로 접고, 성한 토큰이 없으면 안 싣는다" {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(testing.allocator);
+
+    // `tmux list-panes` 출력 그대로 — 꼬리 개행과 공백이 섞여 온다.
+    const got = (try panesWireFrom(&out, testing.allocator, "%0\n%7\n %8 \n")).?;
+    try testing.expectEqualStrings("%0 %7 %8", got);
+
+    // **성한 토큰이 하나도 없으면 `null`.** 여기서 빈 문자열을 돌려주면 호출자가 `{"panes":""}` 를 싣고,
+    // 그것을 받은 로컬이 「pane 이 없다」로 읽어 **살아 있는 행을 전부 지운다.**
+    var empty: std.ArrayListUnmanaged(u8) = .empty;
+    defer empty.deinit(testing.allocator);
+    try testing.expect((try panesWireFrom(&empty, testing.allocator, "")) == null);
+    try testing.expect((try panesWireFrom(&empty, testing.allocator, "junk\nnope\n")) == null);
+    try testing.expect((try panesWireFrom(&empty, testing.allocator, "\n \n")) == null);
+    // 실패했으면 버퍼도 되돌려 놓는다 — 안 그러면 다음 호출이 남은 쓰레기를 이어 붙인다.
+    try testing.expectEqual(@as(usize, 0), empty.items.len);
+}
+
+test "RA7 isPaneToken: 선에 싣는 모양은 소비자와 같은 상한을 쓴다" {
+    try testing.expect(isPaneToken("%0"));
+    try testing.expect(isPaneToken("%27"));
+    try testing.expect(!isPaneToken("%"));
+    try testing.expect(!isPaneToken("27"));
+    try testing.expect(!isPaneToken("%2a"));
+    try testing.expect(!isPaneToken(""));
+    // 상한은 소비자에게서 빌려 온다 — 이 단언은 그 «빌려 옴» 이 살아 있는지를 본다(숫자를 베끼면 통과한다).
+    try testing.expectEqual(remote_agent_stream.max_pane_bytes, max_pane_wire_bytes);
+    // 그 상한에서 한 글자 넘으면 안 싣는다.
+    try testing.expect(!isPaneToken("%" ++ ("1" ** max_pane_wire_bytes)));
+}
+
+test "RA7 formatPanes: 목록 한 줄이 소비자가 가르는 접두를 그대로 쓴다" {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(testing.allocator);
+    try formatPanes(&out, testing.allocator, "%0 %7");
+    try testing.expectEqualStrings("{\"panes\":\"%0 %7\"}\n", out.items);
 }
 
 test "parseArgs: --stdio 와 절대 경로가 있어야 돈다" {

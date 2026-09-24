@@ -79,6 +79,31 @@ pub const Table = struct {
         return slot;
     }
 
+    /// **원격이 「지금 있는 pane 은 이것뿐」이라 말했다** — 그 surface 에서 목록에 없는 항목을 버린다.
+    /// 돌려주는 값은 버린 수.
+    ///
+    /// 이것이 테이블에 생긴 **첫 «사라졌다» 경로**다. 그전까지 지우는 길은 `dropSurface`(그 surface 통째)와
+    /// 상한 초과 LRU 뿐이라, tmux 가 재시작해 pane 번호가 `%0` 으로 리셋되면 옛 세대의 이름이 **앱이 사는
+    /// 동안 영원히** 남았다(2026-09-24 실측: 앱 기동 9/23, tmux 재시작 9/24, 죽은 `%20` 이 그대로).
+    ///
+    /// ⚠️ **밀림(`evicted_trace`)으로 세지 않는다.** 「자리가 모자라 밀렸다」와 「원격에서 없어졌다」는
+    /// 다른 사실이고, 사이드바의 «+N pane 밀림» 고지는 **앞엣것만** 말해야 한다. 섞으면 사용자가
+    /// 「상한을 올리면 보이겠지」로 읽는데, 없어진 pane 은 상한과 무관하고 돌아오지도 않는다.
+    ///
+    /// ⚠️ **빈 목록은 아무것도 안 지운다.** 생산자가 이미 「못 읽었다」를 프레임 자체로 접지만, 여기서도
+    /// 막는다 — 한 번의 잘못된 «없음» 이 살아 있는 행을 전부 지우는 것이 이 함수의 유일한 파괴적 실패다.
+    pub fn retainOnly(self: *Table, surface_id: u64, live: []const u8) usize {
+        if (std.mem.trim(u8, live, " ").len == 0) return 0;
+        var dropped: usize = 0;
+        for (&self.entries) |*e| {
+            if (e.used == 0 or e.surface_id != surface_id or e.pane_len == 0) continue;
+            if (remote_agent_stream.paneListContains(live, e.paneName())) continue;
+            e.* = .{};
+            dropped += 1;
+        }
+        return dropped;
+    }
+
     fn rememberEvicted(self: *Table, surface_id: u64, pane: []const u8) void {
         const t = &self.evicted_trace[self.evicted_next];
         t.* = .{ .surface_id = surface_id, .pane_len = @intCast(pane.len) };
@@ -193,6 +218,50 @@ test "pane 테이블: 같은 (surface, pane) 은 같은 슬롯이고, 다른 sur
     try testing.expectEqual(@as(usize, 1), t.countFor(2));
     // 빈 pane 이름은 거절 — 그 이벤트는 Term 인라인 슬롯 몫이다.
     try testing.expect(t.slotFor(1, "", 40) == null);
+}
+
+test "pane 테이블: 원격이 「지금 있는 것은 이것뿐」이라 말하면 나머지를 버린다 — 그 surface 만" {
+    var t: Table = .{};
+    _ = t.slotFor(1, "%7", 10).?;
+    _ = t.slotFor(1, "%20", 11).?; // tmux 가 재시작하기 전 세대의 잔재
+    _ = t.slotFor(2, "%20", 12).?; // **다른 surface 의 같은 이름** — 다른 기계의 pane 이다
+    try testing.expectEqual(@as(usize, 2), t.countFor(1));
+
+    try testing.expectEqual(@as(usize, 1), t.retainOnly(1, "%0 %7 %8"));
+
+    try testing.expectEqual(@as(usize, 1), t.countFor(1));
+    try testing.expect(t.find(1, "%7") != null);
+    try testing.expect(t.find(1, "%20") == null);
+    // 다른 surface 는 안 건드린다. 원격은 **자기 기계의 목록**만 말한다.
+    try testing.expect(t.find(2, "%20") != null);
+
+    // **밀림으로 세지 않는다.** 「자리가 모자랐다」와 「없어졌다」는 다른 사실이고, «+N pane 밀림» 고지는
+    // 앞엣것만 말해야 한다 — 섞으면 사용자가 「상한을 올리면 보이겠지」로 읽는다.
+    try testing.expectEqual(@as(u32, 0), t.evicted);
+    try testing.expectEqual(@as(usize, 0), t.evictedFor(1));
+}
+
+test "pane 테이블: 목록이 비면 아무것도 안 지운다 — 잘못된 «없음» 하나가 살아 있는 행을 전부 지운다" {
+    var t: Table = .{};
+    _ = t.slotFor(1, "%7", 10).?;
+    _ = t.slotFor(1, "%9", 11).?;
+    try testing.expectEqual(@as(usize, 0), t.retainOnly(1, ""));
+    try testing.expectEqual(@as(usize, 0), t.retainOnly(1, "   "));
+    try testing.expectEqual(@as(usize, 2), t.countFor(1));
+}
+
+test "pane 테이블: 목록 대조는 토큰 단위다 — `%2` 가 `%20` 을 살려 주면 기능이 무효가 된다" {
+    var t: Table = .{};
+    _ = t.slotFor(1, "%20", 10).?;
+    // 목록에는 `%2` 만 있다. 부분문자열로 보면 `%20` 이 «있다» 로 읽혀 영영 안 지워진다.
+    try testing.expectEqual(@as(usize, 1), t.retainOnly(1, "%2"));
+    try testing.expect(t.find(1, "%20") == null);
+
+    // 반대 방향도 — `%20` 이 목록에 있으면 `%2` 는 없는 것이다.
+    var u: Table = .{};
+    _ = u.slotFor(1, "%2", 10).?;
+    try testing.expectEqual(@as(usize, 1), u.retainOnly(1, "%20 %21"));
+    try testing.expect(u.find(1, "%2") == null);
 }
 
 test "pane 테이블: 상한을 넘기면 가장 오래 안 쓴 것부터 밀고 그 사실을 센다" {

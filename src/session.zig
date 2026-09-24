@@ -240,6 +240,8 @@ pub const editor = struct {
     pub const sticky = @import("session/editor/sticky.zig");
     /// 짝 괄호 판정(visual-mapping §5.1b · document-model §3.9c) — 강조와 점프가 같이 쓴다. 출처(트리·글자 훑기)와 고르는 규칙(뒤 먼저)이 여기 있다.
     pub const brackets = @import("session/editor/brackets.zig");
+    /// 들여쓰기 안내선(visual-mapping §5.1c) — 줄마다 단계 · 간격 추정(VS Code guessIndentation) · 활성 블록. 들여쓰기 열은 접힘(`fold.indentOf`)과 한 출처.
+    pub const indent_guides = @import("session/editor/indent_guides.zig");
     /// N2: 편집 가능한 문서 — 버퍼(§3.0)와 소비처가 읽는 평탄한 축을 한 소유자에게 묶는다.
     /// `open`(읽기 전용, bytes를 빌린다)의 편집판이다.
     pub const edit_doc = @import("session/editor/edit_doc.zig");

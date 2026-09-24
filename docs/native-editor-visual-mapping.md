@@ -2524,8 +2524,8 @@ highlightActiveIndentation: true, bracketPairs: false }`.
 | --- | --- | --- |
 | **켜고 끄기** | `editor.guides-indentation`(기본 켬) · `editor.guides-highlight-active-indentation`(기본 켬) | VS Code `guides.indentation` · `guides.highlightActiveIndentation`(그쪽의 `'always'` 는 괄호 안내선과만 갈리므로 참·거짓 둘) |
 | **들여쓰기 열** | `fold.indentOf` — **접힘과 같은 함수**(공백 1열 · 탭은 다음 탭스톱 · 공백만이면 없음). VS Code `computeIndentLevel` 과 같은 규칙이다 | 두 출처 금지 |
-| **간격** | **문서에서 추정한 들여쓰기 폭** — VS Code `guessIndentation` 규칙 그대로(탭 줄이 많으면 탭 파일 → `editor.tab-width`). **Term 에 문서가 처음 그려질 때 한 번** 추정한다(VS Code 도 모델을 만들 때 한 번). **디스크에서 다시 읽어도 다시 추정하지 않는다** — 그 길(`confirmReload`)은 같은 Term 에 편집으로 넣고, VS Code 도 같은 자리(`ModelService.updateModel`)가 편집으로 넣고 추정을 다시 하지 않는다(원문 확인). 탭 파일은 「탭이다」만 들어 설정을 바꾸면 따라간다. **이 추정은 안내선에만 쓴다** — `Tab` 키가 넣는 것·탭의 표시 폭은 지금대로(설정) | VS Code `detectIndentation`(기본 켬). 설정 폭만 쓰면 2 칸 들여쓰기 파일(TS·JS·JSON 에 흔하다)에서 선이 중첩과 어긋난다 |
-| **단계 수** | 위 VS Code 규칙 그대로(공백만인 줄은 위·아래 내용 줄로). offSide 는 Python — 우리 번들 grammar 중 VS Code 가 offSide 로 두는 언어 | VS Code |
+| **간격** | **문서에서 추정한 들여쓰기 폭** — VS Code `guessIndentation` 규칙 그대로(탭 줄이 많으면 탭 파일 → `editor.tab-width`). **언어별 기본**을 따른다 — VS Code 는 `[go]` 의 `insertSpaces` 기본을 거짓으로 둬(확장 `package.json` 의 `configurationDefaults`; `[makefile]` 거짓 · `[yaml]` 참·폭 2 는 grammar 가 없어 해당 없음) 동률과 정렬 예외가 탭 쪽으로 간다. **Term 에 문서가 처음 그려질 때 한 번** 추정한다(VS Code 도 모델을 만들 때 한 번). **디스크에서 다시 읽어도 다시 추정하지 않는다** — 그 길(`confirmReload`)은 같은 Term 에 편집으로 넣고, VS Code 도 같은 자리(`ModelService.updateModel`)가 편집으로 넣고 추정을 다시 하지 않는다(원문 확인). 탭 파일은 「탭이다」만 들어 설정을 바꾸면 따라간다. **이 추정은 안내선에만 쓴다** — `Tab` 키가 넣는 것·탭의 표시 폭은 지금대로(설정) | VS Code `detectIndentation`(기본 켬). 설정 폭만 쓰면 2 칸 들여쓰기 파일(TS·JS·JSON 에 흔하다)에서 선이 중첩과 어긋난다 |
+| **단계 수** | 위 VS Code 규칙 그대로(공백만인 줄은 위·아래 내용 줄로). offSide 는 **Python · Markdown** — 우리 번들 grammar 중 VS Code 가 언어 설정에 `folding.offSide: true` 로 둔 언어(원문 `extensions/{python,markdown-basics}/language-configuration.json`; YAML 도 그렇지만 grammar 가 없다). 처음엔 Python 하나로 적었고 적대적 5회차가 18 개를 전부 열어 Markdown 을 찾았다 | VS Code |
 | **자리** | 단계 `k` 선 = 본문 시작 + 표시 열 `(k−1) × 간격` − 가로 스크롤, 폭 **1px**, 행 높이. 가로로 굴려 그 열이 화면 밖이면 안 긋는다 | VS Code. **1px 세로 quad 는 선다** — 캡처 픽셀로 쟀다(1px·2px 세로선이 같은 세기로 섰다; §4.1i 의 높이 1px 가로 사각이 지워진 것과 다르다) |
 | **랩** | **첫 조각에만** — 우리 랩은 이어짐 행을 0 열에서 시작하므로 VS Code 의 `'none'` 과 같은 경우다 | VS Code `BlockSubsequent`. 이어짐 들여쓰기(`'same'`)가 오면 그때 잇는다 |
 | **접힘** | 보이는 줄마다 그 문서 줄의 값. 공백만인 줄의 위·아래 탐색은 숨은 줄도 본다 | VS Code 도 모델 줄로 센다 |
@@ -2538,7 +2538,7 @@ highlightActiveIndentation: true, bracketPairs: false }`.
 **VS Code 와 다른 점(의도).** ① 랩된 줄의 이어짐 행에 선이 없다(우리에게 이어짐 들여쓰기가 없어서 — 위 표) ② 간격 추정을 **안내선에만** 쓴다(VS Code 는
 `Tab` 키·탭 폭까지 바꾼다 — 그 확장은 편집 계약(§3.9a)의 몫이다). **귀결 하나**: 공백 파일 안의 탭 줄은 VS Code 가 추정 폭(예: 2)으로 탭을 그려 단계가
 적고, 우리는 설정 폭(4)으로 그려 단계가 많다(`a {`·`  b`… 아래 `\tc` — VS Code 1, 우리 2; monaco 실측, `IG6`). 우리 화면에서 그 줄의 글자는 4 열에서
-시작하므로 0·2 열의 선 둘이 맞다 ③ offSide 는 번들 grammar 기준(YAML 은 grammar 가 오면).
+시작하므로 0·2 열의 선 둘이 맞다 ③ offSide·언어별 기본은 번들 grammar 기준(YAML·Makefile 은 grammar 가 오면).
 
 **구현이 계약에 되먹인 것(2026-09-24).** ① **1px 세로선은 선다** — 가장 싼 반증 실험부터 했다: 임시 코드로 1px·2px 세로 quad 를 긋고 캡처 픽셀을
 쟀더니 둘이 같은 세기로 섰다(바탕 `(16,16,16)` 위 `(27,27,27)`). §4.1i 에서 높이 1px **가로** 사각이 셰이더 AA 에 지워진 것과 다르다 — 그래서 VS Code 와
@@ -2561,6 +2561,7 @@ highlightActiveIndentation: true, bracketPairs: false }`.
 | 4 | **VS Code 와 대조 실행** — monaco 0.56 을 Node 에서 돌려 문서 317 개(손 사례 17 · 무작위 300, offSide 61 · 추정 2/3/4/6/8 칸·탭)의 추정·줄마다 단계·모든 줄의 활성 블록을 뽑아 맞췄다 | **불일치 0**(대조가 살아 있는지: 규칙 변이 둘을 넣으면 5·118·402 건이 갈렸다). 77 개를 영구 판정자 `IG5`(`testdata/indent_guides_vscode.json`)로 남겼다. 공백 파일 속 탭 줄은 탭 표시 폭 차이로 갈린다 — 의도(「다른 점」 ②, `IG6`) |
 | 4 | **성능** — 병적 표본과 이 저장소의 큰 파일(ReleaseFast, 20 회 평균) | **결함 하나**: 공백만인 줄 20 만 사이의 caret 에서 한 프레임 **81.8 ms**(빈 줄이면 13.9 ms) — 활성 블록이 줄마다 `levelAt` 으로 빈 구간을 끝까지 훑었다(창 × 구간). 방향마다 위·아래 내용 줄을 들고 걷도록(`Walker`) 고쳐 **0.57 ms**(0.107 ms). 답은 그대로(317 개 대조 다시 0). 걸음 수 판정자 `IG7`(옛 방식이면 빨갛다). `app_session.zig`(92,441 줄)는 전후 모두 0.001 ms 미만 |
 | 4 | 고친 `Walker` 자체 변이 다섯 | **죽음 셋**(`IG5`·`IG7`) · **등가 둘**(「닿았다」 `≥` — 비교되는 줄은 늘 공백만 · 아래 걸음을 거리 0 부터 — 그 값은 안 쓰인다; 코드 주석) |
+| 5 | **대조가 전제로 깐 입력** — offSide 언어 목록 · 추정의 기본값 · 라이트 테마 | **결함 둘**: ① offSide 에 Markdown 이 빠졌다(VS Code 언어 설정 18 개를 전부 열었다 — 내 「Python 하나」는 열지 않고 적은 것) ② Go 는 VS Code 가 추정 기본을 탭으로 둔다(`[go]` `insertSpaces: false`) — 우리는 늘 공백 기본이라 동률 문서가 공백 2 칸이 됐다. `guessWith` 로 고치고 monaco 를 Go 기본으로 돌려 321 개 대조 **불일치 0**. 판정자 `IG8`(두 기본 실측)·`IGP4` Markdown·`IGP6` Go — 고치기 전으로 되돌린 변이 둘을 각각 잡는다. 라이트 테마(`one-light`·`solarized-light`) 캡처 — 선과 활성 선이 선다 |
 
 ### 5.4 진단 층 — 첫 출처는 구문 오류 (2026-09-17, 계획 공격 뒤의 사용자 결정)
 

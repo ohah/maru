@@ -5150,6 +5150,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             // 최종 종료한다. 이 순서만 leased request frame의 pointer 수명을 안전하게 끝낸다.
             maru_macos_mermaid_shutdown()
         })
+        // W3b: Chromium sidecar(웹 OSR — 개발용 환경변수로만 켠다)를 내린다. 꺼져 있으면 무동작.
+        maru_macos_web_osr_shutdown()
         // 컨트롤 플레인 서버를 세션 teardown '전에' 멈춘다 — accept 스레드를 join하고 대기 중 요청을 cancel해, 이후
         // shutdownAppSession이 세션을 해제할 때 accept 스레드가 (marshal 큐 밖에서) 세션을 만지지 않게 한다. tick은
         // 이미 멈춰(위) 더 이상 drain되지 않는다. idempotent(미시작이면 무동작).

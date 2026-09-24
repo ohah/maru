@@ -1048,6 +1048,10 @@ const Table = struct {
     // **로그인 토큰 접근을 묻는 문장이다.** 영어 UI 아래 한국어 동의문이 뜨면 사용자가 무엇을
     // 허용하는지 못 읽는다 — 버튼(`btn_allow`/`btn_deny`)은 이미 번역돼 있어 더 어긋나 보였다.
     grant_scope_storage: [:0]const u8,
+    web_osr_gpu_unavailable: [:0]const u8,
+    web_osr_profile_in_use: [:0]const u8,
+    web_osr_start_failed: [:0]const u8,
+    web_osr_crashed: [:0]const u8,
     grant_scope_control: [:0]const u8,
     grant_prompt: [:0]const u8,
 
@@ -1584,6 +1588,10 @@ const en: Table = .{
     .status_viewport_narrowed = "phone {0} cols",
     .ws_checkpoint_write_failed = "Workspace checkpoint save failed",
     .grant_scope_storage = "read and write this site's cookies and storage, including its subdomains and login tokens",
+    .web_osr_gpu_unavailable = "The Chromium engine can't draw on this Mac (no GPU path). Use the built-in engine for this page.",
+    .web_osr_profile_in_use = "Another maru is using the Chromium browser profile. Chromium tabs stay empty in this window.",
+    .web_osr_start_failed = "The Chromium engine could not start. Check MARU_WEB_OSR_DIR.",
+    .web_osr_crashed = "The Chromium engine stopped repeatedly and will not restart. Restart maru to try again.",
     .grant_scope_control = "control this browser (navigate, click, type, read)",
     .grant_prompt = "An agent wants to {0}. Target: {1}. Allow?",
     .pick_background_png = "Choose a PNG to use as the background",
@@ -2337,6 +2345,10 @@ const ko: Table = .{
     .status_viewport_narrowed = "폰 {0}열",
     .ws_checkpoint_write_failed = "작업 공간 체크포인트 저장에 실패했습니다",
     .grant_scope_storage = "이 사이트(하위 도메인 포함)의 쿠키·스토리지(로그인 토큰 포함)를 읽고 쓰려",
+    .web_osr_gpu_unavailable = "이 Mac 에서는 Chromium 엔진으로 그릴 수 없습니다(GPU 경로 없음). 이 페이지는 내장 엔진을 쓰세요.",
+    .web_osr_profile_in_use = "다른 maru 가 Chromium 브라우저 프로필을 쓰고 있습니다. 이 창의 Chromium 탭은 비어 있습니다.",
+    .web_osr_start_failed = "Chromium 엔진을 시작하지 못했습니다. MARU_WEB_OSR_DIR 을 확인하세요.",
+    .web_osr_crashed = "Chromium 엔진이 거듭 멈춰 다시 시작하지 않습니다. maru 를 다시 켜 보세요.",
     .grant_scope_control = "이 브라우저(이동·클릭·입력·읽기)를 제어하려",
     .grant_prompt = "에이전트가 {0} 합니다. 대상: {1}. 허용하시겠습니까?",
     .pick_background_png = "배경 이미지로 쓸 PNG를 고르세요",

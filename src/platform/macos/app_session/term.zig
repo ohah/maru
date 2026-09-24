@@ -806,6 +806,7 @@ fn destroyTermWithAbandonBackend(
     // Phase 7e-2a: 이 Term(web browser)을 주소창 편집 중이면 편집·관련 pending을 정리한다(stale surface_id 방지 —
     // remove가 슬롯을 해제하기 전에 surface_id로 판정). 비-web·비대상이면 무동작(surface_id 불일치 = no-op).
     web_ops.dropAddrEditIfSurface(self, term.surfaceId());
+    web_ops.dropOsrSurface(self, term.surfaceId()); // W3b: OSR 브라우저면 sidecar 에서 파괴(마지막이면 sidecar 도 내린다)
     if (term.pending_url) |u| { // WP-P: 아직 로드 못 한 복원 URL(owned) 회수
         self.allocator.free(u);
         term.pending_url = null;

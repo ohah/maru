@@ -31,6 +31,8 @@ const writeUrl = fields.writeUrl;
 const readUrl = fields.readUrl;
 const writeText = fields.writeText;
 const readText = fields.readText;
+const writeService = fields.writeService;
+const readService = fields.readService;
 
 /// Caller-owned output 에 frame 을 만든다. 성공 반환값만큼만 pipe 에 써야 한다.
 pub fn encode(message: Message, out: []u8) Error!usize {
@@ -65,6 +67,10 @@ pub fn encode(message: Message, out: []u8) Error!usize {
             try writeUrl(&cursor, value.url);
         },
         .shutdown => {},
+        .frame_channel => |value| {
+            try writeService(&cursor, value.service);
+            try cursor.writeBytes(&value.token);
+        },
         .title_changed => |value| {
             try writeBrowser(&cursor, value.browser);
             try writeText(&cursor, value.text);
@@ -123,6 +129,12 @@ pub fn decodeExact(frame: []const u8) Error!Message {
         .set_focus => .{ .set_focus = .{ .browser = try readBrowser(&cursor), .value = try readBool(&cursor) } },
         .navigate => .{ .navigate = .{ .browser = try readBrowser(&cursor), .url = try readUrl(&cursor) } },
         .shutdown => .shutdown,
+        .frame_channel => blk: {
+            const service = try readService(&cursor);
+            var token: [16]u8 = undefined;
+            @memcpy(&token, try cursor.readBytes(16));
+            break :blk .{ .frame_channel = .{ .service = service, .token = token } };
+        },
         .title_changed => .{ .title_changed = .{ .browser = try readBrowser(&cursor), .text = try readText(&cursor) } },
         .load_finished => .{ .load_finished = .{
             .browser = try readBrowser(&cursor),
@@ -387,4 +399,21 @@ test "view size edges: width at the cap and scale exactly 0.5 and 8.0 are accept
 test "a frame shorter than the length prefix is incomplete, not an out-of-bounds read" {
     try std.testing.expectError(error.IncompleteFrame, decodeExact(&[_]u8{ 0, 0, 0 }));
     try std.testing.expectError(error.IncompleteFrame, decodeExact(&[_]u8{}));
+}
+
+test "frame_channel carries the service name and the 128-bit token, and refuses odd names" {
+    const token = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
+    const got = try roundTrip(.{ .frame_channel = .{ .service = "dev.maru.web.123.abcdef", .token = token } });
+    try std.testing.expectEqualStrings("dev.maru.web.123.abcdef", got.frame_channel.service);
+    try std.testing.expectEqualSlices(u8, &token, &got.frame_channel.token);
+
+    var buf: [256]u8 = undefined;
+    const long = [_]u8{'a'} ** 128;
+    for ([_][]const u8{ "", "has space", "탭\t", &long }) |bad| {
+        try std.testing.expectError(error.InvalidServiceName, encode(.{ .frame_channel = .{ .service = bad, .token = token } }, &buf));
+    }
+    // 손으로 지은 frame 의 이름에 제어 문자가 섞이면 decode 도 거절한다.
+    var frame: [256]u8 = undefined;
+    const body = [_]u8{ 3, 'a', 0x01, 'b' } ++ [_]u8{0} ** 16;
+    try std.testing.expectError(error.InvalidServiceName, decodeExact(handFrame(&frame, .frame_channel, &body)));
 }

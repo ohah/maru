@@ -657,6 +657,12 @@ fn advanceSyntax(self: *AppSession, term: *Term) void {
     if (syntax_color.resumeParse(&term.rt.editor_syntax, doc.file.content)) {
         self.metal_dirty = true;
     }
+    // **괄호 쌍 색**(§5.1d) — 처음 목록 훑기를 이 프레임 몫만큼 잇고, 목록이 바뀌었으면 다시 판정한다. 아직 훑는 중이면 다음 프레임을 부른다(파싱과
+    // 같은 규율 — 안 부르면 idle skip 에서 멈춰 색이 영영 안 온다). 편집 직후의 부분 고침은 편집 통지(`onEditSpan`)가 이미 했다.
+    {
+        const cfg = self.loaded_config.config.editor;
+        if (cfg.bracket_pair_colorization and syntax_color.advanceBrackets(&term.rt.editor_syntax, self.allocator, doc.file.content, cfg.bracket_pair_colorization_independent_pools)) self.metal_dirty = true;
+    }
     // **피커가 열려 있고 방금 전까지 파던 중이었으면 목록을 다시 만든다**(§7.5 저하 — 「아직 모른다」의
     // 기제). 파싱이 끝나는 순간 검색어는 그대로라 아무것도 재필터를 촉발하지 않는다. `pending` 이
     // 풀린 다음 프레임부터는 `was_pending` 이 거짓이라 안 돈다 — 상주 비용이 아니라 **여는 순간의
@@ -715,7 +721,15 @@ fn syntaxColors(self: *AppSession, term: *Term) []const []const chrome_editor.co
         // **색 구간도 byte→열 환산이다**(§4.1h 「규칙 하나」) — 힌트를 안 넘기면 힌트가 선 줄의 색이 힌트 폭만큼 왼쪽으로 밀려
         // 글자마다 이웃의 색을 받는다(2026-09-22 캡처: `s.area()` 의 `a` 만 다른 색). caret·선택·검색은 이미 같은 규칙을 지난다.
         inlayRows(self, term),
+        bracketMarksFor(self, term),
     );
+}
+
+/// 이 편집기가 칠할 괄호 쌍 색(§5.1d) — 끄거나 비교 뷰면 비어 있다(§5.1b 와 같은 가드). sticky 머리줄도 같은 것을 쓴다.
+pub fn bracketMarksFor(self: *AppSession, term: *Term) syntax_color.BracketMarks {
+    if (!self.loaded_config.config.editor.bracket_pair_colorization) return .{};
+    if (term.rt.editor_diff != null) return .{};
+    return syntax_color.bracketMarks(&term.rt.editor_syntax);
 }
 
 /// 설정이 준 미니맵 폭(셀). 꺼져 있으면 0 — 실제 px 는 chrome 의 `minimap.widthPx` 가 정한다(좁으면 접힌다).
@@ -9421,7 +9435,7 @@ fn refreshAfterEdit(self: *AppSession, term: *Term, edit: ?syntax_color.EditSpan
     fold_lsp_client.onEdit(self, term); // 3층은 조용 시계만(§8.2j 「편집 중」) — 범위는 아래 ⑵ 의 `dropFoldState` 가 놓는다
     if (edit) |e| inlay_client.onEdit(self, term, e.start, e.old_end, e.new_end) else inlay_client.onEdit(self, term, null, 0, 0); // 힌트 밀기(§4.1h — 경계 = 뒤)
     if (edit) |e|
-        syntax_color.onEditSpan(&term.rt.editor_syntax, doc.file.content, e, doc.file.lines)
+        syntax_color.onEditSpan(&term.rt.editor_syntax, self.allocator, doc.file.content, e, doc.file.lines)
     else
         // **`null`은 "안 바뀌었다"가 아니라 "범위를 모른다"이다.** 이 함수는 편집 뒤에만 불리므로
         // 통지를 건너뛰면 트리가 낡은 채로 남아 **색이 옛 문서를 가리킨다**. 범위를 못 만드는

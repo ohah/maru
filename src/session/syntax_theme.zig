@@ -227,6 +227,24 @@ pub fn bracketMatchBorderFromTheme(theme: appearance.ResolvedTheme) color.Rgb {
     return .{ .r = mix8(fg.r, bg.r), .g = mix8(fg.g, bg.g), .b = mix8(fg.b, bg.b) };
 }
 
+/// 괄호 쌍 색(visual-mapping §5.1d) — 단계 셋과 무효.
+pub const BracketPairColors = struct { levels: [3]color.Rgb, unexpected: color.Rgb };
+
+/// 괄호 쌍 색을 테마에서 파생한다. VS Code 기본 테마는 두 벌이다 — 다크 금·자주·파랑(`#FFD700`·`#DA70D6`·`#179FFF`), 라이트 파랑·초록·갈색
+/// (`#0431FA`·`#319331`·`#7B3814`) — 그 순서를 ANSI 16 색으로 옮긴다: 다크면 밝은 노랑·밝은 자주·밝은 파랑(11·13·12), 라이트면 파랑·초록·노랑
+/// (4·2·3). 무효는 VS Code 가 `rgba(255,18,18,0.8)` — ANSI 밝은 빨강(9)을 바탕 쪽으로 20 % 당긴다. 모두 바탕 대비 바닥을 둔다(§5.4 진단과 같은 파생).
+pub fn bracketPairsFromTheme(theme: appearance.ResolvedTheme) BracketPairColors {
+    const bg_lum = color.relativeLuminance(theme.background);
+    const target: f32 = 3.0;
+    const dark = bg_lum < 0.2;
+    const idx: [3]u8 = if (dark) .{ 11, 13, 12 } else .{ 4, 2, 3 };
+    var levels: [3]color.Rgb = undefined;
+    for (idx, 0..) |n, i| levels[i] = readable(ansi(theme, n), bg_lum, target);
+    const red = readable(ansi(theme, 9), bg_lum, target);
+    const bg = theme.background;
+    return .{ .levels = levels, .unexpected = .{ .r = toward(red.r, bg.r, 20), .g = toward(red.g, bg.g, 20), .b = toward(red.b, bg.b, 20) } };
+}
+
 /// `from` 을 `to` 쪽으로 `pct` % 옮긴다(정수 산술 — 반올림).
 fn toward(from: u8, to: u8, pct: u16) u8 {
     const f: i32 = from;

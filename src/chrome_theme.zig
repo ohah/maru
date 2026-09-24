@@ -37,6 +37,7 @@ pub fn tokensFor(appearance: config.appearance.ResolvedAppearance) chrome.Tokens
     // **한 번만 부른다** — 파생 계산(휘도·대비 바닥)이 호출마다 돈다.
     const diff_colors = session.syntax_theme.diffFromTheme(t);
     const diag_colors = session.syntax_theme.diagnosticsFromTheme(t);
+    const bracket_colors = session.syntax_theme.bracketPairsFromTheme(t);
     var tk = chrome.tokens.Tokens.rich(.{
         .foreground = t.foreground,
         .sidebar_background = t.sidebar_background,
@@ -60,6 +61,10 @@ pub fn tokensFor(appearance: config.appearance.ResolvedAppearance) chrome.Tokens
         .bracket_match_border = session.syntax_theme.bracketMatchBorderFromTheme(t), // 짝 괄호 테두리(§5.1b)
         .indent_guide = session.syntax_theme.indentGuideFromTheme(t), // 들여쓰기 안내선(§5.1c)
         .indent_guide_active = session.syntax_theme.indentGuideActiveFromTheme(t),
+        .bracket_pair_1 = bracket_colors.levels[0], // 괄호 쌍 색(§5.1d)
+        .bracket_pair_2 = bracket_colors.levels[1],
+        .bracket_pair_3 = bracket_colors.levels[2],
+        .bracket_unexpected = bracket_colors.unexpected,
         .diagnostic_error = diag_colors.err,
         .diagnostic_warning = diag_colors.warning,
         .diagnostic_info = diag_colors.info,

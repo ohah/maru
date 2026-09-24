@@ -114,6 +114,41 @@ pub fn resolve(tokens: []const Token, independent: bool, out: []Info, partner: [
     }
 }
 
+/// 이 길이(UTF-16 단위) 이상인 줄의 괄호는 없다 — VS Code 는 그런 줄을 토큰화하지 않고(`editor.maxTokenizationLineLength` 기본 20,000 ·
+/// `TokenizationSupportWithLineLimit`), 토큰화 안 된 줄은 「균형 괄호」 표시가 없어 괄호도 없다. 한 줄로 줄인(minified) 파일이 온통 칠해지지 않는
+/// 까닭이 이것이다.
+pub const max_tokenized_line: usize = 20_000;
+
+/// 긴 줄(`max_tokenized_line` 이상)에 든 괄호를 뺀다 — 제자리에서 당기고 남은 길이를 돌려준다. `tokens` 는 위치 오름차순이고 `source` 는 그 문서다.
+pub fn dropLongLines(tokens: []Token, source: []const u8) usize {
+    var w: usize = 0;
+    var line_start: usize = 0;
+    var line_end: usize = 0; // 지금 줄 [line_start, line_end) — 아직 안 셌으면 0,0
+    var long = false;
+    for (tokens) |t| {
+        if (t.start >= line_end or t.start < line_start) {
+            line_start = if (std.mem.lastIndexOfScalar(u8, source[0..t.start], '\n')) |nl| nl + 1 else 0;
+            line_end = if (std.mem.indexOfScalarPos(u8, source, t.start, '\n')) |nl| nl else source.len;
+            long = utf16Len(source[line_start..line_end]) >= max_tokenized_line;
+        }
+        if (long) continue;
+        tokens[w] = t;
+        w += 1;
+    }
+    return w;
+}
+
+/// UTF-16 단위 길이 — byte 가 상한보다 짧으면 셀 것도 없다(UTF-16 단위 ≤ byte).
+fn utf16Len(line: []const u8) usize {
+    if (line.len < max_tokenized_line) return line.len;
+    var n: usize = 0;
+    for (line) |b| {
+        if (b & 0xC0 == 0x80) continue; // 이어짐 byte
+        n += if (b >= 0xF0) 2 else 1; // 4 byte 글자는 서로게이트 둘
+    }
+    return n;
+}
+
 /// 깊이 가드로 글자가 된 여는 괄호의 표시(① → ②).
 const ignored = none - 1;
 

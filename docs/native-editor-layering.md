@@ -361,7 +361,7 @@ TSTree *ts_parser_parse_with_options(TSParser *, const TSTree *old_tree, TSInput
 엉뚱한 byte 를 가리킨다. 틀어진 파싱도 **끝까지는 완료**되므로 다음 파싱은 처음부터 맞게 판다(스스로 회복한다).
 
 **제품에서 밟는 자리는 백업 복원이다.** 여는 파싱(4ms 예산)이 끊긴 채로 `restoreIfAny` 가 곧바로 문서 전체를 갈아 끼운다
-(`finishAttach` 꼬리). 그 뒤 프레임에서 **진단(`diagnosticViews`)이 `syntaxColors`(이어 파는 자리)보다 먼저** 트리를 읽어
+(`finishAttach` 꼬리). 그 뒤 프레임에서 **진단(`diagnosticViews`)이 `syntaxColors`(그때 이어 파던 자리 — 2026-09-24 부터는 프레임 맨 앞 `advanceSyntax`, [시각 매핑](native-editor-visual-mapping.md) 접힘 승격 「규칙 넷째」)보다 먼저** 트리를 읽어
 거짓 구문 오류가 목록에 들어가고, 이어 파는 동안에는 「트리가 없으면 직전 목록 유지」([시각 매핑](native-editor-visual-mapping.md) §5.4) 때문에 **파싱이 끝날 때까지 남는다**.
 고치기 전 `ES41` 이 올바른 Zig 문서에서 구문 오류 **2개**를 읽었다. 미니맵도 같은 순서라 한 프레임 틀린 색을 그린다. 사람이 여는
 직후에 쳐서 밟는 일은 사실상 없다 — 파일을 열면 caret 이 없고 클릭이 세운다.

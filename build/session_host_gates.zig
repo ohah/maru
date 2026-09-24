@@ -4333,7 +4333,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         B3SettlementTest.add(b, session_host_2d1_step, event_2d1_attachment_module, "CR3a-2d1 generation attachment", 1);
         const event_2d1_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_2d1_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_generation_release_permit_boundary.zig"),
                 .target = target,
                 .optimize = b3_optimize,
             }),
@@ -4382,7 +4382,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         );
         const event_2d2_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_2d2_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_terminal_cleanup_handoff_boundary.zig"),
                 .target = target,
                 .optimize = b3_optimize,
             }),
@@ -4433,7 +4433,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         }
         const event_2d3_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_2d3_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_terminal_drain_proof_loss_boundary.zig"),
                 .target = target,
                 .optimize = b3_optimize,
             }),
@@ -4473,7 +4473,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         B3SettlementTest.add(b, session_host_2e_step, event_2e_attachment_module, "CR3a-2e 원복은", 3);
         B3SettlementTest.add(b, session_host_2e_step, event_2e_attachment_module, "CR3a-2c3d C3-1 event 예약 실패", 1);
         const event_2e_boundary_module = b.createModule(.{
-            .root_source_file = b.path("tests/session_host_2e_boundary.zig"),
+            .root_source_file = b.path("tests/session_host_batch_reservation_order_boundary.zig"),
             .target = target,
             .optimize = b3_optimize,
         });

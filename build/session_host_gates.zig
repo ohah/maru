@@ -2564,7 +2564,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr5a_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr5a_boundary_tests.setCwd(b.path("."));
         session_host_cr5a_step.dependOn(&run_cr5a_boundary_tests.step);
-        boundary_step.dependOn(&run_cr5a_boundary_tests.step);
+        if (cr5a_optimize == .Debug) boundary_step.dependOn(&run_cr5a_boundary_tests.step);
     }
     const session_host_cr5b1_step = b.step(
         "test-session-host-cr5b1",
@@ -2599,7 +2599,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr5b1_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr5b1_boundary_tests.setCwd(b.path("."));
         session_host_cr5b1_step.dependOn(&run_cr5b1_boundary_tests.step);
-        boundary_step.dependOn(&run_cr5b1_boundary_tests.step);
+        if (cr5b1_optimize == .Debug) boundary_step.dependOn(&run_cr5b1_boundary_tests.step);
     }
     const session_host_cr5b2a_step = b.step(
         "test-session-host-cr5b2a",
@@ -2649,7 +2649,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr5b2a_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr5b2a_boundary_tests.setCwd(b.path("."));
         session_host_cr5b2a_step.dependOn(&run_cr5b2a_boundary_tests.step);
-        boundary_step.dependOn(&run_cr5b2a_boundary_tests.step);
+        if (cr5b2a_optimize == .Debug) boundary_step.dependOn(&run_cr5b2a_boundary_tests.step);
     }
     const session_host_cr5b2b_step = b.step(
         "test-session-host-cr5b2b",
@@ -2699,7 +2699,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr5b2b_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr5b2b_boundary_tests.setCwd(b.path("."));
         session_host_cr5b2b_step.dependOn(&run_cr5b2b_boundary_tests.step);
-        boundary_step.dependOn(&run_cr5b2b_boundary_tests.step);
+        if (cr5b2b_optimize == .Debug) boundary_step.dependOn(&run_cr5b2b_boundary_tests.step);
     }
     const session_host_cr5b2c_step = b.step(
         "test-session-host-cr5b2c",
@@ -2749,7 +2749,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr5b2c_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr5b2c_boundary_tests.setCwd(b.path("."));
         session_host_cr5b2c_step.dependOn(&run_cr5b2c_boundary_tests.step);
-        boundary_step.dependOn(&run_cr5b2c_boundary_tests.step);
+        if (cr5b2c_optimize == .Debug) boundary_step.dependOn(&run_cr5b2c_boundary_tests.step);
     }
     const session_host_cr5c_step = b.step(
         "test-session-host-cr5c",
@@ -2799,7 +2799,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr5c_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr5c_boundary_tests.setCwd(b.path("."));
         session_host_cr5c_step.dependOn(&run_cr5c_boundary_tests.step);
-        boundary_step.dependOn(&run_cr5c_boundary_tests.step);
+        if (cr5c_optimize == .Debug) boundary_step.dependOn(&run_cr5c_boundary_tests.step);
     }
     const session_host_cr5d1_step = b.step(
         "test-session-host-cr5d1",
@@ -2834,7 +2834,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr5d1_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr5d1_boundary_tests.setCwd(b.path("."));
         session_host_cr5d1_step.dependOn(&run_cr5d1_boundary_tests.step);
-        boundary_step.dependOn(&run_cr5d1_boundary_tests.step);
+        if (cr5d1_optimize == .Debug) boundary_step.dependOn(&run_cr5d1_boundary_tests.step);
     }
     const session_host_cr5d2_step = b.step(
         "test-session-host-cr5d2",
@@ -2884,7 +2884,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr5d2_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr5d2_boundary_tests.setCwd(b.path("."));
         session_host_cr5d2_step.dependOn(&run_cr5d2_boundary_tests.step);
-        boundary_step.dependOn(&run_cr5d2_boundary_tests.step);
+        if (cr5d2_optimize == .Debug) boundary_step.dependOn(&run_cr5d2_boundary_tests.step);
     }
     const session_host_cr6a1_step = b.step(
         "test-session-host-cr6a1",
@@ -2947,7 +2947,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr6a1_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr6a1_boundary_tests.setCwd(b.path("."));
         session_host_cr6a1_step.dependOn(&run_cr6a1_boundary_tests.step);
-        boundary_step.dependOn(&run_cr6a1_boundary_tests.step);
+        if (cr6a1_optimize == .Debug) boundary_step.dependOn(&run_cr6a1_boundary_tests.step);
     }
     const session_host_cr6a2_step = b.step(
         "test-session-host-cr6a2",
@@ -3026,7 +3026,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr6a2_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr6a2_boundary_tests.setCwd(b.path("."));
         session_host_cr6a2_step.dependOn(&run_cr6a2_boundary_tests.step);
-        boundary_step.dependOn(&run_cr6a2_boundary_tests.step);
+        if (cr6a2_optimize == .Debug) boundary_step.dependOn(&run_cr6a2_boundary_tests.step);
     }
     const session_host_cr6b_step = b.step(
         "test-session-host-cr6b",
@@ -3117,7 +3117,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_cr6b_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr6b_boundary_tests.setCwd(b.path("."));
         session_host_cr6b_step.dependOn(&run_cr6b_boundary_tests.step);
-        boundary_step.dependOn(&run_cr6b_boundary_tests.step);
+        if (cr6b_optimize == .Debug) boundary_step.dependOn(&run_cr6b_boundary_tests.step);
     }
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{

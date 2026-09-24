@@ -2066,7 +2066,7 @@ uint32_t maru_macos_mermaid_complete_termination(uint64_t helper_instance);
 /* physical adapter가 quiesce된 app 종료에서 queue/latch/lease를 최종 회수한다. */
 void maru_macos_mermaid_shutdown(void);
 /* v190(W3b): 앱 종료 때 Chromium sidecar(웹 OSR)를 내린다 — shutdown 뒤 최대 3 초 기다리고 남았으면 죽인다.
-   개발용 환경변수(MARU_WEB_OSR_DIR)로 켜지 않았으면 무동작. 메인 스레드에서만. */
+   Chromium 엔진(설정 browser.engine·개발용 MARU_WEB_OSR_DIR)을 쓰지 않으면 무동작. 메인 스레드에서만. */
 void maru_macos_web_osr_shutdown(void);
 /* v191(W3c): 이 창 renderer 에서 GPU 가 끝낸 마지막 프레임 세대를 넣는다 — tick 전에 부른다. OSR 탭은 지금 front 를
    그린 프레임이 끝나기 전에는 새 프레임을 꺼내지 않는다(front 를 sidecar 에 돌려주면 GPU 가 읽는 장을 덮는다). */

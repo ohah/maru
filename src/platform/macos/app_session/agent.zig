@@ -1281,27 +1281,16 @@ pub fn pollAgentTranscript(self: *AppSession, term: *Term, displayed: bool) void
     // asked to return to.  Transcript path lookup below does require CWD, so keep that
     // optional enrichment separate from identity observation.
     refreshAgentSessionIdentity(self, term);
-    // **cwd는 Claude 경로에만 필요하다.** 그 경로는 `~/.claude/projects/<cwd 슬러그>/`를 찾느라 cwd를 쓰지만
-    // (`claudeDirName`), codex는 신원이 곧 파일명이라 `refreshCodexTranscript`가 `_ = cwd`로 무시한다.
-    // 그런데 예전에는 여기서 **둘 다** 막았다 — cwd를 모르면 codex도 대화를 못 읽었다. 그 provider에게는
-    // 필요하지도 않은 값 때문에. 아래처럼 provider별로 가른다.
-    //
-    // 그리고 그 cwd 자체도 **축**을 쓴다(`git_ops.termCwd` — OSC 7 → 커널 조회 2단, 단일 출처는
-    // docs/editor-surface-dock.md §3.5). 관측만 보던 동안에는 셸 통합이 없는 셸과 재개 Term에서 Claude
-    // 대화가 통째로 비어, 사이드바 에이전트 행이 마지막 프롬프트·응답 없이 종류 이름만 보였다.
-    //
-    // **수명**: `refreshClaudeTranscript`는 이 슬라이스를 슬러그 계산에만 쓰고 밖으로 내보내지 않으므로
-    // 스택 버퍼로 충분하다. 이 함수는 Term당 `transcript_poll_interval_ms`(1초)로 throttle되어 있어
-    // 커널 조회가 여기서 늘리는 비용은 무시할 수준이다.
-    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd = git_ops.termCwd(self, term, &cwd_buf) orelse "";
+    // **cwd 는 필요 없다.** 두 provider 모두 신원(세션 id)으로 대화 파일을 확정한다 — claude 도 폴더 이름을 cwd 로
+    // 다시 만들지 않는다(`refreshClaudeTranscript` 주석). 예전에는 claude 경로가 cwd 로 폴더를 만들어서, 셸 통합이
+    // 없는 셸·재개 Term 처럼 cwd 를 모르는 칸의 대화 줄이 통째로 비었다.
     const had_reply = cache.owned.reply().len > 0;
     // provider마다 다른 건 **경로 규칙·신원 확인·레코드 모양** 셋뿐이다(§7.3). 매핑 규율(고정하지 않음)·throttle·
     // 재투영은 여기 공통으로 남는다.
     const changed = switch (term.agent_kind) {
         // cwd를 못 풀면 슬러그를 만들 수 없어 이 갈래만 건너뛴다(추측으로 다른 디렉터리를 열지 않는다).
-        .claude => cwd.len > 0 and refreshClaudeTranscript(self, term, cwd),
-        .codex => refreshCodexTranscript(self, term, cwd),
+        .claude => refreshClaudeTranscript(self, term),
+        .codex => refreshCodexTranscript(self, term),
         .none => false,
     };
     if (!changed) return;
@@ -1324,28 +1313,21 @@ pub fn pollAgentTranscript(self: *AppSession, term: *Term, displayed: bool) void
 /// 추측은 §7.2 가 이미 기각했다(새 터미널에 직전 세션 대화가 붙었다).
 ///
 /// 이미 소스가 있으면 아무것도 하지 않는다. 훅이 나중에 오면 그 값이 이긴다(같은 파일이면 무동작).
-pub fn adoptFallbackImageSource(self: *AppSession, term: *Term) void {
+pub fn adoptFallbackImageSource(term: *Term) void {
     if (!term.hook.image_source.isEmpty()) return;
     const cache = &term.hook.transcript;
     if (cache.identity_len == 0 or cache.name_len == 0) return;
 
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path: []const u8 = switch (term.agent_kind) {
+    // 캐시한 `fileName()` 은 두 provider 모두 **뿌리 기준 상대 경로**다 — claude 는 `projects` 아래 `<폴더>/<id>.jsonl`
+    // (id 로 찾았다), codex 는 `sessions` 아래 날짜 계층. 뿌리는 대화 줄과 **같은 함수**로 얻는다(`CODEX_HOME` 포함).
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_path = switch (term.agent_kind) {
         .none => return,
-        // codex 는 `fileName()` 이 `~/.codex/sessions` 아래 상대경로다(날짜 계층을 포함한다).
-        .codex => blk: {
-            const home_z = std.c.getenv("HOME") orelse return;
-            break :blk maru.session.agent_transcript.codexTranscriptPath(&buf, std.mem.span(home_z), cache.fileName()) orelse return;
-        },
-        // claude 는 `~/.claude/projects/<cwd 슬러그>/<신원>.jsonl` 이다 — 슬러그 때문에 cwd 가 필요하다.
-        .claude => blk: {
-            var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-            const cwd = git_ops.termCwd(self, term, &cwd_buf) orelse return;
-            var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-            const claude_dir = settings_ops.claudeConfigDir(&dir_buf) orelse return;
-            break :blk maru.session.agent_transcript.claudeTranscriptPath(&buf, claude_dir, cwd, cache.fileName()) orelse return;
-        },
-    };
+        .codex => codexSessionsRootPath(&root_buf),
+        .claude => claudeProjectsRootPath(&root_buf),
+    } orelse return;
+    const path = std.fmt.bufPrint(&buf, "{s}/{s}", .{ root_path, cache.fileName() }) catch return;
     _ = term.hook.image_source.set(path);
 }
 
@@ -2107,17 +2089,6 @@ fn adoptHookImageSource(self: *AppSession, slot: *HookSlot, ev: maru.session.age
     agent_activity_ops.onSourceChanged(self);
 }
 
-/// claude 가 이 작업 디렉터리의 대화를 쌓는 디렉터리(`<claude 설정>/projects/<cwd slug>`). 대화 줄과 재부팅
-/// 부활(RB2)이 **같은 계산**을 쓴다 — 두 벌이면 한쪽만 slug 규칙을 따라가다 서로 다른 파일을 본다.
-fn claudeProjectDirPath(cwd: []const u8, out: []u8) ?[]const u8 {
-    const tr = maru.session.agent_transcript;
-    var claude_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const claude_dir = settings_ops.claudeConfigDir(&claude_dir_buf) orelse return null;
-    var slug_buf: [1024]u8 = undefined;
-    const slug = tr.claudeDirName(cwd, &slug_buf) orelse return null;
-    return std.fmt.bufPrint(out, "{s}/projects/{s}", .{ claude_dir, slug }) catch null;
-}
-
 /// codex 가 대화(rollout)를 쌓는 뿌리(`$CODEX_HOME/sessions`, 없으면 `~/.codex/sessions`) — 대화 줄과 재부팅
 /// 부활이 공유한다. `CODEX_HOME` 규칙은 훅 설치와 **같은 함수**(`agent_hook_install.configDir`)다 — 예전엔 여기만
 /// `~/.codex` 로 박혀 있어 `CODEX_HOME` 사용자의 대화를 못 찾았다(코드 리뷰).
@@ -2137,38 +2108,54 @@ fn claudeProjectsRootPath(out: []u8) ?[]const u8 {
     return std.fmt.bufPrint(out, "{s}/projects", .{claude_dir}) catch null;
 }
 
-/// claude: 작업 디렉터리를 인코딩한 디렉터리의 **직속** 파일만 본다 — 서브에이전트 기록은 `<세션 id>/` 하위에
-/// 쌓이므로 그것만으로 배제된다(§7.3). 대화가 갱신됐으면 true.
-pub fn refreshClaudeTranscript(self: *AppSession, term: *Term, cwd: []const u8) bool {
+/// claude: 대화 파일을 **세션 id 로** 찾는다 — `<설정>/projects/*/<id>.jsonl`. 대화가 갱신됐으면 true.
+///
+/// 작업 디렉터리로 폴더 이름을 다시 만들지 않는다. claude 는 폴더 이름을 `kT(경로)`(영숫자 아닌 **모든** 문자를
+/// `-` 로, 200 자를 넘으면 잘라 해시)로 만들고, 그 경로도 셸의 cwd 그대로가 아니라 **프로젝트의 정규 작업 루트**
+/// 에서 먼저 고른다(2026-09-24 설치본 2.1.280 코드에서 확인). 예전에는 `/`·`.` 만 바꾸는 규칙으로 흉내 내서 밑줄·
+/// 한글·공백·`~` 경로, 심볼릭 링크, 워크트리 하위 폴더에서 대화 줄이 조용히 비었다. id 는 전역에서 유일하므로
+/// 폴더를 훑으면 규칙 없이 찾는다(재부팅 부활과 **같은** `findClaudeById`). 찾은 상대 경로를 캐시해 두고 신원이
+/// 바뀔 때만 다시 훑는다. 서브에이전트 기록은 `<id>/` 하위라 이름이 달라 안 걸린다(§7.3).
+pub fn refreshClaudeTranscript(self: *AppSession, term: *Term) bool {
     const tr = maru.session.agent_transcript;
     const cache = &term.hook.transcript;
     // **신원이 없으면 아무것도 하지 않는다.** 예전엔 여기서 "그 디렉터리의 가장 최신 파일"을 추측했는데, 그게
     // 새 터미널에 직전 세션의 대화를 붙이고(사용자 제보) 같은 cwd의 두 에이전트가 서로의 대화를 물게 했다.
     // 추측으로 틀린 대화를 보여주느니 비우는 편이 낫다는 계약 1과도 어긋났다 — 그래서 폴백을 없앴다(§7.2).
     if (cache.identity_len == 0) return false;
-    var path_buf: [2048]u8 = undefined;
-    const dir_path = claudeProjectDirPath(cwd, &path_buf) orelse return false;
-    const dir = openAgentDirAbsolute(self, dir_path, .{}) orelse return false;
-    defer dir.close(self.io);
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_path = claudeProjectsRootPath(&path_buf) orelse return false;
+    const root = openAgentDirAbsolute(self, root_path, .{ .iterate = true }) orelse return false;
+    defer root.close(self.io);
 
     // **신원이 곧 파일명이다** — `CLAUDE_CODE_SESSION_ID`가 그대로 `<id>.jsonl`이다(provider가 자식 env로 밝힌
-    // 값, §7.2). 디렉터리를 훑을 것도 시간을 비교할 것도 없다.
+    // 값, §7.2). 캐시한 경로가 이 신원의 것이 아니면(첫 조회·`/clear` 로 신원이 바뀜) 다시 찾는다.
     var name_buf: [tr.max_name_bytes]u8 = undefined;
-    const wanted = std.fmt.bufPrint(&name_buf, "{s}.jsonl", .{cache.identity()}) catch return false;
-    if (!std.mem.eql(u8, wanted, cache.fileName())) {
-        cache.setFileName(wanted);
+    const wanted = std.fmt.bufPrint(&name_buf, "/{s}.jsonl", .{cache.identity()}) catch return false;
+    if (!std.mem.endsWith(u8, cache.fileName(), wanted)) {
+        var found_buf: [tr.max_name_bytes]u8 = undefined;
+        // 아직 파일이 없으면(세션이 막 시작했다) 다음 폴링에 다시 찾는다 — 옛 캐시는 버린다.
+        const found = tr.findClaudeById(self.io, root, wanted[1..], &found_buf) orelse {
+            if (cache.name_len != 0) {
+                cache.setFileName("");
+                cache.read_mtime_ns = 0;
+                cache.owned.clear();
+            }
+            return false;
+        };
+        cache.setFileName(found);
         cache.read_mtime_ns = 0;
         cache.owned.clear();
     }
 
     // mtime이 그대로면 다시 읽지 않는다(계약 4).
-    const st = dir.statFile(self.io, cache.fileName(), .{}) catch return false;
+    const st = root.statFile(self.io, cache.fileName(), .{}) catch return false;
     if (st.mtime.nanoseconds == cache.read_mtime_ns) return false;
     cache.read_mtime_ns = st.mtime.nanoseconds;
 
     const tail_buf = self.allocator.alloc(u8, tr.max_tail_bytes) catch return false;
     defer self.allocator.free(tail_buf);
-    const tail = tr.readTail(self.io, dir, cache.fileName(), tail_buf);
+    const tail = tr.readTail(self.io, root, cache.fileName(), tail_buf);
     if (tail.len == 0) return false;
 
     var parse_arena = std.heap.ArenaAllocator.init(self.allocator);
@@ -2183,10 +2170,9 @@ pub fn refreshClaudeTranscript(self: *AppSession, term: *Term, cwd: []const u8) 
 /// codex: 날짜 계층(`YYYY/MM/DD`)이라 디렉터리 이름이 작업 디렉터리를 말해주지 않고, 서브에이전트 기록이
 /// **같은 계층에 섞인다**(실측: 최근 40개 중 32개). 그래서 최근 후보를 열어 `session_meta`로 신원을 확인한다 —
 /// `thread_source == "user"`이고 cwd가 이 Term과 같은 첫 후보를 고른다. 대화가 갱신됐으면 true.
-pub fn refreshCodexTranscript(self: *AppSession, term: *Term, cwd: []const u8) bool {
+pub fn refreshCodexTranscript(self: *AppSession, term: *Term) bool {
     const tr = maru.session.agent_transcript;
     const cache = &term.hook.transcript;
-    _ = cwd; // 신원으로 파일을 확정하므로 cwd 대조가 필요 없다(그 값이 곧 그 세션이다)
     if (cache.identity_len == 0) return false; // claude와 같은 이유로 폴백 없음(§7.2)
     var path_buf: [2048]u8 = undefined;
     const root_path = codexSessionsRootPath(&path_buf) orelse return false;

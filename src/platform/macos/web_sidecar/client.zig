@@ -170,7 +170,7 @@ fn flushTitles(_: [*c]c.cef_task_t) callconv(.c) void {
     if (next) |at| postTitleFlush(at -| now);
 }
 
-fn nowMs() u64 {
+pub fn nowMs() u64 {
     var ts: std.c.timespec = undefined;
     _ = std.c.clock_gettime(.MONOTONIC, &ts);
     return @as(u64, @intCast(ts.sec)) * 1000 + @as(u64, @intCast(ts.nsec)) / 1_000_000;

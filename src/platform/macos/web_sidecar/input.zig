@@ -5,7 +5,9 @@
 //! (정상 경합). 실패로 알리면 마우스 이동마다 실패가 쏟아진다.
 //!
 //! 페이지가 원하는 커서(`on_cursor_change`)와 IME 조합 사각형(`on_ime_composition_range_changed`)을 maru 로 보내는
-//! 것도 여기다.
+//! 것도 여기다. 둘 다 브라우저마다 마지막 값을 기억해 같으면 다시 안 보낸다 — maru 도 브라우저마다 마지막 커서를 기억해야
+//! 한다(포인터가 나갔다 다시 들어와도 같은 커서는 안 온다). 조합이 끝났다는 알림은 없다 — maru 는 자기가 조합을 보내는
+//! 동안에만 사각형을 쓴다.
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -35,6 +37,9 @@ comptime {
     std.debug.assert(f.command_down == c.EVENTFLAG_COMMAND_DOWN);
     std.debug.assert(f.is_repeat == c.EVENTFLAG_IS_REPEAT);
     std.debug.assert(f.precision_scrolling_delta == c.EVENTFLAG_PRECISION_SCROLLING_DELTA);
+    std.debug.assert(f.is_key_pad == c.EVENTFLAG_IS_KEY_PAD);
+    std.debug.assert(f.is_left == c.EVENTFLAG_IS_LEFT);
+    std.debug.assert(f.is_right == c.EVENTFLAG_IS_RIGHT);
 }
 
 /// 입력 tag 면 수행하고 true.
@@ -172,6 +177,10 @@ pub fn cursorOf(kind: c.cef_cursor_type_t) WebCursor {
         c.CT_COPY, c.CT_DND_COPY => .copy,
         c.CT_ALIAS, c.CT_DND_LINK => .alias,
         c.CT_CONTEXTMENU => .context_menu,
+        c.CT_WAIT => .wait,
+        c.CT_PROGRESS => .progress,
+        c.CT_HELP => .help,
+        c.CT_NONE => .none,
         else => .arrow,
     };
 }
@@ -194,5 +203,8 @@ pub fn onImeCompositionRangeChanged(_: [*c]c.cef_render_handler_t, browser: [*c]
     if (browser == null or count == 0 or bounds == null) return;
     const entry = browsers.state.registry.byCefId(browser.*.get_identifier.?(browser)) orelse return;
     const union_rect = input_map.unionOf(c.cef_rect_t, bounds[0..@min(count, input_map.max_bounds)]) orelse return;
+    // 같은 사각형은 다시 안 보낸다 — 조합 중 페이지가 입력칸을 매 프레임 움직여도 바뀐 것만 간다(적대 검증).
+    if (entry.ime_bounds) |last| if (std.meta.eql(last, union_rect)) return;
+    entry.ime_bounds = union_rect;
     browsers.state.writer.send(.{ .ime_range = .{ .browser = entry.id, .bounds = union_rect } }) catch {};
 }

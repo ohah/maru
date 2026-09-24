@@ -21,13 +21,13 @@ test "p5c3d compatibility fixture is frozen source with provenance and a product
     defer allocator.free(provenance);
     const e2e = try read(
         allocator,
-        "tests/session_host_3d_e2e.zig",
+        "tests/session_host_same_major_compatibility_e2e.zig",
         2 * 1024 * 1024,
     );
     defer allocator.free(e2e);
     const product_e2e = try read(
         allocator,
-        "tests/session_host_3d_product_e2e.zig",
+        "tests/session_host_attach_product_e2e.zig",
         2 * 1024 * 1024,
     );
     defer allocator.free(product_e2e);

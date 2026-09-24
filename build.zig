@@ -5552,7 +5552,7 @@ pub fn build(b: *std.Build) void {
     boundary_step.dependOn(&run_png_codec_wiring_tests.step);
     const session_host_cr6f_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/session_host_cr6f_boundary.zig"),
+            .root_source_file = b.path("tests/session_host_output_wake_boundary.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -8060,7 +8060,7 @@ pub fn build(b: *std.Build) void {
     boundary_step.dependOn(&run_session_host_cr6f_idle_soak_validator_tests.step);
     const session_host_cr6f_idle_soak_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/session_host_cr6f_idle_soak_boundary.zig"),
+            .root_source_file = b.path("tests/session_host_idle_soak_boundary.zig"),
             .target = target,
             .optimize = optimize,
         }),

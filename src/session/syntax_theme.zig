@@ -702,6 +702,13 @@ test "BPT1 괄호 쌍 색 — 다크는 ANSI 11·13·12, 라이트는 4·2·3(VS
     t.foreground = .{ .r = 0x00, .g = 0x00, .b = 0x00 };
     for (0..16) |i| t.palette[i] = .{ .r = @intCast(0x10 + i * 3), .g = @intCast(0x40 - i), .b = @intCast(0x20 + i * 2) };
     const light = bracketPairsFromTheme(t);
+    // 무효 색도 대비 바닥 **뒤**다 — 옅은 빨강(`#FFC0C0`)을 흰 바탕 쪽으로 당기면 바닥 아래로 떨어진다(새 눈 리뷰).
+    {
+        var t2 = t;
+        t2.palette[9] = .{ .r = 0xFF, .g = 0xC0, .b = 0xC0 };
+        const u = bracketPairsFromTheme(t2).unexpected;
+        try std.testing.expect(color.contrastRatio(color.relativeLuminance(u), color.relativeLuminance(t2.background)) >= 3.0 - 0.01);
+    }
     try std.testing.expectEqual(t.palette[4].?, light.levels[0]);
     try std.testing.expectEqual(t.palette[2].?, light.levels[1]);
     try std.testing.expectEqual(t.palette[3].?, light.levels[2]);

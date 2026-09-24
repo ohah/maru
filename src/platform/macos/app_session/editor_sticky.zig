@@ -98,6 +98,7 @@ pub fn compute(self: *AppSession, term: *Term, pane_rect: maru.chrome.draw.Rect,
             .inherit,
             editor_ops.semantic_client.spans(term),
             &.{},
+            editor_ops.bracketMarksFor(self, term), // 괄호 쌍 색 — VS Code 도 머리줄에 인라인 장식을 그린다(§5.1d)
         );
         const lo = st.color_store.items.len;
         if (v < per_line.len) st.color_store.appendSlice(self.allocator, per_line[v]) catch {};

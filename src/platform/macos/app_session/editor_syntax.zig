@@ -21,6 +21,7 @@ const tokens = maru.chrome.tokens;
 const syntax_colors = maru.chrome.components.editor_view.syntax_colors;
 const syntax_capture = maru.session.syntax_capture;
 const editor_language = maru.session.editor.language;
+const bracket_colors = maru.session.editor.bracket_colors;
 
 /// 한 줄에서 색을 계산하는 열 상한. **중립이 소유한다** — 이 이름은 그것을 다시 내보낼 뿐이다
 /// (두 벌을 두면 한쪽만 늘어도 아무도 모른다).
@@ -59,6 +60,15 @@ pub const State = struct {
     bufs: ColorBufs = .{},
     minimap_bufs: ColorBufs = .{},
 
+    /// 괄호 쌍 색(visual-mapping §5.1d) — 문서 전체 괄호 목록(트리에서, 증분으로 고친다)과 그 판정(짝 · 단계 · 무효).
+    brackets: syntax.BracketIndex = .{},
+    bracket_toks: std.ArrayList(bracket_colors.Token) = .empty,
+    bracket_info: std.ArrayList(bracket_colors.Info) = .empty,
+    /// 판정의 작업 칸(짝 · 스택 — 괄호 수의 두 배).
+    bracket_scratch: std.ArrayList(u32) = .empty,
+    /// 지금 판정이 어느 목록 판(`BracketIndex.version`)·어느 풀로 한 것인가. 다르면 그리지 않고 다시 판정한다.
+    bracket_resolved: ?BracketResolved = null,
+
     /// 심볼 목록(§7.5). 프레임마다 다시 채우되 **저장소는 재사용한다** — 색 버퍼들과 같은 규율이다.
     symbols: std.ArrayList(syntax.Provider.Symbol) = .empty,
     /// 헤더 밴드에 그릴 `경로 › 바깥 › 안쪽` 한 줄. 프레임마다 다시 굳힌다(§7.5 — 조회이지 저장이 아니다).
@@ -83,6 +93,10 @@ pub const State = struct {
     }
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
+        self.brackets.deinit(allocator);
+        self.bracket_toks.deinit(allocator);
+        self.bracket_info.deinit(allocator);
+        self.bracket_scratch.deinit(allocator);
         if (self.provider) |*p| p.deinit();
         self.bufs.deinit(allocator);
         self.minimap_bufs.deinit(allocator);
@@ -234,6 +248,7 @@ pub fn spanFromInverse(inverse_changes: []const maru.session.editor.delta.Change
 pub fn reparse(self: *State, source: []const u8) void {
     const p = &(self.provider orelse return);
     p.setSource(source);
+    self.brackets.invalidate(); // 범위를 모른다 — 괄호 목록도 처음부터(§5.1d)
     // **이어 팔 것이 안 남는다** — 예산 없이 끝까지 팠다(끊긴 여는 파싱은 `setSource` 가 버렸다). 남겨 두면 다음 프레임의
     // `resumeParse` 가 방금 맞게 판 트리를 버리고 처음부터 다시 나눠 판다(그동안 무색 · 진단은 직전 목록) — `ES41`.
     self.pending = false;
@@ -242,6 +257,7 @@ pub fn reparse(self: *State, source: []const u8) void {
 /// 편집을 provider에 알린다. 행·열은 **편집 후** 줄 인덱스에서 채운다.
 pub fn onEditSpan(
     self: *State,
+    allocator: std.mem.Allocator,
     source: []const u8,
     e: EditSpan,
     lines_after: maru.session.editor.line_index.LineIndex,
@@ -260,6 +276,8 @@ pub fn onEditSpan(
     const old_end = @max(e.old_end, start);
     const at = pointOf(lines_after, start);
     const to = pointOf(lines_after, new_end);
+    // 괄호 목록(§5.1d)은 **파기 전에 위치를 밀고 판 뒤에 달라진 범위만 고친다** — 달라진 범위는 새 트리 좌표라 민 목록과 맞는다.
+    self.brackets.shift(start, old_end, new_end);
     p.onEdit(source, .{
         .start_byte = start,
         .old_end_byte = old_end,
@@ -270,6 +288,55 @@ pub fn onEditSpan(
     });
     // `reparse` 와 같다 — `onEdit` 은 예산이 없어 끝까지 판다(옛 트리가 없던 여는 도중이면 처음부터). 이어 팔 것이 없다.
     self.pending = false;
+    // 못 고치면(할당) 버린다 — 다음 프레임이 처음부터 만든다. 틀린 목록보다 늦은 목록이 낫다.
+    self.brackets.refresh(allocator, p, source, .{ .start = start, .end = new_end }) catch self.brackets.invalidate();
+}
+
+/// 판정이 어느 목록 판 · 어느 풀로 한 것인가.
+pub const BracketResolved = struct { version: u64, independent: bool };
+
+/// 처음 목록 훑기의 프레임 몫 — 파싱 예산(4 ms)과 따로 든다. 4 MB 문서의 전체 훑기가 36~49 ms 라(§5.1d 실측) 스무 프레임 남짓에 나뉜다.
+pub const bracket_walk_budget_ns: u64 = 2 * std.time.ns_per_ms;
+
+/// 괄호 쌍 색의 이번 프레임 몫(§5.1d). 처음 목록은 예산을 든 훑기로 잇고, 목록이 바뀌었으면 다시 판정한다. **다음 프레임이 더 필요하면
+/// 참**(아직 훑는 중) — 호출자가 그 프레임을 다시 그리게 해야 이어진다(`resumeParse` 와 같은 규율).
+pub fn advanceBrackets(self: *State, allocator: std.mem.Allocator, source: []const u8, independent: bool) bool {
+    const p = &(self.provider orelse return false);
+    const ready = self.brackets.step(allocator, p, source, bracket_walk_budget_ns) catch {
+        self.brackets.invalidate();
+        return false;
+    };
+    if (!ready) return p.tree != null;
+    if (self.bracket_resolved) |r| {
+        if (r.version == self.brackets.version and r.independent == independent) return false;
+    }
+    self.bracket_resolved = null;
+    resolveBrackets(self, allocator, source, independent) catch return false;
+    self.bracket_resolved = .{ .version = self.brackets.version, .independent = independent };
+    return false;
+}
+
+fn resolveBrackets(self: *State, allocator: std.mem.Allocator, source: []const u8, independent: bool) error{OutOfMemory}!void {
+    const leaves = self.brackets.leaves.items;
+    try self.bracket_toks.resize(allocator, leaves.len);
+    for (leaves, self.bracket_toks.items) |l, *t| t.* = .{ .start = l.start, .len = l.len, .close_kind = l.close_kind, .open_kind = l.open_kind, .open = l.open, .colorized = l.colorized };
+    const n = bracket_colors.dropLongLines(self.bracket_toks.items, source);
+    self.bracket_toks.items.len = n;
+    try self.bracket_info.resize(allocator, n);
+    try self.bracket_scratch.resize(allocator, 2 * n);
+    bracket_colors.resolve(self.bracket_toks.items, independent, self.bracket_info.items, self.bracket_scratch.items[0..n], self.bracket_scratch.items[n..]);
+}
+
+/// 칠할 괄호들(문서 순). 판정이 지금 목록의 것이 아니면(편집 뒤 아직 안 했다 · 훑는 중) **비어 있다** — 낡은 자리를 칠하지 않는다.
+pub const BracketMarks = struct {
+    toks: []const bracket_colors.Token = &.{},
+    info: []const bracket_colors.Info = &.{},
+};
+
+pub fn bracketMarks(self: *const State) BracketMarks {
+    const r = self.bracket_resolved orelse return .{};
+    if (!self.brackets.ready or r.version != self.brackets.version) return .{};
+    return .{ .toks = self.bracket_toks.items, .info = self.bracket_info.items };
 }
 
 fn pointOf(idx: maru.session.editor.line_index.LineIndex, offset: usize) syntax.Point {
@@ -339,7 +406,7 @@ pub fn lineColors(
     /// 그 표의 `null` 이 무슨 뜻인가(`NullAxis`).
     null_axis: NullAxis,
 ) []const []const content.ColorSpan {
-    return lineColorsInto(self, &self.bufs, allocator, doc_content, line_idx, first_line, line_count, tab_width, visible_numbers, null_axis, &.{}, &.{});
+    return lineColorsInto(self, &self.bufs, allocator, doc_content, line_idx, first_line, line_count, tab_width, visible_numbers, null_axis, &.{}, &.{}, .{});
 }
 
 /// `lineColors` + **2층 스팬**(semantic tokens, §8.2i — 문서 순서, byte, 우리 색 역할). 1층 스팬 뒤에 문서 순서로 섞여 「마지막이 이긴다」로
@@ -357,8 +424,10 @@ pub fn lineColorsWith(
     extra: []const maru.session.editor.lsp.semantic.Span,
     /// 줄별 가상 텍스트(§4.1h) — **렌더 축**(창 앞 줄부터), 짧은 배열 허용. 색의 열은 힌트 뒤 글리프 열이다.
     line_inlays: []const []const content.Inlay,
+    /// 괄호 쌍 색(§5.1d) — 끄면 `.{}`.
+    brackets: BracketMarks,
 ) []const []const content.ColorSpan {
-    return lineColorsInto(self, &self.bufs, allocator, doc_content, line_idx, first_line, line_count, tab_width, visible_numbers, null_axis, extra, line_inlays);
+    return lineColorsInto(self, &self.bufs, allocator, doc_content, line_idx, first_line, line_count, tab_width, visible_numbers, null_axis, extra, line_inlays, brackets);
 }
 
 /// **미니맵 창**의 색(§6.1) — 본문과 같은 규칙, 다른 저장소. 반환 슬라이스는 `first_line` 기준 상대 첨자다.
@@ -373,7 +442,7 @@ pub fn minimapColors(
     visible_numbers: []const ?u32,
     null_axis: NullAxis,
 ) []const []const content.ColorSpan {
-    return lineColorsInto(self, &self.minimap_bufs, allocator, doc_content, line_idx, first_line, line_count, tab_width, visible_numbers, null_axis, &.{}, &.{}); // 미니맵은 1층만·힌트 없음(§6 — 전 문서)
+    return lineColorsInto(self, &self.minimap_bufs, allocator, doc_content, line_idx, first_line, line_count, tab_width, visible_numbers, null_axis, &.{}, &.{}, .{}); // 미니맵은 1층만·힌트 없음·괄호 색 없음(§6 — 전 문서 · §5.1d)
 }
 
 /// `.empty` 축에서 구간의 **첫 내용 줄**(문서 축, 0-based). 전부 빈 줄이면 null.
@@ -410,6 +479,8 @@ pub fn lineColorsInto(
     null_axis: NullAxis,
     extra: []const maru.session.editor.lsp.semantic.Span,
     line_inlays: []const []const content.Inlay,
+    /// 괄호 쌍 색(§5.1d) — 3층, 구문·semantic 위. 미니맵은 비운다(VS Code 도 미니맵에는 안 칠한다).
+    brackets: BracketMarks,
 ) []const []const content.ColorSpan {
     const p = &(self.provider orelse return &.{});
     if (line_count == 0) return &.{};
@@ -440,7 +511,7 @@ pub fn lineColorsInto(
     };
 
     p.spansForRange(allocator, doc_content, range, &bufs.spans);
-    if (bufs.spans.items.len == 0 and extra.len == 0) return &.{}; // 2층이 있으면 1층 캡처도 있다(글자가 있어야 토큰이 있다) — `extra` 검사는 방어(적대적 2회차 B20: 등가)
+    if (bufs.spans.items.len == 0 and extra.len == 0 and brackets.toks.len == 0) return &.{}; // 2층이 있으면 1층 캡처도 있다(글자가 있어야 토큰이 있다) — `extra` 검사는 방어(적대적 2회차 B20: 등가)
 
     // **여기부터는 중립이 소유한다**(`chrome…editor_view.syntax_colors`, §2m.112). 이 파일에 있는
     // 동안 「마지막이 이긴다」와 탭 열 계산이 macOS 것이었고, Windows 가 색을 칠하려면 같은 규칙을
@@ -457,6 +528,8 @@ pub fn lineColorsInto(
     // **2층을 섞는다**(§8.2i) — 창 범위 안의 것만, 문서 순서로 병합하되 같은 시작이면 2층이 뒤(「마지막이 이긴다」). 1층 목록은 이미 문서
     // 순서이고 2층도 그렇다(서버가 relative 로 내고 편집 밀기가 순서를 지킨다) — 병합 한 번이면 된다.
     if (extra.len > 0) mergeSecondLayer(allocator, bufs, extra, range) catch return &.{};
+    // **3층 — 괄호 쌍 색**(§5.1d). 글자색 장식이라 구문·semantic 색을 이긴다(VS Code `inlineClassName`). 같은 시작이면 뒤에 둔다.
+    if (brackets.toks.len > 0) mergeBracketLayer(allocator, bufs, brackets, range) catch return &.{};
 
     // 줄 경계는 **CRLF 를 아는 쪽**이 준다(`LineIndex.Line.contentEnd()`).
     bufs.line_bounds.clearRetainingCapacity();
@@ -490,6 +563,44 @@ pub fn lineColorsInto(
         first_line,
         line_inlays,
     );
+}
+
+/// 괄호 쌍 색의 역할 — 무효는 한 색, 나머지는 단계 % 3(VS Code 기본 테마는 세 색이 돈다).
+pub fn bracketRole(info: bracket_colors.Info) tokens.ColorRole {
+    if (info.invalid) return .bracket_unexpected;
+    return switch (info.level % 3) {
+        0 => .bracket_pair_1,
+        1 => .bracket_pair_2,
+        else => .bracket_pair_3,
+    };
+}
+
+/// 괄호 층을 병합한다 — `range` 안의 칠할 괄호만, 같은 시작이면 뒤(「마지막이 이긴다」).
+fn mergeBracketLayer(allocator: std.mem.Allocator, bufs: *ColorBufs, marks: BracketMarks, range: syntax.Range) error{OutOfMemory}!void {
+    // 창의 첫 괄호 — 목록이 문서 전체라 이진 탐색으로 건너뛴다.
+    var lo: usize = 0;
+    var hi: usize = marks.toks.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        if (marks.toks[mid].start < range.start) lo = mid + 1 else hi = mid;
+    }
+    const first = bufs.byte_spans.items;
+    var merged: std.ArrayList(syntax_colors.ByteSpan) = .empty;
+    errdefer merged.deinit(allocator);
+    try merged.ensureTotalCapacity(allocator, first.len + 64);
+    var i: usize = 0;
+    var k = lo;
+    while (k < marks.toks.len and marks.toks[k].start < range.end) : (k += 1) {
+        const inf = marks.info[k];
+        if (!inf.colored) continue;
+        const t = marks.toks[k];
+        while (i < first.len and first[i].start <= t.start) : (i += 1) try merged.append(allocator, first[i]);
+        try merged.append(allocator, .{ .start = t.start, .end = t.start + t.len, .role = bracketRole(inf) });
+    }
+    while (i < first.len) : (i += 1) try merged.append(allocator, first[i]);
+    bufs.byte_spans.clearRetainingCapacity();
+    try bufs.byte_spans.appendSlice(allocator, merged.items);
+    merged.deinit(allocator);
 }
 
 /// 1층(`bufs.byte_spans`, 문서 순서)에 2층 스팬을 병합한다 — `range` 밖의 2층은 뺀다. 같은 시작이면 2층이 뒤.
@@ -1173,7 +1284,7 @@ test "ES40 2층 병합 — semantic 스팬은 겹친 자리만 1층을 덮고, �
     const x_at: u32 = @intCast(std.mem.indexOf(u8, doc.content, "x").?);
     const f_at: u32 = @intCast(std.mem.indexOf(u8, doc.content, "f()").?);
     const extra = [_]Span{ .{ .start = x_at, .end = x_at + 1, .role = .type_name }, .{ .start = f_at, .end = f_at + 1, .role = .keyword }, .{ .start = 100, .end = 101, .role = .string } }; // 셋째는 문서 밖(창 밖)
-    const colors = lineColorsWith(&st, testing.allocator, doc.content, doc.lines, 0, 2, 4, &.{}, .inherit, &extra, &.{});
+    const colors = lineColorsWith(&st, testing.allocator, doc.content, doc.lines, 0, 2, 4, &.{}, .inherit, &extra, &.{}, .{});
     try testing.expect(colors.len >= 2);
     var x_role: ?tokens.ColorRole = null;
     var const_role: ?tokens.ColorRole = null;
@@ -1204,4 +1315,76 @@ test "ES40 2층 병합 — semantic 스팬은 겹친 자리만 1층을 덮고, �
         x_plain = cs.role;
     };
     try testing.expectEqual(tokens.ColorRole.syntax_number, x_plain.?);
+}
+
+/// 판정자용 — 문서를 다 파고 괄호 판정까지 몰아 준 뒤 칠할 괄호를 `(자리, 단계 — 무효면 -1)` 로 돌려준다(제품 경로 그대로: `advanceBrackets` → `bracketMarks`).
+fn bracketMarksForTest(allocator: std.mem.Allocator, st: *State, source: []const u8, independent: bool, out: *std.ArrayList([2]i64)) !void {
+    var rounds: usize = 0;
+    while (advanceBrackets(st, allocator, source, independent) and rounds < 100_000) : (rounds += 1) {}
+    _ = advanceBrackets(st, allocator, source, independent);
+    out.clearRetainingCapacity();
+    const m = bracketMarks(st);
+    for (m.toks, m.info) |t, inf| {
+        if (!inf.colored) continue;
+        try out.append(allocator, .{ t.start, if (inf.invalid) -1 else inf.level });
+    }
+}
+
+test "BRC1 언어마다 무엇이 괄호인가 — VS Code 1.139 TextMate 문법을 돌린 오라클과 괄호마다 같다 (visual-mapping §5.1d)" {
+    // 기대값은 VS Code 1.139.0 의 실제 TextMate 문법·언어 설정을 vscode-textmate 로 돌린 오라클이 낸 것이다(scratchpad `tm_oracle`, 괄호 파서는
+    // monaco 0.56 과 1,400 판 대조로 맞췄다). 표본은 규칙마다 하나 이상: TS 제네릭 · 비교 · 화살표 · 시프트 · 템플릿 `${`(TS 는 안 칠한다) ·
+    // JSDoc 타입(`{Array<string>}`) · 인라인 태그 · 타입 단언 / JSX 본문 글 / JS `${`(칠한다) / Bash 큰따옴표 속은 글자 · `[[ ]]` /
+    // PHP·Kotlin 보간은 글자 / C 매크로 본문(문자열 속 괄호 제외) / Python f-string 과 `{{` / Ruby `#{}` 와 `%w[]` / HTML 은 짝 없는 것만.
+    const allocator = testing.allocator;
+    const Case = struct { lang: editor_language.Grammar, src: []const u8, want: []const [2]i64 };
+    const cases = [_]Case{
+        .{ .lang = .typescript, .src = "let a: Map<string, Array<T>> = f<T>(x < y, z => z >> 1);\nconst s = `a${b(c)}d`;\n/** @param {Array<string>} q see {@link W} (prose {x}) */\nconst k = <{ a: number }>o;\n", .want = &.{ .{ 10, 0 }, .{ 24, 1 }, .{ 26, 1 }, .{ 27, 0 }, .{ 32, 0 }, .{ 34, 0 }, .{ 35, 0 }, .{ 54, 0 }, .{ 72, 0 }, .{ 74, 0 }, .{ 91, 0 }, .{ 97, 1 }, .{ 104, 1 }, .{ 105, 0 }, .{ 113, 0 }, .{ 121, 0 }, .{ 149, 0 }, .{ 161, 0 } } },
+        .{ .lang = .tsx, .src = "const e = <div className=\"a\">nothing (yet) [x]</div>;\nlet m: Map<K, V>;\n", .want = &.{ .{ 37, 0 }, .{ 41, 0 }, .{ 43, 0 }, .{ 45, 0 }, .{ 64, 0 }, .{ 69, 0 } } },
+        .{ .lang = .javascript, .src = "const s = `x${(a)}y`;\nconst j = <p>n (yet) [{i}]</p>;\n/** @returns {Promise<{ok: boolean}>} r */\nif (a < b) {}\n", .want = &.{ .{ 12, 0 }, .{ 14, 1 }, .{ 16, 1 }, .{ 17, 0 }, .{ 37, 0 }, .{ 41, 0 }, .{ 43, 0 }, .{ 44, 1 }, .{ 46, 1 }, .{ 47, 0 }, .{ 67, 0 }, .{ 76, 1 }, .{ 88, 1 }, .{ 90, 0 }, .{ 100, 0 }, .{ 106, 0 }, .{ 108, 0 }, .{ 109, 0 } } },
+        .{ .lang = .bash, .src = "echo \"$(dirname x)\" ${v} $(b)\nif [[ -n \"$a\" ]]; then f() { echo; }; fi\n", .want = &.{ .{ 21, 0 }, .{ 23, 0 }, .{ 26, 0 }, .{ 28, 0 }, .{ 33, 0 }, .{ 34, 1 }, .{ 44, 1 }, .{ 45, 0 }, .{ 54, 0 }, .{ 55, 0 }, .{ 57, 0 }, .{ 65, 0 } } },
+        .{ .lang = .php, .src = "<?php echo \"$a[0] {$b}\"; f($a[0], [1]);\n", .want = &.{ .{ 26, 0 }, .{ 29, 1 }, .{ 31, 1 }, .{ 34, 1 }, .{ 36, 1 }, .{ 37, 0 } } },
+        .{ .lang = .kotlin, .src = "val s = \"n (${n})\"\nfun g(a: Int) = listOf(a)[0]\n", .want = &.{ .{ 24, 0 }, .{ 31, 0 }, .{ 41, 0 }, .{ 43, 0 }, .{ 44, 0 }, .{ 46, 0 } } },
+        .{ .lang = .c, .src = "#define M(x) (f(x) + \"(\" + ')') /* ( */\nint m(void) { return M(1)[0]; }\n", .want = &.{ .{ 9, 0 }, .{ 11, 0 }, .{ 13, 0 }, .{ 15, 1 }, .{ 17, 1 }, .{ 30, 0 }, .{ 45, 0 }, .{ 50, 0 }, .{ 52, 0 }, .{ 62, 1 }, .{ 64, 1 }, .{ 65, 1 }, .{ 67, 1 }, .{ 70, 0 } } },
+        .{ .lang = .python, .src = "x = f\"{a} {{b}}\" + g([1], {\"k\": (2)})  # (\n", .want = &.{ .{ 6, 0 }, .{ 8, 0 }, .{ 10, 0 }, .{ 11, 1 }, .{ 13, 1 }, .{ 14, 0 }, .{ 20, 0 }, .{ 21, 1 }, .{ 23, 1 }, .{ 26, 1 }, .{ 32, 2 }, .{ 34, 2 }, .{ 35, 1 }, .{ 36, 0 } } },
+        .{ .lang = .ruby, .src = "s = \"#{a}\" + %w[a b].join(%Q(x))\nh = { a: [1] }\n", .want = &.{ .{ 6, 0 }, .{ 8, 0 }, .{ 25, 0 }, .{ 31, 0 }, .{ 37, 0 }, .{ 42, 1 }, .{ 44, 1 }, .{ 46, 0 } } },
+        .{ .lang = .html, .src = "<p title=\"a (b\">text (x] y</p>\n", .want = &.{ .{ 12, -1 }, .{ 21, -1 } } },
+        .{ .lang = .go, .src = "package m\n\nfunc g[T any](x []T) map[string]T { return nil }\n", .want = &.{ .{ 17, 0 }, .{ 23, 0 }, .{ 24, 0 }, .{ 27, 1 }, .{ 28, 1 }, .{ 30, 0 }, .{ 35, 0 }, .{ 42, 0 }, .{ 45, 0 }, .{ 58, 0 } } },
+        .{ .lang = .rust, .src = "#[derive(Debug)]\nfn g(x: &[u8]) -> Vec<u8> { let c = |a| (a); vec![c(1)] }\n", .want = &.{ .{ 1, 0 }, .{ 8, 1 }, .{ 14, 1 }, .{ 15, 0 }, .{ 21, 0 }, .{ 26, 1 }, .{ 29, 1 }, .{ 30, 0 }, .{ 43, 0 }, .{ 57, 1 }, .{ 59, 1 }, .{ 66, 1 }, .{ 68, 2 }, .{ 70, 2 }, .{ 71, 1 }, .{ 73, 0 } } },
+        .{ .lang = .zig, .src = "const a = f(.{ \"(\", x });\nfn g() void { if (x) { y[0] = (1); } }\n", .want = &.{ .{ 11, 0 }, .{ 13, 1 }, .{ 22, 1 }, .{ 23, 0 }, .{ 30, 0 }, .{ 31, 0 }, .{ 38, 0 }, .{ 43, 1 }, .{ 45, 1 }, .{ 47, 1 }, .{ 50, 2 }, .{ 52, 2 }, .{ 56, 2 }, .{ 58, 2 }, .{ 61, 1 }, .{ 63, 0 } } },
+        .{ .lang = .json, .src = "{\"k\": [\"(\", 1, {\"z\": []}]}\n", .want = &.{ .{ 0, 0 }, .{ 6, 1 }, .{ 15, 2 }, .{ 21, 3 }, .{ 22, 3 }, .{ 23, 2 }, .{ 24, 1 }, .{ 25, 0 } } },
+        .{ .lang = .css, .src = "a { b: url(\"q(1).png\"); c: f(1) [x] }\n", .want = &.{ .{ 2, 0 }, .{ 10, 1 }, .{ 13, 2 }, .{ 15, 2 }, .{ 21, 1 }, .{ 28, 1 }, .{ 30, 1 }, .{ 32, 1 }, .{ 34, 1 }, .{ 36, 0 } } },
+        .{ .lang = .java, .src = "class A { void g() { f(\"(\", x[0]); List<String> l; } }\n", .want = &.{ .{ 8, 0 }, .{ 16, 1 }, .{ 17, 1 }, .{ 19, 1 }, .{ 22, 2 }, .{ 29, 3 }, .{ 31, 3 }, .{ 32, 2 }, .{ 51, 1 }, .{ 53, 0 } } },
+        .{ .lang = .cpp, .src = "int m() { std::vector<int> v{1}; return v[0]; }\n", .want = &.{ .{ 5, 0 }, .{ 6, 0 }, .{ 8, 0 }, .{ 28, 1 }, .{ 30, 1 }, .{ 41, 1 }, .{ 43, 1 }, .{ 46, 0 } } },
+    };
+    var got: std.ArrayList([2]i64) = .empty;
+    defer got.deinit(allocator);
+    for (cases) |c| {
+        errdefer std.debug.print("BRC1 {s}: {any}\n", .{ @tagName(c.lang), got.items });
+        var st = openParsed(c.src, c.lang);
+        defer st.deinit(allocator);
+        try bracketMarksForTest(allocator, &st, c.src, false, &got);
+        try testing.expectEqualSlices([2]i64, c.want, got.items);
+    }
+
+    // Markdown 은 칠하지 않는다(오라클 대조: 블록 grammar 가 인라인 코드를 못 갈라 거짓 빨강 74 — 계약 「언어별」).
+    {
+        const md = "[link](url) (x\n\n```js\nf(1)\n```\n";
+        var st = openParsed(md, .markdown);
+        defer st.deinit(allocator);
+        try bracketMarksForTest(allocator, &st, md, false, &got);
+        try testing.expectEqual(@as(usize, 0), got.items.len);
+    }
+    // 20,000 자 이상인 줄의 괄호는 없다(VS Code 는 그 줄을 토큰화하지 않는다) — 옆의 짧은 줄은 그대로.
+    {
+        var long: std.ArrayList(u8) = .empty;
+        defer long.deinit(allocator);
+        try long.appendSlice(allocator, "f(1);\nconst a = [");
+        for (0..10_000) |_| try long.appendSlice(allocator, "1,");
+        try long.appendSlice(allocator, "];\ng(2);\n");
+        var st = openParsed(long.items, .javascript);
+        defer st.deinit(allocator);
+        try bracketMarksForTest(allocator, &st, long.items, false, &got);
+        try testing.expectEqual(@as(usize, 4), got.items.len); // `f(` `)` · `g(` `)`
+        try testing.expectEqual(@as(i64, 1), got.items[0][0]);
+    }
 }

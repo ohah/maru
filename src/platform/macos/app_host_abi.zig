@@ -173,7 +173,7 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
 }
 
 test "ABI v185 notification release end-all and cold route values match the C header" {
-    try std.testing.expectEqual(@as(u32, 191), abi_version);
+    try std.testing.expectEqual(@as(u32, 192), abi_version);
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @intFromEnum(AppInstanceLeaseResult.acquired));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_HELD), @intFromEnum(AppInstanceLeaseResult.held));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_UNSAFE), @intFromEnum(AppInstanceLeaseResult.unsafe));
@@ -4552,6 +4552,21 @@ pub export fn maru_macos_app_session_osr_quads(session: ?*AppSession, frame_gene
     const app = session orelse return 0;
     const buf = out orelse return 0;
     return session_mod.web_ops.osrQuads(app, frame_generation, buf[0..out_cap]);
+}
+
+/// v192(W4b): hover 중인 Chromium 탭의 페이지 커서가 바뀌었으면 한 번(tick 뒤 Swift 가 가져간다).
+pub export fn maru_macos_app_session_take_osr_cursor(session: ?*AppSession, out_cursor_kind: ?*i32) i32 {
+    const app = session orelse return 0;
+    const out = out_cursor_kind orelse return 0;
+    const kind = session_mod.web_ops.takeOsrCursor(app) orelse return 0;
+    out.* = @intFromEnum(kind);
+    return 1;
+}
+
+/// v192(W4b): 추가 마우스 버튼(3=뒤로·4=앞으로)이 Chromium 탭 본문 위면 그 탭을 뒤로·앞으로 보내고 1.
+pub export fn maru_macos_app_session_osr_aux_button(session: ?*AppSession, button_number: i32, x_px: f64, y_px: f64) i32 {
+    const app = session orelse return 0;
+    return @intFromBool(session_mod.web_ops.osrAuxButton(app, button_number, x_px, y_px));
 }
 
 pub export fn maru_macos_mermaid_snapshot(out_snapshot: ?*MermaidCoordinatorSnapshotAbi) void {

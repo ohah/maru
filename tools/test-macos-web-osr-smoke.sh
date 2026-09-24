@@ -24,6 +24,21 @@ port=$((20000 + $$ % 20000))
 cat > "$root/server.py" <<'PY'
 import http.server, sys
 log = open(sys.argv[2], 'a', buffering=1)
+# W4b: 페이지가 받은 DOM 이벤트를 `/ev?e=...` 요청으로 알린다(제품에 읽는 훅을 두지 않고 바깥에서 본다).
+TEXT = " ".join(["maru selects this paragraph text by dragging across it"] * 40)
+INPUT = ("<!doctype html><title>input</title><style>html,body{margin:0;height:3000px;font:28px sans-serif}p{margin:0;line-height:40px}</style>"
+    "<body><p>" + TEXT + "</p><script>"
+    "function ping(q){new Image().src='/ev?'+q+'&t='+Date.now()}"
+    "addEventListener('click',function(e){ping('e=click&x='+e.clientX+'&y='+e.clientY+'&b='+e.button+'&d='+e.detail+'&w='+innerWidth)});"
+    "addEventListener('dblclick',function(e){ping('e=dblclick&d='+e.detail)});"
+    "addEventListener('contextmenu',function(e){ping('e=contextmenu&x='+e.clientX)});"
+    "addEventListener('auxclick',function(e){if(e.button==1)ping('e=aux&b=1')});"
+    "var out=false,hov=false;addEventListener('mousemove',function(e){if((e.buttons&1)&&e.clientX<0&&!out){out=true;ping('e=dragout&x='+e.clientX)}if(!e.buttons&&!hov){hov=true;ping('e=hover&x='+e.clientX)}});"
+    "addEventListener('mouseup',function(e){if(e.button==0)ping('e=up&sel='+getSelection().toString().length+'&x='+e.clientX+'&y='+e.clientY)});"
+    "document.documentElement.addEventListener('mouseleave',function(){ping('e=leave')});"
+    "addEventListener('scroll',function(){clearTimeout(window.sc);window.sc=setTimeout(function(){ping('e=scroll&y='+scrollY)},300)});"
+    "requestAnimationFrame(function(){requestAnimationFrame(function(){ping('e=ready')})});"
+    "</script>").encode()
 class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_GET(self):
@@ -32,6 +47,14 @@ class H(http.server.BaseHTTPRequestHandler):
             body = b"<!doctype html><title>solid</title><style>html,body{margin:0;height:100%;background:#20a060}</style><body>"
         elif self.path == "/anim":
             body = b"<!doctype html><title>anim</title><style>html,body{margin:0;height:100%}</style><body><script>let n=0;function f(){n++;document.body.style.background='rgb('+(n&255)+',80,160)';requestAnimationFrame(f)}f()</script>"
+        elif self.path.startswith("/ev"):
+            body = b""
+        elif self.path == "/input":
+            body = INPUT
+        elif self.path == "/nav-a":
+            body = b"<!doctype html><title>a</title><style>html,body{margin:0;height:100%}a{display:block;height:100%}</style><body><a href='/nav-b'>b</a><script>addEventListener('pageshow',function(){new Image().src='/ev?e=shown-a&t='+Date.now()})</script>"
+        elif self.path == "/nav-b":
+            body = b"<!doctype html><title>b</title><body style='margin:0;height:100%'>b"
         else:
             body = b"<!doctype html><title>osr-smoke</title><body>osr smoke"
         self.send_response(200); self.send_header('Content-Type', 'text/html'); self.send_header('Content-Length', str(len(body))); self.end_headers(); self.wfile.write(body)
@@ -154,4 +177,133 @@ echo "frames drawn in 9 s: animated page $anim · static page $still"
 # 9 초 중 앞 ~2 초는 sidecar·첫 장 준비다 — 남은 7 초를 CEF 약 60fps 로 따라가면 300 을 넘는다.
 [ "${anim:-0}" -ge 300 ] || fail "the animated page redrew only ${anim:-0} times in 9 s"
 [ "${still:-0}" -le 60 ] || fail "the static page kept redrawing (${still} times in 9 s)"
+# ── W4b: 포인터 ─────────────────────────────────────────────────────────────────────────────────────────────
+# 셸에서 띄운 앱은 활성이 되지 못해 밖에서 합성한 클릭이 창 활성화에 먹힌다(실측). 밖에서 앱을 활성으로 만들면 사용자
+# 작업의 포커스를 빼앗으므로, 앱이 대본(`MARU_WEB_OSR_TEST_INPUT`)을 읽어 Swift 가 부르는 같은 ABI 로 입력을 넣는다.
+# 페이지가 받은 DOM 이벤트를 `/ev` 요청으로 알리고 여기서 본다. 좌표는 창 내용 view 의 비율 + pt.
+cat > "$root/pointer.txt" <<'SCRIPT'
+sleep 7000
+hover 0.5 0.5 0 0
+sleep 300
+hover 0.5 0.5 10 0
+sleep 300
+hover 0.02 0.5 0 0
+sleep 300
+mouse 1 0.5 0.5 0 0 0
+mouse 3 0.5 0.5 0 0 0
+sleep 300
+mouse 1 0.5 0.5 100 0 0
+mouse 3 0.5 0.5 100 0 0
+sleep 300
+mouse 1 1.0 0.5 -50 0 0
+mouse 3 1.0 0.5 -50 0 0
+sleep 300
+mouse 1 0.5 0.5 0 60 0
+mouse 3 0.5 0.5 0 60 0
+mouse 4 0.5 0.5 0 60 0
+mouse 3 0.5 0.5 0 60 0
+sleep 300
+mouse 1 0.5 0.5 0 0 2
+mouse 3 0.5 0.5 0 0 2
+sleep 300
+mouse 1 0.5 0.5 0 0 1
+mouse 3 0.5 0.5 0 0 1
+sleep 300
+mouse 1 0.5 0.35 0 0 0
+mouse 2 0.3 0.35 0 0 0
+mouse 2 0.1 0.35 0 0 0
+mouse 2 0.02 0.35 0 0 0
+mouse 3 0.02 0.35 0 0 0
+sleep 300
+mouse 1 0.6 0.25 0 0 0
+mouse 2 0.5 0.25 0 0 0
+mouse 1 0.5 0.25 0 0 2
+mouse 3 0.5 0.25 0 0 2
+mouse 2 0.4 0.25 0 0 0
+mouse 3 0.4 0.25 0 0 0
+sleep 300
+wheel 0.5 0.5 0 0 -5
+sleep 500
+hover 0.5 0.5 0 0
+sleep 300
+action toggle_command_palette
+sleep 300
+mouse 1 0.5 0.5 0 120 0
+mouse 3 0.5 0.5 0 120 0
+sleep 300
+key 53 U+1B
+sleep 300
+mouse 1 0.5 0.5 0 -120 0
+mouse 3 0.5 0.5 0 -120 0
+sleep 1000
+SCRIPT
+: > "$root/requests.log"
+run_app /input 30000 "$root/input.summary" MARU_WEB_OSR_TEST_INPUT="$root/pointer.txt"
+python3 - "$root/requests.log" <<'PY' || fail "pointer input did not reach the page as expected"
+import sys, urllib.parse
+evs = []
+for line in open(sys.argv[1]):
+    if not line.startswith('/ev?'): continue
+    evs.append(dict(urllib.parse.parse_qsl(line.strip()[4:])))
+def of(name): return [e for e in evs if e.get('e') == name]
+clicks = [e for e in of('click') if e['b'] == '0']
+ok = True
+def check(cond, what):
+    global ok
+    print(('PASS ' if cond else 'FAIL ') + what)
+    ok = ok and cond
+check(bool(of('ready')), 'page ready')
+names = [e.get('e') for e in evs]
+# hover 는 클릭·끌기보다 먼저 한다 — 끌기를 뗄 때 Blink 가 내는 mouseleave 로 leave 판정이 거짓 통과하지 않게(적대 검증).
+first_click = names.index('click') if 'click' in names else len(names)
+check('hover' in names[:first_click], 'a buttonless move over the body reaches the page')
+check('leave' in names[:first_click], 'moving off the body sends leave (before any click)')
+check(len(clicks) >= 2, f'left clicks reached the page ({len(clicks)})')
+if len(clicks) >= 2:
+    x0, y0 = int(clicks[0]['x']), int(clicks[0]['y'])
+    check(abs(int(clicks[1]['x']) - x0 - 100) <= 1 and clicks[1]['y'] == clicks[0]['y'], f'100 pt to the right is clientX +100 ({clicks[0]["x"]} -> {clicks[1]["x"]})')
+    # 본문은 view 오른쪽 끝(창 여백 몇 pt 안쪽)까지다 — view 오른쪽 끝에서 50 pt 안은 clientX ≈ innerWidth − 50. 본문 시작
+    # 오프셋을 빼먹으면 사이드바 폭만큼 어긋난다(상대 차이 판정은 그것을 못 잡는다).
+    edge = [c for c in clicks if abs(int(c['x']) - (int(c['w']) - 50)) <= 12]
+    check(bool(edge), 'a click 50 pt inside the right edge lands at clientX ≈ innerWidth − 50 (absolute coordinates)')
+    gated = [c for c in clicks if abs(int(c['y']) - (y0 + 120)) <= 1]
+    after = [c for c in clicks if abs(int(c['y']) - (y0 - 120)) <= 1]
+    check(not gated, f'a click while the command palette is open does not reach the page ({len(gated)})')
+    check(bool(after), 'a click after closing the palette reaches the page')
+check(any(e.get('d') == '2' for e in of('dblclick')), 'double click reached as dblclick detail 2')
+check(bool(of('contextmenu')), 'right click reached as contextmenu')
+check(bool(of('aux')), 'middle click reached as auxclick')
+out = of('dragout')
+check(bool(out) and int(out[0]['x']) < 0, 'a drag that leaves the body keeps going to the page (clientX < 0 — gesture owner)')
+check(any(int(e.get('sel', '0')) > 0 and int(e['x']) < 0 for e in of('up')), 'the drag selected text and was released outside the body')
+if len(clicks) >= 2:
+    # 본문 안에서 끄는 중 오른쪽을 눌렀다 떼도 왼쪽 뗌은 왼쪽 뗌으로 간다 — 두 번째 버튼이 주인을 덮으면 왼쪽 뗌이 오른쪽 뗌으로
+    # 나가 이 뗌(본문 위쪽, clientX > 0)이 오지 않는다(적대 검증). 우클릭은 Chromium 이 capture 를 끝내므로(실측) 본문 안에서 잰다.
+    check(any(int(e.get('sel', '0')) > 0 and int(e['x']) > 0 and int(e['y']) < y0 - 100 for e in of('up')), 'a right press mid-drag does not steal the left release')
+# 본문 위에 멈춘 채 키보드로 오버레이를 열면(포인터 이동 없음) tick 이 leave 를 보낸다 — 페이지의 :hover 가 오버레이 뒤에
+# 열린 채 남지 않게(적대 검증).
+scroll_at = max((i for i, n in enumerate(names) if n == 'scroll'), default=None)
+check(scroll_at is not None and 'leave' in names[scroll_at:], 'opening an overlay while hovering the body sends leave without a pointer move')
+sc = of('scroll')
+# 마우스 휠 다섯 줄 = 한 줄 40 px(Chromium 과 같은 값) × 5 = 200 px. 줄을 픽셀로 안 바꾸면 5 px 에 그친다.
+check(bool(sc) and int(sc[-1]['y']) >= 100, f'five wheel lines scrolled the page by line height ({sc[-1]["y"] if sc else "none"} px)')
+sys.exit(0 if ok else 1)
+PY
+
+# 뒤로 버튼: /nav-a 의 링크를 눌러 /nav-b 로 간 뒤, 본문 위의 뒤로 버튼(buttonNumber 3)이 /nav-a 로 돌려보낸다. 링크를
+# **눌러서** 간다 — 페이지가 스스로(사용자 동작 없이) 만든 기록은 Chromium 이 뒤로 가기에서 건너뛴다(실측).
+cat > "$root/back.txt" <<'SCRIPT'
+sleep 7000
+mouse 1 0.5 0.5 0 0 0
+mouse 3 0.5 0.5 0 0 0
+sleep 2500
+aux 0.5 0.5 0 0 3
+sleep 2500
+SCRIPT
+: > "$root/requests.log"
+run_app /nav-a 16000 "$root/back.summary" MARU_WEB_OSR_TEST_INPUT="$root/back.txt"
+shown_a=$(grep -c 'e=shown-a' "$root/requests.log" || true)
+went_b=$(grep -c '^/nav-b' "$root/requests.log" || true)
+echo "back button: /nav-b loaded $went_b · /nav-a shown $shown_a times"
+[ "$went_b" -ge 1 ] && [ "$shown_a" -ge 2 ] || fail "the back mouse button did not take the tab back"
 echo "web-osr smoke passed"

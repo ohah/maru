@@ -590,9 +590,24 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     override func rightMouseDown(with event: NSEvent) { controller?.handleMouse(event, kind: 1, in: self) }
     override func rightMouseDragged(with event: NSEvent) { controller?.handleMouse(event, kind: 2, in: self) }
     override func rightMouseUp(with event: NSEvent) { controller?.handleMouse(event, kind: 3, in: self) }
-    override func otherMouseDown(with event: NSEvent) { controller?.handleMouse(event, kind: 1, in: self) }
-    override func otherMouseDragged(with event: NSEvent) { controller?.handleMouse(event, kind: 2, in: self) }
-    override func otherMouseUp(with event: NSEvent) { controller?.handleMouse(event, kind: 3, in: self) }
+    // 추가 버튼(buttonNumber 3 이상 — 뒤로·앞으로)은 Chromium 탭 본문 위의 누름만 그 탭의 뒤로·앞으로로 쓰고 나머지는
+    // 버린다(W4b). 예전에는 `handleMouse` 가 3 이상을 **왼쪽**(0)으로 바꿔 넘겨, 뒤로 버튼이 터미널 선택을 시작하거나 닫기
+    // 확인 모달의 확정 버튼을 누르고, 그 뗌이 진행 중인 왼쪽 끌기를 끝냈다(적대 검증).
+    override func otherMouseDown(with event: NSEvent) {
+        if event.buttonNumber >= 3 {
+            _ = controller?.handleOsrAuxButton(event, in: self)
+            return
+        }
+        controller?.handleMouse(event, kind: 1, in: self)
+    }
+    override func otherMouseDragged(with event: NSEvent) {
+        if event.buttonNumber >= 3 { return }
+        controller?.handleMouse(event, kind: 2, in: self)
+    }
+    override func otherMouseUp(with event: NSEvent) {
+        if event.buttonNumber >= 3 { return }
+        controller?.handleMouse(event, kind: 3, in: self)
+    }
 
     // 시스템 라이트/다크 외관이 바뀌면(System Settings 토글·자동 야간) 모든 세션에 알린다 — Zig가 theme.follow-system이
     // 켜졌으면 preset-light/dark로 테마를 교체한다(F2-9). NSView가 외관 변경마다 이걸 부른다(초기는 tick이 1회 적용).
@@ -4851,6 +4866,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         window.makeKeyAndOrderFront(nil)
         focusTerminalView(window)
         NSApp.activate(ignoringOtherApps: true)
+        startOsrTestInput() // W4b 스모크 전용 — 환경변수가 없으면 아무것도 안 한다.
 
         // app session의 첫 tick(startAppSession 안)이 바로 그릴 수 있도록 renderer를 먼저 만든다.
         setupMetalRenderer()
@@ -5302,6 +5318,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         cancelKeyHintHold(for: resigning)
         guard let surface = resigning, let session = surface.appSession else { return }
         _ = maru_macos_app_session_focus_changed(session, 0)
+        // W4b: 키를 잃으면 트래킹 영역(activeInKeyWindow)이 이동을 더 안 준다 — hover 를 창 밖 좌표로 풀어 Chromium 탭에
+        // leave 를 보낸다(페이지의 `:hover` 가 열린 채 남지 않게). 커서는 건드리지 않는다(이제 다른 창·앱의 것이다).
+        var cursorKind: Int32 = 0
+        _ = maru_macos_app_session_hover(session, -1, -1, 0, &cursorKind)
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
@@ -7417,6 +7437,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             drainBell() // G12 BEL: 이번 tick에 셸이 보낸 벨(0x07)을 시스템 벨로 울린다.
             drainBellBadge() // BEL이 언포커스 시 울렸으면 Dock 배지를 띄운다(config bell.dock-badge).
             drainMouseHide() // 타이핑(글자 입력) 중이면 마우스 커서를 숨긴다(config input.mouse-hide-while-typing).
+            drainOsrCursor() // W4b: hover 중인 Chromium 탭의 페이지 커서가 바뀌었으면 맞춘다.
             drainClipboardAction() // 우클릭(input.right-click=paste·menu)이 요청한 OS 클립보드 복사/붙여넣기를 실행한다.
             drainClipboardRead() // OSC 52 읽기(osc52.read=allow): 셸 프로그램의 `?` 쿼리에 시스템 클립보드를 base64로 응답.
             drainFilePick() // 세팅 window.background-image 행 활성: NSOpenPanel(PNG)을 열어 고른 경로를 config에 적용.
@@ -7819,7 +7840,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         Self.cursor(for: cursorKind).set()
     }
 
-    // CursorKind(app_host_abi.h: 0=arrow, 1=iBeam, 2=pointingHand, 3=resizeLeftRight, 4=resizeUpDown, 5=openHand) → NSCursor.
+    // CursorKind(app_host_abi.h: 0=arrow, 1=iBeam, 2=pointingHand, 3=resizeLeftRight, 4=resizeUpDown, 5=openHand,
+    // v192 Chromium 탭 페이지 커서 6~13) → NSCursor.
     private static func cursor(for kind: Int32) -> NSCursor {
         switch kind {
         case 0: return .arrow
@@ -7827,8 +7849,126 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         case 3: return .resizeLeftRight
         case 4: return .resizeUpDown
         case 5: return .openHand // pane grip 호버(드래그 손잡이)
+        case 6: return .crosshair
+        case 7: return .closedHand
+        case 8: return .operationNotAllowed
+        case 9: return .dragCopy
+        case 10: return .dragLink
+        case 11: return .contextualMenu
+        case 12: return .iBeamCursorForVerticalLayout
+        case 13: return hiddenCursor // CSS cursor:none — 빈 그림(hide/unhide 짝을 맞출 필요가 없다)
         default: return .iBeam // 1(text) 및 미지값
         }
+    }
+
+    // 투명한 1×1 비트맵 — 표현(rep)이 없는 빈 NSImage 로 만든 커서는 무효일 수 있다(적대 검증).
+    private static let hiddenCursor: NSCursor = {
+        let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 1, pixelsHigh: 1, bitsPerSample: 8, samplesPerPixel: 4,
+                                   hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 4, bitsPerPixel: 32)
+        let image = NSImage(size: NSSize(width: 1, height: 1))
+        if let rep {
+            rep.bitmapData?.initialize(repeating: 0, count: 4)
+            image.addRepresentation(rep)
+        }
+        return NSCursor(image: image, hotSpot: .zero)
+    }()
+
+    // W4b 스모크 전용(`MARU_WEB_OSR_TEST_INPUT=<대본 파일>`): 대본의 포인터 입력을 Swift 가 부르는 **같은 ABI**(mouse·hover·
+    // scroll_wheel·osr_aux_button·run_action)로 차례로 넣는다. 셸에서 띄운 앱은 활성이 되지 못해 합성한 클릭이 창 활성화에
+    // 먹힌다(실측 — 첫 클릭이 view 에 안 온다). 밖에서 앱을 활성으로 만들면 사용자의 작업에서 포커스를 빼앗으므로, 앱이 제
+    // 입력 경로를 스스로 부른다. NSEvent → ABI 변환(Swift 한 겹)은 W4d 의 앱 안 시험기가 진짜 이벤트로 본다.
+    // 대본 한 줄: `sleep ms` · `mouse kind fx fy dx dy button`(kind 1 누름·2 끌기·3 뗌·4 두 번·5 세 번, button 0 왼·1 가운데·
+    // 2 오른) · `hover fx fy dx dy` · `wheel fx fy dx dy lines` · `aux fx fy dx dy buttonNumber` · `action 이름` ·
+    // `key keyCode 글자(U+ 16진, 없으면 -)` — 키는 터미널 view 의 keyDown 에 NSEvent 를 직접 넣는다(오버레이가 열린 동안
+    // `run_action` 은 무시되므로 Esc 로 닫는 데 쓴다). 좌표는 창 내용 view 의 (fx×폭 + dx, fy×높이 + dy) pt(왼쪽 위 원점).
+    private func startOsrTestInput() {
+        guard let path = ProcessInfo.processInfo.environment["MARU_WEB_OSR_TEST_INPUT"],
+              let text = try? String(contentsOfFile: path, encoding: .utf8) else { return }
+        let lines = text.split(separator: "\n").map { $0.split(separator: " ").map(String.init) }.filter { !$0.isEmpty }
+        runOsrTestInput(lines, 0)
+    }
+
+    private static func firstTerminalView(in view: NSView?) -> MaruMetalTerminalView? {
+        guard let view else { return nil }
+        if let terminal = view as? MaruMetalTerminalView { return terminal }
+        for sub in view.subviews { if let found = firstTerminalView(in: sub) { return found } }
+        return nil
+    }
+
+    private func runOsrTestInput(_ lines: [[String]], _ index: Int) {
+        guard index < lines.count else { return }
+        let line = lines[index]
+        var delay = 0.03
+        if line[0] == "sleep" {
+            delay = (Double(line.count > 1 ? line[1] : "0") ?? 0) / 1000
+        } else if let session = appSession, let view = window?.contentView {
+            let scale = Double(window?.backingScaleFactor ?? 2)
+            func point(_ at: Int) -> (Double, Double) {
+                let fx = Double(line[at]) ?? 0, fy = Double(line[at + 1]) ?? 0
+                let dx = Double(line[at + 2]) ?? 0, dy = Double(line[at + 3]) ?? 0
+                return ((fx * view.bounds.width + dx) * scale, (fy * view.bounds.height + dy) * scale)
+            }
+            switch line[0] {
+            case "mouse" where line.count >= 7:
+                let (x, y) = point(2)
+                _ = maru_macos_app_session_mouse(session, Int32(line[1]) ?? 0, x, y, Int32(line[6]) ?? 0, 0)
+            case "hover" where line.count >= 5:
+                let (x, y) = point(1)
+                var kind: Int32 = 0
+                _ = maru_macos_app_session_hover(session, x, y, 0, &kind)
+            case "wheel" where line.count >= 6:
+                let (x, y) = point(1)
+                _ = maru_macos_app_session_scroll_wheel(session, Double(line[5]) ?? 0, 0, 0, x, y)
+            case "aux" where line.count >= 6:
+                let (x, y) = point(1)
+                _ = maru_macos_app_session_osr_aux_button(session, Int32(line[5]) ?? 0, x, y)
+            case "action" where line.count >= 2:
+                let bytes = Array(line[1].utf8)
+                _ = bytes.withUnsafeBufferPointer { maru_macos_app_session_run_action(session, $0.baseAddress, $0.count) }
+            case "key" where line.count >= 3:
+                let chars = line[2] == "-" ? "" : (UInt32(line[2].replacingOccurrences(of: "U+", with: ""), radix: 16).flatMap(Unicode.Scalar.init).map { String(Character($0)) } ?? "")
+                if let window, let terminal = Self.firstTerminalView(in: window.contentView),
+                   let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                                windowNumber: window.windowNumber, context: nil, characters: chars,
+                                                charactersIgnoringModifiers: chars, isARepeat: false, keyCode: UInt16(line[1]) ?? 0) {
+                    terminal.keyDown(with: event)
+                }
+            default:
+                break
+            }
+            markMetalNeedsRedraw()
+        } else {
+            // 세션·창이 아직 없다(띄우는 중) — 이 줄을 버리지 않고 조금 뒤 다시 본다.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                self?.runOsrTestInput(lines, index)
+            }
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            self?.runOsrTestInput(lines, index + 1)
+        }
+    }
+
+    // W4b: 추가 마우스 버튼(뒤로·앞으로)이 Chromium 탭 본문 위면 그 탭을 뒤로·앞으로 보내고 true.
+    func handleOsrAuxButton(_ event: NSEvent, in view: NSView) -> Bool {
+        guard let session = appSession else { return false }
+        let (xPx, yPx) = backingPx(view.convert(event.locationInWindow, from: nil), in: view)
+        guard maru_macos_app_session_osr_aux_button(session, Int32(event.buttonNumber), xPx, yPx) != 0 else { return false }
+        markMetalNeedsRedraw()
+        return true
+    }
+
+    // W4b: hover 중인 Chromium 탭의 페이지 커서가 바뀌었으면 맞춘다 — 페이지는 이동을 처리한 **뒤** 커서를 알리므로,
+    // 포인터가 멈춘 자리의 커서가 한 박자 전 것으로 남지 않게 tick 뒤에 가져간다.
+    // NSCursor 는 앱 전역이라 **키 창이고 포인터가 그 창 안일 때만** 바꾼다 — 비활성 창의 tick 이 다른 창·다른 앱 위의
+    // 커서를 덮지 않게(적대 검증).
+    private func drainOsrCursor() {
+        guard let session = appSession else { return }
+        var kind: Int32 = 0
+        guard maru_macos_app_session_take_osr_cursor(session, &kind) != 0 else { return }
+        guard let window, window.isKeyWindow, let content = window.contentView,
+              content.bounds.contains(content.convert(window.mouseLocationOutsideOfEventStream, from: nil)) else { return }
+        Self.cursor(for: kind).set()
     }
 
     func clearHover() {

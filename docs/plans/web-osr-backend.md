@@ -301,7 +301,9 @@ control plane `browser.*` 게이트는 엔진 중립이라 바뀌지 않는다(�
 | **W9** control-plane 호환 | OSR 탭의 `browser.*` 17 종을 CDP 로(프로세스 안 `execute_dev_tools_method`·`add_dev_tools_message_observer` — 원격 디버깅 포트를 열지 않는다). wire·op_kind·CLI 는 그대로(엔진 중립 계약 — control-plane-browser-session §9.5.4) | WKWebView 스모크와 같은 시나리오를 OSR 탭에서 — navigate·executeScript·screenshot·snapshot·act·wait·쿠키(호스트 묶음 포함)·console·이벤트. 순서는 W4 뒤 권장 |
 
 후속(단계 밖): 제스처 근사(핀치·스와이프·관성 phase), 원격 `localhost`(D3), 탭 폐기 정책 튜닝, 다른 사이트가 섞일 때의
-프로세스 비용.
+프로세스 비용, 추가 마우스 버튼(뒤로·앞으로)의 터미널 쪽 동작 — W4b 부터 Chromium 탭 본문 밖에서는 무시한다(전에는 왼쪽
+클릭으로 넘어가 확인 모달 확정까지 눌렀다). 나중에 터미널 앱 리포트(xterm 버튼 8·9)나 maru 동작(탭 이동·설정)으로 붙일 수
+있다(사용자 결정 2026-09-24 — 지금은 무시 그대로).
 
 ## 4. 검증 전략
 

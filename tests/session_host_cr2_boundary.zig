@@ -427,7 +427,7 @@ test "CR2e-a 경계는 pointer-free reducer와 단일 제품 executor caller를 
     const allocator = std.testing.allocator;
     const reducer = try readSource(allocator, "src/platform/macos/session_host/reconnect_reducer.zig");
     defer allocator.free(reducer);
-    const tests = try readSource(allocator, "tests/session_host_cr2e_reducer.zig");
+    const tests = try readSource(allocator, "tests/session_host_reconnect_reducer.zig");
     defer allocator.free(tests);
     const cr5_runtime_set = try readSource(
         allocator,
@@ -482,7 +482,7 @@ test "CR2e-b 경계는 mutation seal substrate와 CR4b stable runtime owner만 �
     const allocator = std.testing.allocator;
     const source = try readSource(allocator, "src/platform/macos/session_host/reconnect_mutation_seal.zig");
     defer allocator.free(source);
-    const tests = try readSource(allocator, "tests/session_host_cr2e_mutation.zig");
+    const tests = try readSource(allocator, "tests/session_host_reconnect_mutation_seal.zig");
     defer allocator.free(tests);
     const build = try build_source.read(allocator);
     defer allocator.free(build);
@@ -541,7 +541,7 @@ test "CR2e-c 경계는 heap-pinned generation slot과 다음 단일 제품 owner
     const allocator = std.testing.allocator;
     const source = try readSource(allocator, "src/platform/macos/session_host/reconnect_generation_slot.zig");
     defer allocator.free(source);
-    const tests = try readSource(allocator, "tests/session_host_cr2e_generation_slot.zig");
+    const tests = try readSource(allocator, "tests/session_host_reconnect_generation_slot.zig");
     defer allocator.free(tests);
     const build = try build_source.read(allocator);
     defer allocator.free(build);

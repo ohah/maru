@@ -3876,7 +3876,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         // 게시 경로 한쪽에만 적어 제품에서 표시가 통째로 안 뜬 적이 있다.
         const s11_6_narrowed_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_s11_6_narrowed_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_viewport_narrowing_boundary.zig"),
                 .target = target,
                 .optimize = b3_optimize,
             }),
@@ -4222,7 +4222,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
             1,
         );
         const event_2c4_boundary_module = b.createModule(.{
-            .root_source_file = b.path("tests/session_host_2c4_boundary.zig"),
+            .root_source_file = b.path("tests/session_host_runtime_connection_mode_boundary.zig"),
             .target = target,
             .optimize = b3_optimize,
         });

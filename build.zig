@@ -5366,7 +5366,7 @@ pub fn build(b: *std.Build) void {
 
         const p4_r3_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_p4_r3_screen_inbox_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_screen_inbox_owner_boundary.zig"),
                 .target = target,
                 .optimize = p4_r3_optimize,
             }),

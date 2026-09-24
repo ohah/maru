@@ -57,7 +57,8 @@ Maru는 초기에 파일 이동을 최소화한다. 기존 `src/*.zig` 파일은
   22(CR3c 세대 승격 · Client 회수 둘) →
   18(CR3a-2d·2e 세대 해제 넷) →
   10(P5c3c external attach 경계 셋·센티넬 다섯) →
-  **8**(재접속 기초 CR0b·CR1 · CR2 stable shell 둘).
+  8(재접속 기초 CR0b·CR1 · CR2 stable shell 둘) →
+  **5**(단일 판정자 셋 — RuntimeConnection mode · screen inbox owner · viewport narrowing).
 
   **이름은 내용에서 나온다** — 그 주제의 파일을 전부 열어 각자 무엇을 세는지 읽고 짓는다.
   - kernel cwd: 주제어가 이미 이름에 있고 `k1`·`k2`·`k3` 만 이력이라 「무엇을 지키는지」만 채웠다

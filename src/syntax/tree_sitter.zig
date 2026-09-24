@@ -1086,10 +1086,22 @@ pub const BracketIndex = struct {
     /// 목록이 `synced_gen` 세대 트리와 맞는가.
     ready: bool = false,
     synced_gen: u64 = 0,
-    /// 예산을 든 처음 훑기의 커서 — `walk_gen` 세대 트리 위에 있다(세대가 바뀌면 버리고 다시 시작한다).
+    /// 예산을 든 처음 훑기 — **트리 사본과 글 사본 위를** 걷는다(`ts_tree_copy` 는 참조 계수라 싸다). 훑는 동안 편집이 와도 버리지 않는다:
+    /// 처음엔 편집마다 훑기를 다시 시작해, 큰 문서(4 MB 에 20~28 프레임)에서 그보다 빨리 계속 치면 색이 영영 안 돌아왔다(새 눈 리뷰가 짚었다).
+    /// 지금은 편집을 `walk_edits` 에 쌓고 「다시 봐야 할 범위」(편집 범위 ∪ 달라진 범위 — 뒤 편집으로 계속 민다)를 `walk_dirty` 에 모았다가,
+    /// 다 훑으면 모은 괄호를 편집들에 통과시켜 옮기고(걸친 것은 버린다) 그 범위만 지금 트리에서 다시 훑는다.
     walking: bool = false,
-    walk_gen: u64 = 0,
     cursor: c.TSTreeCursor = undefined,
+    walk_tree: ?*c.TSTree = null,
+    walk_text: []u8 = &.{},
+    /// 글 사본을 잡은 할당기(버릴 때 같은 것으로 — `invalidate` 가 할당기 없이 불리는 자리가 있다: `reparse`).
+    walk_alloc: ?std.mem.Allocator = null,
+    walk_edits: std.ArrayList(EditRec) = .empty,
+    walk_dirty: std.ArrayList(Provider.ByteRange) = .empty,
+    /// 훑는 동안 달라진 범위를 모르게 됐다(통째 파싱 · 넘침 · 파싱을 놓쳤다) — 다 훑어도 못 쓴다, 처음부터.
+    walk_dirty_all: bool = false,
+    /// 훑는 동안 마지막으로 본 트리 세대(놓침을 가른다).
+    walk_seen_gen: u64 = 0,
     /// 관측 — 처음부터 만든 횟수 · 부분만 고친 횟수(판정자가 「증분으로 갔나」를 시간 없이 묻는다).
     rebuilds: u64 = 0,
     partials: u64 = 0,
@@ -1099,14 +1111,26 @@ pub const BracketIndex = struct {
     /// 편집 한 번이 다시 훑을 범위의 상한(byte) — 넘으면(블록 주석을 열어 문서 끝까지 바뀌었다) 부분 고침 대신 예산을 든 처음 훑기로 넘긴다.
     pub const partial_limit: u32 = 256 * 1024;
 
+    pub const EditRec = struct { start: u32, old_end: u32, new_end: u32 };
+
     pub fn deinit(self: *BracketIndex, allocator: std.mem.Allocator) void {
         self.stopWalk();
         self.leaves.deinit(allocator);
+        self.walk_edits.deinit(allocator);
+        self.walk_dirty.deinit(allocator);
         self.* = .{};
     }
 
     fn stopWalk(self: *BracketIndex) void {
         if (self.walking) c.ts_tree_cursor_delete(&self.cursor);
+        if (self.walk_tree) |t| c.ts_tree_delete(t);
+        if (self.walk_alloc) |a| a.free(self.walk_text);
+        self.walk_alloc = null;
+        self.walk_tree = null;
+        self.walk_text = &.{};
+        self.walk_edits.clearRetainingCapacity();
+        self.walk_dirty.clearRetainingCapacity();
+        self.walk_dirty_all = false;
         self.walking = false;
     }
 
@@ -1118,13 +1142,20 @@ pub const BracketIndex = struct {
     }
 
     /// 편집 — 위치를 민다(`[start, old_end)` 가 `[start, new_end)` 가 됐다). 그 범위에 걸친 괄호는 버린다 — 다시 판 트리에서 `refresh` 가 채운다.
-    /// 처음 훑기 도중이면 목록이 아직 없으니 다시 시작한다.
-    pub fn shift(self: *BracketIndex, start: u32, old_end: u32, new_end: u32) void {
-        if (!self.ready) {
-            self.invalidate();
+    /// 처음 훑기 도중이면 편집을 쌓고 다시 볼 범위를 민다(위 `walking`).
+    pub fn shift(self: *BracketIndex, allocator: std.mem.Allocator, start: u32, old_end: u32, new_end: u32) void {
+        if (self.walking) {
+            self.walk_edits.append(allocator, .{ .start = start, .old_end = old_end, .new_end = new_end }) catch return self.invalidate();
+            for (self.walk_dirty.items) |*r| r.* = shiftRange(r.*, start, old_end, new_end);
             return;
         }
-        const items = self.leaves.items;
+        if (!self.ready) return;
+        shiftLeaves(&self.leaves, start, old_end, new_end);
+        self.version += 1;
+    }
+
+    fn shiftLeaves(leaves: *std.ArrayList(BracketLeaf), start: u32, old_end: u32, new_end: u32) void {
+        const items = leaves.items;
         var w: usize = 0;
         for (items) |l| {
             const end = l.start + l.len;
@@ -1137,19 +1168,32 @@ pub const BracketIndex = struct {
             } else continue; // 편집 범위에 걸쳤다 — 버린다
             w += 1;
         }
-        self.leaves.items.len = w;
-        self.version += 1;
+        leaves.items.len = w;
+    }
+
+    /// 범위를 편집 하나에 통과시킨다 — 앞이면 그대로, 뒤면 민다, 걸치면 편집 범위까지 넓힌다.
+    fn shiftRange(r: Provider.ByteRange, start: u32, old_end: u32, new_end: u32) Provider.ByteRange {
+        if (r.end < start) return r;
+        if (r.start > old_end) return .{ .start = r.start - old_end + new_end, .end = r.end - old_end + new_end };
+        return .{ .start = @min(r.start, start), .end = if (r.end > old_end) r.end - old_end + new_end else new_end };
     }
 
     /// 다시 판 트리에 맞춘다 — **편집 직후**(`Provider.onEdit` 다음)에 부른다. `edited` 는 편집 뒤 좌표의 바뀐 글자 범위(`[start, new_end)`).
     pub fn refresh(self: *BracketIndex, allocator: std.mem.Allocator, prov: *Provider, source: []const u8, edited: Provider.ByteRange) error{OutOfMemory}!void {
         var buf: [Provider.max_changed]Provider.ByteRange = undefined;
         const changed = prov.takeChanged(&buf);
+        if (self.walking) {
+            // 다 훑은 뒤에 다시 볼 범위로 모은다(좌표는 지금 트리 — 뒤 편집이 `shift` 에서 민다).
+            if (changed == null or prov.tree_gen != self.walk_seen_gen + 1) self.walk_dirty_all = true;
+            self.walk_seen_gen = prov.tree_gen;
+            if (changed) |ch| for (ch) |r| try self.walk_dirty.append(allocator, r);
+            try self.walk_dirty.append(allocator, edited);
+            return;
+        }
         if (!self.ready or prov.tree == null or prov.tree_gen != self.synced_gen + 1 or changed == null) {
             self.invalidate();
             return;
         }
-        // 고칠 범위 — 달라진 범위들 ∪ 편집 범위, 정렬해 겹치면 잇는다.
         var ranges: [Provider.max_changed + 1]Provider.ByteRange = undefined;
         var n: usize = 0;
         for (changed.?) |r| {
@@ -1158,14 +1202,44 @@ pub const BracketIndex = struct {
         }
         ranges[n] = edited;
         n += 1;
-        std.mem.sort(Provider.ByteRange, ranges[0..n], {}, struct {
+        if (!try self.repair(allocator, prov, source, ranges[0..n])) {
+            self.invalidate();
+            return;
+        }
+        self.synced_gen = prov.tree_gen;
+        self.partials += 1;
+        self.version += 1;
+    }
+
+    /// `ranges`(지금 트리 좌표 — 정렬 안 됐어도 된다)만 지금 트리에서 다시 훑어 목록을 고친다. 합이 상한을 넘으면 거짓(고치지 않았다).
+    fn repair(self: *BracketIndex, allocator: std.mem.Allocator, prov: *Provider, source: []const u8, ranges: []Provider.ByteRange) error{OutOfMemory}!bool {
+        std.mem.sort(Provider.ByteRange, ranges, {}, struct {
             fn lt(_: void, a: Provider.ByteRange, b: Provider.ByteRange) bool {
                 return a.start < b.start;
             }
         }.lt);
+        // **CSS 는 함수 이름이 인자 속 글을 괄호로 볼지 정한다**(`url("…")`) — `foo` 를 `url` 로 바꾸면 트리 모양은 그대로라 달라진 범위가 이름만
+        // 덮는다. 그래서 둘레 선언까지 넓힌다(새 눈 리뷰가 짚었다).
+        const root = c.ts_tree_root_node(prov.tree orelse return false);
+        if (bracketRuleFor(prov.slot.lang).css_url_strings) {
+            for (ranges) |*r| {
+                var node = c.ts_node_descendant_for_byte_range(root, r.start, r.end);
+                while (!c.ts_node_is_null(node)) : (node = c.ts_node_parent(node)) {
+                    if (typeIn(node, &.{ "declaration", "rule_set" })) {
+                        r.start = @min(r.start, c.ts_node_start_byte(node));
+                        r.end = @max(r.end, c.ts_node_end_byte(node));
+                        break;
+                    }
+                }
+            }
+            std.mem.sort(Provider.ByteRange, ranges, {}, struct {
+                fn lt(_: void, a: Provider.ByteRange, b: Provider.ByteRange) bool {
+                    return a.start < b.start;
+                }
+            }.lt);
+        }
         var merged: usize = 0;
-        var total: u64 = 0;
-        for (ranges[0..n]) |r| {
+        for (ranges) |r| {
             if (merged > 0 and r.start <= ranges[merged - 1].end) {
                 ranges[merged - 1].end = @max(ranges[merged - 1].end, r.end);
             } else {
@@ -1173,14 +1247,11 @@ pub const BracketIndex = struct {
                 merged += 1;
             }
         }
+        var total: u64 = 0;
         for (ranges[0..merged]) |r| total += r.end -| r.start;
-        if (total > partial_limit) {
-            self.invalidate();
-            return;
-        }
+        if (total > partial_limit) return false;
         var fresh: std.ArrayList(BracketLeaf) = .empty;
         defer fresh.deinit(allocator);
-        const root = c.ts_tree_root_node(prov.tree.?);
         // 뒤에서부터 고친다 — 앞 범위를 고쳐도 뒤 범위의 목록 자리가 안 흔들리게.
         var k = merged;
         while (k > 0) {
@@ -1189,50 +1260,63 @@ pub const BracketIndex = struct {
             fresh.clearRetainingCapacity();
             var cover: Provider.ByteRange = r;
             try collectLeaves(allocator, root, source, prov.slot, r, &fresh, &cover);
-            // 목록에서 `cover` 안에서 시작하는 괄호를 갈아 끼운다.
             const lo = lowerBound(self.leaves.items, cover.start);
             const hi = lowerBound(self.leaves.items, cover.end);
             try self.leaves.replaceRange(allocator, lo, hi - lo, fresh.items);
         }
-        self.synced_gen = prov.tree_gen;
-        self.partials += 1;
-        self.version += 1;
+        return true;
     }
 
     /// 예산을 든 처음 훑기(한 프레임 몫). 목록이 맞으면(`ready`) 곧바로 참. 트리가 없으면 거짓(아직 못 만든다).
     pub fn step(self: *BracketIndex, allocator: std.mem.Allocator, prov: *Provider, source: []const u8, budget_ns: u64) error{OutOfMemory}!bool {
         if (self.ready and self.synced_gen == prov.tree_gen) return true;
-        const tree = prov.tree orelse {
-            self.invalidate();
-            return false;
-        };
-        if (self.ready or (self.walking and self.walk_gen != prov.tree_gen)) self.invalidate();
+        if (self.ready) self.invalidate(); // 파싱을 놓쳤다 — 부분만 고칠 수 없다
         if (!self.walking) {
+            const tree = prov.tree orelse return false;
             self.leaves.clearRetainingCapacity();
-            self.cursor = c.ts_tree_cursor_new(c.ts_tree_root_node(tree));
+            self.walk_text = try allocator.dupe(u8, source);
+            self.walk_alloc = allocator;
+            self.walk_tree = c.ts_tree_copy(tree);
+            self.cursor = c.ts_tree_cursor_new(c.ts_tree_root_node(self.walk_tree.?));
             self.walking = true;
-            self.walk_gen = prov.tree_gen;
+            self.walk_seen_gen = prov.tree_gen;
         }
         const deadline = if (budget_ns == 0) std.math.maxInt(u64) else Provider.monotonicNs() +| budget_ns;
         var visited: usize = 0;
+        const rule = bracketRuleFor(prov.slot.lang);
         while (true) {
             const node = c.ts_tree_cursor_current_node(&self.cursor);
             if (c.ts_node_child_count(node) == 0) {
-                try leafBrackets(allocator, node, source, prov.slot, &self.leaves);
-            } else if (!skips(node, bracketRuleFor(prov.slot.lang)) and c.ts_tree_cursor_goto_first_child(&self.cursor)) continue;
+                try leafBrackets(allocator, node, self.walk_text, prov.slot, &self.leaves);
+            } else if (!skips(node, rule) and c.ts_tree_cursor_goto_first_child(&self.cursor)) continue;
             while (!c.ts_tree_cursor_goto_next_sibling(&self.cursor)) {
-                if (!c.ts_tree_cursor_goto_parent(&self.cursor)) {
-                    self.stopWalk();
-                    self.ready = true;
-                    self.synced_gen = prov.tree_gen;
-                    self.rebuilds += 1;
-                    self.version += 1;
-                    return true;
-                }
+                if (!c.ts_tree_cursor_goto_parent(&self.cursor)) return self.finishWalk(allocator, prov, source);
             }
             visited += 1;
             if (visited % 512 == 0 and Provider.monotonicNs() >= deadline) return false;
         }
+    }
+
+    /// 사본을 다 훑었다 — 모은 괄호를 훑는 동안의 편집들에 통과시켜 지금 좌표로 옮기고, 다시 볼 범위만 지금 트리에서 고친다.
+    fn finishWalk(self: *BracketIndex, allocator: std.mem.Allocator, prov: *Provider, source: []const u8) error{OutOfMemory}!bool {
+        const dirty_all = self.walk_dirty_all or prov.tree == null or prov.tree_gen != self.walk_seen_gen;
+        for (self.walk_edits.items) |ed| shiftLeaves(&self.leaves, ed.start, ed.old_end, ed.new_end);
+        const dirty = try allocator.dupe(Provider.ByteRange, self.walk_dirty.items);
+        defer allocator.free(dirty);
+        const had_edits = self.walk_edits.items.len > 0;
+        self.stopWalk();
+        if (dirty_all or !(try self.repair(allocator, prov, source, dirty))) {
+            // 훑는 동안 모르게 됐거나 너무 많이 바뀌었다 — 처음부터(다음 `step`).
+            self.ready = false;
+            self.version += 1;
+            return false;
+        }
+        self.ready = true;
+        self.synced_gen = prov.tree_gen;
+        self.rebuilds += 1;
+        if (had_edits) self.partials += 1;
+        self.version += 1;
+        return true;
     }
 
     /// `leaves` 에서 `start >= at` 인 첫 자리.
@@ -1263,9 +1347,15 @@ pub const BracketIndex = struct {
         }
         var cursor = c.ts_tree_cursor_new(node);
         defer c.ts_tree_cursor_delete(&cursor);
+        // **범위를 지나면 멈춘다** — 원소 수십만인 평평한 목록(큰 JSON 배열 · C 데이터 표)에서 편집 한 번에 뒤 형제까지 전부 도는 것을 줄인다(새 눈
+        // 리뷰가 짚었다). 앞 형제를 **건너뛰는** `ts_tree_cursor_goto_first_child_for_byte` 는 쓰지 않는다 — 자식의 끝을 `position + size` 로 세어
+        // 앞 공백(padding)만큼 짧게 잡아, 범위에 걸친 자식을 건너뛰었다(`SYNU2` 가 되돌리기 퍼즈에서 색이 갈려 잡았다 · `tree_cursor.c` 원문).
+        // TSNode 의 `ts_node_first_child_for_byte` 는 끝을 바르게 세지만 역시 자식을 처음부터 훑는다 — 앞쪽은 어느 길이든 선형이다.
         if (!c.ts_tree_cursor_goto_first_child(&cursor)) return;
         while (true) {
-            try collectLeaves(allocator, c.ts_tree_cursor_current_node(&cursor), source, slot, r, out, cover);
+            const child = c.ts_tree_cursor_current_node(&cursor);
+            if (c.ts_node_start_byte(child) > r.end) break;
+            try collectLeaves(allocator, child, source, slot, r, out, cover);
             if (!c.ts_tree_cursor_goto_next_sibling(&cursor)) break;
         }
     }
@@ -1285,6 +1375,10 @@ pub const BracketIndex = struct {
             }
             if (rule.css_url_strings and cssUrlString(node, source)) return scanText(allocator, text, s, rule, out);
             if (!typeIn(node, rule.text_kinds)) return;
+            if (rule.text_parents.len > 0) {
+                const parent = c.ts_node_parent(node);
+                if (c.ts_node_is_null(parent) or !typeIn(parent, rule.text_parents)) return;
+            }
             return scanText(allocator, text, s, rule, out);
         }
         // 퍼센트 리터럴의 여닫는 글자(Ruby `%w[…]` · `%Q(…)`)는 괄호가 아니다 — VS Code 문법이 문자열 구두점으로 낸다. 여는 쪽은 `%` 로 시작하는
@@ -1316,7 +1410,12 @@ pub const BracketIndex = struct {
         }
         if (rule.no_close_paren_parents.len > 0 and text.len == 1 and text[0] == ')') {
             const parent = c.ts_node_parent(node);
-            if (!c.ts_node_is_null(parent) and typeIn(parent, rule.no_close_paren_parents)) return;
+            // `case` 의 `(pat)` 꼴은 여는 `(` 가 있다 — 그때는 둘이 짝이다(VS Code 도 짝으로 칠한다, 오라클 실측). `pat)` 꼴의 `)` 만 괄호가 아니다.
+            if (!c.ts_node_is_null(parent) and typeIn(parent, rule.no_close_paren_parents)) {
+                const first = c.ts_node_child(parent, 0);
+                const fs = c.ts_node_start_byte(first);
+                if (!(c.ts_node_end_byte(first) == fs + 1 and fs < source.len and source[fs] == '(')) return;
+            }
         }
         for (text, 0..) |ch, k| {
             if (std.mem.indexOfScalar(u8, rule.chars, ch) == null) continue;
@@ -1363,7 +1462,9 @@ pub const BracketIndex = struct {
             if (ch == '@' and (i == 0 or text[i - 1] != '{')) {
                 var j = i + 1;
                 while (j < text.len and (std.ascii.isAlphanumeric(text[j]) or text[j] == '_')) : (j += 1) {}
-                after_tag = j > i + 1 and !std.mem.eql(u8, text[i + 1 .. j], "example");
+                // 타입을 받는 블록 태그만(VS Code `JavaScript.tmLanguage.json` `docblock` 의 `(?={)` 규칙들) — `me@host {x}` 는 태그가 아니다.
+                const prev_ok = i == 0 or text[i - 1] == ' ' or text[i - 1] == '\t' or text[i - 1] == '*';
+                after_tag = prev_ok and isJsdocTypeTag(text[i + 1 .. j]);
                 i = j - 1;
                 continue;
             }
@@ -1407,6 +1508,13 @@ pub const BracketIndex = struct {
         return ne <= source.len and std.ascii.eqlIgnoreCase(source[ns..ne], "url");
     }
 
+    /// 타입 표기(`{…}`)를 받는 JSDoc 블록 태그 — VS Code JavaScript 문법 `docblock` 에서 `\s+(?={)` 로 `#jsdoctype` 을 여는 목록 그대로.
+    fn isJsdocTypeTag(name: []const u8) bool {
+        const tags = [_][]const u8{ "template", "typedef", "arg", "argument", "const", "constant", "member", "namespace", "param", "prop", "property", "var", "define", "enum", "exception", "export", "extends", "lends", "implements", "modifies", "private", "protected", "return", "returns", "satisfies", "suppress", "this", "throws", "type", "yield", "yields" };
+        for (tags) |t| if (std.mem.eql(u8, name, t)) return true;
+        return false;
+    }
+
     /// 들어가지 않는 노드인가(문자열 — 그 안의 괄호는 글자다).
     fn skips(node: c.TSNode, rule: BracketRule) bool {
         return rule.skip_kinds.len > 0 and typeIn(node, rule.skip_kinds);
@@ -1435,6 +1543,8 @@ pub const BracketRule = struct {
     skip_kinds: []const []const u8 = &.{},
     /// 괄호 글자를 세는 **이름 있는 잎**(글 — JSX 본문 · HTML 본문·속성값 · C 매크로 본문 · Python f-string 의 `{{`).
     text_kinds: []const []const u8 = &.{},
+    /// 글 잎의 부모가 이 중 하나일 때만 센다(C 는 `#define` 의 값만 — `#error` · `#warning` 의 본문은 VS Code 가 문자열로 둔다, 오라클 실측).
+    text_parents: []const []const u8 = &.{},
     /// 글 잎을 C 어휘로 훑는다(매크로 본문 — 문자열·문자·주석은 건너뛴다).
     text_c_lexer: bool = false,
     /// `${` 를 한 괄호로 — JavaScript 는 칠하고 TypeScript 는 괄호로만 둔다.
@@ -1457,11 +1567,12 @@ pub fn bracketRuleFor(lang: Language) BracketRule {
         .javascript => .{ .dollar_brace = .colored, .text_kinds = &.{"jsx_text"}, .jsdoc = true },
         .typescript => .{ .dollar_brace = .plain, .angle_parents = &.{ "type_arguments", "type_parameters" }, .jsdoc = true },
         .tsx => .{ .dollar_brace = .plain, .angle_parents = &.{ "type_arguments", "type_parameters" }, .text_kinds = &.{"jsx_text"}, .jsdoc = true },
-        .bash => .{ .skip_kinds = &.{"string"}, .no_close_paren_parents = &.{"case_item"} },
-        .php => .{ .skip_kinds = &.{"encapsed_string"} },
+        .bash => .{ .skip_kinds = &.{ "string", "heredoc_body" }, .no_close_paren_parents = &.{"case_item"} },
+        .php => .{ .skip_kinds = &.{ "encapsed_string", "heredoc", "nowdoc", "shell_command_expression" } },
         .ruby => .{ .percent_literals = true },
         .kotlin => .{ .skip_kinds = &.{"string_literal"} },
-        .c, .cpp => .{ .text_kinds = &.{"preproc_arg"}, .text_c_lexer = true },
+        .c => .{ .text_kinds = &.{"preproc_arg"}, .text_parents = &.{ "preproc_def", "preproc_function_def" }, .text_c_lexer = true },
+        .cpp => .{ .text_kinds = &.{"preproc_arg"}, .text_parents = &.{ "preproc_def", "preproc_function_def" }, .text_c_lexer = true, .skip_kinds = &.{"raw_string_literal"} },
         .python => .{ .text_kinds = &.{"escape_interpolation"} },
         .html => .{ .colorize = false, .text_kinds = &.{ "text", "attribute_value" }, .chars = "(){}" },
         .json => .{ .chars = "[]{}" },
@@ -3035,8 +3146,16 @@ test "SYN47 괄호 목록 — 편집마다 민 위치 + 달라진 범위만 다�
         .{ .lang = .bash, .src = "echo $(printf \"(\") ${x} [[ -n a ]]\ncase x in a) echo;; esac\n" },
         .{ .lang = .json, .src = "{\"k\": [\"(\", 1, {\"z\": []}]}\n" },
         .{ .lang = .rust, .src = "fn g(x: &[u8]) -> Vec<u8> { let c = |a| (a); vec![c(1)] }\n#[derive(Debug)] struct S {}\n" },
+        // 새 눈 리뷰 뒤 — 다른 잎의 글자로 판정하는 규칙(CSS `url` 의 함수 이름 · Ruby 퍼센트 리터럴 · Bash `case`)과 들어가지 않는 노드(heredoc ·
+        // raw string)가 있는 언어. CSS 는 `foo` ↔ `url` 이름 바꾸기가 트리 모양을 안 바꿔 달라진 범위가 인자를 안 덮는다(그래서 선언까지 넓힌다).
+        .{ .lang = .css, .src = "a { b: url(\"q(1)\"); c: foo(\"q(2)\"); d: f([x]) }\n" },
+        .{ .lang = .ruby, .src = "s = %w[a b].map { |x| x[0] }\nt = \"#{f(1)}\" + %Q(p)\n" },
+        .{ .lang = .php, .src = "<?php\n$s = <<<EOT\n{$a['k']} (x\nEOT;\nf($a[0], `ls (x`);\n" },
+        .{ .lang = .tsx, .src = "const e = <div a={f(1)}>(t) [x]</div>; let m: Map<K, V[]>;\n" },
+        .{ .lang = .cpp, .src = "auto s = R\"(abc)\"; int f() { return (1); }\n" },
+        .{ .lang = .bash, .src = "case x in (a) f ;; b) g ;; esac\ncat <<EOF\n$(d) (x\nEOF\n" },
     };
-    const inserts = [_][]const u8{ "(", ")", "{", "}", "[", "]", "\"", "'", "//", "/*", "*/", "\n", "x", "${", "`", " (a)", "{[}]" };
+    const inserts = [_][]const u8{ "(", ")", "{", "}", "[", "]", "\"", "'", "//", "/*", "*/", "\n", "x", "${", "`", " (a)", "{[}]", "url", "%w[", "<<EOF\n", "R\"(" };
     var prng = std.Random.DefaultPrng.init(0xb1ac_5047);
     const r = prng.random();
     var partials: u64 = 0;
@@ -3082,7 +3201,7 @@ test "SYN47 괄호 목록 — 편집마다 민 위치 + 달라진 범위만 다�
                 .old_end_point = old_to,
                 .new_end_point = pointOfForTest(text.items, new_end),
             });
-            idx.shift(@intCast(start), @intCast(old_end), @intCast(new_end));
+            idx.shift(allocator, @intCast(start), @intCast(old_end), @intCast(new_end));
             try idx.refresh(allocator, &prov, text.items, .{ .start = @intCast(start), .end = @intCast(new_end) });
             const ready = try idx.step(allocator, &prov, text.items, 0); // 부분 고침을 못 했으면(범위를 모른다) 처음부터
             if (prov.tree == null) {
@@ -3101,4 +3220,49 @@ test "SYN47 괄호 목록 — 편집마다 민 위치 + 달라진 범위만 다�
     }
     // 판정자가 증분 갈래를 실제로 지났다 — 전부 처음부터 만들었다면 위 대조는 공허하다
     try std.testing.expect(partials * 2 > steps);
+}
+
+test "SYN48 괄호 목록 — 처음 훑기 도중의 편집은 훑기를 다시 시작하지 않고, 다 훑으면 처음부터 만든 것과 같다 (visual-mapping §5.1d)" {
+    // 처음엔 훑는 도중 편집이 오면 처음부터 다시 훑었다 — 4 MB 문서는 20~28 프레임이 걸려, 그보다 빨리 계속 치면 색이 영영 안 왔다(새 눈 리뷰).
+    // 지금은 사본(트리·글)을 끝까지 훑고, 쌓인 편집에 모은 괄호를 통과시킨 뒤 다시 볼 범위만 고친다. 1 ns 예산으로 512 노드마다 끊어 편집을 끼운다.
+    const allocator = std.testing.allocator;
+    const unit = "fn g(a: u8) void {\n    if (a) { y[0] = (1 + f(.{ \"(\", x })); }\n}\n// ( [\n";
+    var prng = std.Random.DefaultPrng.init(0x5e48_0001);
+    const r = prng.random();
+    const inserts = [_][]const u8{ "(", ")", "{", "}", "[", "]", "\"", "//", "\n", "x", " (a)" };
+    for (0..6) |round| {
+        var text: std.ArrayList(u8) = .empty;
+        defer text.deinit(allocator);
+        for (0..120) |_| try text.appendSlice(allocator, unit);
+        var prov = Provider.init(text.items, .zig, 0) orelse return error.NoProvider;
+        defer prov.deinit();
+        var idx: BracketIndex = .{};
+        defer idx.deinit(allocator);
+        var steps: usize = 0;
+        var edits_during_walk: usize = 0;
+        while (!try idx.step(allocator, &prov, text.items, 1)) : (steps += 1) {
+            if (steps % 3 != 0) continue;
+            // 편집 — 제품 순서(민다 → 판다 → 고친다)
+            const len = text.items.len;
+            const start = r.uintLessThan(usize, len + 1);
+            var old_end = start;
+            var ins: []const u8 = "";
+            if (r.boolean() and len > 0) old_end = @min(len, start + r.uintLessThan(usize, 8)) else ins = inserts[r.uintLessThan(usize, inserts.len)];
+            const at = pointOfForTest(text.items, start);
+            const old_to = pointOfForTest(text.items, old_end);
+            try text.replaceRange(allocator, start, old_end - start, ins);
+            const new_end = start + ins.len;
+            idx.shift(allocator, @intCast(start), @intCast(old_end), @intCast(new_end));
+            prov.onEdit(text.items, .{ .start_byte = @intCast(start), .old_end_byte = @intCast(old_end), .new_end_byte = @intCast(new_end), .start_point = at, .old_end_point = old_to, .new_end_point = pointOfForTest(text.items, new_end) });
+            try idx.refresh(allocator, &prov, text.items, .{ .start = @intCast(start), .end = @intCast(new_end) });
+            if (idx.walking) edits_during_walk += 1;
+            if (steps > 200_000) return error.WalkNeverFinished;
+        }
+        errdefer std.debug.print("SYN48 round {d} steps {d} edits {d}\n", .{ round, steps, edits_during_walk });
+        try std.testing.expect(edits_during_walk > 0); // 판정자가 그 갈래를 실제로 지났다
+        try std.testing.expectEqual(@as(u64, 1), idx.rebuilds); // 다시 시작하지 않았다
+        var full = try fullIndexForTest(allocator, &prov, text.items);
+        defer full.deinit(allocator);
+        try std.testing.expectEqualSlices(BracketLeaf, full.leaves.items, idx.leaves.items);
+    }
 }

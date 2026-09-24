@@ -240,9 +240,11 @@ pub fn bracketPairsFromTheme(theme: appearance.ResolvedTheme) BracketPairColors 
     const idx: [3]u8 = if (dark) .{ 11, 13, 12 } else .{ 4, 2, 3 };
     var levels: [3]color.Rgb = undefined;
     for (idx, 0..) |n, i| levels[i] = readable(ansi(theme, n), bg_lum, target);
-    const red = readable(ansi(theme, 9), bg_lum, target);
+    const red = ansi(theme, 9);
     const bg = theme.background;
-    return .{ .levels = levels, .unexpected = .{ .r = toward(red.r, bg.r, 20), .g = toward(red.g, bg.g, 20), .b = toward(red.b, bg.b, 20) } };
+    // 바탕 쪽으로 당긴 **뒤에** 바닥을 둔다 — 당기기만 하면 바닥 아래로 떨어질 수 있다(새 눈 리뷰가 짚었다).
+    const pulled: color.Rgb = .{ .r = toward(red.r, bg.r, 20), .g = toward(red.g, bg.g, 20), .b = toward(red.b, bg.b, 20) };
+    return .{ .levels = levels, .unexpected = readable(pulled, bg_lum, target) };
 }
 
 /// `from` 을 `to` 쪽으로 `pct` % 옮긴다(정수 산술 — 반올림).

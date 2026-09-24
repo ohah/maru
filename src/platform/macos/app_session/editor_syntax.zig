@@ -68,6 +68,8 @@ pub const State = struct {
     bracket_scratch: std.ArrayList(u32) = .empty,
     /// 지금 판정이 어느 목록 판(`BracketIndex.version`)·어느 풀로 한 것인가. 다르면 그리지 않고 다시 판정한다.
     bracket_resolved: ?BracketResolved = null,
+    /// 처음 목록 훑기의 프레임 몫 — 판정자가 줄여 「여러 프레임에 걸친 훑기」를 기계 속도와 무관하게 만든다(`BPP3`).
+    bracket_walk_budget_ns: u64 = bracket_walk_budget_ns,
 
     /// 심볼 목록(§7.5). 프레임마다 다시 채우되 **저장소는 재사용한다** — 색 버퍼들과 같은 규율이다.
     symbols: std.ArrayList(syntax.Provider.Symbol) = .empty,
@@ -277,7 +279,7 @@ pub fn onEditSpan(
     const at = pointOf(lines_after, start);
     const to = pointOf(lines_after, new_end);
     // 괄호 목록(§5.1d)은 **파기 전에 위치를 밀고 판 뒤에 달라진 범위만 고친다** — 달라진 범위는 새 트리 좌표라 민 목록과 맞는다.
-    self.brackets.shift(start, old_end, new_end);
+    self.brackets.shift(allocator, start, old_end, new_end);
     p.onEdit(source, .{
         .start_byte = start,
         .old_end_byte = old_end,
@@ -298,11 +300,22 @@ pub const BracketResolved = struct { version: u64, independent: bool };
 /// 처음 목록 훑기의 프레임 몫 — 파싱 예산(4 ms)과 따로 든다. 4 MB 문서의 전체 훑기가 36~49 ms 라(§5.1d 실측) 스무 프레임 남짓에 나뉜다.
 pub const bracket_walk_budget_ns: u64 = 2 * std.time.ns_per_ms;
 
+/// 괄호 쌍 색을 끈다 — 목록과 판정을 버린다. 켜 둔 채 두면 편집마다 민다·고친다(괄호 수에 선형)를 헛되이 낸다(새 눈 리뷰가 짚었다).
+pub fn dropBrackets(self: *State, allocator: std.mem.Allocator) void {
+    if (self.bracket_resolved == null and !self.brackets.ready and !self.brackets.walking) return;
+    self.brackets.invalidate();
+    self.brackets.leaves.clearAndFree(allocator);
+    self.bracket_toks.clearAndFree(allocator);
+    self.bracket_info.clearAndFree(allocator);
+    self.bracket_scratch.clearAndFree(allocator);
+    self.bracket_resolved = null;
+}
+
 /// 괄호 쌍 색의 이번 프레임 몫(§5.1d). 처음 목록은 예산을 든 훑기로 잇고, 목록이 바뀌었으면 다시 판정한다. **다음 프레임이 더 필요하면
 /// 참**(아직 훑는 중) — 호출자가 그 프레임을 다시 그리게 해야 이어진다(`resumeParse` 와 같은 규율).
 pub fn advanceBrackets(self: *State, allocator: std.mem.Allocator, source: []const u8, independent: bool) bool {
     const p = &(self.provider orelse return false);
-    const ready = self.brackets.step(allocator, p, source, bracket_walk_budget_ns) catch {
+    const ready = self.brackets.step(allocator, p, source, self.bracket_walk_budget_ns) catch {
         self.brackets.invalidate();
         return false;
     };
@@ -1358,6 +1371,14 @@ test "BRC1 언어마다 무엇이 괄호인가 — VS Code 1.139 TextMate 문법
         .{ .lang = .javascript, .src = "/**\n * Prose {not a type} here (and parens) [x].\n * @param {string} a first\n * @param {Array<string>|Map<K,(V)>} b second\n * @returns {Promise<{ok: boolean}>} result\n * @see {@link Foo.bar} and {@link https://x.y/(z) label}\n * @type {import(\"../index\").W}\n * @example\n *   f({ a: [1] });\n */\nfunction f(a, b) {}\n// line {comment} (x)\n/* block {comment} */\n", .want = &.{ .{ 59, 0 }, .{ 66, 0 }, .{ 86, 0 }, .{ 107, 1 }, .{ 109, 1 }, .{ 111, 0 }, .{ 134, 0 }, .{ 143, 1 }, .{ 155, 1 }, .{ 157, 0 }, .{ 174, 0 }, .{ 188, 0 }, .{ 194, 0 }, .{ 213, 1 }, .{ 215, 1 }, .{ 222, 0 }, .{ 233, 0 }, .{ 240, 1 }, .{ 251, 1 }, .{ 254, 0 }, .{ 302, 0 }, .{ 307, 0 }, .{ 309, 0 }, .{ 310, 0 } } },
         // Bash `case` 패턴의 `)` — VS Code 1.139 는 이것을 튀는 괄호로 칠한다(낡은 scope 이름 탓 — 계약 「다른 점」 ①). 우리는 괄호가 아니다.
         .{ .lang = .bash, .src = "case x in\n  a) echo ;;\n  *) f ;;\nesac\n", .want = &.{} },
+        // 새 눈 리뷰 뒤(오라클 실측): `case` 의 `(pat)` 은 짝(`pat)` 의 `)` 는 VS Code 가 튀는 괄호로 칠하지만 결함이라 따르지 않는다 — 계약
+        // 「다른 점」 ①, 그 한 자리만 기대값에서 뺐다) · heredoc 속은 글자 · PHP heredoc/nowdoc/백틱 속은 글자 · C++ raw string · C `#error` 본문 ·
+        // JSDoc 은 타입 받는 태그만(`me@host` 아님) · 안 닫힌 타입 `{` 는 주석 끝까지(VS Code `jsdoctype` 의 `end: }|(?=\*/)`).
+        .{ .lang = .bash, .src = "case \"$1\" in (start) run ;; stop) halt ;; esac\ncat <<EOF\n$(date) ${U} (x\nEOF\nf() { echo \"$(x)\"; }\n", .want = &.{ .{ 13, 0 }, .{ 19, 0 }, .{ 78, 0 }, .{ 79, 0 }, .{ 81, 0 }, .{ 96, 0 } } },
+        .{ .lang = .php, .src = "<?php\n$s = <<<EOT\n{$a['k']} (x\nEOT;\n$n = <<<'N'\n(y\nN;\n$u = `ls (x`;\nf($a[0]);\n", .want = &.{ .{ 69, 0 }, .{ 72, 1 }, .{ 74, 1 }, .{ 75, 0 } } },
+        .{ .lang = .cpp, .src = "auto s = R\"(abc)\";\nint f() { return (1); }\n", .want = &.{ .{ 24, 0 }, .{ 25, 0 }, .{ 27, 0 }, .{ 36, 1 }, .{ 38, 1 }, .{ 41, 0 } } },
+        .{ .lang = .c, .src = "#error need C99 (or later\n#define M(x) (x)\nint g(void) { return M(0); }\n", .want = &.{ .{ 35, 0 }, .{ 37, 0 }, .{ 39, 0 }, .{ 41, 0 }, .{ 48, 0 }, .{ 53, 0 }, .{ 55, 0 }, .{ 65, 1 }, .{ 67, 1 }, .{ 70, 0 } } },
+        .{ .lang = .javascript, .src = "/** mail me@host {x} (y) */\n/**\n * @param {string name here (x)\n * @example f(1)\n */\nf(1);\n", .want = &.{ .{ 42, -1 }, .{ 60, 1 }, .{ 62, 1 }, .{ 77, 1 }, .{ 79, 1 }, .{ 86, 1 }, .{ 88, 1 } } },
     };
     var got: std.ArrayList([2]i64) = .empty;
     defer got.deinit(allocator);

@@ -25,7 +25,7 @@ pub const State = struct {
     /// 지금 든 쌍이 말하는 키. `valid` 가 거짓이면 아직 안 셌다.
     key: u64 = 0,
     valid: bool = false,
-    /// 이번 키의 쌍(커서마다 하나 이하 — 같은 쌍은 한 번).
+    /// 이번 키의 쌍(커서마다 하나 이하 — 같은 쌍이 겹칠 수 있고 `toRows` 가 거른다).
     pairs: std.ArrayList(brackets.Pair) = .empty,
     /// 렌더 축 마크(보이는 줄마다) — 프레임마다 다시 채운다.
     marks: [][]const Mark = &.{},
@@ -42,6 +42,9 @@ pub const State = struct {
 };
 
 /// 트리 출처 — 트리가 있고 **이어 파는 중이 아닐 때만**(선택 확장 1층과 같은 규율 — 다시 파는 중인 트리는 읽지 않는다).
+///
+/// **`pending` 가드는 오늘 등가다**(적대적 1회차 P11 — 선택 확장의 D3 과 같다): #3886 뒤로 「`pending` 이면 트리가 없다」가 성립한다. 예산을
+/// 든 증분(끊기면 옛 트리로 그린다)이 제품에 들어오는 날 이 줄이 그 창을 막는다.
 fn treeOf(term: *Term) ?*Provider {
     if (term.rt.editor_syntax.pending) return null;
     if (term.rt.editor_syntax.provider) |*p| {
@@ -72,7 +75,9 @@ pub fn modeFor(self: *AppSession, term: *Term) brackets.Mode {
 
 /// 이번 프레임의 괄호 마크(보이는 줄 축). 강조가 설 수 없으면 `null`.
 pub fn marks(self: *AppSession, term: *Term) ?[]const []const Mark {
-    if (term.rt.editor_diff != null) return null; // 비교 뷰 — 축이 둘이다(§5.1b)
+    // 비교 뷰 — 축이 둘이다(§5.1b). **이중 방어다**(적대적 1회차 P14: 등가) — 이 함수를 부르는 `paneDecorations` 는 단일 편집기 경로에서만
+    // 불리고, 비교 상태의 경로는 장식 없음(`.{}`)을 넘긴다. 둔 이유는 뜻이다 — 이 함수만 읽고도 「비교 뷰에서는 안 한다」를 알 수 있어야 한다.
+    if (term.rt.editor_diff != null) return null;
     const mode = modeFor(self, term);
     if (mode == .never) return null;
     const doc = term.rt.editor_doc orelse return null;
@@ -111,13 +116,10 @@ pub fn marks(self: *AppSession, term: *Term) ?[]const []const Mark {
                 brackets.forHighlight(brackets.Tree(Provider){ .prov = p, .bytes = content }, content.len, pos, mode)
             else
                 brackets.forHighlight(brackets.Plain{ .bytes = content }, content.len, pos, mode);
-            const got = pair orelse continue;
-            // 같은 쌍은 한 번 — 커서 둘이 같은 괄호에 닿을 수 있다.
-            var dup = false;
-            for (st.pairs.items) |q| {
-                if (q.open == got.open and q.close == got.close) dup = true;
-            }
-            if (!dup) st.pairs.append(self.allocator, got) catch return null;
+            // **같은 쌍이 두 번 들어와도 여기서 거르지 않는다** — 커서 둘이 같은 괄호에 닿으면 같은 쌍이 나오는데, 겹침은 `toRows` 가 괄호
+            // 자리를 정렬·중복 제거하며 한 곳에서 거른다. 처음엔 여기서도 걸렀고 두 곳이 서로를 가려 어느 쪽을 지워도 초록이었다(적대적 1회차
+            // P12·P13) — 그래서 하나로 줄였다. 서로 다른 두 쌍은 괄호를 나눠 갖지 않으므로 겹침은 늘 「같은 쌍」이다.
+            st.pairs.append(self.allocator, pair orelse continue) catch return null;
         }
         st.key = key;
         st.valid = true;

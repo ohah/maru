@@ -105,6 +105,8 @@ pub const Scan = struct {
         const p = @min(pos, self.hi);
         var depth = [3]usize{ 0, 0, 0 };
         var j = p;
+        // **`lo` 에서 멈추는 것은 비용이다 — 답은 같다**(적대적 1회차 B12: 0 까지 가도 초록). 뒤로 훑으므로 범위 밖 글자는 범위 안을 다 본 뒤에야
+        // 오고, 거기서 찾은 여는 괄호는 `pairAt` 이 범위 밖으로 버린다.
         while (j > self.lo) {
             j -= 1;
             const b = bracketOf(self.bytes[j]) orelse continue;
@@ -140,9 +142,9 @@ pub fn Tree(comptime P: type) type {
         /// 글 잎 안이면 그 안에서 먼저 찾고(가장 안쪽이다), 없으면 트리의 조상을 걷는다.
         pub fn enclosing(self: Self, pos: usize) ?Pair {
             const at: u32 = @intCast(@min(pos, self.bytes.len));
-            // caret 은 글자 **사이**다 — 뒤 글자의 잎, 없으면 앞 글자의 잎(잎 끝에 선 caret).
-            const leaf = self.prov.proseLeafAt(at) orelse if (at > 0) self.prov.proseLeafAt(at - 1) else null;
-            if (leaf) |l| {
+            // caret 뒤 글자의 잎만 본다. **잎 끝에 선 caret 을 앞 글자의 잎으로 보지 않는다** — 그 잎 안의 어느 쌍도 닫는 괄호가 `hi - 1` 이하라
+            // caret(`hi`)을 품을 수 없다. 처음엔 그 갈래를 두었는데 적대적 1회차(B15)가 지워도 같은 답임을 보였고, 이유가 위 한 줄이라 걷어냈다.
+            if (self.prov.proseLeafAt(at)) |l| {
                 if ((Scan{ .bytes = self.bytes, .lo = l.start, .hi = l.end }).enclosing(at)) |p| return p;
             }
             const p = self.prov.enclosingBracketTokens(self.bytes, at) orelse return null;
@@ -207,6 +209,9 @@ test "BRK2 글자 훑기는 같은 종류만 깊이로 센다 — 범위 밖은 
     try testing.expectEqual(@as(?Pair, null), cut.pairAt(0));
     const cut_back = Scan{ .bytes = "(a)", .lo = 1, .hi = 3 }; // 여는 괄호가 범위 밖
     try testing.expectEqual(@as(?Pair, null), cut_back.pairAt(2));
+    // **범위 밖 글자에서는 묻지도 않는다** — 범위 끝 뒤의 ')' 가 범위 안 '(' 와 짝이 **될 수 있는** 표본이라야 갈린다. 위 `leaf.pairAt(4)` 는
+    // 짝을 못 찾아 어느 쪽이든 `null` 이었다(적대적 1회차 B7 — 검사를 `bytes.len` 으로 바꿔도 초록이었다).
+    try testing.expectEqual(@as(?Pair, null), (Scan{ .bytes = "(a))", .lo = 0, .hi = 2 }).pairAt(2));
     try testing.expectEqual(@as(?Pair, null), whole.pairAt(1)); // 괄호 아님
 }
 
@@ -307,7 +312,7 @@ test "BRK7 트리 출처의 감싸는 쌍 — 글 잎 안이 먼저, 없으면 �
     const ms: Tree(FakeProv) = .{ .prov = &prose, .bytes = md };
     try testing.expectEqual(pr(3, 6), ms.enclosing(5));
     try testing.expectEqual(@as(usize, 0), prose.enclosing_calls);
-    // 잎 끝에 선 caret(8) — 뒤 글자는 잎 밖이라 앞 글자의 잎을 쓴다: 잎 안에서 품는 쌍이 없어 조상으로
+    // 잎 끝에 선 caret(8) — 뒤 글자는 잎 밖이라 곧바로 조상으로(앞 잎을 봐도 품는 쌍이 있을 수 없다)
     try testing.expectEqual(pr(0, 9), ms.enclosing(8));
     try testing.expectEqual(@as(usize, 1), prose.enclosing_calls);
     // 잎이 없으면 곧바로 조상

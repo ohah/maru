@@ -4758,3 +4758,21 @@ test "BRK9 괄호 상자 — 그 글자 칸에 10% 채움 + 불투명 1px 테두
     }
     try testing.expectEqual(@as(usize, 2), seen);
 }
+
+test "LHL7 위젯 행에는 줄 상자가 안 선다 — 앵커 줄에 caret 이 있어도 글자 행 하나만 (§5.1b · S1.5)" {
+    // 위젯 행은 앵커 줄의 첨자를 든다(그 값이 유효한 것이 그 설계다) — 거르지 않으면 랩이 꺼진 줄은 「그 줄에 caret 이 있다」만으로 위젯
+    // 행에도 상자를 그린다(적대적 1회차 F15 — 위젯과 caret 을 함께 둔 판정자가 없어 살아남았다).
+    const lines = [_][]const u8{ "one", "two", "three" };
+    var props = testProps(&lines, false);
+    const widgets = [_]?content.Widget{ null, .{ .text = "골라라" }, null };
+    props.line_widgets = &widgets;
+    const caret_rows = [_][]const u32{ &.{}, &.{1}, &.{} };
+    props.carets = &caret_rows;
+    props.line_highlight = .line;
+    var bufs: TestBuffers = .{};
+    const w = build(props, bufs.scratch());
+    var got: [8]draw.Op.Quad = undefined;
+    const boxes = lineBoxes(bufs.ops[0..w.ops], &got);
+    try testing.expectEqual(@as(usize, 1), boxes.len);
+    try testing.expectEqual(@as(i32, 2 * 16), boxes[0].rect.y); // 행 0 = one · 행 1 = 위젯 · 행 2 = two
+}

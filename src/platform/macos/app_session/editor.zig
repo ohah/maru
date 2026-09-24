@@ -2317,6 +2317,8 @@ pub fn applyConfigTabWidth(self: *AppSession) void {
                 const cols_changed = term.rt.editor_max_columns != want_cols;
                 term.rt.editor_max_columns = want_cols;
                 if (term.rt.editor_tab_width == want and !cols_changed) continue;
+                // **탭 폭이 바뀌었을 때만** 간격을 다시 추정한다(§5.1c — VS Code 도 들여쓰기 옵션이 달라질 때만. `max-columns` 는 그 옵션이 아니다).
+                if (term.rt.editor_tab_width != want) guides_client.onTabWidthSettingChanged(term);
                 setEditorTabWidth(self, term, want);
                 // **다시 세어 준다.** 세터는 `max_cols`를 **버리기만** 하고(그것이 그 함수의 일이다),
                 // 제품에서 다시 세는 자리는 `finishAttach`와 첫 가로 휠뿐이다. 그대로 두면
@@ -41494,8 +41496,13 @@ test "BRP7 활성이 아닌 편집기에는 괄호 상자가 없다 — 현재 �
 /// 판정자용: 한 프레임을 그리고 **폭 1px** 인 안내선 GPU quad 를 (보통, 활성) 으로 가른다. 좌표는 `editor_hit_geom` 기준 (열, 행).
 const GuideHit = struct { col: i32, row: i32, active: bool };
 fn guideHits(self: *AppSession, term: *Term, out: []GuideHit) ![]GuideHit {
-    self.gpu_quads.clearRetainingCapacity();
     const leaf = activeLeafRectForTest(self) orelse return error.NoLeaf;
+    return guideHitsIn(self, leaf, term, out);
+}
+
+/// `guideHits` 를 주어진 사각에서 — 창 크기가 없는 픽스처(이름 없는 문서 — `U1q` 와 같다)용.
+fn guideHitsIn(self: *AppSession, leaf: maru.session.SplitRect, term: *Term, out: []GuideHit) ![]GuideHit {
+    self.gpu_quads.clearRetainingCapacity();
     var d = appendPaneFrame(self, leaf, term) orelse return error.EditorPaneDidNotDraw;
     d.dl.deinit(self.allocator);
     const tk = self.buildChromeTokens();
@@ -41661,4 +41668,92 @@ test "IGP5 굴린 화면 — 창이 맨 위 줄부터다; 행마다 그 줄의 �
     try testing.expectEqual(@as(usize, 1), countHits(hits, 0));
     try testing.expectEqual(@as(usize, 0), countHits(hits, 1));
     try testing.expectEqual(@as(usize, 1), countHits(hits, 2));
+}
+
+test "IGP7 다시 추정 — 설정 탭 폭이 바뀌면 지금 내용으로(최대 열만 바뀌면 안 한다), 이름 붙여 저장으로 Go 가 되면 언어별 기본으로 (제품 경계, §5.1c)" {
+    // VS Code `_setModelOptionsForModel` 은 모델을 만들 때만이 아니라 **들여쓰기 옵션이 달라질 때**(설정 · 언어 변경) 지금 내용으로 다시 추정한다.
+    // 처음 계약은 「만들 때 한 번」이라 두 자리를 빠뜨렸다(적대적 8회차 새 눈 리뷰 → `modelService.ts` 원문 확인).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const untitled_leaf: maru.session.SplitRect = .{ .x = 100, .y = 50, .w = 800, .h = 600 };
+    {
+        var fx = try PaneFixture.init(allocator);
+        defer fx.deinit(allocator);
+        // 12 칸 차이는 후보(2~8)에 안 걸려 **기본 폭**이 간격이 된다 — 폭 4 면 선 셋(0·4·8), 폭 12 면 하나(monaco 0.56: `IG9` 첫 두 사례).
+        const term = try openBracketFixture(&fx, allocator, "s.txt", "a\n            b\n");
+        var buf: [64]GuideHit = undefined;
+        try testing.expectEqual(@as(usize, 3), countHits(try guideHits(fx.session, term, &buf), 1));
+        try testing.expectEqual(@as(u64, 1), term.rt.editor_guides.guessed);
+        // 최대 열만 바뀐다 — 들여쓰기 옵션이 아니므로 다시 안 한다
+        fx.session.loaded_config.config.editor.max_columns = 7777;
+        applyConfigTabWidth(fx.session);
+        _ = try guideHits(fx.session, term, &buf);
+        try testing.expectEqual(@as(u64, 1), term.rt.editor_guides.guessed);
+        // 탭 폭이 바뀐다 — 다시 한다
+        fx.session.loaded_config.config.editor.tab_width = 12;
+        applyConfigTabWidth(fx.session);
+        try testing.expectEqual(@as(usize, 1), countHits(try guideHits(fx.session, term, &buf), 1));
+        try testing.expectEqual(@as(u64, 2), term.rt.editor_guides.guessed);
+    }
+    {
+        var fx = try UntitledFixture.init(allocator, false, true);
+        defer fx.deinit(allocator);
+        var dir = testing.tmpDir(.{});
+        defer dir.cleanup();
+        var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const root = root_buf[0..try dir.dir.realPath(std.testing.io, &root_buf)];
+        pinUntitledBase(fx.session, root);
+        // 탭 줄 하나 · 공백 줄 하나 — **동률**이라 기본이 가른다(`IG8`): 전역 기본은 공백 2 칸(`\tc` 가 단계 2 → 선 둘), Go 는 탭(선 하나).
+        const t = try openUntitledInActivePane(fx.session);
+        try testing.expect(insertText(fx.session, t, "a\n  b\n\tc\n"));
+        var buf: [64]GuideHit = undefined;
+        try testing.expectEqual(@as(usize, 2), countHits(try guideHitsIn(fx.session, untitled_leaf, t, &buf), 2));
+        try testing.expectEqual(@as(u64, 1), t.rt.editor_guides.guessed);
+        try testing.expectError(error.AskName, saveDocument(fx.session, t));
+        try fx.session.rename_input.query.appendSlice(allocator, "t.go");
+        settings_ops.commitRename(fx.session);
+        try testing.expectEqual(maru.session.editor.language.Grammar.go, t.rt.editor_grammar);
+        try testing.expectEqual(@as(usize, 1), countHits(try guideHitsIn(fx.session, untitled_leaf, t, &buf), 2));
+        try testing.expectEqual(@as(u64, 2), t.rt.editor_guides.guessed);
+    }
+    {
+        // 대조군 — 기본이 같은 언어로 저장하면 다시 안 한다(VS Code 도 두 언어의 옵션이 같으면 모델을 안 건드린다).
+        var fx = try UntitledFixture.init(allocator, false, true);
+        defer fx.deinit(allocator);
+        var dir = testing.tmpDir(.{});
+        defer dir.cleanup();
+        var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const root = root_buf[0..try dir.dir.realPath(std.testing.io, &root_buf)];
+        pinUntitledBase(fx.session, root);
+        const t = try openUntitledInActivePane(fx.session);
+        try testing.expect(insertText(fx.session, t, "a\n  b\n\tc\n"));
+        var buf: [64]GuideHit = undefined;
+        _ = try guideHitsIn(fx.session, untitled_leaf, t, &buf);
+        try testing.expectError(error.AskName, saveDocument(fx.session, t));
+        try fx.session.rename_input.query.appendSlice(allocator, "t.ts");
+        settings_ops.commitRename(fx.session);
+        try testing.expectEqual(maru.session.editor.language.Grammar.typescript, t.rt.editor_grammar);
+        try testing.expectEqual(@as(usize, 2), countHits(try guideHitsIn(fx.session, untitled_leaf, t, &buf), 2));
+        try testing.expectEqual(@as(u64, 1), t.rt.editor_guides.guessed);
+    }
+}
+
+test "IGP8 창은 프레임이 그릴 수 있는 행만큼이다 — 256 행을 넘게 보여도 아래 행에 선이 있다 (제품 경계, §5.1c)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    fx.session.loaded_config.config.editor.sticky_scroll = false;
+    fx.session.cell_height_px = 2; // 행을 256 넘게 세운다
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    for (0..600) |_| try doc.appendSlice(allocator, "    x\n");
+    const term = try openBracketFixture(&fx, allocator, "w.txt", doc.items);
+    term.rt.editor_wrap = false;
+    const buf = try allocator.alloc(GuideHit, 1024);
+    defer allocator.free(buf);
+    const hits = try guideHits(fx.session, term, buf);
+    const rows = term.rt.editor_hit_rows_len;
+    if (rows <= guides_client.window_lines / 2) return error.FixtureTooFewRows; // 옛 창(256)을 넘어야 이 판정자가 잰다
+    for (0..rows) |r| try testing.expectEqual(@as(usize, 1), countHits(hits, @intCast(r)));
 }

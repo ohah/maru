@@ -4,8 +4,12 @@
 //! 근처의 **창**만 단계를 센다 ③ primary caret 의 활성 블록을 그 창에 표시한다 ④ offSide 언어를 가른다.
 //!
 //! **다시 읽어도 다시 추정하지 않는다.** 디스크 변경을 받아들이는 길(`confirmReload`)은 같은 Term 에 **편집으로** 내용을 넣는데, VS Code 도 같은
-//! 자리(`ModelService.updateModel`)가 편집으로 넣고 추정을 다시 하지 않는다 — 추정은 모델을 만들 때(`_setModelOptionsForModel`)뿐이다. 문서를
-//! 여는 길(`finishAttach` 를 부르는 넷)은 전부 **새 Term** 을 만들어 캐시가 빈 채로 온다.
+//! 자리(`ModelService.updateModel`)가 편집으로 넣고 추정을 다시 하지 않는다. 문서를 여는 길(`finishAttach` 를 부르는 넷)은 전부 **새 Term** 을
+//! 만들어 캐시가 빈 채로 온다.
+//!
+//! **다시 추정하는 자리는 둘이다**(VS Code `_setModelOptionsForModel` — 모델을 만들 때만이 아니다; 적대적 8회차가 원문을 열어 찾았다): ① 설정의
+//! 탭 폭이 바뀔 때(`_updateModelOptions` — 들여쓰기 옵션이 달라지면 **지금 내용으로** `detectIndentation`) ② 언어가 바뀌어 언어별 기본이 달라질
+//! 때(`_onDidChangeLanguage` — 옵션이 같으면 그대로 둔다). 우리 자리는 `applyConfigTabWidth` 와 이름 붙여 저장(`editor_untitled_save`)이다.
 const std = @import("std");
 const maru = @import("maru");
 const app_session_mod = @import("../app_session.zig");
@@ -14,8 +18,10 @@ const Term = app_session_mod.Term;
 const guides = maru.session.editor.indent_guides;
 const frame = maru.chrome.components.editor_view.frame;
 
-/// 창의 줄 수 상한 — 구문 색이 쓰는 창과 같은 값(`syntaxColors` 의 256). 화면보다 넉넉하다.
-pub const window_lines: usize = 256;
+/// 창의 줄 수 상한 — **프레임이 한 번에 그릴 수 있는 행 수**(`appendPaneFrame` 의 `content_rows`·`visual_rows` 512)와 같다. 처음엔 구문 색 창
+/// (`syntaxColors` 의 256)을 따랐는데, 글자가 작고 창이 높아 256 행을 넘게 보이면 그 아래 행에 선이 없었다(적대적 8회차 새 눈 리뷰 — `IGP8`).
+/// 구문 색의 256 은 그쪽의 기존 상한이라 여기서 바꾸지 않는다.
+pub const window_lines: usize = 512;
 
 pub const State = struct {
     /// 이 문서의 추정(§5.1c). `null` 이면 아직 안 했다 — 다음 프레임이 한다(새 Term 은 늘 여기서 시작한다).
@@ -59,8 +65,20 @@ fn offsideOf(term: *const Term) bool {
 }
 
 /// 추정의 기본 모드 — VS Code `[go]` 는 `insertSpaces: false` 다(확장 `package.json` 의 `configurationDefaults`). 그 밖은 전역 기본(공백).
-fn defaultSpacesModeOf(term: *const Term) bool {
-    return term.rt.editor_grammar != .go;
+fn defaultSpacesModeOf(grammar: maru.session.editor.language.Grammar) bool {
+    return grammar != .go;
+}
+
+/// 설정의 탭 폭이 **바뀌었다** — 다음 프레임이 지금 내용으로 다시 추정한다(VS Code `_updateModelOptions`: `tabSize` 가 달라지면
+/// `detectIndentation(insertSpaces, tabSize)`). 기본 폭은 못 센 간격과 정렬 예외가 읽는다(`guessWith`).
+pub fn onTabWidthSettingChanged(term: *Term) void {
+    term.rt.editor_guides.guess = null;
+}
+
+/// 문서의 문법이 바뀌었다(`old` → 지금) — **언어별 기본이 달라질 때만** 다시 추정한다(VS Code `_onDidChangeLanguage` → `_setModelOptionsForModel`
+/// 은 두 언어의 옵션이 같으면 모델을 건드리지 않는다). offSide 는 추정이 아니라 프레임마다 읽으므로 여기서 할 것이 없다.
+pub fn onGrammarChanged(term: *Term, old: maru.session.editor.language.Grammar) void {
+    if (defaultSpacesModeOf(old) != defaultSpacesModeOf(term.rt.editor_grammar)) term.rt.editor_guides.guess = null;
 }
 
 /// 한 프레임의 안내선 — 창과 간격(0 이면 그리지 않는다).
@@ -79,7 +97,7 @@ pub fn window(self: *AppSession, term: *Term) Window {
     const src: DocLines = .{ .lines = doc.file.lines, .content = doc.file.content };
     const tab_width = term.rt.editor_tab_width;
     if (st.guess == null) {
-        st.guess = guides.guessWith(src, tab_width, defaultSpacesModeOf(term));
+        st.guess = guides.guessWith(src, tab_width, defaultSpacesModeOf(term.rt.editor_grammar));
         st.guessed += 1;
     }
     const unit = st.guess.?.unit(tab_width);

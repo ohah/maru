@@ -250,7 +250,7 @@ pub fn handle(k: InputEvent.KeyEvent, state: *State) ?Action;                   
   - **왜 호출자가 세면 안 되나.** 컴포넌트가 방출을 하나 늘리는 순간 호출자의 산술이 조용히 낡고, 증상은 "그 op 하나가 빠짐"이 아니라 한 덩어리가 통째로 사라지는 것이다. 소스 컨트롤 도크가 두 번 겪었고(증감을 두 색으로 가르며 행당 op +1, 긴 경로가 바이트 풀을 넘김 — `scm_dock/view.zig` `drawBufferSizes` 주석), 파일 트리는 행당 512바이트 추정을 실제 라벨 길이 합으로 바꿨다(`file_tree/view.zig` `bufferSizes`). 편집기는 구문 색이 한 행의 run을 1개에서 토큰 수로 늘렸는데 호출자 상수는 그대로여서 비교 뷰의 줄 번호가 통째로 사라졌다([native-editor-visual-mapping.md](native-editor-visual-mapping.md) §4 「그릴 예산이 모자라면」).
   - **한 저장소를 여러 층이 차례로 쓰면 층마다 몫을 센다.** 앞 층이 뒤 층의 몫을 먹지 못하게, 각 층에는 자기 몫까지만 쓸 수 있는 조각을 준다. run·글자 바이트는 op이 포인터로 가리키므로 층별로 **떼어** 준다. op은 배열 순서가 곧 그리는 순서(Z)라 **한 배열에 이어 써야** 하므로, 상한만 몫으로 걸고 다음 층은 앞 층이 **실제로 쓴** 자리 뒤에서 시작한다 — 몫의 합이 전체 크기이므로 뒤 층이 굶지 않는다.
   - **실패 정책은 컴포넌트가 정한다** — 이 규칙은 크기만 정한다. 목록형 도크(`file_tree`·`scm_dock`)는 모자라면 `view`가 오류로 끝나 그 프레임을 버리고, 편집기는 잘라 그리되 알린다(`Written.truncated`). 크기를 제대로 세면 어느 정책이든 병적인 입력에서만 발동한다.
-  - **이 규칙 밖에 있는 자리.** `session_dock`은 트리 몫(`build.bufferSizes`)만 컴포넌트가 세고 draw 몫(op·run·글자)은 호출자(`app_session/agent_dock.zig`)가 항목 수로 추정한다. `archive_detail`에는 크기 함수가 없다. 편집기(`editor_view.frame`·`diff_frame`)는 호출자 상수를 쓴다 — 이관 순서는 [plans/native-editor.md](plans/native-editor.md) 「draw 저장소 몫」이 소유한다.
+  - **이 규칙 밖에 있는 자리.** `session_dock`은 트리 몫(`build.bufferSizes`)만 컴포넌트가 세고 draw 몫(op·run·글자)은 호출자(`app_session/agent_dock.zig`)가 항목 수로 추정한다. `archive_detail`에는 크기 함수가 없다. 편집기(`editor_view.frame`·`diff_frame`·`merge_frame`)는 run·글자 몫을 이 규칙대로 답하지만(기하로 묶는다 — `bufferSizes`), **op 몫은 아직 호출자 상수**다 — 순서는 [plans/native-editor.md](plans/native-editor.md) 「draw 저장소 몫」 B2가 소유한다.
 
 ### 5.5 Props(seam) & ChromeState — `chrome/props.zig`, `chrome/state.zig`
 컴포넌트는 **session을 모른다.** host가 매 프레임 불변 props를 빌드한다.

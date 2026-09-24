@@ -209,6 +209,11 @@ fn backgroundFor(i: usize, rect: draw.Rect, lay: Layout, outer: draw.Rect) draw.
 }
 
 fn buildPane(pane: Pane, props: Props, rect: draw.Rect, background: ?draw.Rect, scratch: frame.Scratch) frame.Written {
+    return frame.build(paneProps(pane, props, rect, background), scratch);
+}
+
+/// pane 하나의 `frame.Props` — 그리는 쪽(`buildPane`)과 몫을 재는 쪽(`bufferSizes`)이 **함께** 부른다.
+fn paneProps(pane: Pane, props: Props, rect: draw.Rect, background: ?draw.Rect) frame.Props {
     const probe = diff_frame.sideMetrics(rect.w, rect.h, props.cell_w_px, props.cell_h_px);
     const shows_h_bar = frame.showsHorizontalBar(
         props.wrap,
@@ -216,7 +221,7 @@ fn buildPane(pane: Pane, props: Props, rect: draw.Rect, background: ?draw.Rect, 
         geometry.compute(probe.total_cols, pane.lines.len, .{}).content.width,
     );
     const m = diff_frame.sideMetricsWith(rect.w, rect.h, props.cell_w_px, props.cell_h_px, shows_h_bar);
-    return frame.build(.{
+    return .{
         .lines = pane.lines,
         .line_colors = pane.line_colors,
         .first_line = pane.first_line,
@@ -242,7 +247,49 @@ fn buildPane(pane: Pane, props: Props, rect: draw.Rect, background: ?draw.Rect, 
         .total_cols = m.total_cols,
         .scrollbar_gutter_px = m.scrollbar_gutter_px,
         .metrics = m.metrics,
-    }, scratch);
+    };
+}
+
+/// pane 넷 각각의 run·글자 몫 — 없는 pane(3-up 이 아닐 때의 판·base 없음)은 0 이다. `build` 와 같은 배치·같은
+/// `paneProps` 를 지난다.
+fn paneSizes(props: Props) [4]frame.BufferSizes {
+    const lay = layout(props.rect, props.cell_w_px, props.cell_h_px, props.base != null);
+    const outer = props.background_rect orelse props.rect;
+    const panes = [4]?Pane{ props.current, props.result, props.incoming, props.base };
+    const rects = [4]?draw.Rect{ lay.current, lay.result, lay.incoming, lay.base };
+    var out = [_]frame.BufferSizes{.{}} ** 4;
+    for (panes, rects, 0..) |pane_opt, rect_opt, i| {
+        const pane = pane_opt orelse continue;
+        const rect = rect_opt orelse continue;
+        out[i] = frame.bufferSizes(paneProps(pane, props, rect, backgroundFor(i, rect, lay, outer)));
+    }
+    return out;
+}
+
+/// pane 넷이 쓰는 run·글자 몫의 합(chrome-strategy §5.4). 호출자는 이만큼 잡는다.
+pub fn bufferSizes(props: Props) frame.BufferSizes {
+    var total: frame.BufferSizes = .{};
+    for (paneSizes(props)) |sz| total = total.plus(sz);
+    return total;
+}
+
+/// `splitScratch` 와 같되 **run·글자만 각 pane 의 몫대로** 나눈다(`frame.shareRange`). 넷으로 똑같이 나누면
+/// pane 하나가 run 을 ¼(1280 이면 320개)만 받아, 촘촘한 판의 줄 번호가 빈 판 몫을 두고 사라진다(비교 뷰가
+/// 반반으로 나눠 겪은 결함의 넷판). 행 배열은 균등을 지킨다 — 제품이 그린 뒤 `splitScratch` 자리에서 다시 읽는다.
+pub fn partScratch(s: frame.Scratch, sizes: [4]frame.BufferSizes, index: usize) frame.Scratch {
+    var part = splitScratch(s, index);
+    var run_needs: [4]usize = undefined;
+    var text_needs: [4]usize = undefined;
+    for (sizes, 0..) |sz, i| {
+        run_needs[i] = sz.runs;
+        text_needs[i] = sz.text_bytes;
+    }
+    const i = @min(index, 3);
+    const r = frame.shareRange(s.runs.len, &run_needs, i);
+    const t = frame.shareRange(s.text_bytes.len, &text_needs, i);
+    part.runs = s.runs[r.start..r.end];
+    part.text_bytes = s.text_bytes[t.start..t.end];
+    return part;
 }
 
 /// pane 넷을 `scratch.ops` 앞쪽에 채운다.
@@ -250,6 +297,7 @@ pub fn build(props: Props, scratch: frame.Scratch) Written {
     const has_base = props.base != null;
     const lay = layout(props.rect, props.cell_w_px, props.cell_h_px, has_base);
     const outer = props.background_rect orelse props.rect;
+    const sizes = paneSizes(props);
 
     var out: Written = .{ .ops = 0, .truncated = false, .layout = lay };
     var written: usize = 0;
@@ -266,7 +314,7 @@ pub fn build(props: Props, scratch: frame.Scratch) Written {
     for (&slots, 0..) |*slot, i| {
         const pane = slot.pane orelse continue;
         const rect = slot.rect orelse continue;
-        const part = splitScratch(scratch, i);
+        const part = partScratch(scratch, sizes, i);
         // 배경은 **자기 사각만** 칠하되, `background_rect`(뷰 전체 — 판 블록은 그 안쪽 여백에 선다) 와 맞닿은
         // 변은 **그 가장자리까지** 넓힌다. 이웃까지 칠하면 나중에 그리는 pane 이 앞 pane 을 덮고, 넓히지 않으면
         // 여백 4px 에 pane 배경이 비치는 띠가 남는다(제품이 여백 안쪽 사각을 넘기게 된 뒤 — S3b-2 정정 2026-09-15).
@@ -451,4 +499,86 @@ test "MPN5 저장소는 «넷» 으로 갈리고 자투리는 마지막이 가�
     try testing.expect(p0.caret_cols.ptr != p1.caret_cols.ptr);
     // 그리고 **길이도 전체가 아니다**(안 가르면 조각마다 전체 길이가 온다).
     try testing.expect(p0.text_bytes.len < s.text_bytes.len);
+}
+
+/// 판정자용 — 숫자로 시작하는 글자 op 수(본문은 `a` 뿐이라 번호만 센다).
+fn digitOps(ops: []const draw.Op) usize {
+    var n: usize = 0;
+    for (ops) |op| if (op == .text and op.text.runs.len > 0) {
+        const t = op.text.runs[0].text;
+        if (t.len > 0 and t[0] >= '0' and t[0] <= '9') n += 1;
+    };
+    return n;
+}
+
+const RbBuffers = struct {
+    ops: [16384]draw.Op = undefined,
+    content_rows: [1024]content.Row = undefined,
+    visual_rows: [1024]visual_map.VisualRow = undefined,
+    gutter_rows: [1024]gutter.Row = undefined,
+    row_counts: [8192]u32 = undefined,
+    count_scratch: [content.count_scratch_bytes * 4]u8 = undefined,
+    caret_cols: [512]u32 = undefined,
+
+    fn scratch(self: *RbBuffers, runs: []draw.Run, text: []u8) frame.Scratch {
+        return .{ .ops = &self.ops, .text_bytes = text, .runs = runs, .content_rows = &self.content_rows, .visual_rows = &self.visual_rows, .gutter_rows = &self.gutter_rows, .row_counts = &self.row_counts, .count_scratch = &self.count_scratch, .caret_cols = &self.caret_cols };
+    }
+};
+
+test "RB4 병합 — run·글자를 pane 몫대로 나눈다: base 없는 3-up·Result 하나일 때도 bufferSizes 만큼이면 절단이 없다 (넷으로 똑같이 나누면 모자란다)" {
+    // 넷으로 똑같이 나누면 **없는 pane 의 ¼ 이 버려진다** — base 가 없으면 세 pane 이 각자 필요한 ⅓ 대신 ¼ 만,
+    // 폭이 좁아 Result 하나만 서면 거의 전부가 필요한데 ¼ 만 받는다. 몫대로 나누면(`partScratch`) 합만큼 준
+    // 저장소로 절단이 없다 — `partScratch` 를 `splitScratch`(균등)로 되돌리면 이 판정이 빨개진다.
+    // (base 가 있는 3-up 은 네 pane 넓이가 거의 같아 균등과 몫이 비슷하다 — 갈리는 조건을 일부러 고른다.)
+    const a = testing.allocator;
+    var line_buf: [300]u8 = undefined;
+    @memset(&line_buf, 'a');
+    var lines: [300][]const u8 = undefined;
+    for (&lines) |*l| l.* = &line_buf;
+    var spans: [300]content.ColorSpan = undefined;
+    var ns: usize = 0;
+    var c: u32 = 0;
+    while (c < 300) : (c += 2) {
+        spans[ns] = .{ .start_col = c, .end_col = c + 1, .role = .syntax_keyword };
+        ns += 1;
+    }
+    var colors: [300][]const content.ColorSpan = undefined;
+    for (&colors) |*cl| cl.* = spans[0..ns];
+    const pane: Pane = .{ .lines = &lines, .line_colors = &colors };
+
+    const wide_runs = try a.alloc(draw.Run, 100000);
+    defer a.free(wide_runs);
+    const wide_text = try a.alloc(u8, 1_000_000);
+    defer a.free(wide_text);
+    var bufs: RbBuffers = .{};
+
+    // ⑴ base 없는 3-up(넓은 창) ⑵ Result 하나(좁은 창 — 세 열이 안 선다)
+    const rects = [_]draw.Rect{ .{ .x = 0, .y = 0, .w = 1600, .h = 800 }, .{ .x = 0, .y = 0, .w = 300, .h = 800 } };
+    for (rects) |rect| {
+        const props: Props = .{
+            .rect = rect,
+            .current = pane,
+            .result = pane,
+            .incoming = pane,
+            .base = null,
+            .cell_w_px = 8,
+            .cell_h_px = 16,
+            .font_px = 13,
+            .tab_width = frame.default_tab_width,
+            .wrap = false,
+        };
+        const wide = build(props, bufs.scratch(wide_runs, wide_text));
+        try testing.expect(!wide.truncated);
+        const want = digitOps(bufs.ops[0..wide.ops]);
+        try testing.expect(want > 0);
+
+        const need = bufferSizes(props);
+        const runs = try a.alloc(draw.Run, need.runs);
+        defer a.free(runs);
+        const text = try a.alloc(u8, need.text_bytes);
+        defer a.free(text);
+        const exact = build(props, bufs.scratch(runs, text));
+        try testing.expect(!exact.truncated);
+        try testing.expectEqual(want, digitOps(bufs.ops[0..exact.ops]));
+    }
 }

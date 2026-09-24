@@ -5905,6 +5905,10 @@ pub const AppSession = struct {
     /// **항목이 Term 포인터가 아니라 `surface_id` 인 이유**는 그 Term 이 닫힐 수 있어서다.
     /// 되돌아갈 때 `termBySurfaceId` 로 되찾고 **못 찾으면 버리고 다음으로 간다** — 닫힌 파일을
     /// 되살리는 것은 「이동」이 아니라 「열기」다.
+    /// 편집기 pane 이 그릴 때 쓰는 run·글자 저장소(visual-mapping §4 「저장소는 세션에 하나다」). **세션에 하나**다 —
+    /// `appendPaneFrame` 의 제품 호출처가 `tick` 의 leaf 루프 하나이고 반환 전에 op 을 옮겨 담으므로 pane 들이 차례로
+    /// 재사용한다. 크기는 `bufferSizes` 가 부를 때만 커진다(프레임마다 할당하지 않는다).
+    editor_draw_pool: maru.chrome.components.editor_view.frame.RunTextPool = .{},
     /// 심볼 피커의 굳힌 행(§7.5). **공유 심볼 버퍼의 인덱스가 아니라 값이다** — breadcrumb 이 그
     /// 버퍼를 프레임마다 다시 채우므로 인덱스를 들면 그 수명에 매달린다.
     symbol_picker_rows: symbol_picker.List = .{},
@@ -23416,6 +23420,7 @@ pub const AppSession = struct {
         editor_ops.hover_client.deinit(self);
         editor_ops.signature_client.deinit(self);
         self.editor_workspace_edit.deinit(self.allocator); // 마지막 WorkspaceEdit 기록(§8.2f)
+        self.editor_draw_pool.deinit(self.allocator); // 편집기 run·글자 저장소(visual-mapping §4)
         editor_ops.completion_client.deinit(self); // 완성 목록(§8.2g)
         editor_ops.code_action_client.deinit(self); // code action 목록(§8.2h)
         // 판정자에서는 detached worker 가 **세션보다 오래 살면 안 된다**. 이유·규율은

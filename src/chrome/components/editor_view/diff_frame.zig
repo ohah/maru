@@ -152,7 +152,7 @@ pub const Written = struct {
     truncated: bool,
     /// **각 열이 실제로 채운 행 수.** `visual_rows`는 둘 중 큰 값이라 어느 쪽이 몇 줄인지 모른다 —
     /// 비교 뷰 히트테스트가 좌우 행 배열을 따로 굳히려면 이 둘이 필요하다(§4.1g "비교 뷰").
-    /// 저장소는 `splitScratch`가 이미 반으로 갈라 각 열이 자기 몫만 채운다.
+    /// 저장소는 `splitScratch`가 이미 갈라 각 열이 자기 몫만 채운다.
     left_visual_rows: usize = 0,
     right_visual_rows: usize = 0,
     /// 오른쪽 열이 시작하는 x. 히트테스트(어느 열을 눌렀나)가 쓴다 — 제품은 같은 판정을
@@ -292,6 +292,17 @@ pub fn buildSide(
     background: ?draw.Rect,
     scratch: frame.Scratch,
 ) frame.Written {
+    return frame.build(sideProps(side, shared, rect, background), scratch);
+}
+
+/// 이 열이 쓰는 run·글자 몫(`frame.bufferSizes`). **`buildSide` 와 같은 `sideProps` 를 지난다** — 몫을 재는 쪽이
+/// 열 수·보이는 행을 따로 구하면 두 번째 출처가 된다.
+pub fn sideBufferSizes(side: Side, shared: Shared, rect: draw.Rect, background: ?draw.Rect) frame.BufferSizes {
+    return frame.bufferSizes(sideProps(side, shared, rect, background));
+}
+
+/// 한 열의 `frame.Props` — 그리는 쪽(`buildSide`)과 몫을 재는 쪽(`sideBufferSizes`)이 **함께** 부른다.
+pub fn sideProps(side: Side, shared: Shared, rect: draw.Rect, background: ?draw.Rect) frame.Props {
     // **가로 막대가 자리를 먹으므로 높이를 먼저 줄인다**(§4.1a) — 판정 규칙은 `frame`이 소유한다.
     // 열 수(`total_cols`)를 알아야 판정할 수 있는데 그 값이 이 계산에서 나오므로, 한 번 재고 나서
     // 막대가 서면 다시 잰다. 두 번째 계산은 폭을 안 바꾸므로(막대는 아래에만 붙는다) 열 수는 같다.
@@ -302,7 +313,7 @@ pub fn buildSide(
     const shows_h_bar = shared.force_horizontal_bar orelse
         frame.showsHorizontalBar(shared.wrap, side.content_max_cols, geometry.compute(probe.total_cols, side.total_lines orelse side.lines.len, .{}).content.width);
     const m = sideMetricsWith(body_w, rect.h, shared.cell_w_px, shared.cell_h_px, shows_h_bar);
-    return frame.build(.{
+    return .{
         .minimap = if (side.minimap) |mm| mm.input else null,
         .minimap_px = mm_px,
         .line_colors = side.line_colors,
@@ -352,19 +363,30 @@ pub fn buildSide(
         .total_cols = m.total_cols,
         .scrollbar_gutter_px = m.scrollbar_gutter_px,
         .metrics = m.metrics,
-    }, scratch);
+    };
 }
 
 const ScratchPair = struct { first: frame.Scratch, second: frame.Scratch };
 
-/// 저장소를 반으로 가른다. **두 결과가 동시에 살아 있어야 한다** — op이 text·run을 가리키므로
+/// 저장소를 좌우로 가른다. **두 결과가 동시에 살아 있어야 한다** — op이 text·run을 가리키므로
 /// 같은 버퍼를 두 번 쓰면 왼쪽 글자가 오른쪽 것으로 덮인다.
-pub fn splitScratch(s: frame.Scratch) ScratchPair {
+///
+/// **run·글자는 각 열의 몫대로, 나머지는 반반이다.** run·글자를 반반으로 나누면 한쪽이 촘촘하고 다른 쪽이 비어도
+/// 같은 양을 받아, 촘촘한 쪽이 몫을 다 쓰고 gutter가 0개를 받는다 — 비교 뷰 한 열 640개(1280의 반)에서 68행
+/// Zig 화면이 649개를 요구해 **줄 번호가 통째로 사라졌다**(2026-09-24 제보). 행 배열(`visual_rows` 등)은
+/// 반반을 지킨다 — 제품(`appendPaneFrame`)이 그린 뒤 **반 자리**에서 오른쪽 행을 다시 읽는다.
+pub fn splitScratch(s: frame.Scratch, left: frame.BufferSizes, right: frame.BufferSizes) ScratchPair {
+    const run_needs = [_]usize{ left.runs, right.runs };
+    const text_needs = [_]usize{ left.text_bytes, right.text_bytes };
+    const rl = frame.shareRange(s.runs.len, &run_needs, 0);
+    const rr = frame.shareRange(s.runs.len, &run_needs, 1);
+    const tl = frame.shareRange(s.text_bytes.len, &text_needs, 0);
+    const tr = frame.shareRange(s.text_bytes.len, &text_needs, 1);
     return .{
         .first = .{
             .ops = s.ops[0 .. s.ops.len / 2],
-            .text_bytes = s.text_bytes[0 .. s.text_bytes.len / 2],
-            .runs = s.runs[0 .. s.runs.len / 2],
+            .text_bytes = s.text_bytes[tl.start..tl.end],
+            .runs = s.runs[rl.start..rl.end],
             .content_rows = s.content_rows[0 .. s.content_rows.len / 2],
             .visual_rows = s.visual_rows[0 .. s.visual_rows.len / 2],
             .gutter_rows = s.gutter_rows[0 .. s.gutter_rows.len / 2],
@@ -374,8 +396,8 @@ pub fn splitScratch(s: frame.Scratch) ScratchPair {
         },
         .second = .{
             .ops = s.ops[s.ops.len / 2 ..],
-            .text_bytes = s.text_bytes[s.text_bytes.len / 2 ..],
-            .runs = s.runs[s.runs.len / 2 ..],
+            .text_bytes = s.text_bytes[tr.start..tr.end],
+            .runs = s.runs[rr.start..rr.end],
             .content_rows = s.content_rows[s.content_rows.len / 2 ..],
             .visual_rows = s.visual_rows[s.visual_rows.len / 2 ..],
             .gutter_rows = s.gutter_rows[s.gutter_rows.len / 2 ..],
@@ -386,10 +408,18 @@ pub fn splitScratch(s: frame.Scratch) ScratchPair {
     };
 }
 
-/// 좌우 두 열을 `scratch.ops` 앞쪽에 채운다.
-pub fn build(props: Props, scratch: frame.Scratch) Written {
+/// 좌우 두 열의 배치 — **그리는 쪽(`build`)과 몫을 재는 쪽(`bufferSizes`)이 함께** 부른다.
+const Plan = struct {
+    cols: Columns,
+    shared: Shared,
+    left: Side,
+    right: Side,
+    left_bg: draw.Rect,
+    right_bg: draw.Rect,
+};
+
+fn plan(props: Props) Plan {
     const cols = columns(props.rect, props.cell_w_px);
-    const half = splitScratch(scratch);
     const outer = props.background_rect orelse props.rect;
     const left_bg_x = outer.x;
     const right_bg_end = outer.x + @as(i32, @intCast(outer.w));
@@ -401,37 +431,61 @@ pub fn build(props: Props, scratch: frame.Scratch) Written {
     const wants_h_bar =
         frame.showsHorizontalBar(props.wrap, props.left.content_max_cols, geometry.compute(sideMetrics(cols.left.w, cols.left.h, props.cell_w_px, props.cell_h_px).total_cols, props.left.total_lines orelse props.left.lines.len, .{}).content.width) or
         frame.showsHorizontalBar(props.wrap, props.right.content_max_cols, geometry.compute(sideMetrics(cols.right.w, cols.right.h, props.cell_w_px, props.cell_h_px).total_cols, props.right.total_lines orelse props.right.lines.len, .{}).content.width);
-    const shared: Shared = .{
-        .first_line = props.first_line,
-        .first_piece = props.first_piece,
-        .wrap = props.wrap,
-        .caret_visible = props.caret_visible,
-        .caret_shape = props.caret_shape,
-        .tab_width = props.tab_width,
-        .cell_w_px = props.cell_w_px,
-        .cell_h_px = props.cell_h_px,
-        .font_px = props.font_px,
-        .force_horizontal_bar = wants_h_bar,
-    };
     // **변경 위치 마커는 좌우가 다르다**(§4.1a 「변경 위치 마커」): 왼쪽 막대에는 삭제 띠, 오른쪽 막대에는 추가 띠 —
     // VS Code diff overview ruler 의 두 반쪽을 두 막대에 나눈 것이다.
     var left_side = props.left;
     left_side.change_marker_kind = .removed;
     var right_side = props.right;
     right_side.change_marker_kind = .added;
-    const lw = buildSide(left_side, shared, cols.left, .{
-        .x = left_bg_x,
-        .y = outer.y,
-        .w = @intCast(cols.right.x - left_bg_x),
-        .h = outer.h,
-    }, half.first);
+    return .{
+        .cols = cols,
+        .shared = .{
+            .first_line = props.first_line,
+            .first_piece = props.first_piece,
+            .wrap = props.wrap,
+            .caret_visible = props.caret_visible,
+            .caret_shape = props.caret_shape,
+            .tab_width = props.tab_width,
+            .cell_w_px = props.cell_w_px,
+            .cell_h_px = props.cell_h_px,
+            .font_px = props.font_px,
+            .force_horizontal_bar = wants_h_bar,
+        },
+        .left = left_side,
+        .right = right_side,
+        .left_bg = .{
+            .x = left_bg_x,
+            .y = outer.y,
+            .w = @intCast(cols.right.x - left_bg_x),
+            .h = outer.h,
+        },
+        .right_bg = .{
+            .x = cols.right.x,
+            .y = outer.y,
+            .w = @intCast(@max(right_bg_end - cols.right.x, 0)),
+            .h = outer.h,
+        },
+    };
+}
 
-    const rw = buildSide(right_side, shared, cols.right, .{
-        .x = cols.right.x,
-        .y = outer.y,
-        .w = @intCast(@max(right_bg_end - cols.right.x, 0)),
-        .h = outer.h,
-    }, half.second);
+/// 좌우 두 열이 쓰는 run·글자 몫의 합(chrome-strategy §5.4). 호출자는 이만큼 잡고, `build` 는 각 열에 **자기
+/// 몫**을 준다(`splitScratch`).
+pub fn bufferSizes(props: Props) frame.BufferSizes {
+    const p = plan(props);
+    return sideBufferSizes(p.left, p.shared, p.cols.left, p.left_bg).plus(sideBufferSizes(p.right, p.shared, p.cols.right, p.right_bg));
+}
+
+/// 좌우 두 열을 `scratch.ops` 앞쪽에 채운다.
+pub fn build(props: Props, scratch: frame.Scratch) Written {
+    const p = plan(props);
+    const cols = p.cols;
+    const half = splitScratch(
+        scratch,
+        sideBufferSizes(p.left, p.shared, cols.left, p.left_bg),
+        sideBufferSizes(p.right, p.shared, cols.right, p.right_bg),
+    );
+    const lw = buildSide(p.left, p.shared, cols.left, p.left_bg, half.first);
+    const rw = buildSide(p.right, p.shared, cols.right, p.right_bg, half.second);
 
     // 두 열의 op을 앞쪽으로 모은다 — 호출자는 `ops[0..n]` 하나만 안다. 목적지가 원본보다 앞이므로
     // 전진 복사가 안전하다(왼쪽이 저장소 절반을 다 쓰지 않는 한 겹치지도 않는다).
@@ -616,7 +670,7 @@ test "저장소가 겹치지 않는다 — 겹치면 한쪽 글자가 반대쪽 
         .count_scratch = &count_scratch,
         .caret_cols = &caret_cols,
     };
-    const pair = splitScratch(s);
+    const pair = splitScratch(s, .{}, .{});
     try testing.expect(@intFromPtr(pair.first.text_bytes.ptr) + pair.first.text_bytes.len <= @intFromPtr(pair.second.text_bytes.ptr));
     try testing.expect(@intFromPtr(pair.first.runs.ptr) + pair.first.runs.len * @sizeOf(draw.Run) <= @intFromPtr(pair.second.runs.ptr));
     try testing.expectEqual(ops.len / 2, pair.first.ops.len);
@@ -783,4 +837,95 @@ test "셀 크기가 0이어도 죽지 않는다 — 폰트 측정 전 프레임�
         .caret_cols = &caret_cols,
     });
     try testing.expect(out.ops <= ops.len);
+}
+
+/// 판정자용 — 숫자로 시작하는 글자 op 수(본문은 `a` 뿐이라 번호만 센다).
+fn digitOps(ops: []const draw.Op) usize {
+    var n: usize = 0;
+    for (ops) |op| if (op == .text and op.text.runs.len > 0) {
+        const t = op.text.runs[0].text;
+        if (t.len > 0 and t[0] >= '0' and t[0] <= '9') n += 1;
+    };
+    return n;
+}
+
+/// 판정자용 저장소 — run·글자를 따로 준다.
+const RbBuffers = struct {
+    ops: [8192]draw.Op = undefined,
+    content_rows: [512]@import("content.zig").Row = undefined,
+    visual_rows: [512]@import("../../ui/visual_map.zig").VisualRow = undefined,
+    gutter_rows: [512]gutter.Row = undefined,
+    row_counts: [4096]u32 = undefined,
+    count_scratch: [@import("content.zig").count_scratch_bytes]u8 = undefined,
+    caret_cols: [256]u32 = undefined,
+
+    fn scratch(self: *RbBuffers, runs: []draw.Run, text: []u8) frame.Scratch {
+        return .{ .ops = &self.ops, .text_bytes = text, .runs = runs, .content_rows = &self.content_rows, .visual_rows = &self.visual_rows, .gutter_rows = &self.gutter_rows, .row_counts = &self.row_counts, .count_scratch = &self.count_scratch, .caret_cols = &self.caret_cols };
+    }
+};
+
+test "RB3 제보 재현 — 비교 뷰 68행·촘촘한 색에 옛 제품 저장소(run 1280·글자 16384)를 줘도 좌우 번호가 다 선다; bufferSizes 만큼이면 절단이 없다" {
+    // 2026-09-24 제보: `splitScratch` 가 run 을 반반(640)으로 나눠, 68행 Zig 화면이 한 열에 649개를 요구하자 본문이
+    // 다 쓰고 gutter 가 0개를 받아 **첫 줄부터 번호가 전부 사라졌다**. 여기서는 열마다 번갈아 색을 줘 한 행이
+    // 본문 열 수만큼 run 을 쓰게 한다.
+    //
+    // **이 판정이 지키는 것은 `frame.build` 의 몫 예약이다**(본문이 gutter 몫을 못 먹는다) — 그 예약을 지우면 옛
+    // 저장소 칸에서 번호가 사라져 빨개진다. `splitScratch` 를 반반으로 되돌리는 변이는 **여기서 살아남는다(등가)**:
+    // 몫이 기하로 정해져 좌우 기하가 같으면 몫대로 나눠도 반반과 같다. 그 분할이 갈리는 것은 pane 크기가 다른
+    // 병합 화면이고, 그쪽은 `merge_frame` 의 RB4 가 잰다.
+    const a = testing.allocator;
+    var line_buf: [200]u8 = undefined;
+    @memset(&line_buf, 'a');
+    var lines: [300][]const u8 = undefined;
+    for (&lines) |*l| l.* = &line_buf;
+    var spans: [200]frame.content.ColorSpan = undefined;
+    var ns: usize = 0;
+    var c: u32 = 0;
+    while (c < 200) : (c += 2) {
+        spans[ns] = .{ .start_col = c, .end_col = c + 1, .role = .syntax_keyword };
+        ns += 1;
+    }
+    var colors: [300][]const frame.content.ColorSpan = undefined;
+    for (&colors) |*cl| cl.* = spans[0..ns];
+    // 68행 · 한 열 본문 약 58칸(제보 화면과 같은 크기).
+    const props: Props = .{
+        .left = .{ .lines = &lines, .line_colors = &colors },
+        .right = .{ .lines = &lines, .line_colors = &colors },
+        // 랩을 끈다 — 한 줄이 한 행이라 68행 모두에 번호가 선다(켜면 긴 줄이 여러 행으로 접혀 번호 행이 준다).
+        .wrap = false,
+        .caret_visible = false,
+        .caret_shape = .bar,
+        .tab_width = frame.default_tab_width,
+        .rect = .{ .x = 0, .y = 0, .w = 1100, .h = 68 * 16 },
+        .cell_w_px = 8,
+        .cell_h_px = 16,
+        .font_px = 13,
+    };
+    var bufs: RbBuffers = .{};
+
+    const wide_runs = try a.alloc(draw.Run, 60000);
+    defer a.free(wide_runs);
+    const wide_text = try a.alloc(u8, 600000);
+    defer a.free(wide_text);
+    const wide = build(props, bufs.scratch(wide_runs, wide_text));
+    const want = digitOps(bufs.ops[0..wide.ops]);
+    try testing.expect(want >= 2 * 60); // 좌우 각자 번호가 선다
+
+    // 옛 제품 저장소 크기 — 몫보다 작으므로 본문은 잘리지만 번호는 다 선다.
+    var old_runs: [1280]draw.Run = undefined;
+    var old_text: [16384]u8 = undefined;
+    const old = build(props, bufs.scratch(&old_runs, &old_text));
+    try testing.expectEqual(want, digitOps(bufs.ops[0..old.ops]));
+    try testing.expect(old.truncated); // 경쟁이 실제로 났다 — 안 났다면 이 판정은 아무것도 재지 않는다
+
+    // 몫만큼 — 절단이 없다.
+    const need = bufferSizes(props);
+    try testing.expect(need.runs > 1280); // 옛 상수로는 모자라는 화면이다
+    const exact_runs = try a.alloc(draw.Run, need.runs);
+    defer a.free(exact_runs);
+    const exact_text = try a.alloc(u8, need.text_bytes);
+    defer a.free(exact_text);
+    const exact = build(props, bufs.scratch(exact_runs, exact_text));
+    try testing.expect(!exact.truncated);
+    try testing.expectEqual(want, digitOps(bufs.ops[0..exact.ops]));
 }

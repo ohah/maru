@@ -4451,3 +4451,56 @@ test "DHL2 색의 축은 **정렬된 화면 줄**이다 — 빈 줄을 끼운 �
     try testing.expect(spacer_seen); // 이 입력은 spacer 가 있어야 한다(없으면 축을 못 잰 것이다)
     try testing.expect(content_colored);
 }
+
+test "DRB1 제품 경로 — 촘촘한 zig 비교 뷰 68행에서 좌우 줄 번호가 행마다 선다 (visual-mapping §4 「몫은 층마다」, 2026-09-24 제보)" {
+    // 제보: 비교 뷰에서 스크롤하면 좌우 줄 번호가 **통째로** 사라졌다 — run 저장소 `[1280]` 을 좌우가 반씩(640)
+    // 나눠, 구문 색이 한 행에 토큰 수만큼 run 을 쓰는 68행 화면에서 본문이 다 쓰고 gutter 가 0개를 받았다.
+    // 컴포넌트 판정자(`diff_frame` RB3)는 저장소를 직접 넣는다 — **제품 배선**(세션 저장소 → `bufferSizes` →
+    // 몫대로 분할)이 끊겨도 초록이다. 이 판정자는 `appendPaneFrame` 을 지난다.
+    //
+    // 본문에는 **숫자를 안 넣는다** — 그려진 셀의 숫자가 곧 줄 번호다. 식별자와 문자열이 번갈아 서서 한 행이
+    // run 을 촘촘히 쓴다(색이 실제로 붙었는지는 파싱이 끝났는지로 확인한다 — 무색이면 이 판정은 아무것도 안 잰다).
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try Fixture.init(allocator);
+    defer fx.deinit(allocator);
+    const line = "    x(a, \"s\", b, \"t\", c, \"u\", d, \"v\", e, \"w\", f, \"y\", g, \"z\", h, \"q\");\n";
+    const original = line ** 150;
+    const modified = line ** 149 ++ "    done();\n";
+    var entry = testEntry(original, modified);
+    entry.path = @constCast("/tmp/t.zig");
+    // 68행 이상 서는 높이 — 제보 화면과 같은 촘촘함.
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 1100, .h = 1250 };
+    try diffCaretFixture(&fx, &entry, leaf);
+    // 파싱은 프레임마다 예산만큼 이어 판다 — 끝날 때까지 그린다.
+    var frames: usize = 0;
+    while (frames < 200) : (frames += 1) {
+        const st = fx.term.rt.editor_diff.?;
+        if (st.left_syntax.provider != null and !st.left_syntax.pending and st.right_syntax.provider != null and !st.right_syntax.pending) break;
+        try drawOnce(&fx, leaf);
+    }
+    const st = fx.term.rt.editor_diff.?;
+    try testing.expect(st.left_syntax.provider != null and !st.left_syntax.pending); // 색이 실제로 붙는다
+
+    var d = editor_ops.appendPaneFrame(fx.session, leaf, fx.term) orelse return error.NoDraw;
+    defer d.dl.deinit(allocator);
+    const cols: u16 = d.dl.size.cols;
+    const rows: u16 = d.dl.size.rows;
+    var left_rows: usize = 0;
+    var right_rows: usize = 0;
+    var r: u16 = 0;
+    while (r < rows) : (r += 1) {
+        var left_digit = false;
+        var right_digit = false;
+        for (d.dl.cells) |cell| {
+            if (cell.row != r or cell.codepoint < '0' or cell.codepoint > '9') continue;
+            if (cell.col < cols / 2) left_digit = true else right_digit = true;
+        }
+        if (left_digit) left_rows += 1;
+        if (right_digit) right_rows += 1;
+    }
+    try testing.expect(rows >= 68);
+    // 번호가 **행마다** 선다(마지막 몇 행은 막대·여백일 수 있어 여유를 둔다).
+    try testing.expect(left_rows + 4 >= rows);
+    try testing.expect(right_rows + 4 >= rows);
+}

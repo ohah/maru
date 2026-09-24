@@ -14,6 +14,7 @@ const agent_ops = @import("app_session/agent.zig");
 const notification_ops = @import("app_session/notification.zig");
 pub const input_ops = @import("app_session/input.zig");
 pub const web_ops = @import("app_session/web.zig");
+pub const web_osr = @import("web_osr.zig");
 pub const workspace_ops = @import("app_session/workspace.zig");
 pub const session_host_window_ops = if (builtin.os.tag == .macos)
     @import("app_session/session_host_window.zig")
@@ -288,7 +289,7 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 셸 종료 경로가 앱을 끝낼지 Dock 에 남을지 이 값으로 가른다. 끝에 export 추가 — 구조체 offset 불변.
 // 194: config_file_changed — platform 파일 감시(FSEvents)가 config 파일 변경을 알린다. 다시 읽을지(behavior.auto-reload·
 // 내용 digest 가 이 창이 마지막으로 읽거나 쓴 것과 다른가)는 Zig 가 판정한다. 끝에 export 추가 — 구조체 offset 불변.
-pub const abi_version: u32 = 198;
+pub const abi_version: u32 = 199;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -21005,6 +21006,7 @@ pub const AppSession = struct {
             project_search_ops.pump(self);
         }
         workspace_ops.advancePendingWindowClose(self);
+        web_ops.tickWebOsr(self); // W3b: Chromium sidecar 파이프·주소창 상태·안내(개발용 환경변수가 없으면 즉시 돌아온다)
         // 갤러리 스캔 워커의 완료본을 수확한다(계약 §4.1.1). **여기가 유일한 수확 지점이라**,
         // 안 부르면 워커가 1.68 GB 를 다 훑고도 화면이 영영 안 바뀐다. 결과가 없으면 즉시 돌아온다.
         agent_activity_ops.poll(self);

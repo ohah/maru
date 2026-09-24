@@ -371,3 +371,17 @@ fn sleepMs(ms: u64) void {
     const nap: std.c.timespec = .{ .sec = 0, .nsec = @intCast(ms * std.time.ns_per_ms) };
     _ = std.c.nanosleep(&nap, null);
 }
+
+/// 죽인다(SIGTERM → 잠시 뒤 SIGKILL 은 호출자가 tick 으로) 하고 거둔다.
+pub fn kill(p: *Process, sig: std.c.SIG) void {
+    if (p.reaped) return;
+    _ = std.c.kill(p.pid, sig);
+}
+
+pub fn reapBlocking(p: *Process) void {
+    if (p.reaped) return;
+    var status: c_int = 0;
+    // 신호로 끊기면(EINTR) 다시 기다린다 — 거두지 못했는데 거둔 것으로 적지 않게.
+    while (std.c.waitpid(p.pid, &status, 0) == -1 and std.c._errno().* == @intFromEnum(std.c.E.INTR)) {}
+    p.reaped = true;
+}

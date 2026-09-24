@@ -173,7 +173,7 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
 }
 
 test "ABI v185 notification release end-all and cold route values match the C header" {
-    try std.testing.expectEqual(@as(u32, 189), abi_version);
+    try std.testing.expectEqual(@as(u32, 190), abi_version);
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @intFromEnum(AppInstanceLeaseResult.acquired));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_HELD), @intFromEnum(AppInstanceLeaseResult.held));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_UNSAFE), @intFromEnum(AppInstanceLeaseResult.unsafe));
@@ -4534,6 +4534,13 @@ pub export fn maru_macos_mermaid_shutdown() void {
     session_mod.mermaidCoordinator().shutdown();
 }
 
+/// v190(W3b): 앱 종료 — Chromium sidecar(웹 OSR)가 떠 있으면 shutdown 을 보내고 잠시(3 초) 기다린 뒤 남았으면 죽인다.
+/// 개발용 환경변수로 켜지 않았으면 무동작. sidecar 는 부모가 사라지면 스스로도 끝나지만(kqueue), 정상 종료는 열린
+/// 브라우저를 닫고 프로필을 깨끗이 쓴다. **메인 스레드 전용.**
+pub export fn maru_macos_web_osr_shutdown() void {
+    session_mod.web_osr.shutdownForExit();
+}
+
 pub export fn maru_macos_mermaid_snapshot(out_snapshot: ?*MermaidCoordinatorSnapshotAbi) void {
     const out = out_snapshot orelse return;
     const snap = session_mod.mermaidCoordinator().snapshot();
@@ -5949,6 +5956,15 @@ fn pushBrowserOp(
     async_id: u64,
     op: control_browser.BrowserOp,
 ) void {
+    // W3b: Chromium(OSR) 탭의 browser.* 는 W9(CDP) 전까지 지원하지 않는다 — WKWebView 가 없어 Swift 에 보내면 이유 없이
+    // 실패한다. 무엇이 안 되는지 알 수 있게 여기서 답한다(docs/plans/web-osr-backend.md 「control-plane 호환은 별도 단계」).
+    if (session_mod.web_ops.isOsrSurface(op.surface_id)) {
+        server.cross_gpa.free(op.arg);
+        const pending = server.inFlightPending(async_id) orelse return;
+        const resp = control_browser.serializeBrowserResponseStatus(server.cross_gpa, pending.request_bytes, .failed, "browser.* is not supported by the Chromium engine yet") catch null;
+        _ = server.completeInFlight(async_id, resp);
+        return;
+    }
     const backend_arg = op.arg;
     if (browserMethodHasTrackedLifecycle(op.method)) {
         const provenance: ExecutionProvenance = if (op.pane_grant) |g|

@@ -13,6 +13,7 @@ const agent_ops = @import("app_session/agent.zig");
 const notification_ops = @import("app_session/notification.zig");
 pub const input_ops = @import("app_session/input.zig");
 pub const web_ops = @import("app_session/web.zig");
+pub const web_osr = @import("web_osr.zig");
 pub const workspace_ops = @import("app_session/workspace.zig");
 pub const session_host_window_ops = if (builtin.os.tag == .macos)
     @import("app_session/session_host_window.zig")
@@ -281,7 +282,7 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 185: CR6d-v2b0b extends the read-only input probe with terminal byte/screen generation counters
 // and adds one synchronous transcript-to-canonical-evidence leaf. Raw inventories are borrowed
 // only for the call; Zig owns reduction and absent-target publication.
-pub const abi_version: u32 = 189;
+pub const abi_version: u32 = 190;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -20128,6 +20129,7 @@ pub const AppSession = struct {
         // 마크는 아래 각 단계 경계에서 세팅한다(ft_on 아니면 clock read 자체를 안 함 = release 비용 0).
         self.settleDeferredPointerInput();
         workspace_ops.advancePendingWindowClose(self);
+        web_ops.tickWebOsr(self); // W3b: Chromium sidecar 파이프·주소창 상태·안내(개발용 환경변수가 없으면 즉시 돌아온다)
         // 갤러리 스캔 워커의 완료본을 수확한다(계약 §4.1.1). **여기가 유일한 수확 지점이라**,
         // 안 부르면 워커가 1.68 GB 를 다 훑고도 화면이 영영 안 바뀐다. 결과가 없으면 즉시 돌아온다.
         agent_activity_ops.poll(self);

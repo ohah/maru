@@ -9,7 +9,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 189u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 190u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -2049,6 +2049,9 @@ uint32_t maru_macos_mermaid_expire_deadline(uint64_t now_ms);
 uint32_t maru_macos_mermaid_complete_termination(uint64_t helper_instance);
 /* physical adapter가 quiesce된 app 종료에서 queue/latch/lease를 최종 회수한다. */
 void maru_macos_mermaid_shutdown(void);
+/* v190(W3b): 앱 종료 때 Chromium sidecar(웹 OSR)를 내린다 — shutdown 뒤 최대 3 초 기다리고 남았으면 죽인다.
+   개발용 환경변수(MARU_WEB_OSR_DIR)로 켜지 않았으면 무동작. 메인 스레드에서만. */
+void maru_macos_web_osr_shutdown(void);
 void maru_macos_mermaid_snapshot(MaruMermaidCoordinatorSnapshot *out_snapshot);
 /* allocation-free frame-tick gate와 exact renderer lifetime revoke. */
 uint32_t maru_macos_mermaid_has_work(void);

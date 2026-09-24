@@ -235,7 +235,7 @@ src/
                         `stdio.zig`(프로토콜 fd 분리)·`inbox.zig`(읽기 스레드)·`dispatch.zig`(명령 처리 — CEF 없이 기본 test 에서 시험)·
                         `registry.zig`(maru id ↔ CEF browser 목록 — CEF 없이 시험)·`browsers.zig`(브라우저 명령·종료 순서)·`client.zig`(CEF 콜백·팝업 취소·JS 대화상자 억제)·
                         `title_gate.zig`(제목 알림 중복 제거·간격 조절 — CEF 없이 시험)·`preferences.zig`(제품 설정 — 인쇄 끔)·`watchdog.zig`(종료 기한)·
-                        `profile.zig`(0700·소유자·ACL·링크 거절·백업 제외)·픽셀 링(W2): `ring_producer.zig`(sidecar — 복사·맞바꾸기·세대)·`ring_receiver.zig`(maru —
+                        `profile.zig`(0700·소유자·ACL·링크 거절·백업 제외)·앱 쪽(W3b): `../web_osr.zig`(sidecar 띄우기·재시작 예산·브라우저 기록·알림 적용 — lsp_process 선례)·`session/web_osr_plan.zig`(창 배치 → sidecar 명령, 순수)·픽셀 링(W2): `ring_producer.zig`(sidecar — 복사·맞바꾸기·세대)·`ring_receiver.zig`(maru —
                         pid·토큰 검증, CEF 없이 시험)·`ring_message.zig`·`mach.zig`·`iosurface.zig`·`ring.zig`(판정자·W3 입구)·`app`·`settings`·`layout`·`object`·`cef`. CEF 헤더는 저장소에 없고 `-Dcef-sdk` 가 있을 때만 빌드한다(build/web_sidecar.zig).
     session_host.zig     P3 barrel(protocol·framing·screen_stream·registry·server·socket_server re-export + test 집약, test module은 socket용 link_libc). 구현은 session_host/에 목적별로.
     session_host/        P3 진행: entrypoint.zig(hidden `__session-host` CLI command의 launcher/main 공용 단일 출처),

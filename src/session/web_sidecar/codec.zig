@@ -334,3 +334,57 @@ test "every single-byte corruption of a valid frame decodes or errors without cr
         }
     }
 }
+
+test "url and text exactly at the cap decode, one byte of invalid UTF-8 or a control character does not" {
+    var frame: [max_frame_bytes]u8 = undefined;
+    var body: [max_frame_bytes]u8 = undefined;
+    std.mem.writeInt(u64, body[0..8], 1, .big);
+
+    std.mem.writeInt(u32, body[8..12], max_url_bytes, .big);
+    @memset(body[12..][0..max_url_bytes], 'a');
+    try std.testing.expectEqual(@as(usize, max_url_bytes), (try decodeExact(handFrame(&frame, .navigate, body[0 .. 12 + max_url_bytes]))).navigate.url.len);
+
+    std.mem.writeInt(u32, body[8..12], max_text_bytes, .big);
+    @memset(body[12..][0..max_text_bytes], 'a');
+    try std.testing.expectEqual(@as(usize, max_text_bytes), (try decodeExact(handFrame(&frame, .title_changed, body[0 .. 12 + max_text_bytes]))).title_changed.text.len);
+
+    std.mem.writeInt(u32, body[8..12], 2, .big);
+    body[12] = 'a';
+    body[13] = 0xFF;
+    try std.testing.expectError(error.InvalidUtf8, decodeExact(handFrame(&frame, .navigate, body[0..14])));
+    body[13] = 0x1b;
+    try std.testing.expectError(error.ControlCharacter, decodeExact(handFrame(&frame, .navigate, body[0..14])));
+    try std.testing.expectError(error.ControlCharacter, decodeExact(handFrame(&frame, .title_changed, body[0..14])));
+    body[13] = 0x7f;
+    try std.testing.expectError(error.ControlCharacter, decodeExact(handFrame(&frame, .title_changed, body[0..14])));
+}
+
+test "encode refuses invalid UTF-8 and control characters in url and text" {
+    var buf: [256]u8 = undefined;
+    try std.testing.expectError(error.InvalidUtf8, encode(.{ .navigate = .{ .browser = 1, .url = "a\xFF" } }, &buf));
+    try std.testing.expectError(error.InvalidUtf8, encode(.{ .title_changed = .{ .browser = 1, .text = "a\xFF" } }, &buf));
+    try std.testing.expectError(error.ControlCharacter, encode(.{ .navigate = .{ .browser = 1, .url = "http://x/\n" } }, &buf));
+    try std.testing.expectError(error.ControlCharacter, encode(.{ .title_changed = .{ .browser = 1, .text = "\x1b]0;pwn\x07" } }, &buf));
+}
+
+test "view size edges: width at the cap and scale exactly 0.5 and 8.0 are accepted, just outside is not" {
+    var buf: [128]u8 = undefined;
+    for ([_]ViewSize{
+        .{ .width = max_view_extent, .height = 1, .scale = 1 },
+        .{ .width = 1, .height = 1, .scale = 0.5 },
+        .{ .width = 1, .height = 1, .scale = 8.0 },
+    }) |size| {
+        const len = try encode(.{ .resize = .{ .browser = 1, .size = size } }, &buf);
+        try std.testing.expectEqual(size, (try decodeExact(buf[0..len])).resize.size);
+    }
+    for ([_]ViewSize{
+        .{ .width = max_view_extent + 1, .height = 1, .scale = 1 },
+        .{ .width = 1, .height = 1, .scale = 0.49 },
+        .{ .width = 1, .height = 1, .scale = 8.01 },
+    }) |size| try std.testing.expectError(error.InvalidViewSize, encode(.{ .resize = .{ .browser = 1, .size = size } }, &buf));
+}
+
+test "a frame shorter than the length prefix is incomplete, not an out-of-bounds read" {
+    try std.testing.expectError(error.IncompleteFrame, decodeExact(&[_]u8{ 0, 0, 0 }));
+    try std.testing.expectError(error.IncompleteFrame, decodeExact(&[_]u8{}));
+}

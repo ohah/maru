@@ -1,5 +1,6 @@
 //! 웹 OSR sidecar 제어 채널의 닫힌 필드 규칙(W1a) — browser id 0 금지, view 크기·scale(NaN 거절), bool 0/1,
-//! URL·글 상한과 UTF-8. encode 와 decode 가 같은 함수를 지나야 한쪽만 느슨해지지 않는다.
+//! URL·글 상한과 UTF-8, 제어 문자 거절. encode 와 decode 가 **같은 검사 함수**(`validSize`·`checkUrl`·`checkText`)를
+//! 지나야 한쪽만 느슨해지지 않는다.
 
 const std = @import("std");
 const wire = @import("wire.zig");
@@ -14,7 +15,8 @@ const BrowserId = message.BrowserId;
 const ViewSize = message.ViewSize;
 const Hello = message.Hello;
 
-/// view 크기 상한(DIP). 5K 화면 전체의 두 배를 넘는 view 는 없다.
+/// view 크기 상한(DIP). 가장 큰 Mac 화면(6K — 3008 DIP)의 다섯 배 남짓이라 view 로는 넉넉하다. 물리 픽셀(DIP × scale)
+/// 상한은 픽셀 링이 따로 본다(W2 — IOSurface·Metal 텍스처 한도).
 pub const max_view_extent: u32 = 16 * 1024;
 pub const min_scale: f32 = 0.5;
 pub const max_scale: f32 = 8.0;
@@ -66,26 +68,44 @@ pub fn readHello(cursor: *ReadCursor) Error!Hello {
     return .{ .instance = try cursor.readU64(), .nonce = try cursor.readU64() };
 }
 
-pub fn writeUrl(cursor: *Cursor, url: []const u8) Error!void {
+/// C0 제어 문자와 DEL. 제목·설명은 웹 페이지가 통제하는 글이라 ESC·OSC·NUL 이 maru 의 UI·로그·터미널 제목으로
+/// 흘러가면 주입이 된다(적대 검증) — sidecar 는 `text.replaceControl` 로 치환해 보내고, 받는 쪽은 남아 있으면 거절한다.
+/// URL 은 제어 문자를 퍼센트 인코딩해야 하므로 날것이 있으면 거절한다.
+fn hasControl(bytes: []const u8) bool {
+    for (bytes) |byte| if (byte < 0x20 or byte == 0x7f) return true;
+    return false;
+}
+
+pub fn checkUrl(url: []const u8) Error!void {
     if (url.len == 0) return error.EmptyUrl;
     if (url.len > max_url_bytes) return error.UrlTooLarge;
     if (!std.unicode.utf8ValidateSlice(url)) return error.InvalidUtf8;
+    if (hasControl(url)) return error.ControlCharacter;
+}
+
+pub fn checkText(text: []const u8) Error!void {
+    if (text.len > max_text_bytes) return error.TextTooLarge;
+    if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidUtf8;
+    if (hasControl(text)) return error.ControlCharacter;
+}
+
+pub fn writeUrl(cursor: *Cursor, url: []const u8) Error!void {
+    try checkUrl(url);
     try cursor.writeU32(@intCast(url.len));
     try cursor.writeBytes(url);
 }
 
 pub fn readUrl(cursor: *ReadCursor) Error![]const u8 {
     const len = try cursor.readU32();
-    if (len == 0) return error.EmptyUrl;
+    // 길이만으로 거절할 수 있으면 본문을 읽기 전에 거절한다(같은 상한을 checkUrl 이 다시 본다).
     if (len > max_url_bytes) return error.UrlTooLarge;
     const url = try cursor.readBytes(len);
-    if (!std.unicode.utf8ValidateSlice(url)) return error.InvalidUtf8;
+    try checkUrl(url);
     return url;
 }
 
 pub fn writeText(cursor: *Cursor, text: []const u8) Error!void {
-    if (text.len > max_text_bytes) return error.TextTooLarge;
-    if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidUtf8;
+    try checkText(text);
     try cursor.writeU32(@intCast(text.len));
     try cursor.writeBytes(text);
 }
@@ -94,6 +114,6 @@ pub fn readText(cursor: *ReadCursor) Error![]const u8 {
     const len = try cursor.readU32();
     if (len > max_text_bytes) return error.TextTooLarge;
     const text = try cursor.readBytes(len);
-    if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidUtf8;
+    try checkText(text);
     return text;
 }

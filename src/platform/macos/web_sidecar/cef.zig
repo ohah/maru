@@ -8,6 +8,15 @@ pub const c = @cImport({
     @cInclude("include/capi/cef_app_capi.h");
     @cInclude("include/capi/cef_command_line_capi.h");
     @cInclude("include/capi/cef_task_capi.h");
+    @cInclude("include/capi/cef_browser_capi.h");
+    @cInclude("include/capi/cef_client_capi.h");
+    @cInclude("include/capi/cef_life_span_handler_capi.h");
+    @cInclude("include/capi/cef_render_handler_capi.h");
+    @cInclude("include/capi/cef_display_handler_capi.h");
+    @cInclude("include/capi/cef_load_handler_capi.h");
+    @cInclude("include/capi/cef_request_handler_capi.h");
+    @cInclude("include/capi/cef_browser_process_handler_capi.h");
+    @cInclude("include/capi/cef_frame_capi.h");
 });
 
 pub const api_version: c_int = 15400;

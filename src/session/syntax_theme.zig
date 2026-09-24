@@ -672,3 +672,35 @@ test "LHC2 안내선 18 % · 활성 44 % — VS Code 기본 테마 값 가까이
     try std.testing.expectEqual(color.Rgb{ .r = 0xd1, .g = 0xd1, .b = 0xd1 }, indentGuideFromTheme(t));
     try std.testing.expectEqual(color.Rgb{ .r = 0x8f, .g = 0x8f, .b = 0x8f }, indentGuideActiveFromTheme(t));
 }
+
+test "BPT1 괄호 쌍 색 — 다크는 ANSI 11·13·12, 라이트는 4·2·3(VS Code 기본 두 벌의 순서), 무효는 ANSI 9 를 바탕 쪽으로 20 % (visual-mapping §5.1d)" {
+    var t: appearance.ResolvedTheme = .{
+        .background = .{ .r = 0x1e, .g = 0x1e, .b = 0x1e },
+        .foreground = .{ .r = 0xd4, .g = 0xd4, .b = 0xd4 },
+        .cursor = .{ .r = 0xff, .g = 0xff, .b = 0xff },
+        .selection = .{ .r = 0x33, .g = 0x44, .b = 0x55 },
+        .search_match = .{ .r = 0x55, .g = 0x4a, .b = 0x1a },
+        .search_match_current = .{ .r = 0x99, .g = 0x77, .b = 0x22 },
+        .sidebar_background = .{ .r = 0x28, .g = 0x28, .b = 0x28 },
+        .sidebar_active = .{ .r = 0x40, .g = 0x40, .b = 0x40 },
+        .sidebar_foreground = .{ .r = 0xe8, .g = 0xe8, .b = 0xe8 },
+        .accent = .{ .r = 0xdd, .g = 0xa1, .b = 0x5e },
+        .min_contrast = 0,
+    };
+    // 팔레트 자리마다 다른 색을 넣어 어느 자리를 읽었는지 가른다(대비 바닥에 안 걸리게 밝게 — 다크 바탕).
+    for (0..16) |i| t.palette[i] = .{ .r = @intCast(0x80 + i * 7), .g = @intCast(0xF0 - i * 5), .b = @intCast(0x90 + i * 3) };
+    const dark = bracketPairsFromTheme(t);
+    try std.testing.expectEqual(t.palette[11].?, dark.levels[0]);
+    try std.testing.expectEqual(t.palette[13].?, dark.levels[1]);
+    try std.testing.expectEqual(t.palette[12].?, dark.levels[2]);
+    const r9 = t.palette[9].?;
+    try std.testing.expectEqual(color.Rgb{ .r = toward(r9.r, 0x1e, 20), .g = toward(r9.g, 0x1e, 20), .b = toward(r9.b, 0x1e, 20) }, dark.unexpected);
+    // 라이트 — 어두운 팔레트(대비 바닥에 안 걸리게)
+    t.background = .{ .r = 0xff, .g = 0xff, .b = 0xff };
+    t.foreground = .{ .r = 0x00, .g = 0x00, .b = 0x00 };
+    for (0..16) |i| t.palette[i] = .{ .r = @intCast(0x10 + i * 3), .g = @intCast(0x40 - i), .b = @intCast(0x20 + i * 2) };
+    const light = bracketPairsFromTheme(t);
+    try std.testing.expectEqual(t.palette[4].?, light.levels[0]);
+    try std.testing.expectEqual(t.palette[2].?, light.levels[1]);
+    try std.testing.expectEqual(t.palette[3].?, light.levels[2]);
+}

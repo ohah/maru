@@ -2937,7 +2937,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const cr6a1_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr6a1_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_recovered_sessions_projection_boundary.zig"),
                 .target = target,
                 .optimize = cr6a1_optimize,
             }),
@@ -3016,7 +3016,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const cr6a2_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr6a2_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_recovered_sessions_launch_collector_boundary.zig"),
                 .target = target,
                 .optimize = cr6a2_optimize,
             }),
@@ -3107,7 +3107,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const cr6b_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr6b_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_recovered_session_adopt_authority_boundary.zig"),
                 .target = target,
                 .optimize = cr6b_optimize,
             }),

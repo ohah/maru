@@ -34,6 +34,7 @@ const nav_button_w = app_session_mod.nav_button_w;
 const addr_nav_url_cap = app_session_mod.addr_nav_url_cap;
 const config_mod = app_session_mod.config_mod;
 const dock_ops = @import("dock.zig");
+const web_osr = @import("../web_osr.zig");
 const layout_math = app_session_mod.layout_math;
 const nav_button_count = app_session_mod.nav_button_count;
 const CloseScope = app_session_mod.CloseScope;
@@ -382,6 +383,71 @@ pub fn activeWebSurfaceId(self: *AppSession) u64 {
     return if (isBrowserTerm(term)) term.surfaceId() else 0;
 }
 
+/// OSR(Chromium sidecar)이 그리는 browser 탭인가(W3b — 개발용 환경변수로만 켠다, `web_osr.zig`). 신뢰 패널(markdown)과
+/// 파일 HTML 은 늘 WKWebView 다(분업 — docs/plans/web-osr-backend.md).
+pub fn isOsrTerm(term: *const Term) bool {
+    return isBrowserTerm(term) and web_osr.enabled();
+}
+
+/// OSR 이 들고 있는 surface 인가(control-plane 이 「이 엔진은 아직 지원하지 않는다」로 답한다 — W9 전까지).
+pub fn isOsrSurface(surface_id: u64) bool {
+    return web_osr.enabled() and web_osr.owns(surface_id);
+}
+
+/// 창 tick 마다(W3b): sidecar 파이프를 비우고, 이 창 OSR 탭의 새 주소·탐색 상태를 주소창에 넣고, 안내를 띄운다.
+pub fn tickWebOsr(self: *AppSession) void {
+    if (!web_osr.enabled()) return;
+    web_osr.pump(self.allocator, @intCast(app_session_mod.monotonicMs()));
+    for (self.tabs.items) |tab| {
+        for (tab.panes.items) |pane| {
+            for (pane.terms.items) |term| {
+                if (!isOsrTerm(term)) continue;
+                const sid = term.surfaceId();
+                if (web_osr.takeNavUpdate(sid)) |nav| setWebNavState(self, sid, nav.can_go_back, nav.can_go_forward, nav.url);
+                if (web_osr.takeGpuNotice(sid)) self.showNoticeKey(.web_osr_gpu_unavailable);
+            }
+        }
+    }
+    if (web_osr.takeNotice()) |notice| self.showNoticeKey(switch (notice) {
+        .gpu_unavailable => .web_osr_gpu_unavailable,
+        .profile_in_use => .web_osr_profile_in_use,
+        .start_failed => .web_osr_start_failed,
+        .crashed_repeatedly => .web_osr_crashed,
+    });
+}
+
+/// 이번 tick 배치 중 OSR 탭을 sidecar 에 맞추고 WKWebView 전이 집합에서 뺀다 — Swift 가 그 탭에 WKWebView 를 만들지
+/// 않게. 창의 scale 로 DIP 크기를 정한다. 파괴는 여기서 하지 않는다(배치에서 빠진 탭은 다른 창으로 옮겨졌을 수 있다 —
+/// Term 이 실제로 사라질 때 `destroyTerm` 이 한다).
+fn routeOsrLayouts(self: *AppSession) void {
+    const now: i64 = @intCast(app_session_mod.monotonicMs());
+    var i: usize = 0;
+    while (i < self.web_cur_scratch.items.len) {
+        const layout = self.web_cur_scratch.items[i];
+        const term = term_ops.termBySurfaceId(self, layout.surface_id) orelse {
+            i += 1;
+            continue;
+        };
+        if (!isOsrTerm(term)) {
+            i += 1;
+            continue;
+        }
+        web_osr.ensure(self.allocator, .{
+            .surface_id = layout.surface_id,
+            .width_px = layout.content_rect.w,
+            .height_px = layout.content_rect.h,
+            .visible = layout.visible,
+        }, self.scale_milli, now);
+        _ = self.web_cur_scratch.orderedRemove(i);
+    }
+}
+
+/// Term 이 사라졌다 — OSR 브라우저면 sidecar 에서 파괴한다(`destroyTerm`).
+pub fn dropOsrSurface(self: *AppSession, surface_id: u64) void {
+    if (!web_osr.enabled()) return;
+    web_osr.destroy(self.allocator, surface_id);
+}
+
 pub fn isBrowserTerm(term: *const Term) bool {
     // **파일 entry 제외가 여기 있다**(FP16 §8). `.html`/`.pdf` 파일 Term은 격리 config를 쓰려고
     // `web_panel_kind == .browser`를 갖게 되는데, 그렇다고 browser 기능(주소창 밴드·nav 단축키·URL 편집·
@@ -665,7 +731,13 @@ pub fn takeWebAddrFocusPull(self: *AppSession) ?u64 {
 pub fn takeWebAddrNavigate(self: *AppSession) ?WebNavigateRequest {
     if (self.addr_navigate_pending) |sid| {
         self.addr_navigate_pending = null;
-        return .{ .surface_id = sid, .url = self.addr_navigate_url_buf[0..self.addr_navigate_url_len] };
+        const url = self.addr_navigate_url_buf[0..self.addr_navigate_url_len];
+        // OSR 탭은 Swift 에 WKWebView 가 없다 — sidecar 로 보낸다(W3b).
+        if (isOsrSurface(sid)) {
+            web_osr.navigate(self.allocator, sid, url);
+            return takeRestoredBrowserNavigate(self);
+        }
+        return .{ .surface_id = sid, .url = url };
     }
     return takeRestoredBrowserNavigate(self);
 }
@@ -678,6 +750,14 @@ pub fn takeRestoredBrowserNavigate(self: *AppSession) ?WebNavigateRequest {
             for (pane.terms.items) |term| {
                 const url = term.pending_url orelse continue;
                 if (url.len == 0 or url.len > addr_nav_url_cap) { // 방어: 저장 경로가 이미 걸렀지만 소비는 여기 단일 지점
+                    self.allocator.free(url);
+                    term.pending_url = null;
+                    continue;
+                }
+                // OSR 탭: sidecar 가 그 브라우저를 들고 있으면 넘긴다(만들어지기 전이면 만들어진 뒤 보낸다 — web_osr).
+                if (isOsrTerm(term)) {
+                    if (!web_osr.owns(term.surfaceId())) continue; // 아직 배치 전 — 다음 tick
+                    web_osr.navigate(self.allocator, term.surfaceId(), url);
                     self.allocator.free(url);
                     term.pending_url = null;
                     continue;
@@ -734,6 +814,7 @@ pub fn computeWebSurfaceTransitions(self: *AppSession) void {
     // scratch에 남은 부분 데이터는 다음 tick clearRetainingCapacity가 리셋하므로 무해.
     self.web_cur_scratch.clearRetainingCapacity();
     collectWebSurfaces(self, &self.web_cur_scratch) catch return;
+    if (web_osr.enabled()) routeOsrLayouts(self);
 
     var diff = web_panel_layout.surfaceDiff(self.allocator, self.web_panel_prev.items, self.web_cur_scratch.items) catch return;
     defer diff.deinit(self.allocator);
@@ -966,6 +1047,15 @@ pub fn provideWebFindResult(self: *AppSession, seq: u64, found: bool) void {
 pub fn takeWebNavAction(self: *AppSession) ?WebNavAction {
     if (self.web_nav_action_pending) |sid| {
         self.web_nav_action_pending = null;
+        if (isOsrSurface(sid)) {
+            // 0=back·1=forward·2=reload(주소창 버튼 — WebNavAction 과 같은 번호).
+            web_osr.navAction(self.allocator, sid, switch (self.web_nav_action_code) {
+                0 => .back,
+                1 => .forward,
+                else => .reload,
+            });
+            return null;
+        }
         return .{ .surface_id = sid, .code = self.web_nav_action_code };
     }
     return null;

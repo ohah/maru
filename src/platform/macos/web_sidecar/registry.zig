@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
+const TitleGate = @import("title_gate.zig").TitleGate;
 
 const BrowserId = protocol.message.BrowserId;
 const ViewSize = protocol.message.ViewSize;
@@ -20,6 +21,7 @@ pub const Entry = struct {
     closing: bool = false,
     /// 받은 그리기 콜백 수(W2 전의 관측점).
     paints: u64 = 0,
+    title: TitleGate = .{},
 };
 
 pub const Error = error{ Duplicate, Full };

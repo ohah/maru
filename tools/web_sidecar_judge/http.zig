@@ -5,6 +5,11 @@
 //!   /size         제목을 `w=<innerWidth>` 로, 크기가 바뀔 때마다 다시
 //!   /cookie?v=N   제목을 `cookie=[<document.cookie>]` 로 한 뒤 쿠키 `maru_judge=N` 을 한 시간짜리로 심는다
 //!   /popup        `window.open` 을 부른 뒤 제목을 `popup-tried` 로
+//!   /vis          제목을 `vis=<document.visibilityState>` 로, 바뀔 때마다 다시
+//!   /print        `window.print()` 를 부른 뒤 제목을 `print-tried` 로(인쇄 창이 뜨면 그 창이 닫힐 때까지 안 온다)
+//!   /dialog       `alert`·`confirm`·`prompt` 를 부른 뒤 제목을 `dialog-<confirm>-<prompt>` 로
+//!   /ctl          제목을 `a<BEL>b<DEL>c` 로(제어 문자가 든 제목)
+//!   /flood        2 초 동안 제목을 1ms 마다 200 번씩 바꾼 뒤 `flood-done` 으로
 
 const std = @import("std");
 
@@ -89,6 +94,21 @@ fn page(path: []const u8, query: []const u8, buf: []u8) ![]const u8 {
     }
     if (std.mem.eql(u8, path, "/popup")) {
         return "<!doctype html><title>loading</title><script>window.open('/title?t=opened','_blank');document.title='popup-tried'</script>";
+    }
+    if (std.mem.eql(u8, path, "/vis")) {
+        return "<!doctype html><title>loading</title><script>function t(){document.title='vis='+document.visibilityState}t();document.addEventListener('visibilitychange',t)</script>";
+    }
+    if (std.mem.eql(u8, path, "/print")) {
+        return "<!doctype html><title>loading</title><body>print me<script>window.print();document.title='print-tried'</script>";
+    }
+    if (std.mem.eql(u8, path, "/dialog")) {
+        return "<!doctype html><title>loading</title><script>alert('a');var r=confirm('b');var p=prompt('c','d');document.title='dialog-'+r+'-'+p</script>";
+    }
+    if (std.mem.eql(u8, path, "/ctl")) {
+        return "<!doctype html><title>loading</title><script>document.title='a\\x07b\\x7fc'</script>";
+    }
+    if (std.mem.eql(u8, path, "/flood")) {
+        return "<!doctype html><title>loading</title><script>var i=0;var h=setInterval(function(){for(var k=0;k<200;k++)document.title='f'+(i++)},1);setTimeout(function(){clearInterval(h);document.title='flood-done'},2000)</script>";
     }
     return error.NotFound;
 }

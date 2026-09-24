@@ -2335,6 +2335,9 @@ pub fn reloadConfig(self: *AppSession) void {
     app_session_mod.setAppQuitAfterLastWindowClosed(self.loaded_config.config.window_quit_after_last_window_closed); // 파일이 정본
     editor_ops.lsp_client.setShellEnvironmentEnabled(self.loaded_config.config.lsp.shell_environment); // 파일이 정본(앱 전역)
     editor_ops.lsp_client.setEnvironmentExclude(self.loaded_config.config.lsp.environment_exclude); // 파일이 정본(앱 전역 — 사본을 담는다)
+    // W4d: 엔진은 재시작 후 적용 — 파일에서 바뀌었으면 알린다. 설정 화면에서는 행 이름이 「다시 시작하면 적용」이라 따로
+    // 알리지 않는다(알림은 설정 창을 닫는다 — 드롭다운 미리보기만 해도 창이 닫히고 값이 저장되지 않았다, 적대 검증).
+    web_ops.noteBrowserEngineConfig(self);
     // 옛 arena를 버렸으니 follow-system 복귀 스냅샷(옛 arena slice)도 비운다(dangling 방지). 아래 applyFollowSystemTheme가
     // 새 파일 테마로 다시 스냅샷·적용한다(F2-9). null 대입은 옛 slice를 deref하지 않아 free 후라도 안전.
     self.theme_pre_follow = null;

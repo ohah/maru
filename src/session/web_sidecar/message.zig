@@ -121,7 +121,12 @@ pub const Modifiers = packed struct(u16) {
     is_repeat: bool = false,
     /// 트랙패드처럼 픽셀 단위로 정밀한 스크롤 양이다.
     precise_scroll: bool = false,
-    _reserved: u6 = 0,
+    /// 숫자패드 키(DOM `location` 3).
+    key_pad: bool = false,
+    /// 왼쪽·오른쪽 수식키(DOM `location` 1·2 — Shift·Control·Option·Command).
+    is_left: bool = false,
+    is_right: bool = false,
+    _reserved: u3 = 0,
 };
 
 pub const Point = struct {
@@ -136,7 +141,7 @@ pub const Mouse = struct {
     button: MouseButton = .left,
     point: Point,
     modifiers: Modifiers = .{},
-    /// down·up 은 1~3(더블·트리플 클릭), move·leave 는 0.
+    /// down·up 은 1 이상(macOS `clickCount` 그대로 — 네 번 이상도 Blink 가 받는다), move·leave 는 0.
     click_count: u8 = 0,
 };
 
@@ -170,7 +175,7 @@ pub const Key = struct {
     unmodified_character: u16 = 0,
 };
 
-/// UTF-16 단위 범위. `none` 은 「범위 없음」(CEF 의 무효 범위).
+/// UTF-16 단위 범위. `none` 은 「범위 없음」(CEF 의 무효 범위 — `CefRange::InvalidRange`).
 pub const TextRange = struct {
     start: u32,
     end: u32,
@@ -184,11 +189,11 @@ pub const TextRange = struct {
 
 pub const ImeComposition = struct {
     browser: BrowserId,
-    /// 조합 중인 글(빈 글이면 조합을 비운다).
+    /// 조합 중인 글(빈 글이면 조합을 비운다). 탭·줄바꿈은 받는다(받아쓰기).
     text: []const u8,
-    /// 조합 글 안에서 선택할 범위(보통 끝에 캐럿).
+    /// 조합 글 안에서 선택할 범위. `none`(무효 범위)이면 CEF 가 조합 글 끝의 캐럿으로 둔다(W4a 실측 — 판정자 `input-ime-cancel`).
     selection: TextRange = .none,
-    /// 바꿀 기존 글 범위(macOS 만 쓴다).
+    /// 바꿀 기존 글 범위 — 입력칸 **전체 글** 안의 위치라 글 상한과 무관하다(macOS 만 쓴다).
     replacement: TextRange = .none,
 };
 
@@ -229,6 +234,11 @@ pub const WebCursor = enum(u8) {
     copy = 10,
     alias = 11,
     context_menu = 12,
+    wait = 13,
+    progress = 14,
+    help = 15,
+    /// CSS `cursor: none` — 숨긴다.
+    none = 16,
 };
 
 pub const CursorChanged = struct {

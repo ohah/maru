@@ -28,6 +28,8 @@ pub const Entry = struct {
     frames: ?*anyopaque = null,
     /// 마지막으로 알린 커서(W4 — 같은 것은 다시 안 보낸다).
     cursor: ?protocol.message.WebCursor = null,
+    /// 마지막으로 알린 IME 조합 사각형(W4 — 같은 것은 다시 안 보낸다).
+    ime_bounds: ?protocol.message.Rect = null,
 };
 
 pub const Error = error{ Duplicate, Full };

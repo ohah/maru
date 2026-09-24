@@ -41998,3 +41998,174 @@ test "IGP8 창은 프레임이 그릴 수 있는 행만큼이다 — 256 행을 
     if (rows <= guides_client.window_lines / 2) return error.FixtureTooFewRows; // 옛 창(256)을 넘어야 이 판정자가 잰다
     for (0..rows) |r| try testing.expectEqual(@as(usize, 1), countHits(hits, @intCast(r)));
 }
+
+/// 그린 셀에서 `row` 행의 `nth` 번째 `cp` 글자의 전경(없으면 null) — 같은 (행, 열)에 셀이 여럿이면 나중 것(덮는 순서).
+fn cellFgOf(dl: renderer.DrawList, row: u16, cp: u21, nth: usize) ?maru.terminal.Rgb {
+    var cps: [512]u21 = undefined;
+    var fgs: [512]maru.terminal.Color = undefined;
+    @memset(&cps, 0);
+    var maxc: usize = 0;
+    for (dl.cells) |c| if (c.row == row and c.col < cps.len) {
+        cps[c.col] = c.codepoint;
+        fgs[c.col] = c.style.foreground;
+        maxc = @max(maxc, c.col + 1);
+    };
+    var seen: usize = 0;
+    for (0..maxc) |col| {
+        if (cps[col] != cp) continue;
+        if (seen == nth) return switch (fgs[col]) {
+            .rgb => |v| v,
+            else => null,
+        };
+        seen += 1;
+    }
+    return null;
+}
+
+/// 그 글자로 시작하는 첫 행(행 머리 식별용).
+fn rowStartingWith(dl: renderer.DrawList, text: []const u8) ?u16 {
+    var best: ?u16 = null;
+    for (dl.cells) |c| {
+        if (c.codepoint != text[0]) continue;
+        var ok = true;
+        for (text[1..], 1..) |b, k| {
+            var found = false;
+            for (dl.cells) |d| if (d.row == c.row and d.col == c.col + k and d.codepoint == b) {
+                found = true;
+                break;
+            };
+            if (!found) {
+                ok = false;
+                break;
+            }
+        }
+        if (ok and (best == null or c.row < best.?)) best = c.row;
+    }
+    return best;
+}
+
+test "BPP1 괄호 쌍 색 — 단계마다 세 색이 돌고 짝 없는 괄호는 빨강; 끄면 없고, 독립 풀은 종류별로 세고, 편집은 증분으로 고친다 (제품 경계, §5.1d)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    fx.session.loaded_config.config.editor.sticky_scroll = false;
+    // `q(` 줄: `(`0 `[`1 `{`2 `(`3(= 다시 첫 색) · `z)` 줄: 짝 없는 `)`. 문자열 속 `(` 는 글자다.
+    const src = "q(a[b{c(d)}]);\nz);\nw = \"(\";\n";
+    const term = try openBracketFixture(&fx, allocator, "p.ts", src);
+    const tk = fx.session.buildChromeTokens();
+    const c1 = tk.get(.bracket_pair_1);
+    const c2 = tk.get(.bracket_pair_2);
+    const c3 = tk.get(.bracket_pair_3);
+    const cu = tk.get(.bracket_unexpected);
+    // 네 색이 서로 다르다 — 같으면 아래 단언이 역할 자리를 못 가른다(픽스처가 개념을 갈라야 한다)
+    try testing.expect(!std.meta.eql(c1, c2) and !std.meta.eql(c2, c3) and !std.meta.eql(c1, c3) and !std.meta.eql(c1, cu));
+    {
+        var d = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+        defer d.dl.deinit(allocator);
+        const r0 = rowStartingWith(d.dl, "q(") orelse return error.NoRow;
+        const r1 = rowStartingWith(d.dl, "z)") orelse return error.NoRow;
+        const r2 = rowStartingWith(d.dl, "w =") orelse return error.NoRow;
+        try testing.expectEqual(c1, cellFgOf(d.dl, r0, '(', 0).?);
+        try testing.expectEqual(c2, cellFgOf(d.dl, r0, '[', 0).?);
+        try testing.expectEqual(c3, cellFgOf(d.dl, r0, '{', 0).?);
+        try testing.expectEqual(c1, cellFgOf(d.dl, r0, '(', 1).?); // 단계 3 → 세 색이 돈다
+        try testing.expectEqual(c1, cellFgOf(d.dl, r0, ')', 0).?);
+        try testing.expectEqual(c3, cellFgOf(d.dl, r0, '}', 0).?);
+        try testing.expectEqual(c2, cellFgOf(d.dl, r0, ']', 0).?);
+        try testing.expectEqual(c1, cellFgOf(d.dl, r0, ')', 1).?);
+        try testing.expectEqual(cu, cellFgOf(d.dl, r1, ')', 0).?);
+        const in_string = cellFgOf(d.dl, r2, '(', 0).?;
+        try testing.expect(!std.meta.eql(in_string, c1) and !std.meta.eql(in_string, cu));
+    }
+    // 독립 풀 — `(` `[` `{` 가 각자 첫 단계라 모두 첫 색, 안쪽 `(` 는 두 번째 `(` 라 둘째 색
+    fx.session.loaded_config.config.editor.bracket_pair_colorization_independent_pools = true;
+    {
+        var d = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+        defer d.dl.deinit(allocator);
+        const r0 = rowStartingWith(d.dl, "q(") orelse return error.NoRow;
+        try testing.expectEqual(c1, cellFgOf(d.dl, r0, '[', 0).?);
+        try testing.expectEqual(c1, cellFgOf(d.dl, r0, '{', 0).?);
+        try testing.expectEqual(c2, cellFgOf(d.dl, r0, '(', 1).?);
+    }
+    fx.session.loaded_config.config.editor.bracket_pair_colorization_independent_pools = false;
+    // 끄면 괄호 색이 없다
+    fx.session.loaded_config.config.editor.bracket_pair_colorization = false;
+    {
+        var d = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+        defer d.dl.deinit(allocator);
+        const r0 = rowStartingWith(d.dl, "q(") orelse return error.NoRow;
+        const r1 = rowStartingWith(d.dl, "z)") orelse return error.NoRow;
+        try testing.expect(!std.meta.eql(cellFgOf(d.dl, r0, '[', 0).?, c2));
+        try testing.expect(!std.meta.eql(cellFgOf(d.dl, r1, ')', 0).?, cu));
+    }
+    fx.session.loaded_config.config.editor.bracket_pair_colorization = true;
+    // 편집 — `z)` 앞에 `(` 를 넣으면 짝이 생겨 빨강이 풀린다. **처음부터 다시 만들지 않는다**(증분).
+    const rebuilds = term.rt.editor_syntax.brackets.rebuilds;
+    const partials = term.rt.editor_syntax.brackets.partials;
+    term.rt.editor_selection = editor_selection.Selection.at(15); // `z` 앞
+    try testing.expect(insertText(fx.session, term, "("));
+    {
+        var d = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+        defer d.dl.deinit(allocator);
+        const r1 = rowStartingWith(d.dl, "(z)") orelse return error.NoRow;
+        try testing.expectEqual(c1, cellFgOf(d.dl, r1, '(', 0).?);
+        try testing.expectEqual(c1, cellFgOf(d.dl, r1, ')', 0).?);
+    }
+    try testing.expectEqual(rebuilds, term.rt.editor_syntax.brackets.rebuilds);
+    try testing.expect(term.rt.editor_syntax.brackets.partials > partials);
+}
+
+test "BPP2 괄호 쌍 색 — sticky 머리줄에는 서고 미니맵에는 없다 (제품 경계, §5.1d · VS Code stickyScrollWidget · onlyMinimapDecorations)" {
+    // **색 비교는 켬/끔 두 프레임의 차이로 한다** — 괄호 색이 ANSI 에서 오고 구문 역할도 그렇다(이 테마의 키워드는 괄호 둘째 색과 같은 자주다).
+    // 「미니맵에 괄호 색이 없다」를 색 값으로 재면 키워드 사각이 거짓 빨강을 낸다(처음 이 판정자가 그랬다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    fx.session.loaded_config.config.editor.sticky_scroll = true;
+    fx.session.loaded_config.config.editor.minimap = true;
+    var src: std.ArrayList(u8) = .empty;
+    defer src.deinit(allocator);
+    try src.appendSlice(allocator, "function f(a) {\n");
+    for (0..80) |i| {
+        var buf: [64]u8 = undefined;
+        try src.appendSlice(allocator, try std.fmt.bufPrint(&buf, "  g{d}([{d}]);\n", .{ i, i }));
+    }
+    try src.appendSlice(allocator, "}\n");
+    const term = try openBracketFixture(&fx, allocator, "s.ts", src.items);
+    term.rt.editor_wrap = false;
+    const tk = fx.session.buildChromeTokens();
+    setEditorTop(fx.session, term, 30, "test");
+
+    const Frame = struct { sticky_open: ?maru.terminal.Rgb, sticky_brace: ?maru.terminal.Rgb, body_square: ?maru.terminal.Rgb, strip: std.ArrayList(u64) };
+    var frames: [2]Frame = undefined;
+    for ([_]bool{ true, false }, 0..) |on, fi| {
+        fx.session.loaded_config.config.editor.bracket_pair_colorization = on;
+        fx.session.gpu_quads.clearRetainingCapacity();
+        var d = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+        defer d.dl.deinit(allocator);
+        const r0 = rowStartingWith(d.dl, "function") orelse return error.NoStickyRow;
+        try testing.expectEqual(@as(u16, 0), r0); // 맨 위 행이 머리줄이다(30 줄 아래로 굴렸다)
+        const rb = rowStartingWith(d.dl, "  g31(") orelse return error.NoRow;
+        var strip: std.ArrayList(u64) = .empty;
+        const mr = term.rt.editor_minimap_rect orelse return error.NoMinimap;
+        for (fx.session.gpu_quads.items) |q| {
+            const qx: f32 = @floatFromInt(mr.x);
+            const qw: f32 = @floatFromInt(mr.w);
+            if (!(q.x >= qx and q.x + q.w <= qx + qw + 0.01)) continue;
+            try strip.append(allocator, (@as(u64, @intFromFloat(q.x)) << 48) ^ (@as(u64, @intFromFloat(q.y)) << 32) ^ q.fill_color0);
+        }
+        frames[fi] = .{ .sticky_open = cellFgOf(d.dl, r0, '(', 0), .sticky_brace = cellFgOf(d.dl, r0, '{', 0), .body_square = cellFgOf(d.dl, rb, '[', 0), .strip = strip };
+    }
+    defer for (&frames) |*f| f.strip.deinit(allocator);
+    // sticky 머리줄의 `(` `{` 는 단계 0 색이고, 끈 프레임과 다르다
+    try testing.expectEqual(tk.get(.bracket_pair_1), frames[0].sticky_open.?);
+    try testing.expectEqual(tk.get(.bracket_pair_1), frames[0].sticky_brace.?);
+    try testing.expect(!std.meta.eql(frames[0].sticky_open.?, frames[1].sticky_open.?));
+    // 본문의 `[` 는 단계 2(바깥에 `{` · `(`)
+    try testing.expectEqual(tk.get(.bracket_pair_3), frames[0].body_square.?);
+    // 미니맵 — 켜도 끈 것과 사각 하나하나가 같다(스트립에 사각이 있다: 픽스처가 비지 않았다)
+    try testing.expect(frames[0].strip.items.len > 10);
+    try testing.expectEqualSlices(u64, frames[1].strip.items, frames[0].strip.items);
+}

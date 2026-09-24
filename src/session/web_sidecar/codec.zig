@@ -19,6 +19,7 @@ const Message = message_mod.Message;
 const Tag = message_mod.Tag;
 const ViewSize = message_mod.ViewSize;
 const RendererGoneReason = message_mod.RendererGoneReason;
+const NavActionKind = message_mod.NavActionKind;
 const FailureCode = message_mod.FailureCode;
 const max_view_extent = fields.max_view_extent;
 const writeBrowser = fields.writeBrowser;
@@ -70,6 +71,20 @@ pub fn encode(message: Message, out: []u8) Error!usize {
         .frame_channel => |value| {
             try writeService(&cursor, value.service);
             try cursor.writeBytes(&value.token);
+        },
+        .nav_action => |value| {
+            try writeBrowser(&cursor, value.browser);
+            try cursor.writeByte(@intFromEnum(value.action));
+        },
+        .url_changed => |value| {
+            try writeBrowser(&cursor, value.browser);
+            try writeUrl(&cursor, value.url);
+        },
+        .nav_state => |value| {
+            try writeBrowser(&cursor, value.browser);
+            try cursor.writeByte(@intFromBool(value.can_go_back));
+            try cursor.writeByte(@intFromBool(value.can_go_forward));
+            try cursor.writeByte(@intFromBool(value.loading));
         },
         .title_changed => |value| {
             try writeBrowser(&cursor, value.browser);
@@ -135,6 +150,17 @@ pub fn decodeExact(frame: []const u8) Error!Message {
             @memcpy(&token, try cursor.readBytes(16));
             break :blk .{ .frame_channel = .{ .service = service, .token = token } };
         },
+        .nav_action => .{ .nav_action = .{
+            .browser = try readBrowser(&cursor),
+            .action = std.enums.fromInt(NavActionKind, try cursor.readByte()) orelse return error.UnknownNavAction,
+        } },
+        .url_changed => .{ .url_changed = .{ .browser = try readBrowser(&cursor), .url = try readUrl(&cursor) } },
+        .nav_state => .{ .nav_state = .{
+            .browser = try readBrowser(&cursor),
+            .can_go_back = try readBool(&cursor),
+            .can_go_forward = try readBool(&cursor),
+            .loading = try readBool(&cursor),
+        } },
         .title_changed => .{ .title_changed = .{ .browser = try readBrowser(&cursor), .text = try readText(&cursor) } },
         .load_finished => .{ .load_finished = .{
             .browser = try readBrowser(&cursor),
@@ -218,6 +244,11 @@ test "every message round trips" {
     try std.testing.expectEqualStrings("", (try roundTrip(.{ .title_changed = .{ .browser = 9, .text = "" } })).title_changed.text);
     try std.testing.expectEqual(@as(i32, -1), (try roundTrip(.{ .load_finished = .{ .browser = 9, .http_status = -1 } })).load_finished.http_status);
     try std.testing.expectEqual(RendererGoneReason.out_of_memory, (try roundTrip(.{ .renderer_gone = .{ .browser = 9, .reason = .out_of_memory } })).renderer_gone.reason);
+    try std.testing.expectEqual(NavActionKind.reload, (try roundTrip(.{ .nav_action = .{ .browser = 9, .action = .reload } })).nav_action.action);
+    try std.testing.expectEqualStrings("https://a.example/x", (try roundTrip(.{ .url_changed = .{ .browser = 9, .url = "https://a.example/x" } })).url_changed.url);
+    const nav = (try roundTrip(.{ .nav_state = .{ .browser = 9, .can_go_back = true, .can_go_forward = false, .loading = true } })).nav_state;
+    try std.testing.expect(nav.can_go_back and !nav.can_go_forward and nav.loading);
+    try std.testing.expectEqual(FailureCode.gpu_unavailable, (try roundTrip(.{ .failure = .{ .browser = 9, .code = .gpu_unavailable, .detail = "" } })).failure.code);
     const failure = try roundTrip(.{ .failure = .{ .browser = 0, .code = .profile_in_use, .detail = "프로필 사용 중" } });
     try std.testing.expectEqual(@as(u64, 0), failure.failure.browser);
     try std.testing.expectEqual(FailureCode.profile_in_use, failure.failure.code);
@@ -265,6 +296,21 @@ test "closed fields fail closed on decode" {
     len = try encode(.{ .title_changed = .{ .browser = 1, .text = "ab" } }, &buf);
     buf[len - 1] = 0xFF;
     try std.testing.expectError(error.InvalidUtf8, decodeExact(buf[0..len]));
+
+    len = try encode(.{ .nav_action = .{ .browser = 1, .action = .stop } }, &buf);
+    buf[body + 8] = 4;
+    try std.testing.expectError(error.UnknownNavAction, decodeExact(buf[0..len]));
+
+    len = try encode(.{ .nav_state = .{ .browser = 1, .can_go_back = false, .can_go_forward = false, .loading = false } }, &buf);
+    for (0..3) |i| {
+        var bad = buf;
+        bad[body + 8 + i] = 2;
+        try std.testing.expectError(error.InvalidBool, decodeExact(bad[0..len]));
+    }
+
+    // 주소 알림도 빈 URL·제어 문자를 거절한다(주소창에 그대로 그린다).
+    try std.testing.expectError(error.EmptyUrl, encode(.{ .url_changed = .{ .browser = 1, .url = "" } }, &buf));
+    try std.testing.expectError(error.ControlCharacter, encode(.{ .url_changed = .{ .browser = 1, .url = "https://x/\x1b[2J" } }, &buf));
 }
 
 test "view size bounds and NaN scale are rejected both ways" {

@@ -173,7 +173,7 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
 }
 
 test "ABI v185 notification release end-all and cold route values match the C header" {
-    try std.testing.expectEqual(@as(u32, 188), abi_version);
+    try std.testing.expectEqual(@as(u32, 189), abi_version);
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @intFromEnum(AppInstanceLeaseResult.acquired));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_HELD), @intFromEnum(AppInstanceLeaseResult.held));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_UNSAFE), @intFromEnum(AppInstanceLeaseResult.unsafe));
@@ -5141,9 +5141,19 @@ var control_cap_store: control_capability.CapabilityStore = .{};
 /// scope) grant를 저장하고, dispatchAuthenticated가 browser.* authz서 세션 cap과 **가법** 조회한다. 빈=grant 없음=
 /// (cap도 없으면) default-deny. grant 생성(확인 모달)·surface-close removeSurface 배선은 1e-confirm-1c/2. **메인 스레드 전용**(§8.8).
 var control_pane_grant_store: control_pane_grant.PaneGrantStore = .{};
+/// 마지막으로 꺼낸 op 의 허용 호스트(`maru_macos_control_taken_browser_op_required_host`).
+var browser_op_take_host: control_pane_grant.GrantHost = .{};
 
 /// 5e-2b: browser op 큐 엔트리. `arg`는 cross_gpa 소유(method별 인자 — navigate=url·executeScript=backend JSON·getUrl=빈).
-const BrowserOpEntry = struct { async_id: u64, surface_id: u64, op_kind: u8, arg: []const u8 };
+const BrowserOpEntry = struct {
+    async_id: u64,
+    surface_id: u64,
+    op_kind: u8,
+    arg: []const u8,
+    /// `browser_storage` pane grant 가 인가한 op 의 허용 호스트 — Swift 가 쿠키 저장소를 만지기 직전 대상 문서가 이
+    /// 호스트(또는 하위 도메인)인지 본다. 그 밖의 op 는 빈 값(검사 없음).
+    required_host: control_pane_grant.GrantHost = .{},
+};
 
 /// 5e-2b: browser op FIFO 큐(**메인 스레드 전용** — handleControlRequest가 push, take_browser_op가 pop해 Swift가
 /// 실행). accept가 serial이라 실질 ≤1이나 bounded(`max`)로 견고성 유지. push 성공 시 `arg` 소유권을 큐가 인수한다.
@@ -5573,7 +5583,16 @@ fn pruneInactiveBrowserWaits(server: *control_server_mod.ControlServer) void {
 // ── 1e-confirm-2a: held-request grant 확인 흐름(§9.2 Model B) ──────────────────────────────────────────────
 /// needs_grant 요청을 **틱 넘어 붙잡고**(§5-async deferRequest) 확인 결정(2a=env 스텁·2b=모달)을 기다리는 대기 항목.
 /// `async_id`로 in-flight pending을 조회하고, 결정 시 grant 기록+재-dispatch(승인) or unauthorized(거부)한다.
-const GrantPromptEntry = struct { async_id: u64, pane: u64, target: u64, scope: control_capability.ScopeClass };
+const GrantPromptEntry = struct {
+    async_id: u64,
+    pane: u64,
+    target: u64,
+    scope: control_capability.ScopeClass,
+    /// 모달이 **처음 보였을 때**의 대상 문서 호스트(사용자가 본 사이트). 승인하면 `browser_storage` grant 가 이 호스트에
+    /// 묶인다 — 모달이 떠 있는 사이 탭이 다른 사이트로 가도 허용 범위는 본 사이트다.
+    host: control_pane_grant.GrantHost = .{},
+    host_captured: bool = false,
+};
 /// 대기 중 grant 확인 FIFO(**메인 스레드 전용**). bounded — max_in_flight와 정렬(연결당 held ≤1). deferRequest가
 /// in-flight를 bound하므로 이 큐는 그 미러(항목=held 요청). 서버 drain이 매 tick 결정+resolve.
 const GrantPromptQueue = struct {
@@ -5747,7 +5766,7 @@ fn resolveGrantPrompt(
         _ = server.completeInFlight(e.async_id, resp);
         return;
     }
-    control_pane_grant_store.grant(.{ .pane = e.pane, .target = e.target, .scope = e.scope }) catch {
+    control_pane_grant_store.grant(.{ .pane = e.pane, .target = e.target, .scope = e.scope, .host = e.host }) catch {
         const resp = control_browser.serializeUnauthorized(server.cross_gpa, pending.request_bytes) catch null;
         _ = server.completeInFlight(e.async_id, resp);
         return;
@@ -5808,10 +5827,14 @@ fn drainGrantPrompts(server: *control_server_mod.ControlServer, refs: []const Co
     defer arena.deinit();
     const snapshot = collectSessionsInto(refs, arena.allocator()) catch return; // collect OOM → 다음 tick 재시도(항목 유지)
 
-    // env 스텁(스모크·헤드리스): 설정됐으면 모달 우회 즉시 결정(전부).
+    // env 스텁(스모크·헤드리스): 설정됐으면 모달 우회 즉시 결정(전부). 모달이 없으니 지금 문서 호스트에 묶는다.
     const env = grantDecisionSource();
     if (env != .none) {
-        while (grant_prompt_queue.take()) |e| resolveGrantPrompt(server, e, env == .approve, snapshot, now);
+        while (grant_prompt_queue.take()) |taken| {
+            var e = taken;
+            e.host = control_pane_grant.GrantHost.init(control_browser.targetHost(snapshot, e.target) orelse "");
+            resolveGrantPrompt(server, e, env == .approve, snapshot, now);
+        }
         return;
     }
 
@@ -5819,9 +5842,12 @@ fn drainGrantPrompts(server: *control_server_mod.ControlServer, refs: []const Co
     const head = grant_prompt_queue.items.items[0];
     // **dedup**(grant UX 경화): 이 (pane, target, scope)가 이미 grant됐으면(중복 요청·직전 결정) **모달 없이 승인 resolve**.
     //   같은 triple 두 요청이 연달아 held되면, 첫 모달 승인이 grant를 남기고 → 둘째는 여기서 짧게 접혀 두 번째 모달이 안 뜬다.
-    if (control_pane_grant_store.isGranted(head.pane, head.target, head.scope)) {
-        _ = grant_prompt_queue.take();
-        return resolveGrantPrompt(server, head, true, snapshot, now);
+    //   `browser_storage` 는 grant 호스트가 지금 문서를 덮을 때만 — 다른 사이트면 새 모달로 그 사이트를 묻는다. 재기록은
+    //   기존 호스트 그대로(빈 호스트로 덮어 범위를 잃지 않게).
+    if (control_pane_grant_store.authorizes(head.pane, head.target, head.scope, control_browser.targetHost(snapshot, head.target))) {
+        var e = grant_prompt_queue.take().?;
+        e.host = control_pane_grant_store.hostOf(e.pane, e.target, e.scope).?;
+        return resolveGrantPrompt(server, e, true, snapshot, now);
     }
     // **target-window 모달**(grant UX 경화): 모달을 **대상 web surface를 소유한 창**에 띄운다(멀티창서 엉뚱한 창에
     //   안 뜨게). 대상 surface가 어느 창에도 없으면(닫힘 등) firstAppSession 폴백. 둘 다 없으면(헤드리스) deny.
@@ -5839,8 +5865,15 @@ fn drainGrantPrompts(server: *control_server_mod.ControlServer, refs: []const Co
         // stale 결정(다른 async_id — 도달 어려움): 무시.
     }
     // (2) 미결정: 모달 표시(idempotent — 이미 이 grant 보여주면 no-op·다른 모달 점유면 false로 다음 tick 재시도).
+    //     처음 보인 순간의 호스트를 기록한다 — 문구의 URL 과 같은 snapshot 이라 사용자가 본 사이트와 같다.
     var msg_buf: [256]u8 = undefined;
-    _ = app.showGrantConfirm(grantPromptMessage(&msg_buf, head, snapshot), head.async_id);
+    if (app.showGrantConfirm(grantPromptMessage(&msg_buf, head, snapshot), head.async_id)) {
+        const shown = &grant_prompt_queue.items.items[0];
+        if (!shown.host_captured) {
+            shown.host = control_pane_grant.GrantHost.init(control_browser.targetHost(snapshot, shown.target) orelse "");
+            shown.host_captured = true;
+        }
+    }
 }
 
 /// grant 확인 모달을 띄울 폴백 AppSession — refs 중 첫 non-null 창. `appSessionOwningSurface`가 대상 창을 못 찾을 때
@@ -5967,7 +6000,11 @@ fn pushBrowserOp(
             return;
         };
     }
-    browser_op_queue.push(allocator, .{ .async_id = async_id, .surface_id = op.surface_id, .op_kind = @intFromEnum(op.method), .arg = backend_arg }) catch {
+    const required_host: control_pane_grant.GrantHost = if (op.pane_grant) |g|
+        (if (g.scope == .browser_storage) g.host else .{})
+    else
+        .{};
+    browser_op_queue.push(allocator, .{ .async_id = async_id, .surface_id = op.surface_id, .op_kind = @intFromEnum(op.method), .arg = backend_arg, .required_host = required_host }) catch {
         if (op.method == .wait) _ = removeActiveBrowserWait(async_id);
         if (browserMethodHasTrackedLifecycle(op.method)) _ = active_browser_executions.finish(async_id);
         server.cross_gpa.free(backend_arg);
@@ -6078,7 +6115,7 @@ fn browserExecutionAuthorized(execution: *const ActiveBrowserExecution, now: u64
         else
             false,
         .pane_grant => |g| control_capability.methodRequiredScope(method) == g.scope and
-            control_pane_grant_store.isGranted(g.pane, g.target, g.scope),
+            control_pane_grant_store.stillGrants(g.pane, g.target, g.scope, &g.host),
     };
 }
 
@@ -6139,7 +6176,22 @@ pub export fn maru_macos_control_take_browser_op(
     if (out_op_kind) |p| p.* = e.op_kind;
     if (out_arg_ptr) |p| p.* = if (browser_op_take_buf.items.len > 0) browser_op_take_buf.items.ptr else null;
     if (out_arg_len) |p| p.* = browser_op_take_buf.items.len;
+    browser_op_take_host = e.required_host;
     return 1;
+}
+
+/// 방금 `take_browser_op` 로 꺼낸 op 의 허용 호스트(쿠키 권한은 사이트에 — control_pane_grant). Swift 가 쿠키 저장소를
+/// 만지는 op(getCookies·setCookie·deleteCookie·clearStorage)를 실행하기 직전에 읽어, 대상 문서의 지금 호스트가 이
+/// 호스트이거나 그 하위 도메인이 아니면 `unauthorized`(5)로 끝낸다. 0 = 검사 없음(capability 인가·다른 op). 버퍼가
+/// 모자라면 `maxInt(usize)` — 0 으로 돌려주면 「검사 없음」으로 읽혀 열려 버리므로, 호출자가 거절하게 한다. 다음
+/// take 전까지 유효하다. **메인 스레드 전용.**
+pub export fn maru_macos_control_taken_browser_op_required_host(out: ?[*]u8, out_cap: usize) usize {
+    const host = browser_op_take_host.slice();
+    if (host.len == 0) return 0;
+    const buf = out orelse return std.math.maxInt(usize);
+    if (host.len > out_cap) return std.math.maxInt(usize);
+    @memcpy(buf[0..host.len], host);
+    return host.len;
 }
 
 /// 5e-2b: Swift `BrowserControl` async 완료 콜백이 호출 — `async_id`의 in-flight 요청을 결과로 응답한다. `status`:
@@ -7978,7 +8030,7 @@ test "generic async browser op: target close wins once and late callback only re
     try std.testing.expect(active_browser_executions.markRunning(crash_id));
     cancelBrowserOpsForCrashedSurface(&control_server_storage, 12);
     try expectPendingErrorCode(&crash_pending, .process_exited);
-    try std.testing.expect(control_pane_grant_store.isGranted(5, 12, .browser_storage)); // crash는 logical surface/grant close 아님
+    try std.testing.expect(control_pane_grant_store.hasGrant(5, 12, .browser_storage)); // crash는 logical surface/grant close 아님
     maru_macos_control_complete_browser_op(crash_id, @intFromEnum(control_browser.BrowserCompletionStatus.failed), null, 0);
     try std.testing.expect(active_browser_executions.get(crash_id) == null);
 }
@@ -8539,6 +8591,40 @@ test "WP-F1 ABI: web find export 3종이 null session에 무해하다" {
     maru_macos_app_session_web_find_undeliverable(null, 1);
 }
 
+test "쿠키 권한은 사이트에: 실행 직전 재확인은 grant 호스트가 바뀌면 거절하고, Swift 에 허용 호스트를 넘긴다" {
+    const saved_grants = control_pane_grant_store;
+    defer control_pane_grant_store = saved_grants;
+    const saved_take_host = browser_op_take_host;
+    defer browser_op_take_host = saved_take_host;
+    control_pane_grant_store = .{};
+
+    const host_a = control_pane_grant.GrantHost.init("maru.test");
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 11, .scope = .browser_storage, .host = host_a });
+    const cookies: ActiveBrowserExecution = .{
+        .async_id = 1,
+        .surface_id = 11,
+        .method = .get_cookies,
+        .reserved_bytes = 0,
+        .provenance = .{ .pane_grant = .{ .pane = 5, .target = 11, .scope = .browser_storage, .host = host_a } },
+    };
+    try std.testing.expect(browserExecutionAuthorized(&cookies, 0));
+    // 사이에 같은 (pane, 탭)이 다른 사이트로 다시 허용됐다 — maru.test 로 시작한 op 는 권한을 잃는다.
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 11, .scope = .browser_storage, .host = control_pane_grant.GrantHost.init("other.test") });
+    try std.testing.expect(!browserExecutionAuthorized(&cookies, 0));
+    control_pane_grant_store.revoke(5, 11, .browser_storage);
+    try std.testing.expect(!browserExecutionAuthorized(&cookies, 0));
+
+    // take 가 기록한 허용 호스트를 Swift 가 읽는다. 버퍼가 모자라거나 없으면 0(검사 없음)이 아니라 maxInt — 거절하게.
+    browser_op_take_host = host_a;
+    var buf: [256]u8 = undefined;
+    const n = maru_macos_control_taken_browser_op_required_host(&buf, buf.len);
+    try std.testing.expectEqualStrings("maru.test", buf[0..n]);
+    try std.testing.expectEqual(std.math.maxInt(usize), maru_macos_control_taken_browser_op_required_host(&buf, 3));
+    try std.testing.expectEqual(std.math.maxInt(usize), maru_macos_control_taken_browser_op_required_host(null, 0));
+    browser_op_take_host = .{};
+    try std.testing.expectEqual(@as(usize, 0), maru_macos_control_taken_browser_op_required_host(&buf, buf.len));
+}
+
 test "grant scope wire round-trip: browser=0·browser_storage=1, 그 외 from-wire는 null" {
     try std.testing.expectEqual(@as(u8, 0), grantScopeToWire(.browser));
     try std.testing.expectEqual(@as(u8, 1), grantScopeToWire(.browser_storage));
@@ -8568,8 +8654,8 @@ test "per-grant revoke export: count/grant_at 스냅샷 + 값기반 revoke_brows
     // revoke_browser_grant: browser 하나만 취소(storage 보존). 값 기반이라 인덱스 무관.
     try std.testing.expectEqual(@as(u32, 1), maru_macos_control_revoke_browser_grant(5, 11, 0));
     try std.testing.expectEqual(@as(u32, 1), maru_macos_control_browser_grant_count());
-    try std.testing.expect(!control_pane_grant_store.isGranted(5, 11, .browser));
-    try std.testing.expect(control_pane_grant_store.isGranted(5, 11, .browser_storage));
+    try std.testing.expect(!control_pane_grant_store.hasGrant(5, 11, .browser));
+    try std.testing.expect(control_pane_grant_store.hasGrant(5, 11, .browser_storage));
     // 이미 없는 grant revoke = 0(멱등). 잘못된 scope wire도 0.
     try std.testing.expectEqual(@as(u32, 0), maru_macos_control_revoke_browser_grant(5, 11, 0));
     try std.testing.expectEqual(@as(u32, 0), maru_macos_control_revoke_browser_grant(5, 11, 2));

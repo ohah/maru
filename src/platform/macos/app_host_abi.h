@@ -9,7 +9,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 188u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 189u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -2098,6 +2098,13 @@ void maru_macos_control_server_stop(void);
    서버 미시작이면 0. 메인 스레드에서만. */
 uint32_t maru_macos_control_take_browser_op(uint64_t *out_async_id, uint64_t *out_surface_id, uint8_t *out_op_kind,
                                             const uint8_t **out_arg_ptr, size_t *out_arg_len);
+
+/* v189(쿠키 권한은 사이트에): 방금 take_browser_op 로 꺼낸 op 의 허용 호스트를 out 에 복사하고 길이를 돌려준다(NUL 없음).
+   browser_storage 확인 grant 가 인가한 쿠키 op 만 값이 있고, 0 은 검사 없음이다. Swift 는 쿠키 저장소를 만지는 op
+   (getCookies·setCookie·deleteCookie·clearStorage) 직전에 대상 문서 호스트가 이 호스트이거나 그 하위 도메인인지 보고,
+   아니면 complete_browser_op(status=5 unauthorized)로 끝낸다. out 이 없거나 모자라면 SIZE_MAX 를 돌려준다 — 호출자는
+   거절한다(0 은 「검사 없음」이라 그걸로 돌려주면 열려 버린다). 다음 take 전까지 유효. 메인 스레드에서만. */
+size_t maru_macos_control_taken_browser_op_required_host(uint8_t *out, size_t out_cap);
 
 /* 5e-2b: BrowserControl async 완료 콜백이 호출 — async_id 요청을 결과로 응답한다. status:
    0=success·1=failed·2=timeout·3=invalid_params·4=process_exited·5=unauthorized. result는 method별

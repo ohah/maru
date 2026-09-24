@@ -13,9 +13,62 @@
 //! **수명(§9.2)**: grant는 두 surface(pane·target)가 살아있는 동안 유효. surface close/generation 변경 시
 //! `removeSurface`로 무효(그 surface가 pane이든 target이든). 세션(프로세스) 한정 — 영속 저장 안 함(재시작=빈 store=
 //! default-deny). scope는 **per-scope 별도 grant**(browser가 browser_storage를 함의하지 않음 — 각기 다른 확인, §9.4 D5).
+//!
+//! **쿠키 권한은 사이트에 묶는다**(사용자 결정 2026-09-24 — docs/plans/web-osr-backend.md 「쿠키 권한은 사이트에」): 확인
+//! 모달은 「이 사이트의 쿠키」를 묻는데 grant 가 (pane, target) 에만 묶여 있어, 허용받은 탭을 다른 사이트로 옮기면 그
+//! 사이트의 HttpOnly 세션 쿠키까지 읽을 수 있었다. `browser_storage` grant 는 모달이 보인 호스트를 들고, 그 호스트와 하위
+//! 도메인에서만 인가한다(`authorizes`). 인가는 반드시 `authorizes` 로 한다 — `hasGrant` 는 존재만 본다(메뉴·revoke 용).
 
 const std = @import("std");
 const capmod = @import("control_capability.zig");
+
+/// DNS 이름 상한(RFC 1035 — 점 포함 253 바이트).
+pub const max_host_bytes: usize = 253;
+
+/// grant 가 묶인 호스트(소문자). 빈 값은 어떤 호스트도 인가하지 않는다. 값 타입이라 grant·provenance 로 복사된다.
+pub const GrantHost = struct {
+    buf: [max_host_bytes]u8 = undefined,
+    len: u8 = 0,
+
+    /// 호스트를 소문자로 담는다. 비었거나 상한을 넘으면 빈 값(어떤 호스트도 인가하지 않음).
+    pub fn init(host: []const u8) GrantHost {
+        var out: GrantHost = .{};
+        if (host.len == 0 or host.len > max_host_bytes) return out;
+        for (host, 0..) |c, i| out.buf[i] = std.ascii.toLower(c);
+        out.len = @intCast(host.len);
+        return out;
+    }
+
+    pub fn slice(self: *const GrantHost) []const u8 {
+        return self.buf[0..self.len];
+    }
+
+    pub fn eql(a: *const GrantHost, b: *const GrantHost) bool {
+        return std.mem.eql(u8, a.slice(), b.slice());
+    }
+};
+
+/// `current` 가 `granted` 이거나 그 하위 도메인인가(대소문자 무시). `github.com` 은 `gist.github.com` 을 덮지만
+/// `evilgithub.com` 은 덮지 않는다(점 경계). 거꾸로 하위 도메인 grant 는 부모·형제를 덮지 않는다. 어느 쪽이든 비면 false.
+pub fn hostCovers(granted: []const u8, current: []const u8) bool {
+    if (granted.len == 0 or current.len == 0) return false;
+    if (current.len == granted.len) return std.ascii.eqlIgnoreCase(current, granted);
+    if (current.len < granted.len + 1) return false;
+    const tail = current[current.len - granted.len ..];
+    return current[current.len - granted.len - 1] == '.' and std.ascii.eqlIgnoreCase(tail, granted);
+}
+
+/// http(s) URL 의 호스트. 다른 스킴(data:·about:·file: — 쿠키가 없다)이나 호스트 없는 URL 은 null.
+pub fn hostOfUrl(url: []const u8) ?[]const u8 {
+    const uri = std.Uri.parse(url) catch return null;
+    if (!std.ascii.eqlIgnoreCase(uri.scheme, "http") and !std.ascii.eqlIgnoreCase(uri.scheme, "https")) return null;
+    const host = uri.host orelse return null;
+    const raw = switch (host) {
+        .raw => |r| r,
+        .percent_encoded => |p| p,
+    };
+    return if (raw.len == 0) null else raw;
+}
 
 /// 확인된 grant 한 건: pane P의 에이전트 → target web surface W, scope S.
 pub const PaneGrant = struct {
@@ -25,7 +78,10 @@ pub const PaneGrant = struct {
     target: u64,
     /// `browser` | `browser_storage`(§9.4 D5). 각 scope는 **별도 grant**(별도 확인).
     scope: capmod.ScopeClass,
+    /// `browser_storage` 가 묶인 호스트(모달이 보인 URL 의 호스트). `browser` 는 보지 않는다.
+    host: GrantHost = .{},
 
+    /// 같은 grant 자리인가(pane·target·scope) — 호스트는 자리의 값이다(다시 허용하면 바뀐다).
     pub fn eql(a: PaneGrant, b: PaneGrant) bool {
         return a.pane == b.pane and a.target == b.target and a.scope == b.scope;
     }
@@ -40,22 +96,53 @@ pub const PaneGrantStore = struct {
     grants: [max_grants]PaneGrant = undefined,
     len: usize = 0,
 
-    fn contains(self: *const PaneGrantStore, g: PaneGrant) bool {
-        for (self.grants[0..self.len]) |e| if (e.eql(g)) return true;
-        return false;
+    fn find(self: *PaneGrantStore, g: PaneGrant) ?*PaneGrant {
+        for (self.grants[0..self.len]) |*e| if (e.eql(g)) return e;
+        return null;
     }
 
-    /// grant 기록(idempotent — 이미 있으면 무동작 성공). 신규가 용량 초과면 `error.Full`.
+    fn findConst(self: *const PaneGrantStore, pane: u64, target: u64, scope: capmod.ScopeClass) ?*const PaneGrant {
+        const want: PaneGrant = .{ .pane = pane, .target = target, .scope = scope };
+        for (self.grants[0..self.len]) |*e| if (e.eql(want)) return e;
+        return null;
+    }
+
+    /// grant 기록. 같은 (pane, target, scope) 가 이미 있으면 호스트만 바꾼다(다시 허용한 사이트가 새 범위다). 신규가 용량
+    /// 초과면 `error.Full`.
     pub fn grant(self: *PaneGrantStore, g: PaneGrant) error{Full}!void {
-        if (self.contains(g)) return; // dedup — grant는 유일
+        if (self.find(g)) |existing| {
+            existing.host = g.host;
+            return;
+        }
         if (self.len >= max_grants) return error.Full;
         self.grants[self.len] = g;
         self.len += 1;
     }
 
-    /// (pane, target, scope) grant 보유? browser authz 합성(control_browser)이 호출.
-    pub fn isGranted(self: *const PaneGrantStore, pane: u64, target: u64, scope: capmod.ScopeClass) bool {
-        return self.contains(.{ .pane = pane, .target = target, .scope = scope });
+    /// (pane, target, scope) grant 가 **있는가만** 본다 — 인가에는 쓰지 않는다(`authorizes`). 메뉴·revoke·시험용.
+    pub fn hasGrant(self: *const PaneGrantStore, pane: u64, target: u64, scope: capmod.ScopeClass) bool {
+        return self.findConst(pane, target, scope) != null;
+    }
+
+    /// 인가: grant 가 있고, `browser_storage` 면 대상 문서의 지금 호스트(`current_host` — http(s) 가 아니면 null)가 grant
+    /// 호스트이거나 그 하위 도메인이어야 한다. browser authz 합성(control_browser)과 확인 dedup 이 호출한다.
+    pub fn authorizes(self: *const PaneGrantStore, pane: u64, target: u64, scope: capmod.ScopeClass, current_host: ?[]const u8) bool {
+        const g = self.findConst(pane, target, scope) orelse return false;
+        if (scope != .browser_storage) return true;
+        return hostCovers(g.host.slice(), current_host orelse return false);
+    }
+
+    /// grant 가 (pane, target, scope) 자리에 **그 호스트로** 아직 있는가(실행 직전 재확인 — 사이에 다른 사이트로 다시
+    /// 허용됐으면 옛 호스트로 시작한 op 는 권한을 잃는다). `browser` 는 호스트를 보지 않는다.
+    pub fn stillGrants(self: *const PaneGrantStore, pane: u64, target: u64, scope: capmod.ScopeClass, host: *const GrantHost) bool {
+        const g = self.findConst(pane, target, scope) orelse return false;
+        return scope != .browser_storage or g.host.eql(host);
+    }
+
+    /// (pane, target, scope) grant 의 호스트(없으면 null).
+    pub fn hostOf(self: *const PaneGrantStore, pane: u64, target: u64, scope: capmod.ScopeClass) ?GrantHost {
+        const g = self.findConst(pane, target, scope) orelse return null;
+        return g.host;
     }
 
     /// 특정 grant 취소(명시 revoke). 없으면 무동작. grant가 dedup이라 유일 — 첫 매칭 swap-remove 후 종료.
@@ -96,14 +183,14 @@ pub const PaneGrantStore = struct {
 // ══ 테스트(헤드리스, Linux CI 포함 — 순수 집합 로직) ═══════════════════════════════════════════════════════════
 const testing = std.testing;
 
-test "grant + isGranted: 기록한 (pane,target,scope)만 인가, 없는 건 거부" {
+test "grant + hasGrant: 기록한 (pane,target,scope)만 인가, 없는 건 거부" {
     var store: PaneGrantStore = .{};
     try store.grant(.{ .pane = 5, .target = 11, .scope = .browser });
-    try testing.expect(store.isGranted(5, 11, .browser));
-    try testing.expect(!store.isGranted(5, 11, .browser_storage)); // scope 별도
-    try testing.expect(!store.isGranted(5, 12, .browser)); // target 별도
-    try testing.expect(!store.isGranted(6, 11, .browser)); // pane 별도
-    try testing.expect(!store.isGranted(11, 5, .browser)); // pane↔target 뒤집기 무관
+    try testing.expect(store.hasGrant(5, 11, .browser));
+    try testing.expect(!store.hasGrant(5, 11, .browser_storage)); // scope 별도
+    try testing.expect(!store.hasGrant(5, 12, .browser)); // target 별도
+    try testing.expect(!store.hasGrant(6, 11, .browser)); // pane 별도
+    try testing.expect(!store.hasGrant(11, 5, .browser)); // pane↔target 뒤집기 무관
 }
 
 test "grant idempotent: 같은 grant 반복 기록해도 len 1" {
@@ -112,16 +199,16 @@ test "grant idempotent: 같은 grant 반복 기록해도 len 1" {
     try store.grant(.{ .pane = 5, .target = 11, .scope = .browser });
     try store.grant(.{ .pane = 5, .target = 11, .scope = .browser });
     try testing.expectEqual(@as(usize, 1), store.len);
-    try testing.expect(store.isGranted(5, 11, .browser));
+    try testing.expect(store.hasGrant(5, 11, .browser));
 }
 
 test "scope 별도 grant: browser와 browser_storage는 각기 따로 확인·저장(D5)" {
     var store: PaneGrantStore = .{};
     try store.grant(.{ .pane = 5, .target = 11, .scope = .browser });
-    try testing.expect(store.isGranted(5, 11, .browser));
-    try testing.expect(!store.isGranted(5, 11, .browser_storage)); // browser가 storage 함의 안 함
+    try testing.expect(store.hasGrant(5, 11, .browser));
+    try testing.expect(!store.hasGrant(5, 11, .browser_storage)); // browser가 storage 함의 안 함
     try store.grant(.{ .pane = 5, .target = 11, .scope = .browser_storage });
-    try testing.expect(store.isGranted(5, 11, .browser) and store.isGranted(5, 11, .browser_storage));
+    try testing.expect(store.hasGrant(5, 11, .browser) and store.hasGrant(5, 11, .browser_storage));
     try testing.expectEqual(@as(usize, 2), store.len);
 }
 
@@ -130,8 +217,8 @@ test "revoke: 특정 grant만 제거, 나머지 유지" {
     try store.grant(.{ .pane = 5, .target = 11, .scope = .browser });
     try store.grant(.{ .pane = 5, .target = 12, .scope = .browser });
     store.revoke(5, 11, .browser);
-    try testing.expect(!store.isGranted(5, 11, .browser));
-    try testing.expect(store.isGranted(5, 12, .browser)); // 다른 grant 보존
+    try testing.expect(!store.hasGrant(5, 11, .browser));
+    try testing.expect(store.hasGrant(5, 12, .browser)); // 다른 grant 보존
     try testing.expectEqual(@as(usize, 1), store.len);
     store.revoke(5, 99, .browser); // 없는 grant revoke = 무동작
     try testing.expectEqual(@as(usize, 1), store.len);
@@ -144,12 +231,12 @@ test "clearAll: 부여한 grant 전부 취소(§9.2 revoke UX), 이후 isGranted
     try store.grant(.{ .pane = 7, .target = 20, .scope = .browser });
     store.clearAll();
     try testing.expectEqual(@as(usize, 0), store.len);
-    try testing.expect(!store.isGranted(5, 11, .browser));
-    try testing.expect(!store.isGranted(5, 12, .browser_storage));
-    try testing.expect(!store.isGranted(7, 20, .browser));
+    try testing.expect(!store.hasGrant(5, 11, .browser));
+    try testing.expect(!store.hasGrant(5, 12, .browser_storage));
+    try testing.expect(!store.hasGrant(7, 20, .browser));
     // clearAll 후 새 grant 정상.
     try store.grant(.{ .pane = 1, .target = 2, .scope = .browser });
-    try testing.expect(store.isGranted(1, 2, .browser));
+    try testing.expect(store.hasGrant(1, 2, .browser));
 }
 
 test "removeSurface: surface가 pane이든 target이든 걸린 grant 전부 제거(무관 grant 보존)" {
@@ -159,10 +246,10 @@ test "removeSurface: surface가 pane이든 target이든 걸린 grant 전부 제�
     try store.grant(.{ .pane = 11, .target = 20, .scope = .browser }); // 11=pane
     try store.grant(.{ .pane = 5, .target = 20, .scope = .browser }); // 11 무관
     store.removeSurface(11); // 11이 pane이든 target이든 전부
-    try testing.expect(!store.isGranted(5, 11, .browser));
-    try testing.expect(!store.isGranted(5, 11, .browser_storage));
-    try testing.expect(!store.isGranted(11, 20, .browser));
-    try testing.expect(store.isGranted(5, 20, .browser)); // 11 무관 grant만 남음
+    try testing.expect(!store.hasGrant(5, 11, .browser));
+    try testing.expect(!store.hasGrant(5, 11, .browser_storage));
+    try testing.expect(!store.hasGrant(11, 20, .browser));
+    try testing.expect(store.hasGrant(5, 20, .browser)); // 11 무관 grant만 남음
     try testing.expectEqual(@as(usize, 1), store.len);
 }
 
@@ -180,7 +267,70 @@ test "bounded: max_grants 초과 신규는 Full, 초과 상태서 기존 grant �
     // 하나 revoke하면 다시 여유.
     store.revoke(1, 0, .browser);
     try store.grant(.{ .pane = 1, .target = 999, .scope = .browser });
-    try testing.expect(store.isGranted(1, 999, .browser));
+    try testing.expect(store.hasGrant(1, 999, .browser));
+}
+
+test "browser_storage 는 허용한 호스트와 그 하위 도메인에서만 인가한다 — 다른 사이트로 옮긴 탭은 거절" {
+    var store: PaneGrantStore = .{};
+    try store.grant(.{ .pane = 5, .target = 11, .scope = .browser_storage, .host = GrantHost.init("GitHub.com") });
+    try testing.expect(store.authorizes(5, 11, .browser_storage, "github.com"));
+    try testing.expect(store.authorizes(5, 11, .browser_storage, "gist.github.com"));
+    try testing.expect(store.authorizes(5, 11, .browser_storage, "a.b.GITHUB.com"));
+    try testing.expect(!store.authorizes(5, 11, .browser_storage, "mybank.co.kr")); // 탭을 옮겨 은행 쿠키 — 거절
+    try testing.expect(!store.authorizes(5, 11, .browser_storage, "evilgithub.com")); // 점 경계
+    try testing.expect(!store.authorizes(5, 11, .browser_storage, "github.com.evil.io"));
+    try testing.expect(!store.authorizes(5, 11, .browser_storage, "com"));
+    try testing.expect(!store.authorizes(5, 11, .browser_storage, null)); // data:·about: — 문서 호스트 없음
+    try testing.expect(!store.authorizes(5, 12, .browser_storage, "github.com")); // 다른 탭
+    // 하위 도메인 grant 는 부모·형제를 덮지 않는다.
+    try store.grant(.{ .pane = 5, .target = 13, .scope = .browser_storage, .host = GrantHost.init("mail.google.com") });
+    try testing.expect(!store.authorizes(5, 13, .browser_storage, "google.com"));
+    try testing.expect(!store.authorizes(5, 13, .browser_storage, "drive.google.com"));
+    try testing.expect(store.authorizes(5, 13, .browser_storage, "x.mail.google.com"));
+    // 빈 호스트로 남은 grant 는 아무 호스트도 인가하지 않는다.
+    try store.grant(.{ .pane = 5, .target = 14, .scope = .browser_storage });
+    try testing.expect(!store.authorizes(5, 14, .browser_storage, "github.com"));
+    // browser scope 는 호스트를 보지 않는다.
+    try store.grant(.{ .pane = 5, .target = 11, .scope = .browser });
+    try testing.expect(store.authorizes(5, 11, .browser, "mybank.co.kr"));
+    try testing.expect(store.authorizes(5, 11, .browser, null));
+}
+
+test "다시 허용하면 호스트가 바뀌고, 옛 호스트로 시작한 op 는 stillGrants 에서 권한을 잃는다" {
+    var store: PaneGrantStore = .{};
+    const old = GrantHost.init("github.com");
+    try store.grant(.{ .pane = 5, .target = 11, .scope = .browser_storage, .host = old });
+    try testing.expect(store.stillGrants(5, 11, .browser_storage, &old));
+    const new = GrantHost.init("gitlab.com");
+    try store.grant(.{ .pane = 5, .target = 11, .scope = .browser_storage, .host = new });
+    try testing.expectEqual(@as(usize, 1), store.len); // 자리는 하나
+    try testing.expect(!store.authorizes(5, 11, .browser_storage, "github.com"));
+    try testing.expect(store.authorizes(5, 11, .browser_storage, "gitlab.com"));
+    try testing.expect(!store.stillGrants(5, 11, .browser_storage, &old));
+    try testing.expect(store.stillGrants(5, 11, .browser_storage, &new));
+    store.revoke(5, 11, .browser_storage);
+    try testing.expect(!store.stillGrants(5, 11, .browser_storage, &new));
+}
+
+test "hostOfUrl: http(s) 호스트만 — 다른 스킴과 호스트 없는 URL 은 null" {
+    try testing.expectEqualStrings("github.com", hostOfUrl("https://github.com/ohah/maru?x=1").?);
+    try testing.expectEqualStrings("127.0.0.1", hostOfUrl("http://127.0.0.1:8080/a").?);
+    try testing.expectEqualStrings("Mail.Google.com", hostOfUrl("HTTPS://Mail.Google.com").?);
+    try testing.expect(hostOfUrl("data:text/html,hi") == null);
+    try testing.expect(hostOfUrl("about:blank") == null);
+    try testing.expect(hostOfUrl("file:///etc/passwd") == null);
+    try testing.expect(hostOfUrl("not a url") == null);
+    try testing.expect(hostOfUrl("") == null);
+    // 사용자 정보로 호스트를 속여도 진짜 호스트를 준다.
+    try testing.expectEqualStrings("evil.io", hostOfUrl("https://github.com@evil.io/").?);
+}
+
+test "GrantHost: 상한을 넘거나 빈 호스트는 빈 값" {
+    try testing.expectEqual(@as(u8, 0), GrantHost.init("").len);
+    const long = [_]u8{'a'} ** (max_host_bytes + 1);
+    try testing.expectEqual(@as(u8, 0), GrantHost.init(&long).len);
+    const max = [_]u8{'a'} ** max_host_bytes;
+    try testing.expectEqual(@as(u8, max_host_bytes), GrantHost.init(&max).len);
 }
 
 test {

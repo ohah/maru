@@ -1144,7 +1144,7 @@ enum BrowserControl {
 
     // 5f-4c: browser.getCookies → WKHTTPCookieStore.getAllCookies(async). **§9.4 D5 browser_storage scope**(base
     // browser로는 불인가 — authz가 거름). Zig serializeGetCookiesResult가 배열을 파싱해 `{"result":{"cookies":[...]}}`로 싣는다.
-    // **범위 결정(clean-room, 22차 [0] 정정)**: 비신뢰 browser 패널들은 `browserDataStore`(static nonPersistent) **하나를
+    // **범위 결정(clean-room, 22차 [0] 정정)**: 비신뢰 browser 패널들은 `browserDataStore`(static — macOS 14+ 영속) **하나를
     // 공유**한다(탭 간 로그인 유지 — 라인 1005~1008). 따라서 getAllCookies는 **모든 패널 origin의 쿠키**를 준다 →
     // 대상 surface의 현재 문서 host로 **반드시 필터**해야 다른 패널(예: 은행 로그인 탭)의 세션 쿠키가 안 샌다(D5 교차-surface
     // 격리 = §8.3 권한상승 차단). WebDriver getCookies의 "현재 문서에 보이는 쿠키" 시맨틱 그대로. (초판은 "패널마다 격리
@@ -1978,6 +1978,23 @@ private func runBrowserEventSmokeClient(socketPath: String, sid: UInt64, nonceHe
     return seen.isEmpty ? "pending" : seen.sorted().joined(separator: ",")
 }
 
+// W3a(D6): browser 탭 저장소를 스모크 요약에 싣는다. macOS 14+ 는 영속·기본(신뢰) 저장소와 다른 객체·디렉터리가 0700 이고
+// 백업 제외여야 한다. 11~13 은 비영속이 계약이라 persistent=false 로 싣고 판정 스크립트가 버전을 보고 가른다.
+@MainActor
+private func browserDataStoreProbe() -> (persistent: Bool, isolated: Bool, backupExcluded: String) {
+    let store = MaruWebPanelView.browserDataStore
+    let isolated = store !== WKWebsiteDataStore.default() && store !== MaruWebPanelView.filePanelDataStore
+    guard #available(macOS 14.0, *) else { return (store.isPersistent, isolated, "n/a") }
+    guard let dir = MaruWebPanelView.browserDataStoreDirectory() else { return (store.isPersistent, isolated, "no-dir") }
+    let excluded = (try? dir.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup) ?? nil
+    let mode = (try? FileManager.default.attributesOfItem(atPath: dir.path)[.posixPermissions] as? NSNumber)?.intValue ?? -1
+    // WebKit 이 실제로 이 디렉터리에 썼는가 — 경로 추정(`browserDataStoreDirectory`)이 틀리면 우리가 만든 빈 디렉터리만
+    // 백업 제외되고 진짜 저장소는 딴 곳에 남는다.
+    let used = ((try? FileManager.default.contentsOfDirectory(atPath: dir.path))?.isEmpty == false)
+    let verdict = (excluded == true && mode == 0o700 && used) ? "true" : "excluded=\(excluded.map { String($0) } ?? "nil") mode=\(String(mode, radix: 8)) used=\(used)"
+    return (store.isPersistent, isolated, verdict)
+}
+
 // 5e-2b-2(테스트 전용): JSON-RPC 응답 한 줄에서 `result` 객체를 파싱한다(hand-rolled 문자열 스캔 대신 — 17차 [5]:
 // escape 따옴표 있는 URL도 정확). 파싱 불가·result 없음이면 nil.
 private func browserCtlResult(_ line: String) -> [String: Any]? {
@@ -2620,10 +2637,43 @@ final class MaruWebPanelView: NSView {
     // 필수(리뷰12 [0]): 공백·`<`·`>`가 raw면 macOS 11-13의 legacy CFURL 파서가 URL(string:)=nil로 거부해 navigate 실패·
     // fixture silent false-green. 인코딩하면 전 지원 OS에서 파싱된다. 디코드 결과=`<h1 id=t>maru5d</h1>`(id=t라 getElementById('t') 매칭).
     nonisolated static let browserFixtureURL = "data:text/html,%3Cmeta%20http-equiv=Content-Security-Policy%20content=%22default-src%20%27none%27%3B%20script-src%20%27none%27%22%3E%3Ch1%20id=t%3Emaru5d%3C/h1%3E"
-    // 7e-0: 비신뢰(browser) 패널이 **공유**하는 ephemeral(비영속) 웹사이트 데이터스토어. 쿠키·localStorage·캐시가 디스크에
-    // 안 남고(비영속, 종료 시 소멸) 신뢰 콘텐츠(maru-app://, 기본 persistent store)와 **격리**된다(§7 untrusted 격리). browser
-    // 탭들끼리는 공유(브라우저 세션 시맨틱 — 탭 간 로그인 유지). 앱 전역 1개(static lazy). 임의 웹 로드(7e-2) 전 안전 확보.
-    static let browserDataStore = WKWebsiteDataStore.nonPersistent()
+    // 7e-0: 비신뢰(browser) 패널이 **공유**하는 웹사이트 데이터스토어. 신뢰 콘텐츠(maru-app://, 기본 persistent store)와
+    // **격리**된다(§7 untrusted 격리). browser 탭들끼리는 공유(탭 간 로그인). 앱 전역 1개(static lazy).
+    // **D6(로그인 유지, docs/plans/web-osr-backend.md)**: macOS 14+ 는 격리된 **영속** 저장소(`forIdentifier`)라 재시작 뒤에도
+    // 로그인이 남는다. 11~13 에는 격리된 영속 저장소 API 가 없어(`.default()` 는 신뢰 저장소와 같다) 지금처럼 비영속이다.
+    // 저장소 디렉터리는 WebKit 보다 먼저 0700·Time Machine 백업 제외로 만든다 — 쿠키 파일이 평문(`Cookies.binarycookies`,
+    // 실측)이라 백업 디스크에 쓸 수 있는 로그인 쿠키가 남지 않게(CEF 프로필과 같은 규칙, D7). WebKit 은 미리 만든
+    // 디렉터리를 그대로 쓰고 권한·표시가 유지됐다(W3a 착수 전 실측).
+    static let browserDataStore: WKWebsiteDataStore = {
+        if #available(macOS 14.0, *) {
+            prepareBrowserDataStoreDirectory()
+            return WKWebsiteDataStore(forIdentifier: browserDataStoreIdentifier)
+        }
+        return .nonPersistent()
+    }()
+    // 번들 ID 마다 WebKit 저장소가 따로라(개발 빌드·설치본이 갈린다) 고정 값이면 된다. 바꾸면 사용자 로그인이 사라진다.
+    static let browserDataStoreIdentifier = UUID(uuidString: "5A4F0B7E-6C1D-4E2A-9B8F-3D7C2E1A0F64")!
+
+    /// WebKit 이 `forIdentifier` 저장소를 두는 곳 — `~/Library/WebKit/<번들 ID>/WebsiteDataStore/<uuid 소문자>`(실측 위치).
+    static func browserDataStoreDirectory() -> URL? {
+        guard let library = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first else { return nil }
+        let owner = Bundle.main.bundleIdentifier ?? ProcessInfo.processInfo.processName
+        return library.appendingPathComponent("WebKit", isDirectory: true)
+            .appendingPathComponent(owner, isDirectory: true)
+            .appendingPathComponent("WebsiteDataStore", isDirectory: true)
+            .appendingPathComponent(browserDataStoreIdentifier.uuidString.lowercased(), isDirectory: true)
+    }
+
+    /// 저장소 디렉터리를 0700 으로 만들고(있으면 권한을 좁힌다) 백업 제외를 단다. 실패해도 브라우저는 돈다 — 저장소는
+    /// WebKit 이 만들고, 백업 제외만 빠진다(스모크가 `browser_data_store_backup_excluded` 로 본다).
+    private static func prepareBrowserDataStoreDirectory() {
+        guard var dir = browserDataStoreDirectory() else { return }
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try? dir.setResourceValues(values)
+    }
     // 로컬 HTML은 살아있는 스크립트+CSP 없음이므로 browser 탭의 쿠키 세션과 공유하지 않는다. 도크 HTML끼리만
     // 공유하는 별도 ephemeral store라 디스크 영속도 없고 browser credential도 보이지 않는다.
     static let filePanelDataStore = WKWebsiteDataStore.nonPersistent()
@@ -6876,6 +6926,16 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// 전부 Zig(dispatchAuthenticated→browserOpFromRequest), 여긴 op→WKWebView API 어댑터 + 완료 콜백만. 소유권:
     /// arg는 이 호출 중에만 유효(Zig 안정 슬롯)라 즉시 String으로 복사. surface 부재=status 1(error)로 완료(누설 없이).
     /// 큐가 남았을 수 있어 0 반환까지 loop drain(op ≤ max, 유한). 서버 미시작이면 첫 호출이 0 반환(무동작).
+    /// 방금 꺼낸 browser op 의 허용 호스트(빈 = 검사 없음). `take_browser_op` 바로 뒤에만 부른다. 버퍼가 모자라다는
+    /// 답(SIZE_MAX)이면 어떤 호스트도 덮지 않는 값을 돌려줘 거절되게 한다(검사 없음으로 열리지 않게).
+    private func takenBrowserOpRequiredHost() -> String {
+        var buf = [UInt8](repeating: 0, count: 256)
+        let n = buf.withUnsafeMutableBufferPointer { maru_macos_control_taken_browser_op_required_host($0.baseAddress, $0.count) }
+        if n == 0 { return "" }
+        guard n <= buf.count else { return ".invalid-required-host." }
+        return String(decoding: buf[0 ..< n], as: UTF8.self)
+    }
+
     private func drainBrowserOps() {
         guard controlServerStarted else { return }
         while true {
@@ -6887,10 +6947,19 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             guard maru_macos_control_take_browser_op(&asyncId, &surfaceId, &opKind, &argPtr, &argLen) == 1 else { return }
             // arg는 이 호출 중에만 유효(다음 take가 덮어씀) — 즉시 복사한다.
             let arg = (argPtr != nil && argLen > 0) ? String(decoding: UnsafeBufferPointer(start: argPtr, count: argLen), as: UTF8.self) : ""
+            let requiredHost = takenBrowserOpRequiredHost()
             // surface_id로 그 web 패널을 소유한 창(일반 창·quick)을 찾는다. 없으면(패널이 닫힘 등) error로 완료.
             guard let surface = surfaceOwning(byId: surfaceId), let wp = surface.webPanels[surfaceId],
                   wp.panelKind == 1, wp.filePanelKind == 0 else {
                 maru_macos_control_complete_browser_op(asyncId, opKind == 15 ? 4 : 1, nil, 0)
+                continue
+            }
+            // 쿠키 권한은 사이트에(docs/plans/web-osr-backend.md): 확인 grant 로 인가된 쿠키 저장소 op 는 **지금** 문서가
+            // 허용한 호스트(또는 하위 도메인)일 때만 실행한다. Zig 는 dispatch 때 봤지만, 그 뒤 실행까지 사이에 탭이 다른
+            // 사이트로 갔을 수 있다 — 쿠키 저장소를 만지기 직전인 여기가 마지막 관문이다.
+            if [4, 6, 7, 11].contains(opKind), !requiredHost.isEmpty,
+               !BrowserControl.hostMayUseDomain(wp.webView.url?.host, requiredHost) {
+                maru_macos_control_complete_browser_op(asyncId, 5, nil, 0)
                 continue
             }
             switch opKind {
@@ -13433,6 +13502,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             web_panel_kind=\(wp?.panelKind ?? 99)
             web_panel_scheme_handler_registered=\(schemeRegistered)
             web_panel_data_store_persistent=\(wp?.webView.configuration.websiteDataStore.isPersistent ?? true)
+            browser_data_store_persistent=\(browserDataStoreProbe().persistent)
+            browser_data_store_isolated=\(browserDataStoreProbe().isolated)
+            browser_data_store_backup_excluded=\(browserDataStoreProbe().backupExcluded)
             web_nav_url_swift=\(wp?.navUrl ?? "pending")
             web_nav_url_zig=\(navUrlZig)
             bridge_world_registered=\(wp?.bridgeWorld != nil)

@@ -129,13 +129,17 @@ pub fn destroy(gpa: std.mem.Allocator, surface_id: u64) void {
 pub fn pump(gpa: std.mem.Allocator, now_ms: i64) void {
     gpa_ref = gpa;
     reapRetiring(gpa, now_ms);
+    const generation = process_generation;
     const p = if (process) |*p| p else return;
     _ = lsp_process.flush(p, gpa) catch {};
     const read = lsp_process.readInto(p, gpa, &inbox, 256 * 1024) catch .eof;
     drainInbox(gpa, now_ms);
-    if (read == .eof or lsp_process.reapIfExited(p)) return crashed(gpa, now_ms);
+    // 비우는 사이 sidecar 가 끝났거나(`profile_in_use` 로 멈춤) 다시 떴다 — 위의 `read`·`p` 는 옛 프로세스의 것이다.
+    // 처음엔 그대로 이어가 옛 EOF 로 새 sidecar 를 또 죽은 것으로 세거나, 비운 optional 을 읽었다(적대 점검).
+    if (process == null or process_generation != generation) return;
+    if (read == .eof or lsp_process.reapIfExited(&process.?)) return crashed(gpa, now_ms);
     if (state == .starting and now_ms - started_ms > handshake_timeout_ms) {
-        lsp_process.kill(p, .KILL);
+        lsp_process.kill(&process.?, .KILL);
         return crashed(gpa, now_ms);
     }
 }

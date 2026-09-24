@@ -1,7 +1,11 @@
 //! 들여쓰기 안내선 — 제품 배선(visual-mapping §5.1c).
 //!
-//! **판정은 `session/editor/indent_guides.zig` 가 한다.** 여기는 ① 간격 추정을 **문서가 들어올 때 한 번** 하고 들고 있다(`finishAttach` 가 버린다 —
-//! VS Code 도 모델을 만들 때 한 번) ② 그려질 줄 근처의 **창**만 단계를 센다 ③ primary caret 의 활성 블록을 그 창에 표시한다 ④ offSide 언어를 가른다.
+//! **판정은 `session/editor/indent_guides.zig` 가 한다.** 여기는 ① 간격 추정을 **Term 에 문서가 처음 그려질 때 한 번** 하고 들고 있다 ② 그려질 줄
+//! 근처의 **창**만 단계를 센다 ③ primary caret 의 활성 블록을 그 창에 표시한다 ④ offSide 언어를 가른다.
+//!
+//! **다시 읽어도 다시 추정하지 않는다.** 디스크 변경을 받아들이는 길(`confirmReload`)은 같은 Term 에 **편집으로** 내용을 넣는데, VS Code 도 같은
+//! 자리(`ModelService.updateModel`)가 편집으로 넣고 추정을 다시 하지 않는다 — 추정은 모델을 만들 때(`_setModelOptionsForModel`)뿐이다. 문서를
+//! 여는 길(`finishAttach` 를 부르는 넷)은 전부 **새 Term** 을 만들어 캐시가 빈 채로 온다.
 const std = @import("std");
 const maru = @import("maru");
 const app_session_mod = @import("../app_session.zig");
@@ -14,7 +18,7 @@ const frame = maru.chrome.components.editor_view.frame;
 pub const window_lines: usize = 256;
 
 pub const State = struct {
-    /// 이 문서의 추정(§5.1c). `null` 이면 아직 안 했다 — 다음 프레임이 한다.
+    /// 이 문서의 추정(§5.1c). `null` 이면 아직 안 했다 — 다음 프레임이 한다(새 Term 은 늘 여기서 시작한다).
     guess: ?guides.Guess = null,
     rows: std.ArrayList(frame.GuideLine) = .empty,
     doc_lines: std.ArrayList(u32) = .empty,
@@ -27,11 +31,6 @@ pub const State = struct {
         self.doc_lines.deinit(allocator);
         self.levels.deinit(allocator);
         self.* = .{};
-    }
-
-    /// 문서가 새로 들어왔다 — 추정을 버린다(다시 읽은 파일은 들여쓰기가 달라졌을 수 있다).
-    pub fn forgetDocument(self: *State) void {
-        self.guess = null;
     }
 };
 
@@ -62,7 +61,9 @@ pub fn window(self: *AppSession, term: *Term) Window {
     const none: Window = .{};
     const cfg = self.loaded_config.config.editor;
     if (!cfg.guides_indentation) return none;
-    if (term.rt.editor_diff != null) return none; // 비교 뷰 — 축이 둘이다(§5.1c)
+    // 비교 뷰 — 축이 둘이다(§5.1c). **이중 방어다**(적대적 1회차 P11: 등가) — 이 함수를 부르는 `paneDecorations` 는 단일 편집기 경로에서만
+    // 불린다(§5.1b 의 괄호 가드와 같다).
+    if (term.rt.editor_diff != null) return none;
     const doc = term.rt.editor_doc orelse return none;
     const st = &term.rt.editor_guides;
     const src: DocLines = .{ .lines = doc.file.lines, .content = doc.file.content };
@@ -100,16 +101,22 @@ pub fn window(self: *AppSession, term: *Term) Window {
     if (cfg.guides_highlight_active_indentation) {
         if (term.rt.editor_selection) |sel| {
             const caret_line = doc.file.lines.lineAt(@min(sel.focus, doc.file.content.len));
+            // 그려진 범위로 묶는 것은 **비용**이다 — 창 안의 줄은 묶든 안 묶든 같은 줄이 활성이고, 달라지는 것은 그려지지 않는 창 밖뿐이다(적대적
+            // 1회차 P10: 등가). VS Code 도 보이는 범위로 묶는다.
             act = guides.active(src, p, caret_line, st.doc_lines.items[0], st.doc_lines.items[n - 1]);
         }
     }
     for (0..n) |i| {
         const vi = first + i;
+        // 값 없는 칸은 접힘 구간 합이 잠시 어긋날 때 배열 꼬리를 채우는 **방어용 빈 줄**뿐이라(`rebuildVisible`) 평소엔 닿지 않는다(적대적 1회차
+        // P8: 등가). 닿으면 내용 없는 그 행에 앞 줄의 선이 비칠 것을 막는다.
         const placeholder = folded and (vi >= numbers.len or numbers[vi] == null);
         const count: u16 = if (placeholder) 0 else st.levels.items[i];
         var active_level: u16 = 0;
         if (act) |a| {
             const d = st.doc_lines.items[i];
+            // `count >= level` 은 그리기로는 등가다(적대적 1회차 P7) — 프레임은 `k ≤ count` 인 선만 긋는다. 둔 이유는 뜻이다: 창의 값이 그 줄에
+            // 실제로 있는 선만 가리킨다.
             if (d >= a.start and d <= a.end and count >= a.level) active_level = @intCast(a.level);
         }
         st.rows.items[i] = .{ .count = count, .active = active_level };

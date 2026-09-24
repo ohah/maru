@@ -74,6 +74,8 @@ pub fn guess(src: anytype, default_tab: u16) Guess {
     var size: usize = @max(default_spaces, 1);
     if (spaces_mode) {
         var score: usize = 0;
+        // 순서는 **동률에서만** 뜻이 있다(더 큰 점수만 바꾸므로 앞 후보가 남는다). 2·4 동률은 아래 규칙이 어차피 2 로 정해 둘의 순서는 답을
+        // 안 바꾼다(적대적 1회차 G5: 4 를 앞에 둬도 등가) — 뜻이 있는 동률은 2·3 같은 짝이다(`IG1`).
         for ([_]usize{ 2, 4, 6, 8, 3, 5, 7 }) |p| {
             if (counts[p] > score) {
                 score = counts[p];
@@ -210,6 +212,7 @@ pub fn levels(src: anytype, p: Params, lines: []const u32, out: []u16) void {
             }
             above_known = true;
         }
+        // `<=` 와 `<` 는 같다(적대적 1회차 G13: 등가) — 이 갈래는 공백만인 줄에서만 오고 `below_ln` 은 늘 내용 줄이라 지금 줄과 같을 수 없다.
         if (!below_known or (below_ln != null and below_ln.? <= ln)) {
             below_ln = null;
             below_col = null;
@@ -326,6 +329,27 @@ test "IG1 간격 추정 — 공백 2·4, 탭 파일, 2 가 4 의 2/3 이상이�
     // 정렬 — `const a = 1,` 아래 여섯 칸은 안 센다. **세면 6 이 이기는 표본이라야 갈린다**: 정렬 줄 둘이 6 을 넷 만들고 진짜 들여쓰기는 2 가 둘이다
     const align_src = Lines{ .items = &.{ "const a = 1,", "      b = 2;", "const c = 3,", "      d = 4;", "f {", "  x;", "}" } };
     try testing.expectEqual(@as(u8, 2), guess(align_src, 4).spaces);
+    // **섞인 들여쓰기는 차이로 안 센다**(탭과 공백이 한 줄에 — 적대적 1회차 G6). 4 칸 줄 셋에 섞인 줄·공백 줄 짝 다섯: 섞인 줄을 세면 2 칸이
+    // 다섯 쌓여 2 가 된다
+    var mixed_items: [16][]const u8 = undefined;
+    var mi: usize = 0;
+    for (0..3) |_| {
+        mixed_items[mi] = "a";
+        mixed_items[mi + 1] = "    b";
+        mi += 2;
+    }
+    for (0..5) |_| {
+        mixed_items[mi] = "\t  m";
+        mixed_items[mi + 1] = "    n";
+        mi += 2;
+    }
+    try testing.expectEqual(@as(u8, 4), guess(Lines{ .items = mixed_items[0..mi] }, 4).spaces);
+    // **탭 수와 공백 수가 함께 다르면 공백 차이를 탭 차이로 나눈다**(`\t\t` 와 여덟 칸 → 4, 적대적 1회차 G7 — 나누지 않으면 8)
+    const tabs_to_spaces = Lines{ .items = &.{ "\t\tx", "        y", "\t\tx", "        y", "\t\tx", "        y", "\t\tx", "        y", "        z" } };
+    try testing.expectEqual(Guess{ .tabs = false, .spaces = 4 }, guess(tabs_to_spaces, 3));
+    // **동률은 앞 후보** — 2 칸 둘 · 3 칸 둘이면 2(3 을 앞에 두면 3)
+    const tie = Lines{ .items = &.{ "a", "  b", "a", "   c", "a" } };
+    try testing.expectEqual(@as(u8, 2), guess(tie, 4).spaces);
     // 들여쓴 줄이 없으면 기본 폭(공백 모드 — VS Code 기본 `insertSpaces`)
     const flat = Lines{ .items = &.{ "a", "b" } };
     try testing.expectEqual(Guess{ .tabs = false, .spaces = 4 }, guess(flat, 4));
@@ -337,6 +361,8 @@ test "IG2 공백만인 줄의 단계 — 처음·끝 0, 위가 얕으면 위 블
     try testing.expectEqual(@as(u32, 1), whitespaceLevel(false, 0, 4, 4)); // 위 블록 안: 1 + 0/4
     try testing.expectEqual(@as(u32, 2), whitespaceLevel(false, 4, 8, 4));
     try testing.expectEqual(@as(u32, 1), whitespaceLevel(false, 4, 4, 4)); // 같으면 ceil(4/4)
+    // **간격의 배수가 아닌 열**이라야 올림·내림이 갈린다 — 위 표본은 전부 배수라 `ceil` 을 `floor` 로 바꿔도 초록이었다(적대적 1회차 G10)
+    try testing.expectEqual(@as(u32, 2), whitespaceLevel(false, 6, 6, 4));
     try testing.expectEqual(@as(u32, 1), whitespaceLevel(false, 8, 0, 4)); // 끝나는 블록 안: 1 + 0/4
     try testing.expectEqual(@as(u32, 0), whitespaceLevel(true, 8, 0, 4)); // offSide: 아래 블록과 같이
     try testing.expectEqual(@as(u32, 2), whitespaceLevel(true, 8, 6, 4)); // offSide: ceil(6/4)
@@ -370,6 +396,14 @@ test "IG3 줄마다 단계 — 내용 줄은 ceil, 빈 줄은 이웃으로, 탭�
     var out2: [4]u16 = undefined;
     levels(hid, p, &sparse, &out2);
     try testing.expectEqualSlices(u16, &.{ 0, 1, 2, 1 }, &out2);
+    // **빈 줄이 이어지면** 한 줄씩 묻는 `levelAt` 도 위 내용 줄까지 올라간다 — 바로 윗줄만 보면 둘째 빈 줄의 위가 「없다」가 되어 0 이다(적대적
+    // 1회차 G19: 표본의 빈 줄이 다 내용 줄 바로 아래라 초록이었다). `levelAt` 은 활성 블록이 쓴다.
+    const two_blank = Lines{ .items = &.{ "a {", "    b", "", "", "    c", "}" } };
+    const tb = [_]u32{ 0, 1, 2, 3, 4, 5 };
+    var tb_out: [6]u16 = undefined;
+    levels(two_blank, p, &tb, &tb_out);
+    try testing.expectEqual(@as(u16, 1), tb_out[3]);
+    try testing.expectEqual(@as(u32, 1), levelAt(two_blank, p, 3));
     // 간격 2 — 같은 문서가 더 촘촘해진다
     var out3: [8]u16 = undefined;
     levels(src, .{ .tab_width = 4, .unit = 2 }, &all, &out3);

@@ -4900,6 +4900,19 @@ test "IGF2 랩은 첫 조각에만 · 위젯 행 없음 · 가로로 굴리면 �
     try testing.expectEqual(@as(i32, 0), qs[0].rect.y);
     try testing.expect(qs[1].rect.y > 2 * 16);
 
+    // **들여쓰기가 한 행 폭보다 깊어도** 이어짐 조각에는 없다 — 보통은 이어짐의 시작 열이 들여쓰기보다 뒤라 「화면 왼쪽 밖」 검사가 대신 걸러
+    // 조각 검사를 지워도 초록이었다(적대적 1회차 F1). 70 칸 들여쓰기는 첫 행 폭을 넘어 둘째 행으로 이어진다.
+    const deep_indent = " " ** 70 ++ "x";
+    const dl = [_][]const u8{deep_indent};
+    var pd = testProps(&dl, true);
+    const drow = [_]GuideLine{.{ .count = 35 }};
+    pd.indent_guides = .{ .rows = &drow };
+    pd.guide_unit = 2;
+    var bd: TestBuffers = .{};
+    const wd = build(pd, bd.scratch());
+    var dq_buf: [64]draw.Op.Quad = undefined;
+    for (guideQuads(bd.ops[0..wd.ops], &dq_buf)) |q| try testing.expectEqual(@as(i32, 0), q.rect.y); // 전부 첫 행
+
     // 위젯 행: 앵커 줄의 첨자를 들어도 선이 없다
     const wl = [_][]const u8{ "a", "  b" };
     var pw = testProps(&wl, false);
@@ -4957,4 +4970,26 @@ test "IGF3 안내선이 서도 막대가 안 잘린다 — op 합계에 든다 (
     const p1 = build(props, b1.scratch());
     try testing.expectEqual(p0.ops + 11 * 2, p1.ops); // 보이는 11 행 × 두 선
     try testing.expect(std.meta.eql(last_plain, b1.ops[p1.ops - 1]));
+}
+
+test "IGF4 안내선이 저장소를 다 채우려 해도 막대 몫은 남는다 — 검색과 같은 예약 (§5.1c)" {
+    // 깊게 들여쓴 줄이 화면을 채우면 안내선이 op 저장소를 먹는다(100 행 × 30 단계 = 3,000 > 2,560). 예약이 없으면 **막대가 사라진다** — 넉넉한
+    // 저장소로만 재서 예약을 지워도 초록이었다(적대적 1회차 F7). 저장소를 좁혀 경쟁을 실제로 만든다.
+    var many: [15][]const u8 = undefined;
+    for (&many) |*l| l.* = "    alpha";
+    var props = testProps(&many, false);
+    props.visible_rows = 11;
+    var b0: TestBuffers = .{};
+    const p0 = build(props, b0.scratch());
+    try testing.expect(p0.scrollbar != null);
+    const last_plain = b0.ops[p0.ops - 1];
+    var rows: [15]GuideLine = undefined;
+    for (&rows) |*r| r.* = .{ .count = 2 };
+    props.indent_guides = .{ .rows = &rows };
+    props.guide_unit = 2;
+    var b1: TestBuffers = .{};
+    var s1 = b1.scratch();
+    s1.ops = s1.ops[0 .. p0.ops + 5]; // 안내선 22 개가 들어갈 자리가 없다
+    const p1 = build(props, s1);
+    try testing.expect(std.meta.eql(last_plain, s1.ops[p1.ops - 1])); // 마지막 op 는 그대로 막대
 }

@@ -2524,7 +2524,7 @@ highlightActiveIndentation: true, bracketPairs: false }`.
 | --- | --- | --- |
 | **켜고 끄기** | `editor.guides-indentation`(기본 켬) · `editor.guides-highlight-active-indentation`(기본 켬) | VS Code `guides.indentation` · `guides.highlightActiveIndentation`(그쪽의 `'always'` 는 괄호 안내선과만 갈리므로 참·거짓 둘) |
 | **들여쓰기 열** | `fold.indentOf` — **접힘과 같은 함수**(공백 1열 · 탭은 다음 탭스톱 · 공백만이면 없음). VS Code `computeIndentLevel` 과 같은 규칙이다 | 두 출처 금지 |
-| **간격** | **문서에서 추정한 들여쓰기 폭** — VS Code `guessIndentation` 규칙 그대로(탭 줄이 많으면 탭 파일 → `editor.tab-width`). **열 때 한 번** 추정하고 문서를 다시 읽을 때 다시 한다(VS Code 도 모델을 만들 때 한 번). 탭 파일은 「탭이다」만 들어 설정을 바꾸면 따라간다. **이 추정은 안내선에만 쓴다** — `Tab` 키가 넣는 것·탭의 표시 폭은 지금대로(설정) | VS Code `detectIndentation`(기본 켬). 설정 폭만 쓰면 2 칸 들여쓰기 파일(TS·JS·JSON 에 흔하다)에서 선이 중첩과 어긋난다 |
+| **간격** | **문서에서 추정한 들여쓰기 폭** — VS Code `guessIndentation` 규칙 그대로(탭 줄이 많으면 탭 파일 → `editor.tab-width`). **Term 에 문서가 처음 그려질 때 한 번** 추정한다(VS Code 도 모델을 만들 때 한 번). **디스크에서 다시 읽어도 다시 추정하지 않는다** — 그 길(`confirmReload`)은 같은 Term 에 편집으로 넣고, VS Code 도 같은 자리(`ModelService.updateModel`)가 편집으로 넣고 추정을 다시 하지 않는다(원문 확인). 탭 파일은 「탭이다」만 들어 설정을 바꾸면 따라간다. **이 추정은 안내선에만 쓴다** — `Tab` 키가 넣는 것·탭의 표시 폭은 지금대로(설정) | VS Code `detectIndentation`(기본 켬). 설정 폭만 쓰면 2 칸 들여쓰기 파일(TS·JS·JSON 에 흔하다)에서 선이 중첩과 어긋난다 |
 | **단계 수** | 위 VS Code 규칙 그대로(공백만인 줄은 위·아래 내용 줄로). offSide 는 Python — 우리 번들 grammar 중 VS Code 가 offSide 로 두는 언어 | VS Code |
 | **자리** | 단계 `k` 선 = 본문 시작 + 표시 열 `(k−1) × 간격` − 가로 스크롤, 폭 **1px**, 행 높이. 가로로 굴려 그 열이 화면 밖이면 안 긋는다 | VS Code. **1px 세로 quad 는 선다** — 캡처 픽셀로 쟀다(1px·2px 세로선이 같은 세기로 섰다; §4.1i 의 높이 1px 가로 사각이 지워진 것과 다르다) |
 | **랩** | **첫 조각에만** — 우리 랩은 이어짐 행을 0 열에서 시작하므로 VS Code 의 `'none'` 과 같은 경우다 | VS Code `BlockSubsequent`. 이어짐 들여쓰기(`'same'`)가 오면 그때 잇는다 |

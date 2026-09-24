@@ -34,6 +34,21 @@ const writeText = fields.writeText;
 const readText = fields.readText;
 const writeService = fields.writeService;
 const readService = fields.readService;
+const writeModifiers = fields.writeModifiers;
+const readModifiers = fields.readModifiers;
+const writeExtent = fields.writeExtent;
+const readExtent = fields.readExtent;
+const writePoint = fields.writePoint;
+const readPoint = fields.readPoint;
+const writeRange = fields.writeRange;
+const readRange = fields.readRange;
+const writeRect = fields.writeRect;
+const readRect = fields.readRect;
+const MouseKind = message_mod.MouseKind;
+const MouseButton = message_mod.MouseButton;
+const KeyKind = message_mod.KeyKind;
+const EditCommandKind = message_mod.EditCommandKind;
+const WebCursor = message_mod.WebCursor;
 
 /// Caller-owned output 에 frame 을 만든다. 성공 반환값만큼만 pipe 에 써야 한다.
 pub fn encode(message: Message, out: []u8) Error!usize {
@@ -75,6 +90,59 @@ pub fn encode(message: Message, out: []u8) Error!usize {
         .nav_action => |value| {
             try writeBrowser(&cursor, value.browser);
             try cursor.writeByte(@intFromEnum(value.action));
+        },
+        .mouse => |value| {
+            if (!fields.validClickCount(value)) return error.InvalidClickCount;
+            try writeBrowser(&cursor, value.browser);
+            try cursor.writeByte(@intFromEnum(value.kind));
+            try cursor.writeByte(@intFromEnum(value.button));
+            try writePoint(&cursor, value.point);
+            try writeModifiers(&cursor, value.modifiers);
+            try cursor.writeByte(value.click_count);
+        },
+        .wheel => |value| {
+            try writeBrowser(&cursor, value.browser);
+            try writePoint(&cursor, value.point);
+            try writeExtent(&cursor, value.delta_x);
+            try writeExtent(&cursor, value.delta_y);
+            try writeModifiers(&cursor, value.modifiers);
+        },
+        .key => |value| {
+            try writeBrowser(&cursor, value.browser);
+            try cursor.writeByte(@intFromEnum(value.kind));
+            try writeModifiers(&cursor, value.modifiers);
+            try cursor.writeByte(value.windows_key_code);
+            try cursor.writeByte(value.native_key_code);
+            try cursor.writeU16(value.character);
+            try cursor.writeU16(value.unmodified_character);
+        },
+        .ime_set_composition => |value| {
+            try writeBrowser(&cursor, value.browser);
+            try writeRange(&cursor, value.selection);
+            try writeRange(&cursor, value.replacement);
+            try writeText(&cursor, value.text);
+        },
+        .ime_commit_text => |value| {
+            try writeBrowser(&cursor, value.browser);
+            try writeRange(&cursor, value.replacement);
+            try writeText(&cursor, value.text);
+        },
+        .ime_finish_composing => |value| {
+            try writeBrowser(&cursor, value.browser);
+            try cursor.writeByte(@intFromBool(value.value));
+        },
+        .ime_cancel_composition, .capture_lost => |browser| try writeBrowser(&cursor, browser),
+        .edit_command => |value| {
+            try writeBrowser(&cursor, value.browser);
+            try cursor.writeByte(@intFromEnum(value.command));
+        },
+        .cursor_changed => |value| {
+            try writeBrowser(&cursor, value.browser);
+            try cursor.writeByte(@intFromEnum(value.cursor));
+        },
+        .ime_range => |value| {
+            try writeBrowser(&cursor, value.browser);
+            try writeRect(&cursor, value.bounds);
         },
         .url_changed => |value| {
             try writeBrowser(&cursor, value.browser);
@@ -154,6 +222,57 @@ pub fn decodeExact(frame: []const u8) Error!Message {
             .browser = try readBrowser(&cursor),
             .action = std.enums.fromInt(NavActionKind, try cursor.readByte()) orelse return error.UnknownNavAction,
         } },
+        .mouse => blk: {
+            const mouse: message_mod.Mouse = .{
+                .browser = try readBrowser(&cursor),
+                .kind = std.enums.fromInt(MouseKind, try cursor.readByte()) orelse return error.UnknownMouseKind,
+                .button = std.enums.fromInt(MouseButton, try cursor.readByte()) orelse return error.UnknownMouseButton,
+                .point = try readPoint(&cursor),
+                .modifiers = try readModifiers(&cursor),
+                .click_count = try cursor.readByte(),
+            };
+            if (!fields.validClickCount(mouse)) return error.InvalidClickCount;
+            break :blk .{ .mouse = mouse };
+        },
+        .wheel => .{ .wheel = .{
+            .browser = try readBrowser(&cursor),
+            .point = try readPoint(&cursor),
+            .delta_x = try readExtent(&cursor),
+            .delta_y = try readExtent(&cursor),
+            .modifiers = try readModifiers(&cursor),
+        } },
+        .key => .{ .key = .{
+            .browser = try readBrowser(&cursor),
+            .kind = std.enums.fromInt(KeyKind, try cursor.readByte()) orelse return error.UnknownKeyKind,
+            .modifiers = try readModifiers(&cursor),
+            .windows_key_code = try cursor.readByte(),
+            .native_key_code = try cursor.readByte(),
+            .character = try cursor.readU16(),
+            .unmodified_character = try cursor.readU16(),
+        } },
+        .ime_set_composition => .{ .ime_set_composition = .{
+            .browser = try readBrowser(&cursor),
+            .selection = try readRange(&cursor),
+            .replacement = try readRange(&cursor),
+            .text = try readText(&cursor),
+        } },
+        .ime_commit_text => .{ .ime_commit_text = .{
+            .browser = try readBrowser(&cursor),
+            .replacement = try readRange(&cursor),
+            .text = try readText(&cursor),
+        } },
+        .ime_finish_composing => .{ .ime_finish_composing = .{ .browser = try readBrowser(&cursor), .value = try readBool(&cursor) } },
+        .ime_cancel_composition => .{ .ime_cancel_composition = try readBrowser(&cursor) },
+        .capture_lost => .{ .capture_lost = try readBrowser(&cursor) },
+        .edit_command => .{ .edit_command = .{
+            .browser = try readBrowser(&cursor),
+            .command = std.enums.fromInt(EditCommandKind, try cursor.readByte()) orelse return error.UnknownEditCommand,
+        } },
+        .cursor_changed => .{ .cursor_changed = .{
+            .browser = try readBrowser(&cursor),
+            .cursor = std.enums.fromInt(WebCursor, try cursor.readByte()) orelse return error.UnknownCursor,
+        } },
+        .ime_range => .{ .ime_range = .{ .browser = try readBrowser(&cursor), .bounds = try readRect(&cursor) } },
         .url_changed => .{ .url_changed = .{ .browser = try readBrowser(&cursor), .url = try readUrl(&cursor) } },
         .nav_state => .{ .nav_state = .{
             .browser = try readBrowser(&cursor),
@@ -462,4 +581,132 @@ test "frame_channel carries the service name and the 128-bit token, and refuses 
     var frame: [256]u8 = undefined;
     const body = [_]u8{ 3, 'a', 0x01, 'b' } ++ [_]u8{0} ** 16;
     try std.testing.expectError(error.InvalidServiceName, decodeExact(handFrame(&frame, .frame_channel, &body)));
+}
+
+// ── 입력(W4) ─────────────────────────────────────────────────────────────────────────────────────────────
+
+comptime {
+    // 가장 큰 입력 frame(IME 조합 + 글 상한)도 frame 상한 안에 든다.
+    std.debug.assert(prefix_len + common_len + 8 + 8 + 8 + 4 + max_text_bytes <= max_frame_bytes);
+}
+
+test "input messages round trip" {
+    const drag: message_mod.Mouse = .{ .browser = 7, .kind = .move, .point = .{ .x = -40, .y = 900 }, .modifiers = .{ .left_button = true, .shift = true } };
+    const moved = (try roundTrip(.{ .mouse = drag })).mouse;
+    try std.testing.expectEqual(drag, moved);
+    const click: message_mod.Mouse = .{ .browser = 7, .kind = .down, .button = .right, .point = .{ .x = 10, .y = 20 }, .click_count = 2 };
+    try std.testing.expectEqual(click, (try roundTrip(.{ .mouse = click })).mouse);
+
+    const wheel: message_mod.Wheel = .{ .browser = 7, .point = .{ .x = 1, .y = 2 }, .delta_x = -3, .delta_y = 120, .modifiers = .{ .precise_scroll = true } };
+    try std.testing.expectEqual(wheel, (try roundTrip(.{ .wheel = wheel })).wheel);
+
+    // Ctrl+E: 제어 문자와 원 글자를 함께 싣는다.
+    const key: message_mod.Key = .{ .browser = 7, .kind = .raw_down, .modifiers = .{ .control = true }, .windows_key_code = 'E', .native_key_code = 14, .character = 0x05, .unmodified_character = 'e' };
+    try std.testing.expectEqual(key, (try roundTrip(.{ .key = key })).key);
+
+    const composing = (try roundTrip(.{ .ime_set_composition = .{ .browser = 7, .text = "안", .selection = .{ .start = 1, .end = 1 } } })).ime_set_composition;
+    try std.testing.expectEqualStrings("안", composing.text);
+    try std.testing.expectEqual(@as(u32, 1), composing.selection.end);
+    try std.testing.expect(composing.replacement.isNone());
+    const committed = (try roundTrip(.{ .ime_commit_text = .{ .browser = 7, .text = "", .replacement = .{ .start = 0, .end = 2 } } })).ime_commit_text;
+    try std.testing.expectEqualStrings("", committed.text);
+    try std.testing.expectEqual(@as(u32, 2), committed.replacement.end);
+    try std.testing.expect((try roundTrip(.{ .ime_finish_composing = .{ .browser = 7, .value = true } })).ime_finish_composing.value);
+    try std.testing.expectEqual(@as(u64, 7), (try roundTrip(.{ .ime_cancel_composition = 7 })).ime_cancel_composition);
+    try std.testing.expectEqual(@as(u64, 7), (try roundTrip(.{ .capture_lost = 7 })).capture_lost);
+    try std.testing.expectEqual(EditCommandKind.select_all, (try roundTrip(.{ .edit_command = .{ .browser = 7, .command = .select_all } })).edit_command.command);
+
+    try std.testing.expectEqual(WebCursor.ibeam, (try roundTrip(.{ .cursor_changed = .{ .browser = 7, .cursor = .ibeam } })).cursor_changed.cursor);
+    const range: message_mod.ImeRange = .{ .browser = 7, .bounds = .{ .x = -2, .y = 30, .width = 16, .height = 18 } };
+    try std.testing.expectEqual(range, (try roundTrip(.{ .ime_range = range })).ime_range);
+}
+
+test "input directions: commands go to the sidecar, cursor and ime range come back" {
+    inline for (.{ Tag.mouse, Tag.wheel, Tag.key, Tag.ime_set_composition, Tag.ime_commit_text, Tag.ime_finish_composing, Tag.ime_cancel_composition, Tag.edit_command, Tag.capture_lost }) |tag|
+        try std.testing.expectEqual(message_mod.Direction.to_sidecar, tag.direction());
+    try std.testing.expectEqual(message_mod.Direction.to_maru, Tag.cursor_changed.direction());
+    try std.testing.expectEqual(message_mod.Direction.to_maru, Tag.ime_range.direction());
+}
+
+test "input closed fields fail closed both ways" {
+    var buf: [256]u8 = undefined;
+    const body = prefix_len + common_len;
+    const extent = message_mod.max_pointer_extent;
+
+    // 정의되지 않은 수식자 비트.
+    var bad_modifiers: message_mod.Modifiers = .{};
+    bad_modifiers._reserved = 1;
+    try std.testing.expectError(error.InvalidModifiers, encode(.{ .wheel = .{ .browser = 1, .point = .{ .x = 0, .y = 0 }, .delta_x = 0, .delta_y = 0, .modifiers = bad_modifiers } }, &buf));
+    var len = try encode(.{ .key = .{ .browser = 1, .kind = .up } }, &buf);
+    buf[body + 8 + 1] = 0x80; // 수식자 u16 의 높은 바이트 — 예약 비트
+    try std.testing.expectError(error.InvalidModifiers, decodeExact(buf[0..len]));
+
+    // 좌표·스크롤 양 상한(절댓값) — 경계는 받고 하나 넘으면 거절.
+    _ = try encode(.{ .mouse = .{ .browser = 1, .kind = .move, .point = .{ .x = -extent, .y = extent } } }, &buf);
+    try std.testing.expectError(error.InvalidCoordinate, encode(.{ .mouse = .{ .browser = 1, .kind = .move, .point = .{ .x = extent + 1, .y = 0 } } }, &buf));
+    try std.testing.expectError(error.InvalidCoordinate, encode(.{ .wheel = .{ .browser = 1, .point = .{ .x = 0, .y = 0 }, .delta_x = 0, .delta_y = -extent - 1 } }, &buf));
+    len = try encode(.{ .mouse = .{ .browser = 1, .kind = .move, .point = .{ .x = 0, .y = 0 } } }, &buf);
+    std.mem.writeInt(i32, buf[body + 10 ..][0..4], std.math.minInt(i32), .big); // @abs 넘침 없이 거절
+    try std.testing.expectError(error.InvalidCoordinate, decodeExact(buf[0..len]));
+
+    // 클릭 수: down·up 은 1~3, move·leave 는 0.
+    try std.testing.expectError(error.InvalidClickCount, encode(.{ .mouse = .{ .browser = 1, .kind = .down, .point = .{ .x = 0, .y = 0 } } }, &buf));
+    try std.testing.expectError(error.InvalidClickCount, encode(.{ .mouse = .{ .browser = 1, .kind = .leave, .point = .{ .x = 0, .y = 0 }, .click_count = 1 } }, &buf));
+    len = try encode(.{ .mouse = .{ .browser = 1, .kind = .up, .point = .{ .x = 0, .y = 0 }, .click_count = 3 } }, &buf);
+    buf[len - 1] = 4;
+    try std.testing.expectError(error.InvalidClickCount, decodeExact(buf[0..len]));
+
+    // 닫힌 enum.
+    len = try encode(.{ .mouse = .{ .browser = 1, .kind = .move, .point = .{ .x = 0, .y = 0 } } }, &buf);
+    var bad = buf;
+    bad[body + 8] = 4;
+    try std.testing.expectError(error.UnknownMouseKind, decodeExact(bad[0..len]));
+    bad = buf;
+    bad[body + 9] = 3;
+    try std.testing.expectError(error.UnknownMouseButton, decodeExact(bad[0..len]));
+    len = try encode(.{ .key = .{ .browser = 1, .kind = .char } }, &buf);
+    buf[body + 8] = 4;
+    try std.testing.expectError(error.UnknownKeyKind, decodeExact(buf[0..len]));
+    len = try encode(.{ .edit_command = .{ .browser = 1, .command = .undo } }, &buf);
+    buf[body + 8] = 8;
+    try std.testing.expectError(error.UnknownEditCommand, decodeExact(buf[0..len]));
+    len = try encode(.{ .cursor_changed = .{ .browser = 1, .cursor = .arrow } }, &buf);
+    buf[body + 8] = 13;
+    try std.testing.expectError(error.UnknownCursor, decodeExact(buf[0..len]));
+
+    // 범위: 거꾸로·상한 밖은 거절, 「없음」은 받는다.
+    try std.testing.expectError(error.InvalidRange, encode(.{ .ime_commit_text = .{ .browser = 1, .text = "a", .replacement = .{ .start = 2, .end = 1 } } }, &buf));
+    try std.testing.expectError(error.InvalidRange, encode(.{ .ime_set_composition = .{ .browser = 1, .text = "a", .selection = .{ .start = 0, .end = max_text_bytes + 1 } } }, &buf));
+    len = try encode(.{ .ime_set_composition = .{ .browser = 1, .text = "a" } }, &buf);
+    std.mem.writeInt(u32, buf[body + 8 ..][0..4], 5, .big); // 「없음」의 한쪽만 바꿔 start 5 > end maxInt 아님 → 상한 밖
+    try std.testing.expectError(error.InvalidRange, decodeExact(buf[0..len]));
+
+    // IME 글도 제어 문자·잘못된 UTF-8 을 거절한다.
+    try std.testing.expectError(error.ControlCharacter, encode(.{ .ime_commit_text = .{ .browser = 1, .text = "a\x1b" } }, &buf));
+
+    // 사각형 크기 상한.
+    try std.testing.expectError(error.InvalidCoordinate, encode(.{ .ime_range = .{ .browser = 1, .bounds = .{ .x = 0, .y = 0, .width = @as(u32, @intCast(extent)) + 1, .height = 1 } } }, &buf));
+}
+
+test "every single-byte corruption of input frames decodes to valid fields or errors" {
+    const samples = [_]Message{
+        .{ .mouse = .{ .browser = 3, .kind = .down, .button = .middle, .point = .{ .x = 5, .y = -6 }, .modifiers = .{ .command = true }, .click_count = 1 } },
+        .{ .wheel = .{ .browser = 3, .point = .{ .x = 5, .y = 6 }, .delta_x = 7, .delta_y = -8 } },
+        .{ .key = .{ .browser = 3, .kind = .char, .character = 'a', .unmodified_character = 'a' } },
+        .{ .ime_set_composition = .{ .browser = 3, .text = "아", .selection = .{ .start = 0, .end = 1 } } },
+        .{ .ime_range = .{ .browser = 3, .bounds = .{ .x = 1, .y = 2, .width = 3, .height = 4 } } },
+    };
+    var encoded: [256]u8 = undefined;
+    var corrupted: [256]u8 = undefined;
+    for (samples) |sample| {
+        const len = try encode(sample, &encoded);
+        for (0..len) |i| for ([_]u8{ 0x00, 0x01, 0x7F, 0x80, 0xFF }) |value| {
+            @memcpy(corrupted[0..len], encoded[0..len]);
+            corrupted[i] = value;
+            const message = decodeExact(corrupted[0..len]) catch continue;
+            // 풀렸다면 다시 만들 수 있어야 한다 — encode 와 decode 가 같은 규칙을 지난다.
+            var again: [256]u8 = undefined;
+            _ = try encode(message, &again);
+        };
+    }
 }

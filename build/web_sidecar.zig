@@ -19,7 +19,7 @@ pub const Context = struct {
 
 /// ① 의 시험 수(inbox 2 + dispatch 8 + registry 2 + title_gate 2 + ring_receiver 8 + ring_producer 2 + 입구 파일의 `test {}` 블록 1). 시험을 더하거나 빼면 같이 고친다 —
 /// 조용히 빠지는 것을 러너가 잡는다.
-const pure_test_count = 25;
+const pure_test_count = 27;
 
 pub fn register(b: *std.Build, ctx: Context) void {
     const protocol_mod = b.createModule(.{

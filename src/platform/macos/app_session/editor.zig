@@ -41355,6 +41355,16 @@ test "BRP5 길이가 같은 편집 뒤에는 다시 센다 — 키에 revision �
     try testing.expectEqual(len_before, term.rt.editor_doc.?.file.content.len);
     term.rt.editor_selection = editor_selection.Selection.at(3);
     try testing.expectEqual(@as(usize, 0), (try boxedQuads(fx.session, term, .bracket_match_border, &got)).len);
+
+    // **revision 만 올라도 다시 센다** — 위 편집은 내용 버퍼를 새로 잡아 주소가 바뀌었고, 그래서 revision 을 키에서 빼도 초록이었다(적대적
+    // 2회차 P5). 제품의 할당자는 방금 푼 같은 크기의 자리를 돌려줄 수 있어 그 우연에 기대면 안 된다 — 주소·길이·caret 을 그대로 두고
+    // revision 하나만 움직여 잰다.
+    const before = term.rt.editor_brackets.computed;
+    _ = try boxedQuads(fx.session, term, .bracket_match_border, &got);
+    try testing.expectEqual(before, term.rt.editor_brackets.computed); // 키가 같으면 안 센다(대조군)
+    term.rt.editor_doc.?.file.revision += 1;
+    _ = try boxedQuads(fx.session, term, .bracket_match_border, &got);
+    try testing.expectEqual(before + 1, term.rt.editor_brackets.computed);
 }
 
 test "BRP6 짝이 접혀 숨은 줄에 있으면 보이는 괄호만 선다 — 숨은 괄호를 다음 보이는 줄로 옮기지 않는다 (제품 경계, §5.1b)" {

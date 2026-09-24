@@ -22,6 +22,8 @@ const app = @import("app.zig");
 const settings_mod = @import("settings.zig");
 const profile = @import("profile.zig");
 const browsers = @import("browsers.zig");
+const preferences = @import("preferences.zig");
+const watchdog = @import("watchdog.zig");
 
 /// 종료 코드. maru 는 이 값으로 알림을 못 받은 실패(채널이 없거나 닫힌 뒤)를 가른다.
 pub const ExitCode = enum(u8) {
@@ -34,6 +36,8 @@ pub const ExitCode = enum(u8) {
     reader_thread_failed = 15,
     /// 같은 프로필을 다른 sidecar 가 쥐고 있다(CEF process singleton — exit code 24 로 알려 온다).
     profile_in_use = 16,
+    /// 종료를 시작하고 `watchdog.deadline_ms` 안에 못 끝냈다 — 감시견이 끝냈다.
+    shutdown_stuck = watchdog.exit_code,
 };
 
 // CEF 콜백·읽기 스레드가 닿아야 해서 전역이다(프로세스에 하나).
@@ -67,7 +71,7 @@ fn run(init: std.process.Init) ExitCode {
     const argv = init.minimal.args.vector;
     const profile_dir = profileDir(argv) orelse return fail(.bad_arguments, .cef_initialize_failed, "missing --profile-dir=<absolute path>");
     profile.ensurePrivateDir(profile_dir) catch |err| return fail(.bad_arguments, .cef_initialize_failed, switch (err) {
-        error.NotPrivate => "profile directory is readable by other users",
+        error.NotPrivate => "profile directory is a symlink, not ours, or readable by other users",
         error.MkdirFailed => "cannot create the profile directory",
     });
     if (!profile.excludeFromBackup(profile_dir)) std.debug.print("maru-web-host: cannot exclude the profile from backups\n", .{});
@@ -90,12 +94,15 @@ fn run(init: std.process.Init) ExitCode {
         }
         return fail(.cef_initialize_failed, .cef_initialize_failed, "cef_initialize failed");
     }
+    // 브라우저를 만들기 전에 — 명령은 메시지 루프가 돌아야 처리된다.
+    const unset = preferences.apply(&g_api);
+    if (unset != 0) std.debug.print("maru-web-host: {d} product preference(s) not applied\n", .{unset});
 
     g_inbox = .{ .io = init.io };
     g_task = object.zeroed(c.cef_task_t);
     object.staticRefCounted(&g_task.base);
     g_task.execute = &drainTask;
-    const reader = std.Thread.spawn(.{}, inbox_mod.readLoop, .{ channels.commands, &g_inbox, &wakeUiThread, parent }) catch {
+    const reader = std.Thread.spawn(.{}, readThenWatch, .{ channels.commands, parent }) catch {
         g_api.shutdown();
         return fail(.reader_thread_failed, .cef_initialize_failed, "cannot start the command reader thread");
     };
@@ -108,6 +115,13 @@ fn run(init: std.process.Init) ExitCode {
     g_accepting.store(false, .release);
     g_api.shutdown();
     return .ok;
+}
+
+/// 읽기 스레드 본문. 채널이 끝나면(EOF·부모 종료) 감시견을 켠다 — UI 스레드가 멈춰 있어 종료 task 를 못 돌려도
+/// 프로세스가 남지 않게.
+fn readThenWatch(fd: c_int, parent: c_int) void {
+    inbox_mod.readLoop(fd, &g_inbox, &wakeUiThread, parent);
+    watchdog.start();
 }
 
 /// 읽기 스레드에서 부른다 — CEF UI 스레드에 상자를 비우는 task 를 올린다.

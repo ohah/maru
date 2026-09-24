@@ -16,6 +16,11 @@ pub const Api = struct {
     post_task: *const @TypeOf(c.cef_post_task),
     string_utf8_to_utf16: *const @TypeOf(c.cef_string_utf8_to_utf16),
     string_utf16_clear: *const @TypeOf(c.cef_string_utf16_clear),
+    string_utf16_to_utf8: *const @TypeOf(c.cef_string_utf16_to_utf8),
+    string_utf8_clear: *const @TypeOf(c.cef_string_utf8_clear),
+    get_exit_code: *const @TypeOf(c.cef_get_exit_code),
+    post_delayed_task: *const @TypeOf(c.cef_post_delayed_task),
+    browser_host_create_browser_sync: *const @TypeOf(c.cef_browser_host_create_browser_sync),
 };
 
 pub const LoadError = error{ FrameworkOpenFailed, SymbolMissing };
@@ -32,6 +37,11 @@ pub fn load(framework_binary: [*:0]const u8) LoadError!Api {
         .post_task = try find(handle, "cef_post_task", @TypeOf(c.cef_post_task)),
         .string_utf8_to_utf16 = try find(handle, "cef_string_utf8_to_utf16", @TypeOf(c.cef_string_utf8_to_utf16)),
         .string_utf16_clear = try find(handle, "cef_string_utf16_clear", @TypeOf(c.cef_string_utf16_clear)),
+        .string_utf16_to_utf8 = try find(handle, "cef_string_utf16_to_utf8", @TypeOf(c.cef_string_utf16_to_utf8)),
+        .string_utf8_clear = try find(handle, "cef_string_utf8_clear", @TypeOf(c.cef_string_utf8_clear)),
+        .get_exit_code = try find(handle, "cef_get_exit_code", @TypeOf(c.cef_get_exit_code)),
+        .post_delayed_task = try find(handle, "cef_post_delayed_task", @TypeOf(c.cef_post_delayed_task)),
+        .browser_host_create_browser_sync = try find(handle, "cef_browser_host_create_browser_sync", @TypeOf(c.cef_browser_host_create_browser_sync)),
     };
 }
 
@@ -44,3 +54,17 @@ fn find(handle: *anyopaque, name: [*:0]const u8, comptime F: type) LoadError!*co
 pub fn setString(api: *const Api, out: *c.cef_string_t, value: []const u8) void {
     _ = api.string_utf8_to_utf16(value.ptr, value.len, out);
 }
+
+/// CEF 문자열(UTF-16)을 `out` 에 UTF-8 로 옮긴다. 넘치면 글자 경계에서 자른다(sidecar 가 보낼 글 상한 안으로).
+pub fn readString(api: *const Api, value: [*c]const c.cef_string_t, out: []u8) []const u8 {
+    if (value == null or value.*.str == null) return out[0..0];
+    var utf8: c.cef_string_utf8_t = std.mem.zeroes(c.cef_string_utf8_t);
+    _ = api.string_utf16_to_utf8(value.*.str, value.*.length, &utf8);
+    defer api.string_utf8_clear(&utf8);
+    if (utf8.str == null) return out[0..0];
+    const clamped = protocol_text.clampUtf8(utf8.str[0..utf8.length], out.len);
+    @memcpy(out[0..clamped.len], clamped);
+    return out[0..clamped.len];
+}
+
+const protocol_text = @import("web_sidecar_protocol").text;

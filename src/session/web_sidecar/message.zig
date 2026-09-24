@@ -35,6 +35,8 @@ pub const RendererGoneReason = enum(u8) {
     crashed = 2,
     out_of_memory = 3,
     launch_failed = 4,
+    /// 코드 무결성 검사 실패(CEF TS_INTEGRITY_FAILURE).
+    integrity_failure = 5,
 };
 
 pub const FailureCode = enum(u8) {

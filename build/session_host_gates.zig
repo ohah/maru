@@ -659,7 +659,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         session_host_cr0b_step.dependOn(&run_cr0b_runtime_tests.step);
         const cr0b_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr0b_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_connection_incident_scheduler_boundary.zig"),
                 .target = target,
                 .optimize = cr0b_optimize,
             }),
@@ -698,7 +698,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         session_host_cr1_step.dependOn(&run_cr1_scheduler_tests.step);
         const cr1_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr0b_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_connection_incident_scheduler_boundary.zig"),
                 .target = target,
                 .optimize = cr1_optimize,
             }),
@@ -735,7 +735,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         session_host_cr2a_step.dependOn(&run_cr2a_generation_tests.step);
         const cr2a_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr2_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_stable_shell_generation_boundary.zig"),
                 .target = target,
                 .optimize = cr2a_optimize,
             }),
@@ -783,7 +783,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         session_host_cr2b_step.dependOn(&run_cr2b_runtime_tests.step);
         const cr2b_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr2_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_stable_shell_generation_boundary.zig"),
                 .target = target,
                 .optimize = cr2b_optimize,
             }),
@@ -844,7 +844,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const cr2c_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr2_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_stable_shell_generation_boundary.zig"),
                 .target = target,
                 .optimize = cr2c_optimize,
             }),
@@ -949,7 +949,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const cr2d1_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr2_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_stable_shell_generation_boundary.zig"),
                 .target = target,
                 .optimize = cr2d1_optimize,
             }),
@@ -984,7 +984,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const cr2d2_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr2_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_stable_shell_generation_boundary.zig"),
                 .target = target,
                 .optimize = cr2d2_optimize,
             }),
@@ -1062,7 +1062,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const cr2d3_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr2_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_stable_shell_generation_boundary.zig"),
                 .target = target,
                 .optimize = cr2d3_optimize,
             }),
@@ -1112,7 +1112,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const cr2d4_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr2_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_stable_shell_generation_boundary.zig"),
                 .target = target,
                 .optimize = cr2d4_optimize,
             }),
@@ -1151,7 +1151,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const cr2e_a_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr2_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_stable_shell_generation_boundary.zig"),
                 .target = target,
                 .optimize = cr2e_a_optimize,
             }),
@@ -1190,7 +1190,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const cr2e_b_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr2_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_stable_shell_generation_boundary.zig"),
                 .target = target,
                 .optimize = cr2e_b_optimize,
             }),
@@ -1234,7 +1234,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const cr2e_c_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr2_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_stable_shell_generation_boundary.zig"),
                 .target = target,
                 .optimize = cr2e_c_optimize,
             }),
@@ -1269,7 +1269,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const cr2e_d_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr2_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_stable_shell_generation_boundary.zig"),
                 .target = target,
                 .optimize = cr2e_d_optimize,
             }),
@@ -1304,7 +1304,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const cr2e_e1_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr2_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_stable_shell_generation_boundary.zig"),
                 .target = target,
                 .optimize = cr2e_e1_optimize,
             }),
@@ -1339,7 +1339,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const cr2e_e2a_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr2_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_stable_shell_generation_boundary.zig"),
                 .target = target,
                 .optimize = cr2e_e2a_optimize,
             }),
@@ -1374,7 +1374,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const cr2e_e2b_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr2_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_stable_shell_generation_boundary.zig"),
                 .target = target,
                 .optimize = cr2e_e2b_optimize,
             }),
@@ -1410,7 +1410,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const cr2e_e3a1_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr2_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_stable_shell_generation_boundary.zig"),
                 .target = target,
                 .optimize = cr2e_e3a1_optimize,
             }),
@@ -1461,7 +1461,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const cr2e_e3a2_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr2_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_stable_shell_generation_boundary.zig"),
                 .target = target,
                 .optimize = cr2e_e3a2_optimize,
             }),
@@ -1567,7 +1567,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const cr2e_e3b1_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr2_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_stable_shell_generation_boundary.zig"),
                 .target = target,
                 .optimize = cr2e_e3b1_optimize,
             }),
@@ -1617,7 +1617,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const cr2e_e3b2_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr2_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_stable_shell_generation_boundary.zig"),
                 .target = target,
                 .optimize = cr2e_e3b2_optimize,
             }),
@@ -1652,7 +1652,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const cr2e_e3c1_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr2_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_stable_shell_generation_boundary.zig"),
                 .target = target,
                 .optimize = cr2e_e3c1_optimize,
             }),
@@ -1687,7 +1687,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const cr2e_e3c2_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr2_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_stable_shell_generation_boundary.zig"),
                 .target = target,
                 .optimize = cr2e_e3c2_optimize,
             }),
@@ -1722,7 +1722,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const cr2e_e3c3_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr2_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_stable_shell_generation_boundary.zig"),
                 .target = target,
                 .optimize = cr2e_e3c3_optimize,
             }),

@@ -33,18 +33,23 @@ pub const State = struct {
     creating_size: ?ViewSize = null,
     shutting_down: bool = false,
     quit_requested: bool = false,
-    /// maru 의 받는 port(W2 — `frame_channel` 이 오기 전에는 픽셀을 보내지 않는다).
+    /// maru 의 받는 port(W2). 오기 전의 그리기는 링에 쥐어 두었다가 오면 알린다(`ring_producer` 의 `pending`).
     channel: ?ring_producer.Channel = null,
+    ring_retry_posted: bool = false,
 };
 
 pub var state: State = undefined;
 var grace_task: c.cef_task_t = undefined;
+var ring_retry_task: c.cef_task_t = undefined;
 
 pub fn init(api: *const library.Api, writer: *events.Writer) void {
     state = .{ .api = api, .writer = writer };
     grace_task = object.zeroed(c.cef_task_t);
     object.staticRefCounted(&grace_task.base);
     grace_task.execute = &graceExpired;
+    ring_retry_task = object.zeroed(c.cef_task_t);
+    object.staticRefCounted(&ring_retry_task.base);
+    ring_retry_task.execute = &retryRings;
 }
 
 pub fn handler() dispatch.Handler {
@@ -66,9 +71,7 @@ fn command(_: *anyopaque, message: Message, writer: *events.Writer) void {
             host.*.set_focus.?(host, @intFromBool(value.value));
         },
         .navigate => |value| navigate(value, writer),
-        .frame_channel => |value| {
-            state.channel = ring_producer.Channel.connect(value.service, value.token) catch return fail(writer, 0, .frame_channel_failed, "cannot look up the frame channel");
-        },
+        .frame_channel => |value| frameChannel(value, writer),
         else => {},
     }
 }
@@ -189,12 +192,52 @@ fn producerOf(entry: *registry_mod.Entry) *ring_producer.Producer {
     return @ptrCast(@alignCast(entry.frames.?));
 }
 
-/// 그리기 콜백에서 부른다 — 본 화면 픽셀을 이 브라우저의 링에 넣는다. 받는 port 가 없거나 maru 가 받지 못하면 버린다.
+/// 받는 port 를 (다시) 정한다. 두 번째면 옛 권리를 놓고, 이미 있는 링을 새 받는 쪽에 다시 알린다 — 그리기가 멈춘 정적
+/// 페이지도 받는 port 가 늦게 오거나 바뀐 뒤 링을 받는다.
+fn frameChannel(value: protocol.message.FrameChannel, writer: *events.Writer) void {
+    const fresh = ring_producer.Channel.connect(value.service, value.token) catch return fail(writer, 0, .frame_channel_failed, "cannot look up the frame channel");
+    if (state.channel) |old| {
+        old.close();
+        for (&state.registry.slots) |*slot| {
+            if (slot.*) |*entry| producerOf(entry).reannounce();
+        }
+    }
+    state.channel = fresh;
+    postRingRetry(0);
+}
+
+/// 그리기 콜백에서 부른다 — 본 화면 픽셀을 이 브라우저의 링에 넣는다. 아직 못 알린 링이면 재시도를 건다.
 pub fn deliverFrame(entry: *registry_mod.Entry, source: iosurface.Ref) void {
-    const channel = if (state.channel) |*channel| channel else return;
-    producerOf(entry).paint(channel, source) catch |err| {
+    const channel: ?*const ring_producer.Channel = if (state.channel) |*channel| channel else null;
+    const now = client.nowMs();
+    const painted = producerOf(entry).paint(channel, source, now) catch |err| {
         std.debug.print("maru-web-host: frame for browser {d} dropped: {s}\n", .{ entry.id, @errorName(err) });
+        return;
     };
+    if (painted == .pending) if (producerOf(entry).retryAt()) |at| postRingRetry(at -| now);
+}
+
+/// 못 알린 링을 다시 알릴 task 를 하나만 올린다. 받는 port 가 없으면 올리지 않는다(`frame_channel` 이 올린다).
+fn postRingRetry(delay_ms: u64) void {
+    if (state.channel == null or state.ring_retry_posted) return;
+    state.ring_retry_posted = true;
+    _ = state.api.post_delayed_task(c.TID_UI, &ring_retry_task, @intCast(@max(delay_ms, 1)));
+}
+
+fn retryRings(_: [*c]c.cef_task_t) callconv(.c) void {
+    state.ring_retry_posted = false;
+    const channel: ?*const ring_producer.Channel = if (state.channel) |*channel| channel else null;
+    const now = client.nowMs();
+    var next: ?u64 = null;
+    for (&state.registry.slots) |*slot| {
+        if (slot.*) |*entry| {
+            const producer = producerOf(entry);
+            if (producer.flush(channel, now) == .pending) {
+                if (producer.retryAt()) |at| next = @min(next orelse at, at);
+            }
+        }
+    }
+    if (next) |at| postRingRetry(at -| now);
 }
 
 fn browserOf(entry: *registry_mod.Entry) [*c]c.cef_browser_t {

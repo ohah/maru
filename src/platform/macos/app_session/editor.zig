@@ -3162,6 +3162,48 @@ pub fn clearExtraSelections(self: *AppSession, term: *Term) void {
     term.rt.editor_extra_selections = &.{};
 }
 
+/// **겹치는 커서를 합친다**([문서 모델](../../../../docs/native-editor-document-model.md) §3.2 —
+/// *「편집·이동으로 두 selection 이 겹치면 하나로 합친다. 합치지 않으면 같은 위치에 중복 삽입된다」*).
+///
+/// **커서를 옮기는 경로가 부른다.** 커서를 *더하는* 쪽(`addCursorVertically`·`addNextOccurrence`)은
+/// 자기 버퍼에서 이미 합치므로 안 부른다 — 이 함수는 제품 저장소(`editor_selection` +
+/// `editor_extra_selections`)에 이미 들어앉은 것을 다시 좁히는 자리다.
+///
+/// **커서가 하나면 아무 일도 안 한다** — 할당도 없다. 단일 커서가 압도적으로 흔한 경로다.
+///
+/// **할당이 실패하면 안 합치고 만다.** 이동은 이미 섰으므로 여기서 되돌리면 사용자가 누른 키가
+/// 통째로 씹힌다 — 중복 커서가 남는 것이 덜 나쁘다(다음 이동에서 다시 시도한다).
+fn mergeCarets(self: *AppSession, term: *Term) void {
+    const extras = term.rt.editor_extra_selections;
+    if (extras.len == 0) return;
+    const primary = term.rt.editor_selection orelse return;
+
+    var buf = self.allocator.alloc(editor_selection.Selection, extras.len + 1) catch return;
+    defer self.allocator.free(buf);
+    buf[0] = primary;
+    @memcpy(buf[1..], extras);
+
+    const merged = editor_selection.mergeOverlapping(buf, 0);
+    if (merged.len == buf.len) return; // 합칠 것이 없었다 — 저장소를 안 건드린다
+
+    const items = buf[0..merged.len];
+    if (items.len == 1) {
+        term.rt.editor_selection = items[0];
+        clearExtraSelections(self, term);
+        return;
+    }
+    const grown = self.allocator.alloc(editor_selection.Selection, items.len - 1) catch return;
+    var k: usize = 0;
+    for (items, 0..) |sel, idx| {
+        if (idx == merged.primary) continue;
+        grown[k] = sel;
+        k += 1;
+    }
+    self.allocator.free(term.rt.editor_extra_selections);
+    term.rt.editor_extra_selections = grown;
+    term.rt.editor_selection = items[merged.primary];
+}
+
 /// **다음 일치를 찾아 커서를 하나 더 놓는다**(§9.1 — VSCode `⌘D`. 지금 chord는 `⌘⌃D`다).
 ///
 /// 새로 놓은 것이 **primary가 된다** — 다음에 또 누르면 그 다음 일치로 이어져야 하고, 화면이
@@ -3726,6 +3768,15 @@ pub fn moveCarets(self: *AppSession, term: *Term, how: Motion, extend: bool) boo
     if (!moved_any) return false;
 
     term.rt.editor_selection = next_primary;
+    // **옮긴 뒤 겹치면 합친다**(§3.2 — *「편집·이동으로 두 selection 이 겹치면 하나로 합친다.
+    // 합치지 않으면 같은 위치에 중복 삽입된다」*). 이 호출이 **없었다**(2026-09-25 사용자 보고):
+    // 방향키로 커서 여럿을 문서 끝·줄 끝으로 몰면 clamp 가 그것들을 **같은 offset** 으로 보내는데,
+    // 화면에는 caret 하나로 보이면서 상태는 여럿이라 **다음 타이핑이 그 수만큼 중복 삽입**됐다.
+    //
+    // 삽입 경로의 가드가 이것을 못 잡는다 — `c.start < prev.end` 는 **엄격 부등호**라 길이 0 인
+    // caret 둘(`start == end`)은 통과한다. 그 부등호는 범위끼리 **맞닿는 것**(`[0,5)`+`[5,9)`)을
+    // 허용하려고 그렇게 둔 것이라 옳고, 고칠 자리는 여기다.
+    mergeCarets(self, term);
     breakUndoGroup(term); // 커서가 편집 아닌 이유로 움직였다(§3.3)
     revealPrimaryCaret(self, term); // 화면 밖으로 나갔으면 따라간다
     self.metal_dirty = true;
@@ -8791,10 +8842,13 @@ pub fn pasteText(self: *AppSession, term: *Term, clipboard: []const u8) bool {
     // 실제로 겹치므로 뒤 것을 버린다 — 두 번 넣으면 사용자는 커서를 둘 뒀다는 이유로 **줄이 두 번**
     // 들어간 것을 본다(`PASTE7`이 판정한다).
     //
-    // **범위 겹침(아래 첫 줄)은 닿지 않는다** — `selectionsForEdit`이 부르는 `mergeOverlapping`이
-    // 이미 합쳐서 준다. 지운 뮤턴트가 살아남아 그것을 확인했다(적대적 검증 2026-08-26). 남겨 두는
-    // 이유는 **`delta`의 계약이 정렬·비겹침을 요구**하기 때문이다 — 그 전제가 깨지면 `apply`가
-    // `MalformedDelta`로 붙여넣기를 통째로 거절하므로, 여기서 한 번 더 좁히는 값이 있다.
+    // ⚠️ **`selectionsForEdit` 은 `mergeOverlapping` 을 부르지 않는다**(2026-09-25 정정). 이 주석은
+    // 그렇게 적고 있었고 «지운 뮤턴트가 살아남았다» 를 그 근거로 삼았는데, 뮤턴트가 산 이유는
+    // 「위에서 이미 합쳤다」가 아니라 **정상 경로에서 겹침이 잘 안 생겨서**였다. 실제로 방향키로
+    // 커서를 한 자리에 몰면 겹침이 저장소에 그대로 남았다 — 그쪽은 `mergeCarets` 로 고쳤다.
+    // 그러니 아래 좁히기는 **중복 방어가 아니라 이 경로의 유일한 방어**로 읽어야 한다:
+    // `delta` 계약이 정렬·비겹침을 요구하고, 깨지면 `apply` 가 `MalformedDelta` 로 붙여넣기를
+    // 통째로 거절한다.
     var dedup: std.ArrayList(maru.session.editor.delta.Change) = .empty;
     defer dedup.deinit(self.allocator);
     for (ranges.items) |c| {
@@ -23980,6 +24034,177 @@ test "EDIT2 커서가 여럿이면 모든 자리에 들어가고 뒤 커서가 �
     try testing.expectEqual(@as(usize, 3), n);
     std.mem.sort(usize, &focuses, {}, std.sort.asc(usize));
     try testing.expectEqualSlices(usize, &.{ 2, 8, 14 }, &focuses);
+}
+
+test "EDIT9 방향키로 커서가 한 자리에 몰리면 합쳐진다 — 안 합치면 타이핑이 그 수만큼 들어간다 (§3.2)" {
+    // **사용자 보고(2026-09-25)**: 방향키로 커서를 한 곳에 몰면 화면에는 caret 이 하나인데 타이핑이
+    // 커서 수만큼 중복 삽입됐다. §3.2 가 *「편집·이동으로 두 selection 이 겹치면 하나로 합친다.
+    // 합치지 않으면 같은 위치에 중복 삽입된다」* 로 금지한 바로 그 상태다 — `moveCarets` 가
+    // `mergeOverlapping` 을 안 부르고 있었다.
+    //
+    // **삽입 경로는 이것을 못 잡는다.** 그쪽 가드는 `c.start < prev.end` 라 길이 0 인 caret 둘
+    // (`start == end`)을 통과시킨다. 그 엄격 부등호는 범위끼리 **맞닿는 것**을 허용하려는 것이라
+    // 옳고, 그래서 고칠 자리가 이동 쪽이다. 이 판정자는 **둘 다** 본다 — 커서 수와 문서 내용.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "herd.txt", .data = "aa bb aa cc aa\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "herd.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+
+    // "aa" 셋에 커서 셋.
+    term.rt.editor_selection = editor_selection.Selection.fromAnchorRange(0, 2, 2, .word);
+    try testing.expect(addNextOccurrence(fx.session, term));
+    try testing.expect(addNextOccurrence(fx.session, term));
+    try testing.expectEqual(@as(usize, 2), term.rt.editor_extra_selections.len);
+
+    // **평범한 방향키로 몬다** — 사용자가 쓴 것이 `⌘↓` 가 아니라 방향키다(2026-09-25 보고).
+    // 왼쪽 끝에서 `←` 를 계속 누르면 앞선 커서가 문서 처음에 **clamp** 되고 뒤엣것이 따라붙어
+    // 같은 offset 에 모인다. 특수 모션이 아니라 **가장 흔한 키**에서 나는 것이 이 결함의 성질이다.
+    term.rt.editor_selection = editor_selection.Selection.at(1);
+    clearExtraSelections(fx.session, term);
+    const two = try allocator.alloc(editor_selection.Selection, 1);
+    two[0] = editor_selection.Selection.at(0);
+    term.rt.editor_extra_selections = two;
+    try testing.expect(moveCarets(fx.session, term, .char_left, false)); // 1→0, 0→0(clamp)
+
+    // ⑴ 셋이 하나가 된다. 안 합치면 여기가 3 이고 화면은 caret 하나로 보인다.
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_extra_selections.len);
+    var iter = selections(term);
+    try testing.expectEqual(@as(usize, 1), iter.count());
+
+    // ⑵ 그래서 타이핑이 **한 번만** 들어간다 — 이것이 사용자가 본 증상의 반대편이다.
+    try testing.expect(insertText(fx.session, term, "Z"));
+    try testing.expectEqualStrings("Zaa bb aa cc aa\n", term.rt.editor_doc.?.file.content);
+
+    // ⑶ **특수 모션에서도 같다** — `⌘↓`(doc_end) 로 몰아도 합쳐진다. 두 경로가 같은 자리를 쓰므로
+    //    한쪽만 재면 다른 쪽이 조용히 갈릴 수 있다.
+    term.rt.editor_selection = editor_selection.Selection.at(3);
+    const far = try allocator.alloc(editor_selection.Selection, 1);
+    far[0] = editor_selection.Selection.at(9);
+    if (term.rt.editor_extra_selections.len > 0) allocator.free(term.rt.editor_extra_selections);
+    term.rt.editor_extra_selections = far;
+    try testing.expect(moveCarets(fx.session, term, .doc_end, false));
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_extra_selections.len);
+}
+
+test "EDIT9b 안 겹치는 커서는 이동해도 그대로다 — 병합이 과하면 멀티 커서가 못 쓰게 된다 (§3.2)" {
+    // **가지치기가 과한 쪽이 더 나쁘다.** 합치는 규칙이 너무 넓으면 멀쩡한 커서가 사라져 멀티 커서
+    // 편집 자체가 안 된다. 그래서 「합쳐지나」와 짝으로 「안 합쳐지나」를 함께 잰다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "keep.txt", .data = "aa bb aa cc aa\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "keep.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+
+    term.rt.editor_selection = editor_selection.Selection.fromAnchorRange(0, 2, 2, .word);
+    try testing.expect(addNextOccurrence(fx.session, term));
+    try testing.expect(addNextOccurrence(fx.session, term));
+
+    // 한 글자 오른쪽 — 셋이 서로 멀리 있으므로 여전히 셋이다.
+    try testing.expect(moveCarets(fx.session, term, .char_right, false));
+    try testing.expectEqual(@as(usize, 2), term.rt.editor_extra_selections.len);
+
+    // 그리고 타이핑이 세 자리에 들어간다. **셋째는 개행 «뒤» 다** — focus 가 `\n`(14)에 있었고
+    // 오른쪽 한 칸이 문서 끝(15)이다. 처음에 `...aa Z\n` 으로 적었다가 이 판정자에 걸렸다.
+    try testing.expect(insertText(fx.session, term, "Z"));
+    try testing.expectEqualStrings("aa Zbb aa Zcc aa\nZ", term.rt.editor_doc.?.file.content);
+}
+
+test "EDIT9c 셋 중 둘만 합쳐지면 남은 것과 primary 가 제자리다 — 승계가 틀리면 화면이 엉뚱한 곳을 따라간다 (§3.2)" {
+    // **적대적 검증 1 회차가 연 구멍이다**(2026-09-25). EDIT9·EDIT9b 는 «전부 합쳐짐»과 «하나도
+    // 안 합쳐짐»만 쟀다 — 그 사이(**부분 병합**)를 아무도 안 지나가서, `items[merged.primary]` 를
+    // `items[0]` 으로 바꾼 변이도, 합친 결과를 primary 에 안 싣는 변이도 **둘 다 살아남았다.**
+    //
+    // 부분 병합이 실물에서 가장 흔한 모양이다 — 커서 여럿 중 이웃한 둘만 부딪힌다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "partial.txt", .data = "aa bb aa cc aa\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "partial.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+
+    // **primary 를 뒤쪽에 둔다** — 그래야 병합 뒤 primary 가 `items[0]` 이 아니다. 앞에 두면
+    // 정렬 결과의 0번과 우연히 같아져 승계가 틀려도 안 드러난다.
+    term.rt.editor_selection = editor_selection.Selection.at(9);
+    const extras = try allocator.alloc(editor_selection.Selection, 2);
+    extras[0] = editor_selection.Selection.at(0);
+    extras[1] = editor_selection.Selection.at(1);
+    term.rt.editor_extra_selections = extras;
+
+    // `←` — 9→8, 1→0, 0→0(clamp). 앞의 둘만 부딪힌다.
+    try testing.expect(moveCarets(fx.session, term, .char_left, false));
+
+    // ⑴ 셋이 **둘**이 된다(하나도 전부도 아니다).
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_extra_selections.len);
+
+    // ⑵ **primary 는 살아남은 그 커서**다 — 화면이 따라갈 기준이므로 엉뚱한 쪽이면 뷰가 튄다.
+    try testing.expectEqual(@as(usize, 8), term.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_extra_selections[0].focus);
+
+    // ⑶ 타이핑이 **두 자리**에 들어간다.
+    try testing.expect(insertText(fx.session, term, "Z"));
+    try testing.expectEqualStrings("Zaa bb aaZ cc aa\n", term.rt.editor_doc.?.file.content);
+}
+
+test "EDIT9d Shift+방향키로 겹친 «범위» 둘이 합쳐지면 넓어진 범위가 primary 에 실린다 (§3.2)" {
+    // **적대적 검증 2 회차가 연 구멍이다**(2026-09-25). 앞의 셋은 병합 대상이 전부 caret(길이 0)이라,
+    // 합친 결과가 합치기 전 primary 와 **바이트로 같았다** — 그래서 「합친 값을 primary 에 안 싣는」
+    // 변이가 셋 다 통과했다. 달라지려면 **범위**가 합쳐져야 하고, 그 경로가 `Shift+방향키` 다.
+    //
+    // 실물에서도 이쪽이 더 아프다: caret 이 겹치면 커서 수만 틀리지만, 범위가 겹치면 **선택이 줄어**
+    // 다음 타이핑이 사용자가 고른 것보다 적게 지운다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "ext.txt", .data = "aa bb aa cc aa\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "ext.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+
+    // 겹치는 범위 둘: [4,7) 과 [5,9). Shift+← 로 각각 focus 를 한 칸 당기면 [4,6)·[5,8) 로
+    // **여전히 겹친다** — 합치면 [4,8) 이고, 이는 합치기 전 primary([4,6))와 **다르다.**
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(4, 7);
+    const extras = try allocator.alloc(editor_selection.Selection, 1);
+    extras[0] = editor_selection.Selection.fromPoints(5, 9);
+    term.rt.editor_extra_selections = extras;
+
+    try testing.expect(moveCarets(fx.session, term, .char_left, true)); // extend = Shift
+
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_extra_selections.len);
+    const merged_sel = term.rt.editor_selection.?;
+    // **넓어진 범위가 primary 에 실려야 한다.** 안 실으면 선택이 [4,6) 으로 좁아진 채 남는다.
+    try testing.expectEqual(@as(usize, 4), merged_sel.start());
+    try testing.expectEqual(@as(usize, 8), merged_sel.end());
+
+    // 그 선택([4,8) = "b aa")을 타이핑이 통째로 대체한다. 좁아진 채였다면([4,6) = "b ")
+    // `"aa bZaa cc aa\n"` 이 되어 **"aa" 가 살아남는다** — 사용자가 고른 것보다 적게 지운 것이다.
+    try testing.expect(insertText(fx.session, term, "Z"));
+    try testing.expectEqualStrings("aa bZ cc aa\n", term.rt.editor_doc.?.file.content);
 }
 
 test "EDIT4 Backspace·Delete가 글자 단위로 지운다 — 깨진 UTF-8을 만들지 않는다 (§3.2)" {

@@ -5971,6 +5971,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // session이 하므로 Swift는 이 값을 resize에 쓰지 않는다(진단 표시 전용).
         if frame.cell_width_px > 0 { lastCellWidthPx = frame.cell_width_px }
         if frame.cell_height_px > 0 { lastCellHeightPx = frame.cell_height_px }
+        // W3c: 이 프레임에 그릴 Chromium 탭 본문(IOSurface 를 복사 없이 텍스처로). 없으면 0 장 — 비용 없음.
+        var osrQuads = [MaruAppHostOsrQuad](repeating: MaruAppHostOsrQuad(), count: 16)
+        let osrCount = osrQuads.withUnsafeMutableBufferPointer {
+            maru_macos_app_session_osr_quads(appSession, frame.generation, $0.baseAddress, $0.count)
+        }
+        osrQuads.withUnsafeBufferPointer {
+            maru_metal_renderer_set_osr_quads(renderer, $0.baseAddress, osrCount, frame.generation)
+        }
         let drew = maru_metal_renderer_draw(
             renderer,
             metalLayer,    // 터미널 물리 레이어(맨 아래)
@@ -7383,6 +7391,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             applySystemAppearanceToAllSessions()
         }
 
+        // W3c: GPU 가 끝낸 마지막 프레임 세대를 tick 전에 알린다 — Chromium 탭이 GPU 가 읽는 장을 sidecar 에 돌려주지 않게.
+        if let renderer = metalRenderer {
+            maru_macos_app_session_set_osr_completed_generation(appSession, maru_metal_renderer_osr_completed_generation(renderer))
+        }
         var summary = MaruAppHostFrameSummary()
         let status = maru_macos_app_session_tick(appSession, currentFrameLoopRateHz(), &summary)
         appSessionStatus = status

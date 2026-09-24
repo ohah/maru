@@ -173,7 +173,7 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
 }
 
 test "ABI v185 notification release end-all and cold route values match the C header" {
-    try std.testing.expectEqual(@as(u32, 190), abi_version);
+    try std.testing.expectEqual(@as(u32, 191), abi_version);
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @intFromEnum(AppInstanceLeaseResult.acquired));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_HELD), @intFromEnum(AppInstanceLeaseResult.held));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_UNSAFE), @intFromEnum(AppInstanceLeaseResult.unsafe));
@@ -4539,6 +4539,19 @@ pub export fn maru_macos_mermaid_shutdown() void {
 /// 브라우저를 닫고 프로필을 깨끗이 쓴다. **메인 스레드 전용.**
 pub export fn maru_macos_web_osr_shutdown() void {
     session_mod.web_osr.shutdownForExit();
+}
+
+/// v191(W3c): 이 창 renderer 에서 GPU 가 끝낸 마지막 프레임 세대. Swift 가 tick 전에 넣는다(GPU 소비자 규칙).
+pub export fn maru_macos_app_session_set_osr_completed_generation(session: ?*AppSession, generation: u64) void {
+    const app = session orelse return;
+    app.osr_completed_generation = generation;
+}
+
+/// v191(W3c): 이번 프레임에 그릴 Chromium 탭 본문. 그린 탭에 이 세대를 기록한다. **메인 스레드 전용.**
+pub export fn maru_macos_app_session_osr_quads(session: ?*AppSession, frame_generation: u64, out: ?[*]session_mod.web_ops.OsrQuad, out_cap: usize) usize {
+    const app = session orelse return 0;
+    const buf = out orelse return 0;
+    return session_mod.web_ops.osrQuads(app, frame_generation, buf[0..out_cap]);
 }
 
 pub export fn maru_macos_mermaid_snapshot(out_snapshot: ?*MermaidCoordinatorSnapshotAbi) void {

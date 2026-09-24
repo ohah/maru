@@ -282,7 +282,7 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 185: CR6d-v2b0b extends the read-only input probe with terminal byte/screen generation counters
 // and adds one synchronous transcript-to-canonical-evidence leaf. Raw inventories are borrowed
 // only for the call; Zig owns reduction and absent-target publication.
-pub const abi_version: u32 = 190;
+pub const abi_version: u32 = 191;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -4066,6 +4066,7 @@ pub const MeasuredTextCache = struct {
 /// `takeWebNavAction`의 반환. 익명 struct로 두면 `web.zig`로 본문을 옮길 때 허브가 만든 타입과
 /// 그룹이 만든 타입이 **서로 다른 타입**이 되어 facade를 세울 수 없다(F11에서 그래서 못 옮겼다).
 pub const WebNavAction = struct { surface_id: u64, code: u8 };
+pub const OsrLayout = struct { surface_id: u64, rect: maru.session.web_panel_layout.Rect };
 
 /// `imeCursorRect`의 반환. 위와 같은 이유로 이름을 준다(F12에서 못 옮긴 함수다).
 pub const ImeCursorRect = struct { x: f64, y: f64, w: f64, h: f64 };
@@ -6251,6 +6252,10 @@ pub const AppSession = struct {
     // 가장 최근 RenderFrame의 Metal 투영을 retain하는 owned 버퍼. metalFrame()이 이걸 가리키는
     // view를 돌려준다. metal_dirty가 true일 때만(첫 frame, 새 output, resize) 재투영한다.
     metal_buffer: metal_frame.MetalFrameBuffer = .{},
+    /// W3c: 이번 tick 에 이 창이 그릴 OSR 본문 rect(보이는 Chromium 탭).
+    osr_layouts: std.ArrayList(OsrLayout) = .empty,
+    /// W3c: 이 창 renderer 에서 GPU 가 끝낸 마지막 프레임 세대(Swift 가 tick 전에 넣는다 — GPU 소비자 규칙).
+    osr_completed_generation: u64 = 0,
     probe_frame_timing: bool = false,
     metal_dirty: bool = true,
     // [A: chrome 독립 present] 사이드바 스피너 등 "sync(2026) hold 중에도 갱신돼야 하는 chrome-only 변화" 플래그.
@@ -23556,6 +23561,7 @@ pub const AppSession = struct {
         self.web_surface_transitions.deinit(self.allocator); // Phase 4e-3: web surface 전이 batch
         self.web_cur_scratch.deinit(self.allocator); // Phase 4e: web surface 수집 영속 scratch(swap 후 옛 prev 버퍼 보유)
         self.web_leaf_rects_scratch.deinit(self.allocator); // Phase 4e: web leaf-rect 영속 scratch
+        self.osr_layouts.deinit(self.allocator); // W3c: OSR 본문 rect
         self.pane_target_rects_scratch.deinit(self.allocator); // paneTargetAt(입력 hot path) 영속 scratch
         // Phase 7e-1a: browser 웹 패널 nav 상태 — 각 엔트리의 소유 url을 free한 뒤 맵을 해제한다(prune이 살아 있는
         // 동안 stale을 지우므로 여기 남은 건 세션 종료 시점의 활성 nav 상태들뿐).

@@ -9,7 +9,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 190u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 191u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -443,6 +443,20 @@ typedef struct MaruAppHostGpuImage {
     int32_t z;
     uint32_t pass;           /* 0=below_bg, 1=below_text, 2=above_text(같은 pass 안 z 오름차순) */
 } MaruAppHostGpuImage;
+
+/* v191(W3c): Chromium(OSR) 탭 본문 한 장. iosurface 는 Zig 가 쥔 IOSurfaceRef(그리는 동안 살아 있다), dest 는 창 backing
+   px(좌상단), UV 는 장 안에서 그릴 부분(장이 DIP 올림이라 rect 보다 크거나 같다 — 늘리지 않고 자른다). */
+typedef struct MaruAppHostOsrQuad {
+    void *iosurface;
+    float dest_x;
+    float dest_y;
+    float dest_w;
+    float dest_h;
+    float u0;
+    float v0;
+    float u1;
+    float v1;
+} MaruAppHostOsrQuad;
 
 /* kitty graphics 이미지 텍스처 업로드 디스크립터(K2). Zig metal_frame.GpuImageUpload와 1:1. generation이 바뀐
    (신규/재transmit) 이미지만 들어온다 — renderer가 image_id로 텍스처를 캐시하고 여기 있는 것만 (재)업로드한다.
@@ -2052,6 +2066,12 @@ void maru_macos_mermaid_shutdown(void);
 /* v190(W3b): 앱 종료 때 Chromium sidecar(웹 OSR)를 내린다 — shutdown 뒤 최대 3 초 기다리고 남았으면 죽인다.
    개발용 환경변수(MARU_WEB_OSR_DIR)로 켜지 않았으면 무동작. 메인 스레드에서만. */
 void maru_macos_web_osr_shutdown(void);
+/* v191(W3c): 이 창 renderer 에서 GPU 가 끝낸 마지막 프레임 세대를 넣는다 — tick 전에 부른다. OSR 탭은 지금 front 를
+   그린 프레임이 끝나기 전에는 새 프레임을 꺼내지 않는다(front 를 sidecar 에 돌려주면 GPU 가 읽는 장을 덮는다). */
+void maru_macos_app_session_set_osr_completed_generation(MaruAppHostSession *session, uint64_t generation);
+/* v191(W3c): 이번에 그릴 프레임(세대 frame_generation)의 Chromium 탭 본문 사각형을 out 에 채우고 수를 돌려준다. 그린 탭에는
+   이 세대가 기록된다. 메인 스레드에서만. */
+size_t maru_macos_app_session_osr_quads(MaruAppHostSession *session, uint64_t frame_generation, MaruAppHostOsrQuad *out, size_t out_cap);
 void maru_macos_mermaid_snapshot(MaruMermaidCoordinatorSnapshot *out_snapshot);
 /* allocation-free frame-tick gate와 exact renderer lifetime revoke. */
 uint32_t maru_macos_mermaid_has_work(void);

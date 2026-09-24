@@ -7,7 +7,8 @@
 //!   parent-death     maru 역할 프로세스를 SIGKILL 하면 host 와 helper 가 모두 사라진다(고아 Chromium 없음) — 명령 pipe 의
 //!                    쓰기 끝을 손자(maru 가 띄운 셸 흉내)가 쥐고 있어 EOF 가 오지 않아도
 //!   no-crash         판정 동안 `maru-web-*` 크래시 보고가 하나도 새로 생기지 않는다
-//! W1c 판정은 `browsers_check.zig`, W2 판정은 `frames_check.zig` 가 든다. 하나라도 틀리면 exit 1.
+//! W1c 판정은 `browsers_check.zig`, W2 판정은 `frames_check.zig`, W4 입력 판정은 `input_check.zig` 가 든다. 하나라도
+//! 틀리면 exit 1. `maru-web-judge --input <설치 디렉터리> <프로필 뿌리>` 는 입력 판정만 돈다.
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -17,6 +18,7 @@ const sandbox = @import("sandbox.zig");
 const http = @import("http.zig");
 const browsers_check = @import("browsers_check.zig");
 const frames_check = @import("frames_check.zig");
+const input_check = @import("input_check.zig");
 const attacks = @import("attacks.zig");
 
 const helper_wait_ms = 20_000;
@@ -41,6 +43,15 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     const argv = init.args.vector;
     if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--rogue")) return frames_check.rogueMain(std.mem.span(argv[2]), std.mem.span(argv[3]));
     if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--attack")) return attacks.main(std.mem.span(argv[2]), std.mem.span(argv[3]));
+    if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--input")) {
+        _ = signal(13, 1);
+        var host_buf: [1024]u8 = undefined;
+        const host = std.fmt.bufPrintZ(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}) catch return 2;
+        var profile_buf: [1024]u8 = undefined;
+        const profile = std.fmt.bufPrintZ(&profile_buf, "--profile-dir={s}/e", .{std.mem.span(argv[3])}) catch return 2;
+        inputChecks(host, profile);
+        return if (failures == 0) 0 else 1;
+    }
     if (argv.len != 3) {
         std.debug.print("사용: maru-web-judge <설치 디렉터리> <프로필 뿌리>\n", .{});
         return 2;
@@ -71,6 +82,9 @@ pub fn main(init: std.process.Init.Minimal) u8 {
         const frames_log = std.fmt.bufPrintZ(&frames_log_buf, "{s}/frames-host.log", .{profile_root}) catch return 2;
         frames_check.run(&reportText, argv[0], host_path, profile_d, frames_log, server.port) catch |err| report(false, "frames", "{s}", .{@errorName(err)});
     } else |err| report(false, "browsers", "HTTP 서버: {s}", .{@errorName(err)});
+    var profile_e_buf: [1024]u8 = undefined;
+    const profile_e = std.fmt.bufPrintZ(&profile_e_buf, "--profile-dir={s}/e", .{profile_root}) catch return 2;
+    inputChecks(host_path, profile_e);
     parentDeath(host_path, profile_b) catch |err| report(false, "parent-death", "{s}", .{@errorName(err)});
 
     // 크래시 보고는 ReportCrash 가 몇 초 늦게 쓴다.
@@ -186,4 +200,10 @@ fn allGone(pids: []const c_int, timeout_ms: u32) bool {
         os.sleepMs(100);
     }
     return false;
+}
+
+/// 입력 판정(W4). HTTP 서버는 판정마다 새로 연다(입력만 돌 때도 같은 페이지를 쓴다).
+fn inputChecks(host_path: [:0]const u8, profile: [:0]const u8) void {
+    const server = http.Server.start() catch |err| return report(false, "input", "HTTP 서버: {s}", .{@errorName(err)});
+    input_check.run(&reportText, host_path, profile, server.port) catch |err| report(false, "input", "{s}", .{@errorName(err)});
 }

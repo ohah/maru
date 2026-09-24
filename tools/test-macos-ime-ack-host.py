@@ -177,6 +177,10 @@ class Controller {
  func recordSessionHostInputSmokeMarked() { smokeMarks+=1 }
  func editorOwnsChord(_ event:NSEvent)->Bool { ownsChord }
  func handleKeyDown(_ event:NSEvent) { keyCalls+=1 }
+ // Chromium(OSR) 탭 갈래 — 이 하네스의 사례는 모두 터미널·편집기 키 대상이다(OSR 은 web-osr 스모크가 본다).
+ var osrKeyboardActive=false
+ func imeCommand() {}
+ func handleOsrKeyEquivalent(_ event:NSEvent, commitComposition:()->Bool)->Bool { false }
  static let statusOK: Int32 = 0
  var appSession: UnsafeMutableRawPointer? = UnsafeMutableRawPointer(bitPattern: 1)
 @@METHOD3@@

@@ -73,7 +73,7 @@ sidecar 는 maru 앱 프로세스마다 **하나**다. CEF 는 `root_cache_path`
 **Mermaid helper 선례를 따른다(사용자 결정 2026-09-24, W1 착수 전 공격 #4)** — 계획 초안의 socketpair 대신:
 
 - maru 가 sidecar 를 spawn 하고 그 **stdin 으로 명령**, **stdout 으로 알림**을 받는다. frame 모양·상한·방향은
-  순수 Zig codec [`src/session/web_sidecar/`](../../src/session/web_sidecar/)(`wire`·`message`·`fields`·`codec`·`stream`·`text` —
+  순수 Zig codec [`src/session/web_sidecar/`](../../src/session/web_sidecar/)(`wire`·`message`·`fields`·`codec`·`stream`·`text`·`mailbox`(W2) —
   `session.web_sidecar` 네임스페이스)이
   소유한다(길이 접두 + `MWEB` + 버전 + tag, 빅엔디언, 고정 저장소 스트리밍 decoder). CEF 없이 일반 CI 에서 단위
   시험이 돈다(W1a).
@@ -110,13 +110,39 @@ sidecar 는 maru 앱 프로세스마다 **하나**다. CEF 는 `root_cache_path`
 - **세대(gen)**: 크기가 바뀌면 새 링을 만들고 세대를 올린다. 세대 번호는 **mailbox 와 같은 원자 워드**에 담아 세대가
   다른 맞바꾸기를 거절한다 — PoC 시험 구현은 두 값을 따로 둬서 전환 순간의 겹침이 논리적으로 가능했다. 새 세대의 첫
   프레임이 올 때까지 maru 는 **옛 프레임을 계속** 보인다(전환 직후 빈 장 0.19 % 실측).
-- **port 전달**: maru 가 받는 port 를 열고(이름은 세대마다 무작위), sidecar 가 보낸 메시지의 audit token 으로 **자기가
-  spawn 한 sidecar 인지** 확인한다 — pid 와 **pid 버전**까지 비교한다(pid 재사용 경합 차단 — 실측은 pid 까지, pid 버전은
-  설계이며 W2 에서 잰다). IOSurface port 를 bootstrap
-  이름에 직접 등록하지 않는다(누구나 픽셀을 읽고, 등록자가 죽어도 surface 가 남는다 — §13.1 「버퍼 소유권」).
-- 복사는 GPU blit(제품), 바뀐 영역만(선택 최적화 — 슬롯별 최신성을 추적할 때만).
-- **판정자**: 매 프레임 화면 전체 색을 바꾸는 페이지로 「한 장의 윗줄·가운데·아랫줄 색이 다르면 찢어짐」 0, 새
+- **port 전달**(W2 착수 전 실측으로 확정, 사용자 결정 2026-09-24): mach port 는 커널의 프로세스 사이 우편함이다 — 받을
+  권리는 한 프로세스만, 보낼 권리는 여럿이 가지며, 메시지에 IOSurface·공유 메모리 **접근 권리**를 실을 수 있다(파이프는
+  바이트만 나른다).
+  1. maru 가 받는 port 를 만들어 `bootstrap_check_in` 으로 **무작위 이름**에 올린다(폐기 API 인 `bootstrap_register` 가
+     아니다 — 실측: 동작하고, 받는 권리를 닫으면 이름이 사라진다. `register` 는 등록자가 죽어도 남았다).
+  2. maru 가 sidecar 마다 **128 비트 비밀 토큰**을 OS 암호 난수로 만든다. 이름과 토큰은 **제어 채널(stdin 파이프)의
+     `frame_channel`** 로만 건넨다 — 디스크·환경 변수에 남기지 않는다(환경 변수는 같은 사용자가 볼 수 있다). sidecar 가
+     다시 뜨면 토큰도 새로 만든다.
+  3. sidecar 는 이름으로 port 를 찾아, 링 알림(IOSurface 3 장 + 제어 블록 권리 + 브라우저·세대·크기)마다 토큰을 싣는다.
+  4. maru 는 커널이 메시지에 찍는 **audit token 의 pid** 가 자기가 띄운 sidecar 이고 **토큰이 같을 때만** 받는다. 첫 메시지의
+     **pid 버전을 기억해** 이후 메시지는 pid 버전까지 같아야 받는다 — maru 는 자식의 pid 버전을 미리 알 공개 수단이 없고
+     (공개 SDK 에는 메시지의 audit token 에서 꺼내는 `audit_token_to_pidversion` 뿐이다 — 실측), 토큰이 pid 재사용을 막는다.
+     이름을 아는 제3자의 메시지는 pid·토큰이 모두 틀려 거절됐다(실측).
+  IOSurface port 를 bootstrap 이름에 직접 올리지 않는다(누구나 픽셀을 읽고, 등록자가 죽어도 surface 가 남는다 — §13.1).
+  5. **이름은 비밀이 아니다**(W2 적대 검증 실측): `bootstrap_check_in` 으로 올린 이름은 `launchctl print gui/<uid>` 에 그대로
+     보인다 — 같은 사용자의 어떤 프로세스든 **아무 모양의 메시지**를 넣을 수 있다. 그래서 받는 쪽은 ① 모양(id·크기·네 칸이
+     모두 보낼 권리 port)을 먼저 보고 ② 거절하는 메시지는 **`mach_msg_destroy`** 로 실제 디스크립터대로 버리고(port 라고 가정해
+     풀면 OOL 메모리 디스크립터의 주소 조각을 port 이름으로 풀고 그 메모리를 새운다 — 32MB × 30 통에 가상 메모리 +960MB 재현)
+     ③ 알린 크기를 실제 surface 크기와 대조하고(속이면 surface 밖을 읽는다) ④ 받는 버퍼보다 큰 메시지는 거절로 세고 계속 받고
+     ⑤ 대기열 한도를 최대(1024)로 늘린다. sidecar 는 대기열이 차 있으면 50ms 만 기다리고(CEF UI 스레드를 붙잡지 않게) 다음
+     그리기에서 다시 알린다 — 누가 대기열을 채워도 maru 가 비우기 시작하면 새 링이 온다(판정 `flood-survives`).
+- **제어 블록**: mach 메모리 엔트리로 만든 한 페이지를 링 알림에 실어 공유한다 — 두 프로세스가 같은 워드에 동시에 원자
+  연산 400 만 번을 해 정확히 맞았다(실측). mailbox 규칙(원자 워드 하나에 세대·슬롯·dirty)은 OS 를 모르는 순수 모듈로 두어
+  CEF 없이 시험하고 W3 에서 maru 가 그대로 쓴다.
+- **복사는 CPU `memcpy`**(사용자 결정 2026-09-24 — 계획 초안의 GPU blit 대신): GPU 가 방금 쓴 IOSurface 를 옮기는 비용이
+  1520×972 에서 memcpy 0.08ms 대 Metal blit 0.13~0.16ms, 3024×1890 에서 0.3ms 대 0.17ms(실측, 프레임 16.7ms) — 둘 다 무시할
+  만하고 memcpy 면 sidecar 에 Metal·Objective-C 가 필요 없다. 찢어짐은 판정자가 본다. 바뀐 영역만 복사는 선택 최적화.
+- **판정자**: 매 프레임 화면 전체를 빨강↔파랑으로 바꾸는 페이지로 「한 장 안에 두 색이 함께 있으면 찢어짐」 0, 새
   프레임 수신률, 크기 변경 뒤 새 세대 전환과 옛 프레임 유지. 제3자 프로세스의 가짜 surface 거부.
+- **크기 변경 전환 프레임(W2 실측)**: 크기를 바꾸면 CEF 가 **옛 크기 surface 에 새 레이아웃을 검은 여백과 함께** 그린
+  프레임을 한 장 보낼 때가 있다(판정 7 회 중 대부분 한 장 — 위·아래 검정, 가운데 페이지 색). 한 장으로서 일관돼 찢어짐은
+  아니지만, maru 가 그대로 보이면 크기를 바꿀 때 검은 여백이 한 번 번쩍인다 — W3 에서 다룬다(§3 의 async resize jitter 와
+  같은 자리).
 
 ### C4. maru 렌더 통합
 
@@ -238,8 +264,8 @@ control plane `browser.*` 게이트는 엔진 중립이라 바뀌지 않는다(�
 | **W1a** 제어 채널 codec | C2 의 wire codec(순수 Zig, CEF 없음) | 황금 바이트·왕복·방향 거절·닫힌 필드·상한 ±1·손으로 지은 공격 frame·한 바이트 변조 전수 — **구현됨**. 처음 적은 「변이 8 개가 모두 걸림」은 내가 고른 8 개에 대해서만 맞았다 — 적대 검증에서 한 줄 변이 20 개가 살아남았고, 그중 `feed` 가 조각을 통째로만 받아 **정상 스트림에서도 채널을 닫는** 결함이 나왔다(반쯤 온 큰 frame 뒤 16KB 조각). `feed` 는 받은 만큼만 받고 수를 돌려주게, 오류는 잠기게, 저장소는 가장 큰 frame 하나 크기로, 제목·URL 의 제어 문자는 거절(sidecar 는 `replaceControl`)하게 고치고 경계·스트리밍 시험을 더했다 — 대표 변이 11 개 중 10 개가 걸리고 남은 하나는 동작이 같은 변이다 |
 | **W1b** sidecar 뼈대 | SDK 받기 스크립트(bz2 — `zig fetch` 불가, 실측), opt-in 빌드 스텝, `maru-web-host`·`maru-web-helper`(C1), 제어 채널 배선(C2 — 읽기 스레드·stdout 보호·EOF 종료) | helper 전부 `sandbox_check` 1, maru(부모)가 죽으면 sidecar·helper 가 모두 사라짐, stdout 오염 없음 — **구현됨**: `mise run web-sidecar-judge` 5 판정 통과(3 회 연속). helper 는 GPU·네트워크·저장소 셋이고 1 초 시점에 모두 샌드박스 안(막 fork 된 순간은 exec 전이라 판정자가 안정될 때까지 본다). 초기화~종료 동안 Chromium 이 stdout·stderr 에 0 바이트(WARNING 수준). 판정자를 변이 9 개로 공격 — helper 샌드박스 생략·`no_sandbox=1`·stdout 보호 제거·알림 채널 잡바이트·EOF 무시·ack nonce 오류·shutdown 무시가 모두 FAIL 로 걸린다(처음엔 shutdown 무시에서 판정자가 멈췄다 — 모든 읽기에 기한을 걸어 고쳤다) **적대 검증(2026-09-24)으로 고친 것**: 명령 decoder 가 반쯤 온 큰 명령 뒤에 조각이 오면 정상 명령에도 채널을 닫음(W1a 의 `feed` — 읽은 바이트를 담아 두고 frame 을 비운 뒤 넣는다), shutdown 뒤 명령 처리(재현 5/5 → 0), **helper 의 「샌드박스 못 켜면 종료」가 절반만 맞음** — `cef_sandbox_initialize` 는 요청받지 않은 helper 에도 성공을 돌려줘 macOS 알림 유틸리티(`mac_notifications.mojom.MacNotificationProvider`)가 **샌드박스 밖에서 돌고 있었다**. 이제 초기화 뒤 `sandbox_check` 가 1 이 아니면 끝낸다(그 유틸리티는 뜨자마자 끝난다 — 웹 알림은 W5 에서 maru 가 권한 처리기로 다룬다), 부모 종료를 kqueue 로도 본다(maru 가 fork 한 셸이 명령 pipe 쓰기 끝을 쥐면 EOF 가 안 온다 — 판정자에 손자가 쓰기 끝을 쥔 경우를 넣음), 시작 때 상속 fd 를 닫고 0~2 가 닫혔거나 stdout==stderr 인 시작을 견딘다, stdout 표지(판정자의 「frame 만」 검사가 빈 검사였다), 종료 중 task 금지, SDK 받기의 동시 실행 잠금과 sha256 표지 |
 | **W1c** 브라우저 | 생성·파괴·이동·크기·숨김, 브라우저 N 개, 프로필(C7·D7), 재실행·팝업 차단 | **구현됨** — `mise run web-sidecar-judge` 17 판정(W1b 넷 + W1c 열둘 + 크래시 없음) 8 회 연속 통과: 브라우저 셋 생성·자기 제목, 이동이 대상 브라우저 알림으로만(잘못 간 제목 0), 숨긴 브라우저도 명령 수신, 크기 변경이 innerWidth 까지(12~14ms), 파괴→`browser_closed`→이후 `unknown_browser`, 중복 id 거절, 렌더러 포함 helper 6 개 모두 샌드박스, `window.open` 뒤 창 0·팝업 요청 0, 같은 프로필 두 번째 → `profile_in_use`·exit 16·첫 host 창 0, 프로필 0700·`tmutil` 백업 제외, 재시작 뒤 쿠키 유지, shutdown 이 열린 셋 모두 닫고 exit 0, 크래시 보고 0. 판정을 조정했다(사용자 확인 2026-09-24): 「입력이 대상에만」은 입력 메시지가 W4 라 「명령·알림이 대상에만」으로, 「따로 그려지고」의 픽셀은 W2 라 브라우저별 로드·제목으로 본다. 판정자를 변이로 공격 — 재실행 가로채기 제거·mock keychain 제거·백업 제외 생략·이동 오배달·파괴 생략·`profile_in_use` 미구분·중복 검사 제거·EOF 에서 abort 가 FAIL. 못 잡는 것: `was_resized` 생략(CEF 가 다른 계기로 크기를 다시 묻는다), 종료 순서(C7). **적대 검증(2026-09-24)으로 고친 것**: 페이지가 제스처 없이 **`window.print()` 로 네이티브 인쇄 창**을 띄우고 그 host 는 종료 요청에도 **끝나지 않았다**(고아) → `printing.enabled` 끔(인쇄 처리기는 Linux 전용)과 UI 스레드 밖 감시견(종료 시작 10 초 뒤 exit 17 — 인쇄를 켠 변이에서 exit 17 로 끝남을 확인), **`alert`·`confirm`·`prompt` 도 네이티브 창** → JS 대화상자 억제(W5 전까지), 제목 알림 범람(3 초에 약 16 만 건 — 변이로 재현하면 판정 한 번에 100,804 건) → 같은 제목 생략·브라우저당 50ms 간격·마지막 제목 보존(41 건), 제어 문자가 든 제목은 codec 이 거절해 사라질 수 있었다 → 공백으로 바꿈, 명령줄 콜백 인자 해제, 프로필은 소유자·ACL 허용 항목·마지막 요소 링크까지 거절, 참조 규칙의 근거를 SDK C++ 래퍼(`ctocpp_ref_counted.h`)로. 판정자도 고쳤다 — 세 브라우저 제목을 모두 보고(전에는 셋째만), 숨김은 페이지의 `visibilityState` 로(전에는 이동 수신만), 백업 제외는 `tmutil isexcluded` 로(전에는 속성 존재만), 크래시 보고는 이 빌드의 `slice_uuid` 로(보고의 실행 경로는 `*` 로 가려져 쓸 수 없다), `javascript:` 이동의 `window.open` 으로 **팝업 처리기를 직접** 잰다(차단기를 안 거친다 — 처리기를 풀면 창 1 개·요청 1 건으로 FAIL). 이제 23 판정, 3 회 연속 통과. 대표 변이 10 개 중 9 개가 FAIL — 살아남은 하나는 제어 문자 바꾸기 생략이다(Chromium 이 제목의 제어 문자를 먼저 걸러 그 경로에 닿지 않는다 — 방어로 둔다). 소유자 검사는 남의 디렉터리를 만들 권한이 없어 판정하지 못한다 |
-| **W2** 픽셀 파이프라인 | 소유 링·세대(C3), port 전달·검증, 크기 변경 | 찢어짐 0, 새 프레임 수신률, 세대 전환과 옛 프레임 유지, 제3자 거부 — 헤드리스 판정자(opt-in CI 잡, §4) |
-| **W3** maru 통합 | `.web` Term 의 OSR 백엔드(C4), 백엔드 선택 config(기본 WKWebView — D2), 보이는 Term 만, 창별 rect, 새 프레임 다시 그리기. WKWebView `browserDataStore` 영속화(D6 — 엔진 중립이라 OSR 과 독립으로 먼저 낼 수 있다) | pane 100% 채움, 보이는 빈도(애니메이션 페이지에서 CEF 빈도에 근접), 정적 페이지에서 추가 부담 0 control-plane `browser_storage` 권한이 영속 쿠키에 닿는 범위 재검토(D6 — control-plane-browser-review D4) |
+| **W2** 픽셀 파이프라인 | 소유 링·세대(C3), port 전달·검증, 크기 변경 | **구현됨** — 판정자가 maru 역할로 링을 받는다(`frames_check.zig`, 판정 27 개 중 W2 열). 3 회 연속: 링 알림 1520×972 세대 1, **찢어짐 0**(5 초 300 장 — 빈 장·전환 프레임 0), **초당 60 프레임**, 숨김 2 초 0 장·다시 보임 2 초 120 장, 크기 변경 → 세대 2(1000×600)·넘어가는 동안 빈 장 0, 제3자(토큰 모름·토큰 앎) 둘 다 pid 로 거절, 받는 권리를 닫으면 이름 소멸(1102). 토큰 검사·pid 버전 고정은 가짜 audit token 단위 시험(기본 test). 판정자를 고쳤다: 제3자 역할은 fork 만 한 자식에서 CoreFoundation 을 못 써 판정자를 exec 해 띄운다, 찢어짐은 「두 색이 함께」로(크기 변경 전환 프레임은 C3 — 따로 센다). 판정자를 변이 7 개로 공격해 모두 FAIL: 생산자가 맞바꾸지 않음(`front-held` — 처음엔 받자마자 몇 µs 만 읽어 놓쳤다, 한 프레임 넘게 쥐는 판정을 더함) · 복사 생략(빈 장) · pid 검사 제거(처음엔 pid 버전 고정이 대신 막아 통과 — 거절 이유까지 보게 함) · 숨김 무시 · 세대 미증가 · 토큰 검사 제거(단위) · 소비자가 front 를 안 돌려줌(단위). 판정은 모두 27 개(W2 열). **적대 검증**: 받는 port 이름이 `launchctl` 에 보여(비밀 아님) 아무 모양의 메시지를 넣는 공격을 판정에 넣었다 — OOL 메모리 폭탄(32MB × 30 → 옛 코드는 가상 메모리 +960MB, 고친 뒤 0)·너무 큰 메시지·대기열 포화(1,024 통) 뒤 크기 변경. 옛 거절 코드·재시도 제거 변이가 FAIL, 대기열 한도는 관찰 차이 없음(재시도가 회복을 맡는다). 크기 거짓말 검사는 진짜 sidecar pid 로만 보낼 수 있어 판정 밖(모양 검사는 단위 시험) |
+| **W3** maru 통합 | `.web` Term 의 OSR 백엔드(C4), 백엔드 선택 config(기본 WKWebView — D2), 보이는 Term 만, 창별 rect, 새 프레임 다시 그리기. WKWebView `browserDataStore` 영속화(D6 — 엔진 중립이라 OSR 과 독립으로 먼저 낼 수 있다) | pane 100% 채움, 보이는 빈도(애니메이션 페이지에서 CEF 빈도에 근접), 정적 페이지에서 추가 부담 0 control-plane `browser_storage` 권한이 영속 쿠키에 닿는 범위 재검토(D6 — control-plane-browser-review D4) 크기 변경 전환 프레임(C3 — 검은 여백 한 장) 처리. 링 받기는 `ring_receiver.zig` 를 그대로 쓴다 |
 | **W4** 입력 | C5 여섯 축, IME, 편집 명령, 커서 | 앱 안 시험기(25 항목 — §13.1 「pane 안 실측」)를 opt-in smoke 로 저장소에. IME 는 진짜 키 이벤트로 |
 | **W5** 대화상자·파일·권한 | C6 전부 | `alert`·`confirm`·`prompt`·파일 선택(내용 읽기까지)·권한 거부/허용. 카메라·마이크 권한 귀속을 장치 있는 기계에서 확인 |
 | **W6** 팝업·툴팁·드래그·메뉴 | `<select>` 팝업(D4), 툴팁, 드래그 시작·드롭, 우클릭 메뉴(D5) — IME 후보창 위치는 C5·W4 | 팝업 표시·선택·닫힘 복원, 드래그 콜백 도착 |
@@ -270,7 +296,7 @@ control plane `browser.*` 게이트는 엔진 중립이라 바뀌지 않는다(�
 | 쿠키가 조용히 저장되지 않음(Keychain 실패) | D7 — mock keychain 이라 Keychain 을 건드리지 않는다. W1 판정자가 재시작 뒤 유지를 본다 |
 | mock keychain 스위치가 CEF 버전에서 바뀜 | 테스트용 스위치다. CEF 를 올릴 때 W1 판정자로 확인(§4 버전 회귀) |
 | 같은 사용자로 도는 프로그램이 쿠키를 읽음 | D7 의 받아들인 대가. 같은 권한이면 `~/.ssh` 등도 읽힌다. 백업 제외로 기계 밖 유출은 줄인다 |
-| `bootstrap_register` 는 폐기 예정 API | 받는 port 를 알리는 경로를 W2 에서 확정(대안: spawn 때 넘기는 특수 port) |
+| ~~`bootstrap_register` 는 폐기 예정 API~~ | W2 에서 `bootstrap_check_in` + 토큰으로 확정(C3) |
 | VoiceOver 가 가장 큰 공사 | D2 — 선택형 백엔드로 먼저 출시, 기본값 전환은 W8 뒤 |
 
 ## 6. 실험 자산 (저장소 밖)

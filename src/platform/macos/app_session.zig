@@ -68074,37 +68074,51 @@ test "SO3 사이드바만 다시 그리는 경로는 올려 둔 사이드바와 
     const session = try soTestSession(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
+    // 교체하면 사이드바 셀이 새로 할당되므로 **주소**로 본다. generation 은 커서 깜빡임(`setCursorFadeMilli`)도
+    // 올려서 못 쓴다.
+    const H = struct {
+        /// 사이드바만 다시 그리라는 요청(다른 탭 출력과 같은 신호)으로 한 tick.
+        fn sidebarTick(s: *AppSession) !void {
+            s.metal_dirty = false;
+            s.chrome_dirty = true;
+            _ = try s.tick();
+        }
+        /// 사이드바가 **안정될 때까지** 요청 tick 을 돈다 — 연속 3번 교체가 없으면 안정이다. 살아 있는 세션은 첫 tick
+        /// 뒤에도 비동기 정보(git 브랜치 상태 등)가 늦게 와서 사이드바가 **정당하게** 바뀔 수 있다(CI 에서 실제로
+        /// 그랬다). 건너뛰기가 없으면 영영 안정되지 않으므로 이 대기 자체가 «같으면 안 올린다» 의 판정이 된다.
+        fn settle(s: *AppSession) !bool {
+            var still: usize = 0;
+            var i: usize = 0;
+            while (i < 200) : (i += 1) {
+                const before = s.metal_buffer.sidebar_cells.ptr;
+                try sidebarTick(s);
+                if (s.metal_buffer.sidebar_cells.ptr == before) still += 1 else still = 0;
+                if (still >= 3) return true;
+            }
+            return false;
+        }
+    };
 
     // 첫 프레임 — 전체 투영이 사이드바를 올리고 그 입력을 기억한다.
     _ = try session.tick();
     try std.testing.expect(session.metal_buffer.sidebar_source_valid);
 
-    // ① 다른 탭 출력을 흉내 낸다(사이드바만 다시 그리라는 요청). 입력이 같다 → 버퍼를 건드리지 않는다.
-    //    교체하면 사이드바 셀이 새로 할당되므로 **주소**로 본다. generation 은 커서 깜빡임(`setCursorFadeMilli`)도
-    //    올려서 이 판정에 못 쓴다.
-    session.metal_dirty = false;
-    const cells_before = session.metal_buffer.sidebar_cells.ptr;
-    session.chrome_dirty = true;
-    _ = try session.tick();
-    try std.testing.expectEqual(cells_before, session.metal_buffer.sidebar_cells.ptr);
-    try std.testing.expect(!session.chrome_dirty); // 요청은 소진됐다(다음 tick 에 다시 돌지 않는다)
+    // ① 입력이 같으면 요청이 와도 버퍼를 건드리지 않는다(안정에 도달한다). 요청은 매번 소진된다.
+    try std.testing.expect(try H.settle(session));
+    try std.testing.expect(!session.chrome_dirty);
+    try std.testing.expect(session.metal_buffer.sidebar_source_valid);
 
     // ② 사이드바 입력이 바뀌었다(탭 이름) — 같은 요청이 이번에는 **교체**해야 한다. 안 하면 옛 이름이 굳는다.
     const tab = tab_ops.activeTab(session);
     if (tab.custom_name) |old| allocator.free(old);
     tab.custom_name = try allocator.dupe(u8, "SO3-renamed");
-    session.metal_dirty = false;
-    session.chrome_dirty = true;
-    _ = try session.tick();
+    const cells_before = session.metal_buffer.sidebar_cells.ptr;
+    try H.sidebarTick(session);
     try std.testing.expect(session.metal_buffer.sidebar_cells.ptr != cells_before);
     try std.testing.expect(session.metal_buffer.sidebar_source_valid); // 새 입력을 기억했다
 
-    // ③ 그 뒤 같은 요청은 다시 건너뛴다(새 입력이 기억됐다).
-    const cells_after = session.metal_buffer.sidebar_cells.ptr;
-    session.metal_dirty = false;
-    session.chrome_dirty = true;
-    _ = try session.tick();
-    try std.testing.expectEqual(cells_after, session.metal_buffer.sidebar_cells.ptr);
+    // ③ 그 뒤 같은 요청은 다시 건너뛴다(새 입력이 기억됐다 — 다시 안정에 도달한다).
+    try std.testing.expect(try H.settle(session));
 }
 
 test "SO6 실제 PTY — 안 보이는 탭의 출력은 사이드바만 요청하고, 보이는 탭의 출력은 전체 재투영을 요청한다" {

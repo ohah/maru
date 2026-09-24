@@ -5586,7 +5586,7 @@ pub fn build(b: *std.Build) void {
     }
     const session_host_e2a_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/session_host_e2a_boundary.zig"),
+            .root_source_file = b.path("tests/session_host_observation_cache_leaf_boundary.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -5617,7 +5617,7 @@ pub fn build(b: *std.Build) void {
     }
     const session_host_e2b_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/session_host_e2b_boundary.zig"),
+            .root_source_file = b.path("tests/session_host_observation_cache_owner_boundary.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -5646,7 +5646,7 @@ pub fn build(b: *std.Build) void {
     session_host_e2c_step.dependOn(&run_session_host_e2c_manager_tests.step);
     const session_host_e2c_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/session_host_e2c_boundary.zig"),
+            .root_source_file = b.path("tests/session_host_observation_source_preflight_boundary.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -5711,7 +5711,7 @@ pub fn build(b: *std.Build) void {
     }
     const session_host_e3a_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/session_host_e3a_boundary.zig"),
+            .root_source_file = b.path("tests/session_host_screen_change_token_boundary.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -5785,7 +5785,7 @@ pub fn build(b: *std.Build) void {
     }
     const session_host_e3b_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/session_host_e3b_boundary.zig"),
+            .root_source_file = b.path("tests/session_host_metadata_sampler_boundary.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -6470,7 +6470,7 @@ pub fn build(b: *std.Build) void {
     session_host_e3c_step.dependOn(session_host_e3b_step);
     const session_host_e3c_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/session_host_e3c_boundary.zig"),
+            .root_source_file = b.path("tests/session_host_client_idle_pump_boundary.zig"),
             .target = target,
             .optimize = optimize,
         }),

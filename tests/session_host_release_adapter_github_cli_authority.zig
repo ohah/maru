@@ -91,7 +91,12 @@ test "rejects executable mutation and symlink capture" {
     try std.testing.expectEqual(@as(c_int, 0), std.c.chmod(path.ptr, 0o700));
     const pinned = try authority.pin(std.testing.allocator, path, "f6d97bdb40d0d71bd1f0424dedfbae0927373c93ba3fb18f67300d8fc41e7176");
     try tmp.dir.hardLink("gh", tmp.dir, "hardlink", std.testing.io, .{});
-    const hardlink = try tmp.dir.realPathFileAlloc(std.testing.io, "hardlink", std.testing.allocator);
+    // **하드링크 경로는 realpath 로 얻지 않고 이어 붙인다**(아래 `alias` 와 같은 방식). macOS 의 realpath 는
+    // `fcntl(F_GETPATH)` 인데, 링크가 둘인 파일에서는 커널 이름 캐시에 따라 **다른 링크의 이름**(`gh`)을
+    // 돌려줄 수 있다 — 그러면 이 변수가 원본 경로와 같아져 `revalidate` 가 통과하고 이 단언이
+    // 「expected error.ExecutableChanged, found void」로 빨개진다. CI(main push 35858186602)에서 그렇게 났고,
+    // 로컬에서 8중 병렬 + 파일 시스템 부하로 hardlink 를 연 F_GETPATH 3,200 회 중 10 회가 `gh` 를 돌려줬다.
+    const hardlink = try std.fs.path.joinZ(std.testing.allocator, &.{ std.fs.path.dirname(path).?, "hardlink" });
     defer std.testing.allocator.free(hardlink);
     try std.testing.expectError(error.ExecutableChanged, authority.revalidate(std.testing.allocator, hardlink, &pinned));
     try std.testing.expectEqual(@as(c_int, 0), std.c.chmod(path.ptr, 0o600));

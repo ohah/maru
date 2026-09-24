@@ -80,6 +80,16 @@ const Surface = struct {
     /// 들어와도 이 값을 쓴다. 세대는 바뀔 때마다 올라, 창이 hover 중인 탭의 커서가 바뀐 것을 안다.
     cursor: ws.message.WebCursor = .arrow,
     cursor_generation: u32 = 0,
+    /// 키 포커스를 줘야 하는가(W4c — 창이 정한 키 대상). sidecar 가 다시 떠 브라우저를 새로 만들면 이 값으로 되살린다.
+    focused: bool = false,
+    /// 포커스를 준 창(AppSession 주소) — 탭이 다른 창으로 옮긴 뒤 옛 창의 늦은 「포커스 놓기」가 새 창의 포커스를 덮지 않게.
+    focus_owner: usize = 0,
+    /// 페이지에 조합이 열려 있다고 보는가(W4c). maru 가 보낸 조합 메시지로 세고, 페이지가 조합을 끝내는 자리(이동·포커스
+    /// 잃음·브라우저 재생성)에서 푼다. **조합이 없을 때의 조합 취소는 선택한 글을 지운다**(Chromium — 판정자
+    /// `input-ime-cancel-idle`) — 그래서 취소는 이 값이 참일 때만 보낸다. CEF 는 조합이 끝날 때 알려 주지 않는다(실측).
+    composing: bool = false,
+    /// 마지막 IME 조합 사각형(view DIP — `ime_range`). 후보창 위치(`firstRect`)에 쓴다.
+    ime_bounds: ?ws.message.Rect = null,
 };
 
 pub const Cursor = struct { cursor: ws.message.WebCursor, generation: u32 };
@@ -169,19 +179,63 @@ pub fn navAction(gpa: std.mem.Allocator, surface_id: u64, action: ws.message.Nav
     if (s.created) send(gpa, .{ .nav_action = .{ .browser = surface_id, .action = action } });
 }
 
-/// 입력(W4b — 라우팅은 창이 정했다). 만들어졌고 sidecar 가 돌 때만 보낸다 — 입력은 쥐었다가 늦게 보낼 것이 아니다(첫 프레임
-/// 전 입력은 렌더러도 버린다 — W4a 실측).
-pub fn sendInput(gpa: std.mem.Allocator, message: Message) void {
+/// 입력(W4b·W4c — 라우팅은 창이 정했다). 만들어졌고 sidecar 가 돌 때만 보낸다 — 입력은 쥐었다가 늦게 보낼 것이 아니다(첫
+/// 프레임 전 입력은 렌더러도 버린다 — W4a 실측). 보냈으면 true.
+pub fn sendInput(gpa: std.mem.Allocator, message: Message) bool {
     const browser: u64 = switch (message) {
         .mouse => |m| m.browser,
         .wheel => |m| m.browser,
         .key => |m| m.browser,
-        .capture_lost => |b| b,
-        else => return,
+        .capture_lost, .ime_cancel_composition => |b| b,
+        .ime_set_composition => |m| m.browser,
+        .ime_commit_text => |m| m.browser,
+        .ime_finish_composing => |m| m.browser,
+        .edit_command => |m| m.browser,
+        else => return false,
     };
-    const s = surfaces.getPtr(browser) orelse return;
-    if (!s.created or state != .running) return;
+    const s = surfaces.getPtr(browser) orelse return false;
+    if (!s.created or state != .running) return false;
+    switch (message) {
+        .ime_set_composition => |m| {
+            if (!s.composing) s.ime_bounds = null; // 새 조합 — 옛 사각형을 쓰지 않는다
+            s.composing = m.text.len > 0;
+        },
+        .ime_commit_text, .ime_finish_composing => s.composing = false,
+        .ime_cancel_composition => {
+            if (!s.composing) return false; // 조합이 없으면 취소는 선택을 지운다 — 보내지 않는다
+            s.composing = false;
+        },
+        else => {},
+    }
     send(gpa, message);
+    return true;
+}
+
+/// 페이지에 조합이 열려 있다고 보는가.
+pub fn composing(surface_id: u64) bool {
+    const s = surfaces.getPtr(surface_id) orelse return false;
+    return s.composing;
+}
+
+/// 키 포커스(W4c). 원하는 값을 기억하고 만들어졌으면 곧바로 보낸다 — 만들어지기 전이거나 sidecar 가 다시 떠도
+/// `browser_created` 에서 되살린다(안 그러면 새 브라우저는 포커스 없이 키를 버린다).
+pub fn setFocus(gpa: std.mem.Allocator, surface_id: u64, value: bool, window: usize) void {
+    const s = surfaces.getPtr(surface_id) orelse return;
+    if (value) {
+        s.focus_owner = window;
+    } else {
+        if (s.focus_owner != window) return; // 다른 창이 이미 포커스를 가져갔다
+        s.focus_owner = 0;
+        s.composing = false; // 포커스를 잃으면 Chromium 이 조합을 확정한다
+    }
+    s.focused = value;
+    if (s.created and state == .running) send(gpa, .{ .set_focus = .{ .browser = surface_id, .value = value } });
+}
+
+/// 마지막 IME 조합 사각형(view DIP). 없으면 null.
+pub fn imeBounds(surface_id: u64) ?ws.message.Rect {
+    const s = surfaces.getPtr(surface_id) orelse return null;
+    return s.ime_bounds;
 }
 
 /// 이 탭이 원하는 커서와 그 세대(없는 탭이면 null).
@@ -565,6 +619,8 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
         .browser_created => |id| if (surfaces.getPtr(id)) |s| {
             s.created = true;
             if (s.last_url) |u| send(gpa, .{ .navigate = .{ .browser = id, .url = u } });
+            if (s.focused) send(gpa, .{ .set_focus = .{ .browser = id, .value = true } });
+            s.composing = false;
         },
         .browser_closed => {},
         .url_changed => |v| if (surfaces.getPtr(v.browser)) |s| {
@@ -572,6 +628,10 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             if (s.url) |old| gpa.free(old);
             s.url = owned;
             s.nav_dirty = true;
+            // 다른 사이트로 옮기면 Chromium 이 렌더러를 바꾸고 새 렌더러는 포커스를 모른다 — 키는 닿아도 페이지 `focus`
+            // 가 안 오고 입력기 조합이 버려졌다(W4c 실측). 포커스를 줘야 하는 탭이면 다시 준다.
+            if (s.focused and s.created) send(gpa, .{ .set_focus = .{ .browser = v.browser, .value = true } });
+            s.composing = false; // 이동하면 페이지의 조합은 사라진다
         },
         .nav_state => |v| if (surfaces.getPtr(v.browser)) |s| {
             s.can_go_back = v.can_go_back;
@@ -600,8 +660,9 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             s.cursor = v.cursor;
             s.cursor_generation +%= 1;
         },
-        // IME 후보창 위치는 키보드 라우팅(W4c)이 쓴다 — 그때까지 버린다.
-        .ime_range => {},
+        .ime_range => |v| if (surfaces.getPtr(v.browser)) |s| {
+            s.ime_bounds = v.bounds;
+        },
         // 방향이 다른 tag 는 decoder 가 이미 거절했다.
         .hello, .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .shutdown, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost => unreachable,
     }

@@ -39,6 +39,17 @@ INPUT = ("<!doctype html><title>input</title><style>html,body{margin:0;height:30
     "addEventListener('scroll',function(){clearTimeout(window.sc);window.sc=setTimeout(function(){ping('e=scroll&y='+scrollY)},300)});"
     "requestAnimationFrame(function(){requestAnimationFrame(function(){ping('e=ready')})});"
     "</script>").encode()
+# W4c: 키보드 — textarea 가 받은 keydown·값·조합·포커스를 `/ev` 로 알린다.
+KEYS = ("<!doctype html><title>keys</title><style>html,body{margin:0;height:100%}textarea{display:block;width:100%;height:100%;box-sizing:border-box;font:24px sans-serif}</style>"
+    "<body><textarea id=t></textarea><script>"
+    "var t=document.getElementById('t');function ping(q){new Image().src='/ev?'+q+'&t='+Date.now()}"
+    "t.addEventListener('keydown',function(e){ping('e=kd&k='+encodeURIComponent(e.key)+'&c='+(e.ctrlKey?1:0)+'&m='+(e.metaKey?1:0))});"
+    "t.addEventListener('keypress',function(e){ping('e=kp&k='+encodeURIComponent(e.key))});"
+    "t.addEventListener('input',function(e){ping('e=val&v='+encodeURIComponent(t.value)+'&comp='+(e.isComposing?1:0))});"
+    "t.addEventListener('compositionend',function(e){ping('e=cend&d='+encodeURIComponent(e.data))});"
+    "t.addEventListener('focus',function(){ping('e=focus')});t.addEventListener('blur',function(){ping('e=blur')});"
+    "requestAnimationFrame(function(){requestAnimationFrame(function(){ping('e=ready')})});"
+    "</script>").encode()
 class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_GET(self):
@@ -51,6 +62,8 @@ class H(http.server.BaseHTTPRequestHandler):
             body = b""
         elif self.path == "/input":
             body = INPUT
+        elif self.path == "/keys-app":
+            body = KEYS
         elif self.path == "/nav-a":
             body = b"<!doctype html><title>a</title><style>html,body{margin:0;height:100%}a{display:block;height:100%}</style><body><a href='/nav-b'>b</a><script>addEventListener('pageshow',function(){new Image().src='/ev?e=shown-a&t='+Date.now()})</script>"
         elif self.path == "/nav-b":
@@ -306,4 +319,111 @@ shown_a=$(grep -c 'e=shown-a' "$root/requests.log" || true)
 went_b=$(grep -c '^/nav-b' "$root/requests.log" || true)
 echo "back button: /nav-b loaded $went_b · /nav-a shown $shown_a times"
 [ "$went_b" -ge 1 ] && [ "$shown_a" -ge 2 ] || fail "the back mouse button did not take the tab back"
+# ── W4c: 키보드 ─────────────────────────────────────────────────────────────────────────────────────────────
+# 대본의 `type`·`compose` 는 입력기 콜백(insertText·setMarkedText)을 같은 트랜잭션 안에서 직접 부른다 — 사용자의 입력
+# 소스(한글·영문)에 따라 합성 키의 결과가 갈리지 않게. `key` 는 NSEvent 를 view 의 performKeyEquivalent·메뉴·keyDown 에
+# AppKit 순서대로 넣는다. 복사·붙여넣기는 시스템 클립보드를 덮으므로 재지 않는다.
+cat > "$root/keys.txt" <<'SCRIPT'
+sleep 7000
+mouse 1 0.5 0.5 0 0 0
+mouse 3 0.5 0.5 0 0 0
+sleep 500
+ime 0 i:U+61
+ime 11 i:U+62
+key 36 U+D
+ime 8 i:U+63
+sleep 300
+key 51 U+7F
+sleep 300
+ime 2 m:U+3147
+ime 0 m:U+C544
+ime 45 m:U+C548
+ime 49 k:U+20 i:U+C548
+sleep 300
+key 14 U+5 U+65 16
+sleep 300
+key 0 U+61 U+61 32
+key 51 U+7F
+sleep 300
+key 6 U+7A U+7A 32
+sleep 500
+key 119 U+F72B
+sleep 300
+ime 4 m:U+314E
+ime 0 m:U+D558
+ime 49 k:U+20 i:U+D558 i:U+20
+ime 2 m:U+3137
+ime 36 k:U+D i:U+3137 c:insertNewline:
+ime 38 m:U+6F22
+ime 36 k:U+D i:U+6F22
+ime 45 m:U+3134
+ime 51 k:U+7F i:U+3134 d
+ime 40 m:U+314B
+ime 53 k:U+1B m:- c:cancelOperation:
+ime 0 k:U+61 i:U+61 m:U+3131
+ime 49 k:U+20 i:U+3131 i:U+20
+sleep 500
+ime 4 m:U+314E
+sleep 300
+action toggle_command_palette
+sleep 500
+key 53 U+1B
+sleep 800
+key 15 U+72 U+72 32
+sleep 2500
+SCRIPT
+: > "$root/requests.log"
+run_app /keys-app 30000 "$root/keys.summary" MARU_WEB_OSR_TEST_INPUT="$root/keys.txt"
+python3 - "$root/requests.log" <<'PY' || fail "keyboard input did not reach the page as expected"
+import sys, urllib.parse
+evs, loads = [], 0
+for line in open(sys.argv[1]):
+    line = line.strip()
+    if line == '/keys-app': loads += 1
+    if not line.startswith('/ev?'): continue
+    evs.append(dict(urllib.parse.parse_qsl(line[4:], keep_blank_values=True)))
+names = [e.get('e') for e in evs]
+vals = [e['v'] for e in evs if e.get('e') == 'val']
+kd = [e['k'] for e in evs if e.get('e') == 'kd']
+ok = True
+def check(cond, what):
+    global ok
+    print(('PASS ' if cond else 'FAIL ') + what)
+    ok = ok and cond
+check('ready' in names and 'focus' in names, 'clicking the page gives the textarea focus (the tab got key focus before the click)')
+check(kd[:2] == ['a', 'b'] and 'ab' in vals, f'typed letters arrive as keydown then text ({kd[:2]}, values {vals[:3]})')
+check('Enter' in kd and 'ab\n' in vals, 'Enter is a keydown and inserts a newline (keypress)')
+check('ab\nc' in vals and vals.index('ab\nc') < len(vals) - 1 and 'ab\n' in vals[vals.index('ab\nc') + 1:], 'Backspace deletes with a keydown only')
+comp = [e for e in evs if e.get('e') == 'val' and e.get('comp') == '1']
+check(any(v['v'] == 'ab\n안' for v in comp), 'Hangul composition shows as composing text (ㅇ → 아 → 안)')
+check(any(e.get('e') == 'cend' and e.get('d') == '안' for e in evs), 'committing ends the composition with 안')
+# keydown 순서 전체: 입력기가 가져간 키(조합 자모·조합을 취소한 Backspace·Esc)는 keydown 이 없다(적대 검증 — 처음 판정은
+# 비ASCII 한 글자만 걸러 Unidentified 로 새어 나간 keydown 을 놓쳤다). ⌘ 편집·탐색·앱 단축키는 키가 아니라 명령이다.
+expected_kd = ['a', 'b', 'Enter', 'c', 'Backspace', 'e', 'Backspace', 'End', ' ', 'Enter', ' ']
+check(kd == expected_kd, f'the page sees exactly the keydowns of keys that acted ({kd})')
+check(any(e.get('e') == 'kd' and e.get('k') == 'e' and e.get('c') == '1' for e in evs), 'Ctrl+E reaches the page as key e with ctrlKey')
+i_empty = vals.index('') if '' in vals else -1
+check(i_empty >= 0, '⌘A then Backspace empties the textarea (select all is the page edit command)')
+check(i_empty >= 0 and any('안' in v for v in vals[i_empty + 1:]), '⌘Z undoes it (undo is the page edit command)')
+check(any(e.get('e') == 'cend' and e.get('d') == 'ㅎ' for e in evs), 'opening an overlay mid-composition finishes the composition (ㅎ)')
+blur_at = max((i for i, n in enumerate(names) if n == 'blur'), default=-1)
+check(blur_at >= 0 and 'focus' in names[blur_at + 1:], 'the page loses focus under the overlay and gets it back when it closes')
+check(loads >= 2, f'⌘R reloads the tab (page loads {loads})')
+done = [e['v'] for e in evs if e.get('e') == 'val' and e.get('comp') == '0']
+# 조합을 끝낸 키도 그 동작을 한다(적대 검증 — 처음엔 조합만 확정되고 키가 사라졌다).
+check(any(v.endswith('안하 ') for v in done), 'Korean Space commits 하 and types the space')
+check('ab\n안하 ㄷ\n' in done, 'Korean Enter commits ㄷ and inserts the newline')
+# 조합이 끝날 때 Chrome 은 마지막 input 을 isComposing=true 로 낸다 — 확정·취소는 compositionend 와 그 뒤 값으로 본다.
+allv = [e['v'] for e in evs if e.get('e') == 'val']
+def after(v):  # v 다음에 온 값
+    return allv[allv.index(v) + 1] if v in allv and allv.index(v) + 1 < len(allv) else None
+check(any(e.get('e') == 'cend' and e.get('d') == '漢' for e in evs) and not any(v.endswith('漢\n') for v in allv), 'a commit-only Enter (the input method swallowed the key) commits 漢 and adds no newline')
+base = 'ab\n안하 ㄷ\n漢'
+check(after(base + 'ㄴ') == base and not any('ㄴ' in v for v in done), 'Backspace on the last jamo cancels the composition instead of committing it')
+check(after(base + 'ㅋ') == base and not any('ㅋ' in v for v in done), 'Esc cancels the composition')
+# 조합 없는 트랜잭션에서 확정(a) 뒤 새 조합(ㄱ)이 서도 a 는 남는다(적대 검증 — 쌓인 글이 조합에 덮여 사라졌다).
+check(any(v.endswith('漢aㄱ ') for v in allv), 'text typed right before a new composition in the same key survives (a then ㄱ)')
+sys.exit(0 if ok else 1)
+PY
+
 echo "web-osr smoke passed"

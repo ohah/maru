@@ -41620,6 +41620,23 @@ test "IGP4 Python 은 offSide — 블록 뒤 빈 줄이 아래 블록 쪽이다 
     try testing.expectEqual(@as(usize, 0), countHits(try guideHits(fx.session, py, &buf), 2)); // offSide — 아래(0 열)와 같이
     const txt = try openBracketFixture(&fx, allocator, "o.txt", src);
     try testing.expectEqual(@as(usize, 1), countHits(try guideHits(fx.session, txt, &buf), 2)); // 아니면 끝나는 블록 안
+    // **Markdown 도 offSide 다**(VS Code `markdown-basics/language-configuration.json` — 처음엔 Python 하나로 적었다, 적대적 검증 2026-09-24)
+    const md = try openBracketFixture(&fx, allocator, "o.md", "x\n    y\n\nz\n");
+    try testing.expectEqual(@as(usize, 0), countHits(try guideHits(fx.session, md, &buf), 2));
+}
+
+test "IGP6 Go 는 추정의 기본이 탭 — 탭·공백 동률 문서가 .go 면 탭 파일(간격 4), .txt 면 공백 2 칸 (제품 경계, §5.1c)" {
+    // VS Code `[go]` 는 `insertSpaces: false` 다(확장 `package.json`). 셋째 줄 `\tc`(4 열)가 간격 4 면 선 하나, 간격 2 면 둘이다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const src = "a\n  b\n\tc\n";
+    var buf: [64]GuideHit = undefined;
+    const go = try openBracketFixture(&fx, allocator, "t.go", src);
+    try testing.expectEqual(@as(usize, 1), countHits(try guideHits(fx.session, go, &buf), 2));
+    const txt = try openBracketFixture(&fx, allocator, "t.txt", src);
+    try testing.expectEqual(@as(usize, 2), countHits(try guideHits(fx.session, txt, &buf), 2));
 }
 
 test "IGP5 굴린 화면 — 창이 맨 위 줄부터다; 행마다 그 줄의 단계 (제품 경계, §5.1c)" {

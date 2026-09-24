@@ -48,9 +48,19 @@ const DocLines = struct {
     }
 };
 
-/// 공백만인 줄이 아래 블록 쪽인가 — VS Code 가 `foldingRules.offSide` 로 두는 언어 중 우리 번들 grammar 는 Python 하나다(§5.1c).
+/// 공백만인 줄이 아래 블록 쪽인가 — VS Code 가 언어 설정에 `folding.offSide: true` 로 둔 언어 중 우리 번들 grammar 는 **Python · Markdown**
+/// 이다(원문 `extensions/{python,markdown-basics}/language-configuration.json`; YAML 도 그렇지만 grammar 가 없다). 처음엔 Python 하나로 적었다가
+/// 적대적 검증(2026-09-24)이 번들 18 개의 설정을 전부 열어 Markdown 을 찾았다.
 fn offsideOf(term: *const Term) bool {
-    return term.rt.editor_grammar == .python;
+    return switch (term.rt.editor_grammar) {
+        .python, .markdown => true,
+        else => false,
+    };
+}
+
+/// 추정의 기본 모드 — VS Code `[go]` 는 `insertSpaces: false` 다(확장 `package.json` 의 `configurationDefaults`). 그 밖은 전역 기본(공백).
+fn defaultSpacesModeOf(term: *const Term) bool {
+    return term.rt.editor_grammar != .go;
 }
 
 /// 한 프레임의 안내선 — 창과 간격(0 이면 그리지 않는다).
@@ -69,7 +79,7 @@ pub fn window(self: *AppSession, term: *Term) Window {
     const src: DocLines = .{ .lines = doc.file.lines, .content = doc.file.content };
     const tab_width = term.rt.editor_tab_width;
     if (st.guess == null) {
-        st.guess = guides.guess(src, tab_width);
+        st.guess = guides.guessWith(src, tab_width, defaultSpacesModeOf(term));
         st.guessed += 1;
     }
     const unit = st.guess.?.unit(tab_width);

@@ -31,6 +31,13 @@ pub const Guess = struct {
 /// **기본값은 VS Code 의 것이다**(`insertSpaces` 참 · `tabSize` = 설정) — 동률일 때와 정렬 예외가 그 값을 읽는다. 우리 `Tab` 키는 탭 문자를
 /// 넣지만 이 추정은 안내선 간격에만 쓰므로(§5.1c 「다른 점」 ②) VS Code 와 같은 선을 긋는 쪽을 따른다.
 pub fn guess(src: anytype, default_tab: u16) Guess {
+    return guessWith(src, default_tab, true);
+}
+
+/// `guess` 에 **언어별 기본**을 준다 — VS Code 는 몇 언어의 `insertSpaces` 기본을 바꾼다(`configurationDefaults`: `[go]` 거짓 · `[makefile]` 거짓 ·
+/// `[yaml]` 참·폭 2 — 확장 `package.json` 원문). 그 기본이 **동률**(탭 줄 = 공백 줄)과 **정렬 예외**를 가른다. 우리 번들 grammar 중 해당하는 것은
+/// Go 하나다(YAML·Makefile 은 grammar 없는 문서라 언어를 모른다 — §5.1c).
+pub fn guessWith(src: anytype, default_tab: u16, default_spaces_mode: bool) Guess {
     const n = @min(src.count(), guess_line_limit);
     var tab_lines: usize = 0;
     var space_lines: usize = 0;
@@ -63,13 +70,13 @@ pub fn guess(src: anytype, default_tab: u16) Guess {
         const d = spacesDiff(prev_text, prev_indent, text, cur_indent);
         // 정렬 예외 — `const a = 1,` 아래 `      b = 2;` 같은 것은 들여쓰기 신호가 아니다. 다만 그 차이가 기본 폭과 같으면 들여쓰기로 센다(목록의
         // `- item` 아래 `  - item`). 건너뛸 때는 윗줄도 그대로 둔다(VS Code 와 같다).
-        if (d.alignment and d.diff != default_spaces) continue;
+        if (d.alignment and !(default_spaces_mode and d.diff == default_spaces)) continue;
         if (d.diff <= 8) counts[d.diff] += 1;
         prev_text = text;
         prev_indent = cur_indent;
     }
 
-    var spaces_mode = true; // VS Code 기본 `insertSpaces`
+    var spaces_mode = default_spaces_mode; // 동률이면 기본(VS Code `insertSpaces`)
     if (tab_lines != space_lines) spaces_mode = tab_lines < space_lines;
     var size: usize = @max(default_spaces, 1);
     if (spaces_mode) {
@@ -591,4 +598,21 @@ test "IG7 긴 공백 구간에서도 활성 블록은 줄을 선형으로 읽는
     try testing.expectEqual(@as(u32, 1), a.level);
     try testing.expectEqual(@as(u32, @intCast(mid - 100)), a.start); // 그려진 범위에서 멈췄다
     try testing.expect(reads <= 3 * n);
+}
+
+test "IG8 언어별 기본 — 기본이 탭 모드(VS Code `[go]`)면 동률은 탭, 들여쓴 줄이 없어도 탭 (§5.1c, monaco 0.56 실측)" {
+    // 값은 monaco `detectIndentation(insertSpaces, 4)` 를 두 기본으로 돌려 뽑았다. 전역 기본(공백)만 쓰면 Go 파일의 동률이 공백 2 칸이 되어 선
+    // 간격이 VS Code 와 갈린다(적대적 검증 2026-09-24 — 확장 `package.json` 의 `configurationDefaults` 를 열어 찾았다).
+    const tie = Lines{ .items = &.{ "a", "  b", "\tc", "" } };
+    try testing.expectEqual(Guess{ .tabs = false, .spaces = 2 }, guessWith(tie, 4, true));
+    try testing.expect(guessWith(tie, 4, false).tabs);
+    const tie2 = Lines{ .items = &.{ "a", "\tb", "  c", "  d", "\te", "" } };
+    try testing.expectEqual(Guess{ .tabs = false, .spaces = 2 }, guessWith(tie2, 4, true));
+    try testing.expect(guessWith(tie2, 4, false).tabs);
+    const flat = Lines{ .items = &.{ "x", "" } };
+    try testing.expect(!guessWith(flat, 4, true).tabs);
+    try testing.expect(guessWith(flat, 4, false).tabs);
+    // 공백 줄이 이기면 기본과 무관하다
+    const four = Lines{ .items = &.{ "const a = 1,", "    b = 2;", "x", "    y", "" } };
+    try testing.expectEqual(Guess{ .tabs = false, .spaces = 4 }, guessWith(four, 4, false));
 }

@@ -129,6 +129,8 @@ pub fn dropLongLines(tokens: []Token, source: []const u8) usize {
         if (t.start >= line_end or t.start < line_start) {
             line_start = if (std.mem.lastIndexOfScalar(u8, source[0..t.start], '\n')) |nl| nl + 1 else 0;
             line_end = if (std.mem.indexOfScalarPos(u8, source, t.start, '\n')) |nl| nl else source.len;
+            // 줄 길이는 줄바꿈을 뺀다(VS Code `line.length`) — CRLF 의 `\r` 도 줄바꿈이다.
+            if (line_end > line_start and source[line_end - 1] == '\r') line_end -= 1;
             long = utf16Len(source[line_start..line_end]) >= max_tokenized_line;
         }
         if (long) continue;

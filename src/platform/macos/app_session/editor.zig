@@ -661,7 +661,9 @@ fn advanceSyntax(self: *AppSession, term: *Term) void {
     // 같은 규율 — 안 부르면 idle skip 에서 멈춰 색이 영영 안 온다). 편집 직후의 부분 고침은 편집 통지(`onEditSpan`)가 이미 했다.
     {
         const cfg = self.loaded_config.config.editor;
-        if (cfg.bracket_pair_colorization and syntax_color.advanceBrackets(&term.rt.editor_syntax, self.allocator, doc.file.content, cfg.bracket_pair_colorization_independent_pools)) self.metal_dirty = true;
+        if (!cfg.bracket_pair_colorization) {
+            syntax_color.dropBrackets(&term.rt.editor_syntax, self.allocator);
+        } else if (syntax_color.advanceBrackets(&term.rt.editor_syntax, self.allocator, doc.file.content, cfg.bracket_pair_colorization_independent_pools)) self.metal_dirty = true;
     }
     // **피커가 열려 있고 방금 전까지 파던 중이었으면 목록을 다시 만든다**(§7.5 저하 — 「아직 모른다」의
     // 기제). 파싱이 끝나는 순간 검색어는 그대로라 아무것도 재필터를 촉발하지 않는다. `pending` 이
@@ -42099,7 +42101,14 @@ test "BPP1 괄호 쌍 색 — 단계마다 세 색이 돌고 짝 없는 괄호�
         try testing.expect(!std.meta.eql(cellFgOf(d.dl, r0, '[', 0).?, c2));
         try testing.expect(!std.meta.eql(cellFgOf(d.dl, r1, ')', 0).?, cu));
     }
+    // 끄면 목록도 버린다 — 켜 둔 채 두면 편집마다 민다·고친다를 헛되이 낸다(새 눈 리뷰)
+    try testing.expect(!term.rt.editor_syntax.brackets.ready and term.rt.editor_syntax.brackets.leaves.items.len == 0);
     fx.session.loaded_config.config.editor.bracket_pair_colorization = true;
+    {
+        var d = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+        d.dl.deinit(allocator); // 다시 켠 프레임이 목록을 다시 만든다
+    }
+    try testing.expect(term.rt.editor_syntax.brackets.ready);
     // 편집 — `z)` 앞에 `(` 를 넣으면 짝이 생겨 빨강이 풀린다. **처음부터 다시 만들지 않는다**(증분).
     const rebuilds = term.rt.editor_syntax.brackets.rebuilds;
     const partials = term.rt.editor_syntax.brackets.partials;
@@ -42168,4 +42177,53 @@ test "BPP2 괄호 쌍 색 — sticky 머리줄에는 서고 미니맵에는 없�
     // 미니맵 — 켜도 끈 것과 사각 하나하나가 같다(스트립에 사각이 있다: 픽스처가 비지 않았다)
     try testing.expect(frames[0].strip.items.len > 10);
     try testing.expectEqualSlices(u64, frames[1].strip.items, frames[0].strip.items);
+}
+
+test "BPP3 처음 목록 훑기가 여러 프레임에 걸치면 프레임마다 다시 그리기를 부르고, 그 사이 편집이 와도 다시 시작하지 않고 끝나 색이 선다 (제품 경계, §5.1d)" {
+    // 큰 문서는 처음 훑기가 20~28 프레임이다(§5.1d 실측). 다시 그리기를 안 부르면 idle skip 에서 훑기가 멈춰 색이 영영 안 온다 — 판정자가 없어
+    // 그 변이(`advanceBrackets` 가 거짓을 낸다)가 살아남았다(새 눈 리뷰). 기계 속도와 무관하게 여러 프레임을 만들려고 예산을 1 ns 로 줄인다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    fx.session.loaded_config.config.editor.sticky_scroll = false;
+    var src: std.ArrayList(u8) = .empty;
+    defer src.deinit(allocator);
+    try src.appendSlice(allocator, "q(a[b]);\n");
+    for (0..400) |i| {
+        var buf: [64]u8 = undefined;
+        try src.appendSlice(allocator, try std.fmt.bufPrint(&buf, "f{d}([{d}], {{ k: ({d}) }});\n", .{ i, i, i }));
+    }
+    const term = try openBracketFixture(&fx, allocator, "w.ts", src.items);
+    const st = &term.rt.editor_syntax;
+    // 여는 틱이 이미 만들었을 수 있다 — 버리고 예산을 줄여 다시
+    syntax_color.dropBrackets(st, allocator);
+    st.bracket_walk_budget_ns = 1;
+    const rebuilds0 = st.brackets.rebuilds;
+    const c1 = fx.session.buildChromeTokens().get(.bracket_pair_1);
+    var frames: usize = 0;
+    var edited = false;
+    while (true) : (frames += 1) {
+        if (frames > 10_000) return error.WalkNeverFinished;
+        fx.session.metal_dirty = false;
+        var d = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+        defer d.dl.deinit(allocator);
+        if (st.brackets.ready) {
+            const r0 = rowStartingWith(d.dl, "q(") orelse return error.NoRow;
+            try testing.expectEqual(c1, cellFgOf(d.dl, r0, '(', 0).?);
+            break;
+        }
+        // 아직 훑는 중 — 칠하지 않고(낡은 자리를 안 칠한다) 다음 프레임을 부른다
+        try testing.expect(fx.session.metal_dirty);
+        try testing.expectEqual(@as(usize, 0), syntax_color.bracketMarks(st).toks.len);
+        if (frames == 2 and !edited) {
+            // 훑는 도중의 편집 — 첫 줄 끝에 괄호를 더한다
+            term.rt.editor_selection = editor_selection.Selection.at(8);
+            try testing.expect(insertText(fx.session, term, "(x)"));
+            try testing.expect(st.brackets.walking); // 버리지 않았다
+            edited = true;
+        }
+    }
+    try testing.expect(edited and frames > 3); // 여러 프레임에 걸쳤다
+    try testing.expectEqual(rebuilds0 + 1, st.brackets.rebuilds); // 다시 시작하지 않았다
 }

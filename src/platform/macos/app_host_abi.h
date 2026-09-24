@@ -9,7 +9,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 192u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 193u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -2080,6 +2080,22 @@ int32_t maru_macos_app_session_take_osr_cursor(MaruAppHostSession *session, int3
 /* v192(W4b): 추가 마우스 버튼(macOS buttonNumber 3=뒤로·4=앞으로)이 Chromium 탭 본문 위에서 눌렸다(backing px). 그 탭을
    뒤로·앞으로 보내고 1. 본문이 아니면 0 — Swift 는 옛 경로(handleMouse)로 흘린다. */
 int32_t maru_macos_app_session_osr_aux_button(MaruAppHostSession *session, int32_t button_number, double x_px, double y_px);
+/* v193(W4c): 키 대상이 Chromium 탭인가(활성 pane 의 OSR browser·입력 초점이 터미널 자리·창 키). 1 이면 Swift 는 키를
+   터미널 경로가 아니라 아래 osr_key·입력기 트랜잭션으로 보낸다. */
+int32_t maru_macos_app_session_osr_keyboard_active(MaruAppHostSession *session);
+/* v193(W4c): 키 한 번. phase 0 = 지금 키 누름(⌘·⌃ chord·기능키), 1 = 입력기 트랜잭션 키로 쥐어 둠(ime_end 가 판정),
+   2 = 뗌. key_code 는 NSEvent.keyCode, character·unmodified 는 characters·charactersIgnoringModifiers 의 첫 UTF-16,
+   mods 는 shift=4·alt=8·ctrl=16·cmd=32·caps=64·숫자패드=128·반복=256. 키 대상이 Chromium 탭이면 1. */
+int32_t maru_macos_app_session_osr_key(MaruAppHostSession *session, int32_t phase, uint32_t key_code, uint32_t character,
+                                       uint32_t unmodified, int32_t mods);
+/* v193(W4c): 메뉴 편집 명령(codec EditCommandKind: 0 undo·1 redo·2 cut·3 copy·4 paste·6 delete·7 select_all)을 키 대상
+   Chromium 탭에 보낸다. 대상이 아니면 0. */
+int32_t maru_macos_app_session_osr_edit(MaruAppHostSession *session, int32_t command);
+/* v193(W4c): 입력기가 키 동작 명령을 냈다(doCommand — deleteBackward 밖의 insertNewline·moveLeft 등). Chromium 탭 트랜잭션
+   안이면 기록하고(조합을 끝낸 키가 그 동작으로 페이지에 가게), 아니면 무동작. */
+void maru_macos_app_session_ime_command(MaruAppHostSession *session);
+/* v193(W4c): Zig 가 Chromium 탭의 조합을 끝냈다(키 대상이 바뀜) — 1 이면 Swift 는 입력기 세션의 조합을 버린다(한 번). */
+int32_t maru_macos_app_session_take_osr_discard_marked(MaruAppHostSession *session);
 void maru_macos_mermaid_snapshot(MaruMermaidCoordinatorSnapshot *out_snapshot);
 /* allocation-free frame-tick gate와 exact renderer lifetime revoke. */
 uint32_t maru_macos_mermaid_has_work(void);

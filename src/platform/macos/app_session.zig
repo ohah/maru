@@ -282,7 +282,7 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 185: CR6d-v2b0b extends the read-only input probe with terminal byte/screen generation counters
 // and adds one synchronous transcript-to-canonical-evidence leaf. Raw inventories are borrowed
 // only for the call; Zig owns reduction and absent-target publication.
-pub const abi_version: u32 = 192;
+pub const abi_version: u32 = 193;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -6275,6 +6275,22 @@ pub const AppSession = struct {
     /// W4b: 그 탭 커서의 본 세대 — 바뀌면 `osr_cursor_pending` 을 세워 Swift 가 포인터를 움직이지 않아도 커서를 바꾼다.
     osr_hover_cursor_generation: u32 = 0,
     osr_cursor_pending: ?CursorKind = null,
+    /// W4c: 지금 키 포커스를 준 Chromium 탭(0 = 없음). 바뀌면 `syncOsrKeyTarget` 이 포커스를 옮긴다.
+    osr_key_target: u64 = 0,
+    /// W4c: 트랜잭션 밖에서 조합이 비워졌다(unmarkText — Apple 의미는 「확정」). 곧 확정 글이 오면 그 글이 조합을 대신하고,
+    /// 안 오면 다음 tick 에 조합을 그대로 확정한다.
+    osr_unmark_pending: bool = false,
+    /// W4c: 입력기 트랜잭션(ime_begin~ime_end) 동안 — 대상 탭·쥐어 둔 키·쌓인 확정 글·시작 때 조합의 확정·일어난 일.
+    osr_ime_surface: u64 = 0,
+    osr_armed_key: ?web_ops.OsrKey = null,
+    osr_ime_typed: std.ArrayList(u8) = .empty,
+    osr_ime_commit: std.ArrayList(u8) = .empty,
+    osr_txn: web_ops.OsrTxnFlags = .{},
+    /// W4c: Zig 가 조합을 끝냈다(키 대상이 바뀜) — Swift 가 입력기 세션의 조합도 버리게(안 그러면 다음 자모가 남은 조합에
+    /// 이어져 새 대상에 글자가 겹친다 — 적대 검증).
+    osr_discard_marked: bool = false,
+    /// W4c: raw_down 을 보낸 키(keyCode 비트) — 입력기가 가져가 keydown 이 없던 키의 keyup 은 보내지 않는다.
+    osr_down_sent: u128 = 0,
     probe_frame_timing: bool = false,
     metal_dirty: bool = true,
     // [A: chrome 독립 present] 사이드바 스피너 등 "sync(2026) hold 중에도 갱신돼야 하는 chrome-only 변화" 플래그.
@@ -15598,6 +15614,8 @@ pub const AppSession = struct {
             _ = self.commitTerminalComposition();
             return;
         }
+        // W4c: 키 대상이 Chromium 탭이면 그 탭의 조합을 그대로 확정한다.
+        if (web_ops.osrCommitComposition(self)) return;
         switch (self.inputFocus()) {
             .confirm, .notice, .file_tree, .dock_pending => {}, // 구조 input owner는 확정할 조합이 없다.
             .settings => if (self.chrome_host.settings.commitSearchPreedit()) {
@@ -23592,6 +23610,8 @@ pub const AppSession = struct {
         self.web_cur_scratch.deinit(self.allocator); // Phase 4e: web surface 수집 영속 scratch(swap 후 옛 prev 버퍼 보유)
         self.web_leaf_rects_scratch.deinit(self.allocator); // Phase 4e: web leaf-rect 영속 scratch
         self.osr_layouts.deinit(self.allocator); // W3c: OSR 본문 rect
+        self.osr_ime_typed.deinit(self.allocator); // W4c: OSR 입력기 트랜잭션 글
+        self.osr_ime_commit.deinit(self.allocator);
         self.pane_target_rects_scratch.deinit(self.allocator); // paneTargetAt(입력 hot path) 영속 scratch
         // Phase 7e-1a: browser 웹 패널 nav 상태 — 각 엔트리의 소유 url을 free한 뒤 맵을 해제한다(prune이 살아 있는
         // 동안 stale을 지우므로 여기 남은 건 세션 종료 시점의 활성 nav 상태들뿐).

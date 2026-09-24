@@ -1,18 +1,21 @@
-//! 웹 OSR sidecar W1b 판정자 — `maru-web-judge <설치 디렉터리> <프로필 뿌리>`.
+//! 웹 OSR sidecar W1b·W1c 판정자 — `maru-web-judge <설치 디렉터리> <프로필 뿌리>`.
 //!
 //! 실제 `maru-web-host` 를 maru 처럼 띄워 docs/plans/web-osr-backend.md 「W1b」 완료 판정을 잰다:
 //!   handshake        hello → 같은 instance·nonce 의 hello_ack
 //!   helper-sandbox   host 의 자식이 모두 `maru-web-helper` 이고 `sandbox_check` 1(host 자신은 샌드박스 밖)
-//!   browser-refused  W1c 전의 create_browser 에 browser_create_failed 로 답한다
 //!   shutdown-clean   shutdown → 알림이 끝까지 frame 으로만 풀리고(stdout 오염 없음) exit 0, helper 도 사라진다
 //!   parent-death     maru 역할 프로세스를 SIGKILL 하면 host 와 helper 가 모두 사라진다(고아 Chromium 없음) — 명령 pipe 의
 //!                    쓰기 끝을 손자(maru 가 띄운 셸 흉내)가 쥐고 있어 EOF 가 오지 않아도
-//! 하나라도 틀리면 exit 1.
+//!   no-crash         판정 동안 `maru-web-*` 크래시 보고가 하나도 새로 생기지 않는다
+//! W1c 판정은 `browsers_check.zig` 가 든다. 하나라도 틀리면 exit 1.
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
 const os = @import("os.zig");
 const Host = @import("host.zig").Host;
+const sandbox = @import("sandbox.zig");
+const http = @import("http.zig");
+const browsers_check = @import("browsers_check.zig");
 
 const helper_wait_ms = 20_000;
 const exit_wait_ms = 20_000;
@@ -21,9 +24,15 @@ const reply_wait_ms = 15_000;
 
 var failures: u32 = 0;
 
+extern "c" fn signal(sig: c_int, handler: usize) usize;
+
 fn report(ok: bool, name: []const u8, comptime fmt: []const u8, args: anytype) void {
     if (!ok) failures += 1;
     std.debug.print("{s} {s}: " ++ fmt ++ "\n", .{ if (ok) "PASS" else "FAIL", name } ++ args);
+}
+
+fn reportText(ok: bool, name: []const u8, detail: []const u8) void {
+    report(ok, name, "{s}", .{detail});
 }
 
 pub fn main(init: std.process.Init.Minimal) u8 {
@@ -32,6 +41,9 @@ pub fn main(init: std.process.Init.Minimal) u8 {
         std.debug.print("사용: maru-web-judge <설치 디렉터리> <프로필 뿌리>\n", .{});
         return 2;
     }
+    // 판정자 자신이 닫힌 파이프에 써도 신호로 죽지 않고 실패로 보고하게 한다.
+    _ = signal(13, 1);
+    const started_at = os.unixNow();
     const install_dir = std.mem.span(argv[1]);
     const profile_root = std.mem.span(argv[2]);
 
@@ -43,7 +55,19 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     const profile_b = std.fmt.bufPrintZ(&profile_b_buf, "--profile-dir={s}/b", .{profile_root}) catch return 2;
 
     sessionChecks(host_path, profile_a) catch |err| report(false, "session", "{s}", .{@errorName(err)});
+    var profile_c_dir_buf: [1024]u8 = undefined;
+    const profile_c_dir = std.fmt.bufPrintZ(&profile_c_dir_buf, "{s}/c", .{profile_root}) catch return 2;
+    var profile_c_buf: [1024]u8 = undefined;
+    const profile_c = std.fmt.bufPrintZ(&profile_c_buf, "--profile-dir={s}", .{profile_c_dir}) catch return 2;
+    if (http.Server.start()) |server| {
+        browsers_check.run(&reportText, host_path, profile_c_dir, profile_c, server.port) catch |err| report(false, "browsers", "{s}", .{@errorName(err)});
+    } else |err| report(false, "browsers", "HTTP 서버: {s}", .{@errorName(err)});
     parentDeath(host_path, profile_b) catch |err| report(false, "parent-death", "{s}", .{@errorName(err)});
+
+    // 크래시 보고는 ReportCrash 가 몇 초 늦게 쓴다.
+    os.sleepMs(5000);
+    const crashes = os.crashReportsSince(started_at);
+    report(crashes == 0, "no-crash", "새 maru-web 크래시 보고 {d} 개", .{crashes});
 
     std.debug.print("{s}: 틀림 {d} 건\n", .{ if (failures == 0) "통과" else "실패", failures });
     return if (failures == 0) 0 else 1;
@@ -75,13 +99,9 @@ fn sessionChecks(host_path: [:0]const u8, profile_arg: [:0]const u8) !void {
 
     var kids_buf: [64]c_int = undefined;
     const kids = waitForHelpers(host.pid, &kids_buf, 2);
-    const state = settleSandboxed(host.pid, &kids_buf);
+    const state = sandbox.settle(host.pid, 2, helper_wait_ms);
     const host_outside = os.sandbox_check(host.pid, null, 0) == 0;
-    report(state.all() and host_outside, "helper-sandbox", "helper {d} 개 · 샌드박스 {d} · 이름 일치 {d} · host 샌드박스 밖 {}", .{ state.total, state.sandboxed, state.named, host_outside });
-
-    try host.send(.{ .create_browser = .{ .browser = 41, .size = .{ .width = 400, .height = 300, .scale = 2 }, .hidden = false, .url = "about:blank" } });
-    const refused = (try host.next(reply_wait_ms)) orelse return error.ClosedBeforeRefusal;
-    report(refused == .failure and refused.failure.browser == 41 and refused.failure.code == .browser_create_failed, "browser-refused", "{s}", .{@tagName(refused)});
+    report(state.all(2) and host_outside, "helper-sandbox", "helper {d} 개 · 샌드박스 {d} · 이름 일치 {d} · host 샌드박스 밖 {}", .{ state.total, state.sandboxed, state.named, host_outside });
 
     var remembered: [64]c_int = undefined;
     const remembered_len = os.children(host.pid, &remembered).len;
@@ -136,36 +156,6 @@ fn parentDeath(host_path: [:0]const u8, profile_arg: [:0]const u8) !void {
     if (!gone) for (watched[0 .. kids.len + 1]) |pid| {
         if (os.alive(pid)) _ = std.c.kill(pid, .KILL);
     };
-}
-
-const SandboxState = struct {
-    total: usize,
-    sandboxed: usize,
-    named: usize,
-
-    fn all(self: SandboxState) bool {
-        return self.total >= 2 and self.sandboxed == self.total and self.named == self.total;
-    }
-};
-
-/// 막 fork 된 자식은 아직 exec 전이라 경로가 host 이고, helper 는 `cef_sandbox_initialize` 에 닿기 전 잠깐 샌드박스
-/// 밖이다(실측 — 1 초 시점에는 GPU·네트워크·저장소 셋 다 샌드박스 안). 그래서 제한 시간 안에 **모두** 샌드박스 안
-/// helper 가 되는지 본다. 끝내 안 되면 마지막 관찰을 돌려줘 실패로 판정된다.
-fn settleSandboxed(host_pid: c_int, buf: []c_int) SandboxState {
-    var path_buf: [4096]u8 = undefined;
-    var state: SandboxState = .{ .total = 0, .sandboxed = 0, .named = 0 };
-    var waited: u32 = 0;
-    while (waited <= helper_wait_ms) : (waited += 200) {
-        const kids = os.children(host_pid, buf);
-        state = .{ .total = kids.len, .sandboxed = 0, .named = 0 };
-        for (kids) |pid| {
-            if (os.sandbox_check(pid, null, 0) == 1) state.sandboxed += 1;
-            if (std.mem.endsWith(u8, os.executablePath(pid, &path_buf), "/maru-web-helper")) state.named += 1;
-        }
-        if (state.all()) return state;
-        os.sleepMs(200);
-    }
-    return state;
 }
 
 fn allGone(pids: []const c_int, timeout_ms: u32) bool {

@@ -1,7 +1,7 @@
 //! Provenance for the frozen same-major compatibility fixture.
 //!
 //! `source_revision` is the parent of the P5b3 controller-transfer commit. `source_sha256`
-//! covers `session_host_pre_p5b3_v2.zig` exactly and is checked by the P5c3d sentinel before the
+//! covers `session_host_frozen_same_major_host.zig` exactly and is checked by the P5c3d sentinel before the
 //! executable is launched. The semantic fingerprint names the negotiated wire facts that the
 //! product must observe; it is not inferred from the current compatibility table.
 

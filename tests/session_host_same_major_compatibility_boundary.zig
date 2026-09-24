@@ -9,13 +9,13 @@ test "p5c3d compatibility fixture is frozen source with provenance and a product
     const allocator = std.testing.allocator;
     const fixture = try read(
         allocator,
-        "tests/fixtures/session_host_pre_p5b3_v2.zig",
+        "tests/fixtures/session_host_frozen_same_major_host.zig",
         2 * 1024 * 1024,
     );
     defer allocator.free(fixture);
     const provenance = try read(
         allocator,
-        "tests/fixtures/session_host_pre_p5b3_v2_provenance.zig",
+        "tests/fixtures/session_host_frozen_same_major_host_provenance.zig",
         64 * 1024,
     );
     defer allocator.free(provenance);

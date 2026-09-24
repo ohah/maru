@@ -15428,6 +15428,24 @@ pub const AppSession = struct {
     /// 커서/오버레이 caret 깜빡임 한 스텝(frame-loop tick마다). 깜빡일 대상이 없으면(steady 커서 + 오버레이 닫힘) 보이는
     /// 위상으로 고정한다 — 토글 없으니 idle 재투영도 없다. 오버레이(find·palette)가 열렸으면 커서 blink 설정과 무관
     /// 하게 caret이 깜빡인다(텍스트 입력 caret 관용). 터미널 커서의 기존 메커니즘(틱-카운터 + suffix-trim)을 그대로 탄다.
+    /// in-process Term 의 kitty 애니메이션을 벽시계 경과만큼 전진시킨다.
+    ///
+    /// **전진은 모든 탭에서, 다시 그리기 요청은 보이는 탭에서만.** 전진은 시간 기준 상태라 안 보이는 동안에도
+    /// 흘러야 탭을 바꿨을 때 맞는 프레임이 나온다(탭 전환은 스스로 다시 그린다). 그러나 안 보이는 탭의 프레임이
+    /// 넘어갔다고 화면 전체를 다시 그리면 아무것도 안 바뀐 프레임을 만든다 — 출력 게이트(`outputRedrawFor`)와
+    /// 같은 기준이다(보이는 탭 = 활성 탭의 모든 분할 pane).
+    fn advanceKittyAnimations(self: *AppSession, elapsed_ms: u64) void {
+        const visible_tab: ?*Tab = if (self.tabs.items.len > 0) tab_ops.activeTab(self) else null;
+        for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
+            // **원격 surface 는 건너뛴다.** 그쪽은 host 가 터미널을 소유하고 이 `core` 는 비어 있다 —
+            // 여기서 돌려 봐야 no-op 이고, 「원격에서도 도는 것처럼」 읽히면 안 된다.
+            // 원격 애니메이션은 host tick 이 진행해야 하고, 그때 **delta 가 프레임마다 이미지
+            // blob 을 다시 싣는다**(generation 이 바뀌므로) — 대역폭 설계가 먼저다.
+            if (term.surface.remote != null) continue;
+            if (term.surface.core.advanceAnimations(elapsed_ms) and tab == visible_tab) self.metal_dirty = true;
+        };
+    }
+
     fn updateCursorBlink(self: *AppSession, snap: CoreSnapshot) void {
         // [P4-2, §12] 코어 읽기(cursor 상태 + viewportHasBlink 셀 스캔)는 tick의 readActiveSnapshot이 이미 단일 lock으로
         // 복사했다 — 여기선 스냅샷 값만 읽어 별도 lock을 안 잡는다(sync 게이트와 lock 통합, 리더 경합 접점 축소).
@@ -15514,14 +15532,7 @@ pub const AppSession = struct {
             const anim_elapsed_ms: u64 = @intCast(capped);
             // 소비한 만큼만 전진시킨다 — 나머지를 남겨야 gap 이 실시간에 drift 없이 고정된다.
             self.kitty_anim_ns = anim_base + @as(i128, anim_elapsed_ms) * std.time.ns_per_ms;
-            for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
-                // **원격 surface 는 건너뛴다.** 그쪽은 host 가 터미널을 소유하고 이 `core` 는 비어 있다 —
-                // 여기서 돌려 봐야 no-op 이고, 「원격에서도 도는 것처럼」 읽히면 안 된다.
-                // 원격 애니메이션은 host tick 이 진행해야 하고, 그때 **delta 가 프레임마다 이미지
-                // blob 을 다시 싣는다**(generation 이 바뀌므로) — 대역폭 설계가 먼저다.
-                if (term.surface.remote != null) continue;
-                if (term.surface.core.advanceAnimations(anim_elapsed_ms)) self.metal_dirty = true;
-            };
+            self.advanceKittyAnimations(anim_elapsed_ms);
         }
         if (self.blink_phase_ns == 0) self.blink_phase_ns = now_ns; // 첫 tick — baseline만 잡고 위상 불변
         const elapsed_ns = now_ns - self.blink_phase_ns;
@@ -68382,6 +68393,56 @@ test "SO8 지문과 교체 사이에 배치가 바뀌면 두 경로 모두 adopt
     session.chrome_dirty = true;
     _ = try session.tick();
     try std.testing.expect(!session.metal_buffer.sidebar_source_valid);
+}
+
+test "KA1 안 보이는 탭의 kitty 애니메이션은 프레임만 넘기고 화면을 다시 그리게 하지 않는다 — 보이는 탭은 다시 그린다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try soTestSession(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    const H = struct {
+        /// 2x2 두 프레임 애니메이션을 그 코어에 걸고 재생한다(`core.zig` 의 kitty 애니메이션 판정자와 같은 순서).
+        fn animate(s: *AppSession, term: *Term) !void {
+            if (term.surface.remote != null) return error.SkipZigTest; // in-process 코어가 대상이다
+            term.surface.lockCore(s.io);
+            defer term.surface.unlockCore(s.io);
+            const core = &term.surface.core;
+            var b64: [64]u8 = undefined;
+            var seq: [200]u8 = undefined;
+            const red = [_]u8{ 255, 0, 0, 255 } ** 4;
+            const green = [_]u8{ 0, 255, 0, 255 } ** 4;
+            try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=t,f=32,s=2,v=2,i=7,q=2;{s}\x1b\\", .{std.base64.standard.Encoder.encode(&b64, &red)}));
+            try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=f,f=32,s=2,v=2,i=7,z=100,q=2;{s}\x1b\\", .{std.base64.standard.Encoder.encode(&b64, &green)}));
+            try core.write("\x1b_Ga=p,i=7,q=2\x1b\\");
+            try core.write("\x1b_Ga=a,i=7,r=1,z=100,q=2\x1b\\");
+            try core.write("\x1b_Ga=a,i=7,s=3,q=2\x1b\\");
+        }
+        fn frame(s: *AppSession, term: *Term) u32 {
+            term.surface.lockCore(s.io);
+            defer term.surface.unlockCore(s.io);
+            return term.surface.core.kitty_images.map.get(7).?.current_frame;
+        }
+    };
+    const background_tab = tab_ops.activeTab(session);
+    const background = background_tab.activePane().activeTerm();
+    try H.animate(session, background);
+    _ = try tab_ops.newTab(session);
+    try std.testing.expect(tab_ops.activeTab(session) != background_tab);
+
+    // ① 안 보이는 탭 — 프레임은 넘어가고(시간 기준 상태), 다시 그리기는 요청하지 않는다.
+    session.metal_dirty = false;
+    const before = H.frame(session, background);
+    session.advanceKittyAnimations(100);
+    try std.testing.expect(H.frame(session, background) != before);
+    try std.testing.expect(!session.metal_dirty);
+
+    // ② 보이는 탭 — 같은 전진이 다시 그리기를 요청한다.
+    const visible = tab_ops.activeTab(session).activePane().activeTerm();
+    try H.animate(session, visible);
+    session.metal_dirty = false;
+    session.advanceKittyAnimations(100);
+    try std.testing.expect(session.metal_dirty);
 }
 
 test "SO5 상태바 에이전트 집계는 안 보이는 탭의 전이에도 값이 바뀌면 전체 재투영을 세운다" {

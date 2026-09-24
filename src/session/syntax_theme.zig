@@ -205,6 +205,21 @@ pub fn lineHighlightFromTheme(theme: appearance.ResolvedTheme) color.Rgb {
     return .{ .r = toward(bg.r, fg.r, 6), .g = toward(bg.g, fg.g, 6), .b = toward(bg.b, fg.b, 6) };
 }
 
+/// 들여쓰기 안내선 색(visual-mapping §5.1c) — 바탕을 본문색 쪽으로 **18 %**. VS Code 기본 테마 `editorIndentGuide.background1` 의 비율이다:
+/// 다크(`#1e1e1e`·`#d4d4d4`)에서 `#404040`(≈ 19 %), 라이트(`#fff`·`#000`)에서 `#D3D3D3`(≈ 17 %).
+pub fn indentGuideFromTheme(theme: appearance.ResolvedTheme) color.Rgb {
+    const bg = theme.background;
+    const fg = theme.foreground;
+    return .{ .r = toward(bg.r, fg.r, 18), .g = toward(bg.g, fg.g, 18), .b = toward(bg.b, fg.b, 18) };
+}
+
+/// 활성 안내선 색(§5.1c) — **44 %**. VS Code `activeBackground1`: 다크 `#707070`(≈ 45 %) · 라이트 `#939393`(≈ 42 %).
+pub fn indentGuideActiveFromTheme(theme: appearance.ResolvedTheme) color.Rgb {
+    const bg = theme.background;
+    const fg = theme.foreground;
+    return .{ .r = toward(bg.r, fg.r, 44), .g = toward(bg.g, fg.g, 44), .b = toward(bg.b, fg.b, 44) };
+}
+
 /// 짝 괄호 상자 테두리(§5.1b) — 본문색 55 : 바탕 45(`mix8`). VS Code 다크 기본 `#888`(같은 바탕·본문에서 이 식은 `#828282`)에 가깝다.
 pub fn bracketMatchBorderFromTheme(theme: appearance.ResolvedTheme) color.Rgb {
     const bg = theme.background;
@@ -614,4 +629,28 @@ test "LHC1 현재 줄 테두리는 바탕을 본문색 쪽으로 6 % — VS Code
     t.background = .{ .r = 0x00, .g = 0x80, .b = 0xff };
     t.foreground = .{ .r = 0xff, .g = 0x80, .b = 0x00 };
     try std.testing.expectEqual(color.Rgb{ .r = 0x0f, .g = 0x80, .b = 0xf0 }, lineHighlightFromTheme(t));
+}
+
+test "LHC2 안내선 18 % · 활성 44 % — VS Code 기본 테마 값 가까이 (visual-mapping §5.1c)" {
+    var t: appearance.ResolvedTheme = .{
+        .background = .{ .r = 0x1e, .g = 0x1e, .b = 0x1e },
+        .foreground = .{ .r = 0xd4, .g = 0xd4, .b = 0xd4 },
+        .cursor = .{ .r = 0xff, .g = 0xff, .b = 0xff },
+        .selection = .{ .r = 0x33, .g = 0x44, .b = 0x55 },
+        .search_match = .{ .r = 0x55, .g = 0x4a, .b = 0x1a },
+        .search_match_current = .{ .r = 0x99, .g = 0x77, .b = 0x22 },
+        .sidebar_background = .{ .r = 0x28, .g = 0x28, .b = 0x28 },
+        .sidebar_active = .{ .r = 0x40, .g = 0x40, .b = 0x40 },
+        .sidebar_foreground = .{ .r = 0xe8, .g = 0xe8, .b = 0xe8 },
+        .accent = .{ .r = 0xdd, .g = 0xa1, .b = 0x5e },
+        .min_contrast = 0,
+    };
+    // 다크: 30 + 18 % × 182 = 62.8 → 63(0x3f, VS Code #404040), 30 + 44 % × 182 = 110.1 → 110(0x6e, VS Code #707070)
+    try std.testing.expectEqual(color.Rgb{ .r = 0x3f, .g = 0x3f, .b = 0x3f }, indentGuideFromTheme(t));
+    try std.testing.expectEqual(color.Rgb{ .r = 0x6e, .g = 0x6e, .b = 0x6e }, indentGuideActiveFromTheme(t));
+    // 라이트: 255 − 18 % × 255 = 209.1 → 209(0xd1, VS Code #D3D3D3), 255 − 44 % × 255 = 142.8 → 143(0x8f, VS Code #939393)
+    t.background = .{ .r = 0xff, .g = 0xff, .b = 0xff };
+    t.foreground = .{ .r = 0x00, .g = 0x00, .b = 0x00 };
+    try std.testing.expectEqual(color.Rgb{ .r = 0xd1, .g = 0xd1, .b = 0xd1 }, indentGuideFromTheme(t));
+    try std.testing.expectEqual(color.Rgb{ .r = 0x8f, .g = 0x8f, .b = 0x8f }, indentGuideActiveFromTheme(t));
 }

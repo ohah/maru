@@ -157,6 +157,9 @@ pub const ColorRole = enum {
     occurrence,
     /// 현재 줄 테두리(§5.1b) — 바탕에 아주 가까운 중립색(VS Code `editor.lineHighlightBorder` 와 같은 비율).
     line_highlight,
+    /// 들여쓰기 안내선(§5.1c)과 그 활성 선 — 바탕 쪽 중립색 둘(VS Code 기본 테마 비율).
+    indent_guide,
+    indent_guide_active,
     /// 짝 괄호 상자의 테두리(§5.1b).
     bracket_match_border,
     /// 짝 괄호 상자의 채움(§5.1b) — 알파로 얹는다(VS Code `editorBracketMatch.background` = `#0064001a`).
@@ -411,6 +414,9 @@ pub const ThemeColors = struct {
     /// 이유는 `occurrence` 와 같다.
     line_highlight: Rgb = .{ .r = 40, .g = 40, .b = 40 },
     bracket_match_border: Rgb = .{ .r = 130, .g = 130, .b = 130 },
+    /// 들여쓰기 안내선·활성 선(§5.1c). 호출자가 `syntax_theme.indentGuideFromTheme`·`indentGuideActiveFromTheme` 을 넘긴다.
+    indent_guide: Rgb = .{ .r = 64, .g = 64, .b = 64 },
+    indent_guide_active: Rgb = .{ .r = 112, .g = 112, .b = 112 },
     /// 짝 괄호 채움(§5.1b) — **테마와 무관한 상수**다. VS Code 도 다크·라이트·고대비 다크가 같은 `#006400`(알파 `1a`)이다.
     bracket_match: Rgb = .{ .r = 0, .g = 100, .b = 0 },
 };
@@ -475,6 +481,8 @@ pub const Tokens = struct {
         palette.set(.occurrence, theme.occurrence);
         palette.set(.line_highlight, theme.line_highlight);
         palette.set(.bracket_match_border, theme.bracket_match_border);
+        palette.set(.indent_guide, theme.indent_guide);
+        palette.set(.indent_guide_active, theme.indent_guide_active);
         palette.set(.bracket_match, theme.bracket_match);
         palette.set(.selection, theme.selection);
         palette.set(.cursor, theme.cursor);

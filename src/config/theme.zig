@@ -1204,6 +1204,10 @@ pub const EditorConfig = struct {
     render_line_highlight: RenderLineHighlight = .line,
     /// **짝 괄호 강조**(§5.1b). VS Code `editor.matchBrackets` 와 같은 기본(`always`).
     match_brackets: MatchBrackets = .always,
+    /// **들여쓰기 안내선**(§5.1c). VS Code `editor.guides.indentation` 과 같은 기본(켬).
+    guides_indentation: bool = true,
+    /// caret 이 든 블록의 안내선을 밝힌다(§5.1c). VS Code `editor.guides.highlightActiveIndentation` 과 같은 기본(켬).
+    guides_highlight_active_indentation: bool = true,
     /// **진단 표시**(visual-mapping §5.4) — 물결 밑줄·gutter 글리프·막대/미니맵 마커·F8 이동을 한꺼번에 켜고 끈다. 지금의
     /// 출처는 구문 오류(tree-sitter)라 타이핑 중에도 밑줄이 뜬다 — 거슬리면 끈다.
     diagnostics: bool = true,
@@ -1219,7 +1223,7 @@ pub const EditorConfig = struct {
     /// 명령만 남는다(VS Code `editor.quickSuggestions` 와 같은 관계).
     quick_suggestions: bool = true,
 
-    pub const schema = .{ // 키: editor.wrap · editor.tab-width · editor.cursor-shape · editor.scroll-beyond-last-column · editor.cursor-surrounding-lines · editor.cursor-surrounding-columns · editor.minimap · editor.minimap-width · editor.sticky-scroll · editor.sticky-scroll-max-lines · editor.render-line-highlight · editor.match-brackets · editor.diagnostics · editor.hover · editor.hover-delay · editor.parameter-hints · editor.quick-suggestions
+    pub const schema = .{ // 키: editor.wrap · editor.tab-width · editor.cursor-shape · editor.scroll-beyond-last-column · editor.cursor-surrounding-lines · editor.cursor-surrounding-columns · editor.minimap · editor.minimap-width · editor.sticky-scroll · editor.sticky-scroll-max-lines · editor.render-line-highlight · editor.match-brackets · editor.guides-indentation · editor.guides-highlight-active-indentation · editor.diagnostics · editor.hover · editor.hover-delay · editor.parameter-hints · editor.quick-suggestions
         // **둘 다 설정 GUI에 뜬다.** `wrap`은 한때 `hidden`이었는데(*"편집기가 제품 화면에 배선되기
         // 전이라 토글해도 아무 일이 없어 버그로 보인다"*) 값이 렌더에 닿으면서 벗겼다 —
         // `schema.zig`의 "editor.wrap은 설정 UI에 뜬다"가 그 사실을 잰다. 탭 폭도 같은 조건을
@@ -1254,6 +1258,9 @@ pub const EditorConfig = struct {
         // 현재 줄·짝 괄호(§5.1b) — VS Code 와 같은 값 이름이라 설정 파일을 옮겨 적을 수 있다.
         .render_line_highlight = Meta{ .key_seg = "render-line-highlight", .doc = .cfg_editor_render_line_highlight, .widget = .dropdown, .section = .editor },
         .match_brackets = Meta{ .key_seg = "match-brackets", .doc = .cfg_editor_match_brackets, .widget = .dropdown, .section = .editor },
+        // 들여쓰기 안내선 둘(§5.1c) — VS Code 의 `guides.indentation`·`guides.highlightActiveIndentation` 을 평평하게 적었다.
+        .guides_indentation = Meta{ .key_seg = "guides-indentation", .doc = .cfg_editor_guides_indentation, .widget = .toggle, .section = .editor },
+        .guides_highlight_active_indentation = Meta{ .key_seg = "guides-highlight-active-indentation", .doc = .cfg_editor_guides_highlight_active_indentation, .widget = .toggle, .section = .editor },
         .diagnostics = Meta{ .doc = .cfg_editor_diagnostics, .widget = .toggle, .section = .editor },
         .hover = Meta{ .doc = .cfg_editor_hover, .widget = .toggle, .section = .editor },
         // 상한 5000 — 그 위는 「안 뜬다」와 구별이 안 된다. 0 은 「바로」다.

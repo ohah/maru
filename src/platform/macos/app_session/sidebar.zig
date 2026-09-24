@@ -2479,8 +2479,13 @@ pub fn applySidebarGlyphPyTop(self: *AppSession) void {
 ///
 /// 입력: DrawList(글자·스타일·크기·오버레이·cluster) · 사이드바 전경색 · chrome 기하(스크롤·헤더·slot 높이) ·
 /// 표시 행 목록과 메트릭(글자 세로 위치 py_top 이 여기서 나온다). 행의 `label` 은 슬라이스 **주소**로 들어간다 —
-/// 내용이 같아도 주소가 바뀌면 다르다고 본다(다시 그리는 쪽으로만 틀린다). 적다가 할당에 실패하면 false.
-pub fn sidebarSourceKey(self: *AppSession, dl: renderer.DrawList, chrome_geometry: anytype, out: *std.ArrayListUnmanaged(u8)) bool {
+/// 내용이 같아도 주소가 바뀌면 다르다고 본다(다시 그리는 쪽으로만 틀린다).
+///
+/// 돌려주는 값은 지문 안에서 **배치 부분이 시작하는 위치**다(할당 실패면 null). 배치 부분(전경색·기하·메트릭·행)은
+/// 교체 시점에도 다시 읽히므로(색은 `replace` 가, 기하는 스탬프가, 행·메트릭은 py_top 이), 호출자는 adopt 직전에
+/// `sidebarLayoutUnchanged` 로 그 사이에 안 바뀌었는지 확인한다 — 지문이 옛 배치를, 버퍼가 새 배치를 들면 배치가
+/// 옛 값으로 돌아오는 순간 틀린 사이드바를 건너뛴다.
+pub fn sidebarSourceKey(self: *AppSession, dl: renderer.DrawList, chrome_geometry: anytype, out: *std.ArrayListUnmanaged(u8)) ?usize {
     out.clearRetainingCapacity();
     var w: SourceKeyWriter = .{ .out = out, .allocator = self.allocator };
     std.hash.autoHashStrat(&w, dl.size, .Shallow);
@@ -2490,6 +2495,15 @@ pub fn sidebarSourceKey(self: *AppSession, dl: renderer.DrawList, chrome_geometr
     for (dl.overlays) |overlay| std.hash.autoHashStrat(&w, overlay, .Shallow);
     std.hash.autoHashStrat(&w, dl.grapheme_pool.len, .Shallow);
     for (dl.grapheme_pool) |g| std.hash.autoHashStrat(&w, g, .Shallow);
+    if (w.failed) return null;
+    const layout_at = out.items.len;
+    if (!appendSidebarLayoutKey(self, chrome_geometry, out)) return null;
+    return layout_at;
+}
+
+/// 지문의 배치 부분 — 교체 시점에 다시 읽히는 입력들.
+fn appendSidebarLayoutKey(self: *AppSession, chrome_geometry: anytype, out: *std.ArrayListUnmanaged(u8)) bool {
+    var w: SourceKeyWriter = .{ .out = out, .allocator = self.allocator };
     std.hash.autoHashStrat(&w, self.appearance.theme.foreground, .Shallow);
     std.hash.autoHashStrat(&w, chrome_geometry, .Shallow); // 호출자의 `chromeGeometrySnapshot()`(교체 뒤 스탬프되는 값)
     std.hash.autoHashStrat(&w, sidebarMetrics(self), .Shallow);
@@ -2497,6 +2511,14 @@ pub fn sidebarSourceKey(self: *AppSession, dl: renderer.DrawList, chrome_geometr
     std.hash.autoHashStrat(&w, rows.len, .Shallow);
     for (rows) |row| std.hash.autoHashStrat(&w, row, .Shallow);
     return !w.failed;
+}
+
+/// 지문을 만든 뒤 교체·스탬프·py_top 을 거치는 동안 **배치 입력이 그대로인가**(adopt 직전 확인).
+/// `layout_key` 는 지문의 배치 부분(`sidebarSourceKey` 가 돌려준 위치부터). 모르면 false — adopt 하지 않는다.
+pub fn sidebarLayoutUnchanged(self: *AppSession, chrome_geometry: anytype, layout_key: []const u8, scratch: *std.ArrayListUnmanaged(u8)) bool {
+    scratch.clearRetainingCapacity();
+    if (!appendSidebarLayoutKey(self, chrome_geometry, scratch)) return false;
+    return std.mem.eql(u8, scratch.items, layout_key);
 }
 
 /// `std.hash.autoHash` 의 필드 순회를 빌려 **해시 대신 바이트를 그대로** 모은다(패딩 없이 값만 — 같은 값이면

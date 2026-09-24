@@ -4021,6 +4021,10 @@ const SessionCollection = struct {
     }
 };
 
+/// 판정자 전용 — 사이드바 지문을 계산한 **직후**(교체·스탬프·adopt 전)에 불린다. 그 사이 배치 입력이 바뀌면
+/// adopt 가 거절되는지(SO8)를 tick 안에서 재현한다. 제품 빌드에는 없다(`builtin.is_test`).
+var sidebar_key_test_hook: ?*const fn (*AppSession) void = null;
+
 /// measured chrome 텍스트 한 소비처의 셰이핑 결과 캐시.
 ///
 /// **캐시는 순수 최적화가 아니라 이관의 선행 조건이다.** chrome 텍스트를 셀 그리드에서 measured 경로로
@@ -6750,6 +6754,8 @@ pub const AppSession = struct {
     sidebar_search_text_cache: ?MeasuredTextCache = null,
     /// 사이드바 입력 지문을 적는 재사용 버퍼(`sidebar_ops.sidebarSourceKey`). 프레임마다 새로 할당하지 않는다.
     sidebar_source_scratch: std.ArrayListUnmanaged(u8) = .empty,
+    /// adopt 직전 배치 입력을 다시 적는 재사용 버퍼(`sidebar_ops.sidebarLayoutUnchanged`).
+    sidebar_layout_scratch: std.ArrayListUnmanaged(u8) = .empty,
     /// 상태바가 마지막으로 그린 에이전트 집계. 모든 탭을 세므로 **안 보이는 탭**의 전이도 상태바를 바꾼다 —
     /// 그 전이는 사이드바 카드가 보일 때만 dirty 를 세우므로(`agentDisplayVisible`), 여기서 값으로 따로 본다.
     last_agent_tally: AgentTally = .{},
@@ -20629,11 +20635,12 @@ pub const AppSession = struct {
             if (ft_on) ft_cprep = std.Io.Clock.awake.now(self.io).nanoseconds; // chrome prep 끝 = 사이드바 계열 시작
             var sidebar_frame: ?renderer.RenderFrame = null;
             defer if (sidebar_frame) |*sf| sf.deinit(self.allocator);
-            var sidebar_source_ready = false;
+            var sidebar_layout_at: ?usize = null;
             if (builtin.os.tag == .macos) {
                 // 통합 수집: DrawList만 만들고 collect(.sidebar) — placeAndDistribute가 sidebar_frame을 채운다(한 atlas 세대).
                 if (sidebar_ops.buildSidebarTitleDrawList(self)) |dl| {
-                    sidebar_source_ready = sidebar_ops.sidebarSourceKey(self, dl, self.chromeGeometrySnapshot(), &self.sidebar_source_scratch);
+                    sidebar_layout_at = sidebar_ops.sidebarSourceKey(self, dl, self.chromeGeometrySnapshot(), &self.sidebar_source_scratch);
+                    if (builtin.is_test) if (sidebar_key_test_hook) |hook| hook(self);
                     self.collectShaped(&collected, dl, pane_ops.paneFrameBuilder(self), .sidebar);
                 } else |_| {}
             }
@@ -21631,8 +21638,10 @@ pub const AppSession = struct {
                     // 기하만 새 값으로 올리면 이 함수가 없애려는 바로 그 불일치(옛 pitch 셀 + 새 헤더 높이)를 만든다.
                     self.metal_buffer.stampChromeGeometry(self.chromeGeometrySnapshot());
                     sidebar_ops.applySidebarGlyphPyTop(self); // 카드 glyph py_top을 rowTop 기반 origin_y로(가변 높이 정합 — SG3b-2-ii)
-                    // 이번에 올린 사이드바의 입력을 기억한다 — 셀이 실제로 이 입력에서 나왔을 때만(사이드바 frame 이 있을 때).
-                    if (sidebar_source_ready and sidebar_frame != null)
+                    // 이번에 올린 사이드바의 입력을 기억한다 — 셀이 실제로 이 입력에서 나왔고(사이드바 frame 이 있고),
+                    // 지문을 만든 뒤 배치 입력이 그대로일 때만.
+                    if (sidebar_layout_at) |at| if (sidebar_frame != null and
+                        sidebar_ops.sidebarLayoutUnchanged(self, self.chromeGeometrySnapshot(), self.sidebar_source_scratch.items[at..], &self.sidebar_layout_scratch))
                         self.metal_buffer.adoptSidebarSource(self.allocator, self.sidebar_source_scratch.items);
                     // **프레임을 만드는 동안 예약된 재투영은 이 소거가 삼키면 안 된다.**
                     //
@@ -21686,10 +21695,11 @@ pub const AppSession = struct {
                     collected.deinit(self.allocator);
                 }
                 var sidebar_unchanged = false;
-                var sidebar_source_ready = false;
+                var sidebar_layout_at: ?usize = null;
                 if (sidebar_ops.buildSidebarTitleDrawList(self)) |dl| {
-                    sidebar_source_ready = sidebar_ops.sidebarSourceKey(self, dl, self.chromeGeometrySnapshot(), &self.sidebar_source_scratch);
-                    if (sidebar_source_ready and self.metal_buffer.sidebarSourceIs(self.sidebar_source_scratch.items)) {
+                    sidebar_layout_at = sidebar_ops.sidebarSourceKey(self, dl, self.chromeGeometrySnapshot(), &self.sidebar_source_scratch);
+                    if (builtin.is_test) if (sidebar_key_test_hook) |hook| hook(self);
+                    if (sidebar_layout_at != null and self.metal_buffer.sidebarSourceIs(self.sidebar_source_scratch.items)) {
                         // 올려 둔 사이드바와 입력이 같다 — 셰이핑·배치·교체(와 Swift 의 다시 그리기)를 건너뛴다.
                         var unused = dl;
                         unused.deinit(self.allocator);
@@ -21744,7 +21754,8 @@ pub const AppSession = struct {
                         } else |_| false;
                         sidebar_ops.applySidebarGlyphPyTop(self); // chrome-only 부분 경로도 카드 glyph py_top 정합(가변 높이 — SG3b-2-ii)
                         // 교체에 **성공했을 때만** 입력을 기억한다 — 실패면 버퍼는 옛 셀을 들고 있다.
-                        if (sidebar_replaced and sidebar_source_ready)
+                        if (sidebar_layout_at) |at| if (sidebar_replaced and
+                            sidebar_ops.sidebarLayoutUnchanged(self, self.chromeGeometrySnapshot(), self.sidebar_source_scratch.items[at..], &self.sidebar_layout_scratch))
                             self.metal_buffer.adoptSidebarSource(self.allocator, self.sidebar_source_scratch.items);
                         self.chrome_dirty = false;
                     }
@@ -23703,6 +23714,7 @@ pub const AppSession = struct {
         self.metal_buffer.deinit(self.allocator);
         self.clearMeasuredTextCaches();
         self.sidebar_source_scratch.deinit(self.allocator);
+        self.sidebar_layout_scratch.deinit(self.allocator);
         self.gpu_quads.deinit(self.allocator);
         self.overlay_quads.deinit(self.allocator);
         self.gpu_shadows.deinit(self.allocator);
@@ -68163,7 +68175,7 @@ test "SO4 사이드바 입력 지문은 글자·색·기하(스크롤)·행 메�
         fn run(s: *AppSession, out: *std.ArrayListUnmanaged(u8)) !void {
             var dl = try sidebar_ops.buildSidebarTitleDrawList(s);
             defer dl.deinit(s.allocator);
-            try std.testing.expect(sidebar_ops.sidebarSourceKey(s, dl, s.chromeGeometrySnapshot(), out));
+            try std.testing.expect(sidebar_ops.sidebarSourceKey(s, dl, s.chromeGeometrySnapshot(), out) != null);
         }
     }.run;
 
@@ -68177,7 +68189,7 @@ test "SO4 사이드바 입력 지문은 글자·색·기하(스크롤)·행 메�
         defer dl.deinit(allocator);
         try std.testing.expect(dl.cells.len > 0);
         dl.cells[0].codepoint = if (dl.cells[0].codepoint == 'Z') 'Y' else 'Z';
-        try std.testing.expect(sidebar_ops.sidebarSourceKey(session, dl, session.chromeGeometrySnapshot(), &probe));
+        try std.testing.expect(sidebar_ops.sidebarSourceKey(session, dl, session.chromeGeometrySnapshot(), &probe) != null);
         try std.testing.expect(!std.mem.eql(u8, base.items, probe.items));
     }
     // 색: 사이드바 전경(테마).
@@ -68205,6 +68217,78 @@ test "SO4 사이드바 입력 지문은 글자·색·기하(스크롤)·행 메�
     // 되돌리면 다시 같다.
     try keyInto(session, &probe);
     try std.testing.expectEqualSlices(u8, base.items, probe.items);
+}
+
+test "SO7 지문을 만든 뒤 배치 입력(기하·행·메트릭·색)이 바뀌면 adopt 전 확인이 거절한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try soTestSession(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    _ = try session.tick();
+    var key: std.ArrayListUnmanaged(u8) = .empty;
+    defer key.deinit(allocator);
+    var scratch: std.ArrayListUnmanaged(u8) = .empty;
+    defer scratch.deinit(allocator);
+    var dl = try sidebar_ops.buildSidebarTitleDrawList(session);
+    defer dl.deinit(allocator);
+    const at = sidebar_ops.sidebarSourceKey(session, dl, session.chromeGeometrySnapshot(), &key) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(at > 0 and at < key.items.len); // DrawList 부분 뒤에 배치 부분이 있다
+    const layout = key.items[at..];
+    try std.testing.expect(sidebar_ops.sidebarLayoutUnchanged(session, session.chromeGeometrySnapshot(), layout, &scratch));
+
+    // 지문과 교체 사이에 스크롤이 움직였다 — 버퍼 스탬프는 새 값, 지문은 옛 값이 되므로 adopt 하면 안 된다.
+    session.sidebar_scroll_offset_px += 5;
+    try std.testing.expect(!sidebar_ops.sidebarLayoutUnchanged(session, session.chromeGeometrySnapshot(), layout, &scratch));
+    session.sidebar_scroll_offset_px -= 5;
+    // 행(py_top 입력).
+    session.sidebar_rows.items[0].card.lines +%= 1;
+    try std.testing.expect(!sidebar_ops.sidebarLayoutUnchanged(session, session.chromeGeometrySnapshot(), layout, &scratch));
+    session.sidebar_rows.items[0].card.lines -%= 1;
+    // 메트릭.
+    session.sidebar_metrics.card_pad_v += 1;
+    try std.testing.expect(!sidebar_ops.sidebarLayoutUnchanged(session, session.chromeGeometrySnapshot(), layout, &scratch));
+    session.sidebar_metrics.card_pad_v -= 1;
+    // 색(교체가 읽는 사이드바 전경).
+    session.appearance.theme.foreground.g +%= 1;
+    try std.testing.expect(!sidebar_ops.sidebarLayoutUnchanged(session, session.chromeGeometrySnapshot(), layout, &scratch));
+    session.appearance.theme.foreground.g -%= 1;
+    // 모두 되돌리면 다시 같다.
+    try std.testing.expect(sidebar_ops.sidebarLayoutUnchanged(session, session.chromeGeometrySnapshot(), layout, &scratch));
+}
+
+test "SO8 지문과 교체 사이에 배치가 바뀌면 두 경로 모두 adopt 하지 않는다(tick 안 재현)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try soTestSession(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    const Hook = struct {
+        fn nudgeScroll(s: *AppSession) void {
+            s.sidebar_scroll_offset_px +%= 1; // 지문은 옛 스크롤을, 스탬프는 새 스크롤을 든다
+        }
+    };
+    defer sidebar_key_test_hook = null;
+
+    // 전체 재투영 경로.
+    sidebar_key_test_hook = &Hook.nudgeScroll;
+    session.metal_dirty = true;
+    _ = try session.tick();
+    try std.testing.expect(!session.metal_buffer.sidebar_source_valid);
+
+    // 갈고리 없이 한 번 올려 기억시킨 뒤, 사이드바만 다시 그리는 경로(입력이 바뀐 상태 — 탭 이름)에서 재현한다.
+    sidebar_key_test_hook = null;
+    session.metal_dirty = true;
+    _ = try session.tick();
+    try std.testing.expect(session.metal_buffer.sidebar_source_valid);
+    const tab = tab_ops.activeTab(session);
+    if (tab.custom_name) |old| allocator.free(old);
+    tab.custom_name = try allocator.dupe(u8, "SO8-renamed");
+    sidebar_key_test_hook = &Hook.nudgeScroll;
+    session.metal_dirty = false;
+    session.chrome_dirty = true;
+    _ = try session.tick();
+    try std.testing.expect(!session.metal_buffer.sidebar_source_valid);
 }
 
 test "SO5 상태바 에이전트 집계는 안 보이는 탭의 전이에도 값이 바뀌면 전체 재투영을 세운다" {

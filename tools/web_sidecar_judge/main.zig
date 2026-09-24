@@ -66,8 +66,16 @@ pub fn main(init: std.process.Init.Minimal) u8 {
 
     // 크래시 보고는 ReportCrash 가 몇 초 늦게 쓴다.
     os.sleepMs(5000);
-    const crashes = os.crashReportsSince(started_at);
-    report(crashes == 0, "no-crash", "새 maru-web 크래시 보고 {d} 개", .{crashes});
+    var helper_path_buf: [1024]u8 = undefined;
+    const helper_path = std.fmt.bufPrintZ(&helper_path_buf, "{s}/maru-web-helper", .{install_dir}) catch return 2;
+    var host_uuid: [36]u8 = undefined;
+    var helper_uuid: [36]u8 = undefined;
+    if (os.machoUuid(host_path, &host_uuid)) |host_id| {
+        if (os.machoUuid(helper_path, &helper_uuid)) |helper_id| {
+            const crashes = os.crashReportsSince(started_at, &.{ host_id, helper_id });
+            report(crashes == 0, "no-crash", "이 빌드(host {s} · helper {s})의 새 크래시 보고 {d} 개", .{ host_id[0..8], helper_id[0..8], crashes });
+        } else report(false, "no-crash", "helper UUID 를 못 읽음", .{});
+    } else report(false, "no-crash", "host UUID 를 못 읽음", .{});
 
     std.debug.print("{s}: 틀림 {d} 건\n", .{ if (failures == 0) "통과" else "실패", failures });
     return if (failures == 0) 0 else 1;

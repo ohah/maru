@@ -16,8 +16,12 @@ pub const version: u16 = 1;
 pub const max_url_bytes: usize = 32 * 1024;
 /// sidecar 가 보내는 글(제목·실패 설명) 상한. sidecar 는 `clampUtf8` 로 잘라서 보낸다.
 pub const max_text_bytes: usize = 4 * 1024;
-pub const max_frame_bytes: usize = 34 * 1024;
-pub const max_retained_bytes: usize = max_frame_bytes + prefix_len;
+/// 가장 큰 메시지(`create_browser` + URL 상한)의 frame 크기 — 상한을 따로 두면 그 사이 크기의 frame 이 끝까지 쌓였다가
+/// 필드 검사에서야 거절된다(적대 검증). 메시지를 더할 때 이보다 크면 `codec.zig` 의 comptime 이 멈춘다.
+pub const max_frame_bytes: usize = prefix_len + common_len + largest_body_bytes;
+const largest_body_bytes = 8 + 12 + 1 + 4 + max_url_bytes;
+/// 스트리밍 저장소 — 가장 큰 frame 하나가 딱 들어간다. 그래서 frame 을 비우는 한 `feed` 는 늘 진행한다.
+pub const max_retained_bytes: usize = max_frame_bytes;
 
 pub const prefix_len = 4;
 pub const common_len = magic.len + @sizeOf(u16) + @sizeOf(u8);
@@ -40,7 +44,7 @@ pub const Error = error{
     InvalidViewSize,
     InvalidLength,
     TrailingBytes,
-    RetainedInputOverflow,
+    ControlCharacter,
     IncompleteFrame,
 };
 

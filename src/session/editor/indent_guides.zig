@@ -230,6 +230,74 @@ pub fn levels(src: anytype, p: Params, lines: []const u32, out: []u16) void {
     }
 }
 
+/// **한 방향으로 한 줄씩 걸으며** 단계를 묻는다 — 공백만인 줄의 위·아래 내용 줄을 들고 가서, 긴 빈 구간을 줄마다 다시 훑지 않는다.
+///
+/// 활성 블록(`active`)은 caret 에서 위·아래로 한 줄씩 넓힌다. 처음엔 줄마다 `levelAt` 을 불러 공백만인 줄이 이어지면 **창 줄 수 × 빈 구간**
+/// 만큼 훑었다 — 공백만인 줄 20 만 사이에 caret 을 두면 한 프레임이 81.8 ms 였다(ReleaseFast, 20 회 평균; 적대적 검증 2026-09-24). 방향마다
+/// 「지나온 쪽의 가장 가까운 내용 줄」(걸으며 갱신)과 「가는 쪽의 가장 가까운 내용 줄」(닿으면 다시 찾는다)을 들면 훑기가 겹치지 않는다.
+const Walker = struct {
+    /// 위로 걷는가(줄이 줄어든다).
+    up: bool,
+    /// 지나온 쪽(위로 가면 아래, 아래로 가면 위)의 가장 가까운 내용 줄의 열. `behind_known` 이 거짓이면 아직 안 찾았다.
+    behind: ?u32 = null,
+    behind_known: bool = false,
+    /// 가는 쪽의 가장 가까운 내용 줄과 그 열. 그 줄에 닿거나 지나면 다시 찾는다.
+    ahead_ln: usize = 0,
+    ahead: ?u32 = null,
+    ahead_known: bool = false,
+
+    fn level(self: *Walker, src: anytype, p: Params, ln: usize) u32 {
+        if (fold.indentOf(src.text(ln), p.tab_width)) |col| {
+            self.behind = col; // 다음 줄에서 보면 이 줄이 지나온 쪽의 가장 가까운 내용 줄이다
+            self.behind_known = true;
+            return (col + p.unit - 1) / p.unit;
+        }
+        if (!self.behind_known) {
+            self.behind = scan(src, p, ln, !self.up);
+            self.behind_known = true;
+        }
+        const reached = if (self.up) self.ahead_ln >= ln else self.ahead_ln <= ln;
+        if (!self.ahead_known or (self.ahead != null and reached)) {
+            self.ahead = null;
+            self.ahead_ln = ln;
+            var k = ln;
+            while (true) {
+                if (self.up) {
+                    if (k == 0) break;
+                    k -= 1;
+                } else {
+                    k += 1;
+                    if (k >= src.count()) break;
+                }
+                if (fold.indentOf(src.text(k), p.tab_width)) |c| {
+                    self.ahead = c;
+                    self.ahead_ln = k;
+                    break;
+                }
+            }
+            self.ahead_known = true;
+        }
+        const above = if (self.up) self.ahead else self.behind;
+        const below = if (self.up) self.behind else self.ahead;
+        return whitespaceLevel(p.offside, above, below, p.unit);
+    }
+
+    /// `ln` 에서 한쪽(`up` 이면 위)으로 가장 가까운 내용 줄의 열.
+    fn scan(src: anytype, p: Params, ln: usize, up: bool) ?u32 {
+        var k = ln;
+        while (true) {
+            if (up) {
+                if (k == 0) return null;
+                k -= 1;
+            } else {
+                k += 1;
+                if (k >= src.count()) return null;
+            }
+            if (fold.indentOf(src.text(k), p.tab_width)) |c| return c;
+        }
+    }
+};
+
 /// 활성 블록 — 문서 줄 `[start, end]` 의 단계 `level` 선이 활성 색이다.
 pub const Active = struct { start: u32, end: u32, level: u32 };
 
@@ -249,6 +317,8 @@ pub fn active(src: anytype, p: Params, line: usize, min_line: usize, max_line: u
     var go_down = true;
     var initial: u32 = 0;
     var distance: usize = 0;
+    var up_walk: Walker = .{ .up = true };
+    var down_walk: Walker = .{ .up = false };
     while (go_up or go_down) : (distance += 1) {
         const up_ok = distance <= line; // 위 줄이 문서 안인가
         const up: usize = if (up_ok) line - distance else 0;
@@ -257,8 +327,9 @@ pub fn active(src: anytype, p: Params, line: usize, min_line: usize, max_line: u
         if (distance > 1 and (down >= count or down > max_line)) go_down = false;
         if (distance > active_distance_limit) break;
 
-        const up_level: ?u32 = if (go_up and up_ok) levelAt(src, p, up) else null;
-        const down_level: ?u32 = if (go_down and down < count) levelAt(src, p, down) else null;
+        // 두 방향이 각자 한 줄씩 걷는다(거리 0 은 위 걸음이 묻는다) — 줄마다 `levelAt` 으로 훑으면 긴 빈 구간에서 곱으로 붙는다(`Walker` 주석).
+        const up_level: ?u32 = if (go_up and up_ok) up_walk.level(src, p, up) else null;
+        const down_level: ?u32 = if (go_down and down < count and distance > 0) down_walk.level(src, p, down) else null;
 
         if (distance == 0) {
             initial = up_level orelse 0;
@@ -439,4 +510,82 @@ test "IG4 활성 블록 — 몸통 안·머리·끝·단계 0·그려진 범위 
     // 범위 [5, 7] — 첫 걸음(거리 1)은 범위 밖(4)도 본다, VS Code 와 같다
     try testing.expectEqual(Active{ .start = 4, .end = 5, .level = 1 }, active(src, p, 5, 5, 7).?);
     try testing.expectEqual(@as(?Active, null), active(src, p, 99, 0, 7));
+}
+
+test "IG5 VS Code 와 대조 — monaco 0.56 을 실행해 뽑은 추정·단계·활성 블록과 문서 77 개가 줄마다 같다 (§5.1c)" {
+    // **변이 검사는 규칙이 판정자와 맞는지만 본다 — VS Code 와 맞는지는 이 판정자가 본다.** 데이터는 monaco 를 Node 에서 돌려 뽑았다(파일의
+    // `source`). 317 개로 한 번 대조해 불일치 0 을 확인했고(규칙 변이 둘을 넣으면 추정 5 · 단계 118 · 활성 402 건이 갈려 대조 자체가 살아 있음을
+    // 확인했다), 그중 손 사례 17 과 무작위 60 을 남겼다.
+    const Doc = struct { text: []const u8, offside: bool, tabs: bool, size: u8, levels: []const u16, active: []const ?[3]u32 };
+    const Data = struct { source: []const u8, docs: []const Doc };
+    const parsed = try std.json.parseFromSlice(Data, testing.allocator, @embedFile("testdata/indent_guides_vscode.json"), .{});
+    defer parsed.deinit();
+    try testing.expectEqual(@as(usize, 77), parsed.value.docs.len);
+    for (parsed.value.docs, 0..) |d, di| {
+        errdefer std.debug.print("IG5 문서 {d}: {s}\n", .{ di, d.text });
+        var lines_buf: [64][]const u8 = undefined;
+        var nl: usize = 0;
+        var it = std.mem.splitScalar(u8, d.text, '\n');
+        while (it.next()) |l| : (nl += 1) lines_buf[nl] = l;
+        const src = Lines{ .items = lines_buf[0..nl] };
+        try testing.expectEqual(d.levels.len, nl); // 줄 수 — 끝 개행 뒤 빈 줄도 한 줄이다(양쪽이 같다)
+        const g = guess(src, 4);
+        try testing.expectEqual(d.tabs, g.tabs);
+        if (!d.tabs) try testing.expectEqual(d.size, g.spaces);
+        const p: Params = .{ .tab_width = 4, .unit = g.unit(4), .offside = d.offside };
+        var all: [64]u32 = undefined;
+        for (0..nl) |i| all[i] = @intCast(i);
+        var lv: [64]u16 = undefined;
+        levels(src, p, all[0..nl], lv[0..nl]);
+        try testing.expectEqualSlices(u16, d.levels, lv[0..nl]);
+        for (0..nl) |i| {
+            const a = active(src, p, i, 0, nl - 1);
+            if (d.active[i]) |w| {
+                try testing.expectEqual(Active{ .start = w[0], .end = w[1], .level = w[2] }, a.?);
+            } else try testing.expectEqual(@as(?Active, null), a);
+        }
+    }
+}
+
+test "IG6 VS Code 와 다른 점 — 공백 파일 속 탭 줄은 우리 탭 폭(설정)으로 센다 (§5.1c 「다른 점」 ②)" {
+    // VS Code 는 추정한 폭(2)을 **탭 표시 폭**에도 써서 `\tc` 를 2 열로 그리고 단계 1 이다(monaco 0.56 실측: `[0,1,1,1,1,0,0]`). 우리는 탭을
+    // 설정 폭(4)으로 **그리므로** 그 줄의 글자가 4 열에서 시작하고, 0·2 열의 선 둘이 그 글자와 맞는다 — 하나만 그으면 우리 화면에서 2 열 선이
+    // 빠진다. 추정은 간격에만 쓰고 탭 폭은 바꾸지 않는다는 결정(§5.1c)의 귀결이다.
+    const src = Lines{ .items = &.{ "a {", "  b", "  b", "  b", "\tc", "}", "" } };
+    const g = guess(src, 4);
+    try testing.expectEqual(Guess{ .tabs = false, .spaces = 2 }, g);
+    var out: [7]u16 = undefined;
+    levels(src, .{ .tab_width = 4, .unit = g.unit(4) }, &.{ 0, 1, 2, 3, 4, 5, 6 }, &out);
+    try testing.expectEqualSlices(u16, &.{ 0, 1, 1, 1, 2, 0, 0 }, &out); // VS Code 는 4 번 줄이 1
+}
+
+test "IG7 긴 공백 구간에서도 활성 블록은 줄을 선형으로 읽는다 — 걸음 수로 잰다 (§5.1c, 적대적 검증 2026-09-24)" {
+    // 처음엔 줄마다 `levelAt` 이 공백만인 구간을 끝까지 훑어 **창 줄 수 × 구간 길이**를 읽었다 — 공백만인 줄 20 만 사이에 caret 을 두면 한
+    // 프레임이 81.8 ms(ReleaseFast, 20 회 평균)였다. 시간은 기기마다 달라(CI 가 2.8 배 느렸다) **읽은 줄 수**로 잰다: 지금은 구간을 방향마다
+    // 한 번씩만 지나므로 문서 줄 수의 몇 배 안이고, 옛 방식이면 창 256 × 구간 2 만 ≈ 500 만이다.
+    const Counting = struct {
+        items: []const []const u8,
+        reads: *usize,
+        pub fn count(self: @This()) usize {
+            return self.items.len;
+        }
+        pub fn text(self: @This(), i: usize) []const u8 {
+            self.reads.* += 1;
+            return self.items[i];
+        }
+    };
+    const n: usize = 20_002;
+    const items = try testing.allocator.alloc([]const u8, n);
+    defer testing.allocator.free(items);
+    for (items) |*l| l.* = "    ";
+    items[0] = "a {";
+    items[1] = "    b";
+    items[n - 1] = "}";
+    var reads: usize = 0;
+    const src = Counting{ .items = items, .reads = &reads };
+    const mid = n / 2;
+    const a = active(src, .{ .tab_width = 4, .unit = 4 }, mid, mid - 100, mid + 155).?;
+    try testing.expectEqual(@as(u32, 1), a.level);
+    try testing.expectEqual(@as(u32, @intCast(mid - 100)), a.start); // 그려진 범위에서 멈췄다
+    try testing.expect(reads <= 3 * n);
 }

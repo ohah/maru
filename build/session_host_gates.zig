@@ -1990,7 +1990,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const cr3c_c1_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr3c_c1_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_reconnect_generation_promotion_bridge_boundary.zig"),
                 .target = target,
                 .optimize = cr3c_c1_optimize,
             }),
@@ -2025,7 +2025,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const cr3c_c2_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr3c_c2_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_reconnect_retired_client_reclaim_boundary.zig"),
                 .target = target,
                 .optimize = cr3c_c2_optimize,
             }),

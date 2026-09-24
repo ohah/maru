@@ -235,7 +235,8 @@ src/
                         `stdio.zig`(프로토콜 fd 분리)·`inbox.zig`(읽기 스레드)·`dispatch.zig`(명령 처리 — CEF 없이 기본 test 에서 시험)·
                         `registry.zig`(maru id ↔ CEF browser 목록 — CEF 없이 시험)·`browsers.zig`(브라우저 명령·종료 순서)·`client.zig`(CEF 콜백·팝업 취소·JS 대화상자 억제)·
                         `title_gate.zig`(제목 알림 중복 제거·간격 조절 — CEF 없이 시험)·`preferences.zig`(제품 설정 — 인쇄 끔)·`watchdog.zig`(종료 기한)·
-                        `profile.zig`(0700·소유자·ACL·링크 거절·백업 제외)·`app`·`settings`·`layout`·`object`·`cef`. CEF 헤더는 저장소에 없고 `-Dcef-sdk` 가 있을 때만 빌드한다(build/web_sidecar.zig).
+                        `profile.zig`(0700·소유자·ACL·링크 거절·백업 제외)·픽셀 링(W2): `ring_producer.zig`(sidecar — 복사·맞바꾸기·세대)·`ring_receiver.zig`(maru —
+                        pid·토큰 검증, CEF 없이 시험)·`ring_message.zig`·`mach.zig`·`iosurface.zig`·`ring.zig`(판정자·W3 입구)·`app`·`settings`·`layout`·`object`·`cef`. CEF 헤더는 저장소에 없고 `-Dcef-sdk` 가 있을 때만 빌드한다(build/web_sidecar.zig).
     session_host.zig     P3 barrel(protocol·framing·screen_stream·registry·server·socket_server re-export + test 집약, test module은 socket용 link_libc). 구현은 session_host/에 목적별로.
     session_host/        P3 진행: entrypoint.zig(hidden `__session-host` CLI command의 launcher/main 공용 단일 출처),
                         protocol.zig(`MRSH` 32-byte header·kind/flag·error 어휘 codec — **구현됨, P3-a**),
@@ -561,7 +562,7 @@ graph.rows                                                               // 필�
 tools/
   perf/                 로컬 성능 예산 측정 harness
   cef-sdk-fetch.sh      웹 OSR sidecar 의 CEF SDK 를 받아 sha256 확인 뒤 캐시에 푼다(opt-in — `zig fetch` 는 .tar.bz2 를 못 푼다)
-  web_sidecar_judge/    실제 `maru-web-host` 를 maru 처럼 띄워 W1b·W1c 완료 판정을 잰다(`mise run web-sidecar-judge` — 로컬 HTTP 서버·창 수·크래시 보고 포함)
+  web_sidecar_judge/    실제 `maru-web-host` 를 maru 처럼 띄워 W1b·W1c·W2 완료 판정을 잰다(`mise run web-sidecar-judge` — 로컬 HTTP 서버·창 수·크래시 보고 포함)
   agent-turn-tool-mix.py  에이전트 턴의 도구 구성(캡처 트리거 없는 턴·셸 편집만 있는 턴·배경 호출)을 provider 트랜스크립트에서 잰다 — 훅 로그는 큐라 지워지므로 이것이 AT3b 수치의 재측정 도구다(plans/agent-turn-changes.md)
   ci/                   CI 파이프라인 헬퍼. `changed-areas.sh`가 "이 diff는 어떤 CI 축을 실행해야 하는가"의 단일 출처이고 `changed-areas.test.sh`(=`mise run ci:changed-areas-check`)가 그 분류를 실제 git diff로 고정한다
 ```

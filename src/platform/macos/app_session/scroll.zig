@@ -37,6 +37,7 @@ const dock_list_scroll_drag_payload = app_session_mod.dock_list_scroll_drag_payl
 const dock_ops = @import("dock.zig");
 const project_search_ops = @import("editor/search/dock.zig");
 const outline_ops = @import("editor/outline.zig");
+const web_ops = @import("web.zig");
 const agent_activity_ops = @import("agent_activity.zig");
 const scm_dock_ops = @import("scm_dock.zig");
 const overlay_scroll_max_entries = app_session_mod.overlay_scroll_max_entries;
@@ -281,6 +282,8 @@ pub fn scrollWheel(self: *AppSession, delta_y: f64, delta_x: f64, precise: bool,
         _ = scrollOverlayByLines(self, lines_overlay);
         return;
     }
+    // W4b: Chromium(OSR) 탭 본문 위의 휠은 그 페이지를 굴린다(오버레이 게이트 뒤 — 위에서 이미 막혔다).
+    if (web_ops.osrWheel(self, delta_y, delta_x, precise, x_px, y_px)) return;
     // 갤러리 크게 보기 위의 휠은 **확대·축소**다. 목록이 아니라 한 장을 보고 있으므로 굴릴 것이
     // 없고, 아무 일도 안 하면 「휠이 안 먹는다」로 읽힌다. 격자일 때는 아직 스크롤이 없어 흘려보낸다.
     if (dock_ops.dockVisible(self) and self.dock.view == .agent_activity and

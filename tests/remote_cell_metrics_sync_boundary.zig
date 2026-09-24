@@ -72,16 +72,23 @@ test "원격 runtime 의 셀 메트릭은 바뀔 때만, 락 밖에서 host 로 
     // ④ **모르는 값을 보내지 않는다.** 0 을 보내면 host 코어가 0 이 되어 애초 증상과 같아진다.
     try std.testing.expect(std.mem.indexOf(u8, body, "cell_width_px == 0") != null);
 
-    // ⑤ **코어 락을 쥔 채 보내지 않는다.** 호출이 `lockCore` 블록 밖이어야 한다 — 원격 전송은 RPC 다.
-    const call_at = std.mem.indexOf(u8, src, "self.syncRemoteCellMetrics();") orelse
-        return error.SyncNeverCalled;
-    const lock_at = std.mem.lastIndexOf(u8, src[0..call_at], "active_surface.lockCore(") orelse
-        return error.LockSiteMissing;
-    // 락과 호출 사이에 그 블록을 닫는 줄(들여쓰기 16칸 + `}`)이 있어야 한다.
-    const between = src[lock_at..call_at];
-    if (std.mem.indexOf(u8, between, "\n                }\n") == null) {
-        std.debug.print("코어 락을 쥔 채 원격 RPC 를 건다 — 락 아래 둘 일이 아니다\n", .{});
-        return error.SendsUnderCoreLock;
+    // ⑤ **매 tick, 코어 락 밖에서 부른다.** 호출은 `tick` 본문의 **최상위 문장**(들여쓰기 8칸)이어야 한다 —
+    //    어떤 블록 안에도 없으니 `lockCore` 블록 안일 수 없고(원격 전송은 RPC 다), 재투영 분기 안도 아니다.
+    //    예전에는 전체 재투영 분기 안에 있었는데, 그러면 새로 붙거나 재접속한 **안 보이는** runtime 이 보이는
+    //    화면이 바뀔 때까지 셀 크기를 못 받았다 — 안 보이는 탭의 출력이 더 이상 전체 재투영을 일으키지 않게
+    //    된 뒤(2026-09-24) 그 결합이 드러났다. 같으면 비교만 하고 RPC 는 없으므로(②) 매 tick 이 안전하다.
+    const call_at = std.mem.indexOf(u8, src, "\n        self.syncRemoteCellMetrics();\n") orelse {
+        std.debug.print("tick 본문 최상위(들여쓰기 8칸)에서 부르지 않는다 — 블록 안이면 락 아래이거나 조건부다\n", .{});
+        return error.SyncNotTopLevelInTick;
+    };
+    const tick_at = std.mem.lastIndexOf(u8, src[0..call_at], "\n    pub fn ") orelse return error.SyncNeverCalled;
+    if (!std.mem.startsWith(u8, src[tick_at..], "\n    pub fn tick(self: *AppSession)")) {
+        std.debug.print("최상위 호출이 `tick` 안에 있지 않다 — 매 tick 돈다는 보장이 없다\n", .{});
+        return error.SyncNotInTick;
+    }
+    if (std.mem.count(u8, src, "self.syncRemoteCellMetrics();") != 1) {
+        std.debug.print("호출 자리가 하나가 아니다 — 조건부 사본이 다시 생겼는지 본다\n", .{});
+        return error.SyncCalledTwice;
     }
 
     // ⑥ **in-process 주입을 지운 게 아니다.** 로컬 코어 주입은 그대로 있어야 한다.

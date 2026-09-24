@@ -6748,6 +6748,14 @@ pub const AppSession = struct {
     /// 사이드바 헤더 검색 줄의 measured 셰이핑 캐시(이관 2단계). 슬롯이 도크와 따로인 이유는 fingerprint가
     /// 각자의 ops에서 나오기 때문이다 — 한 슬롯을 공유하면 검색어를 칠 때마다 도크 아티팩트가 버려진다.
     sidebar_search_text_cache: ?MeasuredTextCache = null,
+    /// 사이드바 입력 지문을 적는 재사용 버퍼(`sidebar_ops.sidebarSourceKey`). 프레임마다 새로 할당하지 않는다.
+    sidebar_source_scratch: std.ArrayListUnmanaged(u8) = .empty,
+    /// 상태바가 마지막으로 그린 에이전트 집계. 모든 탭을 세므로 **안 보이는 탭**의 전이도 상태바를 바꾼다 —
+    /// 그 전이는 사이드바 카드가 보일 때만 dirty 를 세우므로(`agentDisplayVisible`), 여기서 값으로 따로 본다.
+    last_agent_tally: AgentTally = .{},
+    /// 출력 게이트가 내린 결정의 누적(`OutputRedraw` 순서: none·sidebar·full). 판정자와 진단이 «안 보이는 탭 출력이
+    /// 전체 재투영을 세우지 않았다» 를 다른 재투영 사유(리소스 미터·깜빡임)와 섞지 않고 본다.
+    output_redraw_counts: [3]u64 = .{ 0, 0, 0 },
     /// pane 탭 제목의 measured 셰이핑 캐시(이관 3단계).
     pane_tab_title_text_cache: ?MeasuredTextCache = null,
     agent_session_dock_interaction: chrome.ui.interaction.InteractionState = .{},
@@ -8798,6 +8806,25 @@ pub const AppSession = struct {
     /// 매 tick RPC 를 보낼 수는 없으므로 runtime 마다 마지막으로 보낸 값을 기억해 **다를 때만** 보낸다.
     /// 새로 만든 runtime 은 기억값이 0 이라 자동으로 한 번 나가고, 폰트·DPI·모니터 이동도 같은 규칙이 덮는다.
     /// host 쪽 `PtySession.setCellPixels` 에도 같은 값 가드가 있어 중복이 도착해도 `TIOCSWINSZ` 는 안 나간다.
+    /// 이번 tick 의 출력이 무엇을 다시 그리게 하는가(`tick` 의 출력 게이트 — 왜는 그 자리 주석).
+    pub const OutputRedraw = enum { none, sidebar, full };
+
+    pub fn outputRedrawFor(visible_tab_output_events: u64, all_output_events: u64) OutputRedraw {
+        if (visible_tab_output_events > 0) return .full;
+        if (all_output_events > 0) return .sidebar;
+        return .none;
+    }
+
+    /// 상태바 에이전트 집계(모든 탭)는 **값이 바뀔 때만** 다시 그린다. 전이 자리마다 dirty 를 세우는 방식은
+    /// 안 보이는 탭(사이드바 접힘·검색으로 숨은 카드)을 빠뜨렸다 — 그 빈틈은 안 보이는 탭의 출력이 전체 재투영을
+    /// 일으키던 동안 가려져 있었다.
+    fn noteAgentTallyForStatusBar(self: *AppSession) void {
+        const tally = agent_ops.tallyAgents(self);
+        if (std.meta.eql(tally, self.last_agent_tally)) return;
+        self.last_agent_tally = tally;
+        self.metal_dirty = true;
+    }
+
     fn syncRemoteCellMetrics(self: *AppSession) void {
         if (self.cell_width_px == 0 or self.cell_height_px == 0) return; // 아직 모르는 값을 보내지 않는다
         for (self.tabs.items) |tab| {
@@ -20293,12 +20320,16 @@ pub const AppSession = struct {
         // (마지막 워크스페이스를 옮겨 비운 창)은 `active()`가 null이라 id 비교를 건너뛴다(그 창엔 그릴 커서도 없다).
         const active_surface_id: ?u64 = if (self.app_window.active()) |s| s.id else null;
         var active_output_events: u64 = 0;
+        // 화면 본문에 그려지는 Term 은 **활성 탭**(모든 분할 pane)의 것뿐이다. 그 밖의 출력은 사이드바만 바꾼다.
+        const visible_tab = tab_ops.activeTab(self);
+        var visible_tab_output_events: u64 = 0;
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
                     if (!term.rt.live_initialized) continue;
                     const ds = try term.rt.pump.drainAvailable();
                     if (ds.output_events > 0) {
+                        if (tab == visible_tab) visible_tab_output_events += ds.output_events;
                         // 알림 폴링이 «먼저 볼 Term» 을 고르는 힌트(session_model 의 필드 주석 참고). 여기서만 세우고
                         // 내리는 것은 확인한 쪽이다. 조용한 Term 은 이 표시가 서지 않아 폴링 대상에서 빠진다.
                         term.output_since_notify_check = true;
@@ -20379,7 +20410,25 @@ pub const AppSession = struct {
         // 머신이 idle/sleep으로 못 들어가게 하지 않는다. generation도 그대로라 재드로우도 생략된다.
         // 가정: 모든 시각 변화는 PTY output(또는 resize)에서 온다. cursor blink나 주기적 redraw
         // 같은 PTY와 무관한 변화를 넣게 되면, 그 트리거에서도 metal_dirty를 세워야 한다.
-        if (drain_summary.output_events > 0) self.metal_dirty = true;
+        //
+        // **보이는 탭의 출력만 전체 재투영을 세운다.** 다른 탭의 출력은 사이드바만 바꾸므로 chrome 경로로 보내고,
+        // 거기서도 사이드바 입력이 올려 둔 것과 같으면 아무것도 안 올린다(`sidebarSourceKey`). 활성 32 세션에서
+        // 재투영의 88 % 가 안 보이는 탭 출력 때문이었고, 그 프레임은 사실상 아무것도 바꾸지 않았다(2026-09-24 계수).
+        //
+        // ⚠️ **규칙**: 안 보이는 탭의 상태를 **사이드바 밖**에 보여 주는 표시는 스스로 dirty 를 세워야 한다 — 여기서
+        // 그 탭의 출력은 더 이상 전체 재투영을 일으키지 않는다. 상태바 에이전트 집계가 그 첫 사례다(아래
+        // `last_agent_tally`). docs/performance-budget.md «안 보이는 탭 출력» 발견에 적었다.
+        const output_redraw = outputRedrawFor(visible_tab_output_events, drain_summary.output_events);
+        self.output_redraw_counts[@intFromEnum(output_redraw)] +%= 1;
+        switch (output_redraw) {
+            .none => {},
+            .sidebar => self.chrome_dirty = true,
+            .full => self.metal_dirty = true,
+        }
+        self.noteAgentTallyForStatusBar();
+        // host 코어 셀 크기 맞추기는 **매 tick** 본다. 전체 재투영 안에 있을 때는 새로 붙은 안 보이는 runtime 이
+        // 보이는 화면이 바뀔 때까지 셀 크기를 못 받았다(CSI 14t/16t 무응답). 같으면 비교만 하고 RPC 는 없다.
+        self.syncRemoteCellMetrics();
         // 깜빡임: **활성 surface에** 출력이 흐르면 보이는 위상으로 리셋(내 커서가 움직이는 동안 항상 보이게),
         // idle이면 500ms마다 토글. steady/숨김 커서 + 오버레이 닫힘이면 updateCursorBlink가 무토글로 고정한다.
         // 오버레이 caret도 같은 위상으로 깜빡이고, 커서 suffix 페이드라 재빌드 없이 토글된다.
@@ -20580,9 +20629,11 @@ pub const AppSession = struct {
             if (ft_on) ft_cprep = std.Io.Clock.awake.now(self.io).nanoseconds; // chrome prep 끝 = 사이드바 계열 시작
             var sidebar_frame: ?renderer.RenderFrame = null;
             defer if (sidebar_frame) |*sf| sf.deinit(self.allocator);
+            var sidebar_source_ready = false;
             if (builtin.os.tag == .macos) {
                 // 통합 수집: DrawList만 만들고 collect(.sidebar) — placeAndDistribute가 sidebar_frame을 채운다(한 atlas 세대).
                 if (sidebar_ops.buildSidebarTitleDrawList(self)) |dl| {
+                    sidebar_source_ready = sidebar_ops.sidebarSourceKey(self, dl, self.chromeGeometrySnapshot(), &self.sidebar_source_scratch);
                     self.collectShaped(&collected, dl, pane_ops.paneFrameBuilder(self), .sidebar);
                 } else |_| {}
             }
@@ -21516,9 +21567,6 @@ pub const AppSession = struct {
                 // 그 id 가 나중에 다른 이미지에 재배정될 때 옛 generation 으로 업로드를 건너뛰는 일을 막는다.
                 _ = self.kitty_ids.endFrame(self.allocator) catch &.{};
                 self.pruneKittyUploaded(kg_live_ids.items);
-                // **락 밖**에서 host 로 보낸다. 위 주입은 원격일 때 로컬 거울에만 닿으므로 진짜 코어가
-                // 있는 host 에도 맞춰야 한다 — 바뀔 때만 나가고, 코어 락을 쥔 채 RPC 를 걸지 않는다.
-                self.syncRemoteCellMetrics();
                 // F2-1 배경 이미지(window.background-image): 풀-윈도 pass-0 GpuImage를 kitty 채널 앞에 끼운다
                 // (렌더러 변경 없이 텍스처 캐시·image quad 인프라 재사용). pass 0이라 (pass,z) 정렬 partition을
                 // 유지하려 kg_images **앞**에 prepend한다(below-text 먼저·above-text 뒤 split 불변).
@@ -21583,6 +21631,9 @@ pub const AppSession = struct {
                     // 기하만 새 값으로 올리면 이 함수가 없애려는 바로 그 불일치(옛 pitch 셀 + 새 헤더 높이)를 만든다.
                     self.metal_buffer.stampChromeGeometry(self.chromeGeometrySnapshot());
                     sidebar_ops.applySidebarGlyphPyTop(self); // 카드 glyph py_top을 rowTop 기반 origin_y로(가변 높이 정합 — SG3b-2-ii)
+                    // 이번에 올린 사이드바의 입력을 기억한다 — 셀이 실제로 이 입력에서 나왔을 때만(사이드바 frame 이 있을 때).
+                    if (sidebar_source_ready and sidebar_frame != null)
+                        self.metal_buffer.adoptSidebarSource(self.allocator, self.sidebar_source_scratch.items);
                     // **프레임을 만드는 동안 예약된 재투영은 이 소거가 삼키면 안 된다.**
                     //
                     // `appendPaneFrame`은 프레임을 다 만든 뒤 검색 재조준을 돌 수 있고(§5.1 —
@@ -21634,10 +21685,22 @@ pub const AppSession = struct {
                     for (collected.items) |*c| c.deinit(self.allocator);
                     collected.deinit(self.allocator);
                 }
+                var sidebar_unchanged = false;
+                var sidebar_source_ready = false;
                 if (sidebar_ops.buildSidebarTitleDrawList(self)) |dl| {
-                    self.collectShaped(&collected, dl, pane_ops.paneFrameBuilder(self), .sidebar);
+                    sidebar_source_ready = sidebar_ops.sidebarSourceKey(self, dl, self.chromeGeometrySnapshot(), &self.sidebar_source_scratch);
+                    if (sidebar_source_ready and self.metal_buffer.sidebarSourceIs(self.sidebar_source_scratch.items)) {
+                        // 올려 둔 사이드바와 입력이 같다 — 셰이핑·배치·교체(와 Swift 의 다시 그리기)를 건너뛴다.
+                        var unused = dl;
+                        unused.deinit(self.allocator);
+                        sidebar_unchanged = true;
+                    } else {
+                        self.collectShaped(&collected, dl, pane_ops.paneFrameBuilder(self), .sidebar);
+                    }
                 } else |_| {}
-                if (collected.items.len > 0) {
+                if (sidebar_unchanged) {
+                    self.chrome_dirty = false;
+                } else if (collected.items.len > 0) {
                     const gen_before = self.renderer_state.atlas.generation;
                     // placeAndDistribute는 out 파라미터가 많지만 .sidebar만 collect했으므로 sidebar_frame만 채워지고
                     // 나머지는 비어 있다(각각 defer로 정리 — 대부분 null/빈이라 no-op).
@@ -21675,10 +21738,14 @@ pub const AppSession = struct {
                         const sidebar_colors: metal_frame.CellColors = .{ .default_fg = self.appearance.theme.foreground };
                         // 스탬프는 **부분 swap이 실제로 성공했을 때만** 올린다(full 경로와 같은 트랜잭션 규칙) —
                         // `catch {}`로 삼킨 실패에서 기하만 전진하면 옛 사이드바 셀과 새 헤더/슬롯 높이가 갈린다.
-                        if (self.metal_buffer.replaceSidebar(self.allocator, sidebar_frame, sidebar_colors, self.renderer_state.atlas.config)) |_| {
+                        const sidebar_replaced = if (self.metal_buffer.replaceSidebar(self.allocator, sidebar_frame, sidebar_colors, self.renderer_state.atlas.config)) |_| blk: {
                             self.metal_buffer.stampChromeGeometry(self.chromeGeometrySnapshot());
-                        } else |_| {}
+                            break :blk true;
+                        } else |_| false;
                         sidebar_ops.applySidebarGlyphPyTop(self); // chrome-only 부분 경로도 카드 glyph py_top 정합(가변 높이 — SG3b-2-ii)
+                        // 교체에 **성공했을 때만** 입력을 기억한다 — 실패면 버퍼는 옛 셀을 들고 있다.
+                        if (sidebar_replaced and sidebar_source_ready)
+                            self.metal_buffer.adoptSidebarSource(self.allocator, self.sidebar_source_scratch.items);
                         self.chrome_dirty = false;
                     }
                     // else: sidebar_frame이 null(placeMultiPane/finishPane alloc 실패)이면 replaceSidebar를 건너뛴다 —
@@ -23635,6 +23702,7 @@ pub const AppSession = struct {
         self.scm_commit_drafts.deinit(self.allocator);
         self.metal_buffer.deinit(self.allocator);
         self.clearMeasuredTextCaches();
+        self.sidebar_source_scratch.deinit(self.allocator);
         self.gpu_quads.deinit(self.allocator);
         self.overlay_quads.deinit(self.allocator);
         self.gpu_shadows.deinit(self.allocator);
@@ -67965,6 +68033,209 @@ test "P4 C3c checkpoint 실패 상태표시줄은 프레임 사이 유지되고 
 // 걷어낸다 — `paneBarHeightPx`가 0을 돌려 탭 바를 통째로 끄는 것과 같은 규율이다. §2의 "항상 선다"는
 // **도크·사이드바 토글**(프레임마다 바뀌어 grid가 출렁이는 것)을 막으려는 규칙이지, 세션 생성 시
 // 고정되는 모드까지 포함하지 않는다. 서면 바 높이만큼 행을 뺏기고, chrome 없는 창에 chrome이 남는다.
+test "SO2 출력 게이트 — 보이는 탭의 출력만 전체 재투영, 다른 탭의 출력은 사이드바만, 출력이 없으면 아무것도" {
+    // 보이는 탭에 출력이 있으면 다른 탭 출력과 섞여 있어도 전체다(본문이 바뀌었다).
+    try std.testing.expectEqual(AppSession.OutputRedraw.full, AppSession.outputRedrawFor(1, 1));
+    try std.testing.expectEqual(AppSession.OutputRedraw.full, AppSession.outputRedrawFor(1, 31));
+    // 다른 탭만 출력했다 — 본문은 그대로이고 사이드바만 바뀔 수 있다.
+    try std.testing.expectEqual(AppSession.OutputRedraw.sidebar, AppSession.outputRedrawFor(0, 5));
+    try std.testing.expectEqual(AppSession.OutputRedraw.none, AppSession.outputRedrawFor(0, 0));
+}
+
+fn soTestSession(allocator: std.mem.Allocator) !*AppSession {
+    const session = try allocator.create(AppSession);
+    errdefer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    _ = try session.resize(1200, 700, 1000);
+    return session;
+}
+
+test "SO3 사이드바만 다시 그리는 경로는 올려 둔 사이드바와 입력이 같으면 아무것도 안 올리고, 다르면 교체한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 CoreText 투영
+    const allocator = std.testing.allocator;
+    const session = try soTestSession(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    // 첫 프레임 — 전체 투영이 사이드바를 올리고 그 입력을 기억한다.
+    _ = try session.tick();
+    try std.testing.expect(session.metal_buffer.sidebar_source_valid);
+
+    // ① 다른 탭 출력을 흉내 낸다(사이드바만 다시 그리라는 요청). 입력이 같다 → 버퍼를 건드리지 않는다.
+    //    교체하면 사이드바 셀이 새로 할당되므로 **주소**로 본다. generation 은 커서 깜빡임(`setCursorFadeMilli`)도
+    //    올려서 이 판정에 못 쓴다.
+    session.metal_dirty = false;
+    const cells_before = session.metal_buffer.sidebar_cells.ptr;
+    session.chrome_dirty = true;
+    _ = try session.tick();
+    try std.testing.expectEqual(cells_before, session.metal_buffer.sidebar_cells.ptr);
+    try std.testing.expect(!session.chrome_dirty); // 요청은 소진됐다(다음 tick 에 다시 돌지 않는다)
+
+    // ② 사이드바 입력이 바뀌었다(탭 이름) — 같은 요청이 이번에는 **교체**해야 한다. 안 하면 옛 이름이 굳는다.
+    const tab = tab_ops.activeTab(session);
+    if (tab.custom_name) |old| allocator.free(old);
+    tab.custom_name = try allocator.dupe(u8, "SO3-renamed");
+    session.metal_dirty = false;
+    session.chrome_dirty = true;
+    _ = try session.tick();
+    try std.testing.expect(session.metal_buffer.sidebar_cells.ptr != cells_before);
+    try std.testing.expect(session.metal_buffer.sidebar_source_valid); // 새 입력을 기억했다
+
+    // ③ 그 뒤 같은 요청은 다시 건너뛴다(새 입력이 기억됐다).
+    const cells_after = session.metal_buffer.sidebar_cells.ptr;
+    session.metal_dirty = false;
+    session.chrome_dirty = true;
+    _ = try session.tick();
+    try std.testing.expectEqual(cells_after, session.metal_buffer.sidebar_cells.ptr);
+}
+
+test "SO6 실제 PTY — 안 보이는 탭의 출력은 사이드바만 요청하고, 보이는 탭의 출력은 전체 재투영을 요청한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실제 PTY
+    const allocator = std.testing.allocator;
+    const session = try soTestSession(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    // controlled_smoke 자식은 `Maru app shell` 을 찍고 한 줄을 읽어 에코한 뒤 **끝난다** — 끝난 탭은 같은 tick 에
+    // 거둬지므로 화면 내용이 아니라 **게이트의 결정**(`output_redraw_counts`)이 바뀌기를 기다린다.
+    const H = struct {
+        /// 그 Term 의 runtime 에 직접 쓴다 — 붙여넣기 큐는 활성 대상 경로라 이 판정자의 관심(출력 게이트) 밖이다.
+        fn send(s: *AppSession, surface_id: u64, bytes: []const u8) !void {
+            for (s.tabs.items) |t| for (t.panes.items) |p| for (p.terms.items) |term| {
+                if (term.surface.id != surface_id) continue;
+                return s.backendFor(term).writeInput(term.rt.handle, bytes);
+            };
+            return error.TestUnexpectedResult;
+        }
+        fn tickUntilCount(s: *AppSession, which: AppSession.OutputRedraw, above: u64) !bool {
+            var i: usize = 0;
+            while (i < 400) : (i += 1) {
+                _ = try s.tick();
+                if (s.output_redraw_counts[@intFromEnum(which)] > above) return true;
+            }
+            return false;
+        }
+        fn quiet(s: *AppSession) !void {
+            // 시작 출력이 다 빠질 때까지 — 이 판정자가 보는 것은 **보낸 뒤** 의 결정뿐이다.
+            var i: usize = 0;
+            while (i < 60) : (i += 1) _ = try s.tick();
+        }
+    };
+    const sidebar = @intFromEnum(AppSession.OutputRedraw.sidebar);
+    const full = @intFromEnum(AppSession.OutputRedraw.full);
+    const background_tab = tab_ops.activeTab(session);
+    const background_id = background_tab.activePane().activeTerm().surface.id;
+    _ = try tab_ops.newTab(session);
+    try std.testing.expect(tab_ops.activeTab(session) != background_tab); // 새 탭이 보이는 탭이다
+    const visible_id = tab_ops.activeTab(session).activePane().activeTerm().surface.id;
+    try H.quiet(session);
+
+    // ① 안 보이는 탭에만 한 줄을 보낸다 — 그 에코는 «사이드바» 결정만 낳고 «전체» 는 늘지 않는다.
+    const before = session.output_redraw_counts;
+    try H.send(session, background_id, "BG\r");
+    try std.testing.expect(try H.tickUntilCount(session, .sidebar, before[sidebar]));
+    try std.testing.expectEqual(before[full], session.output_redraw_counts[full]);
+
+    // ② 보이는 탭에 보낸다 — 이번에는 «전체» 다.
+    const after_bg = session.output_redraw_counts;
+    try H.send(session, visible_id, "FG\r");
+    try std.testing.expect(try H.tickUntilCount(session, .full, after_bg[full]));
+}
+
+test "SO4 사이드바 입력 지문은 글자·색·기하(스크롤)·행 메트릭 하나만 달라도 달라진다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try soTestSession(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    _ = try session.tick();
+
+    var base: std.ArrayListUnmanaged(u8) = .empty;
+    defer base.deinit(allocator);
+    var probe: std.ArrayListUnmanaged(u8) = .empty;
+    defer probe.deinit(allocator);
+    const keyInto = struct {
+        fn run(s: *AppSession, out: *std.ArrayListUnmanaged(u8)) !void {
+            var dl = try sidebar_ops.buildSidebarTitleDrawList(s);
+            defer dl.deinit(s.allocator);
+            try std.testing.expect(sidebar_ops.sidebarSourceKey(s, dl, s.chromeGeometrySnapshot(), out));
+        }
+    }.run;
+
+    try keyInto(session, &base);
+    try keyInto(session, &probe);
+    try std.testing.expectEqualSlices(u8, base.items, probe.items); // 같은 입력은 같은 지문(결정적)
+
+    // 글자: DrawList 셀 하나.
+    {
+        var dl = try sidebar_ops.buildSidebarTitleDrawList(session);
+        defer dl.deinit(allocator);
+        try std.testing.expect(dl.cells.len > 0);
+        dl.cells[0].codepoint = if (dl.cells[0].codepoint == 'Z') 'Y' else 'Z';
+        try std.testing.expect(sidebar_ops.sidebarSourceKey(session, dl, session.chromeGeometrySnapshot(), &probe));
+        try std.testing.expect(!std.mem.eql(u8, base.items, probe.items));
+    }
+    // 색: 사이드바 전경(테마).
+    const fg = session.appearance.theme.foreground;
+    session.appearance.theme.foreground.r +%= 1;
+    try keyInto(session, &probe);
+    try std.testing.expect(!std.mem.eql(u8, base.items, probe.items));
+    session.appearance.theme.foreground = fg;
+    // 기하: 사이드바 스크롤(글자 자리는 같아도 보이는 위치가 다르다).
+    session.sidebar_scroll_offset_px += 7;
+    try keyInto(session, &probe);
+    try std.testing.expect(!std.mem.eql(u8, base.items, probe.items));
+    session.sidebar_scroll_offset_px -= 7;
+    // 행 메트릭: 카드 줄 간격(py_top 이 여기서 나온다).
+    session.sidebar_metrics.line_step += 1;
+    try keyInto(session, &probe);
+    try std.testing.expect(!std.mem.eql(u8, base.items, probe.items));
+    session.sidebar_metrics.line_step -= 1;
+    // 행: 카드 줄 수(글자는 같아도 카드 높이가 달라 그 아래 글자의 세로 위치가 바뀐다).
+    try std.testing.expect(session.sidebar_rows.items.len > 0 and session.sidebar_rows.items[0] == .card);
+    session.sidebar_rows.items[0].card.lines +%= 1;
+    try keyInto(session, &probe);
+    try std.testing.expect(!std.mem.eql(u8, base.items, probe.items));
+    session.sidebar_rows.items[0].card.lines -%= 1;
+    // 되돌리면 다시 같다.
+    try keyInto(session, &probe);
+    try std.testing.expectEqualSlices(u8, base.items, probe.items);
+}
+
+test "SO5 상태바 에이전트 집계는 안 보이는 탭의 전이에도 값이 바뀌면 전체 재투영을 세운다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try soTestSession(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    // 사이드바를 접는다 — 카드가 안 보이면 전이 자리의 dirty(`agentDisplayVisible`)가 서지 않는 조건이다.
+    session.sidebar_collapsed = true;
+    session.noteAgentTallyForStatusBar();
+    session.metal_dirty = false;
+
+    // 값이 그대로면 세우지 않는다.
+    session.noteAgentTallyForStatusBar();
+    try std.testing.expect(!session.metal_dirty);
+
+    // 에이전트 하나가 막혔다 — 상태바의 막힘 개수가 바뀐다.
+    const term = tab_ops.activeTab(session).activePane().activeTerm();
+    term.agent_state = .blocked;
+    session.noteAgentTallyForStatusBar();
+    try std.testing.expect(session.metal_dirty);
+    try std.testing.expectEqual(@as(usize, 1), session.last_agent_tally.blocked);
+
+    // 한 번 반영하면 다음 tick 에는 다시 세우지 않는다.
+    session.metal_dirty = false;
+    session.noteAgentTallyForStatusBar();
+    try std.testing.expect(!session.metal_dirty);
+    term.agent_state = .idle;
+}
+
 test "SB1: quick terminal(chrome_minimal)에는 상태바가 서지 않는다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;

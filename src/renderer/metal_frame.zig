@@ -1687,6 +1687,14 @@ pub const MetalFrameBuffer = struct {
     // 사이드바 셀(밴드 ++ 탭 제목 glyph) — replace가 밴드 cells와 사이드바 RenderFrame을 합쳐 만든다.
     // 제목 glyph는 터미널과 같은 atlas를 쓰므로 uploads/pixels도 cells와 같은 머지 스트림에 들어간다.
     sidebar_cells: []NativeMetalCell = &.{},
+    /// 지금 `sidebar_cells` 를 만든 **입력의 지문**(호출자가 직렬화한 바이트). 같은 입력이면 같은 셀이므로
+    /// 호출자는 사이드바를 다시 셰이핑·배치·교체하지 않고 건너뛸 수 있다(`sidebarSourceIs`).
+    ///
+    /// **사이드바를 쓰는 모든 호출이 이 지문을 먼저 죽인다**(`replace`·`replaceSidebar` 첫 줄). 살리는 길은
+    /// 쓰기에 성공한 호출자가 `adoptSidebarSource` 를 부르는 것 하나다. 그래서 새 쓰기 경로가 adopt 를
+    /// 빠뜨려도 **건너뛰기가 꺼질 뿐** 옛 셀을 붙잡는 일은 없다 — 틀릴 수 있는 방향이 «다시 그린다» 뿐이다.
+    sidebar_source: std.ArrayListUnmanaged(u8) = .empty,
+    sidebar_source_valid: bool = false,
     // C4b: chrome rich GPU quad 프리미티브(둥근 박스). replace가 AppSession이 chrome lowering으로 모은 것을
     // dupe 소유한다. tui 테마/빈이면 길이 0(렌더 무동작). 사이드바/모달/divider가 공유하는 통합 배열.
     gpu_quads: []GpuQuad = &.{},
@@ -1800,6 +1808,7 @@ pub const MetalFrameBuffer = struct {
         // 텍스처를 evict한다(빈 집합 = 살아있는 이미지 없음 → 전부 evict).
         live_image_ids: []const u32,
     ) !void {
+        self.sidebar_source_valid = false; // 쓰기 시도 = 지문 무효(성공한 호출자만 다시 adopt 한다)
         // 1) 터미널 셀: pane 탭 바 chrome을 먼저(커서 suffix 보존), 그 뒤 각 panel frame을 투영해 origin 박아
         //    이어 붙인다. 커서 suffix는 맨 뒤(활성) panel만.
         var cells_list: std.ArrayList(NativeMetalCell) = .empty;
@@ -2040,6 +2049,7 @@ pub const MetalFrameBuffer = struct {
         sidebar_colors: CellColors,
         atlas_config: renderer.GlyphAtlasConfig,
     ) !void {
+        self.sidebar_source_valid = false; // 쓰기 시도 = 지문 무효(성공한 호출자만 다시 adopt 한다)
         const new_sidebar_cells = try buildMergedSidebarCells(allocator, sidebar_frame, sidebar_colors);
         errdefer allocator.free(new_sidebar_cells);
         // atlas가 grow 안 했다는 전제(호출자 폴백)이므로 현재 dims는 self.cells가 정규화된 dims와 같다 —
@@ -2059,6 +2069,26 @@ pub const MetalFrameBuffer = struct {
         self.uploads = merged.uploads;
         self.pixels = merged.pixels;
         self.generation += 1;
+    }
+
+    /// 지금 사이드바 셀이 `key` 입력으로 만든 것인가. 무효(쓰기 뒤 adopt 전)면 늘 false 다.
+    pub fn sidebarSourceIs(self: *const MetalFrameBuffer, key: []const u8) bool {
+        return self.sidebar_source_valid and std.mem.eql(u8, self.sidebar_source.items, key);
+    }
+
+    /// 방금 성공한 사이드바 쓰기의 입력 지문을 기억한다. 사본을 못 만들면 무효로 둔다(다음에 다시 그린다).
+    pub fn adoptSidebarSource(self: *MetalFrameBuffer, allocator: std.mem.Allocator, key: []const u8) void {
+        self.sidebar_source.clearRetainingCapacity();
+        self.sidebar_source.appendSlice(allocator, key) catch {
+            self.sidebar_source_valid = false;
+            return;
+        };
+        self.sidebar_source_valid = true;
+    }
+
+    /// 사이드바 셀을 `replace` 밖에서 제자리로 고치는 쪽(py_top 적용)이 부른다.
+    pub fn invalidateSidebarSource(self: *MetalFrameBuffer) void {
+        self.sidebar_source_valid = false;
     }
 
     pub fn view(self: *const MetalFrameBuffer) MetalFrame {
@@ -2134,6 +2164,7 @@ pub const MetalFrameBuffer = struct {
     }
 
     pub fn deinit(self: *MetalFrameBuffer, allocator: std.mem.Allocator) void {
+        self.sidebar_source.deinit(allocator);
         allocator.free(self.cells);
         allocator.free(self.cell_clips);
         allocator.free(self.sidebar_cells);
@@ -3698,6 +3729,46 @@ test "replace: 같은 clip을 쓰는 pane들이 표 항목 하나를 공유한�
 
     try std.testing.expectEqual(@as(usize, 1), buf.view().cell_clip_count);
     for (buf.cells) |cell| try std.testing.expectEqual(@as(u16, 1), cell.clip_index);
+}
+
+test "SO1 사이드바 입력 지문은 adopt 로만 살아나고, 사이드바를 쓰는 모든 호출과 제자리 수정이 죽인다" {
+    // **왜**: 호출자는 이 지문이 같으면 사이드바 교체를 건너뛴다. 지문이 셀보다 오래 살면 옛 사이드바를 붙잡는다 —
+    // 그래서 살아나는 길은 성공한 쓰기 뒤의 `adoptSidebarSource` 하나이고, 쓰기 경로는 **스스로** 지문을 죽인다.
+    const allocator = std.testing.allocator;
+    var buf: MetalFrameBuffer = .{};
+    defer buf.deinit(allocator);
+    const key_a = "sidebar-input-a";
+    const key_b = "sidebar-input-b";
+
+    // 처음에는 아무 지문도 없다.
+    try std.testing.expect(!buf.sidebarSourceIs(key_a));
+    buf.adoptSidebarSource(allocator, key_a);
+    try std.testing.expect(buf.sidebarSourceIs(key_a));
+    try std.testing.expect(!buf.sidebarSourceIs(key_b)); // 다른 입력은 같지 않다
+    try std.testing.expect(!buf.sidebarSourceIs("sidebar-input-")); // 앞부분만 같은 것도 같지 않다
+
+    // ① 사이드바만 교체 — 지문이 죽는다(호출자가 다시 adopt 하기 전까지).
+    try buf.replaceSidebar(allocator, null, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, .{});
+    try std.testing.expect(!buf.sidebarSourceIs(key_a));
+    buf.adoptSidebarSource(allocator, key_b);
+    try std.testing.expect(buf.sidebarSourceIs(key_b));
+
+    // ② 전체 교체 — 사이드바 셀도 새로 만들므로 지문이 죽는다.
+    try buf.replace(allocator, &.{}, .{}, 8, 16, null, null, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, null, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
+    try std.testing.expect(!buf.sidebarSourceIs(key_b));
+
+    // ③ 제자리 수정(py_top) 쪽의 명시적 무효화.
+    buf.adoptSidebarSource(allocator, key_a);
+    buf.invalidateSidebarSource();
+    try std.testing.expect(!buf.sidebarSourceIs(key_a));
+
+    // ④ 사본을 못 만들면 살아나지 않는다(옛 지문도 남기지 않는다).
+    buf.adoptSidebarSource(allocator, key_a);
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    buf.sidebar_source.clearAndFree(allocator); // 새로 할당해야 하는 상태로 만든다
+    buf.adoptSidebarSource(failing.allocator(), key_b);
+    try std.testing.expect(!buf.sidebarSourceIs(key_b));
+    try std.testing.expect(!buf.sidebarSourceIs(key_a));
 }
 
 test "replaceSidebar swaps only sidebar_cells and bumps generation, leaving grid cells untouched (A)" {

@@ -1520,7 +1520,19 @@ pub const GrantProvenance = struct {
     pane: u64,
     target: u64,
     scope: capmod.ScopeClass,
+    /// `browser_storage` grant 가 인가한 호스트. 실행 직전(L4)과 Swift 가 쿠키 저장소를 만지기 직전에 대상 문서가 아직 이
+    /// 호스트(또는 하위 도메인)인지 다시 본다 — dispatch 와 실행 사이에 탭이 다른 사이트로 가는 경쟁을 막는다.
+    host: cpg.GrantHost = .{},
 };
+
+/// 대상 web surface 문서의 지금 호스트(collector snapshot 의 URL — http(s) 가 아니면 null).
+pub fn targetHost(snapshot: cs.CollectorSnapshot, target_id: u64) ?[]const u8 {
+    const dto = snapshot.find(target_id) orelse return null;
+    return switch (dto.detail) {
+        .web => |w| cpg.hostOfUrl(w.url orelse return null),
+        else => null,
+    };
+}
 
 /// `browser.subscribe`의 인가·검증 통과 결과(5f-0b-3b): 대상 web surface + 이벤트 필터. async op이 아니라 L4가
 /// SubscriberRegistry에 **동기 등록**할 지시(연결 outbound는 L4가 pending에서 가져와 주입).
@@ -1563,7 +1575,7 @@ pub const BrowserDispatch = union(enum) {
 ///   2. parseMethod. `core != .browser`면 `method_not_found`(방어 — 라우팅상 안 옴).
 ///   3. `id` 파싱(params `id`=u64). 형식 오류 → `invalid_params`(authz가 target을 알아야 먼저; 형식 오류는 oracle 아님).
 ///   4. **authz** — 세션 cap 중 하나라도 `authorize(cap, id, cap.generation, method, now)` granted면 통과. 아니면
-///      **4b. pane confirm-grant 조회**(§9.2 Model B, 1e-confirm — `grants.isGranted(pane_selector, id, scope)`, 가법).
+///      **4b. pane confirm-grant 조회**(§9.2 Model B, 1e-confirm — `grants.hasGrant(pane_selector, id, scope)`, 가법).
 ///      둘 다 아니면 authorized=false로 두고 **최종 판정은 순서 6**으로 미룬다(valid web surface면 needs_grant, 아니면
 ///      균일 `unauthorized`). deny 이유 노출 금지.
 ///   5. `parseBrowserMethod(method.rest)`. null(screenshot 등 5a 미구현) → `method_not_found`(authz 뒤 — 미인가
@@ -1643,9 +1655,11 @@ pub fn browserOpFromRequest(
     if (!authorized) {
         if (req_scope) |sc| {
             if (pane_selector) |pane| {
-                if (grants.isGranted(pane, target_id, sc)) {
+                // browser_storage 는 grant 호스트가 대상 문서의 지금 호스트를 덮어야 한다(사이트에 묶인 쿠키 권한). 안 덮으면
+                // 아래에서 needs_grant — 모달이 새 사이트를 묻는다.
+                if (grants.authorizes(pane, target_id, sc, targetHost(snapshot, target_id))) {
                     authorized = true;
-                    pane_grant = .{ .pane = pane, .target = target_id, .scope = sc };
+                    pane_grant = .{ .pane = pane, .target = target_id, .scope = sc, .host = grants.hostOf(pane, target_id, sc).? };
                 }
             }
         }
@@ -2131,12 +2145,13 @@ test "dispatchBrowser(1e-confirm-1c): 미grant valid 요청은 needs_grant, pane
 
 test "dispatchBrowser(1e-confirm-1b): browser_storage grant는 getCookies만 인가·navigate는 needs_grant(scope 대칭)" {
     var grants: cpg.PaneGrantStore = .{};
-    try grants.grant(.{ .pane = 5, .target = 11, .scope = .browser_storage }); // storage grant
-    // getCookies(browser_storage) → 인가 → .op.
+    try grants.grant(.{ .pane = 5, .target = 11, .scope = .browser_storage, .host = cpg.GrantHost.init("example") }); // fixture 문서 https://example/ 에서 허용
+    // getCookies(browser_storage) → 인가 → .op. provenance 가 허용 호스트를 싣는다(실행 직전 재확인용).
     switch (try dispatchGrant("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.getCookies\",\"params\":{\"id\":11}}", 5, &grants)) {
         .op => |op| {
             defer testing.allocator.free(op.arg);
             try testing.expectEqual(BrowserMethod.get_cookies, op.method);
+            try testing.expectEqualStrings("example", op.pane_grant.?.host.slice());
         },
         .err => |e| {
             testing.allocator.free(e);
@@ -2147,6 +2162,32 @@ test "dispatchBrowser(1e-confirm-1b): browser_storage grant는 getCookies만 인
     }
     // navigate(browser) → storage grant로는 미grant(scope 불일치) → needs_grant{browser}(pane 5 확인 대기).
     try expectNeedsGrant(req_navigate_11, 5, &grants, 11, .browser);
+}
+
+test "dispatchBrowser(쿠키 권한은 사이트에): 다른 호스트에서 허용한 browser_storage grant 는 이 문서에 통하지 않는다 — needs_grant" {
+    // 허용한 뒤 탭이 https://example/ 로 옮겨졌다(fixture) — 허용 호스트 github.com 이 덮지 않는다.
+    var grants: cpg.PaneGrantStore = .{};
+    try grants.grant(.{ .pane = 5, .target = 11, .scope = .browser_storage, .host = cpg.GrantHost.init("github.com") });
+    try expectNeedsGrant("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.getCookies\",\"params\":{\"id\":11}}", 5, &grants, 11, .browser_storage);
+    try expectNeedsGrant("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.clearStorage\",\"params\":{\"id\":11}}", 5, &grants, 11, .browser_storage);
+    // 부모 도메인에서 허용했으면 통한다(하위 도메인 포함 — 사용자 결정).
+    var parent: cpg.PaneGrantStore = .{};
+    try parent.grant(.{ .pane = 5, .target = 11, .scope = .browser_storage, .host = cpg.GrantHost.init("EXAMPLE") });
+    switch (try dispatchGrant("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.getCookies\",\"params\":{\"id\":11}}", 5, &parent)) {
+        .op => |op| testing.allocator.free(op.arg),
+        .err => |e| {
+            testing.allocator.free(e);
+            return error.ExpectedOpGotErr;
+        },
+        .subscribe => return error.ExpectedOp,
+        .needs_grant => return error.ExpectedOpGotNeedsGrant,
+    }
+}
+
+test "targetHost: web surface 의 http(s) 호스트만 — 없는 surface·비 web 은 null" {
+    try testing.expectEqualStrings("example", targetHost(fx, 11).?);
+    try testing.expect(targetHost(fx, 10) == null); // terminal
+    try testing.expect(targetHost(fx, 99) == null);
 }
 
 // ── 6) 유효 cap + browser.screenshot(5f-1) → BrowserOp{screenshot, arg={}} ── screenshot도 browser scope, rect/scale 없으면 빈 옵션 `{}`.

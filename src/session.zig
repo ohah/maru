@@ -127,6 +127,7 @@ pub const mermaid_coordinator = @import("session/mermaid_coordinator.zig"); // F
 pub const mermaid_theme = @import("session/mermaid_theme.zig"); // 터미널 색상 테마 → mermaid 팔레트 파생(순수, per-render)
 pub const web_sidecar = @import("session/web_sidecar/root.zig"); // W1a: 웹 OSR sidecar 제어 채널 bounded wire codec SSOT(docs/plans/web-osr-backend.md C2)
 pub const web_osr_plan = @import("session/web_osr_plan.zig"); // W3b: OSR 브라우저 조정(창 배치 → sidecar 명령) — L2 순수
+pub const web_osr_view = @import("session/web_osr_view.zig"); // W3c: 보일 링 고르기(새 링 첫 프레임까지 옛 장·GPU 소비자 규칙) — L2 순수
 pub const file_tree = @import("session/file_tree.zig"); // FP7: OS-중립 파일 트리 snapshot·접힘·멀티루트·최근 파일 모델
 pub const file_tree_navigation = @import("session/file_tree_navigation.zig"); // 파일 트리 transient selection·키보드 탐색·scroll 순수 정책
 pub const file_tree_mutation = @import("session/file_tree_mutation.zig"); // 파일 트리 변경 이름·root·dirty 보호·path remap 순수 정책
@@ -262,5 +263,6 @@ test {
     @import("std").testing.refAllDecls(ssh);
     @import("std").testing.refAllDecls(web_sidecar);
     @import("std").testing.refAllDecls(web_osr_plan);
+    @import("std").testing.refAllDecls(web_osr_view);
     @import("std").testing.refAllDecls(editor.lsp);
 }

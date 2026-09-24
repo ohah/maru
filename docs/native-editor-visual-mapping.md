@@ -2497,6 +2497,47 @@ Term 을 막는다. 그래서 `fileTermForPath` 의 «첫 번째»와 «가장 �
 | 2 | 위 보강 대상 + 다시 쓴 컴파일 거절 넷 + B14(제품 판정자로도 잡히나) (20) | **죽음 17** · T4 등가(짝짓기가 물은 byte 로 다시 거른다) · T13b 등가 → 「처음 닫힌 품는 쌍이 가장 안쪽」으로 코드를 줄였다 · P5 생존 → 주소를 그대로 두고 revision 만 움직이는 단언 |
 | 3 | P5 · 줄인 짝짓기의 경계 둘(T6·T7) | **전부 죽음(3/3)** — 변이 94(71 + 20 + 3), 죽거나 등가(다섯 — 코드 주석)거나 걷어냈다(셋) |
 
+#### 5.1c 들여쓰기 안내선 (2026-09-24, 계획 공격 뒤의 결정)
+
+§5 가 이름만 둔 장식의 셋째다(§5.1b 의 둘에 이어). **VS Code 기본이 켬이다** — `editorOptions.ts` 원문 `guides: { indentation: true,
+highlightActiveIndentation: true, bracketPairs: false }`.
+
+**VS Code 의 동작(원문 — `indentGuides.ts` · `guidesTextModelPart.ts` · `viewModelLines.ts` · `indentationGuesser.ts` · `model/utils.ts` ·
+`editorColorRegistry.ts` · `theme-defaults/*.json`, 동작만 읽었다).**
+
+- **몇 단계인가.** 내용 줄은 `ceil(들여쓰기 열 / indentSize)`(`computeIndentLevel` — 공백 1열, 탭은 다음 탭스톱, 공백만인 줄은 −1). 공백만인 줄은
+  위·아래 가장 가까운 내용 줄로 정한다(`_getIndentLevelForWhitespaceLine`): 문서 처음·끝이면 0, 위 < 아래면 `1 + floor(위/size)`(위 블록 안),
+  같으면 `ceil(아래/size)`, 위 > 아래면 offSide 언어(Python 등 — 언어 설정 `foldingRules.offSide`)는 `ceil(아래/size)`, 아니면 `1 + floor(아래/size)`.
+- **어디에 긋나.** 단계 `k` 의 선은 표시 열 `(k−1) × indentSize` 칸의 **왼쪽 끝 1px**(`box-shadow: 1px 0 0 0 … inset`). 가로로 굴린 만큼 옮긴다.
+- **간격은 파일에서 추정한다** — `detectIndentation` 기본 켬이고 `indentSize` 기본이 `tabSize` 라, 추정한 값이 곧 선 간격이다(`guessIndentation`):
+  앞 10,000 줄에서 탭으로 들여쓴 줄과 공백으로 들여쓴 줄 중 많은 쪽을 고르고, 공백이면 이웃한 내용 줄끼리의 들여쓰기 차이를 세어 {2, 4, 6, 8, 3, 5, 7}
+  중 가장 많은 것(2 가 4 의 2/3 이상이면 2)을 쓴다. 정렬처럼 보이는 차이(윗줄이 쉼표로 끝나고 아래 줄이 윗줄 글자 자리에 맞춘 것)는 세지 않는다.
+- **랩된 줄.** 이어짐 행이 1열에서 시작하면(`wrappingIndent: 'none'`) 첫 조각에만 긋는다(`BlockSubsequent`). 기본 `'same'` 은 이어짐 행을 들여 써서 선이
+  이어진다.
+- **활성 선**(`getActiveIndentGuide`) — primary caret 줄의 단계 `d` 에서 시작한다. 다음 줄이 `d + 1` 이면(스코프 머리) 아래 블록을, 윗줄이 `d + 1` 이면
+  (스코프 끝) 위 블록을 활성으로 하고, 아니면 `d`(0 이면 없음). 위·아래로 단계가 `d` 이상인 줄까지 넓히되 **보이는 범위 안에서** 멈춘다. 그 구간
+  줄들의 단계 `d` 선만 활성 색이다.
+- **색.** 기본 테마가 1 단계 색만 정하고(2~6 단계 기본은 투명 — 걸러진다) 그 한 색을 모든 단계에 쓴다: 다크 `#404040`/활성 `#707070`(바탕
+  `#1e1e1e`·본문 `#d4d4d4` 에서 본문 쪽으로 ≈ 19 %·45 %), 라이트 `#D3D3D3`/`#939393`(≈ 17 %·42 %).
+
+| 축 | 결정 | 근거 |
+| --- | --- | --- |
+| **켜고 끄기** | `editor.guides-indentation`(기본 켬) · `editor.guides-highlight-active-indentation`(기본 켬) | VS Code `guides.indentation` · `guides.highlightActiveIndentation`(그쪽의 `'always'` 는 괄호 안내선과만 갈리므로 참·거짓 둘) |
+| **들여쓰기 열** | `fold.indentOf` — **접힘과 같은 함수**(공백 1열 · 탭은 다음 탭스톱 · 공백만이면 없음). VS Code `computeIndentLevel` 과 같은 규칙이다 | 두 출처 금지 |
+| **간격** | **문서에서 추정한 들여쓰기 폭** — VS Code `guessIndentation` 규칙 그대로(탭 줄이 많으면 탭 파일 → `editor.tab-width`). **열 때 한 번** 추정하고 문서를 다시 읽을 때 다시 한다(VS Code 도 모델을 만들 때 한 번). 탭 파일은 「탭이다」만 들어 설정을 바꾸면 따라간다. **이 추정은 안내선에만 쓴다** — `Tab` 키가 넣는 것·탭의 표시 폭은 지금대로(설정) | VS Code `detectIndentation`(기본 켬). 설정 폭만 쓰면 2 칸 들여쓰기 파일(TS·JS·JSON 에 흔하다)에서 선이 중첩과 어긋난다 |
+| **단계 수** | 위 VS Code 규칙 그대로(공백만인 줄은 위·아래 내용 줄로). offSide 는 Python — 우리 번들 grammar 중 VS Code 가 offSide 로 두는 언어 | VS Code |
+| **자리** | 단계 `k` 선 = 본문 시작 + 표시 열 `(k−1) × 간격` − 가로 스크롤, 폭 **1px**, 행 높이. 가로로 굴려 그 열이 화면 밖이면 안 긋는다 | VS Code. **1px 세로 quad 는 선다** — 캡처 픽셀로 쟀다(1px·2px 세로선이 같은 세기로 섰다; §4.1i 의 높이 1px 가로 사각이 지워진 것과 다르다) |
+| **랩** | **첫 조각에만** — 우리 랩은 이어짐 행을 0 열에서 시작하므로 VS Code 의 `'none'` 과 같은 경우다 | VS Code `BlockSubsequent`. 이어짐 들여쓰기(`'same'`)가 오면 그때 잇는다 |
+| **접힘** | 보이는 줄마다 그 문서 줄의 값. 공백만인 줄의 위·아래 탐색은 숨은 줄도 본다 | VS Code 도 모델 줄로 센다 |
+| **활성 선** | 위 VS Code 규칙 그대로, 탐색은 **그려진 줄 범위**(첫·끝 문서 줄) 안에서 | VS Code 가 보이는 범위로 묶는다 |
+| **색** | 새 역할 둘 — `indent_guide`(바탕을 본문색 쪽으로 18 %) · `indent_guide_active`(44 %). 단계마다 같은 색 | VS Code 기본 테마 비율 |
+| **층** | 밴드 뒤 · 현재 줄 상자 앞 — 글자 아래, 다른 강조가 그 위에 얹힌다. 고정 행(§4.1i)에 걸린 선은 걷어내기가 지운다 | — |
+| **비교 뷰·병합 판** | 안 한다(§5.1b 와 같은 이유) | — |
+| **비용** | 프레임마다 **그려질 줄만** 센다 — 공백만인 줄이 이어지면 위·아래 탐색을 한 번 하고 재사용한다(VS Code 와 같은 캐시). 간격 추정은 열 때 한 번 | — |
+
+**VS Code 와 다른 점(의도).** ① 랩된 줄의 이어짐 행에 선이 없다(우리에게 이어짐 들여쓰기가 없어서 — 위 표) ② 간격 추정을 **안내선에만** 쓴다(VS Code 는
+`Tab` 키·탭 폭까지 바꾼다 — 그 확장은 편집 계약(§3.9a)의 몫이다) ③ offSide 는 번들 grammar 기준(YAML 은 grammar 가 오면).
+
 ### 5.4 진단 층 — 첫 출처는 구문 오류 (2026-09-17, 계획 공격 뒤의 사용자 결정)
 
 **계획 공격이 드러낸 것.** §5 가 진단을 「스팬 층」으로 정해 두었지만 **그 층에 넣을 출처가 하나도 없었다** — LSP 클라이언트

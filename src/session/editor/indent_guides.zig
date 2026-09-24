@@ -1,0 +1,408 @@
+//! 들여쓰기 안내선 — 줄마다 몇 단계인가 · 간격은 몇 열인가 · 어느 블록이 활성인가
+//! ([시각 매핑](../../../docs/native-editor-visual-mapping.md) §5.1c).
+//!
+//! **들여쓰기 열은 접힘과 같은 함수다**(`fold.indentOf` — 공백 1열, 탭은 다음 탭스톱, 공백만인 줄은 없음). 두 곳이 따로 세면 접힘 화살표가
+//! 서는 블록과 선이 가리키는 블록이 갈린다.
+//!
+//! 줄은 `src` 가 준다 — `count() usize` 와 `text(i) []const u8`(줄바꿈 제외) 두 메서드를 가진 값. 문서 줄 전체가 대상이고(접혀 숨은 줄도),
+//! 화면 축으로 옮기는 것은 호출자의 일이다.
+const std = @import("std");
+const fold = @import("fold.zig");
+
+/// 간격 추정이 보는 줄 수의 상한 — VS Code `guessIndentation` 과 같다.
+pub const guess_line_limit: usize = 10_000;
+
+/// 추정한 들여쓰기. **탭 파일은 폭을 들지 않는다** — 「탭이다」만 들어 설정(`editor.tab-width`)을 바꾸면 간격이 따라간다(§5.1c).
+pub const Guess = struct {
+    tabs: bool,
+    /// 공백 파일의 한 단계 폭(2~8). `tabs` 면 뜻이 없다.
+    spaces: u8,
+
+    /// 안내선 간격(열).
+    pub fn unit(self: Guess, tab_width: u16) u32 {
+        return if (self.tabs) @max(tab_width, 1) else self.spaces;
+    }
+};
+
+/// **파일의 들여쓰기를 추정한다** — VS Code `guessIndentation` 의 규칙 그대로(§5.1c). 앞 10,000 줄에서 탭으로 들여쓴 줄과 공백으로 들여쓴
+/// 줄 중 많은 쪽을 고르고, 공백이면 이웃한 내용 줄끼리의 들여쓰기 차이를 세어 {2, 4, 6, 8, 3, 5, 7} 중 가장 많은 것을 쓴다(2 가 4 의 2/3
+/// 이상이면 2). 정렬처럼 보이는 차이는 세지 않는다.
+///
+/// **기본값은 VS Code 의 것이다**(`insertSpaces` 참 · `tabSize` = 설정) — 동률일 때와 정렬 예외가 그 값을 읽는다. 우리 `Tab` 키는 탭 문자를
+/// 넣지만 이 추정은 안내선 간격에만 쓰므로(§5.1c 「다른 점」 ②) VS Code 와 같은 선을 긋는 쪽을 따른다.
+pub fn guess(src: anytype, default_tab: u16) Guess {
+    const n = @min(src.count(), guess_line_limit);
+    var tab_lines: usize = 0;
+    var space_lines: usize = 0;
+    var prev_text: []const u8 = "";
+    var prev_indent: usize = 0;
+    var counts = [_]usize{0} ** 9;
+    const default_spaces: usize = @min(default_tab, 8);
+
+    for (0..n) |ln| {
+        const text = src.text(ln);
+        var tabs: usize = 0;
+        var spaces: usize = 0;
+        var indent: ?usize = null;
+        for (text, 0..) |ch, j| {
+            if (ch == '\t') {
+                tabs += 1;
+            } else if (ch == ' ') {
+                spaces += 1;
+            } else {
+                indent = j;
+                break;
+            }
+        }
+        const cur_indent = indent orelse continue; // 빈 줄·공백만인 줄은 안 센다
+        if (tabs > 0) {
+            tab_lines += 1;
+        } else if (spaces > 1) {
+            space_lines += 1;
+        }
+        const d = spacesDiff(prev_text, prev_indent, text, cur_indent);
+        // 정렬 예외 — `const a = 1,` 아래 `      b = 2;` 같은 것은 들여쓰기 신호가 아니다. 다만 그 차이가 기본 폭과 같으면 들여쓰기로 센다(목록의
+        // `- item` 아래 `  - item`). 건너뛸 때는 윗줄도 그대로 둔다(VS Code 와 같다).
+        if (d.alignment and d.diff != default_spaces) continue;
+        if (d.diff <= 8) counts[d.diff] += 1;
+        prev_text = text;
+        prev_indent = cur_indent;
+    }
+
+    var spaces_mode = true; // VS Code 기본 `insertSpaces`
+    if (tab_lines != space_lines) spaces_mode = tab_lines < space_lines;
+    var size: usize = @max(default_spaces, 1);
+    if (spaces_mode) {
+        var score: usize = 0;
+        for ([_]usize{ 2, 4, 6, 8, 3, 5, 7 }) |p| {
+            if (counts[p] > score) {
+                score = counts[p];
+                size = p;
+            }
+        }
+        // 2 가 4 의 2/3 이상이면 2 — 깊은 중첩이 4 칸 차이를 만드는 2 칸 파일(YAML 등)을 가른다. 정수로 옮겼다(`3·c2 ≥ 2·c4`).
+        if (size == 4 and counts[4] > 0 and counts[2] > 0 and 3 * counts[2] >= 2 * counts[4]) size = 2;
+    }
+    return .{ .tabs = !spaces_mode, .spaces = @intCast(@min(size, 8)) };
+}
+
+const Diff = struct { diff: usize = 0, alignment: bool = false };
+
+/// 두 줄의 들여쓰기 차이(VS Code `spacesDiff`). 공통 앞부분을 빼고 남은 공백·탭을 센다 — 한 줄에 공백과 탭이 섞였으면 0. 탭 수가 같으면 공백
+/// 차이이고, 그때 **정렬처럼 보이는지**(윗줄이 쉼표로 끝나고 아래 줄의 첫 글자가 윗줄의 공백 뒤 글자 자리에 선다)를 본다. 탭 수가 다르면 공백
+/// 차이가 탭 차이로 나누어떨어질 때만 그 몫.
+fn spacesDiff(a: []const u8, a_len: usize, b: []const u8, b_len: usize) Diff {
+    var i: usize = 0;
+    while (i < a_len and i < b_len and a[i] == b[i]) : (i += 1) {}
+    var a_sp: usize = 0;
+    var a_tab: usize = 0;
+    for (a[i..a_len]) |ch| {
+        if (ch == ' ') a_sp += 1 else a_tab += 1;
+    }
+    var b_sp: usize = 0;
+    var b_tab: usize = 0;
+    for (b[i..b_len]) |ch| {
+        if (ch == ' ') b_sp += 1 else b_tab += 1;
+    }
+    if (a_sp > 0 and a_tab > 0) return .{};
+    if (b_sp > 0 and b_tab > 0) return .{};
+    const tabs_diff = if (a_tab > b_tab) a_tab - b_tab else b_tab - a_tab;
+    const sp_diff = if (a_sp > b_sp) a_sp - b_sp else b_sp - a_sp;
+    if (tabs_diff == 0) {
+        var out: Diff = .{ .diff = sp_diff };
+        // 색인은 VS Code 그대로다(`bSpacesCnt` 를 윗줄의 자리로 읽는다 — 공통 앞부분이 0 인 흔한 경우에 「아래 줄 첫 글자의 열」이 된다).
+        if (sp_diff > 0 and b_sp >= 1 and b_sp - 1 < a.len and b_sp < b.len) {
+            if (b[b_sp] != ' ' and a[b_sp - 1] == ' ' and a.len > 0 and a[a.len - 1] == ',') out.alignment = true;
+        }
+        return out;
+    }
+    if (sp_diff % tabs_diff == 0) return .{ .diff = sp_diff / tabs_diff };
+    return .{};
+}
+
+/// 내용 줄의 단계 — `ceil(들여쓰기 열 / 간격)`. 공백만인 줄이면 `null`.
+fn contentLevel(text: []const u8, tab_width: u16, unit: u32) ?u32 {
+    const col = fold.indentOf(text, tab_width) orelse return null;
+    return (col + unit - 1) / unit;
+}
+
+/// **공백만인 줄의 단계**(VS Code `_getIndentLevelForWhitespaceLine`). `above`·`below` 는 가장 가까운 내용 줄의 들여쓰기 **열**(없으면 `null` —
+/// 문서 처음·끝). 위가 얕으면 위 블록 안, 같으면 아래와 같이, 위가 깊으면 offSide 언어는 아래 블록과 같이·아니면 끝나는 블록 안.
+pub fn whitespaceLevel(offside: bool, above: ?u32, below: ?u32, unit: u32) u32 {
+    const a = above orelse return 0;
+    const b = below orelse return 0;
+    if (a < b) return 1 + a / unit;
+    if (a == b) return (b + unit - 1) / unit;
+    return if (offside) (b + unit - 1) / unit else 1 + b / unit;
+}
+
+/// 입력 묶음 — 규칙이 읽는 값들.
+pub const Params = struct {
+    tab_width: u16,
+    /// 안내선 간격(열, ≥ 1) — `Guess.unit`.
+    unit: u32,
+    /// 공백만인 줄이 아래 블록 쪽인가(Python — §5.1c).
+    offside: bool = false,
+};
+
+/// 문서 줄 `ln` 의 단계(한 줄만 묻는다 — 공백만이면 위·아래로 훑는다).
+pub fn levelAt(src: anytype, p: Params, ln: usize) u32 {
+    if (contentLevel(src.text(ln), p.tab_width, p.unit)) |lv| return lv;
+    var above: ?u32 = null;
+    var k = ln;
+    while (k > 0) {
+        k -= 1;
+        if (fold.indentOf(src.text(k), p.tab_width)) |c| {
+            above = c;
+            break;
+        }
+    }
+    var below: ?u32 = null;
+    var j = ln + 1;
+    while (j < src.count()) : (j += 1) {
+        if (fold.indentOf(src.text(j), p.tab_width)) |c| {
+            below = c;
+            break;
+        }
+    }
+    return whitespaceLevel(p.offside, above, below, p.unit);
+}
+
+/// **오름차순 문서 줄들의 단계**를 `out` 에 채운다(`out.len == lines.len`). 공백만인 줄이 이어지면 위·아래 내용 줄을 **한 번** 찾고 재사용한다 —
+/// 줄마다 따로 훑으면 긴 빈 구간에서 곱으로 붙는다(VS Code `getLinesIndentGuides` 와 같은 캐시). 숨은 줄은 `lines` 에 없어도 탐색은 그 위를
+/// 지난다(§5.1c 「접힘」).
+pub fn levels(src: anytype, p: Params, lines: []const u32, out: []u16) void {
+    std.debug.assert(out.len == lines.len);
+    // 캐시: 마지막으로 찾은 위 내용 줄(그 줄 번호와 열)과 아래 내용 줄.
+    var above_ln: ?usize = null;
+    var above_col: ?u32 = null;
+    var above_known = false;
+    var below_ln: ?usize = null;
+    var below_col: ?u32 = null;
+    var below_known = false;
+    var prev: ?usize = null;
+    for (lines, 0..) |l32, i| {
+        const ln: usize = l32;
+        // 건너뛴 줄(접힘)이 있으면 위 캐시가 틀릴 수 있다 — 버린다.
+        if (prev) |pv| {
+            if (ln != pv + 1) above_known = false;
+        }
+        prev = ln;
+        const text = src.text(ln);
+        if (fold.indentOf(text, p.tab_width)) |col| {
+            above_ln = ln;
+            above_col = col;
+            above_known = true;
+            out[i] = @intCast(@min((col + p.unit - 1) / p.unit, std.math.maxInt(u16)));
+            continue;
+        }
+        if (!above_known) {
+            above_ln = null;
+            above_col = null;
+            var k = ln;
+            while (k > 0) {
+                k -= 1;
+                if (fold.indentOf(src.text(k), p.tab_width)) |c| {
+                    above_ln = k;
+                    above_col = c;
+                    break;
+                }
+            }
+            above_known = true;
+        }
+        if (!below_known or (below_ln != null and below_ln.? <= ln)) {
+            below_ln = null;
+            below_col = null;
+            var j = ln + 1;
+            while (j < src.count()) : (j += 1) {
+                if (fold.indentOf(src.text(j), p.tab_width)) |c| {
+                    below_ln = j;
+                    below_col = c;
+                    break;
+                }
+            }
+            below_known = true;
+        }
+        out[i] = @intCast(@min(whitespaceLevel(p.offside, above_col, below_col, p.unit), std.math.maxInt(u16)));
+    }
+}
+
+/// 활성 블록 — 문서 줄 `[start, end]` 의 단계 `level` 선이 활성 색이다.
+pub const Active = struct { start: u32, end: u32, level: u32 };
+
+/// VS Code 가 이 한 줄 뒤에서 훑기를 멈추는 거리(`getActiveIndentGuide` 의 50,000).
+pub const active_distance_limit: usize = 50_000;
+
+/// **활성 블록**(VS Code `getActiveIndentGuide`, §5.1c). caret 줄의 단계 `d` 에서 시작해, 다음 줄이 `d + 1` 이면(스코프 머리) 아래 블록을, 윗줄이
+/// `d + 1` 이면(스코프 끝) 위 블록을 고르고, 아니면 `d`(0 이면 없음). 위·아래로 단계가 그 이상인 줄까지 넓히되 **`[min_line, max_line]` 안에서**
+/// 멈춘다(그려진 범위 — 첫 두 걸음은 그 밖이어도 본다, VS Code 와 같다).
+pub fn active(src: anytype, p: Params, line: usize, min_line: usize, max_line: usize) ?Active {
+    const count = src.count();
+    if (line >= count) return null;
+    var start: usize = 0;
+    var end: usize = 0;
+    var level: u32 = 0;
+    var go_up = true;
+    var go_down = true;
+    var initial: u32 = 0;
+    var distance: usize = 0;
+    while (go_up or go_down) : (distance += 1) {
+        const up_ok = distance <= line; // 위 줄이 문서 안인가
+        const up: usize = if (up_ok) line - distance else 0;
+        const down = line + distance;
+        if (distance > 1 and (!up_ok or up < min_line)) go_up = false;
+        if (distance > 1 and (down >= count or down > max_line)) go_down = false;
+        if (distance > active_distance_limit) break;
+
+        const up_level: ?u32 = if (go_up and up_ok) levelAt(src, p, up) else null;
+        const down_level: ?u32 = if (go_down and down < count) levelAt(src, p, down) else null;
+
+        if (distance == 0) {
+            initial = up_level orelse 0;
+            continue;
+        }
+        if (distance == 1) {
+            if (down_level) |dl| if (initial + 1 == dl) {
+                // 스코프 머리 — 자식 블록이 활성이다
+                go_up = false;
+                start = down;
+                end = down;
+                level = dl;
+                continue;
+            };
+            if (up_level) |ul| if (ul == initial + 1) {
+                // 스코프 끝 — 위와 대칭
+                go_down = false;
+                start = up;
+                end = up;
+                level = ul;
+                continue;
+            };
+            start = line;
+            end = line;
+            level = initial;
+            if (level == 0) return null;
+        }
+        if (go_up) {
+            if (up_level != null and up_level.? >= level) start = up else go_up = false;
+        }
+        if (go_down) {
+            if (down_level != null and down_level.? >= level) end = down else go_down = false;
+        }
+    }
+    if (level == 0) return null;
+    return .{ .start = @intCast(start), .end = @intCast(end), .level = level };
+}
+
+// ── 판정자 ────────────────────────────────────────────────────────────────────
+
+const testing = std.testing;
+
+/// 판정자용 줄 묶음.
+const Lines = struct {
+    items: []const []const u8,
+    pub fn count(self: Lines) usize {
+        return self.items.len;
+    }
+    pub fn text(self: Lines, i: usize) []const u8 {
+        return self.items[i];
+    }
+};
+
+test "IG1 간격 추정 — 공백 2·4, 탭 파일, 2 가 4 의 2/3 이상이면 2, 정렬 예외, 줄이 없으면 기본 (§5.1c, VS Code guessIndentation)" {
+    const two = Lines{ .items = &.{ "a {", "  b {", "    c;", "  }", "}" } };
+    try testing.expectEqual(Guess{ .tabs = false, .spaces = 2 }, guess(two, 4));
+    const four = Lines{ .items = &.{ "a {", "    b {", "        c;", "    }", "}" } };
+    try testing.expectEqual(Guess{ .tabs = false, .spaces = 4 }, guess(four, 8));
+    const tabs = Lines{ .items = &.{ "a {", "\tb {", "\t\tc;", "\t}", "}" } };
+    try testing.expect(guess(tabs, 4).tabs);
+    try testing.expectEqual(@as(u32, 3), guess(tabs, 4).unit(3)); // 탭 파일은 설정을 따른다
+    // 2 칸 차이 넷 · 4 칸 차이 여섯(들어가고 나오는 차이를 다 센다) → 4 가 가장 많지만 `3·4 ≥ 2·6` 이라 2 — 정수 경계에 딱 선다
+    const mixed = Lines{ .items = &.{ "a", "  b", "a", "  b", "a", "    c", "a", "    c", "a", "    c", "a" } };
+    try testing.expectEqual(@as(u8, 2), guess(mixed, 4).spaces);
+    // 2 칸 둘 · 4 칸 넷 → `3·2 < 2·4` 라 4
+    const mostly4 = Lines{ .items = &.{ "a", "  b", "a", "    c", "a", "    c", "a" } };
+    try testing.expectEqual(@as(u8, 4), guess(mostly4, 4).spaces);
+    // 정렬 — `const a = 1,` 아래 여섯 칸은 안 센다. **세면 6 이 이기는 표본이라야 갈린다**: 정렬 줄 둘이 6 을 넷 만들고 진짜 들여쓰기는 2 가 둘이다
+    const align_src = Lines{ .items = &.{ "const a = 1,", "      b = 2;", "const c = 3,", "      d = 4;", "f {", "  x;", "}" } };
+    try testing.expectEqual(@as(u8, 2), guess(align_src, 4).spaces);
+    // 들여쓴 줄이 없으면 기본 폭(공백 모드 — VS Code 기본 `insertSpaces`)
+    const flat = Lines{ .items = &.{ "a", "b" } };
+    try testing.expectEqual(Guess{ .tabs = false, .spaces = 4 }, guess(flat, 4));
+}
+
+test "IG2 공백만인 줄의 단계 — 처음·끝 0, 위가 얕으면 위 블록 안, 같으면 아래와 같이, 위가 깊으면 offSide 에 따라 (§5.1c)" {
+    try testing.expectEqual(@as(u32, 0), whitespaceLevel(false, null, 4, 4));
+    try testing.expectEqual(@as(u32, 0), whitespaceLevel(false, 4, null, 4));
+    try testing.expectEqual(@as(u32, 1), whitespaceLevel(false, 0, 4, 4)); // 위 블록 안: 1 + 0/4
+    try testing.expectEqual(@as(u32, 2), whitespaceLevel(false, 4, 8, 4));
+    try testing.expectEqual(@as(u32, 1), whitespaceLevel(false, 4, 4, 4)); // 같으면 ceil(4/4)
+    try testing.expectEqual(@as(u32, 1), whitespaceLevel(false, 8, 0, 4)); // 끝나는 블록 안: 1 + 0/4
+    try testing.expectEqual(@as(u32, 0), whitespaceLevel(true, 8, 0, 4)); // offSide: 아래 블록과 같이
+    try testing.expectEqual(@as(u32, 2), whitespaceLevel(true, 8, 6, 4)); // offSide: ceil(6/4)
+    try testing.expectEqual(@as(u32, 2), whitespaceLevel(false, 8, 6, 4)); // 1 + 6/4
+}
+
+test "IG3 줄마다 단계 — 내용 줄은 ceil, 빈 줄은 이웃으로, 탭은 탭스톱, 건너뛴 줄(접힘) 뒤에도 옳다 (§5.1c)" {
+    const src = Lines{
+        .items = &.{
+            "fn f() {", //   0 → 0
+            "    a;", //     1 → 1
+            "", //           2 → 위 4 < 아래 6 → 1 + 4/4 = 2
+            "      b;", //   3 → ceil(6/4) = 2
+            "\tc;", //       4 → 탭 = 4 열 → 1
+            "", //           5 → 위 4 > 아래 0 → 1 + 0 = 1
+            "}", //          6 → 0
+            "", //           7 → 아래 없음 → 0
+        },
+    };
+    const p: Params = .{ .tab_width = 4, .unit = 4 };
+    const all = [_]u32{ 0, 1, 2, 3, 4, 5, 6, 7 };
+    var out: [8]u16 = undefined;
+    levels(src, p, &all, &out);
+    try testing.expectEqualSlices(u16, &.{ 0, 1, 2, 2, 1, 1, 0, 0 }, &out);
+    // 한 줄씩 묻는 것과 같다(두 출처가 같은 답)
+    for (all, 0..) |ln, i| try testing.expectEqual(@as(u32, out[i]), levelAt(src, p, ln));
+    // **접혀 숨은 줄을 건너뛰면 위 캐시를 버린다** — 숨은 3 번(8 열)이 4 번 빈 줄의 진짜 위다. 2 번에서 찾아 둔 위(1 번, 2 열)를 그대로 쓰면
+    // `2 < 4` 라 1 이 나온다(옳은 답은 `8 > 4` 라 1 + 4/4 = 2).
+    const hid = Lines{ .items = &.{ "a {", "  x", "", "        y", "", "    z" } };
+    const sparse = [_]u32{ 0, 2, 4, 5 };
+    var out2: [4]u16 = undefined;
+    levels(hid, p, &sparse, &out2);
+    try testing.expectEqualSlices(u16, &.{ 0, 1, 2, 1 }, &out2);
+    // 간격 2 — 같은 문서가 더 촘촘해진다
+    var out3: [8]u16 = undefined;
+    levels(src, .{ .tab_width = 4, .unit = 2 }, &all, &out3);
+    try testing.expectEqualSlices(u16, &.{ 0, 2, 3, 3, 2, 1, 0, 0 }, &out3);
+}
+
+test "IG4 활성 블록 — 몸통 안·머리·끝·단계 0·그려진 범위 (§5.1c, VS Code getActiveIndentGuide)" {
+    const src = Lines{
+        .items = &.{
+            "a {", //        0 lv0
+            "    b {", //    1 lv1
+            "        c;", // 2 lv2
+            "        d;", // 3 lv2
+            "    }", //      4 lv1
+            "    e;", //     5 lv1
+            "}", //          6 lv0
+            "z;", //         7 lv0
+        },
+    };
+    const p: Params = .{ .tab_width = 4, .unit = 4 };
+    // 몸통 안(2) — 단계 2 블록 [2,3]
+    try testing.expectEqual(Active{ .start = 2, .end = 3, .level = 2 }, active(src, p, 2, 0, 7).?);
+    // 스코프 머리(1 — 다음 줄이 한 단계 깊다) — 자식 블록
+    try testing.expectEqual(Active{ .start = 2, .end = 3, .level = 2 }, active(src, p, 1, 0, 7).?);
+    // 스코프 끝(4 — 윗줄이 한 단계 깊다) — 위 블록
+    try testing.expectEqual(Active{ .start = 2, .end = 3, .level = 2 }, active(src, p, 4, 0, 7).?);
+    // 단계 1 몸통(5) — [1,5]
+    try testing.expectEqual(Active{ .start = 1, .end = 5, .level = 1 }, active(src, p, 5, 0, 7).?);
+    // 단계 0 이고 이웃도 머리·끝이 아니다(7) — 없음
+    try testing.expectEqual(@as(?Active, null), active(src, p, 7, 0, 7));
+    // 그려진 범위 [3, 7] — 위로 3 에서 멈춘다(단계는 이어지지만 범위 밖이다)
+    try testing.expectEqual(Active{ .start = 3, .end = 5, .level = 1 }, active(src, p, 5, 3, 7).?);
+    // 범위 [5, 7] — 첫 걸음(거리 1)은 범위 밖(4)도 본다, VS Code 와 같다
+    try testing.expectEqual(Active{ .start = 4, .end = 5, .level = 1 }, active(src, p, 5, 5, 7).?);
+    try testing.expectEqual(@as(?Active, null), active(src, p, 99, 0, 7));
+}

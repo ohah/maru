@@ -69,7 +69,8 @@ pub const Host = struct {
             const step: i64 = @min(deadline_left, 100);
             const ready = std.c.poll(&fds, 1, @intCast(step));
             deadline_left -= step;
-            if (ready == 0) continue;
+            // 0 은 시간 초과, 음수는 신호(EINTR) — 둘 다 막힘 read 로 넘어가지 않는다.
+            if (ready <= 0) continue;
             const n = std.c.read(self.events, &self.carry, self.carry.len);
             if (n <= 0) {
                 self.decoder.finish() catch {

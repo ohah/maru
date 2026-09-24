@@ -5,7 +5,8 @@
 //!   helper-sandbox   host 의 자식이 모두 `maru-web-helper` 이고 `sandbox_check` 1(host 자신은 샌드박스 밖)
 //!   browser-refused  W1c 전의 create_browser 에 browser_create_failed 로 답한다
 //!   shutdown-clean   shutdown → 알림이 끝까지 frame 으로만 풀리고(stdout 오염 없음) exit 0, helper 도 사라진다
-//!   parent-death     maru 역할 프로세스를 SIGKILL 하면 host 와 helper 가 모두 사라진다(고아 Chromium 없음)
+//!   parent-death     maru 역할 프로세스를 SIGKILL 하면 host 와 helper 가 모두 사라진다(고아 Chromium 없음) — 명령 pipe 의
+//!                    쓰기 끝을 손자(maru 가 띄운 셸 흉내)가 쥐고 있어 EOF 가 오지 않아도
 //! 하나라도 틀리면 exit 1.
 
 const std = @import("std");
@@ -105,13 +106,22 @@ fn parentDeath(host_path: [:0]const u8, profile_arg: [:0]const u8) !void {
         const hello: protocol.message.Hello = .{ .instance = 1, .nonce = os.random64() };
         host.send(.{ .hello = hello }) catch std.c._exit(4);
         _ = (host.next(reply_wait_ms) catch std.c._exit(5)) orelse std.c._exit(6);
-        const pid_bytes = std.mem.asBytes(&host.pid);
+        // maru 가 띄운 셸처럼 명령 pipe 의 쓰기 끝을 물려받은 손자 — 부모가 죽어도 이것이 살아 있으면 EOF 가 오지 않는다.
+        const grandchild = os.fork();
+        if (grandchild == 0) {
+            while (true) os.sleepMs(1000);
+        }
+        const pids = [2]c_int{ host.pid, grandchild };
+        const pid_bytes = std.mem.asBytes(&pids);
         _ = std.c.write(report_pipe[1], pid_bytes.ptr, pid_bytes.len);
         while (true) os.sleepMs(1000);
     }
     _ = std.c.close(report_pipe[1]);
-    var host_pid: c_int = 0;
-    if (std.c.read(report_pipe[0], std.mem.asBytes(&host_pid).ptr, @sizeOf(c_int)) != @sizeOf(c_int)) return error.NoHostPid;
+    var pids: [2]c_int = undefined;
+    if (std.c.read(report_pipe[0], std.mem.asBytes(&pids).ptr, @sizeOf([2]c_int)) != @sizeOf([2]c_int)) return error.NoHostPid;
+    const host_pid = pids[0];
+    const grandchild = pids[1];
+    defer _ = std.c.kill(grandchild, .KILL);
 
     var kids_buf: [64]c_int = undefined;
     const kids = waitForHelpers(host_pid, &kids_buf, 2);

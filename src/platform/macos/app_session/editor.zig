@@ -2223,8 +2223,6 @@ pub fn prepareUntitled(self: *AppSession) OpenFileError!Prepared {
 /// 넘긴 뒤에는 실패 지점이 없으므로 errdefer가 겹칠 여지 자체가 사라진다.
 pub fn finishAttach(self: *AppSession, term: *Term, prepared: Prepared) void {
     term.rt.editor_doc = prepared.opened;
-    // **새 문서다 — 들여쓰기 간격을 다시 추정한다**(§5.1c). 다시 읽은 파일은 들여쓰기가 바뀌었을 수 있다.
-    term.rt.editor_guides.forgetDocument();
     term.rt.editor_lines = prepared.lines;
     term.rt.editor_path = prepared.path;
 
@@ -41622,4 +41620,27 @@ test "IGP4 Python 은 offSide — 블록 뒤 빈 줄이 아래 블록 쪽이다 
     try testing.expectEqual(@as(usize, 0), countHits(try guideHits(fx.session, py, &buf), 2)); // offSide — 아래(0 열)와 같이
     const txt = try openBracketFixture(&fx, allocator, "o.txt", src);
     try testing.expectEqual(@as(usize, 1), countHits(try guideHits(fx.session, txt, &buf), 2)); // 아니면 끝나는 블록 안
+}
+
+test "IGP5 굴린 화면 — 창이 맨 위 줄부터다; 행마다 그 줄의 단계 (제품 경계, §5.1c)" {
+    // 창의 시작을 0 으로 두면 굴린 화면의 행마다 **다른 줄의 단계**가 선다. 줄마다 들여쓰기가 번갈아 들고 홀수 줄까지 굴려 그 뒤집힘이
+    // 보이게 한다(프레임 판정자 `IGF1` 은 창을 직접 만들어 이 배선을 못 본다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const src = "a\n    b\n" ** 60;
+    // **sticky 를 끈다** — 들여쓰기 접힘이 `a`·`    b`·다음 `a` 를 세 줄 스코프로 세워 그 머리줄이 0 행을 덮고, 덮인 행의 선은 걷어내기가 지운다
+    // (§4.1i — 처음에 그것 때문에 0 행이 비어 빨갰다). 이 판정자가 재는 것은 창의 시작이다.
+    fx.session.loaded_config.config.editor.sticky_scroll = false;
+    const term = try openBracketFixture(&fx, allocator, "s.txt", src);
+    var buf: [128]GuideHit = undefined;
+    _ = try guideHits(fx.session, term, &buf); // 기하를 굳힌다
+    setEditorTop(fx.session, term, 11, "test");
+    const hits = try guideHits(fx.session, term, &buf);
+    try testing.expectEqual(@as(usize, 11), term.rt.editor_first_line);
+    // 행 0 = 줄 11(`    b` — 선 하나) · 행 1 = 줄 12(`a` — 없음)
+    try testing.expectEqual(@as(usize, 1), countHits(hits, 0));
+    try testing.expectEqual(@as(usize, 0), countHits(hits, 1));
+    try testing.expectEqual(@as(usize, 1), countHits(hits, 2));
 }

@@ -1355,6 +1355,9 @@ test "BRC1 언어마다 무엇이 괄호인가 — VS Code 1.139 TextMate 문법
         .{ .lang = .css, .src = "a { b: url(\"q(1).png\"); c: f(1) [x] }\n", .want = &.{ .{ 2, 0 }, .{ 10, 1 }, .{ 13, 2 }, .{ 15, 2 }, .{ 21, 1 }, .{ 28, 1 }, .{ 30, 1 }, .{ 32, 1 }, .{ 34, 1 }, .{ 36, 0 } } },
         .{ .lang = .java, .src = "class A { void g() { f(\"(\", x[0]); List<String> l; } }\n", .want = &.{ .{ 8, 0 }, .{ 16, 1 }, .{ 17, 1 }, .{ 19, 1 }, .{ 22, 2 }, .{ 29, 3 }, .{ 31, 3 }, .{ 32, 2 }, .{ 51, 1 }, .{ 53, 0 } } },
         .{ .lang = .cpp, .src = "int m() { std::vector<int> v{1}; return v[0]; }\n", .want = &.{ .{ 5, 0 }, .{ 6, 0 }, .{ 8, 0 }, .{ 28, 1 }, .{ 30, 1 }, .{ 41, 1 }, .{ 43, 1 }, .{ 46, 0 } } },
+        .{ .lang = .javascript, .src = "/**\n * Prose {not a type} here (and parens) [x].\n * @param {string} a first\n * @param {Array<string>|Map<K,(V)>} b second\n * @returns {Promise<{ok: boolean}>} result\n * @see {@link Foo.bar} and {@link https://x.y/(z) label}\n * @type {import(\"../index\").W}\n * @example\n *   f({ a: [1] });\n */\nfunction f(a, b) {}\n// line {comment} (x)\n/* block {comment} */\n", .want = &.{ .{ 59, 0 }, .{ 66, 0 }, .{ 86, 0 }, .{ 107, 1 }, .{ 109, 1 }, .{ 111, 0 }, .{ 134, 0 }, .{ 143, 1 }, .{ 155, 1 }, .{ 157, 0 }, .{ 174, 0 }, .{ 188, 0 }, .{ 194, 0 }, .{ 213, 1 }, .{ 215, 1 }, .{ 222, 0 }, .{ 233, 0 }, .{ 240, 1 }, .{ 251, 1 }, .{ 254, 0 }, .{ 302, 0 }, .{ 307, 0 }, .{ 309, 0 }, .{ 310, 0 } } },
+        // Bash `case` 패턴의 `)` — VS Code 1.139 는 이것을 튀는 괄호로 칠한다(낡은 scope 이름 탓 — 계약 「다른 점」 ①). 우리는 괄호가 아니다.
+        .{ .lang = .bash, .src = "case x in\n  a) echo ;;\n  *) f ;;\nesac\n", .want = &.{} },
     };
     var got: std.ArrayList([2]i64) = .empty;
     defer got.deinit(allocator);
@@ -1373,6 +1376,33 @@ test "BRC1 언어마다 무엇이 괄호인가 — VS Code 1.139 TextMate 문법
         defer st.deinit(allocator);
         try bracketMarksForTest(allocator, &st, md, false, &got);
         try testing.expectEqual(@as(usize, 0), got.items.len);
+    }
+    // 경계 — **UTF-16 단위**로 센다(VS Code `line.length`). 19,999 는 칠하고 20,000 은 안 칠한다. 2 byte 글자(`é`)는 한 단위라 byte 로 20,000 이어도
+    // 칠하고, 4 byte 글자(이모지)는 두 단위라 5,000 개면 10,000 단위 — byte(20,000)로 재면 틀린다.
+    {
+        const Edge = struct { unit: []const u8, reps: usize, colored: bool };
+        const edges = [_]Edge{
+            .{ .unit = "x", .reps = 19_999 - 5, .colored = true }, // 아래에서 `f("` · `")` 다섯 글자를 더한다
+            .{ .unit = "x", .reps = 20_000 - 5, .colored = false },
+            .{ .unit = "\u{e9}", .reps = 9_000, .colored = true }, // byte 18,000 · 단위 9,000
+            .{ .unit = "\u{e9}", .reps = 10_000, .colored = true }, // byte 20,000 · 단위 10,000 — byte 로 재면 안 칠한다
+            .{ .unit = "\u{1F600}", .reps = 5_000, .colored = true }, // byte 20,000 · 단위 10,000
+            .{ .unit = "\u{1F600}", .reps = 10_000, .colored = false }, // 단위 20,000
+        };
+        for (edges) |ed| {
+            var line: std.ArrayList(u8) = .empty;
+            defer line.deinit(allocator);
+            try line.appendSlice(allocator, "f(\"");
+            for (0..ed.reps) |_| try line.appendSlice(allocator, ed.unit);
+            try line.appendSlice(allocator, "\")");
+            if (ed.unit.len == 1) try testing.expectEqual(ed.reps + 5, line.items.len); // 단위 길이 = byte 길이(ASCII)
+            try line.appendSlice(allocator, "\n");
+            var st = openParsed(line.items, .javascript);
+            defer st.deinit(allocator);
+            try bracketMarksForTest(allocator, &st, line.items, false, &got);
+            errdefer std.debug.print("BRC1 긴 줄 경계 unit={s} reps={d}\n", .{ ed.unit, ed.reps });
+            try testing.expectEqual(@as(usize, if (ed.colored) 2 else 0), got.items.len);
+        }
     }
     // 20,000 자 이상인 줄의 괄호는 없다(VS Code 는 그 줄을 토큰화하지 않는다) — 옆의 짧은 줄은 그대로.
     {

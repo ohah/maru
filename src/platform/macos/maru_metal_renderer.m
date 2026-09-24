@@ -124,6 +124,8 @@ _Static_assert(sizeof(MaruRendererImageVertex) == 16, "MaruRendererImageVertex m
 @property (nonatomic, strong) id<MTLRenderPipelineState> quadPipeline;
 @property (nonatomic, strong) id<MTLRenderPipelineState> shadowPipeline;
 @property (nonatomic, strong) id<MTLRenderPipelineState> imagePipeline;
+// W3c: Chromium(OSR) 본문 — image 와 같은 정점·블렌딩이지만 fragment 가 premultiplied 장을 그대로 낸다.
+@property (nonatomic, strong) id<MTLRenderPipelineState> osrPipeline;
 @property (nonatomic, strong) id<MTLTexture> atlas;
 @property (nonatomic) uint32_t atlasWidth;
 @property (nonatomic) uint32_t atlasHeight;
@@ -399,6 +401,12 @@ MaruMetalRenderer *maru_metal_renderer_create(id<MTLDevice> device, MTLPixelForm
     if (image_pipeline == nil) {
         return NULL;
     }
+    image_descriptor.fragmentFunction = [image_library newFunctionWithName:@"maru_osr_fragment"];
+    id<MTLRenderPipelineState> osr_pipeline =
+        [device newRenderPipelineStateWithDescriptor:image_descriptor error:NULL];
+    if (osr_pipeline == nil) {
+        return NULL;
+    }
     id<MTLCommandQueue> queue = [device newCommandQueue];
     if (queue == nil) {
         return NULL;
@@ -411,6 +419,7 @@ MaruMetalRenderer *maru_metal_renderer_create(id<MTLDevice> device, MTLPixelForm
     impl.quadPipeline = quad_pipeline;
     impl.shadowPipeline = shadow_pipeline;
     impl.imagePipeline = image_pipeline;
+    impl.osrPipeline = osr_pipeline;
     impl.imageTextures = [NSMutableDictionary dictionary];
     // C handle이 ObjC 객체 수명을 소유한다. destroy에서 __bridge_transfer로 해제한다.
     return (__bridge_retained MaruMetalRenderer *)impl;
@@ -1095,7 +1104,7 @@ static void maru_draw_terminal_layer(const MaruDrawPass *c) {
     // 1.3 Chromium(OSR) 탭 본문(W3c) — web pane 본문에는 터미널 셀이 없다. 탭 바·주소창 밴드는 본문 rect 밖이라 가리지
     //     않고, 모달은 오버레이 레이어라 위에 온다.
     if (c->osr_vertex_buffer != nil && c->osr_n > 0) {
-        [c->encoder setRenderPipelineState:c->impl.imagePipeline];
+        [c->encoder setRenderPipelineState:c->impl.osrPipeline];
         [c->encoder setVertexBuffer:c->osr_vertex_buffer offset:0 atIndex:0];
         for (size_t oi = 0; oi < c->osr_n; oi++) {
             if (c->osr_textures[oi] == nil) continue;
@@ -1978,6 +1987,7 @@ void maru_metal_renderer_destroy(MaruMetalRenderer *renderer) {
     impl.quadPipeline = nil;
     impl.shadowPipeline = nil;
     impl.imagePipeline = nil;
+    impl.osrPipeline = nil;
     [impl.imageTextures removeAllObjects];
     impl.imageTextures = nil;
     impl.queue = nil;

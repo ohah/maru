@@ -2314,7 +2314,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const cr4a_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr4a_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_reconnect_observer_attach_boundary.zig"),
                 .target = target,
                 .optimize = cr4a_optimize,
             }),
@@ -2403,7 +2403,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const cr4b_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr4b_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_reconnect_stable_mutation_seal_boundary.zig"),
                 .target = target,
                 .optimize = cr4b_optimize,
             }),
@@ -2438,7 +2438,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const cr4c_c1_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr4c_c1_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_reconnect_controller_promotion_boundary.zig"),
                 .target = target,
                 .optimize = cr4c_c1_optimize,
             }),
@@ -2515,7 +2515,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const cr4c_c2_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr4c_c2_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_reconnect_generation_publication_boundary.zig"),
                 .target = target,
                 .optimize = cr4c_c2_optimize,
             }),

@@ -51,6 +51,7 @@ fn onBeforeCommandLineProcessing(
     process_type: [*c]const c.cef_string_t,
     command_line: [*c]c.cef_command_line_t,
 ) callconv(.c) void {
+    defer object.releaseArg(command_line);
     // 빈 process_type 이 브라우저 프로세스다. helper 에게는 CEF 가 필요한 것만 넘긴다.
     if (process_type != null and process_type.*.length != 0) return;
     for (product_switches) |name| {

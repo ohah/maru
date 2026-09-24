@@ -185,6 +185,11 @@ const boundary_scans: []const BoundaryScan = &.{
     // 적어 두면 다음 슬라이스가 또 만든다 — 원장을 못 박아 **줄어들기만** 하게 한다.
     .{ .root = "tests/boundary/judge_names.zig" },
 
+    // check-boundaries 가 두 모드 루프 안의 판정자를 **Debug 로만** 도는가. 규칙은 2026-08-17 에 섰지만
+    // (`boundary_step` 선언 위 주석) 적어만 둔 탓에 루프 안 등록 38 개가 두 모드로 붙어 있었다(2026-09-25). 소스를 세는
+    // 판정자는 `if (x == .Debug)` 로 거르고, 제품을 돌리는 동작 테스트만 이름을 올려 예외로 둔다.
+    .{ .root = "tests/boundary/boundary_debug_only.zig", .deps = &.{"build_graph"} },
+
     // 머지 충돌 마커가 커밋되지 않는가. 코드였다면 `zig build` 가 즉시 잡지만(문법 오류), 문서·스크립트는
     // 깨져도 조용하다 — 실제로 `docs/file-explorer.md` 에 하나가 커밋된 채 남아 있었다.
     .{ .root = "tests/boundary/conflict_markers.zig" },
@@ -5261,6 +5266,11 @@ pub fn build(b: *std.Build) void {
     // 개별 집중 gate(`test-session-host-*`)는 **바꾸지 않는다.** 그쪽은 "Debug·ReleaseFast runtime
     // N+boundary 1 exact-count" 계약을 문서가 소유하므로 두 모드를 그대로 돌린다. 그 gate 를 직접
     // 부를 때만 ReleaseFast boundary 가 빌드되고, CI 의 집계 경로에서는 빠진다.
+    //
+    // **적어만 둔 규칙은 샜다.** 2026-09-25 에 세어 보니 루프 안 등록 38 개가 두 모드로 붙어 있었고, 그중
+    // 소스를 세는 판정자 20 개를 다시 걸렀다. 이제 `tests/boundary/boundary_debug_only.zig` 가 세어
+    // 되돌아가면 실패한다. 예외는 제품을 import 해 **동작을 돌리는** release adapter 테스트 18 개 —
+    // ReleaseFast 에서만 드러나는 결함을 잡을 수 있어 두 모드를 유지하고, 그 판정자의 목록에 이름이 있다.
 
     // 이름 → 모듈. 표의 `deps` 가 **이 목록으로만** 풀린다. 그래서 같은 파일로 모듈을 두 번
     // 만드는 일이 없다 — 표가 되기 전에는 `tests/support/build_source.zig` 모듈이 셋이었다.
@@ -7584,7 +7594,7 @@ pub fn build(b: *std.Build) void {
         run_input_parity_boundary_tests.addArg("--maru-expect-tests=1");
         run_input_parity_boundary_tests.setCwd(b.path("."));
         session_host_input_parity_step.dependOn(&run_input_parity_boundary_tests.step);
-        boundary_step.dependOn(&run_input_parity_boundary_tests.step);
+        if (input_parity_optimize == .Debug) boundary_step.dependOn(&run_input_parity_boundary_tests.step);
     }
     const session_host_notification_journal_step = b.step(
         "test-session-host-notification-journal",
@@ -7616,7 +7626,7 @@ pub fn build(b: *std.Build) void {
         run_journal_boundary_tests.addArg("--maru-expect-tests=1");
         run_journal_boundary_tests.setCwd(b.path("."));
         session_host_notification_journal_step.dependOn(&run_journal_boundary_tests.step);
-        boundary_step.dependOn(&run_journal_boundary_tests.step);
+        if (journal_optimize == .Debug) boundary_step.dependOn(&run_journal_boundary_tests.step);
     }
     const session_host_notification_admission_step = b.step(
         "test-session-host-notification-admission",
@@ -7928,7 +7938,7 @@ pub fn build(b: *std.Build) void {
         run_provenance_boundary_tests.addArg("--maru-expect-tests=1");
         run_provenance_boundary_tests.setCwd(b.path("."));
         session_host_config_provenance_step.dependOn(&run_provenance_boundary_tests.step);
-        boundary_step.dependOn(&run_provenance_boundary_tests.step);
+        if (provenance_optimize == .Debug) boundary_step.dependOn(&run_provenance_boundary_tests.step);
     }
     const session_host_config_override_retention_step = b.step(
         "test-session-host-config-override-retention",
@@ -7976,7 +7986,7 @@ pub fn build(b: *std.Build) void {
         run_retention_boundary_tests.addArg("--maru-expect-tests=1");
         run_retention_boundary_tests.setCwd(b.path("."));
         session_host_config_override_retention_step.dependOn(&run_retention_boundary_tests.step);
-        boundary_step.dependOn(&run_retention_boundary_tests.step);
+        if (retention_optimize == .Debug) boundary_step.dependOn(&run_retention_boundary_tests.step);
 
         if (target.result.os.tag == .macos) {
             const retention_app_tests = addProjectTest(b, .{
@@ -8128,7 +8138,7 @@ pub fn build(b: *std.Build) void {
         run_reconnect_worker_owner_boundary_tests.addArg("--maru-expect-tests=1");
         run_reconnect_worker_owner_boundary_tests.setCwd(b.path("."));
         session_host_reconnect_worker_owner_step.dependOn(&run_reconnect_worker_owner_boundary_tests.step);
-        boundary_step.dependOn(&run_reconnect_worker_owner_boundary_tests.step);
+        if (reconnect_worker_owner_optimize == .Debug) boundary_step.dependOn(&run_reconnect_worker_owner_boundary_tests.step);
     }
     const session_host_reconnect_worker_issuer_step = b.step(
         "test-session-host-reconnect-worker-issuer",
@@ -8161,7 +8171,7 @@ pub fn build(b: *std.Build) void {
         run_reconnect_worker_issuer_boundary_tests.addArg("--maru-expect-tests=1");
         run_reconnect_worker_issuer_boundary_tests.setCwd(b.path("."));
         session_host_reconnect_worker_issuer_step.dependOn(&run_reconnect_worker_issuer_boundary_tests.step);
-        boundary_step.dependOn(&run_reconnect_worker_issuer_boundary_tests.step);
+        if (reconnect_worker_issuer_optimize == .Debug) boundary_step.dependOn(&run_reconnect_worker_issuer_boundary_tests.step);
     }
     const session_host_cr6e_c3a_step = b.step(
         "test-session-host-cr6e-c3a",
@@ -8196,7 +8206,7 @@ pub fn build(b: *std.Build) void {
         run_cr6e_c3a_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr6e_c3a_boundary_tests.setCwd(b.path("."));
         session_host_cr6e_c3a_step.dependOn(&run_cr6e_c3a_boundary_tests.step);
-        boundary_step.dependOn(&run_cr6e_c3a_boundary_tests.step);
+        if (cr6e_c3a_optimize == .Debug) boundary_step.dependOn(&run_cr6e_c3a_boundary_tests.step);
     }
     const session_host_cr6e_c3b_step = b.step(
         "test-session-host-cr6e-c3b",
@@ -8258,7 +8268,7 @@ pub fn build(b: *std.Build) void {
         run_cr6e_c3b_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr6e_c3b_boundary_tests.setCwd(b.path("."));
         session_host_cr6e_c3b_step.dependOn(&run_cr6e_c3b_boundary_tests.step);
-        boundary_step.dependOn(&run_cr6e_c3b_boundary_tests.step);
+        if (cr6e_c3b_optimize == .Debug) boundary_step.dependOn(&run_cr6e_c3b_boundary_tests.step);
     }
     const session_host_cr6e_c3c_step = b.step(
         "test-session-host-cr6e-c3c",
@@ -8292,7 +8302,7 @@ pub fn build(b: *std.Build) void {
         run_cr6e_c3c_boundary_tests.addArg("--maru-expect-tests=1");
         run_cr6e_c3c_boundary_tests.setCwd(b.path("."));
         session_host_cr6e_c3c_step.dependOn(&run_cr6e_c3c_boundary_tests.step);
-        boundary_step.dependOn(&run_cr6e_c3c_boundary_tests.step);
+        if (cr6e_c3c_optimize == .Debug) boundary_step.dependOn(&run_cr6e_c3c_boundary_tests.step);
     }
 
     // **판정 스캐폴딩이 제품 경로에서 돌지 않는가.** 합성 앱 루프를 제품과 스모크가 같이 쓰는데,

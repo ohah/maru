@@ -13,11 +13,13 @@ pub const Context = struct {
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     test_step: *std.Build.Step,
+    /// macOS SDK 경로(build.zig 가 구한 것). host 는 `maru` 모듈을 안 받으므로 프레임워크 경로를 직접 붙인다.
+    macos_sdk: ?[]const u8,
 };
 
-/// ① 의 시험 수(inbox 2 + dispatch 8 + 입구 파일의 `test {}` 블록 1). 시험을 더하거나 빼면 같이 고친다 —
+/// ① 의 시험 수(inbox 2 + dispatch 8 + registry 2 + 입구 파일의 `test {}` 블록 1). 시험을 더하거나 빼면 같이 고친다 —
 /// 조용히 빠지는 것을 러너가 잡는다.
-const pure_test_count = 11;
+const pure_test_count = 13;
 
 pub fn register(b: *std.Build, ctx: Context) void {
     const protocol_mod = b.createModule(.{
@@ -63,6 +65,10 @@ pub fn register(b: *std.Build, ctx: Context) void {
             .imports = &.{.{ .name = "web_sidecar_protocol", .module = protocol_mod }},
         }),
     });
+    // 판정자가 host 의 창 수(CGWindowList)를 센다 — 창 없는 sidecar 는 0 개여야 한다.
+    if (ctx.macos_sdk) |macos_sdk| judge.root_module.addSystemFrameworkPath(.{ .cwd_relative = b.fmt("{s}/System/Library/Frameworks", .{macos_sdk}) });
+    judge.root_module.linkFramework("CoreGraphics", .{});
+    judge.root_module.linkFramework("CoreFoundation", .{});
 
     const dest: std.Build.InstallDir = .{ .custom = "web-sidecar" };
     for ([_]*std.Build.Step.Compile{ host, helper, judge }) |artifact| {

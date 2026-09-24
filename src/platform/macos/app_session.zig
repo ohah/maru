@@ -74192,6 +74192,64 @@ test "FP16b B-1: 파일 entry 조회 API가 그룹 구조를 감춘다" {
 // FP16 §5.0 왕복 게이트: 파일 Term이 `pane` 줄의 `file-term` 필드로 나갔다가 **같은 자리**로 돌아온다.
 // 브라우저가 섞인 pane에서 persisted 인덱스가 런타임 인덱스와 갈리는 것이 이 포맷의 핵심 제약이라, 그
 // 조합을 실제 세션으로 왕복시킨다.
+/// 판정자용 — 해제를 **돌려주지 않는** 할당기. 푼 자리를 `0xaa` 로 채워 들고 있다가 `deinit` 에서 한꺼번에 돌려준다. 풀린 자리가 곧 다시 쓰이면
+/// 해제 뒤 읽기가 우연히 멀쩡한 값을 읽어 드러나지 않는다(main 이 그랬다) — 재사용을 막아 결정적으로 드러낸다.
+const QuarantineAllocator = struct {
+    backing: std.mem.Allocator,
+    held: std.ArrayList(Held) = .empty,
+    const Held = struct { memory: []u8, alignment: std.mem.Alignment };
+
+    fn allocator(self: *QuarantineAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
+        const self: *QuarantineAllocator = @ptrCast(@alignCast(ctx));
+        return self.backing.rawAlloc(len, alignment, ret);
+    }
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) bool {
+        const self: *QuarantineAllocator = @ptrCast(@alignCast(ctx));
+        return self.backing.rawResize(memory, alignment, new_len, ret);
+    }
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) ?[*]u8 {
+        const self: *QuarantineAllocator = @ptrCast(@alignCast(ctx));
+        return self.backing.rawRemap(memory, alignment, new_len, ret);
+    }
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
+        const self: *QuarantineAllocator = @ptrCast(@alignCast(ctx));
+        @memset(memory, 0xaa);
+        self.held.append(self.backing, .{ .memory = memory, .alignment = alignment }) catch self.backing.rawFree(memory, alignment, ret);
+    }
+    fn deinit(self: *QuarantineAllocator) void {
+        for (self.held.items) |h| self.backing.rawFree(h.memory, h.alignment, @returnAddress());
+        self.held.deinit(self.backing);
+    }
+};
+
+test "PANE-UAF 탭 목록 안의 탭을 파괴할 때 뒤 Term 의 정리가 이미 푼 형제 Term 을 읽지 않는다 — 복원이 탭을 갈아 끼운다" {
+    // `destroyPane` 이 `for (pane.terms.items) |t| destroyTerm(t)` 로 Term 을 하나씩 풀면서 목록에서는 안 뺐다. 그런데 `destroyTerm` 은
+    // 저장 충돌 비교를 정리하려고 **모든 탭·pane·Term 을 훑는다**(`invalidateCompareFor`) — 파괴 중인 탭이 아직 `self.tabs` 에 있으면 같은
+    // pane 의 **이미 푼 형제**의 `file_entry` 를 읽는다. main 은 풀린 자리가 곧 다시 쓰여 우연히 멀쩡했고, Term 이 커진 괄호 쌍 색 브랜치에서
+    // 큰 할당이 페이지째 반납되며 `FP16 영속` 이 segfault 로 드러났다. 재사용을 막는 할당기로 결정적으로 잰다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var q: QuarantineAllocator = .{ .backing = allocator };
+    defer q.deinit();
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    _ = try pane_ops.openFileTermInActivePane(session, "/tmp/pane-uaf-alpha.md", .markdown);
+    _ = try pane_ops.openFileTermInActivePane(session, "/tmp/pane-uaf-beta.html", .html);
+    file_panel_ops.assignDockSurfaceIds(session);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const win = try workspace_ops.captureWorkspaceWindow(session, arena.allocator(), false, null);
+    // 복원 — 옛 탭(Term 셋)이 탭 목록 안에서 파괴된다. 그동안 푼 것은 돌려주지 않는다.
+    session.allocator = q.allocator();
+    defer session.allocator = allocator;
+    try workspace_ops.applyWorkspaceWindow(session, win);
+    try std.testing.expectEqual(@as(usize, 3), pane_ops.activePane(session).terms.items.len);
+}
+
 test "FP16 영속: 파일 Term이 pane file-term으로 왕복하고 브라우저는 자리를 비운다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;

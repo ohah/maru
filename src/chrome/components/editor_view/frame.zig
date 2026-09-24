@@ -782,15 +782,15 @@ pub fn build(props: Props, scratch: Scratch) Written {
     // 어느 것인지 흐려진다. 글자보다도 뒤라 알파로 얹어도 내용이 읽힌다.
     // **같은 낱말 강조가 먼저다**(§5.1a 우선순위 — 가장 약하다). 선택·검색이 그 위에 얹힌다. (선택과의 순서는 오늘 관측되지 않는다 —
     // 선택이 있으면 강조를 안 그려 둘이 공존하지 않는다: 적대적 C7 등가. 검색은 어느 쪽이든 그 뒤다. 순서는 뜻으로 둔다.)
-    // **들여쓰기 안내선은 밴드 뒤 · 현재 줄 상자 앞**(§5.1c) — 글자 아래에 서고 다른 강조가 그 위에 얹힌다. 줄당 개수가 들여쓰기 깊이만큼이라
-    // 막대 몫을 남긴다(검색과 같은 예약).
+    // **들여쓰기 안내선은 밴드 뒤 · 현재 줄 상자 앞에 «선다»**(§5.1c) — 글자 아래에 서고 다른 강조가 그 위에 얹힌다. 그런데 **저장소는 맨 나중에
+    // 받는다**: 줄당 개수가 들여쓰기 깊이만큼이라(폭 ÷ 간격까지) 먼저 받으면 뒤 층을 굶긴다 — 처음엔 막대 몫만 남기고 먼저 받아, 깊게 들여쓴
+    // 화면에서 caret·선택·현재 줄 상자가 사라질 수 있었다(적대적 8회차 새 눈 리뷰, `IGF4`). 지금은 뒤 층을 전부(막대까지) 그린 다음 남는 자리에
+    // 그리고, 그 묶음을 이 자리로 **회전**해 옮긴다(`std.mem.rotate` — 그리는 순서는 그대로). 모자라면 잘리는 것은 안내선이다.
     const ig_base = bg.ops + cw.ops + gw.ops + band_ops;
-    const ig_room = (scratch.ops.len -| ig_base) -| scrollbar_reserve_ops;
-    const ig_ops = paintIndentGuides(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[ig_base..][0..ig_room]);
     // **현재 줄 상자는 밴드 뒤·다른 강조 앞이다**(§5.1b) — 테두리뿐이라 무엇도 가리지 않고, 강조들이 그 안에 얹힌다.
-    const lh_ops = paintLineHighlight(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[ig_base + ig_ops ..]);
-    const occ_ops = paintOccurrences(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[ig_base + ig_ops + lh_ops ..], scratch.count_scratch);
-    const sel_ops = paintSelection(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[ig_base + ig_ops + lh_ops + occ_ops ..], scratch.count_scratch);
+    const lh_ops = paintLineHighlight(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[ig_base..]);
+    const occ_ops = paintOccurrences(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[ig_base + lh_ops ..], scratch.count_scratch);
+    const sel_ops = paintSelection(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[ig_base + lh_ops + occ_ops ..], scratch.count_scratch);
     // **검색 결과는 선택 위에 얹는다.** 선택 안에서 검색하는 경우가 있고(§5.1의 "선택 영역 내에서만"이
     // 그 자리다), 그때 매치가 선택에 묻히면 검색이 아무 일도 안 한 것처럼 보인다.
     // **막대 몫을 남겨 둔다.** 검색 강조는 **줄당 개수에 상한이 없는 유일한 층**이고(선택은
@@ -818,8 +818,9 @@ pub fn build(props: Props, scratch: Scratch) Written {
     //
     // **이 예약은 검색 층에만 걸린다.** 앞의 배경·본문·gutter·밴드·선택은 여전히 무예약이라,
     // 그쪽이 먼저 다 먹으면 막대는 그대로 굶는다(기존 상태이고 이 슬라이스가 만든 것이 아니다).
-    // 검색만 예약하는 이유는 **줄당 개수에 상한이 없는 층이 그것뿐**이어서다.
-    const find_base = ig_base + ig_ops + lh_ops + occ_ops + sel_ops;
+    // 검색만 예약하는 이유는 **줄당 개수에 상한이 없는 층이 그것뿐**이어서다(들여쓰기 안내선도 줄당 여럿이지만 저장소를 **맨 나중에** 받아
+    // 누구도 굶기지 않는다 — 위 `ig_base`).
+    const find_base = ig_base + lh_ops + occ_ops + sel_ops;
     const find_room = (scratch.ops.len -| find_base) -| scrollbar_reserve_ops;
     const find_ops = paintSearch(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[find_base..][0..find_room], scratch.count_scratch);
 
@@ -930,6 +931,11 @@ pub fn build(props: Props, scratch: Scratch) Written {
         }, scratch.ops[mm_base + mm_ops + sw.ops ..])
     else
         scrollbar.HorizontalWritten{ .ops = 0 };
+
+    // **안내선 — 남은 자리에 그리고 밴드 뒤로 옮긴다**(위 `ig_base` 의 주석). 뒤 층이 막대까지 다 받은 다음이라 막대 몫을 따로 남길 것이 없다.
+    const tail_end = mm_base + mm_ops + sw.ops + hw.ops;
+    const ig_ops = paintIndentGuides(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[tail_end..]);
+    std.mem.rotate(draw.Op, scratch.ops[ig_base .. tail_end + ig_ops], tail_end - ig_base);
 
     // **`occ_ops` 를 빼면 안 된다**(§5.1a — `OCH5`): 뒤 층의 자리(`find_base`)가 이미 그 몫을 세므로, 여기서 빠지면 강조 수만큼
     // 끝 op(막대·미니맵)가 잘린다 — 강조가 선 동안 막대가 사라졌다(2026-09-23 발견).
@@ -1436,7 +1442,7 @@ fn paintIndentGuides(props: Props, layout: geometry.Layout, visual: []const visu
             if (col < v.start_col) continue; // 가로로 굴려 화면 왼쪽 밖
             const on_screen = col - v.start_col;
             if (on_screen >= layout.content.width) break;
-            if (n >= out.len) return n; // 예산 끝 — 막대 몫을 지킨다
+            if (n >= out.len) return n; // 예산 끝 — 뒤 층은 이미 다 받았다(저장소를 맨 나중에 받는다)
             out[n] = .{ .quad = .{
                 .rect = .{
                     .x = props.rect.x + @as(i32, @intCast((@as(u32, layout.contentLeft()) + on_screen) * props.cell_w_px)),
@@ -4972,24 +4978,65 @@ test "IGF3 안내선이 서도 막대가 안 잘린다 — op 합계에 든다 (
     try testing.expect(std.meta.eql(last_plain, b1.ops[p1.ops - 1]));
 }
 
-test "IGF4 안내선이 저장소를 다 채우려 해도 막대 몫은 남는다 — 검색과 같은 예약 (§5.1c)" {
-    // 깊게 들여쓴 줄이 화면을 채우면 안내선이 op 저장소를 먹는다(100 행 × 30 단계 = 3,000 > 2,560). 예약이 없으면 **막대가 사라진다** — 넉넉한
-    // 저장소로만 재서 예약을 지워도 초록이었다(적대적 1회차 F7). 저장소를 좁혀 경쟁을 실제로 만든다.
+test "IGF4 안내선은 저장소를 맨 나중에 받는다 — 모자라면 안내선이 잘리고 caret·선택·현재 줄 상자·막대는 그대로다 (§5.1c)" {
+    // 깊게 들여쓴 줄이 화면을 채우면 안내선이 op 저장소를 먹는다(줄당 폭 ÷ 간격 — 2 칸 파일 80 열이면 40 개, 60 행이면 2,400 > 2,560 에서 앞
+    // 층을 뺀 자리). 처음엔 막대 몫만 남기고 **먼저** 받아, 뒤에 그리는 caret·선택·현재 줄 상자가 굶었다 — 이 판정자는 그때 층을 다 끈 채
+    // (`testProps` 는 현재 줄 `.none` · caret 없음) 막대만 재서 초록이었다(적대적 8회차 새 눈 리뷰). 지금은 **현재 줄 상자 · caret · 선택을 켜고** 잰다.
     var many: [15][]const u8 = undefined;
     for (&many) |*l| l.* = "    alpha";
     var props = testProps(&many, false);
     props.visible_rows = 11;
+    props.line_highlight = .all; // gutter 상자는 선택이 있어도 선다 — 상자와 선택을 한 프레임에 함께 잰다
+    props.active_line = 3;
+    props.selection_empty = false;
+    const caret_row = [_]u32{6};
+    var carets: [15][]const u32 = undefined;
+    for (&carets) |*c| c.* = &.{};
+    carets[3] = &caret_row;
+    props.carets = &carets;
+    const sel_row = [_]Mark{.{ .start = 4, .len = 5 }};
+    var sel: [15][]const Mark = undefined;
+    for (&sel) |*m| m.* = &.{};
+    sel[3] = &sel_row;
+    props.selection_marks = &sel;
     var b0: TestBuffers = .{};
     const p0 = build(props, b0.scratch());
     try testing.expect(p0.scrollbar != null);
-    const last_plain = b0.ops[p0.ops - 1];
+
     var rows: [15]GuideLine = undefined;
     for (&rows) |*r| r.* = .{ .count = 2 };
     props.indent_guides = .{ .rows = &rows };
     props.guide_unit = 2;
     var b1: TestBuffers = .{};
     var s1 = b1.scratch();
-    s1.ops = s1.ops[0 .. p0.ops + 5]; // 안내선 22 개가 들어갈 자리가 없다
+    const spare: usize = 5;
+    s1.ops = s1.ops[0 .. p0.ops + spare]; // 안내선 22 개(11 행 × 2) 중 다섯 자리만 있다
     const p1 = build(props, s1);
-    try testing.expect(std.meta.eql(last_plain, s1.ops[p1.ops - 1])); // 마지막 op 는 그대로 막대
+    try testing.expectEqual(p0.ops + spare, p1.ops);
+    // ⑴ 안내선을 빼면 **안내선 없는 프레임과 op 가 하나하나 같다** — 어느 층도 잘리지 않았다(caret·선택·현재 줄 상자·막대).
+    var guides: usize = 0;
+    var first_guide: ?usize = null;
+    var k: usize = 0;
+    for (s1.ops[0..p1.ops], 0..) |op, i| {
+        if (op == .quad and (op.quad.fill_role == .indent_guide or op.quad.fill_role == .indent_guide_active)) {
+            guides += 1;
+            if (first_guide == null) first_guide = i;
+            continue;
+        }
+        // 글자 op 는 버퍼마다 가리키는 저장소가 달라 통째로 못 견준다 — 종류는 같아야 하고, 사각(caret·선택·상자·막대)은 하나하나 같아야 한다.
+        try testing.expectEqual(std.meta.activeTag(b0.ops[k]), std.meta.activeTag(op));
+        if (op == .quad) try testing.expect(std.meta.eql(b0.ops[k], op));
+        k += 1;
+    }
+    try testing.expectEqual(p0.ops, k);
+    try testing.expectEqual(spare, guides); // 잘린 것은 안내선이다
+    // ⑵ 그리는 자리는 그대로 밴드 뒤 · 현재 줄 상자 앞이다 — 회전이 한 덩어리로 옮겼다.
+    const g0 = first_guide.?;
+    for (s1.ops[g0 .. g0 + spare]) |op| try testing.expect(op == .quad and op.quad.fill_role == .indent_guide);
+    var lh_at: ?usize = null;
+    for (s1.ops[0..p1.ops], 0..) |op, i| if (op == .quad and op.quad.border_role == .line_highlight) {
+        lh_at = i;
+        break;
+    };
+    try testing.expect(lh_at != null and lh_at.? > g0);
 }

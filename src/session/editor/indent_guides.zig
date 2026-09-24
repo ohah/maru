@@ -15,7 +15,8 @@ pub const guess_line_limit: usize = 10_000;
 /// 추정한 들여쓰기. **탭 파일은 폭을 들지 않는다** — 「탭이다」만 들어 설정(`editor.tab-width`)을 바꾸면 간격이 따라간다(§5.1c).
 pub const Guess = struct {
     tabs: bool,
-    /// 공백 파일의 한 단계 폭(2~8). `tabs` 면 뜻이 없다.
+    /// 공백 파일의 한 단계 폭 — 셀 수 있는 후보는 2~8 이고, 못 세면 **기본 폭 그대로**(설정 1~16 — VS Code 도 `defaultTabSize` 를 자르지
+    /// 않는다). `tabs` 면 뜻이 없다.
     spaces: u8,
 
     /// 안내선 간격(열).
@@ -44,7 +45,9 @@ pub fn guessWith(src: anytype, default_tab: u16, default_spaces_mode: bool) Gues
     var prev_text: []const u8 = "";
     var prev_indent: usize = 0;
     var counts = [_]usize{0} ** 9;
-    const default_spaces: usize = @min(default_tab, 8);
+    // **자르지 않는다** — VS Code 는 `tabSize = defaultTabSize` 로 시작하고 정렬 예외도 `defaultTabSize === diff` 로 비교한다. 처음엔 8 로 잘라
+    // 탭 폭 9~16 에서 갈렸다(적대적 8회차: 폭 12 · `a` / 12 칸 `b` 에서 VS Code 선 1 개, 우리 2 개 — monaco 0.56 실측, `IG9`).
+    const default_spaces: usize = default_tab;
 
     for (0..n) |ln| {
         const text = src.text(ln);
@@ -92,7 +95,7 @@ pub fn guessWith(src: anytype, default_tab: u16, default_spaces_mode: bool) Gues
         // 2 가 4 의 2/3 이상이면 2 — 깊은 중첩이 4 칸 차이를 만드는 2 칸 파일(YAML 등)을 가른다. 정수로 옮겼다(`3·c2 ≥ 2·c4`).
         if (size == 4 and counts[4] > 0 and counts[2] > 0 and 3 * counts[2] >= 2 * counts[4]) size = 2;
     }
-    return .{ .tabs = !spaces_mode, .spaces = @intCast(@min(size, 8)) };
+    return .{ .tabs = !spaces_mode, .spaces = @intCast(@min(size, std.math.maxInt(u8))) };
 }
 
 const Diff = struct { diff: usize = 0, alignment: bool = false };
@@ -615,4 +618,67 @@ test "IG8 언어별 기본 — 기본이 탭 모드(VS Code `[go]`)면 동률은
     // 공백 줄이 이기면 기본과 무관하다
     const four = Lines{ .items = &.{ "const a = 1,", "    b = 2;", "x", "    y", "" } };
     try testing.expectEqual(Guess{ .tabs = false, .spaces = 4 }, guessWith(four, 4, false));
+}
+
+test "IG9 탭 폭 9~16 — 못 센 간격은 기본 폭 그대로, 정렬 예외도 그 폭과 비교한다 (§5.1c, monaco 0.56 실측 · 적대적 8회차)" {
+    // 값은 monaco `detectIndentation(true, 폭)` → `getLinesIndentGuides` 로 뽑았다(scratchpad `tab12.mjs`). 8 로 자르던 때는 첫 사례가 [0,2,0] 이었다.
+    const Case = struct { items: []const []const u8, tab: u16, spaces: u8, levels: []const u32 };
+    const cases = [_]Case{
+        .{ .items = &.{ "a", "            b", "" }, .tab = 12, .spaces = 12, .levels = &.{ 0, 1, 0 } },
+        .{ .items = &.{ "a", "            b", "" }, .tab = 4, .spaces = 4, .levels = &.{ 0, 3, 0 } },
+        .{ .items = &.{ "a", "                b", "        c", "" }, .tab = 16, .spaces = 8, .levels = &.{ 0, 2, 1, 0 } },
+        .{ .items = &.{ "x = 1,", "            y", "z", "    w", "" }, .tab = 12, .spaces = 4, .levels = &.{ 0, 3, 0, 1, 0 } },
+        .{ .items = &.{ "a", "          b", "" }, .tab = 10, .spaces = 10, .levels = &.{ 0, 1, 0 } },
+        .{ .items = &.{ "a", "         b", "         c", "" }, .tab = 9, .spaces = 9, .levels = &.{ 0, 1, 1, 0 } },
+    };
+    for (cases) |c| {
+        const src = Lines{ .items = c.items };
+        const g = guess(src, c.tab);
+        try testing.expectEqual(Guess{ .tabs = false, .spaces = c.spaces }, g);
+        const p: Params = .{ .tab_width = c.tab, .unit = g.unit(c.tab) };
+        for (c.levels, 0..) |want, i| try testing.expectEqual(want, levelAt(src, p, i));
+    }
+}
+
+test "IG10 창 단계(`levels`)도 긴 공백 구간을 줄마다 다시 훑지 않는다 — 구간이 문서 끝·처음까지 가도 (§5.1c, 걸음 수 · 적대적 8회차)" {
+    // `IG7` 은 활성 블록만 쟀고 픽스처의 양 끝이 내용 줄이라 「가는 쪽 내용 줄이 없다」(`null`)를 안 지났다. 그래서 `levels` 의 위·아래 캐시를
+    // 지우거나 `Walker` 의 `ahead != null` 검사를 빼는 변이가 초록이었다(새 눈 리뷰가 짚었다) — 값은 같고 비용만 **창 × 구간**으로 는다.
+    const Counting = struct {
+        items: []const []const u8,
+        reads: *usize,
+        pub fn count(self: @This()) usize {
+            return self.items.len;
+        }
+        pub fn text(self: @This(), i: usize) []const u8 {
+            self.reads.* += 1;
+            return self.items[i];
+        }
+    };
+    const n: usize = 20_002;
+    const items = try testing.allocator.alloc([]const u8, n);
+    defer testing.allocator.free(items);
+    const p: Params = .{ .tab_width = 4, .unit = 4 };
+    const mid = n / 2;
+    var window: [256]u32 = undefined;
+    for (&window, 0..) |*w, i| w.* = @intCast(mid - 100 + i);
+    var out: [256]u16 = undefined;
+
+    // ⑴ 양 끝이 내용 줄 · ⑵ 구간이 문서 끝까지(아래 내용 줄 없음) · ⑶ 구간이 문서 처음부터(위 내용 줄 없음)
+    for (0..3) |shape| {
+        for (items) |*l| l.* = "    ";
+        if (shape != 2) {
+            items[0] = "a {";
+            items[1] = "    b";
+        }
+        if (shape != 1) items[n - 1] = "}";
+        var reads: usize = 0;
+        const src = Counting{ .items = items, .reads = &reads };
+        levels(src, p, &window, &out);
+        // 값도 본다 — 걸음을 줄이려다 답을 바꾸면 안 된다
+        for (window, out) |ln, lv| try testing.expectEqual(@as(u16, @intCast(levelAt(Lines{ .items = items }, p, ln))), lv);
+        try testing.expect(reads <= 2 * n); // 캐시가 없으면 창 256 × 구간 1 만 ≈ 250 만
+        reads = 0;
+        _ = active(src, p, mid, mid - 100, mid + 155);
+        try testing.expect(reads <= 3 * n);
+    }
 }

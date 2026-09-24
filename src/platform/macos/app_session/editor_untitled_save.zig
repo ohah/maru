@@ -541,7 +541,10 @@ fn writeAndAdopt(self: *AppSession, term: *Term, abs: []const u8, overwriting: b
     // **문법을 다시 판정한다**(§3.11 — 경로가 생겼다). 옛 상태는 grammar 가 없어 비어 있지만
     // 그래도 같은 자리에서 놓는다(두 벌이 되면 한쪽이 새는 길이 생긴다).
     term.rt.editor_syntax.deinit(self.allocator);
+    const prev_grammar = term.rt.editor_grammar;
     term.rt.editor_grammar = maru.session.editor.language.grammarForPath(owned);
+    // 들여쓰기 안내선의 간격 추정 — 언어별 기본이 달라졌으면 다시 한다(§5.1c, VS Code `_onDidChangeLanguage`).
+    editor_ops.guides_client.onGrammarChanged(term, prev_grammar);
     term.rt.editor_syntax = editor_ops.syntax_color.open(
         term.rt.editor_doc.?.file.content,
         term.rt.editor_grammar,

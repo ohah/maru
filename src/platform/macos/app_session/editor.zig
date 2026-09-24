@@ -632,9 +632,15 @@ fn inlayWindow(self: *AppSession, term: *Term) chrome_editor.content.InlayWindow
     return .{ .first = term.rt.editor_first_line, .rows = inlayRows(self, term), .generation = term.rt.editor_inlay.generation };
 }
 
-fn syntaxColors(self: *AppSession, term: *Term) []const []const chrome_editor.content.ColorSpan {
-    if (term.rt.editor_diff != null) return &.{};
-    const doc = term.rt.editor_doc orelse return &.{};
+/// 이 프레임의 **구문 상태를 앞으로 민다** — 끊긴 파싱을 이어 파고, 끝났으면 접힘을 구문 층으로 승격한다.
+///
+/// **줄 배열을 잡기 전에 불러야 한다**(`appendPaneFrame` 맨 앞). 승격은 접어 둔 것을 풀며 보이는 줄 표를 **놓고 다시
+/// 만든다**(`installFoldRanges` → `rebuildVisible`). 이 단계가 `syntaxColors` 안에 있을 때는 프레임이 `lines` 를 먼저
+/// 잡고 `buildPaneOps` 인자를 평가하다 여기에 닿아, 방금 놓은 배열을 그대로 그렸다 — **해제된 메모리를 읽었다**
+/// (적대적 검증 2026-09-24: 들여쓰기 범위로 접은 채 파싱이 끝나는 프레임, Debug 에서 `0xaaaa…` 주소 segfault).
+fn advanceSyntax(self: *AppSession, term: *Term) void {
+    if (term.rt.editor_diff != null) return;
+    const doc = term.rt.editor_doc orelse return;
 
     // **끊긴 파싱을 이 프레임 몫만큼 이어 판다**(§2.1a). 여는 파싱이 한 프레임에 안 끝나는 문서가
     // 있으므로(`build.zig` 675KB 가 `ReleaseFast` 에서 22.5ms — §2.1a 실측, 4ms 로 여섯 라운드) 프레임마다 예산만큼만 판다. 아직 남았으면 **다음 프레임을
@@ -661,6 +667,12 @@ fn syntaxColors(self: *AppSession, term: *Term) []const []const chrome_editor.co
     }
     // 접힘 3층(§8.2j) — 승격과 같은 자리에서 「물을 때인가」를 판정한다(트리와 무관하게 — grammar 없는 문서도 서버는 있을 수 있다).
     fold_lsp_client.tick(self, term);
+}
+
+/// 보이는 창의 구문 색. **상태를 밀지 않는다** — 그것은 `advanceSyntax` 가 줄 배열을 잡기 전에 한다(그 함수의 doc).
+fn syntaxColors(self: *AppSession, term: *Term) []const []const chrome_editor.content.ColorSpan {
+    if (term.rt.editor_diff != null) return &.{};
+    const doc = term.rt.editor_doc orelse return &.{};
 
     const first = term.rt.editor_first_line;
     // **길이 판정도 렌더 축이다.** 접히면 보이는 줄이 문서 줄보다 적어, 문서 수로 재면 화면 끝
@@ -1762,6 +1774,9 @@ pub fn editorInnerRect(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
 pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, term: *Term) ?PaneDraw {
     if (term.kind != .editor) return null;
     if (self.cell_width_px == 0 or self.cell_height_px == 0) return null;
+
+    // **보이는 줄 표를 바꿀 수 있는 단계는 전부 여기, 아래에서 `lines` 를 잡기 전이다**(`advanceSyntax` 의 doc).
+    advanceSyntax(self, term);
 
     // **그리기 전에 지금 기하로 위치를 되돌린다.** 창·분할·사이드바가 바뀌면 상한이 줄어드는데,
     // 스크롤 입력이 올 때까지 옛 위치가 남으면 화면이 통째로 빈다(그 함수의 doc — 실측값 포함).
@@ -13159,10 +13174,10 @@ test "INL9 인레이 힌트 — 서버가 ready 면 색 만들기 자리가 범�
     d0.dl.deinit(allocator);
     const width_before = scrollWidthCols(s, term, false);
     try testing.expect(width_before >= 14);
-    _ = syntaxColors(s, term);
+    _ = frameSyntaxColors(s, term);
     try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_inlay);
     try testing.expect(term.rt.editor_inlay.waiting);
-    _ = syntaxColors(s, term);
+    _ = frameSyntaxColors(s, term);
     try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_inlay);
     // ⑵ 응답 — 셋(가짜는 뒤에서 앞으로 낸다 → 정렬돼 든다): `: int`@8 · `p:`(padRight → `p: `)@18 · `-> void`(padLeft → ` -> void`)@28.
     try testing.expect(inlayApplied(&f, 1));
@@ -13199,7 +13214,7 @@ test "INL9 인레이 힌트 — 서버가 ready 면 색 만들기 자리가 범�
     // 열은 11 + 힌트 5 = 16 이다: 색 구간이 문서 열로 오면 11 에 서서 힌트 칸에 가리고 글자 `1` 은 무색이 된다(2026-09-22 캡처가 잡은 결함 —
     // `s.area()` 의 `a` 만 다른 색이었다). **열을 못 박는다** — 「어딘가에 number 색이 있다」는 둘째 줄의 숫자로도 참이라 못 가른다.
     {
-        const c = syntaxColors(s, term);
+        const c = frameSyntaxColors(s, term);
         try testing.expectEqual(maru.chrome.tokens.ColorRole.syntax_number, roleAt(c, 0, 16, 17) orelse return error.NoNumberColorAtGlyphColumn);
         try testing.expectEqual(@as(?maru.chrome.tokens.ColorRole, null), roleAt(c, 0, 11, 12)); // 옛 문서 열에는 없다
         try testing.expectEqual(maru.chrome.tokens.ColorRole.syntax_type_name, roleAt(c, 0, 0, 3) orelse return error.NoTypeColor); // 힌트 앞은 그대로
@@ -13245,13 +13260,13 @@ test "INL9 인레이 힌트 — 서버가 ready 면 색 만들기 자리가 범�
     try testing.expectEqual(@as(u32, 9), term.rt.editor_inlay.hints.items.items[0].offset);
     try testing.expectEqual(@as(u32, 19), term.rt.editor_inlay.hints.items.items[1].offset);
     try testing.expectEqual(@as(u64, 2), term.rt.editor_inlay.generation);
-    _ = syntaxColors(s, term);
+    _ = frameSyntaxColors(s, term);
     try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_inlay);
     {
         const t0 = s.awakeMs();
         while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
     }
-    _ = syntaxColors(s, term); // 조용해졌다 — 묻는다
+    _ = frameSyntaxColors(s, term); // 조용해졌다 — 묻는다
     try testing.expectEqual(@as(u64, 2), s.editor_lsp.sent_inlay);
     // ⑸ 대기 중에 또 편집 — 응답의 version 이 낡아 버리고, 조용해진 뒤 다시 묻는다. (`a_hvx` 는 더 이상 `_hv` 낱말이 아니라 새 응답엔 그 힌트가 없다.)
     try testing.expect(insertText(s, term, "y"));
@@ -13265,7 +13280,7 @@ test "INL9 인레이 힌트 — 서버가 ready 면 색 만들기 자리가 범�
         const t0 = s.awakeMs();
         while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
     }
-    _ = syntaxColors(s, term);
+    _ = frameSyntaxColors(s, term);
     try testing.expectEqual(@as(u64, 3), s.editor_lsp.sent_inlay);
     try testing.expect(inlayApplied(&f, 2));
     try testing.expectEqual(@as(usize, 2), term.rt.editor_inlay.hints.items.items.len); // `p: `·` -> void` 만
@@ -13281,7 +13296,7 @@ test "INL9 인레이 힌트 — 서버가 ready 면 색 만들기 자리가 범�
         const t0 = s.awakeMs();
         while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
     }
-    _ = syntaxColors(s, term);
+    _ = frameSyntaxColors(s, term);
     try testing.expect(inlayApplied(&f, 3));
     try testing.expectEqual(@as(usize, 3), term.rt.editor_inlay.hints.items.items.len); // `a_hv` 가 돌아와 `: int` 도 돌아왔다
     try testing.expectEqual(@as(u32, 8), term.rt.editor_inlay.hints.items.items[0].offset);
@@ -13303,7 +13318,7 @@ test "INL10 인레이 힌트 — provider 없으면 아무것도 안 묻고, 오
         const term = f.term;
         try testing.expect(f.ready());
         term.rt.editor_first_line = 0;
-        _ = syntaxColors(s, term);
+        _ = frameSyntaxColors(s, term);
         try testing.expectEqual(@as(u64, 0), s.editor_lsp.sent_inlay);
     }
     _ = unsetenv("MARU_FAKE_LSP_NOINLAYCAP");
@@ -13314,21 +13329,21 @@ test "INL10 인레이 힌트 — provider 없으면 아무것도 안 묻고, 오
         const term = f.term;
         try testing.expect(f.ready());
         term.rt.editor_first_line = 0;
-        _ = syntaxColors(s, term);
+        _ = frameSyntaxColors(s, term);
         try testing.expect(pumpLspUntil(&f.fx, 3000, term, struct {
             fn g(t: *Term) bool {
                 return t.rt.editor_inlay.dropped_error >= 1;
             }
         }.g));
         try testing.expect(!term.rt.editor_inlay.waiting and term.rt.editor_inlay.dirty);
-        _ = syntaxColors(s, term); // 곧바로는 안 묻는다(조용 시계)
+        _ = frameSyntaxColors(s, term); // 곧바로는 안 묻는다(조용 시계)
         try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_inlay);
         try removeMarkerHover(s, term, " // INLERR");
         {
             const t0 = s.awakeMs();
             while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
         }
-        _ = syntaxColors(s, term);
+        _ = frameSyntaxColors(s, term);
         try testing.expectEqual(@as(u64, 2), s.editor_lsp.sent_inlay);
         try testing.expect(inlayApplied(&f, 1));
         try testing.expectEqual(@as(usize, 1), term.rt.editor_inlay.hints.items.items.len);
@@ -13380,7 +13395,7 @@ test "INL11 인레이 힌트 — 서버의 `workspace/inlayHint/refresh` 는 거
     }.g));
     const rejected_before = s.editor_lsp.rejected_requests;
     term.rt.editor_first_line = 0;
-    _ = syntaxColors(s, term);
+    _ = frameSyntaxColors(s, term);
     try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_inlay);
     // ⑴ 첫 응답은 `[]` → 적용 1(힌트 0). 곧 refresh 가 온다 → `null` 로 답하고(거부 수 그대로) dirty.
     try testing.expect(inlayApplied(&f, 1));
@@ -13393,14 +13408,14 @@ test "INL11 인레이 힌트 — 서버의 `workspace/inlayHint/refresh` 는 거
     try testing.expectEqual(rejected_before, s.editor_lsp.rejected_requests);
     try testing.expect(term.rt.editor_inlay.dirty);
     // ⑵ 다음 프레임이 곧바로(조용 시계 없이) 다시 묻고 — 가짜는 우리 답을 받은 뒤라 진짜 힌트를 낸다.
-    _ = syntaxColors(s, term);
+    _ = frameSyntaxColors(s, term);
     try testing.expectEqual(@as(u64, 2), s.editor_lsp.sent_inlay);
     try testing.expect(inlayApplied(&f, 2));
     try testing.expectEqual(@as(usize, 1), term.rt.editor_inlay.hints.items.items.len);
     try testing.expectEqualStrings(": int", term.rt.editor_inlay.hints.items.items[0].text);
     try testing.expect(!term.rt.editor_inlay.dirty);
     // ⑶ 다 든 뒤엔 또 안 묻는다.
-    _ = syntaxColors(s, term);
+    _ = frameSyntaxColors(s, term);
     try testing.expectEqual(@as(u64, 2), s.editor_lsp.sent_inlay);
     // ⑷ refresh 뒤의 되묻기가 **오류**로 답하면(`INLERR` 도 함께) — version·창이 그대로라도 `dirty` 가 남아 조용 뒤 또 묻는다(적대적 C4:
     //    오류에 dirty 를 안 세우면 refresh 가 헛돌아 힌트가 영영 낡는다).
@@ -13411,14 +13426,14 @@ test "INL11 인레이 힌트 — 서버의 `workspace/inlayHint/refresh` 는 거
         const s2 = g.fx.session; // 다른 세션·다른 가짜 서버
         try testing.expect(g.ready());
         t2.rt.editor_first_line = 0;
-        _ = syntaxColors(s2, t2);
+        _ = frameSyntaxColors(s2, t2);
         try testing.expect(inlayApplied(&g, 1)); // `[]`
         try testing.expect(pumpLspUntil(&g.fx, 3000, s2, struct {
             fn h(a: *AppSession) bool {
                 return a.editor_lsp.inlay_refreshes >= 1;
             }
         }.h));
-        _ = syntaxColors(s2, t2); // refresh → 되묻기 → 오류
+        _ = frameSyntaxColors(s2, t2); // refresh → 되묻기 → 오류
         try testing.expect(pumpLspUntil(&g.fx, 3000, t2, struct {
             fn h(t: *Term) bool {
                 return t.rt.editor_inlay.dropped_error >= 1;
@@ -13428,7 +13443,7 @@ test "INL11 인레이 힌트 — 서버의 `workspace/inlayHint/refresh` 는 거
         const t0 = s2.awakeMs();
         while (s2.awakeMs() - t0 < 200) _ = usleep(10_000);
         const before = s2.editor_lsp.sent_inlay;
-        _ = syntaxColors(s2, t2);
+        _ = frameSyntaxColors(s2, t2);
         try testing.expectEqual(before + 1, s2.editor_lsp.sent_inlay);
     }
 }
@@ -13448,17 +13463,17 @@ test "INL13 인레이 힌트 — 창(보이는 줄 ± 20)이 덮이지 않은 �
     const term = f.term;
     try testing.expect(f.ready());
     term.rt.editor_first_line = 0;
-    _ = syntaxColors(s, term);
+    _ = frameSyntaxColors(s, term);
     try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_inlay);
     try testing.expect(inlayApplied(&f, 1));
     try testing.expectEqual(@as(usize, 0), term.rt.editor_inlay.covered_lo);
     try testing.expectEqual(@as(usize, 275), term.rt.editor_inlay.covered_hi); // 0 + 256 - 1 + 20
     // 덮인 안(같은 창)에선 안 묻는다.
-    _ = syntaxColors(s, term);
+    _ = frameSyntaxColors(s, term);
     try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_inlay);
     // 밖으로 스크롤 — version 은 그대로인데 다시 묻는다.
     term.rt.editor_first_line = 300;
-    _ = syntaxColors(s, term);
+    _ = frameSyntaxColors(s, term);
     try testing.expectEqual(@as(u64, 2), s.editor_lsp.sent_inlay);
     try testing.expect(inlayApplied(&f, 2));
     try testing.expectEqual(@as(usize, 280), term.rt.editor_inlay.covered_lo);
@@ -13490,10 +13505,10 @@ test "DSY4 심볼 2층 — 서버가 ready 면 문서 단위로 한 번 묻고, 
     const term = f.term;
     try testing.expect(f.ready());
     // ⑴ 첫 프레임 — 문서 단위로 한 번 묻는다(범위 인자가 없다). 대기 중엔 한 번만.
-    _ = syntaxColors(s, term);
+    _ = frameSyntaxColors(s, term);
     try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_symbols);
     try testing.expect(term.rt.editor_symbols.waiting);
-    _ = syntaxColors(s, term);
+    _ = frameSyntaxColors(s, term);
     try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_symbols);
     // ⑵ 응답 — **문서 순서로 정렬돼** 든다(가짜는 뒤에서 앞으로 낸다).
     try testing.expect(symbolsApplied(&f, 1));
@@ -13521,18 +13536,18 @@ test "DSY4 심볼 2층 — 서버가 ready 면 문서 단위로 한 번 묻고, 
     // 그 사이의 체인은 **1층**이 답한다 — 본문 줄에서도 함수 이름이 붙는다(2층이었다면 경로뿐이다).
     term.rt.editor_selection = .{ .anchor_start = body, .anchor_end = body, .focus = body };
     try testing.expect(std.mem.endsWith(u8, headerBreadcrumb(s, term, "sy.c"), "beta"));
-    _ = syntaxColors(s, term); // 120 ms 안엔 안 묻는다
+    _ = frameSyntaxColors(s, term); // 120 ms 안엔 안 묻는다
     try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_symbols);
     {
         const t0 = s.awakeMs();
         while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
     }
-    _ = syntaxColors(s, term); // 조용해졌다 — 다시 묻는다
+    _ = frameSyntaxColors(s, term); // 조용해졌다 — 다시 묻는다
     try testing.expectEqual(@as(u64, 2), s.editor_lsp.sent_symbols);
     try testing.expect(symbolsApplied(&f, 2));
     try testing.expect(symbols_client.list(term) != null);
     // ⑸ 다 든 뒤엔 또 안 묻는다.
-    _ = syntaxColors(s, term);
+    _ = frameSyntaxColors(s, term);
     try testing.expectEqual(@as(u64, 2), s.editor_lsp.sent_symbols);
     // ⑹ **대기 중에 편집** — 그 응답은 낡은 version 이라 버린다(들면 밴드가 옛 자리를 말한다). 조용 뒤 다시 물어 든다.
     term.rt.editor_symbols.dirty = true;
@@ -13540,7 +13555,7 @@ test "DSY4 심볼 2층 — 서버가 ready 면 문서 단위로 한 번 묻고, 
         const t0 = s.awakeMs();
         while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
     }
-    _ = syntaxColors(s, term);
+    _ = frameSyntaxColors(s, term);
     try testing.expectEqual(@as(u64, 3), s.editor_lsp.sent_symbols);
     try testing.expect(term.rt.editor_symbols.waiting);
     try testing.expect(insertText(s, term, "y")); // 응답이 오기 전에 편집
@@ -13554,7 +13569,7 @@ test "DSY4 심볼 2층 — 서버가 ready 면 문서 단위로 한 번 묻고, 
         const t0 = s.awakeMs();
         while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
     }
-    _ = syntaxColors(s, term);
+    _ = frameSyntaxColors(s, term);
     try testing.expect(symbolsApplied(&f, 3));
     try testing.expect(symbols_client.list(term) != null);
 }
@@ -13569,7 +13584,7 @@ test "DSY5 심볼 2층 — provider 가 없으면 묻지 않고, 빈 목록·평
         var f = (try SmtFixture.open(allocator, "ns.c", "fn alpha(int a) { return a; }\n")) orelse return error.SkipZigTest;
         defer f.close(allocator);
         try testing.expect(f.ready());
-        _ = syntaxColors(f.fx.session, f.term);
+        _ = frameSyntaxColors(f.fx.session, f.term);
         try testing.expectEqual(@as(u64, 0), f.fx.session.editor_lsp.sent_symbols);
         try testing.expect(symbols_client.list(f.term) == null);
     }
@@ -13579,14 +13594,14 @@ test "DSY5 심볼 2층 — provider 가 없으면 묻지 않고, 빈 목록·평
         defer f.close(allocator);
         const s = f.fx.session;
         try testing.expect(f.ready());
-        _ = syntaxColors(s, f.term);
+        _ = frameSyntaxColors(s, f.term);
         try testing.expect(pumpLspUntil(&f.fx, 3000, f.term, struct {
             fn g(t: *Term) bool {
                 return t.rt.editor_symbols.applied_empty >= 1;
             }
         }.g));
         try testing.expect(symbols_client.list(f.term) == null); // 1층이 답한다
-        _ = syntaxColors(s, f.term);
+        _ = frameSyntaxColors(s, f.term);
         try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_symbols);
     }
     // ⑶ 평탄 꼴(`DSYFLAT`) — 이름 범위가 없어 통째로 버린다(카운터로 보인다).
@@ -13594,7 +13609,7 @@ test "DSY5 심볼 2층 — provider 가 없으면 묻지 않고, 빈 목록·평
         var f = (try SmtFixture.open(allocator, "fl.c", "fn alpha(int a) { return a; } // DSYFLAT\n")) orelse return error.SkipZigTest;
         defer f.close(allocator);
         try testing.expect(f.ready());
-        _ = syntaxColors(f.fx.session, f.term);
+        _ = frameSyntaxColors(f.fx.session, f.term);
         try testing.expect(pumpLspUntil(&f.fx, 3000, f.term, struct {
             fn g(t: *Term) bool {
                 return t.rt.editor_symbols.decoded.flat_dropped >= 1;
@@ -13608,18 +13623,18 @@ test "DSY5 심볼 2층 — provider 가 없으면 묻지 않고, 빈 목록·평
         defer f.close(allocator);
         const s = f.fx.session;
         try testing.expect(f.ready());
-        _ = syntaxColors(s, f.term);
+        _ = frameSyntaxColors(s, f.term);
         try testing.expect(pumpLspUntil(&f.fx, 3000, f.term, struct {
             fn g(t: *Term) bool {
                 return t.rt.editor_symbols.dropped_error >= 1;
             }
         }.g));
         try testing.expect(f.term.rt.editor_symbols.dirty);
-        _ = syntaxColors(s, f.term); // 곧바로는 안 묻는다
+        _ = frameSyntaxColors(s, f.term); // 곧바로는 안 묻는다
         try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_symbols);
         const t0 = s.awakeMs();
         while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
-        _ = syntaxColors(s, f.term);
+        _ = frameSyntaxColors(s, f.term);
         try testing.expectEqual(@as(u64, 2), s.editor_lsp.sent_symbols);
     }
     // ⑸ 이름이 문서와 다른 항목(`DSYBAD`) — 그 항목만 버리고 나머지는 든다(자기 검산).
@@ -13627,7 +13642,7 @@ test "DSY5 심볼 2층 — provider 가 없으면 묻지 않고, 빈 목록·평
         var f = (try SmtFixture.open(allocator, "bad.c", "fn alpha(int a) { return a; } // DSYBAD\n")) orelse return error.SkipZigTest;
         defer f.close(allocator);
         try testing.expect(f.ready());
-        _ = syntaxColors(f.fx.session, f.term);
+        _ = frameSyntaxColors(f.fx.session, f.term);
         try testing.expect(symbolsApplied(&f, 1));
         try testing.expectEqual(@as(usize, 1), f.term.rt.editor_symbols.list.items.len);
         try testing.expect(f.term.rt.editor_symbols.decoded.name_mismatch >= 1);
@@ -13658,13 +13673,13 @@ test "OCH3 같은 낱말 강조 — caret 이 낱말에 멈추면 묻고 응답 
     // ⑴ caret 이 낱말 위 — 조용해지면 한 번 묻는다(그 전엔 안 묻는다).
     term.rt.editor_selection = .{ .anchor_start = first + 1, .anchor_end = first + 1, .focus = first + 1 };
     highlight_client.onCaretMove(s, term);
-    _ = syntaxColors(s, term);
+    _ = frameSyntaxColors(s, term);
     try testing.expectEqual(@as(u64, 0), s.editor_lsp.sent_highlight); // 150 ms 조용 전
     {
         const t0 = s.awakeMs();
         while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
     }
-    _ = syntaxColors(s, term);
+    _ = frameSyntaxColors(s, term);
     try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_highlight);
     try testing.expect(highlightApplied(&f, 1));
     // ⑵ 범위 둘 — `alphax` 는 없다(낱말 경계).
@@ -13692,11 +13707,11 @@ test "OCH3 같은 낱말 강조 — caret 이 낱말에 멈추면 묻고 응답 
     {
         const space = std.mem.indexOf(u8, content, "=").?; // 낱말에 **닿지 않는** 자리(양옆이 공백인 `=`)
         term.rt.editor_selection = .{ .anchor_start = space, .anchor_end = space, .focus = space };
-        _ = syntaxColors(s, term);
+        _ = frameSyntaxColors(s, term);
         try testing.expectEqual(@as(usize, 0), highlight_client.spans(term).len); // 낱말 밖 — 안 그린다
         const sent_before = s.editor_lsp.sent_highlight;
         term.rt.editor_selection = .{ .anchor_start = first + 1, .anchor_end = first + 1, .focus = first + 1 };
-        _ = syntaxColors(s, term);
+        _ = frameSyntaxColors(s, term);
         try testing.expectEqual(@as(usize, 2), highlight_client.spans(term).len); // 돌아오면 그대로 뜬다
         try testing.expectEqual(sent_before, s.editor_lsp.sent_highlight); // **다시 묻지 않는다**
     }
@@ -13725,7 +13740,7 @@ test "OCH3 같은 낱말 강조 — caret 이 낱말에 멈추면 묻고 응답 
     term.rt.editor_selection = .{ .anchor_start = first, .anchor_end = first + 5, .focus = first + 5 };
     try testing.expect(highlight_client.wordAtCaret(term) == null);
     try testing.expectEqual(@as(usize, 0), highlight_client.spans(term).len);
-    _ = syntaxColors(s, term);
+    _ = frameSyntaxColors(s, term);
     try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_highlight);
     try testing.expect(buildOccurrenceMarks(s, term) == null);
     // ⑸ 다른 낱말로 가면 옛 강조는 곧바로 사라지고(대조 실패), 조용해진 뒤 새로 묻는다.
@@ -13737,12 +13752,12 @@ test "OCH3 같은 낱말 강조 — caret 이 낱말에 멈추면 묻고 응답 
         const t0 = s.awakeMs();
         while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
     }
-    _ = syntaxColors(s, term);
+    _ = frameSyntaxColors(s, term);
     try testing.expectEqual(@as(u64, 2), s.editor_lsp.sent_highlight);
     try testing.expect(highlightApplied(&f, 2));
     try testing.expectEqual(@as(usize, 1), highlight_client.spans(term).len); // `beta` 는 하나
     // ⑹ 같은 낱말에 머무는 동안엔 또 안 묻는다.
-    _ = syntaxColors(s, term);
+    _ = frameSyntaxColors(s, term);
     try testing.expectEqual(@as(u64, 2), s.editor_lsp.sent_highlight);
     // ⑺ 편집하면 **버린다** — 저장소 자체가 비어야 한다(`spans()` 의 version 대조에 가려지지 않게). 그 뒤 조용해지면 다시 묻는다.
     const cleared_before = term.rt.editor_highlight.cleared;
@@ -13754,7 +13769,7 @@ test "OCH3 같은 낱말 강조 — caret 이 낱말에 멈추면 묻고 응답 
         const t0 = s.awakeMs();
         while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
     }
-    _ = syntaxColors(s, term);
+    _ = frameSyntaxColors(s, term);
     try testing.expectEqual(@as(u64, 3), s.editor_lsp.sent_highlight);
 }
 
@@ -13904,10 +13919,10 @@ test "SSEL11 선택 확장의 1층 — provider 없음 · 빈 범위(clangd 주�
             try testing.expectEqual(@as(u64, 0), term.rt.editor_smart_select.applied);
             const t0 = s.awakeMs();
             while (s.awakeMs() - t0 < 300) _ = usleep(10_000);
-            _ = syntaxColors(s, term);
+            _ = frameSyntaxColors(s, term);
             try testing.expectEqual(@as(u64, 0), term.rt.editor_smart_select.timeout_fallback); // 300 ms — 아직
             while (s.awakeMs() - t0 < 580) _ = usleep(10_000);
-            _ = syntaxColors(s, term);
+            _ = frameSyntaxColors(s, term);
             try testing.expectEqual(@as(u64, 1), term.rt.editor_smart_select.timeout_fallback);
         }
         try testing.expect(smartApplied(&f, 1));
@@ -14393,7 +14408,7 @@ test "OCH4 같은 낱말 강조 — provider 가 없으면 묻지 않고, 빈 �
         f.term.rt.editor_selection = .{ .anchor_start = at, .anchor_end = at, .focus = at };
         const t0 = s.awakeMs();
         while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
-        _ = syntaxColors(s, f.term);
+        _ = frameSyntaxColors(s, f.term);
         try testing.expectEqual(@as(u64, 0), s.editor_lsp.sent_highlight);
         try testing.expectEqual(@as(usize, 0), highlight_client.spans(f.term).len);
     }
@@ -14407,7 +14422,7 @@ test "OCH4 같은 낱말 강조 — provider 가 없으면 묻지 않고, 빈 �
         f.term.rt.editor_selection = .{ .anchor_start = at, .anchor_end = at, .focus = at };
         const t0 = s.awakeMs();
         while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
-        _ = syntaxColors(s, f.term);
+        _ = frameSyntaxColors(s, f.term);
         try testing.expect(pumpLspUntil(&f.fx, 3000, f.term, struct {
             fn g(t: *Term) bool {
                 return t.rt.editor_highlight.applied_empty >= 1;
@@ -14428,13 +14443,13 @@ test "OCH4 같은 낱말 강조 — provider 가 없으면 묻지 않고, 빈 �
             const t0 = s.awakeMs();
             while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
         }
-        _ = syntaxColors(s, f.term);
+        _ = frameSyntaxColors(s, f.term);
         try testing.expect(pumpLspUntil(&f.fx, 3000, f.term, struct {
             fn g(t: *Term) bool {
                 return t.rt.editor_highlight.dropped_error >= 1;
             }
         }.g));
-        _ = syntaxColors(s, f.term);
+        _ = frameSyntaxColors(s, f.term);
         try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_highlight);
     }
     // ⑷ **비교 뷰에서는 묻지도 그리지도 않는다**(§5.1a — 축이 다르다).
@@ -14473,7 +14488,7 @@ test "OCH4 같은 낱말 강조 — provider 가 없으면 묻지 않고, 빈 �
             const t0 = s.awakeMs();
             while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
         }
-        _ = syntaxColors(s, term);
+        _ = frameSyntaxColors(s, term);
         try testing.expect(highlightApplied(&f, 1));
         const sp = highlight_client.spans(term);
         try testing.expectEqual(@as(usize, 2), sp.len); // byte 를 그대로 보내면 가짜가 낱말 밖을 봐 빈 목록이다
@@ -14494,7 +14509,7 @@ test "OCH4 같은 낱말 강조 — provider 가 없으면 묻지 않고, 빈 �
             const t0 = s.awakeMs();
             while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
         }
-        _ = syntaxColors(s, term);
+        _ = frameSyntaxColors(s, term);
         try testing.expect(term.rt.editor_highlight.waiting);
         const beta = std.mem.indexOf(u8, content, "beta").? + 1;
         term.rt.editor_selection = .{ .anchor_start = beta, .anchor_end = beta, .focus = beta }; // 답이 오기 전에 옮긴다
@@ -14517,7 +14532,7 @@ test "DSY9 심볼 2층 — 한 서버에 문서가 둘이면 응답은 «그 seq
     const s = f.fx.session;
     const term_a = f.term;
     try testing.expect(f.ready());
-    _ = syntaxColors(s, term_a);
+    _ = frameSyntaxColors(s, term_a);
     try testing.expect(term_a.rt.editor_symbols.waiting); // A 는 답을 못 받는다
     const root = f.root_buf[0..f.root_len];
     try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "b.c", .data = "fn beta(int b) { return b; }\n" });
@@ -14530,7 +14545,7 @@ test "DSY9 심볼 2층 — 한 서버에 문서가 둘이면 응답은 «그 seq
             return c.t.rt.editor_lsp_version != 0;
         }
     }.g));
-    _ = syntaxColors(s, term_b);
+    _ = frameSyntaxColors(s, term_b);
     try testing.expect(pumpLspUntil(&f.fx, 3000, Ctx{ .fx = &f.fx, .t = term_b }, struct {
         fn g(c: Ctx) bool {
             return c.t.rt.editor_symbols.applied >= 1;
@@ -14552,7 +14567,7 @@ test "DSY10 심볼 2층 — 1층이 비는 문서에서도 피커가 선다(주�
     const s = f.fx.session;
     const term = f.term;
     try testing.expect(f.ready());
-    _ = syntaxColors(s, term);
+    _ = frameSyntaxColors(s, term);
     try testing.expect(symbolsApplied(&f, 1));
     try testing.expectEqual(@as(usize, 1), term.rt.editor_symbols.list.items.len);
     // 1층은 비어 있다 — 두 층이 여기서 갈린다.
@@ -16320,18 +16335,18 @@ test "SMT1 semantic tokens — 서버가 ready 면 프레임의 색 만들기가
     try testing.expect(f.ready());
     // ⑴ 첫 색 만들기 — 요청이 나간다(range 0..(256+20)). 1층만 있는 동안 `a_ty` 는 무색·`int` 는 키워드.
     term.rt.editor_first_line = 0;
-    const c0 = syntaxColors(s, term);
+    const c0 = frameSyntaxColors(s, term);
     try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_semantic);
     try testing.expect(term.rt.editor_semantic.waiting);
     try testing.expectEqual(maru.chrome.tokens.ColorRole.syntax_number, roleAt(c0, 0, 14, 18).?); // `a_ty` — 1층(C 쿼리)의 색
     try testing.expectEqual(maru.chrome.tokens.ColorRole.syntax_type_name, roleAt(c0, 0, 0, 3).?); // `int` — 1층 기본형
-    _ = syntaxColors(s, term); // 대기 중엔 한 번만
+    _ = frameSyntaxColors(s, term); // 대기 중엔 한 번만
     try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_semantic);
     // ⑵ 응답 — `a_ty`(type) 가 2층 색(number → type_name), `my_fn`(function) 은 1층과 같은 색, `int`(variable → 무색)은 1층 그대로.
     try testing.expect(f.applied(1));
     try testing.expectEqual(@as(usize, 3), term.rt.editor_semantic.spans.items.len); // my_fn·a_ty·a_ty — 범위 밖 `tail_fn` 과 무색 `int`·`return` 은 없다
     try testing.expectEqual(term.rt.editor_lsp_version, term.rt.editor_semantic.version);
-    const c1 = syntaxColors(s, term);
+    const c1 = frameSyntaxColors(s, term);
     try testing.expectEqual(maru.chrome.tokens.ColorRole.syntax_type_name, roleAt(c1, 0, 14, 18).?);
     try testing.expectEqual(maru.chrome.tokens.ColorRole.syntax_type_name, roleAt(c1, 1, 9, 13).?);
     try testing.expectEqual(maru.chrome.tokens.ColorRole.syntax_function, roleAt(c1, 0, 4, 9).?);
@@ -16341,14 +16356,14 @@ test "SMT1 semantic tokens — 서버가 ready 면 프레임의 색 만들기가
     term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };
     try testing.expect(insertText(s, term, "//"));
     try testing.expectEqual(@as(u64, 1), term.rt.editor_semantic.shifted);
-    const c2 = syntaxColors(s, term);
+    const c2 = frameSyntaxColors(s, term);
     try testing.expectEqual(maru.chrome.tokens.ColorRole.syntax_type_name, roleAt(c2, 0, 16, 20).?); // 밀린 `a_ty`
     try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_semantic);
     {
         const t0 = s.awakeMs();
         while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
     }
-    _ = syntaxColors(s, term); // 조용해졌다 — 묻는다
+    _ = frameSyntaxColors(s, term); // 조용해졌다 — 묻는다
     try testing.expectEqual(@as(u64, 2), s.editor_lsp.sent_semantic);
     // ⑷ 대기 중에 또 편집 — 응답의 version 이 낡아 버리고, 조용해진 뒤 다시 묻는다.
     try testing.expect(insertText(s, term, "/"));
@@ -16362,30 +16377,30 @@ test "SMT1 semantic tokens — 서버가 ready 면 프레임의 색 만들기가
         const t0 = s.awakeMs();
         while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
     }
-    _ = syntaxColors(s, term);
+    _ = frameSyntaxColors(s, term);
     try testing.expectEqual(@as(u64, 3), s.editor_lsp.sent_semantic);
     try testing.expect(f.applied(2));
-    const c3 = syntaxColors(s, term);
+    const c3 = frameSyntaxColors(s, term);
     try testing.expectEqual(maru.chrome.tokens.ColorRole.syntax_type_name, roleAt(c3, 0, 17, 21).?);
     // ⑷b undo — undo 도 `spanFromInverse` 가 범위를 내므로 스팬은 **밀린다**(버려지지 않는다; 범위를 못 내는 경우만 버림 — 적대적 3회차 C8 은 그래서 등가에 가깝다).
     const shifted_before = term.rt.editor_semantic.shifted;
     s.dispatchAppAction(.editor_undo); // 타이핑 묶음 `///` 이 통째로 돌아간다
     try testing.expectEqual(shifted_before + 1, term.rt.editor_semantic.shifted);
     try testing.expectEqual(@as(usize, 3), term.rt.editor_semantic.spans.items.len);
-    const c3b = syntaxColors(s, term);
+    const c3b = frameSyntaxColors(s, term);
     try testing.expectEqual(maru.chrome.tokens.ColorRole.syntax_type_name, roleAt(c3b, 0, 14, 18).?); // 되돌린 만큼(3) 되밀렸다
     {
         const t0 = s.awakeMs();
         while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
     }
-    _ = syntaxColors(s, term);
+    _ = frameSyntaxColors(s, term);
     try testing.expect(f.applied(3));
     // ⑸ 스크롤 — 덮인 범위(0..276) 밖으로 가면 다시 묻고, 응답 뒤 끝 줄의 `tail_fn` 이 2층(function) — 1층이 없어도(선언만) 선다.
     term.rt.editor_first_line = 290;
-    _ = syntaxColors(s, term);
+    _ = frameSyntaxColors(s, term);
     try testing.expectEqual(@as(u64, 5), s.editor_lsp.sent_semantic);
     try testing.expect(f.applied(4));
-    const c4 = syntaxColors(s, term);
+    const c4 = frameSyntaxColors(s, term);
     try testing.expectEqual(maru.chrome.tokens.ColorRole.syntax_function, roleAt(c4, 299, 4, 11).?); // 색 배열은 렌더 축(앞은 빈 줄)
     try testing.expect(term.rt.editor_semantic.covered_lo <= 270 and term.rt.editor_semantic.covered_hi == 299); // 마지막 줄까지
     // 1층도 선언의 `tail_fn` 을 함수로 칠하므로 색만으론 못 가른다 — 2층 스팬이 **마지막 줄**의 토큰을 실제로 들었는지 본다(적대적 3회차 C6: 범위 끝이 반열림이 아니면 그 줄이 빠진다).
@@ -16415,13 +16430,13 @@ test "SMT2 semantic tokens — range 없는 서버는 full 로 묻고(스크롤�
         const term = f.term;
         try testing.expect(f.ready());
         term.rt.editor_first_line = 0;
-        _ = syntaxColors(s, term);
+        _ = frameSyntaxColors(s, term);
         try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_semantic);
         try testing.expect(term.rt.editor_semantic.waiting_full);
         try testing.expect(f.applied(1));
         try testing.expectEqual(std.math.maxInt(usize), term.rt.editor_semantic.covered_hi); // 전부 덮였다
         term.rt.editor_first_line = 290;
-        const c = syntaxColors(s, term);
+        const c = frameSyntaxColors(s, term);
         try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_semantic); // 스크롤해도 다시 안 묻는다
         try testing.expectEqual(maru.chrome.tokens.ColorRole.syntax_function, roleAt(c, 299, 4, 11).?);
     }
@@ -16435,7 +16450,7 @@ test "SMT2 semantic tokens — range 없는 서버는 full 로 묻고(스크롤�
         const term = f.term;
         try testing.expect(f.ready());
         term.rt.editor_first_line = 0;
-        const c = syntaxColors(s, term);
+        const c = frameSyntaxColors(s, term);
         try testing.expectEqual(@as(u64, 0), s.editor_lsp.sent_semantic);
         try testing.expectEqual(maru.chrome.tokens.ColorRole.syntax_number, roleAt(c, 0, 14, 18).?); // 1층 색 그대로
         try testing.expectEqual(maru.chrome.tokens.ColorRole.syntax_type_name, roleAt(c, 0, 0, 3).?);
@@ -16449,24 +16464,24 @@ test "SMT2 semantic tokens — range 없는 서버는 full 로 묻고(스크롤�
         const term = f.term;
         try testing.expect(f.ready());
         term.rt.editor_first_line = 0;
-        _ = syntaxColors(s, term);
+        _ = frameSyntaxColors(s, term);
         try testing.expect(pumpLspUntil(&f.fx, 3000, term, struct {
             fn g(t: *Term) bool {
                 return t.rt.editor_semantic.dropped_error >= 1;
             }
         }.g));
         try testing.expect(!term.rt.editor_semantic.waiting and term.rt.editor_semantic.dirty);
-        _ = syntaxColors(s, term); // 곧바로는 안 묻는다(조용 시계)
+        _ = frameSyntaxColors(s, term); // 곧바로는 안 묻는다(조용 시계)
         try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_semantic);
         try removeMarkerHover(s, term, " // SEMERR");
         {
             const t0 = s.awakeMs();
             while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
         }
-        _ = syntaxColors(s, term);
+        _ = frameSyntaxColors(s, term);
         try testing.expectEqual(@as(u64, 2), s.editor_lsp.sent_semantic);
         try testing.expect(f.applied(1));
-        const c = syntaxColors(s, term);
+        const c = frameSyntaxColors(s, term);
         try testing.expectEqual(maru.chrome.tokens.ColorRole.syntax_type_name, roleAt(c, 0, 14, 18).?);
     }
 }
@@ -16492,7 +16507,7 @@ const fld_src =
 /// `since` 는 판정자가 **직접 잰** 사건 시각(편집 직전·응답 뒤의 `last_edit_ms`)이고 창은 계약 숫자를 **글자로** 박는다 — 제품 상수를 쓰면
 /// 상수를 바꾼 변이가 창까지 같이 바꿔 산다(적대적 B11·B13 축).
 fn expectFoldQuiet(s: *AppSession, term: *Term, since: u64, window_ms: u64, want_sent: u64) !void {
-    _ = syntaxColors(s, term);
+    _ = frameSyntaxColors(s, term);
     if (s.awakeMs() -| since < window_ms) try testing.expectEqual(want_sent, s.editor_lsp.sent_folding);
 }
 
@@ -16519,14 +16534,14 @@ test "FLD1 foldingRange 3층 — 색 만들기 자리가 문서 전체를 묻고
     try testing.expectEqual(FoldSource.indent, term.rt.editor_fold_source);
     // ⑵ 첫 색 만들기 — 파싱이 끝나 구문 층이 서고(`}` 까지), 3층 요청이 나간다(한 번에 하나).
     term.rt.editor_first_line = 0;
-    _ = syntaxColors(s, term);
+    _ = frameSyntaxColors(s, term);
     try testing.expectEqual(FoldSource.syntax, term.rt.editor_fold_source);
     try testing.expectEqual(@as(usize, 3), term.rt.editor_fold_ranges.len);
     try testing.expectEqual(@as(u32, 5), term.rt.editor_fold_ranges[0].last_hidden);
     try testing.expectEqual(@as(usize, 11), term.rt.editor_fold_marks.len); // 승격도 같은 자리를 지나 표식을 잡는다
     try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_folding);
     try testing.expect(term.rt.editor_fold_lsp.waiting);
-    _ = syntaxColors(s, term);
+    _ = frameSyntaxColors(s, term);
     try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_folding); // 대기 중엔 한 번만
     // ⑶ 응답 — 서버 범위(`}` 앞 줄까지)가 구문 층을 덮는다. 더러운 항목(중복·문서 밖·한 줄)은 걸러졌다.
     try testing.expect(fldApplied(&f, 1));
@@ -16551,7 +16566,7 @@ test "FLD1 foldingRange 3층 — 색 만들기 자리가 문서 전체를 묻고
     try testing.expect(term.rt.editor_syntax_folds_applied);
     try testing.expectEqual(FoldSource.lsp, term.rt.editor_fold_source);
     try testing.expectEqual(@as(u32, 4), term.rt.editor_fold_ranges[0].last_hidden);
-    _ = syntaxColors(s, term);
+    _ = frameSyntaxColors(s, term);
     try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_folding); // version 같음 — 다시 안 묻는다
     // ⑸ 전체 접기 — 서버 범위로 접힌다: 0..4 와 7..8 이 숨어 보이는 줄은 11 - 4 - 1 = 6 (구문 층이면 11 - 5 - 2 = 4).
     try testing.expect(foldAll(s));
@@ -16571,7 +16586,7 @@ test "FLD1 foldingRange 3층 — 색 만들기 자리가 문서 전체를 묻고
         const t0 = s.awakeMs();
         while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
     }
-    _ = syntaxColors(s, term);
+    _ = frameSyntaxColors(s, term);
     try testing.expectEqual(@as(u64, 2), s.editor_lsp.sent_folding);
     // ⑺ 대기 중에 또 편집 — 응답의 version 이 낡아 버리고(2층 그대로), 조용해진 뒤 다시 묻는다.
     try testing.expect(insertText(s, term, "/"));
@@ -16581,13 +16596,13 @@ test "FLD1 foldingRange 3층 — 색 만들기 자리가 문서 전체를 묻고
         }
     }.g));
     try testing.expectEqual(@as(u64, 1), term.rt.editor_fold_lsp.applied);
-    _ = syntaxColors(s, term);
+    _ = frameSyntaxColors(s, term);
     try testing.expectEqual(FoldSource.syntax, term.rt.editor_fold_source);
     {
         const t0 = s.awakeMs();
         while (s.awakeMs() - t0 < 200) _ = usleep(10_000);
     }
-    _ = syntaxColors(s, term);
+    _ = frameSyntaxColors(s, term);
     try testing.expectEqual(@as(u64, 3), s.editor_lsp.sent_folding);
     try testing.expect(fldApplied(&f, 2));
     try testing.expectEqual(FoldSource.lsp, term.rt.editor_fold_source);
@@ -16605,7 +16620,7 @@ test "FLD2 foldingRange 3층 — 빈 응답은 아래 층을 그대로 두고 �
         const term = f.term;
         try testing.expect(f.ready());
         term.rt.editor_first_line = 0;
-        _ = syntaxColors(s, term);
+        _ = frameSyntaxColors(s, term);
         try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_folding);
         try testing.expect(pumpLspUntil(&f.fx, 3000, term, struct {
             fn g(t: *Term) bool {
@@ -16621,7 +16636,7 @@ test "FLD2 foldingRange 3층 — 빈 응답은 아래 층을 그대로 두고 �
             const t0 = s.awakeMs();
             while (s.awakeMs() - t0 < 280) _ = usleep(10_000);
         }
-        _ = syntaxColors(s, term);
+        _ = frameSyntaxColors(s, term);
         try testing.expectEqual(@as(u64, 2), s.editor_lsp.sent_folding);
         try testing.expect(pumpLspUntil(&f.fx, 3000, term, struct {
             fn g(t: *Term) bool {
@@ -16641,7 +16656,7 @@ test "FLD2 foldingRange 3층 — 빈 응답은 아래 층을 그대로 두고 �
         const term = f.term;
         try testing.expect(f.ready());
         term.rt.editor_first_line = 0;
-        _ = syntaxColors(s, term);
+        _ = frameSyntaxColors(s, term);
         try testing.expectEqual(@as(u64, 0), s.editor_lsp.sent_folding);
         try testing.expect(!term.rt.editor_fold_lsp.waiting);
         try testing.expectEqual(FoldSource.syntax, term.rt.editor_fold_source);
@@ -16656,7 +16671,7 @@ test "FLD2 foldingRange 3층 — 빈 응답은 아래 층을 그대로 두고 �
         const term = f.term;
         try testing.expect(f.ready());
         term.rt.editor_first_line = 0;
-        _ = syntaxColors(s, term);
+        _ = frameSyntaxColors(s, term);
         try testing.expect(pumpLspUntil(&f.fx, 3000, term, struct {
             fn g(t: *Term) bool {
                 return t.rt.editor_fold_lsp.dropped_error >= 1;
@@ -16674,7 +16689,7 @@ test "FLD2 foldingRange 3층 — 빈 응답은 아래 층을 그대로 두고 �
             const t0 = s.awakeMs();
             while (s.awakeMs() - t0 < 120) _ = usleep(10_000);
         }
-        _ = syntaxColors(s, term);
+        _ = frameSyntaxColors(s, term);
         try testing.expectEqual(@as(u64, 2), s.editor_lsp.sent_folding);
         try testing.expect(pumpLspUntil(&f.fx, 3000, term, struct {
             fn g(t: *Term) bool {
@@ -16687,7 +16702,7 @@ test "FLD2 foldingRange 3층 — 빈 응답은 아래 층을 그대로 두고 �
             const t0 = s.awakeMs();
             while (s.awakeMs() - t0 < 520) _ = usleep(10_000);
         }
-        _ = syntaxColors(s, term);
+        _ = frameSyntaxColors(s, term);
         try testing.expectEqual(@as(u64, 3), s.editor_lsp.sent_folding);
         try testing.expect(fldApplied(&f, 1));
         try testing.expectEqual(@as(u6, 0), term.rt.editor_fold_lsp.error_streak);
@@ -26847,10 +26862,17 @@ test "L2C9 되돌리기도 «범위를 안다» — 한 묶음의 앞끝과 꼬�
     try testing.expectEqual(@as(?usize, null), lineColsMismatch(term));
 }
 
+/// 판정자가 「한 프레임의 구문 단계」를 부르는 자리 — 제품 프레임과 같은 순서로 **상태를 밀고**(`advanceSyntax`) 색을 만든다.
+/// `syntaxColors` 만 부르면 파싱·승격·접힘 3층 tick 이 안 돈다(그 둘이 갈린 이유는 `advanceSyntax` 의 doc).
+fn frameSyntaxColors(self: *AppSession, term: *Term) []const []const chrome_editor.content.ColorSpan {
+    advanceSyntax(self, term);
+    return syntaxColors(self, term);
+}
+
 /// 지금 화면의 구문 색을 **전부 한 문자열로** 굳힌다 — 두 시점을 대조하기 위한 오라클.
 fn colorDigest(self: *AppSession, term: *Term, out: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
     out.clearRetainingCapacity();
-    const rows = syntaxColors(self, term);
+    const rows = frameSyntaxColors(self, term);
     for (rows, 0..) |row, i| {
         var buf: [64]u8 = undefined;
         try out.appendSlice(allocator, try std.fmt.bufPrint(&buf, "{d}:", .{i}));
@@ -27843,6 +27865,65 @@ test "PROMO2 접을 것이 없는 문서는 «한 번만» 센다 — 표식이 
     promoteFoldRangesToSyntax(fx.session, term);
     fx.session.allocator = allocator;
     try testing.expectEqual(@as(usize, 0), probe.alloc_index);
+}
+
+test "PROMO3 승격하는 프레임은 방금 놓은 보이는 줄 표를 그리지 않는다 — 접은 채 파싱이 끝나는 프레임 (제품 경계)" {
+    // **해제된 메모리를 그렸다.** 승격이 `syntaxColors` 안에 있을 때 `appendPaneFrame` 은 보이는 줄 표(`lines`)를 먼저 잡고
+    // `buildPaneOps` 인자를 평가하다 승격에 닿았다 — 승격은 접어 둔 것을 풀며 그 표를 **놓는다**(`installFoldRanges` →
+    // `rebuildVisible`). 프레임은 놓인 배열을 그대로 본문에 넘겼고, Debug 에서 `0xaaaa…` 주소로 죽었다(적대적 검증
+    // 2026-09-24, 들여쓰기 안내선 슬라이스의 제품 퍼즈가 잡았다 — Go 문서, 들여쓰기 범위로 접은 뒤 첫 프레임).
+    //
+    // 사용자 경로: 큰 파일을 열고 파싱이 끝나기 전에(§2.1a — 여러 프레임에 걸쳐 판다) 접으면, 파싱이 끝나는 프레임이 이것이다.
+    //
+    // **픽스처가 개념을 가른다** — 접은 줄(`_ = 0;`)은 승격 **전** 표에는 없고 **후**(전부 펼침)에는 있다. 옛 표를 그리면
+    // 죽거나(놓인 메모리) 그 줄이 없다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    var doc: std.ArrayList(u8) = .empty;
+    defer doc.deinit(allocator);
+    for (0..8) |i| {
+        var buf: [64]u8 = undefined;
+        try doc.appendSlice(allocator, try std.fmt.bufPrint(&buf, "pub fn f{d}() void {{\n    _ = {d};\n}}\n", .{ i, i }));
+    }
+    const term = try undoFixture(&fx, allocator, "promo3.zig", doc.items);
+    term.rt.editor_wrap = false;
+    const d = term.rt.editor_doc orelse return error.NoDoc;
+    term.rt.editor_syntax.deinit(allocator);
+    term.rt.editor_semantic.deinit(allocator);
+    term.rt.editor_syntax = syntax_color.open(d.file.content, .zig);
+    var rounds: usize = 0;
+    while (term.rt.editor_syntax.pending and rounds < 100_000) : (rounds += 1) {
+        _ = syntax_color.resumeParse(&term.rt.editor_syntax, d.file.content);
+    }
+    if (term.rt.editor_syntax.provider == null) return error.NoProvider;
+
+    // **그리기 전에 들여쓰기 범위로 접는다** — 승격은 아직이다(그리는 프레임이 한다).
+    _ = ensureFoldRanges(fx.session, term) catch {};
+    if (!foldAll(fx.session)) return error.FoldRejected;
+    if (term.rt.editor_folded_len == 0 or term.rt.editor_visible_lines.len == 0) return error.FixtureDidNotFold;
+    if (term.rt.editor_syntax_folds_applied) return error.FixturePromotedEarly;
+    if (term.rt.editor_fold_source != .indent) return error.FixtureNotIndentSource;
+    for (term.rt.editor_visible_lines) |ln| if (std.mem.indexOf(u8, ln, "_ = 0;") != null) return error.FixtureHiddenLineVisible;
+
+    // **색 단계는 상태를 밀지 않는다** — 프레임 안에서 줄 표를 잡은 **뒤**에 불리므로, 여기서 승격하면 같은 결함이 돌아온다. 프레임이 맨 앞에서
+    // 이미 민 경우에는 이 호출이 할 일이 없어 아래 프레임 단언으로는 안 보인다(파싱이 한 프레임 안의 두 예산에 걸쳐 끝날 때만 닿는다) — 그래서
+    // 직접 부른다.
+    const vis_before = term.rt.editor_visible_lines.ptr;
+    _ = syntaxColors(fx.session, term);
+    try testing.expect(!term.rt.editor_syntax_folds_applied);
+    try testing.expect(term.rt.editor_folded_len > 0);
+    try testing.expectEqual(vis_before, term.rt.editor_visible_lines.ptr);
+
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    defer drawn.dl.deinit(allocator);
+    // 이 프레임이 **승격했다**(판정자가 그 경로를 지났다) — 그리고 승격은 접어 둔 것을 푼다.
+    try testing.expect(term.rt.editor_syntax_folds_applied);
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_folded_len);
+    // **그린 것은 승격 뒤의 표다** — 펼쳐져 접혔던 줄이 보인다.
+    try testing.expect(drawnHasText(drawn.dl, "_ = 0;"));
 }
 
 test "DHS16 구문 접힘 승격도 가로 상한·위치를 안 버린다 — 파싱이 끝나는 프레임 (렌더 경계)" {
@@ -33515,10 +33596,10 @@ test "ES16 비교 뷰는 무색이다 — 문서가 둘이라 축이 갈린다" 
     var fx = try PaneFixture.init(allocator);
     defer fx.deinit(allocator);
 
-    try testing.expect(syntaxColors(fx.session, fx.term).len > 0); // 단일 편집기는 색이 있다
+    try testing.expect(frameSyntaxColors(fx.session, fx.term).len > 0); // 단일 편집기는 색이 있다
     fx.term.rt.editor_diff = .{}; // 비교 상태로 바꾼다
     defer fx.term.rt.editor_diff = null;
-    try testing.expectEqual(@as(usize, 0), syntaxColors(fx.session, fx.term).len);
+    try testing.expectEqual(@as(usize, 0), frameSyntaxColors(fx.session, fx.term).len);
 }
 
 test "ES19 탭 폭을 바꾸면 색 경계가 따라온다 — 제품 경로로 잰다" {
@@ -33541,7 +33622,7 @@ test "ES19 탭 폭을 바꾸면 색 경계가 따라온다 — 제품 경로로 
     setEditorTabWidth(fx.session, fx.term, 8);
     try testing.expectEqual(@as(u8, 8), fx.term.rt.editor_tab_width);
 
-    const colors = syntaxColors(fx.session, fx.term); // **제품 경로**
+    const colors = frameSyntaxColors(fx.session, fx.term); // **제품 경로**
     try testing.expect(colors.len >= 1);
 
     var kw_start: ?u32 = null;

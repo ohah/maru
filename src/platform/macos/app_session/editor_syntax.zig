@@ -1425,6 +1425,18 @@ test "BRC1 언어마다 무엇이 괄호인가 — VS Code 1.139 TextMate 문법
             try testing.expectEqual(@as(usize, if (ed.colored) 2 else 0), got.items.len);
         }
     }
+    // CRLF — 줄 길이에 `\r` 을 안 센다(VS Code `line.length` 는 줄바꿈을 뺀다): 19,999 글자 + `\r\n` 은 칠한다.
+    {
+        var line: std.ArrayList(u8) = .empty;
+        defer line.deinit(allocator);
+        try line.appendSlice(allocator, "f(\"");
+        for (0..19_999 - 5) |_| try line.append(allocator, 'x');
+        try line.appendSlice(allocator, "\")\r\ng()\r\n");
+        var st = openParsed(line.items, .javascript);
+        defer st.deinit(allocator);
+        try bracketMarksForTest(allocator, &st, line.items, false, &got);
+        try testing.expectEqual(@as(usize, 4), got.items.len);
+    }
     // 20,000 자 이상인 줄의 괄호는 없다(VS Code 는 그 줄을 토큰화하지 않는다) — 옆의 짧은 줄은 그대로.
     {
         var long: std.ArrayList(u8) = .empty;

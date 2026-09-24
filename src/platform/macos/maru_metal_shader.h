@@ -191,6 +191,11 @@ static NSString *const MARU_METAL_IMAGE_SHADER_SOURCE =
      "  constexpr sampler s(coord::normalized, address::clamp_to_edge, filter::linear);\n"
      "  float4 c = img.sample(s, in.uv);\n"
      "  return float4(c.rgb * c.a, c.a);\n" // premultiplied over(셀·quad와 같은 블렌딩)
+     "}\n"
+     // W3c: Chromium(OSR) 장은 이미 premultiplied(BGRA) — 다시 곱하면 반투명 가장자리가 어두워진다. 1:1 이라 nearest.
+     "fragment float4 maru_osr_fragment(ImageOut in [[stage_in]], texture2d<float> img [[texture(0)]]) {\n"
+     "  constexpr sampler s(coord::normalized, address::clamp_to_edge, filter::nearest);\n"
+     "  return img.sample(s, in.uv);\n"
      "}\n";
 
 #endif

@@ -22,6 +22,8 @@ pub const Entry = struct {
     /// 받은 그리기 콜백 수(관측점).
     paints: u64 = 0,
     title: TitleGate = .{},
+    /// D9 — CPU 경로로 그렸다고 이미 알렸다(한 번만).
+    gpu_unavailable_sent: bool = false,
     /// 이 브라우저의 픽셀 링 생산자(W2 — `ring_producer.Producer`). 목록은 CEF·mach 를 몰라 불투명하게 든다.
     frames: ?*anyopaque = null,
 };

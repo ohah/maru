@@ -71,6 +71,7 @@ fn command(_: *anyopaque, message: Message, writer: *events.Writer) void {
             host.*.set_focus.?(host, @intFromBool(value.value));
         },
         .navigate => |value| navigate(value, writer),
+        .nav_action => |value| navAction(value, writer),
         .frame_channel => |value| frameChannel(value, writer),
         else => {},
     }
@@ -82,7 +83,9 @@ fn create(value: protocol.message.CreateBrowser, writer: *events.Writer) void {
 
     var window_info = object.zeroed(c.cef_window_info_t);
     window_info.windowless_rendering_enabled = 1;
-    window_info.shared_texture_enabled = 1;
+    // 판정자 전용(`MARU_WEB_TEST_CPU_PAINT`): 공유 텍스처를 꺼 CEF 가 CPU 경로(`on_paint`)로 그리게 한다 — D9 거부 경로를
+    // 재현하는 유일한 방법이다(`--disable-gpu` 로도 GPU 경로였다, 실측). 제품 사용자가 켤 이유는 없다.
+    window_info.shared_texture_enabled = if (std.c.getenv("MARU_WEB_TEST_CPU_PAINT") != null) 0 else 1;
     var settings = object.zeroed(c.cef_browser_settings_t);
     settings.windowless_frame_rate = 60;
     var url = std.mem.zeroes(c.cef_string_t);
@@ -145,6 +148,18 @@ fn navigate(value: protocol.message.Navigate, writer: *events.Writer) void {
     library.setString(state.api, &url, value.url);
     defer state.api.string_utf16_clear(&url);
     frame.*.load_url.?(frame, &url);
+}
+
+/// 뒤로·앞으로·새로고침·멈춤(W3b — 주소창 버튼). 갈 곳이 없으면 CEF 가 무시한다.
+fn navAction(value: protocol.message.NavAction, writer: *events.Writer) void {
+    const entry = state.registry.byId(value.browser) orelse return fail(writer, value.browser, .unknown_browser, "no such browser");
+    const browser = browserOf(entry);
+    switch (value.action) {
+        .back => browser.*.go_back.?(browser),
+        .forward => browser.*.go_forward.?(browser),
+        .reload => browser.*.reload.?(browser),
+        .stop => browser.*.stop_load.?(browser),
+    }
 }
 
 /// 모두 닫기를 요청한다. 열린 브라우저가 없으면 바로 루프를 끝낸다.

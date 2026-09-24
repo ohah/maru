@@ -16,6 +16,9 @@
 //!   title-flood        2 초 동안 제목을 약 40 만 번 바꾸는 페이지의 제목 알림이 조절되고(간격 50ms 기준 상한 안),
 //!                      마지막 제목은 온다
 //!   title-control      제어 문자가 든 제목도 온다(제어 문자는 공백으로) — codec 이 거절해 조용히 사라지지 않는다
+//!   nav-actions        뒤로·앞으로가 대상 브라우저를 옮기고, 주소 알림(`url_changed`)·탐색 상태(`nav_state` 의 뒤로 가능)가
+//!                      따라온다(W3b — 주소창)
+//!   gpu-refused        CPU 경로로 그리게 한 host(`MARU_WEB_TEST_CPU_PAINT`)는 그 브라우저에 `gpu_unavailable` 을 알린다(D9)
 //!   relaunch-refused   같은 프로필로 두 번째 host → profile_in_use·exit 16, 첫 host 는 창 0 개로 계속 돈다
 //!   profile-private    프로필이 0700 이고 백업 제외 표시가 있다
 //!   profile-refused    남이 읽을 수 있는 프로필(0755 · ACL 허용 항목 · 심볼릭 링크)은 쓰지 않고 exit 12
@@ -42,6 +45,8 @@ const size: protocol.message.ViewSize = .{ .width = 640, .height = 400, .scale =
 
 const Want = union(enum) {
     title: struct { browser: BrowserId, text: []const u8 },
+    url_suffix: struct { browser: BrowserId, suffix: []const u8 },
+    can_go_back: struct { browser: BrowserId, value: bool },
     created: BrowserId,
     closed: BrowserId,
     failure: struct { browser: BrowserId, code: FailureCode },
@@ -67,26 +72,51 @@ fn waitTitles(host: *Host, wants: []const Want, misrouted: *usize) usize {
     return count;
 }
 
-/// 기대한 알림이 올 때까지 읽는다. 기다리는 동안 **다른 브라우저**에서 같은 제목이 오면 잘못 간 것으로 센다.
+const Match = enum { hit, misrouted, none };
+
+/// 알림 하나가 기대와 맞는가. **다른 브라우저**에서 같은 제목이 오면 잘못 간 것이다.
+fn matches(want: Want, message: Message) Match {
+    switch (want) {
+        .title => |w| if (message == .title_changed) {
+            const got = message.title_changed;
+            if (std.mem.eql(u8, got.text, w.text)) return if (got.browser == w.browser) .hit else .misrouted;
+        },
+        .url_suffix => |w| if (message == .url_changed and message.url_changed.browser == w.browser and std.mem.endsWith(u8, message.url_changed.url, w.suffix)) return .hit,
+        .can_go_back => |w| if (message == .nav_state and message.nav_state.browser == w.browser and !message.nav_state.loading and message.nav_state.can_go_back == w.value) return .hit,
+        .created => |id| if (message == .browser_created and message.browser_created == id) return .hit,
+        .closed => |id| if (message == .browser_closed and message.browser_closed == id) return .hit,
+        .failure => |w| if (message == .failure and message.failure.browser == w.browser and message.failure.code == w.code) return .hit,
+    }
+    return .none;
+}
+
+/// 기대한 알림이 올 때까지 읽는다(그 사이 다른 알림은 버린다).
 fn waitFor(host: *Host, want: Want, misrouted: *usize) bool {
+    return waitAll(host, &.{want}, misrouted);
+}
+
+/// 기대한 알림이 **모두** 올 때까지 읽는다(도착 순서는 상관없다) — 제목은 조절(50ms)로 늦게 올 수 있어, 한 알림을
+/// 기다리며 다른 알림을 버리면 이미 지나간 것을 놓친다.
+fn waitAll(host: *Host, wants: []const Want, misrouted: *usize) bool {
+    var got: [8]bool = @splat(false);
+    var count: usize = 0;
     const deadline = os.nowMs() + wait_ms;
-    while (os.nowMs() < deadline) {
+    while (count < wants.len and os.nowMs() < deadline) {
         const left: u32 = @intCast(@max(deadline - os.nowMs(), 1));
         const message = (host.next(left) catch return false) orelse return false;
-        switch (want) {
-            .title => |w| if (message == .title_changed) {
-                const got = message.title_changed;
-                if (std.mem.eql(u8, got.text, w.text)) {
-                    if (got.browser == w.browser) return true;
-                    misrouted.* += 1;
-                }
-            },
-            .created => |id| if (message == .browser_created and message.browser_created == id) return true,
-            .closed => |id| if (message == .browser_closed and message.browser_closed == id) return true,
-            .failure => |w| if (message == .failure and message.failure.browser == w.browser and message.failure.code == w.code) return true,
+        for (wants, 0..) |want, i| {
+            if (got[i]) continue;
+            switch (matches(want, message)) {
+                .hit => {
+                    got[i] = true;
+                    count += 1;
+                },
+                .misrouted => misrouted.* += 1,
+                .none => {},
+            }
         }
     }
-    return false;
+    return count == wants.len;
 }
 
 fn url(buf: []u8, port: u16, path: []const u8) []const u8 {
@@ -135,8 +165,26 @@ fn profileRefusals(report: Report, host_path: [:0]const u8, root: []const u8) vo
     report(open_refused and acl_set and acl_refused and link_set and link_refused and link_only_refused, "profile-refused", std.fmt.bufPrint(&detail_buf, "0755 {} · ACL 허용(설정 {}) {} · 심볼릭 링크(설정 {}) {} · 깨끗한 곳을 가리키는 링크 {}", .{ open_refused, acl_set, acl_refused, link_set, link_refused, link_only_refused }) catch "");
 }
 
+/// D9 — CPU 경로로 그리게 한 host 는 그 브라우저에 `gpu_unavailable` 을 알린다. 따로 띄운다(판정자 전용 훅이 켜진 host).
+fn gpuRefusal(report: Report, host_path: [:0]const u8, root: []const u8, port: u16) void {
+    var detail_buf: [256]u8 = undefined;
+    var arg_buf: [1100]u8 = undefined;
+    const arg = std.fmt.bufPrintZ(&arg_buf, "--profile-dir={s}/gpu", .{root}) catch return;
+    var host = Host.spawnWith(host_path, arg, null, &.{"MARU_WEB_TEST_CPU_PAINT=1"}) catch return report(false, "gpu-refused", "spawn");
+    handshake(&host) catch return report(false, "gpu-refused", "handshake");
+    var u: [256]u8 = undefined;
+    host.send(.{ .create_browser = .{ .browser = 7, .size = size, .hidden = false, .url = url(&u, port, "/title?t=cpu") } }) catch return report(false, "gpu-refused", "send");
+    var misrouted: usize = 0;
+    const refused = waitFor(&host, .{ .failure = .{ .browser = 7, .code = .gpu_unavailable } }, &misrouted);
+    host.send(.shutdown) catch {};
+    while (host.next(wait_ms) catch null) |_| {}
+    const code = host.wait(wait_ms);
+    report(refused and code != null and code.? == 0, "gpu-refused", std.fmt.bufPrint(&detail_buf, "CPU 경로 → gpu_unavailable {} · exit {?d}", .{ refused, code }) catch "");
+}
+
 pub fn run(report: Report, host_path: [:0]const u8, profile_dir: [:0]const u8, profile_arg: [:0]const u8, port: u16) !void {
     profileRefusals(report, host_path, std.fs.path.dirname(profile_dir) orelse "/tmp");
+    gpuRefusal(report, host_path, std.fs.path.dirname(profile_dir) orelse "/tmp", port);
 
     var detail_buf: [256]u8 = undefined;
     var u: [256]u8 = undefined;
@@ -237,6 +285,26 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_dir: [:0]const u8, p
     }
     // 2 초 ÷ 50ms = 40 + 첫 제목·마지막 제목·타이머 흔들림 몫.
     report(flood_done and flood_titles <= flood_title_limit, "title-flood", std.fmt.bufPrint(&detail_buf, "제목 알림 {d} 개(상한 {d}) · flood-done 도착 {}", .{ flood_titles, flood_title_limit, flood_done }) catch "");
+
+    // 뒤로·앞으로(W3b). 셋째 브라우저로 두 페이지를 차례로 연 뒤 뒤로·앞으로 옮긴다.
+    try host.send(.{ .navigate = .{ .browser = 3, .url = url(&u, port, "/title?t=nav-a") } });
+    const nav_a = waitAll(&host, &.{
+        .{ .url_suffix = .{ .browser = 3, .suffix = "t=nav-a" } },
+        .{ .title = .{ .browser = 3, .text = "nav-a" } },
+    }, &misrouted);
+    try host.send(.{ .navigate = .{ .browser = 3, .url = url(&u, port, "/title?t=nav-b") } });
+    const nav_b = waitAll(&host, &.{
+        .{ .title = .{ .browser = 3, .text = "nav-b" } },
+        .{ .can_go_back = .{ .browser = 3, .value = true } },
+    }, &misrouted);
+    try host.send(.{ .nav_action = .{ .browser = 3, .action = .back } });
+    const went_back = waitAll(&host, &.{
+        .{ .url_suffix = .{ .browser = 3, .suffix = "t=nav-a" } },
+        .{ .title = .{ .browser = 3, .text = "nav-a" } },
+    }, &misrouted);
+    try host.send(.{ .nav_action = .{ .browser = 3, .action = .forward } });
+    const went_forward = waitFor(&host, .{ .url_suffix = .{ .browser = 3, .suffix = "t=nav-b" } }, &misrouted);
+    report(nav_a and nav_b and went_back and went_forward and misrouted == 0, "nav-actions", std.fmt.bufPrint(&detail_buf, "주소 알림 {} · 뒤로 가능 {} · 뒤로 {} · 앞으로 {} · 잘못 간 알림 {d}", .{ nav_a, nav_b, went_back, went_forward, misrouted }) catch "");
 
     // 같은 프로필로 두 번째 host.
     var second = try Host.spawn(host_path, profile_arg);

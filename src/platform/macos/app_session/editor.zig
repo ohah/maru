@@ -729,6 +729,7 @@ fn syntaxColors(self: *AppSession, term: *Term) []const []const chrome_editor.co
 
 /// 이 편집기가 칠할 괄호 쌍 색(§5.1d) — 끄거나 비교 뷰면 비어 있다(§5.1b 와 같은 가드). sticky 머리줄도 같은 것을 쓴다.
 pub fn bracketMarksFor(self: *AppSession, term: *Term) syntax_color.BracketMarks {
+    // 이중 방어다(적대적 2회차 D01: 등가) — 끄면 그 프레임 맨 앞(`advanceSyntax`)이 목록을 버려 판정도 비어 있다. 뜻으로 둔다: 끈 설정이 칠하지 않는다.
     if (!self.loaded_config.config.editor.bracket_pair_colorization) return .{};
     if (term.rt.editor_diff != null) return .{};
     return syntax_color.bracketMarks(&term.rt.editor_syntax);

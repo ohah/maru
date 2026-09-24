@@ -1379,6 +1379,9 @@ test "BRC1 언어마다 무엇이 괄호인가 — VS Code 1.139 TextMate 문법
         .{ .lang = .cpp, .src = "auto s = R\"(abc)\";\nint f() { return (1); }\n", .want = &.{ .{ 24, 0 }, .{ 25, 0 }, .{ 27, 0 }, .{ 36, 1 }, .{ 38, 1 }, .{ 41, 0 } } },
         .{ .lang = .c, .src = "#error need C99 (or later\n#define M(x) (x)\nint g(void) { return M(0); }\n", .want = &.{ .{ 35, 0 }, .{ 37, 0 }, .{ 39, 0 }, .{ 41, 0 }, .{ 48, 0 }, .{ 53, 0 }, .{ 55, 0 }, .{ 65, 1 }, .{ 67, 1 }, .{ 70, 0 } } },
         .{ .lang = .javascript, .src = "/** mail me@host {x} (y) */\n/**\n * @param {string name here (x)\n * @example f(1)\n */\nf(1);\n", .want = &.{ .{ 42, -1 }, .{ 60, 1 }, .{ 62, 1 }, .{ 77, 1 }, .{ 79, 1 }, .{ 86, 1 }, .{ 88, 1 } } },
+        // `#pragma` 본문은 칠하고 `#warning`·`#line` 은 아니다 · JSDoc 태그는 목록으로(앞 글자는 안 본다 — `x@param` 도 태그, `@host`·`@since` 는 아님)
+        .{ .lang = .c, .src = "#pragma omp parallel for private(x)\n#warning old (api\n#line 10 \"f(x)\"\nint a;\n", .want = &.{ .{ 32, 0 }, .{ 34, 0 } } },
+        .{ .lang = .javascript, .src = "/** x@param {T} a */\n/** @host {x} (y) */\n/** @since {z} */\n/** @returns {Q} r */\nf(1);\n", .want = &.{ .{ 12, 0 }, .{ 14, 0 }, .{ 73, 0 }, .{ 75, 0 }, .{ 83, 0 }, .{ 85, 0 } } },
     };
     var got: std.ArrayList([2]i64) = .empty;
     defer got.deinit(allocator);

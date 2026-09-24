@@ -722,14 +722,16 @@ pub const Provider = struct {
     /// 넘치면 그 쌍을 못 찾은 것으로 친다 — 틀린 쌍을 내는 것보다 낫다.
     pub const max_sibling_depth: usize = 64;
 
-    /// **byte `i` 의 글자가 괄호 토큰이면 그 짝**(§5.1b ⓐ). 괄호 토큰 = 이름 없는 잎이고 그 글자들 안의 괄호가 **정확히 하나**(`(` 도, Zig
-    /// `.{` · Bash `$(` 도). 짝은 **같은 부모의 형제**에서 같은 종류를 깊이로 센다 — 문자열·주석 속 글자는 긴 잎의 일부라 여기서 `null` 이다.
+    /// **byte `i` 의 글자가 괄호 토큰이면 그 짝**(§5.1b ⓐ). 괄호 토큰 = 이름 없는 잎이고 그 글자들 안의 괄호가 **정확히 하나**(`(` 도, Bash
+    /// `$(` 도 — Zig `.{`·Rust `#[` 는 grammar 가 두 토큰으로 낸다, 실측). 짝은 **같은 부모의 형제**에서 같은 종류를 깊이로 센다 — 문자열·주석 속 글자는 긴 잎의 일부라 여기서 `null` 이다.
     /// 트리가 없으면 `null`. `source` 는 트리를 만든 그 내용이어야 한다.
     pub fn bracketTokenPair(self: *Provider, source: []const u8, i: u32) ?BracketPair {
         const tree = self.tree orelse return null;
         if (i >= source.len) return null;
         const node = c.ts_node_descendant_for_byte_range(c.ts_tree_root_node(tree), i, i + 1);
         const tok = tokenBracket(node, source) orelse return null;
+        // **오늘 등가다**(적대적 2회차 T4): 이 검사가 없어도 아래 짝짓기가 **물은 byte 가 괄호인 쌍만** 돌려주므로(`.token` 갈래) `$(` 의 `$`
+        // 에서 물으면 결국 `null` 이다. 두는 이유는 뜻이다 — 「이 글자가 괄호인가」를 여기서 답하고, 짝짓기의 비교에 기대지 않는다.
         if (tok.at != i) return null; // 토큰이 이 글자를 덮지만 그 괄호는 다른 자리다(방어 — 한 토큰에 괄호는 하나뿐)
         const parent = c.ts_node_parent(node);
         if (c.ts_node_is_null(parent)) return null;
@@ -752,8 +754,8 @@ pub const Provider = struct {
     }
 
     /// **caret `pos` 를 품는 가장 안쪽 괄호 토큰 쌍**(§5.1b — VS Code `findEnclosingBrackets`). caret 이 든 가장 깊은 노드부터 조상으로 올라가며
-    /// 형제 괄호 쌍 중 `open < pos ≤ close` 인 것을 찾는다(여는 괄호 바로 앞·닫는 괄호 바로 뒤는 품지 않는다). 한 층 안에서는 여는 자리가 가장
-    /// 뒤인 것이 가장 안쪽이다 — 형제 쌍은 서로 겹치지 않거나 포개진다. 트리가 없거나 없으면 `null`.
+    /// 형제 괄호 쌍 중 `open < pos ≤ close` 인 것을 찾는다(여는 괄호 바로 앞·닫는 괄호 바로 뒤는 품지 않는다). 한 층 안에서는 **처음 닫히는** 품는
+    /// 쌍이 가장 안쪽이다 — 형제 쌍은 서로 겹치지 않거나 포개진다. 트리가 없거나 없으면 `null`.
     pub fn enclosingBracketTokens(self: *Provider, source: []const u8, pos: u32) ?BracketPair {
         const tree = self.tree orelse return null;
         var node = c.ts_node_descendant_for_byte_range(c.ts_tree_root_node(tree), pos, pos);
@@ -813,7 +815,6 @@ pub const Provider = struct {
         var depth = [3]usize{ 0, 0, 0 };
         // 스택이 넘친 종류는 그 뒤로 짝을 믿을 수 없다 — 그 종류는 더 짝짓지 않는다.
         var overflow = [3]bool{ false, false, false };
-        var best: ?BracketPair = null;
         while (true) {
             const child = c.ts_tree_cursor_current_node(&cursor);
             if (tokenBracket(child, source)) |b| {
@@ -831,16 +832,17 @@ pub const Provider = struct {
                         const pair: BracketPair = .{ .open = stacks[k][depth[k]], .close = b.at };
                         switch (want) {
                             .token => |t| if (pair.open == t or pair.close == t) return pair,
-                            .enclosing => |pos| if (pair.open < pos and pos <= pair.close) {
-                                if (best == null or pair.open > best.?.open) best = pair;
-                            },
+                            // **처음 완성된 「품는 쌍」이 가장 안쪽이다** — 쌍은 닫히는 순서로 완성되고, caret 을 품는 쌍들은 서로 포개지므로 안쪽이
+                            // 먼저 닫힌다(나란한 두 쌍은 둘 다 caret 을 품을 수 없다). 처음엔 「여는 자리가 가장 뒤인 것」을 골랐는데 적대적 2회차
+                            // (T13b)가 첫 것을 남겨도 같은 답임을 보였고, 이유가 위 한 줄이라 줄였다.
+                            .enclosing => |pos| if (pair.open < pos and pos <= pair.close) return pair,
                         }
                     }
                 }
             }
             if (!c.ts_tree_cursor_goto_next_sibling(&cursor)) break;
         }
-        return best;
+        return null;
     }
 
     /// 접을 수 있는 **줄 범위** 하나(§4 — 접힘의 tree-sitter 층).
@@ -2399,7 +2401,8 @@ test "SYN27 이름 없는 노드는 심볼이 아니다 — zig 익명 test 블�
 test "SYN44 괄호 토큰의 짝·문자열 속 괄호·감싸는 쌍 — 코드 언어 열여섯 (visual-mapping §5.1b ⓐⓒ)" {
     // 표본마다 셋을 잰다: ① 호출 괄호의 짝(양쪽에서), ② 문자열 속 '(' 는 괄호 토큰이 아니고 글 잎도 아니다(ⓒ), ③ 그 문자열 속 자리를
     // 품는 가장 안쪽 쌍이 ①이다. `open` 은 끝 글자가 여는 괄호인 유일한 조각, `close` 는 첫 글자가 닫는 괄호인 유일한 조각, `inner` 는 첫
-    // 글자가 문자열 속 '(' 인 유일한 조각. **Zig `.{` · Bash `$(`** 는 괄호가 다른 글자와 붙은 토큰이다 — 「한 글자 잎」만 보면 여기서 깨진다.
+    // 글자가 문자열 속 '(' 인 유일한 조각. **Bash `$(`** 는 괄호가 다른 글자와 붙은 토큰이다 — 「한 글자 잎」만 보면 여기서 깨진다(Zig `.{` 는
+    // 처음에 그런 토큰으로 알고 넣었는데 노드를 찍어 보니 `.` 과 `{` 두 토큰이었다 — 표본은 여느 `{` 로 남는다).
     const samples = [_]struct { lang: Language, src: []const u8, open: []const u8, close: []const u8, inner: []const u8 }{
         .{ .lang = .zig, .src = "const a = f(.{ \"(\", x });\n", .open = ".{", .close = "})", .inner = "(\"," },
         .{ .lang = .json, .src = "{\"k\": [\"(\", 1]}\n", .open = "[", .close = "]}", .inner = "(\"," },
@@ -2428,8 +2431,8 @@ test "SYN44 괄호 토큰의 짝·문자열 속 괄호·감싸는 쌍 — 코드
         const want: Provider.BracketPair = .{ .open = o, .close = cl };
         try std.testing.expectEqual(@as(?Provider.BracketPair, want), prov.bracketTokenPair(s.src, o));
         try std.testing.expectEqual(@as(?Provider.BracketPair, want), prov.bracketTokenPair(s.src, cl));
-        // **붙은 토큰의 앞 글자는 괄호가 아니다**(`.{` 의 `.`, `$(` 의 `$`) — 그 글자를 덮는 가장 작은 노드도 같은 토큰이라, 「그 괄호가 이
-        // 글자인가」를 안 보면 caret 이 `.{` 바로 앞에 선 것을 괄호에 닿은 것으로 읽는다(적대적 1회차 T4).
+        // **붙은 토큰의 앞 글자는 괄호가 아니다**(`$(` 의 `$`; Zig `.{` 의 `.` 은 따로 된 토큰이라 당연히 아니다). 이 단언은 약속을 못박을 뿐
+        // 적대적 T4 를 가르지는 못한다 — 그 변이는 짝짓기가 물은 byte 로 다시 거른다(T4 주석).
         if (s.open.len > 1) try std.testing.expectEqual(@as(?Provider.BracketPair, null), prov.bracketTokenPair(s.src, o - 1));
         try std.testing.expectEqual(@as(?Provider.BracketPair, null), prov.bracketTokenPair(s.src, in));
         try std.testing.expectEqual(@as(?Provider.ByteRange, null), prov.proseLeafAt(in)); // 코드 언어 — 글 잎이 없다
@@ -2493,7 +2496,7 @@ test "SYN46 짝 없는 괄호·가장 안쪽 쌍·트리가 없을 때 (visual-m
     const o: u32 = @intCast(std.mem.indexOf(u8, broken, "(").?);
     try std.testing.expectEqual(@as(?Provider.BracketPair, null), p1.bracketTokenPair(broken, o));
 
-    // 가장 안쪽 — 같은 형제 목록 안에서 여는 자리가 가장 뒤인 쌍, 그리고 조상보다 자식이 먼저.
+    // 가장 안쪽 — 같은 형제 목록 안에서 처음 닫히는 품는 쌍, 그리고 조상보다 자식이 먼저.
     const nested = "f(g(a), [b])\n";
     var p2 = Provider.init(nested, .javascript, 0) orelse return error.NoProvider;
     defer p2.deinit();

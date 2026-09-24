@@ -192,6 +192,11 @@ pub const Props = struct {
     selection_empty: bool = true,
     /// primary caret 의 줄(`carets`·`lines` 와 같은 축의 첨자) — 그 줄 번호를 밝힌다(§5.1b ⑤). `null` 이면 없다.
     active_line: ?usize = null,
+    /// **들여쓰기 안내선**(§5.1c) — 줄마다 단계 수와 활성 단계. **창이다**(그려질 줄 근처만 — 문서 전체를 세면 큰 문서에서 프레임마다 비싸다).
+    /// 창 밖 줄은 선이 없다.
+    indent_guides: GuideWindow = .{},
+    /// 안내선 간격(열). 0 이면 안 그린다.
+    guide_unit: u16 = 0,
     /// **짝 괄호 상자**(§5.1b) — 줄마다 괄호 글자 마크(`search_marks` 와 같은 축·같은 byte 규칙, 줄 안 오름차순·중복 없음).
     bracket_marks: ?[]const []const Mark = null,
     /// **진단**(§5.4) — 줄마다의 밑줄 조각(`search_marks` 와 같은 축·같은 byte 규칙). 물결(지그재그)로 그린다.
@@ -777,10 +782,15 @@ pub fn build(props: Props, scratch: Scratch) Written {
     // 어느 것인지 흐려진다. 글자보다도 뒤라 알파로 얹어도 내용이 읽힌다.
     // **같은 낱말 강조가 먼저다**(§5.1a 우선순위 — 가장 약하다). 선택·검색이 그 위에 얹힌다. (선택과의 순서는 오늘 관측되지 않는다 —
     // 선택이 있으면 강조를 안 그려 둘이 공존하지 않는다: 적대적 C7 등가. 검색은 어느 쪽이든 그 뒤다. 순서는 뜻으로 둔다.)
+    // **들여쓰기 안내선은 밴드 뒤 · 현재 줄 상자 앞**(§5.1c) — 글자 아래에 서고 다른 강조가 그 위에 얹힌다. 줄당 개수가 들여쓰기 깊이만큼이라
+    // 막대 몫을 남긴다(검색과 같은 예약).
+    const ig_base = bg.ops + cw.ops + gw.ops + band_ops;
+    const ig_room = (scratch.ops.len -| ig_base) -| scrollbar_reserve_ops;
+    const ig_ops = paintIndentGuides(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[ig_base..][0..ig_room]);
     // **현재 줄 상자는 밴드 뒤·다른 강조 앞이다**(§5.1b) — 테두리뿐이라 무엇도 가리지 않고, 강조들이 그 안에 얹힌다.
-    const lh_ops = paintLineHighlight(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[bg.ops + cw.ops + gw.ops + band_ops ..]);
-    const occ_ops = paintOccurrences(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[bg.ops + cw.ops + gw.ops + band_ops + lh_ops ..], scratch.count_scratch);
-    const sel_ops = paintSelection(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[bg.ops + cw.ops + gw.ops + band_ops + lh_ops + occ_ops ..], scratch.count_scratch);
+    const lh_ops = paintLineHighlight(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[ig_base + ig_ops ..]);
+    const occ_ops = paintOccurrences(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[ig_base + ig_ops + lh_ops ..], scratch.count_scratch);
+    const sel_ops = paintSelection(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[ig_base + ig_ops + lh_ops + occ_ops ..], scratch.count_scratch);
     // **검색 결과는 선택 위에 얹는다.** 선택 안에서 검색하는 경우가 있고(§5.1의 "선택 영역 내에서만"이
     // 그 자리다), 그때 매치가 선택에 묻히면 검색이 아무 일도 안 한 것처럼 보인다.
     // **막대 몫을 남겨 둔다.** 검색 강조는 **줄당 개수에 상한이 없는 유일한 층**이고(선택은
@@ -809,7 +819,7 @@ pub fn build(props: Props, scratch: Scratch) Written {
     // **이 예약은 검색 층에만 걸린다.** 앞의 배경·본문·gutter·밴드·선택은 여전히 무예약이라,
     // 그쪽이 먼저 다 먹으면 막대는 그대로 굶는다(기존 상태이고 이 슬라이스가 만든 것이 아니다).
     // 검색만 예약하는 이유는 **줄당 개수에 상한이 없는 층이 그것뿐**이어서다.
-    const find_base = bg.ops + cw.ops + gw.ops + band_ops + lh_ops + occ_ops + sel_ops;
+    const find_base = ig_base + ig_ops + lh_ops + occ_ops + sel_ops;
     const find_room = (scratch.ops.len -| find_base) -| scrollbar_reserve_ops;
     const find_ops = paintSearch(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[find_base..][0..find_room], scratch.count_scratch);
 
@@ -924,7 +934,7 @@ pub fn build(props: Props, scratch: Scratch) Written {
     // **`occ_ops` 를 빼면 안 된다**(§5.1a — `OCH5`): 뒤 층의 자리(`find_base`)가 이미 그 몫을 세므로, 여기서 빠지면 강조 수만큼
     // 끝 op(막대·미니맵)가 잘린다 — 강조가 선 동안 막대가 사라졌다(2026-09-23 발견).
     // 현재 줄(`lh_ops`)·짝 괄호(`brk_ops`)도 같은 이유로 빠지면 안 된다(`LHL5`).
-    const body_ops = bg.ops + cw.ops + gw.ops + sw.ops + band_ops + lh_ops + occ_ops + sel_ops + find_ops + brk_ops + diag_ops + caret_ops + mm_ops + hw.ops;
+    const body_ops = bg.ops + cw.ops + gw.ops + sw.ops + band_ops + ig_ops + lh_ops + occ_ops + sel_ops + find_ops + brk_ops + diag_ops + caret_ops + mm_ops + hw.ops;
     return .{
         .total_visual_rows = total_visual,
         .max_top_line = max_top.line,
@@ -1409,6 +1419,39 @@ fn paintLineHighlight(props: Props, layout: geometry.Layout, visual: []const vis
     return n;
 }
 
+/// **들여쓰기 안내선**(§5.1c) — 줄의 **첫 조각**에만(우리 랩은 이어짐 행을 0 열에서 시작한다 — VS Code 의 `'none'` 과 같은 경우), 단계 `k` 마다
+/// 표시 열 `(k−1) × 간격` 칸의 왼쪽 끝에 1px 세로선. 가로로 굴려 그 열이 화면 밖이면 안 긋고, 본문 폭을 넘으면 거기서 멈춘다. 활성 단계는 다른 색.
+fn paintIndentGuides(props: Props, layout: geometry.Layout, visual: []const visual_map.VisualRow, out: []draw.Op) usize {
+    if (props.guide_unit == 0 or props.indent_guides.rows.len == 0) return 0;
+    const unit: u32 = props.guide_unit;
+    var n: usize = 0;
+    for (visual, 0..) |v, i| {
+        if (v.kind != .text or v.piece != 0) continue; // 위젯 행 · 이어짐 조각
+        const g = props.indent_guides.at(v.docIndex(props.first_line));
+        if (g.count == 0) continue;
+        const y = props.rect.y + @as(i32, @intCast(i)) * @as(i32, props.cell_h_px);
+        var k: u32 = 1;
+        while (k <= g.count) : (k += 1) {
+            const col = (k - 1) * unit;
+            if (col < v.start_col) continue; // 가로로 굴려 화면 왼쪽 밖
+            const on_screen = col - v.start_col;
+            if (on_screen >= layout.content.width) break;
+            if (n >= out.len) return n; // 예산 끝 — 막대 몫을 지킨다
+            out[n] = .{ .quad = .{
+                .rect = .{
+                    .x = props.rect.x + @as(i32, @intCast((@as(u32, layout.contentLeft()) + on_screen) * props.cell_w_px)),
+                    .y = y,
+                    .w = indent_guide_px,
+                    .h = props.cell_h_px,
+                },
+                .fill_role = if (g.active == k) .indent_guide_active else .indent_guide,
+            } };
+            n += 1;
+        }
+    }
+    return n;
+}
+
 /// **짝 괄호 상자**(§5.1b) — 괄호 글자 칸마다 10% 채움 + 1px 테두리. 열 계산은 선택·검색과 같은 `paintRowMarks` 한 곳이다(§4.1c).
 fn paintBrackets(props: Props, layout: geometry.Layout, visual: []const visual_map.VisualRow, out: []draw.Op, scratch_cols: []u8) usize {
     const rows = props.bracket_marks orelse return 0;
@@ -1440,6 +1483,24 @@ pub const caret_width_px: u32 = 2;
 /// caret 모양. 값 이름은 터미널 `cursor.shape`(`config.theme.CursorShape`)와 **같다** — 이 컴포넌트는
 /// config를 안 들여오므로(chrome은 L3) 이름만 맞추고 제품이 옮겨 담는다.
 pub const CaretShape = enum { bar, block, underline };
+
+/// 한 줄의 들여쓰기 안내선(§5.1c) — 단계 수와, 그중 활성인 단계(1부터, 0 은 없음).
+pub const GuideLine = struct { count: u16 = 0, active: u16 = 0 };
+
+/// 안내선 창 — `first` 번째 줄부터 `rows.len` 줄(`lines` 와 같은 축의 첨자). `InlayWindow` 와 같은 꼴이다.
+pub const GuideWindow = struct {
+    first: usize = 0,
+    rows: []const GuideLine = &.{},
+
+    pub fn at(self: GuideWindow, idx: usize) GuideLine {
+        if (idx < self.first or idx - self.first >= self.rows.len) return .{};
+        return self.rows[idx - self.first];
+    }
+};
+
+/// 안내선 폭(px) — VS Code `box-shadow: 1px 0 0 0 … inset`. **1px 세로 quad 는 선다**(캡처 픽셀로 쟀다 — 높이 1px 가로 사각이 셰이더 AA 에
+/// 지워진 §4.1i 와 다르다).
+pub const indent_guide_px: u32 = 1;
 
 /// 현재 줄 강조의 자리(§5.1b) — 값 이름은 `editor.render-line-highlight`(VS Code `renderLineHighlight`)와 같다. chrome 은 config 를 안
 /// 들여오므로 제품이 옮겨 담는다(`CaretShape` 와 같은 규율).
@@ -4775,4 +4836,125 @@ test "LHL7 위젯 행에는 줄 상자가 안 선다 — 앵커 줄에 caret 이
     const boxes = lineBoxes(bufs.ops[0..w.ops], &got);
     try testing.expectEqual(@as(usize, 1), boxes.len);
     try testing.expectEqual(@as(i32, 2 * 16), boxes[0].rect.y); // 행 0 = one · 행 1 = 위젯 · 행 2 = two
+}
+
+// ── 들여쓰기 안내선(visual-mapping §5.1c) ─────────────────────────────────────────────────
+
+/// 판정자용: 안내선 quad(역할이 둘 중 하나)를 op 순서대로.
+fn guideQuads(ops: []const draw.Op, out: []draw.Op.Quad) []draw.Op.Quad {
+    var n: usize = 0;
+    for (ops) |op| {
+        if (op != .quad) continue;
+        if (op.quad.fill_role != .indent_guide and op.quad.fill_role != .indent_guide_active) continue;
+        if (n == out.len) break;
+        out[n] = op.quad;
+        n += 1;
+    }
+    return out[0..n];
+}
+
+test "IGF1 단계마다 (k−1)×간격 열의 1px 선 — 줄의 단계 수만큼, 활성 단계는 다른 색, 간격 0 이면 없다 (§5.1c)" {
+    const lines = [_][]const u8{ "a", "  b", "    c", "  d" };
+    var props = testProps(&lines, false);
+    // 둘째 줄부터 창 — 첫 줄(0)은 창 밖이라 선이 없다(창의 `first` 를 더하지 않는 변이를 가르려고 0 이 아니게 둔다)
+    const rows = [_]GuideLine{ .{ .count = 1 }, .{ .count = 2, .active = 2 }, .{ .count = 1 } };
+    props.indent_guides = .{ .first = 1, .rows = &rows };
+    props.guide_unit = 2;
+    var bufs: TestBuffers = .{};
+    const w = build(props, bufs.scratch());
+    var got: [16]draw.Op.Quad = undefined;
+    const qs = guideQuads(bufs.ops[0..w.ops], &got);
+    try testing.expectEqual(@as(usize, 4), qs.len); // 1 + 2 + 1
+    const layout = geometry.compute(props.total_cols, props.total_lines, .{});
+    const x0: i32 = @as(i32, layout.content.start) * 8;
+    // 줄 1: 열 0 · 줄 2: 열 0·2(둘째가 활성) · 줄 3: 열 0
+    try testing.expectEqual(x0, qs[0].rect.x);
+    try testing.expectEqual(@as(i32, 16), qs[0].rect.y);
+    try testing.expectEqual(x0, qs[1].rect.x);
+    try testing.expectEqual(tokens.ColorRole.indent_guide, qs[1].fill_role);
+    try testing.expectEqual(x0 + 2 * 8, qs[2].rect.x);
+    try testing.expectEqual(tokens.ColorRole.indent_guide_active, qs[2].fill_role);
+    try testing.expectEqual(@as(i32, 2 * 16), qs[2].rect.y);
+    try testing.expectEqual(@as(u32, 1), qs[0].rect.w);
+    try testing.expectEqual(@as(u32, 16), qs[0].rect.h);
+
+    props.guide_unit = 0;
+    var b2: TestBuffers = .{};
+    const w2 = build(props, b2.scratch());
+    try testing.expectEqual(@as(usize, 0), guideQuads(b2.ops[0..w2.ops], &got).len);
+}
+
+test "IGF2 랩은 첫 조각에만 · 위젯 행 없음 · 가로로 굴리면 화면 밖 선은 건너뛰고 본문 폭에서 멈춘다 (§5.1c)" {
+    // 랩: 긴 줄의 이어짐 조각에는 선이 없다(우리 이어짐 행은 0 열에서 시작 — VS Code `BlockSubsequent`)
+    const long = "  " ++ "x" ** 120;
+    const lines = [_][]const u8{ long, "  y" };
+    var props = testProps(&lines, true);
+    const rows = [_]GuideLine{ .{ .count = 1 }, .{ .count = 1 } };
+    props.indent_guides = .{ .rows = &rows };
+    props.guide_unit = 2;
+    var bufs: TestBuffers = .{};
+    const w = build(props, bufs.scratch());
+    var got: [64]draw.Op.Quad = undefined;
+    const qs = guideQuads(bufs.ops[0..w.ops], &got);
+    try testing.expectEqual(@as(usize, 2), qs.len); // 줄 0 첫 조각 · 줄 1 — 이어짐 조각(행 1·2)은 없다
+    try testing.expectEqual(@as(i32, 0), qs[0].rect.y);
+    try testing.expect(qs[1].rect.y > 2 * 16);
+
+    // 위젯 행: 앵커 줄의 첨자를 들어도 선이 없다
+    const wl = [_][]const u8{ "a", "  b" };
+    var pw = testProps(&wl, false);
+    const widgets = [_]?content.Widget{ null, .{ .text = "골라라" } };
+    pw.line_widgets = &widgets;
+    const wrows = [_]GuideLine{ .{}, .{ .count = 1 } };
+    pw.indent_guides = .{ .rows = &wrows };
+    pw.guide_unit = 2;
+    var b2: TestBuffers = .{};
+    const w2 = build(pw, b2.scratch());
+    const wq = guideQuads(b2.ops[0..w2.ops], &got);
+    try testing.expectEqual(@as(usize, 1), wq.len);
+    try testing.expectEqual(@as(i32, 2 * 16), wq[0].rect.y); // 행 1 = 위젯, 행 2 = `  b`
+
+    // 가로 스크롤: 첫 열 3 이면 열 0·2 는 화면 밖, 열 4·6 이 화면 1·3 에
+    const deep = [_][]const u8{"        z" ++ "q" ** 200};
+    var ph = testProps(&deep, false);
+    ph.content_max_cols = 209;
+    ph.first_col = 3;
+    const drows = [_]GuideLine{.{ .count = 4 }};
+    ph.indent_guides = .{ .rows = &drows };
+    ph.guide_unit = 2;
+    var b3: TestBuffers = .{};
+    const w3 = build(ph, b3.scratch());
+    const hq = guideQuads(b3.ops[0..w3.ops], &got);
+    try testing.expectEqual(@as(usize, 2), hq.len);
+    const layout = geometry.compute(ph.total_cols, ph.total_lines, .{});
+    try testing.expectEqual((@as(i32, layout.content.start) + 1) * 8, hq[0].rect.x);
+    try testing.expectEqual((@as(i32, layout.content.start) + 3) * 8, hq[1].rect.x);
+
+    // 본문 폭에서 멈춘다 — 단계가 화면보다 많아도 폭 안의 것만
+    const many = [_]GuideLine{.{ .count = 500 }};
+    ph.first_col = 0;
+    ph.indent_guides = .{ .rows = &many };
+    var b4: TestBuffers = .{};
+    const w4 = build(ph, b4.scratch());
+    var big: [512]draw.Op.Quad = undefined;
+    try testing.expectEqual(@as(usize, (layout.content.width + 1) / 2), guideQuads(b4.ops[0..w4.ops], &big).len);
+}
+
+test "IGF3 안내선이 서도 막대가 안 잘린다 — op 합계에 든다 (§5.1c · OCH5 와 같은 자리)" {
+    var many: [15][]const u8 = undefined;
+    for (&many) |*l| l.* = "    alpha";
+    var props = testProps(&many, false);
+    props.visible_rows = 11;
+    var b0: TestBuffers = .{};
+    const p0 = build(props, b0.scratch());
+    try testing.expect(p0.scrollbar != null);
+    const last_plain = b0.ops[p0.ops - 1];
+    var rows: [15]GuideLine = undefined;
+    for (&rows) |*r| r.* = .{ .count = 2 };
+    props.indent_guides = .{ .rows = &rows };
+    props.guide_unit = 2;
+    var b1: TestBuffers = .{};
+    const p1 = build(props, b1.scratch());
+    try testing.expectEqual(p0.ops + 11 * 2, p1.ops); // 보이는 11 행 × 두 선
+    try testing.expect(std.meta.eql(last_plain, b1.ops[p1.ops - 1]));
 }

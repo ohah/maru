@@ -101,6 +101,8 @@ pub const smart_select_client = @import("editor_smart_select.zig");
 pub const sticky_client = @import("editor_sticky.zig");
 /// 짝 괄호(visual-mapping §5.1b · document-model §3.9c) — 강조 마크와 점프가 같은 출처 고르기를 쓴다.
 pub const brackets_client = @import("editor_brackets.zig");
+/// 들여쓰기 안내선(visual-mapping §5.1c) — 간격 추정 캐시와 그려질 창.
+pub const guides_client = @import("editor_guides.zig");
 /// 접힘 범위를 낸 층(§4 의 세 소스).
 pub const FoldSource = enum { indent, syntax, lsp };
 pub const workspace_edit_client = @import("editor_workspace_edit.zig");
@@ -911,6 +913,8 @@ pub const Decorations = struct {
     selection_empty: bool = true,
     active_line: ?usize = null,
     bracket_marks: ?[]const []const chrome_editor.frame.Mark = null,
+    indent_guides: chrome_editor.frame.GuideWindow = .{},
+    guide_unit: u16 = 0,
 };
 
 /// 단일 편집기의 장식(§5.1b). 현재 줄은 **설정과 선택**만 보고(포커스와 무관 — VS Code 의 테두리 규칙에 포커스 조건이 없다), 짝 괄호는
@@ -937,7 +941,8 @@ fn paneDecorations(self: *AppSession, term: *Term) Decorations {
         const axis_len = if (term.rt.editor_visible_lines.len > 0) term.rt.editor_visible_lines.len else term.rt.editor_lines.len;
         break :blk sticky_client.visibleOf(if (term.rt.editor_visible_lines.len > 0) term.rt.editor_visible_numbers else &.{}, doc_line, axis_len);
     };
-    return .{ .line_highlight = mode, .selection_empty = empty, .active_line = active, .bracket_marks = brackets_client.marks(self, term) };
+    const gw = guides_client.window(self, term);
+    return .{ .line_highlight = mode, .selection_empty = empty, .active_line = active, .bracket_marks = brackets_client.marks(self, term), .indent_guides = gw.win, .guide_unit = gw.unit };
 }
 
 pub fn buildPaneOps(
@@ -1015,7 +1020,7 @@ pub fn buildPaneOps(
     const inset: i32 = @intCast(chrome_editor.frame.content_inset_px);
     const inner: chrome_draw.Rect = .{ .x = 0, .y = 0, .w = rect.w -| chrome_editor.frame.content_inset_px * 2, .h = rect.h -| chrome_editor.frame.content_inset_px * 2 };
     const w = diff_frame.buildSide(
-        .{ .lines = lines, .first_col = first_col, .numbers = numbers, .total_lines = total_lines, .folds = folds, .content_max_cols = content_max_cols, .row_cache = row_cache, .selection_marks = selection_marks, .occurrence_marks = occurrence_marks, .search_marks = search_marks, .search_current = search_current, .search_marker_lines = search_marker_lines, .search_marker_current = search_marker_current, .line_colors = line_colors, .line_seeks = line_seeks, .line_inlays = line_inlays, .carets = carets, .widgets = widgets, .bands = bands, .minimap = minimap, .diag_marks = if (diag) |d| d.marks else null, .diag_markers = if (diag) |d| d.markers else null, .diag_lines = if (diag) |d| d.lines else &.{}, .sticky = sticky, .line_highlight = deco.line_highlight, .selection_empty = deco.selection_empty, .active_line = deco.active_line, .bracket_marks = deco.bracket_marks },
+        .{ .lines = lines, .first_col = first_col, .numbers = numbers, .total_lines = total_lines, .folds = folds, .content_max_cols = content_max_cols, .row_cache = row_cache, .selection_marks = selection_marks, .occurrence_marks = occurrence_marks, .search_marks = search_marks, .search_current = search_current, .search_marker_lines = search_marker_lines, .search_marker_current = search_marker_current, .line_colors = line_colors, .line_seeks = line_seeks, .line_inlays = line_inlays, .carets = carets, .widgets = widgets, .bands = bands, .minimap = minimap, .diag_marks = if (diag) |d| d.marks else null, .diag_markers = if (diag) |d| d.markers else null, .diag_lines = if (diag) |d| d.lines else &.{}, .sticky = sticky, .line_highlight = deco.line_highlight, .selection_empty = deco.selection_empty, .active_line = deco.active_line, .bracket_marks = deco.bracket_marks, .indent_guides = deco.indent_guides, .guide_unit = deco.guide_unit },
         .{ .first_line = first_line, .first_piece = first_piece, .caret_visible = caret_visible, .caret_shape = caret_shape, .wrap = wrap, .tab_width = tab_width, .cell_w_px = cell_w_px, .cell_h_px = cell_h_px, .font_px = font_px },
         inner,
         // **배경만 뒤로 물린다.** 내용 op이 (0,0)에서 시작해야 셀 격자 양자화(`buildTextDrawList`가
@@ -2218,6 +2223,8 @@ pub fn prepareUntitled(self: *AppSession) OpenFileError!Prepared {
 /// 넘긴 뒤에는 실패 지점이 없으므로 errdefer가 겹칠 여지 자체가 사라진다.
 pub fn finishAttach(self: *AppSession, term: *Term, prepared: Prepared) void {
     term.rt.editor_doc = prepared.opened;
+    // **새 문서다 — 들여쓰기 간격을 다시 추정한다**(§5.1c). 다시 읽은 파일은 들여쓰기가 바뀌었을 수 있다.
+    term.rt.editor_guides.forgetDocument();
     term.rt.editor_lines = prepared.lines;
     term.rt.editor_path = prepared.path;
 
@@ -9492,6 +9499,7 @@ fn dropSelectionState(self: *AppSession, term: *Term) void {
     term.rt.editor_highlight_marks = &.{};
     term.rt.editor_highlight_mark_buf = &.{};
     term.rt.editor_brackets.deinit(self.allocator); // 짝 괄호 쌍·마크(§5.1b)도 같은 단위다
+    term.rt.editor_guides.deinit(self.allocator); // 안내선 추정·창(§5.1c)도 같은 단위다
     term.rt.editor_diagnostics.deinit(self.allocator); // 진단 층(§5.4)도 같은 단위다
     if (term.rt.editor_lsp_root) |r| self.allocator.free(r); // LSP root(§8.2a)
     term.rt.editor_lsp_root = null;
@@ -41481,4 +41489,137 @@ test "BRP7 활성이 아닌 편집기에는 괄호 상자가 없다 — 현재 �
     try testing.expect(pane_ops.activePane(fx.session).activeTerm() != first);
     try testing.expectEqual(@as(usize, 0), (try boxedQuads(fx.session, first, .bracket_match_border, &got)).len);
     try testing.expectEqual(@as(usize, 1), (try boxedQuads(fx.session, first, .line_highlight, &got)).len); // 줄 상자는 포커스와 무관
+}
+
+// ── 들여쓰기 안내선 — 제품 경계(visual-mapping §5.1c) ──────────────────────────────────────
+
+/// 판정자용: 한 프레임을 그리고 **폭 1px** 인 안내선 GPU quad 를 (보통, 활성) 으로 가른다. 좌표는 `editor_hit_geom` 기준 (열, 행).
+const GuideHit = struct { col: i32, row: i32, active: bool };
+fn guideHits(self: *AppSession, term: *Term, out: []GuideHit) ![]GuideHit {
+    self.gpu_quads.clearRetainingCapacity();
+    const leaf = activeLeafRectForTest(self) orelse return error.NoLeaf;
+    var d = appendPaneFrame(self, leaf, term) orelse return error.EditorPaneDidNotDraw;
+    d.dl.deinit(self.allocator);
+    const tk = self.buildChromeTokens();
+    const g = term.rt.editor_hit_geom;
+    var n: usize = 0;
+    for (self.gpu_quads.items) |q| {
+        if (q.w != 1) continue;
+        const rgb: maru.terminal.Rgb = .{ .r = @intCast((q.fill_color0 >> 16) & 0xFF), .g = @intCast((q.fill_color0 >> 8) & 0xFF), .b = @intCast(q.fill_color0 & 0xFF) };
+        const is_active = std.meta.eql(rgb, tk.get(.indent_guide_active));
+        if (!is_active and !std.meta.eql(rgb, tk.get(.indent_guide))) continue;
+        if (n == out.len) break;
+        const x: i32 = @intFromFloat(q.x);
+        const y: i32 = @intFromFloat(q.y);
+        out[n] = .{
+            .col = @divTrunc(x - g.body_x - @as(i32, @intCast(g.content_left_px)), @as(i32, g.cell_w_px)),
+            .row = @divTrunc(y - g.body_y, @as(i32, g.cell_h_px)),
+            .active = is_active,
+        };
+        n += 1;
+    }
+    return out[0..n];
+}
+
+fn countHits(hits: []const GuideHit, row: i32) usize {
+    var n: usize = 0;
+    for (hits) |h| {
+        if (h.row == row) n += 1;
+    }
+    return n;
+}
+
+test "IGP1 2 칸 파일 — 간격을 2 로 추정해 선을 긋고, 빈 줄은 블록을 잇고, caret 블록이 활성이며, 설정 둘이 먹는다 (제품 경계, §5.1c)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    // 탭 폭 설정(기본 4)과 다른 들여쓰기 — 설정 폭만 쓰면 선이 중첩과 어긋난다(§5.1c 「간격」)
+    const src = "function f() {\n  if (a) {\n    b();\n\n    c();\n  }\n}\n";
+    const term = try openBracketFixture(&fx, allocator, "g.ts", src);
+    const line2 = term.rt.editor_doc.?.file.lines.line(2).?;
+    term.rt.editor_selection = editor_selection.Selection.at(line2.start + 5); // `b();` 안
+    var buf: [64]GuideHit = undefined;
+    const hits = try guideHits(fx.session, term, &buf);
+    // 행마다 단계 수: 0 · 1 · 2 · 2(빈 줄 — 위아래 4 열) · 2 · 1 · 0
+    try testing.expectEqual(@as(usize, 0), countHits(hits, 0));
+    try testing.expectEqual(@as(usize, 1), countHits(hits, 1));
+    try testing.expectEqual(@as(usize, 2), countHits(hits, 2));
+    try testing.expectEqual(@as(usize, 2), countHits(hits, 3));
+    try testing.expectEqual(@as(usize, 2), countHits(hits, 4));
+    try testing.expectEqual(@as(usize, 1), countHits(hits, 5));
+    try testing.expectEqual(@as(usize, 0), countHits(hits, 6));
+    // 열은 0·2(간격 2) — 4 가 아니다; 활성은 단계 2(열 2)의 [2, 4] 행
+    var active: usize = 0;
+    for (hits) |h| {
+        try testing.expect(h.col == 0 or h.col == 2);
+        if (h.active) {
+            active += 1;
+            try testing.expectEqual(@as(i32, 2), h.col);
+            try testing.expect(h.row >= 2 and h.row <= 4);
+        }
+    }
+    try testing.expectEqual(@as(usize, 3), active);
+    // 활성 끄기 — 선은 그대로, 활성 색만 없다
+    fx.session.loaded_config.config.editor.guides_highlight_active_indentation = false;
+    for (try guideHits(fx.session, term, &buf)) |h| try testing.expect(!h.active);
+    try testing.expectEqual(@as(usize, 8), (try guideHits(fx.session, term, &buf)).len);
+    // 안내선 끄기
+    fx.session.loaded_config.config.editor.guides_indentation = false;
+    try testing.expectEqual(@as(usize, 0), (try guideHits(fx.session, term, &buf)).len);
+}
+
+test "IGP2 추정은 문서가 들어올 때 한 번 — 편집·프레임으로 다시 안 한다; 탭 파일은 탭 폭 설정을 따라간다 (제품 경계, §5.1c)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try openBracketFixture(&fx, allocator, "t.txt", "a\n\tb\n\t\tc\n");
+    var buf: [64]GuideHit = undefined;
+    _ = try guideHits(fx.session, term, &buf);
+    _ = try guideHits(fx.session, term, &buf);
+    try testing.expectEqual(@as(u64, 1), term.rt.editor_guides.guessed);
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, term, "z"));
+    _ = try guideHits(fx.session, term, &buf);
+    try testing.expectEqual(@as(u64, 1), term.rt.editor_guides.guessed); // 편집은 추정을 다시 부르지 않는다
+    // 탭 파일 — 둘째 선의 열이 탭 폭(4 → 2)을 따라간다. 추정은 「탭이다」만 들었다
+    const before = try guideHits(fx.session, term, &buf);
+    var max_col: i32 = 0;
+    for (before) |h| max_col = @max(max_col, h.col);
+    try testing.expectEqual(@as(i32, 4), max_col);
+    term.rt.editor_tab_width = 2;
+    const after = try guideHits(fx.session, term, &buf);
+    max_col = 0;
+    for (after) |h| max_col = @max(max_col, h.col);
+    try testing.expectEqual(@as(i32, 2), max_col);
+    try testing.expectEqual(@as(u64, 1), term.rt.editor_guides.guessed);
+}
+
+test "IGP3 접히면 보이는 줄 축으로 옮긴다 — 숨은 줄 대신 그 아래 줄의 단계 (제품 경계, §5.1c)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    // 숨은 `    c`(단계 1) 자리에 `        e`(단계 2)가 올라온다 — 옮기지 않으면 셋째 행이 1 개다
+    const term = try openBracketFixture(&fx, allocator, "f.txt", "a\n    b\n    c\nd\n        e\n");
+    try ensureFoldRanges(fx.session, term);
+    try testing.expect(toggleFoldHead(fx.session, term, 0));
+    var buf: [64]GuideHit = undefined;
+    const hits = try guideHits(fx.session, term, &buf);
+    try testing.expectEqual(@as(usize, 0), countHits(hits, 1)); // `d`
+    try testing.expectEqual(@as(usize, 2), countHits(hits, 2)); // `        e`
+}
+
+test "IGP4 Python 은 offSide — 블록 뒤 빈 줄이 아래 블록 쪽이다 (제품 경계, §5.1c)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const src = "def f():\n    a = 1\n\nb = 2\n";
+    const py = try openBracketFixture(&fx, allocator, "o.py", src);
+    var buf: [64]GuideHit = undefined;
+    try testing.expectEqual(@as(usize, 0), countHits(try guideHits(fx.session, py, &buf), 2)); // offSide — 아래(0 열)와 같이
+    const txt = try openBracketFixture(&fx, allocator, "o.txt", src);
+    try testing.expectEqual(@as(usize, 1), countHits(try guideHits(fx.session, txt, &buf), 2)); // 아니면 끝나는 블록 안
 }

@@ -58,6 +58,8 @@ pub fn tokensFor(appearance: config.appearance.ResolvedAppearance) chrome.Tokens
         .occurrence = session.syntax_theme.occurrenceFromTheme(t), // 같은 낱말 강조(§5.1a)
         .line_highlight = session.syntax_theme.lineHighlightFromTheme(t), // 현재 줄 테두리(§5.1b)
         .bracket_match_border = session.syntax_theme.bracketMatchBorderFromTheme(t), // 짝 괄호 테두리(§5.1b)
+        .indent_guide = session.syntax_theme.indentGuideFromTheme(t), // 들여쓰기 안내선(§5.1c)
+        .indent_guide_active = session.syntax_theme.indentGuideActiveFromTheme(t),
         .diagnostic_error = diag_colors.err,
         .diagnostic_warning = diag_colors.warning,
         .diagnostic_info = diag_colors.info,

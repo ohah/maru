@@ -60,6 +60,9 @@ pub const Side = struct {
     selection_empty: bool = true,
     active_line: ?usize = null,
     bracket_marks: ?[]const []const frame.Mark = null,
+    /// 들여쓰기 안내선(§5.1c) — 단일 편집기만.
+    indent_guides: frame.GuideWindow = .{},
+    guide_unit: u16 = 0,
     /// 진단(§5.4) — 줄마다의 밑줄 조각·gutter severity·마커 줄. 단일 편집기만 채운다(비교 뷰의 열은 문서가 아니다).
     diag_marks: ?[]const []const frame.diagnostic.Mark = null,
     diag_markers: ?[]const ?frame.diagnostic.Level = null,
@@ -320,6 +323,8 @@ pub fn buildSide(
         .selection_empty = side.selection_empty,
         .active_line = side.active_line,
         .bracket_marks = side.bracket_marks,
+        .indent_guides = side.indent_guides,
+        .guide_unit = side.guide_unit,
         .diag_marks = side.diag_marks,
         .diag_markers = side.diag_markers,
         .diag_lines = side.diag_lines,

@@ -26683,6 +26683,85 @@ test "훅 원격 프레임: pane 슬롯이 둘이면 사이드바에 pane 행이
     try std.testing.expect(std.mem.indexOf(u8, status_a, maru.i18n.t(.sb_agent_idle)) == null);
 }
 
+// [RA7 가지치기] **원격이 「지금 있는 pane 은 이것뿐」이라 말하면 나머지는 사라진다.** 그전까지 테이블에는
+// «사라졌다» 를 받는 경로가 없어서, tmux 서버가 재시작해 pane 번호가 `%0` 으로 리셋되면 옛 세대의 이름이
+// **앱이 사는 동안 영원히** 남았다(2026-09-24 실측: 앱 9/23 기동, tmux 9/24 재시작, 죽은 `%20` 이 그대로).
+//
+// 이 판정자가 재는 것은 **행이 아니라 그 너머**다. 죽은 슬롯은 `hookSlotsAggregate` 를 거쳐 배지·중재·스캔
+// 건너뛰기에 섞이므로, 「행만 감추는」 수정으로는 `running` 으로 굳은 잔재가 배지를 영영 붙잡는다.
+// 그래서 ⑶ 이 **집계가 따라 풀리는지**를 본다 — 행 수만 보면 가짜 수정이 통과한다.
+test "훅 원격 프레임: 살아 있는 pane 목록이 오면 없는 슬롯이 사라지고 배지도 따라 풀린다 (RA7 가지치기)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+    test_config_text = agent_hooks_on_config;
+    defer test_config_text = "";
+
+    var session: AppSession = .{ .allocator = a, .io = std.testing.io };
+    try session.init(io, a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_focused = false;
+    _ = try session.resize(1400, 900, 1000);
+
+    const term = pane_ops.activePane(&session).activeTerm();
+    var ch = maru.session.remote_agent_stream.Channel.init(0);
+    _ = ch.feed("{\"hello\":\"maru-agent-events\",\"v\":1}", 0);
+    term.agent_remote_channel = ch;
+    const nonce = "4331_7";
+    @memcpy(term.agent_remote_nonce[0..nonce.len], nonce);
+    term.agent_remote_nonce_len = nonce.len;
+    term.rt.observation.ssh_remote_dest_present = true;
+
+    const paneRows = struct {
+        fn f(rows: []const chrome.components.sidebar.Row) usize {
+            var n: usize = 0;
+            for (rows) |r| if (r == .agent_pane and r.agent_pane.name_len > 0) {
+                n += 1;
+            };
+            return n;
+        }
+    }.f;
+
+    // `%7` 은 살아서 턴을 끝냈고, `%20` 은 **턴 도중에 사라진 옛 세대**라 `running` 으로 굳어 있다.
+    agent_ops.consumeRemoteAgentLines(&session, term, &.{
+        "{\"nonce\":\"4331_7\",\"pane\":\"%7\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"UserPromptSubmit\\\",\\\"session_id\\\":\\\"S-7\\\",\\\"prompt\\\":\\\"a\\\"}\"}",
+        "{\"nonce\":\"4331_7\",\"pane\":\"%7\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"Stop\\\",\\\"session_id\\\":\\\"S-7\\\",\\\"last_assistant_message\\\":\\\"끝\\\"}\"}",
+        "{\"nonce\":\"4331_7\",\"pane\":\"%20\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"UserPromptSubmit\\\",\\\"session_id\\\":\\\"S-20\\\",\\\"prompt\\\":\\\"b\\\"}\"}",
+    }, 100);
+
+    // ⑴ 잔재 하나가 **없을 구조를 만든다** — pane 행은 슬롯이 둘 이상일 때만 서므로(`countFor >= 2`),
+    //    `%20` 이 있는 동안에는 «pane 하위 목록» 이 통째로 선다.
+    try std.testing.expectEqual(@as(usize, 2), session.remote_agent_panes.countFor(term.surfaceId()));
+    sidebar_ops.reprojectSidebarIfRowLinesStale(&session);
+    try std.testing.expectEqual(@as(usize, 2), paneRows(session.sidebar_rows.items));
+    // ⑵ 그리고 죽은 슬롯이 배지를 붙잡는다 — 살아 있는 `%7` 은 끝났는데도 Term 은 running 이다.
+    try std.testing.expectEqual(maru.session.agent_observer.State.running, agent_ops.hookSlotsAggregate(&session, term).state);
+
+    // 원격이 말한다: 지금 있는 것은 `%0 %7 %8` 뿐이다.
+    agent_ops.consumeRemoteAgentLines(&session, term, &.{"{\"panes\":\"%0 %7 %8\"}"}, 200);
+
+    try std.testing.expectEqual(@as(usize, 1), session.remote_agent_panes.countFor(term.surfaceId()));
+    try std.testing.expect(session.remote_agent_panes.find(term.surfaceId(), "%7") != null);
+    try std.testing.expect(session.remote_agent_panes.find(term.surfaceId(), "%20") == null);
+    // ⑶ **집계가 따라 풀린다.** 행만 감추는 수정은 여기서 걸린다 — 죽은 `running` 이 남아 배지가 안 풀린다.
+    try std.testing.expectEqual(maru.session.agent_observer.State.idle, agent_ops.hookSlotsAggregate(&session, term).state);
+    // ⑷ pane 하위 목록이 통째로 사라진다 — 슬롯이 하나면 에이전트 행이 곧 그 pane 이다.
+    sidebar_ops.reprojectSidebarIfRowLinesStale(&session);
+    try std.testing.expectEqual(@as(usize, 0), paneRows(session.sidebar_rows.items));
+    // ⑸ **밀림으로 세지 않는다** — «+N pane 밀림» 고지는 「자리가 모자랐다」만 말해야 한다.
+    try std.testing.expectEqual(@as(usize, 0), session.remote_agent_panes.evictedFor(term.surfaceId()));
+
+    // ⑹ **빈 목록은 아무것도 안 지운다.** 조회 실패가 곧 삭제가 되면 살아 있는 행이 전멸한다.
+    agent_ops.consumeRemoteAgentLines(&session, term, &.{"{\"panes\":\"\"}"}, 300);
+    try std.testing.expectEqual(@as(usize, 1), session.remote_agent_panes.countFor(term.surfaceId()));
+}
+
 // [RA7 조각 5] **밀린 pane 은 조용히 사라지지 않는다.** 슬롯 상한(16)에 밀려 행이 없어진 pane 이 있으면 그 Term 의 pane 행 뒤에
 // «+N pane 밀림» 고지 행이 선다 — «둘 이상» 규칙과 무관하게(이 Term 의 pane 이 하나였어도). 고지 행은 이름이 없고 ✕ 도 없어
 // ✕ 자리 클릭이 Term 을 닫지 않는다. 밀린 pane 이 돌아오면 고지가 줄고, 0 이면 행이 사라진다 — 낡음 판정이 스스로 건다.

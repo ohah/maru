@@ -2360,6 +2360,24 @@ pub fn consumeRemoteAgentLines(self: *AppSession, term: *Term, lines: []const []
             // 커서는 **host 소유**다(채널이 host 당 하나라 모든 Term 이 같은 줄을 본다) — 기억은
             // `recordRemoteCursors` 가 한 곳에서 한다.
             .heartbeat, .ignored, .cursor => {},
+            // **원격이 「지금 있는 pane 은 이것뿐」이라 말했다**(RA7). 목록에 없는 슬롯을 버린다.
+            //
+            // 커서와 달리 **Term 소유다** — 지울 대상이 `(surface_id, pane)` 키라 surface 마다 불러야
+            // 한다. 같은 줄이 이 host 의 Term 마다 오지만 각자 자기 surface 만 건드린다.
+            //
+            // 프레임이 **올 때만** 움직인다. 구버전 원격·tmux 없음·조회 실패는 전부 «프레임 없음» 이고
+            // 그때는 예전과 같이 아무것도 안 지운다 — 침묵은 「모른다」이지 「없다」가 아니다.
+            .panes => |p| {
+                const dropped = self.remote_agent_panes.retainOnly(term.surfaceId(), p.list);
+                if (dropped > 0) {
+                    // **왜 행이 사라졌는지 사용자가 말할 수 있어야 한다.** 조용히 지우면 「어제는 있던
+                    // 행이 없다」를 버그 보고로 만들 근거가 없다.
+                    std.log.info(
+                        "remote pane prune: surface={d} dropped={d} live={s}",
+                        .{ term.surfaceId(), dropped, p.list },
+                    );
+                }
+            },
             .event => |e| {
                 // **본 횟수를 센다.** 비교가 안 일어나는 것과 안 맞는 것은 원인이 아주 다른데,
                 // 지금까지 로그로는 구분할 수 없었다(2026-09-13).

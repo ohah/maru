@@ -1133,7 +1133,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
     for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr2e_a_optimize| {
         const cr2e_a_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr2e_reducer.zig"),
+                .root_source_file = b.path("tests/session_host_reconnect_reducer.zig"),
                 .target = target,
                 .optimize = cr2e_a_optimize,
             }),
@@ -1172,7 +1172,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
     for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr2e_b_optimize| {
         const cr2e_b_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr2e_mutation.zig"),
+                .root_source_file = b.path("tests/session_host_reconnect_mutation_seal.zig"),
                 .target = target,
                 .optimize = cr2e_b_optimize,
             }),
@@ -1210,7 +1210,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
     for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |cr2e_c_optimize| {
         const cr2e_c_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr2e_generation_slot.zig"),
+                .root_source_file = b.path("tests/session_host_reconnect_generation_slot.zig"),
                 .target = target,
                 .optimize = cr2e_c_optimize,
             }),

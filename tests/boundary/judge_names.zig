@@ -47,9 +47,6 @@ const slice_named = [_][]const u8{
     "tests/session_host_3d_product_e2e.zig",
     "tests/session_host_cr0b_boundary.zig",
     "tests/session_host_cr2_boundary.zig",
-    "tests/session_host_cr2e_generation_slot.zig",
-    "tests/session_host_cr2e_mutation.zig",
-    "tests/session_host_cr2e_reducer.zig",
     "tests/session_host_cr3c_c1_boundary.zig",
     "tests/session_host_cr3c_c2_boundary.zig",
     "tests/session_host_cr4a_boundary.zig",
@@ -77,7 +74,7 @@ const slice_named = [_][]const u8{
 };
 
 /// 목록 길이. 줄을 지우면 이 수도 함께 줄여야 한다.
-const expected_entries: usize = 47;
+const expected_entries: usize = 44;
 
 /// 파일명 한 토막이 슬라이스 ID 인가 — **숫자와 글자가 섞였고 주제어가 아니면** 그렇다.
 /// `v1`·`v2` 는 픽스처의 버전 표시라 뺀다.

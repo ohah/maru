@@ -396,6 +396,8 @@ pub fn isOsrSurface(surface_id: u64) bool {
 
 /// 창 tick 마다(W3b): sidecar 파이프를 비우고, 이 창 OSR 탭의 새 주소·탐색 상태를 주소창에 넣고, 안내를 띄운다.
 pub fn tickWebOsr(self: *AppSession) void {
+    // W4d: 설정은 chromium 을 청했는데 설치가 없다 — 한 번 안내(엔진은 WebKit).
+    if (web_osr.takeInstallNotice()) self.showNoticeKey(.web_osr_not_installed);
     if (!web_osr.enabled()) return;
     web_osr.pump(self.allocator, @intCast(app_session_mod.monotonicMs()));
     for (self.tabs.items) |tab| {
@@ -1646,4 +1648,9 @@ pub fn takeWebNavAction(self: *AppSession) ?WebNavAction {
         return .{ .surface_id = sid, .code = self.web_nav_action_code };
     }
     return null;
+}
+
+/// W4d: 설정의 브라우저 엔진이 바뀌었으면(파일 reload·설정 화면) 「재시작하면 적용」을 한 번 알린다.
+pub fn noteBrowserEngineConfig(self: *AppSession) void {
+    if (web_osr.engineChangeNeedsNotice(self.loaded_config.config.browser.engine == .chromium)) self.showNoticeKey(.set_browser_engine_restart);
 }

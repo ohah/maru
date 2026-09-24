@@ -1213,6 +1213,21 @@ test "parse: file panel external link target defaults in-app and accepts system"
     try std.testing.expectEqual(@as(usize, 1), invalid.diagnostics.len);
 }
 
+test "parse: browser.engine defaults to webkit and accepts chromium" {
+    var defaults = try parse(std.testing.allocator, "font.size = 14");
+    defer defaults.deinit();
+    try std.testing.expectEqual(theme.BrowserEngine.webkit, defaults.config.browser.engine);
+
+    var chromium = try parse(std.testing.allocator, "browser.engine = chromium");
+    defer chromium.deinit();
+    try std.testing.expectEqual(theme.BrowserEngine.chromium, chromium.config.browser.engine);
+
+    var invalid = try parse(std.testing.allocator, "browser.engine = blink");
+    defer invalid.deinit();
+    try std.testing.expectEqual(theme.BrowserEngine.webkit, invalid.config.browser.engine);
+    try std.testing.expectEqual(@as(usize, 1), invalid.diagnostics.len);
+}
+
 // input.link-open-target: 터미널 웹 링크를 보이는 브라우저 패널에서 열지(auto, 기본)·없으면 새 탭까지 열지
 // (in-app)·항상 시스템 브라우저로 보낼지(system). 정책 소비는 app_session.openTerminalWebLink.
 // 오타는 무시하고 기본값을 유지한다(다른 dropdown 키와 같은 규율).

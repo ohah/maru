@@ -17,7 +17,7 @@
 |---|---|---|
 | 의존성 예외 | CEF 는 [프로젝트 규칙](../project-rules.md) 「의존성」의 **예외 ③** 이다(사용자 결정 2026-09-24) — 앱에 링크하지 않는 sidecar 전용, 빌드 opt-in, 헤더 비반입 | 런타임 의존성 기본 0 규율 |
 | CEF 버전 | **154.0.23 / Chromium 154** 에 고정한다. 올릴 때는 아래 회귀 시험을 다시 돈다 | 최신 안정판(2026-09-23 인덱스). `<select>` 가 146 과 154 에서 달랐다 — 버전마다 동작이 바뀐다 |
-| 배포·배치 | **Homebrew formula**(사용자 결정 2026-09-23), `.app` 번들 없이 `libexec/` 에 sidecar·helper·프레임워크를 **실제 파일로** 함께 둔다 | 번들 없는 배치로 154 의 모든 실측이 섰다. 샌드박스는 **별도 helper + 프레임워크를 실행 파일 아래에 둔** 배치에서만 동작했고(§13.1 「남은 미해결」 1), 메모리·N 개·링 실측은 샌드박스 없이 잰 값이다 — W1 에서 샌드박스를 켠 채 다시 잰다 |
+| 배포·배치 | **별도 Homebrew formula `maru-web`**(사용자 결정 2026-09-24 — maru formula 와 따로, OSR 을 쓰는 사용자만 설치한다. OSR 은 선택형이라(D2) 안 쓰는 사용자가 CEF 약 323MB 를 받을 이유가 없다), `.app` 번들 없이 `libexec/` 에 sidecar·helper·프레임워크를 **실제 파일로** 함께 둔다 | 번들 없는 배치로 154 의 모든 실측이 섰다. 샌드박스는 **별도 helper + 프레임워크를 실행 파일 아래에 둔** 배치에서만 동작했고(§13.1 「남은 미해결」 1), PoC 의 메모리·N 개·링 실측은 샌드박스 없이 잰 값이다 — N 개는 W1c 가 샌드박스를 켠 채 다시 쟀고(렌더러 포함 helper 모두 샌드박스), 메모리·링은 W2 이후 다시 잰다 |
 | 샌드박스 | helper(렌더러·GPU·유틸리티)는 **반드시 샌드박스 안**. PoC 의 `no_sandbox` 는 쓰지 않는다 | `.browser` 는 신뢰할 수 없는 웹을 띄운다. PoC 실측은 샌드박스 없이 했다 |
 | 제품 모양 | OSR 은 **`.web` Term 의 백엔드**로 둔다. 터미널 surface 에 kitty 이미지를 붙이는 실험 모양은 쓰지 않는다 | 「웹이 포커스인가」 판정 하나에 백엔드(WKWebView / CEF)만 갈리게 해야 분기가 둘로 늘지 않는다(§13.1 「분업」) |
 | 분업 | `.markdown`(신뢰 — 파일 패널·CM6)은 **WKWebView 유지**. OSR 후보는 `.browser` 뿐 | §13.1 「분업」 — WKWebView 는 OSR 을 주지 않아 공존이 구조상 강제다 |
@@ -164,9 +164,22 @@ maru chrome 모달로 받는다(모달 게이트와 같은 자리).
 - 비용: 브라우저당 렌더러 +1, phys_footprint 약 +66MB(3 개까지 선형 실측).
 - **프로필(D6·D7)**: `root_cache_path`·`cache_path` 를 **maru 전용 경로**(번들 ID 별, 0700, 백업 제외)로 주고 `--use-mock-keychain` 을 넘긴다 — 비우면 CEF 기본 경로를
   다른 CEF 앱과 나눠 singleton(exit 24)에 걸린다. 모든 브라우저가 그 프로필 하나를 공유한다(탭 간 로그인). 비워도 154 는
-  디스크에 쓴다(실측 — 「비우면 메모리」 전제가 틀림). 판정자: 재시작 뒤 쿠키·`localStorage` 유지, Keychain 접근 0.
-- maru 앱 인스턴스가 둘(개발 빌드와 설치본 등)이면 번들 ID 가 달라 프로필도 갈린다 — 같은 번들 ID 로 둘을 띄우면 뒤의
-  sidecar 가 singleton 에 걸리므로 그때는 웹 pane 을 「다른 maru 가 쓰는 중」으로 보인다.
+  디스크에 쓴다(실측 — 「비우면 메모리」 전제가 틀림). 판정자: 재시작 뒤 쿠키 유지(W1c `login-persists`).
+- **백업 제외는 `setxattr` 로 직접 단다**(W1c 실측) — `NSURLIsExcludedFromBackupKey` 는 Spotlight 큐에 비동기 작업을 남기고,
+  그 작업이 CEF 가 올라오는 도중에 돌아 host 가 CHECK 로 죽었다(크래시 보고의 스레드 `CSBackupSetItemExcluded() Spotlight
+  Queue`, 실행 뒤 18~26ms, 판정 몇 번에 한 번). 같은 값(`com.apple.backupd` 의 binary plist — `tmutil addexclusion` 과 바이트
+  단위로 같다)을 동기적으로 단다.
+- **같은 프로필로 다시 실행되면 Chrome 창이 열린다(W1c 실측 — 보안·UX 구멍)**: CEF process singleton 은 두 번째 실행을
+  먼저 떠 있던 sidecar 로 넘기고, 기본 동작은 **새 Chrome 창**이다(헤더 문서 — 실제로 「New Tab - Chromium」 창과 렌더러 4 개가
+  떴고 그 창 때문에 종료가 멈췄다). `on_already_running_app_relaunch` 가 「처리했다」고 답해 막고, 두 번째 쪽은
+  `cef_get_exit_code() == 24` 로 `profile_in_use` 를 알린다(exit 16). maru 앱 인스턴스가 둘(개발 빌드와 설치본 등)이면 번들 ID
+  가 달라 프로필도 갈린다 — 같은 번들 ID 로 둘을 띄우면 뒤의 sidecar 가 `profile_in_use` 로 끝나므로 웹 pane 을 「다른 maru 가
+  쓰는 중」으로 보인다.
+- **팝업은 취소한다** — `window.open` 의 기본 동작도 네이티브 창이다. 탭으로 여는 것은 W3·W6.
+- **CEF 객체 참조**: getter 가 돌려준 객체와 **콜백 인자**는 받은 쪽이 푼다(W1c 실측 — 그리기 콜백 약 1,920 번마다 풀어도
+  죽지 않았다, 안 풀면 조금씩 샌다). 목록이 쥔 browser 는 `on_before_close` 에서 푼다.
+- **종료 순서**: 열린 브라우저를 모두 닫은 뒤(`on_before_close`) 루프를 끝낸다 — 공식 예제의 순서다. 다만 154 Release 에서는
+  닫지 않고 루프를 끝내도 `cef_shutdown` 이 닫고 알림까지 와서 **관찰 차이가 없었다**(변이 실측) — 판정자가 이 순서를 잡지 못한다.
 
 ### C8. 보안
 
@@ -200,14 +213,25 @@ control plane `browser.*` 게이트는 엔진 중립이라 바뀌지 않는다(�
 그대로 선 것(같은 날 재실측): 번들 없는 배치의 샌드박스(brew `opt/` 링크 경로 포함), mock keychain 재시작 유지,
 브라우저 N 개, 숨긴 뒤 명령 수신, 같은 프로필 두 번째 실행의 singleton(exit 24).
 
+**W1c 착수 전 공격(2026-09-24)**:
+
+| # | 계획 | 공격 결과 | 조치 |
+|---|---|---|---|
+| 1 | 두 번째 실행은 `profile_in_use` | **두 번째 실행이 첫 sidecar 에 Chrome 창을 연다**(실측 — 「New Tab - Chromium」, 렌더러 4 개, 종료 멈춤). `cef_initialize` 는 0 을 돌려주고 끝난다 | `on_already_running_app_relaunch` 로 막고, `cef_get_exit_code() == 24` 를 `profile_in_use` 로 |
+| 2 | — | `window.open` 기본 동작도 네이티브 창 | `on_before_popup` 취소. 판정은 host 창 수(CGWindowList)와 팝업 페이지 요청 수 |
+| 3 | — | CEF 에 `TS_INTEGRITY_FAILURE` 종료 사유가 있는데 codec 에 없다 | `RendererGoneReason.integrity_failure` 추가 |
+| 4 | 「입력이 대상에만」 | 입력 메시지는 W4 | 「명령·알림이 대상 브라우저에만」 |
+| 5 | 「따로 그려지고」 | 픽셀 경로는 W2 | 브라우저별 로드·제목 |
+| 6 | 콜백 인자 참조 | SDK 헤더에 규칙이 없다 | 실측으로 정함(C7 「CEF 객체 참조」) |
+
 | 단계 | 내용 | 완료 판정 |
 |---|---|---|
 | **W1a** 제어 채널 codec | C2 의 wire codec(순수 Zig, CEF 없음) | 황금 바이트·왕복·방향 거절·닫힌 필드·상한 ±1·손으로 지은 공격 frame·한 바이트 변조 전수 — **구현됨**. 처음 적은 「변이 8 개가 모두 걸림」은 내가 고른 8 개에 대해서만 맞았다 — 적대 검증에서 한 줄 변이 20 개가 살아남았고, 그중 `feed` 가 조각을 통째로만 받아 **정상 스트림에서도 채널을 닫는** 결함이 나왔다(반쯤 온 큰 frame 뒤 16KB 조각). `feed` 는 받은 만큼만 받고 수를 돌려주게, 오류는 잠기게, 저장소는 가장 큰 frame 하나 크기로, 제목·URL 의 제어 문자는 거절(sidecar 는 `replaceControl`)하게 고치고 경계·스트리밍 시험을 더했다 — 대표 변이 11 개 중 10 개가 걸리고 남은 하나는 동작이 같은 변이다 |
 | **W1b** sidecar 뼈대 | SDK 받기 스크립트(bz2 — `zig fetch` 불가, 실측), opt-in 빌드 스텝, `maru-web-host`·`maru-web-helper`(C1), 제어 채널 배선(C2 — 읽기 스레드·stdout 보호·EOF 종료) | helper 전부 `sandbox_check` 1, maru(부모)가 죽으면 sidecar·helper 가 모두 사라짐, stdout 오염 없음 — **구현됨**: `mise run web-sidecar-judge` 5 판정 통과(3 회 연속). helper 는 GPU·네트워크·저장소 셋이고 1 초 시점에 모두 샌드박스 안(막 fork 된 순간은 exec 전이라 판정자가 안정될 때까지 본다). 초기화~종료 동안 Chromium 이 stdout·stderr 에 0 바이트(WARNING 수준). 판정자를 변이 9 개로 공격 — helper 샌드박스 생략·`no_sandbox=1`·stdout 보호 제거·알림 채널 잡바이트·EOF 무시·ack nonce 오류·shutdown 무시가 모두 FAIL 로 걸린다(처음엔 shutdown 무시에서 판정자가 멈췄다 — 모든 읽기에 기한을 걸어 고쳤다) **적대 검증(2026-09-24)으로 고친 것**: 명령 decoder 가 반쯤 온 큰 명령 뒤에 조각이 오면 정상 명령에도 채널을 닫음(W1a 의 `feed` — 읽은 바이트를 담아 두고 frame 을 비운 뒤 넣는다), shutdown 뒤 명령 처리(재현 5/5 → 0), **helper 의 「샌드박스 못 켜면 종료」가 절반만 맞음** — `cef_sandbox_initialize` 는 요청받지 않은 helper 에도 성공을 돌려줘 macOS 알림 유틸리티(`mac_notifications.mojom.MacNotificationProvider`)가 **샌드박스 밖에서 돌고 있었다**. 이제 초기화 뒤 `sandbox_check` 가 1 이 아니면 끝낸다(그 유틸리티는 뜨자마자 끝난다 — 웹 알림은 W5 에서 maru 가 권한 처리기로 다룬다), 부모 종료를 kqueue 로도 본다(maru 가 fork 한 셸이 명령 pipe 쓰기 끝을 쥐면 EOF 가 안 온다 — 판정자에 손자가 쓰기 끝을 쥔 경우를 넣음), 시작 때 상속 fd 를 닫고 0~2 가 닫혔거나 stdout==stderr 인 시작을 견딘다, stdout 표지(판정자의 「frame 만」 검사가 빈 검사였다), 종료 중 task 금지, SDK 받기의 동시 실행 잠금과 sha256 표지 |
-| **W1c** 브라우저 | 생성·파괴·이동·크기·숨김, 브라우저 N 개, 프로필(C7·D7) | 숨긴 뒤에도 명령 수신, 브라우저 N 개가 따로 그려지고 입력이 대상에만, 재시작 뒤 로그인 유지, 같은 프로필 두 번째 실행은 `profile_in_use` |
+| **W1c** 브라우저 | 생성·파괴·이동·크기·숨김, 브라우저 N 개, 프로필(C7·D7), 재실행·팝업 차단 | **구현됨** — `mise run web-sidecar-judge` 17 판정(W1b 넷 + W1c 열둘 + 크래시 없음) 8 회 연속 통과: 브라우저 셋 생성·자기 제목, 이동이 대상 브라우저 알림으로만(잘못 간 제목 0), 숨긴 브라우저도 명령 수신, 크기 변경이 innerWidth 까지(12~14ms), 파괴→`browser_closed`→이후 `unknown_browser`, 중복 id 거절, 렌더러 포함 helper 6 개 모두 샌드박스, `window.open` 뒤 창 0·팝업 요청 0, 같은 프로필 두 번째 → `profile_in_use`·exit 16·첫 host 창 0, 프로필 0700·`tmutil` 백업 제외, 재시작 뒤 쿠키 유지, shutdown 이 열린 셋 모두 닫고 exit 0, 크래시 보고 0. 판정을 조정했다: 「입력이 대상에만」은 입력 메시지가 W4 라 「명령·알림이 대상에만」으로, 「따로 그려지고」의 픽셀은 W2 라 브라우저별 로드·제목으로 본다. 판정자를 변이로 공격 — 재실행 가로채기 제거·mock keychain 제거·백업 제외 생략·이동 오배달·파괴 생략·`profile_in_use` 미구분·중복 검사 제거·EOF 에서 abort 가 FAIL. 못 잡는 것: 팝업 처리기(제스처 없는 `window.open` 은 Chromium 팝업 차단기가 먼저 막는다 → W4), `was_resized` 생략(CEF 가 다른 계기로 크기를 다시 묻는다), 종료 순서(C7) |
 | **W2** 픽셀 파이프라인 | 소유 링·세대(C3), port 전달·검증, 크기 변경 | 찢어짐 0, 새 프레임 수신률, 세대 전환과 옛 프레임 유지, 제3자 거부 — 헤드리스 판정자(opt-in CI 잡, §4) |
 | **W3** maru 통합 | `.web` Term 의 OSR 백엔드(C4), 백엔드 선택 config(기본 WKWebView — D2), 보이는 Term 만, 창별 rect, 새 프레임 다시 그리기. WKWebView `browserDataStore` 영속화(D6 — 엔진 중립이라 OSR 과 독립으로 먼저 낼 수 있다) | pane 100% 채움, 보이는 빈도(애니메이션 페이지에서 CEF 빈도에 근접), 정적 페이지에서 추가 부담 0 control-plane `browser_storage` 권한이 영속 쿠키에 닿는 범위 재검토(D6 — control-plane-browser-review D4) |
-| **W4** 입력 | C5 여섯 축, IME, 편집 명령, 커서 | 앱 안 시험기(25 항목 — §13.1 「pane 안 실측」)를 opt-in smoke 로 저장소에. IME 는 진짜 키 이벤트로 |
+| **W4** 입력 | C5 여섯 축, IME, 편집 명령, 커서 | 앱 안 시험기(25 항목 — §13.1 「pane 안 실측」)를 opt-in smoke 로 저장소에. IME 는 진짜 키 이벤트로 사용자 제스처가 생기면 팝업 처리기 판정(창 0·팝업 요청 0 — W1c 에서 차단기에 막혀 못 잰 것) |
 | **W5** 대화상자·파일·권한 | C6 전부 | `alert`·`confirm`·`prompt`·파일 선택(내용 읽기까지)·권한 거부/허용. 카메라·마이크 권한 귀속을 장치 있는 기계에서 확인 |
 | **W6** 팝업·툴팁·드래그·메뉴 | `<select>` 팝업(D4), 툴팁, 드래그 시작·드롭, 우클릭 메뉴(D5) — IME 후보창 위치는 C5·W4 | 팝업 표시·선택·닫힘 복원, 드래그 콜백 도착 |
 | **W7** 배포 | formula, 매니페스트(formula 설치물의 버전·ABI 확인용), 설치 감지, 버전 올림 절차, dmg·Intel 공급(D8), CEF·Chromium 라이선스 동봉과 attribution([third-party 라이선스](../third-party-licenses.md)) | 깨끗한 기계에서 설치 → 실행 → 샌드박스 판정자 |
@@ -244,5 +268,6 @@ control plane `browser.*` 게이트는 엔진 중립이라 바뀌지 않는다(�
 
 - `exp/osr-demo` 브랜치(커밋 없음)와 stash `osr-experiment-hooks v2` — maru 쪽 실험 훅과 앱 안 시험기. W3·W4 의 참고용이며
   옮기지 않는다.
-- scratchpad PoC(`cef-osr-poc`·`poc154`·`poc154n`)와 판정 도구(`ring_consumer`·`mp_parent`/`mp_child`·`sbcheck`·
-  `verify2`) — W1·W2 판정자의 원형이다.
+- ~~scratchpad PoC(`cef-osr-poc`·`poc154`·`poc154n`)와 판정 도구(`ring_consumer`·`mp_parent`/`mp_child`·`sbcheck`·
+  `verify2`)~~ — **2026-09-24 세션 정리로 사라졌다**(저장소 밖이라 복구할 수 없다). 수치는 §13.1 에 남아 있고, W1 판정자는
+  저장소의 `tools/web_sidecar_judge/` 로 다시 세웠다. W2 의 링·port 전달 판정자는 새로 짠다.

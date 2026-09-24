@@ -13,3 +13,5 @@ pub const codec = @import("codec.zig");
 pub const stream = @import("stream.zig");
 /// clampUtf8 — sidecar 가 제목을 글자 중간에서 자르지 않고 줄인다.
 pub const text = @import("text.zig");
+/// 픽셀 링의 mailbox 규칙(W2) — 원자 워드 하나에 세대·슬롯·dirty.
+pub const mailbox = @import("mailbox.zig");

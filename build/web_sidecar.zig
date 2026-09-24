@@ -17,9 +17,9 @@ pub const Context = struct {
     macos_sdk: ?[]const u8,
 };
 
-/// ① 의 시험 수(inbox 2 + dispatch 8 + registry 2 + title_gate 2 + 입구 파일의 `test {}` 블록 1). 시험을 더하거나 빼면 같이 고친다 —
+/// ① 의 시험 수(inbox 2 + dispatch 8 + registry 2 + title_gate 2 + ring_receiver 6 + 입구 파일의 `test {}` 블록 1). 시험을 더하거나 빼면 같이 고친다 —
 /// 조용히 빠지는 것을 러너가 잡는다.
-const pure_test_count = 15;
+const pure_test_count = 21;
 
 pub fn register(b: *std.Build, ctx: Context) void {
     const protocol_mod = b.createModule(.{
@@ -54,6 +54,8 @@ pub fn register(b: *std.Build, ctx: Context) void {
     }
 
     const host = sidecarExe(b, ctx, sdk, protocol_mod, "maru-web-host", "src/platform/macos/web_sidecar/host_main.zig");
+    // 픽셀 링(W2) — IOSurface 세 장을 만들고 mach 로 넘긴다. helper 는 샌드박스 전 적재를 줄이려 붙이지 않는다.
+    linkMacosFrameworks(b, ctx, host, &.{ "IOSurface", "CoreFoundation" });
     const helper = sidecarExe(b, ctx, sdk, protocol_mod, "maru-web-helper", "src/platform/macos/web_sidecar/helper_main.zig");
     const judge = b.addExecutable(.{
         .name = "maru-web-judge",
@@ -65,10 +67,15 @@ pub fn register(b: *std.Build, ctx: Context) void {
             .imports = &.{.{ .name = "web_sidecar_protocol", .module = protocol_mod }},
         }),
     });
-    // 판정자가 host 의 창 수(CGWindowList)를 센다 — 창 없는 sidecar 는 0 개여야 한다.
-    if (ctx.macos_sdk) |macos_sdk| judge.root_module.addSystemFrameworkPath(.{ .cwd_relative = b.fmt("{s}/System/Library/Frameworks", .{macos_sdk}) });
-    judge.root_module.linkFramework("CoreGraphics", .{});
-    judge.root_module.linkFramework("CoreFoundation", .{});
+    // 판정자는 host 의 창 수(CGWindowList)를 세고, maru 역할로 픽셀 링을 받는다(IOSurface).
+    linkMacosFrameworks(b, ctx, judge, &.{ "CoreGraphics", "CoreFoundation", "IOSurface" });
+    judge.root_module.addImport("web_sidecar_ring", b.createModule(.{
+        .root_source_file = b.path("src/platform/macos/web_sidecar/ring.zig"),
+        .target = ctx.target,
+        .optimize = ctx.optimize,
+        .link_libc = true,
+        .imports = &.{.{ .name = "web_sidecar_protocol", .module = protocol_mod }},
+    }));
 
     const dest: std.Build.InstallDir = .{ .custom = "web-sidecar" };
     for ([_]*std.Build.Step.Compile{ host, helper, judge }) |artifact| {
@@ -105,4 +112,9 @@ fn sidecarExe(
     exe.root_module.addIncludePath(.{ .cwd_relative = sdk });
     exe.root_module.addIncludePath(b.path("src/platform/macos/web_sidecar/shim"));
     return exe;
+}
+
+fn linkMacosFrameworks(b: *std.Build, ctx: Context, artifact: *std.Build.Step.Compile, names: []const []const u8) void {
+    if (ctx.macos_sdk) |macos_sdk| artifact.root_module.addSystemFrameworkPath(.{ .cwd_relative = b.fmt("{s}/System/Library/Frameworks", .{macos_sdk}) });
+    for (names) |name| artifact.root_module.linkFramework(name, .{});
 }

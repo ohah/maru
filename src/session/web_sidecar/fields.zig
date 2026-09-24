@@ -117,3 +117,23 @@ pub fn readText(cursor: *ReadCursor) Error![]const u8 {
     try checkText(text);
     return text;
 }
+
+/// bootstrap 이름은 1~127 바이트의 출력 가능한 ASCII(공백 제외)만 받는다 — 이름이 곧 신뢰 경계의 주소라 느슨하게 받지 않는다.
+fn validService(name: []const u8) bool {
+    if (name.len == 0 or name.len > wire.max_service_bytes) return false;
+    for (name) |byte| if (byte <= 0x20 or byte >= 0x7f) return false;
+    return true;
+}
+
+pub fn writeService(cursor: *Cursor, name: []const u8) Error!void {
+    if (!validService(name)) return error.InvalidServiceName;
+    try cursor.writeByte(@intCast(name.len));
+    try cursor.writeBytes(name);
+}
+
+pub fn readService(cursor: *ReadCursor) Error![]const u8 {
+    const len = try cursor.readByte();
+    const name = try cursor.readBytes(len);
+    if (!validService(name)) return error.InvalidServiceName;
+    return name;
+}

@@ -173,7 +173,7 @@ description = "Build maru-web-host/helper and the W1b judge into zig-out/web-sid
 run = 'sdk=$(sh tools/cef-sdk-fetch.sh) && zig build web-sidecar -Dcef-sdk="$sdk"'
 
 [tasks.web-sidecar-judge]
-description = "Run the W1b judge against a real maru-web-host (handshake, helper sandbox, clean shutdown, parent death)"
+description = "Run the W1b/W1c judge against a real maru-web-host (sandbox, shutdown, parent death, browsers, profile, popups, dialogs)"
 depends = ["web-sidecar"]
 run = 'profile=$(mktemp -d) && trap "rm -rf \"$profile\"" EXIT && zig-out/web-sidecar/maru-web-judge "$PWD/zig-out/web-sidecar" "$profile"'
 

@@ -10,6 +10,7 @@
 //!   /dialog       `alert`·`confirm`·`prompt` 를 부른 뒤 제목을 `dialog-<confirm>-<prompt>` 로
 //!   /ctl          제목을 `a<BEL>b<DEL>c` 로(제어 문자가 든 제목)
 //!   /flood        2 초 동안 제목을 1ms 마다 200 번씩 바꾼 뒤 `flood-done` 으로
+//!   /tear         매 프레임 화면 전체를 빨강↔파랑으로 바꾼다(W2 찢어짐 판정 — 한 장 안의 줄 색이 달라지면 찢어진 것)
 
 const std = @import("std");
 
@@ -91,6 +92,9 @@ fn page(path: []const u8, query: []const u8, buf: []u8) ![]const u8 {
     }
     if (std.mem.eql(u8, path, "/cookie")) {
         return std.fmt.bufPrint(buf, "<!doctype html><title>loading</title><script>document.title='cookie=['+document.cookie+']';document.cookie='maru_judge={s}; max-age=3600; path=/'</script>", .{query});
+    }
+    if (std.mem.eql(u8, path, "/tear")) {
+        return "<!doctype html><title>tear</title><style>html,body{margin:0;height:100%}</style><body><script>let r=0;function f(){r^=1;document.body.style.background=r?'#ff0000':'#0000ff';requestAnimationFrame(f)}f()</script>";
     }
     if (std.mem.eql(u8, path, "/popup")) {
         return "<!doctype html><title>loading</title><script>window.open('/title?t=opened','_blank');document.title='popup-tried'</script>";

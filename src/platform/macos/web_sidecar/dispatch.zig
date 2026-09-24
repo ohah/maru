@@ -26,6 +26,9 @@ pub const Dispatcher = struct {
     /// 넣는다 — 조각을 통째로 넣던 판은 반쯤 온 큰 frame 뒤에 조각이 오면 정상 명령에도 채널을 닫았다(적대 검증).
     carry: [16 * 1024]u8 = undefined,
     carry_len: usize = 0,
+    /// 한 번 `quit` 을 돌려주면 이후 명령은 처리하지 않는다 — 메시지 루프가 끝나기 전에 올라온 task 가 shutdown 뒤의 명령을
+    /// 브라우저 처리기로 넘기던 것(적대 검증 재현: shutdown 직후 create 5 개가 모두 처리됐다).
+    stopped: bool = false,
 
     /// carry 를 decoder 에 넣을 수 있는 만큼 넣는다. 넣은 수를 돌려준다.
     fn feedCarry(self: *Dispatcher) protocol.wire.Error!usize {
@@ -56,6 +59,13 @@ pub const Dispatcher = struct {
 
     /// 상자에 쌓인 명령을 모두 처리한다(CEF UI 스레드). `quit` 이면 메시지 루프를 끝낸다.
     pub fn drain(self: *Dispatcher, inbox: *inbox_mod.Inbox) Outcome {
+        if (self.stopped) return .quit;
+        const outcome = self.drainOnce(inbox);
+        if (outcome == .quit) self.stopped = true;
+        return outcome;
+    }
+
+    fn drainOnce(self: *Dispatcher, inbox: *inbox_mod.Inbox) Outcome {
         while (true) {
             // ① decoder 에 쌓인 frame 을 모두 처리한다.
             while (true) {
@@ -284,4 +294,24 @@ test "a partly arrived large command followed by more bytes is queued, not refus
     // 세 이동 모두 처리됐다(브라우저가 없는 시험 처리기라 셋 다 unknown_browser) — protocol_violation 은 없다.
     try std.testing.expectEqual(@as(usize, 3), got.len);
     for (got) |event| try std.testing.expectEqual(protocol.message.FailureCode.unknown_browser, event.failure.code);
+}
+
+test "commands that arrive after shutdown are not handed to the browser handler" {
+    var pipes = try Pipes.open();
+    defer pipes.close();
+    var writer: events.Writer = .{ .fd = pipes.to_maru[1] };
+    var dispatcher = testDispatcher(&writer);
+    var inbox: inbox_mod.Inbox = .{ .io = std.testing.io };
+    var frame: [256]u8 = undefined;
+    var len = try protocol.codec.encode(.shutdown, &frame);
+    inbox.push(frame[0..len]);
+    len = try protocol.codec.encode(.{ .destroy_browser = 5 }, &frame);
+    inbox.push(frame[0..len]);
+    try std.testing.expectEqual(Outcome.quit, dispatcher.drain(&inbox));
+    inbox.push(frame[0..len]);
+    try std.testing.expectEqual(Outcome.quit, dispatcher.drain(&inbox));
+    // 처리기가 불렸다면 unknown_browser 알림이 있었을 것이다.
+    closeOne(&pipes.to_maru[1]);
+    var storage: [64]u8 = undefined;
+    try std.testing.expectEqual(@as(isize, 0), std.c.read(pipes.to_maru[0], &storage, storage.len));
 }

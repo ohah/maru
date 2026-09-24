@@ -5030,7 +5030,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
             .name = "maru-session-host-2b2e-integration-sentinel",
             .root_module = b.createModule(.{
                 .root_source_file = b.path(
-                    "tests/session_host_2b2e_integration_sentinel.zig",
+                    "tests/session_host_external_pump_ack_token_sentinel.zig",
                 ),
                 .target = target,
                 .optimize = optimize,
@@ -5210,7 +5210,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         const session_host_2b3_sentinel = b.addExecutable(.{
             .name = "maru-session-host-2b3-sentinel",
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_2b3_sentinel.zig"),
+                .root_source_file = b.path("tests/session_host_external_pump_owner_sentinel.zig"),
                 .target = target,
                 .optimize = optimize,
             }),
@@ -5254,7 +5254,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         const session_host_3a1_sentinel = b.addExecutable(.{
             .name = "maru-session-host-3a1-sentinel",
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_3a1_sentinel.zig"),
+                .root_source_file = b.path("tests/session_host_external_attach_primitives_sentinel.zig"),
                 .target = target,
                 .optimize = optimize,
             }),
@@ -5264,7 +5264,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         session_host_3a1_step.dependOn(&run_session_host_3a1_sentinel.step);
         const session_host_3a1_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_3a1_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_external_attach_primitives_boundary.zig"),
                 .target = target,
                 .optimize = optimize,
             }),
@@ -5322,7 +5322,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         const session_host_3a2_sentinel = b.addExecutable(.{
             .name = "maru-session-host-3a2-sentinel",
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_3a2_sentinel.zig"),
+                .root_source_file = b.path("tests/session_host_external_attach_pre_raw_owner_sentinel.zig"),
                 .target = target,
                 .optimize = optimize,
             }),
@@ -5332,7 +5332,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         session_host_3a2_step.dependOn(&run_session_host_3a2_sentinel.step);
         const session_host_3a2_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_3a2_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_external_attach_pre_raw_owner_boundary.zig"),
                 .target = target,
                 .optimize = optimize,
             }),
@@ -5417,7 +5417,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         const session_host_3b_sentinel = b.addExecutable(.{
             .name = "maru-session-host-3b-sentinel",
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_3b_sentinel.zig"),
+                .root_source_file = b.path("tests/session_host_external_attach_integrated_owner_sentinel.zig"),
                 .target = target,
                 .optimize = optimize,
             }),
@@ -5427,7 +5427,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         session_host_3b_step.dependOn(&run_session_host_3b_sentinel.step);
         const session_host_3b_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_3b_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_external_attach_integrated_owner_boundary.zig"),
                 .target = target,
                 .optimize = optimize,
             }),

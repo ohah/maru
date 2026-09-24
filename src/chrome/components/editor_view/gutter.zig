@@ -253,10 +253,7 @@ pub fn build(props: Props, out: []draw.Op, text_scratch: []u8, runs: []draw.Run)
 /// 번호가 사라졌다**(적대적 검증 2026-08-17). 접힘 표식을 안 넘기는 호출자(비교 뷰)는 `false`를 줘
 /// 예약을 늘리지 않는다.
 pub fn scratchNeeded(row_count: usize, max_line_number: usize, folds: bool) usize {
-    var digits: usize = 1;
-    var n = max_line_number;
-    while (n >= 10) : (n /= 10) digits += 1;
-    return row_count * (digits + if (folds) fold_mark_bytes else 0);
+    return row_count * bytesPerRow(max_line_number, folds, false);
 }
 
 /// 접힘 표식 하나가 쓰는 최대 바이트. `Fold.glyph()`에서 유도한다 — 글자를 바꾸면 예약이 함께
@@ -268,6 +265,29 @@ pub const fold_mark_bytes: usize = blk: {
     }
     break :blk m;
 };
+
+/// 진단 표식 하나가 쓰는 최대 바이트. `fold_mark_bytes` 와 같은 이유로 `diagnostic.Level.glyph()` 에서 유도한다.
+pub const marker_bytes: usize = blk: {
+    var m: usize = 0;
+    for (std.enums.values(diagnostic.Level)) |lv| m = @max(m, lv.glyph().len);
+    break :blk m;
+};
+
+/// 한 행이 `build` 에서 쓰는 **run 상한** — 방출 자리가 셋이다(진단 표식·접힘 표식·번호). 행마다 고정 개수라
+/// 입력에서 센다([chrome-strategy.md] §5.4 「답하는 방식」). `folds`·`markers` 는 그 표식을 **실제로 그리는가**
+/// (표가 있고 그 칸이 레이아웃에 있는가)다 — 안 그리는 표식 몫을 세면 본문 몫이 근거 없이 줄어든다.
+pub fn runsPerRow(folds: bool, markers: bool) usize {
+    return 1 + @as(usize, @intFromBool(folds)) + @intFromBool(markers);
+}
+
+/// 한 행이 `build` 에서 쓰는 **글자 바이트 상한** — 번호 자릿수 + 그리는 표식의 UTF-8. `scratchNeeded` 는 진단
+/// 표식을 몰랐다(그 표식은 번호보다 먼저 같은 저장소를 쓴다 — 접힘 표식이 번호를 밀어낸 그 자리다).
+pub fn bytesPerRow(max_line_number: usize, folds: bool, markers: bool) usize {
+    var digits: usize = 1;
+    var n = max_line_number;
+    while (n >= 10) : (n /= 10) digits += 1;
+    return digits + (if (folds) fold_mark_bytes else 0) + (if (markers) marker_bytes else 0);
+}
 
 /// 본문이 정한 시각 배치를 gutter 행으로 옮긴다 — **랩이 켜졌을 때 쓴다.**
 ///
@@ -394,6 +414,29 @@ test "접힘 표식은 랩 이어짐 행에 반복되지 않고 표 밖을 지�
     // **표를 안 주면 접힘 칸이 빈다** — 접힘을 모르는 호출자(비교 뷰)가 그대로 지나간다.
     const bare = rowsForVisual(&visual, 0, null, null, &buf);
     for (bare) |r| try testing.expectEqual(Fold.none, r.fold);
+}
+
+test "GB1 진단·접힘 표식이 다 있는 행도 runsPerRow·bytesPerRow 만큼이면 번호를 하나도 안 버린다 — scratchNeeded 는 진단 표식을 몰랐다" {
+    // 진단 표식(`✖` 3바이트)은 접힘 표식처럼 **번호보다 먼저** 같은 저장소를 쓴다. 몫이 그 바이트를 모르면 앞 행의
+    // 표식이 뒤 행의 번호를 밀어낸다 — 접힘 표식이 한 번 그랬던 자리다(위 판정자). 한 행 몫을 방출 코드 옆에서
+    // 세는 이유가 이것이다(chrome-strategy §5.4 「답하는 방식」).
+    const layout = geometry.compute(80, 100, .{});
+    var rows: [40]Row = undefined;
+    for (&rows, 0..) |*r, i| r.* = .{ .number = 100 + i, .visual_row = @intCast(i), .fold = .collapsed, .marker = .err };
+
+    const per_row_runs = runsPerRow(true, true);
+    try testing.expectEqual(@as(usize, 3), per_row_runs); // 진단·접힘·번호
+    var ops: [rows.len * 3]draw.Op = undefined;
+    var runs: [rows.len * 3]draw.Run = undefined;
+    const need = rows.len * bytesPerRow(100 + rows.len, true, true);
+    try testing.expect(need > scratchNeeded(rows.len, 100 + rows.len, true)); // 예전 몫은 진단 표식만큼 모자랐다
+    const scratch = try testing.allocator.alloc(u8, need);
+    defer testing.allocator.free(scratch);
+
+    const w = build(testProps(layout, &rows), &ops, scratch, runs[0 .. rows.len * per_row_runs]);
+    try testing.expectEqual(@as(usize, 0), w.dropped_rows);
+    try testing.expect(w.runs <= rows.len * per_row_runs);
+    try testing.expect(w.bytes <= need);
 }
 
 test "접힘 표식도 세로 스크롤에서 표를 절대 인덱스로 읽는다" {

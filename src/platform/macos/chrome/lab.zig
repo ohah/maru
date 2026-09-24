@@ -27,7 +27,12 @@ const file_tree = chrome.components.file_tree;
 /// sticky 시나리오는 그룹 둘·카드 넷에 상단 고정 헤더까지 그리므로 여기가 가장 많이 든다. 상한을
 /// 시나리오마다 나누지 않는 이유는 위와 같다 — 하나만 넉넉하면 다른 쪽이 캡처 전에 죽는다.
 pub const frame_op_capacity = 256;
-pub const frame_run_capacity = 256;
+/// **편집기 시나리오가 run 을 가장 많이 든다** — 편집기 몫은 기하로 묶이므로(`frame.bufferSizes`, visual-mapping §4)
+/// 뷰포트가 가장 큰 편집기 시나리오(1200×720, 8×16 셀 → 45행 × 150열)가 `(45 + 10) × (150 + 3)` ≈ 8,400 개를 요구한다.
+/// 모자라면 캡처 전에 `LabBufferTooSmall` 로 멈춘다(제품과 같은 몫으로 자르므로 조용히 덜 그리지 않는다).
+pub const frame_run_capacity = 16384;
+/// 글자 바이트 상한 — 같은 편집기 시나리오의 `45 × 150 × frame.text_bytes_per_cell` ≈ 27,000 에 gutter·sticky 를 더한 값 위.
+pub const frame_text_capacity = 65536;
 
 pub const ScenarioId = enum {
     empty,
@@ -1055,7 +1060,7 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
     var syn = if (paints_syntax) editorSyntaxColors(lines, lab_tab_width, scenario_grammar) else LabSyntax{ .allocator = std.heap.page_allocator };
     defer syn.deinit();
 
-    const fw = chrome.components.editor_view.frame.build(.{
+    const editor_props: chrome.components.editor_view.frame.Props = .{
         .lines = lines,
         .line_colors = syn.colors,
         .tab_width = lab_tab_width,
@@ -1134,10 +1139,15 @@ fn buildEditorGutterFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
             };
         } else null,
         .minimap_px = minimap_px,
-    }, .{
+    };
+    // **제품과 같은 몫으로 그린다**(chrome-strategy §5.4) — Lab 버퍼는 넉넉해서 통째로 넘기면 `bufferSizes` 가 낡아도
+    // 캡처는 멀쩡하고 제품만 줄 번호가 빈다. 몫만큼만 잘라 넘겨 그 어긋남이 캡처에서 먼저 걸리게 한다(파일 트리와 같은 규율).
+    const editor_budget = chrome.components.editor_view.frame.bufferSizes(editor_props);
+    if (editor_budget.runs > buffers.text_runs.len or editor_budget.text_bytes > buffers.text_bytes.len) return error.LabBufferTooSmall;
+    const fw = chrome.components.editor_view.frame.build(editor_props, .{
         .ops = buffers.ops,
-        .text_bytes = buffers.text_bytes,
-        .runs = buffers.text_runs,
+        .text_bytes = buffers.text_bytes[0..editor_budget.text_bytes],
+        .runs = buffers.text_runs[0..editor_budget.runs],
         .content_rows = content_rows[0..@min(visible, row_capacity)],
         .visual_rows = &visual_rows,
         .gutter_rows = &gutter_rows,
@@ -1197,7 +1207,7 @@ fn buildEditorMergeFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
     var count_scratch: [editor_view.content.count_scratch_bytes]u8 = undefined;
     var caret_cols: [256]u32 = undefined;
 
-    const w = editor_view.merge_frame.build(.{
+    const editor_props: editor_view.merge_frame.Props = .{
         .rect = rect,
         .background_rect = .{ .x = 0, .y = 0, .w = viewport_w, .h = viewport_h }, // 배경은 뷰 전체(§4.1b)
         // S3b-3b: caret 장면은 Current 둘째 줄(`    const msg = "ours";`)의 `"` 앞(byte 16)에 caret 을 둔다.
@@ -1213,10 +1223,15 @@ fn buildEditorMergeFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
         // 비교 골든과 같은 판단 — caret 시나리오가 아닌 골든까지 커서를 켜면 깜빡임 축을 떠안는다.
         .caret_visible = scenario.id == .editor_merge_caret,
         .caret_shape = .bar,
-    }, .{
+    };
+    // **제품과 같은 몫으로 그린다**(chrome-strategy §5.4) — Lab 버퍼는 넉넉해서 통째로 넘기면 `bufferSizes` 가 낡아도
+    // 캡처는 멀쩡하고 제품만 줄 번호가 빈다. 몫만큼만 잘라 넘겨 그 어긋남이 캡처에서 먼저 걸리게 한다(파일 트리와 같은 규율).
+    const editor_budget = editor_view.merge_frame.bufferSizes(editor_props);
+    if (editor_budget.runs > buffers.text_runs.len or editor_budget.text_bytes > buffers.text_bytes.len) return error.LabBufferTooSmall;
+    const w = editor_view.merge_frame.build(editor_props, .{
         .ops = buffers.ops,
-        .text_bytes = buffers.text_bytes,
-        .runs = buffers.text_runs,
+        .text_bytes = buffers.text_bytes[0..editor_budget.text_bytes],
+        .runs = buffers.text_runs[0..editor_budget.runs],
         .content_rows = &content_rows,
         .visual_rows = &visual_rows,
         .gutter_rows = &gutter_rows,
@@ -1353,7 +1368,7 @@ fn buildEditorMergeScrolledFrame(scenario: Scenario, buffers: FrameBuffers) !Fra
     // S6 — **가로는 하나의 값**이다: `editor_merge_hscrolled` 는 네 판에 같은 `first_col` 을 넘긴다(제품은 Result 의
     // `editor_first_col` 을 판마다 자기 폭으로 조여 넘긴다 — `paneFirstCol`. 여기 줄들은 다 짧아 조임이 안 걸린다).
     const first_col: u32 = if (scenario.id == .editor_merge_hscrolled) merge_hscrolled_first_col else 0;
-    const w = editor_view.merge_frame.build(.{
+    const editor_props: editor_view.merge_frame.Props = .{
         .rect = rect,
         .background_rect = .{ .x = 0, .y = 0, .w = viewport_w, .h = viewport_h },
         .current = .{ .lines = &merge_scrolled_ours, .first_line = current_top, .first_col = first_col, .widgets = &cur_widgets },
@@ -1367,10 +1382,15 @@ fn buildEditorMergeScrolledFrame(scenario: Scenario, buffers: FrameBuffers) !Fra
         .wrap = false,
         .caret_visible = false,
         .caret_shape = .bar,
-    }, .{
+    };
+    // **제품과 같은 몫으로 그린다**(chrome-strategy §5.4) — Lab 버퍼는 넉넉해서 통째로 넘기면 `bufferSizes` 가 낡아도
+    // 캡처는 멀쩡하고 제품만 줄 번호가 빈다. 몫만큼만 잘라 넘겨 그 어긋남이 캡처에서 먼저 걸리게 한다(파일 트리와 같은 규율).
+    const editor_budget = editor_view.merge_frame.bufferSizes(editor_props);
+    if (editor_budget.runs > buffers.text_runs.len or editor_budget.text_bytes > buffers.text_bytes.len) return error.LabBufferTooSmall;
+    const w = editor_view.merge_frame.build(editor_props, .{
         .ops = buffers.ops,
-        .text_bytes = buffers.text_bytes,
-        .runs = buffers.text_runs,
+        .text_bytes = buffers.text_bytes[0..editor_budget.text_bytes],
+        .runs = buffers.text_runs[0..editor_budget.runs],
         .content_rows = &content_rows,
         .visual_rows = &visual_rows,
         .gutter_rows = &gutter_rows,
@@ -1467,7 +1487,7 @@ fn buildEditorDiffFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
     const right_selection = [_][]const editor_view.frame.Mark{ &sel_none, &sel_r1, &sel_r2, &sel_r3, &sel_none };
     const selecting = scenario.id == .editor_diff_selection;
 
-    const w = editor_view.diff_frame.build(.{
+    const editor_props: editor_view.diff_frame.Props = .{
         .left = if (scrolled)
             .{ .lines = &long_left, .numbers = &long_left_nums, .total_lines = long_rows, .bands = &long_left_bands }
         else
@@ -1490,10 +1510,15 @@ fn buildEditorDiffFrame(scenario: Scenario, buffers: FrameBuffers) !Frame {
         .cell_w_px = scenario.cell_w_px,
         .cell_h_px = scenario.cell_h_px,
         .font_px = scenario.font_px,
-    }, .{
+    };
+    // **제품과 같은 몫으로 그린다**(chrome-strategy §5.4) — Lab 버퍼는 넉넉해서 통째로 넘기면 `bufferSizes` 가 낡아도
+    // 캡처는 멀쩡하고 제품만 줄 번호가 빈다. 몫만큼만 잘라 넘겨 그 어긋남이 캡처에서 먼저 걸리게 한다(파일 트리와 같은 규율).
+    const editor_budget = editor_view.diff_frame.bufferSizes(editor_props);
+    if (editor_budget.runs > buffers.text_runs.len or editor_budget.text_bytes > buffers.text_bytes.len) return error.LabBufferTooSmall;
+    const w = editor_view.diff_frame.build(editor_props, .{
         .ops = buffers.ops,
-        .text_bytes = buffers.text_bytes,
-        .runs = buffers.text_runs,
+        .text_bytes = buffers.text_bytes[0..editor_budget.text_bytes],
+        .runs = buffers.text_runs[0..editor_budget.runs],
         .content_rows = &content_rows,
         .visual_rows = &visual_rows,
         .gutter_rows = &gutter_rows,
@@ -2302,7 +2327,7 @@ test "Chrome Lab builds a deterministic font specimen card and records only its 
     var dock_nodes: [16]chrome.ui.tree.UiNode = undefined;
     var dock_actions: [12]session_dock.ids.Entry = undefined;
     var text_runs: [frame_run_capacity]chrome.draw.Run = undefined;
-    var text_bytes: [2048]u8 = undefined;
+    var text_bytes: [frame_text_capacity]u8 = undefined;
     const frame = try buildFrame(.{
         .id = .font_specimen,
         .viewport_px = .{ .width = 720, .height = 960 },

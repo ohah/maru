@@ -165,20 +165,25 @@ pub const text_role: tokens.ColorRole = .surface_fg;
 /// 처음에는 그냥 `written >= out_runs.len`에서 멈췄는데, 그러면 꼬리를 쓸 칸이 없어 **줄 끝이
 /// 조용히 사라졌다** — `HL14`가 그것을 잡았고, 위 주석은 코드가 안 하는 일을 적고 있었다.
 fn writeRuns(text: []const u8, start_col: u32, colors: []const ColorSpan, caret_cols: []const u32, out_runs: []draw.Run) usize {
-    return writeRunsWith(text, start_col, colors, caret_cols, &.{}, out_runs);
+    return writeRunsWith(text, start_col, colors, caret_cols, &.{}, out_runs).n;
 }
 
+/// `writeRunsWith` 가 쓴 것. `collapsed` 는 **칸이 모자라 남은 글자를 마지막 칸에 몰았다**는 뜻이다 — 글자는 다
+/// 나오지만 그 뒤 색이 번진다. 조용하면 안 되므로 `build` 가 절단으로 센다(`Written.truncated_rows`).
+const WroteRuns = struct { n: usize, collapsed: bool = false };
+
 /// `writeRuns` + **힌트 칸**(§4.1h) — 그 칸은 구문 색이 무엇이든 `syntax_comment` 로 낸다(caret 반전이 그 위에 선다).
-fn writeRunsWith(text: []const u8, start_col: u32, colors: []const ColorSpan, caret_cols: []const u32, inlay_cols: []const InlayCols, out_runs: []draw.Run) usize {
-    if (out_runs.len == 0) return 0;
+fn writeRunsWith(text: []const u8, start_col: u32, colors: []const ColorSpan, caret_cols: []const u32, inlay_cols: []const InlayCols, out_runs: []draw.Run) WroteRuns {
+    if (out_runs.len == 0) return .{ .n = 0, .collapsed = text.len > 0 };
     // **색이 없고 반전할 칸도 없으면 한 run이다.** 흔한 경우(grammar 없음·무색 줄, 막대 커서)라
     // 걷지 않고 빠져나간다.
     if (colors.len == 0 and caret_cols.len == 0 and inlay_cols.len == 0) {
         out_runs[0] = .{ .text = text };
-        return 1;
+        return .{ .n = 1 };
     }
 
     var written: usize = 0;
+    var collapsed = false;
     var i: usize = 0;
     var col: u32 = start_col;
     var seg_start: usize = 0;
@@ -196,7 +201,10 @@ fn writeRunsWith(text: []const u8, start_col: u32, colors: []const ColorSpan, ca
         if (role != seg_role) {
             if (i > seg_start) {
                 // **마지막 칸은 꼬리 몫이다.** 여기서 다 쓰면 남은 글자를 실을 자리가 없다.
-                if (written + 1 >= out_runs.len) break;
+                if (written + 1 >= out_runs.len) {
+                    collapsed = true;
+                    break;
+                }
                 out_runs[written] = .{ .text = text[seg_start..i], .role = seg_role };
                 written += 1;
                 seg_start = i;
@@ -216,7 +224,7 @@ fn writeRunsWith(text: []const u8, start_col: u32, colors: []const ColorSpan, ca
         out_runs[0] = .{ .text = text };
         written = 1;
     }
-    return written;
+    return .{ .n = written, .collapsed = collapsed };
 }
 
 /// caret > 힌트 > 구문 색(§4.1h). 힌트 칸 커서도 앞으로만 간다.
@@ -413,6 +421,8 @@ pub fn build(
                     },
                 };
                 op_count += 1;
+            } else if (w.text.len > 0) {
+                truncated_rows += 1; // 위젯 글자를 못 실었다 — 본문 행과 같은 규율로 알린다
             }
         }
         // **여기에 「자리가 찼다」 가드를 두지 않는다**(적대적 검증 2회차 실측): 지워도 어떤
@@ -526,10 +536,18 @@ pub fn build(
             //
             // **배치(`visual_out`)는 이미 채웠으므로 gutter가 번호를 그린다** — 본문만 비고 번호는
             // 나온다. 번호가 없으면 화면 전체가 어느 위치인지 알 수 없다는 것이 같은 PR의 결론이다.
-            if (run_used >= runs.len or op_count >= out.len) continue;
+            //
+            // **그래도 조용하면 안 된다** — 이 행의 글자가 통째로 비었으므로 절단으로 센다. 예전엔 여기서 말없이
+            // 넘어가 run 이 모자란 화면이 `truncated = false` 로 보고됐다(2026-09-24, RB2 가 잡았다).
+            if (run_used >= runs.len or op_count >= out.len) {
+                truncated_rows += 1;
+                continue;
+            }
 
             const run_start = run_used;
-            run_used += writeRunsWith(text, @max(src_col, start_col), row.colors, row.caret_cols, inlay_cols.slice(), runs[run_used..]);
+            const wrote = writeRunsWith(text, @max(src_col, start_col), row.colors, row.caret_cols, inlay_cols.slice(), runs[run_used..]);
+            run_used += wrote.n;
+            if (wrote.collapsed) truncated_rows += 1; // 글자는 다 나오지만 색이 번졌다 — 역시 절단이다
             const run_slice = runs[run_start..run_used];
 
             out[op_count] = .{

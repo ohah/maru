@@ -254,6 +254,17 @@ pub const PaneFrame = struct {
 /// **컴포넌트의 것을 그대로 쓴다**(별칭). 같은 모양을 여기서 다시 선언하면 Zig에서 다른 타입이 되어,
 /// 제품과 컴포넌트 사이에 뜻 없는 변환이 하나 생긴다.
 pub const FrameScratch = chrome_editor.frame.Scratch;
+/// 조립 함수가 run·글자 저장소를 받는 곳 — **Props 를 만든 뒤** 그 Props 의 `bufferSizes` 만큼 여기서 받는다(몫을
+/// 재는 쪽과 그리는 쪽이 같은 Props 를 쓴다 — visual-mapping §4). `null` 이면 `scratch` 의 run·글자를 그대로 쓴다(판정자).
+pub const PoolRef = struct {
+    pool: *chrome_editor.frame.RunTextPool,
+    allocator: std.mem.Allocator,
+
+    fn scratchFor(ref: ?PoolRef, need: chrome_editor.frame.BufferSizes, base: FrameScratch) FrameScratch {
+        const r = ref orelse return base;
+        return r.pool.scratchFor(r.allocator, need, base);
+    }
+};
 
 /// 한 열이 쓸 자리에서 나오는 값들은 **컴포넌트가 소유한다**(`diff_frame.sideMetrics`) — 제품과
 /// Chrome Lab이 같은 값을 써야 캡처가 제품을 예고한다.
@@ -313,7 +324,7 @@ fn buildMergePaneOps(
     };
     const pre = chrome_editor.merge_frame.layout(inner_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), st.stages.has_base);
     const collapsed = pre.current == null;
-    const w = chrome_editor.merge_frame.build(.{
+    const props: chrome_editor.merge_frame.Props = .{
         .rect = inner_rect,
         // 배경만 뒤로 물려 뷰 전체를 덮는다(§4.1b — 평범한 편집기와 같은 모양).
         .background_rect = .{ .x = -inset_i, .y = -inset_i, .w = pane_rect.w, .h = pane_rect.h },
@@ -348,7 +359,9 @@ fn buildMergePaneOps(
         .wrap = wrap,
         .caret_visible = self.blink_visible,
         .caret_shape = caretShape(self),
-    }, scratch);
+    };
+    // pane 넷 몫의 합만큼 세션 저장소에서 받는다 — `build` 가 각 pane 에 **자기 몫**을 준다(`merge_frame.partScratch`).
+    const w = chrome_editor.merge_frame.build(props, PoolRef.scratchFor(.{ .pool = &self.editor_draw_pool, .allocator = self.allocator }, chrome_editor.merge_frame.bufferSizes(props), scratch));
     return .{
         .ops = scratch.ops[0..w.ops],
         .ops_len = w.ops,
@@ -1042,22 +1055,23 @@ pub fn buildPaneOps(
     sticky: []const chrome_editor.frame.StickyLine,
     /// 현재 줄·활성 줄 번호·짝 괄호(§5.1b) — 단일 편집기만(나머지는 `.{}` = 없음).
     deco: Decorations,
+    /// run·글자 저장소(`PoolRef`). `null` 이면 `scratch` 것을 쓴다.
+    pool: ?PoolRef,
 ) PaneFrame {
     // **내용은 뷰 사각에서 한 겹 들어간다**(`frame.content_inset_px`) — 배경은 그대로 전체를 덮는다.
     // 활성 pane 포커스 테두리가 셀 **위** 층에 그려져서, 여백이 없으면 첫 글자 행과 스크롤바를 덮는다
     // (2026-08-14 실측). 열 수·스크롤바 gutter를 **이 사각으로** 계산해야 막대가 뷰 밖으로 안 밀린다.
     const inset: i32 = @intCast(chrome_editor.frame.content_inset_px);
     const inner: chrome_draw.Rect = .{ .x = 0, .y = 0, .w = rect.w -| chrome_editor.frame.content_inset_px * 2, .h = rect.h -| chrome_editor.frame.content_inset_px * 2 };
-    const w = diff_frame.buildSide(
-        .{ .lines = lines, .first_col = first_col, .numbers = numbers, .total_lines = total_lines, .folds = folds, .content_max_cols = content_max_cols, .row_cache = row_cache, .selection_marks = selection_marks, .occurrence_marks = occurrence_marks, .search_marks = search_marks, .search_current = search_current, .search_marker_lines = search_marker_lines, .search_marker_current = search_marker_current, .line_colors = line_colors, .line_seeks = line_seeks, .line_inlays = line_inlays, .carets = carets, .widgets = widgets, .bands = bands, .minimap = minimap, .diag_marks = if (diag) |d| d.marks else null, .diag_markers = if (diag) |d| d.markers else null, .diag_lines = if (diag) |d| d.lines else &.{}, .sticky = sticky, .line_highlight = deco.line_highlight, .selection_empty = deco.selection_empty, .active_line = deco.active_line, .bracket_marks = deco.bracket_marks, .indent_guides = deco.indent_guides, .guide_unit = deco.guide_unit, .render_whitespace = deco.render_whitespace },
-        .{ .first_line = first_line, .first_piece = first_piece, .caret_visible = caret_visible, .caret_shape = caret_shape, .wrap = wrap, .tab_width = tab_width, .cell_w_px = cell_w_px, .cell_h_px = cell_h_px, .font_px = font_px },
-        inner,
-        // **배경만 뒤로 물린다.** 내용 op이 (0,0)에서 시작해야 셀 격자 양자화(`buildTextDrawList`가
-        // px→셀로 바꾼다)에 여백이 먹히지 않는다 — 여백은 호출자가 **pane 원점**에 걸고, 배경은
-        // 그만큼 음수로 밀어 뷰 사각 전체를 덮는다(§4.1b).
-        .{ .x = -inset, .y = -inset, .w = rect.w, .h = rect.h },
-        scratch,
-    );
+    const side: diff_frame.Side = .{ .lines = lines, .first_col = first_col, .numbers = numbers, .total_lines = total_lines, .folds = folds, .content_max_cols = content_max_cols, .row_cache = row_cache, .selection_marks = selection_marks, .occurrence_marks = occurrence_marks, .search_marks = search_marks, .search_current = search_current, .search_marker_lines = search_marker_lines, .search_marker_current = search_marker_current, .line_colors = line_colors, .line_seeks = line_seeks, .line_inlays = line_inlays, .carets = carets, .widgets = widgets, .bands = bands, .minimap = minimap, .diag_marks = if (diag) |d| d.marks else null, .diag_markers = if (diag) |d| d.markers else null, .diag_lines = if (diag) |d| d.lines else &.{}, .sticky = sticky, .line_highlight = deco.line_highlight, .selection_empty = deco.selection_empty, .active_line = deco.active_line, .bracket_marks = deco.bracket_marks, .indent_guides = deco.indent_guides, .guide_unit = deco.guide_unit, .render_whitespace = deco.render_whitespace };
+    const shared: diff_frame.Shared = .{ .first_line = first_line, .first_piece = first_piece, .caret_visible = caret_visible, .caret_shape = caret_shape, .wrap = wrap, .tab_width = tab_width, .cell_w_px = cell_w_px, .cell_h_px = cell_h_px, .font_px = font_px };
+    // **배경만 뒤로 물린다.** 내용 op이 (0,0)에서 시작해야 셀 격자 양자화(`buildTextDrawList`가
+    // px→셀로 바꾼다)에 여백이 먹히지 않는다 — 여백은 호출자가 **pane 원점**에 걸고, 배경은
+    // 그만큼 음수로 밀어 뷰 사각 전체를 덮는다(§4.1b).
+    const bg: chrome_draw.Rect = .{ .x = -inset, .y = -inset, .w = rect.w, .h = rect.h };
+    // **몫을 재는 쪽과 그리는 쪽이 같은 `side`·`shared`·사각을 쓴다**(visual-mapping §4).
+    const s = PoolRef.scratchFor(pool, diff_frame.sideBufferSizes(side, shared, inner, bg), scratch);
+    const w = diff_frame.buildSide(side, shared, inner, bg, s);
     return .{ .ops = scratch.ops[0..w.ops], .ops_len = w.ops, .visual_rows = w.visual_rows, .total_visual_rows = w.total_visual_rows, .max_top_line = w.max_top_line, .max_top_piece = w.max_top_piece, .scrollbar = w.scrollbar, .horizontal_scrollbar = w.horizontal_scrollbar };
 }
 
@@ -1716,6 +1730,8 @@ pub fn buildDiffPaneOps(
     cell_h_px: u16,
     font_px: u16,
     scratch: FrameScratch,
+    /// run·글자 저장소(`PoolRef`). `null` 이면 `scratch` 것을 쓴다.
+    pool: ?PoolRef,
 ) PaneFrame {
     const inset: i32 = @intCast(chrome_editor.frame.content_inset_px);
     const inner: chrome_draw.Rect = .{
@@ -1724,7 +1740,7 @@ pub fn buildDiffPaneOps(
         .w = rect.w -| chrome_editor.frame.content_inset_px * 2,
         .h = rect.h -| chrome_editor.frame.content_inset_px * 2,
     };
-    const w = diff_frame.build(.{
+    const props: diff_frame.Props = .{
         .left = left,
         .right = right,
         .first_line = first_line,
@@ -1738,7 +1754,9 @@ pub fn buildDiffPaneOps(
         .cell_w_px = cell_w_px,
         .cell_h_px = cell_h_px,
         .font_px = font_px,
-    }, scratch);
+    };
+    // 좌우 몫의 합만큼 받는다 — `build` 가 각 열에 **자기 몫**을 준다(`diff_frame.splitScratch`).
+    const w = diff_frame.build(props, PoolRef.scratchFor(pool, diff_frame.bufferSizes(props), scratch));
     return .{
         .ops = scratch.ops[0..w.ops],
         .ops_len = w.ops,
@@ -1851,8 +1869,9 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     // 갈리면 열당 절반이므로, 1024면 열당 512 = **128행**이 실질 상한이라 아래 행 저장소(열당 256행)를
     // 키운 의미가 사라진다(리뷰 지적). 2560이면 열당 1,280 = 256행 + 여유다.
     var ops: [2560]chrome_draw.Op = undefined;
-    var text: [16384]u8 = undefined;
-    var runs: [1280]chrome_draw.Run = undefined;
+    // **run·글자는 여기 없다** — 세션 저장소(`editor_draw_pool`)에서 조립 함수가 `bufferSizes` 만큼 받는다
+    // (visual-mapping §4). 예전엔 `[1280]`·`[16384]` 스택 상수였고, 구문 색이 한 행의 run 을 토큰 수로 늘린
+    // 뒤로 비교 뷰 한 열(640)이 68행 Zig 화면에서 모자라 줄 번호가 통째로 사라졌다(2026-09-24 제보).
     // **두 열로 갈리면 열당 절반이다**(`diff_frame.splitScratch`). 256이면 열당 128행 = 2,048px라,
     // 큰 화면을 꽉 채운 pane에서 아래쪽 행이 조용히 잘리고 스크롤바까지 틀린 자리에 선다(막대는
     // "보이는 높이"를 그린 행 수로 잡는다). 512면 열당 256행 = 4,096px로 실사용 화면을 덮는다.
@@ -1884,8 +1903,8 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     const wrap = term.rt.editor_wrap orelse self.loaded_config.config.editor.wrap; // 뷰 override가 config를 이긴다
     const scratch: FrameScratch = .{
         .ops = &ops,
-        .text_bytes = &text,
-        .runs = &runs,
+        .text_bytes = &.{},
+        .runs = &.{},
         .content_rows = &content_rows,
         .visual_rows = &visual_rows,
         .gutter_rows = &gutter_rows,
@@ -1893,6 +1912,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
         .count_scratch = &count_scratch,
         .caret_cols = &caret_cols,
     };
+    const pool: PoolRef = .{ .pool = &self.editor_draw_pool, .allocator = self.allocator };
 
     // **캐시 자리는 필요할 때 잡고, 못 잡으면 없이 그린다**(§2.1의 "저하 동작"과 같은 결) — 캐시는
     // 빠르게 하는 장치이지 정확성의 전제가 아니라, 여기서 실패해도 화면은 그대로 나온다.
@@ -1954,7 +1974,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     const pf = if (diff_state_opt) |st| blk: {
         // **상태 줄은 가로로 안 민다** — 한 줄짜리 문구라 밀면 화면에서 사라진다.
         // 한 줄짜리 상태 문구다 — 캐시가 아낄 것이 없다.
-        if (st.view != .compare) break :blk buildPaneOps(lines, null, null, lines.len, term.rt.editor_first_line, 0, 0, null, null, buildSelectionMarks(self, term), null, null, null, @as([]const u32, &.{}), null, syntaxColors(self, term), &.{}, .{}, buildCaretRows(self, term), &.{}, null, self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, null, null, &.{}, .{});
+        if (st.view != .compare) break :blk buildPaneOps(lines, null, null, lines.len, term.rt.editor_first_line, 0, 0, null, null, buildSelectionMarks(self, term), null, null, null, @as([]const u32, &.{}), null, syntaxColors(self, term), &.{}, .{}, buildCaretRows(self, term), &.{}, null, self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, null, null, &.{}, .{}, pool);
         // **좌우가 세로를 공유한다**(§3.5) — 행 배열이 이미 같은 길이라 같은 인덱스가 같은 높이다.
         // 가로는 각자다(§3.5의 그 규칙은 CM6가 "양쪽 줄 길이가 달라 한쪽을 따라가면 다른 쪽이
         // 엉뚱한 곳을 본다"고 적어 둔 근거에서 왔다) — 입력이 붙을 때 열별 `first_col`이 여기 온다.
@@ -1974,6 +1994,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
             @intCast(self.cell_height_px),
             @intCast(self.cell_height_px),
             scratch,
+            pool,
         );
     } else if (term.rt.editor_merge) |st| blk: {
         // **판이 아직 안 왔거나 못 읽었으면 한 줄로 말한다** — 조용한 빈 화면을 남기지 않는 것이
@@ -1983,7 +2004,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
                 maru.i18n.t(.diff_read_failed)
             else
                 maru.i18n.t(.diff_loading);
-            break :blk buildPaneOps(status_line[0..1], null, null, 1, 0, 0, 0, null, null, null, null, null, null, @as([]const u32, &.{}), null, &.{}, &.{}, .{}, null, &.{}, null, false, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, null, null, &.{}, .{});
+            break :blk buildPaneOps(status_line[0..1], null, null, 1, 0, 0, 0, null, null, null, null, null, null, @as([]const u32, &.{}), null, &.{}, &.{}, .{}, null, &.{}, null, false, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, null, null, &.{}, .{}, pool);
         }
         break :blk buildMergePaneOps(self, term, st, draw_lines, wrap, pane_rect, scratch);
     } else blk: {
@@ -1998,7 +2019,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
         mm_drawn = if (mm) |m| m.input.top else null;
         // **진단**(§5.4) — 트리가 있으면 목록을 다시 채우고(구문 오류), 보이는 줄 축의 세 표로 편다. 끄면 없다.
         const diag = diagnosticViews(self, term, draw_lines.len);
-        break :blk buildPaneOps(draw_lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), fc, maxColsForRender(self, term, false), row_cache, buildSelectionMarks(self, term), find_marks, buildOccurrenceMarks(self, term), find_current, marker_lines, marker_current, syntaxColors(self, term), seek_buf[0..seek_n], inlayWindow(self, term), buildCaretRows(self, term), conflictWidgets(self, term), conflictBands(term), self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, mm, diag, sticky_client.compute(self, term, pane_rect, wrap), paneDecorations(self, term));
+        break :blk buildPaneOps(draw_lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), fc, maxColsForRender(self, term, false), row_cache, buildSelectionMarks(self, term), find_marks, buildOccurrenceMarks(self, term), find_current, marker_lines, marker_current, syntaxColors(self, term), seek_buf[0..seek_n], inlayWindow(self, term), buildCaretRows(self, term), conflictWidgets(self, term), conflictBands(term), self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, mm, diag, sticky_client.compute(self, term, pane_rect, wrap), paneDecorations(self, term), pool);
     };
     if (pf.ops_len == 0) return null;
     // **배치를 싣는다**(병합 모드가 아니면 지운다 — 옛 배치가 남으면 평범한 편집기에서 클릭이
@@ -18930,6 +18951,7 @@ test "같은 행이 좌우에서 같은 높이에 선다 — 비교가 성립하
         16,
         16,
         fx.scratch(),
+        null,
     );
     try testing.expect(pf.ops_len > 0);
 

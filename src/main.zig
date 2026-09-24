@@ -16220,32 +16220,34 @@ fn buildEditorFrame(
         sel_marks = ss.rows[0..n];
     }
 
-    const w = editor_view.diff_frame.buildSide(
-        .{
-            .lines = ls,
-            .total_lines = ls.len,
-            .selection_marks = sel_marks,
-            .line_colors = line_colors,
-            // 가로 스크롤은 **쪽마다**다(그 필드 doc: 공유하면 반대쪽이 엉뚱한 곳을 본다).
-            .first_col = first_col,
-            // 가장 긴 줄의 표시 폭 — 막대 길이와 "막대를 세울지" 를 중립이 이것으로 정한다.
-            .content_max_cols = content_max_cols,
-        },
-        .{
-            .first_line = first_line,
-            // **랩은 토글이고 기본은 끔**(`native-editor-visual-mapping.md`) — 그래서 가로 스크롤이
-            // 축이 되고, 중립이 그 축으로 막대를 세운다(`showsHorizontalBar`).
-            .wrap = false,
-            .tab_width = 4,
-            .cell_w_px = @intCast(cw),
-            .cell_h_px = @intCast(ch),
-            .font_px = @intCast(ch),
-        },
-        inn,
-        // **배경 사각은 호출자가 준다**(위 파라미터 doc).
-        bg,
-        sc,
-    );
+    const side: editor_view.diff_frame.Side = .{
+        .lines = ls,
+        .total_lines = ls.len,
+        .selection_marks = sel_marks,
+        .line_colors = line_colors,
+        // 가로 스크롤은 **쪽마다**다(그 필드 doc: 공유하면 반대쪽이 엉뚱한 곳을 본다).
+        .first_col = first_col,
+        // 가장 긴 줄의 표시 폭 — 막대 길이와 "막대를 세울지" 를 중립이 이것으로 정한다.
+        .content_max_cols = content_max_cols,
+    };
+    const shared: editor_view.diff_frame.Shared = .{
+        .first_line = first_line,
+        // **랩은 토글이고 기본은 끔**(`native-editor-visual-mapping.md`) — 그래서 가로 스크롤이
+        // 축이 되고, 중립이 그 축으로 막대를 세운다(`showsHorizontalBar`).
+        .wrap = false,
+        .tab_width = 4,
+        .cell_w_px = @intCast(cw),
+        .cell_h_px = @intCast(ch),
+        .font_px = @intCast(ch),
+    };
+    // **몫을 재고 모자라면 이 프레임 동안 더 잡는다**(visual-mapping §4 「run 몫은 기하로 묶는다」). 호출자가 주는
+    // 저장소는 흔한 창에 맞춘 값이라, 큰 창에서 본문이 run 을 다 쓰면 줄 번호가 사라진다 — macOS 비교 뷰가 그렇게
+    // 번호를 통째로 잃었다(2026-09-24 제보). 몫은 그리는 쪽과 같은 `side`·`shared`·사각으로 잰다.
+    var grown: editor_view.frame.RunTextPool = .{};
+    defer grown.deinit(a);
+    const need = editor_view.diff_frame.sideBufferSizes(side, shared, inn, bg);
+    const s = if (sc.runs.len < need.runs or sc.text_bytes.len < need.text_bytes) grown.scratchFor(a, need, sc) else sc;
+    const w = editor_view.diff_frame.buildSide(side, shared, inn, bg, s);
 
     // **낮추기가 무엇을 버리는지 센다.** `buildTextDrawList` 는 이름 그대로 **글자만** 셀로
     // 만든다. 세지 않으면 "그림이 그럴듯하다" 로 넘어가고, 실제로 스크롤바가 통째로 빠진 것을

@@ -319,6 +319,137 @@ pub const StickyLine = struct {
 /// 한 프레임에 덮을 수 있는 머리줄의 상한 — 설정 상한(`editor.sticky-scroll-max-lines` 10)과 같다.
 pub const sticky_max_rows: usize = 10;
 
+/// 한 칸이 담는 글자 바이트의 **추정치**(visual-mapping §4 「글자 바이트 몫」). 탭·§3.8 표기는 칸당 1, CJK 는
+/// 2칸에 3, 이모지는 2칸에 4 라 이 값이면 흔한 화면은 안 넘친다. 결합 문자·ZWJ 이모지는 한 칸에 얼마든지
+/// 담으므로 **묶는 불변식이 없다** — 넘치면 거기까지 그리고 알린다(`Written.truncated`).
+pub const text_bytes_per_cell: usize = 4;
+
+/// `build` 가 쓰는 run·글자 저장소의 몫(chrome-strategy §5.4 「draw 저장소의 몫」). 호출자는 이만큼 잡고,
+/// `build` 는 **본문 몫**만큼만 본문에 준다 — 나머지(gutter·sticky)는 본문이 무엇을 하든 남는다.
+pub const BufferSizes = struct {
+    runs: usize = 0,
+    text_bytes: usize = 0,
+    /// 위 두 값 중 **본문**의 몫. 뒤에 그리는 층(gutter·sticky)의 몫은 `runs - body_runs` 다.
+    body_runs: usize = 0,
+    body_text_bytes: usize = 0,
+
+    pub fn plus(a: BufferSizes, b: BufferSizes) BufferSizes {
+        return .{
+            .runs = a.runs + b.runs,
+            .text_bytes = a.text_bytes + b.text_bytes,
+            .body_runs = a.body_runs + b.body_runs,
+            .body_text_bytes = a.body_text_bytes + b.body_text_bytes,
+        };
+    }
+};
+
+/// `build` 와 **같은** 레이아웃 — 몫을 재는 쪽과 그리는 쪽이 본문 폭을 따로 구하면 두 번째 출처가 된다.
+fn layoutOf(props: Props) geometry.Layout {
+    return geometry.compute(props.total_cols, props.total_lines, .{});
+}
+
+/// 이 props 로 `build` 가 쓰는 run·글자의 상한(visual-mapping §4 「run 몫은 기하로 묶는다」).
+///
+/// **run 은 입력에서 세지 않는다.** 줄마다 색 구간·반전 칸·인레이·조각을 세는 공식은 `content.writeRunsWith` 가
+/// 어디서 가르는지를 한 번 더 적은 사본이라, 가르는 규칙이 늘 때마다 조용히 낡는다(1280 상수가 그렇게 낡아
+/// 비교 뷰의 줄 번호가 통째로 사라졌다 — 2026-09-24 제보). 대신 두 불변식으로 묶는다: ⑴ 클러스터는 적어도 한
+/// 칸이다(`display_width.clusterCols` 의 `@max(1, …)`)라 run 하나가 적어도 한 칸을 덮고 ⑵ sticky 말고는 텍스트
+/// op 이 셀을 겹쳐 쓰지 않는다. 그래서 한 행의 본문 run 은 본문 열 수를 넘지 않는다. `build` 가 이 불변식을
+/// debug assert 로 확인한다 — 텍스트 위에 텍스트를 겹치는 층이 생기면 거기서 멈춘다.
+pub fn bufferSizes(props: Props) BufferSizes {
+    const layout = layoutOf(props);
+    const rows: usize = props.visible_rows;
+    const cols: usize = layout.content.width;
+    const folds = props.folds != null and !layout.folding.isEmpty();
+    const markers = props.diag_markers != null and !layout.leading_margin.isEmpty();
+    // sticky 는 덮는 행의 본문 run 을 **쓰인 채 버린다**(`paintSticky` 가 op 만 걷는다) — 그래서 따로 센다.
+    const n_sticky: usize = @min(props.sticky.len, @min(rows, sticky_max_rows));
+    var sticky_max_number: usize = 0;
+    for (props.sticky[0..n_sticky]) |sl| sticky_max_number = @max(sticky_max_number, sl.number);
+
+    const body_runs = rows * cols;
+    const body_text = rows * cols * text_bytes_per_cell;
+    const gutter_runs = rows * gutter.runsPerRow(folds, markers);
+    const gutter_text = rows * gutter.bytesPerRow(props.total_lines, folds, markers);
+    const sticky_runs = n_sticky * (cols + gutter.runsPerRow(false, false));
+    const sticky_text = n_sticky * (cols * text_bytes_per_cell + gutter.bytesPerRow(sticky_max_number, false, false));
+    return .{
+        .runs = body_runs + gutter_runs + sticky_runs,
+        .text_bytes = body_text + gutter_text + sticky_text,
+        .body_runs = body_runs,
+        .body_text_bytes = body_text,
+    };
+}
+
+/// 길이 `len` 인 저장소에서 앞 층(`front`)이 가질 몫 — 전체 필요량이 `total` 일 때.
+///
+/// 넉넉하면(`len ≥ total`) 뒤 층 몫을 **정확히** 떼고 나머지를 전부 앞에 준다. 모자라면 뒤 층(gutter·sticky)에
+/// **먼저** 주되 절반까지만 준다 — 번호가 본문보다 먼저지만(§4 「줄 번호 배치는 예산과 무관하게」), 호출자가
+/// 저장소를 적게 준 것만으로 본문이 통째로 비면 안 된다. 절반 상한은 몫이 생기기 전의 글자 예약 규칙 그대로다.
+fn frontShare(len: usize, total: usize, front: usize) usize {
+    const tail = total -| front;
+    if (len >= total) return len - tail;
+    return len - @min(tail, len / 2);
+}
+
+/// 한 저장소를 여러 pane 이 **몫대로** 나눌 때 `i` 번째 조각(비교 뷰 둘·병합 넷). 넉넉하면 각자 자기 몫을
+/// 정확히 받고(마지막이 남는 것을 가진다), 모자라면 몫에 비례해 나눈다. 몫이 전부 0 이면 균등하게 나눈다.
+///
+/// **반반·넷으로 나누면 안 된다** — 한쪽이 촘촘하고 다른 쪽이 비어도 같은 양을 받아, 촘촘한 쪽의 줄 번호가
+/// 빈 쪽 몫을 두고 사라진다. 균등하게 나눠 자리를 값으로 드는 배열(시각 행 등)은 이 함수를 쓰지 않는다.
+pub fn shareRange(len: usize, needs: []const usize, i: usize) struct { start: usize, end: usize } {
+    var total: usize = 0;
+    var before: usize = 0;
+    for (needs, 0..) |nd, k| {
+        total += nd;
+        if (k < i) before += nd;
+    }
+    const last = i + 1 >= needs.len;
+    if (total == 0) {
+        const each = len / @max(needs.len, 1);
+        return .{ .start = each * i, .end = if (last) len else each * (i + 1) };
+    }
+    if (len >= total) {
+        return .{ .start = before, .end = if (last) len else before + needs[i] };
+    }
+    const start = len * before / total;
+    return .{ .start = start, .end = if (last) len else len * (before + needs[i]) / total };
+}
+
+/// 호출자가 소유하는 run·글자 저장소 — **프레임을 넘어 유지**하고 `bufferSizes` 가 더 크게 부를 때만 다시
+/// 잡는다(visual-mapping §4 「저장소는 세션에 하나다」). `build` 는 할당하지 않는다 — 이 타입은 호출자가 부른다.
+/// 할당이 실패하면 가진 만큼으로 그린다(절단은 `build` 가 알린다).
+pub const RunTextPool = struct {
+    runs: []draw.Run = &.{},
+    text_bytes: []u8 = &.{},
+
+    pub fn deinit(self: *RunTextPool, allocator: std.mem.Allocator) void {
+        allocator.free(self.runs);
+        allocator.free(self.text_bytes);
+        self.* = .{};
+    }
+
+    /// `need` 만큼 자리를 보장하고, `base` 의 run·글자를 이 저장소로 바꾼 것을 돌려준다.
+    pub fn scratchFor(self: *RunTextPool, allocator: std.mem.Allocator, need: BufferSizes, base: Scratch) Scratch {
+        if (self.runs.len < need.runs) {
+            if (allocator.alloc(draw.Run, need.runs)) |fresh| {
+                allocator.free(self.runs);
+                self.runs = fresh;
+            } else |_| {}
+        }
+        if (self.text_bytes.len < need.text_bytes) {
+            if (allocator.alloc(u8, need.text_bytes)) |fresh| {
+                allocator.free(self.text_bytes);
+                self.text_bytes = fresh;
+            } else |_| {}
+        }
+        var s = base;
+        s.runs = self.runs;
+        s.text_bytes = self.text_bytes;
+        return s;
+    }
+};
+
 /// 지금 네비게이션이 가리키는 검색 결과 — 줄(`search_marks`와 **같은 축**)과 그 줄 안 시작 byte.
 ///
 /// `Mark`를 쓰지 않는 이유: 길이는 이미 `search_marks` 쪽에 있고, 여기 또 두면 둘이 다를 수 있다.
@@ -565,7 +696,7 @@ fn rowsOfLine(props: Props, layout: geometry.Layout, line: usize, scratch: []u8)
 }
 
 pub fn build(props: Props, scratch: Scratch) Written {
-    const layout = geometry.compute(props.total_cols, props.total_lines, .{});
+    const layout = layoutOf(props);
 
     // ── 1) 배경 ────────────────────────────────────────────────────────────────
     // **맨 앞이어야 한다**(painter). 뒤로 가면 글자를 덮는다(§4.1b).
@@ -592,19 +723,17 @@ pub fn build(props: Props, scratch: Scratch) Written {
     }
     const visual_budget = @min(props.visible_rows, scratch.visual_rows.len);
 
-    // **gutter 몫을 먼저 뗀다.** 본문이 먼저 도는 순서의 대가다 — 긴 줄 하나가 저장소를 다 쓰면
-    // 뒤에 도는 gutter가 줄 번호를 못 그린다. 본문이 덜 그려지면 그 줄만 짧게 보이지만, 번호가
+    // **뒤 층(gutter·sticky) 몫을 먼저 뗀다 — 글자만이 아니라 run 도.** 본문이 먼저 도는 순서의 대가다 — 본문이
+    // 저장소를 다 쓰면 뒤에 도는 gutter 가 줄 번호를 못 그린다. 본문이 덜 그려지면 그 줄만 짧게 보이지만, 번호가
     // 없으면 화면 전체가 문서의 어디인지 알 수 없다.
     //
-    // 예약은 **실제 자릿수**로 잡는다. `max_digits`로 잡으면 실제의 스무 배를 떼어 본문이 근거
-    // 없이 줄어든다 — 저장소를 나눠 쓰므로 한쪽의 과잉이 다른 쪽의 손실이다.
-    const gutter_reserve = @min(
-        scratch.text_bytes.len / 2,
-        // 표식 몫은 **표식을 실제로 그릴 때만** 뗀다 — 접힘 칸이 없는 레이아웃(`features.folding = false`)
-        // 에서 예약만 늘리면 그만큼 본문이 근거 없이 줄어든다.
-        gutter.scratchNeeded(@intCast(visual_budget), props.total_lines, props.folds != null and !layout.folding.isEmpty()),
-    );
-    const content_scratch = scratch.text_bytes[0 .. scratch.text_bytes.len - gutter_reserve];
+    // **예전에는 글자 바이트만 뗐다.** 그때는 본문이 한 행에 run 을 정확히 하나 써서 run 합이 `2 × 행 수` 를
+    // 못 넘었는데, 구문 색이 한 행의 run 을 토큰 수로 늘린 뒤로 본문이 run 을 다 쓰고 gutter 가 0 개를 받았다 —
+    // 비교 뷰 한 열 640 개에서 68행 Zig 화면이 649 개를 요구해 **첫 줄부터 번호가 전부 사라졌다**(2026-09-24 제보).
+    // 몫은 `bufferSizes` 하나가 정한다 — 여기서 따로 세면 두 번째 출처가 된다.
+    const sizes = bufferSizes(props);
+    const body_runs = scratch.runs[0..frontShare(scratch.runs.len, sizes.runs, sizes.body_runs)];
+    const content_scratch = scratch.text_bytes[0..frontShare(scratch.text_bytes.len, sizes.text_bytes, sizes.body_text_bytes)];
 
     const cw = content.build(.{
         .layout = layout,
@@ -617,7 +746,10 @@ pub fn build(props: Props, scratch: Scratch) Written {
         .cell_h_px = props.cell_h_px,
         .origin_px = .{ .x = props.rect.x, .y = props.rect.y },
         .font_px = props.font_px,
-    }, scratch.ops[bg.ops..], content_scratch, scratch.runs, scratch.visual_rows[0..visual_budget]);
+    }, scratch.ops[bg.ops..], content_scratch, body_runs, scratch.visual_rows[0..visual_budget]);
+    // **불변식 ⑴**(`bufferSizes` doc): run 하나가 적어도 한 칸이면 한 행의 본문 run 은 본문 열 수를 넘지 않는다.
+    // 여기서 넘으면 몫이 틀렸다 — 가르는 규칙이 칸 없는 run 을 내기 시작한 것이다.
+    std.debug.assert(cw.runs <= sizes.body_runs);
 
     // ── 3) gutter ──────────────────────────────────────────────────────────────
     // 본문이 정한 시각 배치를 그대로 따른다 — 이어진 조각에는 번호가 비어야 한다.
@@ -652,6 +784,7 @@ pub fn build(props: Props, scratch: Scratch) Written {
         .origin_px = .{ .x = props.rect.x, .y = props.rect.y },
         .font_px = props.font_px,
     }, scratch.ops[bg.ops + cw.ops ..], scratch.text_bytes[cw.bytes..], scratch.runs[cw.runs..]);
+    std.debug.assert(gw.runs <= @as(usize, props.visible_rows) * gutter.runsPerRow(props.folds != null and !layout.folding.isEmpty(), props.diag_markers != null and !layout.leading_margin.isEmpty()));
 
     // ── 4) 스크롤바 ────────────────────────────────────────────────────────────
     // **문서 전체의 시각 행 수**라야 막대 길이가 맞는다(§4.1a) — 논리 줄로 세면 랩된 문서에서
@@ -1021,6 +1154,8 @@ fn paintSticky(props: Props, layout: geometry.Layout, scratch: Scratch, keep_fro
         .font_px = props.font_px,
     }, scratch.ops[w..], scratch.text_bytes[bytes_used + cwr.bytes ..], scratch.runs[runs_used + cwr.runs ..]);
     w += gw.ops;
+    // sticky 몫(`bufferSizes`)을 넘으면 불변식이 깨졌다 — 머리줄은 한 행이고 번호만 붙는다.
+    std.debug.assert(cwr.runs + gw.runs <= n * (@as(usize, layout.content.width) + gutter.runsPerRow(false, false)));
 
     // ③ 경계선 — 마지막 고정 행의 아래 가장자리 **2px**. **quad 로 낸다** — 편집기 pane 의 lowering 은 `rule` 을 안 그린다(캡처에서
     //    픽셀로 쟀다: 경계 열이 전부 바탕색이었다). 그리고 **1px 은 안 보인다** — quad 셰이더의 SDF 가장자리 AA(`maru_metal_shader.h`
@@ -5527,4 +5662,243 @@ test "WSF5 공백 기호의 층 — 선택 배경 위, 검색 강조·caret 아�
     try testing.expect(last_sel.? < first_ws.?);
     try testing.expect(last_ws.? < first_find.?);
     try testing.expect(last_ws.? < first_caret.?);
+}
+
+// ── draw 저장소 몫(visual-mapping §4 「몫은 층마다 세고」) ─────────────────────────────────────────────
+//
+// 판정자 함정 넷(plans/native-editor.md 「draw 저장소 몫」 — 2026-09-24 사전 검증이 드러냈다)을 그대로 따른다:
+// ⑴ 최악을 **직접 만든** 입력을 섞는다(무작위만으로는 sticky·`+ 3` 몫을 빼는 변이가 살아남았다) ⑵ 소비를 **버퍼
+// 최고 수위**로 잰다(sticky 가 걷어 낸 본문 run 은 쓰인 채 버려진다) ⑶ 접힘·진단 표식을 넣는다(`+ 3` 은 그때만
+// 쓰인다) ⑷ 인레이·위젯이 **실제로 그려졌는지** 따로 센다.
+
+/// 판정자용 — `ops` 가 가리키는 run 들 중 `base` 안에서 가장 멀리 쓴 자리(버퍼 최고 수위).
+fn runHighWater(ops: []const draw.Op, base: []const draw.Run) usize {
+    var hw: usize = 0;
+    const b = @intFromPtr(base.ptr);
+    const e = b + base.len * @sizeOf(draw.Run);
+    for (ops) |op| if (op == .text and op.text.runs.len > 0) {
+        const p = @intFromPtr(op.text.runs.ptr);
+        const pe = p + op.text.runs.len * @sizeOf(draw.Run);
+        if (p >= b and pe <= e) hw = @max(hw, (pe - b) / @sizeOf(draw.Run));
+    };
+    return hw;
+}
+
+/// 판정자용 — 두 op 목록이 **내용**으로 같은가(종류·좌표·역할·run 글자와 역할). 값 그대로 비교하면 run·글자
+/// 저장소의 주소가 달라 늘 다르다.
+fn sameOpContent(a: []const draw.Op, b: []const draw.Op) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |x, y| {
+        if (std.meta.activeTag(x) != std.meta.activeTag(y)) return false;
+        switch (x) {
+            .text => |tx| {
+                const ty = y.text;
+                if (!std.meta.eql(tx.origin, ty.origin) or tx.role != ty.role or tx.max_cols != ty.max_cols) return false;
+                if (tx.runs.len != ty.runs.len) return false;
+                for (tx.runs, ty.runs) |rx, ry| {
+                    if (rx.role != ry.role or rx.bold != ry.bold or !std.mem.eql(u8, rx.text, ry.text)) return false;
+                }
+            },
+            else => if (!std.meta.eql(x, y)) return false,
+        }
+    }
+    return true;
+}
+
+/// 판정자용 넉넉한 저장소 — run·글자는 `runs`·`text` 로 따로 준다(몫대로 좁히려고).
+const WideBuffers = struct {
+    ops: []draw.Op,
+    content_rows: [512]content.Row = undefined,
+    visual_rows: [512]visual_map.VisualRow = undefined,
+    gutter_rows: [512]gutter.Row = undefined,
+    row_counts: [4096]u32 = undefined,
+    count_scratch: [content.count_scratch_bytes]u8 = undefined,
+    caret_cols_store: [512]u32 = undefined,
+
+    fn scratch(self: *WideBuffers, runs: []draw.Run, text: []u8) Scratch {
+        return .{
+            .ops = self.ops,
+            .text_bytes = text,
+            .runs = runs,
+            .content_rows = &self.content_rows,
+            .visual_rows = &self.visual_rows,
+            .gutter_rows = &self.gutter_rows,
+            .row_counts = &self.row_counts,
+            .count_scratch = &self.count_scratch,
+            .caret_cols = &self.caret_cols_store,
+        };
+    }
+};
+
+/// 판정자용 문서 하나 — 최악(1칸 글자로 가득·열마다 번갈아 색·모든 줄 표식·인레이·위젯·sticky 가득)이거나 무작위.
+fn budgetDoc(ar: std.mem.Allocator, r: std.Random, worst: bool) !Props {
+    const pieces = [_][]const u8{ "a", " ", "\t", "\u{D55C}", "😀", "\u{0301}", "\u{2062}", "\u{202E}", "①", "👨\u{200D}👩", "{" };
+    const n_lines: usize = if (worst) 300 else r.intRangeAtMost(usize, 1, 100);
+    const lines = try ar.alloc([]const u8, n_lines);
+    const colors = try ar.alloc([]const content.ColorSpan, n_lines);
+    const carets = try ar.alloc([]const u32, n_lines);
+    const inlays = try ar.alloc([]const content.Inlay, n_lines);
+    const widgets = try ar.alloc(?content.Widget, n_lines);
+    const folds = try ar.alloc(gutter.Fold, n_lines);
+    const marks = try ar.alloc(?diagnostic.Level, n_lines);
+    for (lines, 0..) |*l, li| {
+        var buf: std.ArrayList(u8) = .empty;
+        var offs: std.ArrayList(u32) = .empty;
+        const np: usize = if (worst) 300 else r.uintAtMost(usize, 80);
+        for (0..np) |_| {
+            try offs.append(ar, @intCast(buf.items.len));
+            try buf.appendSlice(ar, if (worst) "a" else pieces[r.uintLessThan(usize, pieces.len)]);
+        }
+        l.* = buf.items;
+        var cs: std.ArrayList(content.ColorSpan) = .empty;
+        var c: u32 = 0;
+        while (c < 700) : (c += 1) {
+            if ((worst and c % 2 == 0) or (!worst and r.boolean()))
+                try cs.append(ar, .{ .start_col = c, .end_col = c + 1, .role = if (r.boolean()) .syntax_keyword else .syntax_string });
+        }
+        colors[li] = cs.items;
+        var cc: std.ArrayList(u32) = .empty;
+        var il: std.ArrayList(content.Inlay) = .empty;
+        for (offs.items, 0..) |o, k| {
+            if ((worst and k % 7 == 3) or (!worst and r.uintLessThan(u8, 30) == 0)) try cc.append(ar, o);
+            if ((worst and k % 5 == 1) or (!worst and r.uintLessThan(u8, 10) == 0)) try il.append(ar, .{ .at = o, .text = if (worst) "x" else ": u32" });
+        }
+        carets[li] = cc.items;
+        inlays[li] = il.items;
+        widgets[li] = if ((worst and li % 3 == 0) or (!worst and r.uintLessThan(u8, 6) == 0))
+            content.Widget{ .text = "Accept Current | Accept Incoming | Accept Both", .col = r.uintAtMost(u32, 20) }
+        else
+            null;
+        folds[li] = if (worst or r.boolean()) .open else .none;
+        marks[li] = if (worst or r.boolean()) .err else null;
+    }
+    const n_sticky: usize = if (worst) sticky_max_rows else r.uintAtMost(usize, sticky_max_rows);
+    const sticky = try ar.alloc(StickyLine, n_sticky);
+    for (sticky, 0..) |*sl, i| sl.* = .{ .number = i + 1, .bytes = lines[i % n_lines], .colors = colors[i % n_lines] };
+
+    var props = testProps(lines, if (worst) true else r.boolean());
+    props.line_colors = colors;
+    props.carets = carets;
+    props.caret_shape = .block;
+    props.line_inlays = .{ .first = 0, .rows = inlays, .generation = 1 };
+    props.line_widgets = widgets;
+    props.folds = folds;
+    props.diag_markers = marks;
+    props.sticky = sticky;
+    props.first_line = if (worst) 0 else r.uintLessThan(usize, n_lines);
+    props.visible_rows = r.intRangeAtMost(u16, 3, 200);
+    props.total_cols = r.intRangeAtMost(u16, 20, 160);
+    if (!props.wrap) props.first_col = r.uintAtMost(u32, 60);
+    props.rect = .{ .x = 0, .y = 0, .w = @as(u32, props.total_cols) * 8 + 16, .h = @as(u32, props.visible_rows) * 16 };
+    return props;
+}
+
+test "RB1 bufferSizes 만큼만 잡아도 절단이 없고 넉넉한 저장소와 op 내용이 같다 — 최악·무작위, 버퍼 최고 수위가 몫 안이다 (visual-mapping §4)" {
+    const a = testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x7b1);
+    const r = prng.random();
+    const ops_exact = try a.alloc(draw.Op, 40000);
+    defer a.free(ops_exact);
+    const ops_wide = try a.alloc(draw.Op, 40000);
+    defer a.free(ops_wide);
+    const wide_runs = try a.alloc(draw.Run, 200000);
+    defer a.free(wide_runs);
+    const wide_text = try a.alloc(u8, 2_000_000);
+    defer a.free(wide_text);
+    var exact_bufs: WideBuffers = .{ .ops = ops_exact };
+    var wide_bufs: WideBuffers = .{ .ops = ops_wide };
+    var inlays_seen: usize = 0;
+    var widgets_seen: usize = 0;
+    var sticky_frames: usize = 0;
+    for (0..400) |iter| {
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        const ar = arena.allocator();
+        const props = try budgetDoc(ar, r, iter % 2 == 0);
+        const sizes = bufferSizes(props);
+        const runs = try ar.alloc(draw.Run, sizes.runs);
+        const text = try ar.alloc(u8, sizes.text_bytes);
+
+        const we = build(props, exact_bufs.scratch(runs, text));
+        const ww = build(props, wide_bufs.scratch(wide_runs, wide_text));
+        try testing.expect(!ww.truncated); // 넉넉한 쪽이 먼저 온전해야 비교가 뜻을 갖는다
+        try testing.expect(!we.truncated);
+        try testing.expect(sameOpContent(ops_exact[0..we.ops], ops_wide[0..ww.ops]));
+        try testing.expect(runHighWater(ops_wide[0..ww.ops], wide_runs) <= sizes.runs);
+
+        for (ops_wide[0..ww.ops]) |op| if (op == .text) {
+            for (op.text.runs) |run| {
+                if (run.role == .syntax_comment) inlays_seen += 1;
+            }
+            if (op.text.runs.len > 0 and std.mem.startsWith(u8, op.text.runs[0].text, "Accept")) widgets_seen += 1;
+        };
+        if (props.sticky.len > 0) sticky_frames += 1;
+    }
+    // 입력이 **실제로 그려졌다** — 넣었지만 안 그려져서 통과하는 상태를 막는다.
+    try testing.expect(inlays_seen > 0);
+    try testing.expect(widgets_seen > 0);
+    try testing.expect(sticky_frames > 0);
+}
+
+/// 판정자용 — 번호 op 수(본문 시작 열보다 왼쪽의 글자 op 중 숫자로 시작하는 것).
+fn numberOps(ops: []const draw.Op, props: Props) usize {
+    const layout = layoutOf(props);
+    const content_start_px = props.rect.x + @as(i32, layout.content.start) * @as(i32, props.cell_w_px);
+    var seen: usize = 0;
+    for (ops) |op| if (op == .text and op.text.origin.x < content_start_px and op.text.runs.len > 0) {
+        const t = op.text.runs[0].text;
+        if (t.len > 0 and t[0] >= '0' and t[0] <= '9') seen += 1;
+    };
+    return seen;
+}
+
+test "RB2 축마다 따로 좁혀도 번호가 다 선다 — run 만 반, 글자만 반 (예전엔 글자만 뗐다)" {
+    const a = testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x7b2);
+    const r = prng.random();
+    const ops = try a.alloc(draw.Op, 40000);
+    defer a.free(ops);
+    var bufs: WideBuffers = .{ .ops = ops };
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const ar = arena.allocator();
+    var props = try budgetDoc(ar, r, true);
+    props.visible_rows = 68;
+    props.total_cols = 70;
+    props.sticky = &.{}; // 번호만 센다 — sticky 는 RB1 이 본다
+    props.rect = .{ .x = 0, .y = 0, .w = 70 * 8 + 16, .h = 68 * 16 };
+    const sizes = bufferSizes(props);
+
+    const full_runs = try ar.alloc(draw.Run, sizes.runs);
+    const full_text = try ar.alloc(u8, sizes.text_bytes);
+    const full = build(props, bufs.scratch(full_runs, full_text));
+    const want = numberOps(ops[0..full.ops], props);
+    try testing.expect(want > 0);
+
+    // **run 축** — 본문이 몫을 다 쓰는 입력(열마다 번갈아 색)에 run 을 절반만 준다.
+    const half_runs = try ar.alloc(draw.Run, sizes.runs / 2);
+    const wr = build(props, bufs.scratch(half_runs, full_text));
+    try testing.expectEqual(want, numberOps(ops[0..wr.ops], props));
+    try testing.expect(wr.truncated); // 본문은 잘렸다 — 그래서 이 판정이 경쟁을 실제로 만든다
+
+    // **글자 축** — 인레이·탭이 없으면 전개가 저장소를 안 쓰므로 인레이가 든 입력(RB 문서)에 글자만 절반.
+    const half_text = try ar.alloc(u8, sizes.text_bytes / 2);
+    const wt = build(props, bufs.scratch(full_runs, half_text));
+    try testing.expectEqual(want, numberOps(ops[0..wt.ops], props));
+}
+
+test "RB5 shareRange — 넉넉하면 몫 그대로·모자라면 비례·몫이 없으면 균등, 마지막이 나머지를 갖는다" {
+    const needs = [_]usize{ 30, 10 };
+    // 넉넉하다 — 왼쪽은 정확히 30, 오른쪽이 나머지(70)
+    try testing.expectEqual(@as(usize, 0), shareRange(100, &needs, 0).start);
+    try testing.expectEqual(@as(usize, 30), shareRange(100, &needs, 0).end);
+    try testing.expectEqual(@as(usize, 30), shareRange(100, &needs, 1).start);
+    try testing.expectEqual(@as(usize, 100), shareRange(100, &needs, 1).end);
+    // 모자라다 — 3:1 비례
+    try testing.expectEqual(@as(usize, 15), shareRange(20, &needs, 0).end);
+    try testing.expectEqual(@as(usize, 20), shareRange(20, &needs, 1).end);
+    // 몫이 전부 0 — 균등
+    const zero = [_]usize{ 0, 0, 0, 0 };
+    try testing.expectEqual(@as(usize, 25), shareRange(100, &zero, 1).start);
+    try testing.expectEqual(@as(usize, 100), shareRange(100, &zero, 3).end);
 }

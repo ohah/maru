@@ -358,7 +358,7 @@ pub fn main(init: std.process.Init) !void {
     var file_tree_nodes: [16]chrome.ui.tree.UiNode = undefined;
     var file_tree_actions: [12]chrome.components.file_tree.ids.Entry = undefined;
     var text_runs: [lab.frame_run_capacity]chrome.draw.Run = undefined;
-    var text_bytes: [2048]u8 = undefined;
+    var text_bytes: [lab.frame_text_capacity]u8 = undefined;
     // SB1 §5.2: 사이드바 배경 strip이 상태바 위에서 끊기는지 **픽셀로** 보는 시나리오에서만 값을 싣는다.
     // 나머지 시나리오는 0이라 기존 캡처와 바이트 동일하다.
     const sidebar_width_px: u32 = if (scenario_id == .sidebar_status_strip) 180 else 0;

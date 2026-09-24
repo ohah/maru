@@ -16,6 +16,9 @@ pub const event_flag = struct {
     pub const middle_mouse_button: u32 = 1 << 5;
     pub const right_mouse_button: u32 = 1 << 6;
     pub const command_down: u32 = 1 << 7;
+    pub const is_key_pad: u32 = 1 << 9;
+    pub const is_left: u32 = 1 << 10;
+    pub const is_right: u32 = 1 << 11;
     pub const is_repeat: u32 = 1 << 13;
     pub const precision_scrolling_delta: u32 = 1 << 14;
 };
@@ -33,6 +36,9 @@ pub fn flags(modifiers: message.Modifiers) u32 {
     if (modifiers.right_button) out |= event_flag.right_mouse_button;
     if (modifiers.is_repeat) out |= event_flag.is_repeat;
     if (modifiers.precise_scroll) out |= event_flag.precision_scrolling_delta;
+    if (modifiers.key_pad) out |= event_flag.is_key_pad;
+    if (modifiers.is_left) out |= event_flag.is_left;
+    if (modifiers.is_right) out |= event_flag.is_right;
     return out;
 }
 

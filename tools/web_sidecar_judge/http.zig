@@ -15,7 +15,7 @@
 //!   /static       한 번 칠하고 멈춘 페이지(W2 — 그리기가 없어도 못 알린 링을 다시 알리는지)
 //!   /input        입력 판정(W4) — 입력칸(0,0 300×40)·문단(y 100)·링크(y 200)·긴 본문. 첫 프레임 뒤에 `input-ready`(그 전의
 //!                 입력은 렌더러가 버린다 — 실측). 입력이 만든 마지막 상태를 제목으로
-//!                 (`click:x,y,button,detail` · `val:` · `comp-val:` · `end:조합:값` · `key:e:ctrl:KeyE` · `blur` ·
+//!                 (`click:x,y,button,detail` · `dbl:2` · `val:` · `comp-val:` · `end:조합:값` · `key:e:ctrl:KeyE` · `blur` ·
 //!                 `ctx:x,y` · `aux:1` · `sel:yes|no` · `leave` · `scroll:down`). 제목은 조절돼 마지막 것만 오므로 한 입력이
 //!                 제목을 둘 바꾸지 않게 이벤트를 골랐다
 
@@ -131,8 +131,8 @@ fn page(path: []const u8, query: []const u8, buf: []u8) ![]const u8 {
 const input_page =
     \\<!doctype html><title>loading</title>
     \\<style>body{margin:0;height:3000px;font:16px sans-serif}#i{position:absolute;left:0;top:0;width:300px;height:40px;box-sizing:border-box}
-    \\#p{position:absolute;left:0;top:100px;width:600px;margin:0;line-height:20px}#a{position:absolute;left:0;top:200px;display:block;width:200px;height:30px}</style>
-    \\<input id=i><p id=p>maru selects this paragraph text by dragging across it</p><a id=a href="#x">link</a>
+    \\#p{position:absolute;left:0;top:100px;width:600px;margin:0;line-height:20px}#a{position:absolute;left:0;top:200px;display:block;width:200px;height:30px}#d{position:absolute;left:0;top:300px;width:200px;height:40px}</style>
+    \\<input id=i><p id=p>maru selects this paragraph text by dragging across it</p><a id=a href="#x">link</a><div id=d></div>
     \\<script>var i=document.getElementById('i');function t(s){document.title=s}
     \\addEventListener('click',function(e){if(e.target.id!='p')t('click:'+e.clientX+','+e.clientY+','+e.button+','+e.detail)});
     \\i.addEventListener('input',function(e){t((e.isComposing?'comp-val:':'val:')+i.value)});
@@ -141,6 +141,7 @@ const input_page =
     \\i.addEventListener('blur',function(){t('blur')});
     \\addEventListener('contextmenu',function(e){t('ctx:'+e.clientX+','+e.clientY)});
     \\addEventListener('auxclick',function(e){if(e.button==1)t('aux:1')});
+    \\document.getElementById('d').addEventListener('dblclick',function(e){t('dbl:'+e.detail)});
     \\addEventListener('mouseup',function(e){if(e.button==0&&e.target.id=='p')t('sel:'+(getSelection().toString().length>=5?'yes':'no'))});
     \\addEventListener('scroll',function(){if(scrollY>0)t('scroll:down')});
     \\document.documentElement.addEventListener('mouseleave',function(){t('leave')});

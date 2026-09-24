@@ -11,6 +11,7 @@ const ReadCursor = wire.ReadCursor;
 const Error = wire.Error;
 const max_url_bytes = wire.max_url_bytes;
 const max_text_bytes = wire.max_text_bytes;
+const max_ime_text_bytes = wire.max_ime_text_bytes;
 const BrowserId = message.BrowserId;
 const ViewSize = message.ViewSize;
 const Hello = message.Hello;
@@ -103,29 +104,62 @@ pub fn readPoint(cursor: *ReadCursor) Error!Point {
     return .{ .x = try readExtent(cursor), .y = try readExtent(cursor) };
 }
 
-/// down·up 은 1~3 번째 클릭, move·leave 는 0.
+/// down·up 은 1 번째 이상의 클릭, move·leave 는 0.
 pub fn validClickCount(mouse: Mouse) bool {
     return switch (mouse.kind) {
-        .down, .up => mouse.click_count >= 1 and mouse.click_count <= 3,
+        .down, .up => mouse.click_count >= 1,
         .move, .leave => mouse.click_count == 0,
     };
 }
 
-pub fn validRange(range: TextRange) bool {
+/// `selection` 은 조합 글 안의 위치(글 상한 안), `replacement` 는 입력칸 전체 글 안의 위치라 순서만 본다(적대 검증 — 5000 자
+/// 입력칸 끝의 조합이 거절됐다). 둘 다 「없음」이거나 순서가 맞아야 하고, 한쪽만 최댓값인 반쪽 「없음」은 거절한다.
+pub const RangeKind = enum { selection, replacement };
+
+pub fn validRange(range: TextRange, kind: RangeKind) bool {
     if (range.isNone()) return true;
-    return range.start <= range.end and range.end <= max_text_bytes;
+    if (range.start > range.end or range.end == std.math.maxInt(u32)) return false;
+    return switch (kind) {
+        .selection => range.end <= max_ime_text_bytes,
+        .replacement => true,
+    };
 }
 
-pub fn writeRange(cursor: *Cursor, range: TextRange) Error!void {
-    if (!validRange(range)) return error.InvalidRange;
+pub fn writeRange(cursor: *Cursor, range: TextRange, kind: RangeKind) Error!void {
+    if (!validRange(range, kind)) return error.InvalidRange;
     try cursor.writeU32(range.start);
     try cursor.writeU32(range.end);
 }
 
-pub fn readRange(cursor: *ReadCursor) Error!TextRange {
+pub fn readRange(cursor: *ReadCursor, kind: RangeKind) Error!TextRange {
     const range: TextRange = .{ .start = try cursor.readU32(), .end = try cursor.readU32() };
-    if (!validRange(range)) return error.InvalidRange;
+    if (!validRange(range, kind)) return error.InvalidRange;
     return range;
+}
+
+/// IME 글: 상한은 `max_ime_text_bytes`, UTF-8, 탭·줄바꿈(LF·CR)을 뺀 제어 문자는 거절한다 — 받아쓰기 「줄 바꿈」이 `\n` 을
+/// 넣는다(적대 검증). 제목용 `checkText` 와 따로 둔다.
+pub fn checkImeText(text: []const u8) Error!void {
+    if (text.len > max_ime_text_bytes) return error.TextTooLarge;
+    if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidUtf8;
+    for (text) |byte| {
+        if (byte == '\t' or byte == '\n' or byte == '\r') continue;
+        if (byte < 0x20 or byte == 0x7f) return error.ControlCharacter;
+    }
+}
+
+pub fn writeImeText(cursor: *Cursor, text: []const u8) Error!void {
+    try checkImeText(text);
+    try cursor.writeU32(@intCast(text.len));
+    try cursor.writeBytes(text);
+}
+
+pub fn readImeText(cursor: *ReadCursor) Error![]const u8 {
+    const len = try cursor.readU32();
+    if (len > max_ime_text_bytes) return error.TextTooLarge;
+    const text = try cursor.readBytes(len);
+    try checkImeText(text);
+    return text;
 }
 
 pub fn writeRect(cursor: *Cursor, rect: Rect) Error!void {

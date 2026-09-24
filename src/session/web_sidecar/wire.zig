@@ -16,6 +16,9 @@ pub const version: u16 = 1;
 pub const max_url_bytes: usize = 32 * 1024;
 /// sidecar 가 보내는 글(제목·실패 설명) 상한. sidecar 는 `clampUtf8` 로 잘라서 보낸다.
 pub const max_text_bytes: usize = 4 * 1024;
+/// maru 가 보내는 IME 글 상한(W4). 제목용 상한(4 KiB)보다 크다 — 받아쓰기·입력 서비스가 한 번에 긴 글을 넣는다(적대 검증).
+/// 이보다 긴 글은 maru 가 글자 경계에서 나눠 보낸다.
+pub const max_ime_text_bytes: usize = 16 * 1024;
 /// bootstrap 이름 상한 — launchd 이름(`name_t`)이 128 바이트다.
 pub const max_service_bytes: usize = 127;
 /// 가장 큰 메시지(`create_browser` + URL 상한)의 frame 크기 — 상한을 따로 두면 그 사이 크기의 frame 이 끝까지 쌓였다가

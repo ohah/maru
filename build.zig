@@ -8746,7 +8746,7 @@ pub fn build(b: *std.Build) void {
 
     // 웹 OSR sidecar(W1b) 등록은 `build/web_sidecar.zig` 가 소유한다 — CEF 없는 시험은 기본 test 에,
     // sidecar 실행 파일은 `-Dcef-sdk` 가 있을 때만 `web-sidecar` 스텝에.
-    web_sidecar_build.register(b, .{ .target = target, .optimize = optimize, .test_step = test_step });
+    web_sidecar_build.register(b, .{ .target = target, .optimize = optimize, .test_step = test_step, .macos_sdk = macos_sdk });
 
     // Opt-in external oracle: validates committed goldens against system libvterm.
     // Intentionally NOT wired into the default `test` step or `mise run check` so

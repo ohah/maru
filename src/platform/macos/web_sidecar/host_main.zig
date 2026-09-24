@@ -20,6 +20,8 @@ const inbox_mod = @import("inbox.zig");
 const dispatch = @import("dispatch.zig");
 const app = @import("app.zig");
 const settings_mod = @import("settings.zig");
+const profile = @import("profile.zig");
+const browsers = @import("browsers.zig");
 
 /// 종료 코드. maru 는 이 값으로 알림을 못 받은 실패(채널이 없거나 닫힌 뒤)를 가른다.
 pub const ExitCode = enum(u8) {
@@ -30,6 +32,8 @@ pub const ExitCode = enum(u8) {
     framework_unavailable = 13,
     cef_initialize_failed = 14,
     reader_thread_failed = 15,
+    /// 같은 프로필을 다른 sidecar 가 쥐고 있다(CEF process singleton — exit code 24 로 알려 온다).
+    profile_in_use = 16,
 };
 
 // CEF 콜백·읽기 스레드가 닿아야 해서 전역이다(프로세스에 하나).
@@ -55,14 +59,18 @@ fn run(init: std.process.Init) ExitCode {
     const sentinel = "maru-web-host: stdio ready\n";
     _ = std.c.write(1, sentinel.ptr, sentinel.len);
     g_writer = .{ .fd = channels.events };
-    g_dispatcher = .{ .writer = &g_writer, .handler = .{ .context = undefined, .browser_command = &dispatch.rejectBrowserCommand } };
+    g_dispatcher = .{ .writer = &g_writer, .handler = browsers.handler() };
 
     const hello = g_dispatcher.readHello(channels.commands) catch return .handshake_failed;
     g_writer.send(.{ .hello_ack = hello }) catch return .handshake_failed;
 
     const argv = init.minimal.args.vector;
     const profile_dir = profileDir(argv) orelse return fail(.bad_arguments, .cef_initialize_failed, "missing --profile-dir=<absolute path>");
-    ensurePrivateDir(profile_dir) catch return fail(.bad_arguments, .cef_initialize_failed, "cannot create the profile directory");
+    profile.ensurePrivateDir(profile_dir) catch |err| return fail(.bad_arguments, .cef_initialize_failed, switch (err) {
+        error.NotPrivate => "profile directory is readable by other users",
+        error.MkdirFailed => "cannot create the profile directory",
+    });
+    if (!profile.excludeFromBackup(profile_dir)) std.debug.print("maru-web-host: cannot exclude the profile from backups\n", .{});
 
     var dir_buf: layout.PathBuf = undefined;
     const install_dir = layout.executableDir(&dir_buf) catch return fail(.framework_unavailable, .cef_initialize_failed, "cannot resolve the executable path");
@@ -75,7 +83,11 @@ fn run(init: std.process.Init) ExitCode {
     var settings = settings_mod.build(&g_api, .{ .install_dir = install_dir, .profile_dir = profile_dir }) catch
         return fail(.bad_arguments, .cef_initialize_failed, "path too long");
     var main_args: c.cef_main_args_t = .{ .argc = @intCast(argv.len), .argv = @ptrCast(@constCast(argv.ptr)) };
+    browsers.init(&g_api, &g_writer);
     if (g_api.initialize(&main_args, &settings, app.get(&g_api), null) == 0) {
+        if (g_api.get_exit_code() == c.CEF_RESULT_CODE_NORMAL_EXIT_PROCESS_NOTIFIED) {
+            return fail(.profile_in_use, .profile_in_use, "profile is in use by another process");
+        }
         return fail(.cef_initialize_failed, .cef_initialize_failed, "cef_initialize failed");
     }
 
@@ -105,7 +117,8 @@ fn wakeUiThread() void {
 }
 
 fn drainTask(_: [*c]c.cef_task_t) callconv(.c) void {
-    if (g_dispatcher.drain(&g_inbox) == .quit) g_api.quit_message_loop();
+    // 열린 브라우저를 모두 닫은 뒤에 루프를 끝낸다(browsers.beginShutdown).
+    if (g_dispatcher.drain(&g_inbox) == .quit) browsers.beginShutdown();
 }
 
 /// 알릴 수 있으면 알리고 종료 코드를 돌려준다.
@@ -125,10 +138,4 @@ fn profileDir(argv: []const [*:0]const u8) ?[:0]const u8 {
         }
     }
     return null;
-}
-
-/// 프로필은 쿠키를 푸는 키가 공개값인 자리라(D7 — mock keychain) 소유자만 읽게 0700 으로 만든다.
-fn ensurePrivateDir(path: [:0]const u8) error{MkdirFailed}!void {
-    if (std.c.mkdir(path, 0o700) == 0) return;
-    if (std.c._errno().* != @intFromEnum(std.c.E.EXIST)) return error.MkdirFailed;
 }

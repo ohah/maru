@@ -223,7 +223,7 @@ flowchart TD
 
 ## 8. 후속·비범위
 
-- **A(앱 in-band 이미지 입력)**: 전송 계층에 무관한 유일한 길이므로 장기 추적. Claude Code 등에 "stdin in-band 이미지" 또는 OSC 52/5522 기반 입력이 생기면 재검토.
+- **A(앱 in-band 이미지 입력)**: 전송 계층에 무관한 유일한 길이므로 장기 추적. Claude Code 등에 "stdin in-band 이미지" 또는 OSC 52/5522 기반 입력이 생기면 재검토. **트리거 상태(2026-09-24 확인): 안 당겨졌다** — 정확히 그 요청([claude-code#42712](https://github.com/anthropics/claude-code/issues/42712) — OSC 52/5522 로 SSH 너머 이미지 붙여넣기)이 올라왔고 **closed as not planned** 다. 서드파티([jcollie/claude-clipboard-ssh](https://github.com/jcollie/claude-clipboard-ssh))가 kitty/ghostty 에 5522 를 직접 말해 우회한다 — **수요는 있으나 앱 쪽 표준 경로가 아직 없다**는 뜻이므로, 재검토 조건은 "서드파티 우회가 생겼다"가 아니라 그대로 "앱이 표준으로 말한다"로 둔다.
 - **paste(클립보드 이미지) 업로드 ✅ 구현**: Cmd+V로 클립보드 이미지(png/tiff/jpeg → PNG 정규화)를 maru ssh 원격에 업로드(ABI v69 `maru_macos_app_session_drop_image` → `app_session.handleDroppedImage` → `startUploadBytes` 공통 경로, `pasted-<pid>-N.png`, 원격 7일 보존 정리). 로컬은 Claude 등이 OS 클립보드를 직접 읽어 maru 불개입. 스크린샷 over SSH 워크플로 완성.
 - **맨 ssh + tmux control mode 통합**: 사용자 결정(2026-06-21)으로 접속 방식이 `maru ssh` 전용이 되어 **비범위**다. 맨 ssh(사용자가 직접 친)까지 지원하려면 tmux control mode 통합 등 별도 큰 트랙이 필요하며, 기본 설계(B)는 tmux 유무와 무관하므로 이 트랙 없이도 tmux 환경에서 동작한다.
 - **kitty graphics(이미지 *표시*, `plans/terminal-input-and-protocols.md` K1~K4)와의 관계**: 방향이 반대다(출력 vs 입력). 별개 기능이며 본 설계와 인프라를 공유하지 않는다.

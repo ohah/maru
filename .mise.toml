@@ -170,7 +170,7 @@ run = "sh tools/cef-sdk-fetch.sh"
 
 [tasks.web-sidecar]
 description = "Build maru-web-host/helper and the W1b judge into zig-out/web-sidecar (opt-in; fetches the CEF SDK)"
-run = 'zig build web-sidecar -Dcef-sdk="$(sh tools/cef-sdk-fetch.sh)"'
+run = 'sdk=$(sh tools/cef-sdk-fetch.sh) && zig build web-sidecar -Dcef-sdk="$sdk"'
 
 [tasks.web-sidecar-judge]
 description = "Run the W1b judge against a real maru-web-host (handshake, helper sandbox, clean shutdown, parent death)"

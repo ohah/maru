@@ -242,6 +242,8 @@ pub const editor = struct {
     pub const brackets = @import("session/editor/brackets.zig");
     /// 들여쓰기 안내선(visual-mapping §5.1c) — 줄마다 단계 · 간격 추정(VS Code guessIndentation) · 활성 블록. 들여쓰기 열은 접힘(`fold.indentOf`)과 한 출처.
     pub const indent_guides = @import("session/editor/indent_guides.zig");
+    /// 괄호 쌍 색(visual-mapping §5.1d) — 문서 전체 괄호 목록에서 짝 · 단계 · 무효(VS Code 괄호 파서의 스택). 무엇이 괄호인지는 위층이 정한다.
+    pub const bracket_colors = @import("session/editor/bracket_colors.zig");
     /// N2: 편집 가능한 문서 — 버퍼(§3.0)와 소비처가 읽는 평탄한 축을 한 소유자에게 묶는다.
     /// `open`(읽기 전용, bytes를 빌린다)의 편집판이다.
     pub const edit_doc = @import("session/editor/edit_doc.zig");

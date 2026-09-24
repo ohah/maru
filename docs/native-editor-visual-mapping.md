@@ -2567,6 +2567,56 @@ highlightActiveIndentation: true, bracketPairs: false }`.
 | 8 | **새 눈 리뷰**(별도 에이전트, 읽기만) 다섯 건 — 전부 코드·원문·monaco 로 확인 | **결함 넷 · 판정자 구멍 하나 · 반박 하나**: ① 안내선이 op 저장소를 caret·선택·현재 줄 상자보다 먼저 받아 깊은 들여쓰기에서 그 층들을 굶겼다 → 맨 나중에 받고 회전(`IGF4` 를 그 층들을 켜고 다시 세움) ② 「추정은 만들 때 한 번」이 틀렸다 — VS Code 는 설정 탭 폭·언어가 바뀌면 다시 한다(`modelService.ts`) → `IGP7` ③ 기본 폭을 8 로 잘라 탭 폭 9~16 에서 갈렸다(monaco 실측 여섯 — `IG9`) ④ 창 256 이 프레임 512 행보다 작았다(`IGP8`) ⑤ `levels` 캐시에 걸음 수 판정자가 없었다(`IG10`). 반박: `Walker` 의 `ahead != null` 을 빼면 제곱 비용이라는 주장 — 가는 쪽 내용 줄이 없으면 단계 0 이라 걷기가 멈춘다(등가, 코드 주석) |
 | 8 | 위 수정의 변이 11(자르기 되살림 · 위/아래 캐시 제거 · null 재탐색 · 회전 제거 · **옛 순서 그대로** · 탭 폭 재추정 제거 · 최대 열에도 재추정 · 언어 무조건 재추정 · 저장 훅 제거 · 창 256) | **죽음 10** · 등가 1(R8d — 위). 그리고 **내 수정이 옛 판정자를 약하게 했다**: 창을 512 로 넓히자 `IGP5`(301 줄까지 굴려 「창을 0 부터」를 잡던 것)가 다시 창 안이 되어 2회차의 P12 구멍이 열렸다 — 굴리는 거리를 창 크기에서 재게 고치고 P12 를 다시 돌려 **죽음** |
 
+#### 5.1d 괄호 쌍 색 (2026-09-25, 계획 공격 전 초안)
+
+§5 가 이름만 둔 장식의 넷째다(§5.1b·§5.1c 에 이어). **VS Code 기본이 켬이다** — `textModelDefaults.ts` 원문 `bracketPairColorizationOptions:
+{ enabled: true, independentColorPoolPerBracketType: false }`.
+
+**VS Code 의 동작(원문 — `colorizedBracketPairsDecorationProvider.ts` · `bracketPairsTree/{parser,bracketPairsTree,tokenizer,brackets}.ts` ·
+`bracketPairsImpl.ts` · `languageBracketsConfiguration.ts` · `languageConfigurationRegistry.ts` · `editorColorRegistry.ts` · `textModelDefaults.ts` ·
+확장의 `language-configuration.json`·`package.json`, 동작만 읽었다. 단계·무효는 monaco-editor 0.56 을 Node(jsdom)에서 돌려 실측했다).**
+
+- **무엇이 괄호인가.** 언어 설정의 `brackets` 로 문자열 목록을 만들고, **토큰 종류가 Other 이고 「균형 괄호」 표시가 선 토큰 안에서만** 그 문자열을 찾는다
+  (문자열·주석·정규식 토큰 속 괄호는 글자다). 색을 칠하는 쌍은 `colorizedBracketPairs` — 없으면 `brackets` 에서 `<`…`>` 를 뺀 전부
+  (`languageBracketsConfiguration.ts`, 비교 연산자와 겹쳐 뺀다는 주석과 이슈 #132476). **HTML·Markdown 은 `colorizedBracketPairs: []`** — 색이 없다.
+  **설정이 없는 언어(plaintext)도 없다**(monaco 실측: `a(b[c]d)e` → 괄호 0). 언어마다의 차이(JS 의 `${`, TS 의 제네릭 `<>`, 셸 `case` 의 `)` 등)는
+  아래 「언어별」 표.
+- **짝·단계·무효**(`parser.ts` — 스택과 같다, monaco 실측으로 맞췄다): 여는 괄호는 쌓는다. 닫는 괄호는 스택 안에 **그것으로 닫을 수 있는 여는 괄호가
+  있으면** 그 위의 여는 괄호들을 「짝 없음」으로 내리고 그것과 짝을 짓는다 — 없으면 「튀는 닫는 괄호」. 문서 끝에 남은 여는 괄호도 짝 없음. **짝 없음·
+  튀는 괄호가 무효**(빨강)이다. 단계는 괄호 종류와 무관하게 **바깥 쌍의 수**(0 부터; 짝 없는 여는 괄호도 안쪽의 단계를 하나 올린다). 실측:
+  `({)}` → `(`0 · `{`1 무효 · `)`0 · `}` 무효 / `f(x` → `(` 무효 / `{ [ ( ] }`(줄 넷) → `(` 만 무효. **중첩이 150 을 넘는 여는 괄호는 글자**가 된다
+  (파서의 깊이 가드 — 실측: `(`×151 이면 151 번째가 괄호에서 빠지고 그 짝이던 `)` 하나가 튀는 괄호로 무효).
+- **색.** 단계 `L` → `foreground{1..6}` 중 **투명하지 않은 것들을 차례로 돈다**(`colorValues[L % n]`). 기본 테마는 1~3 만 정하고 4~6 은 `#00000000` —
+  그래서 **세 색이 돈다**: 다크 `#FFD700`(금)·`#DA70D6`(자주)·`#179FFF`(파랑), 라이트 `#0431FA`(파랑)·`#319331`(초록)·`#7B3814`(갈색). 무효는
+  `unexpectedBracket.foreground` — 다크·라이트 모두 `rgba(255,18,18,0.8)`. `independentColorPoolPerBracketType` 이 켜지면 단계를 **종류별로** 센다.
+- **어디에 서나.** 글자색 장식(`inlineClassName`)이라 **구문 색 위에** 선다. **미니맵에는 없다**(`onlyMinimapDecorations` 면 빈 목록 — 원문 주석).
+  **sticky scroll 머리줄에는 있다**(`stickyScrollWidget` 이 줄의 인라인 장식을 그대로 그린다). 짝 괄호 상자(§5.1b)와 함께 선다(상자는 배경·테두리).
+- **큰 문서.** 길이가 `50_000 × 100` 자를 넘으면 괄호 트리를 만들지 않는다(`canBuildAST`) — 색이 없다.
+
+| 축 | 결정 | 근거 |
+| --- | --- | --- |
+| **켜고 끄기** | `editor.bracket-pair-colorization`(기본 켬) · `editor.bracket-pair-colorization-independent-pools`(기본 끔) | VS Code `bracketPairColorization.enabled` · `.independentColorPoolPerBracketType` |
+| **괄호 토큰** | tree-sitter 의 **이름 없는 잎** 속 괄호 문자열(문자열·주석·정규식은 이름 있는 잎이거나 그 안이라 빠진다 — §5.1b ⓒ 와 같은 판정). 언어별 거름은 아래 표 | VS Code 는 TextMate 토큰 종류로 가른다. 우리 판정과의 같음은 **VS Code 의 TextMate 문법을 돌린 오라클**로 잰다(아래 「검증」) |
+| **짝·단계·무효** | 위 VS Code 스택 그대로(깊이 가드 150 포함) — **문서 전체** 괄호 목록 위에서 | 여는 괄호의 유효 여부가 문서 **뒤쪽**에 달려 있어(`f(x` 는 뒤에 `)` 가 없어야 무효) 창만 봐서는 못 정한다 |
+| **색** | 새 역할 넷 — `bracket_level_1..3`(단계 % 3) · `bracket_unexpected`. 테마에서 파생: 다크 바탕이면 ANSI 밝은 노랑·밝은 자주·밝은 파랑(11·13·12), 라이트면 파랑·초록·노랑(4·2·3 — VS Code 라이트의 파랑·초록·갈색 순서), 무효는 ANSI 9. 모두 바탕 대비 바닥(`readable` — §5.4 진단과 같은 파생) | VS Code 기본 테마의 두 벌을 ANSI 16 색으로 옮긴다(§5 「팔레트는 ANSI 에서 파생」) |
+| **층** | 글자색 — **구문·semantic 색 위**. 미니맵 없음 · sticky 머리줄 있음 · 짝 괄호 상자와 공존 | VS Code |
+| **비교 뷰·병합 판** | 안 한다(§5.1b 와 같은 이유 — 열은 트리가 없는 텍스트 배열) | — |
+| **문서 크기** | 트리가 있는 문서만 — 파싱 상한 4 MB(`max_parse_bytes`)를 넘으면 없다 | VS Code 500 만 자와 같은 부류의 상한 |
+| **파싱 중** | 트리가 아직 없으면 없다(구문 색과 같은 저하 §2.1a). 편집 뒤 다시 파는 동안은 **위치를 민 옛 목록**으로 그린다 — 새로 친 괄호는 파싱이 끝나는 프레임부터 | — |
+| **비용** | Term 이 **문서 전체 괄호 목록**(위치·종류·여닫음)을 든다. 처음 목록은 트리를 한 번 훑어 만들고, 그 뒤로는 **편집이 위치를 밀고** 파싱이 끝나면 **바뀐 범위만**(`ts_tree_get_changed_ranges` ∪ 편집 범위) 다시 훑는다. 스택 훑기는 목록 전체(괄호 수에 선형) | 실측(ReleaseFast, 10 회 중 최소 — 트리 전체 훑기): 4 MB Zig 36.3 ms(괄호 9.2 만) · 2.5 MB Zig 27.4 ms · 3.1 MB JS 36.9 ms · 4 MB C 48.6 ms(괄호 42.8 만) · 0.6 MB JSON 3.6 ms · 0.33 MB TS 1.7 ms — 큰 문서에서 편집마다 전체를 훑으면 한 프레임(16 ms)의 두세 배라 증분이 필요하다 |
+
+**언어별**(VS Code 언어 설정 원문 — `extensions/*/language-configuration.json`·`package.json`; **TextMate 오라클로 확정 예정**):
+
+| 언어 | 괄호 | 비고 |
+| --- | --- | --- |
+| C · C++ · Go · Java · Python · Ruby · Rust · PHP · CSS · Bash | `()` `[]` `{}` | `colorizedBracketPairs` 없음 → `brackets` 그대로. 셸은 `case` 패턴의 `)` 를 뺀다(`unbalancedBracketScopes: meta.scope.case-pattern.shell`) |
+| JSON | `{}` `[]` | 설정에 `()` 가 없다 |
+| JavaScript | `()` `[]` `{}` · **`${`…`}`** | `brackets` 에 `${` 가 있고 템플릿 보간 구두점을 Other 로 돌린다(`tokenTypes`) |
+| TypeScript · TSX | `()` `[]` `{}` · **`<>`**(제네릭만) | `colorizedBracketPairs` 가 `<>` 를 넣고 `${` 는 뺀다. 관계·화살표·시프트 연산자와 태그의 `<` `>` 는 괄호가 아니다(`unbalancedBracketScopes`) |
+| HTML · Markdown | 없음 | `colorizedBracketPairs: []`. 코드 블록·`<script>` 속 다른 언어는 VS Code 가 그 언어로 칠한다 — 우리는 주입이 없어 **없다**(다른 점) |
+| Zig · Kotlin | `()` `[]` `{}`(확인 예정) | VS Code 내장 언어가 아니다 — 확장의 설정을 따른다 |
+| grammar 없음 | 없음 | plaintext 와 같다. YAML·Makefile 등은 VS Code 가 칠한다 — grammar 가 오면(다른 점) |
+
 ### 5.4 진단 층 — 첫 출처는 구문 오류 (2026-09-17, 계획 공격 뒤의 사용자 결정)
 
 **계획 공격이 드러낸 것.** §5 가 진단을 「스팬 층」으로 정해 두었지만 **그 층에 넣을 출처가 하나도 없었다** — LSP 클라이언트

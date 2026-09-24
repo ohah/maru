@@ -18,6 +18,8 @@
 //!                 (`click:x,y,button,detail` · `dbl:2` · `val:` · `comp-val:` · `end:조합:값` · `key:e:ctrl:KeyE` · `blur` ·
 //!                 `ctx:x,y` · `aux:1` · `sel:yes|no` · `leave` · `scroll:down`). 제목은 조절돼 마지막 것만 오므로 한 입력이
 //!                 제목을 둘 바꾸지 않게 이벤트를 골랐다
+//!   /keys?칸      특수 키 판정(W4c) — textarea(t)·폼 입력칸 둘(j·k). 칸(`t`·`j`)을 누르면 준비. 초점 칸·값(줄바꿈은 `NL`)·
+//!                 캐럿을 제목으로(`focus=… val=… caret=…`)
 
 const std = @import("std");
 
@@ -107,6 +109,7 @@ fn page(path: []const u8, query: []const u8, buf: []u8) ![]const u8 {
         return "<!doctype html><title>static</title><style>html,body{margin:0;height:100%;background:#20a060}</style><body>";
     }
     if (std.mem.eql(u8, path, "/input")) return input_page;
+    if (std.mem.eql(u8, path, "/keys")) return keys_page;
     if (std.mem.eql(u8, path, "/popup")) {
         return "<!doctype html><title>loading</title><script>window.open('/title?t=opened','_blank');document.title='popup-tried'</script>";
     }
@@ -147,4 +150,12 @@ const input_page =
     \\document.documentElement.addEventListener('mouseleave',function(){t('leave')});
     \\requestAnimationFrame(function(){requestAnimationFrame(function(){t('input-ready')})});
     \\</script>
+;
+
+const keys_page =
+    \\<!doctype html><title>loading</title><style>body{margin:0}#t{position:absolute;left:0;top:0;width:300px;height:100px}#j{position:absolute;left:0;top:120px;width:300px;height:30px}#k{position:absolute;left:0;top:170px;width:300px;height:30px}</style>
+    \\<textarea id=t></textarea><form id=f onsubmit="t2('submit');return false"><input id=j><input id=k></form>
+    \\<script>function st(){var a=document.activeElement;var v=a&&a.value!==undefined?a.value.split(String.fromCharCode(10)).join('NL'):'';document.title='focus='+(a&&a.id)+' val='+v+' caret='+(a&&a.selectionStart)}
+    \\addEventListener('input',function(){setTimeout(st,0)});addEventListener('keyup',function(){setTimeout(st,0)});document.addEventListener('focusin',function(){setTimeout(st,0)});
+    \\requestAnimationFrame(function(){requestAnimationFrame(function(){document.title='keys-ready'})});</script>
 ;

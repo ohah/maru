@@ -412,6 +412,10 @@ pub fn tickWebOsr(self: *AppSession) void {
             }
         }
     }
+    // W4c: 키 대상이 바뀌었으면(탭·pane 전환·오버레이·창 키) 포커스를 옮기고 조합을 확정한다. 트랜잭션 밖 unmark 뒤 확정
+    // 글이 안 왔으면 조합을 그대로 확정한다.
+    syncOsrKeyTarget(self);
+    if (self.osr_key_target != 0 and self.osr_ime_surface == 0) flushUnmark(self, self.osr_key_target);
     // W4b: hover 중인 탭의 커서가 바뀌었으면(페이지는 이동을 처리한 **뒤** 커서를 알린다) Swift 가 포인터를 다시 움직이지
     // 않아도 바꾸게 세운다 — 안 그러면 멈춘 자리의 커서가 한 박자 전 것으로 남는다.
     if (self.osr_hover_surface != 0) {
@@ -532,10 +536,12 @@ pub fn osrMouseDown(self: *AppSession, kind: i32, x_px: f64, y_px: f64, xterm_bu
             self.markNotificationsReadBySurface(layout.surface_id);
             self.focusWorkspaceInput();
         }
+        // 활성으로 올린 탭에 키 포커스를 **누름보다 먼저** 준다 — 입력칸을 누르면 caret 이 서게(W4c).
+        syncOsrKeyTarget(self);
         // 주인을 먼저 세운다 — 옛 제스처의 capture_lost 가 새 down 보다 먼저 가게(적대 검증 — 순서가 거꾸로였다).
         self.beginPointerGesture(.{ .web_osr = .{ .surface_id = layout.surface_id, .first = button, .held = held, .click_count = count } });
     }
-    web_osr.sendInput(self.allocator, .{ .mouse = .{
+    _ = web_osr.sendInput(self.allocator, .{ .mouse = .{
         .browser = layout.surface_id,
         .kind = .down,
         .button = button,
@@ -555,12 +561,12 @@ pub fn osrGesture(self: *AppSession, kind: i32, x_px: f64, y_px: f64, mods: i32,
     const g = self.pointer_gesture_owner.web_osr;
     const layout = osr_input.find(self.osr_layouts.items, g.surface_id) orelse {
         self.finishPointerGesture();
-        web_osr.sendInput(self.allocator, .{ .capture_lost = g.surface_id });
+        _ = web_osr.sendInput(self.allocator, .{ .capture_lost = g.surface_id });
         return true;
     };
     const point = osrDip(self, layout, x_px, y_px);
     if (kind == 2) {
-        web_osr.sendInput(self.allocator, .{ .mouse = .{ .browser = g.surface_id, .kind = .move, .point = point, .modifiers = osr_input.modifiers(mods, g.held) } });
+        _ = web_osr.sendInput(self.allocator, .{ .mouse = .{ .browser = g.surface_id, .kind = .move, .point = point, .modifiers = osr_input.modifiers(mods, g.held) } });
         return true;
     }
     // 이 제스처가 누르지 않은 버튼의 뗌(본문 밖에서 누른 버튼)은 삼킨다.
@@ -568,7 +574,7 @@ pub fn osrGesture(self: *AppSession, kind: i32, x_px: f64, y_px: f64, mods: i32,
     if (!g.held.has(button)) return true;
     const held = g.held.with(button, false);
     if (held.empty()) self.finishPointerGesture() else self.pointer_gesture_owner.web_osr.held = held;
-    web_osr.sendInput(self.allocator, .{ .mouse = .{
+    _ = web_osr.sendInput(self.allocator, .{ .mouse = .{
         .browser = g.surface_id,
         .kind = .up,
         .button = button,
@@ -581,7 +587,7 @@ pub fn osrGesture(self: *AppSession, kind: i32, x_px: f64, y_px: f64, mods: i32,
 
 /// 끊긴 제스처(`cancelPointerGesture`) — 페이지가 잡은 capture 를 놓게 한다.
 pub fn osrCaptureLost(self: *AppSession, surface_id: u64) void {
-    web_osr.sendInput(self.allocator, .{ .capture_lost = surface_id });
+    _ = web_osr.sendInput(self.allocator, .{ .capture_lost = surface_id });
 }
 
 /// 버튼 없는 이동(hover). 본문 위면 그 탭에 이동을 보내고 페이지 커서를 돌려준다. 오버레이가 열렸거나 본문 밖이면 hover
@@ -603,7 +609,7 @@ pub fn osrHover(self: *AppSession, x_px: f64, y_px: f64, mods: i32) ?app_session
         _ = self.hoverCursor(-1, -1, 0);
         self.osr_hover_surface = l.surface_id;
     }
-    web_osr.sendInput(self.allocator, .{ .mouse = .{ .browser = l.surface_id, .kind = .move, .point = osrDip(self, l, x_px, y_px), .modifiers = osr_input.modifiers(mods, .{}) } });
+    _ = web_osr.sendInput(self.allocator, .{ .mouse = .{ .browser = l.surface_id, .kind = .move, .point = osrDip(self, l, x_px, y_px), .modifiers = osr_input.modifiers(mods, .{}) } });
     const c = web_osr.cursor(l.surface_id) orelse return .default;
     self.osr_hover_cursor_generation = c.generation;
     return cursorKindOf(c.cursor);
@@ -615,14 +621,14 @@ fn osrLeave(self: *AppSession, x_px: f64, y_px: f64, mods: i32) void {
     self.osr_hover_surface = 0;
     const prev = osr_input.find(self.osr_layouts.items, sid);
     const point: osr_input.Point = if (prev) |p| osrDip(self, p, x_px, y_px) else .{ .x = -1, .y = -1 };
-    web_osr.sendInput(self.allocator, .{ .mouse = .{ .browser = sid, .kind = .leave, .point = point, .modifiers = osr_input.modifiers(mods, .{}) } });
+    _ = web_osr.sendInput(self.allocator, .{ .mouse = .{ .browser = sid, .kind = .leave, .point = point, .modifiers = osr_input.modifiers(mods, .{}) } });
 }
 
 /// 본문 위의 휠(오버레이 게이트 뒤). 본문이 아니면 false.
 pub fn osrWheel(self: *AppSession, delta_y: f64, delta_x: f64, precise: bool, x_px: f64, y_px: f64) bool {
     if (self.osr_layouts.items.len == 0) return false;
     const layout = osr_input.hit(self.osr_layouts.items, x_px, y_px) orelse return false;
-    web_osr.sendInput(self.allocator, .{ .wheel = .{
+    _ = web_osr.sendInput(self.allocator, .{ .wheel = .{
         .browser = layout.surface_id,
         .point = osrDip(self, layout, x_px, y_px),
         .delta_x = osr_input.wheelDelta(delta_x, precise),
@@ -651,6 +657,340 @@ pub fn takeOsrCursor(self: *AppSession) ?app_session_mod.CursorKind {
     const c = self.osr_cursor_pending orelse return null;
     self.osr_cursor_pending = null;
     return c;
+}
+
+// ── W4c: 키보드(C5 — 키 라우트·모달 에지·IME·편집 명령) ─────────────────────────────────────────────────
+// 키 대상은 **Zig 활성 pane 이 답한다**(Swift 는 따로 들지 않는다): 창이 키 창이고, 입력 초점이 터미널 자리(모달·notice·
+// 주소창·rename·검색 등이 아님)이고, 활성 Term 이 OSR browser 면 그 탭이다. 키 이벤트는 W4a 실측 규칙대로 보낸다 —
+// 모든 키는 raw_down, 글자를 만드는 키(평문·Enter)만 char 를 더한다(Backspace·Tab·화살표·Home·Esc·⌥⌫ 는 raw_down 만으로
+// 동작하고, char 를 더하면 쓸데없는 keypress 가 생긴다 — W4c 착수 전 실측). 입력기가 가져간 키(조합)는 키 이벤트 대신
+// 조합 메시지로 간다. macOS 텍스트 편집 단축키(⌃A·⌃E·⌃K 등)는 키 이벤트로는 동작하지 않는다 — CDP 편집 명령이 필요해 W9
+// 에서 붙인다(사용자 결정 2026-09-24).
+
+const ws_message = maru.session.web_sidecar.message;
+
+/// Swift 가 넘긴 키 하나(macOS keyCode·글자·수식자).
+pub const OsrKey = struct {
+    key_code: u8,
+    character: u16,
+    unmodified: u16,
+    modifiers: ws_message.Modifiers,
+};
+
+/// Swift 의 수식자 비트(xterm 과 같은 shift=4·alt=8·ctrl=16·cmd=32 에 caps=64·숫자패드=128·반복=256) → codec 수식자.
+pub fn osrKeyModifiers(bits: i32) ws_message.Modifiers {
+    return .{
+        .shift = bits & 4 != 0,
+        .alt = bits & 8 != 0,
+        .control = bits & 16 != 0,
+        .command = bits & 32 != 0,
+        .caps_lock = bits & 64 != 0,
+        .key_pad = bits & 128 != 0,
+        .is_repeat = bits & 256 != 0,
+    };
+}
+
+/// 입력기 트랜잭션에서 일어난 일(글 버퍼는 AppSession 이 든다).
+pub const OsrTxnFlags = struct {
+    had_composition: bool = false,
+    commit_present: bool = false,
+    commit_sent: bool = false,
+    marked: bool = false,
+    command: bool = false,
+    delete_backward: bool = false,
+    cleared: bool = false,
+};
+
+/// 키 대상 Chromium 탭(없으면 null). 텍스트 입력을 maru 가 가지는 동안(모달·주소창·rename·검색·파일 트리 —
+/// `terminalOwnsInput`)은 아니다. **notice 토스트는 빼앗지 않는다** — WKWebView 탭과 같은 규칙(적대 검증 — 처음엔
+/// `inputFocus` 로 판정해 토스트가 뜨면 페이지가 blur 되고 조합이 끊겼다).
+pub fn osrKeyTarget(self: *AppSession) ?u64 {
+    if (!web_osr.enabled() or !self.surface_initialized or !self.window_focused) return null;
+    if (self.terminalOwnsInput()) return null;
+    const term = pane_ops.activePane(self).activeTerm();
+    if (!isOsrTerm(term)) return null;
+    return term.surfaceId();
+}
+
+/// 키 대상이 바뀌었으면 포커스를 옮긴다(C5 모달 에지): 옛 탭은 조합을 그대로 확정하고(`ime_finish_composing`) 포커스를
+/// 놓는다, 새 탭은 포커스를 받는다. tick·키·편집 명령 **직전**과 탭을 활성으로 올리는 누름 **직전**에 부른다 — 키로 탭을
+/// 바꾼 직후의 키가 포커스 없는 브라우저로 가지 않게(적대 검증).
+pub fn syncOsrKeyTarget(self: *AppSession) void {
+    const now = osrKeyTarget(self) orelse 0;
+    if (now == self.osr_key_target) return;
+    // 새 탭이 아직 sidecar 기록에 없으면(배치가 이 tick 뒤에 브라우저를 만든다) 미룬다 — 먼저 대상을 바꿔 두면 포커스를
+    // 영영 못 준다(W4c 실측 — 첫 동기화가 기록 전에 돌아 페이지가 포커스 없이 남았다).
+    if (now != 0 and !web_osr.owns(now)) return;
+    const window = @intFromPtr(self);
+    if (self.osr_key_target != 0) {
+        const old = self.osr_key_target;
+        if (web_osr.composing(old)) {
+            _ = web_osr.sendInput(self.allocator, .{ .ime_finish_composing = .{ .browser = old, .value = false } });
+            self.osr_discard_marked = true;
+        }
+        web_osr.setFocus(self.allocator, old, false, window);
+    }
+    self.osr_down_sent = 0;
+    self.osr_unmark_pending = false;
+    if (now != 0) web_osr.setFocus(self.allocator, now, true, window);
+    self.osr_key_target = now;
+}
+
+fn sendKey(self: *AppSession, sid: u64, kind: ws_message.KeyKind, key: OsrKey, character: u16) void {
+    const bit = @as(u128, 1) << @intCast(key.key_code & 0x7F);
+    switch (kind) {
+        // ⌘ chord 는 macOS 가 keyUp 을 주지 않는다 — 기록하지 않아 다음 같은 키의 짝 없는 keyup 이 안 나가게.
+        .raw_down, .down => if (!key.modifiers.command) {
+            self.osr_down_sent |= bit;
+        },
+        .up => {
+            // keydown 을 안 보낸 키(입력기가 가져간 키)의 keyup 은 보내지 않는다.
+            if (self.osr_down_sent & bit == 0) return;
+            self.osr_down_sent &= ~bit;
+        },
+        .char => {},
+    }
+    _ = web_osr.sendInput(self.allocator, .{ .key = .{
+        .browser = sid,
+        .kind = kind,
+        .modifiers = key.modifiers,
+        .native_key_code = key.key_code,
+        .character = character,
+        .unmodified_character = key.unmodified,
+    } });
+}
+
+/// Swift 키 한 번. phase 0 = 지금 raw_down(⌘·⌃ chord·기능키 — 입력기를 거치지 않는다), 1 = 입력기 트랜잭션 키로 쥐어 둠
+/// (`osrImeEnd` 가 판정한다), 2 = 뗌. 다른 값은 거절한다. 키 대상이 Chromium 탭이면 true(Swift 는 터미널 경로를 안 탄다).
+pub fn osrKey(self: *AppSession, phase: i32, key: OsrKey) bool {
+    if (phase < 0 or phase > 2) return false;
+    syncOsrKeyTarget(self);
+    const sid = osrKeyTarget(self) orelse return false;
+    switch (phase) {
+        0 => sendKey(self, sid, .raw_down, key, key.character),
+        1 => self.osr_armed_key = key,
+        else => sendKey(self, sid, .up, key, key.character),
+    }
+    return true;
+}
+
+/// 터미널이 조합을 쥐고 있으면(`ime_terminal_target_id` — 조합 중 대상이 바뀜) 확정될 때까지 그쪽 것이다.
+fn terminalHoldsComposition(self: *AppSession) bool {
+    return self.ime_terminal_target_id != null;
+}
+
+/// 입력기 트랜잭션 시작 — 키 대상이 Chromium 탭이면 그 탭 몫으로 연다(터미널 core 를 건드리지 않는다).
+pub fn osrImeBegin(self: *AppSession) bool {
+    if (terminalHoldsComposition(self)) return false;
+    syncOsrKeyTarget(self);
+    const sid = osrKeyTarget(self) orelse return false;
+    flushUnmark(self, sid);
+    self.osr_ime_surface = sid;
+    self.osr_ime_typed.clearRetainingCapacity();
+    self.osr_ime_commit.clearRetainingCapacity();
+    self.osr_txn = .{ .had_composition = web_osr.composing(sid) };
+    return true;
+}
+
+/// 트랜잭션 안에서 조합이 아직 열려 있는가(시작 때 조합이 있었고 확정이 쥐어지지 않았다, 또는 이번에 새로 섰다).
+fn txnComposing(self: *AppSession) bool {
+    const t = self.osr_txn;
+    return t.marked or (t.had_composition and !t.commit_present and !t.commit_sent);
+}
+
+/// 조합 글 갱신. 트랜잭션 안에서 비지 않은 조합이 서면 그 키는 입력기 것이다. 빈 글은 Swift `insertText` 가 확정 **전에**
+/// 늘 보내는 조합 지우기이거나(조합이 없으면 아무 일도 아니다 — 처음엔 이것을 「입력기가 가져감」으로 세어 평문 타이핑이
+/// 통째로 사라졌다), 조합 취소(Esc 등)다. 트랜잭션 밖의 빈 글(unmarkText)은 Apple 의미대로 확정인데, 곧 확정 글이 오면
+/// 그 글이 조합을 대신하므로 미뤘다가 판정한다(`flushUnmark`).
+pub fn osrImeMarked(self: *AppSession, bytes: []const u8) bool {
+    if (terminalHoldsComposition(self)) return false;
+    const in_txn = self.osr_ime_surface != 0;
+    const sid = if (in_txn) self.osr_ime_surface else osrKeyTarget(self) orelse return false;
+    if (bytes.len == 0) {
+        if (in_txn) {
+            if (txnComposing(self)) self.osr_txn.cleared = true;
+        } else if (web_osr.composing(sid)) {
+            self.osr_unmark_pending = true;
+        }
+        return true;
+    }
+    if (!in_txn) flushUnmark(self, sid);
+    // 쥐어 둔 확정(「한」)·쌓인 글이 있으면 새 조합(「ㄱ」)보다 먼저 보낸다 — 안 그러면 조합이 그 글을 덮는다(적대 검증).
+    if (in_txn and self.osr_txn.commit_present) {
+        commitText(self, sid, self.osr_ime_commit.items);
+        self.osr_ime_commit.clearRetainingCapacity();
+        self.osr_txn.commit_present = false;
+        self.osr_txn.commit_sent = true;
+    }
+    if (in_txn and self.osr_ime_typed.items.len > 0) {
+        commitText(self, sid, self.osr_ime_typed.items);
+        self.osr_ime_typed.clearRetainingCapacity();
+    }
+    if (in_txn) self.osr_txn.marked = true;
+    self.osr_txn.cleared = false;
+    _ = sendCompositionText(self, sid, bytes);
+    return true;
+}
+
+/// 확정 글. 트랜잭션 안에서 시작 때 조합을 확정하는 첫 글은 끝까지 쥐어 둔다(뒤에 deleteBackward 만 오면 취소다), 그 뒤
+/// 글은 이번 키가 만든 글이다. 트랜잭션 밖(문자 팔레트·받아쓰기·후보창 마우스 선택)이면 곧바로 확정한다 — 조합이 있으면
+/// 그 글이 조합을 대신한다(ime_commit_text 가 조합을 바꾼다).
+pub fn osrImeInsert(self: *AppSession, bytes: []const u8) bool {
+    if (terminalHoldsComposition(self)) return false;
+    const in_txn = self.osr_ime_surface != 0;
+    const sid = if (in_txn) self.osr_ime_surface else osrKeyTarget(self) orelse return false;
+    if (!in_txn) {
+        self.osr_unmark_pending = false;
+        if (bytes.len == 0) {
+            _ = web_osr.sendInput(self.allocator, .{ .ime_cancel_composition = sid }); // 조합이 없으면 web_osr 가 막는다
+        } else commitText(self, sid, bytes);
+        return true;
+    }
+    if (txnComposing(self) and !self.osr_txn.marked and !self.osr_txn.commit_present) {
+        self.osr_ime_commit.appendSlice(self.allocator, bytes) catch {};
+        self.osr_txn.commit_present = true;
+        self.osr_txn.cleared = false;
+        return true;
+    }
+    if (self.osr_txn.marked) {
+        // 이번 트랜잭션에 선 조합을 확정한다(드묾 — 조합 뒤 바로 확정).
+        commitText(self, sid, bytes);
+        self.osr_txn.marked = false;
+        self.osr_txn.commit_sent = true;
+        return true;
+    }
+    self.osr_ime_typed.appendSlice(self.allocator, bytes) catch {};
+    return true;
+}
+
+/// 트랜잭션 밖에서 조합이 비워진 채(unmarkText) 확정 글이 안 왔으면 조합을 그대로 확정한다(Apple 의미).
+fn flushUnmark(self: *AppSession, sid: u64) void {
+    if (!self.osr_unmark_pending) return;
+    self.osr_unmark_pending = false;
+    if (web_osr.composing(sid)) _ = web_osr.sendInput(self.allocator, .{ .ime_finish_composing = .{ .browser = sid, .value = false } });
+}
+
+/// 입력기의 키 동작 명령(doCommand — insertNewline·moveLeft·deleteBackward…). 트랜잭션 안이면 기록한다.
+pub fn osrImeCommand(self: *AppSession, delete_backward: bool) bool {
+    if (self.osr_ime_surface == 0) return false;
+    self.osr_txn.command = true;
+    if (delete_backward) self.osr_txn.delete_backward = true;
+    return true;
+}
+
+/// 트랜잭션 끝 — `web_osr_input.imeOutcome` 이 정한 대로 확정·취소·키 이벤트를 보낸다.
+pub fn osrImeEnd(self: *AppSession) bool {
+    const sid = self.osr_ime_surface;
+    if (sid == 0) return false;
+    defer {
+        self.osr_ime_surface = 0;
+        self.osr_armed_key = null;
+        self.osr_ime_typed.clearRetainingCapacity();
+        self.osr_ime_commit.clearRetainingCapacity();
+        self.osr_txn = .{};
+    }
+    const t = self.osr_txn;
+    const outcome = osr_input.imeOutcome(.{
+        .key_code = if (self.osr_armed_key) |k| k.key_code else 0,
+        .had_composition = t.had_composition,
+        .commit = if (t.commit_present) self.osr_ime_commit.items else null,
+        .commit_sent = t.commit_sent,
+        .marked = t.marked,
+        .typed = self.osr_ime_typed.items,
+        .command = t.command,
+        .delete_backward = t.delete_backward,
+        .cleared = t.cleared,
+    });
+    switch (outcome.commit) {
+        .none => {},
+        .send => commitText(self, sid, self.osr_ime_commit.items),
+        .cancel => _ = web_osr.sendInput(self.allocator, .{ .ime_cancel_composition = sid }),
+    }
+    const key = self.osr_armed_key orelse return true;
+    if (outcome.raw_down) sendKey(self, sid, .raw_down, key, key.character);
+    if (outcome.char) |c| sendKey(self, sid, .char, key, c);
+    if (outcome.commit_typed) commitText(self, sid, self.osr_ime_typed.items);
+    return true;
+}
+
+/// 조합을 지금 확정한다(마우스 누름·키 창 잃음·조합 중 앱 단축키·메뉴 편집 명령 — Swift `commitComposition`). 키 대상이
+/// Chromium 탭이 아니면 false(다른 입력 대상이 확정한다).
+pub fn osrCommitComposition(self: *AppSession) bool {
+    syncOsrKeyTarget(self);
+    const sid = osrKeyTarget(self) orelse return false;
+    self.osr_unmark_pending = false;
+    if (web_osr.composing(sid)) _ = web_osr.sendInput(self.allocator, .{ .ime_finish_composing = .{ .browser = sid, .value = false } });
+    return true;
+}
+
+/// Swift 가 tick 뒤에 가져간다 — Zig 가 조합을 끝냈으니 입력기 세션의 조합도 버리라는 뜻(한 번).
+pub fn takeOsrDiscardMarked(self: *AppSession) bool {
+    const v = self.osr_discard_marked;
+    self.osr_discard_marked = false;
+    return v;
+}
+
+/// 후보창 자리(창 backing px) — 조합 글자 사각형(view DIP)을 본문 자리로. 없으면 본문 왼쪽 위.
+pub fn osrImeCursorRect(self: *AppSession) ?struct { x: f64, y: f64, w: f64, h: f64 } {
+    const sid = osrKeyTarget(self) orelse return null;
+    const layout = osr_input.find(self.osr_layouts.items, sid) orelse return null;
+    const scale: f64 = if (self.scale_milli == 0) 1.0 else @as(f64, @floatFromInt(self.scale_milli)) / 1000.0;
+    const x0: f64 = @floatFromInt(layout.rect.x);
+    const y0: f64 = @floatFromInt(layout.rect.y);
+    // 사각형은 조합 중에만 쓴다 — 조합이 끝난 뒤의 옛 자리를 새 조합의 후보창에 쓰지 않는다(적대 검증).
+    const b = (if (web_osr.composing(sid)) web_osr.imeBounds(sid) else null) orelse return .{ .x = x0, .y = y0, .w = 1, .h = 16 * scale };
+    return .{
+        .x = x0 + @as(f64, @floatFromInt(b.x)) * scale,
+        .y = y0 + @as(f64, @floatFromInt(b.y)) * scale,
+        .w = @max(@as(f64, @floatFromInt(b.width)) * scale, 1),
+        .h = @max(@as(f64, @floatFromInt(b.height)) * scale, 1),
+    };
+}
+
+fn osrEditFor(action: anytype) ?ws_message.EditCommandKind {
+    return switch (action) {
+        .select_all => .select_all,
+        .editor_undo => .undo,
+        .editor_redo => .redo,
+        else => null,
+    };
+}
+
+/// 편집 명령(메뉴 ⌘A·⌘C·⌘V·⌘X·⌘Z·⌘⇧Z). 키 대상이 Chromium 탭이면 보내고 true.
+pub fn osrEdit(self: *AppSession, command: ws_message.EditCommandKind) bool {
+    syncOsrKeyTarget(self);
+    const sid = osrKeyTarget(self) orelse return false;
+    _ = web_osr.sendInput(self.allocator, .{ .edit_command = .{ .browser = sid, .command = command } });
+    return true;
+}
+
+fn sendCompositionText(self: *AppSession, sid: u64, bytes: []const u8) bool {
+    var buf: [maru.session.web_sidecar.wire.max_ime_text_bytes]u8 = undefined;
+    const clean = imeSafe(maru.session.web_sidecar.text.clampUtf8(bytes, buf.len), &buf);
+    return web_osr.sendInput(self.allocator, .{ .ime_set_composition = .{ .browser = sid, .text = clean } });
+}
+
+/// codec 이 거절할 제어 문자(탭·줄바꿈 밖)를 뺀다 — 안 빼면 그 조각이 통째로 조용히 사라진다(적대 검증).
+fn imeSafe(bytes: []const u8, out: []u8) []const u8 {
+    var n: usize = 0;
+    for (bytes) |byte| {
+        if ((byte < 0x20 and byte != '\t' and byte != '\n' and byte != '\r') or byte == 0x7f) continue;
+        out[n] = byte;
+        n += 1;
+    }
+    return out[0..n];
+}
+
+/// 확정 글을 IME 글 상한씩 글자 경계에서 나눠 보낸다(받아쓰기·서비스가 긴 글을 넣는다 — W4a 인계).
+fn commitText(self: *AppSession, sid: u64, bytes: []const u8) void {
+    var rest = bytes;
+    var buf: [maru.session.web_sidecar.wire.max_ime_text_bytes]u8 = undefined;
+    while (rest.len > 0) {
+        const chunk = maru.session.web_sidecar.text.clampUtf8(rest, buf.len);
+        if (chunk.len == 0) break; // 한 글자도 못 싣는 잘못된 UTF-8 — 버린다
+        _ = web_osr.sendInput(self.allocator, .{ .ime_commit_text = .{ .browser = sid, .text = imeSafe(chunk, &buf) } });
+        rest = rest[chunk.len..];
+    }
 }
 
 /// 페이지 커서 → maru 커서. 시스템에 없는 것(기다림·진행·도움말)은 화살표.
@@ -1164,6 +1504,9 @@ pub fn dispatchWebAppAction(self: *AppSession, surface_id: u64, event: terminal.
         workspace_ops.focusWorkspaceInput(self);
         self.workspace_focus_pending = true;
         self.requestClose(.term_or_pane);
+    } else if (isOsrSurface(surface_id) and osrEditFor(action) != null) {
+        // W4c: Chromium 탭의 ⌘A·⌘Z·⌘⇧Z 는 페이지 편집 명령이다(WKWebView 는 WebKit 이 가진다).
+        _ = osrEdit(self, osrEditFor(action).?);
     } else {
         self.dispatchAppAction(action);
     }

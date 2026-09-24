@@ -17,15 +17,15 @@
 const std = @import("std");
 const max_source_bytes = 16 * 1024 * 1024;
 
-test "IME 조합 확정은 키보드·포인터·메뉴·드롭 네 모달리티가 공유한다" {
+test "IME 조합 확정은 키보드·포인터·메뉴·드롭 네 모달리티와 Chromium 탭 세 갈래가 공유한다" {
     const allocator = std.testing.allocator;
     const swift = try readSource(allocator, "src/platform/macos/MaruAppHost.swift");
     defer allocator.free(swift);
 
-    // 선언 1 + 호출 4. 이 숫자가 이 게이트의 전부다 — 늘거나 줄면 목록이 바뀐 것이고, 그때 아래 네
-    // 문맥 단언도 함께 갱신해야 한다.
+    // 선언 1 + 호출 7. 이 숫자가 이 게이트의 전부다 — 늘거나 줄면 목록이 바뀐 것이고, 그때 아래 문맥
+    // 단언도 함께 갱신해야 한다.
     try std.testing.expectEqual(@as(usize, 1), count(swift, "func commitMarkedTextIfComposing()"));
-    try std.testing.expectEqual(@as(usize, 4), count(swift, "commitMarkedTextIfComposing()") - 1);
+    try std.testing.expectEqual(@as(usize, 7), count(swift, "commitMarkedTextIfComposing()") - 1);
 
     // 네 모달리티 각각이 **자기 함수 안에서** 부르는지 본다. 총 개수만 세면 한 경로에서 두 번 부르고
     // 다른 경로가 빠진 상태도 통과한다.
@@ -39,6 +39,15 @@ test "IME 조합 확정은 키보드·포인터·메뉴·드롭 네 모달리티
     try std.testing.expect(count(swift, "if kind == 1 { (view as? MaruMetalTerminalView)?.commitMarkedTextIfComposing() }") == 1);
     // ④ 메뉴(runCatalogAction) — 키 단축키로 와도 keyDown을 안 거친다.
     try std.testing.expect(count(swift, "activeSurface?.view?.commitMarkedTextIfComposing()") == 1);
+    // ⑤ Chromium(OSR) 탭 키 — ⌘·⌃ chord·기능키가 입력기를 거치지 않고 페이지로 가기 **전**(W4c). 키보드 갈래와 같은
+    //    이유지만 터미널 우회 갈래보다 앞에 따로 있다.
+    try std.testing.expect(count(swift, "                commitMarkedTextIfComposing()\n                _ = controller?.osrKey(event, phase: 0)") == 1);
+    // ⑥ Chromium 탭 key equivalent 가 소비하는 갈래(탐색·앱 액션·삼킴) — 조합 중 ⌘T·⌘⇧P 로 대상이 바뀌면 입력기 세션에
+    //    남은 조합이 다음 자모와 이어져 새 대상에 글자가 겹친다(W4c 적대 검증).
+    try std.testing.expect(count(swift, "commitComposition: { self.commitMarkedTextIfComposing() }") == 1);
+    // ⑦ Chromium 탭 메뉴 편집 명령(잘라내기·복사·붙여넣기·전체 선택) — 붙여넣기가 페이지 조합을 끝내면 입력기 세션의
+    //    조합이 남아 글자가 겹친다(W4c 적대 검증).
+    try std.testing.expect(count(swift, "        metalTerminalView?.commitMarkedTextIfComposing()\n        return maru_macos_app_session_osr_edit(") == 1);
 
     // 확정은 **커밋 + AppKit 세션 종료 + 로컬 상태 비우기** 셋이 함께여야 한다. 하나라도 빠지면 잔상의
     // 출처가 그쪽으로 옮겨 간다(Zig만 비우면 AppKit marked 세션이 살아 다음 입력이 조합에 이어 붙는다).

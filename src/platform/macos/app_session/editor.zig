@@ -41647,24 +41647,26 @@ test "IGP6 Go 는 추정의 기본이 탭 — 탭·공백 동률 문서가 .go �
 }
 
 test "IGP5 굴린 화면 — 창이 맨 위 줄부터다; 행마다 그 줄의 단계 (제품 경계, §5.1c)" {
-    // 창의 시작을 0 으로 두면 굴린 화면이 **창 밖**이라 선이 사라진다. 창은 256 줄이라 **그보다 아래로** 굴려야 드러난다 — 11 줄까지만
-    // 굴렸을 때는 0 부터의 창이 화면을 덮어 초록이었다(적대적 2회차 P12). 줄마다 들여쓰기가 번갈아 들고 홀수 줄까지 굴려 행마다 그 줄의 단계인지도
+    // 창의 시작을 0 으로 두면 굴린 화면이 **창 밖**이라 선이 사라진다. **창보다 아래로** 굴려야 드러난다 — 11 줄까지만 굴렸을 때는 0 부터의
+    // 창이 화면을 덮어 초록이었다(적대적 2회차 P12). 창을 256 → 512 로 넓힌 8회차에 301 줄이 다시 창 안이 되어 같은 구멍이 열렸다 — 그래서
+    // 굴리는 거리를 **창 크기에서** 잰다. 줄마다 들여쓰기가 번갈아 들고 홀수 줄까지 굴려 행마다 그 줄의 단계인지도
     // 본다(프레임 판정자 `IGF1` 은 창을 직접 만들어 이 배선을 못 본다).
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var fx = try PaneFixture.init(allocator);
     defer fx.deinit(allocator);
-    const src = "a\n    b\n" ** 300;
+    const src = "a\n    b\n" ** 600;
     // **sticky 를 끈다** — 들여쓰기 접힘이 `a`·`    b`·다음 `a` 를 세 줄 스코프로 세워 그 머리줄이 0 행을 덮고, 덮인 행의 선은 걷어내기가 지운다
     // (§4.1i — 처음에 그것 때문에 0 행이 비어 빨갰다). 이 판정자가 재는 것은 창의 시작이다.
     fx.session.loaded_config.config.editor.sticky_scroll = false;
     const term = try openBracketFixture(&fx, allocator, "s.txt", src);
     var buf: [128]GuideHit = undefined;
     _ = try guideHits(fx.session, term, &buf); // 기하를 굳힌다
-    setEditorTop(fx.session, term, 301, "test");
+    const top = guides_client.window_lines + 189; // 창 밖 · 홀수 줄
+    setEditorTop(fx.session, term, top, "test");
     const hits = try guideHits(fx.session, term, &buf);
-    try testing.expectEqual(@as(usize, 301), term.rt.editor_first_line);
-    // 행 0 = 줄 301(`    b` — 선 하나) · 행 1 = 줄 302(`a` — 없음)
+    try testing.expectEqual(top, term.rt.editor_first_line);
+    // 행 0 = 홀수 줄(`    b` — 선 하나) · 행 1 = 그다음 줄(`a` — 없음)
     try testing.expectEqual(@as(usize, 1), countHits(hits, 0));
     try testing.expectEqual(@as(usize, 0), countHits(hits, 1));
     try testing.expectEqual(@as(usize, 1), countHits(hits, 2));

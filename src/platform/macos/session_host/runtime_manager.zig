@@ -5071,9 +5071,13 @@ test "runtime manager: clear and reset commands reach the authoritative host rea
     const proc_cwd = std.mem.sliceTo(&cwd_buf, 0);
     const result_path = try std.fs.path.join(allocator, &.{ proc_cwd, ".zig-cache/tmp", &tmp.sub_path, "clear.hex" });
     defer allocator.free(result_path);
+    // **자식은 결과를 쓴 뒤에도 살아 있어야 한다**(`exec cat`). `dd` 가 세 바이트(A · ^L · B)를 읽고 끝나면
+    // 셸도 끝나 PTY 큐가 닫히는데, 이 테스트는 B **뒤에** `reset_input_modes` 를 한 번 더 넣는다. 그 사이에
+    // 자식이 먼저 끝나면 `QueueClosed` → `WriteFailed` 로 실패했다 — CI 에서 반나절에 두 번(main push
+    // 35858186602 · 수동 실행 35896753613), 사이에 300ms 를 넣으면 5/5. 정리는 `defer ops.terminate` 가 한다.
     const script = try std.fmt.allocPrint(
         allocator,
-        "stty raw -echo; printf '\\033]133;A\\033\\\\prompt\\033[?1004h\\033[?1003h'; dd bs=1 count=3 2>/dev/null | od -An -tx1 | tr -d ' \\n' > '{s}'",
+        "stty raw -echo; printf '\\033]133;A\\033\\\\prompt\\033[?1004h\\033[?1003h'; dd bs=1 count=3 2>/dev/null | od -An -tx1 | tr -d ' \\n' > '{s}'; exec cat >/dev/null",
         .{result_path},
     );
     defer allocator.free(script);

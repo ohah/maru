@@ -19,9 +19,11 @@ pub const Entry = struct {
     handle: *anyopaque,
     size: ViewSize,
     closing: bool = false,
-    /// 받은 그리기 콜백 수(W2 전의 관측점).
+    /// 받은 그리기 콜백 수(관측점).
     paints: u64 = 0,
     title: TitleGate = .{},
+    /// 이 브라우저의 픽셀 링 생산자(W2 — `ring_producer.Producer`). 목록은 CEF·mach 를 몰라 불투명하게 든다.
+    frames: ?*anyopaque = null,
 };
 
 pub const Error = error{ Duplicate, Full };

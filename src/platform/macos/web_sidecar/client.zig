@@ -123,9 +123,14 @@ fn onPaint(_: [*c]c.cef_render_handler_t, browser: [*c]c.cef_browser_t, _: c.cef
     countPaint(browser);
 }
 
-fn onAcceleratedPaint(_: [*c]c.cef_render_handler_t, browser: [*c]c.cef_browser_t, _: c.cef_paint_element_type_t, _: usize, _: [*c]const c.cef_rect_t, _: [*c]const c.cef_accelerated_paint_info_t) callconv(.c) void {
+fn onAcceleratedPaint(_: [*c]c.cef_render_handler_t, browser: [*c]c.cef_browser_t, kind: c.cef_paint_element_type_t, _: usize, _: [*c]const c.cef_rect_t, info: [*c]const c.cef_accelerated_paint_info_t) callconv(.c) void {
     defer object.releaseArg(browser);
     countPaint(browser);
+    // 팝업(PET_POPUP)은 W6 — 본 화면만 링에 넣는다. CEF surface 는 이 콜백 안에서만 유효하다(C3).
+    if (kind != c.PET_VIEW or info == null) return;
+    const surface = info.*.shared_texture_io_surface orelse return;
+    const entry = entryOf(browser) orelse return;
+    browsers.deliverFrame(entry, @ptrCast(surface));
 }
 
 fn onTitleChange(_: [*c]c.cef_display_handler_t, browser: [*c]c.cef_browser_t, title: [*c]const c.cef_string_t) callconv(.c) void {

@@ -164,4 +164,10 @@ bool maru_metal_renderer_draw(
 
 void maru_metal_renderer_destroy(MaruMetalRenderer *renderer);
 
+/* W3c: 다음 draw 에 그릴 Chromium(OSR) 탭 본문을 맡긴다(복사한다 — 최대 16 장). frame_generation 은 그 draw 의 프레임
+   세대로, 그 command buffer 가 끝나면 `osr_completed_generation` 이 이 값이 된다. draw 가 commit 하지 않고 끝나면(drawable
+   없음 등) 곧바로 끝난 것으로 친다 — GPU 가 읽지 않았다. */
+void maru_metal_renderer_set_osr_quads(MaruMetalRenderer *renderer, const MaruAppHostOsrQuad *quads, size_t count, uint64_t frame_generation);
+uint64_t maru_metal_renderer_osr_completed_generation(MaruMetalRenderer *renderer);
+
 #endif

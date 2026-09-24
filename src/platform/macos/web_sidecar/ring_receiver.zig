@@ -6,15 +6,13 @@
 //! 사용자의 어떤 프로세스든 아무 모양의 메시지를 넣을 수 있다고 보고, 모양을 먼저 엄격히 본 뒤 거절하는 메시지는
 //! `mach_msg_destroy` 로 **실제 디스크립터대로** 버린다 — port 라고 가정하고 이름을 풀면 OOL 메모리 디스크립터가 든 메시지에서
 //! 주소 조각을 port 이름으로 풀고 그 메모리는 새운다(실측 재현).
-//! 판정자가 지금 maru 역할로 쓰고 W3 에서 maru 가 쓴다. **어느 링을 보일지(새 링의 첫 프레임까지 옛 링 유지)와 `take` 의
-//! `.corrupt` 처리는 여기에 없다** — 지금은 판정자의 `View`(tools/web_sidecar_judge/frames_check.zig)가 들고, W3 가 maru 에
-//! 다시 짓고 다시 판정한다.
+//! 판정자가 maru 역할로, 앱이(W3c `web_osr.zig`) 쓴다. **어느 링을 보일지(새 링의 첫 프레임까지 옛 링 유지)와 `take` 의
+//! `.corrupt` 처리·GPU 소비자 규칙은 여기에 없다** — 앱은 `session/web_osr_view.zig`, 판정자는 자기 `View` 가 든다.
 
 const std = @import("std");
 const mach = @import("mach.zig");
 const iosurface = @import("iosurface.zig");
 const ring_message = @import("ring_message.zig");
-const Control = @import("web_sidecar_protocol").mailbox.Control;
 
 pub const Ring = struct {
     browser: u64,
@@ -23,7 +21,8 @@ pub const Ring = struct {
     height: u32,
     scale: f32,
     surfaces: [ring_message.slot_count]iosurface.Ref,
-    control: *Control,
+    /// 제어 블록 페이지 주소(mailbox 워드가 맨 앞에 있다). 받는 쪽이 자기 mailbox 타입으로 본다 — 이 파일은 프로토콜
+    /// 모듈을 import 하지 않는다(앱 빌드에서는 같은 파일이 두 모듈에 속할 수 없어 이름 import 를 쓸 수 없다, W3c).
     control_address: u64,
 
     pub fn release(self: Ring) void {
@@ -154,7 +153,6 @@ fn adopt(message: *const ring_message.Message) error{Malformed}!Ring {
         .height = payload.height,
         .scale = @bitCast(payload.scale_bits),
         .surfaces = surfaces,
-        .control = @ptrFromInt(address),
         .control_address = address,
     };
 }

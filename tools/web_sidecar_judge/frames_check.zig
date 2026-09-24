@@ -35,6 +35,10 @@ const browser_id: u64 = 11;
 const black: u32 = 0xFF000000;
 const wait_ms = 15_000;
 
+fn controlOf(r: *const Ring) *mailbox.Control {
+    return @ptrFromInt(r.control_address);
+}
+
 /// maru 가 보이는 장. 새 링이 와도 그 링의 첫 프레임을 받기 전까지는 옛 링의 front 를 계속 보인다(C3).
 const View = struct {
     shown: ?Ring = null,
@@ -68,7 +72,7 @@ const View = struct {
     /// 새 프레임이 있으면 front 로 삼고 읽어 본다.
     fn poll(self: *View) void {
         if (self.pending) |*pending| {
-            switch (mailbox.take(pending.control, pending.generation, self.pending_front)) {
+            switch (mailbox.take(controlOf(pending), pending.generation, self.pending_front)) {
                 .frame => |slot| {
                     // 새 링의 첫 프레임 — 이제 넘어간다.
                     self.shown.?.release();
@@ -84,7 +88,7 @@ const View = struct {
             }
         }
         const shown = if (self.shown) |*shown| shown else return;
-        switch (mailbox.take(shown.control, shown.generation, self.front)) {
+        switch (mailbox.take(controlOf(shown), shown.generation, self.front)) {
             .frame => |slot| {
                 self.front = slot;
                 self.inspect();

@@ -6,6 +6,8 @@
    같은 규율 — docs/chrome-strategy.md §9.7). */
 #include "icon_codepoints.h"
 #import <QuartzCore/QuartzCore.h>
+#import <IOSurface/IOSurface.h>
+#include <stdatomic.h>
 #include <dispatch/dispatch.h>
 #include <stdlib.h>
 #include <string.h>
@@ -136,10 +138,120 @@ _Static_assert(sizeof(MaruRendererImageVertex) == 16, "MaruRendererImageVertex m
 // AS4-c host fixture만 다음 completed frame의 최종 합성 결과를 복사한다. 일반 screenshot env와
 // 별개인 one-shot request라 여러 상태를 한 process에서 capture해도 다음 user frame에 남지 않는다.
 @property (nonatomic, copy) NSString *testCapturePath;
+// W3c: Chromium(OSR) 탭 본문 — IOSurface 를 복사 없이 감싼 텍스처 캐시(IOSurfaceID → 텍스처). kitty 캐시와 따로 둔다 —
+// kitty 는 매 프레임 live 집합 밖을 지워 링의 세 장이 번갈아 지워진다. 여기는 오래 안 쓴 것만(osrLastUse) 지운다.
+// 텍스처가 IOSurface 를 쥐므로 Zig 가 링을 놓은 뒤에도 GPU 가 읽던 장은 살아 있다.
+@property (nonatomic, strong) NSMutableDictionary<NSNumber *, id<MTLTexture>> *osrTextures;
+@property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSNumber *> *osrLastUse;
+@end
+
+enum { MARU_OSR_MAX_QUADS = 16 };
+
+@interface MaruMetalRendererImpl () {
+@public
+    MaruAppHostOsrQuad osrQuads[MARU_OSR_MAX_QUADS];
+    size_t osrQuadCount;
+    uint64_t osrFrameGeneration;
+    uint64_t osrDrawSerial;
+    _Atomic uint64_t osrCompletedGeneration;
+}
 @end
 
 @implementation MaruMetalRendererImpl
 @end
+
+/* GPU 가 끝낸 세대를 올린다(내려가지 않는다 — 늦게 끝난 옛 command buffer 가 값을 되돌리지 않게). */
+static void maru_osr_mark_completed(MaruMetalRendererImpl *impl, uint64_t generation) {
+    uint64_t seen = atomic_load(&impl->osrCompletedGeneration);
+    while (seen < generation && !atomic_compare_exchange_weak(&impl->osrCompletedGeneration, &seen, generation)) {
+    }
+}
+
+void maru_metal_renderer_set_osr_quads(MaruMetalRenderer *renderer, const MaruAppHostOsrQuad *quads, size_t count, uint64_t frame_generation) {
+    if (renderer == NULL) return;
+    MaruMetalRendererImpl *impl = (__bridge MaruMetalRendererImpl *)renderer;
+    const size_t n = (quads == NULL) ? 0 : (count < MARU_OSR_MAX_QUADS ? count : MARU_OSR_MAX_QUADS);
+    if (n > 0) memcpy(impl->osrQuads, quads, n * sizeof(MaruAppHostOsrQuad));
+    impl->osrQuadCount = n;
+    impl->osrFrameGeneration = frame_generation;
+}
+
+uint64_t maru_metal_renderer_osr_completed_generation(MaruMetalRenderer *renderer) {
+    if (renderer == NULL) return 0;
+    MaruMetalRendererImpl *impl = (__bridge MaruMetalRendererImpl *)renderer;
+    return atomic_load(&impl->osrCompletedGeneration);
+}
+
+/* draw 가 끝날 때(어느 return 이든) commit 하지 않았으면 이번 세대를 곧바로 끝난 것으로 친다(GPU 가 안 읽었다). */
+typedef struct {
+    void *impl;
+    uint64_t generation;
+    bool committed;
+} MaruOsrDrawGuard;
+
+static void maru_osr_draw_guard_end(MaruOsrDrawGuard *guard) {
+    if (!guard->committed && guard->impl != NULL) {
+        maru_osr_mark_completed((__bridge MaruMetalRendererImpl *)guard->impl, guard->generation);
+    }
+}
+
+/* commit 직전에 부른다 — 이 command buffer 가 끝나면 세대를 올린다. */
+static void maru_osr_arm_completion(id<MTLCommandBuffer> command_buffer, MaruOsrDrawGuard *guard) {
+    if (guard->impl == NULL) return;
+    MaruMetalRendererImpl *impl = (__bridge MaruMetalRendererImpl *)guard->impl;
+    const uint64_t generation = guard->generation;
+    [command_buffer addCompletedHandler:^(__unused id<MTLCommandBuffer> done) {
+        maru_osr_mark_completed(impl, generation);
+    }];
+    guard->committed = true;
+}
+
+/* 이 IOSurface 를 감싼 텍스처(없으면 만든다). BGRA 가 아니면 nil(링은 늘 BGRA — `iosurface.fitsRing`). */
+static id<MTLTexture> maru_osr_texture(MaruMetalRendererImpl *impl, IOSurfaceRef surface) {
+    if (surface == NULL) return nil;
+    if (impl.osrTextures == nil) {
+        impl.osrTextures = [NSMutableDictionary dictionary];
+        impl.osrLastUse = [NSMutableDictionary dictionary];
+    }
+    NSNumber *key = @(IOSurfaceGetID(surface));
+    id<MTLTexture> tex = impl.osrTextures[key];
+    // IOSurface ID 는 surface 가 사라지면 다시 쓰일 수 있다 — 캐시의 텍스처가 감싼 surface 가 이것이 아니면 옛 장을
+    // 보이게 된다(텍스처가 옛 surface 를 쥐고 있다). 그때는 새로 감싼다.
+    if (tex != nil && tex.iosurface != surface) {
+        [impl.osrTextures removeObjectForKey:key];
+        tex = nil;
+    }
+    if (tex == nil) {
+        if (IOSurfaceGetPixelFormat(surface) != 0x42475241 /* 'BGRA' */) return nil;
+        MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                                                                     width:IOSurfaceGetWidth(surface)
+                                                                                    height:IOSurfaceGetHeight(surface)
+                                                                                 mipmapped:NO];
+        d.usage = MTLTextureUsageShaderRead;
+        d.storageMode = MTLStorageModeShared;
+        tex = [impl.device newTextureWithDescriptor:d iosurface:surface plane:0];
+        if (tex == nil) return nil;
+        impl.osrTextures[key] = tex;
+    }
+    impl.osrLastUse[key] = @(impl->osrDrawSerial);
+    return tex;
+}
+
+/* 오래(240 draw ≈ 4 초) 안 쓴 텍스처를 놓는다 — 링이 바뀌면 옛 세 장이 여기서 사라진다. */
+static void maru_osr_evict(MaruMetalRendererImpl *impl) {
+    if (impl.osrLastUse == nil || impl.osrLastUse.count == 0) return;
+    NSMutableArray<NSNumber *> *stale = nil;
+    for (NSNumber *key in impl.osrLastUse) {
+        if (impl->osrDrawSerial - impl.osrLastUse[key].unsignedLongLongValue > 240) {
+            if (stale == nil) stale = [NSMutableArray array];
+            [stale addObject:key];
+        }
+    }
+    for (NSNumber *key in stale) {
+        [impl.osrTextures removeObjectForKey:key];
+        [impl.osrLastUse removeObjectForKey:key];
+    }
+}
 
 /* one-shot test capture seam을 열어 주는 fixture env 허용 목록. 값은 정확히 "1"이어야 하고(fail-closed),
    여기 없는 실행에서는 seam 자체가 없다 — 제품·일반 스크린샷 경로는 이 함수를 통과하지 못한다. */
@@ -819,6 +931,10 @@ typedef struct {
     __unsafe_unretained id<MTLBuffer> quad_vertex_buffer;
     __unsafe_unretained id<MTLBuffer> shadow_vertex_buffer;
     __unsafe_unretained id<MTLBuffer> image_vertex_buffer;
+    // W3c: Chromium 탭 본문(6 정점씩). 텍스처는 impl.osrTextures 가 쥔다.
+    __unsafe_unretained id<MTLBuffer> osr_vertex_buffer;
+    __unsafe_unretained id<MTLTexture> osr_textures[MARU_OSR_MAX_QUADS];
+    size_t osr_n;
     const MaruAppHostGpuImage *gpu_images;
     CGSize drawable_size;
     // gpu_quads 레이어 세그먼트 정점 수: bottom(탭 밴드)·under(사이드바 밴드)·header(배지)·
@@ -976,6 +1092,17 @@ static void maru_draw_terminal_layer(const MaruDrawPass *c) {
     //      커서 레이어를 보존한다. cursor_fade_milli<1이면 반투명으로 아래 본문 셀에 합성돼 blink가 페이드.
     if (c->draw_cursor && c->cursor_in_terminal)
         maru_draw_cells_clipped(c, c->cursor_start, c->cursor_cells, c->cursor_opacity);
+    // 1.3 Chromium(OSR) 탭 본문(W3c) — web pane 본문에는 터미널 셀이 없다. 탭 바·주소창 밴드는 본문 rect 밖이라 가리지
+    //     않고, 모달은 오버레이 레이어라 위에 온다.
+    if (c->osr_vertex_buffer != nil && c->osr_n > 0) {
+        [c->encoder setRenderPipelineState:c->impl.imagePipeline];
+        [c->encoder setVertexBuffer:c->osr_vertex_buffer offset:0 atIndex:0];
+        for (size_t oi = 0; oi < c->osr_n; oi++) {
+            if (c->osr_textures[oi] == nil) continue;
+            [c->encoder setFragmentTexture:c->osr_textures[oi] atIndex:0];
+            [c->encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:(oi * 6) vertexCount:6];
+        }
+    }
     // 1.4 이미지 뒤판 quad(layer 5) — 셀은 이미 그려졌고 텍스트-앞 이미지는 아직이다. **이 틈이 유일한
     //     자리다**: 떠 있는 그림(마커 프리뷰)이 터미널 글자를 가리고 자기 배경을 갖게 한다.
     if (c->quad_vertex_buffer != nil)
@@ -1120,6 +1247,13 @@ bool maru_metal_renderer_draw(
     const MaruAppHostClipRect *cell_clips,
     size_t cell_clip_count
 ) {
+    // W3c: 이 draw 가 commit 하지 않고 끝나면(어느 return 이든) 맡긴 OSR 세대를 곧바로 끝난 것으로 친다 — GPU 가 그 장을
+    // 읽지 않았다. commit 하면 그 command buffer 가 끝날 때 올린다(maru_osr_arm_completion).
+    MaruOsrDrawGuard osr_guard __attribute__((cleanup(maru_osr_draw_guard_end))) = {
+        .impl = (void *)renderer,
+        .generation = (renderer != NULL) ? ((__bridge MaruMetalRendererImpl *)renderer)->osrFrameGeneration : 0,
+        .committed = false,
+    };
     if (renderer == NULL || terminal_layer == nil || cols == 0 || rows == 0) {
         return false;
     }
@@ -1471,6 +1605,29 @@ bool maru_metal_renderer_draw(
         }
     }
 
+    // W3c: Chromium 탭 본문 정점·텍스처. 좌표는 창 backing px 좌상단 — kitty 이미지와 같은 투영(origin 0).
+    impl->osrDrawSerial += 1;
+    id<MTLBuffer> osr_vertex_buffer = nil;
+    __unsafe_unretained id<MTLTexture> osr_textures[MARU_OSR_MAX_QUADS] = {nil};
+    const size_t osr_n = impl->osrQuadCount;
+    if (osr_n > 0) {
+        osr_vertex_buffer = [impl.device newBufferWithLength:osr_n * 6 * sizeof(MaruRendererImageVertex)
+                                                     options:MTLResourceStorageModeShared];
+        if (osr_vertex_buffer != nil) {
+            MaruRendererImageVertex *ov = (MaruRendererImageVertex *)osr_vertex_buffer.contents;
+            for (size_t i = 0; i < osr_n; i++) {
+                const MaruAppHostOsrQuad q = impl->osrQuads[i];
+                const MaruAppHostGpuImage as_image = {
+                    .dest_x = q.dest_x, .dest_y = q.dest_y, .dest_w = q.dest_w, .dest_h = q.dest_h,
+                    .src_u0 = q.u0, .src_v0 = q.v0, .src_u1 = q.u1, .src_v1 = q.v1,
+                };
+                maru_fill_image_quad(&ov[i * 6], as_image, drawable_w, drawable_h);
+                osr_textures[i] = maru_osr_texture(impl, (IOSurfaceRef)q.iosurface);
+            }
+        }
+    }
+    maru_osr_evict(impl);
+
     // 스크린샷 하니스: MARU_SCREENSHOT가 설정되면 drawable(framebufferOnly=true라 읽을 수 없다) 대신
     // 같은 크기·픽셀포맷의 오프스크린 텍스처에 두 pass(터미널 Clear → 오버레이 Load)를 합성해 그린다 —
     // 두 물리 레이어가 CoreAnimation으로 합성되는 최종 픽셀을 한 장으로 캡처(무회귀 실측). 평소(NULL)엔 이
@@ -1561,6 +1718,8 @@ bool maru_metal_renderer_draw(
         .quad_vertex_buffer = quad_vertex_buffer,
         .shadow_vertex_buffer = shadow_vertex_buffer,
         .image_vertex_buffer = image_vertex_buffer,
+        .osr_vertex_buffer = osr_vertex_buffer,
+        .osr_n = osr_n,
         .gpu_images = gpu_images,
         .drawable_size = drawable_size,
         .bottom_vertex_count = bottom_vertex_count,
@@ -1598,6 +1757,7 @@ bool maru_metal_renderer_draw(
         .sidebar_scissor_bottom_px = sidebar_scissor_bottom_px,
         .sidebar_header_height_px = sidebar_header_height_px,
     };
+    memcpy(pass_ctx.osr_textures, osr_textures, sizeof(osr_textures));
 
     if (screenshot_mode) {
         // 2레이어 합성을 한 오프스크린 텍스처에 캡처: 터미널 pass(Clear=terminal_clear) → 오버레이 pass(Load,
@@ -1682,6 +1842,7 @@ bool maru_metal_renderer_draw(
        destinationBytesPerRow:bytes_per_row
      destinationBytesPerImage:byte_count];
         [blit endEncoding];
+        maru_osr_arm_completion(command_buffer, &osr_guard);
         [command_buffer commit];
         [command_buffer waitUntilCompleted];
 
@@ -1760,6 +1921,7 @@ bool maru_metal_renderer_draw(
         if (overlay_drawable != nil) {
             [command_buffer presentDrawable:overlay_drawable];
         }
+        maru_osr_arm_completion(command_buffer, &osr_guard);
         [command_buffer commit];
         return false;
     }
@@ -1781,6 +1943,7 @@ bool maru_metal_renderer_draw(
             // 오버레이 인코더 실패: 터미널은 이미 인코딩됐다. 두 drawable을 present+commit해 pool에 되돌린다(누수 0).
             [command_buffer presentDrawable:terminal_drawable];
             [command_buffer presentDrawable:overlay_drawable];
+            maru_osr_arm_completion(command_buffer, &osr_guard);
             [command_buffer commit];
             return false;
         }
@@ -1798,6 +1961,7 @@ bool maru_metal_renderer_draw(
         // 않아, 재시도 프레임이 여전히 present 필요로 판단한다.
         impl.overlayHadContent = overlay_has_content;
     }
+    maru_osr_arm_completion(command_buffer, &osr_guard);
     [command_buffer commit];
     return !overlay_content_dropped; // 내용/clear 전이가 drawable 부족으로 드롭됐으면 재시도(위 주석).
 }

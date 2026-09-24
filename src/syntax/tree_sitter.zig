@@ -1171,7 +1171,9 @@ pub const BracketIndex = struct {
         leaves.items.len = w;
     }
 
-    /// 범위를 편집 하나에 통과시킨다 — 앞이면 그대로, 뒤면 민다, 걸치면 편집 범위까지 넓힌다.
+    /// 범위를 편집 하나에 통과시킨다 — 앞이면 그대로, 뒤면 민다, 걸치면 편집 범위까지 넓힌다. 걸칠 때 넓히지 않아도 판정자에서 드러나지 않는다
+    /// (적대적 2회차 N04 생존) — 뒤 편집이 자기 편집 범위와 달라진 범위를 따로 더하기 때문이다. 넓히는 것이 뜻이다: 범위는 편집을 지나도 같은
+    /// 글을 덮어야 한다.
     fn shiftRange(r: Provider.ByteRange, start: u32, old_end: u32, new_end: u32) Provider.ByteRange {
         if (r.end < start) return r;
         if (r.start > old_end) return .{ .start = r.start - old_end + new_end, .end = r.end - old_end + new_end };
@@ -1183,7 +1185,8 @@ pub const BracketIndex = struct {
         var buf: [Provider.max_changed]Provider.ByteRange = undefined;
         const changed = prov.takeChanged(&buf);
         if (self.walking) {
-            // 다 훑은 뒤에 다시 볼 범위로 모은다(좌표는 지금 트리 — 뒤 편집이 `shift` 에서 민다).
+            // 다 훑은 뒤에 다시 볼 범위로 모은다(좌표는 지금 트리 — 뒤 편집이 `shift` 에서 민다). 세대 검사는 제품에서 닿지 않는 방어다(적대적
+            // 2회차 N06: 등가) — 파싱은 전부 편집 통지(`onEditSpan`)를 지나고, 범위를 모르는 다시 파기(`reparse`)는 목록을 버린다.
             if (changed == null or prov.tree_gen != self.walk_seen_gen + 1) self.walk_dirty_all = true;
             self.walk_seen_gen = prov.tree_gen;
             if (changed) |ch| for (ch) |r| try self.walk_dirty.append(allocator, r);
@@ -1354,6 +1357,8 @@ pub const BracketIndex = struct {
         if (!c.ts_tree_cursor_goto_first_child(&cursor)) return;
         while (true) {
             const child = c.ts_tree_cursor_current_node(&cursor);
+            // `>` 와 `>=` 는 같다(적대적 2회차 N18: 등가) — 범위 끝에서 시작하는 잎은 빈 범위(지우기)에서만 걸치는데, 그 잎은 `shift` 가 이미 그대로
+            // 두었다(맞닿은 잎은 버리지 않는다). 토큰이 합쳐지는 지우기는 트리 모양이 바뀌어 달라진 범위가 덮는다.
             if (c.ts_node_start_byte(child) > r.end) break;
             try collectLeaves(allocator, child, source, slot, r, out, cover);
             if (!c.ts_tree_cursor_goto_next_sibling(&cursor)) break;
@@ -1375,9 +1380,20 @@ pub const BracketIndex = struct {
             }
             if (rule.css_url_strings and cssUrlString(node, source)) return scanText(allocator, text, s, rule, out);
             if (!typeIn(node, rule.text_kinds)) return;
-            if (rule.text_parents.len > 0) {
+            if (rule.text_skip_directives.len > 0) {
+                // `#error` · `#warning` 의 본문은 글자다(VS Code 가 문자열로 둔다 — 오라클). `#pragma` 는 칠한다. 부모로 가르지 않는다 — 매크로 본문의
+                // 부모는 오류 복구로 `ERROR` 가 되기도 한다(fmt `core.h` 의 `#else` 속 `#define` — 말뭉치 대조가 잡았다).
                 const parent = c.ts_node_parent(node);
-                if (c.ts_node_is_null(parent) or !typeIn(parent, rule.text_parents)) return;
+                if (!c.ts_node_is_null(parent) and typeIn(parent, &.{"preproc_call"})) {
+                    const dir = c.ts_node_child(parent, 0);
+                    const ds = c.ts_node_start_byte(dir);
+                    const de = c.ts_node_end_byte(dir);
+                    if (de <= source.len) {
+                        var name = source[ds..de];
+                        while (name.len > 0 and (name[0] == '#' or name[0] == ' ' or name[0] == '\t')) name = name[1..];
+                        for (rule.text_skip_directives) |d| if (std.mem.eql(u8, name, d)) return;
+                    }
+                }
             }
             return scanText(allocator, text, s, rule, out);
         }
@@ -1462,9 +1478,9 @@ pub const BracketIndex = struct {
             if (ch == '@' and (i == 0 or text[i - 1] != '{')) {
                 var j = i + 1;
                 while (j < text.len and (std.ascii.isAlphanumeric(text[j]) or text[j] == '_')) : (j += 1) {}
-                // 타입을 받는 블록 태그만(VS Code `JavaScript.tmLanguage.json` `docblock` 의 `(?={)` 규칙들) — `me@host {x}` 는 태그가 아니다.
-                const prev_ok = i == 0 or text[i - 1] == ' ' or text[i - 1] == '\t' or text[i - 1] == '*';
-                after_tag = prev_ok and isJsdocTypeTag(text[i + 1 .. j]);
+                // 타입을 받는 블록 태그만(VS Code `JavaScript.tmLanguage.json` `docblock` 의 `(?={)` 규칙들) — `@host {x}` 는 아니다. **앞 글자는 안
+                // 본다** — 그 규칙들에 뒤돌아보기가 없어 `x@param {T}` 도 칠한다(오라클 실측 · 처음엔 앞 글자를 봤다가 적대적 2회차 N13 이 짚었다).
+                after_tag = isJsdocTypeTag(text[i + 1 .. j]);
                 i = j - 1;
                 continue;
             }
@@ -1543,8 +1559,8 @@ pub const BracketRule = struct {
     skip_kinds: []const []const u8 = &.{},
     /// 괄호 글자를 세는 **이름 있는 잎**(글 — JSX 본문 · HTML 본문·속성값 · C 매크로 본문 · Python f-string 의 `{{`).
     text_kinds: []const []const u8 = &.{},
-    /// 글 잎의 부모가 이 중 하나일 때만 센다(C 는 `#define` 의 값만 — `#error` · `#warning` 의 본문은 VS Code 가 문자열로 둔다, 오라클 실측).
-    text_parents: []const []const u8 = &.{},
+    /// 이 지시어의 본문(`preproc_call` 의 글)은 세지 않는다 — C `#error` · `#warning`(VS Code 가 문자열로 둔다, 오라클 실측).
+    text_skip_directives: []const []const u8 = &.{},
     /// 글 잎을 C 어휘로 훑는다(매크로 본문 — 문자열·문자·주석은 건너뛴다).
     text_c_lexer: bool = false,
     /// `${` 를 한 괄호로 — JavaScript 는 칠하고 TypeScript 는 괄호로만 둔다.
@@ -1571,8 +1587,8 @@ pub fn bracketRuleFor(lang: Language) BracketRule {
         .php => .{ .skip_kinds = &.{ "encapsed_string", "heredoc", "nowdoc", "shell_command_expression" } },
         .ruby => .{ .percent_literals = true },
         .kotlin => .{ .skip_kinds = &.{"string_literal"} },
-        .c => .{ .text_kinds = &.{"preproc_arg"}, .text_parents = &.{ "preproc_def", "preproc_function_def" }, .text_c_lexer = true },
-        .cpp => .{ .text_kinds = &.{"preproc_arg"}, .text_parents = &.{ "preproc_def", "preproc_function_def" }, .text_c_lexer = true, .skip_kinds = &.{"raw_string_literal"} },
+        .c => .{ .text_kinds = &.{"preproc_arg"}, .text_skip_directives = &.{ "error", "warning" }, .text_c_lexer = true },
+        .cpp => .{ .text_kinds = &.{"preproc_arg"}, .text_skip_directives = &.{ "error", "warning" }, .text_c_lexer = true, .skip_kinds = &.{"raw_string_literal"} },
         .python => .{ .text_kinds = &.{"escape_interpolation"} },
         .html => .{ .colorize = false, .text_kinds = &.{ "text", "attribute_value" }, .chars = "(){}" },
         .json => .{ .chars = "[]{}" },
@@ -3265,4 +3281,37 @@ test "SYN48 괄호 목록 — 처음 훑기 도중의 편집은 훑기를 다시
         defer full.deinit(allocator);
         try std.testing.expectEqualSlices(BracketLeaf, full.leaves.items, idx.leaves.items);
     }
+}
+
+test "SYN49 CSS 함수 이름만 바꿔도(`foo` ↔ `url`) 증분 목록이 처음부터와 같다 — 달라진 범위를 선언까지 넓힌다 (visual-mapping §5.1d)" {
+    // `url("…")` 의 따옴표 속 괄호를 셀지가 **다른 잎(함수 이름)의 글자**에 달렸다. 이름만 바꾸면 트리 모양이 그대로라 달라진 범위가 이름 잎만 덮고
+    // 인자는 재사용돼 다시 안 훑는다(새 눈 리뷰). 무작위 퍼즈(SYN47)는 이 이름 바꾸기를 못 만들어 「넓히기」를 뺀 변이가 살아남았다(적대적 2회차 N14).
+    const allocator = std.testing.allocator;
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(allocator);
+    try text.appendSlice(allocator, "a { b: foo(\"q(1)\"); c: url(\"r(2)\"); }\n");
+    var prov = Provider.init(text.items, .css, 0) orelse return error.NoProvider;
+    defer prov.deinit();
+    var idx: BracketIndex = .{};
+    defer idx.deinit(allocator);
+    _ = try idx.step(allocator, &prov, text.items, 0);
+    const renames = [_]struct { at: usize, old: []const u8, new: []const u8 }{
+        .{ .at = 7, .old = "foo", .new = "url" }, // 인자 속 `(1)` 이 괄호가 된다
+        .{ .at = 23, .old = "url", .new = "foo" }, // 인자 속 `(2)` 가 글자가 된다
+    };
+    for (renames) |rn| {
+        try std.testing.expectEqualStrings(rn.old, text.items[rn.at .. rn.at + rn.old.len]);
+        const at = pointOfForTest(text.items, rn.at);
+        const old_to = pointOfForTest(text.items, rn.at + rn.old.len);
+        try text.replaceRange(allocator, rn.at, rn.old.len, rn.new);
+        const new_end = rn.at + rn.new.len;
+        idx.shift(allocator, @intCast(rn.at), @intCast(rn.at + rn.old.len), @intCast(new_end));
+        prov.onEdit(text.items, .{ .start_byte = @intCast(rn.at), .old_end_byte = @intCast(rn.at + rn.old.len), .new_end_byte = @intCast(new_end), .start_point = at, .old_end_point = old_to, .new_end_point = pointOfForTest(text.items, new_end) });
+        try idx.refresh(allocator, &prov, text.items, .{ .start = @intCast(rn.at), .end = @intCast(new_end) });
+        try std.testing.expect(idx.ready); // 부분 고침으로 갔다
+        var full = try fullIndexForTest(allocator, &prov, text.items);
+        defer full.deinit(allocator);
+        try std.testing.expectEqualSlices(BracketLeaf, full.leaves.items, idx.leaves.items);
+    }
+    try std.testing.expectEqual(@as(u64, 2), idx.partials);
 }

@@ -501,12 +501,13 @@ pub const Provider = struct {
     /// 달라진 범위의 칸 수 — 넘치면 `changed_all`(다 다시 훑는다 — 틀린 것보다 느린 것이 낫다).
     pub const max_changed: usize = 16;
 
-    /// 증분 파싱이 끝났다 — 옛 트리(편집을 먹인)와 새 트리의 달라진 범위를 적는다. 앞의 것을 아직 안 읽었으면 좌표가 섞이므로 `changed_all`.
+    /// 증분 파싱이 끝났다 — 옛 트리(편집을 먹인)와 새 트리의 달라진 범위를 **새로** 적는다(앞의 것은 버린다). 소비처가 그 사이 파싱을 놓쳤는지는
+    /// 범위가 아니라 **세대**(`tree_gen` 이 하나 넘게 뛰었다)로 가른다 — 처음엔 「안 읽은 것이 남아 있으면 모름」으로 적었는데, 여는 파싱이 세운
+    /// 「모름」이 아무도 안 읽어 남아 **편집 첫 번째가 늘 처음부터**였다(큰 문서에서 처음 훑기가 스무 프레임 넘게 걸려, 그동안 치면 색이 영영 안
+    /// 돌아왔다 — `BRPERF` 실측 `partials=0` · 적대적 검증 전 벤치).
     fn noteChanged(self: *Provider, old: *c.TSTree, new: *c.TSTree) void {
-        if (self.changed_len > 0) {
-            self.changed_all = true;
-            self.changed_len = 0;
-        }
+        self.changed_all = false;
+        self.changed_len = 0;
         var count: u32 = 0;
         const ranges = c.ts_tree_get_changed_ranges(old, new, &count);
         // **tree-sitter 의 할당기로 푼다** — API 주석은 「`malloc` 이니 `free` 로」라지만 구현(`get_changed_ranges.c`)은 `array_push` → `ts_realloc`
@@ -3060,7 +3061,8 @@ test "SYN47 괄호 목록 — 편집마다 민 위치 + 달라진 범위만 다�
             try std.testing.expect(idx.leaves.items.len > 0);
         }
 
-        for (0..60) |_| {
+        const rebuilds_before = idx.rebuilds;
+        for (0..60) |step_i| {
             const len = text.items.len;
             const start = r.uintLessThan(usize, len + 1);
             var old_end = start;
@@ -3091,6 +3093,8 @@ test "SYN47 괄호 목록 — 편집마다 민 위치 + 달라진 범위만 다�
             var full = try fullIndexForTest(allocator, &prov, text.items);
             defer full.deinit(allocator);
             try std.testing.expectEqualSlices(BracketLeaf, full.leaves.items, idx.leaves.items);
+            // **여는 파싱 뒤 첫 편집도 부분 고침이다** — 처음엔 여는 파싱의 「범위 모름」이 남아 첫 편집이 늘 처음부터였다(큰 문서에선 그동안 색이 빈다).
+            if (step_i == 0 and idx.rebuilds != rebuilds_before) return error.FirstEditRebuilt;
             steps += 1;
         }
         partials += idx.partials;

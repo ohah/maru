@@ -76,7 +76,13 @@ const Surface = struct {
     view: RingView = .{},
     /// 마지막으로 이 front 를 그린 창(AppSession 주소). 프레임 세대는 창마다 따로 세므로 다른 창의 세대와 비교하지 않는다.
     drawn_by: usize = 0,
+    /// 페이지가 원하는 커서(W4b). sidecar 는 같은 커서를 다시 보내지 않으므로 maru 가 기억한다 — 포인터가 나갔다 다시
+    /// 들어와도 이 값을 쓴다. 세대는 바뀔 때마다 올라, 창이 hover 중인 탭의 커서가 바뀐 것을 안다.
+    cursor: ws.message.WebCursor = .arrow,
+    cursor_generation: u32 = 0,
 };
+
+pub const Cursor = struct { cursor: ws.message.WebCursor, generation: u32 };
 
 var gpa_ref: ?std.mem.Allocator = null;
 var state: State = .off;
@@ -161,6 +167,27 @@ pub fn navigate(gpa: std.mem.Allocator, surface_id: u64, url: []const u8) void {
 pub fn navAction(gpa: std.mem.Allocator, surface_id: u64, action: ws.message.NavActionKind) void {
     const s = surfaces.getPtr(surface_id) orelse return;
     if (s.created) send(gpa, .{ .nav_action = .{ .browser = surface_id, .action = action } });
+}
+
+/// 입력(W4b — 라우팅은 창이 정했다). 만들어졌고 sidecar 가 돌 때만 보낸다 — 입력은 쥐었다가 늦게 보낼 것이 아니다(첫 프레임
+/// 전 입력은 렌더러도 버린다 — W4a 실측).
+pub fn sendInput(gpa: std.mem.Allocator, message: Message) void {
+    const browser: u64 = switch (message) {
+        .mouse => |m| m.browser,
+        .wheel => |m| m.browser,
+        .key => |m| m.browser,
+        .capture_lost => |b| b,
+        else => return,
+    };
+    const s = surfaces.getPtr(browser) orelse return;
+    if (!s.created or state != .running) return;
+    send(gpa, message);
+}
+
+/// 이 탭이 원하는 커서와 그 세대(없는 탭이면 null).
+pub fn cursor(surface_id: u64) ?Cursor {
+    const s = surfaces.getPtr(surface_id) orelse return null;
+    return .{ .cursor = s.cursor, .generation = s.cursor_generation };
 }
 
 /// Term 이 사라졌다 — 브라우저를 파괴한다. 마지막이면 sidecar 도 내린다.
@@ -569,8 +596,12 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             .browser_create_failed, .unknown_browser, .duplicate_browser, .frame_channel_failed => {},
         },
         .title_changed, .load_finished, .renderer_gone => {},
-        // 커서·IME 후보창 위치는 앱 입력 라우팅(W4b)이 쓴다 — 그때까지 버린다.
-        .cursor_changed, .ime_range => {},
+        .cursor_changed => |v| if (surfaces.getPtr(v.browser)) |s| {
+            s.cursor = v.cursor;
+            s.cursor_generation +%= 1;
+        },
+        // IME 후보창 위치는 키보드 라우팅(W4c)이 쓴다 — 그때까지 버린다.
+        .ime_range => {},
         // 방향이 다른 tag 는 decoder 가 이미 거절했다.
         .hello, .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .shutdown, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost => unreachable,
     }

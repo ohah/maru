@@ -8,4 +8,5 @@ test {
     _ = @import("title_gate.zig");
     _ = @import("ring_receiver.zig");
     _ = @import("ring_producer.zig");
+    _ = @import("input_map.zig");
 }

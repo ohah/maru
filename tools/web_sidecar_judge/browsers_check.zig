@@ -43,13 +43,16 @@ const wait_ms = 15_000;
 const flood_title_limit = 60;
 const size: protocol.message.ViewSize = .{ .width = 640, .height = 400, .scale = 2 };
 
-const Want = union(enum) {
+pub const Want = union(enum) {
     title: struct { browser: BrowserId, text: []const u8 },
     url_suffix: struct { browser: BrowserId, suffix: []const u8 },
     can_go_back: struct { browser: BrowserId, value: bool },
     created: BrowserId,
     closed: BrowserId,
     failure: struct { browser: BrowserId, code: FailureCode },
+    cursor: struct { browser: BrowserId, cursor: protocol.message.WebCursor },
+    /// 비지 않은 IME 조합 사각형.
+    ime_range: BrowserId,
 };
 
 /// 기대한 제목이 **모두** 올 때까지 읽는다(도착 순서는 상관없다). 온 수를 돌려준다.
@@ -86,18 +89,20 @@ fn matches(want: Want, message: Message) Match {
         .created => |id| if (message == .browser_created and message.browser_created == id) return .hit,
         .closed => |id| if (message == .browser_closed and message.browser_closed == id) return .hit,
         .failure => |w| if (message == .failure and message.failure.browser == w.browser and message.failure.code == w.code) return .hit,
+        .cursor => |w| if (message == .cursor_changed and message.cursor_changed.browser == w.browser and message.cursor_changed.cursor == w.cursor) return .hit,
+        .ime_range => |id| if (message == .ime_range and message.ime_range.browser == id and message.ime_range.bounds.width > 0 and message.ime_range.bounds.height > 0) return .hit,
     }
     return .none;
 }
 
 /// 기대한 알림이 올 때까지 읽는다(그 사이 다른 알림은 버린다).
-fn waitFor(host: *Host, want: Want, misrouted: *usize) bool {
+pub fn waitFor(host: *Host, want: Want, misrouted: *usize) bool {
     return waitAll(host, &.{want}, misrouted);
 }
 
 /// 기대한 알림이 **모두** 올 때까지 읽는다(도착 순서는 상관없다) — 제목은 조절(50ms)로 늦게 올 수 있어, 한 알림을
 /// 기다리며 다른 알림을 버리면 이미 지나간 것을 놓친다.
-fn waitAll(host: *Host, wants: []const Want, misrouted: *usize) bool {
+pub fn waitAll(host: *Host, wants: []const Want, misrouted: *usize) bool {
     var got: [8]bool = @splat(false);
     var count: usize = 0;
     const deadline = os.nowMs() + wait_ms;
@@ -119,11 +124,11 @@ fn waitAll(host: *Host, wants: []const Want, misrouted: *usize) bool {
     return count == wants.len;
 }
 
-fn url(buf: []u8, port: u16, path: []const u8) []const u8 {
+pub fn url(buf: []u8, port: u16, path: []const u8) []const u8 {
     return std.fmt.bufPrint(buf, "http://127.0.0.1:{d}{s}", .{ port, path }) catch unreachable;
 }
 
-fn handshake(host: *Host) !void {
+pub fn handshake(host: *Host) !void {
     try host.send(.{ .hello = .{ .instance = 1, .nonce = os.random64() } });
     const reply = (try host.next(wait_ms)) orelse return error.ClosedBeforeAck;
     if (reply != .hello_ack) return error.NoAck;

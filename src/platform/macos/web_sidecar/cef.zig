@@ -17,6 +17,7 @@ pub const c = @cImport({
     @cInclude("include/capi/cef_request_handler_capi.h");
     @cInclude("include/capi/cef_browser_process_handler_capi.h");
     @cInclude("include/capi/cef_frame_capi.h");
+    @cInclude("include/capi/cef_context_menu_handler_capi.h");
 });
 
 pub const api_version: c_int = 15400;

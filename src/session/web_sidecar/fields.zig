@@ -14,6 +14,12 @@ const max_text_bytes = wire.max_text_bytes;
 const BrowserId = message.BrowserId;
 const ViewSize = message.ViewSize;
 const Hello = message.Hello;
+const Modifiers = message.Modifiers;
+const Point = message.Point;
+const Mouse = message.Mouse;
+const TextRange = message.TextRange;
+const Rect = message.Rect;
+const max_pointer_extent = message.max_pointer_extent;
 
 /// view 크기 상한(DIP). 가장 큰 Mac 화면(6K — 3008 DIP)의 다섯 배 남짓이라 view 로는 넉넉하다. 물리 픽셀(DIP × scale)
 /// 상한은 픽셀 링이 따로 본다(W2 — IOSurface·Metal 텍스처 한도).
@@ -62,6 +68,83 @@ pub fn readBool(cursor: *ReadCursor) Error!bool {
         1 => true,
         else => error.InvalidBool,
     };
+}
+
+/// 입력 필드(W4). 좌표·스크롤 양은 `max_pointer_extent` 안, 수식자는 정의된 비트만, 범위는 없음이거나 순서가 맞고 글
+/// 상한 안.
+pub fn writeModifiers(cursor: *Cursor, modifiers: Modifiers) Error!void {
+    if (modifiers._reserved != 0) return error.InvalidModifiers;
+    try cursor.writeU16(@bitCast(modifiers));
+}
+
+pub fn readModifiers(cursor: *ReadCursor) Error!Modifiers {
+    const modifiers: Modifiers = @bitCast(try cursor.readU16());
+    if (modifiers._reserved != 0) return error.InvalidModifiers;
+    return modifiers;
+}
+
+pub fn writeExtent(cursor: *Cursor, value: i32) Error!void {
+    if (@abs(value) > max_pointer_extent) return error.InvalidCoordinate;
+    try cursor.writeU32(@bitCast(value));
+}
+
+pub fn readExtent(cursor: *ReadCursor) Error!i32 {
+    const value: i32 = @bitCast(try cursor.readU32());
+    if (@abs(value) > max_pointer_extent) return error.InvalidCoordinate;
+    return value;
+}
+
+pub fn writePoint(cursor: *Cursor, point: Point) Error!void {
+    try writeExtent(cursor, point.x);
+    try writeExtent(cursor, point.y);
+}
+
+pub fn readPoint(cursor: *ReadCursor) Error!Point {
+    return .{ .x = try readExtent(cursor), .y = try readExtent(cursor) };
+}
+
+/// down·up 은 1~3 번째 클릭, move·leave 는 0.
+pub fn validClickCount(mouse: Mouse) bool {
+    return switch (mouse.kind) {
+        .down, .up => mouse.click_count >= 1 and mouse.click_count <= 3,
+        .move, .leave => mouse.click_count == 0,
+    };
+}
+
+pub fn validRange(range: TextRange) bool {
+    if (range.isNone()) return true;
+    return range.start <= range.end and range.end <= max_text_bytes;
+}
+
+pub fn writeRange(cursor: *Cursor, range: TextRange) Error!void {
+    if (!validRange(range)) return error.InvalidRange;
+    try cursor.writeU32(range.start);
+    try cursor.writeU32(range.end);
+}
+
+pub fn readRange(cursor: *ReadCursor) Error!TextRange {
+    const range: TextRange = .{ .start = try cursor.readU32(), .end = try cursor.readU32() };
+    if (!validRange(range)) return error.InvalidRange;
+    return range;
+}
+
+pub fn writeRect(cursor: *Cursor, rect: Rect) Error!void {
+    try writeExtent(cursor, rect.x);
+    try writeExtent(cursor, rect.y);
+    if (rect.width > max_pointer_extent or rect.height > max_pointer_extent) return error.InvalidCoordinate;
+    try cursor.writeU32(rect.width);
+    try cursor.writeU32(rect.height);
+}
+
+pub fn readRect(cursor: *ReadCursor) Error!Rect {
+    const rect: Rect = .{
+        .x = try readExtent(cursor),
+        .y = try readExtent(cursor),
+        .width = try cursor.readU32(),
+        .height = try cursor.readU32(),
+    };
+    if (rect.width > max_pointer_extent or rect.height > max_pointer_extent) return error.InvalidCoordinate;
+    return rect;
 }
 
 pub fn readHello(cursor: *ReadCursor) Error!Hello {

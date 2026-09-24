@@ -17,6 +17,7 @@ const client = @import("client.zig");
 const watchdog = @import("watchdog.zig");
 const ring_producer = @import("ring_producer.zig");
 const iosurface = @import("iosurface.zig");
+const input = @import("input.zig");
 
 const Message = protocol.message.Message;
 const BrowserId = protocol.message.BrowserId;
@@ -58,6 +59,7 @@ pub fn handler() dispatch.Handler {
 
 fn command(_: *anyopaque, message: Message, writer: *events.Writer) void {
     if (state.shutting_down) return;
+    if (input.handle(message)) return;
     switch (message) {
         .create_browser => |value| create(value, writer),
         .destroy_browser => |browser| destroy(browser, writer),

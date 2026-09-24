@@ -8,6 +8,10 @@
 //! 임시 안전 기본값으로 억제한다 — `alert` 는 바로 돌아오고 `confirm`·`prompt` 는 취소로 끝난다. maru 가 대화상자를
 //! 그리는 것은 W5(C6)다. 떠나기 확인(beforeunload)은 떠나기로 답한다.
 //!
+//! **우클릭 메뉴도 막는다**(W4): 창 없는 브라우저라도 기본 우클릭 메뉴는 네이티브 메뉴다 — sidecar 가 maru 밖에 메뉴를
+//! 띄우고 UI 스레드가 메뉴 루프에 묶인다. 메뉴 항목을 비워 띄우지 않는다. 페이지의 `contextmenu` 이벤트는 그대로 간다.
+//! maru 가 메뉴를 그리는 것은 W6(D5)다.
+//!
 //! **제목은 조절한다**: 같은 제목은 다시 안 보내고, 간격 안의 변경은 마지막 것만 보낸다(`title_gate.zig`).
 
 const std = @import("std");
@@ -17,6 +21,7 @@ const object = @import("object.zig");
 const library = @import("library.zig");
 const browsers = @import("browsers.zig");
 const title_gate = @import("title_gate.zig");
+const input = @import("input.zig");
 
 var client_obj: c.cef_client_t = undefined;
 var life_span: c.cef_life_span_handler_t = undefined;
@@ -25,6 +30,7 @@ var display: c.cef_display_handler_t = undefined;
 var load: c.cef_load_handler_t = undefined;
 var request: c.cef_request_handler_t = undefined;
 var jsdialog: c.cef_jsdialog_handler_t = undefined;
+var context_menu: c.cef_context_menu_handler_t = undefined;
 var title_task: c.cef_task_t = undefined;
 var title_flush_posted = false;
 var ready = false;
@@ -47,6 +53,8 @@ pub fn get() *c.cef_client_t {
         object.staticRefCounted(&request.base);
         jsdialog = object.zeroed(c.cef_jsdialog_handler_t);
         object.staticRefCounted(&jsdialog.base);
+        context_menu = object.zeroed(c.cef_context_menu_handler_t);
+        object.staticRefCounted(&context_menu.base);
         title_task = object.zeroed(c.cef_task_t);
         object.staticRefCounted(&title_task.base);
         title_task.execute = &flushTitles;
@@ -57,19 +65,23 @@ pub fn get() *c.cef_client_t {
         client_obj.get_load_handler = &getLoad;
         client_obj.get_request_handler = &getRequest;
         client_obj.get_jsdialog_handler = &getJsDialog;
+        client_obj.get_context_menu_handler = &getContextMenu;
         life_span.on_before_popup = &onBeforePopup;
         life_span.on_before_close = &onBeforeClose;
         render.get_view_rect = &getViewRect;
         render.get_screen_info = &getScreenInfo;
         render.on_paint = &onPaint;
         render.on_accelerated_paint = &onAcceleratedPaint;
+        render.on_ime_composition_range_changed = &input.onImeCompositionRangeChanged;
         display.on_title_change = &onTitleChange;
         display.on_address_change = &onAddressChange;
+        display.on_cursor_change = &input.onCursorChange;
         load.on_loading_state_change = &onLoadingStateChange;
         load.on_load_end = &onLoadEnd;
         request.on_render_process_terminated = &onRenderProcessTerminated;
         jsdialog.on_jsdialog = &onJsDialog;
         jsdialog.on_before_unload_dialog = &onBeforeUnloadDialog;
+        context_menu.on_before_context_menu = &onBeforeContextMenu;
     }
     return &client_obj;
 }
@@ -91,6 +103,24 @@ fn getRequest(_: [*c]c.cef_client_t) callconv(.c) [*c]c.cef_request_handler_t {
 }
 fn getJsDialog(_: [*c]c.cef_client_t) callconv(.c) [*c]c.cef_jsdialog_handler_t {
     return &jsdialog;
+}
+fn getContextMenu(_: [*c]c.cef_client_t) callconv(.c) [*c]c.cef_context_menu_handler_t {
+    return &context_menu;
+}
+
+/// 항목을 비우면 CEF 는 메뉴를 띄우지 않는다(헤더 — 「The |model| can be cleared to show no context menu」).
+fn onBeforeContextMenu(
+    _: [*c]c.cef_context_menu_handler_t,
+    browser: [*c]c.cef_browser_t,
+    frame: [*c]c.cef_frame_t,
+    params: [*c]c.cef_context_menu_params_t,
+    model: [*c]c.cef_menu_model_t,
+) callconv(.c) void {
+    defer object.releaseArg(browser);
+    defer object.releaseArg(frame);
+    defer object.releaseArg(params);
+    defer object.releaseArg(model);
+    if (model != null) _ = model.*.clear.?(model);
 }
 
 fn entryOf(browser: [*c]c.cef_browser_t) ?*@import("registry.zig").Entry {

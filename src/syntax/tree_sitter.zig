@@ -3271,6 +3271,19 @@ test "SYN48 괄호 목록 — 처음 훑기 도중의 편집은 훑기를 다시
                 edits_during_walk += 1;
                 continue;
             }
+            if (steps == 2) {
+                // **문자열이던 글이 코드가 되는 편집** — `"(", x` 의 여는 따옴표를 지우면 그 뒤 `(`·`)` 가 괄호가 된다. 새로 생긴 괄호는 지운 자리에
+                // 안 걸쳐 편집 범위로는 못 찾는다 — 달라진 범위만 안다(위 `//` 는 줄 끝까지 가는 주석 잎 하나가 편집에 걸쳐 편집 범위만으로도 맞았다).
+                const q = std.mem.indexOfPos(u8, text.items, text.items.len / 3, "\"(\", x") orelse return error.NoQuote;
+                const at = pointOfForTest(text.items, q);
+                const old_to = pointOfForTest(text.items, q + 1);
+                try text.replaceRange(allocator, q, 1, "");
+                idx.shift(allocator, @intCast(q), @intCast(q + 1), @intCast(q));
+                prov.onEdit(text.items, .{ .start_byte = @intCast(q), .old_end_byte = @intCast(q + 1), .new_end_byte = @intCast(q), .start_point = at, .old_end_point = old_to, .new_end_point = at });
+                try idx.refresh(allocator, &prov, text.items, .{ .start = @intCast(q), .end = @intCast(q) });
+                edits_during_walk += 1;
+                continue;
+            }
             if (steps % 3 != 0) continue;
             // 편집 — 제품 순서(민다 → 판다 → 고친다)
             const len = text.items.len;

@@ -1,7 +1,7 @@
 //! W2 판정 — 판정자가 **maru 역할**로 픽셀 링을 받아 docs/plans/web-osr-backend.md 「W2」 완료 판정을 잰다.
 //!
-//!   ring-announced     링 알림(IOSurface 세 장 + 제어 블록)을 pid·토큰 검증을 거쳐 받는다
-//!   no-tearing         매 프레임 화면 전체 색을 바꾸는 페이지에서 한 장의 위·가운데·아래 줄 색이 다르지 않다
+//!   ring-announced     링 알림(IOSurface 세 장 + 제어 블록)을 pid·토큰 검증을 거쳐 받고, 고정한 pid 버전이 0 이 아니다
+//!   no-tearing         매 프레임 화면 전체를 프레임 번호 색으로 칠하는 페이지에서 한 장의 위·가운데·아래 줄 색이 같다
 //!   front-held         maru 가 쥔 장(front)을 한 프레임 넘게 쥐고 있어도 생산자가 덮어쓰지 않는다(실제 maru 는 한 프레임 내내
 //!                      그 장을 그린다 — 받자마자 몇 µs 만 읽는 것으로는 덮어쓰기를 못 잡았다, 변이 실측)
 //!   frame-rate         초당 새 프레임 수(CEF 약 60 에 가깝다)
@@ -10,8 +10,10 @@
 //!   rogue-rejected     이름을 아는 제3자 프로세스의 링 알림은 첫 관문(pid)에서 거절된다 — 거절 이유까지 본다(pid 검사를
 //!                      빼도 pid 버전 고정이 막아 통과하던 것을 가른다, 변이 실측)
 //!   malformed-refused  OOL 메모리 폭탄(32MB × 30)·너무 큰 메시지를 거절로 세고, 가상 메모리가 불지 않는다
-//!   flood-survives     maru 가 비우지 못하는 동안 대기열을 가득 채운 상태에서 크기를 바꿔도, 비우기 시작하면 진짜
-//!                      sidecar 의 새 링이 결국 온다(sidecar 가 짧게 기다리고 다음 그리기에서 다시 알린다)
+//!   flood-survives     maru 가 비우지 못하는 동안 대기열을 가득 채운 상태에서(한 통이라도 막혀야 포화로 친다) 크기를
+//!                      바꿔도, 비우기 시작하면 진짜 sidecar 의 새 링이 결국 온다 — host 가 알림 실패를 한 번 이상 겪었어야 한다
+//!   flood-static       같은 공격을 **그리기가 멈춘 정적 페이지**에서 — 다음 그리기가 없어도 sidecar 가 쥔 링을 다시 알린다
+//!   channel-replaced   받는 port 를 새로 알려 주면(두 번째 `frame_channel`) 정적 페이지의 링이 새 받는 쪽에 다시 온다
 //!   channel-closed     받는 권리를 닫으면 bootstrap 이름이 사라진다
 
 const std = @import("std");
@@ -30,8 +32,6 @@ const mailbox = protocol.mailbox;
 pub const Report = *const fn (ok: bool, name: []const u8, detail: []const u8) void;
 
 const browser_id: u64 = 11;
-const red: u32 = 0xFFFF0000;
-const blue: u32 = 0xFF0000FF;
 const black: u32 = 0xFF000000;
 const wait_ms = 15_000;
 
@@ -49,6 +49,8 @@ const View = struct {
     /// 위·아래 검정·가운데 파랑). 한 장으로서 일관돼 찢어짐이 아니다 — 따로 세어 드러낸다.
     transition: u64 = 0,
     switched: u32 = 0,
+    /// `take` 가 워드를 망가진 것으로 본 수(진짜 sidecar 에서는 0 이어야 한다).
+    corrupt: u32 = 0,
     rejected_pid: u32 = 0,
     rejected_other: u32 = 0,
 
@@ -77,6 +79,7 @@ const View = struct {
                     self.inspect();
                     return;
                 },
+                .corrupt => self.corrupt += 1,
                 else => {},
             }
         }
@@ -86,6 +89,7 @@ const View = struct {
                 self.front = slot;
                 self.inspect();
             },
+            .corrupt => self.corrupt += 1,
             .none, .stale => {},
         }
     }
@@ -102,18 +106,13 @@ const View = struct {
         const bottom = iosurface.pixel(surface, x, h - 3);
         self.frames += 1;
         if (top == 0 or middle == 0 or bottom == 0) self.blank += 1;
-        const samples = [_]u32{ top, middle, bottom };
-        var has_red = false;
-        var has_blue = false;
-        var has_black = false;
-        for (samples) |sample| {
-            if (sample == red) has_red = true;
-            if (sample == blue) has_blue = true;
-            if (sample == black) has_black = true;
+        // 크기 변경 전환 프레임은 위·아래가 검정이다(C3) — 따로 센다. 그 밖에는 한 장이 한 색이어야 한다: 페이지가 매
+        // 프레임 다른 색으로 칠하므로, 줄마다 색이 다르면 생산자가 쓰는 장을 소비자가 읽은 것이다.
+        if (top == black or bottom == black) {
+            self.transition += 1;
+        } else if (top != middle or middle != bottom) {
+            self.torn += 1;
         }
-        // 찢어짐 = 한 장 안에 페이지가 번갈아 칠하는 두 색이 함께 있다(생산자가 쓰는 장을 소비자가 읽었다).
-        if (has_red and has_blue) self.torn += 1;
-        if (has_black) self.transition += 1;
     }
 
     /// 지금 쥔 front 의 가운데 픽셀.
@@ -162,7 +161,8 @@ pub fn rogueMain(service: []const u8, real_token_hex: []const u8) u8 {
         const channel = ring.ring_producer.Channel.connect(service, token) catch return 3;
         var producer: ring.ring_producer.Producer = .{ .browser = browser_id, .scale = 2 };
         const fake = iosurface.create(64, 64) catch return 4;
-        producer.paint(&channel, fake) catch return 5;
+        const painted = producer.paint(&channel, fake, 0) catch return 5;
+        if (painted != .delivered) return 5;
     }
     return 0;
 }
@@ -201,12 +201,29 @@ fn spawnRogue(self_path: [*:0]const u8, service: []const u8, token: [16]u8) c_in
     return pid;
 }
 
-pub fn run(report: Report, self_path: [*:0]const u8, host_path: [:0]const u8, profile_arg: [:0]const u8, port: u16) !void {
+/// host 로그에서 `needle` 이 나온 줄 수.
+fn countLines(path: [:0]const u8, needle: []const u8) usize {
+    const fd = std.c.open(path, .{ .ACCMODE = .RDONLY });
+    if (fd < 0) return 0;
+    defer _ = std.c.close(fd);
+    var buf: [256 * 1024]u8 = undefined;
+    var len: usize = 0;
+    while (len < buf.len) {
+        const n = std.c.read(fd, buf[len..].ptr, buf.len - len);
+        if (n <= 0) break;
+        len += @intCast(n);
+    }
+    return std.mem.count(u8, buf[0..len], needle);
+}
+
+const waiting_line = "is waiting — the frame channel did not take it";
+
+pub fn run(report: Report, self_path: [*:0]const u8, host_path: [:0]const u8, profile_arg: [:0]const u8, log_path: [:0]const u8, port: u16) !void {
     var detail: [256]u8 = undefined;
     var u: [256]u8 = undefined;
 
     var receiver = try Receiver.open();
-    var host = try Host.spawn(host_path, profile_arg);
+    var host = try Host.spawnLogged(host_path, profile_arg, log_path);
     receiver.expected_pid = host.pid;
     try host.send(.{ .hello = .{ .instance = 3, .nonce = os.random64() } });
     _ = (try host.next(wait_ms)) orelse return error.NoAck;
@@ -219,7 +236,8 @@ pub fn run(report: Report, self_path: [*:0]const u8, host_path: [:0]const u8, pr
     const announced_deadline = os.nowMs() + wait_ms;
     while (view.shown == null and os.nowMs() < announced_deadline) pump(&view, &receiver, 100, &rejected);
     const first = view.shown;
-    report(first != null and first.?.width == 1520 and first.?.height == 972 and rejected == 0, "ring-announced", std.fmt.bufPrint(&detail, "세대 {d} · {d}x{d} · 거절 {d}", .{ if (first) |r| r.generation else 0, if (first) |r| r.width else 0, if (first) |r| r.height else 0, rejected }) catch "");
+    const pinned = receiver.pinned_pid_version orelse 0;
+    report(first != null and first.?.width == 1520 and first.?.height == 972 and rejected == 0 and pinned != 0, "ring-announced", std.fmt.bufPrint(&detail, "세대 {d} · {d}x{d} · 거절 {d} · 고정한 pid 버전 {d}", .{ if (first) |r| r.generation else 0, if (first) |r| r.width else 0, if (first) |r| r.height else 0, rejected, pinned }) catch "");
     if (first == null) return error.NoRing;
 
     // 첫 로드가 끝나 페이지가 돌 때까지 조금 기다린 뒤 5 초를 잰다.
@@ -230,7 +248,7 @@ pub fn run(report: Report, self_path: [*:0]const u8, host_path: [:0]const u8, pr
     view.transition = 0;
     pump(&view, &receiver, 5000, &rejected);
     const measured = view.frames;
-    report(view.torn == 0 and view.blank == 0 and view.transition == 0 and measured > 0, "no-tearing", std.fmt.bufPrint(&detail, "읽은 장 {d} · 찢어진 장 {d} · 빈 장 {d} · 전환 프레임 {d}", .{ measured, view.torn, view.blank, view.transition }) catch "");
+    report(view.torn == 0 and view.blank == 0 and view.transition == 0 and view.corrupt == 0 and measured > 0, "no-tearing", std.fmt.bufPrint(&detail, "읽은 장 {d} · 찢어진 장 {d} · 빈 장 {d} · 전환 프레임 {d} · 망가진 워드 {d}", .{ measured, view.torn, view.blank, view.transition, view.corrupt }) catch "");
     // 쥔 장이 그대로인가 — 새 프레임을 받은 직후 25ms(한 프레임 넘게) 새로 받지 않고 쥔 채 앞뒤로 읽는다.
     var held: u32 = 0;
     var overwritten: u32 = 0;
@@ -305,7 +323,42 @@ pub fn run(report: Report, self_path: [*:0]const u8, host_path: [:0]const u8, pr
     const flood_deadline = os.nowMs() + wait_ms;
     while (view.switched == switched_before and os.nowMs() < flood_deadline) pump(&view, &receiver, 50, &rejected);
     const flood_rejected = rejected - attack_mark;
-    report(flooded and flood_rejected > 0 and view.switched == switched_before + 1 and view.shown.?.width == 1600, "flood-survives", std.fmt.bufPrint(&detail, "넘친 메시지 거절 {d} · 그 뒤 새 링 {d}x{d}", .{ flood_rejected, view.shown.?.width, view.shown.?.height }) catch "");
+    const waited = countLines(log_path, waiting_line);
+    report(flooded and flood_rejected > 0 and waited >= 1 and view.switched == switched_before + 1 and view.shown.?.width == 1600, "flood-survives", std.fmt.bufPrint(&detail, "포화 {} · 넘친 메시지 거절 {d} · host 알림 대기 {d} 번 · 그 뒤 새 링 {d}x{d}", .{ flooded, flood_rejected, waited, view.shown.?.width, view.shown.?.height }) catch "");
+
+    // 정적 페이지 — 크기를 바꾼 뒤 CEF 가 한두 번 그리고 멈춘다. 그 그리기가 모두 막혀도 링이 와야 한다.
+    try host.send(.{ .navigate = .{ .browser = browser_id, .url = url(&u, port, "/static") } });
+    pump(&view, &receiver, 1500, &rejected);
+    const static_frames_before = view.frames;
+    pump(&view, &receiver, 1000, &rejected);
+    const static_idle = view.frames - static_frames_before;
+    const waited_before = countLines(log_path, waiting_line);
+    const static_flooded = runAttack(self_path, "flood", receiver.serviceName(), &view, &receiver, &rejected, false);
+    const static_switched_before = view.switched;
+    try host.send(.{ .resize = .{ .browser = browser_id, .size = .{ .width = 640, .height = 400, .scale = 2 } } });
+    os.sleepMs(1000);
+    const static_deadline = os.nowMs() + wait_ms;
+    while (view.switched == static_switched_before and os.nowMs() < static_deadline) pump(&view, &receiver, 50, &rejected);
+    const static_waited = countLines(log_path, waiting_line) - waited_before;
+    report(static_idle <= 2 and static_flooded and static_waited >= 1 and view.switched == static_switched_before + 1 and view.shown.?.width == 1280, "flood-static", std.fmt.bufPrint(&detail, "멈춘 페이지(1 초 {d} 장) · 포화 {} · host 알림 대기 {d} 번 · 그 뒤 새 링 {d}x{d}", .{ static_idle, static_flooded, static_waited, view.shown.?.width, view.shown.?.height }) catch "");
+
+    // 받는 쪽을 바꾼다 — 정적 페이지라 그리기 없이 지금 링이 새 받는 쪽으로 와야 한다.
+    var second = try Receiver.open();
+    defer second.close();
+    second.expected_pid = host.pid;
+    try host.send(.{ .frame_channel = .{ .service = second.serviceName(), .token = second.token } });
+    var second_ring: ?Ring = null;
+    var second_rejected: u32 = 0;
+    const second_deadline = os.nowMs() + wait_ms;
+    while (second_ring == null and os.nowMs() < second_deadline) {
+        if (second.receive(100) catch null) |received| switch (received) {
+            .ring => |fresh| second_ring = fresh,
+            .rejected => second_rejected += 1,
+        };
+    }
+    const shown_generation = view.shown.?.generation;
+    report(second_ring != null and second_ring.?.generation == shown_generation and second_ring.?.width == 1280 and second_rejected == 0, "channel-replaced", std.fmt.bufPrint(&detail, "새 받는 쪽이 받은 링: 세대 {d}(보이던 세대 {d}) · {d}x{d} · 거절 {d}", .{ if (second_ring) |r| r.generation else 0, shown_generation, if (second_ring) |r| r.width else 0, if (second_ring) |r| r.height else 0, second_rejected }) catch "");
+    if (second_ring) |r| r.release();
 
     try host.send(.shutdown);
     while (host.next(wait_ms) catch null) |_| {}

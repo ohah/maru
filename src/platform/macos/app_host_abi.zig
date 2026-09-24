@@ -173,7 +173,7 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
 }
 
 test "ABI v185 notification release end-all and cold route values match the C header" {
-    try std.testing.expectEqual(@as(u32, 192), abi_version);
+    try std.testing.expectEqual(@as(u32, 193), abi_version);
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @intFromEnum(AppInstanceLeaseResult.acquired));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_HELD), @intFromEnum(AppInstanceLeaseResult.held));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_UNSAFE), @intFromEnum(AppInstanceLeaseResult.unsafe));
@@ -1968,6 +1968,8 @@ pub export fn maru_macos_app_session_ime_end(
     event: ?*const KeyEvent,
 ) c_int {
     const app_session = session orelse return @intFromEnum(Status.null_out);
+    // W4c: Chromium 탭 트랜잭션은 키 변환이 필요 없다 — 변환 실패로 트랜잭션이 안 닫히지 않게 먼저 닫는다.
+    if (session_mod.web_ops.osrImeEnd(app_session)) return @intFromEnum(Status.ok);
     // event가 null이면 정규화 불가 키 — 트랜잭션은 닫되 일반 키 인코딩은 생략한다(imeEnd가 처리).
     const key_event: ?terminal.KeyEvent = if (event) |e|
         (keyEventFromAbi(e.*) catch return @intFromEnum(Status.invalid_config))
@@ -4567,6 +4569,45 @@ pub export fn maru_macos_app_session_take_osr_cursor(session: ?*AppSession, out_
 pub export fn maru_macos_app_session_osr_aux_button(session: ?*AppSession, button_number: i32, x_px: f64, y_px: f64) i32 {
     const app = session orelse return 0;
     return @intFromBool(session_mod.web_ops.osrAuxButton(app, button_number, x_px, y_px));
+}
+
+/// v193(W4c): 키 대상이 Chromium 탭인가. 판정 전에 대상을 맞춘다(키로 탭을 바꾼 직후의 키 — 적대 검증).
+pub export fn maru_macos_app_session_osr_keyboard_active(session: ?*AppSession) i32 {
+    const app = session orelse return 0;
+    session_mod.web_ops.syncOsrKeyTarget(app);
+    return @intFromBool(session_mod.web_ops.osrKeyTarget(app) != null);
+}
+
+/// v193(W4c): 키 한 번(phase 0 누름·1 쥐어 둠·2 뗌). 키 대상이 Chromium 탭이면 1.
+pub export fn maru_macos_app_session_osr_key(session: ?*AppSession, phase: i32, key_code: u32, character: u32, unmodified: u32, mods: i32) i32 {
+    const app = session orelse return 0;
+    const key: session_mod.web_ops.OsrKey = .{
+        .key_code = @intCast(@min(key_code, 0xFF)),
+        .character = @intCast(@min(character, 0xFFFF)),
+        .unmodified = @intCast(@min(unmodified, 0xFFFF)),
+        .modifiers = session_mod.web_ops.osrKeyModifiers(mods),
+    };
+    return @intFromBool(session_mod.web_ops.osrKey(app, phase, key));
+}
+
+/// v193(W4c): 메뉴 편집 명령을 키 대상 Chromium 탭에.
+pub export fn maru_macos_app_session_osr_edit(session: ?*AppSession, command: i32) i32 {
+    const app = session orelse return 0;
+    if (command < 0 or command > 255) return 0;
+    const kind = std.enums.fromInt(maru.session.web_sidecar.message.EditCommandKind, @as(u8, @intCast(command))) orelse return 0;
+    return @intFromBool(session_mod.web_ops.osrEdit(app, kind));
+}
+
+/// v193(W4c): 입력기의 키 동작 명령(deleteBackward 밖).
+pub export fn maru_macos_app_session_ime_command(session: ?*AppSession) void {
+    const app = session orelse return;
+    _ = session_mod.web_ops.osrImeCommand(app, false);
+}
+
+/// v193(W4c): Zig 가 끝낸 조합을 입력기 세션에서도 버리라는 요청(한 번).
+pub export fn maru_macos_app_session_take_osr_discard_marked(session: ?*AppSession) i32 {
+    const app = session orelse return 0;
+    return @intFromBool(session_mod.web_ops.takeOsrDiscardMarked(app));
 }
 
 pub export fn maru_macos_mermaid_snapshot(out_snapshot: ?*MermaidCoordinatorSnapshotAbi) void {

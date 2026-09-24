@@ -16,6 +16,8 @@ pub const version: u16 = 1;
 pub const max_url_bytes: usize = 32 * 1024;
 /// sidecar 가 보내는 글(제목·실패 설명) 상한. sidecar 는 `clampUtf8` 로 잘라서 보낸다.
 pub const max_text_bytes: usize = 4 * 1024;
+/// bootstrap 이름 상한 — launchd 이름(`name_t`)이 128 바이트다.
+pub const max_service_bytes: usize = 127;
 /// 가장 큰 메시지(`create_browser` + URL 상한)의 frame 크기 — 상한을 따로 두면 그 사이 크기의 frame 이 끝까지 쌓였다가
 /// 필드 검사에서야 거절된다(적대 검증). 메시지를 더할 때 이보다 크면 `codec.zig` 의 comptime 이 멈춘다.
 pub const max_frame_bytes: usize = prefix_len + common_len + largest_body_bytes;
@@ -27,6 +29,7 @@ pub const prefix_len = 4;
 pub const common_len = magic.len + @sizeOf(u16) + @sizeOf(u8);
 
 pub const Error = error{
+    InvalidServiceName,
     OutputTooSmall,
     FrameTooLarge,
     UrlTooLarge,

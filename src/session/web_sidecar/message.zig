@@ -13,6 +13,8 @@ pub const Tag = enum(u8) {
     set_focus = 5,
     navigate = 6,
     shutdown = 7,
+    /// 픽셀 채널(W2): maru 가 연 mach 받는 port 의 bootstrap 이름과 비밀 토큰(C3). 이것으로만 건넨다.
+    frame_channel = 8,
 
     hello_ack = 32,
     browser_created = 33,
@@ -48,6 +50,8 @@ pub const FailureCode = enum(u8) {
     duplicate_browser = 4,
     /// sidecar 가 maru 의 frame 을 풀지 못했다. 이 뒤 sidecar 는 채널을 닫는다.
     protocol_violation = 5,
+    /// `frame_channel` 의 이름으로 port 를 못 찾았다(W2).
+    frame_channel_failed = 6,
 };
 
 pub const BrowserId = u64;
@@ -78,6 +82,12 @@ pub const Resize = struct {
 pub const BrowserFlag = struct {
     browser: BrowserId,
     value: bool,
+};
+
+/// 링 알림을 받을 mach port 의 bootstrap 이름과, 알림마다 실어 보낼 128 비트 비밀 토큰(C3).
+pub const FrameChannel = struct {
+    service: []const u8,
+    token: [16]u8,
 };
 
 pub const Navigate = struct {
@@ -116,6 +126,7 @@ pub const Message = union(Tag) {
     set_focus: BrowserFlag,
     navigate: Navigate,
     shutdown: void,
+    frame_channel: FrameChannel,
 
     hello_ack: Hello,
     browser_created: BrowserId,

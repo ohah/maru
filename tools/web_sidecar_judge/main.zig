@@ -7,7 +7,7 @@
 //!   parent-death     maru 역할 프로세스를 SIGKILL 하면 host 와 helper 가 모두 사라진다(고아 Chromium 없음) — 명령 pipe 의
 //!                    쓰기 끝을 손자(maru 가 띄운 셸 흉내)가 쥐고 있어 EOF 가 오지 않아도
 //!   no-crash         판정 동안 `maru-web-*` 크래시 보고가 하나도 새로 생기지 않는다
-//! W1c 판정은 `browsers_check.zig` 가 든다. 하나라도 틀리면 exit 1.
+//! W1c 판정은 `browsers_check.zig`, W2 판정은 `frames_check.zig` 가 든다. 하나라도 틀리면 exit 1.
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -16,6 +16,8 @@ const Host = @import("host.zig").Host;
 const sandbox = @import("sandbox.zig");
 const http = @import("http.zig");
 const browsers_check = @import("browsers_check.zig");
+const frames_check = @import("frames_check.zig");
+const attacks = @import("attacks.zig");
 
 const helper_wait_ms = 20_000;
 const exit_wait_ms = 20_000;
@@ -37,6 +39,8 @@ fn reportText(ok: bool, name: []const u8, detail: []const u8) void {
 
 pub fn main(init: std.process.Init.Minimal) u8 {
     const argv = init.args.vector;
+    if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--rogue")) return frames_check.rogueMain(std.mem.span(argv[2]), std.mem.span(argv[3]));
+    if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--attack")) return attacks.main(std.mem.span(argv[2]), std.mem.span(argv[3]));
     if (argv.len != 3) {
         std.debug.print("사용: maru-web-judge <설치 디렉터리> <프로필 뿌리>\n", .{});
         return 2;
@@ -61,6 +65,9 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     const profile_c = std.fmt.bufPrintZ(&profile_c_buf, "--profile-dir={s}", .{profile_c_dir}) catch return 2;
     if (http.Server.start()) |server| {
         browsers_check.run(&reportText, host_path, profile_c_dir, profile_c, server.port) catch |err| report(false, "browsers", "{s}", .{@errorName(err)});
+        var profile_d_buf: [1024]u8 = undefined;
+        const profile_d = std.fmt.bufPrintZ(&profile_d_buf, "--profile-dir={s}/d", .{profile_root}) catch return 2;
+        frames_check.run(&reportText, argv[0], host_path, profile_d, server.port) catch |err| report(false, "frames", "{s}", .{@errorName(err)});
     } else |err| report(false, "browsers", "HTTP 서버: {s}", .{@errorName(err)});
     parentDeath(host_path, profile_b) catch |err| report(false, "parent-death", "{s}", .{@errorName(err)});
 

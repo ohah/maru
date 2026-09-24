@@ -15,6 +15,7 @@ const common_len = wire.common_len;
 const max_frame_bytes = wire.max_frame_bytes;
 const max_url_bytes = wire.max_url_bytes;
 const max_text_bytes = wire.max_text_bytes;
+const max_ime_text_bytes = wire.max_ime_text_bytes;
 const Message = message_mod.Message;
 const Tag = message_mod.Tag;
 const ViewSize = message_mod.ViewSize;
@@ -42,6 +43,8 @@ const writePoint = fields.writePoint;
 const readPoint = fields.readPoint;
 const writeRange = fields.writeRange;
 const readRange = fields.readRange;
+const writeImeText = fields.writeImeText;
+const readImeText = fields.readImeText;
 const writeRect = fields.writeRect;
 const readRect = fields.readRect;
 const MouseKind = message_mod.MouseKind;
@@ -118,14 +121,14 @@ pub fn encode(message: Message, out: []u8) Error!usize {
         },
         .ime_set_composition => |value| {
             try writeBrowser(&cursor, value.browser);
-            try writeRange(&cursor, value.selection);
-            try writeRange(&cursor, value.replacement);
-            try writeText(&cursor, value.text);
+            try writeRange(&cursor, value.selection, .selection);
+            try writeRange(&cursor, value.replacement, .replacement);
+            try writeImeText(&cursor, value.text);
         },
         .ime_commit_text => |value| {
             try writeBrowser(&cursor, value.browser);
-            try writeRange(&cursor, value.replacement);
-            try writeText(&cursor, value.text);
+            try writeRange(&cursor, value.replacement, .replacement);
+            try writeImeText(&cursor, value.text);
         },
         .ime_finish_composing => |value| {
             try writeBrowser(&cursor, value.browser);
@@ -252,14 +255,14 @@ pub fn decodeExact(frame: []const u8) Error!Message {
         } },
         .ime_set_composition => .{ .ime_set_composition = .{
             .browser = try readBrowser(&cursor),
-            .selection = try readRange(&cursor),
-            .replacement = try readRange(&cursor),
-            .text = try readText(&cursor),
+            .selection = try readRange(&cursor, .selection),
+            .replacement = try readRange(&cursor, .replacement),
+            .text = try readImeText(&cursor),
         } },
         .ime_commit_text => .{ .ime_commit_text = .{
             .browser = try readBrowser(&cursor),
-            .replacement = try readRange(&cursor),
-            .text = try readText(&cursor),
+            .replacement = try readRange(&cursor, .replacement),
+            .text = try readImeText(&cursor),
         } },
         .ime_finish_composing => .{ .ime_finish_composing = .{ .browser = try readBrowser(&cursor), .value = try readBool(&cursor) } },
         .ime_cancel_composition => .{ .ime_cancel_composition = try readBrowser(&cursor) },
@@ -586,8 +589,8 @@ test "frame_channel carries the service name and the 128-bit token, and refuses 
 // ── 입력(W4) ─────────────────────────────────────────────────────────────────────────────────────────────
 
 comptime {
-    // 가장 큰 입력 frame(IME 조합 + 글 상한)도 frame 상한 안에 든다.
-    std.debug.assert(prefix_len + common_len + 8 + 8 + 8 + 4 + max_text_bytes <= max_frame_bytes);
+    // 가장 큰 입력 frame(IME 조합 + IME 글 상한)도 frame 상한 안에 든다.
+    std.debug.assert(prefix_len + common_len + 8 + 8 + 8 + 4 + max_ime_text_bytes <= max_frame_bytes);
 }
 
 test "input messages round trip" {
@@ -649,11 +652,15 @@ test "input closed fields fail closed both ways" {
     std.mem.writeInt(i32, buf[body + 10 ..][0..4], std.math.minInt(i32), .big); // @abs 넘침 없이 거절
     try std.testing.expectError(error.InvalidCoordinate, decodeExact(buf[0..len]));
 
-    // 클릭 수: down·up 은 1~3, move·leave 는 0.
+    // 클릭 수: down·up 은 1 이상(네 번 이상도 — macOS clickCount 그대로), move·leave 는 0.
     try std.testing.expectError(error.InvalidClickCount, encode(.{ .mouse = .{ .browser = 1, .kind = .down, .point = .{ .x = 0, .y = 0 } } }, &buf));
     try std.testing.expectError(error.InvalidClickCount, encode(.{ .mouse = .{ .browser = 1, .kind = .leave, .point = .{ .x = 0, .y = 0 }, .click_count = 1 } }, &buf));
+    _ = try encode(.{ .mouse = .{ .browser = 1, .kind = .down, .point = .{ .x = 0, .y = 0 }, .click_count = 4 } }, &buf);
     len = try encode(.{ .mouse = .{ .browser = 1, .kind = .up, .point = .{ .x = 0, .y = 0 }, .click_count = 3 } }, &buf);
-    buf[len - 1] = 4;
+    buf[len - 1] = 0;
+    try std.testing.expectError(error.InvalidClickCount, decodeExact(buf[0..len]));
+    len = try encode(.{ .mouse = .{ .browser = 1, .kind = .move, .point = .{ .x = 0, .y = 0 } } }, &buf);
+    buf[len - 1] = 1;
     try std.testing.expectError(error.InvalidClickCount, decodeExact(buf[0..len]));
 
     // 닫힌 enum.
@@ -671,29 +678,45 @@ test "input closed fields fail closed both ways" {
     buf[body + 8] = 8;
     try std.testing.expectError(error.UnknownEditCommand, decodeExact(buf[0..len]));
     len = try encode(.{ .cursor_changed = .{ .browser = 1, .cursor = .arrow } }, &buf);
-    buf[body + 8] = 13;
+    buf[body + 8] = 17;
     try std.testing.expectError(error.UnknownCursor, decodeExact(buf[0..len]));
 
     // 범위: 거꾸로·상한 밖은 거절, 「없음」은 받는다.
     try std.testing.expectError(error.InvalidRange, encode(.{ .ime_commit_text = .{ .browser = 1, .text = "a", .replacement = .{ .start = 2, .end = 1 } } }, &buf));
-    try std.testing.expectError(error.InvalidRange, encode(.{ .ime_set_composition = .{ .browser = 1, .text = "a", .selection = .{ .start = 0, .end = max_text_bytes + 1 } } }, &buf));
+    try std.testing.expectError(error.InvalidRange, encode(.{ .ime_set_composition = .{ .browser = 1, .text = "a", .selection = .{ .start = 0, .end = max_ime_text_bytes + 1 } } }, &buf));
+    // 바꿀 범위는 입력칸 전체 글 안의 위치라 글 상한과 무관하다(5000 자 입력칸 끝) — 반쪽 「없음」은 거절.
+    _ = try encode(.{ .ime_commit_text = .{ .browser = 1, .text = "a", .replacement = .{ .start = 5000, .end = 5000 } } }, &buf);
+    _ = try encode(.{ .ime_set_composition = .{ .browser = 1, .text = "a", .replacement = .{ .start = 70_000, .end = 70_002 } } }, &buf);
+    try std.testing.expectError(error.InvalidRange, encode(.{ .ime_commit_text = .{ .browser = 1, .text = "a", .replacement = .{ .start = 3, .end = std.math.maxInt(u32) } } }, &buf));
     len = try encode(.{ .ime_set_composition = .{ .browser = 1, .text = "a" } }, &buf);
     std.mem.writeInt(u32, buf[body + 8 ..][0..4], 5, .big); // 「없음」의 한쪽만 바꿔 start 5 > end maxInt 아님 → 상한 밖
     try std.testing.expectError(error.InvalidRange, decodeExact(buf[0..len]));
 
-    // IME 글도 제어 문자·잘못된 UTF-8 을 거절한다.
+    // IME 글: 탭·줄바꿈(받아쓰기)은 받고 다른 제어 문자는 거절한다. 상한은 제목보다 크다.
     try std.testing.expectError(error.ControlCharacter, encode(.{ .ime_commit_text = .{ .browser = 1, .text = "a\x1b" } }, &buf));
+    try std.testing.expectEqualStrings("줄\n바꿈\t탭\r", (try roundTrip(.{ .ime_commit_text = .{ .browser = 1, .text = "줄\n바꿈\t탭\r" } })).ime_commit_text.text);
+    const long_ime = [_]u8{'a'} ** (max_ime_text_bytes + 1);
+    _ = try roundTrip(.{ .ime_commit_text = .{ .browser = 1, .text = long_ime[0..max_ime_text_bytes] } });
+    var big: [max_frame_bytes]u8 = undefined;
+    try std.testing.expectError(error.TextTooLarge, encode(.{ .ime_commit_text = .{ .browser = 1, .text = &long_ime } }, &big));
 
     // 사각형 크기 상한.
     try std.testing.expectError(error.InvalidCoordinate, encode(.{ .ime_range = .{ .browser = 1, .bounds = .{ .x = 0, .y = 0, .width = @as(u32, @intCast(extent)) + 1, .height = 1 } } }, &buf));
 }
 
 test "every single-byte corruption of input frames decodes to valid fields or errors" {
+    // 입력 tag 모두(방향 둘) — 새 tag 를 더하면 여기에도 넣는다.
     const samples = [_]Message{
         .{ .mouse = .{ .browser = 3, .kind = .down, .button = .middle, .point = .{ .x = 5, .y = -6 }, .modifiers = .{ .command = true }, .click_count = 1 } },
         .{ .wheel = .{ .browser = 3, .point = .{ .x = 5, .y = 6 }, .delta_x = 7, .delta_y = -8 } },
         .{ .key = .{ .browser = 3, .kind = .char, .character = 'a', .unmodified_character = 'a' } },
         .{ .ime_set_composition = .{ .browser = 3, .text = "아", .selection = .{ .start = 0, .end = 1 } } },
+        .{ .ime_commit_text = .{ .browser = 3, .text = "안\n", .replacement = .{ .start = 2, .end = 4 } } },
+        .{ .ime_finish_composing = .{ .browser = 3, .value = true } },
+        .{ .ime_cancel_composition = 3 },
+        .{ .edit_command = .{ .browser = 3, .command = .paste } },
+        .{ .capture_lost = 3 },
+        .{ .cursor_changed = .{ .browser = 3, .cursor = .none } },
         .{ .ime_range = .{ .browser = 3, .bounds = .{ .x = 1, .y = 2, .width = 3, .height = 4 } } },
     };
     var encoded: [256]u8 = undefined;

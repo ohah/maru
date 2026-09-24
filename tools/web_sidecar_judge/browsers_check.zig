@@ -96,13 +96,25 @@ fn matches(want: Want, message: Message) Match {
 }
 
 /// 기대한 알림이 올 때까지 읽는다(그 사이 다른 알림은 버린다).
-pub fn waitFor(host: *Host, want: Want, misrouted: *usize) bool {
+/// 알림 하나가 기대와 맞는가(`misrouted` 는 다른 브라우저에서 같은 제목이 오면 는다).
+pub fn matchOne(want: Want, message: Message, misrouted: *usize) bool {
+    return switch (matches(want, message)) {
+        .hit => true,
+        .misrouted => blk: {
+            misrouted.* += 1;
+            break :blk false;
+        },
+        .none => false,
+    };
+}
+
+fn waitFor(host: *Host, want: Want, misrouted: *usize) bool {
     return waitAll(host, &.{want}, misrouted);
 }
 
 /// 기대한 알림이 **모두** 올 때까지 읽는다(도착 순서는 상관없다) — 제목은 조절(50ms)로 늦게 올 수 있어, 한 알림을
 /// 기다리며 다른 알림을 버리면 이미 지나간 것을 놓친다.
-pub fn waitAll(host: *Host, wants: []const Want, misrouted: *usize) bool {
+fn waitAll(host: *Host, wants: []const Want, misrouted: *usize) bool {
     var got: [8]bool = @splat(false);
     var count: usize = 0;
     const deadline = os.nowMs() + wait_ms;

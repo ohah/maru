@@ -412,6 +412,21 @@ pub fn tickWebOsr(self: *AppSession) void {
             }
         }
     }
+    // W4b: hover 중인 탭의 커서가 바뀌었으면(페이지는 이동을 처리한 **뒤** 커서를 알린다) Swift 가 포인터를 다시 움직이지
+    // 않아도 바꾸게 세운다 — 안 그러면 멈춘 자리의 커서가 한 박자 전 것으로 남는다.
+    if (self.osr_hover_surface != 0) {
+        // 포인터를 움직이지 않은 채 hover 가 끝났다 — 키보드로 오버레이를 열었거나 탭을 바꿨거나 탭이 닫혔다. leave 를 보내
+        // 페이지의 `:hover` 를 풀고, 커서는 화살표로 돌린다(페이지가 커서를 숨겼으면 포인터가 안 보인 채 남는다 — 적대 검증).
+        if (self.anyOverlayOpen() or osr_input.find(self.osr_layouts.items, self.osr_hover_surface) == null) {
+            if (self.pointer_gesture_owner != .web_osr) {
+                osrLeave(self, -1, -1, 0);
+                self.osr_cursor_pending = .default;
+            }
+        } else if (web_osr.cursor(self.osr_hover_surface)) |c| if (c.generation != self.osr_hover_cursor_generation) {
+            self.osr_hover_cursor_generation = c.generation;
+            self.osr_cursor_pending = cursorKindOf(c.cursor);
+        };
+    }
     if (web_osr.takeNotice()) |notice| self.showNoticeKey(switch (notice) {
         .gpu_unavailable => .web_osr_gpu_unavailable,
         .profile_in_use => .web_osr_profile_in_use,
@@ -445,7 +460,16 @@ fn routeOsrLayouts(self: *AppSession) void {
         }, self.scale_milli, now);
         // W3c: 이 창이 그릴 rect(보이는 것만). 매 tick 새로 모은다.
         if (layout.visible and layout.content_rect.w > 0 and layout.content_rect.h > 0) {
-            self.osr_layouts.append(self.allocator, .{ .surface_id = layout.surface_id, .rect = layout.content_rect }) catch {};
+            // W4b: divider 잡는 띠(pt → backing px) — 그 안의 클릭·hover 는 divider 것이다(WKWebView 의 hitTest 통과와 같은 자리).
+            const scale: f64 = @as(f64, @floatFromInt(@max(self.scale_milli, 1))) / 1000.0;
+            self.osr_layouts.append(self.allocator, .{
+                .surface_id = layout.surface_id,
+                .rect = layout.content_rect,
+                .seam_edges = layout.seam_edges,
+                .left_band_px = layout.divider_grab_bands_pt.left * scale,
+                .right_band_px = layout.divider_grab_bands_pt.right * scale,
+                .bottom_band_px = layout.divider_grab_bands_pt.bottom * scale,
+            }) catch {};
         }
         _ = self.web_cur_scratch.orderedRemove(i);
     }
@@ -477,6 +501,176 @@ pub fn osrQuads(self: *AppSession, frame_generation: u64, out: []OsrQuad) usize 
         n += 1;
     }
     return n;
+}
+
+// ── W4b: 포인터(C5 — 마우스 게이트·제스처 주인·포커스 주인·창) ─────────────────────────────────────────────
+// 판정은 이 창이 마지막 tick 에 그린 본문(`osr_layouts`)으로만 한다 — 다른 창의 같은 좌표는 이 창 것이 아니다. 오버레이
+// 게이트는 호출자(`mouse`·`scrollWheel`)가 앞에서 끝냈고, hover 만 여기서 본다(hover 경로는 게이트가 흩어져 있다).
+
+const osr_input = maru.session.web_osr_input;
+
+fn osrDip(self: *AppSession, layout: app_session_mod.OsrLayout, x_px: f64, y_px: f64) osr_input.Point {
+    return osr_input.toDip(layout.rect, x_px, y_px, self.scale_milli);
+}
+
+/// 본문 위의 누름(kind 1·4·5). 왼쪽 누름이면 그 탭을 활성으로 올린다(WKWebView `webPanelPrimaryDown` 과 같은 길 — 알림 읽음·
+/// 작업 공간 입력 포커스). 누름은 제스처 주인이 되어 끌기·뗌을 받는다. 같은 탭의 제스처가 살아 있으면(왼쪽으로 끄는 중
+/// 오른쪽) 주인을 바꾸지 않고 그 버튼의 down 만 보탠다. 본문이 아니면 false(아래 일반 라우팅으로).
+pub fn osrMouseDown(self: *AppSession, kind: i32, x_px: f64, y_px: f64, xterm_button: i32, mods: i32) bool {
+    if (self.osr_layouts.items.len == 0) return false;
+    const count = osr_input.clickCount(kind) orelse return false;
+    // 제스처가 살아 있으면(왼쪽으로 끄는 중 다른 버튼) 누른 자리가 본문 밖이어도 그 탭이 받는다 — 페이지가 capture 를 쥐고 있다.
+    const owned: ?app_session_mod.OsrLayout = if (self.pointer_gesture_owner == .web_osr) osr_input.find(self.osr_layouts.items, self.pointer_gesture_owner.web_osr.surface_id) else null;
+    const layout = owned orelse osr_input.hit(self.osr_layouts.items, x_px, y_px) orelse return false;
+    const button = osr_input.button(xterm_button) orelse return true; // 모르는 버튼 — 본문 것이니 삼킨다
+    var held = osr_input.Held.one(button);
+    if (owned != null) {
+        held = self.pointer_gesture_owner.web_osr.held.with(button, true);
+        self.pointer_gesture_owner.web_osr.held = held;
+    } else {
+        if (button == .left and self.activateSurfaceById(layout.surface_id)) {
+            self.markNotificationsReadBySurface(layout.surface_id);
+            self.focusWorkspaceInput();
+        }
+        // 주인을 먼저 세운다 — 옛 제스처의 capture_lost 가 새 down 보다 먼저 가게(적대 검증 — 순서가 거꾸로였다).
+        self.beginPointerGesture(.{ .web_osr = .{ .surface_id = layout.surface_id, .first = button, .held = held, .click_count = count } });
+    }
+    web_osr.sendInput(self.allocator, .{ .mouse = .{
+        .browser = layout.surface_id,
+        .kind = .down,
+        .button = button,
+        .point = osrDip(self, layout, x_px, y_px),
+        .modifiers = osr_input.modifiers(mods, held),
+        .click_count = count,
+    } });
+    self.metal_dirty = true;
+    return true;
+}
+
+/// 제스처 주인이 Chromium 탭이면 끌기(2)·뗌(3)을 그 탭에 보낸다 — 본문 밖이어도(C5 — rect 밖 클램프 없음). 뗌은 그
+/// 버튼만 떼고, 눌린 버튼이 모두 떼어지면 끝난다. 탭이 이 창의 배치에서 사라졌으면(닫힘·숨김·다른 창으로) 제스처를 끝내고
+/// capture 를 놓게 한다.
+pub fn osrGesture(self: *AppSession, kind: i32, x_px: f64, y_px: f64, mods: i32, xterm_button: i32) bool {
+    if (self.pointer_gesture_owner != .web_osr) return false;
+    const g = self.pointer_gesture_owner.web_osr;
+    const layout = osr_input.find(self.osr_layouts.items, g.surface_id) orelse {
+        self.finishPointerGesture();
+        web_osr.sendInput(self.allocator, .{ .capture_lost = g.surface_id });
+        return true;
+    };
+    const point = osrDip(self, layout, x_px, y_px);
+    if (kind == 2) {
+        web_osr.sendInput(self.allocator, .{ .mouse = .{ .browser = g.surface_id, .kind = .move, .point = point, .modifiers = osr_input.modifiers(mods, g.held) } });
+        return true;
+    }
+    // 이 제스처가 누르지 않은 버튼의 뗌(본문 밖에서 누른 버튼)은 삼킨다.
+    const button = osr_input.button(xterm_button) orelse return true;
+    if (!g.held.has(button)) return true;
+    const held = g.held.with(button, false);
+    if (held.empty()) self.finishPointerGesture() else self.pointer_gesture_owner.web_osr.held = held;
+    web_osr.sendInput(self.allocator, .{ .mouse = .{
+        .browser = g.surface_id,
+        .kind = .up,
+        .button = button,
+        .point = point,
+        .modifiers = osr_input.modifiers(mods, held),
+        .click_count = if (button == g.first) g.click_count else 1,
+    } });
+    return true;
+}
+
+/// 끊긴 제스처(`cancelPointerGesture`) — 페이지가 잡은 capture 를 놓게 한다.
+pub fn osrCaptureLost(self: *AppSession, surface_id: u64) void {
+    web_osr.sendInput(self.allocator, .{ .capture_lost = surface_id });
+}
+
+/// 버튼 없는 이동(hover). 본문 위면 그 탭에 이동을 보내고 페이지 커서를 돌려준다. 오버레이가 열렸거나 본문 밖이면 hover
+/// 하던 탭에 leave 를 보내고 null. 본문으로 들어오면 창의 일반 hover 를 창 밖 좌표로 한 번 돌려 다른 강조(사이드바·탭·
+/// 상태바·도크)를 모두 내린다 — 본문 위에서는 일반 hover 가 돌지 않아 곧장 들어오면 강조가 남는다(적대 검증).
+/// Chromium 탭 제스처 중(끄는 중 수식키를 눌러 hover 가 불린 경우)에는 아무것도 보내지 않는다 — 버튼 비트가 빠진 move 나
+/// leave 가 가면 페이지는 끌기가 끝난 것으로 본다(적대 검증).
+pub fn osrHover(self: *AppSession, x_px: f64, y_px: f64, mods: i32) ?app_session_mod.CursorKind {
+    if (self.pointer_gesture_owner == .web_osr) {
+        const c = web_osr.cursor(self.pointer_gesture_owner.web_osr.surface_id) orelse return .default;
+        return cursorKindOf(c.cursor);
+    }
+    const layout: ?app_session_mod.OsrLayout = if (self.anyOverlayOpen()) null else osr_input.hit(self.osr_layouts.items, x_px, y_px);
+    const now: u64 = if (layout) |l| l.surface_id else 0;
+    if (self.osr_hover_surface != 0 and self.osr_hover_surface != now) osrLeave(self, x_px, y_px, mods);
+    const l = layout orelse return null;
+    if (self.osr_hover_surface != l.surface_id) {
+        // 창 밖 좌표로 일반 hover 를 한 번 — 여기(osrHover)는 hover 중인 탭이 없어 null 로 흘러 모든 강조를 내린다.
+        _ = self.hoverCursor(-1, -1, 0);
+        self.osr_hover_surface = l.surface_id;
+    }
+    web_osr.sendInput(self.allocator, .{ .mouse = .{ .browser = l.surface_id, .kind = .move, .point = osrDip(self, l, x_px, y_px), .modifiers = osr_input.modifiers(mods, .{}) } });
+    const c = web_osr.cursor(l.surface_id) orelse return .default;
+    self.osr_hover_cursor_generation = c.generation;
+    return cursorKindOf(c.cursor);
+}
+
+/// hover 하던 탭에 leave 를 보내고 hover 를 푼다.
+fn osrLeave(self: *AppSession, x_px: f64, y_px: f64, mods: i32) void {
+    const sid = self.osr_hover_surface;
+    self.osr_hover_surface = 0;
+    const prev = osr_input.find(self.osr_layouts.items, sid);
+    const point: osr_input.Point = if (prev) |p| osrDip(self, p, x_px, y_px) else .{ .x = -1, .y = -1 };
+    web_osr.sendInput(self.allocator, .{ .mouse = .{ .browser = sid, .kind = .leave, .point = point, .modifiers = osr_input.modifiers(mods, .{}) } });
+}
+
+/// 본문 위의 휠(오버레이 게이트 뒤). 본문이 아니면 false.
+pub fn osrWheel(self: *AppSession, delta_y: f64, delta_x: f64, precise: bool, x_px: f64, y_px: f64) bool {
+    if (self.osr_layouts.items.len == 0) return false;
+    const layout = osr_input.hit(self.osr_layouts.items, x_px, y_px) orelse return false;
+    web_osr.sendInput(self.allocator, .{ .wheel = .{
+        .browser = layout.surface_id,
+        .point = osrDip(self, layout, x_px, y_px),
+        .delta_x = osr_input.wheelDelta(delta_x, precise),
+        .delta_y = osr_input.wheelDelta(delta_y, precise),
+        .modifiers = .{ .precise_scroll = precise },
+    } });
+    return true;
+}
+
+/// 뒤로·앞으로 마우스 버튼(macOS buttonNumber 3·4). CEF 마우스 API 에는 이 버튼이 없어 주소창의 뒤로·앞으로로 보낸다
+/// (브라우저 관례). 본문이 아니면 false — 호출자가 옛 경로로 흘린다.
+pub fn osrAuxButton(self: *AppSession, button_number: i32, x_px: f64, y_px: f64) bool {
+    if (self.anyOverlayOpen() or self.osr_layouts.items.len == 0) return false;
+    const layout = osr_input.hit(self.osr_layouts.items, x_px, y_px) orelse return false;
+    const action: maru.session.web_sidecar.message.NavActionKind = switch (button_number) {
+        3 => .back,
+        4 => .forward,
+        else => return true, // 본문 위의 다른 추가 버튼은 삼킨다
+    };
+    web_osr.navAction(self.allocator, layout.surface_id, action);
+    return true;
+}
+
+/// Swift 가 tick 뒤에 가져간다 — hover 중인 탭의 커서가 바뀌었거나 hover 가 포인터 이동 없이 끝났으면 한 번.
+pub fn takeOsrCursor(self: *AppSession) ?app_session_mod.CursorKind {
+    const c = self.osr_cursor_pending orelse return null;
+    self.osr_cursor_pending = null;
+    return c;
+}
+
+/// 페이지 커서 → maru 커서. 시스템에 없는 것(기다림·진행·도움말)은 화살표.
+fn cursorKindOf(c: maru.session.web_sidecar.message.WebCursor) app_session_mod.CursorKind {
+    return switch (c) {
+        .arrow, .wait, .progress, .help => .default,
+        .hand => .link,
+        .ibeam => .text,
+        .vertical_ibeam => .vertical_text,
+        .crosshair => .crosshair,
+        .resize_ew => .resize_h,
+        .resize_ns => .resize_v,
+        .grab => .grab,
+        .grabbing => .grabbing,
+        .not_allowed => .not_allowed,
+        .copy => .copy,
+        .alias => .alias,
+        .context_menu => .context_menu,
+        .none => .hidden,
+    };
 }
 
 /// ABI 로 넘기는 OSR 사각형 하나(`MaruAppHostOsrQuad` 와 같은 배치).

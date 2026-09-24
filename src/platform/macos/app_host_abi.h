@@ -9,7 +9,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 191u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 192u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -1085,7 +1085,9 @@ uint32_t maru_macos_app_session_dispatch_web_app_action(MaruAppHostSession *sess
 /* 진행 중 IME 조합을 확정(커밋)한다. IME 우회 특수키/단축키 직전에 호출. */
 int32_t maru_macos_app_session_commit_composition(MaruAppHostSession *session);
 /* 마우스 호버 갱신(backing px). *out_cursor_kind에 위치별 커서 종류(0=arrow/사이드바·탭 바, 1=iBeam/터미널,
-   2=pointingHand/URL hover, 3=resizeLeftRight/세로 divider, 4=resizeUpDown/가로 divider, 5=openHand/pane grip 호버).
+   2=pointingHand/URL hover, 3=resizeLeftRight/세로 divider, 4=resizeUpDown/가로 divider, 5=openHand/pane grip 호버.
+   v192 Chromium 탭 본문의 페이지 커서: 6=crosshair, 7=closedHand, 8=operationNotAllowed, 9=dragCopy, 10=dragLink,
+   11=contextualMenu, 12=세로 iBeam, 13=숨김).
    Swift가 이 값으로
    NSCursor를 세운다. Zig는 부수적으로 사이드바 슬롯·pane 탭 호버·URL 밑줄을 갱신한다. mods는 마우스 수식키 비트
    (xterm 규약: shift=4, alt=8, ctrl=16, cmd=32) — Zig가 config input.url-click-modifier와 비교해 URL 밑줄을 켠다
@@ -2072,6 +2074,12 @@ void maru_macos_app_session_set_osr_completed_generation(MaruAppHostSession *ses
 /* v191(W3c): 이번에 그릴 프레임(세대 frame_generation)의 Chromium 탭 본문 사각형을 out 에 채우고 수를 돌려준다. 그린 탭에는
    이 세대가 기록된다. 메인 스레드에서만. */
 size_t maru_macos_app_session_osr_quads(MaruAppHostSession *session, uint64_t frame_generation, MaruAppHostOsrQuad *out, size_t out_cap);
+/* v192(W4b): hover 중인 Chromium 탭의 페이지 커서가 바뀌었으면 1 과 *out_cursor_kind(hover 와 같은 CursorKind)를 한 번
+   돌려준다 — 페이지는 이동을 처리한 뒤 커서를 알리므로, 포인터가 멈춰도 커서를 맞추려고 tick 뒤에 부른다. */
+int32_t maru_macos_app_session_take_osr_cursor(MaruAppHostSession *session, int32_t *out_cursor_kind);
+/* v192(W4b): 추가 마우스 버튼(macOS buttonNumber 3=뒤로·4=앞으로)이 Chromium 탭 본문 위에서 눌렸다(backing px). 그 탭을
+   뒤로·앞으로 보내고 1. 본문이 아니면 0 — Swift 는 옛 경로(handleMouse)로 흘린다. */
+int32_t maru_macos_app_session_osr_aux_button(MaruAppHostSession *session, int32_t button_number, double x_px, double y_px);
 void maru_macos_mermaid_snapshot(MaruMermaidCoordinatorSnapshot *out_snapshot);
 /* allocation-free frame-tick gate와 exact renderer lifetime revoke. */
 uint32_t maru_macos_mermaid_has_work(void);

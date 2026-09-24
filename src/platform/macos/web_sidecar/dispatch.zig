@@ -10,7 +10,7 @@ const Message = protocol.message.Message;
 
 pub const Outcome = enum { keep_running, quit };
 
-/// 브라우저 명령을 실제로 수행하는 쪽(W1c 에서 CEF 로 채운다). W1b 는 브라우저가 없어 전부 거절한다.
+/// 브라우저 명령을 실제로 수행하는 쪽(`browsers.zig` — CEF). 시험은 거절하는 처리기를 끼운다.
 pub const Handler = struct {
     context: *anyopaque,
     browser_command: *const fn (context: *anyopaque, message: Message, writer: *events.Writer) void,
@@ -109,20 +109,6 @@ pub const Dispatcher = struct {
     }
 };
 
-/// W1b 의 브라우저 명령 처리 — 아직 브라우저가 없다(W1c). 대상 브라우저를 모른다고 답한다.
-pub fn rejectBrowserCommand(_: *anyopaque, message: Message, writer: *events.Writer) void {
-    const browser: protocol.message.BrowserId = switch (message) {
-        .create_browser => |value| value.browser,
-        .destroy_browser => |browser| browser,
-        .resize => |value| value.browser,
-        .set_hidden, .set_focus => |value| value.browser,
-        .navigate => |value| value.browser,
-        else => 0,
-    };
-    const code: protocol.message.FailureCode = if (message == .create_browser) .browser_create_failed else .unknown_browser;
-    writer.send(.{ .failure = .{ .browser = browser, .code = code, .detail = "browsers are not implemented yet (W1c)" } }) catch {};
-}
-
 // ── 시험: 파이프 두 개로 maru 쪽을 흉내 낸다 ───────────────────────────────────────────────
 
 const Pipes = struct {
@@ -167,6 +153,20 @@ fn readEvents(fd: c_int, storage: []u8, out: []Message) ![]Message {
     return out[0..count];
 }
 
+/// 시험용 처리기 — 브라우저가 없는 host 처럼 대상 브라우저를 모른다고 답한다.
+fn rejectBrowserCommand(_: *anyopaque, message: Message, writer: *events.Writer) void {
+    const browser: protocol.message.BrowserId = switch (message) {
+        .create_browser => |value| value.browser,
+        .destroy_browser => |browser| browser,
+        .resize => |value| value.browser,
+        .set_hidden, .set_focus => |value| value.browser,
+        .navigate => |value| value.browser,
+        else => 0,
+    };
+    const code: protocol.message.FailureCode = if (message == .create_browser) .browser_create_failed else .unknown_browser;
+    writer.send(.{ .failure = .{ .browser = browser, .code = code, .detail = "browsers are not implemented yet (W1c)" } }) catch {};
+}
+
 fn testDispatcher(writer: *events.Writer) Dispatcher {
     return .{ .writer = writer, .handler = .{ .context = undefined, .browser_command = &rejectBrowserCommand } };
 }
@@ -204,7 +204,7 @@ test "closed command channel before hello is reported, not waited on" {
     try std.testing.expectError(error.ChannelClosed, dispatcher.readHello(pipes.to_sidecar[0]));
 }
 
-test "browser commands before W1c are answered, and the loop keeps running" {
+test "browser commands reach the handler, and the loop keeps running" {
     var pipes = try Pipes.open();
     defer pipes.close();
     var writer: events.Writer = .{ .fd = pipes.to_maru[1] };

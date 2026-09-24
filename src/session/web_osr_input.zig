@@ -155,6 +155,75 @@ pub fn wheelDelta(delta: f64, precise: bool) i32 {
     return clampExtent(if (precise) @round(delta) else @round(delta * per_line));
 }
 
+/// 입력기 트랜잭션(ime_begin~ime_end) 하나에서 일어난 일(W4c). 확정은 트랜잭션 끝까지 쥐어 둔다 — 한글 마지막 자모
+/// Backspace 는 입력기가 「확정 + deleteBackward」로 보내는데, 그때는 확정이 아니라 조합 취소여야 한다.
+pub const ImeTxn = struct {
+    key_code: u8,
+    /// 트랜잭션 시작 때 조합이 열려 있었다.
+    had_composition: bool = false,
+    /// 시작 때 조합을 확정한 글(아직 안 보냄). 새 조합이 뒤따르면 그 전에 보내고 `commit_sent` 로 바뀐다.
+    commit: ?[]const u8 = null,
+    commit_sent: bool = false,
+    /// 이 트랜잭션에서 비지 않은 조합 글이 섰다(조합 시작·갱신) — 키는 입력기 것이다.
+    marked: bool = false,
+    /// 조합 확정이 아닌 확정 글(평문·확정 뒤 공백·문장부호).
+    typed: []const u8 = "",
+    /// 입력기가 키 동작 명령(doCommand — insertNewline·moveLeft·deleteBackward…)을 냈다.
+    command: bool = false,
+    delete_backward: bool = false,
+    /// 조합이 확정 없이 비워졌다(Esc 등).
+    cleared: bool = false,
+};
+
+/// 트랜잭션 끝에서 보낼 것. 규칙(W4c 착수 전 실측 + 적대 검증):
+///   - 시작 때 조합: 확정 글이 있으면 보낸다 — 단 빈 확정이거나, 뒤에 deleteBackward 만 있으면(한글 마지막 자모) 취소.
+///     확정 없이 비워졌으면 취소.
+///   - 이번 키: 새 조합이 섰거나 조합을 취소했으면 아무 키 이벤트도 없다(입력기가 가져갔다). 확정 글(평문)이 있으면 raw_down + 글자(한
+///     글자·BMP) 또는 확정 글. 조합을 끝낸 키는 뒤따른 명령이 있을 때만 그 키의 동작으로 보낸다(한글 Space·Enter·
+///     화살표) — 명령 없이 확정만 했으면 입력기가 키를 삼킨 것이다(일본어 변환 확정 Enter). 조합이 없던 키는 늘 raw_down
+///     (Backspace·Tab·화살표·Esc 는 raw_down 만으로 동작하고, char 를 더하면 쓸데없는 keypress 가 생긴다 — 실측).
+///   - Enter(Return 36·숫자패드 76)는 raw_down 에 char `\r` 을 더한다(textarea 줄바꿈·폼 제출은 keypress 가 한다).
+pub const ImeOutcome = struct {
+    commit: enum { none, send, cancel } = .none,
+    raw_down: bool = false,
+    /// raw_down 뒤에 보낼 글자(char 이벤트).
+    char: ?u16 = null,
+    /// raw_down 뒤에 확정 글로 보낼 `typed`(여러 글자·BMP 밖 글자).
+    commit_typed: bool = false,
+};
+
+pub fn imeOutcome(t: ImeTxn) ImeOutcome {
+    var out: ImeOutcome = .{};
+    const only_delete = t.delete_backward and t.typed.len == 0 and !t.marked;
+    if (t.commit) |c| {
+        out.commit = if (c.len == 0 or only_delete) .cancel else .send;
+    } else if (t.had_composition and t.cleared and !t.marked and !t.commit_sent) {
+        out.commit = .cancel;
+    }
+    if (t.marked) return out;
+    if (t.typed.len > 0) {
+        out.raw_down = true;
+        const len = std.unicode.utf8ByteSequenceLength(t.typed[0]) catch {
+            out.commit_typed = true;
+            return out;
+        };
+        const cp = if (len == t.typed.len) std.unicode.utf8Decode(t.typed) catch null else null;
+        if (cp != null and cp.? <= 0xFFFF) out.char = @intCast(cp.?) else out.commit_typed = true;
+        return out;
+    }
+    // 조합을 취소한 키(Esc·마지막 자모 Backspace)는 입력기 것이다 — 페이지에 Escape·Backspace 가 가면 페이지의 모달이
+    // 닫히거나 태그 입력이 앞 태그를 지운다(Chrome 도 조합 중 키는 Process 로 준다 — 적대 검증).
+    if (out.commit == .cancel) return out;
+    const ended = t.commit != null or t.commit_sent;
+    if (t.had_composition and (!ended or !t.command)) {
+        // 조합을 끝낸 키는 뒤따른 명령이 있을 때만 그 키의 동작이다. 조합 중 아무 변화 없이 명령만 온 키도 그 동작이다.
+        if (!(t.command and !ended)) return out;
+    }
+    out.raw_down = true;
+    if (t.key_code == 36 or t.key_code == 76) out.char = '\r';
+    return out;
+}
+
 const testing = std.testing;
 
 test "hit finds the body under the point and skips divider grab bands" {
@@ -214,4 +283,46 @@ test "buttons, click counts and wheel deltas" {
     try testing.expectEqual(@as(i32, -120), wheelDelta(-3, false));
     try testing.expectEqual(message.max_pointer_extent, wheelDelta(1e9, false));
     try testing.expectEqual(@as(i32, 0), wheelDelta(std.math.nan(f64), true));
+}
+
+test "ime outcome without a composition: plain letters, Enter and other keys" {
+    try testing.expectEqual(ImeOutcome{ .raw_down = true, .char = 'a' }, imeOutcome(.{ .key_code = 0, .typed = "a" }));
+    try testing.expectEqual(ImeOutcome{ .raw_down = true, .char = 0xE9 }, imeOutcome(.{ .key_code = 14, .typed = "é" }));
+    try testing.expectEqual(ImeOutcome{ .raw_down = true, .char = '\r' }, imeOutcome(.{ .key_code = 36, .command = true }));
+    try testing.expectEqual(ImeOutcome{ .raw_down = true, .char = '\r' }, imeOutcome(.{ .key_code = 76 }));
+    try testing.expectEqual(ImeOutcome{ .raw_down = true }, imeOutcome(.{ .key_code = 51, .command = true, .delete_backward = true }));
+    try testing.expectEqual(ImeOutcome{ .raw_down = true }, imeOutcome(.{ .key_code = 48, .command = true }));
+    try testing.expectEqual(ImeOutcome{ .raw_down = true, .commit_typed = true }, imeOutcome(.{ .key_code = 0, .typed = "ab" }));
+    try testing.expectEqual(ImeOutcome{ .raw_down = true, .commit_typed = true }, imeOutcome(.{ .key_code = 0, .typed = "😀" }));
+    try testing.expectEqual(ImeOutcome{ .raw_down = true, .commit_typed = true }, imeOutcome(.{ .key_code = 0, .typed = "\xff" }));
+    // 조합 시작 — 키는 입력기 것.
+    try testing.expectEqual(ImeOutcome{}, imeOutcome(.{ .key_code = 2, .marked = true }));
+}
+
+test "ime outcome with a composition: the key that ends it (Korean Space, Enter, arrows) still acts" {
+    // 한글 Space: 「한」 확정 + 「 」 삽입 → 확정을 보내고 공백 키.
+    try testing.expectEqual(ImeOutcome{ .commit = .send, .raw_down = true, .char = ' ' }, imeOutcome(.{ .key_code = 49, .had_composition = true, .commit = "한", .typed = " " }));
+    // 한글 Enter: 확정 + insertNewline 명령 → 확정 뒤 Enter.
+    try testing.expectEqual(ImeOutcome{ .commit = .send, .raw_down = true, .char = '\r' }, imeOutcome(.{ .key_code = 36, .had_composition = true, .commit = "한", .command = true }));
+    // 한글 ←: 확정 + moveLeft.
+    try testing.expectEqual(ImeOutcome{ .commit = .send, .raw_down = true }, imeOutcome(.{ .key_code = 123, .had_composition = true, .commit = "한", .command = true }));
+    // 일본어 변환 확정 Enter: 확정만, 명령 없음 → 입력기가 키를 삼켰다.
+    try testing.expectEqual(ImeOutcome{ .commit = .send }, imeOutcome(.{ .key_code = 36, .had_composition = true, .commit = "漢字" }));
+    // 다음 음절: 「한」 확정 + 「ㄱ」 조합(확정은 조합 전에 이미 보냄).
+    try testing.expectEqual(ImeOutcome{}, imeOutcome(.{ .key_code = 1, .had_composition = true, .commit_sent = true, .marked = true }));
+    // 자모 갱신(하 → 한): 키 이벤트 없음.
+    try testing.expectEqual(ImeOutcome{}, imeOutcome(.{ .key_code = 45, .had_composition = true, .marked = true }));
+}
+
+test "ime outcome with a composition: last jamo Backspace, empty commit and Esc cancel instead of committing" {
+    // 마지막 자모 Backspace: 입력기가 「ㄴ」 확정 + deleteBackward → 확정이 아니라 조합 취소, 키도 안 보낸다.
+    try testing.expectEqual(ImeOutcome{ .commit = .cancel }, imeOutcome(.{ .key_code = 51, .had_composition = true, .commit = "ㄴ", .command = true, .delete_backward = true }));
+    // 빈 확정(insertText("")) → 취소.
+    try testing.expectEqual(ImeOutcome{ .commit = .cancel }, imeOutcome(.{ .key_code = 51, .had_composition = true, .commit = "" }));
+    // Esc 가 조합을 비움(확정 없음) → 취소, Escape 키는 안 보낸다(입력기 것).
+    try testing.expectEqual(ImeOutcome{ .commit = .cancel }, imeOutcome(.{ .key_code = 53, .had_composition = true, .cleared = true, .command = true }));
+    // 조합 중 아무 변화 없이 명령만(드묾) → 그 키.
+    try testing.expectEqual(ImeOutcome{ .raw_down = true }, imeOutcome(.{ .key_code = 123, .had_composition = true, .command = true }));
+    // 조합 중 아무 일도 없음 → 입력기가 삼킴.
+    try testing.expectEqual(ImeOutcome{}, imeOutcome(.{ .key_code = 7, .had_composition = true }));
 }

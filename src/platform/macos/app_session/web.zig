@@ -405,6 +405,10 @@ pub fn tickWebOsr(self: *AppSession) void {
                 const sid = term.surfaceId();
                 if (web_osr.takeNavUpdate(sid)) |nav| setWebNavState(self, sid, nav.can_go_back, nav.can_go_forward, nav.url);
                 if (web_osr.takeGpuNotice(sid)) self.showNoticeKey(.web_osr_gpu_unavailable);
+                // W3c: 새 웹 프레임이면 이 창을 다시 그린다 — 재투영 없이 세대만 올린다(커서 페이드와 같은 길).
+                // 숨은 탭도 front 는 갱신한다(다시 보일 때 옛 장이 한 프레임 비치지 않게) — CEF 가 숨은 탭은 거의
+                // 안 그린다.
+                if (web_osr.pollFrame(sid, self.osr_completed_generation, @intFromPtr(self))) self.metal_buffer.generation += 1;
             }
         }
     }
@@ -421,6 +425,7 @@ pub fn tickWebOsr(self: *AppSession) void {
 /// Term 이 실제로 사라질 때 `destroyTerm` 이 한다).
 fn routeOsrLayouts(self: *AppSession) void {
     const now: i64 = @intCast(app_session_mod.monotonicMs());
+    self.osr_layouts.clearRetainingCapacity();
     var i: usize = 0;
     while (i < self.web_cur_scratch.items.len) {
         const layout = self.web_cur_scratch.items[i];
@@ -438,9 +443,54 @@ fn routeOsrLayouts(self: *AppSession) void {
             .height_px = layout.content_rect.h,
             .visible = layout.visible,
         }, self.scale_milli, now);
+        // W3c: 이 창이 그릴 rect(보이는 것만). 매 tick 새로 모은다.
+        if (layout.visible and layout.content_rect.w > 0 and layout.content_rect.h > 0) {
+            self.osr_layouts.append(self.allocator, .{ .surface_id = layout.surface_id, .rect = layout.content_rect }) catch {};
+        }
         _ = self.web_cur_scratch.orderedRemove(i);
     }
 }
+
+/// W3c: 이번 프레임(세대 `frame_generation`)에 그릴 OSR 본문 — 보이는 탭마다 front IOSurface 를 본문 rect(창 backing px,
+/// 좌상단)에 1:1 로 붙인다. 장은 DIP 올림이라 rect 보다 크거나 같다 — UV 로 rect 만큼만 자른다(늘리지 않아 흐려지지
+/// 않는다). 장이 rect 보다 작으면(크기 변경 중 옛 링) 장 크기만 그리고 나머지는 그리지 않는다. 그린 탭에는 이 세대를
+/// 적어 GPU 소비자 규칙(`web_osr_view`)이 쓴다.
+pub fn osrQuads(self: *AppSession, frame_generation: u64, out: []OsrQuad) usize {
+    if (!web_osr.enabled()) return 0;
+    var n: usize = 0;
+    for (self.osr_layouts.items) |layout| {
+        if (n == out.len) break;
+        const f = web_osr.front(layout.surface_id) orelse continue;
+        if (f.width == 0 or f.height == 0) continue;
+        const w = @min(layout.rect.w, f.width);
+        const h = @min(layout.rect.h, f.height);
+        out[n] = .{
+            .iosurface = f.surface,
+            .dest_x = @floatFromInt(layout.rect.x),
+            .dest_y = @floatFromInt(layout.rect.y),
+            .dest_w = @floatFromInt(w),
+            .dest_h = @floatFromInt(h),
+            .u1 = @as(f32, @floatFromInt(w)) / @as(f32, @floatFromInt(f.width)),
+            .v1 = @as(f32, @floatFromInt(h)) / @as(f32, @floatFromInt(f.height)),
+        };
+        web_osr.drew(layout.surface_id, frame_generation, @intFromPtr(self));
+        n += 1;
+    }
+    return n;
+}
+
+/// ABI 로 넘기는 OSR 사각형 하나(`MaruAppHostOsrQuad` 와 같은 배치).
+pub const OsrQuad = extern struct {
+    iosurface: ?*anyopaque = null,
+    dest_x: f32 = 0,
+    dest_y: f32 = 0,
+    dest_w: f32 = 0,
+    dest_h: f32 = 0,
+    u0: f32 = 0,
+    v0: f32 = 0,
+    u1: f32 = 1,
+    v1: f32 = 1,
+};
 
 /// Term 이 사라졌다 — OSR 브라우저면 sidecar 에서 파괴한다(`destroyTerm`).
 pub fn dropOsrSurface(self: *AppSession, surface_id: u64) void {

@@ -5392,7 +5392,7 @@ pub fn build(b: *std.Build) void {
     boundary_step.dependOn(&run_session_host_cr6d_global_boundary_tests.step);
     const session_host_cr6e_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/session_host_cr6e_boundary.zig"),
+            .root_source_file = b.path("tests/session_host_reconnect_baseline_evidence_boundary.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -8087,7 +8087,7 @@ pub fn build(b: *std.Build) void {
     boundary_step.dependOn(&run_session_host_cr6e_c3c_sample_set_validator_tests.step);
     const session_host_cr6e_c3c_sample_set_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/session_host_cr6e_c3c_sample_set_boundary.zig"),
+            .root_source_file = b.path("tests/session_host_reconnect_latency_sample_set_boundary.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -8186,7 +8186,7 @@ pub fn build(b: *std.Build) void {
 
         const cr6e_c3a_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr6e_c3a_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_reconnect_candidate_adoption_boundary.zig"),
                 .target = target,
                 .optimize = cr6e_c3a_optimize,
             }),
@@ -8248,7 +8248,7 @@ pub fn build(b: *std.Build) void {
 
         const cr6e_c3b_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr6e_c3b_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_reconnect_worker_lane_boundary.zig"),
                 .target = target,
                 .optimize = cr6e_c3b_optimize,
             }),
@@ -8282,7 +8282,7 @@ pub fn build(b: *std.Build) void {
 
         const cr6e_c3c_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr6e_c3c_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_reconnect_frame_quit_order_boundary.zig"),
                 .target = target,
                 .optimize = cr6e_c3c_optimize,
             }),

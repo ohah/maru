@@ -360,7 +360,7 @@ test "p5c3d --stream 은 첫 화면 뒤 delta 를 계속 흘린다" {
 const stream_header_bytes: usize = 12;
 
 /// 제품 exe 경로. **이 env 를 읽는 자리는 하나여야 한다** — 경계 게이트가 "제품 프로세스
-/// 호출자 하나" 로 그것을 고정한다(`tests/session_host_3d_boundary.zig`). 없으면 이 스위트는
+/// 호출자 하나" 로 그것을 고정한다(`tests/session_host_same_major_compatibility_boundary.zig`). 없으면 이 스위트는
 /// 제품 없이 돌 수 없으므로 건너뛴다.
 fn productExe(allocator: std.mem.Allocator) ![:0]u8 {
     const raw = c.getenv("MARU_SESSION_HOST_PRODUCT_EXE") orelse return error.SkipZigTest;

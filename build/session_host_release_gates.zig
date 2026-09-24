@@ -5446,7 +5446,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         session_host_3d_step.dependOn(session_host_3b_step);
         const session_host_3d_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_3d_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_same_major_compatibility_boundary.zig"),
                 .target = target,
                 .optimize = optimize,
             }),
@@ -5480,7 +5480,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         });
         const session_host_3d_e2e_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_3d_e2e.zig"),
+                .root_source_file = b.path("tests/session_host_same_major_compatibility_e2e.zig"),
                 .target = target,
                 .optimize = optimize,
                 .link_libc = true,
@@ -5508,7 +5508,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const session_host_3d_product_e2e_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_3d_product_e2e.zig"),
+                .root_source_file = b.path("tests/session_host_attach_product_e2e.zig"),
                 .target = target,
                 .optimize = optimize,
                 .link_libc = true,

@@ -28,7 +28,12 @@ class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_GET(self):
         log.write(self.path + "\n")
-        body = b"<!doctype html><title>osr-smoke</title><body>osr smoke"
+        if self.path == "/solid":
+            body = b"<!doctype html><title>solid</title><style>html,body{margin:0;height:100%;background:#20a060}</style><body>"
+        elif self.path == "/anim":
+            body = b"<!doctype html><title>anim</title><style>html,body{margin:0;height:100%}</style><body><script>let n=0;function f(){n++;document.body.style.background='rgb('+(n&255)+',80,160)';requestAnimationFrame(f)}f()</script>"
+        else:
+            body = b"<!doctype html><title>osr-smoke</title><body>osr smoke"
         self.send_response(200); self.send_header('Content-Type', 'text/html'); self.send_header('Content-Length', str(len(body))); self.end_headers(); self.wfile.write(body)
 http.server.HTTPServer(('127.0.0.1', int(sys.argv[1])), H).serve_forever()
 PY
@@ -107,4 +112,46 @@ done
 kill -0 "$host_pid" 2>/dev/null && fail "sidecar $host_pid still alive after the app exited"
 leftover=$(pgrep -f "$profile" || true)
 [ -z "$leftover" ] || fail "processes still using the profile: $leftover"
+
+# ── W3c: 본문을 실제로 그린다 ───────────────────────────────────────────────────────────────────────────
+# 앱을 새로 띄워(재시작 예산이 걸리지 않게) 세 가지를 잰다: 정적 페이지가 본문을 빈틈없이 채우는가(스크린샷), 애니메이션
+# 페이지를 CEF 빈도에 가깝게 다시 그리는가, 정적 페이지에서는 다시 그리지 않는가(요약의 metal_frames_drawn).
+run_app() { # $1=경로 $2=실행 ms $3=요약 파일, 나머지는 추가 환경
+    path=$1; ms=$2; summary=$3; shift 3
+    rm -rf "$root/home" && mkdir -p "$root/home"
+    env HOME="$root/home" CFFIXED_USER_HOME="$root/home" MARU_SESSION_HOST_ROOT="$root/session-host" \
+        MARU_WEB_PANEL=1 MARU_WEB_OSR_DIR="$sidecar_dir" MARU_WEB_OSR_TEST_URL="http://127.0.0.1:$port$path" \
+        MARU_MACOS_APP_SMOKE_MS="$ms" MARU_APP_SUMMARY_PATH="$summary" "$@" "$app" > "$root/app-${path#/}.log" 2>&1
+}
+
+run_app /solid 20000 "$root/solid.summary" MARU_SCREENSHOT="$root/shot.ppm" MARU_SCREENSHOT_DELAY_MS=7000
+[ -f "$root/shot.ppm" ] || fail "no screenshot"
+python3 - "$root/shot.ppm" <<'PY' || fail "the page did not fill the pane body"
+import sys
+d = open(sys.argv[1], 'rb').read()
+_, dims, _, px = d.split(b'\n', 3)
+w, h = map(int, dims.split())
+green = bytes.fromhex('20a060')
+xs, ys = [], []
+for y in range(h):
+    for x in range(w):
+        i = (y * w + x) * 3
+        if px[i:i + 3] == green:
+            xs.append(x); ys.append(y)
+if not xs: print('no page pixels'); sys.exit(1)
+x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
+area = (x1 - x0 + 1) * (y1 - y0 + 1)
+holes = area - len(xs)
+print(f'page rect {x1-x0+1}x{y1-y0+1} of {w}x{h} · non-page pixels inside {holes}')
+sys.exit(0 if holes == 0 and area > w * h // 3 else 1)
+PY
+
+run_app /anim 9000 "$root/anim.summary"
+run_app /solid 9000 "$root/static.summary"
+anim=$(sed -n 's/^metal_frames_drawn=//p' "$root/anim.summary")
+still=$(sed -n 's/^metal_frames_drawn=//p' "$root/static.summary")
+echo "frames drawn in 9 s: animated page $anim · static page $still"
+# 9 초 중 앞 ~2 초는 sidecar·첫 장 준비다 — 남은 7 초를 CEF 약 60fps 로 따라가면 300 을 넘는다.
+[ "${anim:-0}" -ge 300 ] || fail "the animated page redrew only ${anim:-0} times in 9 s"
+[ "${still:-0}" -le 60 ] || fail "the static page kept redrawing (${still} times in 9 s)"
 echo "web-osr smoke passed"

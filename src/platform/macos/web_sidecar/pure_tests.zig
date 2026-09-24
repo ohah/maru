@@ -4,4 +4,5 @@
 test {
     _ = @import("inbox.zig");
     _ = @import("dispatch.zig");
+    _ = @import("registry.zig");
 }

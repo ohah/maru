@@ -35,3 +35,19 @@ fn noop_has_one_ref(_: [*c]c.cef_base_ref_counted_t) callconv(.c) c_int {
 fn noop_has_at_least_one_ref(_: [*c]c.cef_base_ref_counted_t) callconv(.c) c_int {
     return 1;
 }
+
+/// CEF 가 돌려준 참조(getter 반환값·목록이 쥔 browser)를 푼다.
+pub fn release(ptr: anytype) void {
+    if (ptr == null) return;
+    _ = ptr.*.base.release.?(&ptr.*.base);
+}
+
+/// CEF 가 **콜백 인자로** 넘긴 객체는 콜백이 푼다. SDK 헤더는 이 규칙을 적지 않아 실측으로 정했다(W1c): 애니메이션
+/// 페이지에서 36 초 동안 그리기 콜백 약 1,920 번마다 browser 인자를 풀어도 죽지 않았다 — 인자가 우리 몫의 참조가 아니었다면
+/// 목록이 쥔 참조까지 깎여 몇 번 만에 해제된 객체를 썼을 것이다. 안 풀면 RSS 가 조금씩 더 늘었다(24 초에 +700KB 대 +370KB).
+pub const release_callback_args = true;
+
+/// 콜백 인자로 받은 객체를 다 썼을 때 부른다(`release_callback_args` 가 규칙을 든다).
+pub fn releaseArg(ptr: anytype) void {
+    if (release_callback_args) release(ptr);
+}

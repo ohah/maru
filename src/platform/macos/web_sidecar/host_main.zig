@@ -43,8 +43,17 @@ pub fn main(init: std.process.Init) u8 {
     return @intFromEnum(run(init));
 }
 
+/// 메시지 루프가 도는 동안만 읽기 스레드가 task 를 올린다 — `cef_shutdown` 도중·뒤에 올리지 않게.
+var g_accepting = std.atomic.Value(bool).init(true);
+
 fn run(init: std.process.Init) ExitCode {
+    // 부모는 가장 먼저 기록한다 — 채널을 떼는 사이 부모가 죽어 launchd 로 입양되면 1 이 나온다(읽기 스레드가 곧 끝낸다).
+    const parent = std.c.getppid();
     const channels = stdio.take() catch return .stdio_unavailable;
+    // stdout 표지: 보호가 제대로면 이 줄은 stderr 로 간다. 보호가 깨지면 알림 채널을 더럽혀 판정자의 첫 frame 이 깨진다 —
+    // Chromium 이 stdout 에 아무것도 안 찍어(실측) 판정자의 「stdout 에는 frame 만」 검사가 빈 검사였던 것을 채운다.
+    const sentinel = "maru-web-host: stdio ready\n";
+    _ = std.c.write(1, sentinel.ptr, sentinel.len);
     g_writer = .{ .fd = channels.events };
     g_dispatcher = .{ .writer = &g_writer, .handler = .{ .context = undefined, .browser_command = &dispatch.rejectBrowserCommand } };
 
@@ -74,7 +83,7 @@ fn run(init: std.process.Init) ExitCode {
     g_task = object.zeroed(c.cef_task_t);
     object.staticRefCounted(&g_task.base);
     g_task.execute = &drainTask;
-    const reader = std.Thread.spawn(.{}, inbox_mod.readLoop, .{ channels.commands, &g_inbox, &wakeUiThread }) catch {
+    const reader = std.Thread.spawn(.{}, inbox_mod.readLoop, .{ channels.commands, &g_inbox, &wakeUiThread, parent }) catch {
         g_api.shutdown();
         return fail(.reader_thread_failed, .cef_initialize_failed, "cannot start the command reader thread");
     };
@@ -84,12 +93,14 @@ fn run(init: std.process.Init) ExitCode {
     wakeUiThread();
 
     g_api.run_message_loop();
+    g_accepting.store(false, .release);
     g_api.shutdown();
     return .ok;
 }
 
 /// 읽기 스레드에서 부른다 — CEF UI 스레드에 상자를 비우는 task 를 올린다.
 fn wakeUiThread() void {
+    if (!g_accepting.load(.acquire)) return;
     _ = g_api.post_task(c.TID_UI, &g_task);
 }
 

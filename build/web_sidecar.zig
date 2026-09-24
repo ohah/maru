@@ -15,9 +15,9 @@ pub const Context = struct {
     test_step: *std.Build.Step,
 };
 
-/// ① 의 시험 수(inbox 2 + dispatch 7 + 입구 파일의 `test {}` 블록 1). 시험을 더하거나 빼면 같이 고친다 —
+/// ① 의 시험 수(inbox 2 + dispatch 8 + 입구 파일의 `test {}` 블록 1). 시험을 더하거나 빼면 같이 고친다 —
 /// 조용히 빠지는 것을 러너가 잡는다.
-const pure_test_count = 10;
+const pure_test_count = 11;
 
 pub fn register(b: *std.Build, ctx: Context) void {
     const protocol_mod = b.createModule(.{

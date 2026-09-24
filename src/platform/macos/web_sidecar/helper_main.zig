@@ -11,6 +11,7 @@ const library = @import("library.zig");
 const layout = @import("layout.zig");
 
 const SandboxInitialize = *const fn (argc: c_int, argv: [*c][*c]u8) callconv(.c) ?*anyopaque;
+extern "c" fn sandbox_check(pid: c_int, operation: ?[*:0]const u8, kind: c_int) c_int;
 
 /// 샌드박스를 켜기 전에는 아무것도 하지 않도록 최소 진입점을 쓴다(할당자·Io 준비 없음).
 pub fn main(init: std.process.Init.Minimal) u8 {
@@ -28,6 +29,12 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     const sandbox_initialize: SandboxInitialize = @ptrCast(@alignCast(sandbox_symbol));
     // 돌려받는 문맥은 프로세스가 끝날 때까지 쥔다 — 풀면 샌드박스가 풀린다.
     if (sandbox_initialize(argc, argv_c) == null) return fail("sandbox initialization failed");
+    // `cef_sandbox_initialize` 는 샌드박스를 요청받지 않은(브라우저가 `--seatbelt-client` 를 안 준) helper 에게도 성공을
+    // 돌려준다(적대 검증 실측) — 그러면 샌드박스 없이 프레임워크를 올린다. 실제로 샌드박스 안인지 확인하고, 아니면 끝낸다.
+    if (sandbox_check(std.c.getpid(), null, 0) != 1) {
+        std.debug.print("maru-web-helper: sandbox is not active after initialization ({s} {s})\n", .{ argValue(argv, "--type="), argValue(argv, "--utility-sub-type=") });
+        return 1;
+    }
 
     var framework_path: layout.PathBuf = undefined;
     const framework = layout.join(&framework_path, dir, layout.framework_dir_name ++ "/" ++ layout.framework_binary_name) catch return fail("path too long");
@@ -43,4 +50,13 @@ pub fn main(init: std.process.Init.Minimal) u8 {
 fn fail(reason: []const u8) u8 {
     std.debug.print("maru-web-helper: {s}\n", .{reason});
     return 1;
+}
+
+/// 진단용 — `--type=` 같은 인자의 값(없으면 빈 글).
+fn argValue(argv: []const [*:0]const u8, prefix: []const u8) []const u8 {
+    for (argv) |raw| {
+        const arg = std.mem.span(raw);
+        if (std.mem.startsWith(u8, arg, prefix)) return arg[prefix.len..];
+    }
+    return "";
 }

@@ -53,21 +53,45 @@ pub const Inbox = struct {
     }
 };
 
-/// 읽기 스레드 본문. `wake` 는 바이트가 들어오거나 fd 가 닫힐 때마다 부른다(CEF UI 스레드에 task 를 올린다).
-pub fn readLoop(fd: c_int, inbox: *Inbox, wake: *const fn () void) void {
+/// 읽기 스레드 본문. `wake` 는 바이트가 들어오거나 채널이 끝날 때마다 부른다(CEF UI 스레드에 task 를 올린다).
+///
+/// 채널은 두 가지로 끝난다: 명령 fd 의 EOF, 그리고 **부모(maru)의 종료**. maru 는 셸을 fork 하는 터미널이라 명령 pipe 의
+/// 쓰기 끝이 셸 자손에게 새면 maru 가 죽어도 EOF 가 오지 않는다(적대 검증) — 그래서 kqueue 로 부모 프로세스의 종료도 본다.
+/// 시작할 때 이미 부모가 없으면(launchd 로 입양됨) 곧바로 끝낸다.
+pub fn readLoop(fd: c_int, inbox: *Inbox, wake: *const fn () void, parent: c_int) void {
+    defer {
+        inbox.close();
+        wake();
+    }
+    if (parent <= 1) return;
+    const kq = std.c.kqueue();
+    if (kq < 0) return;
+    defer _ = std.c.close(kq);
+    const changes = [_]std.c.Kevent{
+        .{ .ident = @intCast(fd), .filter = std.c.EVFILT.READ, .flags = std.c.EV.ADD, .fflags = 0, .data = 0, .udata = 0 },
+        .{ .ident = @intCast(parent), .filter = std.c.EVFILT.PROC, .flags = std.c.EV.ADD, .fflags = std.c.NOTE.EXIT, .data = 0, .udata = 0 },
+    };
+    var none: [0]std.c.Kevent = undefined;
+    // 부모가 이미 사라졌으면 PROC 등록이 실패한다(ESRCH) — 그때도 끝낸다.
+    if (std.c.kevent(kq, &changes, changes.len, &none, 0, null) != 0) return;
     var chunk: [16 * 1024]u8 = undefined;
     while (true) {
+        var happened: [2]std.c.Kevent = undefined;
+        const count = std.c.kevent(kq, &changes, 0, &happened, happened.len, null);
+        if (count < 0) {
+            if (std.c._errno().* == @intFromEnum(std.c.E.INTR)) continue;
+            return;
+        }
+        for (happened[0..@intCast(count)]) |event| {
+            if (event.filter == std.c.EVFILT.PROC) return;
+        }
         const n = std.c.read(fd, &chunk, chunk.len);
         if (n > 0) {
             inbox.push(chunk[0..@intCast(n)]);
             wake();
         } else if (n < 0 and std.c._errno().* == @intFromEnum(std.c.E.INTR)) {
             continue;
-        } else {
-            inbox.close();
-            wake();
-            return;
-        }
+        } else return;
     }
 }
 

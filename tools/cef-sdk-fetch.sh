@@ -22,14 +22,36 @@ esac
 name="cef_binary_${version}_${platform}_minimal"
 cache="${MARU_CEF_CACHE:-$HOME/Library/Caches/maru/cef}"
 dest="$cache/$name"
-if [ -f "$dest/.maru-verified" ]; then
+
+# 표지에는 확인한 sha256 을 적는다 — 고정값이 바뀌면 옛 캐시를 믿지 않는다. 남이 심어 둔 캐시도 믿지 않는다(소유자 확인).
+verified() {
+  [ -f "$dest/.maru-verified" ] && [ -O "$dest" ] && [ "$(cat "$dest/.maru-verified")" = "$sha256" ]
+}
+if verified; then
   echo "$dest"
   exit 0
 fi
 
 mkdir -p "$cache"
+# 동시에 두 번 돌면 한쪽의 rm -rf 와 다른 쪽의 표지가 엇갈려 반쯤 지운 캐시에 표지가 남을 수 있다 — mkdir 잠금으로 줄 세운다.
+lock="$cache/.lock"
+waited=0
+until mkdir "$lock" 2>/dev/null; do
+  waited=$((waited + 1))
+  if [ "$waited" -gt 900 ]; then
+    echo "cef-sdk-fetch: 잠금($lock)을 15 분 기다렸다 — 다른 실행이 없으면 지운다" >&2
+    exit 1
+  fi
+  sleep 1
+done
 work=$(mktemp -d "$cache/.fetch.XXXXXX")
-trap 'rm -rf "$work"' EXIT INT TERM
+trap 'rm -rf "$work"; rmdir "$lock" 2>/dev/null' EXIT
+trap 'exit 130' INT TERM
+# 잠금을 기다리는 사이 다른 실행이 끝냈을 수 있다.
+if verified; then
+  echo "$dest"
+  exit 0
+fi
 
 archive="${MARU_CEF_ARCHIVE:-}"
 if [ -z "$archive" ]; then
@@ -52,5 +74,5 @@ if [ ! -d "$work/$name/Release/Chromium Embedded Framework.framework" ]; then
 fi
 rm -rf "$dest"
 mv "$work/$name" "$dest"
-touch "$dest/.maru-verified"
+printf %s "$sha256" > "$dest/.maru-verified"
 echo "$dest"

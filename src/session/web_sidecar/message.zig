@@ -17,6 +17,19 @@ pub const Tag = enum(u8) {
     frame_channel = 8,
     /// 뒤로·앞으로·새로고침·멈춤(W3b — 주소창 버튼).
     nav_action = 9,
+    /// 입력(W4 — C5). 좌표는 view 좌상단 기준 DIP 다(CEF 의 view 좌표). 라우팅(누구에게 보낼지)은 maru 가 정했다.
+    mouse = 10,
+    wheel = 11,
+    key = 12,
+    ime_set_composition = 13,
+    ime_commit_text = 14,
+    /// 조합 중인 글을 그대로 확정한다(키 대상이 바뀌는 모달 에지 — C5).
+    ime_finish_composing = 15,
+    ime_cancel_composition = 16,
+    /// 주 프레임 편집 명령(⌘A/C/V/X/Z — 메뉴와 단축키).
+    edit_command = 17,
+    /// 제스처 주인이 바뀌었다 — 페이지가 잡은 마우스 capture 를 놓게 한다(모달 에지 — C5).
+    capture_lost = 18,
 
     hello_ack = 32,
     browser_created = 33,
@@ -29,6 +42,10 @@ pub const Tag = enum(u8) {
     url_changed = 39,
     /// 뒤로·앞으로 가능 여부와 로딩 중(W3b — 주소창 버튼).
     nav_state = 40,
+    /// 페이지가 원하는 마우스 커서(W4).
+    cursor_changed = 41,
+    /// IME 조합 글자들이 차지한 사각형(view DIP) — 후보창 위치(`firstRect`, W4).
+    ime_range = 42,
 
     pub fn direction(self: Tag) Direction {
         return if (@intFromEnum(self) < 32) .to_sidecar else .to_maru;
@@ -71,6 +88,167 @@ pub const NavActionKind = enum(u8) {
 };
 
 pub const BrowserId = u64;
+
+/// 입력 좌표·스크롤 양의 상한(절댓값, DIP). 제스처 주인은 view 밖까지 끌 수 있어(C5 — rect 밖 클램프 없음) 음수와 view
+/// 크기 너머를 받되, 이보다 크면 쓰레기로 보고 거절한다.
+pub const max_pointer_extent: i32 = 64 * 1024;
+
+pub const MouseKind = enum(u8) {
+    move = 0,
+    /// 포인터가 view 를 떠났다(hover 해제).
+    leave = 1,
+    down = 2,
+    up = 3,
+};
+
+pub const MouseButton = enum(u8) {
+    left = 0,
+    middle = 1,
+    right = 2,
+};
+
+/// 입력의 수식자·눌린 버튼. 정의되지 않은 비트는 거절한다(닫힌 필드). 끄는 동안의 move 는 눌린 버튼 비트를 실어야
+/// 페이지가 드래그(선택)로 본다.
+pub const Modifiers = packed struct(u16) {
+    shift: bool = false,
+    control: bool = false,
+    alt: bool = false,
+    command: bool = false,
+    caps_lock: bool = false,
+    left_button: bool = false,
+    middle_button: bool = false,
+    right_button: bool = false,
+    is_repeat: bool = false,
+    /// 트랙패드처럼 픽셀 단위로 정밀한 스크롤 양이다.
+    precise_scroll: bool = false,
+    _reserved: u6 = 0,
+};
+
+pub const Point = struct {
+    x: i32,
+    y: i32,
+};
+
+pub const Mouse = struct {
+    browser: BrowserId,
+    kind: MouseKind,
+    /// down·up 만 쓴다(move·leave 는 `left`).
+    button: MouseButton = .left,
+    point: Point,
+    modifiers: Modifiers = .{},
+    /// down·up 은 1~3(더블·트리플 클릭), move·leave 는 0.
+    click_count: u8 = 0,
+};
+
+pub const Wheel = struct {
+    browser: BrowserId,
+    point: Point,
+    delta_x: i32,
+    delta_y: i32,
+    modifiers: Modifiers = .{},
+};
+
+pub const KeyKind = enum(u8) {
+    /// 글자로 바뀌기 전의 누름 — 글자는 따로 `char` 로 보낸다.
+    raw_down = 0,
+    down = 1,
+    up = 2,
+    char = 3,
+};
+
+/// 키 하나. macOS 의 keyCode·글자를 그대로 싣는다 — CEF 는 이것으로 NSEvent 를 다시 지어 DOM `key`·`code` 를 정한다
+/// (W4a 변이 실측): `code` 는 `native_key_code` 에서, `key` 는 `character`·`unmodified_character` 에서 온다. Ctrl chord 는
+/// `character` 에 제어 문자, `unmodified_character` 에 원 글자를 함께 싣는다 — 둘 다 0 이면 `key` 를 못 정한다(§13.1 시험기의
+/// `Unidentified`). `windows_key_code` 는 macOS 에서 CEF 가 NSEvent 로 다시 정해 쓰지 않는다(실측) — 다른 플랫폼 자리다.
+pub const Key = struct {
+    browser: BrowserId,
+    kind: KeyKind,
+    modifiers: Modifiers = .{},
+    windows_key_code: u8 = 0,
+    native_key_code: u8 = 0,
+    character: u16 = 0,
+    unmodified_character: u16 = 0,
+};
+
+/// UTF-16 단위 범위. `none` 은 「범위 없음」(CEF 의 무효 범위).
+pub const TextRange = struct {
+    start: u32,
+    end: u32,
+
+    pub const none: TextRange = .{ .start = std.math.maxInt(u32), .end = std.math.maxInt(u32) };
+
+    pub fn isNone(self: TextRange) bool {
+        return self.start == none.start and self.end == none.end;
+    }
+};
+
+pub const ImeComposition = struct {
+    browser: BrowserId,
+    /// 조합 중인 글(빈 글이면 조합을 비운다).
+    text: []const u8,
+    /// 조합 글 안에서 선택할 범위(보통 끝에 캐럿).
+    selection: TextRange = .none,
+    /// 바꿀 기존 글 범위(macOS 만 쓴다).
+    replacement: TextRange = .none,
+};
+
+pub const ImeCommit = struct {
+    browser: BrowserId,
+    text: []const u8,
+    replacement: TextRange = .none,
+};
+
+pub const EditCommandKind = enum(u8) {
+    undo = 0,
+    redo = 1,
+    cut = 2,
+    copy = 3,
+    paste = 4,
+    paste_and_match_style = 5,
+    delete = 6,
+    select_all = 7,
+};
+
+pub const EditCommand = struct {
+    browser: BrowserId,
+    command: EditCommandKind,
+};
+
+/// 페이지가 원하는 커서. CEF 의 50 여 종을 maru 가 보일 수 있는 것으로 줄였다 — 나머지는 `arrow`.
+pub const WebCursor = enum(u8) {
+    arrow = 0,
+    hand = 1,
+    ibeam = 2,
+    vertical_ibeam = 3,
+    crosshair = 4,
+    resize_ew = 5,
+    resize_ns = 6,
+    grab = 7,
+    grabbing = 8,
+    not_allowed = 9,
+    copy = 10,
+    alias = 11,
+    context_menu = 12,
+};
+
+pub const CursorChanged = struct {
+    browser: BrowserId,
+    cursor: WebCursor,
+};
+
+/// view 좌표(DIP) 사각형.
+pub const Rect = struct {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+};
+
+pub const ImeRange = struct {
+    browser: BrowserId,
+    /// 조합 글자들의 사각형을 모두 합친 것.
+    bounds: Rect,
+};
 
 pub const Hello = struct {
     instance: u64,
@@ -156,6 +334,15 @@ pub const Message = union(Tag) {
     shutdown: void,
     frame_channel: FrameChannel,
     nav_action: NavAction,
+    mouse: Mouse,
+    wheel: Wheel,
+    key: Key,
+    ime_set_composition: ImeComposition,
+    ime_commit_text: ImeCommit,
+    ime_finish_composing: BrowserFlag,
+    ime_cancel_composition: BrowserId,
+    edit_command: EditCommand,
+    capture_lost: BrowserId,
 
     hello_ack: Hello,
     browser_created: BrowserId,
@@ -166,6 +353,8 @@ pub const Message = union(Tag) {
     failure: Failure,
     url_changed: Navigate,
     nav_state: NavState,
+    cursor_changed: CursorChanged,
+    ime_range: ImeRange,
 };
 
 test "tags split by direction at 32" {

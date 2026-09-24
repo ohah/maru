@@ -569,7 +569,9 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             .browser_create_failed, .unknown_browser, .duplicate_browser, .frame_channel_failed => {},
         },
         .title_changed, .load_finished, .renderer_gone => {},
+        // 커서·IME 후보창 위치는 앱 입력 라우팅(W4b)이 쓴다 — 그때까지 버린다.
+        .cursor_changed, .ime_range => {},
         // 방향이 다른 tag 는 decoder 가 이미 거절했다.
-        .hello, .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .shutdown, .frame_channel, .nav_action => unreachable,
+        .hello, .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .shutdown, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost => unreachable,
     }
 }

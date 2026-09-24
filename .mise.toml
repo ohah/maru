@@ -178,7 +178,7 @@ depends = ["web-sidecar"]
 run = "zig build -Doptimize=ReleaseSafe macos-app-build && sh tools/test-macos-web-osr-smoke.sh"
 
 [tasks.web-sidecar-judge]
-description = "Run the W1b/W1c judge against a real maru-web-host (sandbox, shutdown, parent death, browsers, profile, popups, dialogs)"
+description = "Run the W1b/W1c/W2/W4 judge against a real maru-web-host (sandbox, shutdown, parent death, browsers, profile, popups, dialogs, frames, input)"
 depends = ["web-sidecar"]
 run = 'profile=$(mktemp -d) && trap "rm -rf \"$profile\"" EXIT && zig-out/web-sidecar/maru-web-judge "$PWD/zig-out/web-sidecar" "$profile"'
 

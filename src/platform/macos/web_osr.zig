@@ -3,8 +3,8 @@
 //! **Zig 가 직접 띄운다**(사용자 결정 2026-09-24 — `lsp_process.zig` 선례): fork·execve 로 띄우고, 비차단 파이프를 창
 //! tick 에서 비운다. Mermaid helper 는 Swift 가 띄우는데 그 이유(Security.framework 서명 검증)는 배포(W7) 때 필요하다.
 //!
-//! **켜는 법(W4 전까지 개발용)**: `MARU_WEB_OSR_DIR=<설치 디렉터리>` — `maru-web-host`·helper·프레임워크가 있는 곳
-//! (`zig build web-sidecar` 의 `zig-out/web-sidecar`). 설정 키는 입력까지 되는 W4 에서 연다(사용자 결정).
+//! **켜는 법**: 설정 `browser.engine = chromium`(W4d — `maru-chromium` 설치가 있어야 한다, 앱을 다시 시작해야 적용)
+//! 또는 개발용 `MARU_WEB_OSR_DIR=<설치 디렉터리>`(`zig build web-sidecar` 의 `zig-out/web-sidecar` — 환경변수가 먼저).
 //!
 //! 수명: 첫 OSR 탭이 보이면 띄우고, 마지막 브라우저가 파괴되면 내린다. 죽으면 다시 띄워 살아 있던 탭을 다시 만든다 —
 //! 60 초 안에 세 번 죽으면 멈추고 안내한다(Mermaid 와 같은 예산). 같은 프로필을 다른 maru 가 쓰면(`profile_in_use`)
@@ -118,10 +118,150 @@ var receiver: ?ring_receiver.Receiver = null;
 var rejected_rings: u64 = 0;
 var latched: ?Notice = null;
 
-/// OSR 백엔드가 켜져 있는가(개발용 환경변수).
+/// 엔진 결정(W4d — 프로세스에 한 번, 재시작 후 적용). 첫 창이 설정을 읽은 뒤 `decide` 로 정한다. 개발용 환경변수
+/// `MARU_WEB_OSR_DIR` 가 먼저고, 아니면 설정 `browser.engine = chromium` 이고 `maru-chromium` 이 설치돼 있을 때 켠다.
+var decided: ?bool = null;
+/// 결정할 때 설정이 청한 값(chromium 이면 true) — 설정이 바뀌면 「재시작하면 적용」을 한 번 알린다.
+var requested_chromium: bool = false;
+var last_change_notice: ?bool = null;
+var install_notice_pending = false;
+var install_buf: [512]u8 = undefined;
+var install_len: usize = 0;
+
+/// `maru-chromium` formula 설치 위치 후보(`$(brew --prefix)/opt/maru-chromium/libexec` — 계획 문서 「배포·배치」).
+/// `HOMEBREW_PREFIX` 가 있으면 그 prefix 를 먼저 본다(brew shellenv 가 세운다 — 스모크도 이것으로 가짜 설치를 가리킨다).
+const install_candidates = [_][]const u8{
+    "/opt/homebrew",
+    "/usr/local",
+};
+
+/// 엔진 결정 규칙(순수 — 시험한다): 개발용 환경변수가 먼저, 설정이 chromium 을 청하고 설치가 있으면 그 설치, 청했는데
+/// 설치가 없으면 WebKit + 안내.
+pub const Decision = struct { chromium: bool, dir: ?[]const u8 = null, not_installed: bool = false };
+
+pub fn decideFrom(config_wants_chromium: bool, env_dir: ?[]const u8, installed_dir: ?[]const u8) Decision {
+    if (env_dir) |dir| return .{ .chromium = true, .dir = dir };
+    if (!config_wants_chromium) return .{ .chromium = false };
+    if (installed_dir) |dir| return .{ .chromium = true, .dir = dir };
+    return .{ .chromium = false, .not_installed = true };
+}
+
+/// 첫 창이 설정을 읽은 뒤 부른다(두 번째부터는 무동작).
+pub fn decide(config_wants_chromium: bool) void {
+    if (decided != null) return;
+    requested_chromium = config_wants_chromium;
+    const env = envDir();
+    const d = decideFrom(config_wants_chromium, env, if (config_wants_chromium) findInstall() else null);
+    // 환경변수 경로는 복사하지 않는다(`installDir` 가 그대로 읽는다 — 길이 제한 없이). 설치 경로는 findInstall 이 상한 안에서 만든다.
+    if (env == null) if (d.dir) |dir| setInstall(dir);
+    decided = d.chromium;
+    install_notice_pending = d.not_installed; // 청했는데 설치가 없다 — 한 번 안내하고 WebKit 으로
+    const log = std.log.scoped(.web_osr);
+    if (d.not_installed) log.warn("browser.engine = chromium but maru-chromium is not installed — using WebKit", .{});
+    if (d.chromium) log.info("browser engine: chromium ({s})", .{installDir() orelse "?"});
+}
+
+test "engine decision: env first, then an installed maru-chromium, else WebKit with a notice" {
+    try std.testing.expectEqual(Decision{ .chromium = true, .dir = "/dev/build" }, decideFrom(false, "/dev/build", null));
+    try std.testing.expectEqual(Decision{ .chromium = false }, decideFrom(false, null, "/opt/homebrew/opt/maru-chromium/libexec"));
+    const installed = decideFrom(true, null, "/opt/homebrew/opt/maru-chromium/libexec");
+    try std.testing.expect(installed.chromium and !installed.not_installed);
+    try std.testing.expectEqualStrings("/opt/homebrew/opt/maru-chromium/libexec", installed.dir.?);
+    try std.testing.expectEqual(Decision{ .chromium = false, .not_installed = true }, decideFrom(true, null, null));
+}
+
+test "the engine is latched by the first decision (restart-only)" {
+    const saved = .{ decided, requested_chromium, install_notice_pending };
+    defer {
+        decided = saved[0];
+        requested_chromium = saved[1];
+        install_notice_pending = saved[2];
+    }
+    if (envDir() != null) return error.SkipZigTest; // 개발용 환경변수가 걸린 셸이면 결정이 달라진다
+    decided = null;
+    decide(false);
+    try std.testing.expect(!enabled());
+    decide(true); // 두 번째 창 — 무동작
+    try std.testing.expect(!enabled());
+    try std.testing.expect(!requested_chromium);
+}
+
+test "engine change notice fires once per new value and resets when the setting returns" {
+    const saved_decided = decided;
+    const saved_requested = requested_chromium;
+    const saved_last = last_change_notice;
+    defer {
+        decided = saved_decided;
+        requested_chromium = saved_requested;
+        last_change_notice = saved_last;
+    }
+    decided = false;
+    requested_chromium = false;
+    last_change_notice = null;
+    try std.testing.expect(!engineChangeNeedsNotice(false));
+    try std.testing.expect(engineChangeNeedsNotice(true));
+    try std.testing.expect(!engineChangeNeedsNotice(true)); // 같은 값 — 다시 안 알린다
+    try std.testing.expect(!engineChangeNeedsNotice(false)); // 되돌림 — 적용 중인 값과 같다
+    try std.testing.expect(engineChangeNeedsNotice(true)); // 다시 바꾸면 다시 알린다
+    // 청했지만 설치가 없어 WebKit 인 상태에서 webkit 으로 되돌림 — 바뀌는 것이 없다.
+    decided = false;
+    requested_chromium = true;
+    last_change_notice = null;
+    try std.testing.expect(!engineChangeNeedsNotice(false));
+}
+
+/// 설정의 엔진이 바뀌었다(파일 reload·설정 화면). 적용 중인 결정과 다르면 한 번 true — 「재시작하면 적용」 안내.
+pub fn engineChangeNeedsNotice(config_wants_chromium: bool) bool {
+    const effective = decided orelse return false;
+    // 청했지만 설치가 없어 이미 WebKit 인데 webkit 으로 되돌렸다 — 바뀌는 것이 없다.
+    if (config_wants_chromium == requested_chromium or (!effective and !config_wants_chromium)) {
+        last_change_notice = null;
+        return false;
+    }
+    if (last_change_notice == config_wants_chromium) return false;
+    last_change_notice = config_wants_chromium;
+    return true;
+}
+
+/// 설정은 chromium 을 청했는데 설치가 없어 WebKit 으로 열었다 — 한 번.
+pub fn takeInstallNotice() bool {
+    const v = install_notice_pending;
+    install_notice_pending = false;
+    return v;
+}
+
+/// OSR 백엔드가 켜져 있는가. 결정 전(첫 창 설정 전)에는 개발용 환경변수만 본다.
 pub fn enabled() bool {
-    const dir = std.c.getenv("MARU_WEB_OSR_DIR") orelse return false;
-    return std.mem.span(dir).len > 0;
+    return decided orelse (envDir() != null);
+}
+
+fn envDir() ?[]const u8 {
+    const dir = std.c.getenv("MARU_WEB_OSR_DIR") orelse return null;
+    const s = std.mem.span(dir);
+    return if (s.len == 0) null else s;
+}
+
+fn findInstall() ?[]const u8 {
+    const S = struct {
+        var dir_buf: [512]u8 = undefined;
+    };
+    var path_buf: [600]u8 = undefined;
+    const env_prefix: ?[]const u8 = if (std.c.getenv("HOMEBREW_PREFIX")) |p| std.mem.span(p) else null;
+    const prefixes = [_]?[]const u8{ env_prefix, install_candidates[0], install_candidates[1] };
+    for (prefixes) |maybe| {
+        const prefix = maybe orelse continue;
+        if (prefix.len == 0) continue;
+        const dir = std.fmt.bufPrint(&S.dir_buf, "{s}/opt/maru-chromium/libexec", .{prefix}) catch continue;
+        const host = std.fmt.bufPrintZ(&path_buf, "{s}/maru-web-host", .{dir}) catch continue;
+        if (std.c.access(host, std.c.X_OK) == 0) return dir;
+    }
+    return null;
+}
+
+fn setInstall(dir: []const u8) void {
+    const n = @min(dir.len, install_buf.len);
+    @memcpy(install_buf[0..n], dir[0..n]);
+    install_len = n;
 }
 
 pub fn currentState() State {
@@ -366,9 +506,8 @@ fn freeSurface(gpa: std.mem.Allocator, s: *Surface) void {
 }
 
 fn installDir() ?[]const u8 {
-    const dir = std.c.getenv("MARU_WEB_OSR_DIR") orelse return null;
-    const s = std.mem.span(dir);
-    return if (s.len == 0) null else s;
+    if (install_len > 0) return install_buf[0..install_len];
+    return envDir();
 }
 
 /// `~/Library/Application Support/maru/web/<번들 ID>/profile` — 개발 빌드와 설치본이 갈리게(C7).

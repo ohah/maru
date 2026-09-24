@@ -14,6 +14,10 @@ extern "c" fn IOSurfaceGetBaseAddress(surface: Ref) [*]u8;
 extern "c" fn IOSurfaceGetBytesPerRow(surface: Ref) usize;
 extern "c" fn IOSurfaceGetWidth(surface: Ref) usize;
 extern "c" fn IOSurfaceGetHeight(surface: Ref) usize;
+extern "c" fn IOSurfaceGetPixelFormat(surface: Ref) u32;
+extern "c" fn IOSurfaceGetBytesPerElement(surface: Ref) usize;
+extern "c" fn IOSurfaceGetPlaneCount(surface: Ref) usize;
+extern "c" fn IOSurfaceGetAllocSize(surface: Ref) usize;
 extern "c" fn CFRelease(object: *anyopaque) void;
 extern "c" fn CFDictionaryCreateMutable(allocator: ?*anyopaque, capacity: isize, keys: ?*const anyopaque, values: ?*const anyopaque) ?*anyopaque;
 extern "c" fn CFDictionarySetValue(dict: *anyopaque, key: *const anyopaque, value: *const anyopaque) void;
@@ -27,15 +31,20 @@ extern "c" const kCFTypeDictionaryValueCallBacks: anyopaque;
 
 const kCFNumberSInt32Type: isize = 3;
 pub const lock_read_only: u32 = 1;
-const pixel_format_bgra: i32 = 0x42475241; // 'BGRA'
+pub const pixel_format_bgra: u32 = 0x42475241; // 'BGRA'
 
 pub fn create(pixels_wide: u32, pixels_high: u32) error{IOSurfaceFailed}!Ref {
+    return createWith(pixels_wide, pixels_high, 4, pixel_format_bgra);
+}
+
+/// 형식을 골라 만든다 — 링은 늘 `create`(BGRA·4 바이트)를 쓰고, 이것은 형식을 속인 surface 를 시험에서 만들 때 쓴다.
+pub fn createWith(pixels_wide: u32, pixels_high: u32, bytes_per_element: i32, pixel_format: u32) error{IOSurfaceFailed}!Ref {
     const dict = CFDictionaryCreateMutable(null, 4, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks) orelse return error.IOSurfaceFailed;
     defer CFRelease(dict);
     const w: i32 = @intCast(pixels_wide);
     const h: i32 = @intCast(pixels_high);
-    const bpe: i32 = 4;
-    const format: i32 = pixel_format_bgra;
+    const bpe: i32 = bytes_per_element;
+    const format: i32 = @bitCast(pixel_format);
     const pairs = [_]struct { key: *const anyopaque, value: *const i32 }{
         .{ .key = kIOSurfaceWidth, .value = &w },
         .{ .key = kIOSurfaceHeight, .value = &h },
@@ -62,6 +71,19 @@ pub fn machPort(surface: Ref) mach.Port {
 /// 받은 권리에서 surface 를 되찾는다(참조 하나를 쥔다 — `release` 로 푼다).
 pub fn fromMachPort(port: mach.Port) ?Ref {
     return IOSurfaceLookupFromMachPort(port);
+}
+
+/// 받은 surface 가 링이 가정하는 모양인가 — `w`×`h` BGRA, 요소 4 바이트, 평면 하나, 줄과 할당이 그 크기를 담는다. maru 는
+/// 이 가정으로 `x * 4` 를 읽으므로, 폭·높이만 맞추고 요소를 1 바이트로 속인 surface 는 할당 밖을 읽게 한다(적대 검증 —
+/// 8192×64 요소 1 바이트에서 24KB 넘침).
+pub fn fitsRing(surface: Ref, w: u32, h: u32) bool {
+    if (width(surface) != w or height(surface) != h) return false;
+    if (IOSurfaceGetPixelFormat(surface) != pixel_format_bgra) return false;
+    if (IOSurfaceGetBytesPerElement(surface) != 4) return false;
+    if (IOSurfaceGetPlaneCount(surface) != 0) return false;
+    const row = IOSurfaceGetBytesPerRow(surface);
+    if (row < @as(usize, w) * 4) return false;
+    return IOSurfaceGetAllocSize(surface) >= row * h;
 }
 
 pub fn width(surface: Ref) usize {

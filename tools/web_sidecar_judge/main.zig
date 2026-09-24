@@ -67,7 +67,9 @@ pub fn main(init: std.process.Init.Minimal) u8 {
         browsers_check.run(&reportText, host_path, profile_c_dir, profile_c, server.port) catch |err| report(false, "browsers", "{s}", .{@errorName(err)});
         var profile_d_buf: [1024]u8 = undefined;
         const profile_d = std.fmt.bufPrintZ(&profile_d_buf, "--profile-dir={s}/d", .{profile_root}) catch return 2;
-        frames_check.run(&reportText, argv[0], host_path, profile_d, server.port) catch |err| report(false, "frames", "{s}", .{@errorName(err)});
+        var frames_log_buf: [1024]u8 = undefined;
+        const frames_log = std.fmt.bufPrintZ(&frames_log_buf, "{s}/frames-host.log", .{profile_root}) catch return 2;
+        frames_check.run(&reportText, argv[0], host_path, profile_d, frames_log, server.port) catch |err| report(false, "frames", "{s}", .{@errorName(err)});
     } else |err| report(false, "browsers", "HTTP 서버: {s}", .{@errorName(err)});
     parentDeath(host_path, profile_b) catch |err| report(false, "parent-death", "{s}", .{@errorName(err)});
 

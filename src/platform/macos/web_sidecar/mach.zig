@@ -48,7 +48,21 @@ pub const received_send_right: u8 = 17;
 pub const bits_complex: u32 = 0x8000_0000;
 pub const type_move_send: u8 = 17;
 pub const type_copy_send: u8 = 19;
+pub const type_make_send: u8 = 20;
+pub const type_make_send_once: u8 = 21;
+pub const right_send: u32 = 0;
 pub const right_receive: u32 = 1;
+/// 보내기가 시간 초과·신호로 멈췄다 — 커널이 메시지를 보낸 쪽에 되돌려 받게 한다(pseudo-receive: 권리가 돌아온다).
+pub const send_timed_out: i32 = 0x1000_0004;
+pub const send_interrupted: i32 = 0x1000_0007;
+/// 받는 중 디스크립터를 옮기다 실패했다 — 머리는 받았고 권리 일부가 이미 내 것이다(`mach_msg_destroy` 로 버린다).
+pub const rcv_body_error: i32 = 0x1000_400c;
+pub const rcv_header_error: i32 = 0x1000_400b;
+/// 머리 비트 — 받은 메시지에서 remote 는 답장 port, local 은 받는 port, voucher 는 voucher 의 처분.
+pub const bits_remote_mask: u32 = 0x1f;
+pub const bits_local_mask: u32 = 0x1f00;
+pub const bits_voucher_mask: u32 = 0x1f_0000;
+pub const trailer_format_0: u32 = 0;
 
 pub fn bits(remote: u32, local: u32) u32 {
     return remote | (local << 8);
@@ -72,6 +86,22 @@ pub extern "c" fn mach_port_set_attributes(task: Port, name: Port, flavor: i32, 
 pub const port_limits_info: i32 = 1;
 pub const queue_limit_max: i32 = 1024;
 pub extern "c" fn mach_port_mod_refs(task: Port, name: Port, right: u32, delta: i32) i32;
+pub extern "c" fn mach_port_allocate(task: Port, right: u32, name: *Port) i32;
+pub extern "c" fn mach_port_insert_right(task: Port, name: Port, poly: Port, disposition: u32) i32;
+pub extern "c" fn mach_port_get_refs(task: Port, name: Port, right: u32, refs: *u32) i32;
+extern "c" fn mach_port_names(task: Port, names: *[*]Port, names_count: *u32, types: *[*]u32, types_count: *u32) i32;
+
+/// 이 태스크의 port 이름 수 — 권리가 새는지 잴 때 쓴다.
+pub fn portNameCount() u32 {
+    var names: [*]Port = undefined;
+    var types: [*]u32 = undefined;
+    var names_count: u32 = 0;
+    var types_count: u32 = 0;
+    if (mach_port_names(task(), &names, &names_count, &types, &types_count) != 0) return 0;
+    _ = mach_vm_deallocate(task(), @intFromPtr(names), @as(u64, names_count) * @sizeOf(Port));
+    _ = mach_vm_deallocate(task(), @intFromPtr(types), @as(u64, types_count) * @sizeOf(u32));
+    return names_count;
+}
 pub extern "c" fn mach_vm_allocate(task: Port, address: *u64, size: u64, flags: i32) i32;
 pub extern "c" fn mach_vm_deallocate(task: Port, address: u64, size: u64) i32;
 pub extern "c" fn mach_make_memory_entry_64(task: Port, size: *u64, offset: u64, permission: i32, handle: *Port, parent: Port) i32;

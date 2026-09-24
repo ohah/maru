@@ -3,7 +3,8 @@
 //!
 //!   ool    32MB OOL 메모리 디스크립터가 든 메시지 30 통 — 받는 쪽이 port 라고 가정하면 주소 조각을 port 이름으로 풀고 메모리를 샌다
 //!   big    받는 버퍼보다 큰 인라인 메시지 — 받는 쪽은 거절로 세고 계속 받아야 한다
-//!   flood  짧은 메시지 2,000 통을 기다리지 않고 넣는다 — 받는 쪽이 바빠 못 비우는 동안 대기열을 가득 채운다
+//!   flood  짧은 메시지 2,000 통을 기다리지 않고 넣는다 — 받는 쪽이 바빠 못 비우는 동안 대기열을 가득 채운다(막힌 통이
+//!          없으면 exit 6 — 포화하지 않았다)
 
 const std = @import("std");
 const ring = @import("web_sidecar_ring");
@@ -89,9 +90,10 @@ pub fn main(kind: []const u8, service: []const u8) u8 {
             // 기다리지 않는다 — 대기열이 차면 그 자리에서 실패하고 다음 통으로 넘어간다.
             if (mach.mach_msg(&message, mach.msg_send | mach.msg_send_timeout, @sizeOf(SmallMessage), 0, mach.null_port, 0, mach.null_port) == 0) sent += 1;
         }
-        // 받는 쪽이 비우는 속도보다 빨리 넣으면 일부는 대기열 한도에 막힌다 — 넣은 수를 알린다.
+        // 대기열이 **실제로 찼는지** 종료 코드로 알린다 — 한 통이라도 한도에 막혀야 포화다(막힌 적이 없으면 재시도 경로를
+        // 안 탄 것이라 판정이 빈 검사가 된다).
         std.debug.print("flood: {d}/{d} 통 넣음\n", .{ sent, flood_messages });
-        return 0;
+        return if (sent > 0 and sent < flood_messages) 0 else 6;
     }
     return 2;
 }

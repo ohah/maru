@@ -18,6 +18,11 @@ pub const Host = struct {
     carry_len: usize = 0,
 
     pub fn spawn(host_path: [:0]const u8, profile_arg: [:0]const u8) !Host {
+        return spawnLogged(host_path, profile_arg, null);
+    }
+
+    /// `stderr_path` 가 있으면 host 의 stderr 를 그 파일로 보낸다(판정자가 진단 줄을 센다).
+    pub fn spawnLogged(host_path: [:0]const u8, profile_arg: [:0]const u8, stderr_path: ?[:0]const u8) !Host {
         var to_host: [2]c_int = undefined;
         var from_host: [2]c_int = undefined;
         if (std.c.pipe(&to_host) != 0 or std.c.pipe(&from_host) != 0) return error.PipeFailed;
@@ -26,6 +31,10 @@ pub const Host = struct {
         if (pid == 0) {
             _ = std.c.dup2(to_host[0], 0);
             _ = std.c.dup2(from_host[1], 1);
+            if (stderr_path) |path| {
+                const log = std.c.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(c_uint, 0o600));
+                if (log >= 0) _ = std.c.dup2(log, 2);
+            }
             for ([_]c_int{ to_host[0], to_host[1], from_host[0], from_host[1] }) |fd| _ = std.c.close(fd);
             const argv = [_:null]?[*:0]const u8{ host_path, profile_arg };
             const envp = [_:null]?[*:0]const u8{};

@@ -148,7 +148,10 @@ pub fn mergeKeepingMissing(dst: *Owned, fresh: *const Owned) void {
 }
 
 /// 세션 파일 이름 상한. claude는 `<uuid>.jsonl`(41자)이라 넉넉하다.
-pub const max_name_bytes: usize = 128;
+/// 캐시가 드는 대화 파일 **상대 경로**의 상한 — claude 는 `<폴더>/<id>.jsonl`(폴더 이름이 200 자를 넘으면 claude 가
+/// 잘라 해시를 붙인다 — 그래서 폴더만 최대 약 215 자), codex 는 `YYYY/MM/DD/rollout-…-<id>.jsonl`. 예전 128 은 폴더
+/// 없이 파일 이름만 들던 때의 값이다.
+pub const max_name_bytes: usize = 512;
 
 /// Term마다 드는 **매핑 + 대화 캐시**. 힙을 잡지 않는다(고정 크기) — Term 생애와 함께 죽으므로 해제가 필요 없고,
 /// 매 폴링마다 할당/해제하면 tick 비용이 는다.
@@ -241,20 +244,6 @@ pub fn trimToCharBoundary(text: []const u8) usize {
     return 0;
 }
 
-/// cwd → claude 프로젝트 디렉터리 이름. **실측으로 역추론한 규칙**: `/`와 `.`을 `-`로 치환하는 1:1 매핑이다
-/// (기존 프로젝트 디렉터리 8개를 각 파일의 `cwd` 필드와 문자 단위로 대조 — 길이 불일치 0, 대문자 보존).
-///
-/// 규칙이 모든 문자를 덮는다고 **가정하지 않는다**: provider가 다른 문자도 치환한다면 여기서 만든 이름의
-/// 디렉터리가 없어 보강이 조용히 비고(계약 1), 우연히 다른 디렉터리와 겹치더라도 `Conversation.cwd` 대조가
-/// 걸러낸다. 그래서 이 함수는 추측을 늘리는 대신 확인된 둘만 치환한다.
-///
-/// buf가 모자라면 null(계약 1).
-pub fn claudeDirName(cwd: []const u8, buf: []u8) ?[]const u8 {
-    if (cwd.len == 0 or cwd.len > buf.len) return null;
-    for (cwd, 0..) |c, i| buf[i] = if (c == '/' or c == '.') '-' else c;
-    return buf[0..cwd.len];
-}
-
 /// codex `session_meta` 가 밝히는 **부모 세션**. 재개/fork 로 이어진 세션이면 이전 대화가 그쪽에 있다.
 ///
 /// 실측(2026-08-30, rollout 296 파일): fork/재개가 **172개(58%)**로 일상이고, 부모 id 가 파일명에 박혀
@@ -290,24 +279,6 @@ pub fn isCodexRolloutOf(file_name: []const u8, thread_id: []const u8) bool {
     // id 앞은 구분자여야 한다 — 안 그러면 `…-Xabc123` 이 `abc123` 의 것으로 읽힌다.
     const at = stem.len - thread_id.len;
     return at == 0 or stem[at - 1] == '-';
-}
-
-/// 확정된 트랜스크립트의 **절대경로**(claude). 이름은 호출자가 신원으로 이미 확정한 값이라 여기에
-/// 추측이 없다(계약 2) — 하는 일은 `<claude_dir>/projects/<cwd 슬러그>/<이름>` 조립뿐이다.
-///
-/// 갤러리가 훅 없이도 소스를 얻는 길이다(docs/agent-image-gallery.md §4.4). 빈 입력이나 버퍼 부족은
-/// `null` — 반쯤 만든 경로를 돌려주면 엉뚱한 파일을 열게 된다.
-pub fn claudeTranscriptPath(buf: []u8, claude_dir: []const u8, cwd: []const u8, file_name: []const u8) ?[]const u8 {
-    if (claude_dir.len == 0 or cwd.len == 0 or file_name.len == 0) return null;
-    var slug_buf: [1024]u8 = undefined;
-    const slug = claudeDirName(cwd, &slug_buf) orelse return null;
-    return std.fmt.bufPrint(buf, "{s}/projects/{s}/{s}", .{ claude_dir, slug, file_name }) catch null;
-}
-
-/// 같은 것의 codex 판. codex 의 이름은 `~/.codex/sessions` 아래 **상대경로**다(날짜 계층을 포함한다).
-pub fn codexTranscriptPath(buf: []u8, home: []const u8, file_name: []const u8) ?[]const u8 {
-    if (home.len == 0 or file_name.len == 0) return null;
-    return std.fmt.bufPrint(buf, "{s}/.codex/sessions/{s}", .{ home, file_name }) catch null;
 }
 
 /// codex 세션 파일이 밝히는 신원 — 첫 `session_meta` 레코드에서 뽑는다.
@@ -662,22 +633,6 @@ pub fn flatten(text: []const u8, buf: []u8) []const u8 {
 
 const testing = std.testing;
 
-test "claudeDirName: 실측 규칙(/ · . → -)을 그대로 따른다" {
-    var buf: [256]u8 = undefined;
-    try testing.expectEqualStrings(
-        "-Users-yoonhb-Documents-workspace-maru",
-        claudeDirName("/Users/yoonhb/Documents/workspace/maru", &buf).?,
-    );
-    // 점도 치환된다(실측 대조에서 확인된 둘 중 하나) — `.config` 같은 경로가 조용히 빗나가지 않게.
-    try testing.expectEqualStrings("-home-me--config-app", claudeDirName("/home/me/.config/app", &buf).?);
-    // 하이픈은 원래 이름에 있을 수 있고 그대로 둔다(역변환이 모호한 이유이기도 하다).
-    try testing.expectEqualStrings("-a-react-native-mcp", claudeDirName("/a/react-native-mcp", &buf).?);
-    // 계약 1: 빈 cwd·버퍼 부족은 error가 아니라 null이다.
-    try testing.expect(claudeDirName("", &buf) == null);
-    var tiny: [4]u8 = undefined;
-    try testing.expect(claudeDirName("/very/long/path", &tiny) == null);
-}
-
 test "parseClaudeTail: last-prompt와 마지막 assistant text를 뽑고 cwd를 싣는다" {
     const tail =
         \\{"type":"user","cwd":"/w/maru","message":{"role":"user","content":[{"type":"tool_result","content":"noise"}]}}
@@ -876,40 +831,6 @@ test "Owned: 같은 버퍼에 거듭 써도 값이 사라지지 않는다" {
     }
     try testing.expectEqualStrings("배포 스크립트 고쳐줘 — 사용자가 친 문장이 이만큼 길 수 있다", owned.prompt());
     try testing.expectEqualStrings(reply, owned.reply());
-}
-
-test "트랜스크립트 절대경로: claude 는 cwd 슬러그 아래다" {
-    var buf: [512]u8 = undefined;
-    try testing.expectEqualStrings(
-        "/h/.claude/projects/-Users-me-work/abc.jsonl",
-        claudeTranscriptPath(&buf, "/h/.claude", "/Users/me/work", "abc.jsonl").?,
-    );
-    // 점도 슬러그에서 하이픈이 된다(`claudeDirName` 규칙을 그대로 쓴다 — 여기서 다시 구현하지 않는다).
-    try testing.expectEqualStrings(
-        "/h/.claude/projects/-a-b-c-d/x.jsonl",
-        claudeTranscriptPath(&buf, "/h/.claude", "/a/b.c/d", "x.jsonl").?,
-    );
-}
-
-test "트랜스크립트 절대경로: codex 는 이름이 상대경로다(날짜 계층 포함)" {
-    var buf: [512]u8 = undefined;
-    try testing.expectEqualStrings(
-        "/home/me/.codex/sessions/2026/08/29/rollout-x-y.jsonl",
-        codexTranscriptPath(&buf, "/home/me", "2026/08/29/rollout-x-y.jsonl").?,
-    );
-}
-
-test "트랜스크립트 절대경로: 빈 입력과 좁은 버퍼는 null — 반쯤 만든 경로를 돌려주지 않는다" {
-    var buf: [512]u8 = undefined;
-    try testing.expect(claudeTranscriptPath(&buf, "", "/a", "x") == null);
-    try testing.expect(claudeTranscriptPath(&buf, "/h", "", "x") == null);
-    try testing.expect(claudeTranscriptPath(&buf, "/h", "/a", "") == null);
-    try testing.expect(codexTranscriptPath(&buf, "", "x") == null);
-    try testing.expect(codexTranscriptPath(&buf, "/h", "") == null);
-    // 버퍼가 모자라면 자르지 않고 포기한다.
-    var tiny: [8]u8 = undefined;
-    try testing.expect(claudeTranscriptPath(&tiny, "/home/me/.claude", "/a", "x.jsonl") == null);
-    try testing.expect(codexTranscriptPath(&tiny, "/home/me", "a/b/c.jsonl") == null);
 }
 
 test "codex 부모 신원: session_meta 첫 줄에서만 읽는다" {

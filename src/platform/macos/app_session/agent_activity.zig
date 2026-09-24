@@ -967,7 +967,7 @@ fn activeSourcePath(self: *AppSession) ?[]const u8 {
     self.agent_activity.source_remote = agent_ops.isRemoteAgentPane(term);
     // 훅이 아직 한 번도 안 돌았으면 자식 env 로 확정해 둔 파일로 메운다(추측이 아니다 — 사이드바
     // 대화 라벨이 읽고 있는 그 파일이다). 훅이 나중에 오면 그 값이 이긴다.
-    agent_ops.adoptFallbackImageSource(self, term);
+    agent_ops.adoptFallbackImageSource(term);
     const slot = agent_ops.primaryHookSlot(self, term); // pane 슬롯이 있으면 최근 pane(RA7)
     if (slot.image_source.isEmpty()) return null;
     return slot.image_source.path();

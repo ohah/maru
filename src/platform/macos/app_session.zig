@@ -42960,10 +42960,8 @@ test "RB2-9 재부팅 증명 복원만 이어간다 — 수를 세어 알리고,
     defer tmp.cleanup();
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
-    var slug_buf: [256]u8 = undefined;
-    const slug = maru.session.agent_transcript.claudeDirName("/tmp", &slug_buf).?;
-    var rel_buf: [512]u8 = undefined;
-    const claude_dir = try std.fmt.bufPrint(&rel_buf, "claude/projects/{s}", .{slug});
+    // 폴더 이름은 무엇이든 된다 — 대화 파일은 세션 id 로 찾는다(`findClaudeById`).
+    const claude_dir = "claude/projects/-any-folder";
     try tmp.dir.createDirPath(io, claude_dir);
     var file_buf: [600]u8 = undefined;
     try tmp.dir.writeFile(io, .{
@@ -43366,6 +43364,51 @@ test "RB2-16 부활 칸의 spawn 이 실패하면 그 칸만 묘비로 강등하
     try std.testing.expect(terms[1].rt.ended_placeholder); // 그 칸만 묘비(⏎ 로 다시 시작)
     try std.testing.expect(!terms[2].rt.ended_placeholder); // 다음 칸은 정상 부활
     try std.testing.expectEqual(@as(u32, 1), AppSession.reboot_revived_pending);
+}
+
+test "SB-1 사이드바 대화 줄은 대화 파일을 세션 id 로 찾는다 — claude 의 폴더 이름 규칙을 흉내 내지 않는다" {
+    // claude 는 폴더 이름을 영숫자 아닌 **모든** 문자를 `-` 로 바꿔 만든다(`/Users/me/my_project` → `-Users-me-my-project`).
+    // 예전에는 `/`·`.` 만 바꾸는 규칙으로 흉내 내서 이런 경로의 대화 줄이 조용히 비었다. 셸 cwd 도 필요 없다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    try tmp.dir.createDirPath(io, "claude/projects/-Users-me-my-project");
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "claude/projects/-Users-me-my-project/" ++ rb2_claude_id ++ ".jsonl",
+        .data = "{\"type\":\"last-prompt\",\"lastPrompt\":\"underscore folder prompt\"}\n" ++
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"reply one\"}]}}\n",
+    });
+    var zbuf: [std.fs.max_path_bytes]u8 = undefined;
+    var claude_env = try Rb2EnvGuard.set("CLAUDE_CONFIG_DIR", try std.fmt.bufPrintZ(&zbuf, "{s}/claude", .{root}));
+    defer claude_env.restore();
+
+    const session = try initSmokeSessionSized(a);
+    defer a.destroy(session);
+    defer session.deinit();
+    const term = pane_ops.activePane(session).activeTerm();
+    term.agent_kind = .claude;
+    const cache = &term.hook.transcript;
+
+    // 신원이 없으면 아무것도 안 한다(추측 금지 — §7.2).
+    cache.setIdentity("");
+    try std.testing.expect(!agent_ops.refreshClaudeTranscript(session, term));
+
+    cache.setIdentity(rb2_claude_id);
+    try std.testing.expect(agent_ops.refreshClaudeTranscript(session, term));
+    try std.testing.expectEqualStrings("underscore folder prompt", cache.prompt());
+    try std.testing.expectEqualStrings("-Users-me-my-project/" ++ rb2_claude_id ++ ".jsonl", cache.fileName());
+    // mtime 이 그대로면 다시 읽지 않는다(계약 4) — 같은 경로를 다시 훑지도 않는다.
+    try std.testing.expect(!agent_ops.refreshClaudeTranscript(session, term));
+
+    // 신원이 바뀌면(`/clear`) 그 신원의 파일을 새로 찾는다. 아직 없으면 옛 대화를 **남기지 않는다**.
+    cache.setIdentity("99999999-8888-4777-8666-555555555555");
+    try std.testing.expect(!agent_ops.refreshClaudeTranscript(session, term));
+    try std.testing.expectEqualStrings("", cache.fileName());
+    try std.testing.expectEqualStrings("", cache.prompt());
 }
 
 test "legacy bare runtime-id Gone은 host 없는 tombstone으로 승격하지 않는다" {
@@ -87640,25 +87683,34 @@ test "이미지 갤러리: 훅이 없으면 자식 env 로 확정한 트랜스�
 
     // ── ① 신원이 없으면 폴백도 없다. **추측하지 않는다**(§7.2 가 기각한 그 폴백을 되살리지 않는다).
     term.agent_kind = .codex;
-    agent_ops.adoptFallbackImageSource(session, term);
+    agent_ops.adoptFallbackImageSource(term);
     try std.testing.expect(term.hook.image_source.isEmpty());
 
     // ── ② 신원과 파일명이 있으면 그 파일을 가리킨다. codex 이름은 날짜 계층을 포함한 상대경로다.
     term.hook.transcript.setIdentity("thread-abc");
     term.hook.transcript.setFileName("2026/08/29/rollout-2026-08-29T00-00-00-thread-abc.jsonl");
-    agent_ops.adoptFallbackImageSource(session, term);
+    agent_ops.adoptFallbackImageSource(term);
     try std.testing.expect(!term.hook.image_source.isEmpty());
-    // HOME 은 이 test 가 못 정하므로 **꼬리만** 본다 — 앞은 `codexTranscriptPath` 순수 test 가 본다.
+    // HOME 은 이 test 가 못 정하므로 **꼬리만** 본다 — 앞(뿌리)은 대화 줄과 같은 `codexSessionsRootPath` 가 정한다.
     try std.testing.expect(std.mem.endsWith(
         u8,
         term.hook.image_source.path(),
         "/.codex/sessions/2026/08/29/rollout-2026-08-29T00-00-00-thread-abc.jsonl",
     ));
 
+    // ── ②-b claude 도 캐시한 상대 경로(`<폴더>/<id>.jsonl` — id 로 찾은 것)를 `projects` 에 잇는다. 폴더 이름을
+    // cwd 로 다시 만들지 않는다(그 규칙은 claude 와 달랐다).
+    term.hook.image_source.clear();
+    term.agent_kind = .claude;
+    term.hook.transcript.setIdentity("abc");
+    term.hook.transcript.setFileName("-Users-me-my-project/abc.jsonl");
+    agent_ops.adoptFallbackImageSource(term);
+    try std.testing.expect(std.mem.endsWith(u8, term.hook.image_source.path(), "/projects/-Users-me-my-project/abc.jsonl"));
+
     // ── ③ 이미 소스가 있으면 건드리지 않는다. 훅이 준 값이 이긴다 — 폴백이 그것을 덮으면
     // 훅을 켠 사용자가 오히려 틀린 파일을 보게 된다.
     _ = term.hook.image_source.set("/tmp/from-hook.jsonl");
-    agent_ops.adoptFallbackImageSource(session, term);
+    agent_ops.adoptFallbackImageSource(term);
     try std.testing.expectEqualStrings("/tmp/from-hook.jsonl", term.hook.image_source.path());
 }
 

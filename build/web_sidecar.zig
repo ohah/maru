@@ -17,9 +17,9 @@ pub const Context = struct {
     macos_sdk: ?[]const u8,
 };
 
-/// ① 의 시험 수(inbox 2 + dispatch 8 + registry 2 + title_gate 2 + ring_receiver 6 + 입구 파일의 `test {}` 블록 1). 시험을 더하거나 빼면 같이 고친다 —
+/// ① 의 시험 수(inbox 2 + dispatch 8 + registry 2 + title_gate 2 + ring_receiver 8 + ring_producer 2 + 입구 파일의 `test {}` 블록 1). 시험을 더하거나 빼면 같이 고친다 —
 /// 조용히 빠지는 것을 러너가 잡는다.
-const pure_test_count = 21;
+const pure_test_count = 25;
 
 pub fn register(b: *std.Build, ctx: Context) void {
     const protocol_mod = b.createModule(.{
@@ -37,11 +37,14 @@ pub fn register(b: *std.Build, ctx: Context) void {
             .imports = &.{.{ .name = "web_sidecar_protocol", .module = protocol_mod }},
         }),
     });
+    // 링 시험(ring_receiver·ring_producer)은 실제 IOSurface 를 만든다.
+    linkMacosFrameworks(b, ctx, pure_tests, &.{ "IOSurface", "CoreFoundation" });
     const run_pure_tests = b.addRunArtifact(pure_tests);
     run_pure_tests.addArg(b.fmt("--maru-expect-tests={d}", .{pure_test_count}));
     const pure_step = b.step("test-web-sidecar", "Run web OSR sidecar tests that need no CEF SDK");
     pure_step.dependOn(&run_pure_tests.step);
-    ctx.test_step.dependOn(&run_pure_tests.step);
+    // kqueue·mach·IOSurface 를 쓰는 macOS 전용 시험이다 — 다른 대상의 기본 test 에는 걸지 않는다.
+    if (ctx.target.result.os.tag == .macos) ctx.test_step.dependOn(&run_pure_tests.step);
 
     const sidecar_step = b.step("web-sidecar", "Build maru-web-host/helper and the W1b judge into zig-out/web-sidecar (needs -Dcef-sdk)");
     const sdk = b.option([]const u8, "cef-sdk", "CEF SDK directory for the web OSR sidecar (tools/cef-sdk-fetch.sh prints it)") orelse {

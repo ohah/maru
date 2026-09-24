@@ -256,6 +256,7 @@ const Walker = struct {
             self.behind = scan(src, p, ln, !self.up);
             self.behind_known = true;
         }
+        // `>=` 와 `>` 는 같다(적대적 4회차 W2: 등가) — 여기 오는 줄은 공백만인 줄이고 `ahead_ln` 은 내용 줄이라 둘이 같을 수 없다.
         const reached = if (self.up) self.ahead_ln >= ln else self.ahead_ln <= ln;
         if (!self.ahead_known or (self.ahead != null and reached)) {
             self.ahead = null;
@@ -329,6 +330,8 @@ pub fn active(src: anytype, p: Params, line: usize, min_line: usize, max_line: u
 
         // 두 방향이 각자 한 줄씩 걷는다(거리 0 은 위 걸음이 묻는다) — 줄마다 `levelAt` 으로 훑으면 긴 빈 구간에서 곱으로 붙는다(`Walker` 주석).
         const up_level: ?u32 = if (go_up and up_ok) up_walk.level(src, p, up) else null;
+        // 거리 0 의 아래 값은 안 쓰인다 — `distance > 0` 은 호출 하나를 아낄 뿐이다(적대적 4회차 W4: 등가 — caret 줄에서 걸음을 시작해도 줄 1 이
+        // 쓰는 캐시가 같다: caret 줄이 내용이면 그 열, 공백이면 그 위의 가장 가까운 내용 줄).
         const down_level: ?u32 = if (go_down and down < count and distance > 0) down_walk.level(src, p, down) else null;
 
         if (distance == 0) {

@@ -2,7 +2,8 @@
 //! 모두 CEF UI 스레드에서 돈다(명령은 `dispatch.zig` 가, 콜백은 CEF 가 그 스레드에서 부른다).
 //!
 //! 종료: 열린 브라우저가 있는 채로 CEF 를 내리면 안 된다 — `beginShutdown` 이 모두 닫기를 요청하고, 마지막
-//! `on_before_close` 에서 메시지 루프를 끝낸다. 닫힘이 멈추면 `shutdown_grace_ms` 뒤 그래도 끝낸다.
+//! `on_before_close` 에서 메시지 루프를 끝낸다. 닫힘이 멈추면 `shutdown_grace_ms` 뒤 그래도 끝내고, UI 스레드마저
+//! 멈추면 `watchdog.zig` 가 프로세스를 끝낸다.
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -13,6 +14,7 @@ const events = @import("events.zig");
 const dispatch = @import("dispatch.zig");
 const registry_mod = @import("registry.zig");
 const client = @import("client.zig");
+const watchdog = @import("watchdog.zig");
 
 const Message = protocol.message.Message;
 const BrowserId = protocol.message.BrowserId;
@@ -131,6 +133,7 @@ fn navigate(value: protocol.message.Navigate, writer: *events.Writer) void {
 pub fn beginShutdown() void {
     if (state.shutting_down) return;
     state.shutting_down = true;
+    watchdog.start();
     for (&state.registry.slots) |*slot| {
         if (slot.*) |*entry| if (!entry.closing) {
             entry.closing = true;

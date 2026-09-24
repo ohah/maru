@@ -153,6 +153,7 @@ maru chrome 모달로 받는다(모달 게이트와 같은 자리).
 | CEF 콜백 | maru 쪽 |
 |---|---|
 | `on_jsdialog`(`alert`·`confirm`·`prompt`)·`on_before_unload_dialog` | chrome 모달, 응답을 콜백으로 |
+| (W5 전까지) | `on_jsdialog` 는 억제(`alert` 는 바로 돌아오고 `confirm`·`prompt` 는 취소), 떠나기 확인은 떠나기로 답한다 — 기본 동작이 네이티브 창이고 페이지가 제스처 없이 띄운다(W1c 적대 검증). 인쇄도 네이티브 창이라 `printing.enabled` 를 끈다(인쇄 처리기는 Linux 전용) |
 | `on_file_dialog` | maru 가 열기 창을 띄우고 고른 경로를 콜백으로(샌드박스 안 렌더러가 내용을 읽는 것까지 실측) |
 | `on_show_permission_prompt`·`on_request_media_access_permission` | chrome 권한 모달. 카메라·마이크의 macOS 권한 귀속(Maru.app Info.plist)은 장치 있는 기계에서 확인(W5) |
 
@@ -176,10 +177,18 @@ maru chrome 모달로 받는다(모달 게이트와 같은 자리).
   가 달라 프로필도 갈린다 — 같은 번들 ID 로 둘을 띄우면 뒤의 sidecar 가 `profile_in_use` 로 끝나므로 웹 pane 을 「다른 maru 가
   쓰는 중」으로 보인다.
 - **팝업은 취소한다** — `window.open` 의 기본 동작도 네이티브 창이다. 탭으로 여는 것은 W3·W6.
-- **CEF 객체 참조**: getter 가 돌려준 객체와 **콜백 인자**는 받은 쪽이 푼다(W1c 실측 — 그리기 콜백 약 1,920 번마다 풀어도
-  죽지 않았다, 안 풀면 조금씩 샌다). 목록이 쥔 browser 는 `on_before_close` 에서 푼다.
+- **CEF 객체 참조**: getter 가 돌려준 객체와 **콜백 인자**는 받은 쪽이 푼다 — 근거는 SDK 의 C++ 래퍼(`libcef_dll/ctocpp/
+  ctocpp_ref_counted.h` 의 `Wrap` 이 넘기기 전에 더해진 참조를 푼다)이고 실측도 같다(그리기 콜백 약 1,920 번마다 풀어도 죽지
+  않았고, 안 풀면 조금씩 샌다). 거꾸로 우리가 CEF 함수에 **`self` 가 아닌 인자로 넘긴** CEF 객체는 참조가 CEF 로 옮겨 간다
+  (ctocpp `Unwrap` 이 더하고 cpptoc `Unwrap` 이 푼다). 목록이 쥔 browser 는 `on_before_close` 에서 푼다.
+- **프로필 비공개**: 마지막 경로 요소가 심볼릭 링크이거나, 소유자가 다르거나, 권한이 소유자 전용이 아니거나, ACL 에 허용
+  항목이 있으면 쓰지 않는다(exit 12) — 쿠키 키가 공개값(D7)이라 파일 권한이 유일한 보호다.
+- **제목 알림 조절**: 같은 제목은 다시 안 보내고 브라우저당 50ms 간격 안의 변경은 마지막 것만 보낸다 — 페이지가 3 초에
+  제목 알림 약 16 만 건으로 알림 채널을 범람시킬 수 있었다(W1c 적대 검증).
 - **종료 순서**: 열린 브라우저를 모두 닫은 뒤(`on_before_close`) 루프를 끝낸다 — 공식 예제의 순서다. 다만 154 Release 에서는
   닫지 않고 루프를 끝내도 `cef_shutdown` 이 닫고 알림까지 와서 **관찰 차이가 없었다**(변이 실측) — 판정자가 이 순서를 잡지 못한다.
+  UI 스레드의 기한(5 초) 밖에 **감시견 스레드**가 따로 있다 — 종료가 시작되면(shutdown·EOF·부모 종료) 10 초 뒤 `_exit(17)`.
+  네이티브 인쇄 창이 뜬 host 는 UI 스레드 기한이 지나도 루프에서 못 나와 고아로 남았다(W1c 적대 검증).
 
 ### C8. 보안
 
@@ -228,10 +237,10 @@ control plane `browser.*` 게이트는 엔진 중립이라 바뀌지 않는다(�
 |---|---|---|
 | **W1a** 제어 채널 codec | C2 의 wire codec(순수 Zig, CEF 없음) | 황금 바이트·왕복·방향 거절·닫힌 필드·상한 ±1·손으로 지은 공격 frame·한 바이트 변조 전수 — **구현됨**. 처음 적은 「변이 8 개가 모두 걸림」은 내가 고른 8 개에 대해서만 맞았다 — 적대 검증에서 한 줄 변이 20 개가 살아남았고, 그중 `feed` 가 조각을 통째로만 받아 **정상 스트림에서도 채널을 닫는** 결함이 나왔다(반쯤 온 큰 frame 뒤 16KB 조각). `feed` 는 받은 만큼만 받고 수를 돌려주게, 오류는 잠기게, 저장소는 가장 큰 frame 하나 크기로, 제목·URL 의 제어 문자는 거절(sidecar 는 `replaceControl`)하게 고치고 경계·스트리밍 시험을 더했다 — 대표 변이 11 개 중 10 개가 걸리고 남은 하나는 동작이 같은 변이다 |
 | **W1b** sidecar 뼈대 | SDK 받기 스크립트(bz2 — `zig fetch` 불가, 실측), opt-in 빌드 스텝, `maru-web-host`·`maru-web-helper`(C1), 제어 채널 배선(C2 — 읽기 스레드·stdout 보호·EOF 종료) | helper 전부 `sandbox_check` 1, maru(부모)가 죽으면 sidecar·helper 가 모두 사라짐, stdout 오염 없음 — **구현됨**: `mise run web-sidecar-judge` 5 판정 통과(3 회 연속). helper 는 GPU·네트워크·저장소 셋이고 1 초 시점에 모두 샌드박스 안(막 fork 된 순간은 exec 전이라 판정자가 안정될 때까지 본다). 초기화~종료 동안 Chromium 이 stdout·stderr 에 0 바이트(WARNING 수준). 판정자를 변이 9 개로 공격 — helper 샌드박스 생략·`no_sandbox=1`·stdout 보호 제거·알림 채널 잡바이트·EOF 무시·ack nonce 오류·shutdown 무시가 모두 FAIL 로 걸린다(처음엔 shutdown 무시에서 판정자가 멈췄다 — 모든 읽기에 기한을 걸어 고쳤다) **적대 검증(2026-09-24)으로 고친 것**: 명령 decoder 가 반쯤 온 큰 명령 뒤에 조각이 오면 정상 명령에도 채널을 닫음(W1a 의 `feed` — 읽은 바이트를 담아 두고 frame 을 비운 뒤 넣는다), shutdown 뒤 명령 처리(재현 5/5 → 0), **helper 의 「샌드박스 못 켜면 종료」가 절반만 맞음** — `cef_sandbox_initialize` 는 요청받지 않은 helper 에도 성공을 돌려줘 macOS 알림 유틸리티(`mac_notifications.mojom.MacNotificationProvider`)가 **샌드박스 밖에서 돌고 있었다**. 이제 초기화 뒤 `sandbox_check` 가 1 이 아니면 끝낸다(그 유틸리티는 뜨자마자 끝난다 — 웹 알림은 W5 에서 maru 가 권한 처리기로 다룬다), 부모 종료를 kqueue 로도 본다(maru 가 fork 한 셸이 명령 pipe 쓰기 끝을 쥐면 EOF 가 안 온다 — 판정자에 손자가 쓰기 끝을 쥔 경우를 넣음), 시작 때 상속 fd 를 닫고 0~2 가 닫혔거나 stdout==stderr 인 시작을 견딘다, stdout 표지(판정자의 「frame 만」 검사가 빈 검사였다), 종료 중 task 금지, SDK 받기의 동시 실행 잠금과 sha256 표지 |
-| **W1c** 브라우저 | 생성·파괴·이동·크기·숨김, 브라우저 N 개, 프로필(C7·D7), 재실행·팝업 차단 | **구현됨** — `mise run web-sidecar-judge` 17 판정(W1b 넷 + W1c 열둘 + 크래시 없음) 8 회 연속 통과: 브라우저 셋 생성·자기 제목, 이동이 대상 브라우저 알림으로만(잘못 간 제목 0), 숨긴 브라우저도 명령 수신, 크기 변경이 innerWidth 까지(12~14ms), 파괴→`browser_closed`→이후 `unknown_browser`, 중복 id 거절, 렌더러 포함 helper 6 개 모두 샌드박스, `window.open` 뒤 창 0·팝업 요청 0, 같은 프로필 두 번째 → `profile_in_use`·exit 16·첫 host 창 0, 프로필 0700·`tmutil` 백업 제외, 재시작 뒤 쿠키 유지, shutdown 이 열린 셋 모두 닫고 exit 0, 크래시 보고 0. 판정을 조정했다(사용자 확인 2026-09-24): 「입력이 대상에만」은 입력 메시지가 W4 라 「명령·알림이 대상에만」으로, 「따로 그려지고」의 픽셀은 W2 라 브라우저별 로드·제목으로 본다. 판정자를 변이로 공격 — 재실행 가로채기 제거·mock keychain 제거·백업 제외 생략·이동 오배달·파괴 생략·`profile_in_use` 미구분·중복 검사 제거·EOF 에서 abort 가 FAIL. 못 잡는 것: 팝업 처리기(제스처 없는 `window.open` 은 Chromium 팝업 차단기가 먼저 막는다 → W4), `was_resized` 생략(CEF 가 다른 계기로 크기를 다시 묻는다), 종료 순서(C7) |
+| **W1c** 브라우저 | 생성·파괴·이동·크기·숨김, 브라우저 N 개, 프로필(C7·D7), 재실행·팝업 차단 | **구현됨** — `mise run web-sidecar-judge` 17 판정(W1b 넷 + W1c 열둘 + 크래시 없음) 8 회 연속 통과: 브라우저 셋 생성·자기 제목, 이동이 대상 브라우저 알림으로만(잘못 간 제목 0), 숨긴 브라우저도 명령 수신, 크기 변경이 innerWidth 까지(12~14ms), 파괴→`browser_closed`→이후 `unknown_browser`, 중복 id 거절, 렌더러 포함 helper 6 개 모두 샌드박스, `window.open` 뒤 창 0·팝업 요청 0, 같은 프로필 두 번째 → `profile_in_use`·exit 16·첫 host 창 0, 프로필 0700·`tmutil` 백업 제외, 재시작 뒤 쿠키 유지, shutdown 이 열린 셋 모두 닫고 exit 0, 크래시 보고 0. 판정을 조정했다(사용자 확인 2026-09-24): 「입력이 대상에만」은 입력 메시지가 W4 라 「명령·알림이 대상에만」으로, 「따로 그려지고」의 픽셀은 W2 라 브라우저별 로드·제목으로 본다. 판정자를 변이로 공격 — 재실행 가로채기 제거·mock keychain 제거·백업 제외 생략·이동 오배달·파괴 생략·`profile_in_use` 미구분·중복 검사 제거·EOF 에서 abort 가 FAIL. 못 잡는 것: `was_resized` 생략(CEF 가 다른 계기로 크기를 다시 묻는다), 종료 순서(C7). **적대 검증(2026-09-24)으로 고친 것**: 페이지가 제스처 없이 **`window.print()` 로 네이티브 인쇄 창**을 띄우고 그 host 는 종료 요청에도 **끝나지 않았다**(고아) → `printing.enabled` 끔(인쇄 처리기는 Linux 전용)과 UI 스레드 밖 감시견(종료 시작 10 초 뒤 exit 17 — 인쇄를 켠 변이에서 exit 17 로 끝남을 확인), **`alert`·`confirm`·`prompt` 도 네이티브 창** → JS 대화상자 억제(W5 전까지), 제목 알림 범람(3 초에 약 16 만 건 — 변이로 재현하면 판정 한 번에 100,804 건) → 같은 제목 생략·브라우저당 50ms 간격·마지막 제목 보존(41 건), 제어 문자가 든 제목은 codec 이 거절해 사라질 수 있었다 → 공백으로 바꿈, 명령줄 콜백 인자 해제, 프로필은 소유자·ACL 허용 항목·마지막 요소 링크까지 거절, 참조 규칙의 근거를 SDK C++ 래퍼(`ctocpp_ref_counted.h`)로. 판정자도 고쳤다 — 세 브라우저 제목을 모두 보고(전에는 셋째만), 숨김은 페이지의 `visibilityState` 로(전에는 이동 수신만), 백업 제외는 `tmutil isexcluded` 로(전에는 속성 존재만), 크래시 보고는 이 빌드의 `slice_uuid` 로(보고의 실행 경로는 `*` 로 가려져 쓸 수 없다), `javascript:` 이동의 `window.open` 으로 **팝업 처리기를 직접** 잰다(차단기를 안 거친다 — 처리기를 풀면 창 1 개·요청 1 건으로 FAIL). 이제 23 판정, 3 회 연속 통과. 대표 변이 10 개 중 9 개가 FAIL — 살아남은 하나는 제어 문자 바꾸기 생략이다(Chromium 이 제목의 제어 문자를 먼저 걸러 그 경로에 닿지 않는다 — 방어로 둔다). 소유자 검사는 남의 디렉터리를 만들 권한이 없어 판정하지 못한다 |
 | **W2** 픽셀 파이프라인 | 소유 링·세대(C3), port 전달·검증, 크기 변경 | 찢어짐 0, 새 프레임 수신률, 세대 전환과 옛 프레임 유지, 제3자 거부 — 헤드리스 판정자(opt-in CI 잡, §4) |
 | **W3** maru 통합 | `.web` Term 의 OSR 백엔드(C4), 백엔드 선택 config(기본 WKWebView — D2), 보이는 Term 만, 창별 rect, 새 프레임 다시 그리기. WKWebView `browserDataStore` 영속화(D6 — 엔진 중립이라 OSR 과 독립으로 먼저 낼 수 있다) | pane 100% 채움, 보이는 빈도(애니메이션 페이지에서 CEF 빈도에 근접), 정적 페이지에서 추가 부담 0 control-plane `browser_storage` 권한이 영속 쿠키에 닿는 범위 재검토(D6 — control-plane-browser-review D4) |
-| **W4** 입력 | C5 여섯 축, IME, 편집 명령, 커서 | 앱 안 시험기(25 항목 — §13.1 「pane 안 실측」)를 opt-in smoke 로 저장소에. IME 는 진짜 키 이벤트로 사용자 제스처가 생기면 팝업 처리기 판정(창 0·팝업 요청 0 — W1c 에서 차단기에 막혀 못 잰 것) |
+| **W4** 입력 | C5 여섯 축, IME, 편집 명령, 커서 | 앱 안 시험기(25 항목 — §13.1 「pane 안 실측」)를 opt-in smoke 로 저장소에. IME 는 진짜 키 이벤트로 |
 | **W5** 대화상자·파일·권한 | C6 전부 | `alert`·`confirm`·`prompt`·파일 선택(내용 읽기까지)·권한 거부/허용. 카메라·마이크 권한 귀속을 장치 있는 기계에서 확인 |
 | **W6** 팝업·툴팁·드래그·메뉴 | `<select>` 팝업(D4), 툴팁, 드래그 시작·드롭, 우클릭 메뉴(D5) — IME 후보창 위치는 C5·W4 | 팝업 표시·선택·닫힘 복원, 드래그 콜백 도착 |
 | **W7** 배포 | formula, 매니페스트(formula 설치물의 버전·ABI 확인용), 설치 감지, 버전 올림 절차, dmg·Intel 공급(D8), CEF·Chromium 라이선스 동봉과 attribution([third-party 라이선스](../third-party-licenses.md)) | 깨끗한 기계에서 설치 → 실행 → 샌드박스 판정자 |

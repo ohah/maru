@@ -3,6 +3,12 @@
 //!
 //! **팝업은 막는다**: 창 없는 브라우저라도 `window.open` 의 기본 동작은 네이티브 Chrome 창이다 — maru 가 통제하지
 //! 못하는 창을 sidecar 가 열면 안 된다(탭으로 여는 것은 W3·W6).
+//!
+//! **JS 대화상자도 막는다**: `alert`·`confirm`·`prompt` 의 기본 동작도 네이티브 창이고 사용자 제스처 없이 뜬다(적대 검증).
+//! 임시 안전 기본값으로 억제한다 — `alert` 는 바로 돌아오고 `confirm`·`prompt` 는 취소로 끝난다. maru 가 대화상자를
+//! 그리는 것은 W5(C6)다. 떠나기 확인(beforeunload)은 떠나기로 답한다.
+//!
+//! **제목은 조절한다**: 같은 제목은 다시 안 보내고, 간격 안의 변경은 마지막 것만 보낸다(`title_gate.zig`).
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -10,6 +16,7 @@ const c = @import("cef.zig").c;
 const object = @import("object.zig");
 const library = @import("library.zig");
 const browsers = @import("browsers.zig");
+const title_gate = @import("title_gate.zig");
 
 var client_obj: c.cef_client_t = undefined;
 var life_span: c.cef_life_span_handler_t = undefined;
@@ -17,6 +24,9 @@ var render: c.cef_render_handler_t = undefined;
 var display: c.cef_display_handler_t = undefined;
 var load: c.cef_load_handler_t = undefined;
 var request: c.cef_request_handler_t = undefined;
+var jsdialog: c.cef_jsdialog_handler_t = undefined;
+var title_task: c.cef_task_t = undefined;
+var title_flush_posted = false;
 var ready = false;
 
 /// 프로세스 수명 동안 사는 client. 첫 호출에서 채운다(CEF UI 스레드).
@@ -35,12 +45,18 @@ pub fn get() *c.cef_client_t {
         object.staticRefCounted(&load.base);
         request = object.zeroed(c.cef_request_handler_t);
         object.staticRefCounted(&request.base);
+        jsdialog = object.zeroed(c.cef_jsdialog_handler_t);
+        object.staticRefCounted(&jsdialog.base);
+        title_task = object.zeroed(c.cef_task_t);
+        object.staticRefCounted(&title_task.base);
+        title_task.execute = &flushTitles;
 
         client_obj.get_life_span_handler = &getLifeSpan;
         client_obj.get_render_handler = &getRender;
         client_obj.get_display_handler = &getDisplay;
         client_obj.get_load_handler = &getLoad;
         client_obj.get_request_handler = &getRequest;
+        client_obj.get_jsdialog_handler = &getJsDialog;
         life_span.on_before_popup = &onBeforePopup;
         life_span.on_before_close = &onBeforeClose;
         render.get_view_rect = &getViewRect;
@@ -50,6 +66,8 @@ pub fn get() *c.cef_client_t {
         display.on_title_change = &onTitleChange;
         load.on_load_end = &onLoadEnd;
         request.on_render_process_terminated = &onRenderProcessTerminated;
+        jsdialog.on_jsdialog = &onJsDialog;
+        jsdialog.on_before_unload_dialog = &onBeforeUnloadDialog;
     }
     return &client_obj;
 }
@@ -68,6 +86,9 @@ fn getLoad(_: [*c]c.cef_client_t) callconv(.c) [*c]c.cef_load_handler_t {
 }
 fn getRequest(_: [*c]c.cef_client_t) callconv(.c) [*c]c.cef_request_handler_t {
     return &request;
+}
+fn getJsDialog(_: [*c]c.cef_client_t) callconv(.c) [*c]c.cef_jsdialog_handler_t {
+    return &jsdialog;
 }
 
 fn entryOf(browser: [*c]c.cef_browser_t) ?*@import("registry.zig").Entry {
@@ -112,7 +133,42 @@ fn onTitleChange(_: [*c]c.cef_display_handler_t, browser: [*c]c.cef_browser_t, t
     const entry = entryOf(browser) orelse return;
     var buf: [protocol.wire.max_text_bytes]u8 = undefined;
     const text = library.readString(browsers.state.api, title, &buf);
-    browsers.state.writer.send(.{ .title_changed = .{ .browser = entry.id, .text = text } }) catch {};
+    const now = nowMs();
+    switch (entry.title.offer(text, now)) {
+        .send => sendTitle(entry.id, text),
+        .held => postTitleFlush(entry.title.flushAt().? -| now),
+        .duplicate => {},
+    }
+}
+
+fn sendTitle(id: protocol.message.BrowserId, text: []const u8) void {
+    browsers.state.writer.send(.{ .title_changed = .{ .browser = id, .text = text } }) catch {};
+}
+
+/// 쥔 제목을 내보낼 task 를 하나만 올린다 — 브라우저가 몇이든 task 는 하나다.
+fn postTitleFlush(delay_ms: u64) void {
+    if (title_flush_posted) return;
+    title_flush_posted = true;
+    _ = browsers.state.api.post_delayed_task(c.TID_UI, &title_task, @intCast(@max(delay_ms, 1)));
+}
+
+fn flushTitles(_: [*c]c.cef_task_t) callconv(.c) void {
+    title_flush_posted = false;
+    const now = nowMs();
+    var next: ?u64 = null;
+    for (&browsers.state.registry.slots) |*slot| {
+        if (slot.*) |*entry| {
+            if (entry.title.flush(now)) |text| sendTitle(entry.id, text);
+            if (entry.title.flushAt()) |at| next = @min(next orelse at, at);
+        }
+    }
+    if (next) |at| postTitleFlush(at -| now);
+}
+
+fn nowMs() u64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    return @as(u64, @intCast(ts.sec)) * 1000 + @as(u64, @intCast(ts.nsec)) / 1_000_000;
 }
 
 fn onLoadEnd(_: [*c]c.cef_load_handler_t, browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, status: c_int) callconv(.c) void {
@@ -162,4 +218,34 @@ fn onBeforeClose(_: [*c]c.cef_life_span_handler_t, browser: [*c]c.cef_browser_t)
     defer object.releaseArg(browser);
     if (browser == null) return;
     browsers.onClosed(browser.*.get_identifier.?(browser));
+}
+
+fn onJsDialog(
+    _: [*c]c.cef_jsdialog_handler_t,
+    browser: [*c]c.cef_browser_t,
+    _: [*c]const c.cef_string_t,
+    _: c.cef_jsdialog_type_t,
+    _: [*c]const c.cef_string_t,
+    _: [*c]const c.cef_string_t,
+    callback: [*c]c.cef_jsdialog_callback_t,
+    suppress_message: [*c]c_int,
+) callconv(.c) c_int {
+    defer object.releaseArg(browser);
+    defer object.releaseArg(callback);
+    // 헤더 권장 — 억제가 콜백을 바로 부르는 것보다 낫다(Chromium 이 대화상자 남발을 이것으로 가린다).
+    suppress_message.* = 1;
+    return 0;
+}
+
+fn onBeforeUnloadDialog(
+    _: [*c]c.cef_jsdialog_handler_t,
+    browser: [*c]c.cef_browser_t,
+    _: [*c]const c.cef_string_t,
+    _: c_int,
+    callback: [*c]c.cef_jsdialog_callback_t,
+) callconv(.c) c_int {
+    defer object.releaseArg(browser);
+    defer object.releaseArg(callback);
+    callback.*.cont.?(callback, 1, null);
+    return 1;
 }

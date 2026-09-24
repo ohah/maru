@@ -42,6 +42,7 @@ pub const Error = error{
     WrongDirection,
     UnknownReason,
     UnknownFailureCode,
+    UnknownNavAction,
     InvalidBool,
     InvalidBrowserId,
     InvalidViewSize,

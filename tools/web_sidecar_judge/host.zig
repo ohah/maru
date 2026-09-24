@@ -23,6 +23,11 @@ pub const Host = struct {
 
     /// `stderr_path` 가 있으면 host 의 stderr 를 그 파일로 보낸다(판정자가 진단 줄을 센다).
     pub fn spawnLogged(host_path: [:0]const u8, profile_arg: [:0]const u8, stderr_path: ?[:0]const u8) !Host {
+        return spawnWith(host_path, profile_arg, stderr_path, &.{});
+    }
+
+    /// 환경 변수(`KEY=VALUE`)를 주어 띄운다 — 판정자 전용 훅(`MARU_WEB_TEST_*`)을 켤 때.
+    pub fn spawnWith(host_path: [:0]const u8, profile_arg: [:0]const u8, stderr_path: ?[:0]const u8, env: []const [*:0]const u8) !Host {
         var to_host: [2]c_int = undefined;
         var from_host: [2]c_int = undefined;
         if (std.c.pipe(&to_host) != 0 or std.c.pipe(&from_host) != 0) return error.PipeFailed;
@@ -37,7 +42,8 @@ pub const Host = struct {
             }
             for ([_]c_int{ to_host[0], to_host[1], from_host[0], from_host[1] }) |fd| _ = std.c.close(fd);
             const argv = [_:null]?[*:0]const u8{ host_path, profile_arg };
-            const envp = [_:null]?[*:0]const u8{};
+            var envp: [8:null]?[*:0]const u8 = @splat(null);
+            for (env, 0..) |entry, i| envp[i] = entry;
             _ = std.c.execve(host_path, &argv, &envp);
             std.c._exit(127);
         }

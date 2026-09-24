@@ -172,6 +172,11 @@ run = "sh tools/cef-sdk-fetch.sh"
 description = "Build maru-web-host/helper and the W1b judge into zig-out/web-sidecar (opt-in; fetches the CEF SDK)"
 run = 'sdk=$(sh tools/cef-sdk-fetch.sh) && zig build web-sidecar -Dcef-sdk="$sdk"'
 
+[tasks.web-osr-smoke]
+description = "Run the local W3b smoke: the app spawns the Chromium sidecar, restarts it, and leaves no orphan"
+depends = ["web-sidecar"]
+run = "zig build -Doptimize=ReleaseSafe macos-app-build && sh tools/test-macos-web-osr-smoke.sh"
+
 [tasks.web-sidecar-judge]
 description = "Run the W1b/W1c judge against a real maru-web-host (sandbox, shutdown, parent death, browsers, profile, popups, dialogs)"
 depends = ["web-sidecar"]

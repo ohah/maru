@@ -742,6 +742,8 @@ pub const Provider = struct {
         if (!self.slot.prose_brackets) return null;
         const tree = self.tree orelse return null;
         const node = c.ts_node_descendant_for_byte_range(c.ts_tree_root_node(tree), i, i + 1);
+        // **이름 없는 잎을 거르는 것은 오늘 등가다**(적대적 1회차 T10): 표시가 선 언어는 HTML 하나이고 그 이름 없는 잎(`<`·`>`·`</`·`=`·`"`)에는
+        // 괄호 글자가 없다. 둔 이유는 뜻이다 — 글 잎은 「글」이고 구두점 토큰은 글이 아니다(표시를 다른 언어로 넓히는 날 이 줄이 일한다).
         if (c.ts_node_is_null(node) or c.ts_node_child_count(node) != 0 or !c.ts_node_is_named(node)) return null;
         const s = c.ts_node_start_byte(node);
         const e = c.ts_node_end_byte(node);
@@ -2426,6 +2428,9 @@ test "SYN44 괄호 토큰의 짝·문자열 속 괄호·감싸는 쌍 — 코드
         const want: Provider.BracketPair = .{ .open = o, .close = cl };
         try std.testing.expectEqual(@as(?Provider.BracketPair, want), prov.bracketTokenPair(s.src, o));
         try std.testing.expectEqual(@as(?Provider.BracketPair, want), prov.bracketTokenPair(s.src, cl));
+        // **붙은 토큰의 앞 글자는 괄호가 아니다**(`.{` 의 `.`, `$(` 의 `$`) — 그 글자를 덮는 가장 작은 노드도 같은 토큰이라, 「그 괄호가 이
+        // 글자인가」를 안 보면 caret 이 `.{` 바로 앞에 선 것을 괄호에 닿은 것으로 읽는다(적대적 1회차 T4).
+        if (s.open.len > 1) try std.testing.expectEqual(@as(?Provider.BracketPair, null), prov.bracketTokenPair(s.src, o - 1));
         try std.testing.expectEqual(@as(?Provider.BracketPair, null), prov.bracketTokenPair(s.src, in));
         try std.testing.expectEqual(@as(?Provider.ByteRange, null), prov.proseLeafAt(in)); // 코드 언어 — 글 잎이 없다
         try std.testing.expectEqual(@as(?Provider.BracketPair, want), prov.enclosingBracketTokens(s.src, in));
@@ -2450,6 +2455,18 @@ test "SYN45 글 속 괄호 — 마크다운은 토큰, HTML 본문은 글 잎 (v
     const f_open: u32 = @intCast(std.mem.indexOf(u8, md, "f(").? + 1);
     try std.testing.expectEqual(@as(?Provider.BracketPair, .{ .open = f_open, .close = f_open + 2 }), pm.bracketTokenPair(md, f_open)); // 코드 펜스
     try std.testing.expectEqual(@as(?Provider.ByteRange, null), pm.proseLeafAt(lb)); // 마크다운은 글 잎 표시가 없다
+
+    // **평평한 형제 — 한 목록 안에서 쌍이 포갠다.** 마크다운 `inline` 은 괄호 토큰을 자식으로 늘어놓으므로(코드 언어는 안쪽 괄호가 자식 노드로
+    // 내려간다) 여기서만 ① 같은 목록 안의 「가장 안쪽」(적대적 1회차 T8 — 바깥을 골라도 초록이었다)과 ② 같은 종류의 깊이(T12 — 상한 1 로
+    // 줄여도 초록이었다)가 관측된다.
+    const flat = "본문 [a (b) c] 와 ((x)) 끝\n";
+    var pf = Provider.init(flat, .markdown, 0) orelse return error.NoProvider;
+    defer pf.deinit();
+    const b_at: u32 = @intCast(std.mem.indexOf(u8, flat, "b)").?);
+    try std.testing.expectEqual(@as(?Provider.BracketPair, .{ .open = b_at - 1, .close = b_at + 1 }), pf.enclosingBracketTokens(flat, b_at));
+    const x_at: u32 = @intCast(std.mem.indexOf(u8, flat, "x").?);
+    try std.testing.expectEqual(@as(?Provider.BracketPair, .{ .open = x_at - 2, .close = x_at + 2 }), pf.bracketTokenPair(flat, x_at - 2)); // 바깥
+    try std.testing.expectEqual(@as(?Provider.BracketPair, .{ .open = x_at - 1, .close = x_at + 1 }), pf.bracketTokenPair(flat, x_at + 1)); // 안쪽
 
     // **HTML 본문은 긴 잎(`text`)이다** — 괄호 토큰이 없고, 글 잎 범위가 그 괄호를 품는다.
     const html = "<p>보기 (a) 끝</p>\n";
@@ -2487,10 +2504,36 @@ test "SYN46 짝 없는 괄호·가장 안쪽 쌍·트리가 없을 때 (visual-m
     try std.testing.expectEqual(@as(?Provider.BracketPair, .{ .open = b_at - 1, .close = b_at + 1 }), p2.enclosingBracketTokens(nested, b_at));
     const comma: u32 = @intCast(std.mem.indexOf(u8, nested, ", ").?);
     try std.testing.expectEqual(@as(?Provider.BracketPair, .{ .open = 1, .close = @intCast(nested.len - 2) }), p2.enclosingBracketTokens(nested, comma));
+    // **닫는 괄호 바로 앞은 품는다**(`pos ≤ close`) — 제품에서는 그 자리가 먼저 「닿은 괄호」로 답해져 이 갈래에 안 오지만(적대적 1회차 T7:
+    // 제품 등가), 이 함수의 약속은 여기서 못박는다.
+    const outer_close: u32 = @intCast(nested.len - 2);
+    try std.testing.expectEqual(@as(?Provider.BracketPair, .{ .open = 1, .close = outer_close }), p2.enclosingBracketTokens(nested, outer_close));
     // 여는 괄호 바로 앞·닫는 괄호 바로 뒤는 품지 않는다(`open < pos ≤ close`)
     try std.testing.expectEqual(@as(?Provider.BracketPair, null), p2.enclosingBracketTokens(nested, 1));
     try std.testing.expectEqual(@as(?Provider.BracketPair, null), p2.enclosingBracketTokens(nested, @intCast(nested.len - 1)));
 
     // 범위 밖 byte 는 없다
     try std.testing.expectEqual(@as(?Provider.BracketPair, null), p2.bracketTokenPair(nested, 999));
+
+    // **괄호가 둘 붙은 토큰은 괄호가 아니다**(Bash `((`·`))`·`[[`·`]]`) — 어느 괄호인지 못 정한다. 마지막 것을 고르면 `((`·`))` 가 쌍으로
+    // 선다(적대적 1회차 T2 — 코드 표본에 그런 토큰이 없어 살아남았다).
+    const bash = "(( x + 1 ))\n[[ -n x ]]\n";
+    var pb = Provider.init(bash, .bash, 0) orelse return error.NoProvider;
+    defer pb.deinit();
+    for ([_][]const u8{ "(( ", " ))", "[[ ", " ]]" }) |tok| {
+        const at: u32 = @intCast(std.mem.indexOf(u8, bash, tok).?);
+        const lo: u32 = if (tok[0] == ' ') at + 1 else at;
+        try std.testing.expectEqual(@as(?Provider.BracketPair, null), pb.bracketTokenPair(bash, lo));
+        try std.testing.expectEqual(@as(?Provider.BracketPair, null), pb.bracketTokenPair(bash, lo + 1));
+    }
+
+    // **이름 있는 짧은 잎은 괄호 토큰이 아니다** — 템플릿 문자열의 조각 `(`·`)` 는 같은 부모의 형제로 서서, 이름을 안 보면 문자열 속 두
+    // 글자가 쌍이 된다(적대적 1회차 T3 — `"("` 는 짝이 없어 변이도 `null` 이었다).
+    const tpl = "f(`(${a})`);\n";
+    var pt = Provider.init(tpl, .javascript, 0) orelse return error.NoProvider;
+    defer pt.deinit();
+    const in_open: u32 = @intCast(std.mem.indexOf(u8, tpl, "`(").? + 1);
+    const in_close: u32 = @intCast(std.mem.indexOf(u8, tpl, "})").? + 1);
+    try std.testing.expectEqual(@as(?Provider.BracketPair, null), pt.bracketTokenPair(tpl, in_open));
+    try std.testing.expectEqual(@as(?Provider.BracketPair, null), pt.bracketTokenPair(tpl, in_close));
 }

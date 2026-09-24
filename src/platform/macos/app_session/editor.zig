@@ -41149,6 +41149,19 @@ test "BRP1 짝 괄호 — 트리로 판정해 문자열 속 '(' 가 아니라 �
     try testing.expect(!fx.session.anyOverlayOpen()); // 키를 가져갈 모달이 없다(아래 ⇧⌘\ 가 제품 경로로 간다)
     term.rt.editor_selection = editor_selection.Selection.at(9); // 끝 ')'(8) 뒤
     var got: [16]renderer.metal_frame.GpuQuad = undefined;
+    const g0 = term.rt.editor_hit_geom;
+    // **트리가 오기 전(글자 훑기)과 뒤가 다른 답을 낸다 — 키가 그 전이를 안다.** provider 를 잠시 떼어 트리 없는 상태로 그리면 글자 훑기가 문자열
+    // 속 '(' (3) 를 짝으로 세고, 다시 붙이면 트리가 호출 괄호 (1) 로 고친다. 키에서 트리를 빼면 옛 답(3)이 남는다(적대적 1회차 P6).
+    {
+        const saved = term.rt.editor_syntax.provider;
+        term.rt.editor_syntax.provider = null;
+        defer term.rt.editor_syntax.provider = saved;
+        const plain = try boxedQuads(fx.session, term, .bracket_match_border, &got);
+        try testing.expectEqual(@as(usize, 2), plain.len);
+        var min_x = plain[0].x;
+        for (plain) |q| min_x = @min(min_x, q.x);
+        try testing.expectEqual(@as(f32, @floatFromInt(@as(i32, g0.body_x) + @as(i32, @intCast(g0.content_left_px)) + 3 * @as(i32, g0.cell_w_px))), min_x);
+    }
     const boxes = try boxedQuads(fx.session, term, .bracket_match_border, &got);
     try testing.expectEqual(@as(usize, 2), boxes.len);
     const g = term.rt.editor_hit_geom;
@@ -41165,7 +41178,17 @@ test "BRP1 짝 괄호 — 트리로 판정해 문자열 속 '(' 가 아니라 �
     try testing.expectEqual(@as(u32, chrome_editor.frame.bracket_match_alpha), boxes[0].fill_color0 >> 24);
     try testing.expectEqual(@as(f32, 1), boxes[0].border_widths[0]);
 
+    // **문자열 속 '(' 바로 뒤** — 트리에게 그 글자는 괄호가 아니다: 닿은 괄호가 없어 감싸는 (1,8) 이 선다. 트리가 「아니다」라 한 자리를 글자
+    // 훑기로 다시 보면 문자열 속 쌍 (3,8) 이 선다(적대적 1회차 B14 — 위 자리(9)는 그 글자에 안 닿아 가르지 못했다).
+    term.rt.editor_selection = editor_selection.Selection.at(4);
+    const in_str = try boxedQuads(fx.session, term, .bracket_match_border, &got);
+    try testing.expectEqual(@as(usize, 2), in_str.len);
+    var in_min = in_str[0].x;
+    for (in_str) |q| in_min = @min(in_min, q.x);
+    try testing.expectEqual(col_x.at(g, 1), in_min);
+
     // ⇧⌘\ — 강조가 가리킨 그 '(' 로 간다(글자 훑기였다면 3)
+    term.rt.editor_selection = editor_selection.Selection.at(9);
     _ = try fx.session.handleKeyEvent(.{ .key = .{ .char = '\\' }, .modifiers = .{ .command = true, .shift = true } });
     try testing.expectEqual(@as(usize, 1), term.rt.editor_selection.?.focus);
 }
@@ -41218,9 +41241,11 @@ test "BRP3 커서 — 빈 선택만 보고, 같은 괄호는 한 번, 100 개를
     const moved = try boxedQuads(fx.session, term, .bracket_match_border, &got);
     try testing.expectEqual(before + 1, term.rt.editor_brackets.computed);
     try testing.expectEqual(@as(usize, 4), moved.len); // 두 줄의 쌍 둘
-    // 101 개면 없다
+    // **정확히 100 개는 선다**, 101 개면 없다 — 경계의 두 쪽을 다 잰다(적대적 1회차 P3: 101 만 재서 `≥` 로 바꿔도 초록이었다)
     var many: [brackets_client.max_cursors]editor_selection.Selection = undefined;
     for (&many) |*m| m.* = editor_selection.Selection.at(1);
+    try setExtraSelections(fx.session, term, many[0 .. brackets_client.max_cursors - 1]);
+    try testing.expect((try boxedQuads(fx.session, term, .bracket_match_border, &got)).len > 0);
     try setExtraSelections(fx.session, term, &many);
     try testing.expectEqual(@as(usize, 0), (try boxedQuads(fx.session, term, .bracket_match_border, &got)).len);
 }
@@ -41262,6 +41287,12 @@ test "LHP1 현재 줄 — caret 줄에 2px 테두리 상자, 포커스와 무관
     // 선택이 있으면 본문 상자는 없다
     term.rt.editor_selection = .{ .anchor_start = line2.start, .anchor_end = line2.start, .focus = line2.start + 3 };
     try testing.expectEqual(@as(usize, 0), (try boxedQuads(fx.session, term, .line_highlight, &got)).len);
+    // **추가 커서 하나만 선택이어도 없다** — primary 는 빈 caret(VS Code `every(isEmpty)` — 적대적 1회차 E1: primary 만 봐도 초록이었다)
+    term.rt.editor_selection = editor_selection.Selection.at(line2.start + 1);
+    try setExtraSelections(fx.session, term, &.{.{ .anchor_start = 0, .anchor_end = 0, .focus = 2 }});
+    try testing.expectEqual(@as(usize, 0), (try boxedQuads(fx.session, term, .line_highlight, &got)).len);
+    clearExtraSelections(fx.session, term);
+    term.rt.editor_selection = .{ .anchor_start = line2.start, .anchor_end = line2.start, .focus = line2.start + 3 };
     // gutter — 선택과 무관, 원점은 pane 왼쪽
     fx.session.loaded_config.config.editor.render_line_highlight = .gutter;
     const gb = try boxedQuads(fx.session, term, .line_highlight, &got);
@@ -41276,7 +41307,12 @@ test "LHP2 활성 줄 번호 — primary caret 줄의 번호만 본문 글자색
     const allocator = testing.allocator;
     var fx = try PaneFixture.init(allocator);
     defer fx.deinit(allocator);
-    const term = try openBracketFixture(&fx, allocator, "n.txt", "a\nb\nc\nd\ne\n");
+    // **앞 블록을 접는다** — 문서 줄(3)과 보이는 줄(1)이 갈려야 「보이는 줄 축으로 옮긴다」가 관측된다(적대적 1회차 E2: 제목만 그렇게 적고
+    // 접지 않아, 접힘을 무시한 변이가 초록이었다).
+    const term = try openBracketFixture(&fx, allocator, "n.txt", "a\n  b\n  c\nd\ne\n");
+    try ensureFoldRanges(fx.session, term);
+    try testing.expect(toggleFoldHead(fx.session, term, 0));
+    try testing.expectEqual(@as(usize, 4), term.rt.editor_visible_lines.len); // a · d · e · (끝 빈 줄)
     const line3 = term.rt.editor_doc.?.file.lines.line(3).?;
     term.rt.editor_selection = editor_selection.Selection.at(line3.start);
     const tk = fx.session.buildChromeTokens();
@@ -41298,5 +41334,60 @@ test "LHP2 활성 줄 번호 — primary caret 줄의 번호만 본문 글자색
         }
     }
     try testing.expectEqual(@as(usize, 1), active_rows); // 번호 한 자리(4)
-    try testing.expectEqual(@as(u16, 3), active_row);
+    try testing.expectEqual(@as(u16, 1), active_row); // 보이는 둘째 행(`a` 다음이 `d`)
+}
+
+test "BRP5 길이가 같은 편집 뒤에는 다시 센다 — 키에 revision 이 든다 (제품 경계, §5.1b)" {
+    // 편집이 내용의 길이도 caret 자리도 안 바꾸면, revision 이 키에 없을 때 **옛 쌍**이 그대로 그려진다(적대적 1회차 P5 — 편집하는 판정자가
+    // 없었다). `(a)x` 에서 'a' 를 ')' 로 바꾸면 3 자리 앞의 ')' 는 짝이 없다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try openBracketFixture(&fx, allocator, "r.txt", "(a)x\n");
+    var got: [16]renderer.metal_frame.GpuQuad = undefined;
+    term.rt.editor_selection = editor_selection.Selection.at(3);
+    try testing.expectEqual(@as(usize, 2), (try boxedQuads(fx.session, term, .bracket_match_border, &got)).len);
+    const len_before = term.rt.editor_doc.?.file.content.len;
+    term.rt.editor_selection = .{ .anchor_start = 1, .anchor_end = 1, .focus = 2 };
+    try testing.expect(insertText(fx.session, term, ")"));
+    try testing.expectEqualStrings("())x\n", term.rt.editor_doc.?.file.content);
+    try testing.expectEqual(len_before, term.rt.editor_doc.?.file.content.len);
+    term.rt.editor_selection = editor_selection.Selection.at(3);
+    try testing.expectEqual(@as(usize, 0), (try boxedQuads(fx.session, term, .bracket_match_border, &got)).len);
+}
+
+test "BRP6 짝이 접혀 숨은 줄에 있으면 보이는 괄호만 선다 — 숨은 괄호를 다음 보이는 줄로 옮기지 않는다 (제품 경계, §5.1b)" {
+    // 들여쓰기 접힘은 `y)` 까지 숨긴다 — 쌍의 한쪽이 숨는 자리가 여기서 생긴다. 숨은 괄호를 건너뛰지 않으면 다음 보이는 줄(`z`)의 마크로
+    // 옮기다 줄 안 byte 가 음수로 넘친다(적대적 1회차 P8 — 접힌 픽스처가 없어 살아남았다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try openBracketFixture(&fx, allocator, "h.txt", "f(\n  x,\n  y)\nz\n");
+    try ensureFoldRanges(fx.session, term);
+    try testing.expect(toggleFoldHead(fx.session, term, 0));
+    try testing.expectEqual(@as(usize, 3), term.rt.editor_visible_lines.len); // `f(` · `z` · (끝 빈 줄) — `x,`·`y)` 가 숨었다
+    term.rt.editor_selection = editor_selection.Selection.at(2); // `f(|`
+    var got: [16]renderer.metal_frame.GpuQuad = undefined;
+    const boxes = try boxedQuads(fx.session, term, .bracket_match_border, &got);
+    try testing.expectEqual(@as(usize, 1), boxes.len); // 보이는 '(' 하나
+    try testing.expectEqual(@as(f32, @floatFromInt(term.rt.editor_hit_geom.body_y)), boxes[0].y); // 첫 행
+}
+
+test "BRP7 활성이 아닌 편집기에는 괄호 상자가 없다 — 현재 줄 상자는 남는다 (제품 경계, §5.1b)" {
+    // 포커스 조건은 둘이다 — 창이 key 이고 **그 Term 이 활성 pane 의 활성 Term** 이다. `BRP2` 는 창만 껐다(적대적 1회차 P2).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const first = try openBracketFixture(&fx, allocator, "one.txt", "g(1)\n");
+    first.rt.editor_selection = editor_selection.Selection.at(1);
+    var got: [16]renderer.metal_frame.GpuQuad = undefined;
+    try testing.expectEqual(@as(usize, 2), (try boxedQuads(fx.session, first, .bracket_match_border, &got)).len);
+    const second = try openBracketFixture(&fx, allocator, "two.txt", "h(2)\n");
+    try testing.expect(pane_ops.activePane(fx.session).activeTerm() == second);
+    try testing.expect(pane_ops.activePane(fx.session).activeTerm() != first);
+    try testing.expectEqual(@as(usize, 0), (try boxedQuads(fx.session, first, .bracket_match_border, &got)).len);
+    try testing.expectEqual(@as(usize, 1), (try boxedQuads(fx.session, first, .line_highlight, &got)).len); // 줄 상자는 포커스와 무관
 }

@@ -2554,7 +2554,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const cr5a_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr5a_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_reconnect_runtime_set_ledger_boundary.zig"),
                 .target = target,
                 .optimize = cr5a_optimize,
             }),
@@ -2589,7 +2589,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const cr5b1_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr5b1_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_reconnect_runtime_set_capture_boundary.zig"),
                 .target = target,
                 .optimize = cr5b1_optimize,
             }),
@@ -2639,7 +2639,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const cr5b2a_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr5b2a_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_reconnect_retirement_preparation_boundary.zig"),
                 .target = target,
                 .optimize = cr5b2a_optimize,
             }),
@@ -2689,7 +2689,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const cr5b2b_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr5b2b_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_reconnect_shared_client_replacement_boundary.zig"),
                 .target = target,
                 .optimize = cr5b2b_optimize,
             }),
@@ -2739,7 +2739,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const cr5b2c_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr5b2c_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_reconnect_runtime_transaction_order_boundary.zig"),
                 .target = target,
                 .optimize = cr5b2c_optimize,
             }),
@@ -2789,7 +2789,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const cr5c_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr5c_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_reconnect_shared_client_failure_boundary.zig"),
                 .target = target,
                 .optimize = cr5c_optimize,
             }),
@@ -2824,7 +2824,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const cr5d1_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr5d1_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_reconnect_window_transaction_boundary.zig"),
                 .target = target,
                 .optimize = cr5d1_optimize,
             }),
@@ -2874,7 +2874,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
 
         const cr5d2_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr5d2_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_reconnect_window_move_close_boundary.zig"),
                 .target = target,
                 .optimize = cr5d2_optimize,
             }),

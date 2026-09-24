@@ -127,7 +127,7 @@ test "CR5d-2 경계는 기존 Window 이동 뒤 fresh abandon commit 하나만 �
     try std.testing.expectEqual(@as(usize, 1), count(gate, "src/platform/macos/coretext_smoke.m"));
     try std.testing.expectEqual(@as(usize, 1), count(gate, "--maru-expect-tests=4"));
     try std.testing.expectEqual(@as(usize, 1), count(gate, "src/platform/macos/session_host_cr5d2_boundary.zig") +
-        count(gate, "tests/session_host_cr5d2_boundary.zig"));
+        count(gate, "tests/session_host_reconnect_window_move_close_boundary.zig"));
     try std.testing.expectEqual(@as(usize, 1), count(gate, "--maru-expect-tests=1"));
 
     inline for (.{ development, plan, matrix, persistent }) |doc|

@@ -3257,6 +3257,20 @@ test "SYN48 괄호 목록 — 처음 훑기 도중의 편집은 훑기를 다시
         var steps: usize = 0;
         var edits_during_walk: usize = 0;
         while (!try idx.step(allocator, &prov, text.items, 1)) : (steps += 1) {
+            if (steps == 1) {
+                // **편집 범위 밖까지 바꾸는 편집** — 괄호가 든 줄 머리에 `//` 를 넣으면 그 줄의 괄호가 전부 주석이 된다. 편집 범위(두 글자)만 다시
+                // 보면 사본에서 모은 그 줄의 괄호가 남는다 — 달라진 범위를 모아야 한다(무작위 편집이 이것을 못 만들어 그 수집을 뺀 변이가 살아남았다 —
+                // 적대적 2회차 N05b).
+                const at_line = std.mem.indexOfPos(u8, text.items, text.items.len / 2, "    if (a)") orelse return error.NoLine;
+                const at = pointOfForTest(text.items, at_line);
+                try text.insertSlice(allocator, at_line, "//");
+                idx.shift(allocator, @intCast(at_line), @intCast(at_line), @intCast(at_line + 2));
+                prov.onEdit(text.items, .{ .start_byte = @intCast(at_line), .old_end_byte = @intCast(at_line), .new_end_byte = @intCast(at_line + 2), .start_point = at, .old_end_point = at, .new_end_point = pointOfForTest(text.items, at_line + 2) });
+                try idx.refresh(allocator, &prov, text.items, .{ .start = @intCast(at_line), .end = @intCast(at_line + 2) });
+                try std.testing.expect(idx.walking);
+                edits_during_walk += 1;
+                continue;
+            }
             if (steps % 3 != 0) continue;
             // 편집 — 제품 순서(민다 → 판다 → 고친다)
             const len = text.items.len;

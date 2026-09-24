@@ -6855,7 +6855,7 @@ delta 가 먼저 도착하면 base 가 어긋나 `GenerationGap` 이 난다.
 legacy 쪽에만 판정을 적었더니 **제품이 쓰는 generation 경로에서 표시가 통째로 안 떴다** — 관측
 크기는 갱신되는데 이 값만 0 이라 화면만 봐서는 「폰이 안 붙었나 보다」와 구별되지 않는다. 그래서
 판정을 한 함수(`noteHostAppliedCols`)로 모으고, **확정 이벤트를 적용하는 자리가 모두 그것을
-부르는지**를 경계 게이트가 센다(`tests/session_host_s11_6_narrowed_boundary.zig`).
+부르는지**를 경계 게이트가 센다(`tests/session_host_viewport_narrowing_boundary.zig`).
 
 **크기를 싣는 다른 자리는 일부러 판정하지 않는다.** 주기적 관측 DTO 도 `cols`·`rows` 를 싣지만
 그것은 「방금 확정한 순간」이 아니라서 거기서 판정하면 확정 전 값으로 표시가 번쩍인다. 재연결

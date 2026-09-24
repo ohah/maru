@@ -22,14 +22,54 @@ extern "c" fn signal(sig: c_int, handler: usize) usize;
 pub fn take() Error!Channels {
     // maru 가 먼저 사라져 알림을 쓸 곳이 닫혀도 프로세스가 신호로 죽지 않고 쓰기 오류로 알게 한다.
     _ = signal(SIGPIPE, SIG_IGN);
+    // stderr 가 닫힌 채 띄워지면 아래 dup2 가 실패해 시작을 못 했다(적대 검증) — 비어 있는 0~2 는 /dev/null 로 채운다.
+    // stdin·stdout 이 닫혀 있다면 채널이 없는 것이라 아래 cloexecCopy 가 실패로 알린다.
+    fillClosedWithNull(2);
     const commands = try cloexecCopy(0);
     const events = try cloexecCopy(1);
-    const null_fd = std.c.open("/dev/null", .{ .ACCMODE = .RDONLY });
-    if (null_fd < 0) return error.StdioUnavailable;
-    if (std.c.dup2(null_fd, 0) < 0) return error.StdioUnavailable;
-    _ = std.c.close(null_fd);
-    if (std.c.dup2(2, 1) < 0) return error.StdioUnavailable;
+    // stdout 과 stderr 가 같은 대상(같은 pipe)이면 fd 1 을 stderr 로 돌려도 여전히 프로토콜 채널이다 — 그때는 둘 다
+    // /dev/null 로 돌린다(helper 가 물려받는 stderr 도 채널이 아니게).
+    const same_target = sameFile(1, 2);
+    try redirectToNull(0, .RDONLY);
+    if (same_target) {
+        try redirectToNull(1, .WRONLY);
+        try redirectToNull(2, .WRONLY);
+    } else if (std.c.dup2(2, 1) < 0) return error.StdioUnavailable;
+    closeInherited(commands, events);
     return .{ .commands = commands, .events = events };
+}
+
+fn fillClosedWithNull(fd: c_int) void {
+    if (std.c.fcntl(fd, std.c.F.GETFD) >= 0) return;
+    const null_fd = std.c.open("/dev/null", .{ .ACCMODE = .RDWR });
+    if (null_fd >= 0 and null_fd != fd) {
+        _ = std.c.dup2(null_fd, fd);
+        _ = std.c.close(null_fd);
+    }
+}
+
+fn redirectToNull(fd: c_int, mode: std.posix.ACCMODE) Error!void {
+    const null_fd = std.c.open("/dev/null", .{ .ACCMODE = mode });
+    if (null_fd < 0) return error.StdioUnavailable;
+    defer if (null_fd != fd) {
+        _ = std.c.close(null_fd);
+    };
+    if (null_fd != fd and std.c.dup2(null_fd, fd) < 0) return error.StdioUnavailable;
+}
+
+fn sameFile(a: c_int, b: c_int) bool {
+    var sa: std.c.Stat = undefined;
+    var sb: std.c.Stat = undefined;
+    if (std.c.fstat(a, &sa) != 0 or std.c.fstat(b, &sb) != 0) return false;
+    return sa.dev == sb.dev and sa.ino == sb.ino;
+}
+
+/// maru 에서 새어 들어온 fd(PTY master 등)를 쥐지 않는다 — 쥐고 있으면 maru 쪽 자원이 sidecar 수명만큼 산다.
+fn closeInherited(keep_a: c_int, keep_b: c_int) void {
+    var fd: c_int = 3;
+    while (fd < 256) : (fd += 1) {
+        if (fd != keep_a and fd != keep_b) _ = std.c.close(fd);
+    }
 }
 
 fn cloexecCopy(fd: c_int) Error!c_int {

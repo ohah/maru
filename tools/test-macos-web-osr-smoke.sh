@@ -426,4 +426,49 @@ check(any(v.endswith('漢aㄱ ') for v in allv), 'text typed right before a new 
 sys.exit(0 if ok else 1)
 PY
 
+# ── W4d①: 설정 `browser.engine` ─────────────────────────────────────────────────────────────────────────────
+# 개발용 환경변수 없이 설정으로 켠다. 설치 위치는 `$HOMEBREW_PREFIX/opt/maru-chromium/libexec` 를 먼저 본다 — 가짜 prefix 에
+# sidecar 빌드를 링크해 「설치됨」을, 빈 prefix 로 「설치 없음」을 만든다(실제 /opt/homebrew 에 없을 때만 믿을 수 있다).
+printf 'browser.engine = chromium\n' > "$root/engine.conf"
+engine_app() { # $1=HOMEBREW_PREFIX $2=로그 이름
+    rm -rf "$root/home" && mkdir -p "$root/home"
+    env -u MARU_WEB_OSR_DIR HOME="$root/home" CFFIXED_USER_HOME="$root/home" MARU_SESSION_HOST_ROOT="$root/session-host" \
+        MARU_WEB_PANEL=1 MARU_CONFIG="$root/engine.conf" HOMEBREW_PREFIX="$1" \
+        MARU_WEB_OSR_TEST_URL="http://127.0.0.1:$port/osr-smoke" MARU_MACOS_APP_SMOKE_MS=12000 "$app" > "$root/$2.log" 2>&1
+}
+if [ -x /opt/homebrew/opt/maru-chromium/libexec/maru-web-host ] || [ -x /usr/local/opt/maru-chromium/libexec/maru-web-host ]; then
+    echo "browser.engine: maru-chromium is really installed — skipping the not-installed case"
+    real_install=1
+else
+    real_install=0
+fi
+mkdir -p "$root/prefix/opt/maru-chromium" && ln -s "$sidecar_dir" "$root/prefix/opt/maru-chromium/libexec"
+: > "$root/requests.log"
+engine_app "$root/prefix" engine-on &
+on_pid=$!
+sleep 8
+# 양성 대조 — 아래 「설치 없음」 판정이 쓰는 같은 방법으로 자식 sidecar 가 보여야 한다.
+on_child=$(pgrep -P "$(pgrep -n -f "$app" || echo 0)" -f maru-web-host 2>/dev/null || true)
+wait "$on_pid" || true
+[ -n "$on_child" ] || fail "the child-sidecar probe did not see the Chromium sidecar of an installed engine"
+grep -q '^/osr-smoke' "$root/requests.log" || fail "browser.engine = chromium with maru-chromium installed did not open the tab in Chromium"
+grep -q 'browser engine: chromium' "$root/engine-on.log" || fail "the chromium engine decision was not logged"
+grep -q '^web_panel_count=0$' "$root/engine-on.log" || fail "the Chromium engine still made a WKWebView for the browser tab"
+if [ "$real_install" = 0 ]; then
+    mkdir -p "$root/empty-prefix"
+    : > "$root/requests.log"
+    # 설치가 없으면 sidecar 를 띄우지 않는다 — 돌리는 동안 이 앱의 자식에 maru-web-host 가 없어야 한다(요청이 없다는 것만으로는
+    # 탭이 아예 안 열려도 통과한다 — 적대 검증).
+    engine_app "$root/empty-prefix" engine-missing &
+    missing_pid=$!
+    sleep 8
+    missing_child=$(pgrep -P "$(pgrep -n -f "$app" || echo 0)" -f maru-web-host 2>/dev/null || true)
+    wait "$missing_pid" || true
+    [ -z "$missing_child" ] || fail "browser.engine = chromium without maru-chromium still started the Chromium sidecar"
+    ! grep -q '^/osr-smoke' "$root/requests.log" || fail "browser.engine = chromium without maru-chromium still used Chromium"
+    grep -q 'maru-chromium is not installed' "$root/engine-missing.log" || fail "no not-installed notice when maru-chromium is missing"
+    # 실제로 WebKit 으로 열었는가 — 「Chromium 으로 정했는데 설치가 망가져 탭이 빈」 경우와 가른다(변이가 살아남았다).
+    grep -Eq '^web_panel_count=[1-9]' "$root/engine-missing.log" || fail "without maru-chromium the browser tab did not open in WebKit"
+fi
+echo "browser.engine: installed → Chromium, missing → WebKit with a notice"
 echo "web-osr smoke passed"

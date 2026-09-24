@@ -1302,6 +1302,7 @@ pub const Config = struct {
     quick_terminal: QuickTerminalConfig = .{},
     /// 파일 도크에서 동시에 유지할 WKWebView 상한. 탭 metadata는 남기고 non-dirty LRU view만 해제한다.
     file_panel: FilePanelConfig = .{},
+    browser: BrowserConfig = .{},
     /// 활성 탭 룩(`chrome.tab-style` = connected|underline|pill). 기본 **underline**(미니멀 — 언더바만, 사용자 요청). connected는
     /// 본문색 cutout + 앰버 언더바, pill은 Warp식 lifted 캡슐. `chrome.theme`·`theme.preset`과 직교. schema-driven(Config.schema).
     chrome_tab_style: ChromeTabStyle = .underline,
@@ -1480,6 +1481,19 @@ pub const Config = struct {
 };
 
 pub const ExternalLinkTarget = enum { in_app, system };
+
+/// 웹 브라우저 탭의 엔진(W4d — docs/plans/web-osr-backend.md). 마크다운·파일 패널은 어느 쪽이든 WKWebView 다(분업).
+/// `chromium` 은 따로 설치하는 `maru-chromium`(Homebrew)이 있을 때만 켜지고, maru 를 다시 시작해야 적용된다 — 열린
+/// 브라우저 탭이 엔진을 옮기며 로그인·입력을 잃지 않게(사용자 결정 2026-09-25).
+pub const BrowserEngine = enum { webkit, chromium };
+
+pub const BrowserConfig = struct {
+    engine: BrowserEngine = .webkit,
+
+    pub const schema = .{
+        .engine = Meta{ .doc = .cfg_browser_engine, .widget = .dropdown, .section = .workspace },
+    };
+};
 
 pub const FilePanelConfig = struct {
     external_link_target: ExternalLinkTarget = .in_app,

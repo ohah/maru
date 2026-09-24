@@ -93,12 +93,12 @@ pub const Dispatcher = struct {
         switch (message) {
             .shutdown => return .quit,
             .hello => return self.violation("second hello"),
-            .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .frame_channel => {
+            .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .frame_channel, .nav_action => {
                 self.handler.browser_command(self.handler.context, message, self.writer);
                 return .keep_running;
             },
             // 방향이 다른 tag 는 decoder 가 이미 거절했다.
-            .hello_ack, .browser_created, .browser_closed, .title_changed, .load_finished, .renderer_gone, .failure => unreachable,
+            .hello_ack, .browser_created, .browser_closed, .title_changed, .load_finished, .renderer_gone, .failure, .url_changed, .nav_state => unreachable,
         }
     }
 

@@ -15,6 +15,8 @@ pub const Tag = enum(u8) {
     shutdown = 7,
     /// 픽셀 채널(W2): maru 가 연 mach 받는 port 의 bootstrap 이름과 비밀 토큰(C3). 이것으로만 건넨다.
     frame_channel = 8,
+    /// 뒤로·앞으로·새로고침·멈춤(W3b — 주소창 버튼).
+    nav_action = 9,
 
     hello_ack = 32,
     browser_created = 33,
@@ -23,6 +25,10 @@ pub const Tag = enum(u8) {
     load_finished = 36,
     renderer_gone = 37,
     failure = 38,
+    /// 주 프레임의 주소가 바뀌었다(W3b — 주소창).
+    url_changed = 39,
+    /// 뒤로·앞으로 가능 여부와 로딩 중(W3b — 주소창 버튼).
+    nav_state = 40,
 
     pub fn direction(self: Tag) Direction {
         return if (@intFromEnum(self) < 32) .to_sidecar else .to_maru;
@@ -52,6 +58,16 @@ pub const FailureCode = enum(u8) {
     protocol_violation = 5,
     /// `frame_channel` 의 이름으로 port 를 못 찾았다(W2).
     frame_channel_failed = 6,
+    /// GPU 경로(`on_accelerated_paint`)가 아니라 CPU 버퍼(`on_paint`)로 그렸다 — 이 브라우저는 그리지 않는다(D9 — 거부하고
+    /// 안내). 실측으로는 `--disable-gpu` 에서도 GPU 경로였다(W3b 착수 전) — 드문 경우다.
+    gpu_unavailable = 7,
+};
+
+pub const NavActionKind = enum(u8) {
+    back = 0,
+    forward = 1,
+    reload = 2,
+    stop = 3,
 };
 
 pub const BrowserId = u64;
@@ -100,6 +116,18 @@ pub const BrowserText = struct {
     text: []const u8,
 };
 
+pub const NavAction = struct {
+    browser: BrowserId,
+    action: NavActionKind,
+};
+
+pub const NavState = struct {
+    browser: BrowserId,
+    can_go_back: bool,
+    can_go_forward: bool,
+    loading: bool,
+};
+
 pub const LoadFinished = struct {
     browser: BrowserId,
     http_status: i32,
@@ -127,6 +155,7 @@ pub const Message = union(Tag) {
     navigate: Navigate,
     shutdown: void,
     frame_channel: FrameChannel,
+    nav_action: NavAction,
 
     hello_ack: Hello,
     browser_created: BrowserId,
@@ -135,6 +164,8 @@ pub const Message = union(Tag) {
     load_finished: LoadFinished,
     renderer_gone: RendererGone,
     failure: Failure,
+    url_changed: Navigate,
+    nav_state: NavState,
 };
 
 test "tags split by direction at 32" {

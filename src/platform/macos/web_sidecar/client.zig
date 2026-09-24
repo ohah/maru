@@ -64,6 +64,8 @@ pub fn get() *c.cef_client_t {
         render.on_paint = &onPaint;
         render.on_accelerated_paint = &onAcceleratedPaint;
         display.on_title_change = &onTitleChange;
+        display.on_address_change = &onAddressChange;
+        load.on_loading_state_change = &onLoadingStateChange;
         load.on_load_end = &onLoadEnd;
         request.on_render_process_terminated = &onRenderProcessTerminated;
         jsdialog.on_jsdialog = &onJsDialog;
@@ -118,9 +120,15 @@ fn countPaint(browser: [*c]c.cef_browser_t) void {
     if (entryOf(browser)) |entry| entry.paints += 1;
 }
 
-fn onPaint(_: [*c]c.cef_render_handler_t, browser: [*c]c.cef_browser_t, _: c.cef_paint_element_type_t, _: usize, _: [*c]const c.cef_rect_t, _: ?*const anyopaque, _: c_int, _: c_int) callconv(.c) void {
+fn onPaint(_: [*c]c.cef_render_handler_t, browser: [*c]c.cef_browser_t, kind: c.cef_paint_element_type_t, _: usize, _: [*c]const c.cef_rect_t, _: ?*const anyopaque, _: c_int, _: c_int) callconv(.c) void {
     defer object.releaseArg(browser);
     countPaint(browser);
+    // D9 — GPU 경로가 아니라 CPU 버퍼로 그렸다. 이 브라우저는 그리지 않고 한 번 알린다(maru 가 그 pane 에 안내한다).
+    if (kind != c.PET_VIEW) return;
+    const entry = entryOf(browser) orelse return;
+    if (entry.gpu_unavailable_sent) return;
+    entry.gpu_unavailable_sent = true;
+    browsers.state.writer.send(.{ .failure = .{ .browser = entry.id, .code = .gpu_unavailable, .detail = "CEF painted through the CPU path" } }) catch {};
 }
 
 fn onAcceleratedPaint(_: [*c]c.cef_render_handler_t, browser: [*c]c.cef_browser_t, kind: c.cef_paint_element_type_t, _: usize, _: [*c]const c.cef_rect_t, info: [*c]const c.cef_accelerated_paint_info_t) callconv(.c) void {
@@ -174,6 +182,29 @@ pub fn nowMs() u64 {
     var ts: std.c.timespec = undefined;
     _ = std.c.clock_gettime(.MONOTONIC, &ts);
     return @as(u64, @intCast(ts.sec)) * 1000 + @as(u64, @intCast(ts.nsec)) / 1_000_000;
+}
+
+/// 주 프레임 주소만 알린다(주소창). 상한을 넘거나 비었으면 보내지 않는다 — codec 이 거절한다.
+fn onAddressChange(_: [*c]c.cef_display_handler_t, browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, url: [*c]const c.cef_string_t) callconv(.c) void {
+    defer object.releaseArg(browser);
+    defer object.releaseArg(frame);
+    if (frame == null or frame.*.is_main.?(frame) == 0) return;
+    const entry = entryOf(browser) orelse return;
+    var buf: [protocol.wire.max_url_bytes]u8 = undefined;
+    const text = library.readString(browsers.state.api, url, &buf);
+    if (text.len == 0 or text.len == buf.len) return; // 비었거나 잘렸다(잘린 주소는 다른 주소다)
+    browsers.state.writer.send(.{ .url_changed = .{ .browser = entry.id, .url = text } }) catch {};
+}
+
+fn onLoadingStateChange(_: [*c]c.cef_load_handler_t, browser: [*c]c.cef_browser_t, loading: c_int, can_go_back: c_int, can_go_forward: c_int) callconv(.c) void {
+    defer object.releaseArg(browser);
+    const entry = entryOf(browser) orelse return;
+    browsers.state.writer.send(.{ .nav_state = .{
+        .browser = entry.id,
+        .can_go_back = can_go_back != 0,
+        .can_go_forward = can_go_forward != 0,
+        .loading = loading != 0,
+    } }) catch {};
 }
 
 fn onLoadEnd(_: [*c]c.cef_load_handler_t, browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, status: c_int) callconv(.c) void {

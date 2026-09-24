@@ -268,6 +268,9 @@ const Walker = struct {
         }
         // `>=` 와 `>` 는 같다(적대적 4회차 W2: 등가) — 여기 오는 줄은 공백만인 줄이고 `ahead_ln` 은 내용 줄이라 둘이 같을 수 없다.
         const reached = if (self.up) self.ahead_ln >= ln else self.ahead_ln <= ln;
+        // `ahead != null` 을 빼도 **비용이 곱으로 붙지 않는다**(적대적 8회차 R8d: 등가 — 새 눈 리뷰가 「구간이 문서 끝까지면 줄마다 EOF 까지
+        // 다시 훑는다」고 짚었지만 닿지 않는다): 가는 쪽 내용 줄이 없으면 그 공백 줄의 단계는 0 이고(`whitespaceLevel`), 활성 블록은 단계 ≥ 1 인
+        // 동안만 걷으므로 그 방향은 거기서 멈춘다 — 다시 불리는 것은 많아야 한 번이다. 뜻으로 둔다: 「없음」을 안 뒤에는 다시 찾지 않는다.
         if (!self.ahead_known or (self.ahead != null and reached)) {
             self.ahead = null;
             self.ahead_ln = ln;

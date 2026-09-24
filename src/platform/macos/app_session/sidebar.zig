@@ -2466,8 +2466,52 @@ pub fn buildSidebarTitleDrawList(self: *AppSession) !renderer.DrawList {
 /// 같은 단일 스크롤 소스). slot=압축 카드 서수(sidebarGlyphRow 인코딩과 동일 도메인). 밴드/배경 셀(slot_id==0)은
 /// 손대지 않는다(그 경로는 row 인덱스·별도 기하). replace/replaceSidebar 직후 metal_buffer.sidebar_cells에 in-place 적용.
 pub fn applySidebarGlyphPyTop(self: *AppSession) void {
+    // 셀을 제자리로 고친다 — 그 셀을 만든 입력의 지문은 여기서 죽고, 호출자가 이 뒤에 다시 adopt 한다.
+    self.metal_buffer.invalidateSidebarSource();
     fillSidebarGlyphPyTop(self.allocator, self.metal_buffer.sidebar_cells, sidebarRenderRows(self), sidebarMetrics(self));
 }
+
+/// 사이드바 셀을 만드는 **입력 전체**를 `out` 에 바이트로 적는다 — `MetalFrameBuffer.sidebarSourceIs` 의 지문.
+///
+/// **왜**: 다른 탭의 출력은 사이드바만 다시 그리게 하는데(`AppSession.tick` 출력 게이트), 그 사이드바는 거의 늘
+/// 그대로다(활성 32 세션 1,200 프레임 중 1,199). 입력이 올려 둔 것과 같으면 셰이핑·배치·교체와 Swift 쪽 그리기까지
+/// 통째로 건너뛴다. 해시가 아니라 **바이트를 그대로** 비교하므로 충돌로 옛 글자를 붙잡지 않는다.
+///
+/// 입력: DrawList(글자·스타일·크기·오버레이·cluster) · 사이드바 전경색 · chrome 기하(스크롤·헤더·slot 높이) ·
+/// 표시 행 목록과 메트릭(글자 세로 위치 py_top 이 여기서 나온다). 행의 `label` 은 슬라이스 **주소**로 들어간다 —
+/// 내용이 같아도 주소가 바뀌면 다르다고 본다(다시 그리는 쪽으로만 틀린다). 적다가 할당에 실패하면 false.
+pub fn sidebarSourceKey(self: *AppSession, dl: renderer.DrawList, chrome_geometry: anytype, out: *std.ArrayListUnmanaged(u8)) bool {
+    out.clearRetainingCapacity();
+    var w: SourceKeyWriter = .{ .out = out, .allocator = self.allocator };
+    std.hash.autoHashStrat(&w, dl.size, .Shallow);
+    std.hash.autoHashStrat(&w, dl.cells.len, .Shallow);
+    for (dl.cells) |cell| std.hash.autoHashStrat(&w, cell, .Shallow);
+    std.hash.autoHashStrat(&w, dl.overlays.len, .Shallow);
+    for (dl.overlays) |overlay| std.hash.autoHashStrat(&w, overlay, .Shallow);
+    std.hash.autoHashStrat(&w, dl.grapheme_pool.len, .Shallow);
+    for (dl.grapheme_pool) |g| std.hash.autoHashStrat(&w, g, .Shallow);
+    std.hash.autoHashStrat(&w, self.appearance.theme.foreground, .Shallow);
+    std.hash.autoHashStrat(&w, chrome_geometry, .Shallow); // 호출자의 `chromeGeometrySnapshot()`(교체 뒤 스탬프되는 값)
+    std.hash.autoHashStrat(&w, sidebarMetrics(self), .Shallow);
+    const rows = sidebarRenderRows(self);
+    std.hash.autoHashStrat(&w, rows.len, .Shallow);
+    for (rows) |row| std.hash.autoHashStrat(&w, row, .Shallow);
+    return !w.failed;
+}
+
+/// `std.hash.autoHash` 의 필드 순회를 빌려 **해시 대신 바이트를 그대로** 모은다(패딩 없이 값만 — 같은 값이면
+/// 같은 바이트). 해시기 인터페이스(`update`)만 채운다.
+const SourceKeyWriter = struct {
+    out: *std.ArrayListUnmanaged(u8),
+    allocator: std.mem.Allocator,
+    failed: bool = false,
+    pub fn update(self: *SourceKeyWriter, bytes: []const u8) void {
+        if (self.failed) return;
+        self.out.appendSlice(self.allocator, bytes) catch {
+            self.failed = true;
+        };
+    }
+};
 
 /// 사이드바 카드 줄의 세로 **스텝**(줄 top-to-top, px) = cell_height + 여유(≈0.15×ch). 예전엔 줄이 딱 ch 간격으로
 /// 붙어 촘촘했다(사용자 요청 "line-height 여유"). fillSidebarGlyphPyTop(줄 배치)·renameCaretRect(caret y)가 이 한

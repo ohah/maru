@@ -5464,7 +5464,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
             .name = "maru-session-host-pre-p5b3-v2",
             .root_module = b.createModule(.{
                 .root_source_file = b.path(
-                    "tests/fixtures/session_host_pre_p5b3_v2.zig",
+                    "tests/fixtures/session_host_frozen_same_major_host.zig",
                 ),
                 .target = target,
                 .optimize = .ReleaseFast,

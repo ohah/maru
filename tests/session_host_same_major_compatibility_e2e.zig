@@ -6,7 +6,7 @@
 
 const std = @import("std");
 const session_host = @import("session_host");
-const provenance = @import("fixtures/session_host_pre_p5b3_v2_provenance.zig");
+const provenance = @import("fixtures/session_host_frozen_same_major_host_provenance.zig");
 const c = std.c;
 const posix = std.posix;
 
@@ -315,7 +315,7 @@ fn writeSnapshot(allocator: std.mem.Allocator, path: [:0]const u8) !void {
 }
 
 fn verifyFrozenSource(allocator: std.mem.Allocator) !void {
-    const source = try readFile(allocator, "tests/fixtures/session_host_pre_p5b3_v2.zig", 2 * 1024 * 1024);
+    const source = try readFile(allocator, "tests/fixtures/session_host_frozen_same_major_host.zig", 2 * 1024 * 1024);
     defer allocator.free(source);
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(source, &digest, .{});

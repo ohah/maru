@@ -26,6 +26,8 @@ pub const Entry = struct {
     gpu_unavailable_sent: bool = false,
     /// 이 브라우저의 픽셀 링 생산자(W2 — `ring_producer.Producer`). 목록은 CEF·mach 를 몰라 불투명하게 든다.
     frames: ?*anyopaque = null,
+    /// 마지막으로 알린 커서(W4 — 같은 것은 다시 안 보낸다).
+    cursor: ?protocol.message.WebCursor = null,
 };
 
 pub const Error = error{ Duplicate, Full };

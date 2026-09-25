@@ -347,8 +347,12 @@ pub const Provider = struct {
     changed: [max_changed]ByteRange = undefined,
     changed_len: u8 = 0,
     changed_all: bool = true,
-    /// 마지막 `nextOpenBracket` 이 지난 노드 수 — 판정자(`SYN50`)가 **걸음 수로** 비용을 잰다(시간은 CI 에서 흔들린다).
+    /// 마지막 `nextOpenBracket`·`nextOpenBrackets` 가 지난 노드 수 — 판정자(`SYN50`)가 **걸음 수로** 비용을 잰다(시간은 CI 에서 흔들린다).
     next_open_visits: u32 = 0,
+    /// 형제 짝짓기(`pairAmongChildren`)가 지난 자식 수의 누계 — 판정자(`BRP8`·`SYN51`)가 커서가 많은 점프의 비용을 걸음 수로 잰다.
+    sibling_visits: u64 = 0,
+    /// **한 번의 점프 동안만** 선다(`PairMemo` — 커서마다 같은 부모의 형제를 다시 짝짓지 않게). 평소에는 `null` 이다.
+    memo: ?*PairMemo = null,
 
     /// 문서 하나를 맡는다. **§5.3의 `init(문서 bytes, 언어)` 그대로다** — 언어만 받고 내용을
     /// 나중에 넣는 형태였다가 계약에 맞췄다(이름과 인자가 계약과 갈리면 문서를 읽고 코드를 찾는
@@ -787,7 +791,7 @@ pub const Provider = struct {
         if (tok.at != i) return null; // 토큰이 이 글자를 덮지만 그 괄호는 다른 자리다(방어 — 한 토큰에 괄호는 하나뿐)
         const parent = c.ts_node_parent(node);
         if (c.ts_node_is_null(parent)) return null;
-        return pairAmongChildren(parent, source, .{ .token = i });
+        return self.pairAmong(parent, source, .{ .token = i });
     }
 
     /// **byte `i` 의 글자가 여는 괄호 토큰인가**(§5.1b ⓐ — 짝은 안 본다). 「다음 여는 괄호」(`nextOpenBracket`)의 **정의**다 — 제품은 이것을
@@ -852,10 +856,23 @@ pub const Provider = struct {
     /// 여는 괄호 **글자**마다 루트에서 내려가 물었는데(`isOpenBracketToken`), 한 번 내려갈 때마다 형제를 줄줄이 훑어 최상위 주석 2 만 줄 뒤의
     /// `(` 46 만 개에서 **44 초** 걸렸다(ReleaseFast 실측 — 적대적 1회차). 답은 그 정의와 같다(`SYN50` 이 모든 자리에서 잰다).
     pub fn nextOpenBracket(self: *Provider, source: []const u8, pos: u32) ?u32 {
-        const tree = self.tree orelse return null;
+        var out = [1]?u32{null};
+        self.nextOpenBrackets(source, &.{pos}, &out);
+        return out[0];
+    }
+
+    /// **여러 caret 의 「다음 여는 괄호」를 한 번의 걷기로**(문서 모델 §3.9c — 커서가 많은 점프). `positions` 는 **오름차순**이고 `out` 은 같은 길이다.
+    /// 가장 앞 caret 에서 시작해 여는 괄호를 문서 순서로 만날 때마다 그 앞에 선 caret 들에게 그 자리를 준다 — 답은 caret 마다 따로 걸은 것과 같다
+    /// (`SYN51`). 커서마다 따로 걸으면 최상위 형제를 caret 수만큼 다시 지난다.
+    pub fn nextOpenBrackets(self: *Provider, source: []const u8, positions: []const u32, out: []?u32) void {
         self.next_open_visits = 0;
-        // (등가 — 적대적 2회차 K10: `pos == len` 이면 caret 뒤에서 끝나는 노드가 없어 걷기가 어차피 `null` 이다. 한 바퀴를 안 돌려고 둔다.)
-        if (pos >= source.len) return null;
+        @memset(out, null);
+        const tree = self.tree orelse return;
+        var qi: usize = 0;
+        // (등가 — 적대적 2회차 K10: 문서 끝의 caret 은 caret 뒤에서 끝나는 노드가 없어 걷기가 어차피 답을 못 준다. 한 바퀴를 안 돌려고 둔다.)
+        while (qi < positions.len and positions[qi] >= source.len) qi += 1;
+        if (qi == positions.len) return;
+        const pos = positions[qi];
         var cursor = c.ts_tree_cursor_new(c.ts_tree_root_node(tree));
         defer c.ts_tree_cursor_delete(&cursor);
         while (true) {
@@ -863,12 +880,20 @@ pub const Provider = struct {
             self.next_open_visits +|= 1;
             if (c.ts_node_end_byte(node) > pos) {
                 if (c.ts_node_child_count(node) == 0) {
-                    if (self.leafOpenFrom(node, source, pos)) |at| return at;
+                    // 이 잎의 여는 괄호를 차례로 — 괄호 토큰은 하나, 글 잎은 여럿일 수 있다
+                    var from = pos;
+                    while (self.leafOpenFrom(node, source, from)) |at| {
+                        while (qi < positions.len and positions[qi] <= at) : (qi += 1) {
+                            if (positions[qi] < source.len) out[qi] = at;
+                        }
+                        if (qi == positions.len) return;
+                        from = at + 1;
+                    }
                 } else if (c.ts_tree_cursor_goto_first_child(&cursor)) continue;
             }
             while (true) {
                 if (c.ts_tree_cursor_goto_next_sibling(&cursor)) break;
-                if (!c.ts_tree_cursor_goto_parent(&cursor)) return null;
+                if (!c.ts_tree_cursor_goto_parent(&cursor)) return;
             }
         }
     }
@@ -897,7 +922,7 @@ pub const Provider = struct {
             steps += 1;
         }) {
             if (c.ts_node_child_count(node) == 0) continue;
-            if (pairAmongChildren(node, source, .{ .enclosing = pos })) |p| return p;
+            if (self.pairAmong(node, source, .{ .enclosing = pos })) |p| return p;
         }
         return null;
     }
@@ -934,21 +959,109 @@ pub const Provider = struct {
         };
     }
 
-    /// 형제 짝짓기가 찾는 것 — 한 토큰의 짝, 또는 caret 을 품는 가장 안쪽 쌍.
+    /// **한 번의 점프 동안 부모마다 형제 괄호 쌍을 한 번만 짝짓는다**(문서 모델 §3.9c — 커서가 많은 점프). 커서마다 `pairAmongChildren` 을 다시
+    /// 부르면 같은 부모(수만 원소 배열)의 자식을 커서 수만큼 다시 지나 곱으로 붙었다(적대적 3회차 — 커서 1 만 = 12 s). 답은 메모 없이 짝지은 것과
+    /// 같다(`SYN51`). 부르는 쪽이 `Provider.memo` 에 세우고 끝나면 거둔다 — 트리가 바뀌면 옛 노드를 가리키므로 한 번의 점프보다 오래 두지 않는다.
+    pub const PairMemo = struct {
+        allocator: std.mem.Allocator,
+        map: std.AutoHashMapUnmanaged(Key, Sibling) = .empty,
+
+        const Key = struct { id: usize, start: u32 };
+        /// 한 부모의 형제 쌍 — `pairs` 는 **닫히는 순서**(`pairAmongChildren` 이 완성하는 순서), `by_bracket` 은 괄호 자리 → 쌍 색인.
+        const Sibling = struct {
+            pairs: []BracketPair,
+            by_bracket: std.AutoHashMapUnmanaged(u32, u32),
+        };
+
+        pub fn init(allocator: std.mem.Allocator) PairMemo {
+            return .{ .allocator = allocator };
+        }
+
+        pub fn deinit(self: *PairMemo) void {
+            var it = self.map.valueIterator();
+            while (it.next()) |sib| {
+                self.allocator.free(sib.pairs);
+                sib.by_bracket.deinit(self.allocator);
+            }
+            self.map.deinit(self.allocator);
+            self.* = undefined;
+        }
+    };
+
+    /// 형제 짝짓기 — 메모가 서 있으면 그 부모의 쌍을 한 번 짝지어 두고 거기서 답한다. 메모가 없거나 할당이 실패하면 곧바로 짝짓는다(답은 같다).
+    fn pairAmong(self: *Provider, parent: c.TSNode, source: []const u8, want: Want) ?BracketPair {
+        const memo = self.memo orelse return self.pairAmongChildren(parent, source, want);
+        const sib = self.siblingsOf(memo, parent, source) catch return self.pairAmongChildren(parent, source, want);
+        switch (want) {
+            .token => |t| {
+                const k = sib.by_bracket.get(t) orelse return null;
+                return sib.pairs[k];
+            },
+            // 닫히는 순서에서 **처음으로** 품는 쌍 — 닫는 자리가 `pos` 이상인 첫 쌍부터 본다(그 앞 쌍은 `pos` 전에 닫혀 품을 수 없다).
+            .enclosing => |pos| {
+                var lo: usize = 0;
+                var hi: usize = sib.pairs.len;
+                while (lo < hi) {
+                    const mid = (lo + hi) / 2;
+                    if (sib.pairs[mid].close < pos) lo = mid + 1 else hi = mid;
+                }
+                for (sib.pairs[lo..]) |p| {
+                    if (p.open < pos and pos <= p.close) return p;
+                }
+                return null;
+            },
+        }
+    }
+
+    fn siblingsOf(self: *Provider, memo: *PairMemo, parent: c.TSNode, source: []const u8) !*const PairMemo.Sibling {
+        const key: PairMemo.Key = .{ .id = @intFromPtr(parent.id), .start = c.ts_node_start_byte(parent) };
+        const gop = try memo.map.getOrPut(memo.allocator, key);
+        if (gop.found_existing) return gop.value_ptr;
+        errdefer memo.map.removeByPtr(gop.key_ptr);
+        var pairs: std.ArrayList(BracketPair) = .empty;
+        errdefer pairs.deinit(memo.allocator);
+        try self.collectSiblingPairs(parent, source, memo.allocator, &pairs);
+        var by: std.AutoHashMapUnmanaged(u32, u32) = .empty;
+        errdefer by.deinit(memo.allocator);
+        for (pairs.items, 0..) |p, k| {
+            try by.put(memo.allocator, p.open, @intCast(k));
+            try by.put(memo.allocator, p.close, @intCast(k));
+        }
+        gop.value_ptr.* = .{ .pairs = try pairs.toOwnedSlice(memo.allocator), .by_bracket = by };
+        return gop.value_ptr;
+    }
+
     const Want = union(enum) { token: u32, enclosing: u32 };
 
     /// `parent` 의 자식들을 앞에서부터 한 번 지나며 괄호 토큰을 종류별 스택으로 짝짓는다. 커서로 걷는다 — `ts_node_prev_sibling` 은 부모부터
     /// 다시 세므로 큰 형제 목록(수만 원소 JSON 배열)에서 곱으로 붙는다.
-    fn pairAmongChildren(parent: c.TSNode, source: []const u8, want: Want) ?BracketPair {
+    fn pairAmongChildren(self: *Provider, parent: c.TSNode, source: []const u8, want: Want) ?BracketPair {
+        var found: ?BracketPair = null;
+        self.walkSiblingPairs(parent, source, want, &found, null) catch {};
+        return found;
+    }
+
+    /// 메모용 — `parent` 의 형제 쌍을 **전부** 닫히는 순서로 모은다(`pairAmongChildren` 과 같은 걷기).
+    fn collectSiblingPairs(self: *Provider, parent: c.TSNode, source: []const u8, allocator: std.mem.Allocator, out: *std.ArrayList(BracketPair)) !void {
+        var unused: ?BracketPair = null;
+        try self.walkSiblingPairs(parent, source, null, &unused, .{ .allocator = allocator, .list = out });
+    }
+
+    const PairSink = struct { allocator: std.mem.Allocator, list: *std.ArrayList(BracketPair) };
+
+    /// 형제를 앞에서부터 한 번 지나며 괄호 토큰을 종류별 스택으로 짝짓는다. `want` 가 있으면 그 답에서 멈추고(`found`), `sink` 가 있으면 완성된 쌍을
+    /// 모두 모은다 — 메모와 곧바로 짝짓기가 **같은 걷기**를 쓴다(답이 갈릴 자리가 없게).
+    fn walkSiblingPairs(self: *Provider, parent: c.TSNode, source: []const u8, want: ?Want, found: *?BracketPair, sink: ?PairSink) !void {
         var cursor = c.ts_tree_cursor_new(parent);
         defer c.ts_tree_cursor_delete(&cursor);
-        if (!c.ts_tree_cursor_goto_first_child(&cursor)) return null;
+        if (!c.ts_tree_cursor_goto_first_child(&cursor)) return;
         var stacks: [3][max_sibling_depth]u32 = undefined;
         var depth = [3]usize{ 0, 0, 0 };
         // 스택이 넘친 종류는 그 뒤로 짝을 믿을 수 없다 — 그 종류는 더 짝짓지 않는다.
         var overflow = [3]bool{ false, false, false };
         while (true) {
             const child = c.ts_tree_cursor_current_node(&cursor);
+            self.sibling_visits +|= 1;
             if (tokenBracket(child, source)) |b| {
                 const k: usize = b.kind;
                 if (!overflow[k]) {
@@ -962,19 +1075,25 @@ pub const Provider = struct {
                     } else if (depth[k] > 0) {
                         depth[k] -= 1;
                         const pair: BracketPair = .{ .open = stacks[k][depth[k]], .close = b.at };
-                        switch (want) {
-                            .token => |t| if (pair.open == t or pair.close == t) return pair,
+                        if (sink) |sk| try sk.list.append(sk.allocator, pair);
+                        if (want) |w| switch (w) {
+                            .token => |t| if (pair.open == t or pair.close == t) {
+                                found.* = pair;
+                                return;
+                            },
                             // **처음 완성된 「품는 쌍」이 가장 안쪽이다** — 쌍은 닫히는 순서로 완성되고, caret 을 품는 쌍들은 서로 포개지므로 안쪽이
                             // 먼저 닫힌다(나란한 두 쌍은 둘 다 caret 을 품을 수 없다). 처음엔 「여는 자리가 가장 뒤인 것」을 골랐는데 적대적 2회차
                             // (T13b)가 첫 것을 남겨도 같은 답임을 보였고, 이유가 위 한 줄이라 줄였다.
-                            .enclosing => |pos| if (pair.open < pos and pos <= pair.close) return pair,
-                        }
+                            .enclosing => |pos| if (pair.open < pos and pos <= pair.close) {
+                                found.* = pair;
+                                return;
+                            },
+                        };
                     }
                 }
             }
             if (!c.ts_tree_cursor_goto_next_sibling(&cursor)) break;
         }
-        return null;
     }
 
     /// 접을 수 있는 **줄 범위** 하나(§4 — 접힘의 tree-sitter 층).
@@ -3523,4 +3642,54 @@ test "SYN50 다음 여는 괄호 — 트리 걷기가 모든 자리에서 정의
     var pp = Provider.init(php, .php, 0) orelse return error.NoProvider;
     defer pp.deinit();
     try std.testing.expectEqual(@as(?u32, null), pp.nextOpenBracket(php, 0));
+}
+
+test "SYN51 형제 쌍 메모와 한 번 걷기 — 모든 자리에서 메모 없이·caret 마다 따로 물은 답과 같다 (문서 모델 §3.9c — 커서가 많은 점프)" {
+    const a = std.testing.allocator;
+    const samples = [_]struct { lang: Language, src: []const u8 }{
+        .{ .lang = .javascript, .src = "// f(x)\nconst s = \"(\" + `a${b(1)}`; /* [ */ g(h[0], {k: 1}) ) (\nf([1, [2, (3)]], {a: {b: []}});\n" },
+        .{ .lang = .typescript, .src = "type A = {| a: (1) |};\nlet a: Array<number> = [1]; f<T>(x) // (\n" },
+        .{ .lang = .python, .src = "x = '(' # [\ndef f(a, b=[1]): return {a: (b)}\n" },
+        .{ .lang = .bash, .src = "echo \"$(date)\" ; f() { x; } # (\n" },
+        .{ .lang = .html, .src = "<p>a ) (b) [c]</p><!-- (x) --><button (click)=\"go()\">x</button><script>f(\"(\");</script>\n" },
+        .{ .lang = .zig, .src = "const a = f(.{ \"(\", x }); // [\nfn g() void { h(&.{ 1, 2 }); }\n" },
+        // 한 부모 아래 괄호 토큰이 여럿 — 종류가 엇갈려(`( [ ) ]`) 닫히는 순서와 여는 순서가 다르다
+        .{ .lang = .javascript, .src = "x = ( [ ) ] ( ( ) [ ] ) ;\n" },
+    };
+    for (samples) |sm| {
+        errdefer std.debug.print("SYN51 언어 {s}\n", .{@tagName(sm.lang)});
+        var prov = Provider.init(sm.src, sm.lang, 0) orelse return error.NoProvider;
+        defer prov.deinit();
+        const n = sm.src.len + 1;
+        const plain_tok = try a.alloc(?Provider.BracketPair, n);
+        defer a.free(plain_tok);
+        const plain_enc = try a.alloc(?Provider.BracketPair, n);
+        defer a.free(plain_enc);
+        const plain_next = try a.alloc(?u32, n);
+        defer a.free(plain_next);
+        for (0..n) |i| {
+            plain_tok[i] = prov.bracketTokenPair(sm.src, @intCast(i));
+            plain_enc[i] = prov.enclosingBracketTokens(sm.src, @intCast(i));
+            plain_next[i] = prov.nextOpenBracket(sm.src, @intCast(i));
+        }
+        // 메모를 세우고 — 같은 부모를 여러 번 묻도록 모든 자리를 두 바퀴
+        var memo = Provider.PairMemo.init(a);
+        defer memo.deinit();
+        prov.memo = &memo;
+        defer prov.memo = null;
+        for (0..2) |_| for (0..n) |i| {
+            errdefer std.debug.print("SYN51 pos={d}\n", .{i});
+            try std.testing.expectEqual(plain_tok[i], prov.bracketTokenPair(sm.src, @intCast(i)));
+            try std.testing.expectEqual(plain_enc[i], prov.enclosingBracketTokens(sm.src, @intCast(i)));
+        };
+        try std.testing.expect(memo.map.count() > 0); // 메모가 실제로 섰다
+        // 모든 자리를 한 번에(오름차순) — 자리마다 따로 걸은 것과 같다
+        const qs = try a.alloc(u32, n);
+        defer a.free(qs);
+        for (qs, 0..) |*q, i| q.* = @intCast(i);
+        const got = try a.alloc(?u32, n);
+        defer a.free(got);
+        prov.nextOpenBrackets(sm.src, qs, got);
+        try std.testing.expectEqualSlices(?u32, plain_next, got);
+    }
 }

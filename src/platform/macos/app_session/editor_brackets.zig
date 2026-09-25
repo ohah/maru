@@ -53,17 +53,26 @@ fn treeOf(term: *Term) ?*Provider {
     return null;
 }
 
-/// **괄호 짝으로 점프**(§3.9c)의 도착 byte — 강조와 같은 출처 고르기. 갈 데가 없으면 `null`(트리가 없으면 닿은 괄호뿐이다).
-///
-/// **커서가 `max_cursors` 를 넘으면 닿은 괄호만 본다**(§3.9c) — 감싸는 쌍·다음 괄호는 커서마다 그 쌍을 품은 노드의 형제를 훑어 커서 수 ×
-/// 형제 수로 붙는다(적대적 3회차 실측: 배열 원소마다 커서 1 만 개 = 12 s). 강조가 같은 값에서 멈추는 것(`max_cursors`)과 같은 선이다.
-pub fn jumpTarget(term: *Term, content: []const u8, pos: usize, carets: usize) ?usize {
-    const search = carets <= max_cursors;
-    if (treeOf(term)) |p| {
-        const src = brackets.Tree(Provider){ .prov = p, .bytes = content };
-        return if (search) brackets.jumpTarget(src, content.len, pos) else brackets.touchJump(src, content.len, pos);
-    }
+/// **괄호 짝으로 점프**(§3.9c)의 도착 byte — 강조와 같은 출처 고르기. 갈 데가 없으면 `null`(트리가 없으면 닿은 괄호뿐이다). 커서 하나다.
+pub fn jumpTarget(term: *Term, content: []const u8, pos: usize) ?usize {
+    if (treeOf(term)) |p| return brackets.jumpTarget(brackets.Tree(Provider){ .prov = p, .bytes = content }, content.len, pos);
     return brackets.jumpTarget(brackets.Plain{ .bytes = content }, content.len, pos);
+}
+
+/// **커서 여럿의 점프** — `positions[i]` 의 도착을 `out[i]` 에. 커서 수에 상한이 없다(VS Code 와 같다): 한 번의 점프 동안 형제 쌍 메모
+/// (`Provider.PairMemo`)를 세워 같은 부모를 다시 짝짓지 않고, 다음 여는 괄호는 한 번 걷는다. 처음엔 커서 100 개에서 닿은 괄호만 보는 선을 두었다가
+/// (커서 1 만 = 12 s 였다) 이 둘로 걷어냈다.
+pub fn jumpTargets(allocator: std.mem.Allocator, term: *Term, content: []const u8, positions: []const usize, out: []?usize) error{OutOfMemory}!void {
+    if (treeOf(term)) |p| {
+        var memo = Provider.PairMemo.init(allocator);
+        p.memo = &memo;
+        defer {
+            p.memo = null;
+            memo.deinit();
+        }
+        return brackets.jumpTargets(brackets.Tree(Provider){ .prov = p, .bytes = content }, content.len, positions, out, allocator);
+    }
+    return brackets.jumpTargets(brackets.Plain{ .bytes = content }, content.len, positions, out, allocator);
 }
 
 /// 강조의 모드 — 설정, 그리고 **포커스**(창이 key · 활성 pane 의 활성 Term — VS Code `hasWidgetFocus`). 포커스가 없으면 `never`.

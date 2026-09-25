@@ -3609,7 +3609,7 @@ fn movedOffset(
             // **선택의 앞쪽 끝에서 판정하고 커서로 접는다**(§3.9c — VS Code `selection.getStartPosition()`: [1,3] 과 [3,1] 이 같은 데로 간다).
             // 강조(§5.1b)와 **같은 출처**다 — 트리가 있으면 트리(문자열·주석 속 괄호가 빠진다), 없으면 글자 훑기.
             const from = @min(sel.start(), content.len);
-            break :blk brackets_client.jumpTarget(term, content, from, 1 + term.rt.editor_extra_selections.len) orelse from;
+            break :blk brackets_client.jumpTarget(term, content, from) orelse from;
         },
         .line_end => blk: {
             // **줄 끝은 목표를 `line_end`로 세운다** — End 뒤에 아래로 내려가면 계속 줄 끝을 따라간다.
@@ -3889,11 +3889,17 @@ pub fn moveCarets(self: *AppSession, term: *Term, how: Motion, extend: bool) boo
     const doc = term.rt.editor_doc orelse return false;
     const primary = term.rt.editor_selection orelse return false;
 
+    // **괄호 점프는 커서 전부를 한 번에 판정한다**(§3.9c) — 커서마다 따로 물으면 같은 부모의 형제를 커서 수만큼 다시 짝지어 곱으로 붙는다.
+    // 모자라면(할당 실패) 커서마다 묻는 길로 간다 — 답은 같다.
+    var jumps: ?[]?usize = null;
+    defer if (jumps) |j| self.allocator.free(j);
+    if (how == .bracket_match) jumps = bracketJumps(self, term, doc, primary) catch null;
+
     var moved_any = false;
     var next_primary = primary;
     {
         var goal = primary.goal;
-        const off = movedOffset(self, term, doc, primary, how, &goal);
+        const off = if (jumps) |j| jumpOrStart(doc, primary, j[0], &goal) else movedOffset(self, term, doc, primary, how, &goal);
         next_primary = if (extend)
             editor_selection.Selection.fromAnchorRange(primary.anchorLo(), primary.anchorHi(), off, primary.kind)
         else
@@ -3903,9 +3909,9 @@ pub fn moveCarets(self: *AppSession, term: *Term, how: Motion, extend: bool) boo
     }
 
     // 나머지 커서도 같은 단위로 옮긴다.
-    for (term.rt.editor_extra_selections) |*extra| {
+    for (term.rt.editor_extra_selections, 0..) |*extra, ei| {
         var goal = extra.goal;
-        const off = movedOffset(self, term, doc, extra.*, how, &goal);
+        const off = if (jumps) |j| jumpOrStart(doc, extra.*, j[ei + 1], &goal) else movedOffset(self, term, doc, extra.*, how, &goal);
         const next = if (extend)
             editor_selection.Selection.fromAnchorRange(extra.anchorLo(), extra.anchorHi(), off, extra.kind)
         else
@@ -3931,6 +3937,26 @@ pub fn moveCarets(self: *AppSession, term: *Term, how: Motion, extend: bool) boo
     revealPrimaryCaret(self, term); // 화면 밖으로 나갔으면 따라간다
     self.metal_dirty = true;
     return true;
+}
+
+/// 괄호 점프의 도착 — `[primary, extras…]` 순서로, 각 선택의 **앞쪽 끝**에서 판정한다(§3.9c — `movedOffset` 의 `.bracket_match` 와 같은 규칙).
+fn bracketJumps(self: *AppSession, term: *Term, doc: Opened, primary: editor_selection.Selection) error{OutOfMemory}![]?usize {
+    const content = doc.file.content;
+    const n = 1 + term.rt.editor_extra_selections.len;
+    const from = try self.allocator.alloc(usize, n);
+    defer self.allocator.free(from);
+    from[0] = @min(primary.start(), content.len);
+    for (term.rt.editor_extra_selections, from[1..]) |e, *f| f.* = @min(e.start(), content.len);
+    const out = try self.allocator.alloc(?usize, n);
+    errdefer self.allocator.free(out);
+    try brackets_client.jumpTargets(self.allocator, term, content, from, out);
+    return out;
+}
+
+/// 도착이 없으면 **앞쪽 끝으로 접힌다**(VS Code 가 `position` = 선택 시작을 돌려준다). 가로 이동이라 목표 열을 버린다.
+fn jumpOrStart(doc: Opened, sel: editor_selection.Selection, target: ?usize, goal: *editor_selection.Goal) usize {
+    goal.* = .none;
+    return target orelse @min(sel.start(), doc.file.content.len);
 }
 
 /// 위/아래로 커서 추가 — 각 커서마다 한 줄 위(아래)에 **사본**을 더한다
@@ -41839,24 +41865,54 @@ test "BRP8 괄호 점프 — 닿은 괄호가 없으면 감싸는 쌍의 닫는 
     try press.go(&fx);
     try testing.expectEqual(@as(usize, 6), term.rt.editor_selection.?.focus);
     try testing.expectEqual(@as(usize, 0), term.rt.editor_extra_selections.len);
-    // **커서가 100 개를 넘으면 닿은 괄호만** — 101 개가 모두 `a|,`(3)에 서면 감싸는 쌍으로 안 간다; 100 개면 간다
+    // **커서 수에 상한이 없다**(VS Code 와 같다) — 101 개가 모두 `a|,`(3)에 서도 감싸는 쌍으로 간다
     var many: [100]editor_selection.Selection = undefined;
     for (&many) |*m| m.* = editor_selection.Selection.at(3);
     term.rt.editor_selection = editor_selection.Selection.at(3);
     try setExtraSelections(fx.session, term, &many);
     try press.go(&fx);
-    try testing.expectEqual(@as(usize, 3), term.rt.editor_selection.?.focus);
-    // 상한을 넘어도 **닿은 괄호는 간다** — 101 개가 `(|a`(1)에 서면 닫는 괄호(6) 앞
-    for (&many) |*m| m.* = editor_selection.Selection.at(1);
-    term.rt.editor_selection = editor_selection.Selection.at(1);
-    try setExtraSelections(fx.session, term, &many);
-    try press.go(&fx);
     try testing.expectEqual(@as(usize, 6), term.rt.editor_selection.?.focus);
-    for (&many) |*m| m.* = editor_selection.Selection.at(3);
-    term.rt.editor_selection = editor_selection.Selection.at(3);
-    try setExtraSelections(fx.session, term, many[0..99]);
-    try press.go(&fx);
-    try testing.expectEqual(@as(usize, 6), term.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_extra_selections.len); // 같은 곳이라 하나로 합쳤다
+}
+
+test "BRP9 커서가 많은 괄호 점프 — 원소 3,000 개 배열의 원소마다 커서: 전부 감싸는 `]` 앞으로, 형제 짝짓기는 원소 수 자릿수 걸음 (제품 경계, §3.9c)" {
+    // 커서마다 형제를 다시 짝지으면 커서 수 × 원소 수(여기서 약 1,800 만 걸음)로 붙는다 — 적대적 3회차가 커서 1 만에서 12 s 를 쟀다. 한 번의 점프
+    // 동안 형제 쌍 메모(`PairMemo`)를 세워 배열의 자식을 한 번만 짝짓는다. 다음 여는 괄호도 한 번에 걷는다(끝 두 커서).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const n: usize = 3000;
+    var src: std.ArrayList(u8) = .empty;
+    defer src.deinit(allocator);
+    try src.appendSlice(allocator, "const v = [\n");
+    const base = src.items.len;
+    for (0..n) |_| try src.appendSlice(allocator, "ab, ");
+    const close = src.items.len;
+    try src.appendSlice(allocator, "];\nx; y; f(1);\n");
+    const tail_x = close + 3; // `x` 앞 — 감싸는 쌍이 없어 다음 여는 괄호 `(`
+    const open_f = std.mem.lastIndexOfScalar(u8, src.items, '(').?;
+    const term = try openBracketFixture(&fx, allocator, "many.js", src.items);
+    // 큰 문서라 첫 파싱이 한 프레임 예산을 넘는다 — 끝까지 판다(트리가 없으면 점프는 닿은 괄호뿐이다)
+    while (term.rt.editor_syntax.pending) _ = syntax_color.resumeParse(&term.rt.editor_syntax, term.rt.editor_doc.?.file.content);
+    try testing.expect(term.rt.editor_syntax.provider != null);
+    const extras = try allocator.alloc(editor_selection.Selection, n + 1);
+    defer allocator.free(extras);
+    for (extras[0 .. n - 1], 1..) |*e, k| e.* = editor_selection.Selection.at(base + 4 * k + 1); // `a|b`
+    extras[n - 1] = editor_selection.Selection.at(tail_x);
+    extras[n] = editor_selection.Selection.at(tail_x + 3); // `y` 앞
+    term.rt.editor_selection = editor_selection.Selection.at(base + 1);
+    try setExtraSelections(fx.session, term, extras);
+    const prov = &term.rt.editor_syntax.provider.?;
+    const visits0 = prov.sibling_visits;
+    _ = try fx.session.handleKeyEvent(.{ .key = .{ .char = '\\' }, .modifiers = .{ .command = true, .shift = true } });
+    // 원소 커서 3,000 개는 `]` 앞 하나로, 끝 두 커서는 `f(` 의 `(` 앞 하나로 합쳤다
+    try testing.expectEqual(close, term.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_extra_selections.len);
+    try testing.expectEqual(open_f, term.rt.editor_extra_selections[0].focus);
+    // 배열의 자식은 약 6,000 개(원소 3,000 + 쉼표 3,000 + 괄호 둘) — 한 번 짝지으면 그 자릿수다
+    const visits = prov.sibling_visits - visits0;
+    try testing.expect(visits >= 2 * n and visits < 4 * n);
 }
 
 test "BRP2 모드와 포커스 — always 는 감싸는 쌍, near 는 닿은 것만, never·포커스 없음은 없다 (제품 경계, §5.1b)" {

@@ -41820,6 +41820,11 @@ test "BRP8 괄호 점프 — 닿은 괄호가 없으면 감싸는 쌍의 닫는 
         term.rt.editor_selection = editor_selection.Selection.at(3);
         try press.go(&fx);
         try testing.expectEqual(@as(usize, 3), term.rt.editor_selection.?.focus);
+        // 갈 데가 없어도 선택은 **앞쪽 끝으로** 접힌다 — [8 → 10] 의 앞쪽 끝 8(`+` 앞)에도 focus 10(`h` 앞)에도 닿은 괄호가 없다
+        term.rt.editor_selection = editor_selection.Selection.fromPoints(8, 10);
+        try press.go(&fx);
+        try testing.expectEqual(@as(usize, 8), term.rt.editor_selection.?.focus);
+        try testing.expect(term.rt.editor_selection.?.isEmpty());
     }
 }
 

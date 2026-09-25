@@ -619,8 +619,13 @@ pub fn paneMove(self: *AppSession, term: *Term, how: editor_ops.Motion, extend: 
             .{ .row = cur_row + 1, .byte = 0 }
         else
             .{ .row = cur_row, .byte = cur_byte },
-        .line_start => .{ .row = cur_row, .byte = editor_motion.lineStartSmart(texts[cur_row], editor_ops.rowLine(texts[cur_row]), cur_byte) },
-        .line_end => .{ .row = cur_row, .byte = texts[cur_row].len },
+        // **비교 뷰/병합 판은 한 행이 곧 한 줄**이다(`texts[cur_row]` 가 행 하나). 랩이 없어
+        // 「행까지」와 「줄까지」가 같은 자리라 별칭이 **저하가 아니라 정답**이다 — 오늘 이 둘은
+        // 위 키 switch 가 안 보내지만, 보내는 날 조용히 틀리지 않도록 여기 적는다.
+        .line_start, .row_then_line_start => .{ .row = cur_row, .byte = editor_motion.lineStartSmart(texts[cur_row], editor_ops.rowLine(texts[cur_row]), cur_byte) },
+        .line_end, .row_then_line_end => .{ .row = cur_row, .byte = texts[cur_row].len },
+        // `^A` 는 토글이 없다 — 행 머리 그대로다.
+        .hard_line_start => .{ .row = cur_row, .byte = 0 },
         .line_up, .line_down, .page_up, .page_down => blk: {
             const step: usize = if (how == .line_up or how == .line_down) 1 else rows;
             const up = (how == .line_up or how == .page_up);

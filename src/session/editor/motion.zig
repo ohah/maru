@@ -94,6 +94,95 @@ pub fn lineEnd(line: line_index.Line) usize {
     return line.contentEnd();
 }
 
+/// **줄 머리**(0열) — smart home 토글이 **없다**.
+///
+/// `lineStartSmart` 와 일부러 갈린다: VS Code 도 `CursorHome`(⌘←, 토글 + 아래 랩 하이브리드)과
+/// `CursorLineStart`(^A, `move(…, lineNumber, **1**, 0)`)를 **다른 명령**으로 둔다. 토글만 있으면
+/// "무조건 0열"을 원하는 사용자가 한 번 눌러야 하는지 두 번인지 **자리마다 달라진다** — 그 자리가
+/// 없어서 ^A 가 필요하다.
+pub fn lineStart(line: line_index.Line) usize {
+    return line.start;
+}
+
+/// caret 이 든 **시각 행**의 원본 byte 범위. 제품이 렌더 스냅숏에서 읽어 넘긴다.
+///
+/// **여기서 세지 않는다.** 어디서 접히는지는 `visual_map.pieces` 가 정하고(cluster 를 안 쪼개므로
+/// 열 상한의 배수가 아니다), 다시 세면 그것이 곧 두 번째 규칙이라 걸친 2칸 글자·§3.8 표기에서
+/// 갈린다 — `movedVisualRow` 가 같은 이유로 스냅숏을 읽는다.
+pub const VisualRow = struct { start: usize, end: usize };
+
+/// `⌘←`/`⌘→` 가 **행**까지 갈지 **줄**까지 갈지.
+pub const LineEdgeScope = enum { row, line };
+
+/// `⌘←` 의 단계 — **행 첫 글자 → 줄 첫 글자 → 줄 머리**로 넓어진다
+/// ([문서 모델](../../../docs/native-editor-document-model.md) §3.2).
+///
+/// VS Code `_moveToLineStart` 를 offset 축으로 옮긴 것이다(원문 2026-09-25):
+///
+/// ```
+/// isFirstLineOfWrappedLine = (viewCol === modelCol)          ⟺ row.start == line.start
+/// isBeginningOfViewLine    = (viewCol === firstNonBlankCol)  ⟺ offset == 행 안 첫 글자
+/// if (!isFirstLineOfWrappedLine && !isBeginningOfViewLine) → ByView   else → ByModel
+/// ```
+///
+/// **왜 단계인가**: 랩을 켜면 한 줄이 여러 행이라, 세 번째 행 가운데서 ⌘← 를 눌렀을 때 줄 머리로
+/// 튀면 화면에서 커서가 두 행 위로 사라진다. 클릭(`native-editor-visual-mapping.md` 「줄 끝이
+/// 아니라 행 끝」)과 세로 이동(§4.1g)이 이미 행을 보는데 가로 끝 이동만 줄을 보던 것이 어긋남이다.
+/// 그렇다고 행에서 멈추기만 하면 **줄 머리로 갈 길이 없어지므로** 한 번 더 누르면 넓어진다.
+pub fn lineStartScope(
+    bytes: []const u8,
+    line: line_index.Line,
+    offset: usize,
+    row: VisualRow,
+) LineEdgeScope {
+    // 줄의 **첫 행**이면 행과 줄이 같은 질문이다 — 토글을 가진 줄 경로가 답한다.
+    if (row.start <= line.start) return .line;
+    // 이미 **행 첫 글자**면 한 단계 넓힌다.
+    if (offset == firstNonBlank(bytes, row.start, @min(row.end, line.contentEnd()))) return .line;
+    return .row;
+}
+
+/// `⌘→` 의 단계 — **행 끝 → 줄 끝**으로 넓어진다. `lineStartScope` 의 거울이다.
+///
+/// VS Code `_moveToLineEnd`(원문 2026-09-25):
+///
+/// ```
+/// isEndOfViewLine        = (viewCol === viewMaxCol)                      ⟺ offset >= row.end
+/// isEndLineOfWrappedLine = (viewMaxCol - viewCol === modelMaxCol - modelCol) ⟺ 마지막 행인가
+/// if (isEndOfViewLine || isEndLineOfWrappedLine) → ByModel   else → ByView
+/// ```
+///
+/// `isEndLineOfWrappedLine` 은 "caret 뒤에 남은 글자 수가 행과 줄에서 같다" 이고, 그것은 **caret 이
+/// 든 행이 줄의 마지막 행**이라는 뜻이다 — offset 축에서는 `row.end >= line.contentEnd()` 다.
+pub fn lineEndScope(line: line_index.Line, offset: usize, row: VisualRow) LineEdgeScope {
+    if (offset >= row.end) return .line; // 이미 행 끝 — 한 단계 넓힌다
+    if (row.end >= line.contentEnd()) return .line; // 줄의 마지막 행 — 행과 줄이 같은 질문이다
+    return .row;
+}
+
+/// 행 안 **첫 글자**(들여쓰기 뒤). `lineStartScope` 가 `.row` 를 냈을 때의 착지점이다.
+///
+/// 토글이 **없다** — 토글은 `lineStartScope` 가 소유한다(거기서 `.row` 가 나왔다는 것 자체가
+/// "아직 행 첫 글자가 아니다" 라는 뜻이다). 두 자리에 두면 규칙이 둘이 된다.
+pub fn rowStartSmart(bytes: []const u8, line: line_index.Line, row: VisualRow) usize {
+    return firstNonBlank(bytes, row.start, @min(row.end, line.contentEnd()));
+}
+
+/// 행 **끝**. `lineEndScope` 가 `.row` 를 냈을 때의 착지점이다.
+///
+/// **이음매가 `movedVisualRow` 와 반대다**(의도): 그쪽은 목표 열이 경계에 걸리면 **뒤 행 머리**를
+/// 고르는데(세로 이동은 "어느 행에 서는가" 를 묻는다), ⌘→ 는 **앞 행 끝**을 원한다. 같은 offset 을
+/// 두 질문이 다르게 부르는 것이라 한쪽에 맞추면 다른 쪽이 틀린다.
+pub fn rowEnd(line: line_index.Line, row: VisualRow) usize {
+    return @min(row.end, line.contentEnd());
+}
+
+fn firstNonBlank(bytes: []const u8, start: usize, end: usize) usize {
+    var i = start;
+    while (i < end and (bytes[i] == ' ' or bytes[i] == '\t')) i += 1;
+    return i;
+}
+
 /// 목표 열을 들고 다른 줄로 옮긴 자리.
 ///
 /// **목표가 `line_end`면 어느 줄에서도 그 줄 끝**이다 — End를 누르고 아래로 내려가면 계속 줄
@@ -339,6 +428,65 @@ test "MOT5: 목표가 line_end면 어느 줄에서도 줄 끝을 따라간다" {
         const line = idx.line(i).?;
         try testing.expectEqual(line.contentEnd(), offsetForGoal(s, line, .line_end, map));
     }
+}
+
+test "MOT9: ⌘← 는 행 첫 글자 → 줄 첫 글자 → 줄 머리로 넓어진다 (§3.2)" {
+    // **랩을 켜면 한 줄이 여러 행이다.** 세 번째 행 가운데서 눌렀는데 줄 머리로 튀면 커서가 화면에서
+    // 두 행 위로 사라진다 — 클릭과 세로 이동은 이미 행을 보는데 가로만 줄을 보던 어긋남이다.
+    const s = "    hello world foo\n";
+    var idx = try line_index.build(testing.allocator, s);
+    defer idx.deinit();
+    const line = idx.line(0).?;
+    try testing.expectEqual(@as(usize, 19), line.contentEnd());
+
+    // 랩이 [0,10) · [10,19) 두 행으로 쪼갰다고 하자(제품은 이것을 렌더 스냅숏에서 읽는다).
+    const row0 = VisualRow{ .start = 0, .end = 10 };
+    const row1 = VisualRow{ .start = 10, .end = 19 };
+
+    // ① 이어지는 행 **가운데** → 그 행까지만.
+    try testing.expectEqual(LineEdgeScope.row, lineStartScope(s, line, 14, row1));
+    try testing.expectEqual(@as(usize, 10), rowStartSmart(s, line, row1));
+
+    // ② 이미 **행 첫 글자** → 한 단계 넓혀 줄로. 줄 경로의 토글이 줄 첫 글자(4)를 준다.
+    try testing.expectEqual(LineEdgeScope.line, lineStartScope(s, line, 10, row1));
+    try testing.expectEqual(@as(usize, 4), lineStartSmart(s, line, 10));
+
+    // ③ 줄 첫 글자에서 한 번 더 → 줄 머리(0).
+    try testing.expectEqual(@as(usize, 0), lineStartSmart(s, line, 4));
+
+    // **줄의 첫 행이면 행과 줄이 같은 질문**이다 — 토글을 가진 줄 경로가 답한다.
+    try testing.expectEqual(LineEdgeScope.line, lineStartScope(s, line, 7, row0));
+
+    // 행이 **공백으로 시작하면** 그 공백 뒤가 행 첫 글자다(행 안에서도 들여쓰기를 건너뛴다).
+    const row1b = VisualRow{ .start = 9, .end = 19 };
+    try testing.expectEqual(@as(usize, 10), rowStartSmart(s, line, row1b));
+    try testing.expectEqual(LineEdgeScope.row, lineStartScope(s, line, 15, row1b));
+    try testing.expectEqual(LineEdgeScope.line, lineStartScope(s, line, 10, row1b));
+}
+
+test "MOT10: ⌘→ 는 행 끝 → 줄 끝으로 넓어지고, ^A 는 토글 없이 줄 머리다" {
+    const s = "    hello world foo\n";
+    var idx = try line_index.build(testing.allocator, s);
+    defer idx.deinit();
+    const line = idx.line(0).?;
+    const row0 = VisualRow{ .start = 0, .end = 10 };
+    const row1 = VisualRow{ .start = 10, .end = 19 };
+
+    // ① 이어지는 행이 **더 남았고** caret 이 행 끝이 아니면 → 그 행 끝(10).
+    try testing.expectEqual(LineEdgeScope.row, lineEndScope(line, 5, row0));
+    try testing.expectEqual(@as(usize, 10), rowEnd(line, row0));
+
+    // ② 이미 **행 끝** → 한 단계 넓혀 줄 끝(19).
+    try testing.expectEqual(LineEdgeScope.line, lineEndScope(line, 10, row0));
+    try testing.expectEqual(@as(usize, 19), lineEnd(line));
+
+    // **줄의 마지막 행**이면 행 끝이 곧 줄 끝이라 한 번에 간다(VS Code `isEndLineOfWrappedLine`).
+    try testing.expectEqual(LineEdgeScope.line, lineEndScope(line, 14, row1));
+
+    // `^A` 는 **어느 자리에서도** 줄 머리다 — `lineStartSmart` 와 일부러 갈린다.
+    try testing.expectEqual(@as(usize, 0), lineStart(line));
+    try testing.expectEqual(@as(usize, 4), lineStartSmart(s, line, 7)); // 토글은 첫 글자를 준다
+    try testing.expectEqual(@as(usize, 0), lineStart(line)); // ^A 는 그대로 0
 }
 
 test "MOT8: 넓은 글자 안쪽 열은 가장 가까운 경계다 — 클릭과 같은 규칙" {

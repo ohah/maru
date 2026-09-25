@@ -13720,14 +13720,27 @@ pub const AppSession = struct {
                     const m = key_event.modifiers;
                     const extend = m.shift;
                     const motion: ?editor_ops.Motion = switch (key_event.key) {
-                        .arrow_left => if (m.option) .word_left else if (m.command) .line_start else .char_left,
-                        .arrow_right => if (m.option) .word_right else if (m.command) .line_end else .char_right,
+                        // **`⌘←`/`⌘→`·`Home`/`End` 는 랩이 켜지면 행부터다**(§3.2, VS Code
+                        // `CursorHome`/`CursorEnd`). 랩이 꺼지면 `line_start`/`line_end` 와 같은 답이다.
+                        .arrow_left => if (m.option) .word_left else if (m.command) .row_then_line_start else .char_left,
+                        .arrow_right => if (m.option) .word_right else if (m.command) .row_then_line_end else .char_right,
                         .arrow_up => if (m.command) .doc_start else .line_up,
                         .arrow_down => if (m.command) .doc_end else .line_down,
-                        .home => if (m.command) .doc_start else .line_start,
-                        .end => if (m.command) .doc_end else .line_end,
+                        .home => if (m.command) .doc_start else .row_then_line_start,
+                        .end => if (m.command) .doc_end else .row_then_line_end,
                         .page_up => .page_up,
                         .page_down => .page_down,
+                        // **`^A`/`^E` 는 언제나 논리 줄**이다 — VS Code 가 `CursorLineStart`/
+                        // `CursorLineEnd` 를 위 둘과 **다른 명령**으로 둔 그 가름이고, 랩을 켰을 때
+                        // "줄 끝까지 한 번에" 가는 길이 여기 남는다. `^A` 는 smart home 토글도 없다
+                        // (`hard_line_start`). 편집기 Term 에는 PTY 가 없어 이 둘은 오늘 **죽은 키**였다
+                        // (제어문자로 나가지도 않는다) — 뺏는 것이 없다. `⇧` 는 위 `extend` 가 그대로
+                        // 받아 선택이 늘어난다.
+                        .char => |c| if (m.control and !m.command and !m.option) switch (c) {
+                            'a', 'A' => .hard_line_start,
+                            'e', 'E' => .line_end,
+                            else => null,
+                        } else null,
                         else => null,
                     };
                     const handled = if (motion) |how|
@@ -13748,6 +13761,12 @@ pub const AppSession = struct {
                         //
                         // 경계는 `motion.zig`가 소유한다 — 이동과 **같은 자리**여야 "⌥←로 간 곳"과
                         // "⌥⌫가 지운 곳"이 갈리지 않는다.
+                        //
+                        // **`⌘` 는 예외다**(2026-09-25): 랩이 켜지면 `⌘←`/`⌘→` 는 **행**부터 가는데
+                        // `⌘⌫`/`⌘⌦` 는 **줄**까지 지운다. VS Code 가 같게 가른다 — `DeleteAllLeft`/
+                        // `DeleteAllRight` 가 model(논리 줄) 기준이고 `CursorHome`/`CursorEnd` 만
+                        // 하이브리드다(원문 확인). 지우는 것은 되돌리기 어려워 **행에서 멈추는 쪽이
+                        // 안전**하고, 위 `⌥` 짝은 그대로 같은 자리에 남는다.
                         .backspace => editor_ops.deleteBy(self, active, true, if (m.option)
                             .word
                         else if (m.command)

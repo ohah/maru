@@ -742,15 +742,17 @@
 
 **기하로 묶기로 한 근거 — 다른 편집기·터미널이 저장소 크기를 정하는 법**(2026-09-24 조사, 코드 표현은 옮기지 않았다).
 어느 것도 입력에서 세는 공식이나 "모자라면 다시 그리기"를 쓰지 않는다 — **기하로 미리 잡거나, 방출 도중 늘린다.**
-우리는 컴포넌트가 할당하지 않으므로 앞쪽을 택했다.
+GPU 로 그리는 편집기의 가장 가까운 선례(VS Code 실험 GPU 렌더러)가 **글자는 기하로** 묶는다 — 글자(run·글자
+바이트)는 그 방식을 택했다. 모양이 있는 장식(op)은 선례가 늘어나는 저장소 쪽이고, 그 선택은 B2 가 한다.
 
 | 대상 | 방식 | 확인 |
 |---|---|---|
 | Neovim | 격자(`grid_resize`) + 셀마다 강조 id(`grid_line` 의 `[text, hl_id]`) | UI 프로토콜 문서 `runtime/doc/api-ui-events.txt`(Apache-2.0). **Vim 자체는** 소스를 보지 않았다(라이선스 규율) |
 | xterm.js WebGL | `cols × rows × 셀당 고정 개수`, 크기가 바뀔 때만 새로 잡는다 | `GlyphRenderer.ts` `clear()` |
 | Ghostty | 행마다 `열 × 3`을 격자로 미리 잡고 유지 + 결합·다중 치환이면 방출 도중 늘린다("exceedingly rare") | `renderer/cell.zig` `Contents.resize` |
-| VS Code | 방출 도중 늘린다(`StringBuilder`가 조각을 넘긴다). 한도는 줄 단위 정책(`stopRenderingLineAfter` 10000) | `stringBuilder.ts`·`editorOptions.ts` |
-| Zed(gpui) | 프레임 arena 1MB 조각 — 매 프레임 비우되 조각은 유지, 모자라면 다음 조각. run은 `SmallVec`에서 힙으로 | `arena.rs`·`text_system.rs`(Apache-2.0). `crates/editor`는 GPL이라 보지 않았다 |
+| VS Code (DOM, 기본) | 방출 도중 늘린다(`StringBuilder`가 조각을 넘긴다). 한도는 줄 단위 정책(`stopRenderingLineAfter` 10000) | `stringBuilder.ts`·`editorOptions.ts` |
+| VS Code (실험 GPU, 기본 꺼짐) | **글자 셀은 기하로** — `보이는 줄 × 2000열 × 셀당 6` 을 잡고 줄 수가 늘면 32줄 단위로 다시 잡는다. 2000열을 넘는 줄·RTL·색만 바꾸는 것이 아닌 인라인 장식이 있는 줄은 **그 줄만 DOM 으로** 넘긴다. 사각형 버퍼(`ObjectCollectionBuffer`, 가득 차면 2배)는 세로 눈금자가 쓰고, 선택·검색 강조 같은 장식은 DOM 부품이 그린다 | `viewportRenderStrategy.ts`·`viewGpuContext.ts`(`maxGpuCols`·`canRenderDetailed`)·`objectCollectionBuffer.ts`·`rulersGpu.ts` |
+| Zed (gpui) | 그리기 결과를 `Scene` 의 **종류별 `Vec`**(quads·underlines·스프라이트)에 담고 매 프레임 `clear()` — 용량은 유지하며 늘어난다. 글자는 모양을 잡은 스프라이트 **값**이라 다른 버퍼를 가리키지 않는다. 요소 트리는 1MB 조각 arena | `scene.rs`·`arena.rs`·`text_system.rs` — permissive(Apache-2.0)인 gpui 만 참고했다 |
 
 **이 계획 밖**: `session_dock`의 draw 몫(호출자가 추정)과 `archive_detail`(크기 함수 없음) — 같은 규칙의
 위반이지만 편집기가 아니고 제보도 없다. 층 규칙 문서가 그 둘을 「규칙 밖」으로 적어 둔다.

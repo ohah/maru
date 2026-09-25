@@ -1497,9 +1497,18 @@ fn paintWhitespace(props: Props, layout: geometry.Layout, visual: []const visual
             for (marks[0..k], sel_buf[0..k]) |m, *r| r.* = .{ .start = m.start, .end = m.start + m.len };
             sels = sel_buf[0..k];
         }
-        const got = whitespace.collect(line, props.render_whitespace, sels, offsets);
-        if (got == 0) continue;
         const row_end = v.start_col + layout.content.width;
+        // **이 행의 byte 창**(WSF3) — 조각 시작 byte 에서 행 오른쪽 끝 열까지 걷는다. 줄 처음부터 모으면 공백이 작업 칸보다 많은 긴 줄에서
+        // 뒤 조각·가로로 민 창이 빈다. 인레이 폭은 빼고 걷는다 — 열이 덜 늘어 창이 넓어질 뿐(더 모으고 아래에서 자른다)이다.
+        var end_byte: usize = v.start_byte;
+        var end_col: u32 = v.start_byte_col;
+        while (end_byte < line.len and end_col < row_end) {
+            const st = content.stepColumn(line, end_byte, end_col, props.tab_width);
+            end_byte = st.next_byte;
+            end_col = st.next_col;
+        }
+        const got = whitespace.collect(line, props.render_whitespace, sels, .{ .start = v.start_byte, .end = @intCast(end_byte) }, offsets);
+        if (got == 0) continue;
         content.columnsAtOffsetsWith(line, props.tab_width, offsets[0..got], cols[0..got], row_end, props.line_inlays.at(idx));
         const y = props.rect.y + @as(i32, @intCast(i)) * @as(i32, props.cell_h_px);
         for (offsets[0..got], cols[0..got]) |off, col| {
@@ -5187,4 +5196,44 @@ test "WSF2 공백 기호는 저장소를 맨 나중에 받는다 — 모자라�
     }
     try testing.expectEqual(p0.ops, k);
     try testing.expectEqual(spare, glyphs);
+}
+
+test "WSF3 공백이 작업 칸보다 많은 긴 줄 — 가로로 민 창과 랩의 뒤 조각에도 기호가 선다 (§5.1e)" {
+    // 공백 700 개 — 판정자 작업 칸(4096 byte = 자리·열 쌍 512)을 넘는다. 줄 앞에서부터 담으면 뒤쪽 창이 빈다.
+    const line = "a " ** 700;
+    const lines = [_][]const u8{line};
+    var props = testProps(&lines, false);
+    props.render_whitespace = .all;
+    const layout = geometry.compute(props.total_cols, props.total_lines, .{});
+    const width = layout.content.width;
+    var got_buf: [256][3]u32 = undefined;
+    // ⑴ 가로로 1,300 열 민 창 — 공백은 홀수 열(줄 절대 열)이다
+    props.first_col = 1300;
+    var b1: TestBuffers = .{};
+    const w1 = build(props, b1.scratch());
+    const g1 = whitespaceGlyphs(props, b1.ops[0..w1.ops], &got_buf);
+    try testing.expectEqual(@as(usize, width / 2), g1.len);
+    for (g1) |g| try testing.expect((g[0] + props.first_col) % 2 == 1 and g[1] == 0);
+    // ⑵ 랩 — 조각 25 부터 네 행(1,400 열 ÷ 49 열 = 조각 29 개; 조각 25 의 시작 byte 1,225 는 작업 칸이 담는 앞 공백 512 개 = byte 1,024 너머다).
+    // 행마다 그 행의 열 창 [start_col, start_col + 폭) 안 홀수 열이 전부 공백이다.
+    props.first_col = 0;
+    props.wrap = true;
+    props.first_piece = 25;
+    props.visible_rows = 4;
+    var b2: TestBuffers = .{};
+    const w2 = build(props, b2.scratch());
+    const g2 = whitespaceGlyphs(props, b2.ops[0..w2.ops], &got_buf);
+    const rows = b2.visual_rows[0..w2.visual_rows];
+    try testing.expectEqual(@as(usize, 4), rows.len);
+    try testing.expectEqual(@as(u32, 25), rows[0].piece);
+    var per_row = [_]usize{0} ** 4;
+    for (g2) |g| {
+        try testing.expect((g[0] + rows[g[1]].start_col) % 2 == 1);
+        per_row[g[1]] += 1;
+    }
+    for (rows, per_row) |v, c| {
+        const from = v.start_col;
+        const to = @min(v.start_col + width, 1400);
+        try testing.expectEqual(@as(usize, (to - from + from % 2) / 2), c);
+    }
 }

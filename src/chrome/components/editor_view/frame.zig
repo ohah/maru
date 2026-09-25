@@ -430,15 +430,19 @@ pub const RunTextPool = struct {
     }
 
     /// `need` 만큼 자리를 보장하고, `base` 의 run·글자를 이 저장소로 바꾼 것을 돌려준다.
+    ///
+    /// **1.5배씩 키운다.** 딱 맞게 잡으면 pane 경계·사이드바를 끌어 폭이 조금씩 넓어지는 동안 **프레임마다** 풀었다가
+    /// 다시 잡는다(그 드래그는 폭을 라이브로 바꾼다 — 창 리사이즈와 달리 보류되지 않는다). 기하급수로 키우면 그 횟수가
+    /// 로그로 준다(`std.ArrayList` 와 같은 이유 — 적대적 5회차).
     pub fn scratchFor(self: *RunTextPool, allocator: std.mem.Allocator, need: BufferSizes, base: Scratch) Scratch {
         if (self.runs.len < need.runs) {
-            if (allocator.alloc(draw.Run, need.runs)) |fresh| {
+            if (allocator.alloc(draw.Run, @max(need.runs, self.runs.len + self.runs.len / 2))) |fresh| {
                 allocator.free(self.runs);
                 self.runs = fresh;
             } else |_| {}
         }
         if (self.text_bytes.len < need.text_bytes) {
-            if (allocator.alloc(u8, need.text_bytes)) |fresh| {
+            if (allocator.alloc(u8, @max(need.text_bytes, self.text_bytes.len + self.text_bytes.len / 2))) |fresh| {
                 allocator.free(self.text_bytes);
                 self.text_bytes = fresh;
             } else |_| {}
@@ -5887,6 +5891,46 @@ test "RB2 축마다 따로 좁혀도 번호가 다 선다 — run 만 반, 글�
     const half_text = try ar.alloc(u8, sizes.text_bytes / 2);
     const wt = build(props, bufs.scratch(full_runs, half_text));
     try testing.expectEqual(want, numberOps(ops[0..wt.ops], props));
+
+    // **뒤 층은 절반까지만 가져간다** — 저장소를 뒤 층 몫만큼만 줘도 본문이 통째로 비지 않는다(`frontShare`).
+    const tail_only = try ar.alloc(draw.Run, sizes.runs - sizes.body_runs);
+    const wb = build(props, bufs.scratch(tail_only, full_text));
+    try testing.expect(bodyTextOps(ops[0..wb.ops], props) > 0);
+}
+
+/// 판정자용 — 본문 글자 op 수(본문 시작 열부터).
+fn bodyTextOps(ops: []const draw.Op, props: Props) usize {
+    const layout = layoutOf(props);
+    const content_start_px = props.rect.x + @as(i32, layout.content.start) * @as(i32, props.cell_w_px);
+    var seen: usize = 0;
+    for (ops) |op| if (op == .text and op.text.origin.x >= content_start_px) {
+        seen += 1;
+    };
+    return seen;
+}
+
+test "RB7 글자가 한 칸 추정치를 넘는 줄에서도 번호 글자 몫은 남는다 — 넉넉한 저장소에서도 뒤 층 몫을 떼는 이유" {
+    // run 은 불변식(한 run ≥ 한 칸)이 본문을 자기 몫 안에 묶으므로 넉넉할 때 몫을 안 떼도 결과가 같다(등가).
+    // **글자는 그런 불변식이 없다** — ZWJ 이모지 하나가 두 칸에 25바이트라 한 칸 4바이트 추정을 넘고, 탭이 있어
+    // 전개가 저장소를 쓴다. 몫을 안 떼면 본문이 gutter 글자 몫까지 먹어 번호가 사라진다.
+    const a = testing.allocator;
+    const ops = try a.alloc(draw.Op, 4000);
+    defer a.free(ops);
+    var bufs: WideBuffers = .{ .ops = ops };
+    const heavy = "\t" ++ ("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}" ** 30);
+    var lines: [40][]const u8 = undefined;
+    for (&lines) |*l| l.* = heavy;
+    var props = testProps(&lines, false);
+    props.visible_rows = 20;
+    const sizes = bufferSizes(props);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const ar = arena.allocator();
+    const runs = try ar.alloc(draw.Run, sizes.runs);
+    const text = try ar.alloc(u8, sizes.text_bytes);
+    const w = build(props, bufs.scratch(runs, text));
+    try testing.expect(w.truncated); // 본문 글자는 추정을 넘어 잘렸다 — 경쟁이 실제로 났다
+    try testing.expectEqual(@as(usize, 20), numberOps(ops[0..w.ops], props)); // 그래도 번호는 행마다 선다
 }
 
 test "RB5 shareRange — 넉넉하면 몫 그대로·모자라면 비례·몫이 없으면 균등, 마지막이 나머지를 갖는다" {
@@ -5898,6 +5942,7 @@ test "RB5 shareRange — 넉넉하면 몫 그대로·모자라면 비례·몫이
     try testing.expectEqual(@as(usize, 100), shareRange(100, &needs, 1).end);
     // 모자라다 — 3:1 비례
     try testing.expectEqual(@as(usize, 15), shareRange(20, &needs, 0).end);
+    try testing.expectEqual(@as(usize, 15), shareRange(20, &needs, 1).start); // 시작도 비례다 — 균등(10)이 아니다
     try testing.expectEqual(@as(usize, 20), shareRange(20, &needs, 1).end);
     // 몫이 전부 0 — 균등
     const zero = [_]usize{ 0, 0, 0, 0 };
@@ -5923,4 +5968,9 @@ test "RB6 RunTextPool — 할당이 실패해도 호출자가 준 저장소보�
     try testing.expectEqual(@as(usize, 1000), grown.runs.len);
     const again = pool.scratchFor(testing.allocator, .{ .runs = 10, .text_bytes = 10 }, base);
     try testing.expectEqual(grown.runs.ptr, again.runs.ptr);
+    // **조금씩 커질 때 매번 다시 잡지 않는다** — 1.5배로 키우므로 1001 은 1500 을 잡고, 1400 은 그 안에 든다.
+    const step1 = pool.scratchFor(testing.allocator, .{ .runs = 1001, .text_bytes = 10 }, base);
+    try testing.expectEqual(@as(usize, 1500), step1.runs.len);
+    const step2 = pool.scratchFor(testing.allocator, .{ .runs = 1400, .text_bytes = 10 }, base);
+    try testing.expectEqual(step1.runs.ptr, step2.runs.ptr);
 }

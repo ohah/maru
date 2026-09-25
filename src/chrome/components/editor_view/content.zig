@@ -3498,3 +3498,48 @@ test "SEEK2 못 믿을 체크포인트는 «무시한다» — 조용한 오답�
     const past_end = expandTabs(line, 4, &out_b, .{ .start = 3, .count = 40, .seek = .{ .byte = 999, .col = 0 } });
     try testing.expectEqualStrings(plain.text, past_end.text);
 }
+
+// ── run 절단은 조용하지 않다(visual-mapping §4 — 2026-09-24 RB2 가 잡은 결함) ────────────────────────────
+// 절단의 모양이 셋이고 **각자 따로** 센다 — 한 입력에 둘이 같이 켜지면 하나를 지워도 다른 하나가 `truncated` 를
+// 세워 변이가 살아남는다(적대적 4회차에서 그랬다). 그래서 모양마다 그것만 켜지는 입력을 둔다.
+
+test "CTR1 run 이 떨어져 행을 통째로 건너뛰면 그 행 수만큼 절단으로 센다 — 색이 없어 뭉개짐은 안 켜진다" {
+    const layout = geometry.compute(40, 5, .{});
+    var ops: [16]draw.Op = undefined;
+    var runs: [2]draw.Run = undefined; // 무색 행은 run 하나 — 두 행만 들어간다
+    var vrows: [8]visual_map.VisualRow = undefined;
+    var scratch: [256]u8 = undefined;
+    const rows = [_]Row{ .{ .bytes = "a" }, .{ .bytes = "b" }, .{ .bytes = "c" }, .{ .bytes = "d" }, .{ .bytes = "e" } };
+    const w = build(testProps(layout, &rows), &ops, &scratch, &runs, &vrows);
+    try testing.expectEqual(@as(usize, 3), w.truncated_rows);
+}
+
+test "CTR2 칸이 모자라 남은 글자를 마지막 칸에 몰면 절단으로 센다 — 글자는 다 나온다" {
+    const layout = geometry.compute(40, 1, .{});
+    var ops: [4]draw.Op = undefined;
+    var runs: [3]draw.Run = undefined; // 열마다 색이 바뀌는 줄에 세 칸 — 넷째부터 몰린다
+    var vrows: [4]visual_map.VisualRow = undefined;
+    var scratch: [256]u8 = undefined;
+    const colors = [_]ColorSpan{
+        .{ .start_col = 0, .end_col = 1, .role = .syntax_keyword },
+        .{ .start_col = 2, .end_col = 3, .role = .syntax_string },
+        .{ .start_col = 4, .end_col = 5, .role = .syntax_number },
+        .{ .start_col = 6, .end_col = 7, .role = .syntax_comment },
+    };
+    const rows = [_]Row{.{ .bytes = "abcdefgh", .colors = &colors }};
+    const w = build(testProps(layout, &rows), &ops, &scratch, &runs, &vrows);
+    try testing.expectEqual(@as(usize, 1), w.truncated_rows);
+    var buf: [16]u8 = undefined;
+    try testing.expectEqualStrings("abcdefgh", joinRuns(&buf, runs[0..w.runs]));
+}
+
+test "CTR3 위젯 글자를 못 실어도 절단으로 센다 — 그 아래 본문 행도 따로 센다" {
+    const layout = geometry.compute(40, 2, .{});
+    var ops: [8]draw.Op = undefined;
+    var runs: [1]draw.Run = undefined; // 첫 행이 하나를 쓰면 위젯과 그 줄은 남는 칸이 없다
+    var vrows: [8]visual_map.VisualRow = undefined;
+    var scratch: [256]u8 = undefined;
+    const rows = [_]Row{ .{ .bytes = "a" }, .{ .bytes = "b", .widget = .{ .text = "Accept Current" } } };
+    const w = build(testProps(layout, &rows), &ops, &scratch, &runs, &vrows);
+    try testing.expectEqual(@as(usize, 2), w.truncated_rows); // 위젯 하나 + 본문 행 하나
+}

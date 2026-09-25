@@ -1200,7 +1200,7 @@ pub fn maybeDebugOpenNativeEditor(self: *AppSession) void {
     self.metal_dirty = true;
 }
 
-/// 강제된 **편집기 caret**(캡처 전용, `MARU_FORCE_EDITOR_CARET=<줄>:<열>`, 1-based).
+/// 강제된 **편집기 caret**(캡처 전용, `MARU_FORCE_EDITOR_CARET=<줄>:<열>`, 1-based) — `<줄>:<열>-<줄>:<열>` 이면 선택.
 ///
 /// 상태바의 커서 위치 항목은 **선택이 있을 때만** 뜨는데(§2.2), 선택은 클릭으로만 생긴다 —
 /// 포인터가 없는 캡처 하니스에서는 그 항목이 있는 화면을 얻을 방법이 아예 없다. 커밋 메시지·
@@ -1217,19 +1217,28 @@ pub fn applyForcedEditorCaret(self: *AppSession) void {
     // 키 훅은 caret 이 **선 뒤에** 한 번만 도므로, 그 래치가 서면 여기서 손을 뗀다.
     if (self.debug_diff_caret_keys_done) return;
     const spec = std.mem.span(raw);
-    const colon = std.mem.indexOfScalar(u8, spec, ':') orelse return;
-    const want_line = std.fmt.parseInt(usize, spec[0..colon], 10) catch return;
-    const want_col = std.fmt.parseInt(usize, spec[colon + 1 ..], 10) catch return;
-    if (want_line == 0 or want_col == 0) return;
-
     const pane = pane_ops.activePane(self);
     const term = pane.activeTerm();
     if (term.kind != .editor) return;
     const doc = term.rt.editor_doc orelse return;
-    const line = doc.file.lines.line(want_line - 1) orelse return;
+    // **`<줄>:<열>-<줄>:<열>` 이면 선택이다**(앞이 anchor · 뒤가 focus) — 선택 안에서만 서는 장식(공백 표시 §5.1e)을 찍으려면 선택이 있어야 한다.
+    if (std.mem.indexOfScalar(u8, spec, '-')) |dash| {
+        const anchor = forcedOffset(doc, spec[0..dash]) orelse return;
+        const focus = forcedOffset(doc, spec[dash + 1 ..]) orelse return;
+        term.rt.editor_selection = maru.session.editor.selection.Selection.fromPoints(anchor, focus);
+    } else {
+        term.rt.editor_selection = maru.session.editor.selection.Selection.at(forcedOffset(doc, spec) orelse return);
+    }
+    self.metal_dirty = true;
+}
 
-    // 열을 클러스터로 세어 offset을 찾는다 — 상태바가 되짚는 것과 **같은 축**이라야 캡처가
-    // 보여주는 값이 요청한 값과 같다.
+/// `<줄>:<열>`(1-based, 열은 그래핌 클러스터 — 상태바가 되짚는 것과 **같은 축**) → 문서 offset.
+fn forcedOffset(doc: anytype, spec: []const u8) ?usize {
+    const colon = std.mem.indexOfScalar(u8, spec, ':') orelse return null;
+    const want_line = std.fmt.parseInt(usize, spec[0..colon], 10) catch return null;
+    const want_col = std.fmt.parseInt(usize, spec[colon + 1 ..], 10) catch return null;
+    if (want_line == 0 or want_col == 0) return null;
+    const line = doc.file.lines.line(want_line - 1) orelse return null;
     var off = line.start;
     var col: usize = 1;
     const text = doc.file.content[line.start..line.contentEnd()];
@@ -1239,8 +1248,7 @@ pub fn applyForcedEditorCaret(self: *AppSession) void {
         off = line.start + i;
         col += 1;
     }
-    term.rt.editor_selection = maru.session.editor.selection.Selection.at(off);
-    self.metal_dirty = true;
+    return off;
 }
 
 /// 강제된 **편집기 세로 스크롤**(캡처 전용, `MARU_FORCE_EDITOR_TOP=<줄>`, 1-based) — 그 줄이 화면 맨 위에 오게 한다(sticky scroll 을 찍는

@@ -26,8 +26,7 @@ const std = @import("std");
 const subject_words = [_][]const u8{ "a11y", "e2e", "stage3", "i18n" };
 
 /// 슬라이스 ID 로 이름 붙은 판정자 — **줄어들기만 한다.**
-const slice_named = [_][]const u8{
-};
+const slice_named = [_][]const u8{};
 
 /// 목록 길이. 줄을 지우면 이 수도 함께 줄여야 한다.
 const expected_entries: usize = 0;

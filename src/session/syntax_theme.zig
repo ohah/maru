@@ -213,13 +213,22 @@ pub fn indentGuideFromTheme(theme: appearance.ResolvedTheme) color.Rgb {
     return .{ .r = toward(bg.r, fg.r, 18), .g = toward(bg.g, fg.g, 18), .b = toward(bg.b, fg.b, 18) };
 }
 
-/// 공백 표시 기호 색(§5.1e) — 바탕을 본문색 쪽으로 다크 **16 %** · 라이트 **20 %**. VS Code `editorWhitespace.foreground`: 다크 `#e3e4e229`
-/// (`#e3e4e2` 16 %) · 라이트 `#33333333`(`#333333` 20 %) — 바탕 위에 얹힌 알파를 비율로 옮긴다.
+/// 공백 표시 기호 색(§5.1e) — VS Code `editorWhitespace.foreground` 를 **바탕 위에 얹은 색**: 다크 `#e3e4e229`(알파 41/255 ≈ 16 %) · 라이트
+/// `#33333333`(51/255 = 20 %). 테마 본문색 쪽으로 섞지 않는다 — VS Code 의 값은 테마와 무관한 상수이고, 본문색으로 섞으면 라이트 흰 바탕에서
+/// `#cccccc`(VS Code `#d6d6d6`)로 짙어진다.
 pub fn whitespaceFromTheme(theme: appearance.ResolvedTheme) color.Rgb {
     const bg = theme.background;
-    const fg = theme.foreground;
-    const pct: u16 = if (color.relativeLuminance(bg) < 0.2) 16 else 20;
-    return .{ .r = toward(bg.r, fg.r, pct), .g = toward(bg.g, fg.g, pct), .b = toward(bg.b, fg.b, pct) };
+    const dark = color.relativeLuminance(bg) < 0.2;
+    const over: color.Rgb = if (dark) .{ .r = 0xe3, .g = 0xe4, .b = 0xe2 } else .{ .r = 0x33, .g = 0x33, .b = 0x33 };
+    const alpha: i32 = if (dark) 0x29 else 0x33;
+    return .{ .r = overAlpha(bg.r, over.r, alpha), .g = overAlpha(bg.g, over.g, alpha), .b = overAlpha(bg.b, over.b, alpha) };
+}
+
+/// `to` 를 알파 `alpha`/255 로 `from` 위에 얹는다(반올림).
+fn overAlpha(from: u8, to: u8, alpha: i32) u8 {
+    const f: i32 = from;
+    const t: i32 = to;
+    return @intCast(f + @divFloor((t - f) * alpha * 2 + 255, 510));
 }
 
 /// 활성 안내선 색(§5.1c) — **44 %**. VS Code `activeBackground1`: 다크 `#707070`(≈ 45 %) · 라이트 `#939393`(≈ 42 %).
@@ -723,7 +732,7 @@ test "BPT1 괄호 쌍 색 — 다크는 ANSI 11·13·12, 라이트는 4·2·3(VS
     try std.testing.expectEqual(t.palette[3].?, light.levels[2]);
 }
 
-test "WST1 공백 기호 색 — 다크 16 % · 라이트 20 %(VS Code `editorWhitespace.foreground`) (visual-mapping §5.1e)" {
+test "WST1 공백 기호 색 — VS Code `editorWhitespace.foreground`(다크 `#e3e4e229` · 라이트 `#33333333`)를 바탕에 얹은 색 (visual-mapping §5.1e)" {
     var t: appearance.ResolvedTheme = .{
         .background = .{ .r = 0x1e, .g = 0x1e, .b = 0x1e },
         .foreground = .{ .r = 0xd4, .g = 0xd4, .b = 0xd4 },
@@ -737,10 +746,16 @@ test "WST1 공백 기호 색 — 다크 16 % · 라이트 20 %(VS Code `editorWh
         .accent = .{ .r = 0xdd, .g = 0xa1, .b = 0x5e },
         .min_contrast = 0,
     };
-    // 다크: 30 + 16 % × 182 = 59.1 → 59(0x3b) — VS Code `#e3e4e229` 를 `#1e1e1e` 에 얹으면 ≈ `#3d3d3d`
-    try std.testing.expectEqual(color.Rgb{ .r = 0x3b, .g = 0x3b, .b = 0x3b }, whitespaceFromTheme(t));
-    // 라이트: 255 − 20 % × 255 = 204 → 0xcc — VS Code `#33333333` 를 흰 바탕에 얹으면 ≈ `#d6d6d6`
+    // 다크 `#1e1e1e`: 30 + (227 − 30) × 41/255 = 61.7 → 0x3e · g 61.8 → 0x3e · b 61.5 → 0x3e(반올림). 본문색과 무관하다.
+    try std.testing.expectEqual(color.Rgb{ .r = 0x3e, .g = 0x3e, .b = 0x3e }, whitespaceFromTheme(t));
+    t.foreground = .{ .r = 0xff, .g = 0x00, .b = 0x00 };
+    try std.testing.expectEqual(color.Rgb{ .r = 0x3e, .g = 0x3e, .b = 0x3e }, whitespaceFromTheme(t));
+    // 라이트 흰 바탕: 255 − 204 × 51/255 = 214.2 → 0xd6(VS Code 가 흰 바탕에 얹는 값)
     t.background = .{ .r = 0xff, .g = 0xff, .b = 0xff };
-    t.foreground = .{ .r = 0x00, .g = 0x00, .b = 0x00 };
-    try std.testing.expectEqual(color.Rgb{ .r = 0xcc, .g = 0xcc, .b = 0xcc }, whitespaceFromTheme(t));
+    try std.testing.expectEqual(color.Rgb{ .r = 0xd6, .g = 0xd6, .b = 0xd6 }, whitespaceFromTheme(t));
+    // 다크·라이트의 경계(상대 휘도 0.2) — `#505050`(0.08)은 다크 쪽, `#a0a0a0`(0.35)는 라이트 쪽
+    t.background = .{ .r = 0x50, .g = 0x50, .b = 0x50 };
+    try std.testing.expectEqual(color.Rgb{ .r = 0x68, .g = 0x68, .b = 0x67 }, whitespaceFromTheme(t));
+    t.background = .{ .r = 0xa0, .g = 0xa0, .b = 0xa0 };
+    try std.testing.expectEqual(color.Rgb{ .r = 0x8a, .g = 0x8a, .b = 0x8a }, whitespaceFromTheme(t));
 }

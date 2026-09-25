@@ -1469,65 +1469,149 @@ fn paintIndentGuides(props: Props, layout: geometry.Layout, visual: []const visu
     return n;
 }
 
-const whitespace_dot = [_]draw.Run{.{ .text = "\u{b7}" }};
+/// 이어진 공백 `k` 칸의 기호 — `whitespace_dots[k - 1 .. k]` 가 `·` × k 한 run 이다. 이어진 공백을 op 하나로 그린다(§5.1e — 기호마다 op 이면
+/// 들여쓰기 깊은 화면에서 op 저장소가 먼저 바닥나 아래 행의 기호가 사라진다).
+const whitespace_run_max = 64;
+const whitespace_dots = blk: {
+    const dots = "\u{b7}" ** whitespace_run_max;
+    var runs: [whitespace_run_max]draw.Run = undefined;
+    for (&runs, 0..) |*r, k| r.* = .{ .text = dots[0 .. (k + 1) * "\u{b7}".len] };
+    break :blk runs;
+};
 const whitespace_arrow = [_]draw.Run{.{ .text = "\u{2192}" }};
 
+/// 공백 표시의 한 행 — 모은 자리 `[begin, 다음 행의 begin)` 과 그 행의 열 창 `[start_col, row_end)`.
+const WhitespaceRow = struct { visual: u32, begin: u32, start_col: u32, row_end: u32 };
+
 /// **공백 표시**(§5.1e) — 기호를 세울 공백·탭(`whitespace.collect`)의 자리에 공백은 `·`, 탭은 첫 칸에 `→`. 열 계산은 선택 강조와 같은
-/// `columnsAtOffsetsWith` 한 번(랩 조각 · 가로 스크롤 · 인레이를 같은 규칙으로 지난다). 조각마다 그 조각의 열 창에 드는 것만 낸다.
+/// `columnsAtOffsetsWith`(랩 조각 · 가로 스크롤 · 인레이를 같은 규칙으로 지난다).
+///
+/// **같은 줄의 이어진 행을 묶어 열을 한 번만 걷는다.** 그 함수는 줄 처음부터 걸으므로 행마다 부르면 깊이 스크롤한 긴 랩 줄에서 행 수만큼
+/// 곱해진다(실측 ReleaseFast · 99,000 열 한 줄 · 40 행: 행마다 +8.6 ms, 묶으면 — §5.1e 적대적 기록). 작업 칸이 모자라면 묶음을 끊고
+/// 거기서 다시 시작한다.
 fn paintWhitespace(props: Props, layout: geometry.Layout, visual: []const visual_map.VisualRow, out: []draw.Op, scratch: []u8) usize {
-    if (props.render_whitespace == .none) return 0;
-    // 작업 칸 — 자리(offsets)와 열(cols) 둘. 모자라면 앞에서부터 담은 만큼만(줄 앞쪽이 먼저 보인다).
+    const mode = props.render_whitespace;
+    if (mode == .none) return 0;
+    // 작업 칸 — 자리(offsets)와 열(cols) 둘.
     const pairs = scratch.len / (2 * @sizeOf(u32));
     if (pairs == 0) return 0;
     const offsets = std.mem.bytesAsSlice(u32, scratch[0 .. pairs * @sizeOf(u32)]);
     const cols = std.mem.bytesAsSlice(u32, scratch[pairs * @sizeOf(u32) .. pairs * 2 * @sizeOf(u32)]);
-    var sel_buf: [64]whitespace.Range = undefined;
+    const width = layout.content.width;
+    var rows: [64]WhitespaceRow = undefined;
+    var sel_buf: [256]whitespace.Range = undefined;
     var n: usize = 0;
-    for (visual, 0..) |v, i| {
-        if (n >= out.len) break;
-        if (v.kind != .text) continue; // 위젯 행은 문서 줄이 아니다
-        const idx = v.docIndex(props.first_line);
-        if (idx >= props.lines.len) continue;
+    var i: usize = 0;
+    while (i < visual.len and n < out.len) {
+        const v0 = visual[i];
+        // 위젯 행은 문서 줄이 아니다
+        const idx = v0.docIndex(props.first_line);
+        if (v0.kind != .text or idx >= props.lines.len) {
+            i += 1;
+            continue;
+        }
         const line = props.lines[idx];
-        var sels: []const whitespace.Range = &.{};
-        if (props.render_whitespace == .selection) {
-            const marks: []const Mark = if (props.selection_marks) |sm| (if (idx < sm.len) sm[idx] else &.{}) else &.{};
-            if (marks.len == 0) continue;
-            const k = @min(marks.len, sel_buf.len);
-            for (marks[0..k], sel_buf[0..k]) |m, *r| r.* = .{ .start = m.start, .end = m.start + m.len };
-            sels = sel_buf[0..k];
+        const marks: []const Mark = if (props.selection_marks) |sm| (if (idx < sm.len) sm[idx] else &.{}) else &.{};
+        var mi: usize = 0; // 이 행 창 앞에서 끝난 선택은 건너뛴다(행 창은 오름차순이다)
+        // ── 묶음 [i, j) — 같은 줄의 이어진 행. 행마다 창을 정하고 모은다.
+        var j = i;
+        var got: usize = 0;
+        var rn: usize = 0;
+        while (j < visual.len and rn < rows.len) : (j += 1) {
+            const v = visual[j];
+            if (v.kind != .text or v.docIndex(props.first_line) != idx) break;
+            const row_end = v.start_col + width;
+            // **이 행의 byte 창**(WSF3) — 조각 시작 byte 에서 행 오른쪽 끝 열까지 걷는다. 인레이 폭은 빼고 걷는다 — 열이 덜 늘어 창이 넓어질
+            // 뿐(더 모으고 아래에서 자른다)이다.
+            var end_byte: usize = v.start_byte;
+            var end_col: u32 = v.start_byte_col;
+            while (end_byte < line.len and end_col < row_end) {
+                const st = content.stepColumn(line, end_byte, end_col, props.tab_width);
+                end_byte = st.next_byte;
+                end_col = st.next_col;
+            }
+            // 이 행이 낼 수 있는 기호는 창의 byte 수를 넘지 않는다 — 안 들어가면 묶음을 여기서 끊는다(첫 행이면 담을 만큼만).
+            if (rn > 0 and got + (end_byte - v.start_byte) > pairs) break;
+            const window: whitespace.Range = .{ .start = v.start_byte, .end = @intCast(end_byte) };
+            // **랩 행은 VS Code 의 view line 하나다**(§5.1e) — 앞뒤 경계·`trailing`·`boundary` 의 끝 공백을 그 행의 글로 가른다. 가로로 민 창은
+            // 줄 하나의 일부일 뿐이라 줄 전체다.
+            const segment: whitespace.Segment = if (props.wrap) .{ .range = window, .continues = end_byte < line.len } else whitespace.whole_line;
+            var sels: []const whitespace.Range = &.{};
+            if (mode == .selection) {
+                while (mi < marks.len and marks[mi].start + marks[mi].len <= window.start) mi += 1;
+                var k: usize = 0;
+                var mk = mi;
+                while (mk < marks.len and marks[mk].start < window.end and k < sel_buf.len) : (mk += 1) {
+                    sel_buf[k] = .{ .start = marks[mk].start, .end = marks[mk].start + marks[mk].len };
+                    k += 1;
+                }
+                sels = sel_buf[0..k];
+            }
+            rows[rn] = .{ .visual = @intCast(j), .begin = @intCast(got), .start_col = v.start_col, .row_end = row_end };
+            rn += 1;
+            got += whitespace.collect(line, mode, sels, segment, window, offsets[got..pairs]);
         }
-        const row_end = v.start_col + layout.content.width;
-        // **이 행의 byte 창**(WSF3) — 조각 시작 byte 에서 행 오른쪽 끝 열까지 걷는다. 줄 처음부터 모으면 공백이 작업 칸보다 많은 긴 줄에서
-        // 뒤 조각·가로로 민 창이 빈다. 인레이 폭은 빼고 걷는다 — 열이 덜 늘어 창이 넓어질 뿐(더 모으고 아래에서 자른다)이다.
-        var end_byte: usize = v.start_byte;
-        var end_col: u32 = v.start_byte_col;
-        while (end_byte < line.len and end_col < row_end) {
-            const st = content.stepColumn(line, end_byte, end_col, props.tab_width);
-            end_byte = st.next_byte;
-            end_col = st.next_col;
-        }
-        const got = whitespace.collect(line, props.render_whitespace, sels, .{ .start = v.start_byte, .end = @intCast(end_byte) }, offsets);
+        // 첫 행은 늘 제 줄이라 묶음이 한 행 이상이다 — 그래도 못 나아가면 한 행 건너 끝없는 되풀이를 막는다(적대적 1회차: `docIndex` 를
+        // 비튼 변이가 여기서 멈췄다).
+        i = @max(j, i + 1);
         if (got == 0) continue;
-        content.columnsAtOffsetsWith(line, props.tab_width, offsets[0..got], cols[0..got], row_end, props.line_inlays.at(idx));
-        const y = props.rect.y + @as(i32, @intCast(i)) * @as(i32, props.cell_h_px);
-        for (offsets[0..got], cols[0..got]) |off, col| {
-            if (col < v.start_col or col >= row_end) continue; // 이 조각(가로로 민 창) 밖
-            if (n >= out.len) break;
-            const on_screen: u32 = @as(u32, layout.contentLeft()) + (col - v.start_col);
-            out[n] = .{ .text = .{
-                .origin = .{ .x = props.rect.x + @as(i32, @intCast(on_screen * props.cell_w_px)), .y = y },
-                .runs = if (line[off] == '\t') &whitespace_arrow else &whitespace_dot,
-                .role = .whitespace,
-                .max_cols = 1,
-                .font_px = props.font_px,
-                .line_height_px = props.cell_h_px,
-                .cell_w_px = props.cell_w_px,
-            } };
-            n += 1;
+        // **블록 caret 이 선 칸은 뺀다** — 본문이 그 칸의 글자를 바탕색으로 다시 그리듯(`caretColsFor`) caret 블록이 글자를 가린다. VS Code 도
+        // 블록 caret 안에는 그 자리 글자(공백이면 빈칸)만 보인다. 깜빡여 꺼진 동안은 선다.
+        const block_carets: []const u32 = if (props.caret_shape == .block and props.caret_visible)
+            (if (props.carets) |cr| (if (idx < cr.len) cr[idx] else &.{}) else &.{})
+        else
+            &.{};
+        // ── 열을 한 번 걷는다(묶음 마지막 행의 끝 열에서 멈춘다) — 자리는 행 순서로 오름차순이다(창이 겹치는 것은 걸친 탭 하나뿐이고 같은 값이다).
+        content.columnsAtOffsetsWith(line, props.tab_width, offsets[0..got], cols[0..got], rows[rn - 1].row_end, props.line_inlays.at(idx));
+        for (rows[0..rn], 0..) |r, ri| {
+            const stop: usize = if (ri + 1 < rn) rows[ri + 1].begin else got;
+            const y = props.rect.y + @as(i32, @intCast(r.visual)) * @as(i32, props.cell_h_px);
+            // 이어진 공백을 한 op 로 모은다 — `run_n` 칸, 첫 칸의 화면 열 `run_col`.
+            var run_col: u32 = 0;
+            var run_n: usize = 0;
+            var ci: usize = 0; // 블록 caret 자리(오름차순)
+            for (offsets[r.begin..stop], cols[r.begin..stop]) |off, col| {
+                if (col < r.start_col or col >= r.row_end) continue; // 이 조각(가로로 민 창) 밖
+                while (ci < block_carets.len and block_carets[ci] < off) ci += 1;
+                if (ci < block_carets.len and block_carets[ci] == off) {
+                    if (run_n > 0) n += emitWhitespace(props, out[n..], run_col, y, whitespace_dots[run_n - 1 ..][0..1], run_n);
+                    run_n = 0;
+                    continue;
+                }
+                const on_screen: u32 = @as(u32, layout.contentLeft()) + (col - r.start_col);
+                const is_tab = line[off] == '\t';
+                if (!is_tab and run_n > 0 and on_screen == run_col + run_n and run_n < whitespace_run_max) {
+                    run_n += 1;
+                    continue;
+                }
+                if (run_n > 0) n += emitWhitespace(props, out[n..], run_col, y, whitespace_dots[run_n - 1 ..][0..1], run_n);
+                run_n = 0;
+                if (is_tab) {
+                    n += emitWhitespace(props, out[n..], on_screen, y, &whitespace_arrow, 1);
+                } else {
+                    run_col = on_screen;
+                    run_n = 1;
+                }
+            }
+            if (run_n > 0) n += emitWhitespace(props, out[n..], run_col, y, whitespace_dots[run_n - 1 ..][0..1], run_n);
         }
     }
     return n;
+}
+
+/// 공백 기호 op 하나 — 화면 열 `col` 부터 `cols` 칸. 자리가 없으면 0.
+fn emitWhitespace(props: Props, out: []draw.Op, col: u32, y: i32, runs: []const draw.Run, cols: usize) usize {
+    if (out.len == 0) return 0;
+    out[0] = .{ .text = .{
+        .origin = .{ .x = props.rect.x + @as(i32, @intCast(col * props.cell_w_px)), .y = y },
+        .runs = runs,
+        .role = .whitespace,
+        .max_cols = @intCast(cols),
+        .font_px = props.font_px,
+        .line_height_px = props.cell_h_px,
+        .cell_w_px = props.cell_w_px,
+    } };
+    return 1;
 }
 
 /// **짝 괄호 상자**(§5.1b) — 괄호 글자 칸마다 10% 채움 + 1px 테두리. 열 계산은 선택·검색과 같은 `paintRowMarks` 한 곳이다(§4.1c).
@@ -5113,7 +5197,7 @@ test "IGF4 안내선은 저장소를 맨 나중에 받는다 — 모자라면 �
     try testing.expect(lh_at != null and lh_at.? > g0);
 }
 
-/// 판정자용 — 그린 op 중 공백 기호(`whitespace` 역할의 글자)의 (화면 열, 행, 글리프).
+/// 판정자용 — 그린 op 중 공백 기호(`whitespace` 역할의 글자)의 (화면 열, 행, 글리프). 칸마다 하나다.
 fn whitespaceGlyphs(props: Props, ops: []const draw.Op, out: [][3]u32) [][3]u32 {
     const layout = geometry.compute(props.total_cols, props.total_lines, .{});
     var n: usize = 0;
@@ -5122,9 +5206,14 @@ fn whitespaceGlyphs(props: Props, ops: []const draw.Op, out: [][3]u32) [][3]u32 
         if (n == out.len) break;
         const col: u32 = @intCast(@divTrunc(op.text.origin.x - props.rect.x, @as(i32, props.cell_w_px)) - @as(i32, layout.contentLeft()));
         const row: u32 = @intCast(@divTrunc(op.text.origin.y - props.rect.y, @as(i32, props.cell_h_px)));
-        const g = std.unicode.utf8Decode(op.text.runs[0].text) catch 0;
-        out[n] = .{ col, row, g };
-        n += 1;
+        // 이어진 공백은 op 하나에 `·` 여럿이다 — 칸마다 펼친다.
+        var it = (std.unicode.Utf8View.init(op.text.runs[0].text) catch unreachable).iterator();
+        var k: u32 = 0;
+        while (it.nextCodepoint()) |g| : (k += 1) {
+            if (n == out.len) break;
+            out[n] = .{ col + k, row, g };
+            n += 1;
+        }
     }
     return out[0..n];
 }
@@ -5180,7 +5269,7 @@ test "WSF2 공백 기호는 저장소를 맨 나중에 받는다 — 모자라�
     var b1: TestBuffers = .{};
     var s1 = b1.scratch();
     const spare: usize = 3;
-    s1.ops = s1.ops[0 .. p0.ops + spare]; // 기호 88 개(11 행 × 8) 중 셋만 들어간다
+    s1.ops = s1.ops[0 .. p0.ops + spare]; // 기호 op 22 개(11 행 × 이어진 공백 덩이 둘) 중 셋만 들어간다
     const p1 = build(props, s1);
     try testing.expectEqual(p0.ops + spare, p1.ops);
     var k: usize = 0;
@@ -5236,4 +5325,206 @@ test "WSF3 공백이 작업 칸보다 많은 긴 줄 — 가로로 민 창과 �
         const to = @min(v.start_col + width, 1400);
         try testing.expectEqual(@as(usize, (to - from + from % 2) / 2), c);
     }
+    // ⑶ **작업 칸이 한 묶음을 못 담으면 묶음을 끊는다** — 작업 칸 256 byte(쌍 32)에 `a ` × 98 을 49 열로 접은 네 행(행마다 공백 24~25).
+    // 묶음을 안 끊으면 첫 행이 24 를 쓰고 둘째 행이 남은 8 만, 셋째·넷째는 0 이다.
+    {
+        const short = "a " ** 98;
+        const short_lines = [_][]const u8{short};
+        var p3 = testProps(&short_lines, true);
+        p3.render_whitespace = .all;
+        var b3: TestBuffers = .{};
+        var s3 = b3.scratch();
+        s3.count_scratch = s3.count_scratch[0..256];
+        const w3 = build(p3, s3);
+        const rows3 = b3.visual_rows[0..w3.visual_rows];
+        try testing.expectEqual(@as(usize, 4), rows3.len);
+        const g3 = whitespaceGlyphs(p3, b3.ops[0..w3.ops], &got_buf);
+        var per3 = [_]usize{0} ** 4;
+        for (g3) |g| per3[g[1]] += 1;
+        for (rows3, per3) |v, c| {
+            const from = v.start_col;
+            const to = @min(v.start_col + width, 196);
+            try testing.expectEqual(@as(usize, (to - from + from % 2) / 2), c);
+        }
+    }
+}
+
+test "WSF4 공백 표시의 열 — 스크롤한 줄 · 탭 폭 · 인레이 · 위젯 행 · 선택+랩/가로 스크롤 · 랩 행의 trailing · 이어진 공백은 op 하나 (§5.1e)" {
+    var got_buf: [256][3]u32 = undefined;
+    // ⑴ **스크롤한 줄**(first_line 1) · **탭 폭** — `\tb c` 의 탭은 첫 칸 `→`, 공백은 탭 폭 뒤. 첫 줄 `x` 와 겹치지 않게 둘째 줄을 본다.
+    {
+        const lines = [_][]const u8{ "x", "\tb c" };
+        var props = testProps(&lines, false);
+        props.first_line = 1;
+        props.render_whitespace = .all;
+        var b: TestBuffers = .{};
+        var w = build(props, b.scratch());
+        try testing.expectEqualSlices([3]u32, &.{ .{ 0, 0, 0x2192 }, .{ 5, 0, 0xB7 } }, whitespaceGlyphs(props, b.ops[0..w.ops], &got_buf));
+        props.tab_width = 8;
+        w = build(props, b.scratch());
+        try testing.expectEqualSlices([3]u32, &.{ .{ 0, 0, 0x2192 }, .{ 9, 0, 0xB7 } }, whitespaceGlyphs(props, b.ops[0..w.ops], &got_buf));
+    }
+    // ⑵ **인레이** — byte 1(공백) 앞의 힌트 `: T`(3 칸)가 공백을 3 칸 민다.
+    {
+        const lines = [_][]const u8{"a b"};
+        var props = testProps(&lines, false);
+        props.render_whitespace = .all;
+        const hints = [_]content.Inlay{.{ .at = 1, .text = ": T" }};
+        const rows = [_][]const content.Inlay{&hints};
+        props.line_inlays = .{ .rows = &rows };
+        var b: TestBuffers = .{};
+        const w = build(props, b.scratch());
+        try testing.expectEqualSlices([3]u32, &.{.{ 4, 0, 0xB7 }}, whitespaceGlyphs(props, b.ops[0..w.ops], &got_buf));
+        // **인레이가 공백을 화면 오른쪽 밖으로 민다** — 창 끝은 인레이 없이 걸어 더 넓으므로, 행 끝 열 거르기만이 막는다. `a` + 공백 10 에
+        // 힌트 45 칸: 공백은 46..55 열, 폭 49 라 46·47·48 셋만.
+        const long_hint = [_]content.Inlay{.{ .at = 1, .text = "x" ** 45 }};
+        const rows2 = [_][]const content.Inlay{&long_hint};
+        const lines2 = [_][]const u8{"a" ++ " " ** 10};
+        props.lines = &lines2;
+        props.line_inlays = .{ .rows = &rows2 };
+        const w2 = build(props, b.scratch());
+        try testing.expectEqualSlices([3]u32, &.{ .{ 46, 0, 0xB7 }, .{ 47, 0, 0xB7 }, .{ 48, 0, 0xB7 } }, whitespaceGlyphs(props, b.ops[0..w2.ops], &got_buf));
+    }
+    // ⑶ **위젯 행** — 위젯(행 0)은 문서 줄이 아니다. 기호는 그 아래 글자 행(행 1)에만.
+    {
+        const lines = [_][]const u8{"a b"};
+        var props = testProps(&lines, false);
+        props.render_whitespace = .all;
+        const widgets = [_]?content.Widget{.{ .text = "w w" }};
+        props.line_widgets = &widgets;
+        var b: TestBuffers = .{};
+        const w = build(props, b.scratch());
+        try testing.expectEqualSlices([3]u32, &.{.{ 1, 1, 0xB7 }}, whitespaceGlyphs(props, b.ops[0..w.ops], &got_buf));
+    }
+    // ⑷ **선택 + 랩 · 선택 + 가로 스크롤** — `ab ` × 40 에서 [40, 60) 를 골랐다. 공백(3k + 2)마다 그 행의 열에.
+    {
+        const line = "ab " ** 40;
+        const lines = [_][]const u8{line};
+        const sel_row = [_]Mark{.{ .start = 40, .len = 20 }};
+        const sels = [_][]const Mark{&sel_row};
+        for ([_]bool{ true, false }) |wrap| {
+            var props = testProps(&lines, wrap);
+            props.render_whitespace = .selection;
+            props.selection_marks = &sels;
+            if (!wrap) props.first_col = 40;
+            var b: TestBuffers = .{};
+            const w = build(props, b.scratch());
+            const rows = b.visual_rows[0..w.visual_rows];
+            var want: [16][3]u32 = undefined;
+            var wn: usize = 0;
+            for (40..60) |pos| {
+                if (line[pos] != ' ') continue;
+                // 그 자리가 든 행과 그 행의 시작 열(랩이면 조각, 아니면 가로로 민 창)
+                var r: usize = 0;
+                while (r + 1 < rows.len and rows[r + 1].start_col <= pos) r += 1;
+                want[wn] = .{ @intCast(pos - rows[r].start_col), @intCast(r), 0xB7 };
+                wn += 1;
+            }
+            if (wrap) try testing.expect(want[0][1] == 0 and want[wn - 1][1] == 1); // 두 행에 걸친다
+            try testing.expectEqualSlices([3]u32, want[0..wn], whitespaceGlyphs(props, b.ops[0..w.ops], &got_buf));
+        }
+    }
+    // ⑸ **랩 행의 trailing** — `b` + 공백 100 을 49 열로 접으면 [0, 49) · [49, 98) · [98, 101). 이어지는 두 행에는 없고(VS Code 는 이어지는
+    // 랩 행에 뒤 공백을 안 그린다), 공백뿐인 끝 행은 전부. 줄 전체로 가르면 세 행 모두 선다.
+    {
+        const line = "b" ++ " " ** 100;
+        const lines = [_][]const u8{line};
+        var props = testProps(&lines, true);
+        props.render_whitespace = .trailing;
+        var b: TestBuffers = .{};
+        const w = build(props, b.scratch());
+        try testing.expectEqual(@as(usize, 3), w.visual_rows);
+        try testing.expectEqualSlices([3]u32, &.{ .{ 0, 2, 0xB7 }, .{ 1, 2, 0xB7 }, .{ 2, 2, 0xB7 } }, whitespaceGlyphs(props, b.ops[0..w.ops], &got_buf));
+    }
+    // ⑹ **이어진 공백은 op 하나** — 4 칸 · 3 칸 덩이는 op 둘, 탭은 따로. 70 칸 덩이는 run 상한(64)에서 둘로 갈린다.
+    {
+        const lines = [_][]const u8{ "    a   b\t c", " " ** 70 };
+        var props = testProps(&lines, false);
+        props.render_whitespace = .all;
+        var b: TestBuffers = .{};
+        const w = build(props, b.scratch());
+        var per_row = [_]usize{ 0, 0 };
+        for (b.ops[0..w.ops]) |op| {
+            if (op != .text or op.text.role != .whitespace) continue;
+            per_row[@intCast(@divTrunc(op.text.origin.y - props.rect.y, @as(i32, props.cell_h_px)))] += 1;
+        }
+        // 줄 0: `····` · `···` · `→` · `·`(탭 뒤 공백) = op 넷. 줄 1: 보이는 폭(49)만 — 64 를 안 넘어 op 하나.
+        try testing.expectEqual([2]usize{ 4, 1 }, per_row);
+        const g = whitespaceGlyphs(props, b.ops[0..w.ops], &got_buf);
+        try testing.expectEqualSlices([3]u32, &.{ .{ 0, 0, 0xB7 }, .{ 1, 0, 0xB7 }, .{ 2, 0, 0xB7 }, .{ 3, 0, 0xB7 }, .{ 5, 0, 0xB7 }, .{ 6, 0, 0xB7 }, .{ 7, 0, 0xB7 }, .{ 9, 0, 0x2192 }, .{ 12, 0, 0xB7 } }, g[0..9]);
+        // 가로로 민 창의 덩이도 64 에서 갈린다 — 줄 1 을 폭이 넓은 창으로(총 열 200)
+        props.total_cols = 200;
+        props.rect.w = 200 * 8;
+        const w2 = build(props, b.scratch());
+        per_row = .{ 0, 0 };
+        var dots1: usize = 0;
+        for (b.ops[0..w2.ops]) |op| {
+            if (op != .text or op.text.role != .whitespace) continue;
+            const r: usize = @intCast(@divTrunc(op.text.origin.y - props.rect.y, @as(i32, props.cell_h_px)));
+            per_row[r] += 1;
+            if (r == 1) dots1 += op.text.max_cols;
+        }
+        try testing.expectEqual(@as(usize, 2), per_row[1]);
+        try testing.expectEqual(@as(usize, 70), dots1);
+    }
+}
+
+test "WSF6 블록 caret 이 선 공백에는 기호가 없다 — 막대 caret · 깜빡여 꺼진 동안은 선다; 덩이는 caret 앞뒤로 갈린다 (§5.1e)" {
+    const lines = [_][]const u8{"a    b"};
+    var props = testProps(&lines, false);
+    props.render_whitespace = .all;
+    const caret_row = [_]u32{3};
+    const carets = [_][]const u32{&caret_row};
+    props.carets = &carets;
+    var got_buf: [16][3]u32 = undefined;
+    props.caret_shape = .block;
+    var b: TestBuffers = .{};
+    var w = build(props, b.scratch());
+    try testing.expectEqualSlices([3]u32, &.{ .{ 1, 0, 0xB7 }, .{ 2, 0, 0xB7 }, .{ 4, 0, 0xB7 } }, whitespaceGlyphs(props, b.ops[0..w.ops], &got_buf));
+    props.caret_visible = false;
+    w = build(props, b.scratch());
+    try testing.expectEqual(@as(usize, 4), whitespaceGlyphs(props, b.ops[0..w.ops], &got_buf).len);
+    props.caret_visible = true;
+    props.caret_shape = .bar;
+    w = build(props, b.scratch());
+    try testing.expectEqual(@as(usize, 4), whitespaceGlyphs(props, b.ops[0..w.ops], &got_buf).len);
+}
+
+test "WSF5 공백 기호의 층 — 선택 배경 위, 검색 강조·caret 아래 (§5.1e)" {
+    const lines = [_][]const u8{"a  b  c"};
+    var props = testProps(&lines, false);
+    props.render_whitespace = .selection;
+    const sel_row = [_]Mark{.{ .start = 0, .len = 7 }};
+    const sels = [_][]const Mark{&sel_row};
+    props.selection_marks = &sels;
+    const find_row = [_]Mark{.{ .start = 3, .len = 1 }};
+    const finds = [_][]const Mark{&find_row};
+    props.search_marks = &finds;
+    const caret_row = [_]u32{2};
+    const carets = [_][]const u32{&caret_row};
+    props.carets = &carets;
+    var b: TestBuffers = .{};
+    const w = build(props, b.scratch());
+    var last_sel: ?usize = null;
+    var first_ws: ?usize = null;
+    var last_ws: ?usize = null;
+    var first_find: ?usize = null;
+    var first_caret: ?usize = null;
+    for (b.ops[0..w.ops], 0..) |op, k| switch (op) {
+        .quad => |q| switch (q.fill_role) {
+            .selection => last_sel = k,
+            .search_match, .search_match_current => first_find = first_find orelse k,
+            .cursor => first_caret = first_caret orelse k,
+            else => {},
+        },
+        .text => |t| if (t.role == .whitespace) {
+            first_ws = first_ws orelse k;
+            last_ws = k;
+        },
+        else => {},
+    };
+    try testing.expect(last_sel != null and first_ws != null and first_find != null and first_caret != null);
+    try testing.expect(last_sel.? < first_ws.?);
+    try testing.expect(last_ws.? < first_find.?);
+    try testing.expect(last_ws.? < first_caret.?);
 }

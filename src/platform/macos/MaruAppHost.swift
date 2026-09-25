@@ -5159,6 +5159,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         terminationStartNs = DispatchTime.now().uptimeNanoseconds
         _ = restoreSessionHostInputSmokeInputSource()
         restoreSessionHostInputSmokePasteboard()
+        restoreTestLive() // W4d② 자리 비움 모드 — 켜지 않았으면 아무것도 안 한다.
         tickTimer?.invalidate()
         tickTimer = nil
         cancelSessionHostWakeSources()
@@ -7910,10 +7911,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return NSCursor(image: image, hotSpot: .zero)
     }()
 
-    // W4b 스모크 전용(`MARU_WEB_OSR_TEST_INPUT=<대본 파일>`): 대본의 포인터 입력을 Swift 가 부르는 **같은 ABI**(mouse·hover·
-    // scroll_wheel·osr_aux_button·run_action)로 차례로 넣는다. 셸에서 띄운 앱은 활성이 되지 못해 합성한 클릭이 창 활성화에
-    // 먹힌다(실측 — 첫 클릭이 view 에 안 온다). 밖에서 앱을 활성으로 만들면 사용자의 작업에서 포커스를 빼앗으므로, 앱이 제
-    // 입력 경로를 스스로 부른다. NSEvent → ABI 변환(Swift 한 겹)은 W4d 의 앱 안 시험기가 진짜 이벤트로 본다.
+    // W4b 스모크·W4d② 시험기 전용(`MARU_WEB_OSR_TEST_INPUT=<대본 파일>`): 대본의 포인터 입력을 Swift 가 부르는 **같은
+    // ABI**(mouse·hover·scroll_wheel·osr_aux_button·run_action)로 차례로 넣는다. 셸에서 띄운 앱은 활성이 되지 못해 합성한
+    // 클릭이 창 활성화에 먹힌다(실측 — 첫 클릭이 view 에 안 온다). 밖에서 앱을 활성으로 만들면 사용자의 작업에서 포커스를
+    // 빼앗으므로, 앱이 제 입력 경로를 스스로 부른다. W4d② 시험기(`tools/test-macos-web-osr-tester.sh`)는 그 위의 Swift 한 겹을
+    // 탄다: `post`(진짜 키 이벤트를 이 프로세스에만)·`view`(view 의 마우스 메서드)·`cursor`·`imerect`·`menu`·`config`·
+    // `newwindow`·`mark`, 자리 비움 모드의 `live`. 결과는 `MARU_WEB_OSR_TEST_REPORT` 파일에 적는다.
     // 대본 한 줄: `sleep ms` · `mouse kind fx fy dx dy button`(kind 1 누름·2 끌기·3 뗌·4 두 번·5 세 번, button 0 왼·1 가운데·
     // 2 오른) · `hover fx fy dx dy` · `wheel fx fy dx dy lines` · `aux fx fy dx dy buttonNumber` · `action 이름` ·
     // `key keyCode 글자 [원글자 수식자]`(글자는 U+ 16진, 없으면 -) — 키는 터미널 view 에 NSEvent 를 직접 넣는다(오버레이가
@@ -7945,9 +7948,246 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return nil
     }
 
+    // W4d②: 대본의 결과는 `MARU_WEB_OSR_TEST_REPORT` 파일에 한 줄씩 붙인다 — 새 창을 만들면 stderr 가 앱 로그 파일로
+    // 옮겨 가므로(`redirectStderrToAppLog`) stderr 로는 끝까지 못 읽는다.
+    private static func testReport(_ line: String) {
+        guard let path = ProcessInfo.processInfo.environment["MARU_WEB_OSR_TEST_REPORT"] else {
+            fputs("osr-test \(line)\n", stderr)
+            return
+        }
+        let data = Data((line + "\n").utf8)
+        if let handle = FileHandle(forWritingAtPath: path) {
+            handle.seekToEndOfFile()
+            handle.write(data)
+            try? handle.close()
+        } else {
+            FileManager.default.createFile(atPath: path, contents: data)
+        }
+    }
+
+    /// osr_key 와 같은 수식자 비트(shift=4·alt=8·ctrl=16·cmd=32) → CGEvent 수식자.
+    private static func testCGFlags(_ bits: Int32) -> CGEventFlags {
+        var flags: CGEventFlags = []
+        if bits & 4 != 0 { flags.insert(.maskShift) }
+        if bits & 8 != 0 { flags.insert(.maskAlternate) }
+        if bits & 16 != 0 { flags.insert(.maskControl) }
+        if bits & 32 != 0 { flags.insert(.maskCommand) }
+        return flags
+    }
+
+    private static func testCursorName(_ cursor: NSCursor) -> String {
+        let named: [(NSCursor, String)] = [
+            (.arrow, "arrow"), (.iBeam, "ibeam"), (.pointingHand, "hand"), (.crosshair, "crosshair"),
+            (.openHand, "open-hand"), (.closedHand, "closed-hand"), (.operationNotAllowed, "not-allowed"),
+            (hiddenCursor, "hidden"),
+        ]
+        return named.first { $0.0 == cursor }?.1 ?? "other"
+    }
+
+    private static func testMenuItem(_ menu: NSMenu?, _ title: String) -> (NSMenu, Int)? {
+        guard let menu else { return nil }
+        for (index, item) in menu.items.enumerated() {
+            if item.title == title { return (menu, index) }
+            if let found = testMenuItem(item.submenu, title) { return found }
+        }
+        return nil
+    }
+
+    private func testViewMouse(_ line: [String], _ content: NSView) {
+        guard let window, let terminal = Self.firstTerminalView(in: window.contentView) else { return }
+        let fx = Double(line[2]) ?? 0, fy = Double(line[3]) ?? 0, dx = Double(line[4]) ?? 0, dy = Double(line[5]) ?? 0
+        let button = line.count >= 7 ? (Int(line[6]) ?? 0) : 0
+        let clicks = line.count >= 8 ? (Int(line[7]) ?? 1) : 1
+        let local = NSPoint(x: fx * content.bounds.width + dx, y: content.bounds.height - (fy * content.bounds.height + dy))
+        let type: NSEvent.EventType
+        switch (line[1], button) {
+        case ("down", 0): type = .leftMouseDown
+        case ("drag", 0): type = .leftMouseDragged
+        case ("up", 0): type = .leftMouseUp
+        case ("down", 1): type = .rightMouseDown
+        case ("drag", 1): type = .rightMouseDragged
+        case ("up", 1): type = .rightMouseUp
+        case ("down", _): type = .otherMouseDown
+        case ("drag", _): type = .otherMouseDragged
+        case ("up", _): type = .otherMouseUp
+        default: type = .mouseMoved
+        }
+        // NSEvent.mouseEvent 는 버튼 번호를 받지 않는다(가운데·추가 버튼이 0 이 된다 — 실측) — 그 버튼은 CGEvent 로 만들어
+        // 번호를 싣고 창 번호로 창 좌표를 잇는다.
+        let inWindow = content.convert(local, to: nil)
+        let event = button >= 1 ? Self.testButtonMouseEvent(type, button, inWindow, clicks)
+            : NSEvent.mouseEvent(with: type, location: inWindow, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                 windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: clicks,
+                                 pressure: type == .mouseMoved ? 0 : 1)
+        guard let event else { return }
+        if line[1] == "down" { Self.testReport("view down \(Int(local.x)) \(Int(content.bounds.height - local.y))") }
+        switch type {
+        case .leftMouseDown: terminal.mouseDown(with: event)
+        case .leftMouseDragged: terminal.mouseDragged(with: event)
+        case .leftMouseUp: terminal.mouseUp(with: event)
+        case .rightMouseDown: terminal.rightMouseDown(with: event)
+        case .rightMouseDragged: terminal.rightMouseDragged(with: event)
+        case .rightMouseUp: terminal.rightMouseUp(with: event)
+        case .otherMouseDown: terminal.otherMouseDown(with: event)
+        case .otherMouseDragged: terminal.otherMouseDragged(with: event)
+        case .otherMouseUp: terminal.otherMouseUp(with: event)
+        default: terminal.mouseMoved(with: event)
+        }
+    }
+
+    private static func testButtonMouseEvent(_ type: NSEvent.EventType, _ button: Int, _ inWindow: NSPoint, _ clicks: Int) -> NSEvent? {
+        let cgType: CGEventType
+        switch type {
+        case .rightMouseDown: cgType = .rightMouseDown
+        case .rightMouseDragged: cgType = .rightMouseDragged
+        case .rightMouseUp: cgType = .rightMouseUp
+        case .otherMouseDown: cgType = .otherMouseDown
+        case .otherMouseDragged: cgType = .otherMouseDragged
+        default: cgType = .otherMouseUp
+        }
+        // 창이 없는 CGEvent 에서 만든 NSEvent 는 화면 좌표(왼쪽 아래 원점)를 locationInWindow 로 싣는다 — 그 값이 창
+        // 좌표가 되도록 위치를 준다(CGEvent 는 주 화면 왼쪽 위 원점).
+        let top = NSScreen.screens.first?.frame.height ?? 0
+        guard let cg = CGEvent(mouseEventSource: CGEventSource(stateID: .privateState), mouseType: cgType, mouseCursorPosition: CGPoint(x: inWindow.x, y: top - inWindow.y),
+                               mouseButton: CGMouseButton(rawValue: UInt32(button)) ?? .center) else { return nil }
+        cg.setIntegerValueField(.mouseEventClickState, value: Int64(clicks))
+        cg.flags = []
+        return NSEvent(cgEvent: cg)
+    }
+
+    // 자리 비움 모드(W4d② — `MARU_WEB_OSR_TEST_LIVE=<복원 기록 경로>` 일 때만): 진짜 macOS 입력기는 maru 가 **맨 앞 앱**일
+    // 때만, **HID 로 들어온** 키만 조합한다(W4d 실측 — 비활성 앱은 입력 문맥의 입력기를 바꿔도 ASCII 가 들어왔고, CR6d 가
+    // 먼저 밝혔듯 프로세스 대상·AppKit 이 만든 이벤트는 TSM 을 건너뛴다). maru 를 앞으로 올리고 시스템 입력 소스를 한글
+    // 2벌식으로 바꾸고 진짜 키·포인터를 보내므로 사용자가 자리를 비웠을 때만 돌린다.
+    // - `begin` 은 앞으로 올리기만 한다(활성화는 비동기다). 입력 소스는 `source` 가 **maru 가 맨 앞이 된 뒤에만** 바꾼다 —
+    //   활성화가 거절됐는데 바꾸면 사용자의 앞 앱이 한글이 된다(적대 검증). 전환은 CR6d 의 트랜잭션(`SessionHostInputSourcePolicy`
+    //   — 복원 기록을 먼저 쓰므로 앱이 죽어도 스크립트가 되돌린다)을 그대로 쓴다.
+    // - HID 로 보내는 것은 입력기가 필요한 키(수식자 없는 키)와 포인터뿐이다. ⌘ 조합은 이 프로세스에만 보낸다(`postToPid` —
+    //   맨 앞이면 키 창이 있어 진짜 performKeyEquivalent 경로다) — HID 로 보내면 다른 앱의 전역 단축키가 먼저 가져갈 수 있다.
+    // - 키·포인터는 보낼 때마다 이 앱이 활성·맨 앞·view 가 첫 응답자인지, 포인터는 그 자리의 맨 위 창이 이 창인지 다시 본다.
+    //   누름·뗌은 한 줄(`click`)이라 사이에 가드가 바뀌어 버튼이 눌린 채 남지 않는다.
+    // - 되돌리기(`end`·앱 종료): 입력 소스는 우리가 고른 소스일 때만, 클립보드는 마지막 `settle` 뒤 아무도 안 썼을 때만, 앞
+    //   앱은 maru 가 아직 맨 앞일 때만 — 사용자가 돌아와 한 일을 덮지 않는다. 결과는 늘 보고에 남긴다(스크립트의 폴백이 본다).
+    private var testLiveSaved: (record: URL, pasteboard: [[(NSPasteboard.PasteboardType, Data)]], changeCount: Int,
+                                front: NSRunningApplication?)?
+
+    private func testLiveOwnsInput(_ terminal: MaruMetalTerminalView) -> Bool {
+        NSApp.isActive && terminal.window?.firstResponder === terminal &&
+            NSWorkspace.shared.frontmostApplication?.processIdentifier == getpid()
+    }
+
+    private func testLive(_ line: [String], _ content: NSView) {
+        guard let recordPath = ProcessInfo.processInfo.environment["MARU_WEB_OSR_TEST_LIVE"], recordPath.hasPrefix("/") else {
+            Self.testReport("live-refused")
+            return
+        }
+        guard let window, let terminal = Self.firstTerminalView(in: window.contentView) else {
+            Self.testReport("live-no-window")
+            return
+        }
+        switch line[1] {
+        case "begin" where testLiveSaved == nil:
+            let board = NSPasteboard.general
+            let items = (board.pasteboardItems ?? []).map { item in
+                item.types.compactMap { type in item.data(forType: type).map { (type, $0) } }
+            }
+            testLiveSaved = (URL(fileURLWithPath: recordPath).standardizedFileURL, items, board.changeCount,
+                             NSWorkspace.shared.frontmostApplication)
+            Self.testReport("live begun pid=\(getpid())")
+            NSApp.activate(ignoringOtherApps: true)
+            _ = NSRunningApplication.current.activate(options: [.activateAllWindows])
+            window.makeKeyAndOrderFront(nil)
+            window.makeFirstResponder(terminal)
+        case "source":
+            guard let saved = testLiveSaved, testLiveOwnsInput(terminal) else {
+                Self.testReport("live-not-front")
+                return
+            }
+            do {
+                _ = try SessionHostInputSourcePolicy.prepareKoreanSelection(recordURL: saved.record)
+            } catch {
+                Self.testReport("live-source-failed \(error)")
+            }
+        case "check":
+            Self.testReport("live owns=\(testLiveOwnsInput(terminal)) source=\(SessionHostInputSourcePolicy.currentSourceID() ?? "nil")")
+        case "key" where line.count >= 3:
+            // live key keyCode [수식자]
+            guard testLiveOwnsInput(terminal) else {
+                Self.testReport("live-not-front")
+                return
+            }
+            let bits = line.count >= 4 ? (Int32(line[3]) ?? 0) : 0
+            let chord = bits & (16 | 32) != 0
+            let source = CGEventSource(stateID: chord ? .privateState : .hidSystemState)
+            for down in [true, false] {
+                let event = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(line[2]) ?? 0, keyDown: down)
+                event?.flags = Self.testCGFlags(bits)
+                if chord { event?.postToPid(getpid()) } else { event?.post(tap: .cghidEventTap) }
+            }
+        case "move", "click":
+            // live move|click fx fy dx dy — 진짜 포인터(HID). click 은 옮기고 누르고 뗀다.
+            guard line.count >= 6, testLiveOwnsInput(terminal) else {
+                Self.testReport("live-not-front")
+                return
+            }
+            let fx = Double(line[2]) ?? 0, fy = Double(line[3]) ?? 0, dx = Double(line[4]) ?? 0, dy = Double(line[5]) ?? 0
+            let local = NSPoint(x: fx * content.bounds.width + dx, y: content.bounds.height - (fy * content.bounds.height + dy))
+            let screen = window.convertPoint(toScreen: content.convert(local, to: nil))
+            guard NSWindow.windowNumber(at: screen, belowWindowWithWindowNumber: 0) == window.windowNumber else {
+                Self.testReport("live-covered")
+                return
+            }
+            let top = NSScreen.screens.first?.frame.height ?? 0
+            let at = CGPoint(x: screen.x, y: top - screen.y)
+            let source = CGEventSource(stateID: .hidSystemState)
+            let types: [CGEventType] = line[1] == "click" ? [.mouseMoved, .leftMouseDown, .leftMouseUp] : [.mouseMoved]
+            for type in types {
+                let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: at, mouseButton: .left)
+                event?.setIntegerValueField(.mouseEventClickState, value: type == .mouseMoved ? 0 : 1)
+                event?.post(tap: .cghidEventTap)
+            }
+            if line[1] == "click" { Self.testReport("live click \(Int(local.x)) \(Int(content.bounds.height - local.y))") }
+        case "settle":
+            // 클립보드를 쓰는 단계가 끝났다 — 여기까지의 변경은 시험기 것이다.
+            testLiveSaved?.changeCount = NSPasteboard.general.changeCount
+        case "end":
+            restoreTestLive()
+        default:
+            break
+        }
+    }
+
+    /// 자리 비움 모드가 바꾼 것을 되돌린다(위 규칙). 앱 종료에서도 부른다.
+    func restoreTestLive() {
+        guard let saved = testLiveSaved else { return }
+        testLiveSaved = nil
+        let outcome = SessionHostInputSourcePolicy.restore(recordURL: saved.record)
+        let board = NSPasteboard.general
+        let clipboardOurs = board.changeCount == saved.changeCount
+        if clipboardOurs {
+            board.clearContents()
+            let items = saved.pasteboard.map { pairs -> NSPasteboardItem in
+                let item = NSPasteboardItem()
+                for (type, data) in pairs { item.setData(data, forType: type) }
+                return item
+            }
+            if !items.isEmpty { board.writeObjects(items) }
+        }
+        let front = NSWorkspace.shared.frontmostApplication?.processIdentifier == getpid()
+        if front, let previous = saved.front, previous.processIdentifier != getpid() { previous.activate() }
+        Self.testReport("live restored source=\(outcome == .restored || outcome == .noRecord) clipboard=\(clipboardOurs) front=\(front)")
+    }
+
+    // 대본이 `newwindow` 로 만든 창 — 그 뒤의 줄은 이 창을 대상으로 한다(키 창이 없는 비활성 앱에서 활성 surface 는 첫 창이다).
+    private var testSurface: TerminalSurface?
+
     private func runOsrTestInput(_ lines: [[String]], _ index: Int) {
         guard index < lines.count else { return }
         let line = lines[index]
+        let previousExplicit = explicitSurface
+        if testSurface?.window == nil { testSurface = nil } // 그 창이 닫혔다 — 붙잡지 않는다.
+        if let testSurface { explicitSurface = testSurface }
+        defer { explicitSurface = previousExplicit }
         var delay = 0.03
         if line[0] == "sleep" {
             delay = (Double(line.count > 1 ? line[1] : "0") ?? 0) / 1000
@@ -7998,6 +8238,70 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                     }
                     terminal.keyUp(with: up)
                 }
+            // ── W4d② 앱 안 시험기: 진짜 AppKit 경로 ──
+            case "post" where line.count >= 2:
+                // post keyCode [수식자] — 진짜 키 이벤트를 **이 프로세스에만** 보낸다(`postToPid`). 창 서버를 지나
+                // NSApp.sendEvent → keyDown·interpretKeyEvents 를 탄다. 다른 앱으로 새지 않고 앱이 비활성이어도 닿는다(W4d
+                // 실측). 이벤트 원천은 사적 상태라 사용자가 누르고 있는 수식키와 섞이지 않는다. **비활성 앱에는 키 창이 없어
+                // ⌘ 조합은 view 의 performKeyEquivalent 를 건너뛰고 메뉴로 간다**(실측) — view 가 먼저 받는 조합은 `key`(AppKit
+                // 순서를 대본이 밟는다)로, 진짜 경로는 자리 비움 모드에서 본다. 도착이 비동기라 `newwindow` 뒤에는 쓰지 않는다
+                // (도착할 때는 대상 창 고정이 풀려 첫 창으로 간다).
+                guard testSurface == nil else {
+                    Self.testReport("post-refused-after-newwindow")
+                    break
+                }
+                let source = CGEventSource(stateID: .privateState)
+                let flags = Self.testCGFlags(line.count >= 3 ? (Int32(line[2]) ?? 0) : 0)
+                for down in [true, false] {
+                    let event = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(line[1]) ?? 0, keyDown: down)
+                    event?.flags = flags
+                    event?.postToPid(getpid())
+                }
+            case "view" where line.count >= 6:
+                // view 종류 fx fy dx dy [버튼 클릭수] — 터미널 view 의 마우스 메서드를 NSEvent 로 부른다(종류 down·drag·up·
+                // move, 버튼 0 왼·1 오른·2 가운데·3 이상 뒤로·앞으로). 비활성 앱의 창에 클릭을 보내면 창 활성화가 먹거나 앱을
+                // 앞으로 올려 사용자 포커스를 빼앗으므로 창 hitTest 한 겹만 건너뛴다 — view → Swift → ABI 는 진짜 경로다.
+                testViewMouse(line, view)
+            case "mark" where line.count >= 2:
+                // mark 이름 — 보고에 시각(ms, 페이지의 Date.now() 와 같은 시계)을 남겨 페이지 이벤트를 단계로 가른다.
+                Self.testReport("mark \(line[1]) \(Int64(Date().timeIntervalSince1970 * 1000))")
+            case "overlay":
+                // 오버레이(알림 토스트 포함)가 열려 있는가 — 마우스 게이트가 보는 그 집합.
+                Self.testReport("overlay \(anyOverlayOpen)")
+            case "cursor":
+                Self.testReport("cursor \(Self.testCursorName(NSCursor.current))")
+            case "imerect":
+                // 입력기가 후보창 자리를 묻는 그 호출(firstRect) — 창 내용 view 의 왼쪽 위 원점 pt 로 보고한다.
+                if let window, let terminal = Self.firstTerminalView(in: window.contentView) {
+                    let screen = terminal.firstRect(forCharacterRange: NSRange(location: 0, length: 0), actualRange: nil)
+                    let local = view.convert(window.convertFromScreen(screen), from: nil)
+                    Self.testReport("imerect \(Int(local.minX)) \(Int(view.bounds.height - local.maxY)) \(Int(local.width)) \(Int(local.height))")
+                }
+            case "menu" where line.count >= 2:
+                // menu 제목… — 메뉴 막대에서 그 제목의 항목을 찾아 실행한다(단축키 없는 메뉴 — Reload Config).
+                let title = line.dropFirst().joined(separator: " ")
+                if let (menu, index) = Self.testMenuItem(NSApp.mainMenu, title) {
+                    menu.performActionForItem(at: index)
+                } else {
+                    Self.testReport("menu-missing \(title)")
+                }
+            case "config" where line.count >= 2:
+                // config 한 줄 — `MARU_CONFIG` 파일을 이 한 줄로 바꾼다(reload 로 알림 토스트를 띄우는 데 쓴다).
+                if let path = ProcessInfo.processInfo.environment["MARU_CONFIG"] {
+                    try? (line.dropFirst().joined(separator: " ") + "\n").write(toFile: path, atomically: true, encoding: .utf8)
+                }
+            case "newwindow":
+                // 스모크 모드는 New Window 메뉴를 막는다(`newTerminalWindow`) — 같은 팩토리를 직접 부른다. 비활성 앱에는 키
+                // 창이 없어 새 창이 키가 되지 않으므로, 키 창이 바뀔 때 AppKit 이 부르는 delegate 를 그대로 부르고 이 뒤의
+                // 대본은 새 창을 대상으로 한다(`testSurface`).
+                let previous = window
+                if let surface = createTerminalWindow(applyingWorkspace: nil), let next = surface.window {
+                    if let previous { windowDidResignKey(Notification(name: NSWindow.didResignKeyNotification, object: previous)) }
+                    windowDidBecomeKey(Notification(name: NSWindow.didBecomeKeyNotification, object: next))
+                    testSurface = surface
+                }
+            case "live" where line.count >= 2:
+                testLive(line, view)
             case "ime" where line.count >= 3:
                 // ime keyCode 단계… — 입력기 없이 한 트랜잭션(osr_key 쥐기 → ime_begin → 단계들 → ime_end → 뗌)을 돈다. 사용자
                 // 입력 소스(한글·영문)에 따라 합성 키의 결과가 갈리지 않게 입력기 콜백을 직접 부른다(진짜 입력기는 W4d

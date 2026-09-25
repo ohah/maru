@@ -23,6 +23,20 @@ pub fn replaceControl(bytes: []u8) void {
     }
 }
 
+/// 대화상자 글(W5a)용 — 탭·줄바꿈(LF·CR)은 두고 나머지 C0 제어 문자와 DEL 만 공백으로 바꾼다(`fields.checkDialogText` 와 짝).
+pub fn replaceControlKeepLines(bytes: []u8) void {
+    for (bytes) |*byte| {
+        if (byte.* == '\t' or byte.* == '\n' or byte.* == '\r') continue;
+        if (byte.* < 0x20 or byte.* == 0x7f) byte.* = ' ';
+    }
+}
+
+test "replaceControlKeepLines keeps line breaks and tabs, blanks escape sequences" {
+    var buf = "a\nb\tc\r\x1b]0;x\x07\x7f".*;
+    replaceControlKeepLines(&buf);
+    try std.testing.expectEqualStrings("a\nb\tc\r ]0;x  ", &buf);
+}
+
 test "clampUtf8 never splits a character" {
     try std.testing.expectEqualStrings("abc", clampUtf8("abc", 8));
     try std.testing.expectEqualStrings("가", clampUtf8("가나", 5)); // 한글은 3바이트 — 5 에서 자르면 둘째 글자 중간

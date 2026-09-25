@@ -22,6 +22,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const maru = @import("maru");
+const notification_ops = @import("notification.zig");
 
 const chrome = maru.chrome;
 const app_session_mod = @import("../app_session.zig");
@@ -439,6 +440,141 @@ pub fn tickWebOsr(self: *AppSession) void {
         .start_failed => .web_osr_start_failed,
         .crashed_repeatedly => .web_osr_crashed,
     });
+    tickOsrDialog(self);
+}
+
+// ── W5a: 대화상자·파일 선택 ──────────────────────────────────────────────────────────────────────────────
+//
+// sidecar 가 보낸 요청은 `web_osr` 가 탭마다 쥔다. 창은 **키보드 초점을 가진**(`osr_key_target` — 창 키·활성 pane) Chromium
+// 탭의 요청만 고른다 — 뒤쪽 탭·초점 없는 옆 pane 의 대화상자는 초점이 올 때까지 기다린다(페이지는 그동안 멈춘다). 보이는데
+// 초점이 없는 pane 이 기다리면 한 번 안내한다. Swift 는 maru 창에 붙는 네이티브 sheet 로 묻고 답을 돌려준다(사용자 결정
+// 2026-09-25 — docs/plans/web-osr-backend.md C6).
+
+pub const OsrDialogShown = struct { surface_id: u64, token: u64 };
+
+fn tickOsrDialog(self: *AppSession) void {
+    if (self.osr_dialog) |shown| {
+        if (web_osr.dialogPending(shown.surface_id, shown.token) != null) return;
+        // 떠 있던(또는 띄우려던) 요청이 사라졌다 — Swift 가 가져가기 전이면 그냥 거두고, 띄웠으면 닫게 한다.
+        self.osr_dialog = null;
+        if (self.osr_dialog_ready) self.osr_dialog_ready = false else self.osr_dialog_dismiss = true;
+        return;
+    }
+    // 키보드 초점을 가진 Chromium 탭만 띄운다 — 보이기만 하는 옆 pane 이 띄우면 sheet 가 곧바로 키를 가져가, 터미널에 치던
+    // 글자(비밀번호)와 Return 이 대화상자로 들어갔다(적대 검증). 초점이 그 탭으로 오면(클릭·pane 이동) 그때 뜬다.
+    for (self.osr_layouts.items) |layout| {
+        const d = web_osr.nextDialog(layout.surface_id) orelse continue;
+        if (layout.surface_id != self.osr_key_target) {
+            // 보이는데 초점이 없는 pane 이 답을 기다린다 — 표시 없이 얼어 있지 않게 알림 목록에 한 번 남긴다(안 읽음 배지 —
+            // 적대 검증). 토스트는 쓰지 않는다: 「다음 입력이 닫는다」라 그 pane 으로 옮기는 첫 키·클릭을 먹었다(시험기 실측).
+            // 그 pane 을 누르면 읽음이 된다(웹 클릭이 `markNotificationsReadBySurface`).
+            if (self.osr_dialog_hinted != d.token) {
+                self.osr_dialog_hinted = d.token;
+                _ = notification_ops.pushNotificationHistory(self, maru.i18n.t(.web_dialog_waiting), d.origin, layout.surface_id);
+            }
+            continue;
+        }
+        web_osr.markDialogShown(layout.surface_id, d.token, @intFromPtr(self));
+        self.markNotificationsReadBySurface(layout.surface_id); // 기다린다는 알림은 이제 읽었다
+        self.osr_dialog = .{ .surface_id = layout.surface_id, .token = d.token };
+        self.osr_dialog_ready = true;
+        return;
+    }
+}
+
+pub const OsrDialogView = struct {
+    surface_id: u64,
+    token: u64,
+    offer_suppress: bool,
+    kind: web_osr.DialogKind,
+    title: []const u8,
+    message: []const u8,
+    default_text: []const u8,
+    accept: []const u8,
+    ok_label: []const u8,
+    cancel_label: []const u8,
+};
+
+/// 띄울 요청(한 번). 글은 `web_osr` 가 쥔 요청(답할 때까지)과 이 창의 버퍼(다음 가져가기까지)를 빌린다. 문구는 여기서
+/// 번역·조립한다(Swift 는 문장을 만들지 않는다 — docs/i18n.md §7.2).
+pub fn takeOsrDialog(self: *AppSession) ?OsrDialogView {
+    if (!self.osr_dialog_ready) return null;
+    const shown = self.osr_dialog orelse return null;
+    const d = web_osr.dialogPending(shown.surface_id, shown.token) orelse return null;
+    self.osr_dialog_ready = false;
+    const t = maru.i18n.t;
+    var view: OsrDialogView = .{
+        .surface_id = shown.surface_id,
+        .token = shown.token,
+        .offer_suppress = d.offer_suppress,
+        .kind = d.kind,
+        .title = "",
+        .message = d.message,
+        .default_text = d.default_text,
+        .accept = d.accept,
+        .ok_label = t(.web_dialog_ok),
+        .cancel_label = t(.web_dialog_cancel),
+    };
+    switch (d.kind) {
+        .alert, .confirm, .prompt => {
+            view.title = if (d.origin.len == 0) t(.web_dialog_title_page) else maru.i18n.format(&self.osr_dialog_title_buf, t(.web_dialog_title), &.{.{ .s = d.origin }});
+            if (d.kind == .alert) view.cancel_label = "";
+        },
+        .before_unload => {
+            // 페이지 글이 아니라 maru 문구(CEF 도 영어 한 줄을 준다 — 페이지가 문구를 정하지 못하는 것이 떠나기 확인의 규칙).
+            view.title = t(.web_dialog_leave_title);
+            view.message = t(.web_dialog_leave_message);
+            view.ok_label = t(.web_dialog_leave);
+        },
+        .file_open, .file_open_multiple, .file_open_folder, .file_save => {
+            // 파일 선택은 `message` 에 페이지가 준 제목(대개 빈 글)이 있다 — 창의 안내는 maru 문구. 저장은 페이지에 **쓰기**를
+            // 맡기는 선택이라 올리기 문구를 쓰지 않는다(적대 검증).
+            view.title = d.message;
+            view.message = t(if (d.kind == .file_save) .web_file_save_message else .web_file_pick_message);
+        },
+    }
+    return view;
+}
+
+pub fn takeOsrDialogDismiss(self: *AppSession) bool {
+    const v = self.osr_dialog_dismiss;
+    self.osr_dialog_dismiss = false;
+    return v;
+}
+
+fn clearShown(self: *AppSession, surface_id: u64, token: u64) void {
+    const shown = self.osr_dialog orelse return;
+    if (shown.surface_id != surface_id or shown.token != token) return;
+    self.osr_dialog = null;
+    self.osr_dialog_ready = false;
+}
+
+pub fn osrDialogReply(self: *AppSession, surface_id: u64, token: u64, accept: bool, text: []const u8, suppress: bool) void {
+    web_osr.replyDialog(self.allocator, surface_id, token, accept, text, suppress);
+    clearShown(self, surface_id, token);
+}
+
+pub fn osrFileDialogPath(self: *AppSession, surface_id: u64, token: u64, path: []const u8) void {
+    web_osr.fileDialogPath(self.allocator, surface_id, token, path);
+}
+
+pub fn osrFileDialogReply(self: *AppSession, surface_id: u64, token: u64, accept: bool) void {
+    web_osr.replyFileDialog(self.allocator, surface_id, token, accept);
+    clearShown(self, surface_id, token);
+}
+
+/// Swift 가 sheet 에 쓰는 나머지 문구(번역·조립은 Zig — docs/i18n.md §7.2). 0 = 억제 선택, 1 = 폴더 올리기 확인 제목(`number`
+/// 는 파일 수), 2 = 올리기 단추, 3 = 취소 단추, 4 = 폴더가 너무 크다(`number` 는 상한).
+pub fn osrDialogString(which: u32, number: i64, buf: []u8) []const u8 {
+    const t = maru.i18n.t;
+    return switch (which) {
+        0 => maru.i18n.format(buf, t(.web_dialog_suppress), &.{}),
+        1 => maru.i18n.format(buf, t(.web_folder_upload_title), &.{.{ .d = number }}),
+        2 => maru.i18n.format(buf, t(.web_folder_upload), &.{}),
+        3 => maru.i18n.format(buf, t(.web_dialog_cancel), &.{}),
+        4 => maru.i18n.format(buf, t(.web_folder_too_many), &.{.{ .d = number }}),
+        else => buf[0..0],
+    };
 }
 
 /// 이번 tick 배치 중 OSR 탭을 sidecar 에 맞추고 WKWebView 전이 집합에서 뺀다 — Swift 가 그 탭에 WKWebView 를 만들지
@@ -650,6 +786,10 @@ pub fn osrAuxButton(self: *AppSession, button_number: i32, x_px: f64, y_px: f64)
         4 => .forward,
         else => return true, // 본문 위의 다른 추가 버튼은 삼킨다
     };
+    // 그 pane 을 활성으로 올린다(왼쪽 누름과 같은 길) — 이동이 떠나기 확인을 부르면 초점 있는 pane 이라야 sheet 가 뜬다(적대 검증:
+    // 초점 없는 pane 에서 확인이 보이지 않은 채 걸렸다).
+    if (self.activateSurfaceById(layout.surface_id)) self.focusWorkspaceInput();
+    syncOsrKeyTarget(self);
     web_osr.navAction(self.allocator, layout.surface_id, action);
     return true;
 }

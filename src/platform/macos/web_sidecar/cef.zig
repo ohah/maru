@@ -18,6 +18,7 @@ pub const c = @cImport({
     @cInclude("include/capi/cef_browser_process_handler_capi.h");
     @cInclude("include/capi/cef_frame_capi.h");
     @cInclude("include/capi/cef_context_menu_handler_capi.h");
+    @cInclude("include/capi/cef_parser_capi.h"); // W5a — 대화상자 제목의 출처(보안 표시 형식)
 });
 
 pub const api_version: c_int = 15400;

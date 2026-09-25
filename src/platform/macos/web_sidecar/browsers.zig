@@ -18,6 +18,7 @@ const watchdog = @import("watchdog.zig");
 const ring_producer = @import("ring_producer.zig");
 const iosurface = @import("iosurface.zig");
 const input = @import("input.zig");
+const dialogs = @import("dialogs.zig");
 
 const Message = protocol.message.Message;
 const BrowserId = protocol.message.BrowserId;
@@ -60,6 +61,7 @@ pub fn handler() dispatch.Handler {
 fn command(_: *anyopaque, message: Message, writer: *events.Writer) void {
     if (state.shutting_down) return;
     if (input.handle(message)) return;
+    if (dialogs.handle(message)) return;
     switch (message) {
         .create_browser => |value| create(value, writer),
         .destroy_browser => |browser| destroy(browser, writer),
@@ -124,6 +126,7 @@ fn create(value: protocol.message.CreateBrowser, writer: *events.Writer) void {
 fn destroy(browser_id: BrowserId, writer: *events.Writer) void {
     const entry = state.registry.byId(browser_id) orelse return fail(writer, browser_id, .unknown_browser, "no such browser");
     if (entry.closing) return;
+    dialogs.cancelFor(browser_id);
     entry.closing = true;
     closeBrowser(browserOf(entry));
 }
@@ -142,6 +145,7 @@ fn resize(value: protocol.message.Resize, writer: *events.Writer) void {
 
 fn navigate(value: protocol.message.Navigate, writer: *events.Writer) void {
     const entry = state.registry.byId(value.browser) orelse return fail(writer, value.browser, .unknown_browser, "no such browser");
+    dialogs.cancelFor(value.browser);
     const browser = browserOf(entry);
     const frame = browser.*.get_main_frame.?(browser);
     if (frame == null) return fail(writer, value.browser, .unknown_browser, "browser has no main frame");
@@ -155,7 +159,10 @@ fn navigate(value: protocol.message.Navigate, writer: *events.Writer) void {
 /// 뒤로·앞으로·새로고침·멈춤(W3b — 주소창 버튼). 갈 곳이 없으면 CEF 가 무시한다.
 fn navAction(value: protocol.message.NavAction, writer: *events.Writer) void {
     const entry = state.registry.byId(value.browser) orelse return fail(writer, value.browser, .unknown_browser, "no such browser");
+    dialogs.cancelFor(value.browser);
     const browser = browserOf(entry);
+    // 멈춤은 새 문서를 부르지 않는다 — 대화상자 억제를 풀 표시를 남기지 않는다.
+    if (value.action == .stop) dialogs.keepSuppression(value.browser);
     switch (value.action) {
         .back => browser.*.go_back.?(browser),
         .forward => browser.*.go_forward.?(browser),
@@ -168,6 +175,7 @@ fn navAction(value: protocol.message.NavAction, writer: *events.Writer) void {
 pub fn beginShutdown() void {
     if (state.shutting_down) return;
     state.shutting_down = true;
+    dialogs.dropAll();
     watchdog.start();
     for (&state.registry.slots) |*slot| {
         if (slot.*) |*entry| if (!entry.closing) {
@@ -182,6 +190,7 @@ pub fn beginShutdown() void {
 /// `on_before_close` 에서 부른다 — 목록이 쥔 참조를 풀고 maru 에 알린다.
 pub fn onClosed(cef_id: c_int) void {
     if (state.registry.remove(cef_id)) |entry| {
+        dialogs.dropBrowser(entry.id);
         const browser: [*c]c.cef_browser_t = @ptrCast(@alignCast(entry.handle));
         object.release(browser);
         if (entry.frames) |frames| {

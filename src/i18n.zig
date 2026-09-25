@@ -1086,6 +1086,8 @@ const Table = struct {
     /// 닫기 — 허용·차단으로 기억하지 않는다(Chrome 의 X 와 같다 — 셋이 쌓이면 Chromium 이 한동안 묻지 않는다).
     web_permission_close: [:0]const u8,
     /// 허용·차단은 Chromium 이 그 사이트에 기억한다(사용자 결정 2026-09-25).
+    /// W5b2: 위치 — 허용은 그 탭에서 Maru 를 다시 시작할 때까지 기억한다(Chromium 은 부를 때마다 묻는다).
+    web_permission_location_note: [:0]const u8,
     web_permission_remembered: [:0]const u8,
     /// macOS 가 Maru 의 장치 사용을 막았다 — `{0}` 은 장치 이름(perm_camera 등).
     web_permission_macos_blocked: [:0]const u8,
@@ -1095,6 +1097,7 @@ const Table = struct {
     /// 안내 문구의 장치 이름(시스템 설정의 항목 이름과 같게).
     web_device_camera: [:0]const u8,
     web_device_microphone: [:0]const u8,
+    web_device_location: [:0]const u8,
     /// 시스템 설정의 항목 이름 — 화면 공유는 macOS 의 「화면 기록」 권한이다(안내 문구의 `{0}`).
     web_permission_screen_recording: [:0]const u8,
     /// 권한 이름(청한 목록의 한 줄).
@@ -1689,11 +1692,13 @@ const en: Table = .{
     .web_permission_block = "Block",
     .web_permission_close = "Close",
     .web_permission_remembered = "If you allow or block, this site will remember your choice.",
+    .web_permission_location_note = "If you allow, this tab won't ask again until Maru restarts. If you block, this site is remembered.",
     .web_permission_macos_blocked = "macOS has not given Maru this permission: {0}. Turn Maru on in System Settings › Privacy & Security.",
     .web_permission_open_settings = "Open System Settings",
     .web_permission_macos_blocked_restart = "macOS has not given Maru this permission: {0}. Turn Maru on in System Settings › Privacy & Security, then restart Maru.",
     .web_device_camera = "Camera",
     .web_device_microphone = "Microphone",
+    .web_device_location = "Location Services",
     .web_permission_screen_recording = "Screen Recording",
     .perm_camera = "Use your camera",
     .perm_microphone = "Use your microphone",
@@ -2504,11 +2509,13 @@ const ko: Table = .{
     .web_permission_block = "차단",
     .web_permission_close = "닫기",
     .web_permission_remembered = "허용하거나 차단하면 이 사이트에 기억됩니다.",
+    .web_permission_location_note = "허용하면 Maru 를 다시 시작할 때까지 이 탭에서는 다시 묻지 않습니다. 차단하면 이 사이트에 기억됩니다.",
     .web_permission_macos_blocked = "macOS 가 Maru 에 이 권한을 주지 않았습니다: {0}. 시스템 설정 › 개인정보 보호 및 보안에서 Maru 를 켜세요.",
     .web_permission_open_settings = "시스템 설정 열기",
     .web_permission_macos_blocked_restart = "macOS 가 Maru 에 이 권한을 주지 않았습니다: {0}. 시스템 설정 › 개인정보 보호 및 보안에서 Maru 를 켠 뒤 Maru 를 다시 시작하세요.",
     .web_device_camera = "카메라",
     .web_device_microphone = "마이크",
+    .web_device_location = "위치 서비스",
     .web_permission_screen_recording = "화면 기록",
     .perm_camera = "카메라 사용",
     .perm_microphone = "마이크 사용",

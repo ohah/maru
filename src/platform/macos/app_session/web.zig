@@ -586,8 +586,11 @@ fn permissionMessage(buf: []u8, kinds: u32, media: u8) []const u8 {
         }
     }
     const not_remembered = ws.message.PermissionKind.geolocation.bit() | ws.message.PermissionKind.file_system_access.bit();
-    if (kinds & ~not_remembered != 0) {
-        const note = t(.web_permission_remembered);
+    // 위치는 허용을 maru 가 그 탭에서 다시 시작할 때까지 기억한다(W5b2) — 그 범위를 적는다(2 차 적대 검증 — 적지 않으면 동의
+    // 문구와 실제가 달랐다).
+    const location_only = kinds == ws.message.PermissionKind.geolocation.bit();
+    if (kinds & ~not_remembered != 0 or location_only) {
+        const note = t(if (location_only) .web_permission_location_note else .web_permission_remembered);
         if (len + 2 + note.len <= buf.len) {
             @memcpy(buf[len..][0..2], "\n\n");
             len += 2;
@@ -666,6 +669,37 @@ pub fn osrFileDialogReply(self: *AppSession, surface_id: u64, token: u64, accept
     clearShown(self, surface_id, token);
 }
 
+/// W5b2: 아직 맡지 않은 기억된 위치 요청 하나(sheet 없이 좌표만 구한다 — 이 창이 맡는다).
+pub fn takeOsrLocation(self: *AppSession) ?OsrDialogShown {
+    const next = web_osr.nextLocation(@intFromPtr(self)) orelse return null;
+    return .{ .surface_id = next.surface_id, .token = next.token };
+}
+
+pub const LocationStatus = enum(u32) { position = 0, unavailable = 1, blocked = 2 };
+
+/// W5b2: sheet 가 닫혔지만 답은 나중에 온다(위치 — macOS 위치 창·좌표를 기다린다). 이 창의 표시만 풀어 다른 탭의 대화상자가
+/// 기다리지 않게 한다(요청은 이 창이 맡은 채 남아 같은 탭의 다음 요청은 답을 기다린다 — 적대 검증).
+pub fn osrDialogRelease(self: *AppSession, surface_id: u64, token: u64) void {
+    clearShown(self, surface_id, token);
+}
+
+/// W5b2: 위치 요청의 좌표. 처음 요청(sheet 에서 허용)이면 macOS 가 막았을 때 못 물음(사용자는 사이트를 허용했다 — 기억·embargo
+/// 가 쌓이지 않게 — 카메라와 같다), 기억된 요청이면 허용과 「없음」(되풀이된 못 물음이 embargo 가 되지 않게). 답했으면 true.
+pub fn osrLocationReply(self: *AppSession, surface_id: u64, token: u64, status: LocationStatus, position: web_osr.Position) bool {
+    const d = web_osr.dialogPending(surface_id, token) orelse {
+        clearShown(self, surface_id, token);
+        return false;
+    };
+    const remembered = d.remembered;
+    const answered = switch (status) {
+        .position => web_osr.replyLocation(self.allocator, surface_id, token, position, .accept),
+        .unavailable => web_osr.replyLocation(self.allocator, surface_id, token, null, .accept),
+        .blocked => web_osr.replyLocation(self.allocator, surface_id, token, null, if (remembered) .accept else .ignore),
+    };
+    clearShown(self, surface_id, token);
+    return answered;
+}
+
 /// 답했으면 true — 요청이 이미 사라졌으면(이동·닫힘) false(Swift 는 그때 macOS 안내를 띄우지 않는다).
 pub fn osrPermissionReply(self: *AppSession, surface_id: u64, token: u64, result: ws.message.PermissionResult) bool {
     const answered = web_osr.replyPermission(self.allocator, surface_id, token, result);
@@ -675,8 +709,8 @@ pub fn osrPermissionReply(self: *AppSession, surface_id: u64, token: u64, result
 
 /// Swift 가 sheet 에 쓰는 나머지 문구(번역·조립은 Zig — docs/i18n.md §7.2). 0 = 억제 선택, 1 = 폴더 올리기 확인 제목(`number`
 /// 는 파일 수), 2 = 올리기 단추, 3 = 취소 단추, 4 = 폴더가 너무 크다(`number` 는 상한), 5 = 권한 닫기 단추(W5b), 6 = macOS 가
-/// Maru 의 장치 사용을 막았다(`number` 는 장치 — 0 카메라·1 마이크·2 화면 기록 — 화면 기록은 다시 시작해야 반영된다는 안내를
-/// 붙인다), 7 = 시스템 설정 열기 단추, 8 = 확인 단추.
+/// Maru 의 장치 사용을 막았다(`number` 는 장치 — 0 카메라·1 마이크·2 화면 기록·3 위치 서비스(W5b2) — 화면 기록은 다시 시작해야
+/// 반영된다는 안내를 붙인다), 7 = 시스템 설정 열기 단추, 8 = 확인 단추.
 pub fn osrDialogString(which: u32, number: i64, buf: []u8) []const u8 {
     const t = maru.i18n.t;
     return switch (which) {
@@ -689,6 +723,7 @@ pub fn osrDialogString(which: u32, number: i64, buf: []u8) []const u8 {
         6 => maru.i18n.format(buf, t(if (number == 2) .web_permission_macos_blocked_restart else .web_permission_macos_blocked), &.{.{ .s = t(switch (number) {
             0 => .web_device_camera,
             1 => .web_device_microphone,
+            3 => .web_device_location,
             else => .web_permission_screen_recording,
         }) }}),
         7 => maru.i18n.format(buf, t(.web_permission_open_settings), &.{}),
@@ -1930,8 +1965,10 @@ test "permission sheet text lists each asked permission once and notes rememberi
     const media = permissionMessage(&buf, 0, ws.message.MediaPermission.camera.bit() | ws.message.MediaPermission.microphone.bit());
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, media, "\n"));
     try std.testing.expect(std.mem.indexOf(u8, media, maru.i18n.tIn(.ko, .web_permission_remembered)) == null);
-    // 위치만 청하면 안내가 없다(저장된 허용이 있어도 Chromium 이 매번 다시 묻는다 — 실측). 위치와 알림을 함께면 붙는다.
-    try std.testing.expect(std.mem.indexOf(u8, permissionMessage(&buf, kinds.geolocation.bit(), 0), maru.i18n.tIn(.ko, .web_permission_remembered)) == null);
+    // 위치만 청하면 위치 안내(이 탭에서 다시 시작할 때까지)가 붙는다 — 사이트 기억 안내가 아니다. 위치와 알림을 함께면 사이트 안내.
+    const location_only = permissionMessage(&buf, kinds.geolocation.bit(), 0);
+    try std.testing.expect(std.mem.indexOf(u8, location_only, maru.i18n.tIn(.ko, .web_permission_remembered)) == null);
+    try std.testing.expect(std.mem.endsWith(u8, location_only, maru.i18n.tIn(.ko, .web_permission_location_note)));
     try std.testing.expect(std.mem.indexOf(u8, permissionMessage(&buf, kinds.geolocation.bit() | kinds.notifications.bit(), 0), maru.i18n.tIn(.ko, .web_permission_remembered)) != null);
     // 버퍼가 모자라면 앞쪽 줄까지만(자른 줄은 없다).
     var small: [24]u8 = undefined;

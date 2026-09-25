@@ -33,13 +33,19 @@ pub fn forHighlight(src: anytype, len: usize, pos: usize, mode: Mode) ?Pair {
     };
 }
 
-/// **괄호 짝으로 점프**(§3.9c)가 caret 을 둘 byte. 여는 괄호에**만** 닿았으면 닫는 괄호 앞으로, 닫는 괄호에 닿았으면 여는 괄호 앞으로
-/// (VS Code `jumpToBracket` — `{|}` 는 둘 다 닿아 여는 괄호 앞으로 간다). 닿은 괄호가 없으면 `null`(감싸는 쌍으로는 아직 안 간다).
+/// **괄호 짝으로 점프**(§3.9c)가 caret 을 둘 byte — VS Code `jumpToBracket` 의 세 갈래.
+///
+/// ① 닿은 괄호가 있으면: 여는 괄호에**만** 닿았으면 닫는 괄호 앞, 닫는 괄호에 닿았으면 여는 괄호 앞(`{|}` 는 둘 다 닿아 여는 괄호 앞).
+/// ② 없으면 **감싸는 쌍의 닫는 괄호 앞**(`findEnclosingBrackets` — 강조 `always` 와 같은 판정). ③ 그것도 없으면 **다음 여는 괄호 앞**
+/// (`findNextBracket` — caret 바로 뒤 글자도 친다). ②③ 은 출처가 답할 때만이다 — 글자 훑기(`Plain`)는 둘 다 `null` 이다. 갈 데가 없으면 `null`.
 pub fn jumpTarget(src: anytype, len: usize, pos: usize) ?usize {
     const at = @min(pos, len);
-    const p = touching(src, len, at) orelse return null;
-    const on_close = at == p.close or at == @as(usize, p.close) + 1;
-    return if (on_close) p.open else p.close;
+    if (touching(src, len, at)) |p| {
+        const on_close = at == p.close or at == @as(usize, p.close) + 1;
+        return if (on_close) p.open else p.close;
+    }
+    if (src.enclosing(at)) |p| return p.close;
+    return src.nextOpen(at);
 }
 
 /// **grammar 없는 문서**의 출처(§3.9c 저하) — 문서 전체를 글자로 훑는다. 감싸는 쌍은 **안 찾는다**: 문자열 속 괄호를 세어 틀린 쌍을 보인다.
@@ -51,6 +57,13 @@ pub const Plain = struct {
     }
 
     pub fn enclosing(self: Plain, pos: usize) ?Pair {
+        _ = self;
+        _ = pos;
+        return null;
+    }
+
+    /// 다음 여는 괄호도 **안 찾는다**(§3.9c) — 감싸는 쌍을 안 찾는 것과 같은 이유다.
+    pub fn nextOpen(self: Plain, pos: usize) ?usize {
         _ = self;
         _ = pos;
         return null;
@@ -149,6 +162,20 @@ pub fn Tree(comptime P: type) type {
             }
             const p = self.prov.enclosingBracketTokens(self.bytes, at) orelse return null;
             return .{ .open = p.open, .close = p.close };
+        }
+
+        /// **`pos` 이후 첫 여는 괄호**(§3.9c ③ — VS Code `findNextBracket`). 여는 괄호 글자마다 그것이 괄호인지 트리에 묻는다: ⓐ 괄호 토큰이거나
+        /// ⓑ 글 잎 속 글자. 짝은 안 본다 — 안 닫힌 여는 괄호도 친다(VS Code 실측 `x| ) (` → `(` 앞). 닫는 괄호는 볼 까닭이 없다 — 짝 있는
+        /// 닫는 괄호는 감싸는 쌍이 먼저 걸렸거나 그 여는 괄호를 먼저 만나고, 짝 없는 것은 VS Code 도 건너뛴다(`x| )` → 그대로).
+        /// **상한이 없다** — 두면 큰 파일에서만 답이 달라진다(§3.9c).
+        pub fn nextOpen(self: Self, pos: usize) ?usize {
+            var j = @min(pos, self.bytes.len);
+            while (j < self.bytes.len) : (j += 1) {
+                const b = bracketOf(self.bytes[j]) orelse continue;
+                if (!b.open) continue;
+                if (self.prov.isOpenBracketToken(self.bytes, @intCast(j)) or self.prov.proseLeafAt(@intCast(j)) != null) return j;
+            }
+            return null;
         }
     };
 }
@@ -267,6 +294,8 @@ test "BRK5 점프 — 여는 괄호에만 닿으면 닫는 괄호 앞, 닫는 �
 /// 가짜 provider — 토큰 짝·글 잎·감싸는 토큰을 표로 답한다.
 const FakeProv = struct {
     tokens: []const Pair = &.{},
+    /// 짝 없이 괄호 토큰인 여는 괄호 자리(안 닫힌 것).
+    lone_opens: []const u32 = &.{},
     leaf: ?struct { start: u32, end: u32 } = null,
     tree_enclosing: ?Pair = null,
     enclosing_calls: usize = 0,
@@ -279,6 +308,12 @@ const FakeProv = struct {
     pub fn proseLeafAt(self: *FakeProv, i: u32) ?struct { start: u32, end: u32 } {
         const l = self.leaf orelse return null;
         return if (l.start <= i and i < l.end) .{ .start = l.start, .end = l.end } else null;
+    }
+    pub fn isOpenBracketToken(self: *FakeProv, bytes: []const u8, i: u32) bool {
+        _ = bytes;
+        for (self.tokens) |t| if (t.open == i) return true;
+        for (self.lone_opens) |o| if (o == i) return true;
+        return false;
     }
     pub fn enclosingBracketTokens(self: *FakeProv, bytes: []const u8, pos: u32) ?Pair {
         _ = bytes;
@@ -319,4 +354,28 @@ test "BRK7 트리 출처의 감싸는 쌍 — 글 잎 안이 먼저, 없으면 �
     var code: FakeProv = .{ .tree_enclosing = pr(1, 8) };
     const cs: Tree(FakeProv) = .{ .prov = &code, .bytes = "f(\"(\", x)" };
     try testing.expectEqual(pr(1, 8), cs.enclosing(4));
+}
+
+test "BRJ1 점프 — 닿은 괄호가 없으면 감싸는 쌍의 닫는 괄호 앞, 없으면 다음 여는 괄호 앞; 글자 훑기는 둘 다 안 한다 (§3.9c, VS Code 실측)" {
+    // ① 감싸는 쌍 — `f("(", x)` 의 x(7) 앞: 닿은 괄호가 없어 트리가 준 (1,8) 의 닫는 괄호 앞. 닿았으면 닿은 쪽이 이긴다(8 뒤 → 여는 괄호 1).
+    const call = "f(\"(\", x)";
+    var enc: FakeProv = .{ .tokens = &.{.{ .open = 1, .close = 8 }}, .tree_enclosing = pr(1, 8) };
+    const es: Tree(FakeProv) = .{ .prov = &enc, .bytes = call };
+    try testing.expectEqual(@as(?usize, 8), jumpTarget(es, call.len, 7));
+    try testing.expectEqual(@as(?usize, 1), jumpTarget(es, call.len, 9));
+    // ② 다음 여는 괄호 — `a ( ) x (b) (`: 2 는 괄호 토큰이 아니고(문자열 속), 4 는 닫는 괄호, 8 이 첫 여는 괄호 토큰이다. 12 는 안 닫힌 여는 괄호
+    // 토큰 — 짝이 없어도 친다. caret 바로 뒤 글자도 「다음」이다(12 에서 제자리).
+    const s = "a ( ) x (b) (";
+    var nx: FakeProv = .{ .tokens = &.{.{ .open = 8, .close = 10 }}, .lone_opens = &.{12} };
+    const ns: Tree(FakeProv) = .{ .prov = &nx, .bytes = s };
+    try testing.expectEqual(@as(?usize, 8), jumpTarget(ns, s.len, 0));
+    try testing.expectEqual(@as(?usize, 12), jumpTarget(ns, s.len, 12));
+    try testing.expectEqual(@as(?usize, null), jumpTarget(ns, s.len, 13)); // 뒤에 없다
+    // ⓑ 글 잎 속 '(' 는 괄호다 — 잎 [0, 4) 안의 2
+    var pl: FakeProv = .{ .tokens = &.{.{ .open = 8, .close = 10 }}, .leaf = .{ .start = 0, .end = 4 } };
+    const ps: Tree(FakeProv) = .{ .prov = &pl, .bytes = s };
+    try testing.expectEqual(@as(?usize, 2), jumpTarget(ps, s.len, 0));
+    // **글자 훑기는 감싸는 쌍도 다음 괄호도 안 찾는다**(§3.9c — 문자열 속 괄호를 센다)
+    try testing.expectEqual(@as(?usize, null), jumpTarget(Plain{ .bytes = "(a b)" }, 5, 2));
+    try testing.expectEqual(@as(?usize, null), jumpTarget(Plain{ .bytes = "x (a)" }, 5, 0));
 }

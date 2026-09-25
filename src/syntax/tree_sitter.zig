@@ -788,6 +788,16 @@ pub const Provider = struct {
         return pairAmongChildren(parent, source, .{ .token = i });
     }
 
+    /// **byte `i` 의 글자가 여는 괄호 토큰인가**(§5.1b ⓐ — 짝은 안 본다). 점프의 「다음 여는 괄호」(문서 모델 §3.9c ③)가 쓴다 — VS Code 는 안 닫힌
+    /// 여는 괄호도 친다. 트리가 없으면 `false`.
+    pub fn isOpenBracketToken(self: *Provider, source: []const u8, i: u32) bool {
+        const tree = self.tree orelse return false;
+        if (i >= source.len) return false;
+        const node = c.ts_node_descendant_for_byte_range(c.ts_tree_root_node(tree), i, i + 1);
+        const tok = tokenBracket(node, source) orelse return false;
+        return tok.at == i and tok.open;
+    }
+
     /// **byte `i`(또는 caret `i` 가 그 안에 선) 글 잎**(§5.1b ⓑ)의 범위 — 글이 괄호를 담는 언어(`prose_brackets`)에서 이름 있는 잎만.
     /// 짝짓기는 호출자가 이 범위 **안에서만** 글자 훑기로 한다. 그 밖이면 `null`.
     pub fn proseLeafAt(self: *Provider, i: u32) ?ByteRange {
@@ -3027,6 +3037,19 @@ test "SYN44 괄호 토큰의 짝·문자열 속 괄호·감싸는 쌍 — 코드
         try std.testing.expectEqual(@as(?Provider.ByteRange, null), prov.proseLeafAt(in)); // 코드 언어 — 글 잎이 없다
         try std.testing.expectEqual(@as(?Provider.BracketPair, want), prov.enclosingBracketTokens(s.src, in));
         try std.testing.expectEqual(@as(?Provider.BracketPair, want), prov.enclosingBracketTokens(s.src, in + 1));
+        // **여는 괄호 토큰인가**(문서 모델 §3.9c ③ 「다음 여는 괄호」) — 여는 괄호만, 문자열 속은 아니다, 붙은 토큰의 앞 글자도 아니다
+        try std.testing.expect(prov.isOpenBracketToken(s.src, o));
+        try std.testing.expect(!prov.isOpenBracketToken(s.src, cl));
+        try std.testing.expect(!prov.isOpenBracketToken(s.src, in));
+        if (s.open.len > 1) try std.testing.expect(!prov.isOpenBracketToken(s.src, o - 1));
+    }
+    // **안 닫힌 여는 괄호도 토큰이다** — VS Code 가 「다음 괄호」로 친다(`x| ) (` → `(` 앞)
+    {
+        const src = "f(x) + g(\n";
+        var prov = Provider.init(src, .javascript, 0) orelse return error.NoProvider;
+        defer prov.deinit();
+        try std.testing.expect(prov.isOpenBracketToken(src, 8));
+        try std.testing.expect(!prov.isOpenBracketToken(src, 99)); // 범위 밖
     }
 }
 

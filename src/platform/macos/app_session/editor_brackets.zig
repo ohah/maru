@@ -53,7 +53,7 @@ fn treeOf(term: *Term) ?*Provider {
     return null;
 }
 
-/// **괄호 짝으로 점프**(§3.9c)의 도착 byte — 강조와 같은 출처 고르기. 닿은 괄호가 없으면 `null`.
+/// **괄호 짝으로 점프**(§3.9c)의 도착 byte — 강조와 같은 출처 고르기. 갈 데가 없으면 `null`(트리가 없으면 닿은 괄호뿐이다).
 pub fn jumpTarget(term: *Term, content: []const u8, pos: usize) ?usize {
     if (treeOf(term)) |p| return brackets.jumpTarget(brackets.Tree(Provider){ .prov = p, .bytes = content }, content.len, pos);
     return brackets.jumpTarget(brackets.Plain{ .bytes = content }, content.len, pos);

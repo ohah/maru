@@ -120,7 +120,8 @@ keybind = F4 = esc:[2J
   `toggle_symbol_picker`는 **파일 안 심볼을 필터해 그 자리로 간다**(VSCode `⇧⌘O`. 찾기가 모든 글자에서
   문자열을 보는 것과 달리 **심볼 이름만** 본다 — [native-editor-ui.md §7.5](native-editor-ui.md)).
   `jump_to_bracket`은 **caret 옆 괄호의 짝으로 간다** — 대상은 괄호 셋뿐이고(따옴표는 여는 것과 닫는
-  것이 같아 깊이를 못 센다), 괄호가 아닌 곳에서는 아무 일도 안 한다([문서 모델](native-editor-document-model.md) §3.9c).
+  것이 같아 깊이를 못 센다), 괄호가 아닌 곳에서는 구문 트리가 있으면 감싸는 쌍의 닫는 괄호로(그것도 없으면 다음 여는 괄호로)
+  가고 트리가 없으면 안 움직인다([문서 모델](native-editor-document-model.md) §3.9c).
 
   ~~**chord 가 붙은 것이 일곱이다**(2026-09-05 실측)~~ → **열넷이다**(2026-09-07 재실측):
   `toggle_symbol_picker`(`⇧⌘O`) · `toggle_editor_wrap`(`⌥Z`) · `delete_lines`(`⇧⌘K`) ·

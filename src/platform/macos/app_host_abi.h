@@ -9,7 +9,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 195u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 196u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -2158,9 +2158,29 @@ void maru_macos_app_session_osr_file_dialog_reply(MaruAppHostSession *session, u
    닫기·못 물음은 허용·차단으로 기억하지 않는다(프롬프트는 되풀이되면 Chromium 이 한동안 묻지 않는다 — 닫기 셋·못 물음 넷).
    답했으면 1 — 권한 요청이 아니거나 이미 사라졌으면(이동·닫힘) 0. */
 int32_t maru_macos_app_session_osr_permission_reply(MaruAppHostSession *session, uint64_t surface_id, uint64_t token, uint32_t result);
+/* v196(W5b2): 기억된 위치 요청 — 사용자가 이미 허용한 출처가 위치를 다시 청했다(Chromium 은 부를 때마다 묻는다). sheet 없이
+   Maru 의 CoreLocation 좌표를 구해 maru_macos_app_session_osr_location_reply 로 답한다. 보이지 않는 탭도 온다. */
+typedef struct MaruAppHostOsrLocationRequest {
+    uint64_t surface_id;
+    uint64_t token;
+} MaruAppHostOsrLocationRequest;
+int32_t maru_macos_app_session_take_osr_location(MaruAppHostSession *session, MaruAppHostOsrLocationRequest *out);
+/* v196(W5b2): 위치 요청(sheet 의 허용 뒤 또는 기억된 요청)의 좌표 — maru_macos_app_session_osr_location_reply. status 는 아래
+   MARU_OSR_LOCATION_*. POSITION 이면 위도·경도·정확도(m)를 싣고(범위 밖은 「없음」으로 본다), UNAVAILABLE 이면 페이지가 「위치를
+   알 수 없음」을 받는다, BLOCKED 는 macOS 가 Maru 의 위치를 막았다(처음 요청이면 못 물음, 기억된 요청이면 허용과 「없음」).
+   기다리는 사이 사용자가 그 출처를 차단했으면 허용하지 않는다. 답했으면 1(요청이 이미 사라졌으면 0). */
+/* v196(W5b2): sheet 는 닫혔지만 답은 나중에 한다(위치 — macOS 위치 창·좌표를 기다린다) — 이 창의 다른 대화상자가 기다리지 않게
+   표시만 푼다. */
+void maru_macos_app_session_osr_dialog_release(MaruAppHostSession *session, uint64_t surface_id, uint64_t token);
+#define MARU_OSR_LOCATION_POSITION 0u
+#define MARU_OSR_LOCATION_UNAVAILABLE 1u
+#define MARU_OSR_LOCATION_BLOCKED 2u
+int32_t maru_macos_app_session_osr_location_reply(MaruAppHostSession *session, uint64_t surface_id, uint64_t token, uint32_t status,
+                                                  double latitude, double longitude, double accuracy);
 /* v194(W5a): sheet 의 나머지 문구를 out 에 쓰고 길이를 돌려준다(UTF-8, NUL 없음). which: 0 억제 선택 · 1 폴더 올리기 확인
    제목(number = 파일 수) · 2 올리기 단추 · 3 취소 단추 · 4 폴더가 너무 크다(number = 상한) · v195(W5b): 5 권한 닫기 단추 ·
-   6 macOS 가 Maru 의 장치 사용을 막았다(number: 0 카메라 · 1 마이크 · 2 화면 기록) · 7 시스템 설정 열기 단추 · 8 확인 단추. */
+   6 macOS 가 Maru 의 장치 사용을 막았다(number: 0 카메라 · 1 마이크 · 2 화면 기록 · 3 위치 서비스) · 7 시스템 설정 열기 단추 ·
+   8 확인 단추. */
 size_t maru_macos_web_dialog_string(uint32_t which, int64_t number, uint8_t *out, size_t out_cap);
 void maru_macos_mermaid_snapshot(MaruMermaidCoordinatorSnapshot *out_snapshot);
 /* allocation-free frame-tick gate와 exact renderer lifetime revoke. */

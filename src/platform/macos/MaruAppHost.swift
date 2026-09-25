@@ -1,6 +1,7 @@
 import AppKit
 import AVFoundation // W5b: Chromium 탭이 카메라·마이크를 청하면 Maru 의 macOS 권한을 먼저 받는다
 import Carbon.HIToolbox
+import CoreLocation // W5b2: Chromium 탭의 위치 요청 — Chromium 의 공급자가 CEF 에서 돌지 않아 Maru 가 좌표를 구해 넘긴다
 import CoreServices
 import Darwin
 import Foundation
@@ -7485,6 +7486,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             drainOsrCursor() // W4b: hover 중인 Chromium 탭의 페이지 커서가 바뀌었으면 맞춘다.
             drainOsrDiscardMarked() // W4c: Zig 가 끝낸 Chromium 탭 조합을 입력기 세션에서도 버린다.
             drainOsrDialog() // W5a: Chromium 탭의 JS 대화상자·파일 선택을 maru 창에 붙는 sheet 로 묻는다.
+            drainOsrLocation() // W5b2: 이미 허용한 출처의 위치 요청 — sheet 없이 좌표만 구해 답한다.
             drainClipboardAction() // 우클릭(input.right-click=paste·menu)이 요청한 OS 클립보드 복사/붙여넣기를 실행한다.
             drainClipboardRead() // OSC 52 읽기(osc52.read=allow): 셸 프로그램의 `?` 쿼리에 시스템 클립보드를 base64로 응답.
             drainFilePick() // 세팅 window.background-image 행 활성: NSOpenPanel(PNG)을 열어 고른 경로를 config에 적용.
@@ -8356,6 +8358,18 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 } else {
                     Self.testReport("sheet-answer-missing")
                 }
+            case "macos-location" where line.count >= 2:
+                // macos-location granted 위도 경도 정확도 | denied | unavailable — 위치 요청 때 CoreLocation 대신 이 답을 준다.
+                switch line[1] {
+                case "granted" where line.count >= 5:
+                    if let lat = Double(line[2]), let lon = Double(line[3]), let acc = Double(line[4]) {
+                        let location = CLLocation(coordinate: CLLocationCoordinate2D(latitude: lat, longitude: lon), altitude: 0,
+                                                  horizontalAccuracy: acc, verticalAccuracy: -1, timestamp: Date())
+                        osrLocation.testAnswer = (MARU_OSR_LOCATION_POSITION, location)
+                    }
+                case "denied": osrLocation.testAnswer = (MARU_OSR_LOCATION_BLOCKED, nil)
+                default: osrLocation.testAnswer = (MARU_OSR_LOCATION_UNAVAILABLE, nil)
+                }
             case "macos-access" where line.count >= 3:
                 // macos-access camera|microphone|screen granted|denied — 권한 요청 허용 때 macOS 권한 확인을 이 값으로 대신한다.
                 let device: OsrDevice? = switch line[1] {
@@ -8667,7 +8681,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // (Esc)는 기억하지 않는다(Chrome 의 X). Return 에는 아무 단추도 걸지 않는다 — 치던 Return 이 허용이 되지 않게(입력 보호와 함께).
     // 카메라·마이크·화면을 허용하면 Maru 의 macOS 권한을 먼저 받는다 — macOS 가 막으면 페이지에는 「못 물음」으로 답하고(차단은
     // 사이트에 기억되고 닫기는 embargo 를 쌓는다) 시스템 설정으로 안내한다.
-    enum OsrDevice: Int64 { case camera = 0, microphone = 1, screen = 2 }
+    enum OsrDevice: Int64 { case camera = 0, microphone = 1, screen = 2, location = 3 }
     /// 시험기 전용(`macos-access`) — macOS 권한 상태를 대신 정한다(비활성 앱·장치 없는 기계에서 TCC 를 다룰 수 없다).
     private var osrTestMacAccess: [OsrDevice: Bool] = [:]
     /// 떠 있는 macOS 안내 sheet(시험기가 읽는다).
@@ -8707,6 +8721,17 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 alert.window.orderOut(nil) // 이어서 macOS 안내 sheet 를 띄울 수 있다
                 self.ensureMacAccess(Self.osrDevices(kinds: kinds, media: media)) { [weak self, weak window] blocked in
                     guard let self, let window else { return }
+                    // W5b2: 위치는 Maru 가 좌표를 구해 허용 **전에** 건다(허용 뒤에 걸면 기다리던 요청이 실패한다 — 실측).
+                    if blocked == nil, kinds & 0x100 != 0 {
+                        // 답은 좌표가 오면 한다 — 그동안 이 창의 다른 대화상자가 기다리지 않게 표시를 푼다.
+                        if let session = self.surfaceOwning(window)?.appSession { maru_macos_app_session_osr_dialog_release(session, sid, token) }
+                        self.osrLocation.fetch { [weak self, weak window] status, location in
+                            guard let self, let window else { return }
+                            let answered = self.replyOsrLocation(window: window, sid: sid, token: token, status: status, location: location)
+                            if status == MARU_OSR_LOCATION_BLOCKED, answered, window.isVisible { self.showMacAccessBlocked(window: window, device: .location) }
+                        }
+                        return
+                    }
                     // macOS 가 막았으면 「못 물음」 — 사용자는 사이트를 허용했다(차단이나 닫기로 기억·embargo 가 쌓이지 않게).
                     let answered = self.replyOsrPermission(window: window, sid: sid, token: token,
                                                            result: blocked == nil ? MARU_OSR_PERMISSION_ACCEPT : MARU_OSR_PERMISSION_IGNORE)
@@ -8720,6 +8745,125 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             }
         }
         Self.guardOsrSheetInput(alert, field: nil)
+    }
+
+    // ── W5b2: 위치 ──
+    // Chromium 의 위치 공급자는 CEF 에서 돌지 않는다 — macOS 위치 권한은 프로세스마다 매겨져 Maru 가 받은 허용이 sidecar 에 보이지
+    // 않는다(실측). Maru 가 CoreLocation 으로 좌표를 **한 번** 구해 넘기고 sidecar 가 그 탭에 DevTools 덮어쓰기로 건다. 계속 추적하지
+    // 않는다 — 덮어쓰기를 갱신하면 페이지가 매번 오류를 먼저 받아서(실측) `watchPosition` 은 처음 좌표 하나만 받는다(사용자 결정
+    // 2026-09-26). 1 분 안에 구한 좌표는 다시 쓴다.
+    final class OsrLocation: NSObject, CLLocationManagerDelegate {
+        typealias Done = (UInt32, CLLocation?) -> Void
+        private var manager: CLLocationManager?
+        private var waiting: [Done] = []
+        /// 지금 기다리는 것(macOS 위치 창의 답 또는 좌표)의 시한 — 없으면 창의 sheet 가 영영 멈출 수 있었다(적대 검증).
+        private var deadline: DispatchWorkItem?
+        private var awaitingFix = false
+        /// 시험기 전용(`macos-location`) — CoreLocation 대신 이 답을 준다(비활성 앱은 TCC 를 다룰 수 없다).
+        var testAnswer: (UInt32, CLLocation?)?
+
+        func fetch(_ done: @escaping Done) {
+            if let answer = testAnswer { return done(answer.0, answer.1) }
+            // 위치 서비스가 꺼져 있으면 CoreLocation 이 거절(denied)로 알린다 — `locationServicesEnabled()` 는 메인 스레드를 멈출 수
+            // 있다고 Apple 이 경고한다.
+            waiting.append(done)
+            guard waiting.count == 1 else { return } // 이미 구하는 중 — 같은 답을 나눈다
+            let manager = self.manager ?? CLLocationManager()
+            self.manager = manager
+            manager.delegate = self
+            // 웹 페이지에 줄 좌표 — Wi-Fi 측위만 되는 Mac 에서 최고 정확도를 기다리면 10 초 시한과 겹친다(2 차 적대 검증).
+            manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
+            proceed(manager)
+        }
+
+        private func proceed(_ manager: CLLocationManager) {
+            switch manager.authorizationStatus {
+            case .notDetermined:
+                // macOS 「Maru」 위치 창 — 답은 delegate 로 온다. 사용자가 답하지 않으면 1 분 뒤 「없음」.
+                arm(60)
+                manager.requestWhenInUseAuthorization()
+            case .denied, .restricted:
+                finish(MARU_OSR_LOCATION_BLOCKED, nil)
+            default:
+                if let recent = manager.location, recent.horizontalAccuracy > 0, -recent.timestamp.timeIntervalSinceNow < 60 {
+                    return finish(MARU_OSR_LOCATION_POSITION, recent)
+                }
+                // 첫 좌표를 오래 기다리지 않는다 — 페이지의 시한은 권한을 묻는 동안에도 흐른다(실측).
+                arm(10)
+                awaitingFix = true
+                manager.requestLocation()
+            }
+        }
+
+        private func arm(_ seconds: Double) {
+            deadline?.cancel()
+            let item = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                // 시한에 신선한 좌표가 있으면 그것으로 끝낸다.
+                let recent = self.manager?.location
+                let fresh = self.awaitingFix && recent.map { $0.horizontalAccuracy > 0 && -$0.timestamp.timeIntervalSinceNow < 60 } == true
+                // 끝나지 않은 요청을 거두고 매니저를 버린다 — 큐에 들어간 옛 콜백이 다음 묶음을 끝내지 않게(적대 검증 1·2 차).
+                self.manager?.stopUpdatingLocation()
+                self.manager?.delegate = nil
+                self.manager = nil
+                self.finish(fresh ? MARU_OSR_LOCATION_POSITION : MARU_OSR_LOCATION_UNAVAILABLE, fresh ? recent : nil)
+            }
+            deadline = item
+            DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: item)
+        }
+
+        private func finish(_ status: UInt32, _ location: CLLocation?) {
+            deadline?.cancel()
+            deadline = nil
+            awaitingFix = false
+            let done = waiting
+            waiting = []
+            for callback in done { callback(status, location) }
+        }
+
+        func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+            // macOS 위치 창의 답을 기다리던 중일 때만 이어 간다.
+            guard !waiting.isEmpty, !awaitingFix, manager.authorizationStatus != .notDetermined else { return }
+            proceed(manager)
+        }
+
+        func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+            guard awaitingFix, let last = locations.last else { return }
+            finish(MARU_OSR_LOCATION_POSITION, last)
+        }
+
+        func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+            guard awaitingFix else { return }
+            let denied = (error as? CLError)?.code == .denied
+            finish(denied ? MARU_OSR_LOCATION_BLOCKED : MARU_OSR_LOCATION_UNAVAILABLE, nil)
+        }
+    }
+    private let osrLocation = OsrLocation()
+
+    @discardableResult
+    private func replyOsrLocation(window: NSWindow, sid: UInt64, token: UInt64, status: UInt32, location: CLLocation?) -> Bool {
+        guard let session = surfaceOwning(window)?.appSession else { return false }
+        let c = location?.coordinate
+        let answered = maru_macos_app_session_osr_location_reply(session, sid, token, status, c?.latitude ?? 0, c?.longitude ?? 0,
+                                                                 location?.horizontalAccuracy ?? 0) != 0
+        Self.testNote("location-reply \(status) answered=\(answered)")
+        return answered
+    }
+
+    /// 이미 허용한 출처가 위치를 다시 청했다(Chromium 은 부를 때마다 묻는다 — 실측) — sheet 없이 좌표만 구해 답한다. 보이지 않는
+    /// 탭도 온다. macOS 가 막았으면 페이지는 「위치를 알 수 없음」을 받는다(안내는 처음 허용 때 한다).
+    private func drainOsrLocation() {
+        guard let session = appSession, let window else { return }
+        var request = MaruAppHostOsrLocationRequest()
+        while maru_macos_app_session_take_osr_location(session, &request) != 0 {
+            let sid = request.surface_id
+            let token = request.token
+            Self.testNote("location-taken")
+            osrLocation.fetch { [weak self, weak window] status, location in
+                guard let self, let window else { return }
+                self.replyOsrLocation(window: window, sid: sid, token: token, status: status, location: location)
+            }
+        }
     }
 
     @discardableResult
@@ -8750,6 +8894,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             case .notDetermined: AVCaptureDevice.requestAccess(for: type, completionHandler: next)
             default: next(false)
             }
+        case .location:
+            next(true) // `osrDevices` 는 위치를 넣지 않는다 — 좌표를 구할 때 CoreLocation 이 묻는다(`OsrLocation`)
         case .screen:
             if CGPreflightScreenCaptureAccess() { next(true) } else {
                 _ = CGRequestScreenCaptureAccess()
@@ -8773,6 +8919,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             case .camera: "Privacy_Camera"
             case .microphone: "Privacy_Microphone"
             case .screen: "Privacy_ScreenCapture"
+            case .location: "Privacy_LocationServices"
             }
             if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(pane)") { NSWorkspace.shared.open(url) }
         }

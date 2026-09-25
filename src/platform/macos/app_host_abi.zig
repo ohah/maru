@@ -173,7 +173,11 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
 }
 
 test "ABI v185 notification release end-all and cold route values match the C header" {
-    try std.testing.expectEqual(@as(u32, 195), abi_version);
+    try std.testing.expectEqual(@as(u32, 196), abi_version);
+    const Location = session_mod.web_ops.LocationStatus;
+    try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_POSITION), @intFromEnum(Location.position));
+    try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_UNAVAILABLE), @intFromEnum(Location.unavailable));
+    try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_BLOCKED), @intFromEnum(Location.blocked));
     // W5a·W5b: Swift 가 쓰는 대화상자 종류·권한 답 상수가 Zig 열거형과 같다.
     const web_osr_mod = session_mod.web_osr;
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_DIALOG_PROMPT), @intFromEnum(web_osr_mod.DialogKind.prompt));
@@ -4632,6 +4636,28 @@ pub export fn maru_macos_app_session_osr_permission_reply(session: ?*AppSession,
     const app = session orelse return 0;
     const value = std.enums.fromInt(maru.session.web_sidecar.message.PermissionResult, result) orelse .ignore;
     return @intFromBool(session_mod.web_ops.osrPermissionReply(app, surface_id, token, value));
+}
+
+/// v196(W5b2): sheet 는 닫혔지만 답은 나중에 — 창의 표시만 푼다.
+pub export fn maru_macos_app_session_osr_dialog_release(session: ?*AppSession, surface_id: u64, token: u64) void {
+    const app = session orelse return;
+    session_mod.web_ops.osrDialogRelease(app, surface_id, token);
+}
+
+/// v196(W5b2): 기억된 위치 요청 하나(sheet 없이 좌표만 구한다).
+pub export fn maru_macos_app_session_take_osr_location(session: ?*AppSession, out: ?*c.MaruAppHostOsrLocationRequest) i32 {
+    const app = session orelse return 0;
+    const dst = out orelse return 0;
+    const next = session_mod.web_ops.takeOsrLocation(app) orelse return 0;
+    dst.* = .{ .surface_id = next.surface_id, .token = next.token };
+    return 1;
+}
+
+/// v196(W5b2): 위치 요청의 좌표 — 답했으면 1. 모르는 status 는 「없음」으로 본다.
+pub export fn maru_macos_app_session_osr_location_reply(session: ?*AppSession, surface_id: u64, token: u64, status: u32, latitude: f64, longitude: f64, accuracy: f64) i32 {
+    const app = session orelse return 0;
+    const value = std.enums.fromInt(session_mod.web_ops.LocationStatus, status) orelse .unavailable;
+    return @intFromBool(session_mod.web_ops.osrLocationReply(app, surface_id, token, value, .{ .latitude = latitude, .longitude = longitude, .accuracy = accuracy }));
 }
 
 pub export fn maru_macos_web_dialog_string(which: u32, number: i64, out: ?[*]u8, out_cap: usize) usize {

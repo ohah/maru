@@ -57,6 +57,7 @@ pub const Error = error{
     InvalidPath,
     InvalidOrigin,
     InvalidPermissions,
+    InvalidGeolocation,
     UnknownPermissionResult,
     InvalidModifiers,
     InvalidCoordinate,

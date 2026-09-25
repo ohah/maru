@@ -826,14 +826,16 @@ pub const Provider = struct {
         return node;
     }
 
-    /// 글 잎인가(§5.1b ⓑ) — 글이 괄호를 담는 언어의 **`text`·`attribute_value`·`raw_text` 잎**(HTML — 색 규칙 `bracketRuleFor` 가 VS Code 에
-    /// 맞춘 글이 `text`·`attribute_value` 이고, `raw_text` 는 `<script>`·`<style>` 본문이다). **이름 있는 잎 전부가 아니다** — `comment` 속 괄호는
-    /// 괄호가 아니다(VS Code 도 짝을 안 짓는다). 이름 없는 잎(`<`·`>`·`=`·`"`)은 구두점이라 글이 아니다.
+    /// 글 잎인가(§5.1b ⓑ) — 글이 괄호를 담는 언어의 **`comment` 가 아닌 이름 있는 잎**(HTML: `text`·`attribute_value`·`attribute_name`·
+    /// `raw_text`(`<script>`·`<style>` 본문) 등). `comment` 속 괄호는 괄호가 아니다(VS Code 도 `<!--` 부터 주석 토큰이다). 이름 있는 잎을
+    /// 종류로 좁히지 않는 것은 **속성 이름** 때문이다 — Angular `(click)` 은 `attribute_name` 잎이고 VS Code 는 그 괄호를 짝짓는다(`[value]` 의 `[]` 는
+    /// VS Code HTML 괄호가 아니다 — 우리는 짝짓는다: 알려진 차이, 문서 모델 §3.9c)
+    /// (적대적 3회차: 2회차에 `text`·`attribute_value`·`raw_text` 로 좁혔다가 `(click)` 강조·점프를 잃었다). 이름 없는 잎(`<`·`>`·`=`·`"`)은
+    /// 구두점이라 글이 아니다.
     fn isProseLeaf(self: *Provider, node: c.TSNode) bool {
         if (!self.slot.prose_brackets) return false;
         if (c.ts_node_is_null(node) or c.ts_node_child_count(node) != 0 or !c.ts_node_is_named(node)) return false;
-        const t = std.mem.span(c.ts_node_type(node));
-        return std.mem.eql(u8, t, "text") or std.mem.eql(u8, t, "attribute_value") or std.mem.eql(u8, t, "raw_text");
+        return !std.mem.eql(u8, std.mem.span(c.ts_node_type(node)), "comment");
     }
 
     /// 글 잎 중 **다음 여는 괄호로 칠 글**인가 — `raw_text`(스크립트·스타일 본문)는 뺀다. 짝·감싸는 쌍은 **보이는** 판정이라(상자가 선다)
@@ -852,6 +854,7 @@ pub const Provider = struct {
     pub fn nextOpenBracket(self: *Provider, source: []const u8, pos: u32) ?u32 {
         const tree = self.tree orelse return null;
         self.next_open_visits = 0;
+        // (등가 — 적대적 2회차 K10: `pos == len` 이면 caret 뒤에서 끝나는 노드가 없어 걷기가 어차피 `null` 이다. 한 바퀴를 안 돌려고 둔다.)
         if (pos >= source.len) return null;
         var cursor = c.ts_tree_cursor_new(c.ts_tree_root_node(tree));
         defer c.ts_tree_cursor_delete(&cursor);
@@ -3439,6 +3442,9 @@ test "SYN50 다음 여는 괄호 — 트리 걷기가 모든 자리에서 정의
     const samples = [_]struct { lang: Language, src: []const u8 }{
         .{ .lang = .javascript, .src = "// f(x)\nconst s = \"(\" + `a${b(1)}`; /* [ */ g(h[0], {k: 1}) ) (\n" },
         .{ .lang = .typescript, .src = "let a: Array<number> = [1]; f<T>(x) // (\n" },
+        // **괄호가 첫 글자인 토큰** `{|`(Flow 식 정확 객체 타입) — caret 이 `{` 와 `|` 사이면 토큰은 caret 뒤에서 끝나지만 그 괄호는 caret
+        // 앞이다: 「다음」이 아니다(적대적 2회차 K04 — 번들 grammar 의 문법 파일 스무 개 중 괄호가 끝 글자가 아닌 토큰은 TS·TSX 의 `{|` 뿐이다)
+        .{ .lang = .typescript, .src = "type A = {| a: (1) |};\n" },
         .{ .lang = .python, .src = "x = '(' # [\ndef f(a, b=[1]): return {a: (b)}\n" },
         .{ .lang = .bash, .src = "echo \"$(date)\" ; f() { x; } # (\n" },
         .{ .lang = .zig, .src = "const a = f(.{ \"(\", x }); // [\n" },
@@ -3448,6 +3454,8 @@ test "SYN50 다음 여는 괄호 — 트리 걷기가 모든 자리에서 정의
         .{ .lang = .html, .src = "x <!-- ( --> y {z} <!-- [ --> <a onclick=\"f(q)\">v</a>\n" },
         // PHP 의 `text`(PHP 밖 HTML)는 글 잎이 아니다 — 글이 괄호를 담는 언어 표시가 없다
         .{ .lang = .php, .src = "a (b) <?php f(1); ?> c [d]\n" },
+        // **속성 이름**(Angular `(click)`·`[value]`) — `attribute_name` 잎이다
+        .{ .lang = .html, .src = "<button (click)=\"go()\" [value]=\"v\">x</button>\n" },
         .{ .lang = .markdown, .src = "# t (a)\n\n- [x] b ( c\n\n```\n(code)\n```\n" },
     };
     for (samples) |sm| {
@@ -3502,6 +3510,15 @@ test "SYN50 다음 여는 괄호 — 트리 걷기가 모든 자리에서 정의
         try std.testing.expectEqual(@as(?u32, tail_at + 4), bp.nextOpenBracket(big.items, tail_at));
         try std.testing.expect(bp.next_open_visits > 1000 and bp.next_open_visits < 1100);
     }
+    // 속성 이름 `(click)` — 짝이 서고(강조·닿은 점프), 그 앞 caret 의 다음 여는 괄호다(VS Code 도 짝짓는다 — 적대적 3회차 F1)
+    const ng = "<button (click)=\"go()\">x</button>\n";
+    var np = Provider.init(ng, .html, 0) orelse return error.NoProvider;
+    defer np.deinit();
+    const click: u32 = @intCast(std.mem.indexOf(u8, ng, "(click").?);
+    try std.testing.expect(np.proseLeafAt(click) != null);
+    try std.testing.expectEqual(@as(?u32, click), np.nextOpenBracket(ng, 0));
+    // 주석은 여전히 아니다
+    try std.testing.expectEqual(@as(?Provider.ByteRange, null), hp.proseLeafAt(@intCast(std.mem.indexOf(u8, html, "(x").?)));
     const php = "a (b) <?php $x = 1; ?> c\n";
     var pp = Provider.init(php, .php, 0) orelse return error.NoProvider;
     defer pp.deinit();

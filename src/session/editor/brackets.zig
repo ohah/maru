@@ -40,12 +40,17 @@ pub fn forHighlight(src: anytype, len: usize, pos: usize, mode: Mode) ?Pair {
 /// (`findNextBracket` — caret 바로 뒤 글자도 친다). ②③ 은 출처가 답할 때만이다 — 글자 훑기(`Plain`)는 둘 다 `null` 이다. 갈 데가 없으면 `null`.
 pub fn jumpTarget(src: anytype, len: usize, pos: usize) ?usize {
     const at = @min(pos, len);
-    if (touching(src, len, at)) |p| {
-        const on_close = at == p.close or at == @as(usize, p.close) + 1;
-        return if (on_close) p.open else p.close;
-    }
+    if (touchJump(src, len, at)) |t| return t;
     if (src.enclosing(at)) |p| return p.close;
     return src.nextOpen(at);
+}
+
+/// ① 만 — 닿은 괄호의 짝. 커서가 아주 많을 때(`jumpTarget` 을 커서마다 부르면 ②③ 이 커서 수 × 형제 수로 붙는다) 호출자가 이것으로 물러선다.
+pub fn touchJump(src: anytype, len: usize, pos: usize) ?usize {
+    const at = @min(pos, len);
+    const p = touching(src, len, at) orelse return null;
+    const on_close = at == p.close or at == @as(usize, p.close) + 1;
+    return if (on_close) p.open else p.close;
 }
 
 /// **grammar 없는 문서**의 출처(§3.9c 저하) — 문서 전체를 글자로 훑는다. 감싸는 쌍은 **안 찾는다**: 문자열 속 괄호를 세어 틀린 쌍을 보인다.
@@ -373,6 +378,14 @@ test "BRJ1 점프 — 닿은 괄호가 없으면 감싸는 쌍의 닫는 괄호 
     const es: Tree(FakeProv) = .{ .prov = &enc, .bytes = call };
     try testing.expectEqual(@as(?usize, 8), jumpTarget(es, call.len, 7));
     try testing.expectEqual(@as(?usize, 1), jumpTarget(es, call.len, 9));
+    // **감싸는 쌍이 다음 여는 괄호보다 먼저다** — 뒤에 여는 괄호(11)가 있어도 7 에서는 닫는 괄호(8) 앞(적대적 3회차: ②③ 을 바꿔도 위 줄은 초록이었다)
+    const call2 = "f(\"(\", x) (";
+    var enc2: FakeProv = .{ .tokens = &.{.{ .open = 1, .close = 8 }}, .lone_opens = &.{10}, .tree_enclosing = pr(1, 8) };
+    const es2: Tree(FakeProv) = .{ .prov = &enc2, .bytes = call2 };
+    try testing.expectEqual(@as(?usize, 8), jumpTarget(es2, call2.len, 7));
+    // ① 만(`touchJump`) — 닿은 괄호가 없으면 감싸는 쌍·다음 괄호로 안 간다
+    try testing.expectEqual(@as(?usize, null), touchJump(es2, call2.len, 7));
+    try testing.expectEqual(@as(?usize, 1), touchJump(es2, call2.len, 9));
     // ② 다음 여는 괄호 — `a ( ) x (b) (`: 2 는 괄호 토큰이 아니고(문자열 속), 4 는 닫는 괄호, 8 이 첫 여는 괄호 토큰이다. 12 는 안 닫힌 여는 괄호
     // 토큰 — 짝이 없어도 친다. caret 바로 뒤 글자도 「다음」이다(12 에서 제자리).
     const s = "a ( ) x (b) (";

@@ -177,6 +177,16 @@ description = "Run the local W3b smoke: the app spawns the Chromium sidecar, res
 depends = ["web-sidecar"]
 run = "zig build -Doptimize=ReleaseSafe macos-app-build && sh tools/test-macos-web-osr-smoke.sh"
 
+[tasks.web-osr-tester]
+description = "Run the W4d in-app tester: real AppKit input (key events, view mouse methods, cursor, candidate rect) into a Chromium tab without stealing focus"
+depends = ["web-sidecar"]
+run = "zig build -Doptimize=ReleaseSafe macos-app-build && sh tools/test-macos-web-osr-tester.sh"
+
+[tasks.web-osr-tester-live]
+description = "Run the W4d away-from-keyboard tester: maru comes to the front and types with the real Korean input method, pointer and clipboard (only while you are away)"
+depends = ["web-sidecar"]
+run = "zig build -Doptimize=ReleaseSafe macos-app-build && sh tools/test-macos-web-osr-tester.sh --live"
+
 [tasks.web-sidecar-judge]
 description = "Run the W1b/W1c/W2/W4 judge against a real maru-web-host (sandbox, shutdown, parent death, browsers, profile, popups, dialogs, frames, input)"
 depends = ["web-sidecar"]

@@ -165,7 +165,12 @@ test "CR6d 경계는 exact recovered screen probe와 actual AppKit input smoke�
         "session_host_input_smoke_first_responder=",
         "session_host_input_smoke_frontmost_pid=",
     }) |field| try std.testing.expectEqual(@as(usize, 1), count(swift, field));
-    try std.testing.expectEqual(@as(usize, 2), count(swift, ".post(tap: .cghidEventTap)"));
+    // 시스템 HID 로 보내는 자리는 opt-in 시험 둘뿐이다 — CR6d 입력 연속성(누름·뗌)과 W4d② 자리 비움 모드(`testLive` 의
+    // 키·포인터 — `MARU_WEB_OSR_TEST_LIVE` 가 없으면 아무것도 보내지 않는다).
+    try std.testing.expectEqual(@as(usize, 4), count(swift, ".post(tap: .cghidEventTap)"));
+    const web_osr_live = between(swift, "private func testLive(", "func restoreTestLive(") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 2), count(web_osr_live, ".post(tap: .cghidEventTap)"));
+    try std.testing.expect(std.mem.startsWith(u8, std.mem.trimStart(u8, web_osr_live[std.mem.indexOfScalar(u8, web_osr_live, '{').? + 1 ..], " \n"), "guard let recordPath = ProcessInfo.processInfo.environment[\"MARU_WEB_OSR_TEST_LIVE\"]"));
     try std.testing.expectEqual(@as(usize, 0), count(swift, "func MaruCreateCarbonEvent("));
     try std.testing.expectEqual(@as(usize, 0), count(swift, "handled = context.handleEvent(event)"));
     try std.testing.expectEqual(@as(usize, 0), count(swift, ".postToPid(pid)"));

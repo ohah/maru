@@ -997,7 +997,8 @@ pub const Provider = struct {
                 const k = sib.by_bracket.get(t) orelse return null;
                 return sib.pairs[k];
             },
-            // 닫히는 순서에서 **처음으로** 품는 쌍 — 닫는 자리가 `pos` 이상인 첫 쌍부터 본다(그 앞 쌍은 `pos` 전에 닫혀 품을 수 없다).
+            // 닫히는 순서에서 **처음으로** 품는 쌍 — 닫는 자리가 `pos` 이상인 첫 쌍부터 본다(그 앞 쌍은 `pos` 전에 닫혀 품을 수 없다) 처음부터 훑어도 답은 같다 —
+            // 등가(메모 적대적 P02); 이분 탐색은 비용이다.
             .enclosing => |pos| {
                 var lo: usize = 0;
                 var hi: usize = sib.pairs.len;

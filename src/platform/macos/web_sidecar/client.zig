@@ -21,6 +21,7 @@ const object = @import("object.zig");
 const library = @import("library.zig");
 const browsers = @import("browsers.zig");
 const dialogs = @import("dialogs.zig");
+const permissions = @import("permissions.zig");
 const title_gate = @import("title_gate.zig");
 const input = @import("input.zig");
 
@@ -33,6 +34,7 @@ var request: c.cef_request_handler_t = undefined;
 var jsdialog: c.cef_jsdialog_handler_t = undefined;
 var file_dialog: c.cef_dialog_handler_t = undefined;
 var context_menu: c.cef_context_menu_handler_t = undefined;
+var permission: c.cef_permission_handler_t = undefined;
 var title_task: c.cef_task_t = undefined;
 var title_flush_posted = false;
 var ready = false;
@@ -59,6 +61,8 @@ pub fn get() *c.cef_client_t {
         object.staticRefCounted(&file_dialog.base);
         context_menu = object.zeroed(c.cef_context_menu_handler_t);
         object.staticRefCounted(&context_menu.base);
+        permission = object.zeroed(c.cef_permission_handler_t);
+        object.staticRefCounted(&permission.base);
         title_task = object.zeroed(c.cef_task_t);
         object.staticRefCounted(&title_task.base);
         title_task.execute = &flushTitles;
@@ -71,6 +75,7 @@ pub fn get() *c.cef_client_t {
         client_obj.get_jsdialog_handler = &getJsDialog;
         client_obj.get_dialog_handler = &getFileDialog;
         client_obj.get_context_menu_handler = &getContextMenu;
+        client_obj.get_permission_handler = &getPermission;
         life_span.on_before_popup = &onBeforePopup;
         life_span.on_before_close = &onBeforeClose;
         render.get_view_rect = &getViewRect;
@@ -84,6 +89,7 @@ pub fn get() *c.cef_client_t {
         load.on_loading_state_change = &onLoadingStateChange;
         load.on_load_end = &onLoadEnd;
         load.on_load_start = &dialogs.onLoadStart;
+        load.on_load_error = &dialogs.onLoadError;
         request.on_render_process_terminated = &onRenderProcessTerminated;
         jsdialog.on_jsdialog = &dialogs.onJsDialog;
         jsdialog.on_before_unload_dialog = &dialogs.onBeforeUnloadDialog;
@@ -91,6 +97,9 @@ pub fn get() *c.cef_client_t {
         jsdialog.on_dialog_closed = &dialogs.onDialogClosed;
         file_dialog.on_file_dialog = &dialogs.onFileDialog;
         context_menu.on_before_context_menu = &onBeforeContextMenu;
+        permission.on_show_permission_prompt = &permissions.onShowPermissionPrompt;
+        permission.on_dismiss_permission_prompt = &permissions.onDismissPermissionPrompt;
+        permission.on_request_media_access_permission = &permissions.onRequestMediaAccessPermission;
     }
     return &client_obj;
 }
@@ -118,6 +127,9 @@ fn getFileDialog(_: [*c]c.cef_client_t) callconv(.c) [*c]c.cef_dialog_handler_t 
 }
 fn getContextMenu(_: [*c]c.cef_client_t) callconv(.c) [*c]c.cef_context_menu_handler_t {
     return &context_menu;
+}
+fn getPermission(_: [*c]c.cef_client_t) callconv(.c) [*c]c.cef_permission_handler_t {
+    return &permission;
 }
 
 /// 항목을 비우면 CEF 는 메뉴를 띄우지 않는다(헤더 — 「The |model| can be cleared to show no context menu」).
@@ -270,6 +282,7 @@ fn onRenderProcessTerminated(_: [*c]c.cef_request_handler_t, browser: [*c]c.cef_
     };
     browsers.state.writer.send(.{ .renderer_gone = .{ .browser = entry.id, .reason = reason } }) catch {};
     dialogs.rendererGone(entry.id);
+    permissions.rendererGone(entry.id);
 }
 
 fn onBeforePopup(

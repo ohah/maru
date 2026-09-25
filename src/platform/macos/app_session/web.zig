@@ -25,6 +25,7 @@ const maru = @import("maru");
 const notification_ops = @import("notification.zig");
 
 const chrome = maru.chrome;
+const ws = maru.session.web_sidecar;
 const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
 const WebNavAction = app_session_mod.WebNavAction;
@@ -443,7 +444,7 @@ pub fn tickWebOsr(self: *AppSession) void {
     tickOsrDialog(self);
 }
 
-// ── W5a: 대화상자·파일 선택 ──────────────────────────────────────────────────────────────────────────────
+// ── W5a: 대화상자·파일 선택 · W5b: 권한 ──────────────────────────────────────────────────────────────────────────────
 //
 // sidecar 가 보낸 요청은 `web_osr` 가 탭마다 쥔다. 창은 **키보드 초점을 가진**(`osr_key_target` — 창 키·활성 pane) Chromium
 // 탭의 요청만 고른다 — 뒤쪽 탭·초점 없는 옆 pane 의 대화상자는 초점이 올 때까지 기다린다(페이지는 그동안 멈춘다). 보이는데
@@ -493,6 +494,9 @@ pub const OsrDialogView = struct {
     accept: []const u8,
     ok_label: []const u8,
     cancel_label: []const u8,
+    /// 권한 요청(W5b)이 청한 종류 — Swift 가 macOS 권한(카메라·마이크·화면 녹화)을 먼저 받을지 가린다.
+    permission_kinds: u32 = 0,
+    permission_media: u8 = 0,
 };
 
 /// 띄울 요청(한 번). 글은 `web_osr` 가 쥔 요청(답할 때까지)과 이 창의 버퍼(다음 가져가기까지)를 빌린다. 문구는 여기서
@@ -532,8 +536,107 @@ pub fn takeOsrDialog(self: *AppSession) ?OsrDialogView {
             view.title = d.message;
             view.message = t(if (d.kind == .file_save) .web_file_save_message else .web_file_pick_message);
         },
+        .permission => {
+            view.title = if (d.origin.len == 0) t(.web_permission_title_page) else maru.i18n.format(&self.osr_dialog_title_buf, t(.web_permission_title), &.{.{ .s = d.origin }});
+            view.message = permissionMessage(&self.osr_dialog_message_buf, d.permission_kinds, d.permission_media);
+            view.ok_label = t(.web_permission_allow);
+            view.cancel_label = t(.web_permission_block);
+            view.permission_kinds = d.permission_kinds;
+            view.permission_media = d.permission_media;
+        },
     }
     return view;
+}
+
+/// 권한 요청 sheet 의 본문 — 청한 권한을 한 줄씩(「• 카메라」), 프롬프트면 기억 안내를 붙인다(허용·차단은 Chromium 이 그
+/// 사이트에 기억한다 — 사용자 결정 2026-09-25). 미디어 요청은 기억하지 않고(W5b 실측), 위치는 저장된 허용이 있어도 매번 다시
+/// 묻고(실측), 파일 편집은 방문 동안만이라 그 둘만 청하면 안내를 붙이지 않는다(적대 검증). 버퍼가 모자라면 앞쪽 줄까지만.
+fn permissionMessage(buf: []u8, kinds: u32, media: u8) []const u8 {
+    const t = maru.i18n.t;
+    var len: usize = 0;
+    // 두 비트가 한 이름으로 이어진다(저장소 접근 둘·로컬 네트워크 둘) — 같은 줄을 두 번 쓰지 않는다.
+    var written = std.EnumSet(maru.i18n.Key).initEmpty();
+    const Line = struct {
+        fn add(out: []u8, at: *usize, name: []const u8) void {
+            const bullet = "• ";
+            const need = @as(usize, @intFromBool(at.* > 0)) + bullet.len + name.len;
+            if (at.* + need > out.len) return;
+            if (at.* > 0) {
+                out[at.*] = '\n';
+                at.* += 1;
+            }
+            @memcpy(out[at.*..][0..bullet.len], bullet);
+            at.* += bullet.len;
+            @memcpy(out[at.*..][0..name.len], name);
+            at.* += name.len;
+        }
+    };
+    inline for (std.meta.fields(ws.message.MediaPermission)) |field| {
+        const which: ws.message.MediaPermission = @enumFromInt(field.value);
+        if (media & which.bit() != 0 and !written.contains(mediaName(which))) {
+            written.insert(mediaName(which));
+            Line.add(buf, &len, t(mediaName(which)));
+        }
+    }
+    inline for (std.meta.fields(ws.message.PermissionKind)) |field| {
+        const which: ws.message.PermissionKind = @enumFromInt(field.value);
+        if (kinds & which.bit() != 0 and !written.contains(permissionName(which))) {
+            written.insert(permissionName(which));
+            Line.add(buf, &len, t(permissionName(which)));
+        }
+    }
+    const not_remembered = ws.message.PermissionKind.geolocation.bit() | ws.message.PermissionKind.file_system_access.bit();
+    if (kinds & ~not_remembered != 0) {
+        const note = t(.web_permission_remembered);
+        if (len + 2 + note.len <= buf.len) {
+            @memcpy(buf[len..][0..2], "\n\n");
+            len += 2;
+            @memcpy(buf[len..][0..note.len], note);
+            len += note.len;
+        }
+    }
+    return buf[0..len];
+}
+
+fn mediaName(which: ws.message.MediaPermission) maru.i18n.Key {
+    return switch (which) {
+        .microphone => .perm_microphone,
+        .camera => .perm_camera,
+        .screen_audio => .perm_screen_audio,
+        .screen => .perm_screen,
+    };
+}
+
+fn permissionName(which: ws.message.PermissionKind) maru.i18n.Key {
+    return switch (which) {
+        .ar_session => .perm_ar_session,
+        .camera_pan_tilt_zoom => .perm_camera_pan_tilt_zoom,
+        .camera => .perm_camera,
+        .captured_surface_control => .perm_captured_surface_control,
+        .clipboard => .perm_clipboard,
+        .top_level_storage_access, .storage_access => .perm_storage_access,
+        .disk_quota => .perm_disk_quota,
+        .local_fonts => .perm_local_fonts,
+        .geolocation => .perm_geolocation,
+        .hand_tracking => .perm_hand_tracking,
+        .identity_provider => .perm_identity_provider,
+        .idle_detection => .perm_idle_detection,
+        .microphone => .perm_microphone,
+        .midi_sysex => .perm_midi_sysex,
+        .multiple_downloads => .perm_multiple_downloads,
+        .notifications => .perm_notifications,
+        .keyboard_lock => .perm_keyboard_lock,
+        .pointer_lock => .perm_pointer_lock,
+        .protected_media_identifier => .perm_protected_media_identifier,
+        .register_protocol_handler => .perm_register_protocol_handler,
+        .vr_session => .perm_vr_session,
+        .web_app_installation => .perm_web_app_installation,
+        .window_management => .perm_window_management,
+        .file_system_access => .perm_file_system_access,
+        .local_network_access, .local_network => .perm_local_network,
+        .loopback_network => .perm_loopback_network,
+        .sensors => .perm_sensors,
+    };
 }
 
 pub fn takeOsrDialogDismiss(self: *AppSession) bool {
@@ -563,8 +666,17 @@ pub fn osrFileDialogReply(self: *AppSession, surface_id: u64, token: u64, accept
     clearShown(self, surface_id, token);
 }
 
+/// 답했으면 true — 요청이 이미 사라졌으면(이동·닫힘) false(Swift 는 그때 macOS 안내를 띄우지 않는다).
+pub fn osrPermissionReply(self: *AppSession, surface_id: u64, token: u64, result: ws.message.PermissionResult) bool {
+    const answered = web_osr.replyPermission(self.allocator, surface_id, token, result);
+    clearShown(self, surface_id, token);
+    return answered;
+}
+
 /// Swift 가 sheet 에 쓰는 나머지 문구(번역·조립은 Zig — docs/i18n.md §7.2). 0 = 억제 선택, 1 = 폴더 올리기 확인 제목(`number`
-/// 는 파일 수), 2 = 올리기 단추, 3 = 취소 단추, 4 = 폴더가 너무 크다(`number` 는 상한).
+/// 는 파일 수), 2 = 올리기 단추, 3 = 취소 단추, 4 = 폴더가 너무 크다(`number` 는 상한), 5 = 권한 닫기 단추(W5b), 6 = macOS 가
+/// Maru 의 장치 사용을 막았다(`number` 는 장치 — 0 카메라·1 마이크·2 화면 기록 — 화면 기록은 다시 시작해야 반영된다는 안내를
+/// 붙인다), 7 = 시스템 설정 열기 단추, 8 = 확인 단추.
 pub fn osrDialogString(which: u32, number: i64, buf: []u8) []const u8 {
     const t = maru.i18n.t;
     return switch (which) {
@@ -573,6 +685,14 @@ pub fn osrDialogString(which: u32, number: i64, buf: []u8) []const u8 {
         2 => maru.i18n.format(buf, t(.web_folder_upload), &.{}),
         3 => maru.i18n.format(buf, t(.web_dialog_cancel), &.{}),
         4 => maru.i18n.format(buf, t(.web_folder_too_many), &.{.{ .d = number }}),
+        5 => maru.i18n.format(buf, t(.web_permission_close), &.{}),
+        6 => maru.i18n.format(buf, t(if (number == 2) .web_permission_macos_blocked_restart else .web_permission_macos_blocked), &.{.{ .s = t(switch (number) {
+            0 => .web_device_camera,
+            1 => .web_device_microphone,
+            else => .web_permission_screen_recording,
+        }) }}),
+        7 => maru.i18n.format(buf, t(.web_permission_open_settings), &.{}),
+        8 => maru.i18n.format(buf, t(.web_dialog_ok), &.{}),
         else => buf[0..0],
     };
 }
@@ -1793,4 +1913,28 @@ pub fn takeWebNavAction(self: *AppSession) ?WebNavAction {
 /// W4d: 설정의 브라우저 엔진이 바뀌었으면(파일 reload·설정 화면) 「재시작하면 적용」을 한 번 알린다.
 pub fn noteBrowserEngineConfig(self: *AppSession) void {
     if (web_osr.engineChangeNeedsNotice(self.loaded_config.config.browser.engine == .chromium)) self.showNoticeKey(.set_browser_engine_restart);
+}
+
+test "permission sheet text lists each asked permission once and notes remembering only for prompts" {
+    const lang_before = maru.i18n.lang();
+    defer maru.i18n.setLang(lang_before);
+    maru.i18n.setLang(.ko);
+    const kinds = ws.message.PermissionKind;
+    var buf: [2048]u8 = undefined;
+    // 저장소 접근 두 비트는 한 이름 — 한 줄만. 프롬프트라 기억 안내가 붙는다.
+    const prompt = permissionMessage(&buf, kinds.storage_access.bit() | kinds.top_level_storage_access.bit() | kinds.notifications.bit(), 0);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, prompt, maru.i18n.tIn(.ko, .perm_storage_access)));
+    try std.testing.expect(std.mem.indexOf(u8, prompt, maru.i18n.tIn(.ko, .perm_notifications)) != null);
+    try std.testing.expect(std.mem.endsWith(u8, prompt, maru.i18n.tIn(.ko, .web_permission_remembered)));
+    // 미디어 답은 Chromium 이 기억하지 않는다 — 안내가 없다. 마이크·카메라 순서로 한 줄씩.
+    const media = permissionMessage(&buf, 0, ws.message.MediaPermission.camera.bit() | ws.message.MediaPermission.microphone.bit());
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, media, "\n"));
+    try std.testing.expect(std.mem.indexOf(u8, media, maru.i18n.tIn(.ko, .web_permission_remembered)) == null);
+    // 위치만 청하면 안내가 없다(저장된 허용이 있어도 Chromium 이 매번 다시 묻는다 — 실측). 위치와 알림을 함께면 붙는다.
+    try std.testing.expect(std.mem.indexOf(u8, permissionMessage(&buf, kinds.geolocation.bit(), 0), maru.i18n.tIn(.ko, .web_permission_remembered)) == null);
+    try std.testing.expect(std.mem.indexOf(u8, permissionMessage(&buf, kinds.geolocation.bit() | kinds.notifications.bit(), 0), maru.i18n.tIn(.ko, .web_permission_remembered)) != null);
+    // 버퍼가 모자라면 앞쪽 줄까지만(자른 줄은 없다).
+    var small: [24]u8 = undefined;
+    const cut = permissionMessage(&small, kinds.notifications.bit() | kinds.midi_sysex.bit(), 0);
+    try std.testing.expect(cut.len <= small.len and std.unicode.utf8ValidateSlice(cut));
 }

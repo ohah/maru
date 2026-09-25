@@ -162,6 +162,133 @@ pub fn readImeText(cursor: *ReadCursor) Error![]const u8 {
     return text;
 }
 
+/// 대화상자 글(W5a): 상한은 제목과 같은 `max_text_bytes`, UTF-8, 탭·줄바꿈(LF·CR)을 뺀 제어 문자는 거절한다 — 대화상자
+/// 문구는 여러 줄이 흔하다. 제목(`checkText`)은 한 줄이라 따로 둔다.
+pub fn checkDialogText(text: []const u8) Error!void {
+    if (text.len > max_text_bytes) return error.TextTooLarge;
+    if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidUtf8;
+    for (text) |byte| {
+        if (byte == '\t' or byte == '\n' or byte == '\r') continue;
+        if (byte < 0x20 or byte == 0x7f) return error.ControlCharacter;
+    }
+}
+
+pub fn writeDialogText(cursor: *Cursor, text: []const u8) Error!void {
+    try checkDialogText(text);
+    try cursor.writeU32(@intCast(text.len));
+    try cursor.writeBytes(text);
+}
+
+pub fn readDialogText(cursor: *ReadCursor) Error![]const u8 {
+    const len = try cursor.readU32();
+    if (len > max_text_bytes) return error.TextTooLarge;
+    const text = try cursor.readBytes(len);
+    try checkDialogText(text);
+    return text;
+}
+
+/// 파일 경로(W5a): 비지 않고, 절대 경로이고, `max_text_bytes` 안이고, UTF-8 이며 제어 문자가 없다. 경로는 maru 가 열기
+/// 창에서 받은 것이라 sidecar 쪽은 이 규칙만 본다(파일이 있는지는 렌더러가 읽을 때 드러난다).
+pub fn checkPath(path: []const u8) Error!void {
+    if (path.len == 0 or path[0] != '/') return error.InvalidPath;
+    if (path.len > max_text_bytes) return error.TextTooLarge;
+    if (!std.unicode.utf8ValidateSlice(path)) return error.InvalidUtf8;
+    if (hasControl(path)) return error.ControlCharacter;
+}
+
+pub fn writePath(cursor: *Cursor, path: []const u8) Error!void {
+    try checkPath(path);
+    try cursor.writeU32(@intCast(path.len));
+    try cursor.writeBytes(path);
+}
+
+pub fn readPath(cursor: *ReadCursor) Error![]const u8 {
+    const len = try cursor.readU32();
+    if (len > max_text_bytes) return error.TextTooLarge;
+    const path = try cursor.readBytes(len);
+    try checkPath(path);
+    return path;
+}
+
+/// 요청 번호는 0 이 아니다(browser id 와 같은 규칙 — 0 은 「없음」으로 남긴다).
+pub fn writeRequest(cursor: *Cursor, browser: BrowserId, request: u32) Error!void {
+    try writeBrowser(cursor, browser);
+    if (request == 0) return error.InvalidRequestId;
+    try cursor.writeU32(request);
+}
+
+pub fn readRequest(cursor: *ReadCursor) Error!message.Request {
+    const browser = try readBrowser(cursor);
+    const request = try cursor.readU32();
+    if (request == 0) return error.InvalidRequestId;
+    return .{ .browser = browser, .request = request };
+}
+
+/// 출처 상한 — 호스트 이름(253)과 scheme·포트가 들어간다. 대화상자 제목에 들어가므로 짧게 둔다.
+pub const max_origin_bytes: usize = 255;
+
+/// 출처: 빈 글(불투명 출처 — maru 는 「이 페이지」로 보인다)이거나 `scheme://host[:port]`. scheme 은 소문자·숫자·`+.-`,
+/// 호스트는 글자·숫자·`.-_`·IPv6 대괄호(`[::1]`)와 유니코드 IDN(CEF 가 안전할 때만 유니코드로 준다), 포트는 숫자다. 경로·질의·
+/// 사용자 정보(`@`)·공백·제어 문자는 거절한다 — 제목의 출처 자리에 사이트가 고른 글이 들어가면 위장이 된다(적대 검증).
+pub fn checkOrigin(origin: []const u8) Error!void {
+    if (origin.len == 0) return;
+    if (origin.len > max_origin_bytes) return error.InvalidOrigin;
+    if (!std.unicode.utf8ValidateSlice(origin)) return error.InvalidUtf8;
+    const sep = std.mem.indexOf(u8, origin, "://") orelse return error.InvalidOrigin;
+    if (sep == 0) return error.InvalidOrigin;
+    for (origin[0..sep], 0..) |byte, i| {
+        const ok = std.ascii.isLower(byte) or (i > 0 and (std.ascii.isDigit(byte) or byte == '+' or byte == '.' or byte == '-'));
+        if (!ok) return error.InvalidOrigin;
+    }
+    var host = origin[sep + 3 ..];
+    if (host.len == 0) return error.InvalidOrigin;
+    // 포트: 마지막 `:` 뒤가 숫자면 뗀다(IPv6 대괄호 안의 `:` 는 `]` 뒤가 아니면 포트가 아니다).
+    if (std.mem.lastIndexOfScalar(u8, host, ':')) |colon| {
+        const after_bracket = std.mem.lastIndexOfScalar(u8, host, ']');
+        if (after_bracket == null or after_bracket.? < colon) {
+            const port = host[colon + 1 ..];
+            if (port.len == 0 or port.len > 5) return error.InvalidOrigin;
+            for (port) |byte| if (!std.ascii.isDigit(byte)) return error.InvalidOrigin;
+            host = host[0..colon];
+        }
+    }
+    if (host.len == 0) return error.InvalidOrigin;
+    if (host[0] == '[') {
+        if (host[host.len - 1] != ']') return error.InvalidOrigin;
+        for (host[1 .. host.len - 1]) |byte| if (!(std.ascii.isHex(byte) or byte == ':' or byte == '.')) return error.InvalidOrigin;
+        return;
+    }
+    var it = std.unicode.Utf8View.initUnchecked(host).iterator();
+    while (it.nextCodepoint()) |cp| {
+        if (cp < 0x80) {
+            const byte: u8 = @intCast(cp);
+            if (!(std.ascii.isAlphanumeric(byte) or byte == '.' or byte == '-' or byte == '_')) return error.InvalidOrigin;
+        } else if (deceptive(cp)) return error.InvalidOrigin;
+    }
+}
+
+/// IDN 호스트에 들어가면 제목을 속이는 글자 — C1 제어, 방향 제어(U+202E 등), 줄·문단 구분(NSAlert 에서 줄바꿈으로 보인다),
+/// 폭 없는 글자, 빗금 닮은꼴(U+2044·U+2215·U+FF0F — 호스트 안에 가짜 경로를 그린다). CEF 의 보안 표시는 이런 글을 안 주지만
+/// sidecar 는 믿지 않는다(적대 검증).
+fn deceptive(cp: u21) bool {
+    return (cp >= 0x80 and cp <= 0x9f) or (cp >= 0x200b and cp <= 0x200f) or (cp >= 0x2028 and cp <= 0x202e) or
+        (cp >= 0x2060 and cp <= 0x206f) or cp == 0xfeff or cp == 0x2044 or cp == 0x2215 or cp == 0xff0f or cp == 0x00ad;
+}
+
+pub fn writeOrigin(cursor: *Cursor, origin: []const u8) Error!void {
+    try checkOrigin(origin);
+    try cursor.writeU32(@intCast(origin.len));
+    try cursor.writeBytes(origin);
+}
+
+pub fn readOrigin(cursor: *ReadCursor) Error![]const u8 {
+    const len = try cursor.readU32();
+    if (len > max_origin_bytes) return error.InvalidOrigin;
+    const origin = try cursor.readBytes(len);
+    try checkOrigin(origin);
+    return origin;
+}
+
 pub fn writeRect(cursor: *Cursor, rect: Rect) Error!void {
     try writeExtent(cursor, rect.x);
     try writeExtent(cursor, rect.y);

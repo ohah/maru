@@ -22,7 +22,7 @@ test "P4 C3c 경계는 main capture immutable bytes serial C2 writer를 고정�
     const allocator = std.testing.allocator;
     const swift = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "src/platform/macos/MaruAppHost.swift", allocator, .limited(2 * 1024 * 1024));
     defer allocator.free(swift);
-    const abi = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "src/platform/macos/app_host_abi.zig", allocator, .limited(512 * 1024));
+    const abi = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "src/platform/macos/app_host_abi.zig", allocator, .limited(1024 * 1024));
     defer allocator.free(abi);
     const build = try build_source.read(allocator);
     defer allocator.free(build);

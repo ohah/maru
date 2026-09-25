@@ -366,8 +366,18 @@ const FakeProv = struct {
         }
         return best;
     }
+    /// `Provider.nextOpenBrackets` 와 **같은 한 번 걷기** — 여는 괄호를 문서 순서로 만나며 그 앞의 caret 들에게 준다. 그래서 `positions` 가 오름차순이
+    /// 아니면 실제처럼 틀린 답을 낸다(적대적: 정렬을 빼도 caret 마다 따로 답하는 가짜 앞에서는 초록이었다).
     pub fn nextOpenBrackets(self: *FakeProv, bytes: []const u8, positions: []const u32, out: []?u32) void {
-        for (positions, out) |p, *o| o.* = self.nextOpenBracket(bytes, p);
+        @memset(out, null);
+        if (positions.len == 0) return;
+        var qi: usize = 0;
+        var from: u32 = positions[0];
+        while (qi < positions.len) {
+            const b = self.nextOpenBracket(bytes, from) orelse return;
+            while (qi < positions.len and positions[qi] <= b) : (qi += 1) out[qi] = b;
+            from = b + 1;
+        }
     }
     pub fn enclosingBracketTokens(self: *FakeProv, bytes: []const u8, pos: u32) ?Pair {
         _ = bytes;

@@ -108,11 +108,28 @@ DIALOGS = ("<!doctype html><title>dialogs</title><style>html,body{margin:0;heigh
     "document.getElementById('u').onclick=function(){window.onbeforeunload=function(e){e.preventDefault();e.returnValue='x';return 'x'};ping('e=armed')};"
     "requestAnimationFrame(function(){requestAnimationFrame(function(){ping('e=ready')})});"
     "</script>").encode()
+# W5b: 권한 — 위쪽 단추 여섯(본문 x 0·100·…·500): 알림 · MIDI sysex · 로컬 글꼴 · 화면 공유 · 창 관리 뒤 스스로 새로고침(묻는 동안
+# 페이지가 떠나면 sheet 가 닫히는지) · 화면 공유 뒤 0.3 초에 창 관리(macOS 안내 뒤에 줄 선 요청).
+PERMS = ("<!doctype html><title>perms</title><style>html,body{margin:0;height:100%}.b{position:absolute;top:0;width:100px;height:80px}</style>"
+    "<button class=b id=n style='left:0'>notif</button><button class=b id=m style='left:100px'>midi</button>"
+    "<button class=b id=f style='left:200px'>fonts</button><button class=b id=d style='left:300px'>display</button>"
+    "<button class=b id=w style='left:400px'>leave</button><button class=b id=c style='left:500px'>chain</button><script>"
+    "var P=Math.random().toString(36).slice(2,8),S=0;function ping(q){new Image().src='/ev?p='+P+'&s='+(++S)+'&'+q+'&t='+Date.now()}"
+    "function on(id,f){document.getElementById(id).onclick=f}function E(k){return function(e){ping('e='+k+'&r=err-'+e.name)}}"
+    "on('n',function(){Notification.requestPermission().then(function(r){ping('e=notif&r='+r)})});"
+    "on('m',function(){navigator.requestMIDIAccess({sysex:true}).then(function(){ping('e=midi&r=ok')},E('midi'))});"
+    "on('f',function(){queryLocalFonts().then(function(f){ping('e=fonts&n='+f.length)},E('fonts'))});"
+    "on('d',function(){navigator.mediaDevices.getDisplayMedia({video:true}).then(function(){ping('e=display&r=ok')},E('display'))});"
+    "on('w',function(){getScreenDetails().then(function(){ping('e=screens&r=ok')},E('screens'));setTimeout(function(){location.reload()},1500)});"
+    "on('c',function(){navigator.mediaDevices.getDisplayMedia({video:true}).then(function(){ping('e=display&r=ok')},E('display'));"
+    "setTimeout(function(){getScreenDetails().then(function(){ping('e=screens&r=ok')},E('screens'))},300)});"
+    "requestAnimationFrame(function(){requestAnimationFrame(function(){ping('e=ready')})});"
+    "</script>").encode()
 class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_GET(self):
         log.write(self.path + "\n")
-        body = PAGE if self.path == "/tester" else DIALOGS if self.path == "/dialogs" else b""
+        body = PAGE if self.path == "/tester" else DIALOGS if self.path == "/dialogs" else PERMS if self.path == "/perms" else b""
         self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.send_header('Content-Length', str(len(body))); self.end_headers(); self.wfile.write(body)
     def do_POST(self):
         # sendBeacon — alert 가 렌더러를 막기 전에 브라우저로 넘어가는 신호.
@@ -680,6 +697,139 @@ fb = sheets('focus-back')
 fired2 = [int(e['t']) for e in evs if e.get('e') == 'later-fired' and int(e['t']) > dict(marks).get('focus-wait', 0)]
 check(fc[-1:] and fc[-1].startswith('none') and fb[-1:] and says(fb[-1], 'later') and fired2[:1] and fired2[0] < dict(marks).get('focus-check', 0),
       f'with a split and the terminal pane focused, the web pane dialog waits; moving focus to the web pane shows it ({fc} → {fb})')
+check(not any(l.startswith('sheet-answer-missing') for l in lines), 'every sheet the script answered was there')
+sys.exit(0 if ok else 1)
+PY
+
+# ── W5b: 권한 요청이 maru 창에 붙는 sheet 로 ───────────────────────────────────────────────────────────────────────
+# 단추 셋: 허용(0)·차단(1)·닫기(2 — Esc). 허용·차단은 Chromium 이 그 사이트에 기억하고(다시 청해도 sheet 없이 같은 답), 닫기는
+# 기억하지 않는다. 화면 공유는 macOS 권한(화면 녹화)을 먼저 본다 — 비활성 앱에서 TCC 를 다룰 수 없어 `macos-access` 가 대신 정한다.
+cat > "$root/perms.txt" <<'SCRIPT'
+sleep 7000
+mark perm-allow
+view down 0 0 238 152 0 1
+view up 0 0 238 152 0 1
+sleep 400
+sheet-answer 0
+sleep 600
+sheet
+sheet-answer 0
+sleep 1500
+mark perm-remembered
+view down 0 0 238 152 0 1
+view up 0 0 238 152 0 1
+sleep 1500
+sheet
+mark perm-block
+view down 0 0 338 152 0 1
+view up 0 0 338 152 0 1
+sleep 900
+sheet
+sheet-answer 1
+sleep 1500
+mark perm-block-remembered
+view down 0 0 338 152 0 1
+view up 0 0 338 152 0 1
+sleep 1500
+sheet
+mark perm-close
+view down 0 0 438 152 0 1
+view up 0 0 438 152 0 1
+sleep 900
+sheet-answer 2
+sleep 1500
+mark perm-close-again
+view down 0 0 438 152 0 1
+view up 0 0 438 152 0 1
+sleep 900
+sheet
+sheet-answer 0
+sleep 2000
+mark perm-macos
+macos-access screen denied
+view down 0 0 538 152 0 1
+view up 0 0 538 152 0 1
+sleep 900
+sheet
+sheet-answer 0
+sleep 1200
+sheet-blocked
+sleep 1000
+mark perm-queued
+view down 0 0 738 152 0 1
+view up 0 0 738 152 0 1
+sleep 900
+sheet
+sheet-answer 0
+sleep 1500
+sheet
+sheet-blocked
+sleep 1200
+sheet
+sheet-answer 2
+sleep 1200
+mark perm-leave
+view down 0 0 638 152 0 1
+view up 0 0 638 152 0 1
+sleep 900
+sheet
+sleep 3000
+sheet
+mark end
+SCRIPT
+page_path=/perms run_app "$root/perms.txt" 60000
+cat "$root/report"
+python3 - "$root/requests.log" "$root/report" "$root/judge.py" <<'PY' || fail "Chromium tab permission requests did not work through the maru sheet"
+import sys
+exec(open(sys.argv[3]).read())
+def sheets(name): return [l[len('sheet '):] for l in after(name) if l.startswith('sheet ')]
+def replies(name): return [l.split()[1] for l in after(name) if l.startswith('permission-reply ') and l.endswith('answered=true')]
+def page(name, kind): return at(phase(name), kind)
+allow = sheets('perm-allow')
+def asks(line, name):
+    head = line.split('|')[0]
+    return (head.startswith('alert ') and ('권한을 요청합니다' in head or ' wants to' in head) and 'http://127.0.0.1:' in head
+            and name in line.split('|')[1] and line.endswith('attached=true'))
+remembered_note = lambda line: '기억됩니다' in line or 'remembered' in line
+check(allow[:1] and asks(allow[0], '알림') or allow[:1] and asks(allow[0], 'notifications'),
+      f'a notification request opens a maru sheet titled with the origin, listing what is asked ({allow[:1]})')
+check(allow[:1] and allow[0].split('|')[2].count(',') == 2 and remembered_note(allow[0]),
+      f'three buttons (allow, block, close) and a note that the answer is remembered ({allow[:1]})')
+# 비활성 앱의 sheet 는 키 창이 되지 않아 실제 초점은 창 자신에 머문다(실측) — 키 창이 될 때 받을 첫 초점을 본다.
+check(allow[:1] and ('|first=닫기|' in allow[0] or '|first=Close|' in allow[0]),
+      f'the first focus is set to Close, not Allow or Block (Space with full keyboard access) ({allow[:1]})')
+check(replies('perm-allow') == ['0'] and any(e['r'] == 'granted' for e in page('perm-allow', 'notif')),
+      f'an answer in the first half second is ignored, then Allow reaches the page as granted ({replies("perm-allow")})')
+rem = sheets('perm-remembered')
+check(rem[-1:] and rem[-1].startswith('none') and any(e['r'] == 'granted' for e in page('perm-remembered', 'notif')),
+      f'asking again gets the remembered answer without a sheet ({rem})')
+check(replies('perm-block') == ['1'] and any(e['r'] == 'err-NotAllowedError' for e in page('perm-block', 'midi')),
+      f'Block reaches the page as NotAllowedError ({replies("perm-block")})')
+brem = sheets('perm-block-remembered')
+check(brem[-1:] and brem[-1].startswith('none') and any(e['r'] == 'err-NotAllowedError' for e in page('perm-block-remembered', 'midi')),
+      f'a blocked site is refused again without a sheet ({brem})')
+check(replies('perm-close') == ['2'] and any(e['n'] == '0' for e in page('perm-close', 'fonts')),
+      f'Close (Esc) answers dismiss — the page gets no fonts ({replies("perm-close")})')
+again = sheets('perm-close-again')
+check(again[:1] and asks(again[0], '글꼴') or again[:1] and asks(again[0], 'fonts'), f'closing is not remembered: asking again shows the sheet again ({again[:1]})')
+check(any(int(e['n']) > 0 for e in page('perm-close-again', 'fonts')), 'allowing then gives the page the installed fonts')
+mac = sheets('perm-macos')
+blocked = [l for l in after('perm-macos') if l.startswith('sheet-blocked ')]
+check(mac[:1] and (asks(mac[0], '화면 전체 공유') or asks(mac[0], 'Share your entire screen')) and not remembered_note(mac[0]),
+      f'screen sharing asks without the remembered note (media answers are not remembered) ({mac[:1]})')
+check(replies('perm-macos') == ['3'] and blocked[:1] and ('macOS' in blocked[0]) and ('다시 시작' in blocked[0] or 'restart' in blocked[0])
+      and blocked[0].split('|')[1].count(',') == 1 and any(e['r'] == 'err-NotAllowedError' for e in page('perm-macos', 'display')),
+      f'when macOS has not given Maru screen recording, Allow answers "could not ask" (no remembered block, no dismiss embargo) and points to System Settings and a restart ({blocked})')
+queued = sheets('perm-queued')
+qblocked = [l for l in after('perm-queued') if l.startswith('sheet-blocked ')]
+check(len(queued) == 3 and (asks(queued[0], '화면 전체') or asks(queued[0], 'entire screen')) and queued[1].startswith('none|attached=true')
+      and qblocked[:1] and qblocked[0] != 'sheet-blocked none' and (asks(queued[2], '창 관리') or asks(queued[2], 'windows')),
+      f'a request that arrives while the macOS guidance sheet is up waits until it is closed — its input protection starts when it shows ({queued})')
+check(replies('perm-queued') == ['3', '2'], f'then it is answered on its own (close) ({replies("perm-queued")})')
+leave = sheets('perm-leave')
+check(len(leave) == 2 and asks(leave[0], '창') or len(leave) == 2 and asks(leave[0], 'windows'), f'a window-management request shows a sheet ({leave[:1]})')
+check(len(leave) == 2 and leave[1].startswith('none') and not replies('perm-leave'),
+      f'when the page leaves while asking, the sheet closes without an answer ({leave})')
 check(not any(l.startswith('sheet-answer-missing') for l in lines), 'every sheet the script answered was there')
 sys.exit(0 if ok else 1)
 PY

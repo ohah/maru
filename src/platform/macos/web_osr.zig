@@ -90,13 +90,13 @@ const Surface = struct {
     composing: bool = false,
     /// 마지막 IME 조합 사각형(view DIP — `ime_range`). 후보창 위치(`firstRect`)에 쓴다.
     ime_bounds: ?ws.message.Rect = null,
-    /// 답을 기다리는 대화상자·파일 선택(W5a) — 온 차례대로.
+    /// 답을 기다리는 대화상자·파일 선택(W5a)·권한 요청(W5b) — 온 차례대로.
     dialogs: std.ArrayList(Dialog) = .empty,
 };
 
 pub const Cursor = struct { cursor: ws.message.WebCursor, generation: u32 };
 
-/// 답을 기다리는 JS 대화상자·파일 선택(W5a — C6). 글은 복사해 쥔다(sidecar 가 보낸 frame 은 곧 사라진다).
+/// 답을 기다리는 JS 대화상자·파일 선택(W5a)·권한 요청(W5b) — C6. 글은 복사해 쥔다(sidecar 가 보낸 frame 은 곧 사라진다).
 pub const DialogKind = enum(u32) {
     alert = 0,
     confirm = 1,
@@ -106,9 +106,10 @@ pub const DialogKind = enum(u32) {
     file_open_multiple = 11,
     file_open_folder = 12,
     file_save = 13,
+    permission = 20,
 
     pub fn isFile(self: DialogKind) bool {
-        return @intFromEnum(self) >= 10;
+        return @intFromEnum(self) >= 10 and @intFromEnum(self) <= 13;
     }
 };
 
@@ -126,6 +127,9 @@ pub const Dialog = struct {
     accept: []u8,
     /// 이 페이지가 이동 없이 두 번째 이상 띄운 대화상자 — 「더 띄우지 못하게」를 보인다.
     offer_suppress: bool = false,
+    /// 권한 요청(W5b)이 청한 종류 — 둘 중 하나만 찬다(`ws.message.PermissionRequest`).
+    permission_kinds: u32 = 0,
+    permission_media: u8 = 0,
     /// 띄운 창(AppSession 주소) — 0 이면 아직 안 띄웠다.
     shown_by: usize = 0,
 
@@ -578,6 +582,16 @@ fn queueDialog(gpa: std.mem.Allocator, browser: u64, request: ws.message.Request
     return true;
 }
 
+/// 권한 요청(W5b)을 적는다 — 대화상자와 같은 대기열·상한·토큰.
+fn queuePermission(gpa: std.mem.Allocator, v: ws.message.PermissionRequest) bool {
+    if (!queueDialog(gpa, v.browser, v.request, .permission, v.origin, "", "", "", false)) return false;
+    const s = surfaces.getPtr(v.browser).?;
+    const d = &s.dialogs.items[s.dialogs.items.len - 1];
+    d.permission_kinds = v.kinds;
+    d.permission_media = v.media;
+    return true;
+}
+
 fn removeDialog(gpa: std.mem.Allocator, s: *Surface, token: u64) void {
     for (s.dialogs.items, 0..) |d, i| if (d.token == token) {
         d.free(gpa);
@@ -613,7 +627,7 @@ pub fn dialogPending(surface_id: u64, token: u64) ?*const Dialog {
 pub fn replyDialog(gpa: std.mem.Allocator, surface_id: u64, token: u64, accept: bool, text: []const u8, suppress: bool) void {
     const s = surfaces.getPtr(surface_id) orelse return;
     const d = dialogPending(surface_id, token) orelse return;
-    if (d.kind.isFile()) return;
+    if (d.kind.isFile() or d.kind == .permission) return;
     const request = d.request;
     // 답 글은 대화상자 글 규칙(상한·제어 문자)에 맞게 다듬는다 — 글자 경계에서 자르고 줄바꿈·탭 밖의 제어 문자는 공백으로
     // (통째로 버리면 긴 답이 빈 답이 된다 — 적대 검증).
@@ -643,6 +657,18 @@ pub fn replyFileDialog(gpa: std.mem.Allocator, surface_id: u64, token: u64, acce
     if (s.created) send(gpa, .{ .file_dialog_reply = .{ .browser = surface_id, .request = request, .accept = accept } });
 }
 
+/// 권한 요청의 답(W5b). 허용·차단은 Chromium 이 출처별로 기억하고(프롬프트 — 미디어는 기억하지 않는다), 닫기·못 물음은
+/// 기억하지 않는다. 답했으면 true — 권한 요청이 아니거나 이미 사라졌으면(이동·닫힘) false.
+pub fn replyPermission(gpa: std.mem.Allocator, surface_id: u64, token: u64, result: ws.message.PermissionResult) bool {
+    const s = surfaces.getPtr(surface_id) orelse return false;
+    const d = dialogPending(surface_id, token) orelse return false;
+    if (d.kind != .permission) return false;
+    const request = d.request;
+    removeDialog(gpa, s, token);
+    if (s.created) send(gpa, .{ .permission_reply = .{ .browser = surface_id, .request = request, .result = result } });
+    return true;
+}
+
 /// 창이 닫힌다 — 그 창이 띄운 요청은 취소로 답한다(다른 창이 다시 띄우지 않는다 — 탭도 그 창과 함께 사라진다).
 pub fn cancelDialogsShownBy(gpa: std.mem.Allocator, window: usize) void {
     for (surfaces.keys(), surfaces.values()) |surface_id, *s| {
@@ -653,7 +679,10 @@ pub fn cancelDialogsShownBy(gpa: std.mem.Allocator, window: usize) void {
                 i += 1;
                 continue;
             }
-            if (d.kind.isFile()) replyFileDialog(gpa, surface_id, d.token, false) else replyDialog(gpa, surface_id, d.token, d.kind == .before_unload, "", false);
+            // 권한은 「못 물음」 — 차단은 Chromium 이 그 사이트에 기억하고 닫기는 embargo 를 쌓는다(사용자가 고르지 않았다).
+            if (d.kind.isFile()) replyFileDialog(gpa, surface_id, d.token, false) else if (d.kind == .permission) {
+                _ = replyPermission(gpa, surface_id, d.token, .ignore);
+            } else replyDialog(gpa, surface_id, d.token, d.kind == .before_unload, "", false);
         }
     }
 }
@@ -995,6 +1024,9 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             if (!queueDialog(gpa, v.browser, v.request, kind, "", v.title, v.default_path, v.accept, false))
                 send(gpa, .{ .file_dialog_reply = .{ .browser = v.browser, .request = v.request, .accept = false } });
         },
+        // 받지 못하면(상한·모르는 탭) 「못 물음」으로 답한다 — 차단은 Chromium 이 기억하고 닫기는 embargo 를 쌓는다.
+        .permission_request => |v| if (!queuePermission(gpa, v))
+            send(gpa, .{ .permission_reply = .{ .browser = v.browser, .request = v.request, .result = .ignore } }),
         .dialog_closed => |v| if (surfaces.getPtr(v.browser)) |s| {
             for (s.dialogs.items) |d| if (d.request == v.request) {
                 removeDialog(gpa, s, d.token);
@@ -1002,7 +1034,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             };
         },
         // 방향이 다른 tag 는 decoder 가 이미 거절했다.
-        .hello, .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .shutdown, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost, .dialog_reply, .file_dialog_path, .file_dialog_reply => unreachable,
+        .hello, .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .shutdown, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost, .dialog_reply, .file_dialog_path, .file_dialog_reply, .permission_reply => unreachable,
     }
 }
 
@@ -1070,6 +1102,60 @@ test "dialogs queue per tab, show one at a time, and each answer goes out exactl
     try std.testing.expect(frames[1].dialog_reply.request == 9 and frames[1].dialog_reply.accept);
     try std.testing.expect(frames[2].file_dialog_reply.request == 10 and !frames[2].file_dialog_reply.accept);
     try std.testing.expect(frames[3].dialog_reply.request == 3 and !frames[3].dialog_reply.accept);
+}
+
+test "permission requests share the dialog queue: one answer each, other answers cannot close them, a closing window dismisses" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer {
+        for (surfaces.values()) |*s| freeSurface(gpa, s);
+        surfaces.deinit(gpa);
+        surfaces = .empty;
+        outbox_pending.deinit(gpa);
+        outbox_pending = .empty;
+        state = .off;
+    }
+    try surfaces.put(gpa, 7, .{ .record = .{ .surface_id = 7, .size = .{ .width = 10, .height = 10, .scale = 1 }, .hidden = false }, .created = true });
+    apply(gpa, .{ .permission_request = .{ .browser = 7, .request = 1, .origin = "https://meet.example", .media = 0b11 } }, 0);
+    const asked = nextDialog(7).?;
+    try std.testing.expectEqual(DialogKind.permission, asked.kind);
+    try std.testing.expectEqual(@as(u8, 0b11), asked.permission_media);
+    try std.testing.expectEqualStrings("https://meet.example", asked.origin);
+    const token = asked.token;
+    // JS 대화상자·파일 선택의 답은 권한 요청을 닫지 못한다.
+    replyDialog(gpa, 7, token, true, "", false);
+    replyFileDialog(gpa, 7, token, true);
+    try std.testing.expect(dialogPending(7, token) != null);
+    try std.testing.expect(replyPermission(gpa, 7, token, .accept));
+    try std.testing.expect(!replyPermission(gpa, 7, token, .deny)); // 두 번째 답은 무동작
+    try std.testing.expect(dialogPending(7, token) == null);
+    // 권한 답은 대화상자를 닫지 못한다.
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 2, .kind = .confirm, .origin = "", .message = "" } }, 0);
+    const confirm = nextDialog(7).?.token;
+    try std.testing.expect(!replyPermission(gpa, 7, confirm, .accept));
+    try std.testing.expect(dialogPending(7, confirm) != null);
+    replyDialog(gpa, 7, confirm, false, "", false);
+    // 창이 닫히면 그 창이 띄운 권한 요청은 「못 물음」으로(차단은 기억되고 닫기는 embargo 를 쌓는다), 상한을 넘은 요청·모르는
+    // 탭도 「못 물음」으로.
+    apply(gpa, .{ .permission_request = .{ .browser = 7, .request = 3, .origin = "", .kinds = ws.message.PermissionKind.notifications.bit() } }, 0);
+    const notif = nextDialog(7).?;
+    try std.testing.expectEqual(ws.message.PermissionKind.notifications.bit(), notif.permission_kinds);
+    markDialogShown(7, notif.token, 11);
+    cancelDialogsShownBy(gpa, 11);
+    for (4..9) |r| apply(gpa, .{ .permission_request = .{ .browser = 7, .request = @intCast(r), .origin = "", .kinds = 1 } }, 0);
+    apply(gpa, .{ .permission_request = .{ .browser = 99, .request = 10, .origin = "", .kinds = 1 } }, 0);
+    // 페이지가 옮겨 가 요청이 사라지면 답을 보내지 않는다.
+    apply(gpa, .{ .dialog_closed = .{ .browser = 7, .request = 4 } }, 0);
+
+    var frames: [16]Message = undefined;
+    const n = sentFrames(&frames);
+    try std.testing.expectEqual(@as(usize, 5), n);
+    try std.testing.expect(frames[0].permission_reply.request == 1 and frames[0].permission_reply.result == .accept);
+    try std.testing.expect(frames[1].dialog_reply.request == 2 and !frames[1].dialog_reply.accept);
+    try std.testing.expect(frames[2].permission_reply.request == 3 and frames[2].permission_reply.result == .ignore);
+    try std.testing.expect(frames[3].permission_reply.request == 8 and frames[3].permission_reply.result == .ignore);
+    try std.testing.expect(frames[4].permission_reply.request == 10 and frames[4].permission_reply.result == .ignore);
+    try std.testing.expectEqual(@as(usize, 3), surfaces.getPtr(7).?.dialogs.items.len);
 }
 
 test "file chooser answers: bad paths are dropped, a JS answer cannot close a file request, crash drops everything" {

@@ -3449,8 +3449,15 @@ const SeamSide = enum {
 /// position 이 둘이라 구별한다). 어느 쪽인지는 **묻는 질문이 정한다**: `⌘←` 는 "이 행의 첫 글자가
 /// 어디냐"를 묻고, `⌘→` 는 "이미 이 행 끝이냐"를 묻는다. 한쪽에 맞추면 다른 쪽이 틀린다.
 fn visualRowSpan(self: *AppSession, term: *Term, focus: usize, seam: SeamSide) ?editor_motion.VisualRow {
-    // 가드는 `movedVisualRow` 와 같다 — 랩이 아니면 조각이 줄과 1:1이라 **두 경로가 같은 답**을
-    // 내므로 정답 문제가 아니라 의존성 문제다(굳이 랩도 아닌데 스냅숏에 기대지 않는다).
+    // **가드 모양은 `movedVisualRow` 와 같지만 무게가 다르다**(적대적 검증 2026-09-25 MA7).
+    // 그쪽 주석은 「랩이 아니면 조각이 줄과 1:1이라 두 경로가 같은 답을 내므로 **정답 문제가 아니라
+    // 의존성 문제**」라고 적고, 실제로 그 분기를 지워도 아무 판정자가 안 깨진다. **여기서는 깨진다** —
+    // 이 줄을 지우면 `MOV12`·`MOV13` 이 함께 빨개진다.
+    //
+    // 까닭은 **스냅숏이 낡을 수 있기 때문**이다. 랩을 끄면 다음 프레임부터 조각이 줄과 1:1이 되지만,
+    // 그 프레임을 그리기 전까지 `editor_hit_rows` 에는 **랩이 켜져 있던 때의 조각들**이 남아 있다.
+    // 그것을 읽으면 랩이 꺼졌는데도 행 단위로 답한다 — 사용자가 방금 끈 설정이 한 박자 안 먹는다.
+    // 그래서 이 가드는 「굳이 스냅숏에 기대지 않는다」는 위생이 아니라 **정답을 지키는 조건**이다.
     const wrap = term.rt.editor_wrap orelse self.loaded_config.config.editor.wrap;
     if (!wrap) return null;
     const rows = term.rt.editor_hit_rows_len;

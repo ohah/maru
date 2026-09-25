@@ -121,6 +121,8 @@ fn create(value: protocol.message.CreateBrowser, writer: *events.Writer) void {
         defer object.release(host);
         host.*.was_hidden.?(host, 1);
     }
+    // W5b2: 같은 문서에서 위치를 다시 부를 때 멈추지 않게 하는 보정 스크립트(`permissions.zig`).
+    permissions.installGeolocationShim(browser);
     writer.send(.{ .browser_created = value.browser }) catch {};
 }
 

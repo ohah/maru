@@ -16,7 +16,9 @@
 //!   /file·/files·/folder  화면 왼쪽 위(0,0 300×100)의 파일 입력칸(받을 형식 `image/*,.txt` · 여러 개 · 폴더). 준비는 `file-ready`, 고르면
 //!                 렌더러가 내용을 읽어 `file-<수>-<이름들,정렬>-<바이트 합>`, 취소면 `file-cancel`
 //!   /perm?a=X     권한 판정(W5b) — 누르면 X 를 청한다(`notif` 알림 · `midi` MIDI sysex · `fonts` 로컬 글꼴 · `screens` 창 관리 ·
-//!                 `idle` 유휴 감지 · `geo` 위치 · `cam` 카메라 · `display` 화면 공유 · `displayleave` 화면 공유를 청하고 1.5 초 뒤 스스로
+//!                 `idle` 유휴 감지 · `geo` 위치 · `geox` 위치(`at<위도>,<경도>,<정확도>` — 시한 8 초) · `geolater` 한 문서에서 위치를 두 번 — 1.5 초 뒤 둘째(`at…|at…` 또는 `…|geo-err<코드>`) ·
+//!                 `geoframe` 같은 출처 iframe(`allow=geolocation`)이 `geolater` 를 하고 결과를 위 문서 제목에(`geoframe:…`) · `watch` 위치 지켜보기(3 초 뒤
+//!                 `n<받은 수>-<위도·오류들>`) · `cam` 카메라 · `display` 화면 공유 · `displayleave` 화면 공유를 청하고 1.5 초 뒤 스스로
 //!                 `/title?t=perm-left` 로 떠난다 · `displayfail` 같은데 닿지 않는 주소(`127.0.0.1:9`)로 떠난다 — 실패한 이동). 준비는 `X:ready`, 결과는 `X:<결과>`(`granted`·`ok`·`err-<이름>` — 글꼴은 `ok<수>`, 거절이면 빈 목록 `ok0`)
 //!   /ctl          제목을 `a<BEL>b<DEL>c` 로(제어 문자가 든 제목)
 //!   /flood        2 초 동안 제목을 1ms 마다 200 번씩 바꾼 뒤 `flood-done` 으로
@@ -93,7 +95,7 @@ fn handle(conn: c_int) void {
     const path = target[0 .. std.mem.indexOfScalar(u8, target, '?') orelse target.len];
     const query = if (std.mem.indexOfScalar(u8, target, '=')) |eq| target[eq + 1 ..] else "";
 
-    var body_buf: [2048]u8 = undefined;
+    var body_buf: [4096]u8 = undefined;
     const body = page(path, query, &body_buf) catch "<!doctype html><title>not-found</title>";
     var head_buf: [256]u8 = undefined;
     const head = std.fmt.bufPrint(&head_buf, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {d}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n", .{body.len}) catch return;
@@ -149,18 +151,23 @@ fn page(path: []const u8, query: []const u8, buf: []u8) ![]const u8 {
     if (std.mem.eql(u8, path, "/folder")) return filePage("webkitdirectory", buf);
     if (std.mem.eql(u8, path, "/perm")) {
         return std.fmt.bufPrint(buf, "<!doctype html><title>loading</title><body style='margin:0;height:100%'><script>" ++
-            "var A='{s}';function T(x){{document.title=A+':'+x}}function E(e){{T('err-'+e.name)}}function K(){{T('ok')}}" ++
+            "var A='{s}',I=A=='geoinner';function T(x){{(I?top:window).document.title=(I?'geoframe':A)+':'+x}}function E(e){{T('err-'+e.name)}}function K(){{T('ok')}}" ++
             "function go(){{if(A=='notif')Notification.requestPermission().then(T);" ++
             "else if(A=='midi')navigator.requestMIDIAccess({{sysex:true}}).then(K,E);" ++
             "else if(A=='fonts')queryLocalFonts().then(function(f){{T('ok'+f.length)}},E);" ++
             "else if(A=='screens')getScreenDetails().then(K,E);" ++
             "else if(A=='idle')IdleDetector.requestPermission().then(T,E);" ++
             "else if(A=='geo')navigator.geolocation.getCurrentPosition(K,function(e){{T('geo-err'+e.code)}},{{timeout:3000}});" ++
+            "else if(A=='geox')navigator.geolocation.getCurrentPosition(function(p){{T('at'+p.coords.latitude.toFixed(3)+','+p.coords.longitude.toFixed(3)+','+p.coords.accuracy)}},function(e){{T('geo-err'+e.code)}},{{timeout:8000}});" ++
+            "else if(A=='geoframe'){{var f=document.createElement('iframe');f.allow='geolocation';f.src='/perm?a=geoinner';document.body.appendChild(f)}}" ++
+            "else if(A=='geolater'||I){{var g=navigator.geolocation,o={{timeout:5000}},f=function(p){{return 'at'+p.coords.latitude.toFixed(3)}},e=function(x){{return 'geo-err'+x.code}};" ++
+            "g.getCurrentPosition(function(p){{var a=f(p);setTimeout(function(){{g.getCurrentPosition(function(q){{T(a+'|'+f(q))}},function(x){{T(a+'|'+e(x))}},o)}},1500)}},function(x){{T(e(x))}},o)}}" ++
+            "else if(A=='watch'){{var n=0,l=[];navigator.geolocation.watchPosition(function(p){{n++;l.push(p.coords.latitude.toFixed(3))}},function(e){{l.push('e'+e.code)}});setTimeout(function(){{T('n'+n+'-'+l.join('/'))}},3000)}}" ++
             "else if(A=='cam')navigator.mediaDevices.getUserMedia({{video:true}}).then(K,E);" ++
             "else if(A=='display')navigator.mediaDevices.getDisplayMedia({{video:true}}).then(K,E);" ++
             "else if(A=='displayleave'){{navigator.mediaDevices.getDisplayMedia({{video:true}}).then(K,E);setTimeout(function(){{location.href='/title?t=perm-left'}},1500)}}" ++
             "else if(A=='displayfail'){{navigator.mediaDevices.getDisplayMedia({{video:true}}).then(K,E);setTimeout(function(){{location.href='http://127.0.0.1:9/'}},1500)}}}}" ++
-            "addEventListener('click',go);requestAnimationFrame(function(){{requestAnimationFrame(function(){{T('ready')}})}})</script>", .{query});
+            "addEventListener('click',go);if(I)go();requestAnimationFrame(function(){{requestAnimationFrame(function(){{T('ready')}})}})</script>", .{query});
     }
     if (std.mem.eql(u8, path, "/ctl")) {
         return "<!doctype html><title>loading</title><script>document.title='a\\x07b\\x7fc'</script>";

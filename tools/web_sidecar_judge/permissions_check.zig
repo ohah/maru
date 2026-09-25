@@ -6,7 +6,15 @@
 //!   perm-dismiss       로컬 글꼴 닫기 → 페이지는 빈 목록을 받고(`queryLocalFonts` 는 거절을 빈 목록으로 준다), 다시 청하면 또
 //!                      묻는다(닫기는 기억하지 않는다) — 이번엔 허용해 글꼴이 온다
 //!   perm-closed        묻는 동안 maru 가 이동시키면 그 요청의 `dialog_closed` 가 오고, 늦은 답·없는 번호의 답은 조용히 버린다
-//!   perm-geolocation   위치는 위치 비트로 온다(좌표는 W5b2 — 여기서는 닫기)
+//!   perm-geolocation   위치는 위치 비트로 온다(기억된 허용 아님) — 닫기면 페이지는 거절(오류 1)
+//!   geo-coords         허용 전에 좌표(`geolocation`)를 보내면 페이지가 그 좌표를 받는다(W5b2 — DevTools 덮어쓰기). 짝이 없는 좌표는
+//!                      버린다
+//!   geo-remembered     허용한 출처가 다시 청하면 Chromium 이 또 묻지만(실측) 요청에 기억된 허용 표시가 붙는다 — 새 좌표를 보내고
+//!                      허용하면 오류 없이 새 좌표가 간다. 같은 서버라도 다른 출처(`localhost`)에는 표시가 붙지 않는다
+//!   geo-unavailable    같은 문서의 둘째 요청(나중에)은 묻지 않고 걸린 좌표를 곧바로 받는다(iframe 도) · 새 문서에서 좌표 없이 허용(앞 문서의
+//!                      좌표가 남지 않는다) · 「없음」을 보내고 허용 — 뒤의 둘은 곧바로 「위치를 알 수 없음」(오류 2 — 시간 초과가 아니다)
+//!   geo-watch          `watchPosition` 은 좌표 하나를 받는다(갱신하지 않는다 — 사용자 결정 2026-09-26)
+//!   geo-block          차단하면 다음 요청은 묻지 않고 거절된다(기억)
 //!   perm-media         카메라: 장치가 있으면 미디어 요청(카메라 비트)이 와서 거부가 닿고, 없으면 요청 전에 `NotFoundError`(이 기계)
 //!   perm-display       화면 공유(`getDisplayMedia`)는 미디어 요청(화면 비트)으로 온다 — 거부하면 `NotAllowedError`. 미디어 요청의
 //!                      답은 Chromium 이 기억하지 않는다 — 다시 청하면 또 묻는다(W5b 실측). 허용하면 청한 비트를 그대로 돌려준다
@@ -42,6 +50,7 @@ const Asked = struct {
     request: RequestId = 0,
     kinds: u32 = 0,
     media: u8 = 0,
+    remembered: bool = false,
     origin_buf: [protocol.fields.max_origin_bytes]u8 = undefined,
     origin_len: usize = 0,
 
@@ -70,7 +79,7 @@ fn waitResult(host: *Host, action: []const u8, stop_on_request: bool, out: *Outc
         const next = (host.next(@intCast(@max(deadline - os.nowMs(), 1))) catch return) orelse return;
         switch (next) {
             .permission_request => |value| if (value.browser == id) {
-                var asked: Asked = .{ .request = value.request, .kinds = value.kinds, .media = value.media, .origin_len = value.origin.len };
+                var asked: Asked = .{ .request = value.request, .kinds = value.kinds, .media = value.media, .remembered = value.remembered, .origin_len = value.origin.len };
                 @memcpy(asked.origin_buf[0..value.origin.len], value.origin);
                 out.asked = asked;
                 if (stop_on_request) return;
@@ -218,7 +227,62 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, p
     const geo = try ask(&host, &u, port, "geo");
     const geo_asked = geo.asked orelse Asked{};
     const geo_done = if (geo.asked != null) try answer(&host, "geo", geo_asked.request, .dismiss) else Outcome{};
-    report(geo_asked.kinds == PermissionKind.geolocation.bit() and endsWith(&geo_done, ":geo-err1"), "perm-geolocation", std.fmt.bufPrint(&detail_buf, "위치 요청(비트 0x{x}) · 닫기 → {s}", .{ geo_asked.kinds, geo_done.title() }) catch "");
+    report(geo_asked.kinds == PermissionKind.geolocation.bit() and !geo_asked.remembered and endsWith(&geo_done, ":geo-err1"), "perm-geolocation", std.fmt.bufPrint(&detail_buf, "위치 요청(비트 0x{x} · 기억 {}) · 닫기 → {s}", .{ geo_asked.kinds, geo_asked.remembered, geo_done.title() }) catch "");
+
+    // ── 위치 좌표(W5b2) ──
+    const first = try ask(&host, &u, port, "geox");
+    const first_asked = first.asked orelse Asked{};
+    // 짝이 없는 좌표(없는 번호)는 버린다 — 채널이 닫히거나 실패가 나지 않는다.
+    try host.send(.{ .geolocation = .{ .browser = id, .request = 999_999, .available = true, .latitude = 1, .longitude = 1, .accuracy = 1 } });
+    try host.send(.{ .geolocation = .{ .browser = id, .request = first_asked.request, .available = true, .latitude = 37.5665, .longitude = 126.978, .accuracy = 25 } });
+    const first_done = if (first.asked != null) try answer(&host, "geox", first_asked.request, .accept) else Outcome{};
+    report(!first_asked.remembered and endsWith(&first_done, ":at37.566,126.978,25"), "geo-coords", std.fmt.bufPrint(&detail_buf, "처음 요청(기억 {}) · 좌표를 걸고 허용 → {s}", .{ first_asked.remembered, first_done.title() }) catch "");
+
+    const repeat = try ask(&host, &u, port, "geox");
+    const repeat_asked = repeat.asked orelse Asked{};
+    try host.send(.{ .geolocation = .{ .browser = id, .request = repeat_asked.request, .available = true, .latitude = 35.1796, .longitude = 129.0756, .accuracy = 40 } });
+    const repeat_done = if (repeat.asked != null) try answer(&host, "geox", repeat_asked.request, .accept) else Outcome{};
+    // 다른 출처(같은 서버를 `localhost` 로)는 허용을 물려받지 않는다 — 기억된 허용 표시가 없다(출처별 — 적대 검증).
+    var other_buf: [128]u8 = undefined;
+    try host.send(.{ .navigate = .{ .browser = id, .url = std.fmt.bufPrint(&other_buf, "http://localhost:{d}/perm?a=geox", .{port}) catch unreachable } });
+    if (!waitTitle(&host, "geox:ready")) return error.PageNotReady;
+    os.sleepMs(800);
+    try host.send(.{ .mouse = .{ .browser = id, .kind = .down, .point = .{ .x = 100, .y = 100 }, .click_count = 1 } });
+    try host.send(.{ .mouse = .{ .browser = id, .kind = .up, .point = .{ .x = 100, .y = 100 }, .click_count = 1 } });
+    var other: Outcome = .{};
+    waitResult(&host, "geox", true, &other);
+    const other_asked = other.asked orelse Asked{};
+    const other_done = if (other.asked != null) try answer(&host, "geox", other_asked.request, .dismiss) else Outcome{};
+    const other_ok = other.asked != null and !other_asked.remembered and std.mem.startsWith(u8, other_asked.origin(), "http://localhost:") and endsWith(&other_done, ":geo-err1");
+    report(repeat_asked.remembered and other_ok and endsWith(&repeat_done, ":at35.180,129.076,40"), "geo-remembered", std.fmt.bufPrint(&detail_buf, "허용한 출처가 다시 청함 → 또 묻지만 기억된 허용 {} · 새 좌표 → {s} · 다른 출처(localhost)는 기억 없이 물음 {}", .{ repeat_asked.remembered, repeat_done.title(), other_ok }) catch "");
+
+    // 같은 문서의 둘째 요청(1.5 초 뒤)은 묻지 않고(Chromium 이 그 문서에 허용을 둔다) 걸린 좌표를 곧바로 받는다(실측).
+    const later = try ask(&host, &u, port, "geolater");
+    if (later.asked) |asked| try host.send(.{ .geolocation = .{ .browser = id, .request = asked.request, .available = true, .latitude = 35.1796, .longitude = 129.0756, .accuracy = 40 } });
+    const later_done = if (later.asked) |asked| try answer(&host, "geolater", asked.request, .accept) else Outcome{};
+    // iframe 도 같다 — 허용 때 넣는 보정은 주 프레임에만 가므로, 새 문서마다 넣는 보정(모든 프레임)이 iframe 을 맡는다.
+    const framed = try ask(&host, &u, port, "geoframe");
+    if (framed.asked) |asked| try host.send(.{ .geolocation = .{ .browser = id, .request = asked.request, .available = true, .latitude = 35.1796, .longitude = 129.0756, .accuracy = 40 } });
+    const framed_done = if (framed.asked) |asked| try answer(&host, "geoframe", asked.request, .accept) else Outcome{};
+    // 좌표 없이 허용 — 새 문서라 앞의 좌표(35.18)가 남지 않고 「없음」이다(sidecar 가 새 문서에서 「없음」으로 되돌리고, 허용 전에도
+    // 「없음」을 건다). 그 뒤 「없음」을 보내고 허용.
+    const bare = try ask(&host, &u, port, "geox");
+    const bare_done = if (bare.asked) |asked| try answer(&host, "geox", asked.request, .accept) else Outcome{};
+    const none = try ask(&host, &u, port, "geox");
+    const none_asked = none.asked orelse Asked{};
+    try host.send(.{ .geolocation = .{ .browser = id, .request = none_asked.request, .available = false } });
+    const none_done = if (none.asked != null) try answer(&host, "geox", none_asked.request, .accept) else Outcome{};
+    report(endsWith(&later_done, ":at35.180|at35.180") and endsWith(&framed_done, ":at35.180|at35.180") and endsWith(&none_done, ":geo-err2") and endsWith(&bare_done, ":geo-err2"), "geo-unavailable", std.fmt.bufPrint(&detail_buf, "같은 문서의 둘째 요청 → {s} · iframe 도 → {s} · 「없음」을 걸고 허용 → {s} · 새 문서에서 좌표 없이 허용 → {s}", .{ later_done.title(), framed_done.title(), none_done.title(), bare_done.title() }) catch "");
+
+    const watch = try ask(&host, &u, port, "watch");
+    if (watch.asked) |asked| try host.send(.{ .geolocation = .{ .browser = id, .request = asked.request, .available = true, .latitude = 33.4996, .longitude = 126.5312, .accuracy = 50 } });
+    const watch_done = if (watch.asked) |asked| try answer(&host, "watch", asked.request, .accept) else Outcome{};
+    report(endsWith(&watch_done, ":n1-33.500"), "geo-watch", std.fmt.bufPrint(&detail_buf, "watchPosition → {s}", .{watch_done.title()}) catch "");
+
+    const blocked = try ask(&host, &u, port, "geox");
+    const blocked_done = if (blocked.asked) |asked| try answer(&host, "geox", asked.request, .deny) else Outcome{};
+    const after_block = try ask(&host, &u, port, "geox");
+    report(endsWith(&blocked_done, ":geo-err1") and silent(&after_block) and endsWith(&after_block, ":geo-err1"), "geo-block", std.fmt.bufPrint(&detail_buf, "차단 → {s} · 다음은 묻지 않고 {s}", .{ blocked_done.title(), after_block.title() }) catch "");
 
     // ── 카메라 ──
     const cam = try ask(&host, &u, port, "cam");

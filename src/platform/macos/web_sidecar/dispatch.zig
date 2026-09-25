@@ -93,7 +93,7 @@ pub const Dispatcher = struct {
         switch (message) {
             .shutdown => return .quit,
             .hello => return self.violation("second hello"),
-            .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost, .dialog_reply, .file_dialog_path, .file_dialog_reply, .permission_reply => {
+            .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost, .dialog_reply, .file_dialog_path, .file_dialog_reply, .permission_reply, .geolocation => {
                 self.handler.browser_command(self.handler.context, message, self.writer);
                 return .keep_running;
             },

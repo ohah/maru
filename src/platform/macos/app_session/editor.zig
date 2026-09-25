@@ -3232,9 +3232,17 @@ pub const Motion = enum {
     char_right,
     word_left,
     word_right,
-    /// smart home — 첫 글자와 줄 머리를 오간다.
+    /// smart home — 첫 글자와 줄 머리를 오간다. **언제나 논리 줄**이다(비교 뷰·병합 판이 쓴다).
     line_start,
+    /// 논리 줄 끝. `^E` 가 이것이다(VS Code `CursorLineEnd`).
     line_end,
+    /// `⌘←`·`Home` — **행 첫 글자 → 줄 첫 글자 → 줄 머리**로 넓어진다(VS Code `CursorHome`).
+    /// 랩이 꺼졌거나 스냅숏이 없으면 `line_start` 와 **같은 답**이다.
+    row_then_line_start,
+    /// `⌘→`·`End` — **행 끝 → 줄 끝**으로 넓어진다(VS Code `CursorEnd`). 위의 거울.
+    row_then_line_end,
+    /// `^A` — **무조건 줄 머리**(0열). smart home 토글이 없다(VS Code `CursorLineStart`).
+    hard_line_start,
     line_up,
     line_down,
     doc_start,
@@ -3418,6 +3426,81 @@ fn movedVisualRow(self: *AppSession, term: *Term, focus: usize, goal: editor_sel
     return dest_line.start + map.offsetOf(map.ctx, dest_text, want_col);
 }
 
+/// 행 경계 offset 을 **어느 행의 것으로 읽을지**(§4 이음매).
+const SeamSide = enum {
+    /// **뒤 행 머리**로 읽는다 — `⌘←` 가 "이 행의 첫 글자가 어디냐"를 물을 때. `movedVisualRow` 의
+    /// `assoc = 1`·`paintCarets` 의 열 거르기와 같은 쪽이다.
+    next_row,
+    /// **앞 행 끝**으로 읽는다 — `⌘→` 가 "이미 이 행 끝이냐"를 물을 때.
+    prev_row,
+};
+
+/// caret 이 든 **시각 행**의 원본 byte 범위. 랩이 꺼졌거나 확실히 알 수 없으면 `null`.
+///
+/// `⌘←`/`⌘→` 의 단계 확장(§3.2)이 이것을 읽고 `motion.zig` 의 `lineStartScope`/`lineEndScope` 에
+/// 넘긴다. **경계를 세지 않고 스냅숏에서 읽는 것**은 `movedVisualRow` 와 같은 이유다 — 다시 세면
+/// 그것이 두 번째 규칙이고 걸친 2칸 글자·§3.8 표기에서 갈린다.
+///
+/// **`start_byte` 를 안 쓴다**: 쪼개진 탭에서 조각 시작이 cluster 안쪽일 수 있어 그 cluster 시작을
+/// 가리킨다(`visual_map.zig` 의 그 필드 주석). `start_col` + `offsetOf` 가 화면과 같은 출처다.
+///
+/// **이음매를 호출자가 고른다**(`seam`) — 행 경계 offset 은 「앞 행의 끝」이기도 하고 「뒤 행의
+/// 머리」이기도 한데, 우리 모델에서는 **같은 byte 하나**라 스스로 구별이 안 된다(VS Code 는 view
+/// position 이 둘이라 구별한다). 어느 쪽인지는 **묻는 질문이 정한다**: `⌘←` 는 "이 행의 첫 글자가
+/// 어디냐"를 묻고, `⌘→` 는 "이미 이 행 끝이냐"를 묻는다. 한쪽에 맞추면 다른 쪽이 틀린다.
+fn visualRowSpan(self: *AppSession, term: *Term, focus: usize, seam: SeamSide) ?editor_motion.VisualRow {
+    // 가드는 `movedVisualRow` 와 같다 — 랩이 아니면 조각이 줄과 1:1이라 **두 경로가 같은 답**을
+    // 내므로 정답 문제가 아니라 의존성 문제다(굳이 랩도 아닌데 스냅숏에 기대지 않는다).
+    const wrap = term.rt.editor_wrap orelse self.loaded_config.config.editor.wrap;
+    if (!wrap) return null;
+    const rows = term.rt.editor_hit_rows_len;
+    if (rows == 0) return null; // 아직 안 그렸다
+    const doc = term.rt.editor_doc orelse return null;
+
+    const lines = doc.file.lines;
+    const doc_line = lines.lineAt(focus);
+    const line = lines.line(doc_line) orelse return null;
+    const visible_row = visibleRowOfDocLine(term, @intCast(doc_line)) orelse return null;
+    const first: u32 = @intCast(term.rt.editor_first_line);
+    if (visible_row < first) return null;
+    const screen_line: u32 = visible_row - first;
+
+    const snap = term.rt.editor_hit_rows[0..rows];
+    var pcm = productColumnMap(term);
+    const map = pcm.map();
+    const text = doc.file.content[line.start..line.contentEnd()];
+    const col = if (focus >= line.contentEnd())
+        map.columnOf(map.ctx, text, text.len)
+    else
+        map.columnOf(map.ctx, text, focus - line.start);
+
+    var here: ?usize = null;
+    for (snap, 0..) |vr, i| {
+        if (vr.line != screen_line) continue;
+        if (vr.start_col <= col) here = i else break;
+    }
+    var cur = here orelse return null;
+
+    // **이음매**: caret 이 조각 머리에 정확히 서 있으면 위 훑기는 늘 **뒤 행**을 고른다. `⌘→` 는
+    // 그 자리를 **앞 행의 끝**으로 읽어야 "한 번 더 누르면 줄 끝" 이 성립한다 — 안 그러면 행에서
+    // 행으로 한 칸씩 걸어가 줄 끝에 영영 못 간다. 앞 조각이 **같은 논리 줄**일 때만 물러난다
+    // (줄 머리면 물러날 곳이 없다).
+    if (seam == .prev_row and cur > 0 and snap[cur].start_col == col and snap[cur - 1].line == screen_line) {
+        cur -= 1;
+    }
+
+    // **다음 조각이 없으면 모른다.** 이 행이 줄의 마지막이라서 없는 것인지, 화면 아래로 잘려서
+    // 없는 것인지 여기서는 구별이 안 된다 — 잘린 것을 "마지막"으로 읽으면 ⌘→ 가 화면 밖 줄 끝으로
+    // 튄다. 모를 때 추측해 두 번째 규칙을 만드는 것보다 `null` 이 낫다(`movedVisualRow` 와 같은
+    // 규율). 호출자는 논리 줄로 떨어지고, 그것은 **오늘과 같은 동작**이라 잃는 것이 없다.
+    if (cur + 1 >= snap.len) return null;
+    const end = if (snap[cur + 1].line == screen_line)
+        line.start + map.offsetOf(map.ctx, text, snap[cur + 1].start_col)
+    else
+        line.contentEnd(); // 다음 조각이 **다른 줄** — 이 행이 줄의 마지막이다
+    return .{ .start = line.start + map.offsetOf(map.ctx, text, snap[cur].start_col), .end = end };
+}
+
 /// **보이는 줄** 인덱스가 어느 문서 줄인가 — `visibleRowOfDocLine`의 역이다.
 ///
 /// 접힘이 켜지면 둘이 1:1이 아니므로 `editor_visible_numbers`(줄 번호 = 문서 줄 + 1)를 읽는다.
@@ -3470,6 +3553,35 @@ fn movedOffset(
         .line_start => blk: {
             goal.* = .none;
             break :blk editor_motion.lineStartSmart(content, line, focus);
+        },
+        // **`^A` 는 토글이 없다** — `line_start` 와 일부러 갈린다(VS Code 가 `CursorHome` 과
+        // `CursorLineStart` 를 다른 명령으로 둔 그 가름이다).
+        .hard_line_start => blk: {
+            goal.* = .none;
+            break :blk editor_motion.lineStart(line);
+        },
+        // **랩이 켜졌으면 행이 먼저다**(§3.2). 세로 이동(§4.1g)과 클릭이 이미 행을 보는데 가로 끝
+        // 이동만 줄을 보던 어긋남을 닫는다. 행에서 멈추기만 하면 줄 머리로 갈 길이 없어지므로
+        // **한 번 더 누르면 넓어진다** — 단계는 `motion.zig` 의 `lineStartScope` 가 소유한다.
+        .row_then_line_start => blk: {
+            goal.* = .none;
+            if (visualRowSpan(self, term, focus, .next_row)) |row| {
+                if (editor_motion.lineStartScope(content, line, focus, row) == .row)
+                    break :blk editor_motion.rowStartSmart(content, line, row);
+            }
+            break :blk editor_motion.lineStartSmart(content, line, focus);
+        },
+        .row_then_line_end => blk: {
+            if (visualRowSpan(self, term, focus, .prev_row)) |row| {
+                if (editor_motion.lineEndScope(line, focus, row) == .row) {
+                    // **행 끝은 「열」이지 「줄 끝」이 아니다.** goal 을 `line_end` 로 세우면 다음
+                    // ↓ 가 줄 끝을 따라가 버려, 방금 행 끝에 선 사용자가 줄 끝으로 끌려간다.
+                    goal.* = .none;
+                    break :blk editor_motion.rowEnd(line, row);
+                }
+            }
+            goal.* = .line_end;
+            break :blk editor_motion.lineEnd(line);
         },
         // **짝이 없으면 제자리다**(§3.9c) — 「없다」와 「여기다」는 다른 답이고, 없는데 옮기면
         // 사용자가 자기 자리를 잃는다.
@@ -5168,8 +5280,13 @@ pub fn diffMove(self: *AppSession, term: *Term, how: Motion, extend: bool) bool 
             .{ .row = cur_row + 1, .byte = 0 }
         else
             .{ .row = cur_row, .byte = cur_byte },
-        .line_start => .{ .row = cur_row, .byte = editor_motion.lineStartSmart(texts[cur_row], rowLine(texts[cur_row]), cur_byte) },
-        .line_end => .{ .row = cur_row, .byte = texts[cur_row].len },
+        // **비교 뷰/병합 판은 한 행이 곧 한 줄**이다(`texts[cur_row]` 가 행 하나). 랩이 없어
+        // 「행까지」와 「줄까지」가 같은 자리라 별칭이 **저하가 아니라 정답**이다 — 오늘 이 둘은
+        // 위 키 switch 가 안 보내지만, 보내는 날 조용히 틀리지 않도록 여기 적는다.
+        .line_start, .row_then_line_start => .{ .row = cur_row, .byte = editor_motion.lineStartSmart(texts[cur_row], rowLine(texts[cur_row]), cur_byte) },
+        .line_end, .row_then_line_end => .{ .row = cur_row, .byte = texts[cur_row].len },
+        // `^A` 는 토글이 없다 — 행 머리 그대로다.
+        .hard_line_start => .{ .row = cur_row, .byte = 0 },
         .line_up, .line_down, .page_up, .page_down => blk: {
             const step: usize = if (how == .line_up or how == .line_down) 1 else rows;
             const up = (how == .line_up or how == .page_up);
@@ -31256,6 +31373,123 @@ test "MOV9 랩이 켜지면 위/아래가 시각 행을 따라간다 — 이음�
     // ⑶ ↑ 로 되돌아오면 제자리다 — 왕복이 성립해야 사용자가 방향키를 믿는다.
     try testing.expect(moveCarets(fx.session, term, .line_up, false));
     try testing.expectEqual(@as(usize, 0), term.rt.editor_selection.?.focus);
+}
+
+/// 랩된 긴 줄 하나(들여쓰기 4칸) + `tail`. `⌘←`/`⌘→` 단계 확장을 재는 공통 고정이다.
+fn lineEdgeFixture(fx: *PaneFixture, allocator: std.mem.Allocator, name: []const u8) !*Term {
+    var long: std.ArrayList(u8) = .empty;
+    defer long.deinit(allocator);
+    try long.appendSlice(allocator, "    "); // **들여쓰기** — smart home 토글이 여기서 갈린다
+    for (0..300) |i| try long.append(allocator, @intCast('a' + (i % 26)));
+    try long.append(allocator, '\n');
+    try long.appendSlice(allocator, "tail\n");
+    const term = try undoFixture(fx, allocator, name, long.items);
+    term.rt.editor_wrap = true;
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    fx.session.gpu_quads.clearRetainingCapacity();
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+    return term;
+}
+
+/// 고정의 **둘째 시각 행**이 시작하는 문서 offset.
+fn secondRowStart(term: *Term) usize {
+    const line0 = term.rt.editor_doc.?.file.lines.line(0).?;
+    const rows = term.rt.editor_hit_rows[0..term.rt.editor_hit_rows_len];
+    var pcm = productColumnMap(term);
+    const map = pcm.map();
+    const text = term.rt.editor_doc.?.file.content[line0.start..line0.contentEnd()];
+    return line0.start + map.offsetOf(map.ctx, text, rows[1].start_col);
+}
+
+test "MOV12 ⌘← 는 랩된 줄에서 행 첫 글자 → 줄 첫 글자 → 줄 머리로 넓어진다 (§3.2)" {
+    // **클릭도 행, 세로 이동도 행인데 가로 끝 이동만 줄이었다**(2026-09-25). 세 번째 행 가운데서
+    // ⌘← 를 누르면 커서가 화면에서 두 행 위로 사라진다 — VS Code `CursorHome` 은 그 행에서 멈춘다.
+    // 그렇다고 행에서 멈추기만 하면 줄 머리로 갈 길이 없어지므로 **한 번 더 누르면 넓어진다.**
+    //
+    // **키를 실제로 누른다** — `moveCarets` 를 직접 부르면 `Motion` 배선(⌘← → `row_then_line_start`)
+    // 이 판정 밖에 남는다. `MOV7` 이 같은 이유로 `pressKey` 를 쓴다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try lineEdgeFixture(&fx, allocator, "mov12.txt");
+    try testing.expect(term.rt.editor_hit_rows_len > 2); // 실제로 접혔다
+    const row1 = secondRowStart(term);
+    try testing.expect(row1 > 4);
+
+    // ① 이어지는 행 **가운데** → 그 행 첫 글자에서 멈춘다.
+    term.rt.editor_selection = editor_selection.Selection.at(row1 + 5);
+    try pressKey(&fx, .arrow_left, .{ .command = true });
+    try testing.expectEqual(row1, term.rt.editor_selection.?.focus);
+
+    // ② 한 번 더 → **줄 첫 글자**(들여쓰기 뒤 = 4). 여기서 한 단계 넓어진다.
+    try pressKey(&fx, .arrow_left, .{ .command = true });
+    try testing.expectEqual(@as(usize, 4), term.rt.editor_selection.?.focus);
+
+    // ③ 한 번 더 → **줄 머리**(0). smart home 토글이 「줄」 단계 안에 그대로 산다.
+    try pressKey(&fx, .arrow_left, .{ .command = true });
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_selection.?.focus);
+
+    // **랩을 끄면 이전과 같다** — 한 번에 줄 첫 글자다. 이것이 이 변경의 가장 중요한 회귀 성질이라
+    // 여기서 직접 잰다(스냅숏에 안 기대는 길이 살아 있다는 증거이기도 하다).
+    term.rt.editor_wrap = false;
+    term.rt.editor_selection = editor_selection.Selection.at(row1 + 5);
+    try pressKey(&fx, .arrow_left, .{ .command = true });
+    try testing.expectEqual(@as(usize, 4), term.rt.editor_selection.?.focus);
+}
+
+test "MOV13 ⌘→ 는 행 끝 → 줄 끝으로 넓어지고, ^A·^E 는 언제나 논리 줄이다 (§3.2)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try lineEdgeFixture(&fx, allocator, "mov13.txt");
+    try testing.expect(term.rt.editor_hit_rows_len > 2);
+    const row1 = secondRowStart(term);
+    const end0 = term.rt.editor_doc.?.file.lines.line(0).?.contentEnd();
+    try testing.expect(row1 < end0);
+
+    // ① 첫 행 가운데 → **그 행 끝**. 행 끝 offset 은 뒤 행 머리와 같은 byte 다.
+    term.rt.editor_selection = editor_selection.Selection.at(6);
+    try pressKey(&fx, .arrow_right, .{ .command = true });
+    try testing.expectEqual(row1, term.rt.editor_selection.?.focus);
+
+    // **행 끝은 「열」이지 「줄 끝」이 아니다** — goal 을 `line_end` 로 세우면 다음 ↓ 가 줄 끝을
+    // 따라가 방금 행 끝에 선 사용자를 줄 끝으로 끌고 간다.
+    try testing.expectEqual(editor_selection.Goal.none, term.rt.editor_selection.?.goal);
+
+    // ② 한 번 더 → **줄 끝**. 여기가 이음매다: 같은 byte 를 「앞 행의 끝」으로 읽어야 넓어진다 —
+    // 「뒤 행의 머리」로 읽으면 행에서 행으로 한 칸씩 걸어가 줄 끝에 영영 못 간다.
+    try pressKey(&fx, .arrow_right, .{ .command = true });
+    try testing.expectEqual(end0, term.rt.editor_selection.?.focus);
+    try testing.expectEqual(editor_selection.Goal.line_end, term.rt.editor_selection.?.goal);
+
+    // ③ **`^A` 는 토글 없이 줄 머리**다 — 랩이 켜져 있어도 행에서 안 멈춘다.
+    term.rt.editor_selection = editor_selection.Selection.at(row1 + 5);
+    try pressKey(&fx, .{ .char = 'a' }, .{ .control = true });
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_selection.?.focus);
+    // 줄 머리에서 한 번 더 눌러도 **0 그대로**다(`line_start` 였다면 첫 글자 4로 튄다).
+    try pressKey(&fx, .{ .char = 'a' }, .{ .control = true });
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_selection.?.focus);
+
+    // ④ **`^E` 는 한 번에 줄 끝**이다 — 랩을 켰을 때 그 길이 여기 남는다.
+    term.rt.editor_selection = editor_selection.Selection.at(6);
+    try pressKey(&fx, .{ .char = 'e' }, .{ .control = true });
+    try testing.expectEqual(end0, term.rt.editor_selection.?.focus);
+
+    // ⑤ **`⇧` 는 선택을 늘린다** — 이동 표가 그것을 공짜로 받는다(따로 배선하지 않았다는 증거).
+    term.rt.editor_selection = editor_selection.Selection.at(6);
+    try pressKey(&fx, .{ .char = 'A' }, .{ .control = true, .shift = true });
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 6), term.rt.editor_selection.?.anchor_start);
+    try testing.expectEqual(@as(usize, 6), term.rt.editor_selection.?.anchor_end);
+
+    // 랩을 끄면 `⌘→` 도 이전과 같다 — 한 번에 줄 끝.
+    term.rt.editor_wrap = false;
+    term.rt.editor_selection = editor_selection.Selection.at(6);
+    try pressKey(&fx, .arrow_right, .{ .command = true });
+    try testing.expectEqual(end0, term.rt.editor_selection.?.focus);
 }
 
 test "MOV8 문서 끝·처음을 넘지 않고, 나머지 커서만 움직여도 보고한다 (§3.2)" {

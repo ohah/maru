@@ -12,7 +12,6 @@
 //!   no-popup-js        `javascript:` 이동으로 부른 `window.open`(브라우저가 시작한 이동이라 팝업 차단기를 안 거친다)도
 //!                      창 0 개·팝업 페이지 요청 0 — 우리 팝업 처리기가 막는다
 //!   no-print           `window.print()` 가 인쇄 창을 띄우지 않고 바로 돌아온다(창 0 개)
-//!   no-dialog          `alert`·`confirm`·`prompt` 가 창을 띄우지 않고 바로 돌아온다(confirm 은 false, prompt 는 null)
 //!   title-flood        2 초 동안 제목을 약 40 만 번 바꾸는 페이지의 제목 알림이 조절되고(간격 50ms 기준 상한 안),
 //!                      마지막 제목은 온다
 //!   title-control      제어 문자가 든 제목도 온다(제어 문자는 공백으로) — codec 이 거절해 조용히 사라지지 않는다
@@ -280,12 +279,6 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_dir: [:0]const u8, p
     os.sleepMs(1500);
     const print_windows = windows.ownedBy(host.pid);
     report(printed and print_windows == 0, "no-print", std.fmt.bufPrint(&detail_buf, "window.print() 가 돌아옴 {} · host 창 {d} 개", .{ printed, print_windows }) catch "");
-
-    try host.send(.{ .navigate = .{ .browser = 3, .url = url(&u, port, "/dialog") } });
-    const dialogs = waitFor(&host, .{ .title = .{ .browser = 3, .text = "dialog-false-null" } }, &misrouted);
-    os.sleepMs(1500);
-    const dialog_windows = windows.ownedBy(host.pid);
-    report(dialogs and dialog_windows == 0, "no-dialog", std.fmt.bufPrint(&detail_buf, "alert·confirm·prompt 가 억제되어 돌아옴(dialog-false-null) {} · host 창 {d} 개", .{ dialogs, dialog_windows }) catch "");
 
     try host.send(.{ .navigate = .{ .browser = 3, .url = url(&u, port, "/ctl") } });
     report(waitFor(&host, .{ .title = .{ .browser = 3, .text = "a b c" } }, &misrouted), "title-control", "제목 a<BEL>b<DEL>c → \"a b c\"");

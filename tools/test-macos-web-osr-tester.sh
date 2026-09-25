@@ -89,12 +89,36 @@ PAGE = ("<!doctype html><title>tester</title><style>html,body{margin:0;height:10
     "addEventListener('hashchange',function(){ping('e=hash&h='+encodeURIComponent(location.hash))});"
     "requestAnimationFrame(function(){requestAnimationFrame(function(){ping('e=ready')})});"
     "</script>").encode()
+# W5a: 대화상자·파일 선택 — 위쪽 단추 일곱(본문 좌표 x 0·100·…·600, 폭 100·높이 80): 대화상자 셋 차례로 · 파일 하나(.txt) ·
+# 여러 개 · 폴더 · 3 초 뒤 alert · 떠나기 확인 걸기(사용자 동작 뒤에 건 확인만 Chromium 이 묻는다) · alert 넷 이어서(억제).
+DIALOGS = ("<!doctype html><title>dialogs</title><style>html,body{margin:0;height:100%}.b{position:absolute;top:0;width:100px;height:80px}</style>"
+    "<button class=b id=a style='left:0'>chain</button><input class=b id=f1 type=file accept='.txt' style='left:100px'>"
+    "<input class=b id=f2 type=file multiple style='left:200px'><input class=b id=f3 type=file webkitdirectory style='left:300px'>"
+    "<button class=b id=l style='left:400px'>later</button><button class=b id=u style='left:500px'>arm</button>"
+    "<button class=b id=o style='left:600px'>loop</button><script>"
+    "var P=Math.random().toString(36).slice(2,8),S=0;function ping(q){new Image().src='/ev?p='+P+'&s='+(++S)+'&'+q+'&t='+Date.now()}"
+    "document.getElementById('a').onclick=function(){alert('첫 줄\\n둘째 줄');ping('e=alert-done');var c=confirm('확인할까요');ping('e=confirm&r='+c);"
+    "var p=prompt('이름','기본값');ping('e=prompt&r='+encodeURIComponent(String(p)))};"
+    "function files(id,tag){var el=document.getElementById(id);el.addEventListener('change',function(){var fs=Array.from(el.files);"
+    "var n=fs.map(function(x){return x.name}).sort();Promise.all(fs.map(function(x){return x.arrayBuffer()})).then(function(bs){var t=0;"
+    "bs.forEach(function(b){t+=b.byteLength});ping('e=files&w='+tag+'&n='+fs.length+'&names='+encodeURIComponent(n.join(','))+'&len='+t)})})}"
+    "files('f1','one');files('f2','many');files('f3','folder');"
+    "document.getElementById('l').onclick=function(){setTimeout(function(){navigator.sendBeacon('/ev?p='+P+'&s='+(++S)+'&e=later-fired&t='+Date.now());alert('later');ping('e=later-done')},3000)};"
+    "document.getElementById('o').onclick=function(){for(var i=0;i<4;i++)alert('loop '+i);ping('e=loop-done')};"
+    "document.getElementById('u').onclick=function(){window.onbeforeunload=function(e){e.preventDefault();e.returnValue='x';return 'x'};ping('e=armed')};"
+    "requestAnimationFrame(function(){requestAnimationFrame(function(){ping('e=ready')})});"
+    "</script>").encode()
 class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_GET(self):
         log.write(self.path + "\n")
-        body = PAGE if self.path == "/tester" else b""
-        self.send_response(200); self.send_header('Content-Type', 'text/html'); self.send_header('Content-Length', str(len(body))); self.end_headers(); self.wfile.write(body)
+        body = PAGE if self.path == "/tester" else DIALOGS if self.path == "/dialogs" else b""
+        self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.send_header('Content-Length', str(len(body))); self.end_headers(); self.wfile.write(body)
+    def do_POST(self):
+        # sendBeacon — alert 가 렌더러를 막기 전에 브라우저로 넘어가는 신호.
+        log.write(self.path + "\n")
+        self.rfile.read(int(self.headers.get('Content-Length') or 0))
+        self.send_response(204); self.end_headers()
 http.server.HTTPServer(('127.0.0.1', int(sys.argv[1])), H).serve_forever()
 PY
 python3 "$root/server.py" "$port" "$root/requests.log" &
@@ -118,7 +142,7 @@ run_app() { # $1=대본 $2=실행 ms, 나머지는 추가 환경(NAME=값)
     : > "$root/report"
     printf 'browser.engine = chromium\n' > "$root/config"
     set -- HOME="$root/home" CFFIXED_USER_HOME="$root/home" MARU_SESSION_HOST_ROOT="$root/session-host" MARU_CONFIG="$root/config" \
-        MARU_WEB_PANEL=1 MARU_WEB_OSR_DIR="$sidecar_dir" MARU_WEB_OSR_TEST_URL="http://127.0.0.1:$port/tester" \
+        MARU_WEB_PANEL=1 MARU_WEB_OSR_DIR="$sidecar_dir" MARU_WEB_OSR_TEST_URL="http://127.0.0.1:$port${page_path:-/tester}" \
         MARU_MACOS_APP_SMOKE_MS="$ms" MARU_WEB_OSR_TEST_INPUT="$script" MARU_WEB_OSR_TEST_REPORT="$root/report" "$@"
     if [ "$live" = 1 ]; then
         # 셸에서 띄운 실행 파일은 맨 앞 앱이 되지 못한다 — LaunchServices 로 번들을 띄운다(CR6d 와 같은 길). 앱 pid 는 번들
@@ -416,6 +440,247 @@ check(set(kinds(old)) <= {'blur'}, f'a click and a key in a new window at the sa
 check(P1 is not None and bool(new_down) and int(ready1[0]['t']) <= int(new_down[0]['t']) and any(e['k'] == 'a' for e in at(new, 'kd')),
       f'they reach the new window own Chromium tab, loaded before the click ({kinds(new)})')
 check(not any(l.startswith(('menu-missing', 'post-refused')) for l in lines), 'every scripted step ran')
+sys.exit(0 if ok else 1)
+PY
+
+# ── W5a: Chromium 탭의 JS 대화상자·파일 선택이 maru 창에 붙는 sheet 로 ─────────────────────────────────────────────
+# 대본이 sheet 를 읽고(`sheet`) 단추를 누른다(`sheet-answer` — 입력칸을 채우고 performClick). 비활성 앱의 열기 창은 대본이 고를
+# 수 없어 `file-answer` 가 열기 창만 건너뛰고 같은 길(ABI·Zig·sidecar·폴더 펼치기)로 답한다. 본문 원점은 창 내용 view 의
+# (188,112) pt — 단추 중심은 본문 (50+100k, 40).
+mkdir -p "$root/pick/folder/sub"
+printf 'hello' > "$root/pick/a.txt"
+printf 'maru!!' > "$root/pick/b.txt"
+printf '1' > "$root/pick/folder/x.txt"
+printf '22' > "$root/pick/folder/sub/y.txt"
+printf 'zzz' > "$root/pick/folder/.hidden"
+mkdir -p "$root/outside"
+printf 'secret' > "$root/outside/secret.txt"
+# 폴더 밖을 가리키는 심볼릭 링크(파일·폴더) — 올라가면 안 된다.
+ln -s "$root/outside/secret.txt" "$root/pick/folder/link.txt"
+ln -s "$root/outside" "$root/pick/folder/linkdir"
+cat > "$root/dialogs.txt" <<SCRIPT
+sleep 7000
+mark chain-ok
+view down 0 0 238 152 0 1
+view up 0 0 238 152 0 1
+sleep 400
+sheet-answer 0
+sleep 600
+sheet
+sheet-answer 0
+sleep 1000
+sheet
+sheet-answer 0
+sleep 1000
+sheet
+sheet-answer 0 U+B9C8,U+B8E8
+sleep 900
+mark chain-cancel
+view down 0 0 238 152 0 1
+view up 0 0 238 152 0 1
+sleep 900
+sheet-answer 0
+sleep 1000
+sheet-answer 1
+sleep 1000
+sheet-answer 1 U+C5C6
+sleep 900
+mark file-one
+file-answer $root/pick/a.txt
+view down 0 0 338 152 0 1
+view up 0 0 338 152 0 1
+sleep 1500
+mark file-many
+file-answer $root/pick/a.txt $root/pick/b.txt
+view down 0 0 438 152 0 1
+view up 0 0 438 152 0 1
+sleep 1500
+mark file-folder
+file-answer $root/pick/folder
+view down 0 0 538 152 0 1
+view up 0 0 538 152 0 1
+sleep 900
+sheet
+sheet-answer 0
+sleep 1500
+mark folder-decline
+file-answer $root/pick/folder
+view down 0 0 538 152 0 1
+view up 0 0 538 152 0 1
+sleep 900
+sheet-answer 1
+sleep 1500
+mark panel-open
+view down 0 0 338 152 0 1
+view up 0 0 338 152 0 1
+sleep 1200
+sheet
+sheet-cancel
+sleep 1000
+mark panel-folder
+view down 0 0 538 152 0 1
+view up 0 0 538 152 0 1
+sleep 1200
+sheet
+sheet-cancel
+sleep 1000
+mark accept
+accept-types image/*,.png
+accept-types .txt
+accept-types font/*
+accept-types application/x-foo-bar
+mark file-cancel
+file-answer
+view down 0 0 338 152 0 1
+view up 0 0 338 152 0 1
+sleep 1500
+mark unload-stay
+view down 0 0 738 152 0 1
+view up 0 0 738 152 0 1
+sleep 500
+key 15 U+72 U+72 32
+sleep 1000
+sheet
+sheet-answer 1
+sleep 800
+view down 0 0 738 152 0 1
+view up 0 0 738 152 0 1
+sleep 1200
+mark unload-leave
+key 15 U+72 U+72 32
+sleep 1000
+sheet
+sheet-answer 0
+sleep 3500
+mark suppress
+view down 0 0 838 152 0 1
+view up 0 0 838 152 0 1
+sleep 900
+sheet
+sheet-answer 0
+sleep 1000
+sheet
+sheet-suppress
+sheet-answer 0
+sleep 1500
+sheet
+mark suppress-reset
+key 15 U+72 U+72 32
+sleep 3500
+mark later-hidden
+view down 0 0 638 152 0 1
+view up 0 0 638 152 0 1
+sleep 300
+action new_tab
+sleep 4500
+mark later-check
+sheet
+mark later-shown
+action previous_tab
+sleep 1200
+sheet
+sheet-answer 0
+sleep 800
+mark focus-wait
+view down 0 0 638 152 0 1
+view up 0 0 638 152 0 1
+sleep 300
+post 2 32
+sleep 4500
+mark focus-check
+sheet
+mark focus-back
+post 123 40
+sleep 1500
+sheet
+mark crash
+sleep 5000
+sheet
+mark end
+SCRIPT
+: > "$root/report"
+# sidecar 를 죽여 떠 있던 sheet 가 답 없이 닫히는지 본다(`mark crash` 를 보고 죽인다).
+( while ! grep -q '^mark crash' "$root/report" 2>/dev/null; do sleep 0.2; done
+  pkill -KILL -f "$sidecar_dir/maru-web-host" 2>/dev/null || true ) &
+crash_pid=$!
+page_path=/dialogs run_app "$root/dialogs.txt" 100000
+kill "$crash_pid" 2>/dev/null || true
+cat "$root/report"
+python3 - "$root/requests.log" "$root/report" "$root/judge.py" <<'PY' || fail "Chromium tab dialogs or file choosers did not work through the maru sheet"
+import sys
+exec(open(sys.argv[3]).read())
+ready = [e for e in evs if e.get('e') == 'ready']
+P0 = ready[0]['p'] if ready else None
+def mine(name): return [e for e in phase(name) if e.get('p') == P0]
+def sheets(name): return [l[len('sheet '):] for l in after(name) if l.startswith('sheet ')]
+ok_sheets = sheets('chain-ok')
+def says(line, text):
+    head = line.split('|')[0]
+    return head.startswith('alert ') and ('의 메시지' in head or ' says' in head) and 'http://127.0.0.1:' in head and ('|' + text + '|') in line and line.endswith('attached=true')
+check(len(ok_sheets) == 3 and says(ok_sheets[0], '첫 줄\\n둘째 줄') and ok_sheets[0].count(',') == 0,
+      f'alert shows as a sheet on the maru window: the site origin in the title, the page text with its line break, one button ({ok_sheets[:1]})')
+check(len(ok_sheets) == 3 and says(ok_sheets[1], '확인할까요') and ok_sheets[1].split('|')[2].count(',') == 1, f'confirm has two buttons ({ok_sheets[1:2]})')
+check(len(ok_sheets) == 3 and says(ok_sheets[2], '이름') and ok_sheets[2].split('|')[3] == '기본값', f'prompt has a text field with the page default ({ok_sheets[2:3]})')
+c = mine('chain-ok')
+check('alert-done' in kinds(c) and any(e['r'] == 'true' for e in at(c, 'confirm')) and any(e['r'] == '마루' for e in at(c, 'prompt')),
+      f'the answers reach the page: alert returns, confirm true, prompt 마루 ({kinds(c)})')
+x = mine('chain-cancel')
+check(any(e['r'] == 'false' for e in at(x, 'confirm')) and any(e['r'] == 'null' for e in at(x, 'prompt')), 'Cancel: confirm false, prompt null (the typed text is dropped)')
+def files(name): return at(mine(name), 'files')
+one, many, folder = files('file-one'), files('file-many'), files('file-folder')
+check(any(e['n'] == '1' and e['names'] == 'a.txt' and e['len'] == '5' for e in one), f'a picked file reaches the page and the sandboxed renderer reads it ({one})')
+check(any(e['n'] == '2' and e['names'] == 'a.txt,b.txt' and e['len'] == '11' for e in many), f'several files ({many})')
+folder_sheet = sheets('file-folder')
+check(folder_sheet[-1:] and ('2개' in folder_sheet[-1].split('|')[0] or ' 2 files' in folder_sheet[-1].split('|')[0]),
+      f'a folder asks first how many files will be uploaded (Chrome does too) ({folder_sheet})')
+check(any(e['n'] == '2' and e['names'] == 'x.txt,y.txt' and e['len'] == '3' for e in folder),
+      f'the folder goes as the files inside it — subfolders included, hidden files and symbolic links out of the folder skipped ({folder})')
+check(not files('folder-decline') and any('kind=12' in l for l in after('folder-decline')), 'declining the folder upload sends the page nothing')
+cancel_taken = [l for l in after('file-cancel') if l.startswith('dialog-taken')]
+check(not files('file-cancel') and any('kind=10' in l for l in cancel_taken), f'cancelling the file chooser sends the page nothing (the request did arrive: {cancel_taken})')
+panel = [l for l in after('panel-open') if l.startswith('sheet ')]
+check(panel[:1] and panel[0].startswith('sheet panel dirs=false files=true multi=false types=public.plain-text') and panel[0].endswith('attached=true'),
+      f'without a scripted answer the real open panel is attached to the maru window, limited to .txt ({panel[:1]})')
+check(not files('panel-open') and len([l for l in after('panel-open') if l.startswith('sheet panel')]) == 1, 'cancelling the real panel sends the page nothing')
+pfolder = [l for l in after('panel-folder') if l.startswith('sheet ')]
+check(pfolder[:1] and pfolder[0].startswith('sheet panel dirs=true files=false'), f'a folder request opens a folder-only panel ({pfolder[:1]})')
+acc = [l.split() for l in after('accept') if l.startswith('accept-types')]
+check([a[2] for a in acc] == ['public.image,public.png', 'public.plain-text', 'none', 'none'],
+      f'accept filters map to content types; unknown wildcards and unknown MIME types (macOS gives a dynamic type) do not restrict ({acc})')
+sup_sheets = sheets('suppress')
+sup_page = phase('suppress')
+check(len(sup_sheets) == 3 and 'suppress=false' in sup_sheets[0] and 'suppress=true' in sup_sheets[1] and sup_sheets[2].startswith('none')
+      and 'loop-done' in kinds(sup_page), f'from the second dialog the sheet offers to stop more dialogs; choosing it lets the page finish without more sheets ({sup_sheets})')
+# 억제는 그 페이지에만 — 새로고침한 페이지의 alert 는 다시 묻는다(아래 later-shown).
+stay = mine('unload-stay')
+stay_sheet = sheets('unload-stay')
+def leave_sheet(line): return line.startswith('alert ') and ('나가시겠습니까' in line or 'Leave site?' in line) and line.split('|')[2].count(',') == 1
+check('armed' in kinds(stay) and stay_sheet[-1:] and leave_sheet(stay_sheet[-1]) and 'ready' not in kinds(phase('unload-stay'))
+      and kinds(stay).count('armed') == 2, f'⌘R on a page with a leave confirmation asks with maru wording (not the page text), Cancel keeps the page and it still responds ({stay_sheet})')
+leave_sheet_lines = sheets('unload-leave')
+reloaded = [e for e in at(phase('unload-leave'), 'ready') if e.get('p') != P0]
+check(leave_sheet_lines[-1:] and leave_sheet(leave_sheet_lines[-1]) and bool(reloaded), f'⌘R again and Leave reloads the page ({leave_sheet_lines})')
+hidden = sheets('later-hidden')
+shown = sheets('later-shown')
+# 페이지가 alert 를 부른 시각 < 탭으로 돌아간 시각. 신호는 sendBeacon 이다 — 이미지 요청은 alert 가 렌더러를 막아 나가지
+# 못한다(실측 — 끝내 안 나갔다).
+fired = [int(e['t']) for e in evs if e.get('e') == 'later-fired']
+checked_at = dict(marks).get('later-check', 0)
+hidden = sheets('later-check')
+check(hidden[-1:] and hidden[-1].startswith('none') and fired[:1] and fired[0] < checked_at,
+      f'an alert from a tab that is not visible waits — the page called alert while hidden, no sheet while another tab is in front ({hidden})')
+check(shown[-1:] and says(shown[-1], 'later'), f'switching back to that tab shows it ({shown})')
+crash = sheets('crash')
+check(crash[-1:] and crash[-1] == 'none|attached=false', f'when the sidecar dies the open sheet closes without an answer ({crash})')
+# 뜨자마자(0.4 초) 누른 답은 먹지 않는다 — 그 뒤 처음 보고된 sheet 가 여전히 첫 alert 다(먹었다면 confirm 이 떠 있다).
+check(ok_sheets[:1] and says(ok_sheets[0], '첫 줄\\n둘째 줄'),
+      'an answer in the first half second after the sheet appears is ignored (input protection) — the same alert is still up')
+fc = sheets('focus-check')
+fb = sheets('focus-back')
+fired2 = [int(e['t']) for e in evs if e.get('e') == 'later-fired' and int(e['t']) > dict(marks).get('focus-wait', 0)]
+check(fc[-1:] and fc[-1].startswith('none') and fb[-1:] and says(fb[-1], 'later') and fired2[:1] and fired2[0] < dict(marks).get('focus-check', 0),
+      f'with a split and the terminal pane focused, the web pane dialog waits; moving focus to the web pane shows it ({fc} → {fb})')
+check(not any(l.startswith('sheet-answer-missing') for l in lines), 'every sheet the script answered was there')
 sys.exit(0 if ok else 1)
 PY
 fi

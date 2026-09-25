@@ -20,6 +20,7 @@ const c = @import("cef.zig").c;
 const object = @import("object.zig");
 const library = @import("library.zig");
 const browsers = @import("browsers.zig");
+const dialogs = @import("dialogs.zig");
 const title_gate = @import("title_gate.zig");
 const input = @import("input.zig");
 
@@ -30,6 +31,7 @@ var display: c.cef_display_handler_t = undefined;
 var load: c.cef_load_handler_t = undefined;
 var request: c.cef_request_handler_t = undefined;
 var jsdialog: c.cef_jsdialog_handler_t = undefined;
+var file_dialog: c.cef_dialog_handler_t = undefined;
 var context_menu: c.cef_context_menu_handler_t = undefined;
 var title_task: c.cef_task_t = undefined;
 var title_flush_posted = false;
@@ -53,6 +55,8 @@ pub fn get() *c.cef_client_t {
         object.staticRefCounted(&request.base);
         jsdialog = object.zeroed(c.cef_jsdialog_handler_t);
         object.staticRefCounted(&jsdialog.base);
+        file_dialog = object.zeroed(c.cef_dialog_handler_t);
+        object.staticRefCounted(&file_dialog.base);
         context_menu = object.zeroed(c.cef_context_menu_handler_t);
         object.staticRefCounted(&context_menu.base);
         title_task = object.zeroed(c.cef_task_t);
@@ -65,6 +69,7 @@ pub fn get() *c.cef_client_t {
         client_obj.get_load_handler = &getLoad;
         client_obj.get_request_handler = &getRequest;
         client_obj.get_jsdialog_handler = &getJsDialog;
+        client_obj.get_dialog_handler = &getFileDialog;
         client_obj.get_context_menu_handler = &getContextMenu;
         life_span.on_before_popup = &onBeforePopup;
         life_span.on_before_close = &onBeforeClose;
@@ -78,9 +83,13 @@ pub fn get() *c.cef_client_t {
         display.on_cursor_change = &input.onCursorChange;
         load.on_loading_state_change = &onLoadingStateChange;
         load.on_load_end = &onLoadEnd;
+        load.on_load_start = &dialogs.onLoadStart;
         request.on_render_process_terminated = &onRenderProcessTerminated;
-        jsdialog.on_jsdialog = &onJsDialog;
-        jsdialog.on_before_unload_dialog = &onBeforeUnloadDialog;
+        jsdialog.on_jsdialog = &dialogs.onJsDialog;
+        jsdialog.on_before_unload_dialog = &dialogs.onBeforeUnloadDialog;
+        jsdialog.on_reset_dialog_state = &dialogs.onResetDialogState;
+        jsdialog.on_dialog_closed = &dialogs.onDialogClosed;
+        file_dialog.on_file_dialog = &dialogs.onFileDialog;
         context_menu.on_before_context_menu = &onBeforeContextMenu;
     }
     return &client_obj;
@@ -103,6 +112,9 @@ fn getRequest(_: [*c]c.cef_client_t) callconv(.c) [*c]c.cef_request_handler_t {
 }
 fn getJsDialog(_: [*c]c.cef_client_t) callconv(.c) [*c]c.cef_jsdialog_handler_t {
     return &jsdialog;
+}
+fn getFileDialog(_: [*c]c.cef_client_t) callconv(.c) [*c]c.cef_dialog_handler_t {
+    return &file_dialog;
 }
 fn getContextMenu(_: [*c]c.cef_client_t) callconv(.c) [*c]c.cef_context_menu_handler_t {
     return &context_menu;
@@ -257,6 +269,7 @@ fn onRenderProcessTerminated(_: [*c]c.cef_request_handler_t, browser: [*c]c.cef_
         else => .abnormal,
     };
     browsers.state.writer.send(.{ .renderer_gone = .{ .browser = entry.id, .reason = reason } }) catch {};
+    dialogs.rendererGone(entry.id);
 }
 
 fn onBeforePopup(
@@ -284,34 +297,4 @@ fn onBeforeClose(_: [*c]c.cef_life_span_handler_t, browser: [*c]c.cef_browser_t)
     defer object.releaseArg(browser);
     if (browser == null) return;
     browsers.onClosed(browser.*.get_identifier.?(browser));
-}
-
-fn onJsDialog(
-    _: [*c]c.cef_jsdialog_handler_t,
-    browser: [*c]c.cef_browser_t,
-    _: [*c]const c.cef_string_t,
-    _: c.cef_jsdialog_type_t,
-    _: [*c]const c.cef_string_t,
-    _: [*c]const c.cef_string_t,
-    callback: [*c]c.cef_jsdialog_callback_t,
-    suppress_message: [*c]c_int,
-) callconv(.c) c_int {
-    defer object.releaseArg(browser);
-    defer object.releaseArg(callback);
-    // 헤더 권장 — 억제가 콜백을 바로 부르는 것보다 낫다(Chromium 이 대화상자 남발을 이것으로 가린다).
-    suppress_message.* = 1;
-    return 0;
-}
-
-fn onBeforeUnloadDialog(
-    _: [*c]c.cef_jsdialog_handler_t,
-    browser: [*c]c.cef_browser_t,
-    _: [*c]const c.cef_string_t,
-    _: c_int,
-    callback: [*c]c.cef_jsdialog_callback_t,
-) callconv(.c) c_int {
-    defer object.releaseArg(browser);
-    defer object.releaseArg(callback);
-    callback.*.cont.?(callback, 1, null);
-    return 1;
 }

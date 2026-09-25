@@ -30,6 +30,11 @@ pub const Tag = enum(u8) {
     edit_command = 17,
     /// 제스처 주인이 바뀌었다 — 페이지가 잡은 마우스 capture 를 놓게 한다(모달 에지 — C5).
     capture_lost = 18,
+    /// JS 대화상자의 답(W5a — C6). 요청 번호는 `js_dialog` 가 준 것이다.
+    dialog_reply = 19,
+    /// 파일 선택의 경로 하나(W5a). 여러 개면 여러 번 보내고 `file_dialog_reply` 로 끝낸다.
+    file_dialog_path = 20,
+    file_dialog_reply = 21,
 
     hello_ack = 32,
     browser_created = 33,
@@ -46,6 +51,12 @@ pub const Tag = enum(u8) {
     cursor_changed = 41,
     /// IME 조합 글자들이 차지한 사각형(view DIP) — 후보창 위치(`firstRect`, W4).
     ime_range = 42,
+    /// 페이지가 JS 대화상자(`alert`·`confirm`·`prompt`·떠나기 확인)를 띄우려 한다(W5a — C6). 페이지는 답이 올 때까지 멈춘다.
+    js_dialog = 43,
+    /// 페이지가 파일 선택을 띄우려 한다(W5a — C6).
+    file_dialog = 44,
+    /// 그 요청은 더는 답을 받지 않는다 — 페이지가 이동했거나 닫혔다(CEF `on_reset_dialog_state`). maru 는 떠 있는 창을 닫는다.
+    dialog_closed = 45,
 
     pub fn direction(self: Tag) Direction {
         return if (@intFromEnum(self) < 32) .to_sidecar else .to_maru;
@@ -88,6 +99,82 @@ pub const NavActionKind = enum(u8) {
 };
 
 pub const BrowserId = u64;
+
+/// 대화상자·파일 선택 요청 번호(W5a). sidecar 가 0 이 아닌 값으로 매긴다 — 답은 이 번호로 짝을 찾는다.
+pub const RequestId = u32;
+
+pub const JsDialogKind = enum(u8) {
+    alert = 0,
+    confirm = 1,
+    prompt = 2,
+    /// 떠나기 확인(`beforeunload`) — 답이 참이면 떠난다.
+    before_unload = 3,
+};
+
+/// CEF `cef_file_dialog_mode_t` 와 같은 값.
+pub const FileDialogMode = enum(u8) {
+    open = 0,
+    open_multiple = 1,
+    open_folder = 2,
+    save = 3,
+};
+
+/// 대화상자 글: 줄바꿈·탭은 받는다(`alert("a\nb")` 가 흔하다). 나머지 제어 문자는 sidecar 가 바꿔 보내고 받는 쪽은 거절한다.
+pub const JsDialog = struct {
+    browser: BrowserId,
+    request: RequestId,
+    kind: JsDialogKind,
+    /// 요청한 쪽의 출처(`https://example.com:8080`) — 사용자가 누가 띄웠는지 알게(위장 방지). `scheme://host[:port]` 만 받는다
+    /// (`fields.checkOrigin`) — 경로·사용자 정보(`https://apple.com@evil.test`)·불투명 출처(`data:`)는 빈 글로 온다.
+    origin: []const u8,
+    message: []const u8,
+    /// `prompt` 의 기본 글. 다른 종류는 빈 글.
+    default_text: []const u8 = "",
+    /// 이 페이지가 이동 없이 두 번째 이상 띄우는 대화상자다 — maru 는 「이 페이지가 대화상자를 더 띄우지 못하게」를 보인다(Chrome
+    /// 과 같다 — `while(1) alert()` 에서 빠져나갈 길).
+    offer_suppress: bool = false,
+};
+
+pub const FileDialog = struct {
+    browser: BrowserId,
+    request: RequestId,
+    mode: FileDialogMode,
+    /// 페이지가 준 제목(대개 빈 글 — 기본 제목을 쓴다).
+    title: []const u8 = "",
+    /// 처음 고를 경로·이름(저장이면 파일 이름). 빈 글이면 없다.
+    default_path: []const u8 = "",
+    /// 받을 형식을 쉼표로 이은 것(`image/*,.png`). 빈 글이면 제한 없음.
+    accept: []const u8 = "",
+};
+
+pub const Request = struct {
+    browser: BrowserId,
+    request: RequestId,
+};
+
+pub const DialogReply = struct {
+    browser: BrowserId,
+    request: RequestId,
+    /// 확인·떠나기면 참, 취소·머무르기면 거짓.
+    accept: bool,
+    /// `prompt` 에 친 글. 다른 종류는 빈 글.
+    text: []const u8 = "",
+    /// 이 페이지가 이동할 때까지 대화상자를 더 띄우지 못하게 한다(sidecar 가 억제한다).
+    suppress: bool = false,
+};
+
+pub const FileDialogPath = struct {
+    browser: BrowserId,
+    request: RequestId,
+    path: []const u8,
+};
+
+pub const FileDialogReply = struct {
+    browser: BrowserId,
+    request: RequestId,
+    /// 거짓이면 취소 — 앞서 보낸 경로는 버린다.
+    accept: bool,
+};
 
 /// 입력 좌표·스크롤 양의 상한(절댓값, DIP). 제스처 주인은 view 밖까지 끌 수 있어(C5 — rect 밖 클램프 없음) 음수와 view
 /// 크기 너머를 받되, 이보다 크면 쓰레기로 보고 거절한다.
@@ -353,6 +440,9 @@ pub const Message = union(Tag) {
     ime_cancel_composition: BrowserId,
     edit_command: EditCommand,
     capture_lost: BrowserId,
+    dialog_reply: DialogReply,
+    file_dialog_path: FileDialogPath,
+    file_dialog_reply: FileDialogReply,
 
     hello_ack: Hello,
     browser_created: BrowserId,
@@ -365,6 +455,9 @@ pub const Message = union(Tag) {
     nav_state: NavState,
     cursor_changed: CursorChanged,
     ime_range: ImeRange,
+    js_dialog: JsDialog,
+    file_dialog: FileDialog,
+    dialog_closed: Request,
 };
 
 test "tags split by direction at 32" {

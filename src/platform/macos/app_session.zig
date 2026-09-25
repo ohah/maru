@@ -282,7 +282,7 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 185: CR6d-v2b0b extends the read-only input probe with terminal byte/screen generation counters
 // and adds one synchronous transcript-to-canonical-evidence leaf. Raw inventories are borrowed
 // only for the call; Zig owns reduction and absent-target publication.
-pub const abi_version: u32 = 193;
+pub const abi_version: u32 = 194;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -6291,6 +6291,14 @@ pub const AppSession = struct {
     osr_discard_marked: bool = false,
     /// W4c: raw_down 을 보낸 키(keyCode 비트) — 입력기가 가져가 keydown 이 없던 키의 keyup 은 보내지 않는다.
     osr_down_sent: u128 = 0,
+    /// W5a: 이 창에 띄운 Chromium 탭의 대화상자·파일 선택 — sheet 는 창 전체를 막아 한 창에 하나씩. `ready` 는 Swift 가 아직
+    /// 가져가지 않았다, `dismiss` 는 떠 있는 요청이 사라져(이동·닫힘·sidecar 재시작) sheet 를 닫아야 한다(한 번).
+    osr_dialog: ?web_ops.OsrDialogShown = null,
+    osr_dialog_ready: bool = false,
+    osr_dialog_dismiss: bool = false,
+    osr_dialog_title_buf: [1024]u8 = undefined,
+    /// 초점 없는 pane 이 답을 기다린다는 안내를 이미 띄운 요청(한 번만).
+    osr_dialog_hinted: u64 = 0,
     probe_frame_timing: bool = false,
     metal_dirty: bool = true,
     // [A: chrome 독립 present] 사이드바 스피너 등 "sync(2026) hold 중에도 갱신돼야 하는 chrome-only 변화" 플래그.
@@ -23332,6 +23340,8 @@ pub const AppSession = struct {
     }
 
     pub fn deinit(self: *AppSession) void {
+        // W5a: 이 창이 띄운 Chromium 탭 대화상자는 취소로 답한다(페이지가 영영 멈추지 않게).
+        web_osr.cancelDialogsShownBy(self.allocator, @intFromPtr(self));
         editor_ops.lsp_client.deinit(self); // §8.2a: 서버 자식을 거둔다(짧게 — 종료 경로)
         editor_ops.hover_client.deinit(self);
         editor_ops.signature_client.deinit(self);

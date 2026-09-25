@@ -45,7 +45,32 @@ pub fn jumpTarget(src: anytype, len: usize, pos: usize) ?usize {
     return src.nextOpen(at);
 }
 
-/// ① 만 — 닿은 괄호의 짝. 커서가 아주 많을 때(`jumpTarget` 을 커서마다 부르면 ②③ 이 커서 수 × 형제 수로 붙는다) 호출자가 이것으로 물러선다.
+/// **커서 여럿의 점프**(§3.9c) — `positions[i]` 의 도착을 `out[i]` 에(갈 데가 없으면 `null`). 답은 `jumpTarget` 을 커서마다 부른 것과 같다. ③ 다음 여는
+/// 괄호는 남은 커서들을 **정렬해 한 번에** 묻는다(`nextOpenMany`) — 커서마다 걸으면 최상위 형제를 커서 수만큼 다시 지난다.
+pub fn jumpTargets(src: anytype, len: usize, positions: []const usize, out: []?usize, allocator: std.mem.Allocator) error{OutOfMemory}!void {
+    var pending: std.ArrayList(u32) = .empty;
+    defer pending.deinit(allocator);
+    for (positions, out, 0..) |pos, *o, i| {
+        const at = @min(pos, len);
+        o.* = touchJump(src, len, at) orelse if (src.enclosing(at)) |p| p.close else null;
+        if (o.* == null) try pending.append(allocator, @intCast(i));
+    }
+    if (pending.items.len == 0) return;
+    std.mem.sort(u32, pending.items, positions, struct {
+        fn lt(ps: []const usize, a: u32, b: u32) bool {
+            return ps[a] < ps[b];
+        }
+    }.lt);
+    const qs = try allocator.alloc(u32, pending.items.len);
+    defer allocator.free(qs);
+    const got = try allocator.alloc(?u32, pending.items.len);
+    defer allocator.free(got);
+    for (pending.items, qs) |i, *q| q.* = @intCast(@min(positions[i], len));
+    src.nextOpenMany(qs, got);
+    for (pending.items, got) |i, g| out[i] = if (g) |k| k else null;
+}
+
+/// ① 만 — 닿은 괄호의 짝.
 pub fn touchJump(src: anytype, len: usize, pos: usize) ?usize {
     const at = @min(pos, len);
     const p = touching(src, len, at) orelse return null;
@@ -72,6 +97,12 @@ pub const Plain = struct {
         _ = self;
         _ = pos;
         return null;
+    }
+
+    pub fn nextOpenMany(self: Plain, positions: []const u32, out: []?u32) void {
+        _ = self;
+        _ = positions;
+        @memset(out, null);
     }
 };
 
@@ -176,6 +207,11 @@ pub fn Tree(comptime P: type) type {
             const at = @min(pos, self.bytes.len);
             const k = self.prov.nextOpenBracket(self.bytes, @intCast(at)) orelse return null;
             return k;
+        }
+
+        /// 여러 caret(**오름차순**)의 다음 여는 괄호를 한 번에 — provider 가 한 번 걷는다(`nextOpenBrackets`).
+        pub fn nextOpenMany(self: Self, positions: []const u32, out: []?u32) void {
+            self.prov.nextOpenBrackets(self.bytes, positions, out);
         }
     };
 }
@@ -330,6 +366,9 @@ const FakeProv = struct {
         }
         return best;
     }
+    pub fn nextOpenBrackets(self: *FakeProv, bytes: []const u8, positions: []const u32, out: []?u32) void {
+        for (positions, out) |p, *o| o.* = self.nextOpenBracket(bytes, p);
+    }
     pub fn enclosingBracketTokens(self: *FakeProv, bytes: []const u8, pos: u32) ?Pair {
         _ = bytes;
         _ = pos;
@@ -401,6 +440,18 @@ test "BRJ1 점프 — 닿은 괄호가 없으면 감싸는 쌍의 닫는 괄호 
     // **출처가 답한 자리 그대로 쓴다** — 짝을 다시 보거나 앞으로 되돌리지 않는다(caret 바로 뒤 글자 12 도 그대로)
     try testing.expectEqual(@as(?usize, 12), ns.nextOpen(12));
     try testing.expectEqual(@as(?usize, 8), ns.nextOpen(3));
+    // **커서 여럿**(`jumpTargets`) — 순서가 섞인 자리들에서 `jumpTarget` 을 하나씩 부른 것과 같다(③ 은 정렬해 한 번에 묻는다)
+    {
+        const carets = [_]usize{ 12, 0, 7, 13, 3, 12 };
+        var outs: [carets.len]?usize = undefined;
+        try jumpTargets(ns, s.len, &carets, &outs, testing.allocator);
+        for (carets, outs) |p, o| try testing.expectEqual(jumpTarget(ns, s.len, p), o);
+        const carets2 = [_]usize{ 9, 7, 11 };
+        try jumpTargets(es2, call2.len, &carets2, outs[0..3], testing.allocator);
+        for (carets2, outs[0..3]) |p, o| try testing.expectEqual(jumpTarget(es2, call2.len, p), o);
+        try testing.expectEqual(@as(?usize, 1), outs[0]); // 9 — 닿은 ')' → 여는 괄호
+        try testing.expectEqual(@as(?usize, 8), outs[1]); // 7 — 감싸는 쌍
+    }
     // **글자 훑기는 감싸는 쌍도 다음 괄호도 안 찾는다**(§3.9c — 문자열 속 괄호를 센다)
     try testing.expectEqual(@as(?usize, null), jumpTarget(Plain{ .bytes = "(a b)" }, 5, 2));
     try testing.expectEqual(@as(?usize, null), jumpTarget(Plain{ .bytes = "x (a)" }, 5, 0));

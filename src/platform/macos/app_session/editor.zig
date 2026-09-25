@@ -42309,9 +42309,65 @@ test "WSP1 공백 표시 — 기본(selection)은 선택 안의 공백 `·` · �
     term.rt.editor_selection = editor_selection.Selection.at(0);
     n = try Probe.frame(&fx, term, allocator, &dots, &arrows, &dots2);
     try testing.expectEqual([3]usize{ 2, 1, 1 }, n);
+    // boundary — 둘째 줄 `zx y` 의 홀로 선 공백은 빠진다(all 과 갈린다)
+    fx.session.loaded_config.config.editor.render_whitespace = .boundary;
+    n = try Probe.frame(&fx, term, allocator, &dots, &arrows, &dots2);
+    try testing.expectEqual([3]usize{ 2, 1, 0 }, n);
+    // trailing — 두 줄 다 뒤 공백이 없다
+    fx.session.loaded_config.config.editor.render_whitespace = .trailing;
+    n = try Probe.frame(&fx, term, allocator, &dots, &arrows, &dots2);
+    try testing.expectEqual([3]usize{ 0, 0, 0 }, n);
     // none — 없다
     fx.session.loaded_config.config.editor.render_whitespace = .none;
     term.rt.editor_selection = editor_selection.Selection.fromPoints(1, 6);
     n = try Probe.frame(&fx, term, allocator, &dots, &arrows, &dots2);
     try testing.expectEqual([3]usize{ 0, 0, 0 }, n);
+}
+
+test "WSP2 비교 뷰 — 두 열 모두 같은 설정으로 공백 기호를 그린다 (제품 경계, §5.1e)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    fx.session.loaded_config.config.editor.sticky_scroll = false;
+    const term = try openBracketFixture(&fx, allocator, "d.txt", "x\n");
+    const left = [_][]const u8{"lq a  b"};
+    const right = [_][]const u8{"rq c   d"};
+    const nums = [_]?u32{1};
+    term.rt.editor_diff = .{ .requested_ms = 0 };
+    defer term.rt.editor_diff = null;
+    term.rt.editor_diff.?.view = .{ .compare = .{ .left = &.{}, .right = &.{}, .changed = 1 } };
+    term.rt.editor_diff.?.left_texts = &left;
+    term.rt.editor_diff.?.right_texts = &right;
+    term.rt.editor_diff.?.left_lines = &left;
+    term.rt.editor_diff.?.right_lines = &right;
+    term.rt.editor_diff.?.left_numbers = &nums;
+    term.rt.editor_diff.?.right_numbers = &nums;
+    const Count = struct {
+        fn dots(f: *PaneFixture, t: *Term, a: std.mem.Allocator) ![2]usize {
+            var d = appendPaneFrame(f.session, f.leaf_rect, t) orelse return error.EditorPaneDidNotDraw;
+            defer d.dl.deinit(a);
+            // 두 열의 첫 글자(`l`·`r`) 열로 좌우를 가른다
+            var lc: ?u16 = null;
+            var rc: ?u16 = null;
+            for (d.dl.cells) |c| {
+                if (c.codepoint == 'q' and lc == null) lc = c.col;
+            }
+            for (d.dl.cells) |c| {
+                if (c.codepoint == 'q' and c.col != lc.?) rc = c.col;
+            }
+            if (lc == null or rc == null) return error.NoColumns;
+            const split = @min(lc.?, rc.?) + (@max(lc.?, rc.?) - @min(lc.?, rc.?)) / 2;
+            var out = [2]usize{ 0, 0 };
+            for (d.dl.cells) |c| {
+                if (c.codepoint != 0xB7) continue;
+                out[if (c.col < split) 0 else 1] += 1;
+            }
+            return out;
+        }
+    };
+    fx.session.loaded_config.config.editor.render_whitespace = .all;
+    try testing.expectEqual([2]usize{ 3, 4 }, try Count.dots(&fx, term, allocator));
+    fx.session.loaded_config.config.editor.render_whitespace = .none;
+    try testing.expectEqual([2]usize{ 0, 0 }, try Count.dots(&fx, term, allocator));
 }

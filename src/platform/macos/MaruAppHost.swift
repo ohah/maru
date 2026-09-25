@@ -4166,10 +4166,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // (quick 패널이 key면 quick, 아니면 primary). 앱-전역으로 "메인 창"이 필요한 곳은 primary를 직접 쓴다.
     private var activeSurface: TerminalSurface? {
         if let explicitSurface { return explicitSurface }
-        if let quick, quick.window?.isKeyWindow == true { return quick }
+        // sheet(W5a — Chromium 탭 대화상자)가 키면 그 **부모 창**이 대상이다 — 안 그러면 sheet 가 뜬 동안 메뉴 단축키(⌘W 등)가
+        // 첫 창에 작용했다(적대 검증).
+        func isKey(_ window: NSWindow?) -> Bool { window?.isKeyWindow == true || window?.attachedSheet?.isKeyWindow == true }
+        if let quick, isKey(quick.window) { return quick }
         // key인 일반 창을 고르고, 없으면 첫 창(primary). 단일 창에선 둘 다 그 창이라 동작 불변, 멀티 창에선
         // 입력/draw가 자연히 key 창으로 간다(이벤트는 key 창의 first responder로 오므로).
-        return windows.first(where: { $0.window?.isKeyWindow == true }) ?? windows.first
+        return windows.first(where: { isKey($0.window) }) ?? windows.first
     }
 
     /// 주어진 surface를 강제 대상으로 클로저를 실행한다(그동안 forwarder가 그 surface를 가리킨다). primary 창의
@@ -5288,6 +5291,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     func windowWillClose(_ notification: Notification) {
+        // W5a: 그 창에 붙어 있던 Chromium 탭 대화상자 기록을 치운다(창 주소가 새 창에 다시 쓰여 엉뚱한 sheet 를 닫지 않게).
+        if let closing = notification.object as? NSWindow, let open = osrDialogSheets.removeValue(forKey: ObjectIdentifier(closing)) {
+            open.dismissed = true
+        }
         // 닫히는 창의 일반-창 surface(quick은 delegate를 안 써 여기 안 옴). 마지막 일반 창이면 앱 종료
         // (정리·요약은 applicationWillTerminate — primary가 살아 있어야 요약이 그 세션 기준. 원래 단일 창 동작
         // 보존). 마지막이 아니면 그 창 세션만 닫고 앱은 계속한다(window는 AppKit이 이미 닫는 중).
@@ -7476,6 +7483,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             drainMouseHide() // 타이핑(글자 입력) 중이면 마우스 커서를 숨긴다(config input.mouse-hide-while-typing).
             drainOsrCursor() // W4b: hover 중인 Chromium 탭의 페이지 커서가 바뀌었으면 맞춘다.
             drainOsrDiscardMarked() // W4c: Zig 가 끝낸 Chromium 탭 조합을 입력기 세션에서도 버린다.
+            drainOsrDialog() // W5a: Chromium 탭의 JS 대화상자·파일 선택을 maru 창에 붙는 sheet 로 묻는다.
             drainClipboardAction() // 우클릭(input.right-click=paste·menu)이 요청한 OS 클립보드 복사/붙여넣기를 실행한다.
             drainClipboardRead() // OSC 52 읽기(osc52.read=allow): 셸 프로그램의 `?` 쿼리에 시스템 클립보드를 base64로 응답.
             drainFilePick() // 세팅 window.background-image 행 활성: NSOpenPanel(PNG)을 열어 고른 경로를 config에 적용.
@@ -7916,7 +7924,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // 클릭이 창 활성화에 먹힌다(실측 — 첫 클릭이 view 에 안 온다). 밖에서 앱을 활성으로 만들면 사용자의 작업에서 포커스를
     // 빼앗으므로, 앱이 제 입력 경로를 스스로 부른다. W4d② 시험기(`tools/test-macos-web-osr-tester.sh`)는 그 위의 Swift 한 겹을
     // 탄다: `post`(진짜 키 이벤트를 이 프로세스에만)·`view`(view 의 마우스 메서드)·`cursor`·`imerect`·`menu`·`config`·
-    // `newwindow`·`mark`, 자리 비움 모드의 `live`. 결과는 `MARU_WEB_OSR_TEST_REPORT` 파일에 적는다.
+    // `newwindow`·`mark`, 자리 비움 모드의 `live`, W5a 대화상자의 `sheet`·`sheet-answer`·`file-answer`. 결과는
+    // `MARU_WEB_OSR_TEST_REPORT` 파일에 적는다.
     // 대본 한 줄: `sleep ms` · `mouse kind fx fy dx dy button`(kind 1 누름·2 끌기·3 뗌·4 두 번·5 세 번, button 0 왼·1 가운데·
     // 2 오른) · `hover fx fy dx dy` · `wheel fx fy dx dy lines` · `aux fx fy dx dy buttonNumber` · `action 이름` ·
     // `key keyCode 글자 [원글자 수식자]`(글자는 U+ 16진, 없으면 -) — 키는 터미널 view 에 NSEvent 를 직접 넣는다(오버레이가
@@ -8307,6 +8316,52 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 if let path = ProcessInfo.processInfo.environment["MARU_CONFIG"] {
                     try? (line.dropFirst().joined(separator: " ") + "\n").write(toFile: path, atomically: true, encoding: .utf8)
                 }
+            case "sheet":
+                // W5a: 이 창에 떠 있는 Chromium 탭 대화상자 — `sheet 종류 제목|글|단추들|입력칸` 또는 `sheet none`.
+                if let window, let open = osrDialogSheets[ObjectIdentifier(window)] {
+                    if let alert = open.alert {
+                        let buttons = alert.buttons.map(\.title).joined(separator: ",")
+                        let text = alert.informativeText.replacingOccurrences(of: "\n", with: "\\n")
+                        Self.testReport("sheet alert \(alert.messageText)|\(text)|\(buttons)|\(open.field?.stringValue ?? "-")|suppress=\(alert.showsSuppressionButton)|attached=\(window.attachedSheet === open.sheet)")
+                    } else if let panel = open.sheet as? NSOpenPanel {
+                        let types = panel.allowedContentTypes.map(\.identifier).joined(separator: ",")
+                        Self.testReport("sheet panel dirs=\(panel.canChooseDirectories) files=\(panel.canChooseFiles) multi=\(panel.allowsMultipleSelection) types=\(types)|attached=\(window.attachedSheet === open.sheet)")
+                    } else {
+                        Self.testReport("sheet save|attached=\(window.attachedSheet === open.sheet)")
+                    }
+                } else {
+                    Self.testReport("sheet none|attached=\(window?.attachedSheet != nil)")
+                }
+            case "sheet-answer" where line.count >= 2:
+                // sheet-answer 단추번호 [글(U+ 16진을 , 로 이은 것)] — 입력칸을 채우고 그 단추를 누른다(사용자가 누른 것과 같은 길).
+                if let window, let open = osrDialogSheets[ObjectIdentifier(window)], let alert = open.alert,
+                   let index = Int(line[1]), index < alert.buttons.count {
+                    if line.count >= 3 { open.field?.stringValue = line[2].split(separator: ",").map { Self.testScalar(String($0)) }.joined() }
+                    alert.buttons[index].performClick(nil)
+                } else {
+                    Self.testReport("sheet-answer-missing")
+                }
+            case "sheet-suppress":
+                // 「이 페이지가 대화상자를 더 띄우지 못하게」를 고른다(보일 때만 — 없으면 missing 을 보고).
+                if let window, let alert = osrDialogSheets[ObjectIdentifier(window)]?.alert, alert.showsSuppressionButton {
+                    alert.suppressionButton?.state = .on
+                } else {
+                    Self.testReport("sheet-answer-missing")
+                }
+            case "sheet-cancel":
+                // 떠 있는 열기 창(또는 경고창)을 취소한다 — 사용자가 취소를 누른 것과 같은 완료 경로를 탄다.
+                if let window, let open = osrDialogSheets[ObjectIdentifier(window)] {
+                    if let panel = open.sheet as? NSSavePanel { panel.cancel(nil) } else { open.alert?.buttons.last?.performClick(nil) }
+                } else {
+                    Self.testReport("sheet-answer-missing")
+                }
+            case "accept-types" where line.count >= 2:
+                // accept-types 받을형식 — 파일 선택의 형식 변환 결과(모르면 none — 제한하지 않는다).
+                let types = Self.osrContentTypes(line[1]).map { $0.map(\.identifier).joined(separator: ",") } ?? "none"
+                Self.testReport("accept-types \(line[1]) \(types)")
+            case "file-answer":
+                // file-answer 경로… — 다음 파일 선택을 열기 창 없이 이 경로들로 답한다(경로가 없으면 취소).
+                osrTestFileAnswer = Array(line.dropFirst())
             case "newwindow":
                 // 스모크 모드는 New Window 메뉴를 막는다(`newTerminalWindow`) — 같은 팩토리를 직접 부른다. 비활성 앱에는 키
                 // 창이 없어 새 창이 키가 되지 않으므로, 키 창이 바뀔 때 AppKit 이 부르는 delegate 를 그대로 부르고 이 뒤의
@@ -8450,6 +8505,277 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         guard maru_macos_app_session_osr_aux_button(session, Int32(event.buttonNumber), xPx, yPx) != 0 else { return false }
         markMetalNeedsRedraw()
         return true
+    }
+
+    // ── W5a: Chromium 탭의 JS 대화상자·파일 선택 ──
+    // Zig 가 이 창에서 **키보드 초점을 가진** 탭의 요청을 하나씩 준다(문구는 Zig 가 번역·조립했다). maru 창에 붙는 네이티브 sheet 로 묻고
+    // 답을 ABI 로 돌려준다(사용자 결정 2026-09-25 — Chromium 기본 창은 sidecar 의 창이라 maru 창 뒤에 숨었다, C6 실측).
+    // 떠 있는 요청이 사라지면(페이지 이동·탭 닫힘·sidecar 재시작) 답 없이 닫는다. 답은 그 sheet 가 붙은 **창의** 세션으로
+    // 보낸다 — 활성 surface 는 그 사이 다른 창일 수 있다.
+    final class OsrDialogSheet {
+        let surfaceID: UInt64
+        let token: UInt64
+        let sheet: NSWindow
+        let alert: NSAlert?
+        let field: NSTextField?
+        var dismissed = false
+
+        init(surfaceID: UInt64, token: UInt64, sheet: NSWindow, alert: NSAlert?, field: NSTextField?) {
+            self.surfaceID = surfaceID
+            self.token = token
+            self.sheet = sheet
+            self.alert = alert
+            self.field = field
+        }
+    }
+
+    /// 그 창의 surface — quick 창도(`surfaceForWindow` 는 일반 창만 본다 — 적대 검증: quick 창의 답이 버려졌다).
+    private func surfaceOwning(_ window: NSWindow?) -> TerminalSurface? {
+        guard let window else { return nil }
+        if let quick, quick.window === window { return quick }
+        return surfaceForWindow(window)
+    }
+
+    private static func osrDialogString(_ which: UInt32, _ number: Int64 = 0) -> String {
+        var buf = [UInt8](repeating: 0, count: 512)
+        let len = buf.withUnsafeMutableBufferPointer { maru_macos_web_dialog_string(which, number, $0.baseAddress, $0.count) }
+        return String(decoding: buf[0..<len], as: UTF8.self)
+    }
+
+    /// 뜬 뒤 잠깐(0.5 초) 단추·입력칸을 막는다 — 사용자가 치던 Return·글자가 방금 뜬 대화상자로 들어가 의도하지 않은 답이 되지
+    /// 않게(Chrome 의 입력 보호와 같다 — 적대 검증).
+    private static func guardOsrSheetInput(_ alert: NSAlert, field: NSTextField?) {
+        for button in alert.buttons { button.isEnabled = false }
+        field?.isEditable = false
+        alert.suppressionButton?.isEnabled = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            for button in alert.buttons { button.isEnabled = true }
+            field?.isEditable = true
+            alert.suppressionButton?.isEnabled = true
+        }
+    }
+
+    /// sheet(Chromium 탭 대화상자·열기 창)가 키 창이면 편집 메뉴 명령을 그 sheet 의 입력칸으로 넘긴다 — 안 그러면 ⌘V 가
+    /// 부모 창의 터미널로 붙여넣었다(줄바꿈이 있으면 셸에서 실행된다 — 적대 검증). 넘겼으면 true.
+    private static func forwardEditToSheet(_ selector: Selector, _ sender: Any?) -> Bool {
+        guard NSApp.keyWindow?.isSheet == true else { return false }
+        NSApp.sendAction(selector, to: nil, from: sender)
+        return true
+    }
+
+    /// 시험기 전용 보고 — 보고 파일이 없으면(제품) 아무것도 안 한다.
+    private static func testNote(_ line: String) {
+        guard ProcessInfo.processInfo.environment["MARU_WEB_OSR_TEST_REPORT"] != nil else { return }
+        testReport(line)
+    }
+    private var osrDialogSheets: [ObjectIdentifier: OsrDialogSheet] = [:]
+    /// 시험기 전용(`file-answer`) — 다음 파일 선택을 열기 창 없이 이 경로들로 답한다(비활성 앱의 열기 창은 대본이 고를 수
+    /// 없다). 나머지 경로(ABI·Zig·sidecar·폴더 펼치기)는 그대로 탄다.
+    private var osrTestFileAnswer: [String]?
+
+    private static func osrText(_ ptr: UnsafePointer<UInt8>?, _ len: Int) -> String {
+        guard let ptr, len > 0 else { return "" }
+        return String(decoding: UnsafeBufferPointer(start: ptr, count: len), as: UTF8.self)
+    }
+
+    private func drainOsrDialog() {
+        guard let session = appSession, let window else { return }
+        let key = ObjectIdentifier(window)
+        if maru_macos_app_session_take_osr_dialog_dismiss(session) != 0, let open = osrDialogSheets.removeValue(forKey: key) {
+            open.dismissed = true
+            window.endSheet(open.sheet, returnCode: .abort)
+        }
+        var dialog = MaruAppHostOsrDialog()
+        guard maru_macos_app_session_take_osr_dialog(session, &dialog) != 0 else { return }
+        let sid = dialog.surface_id
+        let token = dialog.token
+        Self.testNote("dialog-taken kind=\(dialog.kind) suppress=\(dialog.offer_suppress)")
+        let title = Self.osrText(dialog.title, dialog.title_len)
+        let message = Self.osrText(dialog.message, dialog.message_len)
+        let defaultText = Self.osrText(dialog.default_text, dialog.default_text_len)
+        if dialog.kind >= UInt32(MARU_OSR_DIALOG_FILE_OPEN) {
+            let accept = Self.osrText(dialog.accept, dialog.accept_len)
+            showOsrFileDialog(window: window, sid: sid, token: token, kind: dialog.kind, title: title, message: message,
+                              defaultPath: defaultText, accept: accept)
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: Self.osrText(dialog.ok_label, dialog.ok_label_len))
+        let cancel = Self.osrText(dialog.cancel_label, dialog.cancel_label_len)
+        if !cancel.isEmpty { alert.addButton(withTitle: cancel).keyEquivalent = "\u{1b}" } // 번역된 「취소」에도 Esc
+        if dialog.offer_suppress != 0 {
+            alert.showsSuppressionButton = true
+            alert.suppressionButton?.title = Self.osrDialogString(0)
+        }
+        var field: NSTextField?
+        if dialog.kind == UInt32(MARU_OSR_DIALOG_PROMPT) {
+            let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+            input.stringValue = defaultText
+            alert.accessoryView = input
+            alert.window.initialFirstResponder = input
+            field = input
+        }
+        let open = OsrDialogSheet(surfaceID: sid, token: token, sheet: alert.window, alert: alert, field: field)
+        osrDialogSheets[key] = open
+        alert.beginSheetModal(for: window) { [weak self, weak window] response in
+            guard let self else { return }
+            if let window, self.osrDialogSheets[ObjectIdentifier(window)] === open { self.osrDialogSheets[ObjectIdentifier(window)] = nil }
+            guard !open.dismissed, let session = self.surfaceOwning(window)?.appSession else { return }
+            let text = Array((field?.stringValue ?? "").utf8)
+            let suppress: Int32 = alert.suppressionButton?.state == .on ? 1 : 0
+            text.withUnsafeBufferPointer { buf in
+                maru_macos_app_session_osr_dialog_reply(session, sid, token, response == .alertFirstButtonReturn ? 1 : 0,
+                                                        buf.baseAddress, buf.count, suppress)
+            }
+        }
+        // sheet 를 세운 **뒤**에 막는다 — 세우기 전에 끄면 NSAlert 가 배치하며 다시 켰다(시험기 실측 — 뜨자마자 누른 답이 먹었다).
+        Self.guardOsrSheetInput(alert, field: field)
+    }
+
+    private func showOsrFileDialog(window: NSWindow, sid: UInt64, token: UInt64, kind: UInt32, title: String, message: String,
+                                   defaultPath: String, accept: String) {
+        let folder = kind == UInt32(MARU_OSR_DIALOG_FILE_OPEN_FOLDER)
+        if let answer = osrTestFileAnswer {
+            osrTestFileAnswer = nil
+            finishOsrFileDialog(window: window, sid: sid, token: token, folder: folder, urls: answer.map { URL(fileURLWithPath: $0) })
+            return
+        }
+        let panel: NSSavePanel
+        if kind == UInt32(MARU_OSR_DIALOG_FILE_SAVE) {
+            panel = NSSavePanel()
+            let name = (defaultPath as NSString).lastPathComponent
+            if !name.isEmpty { panel.nameFieldStringValue = name }
+        } else {
+            let open = NSOpenPanel()
+            open.canChooseFiles = !folder
+            open.canChooseDirectories = folder
+            open.allowsMultipleSelection = kind == UInt32(MARU_OSR_DIALOG_FILE_OPEN_MULTIPLE)
+            if !folder, let types = Self.osrContentTypes(accept) { open.allowedContentTypes = types }
+            panel = open
+        }
+        if defaultPath.hasPrefix("/") {
+            let url = URL(fileURLWithPath: defaultPath)
+            panel.directoryURL = kind == UInt32(MARU_OSR_DIALOG_FILE_SAVE) ? url.deletingLastPathComponent() : url
+        }
+        if !title.isEmpty { panel.title = title }
+        panel.message = message
+        let key = ObjectIdentifier(window)
+        let open = OsrDialogSheet(surfaceID: sid, token: token, sheet: panel, alert: nil, field: nil)
+        osrDialogSheets[key] = open
+        panel.beginSheetModal(for: window) { [weak self, weak window] response in
+            guard let self else { return }
+            if let window, self.osrDialogSheets[ObjectIdentifier(window)] === open { self.osrDialogSheets[ObjectIdentifier(window)] = nil }
+            guard !open.dismissed, let window else { return }
+            panel.orderOut(nil) // 이어서 폴더 확인 sheet 를 띄울 수 있다 — 열기 창이 아직 붙어 있으면 새 sheet 가 안 선다
+            let urls: [URL]
+            if response != .OK {
+                urls = []
+            } else if let openPanel = panel as? NSOpenPanel {
+                urls = openPanel.urls
+            } else {
+                urls = panel.url.map { [$0] } ?? []
+            }
+            self.finishOsrFileDialog(window: window, sid: sid, token: token, folder: folder, urls: urls)
+        }
+    }
+
+    /// 고른 경로를 보내고 끝낸다. 폴더는 안의 파일들로 펼친다 — 폴더 경로 자체로 답하면 페이지에 아무것도 안 온다(CEF 154
+    /// 실측 — 판정자 `file-folder`). 그래서 페이지의 `webkitRelativePath` 는 빈다(후속). 폴더는 Chrome 처럼 「파일 N개를 이
+    /// 사이트에 올릴까요?」를 한 번 묻고, 상한을 넘으면 안내하고 취소한다(일부만 몰래 올리지 않는다 — 적대 검증).
+    private func finishOsrFileDialog(window: NSWindow, sid: UInt64, token: UInt64, folder: Bool, urls: [URL]) {
+        guard folder else {
+            sendOsrFilePaths(window: window, sid: sid, token: token, paths: urls.map(\.path))
+            return
+        }
+        var files: [String] = []
+        var tooMany = false
+        for url in urls {
+            guard let found = Self.osrFolderFiles(url, limit: Self.osrFolderLimit - files.count) else {
+                tooMany = true
+                break
+            }
+            files.append(contentsOf: found)
+        }
+        let alert = NSAlert()
+        if tooMany {
+            alert.messageText = Self.osrDialogString(4, Int64(Self.osrFolderLimit))
+            alert.addButton(withTitle: Self.osrDialogString(3)).keyEquivalent = "\u{1b}"
+        } else if files.isEmpty {
+            sendOsrFilePaths(window: window, sid: sid, token: token, paths: [])
+            return
+        } else {
+            alert.messageText = Self.osrDialogString(1, Int64(files.count))
+            alert.addButton(withTitle: Self.osrDialogString(2))
+            alert.addButton(withTitle: Self.osrDialogString(3)).keyEquivalent = "\u{1b}"
+        }
+        let key = ObjectIdentifier(window)
+        let open = OsrDialogSheet(surfaceID: sid, token: token, sheet: alert.window, alert: alert, field: nil)
+        osrDialogSheets[key] = open
+        alert.beginSheetModal(for: window) { [weak self, weak window] response in
+            guard let self else { return }
+            if let window, self.osrDialogSheets[ObjectIdentifier(window)] === open { self.osrDialogSheets[ObjectIdentifier(window)] = nil }
+            guard !open.dismissed, let window else { return }
+            let upload = !tooMany && response == .alertFirstButtonReturn
+            self.sendOsrFilePaths(window: window, sid: sid, token: token, paths: upload ? files : [])
+        }
+        Self.guardOsrSheetInput(alert, field: nil) // 열기 창에서 친 Return 이 곧바로 「올리기」가 되지 않게
+    }
+
+    private func sendOsrFilePaths(window: NSWindow, sid: UInt64, token: UInt64, paths: [String]) {
+        guard let session = surfaceOwning(window)?.appSession else { return }
+        for path in paths {
+            let bytes = Array(path.utf8)
+            bytes.withUnsafeBufferPointer { buf in
+                maru_macos_app_session_osr_file_dialog_path(session, sid, token, buf.baseAddress, buf.count)
+            }
+        }
+        maru_macos_app_session_osr_file_dialog_reply(session, sid, token, paths.isEmpty ? 0 : 1)
+    }
+
+    /// 폴더 하나에서 올릴 파일 상한(sidecar 의 경로 상한과 같다).
+    private static let osrFolderLimit = 4096
+
+    /// 폴더 안의 보통 파일(숨긴 것·패키지 속은 뺀다 — 심볼릭 링크는 파일이든 폴더든 따라가지 않는다), 정렬. `limit` 을 넘으면
+    /// nil(일부만 고르지 않는다).
+    private static func osrFolderFiles(_ folder: URL, limit: Int) -> [String]? {
+        guard let walker = FileManager.default.enumerator(at: folder, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
+                                                          options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return [] }
+        var files: [String] = []
+        for case let url as URL in walker {
+            let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+            guard values?.isSymbolicLink != true, values?.isRegularFile == true else { continue }
+            if files.count >= limit { return nil }
+            files.append(url.path)
+        }
+        return files.sorted()
+    }
+
+    /// 받을 형식(`image/*,.png,text/plain`) → UTType. 하나라도 모르면 nil(제한하지 않는다 — 페이지가 받을 파일을 못 고르게
+    /// 되느니 넓게 연다). macOS 는 모르는 확장자·MIME 에 nil 이 아니라 **동적 형식**(`dyn.…`)을 준다 — 그것으로 제한하면 어떤
+    /// 파일도 고를 수 없었다(적대 검증 실측) — 동적이면 모르는 것으로 본다.
+    private static func osrContentTypes(_ accept: String) -> [UTType]? {
+        var types: [UTType] = []
+        for raw in accept.split(separator: ",") {
+            let token = raw.trimmingCharacters(in: .whitespaces).lowercased()
+            if token.hasPrefix(".") {
+                guard let type = UTType(filenameExtension: String(token.dropFirst())), !type.isDynamic else { return nil }
+                types.append(type)
+            } else if token.hasSuffix("/*") {
+                switch token {
+                case "image/*": types.append(.image)
+                case "audio/*": types.append(.audio)
+                case "video/*": types.append(.movie)
+                case "text/*": types.append(.text)
+                default: return nil
+                }
+            } else {
+                guard let type = UTType(mimeType: token), !type.isDynamic else { return nil }
+                types.append(type)
+            }
+        }
+        return types.isEmpty ? nil : types
     }
 
     // W4b: hover 중인 Chromium 탭의 페이지 커서가 바뀌었으면 맞춘다 — 페이지는 이동을 처리한 **뒤** 커서를 알리므로,
@@ -10188,6 +10514,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// appSession(활성 surface)에 적용해, quick terminal이 key면 그쪽에 동작한다(메뉴는 포커스된 터미널에 작용).
     @objc private func runCatalogAction(_ sender: NSMenuItem) {
         guard let key = sender.representedObject as? String, let session = appSession else { return }
+        if key == "select_all", Self.forwardEditToSheet(#selector(NSText.selectAll(_:)), sender) { return }
         if isSessionHostAutoReconnectSmokeMode, key == "select_all" {
             sessionHostAutoReconnectSelectMenuActions += 1
         }
@@ -10333,7 +10660,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     @objc private func menuCut(_ sender: Any?) {
-        _ = sender
+        if Self.forwardEditToSheet(#selector(NSText.cut(_:)), sender) { return }
         // 웹 패널이 first responder면 WebKit이 자기 편집 영역에서 잘라낸다(표준 cut: — 편집기 자신의 되돌리기
         // 기록에 남는다). 터미널에는 잘라내기가 없다(읽기 전용 화면) — 복사만 하고 지우지 않는다.
         if firstResponderWebPanel() != nil {
@@ -10345,7 +10672,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     @objc private func menuCopy(_ sender: Any?) {
-        _ = sender
+        if Self.forwardEditToSheet(#selector(NSText.copy(_:)), sender) { return }
         if isSessionHostAutoReconnectSmokeMode {
             sessionHostAutoReconnectCopyMenuActions += 1
         }
@@ -10360,7 +10687,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     @objc private func menuPaste(_ sender: Any?) {
-        _ = sender
+        if Self.forwardEditToSheet(#selector(NSText.paste(_:)), sender) { return }
         // 웹 포커스면 WebKit이 편집 영역(CM6 등)에 붙여넣도록 표준 paste:를 넘긴다(read·HTML은 삽입 대상이 없어
         // no-op). 아니면 터미널 PTY 붙여넣기.
         if firstResponderWebPanel() != nil {
@@ -13368,6 +13695,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// 숨김 완료 orderOut의 resignKey)에는 재진입을 막고, 보이는 상태일 때만 숨긴다.
     @objc private func quickTerminalLostKey(_ note: Notification) {
         guard quickAutoHide, !quickAnimating, let panel = quick?.window, panel.isVisible else { return }
+        // W5a: 키를 가져간 것이 이 패널에 붙은 sheet(Chromium 탭 대화상자)면 숨기지 않는다 — 숨기면 sheet 도 사라져 페이지가 영영
+        // 멈췄다(적대 검증).
+        if panel.attachedSheet != nil || NSApp.keyWindow?.sheetParent === panel { return }
         hideQuickTerminalAnimated(panel)
     }
 

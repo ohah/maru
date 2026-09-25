@@ -23,6 +23,15 @@ pub const Api = struct {
     browser_host_create_browser_sync: *const @TypeOf(c.cef_browser_host_create_browser_sync),
     request_context_get_global_context: *const @TypeOf(c.cef_request_context_get_global_context),
     value_create: *const @TypeOf(c.cef_value_create),
+    // 파일 선택(W5a) — 고른 경로를 CEF 에 넘기고 받을 형식을 읽는다.
+    string_list_alloc: *const @TypeOf(c.cef_string_list_alloc),
+    string_list_append: *const @TypeOf(c.cef_string_list_append),
+    string_list_free: *const @TypeOf(c.cef_string_list_free),
+    string_list_size: *const @TypeOf(c.cef_string_list_size),
+    string_list_value: *const @TypeOf(c.cef_string_list_value),
+    // 대화상자 제목의 출처(W5a) — 사용자 정보·경로를 떼고 IDN 은 안전할 때만 유니코드로(Chrome 의 보안 표시 규칙).
+    format_url_for_security_display: *const @TypeOf(c.cef_format_url_for_security_display),
+    string_userfree_utf16_free: *const @TypeOf(c.cef_string_userfree_utf16_free),
 };
 
 pub const LoadError = error{ FrameworkOpenFailed, SymbolMissing };
@@ -46,6 +55,13 @@ pub fn load(framework_binary: [*:0]const u8) LoadError!Api {
         .browser_host_create_browser_sync = try find(handle, "cef_browser_host_create_browser_sync", @TypeOf(c.cef_browser_host_create_browser_sync)),
         .request_context_get_global_context = try find(handle, "cef_request_context_get_global_context", @TypeOf(c.cef_request_context_get_global_context)),
         .value_create = try find(handle, "cef_value_create", @TypeOf(c.cef_value_create)),
+        .string_list_alloc = try find(handle, "cef_string_list_alloc", @TypeOf(c.cef_string_list_alloc)),
+        .string_list_append = try find(handle, "cef_string_list_append", @TypeOf(c.cef_string_list_append)),
+        .string_list_free = try find(handle, "cef_string_list_free", @TypeOf(c.cef_string_list_free)),
+        .string_list_size = try find(handle, "cef_string_list_size", @TypeOf(c.cef_string_list_size)),
+        .string_list_value = try find(handle, "cef_string_list_value", @TypeOf(c.cef_string_list_value)),
+        .format_url_for_security_display = try find(handle, "cef_format_url_for_security_display", @TypeOf(c.cef_format_url_for_security_display)),
+        .string_userfree_utf16_free = try find(handle, "cef_string_userfree_utf16_free", @TypeOf(c.cef_string_userfree_utf16_free)),
     };
 }
 
@@ -70,6 +86,19 @@ pub fn readString(api: *const Api, value: [*c]const c.cef_string_t, out: []u8) [
     const clamped = protocol_text.clampUtf8(utf8.str[0..utf8.length], out.len);
     @memcpy(out[0..clamped.len], clamped);
     protocol_text.replaceControl(out[0..clamped.len]);
+    return out[0..clamped.len];
+}
+
+/// 대화상자 글(W5a) — `readString` 과 같되 탭·줄바꿈은 남긴다(대화상자 문구는 여러 줄이 흔하다).
+pub fn readDialogString(api: *const Api, value: [*c]const c.cef_string_t, out: []u8) []const u8 {
+    if (value == null or value.*.str == null) return out[0..0];
+    var utf8: c.cef_string_utf8_t = std.mem.zeroes(c.cef_string_utf8_t);
+    _ = api.string_utf16_to_utf8(value.*.str, value.*.length, &utf8);
+    defer api.string_utf8_clear(&utf8);
+    if (utf8.str == null) return out[0..0];
+    const clamped = protocol_text.clampUtf8(utf8.str[0..utf8.length], out.len);
+    @memcpy(out[0..clamped.len], clamped);
+    protocol_text.replaceControlKeepLines(out[0..clamped.len]);
     return out[0..clamped.len];
 }
 

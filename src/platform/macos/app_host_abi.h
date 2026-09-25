@@ -9,7 +9,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 193u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 194u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -2096,6 +2096,54 @@ int32_t maru_macos_app_session_osr_edit(MaruAppHostSession *session, int32_t com
 void maru_macos_app_session_ime_command(MaruAppHostSession *session);
 /* v193(W4c): Zig 가 Chromium 탭의 조합을 끝냈다(키 대상이 바뀜) — 1 이면 Swift 는 입력기 세션의 조합을 버린다(한 번). */
 int32_t maru_macos_app_session_take_osr_discard_marked(MaruAppHostSession *session);
+/* v194(W5a): Chromium 탭의 JS 대화상자·파일 선택(C6). kind 는 아래 MARU_OSR_DIALOG_*. 글(UTF-8, NUL 없음)은 답할 때까지
+   (title 은 다음 take 까지) 유효하다. 문구(title·message·버튼)는 Zig 가 번역·조립했다 — cancel_label 이 비면 취소 단추가
+   없다(alert). 파일 선택은 message 가 열기 창 안내, default_text 가 처음 경로, accept 가 받을 형식(`image/*,.png`). */
+#define MARU_OSR_DIALOG_ALERT 0u
+#define MARU_OSR_DIALOG_CONFIRM 1u
+#define MARU_OSR_DIALOG_PROMPT 2u
+#define MARU_OSR_DIALOG_BEFORE_UNLOAD 3u
+#define MARU_OSR_DIALOG_FILE_OPEN 10u
+#define MARU_OSR_DIALOG_FILE_OPEN_MULTIPLE 11u
+#define MARU_OSR_DIALOG_FILE_OPEN_FOLDER 12u
+#define MARU_OSR_DIALOG_FILE_SAVE 13u
+typedef struct MaruAppHostOsrDialog {
+    uint64_t surface_id;
+    /* maru 가 매긴 번호 — 답은 이것으로 짝을 찾는다(sidecar 가 다시 떠도 겹치지 않는다). */
+    uint64_t token;
+    uint32_t kind;
+    /* 1 이면 「이 페이지가 대화상자를 더 띄우지 못하게」를 보인다(이동 없이 두 번째 대화상자부터 — 문구는
+       maru_macos_web_dialog_string(0)). */
+    uint32_t offer_suppress;
+    const uint8_t *title;
+    size_t title_len;
+    const uint8_t *message;
+    size_t message_len;
+    const uint8_t *default_text;
+    size_t default_text_len;
+    const uint8_t *accept;
+    size_t accept_len;
+    const uint8_t *ok_label;
+    size_t ok_label_len;
+    const uint8_t *cancel_label;
+    size_t cancel_label_len;
+} MaruAppHostOsrDialog;
+/* v194(W5a): 이 창에 띄울 대화상자·파일 선택이 있으면 1 과 *out(한 번). 키보드 초점을 가진 탭의 요청만, 한 창에 하나씩. */
+int32_t maru_macos_app_session_take_osr_dialog(MaruAppHostSession *session, MaruAppHostOsrDialog *out);
+/* v194(W5a): 띄운 요청이 사라졌다(페이지 이동·탭 닫힘·sidecar 재시작) — 1 이면 Swift 는 sheet 를 답 없이 닫는다(한 번). */
+int32_t maru_macos_app_session_take_osr_dialog_dismiss(MaruAppHostSession *session);
+/* v194(W5a): JS 대화상자의 답(accept = 확인·떠나기, text = prompt 에 친 글 — 상한·제어 문자는 Zig 가 다듬는다, suppress =
+   이 페이지가 이동할 때까지 대화상자를 더 띄우지 못하게). 이미 사라진 요청이면 무동작. */
+void maru_macos_app_session_osr_dialog_reply(MaruAppHostSession *session, uint64_t surface_id, uint64_t token, int32_t accept,
+                                             const uint8_t *text, size_t text_len, int32_t suppress);
+/* v194(W5a): 파일 선택의 경로 하나(여러 개면 여러 번 — 폴더는 안의 파일들로 펼쳐서). 절대 경로가 아니면 버린다. */
+void maru_macos_app_session_osr_file_dialog_path(MaruAppHostSession *session, uint64_t surface_id, uint64_t token,
+                                                 const uint8_t *path, size_t path_len);
+/* v194(W5a): 파일 선택을 끝낸다 — accept 0 이면 취소(보낸 경로는 버린다). */
+void maru_macos_app_session_osr_file_dialog_reply(MaruAppHostSession *session, uint64_t surface_id, uint64_t token, int32_t accept);
+/* v194(W5a): sheet 의 나머지 문구를 out 에 쓰고 길이를 돌려준다(UTF-8, NUL 없음). which: 0 억제 선택 · 1 폴더 올리기 확인
+   제목(number = 파일 수) · 2 올리기 단추 · 3 취소 단추 · 4 폴더가 너무 크다(number = 상한). */
+size_t maru_macos_web_dialog_string(uint32_t which, int64_t number, uint8_t *out, size_t out_cap);
 void maru_macos_mermaid_snapshot(MaruMermaidCoordinatorSnapshot *out_snapshot);
 /* allocation-free frame-tick gate와 exact renderer lifetime revoke. */
 uint32_t maru_macos_mermaid_has_work(void);

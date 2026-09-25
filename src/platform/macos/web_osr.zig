@@ -90,9 +90,57 @@ const Surface = struct {
     composing: bool = false,
     /// 마지막 IME 조합 사각형(view DIP — `ime_range`). 후보창 위치(`firstRect`)에 쓴다.
     ime_bounds: ?ws.message.Rect = null,
+    /// 답을 기다리는 대화상자·파일 선택(W5a) — 온 차례대로.
+    dialogs: std.ArrayList(Dialog) = .empty,
 };
 
 pub const Cursor = struct { cursor: ws.message.WebCursor, generation: u32 };
+
+/// 답을 기다리는 JS 대화상자·파일 선택(W5a — C6). 글은 복사해 쥔다(sidecar 가 보낸 frame 은 곧 사라진다).
+pub const DialogKind = enum(u32) {
+    alert = 0,
+    confirm = 1,
+    prompt = 2,
+    before_unload = 3,
+    file_open = 10,
+    file_open_multiple = 11,
+    file_open_folder = 12,
+    file_save = 13,
+
+    pub fn isFile(self: DialogKind) bool {
+        return @intFromEnum(self) >= 10;
+    }
+};
+
+pub const Dialog = struct {
+    /// maru 가 매기는 번호(프로세스 전체에서 한 번씩) — 창·Swift 는 이것으로 짝을 찾는다. sidecar 의 요청 번호는 sidecar 가
+    /// 다시 뜨면 1 부터 다시 매겨 옛 창의 늦은 답이 새 요청에 붙을 수 있다(적대 검증).
+    token: u64,
+    request: ws.message.RequestId,
+    kind: DialogKind,
+    origin: []u8,
+    message: []u8,
+    /// `prompt` 의 기본 글, 파일 선택이면 처음 고를 경로.
+    default_text: []u8,
+    /// 파일 선택이 받을 형식(`image/*,.png`).
+    accept: []u8,
+    /// 이 페이지가 이동 없이 두 번째 이상 띄운 대화상자 — 「더 띄우지 못하게」를 보인다.
+    offer_suppress: bool = false,
+    /// 띄운 창(AppSession 주소) — 0 이면 아직 안 띄웠다.
+    shown_by: usize = 0,
+
+    fn free(self: Dialog, gpa: std.mem.Allocator) void {
+        gpa.free(self.origin);
+        gpa.free(self.message);
+        gpa.free(self.default_text);
+        gpa.free(self.accept);
+    }
+};
+
+/// 한 브라우저가 동시에 기다리게 하는 상한. JS 대화상자는 페이지가 멈춰 하나씩이고 파일 선택도 하나씩이라 넉넉하다 —
+/// 넘으면 곧바로 취소로 답한다(sidecar 가 쥔 콜백이 쌓이지 않게).
+const max_dialogs_per_surface = 4;
+var next_dialog_token: u64 = 1;
 
 var gpa_ref: ?std.mem.Allocator = null;
 var state: State = .off;
@@ -496,6 +544,120 @@ pub fn shutdownForExit() void {
     notice_queue = .empty;
 }
 
+// ── 대화상자·파일 선택(W5a) ────────────────────────────────────────────────────────────────────────────
+//
+// 창은 자기 창에서 **키보드 초점을 가진** Chromium 탭의 요청만 띄운다(뒤쪽 탭·초점 없는 pane 의 대화상자는 초점이 올 때까지
+// 기다린다 — 페이지는 그동안 멈춰 있다). 한 창에 하나씩 — sheet 는 창 전체를 막는다.
+
+/// 요청을 적는다. 모르는 브라우저(파괴 경합)·상한·메모리 부족이면 false — 호출자가 곧바로 기본값으로 답한다.
+fn queueDialog(gpa: std.mem.Allocator, browser: u64, request: ws.message.RequestId, kind: DialogKind, origin: []const u8, message_text: []const u8, default_text: []const u8, accept: []const u8, offer_suppress: bool) bool {
+    const s = surfaces.getPtr(browser) orelse return false;
+    if (s.dialogs.items.len >= max_dialogs_per_surface) return false;
+    const origin_owned = gpa.dupe(u8, origin) catch return false;
+    const message_owned = gpa.dupe(u8, message_text) catch {
+        gpa.free(origin_owned);
+        return false;
+    };
+    const default_owned = gpa.dupe(u8, default_text) catch {
+        gpa.free(origin_owned);
+        gpa.free(message_owned);
+        return false;
+    };
+    const accept_owned = gpa.dupe(u8, accept) catch {
+        gpa.free(origin_owned);
+        gpa.free(message_owned);
+        gpa.free(default_owned);
+        return false;
+    };
+    const dialog: Dialog = .{ .token = next_dialog_token, .request = request, .kind = kind, .origin = origin_owned, .message = message_owned, .default_text = default_owned, .accept = accept_owned, .offer_suppress = offer_suppress };
+    next_dialog_token += 1;
+    s.dialogs.append(gpa, dialog) catch {
+        dialog.free(gpa);
+        return false;
+    };
+    return true;
+}
+
+fn removeDialog(gpa: std.mem.Allocator, s: *Surface, token: u64) void {
+    for (s.dialogs.items, 0..) |d, i| if (d.token == token) {
+        d.free(gpa);
+        _ = s.dialogs.orderedRemove(i);
+        return;
+    };
+}
+
+/// 그 탭에서 다음에 띄울 요청(아직 아무 창도 안 띄운 첫 요청). 앞 요청이 떠 있으면 null — 한 탭은 하나씩.
+pub fn nextDialog(surface_id: u64) ?*const Dialog {
+    const s = surfaces.getPtr(surface_id) orelse return null;
+    if (s.dialogs.items.len == 0) return null;
+    const first = &s.dialogs.items[0];
+    return if (first.shown_by == 0) first else null;
+}
+
+pub fn markDialogShown(surface_id: u64, token: u64, window: usize) void {
+    const s = surfaces.getPtr(surface_id) orelse return;
+    for (s.dialogs.items) |*d| if (d.token == token) {
+        d.shown_by = window;
+        return;
+    };
+}
+
+/// 그 요청이 아직 답을 기다리는가 — 창은 떠 있는 요청이 사라지면(이동·닫힘·sidecar 재시작) 창을 닫는다.
+pub fn dialogPending(surface_id: u64, token: u64) ?*const Dialog {
+    const s = surfaces.getPtr(surface_id) orelse return null;
+    for (s.dialogs.items) |*d| if (d.token == token) return d;
+    return null;
+}
+
+/// JS 대화상자의 답. 요청이 없으면(이미 사라졌다) 무동작. `suppress` 면 그 페이지가 이동할 때까지 대화상자를 더 띄우지 못한다.
+pub fn replyDialog(gpa: std.mem.Allocator, surface_id: u64, token: u64, accept: bool, text: []const u8, suppress: bool) void {
+    const s = surfaces.getPtr(surface_id) orelse return;
+    const d = dialogPending(surface_id, token) orelse return;
+    if (d.kind.isFile()) return;
+    const request = d.request;
+    // 답 글은 대화상자 글 규칙(상한·제어 문자)에 맞게 다듬는다 — 글자 경계에서 자르고 줄바꿈·탭 밖의 제어 문자는 공백으로
+    // (통째로 버리면 긴 답이 빈 답이 된다 — 적대 검증).
+    var buf: [ws.wire.max_text_bytes]u8 = undefined;
+    const clamped = ws.text.clampUtf8(text, buf.len);
+    @memcpy(buf[0..clamped.len], clamped);
+    ws.text.replaceControlKeepLines(buf[0..clamped.len]);
+    removeDialog(gpa, s, token);
+    if (s.created) send(gpa, .{ .dialog_reply = .{ .browser = surface_id, .request = request, .accept = accept, .text = buf[0..clamped.len], .suppress = suppress } });
+}
+
+/// 파일 선택의 경로 하나(여러 개면 여러 번). 경로 규칙을 못 지나면 버린다.
+pub fn fileDialogPath(gpa: std.mem.Allocator, surface_id: u64, token: u64, path: []const u8) void {
+    const s = surfaces.getPtr(surface_id) orelse return;
+    const d = dialogPending(surface_id, token) orelse return;
+    if (!d.kind.isFile()) return;
+    ws.fields.checkPath(path) catch return;
+    if (s.created) send(gpa, .{ .file_dialog_path = .{ .browser = surface_id, .request = d.request, .path = path } });
+}
+
+pub fn replyFileDialog(gpa: std.mem.Allocator, surface_id: u64, token: u64, accept: bool) void {
+    const s = surfaces.getPtr(surface_id) orelse return;
+    const d = dialogPending(surface_id, token) orelse return;
+    if (!d.kind.isFile()) return;
+    const request = d.request;
+    removeDialog(gpa, s, token);
+    if (s.created) send(gpa, .{ .file_dialog_reply = .{ .browser = surface_id, .request = request, .accept = accept } });
+}
+
+/// 창이 닫힌다 — 그 창이 띄운 요청은 취소로 답한다(다른 창이 다시 띄우지 않는다 — 탭도 그 창과 함께 사라진다).
+pub fn cancelDialogsShownBy(gpa: std.mem.Allocator, window: usize) void {
+    for (surfaces.keys(), surfaces.values()) |surface_id, *s| {
+        var i: usize = 0;
+        while (i < s.dialogs.items.len) {
+            const d = s.dialogs.items[i];
+            if (d.shown_by != window) {
+                i += 1;
+                continue;
+            }
+            if (d.kind.isFile()) replyFileDialog(gpa, surface_id, d.token, false) else replyDialog(gpa, surface_id, d.token, d.kind == .before_unload, "", false);
+        }
+    }
+}
+
 // ── 안 ─────────────────────────────────────────────────────────────────────────────────────────────
 
 fn freeSurface(gpa: std.mem.Allocator, s: *Surface) void {
@@ -503,6 +665,15 @@ fn freeSurface(gpa: std.mem.Allocator, s: *Surface) void {
     if (s.url) |u| gpa.free(u);
     s.last_url = null;
     s.url = null;
+    dropDialogs(gpa, s);
+    s.dialogs.deinit(gpa);
+}
+
+/// 답을 기다리던 요청을 모두 버린다 — 답을 보내지 않는다(sidecar 가 죽었거나 브라우저가 사라져 콜백이 없다). 떠 있던
+/// 창은 그 창의 tick 이 요청이 사라진 것을 보고 닫는다.
+fn dropDialogs(gpa: std.mem.Allocator, s: *Surface) void {
+    for (s.dialogs.items) |d| d.free(gpa);
+    s.dialogs.clearRetainingCapacity();
 }
 
 fn installDir() ?[]const u8 {
@@ -669,6 +840,8 @@ fn crashed(gpa: std.mem.Allocator, now_ms: i64) void {
         const t = at orelse continue;
         if (now_ms - t < restart_window_ms) recent += 1;
     }
+    // 죽은 sidecar 가 쥐던 대화상자 콜백은 사라졌다 — 기다리던 요청을 버린다(떠 있는 창은 그 창이 닫는다).
+    for (surfaces.values()) |*s| dropDialogs(gpa, s);
     if (recent >= restart_budget) return fail(.crashed_repeatedly);
     if (surfaces.count() == 0) return;
     // 모든 브라우저를 처음부터 다시 만든다(기록을 「안 만들어짐」으로 돌리고 create 를 다시 보낸다).
@@ -802,7 +975,165 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
         .ime_range => |v| if (surfaces.getPtr(v.browser)) |s| {
             s.ime_bounds = v.bounds;
         },
+        .js_dialog => |v| {
+            const kind: DialogKind = switch (v.kind) {
+                .alert => .alert,
+                .confirm => .confirm,
+                .prompt => .prompt,
+                .before_unload => .before_unload,
+            };
+            if (!queueDialog(gpa, v.browser, v.request, kind, v.origin, v.message, v.default_text, "", v.offer_suppress))
+                send(gpa, .{ .dialog_reply = .{ .browser = v.browser, .request = v.request, .accept = kind == .before_unload } });
+        },
+        .file_dialog => |v| {
+            const kind: DialogKind = switch (v.mode) {
+                .open => .file_open,
+                .open_multiple => .file_open_multiple,
+                .open_folder => .file_open_folder,
+                .save => .file_save,
+            };
+            if (!queueDialog(gpa, v.browser, v.request, kind, "", v.title, v.default_path, v.accept, false))
+                send(gpa, .{ .file_dialog_reply = .{ .browser = v.browser, .request = v.request, .accept = false } });
+        },
+        .dialog_closed => |v| if (surfaces.getPtr(v.browser)) |s| {
+            for (s.dialogs.items) |d| if (d.request == v.request) {
+                removeDialog(gpa, s, d.token);
+                break;
+            };
+        },
         // 방향이 다른 tag 는 decoder 가 이미 거절했다.
-        .hello, .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .shutdown, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost => unreachable,
+        .hello, .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .shutdown, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost, .dialog_reply, .file_dialog_path, .file_dialog_reply => unreachable,
     }
+}
+
+/// 시험용 — 쌓인 frame(handshake 전 outbox)을 풀어 돌려준다.
+fn sentFrames(out: []Message) usize {
+    var n: usize = 0;
+    var rest = outbox_pending.items;
+    while (rest.len >= 4 and n < out.len) {
+        const len = 4 + std.mem.readInt(u32, rest[0..4], .big);
+        out[n] = ws.codec.decodeExact(rest[0..len]) catch unreachable;
+        n += 1;
+        rest = rest[len..];
+    }
+    return n;
+}
+
+test "dialogs queue per tab, show one at a time, and each answer goes out exactly once" {
+    const gpa = std.testing.allocator;
+    state = .starting; // 보낸 frame 을 outbox 에 쌓게(sidecar 없이)
+    defer {
+        for (surfaces.values()) |*s| freeSurface(gpa, s);
+        surfaces.deinit(gpa);
+        surfaces = .empty;
+        outbox_pending.deinit(gpa);
+        outbox_pending = .empty;
+        state = .off;
+    }
+    try surfaces.put(gpa, 7, .{ .record = .{ .surface_id = 7, .size = .{ .width = 10, .height = 10, .scale = 1 }, .hidden = false }, .created = true });
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .alert, .origin = "https://a.b", .message = "하나" } }, 0);
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 2, .kind = .prompt, .origin = "", .message = "둘", .default_text = "기본" } }, 0);
+    const first = nextDialog(7).?;
+    try std.testing.expectEqual(@as(u32, 1), first.request);
+    const first_token = first.token;
+    // 떠 있는 동안 다음 요청은 나오지 않는다(한 탭에 하나씩).
+    markDialogShown(7, first_token, 11);
+    try std.testing.expect(nextDialog(7) == null);
+    replyDialog(gpa, 7, first_token, true, "", false);
+    replyDialog(gpa, 7, first_token, true, "", false); // 두 번째 답은 무동작
+    const second = nextDialog(7).?;
+    const second_token = second.token;
+    try std.testing.expect(second_token != first_token);
+    try std.testing.expectEqual(DialogKind.prompt, second.kind);
+    try std.testing.expectEqualStrings("기본", second.default_text);
+    // 페이지가 옮겨 가 요청이 사라지면 답을 보내지 않는다.
+    apply(gpa, .{ .dialog_closed = .{ .browser = 7, .request = 2 } }, 0);
+    try std.testing.expect(dialogPending(7, second_token) == null);
+    // 상한을 넘은 요청은 곧바로 기본값으로 답한다(떠나기 확인은 떠나기).
+    for (3..7) |r| apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = @intCast(r), .kind = .confirm, .origin = "", .message = "" } }, 0);
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 9, .kind = .before_unload, .origin = "", .message = "" } }, 0);
+    for (surfaces.getPtr(7).?.dialogs.items) |d| try std.testing.expect(d.request != 9);
+    // 모르는 탭의 요청도 곧바로 답한다(sidecar 가 콜백을 쥔 채 남지 않게).
+    apply(gpa, .{ .file_dialog = .{ .browser = 99, .request = 10, .mode = .open } }, 0);
+    // 창이 닫히면 그 창이 띄운 요청만 취소로 답한다.
+    const third = nextDialog(7).?.token;
+    const fourth = surfaces.getPtr(7).?.dialogs.items[1].token;
+    markDialogShown(7, third, 11);
+    cancelDialogsShownBy(gpa, 11);
+    try std.testing.expect(dialogPending(7, third) == null);
+    try std.testing.expect(dialogPending(7, fourth) != null);
+
+    var frames: [16]Message = undefined;
+    const n = sentFrames(&frames);
+    try std.testing.expectEqual(@as(usize, 4), n);
+    try std.testing.expect(frames[0].dialog_reply.request == 1 and frames[0].dialog_reply.accept);
+    try std.testing.expect(frames[1].dialog_reply.request == 9 and frames[1].dialog_reply.accept);
+    try std.testing.expect(frames[2].file_dialog_reply.request == 10 and !frames[2].file_dialog_reply.accept);
+    try std.testing.expect(frames[3].dialog_reply.request == 3 and !frames[3].dialog_reply.accept);
+}
+
+test "file chooser answers: bad paths are dropped, a JS answer cannot close a file request, crash drops everything" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer {
+        for (surfaces.values()) |*s| freeSurface(gpa, s);
+        surfaces.deinit(gpa);
+        surfaces = .empty;
+        outbox_pending.deinit(gpa);
+        outbox_pending = .empty;
+        state = .off;
+    }
+    try surfaces.put(gpa, 7, .{ .record = .{ .surface_id = 7, .size = .{ .width = 10, .height = 10, .scale = 1 }, .hidden = false }, .created = true });
+    apply(gpa, .{ .file_dialog = .{ .browser = 7, .request = 5, .mode = .open_multiple, .accept = ".png" } }, 0);
+    const file = nextDialog(7).?;
+    try std.testing.expectEqualStrings(".png", file.accept);
+    const token = file.token;
+    fileDialogPath(gpa, 7, token, "relative/a.png"); // 절대 경로가 아니다 — 버린다
+    fileDialogPath(gpa, 7, token, "/a\nb"); // 제어 문자 — 버린다
+    fileDialogPath(gpa, 7, token, "/tmp/a.png");
+    replyDialog(gpa, 7, token, true, "", false); // JS 답은 파일 요청을 닫지 못한다
+    try std.testing.expect(dialogPending(7, token) != null);
+    replyFileDialog(gpa, 7, token, true);
+    try std.testing.expect(dialogPending(7, token) == null);
+    var frames: [8]Message = undefined;
+    const n = sentFrames(&frames);
+    try std.testing.expectEqual(@as(usize, 2), n);
+    try std.testing.expectEqualStrings("/tmp/a.png", frames[0].file_dialog_path.path);
+    try std.testing.expect(frames[1].file_dialog_reply.accept);
+    // sidecar 가 죽으면 기다리던 요청은 답 없이 사라진다(콜백이 없다).
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 6, .kind = .alert, .origin = "", .message = "" } }, 0);
+    const dropped = nextDialog(7).?.token;
+    for (surfaces.values()) |*s| dropDialogs(gpa, s);
+    try std.testing.expect(dialogPending(7, dropped) == null);
+    try std.testing.expectEqual(@as(usize, 2), sentFrames(&frames));
+    // 다시 뜬 sidecar 가 같은 요청 번호(6)로 새 요청을 보내도 옛 토큰의 답은 붙지 않는다.
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 6, .kind = .confirm, .origin = "", .message = "" } }, 0);
+    replyDialog(gpa, 7, dropped, true, "", false);
+    try std.testing.expect(nextDialog(7) != null);
+    try std.testing.expectEqual(@as(usize, 2), sentFrames(&frames));
+}
+
+test "a prompt answer is trimmed to the dialog text rules instead of being dropped, and suppress rides along" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer {
+        for (surfaces.values()) |*s| freeSurface(gpa, s);
+        surfaces.deinit(gpa);
+        surfaces = .empty;
+        outbox_pending.deinit(gpa);
+        outbox_pending = .empty;
+        state = .off;
+    }
+    try surfaces.put(gpa, 7, .{ .record = .{ .surface_id = 7, .size = .{ .width = 10, .height = 10, .scale = 1 }, .hidden = false }, .created = true });
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .prompt, .origin = "", .message = "", .offer_suppress = true } }, 0);
+    const d = nextDialog(7).?;
+    try std.testing.expect(d.offer_suppress);
+    const long = "가" ** 2000; // 6000 바이트 — 상한(4 KiB)을 넘는다
+    replyDialog(gpa, 7, d.token, true, long ++ "\x1b", true);
+    var frames: [2]Message = undefined;
+    try std.testing.expectEqual(@as(usize, 1), sentFrames(&frames));
+    const r = frames[0].dialog_reply;
+    try std.testing.expect(r.accept and r.suppress);
+    try std.testing.expect(r.text.len > 4000 and r.text.len <= ws.wire.max_text_bytes);
+    try std.testing.expect(std.mem.startsWith(u8, r.text, "가가가"));
 }

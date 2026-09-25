@@ -8,6 +8,13 @@
 //!   /vis          제목을 `vis=<document.visibilityState>` 로, 바뀔 때마다 다시
 //!   /print        `window.print()` 를 부른 뒤 제목을 `print-tried` 로(인쇄 창이 뜨면 그 창이 닫힐 때까지 안 온다)
 //!   /dialog       `alert`·`confirm`·`prompt` 를 부른 뒤 제목을 `dialog-<confirm>-<prompt>` 로
+//!   /dialog-hold  `alert('hold')` 에서 멈춘다(W5a — 떠 있을 때 이동)
+//!   /unload       누르면 떠나기 확인을 건다(`unload-armed-<누른 수>`) — 사용자 동작 없이 건 확인은 Chromium 이 묻지 않는다. 준비는
+//!                 `unload-ready`
+//!   /dialog-loop  `alert` 를 다섯 번 부른 뒤 제목을 `loop-done` 으로(억제 판정)
+//!   /dialog-reload `alert` 뒤 스스로 새로고침 — 세 번 뒤 `reload-done`(억제 우회 판정)
+//!   /file·/files·/folder  화면 왼쪽 위(0,0 300×100)의 파일 입력칸(받을 형식 `image/*,.txt` · 여러 개 · 폴더). 준비는 `file-ready`, 고르면
+//!                 렌더러가 내용을 읽어 `file-<수>-<이름들,정렬>-<바이트 합>`, 취소면 `file-cancel`
 //!   /ctl          제목을 `a<BEL>b<DEL>c` 로(제어 문자가 든 제목)
 //!   /flood        2 초 동안 제목을 1ms 마다 200 번씩 바꾼 뒤 `flood-done` 으로
 //!   /tear         매 프레임 화면 전체를 프레임 번호 색(`rgb(n&255, n>>8&255, 200)`)으로 칠한다(W2 — 한 장 안의 줄 색이
@@ -122,6 +129,21 @@ fn page(path: []const u8, query: []const u8, buf: []u8) ![]const u8 {
     if (std.mem.eql(u8, path, "/dialog")) {
         return "<!doctype html><title>loading</title><script>alert('a');var r=confirm('b');var p=prompt('c','d');document.title='dialog-'+r+'-'+p</script>";
     }
+    if (std.mem.eql(u8, path, "/dialog-hold")) {
+        return "<!doctype html><title>loading</title><script>alert('hold');document.title='after-hold'</script>";
+    }
+    if (std.mem.eql(u8, path, "/unload")) {
+        return "<!doctype html><title>loading</title><body style='margin:0;height:100%'><script>var n=0;addEventListener('click',function(){window.onbeforeunload=function(e){e.preventDefault();e.returnValue='leave?';return 'leave?'};document.title='unload-armed-'+(++n)});requestAnimationFrame(function(){requestAnimationFrame(function(){document.title='unload-ready'})})</script>";
+    }
+    if (std.mem.eql(u8, path, "/dialog-reload")) {
+        return "<!doctype html><title>loading</title><script>var n=+(sessionStorage.n||0);sessionStorage.n=n+1;if(n<3){alert('again');location.reload()}else document.title='reload-done'</script>";
+    }
+    if (std.mem.eql(u8, path, "/dialog-loop")) {
+        return "<!doctype html><title>loading</title><script>for(var i=0;i<5;i++)alert('loop '+i);document.title='loop-done'</script>";
+    }
+    if (std.mem.eql(u8, path, "/file")) return filePage("accept=\"image/*,.txt\"", buf);
+    if (std.mem.eql(u8, path, "/files")) return filePage("multiple", buf);
+    if (std.mem.eql(u8, path, "/folder")) return filePage("webkitdirectory", buf);
     if (std.mem.eql(u8, path, "/ctl")) {
         return "<!doctype html><title>loading</title><script>document.title='a\\x07b\\x7fc'</script>";
     }
@@ -129,6 +151,17 @@ fn page(path: []const u8, query: []const u8, buf: []u8) ![]const u8 {
         return "<!doctype html><title>loading</title><script>var i=0;var h=setInterval(function(){for(var k=0;k<200;k++)document.title='f'+(i++)},1);setTimeout(function(){clearInterval(h);document.title='flood-done'},2000)</script>";
     }
     return error.NotFound;
+}
+
+fn filePage(attr: []const u8, buf: []u8) ![]const u8 {
+    return std.fmt.bufPrint(buf,
+        \\<!doctype html><title>loading</title><style>html,body{{margin:0;height:100%}}input{{position:absolute;left:0;top:0;width:300px;height:100px}}</style>
+        \\<input type=file id=f {s}><script>var f=document.getElementById('f');
+        \\f.addEventListener('change',function(){{var fs=Array.from(f.files);var n=fs.map(function(x){{return x.name}}).sort();
+        \\Promise.all(fs.map(function(x){{return x.arrayBuffer()}})).then(function(bs){{var t=0;bs.forEach(function(b){{t+=b.byteLength}});document.title='file-'+fs.length+'-'+n.join(',')+'-'+t}},function(){{document.title='file-readerr'}})}});
+        \\f.addEventListener('cancel',function(){{document.title='file-cancel'}});
+        \\requestAnimationFrame(function(){{requestAnimationFrame(function(){{document.title='file-ready'}})}})</script>
+    , .{attr});
 }
 
 const input_page =

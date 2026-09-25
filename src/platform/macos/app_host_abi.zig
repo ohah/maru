@@ -173,7 +173,7 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
 }
 
 test "ABI v185 notification release end-all and cold route values match the C header" {
-    try std.testing.expectEqual(@as(u32, 193), abi_version);
+    try std.testing.expectEqual(@as(u32, 194), abi_version);
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @intFromEnum(AppInstanceLeaseResult.acquired));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_HELD), @intFromEnum(AppInstanceLeaseResult.held));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_UNSAFE), @intFromEnum(AppInstanceLeaseResult.unsafe));
@@ -4563,6 +4563,59 @@ pub export fn maru_macos_app_session_take_osr_cursor(session: ?*AppSession, out_
     const kind = session_mod.web_ops.takeOsrCursor(app) orelse return 0;
     out.* = @intFromEnum(kind);
     return 1;
+}
+
+/// v194(W5a): 이 창에 띄울 Chromium 탭의 대화상자·파일 선택(한 번).
+pub export fn maru_macos_app_session_take_osr_dialog(session: ?*AppSession, out: ?*c.MaruAppHostOsrDialog) i32 {
+    const app = session orelse return 0;
+    const dst = out orelse return 0;
+    const view = session_mod.web_ops.takeOsrDialog(app) orelse return 0;
+    dst.* = .{
+        .surface_id = view.surface_id,
+        .token = view.token,
+        .kind = @intFromEnum(view.kind),
+        .offer_suppress = @intFromBool(view.offer_suppress),
+        .title = view.title.ptr,
+        .title_len = view.title.len,
+        .message = view.message.ptr,
+        .message_len = view.message.len,
+        .default_text = view.default_text.ptr,
+        .default_text_len = view.default_text.len,
+        .accept = view.accept.ptr,
+        .accept_len = view.accept.len,
+        .ok_label = view.ok_label.ptr,
+        .ok_label_len = view.ok_label.len,
+        .cancel_label = view.cancel_label.ptr,
+        .cancel_label_len = view.cancel_label.len,
+    };
+    return 1;
+}
+
+pub export fn maru_macos_app_session_take_osr_dialog_dismiss(session: ?*AppSession) i32 {
+    const app = session orelse return 0;
+    return @intFromBool(session_mod.web_ops.takeOsrDialogDismiss(app));
+}
+
+pub export fn maru_macos_app_session_osr_dialog_reply(session: ?*AppSession, surface_id: u64, token: u64, accept: i32, text: ?[*]const u8, text_len: usize, suppress: i32) void {
+    const app = session orelse return;
+    const bytes: []const u8 = if (text) |p| p[0..text_len] else "";
+    session_mod.web_ops.osrDialogReply(app, surface_id, token, accept != 0, bytes, suppress != 0);
+}
+
+pub export fn maru_macos_app_session_osr_file_dialog_path(session: ?*AppSession, surface_id: u64, token: u64, path: ?[*]const u8, path_len: usize) void {
+    const app = session orelse return;
+    const p = path orelse return;
+    session_mod.web_ops.osrFileDialogPath(app, surface_id, token, p[0..path_len]);
+}
+
+pub export fn maru_macos_app_session_osr_file_dialog_reply(session: ?*AppSession, surface_id: u64, token: u64, accept: i32) void {
+    const app = session orelse return;
+    session_mod.web_ops.osrFileDialogReply(app, surface_id, token, accept != 0);
+}
+
+pub export fn maru_macos_web_dialog_string(which: u32, number: i64, out: ?[*]u8, out_cap: usize) usize {
+    const dst = out orelse return 0;
+    return session_mod.web_ops.osrDialogString(which, number, dst[0..out_cap]).len;
 }
 
 /// v192(W4b): 추가 마우스 버튼(3=뒤로·4=앞으로)이 Chromium 탭 본문 위면 그 탭을 뒤로·앞으로 보내고 1.

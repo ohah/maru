@@ -35,6 +35,8 @@ pub const Side = struct {
     /// 그 열의 행마다 **선택 범위**(§4.1g). 단일 편집기와 비교 뷰가 **둘 다** 쓴다 — 비교는
     /// 좌우가 각자 자기 것을 넘긴다(한 번에 한 열만 고르므로 한쪽은 `null`이다).
     selection_marks: ?[]const []const frame.Mark = null,
+    /// 공백 표시(§5.1e) — 단일 편집기와 같은 설정. 기본 `none`.
+    render_whitespace: frame.WhitespaceMode = .none,
 
     /// 그 열의 행마다 **커서 자리**(행 안 byte offset, 오름차순). `selection_marks`와 **같은
     /// 축이고 같은 이유로 열마다 든다** — 비교 뷰는 caret 이 한 열에만 서므로 반대 열은 `null`
@@ -316,6 +318,7 @@ pub fn buildSide(
         .content_max_cols = side.content_max_cols,
         .row_cache = side.row_cache,
         .selection_marks = side.selection_marks,
+        .render_whitespace = side.render_whitespace,
         .search_marks = side.search_marks,
         .occurrence_marks = side.occurrence_marks,
         .sticky = side.sticky,

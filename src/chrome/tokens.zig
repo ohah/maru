@@ -165,6 +165,8 @@ pub const ColorRole = enum {
     bracket_pair_2,
     bracket_pair_3,
     bracket_unexpected,
+    /// 공백 표시 기호(§5.1e) — `·` · `→`.
+    whitespace,
     /// 짝 괄호 상자의 테두리(§5.1b).
     bracket_match_border,
     /// 짝 괄호 상자의 채움(§5.1b) — 알파로 얹는다(VS Code `editorBracketMatch.background` = `#0064001a`).
@@ -427,6 +429,8 @@ pub const ThemeColors = struct {
     bracket_pair_2: Rgb = .{ .r = 0xDA, .g = 0x70, .b = 0xD6 },
     bracket_pair_3: Rgb = .{ .r = 0x17, .g = 0x9F, .b = 0xFF },
     bracket_unexpected: Rgb = .{ .r = 0xD0, .g = 0x14, .b = 0x14 },
+    /// 공백 표시 기호(§5.1e) — 기본은 VS Code 다크 기본 테마의 값을 바탕에 얹은 것.
+    whitespace: Rgb = .{ .r = 0x3d, .g = 0x3d, .b = 0x3d },
     /// 짝 괄호 채움(§5.1b) — **테마와 무관한 상수**다. VS Code 도 다크·라이트·고대비 다크가 같은 `#006400`(알파 `1a`)이다.
     bracket_match: Rgb = .{ .r = 0, .g = 100, .b = 0 },
 };
@@ -497,6 +501,7 @@ pub const Tokens = struct {
         palette.set(.bracket_pair_2, theme.bracket_pair_2);
         palette.set(.bracket_pair_3, theme.bracket_pair_3);
         palette.set(.bracket_unexpected, theme.bracket_unexpected);
+        palette.set(.whitespace, theme.whitespace);
         palette.set(.bracket_match, theme.bracket_match);
         palette.set(.selection, theme.selection);
         palette.set(.cursor, theme.cursor);

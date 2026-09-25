@@ -932,7 +932,19 @@ pub const Decorations = struct {
     bracket_marks: ?[]const []const chrome_editor.frame.Mark = null,
     indent_guides: chrome_editor.frame.GuideWindow = .{},
     guide_unit: u16 = 0,
+    render_whitespace: chrome_editor.frame.WhitespaceMode = .none,
 };
+
+/// 설정의 공백 표시 모드(§5.1e) → 프레임의 것. 단일 편집기와 비교 뷰의 두 열이 같은 값을 쓴다.
+pub fn whitespaceModeFor(self: *AppSession) chrome_editor.frame.WhitespaceMode {
+    return switch (self.loaded_config.config.editor.render_whitespace) {
+        .none => .none,
+        .boundary => .boundary,
+        .selection => .selection,
+        .trailing => .trailing,
+        .all => .all,
+    };
+}
 
 /// 단일 편집기의 장식(§5.1b). 현재 줄은 **설정과 선택**만 보고(포커스와 무관 — VS Code 의 테두리 규칙에 포커스 조건이 없다), 짝 괄호는
 /// 포커스까지 본다(`brackets_client.modeFor`). 활성 줄 번호는 primary caret 의 줄을 **보이는 줄 축**으로 옮긴 것이다.
@@ -959,7 +971,7 @@ fn paneDecorations(self: *AppSession, term: *Term) Decorations {
         break :blk sticky_client.visibleOf(if (term.rt.editor_visible_lines.len > 0) term.rt.editor_visible_numbers else &.{}, doc_line, axis_len);
     };
     const gw = guides_client.window(self, term);
-    return .{ .line_highlight = mode, .selection_empty = empty, .active_line = active, .bracket_marks = brackets_client.marks(self, term), .indent_guides = gw.win, .guide_unit = gw.unit };
+    return .{ .line_highlight = mode, .selection_empty = empty, .active_line = active, .bracket_marks = brackets_client.marks(self, term), .indent_guides = gw.win, .guide_unit = gw.unit, .render_whitespace = whitespaceModeFor(self) };
 }
 
 pub fn buildPaneOps(
@@ -1037,7 +1049,7 @@ pub fn buildPaneOps(
     const inset: i32 = @intCast(chrome_editor.frame.content_inset_px);
     const inner: chrome_draw.Rect = .{ .x = 0, .y = 0, .w = rect.w -| chrome_editor.frame.content_inset_px * 2, .h = rect.h -| chrome_editor.frame.content_inset_px * 2 };
     const w = diff_frame.buildSide(
-        .{ .lines = lines, .first_col = first_col, .numbers = numbers, .total_lines = total_lines, .folds = folds, .content_max_cols = content_max_cols, .row_cache = row_cache, .selection_marks = selection_marks, .occurrence_marks = occurrence_marks, .search_marks = search_marks, .search_current = search_current, .search_marker_lines = search_marker_lines, .search_marker_current = search_marker_current, .line_colors = line_colors, .line_seeks = line_seeks, .line_inlays = line_inlays, .carets = carets, .widgets = widgets, .bands = bands, .minimap = minimap, .diag_marks = if (diag) |d| d.marks else null, .diag_markers = if (diag) |d| d.markers else null, .diag_lines = if (diag) |d| d.lines else &.{}, .sticky = sticky, .line_highlight = deco.line_highlight, .selection_empty = deco.selection_empty, .active_line = deco.active_line, .bracket_marks = deco.bracket_marks, .indent_guides = deco.indent_guides, .guide_unit = deco.guide_unit },
+        .{ .lines = lines, .first_col = first_col, .numbers = numbers, .total_lines = total_lines, .folds = folds, .content_max_cols = content_max_cols, .row_cache = row_cache, .selection_marks = selection_marks, .occurrence_marks = occurrence_marks, .search_marks = search_marks, .search_current = search_current, .search_marker_lines = search_marker_lines, .search_marker_current = search_marker_current, .line_colors = line_colors, .line_seeks = line_seeks, .line_inlays = line_inlays, .carets = carets, .widgets = widgets, .bands = bands, .minimap = minimap, .diag_marks = if (diag) |d| d.marks else null, .diag_markers = if (diag) |d| d.markers else null, .diag_lines = if (diag) |d| d.lines else &.{}, .sticky = sticky, .line_highlight = deco.line_highlight, .selection_empty = deco.selection_empty, .active_line = deco.active_line, .bracket_marks = deco.bracket_marks, .indent_guides = deco.indent_guides, .guide_unit = deco.guide_unit, .render_whitespace = deco.render_whitespace },
         .{ .first_line = first_line, .first_piece = first_piece, .caret_visible = caret_visible, .caret_shape = caret_shape, .wrap = wrap, .tab_width = tab_width, .cell_w_px = cell_w_px, .cell_h_px = cell_h_px, .font_px = font_px },
         inner,
         // **배경만 뒤로 물린다.** 내용 op이 (0,0)에서 시작해야 셀 격자 양자화(`buildTextDrawList`가
@@ -1949,8 +1961,8 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
         break :blk buildDiffPaneOps(
             // **검색 강조는 검색 중인 열에만 간다**(§5.1 「비교 뷰 검색」 — 한 번에 한 열이다).
             // 양쪽에 칠하면 카운터가 세지 않은 자리에 색이 남아, Enter 가 어디로 갈지 화면이 거짓말한다.
-            .{ .lines = st.left_texts, .numbers = st.left_numbers, .total_lines = st.left_lines.len, .bands = st.left_bands, .marks = st.left_marks, .first_col = effectiveFirstCol(wrap, term, false), .content_max_cols = maxColsForRender(self, term, false), .selection_marks = buildDiffSelectionMarks(self, term, .left), .search_marks = diffSearchMarksFor(self, term, .left, find_marks), .search_current = diffSearchMarksFor(self, term, .left, find_current), .search_marker_lines = diffMarkerLinesFor(self, term, .left, marker_lines), .search_marker_current = diffSearchMarksFor(self, term, .left, marker_current), .carets = buildDiffCarets(self, term, .left), .line_colors = editor_diff_ops.sideColors(self, term, .left) },
-            .{ .lines = st.right_texts, .numbers = st.right_numbers, .total_lines = st.right_lines.len, .bands = st.right_bands, .marks = st.right_marks, .first_col = effectiveFirstCol(wrap, term, true), .content_max_cols = maxColsForRender(self, term, true), .selection_marks = buildDiffSelectionMarks(self, term, .right), .search_marks = diffSearchMarksFor(self, term, .right, find_marks), .search_current = diffSearchMarksFor(self, term, .right, find_current), .search_marker_lines = diffMarkerLinesFor(self, term, .right, marker_lines), .search_marker_current = diffSearchMarksFor(self, term, .right, marker_current), .carets = buildDiffCarets(self, term, .right), .line_colors = editor_diff_ops.sideColors(self, term, .right) },
+            .{ .lines = st.left_texts, .numbers = st.left_numbers, .total_lines = st.left_lines.len, .bands = st.left_bands, .marks = st.left_marks, .first_col = effectiveFirstCol(wrap, term, false), .content_max_cols = maxColsForRender(self, term, false), .selection_marks = buildDiffSelectionMarks(self, term, .left), .render_whitespace = whitespaceModeFor(self), .search_marks = diffSearchMarksFor(self, term, .left, find_marks), .search_current = diffSearchMarksFor(self, term, .left, find_current), .search_marker_lines = diffMarkerLinesFor(self, term, .left, marker_lines), .search_marker_current = diffSearchMarksFor(self, term, .left, marker_current), .carets = buildDiffCarets(self, term, .left), .line_colors = editor_diff_ops.sideColors(self, term, .left) },
+            .{ .lines = st.right_texts, .numbers = st.right_numbers, .total_lines = st.right_lines.len, .bands = st.right_bands, .marks = st.right_marks, .first_col = effectiveFirstCol(wrap, term, true), .content_max_cols = maxColsForRender(self, term, true), .selection_marks = buildDiffSelectionMarks(self, term, .right), .render_whitespace = whitespaceModeFor(self), .search_marks = diffSearchMarksFor(self, term, .right, find_marks), .search_current = diffSearchMarksFor(self, term, .right, find_current), .search_marker_lines = diffMarkerLinesFor(self, term, .right, marker_lines), .search_marker_current = diffSearchMarksFor(self, term, .right, marker_current), .carets = buildDiffCarets(self, term, .right), .line_colors = editor_diff_ops.sideColors(self, term, .right) },
             term.rt.editor_first_line,
             effectiveFirstPiece(wrap, term),
             self.blink_visible,
@@ -42468,4 +42480,79 @@ test "BPP3 처음 목록 훑기가 여러 프레임에 걸치면 프레임마다
     }
     try testing.expect(edited and frames > 3); // 여러 프레임에 걸쳤다
     try testing.expectEqual(rebuilds0 + 1, st.brackets.rebuilds); // 다시 시작하지 않았다
+}
+
+const GlyphCell = struct { col: u16, fg: ?maru.terminal.Rgb };
+
+/// 그린 셀에서 `row` 행의 그 글자들의 열(행 첫 글자 기준 상대 열)과 전경.
+fn glyphCellsOnRow(dl: renderer.DrawList, row: u16, base_col: u16, cp: u21, out: []GlyphCell) usize {
+    var n: usize = 0;
+    for (dl.cells) |c| {
+        if (c.row != row or c.codepoint != cp or n == out.len) continue;
+        out[n] = .{ .col = c.col - base_col, .fg = switch (c.style.foreground) {
+            .rgb => |v| v,
+            else => null,
+        } };
+        n += 1;
+    }
+    std.mem.sort(GlyphCell, out[0..n], {}, struct {
+        fn lt(_: void, a: GlyphCell, b: GlyphCell) bool {
+            return a.col < b.col;
+        }
+    }.lt);
+    return n;
+}
+
+test "WSP1 공백 표시 — 기본(selection)은 선택 안의 공백 `·` · 탭 `→` 만 옅은 색으로; 커서만이면 없고, all 은 전부, none 은 없다 (제품 경계, §5.1e)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    fx.session.loaded_config.config.editor.sticky_scroll = false;
+    const term = try openBracketFixture(&fx, allocator, "w.txt", "qa  b\tc\nzx y\n");
+    const ws = fx.session.buildChromeTokens().get(.whitespace);
+    const Cell = GlyphCell;
+    const Probe = struct {
+        fn frame(f: *PaneFixture, t: *Term, a: std.mem.Allocator, dots: []Cell, arrows: []Cell, dots2: []Cell) ![3]usize {
+            var d = appendPaneFrame(f.session, f.leaf_rect, t) orelse return error.EditorPaneDidNotDraw;
+            defer d.dl.deinit(a);
+            const r0 = rowStartingWith(d.dl, "qa") orelse return error.NoRow;
+            const r1 = rowStartingWith(d.dl, "zx") orelse return error.NoRow;
+            const base = blk: {
+                for (d.dl.cells) |c| if (c.row == r0 and c.codepoint == 'q') break :blk c.col;
+                return error.NoBase;
+            };
+            return .{
+                glyphCellsOnRow(d.dl, r0, base, 0xB7, dots),
+                glyphCellsOnRow(d.dl, r0, base, 0x2192, arrows),
+                glyphCellsOnRow(d.dl, r1, base, 0xB7, dots2),
+            };
+        }
+    };
+    var dots: [8]Cell = undefined;
+    var arrows: [8]Cell = undefined;
+    var dots2: [8]Cell = undefined;
+    // 커서만 — 없다
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    var n = try Probe.frame(&fx, term, allocator, &dots, &arrows, &dots2);
+    try testing.expectEqual([3]usize{ 0, 0, 0 }, n);
+    // 첫 줄 `a  b\t` 를 고른다(1..6) — 공백 2·3 → `·`, 탭 5 → `→`; 둘째 줄은 선택 밖
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(1, 6);
+    n = try Probe.frame(&fx, term, allocator, &dots, &arrows, &dots2);
+    try testing.expectEqual([3]usize{ 2, 1, 0 }, n);
+    try testing.expectEqual(@as(u16, 2), dots[0].col);
+    try testing.expectEqual(@as(u16, 3), dots[1].col);
+    try testing.expectEqual(@as(u16, 5), arrows[0].col);
+    try testing.expectEqual(ws, dots[0].fg.?);
+    try testing.expectEqual(ws, arrows[0].fg.?);
+    // all — 선택과 무관하게 둘째 줄 공백도
+    fx.session.loaded_config.config.editor.render_whitespace = .all;
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    n = try Probe.frame(&fx, term, allocator, &dots, &arrows, &dots2);
+    try testing.expectEqual([3]usize{ 2, 1, 1 }, n);
+    // none — 없다
+    fx.session.loaded_config.config.editor.render_whitespace = .none;
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(1, 6);
+    n = try Probe.frame(&fx, term, allocator, &dots, &arrows, &dots2);
+    try testing.expectEqual([3]usize{ 0, 0, 0 }, n);
 }

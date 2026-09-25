@@ -22,12 +22,11 @@ live=0
 
 sidecar_dir="$PWD/zig-out/web-sidecar"
 app=./zig-out/bin/maru-macos-app
-restore_exe="$PWD/zig-out/bin/maru-session-host-input-source-restore"
 bundle="$PWD/zig-out/Maru.app"
 test -x "$sidecar_dir/maru-web-host" || { echo "web-osr tester: build the sidecar first (mise run web-sidecar)" >&2; exit 2; }
 test -x "$app" || { echo "web-osr tester: build the app first (zig build macos-app-build)" >&2; exit 2; }
 if [ "$live" = 1 ]; then
-    test -x "$restore_exe" && test -d "$bundle" || { echo "web-osr tester: build the app first (zig build macos-app-build)" >&2; exit 2; }
+    test -d "$bundle" || { echo "web-osr tester: build the app first (zig build macos-app-build)" >&2; exit 2; }
 fi
 keep=${MARU_WEB_OSR_TESTER_KEEP:-}
 [ -z "$keep" ] || [ ! -e "$keep" ] || { echo "web-osr tester: MARU_WEB_OSR_TESTER_KEEP=$keep already exists" >&2; exit 2; }
@@ -35,16 +34,22 @@ keep=${MARU_WEB_OSR_TESTER_KEEP:-}
 root=$(mktemp -d "/tmp/maru-web-osr-tester.XXXXXX")
 server_pid=""
 app_pid=""
+watchdog_pid=""
 clip_saved=0
+restore_exe="$root/input-source-restore"
 cleanup() {
+    [ -n "$watchdog_pid" ] && kill "$watchdog_pid" 2>/dev/null || true
     [ -n "$app_pid" ] && kill "$app_pid" 2>/dev/null || true
     [ -n "$server_pid" ] && kill "$server_pid" 2>/dev/null || true
     pkill -KILL -f "$root" 2>/dev/null || true
     if [ "$live" = 1 ]; then
-        # 앱이 되돌리지 못하고 죽었으면 입력 소스(우리가 고른 소스일 때만 — 복원 도구의 규칙)를 되돌린다. 클립보드 글은
-        # 앱이 시작했는데(`live begun`) 되돌렸다는 보고가 없을 때만 — 앱이 되돌렸거나 시작도 안 했으면 덮지 않는다.
-        [ -f "$root/input-source-restore.json" ] && "$restore_exe" "$root/input-source-restore.json" || true
-        if [ "$clip_saved" = 1 ] && grep -q '^live begun' "$root/report" 2>/dev/null && ! grep -q '^live restored' "$root/report"; then
+        # 앱이 되돌리지 못하고 죽었으면(SIGTERM·SIGKILL 은 applicationWillTerminate 를 안 부른다) 입력 소스(우리가 고른
+        # 소스일 때만 — 복원 도구의 규칙)를 되돌린다. 클립보드 글은 앱이 ⌘C 를 보냈는데(`live clipboard-touched`) 되돌렸다는
+        # 보고가 없고, 시작 전 클립보드가 글이었을 때만 — 글이 아닌 클립보드(그림·파일)는 pbcopy 로 되살릴 수 없어 비우지
+        # 않는다.
+        [ -f "$root/input-source-restore.json" ] && [ -x "$restore_exe" ] && "$restore_exe" "$root/input-source-restore.json" || true
+        if [ "$clip_saved" = 1 ] && [ -s "$root/clip.txt" ] && grep -q '^live clipboard-touched' "$root/report" 2>/dev/null &&
+            ! grep -q '^live restored' "$root/report"; then
             pbcopy < "$root/clip.txt" || true
         fi
     fi
@@ -79,7 +84,7 @@ PAGE = ("<!doctype html><title>tester</title><style>html,body{margin:0;height:10
     "addEventListener('dblclick',function(e){ping('e=dblclick&d='+e.detail)});"
     "addEventListener('contextmenu',function(e){e.preventDefault();ping('e=contextmenu')});"
     "addEventListener('auxclick',function(e){if(e.button==1)ping('e=aux')});"
-    "var out=false,held=false;addEventListener('mousemove',function(e){if(!(e.buttons&1)){held=false;return}"
+    "var out=false,held=false,mv=0;addEventListener('mousemove',function(e){if(!(e.buttons&1)){held=false;if(Date.now()-mv>300){mv=Date.now();ping('e=mv')}return}"
     "if(!held){held=true;ping('e=bmove&x='+e.clientX+'&y='+e.clientY)}if(e.clientX<0&&!out){out=true;ping('e=dragout&x='+e.clientX)}});"
     "addEventListener('hashchange',function(){ping('e=hash&h='+encodeURIComponent(location.hash))});"
     "requestAnimationFrame(function(){requestAnimationFrame(function(){ping('e=ready')})});"
@@ -98,6 +103,14 @@ sleep 1
 
 fail() { echo "web-osr tester failed: $1" >&2; exit 1; }
 
+# 앱이 멈춰 스모크 시간에 끝나지 않으면(메인 스레드 정지 등) 죽인다 — 자리 비움 모드에서 maru 가 입력 소스를 쥔 채 맨 앞에
+# 남지 않게.
+watchdog() { # $1=실행 ms
+    [ -n "$app_pid" ] || return 0
+    (sleep $(($1 / 1000 + 30)); kill "$app_pid" 2>/dev/null) &
+    watchdog_pid=$!
+}
+
 run_app() { # $1=대본 $2=실행 ms, 나머지는 추가 환경(NAME=값)
     script=$1; ms=$2; shift 2
     rm -rf "$root/home" && mkdir -p "$root/home"
@@ -114,7 +127,7 @@ run_app() { # $1=대본 $2=실행 ms, 나머지는 추가 환경(NAME=값)
         for kv in "$@"; do set -- "$@" --env "$kv"; done
         shift "$count"
         before=$(pgrep -f "$bundle/Contents/MacOS/maru-macos-app" || true)
-        /usr/bin/open -n -W --stdout "$root/app.log" --stderr "$root/app.log" "$@" "$bundle" &
+        /usr/bin/open -n -W --stdout "$root/app.out.log" --stderr "$root/app.log" "$@" "$bundle" &
         open_pid=$!
         for _ in $(seq 1 100); do
             for pid in $(pgrep -f "$bundle/Contents/MacOS/maru-macos-app" || true); do
@@ -123,11 +136,13 @@ run_app() { # $1=대본 $2=실행 ms, 나머지는 추가 환경(NAME=값)
             [ -n "$app_pid" ] && break
             sleep 0.1
         done
+        watchdog "$ms"
         wait "$open_pid" || true
         app_pid=""
     else
         env "$@" "$app" > "$root/app.log" 2>&1 &
         app_pid=$!
+        watchdog "$ms"
         wait "$app_pid" || true
         app_pid=""
     fi
@@ -326,6 +341,8 @@ names = [m[0] for m in marks]
 t_new = marks[names.index('newwindow')][1] if 'newwindow' in names else 1 << 62
 first = {e['p'] for e in evs if int(e['t']) < t_new}
 check(len(first) == 1, f'one page instance until the new window (no reload in between: {sorted(first)})')
+readies = [e['p'] for e in evs if e.get('e') == 'ready']
+check(len(readies) == 2 and len(set(readies)) == 2, f'exactly two page loads — the first window and the new window ({readies})')
 P0 = next(iter(first)) if first else None
 def mine(name): return [e for e in phase(name) if e.get('p') == P0]
 
@@ -383,7 +400,7 @@ lu = mine('lostup')
 check([int(e['x']) for e in at(lu, 'down')] == [X0 - 50, X0 + 50] and [int(e['x']) for e in at(lu, 'click')] == [X0 + 50],
       f'a press on the page whose release was lost: a press outside (address bar) starts a new gesture there, not a page drag ({[(e["e"], e.get("x"), e.get("y")) for e in lu]})')
 td = mine('outdrag')
-check(not any(x in kinds(td) for x in ('down', 'click', 'bmove', 'dragout')), f'a drag that starts outside the page (address bar) and crosses it sends the page nothing ({kinds(td)})')
+check(not any(x in kinds(td) for x in ('down', 'click', 'bmove', 'mv', 'dragout')), f'a drag that starts outside the page (address bar) and crosses it sends the page nothing ({kinds(td)})')
 check('focus' in kinds(mine('refocus')), 'clicking the page again gives it focus back')
 sp = mine('split')
 check('blur' in kinds(sp) and 'kd' not in kinds(sp), f'⌘D (menu) splits to a terminal pane: the page blurs and typing does not reach it ({kinds(sp)})')
@@ -410,6 +427,13 @@ if [ "$live" = 1 ]; then
 echo "web-osr tester --live: maru comes to the front, switches the input source to Korean 2-Set and moves the pointer."
 echo "  Do not touch the keyboard or mouse. Everything is restored at the end. Ctrl-C now to cancel."
 sleep 5
+# 입력 소스 복원 도구(CR6d 와 같은 두 소스 — `macos-app-build` 는 만들지 않는다)를 먼저 만든다. 없으면 입력 소스를 바꾸지 않는다.
+xcrun swiftc -parse-as-library src/platform/macos/SessionHostInputSourcePolicy.swift src/platform/macos/SessionHostInputSourceRestore.swift \
+    -o "$restore_exe" > "$root/restore-build.log" 2>&1 || fail "could not build the input-source restore tool ($root/restore-build.log)"
+# LaunchServices 로 띄운 앱은 제 TCC 책임자다 — 문서 폴더 아래의 sidecar 를 읽다 권한 창이 뜨지 않게 임시 뿌리로 복제한다.
+cp -cR "$sidecar_dir" "$root/web-sidecar" 2>/dev/null || cp -R "$sidecar_dir" "$root/web-sidecar"
+sidecar_dir="$root/web-sidecar"
+front=$(osascript -e 'id of application (path to frontmost application as text)' 2>/dev/null || true)
 pbpaste > "$root/clip.txt" 2>/dev/null && clip_saved=1 || true
 cat > "$root/live.txt" <<'SCRIPT'
 sleep 7000
@@ -450,6 +474,7 @@ live key 0 32
 live key 8 32
 sleep 300
 live key 124
+sleep 200
 live key 9 32
 sleep 500
 live settle
@@ -472,7 +497,7 @@ mark live-end
 live end
 sleep 500
 SCRIPT
-run_app "$root/live.txt" 32000 MARU_WEB_OSR_TEST_LIVE="$root/input-source-restore.json"
+run_app "$root/live.txt" 26000 MARU_WEB_OSR_TEST_LIVE="$root/input-source-restore.json" MARU_WEB_OSR_TEST_LIVE_FRONT="${front:-none}"
 cat "$root/report"
 python3 - "$root/requests.log" "$root/report" "$root/judge.py" <<'PY' || fail "the real input method, pointer or clipboard did not reach the Chromium tab as expected"
 import sys
@@ -480,7 +505,7 @@ exec(open(sys.argv[3]).read())
 def vals(name): return [e['v'] for e in at(phase(name), 'val')]
 state = [l for l in lines if l.startswith('live owns=')]
 check(bool(state) and 'owns=true' in state[0] and 'Korean.2SetKorean' in state[0], f'maru is frontmost with Korean 2-Set selected ({state})')
-check(not any(l.startswith(('live-not-front', 'live-refused', 'live-source-failed', 'live-covered', 'live-no-window')) for l in lines),
+check(not any(l.startswith(('live-not-front', 'live-refused', 'live-source-failed', 'live-covered', 'live-no-window', 'live-no-post-access')) for l in lines),
       'every real key and pointer event was sent (maru stayed in front and uncovered)')
 c = phase('live-click')
 downs = at(c, 'down')
@@ -491,7 +516,7 @@ OX, OY = (int(press[0][2]) - X0, int(press[0][3]) - Y0) if press else (0, 0)
 pre = '\n    '
 h = phase('live-hangul')
 check(any(e['v'] == pre + '안' and e['comp'] == '1' for e in at(h, 'val')), f'the real input method composes ㅇ → 아 → 안 in the page ({vals("live-hangul")})')
-check(any(e['d'] == '안' for e in at(h, 'cend')) and vals('live-hangul')[-1:] == [pre + '안 '], 'Space commits 안 and types the space')
+check(any(e['d'] in ('안', '안 ') for e in at(h, 'cend')) and vals('live-hangul')[-1:] == [pre + '안 '], 'Space commits 안 and types the space')
 rect = [l.split() for l in lines if l.startswith('imerect')]
 rx, ry = (int(rect[0][1]), int(rect[0][2])) if rect else (-1, -1)
 check(OX + 20 <= rx <= OX + 200 and OY + 20 <= ry <= OY + 120, f'the candidate window sits at the real composition (rect {rx},{ry}, page origin {OX},{OY})')

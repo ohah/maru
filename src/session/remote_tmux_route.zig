@@ -22,6 +22,10 @@ pub const Observed = struct {
     /// `$TMUX` 의 소켓 경로. 사용자가 `-L`/`-S` 를 쓰면 기본 소켓이 아니다 — 그때 기본으로 물으면
     /// **엉뚱한 서버**를 본다(2026-08-29 실측: 기본 조회가 남의 세션을 봤다).
     socket: ?[]const u8 = null,
+    /// `$TMUX` 의 **서버 pid**(가운데 칸). tmux 서버가 다시 뜨면 이 값이 바뀌고 pane 번호는 `%0` 부터
+    /// 다시 매겨진다 — 그래서 **이름만으로는 세대를 못 가른다**(RA7.6, 2026-09-25 실측: 옛 서버의
+    /// `%8` 사이드카가 새 서버의 살아 있는 `%8` 로 통과해 남의 카드로 갈 뻔했다).
+    server: ?[]const u8 = null,
     /// 역조회를 **실제로 물어봤는가**. 원격에 `tmux` 바이너리가 없으면 물어보지도 못한다.
     ///
     /// ⚠️ **이 칸이 없으면 「못 물어봤다」와 「진짜 detached」가 같은 값이 된다**(적대적 검증 2026-08-29 이
@@ -68,6 +72,16 @@ pub const no_tmux_marker = "!maru-no-tmux";
 /// `%` 로 시작하지 않아 pane 토큰과 안 섞이고, nonce 클래스가 `@` 를 안 받아 클라이언트 줄과도 안 섞인다.
 pub const panes_marker = "@maru-panes";
 
+/// **지금 살아 있는 tmux 서버의 pid** 구획을 여는 표식(RA7.6).
+///
+/// pane 이름은 서버가 다시 뜨면 `%0` 부터 다시 매겨지므로 **이름만으로는 세대를 못 가른다** —
+/// 옛 서버의 `%8` 이 새 서버의 살아 있는 `%8` 과 같은 글자다. 그러면 그 사이드카가 살아남아
+/// 이벤트가 **남의 카드로 간다**(2026-09-25 실측: `pid=1591 %8` 이 그 자리였다).
+///
+/// 같은 조회에 얹는 이유는 `panes_marker` 와 같다 — fork 를 안 늘린다. **클라이언트 구획보다
+/// 앞에 두지 않는다**: `parseClients` 가 이 표식에서 멈추므로 순서가 곧 계약이다.
+pub const server_marker = "@maru-server";
+
 /// 훅이 남긴 **옆 파일**(`<nonce>.tmux`)의 내용을 읽는다.
 ///
 /// 형식은 `<$TMUX>\t<$TMUX_PANE>\n` 한 줄이다. tmux 밖이면 두 칸이 다 비어 있고, 그때는 `null` 을
@@ -84,13 +98,22 @@ pub fn parseSidecar(bytes: []const u8) ?Observed {
     const tmux_env = std.mem.trim(u8, it.next() orelse return null, " \t\r");
     const pane = std.mem.trim(u8, it.next() orelse "", " \t\r");
     if (pane.len == 0) return null; // tmux 밖
+    const comma = std.mem.indexOfScalar(u8, tmux_env, ',');
     const socket = blk: {
         if (tmux_env.len == 0) break :blk null;
-        const comma = std.mem.indexOfScalar(u8, tmux_env, ',') orelse tmux_env.len;
-        const sock = tmux_env[0..comma];
+        const sock = tmux_env[0 .. comma orelse tmux_env.len];
         break :blk if (sock.len == 0) null else sock;
     };
-    return .{ .pane = pane, .socket = socket };
+    // **가운데 칸이 서버 pid 다**(`<소켓>,<pid>,<세션번호>`). 칸이 모자라면 `null` — 「모른다」이지
+    // 「다르다」가 아니라서, 호출자는 그때 아무것도 안 지운다.
+    const server = blk: {
+        const c = comma orelse break :blk null;
+        const rest = tmux_env[c + 1 ..];
+        const c2 = std.mem.indexOfScalar(u8, rest, ',') orelse rest.len;
+        const pid = std.mem.trim(u8, rest[0..c2], " \t\r");
+        break :blk if (pid.len == 0) null else pid;
+    };
+    return .{ .pane = pane, .socket = socket, .server = server };
 }
 
 /// 역조회 스크립트. **`/bin/sh` 가 그 기계에서 직접 돈다** — 스트리머가 이미 그 기계에 있으므로 ssh 왕복이
@@ -113,8 +136,9 @@ pub fn lookupScript(allocator: std.mem.Allocator, socket: []const u8, pane: []co
         \\tmux -S '{s}' list-clients -t "$s" -F '#{{client_pid}}' 2>/dev/null | while IFS= read -r p; do
         \\if [ -r "/proc/$p/environ" ]; then tr '\0' '\n' < "/proc/$p/environ" | sed -n 's/^LC_MARU_PANE=//p' | head -1;
         \\else ps -E -p "$p" 2>/dev/null | tr ' ' '\n' | sed -n 's/^LC_MARU_PANE=//p' | head -1; fi; echo; done; done
+        \\echo '{s}'; tmux -S '{s}' display -p '#{{pid}}' 2>/dev/null
         \\echo '{s}'; tmux -S '{s}' list-panes -a -F '#{{pane_id}}' 2>/dev/null
-    , .{ no_tmux_marker, socket, pane, socket, panes_marker, socket });
+    , .{ no_tmux_marker, socket, pane, socket, server_marker, socket, panes_marker, socket });
 }
 
 /// 스크립트 출력을 클라이언트 목록으로 접는다.
@@ -135,6 +159,9 @@ pub fn parseClients(out: []const u8, buf: []Client) ?[]const Client {
         // **pane 구획은 클라이언트가 아니다.** 표식 아래는 `%3` 같은 pane 이름인데 그것을 nonce 로 세면
         // 클라이언트가 여럿인 것처럼 보여 귀속이 통째로 `ambiguous` 로 접힌다(= 배지가 안 선다).
         if (std.mem.eql(u8, nonce, panes_marker)) break;
+        // **서버 구획도 클라이언트가 아니다**(RA7.6). 이 표식이 pane 구획보다 **앞에** 오므로 여기서
+        // 멈추지 않으면 pid 한 줄이 nonce 로 세어져 귀속이 통째로 `ambiguous` 가 된다.
+        if (std.mem.eql(u8, nonce, server_marker)) break;
         buf[n] = .{ .nonce = if (nonce.len == 0) null else nonce };
         n += 1;
     }
@@ -147,6 +174,18 @@ pub fn parseClients(out: []const u8, buf: []Client) ?[]const Client {
 /// 출력이 잘렸다는 뜻이다. **그때는 아무것도 지우면 안 된다**: 한 번의 잘못된 «없음» 이 살아 있는 행을
 /// 전부 지운다. 빈 구획도 같은 뜻으로 접는다 — tmux 가 살아 있는데 pane 이 0 개일 수는 없으므로 빈 것은
 /// 조회 실패다(서버가 그 사이 죽었거나 출력이 잘렸다).
+/// 조회 출력에서 **살아 있는 서버 pid** 한 줄. 표식이 없거나 비면 `null`(= 모른다).
+///
+/// pane 구획이 바로 뒤에 오므로 그 표식 앞까지만 본다 — 안 자르면 pid 뒤에 pane 목록이 붙는다.
+pub fn serverSection(out: []const u8) ?[]const u8 {
+    if (std.mem.indexOf(u8, out, no_tmux_marker) != null) return null;
+    const at = std.mem.indexOf(u8, out, server_marker) orelse return null;
+    const rest = out[at + server_marker.len ..];
+    const end = std.mem.indexOf(u8, rest, panes_marker) orelse rest.len;
+    const trimmed = std.mem.trim(u8, rest[0..end], " \t\r\n");
+    return if (trimmed.len == 0) null else trimmed;
+}
+
 pub fn panesSection(out: []const u8) ?[]const u8 {
     if (std.mem.indexOf(u8, out, no_tmux_marker) != null) return null;
     const at = std.mem.indexOf(u8, out, panes_marker) orelse return null;
@@ -326,6 +365,57 @@ test "panesSection: 모르는 것과 없는 것을 가른다 — 잘못된 «없
     try std.testing.expect(panesSection("nonce-a\n" ++ panes_marker ++ "\n   \n") == null);
 }
 
+test "RA7.6 parseSidecar: $TMUX 가운데 칸이 서버 세대다 — 이름만으로는 세대를 못 가른다" {
+    // tmux 서버가 다시 뜨면 pane 번호가 `%0` 부터 다시 매겨진다. 그래서 **옛 서버의 `%8` 과 새
+    // 서버의 `%8` 이 같은 글자**이고, 이름만 보면 옛 사이드카가 살아남아 그 nonce 의 이벤트가
+    // 남의 카드로 간다(2026-09-25 실측: `pid=1591 %8`).
+    const obs = parseSidecar("/private/tmp/tmux-501/default,1591,8\t%8\n").?;
+    try testing.expectEqualStrings("/private/tmp/tmux-501/default", obs.socket.?);
+    try testing.expectEqualStrings("1591", obs.server.?);
+    try testing.expectEqualStrings("%8", obs.pane.?);
+
+    // **칸이 모자라면 「모른다」다** — 구버전 훅이 그렇게 쓴다. `null` 이어야 호출자가 안 지운다.
+    try testing.expect(parseSidecar("/tmp/sock\t%1\n").?.server == null);
+    try testing.expect(parseSidecar("\t%1\n").?.server == null);
+    try testing.expect(parseSidecar("/tmp/sock,,3\t%1\n").?.server == null);
+}
+
+test "RA7.6 serverSection: 살아 있는 서버 세대 한 줄 — pane 목록과 안 섞인다" {
+    const out = "nonce-a\n" ++ server_marker ++ "\n2963\n" ++ panes_marker ++ "\n%0\n%7\n";
+
+    // **pid 뒤에 pane 목록이 붙으면 안 된다** — 안 자르면 «2963 %0 %7» 이 세대가 된다.
+    try testing.expectEqualStrings("2963", serverSection(out).?);
+    try testing.expectEqualStrings("%0\n%7", panesSection(out).?);
+
+    // **클라이언트는 여전히 하나다.** 새 표식에서 안 멈추면 pid 한 줄이 nonce 로 세어져 귀속이
+    // 통째로 `ambiguous` 가 된다(= 배지가 안 선다).
+    var buf: [4]Client = undefined;
+    const clients = parseClients(out, &buf).?;
+    try testing.expectEqual(@as(usize, 1), clients.len);
+    try testing.expectEqualStrings("nonce-a", clients[0].nonce.?);
+
+    // **모르는 것과 없는 것을 가른다** — `panesSection` 과 같은 규율이다.
+    try testing.expect(serverSection(no_tmux_marker ++ "\n") == null);
+    try testing.expect(serverSection(no_tmux_marker ++ "\n" ++ server_marker ++ "\n2963\n") == null);
+    try testing.expect(serverSection("nonce-a\n") == null); // 구버전 스크립트
+    try testing.expect(serverSection("nonce-a\n" ++ server_marker ++ "\n" ++ panes_marker ++ "\n%0\n") == null);
+    try testing.expect(serverSection("nonce-a\n" ++ server_marker ++ "\n   \n") == null);
+}
+
+test "RA7.6 lookupScript: 서버 세대도 같은 셸에서 묻고, pane 구획보다 앞에 둔다" {
+    const a = testing.allocator;
+    const script = try lookupScript(a, "/tmp/sock", "%3");
+    defer a.free(script);
+    try testing.expect(std.mem.indexOf(u8, script, "echo '" ++ server_marker ++ "'") != null);
+    try testing.expect(std.mem.indexOf(u8, script, "display -p '#{pid}'") != null);
+
+    // **순서가 계약이다**: `parseClients` 는 먼저 오는 표식에서 멈추고, `serverSection` 은 pane
+    // 표식 앞까지만 본다. 뒤집으면 pid 구획에 pane 목록이 섞인다.
+    const sv = std.mem.indexOf(u8, script, server_marker).?;
+    const pn = std.mem.indexOf(u8, script, panes_marker).?;
+    try testing.expect(sv < pn);
+}
+
 test "lookupScript: pane 구획을 같은 셸 안에서 묻는다 — 포크를 늘리지 않는다" {
     const script = try lookupScript(std.testing.allocator, "/tmp/sock", "%3");
     defer std.testing.allocator.free(script);
@@ -336,7 +426,10 @@ test "lookupScript: pane 구획을 같은 셸 안에서 묻는다 — 포크를 
     var it = std.mem.splitSequence(u8, script, "-S '/tmp/sock'");
     var n: usize = 0;
     while (it.next()) |_| n += 1;
-    try std.testing.expectEqual(@as(usize, 4), n); // 조각 4 = 등장 3회(display·list-clients·list-panes)
+    // 조각 5 = 등장 4회(display·list-clients·**display -p '#{pid}'**·list-panes). 서버 세대 조회가
+    // 2026-09-25 에 늘었다(RA7.6) — **이 단언이 그 변경을 잡았다**. 늘리려면 여기를 고치게 되고,
+    // 고치는 사람은 「왜 또 한 번 포크하나」를 답하게 된다.
+    try std.testing.expectEqual(@as(usize, 5), n);
 }
 
 test "lookupScript: 소켓과 pane 을 그대로 싣고, tmux 가 없으면 표식으로 말한다" {

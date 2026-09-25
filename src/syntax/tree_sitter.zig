@@ -347,6 +347,8 @@ pub const Provider = struct {
     changed: [max_changed]ByteRange = undefined,
     changed_len: u8 = 0,
     changed_all: bool = true,
+    /// 마지막 `nextOpenBracket` 이 지난 노드 수 — 판정자(`SYN50`)가 **걸음 수로** 비용을 잰다(시간은 CI 에서 흔들린다).
+    next_open_visits: u32 = 0,
 
     /// 문서 하나를 맡는다. **§5.3의 `init(문서 bytes, 언어)` 그대로다** — 언어만 받고 내용을
     /// 나중에 넣는 형태였다가 계약에 맞췄다(이름과 인자가 계약과 갈리면 문서를 읽고 코드를 찾는
@@ -788,29 +790,96 @@ pub const Provider = struct {
         return pairAmongChildren(parent, source, .{ .token = i });
     }
 
-    /// **byte `i` 의 글자가 여는 괄호 토큰인가**(§5.1b ⓐ — 짝은 안 본다). 점프의 「다음 여는 괄호」(문서 모델 §3.9c ③)가 쓴다 — VS Code 는 안 닫힌
-    /// 여는 괄호도 친다. 트리가 없으면 `false`.
+    /// **byte `i` 의 글자가 여는 괄호 토큰인가**(§5.1b ⓐ — 짝은 안 본다). 「다음 여는 괄호」(`nextOpenBracket`)의 **정의**다 — 제품은 이것을
+    /// 글자마다 부르지 않는다(느리다 — 그 함수 주석). 판정자(`SYN44`·`SYN50`)가 쓴다. 트리가 없으면 `false`.
     pub fn isOpenBracketToken(self: *Provider, source: []const u8, i: u32) bool {
         const tree = self.tree orelse return false;
+        // (범위 가드는 **등가**다 — 적대적 1회차 J13: 문서 밖 byte 로 물으면 트리가 루트를 돌려주고, 루트는 잎이 아니라 괄호 토큰이 아니다. 뜻으로 둔다.)
         if (i >= source.len) return false;
         const node = c.ts_node_descendant_for_byte_range(c.ts_tree_root_node(tree), i, i + 1);
         const tok = tokenBracket(node, source) orelse return false;
         return tok.at == i and tok.open;
     }
 
-    /// **byte `i`(또는 caret `i` 가 그 안에 선) 글 잎**(§5.1b ⓑ)의 범위 — 글이 괄호를 담는 언어(`prose_brackets`)에서 이름 있는 잎만.
-    /// 짝짓기는 호출자가 이 범위 **안에서만** 글자 훑기로 한다. 그 밖이면 `null`.
+    /// **byte `i`(또는 caret `i` 가 그 안에 선) 글 잎**(§5.1b ⓑ)의 범위 — 글이 괄호를 담는 언어(`prose_brackets`)의 글 잎(`isProseLeaf`).
+    /// 짝·감싸는 쌍은 호출자가 이 범위 **안에서만** 글자 훑기로 찾는다. 그 밖이면 `null`.
     pub fn proseLeafAt(self: *Provider, i: u32) ?ByteRange {
+        const node = self.proseNodeAt(i) orelse return null;
+        return .{ .start = c.ts_node_start_byte(node), .end = c.ts_node_end_byte(node) };
+    }
+
+    /// byte `i` 가 **다음 여는 괄호**(문서 모델 §3.9c ③)로 칠 수 있는 글 잎 속인가 — 글 잎 중 `raw_text` 는 뺀다(`isProseText`). 판정자
+    /// (`SYN50`)가 `nextOpenBracket` 의 정의로 쓴다.
+    pub fn isProseTextAt(self: *Provider, i: u32) bool {
+        const node = self.proseNodeAt(i) orelse return false;
+        return isProseText(node);
+    }
+
+    fn proseNodeAt(self: *Provider, i: u32) ?c.TSNode {
         if (!self.slot.prose_brackets) return null;
         const tree = self.tree orelse return null;
         const node = c.ts_node_descendant_for_byte_range(c.ts_tree_root_node(tree), i, i + 1);
-        // **이름 없는 잎을 거르는 것은 오늘 등가다**(적대적 1회차 T10): 표시가 선 언어는 HTML 하나이고 그 이름 없는 잎(`<`·`>`·`</`·`=`·`"`)에는
-        // 괄호 글자가 없다. 둔 이유는 뜻이다 — 글 잎은 「글」이고 구두점 토큰은 글이 아니다(표시를 다른 언어로 넓히는 날 이 줄이 일한다).
-        if (c.ts_node_is_null(node) or c.ts_node_child_count(node) != 0 or !c.ts_node_is_named(node)) return null;
+        if (!self.isProseLeaf(node)) return null;
         const s = c.ts_node_start_byte(node);
         const e = c.ts_node_end_byte(node);
         if (!(s <= i and i < e)) return null;
-        return .{ .start = s, .end = e };
+        return node;
+    }
+
+    /// 글 잎인가(§5.1b ⓑ) — 글이 괄호를 담는 언어의 **`text`·`attribute_value`·`raw_text` 잎**(HTML — 색 규칙 `bracketRuleFor` 가 VS Code 에
+    /// 맞춘 글이 `text`·`attribute_value` 이고, `raw_text` 는 `<script>`·`<style>` 본문이다). **이름 있는 잎 전부가 아니다** — `comment` 속 괄호는
+    /// 괄호가 아니다(VS Code 도 짝을 안 짓는다). 이름 없는 잎(`<`·`>`·`=`·`"`)은 구두점이라 글이 아니다.
+    fn isProseLeaf(self: *Provider, node: c.TSNode) bool {
+        if (!self.slot.prose_brackets) return false;
+        if (c.ts_node_is_null(node) or c.ts_node_child_count(node) != 0 or !c.ts_node_is_named(node)) return false;
+        const t = std.mem.span(c.ts_node_type(node));
+        return std.mem.eql(u8, t, "text") or std.mem.eql(u8, t, "attribute_value") or std.mem.eql(u8, t, "raw_text");
+    }
+
+    /// 글 잎 중 **다음 여는 괄호로 칠 글**인가 — `raw_text`(스크립트·스타일 본문)는 뺀다. 짝·감싸는 쌍은 **보이는** 판정이라(상자가 선다)
+    /// 스크립트 속 글자 훑기에 속아도 사용자가 알지만, 다음 여는 괄호는 **안 보이는** 판정이라 스크립트 문자열 속 `"("` 로 데려가면 왜 거기
+    /// 왔는지 모른다(문서 모델 §3.9c — 트리가 없으면 감싸는 쌍을 안 찾는 것과 같은 이유 · 적대적 1회차).
+    fn isProseText(node: c.TSNode) bool {
+        return !std.mem.eql(u8, std.mem.span(c.ts_node_type(node)), "raw_text");
+    }
+
+    /// **`pos` 이후 첫 여는 괄호**(문서 모델 §3.9c ③ — VS Code `findNextBracket`)의 byte. 괄호 토큰(§5.1b ⓐ)의 여는 괄호이거나 글 잎(ⓑ)
+    /// 속 여는 괄호 글자다 — 짝은 안 본다(안 닫힌 것도 친다). 없거나 트리가 없으면 `null`.
+    ///
+    /// **트리 커서로 잎을 문서 순서로 한 번 걷는다** — `pos` 앞에서 끝난 가지는 통째로 건너뛰고, 문자열·주석은 잎 하나라 한 걸음이다. 처음엔
+    /// 여는 괄호 **글자**마다 루트에서 내려가 물었는데(`isOpenBracketToken`), 한 번 내려갈 때마다 형제를 줄줄이 훑어 최상위 주석 2 만 줄 뒤의
+    /// `(` 46 만 개에서 **44 초** 걸렸다(ReleaseFast 실측 — 적대적 1회차). 답은 그 정의와 같다(`SYN50` 이 모든 자리에서 잰다).
+    pub fn nextOpenBracket(self: *Provider, source: []const u8, pos: u32) ?u32 {
+        const tree = self.tree orelse return null;
+        self.next_open_visits = 0;
+        if (pos >= source.len) return null;
+        var cursor = c.ts_tree_cursor_new(c.ts_tree_root_node(tree));
+        defer c.ts_tree_cursor_delete(&cursor);
+        while (true) {
+            const node = c.ts_tree_cursor_current_node(&cursor);
+            self.next_open_visits +|= 1;
+            if (c.ts_node_end_byte(node) > pos) {
+                if (c.ts_node_child_count(node) == 0) {
+                    if (self.leafOpenFrom(node, source, pos)) |at| return at;
+                } else if (c.ts_tree_cursor_goto_first_child(&cursor)) continue;
+            }
+            while (true) {
+                if (c.ts_tree_cursor_goto_next_sibling(&cursor)) break;
+                if (!c.ts_tree_cursor_goto_parent(&cursor)) return null;
+            }
+        }
+    }
+
+    /// 잎 `node` 에서 `pos` 이후 첫 여는 괄호 — 괄호 토큰이면 그 괄호(여는 것만), 글 잎이면 그 안의 여는 괄호 글자.
+    fn leafOpenFrom(self: *Provider, node: c.TSNode, source: []const u8, pos: u32) ?u32 {
+        if (tokenBracket(node, source)) |t| return if (t.open and t.at >= pos) t.at else null;
+        if (!self.isProseLeaf(node) or !isProseText(node)) return null;
+        const e = @min(c.ts_node_end_byte(node), @as(u32, @intCast(source.len)));
+        var k = @max(c.ts_node_start_byte(node), pos);
+        while (k < e) : (k += 1) {
+            if (source[k] == '(' or source[k] == '[' or source[k] == '{') return k;
+        }
+        return null;
     }
 
     /// **caret `pos` 를 품는 가장 안쪽 괄호 토큰 쌍**(§5.1b — VS Code `findEnclosingBrackets`). caret 이 든 가장 깊은 노드부터 조상으로 올라가며
@@ -3364,4 +3433,77 @@ test "SYN49 CSS 함수 이름만 바꿔도(`foo` ↔ `url`) 증분 목록이 처
         try std.testing.expectEqualSlices(BracketLeaf, full.leaves.items, idx.leaves.items);
     }
     try std.testing.expectEqual(@as(u64, 2), idx.partials);
+}
+
+test "SYN50 다음 여는 괄호 — 트리 걷기가 모든 자리에서 정의(글자마다 괄호 토큰·글 잎)와 같다; HTML 주석·스크립트 속은 아니다 (문서 모델 §3.9c ③)" {
+    const samples = [_]struct { lang: Language, src: []const u8 }{
+        .{ .lang = .javascript, .src = "// f(x)\nconst s = \"(\" + `a${b(1)}`; /* [ */ g(h[0], {k: 1}) ) (\n" },
+        .{ .lang = .typescript, .src = "let a: Array<number> = [1]; f<T>(x) // (\n" },
+        .{ .lang = .python, .src = "x = '(' # [\ndef f(a, b=[1]): return {a: (b)}\n" },
+        .{ .lang = .bash, .src = "echo \"$(date)\" ; f() { x; } # (\n" },
+        .{ .lang = .zig, .src = "const a = f(.{ \"(\", x }); // [\n" },
+        .{ .lang = .c, .src = "#define M(x) (x)\nint m(void) { return a[0]; } /* ( */\n" },
+        .{ .lang = .html, .src = "<p>a ) (b) [c]</p><!-- (x) --><script>s = \"(\";</script><style>a{}</style>\n" },
+        // 글 잎 사이에 괄호 든 주석 — 글 잎 **시작보다 앞**의 caret 에서 주석 속 '(' 를 건너뛰어야 한다; 글 속 `{`; 속성 값 속 `(`
+        .{ .lang = .html, .src = "x <!-- ( --> y {z} <!-- [ --> <a onclick=\"f(q)\">v</a>\n" },
+        // PHP 의 `text`(PHP 밖 HTML)는 글 잎이 아니다 — 글이 괄호를 담는 언어 표시가 없다
+        .{ .lang = .php, .src = "a (b) <?php f(1); ?> c [d]\n" },
+        .{ .lang = .markdown, .src = "# t (a)\n\n- [x] b ( c\n\n```\n(code)\n```\n" },
+    };
+    for (samples) |sm| {
+        errdefer std.debug.print("SYN50 언어 {s}\n", .{@tagName(sm.lang)});
+        var prov = Provider.init(sm.src, sm.lang, 0) orelse return error.NoProvider;
+        defer prov.deinit();
+        for (0..sm.src.len + 1) |pos| {
+            errdefer std.debug.print("SYN50 pos={d}\n", .{pos});
+            var want: ?u32 = null;
+            for (pos..sm.src.len) |j| {
+                const ch = sm.src[j];
+                if (ch != '(' and ch != '[' and ch != '{') continue;
+                if (prov.isOpenBracketToken(sm.src, @intCast(j)) or prov.isProseTextAt(@intCast(j))) {
+                    want = @intCast(j);
+                    break;
+                }
+            }
+            try std.testing.expectEqual(want, prov.nextOpenBracket(sm.src, @intCast(pos)));
+        }
+    }
+    // **HTML — 글(`text`)의 괄호만**: `a ) (b)` 의 '(' 는 치고(앞의 ')' 는 닫는 괄호라 건너뛴다), 주석 `(x)`·스크립트 문자열 `"("` 는 글이 아니다
+    const html = "<p>a ) (b)</p><!-- (x) --><script>s = \"(\";</script>\n";
+    var hp = Provider.init(html, .html, 0) orelse return error.NoProvider;
+    defer hp.deinit();
+    const open_b: u32 = @intCast(std.mem.indexOf(u8, html, "(b").?);
+    try std.testing.expectEqual(@as(?u32, open_b), hp.nextOpenBracket(html, 0));
+    const after_p: u32 = @intCast(std.mem.indexOf(u8, html, "<!--").?);
+    try std.testing.expectEqual(@as(?u32, null), hp.nextOpenBracket(html, after_p));
+    try std.testing.expectEqual(@as(?Provider.ByteRange, null), hp.proseLeafAt(@intCast(std.mem.indexOf(u8, html, "(x").?)));
+    try std.testing.expectEqual(@as(?u32, null), hp.nextOpenBracket(html, @intCast(html.len)));
+    // 스크립트 본문(`raw_text`)은 짝·감싸는 쌍에는 든다(보이는 판정) — `f(x)` 의 짝
+    const js_open: u32 = @intCast(std.mem.indexOf(u8, html, "s = ").?);
+    try std.testing.expect(hp.proseLeafAt(js_open) != null);
+    try std.testing.expect(!hp.isProseTextAt(js_open));
+    // 명시 단언 — 주석 뒤 글의 `{`, 속성 값의 `(`, PHP 의 글은 안 친다
+    const h2 = "x <!-- ( --> y {z} <a onclick=\"f(q)\">v</a>\n";
+    var hp2 = Provider.init(h2, .html, 0) orelse return error.NoProvider;
+    defer hp2.deinit();
+    try std.testing.expectEqual(@as(?u32, @intCast(std.mem.indexOf(u8, h2, "{z").?)), hp2.nextOpenBracket(h2, 0));
+    const after_z: u32 = @intCast(std.mem.indexOf(u8, h2, "} ").? + 1);
+    try std.testing.expectEqual(@as(?u32, @intCast(std.mem.indexOf(u8, h2, "(q").?)), hp2.nextOpenBracket(h2, after_z));
+    // **걸음 수** — caret 앞에서 끝난 가지는 통째로 건너뛴다: 함수 1,000 개(각 노드 스무 개 남짓) 뒤 마지막 줄의 caret 에서 걸음은 최상위
+    // 형제 수 자릿수다. 가지를 안 건너뛰면(모든 노드를 내려가면) 그 열 배를 넘는다. 초판(글자마다 루트에서 내려가기)의 44 초가 이 축이다.
+    {
+        var big: std.ArrayList(u8) = .empty;
+        defer big.deinit(std.testing.allocator);
+        for (0..1000) |_| try big.appendSlice(std.testing.allocator, "function f() { a(b(c(d)), [1, 2]); }\n");
+        const tail_at: u32 = @intCast(big.items.len);
+        try big.appendSlice(std.testing.allocator, "x + (y);\n");
+        var bp = Provider.init(big.items, .javascript, 0) orelse return error.NoProvider;
+        defer bp.deinit();
+        try std.testing.expectEqual(@as(?u32, tail_at + 4), bp.nextOpenBracket(big.items, tail_at));
+        try std.testing.expect(bp.next_open_visits > 1000 and bp.next_open_visits < 1100);
+    }
+    const php = "a (b) <?php $x = 1; ?> c\n";
+    var pp = Provider.init(php, .php, 0) orelse return error.NoProvider;
+    defer pp.deinit();
+    try std.testing.expectEqual(@as(?u32, null), pp.nextOpenBracket(php, 0));
 }

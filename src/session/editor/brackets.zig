@@ -164,18 +164,13 @@ pub fn Tree(comptime P: type) type {
             return .{ .open = p.open, .close = p.close };
         }
 
-        /// **`pos` 이후 첫 여는 괄호**(§3.9c ③ — VS Code `findNextBracket`). 여는 괄호 글자마다 그것이 괄호인지 트리에 묻는다: ⓐ 괄호 토큰이거나
-        /// ⓑ 글 잎 속 글자. 짝은 안 본다 — 안 닫힌 여는 괄호도 친다(VS Code 실측 `x| ) (` → `(` 앞). 닫는 괄호는 볼 까닭이 없다 — 짝 있는
-        /// 닫는 괄호는 감싸는 쌍이 먼저 걸렸거나 그 여는 괄호를 먼저 만나고, 짝 없는 것은 VS Code 도 건너뛴다(`x| )` → 그대로).
-        /// **상한이 없다** — 두면 큰 파일에서만 답이 달라진다(§3.9c).
+        /// **`pos` 이후 첫 여는 괄호**(§3.9c ③ — VS Code `findNextBracket`): ⓐ 괄호 토큰의 여는 괄호이거나 ⓑ 글 잎 속 여는 괄호 글자. 짝은 안
+        /// 본다 — 안 닫힌 여는 괄호도 친다(VS Code 실측 `x| ) (` → `(` 앞). 닫는 괄호는 볼 까닭이 없다 — 짝 있는 닫는 괄호는 감싸는 쌍이 먼저
+        /// 걸렸거나 그 여는 괄호를 먼저 만나고, 짝 없는 것은 VS Code 도 건너뛴다(`x| )` → 그대로). 트리 걷기는 provider 가 한다(`nextOpenBracket`).
         pub fn nextOpen(self: Self, pos: usize) ?usize {
-            var j = @min(pos, self.bytes.len);
-            while (j < self.bytes.len) : (j += 1) {
-                const b = bracketOf(self.bytes[j]) orelse continue;
-                if (!b.open) continue;
-                if (self.prov.isOpenBracketToken(self.bytes, @intCast(j)) or self.prov.proseLeafAt(@intCast(j)) != null) return j;
-            }
-            return null;
+            const at = @min(pos, self.bytes.len);
+            const k = self.prov.nextOpenBracket(self.bytes, @intCast(at)) orelse return null;
+            return k;
         }
     };
 }
@@ -309,11 +304,26 @@ const FakeProv = struct {
         const l = self.leaf orelse return null;
         return if (l.start <= i and i < l.end) .{ .start = l.start, .end = l.end } else null;
     }
-    pub fn isOpenBracketToken(self: *FakeProv, bytes: []const u8, i: u32) bool {
-        _ = bytes;
-        for (self.tokens) |t| if (t.open == i) return true;
-        for (self.lone_opens) |o| if (o == i) return true;
-        return false;
+    /// 표의 여는 괄호(짝 있는 것 · 없는 것)와 글 잎 속 여는 괄호 글자 중 `pos` 이후 첫 것 — `Provider.nextOpenBracket` 의 정의 그대로.
+    pub fn nextOpenBracket(self: *FakeProv, bytes: []const u8, pos: u32) ?u32 {
+        var best: ?u32 = null;
+        for (self.tokens) |t| if (t.open >= pos and (best == null or t.open < best.?)) {
+            best = t.open;
+        };
+        for (self.lone_opens) |o| if (o >= pos and (best == null or o < best.?)) {
+            best = o;
+        };
+        if (self.leaf) |l| {
+            var k = @max(l.start, pos);
+            while (k < l.end and k < bytes.len) : (k += 1) {
+                const b = bracketOf(bytes[k]) orelse continue;
+                if (b.open) {
+                    if (best == null or k < best.?) best = k;
+                    break;
+                }
+            }
+        }
+        return best;
     }
     pub fn enclosingBracketTokens(self: *FakeProv, bytes: []const u8, pos: u32) ?Pair {
         _ = bytes;
@@ -375,6 +385,9 @@ test "BRJ1 점프 — 닿은 괄호가 없으면 감싸는 쌍의 닫는 괄호 
     var pl: FakeProv = .{ .tokens = &.{.{ .open = 8, .close = 10 }}, .leaf = .{ .start = 0, .end = 4 } };
     const ps: Tree(FakeProv) = .{ .prov = &pl, .bytes = s };
     try testing.expectEqual(@as(?usize, 2), jumpTarget(ps, s.len, 0));
+    // **출처가 답한 자리 그대로 쓴다** — 짝을 다시 보거나 앞으로 되돌리지 않는다(caret 바로 뒤 글자 12 도 그대로)
+    try testing.expectEqual(@as(?usize, 12), ns.nextOpen(12));
+    try testing.expectEqual(@as(?usize, 8), ns.nextOpen(3));
     // **글자 훑기는 감싸는 쌍도 다음 괄호도 안 찾는다**(§3.9c — 문자열 속 괄호를 센다)
     try testing.expectEqual(@as(?usize, null), jumpTarget(Plain{ .bytes = "(a b)" }, 5, 2));
     try testing.expectEqual(@as(?usize, null), jumpTarget(Plain{ .bytes = "x (a)" }, 5, 0));

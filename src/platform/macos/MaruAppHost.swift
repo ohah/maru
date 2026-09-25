@@ -8070,6 +8070,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     //   앱은 maru 가 아직 맨 앞일 때만 — 사용자가 돌아와 한 일을 덮지 않는다. 결과는 늘 보고에 남긴다(스크립트의 폴백이 본다).
     private var testLiveSaved: (record: URL, pasteboard: [[(NSPasteboard.PasteboardType, Data)]], changeCount: Int,
                                 front: NSRunningApplication?)?
+    // ⌘C 를 보내기 직전의 클립보드 changeCount — `settle` 은 그 뒤 정확히 한 번(우리 ⌘C)만 바뀌었을 때만 받아들인다.
+    private var testLivePreCopy: Int?
 
     private func testLiveOwnsInput(_ terminal: MaruMetalTerminalView) -> Bool {
         NSApp.isActive && terminal.window?.firstResponder === terminal &&
@@ -8087,12 +8089,20 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
         switch line[1] {
         case "begin" where testLiveSaved == nil:
+            // 이벤트 보내기 권한(TCC)이 없으면 HID 가 말없이 버려진다 — 입력 소스를 바꾸기 전에 멈춘다(CR6d 와 같은 확인).
+            guard CGPreflightPostEventAccess() else {
+                Self.testReport("live-no-post-access")
+                return
+            }
             let board = NSPasteboard.general
             let items = (board.pasteboardItems ?? []).map { item in
                 item.types.compactMap { type in item.data(forType: type).map { (type, $0) } }
             }
-            testLiveSaved = (URL(fileURLWithPath: recordPath).standardizedFileURL, items, board.changeCount,
-                             NSWorkspace.shared.frontmostApplication)
+            // 앞 앱은 스크립트가 띄우기 전에 적어 넘긴다 — LaunchServices 가 띄우는 순간 maru 가 이미 앞이다.
+            let front = ProcessInfo.processInfo.environment["MARU_WEB_OSR_TEST_LIVE_FRONT"].flatMap {
+                NSRunningApplication.runningApplications(withBundleIdentifier: $0).first
+            }
+            testLiveSaved = (URL(fileURLWithPath: recordPath).standardizedFileURL, items, board.changeCount, front)
             Self.testReport("live begun pid=\(getpid())")
             NSApp.activate(ignoringOtherApps: true)
             _ = NSRunningApplication.current.activate(options: [.activateAllWindows])
@@ -8111,13 +8121,17 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         case "check":
             Self.testReport("live owns=\(testLiveOwnsInput(terminal)) source=\(SessionHostInputSourcePolicy.currentSourceID() ?? "nil")")
         case "key" where line.count >= 3:
-            // live key keyCode [수식자]
-            guard testLiveOwnsInput(terminal) else {
+            // live key keyCode [수식자] — `begin`~`end` 안에서만.
+            guard testLiveSaved != nil, testLiveOwnsInput(terminal) else {
                 Self.testReport("live-not-front")
                 return
             }
             let bits = line.count >= 4 ? (Int32(line[3]) ?? 0) : 0
             let chord = bits & (16 | 32) != 0
+            if chord, bits & 32 != 0, line[2] == "8" {
+                testLivePreCopy = NSPasteboard.general.changeCount
+                Self.testReport("live clipboard-touched")
+            }
             let source = CGEventSource(stateID: chord ? .privateState : .hidSystemState)
             for down in [true, false] {
                 let event = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(line[2]) ?? 0, keyDown: down)
@@ -8126,7 +8140,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             }
         case "move", "click":
             // live move|click fx fy dx dy — 진짜 포인터(HID). click 은 옮기고 누르고 뗀다.
-            guard line.count >= 6, testLiveOwnsInput(terminal) else {
+            guard line.count >= 6, testLiveSaved != nil, testLiveOwnsInput(terminal) else {
                 Self.testReport("live-not-front")
                 return
             }
@@ -8148,8 +8162,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             }
             if line[1] == "click" { Self.testReport("live click \(Int(local.x)) \(Int(content.bounds.height - local.y))") }
         case "settle":
-            // 클립보드를 쓰는 단계가 끝났다 — 여기까지의 변경은 시험기 것이다.
-            testLiveSaved?.changeCount = NSPasteboard.general.changeCount
+            // 클립보드를 쓰는 단계가 끝났다 — ⌘C 뒤 정확히 한 번만 바뀌었으면 그 변경은 시험기 것이다. 그 사이 다른 앱이
+            // 썼으면 받아들이지 않는다(그러면 끝에 클립보드를 되돌리지 않는다 — 남이 쓴 것을 옛 값으로 덮지 않게).
+            let now = NSPasteboard.general.changeCount
+            if let pre = testLivePreCopy, now == pre + 1 { testLiveSaved?.changeCount = now }
         case "end":
             restoreTestLive()
         default:
@@ -8161,6 +8177,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     func restoreTestLive() {
         guard let saved = testLiveSaved else { return }
         testLiveSaved = nil
+        testLivePreCopy = nil
         let outcome = SessionHostInputSourcePolicy.restore(recordURL: saved.record)
         let board = NSPasteboard.general
         let clipboardOurs = board.changeCount == saved.changeCount

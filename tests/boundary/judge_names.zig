@@ -27,13 +27,10 @@ const subject_words = [_][]const u8{ "a11y", "e2e", "stage3", "i18n" };
 
 /// 슬라이스 ID 로 이름 붙은 판정자 — **줄어들기만 한다.**
 const slice_named = [_][]const u8{
-    "tests/session_host_cr6d_boundary.zig",
-    "tests/session_host_cr6d_pixel.zig",
-    "tests/support/session_host_cr6d_pixel.zig",
 };
 
 /// 목록 길이. 줄을 지우면 이 수도 함께 줄여야 한다.
-const expected_entries: usize = 3;
+const expected_entries: usize = 0;
 
 /// 파일명 한 토막이 슬라이스 ID 인가 — **숫자와 글자가 섞였고 주제어가 아니면** 그렇다.
 /// `v1`·`v2` 는 픽스처의 버전 표시라 뺀다.

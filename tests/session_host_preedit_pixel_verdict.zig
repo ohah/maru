@@ -1,7 +1,7 @@
 //! CR6d-v2a의 두 제품 PPM이 같은 복구 surface의 실제 preedit 변화를 증명하는지 검증한다.
 
 const std = @import("std");
-const subject = @import("support/session_host_cr6d_pixel.zig");
+const subject = @import("support/session_host_preedit_pixel_verdict.zig");
 
 const black = "\x00\x00\x00";
 const white = "\xff\xff\xff";

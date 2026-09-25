@@ -3299,7 +3299,7 @@ pub fn build(b: *std.Build) void {
         run_session_host_cr6d_appkit.step.dependOn(&session_host_input_source_restore_compile.step);
         const session_host_cr6d_boundary_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/session_host_cr6d_boundary.zig"),
+                .root_source_file = b.path("tests/session_host_recovered_input_continuity_boundary.zig"),
                 .target = target,
                 .optimize = optimize,
             }),
@@ -3357,7 +3357,7 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseFast,
         });
         session_host_cr6d_pixel_verify_mod.addImport("cr6d_pixel", b.createModule(.{
-            .root_source_file = b.path("tests/support/session_host_cr6d_pixel.zig"),
+            .root_source_file = b.path("tests/support/session_host_preedit_pixel_verdict.zig"),
             .target = target,
             .optimize = .ReleaseFast,
         }));
@@ -3371,7 +3371,7 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseFast,
         });
         session_host_cr6d_pixel_verify_test_mod.addImport("cr6d_pixel", b.createModule(.{
-            .root_source_file = b.path("tests/support/session_host_cr6d_pixel.zig"),
+            .root_source_file = b.path("tests/support/session_host_preedit_pixel_verdict.zig"),
             .target = target,
             .optimize = .ReleaseFast,
         }));
@@ -4629,7 +4629,7 @@ pub fn build(b: *std.Build) void {
     // 캡처가 없어도 malformed/identity/geometry/관심영역 실패를 모든 플랫폼에서 재검증한다.
     const session_host_cr6d_pixel_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/session_host_cr6d_pixel.zig"),
+            .root_source_file = b.path("tests/session_host_preedit_pixel_verdict.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -5390,7 +5390,7 @@ pub fn build(b: *std.Build) void {
     }
     const session_host_cr6d_global_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/session_host_cr6d_boundary.zig"),
+            .root_source_file = b.path("tests/session_host_recovered_input_continuity_boundary.zig"),
             .target = target,
             .optimize = optimize,
         }),

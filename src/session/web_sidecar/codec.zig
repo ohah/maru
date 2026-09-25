@@ -187,6 +187,17 @@ pub fn encode(message: Message, out: []u8) Error!usize {
             try writeDialogText(&cursor, value.accept);
         },
         .dialog_closed => |value| try writeRequest(&cursor, value.browser, value.request),
+        .permission_request => |value| {
+            try writeRequest(&cursor, value.browser, value.request);
+            try fields.checkPermissions(value.kinds, value.media);
+            try cursor.writeU32(value.kinds);
+            try cursor.writeByte(value.media);
+            try writeOrigin(&cursor, value.origin);
+        },
+        .permission_reply => |value| {
+            try writeRequest(&cursor, value.browser, value.request);
+            try cursor.writeByte(@intFromEnum(value.result));
+        },
         .url_changed => |value| {
             try writeBrowser(&cursor, value.browser);
             try writeUrl(&cursor, value.url);
@@ -358,6 +369,27 @@ pub fn decodeExact(frame: []const u8) Error!Message {
             } };
         },
         .dialog_closed => .{ .dialog_closed = try readRequest(&cursor) },
+        .permission_request => blk: {
+            const request = try readRequest(&cursor);
+            const kinds = try cursor.readU32();
+            const media = try cursor.readByte();
+            try fields.checkPermissions(kinds, media);
+            break :blk .{ .permission_request = .{
+                .browser = request.browser,
+                .request = request.request,
+                .kinds = kinds,
+                .media = media,
+                .origin = try readOrigin(&cursor),
+            } };
+        },
+        .permission_reply => blk: {
+            const request = try readRequest(&cursor);
+            break :blk .{ .permission_reply = .{
+                .browser = request.browser,
+                .request = request.request,
+                .result = std.enums.fromInt(message_mod.PermissionResult, try cursor.readByte()) orelse return error.UnknownPermissionResult,
+            } };
+        },
         .url_changed => .{ .url_changed = .{ .browser = try readBrowser(&cursor), .url = try readUrl(&cursor) } },
         .nav_state => .{ .nav_state = .{
             .browser = try readBrowser(&cursor),
@@ -807,6 +839,10 @@ test "every single-byte corruption of input frames decodes to valid fields or er
         .{ .dialog_reply = .{ .browser = 3, .request = 2, .accept = true, .text = "답\t" } },
         .{ .file_dialog_path = .{ .browser = 3, .request = 2, .path = "/tmp/사진.png" } },
         .{ .file_dialog_reply = .{ .browser = 3, .request = 2, .accept = true } },
+        // W5b 권한.
+        .{ .permission_request = .{ .browser = 3, .request = 2, .origin = "https://a.b", .kinds = 0x8100 } },
+        .{ .permission_request = .{ .browser = 3, .request = 2, .origin = "", .media = 0b11 } },
+        .{ .permission_reply = .{ .browser = 3, .request = 2, .result = .dismiss } },
     };
     var encoded: [256]u8 = undefined;
     var corrupted: [256]u8 = undefined;
@@ -909,6 +945,53 @@ test "dialog closed fields fail closed both ways" {
     @memcpy(long_origin[0..8], "https://");
     try std.testing.expectError(error.InvalidOrigin, encode(.{ .js_dialog = .{ .browser = 1, .request = 1, .kind = .alert, .origin = &long_origin, .message = "" } }, &large));
     _ = try encode(.{ .js_dialog = .{ .browser = 1, .request = 1, .kind = .alert, .origin = long_origin[0..fields.max_origin_bytes], .message = "" } }, &large);
+}
+
+// ── 권한(W5b) ────────────────────────────────────────────────────────────────────────────────────────────
+
+test "permission messages round trip and go the right way" {
+    const asked = (try roundTrip(.{ .permission_request = .{
+        .browser = 7,
+        .request = 3,
+        .origin = "https://meet.example",
+        .kinds = message_mod.PermissionKind.notifications.bit() | message_mod.PermissionKind.geolocation.bit(),
+    } })).permission_request;
+    try std.testing.expectEqual(@as(u32, 0x8100), asked.kinds);
+    try std.testing.expectEqual(@as(u8, 0), asked.media);
+    try std.testing.expectEqualStrings("https://meet.example", asked.origin);
+    const media = (try roundTrip(.{ .permission_request = .{ .browser = 7, .request = 4, .origin = "", .media = message_mod.MediaPermission.camera.bit() | message_mod.MediaPermission.microphone.bit() } })).permission_request;
+    try std.testing.expectEqual(@as(u8, 0b11), media.media);
+    try std.testing.expectEqual(@as(u32, 0), media.kinds);
+    inline for (.{ message_mod.PermissionResult.accept, .deny, .dismiss, .ignore }) |result| {
+        try std.testing.expectEqual(result, (try roundTrip(.{ .permission_reply = .{ .browser = 7, .request = 3, .result = result } })).permission_reply.result);
+    }
+    try std.testing.expectEqual(message_mod.Direction.to_maru, Tag.permission_request.direction());
+    try std.testing.expectEqual(message_mod.Direction.to_sidecar, Tag.permission_reply.direction());
+}
+
+test "permission fields fail closed both ways" {
+    var buf: [512]u8 = undefined;
+    const body = prefix_len + common_len;
+    // 정의되지 않은 비트·둘 다 빈 요청·둘 다 찬 요청.
+    for ([_][2]u32{ .{ 1 << 29, 0 }, .{ 1 << 31, 0 }, .{ 0, 0b1_0000 }, .{ 0, 0 }, .{ 1, 1 } }) |bad| {
+        try std.testing.expectError(error.InvalidPermissions, encode(.{ .permission_request = .{ .browser = 1, .request = 1, .origin = "", .kinds = bad[0], .media = @intCast(bad[1]) } }, &buf));
+    }
+    var len = try encode(.{ .permission_request = .{ .browser = 1, .request = 1, .origin = "", .kinds = 1 } }, &buf);
+    // kinds 의 윗 비트를 켜면 거절.
+    buf[body + 12] = 0x20;
+    try std.testing.expectError(error.InvalidPermissions, decodeExact(buf[0..len]));
+    buf[body + 12] = 0;
+    // media 도 싣으면(둘 다) 거절.
+    buf[body + 16] = 1;
+    try std.testing.expectError(error.InvalidPermissions, decodeExact(buf[0..len]));
+    buf[body + 16] = 0;
+    // 출처는 대화상자와 같은 규칙.
+    try std.testing.expectError(error.InvalidOrigin, encode(.{ .permission_request = .{ .browser = 1, .request = 1, .origin = "https://apple.com@evil.test", .kinds = 1 } }, &buf));
+    // 요청 번호 0·모르는 답.
+    try std.testing.expectError(error.InvalidRequestId, encode(.{ .permission_reply = .{ .browser = 1, .request = 0, .result = .accept } }, &buf));
+    len = try encode(.{ .permission_reply = .{ .browser = 1, .request = 1, .result = .deny } }, &buf);
+    buf[body + 12] = 4;
+    try std.testing.expectError(error.UnknownPermissionResult, decodeExact(buf[0..len]));
 }
 
 comptime {

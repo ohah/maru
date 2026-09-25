@@ -289,10 +289,31 @@ pub fn readOrigin(cursor: *ReadCursor) Error![]const u8 {
     return origin;
 }
 
-/// 권한 집합(W5b) — 정의된 비트만, 프롬프트·미디어 중 하나만(둘 다 비거나 둘 다 차면 거절).
-pub fn checkPermissions(kinds: u32, media: u8) Error!void {
+/// 권한 집합(W5b) — 정의된 비트만, 프롬프트·미디어 중 하나만(둘 다 비거나 둘 다 차면 거절). 기억된 허용 표시는 위치만 청한
+/// 요청에만(W5b2).
+pub fn checkPermissions(kinds: u32, media: u8, remembered: bool) Error!void {
     if (kinds & ~message.permission_kind_mask != 0 or media & ~message.permission_media_mask != 0) return error.InvalidPermissions;
     if ((kinds == 0) == (media == 0)) return error.InvalidPermissions;
+    if (remembered and kinds != message.PermissionKind.geolocation.bit()) return error.InvalidPermissions;
+}
+
+/// 좌표(W5b2) — 없음이면 모두 0, 있으면 범위 안의 유한한 값.
+pub fn checkGeolocation(value: message.Geolocation) Error!void {
+    if (!value.available) {
+        if (value.latitude != 0 or value.longitude != 0 or value.accuracy != 0) return error.InvalidGeolocation;
+        return;
+    }
+    if (!std.math.isFinite(value.latitude) or !std.math.isFinite(value.longitude) or !std.math.isFinite(value.accuracy)) return error.InvalidGeolocation;
+    if (value.latitude < -90 or value.latitude > 90 or value.longitude < -180 or value.longitude > 180) return error.InvalidGeolocation;
+    if (!(value.accuracy > 0) or value.accuracy > message.max_geolocation_accuracy) return error.InvalidGeolocation;
+}
+
+pub fn writeF64(cursor: *Cursor, value: f64) Error!void {
+    try cursor.writeU64(@bitCast(value));
+}
+
+pub fn readF64(cursor: *ReadCursor) Error!f64 {
+    return @bitCast(try cursor.readU64());
 }
 
 pub fn writeRect(cursor: *Cursor, rect: Rect) Error!void {

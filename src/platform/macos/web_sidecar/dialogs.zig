@@ -243,6 +243,7 @@ pub fn onLoadStart(_: [*c]c.cef_load_handler_t, browser: [*c]c.cef_browser_t, fr
     // 새 문서다 — 옛 문서의 미디어 요청(카메라·마이크·화면)은 답할 곳이 없다. 프롬프트는 CEF 가 닫아 알리지만 미디어는 알림이
     // 없어, 페이지가 스스로 옮겨 가면 옛 출처의 sheet 가 뒤늦게 떴다(적대 검증).
     permissions.cancelMedia(id);
+    permissions.resetOverride(id);
     for (&pages) |*slot| {
         if (slot.*) |*page| if (page.id == id and page.reset_at_ms != 0 and nowMs() - page.reset_at_ms <= reset_grace_ms) {
             page.* = .{ .id = id };
@@ -377,6 +378,7 @@ pub fn handle(msg: Message) bool {
             entry.path_count += 1;
         },
         .permission_reply => |value| permissions.reply(value),
+        .geolocation => |value| permissions.geolocation(value),
         .file_dialog_reply => |value| {
             const entry = table.find(value.browser, value.request, .file) orelse return true;
             const pending = table.take(entry);
@@ -403,6 +405,7 @@ fn freePaths(entry: dialog_table.Entry) void {
 pub fn dropBrowser(id: BrowserId) void {
     while (table.takeFor(id, null)) |pending| release(pending);
     forgetPage(id);
+    permissions.forgetBrowser(id);
 }
 
 /// 종료 — 모든 요청을 놓는다.

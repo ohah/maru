@@ -59,9 +59,9 @@ test "CR6d 경계는 exact recovered screen probe와 actual AppKit input smoke�
     defer allocator.free(input_source_policy);
     const input_source_restore = try read(allocator, "src/platform/macos/SessionHostInputSourceRestore.swift");
     defer allocator.free(input_source_restore);
-    const pixel_test = try read(allocator, "tests/session_host_cr6d_pixel.zig");
+    const pixel_test = try read(allocator, "tests/session_host_preedit_pixel_verdict.zig");
     defer allocator.free(pixel_test);
-    const pixel_validator = try read(allocator, "tests/support/session_host_cr6d_pixel.zig");
+    const pixel_validator = try read(allocator, "tests/support/session_host_preedit_pixel_verdict.zig");
     defer allocator.free(pixel_validator);
 
     // The read-only record exposes five scalar observations and no

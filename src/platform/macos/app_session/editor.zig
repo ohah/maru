@@ -42470,7 +42470,15 @@ test "BPP3 처음 목록 훑기가 여러 프레임에 걸치면 프레임마다
         // 아직 훑는 중 — 칠하지 않고(낡은 자리를 안 칠한다) 다음 프레임을 부른다
         try testing.expect(fx.session.metal_dirty);
         try testing.expectEqual(@as(usize, 0), syntax_color.bracketMarks(st).toks.len);
-        if (frames == 2 and !edited) {
+        // **「훑는 중」을 프레임 번호로 세지 않는다**(2026-09-25 흔들림). 훑기는 트리가 있어야
+        // 시작하는데(`step` 의 `prov.tree orelse return false`) **파싱이 프레임당 4 ms 벽시계
+        // 예산**이라, 부하 걸린 기계에서는 셋째 프레임에도 아직 파는 중이다 — 그러면 `walking` 이
+        // 거짓이라 아래 단언이 깨진다. **제품이 아니라 이 판정자가 틀린 것이다**: 재는 계약은
+        // 「훑는 **도중**의 편집이 훑기를 안 버린다」이지 「셋째 프레임」이 아니다.
+        //
+        // 60,000 줄로 키워 로컬에서 그 실패를 그대로 재현했다(같은 줄·같은 사유). CI 에서는 무관한
+        // PR 두 개(#3949 · #3952)가 이것으로 빨개졌다.
+        if (!edited and st.brackets.walking) {
             // 훑는 도중의 편집 — 첫 줄 끝에 괄호를 더한다
             term.rt.editor_selection = editor_selection.Selection.at(8);
             try testing.expect(insertText(fx.session, term, "(x)"));

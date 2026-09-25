@@ -289,6 +289,12 @@ pub fn readOrigin(cursor: *ReadCursor) Error![]const u8 {
     return origin;
 }
 
+/// 권한 집합(W5b) — 정의된 비트만, 프롬프트·미디어 중 하나만(둘 다 비거나 둘 다 차면 거절).
+pub fn checkPermissions(kinds: u32, media: u8) Error!void {
+    if (kinds & ~message.permission_kind_mask != 0 or media & ~message.permission_media_mask != 0) return error.InvalidPermissions;
+    if ((kinds == 0) == (media == 0)) return error.InvalidPermissions;
+}
+
 pub fn writeRect(cursor: *Cursor, rect: Rect) Error!void {
     try writeExtent(cursor, rect.x);
     try writeExtent(cursor, rect.y);

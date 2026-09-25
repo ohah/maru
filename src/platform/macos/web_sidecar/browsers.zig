@@ -19,6 +19,7 @@ const ring_producer = @import("ring_producer.zig");
 const iosurface = @import("iosurface.zig");
 const input = @import("input.zig");
 const dialogs = @import("dialogs.zig");
+const permissions = @import("permissions.zig");
 
 const Message = protocol.message.Message;
 const BrowserId = protocol.message.BrowserId;
@@ -127,6 +128,7 @@ fn destroy(browser_id: BrowserId, writer: *events.Writer) void {
     const entry = state.registry.byId(browser_id) orelse return fail(writer, browser_id, .unknown_browser, "no such browser");
     if (entry.closing) return;
     dialogs.cancelFor(browser_id);
+    permissions.cancelMedia(browser_id);
     entry.closing = true;
     closeBrowser(browserOf(entry));
 }
@@ -146,6 +148,7 @@ fn resize(value: protocol.message.Resize, writer: *events.Writer) void {
 fn navigate(value: protocol.message.Navigate, writer: *events.Writer) void {
     const entry = state.registry.byId(value.browser) orelse return fail(writer, value.browser, .unknown_browser, "no such browser");
     dialogs.cancelFor(value.browser);
+    permissions.cancelMedia(value.browser);
     const browser = browserOf(entry);
     const frame = browser.*.get_main_frame.?(browser);
     if (frame == null) return fail(writer, value.browser, .unknown_browser, "browser has no main frame");
@@ -160,6 +163,7 @@ fn navigate(value: protocol.message.Navigate, writer: *events.Writer) void {
 fn navAction(value: protocol.message.NavAction, writer: *events.Writer) void {
     const entry = state.registry.byId(value.browser) orelse return fail(writer, value.browser, .unknown_browser, "no such browser");
     dialogs.cancelFor(value.browser);
+    if (value.action != .stop) permissions.cancelMedia(value.browser);
     const browser = browserOf(entry);
     // 멈춤은 새 문서를 부르지 않는다 — 대화상자 억제를 풀 표시를 남기지 않는다.
     if (value.action == .stop) dialogs.keepSuppression(value.browser);

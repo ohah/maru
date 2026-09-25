@@ -56,6 +56,8 @@ pub const Error = error{
     InvalidRequestId,
     InvalidPath,
     InvalidOrigin,
+    InvalidPermissions,
+    UnknownPermissionResult,
     InvalidModifiers,
     InvalidCoordinate,
     InvalidClickCount,

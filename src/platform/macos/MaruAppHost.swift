@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation // W5b: Chromium 탭이 카메라·마이크를 청하면 Maru 의 macOS 권한을 먼저 받는다
 import Carbon.HIToolbox
 import CoreServices
 import Darwin
@@ -8322,7 +8323,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                     if let alert = open.alert {
                         let buttons = alert.buttons.map(\.title).joined(separator: ",")
                         let text = alert.informativeText.replacingOccurrences(of: "\n", with: "\\n")
-                        Self.testReport("sheet alert \(alert.messageText)|\(text)|\(buttons)|\(open.field?.stringValue ?? "-")|suppress=\(alert.showsSuppressionButton)|attached=\(window.attachedSheet === open.sheet)")
+                        Self.testReport("sheet alert \(alert.messageText)|\(text)|\(buttons)|\(open.field?.stringValue ?? "-")|suppress=\(alert.showsSuppressionButton)|first=\((alert.window.initialFirstResponder as? NSButton)?.title ?? "-")|attached=\(window.attachedSheet === open.sheet)")
                     } else if let panel = open.sheet as? NSOpenPanel {
                         let types = panel.allowedContentTypes.map(\.identifier).joined(separator: ",")
                         Self.testReport("sheet panel dirs=\(panel.canChooseDirectories) files=\(panel.canChooseFiles) multi=\(panel.allowsMultipleSelection) types=\(types)|attached=\(window.attachedSheet === open.sheet)")
@@ -8354,6 +8355,23 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                     if let panel = open.sheet as? NSSavePanel { panel.cancel(nil) } else { open.alert?.buttons.last?.performClick(nil) }
                 } else {
                     Self.testReport("sheet-answer-missing")
+                }
+            case "macos-access" where line.count >= 3:
+                // macos-access camera|microphone|screen granted|denied — 권한 요청 허용 때 macOS 권한 확인을 이 값으로 대신한다.
+                let device: OsrDevice? = switch line[1] {
+                case "camera": .camera
+                case "microphone": .microphone
+                case "screen": .screen
+                default: nil
+                }
+                if let device { osrTestMacAccess[device] = line[2] == "granted" }
+            case "sheet-blocked":
+                // 떠 있는 sheet 가 macOS 안내면 그 제목·단추 — 권한 sheet 가 끝난 뒤 붙는다(osrDialogSheets 밖).
+                if let window, let alert = osrBlockedAlert, window.attachedSheet === alert.window {
+                    Self.testReport("sheet-blocked \(alert.messageText)|\(alert.buttons.map(\.title).joined(separator: ","))")
+                    alert.buttons.last?.performClick(nil)
+                } else {
+                    Self.testReport("sheet-blocked none")
                 }
             case "accept-types" where line.count >= 2:
                 // accept-types 받을형식 — 파일 선택의 형식 변환 결과(모르면 none — 제한하지 않는다).
@@ -8585,6 +8603,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             open.dismissed = true
             window.endSheet(open.sheet, returnCode: .abort)
         }
+        // 창에 다른 sheet(macOS 안내 등)가 붙어 있으면 다음 요청을 가져오지 않는다 — 새 sheet 가 그 뒤에 줄을 서면 입력 보호
+        // (0.5 초)가 보이기 전에 끝나, 안내를 닫는 클릭이 뒤이어 뜬 권한 sheet 의 허용에 떨어졌다(적대 검증).
+        guard window.attachedSheet == nil else { return }
         var dialog = MaruAppHostOsrDialog()
         guard maru_macos_app_session_take_osr_dialog(session, &dialog) != 0 else { return }
         let sid = dialog.surface_id
@@ -8593,6 +8614,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         let title = Self.osrText(dialog.title, dialog.title_len)
         let message = Self.osrText(dialog.message, dialog.message_len)
         let defaultText = Self.osrText(dialog.default_text, dialog.default_text_len)
+        if dialog.kind == UInt32(MARU_OSR_DIALOG_PERMISSION) {
+            showOsrPermission(window: window, sid: sid, token: token, title: title, message: message,
+                              allow: Self.osrText(dialog.ok_label, dialog.ok_label_len),
+                              block: Self.osrText(dialog.cancel_label, dialog.cancel_label_len),
+                              kinds: dialog.permission_kinds, media: dialog.permission_media)
+            return
+        }
         if dialog.kind >= UInt32(MARU_OSR_DIALOG_FILE_OPEN) {
             let accept = Self.osrText(dialog.accept, dialog.accept_len)
             showOsrFileDialog(window: window, sid: sid, token: token, kind: dialog.kind, title: title, message: message,
@@ -8632,6 +8660,122 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
         // sheet 를 세운 **뒤**에 막는다 — 세우기 전에 끄면 NSAlert 가 배치하며 다시 켰다(시험기 실측 — 뜨자마자 누른 답이 먹었다).
         Self.guardOsrSheetInput(alert, field: field)
+    }
+
+    // ── W5b: 권한 요청 ──
+    // 허용·차단·닫기 셋. 허용·차단은 Chromium 이 그 사이트에 기억한다(사용자 결정 2026-09-25 — 미디어 요청은 기억하지 않는다), 닫기
+    // (Esc)는 기억하지 않는다(Chrome 의 X). Return 에는 아무 단추도 걸지 않는다 — 치던 Return 이 허용이 되지 않게(입력 보호와 함께).
+    // 카메라·마이크·화면을 허용하면 Maru 의 macOS 권한을 먼저 받는다 — macOS 가 막으면 페이지에는 「못 물음」으로 답하고(차단은
+    // 사이트에 기억되고 닫기는 embargo 를 쌓는다) 시스템 설정으로 안내한다.
+    enum OsrDevice: Int64 { case camera = 0, microphone = 1, screen = 2 }
+    /// 시험기 전용(`macos-access`) — macOS 권한 상태를 대신 정한다(비활성 앱·장치 없는 기계에서 TCC 를 다룰 수 없다).
+    private var osrTestMacAccess: [OsrDevice: Bool] = [:]
+    /// 떠 있는 macOS 안내 sheet(시험기가 읽는다).
+    private weak var osrBlockedAlert: NSAlert?
+
+    private static func osrDevices(kinds: UInt32, media: UInt32) -> [OsrDevice] {
+        var devices: [OsrDevice] = []
+        // 미디어: 1 마이크 · 2 카메라 · 4 화면 소리 · 8 화면. 프롬프트: 2 카메라 움직이기 · 4 카메라 · 0x1000 마이크(CEF 비트).
+        if media & 2 != 0 || kinds & (2 | 4) != 0 { devices.append(.camera) }
+        if media & 1 != 0 || kinds & 0x1000 != 0 { devices.append(.microphone) }
+        if media & (4 | 8) != 0 { devices.append(.screen) }
+        return devices
+    }
+
+    private func showOsrPermission(window: NSWindow, sid: UInt64, token: UInt64, title: String, message: String, allow: String,
+                                   block: String, kinds: UInt32, media: UInt32) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: allow).keyEquivalent = ""
+        alert.addButton(withTitle: block)
+        let close = alert.addButton(withTitle: Self.osrDialogString(5))
+        close.keyEquivalent = "\u{1b}"
+        // 전체 키보드 접근이 켜져 있으면 초점을 가진 단추가 Space 에 눌린다 — 첫 초점은 허용·차단이 아닌 닫기에 둔다(적대 검증).
+        // NSAlert 는 배치하며 단추를 다시 만진다(W5a 실측) — 배치를 먼저 끝낸다.
+        alert.layout()
+        alert.window.initialFirstResponder = close
+        let key = ObjectIdentifier(window)
+        let open = OsrDialogSheet(surfaceID: sid, token: token, sheet: alert.window, alert: alert, field: nil)
+        osrDialogSheets[key] = open
+        alert.beginSheetModal(for: window) { [weak self, weak window] response in
+            guard let self else { return }
+            if let window, self.osrDialogSheets[ObjectIdentifier(window)] === open { self.osrDialogSheets[ObjectIdentifier(window)] = nil }
+            guard !open.dismissed, let window else { return }
+            switch response {
+            case .alertFirstButtonReturn:
+                alert.window.orderOut(nil) // 이어서 macOS 안내 sheet 를 띄울 수 있다
+                self.ensureMacAccess(Self.osrDevices(kinds: kinds, media: media)) { [weak self, weak window] blocked in
+                    guard let self, let window else { return }
+                    // macOS 가 막았으면 「못 물음」 — 사용자는 사이트를 허용했다(차단이나 닫기로 기억·embargo 가 쌓이지 않게).
+                    let answered = self.replyOsrPermission(window: window, sid: sid, token: token,
+                                                           result: blocked == nil ? MARU_OSR_PERMISSION_ACCEPT : MARU_OSR_PERMISSION_IGNORE)
+                    // 기다리는 사이 요청이 사라졌으면(이동·닫힘) 안내하지 않는다.
+                    if let blocked, answered, window.isVisible { self.showMacAccessBlocked(window: window, device: blocked) }
+                }
+            case .alertSecondButtonReturn:
+                self.replyOsrPermission(window: window, sid: sid, token: token, result: MARU_OSR_PERMISSION_DENY)
+            default:
+                self.replyOsrPermission(window: window, sid: sid, token: token, result: MARU_OSR_PERMISSION_DISMISS)
+            }
+        }
+        Self.guardOsrSheetInput(alert, field: nil)
+    }
+
+    @discardableResult
+    private func replyOsrPermission(window: NSWindow, sid: UInt64, token: UInt64, result: UInt32) -> Bool {
+        guard let session = surfaceOwning(window)?.appSession else { return false }
+        let answered = maru_macos_app_session_osr_permission_reply(session, sid, token, result) != 0
+        Self.testNote("permission-reply \(result) answered=\(answered)")
+        return answered
+    }
+
+    /// 장치마다 Maru 의 macOS 권한을 확인하고, 아직 묻지 않았으면 묻는다(macOS 창 — Maru 이름). 모두 허용이면 nil, 아니면 막힌
+    /// 첫 장치로 끝낸다(메인 스레드). 화면 녹화는 macOS 가 앱을 다시 띄워야 반영하므로 막힌 것으로 본다.
+    private func ensureMacAccess(_ devices: [OsrDevice], done: @escaping (OsrDevice?) -> Void) {
+        guard let device = devices.first else { return done(nil) }
+        let rest = Array(devices.dropFirst())
+        let next: (Bool) -> Void = { [weak self] granted in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if granted { self.ensureMacAccess(rest, done: done) } else { done(device) }
+            }
+        }
+        if let forced = osrTestMacAccess[device] { return next(forced) }
+        switch device {
+        case .camera, .microphone:
+            let type: AVMediaType = device == .camera ? .video : .audio
+            switch AVCaptureDevice.authorizationStatus(for: type) {
+            case .authorized: next(true)
+            case .notDetermined: AVCaptureDevice.requestAccess(for: type, completionHandler: next)
+            default: next(false)
+            }
+        case .screen:
+            if CGPreflightScreenCaptureAccess() { next(true) } else {
+                _ = CGRequestScreenCaptureAccess()
+                next(false)
+            }
+        }
+    }
+
+    /// macOS 가 Maru 의 장치 사용을 막았다 — 시스템 설정의 그 항목으로 안내한다.
+    private func showMacAccessBlocked(window: NSWindow, device: OsrDevice) {
+        Self.testNote("macos-blocked \(device.rawValue)")
+        guard window.attachedSheet == nil else { return }
+        let alert = NSAlert()
+        alert.messageText = Self.osrDialogString(6, device.rawValue)
+        alert.addButton(withTitle: Self.osrDialogString(7))
+        alert.addButton(withTitle: Self.osrDialogString(8)).keyEquivalent = "\u{1b}"
+        osrBlockedAlert = alert
+        alert.beginSheetModal(for: window) { response in
+            guard response == .alertFirstButtonReturn else { return }
+            let pane = switch device {
+            case .camera: "Privacy_Camera"
+            case .microphone: "Privacy_Microphone"
+            case .screen: "Privacy_ScreenCapture"
+            }
+            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(pane)") { NSWorkspace.shared.open(url) }
+        }
     }
 
     private func showOsrFileDialog(window: NSWindow, sid: UInt64, token: UInt64, kind: UInt32, title: String, message: String,

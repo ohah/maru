@@ -15,6 +15,9 @@
 //!   /dialog-reload `alert` 뒤 스스로 새로고침 — 세 번 뒤 `reload-done`(억제 우회 판정)
 //!   /file·/files·/folder  화면 왼쪽 위(0,0 300×100)의 파일 입력칸(받을 형식 `image/*,.txt` · 여러 개 · 폴더). 준비는 `file-ready`, 고르면
 //!                 렌더러가 내용을 읽어 `file-<수>-<이름들,정렬>-<바이트 합>`, 취소면 `file-cancel`
+//!   /perm?a=X     권한 판정(W5b) — 누르면 X 를 청한다(`notif` 알림 · `midi` MIDI sysex · `fonts` 로컬 글꼴 · `screens` 창 관리 ·
+//!                 `idle` 유휴 감지 · `geo` 위치 · `cam` 카메라 · `display` 화면 공유 · `displayleave` 화면 공유를 청하고 1.5 초 뒤 스스로
+//!                 `/title?t=perm-left` 로 떠난다 · `displayfail` 같은데 닿지 않는 주소(`127.0.0.1:9`)로 떠난다 — 실패한 이동). 준비는 `X:ready`, 결과는 `X:<결과>`(`granted`·`ok`·`err-<이름>` — 글꼴은 `ok<수>`, 거절이면 빈 목록 `ok0`)
 //!   /ctl          제목을 `a<BEL>b<DEL>c` 로(제어 문자가 든 제목)
 //!   /flood        2 초 동안 제목을 1ms 마다 200 번씩 바꾼 뒤 `flood-done` 으로
 //!   /tear         매 프레임 화면 전체를 프레임 번호 색(`rgb(n&255, n>>8&255, 200)`)으로 칠한다(W2 — 한 장 안의 줄 색이
@@ -144,6 +147,21 @@ fn page(path: []const u8, query: []const u8, buf: []u8) ![]const u8 {
     if (std.mem.eql(u8, path, "/file")) return filePage("accept=\"image/*,.txt\"", buf);
     if (std.mem.eql(u8, path, "/files")) return filePage("multiple", buf);
     if (std.mem.eql(u8, path, "/folder")) return filePage("webkitdirectory", buf);
+    if (std.mem.eql(u8, path, "/perm")) {
+        return std.fmt.bufPrint(buf, "<!doctype html><title>loading</title><body style='margin:0;height:100%'><script>" ++
+            "var A='{s}';function T(x){{document.title=A+':'+x}}function E(e){{T('err-'+e.name)}}function K(){{T('ok')}}" ++
+            "function go(){{if(A=='notif')Notification.requestPermission().then(T);" ++
+            "else if(A=='midi')navigator.requestMIDIAccess({{sysex:true}}).then(K,E);" ++
+            "else if(A=='fonts')queryLocalFonts().then(function(f){{T('ok'+f.length)}},E);" ++
+            "else if(A=='screens')getScreenDetails().then(K,E);" ++
+            "else if(A=='idle')IdleDetector.requestPermission().then(T,E);" ++
+            "else if(A=='geo')navigator.geolocation.getCurrentPosition(K,function(e){{T('geo-err'+e.code)}},{{timeout:3000}});" ++
+            "else if(A=='cam')navigator.mediaDevices.getUserMedia({{video:true}}).then(K,E);" ++
+            "else if(A=='display')navigator.mediaDevices.getDisplayMedia({{video:true}}).then(K,E);" ++
+            "else if(A=='displayleave'){{navigator.mediaDevices.getDisplayMedia({{video:true}}).then(K,E);setTimeout(function(){{location.href='/title?t=perm-left'}},1500)}}" ++
+            "else if(A=='displayfail'){{navigator.mediaDevices.getDisplayMedia({{video:true}}).then(K,E);setTimeout(function(){{location.href='http://127.0.0.1:9/'}},1500)}}}}" ++
+            "addEventListener('click',go);requestAnimationFrame(function(){{requestAnimationFrame(function(){{T('ready')}})}})</script>", .{query});
+    }
     if (std.mem.eql(u8, path, "/ctl")) {
         return "<!doctype html><title>loading</title><script>document.title='a\\x07b\\x7fc'</script>";
     }

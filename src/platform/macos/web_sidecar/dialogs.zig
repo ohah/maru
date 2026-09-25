@@ -19,13 +19,15 @@ const object = @import("object.zig");
 const library = @import("library.zig");
 const browsers = @import("browsers.zig");
 const dialog_table = @import("dialog_table.zig");
+const permissions = @import("permissions.zig");
 
 const message = protocol.message;
 const Message = message.Message;
 const BrowserId = message.BrowserId;
 const max_text_bytes = protocol.wire.max_text_bytes;
 
-var table: dialog_table.Table = .{};
+/// 대화상자·파일 선택·권한(`permissions.zig`)이 함께 쓰는 요청 표.
+pub var table: dialog_table.Table = .{};
 
 /// 페이지마다(이동하면 새로) 띄운 JS 대화상자 수와 억제 여부 — 두 번째부터 maru 가 「더 띄우지 못하게」를 보이고, 사용자가
 /// 고르면 이동할 때까지 억제한다(Chrome 과 같다 — `while(1) alert()` 가 창을 영영 막지 않게).
@@ -82,7 +84,7 @@ comptime {
     std.debug.assert(c.FILE_DIALOG_SAVE == @intFromEnum(message.FileDialogMode.save));
 }
 
-fn browserId(browser: [*c]c.cef_browser_t) ?BrowserId {
+pub fn browserId(browser: [*c]c.cef_browser_t) ?BrowserId {
     if (browser == null) return null;
     const entry = browsers.state.registry.byCefId(browser.*.get_identifier.?(browser)) orelse return null;
     if (entry.closing) return null;
@@ -179,7 +181,7 @@ fn giveUp(kind: message.JsDialogKind, callback: [*c]c.cef_jsdialog_callback_t) b
 /// 제목에 쓸 출처 — CEF 의 보안 표시 형식(`cef_format_url_for_security_display` — 사용자 정보·경로를 떼고 IDN 은 안전할 때만
 /// 유니코드로)을 `scheme://host[:port]` 규칙(`fields.checkOrigin`)으로 한 번 더 거른다. 못 지나면 빈 글 — maru 는 「이 페이지」
 /// 로 보인다(`data:`·`about:srcdoc` 처럼 페이지가 글을 고를 수 있는 출처가 제목에 들어가지 않게 — 적대 검증).
-fn originOf(origin_url: [*c]const c.cef_string_t, out: []u8) []const u8 {
+pub fn originOf(origin_url: [*c]const c.cef_string_t, out: []u8) []const u8 {
     if (origin_url == null) return "";
     const api = browsers.state.api;
     const formatted = api.format_url_for_security_display(origin_url);
@@ -238,11 +240,25 @@ pub fn onLoadStart(_: [*c]c.cef_load_handler_t, browser: [*c]c.cef_browser_t, fr
     defer object.releaseArg(frame);
     if (frame == null or frame.*.is_main.?(frame) == 0) return;
     const id = browserId(browser) orelse return;
+    // 새 문서다 — 옛 문서의 미디어 요청(카메라·마이크·화면)은 답할 곳이 없다. 프롬프트는 CEF 가 닫아 알리지만 미디어는 알림이
+    // 없어, 페이지가 스스로 옮겨 가면 옛 출처의 sheet 가 뒤늦게 떴다(적대 검증).
+    permissions.cancelMedia(id);
     for (&pages) |*slot| {
         if (slot.*) |*page| if (page.id == id and page.reset_at_ms != 0 and nowMs() - page.reset_at_ms <= reset_grace_ms) {
             page.* = .{ .id = id };
         };
     }
+}
+
+/// `on_load_error` — 주 프레임의 이동이 실패했다. 실패한 이동은 `on_load_start` 없이 오류 페이지로 옛 문서를 바꾸므로(CEF 헤더)
+/// 옛 문서의 미디어 요청을 여기서도 치운다(적대 검증). 멈춤·새 이동으로 끊긴 것(ERR_ABORTED)은 옛 문서가 남거나 새 문서의
+/// `on_load_start` 가 치운다.
+pub fn onLoadError(_: [*c]c.cef_load_handler_t, browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, error_code: c.cef_errorcode_t, _: [*c]const c.cef_string_t, _: [*c]const c.cef_string_t) callconv(.c) void {
+    defer object.releaseArg(browser);
+    defer object.releaseArg(frame);
+    if (frame == null or frame.*.is_main.?(frame) == 0 or error_code == c.ERR_ABORTED) return;
+    const id = browserId(browser) orelse return;
+    permissions.cancelMedia(id);
 }
 
 /// 렌더러가 죽었다 — 그 페이지의 JS 대화상자는 답할 곳이 없다(CEF 가 상태 비우기를 부르지 않을 수 있다 — 적대 검증). 콜백을
@@ -360,6 +376,7 @@ pub fn handle(msg: Message) bool {
             api.string_list_append(@ptrCast(entry.paths), &path);
             entry.path_count += 1;
         },
+        .permission_reply => |value| permissions.reply(value),
         .file_dialog_reply => |value| {
             const entry = table.find(value.browser, value.request, .file) orelse return true;
             const pending = table.take(entry);
@@ -400,5 +417,6 @@ fn release(pending: dialog_table.Entry) void {
             freePaths(pending);
             object.release(@as([*c]c.cef_file_dialog_callback_t, @ptrCast(@alignCast(pending.callback))));
         },
+        .prompt, .media => permissions.release(pending),
     }
 }

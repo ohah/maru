@@ -35,6 +35,8 @@ pub const Tag = enum(u8) {
     /// 파일 선택의 경로 하나(W5a). 여러 개면 여러 번 보내고 `file_dialog_reply` 로 끝낸다.
     file_dialog_path = 20,
     file_dialog_reply = 21,
+    /// 권한 요청의 답(W5b — C6). 요청 번호는 `permission_request` 가 준 것이다.
+    permission_reply = 22,
 
     hello_ack = 32,
     browser_created = 33,
@@ -56,7 +58,10 @@ pub const Tag = enum(u8) {
     /// 페이지가 파일 선택을 띄우려 한다(W5a — C6).
     file_dialog = 44,
     /// 그 요청은 더는 답을 받지 않는다 — 페이지가 이동했거나 닫혔다(CEF `on_reset_dialog_state`). maru 는 떠 있는 창을 닫는다.
+    /// 권한 요청(W5b)도 같다(CEF `on_dismiss_permission_prompt`).
     dialog_closed = 45,
+    /// 페이지가 권한(카메라·마이크·위치·알림 등)을 청한다(W5b — C6). 답이 올 때까지 페이지의 그 요청만 기다린다.
+    permission_request = 46,
 
     pub fn direction(self: Tag) Direction {
         return if (@intFromEnum(self) < 32) .to_sidecar else .to_maru;
@@ -150,6 +155,89 @@ pub const FileDialog = struct {
 pub const Request = struct {
     browser: BrowserId,
     request: RequestId,
+};
+
+/// 권한 종류(W5b) — CEF `cef_permission_request_types_t` 와 **같은 비트**(0~28 — sidecar 의 comptime 이 CEF 를 올려 값이
+/// 바뀌면 빌드를 멈춘다). 이 밖의 비트는 거절한다(닫힌 필드).
+pub const permission_kind_mask: u32 = (1 << 29) - 1;
+/// 미디어 권한(W5b) — CEF `cef_media_access_permission_types_t` 와 같은 비트: 소리 입력(마이크)·영상 입력(카메라)·화면 소리·
+/// 화면.
+pub const permission_media_mask: u8 = 0b1111;
+
+pub const PermissionKind = enum(u5) {
+    ar_session = 0,
+    camera_pan_tilt_zoom = 1,
+    camera = 2,
+    captured_surface_control = 3,
+    clipboard = 4,
+    top_level_storage_access = 5,
+    disk_quota = 6,
+    local_fonts = 7,
+    geolocation = 8,
+    hand_tracking = 9,
+    identity_provider = 10,
+    idle_detection = 11,
+    microphone = 12,
+    midi_sysex = 13,
+    multiple_downloads = 14,
+    notifications = 15,
+    keyboard_lock = 16,
+    pointer_lock = 17,
+    protected_media_identifier = 18,
+    register_protocol_handler = 19,
+    storage_access = 20,
+    vr_session = 21,
+    web_app_installation = 22,
+    window_management = 23,
+    file_system_access = 24,
+    local_network_access = 25,
+    local_network = 26,
+    loopback_network = 27,
+    sensors = 28,
+
+    pub fn bit(self: PermissionKind) u32 {
+        return @as(u32, 1) << @intFromEnum(self);
+    }
+};
+
+pub const MediaPermission = enum(u2) {
+    microphone = 0,
+    camera = 1,
+    screen_audio = 2,
+    screen = 3,
+
+    pub fn bit(self: MediaPermission) u8 {
+        return @as(u8, 1) << @intFromEnum(self);
+    }
+};
+
+/// CEF `cef_permission_request_result_t` 와 같은 값. 허용·차단은 Chromium 이 출처별로 기억한다(사용자 결정 2026-09-25).
+/// 닫기(사용자가 고른 것)는 허용·차단으로 기억하지 않지만 셋이 쌓이면 Chromium 이 한동안 묻지 않고 막는다(embargo — W5b 실측).
+/// `ignore` 는 maru 가 **묻지 못했다**(대기열이 참·탭이 사라짐·창이 닫힘·macOS 가 장치를 막음) — 사용자의 닫기 수에 섞이지 않게
+/// 따로 둔다. Chromium 은 이것도 따로 센다 — 넷이면 그 종류를 한동안 묻지 않는다(판정자 `perm-ignore` 실측, Chrome 에서 묻는 중
+/// 탭을 닫은 것과 같다). 미디어 요청은 어느 쪽도 세지 않는다.
+pub const PermissionResult = enum(u8) {
+    accept = 0,
+    deny = 1,
+    dismiss = 2,
+    ignore = 3,
+};
+
+/// 한 요청은 `kinds`(프롬프트 — `on_show_permission_prompt`)와 `media`(카메라·마이크·화면 — `on_request_media_access_permission`)
+/// 중 **하나만** 싣는다(둘 다 0 이거나 둘 다 있으면 거절). 한 요청에 종류가 여럿일 수 있다(카메라+마이크).
+pub const PermissionRequest = struct {
+    browser: BrowserId,
+    request: RequestId,
+    /// `js_dialog` 와 같은 규칙의 출처(빈 글이면 maru 는 「이 페이지」).
+    origin: []const u8,
+    kinds: u32 = 0,
+    media: u8 = 0,
+};
+
+pub const PermissionReply = struct {
+    browser: BrowserId,
+    request: RequestId,
+    result: PermissionResult,
 };
 
 pub const DialogReply = struct {
@@ -443,6 +531,7 @@ pub const Message = union(Tag) {
     dialog_reply: DialogReply,
     file_dialog_path: FileDialogPath,
     file_dialog_reply: FileDialogReply,
+    permission_reply: PermissionReply,
 
     hello_ack: Hello,
     browser_created: BrowserId,
@@ -458,6 +547,7 @@ pub const Message = union(Tag) {
     js_dialog: JsDialog,
     file_dialog: FileDialog,
     dialog_closed: Request,
+    permission_request: PermissionRequest,
 };
 
 test "tags split by direction at 32" {

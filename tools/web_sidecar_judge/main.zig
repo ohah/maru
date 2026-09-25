@@ -8,8 +8,9 @@
 //!                    쓰기 끝을 손자(maru 가 띄운 셸 흉내)가 쥐고 있어 EOF 가 오지 않아도
 //!   no-crash         판정 동안 `maru-web-*` 크래시 보고가 하나도 새로 생기지 않는다
 //! W1c 판정은 `browsers_check.zig`, W2 판정은 `frames_check.zig`, W4 입력 판정은 `input_check.zig`, W5a 대화상자·파일 선택
-//! 판정은 `dialogs_check.zig` 가 든다. 하나라도 틀리면 exit 1. `maru-web-judge --input <설치 디렉터리> <프로필 뿌리>` 는 입력
-//! 판정만, `--dialogs` 는 대화상자 판정만 돈다.
+//! 판정은 `dialogs_check.zig`, W5b 권한 판정은 `permissions_check.zig` 가 든다. 하나라도 틀리면 exit 1.
+//! `maru-web-judge --input <설치 디렉터리> <프로필 뿌리>` 는 입력 판정만, `--dialogs` 는 대화상자 판정만, `--permissions` 는 권한
+//! 판정만 돈다.
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -21,6 +22,7 @@ const browsers_check = @import("browsers_check.zig");
 const frames_check = @import("frames_check.zig");
 const input_check = @import("input_check.zig");
 const dialogs_check = @import("dialogs_check.zig");
+const permissions_check = @import("permissions_check.zig");
 const attacks = @import("attacks.zig");
 
 const helper_wait_ms = 20_000;
@@ -61,6 +63,13 @@ pub fn main(init: std.process.Init.Minimal) u8 {
         dialogChecks(host, std.mem.span(argv[3]));
         return if (failures == 0) 0 else 1;
     }
+    if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--permissions")) {
+        _ = signal(13, 1);
+        var host_buf: [1024]u8 = undefined;
+        const host = std.fmt.bufPrintZ(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}) catch return 2;
+        permissionChecks(host, std.mem.span(argv[3]));
+        return if (failures == 0) 0 else 1;
+    }
     if (argv.len != 3) {
         std.debug.print("사용: maru-web-judge <설치 디렉터리> <프로필 뿌리>\n", .{});
         return 2;
@@ -95,6 +104,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     const profile_e = std.fmt.bufPrintZ(&profile_e_buf, "--profile-dir={s}/e", .{profile_root}) catch return 2;
     inputChecks(host_path, profile_e);
     dialogChecks(host_path, profile_root);
+    permissionChecks(host_path, profile_root);
     parentDeath(host_path, profile_b) catch |err| report(false, "parent-death", "{s}", .{@errorName(err)});
 
     // 크래시 보고는 ReportCrash 가 몇 초 늦게 쓴다.
@@ -218,6 +228,14 @@ fn dialogChecks(host_path: [:0]const u8, profile_root: []const u8) void {
     var profile_buf: [1024]u8 = undefined;
     const profile = std.fmt.bufPrintZ(&profile_buf, "--profile-dir={s}/f", .{profile_root}) catch return report(false, "dialogs", "프로필 경로가 길다", .{});
     dialogs_check.run(&reportText, host_path, profile, profile_root, server.port) catch |err| report(false, "dialogs", "{s}", .{@errorName(err)});
+}
+
+/// 권한 판정(W5b) — 프로필은 `<뿌리>/g`(다시 띄워 기억을 잰다 — 같은 HTTP 서버라 출처가 같다).
+fn permissionChecks(host_path: [:0]const u8, profile_root: []const u8) void {
+    const server = http.Server.start() catch |err| return report(false, "permissions", "HTTP 서버: {s}", .{@errorName(err)});
+    var profile_buf: [1024]u8 = undefined;
+    const profile = std.fmt.bufPrintZ(&profile_buf, "--profile-dir={s}/g", .{profile_root}) catch return report(false, "permissions", "프로필 경로가 길다", .{});
+    permissions_check.run(&reportText, host_path, profile, server.port) catch |err| report(false, "permissions", "{s}", .{@errorName(err)});
 }
 
 /// 입력 판정(W4). HTTP 서버는 판정마다 새로 연다(입력만 돌 때도 같은 페이지를 쓴다).

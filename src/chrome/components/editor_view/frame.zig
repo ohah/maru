@@ -418,7 +418,7 @@ pub fn shareRange(len: usize, needs: []const usize, i: usize) struct { start: us
 
 /// 호출자가 소유하는 run·글자 저장소 — **프레임을 넘어 유지**하고 `bufferSizes` 가 더 크게 부를 때만 다시
 /// 잡는다(visual-mapping §4 「저장소는 세션에 하나다」). `build` 는 할당하지 않는다 — 이 타입은 호출자가 부른다.
-/// 할당이 실패하면 가진 만큼으로 그린다(절단은 `build` 가 알린다).
+/// 할당이 실패하면 풀과 호출자가 준 것 중 **큰 쪽**으로 그린다(절단은 `build` 가 알린다).
 pub const RunTextPool = struct {
     runs: []draw.Run = &.{},
     text_bytes: []u8 = &.{},
@@ -443,9 +443,11 @@ pub const RunTextPool = struct {
                 self.text_bytes = fresh;
             } else |_| {}
         }
+        // **할당이 실패해도 호출자가 준 것보다 작아지지 않는다** — 큰 쪽을 쓴다. 풀 것을 무조건 쓰면 실패한 순간
+        // 호출자의 버퍼(Windows 호스트의 `4096`)를 빈 슬라이스로 바꿔 화면이 통째로 빈다(적대적 검증 2026-09-25).
         var s = base;
-        s.runs = self.runs;
-        s.text_bytes = self.text_bytes;
+        if (self.runs.len >= base.runs.len) s.runs = self.runs;
+        if (self.text_bytes.len >= base.text_bytes.len) s.text_bytes = self.text_bytes;
         return s;
     }
 };
@@ -5901,4 +5903,24 @@ test "RB5 shareRange — 넉넉하면 몫 그대로·모자라면 비례·몫이
     const zero = [_]usize{ 0, 0, 0, 0 };
     try testing.expectEqual(@as(usize, 25), shareRange(100, &zero, 1).start);
     try testing.expectEqual(@as(usize, 100), shareRange(100, &zero, 3).end);
+}
+
+test "RB6 RunTextPool — 할당이 실패해도 호출자가 준 저장소보다 작아지지 않는다" {
+    var runs: [64]draw.Run = undefined;
+    var text: [128]u8 = undefined;
+    var bufs: TestBuffers = .{};
+    var base = bufs.scratch();
+    base.runs = &runs;
+    base.text_bytes = &text;
+    var pool: RunTextPool = .{};
+    var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    const got = pool.scratchFor(failing.allocator(), .{ .runs = 1000, .text_bytes = 1000 }, base);
+    try testing.expectEqual(@as(usize, 64), got.runs.len); // 빈 슬라이스로 바뀌지 않았다
+    try testing.expectEqual(@as(usize, 128), got.text_bytes.len);
+    // 할당이 되면 풀 것을 쓰고, 다음에 더 작은 몫이 와도 다시 잡지 않는다.
+    const grown = pool.scratchFor(testing.allocator, .{ .runs = 1000, .text_bytes = 1000 }, base);
+    defer pool.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 1000), grown.runs.len);
+    const again = pool.scratchFor(testing.allocator, .{ .runs = 10, .text_bytes = 10 }, base);
+    try testing.expectEqual(grown.runs.ptr, again.runs.ptr);
 }

@@ -189,6 +189,37 @@ pub fn isPaneToken(p: []const u8) bool {
 /// 드러나 찾기 어렵다. 값을 빌려 오면 그 드리프트가 **구조적으로 불가능**하다.
 pub const max_pane_wire_bytes: usize = remote_agent_stream.max_pane_bytes;
 
+/// 이 pane 이름을 선에 **실어도 되는가** — 살아 있는 목록에 들 때만이다(RA7.6).
+///
+/// **왜 필요한가**: 사이드카는 tmux 서버가 바뀌어도 원격에 남는다. 그 파일이 남으면 죽은 이름이
+/// 이벤트마다 계속 실려 나가고, 소비자는 그때마다 그 행을 **다시 만든다**(`slotFor` 는 살았는지
+/// 묻지 않는다). 가지치기(`retainOnly`)가 지워도 곧 되살아나 「어제 닫은 pane 이 영영 안 사라진다」
+/// 가 된다 — 2026-09-25 실측: 옛 서버(pid 1591)의 사이드카가 `%16`·`%18`·`%27`·`%36` 을 계속 냈고,
+/// 앱 로그의 가지치기는 **딱 한 줄**이었다(살아 있는 목록이 안 바뀌어 두 번째 공지가 없었다).
+///
+/// **모를 때는 싣는다.** 목록을 아직 한 번도 못 받았으면 `live` 가 비는데, 그것은 「없다」가 아니라
+/// **「모른다」** 다 — 여기서 지우면 tmux 가 없는 기계·구버전 원격에서 pane 축이 통째로 사라진다.
+/// 침묵을 「없다」로 안 읽는 RA7 규율과 같은 자리다.
+/// 이 사이드카가 **지금 살아 있는 tmux 서버의 것**인가(RA7.6).
+///
+/// pane 이름은 서버가 다시 뜨면 `%0` 부터 다시 매겨져 **세대를 못 가른다** — 옛 서버의 `%8` 과
+/// 새 서버의 `%8` 은 같은 글자다. 이름만 보면 그 사이드카가 살아남고, 그 nonce 의 이벤트가
+/// **남의 카드로 간다**(2026-09-25 실측: `pid=1591 %8` 이 살아 있는 `maru2` 의 `%8` 로 통과했다).
+/// 이름 검사(`shouldEmitPane`)가 「죽은 pane」을 잡는다면 이쪽은 **「죽은 서버」**를 잡는다.
+///
+/// **둘 중 하나라도 모르면 참이다.** 구버전 훅은 pid 를 안 남기고, 조회를 못 했으면 살아 있는
+/// 값이 없다 — 그때 「다르다」로 읽으면 멀쩡한 사이드카를 지운다.
+pub fn sidecarIsCurrent(live_server: []const u8, side_server: []const u8) bool {
+    if (live_server.len == 0 or side_server.len == 0) return true; // 모른다
+    return std.mem.eql(u8, live_server, side_server);
+}
+
+pub fn shouldEmitPane(live: []const u8, pane: []const u8) bool {
+    if (pane.len == 0) return false; // 실을 이름이 없다
+    if (live.len == 0) return true; // **모른다** — 건드리지 않는다
+    return remote_agent_stream.paneListContains(live, pane);
+}
+
 /// 줄바꿈 구분 `tmux list-panes` 출력을 **공백 구분 wire 목록**으로 접는다. 성한 토큰이 하나도 없으면
 /// `null` — 그때는 프레임을 안 보낸다(위 경고).
 pub fn panesWireFrom(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, raw: []const u8) !?[]const u8 {
@@ -389,6 +420,43 @@ test "RA7 isPaneToken: 선에 싣는 모양은 소비자와 같은 상한을 쓴
     try testing.expectEqual(remote_agent_stream.max_pane_bytes, max_pane_wire_bytes);
     // 그 상한에서 한 글자 넘으면 안 싣는다.
     try testing.expect(!isPaneToken("%" ++ ("1" ** max_pane_wire_bytes)));
+}
+
+test "RA7.6 서버 세대가 다르면 이름이 같아도 남의 것이다" {
+    // **이름은 세대를 못 가른다.** tmux 서버가 다시 뜨면 pane 번호가 `%0` 부터 다시 매겨져,
+    // 옛 서버의 `%8` 과 새 서버의 `%8` 이 **같은 글자**가 된다 — 이름만 보면 그 사이드카가
+    // 살아남고 그 nonce 의 이벤트가 남의 카드로 간다(2026-09-25 실측).
+    try testing.expect(sidecarIsCurrent("2963", "2963"));
+    try testing.expect(!sidecarIsCurrent("2963", "1591"));
+
+    // **둘 중 하나라도 모르면 안 건드린다** — 구버전 훅은 pid 를 안 남기고, 조회를 못 했으면
+    // 살아 있는 값이 없다. 「모른다」를 「다르다」로 읽으면 멀쩡한 사이드카를 지운다.
+    try testing.expect(sidecarIsCurrent("", "1591"));
+    try testing.expect(sidecarIsCurrent("2963", ""));
+    try testing.expect(sidecarIsCurrent("", ""));
+}
+
+test "RA7.6 죽은 pane 이름은 안 싣는다 — 옛 사이드카가 행을 되살린다" {
+    // **소비자는 이름이 살았는지 안 묻는다**(`slotFor`). 그래서 여기서 안 거르면 가지치기가 지운
+    // 행이 다음 이벤트에 그대로 되살아나고, 살아 있는 목록은 안 바뀌니 두 번째 공지도 없다 —
+    // 2026-09-25 에 실제로 그렇게 됐다(옛 tmux 서버 pid 1591 의 사이드카).
+    try testing.expect(shouldEmitPane("%0 %1 %8", "%1"));
+    try testing.expect(shouldEmitPane("%0 %1 %8", "%8"));
+    try testing.expect(!shouldEmitPane("%0 %1 %8", "%16"));
+    try testing.expect(!shouldEmitPane("%0 %1 %8", "%36"));
+
+    // **접두가 같아도 다른 이름이다** — `%1` 로 `%16` 을 살려 주면 옛 서버의 낮은 번호가 전부 산다.
+    try testing.expect(!shouldEmitPane("%1", "%16"));
+    try testing.expect(!shouldEmitPane("%16", "%1"));
+
+    // **모르면 싣는다.** 목록을 못 받은 것은 「없다」가 아니다 — tmux 없는 기계·구버전 원격에서
+    // 여기서 지우면 pane 축이 통째로 사라진다.
+    try testing.expect(shouldEmitPane("", "%16"));
+    try testing.expect(shouldEmitPane("", "%0"));
+
+    // 실을 이름이 없으면 싣지 않는다(빈 값은 Term 인라인 슬롯으로 접히는 길이다).
+    try testing.expect(!shouldEmitPane("%0 %1", ""));
+    try testing.expect(!shouldEmitPane("", ""));
 }
 
 test "RA7 formatPanes: 목록 한 줄이 소비자가 가르는 접두를 그대로 쓴다" {

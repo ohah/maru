@@ -14511,12 +14511,31 @@ fn readSidecar(io: std.Io, allocator: std.mem.Allocator, dir: std.Io.Dir, nonce:
     return dir.readFileAlloc(io, name, allocator, .limited(4096)) catch null;
 }
 
+/// 낡은 사이드카를 치운다 — 지웠으면 `true`(RA7.6).
+///
+/// **옛 tmux 서버 세대의 파일이라 아무도 안 읽는다.** 남겨 두면 죽은 이름이 회차마다 다시 나와
+/// 같은 검사를 영원히 돌게 하고, 원격 디스크에도 계속 쌓인다(2026-09-25 실측: 사이드카 22 개 중
+/// 아홉이 죽은 서버 pid 1591 의 것이었다).
+///
+/// **지우는 것이 파괴가 아니라 「다시 묻게 하는 것」이다.** 그 에이전트가 아직 살아 있으면 훅이
+/// 다음 이벤트에서 **새 좌표로 다시 쓴다** — 훅은 매 이벤트마다 이 파일을 덮어쓴다. 살아 있지
+/// 않으면 애초에 아무도 안 읽을 쓰레기다.
+fn deleteSidecar(io: std.Io, dir: std.Io.Dir, nonce: []const u8) bool {
+    var name_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const name = std.fmt.bufPrint(&name_buf, "{s}{s}", .{
+        nonce,
+        maru.session.agent_hook_command.tmux_sidecar_suffix,
+    }) catch return false;
+    dir.deleteFile(io, name) catch return false;
+    return true;
+}
+
 /// 한 조회의 결과. 귀속(`nonce`)과 **지금 그 서버에 있는 pane 목록**(`panes`, 줄바꿈 구분 원문)을 함께
 /// 돌려준다 — 둘 다 같은 `/bin/sh` 한 번에서 나오므로 **포크가 늘지 않는다**(RA7 가지치기).
 ///
 /// 각 칸은 따로 `null` 일 수 있다: 귀속이 모호해도 pane 목록은 성할 수 있고, 그 반대도 된다.
 /// 둘 다 호출자 소유다.
-const TmuxLookup = struct { nonce: ?[]u8 = null, panes: ?[]u8 = null };
+const TmuxLookup = struct { nonce: ?[]u8 = null, panes: ?[]u8 = null, server: ?[]u8 = null };
 
 fn tmuxResolveNonce(allocator: std.mem.Allocator, obs: maru.session.remote_tmux_route.Observed) TmuxLookup {
     const rt = maru.session.remote_tmux_route;
@@ -14532,12 +14551,16 @@ fn tmuxResolveNonce(allocator: std.mem.Allocator, obs: maru.session.remote_tmux_
     // 성한 사실이고, 그것으로 죽은 슬롯을 지우는 것은 옳다.
     const panes: ?[]u8 = if (rt.panesSection(out)) |sec| (allocator.dupe(u8, sec) catch null) else null;
     errdefer if (panes) |pp| allocator.free(pp);
+    // **살아 있는 서버 세대**(RA7.6). pane 목록과 같은 이유로 귀속과 따로 산다 — 귀속이 모호해도
+    // 「지금 서버가 누구인가」는 성한 사실이고, 그것으로 옛 세대의 사이드카를 가른다.
+    const server: ?[]u8 = if (rt.serverSection(out)) |sec| (allocator.dupe(u8, sec) catch null) else null;
+    errdefer if (server) |sp| allocator.free(sp);
 
     var buf: [16]rt.Client = undefined;
     const clients = rt.parseClients(out, &buf) orelse {
         // 표식이 왔다 = 그 기계에 `tmux` 가 없다. **물어보지도 못했다**로 접는다.
         _ = rt.route(.{ .pane = pane, .socket = socket, .lookup_ran = false }, &.{});
-        return .{ .panes = panes }; // 표식이면 `panesSection` 도 null 이다 — 모양만 맞춘다
+        return .{ .panes = panes, .server = server }; // 표식이면 두 구획도 null 이다 — 모양만 맞춘다
     };
     return .{
         .nonce = switch (rt.route(.{ .pane = pane, .socket = socket }, clients)) {
@@ -14547,6 +14570,7 @@ fn tmuxResolveNonce(allocator: std.mem.Allocator, obs: maru.session.remote_tmux_
             .ambiguous, .detached, .unresolved, .direct => null,
         },
         .panes = panes,
+        .server = server,
     };
 }
 
@@ -14788,6 +14812,10 @@ fn runAgentEvents(
     // 목록은 그 기계 전체의 것이라, 안 거르면 같은 줄이 nonce 수만큼 곱해져 선을 채운다.
     var last_panes: std.ArrayListUnmanaged(u8) = .empty;
     defer last_panes.deinit(allocator);
+    // **마지막으로 본 살아 있는 서버 pid**(RA7.6). 선에 싣지 않는다 — 소비자는 이 값을 안 쓰고,
+    // 여기서 옛 세대의 사이드카를 가르는 데만 쓴다.
+    var last_server: std.ArrayListUnmanaged(u8) = .empty;
+    defer last_server.deinit(allocator);
     var routes: std.StringHashMapUnmanaged(RouteCache) = .empty;
     defer {
         var rit = routes.iterator();
@@ -14943,6 +14971,9 @@ fn runAgentEvents(
             // 에이전트» 다. 사이드카 버퍼는 아래 `defer` 로 사라지므로 **값을 복사해 둔다.**
             var pane_buf: [16]u8 = undefined;
             var emit_pane: []const u8 = "";
+            // 사이드카가 적어 둔 **서버 세대**. 아래 `defer` 로 버퍼가 사라지므로 값을 복사해 둔다.
+            var side_server_buf: [24]u8 = undefined;
+            var side_server: []const u8 = "";
             const emit_nonce = blk: {
                 const side = readSidecar(io, allocator, dir, nonce) orelse break :blk nonce;
                 defer allocator.free(side);
@@ -14951,6 +14982,12 @@ fn runAgentEvents(
                     if (p.len > 0 and p.len <= pane_buf.len) {
                         @memcpy(pane_buf[0..p.len], p);
                         emit_pane = pane_buf[0..p.len];
+                    }
+                }
+                if (obs.server) |sv| {
+                    if (sv.len > 0 and sv.len <= side_server_buf.len) {
+                        @memcpy(side_server_buf[0..sv.len], sv);
+                        side_server = side_server_buf[0..sv.len];
                     }
                 }
                 const rgop = routes.getOrPut(allocator, nonce) catch break :blk nonce;
@@ -14986,12 +15023,38 @@ fn runAgentEvents(
                         }
                     }
                 }
+                if (look.server) |sv| {
+                    defer allocator.free(sv);
+                    last_server.clearRetainingCapacity();
+                    last_server.appendSlice(allocator, sv) catch last_server.clearRetainingCapacity();
+                }
                 rgop.value_ptr.last_lookup_ms = now_ms;
                 rgop.value_ptr.asked = true;
                 allocator.free(rgop.value_ptr.seen_sidecar);
                 rgop.value_ptr.seen_sidecar = allocator.dupe(u8, side) catch "";
                 break :blk if (rgop.value_ptr.resolved) |r| r else nonce;
             };
+
+            // **죽은 이름은 안 싣는다**(RA7.6). 소비자(`slotFor`)는 이름이 살았는지 묻지 않으므로,
+            // 여기서 안 거르면 가지치기가 지운 행이 다음 이벤트에 **그대로 되살아난다** — 그리고
+            // 살아 있는 목록은 안 바뀌니 두 번째 공지도 안 온다. 2026-09-25 에 실제로 그랬다:
+            // 옛 서버(pid 1591)의 사이드카가 `%16`·`%18`·`%27`·`%36` 을 계속 냈고, 앱 로그의
+            // 가지치기는 딱 한 줄이었다. 판정은 `ae.shouldEmitPane` 이 소유한다(모름은 안 건드린다).
+            if (emit_pane.len > 0 and (!ae.sidecarIsCurrent(last_server.items, side_server) or
+                !ae.shouldEmitPane(last_panes.items, emit_pane)))
+            {
+                emit_pane = "";
+                // **근원을 치운다.** 이 검사만 두면 같은 이름이 회차마다 다시 와 검사가 영원히 돈다.
+                if (deleteSidecar(io, dir, nonce)) {
+                    // **지운 그 순간 한 번만 다시 공지한다.** 이미 쌓인 행은 「바뀔 때만 보낸다」
+                    // 게이트 때문에 영영 안 지워진다 — 방아쇠는 주기가 아니라 **낡음을 발견한
+                    // 시점**이다. 사이드카를 지웠으므로 다음 회차엔 이 자리에 안 온다(한 번뿐).
+                    frame.clearRetainingCapacity();
+                    if (ae.formatPanes(&frame, allocator, last_panes.items)) |_| {
+                        stdout.writeAll(frame.items) catch {};
+                    } else |_| {}
+                }
+            }
 
             var consumed: usize = 0;
             var lines = std.mem.splitScalar(u8, chunk, '\n');

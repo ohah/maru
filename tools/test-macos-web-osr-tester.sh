@@ -108,12 +108,13 @@ DIALOGS = ("<!doctype html><title>dialogs</title><style>html,body{margin:0;heigh
     "document.getElementById('u').onclick=function(){window.onbeforeunload=function(e){e.preventDefault();e.returnValue='x';return 'x'};ping('e=armed')};"
     "requestAnimationFrame(function(){requestAnimationFrame(function(){ping('e=ready')})});"
     "</script>").encode()
-# W5b: 권한 — 위쪽 단추 여섯(본문 x 0·100·…·500): 알림 · MIDI sysex · 로컬 글꼴 · 화면 공유 · 창 관리 뒤 스스로 새로고침(묻는 동안
-# 페이지가 떠나면 sheet 가 닫히는지) · 화면 공유 뒤 0.3 초에 창 관리(macOS 안내 뒤에 줄 선 요청).
+# W5b: 권한 — 위쪽 단추 일곱(본문 x 0·100·…·600): 알림 · MIDI sysex · 로컬 글꼴 · 화면 공유 · 창 관리 뒤 스스로 새로고침(묻는 동안
+# 페이지가 떠나면 sheet 가 닫히는지) · 화면 공유 뒤 0.3 초에 창 관리(macOS 안내 뒤에 줄 선 요청) · 위치(W5b2).
 PERMS = ("<!doctype html><title>perms</title><style>html,body{margin:0;height:100%}.b{position:absolute;top:0;width:100px;height:80px}</style>"
     "<button class=b id=n style='left:0'>notif</button><button class=b id=m style='left:100px'>midi</button>"
     "<button class=b id=f style='left:200px'>fonts</button><button class=b id=d style='left:300px'>display</button>"
-    "<button class=b id=w style='left:400px'>leave</button><button class=b id=c style='left:500px'>chain</button><script>"
+    "<button class=b id=w style='left:400px'>leave</button><button class=b id=c style='left:500px'>chain</button>"
+    "<button class=b id=g style='left:600px'>geo</button><script>"
     "var P=Math.random().toString(36).slice(2,8),S=0;function ping(q){new Image().src='/ev?p='+P+'&s='+(++S)+'&'+q+'&t='+Date.now()}"
     "function on(id,f){document.getElementById(id).onclick=f}function E(k){return function(e){ping('e='+k+'&r=err-'+e.name)}}"
     "on('n',function(){Notification.requestPermission().then(function(r){ping('e=notif&r='+r)})});"
@@ -123,6 +124,8 @@ PERMS = ("<!doctype html><title>perms</title><style>html,body{margin:0;height:10
     "on('w',function(){getScreenDetails().then(function(){ping('e=screens&r=ok')},E('screens'));setTimeout(function(){location.reload()},1500)});"
     "on('c',function(){navigator.mediaDevices.getDisplayMedia({video:true}).then(function(){ping('e=display&r=ok')},E('display'));"
     "setTimeout(function(){getScreenDetails().then(function(){ping('e=screens&r=ok')},E('screens'))},300)});"
+    "on('g',function(){navigator.geolocation.getCurrentPosition(function(p){ping('e=geo&r=at'+p.coords.latitude.toFixed(3)+','+p.coords.longitude.toFixed(3))},"
+    "function(e){ping('e=geo&r=err'+e.code)},{timeout:8000})});"
     "requestAnimationFrame(function(){requestAnimationFrame(function(){ping('e=ready')})});"
     "</script>").encode()
 class H(http.server.BaseHTTPRequestHandler):
@@ -768,6 +771,45 @@ sleep 1200
 sheet
 sheet-answer 2
 sleep 1200
+mark geo-denied
+macos-location denied
+view down 0 0 838 152 0 1
+view up 0 0 838 152 0 1
+sleep 900
+sheet
+sheet-answer 0
+sleep 1200
+sheet-blocked
+sleep 1000
+mark geo-allow
+macos-location granted 37.5665 126.978 25
+view down 0 0 838 152 0 1
+view up 0 0 838 152 0 1
+sleep 900
+sheet
+sheet-answer 0
+sleep 1500
+mark geo-same-doc
+macos-location granted 35.1796 129.0756 40
+view down 0 0 838 152 0 1
+view up 0 0 838 152 0 1
+sleep 1500
+sheet
+key 15 U+72 U+72 32
+sleep 3500
+mark geo-remembered
+view down 0 0 838 152 0 1
+view up 0 0 838 152 0 1
+sleep 1500
+sheet
+macos-location denied
+key 15 U+72 U+72 32
+sleep 3500
+mark geo-remembered-blocked
+view down 0 0 838 152 0 1
+view up 0 0 838 152 0 1
+sleep 1500
+sheet
 mark perm-leave
 view down 0 0 638 152 0 1
 view up 0 0 638 152 0 1
@@ -777,7 +819,7 @@ sleep 3000
 sheet
 mark end
 SCRIPT
-page_path=/perms run_app "$root/perms.txt" 60000
+page_path=/perms run_app "$root/perms.txt" 80000
 cat "$root/report"
 python3 - "$root/requests.log" "$root/report" "$root/judge.py" <<'PY' || fail "Chromium tab permission requests did not work through the maru sheet"
 import sys
@@ -826,6 +868,28 @@ check(len(queued) == 3 and (asks(queued[0], '화면 전체') or asks(queued[0], 
       and qblocked[:1] and qblocked[0] != 'sheet-blocked none' and (asks(queued[2], '창 관리') or asks(queued[2], 'windows')),
       f'a request that arrives while the macOS guidance sheet is up waits until it is closed — its input protection starts when it shows ({queued})')
 check(replies('perm-queued') == ['3', '2'], f'then it is answered on its own (close) ({replies("perm-queued")})')
+def locs(name): return [l.split()[1] for l in after(name) if l.startswith('location-reply ') and l.endswith('answered=true')]
+def geo(name): return [e.get('r') for e in page(name, 'geo')]
+gd = sheets('geo-denied')
+gblocked = [l for l in after('geo-denied') if l.startswith('sheet-blocked ')]
+check(gd[:1] and (asks(gd[0], '위치 확인') or asks(gd[0], 'location')) and '허용하거나 차단하면' not in gd[0] and 'If you allow or block' not in gd[0]
+      and ('다시 시작할 때까지 이 탭' in gd[0] or 'until Maru restarts' in gd[0]),
+      f'a location request asks with a sheet that says an allow lasts for this tab until Maru restarts ({gd[:1]})')
+check(locs('geo-denied') == ['2'] and gblocked[:1] and ('위치 서비스' in gblocked[0] or 'Location Services' in gblocked[0]) and geo('geo-denied') == ['err1'],
+      f'if macOS has not given Maru location, Allow answers "could not ask" and points to Location Services ({gblocked} {geo("geo-denied")})')
+ga = sheets('geo-allow')
+check(ga[:1] and ga[0].startswith('alert ') and locs('geo-allow') == ['0'] and geo('geo-allow') == ['at37.566,126.978'],
+      f'Allow gives the page the Maru location, set before the allow (no error first) ({geo("geo-allow")})')
+gs = sheets('geo-same-doc')
+check(gs[-1:] and gs[-1].startswith('none') and not locs('geo-same-doc') and geo('geo-same-doc') == ['at37.566,126.978'],
+      f'the same page asking again gets its position right away without a sheet (one position per page — the shim fills maximumAge) ({geo("geo-same-doc")})')
+gr = sheets('geo-remembered')
+check(gr[-1:] and gr[-1].startswith('none') and any(l == 'location-taken' for l in after('geo-remembered')) and locs('geo-remembered') == ['0']
+      and geo('geo-remembered') == ['at35.180,129.076'], f'an allowed site asking again gets a fresh location without a sheet ({gr} {geo("geo-remembered")})')
+gb = sheets('geo-remembered-blocked')
+check(gb[-1:] and gb[-1].startswith('none') and locs('geo-remembered-blocked') == ['2'] and geo('geo-remembered-blocked') == ['err2']
+      and not [l for l in after('geo-remembered-blocked') if l.startswith('macos-blocked')],
+      f'if macOS blocks it later, the allowed site gets "position unavailable" without a sheet or guidance ({geo("geo-remembered-blocked")})')
 leave = sheets('perm-leave')
 check(len(leave) == 2 and asks(leave[0], '창') or len(leave) == 2 and asks(leave[0], 'windows'), f'a window-management request shows a sheet ({leave[:1]})')
 check(len(leave) == 2 and leave[1].startswith('none') and not replies('perm-leave'),

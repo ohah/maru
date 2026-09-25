@@ -130,6 +130,10 @@ pub const Dialog = struct {
     /// 권한 요청(W5b)이 청한 종류 — 둘 중 하나만 찬다(`ws.message.PermissionRequest`).
     permission_kinds: u32 = 0,
     permission_media: u8 = 0,
+    /// W5b2: 사용자가 이미 허용한 출처의 위치 요청 — sheet 없이 좌표만 구해 답한다(`nextLocation`). 초점·창 sheet 와 무관하다.
+    remembered: bool = false,
+    /// W5b2: 답을 기다리는 사이 사용자가 그 출처의 위치를 차단했다 — 허용으로 답하지 않는다(`revokeLocationOrigin`).
+    revoked: bool = false,
     /// 띄운 창(AppSession 주소) — 0 이면 아직 안 띄웠다.
     shown_by: usize = 0,
 
@@ -145,6 +149,79 @@ pub const Dialog = struct {
 /// 넘으면 곧바로 취소로 답한다(sidecar 가 쥔 콜백이 쌓이지 않게).
 const max_dialogs_per_surface = 4;
 var next_dialog_token: u64 = 1;
+
+/// W5b2: 이 실행 동안 사용자가 **maru 의 sheet 에서** 위치를 허용한 (탭, 출처). sidecar 의 `remembered` 는 믿지 않는다 —
+/// sidecar 는 신뢰할 수 없는 웹의 뿌리라, 그 표시 하나로 sheet 를 건너뛰면 장악된 sidecar 가 Maru 의 macOS 위치 권한으로 좌표를
+/// 조용히 빼 갈 수 있다(적대 검증). 출처만이 아니라 허용한 **탭**에 묶는다 — 장악된 sidecar 가 다른 탭 번호로 그 출처를 흉내 내도
+/// sheet 로 묻는다(2 차 적대 검증). 탭이 닫히면 그 탭의 기록이 지워지고, 차단하면 그 출처의 기록을 모든 탭에서 뺀다. 앱을 다시
+/// 띄우면 비어 첫 요청은 다시 묻는다. 키는 `<탭 번호>\x00<출처>`.
+var location_allowed: std.StringArrayHashMapUnmanaged(void) = .empty;
+const max_location_allowed = 256;
+
+fn locationKey(buf: []u8, surface_id: u64, origin: []const u8) ?[]const u8 {
+    if (origin.len == 0) return null;
+    return std.fmt.bufPrint(buf, "{d}\x00{s}", .{ surface_id, origin }) catch null;
+}
+
+fn locationAllowed(surface_id: u64, origin: []const u8) bool {
+    var buf: [ws.fields.max_origin_bytes + 32]u8 = undefined;
+    const key = locationKey(&buf, surface_id, origin) orelse return false;
+    return location_allowed.contains(key);
+}
+
+fn allowLocation(gpa: std.mem.Allocator, surface_id: u64, origin: []const u8) void {
+    var buf: [ws.fields.max_origin_bytes + 32]u8 = undefined;
+    const key = locationKey(&buf, surface_id, origin) orelse return;
+    if (location_allowed.contains(key) or location_allowed.count() >= max_location_allowed) return;
+    const owned = gpa.dupe(u8, key) catch return;
+    location_allowed.put(gpa, owned, {}) catch gpa.free(owned);
+}
+
+/// 차단 — 그 출처의 기록을 모든 탭에서 뺀다(Chromium 도 출처 단위로 차단을 기억한다).
+fn forgetLocationOrigin(gpa: std.mem.Allocator, origin: []const u8) void {
+    var i: usize = 0;
+    while (i < location_allowed.count()) {
+        const key = location_allowed.keys()[i];
+        const sep = std.mem.indexOfScalar(u8, key, 0) orelse unreachable;
+        if (std.mem.eql(u8, key[sep + 1 ..], origin)) {
+            location_allowed.swapRemoveAt(i);
+            gpa.free(key);
+        } else i += 1;
+    }
+}
+
+/// 탭이 사라졌다 — 그 탭의 기록을 뺀다(탭 번호가 다시 쓰여도 옛 허용이 붙지 않게).
+fn forgetLocationSurface(gpa: std.mem.Allocator, surface_id: u64) void {
+    var prefix_buf: [32]u8 = undefined;
+    const prefix = std.fmt.bufPrint(&prefix_buf, "{d}\x00", .{surface_id}) catch return;
+    var i: usize = 0;
+    while (i < location_allowed.count()) {
+        const key = location_allowed.keys()[i];
+        if (std.mem.startsWith(u8, key, prefix)) {
+            location_allowed.swapRemoveAt(i);
+            gpa.free(key);
+        } else i += 1;
+    }
+}
+
+/// 사용자가 그 출처의 위치를 차단했다 — 답을 기다리던 같은 출처의 위치 요청(좌표를 구하는 중인 허용 포함)은 허용으로 답하지
+/// 않는다. 늦게 온 허용이 나중의 차단을 덮어쓰지 않게(Chromium 의 저장값은 마지막 답이다 — 2 차 적대 검증).
+fn revokeLocationOrigin(origin: []const u8, except_token: u64) void {
+    for (surfaces.values()) |*s| {
+        for (s.dialogs.items) |*d| if (d.token != except_token and d.kind == .permission and
+            d.permission_kinds & ws.message.PermissionKind.geolocation.bit() != 0 and std.mem.eql(u8, d.origin, origin))
+        {
+            d.revoked = true;
+        };
+    }
+}
+
+/// 시험용 — 기록한 출처를 모두 비운다.
+fn forgetAllLocations(gpa: std.mem.Allocator) void {
+    for (location_allowed.keys()) |key| gpa.free(key);
+    location_allowed.deinit(gpa);
+    location_allowed = .empty;
+}
 
 var gpa_ref: ?std.mem.Allocator = null;
 var state: State = .off;
@@ -589,8 +666,13 @@ fn queuePermission(gpa: std.mem.Allocator, v: ws.message.PermissionRequest) bool
     const d = &s.dialogs.items[s.dialogs.items.len - 1];
     d.permission_kinds = v.kinds;
     d.permission_media = v.media;
+    // sheet 없이 답하는 것은 maru 가 스스로 기록한 (탭, 출처)만 — sidecar 의 표시만으로는 아니다(적대 검증).
+    d.remembered = v.remembered and locationAllowed(v.browser, v.origin);
     return true;
 }
+
+/// W5b2 좌표. null 이면 「없음」(페이지는 「위치를 알 수 없음」).
+pub const Position = struct { latitude: f64, longitude: f64, accuracy: f64 };
 
 fn removeDialog(gpa: std.mem.Allocator, s: *Surface, token: u64) void {
     for (s.dialogs.items, 0..) |d, i| if (d.token == token) {
@@ -600,12 +682,53 @@ fn removeDialog(gpa: std.mem.Allocator, s: *Surface, token: u64) void {
     };
 }
 
-/// 그 탭에서 다음에 띄울 요청(아직 아무 창도 안 띄운 첫 요청). 앞 요청이 떠 있으면 null — 한 탭은 하나씩.
+/// 그 탭에서 다음에 띄울 요청(아직 아무 창도 안 띄운 첫 요청). 앞 요청이 떠 있으면 null — 한 탭은 하나씩. 기억된 위치
+/// 요청(W5b2)은 sheet 가 없으니 건너뛴다(`nextLocation`).
 pub fn nextDialog(surface_id: u64) ?*const Dialog {
     const s = surfaces.getPtr(surface_id) orelse return null;
-    if (s.dialogs.items.len == 0) return null;
-    const first = &s.dialogs.items[0];
-    return if (first.shown_by == 0) first else null;
+    for (s.dialogs.items) |*d| {
+        if (d.remembered) continue;
+        return if (d.shown_by == 0) d else null;
+    }
+    return null;
+}
+
+/// W5b2: 아직 아무 창도 맡지 않은 기억된 위치 요청(모든 탭에서 — 보이지 않는 탭도 sheet 없이 답한다). 맡은 창을 적는다.
+pub fn nextLocation(window: usize) ?struct { surface_id: u64, token: u64 } {
+    for (surfaces.keys(), surfaces.values()) |surface_id, *s| {
+        for (s.dialogs.items) |*d| if (d.remembered and d.shown_by == 0) {
+            d.shown_by = window;
+            return .{ .surface_id = surface_id, .token = d.token };
+        };
+    }
+    return null;
+}
+
+/// W5b2: 위치 요청의 답 — `accept` 면 좌표(없으면 「없음」)를 먼저 걸고 허용한다(허용 뒤에 걸면 기다리던 요청이 실패한다 —
+/// 실측), 아니면 그 답만. 답했으면 true — 위치 요청이 아니거나 이미 사라졌으면 false.
+pub fn replyLocation(gpa: std.mem.Allocator, surface_id: u64, token: u64, position: ?Position, result: ws.message.PermissionResult) bool {
+    const s = surfaces.getPtr(surface_id) orelse return false;
+    const d = dialogPending(surface_id, token) orelse return false;
+    if (d.kind != .permission or d.permission_kinds & ws.message.PermissionKind.geolocation.bit() == 0) return false;
+    const request = d.request;
+    // 기다리는 사이 그 출처를 차단했다 — 허용으로 답하지 않는다(늦은 허용이 차단을 덮어쓰지 않게).
+    const effective: ws.message.PermissionResult = if (d.revoked and result == .accept) .ignore else result;
+    // sheet 에서 허용했다 — 이 탭에서 이 출처의 다음 요청(Chromium 은 부를 때마다 묻는다)은 sheet 없이 답한다.
+    if (!d.remembered and effective == .accept) allowLocation(gpa, surface_id, d.origin);
+    removeDialog(gpa, s, token);
+    if (!s.created) return true;
+    if (effective == .accept) {
+        const geo: ws.message.Geolocation = if (position) |p| .{ .browser = surface_id, .request = request, .available = true, .latitude = p.latitude, .longitude = p.longitude, .accuracy = p.accuracy } else .{ .browser = surface_id, .request = request, .available = false };
+        // 규칙(범위·유한)을 못 지나는 좌표는 「없음」으로.
+        ws.fields.checkGeolocation(geo) catch {
+            send(gpa, .{ .geolocation = .{ .browser = surface_id, .request = request, .available = false } });
+            send(gpa, .{ .permission_reply = .{ .browser = surface_id, .request = request, .result = .accept } });
+            return true;
+        };
+        send(gpa, .{ .geolocation = geo });
+    }
+    send(gpa, .{ .permission_reply = .{ .browser = surface_id, .request = request, .result = effective } });
+    return true;
 }
 
 pub fn markDialogShown(surface_id: u64, token: u64, window: usize) void {
@@ -664,12 +787,18 @@ pub fn replyPermission(gpa: std.mem.Allocator, surface_id: u64, token: u64, resu
     const d = dialogPending(surface_id, token) orelse return false;
     if (d.kind != .permission) return false;
     const request = d.request;
+    // 위치를 차단했다 — maru 의 기록에서도 빼고, 같은 출처의 기다리던 허용을 거둔다(Chromium 도 차단을 기억해 다시 묻지 않는다).
+    if (result == .deny and d.permission_kinds & ws.message.PermissionKind.geolocation.bit() != 0) {
+        forgetLocationOrigin(gpa, d.origin);
+        revokeLocationOrigin(d.origin, token);
+    }
     removeDialog(gpa, s, token);
     if (s.created) send(gpa, .{ .permission_reply = .{ .browser = surface_id, .request = request, .result = result } });
     return true;
 }
 
-/// 창이 닫힌다 — 그 창이 띄운 요청은 취소로 답한다(다른 창이 다시 띄우지 않는다 — 탭도 그 창과 함께 사라진다).
+/// 창이 닫힌다 — 그 창이 띄운 요청은 취소로 답한다(다른 창이 다시 띄우지 않는다). 기억된 위치 요청은 창에 묶이지 않아 맡음만
+/// 푼다(다른 창 탭의 요청일 수 있다).
 pub fn cancelDialogsShownBy(gpa: std.mem.Allocator, window: usize) void {
     for (surfaces.keys(), surfaces.values()) |surface_id, *s| {
         var i: usize = 0;
@@ -680,6 +809,12 @@ pub fn cancelDialogsShownBy(gpa: std.mem.Allocator, window: usize) void {
                 continue;
             }
             // 권한은 「못 물음」 — 차단은 Chromium 이 그 사이트에 기억하고 닫기는 embargo 를 쌓는다(사용자가 고르지 않았다).
+            // 기억된 위치 요청은 창에 묶이지 않는다 — 맡음만 풀어 다른 창이 맡게 한다(다른 창 탭의 요청을 끝내지 않게 — 적대 검증).
+            if (d.kind == .permission and d.remembered) {
+                s.dialogs.items[i].shown_by = 0;
+                i += 1;
+                continue;
+            }
             if (d.kind.isFile()) replyFileDialog(gpa, surface_id, d.token, false) else if (d.kind == .permission) {
                 _ = replyPermission(gpa, surface_id, d.token, .ignore);
             } else replyDialog(gpa, surface_id, d.token, d.kind == .before_unload, "", false);
@@ -690,6 +825,7 @@ pub fn cancelDialogsShownBy(gpa: std.mem.Allocator, window: usize) void {
 // ── 안 ─────────────────────────────────────────────────────────────────────────────────────────────
 
 fn freeSurface(gpa: std.mem.Allocator, s: *Surface) void {
+    forgetLocationSurface(gpa, s.record.surface_id);
     if (s.last_url) |u| gpa.free(u);
     if (s.url) |u| gpa.free(u);
     s.last_url = null;
@@ -1025,8 +1161,13 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
                 send(gpa, .{ .file_dialog_reply = .{ .browser = v.browser, .request = v.request, .accept = false } });
         },
         // 받지 못하면(상한·모르는 탭) 「못 물음」으로 답한다 — 차단은 Chromium 이 기억하고 닫기는 embargo 를 쌓는다.
-        .permission_request => |v| if (!queuePermission(gpa, v))
-            send(gpa, .{ .permission_reply = .{ .browser = v.browser, .request = v.request, .result = .ignore } }),
+        // maru 가 허용을 기록한 기억된 위치 요청은 허용과 「없음」으로(되풀이된 못 물음이 embargo 를 만들지 않게) — sidecar 의
+        // 표시만이면 못 물음.
+        .permission_request => |v| if (!queuePermission(gpa, v)) {
+            const allowed = v.remembered and locationAllowed(v.browser, v.origin);
+            if (allowed) send(gpa, .{ .geolocation = .{ .browser = v.browser, .request = v.request, .available = false } });
+            send(gpa, .{ .permission_reply = .{ .browser = v.browser, .request = v.request, .result = if (allowed) .accept else .ignore } });
+        },
         .dialog_closed => |v| if (surfaces.getPtr(v.browser)) |s| {
             for (s.dialogs.items) |d| if (d.request == v.request) {
                 removeDialog(gpa, s, d.token);
@@ -1034,7 +1175,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             };
         },
         // 방향이 다른 tag 는 decoder 가 이미 거절했다.
-        .hello, .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .shutdown, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost, .dialog_reply, .file_dialog_path, .file_dialog_reply, .permission_reply => unreachable,
+        .hello, .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .shutdown, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost, .dialog_reply, .file_dialog_path, .file_dialog_reply, .permission_reply, .geolocation => unreachable,
     }
 }
 
@@ -1156,6 +1297,75 @@ test "permission requests share the dialog queue: one answer each, other answers
     try std.testing.expect(frames[3].permission_reply.request == 8 and frames[3].permission_reply.result == .ignore);
     try std.testing.expect(frames[4].permission_reply.request == 10 and frames[4].permission_reply.result == .ignore);
     try std.testing.expectEqual(@as(usize, 3), surfaces.getPtr(7).?.dialogs.items.len);
+}
+
+test "remembered location requests skip the sheet only for origins the user allowed in maru, take coordinates before the allow" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer {
+        for (surfaces.values()) |*s| freeSurface(gpa, s);
+        surfaces.deinit(gpa);
+        surfaces = .empty;
+        outbox_pending.deinit(gpa);
+        outbox_pending = .empty;
+        forgetAllLocations(gpa);
+        state = .off;
+    }
+    try surfaces.put(gpa, 7, .{ .record = .{ .surface_id = 7, .size = .{ .width = 10, .height = 10, .scale = 1 }, .hidden = false }, .created = true });
+    const geo = ws.message.PermissionKind.geolocation.bit();
+    const site = "https://maps.example";
+    // sidecar 가 「기억된 허용」이라 해도 maru 가 기록하지 않은 출처면 sheet 로 묻는다(적대 검증 — 장악된 sidecar).
+    apply(gpa, .{ .permission_request = .{ .browser = 7, .request = 1, .origin = site, .kinds = geo, .remembered = true } }, 0);
+    try std.testing.expect(nextLocation(11) == null);
+    const asked = nextDialog(7).?;
+    try std.testing.expect(!asked.remembered);
+    // sheet 에서 허용하면 좌표를 먼저 걸고 허용한다 — 그 출처가 기록된다.
+    try std.testing.expect(replyLocation(gpa, 7, asked.token, .{ .latitude = 37.5, .longitude = 127, .accuracy = 30 }, .accept));
+    try std.testing.expect(!replyLocation(gpa, 7, asked.token, null, .accept)); // 두 번째 답은 무동작
+    // 이제 그 출처의 기억된 요청은 sheet 를 건너뛰고 창 하나가 맡는다. 빈 출처·다른 출처는 여전히 sheet.
+    apply(gpa, .{ .permission_request = .{ .browser = 7, .request = 2, .origin = site, .kinds = geo, .remembered = true } }, 0);
+    apply(gpa, .{ .permission_request = .{ .browser = 7, .request = 3, .origin = "", .kinds = geo, .remembered = true } }, 0);
+    const loc = nextLocation(11).?;
+    try std.testing.expect(nextLocation(12) == null);
+    // (대기열 원소를 가리키는 포인터는 다음 요청이 오면 무효다 — 값으로 떠 둔다.)
+    const blank = nextDialog(7).?;
+    try std.testing.expect(blank.request == 3 and !blank.remembered);
+    const blank_token = blank.token;
+    // 범위를 벗어난 좌표는 「없음」으로.
+    try std.testing.expect(replyLocation(gpa, 7, loc.token, .{ .latitude = 91, .longitude = 0, .accuracy = 5 }, .accept));
+    // 맡은 창이 닫히면 기억된 요청은 끝내지 않고 맡음만 푼다 — 다른 창이 맡는다.
+    apply(gpa, .{ .permission_request = .{ .browser = 7, .request = 4, .origin = site, .kinds = geo, .remembered = true } }, 0);
+    const held = nextLocation(11).?;
+    cancelDialogsShownBy(gpa, 11);
+    try std.testing.expectEqual(held.token, nextLocation(12).?.token);
+    // 다른 탭(8)이 같은 출처를 「기억된 허용」으로 청해도 sheet 로 — 허용은 허용한 탭에 묶인다(장악된 sidecar 가 탭 번호를 흉내 내도).
+    try surfaces.put(gpa, 8, .{ .record = .{ .surface_id = 8, .size = .{ .width = 10, .height = 10, .scale = 1 }, .hidden = false }, .created = true });
+    apply(gpa, .{ .permission_request = .{ .browser = 8, .request = 8, .origin = site, .kinds = geo, .remembered = true } }, 0);
+    const other_tab = nextDialog(8).?;
+    try std.testing.expect(!other_tab.remembered);
+    const other_tab_token = other_tab.token;
+    // 차단하면 기록에서 빠지고, 좌표를 기다리던 같은 출처의 허용(탭 8)은 늦게 와도 허용이 되지 않는다(못 물음).
+    try std.testing.expect(replyPermission(gpa, 7, blank_token, .deny));
+    apply(gpa, .{ .permission_request = .{ .browser = 7, .request = 5, .origin = site, .kinds = geo } }, 0);
+    try std.testing.expect(replyPermission(gpa, 7, nextDialog(7).?.token, .deny));
+    try std.testing.expect(replyLocation(gpa, 8, other_tab_token, .{ .latitude = 1, .longitude = 1, .accuracy = 1 }, .accept));
+    try std.testing.expect(!locationAllowed(8, site));
+    apply(gpa, .{ .permission_request = .{ .browser = 7, .request = 6, .origin = site, .kinds = geo, .remembered = true } }, 0);
+    try std.testing.expect(!nextDialog(7).?.remembered);
+    apply(gpa, .{ .permission_request = .{ .browser = 99, .request = 7, .origin = site, .kinds = geo, .remembered = true } }, 0);
+
+    var frames: [16]Message = undefined;
+    const n = sentFrames(&frames);
+    try std.testing.expectEqual(@as(usize, 8), n);
+    try std.testing.expect(frames[0].geolocation.request == 1 and frames[0].geolocation.available and frames[0].geolocation.latitude == 37.5);
+    try std.testing.expect(frames[1].permission_reply.request == 1 and frames[1].permission_reply.result == .accept);
+    try std.testing.expect(frames[2].geolocation.request == 2 and !frames[2].geolocation.available);
+    try std.testing.expect(frames[3].permission_reply.request == 2 and frames[3].permission_reply.result == .accept);
+    try std.testing.expect(frames[4].permission_reply.request == 3 and frames[4].permission_reply.result == .deny);
+    try std.testing.expect(frames[5].permission_reply.request == 5 and frames[5].permission_reply.result == .deny);
+    try std.testing.expect(frames[6].permission_reply.request == 8 and frames[6].permission_reply.result == .ignore);
+    // 모르는 탭(99)은 maru 가 기록하지 않았으니 sidecar 의 표시만으로는 못 물음.
+    try std.testing.expect(frames[7].permission_reply.request == 7 and frames[7].permission_reply.result == .ignore);
 }
 
 test "file chooser answers: bad paths are dropped, a JS answer cannot close a file request, crash drops everything" {

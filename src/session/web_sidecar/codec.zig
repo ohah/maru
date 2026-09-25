@@ -189,14 +189,23 @@ pub fn encode(message: Message, out: []u8) Error!usize {
         .dialog_closed => |value| try writeRequest(&cursor, value.browser, value.request),
         .permission_request => |value| {
             try writeRequest(&cursor, value.browser, value.request);
-            try fields.checkPermissions(value.kinds, value.media);
+            try fields.checkPermissions(value.kinds, value.media, value.remembered);
             try cursor.writeU32(value.kinds);
             try cursor.writeByte(value.media);
+            try cursor.writeByte(@intFromBool(value.remembered));
             try writeOrigin(&cursor, value.origin);
         },
         .permission_reply => |value| {
             try writeRequest(&cursor, value.browser, value.request);
             try cursor.writeByte(@intFromEnum(value.result));
+        },
+        .geolocation => |value| {
+            try writeRequest(&cursor, value.browser, value.request);
+            try fields.checkGeolocation(value);
+            try cursor.writeByte(@intFromBool(value.available));
+            try fields.writeF64(&cursor, value.latitude);
+            try fields.writeF64(&cursor, value.longitude);
+            try fields.writeF64(&cursor, value.accuracy);
         },
         .url_changed => |value| {
             try writeBrowser(&cursor, value.browser);
@@ -373,12 +382,14 @@ pub fn decodeExact(frame: []const u8) Error!Message {
             const request = try readRequest(&cursor);
             const kinds = try cursor.readU32();
             const media = try cursor.readByte();
-            try fields.checkPermissions(kinds, media);
+            const remembered = try readBool(&cursor);
+            try fields.checkPermissions(kinds, media, remembered);
             break :blk .{ .permission_request = .{
                 .browser = request.browser,
                 .request = request.request,
                 .kinds = kinds,
                 .media = media,
+                .remembered = remembered,
                 .origin = try readOrigin(&cursor),
             } };
         },
@@ -389,6 +400,19 @@ pub fn decodeExact(frame: []const u8) Error!Message {
                 .request = request.request,
                 .result = std.enums.fromInt(message_mod.PermissionResult, try cursor.readByte()) orelse return error.UnknownPermissionResult,
             } };
+        },
+        .geolocation => blk: {
+            const request = try readRequest(&cursor);
+            const value: message_mod.Geolocation = .{
+                .browser = request.browser,
+                .request = request.request,
+                .available = try readBool(&cursor),
+                .latitude = try fields.readF64(&cursor),
+                .longitude = try fields.readF64(&cursor),
+                .accuracy = try fields.readF64(&cursor),
+            };
+            try fields.checkGeolocation(value);
+            break :blk .{ .geolocation = value };
         },
         .url_changed => .{ .url_changed = .{ .browser = try readBrowser(&cursor), .url = try readUrl(&cursor) } },
         .nav_state => .{ .nav_state = .{
@@ -843,6 +867,9 @@ test "every single-byte corruption of input frames decodes to valid fields or er
         .{ .permission_request = .{ .browser = 3, .request = 2, .origin = "https://a.b", .kinds = 0x8100 } },
         .{ .permission_request = .{ .browser = 3, .request = 2, .origin = "", .media = 0b11 } },
         .{ .permission_reply = .{ .browser = 3, .request = 2, .result = .dismiss } },
+        // W5b2 위치.
+        .{ .permission_request = .{ .browser = 3, .request = 2, .origin = "", .kinds = 0x100, .remembered = true } },
+        .{ .geolocation = .{ .browser = 3, .request = 2, .available = true, .latitude = 37.5, .longitude = 127, .accuracy = 30 } },
     };
     var encoded: [256]u8 = undefined;
     var corrupted: [256]u8 = undefined;
@@ -985,6 +1012,12 @@ test "permission fields fail closed both ways" {
     buf[body + 16] = 1;
     try std.testing.expectError(error.InvalidPermissions, decodeExact(buf[0..len]));
     buf[body + 16] = 0;
+    // 기억된 허용 표시는 위치만 청한 요청에만(W5b2) — 다른 종류에 붙이면 거절.
+    buf[body + 17] = 1;
+    try std.testing.expectError(error.InvalidPermissions, decodeExact(buf[0..len]));
+    buf[body + 17] = 0;
+    try std.testing.expectError(error.InvalidPermissions, encode(.{ .permission_request = .{ .browser = 1, .request = 1, .origin = "", .kinds = 0x8100, .remembered = true } }, &buf));
+    try std.testing.expectError(error.InvalidPermissions, encode(.{ .permission_request = .{ .browser = 1, .request = 1, .origin = "", .media = 2, .remembered = true } }, &buf));
     // 출처는 대화상자와 같은 규칙.
     try std.testing.expectError(error.InvalidOrigin, encode(.{ .permission_request = .{ .browser = 1, .request = 1, .origin = "https://apple.com@evil.test", .kinds = 1 } }, &buf));
     // 요청 번호 0·모르는 답.
@@ -992,6 +1025,32 @@ test "permission fields fail closed both ways" {
     len = try encode(.{ .permission_reply = .{ .browser = 1, .request = 1, .result = .deny } }, &buf);
     buf[body + 12] = 4;
     try std.testing.expectError(error.UnknownPermissionResult, decodeExact(buf[0..len]));
+}
+
+// ── 위치(W5b2) ────────────────────────────────────────────────────────────────────────────────────────────
+
+test "geolocation round trips and its numbers fail closed" {
+    const remembered = (try roundTrip(.{ .permission_request = .{ .browser = 7, .request = 3, .origin = "https://maps.example", .kinds = message_mod.PermissionKind.geolocation.bit(), .remembered = true } })).permission_request;
+    try std.testing.expect(remembered.remembered);
+    const at = (try roundTrip(.{ .geolocation = .{ .browser = 7, .request = 3, .available = true, .latitude = -33.8688, .longitude = 151.2093, .accuracy = 12.5 } })).geolocation;
+    try std.testing.expect(at.available and at.latitude == -33.8688 and at.longitude == 151.2093 and at.accuracy == 12.5);
+    try std.testing.expect(!(try roundTrip(.{ .geolocation = .{ .browser = 7, .request = 3, .available = false } })).geolocation.available);
+    try std.testing.expectEqual(message_mod.Direction.to_sidecar, Tag.geolocation.direction());
+    var buf: [256]u8 = undefined;
+    const nan = std.math.nan(f64);
+    const inf = std.math.inf(f64);
+    for ([_][3]f64{ .{ 91, 0, 10 }, .{ -90.5, 0, 10 }, .{ 0, 180.1, 10 }, .{ 0, -181, 10 }, .{ 0, 0, 0 }, .{ 0, 0, -1 }, .{ 0, 0, 2e7 }, .{ nan, 0, 10 }, .{ 0, inf, 10 }, .{ 0, 0, nan } }) |bad| {
+        try std.testing.expectError(error.InvalidGeolocation, encode(.{ .geolocation = .{ .browser = 1, .request = 1, .available = true, .latitude = bad[0], .longitude = bad[1], .accuracy = bad[2] } }, &buf));
+    }
+    // 없음이면 좌표는 모두 0.
+    try std.testing.expectError(error.InvalidGeolocation, encode(.{ .geolocation = .{ .browser = 1, .request = 1, .available = false, .latitude = 1 } }, &buf));
+    // 받는 쪽도 같은 규칙 — 위도 자리를 NaN 으로 바꾸면 거절.
+    const len = try encode(.{ .geolocation = .{ .browser = 1, .request = 1, .available = true, .latitude = 1, .longitude = 2, .accuracy = 3 } }, &buf);
+    const body = prefix_len + common_len;
+    std.mem.writeInt(u64, buf[body + 13 ..][0..8], @bitCast(nan), .big);
+    try std.testing.expectError(error.InvalidGeolocation, decodeExact(buf[0..len]));
+    buf[body + 12] = 2; // available 은 bool
+    try std.testing.expectError(error.InvalidBool, decodeExact(buf[0..len]));
 }
 
 comptime {

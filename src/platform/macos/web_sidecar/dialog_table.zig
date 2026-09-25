@@ -43,6 +43,10 @@ pub const Entry = struct {
     paths: ?*anyopaque = null,
     path_count: u32 = 0,
     extra: u64 = 0,
+    /// 프롬프트가 청한 종류(CEF 비트) — 위치 요청을 가려 좌표를 받는다(W5b2).
+    kinds: u32 = 0,
+    /// 위치 요청에 좌표(또는 「없음」)를 걸었다 — 허용으로 답하기 전에 건다(W5b2).
+    geo_set: bool = false,
 };
 
 pub const Table = struct {

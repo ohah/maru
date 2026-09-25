@@ -37,6 +37,9 @@ pub const Tag = enum(u8) {
     file_dialog_reply = 21,
     /// 권한 요청의 답(W5b — C6). 요청 번호는 `permission_request` 가 준 것이다.
     permission_reply = 22,
+    /// 위치 요청에 줄 좌표(W5b2) — 허용으로 답하기 **전에** 보낸다. sidecar 는 그 브라우저에 DevTools 위치 덮어쓰기를 건다
+    /// (Chromium 의 위치 공급자는 CEF 에서 돌지 않는다 — 실측).
+    geolocation = 23,
 
     hello_ack = 32,
     browser_created = 33,
@@ -232,7 +235,23 @@ pub const PermissionRequest = struct {
     origin: []const u8,
     kinds: u32 = 0,
     media: u8 = 0,
+    /// W5b2: Chromium 이 이 출처의 위치를 허용으로 기억한다 — Chromium 은 위치를 부를 때마다 다시 묻는다. maru 는 이 표시를 믿지
+    /// 않고, 자기 sheet 에서 그 탭이 허용받은 출처일 때만 sheet 없이 좌표를 구한다. 위치만 청한 요청에만 선다(그 밖이면 거절).
+    remembered: bool = false,
 };
+
+/// 위치 요청의 좌표(W5b2). `available` 이 거짓이면 좌표는 모두 0 이고 페이지는 「위치를 알 수 없음」을 받는다.
+/// 위도 -90~90, 경도 -180~180, 정확도(m)는 0 보다 크고 `max_geolocation_accuracy` 이하 — 그 밖(NaN·무한대 포함)은 거절한다.
+pub const Geolocation = struct {
+    browser: BrowserId,
+    request: RequestId,
+    available: bool,
+    latitude: f64 = 0,
+    longitude: f64 = 0,
+    accuracy: f64 = 0,
+};
+
+pub const max_geolocation_accuracy: f64 = 10_000_000;
 
 pub const PermissionReply = struct {
     browser: BrowserId,
@@ -532,6 +551,7 @@ pub const Message = union(Tag) {
     file_dialog_path: FileDialogPath,
     file_dialog_reply: FileDialogReply,
     permission_reply: PermissionReply,
+    geolocation: Geolocation,
 
     hello_ack: Hello,
     browser_created: BrowserId,

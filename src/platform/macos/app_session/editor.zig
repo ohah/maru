@@ -3606,8 +3606,10 @@ fn movedOffset(
         // 사용자가 자기 자리를 잃는다.
         .bracket_match => blk: {
             goal.* = .none;
+            // **선택의 앞쪽 끝에서 판정하고 커서로 접는다**(§3.9c — VS Code `selection.getStartPosition()`: [1,3] 과 [3,1] 이 같은 데로 간다).
             // 강조(§5.1b)와 **같은 출처**다 — 트리가 있으면 트리(문자열·주석 속 괄호가 빠진다), 없으면 글자 훑기.
-            break :blk brackets_client.jumpTarget(term, content, focus) orelse focus;
+            const from = @min(sel.start(), content.len);
+            break :blk brackets_client.jumpTarget(term, content, from) orelse from;
         },
         .line_end => blk: {
             // **줄 끝은 목표를 `line_end`로 세운다** — End 뒤에 아래로 내려가면 계속 줄 끝을 따라간다.
@@ -41775,6 +41777,50 @@ test "BRP1 짝 괄호 — 트리로 판정해 문자열 속 '(' 가 아니라 �
     term.rt.editor_selection = editor_selection.Selection.at(9);
     _ = try fx.session.handleKeyEvent(.{ .key = .{ .char = '\\' }, .modifiers = .{ .command = true, .shift = true } });
     try testing.expectEqual(@as(usize, 1), term.rt.editor_selection.?.focus);
+}
+
+test "BRP8 괄호 점프 — 닿은 괄호가 없으면 감싸는 쌍의 닫는 괄호 앞, 없으면 다음 여는 괄호 앞; 선택은 앞쪽 끝에서; 트리가 없으면 제자리 (제품 경계, §3.9c)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    // 0 g · 1 ( · 2 a · 3 , · 4 ␠ · 5 b · 6 ) · 7 ␠ · 8 + · 9 ␠ · 10 h · 11 ( · 12 c · 13 ) · 14 ;
+    const src = "g(a, b) + h(c);\n";
+    const term = try openBracketFixture(&fx, allocator, "j.ts", src);
+    try testing.expect(term.rt.editor_syntax.provider != null and !term.rt.editor_syntax.pending);
+    try testing.expect(!fx.session.anyOverlayOpen());
+    const press = struct {
+        fn go(f: *PaneFixture) !void {
+            _ = try f.session.handleKeyEvent(.{ .key = .{ .char = '\\' }, .modifiers = .{ .command = true, .shift = true } });
+        }
+    };
+    // 감싸는 쌍 — `a|,` 는 닿은 괄호가 없다 → 닫는 ')'(6) 앞
+    term.rt.editor_selection = editor_selection.Selection.at(3);
+    try press.go(&fx);
+    try testing.expectEqual(@as(usize, 6), term.rt.editor_selection.?.focus);
+    // 다음 여는 괄호 — `|+` 는 감싸는 쌍도 없다 → 뒤쪽 첫 '('(11) 앞
+    term.rt.editor_selection = editor_selection.Selection.at(8);
+    try press.go(&fx);
+    try testing.expectEqual(@as(usize, 11), term.rt.editor_selection.?.focus);
+    // **선택은 앞쪽 끝에서 판정하고 접는다** — [7 → 1](뒤로 고름)의 앞쪽 끝 1 은 '(' 뒤라 닫는 괄호(6) 앞으로. focus(1)가 아니라 앞쪽 끝이라야
+    // 갈린다: 앞으로 고른 [1 → 7] 의 focus 7 은 ')' 에 닿아 여는 괄호(1)로 간다 — 그 방향도 6 이어야 한다(VS Code 실측 [1,3]·[3,1] → 3).
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(7, 1);
+    try press.go(&fx);
+    try testing.expectEqual(@as(usize, 6), term.rt.editor_selection.?.focus);
+    try testing.expect(term.rt.editor_selection.?.isEmpty());
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(1, 7);
+    try press.go(&fx);
+    try testing.expectEqual(@as(usize, 6), term.rt.editor_selection.?.focus);
+    try testing.expect(term.rt.editor_selection.?.isEmpty());
+    // **트리가 없으면 제자리**(글자 훑기는 감싸는 쌍·다음 괄호를 안 찾는다)
+    {
+        const saved = term.rt.editor_syntax.provider;
+        term.rt.editor_syntax.provider = null;
+        defer term.rt.editor_syntax.provider = saved;
+        term.rt.editor_selection = editor_selection.Selection.at(3);
+        try press.go(&fx);
+        try testing.expectEqual(@as(usize, 3), term.rt.editor_selection.?.focus);
+    }
 }
 
 test "BRP2 모드와 포커스 — always 는 감싸는 쌍, near 는 닿은 것만, never·포커스 없음은 없다 (제품 경계, §5.1b)" {

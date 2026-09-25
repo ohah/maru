@@ -125,6 +125,10 @@ pub const agent_selection = @import("session/agent_selection.zig"); // 파일 �
 pub const mermaid_protocol = @import("session/mermaid_protocol.zig"); // FP10c1: parent/helper가 공유하는 bounded wire codec SSOT
 pub const mermaid_coordinator = @import("session/mermaid_coordinator.zig"); // FP10c1: 앱 전역 queue/capability/deadline/failure 정책 SSOT
 pub const mermaid_theme = @import("session/mermaid_theme.zig"); // 터미널 색상 테마 → mermaid 팔레트 파생(순수, per-render)
+pub const web_sidecar = @import("session/web_sidecar/root.zig"); // W1a: 웹 OSR sidecar 제어 채널 bounded wire codec SSOT(docs/plans/web-osr-backend.md C2)
+pub const web_osr_plan = @import("session/web_osr_plan.zig"); // W3b: OSR 브라우저 조정(창 배치 → sidecar 명령) — L2 순수
+pub const web_osr_view = @import("session/web_osr_view.zig"); // W3c: 보일 링 고르기(새 링 첫 프레임까지 옛 장·GPU 소비자 규칙) — L2 순수
+pub const web_osr_input = @import("session/web_osr_input.zig"); // W4b: OSR 포인터 입력(본문 hit·DIP·수식자·휠) — L2 순수
 pub const file_tree = @import("session/file_tree.zig"); // FP7: OS-중립 파일 트리 snapshot·접힘·멀티루트·최근 파일 모델
 pub const file_tree_navigation = @import("session/file_tree_navigation.zig"); // 파일 트리 transient selection·키보드 탐색·scroll 순수 정책
 pub const file_tree_mutation = @import("session/file_tree_mutation.zig"); // 파일 트리 변경 이름·root·dirty 보호·path remap 순수 정책
@@ -264,5 +268,9 @@ test {
     // **네임스페이스 자식은 따로 ref 한다** — `refAllDecls` 는 한 단계라, 소비처가 아직 없는
     // 모듈은 테스트를 써 놔도 집계 밖이다(chrome.ui.gesture 가 실제로 그랬다).
     @import("std").testing.refAllDecls(ssh);
+    @import("std").testing.refAllDecls(web_sidecar);
+    @import("std").testing.refAllDecls(web_osr_plan);
+    @import("std").testing.refAllDecls(web_osr_view);
+    @import("std").testing.refAllDecls(web_osr_input);
     @import("std").testing.refAllDecls(editor.lsp);
 }

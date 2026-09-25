@@ -278,6 +278,13 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     // 왜 Zig switchTab/focusTerm(전환의 단일 chokepoint)이 아니라 Swift 입력 경계에서 하나 — AppKit 입력기
     // 세션 종료(inputContext.discardMarkedText)는 NSView만 할 수 있다. Zig가 preedit를 커밋해도 그걸 못 부르면
     // marked 세션이 살아 다음 입력이 'ㅈ'부터 이어진다(누수의 실제 출처가 AppKit 세션이라 Zig만으론 못 막는다).
+    /// W4c: Zig 가 이미 조합을 끝냈다(Chromium 탭 키 대상이 바뀜) — 입력기 세션의 조합만 버린다(다시 확정하지 않는다).
+    func discardOsrMarkedText() {
+        guard hasMarkedText() else { return }
+        inputContext?.discardMarkedText()
+        markedTextBuffer = ""
+    }
+
     func commitMarkedTextIfComposing() {
         guard hasMarkedText() else { return }
         controller?.imeCommit()            // Surface preedit 커밋(조합 글자 PTY로)
@@ -303,6 +310,9 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
             controller?.handleKeyDown(event)
             return true
         }
+        // W4c: 키 대상이 Chromium 탭이면 WKWebView 패널과 같은 판정(⌘←/→/R 탐색, 그 외 web_key_route). 메뉴·페이지로
+        // 흘릴 키(pass-through)는 false — 메뉴가 먼저 보고, 메뉴에 없으면 keyDown 이 페이지로 보낸다.
+        if controller?.handleOsrKeyEquivalent(event, commitComposition: { self.commitMarkedTextIfComposing() }) == true { return true }
         return super.performKeyEquivalent(with: event)
     }
 
@@ -315,6 +325,7 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     /// IME 경로는 타지 않는다 — 조합 확정·preedit 는 keyDown 이 소유하고, release 는 «뗐다» 는 사실만
     /// 나르면 된다. 조합 중이면 marked text 를 건드리지 않고 그대로 흘린다.
     override func keyUp(with event: NSEvent) {
+        if controller?.osrKey(event, phase: 2) == true { return } // W4c: Chromium 탭이 키 대상이면 그 탭의 뗌
         guard var keyEvent = controller?.normalizedKeyEventForRelease(event) else {
             super.keyUp(with: event)
             return
@@ -338,6 +349,25 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         let exactChord = event.modifierFlags.intersection([.command, .control, .option, .shift])
         if exactChord == [.command, .control], event.keyCode == 49 {
             NSApp.orderFrontCharacterPalette(self)
+            return
+        }
+        // W4c: 키 대상이 Chromium 탭이면 그 탭으로. ⌘·⌃ chord 와 기능키는 입력기를 거치지 않고 곧바로 키 누름을 보낸다
+        // (Option 은 메타로 쓰지 않는다 — 웹에서는 ⌥ 조합 글자·⌥⌫ 단어 지우기다). 그 밖은 입력기 트랜잭션을 거쳐 Zig 가
+        // 조합·확정 결과를 보고 키 이벤트를 정한다.
+        if controller?.osrKeyboardActive == true {
+            // 키 대상을 맞추며 Zig 가 조합을 끝냈으면(tick 을 기다리지 않고) 입력기 세션의 조합을 이 키 전에 버린다.
+            controller?.drainOsrDiscardMarked()
+            let osrChord = event.modifierFlags.intersection([.command, .control])
+            if !osrChord.isEmpty || Self.directEncodeKeyCodes.contains(event.keyCode) {
+                commitMarkedTextIfComposing()
+                _ = controller?.osrKey(event, phase: 0)
+                return
+            }
+            _ = controller?.osrKey(event, phase: 1)
+            // 후보창 문맥 탐침(CR6d)은 터미널 전용이다 — Chromium 탭 트랜잭션은 Zig 가 키를 판정한다.
+            controller?.imeKeyTransaction(event, suppressUnconsumedKey: false) {
+                self.interpretKeyEvents([event])
+            }
             return
         }
         // Ctrl/Cmd/Option 조합은 입력기에 보내지 않고 바로 단축키/인코딩 경로로 — 한글 입력
@@ -390,6 +420,8 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         // 박히지 않게). 그 외 편집 명령(insertNewline 등)은 ime_end가 일반 키로 인코딩한다.
         if selector == #selector(NSStandardKeyBindingResponding.deleteBackward(_:)) {
             controller?.imeDeleteBackward()
+        } else {
+            controller?.imeCommand() // W4c: Chromium 탭 트랜잭션 — 조합을 끝낸 키가 그 동작(Enter·화살표)으로 가게
         }
     }
 
@@ -590,9 +622,24 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     override func rightMouseDown(with event: NSEvent) { controller?.handleMouse(event, kind: 1, in: self) }
     override func rightMouseDragged(with event: NSEvent) { controller?.handleMouse(event, kind: 2, in: self) }
     override func rightMouseUp(with event: NSEvent) { controller?.handleMouse(event, kind: 3, in: self) }
-    override func otherMouseDown(with event: NSEvent) { controller?.handleMouse(event, kind: 1, in: self) }
-    override func otherMouseDragged(with event: NSEvent) { controller?.handleMouse(event, kind: 2, in: self) }
-    override func otherMouseUp(with event: NSEvent) { controller?.handleMouse(event, kind: 3, in: self) }
+    // 추가 버튼(buttonNumber 3 이상 — 뒤로·앞으로)은 Chromium 탭 본문 위의 누름만 그 탭의 뒤로·앞으로로 쓰고 나머지는
+    // 버린다(W4b). 예전에는 `handleMouse` 가 3 이상을 **왼쪽**(0)으로 바꿔 넘겨, 뒤로 버튼이 터미널 선택을 시작하거나 닫기
+    // 확인 모달의 확정 버튼을 누르고, 그 뗌이 진행 중인 왼쪽 끌기를 끝냈다(적대 검증).
+    override func otherMouseDown(with event: NSEvent) {
+        if event.buttonNumber >= 3 {
+            _ = controller?.handleOsrAuxButton(event, in: self)
+            return
+        }
+        controller?.handleMouse(event, kind: 1, in: self)
+    }
+    override func otherMouseDragged(with event: NSEvent) {
+        if event.buttonNumber >= 3 { return }
+        controller?.handleMouse(event, kind: 2, in: self)
+    }
+    override func otherMouseUp(with event: NSEvent) {
+        if event.buttonNumber >= 3 { return }
+        controller?.handleMouse(event, kind: 3, in: self)
+    }
 
     // 시스템 라이트/다크 외관이 바뀌면(System Settings 토글·자동 야간) 모든 세션에 알린다 — Zig가 theme.follow-system이
     // 켜졌으면 preset-light/dark로 테마를 교체한다(F2-9). NSView가 외관 변경마다 이걸 부른다(초기는 tick이 1회 적용).
@@ -1144,7 +1191,7 @@ enum BrowserControl {
 
     // 5f-4c: browser.getCookies → WKHTTPCookieStore.getAllCookies(async). **§9.4 D5 browser_storage scope**(base
     // browser로는 불인가 — authz가 거름). Zig serializeGetCookiesResult가 배열을 파싱해 `{"result":{"cookies":[...]}}`로 싣는다.
-    // **범위 결정(clean-room, 22차 [0] 정정)**: 비신뢰 browser 패널들은 `browserDataStore`(static nonPersistent) **하나를
+    // **범위 결정(clean-room, 22차 [0] 정정)**: 비신뢰 browser 패널들은 `browserDataStore`(static — macOS 14+ 영속) **하나를
     // 공유**한다(탭 간 로그인 유지 — 라인 1005~1008). 따라서 getAllCookies는 **모든 패널 origin의 쿠키**를 준다 →
     // 대상 surface의 현재 문서 host로 **반드시 필터**해야 다른 패널(예: 은행 로그인 탭)의 세션 쿠키가 안 샌다(D5 교차-surface
     // 격리 = §8.3 권한상승 차단). WebDriver getCookies의 "현재 문서에 보이는 쿠키" 시맨틱 그대로. (초판은 "패널마다 격리
@@ -1978,6 +2025,23 @@ private func runBrowserEventSmokeClient(socketPath: String, sid: UInt64, nonceHe
     return seen.isEmpty ? "pending" : seen.sorted().joined(separator: ",")
 }
 
+// W3a(D6): browser 탭 저장소를 스모크 요약에 싣는다. macOS 14+ 는 영속·기본(신뢰) 저장소와 다른 객체·디렉터리가 0700 이고
+// 백업 제외여야 한다. 11~13 은 비영속이 계약이라 persistent=false 로 싣고 판정 스크립트가 버전을 보고 가른다.
+@MainActor
+private func browserDataStoreProbe() -> (persistent: Bool, isolated: Bool, backupExcluded: String) {
+    let store = MaruWebPanelView.browserDataStore
+    let isolated = store !== WKWebsiteDataStore.default() && store !== MaruWebPanelView.filePanelDataStore
+    guard #available(macOS 14.0, *) else { return (store.isPersistent, isolated, "n/a") }
+    guard let dir = MaruWebPanelView.browserDataStoreDirectory() else { return (store.isPersistent, isolated, "no-dir") }
+    let excluded = (try? dir.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup) ?? nil
+    let mode = (try? FileManager.default.attributesOfItem(atPath: dir.path)[.posixPermissions] as? NSNumber)?.intValue ?? -1
+    // WebKit 이 실제로 이 디렉터리에 썼는가 — 경로 추정(`browserDataStoreDirectory`)이 틀리면 우리가 만든 빈 디렉터리만
+    // 백업 제외되고 진짜 저장소는 딴 곳에 남는다.
+    let used = ((try? FileManager.default.contentsOfDirectory(atPath: dir.path))?.isEmpty == false)
+    let verdict = (excluded == true && mode == 0o700 && used) ? "true" : "excluded=\(excluded.map { String($0) } ?? "nil") mode=\(String(mode, radix: 8)) used=\(used)"
+    return (store.isPersistent, isolated, verdict)
+}
+
 // 5e-2b-2(테스트 전용): JSON-RPC 응답 한 줄에서 `result` 객체를 파싱한다(hand-rolled 문자열 스캔 대신 — 17차 [5]:
 // escape 따옴표 있는 URL도 정확). 파싱 불가·result 없음이면 nil.
 private func browserCtlResult(_ line: String) -> [String: Any]? {
@@ -2620,10 +2684,43 @@ final class MaruWebPanelView: NSView {
     // 필수(리뷰12 [0]): 공백·`<`·`>`가 raw면 macOS 11-13의 legacy CFURL 파서가 URL(string:)=nil로 거부해 navigate 실패·
     // fixture silent false-green. 인코딩하면 전 지원 OS에서 파싱된다. 디코드 결과=`<h1 id=t>maru5d</h1>`(id=t라 getElementById('t') 매칭).
     nonisolated static let browserFixtureURL = "data:text/html,%3Cmeta%20http-equiv=Content-Security-Policy%20content=%22default-src%20%27none%27%3B%20script-src%20%27none%27%22%3E%3Ch1%20id=t%3Emaru5d%3C/h1%3E"
-    // 7e-0: 비신뢰(browser) 패널이 **공유**하는 ephemeral(비영속) 웹사이트 데이터스토어. 쿠키·localStorage·캐시가 디스크에
-    // 안 남고(비영속, 종료 시 소멸) 신뢰 콘텐츠(maru-app://, 기본 persistent store)와 **격리**된다(§7 untrusted 격리). browser
-    // 탭들끼리는 공유(브라우저 세션 시맨틱 — 탭 간 로그인 유지). 앱 전역 1개(static lazy). 임의 웹 로드(7e-2) 전 안전 확보.
-    static let browserDataStore = WKWebsiteDataStore.nonPersistent()
+    // 7e-0: 비신뢰(browser) 패널이 **공유**하는 웹사이트 데이터스토어. 신뢰 콘텐츠(maru-app://, 기본 persistent store)와
+    // **격리**된다(§7 untrusted 격리). browser 탭들끼리는 공유(탭 간 로그인). 앱 전역 1개(static lazy).
+    // **D6(로그인 유지, docs/plans/web-osr-backend.md)**: macOS 14+ 는 격리된 **영속** 저장소(`forIdentifier`)라 재시작 뒤에도
+    // 로그인이 남는다. 11~13 에는 격리된 영속 저장소 API 가 없어(`.default()` 는 신뢰 저장소와 같다) 지금처럼 비영속이다.
+    // 저장소 디렉터리는 WebKit 보다 먼저 0700·Time Machine 백업 제외로 만든다 — 쿠키 파일이 평문(`Cookies.binarycookies`,
+    // 실측)이라 백업 디스크에 쓸 수 있는 로그인 쿠키가 남지 않게(CEF 프로필과 같은 규칙, D7). WebKit 은 미리 만든
+    // 디렉터리를 그대로 쓰고 권한·표시가 유지됐다(W3a 착수 전 실측).
+    static let browserDataStore: WKWebsiteDataStore = {
+        if #available(macOS 14.0, *) {
+            prepareBrowserDataStoreDirectory()
+            return WKWebsiteDataStore(forIdentifier: browserDataStoreIdentifier)
+        }
+        return .nonPersistent()
+    }()
+    // 번들 ID 마다 WebKit 저장소가 따로라(개발 빌드·설치본이 갈린다) 고정 값이면 된다. 바꾸면 사용자 로그인이 사라진다.
+    static let browserDataStoreIdentifier = UUID(uuidString: "5A4F0B7E-6C1D-4E2A-9B8F-3D7C2E1A0F64")!
+
+    /// WebKit 이 `forIdentifier` 저장소를 두는 곳 — `~/Library/WebKit/<번들 ID>/WebsiteDataStore/<uuid 소문자>`(실측 위치).
+    static func browserDataStoreDirectory() -> URL? {
+        guard let library = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first else { return nil }
+        let owner = Bundle.main.bundleIdentifier ?? ProcessInfo.processInfo.processName
+        return library.appendingPathComponent("WebKit", isDirectory: true)
+            .appendingPathComponent(owner, isDirectory: true)
+            .appendingPathComponent("WebsiteDataStore", isDirectory: true)
+            .appendingPathComponent(browserDataStoreIdentifier.uuidString.lowercased(), isDirectory: true)
+    }
+
+    /// 저장소 디렉터리를 0700 으로 만들고(있으면 권한을 좁힌다) 백업 제외를 단다. 실패해도 브라우저는 돈다 — 저장소는
+    /// WebKit 이 만들고, 백업 제외만 빠진다(스모크가 `browser_data_store_backup_excluded` 로 본다).
+    private static func prepareBrowserDataStoreDirectory() {
+        guard var dir = browserDataStoreDirectory() else { return }
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try? dir.setResourceValues(values)
+    }
     // 로컬 HTML은 살아있는 스크립트+CSP 없음이므로 browser 탭의 쿠키 세션과 공유하지 않는다. 도크 HTML끼리만
     // 공유하는 별도 ephemeral store라 디스크 영속도 없고 browser credential도 보이지 않는다.
     static let filePanelDataStore = WKWebsiteDataStore.nonPersistent()
@@ -4801,6 +4898,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         window.makeKeyAndOrderFront(nil)
         focusTerminalView(window)
         NSApp.activate(ignoringOtherApps: true)
+        startOsrTestInput() // W4b 스모크 전용 — 환경변수가 없으면 아무것도 안 한다.
 
         // app session의 첫 tick(startAppSession 안)이 바로 그릴 수 있도록 renderer를 먼저 만든다.
         setupMetalRenderer()
@@ -5100,6 +5198,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             // 최종 종료한다. 이 순서만 leased request frame의 pointer 수명을 안전하게 끝낸다.
             maru_macos_mermaid_shutdown()
         })
+        // W3b: Chromium sidecar(웹 OSR — 개발용 환경변수로만 켠다)를 내린다. 꺼져 있으면 무동작.
+        maru_macos_web_osr_shutdown()
         // 컨트롤 플레인 서버를 세션 teardown '전에' 멈춘다 — accept 스레드를 join하고 대기 중 요청을 cancel해, 이후
         // shutdownAppSession이 세션을 해제할 때 accept 스레드가 (marshal 큐 밖에서) 세션을 만지지 않게 한다. tick은
         // 이미 멈춰(위) 더 이상 drain되지 않는다. idempotent(미시작이면 무동작).
@@ -5250,6 +5350,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         cancelKeyHintHold(for: resigning)
         guard let surface = resigning, let session = surface.appSession else { return }
         _ = maru_macos_app_session_focus_changed(session, 0)
+        // W4b: 키를 잃으면 트래킹 영역(activeInKeyWindow)이 이동을 더 안 준다 — hover 를 창 밖 좌표로 풀어 Chromium 탭에
+        // leave 를 보낸다(페이지의 `:hover` 가 열린 채 남지 않게). 커서는 건드리지 않는다(이제 다른 창·앱의 것이다).
+        var cursorKind: Int32 = 0
+        _ = maru_macos_app_session_hover(session, -1, -1, 0, &cursorKind)
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
@@ -5823,6 +5927,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             // 활성 = web term → 그 webview가 firstResponder(아직 아니면 전이). 브라우저 탭 활성화·모달 닫힘 복원 커버.
             if let wp = surface.webPanels[activeWeb], wp.superview != nil, !wp.isHidden, !isWebPanelFocused(wp) {
                 window.makeFirstResponder(wp.webView)
+            } else if surface.webPanels[activeWeb] == nil, window.firstResponder !== tv {
+                // W4c: Chromium(OSR) 탭은 NSView 가 없다 — 키는 터미널 뷰가 받아 Zig 가 그 탭으로 보낸다. 다른 WKWebView 에
+                // 남은 포커스를 회수한다(안 그러면 키가 그 웹뷰로 샌다).
+                window.makeFirstResponder(tv)
             }
         } else if window.firstResponder !== tv {
             // 활성 = terminal → 터미널 뷰(키보드로 웹→터미널 pane 전환 시 stale 웹뷰 포커스 회수 = 키보드 갭 닫음).
@@ -5919,6 +6027,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // session이 하므로 Swift는 이 값을 resize에 쓰지 않는다(진단 표시 전용).
         if frame.cell_width_px > 0 { lastCellWidthPx = frame.cell_width_px }
         if frame.cell_height_px > 0 { lastCellHeightPx = frame.cell_height_px }
+        // W3c: 이 프레임에 그릴 Chromium 탭 본문(IOSurface 를 복사 없이 텍스처로). 없으면 0 장 — 비용 없음.
+        var osrQuads = [MaruAppHostOsrQuad](repeating: MaruAppHostOsrQuad(), count: 16)
+        let osrCount = osrQuads.withUnsafeMutableBufferPointer {
+            maru_macos_app_session_osr_quads(appSession, frame.generation, $0.baseAddress, $0.count)
+        }
+        osrQuads.withUnsafeBufferPointer {
+            maru_metal_renderer_set_osr_quads(renderer, $0.baseAddress, osrCount, frame.generation)
+        }
         let drew = maru_metal_renderer_draw(
             renderer,
             metalLayer,    // 터미널 물리 레이어(맨 아래)
@@ -6876,6 +6992,16 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// 전부 Zig(dispatchAuthenticated→browserOpFromRequest), 여긴 op→WKWebView API 어댑터 + 완료 콜백만. 소유권:
     /// arg는 이 호출 중에만 유효(Zig 안정 슬롯)라 즉시 String으로 복사. surface 부재=status 1(error)로 완료(누설 없이).
     /// 큐가 남았을 수 있어 0 반환까지 loop drain(op ≤ max, 유한). 서버 미시작이면 첫 호출이 0 반환(무동작).
+    /// 방금 꺼낸 browser op 의 허용 호스트(빈 = 검사 없음). `take_browser_op` 바로 뒤에만 부른다. 버퍼가 모자라다는
+    /// 답(SIZE_MAX)이면 어떤 호스트도 덮지 않는 값을 돌려줘 거절되게 한다(검사 없음으로 열리지 않게).
+    private func takenBrowserOpRequiredHost() -> String {
+        var buf = [UInt8](repeating: 0, count: 256)
+        let n = buf.withUnsafeMutableBufferPointer { maru_macos_control_taken_browser_op_required_host($0.baseAddress, $0.count) }
+        if n == 0 { return "" }
+        guard n <= buf.count else { return ".invalid-required-host." }
+        return String(decoding: buf[0 ..< n], as: UTF8.self)
+    }
+
     private func drainBrowserOps() {
         guard controlServerStarted else { return }
         while true {
@@ -6887,10 +7013,19 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             guard maru_macos_control_take_browser_op(&asyncId, &surfaceId, &opKind, &argPtr, &argLen) == 1 else { return }
             // arg는 이 호출 중에만 유효(다음 take가 덮어씀) — 즉시 복사한다.
             let arg = (argPtr != nil && argLen > 0) ? String(decoding: UnsafeBufferPointer(start: argPtr, count: argLen), as: UTF8.self) : ""
+            let requiredHost = takenBrowserOpRequiredHost()
             // surface_id로 그 web 패널을 소유한 창(일반 창·quick)을 찾는다. 없으면(패널이 닫힘 등) error로 완료.
             guard let surface = surfaceOwning(byId: surfaceId), let wp = surface.webPanels[surfaceId],
                   wp.panelKind == 1, wp.filePanelKind == 0 else {
                 maru_macos_control_complete_browser_op(asyncId, opKind == 15 ? 4 : 1, nil, 0)
+                continue
+            }
+            // 쿠키 권한은 사이트에(docs/plans/web-osr-backend.md): 확인 grant 로 인가된 쿠키 저장소 op 는 **지금** 문서가
+            // 허용한 호스트(또는 하위 도메인)일 때만 실행한다. Zig 는 dispatch 때 봤지만, 그 뒤 실행까지 사이에 탭이 다른
+            // 사이트로 갔을 수 있다 — 쿠키 저장소를 만지기 직전인 여기가 마지막 관문이다.
+            if [4, 6, 7, 11].contains(opKind), !requiredHost.isEmpty,
+               !BrowserControl.hostMayUseDomain(wp.webView.url?.host, requiredHost) {
+                maru_macos_control_complete_browser_op(asyncId, 5, nil, 0)
                 continue
             }
             switch opKind {
@@ -7312,6 +7447,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             applySystemAppearanceToAllSessions()
         }
 
+        // W3c: GPU 가 끝낸 마지막 프레임 세대를 tick 전에 알린다 — Chromium 탭이 GPU 가 읽는 장을 sidecar 에 돌려주지 않게.
+        if let renderer = metalRenderer {
+            maru_macos_app_session_set_osr_completed_generation(appSession, maru_metal_renderer_osr_completed_generation(renderer))
+        }
         var summary = MaruAppHostFrameSummary()
         let status = maru_macos_app_session_tick(appSession, currentFrameLoopRateHz(), &summary)
         appSessionStatus = status
@@ -7334,6 +7473,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             drainBell() // G12 BEL: 이번 tick에 셸이 보낸 벨(0x07)을 시스템 벨로 울린다.
             drainBellBadge() // BEL이 언포커스 시 울렸으면 Dock 배지를 띄운다(config bell.dock-badge).
             drainMouseHide() // 타이핑(글자 입력) 중이면 마우스 커서를 숨긴다(config input.mouse-hide-while-typing).
+            drainOsrCursor() // W4b: hover 중인 Chromium 탭의 페이지 커서가 바뀌었으면 맞춘다.
+            drainOsrDiscardMarked() // W4c: Zig 가 끝낸 Chromium 탭 조합을 입력기 세션에서도 버린다.
             drainClipboardAction() // 우클릭(input.right-click=paste·menu)이 요청한 OS 클립보드 복사/붙여넣기를 실행한다.
             drainClipboardRead() // OSC 52 읽기(osc52.read=allow): 셸 프로그램의 `?` 쿼리에 시스템 클립보드를 base64로 응답.
             drainFilePick() // 세팅 window.background-image 행 활성: NSOpenPanel(PNG)을 열어 고른 경로를 config에 적용.
@@ -7736,7 +7877,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         Self.cursor(for: cursorKind).set()
     }
 
-    // CursorKind(app_host_abi.h: 0=arrow, 1=iBeam, 2=pointingHand, 3=resizeLeftRight, 4=resizeUpDown, 5=openHand) → NSCursor.
+    // CursorKind(app_host_abi.h: 0=arrow, 1=iBeam, 2=pointingHand, 3=resizeLeftRight, 4=resizeUpDown, 5=openHand,
+    // v192 Chromium 탭 페이지 커서 6~13) → NSCursor.
     private static func cursor(for kind: Int32) -> NSCursor {
         switch kind {
         case 0: return .arrow
@@ -7744,8 +7886,262 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         case 3: return .resizeLeftRight
         case 4: return .resizeUpDown
         case 5: return .openHand // pane grip 호버(드래그 손잡이)
+        case 6: return .crosshair
+        case 7: return .closedHand
+        case 8: return .operationNotAllowed
+        case 9: return .dragCopy
+        case 10: return .dragLink
+        case 11: return .contextualMenu
+        case 12: return .iBeamCursorForVerticalLayout
+        case 13: return hiddenCursor // CSS cursor:none — 빈 그림(hide/unhide 짝을 맞출 필요가 없다)
         default: return .iBeam // 1(text) 및 미지값
         }
+    }
+
+    // 투명한 1×1 비트맵 — 표현(rep)이 없는 빈 NSImage 로 만든 커서는 무효일 수 있다(적대 검증).
+    private static let hiddenCursor: NSCursor = {
+        let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 1, pixelsHigh: 1, bitsPerSample: 8, samplesPerPixel: 4,
+                                   hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 4, bitsPerPixel: 32)
+        let image = NSImage(size: NSSize(width: 1, height: 1))
+        if let rep {
+            rep.bitmapData?.initialize(repeating: 0, count: 4)
+            image.addRepresentation(rep)
+        }
+        return NSCursor(image: image, hotSpot: .zero)
+    }()
+
+    // W4b 스모크 전용(`MARU_WEB_OSR_TEST_INPUT=<대본 파일>`): 대본의 포인터 입력을 Swift 가 부르는 **같은 ABI**(mouse·hover·
+    // scroll_wheel·osr_aux_button·run_action)로 차례로 넣는다. 셸에서 띄운 앱은 활성이 되지 못해 합성한 클릭이 창 활성화에
+    // 먹힌다(실측 — 첫 클릭이 view 에 안 온다). 밖에서 앱을 활성으로 만들면 사용자의 작업에서 포커스를 빼앗으므로, 앱이 제
+    // 입력 경로를 스스로 부른다. NSEvent → ABI 변환(Swift 한 겹)은 W4d 의 앱 안 시험기가 진짜 이벤트로 본다.
+    // 대본 한 줄: `sleep ms` · `mouse kind fx fy dx dy button`(kind 1 누름·2 끌기·3 뗌·4 두 번·5 세 번, button 0 왼·1 가운데·
+    // 2 오른) · `hover fx fy dx dy` · `wheel fx fy dx dy lines` · `aux fx fy dx dy buttonNumber` · `action 이름` ·
+    // `key keyCode 글자 [원글자 수식자]`(글자는 U+ 16진, 없으면 -) — 키는 터미널 view 에 NSEvent 를 직접 넣는다(오버레이가
+    // 열린 동안 `run_action` 은 무시되므로 Esc 로 닫는 데도 쓴다) · `ime keyCode 단계…`(W4c — 입력기 콜백을 한 트랜잭션
+    // 안에서 직접 부른다). 좌표는 창 내용 view 의 (fx×폭 + dx, fy×높이 + dy) pt(왼쪽 위 원점).
+    private func startOsrTestInput() {
+        guard let path = ProcessInfo.processInfo.environment["MARU_WEB_OSR_TEST_INPUT"],
+              let text = try? String(contentsOfFile: path, encoding: .utf8) else { return }
+        let lines = text.split(separator: "\n").map { $0.split(separator: " ").map(String.init) }.filter { !$0.isEmpty }
+        runOsrTestInput(lines, 0)
+    }
+
+    private static func testScalar(_ token: String) -> String {
+        if token == "-" { return "" }
+        return UInt32(token.replacingOccurrences(of: "U+", with: ""), radix: 16).flatMap(Unicode.Scalar.init).map { String(Character($0)) } ?? ""
+    }
+
+    private static func testKeyEvent(_ type: NSEvent.EventType, _ window: NSWindow, _ code: UInt16, _ chars: String, _ ign: String,
+                                     _ flags: NSEvent.ModifierFlags) -> NSEvent? {
+        NSEvent.keyEvent(with: type, location: .zero, modifierFlags: flags, timestamp: ProcessInfo.processInfo.systemUptime,
+                         windowNumber: window.windowNumber, context: nil, characters: chars,
+                         charactersIgnoringModifiers: ign, isARepeat: false, keyCode: code)
+    }
+
+    private static func firstTerminalView(in view: NSView?) -> MaruMetalTerminalView? {
+        guard let view else { return nil }
+        if let terminal = view as? MaruMetalTerminalView { return terminal }
+        for sub in view.subviews { if let found = firstTerminalView(in: sub) { return found } }
+        return nil
+    }
+
+    private func runOsrTestInput(_ lines: [[String]], _ index: Int) {
+        guard index < lines.count else { return }
+        let line = lines[index]
+        var delay = 0.03
+        if line[0] == "sleep" {
+            delay = (Double(line.count > 1 ? line[1] : "0") ?? 0) / 1000
+        } else if let session = appSession, let view = window?.contentView {
+            let scale = Double(window?.backingScaleFactor ?? 2)
+            func point(_ at: Int) -> (Double, Double) {
+                let fx = Double(line[at]) ?? 0, fy = Double(line[at + 1]) ?? 0
+                let dx = Double(line[at + 2]) ?? 0, dy = Double(line[at + 3]) ?? 0
+                return ((fx * view.bounds.width + dx) * scale, (fy * view.bounds.height + dy) * scale)
+            }
+            switch line[0] {
+            case "mouse" where line.count >= 7:
+                let (x, y) = point(2)
+                _ = maru_macos_app_session_mouse(session, Int32(line[1]) ?? 0, x, y, Int32(line[6]) ?? 0, 0)
+            case "hover" where line.count >= 5:
+                let (x, y) = point(1)
+                var kind: Int32 = 0
+                _ = maru_macos_app_session_hover(session, x, y, 0, &kind)
+            case "wheel" where line.count >= 6:
+                let (x, y) = point(1)
+                _ = maru_macos_app_session_scroll_wheel(session, Double(line[5]) ?? 0, 0, 0, x, y)
+            case "aux" where line.count >= 6:
+                let (x, y) = point(1)
+                _ = maru_macos_app_session_osr_aux_button(session, Int32(line[5]) ?? 0, x, y)
+            case "action" where line.count >= 2:
+                let bytes = Array(line[1].utf8)
+                _ = bytes.withUnsafeBufferPointer { maru_macos_app_session_run_action(session, $0.baseAddress, $0.count) }
+            case "key" where line.count >= 3:
+                // key keyCode 글자 [원글자 수식자] — 수식자는 osr_key 와 같은 비트(shift=4·alt=8·ctrl=16·cmd=32). ⌘·⌃ 면
+                // AppKit 순서대로 view 의 performKeyEquivalent → 메뉴 → keyDown, 아니면 keyDown. 뗌도 보낸다.
+                let chars = Self.testScalar(line[2])
+                let ign = line.count >= 4 ? Self.testScalar(line[3]) : chars
+                let bits = line.count >= 5 ? (Int32(line[4]) ?? 0) : 0
+                var flags: NSEvent.ModifierFlags = []
+                if bits & 4 != 0 { flags.insert(.shift) }
+                if bits & 8 != 0 { flags.insert(.option) }
+                if bits & 16 != 0 { flags.insert(.control) }
+                if bits & 32 != 0 { flags.insert(.command) }
+                if let window, let terminal = Self.firstTerminalView(in: window.contentView),
+                   let down = Self.testKeyEvent(.keyDown, window, UInt16(line[1]) ?? 0, chars, ign, flags),
+                   let up = Self.testKeyEvent(.keyUp, window, UInt16(line[1]) ?? 0, chars, ign, flags) {
+                    if flags.contains(.command) || flags.contains(.control) {
+                        if !terminal.performKeyEquivalent(with: down), NSApp.mainMenu?.performKeyEquivalent(with: down) != true {
+                            terminal.keyDown(with: down)
+                        }
+                    } else {
+                        terminal.keyDown(with: down)
+                    }
+                    terminal.keyUp(with: up)
+                }
+            case "ime" where line.count >= 3:
+                // ime keyCode 단계… — 입력기 없이 한 트랜잭션(osr_key 쥐기 → ime_begin → 단계들 → ime_end → 뗌)을 돈다. 사용자
+                // 입력 소스(한글·영문)에 따라 합성 키의 결과가 갈리지 않게 입력기 콜백을 직접 부른다(진짜 입력기는 W4d
+                // 시험기). 단계: `k:글자`(키 자체의 글자 — 없으면 첫 `i:`) · `i:글`(insertText) · `m:글`(setMarkedText, `m:-` 는
+                // 빈 조합) · `c:셀렉터`(doCommand) · `d`(deleteBackward). 글은 U+ 16진을 `,` 로 이은 것.
+                // 키 이벤트의 글자(진짜 keyDown 도 characters 를 싣는다 — 없으면 페이지가 key 를 못 정한다): `k:글자` 단계가
+                // 있으면 그것, 없으면 첫 `i:` 글.
+                let keyStep = line.dropFirst(2).first { $0.hasPrefix("k:") } ?? line.dropFirst(2).first { $0.hasPrefix("i:") }
+                let first = keyStep.map { Self.testScalar(String($0.dropFirst(2).split(separator: ",").first ?? "")) } ?? ""
+                if let window, let terminal = Self.firstTerminalView(in: window.contentView),
+                   let down = Self.testKeyEvent(.keyDown, window, UInt16(line[1]) ?? 0, first, first, []),
+                   let up = Self.testKeyEvent(.keyUp, window, UInt16(line[1]) ?? 0, first, first, []) {
+                    _ = osrKey(down, phase: 1)
+                    imeKeyTransaction(down, suppressUnconsumedKey: false) {
+                        for step in line.dropFirst(2) {
+                            let body = String(step.dropFirst(2))
+                            let text = body.split(separator: ",").map { Self.testScalar(String($0)) }.joined()
+                            if step.hasPrefix("i:") {
+                                terminal.insertText(text, replacementRange: NSRange(location: NSNotFound, length: 0))
+                            } else if step.hasPrefix("m:") {
+                                terminal.setMarkedText(text, selectedRange: NSRange(location: (text as NSString).length, length: 0),
+                                                       replacementRange: NSRange(location: NSNotFound, length: 0))
+                            } else if step.hasPrefix("c:") {
+                                terminal.doCommand(by: NSSelectorFromString(body))
+                            } else if step.hasPrefix("k:") {
+                                continue
+                            } else if step == "d" {
+                                terminal.doCommand(by: #selector(NSStandardKeyBindingResponding.deleteBackward(_:)))
+                            }
+                        }
+                    }
+                    terminal.keyUp(with: up)
+                }
+            default:
+                break
+            }
+            markMetalNeedsRedraw()
+        } else {
+            // 세션·창이 아직 없다(띄우는 중) — 이 줄을 버리지 않고 조금 뒤 다시 본다.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                self?.runOsrTestInput(lines, index)
+            }
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            self?.runOsrTestInput(lines, index + 1)
+        }
+    }
+
+    // ── W4c: Chromium 탭 키보드 ──
+    // 키 대상 판정은 Zig 가 한다(활성 pane 의 OSR browser·입력 초점·창 키). Swift 는 NSEvent 를 옮기기만 한다.
+    var osrKeyboardActive: Bool {
+        guard let session = appSession else { return false }
+        return maru_macos_app_session_osr_keyboard_active(session) != 0
+    }
+
+    /// phase 0 = 지금 키 누름(chord·기능키), 1 = 입력기 트랜잭션 키로 쥐어 둠, 2 = 뗌. 키 대상이 Chromium 탭이면 true.
+    @discardableResult
+    func osrKey(_ event: NSEvent, phase: Int32) -> Bool {
+        guard let session = appSession else { return false }
+        let flags = event.modifierFlags
+        var bits: Int32 = 0
+        if flags.contains(.shift) { bits |= 4 }
+        if flags.contains(.option) { bits |= 8 }
+        if flags.contains(.control) { bits |= 16 }
+        if flags.contains(.command) { bits |= 32 }
+        if flags.contains(.capsLock) { bits |= 64 }
+        if flags.contains(.numericPad) { bits |= 128 }
+        if (event.type == .keyDown || event.type == .keyUp), event.isARepeat { bits |= 256 }
+        // character 는 수식자를 적용한 글자(⌃E 면 제어 문자), unmodified 는 원 글자 — 둘 다 없으면 페이지는 key 를 못
+        // 정한다(W4a 실측). 기능키는 macOS 의 사설 영역 글자(←=U+F702)가 그대로 간다.
+        let character = UInt32(event.characters?.utf16.first ?? 0)
+        let unmodified = UInt32(event.charactersIgnoringModifiers?.utf16.first ?? 0)
+        return maru_macos_app_session_osr_key(session, phase, UInt32(event.keyCode), character, unmodified, bits) != 0
+    }
+
+    /// Chromium 탭이 키 대상일 때의 key equivalent — WKWebView 패널의 performKeyEquivalent 와 같은 판정.
+    /// 소비하는 갈래(탐색·앱 액션·삼킴)는 **먼저 조합을 확정한다** — 조합 중 ⌘T·⌘⇧P 로 대상이 바뀌면 입력기 세션에 남은
+    /// 조합이 다음 자모와 이어져 새 대상에 글자가 겹친다(적대 검증). pass-through 는 keyDown 의 chord 갈래가 확정한다.
+    func handleOsrKeyEquivalent(_ event: NSEvent, commitComposition: () -> Void) -> Bool {
+        guard let session = appSession, osrKeyboardActive else { return false }
+        let sid = maru_macos_app_session_active_web_surface_id(session)
+        guard sid != 0 else { return false }
+        if event.modifierFlags.intersection([.command, .shift, .option, .control]) == .command {
+            let nav: UInt32? = event.keyCode == 123 ? 0 : (event.keyCode == 124 ? 1 : (event.keyCode == 15 ? 2 : nil))
+            if let nav {
+                commitComposition()
+                dispatchBrowserNav(sid, nav) // ← 뒤로 · → 앞으로 · R 새로고침
+                return true
+            }
+        }
+        guard var keyEvent = normalizedKeyEvent(from: event) else { return false }
+        switch maru_macos_app_session_web_key_route(session, sid, &keyEvent) {
+        case MARU_WEB_KEY_ROUTE_PASS_THROUGH, MARU_WEB_KEY_ROUTE_WEB_EDITOR:
+            return false
+        case MARU_WEB_KEY_ROUTE_APP_ACTION:
+            commitComposition()
+            syncLastWindowBeforeKeyDispatch(session, owner: activeSurface)
+            _ = maru_macos_app_session_dispatch_web_app_action(session, sid, &keyEvent)
+            reconcileWebFocus()
+            return true
+        default: // consume_unbound·모르는 값: 삼킨다(fail closed)
+            commitComposition()
+            return true
+        }
+    }
+
+    // W4c: Zig 가 Chromium 탭의 조합을 끝냈으면(키 대상이 바뀜 — 토스트 아닌 오버레이·탭 전환) 입력기 세션의 조합도 버린다.
+    func drainOsrDiscardMarked() {
+        guard let session = appSession else { return }
+        guard maru_macos_app_session_take_osr_discard_marked(session) != 0 else { return }
+        metalTerminalView?.discardOsrMarkedText()
+    }
+
+    /// 메뉴 편집 명령(잘라내기·복사·붙여넣기·전체 선택)의 Chromium 갈래. 키 대상이 Chromium 탭이면 보내고 true.
+    /// command: 2=cut 3=copy 4=paste 7=select_all(codec `EditCommandKind`).
+    func osrEdit(_ command: Int32) -> Bool {
+        guard let session = appSession, osrKeyboardActive else { return false }
+        // 조합 중이면 먼저 확정한다 — 붙여넣기가 페이지 조합을 끝내면 입력기 세션에 남은 조합이 다음 자모와 이어져 글자가
+        // 겹친다(적대 검증).
+        metalTerminalView?.commitMarkedTextIfComposing()
+        return maru_macos_app_session_osr_edit(session, command) != 0
+    }
+
+    // W4b: 추가 마우스 버튼(뒤로·앞으로)이 Chromium 탭 본문 위면 그 탭을 뒤로·앞으로 보내고 true.
+    func handleOsrAuxButton(_ event: NSEvent, in view: NSView) -> Bool {
+        guard let session = appSession else { return false }
+        let (xPx, yPx) = backingPx(view.convert(event.locationInWindow, from: nil), in: view)
+        guard maru_macos_app_session_osr_aux_button(session, Int32(event.buttonNumber), xPx, yPx) != 0 else { return false }
+        markMetalNeedsRedraw()
+        return true
+    }
+
+    // W4b: hover 중인 Chromium 탭의 페이지 커서가 바뀌었으면 맞춘다 — 페이지는 이동을 처리한 **뒤** 커서를 알리므로,
+    // 포인터가 멈춘 자리의 커서가 한 박자 전 것으로 남지 않게 tick 뒤에 가져간다.
+    // NSCursor 는 앱 전역이라 **키 창이고 포인터가 그 창 안일 때만** 바꾼다 — 비활성 창의 tick 이 다른 창·다른 앱 위의
+    // 커서를 덮지 않게(적대 검증).
+    private func drainOsrCursor() {
+        guard let session = appSession else { return }
+        var kind: Int32 = 0
+        guard maru_macos_app_session_take_osr_cursor(session, &kind) != 0 else { return }
+        guard let window, window.isKeyWindow, let content = window.contentView,
+              content.bounds.contains(content.convert(window.mouseLocationOutsideOfEventStream, from: nil)) else { return }
+        Self.cursor(for: kind).set()
     }
 
     func clearHover() {
@@ -9498,6 +9894,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             }
             return
         }
+        // W4c: Chromium 탭이 키 대상이면 페이지 전체 선택. WKWebView 패널 갈래 **뒤**다 — 그 웹뷰가 first responder 인 순간은
+        // 그쪽이 가진다(잘라내기·복사·붙여넣기와 같은 순서 — 적대 검증).
+        if key == "select_all", osrEdit(7) { return }
         // 메뉴 액션은 keyDown을 안 거친다 — next/previous_tab은 keyEquivalent가 달려 키 단축키로 와도
         // 메뉴가 가로채 여기로 온다. 조합 중이면 먼저 확정해, 탭 전환으로 입력기 세션이 새 탭으로 새지 않게 한다.
         activeSurface?.view?.commitMarkedTextIfComposing()
@@ -9620,6 +10019,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             NSApp.sendAction(#selector(NSText.cut(_:)), to: nil, from: self)
             return
         }
+        if osrEdit(2) { return } // W4c: Chromium 탭 — sidecar 가 페이지 선택을 잘라 클립보드에 쓴다
         copySelectionToPasteboard()
     }
 
@@ -9634,6 +10034,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: self)
             return
         }
+        if osrEdit(3) { return } // W4c
         copySelectionToPasteboard()
     }
 
@@ -9645,6 +10046,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: self)
             return
         }
+        if osrEdit(4) { return } // W4c
         pastePasteboardText()
     }
 
@@ -12115,6 +12517,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
     }
 
+    func imeCommand() {
+        guard let session = appSession else { return }
+        maru_macos_app_session_ime_command(session)
+    }
+
     func imeInsert(_ text: String) {
         guard let session = appSession else { return }
         let bytes = Array(text.utf8)
@@ -13433,6 +13840,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             web_panel_kind=\(wp?.panelKind ?? 99)
             web_panel_scheme_handler_registered=\(schemeRegistered)
             web_panel_data_store_persistent=\(wp?.webView.configuration.websiteDataStore.isPersistent ?? true)
+            browser_data_store_persistent=\(browserDataStoreProbe().persistent)
+            browser_data_store_isolated=\(browserDataStoreProbe().isolated)
+            browser_data_store_backup_excluded=\(browserDataStoreProbe().backupExcluded)
             web_nav_url_swift=\(wp?.navUrl ?? "pending")
             web_nav_url_zig=\(navUrlZig)
             bridge_world_registered=\(wp?.bridgeWorld != nil)

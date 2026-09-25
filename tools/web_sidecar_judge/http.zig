@@ -1,0 +1,161 @@
+//! 판정자가 띄우는 로컬 HTTP 서버(W1c). 쿠키 유지는 http 출처에서만 잴 수 있어(file: 은 쿠키가 없다) 페이지를
+//! 메모리에서 바로 내보낸다. 127.0.0.1 의 빈 포트에만 묶는다.
+//!
+//!   /title?t=X    제목을 X 로
+//!   /size         제목을 `w=<innerWidth>` 로, 크기가 바뀔 때마다 다시
+//!   /cookie?v=N   제목을 `cookie=[<document.cookie>]` 로 한 뒤 쿠키 `maru_judge=N` 을 한 시간짜리로 심는다
+//!   /popup        `window.open` 을 부른 뒤 제목을 `popup-tried` 로
+//!   /vis          제목을 `vis=<document.visibilityState>` 로, 바뀔 때마다 다시
+//!   /print        `window.print()` 를 부른 뒤 제목을 `print-tried` 로(인쇄 창이 뜨면 그 창이 닫힐 때까지 안 온다)
+//!   /dialog       `alert`·`confirm`·`prompt` 를 부른 뒤 제목을 `dialog-<confirm>-<prompt>` 로
+//!   /ctl          제목을 `a<BEL>b<DEL>c` 로(제어 문자가 든 제목)
+//!   /flood        2 초 동안 제목을 1ms 마다 200 번씩 바꾼 뒤 `flood-done` 으로
+//!   /tear         매 프레임 화면 전체를 프레임 번호 색(`rgb(n&255, n>>8&255, 200)`)으로 칠한다(W2 — 한 장 안의 줄 색이
+//!                 다르면 찢어진 것, 쥔 장의 색이 바뀌면 덮어쓴 것. 두 색만 번갈면 두 프레임 뒤의 덮어쓰기를 놓쳤다)
+//!   /static       한 번 칠하고 멈춘 페이지(W2 — 그리기가 없어도 못 알린 링을 다시 알리는지)
+//!   /input        입력 판정(W4) — 입력칸(0,0 300×40)·문단(y 100)·링크(y 200)·긴 본문. 첫 프레임 뒤에 `input-ready`(그 전의
+//!                 입력은 렌더러가 버린다 — 실측). 입력이 만든 마지막 상태를 제목으로
+//!                 (`click:x,y,button,detail` · `dbl:2` · `val:` · `comp-val:` · `end:조합:값` · `key:e:ctrl:KeyE` · `blur` ·
+//!                 `ctx:x,y` · `aux:1` · `sel:yes|no` · `leave` · `scroll:down`). 제목은 조절돼 마지막 것만 오므로 한 입력이
+//!                 제목을 둘 바꾸지 않게 이벤트를 골랐다
+//!   /keys?칸      특수 키 판정(W4c) — textarea(t)·폼 입력칸 둘(j·k). 칸(`t`·`j`)을 누르면 준비. 초점 칸·값(줄바꿈은 `NL`)·
+//!                 캐럿을 제목으로(`focus=… val=… caret=…`)
+
+const std = @import("std");
+
+const AF_INET: c_int = 2;
+const SOCK_STREAM: c_int = 1;
+
+const SockaddrIn = extern struct {
+    len: u8 = @sizeOf(SockaddrIn),
+    family: u8 = AF_INET,
+    port: u16 = 0,
+    addr: u32 = 0,
+    zero: [8]u8 = @splat(0),
+};
+
+extern "c" fn socket(domain: c_int, kind: c_int, protocol: c_int) c_int;
+extern "c" fn bind(fd: c_int, addr: *const SockaddrIn, len: u32) c_int;
+extern "c" fn listen(fd: c_int, backlog: c_int) c_int;
+extern "c" fn accept(fd: c_int, addr: ?*anyopaque, len: ?*u32) c_int;
+extern "c" fn getsockname(fd: c_int, addr: *SockaddrIn, len: *u32) c_int;
+
+/// 팝업 페이지(`/title?t=opened`)가 실제로 요청된 수. 창 없는 모드에서는 허용된 팝업이 **보이지 않는 브라우저**로
+/// 뜨므로 창 수로는 못 잡는다(변이 실측) — 페이지가 불렸는지로 본다.
+pub var opened_requests = std.atomic.Value(u32).init(0);
+
+pub const Server = struct {
+    fd: c_int,
+    port: u16,
+
+    pub fn start() !Server {
+        const fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (fd < 0) return error.SocketFailed;
+        var addr: SockaddrIn = .{ .addr = std.mem.nativeToBig(u32, 0x7f000001) };
+        if (bind(fd, &addr, @sizeOf(SockaddrIn)) != 0) return error.BindFailed;
+        if (listen(fd, 16) != 0) return error.ListenFailed;
+        var len: u32 = @sizeOf(SockaddrIn);
+        if (getsockname(fd, &addr, &len) != 0) return error.SocketFailed;
+        const server: Server = .{ .fd = fd, .port = std.mem.bigToNative(u16, addr.port) };
+        const thread = try std.Thread.spawn(.{}, serve, .{fd});
+        thread.detach();
+        return server;
+    }
+};
+
+fn serve(fd: c_int) void {
+    while (true) {
+        const conn = accept(fd, null, null);
+        if (conn < 0) continue;
+        handle(conn);
+        _ = std.c.close(conn);
+    }
+}
+
+fn handle(conn: c_int) void {
+    var req: [4096]u8 = undefined;
+    const n = std.c.read(conn, &req, req.len);
+    if (n <= 0) return;
+    const line_end = std.mem.indexOfScalar(u8, req[0..@intCast(n)], '\r') orelse return;
+    var parts = std.mem.splitScalar(u8, req[0..line_end], ' ');
+    _ = parts.next();
+    const target = parts.next() orelse return;
+    const path = target[0 .. std.mem.indexOfScalar(u8, target, '?') orelse target.len];
+    const query = if (std.mem.indexOfScalar(u8, target, '=')) |eq| target[eq + 1 ..] else "";
+
+    var body_buf: [2048]u8 = undefined;
+    const body = page(path, query, &body_buf) catch "<!doctype html><title>not-found</title>";
+    var head_buf: [256]u8 = undefined;
+    const head = std.fmt.bufPrint(&head_buf, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {d}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n", .{body.len}) catch return;
+    _ = std.c.write(conn, head.ptr, head.len);
+    _ = std.c.write(conn, body.ptr, body.len);
+}
+
+fn page(path: []const u8, query: []const u8, buf: []u8) ![]const u8 {
+    if (std.mem.eql(u8, path, "/title")) {
+        if (std.mem.eql(u8, query, "opened")) _ = opened_requests.fetchAdd(1, .monotonic);
+        return std.fmt.bufPrint(buf, "<!doctype html><title>loading</title><script>document.title='{s}'</script>", .{query});
+    }
+    if (std.mem.eql(u8, path, "/size")) {
+        return "<!doctype html><title>loading</title><script>function t(){document.title='w='+innerWidth}t();addEventListener('resize',t)</script>";
+    }
+    if (std.mem.eql(u8, path, "/cookie")) {
+        return std.fmt.bufPrint(buf, "<!doctype html><title>loading</title><script>document.title='cookie=['+document.cookie+']';document.cookie='maru_judge={s}; max-age=3600; path=/'</script>", .{query});
+    }
+    if (std.mem.eql(u8, path, "/tear")) {
+        return "<!doctype html><title>tear</title><style>html,body{margin:0;height:100%}</style><body><script>let n=0;function f(){n++;document.body.style.background='rgb('+(n&255)+','+((n>>8)&255)+',200)';requestAnimationFrame(f)}f()</script>";
+    }
+    if (std.mem.eql(u8, path, "/static")) {
+        return "<!doctype html><title>static</title><style>html,body{margin:0;height:100%;background:#20a060}</style><body>";
+    }
+    if (std.mem.eql(u8, path, "/input")) return input_page;
+    if (std.mem.eql(u8, path, "/keys")) return keys_page;
+    if (std.mem.eql(u8, path, "/popup")) {
+        return "<!doctype html><title>loading</title><script>window.open('/title?t=opened','_blank');document.title='popup-tried'</script>";
+    }
+    if (std.mem.eql(u8, path, "/vis")) {
+        return "<!doctype html><title>loading</title><script>function t(){document.title='vis='+document.visibilityState}t();document.addEventListener('visibilitychange',t)</script>";
+    }
+    if (std.mem.eql(u8, path, "/print")) {
+        return "<!doctype html><title>loading</title><body>print me<script>window.print();document.title='print-tried'</script>";
+    }
+    if (std.mem.eql(u8, path, "/dialog")) {
+        return "<!doctype html><title>loading</title><script>alert('a');var r=confirm('b');var p=prompt('c','d');document.title='dialog-'+r+'-'+p</script>";
+    }
+    if (std.mem.eql(u8, path, "/ctl")) {
+        return "<!doctype html><title>loading</title><script>document.title='a\\x07b\\x7fc'</script>";
+    }
+    if (std.mem.eql(u8, path, "/flood")) {
+        return "<!doctype html><title>loading</title><script>var i=0;var h=setInterval(function(){for(var k=0;k<200;k++)document.title='f'+(i++)},1);setTimeout(function(){clearInterval(h);document.title='flood-done'},2000)</script>";
+    }
+    return error.NotFound;
+}
+
+const input_page =
+    \\<!doctype html><title>loading</title>
+    \\<style>body{margin:0;height:3000px;font:16px sans-serif}#i{position:absolute;left:0;top:0;width:300px;height:40px;box-sizing:border-box}
+    \\#p{position:absolute;left:0;top:100px;width:600px;margin:0;line-height:20px}#a{position:absolute;left:0;top:200px;display:block;width:200px;height:30px}#d{position:absolute;left:0;top:300px;width:200px;height:40px}</style>
+    \\<input id=i><p id=p>maru selects this paragraph text by dragging across it</p><a id=a href="#x">link</a><div id=d></div>
+    \\<script>var i=document.getElementById('i');function t(s){document.title=s}
+    \\addEventListener('click',function(e){if(e.target.id!='p')t('click:'+e.clientX+','+e.clientY+','+e.button+','+e.detail)});
+    \\i.addEventListener('input',function(e){t((e.isComposing?'comp-val:':'val:')+i.value)});
+    \\i.addEventListener('compositionend',function(e){t('end:'+e.data+':'+i.value)});
+    \\i.addEventListener('keydown',function(e){if(e.ctrlKey)t('key:'+e.key+':ctrl:'+e.code)});
+    \\i.addEventListener('blur',function(){t('blur')});
+    \\addEventListener('contextmenu',function(e){t('ctx:'+e.clientX+','+e.clientY)});
+    \\addEventListener('auxclick',function(e){if(e.button==1)t('aux:1')});
+    \\document.getElementById('d').addEventListener('dblclick',function(e){t('dbl:'+e.detail)});
+    \\addEventListener('mouseup',function(e){if(e.button==0&&e.target.id=='p')t('sel:'+(getSelection().toString().length>=5?'yes':'no'))});
+    \\addEventListener('scroll',function(){if(scrollY>0)t('scroll:down')});
+    \\document.documentElement.addEventListener('mouseleave',function(){t('leave')});
+    \\requestAnimationFrame(function(){requestAnimationFrame(function(){t('input-ready')})});
+    \\</script>
+;
+
+const keys_page =
+    \\<!doctype html><title>loading</title><style>body{margin:0}#t{position:absolute;left:0;top:0;width:300px;height:100px}#j{position:absolute;left:0;top:120px;width:300px;height:30px}#k{position:absolute;left:0;top:170px;width:300px;height:30px}</style>
+    \\<textarea id=t></textarea><form id=f onsubmit="t2('submit');return false"><input id=j><input id=k></form>
+    \\<script>function st(){var a=document.activeElement;var v=a&&a.value!==undefined?a.value.split(String.fromCharCode(10)).join('NL'):'';document.title='focus='+(a&&a.id)+' val='+v+' caret='+(a&&a.selectionStart)}
+    \\addEventListener('input',function(){setTimeout(st,0)});addEventListener('keyup',function(){setTimeout(st,0)});document.addEventListener('focusin',function(){setTimeout(st,0)});
+    \\requestAnimationFrame(function(){requestAnimationFrame(function(){document.title='keys-ready'})});</script>
+;

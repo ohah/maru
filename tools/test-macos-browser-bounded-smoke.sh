@@ -37,6 +37,20 @@ do
     }
 done
 
+# W3a(D6): browser 탭 저장소 — macOS 14+ 는 격리된 영속 저장소이고 디렉터리는 0700·백업 제외, 11~13 은 비영속이 계약.
+grep -qx "browser_data_store_isolated=true" "$summary" || { echo "bounded browser smoke failed: browser_data_store_isolated" >&2; exit 1; }
+os_major=$(sw_vers -productVersion | cut -d. -f1)
+if [ "$os_major" -ge 14 ]; then
+    for field in browser_data_store_persistent browser_data_store_backup_excluded; do
+        grep -qx "$field=true" "$summary" || {
+            echo "bounded browser smoke failed: $field ($(grep "^$field=" "$summary"))" >&2
+            exit 1
+        }
+    done
+else
+    grep -qx "browser_data_store_persistent=false" "$summary" || { echo "bounded browser smoke failed: persistent store on macOS <14" >&2; exit 1; }
+fi
+
 pump_actions=$(sed -n 's/^browser_result_pump_actions=//p' "$summary")
 pump_p95=$(sed -n 's/^browser_result_pump_p95_ms=//p' "$summary")
 pump_max=$(sed -n 's/^browser_result_pump_max_ms=//p' "$summary")

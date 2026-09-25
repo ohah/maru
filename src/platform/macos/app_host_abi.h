@@ -9,7 +9,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 188u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 193u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -443,6 +443,20 @@ typedef struct MaruAppHostGpuImage {
     int32_t z;
     uint32_t pass;           /* 0=below_bg, 1=below_text, 2=above_text(같은 pass 안 z 오름차순) */
 } MaruAppHostGpuImage;
+
+/* v191(W3c): Chromium(OSR) 탭 본문 한 장. iosurface 는 Zig 가 쥔 IOSurfaceRef(그리는 동안 살아 있다), dest 는 창 backing
+   px(좌상단), UV 는 장 안에서 그릴 부분(장이 DIP 올림이라 rect 보다 크거나 같다 — 늘리지 않고 자른다). */
+typedef struct MaruAppHostOsrQuad {
+    void *iosurface;
+    float dest_x;
+    float dest_y;
+    float dest_w;
+    float dest_h;
+    float u0;
+    float v0;
+    float u1;
+    float v1;
+} MaruAppHostOsrQuad;
 
 /* kitty graphics 이미지 텍스처 업로드 디스크립터(K2). Zig metal_frame.GpuImageUpload와 1:1. generation이 바뀐
    (신규/재transmit) 이미지만 들어온다 — renderer가 image_id로 텍스처를 캐시하고 여기 있는 것만 (재)업로드한다.
@@ -1071,7 +1085,9 @@ uint32_t maru_macos_app_session_dispatch_web_app_action(MaruAppHostSession *sess
 /* 진행 중 IME 조합을 확정(커밋)한다. IME 우회 특수키/단축키 직전에 호출. */
 int32_t maru_macos_app_session_commit_composition(MaruAppHostSession *session);
 /* 마우스 호버 갱신(backing px). *out_cursor_kind에 위치별 커서 종류(0=arrow/사이드바·탭 바, 1=iBeam/터미널,
-   2=pointingHand/URL hover, 3=resizeLeftRight/세로 divider, 4=resizeUpDown/가로 divider, 5=openHand/pane grip 호버).
+   2=pointingHand/URL hover, 3=resizeLeftRight/세로 divider, 4=resizeUpDown/가로 divider, 5=openHand/pane grip 호버.
+   v192 Chromium 탭 본문의 페이지 커서: 6=crosshair, 7=closedHand, 8=operationNotAllowed, 9=dragCopy, 10=dragLink,
+   11=contextualMenu, 12=세로 iBeam, 13=숨김).
    Swift가 이 값으로
    NSCursor를 세운다. Zig는 부수적으로 사이드바 슬롯·pane 탭 호버·URL 밑줄을 갱신한다. mods는 마우스 수식키 비트
    (xterm 규약: shift=4, alt=8, ctrl=16, cmd=32) — Zig가 config input.url-click-modifier와 비교해 URL 밑줄을 켠다
@@ -2049,6 +2065,37 @@ uint32_t maru_macos_mermaid_expire_deadline(uint64_t now_ms);
 uint32_t maru_macos_mermaid_complete_termination(uint64_t helper_instance);
 /* physical adapter가 quiesce된 app 종료에서 queue/latch/lease를 최종 회수한다. */
 void maru_macos_mermaid_shutdown(void);
+/* v190(W3b): 앱 종료 때 Chromium sidecar(웹 OSR)를 내린다 — shutdown 뒤 최대 3 초 기다리고 남았으면 죽인다.
+   Chromium 엔진(설정 browser.engine·개발용 MARU_WEB_OSR_DIR)을 쓰지 않으면 무동작. 메인 스레드에서만. */
+void maru_macos_web_osr_shutdown(void);
+/* v191(W3c): 이 창 renderer 에서 GPU 가 끝낸 마지막 프레임 세대를 넣는다 — tick 전에 부른다. OSR 탭은 지금 front 를
+   그린 프레임이 끝나기 전에는 새 프레임을 꺼내지 않는다(front 를 sidecar 에 돌려주면 GPU 가 읽는 장을 덮는다). */
+void maru_macos_app_session_set_osr_completed_generation(MaruAppHostSession *session, uint64_t generation);
+/* v191(W3c): 이번에 그릴 프레임(세대 frame_generation)의 Chromium 탭 본문 사각형을 out 에 채우고 수를 돌려준다. 그린 탭에는
+   이 세대가 기록된다. 메인 스레드에서만. */
+size_t maru_macos_app_session_osr_quads(MaruAppHostSession *session, uint64_t frame_generation, MaruAppHostOsrQuad *out, size_t out_cap);
+/* v192(W4b): hover 중인 Chromium 탭의 페이지 커서가 바뀌었으면 1 과 *out_cursor_kind(hover 와 같은 CursorKind)를 한 번
+   돌려준다 — 페이지는 이동을 처리한 뒤 커서를 알리므로, 포인터가 멈춰도 커서를 맞추려고 tick 뒤에 부른다. */
+int32_t maru_macos_app_session_take_osr_cursor(MaruAppHostSession *session, int32_t *out_cursor_kind);
+/* v192(W4b): 추가 마우스 버튼(macOS buttonNumber 3=뒤로·4=앞으로)이 Chromium 탭 본문 위에서 눌렸다(backing px). 그 탭을
+   뒤로·앞으로 보내고 1. 본문이 아니면 0 — Swift 는 옛 경로(handleMouse)로 흘린다. */
+int32_t maru_macos_app_session_osr_aux_button(MaruAppHostSession *session, int32_t button_number, double x_px, double y_px);
+/* v193(W4c): 키 대상이 Chromium 탭인가(활성 pane 의 OSR browser·입력 초점이 터미널 자리·창 키). 1 이면 Swift 는 키를
+   터미널 경로가 아니라 아래 osr_key·입력기 트랜잭션으로 보낸다. */
+int32_t maru_macos_app_session_osr_keyboard_active(MaruAppHostSession *session);
+/* v193(W4c): 키 한 번. phase 0 = 지금 키 누름(⌘·⌃ chord·기능키), 1 = 입력기 트랜잭션 키로 쥐어 둠(ime_end 가 판정),
+   2 = 뗌. key_code 는 NSEvent.keyCode, character·unmodified 는 characters·charactersIgnoringModifiers 의 첫 UTF-16,
+   mods 는 shift=4·alt=8·ctrl=16·cmd=32·caps=64·숫자패드=128·반복=256. 키 대상이 Chromium 탭이면 1. */
+int32_t maru_macos_app_session_osr_key(MaruAppHostSession *session, int32_t phase, uint32_t key_code, uint32_t character,
+                                       uint32_t unmodified, int32_t mods);
+/* v193(W4c): 메뉴 편집 명령(codec EditCommandKind: 0 undo·1 redo·2 cut·3 copy·4 paste·6 delete·7 select_all)을 키 대상
+   Chromium 탭에 보낸다. 대상이 아니면 0. */
+int32_t maru_macos_app_session_osr_edit(MaruAppHostSession *session, int32_t command);
+/* v193(W4c): 입력기가 키 동작 명령을 냈다(doCommand — deleteBackward 밖의 insertNewline·moveLeft 등). Chromium 탭 트랜잭션
+   안이면 기록하고(조합을 끝낸 키가 그 동작으로 페이지에 가게), 아니면 무동작. */
+void maru_macos_app_session_ime_command(MaruAppHostSession *session);
+/* v193(W4c): Zig 가 Chromium 탭의 조합을 끝냈다(키 대상이 바뀜) — 1 이면 Swift 는 입력기 세션의 조합을 버린다(한 번). */
+int32_t maru_macos_app_session_take_osr_discard_marked(MaruAppHostSession *session);
 void maru_macos_mermaid_snapshot(MaruMermaidCoordinatorSnapshot *out_snapshot);
 /* allocation-free frame-tick gate와 exact renderer lifetime revoke. */
 uint32_t maru_macos_mermaid_has_work(void);
@@ -2098,6 +2145,13 @@ void maru_macos_control_server_stop(void);
    서버 미시작이면 0. 메인 스레드에서만. */
 uint32_t maru_macos_control_take_browser_op(uint64_t *out_async_id, uint64_t *out_surface_id, uint8_t *out_op_kind,
                                             const uint8_t **out_arg_ptr, size_t *out_arg_len);
+
+/* v189(쿠키 권한은 사이트에): 방금 take_browser_op 로 꺼낸 op 의 허용 호스트를 out 에 복사하고 길이를 돌려준다(NUL 없음).
+   browser_storage 확인 grant 가 인가한 쿠키 op 만 값이 있고, 0 은 검사 없음이다. Swift 는 쿠키 저장소를 만지는 op
+   (getCookies·setCookie·deleteCookie·clearStorage) 직전에 대상 문서 호스트가 이 호스트이거나 그 하위 도메인인지 보고,
+   아니면 complete_browser_op(status=5 unauthorized)로 끝낸다. out 이 없거나 모자라면 SIZE_MAX 를 돌려준다 — 호출자는
+   거절한다(0 은 「검사 없음」이라 그걸로 돌려주면 열려 버린다). 다음 take 전까지 유효. 메인 스레드에서만. */
+size_t maru_macos_control_taken_browser_op_required_host(uint8_t *out, size_t out_cap);
 
 /* 5e-2b: BrowserControl async 완료 콜백이 호출 — async_id 요청을 결과로 응답한다. status:
    0=success·1=failed·2=timeout·3=invalid_params·4=process_exited·5=unauthorized. result는 method별

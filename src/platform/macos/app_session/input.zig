@@ -291,6 +291,8 @@ pub fn imeComposingActive(self: *AppSession) bool {
 /// 텍스트/조합 변화를 모으기 시작한다.
 pub fn imeBegin(self: *AppSession) void {
     if (!self.surface_initialized) return;
+    // W4c: 키 대상이 Chromium 탭이면 그 탭 몫의 트랜잭션 — 터미널 core·preedit 를 건드리지 않는다.
+    if (web_ops.osrImeBegin(self)) return;
     // missing pin에서도 transaction은 반드시 열린 뒤 imeEnd에서 닫혀야 한다. 예전 조기 반환은
     // ime_active=false를 남겨 imeMarked 변화가 기록되지 않았고, imeEnd가 다음 active terminal로
     // 물리 키를 encode/replay했다.
@@ -337,6 +339,7 @@ pub fn imeBegin(self: *AppSession) void {
 /// 커밋 — 포커스 전환 등)이면 그대로 확정 전송한다.
 pub fn imeInsert(self: *AppSession, bytes: []const u8) void {
     if (!self.surface_initialized) return;
+    if (web_ops.osrImeInsert(self, bytes)) return; // W4c
     if (!self.ime_active) {
         // 트랜잭션 밖 직접 커밋(입력기가 keyDown 없이 직접 — 포커스 전환 등 windowLostKey와 같은
         // AppKit 동기 콜백 클래스)도 현재 입력 대상으로 라우팅한다(#10 후속) — 터미널이면 non-blocking
@@ -353,6 +356,7 @@ pub fn imeInsert(self: *AppSession, bytes: []const u8) void {
 /// find/palette 열림이면 그 입력에, 아니면 터미널 core. 조합 상태가 그 자리에 즉시 보이고 뒤로 새지 않는다.
 pub fn imeMarked(self: *AppSession, bytes: []const u8) void {
     if (!self.surface_initialized) return;
+    if (web_ops.osrImeMarked(self, bytes)) return; // W4c
     imeSetPreedit(self, bytes);
     self.metal_dirty = true; // 조합 글자는 즉시 보여야 한다
     if (self.ime_active) self.ime_marked_changed = true;
@@ -360,6 +364,7 @@ pub fn imeMarked(self: *AppSession, bytes: []const u8) void {
 
 /// 입력기의 deleteBackward 편집 명령(doCommand). 트랜잭션에 기록만 하고 판정은 imeEnd가 한다.
 pub fn imeDeleteBackward(self: *AppSession) void {
+    if (web_ops.osrImeCommand(self, true)) return; // W4c: Chromium 탭 트랜잭션에 기록
     if (self.ime_active) self.ime_did_delete = true;
 }
 
@@ -376,6 +381,7 @@ pub fn imeDeleteBackward(self: *AppSession) void {
 /// 막는다(라이브 회귀 클래스).
 pub fn imeEnd(self: *AppSession, event: ?terminal.KeyEvent) void {
     if (!self.surface_initialized) return;
+    if (web_ops.osrImeEnd(self)) return; // W4c
     // target이 imeBegin 뒤 사라진 경우도 같은 transaction에서 tombstone으로 승격한다. pin id가
     // 존재한다는 이유만으로 routeCommittedText는 새 active로 fallback하지 않지만, encode_key/replay는
     // handleKeyEvent를 직접 타므로 이 명시 상태가 없으면 새 terminal로 샌다.
@@ -1006,6 +1012,8 @@ pub fn imeCursorRect(self: *AppSession) ImeCursorRect {
     const cw: f64 = @floatFromInt(if (self.cell_width_px > 0) self.cell_width_px else placeholder_cell_width_px);
     const ch: f64 = @floatFromInt(if (self.cell_height_px > 0) self.cell_height_px else placeholder_cell_height_px);
     if (!self.surface_initialized) return .{ .x = 0, .y = 0, .w = cw, .h = ch };
+    // W4c: Chromium 탭이면 조합 글자 사각형(sidecar `ime_range`) 자리.
+    if (self.ime_terminal_target_id == null) if (web_ops.osrImeCursorRect(self)) |r| return .{ .x = r.x, .y = r.y, .w = r.w, .h = r.h };
     // 활성 입력 대상(inputFocus 단일 출처)의 입력 caret 옆에 후보창을 띄운다 — caretRect가 위치 단일 출처.
     // null(패널 밖)이거나 터미널이면 아래 터미널 커서로 폴백.
     const props = self.buildChromeProps();

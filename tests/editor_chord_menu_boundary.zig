@@ -36,9 +36,16 @@ test "EMK5 performKeyEquivalent 가 편집기 질의를 오버레이 뒤에 부�
         \\            controller?.handleKeyDown(event)
         \\            return true
         \\        }
-        \\        return super.performKeyEquivalent(with: event)
     ;
     try std.testing.expect(std.mem.indexOf(u8, swift, block) != null);
+    // 그 뒤 Chromium(OSR) 탭 갈래(W4c — 편집기가 아닐 때만 닿는다), 그다음 메뉴.
+    const tail =
+        \\        if controller?.handleOsrKeyEquivalent(event, commitComposition: { self.commitMarkedTextIfComposing() }) == true { return true }
+        \\        return super.performKeyEquivalent(with: event)
+    ;
+    const block_at = std.mem.indexOf(u8, swift, block).?;
+    const tail_at = std.mem.indexOfPos(u8, swift, block_at, tail) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(tail_at < block_at + block.len + 400);
 
     // **판정을 Swift 로 복제하지 않았다.** 활성 Term 종류·resolver 순서를 Swift 가 다시 세면 출처가
     // 둘이 되고, 그 둘은 반드시 갈린다.

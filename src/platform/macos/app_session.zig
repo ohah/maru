@@ -13,6 +13,7 @@ const agent_ops = @import("app_session/agent.zig");
 const notification_ops = @import("app_session/notification.zig");
 pub const input_ops = @import("app_session/input.zig");
 pub const web_ops = @import("app_session/web.zig");
+pub const web_osr = @import("web_osr.zig");
 pub const workspace_ops = @import("app_session/workspace.zig");
 pub const session_host_window_ops = if (builtin.os.tag == .macos)
     @import("app_session/session_host_window.zig")
@@ -281,7 +282,7 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 185: CR6d-v2b0b extends the read-only input probe with terminal byte/screen generation counters
 // and adds one synchronous transcript-to-canonical-evidence leaf. Raw inventories are borrowed
 // only for the call; Zig owns reduction and absent-target publication.
-pub const abi_version: u32 = 188;
+pub const abi_version: u32 = 193;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -534,6 +535,15 @@ pub const CursorKind = enum(i32) {
     resize_h = 3, // resizeLeftRight ↔ — 세로 divider(좌우 split, 좌우로 끈다)
     resize_v = 4, // resizeUpDown ↕ — 가로 divider(상하 split, 위아래로 끈다)
     grab = 5, // openHand ✋ — pane 탭바 좌측 grip 핸들 호버(통째 드래그 가능 신호)
+    // W4b: Chromium(OSR) 탭 본문 — 페이지가 원하는 커서(`web_osr` 가 기억한 `cursor_changed`).
+    crosshair = 6, // crosshair
+    grabbing = 7, // closedHand
+    not_allowed = 8, // operationNotAllowed
+    copy = 9, // dragCopy
+    alias = 10, // dragLink
+    context_menu = 11, // contextualMenu
+    vertical_text = 12, // iBeamCursorForVerticalLayout
+    hidden = 13, // CSS cursor:none — 빈 커서
 };
 
 // cell 메트릭이 아직 없을 때(이론상 init 전) grid 계산에 쓰는 placeholder cell 픽셀 크기.
@@ -3327,6 +3337,10 @@ const PointerGestureOwner = union(enum) {
     /// 편집기 **본문 텍스트** 드래그 선택(§4.1g). 잡은 Term을 든다 — 드래그 중 포커스가 옮겨져도
     /// 그 문서가 선택된다(스크롤바 드래그가 같은 규율을 쓴다).
     editor_selection: struct { term: *Term },
+    /// Chromium(OSR) 탭 본문에서 시작한 누름(W4b — C5 제스처 주인). 끌기·뗌은 본문 밖으로 나가도 이 탭이 받는다. 같은
+    /// 제스처 안에서 다른 버튼을 더 누를 수 있어 눌린 버튼들을 들고, 모두 떼면 끝난다. 첫 버튼의 뗌에는 누름의 클릭 수를
+    /// 그대로 싣는다(CEF 는 down·up 쌍의 클릭 수를 본다).
+    web_osr: struct { surface_id: u64, first: maru.session.web_osr_input.MouseButton, held: maru.session.web_osr_input.Held, click_count: u8 },
 };
 const file_tree_trash_capacity: usize = 16;
 
@@ -4083,6 +4097,8 @@ pub const MeasuredTextCache = struct {
 /// `takeWebNavAction`의 반환. 익명 struct로 두면 `web.zig`로 본문을 옮길 때 허브가 만든 타입과
 /// 그룹이 만든 타입이 **서로 다른 타입**이 되어 facade를 세울 수 없다(F11에서 그래서 못 옮겼다).
 pub const WebNavAction = struct { surface_id: u64, code: u8 };
+/// W3c·W4b: 이 창이 그린 OSR 본문(그릴 rect·포인터 hit-test·divider 잡는 띠).
+pub const OsrLayout = maru.session.web_osr_input.Target;
 
 /// `imeCursorRect`의 반환. 위와 같은 이유로 이름을 준다(F12에서 못 옮긴 함수다).
 pub const ImeCursorRect = struct { x: f64, y: f64, w: f64, h: f64 };
@@ -6268,6 +6284,31 @@ pub const AppSession = struct {
     // 가장 최근 RenderFrame의 Metal 투영을 retain하는 owned 버퍼. metalFrame()이 이걸 가리키는
     // view를 돌려준다. metal_dirty가 true일 때만(첫 frame, 새 output, resize) 재투영한다.
     metal_buffer: metal_frame.MetalFrameBuffer = .{},
+    /// W3c: 이번 tick 에 이 창이 그릴 OSR 본문 rect(보이는 Chromium 탭).
+    osr_layouts: std.ArrayList(OsrLayout) = .empty,
+    /// W3c: 이 창 renderer 에서 GPU 가 끝낸 마지막 프레임 세대(Swift 가 tick 전에 넣는다 — GPU 소비자 규칙).
+    osr_completed_generation: u64 = 0,
+    /// W4b: 포인터가 올라 있는 OSR 탭(0 = 없음). 벗어나면 그 탭에 leave 를 보낸다.
+    osr_hover_surface: u64 = 0,
+    /// W4b: 그 탭 커서의 본 세대 — 바뀌면 `osr_cursor_pending` 을 세워 Swift 가 포인터를 움직이지 않아도 커서를 바꾼다.
+    osr_hover_cursor_generation: u32 = 0,
+    osr_cursor_pending: ?CursorKind = null,
+    /// W4c: 지금 키 포커스를 준 Chromium 탭(0 = 없음). 바뀌면 `syncOsrKeyTarget` 이 포커스를 옮긴다.
+    osr_key_target: u64 = 0,
+    /// W4c: 트랜잭션 밖에서 조합이 비워졌다(unmarkText — Apple 의미는 「확정」). 곧 확정 글이 오면 그 글이 조합을 대신하고,
+    /// 안 오면 다음 tick 에 조합을 그대로 확정한다.
+    osr_unmark_pending: bool = false,
+    /// W4c: 입력기 트랜잭션(ime_begin~ime_end) 동안 — 대상 탭·쥐어 둔 키·쌓인 확정 글·시작 때 조합의 확정·일어난 일.
+    osr_ime_surface: u64 = 0,
+    osr_armed_key: ?web_ops.OsrKey = null,
+    osr_ime_typed: std.ArrayList(u8) = .empty,
+    osr_ime_commit: std.ArrayList(u8) = .empty,
+    osr_txn: web_ops.OsrTxnFlags = .{},
+    /// W4c: Zig 가 조합을 끝냈다(키 대상이 바뀜) — Swift 가 입력기 세션의 조합도 버리게(안 그러면 다음 자모가 남은 조합에
+    /// 이어져 새 대상에 글자가 겹친다 — 적대 검증).
+    osr_discard_marked: bool = false,
+    /// W4c: raw_down 을 보낸 키(keyCode 비트) — 입력기가 가져가 keydown 이 없던 키의 keyup 은 보내지 않는다.
+    osr_down_sent: u128 = 0,
     probe_frame_timing: bool = false,
     metal_dirty: bool = true,
     // [A: chrome 독립 present] 사이드바 스피너 등 "sync(2026) hold 중에도 갱신돼야 하는 chrome-only 변화" 플래그.
@@ -7969,6 +8010,8 @@ pub const AppSession = struct {
         // 헬퍼(`*AppSession` 을 받는다)를 부르지 않고 전역만 직접 세운다 — 이 호출이 읽는 것은 방금
         // 대입한 `loaded_config` 뿐이다.
         maru.i18n.applyPreference(self.loaded_config.config.ui_language);
+        // W4d: 브라우저 탭 엔진은 첫 창의 설정으로 프로세스에 한 번 정한다(재시작 후 적용 — 사용자 결정 2026-09-25).
+        if (!builtin.is_test) web_osr.decide(self.loaded_config.config.browser.engine == .chromium);
         if (builtin.is_test and live_app_sessions == 0) {
             // 이전 test의 process-global 값만 리셋한다. 같은 test에서 이미 열린 Window가 있으면 아래 production
             // resolver를 그대로 타므로 Window A toggle → Window B 첫 Term remote 배선을 실제 통합 검증할 수 있다.
@@ -8209,6 +8252,8 @@ pub const AppSession = struct {
             .terminal_tab => |drag| drag.pane,
             else => null,
         };
+        // Chromium 탭 제스처를 끊는다(뗌을 잃고 새로 눌렀다 등) — 페이지가 잡은 마우스 capture 를 놓게 한다(C5 모달 에지).
+        if (self.pointer_gesture_owner == .web_osr) web_ops.osrCaptureLost(self, self.pointer_gesture_owner.web_osr.surface_id);
         self.clearPointerGesture();
         if (tab_drag_pane) |pane| term_ops.ensureActiveTermVisible(self, pane);
     }
@@ -14094,7 +14139,7 @@ pub const AppSession = struct {
     /// **먼저** 와야 하고(아래 본문 주석), 아홉 개 제스처가 모두 같은 모양(`pointerGestureIs(...) and
     /// (kind == 2 or kind == 3)`)으로 늘어서 있어 한 덩어리로 읽고 한 덩어리로 옮겨야 한다.
     /// down(1)은 여기서 처리하지 않고 호출자의 일반 라우팅으로 흘려 새 제스처를 시작하게 둔다.
-    fn routeActivePointerGesture(self: *AppSession, kind: i32, x_px: f64, y_px: f64, cmd_held: bool) bool {
+    fn routeActivePointerGesture(self: *AppSession, kind: i32, x_px: f64, y_px: f64, cmd_held: bool, mods: i32, button: i32) bool {
         // ── 진행 중인 포인터 제스처 라우팅(오버레이보다 먼저) ─────────────────────────────
         // **살아 있는 제스처는 어떤 오버레이보다 먼저 자기 이벤트(move·up)를 받는다.** 오버레이 블록이
         // 앞에 있으면 드래그 도중 비동기로 뜬 것(알림 토스트·패널)이 up을 삼켜 제스처가 영영 끝나지
@@ -14110,6 +14155,8 @@ pub const AppSession = struct {
         // 박힌 채 손을 뗀 사용자는 되돌릴 방법이 없다. down(1)은 여기서 안 잡는다(아래로 흘려 pane
         // 라우팅이 막대 뒤·포커스 앞 순서로 처리한다).
         if (kind == 2 or kind == 3) {
+            // Chromium 탭 본문에서 시작한 누름(W4b) — 끌기·뗌은 본문 밖이어도 그 탭이 받는다.
+            if (web_ops.osrGesture(self, kind, x_px, y_px, mods, button)) return true;
             if (editor_ops.dragBodySelection(self, @intCast(kind), x_px, y_px)) return true;
             if (editor_ops.dragDiffBodySelection(self, @intCast(kind), x_px, y_px)) return true;
         }
@@ -14350,7 +14397,7 @@ pub const AppSession = struct {
         // 터미널 마우스 리포트로 갈 때는 아래 report_mouse 경로에서 32비트를 마스킹해 뺀다(command=32이 input_report.zig
         // reportMouse의 SGR motion 비트 32와 충돌 — cb=button+mods+motion이라 섞이면 리포트가 오염된다). shift/option 게이트는 불변.
         const cmd_held = (mods & 32) != 0;
-        if (self.routeActivePointerGesture(kind, x_px, y_px, cmd_held)) return;
+        if (self.routeActivePointerGesture(kind, x_px, y_px, cmd_held, mods, button)) return;
         // 닫기 확인 모달이 열려 있으면 마우스는 **버튼 클릭만** 처리하고 나머지는 삼킨다 — 파괴적 게이트라 뒤
         // 터미널/사이드바/탭 ✕로 클릭이 새면 또 다른 닫기를 띄우거나 엉뚱한 조작이 된다. down(kind 1)이면
         // confirm.buttonAtPoint로 hit-test(view와 같은 buttonGeom 단일 레이아웃): 확인 버튼=confirmed, 취소 버튼·
@@ -14509,6 +14556,10 @@ pub const AppSession = struct {
         // 아래 pane 라우팅으로 그대로 흘러간다 — 옆을 눌렀는데 캐럿이 안 옮겨지면, 상자를 없애려고
         // 두 번 눌러야 한다.
         if (kind == 1 and button == 0 and editor_ops.sendHelperClick(self, x_px, y_px)) return;
+        // **Chromium(OSR) 탭 본문**(W4b — C5). 모달·오버레이 게이트를 모두 지난 자리라 여기 온 누름은 본문 것이다. divider
+        // 잡는 띠는 hit 에서 빠져 아래 divider 라우팅으로 흐른다. 왼쪽 누름은 그 탭을 활성으로(WKWebView 의
+        // `webPanelPrimaryDown` 과 같은 길), 누름은 제스처 주인이 되어 끌기·뗌을 받는다.
+        if (web_ops.osrMouseDown(self, kind, x_px, y_px, button, mods)) return;
         // SessionDock has no platform row arithmetic. While its capture is live, drag/up stays
         // with the same published component tree even if the pointer leaves the dock; an up over
         // a terminal must not begin a terminal selection or leak a PTY mouse event. A bare up in
@@ -15638,6 +15689,8 @@ pub const AppSession = struct {
             _ = self.commitTerminalComposition();
             return;
         }
+        // W4c: 키 대상이 Chromium 탭이면 그 탭의 조합을 그대로 확정한다.
+        if (web_ops.osrCommitComposition(self)) return;
         switch (self.inputFocus()) {
             .confirm, .notice, .file_tree, .dock_pending => {}, // 구조 input owner는 확정할 조합이 없다.
             .settings => if (self.chrome_host.settings.commitSearchPreedit()) {
@@ -17636,6 +17689,9 @@ pub const AppSession = struct {
         if (!self.surface_initialized) return .text;
         // 호버 박스의 포인터 추적(tooling §8.2b) — 정지 시간은 tick 이 잰다. 열려 있으면 sticky 판정(낱말·상자 밖이면 닫힘).
         editor_ops.hover_client.notePointer(self, x_px, y_px);
+        // W4b: Chromium(OSR) 탭 본문 위면 이동을 그 탭에 보내고 페이지 커서를 쓴다. 오버레이가 열렸거나 본문 밖이면 hover 하던
+        // 탭에 leave 를 보내고(null) 아래 일반 hover 로 흐른다.
+        if (web_ops.osrHover(self, x_px, y_px, mods)) |kind| return kind;
         // 닫기 확인 모달 중엔 호버 부수효과(사이드바/탭/◧ 호버 강조·스크롤바 hover·URL 밑줄)를 멈추고 화살표 커서만
         // 둔다 — 안 그러면 모달 뒤 버튼/슬롯이 호버에 반응해 강조되며(모달 위로 비침) UI가 깨져 보인다(모달 게이트).
         if (self.chrome_host.confirm.open) return .default;
@@ -20201,6 +20257,7 @@ pub const AppSession = struct {
         // 마크는 아래 각 단계 경계에서 세팅한다(ft_on 아니면 clock read 자체를 안 함 = release 비용 0).
         self.settleDeferredPointerInput();
         workspace_ops.advancePendingWindowClose(self);
+        web_ops.tickWebOsr(self); // W3b: Chromium sidecar 파이프·주소창 상태·안내(개발용 환경변수가 없으면 즉시 돌아온다)
         // 갤러리 스캔 워커의 완료본을 수확한다(계약 §4.1.1). **여기가 유일한 수확 지점이라**,
         // 안 부르면 워커가 1.68 GB 를 다 훑고도 화면이 영영 안 바뀐다. 결과가 없으면 즉시 돌아온다.
         agent_activity_ops.poll(self);
@@ -23672,6 +23729,9 @@ pub const AppSession = struct {
         self.web_surface_transitions.deinit(self.allocator); // Phase 4e-3: web surface 전이 batch
         self.web_cur_scratch.deinit(self.allocator); // Phase 4e: web surface 수집 영속 scratch(swap 후 옛 prev 버퍼 보유)
         self.web_leaf_rects_scratch.deinit(self.allocator); // Phase 4e: web leaf-rect 영속 scratch
+        self.osr_layouts.deinit(self.allocator); // W3c: OSR 본문 rect
+        self.osr_ime_typed.deinit(self.allocator); // W4c: OSR 입력기 트랜잭션 글
+        self.osr_ime_commit.deinit(self.allocator);
         self.pane_target_rects_scratch.deinit(self.allocator); // paneTargetAt(입력 hot path) 영속 scratch
         // Phase 7e-1a: browser 웹 패널 nav 상태 — 각 엔트리의 소유 url을 free한 뒤 맵을 해제한다(prune이 살아 있는
         // 동안 stale을 지우므로 여기 남은 건 세션 종료 시점의 활성 nav 상태들뿐).

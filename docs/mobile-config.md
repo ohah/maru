@@ -192,6 +192,7 @@
 | `cursor.unfocused` | 창이 하나라 "포커스 잃은 창" 이 없다 |
 | `font.ligatures` | 글자를 **칸 단위로** 굽고 그린다. 합자는 셰이핑이 필요한데 그 경로가 없고, 있어도 격자와 어긋난다 |
 | `scroll.multiplier` | 마우스 휠 축이다. 터치 스크롤의 느낌은 관성이 정하고 그건 host 몫이다([플랫폼 §3.1](mobile-platform.md)) |
+| `browser.engine` | **Chromium 사이드카(CEF) 는 데스크톱 전용이다.** 폰에서 웹 탭이 쓰는 엔진은 OS 가 정한다(iOS 는 WebKit 만 허용한다) — 고를 것이 없다([OSR 계획](plans/web-osr-backend.md)) |
 | `chrome.theme` | 색 축은 `theme` 계열 하나로 둔다. 두 이름이 같은 것을 정하면 어느 쪽이 이기는지 사용자가 모른다 |
 
 ### 4.5 기본값이 데스크톱과 다른 것

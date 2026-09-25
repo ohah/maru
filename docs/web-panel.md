@@ -143,7 +143,7 @@ z-order상 모달(최상위)을 제외한 모든 터미널 마우스 인터랙�
 - **`maru-app://` 스킴**(이름 문법·등록 가능성 근거는 §9): 엄격 CSP 응답 헤더로 외부 네트워크·`<base>`·form-action exfil을 차단하고, frame은 번들 renderer origin `maru-app://render` 하나만 허용한다. FP10의 문자열 단일 출처는 Zig의 host-role별 `app_csp_header`/`render_csp_header`다. app role만 exact `live-preview-worker.js`를 `worker-src 'self'`로 허용·서빙하고 render role은 `worker-src 'none'`이며 worker asset 요청도 거부한다(§7.1 ③). 스킴 핸들러는 `..`·비허용 문자를 먼저 거부하고 flat bundle allowlist만 root-relative `follow_symlinks=false`로 연다. Zig가 open fd를 `fstat`해 정규 파일·worker hardlink alias·4 MiB cap을 확인하고 **같은 fd**에서 응답 bytes를 읽으므로 검증 뒤 Swift pathname 재-open은 없다. FP10b부터 물리 queued+running job은 취소를 포함해 completion까지 앱 전역 32 slot을 점유하는 serial asset queue에서만 수행하고, AppSession과 분리된 Zig I/O instance를 쓴다. MainActor는 admission과 `WKURLSchemeTask` 응답/취소만 처리해 frame tick FS I/O를 0으로 유지한다.
 - **브리지 origin 격리(sanitizer 단독 의존 금지, FP4 실구현, renderer capability 승격)**: 브리지는 신뢰 viewer shell `maru-app://app` main frame에만 붙이고, md-derived 문서는 `sandbox="allow-scripts allow-same-origin"`인 `maru-app://render/render.html` iframe에서 처리한다. 읽기 모드의 document iframe뿐 아니라 라이브 프리뷰의 CM6 widget도 이 bridge-free renderer iframe이어야 하며 Markdown 파생 HTML/SVG를 shell DOM에 삽입하지 않는다. app/render의 host가 달라 서로 same-origin이 아니며 renderer page world에는 user script/message handler를 주입하지 않는다. shell은 load마다 비재사용 `renderer_instance`와 새 `MessageChannel`을 발급하고 FP11a 현재 공용 alias `RendererCapability { editor_epoch, document_revision, projection_generation, widget_id, widget_generation, renderer_instance }`가 맞는 port message만 수용한다. navigation/detach/crash/mode 전환은 port와 registry를 먼저 revoke한다. renderer page world는 asset/link action을 보낼 수 없고 trusted `AssetGrant` prefetch와 isolated-world trusted-click handler만 그 효과를 낸다. 모든 renderer navigation은 종류와 무관하게 취소하며 `anchor.click()`·synthetic event·redirect·직접 navigation은 action 0이다. actual WKWebView smoke가 document와 fragment renderer 모두 `window.maru`/`window.webkit.messageHandlers.maru`가 `undefined`, `parent.document` 접근 실패, 외부 요청 0, 물리 click/keyboard trusted activation만 action 1임을 단언한다. `allow-same-origin`은 custom-scheme ESM+SRI 실행에 필요하지만 host 분리와 이 런타임 gate 없이는 허용하지 않는다.
 - **브리지 호출부 프레임 검증**: 메시지 핸들러 등록은 world-scope(frame 무관)라, 핸들러 진입에서 `frameInfo.isMainFrame` + `securityOrigin`이 **scheme=`maru-app`, host=`app`, 명시 port 없음**과 일치하는지 검사한다. 같은 Zig `appOriginAllowed` 정책을 scheme handler(assets=app|render)·navigation(main=app/subframe=render)·bridge(main=app)가 역할별로 소비한다. `browser` config에는 scheme/message handler를 등록하지 않고 `maru-app://` 네비게이션을 차단한다.
-- **untrusted 패널 격리**: `browser` 패널은 신뢰 콘텐츠와 데이터스토어를 분리한다 — **실구현(7e-0·2026-07-17 정정)**: browser 탭들은 **공유 ephemeral `browserDataStore`**(탭 간 공유 = 로그인 연속성·팝업 OAuth 근거, §7e-0)이고 신뢰 persistent store와 격리된다. 초판의 "별도 WKProcessPool + per-surface ephemeral"은 stale — WKProcessPool은 최신 WebKit 자동 관리(deprecated)라 명시하지 않고, per-surface 격리는 안 하기로 결정됐다([control-plane-browser.md] §9 동일 정정). 파일 도크의 로컬 html은 FP5에서 별도 ephemeral `filePanelDataStore`로 구현됐고 browser credential을 공유하지 않는다([file-panel-kinds.md](file-panel-kinds.md) §2).
+- **untrusted 패널 격리**: `browser` 패널은 신뢰 콘텐츠와 데이터스토어를 분리한다 — **실구현(7e-0·2026-07-17 정정, W3a 2026-09-24)**: browser 탭들은 **공유 `browserDataStore`**(탭 간 공유 = 로그인 연속성·팝업 OAuth 근거, §7e-0)이고 신뢰 persistent store와 격리된다. **D6(로그인 유지, [구현 계획](plans/web-osr-backend.md))**: macOS 14+ 는 격리된 **영속** 저장소(`WKWebsiteDataStore(forIdentifier:)` — 재시작 뒤 로그인이 남는다), 11~13 은 그 API 가 없어 지금처럼 ephemeral 이다(`.default()` 는 신뢰 저장소와 같아 쓰지 않는다). 저장소 디렉터리(`~/Library/WebKit/<번들 ID>/WebsiteDataStore/<uuid>`)는 WebKit 보다 먼저 0700·Time Machine 백업 제외로 만든다 — 쿠키 파일(`Cookies.binarycookies`)이 평문이라서다(CEF 프로필과 같은 규칙). control-plane `browser_storage` grant 는 허용한 호스트와 그 하위 도메인에 묶인다([control-plane-browser-review](control-plane-browser-review.md) D4). 초판의 "별도 WKProcessPool + per-surface ephemeral"은 stale — WKProcessPool은 최신 WebKit 자동 관리(deprecated)라 명시하지 않고, per-surface 격리는 안 하기로 결정됐다([control-plane-browser.md] §9 동일 정정). 파일 도크의 로컬 html은 FP5에서 별도 ephemeral `filePanelDataStore`로 구현됐고 browser credential을 공유하지 않는다([file-panel-kinds.md](file-panel-kinds.md) §2).
 - **링크 라우팅**: browser/HTML 패널은 기존 `decidePolicyForNavigationAction` 정책을 쓴다. Markdown renderer는 모든 navigation을 취소하고, render-origin subframe에 document-start로 설치한 isolated-world capture listener가 `event.isTrusted`를 확인해 current `renderer_instance`에 묶은 one-shot link action만 Zig의 존재검증·스킴 화이트리스트로 전달한다. page-world `link-activate`, `.linkActivated` 단독 권한, 합성 click/redirect는 허용하지 않는다.
 - **Mermaid 실행 격리(FP10)**: `WKProcessPool`은 macOS 12+에서 여러 인스턴스의 격리 효과가 없으므로 Mermaid timeout 경계로 쓰지 않는다. 앱은 번들된 별도 `maru-mermaid-renderer` helper process와 bounded stdin/stdout frame으로만 통신하고, helper 내부 WKWebView에는 앱 bridge/message handler·파일 경로·asset grant를 제공하지 않는다. parent의 Zig coordinator가 고르는 cold 5초/warm 2초 response deadline은 job capability revoke와 helper terminate/restart를 보장하지만 WebKit service CPU의 정확한 종료 시각은 보장한다고 주장하지 않는다. helper의 protocol·queue·서명·검증 계약은 [file-panel-dock-ui.md] §3과 [macos-app-host-boundary.md]를 따른다.
 
@@ -195,9 +195,295 @@ Phase 5 세 번째 슬라이스(신뢰 UI 경로)는 `maru-app://`를 안정적 
 - 이식: WebView2(별도 HWND)·Wayland에서 모달 오버레이 합성 모델이 macOS와 달라 재결정 필요.
 - async resize jitter(§3).
 
-## 13. 미래: CEF native webview-backend plugin (이번 범위 밖)
+## 13. Chromium 백엔드 (OSR sidecar — 실측 2026-09-23, 선택형 백엔드로 도입 결정 D2)
 
-WKWebView(WebKit)는 시스템 프레임워크라 의존성이 없지만 Chromium 호환·CDP 생태계 검증이 제약된다. 미래에 CEF를 대안 백엔드로 둘 수 있으나, 기본 maru는 WKWebView만 써 의존성 0을 유지한다.
+WKWebView(WebKit)는 시스템 프레임워크라 의존성이 없지만 Chromium 호환·CDP 생태계 검증이 제약된다. Chromium은 **선택형 백엔드**로 둔다(사용자 결정 2026-09-24 — [구현 계획](plans/web-osr-backend.md) D2) — 기본은 WKWebView이고, 기본 앱은 CEF를 링크하지 않는다([프로젝트 규칙](project-rules.md) 「의존성」 예외 ③ — sidecar 전용·opt-in 빌드).
+
+> **이 절은 두 층으로 읽는다.** §13.1 은 **OSR(off-screen rendering) + sidecar** 축이고 PoC 로 실측한 것이다. §13.2 이후(옛 서술)는 **on-screen CEF**(child NSWindow / 앱에 링크하는 plugin ABI)를 전제로 쓰였고, 그 전제에서만 유효한 제약이 섞여 있다. **둘을 섞어 읽으면 막힌 길로 읽힌다** — §13.1 이 뒤집은 것을 그 절이 명시한다. 엔진 중립 계약(`browser.*` wire·불투명 `ref`·host-mediated MCP 분기)은 두 축 모두에서 그대로다.
+
+### 13.1 OSR + sidecar — PoC 실측
+
+> **구현 계획은 [웹 OSR 백엔드 구현 계획](plans/web-osr-backend.md)이 소유한다**(결정·계약·단계 W1~W8·검증). 이 절은 그 계획의 근거인 실측 기록이다.
+
+**동기 — 「빚 갚기」가 아니다(2026-09-23 정정).** 이 절의 초안은 §4 firstResponder 전쟁·§5 chrome 가로채기·§3 divider seam 을 「갚아야 할 빚」으로 앞세웠다. **그 전제는 실측으로 흔들렸다** — 최근 커밋 200 개에서 web-panel·firstResponder·포커스·seam 관련 수정이 **0 건**이다. 4g-0~4g-4 가 흩어진 패치를 통합한 뒤 그 축은 **수렴했다**. 빚이 계속 쌓인다는 관찰은 사실이 아니므로 그것을 근거로 삼지 않는다.
+
+**실제 동기는 하나다: Chromium 을 pane «안에» 넣는 길.** WKWebView 는 OSR 을 제공하지 않고(SDK 전수 검색 — §13.1 「분업」), windowed CEF 는 child NSWindow 라 모달을 가리고 좌표·space 추종이 따라붙는다(§13.2, suji 17-A→17-B 후퇴). **픽셀로 받는 것 말고 길이 없다.** 그래서 판단 질문은 「빚을 갚을까」가 아니라 **「Chromium 인앱 surface 가 필요한가」**이고, 필요 없다면 지금 WKWebView 가 맞다(의존성 0·IME·접근성이 공짜다).
+
+경계 문제가 **덤으로** 사라지는 것은 사실이다 — NSView 가 없으면 responder chain 에 참가하지 않고, 마우스가 우리 Metal 뷰에 **먼저** 오므로 「통과시킨다」는 개념 자체가 없다. 다만 그것은 이 축의 **근거가 아니라 부수 효과**다.
+
+**핵심 구분 — 소속은 안 바뀐다.** 바뀌는 것은 **매체**다.
+
+| | 소속(논리) | 매체(물리) |
+|---|---|---|
+| 현행 | web Term = pane 트리 슬롯 | **WKWebView = NSView** |
+| (A) 기각 | 터미널 Term | kitty 이미지 |
+| **(B) 이 축** | web Term = pane 슬롯 **(그대로)** | **OSR 픽셀 = GPU quad** |
+
+(A)는 웹을 터미널 코어에 밀어넣어 스크롤백·터미널 선택·kitty 저장소 320MB 한도·세션호스트 투영을 타게 되므로 **하지 않는다**. (B)가 성립하는 근거는 구조가 이미 그렇게 돼 있다는 것이다 — `live_pty.zig` 의 `LiveSurface` 는 `.terminal`/`.web`/`.editor` union 이고 **web arm 은 PTY 도 reader 도 없다**. OSR 로 바꿔도 이 관계는 한 줄도 안 바뀐다.
+
+> **함정**: 같은 자리 주석이 *"arm 태그로 `Term.kind` 를 파생하지 말 것"* 이라고 경고한다(§7 종료 묘비가 `.web` arm 을 쓰면서 `kind` 는 `.terminal`). OSR 분기를 arm 으로 가르면 묘비가 웹으로 샌다.
+
+**kitty 프로토콜은 경유하지 않는다.** kitty graphics 는 PTY 라는 바이트 파이프를 건너기 위한 인코딩(base64·청킹·image_id 수명)이다. 내부 웹뷰는 같은 프로세스 안이라 그 세금을 낼 이유가 없다. 쓰는 것은 프로토콜이 아니라 **도착지** — `metal_frame.zig` 의 `GpuImage` / `image_backdrop`(layer 5) 경로다. 실측 근거: 터미널 브라우저(kitty 로 웹을 그리는 TUI)를 손님으로 받았을 때 프레임당 5.6MB·초당 25~40MB 가 코어→렌더를 지났고([io-render-present.md] §10.6), 그 비용을 깎느라 수정 넷을 넣었다. OSR 경로에서는 **PTY·base64·코어→렌더 업로드가 0** 이 된다. **복사가 0 인 것은 아니다** — CEF 계약상 프레임을 콜백 안에서 우리 소유 버퍼로 한 번 옮겨야 한다(아래 「버퍼 소유권」). 제품 경로는 프레임당 GPU blit 1 회다.
+
+#### PoC 결과 (`scratchpad/cef-osr-poc`, CEF 146 / Chromium 146)
+
+> **최신 안정판 재확인(2026-09-23)**: 아래 수치는 suji 가 받아 둔 146 으로 쟀다. 제품은 최신 안정판(154.0.23 / Chromium 154)으로 가므로 같은 PoC 를 154 minimal 배포본(sha1 검증)으로 다시 빌드해 창 없는 실행·IOSurface 가속 paint·입력 주입·`<select>`(⑧)를 재확인했다. API 버전은 `15400` 이다. **⑧ 은 154 에서 결과가 달랐다**(아래 「남은 미해결」 8). OSR 관련 헤더(렌더·접근성 핸들러, macOS 타입)는 146 과 차이가 없고 브라우저 헤더는 문장부호 한 곳만 다르다 — 이 절이 인용한 헤더 계약은 154 에서도 그대로다. 154 는 프레임워크의 `libEGL`·`libGLESv2` 가 빠지고 `libvulkan` 이 들어와 146 PoC 의 라이브러리 링크 목록은 그대로 못 쓴다. 아래 수치 표는 146 값이고, **154 로 다시 잰 값**은 다음과 같다(모두 같은 결론):
+
+> | 측정 | CEF 146 | **CEF 154** |
+> |---|---|---|
+> | CEF 가 그리는 빈도(`windowless_frame_rate=60`) | 62.8 fps | **62.7 fps** |
+> | **maru pane 에 보이는 빈도** | — | **초당 2~8 회** → seed 확인 훅으로 **~53 회**(아래 「남은 미해결」 10) |
+> | surface / 포맷 | 1280x720 stride 5120, BGRA | **같음** |
+> | 버퍼 풀 | 고유 IOSurface 16+ | **16** |
+> | damage | 변경 영역만 | **변경 영역만**(10x10·54x89 …, 첫 프레임만 전체) |
+> | ad-hoc 서명으로 렌더러까지 | 동작 | **동작**(`Signature=adhoc`, `TeamIdentifier=not set`) |
+> | 입력 주입(클릭 ×3·포커스·타이핑·휠) | 화면 반영 | **화면 반영**(「3번 클릭됨」·「Hello CEF」 9 자·스크롤) |
+> | 같은 캐시 경로 두 번째 인스턴스 | exit 21/24 | **exit 24**(「Opening in existing browser session」) |
+> | 기본 `<select>` | 안 열림 | **열림**(⑧) |
+> | pane 안 입력 계약(아래) | 11 시나리오 통과 | **23 항목 통과** — IME·hover 커서 포함(시나리오 하나가 여러 항목을 잰다). select 2 항목을 더해 **25 항목** |
+
+![CEF OSR 이 IOSurface 로 건너온 프레임 — 창 없이 1280x720, BGRA, ad-hoc 서명](images/web-panel-osr-iosurface.png)
+
+위 그림은 **창 없이** `on_accelerated_paint` 로 건너온 IOSurface 의 픽셀을 그대로 꺼낸 것이다(보여주려고 `IOSurfaceLock` → PPM 덤프했다. 이 덤프용 복사는 표시 경로에 없다 — 표시 경로에 남는 복사 1 회는 아래 「버퍼 소유권」). 그라디언트 텍스트·둥근 카드·그림자·**한글 폰트 폴백**까지 Chromium 합성 품질이 그대로다.
+
+| 측정 | 값 |
+|---|---|
+| 프레임률 | **62.8 fps** (`windowless_frame_rate=60` 설정대로) |
+| surface | **1280x720, stride 5120** (`get_view_rect` 가 준 크기, 패딩 없음) |
+| 포맷 | `format=1` = **BGRA** — Metal 텍스처로 바로 감쌀 수 있다 |
+| damage | 전체가 아니라 **실제 변경 영역만**(324x324·440x440 …) |
+| 버퍼 | 프레임마다 다른 IOSurface(고유 16+ 관측) — CEF **내부 풀**이다. 이것이 안전의 근거는 **아니다**(아래 「버퍼 소유권」) |
+| 서명 | **`Signature=adhoc`, `TeamIdentifier=not set`** 로 렌더러까지 전부 동작 |
+
+**가정 ⑴ 은 참, ⑵ 는 절반만 참이었다**: ⑴ ad-hoc + non-hardened 로 CEF 가 (렌더러 포함) 돈다. ⑵ `on_accelerated_paint` 가 IOSurface 를 주는 것은 맞지만, 「멀티버퍼라 동기화 문제가 없다」는 **틀렸다** — 그 버퍼들은 CEF 풀 소유라 콜백 밖에서 잡고 있으면 계약 위반이다(적대적 검증이 잡았다, 아래).
+
+#### PoC 가 넘은 함정 여섯 (구현에서 똑같이 만난다)
+
+| # | 증상 | 원인·해법 |
+|---|---|---|
+| 1 | `uchar.h not found` | Zig translate-c 가 `__has_include(<uchar.h>)` 를 참으로 보고 파일은 못 찾는다 → `char16_t`/`char32_t` 만 담은 shim 헤더를 include path 앞에 둔다 |
+| 2 | `CefClient_0_CToCpp called with invalid version -1` | **`cef_api_hash(CEF_API_VERSION, 0)` 을 다른 어떤 CEF 함수보다 먼저** 부른다(`cef_api_hash.h`: 첫 호출 이후 값 변경은 무시). `999999`(실험)가 아니라 그 빌드의 정식 버전(146 → `14600`)으로 고정한다 |
+| 3 | `... is not an absolute path. Defaulting to empty` | CEF 는 `framework_dir_path`·`main_bundle_path`·`browser_subprocess_path` 가 모두 **절대경로**여야 받는다 |
+| 4 | **렌더러만 조용히 안 뜬다** | `resources_dir_path`·`locales_dir_path` 미설정. gpu·network·storage helper 는 뜨는데 renderer 만 안 떠서 `ERR_ABORTED` 로 보인다 — **가장 오래 헤맨 자리** |
+| 5 | `install_name_tool: larger updated load commands do not fit` | 빌드에 `headerpad_max_install_names = true` 가 필요하다(suji `build.zig` 가 같은 이유로 같은 일을 한다) |
+| 6 | `.app` 번들에서 렌더러가 안 뜸 | `browser_subprocess_path` 를 **자기 자신**으로 둔 비-번들 구조에서는 즉시 떴다. 번들 layout 은 쓰지 않기로 했다(아래 「남은 미해결」 1 — 번들 없는 배치) |
+
+#### 버퍼 소유권 — 콜백 안에서 복사한다 (적대적 검증으로 정정, 2026-09-23)
+
+**CEF 계약**(`cef_render_handler_capi.h`): `on_accelerated_paint` 의 surface 는 **CEF 풀 소유**이고 콜백 밖에서 접근하면 안 된다 — 클라이언트 소유 텍스처로 복사하라고 적혀 있다. PoC 초판은 받은 surface 를 캐시해 두고 maru 가 나중에 샘플링했다. 화면은 나왔지만 **계약 위반**이었고, 풀이 그 버퍼를 다음 프레임에 재사용하면 읽는 도중 덮인다. 「프레임마다 다른 IOSurface 가 온다」는 관측은 그 위험을 가리지 못한다 — 풀 크기는 CEF 사정이고 우리가 쥔 동안 돌아오지 않는다는 보장이 없다.
+
+| | 옛 서술 | 정정 |
+|---|---|---|
+| 복사 | 0 | PTY·인코딩·CPU 업로드는 0. **콜백 안 복사 1 회/프레임**은 남는다(PoC 는 CPU `memcpy`, 제품은 GPU blit). **PoC 는 지금 2 회다** — ⑧ 팝업 합성 때문에 바뀐 영역을 본 화면 사본에도 한 번 더 복사한다(7 차 적대적 검증). 합성을 maru 렌더러로 옮기면 1 회로 돌아간다 |
+| tearing 안전의 근거 | 멀티버퍼 | **콜백 안에서 복사한다는 것** + 우리 버퍼의 생산·소비 순서 규약 |
+| 프로세스 경계 | IOSurface global id | **`IOSurfaceLookup(global id)` 는 다른 프로세스에서 NULL**(실측). `IOSurfaceCreateMachPort` → mach port 로 넘겨 `IOSurfaceLookupFromMachPort` 해야 건너간다(실측, PoC 는 `bootstrap_register`/`bootstrap_look_up`) |
+
+**제품 설계(미구현 — 확정 계약은 [구현 계획](plans/web-osr-backend.md) C3)**: sidecar 가 **자기 소유 IOSurface 링**(3 슬롯)을 만들어 **링을 새로 만들 때마다(세대마다 — 첫 그리기·크기 변경)** mach port 로 넘기고, 이후 프레임은 공유 메모리의 mailbox 원자 워드로만 주고받는다(아래 옛 서술의 「반납」 메시지 대신). maru 는 그 슬롯을 샘플링한 GPU 작업이 끝나면 **반납**을 알리고, sidecar 는 반납된 슬롯에만 쓴다. PoC 는 소유 surface **하나**에 콜백 안에서 복사할 뿐이라 계약 위반은 고쳤지만 **tearing 은 여전히 가능하다**(maru 가 읽는 중에 다음 프레임이 쓸 수 있다). **port 를 넘기는 길 — PoC 방식은 보안 구멍이다(2 차 적대적 검증).** PoC 는 sidecar 가 bootstrap 에 이름을 등록하고 maru 가 그 이름으로 찾는다. 그러면 **이름만 알면 같은 사용자의 아무 프로세스나** 브라우저 픽셀을 읽는다 — 화면 기록 권한(TCC) 없이. 실측: 이 절의 독립 검증기(`verify.c`)가 maru 와 무관한 프로세스로 정확히 그렇게 읽었다. 또 **IOSurface port 를 등록하면 등록한 프로세스가 죽어도 이름과 surface 가 남는다** — 그 port 의 receive right 는 프로세스가 아니라 커널(IOSurface 객체)이 쥐기 때문이다(대조 실측: 프로세스가 receive right 를 쥔 일반 port 는 등록자와 함께 사라진다). 그래서 제3자가 **죽은 sidecar 의 마지막 픽셀**을 계속 받고, 그 IOSurface 메모리도 풀리지 않는다. 같은 이름의 재등록은 `1100`(Permission denied)으로 실패한다 — PoC 는 그 반환값을 로그에 안 찍어 조용해 보였고, 이 때문에 ⑧ 조사의 초기 덤프 판정이 전부 무효였다. 그렇다고 「spawn 때 상속한 socketpair 로 넘긴다」(이 절 초안)도 **안 된다** — Unix 소켓(`SCM_RIGHTS`)은 fd 만 나르고 mach port 는 못 나른다. 제품은 **방향을 뒤집는다**: maru 가 받는 쪽 port 를 열고, 들어온 mach 메시지의 audit token(보낸 pid)이 **자기가 spawn 한 sidecar** 인지 확인한 뒤에만 IOSurface port 를 받는다. **실측(사전 확인 2026-09-23)**: 부모(maru 역할)가 받는 port 를 무작위 이름으로 등록하고 자식(sidecar 역할)을 spawn 하자, 자식이 보낸 IOSurface 는 audit token 의 pid 가 자식과 같아 **수락**됐고, 이름을 알아낸 **제3자 프로세스가 보낸 가짜 surface 는 거부**됐다. 픽셀은 자식 → 부모로만 흐르므로 이름이 새도 제3자는 부모 port 에 보낼 수만 있고 sidecar 의 픽셀은 읽지 못한다. 보강할 점: pid 만 비교하면 pid 재사용 경합이 이론상 남으므로 제품에서는 audit token 의 pid 버전까지 비교한다.
+
+#### 입력 주입 — 실측 (PoC, 2026-09-23)
+
+「우리 → CEF」 방향도 PoC 로 확인했다. 버튼·입력창·긴 스크롤이 있는 페이지를 띄우고 주입한 뒤 **렌더된 프레임을 덤프해 눈으로 판정**했다.
+
+![입력 주입 실측 — 클릭 3 회로 카운터 3, 입력창 포커스 링, 타이핑 "Hello CEF"](images/web-panel-osr-input.png)
+
+| 주입 | 호출 | 프레임에서 확인된 것 |
+|---|---|---|
+| 클릭 ×3 | `send_mouse_click_event(ev, MBT_LEFT, down/up, count)` | 버튼 라벨 「3번 클릭됨」, 카운터 **3** |
+| 포커스 | 입력창 좌표 클릭 | 분홍 **포커스 링 + box-shadow** 렌더 |
+| 타이핑 | `send_key_event` ×3 단(`RAWKEYDOWN`→`CHAR`→`KEYUP`) × 9 자 | 입력창 「Hello CEF」, 캐럿, JS 가 `value: "Hello CEF" (9자)` |
+| 휠 | `send_mouse_wheel_event(ev, 0, -400)` | 스크롤 이동(300px·600px 마커 상승, 스크롤바 위치 변화) |
+
+**CEF 만으로 전부 됐다 — CDP 를 섞을 필요가 없었다.** terminal-browser 가 Enter·붙여넣기를 CDP 로 우회한 것(`input.ts` 의 `Input.dispatchKeyEvent`)은 **Electron API 사정**이지 OSR 의 제약이 아니다.
+
+**실측이 추론 하나를 잡았다**: 첫 시도에서 클릭이 카운터 0 이었다. 좌표를 (140,196) 으로 찍었는데 버튼은 y=132~184 — 빗나갔고 **아무 일도 일어나지 않았다(오류도 로그도 없다)**. 렌더된 프레임에서 실제 위치를 읽어 (128,158) 로 고치니 즉시 동작했다. 좌표계 자체는 단순하다(**view 좌표 그대로**, `deviceScaleFactor=1` 기준 변환 불요) — 위험한 것은 변환이 아니라 **틀려도 조용하다는 것**이다.
+
+#### pane 안 실측 — 터미널 프로토콜 없이 직접 라우팅 (2026-09-23)
+
+위 「입력 주입」은 PoC 가 스스로 주입한 것이다. 이어서 **실제 maru pane 안에** 띄우고 사용자 입력을 넣었다(처음엔 CEF 146 으로 쟀고, **154 로 전부 다시 쟀다** — 아래 시험기 절). 실험 배선은 **제품 모양이 아니다** — 브라우저 픽셀을 pane 에 올리는 기하만 빌리려고 터미널 surface 에 kitty placement(1x1 더미, 로컬 id 7000~7999)를 두고, 렌더러가 그 id 의 텍스처를 sidecar IOSurface 로 바꿔 끼웠다(위 표의 (A) 모양을 **측정 장치로만** 썼다). 입력은 PTY 를 거치지 않는다 — Swift 가 NSEvent 를 그 이미지 rect 로 hit-test 해 sidecar 로 직접 보낸다.
+
+| 항목 | 결과 |
+|---|---|
+| pane 100% 채움(레티나 scale 2) | 동작. 픽셀은 PTY 를 한 바이트도 지나지 않는다 |
+| 클릭·더블클릭·스크롤·드래그 | 동작(`clickCount`·픽셀 delta 그대로) |
+| 키 | 동작. 특수키·수식자 chord 는 raw 키 이벤트, 글자는 `interpretKeyEvents` 경유 |
+| **한글 IME** | 동작 — `setMarkedText` → `ime_set_composition`, `insertText` → `ime_commit_text`. 조합 중 글자가 **웹 입력창 안에** 보인다(사용자 확인) |
+| hover 커서 | 동작 — `on_cursor_change` → `NSCursor`(손가락·I-beam) |
+| split 으로 함께 보이는 두 pane | 둘 다 그려진다(K2e 로 비활성 pane 이미지 렌더를 먼저 고쳤다 — [terminal-input-and-protocols.md](plans/terminal-input-and-protocols.md) K2e) |
+
+**호스트가 라우팅을 든다.** WKWebView 에서는 AppKit 의 first responder 가 「이 키·클릭은 웹 것」을 대신 갈라 줬다. pane 안에 네이티브 view 를 두지 않으면 **그 일을 우리가 한다** — 새 예외를 만드는 것이 아니라 WKWebView 가 이미 가진 계약(§3·§4.1)을 같은 자리에서 우리가 수행하는 것이다. **한 곳은 실험이 WKWebView 와 다르다**: `app_action` 을 WKWebView 는 performKeyEquivalent 에서 `dispatch_web_app_action`(웹 surface 가 지금 활성인지 다시 증명하는 `webAppActionSource` 포함)으로 실행하는데, 실험은 false 로 넘겨 메뉴·**터미널 경로**가 실행한다(OSR 이 터미널 surface 에 붙어 있어서 web dispatch 가 거절한다). 제품에서는 WKWebView 와 같은 dispatch 로 맞춘다. 실험에서 옮긴 것:
+
+| 계약 | OSR 에서의 형태 |
+|---|---|
+| 마우스 게이트 | 오버레이가 열리면 down 을 Zig 로 — **토스트 포함**(`anyOverlayOpen`, WKWebView `hitTest` 와 같은 집합). notice 는 자동으로 안 닫히고 「다음 입력이 닫는다」가 계약이라, 토스트를 빼면 웹을 누르는 동안 토스트가 영영 남는다 |
+| 제스처 주인(§3) | down 에서 한 번 정하고 drag·up 은 주인을 따른다(rect 밖에서도 클램프 없이). 웹 밖(탭 바 등)에서 시작한 드래그는 웹 위를 지나가도 가로채지 않는다. 새 primary down 은 옛 제스처를 취소한다(up 유실 대비 — Zig `mouse` 와 같은 규칙). 우클릭·가운데 클릭도 같은 규칙 |
+| 포커스 주인(§4.1) | Swift 가 「웹에 포커스」를 따로 들지 않는다. 웹 클릭은 Zig 에 pane 활성화를 요청하고, 키 대상은 **Zig 활성 pane** 이 답한다. 키 대상 표는 tick 의 kitty 수집이 이미 쥔 surface 락 안에서 적어 두고 질의는 락 없이 읽는다 |
+| 키 라우트 | `web_key_route`(같은 resolver) — `consume_unbound` 만 삼키고 pass-through 는 **메뉴에 먼저** 넘긴다. 메뉴 편집 액션(잘라내기·복사·붙여넣기·전체 선택)은 WKWebView 의 `firstResponderWebPanel()` 특례 자리에 OSR 갈래를 둔다. 메뉴가 안 받은 키만 CEF 로 |
+| 모달 에지 | 키 대상이 바뀌면(모달 열림·다른 pane) 옛 대상에 `send_capture_lost_event` + `ime_finish_composing_text` + `set_focus(0)`, 새 대상에 `set_focus(1)` |
+| 창 | hit-test rect 는 렌더러(창)마다, 세션도 그 view 의 창 것 |
+
+`terminalOwnsInput` 이 `find` 를 포함하는 것(`modalInputRole` 의 `routes_text`)도 그대로 따른다. 반대로 `fileContentMenuHoldsWebFocus` 예외는 **WKWebView 전용**이다 — WebKit 이 포커스 없는 문서의 선택을 안 그리는 것을 피하려는 것이고, 그 메뉴는 파일 패널(`.markdown`, 아래 「분업」에서 WKWebView 로 남는 쪽)에만 뜬다. OSR 대상(`.browser`)과 겹치지 않으므로 옮기지 않는다. blur 된 CEF 페이지가 선택을 어떻게 그리는지는 **재지 않았다**.
+
+**적대적 시험기로 확인한 것.** 이 셸은 **화면 기록 권한이 없어** 화면 캡처를 못 했다. 접근성·이벤트 합성 권한은 **있었다**(`AXIsProcessTrusted`·`CGPreflightPostEventAccess` 참 — 4 차 적대적 검증에서 확인. 초안의 「CGEvent 를 합성할 수 없다」는 시도하지 않은 추론이었다). CGEvent 대신 앱 안에서 NSEvent 를 만들어 `NSApp.sendEvent` 로 넣는 시험기를 택했다(AppKit 의 실제 경로 — 창 hitTest·performKeyEquivalent·메뉴·keyDown). 판정은 세 곳의 교차다: maru 가 보낸 것, CEF 가 받은 것, **페이지가 받은 DOM 이벤트**(페이지가 `document.title` 로 흘린 관측점).
+
+| 시나리오 | 결과 |
+|---|---|
+| 웹 클릭 → 그 pane 활성화, 입력 → 입력창 `"ab"` | 통과 |
+| ⌘A / ⌘C | 통과 — 입력창 선택 `0-2`, `copy` 도달 |
+| Ctrl+E | 통과 — 페이지가 `key=e ctrl=true` |
+| 우클릭 / 가운데 클릭 | 통과 — `contextmenu`·`auxclick` 도달, 터미널 메뉴 안 뜸 |
+| 웹에서 시작한 드래그가 pane 밖까지 | 통과 — 페이지가 pane 밖 좌표를 받는다 |
+| 키보드로 pane 전환 → 타이핑 | 통과 — 터미널로 가고 페이지는 `blur` |
+| 웹 밖(탭 바 자리)에서 시작한 드래그가 웹 위를 지나감 | 통과 — 웹으로 0 건. 그 드래그가 실제로 탭 끌기를 시작했는지는 판정하지 않았다 |
+| ⌘W 확인창 중 클릭·스크롤·타이핑 / Esc 뒤 | 통과 — 전부 Zig, 웹 0 건 / 포커스 복귀 |
+| 토스트 중 첫 클릭 / 둘째 클릭 | 통과 — 토스트만 닫힘 / 웹 도달 |
+| mouseUp 유실 뒤 새 클릭 | 통과 — 옛 제스처 취소 후 정상 |
+| 새 창에서 같은 좌표 클릭·타이핑 | 통과 — 적중 없음, 웹 0 건 |
+
+**시험기가 잡은 결함 셋**(실험 배선에서 고쳤다): ⑴ pass-through 를 performKeyEquivalent 에서 삼켜 **⌘N 같은 메뉴 전용 키가 죽었다** — WKWebView 처럼 false 로 메뉴에 넘겨야 한다. ⑵ **⌘A 가 터미널 전체 선택**으로 갔다 — 메뉴 `select_all` 특례에 OSR 갈래가 필요하다. ⑶ Ctrl chord 에 `character` 를 0 으로 실어 페이지가 **`Unidentified`** 를 받았다 — `character`(제어 문자)와 `unmodified_character`(원 글자)를 함께 실어야 한다.
+
+**함께 드러난 기존 문제(OSR 고유 아님, 코드로만 확인)**: 브라우저 웹은 편집 가능 문맥이 아니라(`webContextIsEditable` 은 파일 패널 편집기만 참) `resolveWeb` 이 ⌘Z 를 `editor_undo` 앱 액션으로 판정하고, 그 액션은 활성 Term 이 편집기일 때만 일한다 — 웹 입력창의 ⌘Z 가 먹힌다. WKWebView 브라우저도 같은 경로다(실기 미확인).
+
+**154 로 다시 잰 결과(2026-09-23)** — 위 11 시나리오(시나리오 하나가 여러 항목을 잰다)에 IME·hover 를 더한 **23 항목 전부 통과**했다. 팝업 합성을 넣은 뒤에는 maru 입력 경로로 `<select>` 를 열고 항목을 고르는 2 항목을 더해 다시 돌렸다(처음엔 25 항목 중 23 통과 — 둘은 다른 세션이 앱을 띄워 포커스를 가져간 간섭 탓이었다). **11 차 검증에서 시험 페이지의 오염을 발견했다** — 카운트 버튼에 ⑧ 조사용 `showPicker()` 가 남아 버튼을 누를 때마다 select 팝업이 열렸다. 그 코드를 빼고 깨끗한 페이지로 다시 돌려 **25 항목 전부 통과**(포커스 간섭 0, 팝업은 select 단계에서만 1 번)했으므로 앞선 판정은 오염의 영향을 받지 않았다. 새로 판정한 것:
+- **한글 IME** — 조합 중 글자가 `ㅇ → 아 → 안` 으로 **웹 입력창 안에** 보이고(`ime_set_composition`), space 로 확정되면 `compositionend "안 "` 이 온다. **조합 중 다른 pane 을 누르면 웹에 확정된다**(`compositionend "아"`) — 확정은 키 대상이 바뀔 때 보내는 `ime_finish_composing_text` 가 맡고, 마우스 경로의 `commitMarkedTextIfComposing` 은 터미널 preedit 가 비어 있어 PTY 로 새는 글자가 없다(코드 확인).
+- **hover 커서** — 입력창 위에서 I-beam(`CT_IBEAM`), 밖으로 나가면 mouse leave 와 기본 커서.
+- 한 번 실패로 보였던 「토스트 뒤 클릭」은 **시험 순서 탓**이었다 — 앞 단계의 스크롤로 버튼이 40px 올라가 빈 곳을 눌렀다(덤프로 확인). 스크롤을 원위치하는 단계를 넣자 통과했다.
+
+**시험기 한계와 방법**: 입력기(IMK)는 앱 안에서 만든 합성 NSEvent 를 **조합하지 않는다**(실측 — 입력 문맥의 입력기를 한국어로 바꿔도 `d`·`k`·`s` 가 그대로 들어갔다). IME 는 진짜 키 이벤트(`CGEvent`)를 **maru 프로세스에만**(`postToPid` — 다른 앱으로 새지 않는다) 보내고, 입력기는 시스템이 아니라 **그 view 의 입력 문맥에서만**(`inputContext.selectedKeyboardInputSource`) 바꿔 판정했다. AppKit 이 합성 이벤트를 view 로 보내지 않은 단계(up 없는 down 뒤의 새 down·mouseMoved·스크롤)는 view 메서드를 직접 불러 판정했다. `<select>` 팝업은 이 시험 뒤 합성을 넣어 pane 안에서도 보이게 됐다(⑧).
+
+#### terminal-browser 에서 가를 것 — 판별자 하나
+
+> **스냅샷(4 차 적대적 검증에서 고정)**: 아래 파일·함수 인용은 **`b16b857`(2026-09-08, #104 직전)** 기준이다. upstream `179d87e`「Terminal electron port (#104)」(2026-09-14)가 렌더·입력·`terminals/` 코드(약 4.3 만 줄)를 지우고 외부 패키지 `@zenbu-labs/pixel` 로 옮겨서, **지금 `references/terminal-browser` 클론(`ff8f170`)에는 `page/paint.ts`·`input.ts`·`offscreen.ts`·`terminals/` 가 없다.** 「키를 PTY 로 받아 스스로 디코드」 행만 #104 이후(`ff8f170`)를 읽었다.
+>
+> **clean-room**: 아래는 [references.md] 의 `terminal-browser` 를 **착상·계약 수준**에서 읽은 결과다. 코드 표현을 가져오지 않으며, 파일명은 판단 근거의 출처 표시다.
+
+**판별자**: 그 코드가 ⑴ **웹을 픽셀로 다루는 데 본질적**인가, ⑵ **터미널 「밖」에 있어서 낸 세금**인가. maru 는 터미널이므로 ⑵ 를 따라 내면 손해다.
+
+**따라할 것 (⑴ — 본질적)**
+
+| 착상 | 출처 | 왜 우리도 필요한가 |
+|---|---|---|
+| **OSR 3 단 폴백** | `page/offscreen.ts`·`paint.ts` (`presentTexture`→`presentShmFrame`→`presentBitmap`) | GPU 경로가 실패해도 그림이 나와야 한다. 우리도 `on_accelerated_paint` 가 안 오면 `on_paint`(CPU) 로 떨어지는 길이 필요하다 |
+| **damage rect 부분 갱신** | 같은 파일의 `damageOf(info)` | PoC 실측에서 실제로 전체(1280x720)가 아니라 **변경 영역만** 왔다(324x324·440x440 …). 텍스처를 매 프레임 통째로 올리지 않는 규율이고, [io-render-present.md] §10.6 이 깎으려던 비용과 같은 자리다 |
+| **프레임 coalescing** | `BitmapPresenter`(`unionRect` 로 damage 합치고 지연 드레인) | maru tick(60Hz, config 30~120)과 CEF 프레임률이 어긋날 때 프레임을 버리지 않고 합쳐 그린다 |
+| **버퍼 반납 규율** | `presentTexture` 의 `finally { texture.release() }`, shm 의 `released` 콜백 | 빌린 버퍼를 안 돌려주면 CEF 풀이 마른다 |
+
+**버릴 것 (⑵ — 터미널 밖에 있어서 낸 세금)**
+
+| 저쪽 코드 | 저쪽이 만든 이유 | 우리가 안 만드는 근거(실측) |
+|---|---|---|
+| `nextClickCount()` | 터미널 마우스 프로토콜에 클릭 횟수가 없다 | **`send_mouse_click_event` 가 `int clickCount` 를 직접 받는다**(헤더 확인 + 주입 동작 확인). `NSEvent.clickCount` 를 그대로 넘긴다 |
+| `wheelRemainderX/Y` + `/40` tick 변환 | Electron `sendInputEvent` 가 tick 단위다 | **`send_mouse_wheel_event(ev, deltaX, deltaY)` 는 tick 이 아니라 delta 다**(헤더 확인 + `dy=-400` 으로 스크롤 확인). `scrollingDeltaY` 를 그대로 준다 |
+| `superHeld` modifier 추적 | escape 시퀀스에서 modifier 가 유실된다 | `NSEvent.modifierFlags` 가 그대로 있다 |
+| `pinchScale > 1 ? 1 : -1` | 핀치를 wheel tick 으로 뭉개야 했다 | 우리는 `magnification` 실수를 갖는다(**단 CEF 쪽 대응은 미검증 — 아래 「남은 미해결」**) |
+| Enter·붙여넣기를 CDP 로 | Electron `sendInputEvent` 가 그 경우를 못 다룬다 | **CEF `send_key_event` 3 단으로 충분했다**(실측). 먼저 CEF 로 시도하고 막히는 것만 CDP 로 간다 — 처음부터 두 채널을 섞으면 어디서 새는지 모른다 |
+| **키를 PTY 로 받아 스스로 디코드**(`session/session.tsx` 의 `handleKey`) | 터미널 안의 **손님 앱**이라 호스트가 먼저 먹은 키만 남는다. kitty 키보드가 없으면 Cmd 를 구분할 수 없어 기본 단축키에서 Cmd 를 뺀다(`setNoSuper` → `withoutSuper`) | 우리는 호스트다. 같은 방식을 따르면 ⌘C/⌘V/⌘A 가 웹에 안 가고, 한글 조합이 웹 입력창이 아니라 터미널 커서 자리에 그려진다 — 위 「pane 안 실측」의 라우팅이 그 값을 되찾는다 |
+| `a=q` 능력 감지, `CSI 14t` pane 픽셀 조회 | 남의 터미널에게 물어야 한다 | **우리가 그 터미널이다.** pane rect 는 내부 값이다 |
+| kitty 인코딩 전체 | PTY 를 건너야 한다 | 같은 기계의 IOSurface 직결. [io-render-present.md] §10.6 의 5.6MB/frame·25~40MB/s 가 그 세금의 실측치다 |
+| `pixel-react` (React reconciler 로 TUI 렌더) | TUI 를 직접 그려야 한다 | **Zig + Metal 이 이미 있다** |
+| Electron 런타임 | TypeScript 프로젝트라서 | Node 런타임은 우리에게 순수 부채. CEF 는 C API 라 `@cImport` 직결(suji 선례) |
+| `terminals/*.ts` 의 AppleScript 조작(#104 에서 upstream 도 지웠다) | 남의 터미널 창을 열어야 한다 | [terminal-compatibility-policy.md] 가 이미 **위험으로 기록**했다(`TERM_PROGRAM` 위장이 남의 앱 자동화 표면을 빌리는 문제) |
+
+**판단 보류 (결정에 실측이 더 필요)**
+
+| 항목 | 무엇을 확인해야 정해지나 |
+|---|---|
+| GPU 경로 실패 시 **거부할지 폴백할지** | 저쪽은 macOS 에서 shared texture 가 없으면 `throw` 로 **실행을 거부**한다(`initOffscreenMode`). 우리는 초기 불안정을 감안해 폴백이 맞아 보이나, CPU 경로의 실제 프레임 비용을 재봐야 한다 |
+| 컨텍스트 메뉴를 **chrome 으로 그릴지 NSMenu 로 띄울지** | 저쪽은 TUI 라 직접 그렸다(`ui/context-menu.tsx`). 우리는 chrome 컴포넌트가 있어 재사용하면 일관되지만, 네이티브 메뉴 관용과 어긋나는 비용을 재야 한다 |
+| 제스처(핀치·스와이프·관성) 근사 품질 | maru 에 `magnify:`·`swipe:`·`momentumPhase` 코드가 **0 줄**이다(실측). CEF 쪽 수용 형태(`send_touch_event` vs ctrl+wheel)와 질감 손실을 함께 재야 한다 |
+
+#### 이 축이 뒤집은 것 (§13.2 이후 옛 서술 대비)
+
+| 옛 서술 | 실측 |
+|---|---|
+| **z-order 역전** — CEF child NSWindow 가 모달을 가린다 | **소멸.** OSR 픽셀은 우리 Metal 레이어 *안*에 들어온다. `seam_edges`(ABI v103)·`divider_grab_*_pt`(v136)·`WebPanelHitTestGeometry`·drop-zone 임시 통과·하이라이트 최상위 이관·`modal_cells_start` sentinel 한계까지 **함께 불필요**해진다 |
+| **native backend plugin ABI 가 필요** | **불필요.** sidecar 프로세스 경계가 곧 ABI 다. renderer/platform/window 를 직접 만지지 않으므로 특별 권한 plugin 을 설계할 이유가 없다 |
+| **공증이 blocker** | **아니다.** ad-hoc 서명으로 렌더러까지 동작하고, Homebrew **formula** 로 받은 산출물과 `curl` 로 받은 GitHub Release asset 에는 `com.apple.quarantine` 이 **안 붙는다**(cask 는 붙는다 — 실측으로 갈렸다). Developer ID($99/년)는 dmg/cask 채널을 열 때 필요한 것이지 이 축의 전제가 아니다 |
+| **Library Validation 이 기본 사용자 보안까지 약화** | sidecar 는 별도 실행 파일이라 메인 바이너리에 dylib 를 링크하지 않는다 |
+| **JIT entitlement 를 메인/helper 중 어디에?** | sidecar 에만. hardened runtime 을 켜지 않으면 요구 자체가 없다 |
+| **CEF prebuilt ~120~150MB** | **실측 146: 301MB / 154: 323MB** (프레임워크 전체, `du` MiB — 바이너리 200/225 + Resources 79/82 + Libraries 23/17). arm64 단일, 이미 스트립됨, `__text` 만 168/186 MiB 라 더 줄일 여지가 없다(초안의 「176MB」는 146 값의 10 진 표기였다). locale(`.lproj` 220 개, ~49MB — 쓰는 몇 개만 남긴다) + swiftshader(16MB) 제거로 **146 ~235MB / 154 ~258MB**. 참고(같은 기준): terminal-browser 가 받은 Electron Framework 는 바이너리 182MB·전체 272MB — 초안은 Electron **바이너리**를 CEF **전체**와 나란히 놓아 기준이 어긋났다(5 차 적대적 검증). `Google Chrome.app` 1.4GB |
+
+#### 구조와 배포
+
+```
+Maru.app (190MB, Chromium 0 바이트)
+  └─ spawn (링크 아님)
+       maru-web-host  ── CEF browser process + helper 4, 브라우저 N 개
+         제어 : spawn 시 상속한 socketpair (control plane 공개 표면과 분리)
+         픽셀 : 브라우저마다 소유 IOSurface 링 — 세대마다 mach 메시지로 공유(파이프로는 못 넘김),
+                프레임은 mailbox 원자 워드 → MTLDevice.makeTexture(descriptor:iosurface:plane:)
+                → GpuImage / image_backdrop
+```
+
+- **sidecar 는 하나, 브라우저는 N 개다(8 차 적대적 검증에서 실측).** 한 PoC 프로세스에 브라우저 2 개를 만들었더니 둘 다 따로 그려졌고(각자 `on_accelerated_paint`), 입력 대상을 바꿔 가며 보낸 클릭·타이핑이 **그 브라우저에만** 닿았다(b1 에만 클릭, b0 에만 포커스·입력). 브라우저 하나를 더할 때 렌더러 프로세스 +1 이고, 3 개까지 늘려 보니 **선형**이었다 — 실제 메모리(`footprint` 의 phys_footprint 합) 393 → 461 → 525MB 로 **브라우저당 약 +66MB**(RSS 합으로는 420 → 517 → 610MB 인데 공유 페이지가 중복으로 잡힌 값이다 — 8 차에 적은 「+100MB」는 이 RSS 기준이었다, 9 차 정정). CEF 는 `root_cache_path` 단위 process singleton 이라 같은 경로로 두 번째 인스턴스를 띄우면 즉시 끝난다(exit 21/24 실측). 경로를 pane 마다 달리하면 뜨기는 하지만(헤더 계약상 singleton 은 그 경로 기준이다) **프로필이 갈라져 쿠키·로그인·저장소가 pane 끼리 공유되지 않는다** — 브라우저로서 틀린 동작이라 택하지 않는다.
+
+- **기본 앱은 190MB 그대로**, 웹 백엔드를 켠 사용자만 ~258MB(154 기준, 146 은 ~235MB)를 받는다. §13.2 가 *"기본 앱에 CEF 를 넣지 않고 필요할 때 받는 선택 백엔드"* 라고 적고도 plugin ABI 로 표현 못 해 막혔던 그 형태가, 프로세스 경계로는 그냥 성립한다.
+- ~~배포는 **GitHub Releases + 매니페스트 한 겹**~~ — **결정은 별도 Homebrew formula**([구현 계획](plans/web-osr-backend.md) 「배포·배치」). 아래는 초안이며 dmg·Intel 공급(D8)의 후보로만 남는다: (`cef_version`·`chromium_version`·`maru_backend_abi`·`platform`·`arch`·`sha256`). maru 는 이미 거기서 dmg 를 주므로 새 인프라가 0 이고, 나중에 R2 로 옮겨도 앱 업데이트가 필요 없다. CEF 조달 파이프라인(Spotify CDN → 빌드)은 suji `release.yml` 에 검증된 선례가 있다.
+- **Homebrew 는 formula 로**(cask 아님). 앱이 찾는 자리는 brew prefix 다 — `~/Library/Application Support/Maru/backends/…` 는 D8(앱이 내려받는 후보)에서만 쓴다.
+- 최신 CEF 는 **154.0.23 / Chromium 154** (공식 빌드 인덱스 stable 채널 기준, 2026-09-23 재확인). suji 가 받아둔 것은 146 이고, **제품은 최신 안정판으로 간다** — ⑧ 이 버전에 따라 갈렸다.
+
+#### 분업 — WKWebView 는 남는다
+
+WKWebView 는 **OSR 을 제공하지 않는다**. macOS SDK 의 WebKit 공개 헤더 전체에 `IOSurface`·`offscreen rendering`·`windowless` 매치가 **0 건**이고, 렌더 결과를 꺼내는 공개 API 는 비동기 `takeSnapshotWithConfiguration` 하나뿐이다(WebContent 프로세스가 remote layer tree 로 넘기므로 `layer.render(in:)` 도 빈 화면). 따라서 **두 합성 모델의 공존은 선택이 아니라 구조상 강제**다.
+
+- `.markdown`(신뢰 — `maru-app://`, 파일 패널, CM6) → **WKWebView 유지**. 네이티브 IME 가 실제로 중요하고, firstResponder 계약(§4.1 4g-0~4g-4)이 이미 완성돼 있으며, 시스템 프레임워크라 배포 비용이 0 이다.
+- `.browser`(비신뢰 — 워크스페이스 브라우저·팝업, `trust=.untrusted`) → **OSR 후보**. §4.1 이 기록한 포커스 버그 5 개가 전부 이 자리에서 났다. OSR term 은 AppKit firstResponder 게임에는 참가하지 않지만, **그 계약 자체는 우리 라우팅으로 옮겨 온다**(위 「pane 안 실측」).
+- ~~침습은 한 군데다: `terminalOwnsInput` 에 한 항을 더한다~~ — **실험으로 틀렸다.** 게이트 한 줄이 아니라 위 「호스트가 라우팅을 든다」 표의 여섯 축(마우스 게이트·제스처 주인·포커스 주인·키 라우트와 메뉴 편집 특례·모달 에지·창별 hit-test)이 필요했다. 다만 **새 예외는 없다** — 전부 WKWebView 가 이미 가진 분기와 같은 자리다(`app_action` dispatch 한 곳은 실험이 달랐고 제품에서 맞춘다 — 위 「호스트가 라우팅을 든다」). 실험에서 분기가 둘씩 생긴 것은 OSR 을 터미널 surface 에 붙였기 때문이고, 제품에서는 OSR 을 `.web` Term 의 **백엔드**로 두어 「웹이 포커스인가」 판정 하나에 백엔드(WKWebView responder / CEF sidecar)만 갈리게 한다.
+- 그리기: 화면에 보이는 web Term 은 **전부** 그린다(활성 pane 만이 아니다 — split 에서 비활성 pane 이 비어 보였던 것을 K2e 로 먼저 고쳤다). hit-test 는 그 pane rect 로 하고, rect 는 **이번 프레임에 그린 것만** 유효하다(매 프레임 비운다 — 안 그려진 pane 의 옛 rect 로 클릭이 새지 않게).
+
+#### 남은 미해결 (도입 전 필수) — 막는 것은 없다
+
+**불가능하다고 판정된 항목은 없다.** 물리적으로 넘을 수 없는 것은 「기계를 건너 GPU 메모리를 공유하는 것」 하나이고, 그것은 ②의 결정으로 피한다. 나머지는 연결 작업, 선례가 있는 공사, 결정, 품질 손실을 감수하는 근사 중 하나다 — ⑧ 은 146 에서만 막혔고 **최신 안정판(154)에서는 연결 작업**이다(4 차 적대적 검증). 아래 분류는 **적대적으로 한 번 공격한 뒤** 남긴 것이다 — 처음 분류에서 「연결만」이라 했던 ⑥, 「손실은 핀치뿐」이라 했던 ④⑴, 「원격은 결정 하나로 사라진다」고 했던 ②가 과장이었고, ⑧⑨는 목록에서 빠져 있었다. ⑪ 은 13 차 적대적 검증에서 나왔다.
+
+| # | 항목 | 부류 | 크기 |
+|---|---|---|---|
+| ① | 설치 배치·**샌드박스** | **Homebrew formula + 번들 없는 배치로 결정**. 샌드박스는 별도 helper + 프레임워크를 실행 파일 옆에 두면 동작(실측) — 권한 귀속만 확인 | 소 |
+| ② | 원격 세션호스트 | **결정** + 새 기능 하나 | 결정 후 중 |
+| ③ | 프로세스 회계 | 선례 있는 공사 + 실측 | 중 |
+| ④ | 입력 합성 잔여 | 연결 / 결정 / 근사 | 소~중 |
+| ⑤ | 접근성(VoiceOver) | 공사 | **대** |
+| ⑥ | 크기 전파 | ⑦과 묶인 공사 | 중 |
+| ⑦ | 소유 버퍼 링과 반납 | **CPU 경로로 PoC 확인** — 단일 버퍼 찢어짐 2.09% → 링 0%(CPU `memcpy`·CPU 소비자). GPU 소비자의 완료 조건은 계획 C3 | 중 |
+| ⑧ | `<select>` 팝업 합성 | **PoC 로 해결 확인**(154). 146 에서는 안 열림 — 알려진 문제 | 소 |
+| ⑨ | JS 대화상자·파일 선택·권한 요청 | **필수 구현, PoC 로 확인** — 핸들러가 있으면 전부 동작, 없으면 멈추거나 응답이 없다 | 소 |
+| ⑩ | **새 프레임 신호 → maru 다시 그리기** | 연결 — **PoC 로 해결 확인**(seed 확인, 초당 ~53 회) | 소 |
+| ⑪ | **프로필 유지·Keychain** | **결정 둘(유지·mock keychain)** — 둘 다 실측 | 소 |
+
+1. **설치 배치 — `.app` 번들 불필요(결정 2026-09-23)** — 배포는 Homebrew **formula** 로 정했고(위 「구조와 배포」), PoC 는 처음부터 **번들 없는 배치**(실행 파일 하나가 자기 자신을 helper 로 쓰는 `browser_subprocess_path = self`)로 돌았다 — 154 의 모든 실측(렌더러·GPU 프로세스, 입력, IME, 브라우저 N 개)이 이 배치다. formula 는 이 배치를 brew prefix 에 그대로 설치하면 되므로 `.app` 번들은 만들지 않는다(함정 6 의 「번들 layout 에서 렌더러가 안 뜸」은 번들을 쓸 때의 문제라 해당 없음). 남는 확인 중 하나는 **권한 귀속**이다(샌드박스·링크 경로·dmg 는 아래 하위 항목) — 웹페이지가 카메라·마이크를 요청할 때 macOS 권한 창은 앱 번들의 사용 목적 문구(Info.plist)를 요구하고, maru 가 spawn 한 sidecar 의 요청은 Maru.app 쪽으로 귀속될 가능성이 높다(그러면 Maru.app Info.plist 에 문구를 넣는다). 이 기계(Mac Studio)는 마이크·카메라가 없고 시험 환경에서는 maru 를 셸에서 띄워 귀속 대상이 제품과 달라 **재지 못했다.**
+   - **샌드박스(12 차 적대적 검증에서 발견·해결 확인)**: 지금까지의 PoC 실측은 **전부 샌드박스를 끈 상태**였다(`settings.no_sandbox = 1` — 렌더러·GPU 가 모두 `sandbox_check` 0). `.browser` 는 신뢰할 수 없는 웹을 띄우는 자리라 이대로는 안 된다. 공식 요구는 「helper `main()` 첫머리에서 **프레임워크를 불러오기 전에** `cef_sandbox_initialize`」다. ⑴ PoC 처럼 프레임워크를 링크 시점에 붙이고 실행 파일 하나를 helper 로 겸용하면, 샌드박스 초기화는 성공하지만 GPU 프로세스가 exit 5 로 반복해 죽고 브라우저가 「GPU 프로세스를 쓸 수 없다」며 종료한다. ⑵ helper 를 **별도 실행 파일**로 두고 샌드박스를 켠 **뒤** 프레임워크를 `dlopen` 하면, 샌드박스가 프레임워크 경로 읽기를 막는다(`file system sandbox blocked open()`) — 번들이 없으면 **실행 파일 디렉터리가 번들 경로**로 쓰이고 그 밖은 못 읽는다. ⑶ **프레임워크를 실행 파일 디렉터리 아래로 옮기자 동작했다**: GPU·유틸리티·렌더러 helper 가 전부 `sandbox_check` 1 이고(브라우저 프로세스는 원래 샌드박스 밖), 페이지 그리기·클릭·입력, select 팝업, JS 대화상자, 파일 선택(샌드박스 안의 렌더러가 고른 파일의 내용까지 읽음), 한글 조합이 모두 그대로였다. 즉 **번들 없이도 샌드박스가 된다** — 단 **별도 helper 배치에서만**이다(PoC 의 자기 자신 겸용 배치는 ⑴ 처럼 GPU 가 죽었다). 그리고 **메모리(브라우저 N 개 +66MB)·IME·링 실측은 샌드박스 없이 잰 값**이고, 샌드박스를 켜고 다시 확인한 것은 위에 나열한 항목뿐이다. formula 는 `libexec/` 아래에 sidecar·helper·프레임워크를 함께 둔다(심볼릭 링크는 샌드박스가 실제 경로로 풀므로 실제 파일로 둔다).
+   - **13 차 적대적 검증 — 링크와 경로**: ⑴ brew 는 설치물을 `opt/<이름>` → `Cellar/<이름>/<버전>` 링크로 가리킨다. 같은 배치를 `Cellar` 실제 경로로 띄워도, `opt` 링크 경로로 띄워도 helper 가 모두 `sandbox_check` 1 이고 페이지가 그려졌다 — **경로 앞쪽의 링크는 괜찮다.** ⑵ 디렉터리 **안에서** 프레임워크만 바깥을 가리키는 링크로 두면 샌드박스 안 helper 가 프레임워크를 못 열어(`blocked` 37 건, GPU 프로세스 6 번 죽음) 그리지 못한다 — 위 「실제 파일로」를 실측으로 확인했다. ⑶ **이 PoC 의 브라우저 프로세스는 프레임워크를 SDK 의 절대 경로로 링크하고 있었다** — 배치 디렉터리를 실제로 탄 것은 `dlopen` 하는 helper 뿐이다(샌드박스 판정은 helper 에 걸리므로 결론은 같다). 제품의 브라우저 프로세스도 프레임워크를 실행 파일 기준 상대 경로로 불러야 한다(소스 빌드 formula 는 빌드 디렉터리를 남기지 않는다).
+   - **배포 채널이 하나 더 있다(13 차)**: [배포](distribution.md) 는 formula(소스 빌드) 외에 **서명·공증된 universal `.dmg`** 와 그 cask 를 둔다 — 대상에 Intel(x86_64)도 있다. 위 실측은 arm64·formula 모양뿐이고, dmg 사용자에게 CEF 를 어디서 줄지는 정하지 않았다([구현 계획](plans/web-osr-backend.md) D8).
+2. **원격 세션호스트** — IOSurface mach port 는 같은 기계 안에서만 유효하다. 다만 **웹 pane 은 PTY 가 없는 pane 슬롯**이라 브라우저를 원격 host 에서 돌릴 이유가 없다. **결정(사용자 2026-09-23): 브라우저 sidecar 는 항상 maru 앱이 도는 기계에서 돈다.** 그러면 터미널 세션이 SSH 너머에 있어도 픽셀이 같은 기계 안의 공유 GPU 메모리로 넘어간다(sidecar 의 링 복사 한 번은 남는다 — 위 「복사가 0 인 것은 아니다」). 이 결정으로 남는 것:
+   - 원격의 `localhost:3000` 같은 개발 서버를 보려면 **포트 전달**이 필요한데, maru SSH 클라이언트는 그것을 **「안 하는 것」으로 못박아 두었다**([ssh-client.md] §3 — `direct-tcpip` 채널을 안 연다). 그래서 이것은 새 기능이면서 **문서화된 지원 집합을 넓히는 결정**이다. 원격 세션 안에서 연 `localhost` 가 어느 기계를 뜻하는지의 정책도 함께 정해야 한다.
+   - 다른 기계에서 세션에 다시 붙으면 **살아 있는 페이지가 아니라 URL 만** 복원된다. 이것은 지금과 같다 — workspace 는 이미 `browser-term="<insert-after>:<len>:<url>"` 로 URL 만 저장한다(`session/workspace.zig`).
+   - 화면을 그리는 쪽이 브라우저와 **다른 기기**(모바일 클라이언트 등)라면 픽셀을 보내야 하고 그때는 terminal-browser 가 낸 비용이 돌아온다. 모바일 문서에는 웹 pane 서술이 없다 — 지원 범위부터 정해야 한다.
+3. **프로세스 회계** — 탭 20 개 워크스페이스를 복원해도 **URL 만 복원하고, 처음 보일 때 브라우저를 만든다.** 안 보이는 탭은 `was_hidden(1)` 로 멈춘다 — **실측(154)**: 숨기면 그리기가 멈추고(2.8 초 동안 프레임 0) `was_hidden(0)` 이면 다시 돈다. **JS 타이머는 멈추지 않는다**(10 차 실측 — 0.5 초 간격 타이머가 숨긴 3 초 동안 6 번이 아니라 2~3 번 돌았다: 느려질 뿐 계속 돈다). 그래서 숨긴 탭도 CPU 가 0 이 아니고, 오래 안 본 탭은 닫는 쪽(아래)이 필요하다. **함정**: PoC 는 입력 FIFO 를 그리기 콜백 안에서만 읽어서, 숨긴 뒤 「다시 보여라」 명령조차 못 읽었다 — **제어 채널은 그리기와 독립이어야 한다**(PoC 는 UI 스레드 타이머 `cef_post_delayed_task` 로 고쳤다). 오래 안 본 탭은 브라우저를 닫는다(Chrome 탭 폐기와 같은 방식). **대가**: 닫은 탭은 다시 열 때 폼 입력·스크롤 위치를 잃는다. 브라우저 N 개의 비용은 위 「구조와 배포」에 실측했다(같은 페이지 기준 브라우저당 렌더러 +1·약 +66MB — 다른 사이트가 섞일 때는 별도로 잰다).
+4. **입력 합성 잔여** — 클릭·키·휠·드래그·우클릭·hover 커서·한글 IME 는 pane 안에서 동작을 확인했다(위 「pane 안 실측」).
+   - ⑴ **제스처(근사)** — 관성 스크롤은 macOS 가 관성 구간도 스크롤 이벤트로 계속 보내므로 지금처럼 넘기면 스크롤은 된다. 다만 `send_mouse_wheel_event` 에는 **phase 인자가 없어** 고무줄 효과(overscroll)와 스크롤 대상 고정(latching) 정보가 빠진다 — 중첩 스크롤러에서 관성 도중 대상이 바뀌는 질감 손실이 있을 수 있다. 스와이프 뒤로/앞으로는 maru 가 네비게이션으로 받는다(maru 에 스와이프 코드가 아직 0 줄이라 새로 쓴다). 핀치는 CEF 에 1:1 API 가 없어 Ctrl+휠, `set_zoom_level`(레이아웃 줌), `send_touch_event` 두 손가락 중 하나로 흉내 내야 하고, **어느 쪽이 Chrome 의 부드러운 핀치 확대에 가까운지 실측 전**이다.
+   - ⑵ **연결** — `on_tooltip` 문자열을 보여 준다(**실측**: hover 하면 `title` 문구가, 벗어나면 빈 문자열이 온다). 웹에서 시작하는 드래그는 `start_dragging` 을 받아(**실측**: 페이지 `dragstart` 뒤 드래그 위치와 텍스트 조각 정보를 담아 불린다 — 0 을 돌려주면 CEF 가 드래그를 취소한다) Metal 뷰에서 macOS 드래그 세션을 시작하고, 들어오는 드롭은 `drag_target_*` 로 넘긴다.
+   - ⑶ **연결** — IME 후보창 위치. `on_ime_composition_range_changed` 의 글자 사각형(**실측**: 조합 중 `x=77 y=221 16x20` DIP 가 온다)을 pane 좌표로 바꿔 `firstRect(forCharacterRange:)` 에서 돌려준다. maru 는 터미널 조합에 그 메서드를 이미 구현해 두었다.
+   - ⑷ **결정** — 우클릭 메뉴. 페이지의 `contextmenu` 는 도달한다. CEF 기본 메뉴는 `run_context_menu` 를 구현해야 뜨고, NSMenu 로 띄울지 chrome 메뉴로 그릴지는 위 「판단 보류」의 결정이다.
+5. **접근성(VoiceOver) — 가장 큰 공사.** 옛 서술 「CDP `getFullAXTree` 로 온다, 함께 풀린다」는 **에이전트가 읽는 트리**에만 맞다([control-plane-browser-session.md] §9.5.4 의 우회는 이 축에서 풀린다). **스크린리더에는 반대다** — WKWebView 는 접근성을 공짜로 주지만 OSR 픽셀에는 접근성 정보가 없다. 헤더(`set_accessibility_state`)가 명시한다: 창 없는 브라우저는 접근성이 **트리만(TreeOnly)** 켜지고 **플랫폼 접근성 객체를 만들지 않으며**, 클라이언트가 `on_accessibility_tree_change`·`on_accessibility_location_change` 로 직접 만들 수 있다. 즉 Chromium 접근성 트리를 받아 **NSAccessibility 요소 계층을 우리가 지어 붙여야** 한다. 헤더는 클라이언트가 스크린리더를 감지해 이 함수를 부르라고 하고, macOS 의 감지 예로 `AXEnhancedUserStructure` 속성을 든다(그 예는 창 있는 모드 문단에 있다). 트리 계산은 비용이 들므로 VoiceOver 가 켜졌을 때만 켠다. **실측(154)**: `set_accessibility_state(ENABLED)` 직후 `on_accessibility_tree_change` 가 사전(dictionary) 값으로 오고 위치 변경도 온다 — 재료는 확실히 온다. 빈도는 **페이지가 바뀌는 만큼**이다(10 차 대조 — 정적 페이지 10 초에 1 번, 0.5 초마다 제목을 바꾸는 페이지 10 초에 62 번). 받아서 NSAccessibility 계층에 반영하는 쪽이 변경분만 다루도록 짜야 한다. **terminal-browser 도 이 자리를 풀지 않았다** — 저장소(`ff8f170`) 전체에 접근성 코드가 없고, Electron 오프스크린 픽셀을 터미널 그림으로 내보내므로 스크린리더에는 그림이다.
+6. **크기 전파 — ⑦과 묶인다.** pane 크기가 바뀌면 `was_resized()`, 레티나 배율이 바뀌면 `notify_screen_info_changed()` 를 부르는 것 자체는 한 줄이다(**실측**: `was_resized` 직후 surface 가 1520x972 → 1000x600 으로 바뀌고 원복도 된다). 그러나 ⑦의 **소유 링은 view 크기에 묶여** 있어 크기가 바뀌면 링을 다시 만들어 다시 공유해야 하고, 드래그 리사이즈 중에는 그것이 초당 수십 번이 된다. 링을 넉넉한 크기로 잡고 부분 사각형만 쓰거나, 세대(generation)를 붙여 재할당을 늦추고 그동안은 옛 프레임을 늘여 보이는 방식(§3 의 async resize jitter 와 같은 자리)이 필요하다. 실험 배선은 이 경로가 없어 split 뒤 이미지가 옛 크기로 **잘려** 보였다(뷰포트 crop 덕에 옆 pane 은 안 덮었다).
+7. **소유 버퍼 링과 반납** — 위 「버퍼 소유권」. PoC 는 단일 버퍼라 tearing 이 가능하다. 3 슬롯이면 되지만 **GPU 완료 시점**을 지켜야 한다 — sidecar 는 blit 이 GPU 에서 끝난 뒤에 「준비」를 보내고, maru 는 그 슬롯을 샘플링한 command buffer 가 **완료된 뒤**(`addCompletedHandler`)에 「반납」을 보낸다. 인코딩 시점에 반납하면 GPU 가 아직 읽는 슬롯을 덮는다. **실측(154, 사전 확인 2026-09-23)**: 공유 메모리의 원자 워드 하나로 back(sidecar 가 씀)·mailbox(대기)·front(maru 가 읽음) 세 장을 맞바꾸는 3 중 버퍼를 PoC 에 넣고, 매 프레임 화면 전체를 빨강↔파랑으로 바꾸는 페이지로 「한 장의 윗줄·가운데·아랫줄 색이 다르면 찢어짐」을 셌다. **지금 PoC 의 단일 버퍼는 표본 1,613 만 중 33.7 만(2.09 %) 이 찢어졌고**(「가능하다」로만 적었던 것을 처음 쟀다), **링은 2,137 만 중 0** 이었다. 새 프레임은 초당 60.1 개 받았고(생산 480·수신 481 — mailbox 의 dirty 표시가 곧 ⑩ 의 다시 그리기 신호다), 도중 크기 변경(1520x972 → 1000x600)에 새 세대 링으로 넘어갔다. 크기 변경 직후 새 링의 첫 프레임 전까지 빈 장을 읽은 표본이 0.19 % 있었다 — **새 링의 첫 프레임이 올 때까지 옛 프레임을 계속 보여야** 한다. 이 시험은 CPU `memcpy` 와 bootstrap 등록(전달 경로는 아래 보안 시험과 별개)으로 했다. **시험 구현에 세대 전환 경합이 있었다(12 차)** — 크기 변경 순간 소비자가 옛 세대 기준으로 맞바꾸기를 하면 드물게 생산자의 back 과 소비자의 front 가 겹칠 수 있다(실측에서는 0 건). 제품에서는 세대 번호를 mailbox 와 같은 원자 워드에 담아 세대가 다른 맞바꾸기를 거절한다.
+8. **`<select>` 팝업 — 154 에서는 합성만 남고, 146 에서는 안 열린다(버전 의존)**
+   - **154(최신 안정판, 제품 대상)**: 기본 `<select>` 를 누르면 `on_popup_show(1)` 과 위치(`on_popup_size` — select 바로 아래 53x91 DIP), `PET_POPUP` 프레임(106x182 px, 레티나 2 배)이 온다. 열린 팝업에서 키보드로 항목을 고르면 값이 바뀌고(`change`) 팝업이 닫힌다(`show=0`). `showPicker()` 로도 열린다(실측). **합성을 PoC 에 넣어 화면에 나오는 것까지 확인했다(2026-09-23)** — sidecar 가 본 화면 사본을 따로 들고, 팝업이 떠 있으면 공유 surface 의 팝업 자리(`on_popup_size` 의 DIP × scale)에 `PET_POPUP` 픽셀을 덧그리며, 본 화면이 바뀔 때마다 다시 덧그리고, 닫히면(`show=0`) 그 자리를 본 화면 사본으로 되돌린다. 실측: 목록(첫째·둘째·셋째)이 select 바로 아래 그려지고, 마우스로 항목을 누르면 값이 바뀌며(CEF 가 view 좌표 클릭을 팝업으로 넘긴다 — 우리 쪽 hit-test 변경 없음), Esc 로 닫으면 그 자리가 복원된다. maru pane 이 쓰는 공유 surface 에서도 같게 그려진다. 합성을 sidecar 에 둔 것은 렌더러 ABI 를 안 바꾸려는 PoC 선택이다 — 제품에서는 maru 렌더러가 팝업을 별도 quad 로 올리는 쪽(복사 1 회 절약)과 비교해 정한다. 팝업 안 휠 스크롤에는 `get_screen_point` 도 필요하다(휠 API 헤더 주석, PoC 는 구현했다).
+   - **146(suji 가 받아 둔 것) — 알려진 문제**: 클릭·Space·Alt+↓·`showPicker()` 모두 안 열린다(올바른 덤프로 확인, 덤프 최신성은 같은 덤프의 버튼 카운터로 보장). 팝업 콜백·`PET_POPUP` 은 0 건이고, select 클릭 뒤에만 Blink 가 **네이티브 NSMenu 경로(external popup)** 를 띄울 때 보내는 합성 mouseup 이 찍힌다(`external_popup_menu.cc` 의 macOS 분기) — 창이 없어 메뉴가 못 뜬 것이다. 우회로 `appearance: base-select` 는 146 에서도 열리고 선택까지 된다.
+   - **원인은 확정하지 못했다.** CEF 는 창 없는 브라우저에서 renderer 가 external popup 을 끄는데(`chrome_content_renderer_client_cef.cc`), Chromium 은 웹 설정을 보낼 때마다 그 값을 `should_disable_external_popups` 로 덮어쓰고(`web_view_impl.cc`) 그 설정은 `ForbidExternalPopupMenus()` 로만 켜진다 — CEF 는 146(`3ca6a87` 트리 전체)·154(`062ebe4`)·master 모두 이 함수를 부르지 않는다. 그래서 3 차 검증까지는 이 덮어쓰기를 146 의 원인으로 적었는데, **154 도 CEF·Blink 해당 코드가 같은데 내부 팝업 경로를 탄다** — 이 가설은 버전 차이를 설명하지 못한다. 확인된 것은 관측(146 은 네이티브 경로, 154 는 내부 경로)뿐이다.
+9. **JS 대화상자·파일 선택·권한 요청 — 필수 구현, 핸들러로 전부 동작(사전 확인 2026-09-23)**
+   - **핸들러가 없으면**: `alert`·`confirm` 에서 페이지가 **멈추고**(그리기·타이머·클릭 반응 정지), 알림 권한 요청(`Notification.requestPermission()`)은 **응답이 영원히 오지 않는다.** 창 없는 모드의 기본 구현이 대화상자를 띄우지 못한 채 붙잡는 것이다.
+   - **핸들러가 있으면(실측)**: `on_jsdialog` 로 `alert`·`confirm`·`prompt` 가 모두 오고 응답이 페이지로 돌아간다(`confirm` → `true`, `prompt` → 입력값). `on_file_dialog` 는 파일 입력 클릭 때 불리고(mode=열기), 콜백으로 경로를 넘기면 페이지가 그 파일의 이름·크기·내용까지 받는다. `on_show_permission_prompt` 로 알림 권한 요청이 오고 거부하면 페이지가 `denied` 를 받는다. 제품에서는 셋 다 maru chrome 모달(파일은 maru 가 띄운 열기 창)로 받는다 — 모달 게이트(위 「호스트가 라우팅을 든다」)와도 맞는다. `on_before_unload_dialog` 는 구현만 하고 발동은 재지 않았다.
+   - **정정 — 10·11 차의 「파일 선택이 조용히 안 열린다」는 PoC 버그였다.** PoC 가 대화상자 핸들러를 클라이언트 구조체를 0 으로 초기화하기 **전에** 달아서 초기화가 지웠고, 그래서 핸들러 없이 잰 것이었다(추적에서 요청이 사라진 것은 창 없는 모드의 기본 동작이 아무것도 못 띄운 것). 핸들러를 초기화 뒤로 옮기자 바로 불렸다. 「핸들러가 없으면 멈춘다」는 실제로 핸들러가 없던 측정이라 유효하다.
+   - **카메라·마이크**는 같은 권한 핸들러의 `on_request_media_access_permission` 으로 오게 돼 있지만, 이 기계에 장치가 없어 권한 단계 전에 「장치 없음」(`NotFoundError`)으로 끝났다 — 재지 못했다(① 의 귀속 문제와 함께 장치 있는 기계에서 확인).
+10. **새 프레임이 와도 maru 가 다시 그리지 않는다(6 차 적대적 검증에서 발견)** — maru 는 **자기 프레임이 바뀌거나 다시 그리기 요청이 있을 때만** 그린다. 웹 픽셀은 PTY 를 지나지 않으므로 maru 는 새 웹 프레임이 온 것을 모른다. 실측(154, 데모 pane): CEF 는 초당 약 60 프레임을 그리는데(페이지 애니메이션) **maru 의 그리기는 유휴 때 초당 2~8 회, 시험 중에도 1~8 회**였다 — pane 에 보이는 웹은 사실상 그 빈도로만 바뀌고, 클릭·타이핑 결과도 다음 다시 그리기까지 늦게 보인다. 표의 「62.7 fps」는 CEF 가 그리는 빈도이지 **보이는 빈도가 아니었다.** 해법은 ⑦ 의 「슬롯 k 준비됨」 신호를 maru 가 받으면 그 창에 다시 그리기를 요청하는 것이다(보이는 web Term 이 있을 때만 — 가려진 탭은 ③ 대로 CEF 쪽 렌더를 멈춘다). **신호 채널 없는 더 작은 형태를 실측했다(7 차 적대적 검증)**: maru 가 매 tick OSR 텍스처의 IOSurface seed(쓰기 잠금을 풀 때마다 커진다)를 확인해 바뀌었으면 다시 그린다. 같은 데모 pane·입력 없음·애니메이션 페이지로 12 초씩 쟀더니 **그리기 초당 1.7 → 52.6 회**, maru CPU **약 1.5 → 3.7 %** 였다. 링을 도입하면 그 「준비」 신호가 이 확인을 대신한다. **정적 페이지에서는 부담이 없다(8 차 검증)** — 애니메이션 없는 페이지는 CEF 가 첫 프레임 1 장만 그려 seed 가 안 바뀌고, 훅을 켜든 끄든 그리기 초당 1~1.5 회·maru CPU 12 초간 0.13 초로 같았다. 비용은 웹이 실제로 움직일 때만 생긴다.
+11. **브라우저 프로필 유지와 Keychain(13 차 적대적 검증)** — 이 조사 때 WKWebView `.browser` 탭은 **공유 ephemeral 저장소**(`browserDataStore`, 위 「untrusted 패널 격리」)라 탭끼리는 로그인이 이어지지만 앱을 끄면 사라졌다. **결정(사용자 2026-09-24): 로그인·쿠키는 재시작 뒤에도 유지한다** — 엔진 중립 계약이므로 WKWebView 쪽도 신뢰 저장소와 격리된 **영속** 저장소로 바꿨다(W3a — macOS 14+ 만, 위 「untrusted 패널 격리」). CEF 쪽 실측(154, 샌드박스 켬, 같은 프로필로 두 번 띄워 `document.cookie`·`localStorage` 를 비교):
+   - **Keychain 을 못 쓰면 쿠키가 디스크에 남지 않는다.** Chromium 은 쿠키 암호화 키를 Keychain 항목 「**Chromium Safe Storage**」(계정 `Chromium`)에 둔다 — **Chromium 브라우저와 같은 이름**이다. 이 기계의 항목은 이전 PoC 빌드가 만든 것이라 다시 빌드한 바이너리(다른 ad-hoc 서명)는 신뢰 목록에 없고, 물어볼 창을 띄울 수 없는 문맥에서 `errSecInteractionNotAllowed` 로 실패했다. 그 결과 재시작 뒤 **`localStorage` 는 남았고 쿠키는 사라졌다** — 로그인이 풀린다. formula 는 소스 빌드라 **업그레이드마다 서명이 바뀐다** — 보통의 GUI 실행에서는 그때마다 Keychain 허용 창이 뜰 것으로 보이나 **재지 못했다**(시험 maru 도 셸에서 띄웠다).
+   - **`--use-mock-keychain` 이면 Keychain 을 건드리지 않고 쿠키가 유지됐다**(오류 0, 재시작 뒤 쿠키·`localStorage` 모두 남음). 대가는 쿠키 암호화 키가 고정값이라 디스크 위 보호가 **파일 권한뿐**이라는 것이다 — 같은 사용자로 도는 프로그램은 쿠키 파일을 읽어 풀 수 있다. **서명 안정화와의 관계**: ad-hoc 서명의 지정 요구사항(Keychain 이 「같은 앱인가」를 판정하는 기준)은 `cdhash`(실측 — 빌드마다 바뀐다)이고, Developer ID 서명이면 팀 ID·식별자라 업데이트해도 유지된다. 그래서 서명을 고정하면 재허용 문제는 사라지지만, 항목 이름이 Chromium 과 같은 문제는 남는다(CEF 헤더에 바꾸는 설정 없음). 이 기계에 Developer ID 인증서가 없어 서명 고정 쪽은 재지 못했다. **결정(사용자 2026-09-24): 계속 mock keychain 으로 간다**([구현 계획](plans/web-osr-backend.md) D7) — 프로필 디렉터리는 0700·백업 제외로 보완한다.
+   - **`root_cache_path` 는 maru 전용 경로여야 한다.** 비우면 CEF 기본값 `~/Library/Application Support/CEF/User Data` 를 쓰는데, 이 자리는 **기본값을 쓰는 다른 CEF 앱과 겹쳐** 프로세스 singleton(exit 24)에 걸린다. 같은 이유로 maru 앱 인스턴스(번들 ID)마다 프로필 경로를 나눈다. **같은 프로필로 두 번째 실행이 오면 먼저 떠 있던 쪽이 새 Chrome 창을 연다**(W1c 실측 — 「New Tab - Chromium」 창과 렌더러 4 개, 그 창 때문에 종료가 멈췄다) — 제품은 `on_already_running_app_relaunch` 로 막는다([구현 계획](plans/web-osr-backend.md) C7).
+   - **`cache_path` 를 비워도 154 는 디스크에 쓴다** — 헤더는 「비우면 메모리(incognito)」라고 하지만, 전역 설정에서 비우고 `root_cache_path` 만 주자 `root/Default/Cookies` 가 생기고 재시작 뒤 쿠키가 남았다. 메모리 전용이 필요하면 `cache_path` 를 비운 **요청 컨텍스트**를 따로 만들어야 한다(브라우저 하나로는 동작 확인, 둘이 공유하면 로드가 멈췄다 — 원인 미확인). 유지 결정으로 제품 경로에서는 쓰지 않는다.
+
+### 13.2 이하 — on-screen CEF 전제의 옛 서술 (보존)
+
+> 아래는 **CEF 를 child NSWindow 로 붙이고 앱에 링크하는** 전제에서 쓰였다. z-order·plugin ABI·공증·Library Validation·JIT·용량 항목은 §13.1 표가 정정한다. **엔진 중립 계약과 host-mediated MCP 분기**(다른 문서들이 `§13` 으로 가리키는 것)는 두 축 모두에서 그대로 유효하다.
 
 **plugin이라는 말의 경계**: 사용자가 원하는 제품 형태는 "기본 앱에 CEF를 넣지 않고 필요할 때 받는 선택 백엔드"다. 이 방향은 맞다. 다만 현재 maru의 일반 plugin/Wasm 경계는 domain event + action facade만 허용하고 renderer/platform/window를 직접 만지지 못하므로 CEF를 표현할 수 없다. CEF는 모달 Metal 오버레이 z-order 조율(renderer)·NSWindow/CefWindow 마운트(platform)·per-pane 좌표(레이아웃)를 요구한다. 따라서 이름은 plugin이어도 **일반 Wasm/action plugin이 아니라 별도 권한의 native webview-backend plugin ABI**가 필요하다.
 

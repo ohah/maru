@@ -209,8 +209,8 @@ test "모듈 주입을 실제로 담는가 — `&.{…}` 에서 멈춰 468건 �
     // **고치기 전 이 수는 1 이었다.** `.imports = &.{ .{ .name = "maru", … } }` 의 `&.{ … }` 는
     // struct init 도 call 도 아니라 재귀가 거기서 멈췄고, 모듈을 주입받는 등록이 전부
     // 「주입 없음」으로 보였다. 뷰가 «안 본다» 는 것을 뷰 자신은 못 신고하므로 수로 잠근다.
-    try std.testing.expectEqual(@as(usize, 468), with_imports); // +1: `test-remote-watch-module`(2026-09-23), +1: `test-color-scheme-notify`(2026-09-22)
-    try std.testing.expectEqual(@as(usize, 896), pairs); // +2: `test-remote-watch-module` 이 `maru`·`syntax` 둘을 주입한다(2026-09-23)
+    try std.testing.expectEqual(@as(usize, 469), with_imports); // +1: `test-web-sidecar`(2026-09-24), +1: `test-remote-watch-module`(2026-09-23), +1: `test-color-scheme-notify`(2026-09-22)
+    try std.testing.expectEqual(@as(usize, 897), pairs); // +1: `test-web-sidecar` 가 `web_sidecar_protocol` 하나를 주입한다(2026-09-24), +2: `test-remote-watch-module` 이 `maru`·`syntax` 둘을 주입한다(2026-09-23)
 
     // 그 자리에서 모듈을 만드는가, 기존 모듈 변수를 이름으로 부르는가. 후자가 압도적이라는
     // 사실이 「등록을 표로 적을 때 `deps` 는 이름 목록으로 족한가」의 답이다.
@@ -219,7 +219,7 @@ test "모듈 주입을 실제로 담는가 — `&.{…}` 에서 멈춰 468건 �
     // (`shell_gate_ledger`·`wake_latency_budget`·`pinned_language`)이 각자 만들던 모듈을
     // `boundary_scan_modules` 가 대신 준다 — `build_source` 는 그렇게 셋에서 하나가 됐다.
     try std.testing.expectEqual(@as(usize, 5), inline_create);
-    try std.testing.expectEqual(@as(usize, 891), by_var); // +2: `test-remote-watch-module` 의 `maru`·`syntax`(2026-09-23), +1: `test-color-scheme-notify` 의 `shutdown_wire_contract_mod`
+    try std.testing.expectEqual(@as(usize, 892), by_var); // +1: `test-web-sidecar` 의 `protocol_mod`(2026-09-24), +2: `test-remote-watch-module` 의 `maru`·`syntax`(2026-09-23), +1: `test-color-scheme-notify` 의 `shutdown_wire_contract_mod`
 
     // 이름과 모듈이 **짝으로** 들어왔는지 확인한다 — 가장 많이 쓰이는 짝으로.
     // 이름만 담던 예전에는 물을 수 없던 질문이다.

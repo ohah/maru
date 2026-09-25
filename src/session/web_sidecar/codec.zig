@@ -47,6 +47,16 @@ const writeImeText = fields.writeImeText;
 const readImeText = fields.readImeText;
 const writeRect = fields.writeRect;
 const readRect = fields.readRect;
+const writeDialogText = fields.writeDialogText;
+const readDialogText = fields.readDialogText;
+const writePath = fields.writePath;
+const readPath = fields.readPath;
+const writeRequest = fields.writeRequest;
+const readRequest = fields.readRequest;
+const writeOrigin = fields.writeOrigin;
+const readOrigin = fields.readOrigin;
+const JsDialogKind = message_mod.JsDialogKind;
+const FileDialogMode = message_mod.FileDialogMode;
 const MouseKind = message_mod.MouseKind;
 const MouseButton = message_mod.MouseButton;
 const KeyKind = message_mod.KeyKind;
@@ -147,6 +157,36 @@ pub fn encode(message: Message, out: []u8) Error!usize {
             try writeBrowser(&cursor, value.browser);
             try writeRect(&cursor, value.bounds);
         },
+        .dialog_reply => |value| {
+            try writeRequest(&cursor, value.browser, value.request);
+            try cursor.writeByte(@intFromBool(value.accept));
+            try cursor.writeByte(@intFromBool(value.suppress));
+            try writeDialogText(&cursor, value.text);
+        },
+        .file_dialog_path => |value| {
+            try writeRequest(&cursor, value.browser, value.request);
+            try writePath(&cursor, value.path);
+        },
+        .file_dialog_reply => |value| {
+            try writeRequest(&cursor, value.browser, value.request);
+            try cursor.writeByte(@intFromBool(value.accept));
+        },
+        .js_dialog => |value| {
+            try writeRequest(&cursor, value.browser, value.request);
+            try cursor.writeByte(@intFromEnum(value.kind));
+            try cursor.writeByte(@intFromBool(value.offer_suppress));
+            try writeOrigin(&cursor, value.origin);
+            try writeDialogText(&cursor, value.message);
+            try writeDialogText(&cursor, value.default_text);
+        },
+        .file_dialog => |value| {
+            try writeRequest(&cursor, value.browser, value.request);
+            try cursor.writeByte(@intFromEnum(value.mode));
+            try writeDialogText(&cursor, value.title);
+            try writeDialogText(&cursor, value.default_path);
+            try writeDialogText(&cursor, value.accept);
+        },
+        .dialog_closed => |value| try writeRequest(&cursor, value.browser, value.request),
         .url_changed => |value| {
             try writeBrowser(&cursor, value.browser);
             try writeUrl(&cursor, value.url);
@@ -276,6 +316,48 @@ pub fn decodeExact(frame: []const u8) Error!Message {
             .cursor = std.enums.fromInt(WebCursor, try cursor.readByte()) orelse return error.UnknownCursor,
         } },
         .ime_range => .{ .ime_range = .{ .browser = try readBrowser(&cursor), .bounds = try readRect(&cursor) } },
+        .dialog_reply => blk: {
+            const request = try readRequest(&cursor);
+            break :blk .{ .dialog_reply = .{
+                .browser = request.browser,
+                .request = request.request,
+                .accept = try readBool(&cursor),
+                .suppress = try readBool(&cursor),
+                .text = try readDialogText(&cursor),
+            } };
+        },
+        .file_dialog_path => blk: {
+            const request = try readRequest(&cursor);
+            break :blk .{ .file_dialog_path = .{ .browser = request.browser, .request = request.request, .path = try readPath(&cursor) } };
+        },
+        .file_dialog_reply => blk: {
+            const request = try readRequest(&cursor);
+            break :blk .{ .file_dialog_reply = .{ .browser = request.browser, .request = request.request, .accept = try readBool(&cursor) } };
+        },
+        .js_dialog => blk: {
+            const request = try readRequest(&cursor);
+            break :blk .{ .js_dialog = .{
+                .browser = request.browser,
+                .request = request.request,
+                .kind = std.enums.fromInt(JsDialogKind, try cursor.readByte()) orelse return error.UnknownDialogKind,
+                .offer_suppress = try readBool(&cursor),
+                .origin = try readOrigin(&cursor),
+                .message = try readDialogText(&cursor),
+                .default_text = try readDialogText(&cursor),
+            } };
+        },
+        .file_dialog => blk: {
+            const request = try readRequest(&cursor);
+            break :blk .{ .file_dialog = .{
+                .browser = request.browser,
+                .request = request.request,
+                .mode = std.enums.fromInt(FileDialogMode, try cursor.readByte()) orelse return error.UnknownFileDialogMode,
+                .title = try readDialogText(&cursor),
+                .default_path = try readDialogText(&cursor),
+                .accept = try readDialogText(&cursor),
+            } };
+        },
+        .dialog_closed => .{ .dialog_closed = try readRequest(&cursor) },
         .url_changed => .{ .url_changed = .{ .browser = try readBrowser(&cursor), .url = try readUrl(&cursor) } },
         .nav_state => .{ .nav_state = .{
             .browser = try readBrowser(&cursor),
@@ -705,7 +787,7 @@ test "input closed fields fail closed both ways" {
 }
 
 test "every single-byte corruption of input frames decodes to valid fields or errors" {
-    // 입력 tag 모두(방향 둘) — 새 tag 를 더하면 여기에도 넣는다.
+    // 입력·대화상자 tag 모두(방향 둘) — 새 tag 를 더하면 여기에도 넣는다.
     const samples = [_]Message{
         .{ .mouse = .{ .browser = 3, .kind = .down, .button = .middle, .point = .{ .x = 5, .y = -6 }, .modifiers = .{ .command = true }, .click_count = 1 } },
         .{ .wheel = .{ .browser = 3, .point = .{ .x = 5, .y = 6 }, .delta_x = 7, .delta_y = -8 } },
@@ -718,6 +800,13 @@ test "every single-byte corruption of input frames decodes to valid fields or er
         .{ .capture_lost = 3 },
         .{ .cursor_changed = .{ .browser = 3, .cursor = .none } },
         .{ .ime_range = .{ .browser = 3, .bounds = .{ .x = 1, .y = 2, .width = 3, .height = 4 } } },
+        // W5a 대화상자·파일 선택.
+        .{ .js_dialog = .{ .browser = 3, .request = 2, .kind = .prompt, .origin = "https://a.b", .message = "줄\n둘", .default_text = "기본" } },
+        .{ .file_dialog = .{ .browser = 3, .request = 2, .mode = .open_multiple, .title = "t", .default_path = "/a", .accept = ".png" } },
+        .{ .dialog_closed = .{ .browser = 3, .request = 2 } },
+        .{ .dialog_reply = .{ .browser = 3, .request = 2, .accept = true, .text = "답\t" } },
+        .{ .file_dialog_path = .{ .browser = 3, .request = 2, .path = "/tmp/사진.png" } },
+        .{ .file_dialog_reply = .{ .browser = 3, .request = 2, .accept = true } },
     };
     var encoded: [256]u8 = undefined;
     var corrupted: [256]u8 = undefined;
@@ -732,4 +821,97 @@ test "every single-byte corruption of input frames decodes to valid fields or er
             _ = try encode(message, &again);
         };
     }
+}
+
+// ── 대화상자·파일 선택(W5a) ───────────────────────────────────────────────────────────────────────────────
+
+test "dialog messages round trip — multi-line text, Korean, empty origin" {
+    const asked = (try roundTrip(.{ .js_dialog = .{
+        .browser = 7,
+        .request = 3,
+        .kind = .prompt,
+        .origin = "https://example.com",
+        .message = "첫 줄\n둘째 줄\t탭",
+        .default_text = "기본값",
+    } })).js_dialog;
+    try std.testing.expectEqual(JsDialogKind.prompt, asked.kind);
+    try std.testing.expectEqual(@as(u32, 3), asked.request);
+    try std.testing.expectEqualStrings("https://example.com", asked.origin);
+    try std.testing.expectEqualStrings("첫 줄\n둘째 줄\t탭", asked.message);
+    try std.testing.expectEqualStrings("기본값", asked.default_text);
+    const opaque_origin = (try roundTrip(.{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .alert, .origin = "", .message = "" } })).js_dialog;
+    try std.testing.expectEqualStrings("", opaque_origin.origin);
+
+    const file = (try roundTrip(.{ .file_dialog = .{ .browser = 7, .request = 4, .mode = .open_multiple, .accept = "image/*,.png" } })).file_dialog;
+    try std.testing.expectEqual(FileDialogMode.open_multiple, file.mode);
+    try std.testing.expectEqualStrings("image/*,.png", file.accept);
+    try std.testing.expectEqual(message_mod.Request{ .browser = 7, .request = 4 }, (try roundTrip(.{ .dialog_closed = .{ .browser = 7, .request = 4 } })).dialog_closed);
+
+    const reply = (try roundTrip(.{ .dialog_reply = .{ .browser = 7, .request = 3, .accept = true, .text = "한글\n입력", .suppress = true } })).dialog_reply;
+    try std.testing.expect(reply.accept and reply.suppress);
+    try std.testing.expectEqualStrings("한글\n입력", reply.text);
+    // (roundTrip 이 돌려준 글은 공용 버퍼를 빌린다 — 다음 roundTrip 전에 본다.)
+    try std.testing.expect((try roundTrip(.{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .alert, .origin = "", .message = "", .offer_suppress = true } })).js_dialog.offer_suppress);
+    try std.testing.expectEqualStrings("/Users/me/사진 1.png", (try roundTrip(.{ .file_dialog_path = .{ .browser = 7, .request = 4, .path = "/Users/me/사진 1.png" } })).file_dialog_path.path);
+    try std.testing.expect(!(try roundTrip(.{ .file_dialog_reply = .{ .browser = 7, .request = 4, .accept = false } })).file_dialog_reply.accept);
+}
+
+test "dialog directions: requests come to maru, answers go to the sidecar" {
+    inline for (.{ Tag.dialog_reply, Tag.file_dialog_path, Tag.file_dialog_reply }) |tag|
+        try std.testing.expectEqual(message_mod.Direction.to_sidecar, tag.direction());
+    inline for (.{ Tag.js_dialog, Tag.file_dialog, Tag.dialog_closed }) |tag|
+        try std.testing.expectEqual(message_mod.Direction.to_maru, tag.direction());
+}
+
+test "dialog closed fields fail closed both ways" {
+    var buf: [256]u8 = undefined;
+    const body = prefix_len + common_len;
+    // 요청 번호 0.
+    try std.testing.expectError(error.InvalidRequestId, encode(.{ .dialog_closed = .{ .browser = 1, .request = 0 } }, &buf));
+    var len = try encode(.{ .dialog_closed = .{ .browser = 1, .request = 1 } }, &buf);
+    std.mem.writeInt(u32, buf[body + 8 ..][0..4], 0, .big);
+    try std.testing.expectError(error.InvalidRequestId, decodeExact(buf[0..len]));
+    // 모르는 종류·방식.
+    len = try encode(.{ .js_dialog = .{ .browser = 1, .request = 1, .kind = .alert, .origin = "", .message = "" } }, &buf);
+    buf[body + 12] = 4;
+    try std.testing.expectError(error.UnknownDialogKind, decodeExact(buf[0..len]));
+    buf[body + 12] = 0;
+    buf[body + 13] = 2; // offer_suppress 는 bool
+    try std.testing.expectError(error.InvalidBool, decodeExact(buf[0..len]));
+    len = try encode(.{ .file_dialog = .{ .browser = 1, .request = 1, .mode = .save } }, &buf);
+    buf[body + 12] = 4;
+    try std.testing.expectError(error.UnknownFileDialogMode, decodeExact(buf[0..len]));
+    // 대화상자 글: 줄바꿈·탭은 받고 ESC·NUL·DEL 은 거절(페이지가 통제하는 글 — 주입).
+    for ([_][]const u8{ "\x1b]0;pwn\x07", "a\x00b", "a\x7fb" }) |bad| {
+        try std.testing.expectError(error.ControlCharacter, encode(.{ .js_dialog = .{ .browser = 1, .request = 1, .kind = .alert, .origin = "", .message = bad } }, &buf));
+        try std.testing.expectError(error.ControlCharacter, encode(.{ .dialog_reply = .{ .browser = 1, .request = 1, .accept = true, .text = bad } }, &buf));
+    }
+    // 출처: `scheme://host[:port]` 만 — 경로·사용자 정보·불투명 출처·공백·제어 문자는 위장 자리다.
+    for ([_][]const u8{ "https://x/\n", "https://a.b/path", "https://www.apple.com@evil.test", "maru", "data:text/html,hi", "https://a b", "HTTPS://a.b", "https://", "https://a.b:", "https://a.b:123456", "://a.b", "https://evil\u{202E}moc.elgoog", "https://apple.com\u{2044}login", "https://a\u{2028}b", "https://a\u{200B}b", "https://a\u{0085}b" }) |bad| {
+        try std.testing.expectError(error.InvalidOrigin, encode(.{ .js_dialog = .{ .browser = 1, .request = 1, .kind = .alert, .origin = bad, .message = "" } }, &buf));
+    }
+    for ([_][]const u8{ "https://example.com", "http://127.0.0.1:8080", "http://[::1]:3000", "https://한국.kr", "chrome-extension://abc" }) |good| {
+        _ = try encode(.{ .js_dialog = .{ .browser = 1, .request = 1, .kind = .alert, .origin = good, .message = "" } }, &buf);
+    }
+    // 경로: 절대 경로만, 제어 문자 없이.
+    for ([_][]const u8{ "", "relative/a.png", "/a\nb" }) |bad| {
+        const got = encode(.{ .file_dialog_path = .{ .browser = 1, .request = 1, .path = bad } }, &buf);
+        try std.testing.expect(got == error.InvalidPath or got == error.ControlCharacter);
+    }
+    // 글 상한(4 KiB) — 경계는 받고 하나 넘으면 거절. 출처도 같은 상한이다(URL 상한 32 KiB 가 아니라).
+    var big: [max_text_bytes + 1]u8 = undefined;
+    @memset(&big, 'a');
+    var large: [max_frame_bytes]u8 = undefined;
+    _ = try encode(.{ .js_dialog = .{ .browser = 1, .request = 1, .kind = .alert, .origin = "", .message = big[0..max_text_bytes] } }, &large);
+    try std.testing.expectError(error.TextTooLarge, encode(.{ .js_dialog = .{ .browser = 1, .request = 1, .kind = .alert, .origin = "", .message = &big } }, &large));
+    var long_origin: [fields.max_origin_bytes + 1]u8 = undefined;
+    @memset(&long_origin, 'a');
+    @memcpy(long_origin[0..8], "https://");
+    try std.testing.expectError(error.InvalidOrigin, encode(.{ .js_dialog = .{ .browser = 1, .request = 1, .kind = .alert, .origin = &long_origin, .message = "" } }, &large));
+    _ = try encode(.{ .js_dialog = .{ .browser = 1, .request = 1, .kind = .alert, .origin = long_origin[0..fields.max_origin_bytes], .message = "" } }, &large);
+}
+
+comptime {
+    // 가장 큰 대화상자 frame(글 셋 상한)도 frame 상한 안에 든다.
+    std.debug.assert(prefix_len + common_len + 8 + 4 + 2 + 3 * (4 + max_text_bytes) <= max_frame_bytes);
 }

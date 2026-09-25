@@ -213,6 +213,15 @@ pub fn indentGuideFromTheme(theme: appearance.ResolvedTheme) color.Rgb {
     return .{ .r = toward(bg.r, fg.r, 18), .g = toward(bg.g, fg.g, 18), .b = toward(bg.b, fg.b, 18) };
 }
 
+/// 공백 표시 기호 색(§5.1e) — 바탕을 본문색 쪽으로 다크 **16 %** · 라이트 **20 %**. VS Code `editorWhitespace.foreground`: 다크 `#e3e4e229`
+/// (`#e3e4e2` 16 %) · 라이트 `#33333333`(`#333333` 20 %) — 바탕 위에 얹힌 알파를 비율로 옮긴다.
+pub fn whitespaceFromTheme(theme: appearance.ResolvedTheme) color.Rgb {
+    const bg = theme.background;
+    const fg = theme.foreground;
+    const pct: u16 = if (color.relativeLuminance(bg) < 0.2) 16 else 20;
+    return .{ .r = toward(bg.r, fg.r, pct), .g = toward(bg.g, fg.g, pct), .b = toward(bg.b, fg.b, pct) };
+}
+
 /// 활성 안내선 색(§5.1c) — **44 %**. VS Code `activeBackground1`: 다크 `#707070`(≈ 45 %) · 라이트 `#939393`(≈ 42 %).
 pub fn indentGuideActiveFromTheme(theme: appearance.ResolvedTheme) color.Rgb {
     const bg = theme.background;
@@ -712,4 +721,26 @@ test "BPT1 괄호 쌍 색 — 다크는 ANSI 11·13·12, 라이트는 4·2·3(VS
     try std.testing.expectEqual(t.palette[4].?, light.levels[0]);
     try std.testing.expectEqual(t.palette[2].?, light.levels[1]);
     try std.testing.expectEqual(t.palette[3].?, light.levels[2]);
+}
+
+test "WST1 공백 기호 색 — 다크 16 % · 라이트 20 %(VS Code `editorWhitespace.foreground`) (visual-mapping §5.1e)" {
+    var t: appearance.ResolvedTheme = .{
+        .background = .{ .r = 0x1e, .g = 0x1e, .b = 0x1e },
+        .foreground = .{ .r = 0xd4, .g = 0xd4, .b = 0xd4 },
+        .cursor = .{ .r = 0xff, .g = 0xff, .b = 0xff },
+        .selection = .{ .r = 0x33, .g = 0x44, .b = 0x55 },
+        .search_match = .{ .r = 0x55, .g = 0x4a, .b = 0x1a },
+        .search_match_current = .{ .r = 0x99, .g = 0x77, .b = 0x22 },
+        .sidebar_background = .{ .r = 0x28, .g = 0x28, .b = 0x28 },
+        .sidebar_active = .{ .r = 0x40, .g = 0x40, .b = 0x40 },
+        .sidebar_foreground = .{ .r = 0xe8, .g = 0xe8, .b = 0xe8 },
+        .accent = .{ .r = 0xdd, .g = 0xa1, .b = 0x5e },
+        .min_contrast = 0,
+    };
+    // 다크: 30 + 16 % × 182 = 59.1 → 59(0x3b) — VS Code `#e3e4e229` 를 `#1e1e1e` 에 얹으면 ≈ `#3d3d3d`
+    try std.testing.expectEqual(color.Rgb{ .r = 0x3b, .g = 0x3b, .b = 0x3b }, whitespaceFromTheme(t));
+    // 라이트: 255 − 20 % × 255 = 204 → 0xcc — VS Code `#33333333` 를 흰 바탕에 얹으면 ≈ `#d6d6d6`
+    t.background = .{ .r = 0xff, .g = 0xff, .b = 0xff };
+    t.foreground = .{ .r = 0x00, .g = 0x00, .b = 0x00 };
+    try std.testing.expectEqual(color.Rgb{ .r = 0xcc, .g = 0xcc, .b = 0xcc }, whitespaceFromTheme(t));
 }

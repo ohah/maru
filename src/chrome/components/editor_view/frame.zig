@@ -23,6 +23,9 @@ const minimap = @import("minimap.zig");
 pub const diagnostic = @import("diagnostic.zig");
 const surface = @import("surface.zig");
 const visual_map = @import("../../ui/visual_map.zig");
+const whitespace = @import("whitespace.zig");
+/// 공백 표시 모드(§5.1e) — 부르는 쪽(비교 뷰의 열 등)이 `whitespace` 를 따로 들이지 않게 다시 내보낸다.
+pub const WhitespaceMode = whitespace.Mode;
 const scroll_area = @import("../../ui/scroll_area.zig");
 
 /// 내용(gutter·본문·스크롤바)이 뷰 사각에서 안쪽으로 들어가는 여백(px).
@@ -197,6 +200,8 @@ pub const Props = struct {
     indent_guides: GuideWindow = .{},
     /// 안내선 간격(열). 0 이면 안 그린다.
     guide_unit: u16 = 0,
+    /// **공백 표시**(§5.1e) — VS Code `renderWhitespace`. `selection` 이면 `selection_marks` 안만. 기본 `none`(부르는 쪽이 설정을 넘긴다).
+    render_whitespace: whitespace.Mode = .none,
     /// **짝 괄호 상자**(§5.1b) — 줄마다 괄호 글자 마크(`search_marks` 와 같은 축·같은 byte 규칙, 줄 안 오름차순·중복 없음).
     bracket_marks: ?[]const []const Mark = null,
     /// **진단**(§5.4) — 줄마다의 밑줄 조각(`search_marks` 와 같은 축·같은 byte 규칙). 물결(지그재그)로 그린다.
@@ -936,11 +941,17 @@ pub fn build(props: Props, scratch: Scratch) Written {
     const tail_end = mm_base + mm_ops + sw.ops + hw.ops;
     const ig_ops = paintIndentGuides(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[tail_end..]);
     std.mem.rotate(draw.Op, scratch.ops[ig_base .. tail_end + ig_ops], tail_end - ig_base);
+    // **공백 표시 — 같은 규율로 맨 나중에 받고 선택 층 바로 뒤로 옮긴다**(§5.1e). 선택 배경 위에 서고 검색·괄호 상자·진단·caret 아래다. 전체를
+    // 고르면 기호가 수천이라 먼저 받으면 caret 을 굶긴다(안내선에서 배운 것 — §5.1c `IGF4`).
+    const ws_base = ig_base + ig_ops + lh_ops + occ_ops + sel_ops;
+    const ws_tail = tail_end + ig_ops;
+    const ws_ops = paintWhitespace(props, layout, scratch.visual_rows[0..cw.visual_rows], scratch.ops[ws_tail..], scratch.count_scratch);
+    std.mem.rotate(draw.Op, scratch.ops[ws_base .. ws_tail + ws_ops], ws_tail - ws_base);
 
     // **`occ_ops` 를 빼면 안 된다**(§5.1a — `OCH5`): 뒤 층의 자리(`find_base`)가 이미 그 몫을 세므로, 여기서 빠지면 강조 수만큼
     // 끝 op(막대·미니맵)가 잘린다 — 강조가 선 동안 막대가 사라졌다(2026-09-23 발견).
     // 현재 줄(`lh_ops`)·짝 괄호(`brk_ops`)도 같은 이유로 빠지면 안 된다(`LHL5`).
-    const body_ops = bg.ops + cw.ops + gw.ops + sw.ops + band_ops + ig_ops + lh_ops + occ_ops + sel_ops + find_ops + brk_ops + diag_ops + caret_ops + mm_ops + hw.ops;
+    const body_ops = bg.ops + cw.ops + gw.ops + sw.ops + band_ops + ig_ops + lh_ops + occ_ops + sel_ops + ws_ops + find_ops + brk_ops + diag_ops + caret_ops + mm_ops + hw.ops;
     return .{
         .total_visual_rows = total_visual,
         .max_top_line = max_top.line,
@@ -1451,6 +1462,58 @@ fn paintIndentGuides(props: Props, layout: geometry.Layout, visual: []const visu
                     .h = props.cell_h_px,
                 },
                 .fill_role = if (g.active == k) .indent_guide_active else .indent_guide,
+            } };
+            n += 1;
+        }
+    }
+    return n;
+}
+
+const whitespace_dot = [_]draw.Run{.{ .text = "\u{b7}" }};
+const whitespace_arrow = [_]draw.Run{.{ .text = "\u{2192}" }};
+
+/// **공백 표시**(§5.1e) — 기호를 세울 공백·탭(`whitespace.collect`)의 자리에 공백은 `·`, 탭은 첫 칸에 `→`. 열 계산은 선택 강조와 같은
+/// `columnsAtOffsetsWith` 한 번(랩 조각 · 가로 스크롤 · 인레이를 같은 규칙으로 지난다). 조각마다 그 조각의 열 창에 드는 것만 낸다.
+fn paintWhitespace(props: Props, layout: geometry.Layout, visual: []const visual_map.VisualRow, out: []draw.Op, scratch: []u8) usize {
+    if (props.render_whitespace == .none) return 0;
+    // 작업 칸 — 자리(offsets)와 열(cols) 둘. 모자라면 앞에서부터 담은 만큼만(줄 앞쪽이 먼저 보인다).
+    const pairs = scratch.len / (2 * @sizeOf(u32));
+    if (pairs == 0) return 0;
+    const offsets = std.mem.bytesAsSlice(u32, scratch[0 .. pairs * @sizeOf(u32)]);
+    const cols = std.mem.bytesAsSlice(u32, scratch[pairs * @sizeOf(u32) .. pairs * 2 * @sizeOf(u32)]);
+    var sel_buf: [64]whitespace.Range = undefined;
+    var n: usize = 0;
+    for (visual, 0..) |v, i| {
+        if (n >= out.len) break;
+        if (v.kind != .text) continue; // 위젯 행은 문서 줄이 아니다
+        const idx = v.docIndex(props.first_line);
+        if (idx >= props.lines.len) continue;
+        const line = props.lines[idx];
+        var sels: []const whitespace.Range = &.{};
+        if (props.render_whitespace == .selection) {
+            const marks: []const Mark = if (props.selection_marks) |sm| (if (idx < sm.len) sm[idx] else &.{}) else &.{};
+            if (marks.len == 0) continue;
+            const k = @min(marks.len, sel_buf.len);
+            for (marks[0..k], sel_buf[0..k]) |m, *r| r.* = .{ .start = m.start, .end = m.start + m.len };
+            sels = sel_buf[0..k];
+        }
+        const got = whitespace.collect(line, props.render_whitespace, sels, offsets);
+        if (got == 0) continue;
+        const row_end = v.start_col + layout.content.width;
+        content.columnsAtOffsetsWith(line, props.tab_width, offsets[0..got], cols[0..got], row_end, props.line_inlays.at(idx));
+        const y = props.rect.y + @as(i32, @intCast(i)) * @as(i32, props.cell_h_px);
+        for (offsets[0..got], cols[0..got]) |off, col| {
+            if (col < v.start_col or col >= row_end) continue; // 이 조각(가로로 민 창) 밖
+            if (n >= out.len) break;
+            const on_screen: u32 = @as(u32, layout.contentLeft()) + (col - v.start_col);
+            out[n] = .{ .text = .{
+                .origin = .{ .x = props.rect.x + @as(i32, @intCast(on_screen * props.cell_w_px)), .y = y },
+                .runs = if (line[off] == '\t') &whitespace_arrow else &whitespace_dot,
+                .role = .whitespace,
+                .max_cols = 1,
+                .font_px = props.font_px,
+                .line_height_px = props.cell_h_px,
+                .cell_w_px = props.cell_w_px,
             } };
             n += 1;
         }
@@ -5039,4 +5102,89 @@ test "IGF4 안내선은 저장소를 맨 나중에 받는다 — 모자라면 �
         break;
     };
     try testing.expect(lh_at != null and lh_at.? > g0);
+}
+
+/// 판정자용 — 그린 op 중 공백 기호(`whitespace` 역할의 글자)의 (화면 열, 행, 글리프).
+fn whitespaceGlyphs(props: Props, ops: []const draw.Op, out: [][3]u32) [][3]u32 {
+    const layout = geometry.compute(props.total_cols, props.total_lines, .{});
+    var n: usize = 0;
+    for (ops) |op| {
+        if (op != .text or op.text.role != .whitespace) continue;
+        if (n == out.len) break;
+        const col: u32 = @intCast(@divTrunc(op.text.origin.x - props.rect.x, @as(i32, props.cell_w_px)) - @as(i32, layout.contentLeft()));
+        const row: u32 = @intCast(@divTrunc(op.text.origin.y - props.rect.y, @as(i32, props.cell_h_px)));
+        const g = std.unicode.utf8Decode(op.text.runs[0].text) catch 0;
+        out[n] = .{ col, row, g };
+        n += 1;
+    }
+    return out[0..n];
+}
+
+test "WSF1 공백 표시 — 선택 안의 공백은 `·` · 탭은 첫 칸에 `→`, 선택 밖과 글자는 없다; 가로로 밀면 열도 민다 (§5.1e)" {
+    const lines = [_][]const u8{ "a  b\tc", "x y" };
+    const sel = [_][]const Mark{ &.{.{ .start = 1, .len = 4 }}, &.{} }; // "  b\t" — 둘째 줄은 선택 없음
+    var props = testProps(&lines, false);
+    props.selection_marks = &sel;
+    props.render_whitespace = .selection;
+    var bufs: TestBuffers = .{};
+    const w = build(props, bufs.scratch());
+    var got_buf: [16][3]u32 = undefined;
+    const got = whitespaceGlyphs(props, bufs.ops[0..w.ops], &got_buf);
+    // 공백 1·2 → 열 1·2 `·`, 탭(4) → 열 4 `→`(탭은 4..8 을 덮지만 기호는 첫 칸 하나)
+    try testing.expectEqualSlices([3]u32, &.{ .{ 1, 0, 0xB7 }, .{ 2, 0, 0xB7 }, .{ 4, 0, 0x2192 } }, got);
+    // all — 둘째 줄의 공백도, 첫 줄 선택 밖 공백은 없다(모두 선택 안이다)
+    props.render_whitespace = .all;
+    var bufs2: TestBuffers = .{};
+    const w2 = build(props, bufs2.scratch());
+    const got2 = whitespaceGlyphs(props, bufs2.ops[0..w2.ops], &got_buf);
+    try testing.expectEqualSlices([3]u32, &.{ .{ 1, 0, 0xB7 }, .{ 2, 0, 0xB7 }, .{ 4, 0, 0x2192 }, .{ 1, 1, 0xB7 } }, got2);
+    // 가로로 두 칸 민다 — 열 1 은 화면 밖, 나머지는 두 칸 왼쪽
+    props.first_col = 2;
+    var bufs3: TestBuffers = .{};
+    const w3 = build(props, bufs3.scratch());
+    const got3 = whitespaceGlyphs(props, bufs3.ops[0..w3.ops], &got_buf);
+    try testing.expectEqualSlices([3]u32, &.{ .{ 0, 0, 0xB7 }, .{ 2, 0, 0x2192 } }, got3);
+    // none — 없다
+    props.first_col = 0;
+    props.render_whitespace = .none;
+    var bufs4: TestBuffers = .{};
+    const w4 = build(props, bufs4.scratch());
+    try testing.expectEqual(@as(usize, 0), whitespaceGlyphs(props, bufs4.ops[0..w4.ops], &got_buf).len);
+}
+
+test "WSF2 공백 기호는 저장소를 맨 나중에 받는다 — 모자라면 기호가 잘리고 caret·선택·막대는 그대로다 (§5.1e · §5.1c IGF4 와 같은 규율)" {
+    var many: [15][]const u8 = undefined;
+    for (&many) |*l| l.* = "    alpha    beta";
+    var props = testProps(&many, false);
+    props.visible_rows = 11;
+    const caret_row = [_]u32{6};
+    var carets: [15][]const u32 = undefined;
+    for (&carets) |*c| c.* = &.{};
+    carets[3] = &caret_row;
+    props.carets = &carets;
+    var sel: [15][]const Mark = undefined;
+    for (&sel) |*m| m.* = &.{.{ .start = 0, .len = 17 }}; // 전부 골랐다
+    props.selection_marks = &sel;
+    var b0: TestBuffers = .{};
+    const p0 = build(props, b0.scratch()); // 기호 없이
+    props.render_whitespace = .selection;
+    var b1: TestBuffers = .{};
+    var s1 = b1.scratch();
+    const spare: usize = 3;
+    s1.ops = s1.ops[0 .. p0.ops + spare]; // 기호 88 개(11 행 × 8) 중 셋만 들어간다
+    const p1 = build(props, s1);
+    try testing.expectEqual(p0.ops + spare, p1.ops);
+    var k: usize = 0;
+    var glyphs: usize = 0;
+    for (s1.ops[0..p1.ops]) |op| {
+        if (op == .text and op.text.role == .whitespace) {
+            glyphs += 1;
+            continue;
+        }
+        try testing.expectEqual(std.meta.activeTag(b0.ops[k]), std.meta.activeTag(op));
+        if (op == .quad) try testing.expect(std.meta.eql(b0.ops[k], op));
+        k += 1;
+    }
+    try testing.expectEqual(p0.ops, k);
+    try testing.expectEqual(spare, glyphs);
 }

@@ -65,6 +65,7 @@ pub fn tokensFor(appearance: config.appearance.ResolvedAppearance) chrome.Tokens
         .bracket_pair_2 = bracket_colors.levels[1],
         .bracket_pair_3 = bracket_colors.levels[2],
         .bracket_unexpected = bracket_colors.unexpected,
+        .whitespace = session.syntax_theme.whitespaceFromTheme(t), // 공백 표시 기호(§5.1e)
         .diagnostic_error = diag_colors.err,
         .diagnostic_warning = diag_colors.warning,
         .diagnostic_info = diag_colors.info,

@@ -1091,6 +1091,9 @@ pub const RenderLineHighlight = enum { none, gutter, line, all };
 /// 괄호가 없으면 caret 을 품는 가장 안쪽 쌍까지.
 pub const MatchBrackets = enum { never, near, always };
 
+/// 공백 표시(visual-mapping §5.1e) — VS Code `editor.renderWhitespace` 와 같은 값.
+pub const RenderWhitespace = enum { none, boundary, selection, trailing, all };
+
 pub const EditorConfig = struct {
     /// 본문 폭을 넘는 줄을 다음 시각 행으로 접을지
     /// ([native-editor-visual-mapping.md](../../docs/native-editor-visual-mapping.md) §4 세로 축).
@@ -1212,6 +1215,8 @@ pub const EditorConfig = struct {
     bracket_pair_colorization: bool = true,
     /// 괄호 종류마다 단계를 따로 센다(§5.1d). VS Code `editor.bracketPairColorization.independentColorPoolPerBracketType` 와 같은 기본(끔).
     bracket_pair_colorization_independent_pools: bool = false,
+    /// **공백 표시**(§5.1e). VS Code `editor.renderWhitespace` 와 같은 기본(`selection` — 선택한 글 안의 공백·탭만).
+    render_whitespace: RenderWhitespace = .selection,
     /// **진단 표시**(visual-mapping §5.4) — 물결 밑줄·gutter 글리프·막대/미니맵 마커·F8 이동을 한꺼번에 켜고 끈다. 지금의
     /// 출처는 구문 오류(tree-sitter)라 타이핑 중에도 밑줄이 뜬다 — 거슬리면 끈다.
     diagnostics: bool = true,
@@ -1227,7 +1232,7 @@ pub const EditorConfig = struct {
     /// 명령만 남는다(VS Code `editor.quickSuggestions` 와 같은 관계).
     quick_suggestions: bool = true,
 
-    pub const schema = .{ // 키: editor.wrap · editor.tab-width · editor.cursor-shape · editor.scroll-beyond-last-column · editor.cursor-surrounding-lines · editor.cursor-surrounding-columns · editor.minimap · editor.minimap-width · editor.sticky-scroll · editor.sticky-scroll-max-lines · editor.render-line-highlight · editor.match-brackets · editor.guides-indentation · editor.guides-highlight-active-indentation · editor.bracket-pair-colorization · editor.bracket-pair-colorization-independent-pools · editor.diagnostics · editor.hover · editor.hover-delay · editor.parameter-hints · editor.quick-suggestions
+    pub const schema = .{ // 키: editor.wrap · editor.tab-width · editor.cursor-shape · editor.scroll-beyond-last-column · editor.cursor-surrounding-lines · editor.cursor-surrounding-columns · editor.minimap · editor.minimap-width · editor.sticky-scroll · editor.sticky-scroll-max-lines · editor.render-line-highlight · editor.match-brackets · editor.guides-indentation · editor.guides-highlight-active-indentation · editor.bracket-pair-colorization · editor.bracket-pair-colorization-independent-pools · editor.render-whitespace · editor.diagnostics · editor.hover · editor.hover-delay · editor.parameter-hints · editor.quick-suggestions
         // **둘 다 설정 GUI에 뜬다.** `wrap`은 한때 `hidden`이었는데(*"편집기가 제품 화면에 배선되기
         // 전이라 토글해도 아무 일이 없어 버그로 보인다"*) 값이 렌더에 닿으면서 벗겼다 —
         // `schema.zig`의 "editor.wrap은 설정 UI에 뜬다"가 그 사실을 잰다. 탭 폭도 같은 조건을
@@ -1267,6 +1272,7 @@ pub const EditorConfig = struct {
         .guides_highlight_active_indentation = Meta{ .key_seg = "guides-highlight-active-indentation", .doc = .cfg_editor_guides_highlight_active_indentation, .widget = .toggle, .section = .editor },
         // 괄호 쌍 색 둘(§5.1d) — VS Code 의 `bracketPairColorization.enabled`·`.independentColorPoolPerBracketType` 을 평평하게 적었다.
         .bracket_pair_colorization = Meta{ .key_seg = "bracket-pair-colorization", .doc = .cfg_editor_bracket_pair_colorization, .widget = .toggle, .section = .editor },
+        .render_whitespace = Meta{ .key_seg = "render-whitespace", .doc = .cfg_editor_render_whitespace, .widget = .dropdown, .section = .editor },
         .bracket_pair_colorization_independent_pools = Meta{ .key_seg = "bracket-pair-colorization-independent-pools", .doc = .cfg_editor_bracket_pair_colorization_independent_pools, .widget = .toggle, .section = .editor },
         .diagnostics = Meta{ .doc = .cfg_editor_diagnostics, .widget = .toggle, .section = .editor },
         .hover = Meta{ .doc = .cfg_editor_hover, .widget = .toggle, .section = .editor },

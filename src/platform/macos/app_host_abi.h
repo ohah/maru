@@ -9,7 +9,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 194u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 195u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -2107,6 +2107,17 @@ int32_t maru_macos_app_session_take_osr_discard_marked(MaruAppHostSession *sessi
 #define MARU_OSR_DIALOG_FILE_OPEN_MULTIPLE 11u
 #define MARU_OSR_DIALOG_FILE_OPEN_FOLDER 12u
 #define MARU_OSR_DIALOG_FILE_SAVE 13u
+/* v195(W5b): 권한 요청 — ok_label 은 허용, cancel_label 은 차단(닫기 단추 문구는 maru_macos_web_dialog_string(5)). message 는
+   청한 권한 목록. permission_kinds·permission_media 는 청한 종류(CEF 비트 — 미디어: 1 마이크 · 2 카메라 · 4 화면 소리 ·
+   8 화면, 프롬프트: 4 카메라 · 0x1000 마이크 …) — Swift 는 허용하기 전에 macOS 권한을 받는다. */
+#define MARU_OSR_DIALOG_PERMISSION 20u
+/* v195(W5b): 권한 요청의 답 — maru_macos_app_session_osr_permission_reply 의 result. */
+#define MARU_OSR_PERMISSION_ACCEPT 0u
+#define MARU_OSR_PERMISSION_DENY 1u
+#define MARU_OSR_PERMISSION_DISMISS 2u
+/* maru 가 묻지 못했다(macOS 가 장치를 막음 등) — 허용·차단으로 기억하지 않고 사용자 닫기 수에도 섞이지 않는다(Chromium 은 따로
+   세어 넷이면 한동안 묻지 않는다 — 미디어 요청은 세지 않는다). */
+#define MARU_OSR_PERMISSION_IGNORE 3u
 typedef struct MaruAppHostOsrDialog {
     uint64_t surface_id;
     /* maru 가 매긴 번호 — 답은 이것으로 짝을 찾는다(sidecar 가 다시 떠도 겹치지 않는다). */
@@ -2127,6 +2138,8 @@ typedef struct MaruAppHostOsrDialog {
     size_t ok_label_len;
     const uint8_t *cancel_label;
     size_t cancel_label_len;
+    uint32_t permission_kinds;
+    uint32_t permission_media;
 } MaruAppHostOsrDialog;
 /* v194(W5a): 이 창에 띄울 대화상자·파일 선택이 있으면 1 과 *out(한 번). 키보드 초점을 가진 탭의 요청만, 한 창에 하나씩. */
 int32_t maru_macos_app_session_take_osr_dialog(MaruAppHostSession *session, MaruAppHostOsrDialog *out);
@@ -2141,8 +2154,13 @@ void maru_macos_app_session_osr_file_dialog_path(MaruAppHostSession *session, ui
                                                  const uint8_t *path, size_t path_len);
 /* v194(W5a): 파일 선택을 끝낸다 — accept 0 이면 취소(보낸 경로는 버린다). */
 void maru_macos_app_session_osr_file_dialog_reply(MaruAppHostSession *session, uint64_t surface_id, uint64_t token, int32_t accept);
+/* v195(W5b): 권한 요청의 답(MARU_OSR_PERMISSION_*). 허용·차단은 Chromium 이 그 사이트에 기억한다(미디어 요청은 기억하지 않는다),
+   닫기·못 물음은 허용·차단으로 기억하지 않는다(프롬프트는 되풀이되면 Chromium 이 한동안 묻지 않는다 — 닫기 셋·못 물음 넷).
+   답했으면 1 — 권한 요청이 아니거나 이미 사라졌으면(이동·닫힘) 0. */
+int32_t maru_macos_app_session_osr_permission_reply(MaruAppHostSession *session, uint64_t surface_id, uint64_t token, uint32_t result);
 /* v194(W5a): sheet 의 나머지 문구를 out 에 쓰고 길이를 돌려준다(UTF-8, NUL 없음). which: 0 억제 선택 · 1 폴더 올리기 확인
-   제목(number = 파일 수) · 2 올리기 단추 · 3 취소 단추 · 4 폴더가 너무 크다(number = 상한). */
+   제목(number = 파일 수) · 2 올리기 단추 · 3 취소 단추 · 4 폴더가 너무 크다(number = 상한) · v195(W5b): 5 권한 닫기 단추 ·
+   6 macOS 가 Maru 의 장치 사용을 막았다(number: 0 카메라 · 1 마이크 · 2 화면 기록) · 7 시스템 설정 열기 단추 · 8 확인 단추. */
 size_t maru_macos_web_dialog_string(uint32_t which, int64_t number, uint8_t *out, size_t out_cap);
 void maru_macos_mermaid_snapshot(MaruMermaidCoordinatorSnapshot *out_snapshot);
 /* allocation-free frame-tick gate와 exact renderer lifetime revoke. */

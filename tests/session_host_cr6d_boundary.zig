@@ -66,9 +66,9 @@ test "CR6d 경계는 exact recovered screen probe와 actual AppKit input smoke�
 
     // The read-only record exposes five scalar observations and no
     // input handle, runtime pointer, or action token that Swift could use to bypass NSEvent.
-    try std.testing.expectEqual(@as(usize, 1), count(app, "pub const abi_version: u32 = 194;"));
-    try std.testing.expectEqual(@as(usize, 1), count(abi, "expectEqual(@as(u32, 194), abi_version)"));
-    try std.testing.expectEqual(@as(usize, 1), count(header, "#define MARU_MACOS_APP_HOST_ABI_VERSION 194u"));
+    try std.testing.expectEqual(@as(usize, 1), count(app, "pub const abi_version: u32 = 195;"));
+    try std.testing.expectEqual(@as(usize, 1), count(abi, "expectEqual(@as(u32, 195), abi_version)"));
+    try std.testing.expectEqual(@as(usize, 1), count(header, "#define MARU_MACOS_APP_HOST_ABI_VERSION 195u"));
     const probe_record = between(
         abi,
         "pub const SessionHostInputSmokeProbe = extern struct {",
@@ -286,7 +286,12 @@ test "CR6d v2b0b는 preflight 뒤 전체 inventory를 Zig 판정자에 exact onc
     try std.testing.expectEqual(@as(usize, 2), count(build, "SessionHostIMECandidateObservation.swift"));
     try std.testing.expectEqual(@as(usize, 1), count(header, "maru_macos_session_host_ime_candidate_observation_publish("));
     try std.testing.expectEqual(@as(usize, 1), count(abi, "pub export fn maru_macos_session_host_ime_candidate_observation_publish("));
-    try std.testing.expectEqual(@as(usize, 1), count(swift, "CGPreflightScreenCaptureAccess()"));
+    // 화면 기록 권한 확인은 두 곳뿐이다 — 이 입력 smoke 와 W5b 의 웹 화면 공유 허용(`ensureMacAccess` — 사용자가 maru 권한
+    // sheet 에서 허용한 뒤 macOS 권한을 본다). 그 밖의 호출은 없다.
+    try std.testing.expectEqual(@as(usize, 2), count(swift, "CGPreflightScreenCaptureAccess()"));
+    const web_access = between(swift, "private func ensureMacAccess(", "private func showMacAccessBlocked(") orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), count(web_access, "CGPreflightScreenCaptureAccess()"));
     const input_smoke = between(
         swift,
         "private func maybeRunSessionHostInputContinuitySmoke()",

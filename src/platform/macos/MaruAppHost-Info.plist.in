@@ -34,6 +34,13 @@
     <string>NSApplication</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <!-- W5b: Chromium 탭(`browser.engine = chromium`)의 웹 페이지가 카메라·마이크를 청하고 사용자가 maru 권한 창에서 허용하면
+         Maru 가 macOS 권한을 받는다. sidecar 는 Maru 가 띄운 자식이라 macOS 가 그 사용을 Maru 에 돌린다 — 이 문구가 없으면 macOS 가
+         장치에 닿는 프로세스를 죽인다(docs/plans/web-osr-backend.md C6). -->
+    <key>NSCameraUsageDescription</key>
+    <string>Web pages in Maru browser tabs can use your camera when you allow it.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Web pages in Maru browser tabs can use your microphone when you allow it.</string>
     <!-- 번들 Contents/Resources/Fonts 안의 폰트를 앱 실행 시 자동 등록한다. 시스템에 폰트가
          설치돼 있지 않아도 기본 폰트(JetBrains Mono)를 항상 쓸 수 있게 한다(self-contained). -->
     <key>ATSApplicationFontsPath</key>

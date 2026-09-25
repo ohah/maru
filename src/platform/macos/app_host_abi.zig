@@ -173,7 +173,18 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
 }
 
 test "ABI v185 notification release end-all and cold route values match the C header" {
-    try std.testing.expectEqual(@as(u32, 194), abi_version);
+    try std.testing.expectEqual(@as(u32, 195), abi_version);
+    // W5a·W5b: Swift 가 쓰는 대화상자 종류·권한 답 상수가 Zig 열거형과 같다.
+    const web_osr_mod = session_mod.web_osr;
+    try std.testing.expectEqual(@as(u32, c.MARU_OSR_DIALOG_PROMPT), @intFromEnum(web_osr_mod.DialogKind.prompt));
+    try std.testing.expectEqual(@as(u32, c.MARU_OSR_DIALOG_FILE_OPEN), @intFromEnum(web_osr_mod.DialogKind.file_open));
+    try std.testing.expectEqual(@as(u32, c.MARU_OSR_DIALOG_FILE_SAVE), @intFromEnum(web_osr_mod.DialogKind.file_save));
+    try std.testing.expectEqual(@as(u32, c.MARU_OSR_DIALOG_PERMISSION), @intFromEnum(web_osr_mod.DialogKind.permission));
+    const Result = maru.session.web_sidecar.message.PermissionResult;
+    try std.testing.expectEqual(@as(u32, c.MARU_OSR_PERMISSION_ACCEPT), @intFromEnum(Result.accept));
+    try std.testing.expectEqual(@as(u32, c.MARU_OSR_PERMISSION_DENY), @intFromEnum(Result.deny));
+    try std.testing.expectEqual(@as(u32, c.MARU_OSR_PERMISSION_DISMISS), @intFromEnum(Result.dismiss));
+    try std.testing.expectEqual(@as(u32, c.MARU_OSR_PERMISSION_IGNORE), @intFromEnum(Result.ignore));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @intFromEnum(AppInstanceLeaseResult.acquired));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_HELD), @intFromEnum(AppInstanceLeaseResult.held));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_UNSAFE), @intFromEnum(AppInstanceLeaseResult.unsafe));
@@ -4587,6 +4598,8 @@ pub export fn maru_macos_app_session_take_osr_dialog(session: ?*AppSession, out:
         .ok_label_len = view.ok_label.len,
         .cancel_label = view.cancel_label.ptr,
         .cancel_label_len = view.cancel_label.len,
+        .permission_kinds = view.permission_kinds,
+        .permission_media = view.permission_media,
     };
     return 1;
 }
@@ -4611,6 +4624,14 @@ pub export fn maru_macos_app_session_osr_file_dialog_path(session: ?*AppSession,
 pub export fn maru_macos_app_session_osr_file_dialog_reply(session: ?*AppSession, surface_id: u64, token: u64, accept: i32) void {
     const app = session orelse return;
     session_mod.web_ops.osrFileDialogReply(app, surface_id, token, accept != 0);
+}
+
+/// v195(W5b): 권한 요청의 답 — 답했으면 1(요청이 이미 사라졌으면 0). 모르는 값이면 「못 물음」으로 본다(차단은 Chromium 이
+/// 기억하고 닫기는 embargo 를 쌓는다).
+pub export fn maru_macos_app_session_osr_permission_reply(session: ?*AppSession, surface_id: u64, token: u64, result: u32) i32 {
+    const app = session orelse return 0;
+    const value = std.enums.fromInt(maru.session.web_sidecar.message.PermissionResult, result) orelse .ignore;
+    return @intFromBool(session_mod.web_ops.osrPermissionReply(app, surface_id, token, value));
 }
 
 pub export fn maru_macos_web_dialog_string(which: u32, number: i64, out: ?[*]u8, out_cap: usize) usize {

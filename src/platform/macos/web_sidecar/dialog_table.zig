@@ -1,4 +1,4 @@
-//! 답을 기다리는 대화상자·파일 선택 요청(W5a — C6)의 표. CEF 를 모르는 순수 부분이라 CEF 없이 시험한다 — 콜백·경로 목록은
+//! 답을 기다리는 대화상자·파일 선택(W5a)·권한(W5b) 요청 — C6 — 의 표. CEF 를 모르는 순수 부분이라 CEF 없이 시험한다 — 콜백·경로 목록은
 //! 불투명 포인터로만 든다(푸는 것은 `dialogs.zig`).
 //!
 //! 번호는 sidecar 전체에서 매긴다(0 은 「없음」이라 건너뛴다). 답은 (브라우저, 번호, 종류)가 모두 맞아야 짝을 찾는다 — 다른
@@ -16,7 +16,22 @@ pub const capacity = 64;
 /// 파일 선택 하나에 받는 경로 상한 — maru 가 이보다 많이 보내면 뒤는 버린다(끝없이 쌓지 않게).
 pub const max_paths = 4096;
 
-pub const Kind = enum { js, file };
+/// 권한 요청(프롬프트·미디어)은 한 브라우저가 이만큼만 동시에 기다리게 한다 — 페이지가 요청을 쏟아 표를 채우면 다른 탭의 JS
+/// 대화상자까지 못 묻는다(표는 sidecar 전체가 나눠 쓴다).
+pub const max_permissions_per_browser = 8;
+
+pub const Kind = enum {
+    js,
+    file,
+    /// `on_show_permission_prompt` — CEF 가 준 `prompt_id` 를 `extra` 에 둔다(닫힘 알림이 이 번호로 온다).
+    prompt,
+    /// `on_request_media_access_permission` — 청한 미디어 비트를 `extra` 에 둔다(허용하면 그대로 돌려준다).
+    media,
+
+    pub fn isPermission(self: Kind) bool {
+        return self == .prompt or self == .media;
+    }
+};
 
 pub const Entry = struct {
     browser: BrowserId,
@@ -27,6 +42,7 @@ pub const Entry = struct {
     /// 파일 선택이 받은 경로 목록(`cef_string_list_t`) — 첫 경로에 만든다.
     paths: ?*anyopaque = null,
     path_count: u32 = 0,
+    extra: u64 = 0,
 };
 
 pub const Table = struct {
@@ -43,6 +59,31 @@ pub const Table = struct {
         if (self.next == 0) self.next = 1;
         slot.* = .{ .browser = browser, .request = request, .kind = kind, .callback = callback };
         return request;
+    }
+
+    /// 권한 요청을 적는다 — 그 브라우저가 이미 `max_permissions_per_browser` 만큼 기다리면 받지 않는다.
+    pub fn addPermission(self: *Table, browser: BrowserId, kind: Kind, callback: *anyopaque, extra: u64) ?RequestId {
+        std.debug.assert(kind.isPermission());
+        var waiting: usize = 0;
+        for (self.entries) |slot| {
+            if (slot) |entry| if (entry.browser == browser and entry.kind.isPermission()) {
+                waiting += 1;
+            };
+        }
+        if (waiting >= max_permissions_per_browser) return null;
+        const request = self.add(browser, kind, callback) orelse return null;
+        self.find(browser, request, kind).?.extra = extra;
+        return request;
+    }
+
+    /// CEF 가 닫은 프롬프트(`prompt_id`)를 찾는다.
+    pub fn findPrompt(self: *Table, browser: BrowserId, prompt_id: u64) ?*Entry {
+        for (&self.entries) |*slot| {
+            if (slot.*) |*entry| {
+                if (entry.browser == browser and entry.kind == .prompt and entry.extra == prompt_id) return entry;
+            }
+        }
+        return null;
     }
 
     pub fn find(self: *Table, browser: BrowserId, request: RequestId, kind: Kind) ?*Entry {
@@ -122,6 +163,21 @@ test "requests get non-zero numbers, answers must match browser, number and kind
     try std.testing.expect(table.add(9, .js, fake(0)) == null);
     _ = table.takeFor(9, .js).?;
     try std.testing.expect(table.add(9, .js, fake(0)) != null);
+}
+
+test "permission requests are capped per browser so one page cannot fill the shared table, and prompts are found by CEF's id" {
+    var table: Table = .{};
+    for (0..max_permissions_per_browser) |i| _ = table.addPermission(1, if (i % 2 == 0) .prompt else .media, fake(0), 100 + i).?;
+    try std.testing.expect(table.addPermission(1, .prompt, fake(0), 999) == null);
+    // 다른 브라우저·JS 대화상자는 여전히 받는다.
+    try std.testing.expect(table.addPermission(2, .media, fake(0), 3) != null);
+    try std.testing.expect(table.add(1, .js, fake(0)) != null);
+    // 프롬프트 번호로 찾는다 — 미디어의 `extra`(비트)나 다른 브라우저의 같은 값에 걸리지 않는다.
+    try std.testing.expectEqual(@as(u64, 102), table.findPrompt(1, 102).?.extra);
+    try std.testing.expect(table.findPrompt(1, 101) == null);
+    try std.testing.expect(table.findPrompt(2, 102) == null);
+    _ = table.take(table.findPrompt(1, 102).?);
+    try std.testing.expect(table.addPermission(1, .prompt, fake(0), 7) != null);
 }
 
 test "numbering wraps past zero, and closing a browser takes only its requests" {

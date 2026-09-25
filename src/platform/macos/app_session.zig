@@ -282,7 +282,7 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 185: CR6d-v2b0b extends the read-only input probe with terminal byte/screen generation counters
 // and adds one synchronous transcript-to-canonical-evidence leaf. Raw inventories are borrowed
 // only for the call; Zig owns reduction and absent-target publication.
-pub const abi_version: u32 = 194;
+pub const abi_version: u32 = 195;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -6297,6 +6297,8 @@ pub const AppSession = struct {
     osr_dialog_ready: bool = false,
     osr_dialog_dismiss: bool = false,
     osr_dialog_title_buf: [1024]u8 = undefined,
+    /// W5b: 권한 요청 sheet 의 본문(청한 권한 목록·기억 안내) — 다음 가져가기까지.
+    osr_dialog_message_buf: [2048]u8 = undefined,
     /// 초점 없는 pane 이 답을 기다린다는 안내를 이미 띄운 요청(한 번만).
     osr_dialog_hinted: u64 = 0,
     probe_frame_timing: bool = false,

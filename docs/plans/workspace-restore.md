@@ -30,7 +30,7 @@ TDD 방식:
 
 ### 설계·결정 (window-aware, 사용자 결정 2026-06-14)
 
-확정 순서(New Window → restore → chrome)의 하드 제약대로 **window-aware**다(workspace-restore.md 초안은 cmux 풀 모델·멀티 창 이전이라 surface/tab만 — 현재 모델 windows→tabs→pane split 트리→Term에 맞춰 확장). 토대는 이미 상당: `app.surface.RestorableSurfaceMetadata`(id·title·cwd·command·size), `core.currentCwd()`(OSC 7)·`windowTitle()`(OSC 0/2)·`Surface.command`, `split_tree`(dir/ratio), snapshot/trace 직렬화 컨벤션.
+확정 순서(New Window → restore → chrome)의 하드 제약대로 **window-aware**다(workspace-restore.md 초안은 pane 탭 컨테이너 모델·멀티 창 이전이라 surface/tab만 — 현재 모델 windows→tabs→pane split 트리→Term에 맞춰 확장). 토대는 이미 상당: `app.surface.RestorableSurfaceMetadata`(id·title·cwd·command·size), `core.currentCwd()`(OSC 7)·`windowTitle()`(OSC 0/2)·`Surface.command`, `split_tree`(dir/ratio), snapshot/trace 직렬화 컨벤션.
 
 - **D-범위 = 최근 세션 1개**(사용자 결정): 앱을 닫을 때의 전체 상태(모든 창·탭·split·cwd)를 전역 1개로 저장·복원("끄던 그대로 다시 열기"). repo별 workspace는 후속(이 위에 얹는 레이어).
 - **D-트리거 = 자동 복원, 기본 ON + config 토글, 정상 종료분만**(사용자 결정): 앱 시작 시 마지막 세션을 자동으로 다시 연다(layout·cwd·shell 시작까지만 — **명령 자동실행 없음**이라 안전). config로 끌 수 있고, **크래시 후엔 복원 안 함**(정상 종료 때 저장한 것만). 첫 실행·저장 없음·복원 off면 기본 빈 창 1개.

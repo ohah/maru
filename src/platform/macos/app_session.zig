@@ -6174,7 +6174,7 @@ pub const AppSession = struct {
     // 달리 메인 창 전용 토글이라 별도 플래그 — refreshCellMetrics가 둘 다 0으로 환산한다.
     sidebar_collapsed: bool = false,
     // 상단 타이틀바 띠(backing px) — 네이티브 타이틀바를 숨겼으므로(신호등만) 그 높이만큼 '터미널 영역'을 아래로 들여
-    // 신호등·헤더 아이콘이 있는 상단 줄과 pane 탭 바·서페이스가 겹치지 않게 한다(cmux식: 상단 타이틀바 → 탭 → 본문).
+    // 신호등·헤더 아이콘이 있는 상단 줄과 pane 탭 바·서페이스가 겹치지 않게 한다(상단 타이틀바 → 탭 → 본문 순).
     // termRect.y/h와 spawn grid(gridFromBacking 호출의 padding.top)에 같이 적용해 단일 출처. quick terminal(chrome_minimal,
     // borderless·신호등 없음)이면 0. refreshCellMetrics가 cell 높이에서 파생한다(보통 한 줄).
     titlebar_strip_px: u32 = 0,
@@ -8237,7 +8237,7 @@ pub const AppSession = struct {
     /// resize 값이고, 첫 resize 전(0)이면 폭/높이가 0이라 단일 leaf가 origin에만 그려진다(무해).
     pub fn termRect(self: *const AppSession) maru.session.SplitRect {
         // 상단 타이틀바 띠(titlebar_strip_px)만큼 터미널 영역을 아래로 들인다 — 신호등·헤더 아이콘 줄과 pane 탭 바·
-        // 서페이스가 안 겹친다(cmux식). 사이드바는 별도(좌측 전체 높이) — 띠는 터미널 영역에만. 단일 출처라 grid·
+        // 서페이스가 안 겹친다. 사이드바는 별도(좌측 전체 높이) — 띠는 터미널 영역에만. 단일 출처라 grid·
         // 렌더 origin·마우스 hit-test·IME가 함께 띠 아래로 정합한다.
         return dock_ops.dockGeometry(self).terminal;
     }
@@ -65329,7 +65329,7 @@ test "isWindowDragRegion: only empty header area drags the window (not icons/sea
     // 헤더 아래 카드 영역 → 드래그 아님.
     const card_y: f64 = @as(f64, @floatFromInt(session.sidebar_header_height_px)) + 5;
     try std.testing.expect(!workspace_ops.isWindowDragRegion(session, 2 * cw, card_y));
-    // 터미널 위 타이틀바 띠(y<strip) → 드래그 영역(② cmux식 상단 띠).
+    // 터미널 위 타이틀바 띠(y<strip) → 드래그 영역(② 상단 띠).
     const term_x: f64 = @floatFromInt(session.active_pane_rect.x + 50);
     try std.testing.expect(workspace_ops.isWindowDragRegion(session, term_x, @as(f64, @floatFromInt(session.titlebar_strip_px)) * 0.5));
     // 터미널 '본문'(띠 아래 y≥strip) → 드래그 아님(셀 선택).

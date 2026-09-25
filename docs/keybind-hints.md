@@ -1,6 +1,6 @@
 # 단축키 힌트 — 모디파이어 홀드 오버레이 전략·구현 계획
 
-사용자가 **모디파이어 키(기본 `Cmd`)를 일정 시간 누르고 있으면** 각 chrome 요소(사이드바 워크스페이스 카드·새 워크스페이스 버튼·탭바·활성 pane 등)의 **우상단에 그 요소를 동작시키는 단축키 배지**를 띄운다(요소별 배지 — CSS로 치면 요소가 relative parent, 배지가 absolute right:0 top:0). 모디파이어를 떼면 사라진다. cmux 등 일부 도구의 "키를 누르면 단축키가 뜨는" 동작을 maru 독립 설계로 구현한다(형태만 비교, 코드 표현은 옮기지 않는다 — [project-rules](project-rules.md) clean-room).
+사용자가 **모디파이어 키(기본 `Cmd`)를 일정 시간 누르고 있으면** 각 chrome 요소(사이드바 워크스페이스 카드·새 워크스페이스 버튼·탭바·활성 pane 등)의 **우상단에 그 요소를 동작시키는 단축키 배지**를 띄운다(요소별 배지 — CSS로 치면 요소가 relative parent, 배지가 absolute right:0 top:0). 모디파이어를 떼면 사라진다. 일부 도구의 "키를 누르면 단축키가 뜨는" 동작을 maru 독립 설계로 구현한다(형태만 비교, 코드 표현은 옮기지 않는다 — [project-rules](project-rules.md) clean-room).
 
 이 문서가 이 기능의 **단일 출처**다. 구현이 진행되면 이 문서를 코드와 맞춘다([project-rules §문서와 설명](project-rules.md#문서와-설명)). 상위 경계는 [키 입력과 단축키 경계](key-input-and-shortcuts.md)·[Chrome 전략](chrome-strategy.md)을 따르고, config 키는 [config 스키마](config-schema.md)를 따른다.
 
@@ -36,13 +36,13 @@
 | **모달/IME 조합 중이면 힌트 억제** | platform lowering이 "단일 오버레이 frame"을 가정(`host.zig` collectDraws 주석) | 동시에 두 오버레이 frame이 뜨면 그 가정이 깨진다. 모달이 열렸으면 거기 타이핑 중이라 Cmd-홀드 힌트는 무의미 → 억제로 단일 오버레이 불변 유지 |
 | **내용 = chord가 바인딩된 app 액션만** | `command_catalog.chordForAction`이 안 묶인 액션은 null 반환 | "이 단축키가 X를 한다"가 HUD의 본질. chord 없는 액션(`install_cli`·`move_pane_to_new_workspace` 등 — 팔레트 발견 전용)은 보여 줄 키가 없으므로 제외. unbind도 자연히 빠지고 리바인드는 새 chord로 표시 |
 | **트리거 = 모디파이어 홀드(지연 후)** | 사용자 요청("Cmd 오래 누르고 있으면") | 즉시 표시는 매 `Cmd+key`마다 깜빡여 거슬린다. 지연 + "다른 키 눌리면 취소"로 정상 단축키 사용과 충돌 안 함 |
-| **카테고리 그룹핑(맥락별 아님)** | maru app 바인딩은 대부분 전역(어느 pane이든 동작 — `key-input-and-shortcuts.md`) | cmux식 "포커스 맥락별 좁히기"는 maru에선 표면이 거의 없다. 정직하게 카테고리로 묶는다(맥락 인식은 §8 후속) |
+| **카테고리 그룹핑(맥락별 아님)** | maru app 바인딩은 대부분 전역(어느 pane이든 동작 — `key-input-and-shortcuts.md`) | "포커스 맥락별 좁히기"는 maru에선 표면이 거의 없다. 정직하게 카테고리로 묶는다(맥락 인식은 §8 후속) |
 | **활성 pane 우상단(중앙 아님)** | Find가 `overlay_input.findLayout`/`p.active_pane`으로 활성 pane 우상단에 뜨는 선례 | 사용자 요청 — 단축키가 적용되는 **포커스된 패널**에 시각적으로 묶인다. split이면 그 pane 우상단, single-pane이면 터미널 영역 우상단 폴백. Find는 한 줄, 힌트는 멀티행이라 같은 앵커에서 **아래로 자라는 박스**(폭=`panelSize`/EAW 공유, 우측 정렬로 오른쪽 pane/divider 비침범) |
 | **gesture 정책=config(Zig), 타이머 clock=platform(Swift), 내용=Zig, 가시성 플래그=chrome State** | "native 최소", `zig_owns_frame_loop`는 tick 본문 소유·clock은 OS(`chrome-strategy.md` §10), `is_window_drag_region`/`jump_prompt` 선례 | 무엇을 언제 보일지(enabled/delay/modifier·어떤 단축키)는 Zig가 판정, OS 타이머 mechanics만 Swift. 기존 native-최소 경계와 일치 |
 
 > **⚠️ KH-6 재설계 — 위 표의 "활성 pane 우상단 한 박스 + 카테고리 그룹핑"은 폐기됐다.** KH-1~5는 모든 단축키를 활성 pane 우상단 한 박스에 카테고리로 모았으나, 사용자가 "각 단축키는 **그 단축키로 동작하는 요소** 위에 떠야 한다"고 정정했다. 현재 모델은 **요소별 배지**(§3.0)다. 아래 §3.1~3.6의 "박스/멀티행/카테고리/키캡" 서술은 KH-1~5 옛 모델의 역사 기록이고, 현재 렌더는 §3.0가 단일 출처다(트리거 감지 §3.4·3.5, config §5는 그대로 유효).
 
-레퍼런스 사용은 동작 비교만 — cmux의 단축키 오버레이 UX는 최종 동작만 참고하고 소스를 옮기지 않는다([no-external-ref-in-pr] 원칙: 산출물은 maru 용어·독립 설계).
+레퍼런스 사용은 동작 비교만 — 단축키 오버레이 UX는 최종 동작만 참고하고 소스를 옮기지 않는다([no-external-ref-in-pr] 원칙: 산출물은 maru 용어·독립 설계).
 
 ## 3.0 배지 재설계 (KH-6 — 현재 모델, 단일 출처)
 
@@ -323,7 +323,7 @@ pub const KeyHintConfig = struct {
 
 - **(중) 홀드 오발/누락**: `flagsChanged`는 modifierFlags만 줘 좌/우 Cmd 구분이 애매할 수 있다. keyCode(`event.keyCode`)로 보강하거나 modifierFlags 비교만으로 충분한지 KH-4 실측으로 확정한다("추측 말고 캡처").
 - **(중) 단일 오버레이 frame 가정**: collectDraws가 동시 1개 오버레이를 가정 → 모달 억제로 지킨다(§3.2). 향후 다중 오버레이가 필요해지면 lowering을 먼저 일반화한다.
-- **(낮) 맥락 인식 한계**: maru app 바인딩이 전역이라 v1은 카테고리 그룹만. cmux식 "현재 패널 전용"은 표면이 생기면(터미널 매크로 등) KH-5에서.
+- **(낮) 맥락 인식 한계**: maru app 바인딩이 전역이라 v1은 카테고리 그룹만. "현재 패널 전용" 배지는 표면이 생기면(터미널 매크로 등) KH-5에서.
 - **(낮) 내용 길이 vs pane 높이**: 활성 pane 우상단에서 아래로 자라므로, 바인딩이 많고 pane이 짧으면 박스가 pane(또는 창) 아래로 넘칠 수 있다. v1은 `paneTopRightBox`가 pane 높이로 행 수를 clamp하고 초과분은 컴포넌트가 안 그린다(상단은 안 넘침 — 위에서 아래로만 자람). 카테고리 2열 배치·폰트 축소·스크롤은 KH-5.
 - **트리거 모디파이어 표시 정책**: `keyhint.modifier`를 Control/Option로 바꾸면 그 모디파이어 홀드로 뜨되, 내용은 여전히 "바인딩된 app 액션 전체"다(모디파이어별 필터 아님 — v1 단순화). 필터링이 필요하면 KH-5.
 

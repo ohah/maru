@@ -50,7 +50,7 @@ legacy component의 계약이다. 새 `UiNode` tree component는 그것을 복�
 >
 > C0(Notice)·S1(구조-무효화)·C1(palette·find 이주)·C2(divider 이주)·C3a(sidebar 이주)·C3b(tabbar hit-test 이주)·C4a(rich 토큰셋)에서 neutral component와 `ChromeHost`, platform lowering 경계가 형성됐다. 아래 §3 이후의 표는 이주 전 출발 스냅샷과 설계 근거를 보존한다. 이후 C4b와 U 단계의 세부 연대기는 위 계획 문서가 소유한다.
 
-> **U5(창 상호작용 + cmux식 타이틀바 띠)** — (a) 네이티브 타이틀바를 숨겨 콘텐츠가 마우스를 받으므로 `MaruMetalTerminalView.mouseDownCanMoveWindow=false`로 콘텐츠 자동 창-드래그를 끄고, 창 이동(performDrag)·더블클릭 확대(zoom)는 **빈 영역에서만** 한다: ① 사이드바 헤더의 빈 곳(headerHit==.none) + ② 상단 타이틀바 띠의 빈 곳. 빈 영역 hit-test는 Zig `isWindowDragRegion`(단일 출처) → **ABI v64** `is_window_drag_region`, 동작(performDrag/zoom)은 Swift(platform 경계 — '어디가 드래그 영역인가'만 Zig). (b) **타이틀바 띠**(`titlebar_strip_px`): 숨긴 타이틀바 높이만큼 **터미널 영역**(termRect.y/h)을 아래로 들이고 spawn grid(gridFromBacking의 `gridPadding`=window padding+띠)도 같은 양을 빼, 신호등·헤더 아이콘 줄과 pane 탭 바·서페이스가 안 겹친다(cmux식: 상단 타이틀바 → 탭 → 본문). 단일 출처 termRect라 grid·렌더 origin·마우스 hit-test·IME가 함께 띠 아래로 정합. 띠 높이는 상태 의존(`computeTitlebarStripPx`): 펼침=`max(cell_h, 28pt)`(네이티브 macOS 타이틀바 높이 — 한 줄만 두면 상단 드래그 영역이 네이티브보다 좁아 사용자 피드백으로 바닥을 줌), 접힘=`max(cell_h, 30pt)`(터미널 전폭이라 신호등 세로 높이 확보, 침범 방지). 사이드바는 띠 inset 비대상(헤더 아이콘이 띠 줄에 그대로). (c) 사이드바 **접기**(◧): 폭 0(pt 보존)으로 완전히 숨기고 좌상단 신호등 옆에 펼치기 버튼만 — 버튼 frame은 `metal_frame.replace`가 활성 커서 suffix '앞'(터미널 위·커서 아래)에 끼워 보인다(접힘 터미널 origin_x=0과 겹쳐도 위에). `collapsedToggleRect`(hit-test)·`collapsedToggleCol`(render) 단일 출처.
+> **U5(창 상호작용 + 상단 타이틀바 띠)** — (a) 네이티브 타이틀바를 숨겨 콘텐츠가 마우스를 받으므로 `MaruMetalTerminalView.mouseDownCanMoveWindow=false`로 콘텐츠 자동 창-드래그를 끄고, 창 이동(performDrag)·더블클릭 확대(zoom)는 **빈 영역에서만** 한다: ① 사이드바 헤더의 빈 곳(headerHit==.none) + ② 상단 타이틀바 띠의 빈 곳. 빈 영역 hit-test는 Zig `isWindowDragRegion`(단일 출처) → **ABI v64** `is_window_drag_region`, 동작(performDrag/zoom)은 Swift(platform 경계 — '어디가 드래그 영역인가'만 Zig). (b) **타이틀바 띠**(`titlebar_strip_px`): 숨긴 타이틀바 높이만큼 **터미널 영역**(termRect.y/h)을 아래로 들이고 spawn grid(gridFromBacking의 `gridPadding`=window padding+띠)도 같은 양을 빼, 신호등·헤더 아이콘 줄과 pane 탭 바·서페이스가 안 겹친다(상단 타이틀바 → 탭 → 본문 순). 단일 출처 termRect라 grid·렌더 origin·마우스 hit-test·IME가 함께 띠 아래로 정합. 띠 높이는 상태 의존(`computeTitlebarStripPx`): 펼침=`max(cell_h, 28pt)`(네이티브 macOS 타이틀바 높이 — 한 줄만 두면 상단 드래그 영역이 네이티브보다 좁아 사용자 피드백으로 바닥을 줌), 접힘=`max(cell_h, 30pt)`(터미널 전폭이라 신호등 세로 높이 확보, 침범 방지). 사이드바는 띠 inset 비대상(헤더 아이콘이 띠 줄에 그대로). (c) 사이드바 **접기**(◧): 폭 0(pt 보존)으로 완전히 숨기고 좌상단 신호등 옆에 펼치기 버튼만 — 버튼 frame은 `metal_frame.replace`가 활성 커서 suffix '앞'(터미널 위·커서 아래)에 끼워 보인다(접힘 터미널 origin_x=0과 겹쳐도 위에). `collapsedToggleRect`(hit-test)·`collapsedToggleCol`(render) 단일 출처.
 
 ## 1. 목표
 
@@ -77,9 +77,9 @@ legacy component의 계약이다. 새 `UiNode` tree component는 그것을 복�
 | 네이티브 UI 프레임워크 없이 Zig draw + GPU | 런타임 의존성 0·native 최소(SwiftUI=Apple 전용) | project-rules §의존성 |
 | theme = 토큰(데이터), 새 UI는 rich/Metal만 | 기존 TUI는 설정 UI에서 숨긴 읽기 호환·회귀 fixture로만 유지하고 새 component는 rich/Metal만 소비 | 사용자 결정 |
 | props seam + 단일 ChromeState로 구조 분해 | "버그는 루트커즈. 구조가 원인이면 구조를 바꾼다" | project-rules §버그 수정 |
-| 컴포넌트·룩을 cmux/Ghostty 코드 표현 안 옮김 | clean-room(renderer·platform interop에도 적용) | project-rules §기본 규칙 |
+| 컴포넌트·룩을 레퍼런스 코드 표현으로 안 옮김 | clean-room(renderer·platform interop에도 적용) | project-rules §기본 규칙 |
 
-레퍼런스 사용은 동작 비교(오라클)만 — cmux의 세로 사이드바·드래그 UX는 최종 동작만 참고하고 소스를 옮기지 않는다.
+레퍼런스 사용은 동작 비교(오라클)만 — 세로 사이드바·드래그 UX는 최종 동작만 참고하고 소스를 옮기지 않는다(copyleft 레퍼런스는 소스를 열지 않는다).
 
 ## 3. 이주 전 구조 (조사 기록)
 

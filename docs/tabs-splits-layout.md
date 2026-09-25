@@ -6,7 +6,7 @@ terminal runtime 소유 분리), 렌더링 방식, 단계 분해, 레퍼런스 �
 
 ## 목표 UX
 
-cmux 같은 유연한 레이아웃:
+세로 사이드바 + 자유 분할의 유연한 레이아웃:
 
 > **그룹(접이식 워크스페이스 묶음)**: 워크스페이스 카드를 이름 붙은 그룹으로 묶어 접고 펴는 조직화 레이어는
 > [사이드바 그룹 전략](sidebar-groups.md)을 단일 출처로 둔다(설계 단계). 그 설계는 이 절의 flat 카드 나열을
@@ -95,7 +95,7 @@ Maru 레이아웃 모델 (Window → Workspace → SplitTree → Pane → Term)
 탭 사이드바와 split 레이아웃을 **Maru의 Metal 프레임에 직접 그린다** — AppKit 위젯(NSView 탭/SwiftUI
 SplitView)을 쓰지 않는다. 이유:
 
-- 터미널이 이미 Metal로 그려지니, 사이드바·divider도 같은 렌더 경로에 두면 룩을 완전히 통제하고(cmux/Warp식
+- 터미널이 이미 Metal로 그려지니, 사이드바·divider도 같은 렌더 경로에 두면 룩을 완전히 통제하고(Warp식
   커스텀) 우리 메타데이터(cwd/✓✗/이벤트)를 바로 표시할 수 있다.
 - [macOS 앱 호스트 경계](macos-app-host-boundary.md)의 native 최소 원칙과 일치 — 레이아웃·상태·히트 테스트는
   Zig가 소유하고, Swift는 backing px 클릭/드래그 좌표만 ABI로 넘긴다(스크롤·마우스 선택과 같은 규율).
@@ -139,7 +139,7 @@ Node = leaf(Pane)
      | split{ direction: horizontal|vertical, ratio: f, left: Node, right: Node }
 ```
 
-- `leaf`는 **Pane 하나**(= 화면의 한 분할 영역). **cmux 풀 모델(PR-A~)**: 한 Pane은 surface 1개가 아니라
+- `leaf`는 **Pane 하나**(= 화면의 한 분할 영역). **pane 탭 컨테이너 모델(PR-A~)**: 한 Pane은 surface 1개가 아니라
   **여러 터미널(Term: surface+PTY+pump)을 가로 탭으로** 담는 컨테이너다(⌘T가 활성 Pane에 Term 추가, Pane
   상단 탭 바가 각 Term을 탭으로 표시, 화면엔 활성 Term의 surface를 그림). `split`은 두 자식을 방향(가로=좌우,
   세로=상하)과 비율로 나눈다.
@@ -185,7 +185,7 @@ Node = leaf(Pane)
   아니라 panel이 나란히 놓이는 축**을 따른다 — tmux `split-window -h`(좌우)/`−v`(상하)와 같은 관습(베이스). iTerm2는
   반대로 분할선 방향으로 부르므로(좌우를 "Vertical") 충돌하는데, 모델·코드는 tmux식 축-기준으로 단일화하고 키 매핑만
   iTerm2 관습에 맞춘다(사용자가 누르는 키는 iTerm2, 내부 enum 이름은 tmux). 이 결정은 `config/action.zig` 주석에도 남긴다.
-- **포커스**: 분할 직후 **새 panel로 포커스가 이동**한다(cmux/tmux/iTerm2 공통 동작 — 새로 연 pane에서 바로 입력).
+- **포커스**: 분할 직후 **새 panel로 포커스가 이동**한다(tmux/iTerm2 공통 동작 — 새로 연 pane에서 바로 입력).
   활성 panel만 입력·커서를 받고, 분할은 활성 panel을 둘로 나눠 한쪽(기존)을 줄이고 다른 쪽(새 셸)을 띄운다.
 - **포커스 이동(PR3b-2a/2b)**: ① **마우스 클릭** — 다른 panel을 클릭하면 그 panel로 포커스가 옮겨간다(클릭은 포커스에
   소비, 선택은 새 활성 panel에서 다음부터). ② **키보드** — `Cmd+Option+화살표`로 방향 인접 panel로 이동(**베이스**:
@@ -210,7 +210,7 @@ Node = leaf(Pane)
   밖이면 no-op — Safari/Terminal.app/iTerm2식). **베이스**: pane 내 가로 탭(새 탭·탭 순환)이라는 탭 모델 관례; `⌘[]`를 split
   순환에 두고 Term을 `⌘⌥[]`로 옮긴 것은 사용자 요청 배치다(split을 가장 자주 오가므로 무수식 `⌘[]`에 둠). 워크스페이스 생성은
   **사이드바 하단 "+" 버튼**(③b)으로도 한다 — 탭 목록 아래 슬롯의 "+"를 클릭하면 새 워크스페이스(`newTab`).
-- **닫기(PR5a + PR-B cascade)**: `Cmd+W`는 **cmux식 계층 cascade** — 활성 pane에 Term이 여럿이면 **활성 Term**을
+- **닫기(PR5a + PR-B cascade)**: `Cmd+W`는 **계층 cascade** — 활성 pane에 Term이 여럿이면 **활성 Term**을
   닫고, Term이 1개면 **pane**을(split이면 형제로 collapse, 형제가 빈자리 차지) 닫고, pane이 1개면 **워크스페이스**를
   (마지막이면 창) 닫는다. 즉 Cmd+W를 반복하면 Term → pane → 워크스페이스 순으로 하나씩 닫힌다.
 - **exit 자동 collapse(PR5b)**: 셸이 `exit`하면 그 Term도 같은 cascade로 자동 정리된다(Cmd+W 닫기와 동일 경로의
@@ -240,7 +240,7 @@ Node = leaf(Pane)
 - **탭 바 "+" 버튼(PR-F)**: 바 우측에 "+"를 그려 클릭하면 그 pane에 새 Term을 띄운다(⌘T의 마우스 버전). 바를
   `paneTabAreaCols(cols)`(넓으면 `cols - 3`, 좁으면 전체)로 나눠 **탭 영역**과 우측 **"+" 영역**을 분리한다 — 탭
   렌더·hit-test(tabbar `Metrics`의 `tabIndex`/`segOf`로 탭 인덱스, `inCloseZone`으로 ✕)·"+"(`inPlusZone`)가 같은 분할을 공유해 "보이는 = 클릭되는"을
-  지킨다. cmux 비교상 "+"는 새 **탭(Term)** 추가이며, split은 ⌘D/⌘⇧D·divider(PR6)로 둔다. **상단탭 Warp 폴리시(인라인 "+")**:
+  지킨다. 동작 비교상 "+"는 새 **탭(Term)** 추가이며, split은 ⌘D/⌘⇧D·divider(PR6)로 둔다. **상단탭 Warp 폴리시(인라인 "+")**:
   "+"를 바 far-right가 아니라 **마지막 탭 바로 뒤**에 둔다(Warp식 — 탭과 "+"가 좌측 묶음, 오른쪽은 빈 바). `tabbar.Metrics.plusZoneStart`
   가 `has_scroll`이면 옛대로 far-right(‹·gap·› 뒤), 아니면 `tabsEndCol`(=`min(tab_count*tab_w, tab_cols)`)을 돌려주고 렌더
   (`coretext` `plus_start`)가 같은 값을 써 단일 정합("보이는 + = 클릭되는 +"). **`inPlusZone`은 cols까지가 아니라 버튼 폭
@@ -415,7 +415,7 @@ quick terminal·global shortcut은 이 레이아웃과 직교라 별도다.
 
 - **Ghostty**(MIT): SplitTree 개념·드래그 zone·native 탭 동작을 **동작 비교**로 본다(`references/ghostty`).
   코드 구조(자료구조 레이아웃·함수 분해)는 옮기지 않고 Zig로 독립 재구현한다.
-- **cmux**(GPL-3.0): 세로 사이드바 + 메타데이터·드래그 UX를 **최종 동작 비교로만** 참고하고 소스는 열람하지
+- **copyleft 레퍼런스**: 세로 사이드바 + 메타데이터·드래그 UX를 **최종 동작 비교로만** 참고하고 소스는 열람하지
   않는다(LGPL/GPL 레퍼런스 규칙).
 - **tmux control mode**: 공개 프로토콜 명세(tmux `control-mode` man page)에서 직접 구현. iTerm2(GPL) 소스 미열람.
 

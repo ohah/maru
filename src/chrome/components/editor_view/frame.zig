@@ -353,9 +353,11 @@ fn layoutOf(props: Props) geometry.Layout {
 /// **run 은 입력에서 세지 않는다.** 줄마다 색 구간·반전 칸·인레이·조각을 세는 공식은 `content.writeRunsWith` 가
 /// 어디서 가르는지를 한 번 더 적은 사본이라, 가르는 규칙이 늘 때마다 조용히 낡는다(1280 상수가 그렇게 낡아
 /// 비교 뷰의 줄 번호가 통째로 사라졌다 — 2026-09-24 제보). 대신 두 불변식으로 묶는다: ⑴ 클러스터는 적어도 한
-/// 칸이다(`display_width.clusterCols` 의 `@max(1, …)`)라 run 하나가 적어도 한 칸을 덮고 ⑵ sticky 말고는 텍스트
-/// op 이 셀을 겹쳐 쓰지 않는다. 그래서 한 행의 본문 run 은 본문 열 수를 넘지 않는다. `build` 가 이 불변식을
-/// debug assert 로 확인한다 — 텍스트 위에 텍스트를 겹치는 층이 생기면 거기서 멈춘다.
+/// 칸이다(`display_width.clusterCols` 의 `@max(1, …)`)라 run 하나가 적어도 한 칸을 덮고 ⑵ sticky 말고는 **이
+/// 저장소의 run 을 쓰는** 텍스트 op 이 셀을 겹쳐 쓰지 않는다 — 공백 표시(`paintWhitespace`)는 본문 위에 `·`·`→` 를
+/// 겹치지만 **정적 run**(`whitespace_dots`·`whitespace_arrow`)을 가리켜 이 저장소를 안 쓴다(op 만 쓴다 — B2 몫).
+/// 그래서 한 행의 본문 run 은 본문 열 수를 넘지 않는다. `build` 가 이 불변식을 debug assert 로 확인한다 — 저장소의
+/// run 을 쓰며 텍스트 위에 텍스트를 겹치는 층이 생기면 거기서 멈춘다.
 pub fn bufferSizes(props: Props) BufferSizes {
     const layout = layoutOf(props);
     const rows: usize = props.visible_rows;
@@ -5973,4 +5975,44 @@ test "RB6 RunTextPool — 할당이 실패해도 호출자가 준 저장소보�
     try testing.expectEqual(@as(usize, 1500), step1.runs.len);
     const step2 = pool.scratchFor(testing.allocator, .{ .runs = 1400, .text_bytes = 10 }, base);
     try testing.expectEqual(step1.runs.ptr, step2.runs.ptr);
+}
+
+test "RB8 공백 표시는 run·글자 몫을 쓰지 않는다 — 본문 위에 기호를 겹쳐도 bufferSizes 만큼이면 절단이 없고 넉넉한 저장소와 같다" {
+    // 공백 표시(§5.1e)는 본문 글자 op 위에 `·`·`→` 글자 op 을 **겹쳐** 그린다 — 몫의 불변식 ⑵(「이 저장소의 run 을 쓰는
+    // 텍스트 op 은 셀을 겹쳐 쓰지 않는다」)가 성립하는 근거는 그 기호가 **정적 run** 을 가리킨다는 것이다. 그것이 저장소 run 으로
+    // 바뀌면 이 판정이 빨개진다(`bufferSizes` 만큼만 준 저장소에서 절단이 난다).
+    //
+    // 인레이 힌트는 넣지 않는다 — 인레이 + 랩 + 공백 표시 조합은 `paintWhitespace` 가 `columnsAtOffsetsWith` 에 오름차순이 아닌
+    // 자리를 넘겨 debug assert 에 걸린다(2026-09-26 이 판정자를 세우다 찾았다 — 이 몫 계산과 무관한 공백 표시 층의 결함이라 따로 다룬다).
+    const a = testing.allocator;
+    const lines = [_][]const u8{ " \t a  \t  b\t\t c   d", "\t\t\t\t", "   x   y   z   ", "a\tb\tc\td\te" } ** 10;
+    const ops_e = try a.alloc(draw.Op, 4000);
+    defer a.free(ops_e);
+    const ops_w = try a.alloc(draw.Op, 4000);
+    defer a.free(ops_w);
+    var be: WideBuffers = .{ .ops = ops_e };
+    var bw: WideBuffers = .{ .ops = ops_w };
+    for ([_]bool{ false, true }) |wrap| {
+        var props = testProps(&lines, wrap);
+        props.render_whitespace = .all;
+        props.visible_rows = 30;
+        const sizes = bufferSizes(props);
+        const runs = try a.alloc(draw.Run, sizes.runs);
+        defer a.free(runs);
+        const text = try a.alloc(u8, sizes.text_bytes);
+        defer a.free(text);
+        const wide_runs = try a.alloc(draw.Run, sizes.runs * 4);
+        defer a.free(wide_runs);
+        const wide_text = try a.alloc(u8, sizes.text_bytes * 4);
+        defer a.free(wide_text);
+        const we = build(props, be.scratch(runs, text));
+        const ww = build(props, bw.scratch(wide_runs, wide_text));
+        var ws_ops: usize = 0;
+        for (ops_w[0..ww.ops]) |op| if (op == .text and op.text.role == .whitespace) {
+            ws_ops += 1;
+        };
+        try testing.expect(ws_ops > 0); // 기호가 실제로 그려졌다
+        try testing.expect(!we.truncated);
+        try testing.expect(sameOpContent(ops_e[0..we.ops], ops_w[0..ww.ops]));
+    }
 }

@@ -3628,7 +3628,7 @@ fn movedOffset(
             // **선택의 앞쪽 끝에서 판정하고 커서로 접는다**(§3.9c — VS Code `selection.getStartPosition()`: [1,3] 과 [3,1] 이 같은 데로 간다).
             // 강조(§5.1b)와 **같은 출처**다 — 트리가 있으면 트리(문자열·주석 속 괄호가 빠진다), 없으면 글자 훑기.
             const from = @min(sel.start(), content.len);
-            break :blk brackets_client.jumpTarget(term, content, from) orelse from;
+            break :blk brackets_client.jumpTarget(term, content, from, 1 + term.rt.editor_extra_selections.len) orelse from;
         },
         .line_end => blk: {
             // **줄 끝은 목표를 `line_end`로 세운다** — End 뒤에 아래로 내려가면 계속 줄 끝을 따라간다.
@@ -41952,6 +41952,37 @@ test "BRP8 괄호 점프 — 닿은 괄호가 없으면 감싸는 쌍의 닫는 
         try testing.expectEqual(@as(usize, 8), term.rt.editor_selection.?.focus);
         try testing.expect(term.rt.editor_selection.?.isEmpty());
     }
+    // **커서가 여럿이면 각자** — 3 은 감싸는 쌍으로 6, 12(`c` 뒤 — '(' 11 에 닿았다)는 13. 추가 커서도 자기 선택의 앞쪽 끝에서 판정한다
+    // ([12 → 9] 의 앞쪽 끝 9 는 `+` 뒤 공백 — 다음 여는 괄호 11). 둘이 같은 곳에 서면 하나가 된다(VS Code 실측 3·5 → 6).
+    term.rt.editor_selection = editor_selection.Selection.at(3);
+    try setExtraSelections(fx.session, term, &.{editor_selection.Selection.fromPoints(12, 9)});
+    try press.go(&fx);
+    try testing.expectEqual(@as(usize, 6), term.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_extra_selections.len);
+    try testing.expectEqual(@as(usize, 11), term.rt.editor_extra_selections[0].focus);
+    term.rt.editor_selection = editor_selection.Selection.at(3);
+    try setExtraSelections(fx.session, term, &.{editor_selection.Selection.at(5)});
+    try press.go(&fx);
+    try testing.expectEqual(@as(usize, 6), term.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_extra_selections.len);
+    // **커서가 100 개를 넘으면 닿은 괄호만** — 101 개가 모두 `a|,`(3)에 서면 감싸는 쌍으로 안 간다; 100 개면 간다
+    var many: [100]editor_selection.Selection = undefined;
+    for (&many) |*m| m.* = editor_selection.Selection.at(3);
+    term.rt.editor_selection = editor_selection.Selection.at(3);
+    try setExtraSelections(fx.session, term, &many);
+    try press.go(&fx);
+    try testing.expectEqual(@as(usize, 3), term.rt.editor_selection.?.focus);
+    // 상한을 넘어도 **닿은 괄호는 간다** — 101 개가 `(|a`(1)에 서면 닫는 괄호(6) 앞
+    for (&many) |*m| m.* = editor_selection.Selection.at(1);
+    term.rt.editor_selection = editor_selection.Selection.at(1);
+    try setExtraSelections(fx.session, term, &many);
+    try press.go(&fx);
+    try testing.expectEqual(@as(usize, 6), term.rt.editor_selection.?.focus);
+    for (&many) |*m| m.* = editor_selection.Selection.at(3);
+    term.rt.editor_selection = editor_selection.Selection.at(3);
+    try setExtraSelections(fx.session, term, many[0..99]);
+    try press.go(&fx);
+    try testing.expectEqual(@as(usize, 6), term.rt.editor_selection.?.focus);
 }
 
 test "BRP2 모드와 포커스 — always 는 감싸는 쌍, near 는 닿은 것만, never·포커스 없음은 없다 (제품 경계, §5.1b)" {

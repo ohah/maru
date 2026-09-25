@@ -54,8 +54,15 @@ fn treeOf(term: *Term) ?*Provider {
 }
 
 /// **괄호 짝으로 점프**(§3.9c)의 도착 byte — 강조와 같은 출처 고르기. 갈 데가 없으면 `null`(트리가 없으면 닿은 괄호뿐이다).
-pub fn jumpTarget(term: *Term, content: []const u8, pos: usize) ?usize {
-    if (treeOf(term)) |p| return brackets.jumpTarget(brackets.Tree(Provider){ .prov = p, .bytes = content }, content.len, pos);
+///
+/// **커서가 `max_cursors` 를 넘으면 닿은 괄호만 본다**(§3.9c) — 감싸는 쌍·다음 괄호는 커서마다 그 쌍을 품은 노드의 형제를 훑어 커서 수 ×
+/// 형제 수로 붙는다(적대적 3회차 실측: 배열 원소마다 커서 1 만 개 = 12 s). 강조가 같은 값에서 멈추는 것(`max_cursors`)과 같은 선이다.
+pub fn jumpTarget(term: *Term, content: []const u8, pos: usize, carets: usize) ?usize {
+    const search = carets <= max_cursors;
+    if (treeOf(term)) |p| {
+        const src = brackets.Tree(Provider){ .prov = p, .bytes = content };
+        return if (search) brackets.jumpTarget(src, content.len, pos) else brackets.touchJump(src, content.len, pos);
+    }
     return brackets.jumpTarget(brackets.Plain{ .bytes = content }, content.len, pos);
 }
 

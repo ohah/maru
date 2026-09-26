@@ -1018,7 +1018,7 @@ pub fn newTermInActivePane(self: *AppSession) !void {
     const size = layout_math.gridFromRectPx(self.cell_width_px, self.cell_height_px, self.active_pane_rect.w, self.active_pane_rect.h);
     var cfg = self.new_tab_config;
     cfg.size = size;
-    var req = spawnRequest(cfg, self.loaded_config.config.term, self.loaded_config.config.shell, self.loaded_config.config.env, self.shellIntegrationZdotdir(), self.new_tab_ssh_bin);
+    var req = spawnRequest(cfg, self.loaded_config.config.term, self.loaded_config.config.term_program, self.loaded_config.config.shell, self.loaded_config.config.env, self.shellIntegrationZdotdir(), self.new_tab_ssh_bin);
     // 서페이스(새 Term)는 Term 탭이라 tab-inherit-cwd 토글을 따른다(켜지면 포커스 cwd 상속, 아니면 root).
     // append 전에 읽어야 focusedTermCwd의 activeTerm이 아직 현재(=직전 포커스) Term을 가리킨다.
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -1070,7 +1070,7 @@ pub fn splitActivePane(self: *AppSession, direction: maru.session.SplitDirection
     // 3) 새 panel을 b 크기로 spawn(새 셸). 실패하면 트리/탭은 그대로다.
     var cfg = self.new_tab_config;
     cfg.size = b_size;
-    var req = spawnRequest(cfg, self.loaded_config.config.term, self.loaded_config.config.shell, self.loaded_config.config.env, self.shellIntegrationZdotdir(), self.new_tab_ssh_bin);
+    var req = spawnRequest(cfg, self.loaded_config.config.term, self.loaded_config.config.term_program, self.loaded_config.config.shell, self.loaded_config.config.env, self.shellIntegrationZdotdir(), self.new_tab_ssh_bin);
     // 팬(분할)은 split-inherit-cwd면 분할되는(활성) pane의 활성 Term cwd 상속, 아니면 root. 아래 트리 변형
     // 전에 읽어 focusedTermCwd의 active가 아직 포커스 Term을 가리킨다.
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -2223,7 +2223,7 @@ pub fn restoreSpawn(self: *AppSession, sm: maru.session.workspace.Surface) struc
     var cfg = self.new_tab_config;
     const size = restoreSurfaceSize(sm);
     cfg.size = size;
-    var req = spawnRequest(cfg, self.loaded_config.config.term, self.loaded_config.config.shell, self.loaded_config.config.env, self.shellIntegrationZdotdir(), self.new_tab_ssh_bin);
+    var req = spawnRequest(cfg, self.loaded_config.config.term, self.loaded_config.config.term_program, self.loaded_config.config.shell, self.loaded_config.config.env, self.shellIntegrationZdotdir(), self.new_tab_ssh_bin);
     if (usableRestoreCwd(sm.cwd)) |c| req.cwd = c; // 존재하는 디렉터리면 거기서, 아니면 기본 cwd(surface 안 잃음)
     return .{ .req = req, .size = size };
 }

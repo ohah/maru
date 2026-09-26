@@ -55784,7 +55784,7 @@ test "spawnRequest: interactive_shell이 잘못된 shell.command를 기본 셸�
     const ok = spawnRequest(norm, "xterm-256color", "maru", .{ .command = "/bin/sh" }, &.{}, null, null);
     try std.testing.expectEqualStrings("/bin/sh", ok.command);
     // 빈 값(자동)도 기본 셸(현행 동작 유지).
-    const auto = spawnRequest(norm, "xterm-256color", .{ .command = "" }, &.{}, null, null);
+    const auto = spawnRequest(norm, "xterm-256color", "maru", .{ .command = "" }, &.{}, null, null);
     try std.testing.expectEqualStrings(fallback, auto.command);
 }
 

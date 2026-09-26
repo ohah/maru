@@ -92,6 +92,8 @@ const Surface = struct {
     ime_bounds: ?ws.message.Rect = null,
     /// 답을 기다리는 대화상자·파일 선택(W5a)·권한 요청(W5b) — 온 차례대로.
     dialogs: std.ArrayList(Dialog) = .empty,
+    /// 아직 maru 알림으로 내보내지 않은 웹 알림(W5c) — 온 차례대로, 탭마다 `max_notes_per_surface` 까지(넘치면 오래된 것부터 버린다).
+    notes: std.ArrayList(WebNote) = .empty,
 };
 
 pub const Cursor = struct { cursor: ws.message.WebCursor, generation: u32 };
@@ -148,6 +150,83 @@ pub const Dialog = struct {
 /// 한 브라우저가 동시에 기다리게 하는 상한. JS 대화상자는 페이지가 멈춰 하나씩이고 파일 선택도 하나씩이라 넉넉하다 —
 /// 넘으면 곧바로 취소로 답한다(sidecar 가 쥔 콜백이 쌓이지 않게).
 const max_dialogs_per_surface = 4;
+
+/// 웹 알림 한 건(W5c). 글은 sidecar 가 대화상자 글 규칙으로 다듬었다 — maru 알림 경로가 한 번 더 다듬는다.
+pub const WebNote = struct {
+    /// maru 가 매긴 번호 — 알림(배너 userInfo·목록)이 들고 있다가 누르면 이것으로 짝을 찾는다. 시작값이 무작위라 옛 프로세스의
+    /// 배너가 새 프로세스의 다른 알림을 누르지 못한다.
+    token: u64,
+    surface_id: u64,
+    /// sidecar 가 매긴 번호(누를 때 돌려준다). 0 이면 누를 수 없는 알림.
+    notification: u32,
+    origin: []u8,
+    title: []u8,
+    body: []u8,
+
+    pub fn free(self: WebNote, gpa: std.mem.Allocator) void {
+        gpa.free(self.origin);
+        gpa.free(self.title);
+        gpa.free(self.body);
+    }
+};
+const max_notes_per_surface = 8;
+var next_note_token: u64 = 0;
+/// 내보낸 알림 → (탭, sidecar 번호) — 누를 때 찾는다. 최근 64 개.
+const ShownNote = struct { token: u64, surface_id: u64, notification: u32 };
+var shown_notes: [64]?ShownNote = [_]?ShownNote{null} ** 64;
+var shown_notes_next: usize = 0;
+
+fn queueNote(gpa: std.mem.Allocator, v: ws.message.WebNotification) void {
+    const s = surfaces.getPtr(v.browser) orelse return;
+    if (s.notes.items.len >= max_notes_per_surface) s.notes.orderedRemove(0).free(gpa);
+    if (next_note_token == 0) {
+        arc4random_buf(@ptrCast(&next_note_token), @sizeOf(u64));
+        next_note_token |= 1;
+    }
+    const origin = gpa.dupe(u8, v.origin) catch return;
+    const title = gpa.dupe(u8, v.title) catch {
+        gpa.free(origin);
+        return;
+    };
+    const body = gpa.dupe(u8, v.body) catch {
+        gpa.free(origin);
+        gpa.free(title);
+        return;
+    };
+    const note: WebNote = .{ .token = next_note_token, .surface_id = v.browser, .notification = v.notification, .origin = origin, .title = title, .body = body };
+    next_note_token +%= 1;
+    if (next_note_token == 0) next_note_token = 1;
+    s.notes.append(gpa, note) catch note.free(gpa);
+}
+
+/// 그 탭의 다음 웹 알림(소유권은 호출자 — `WebNote.free`). 내보낸 것으로 적는다(누를 수 있게).
+pub fn takeWebNotification(surface_id: u64) ?WebNote {
+    const s = surfaces.getPtr(surface_id) orelse return null;
+    if (s.notes.items.len == 0) return null;
+    const note = s.notes.orderedRemove(0);
+    if (note.notification != 0) {
+        shown_notes[shown_notes_next] = .{ .token = note.token, .surface_id = surface_id, .notification = note.notification };
+        shown_notes_next = (shown_notes_next + 1) % shown_notes.len;
+    }
+    return note;
+}
+
+/// 사용자가 maru 알림을 눌렀다 — 그 탭의 그 알림이면 sidecar 에 알린다(페이지의 `onclick`). 모르는 번호·다른 탭이면 무동작.
+pub fn clickWebNotification(gpa: std.mem.Allocator, surface_id: u64, token: u64) void {
+    if (token == 0) return;
+    for (shown_notes) |slot| {
+        const note = slot orelse continue;
+        if (note.token != token or note.surface_id != surface_id) continue;
+        const s = surfaces.getPtr(surface_id) orelse return;
+        if (s.created) send(gpa, .{ .web_notification_click = .{ .browser = surface_id, .notification = note.notification } });
+        return;
+    }
+}
+
+fn dropNotes(gpa: std.mem.Allocator, s: *Surface) void {
+    for (s.notes.items) |n| n.free(gpa);
+    s.notes.clearRetainingCapacity();
+}
 var next_dialog_token: u64 = 1;
 
 /// W5b2: 이 실행 동안 사용자가 **maru 의 sheet 에서** 위치를 허용한 (탭, 출처). sidecar 의 `remembered` 는 믿지 않는다 —
@@ -832,6 +911,8 @@ fn freeSurface(gpa: std.mem.Allocator, s: *Surface) void {
     s.url = null;
     dropDialogs(gpa, s);
     s.dialogs.deinit(gpa);
+    dropNotes(gpa, s);
+    s.notes.deinit(gpa);
 }
 
 /// 답을 기다리던 요청을 모두 버린다 — 답을 보내지 않는다(sidecar 가 죽었거나 브라우저가 사라져 콜백이 없다). 떠 있던
@@ -989,6 +1070,17 @@ fn fail(notice: Notice) void {
     notice_queue.append(gpa_ref orelse return, notice) catch {};
 }
 
+/// 죽은 sidecar 가 쥐던 것을 버린다. 대화상자 콜백은 사라졌다 — 기다리던 요청을 버린다(떠 있는 창은 그 창이 닫는다). 알림
+/// 번호도 새 sidecar 에서 다시 매겨지므로 아직 내보내지 않은 알림과 누를 수 있던 기록을 지운다(옛 번호가 새 알림을 누르지
+/// 않게 — 적대 검증).
+fn forgetSidecar(gpa: std.mem.Allocator) void {
+    for (surfaces.values()) |*s| {
+        dropDialogs(gpa, s);
+        dropNotes(gpa, s);
+    }
+    shown_notes = [_]?ShownNote{null} ** shown_notes.len;
+}
+
 /// sidecar 가 죽었다 — 예산 안이면 다시 띄워 살아 있던 브라우저를 되살린다.
 fn crashed(gpa: std.mem.Allocator, now_ms: i64) void {
     if (process) |*p| {
@@ -1005,8 +1097,7 @@ fn crashed(gpa: std.mem.Allocator, now_ms: i64) void {
         const t = at orelse continue;
         if (now_ms - t < restart_window_ms) recent += 1;
     }
-    // 죽은 sidecar 가 쥐던 대화상자 콜백은 사라졌다 — 기다리던 요청을 버린다(떠 있는 창은 그 창이 닫는다).
-    for (surfaces.values()) |*s| dropDialogs(gpa, s);
+    forgetSidecar(gpa);
     if (recent >= restart_budget) return fail(.crashed_repeatedly);
     if (surfaces.count() == 0) return;
     // 모든 브라우저를 처음부터 다시 만든다(기록을 「안 만들어짐」으로 돌리고 create 를 다시 보낸다).
@@ -1168,6 +1259,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             if (allowed) send(gpa, .{ .geolocation = .{ .browser = v.browser, .request = v.request, .available = false } });
             send(gpa, .{ .permission_reply = .{ .browser = v.browser, .request = v.request, .result = if (allowed) .accept else .ignore } });
         },
+        .web_notification => |v| queueNote(gpa, v),
         .dialog_closed => |v| if (surfaces.getPtr(v.browser)) |s| {
             for (s.dialogs.items) |d| if (d.request == v.request) {
                 removeDialog(gpa, s, d.token);
@@ -1175,7 +1267,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             };
         },
         // 방향이 다른 tag 는 decoder 가 이미 거절했다.
-        .hello, .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .shutdown, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost, .dialog_reply, .file_dialog_path, .file_dialog_reply, .permission_reply, .geolocation => unreachable,
+        .hello, .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .shutdown, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost, .dialog_reply, .file_dialog_path, .file_dialog_reply, .permission_reply, .geolocation, .web_notification_click => unreachable,
     }
 }
 
@@ -1368,6 +1460,45 @@ test "remembered location requests skip the sheet only for origins the user allo
     try std.testing.expect(frames[7].permission_reply.request == 7 and frames[7].permission_reply.result == .ignore);
 }
 
+test "web notifications queue per tab, drop the oldest past the cap, and a click reaches only its own tab" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer {
+        for (surfaces.values()) |*s| freeSurface(gpa, s);
+        surfaces.deinit(gpa);
+        surfaces = .empty;
+        outbox_pending.deinit(gpa);
+        outbox_pending = .empty;
+        shown_notes = [_]?ShownNote{null} ** shown_notes.len;
+        state = .off;
+    }
+    try surfaces.put(gpa, 7, .{ .record = .{ .surface_id = 7, .size = .{ .width = 10, .height = 10, .scale = 1 }, .hidden = false }, .created = true });
+    try surfaces.put(gpa, 8, .{ .record = .{ .surface_id = 8, .size = .{ .width = 10, .height = 10, .scale = 1 }, .hidden = false }, .created = true });
+    for (1..11) |i| apply(gpa, .{ .web_notification = .{ .browser = 7, .notification = @intCast(i), .origin = "https://chat.example", .title = "t", .body = "b" } }, 0);
+    apply(gpa, .{ .web_notification = .{ .browser = 99, .notification = 1, .origin = "https://a.b", .title = "t" } }, 0); // 모르는 탭
+    // 상한 8 — 오래된 둘(1·2)은 버려졌다.
+    const first = takeWebNotification(7).?;
+    defer first.free(gpa);
+    try std.testing.expectEqual(@as(u32, 3), first.notification);
+    try std.testing.expectEqualStrings("https://chat.example", first.origin);
+    // 다른 탭(8)의 이름으로 누르거나 모르는 번호로 누르면 무동작, 제 탭으로 누르면 sidecar 번호로 간다.
+    clickWebNotification(gpa, 8, first.token);
+    clickWebNotification(gpa, 7, first.token +% 12345);
+    clickWebNotification(gpa, 7, first.token);
+    var frames: [4]Message = undefined;
+    try std.testing.expectEqual(@as(usize, 1), sentFrames(&frames));
+    try std.testing.expectEqual(@as(u32, 3), frames[0].web_notification_click.notification);
+    // sidecar 가 죽으면(`crashed` 가 부르는 그 정리) 옛 번호로는 누르지 못하고, 아직 내보내지 않은 알림도 사라진다(새
+    // sidecar 의 같은 번호를 누르지 않게).
+    const second = takeWebNotification(7).?;
+    defer second.free(gpa);
+    forgetSidecar(gpa);
+    clickWebNotification(gpa, 7, first.token);
+    clickWebNotification(gpa, 7, second.token);
+    try std.testing.expectEqual(@as(usize, 1), sentFrames(&frames)); // 앞의 그 하나뿐 — 새로 나간 것이 없다
+    try std.testing.expect(takeWebNotification(7) == null);
+}
+
 test "file chooser answers: bad paths are dropped, a JS answer cannot close a file request, crash drops everything" {
     const gpa = std.testing.allocator;
     state = .starting;
@@ -1399,7 +1530,7 @@ test "file chooser answers: bad paths are dropped, a JS answer cannot close a fi
     // sidecar 가 죽으면 기다리던 요청은 답 없이 사라진다(콜백이 없다).
     apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 6, .kind = .alert, .origin = "", .message = "" } }, 0);
     const dropped = nextDialog(7).?.token;
-    for (surfaces.values()) |*s| dropDialogs(gpa, s);
+    forgetSidecar(gpa);
     try std.testing.expect(dialogPending(7, dropped) == null);
     try std.testing.expectEqual(@as(usize, 2), sentFrames(&frames));
     // 다시 뜬 sidecar 가 같은 요청 번호(6)로 새 요청을 보내도 옛 토큰의 답은 붙지 않는다.

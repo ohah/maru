@@ -206,6 +206,7 @@ file-panel.external-link-target = in-app
 | `bell.audible` | `true`\|`false` | `true` | BEL(0x07) 수신 시 시스템 소리(NSSound.beep)를 낼지. `false`면 음소거(코어 플래그는 정상 소비) |
 | `bell.visual` | `true`\|`false` | `false` | BEL 수신 시 **화면을 잠깐 번쩍**이는 시각 벨. `true`면 활성 화면 위에 전경색 반투명 오버레이를 덮고 ~250ms 페이드아웃한다(소리를 못 듣는 환경 보조). `audible`과 독립이라 둘 다 켤 수 있다. 기본 `false`(현행 — 소리만) |
 | `bell.dock-badge` | `true`\|`false` | `false` | BEL 수신 시 **창이 포커스 없을 때만** Dock 아이콘에 `●` 배지를 띄울지. `true`면 백그라운드에서 벨이 울리면 Dock에 배지가 뜨고 앱으로 돌아오면 사라진다(놓친 알림 표시 — Terminal.app/iTerm2 관례). 포커스 중이면 안 띄운다. 기본 `false` |
+| `notifications.web` | `true`\|`false` | `true` | Chromium 브라우저 탭(`browser.engine = chromium`)의 웹 알림을 maru 알림(데스크톱 배너·인앱 알림 센터)으로 넘길지. 사이트가 알림 권한을 받은 뒤에만 넘어오고, 제목 앞에 사이트 출처가 붙는다. 알림을 누르면 그 탭으로 가고 페이지의 알림 `onclick` 이 불린다. `false`면 넘기지 않는다. 그 외 값은 무시 |
 | `notifications.osc` | `true`\|`false` | `true` | 셸/TUI가 보낸 OSC 9(iTerm2)/777(rxvt) 데스크톱 알림을 띄울지. `false`면 OSC 알림을 무시한다(데스크톱 배너·인앱 알림 센터 둘 다). 세팅 GUI에서 `false`→`true`로 켜면 macOS 데스크톱 알림 권한 요청을 시도한다. 그 외 값은 무시 |
 | `notifications.update-check` | `true`\|`false` | `true` | 새 버전이 나왔는지 앱 시작 시 1회 백그라운드로 확인해 인앱 알림으로 안내할지. 업그레이드를 자동 실행하지 않고 안내만 한다([배포·업데이트 전략](distribution.md)). 외부 요청(GitHub releases API)이라 끌 수 있다. 그 외 값은 무시 |
 | `notifications.history-limit` | `8`~`512` | `64` | 인앱 알림 센터(종 아이콘 패널)에 보관할 최대 알림 수. 초과하면 가장 오래된 것부터 버린다. 범위 밖은 무시 |

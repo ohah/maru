@@ -418,6 +418,20 @@ pub const SpawnRequest = struct {
     /// **의미는 백엔드가 정한다.** POSIX 셸에는 terminfo 항목 이름이지만 네이티브 Windows 셸(cmd·PowerShell)은
     /// terminfo를 안 쓴다 — 거기서는 WSL·msys로 들어가는 프로그램에만 뜻이 있다(계약 §4.2).
     term: []const u8 = "xterm-256color",
+    /// 자식에게 줄 `TERM_PROGRAM` 값. 기본 `maru` — **자기 이름을 말한다.**
+    ///
+    /// **왜 바꿀 수 있게 두는가**(2026-09-26). 여러 TUI 가 기능을 이 값의 **화이트리스트**로 켠다:
+    /// node `supports-hyperlinks` 가 OSC 8 을(`iTerm.app`·`WezTerm`·`vscode`·`ghostty`·`zed`·`Orca`,
+    /// 나머지는 전부 `false`), Claude Code·Codex 가 데스크톱 알림을(`kitty`/`ghostty`/`wezterm`).
+    /// `maru` 는 어느 명단에도 없어 그 기능들이 조용히 꺼진다.
+    ///
+    /// **기본값을 위장으로 두지 않는 이유**는 실측된 대가다 — 한때 `ghostty` 로 위장했더니
+    /// `terminal-browser` 가 그것을 보고 **AppleScript 로 진짜 Ghostty 앱을 조작하려 들었다**
+    /// (2026-09-08). 화이트리스트를 「능력」으로 쓰는 앱과 「신원」으로 쓰는 앱이 섞여 있고, 어느
+    /// 쪽인지 미리 알 수 없다. 그래서 **기본은 참말**이고, 대가를 아는 사용자만 바꾼다.
+    ///
+    /// 하이퍼링크만 필요하면 이 값을 안 바꿔도 된다 — `FORCE_HYPERLINK` 로 **능력만** 알린다.
+    term_program: []const u8 = "maru",
     /// **셸 통합을 어떻게 심을 것인가.** null이면 통합 없이 띄운다.
     ///
     /// **갈리는 축은 OS가 아니라 메커니즘이다**(계약 §4.2a). 한때 이 필드는 `?[]const u8`(자산 디렉터리)

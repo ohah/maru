@@ -1546,6 +1546,7 @@ const EnvBlock = struct {
             .parent_env = parent.entries,
             .env_overrides = overrides.items,
             .term = request.term,
+            .term_program = request.term_program,
             .pane_id = request.pane_id,
             .ssh_integration_bin = request.ssh_integration_bin,
         });

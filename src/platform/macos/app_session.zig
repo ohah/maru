@@ -5370,6 +5370,7 @@ pub const AppSession = struct {
         const request = spawnRequest(
             cfg,
             target.loaded_config.config.term,
+            target.loaded_config.config.term_program,
             target.loaded_config.config.shell,
             target.loaded_config.config.env,
             target.shellIntegrationZdotdir(),
@@ -5599,6 +5600,7 @@ pub const AppSession = struct {
         var first_req = spawnRequest(
             spawn_config,
             self.loaded_config.config.term,
+            self.loaded_config.config.term_program,
             self.loaded_config.config.shell,
             self.loaded_config.config.env,
             self.new_tab_zdotdir,
@@ -8121,7 +8123,7 @@ pub const AppSession = struct {
         if (!config.defer_initial_surface) {
             // 일반 새 Window/quick/smoke는 첫 탭을 즉시 만든다. workspace restore 전용 세션은 saved 모델을
             // apply하기 전 default shell을 띄우지 않아 relaunch side effect와 throwaway host runtime을 0으로 만든다.
-            var first_req = spawnRequest(spawn_config, self.loaded_config.config.term, self.loaded_config.config.shell, self.loaded_config.config.env, integ_dir, self.new_tab_ssh_bin);
+            var first_req = spawnRequest(spawn_config, self.loaded_config.config.term, self.loaded_config.config.term_program, self.loaded_config.config.shell, self.loaded_config.config.env, integ_dir, self.new_tab_ssh_bin);
             var root_buf: [std.fs.max_path_bytes]u8 = undefined;
             self.applySpawnCwd(&first_req, &root_buf, false);
             _ = try tab_ops.createTab(
@@ -8731,7 +8733,7 @@ pub const AppSession = struct {
         const size = layout_math.gridFromRectPx(self.cell_width_px, self.cell_height_px, self.active_pane_rect.w, self.active_pane_rect.h);
         var cfg = self.new_tab_config;
         cfg.size = size;
-        var req = spawnRequest(cfg, self.loaded_config.config.term, self.loaded_config.config.shell, self.loaded_config.config.env, self.shellIntegrationZdotdir(), self.new_tab_ssh_bin);
+        var req = spawnRequest(cfg, self.loaded_config.config.term, self.loaded_config.config.term_program, self.loaded_config.config.shell, self.loaded_config.config.env, self.shellIntegrationZdotdir(), self.new_tab_ssh_bin);
         // 원격 cwd는 되살릴 Term의 spawn에 쓰지 않는다 — 그 경로는 원격 파일시스템의 것이라 로컬 자식이 chdir에
         // 실패하고 $HOME으로 조용히 폴백한다(ssh-integration.md §9.4). cwd 없이 기본 자리에서 띄운다.
         if (!termCwdIsRemote(tomb)) {
@@ -24327,7 +24329,7 @@ fn startupExitDetail(buf: []u8, ended: ?app.RuntimePumpTermination) []const u8 {
     };
 }
 
-pub fn spawnRequest(config: NormalizedConfig, term: []const u8, shell: config_mod.ShellConfig, env_overrides: []const []const u8, zdotdir: ?[]const u8, ssh_bin: ?[]const u8) maru.pty.SpawnRequest {
+pub fn spawnRequest(config: NormalizedConfig, term: []const u8, term_program: []const u8, shell: config_mod.ShellConfig, env_overrides: []const []const u8, zdotdir: ?[]const u8, ssh_bin: ?[]const u8) maru.pty.SpawnRequest {
     var request: maru.pty.SpawnRequest = switch (config.command_kind) {
         .controlled_smoke => .{
             .command = "/bin/sh",
@@ -24354,6 +24356,9 @@ pub fn spawnRequest(config: NormalizedConfig, term: []const u8, shell: config_mo
     // 사용자 config의 TERM을 셸에 준다(기본 xterm-256color). env는 빈 채로 둬 부모 상속 +
     // TERM/COLORTERM override 경로를 타게 한다. zdotdir이 있으면 셸 통합용 ZDOTDIR을 주입한다.
     request.term = term;
+    // **신원도 설정이 정한다**(기본 `maru`). 화이트리스트로 기능을 켜는 TUI 때문에 바꾸고 싶은
+    // 사용자를 위한 탈출구다 — 기본은 여전히 참말이고, 대가는 docs/configuration.md 에 적혀 있다.
+    request.term_program = term_program;
     // 사용자 config env.<KEY> 주입(부모 상속 + maru override 위에 upsert). 빈 슬라이스면 EnvStorage가 무동작.
     request.env_overrides = env_overrides;
     request.shell_integration = if (zdotdir) |dir| .{ .assets_dir = dir } else null;
@@ -55645,12 +55650,12 @@ test "spawnRequest: interactive_shell이 잘못된 shell.command를 기본 셸�
     // 없는 경로·`~`·디렉터리 shell.command → req.command가 기본 셸(폴백). 예전엔 이 값이 그대로 execve돼 자식이
     // _exit(127) → 첫(유일) 창이면 앱이 시작하자마자 종료됐다. login 래퍼는 유지된다(req.login==true).
     inline for (.{ "/no/such/maru-shell-xyz", "~", "/" }) |bad| {
-        const req = spawnRequest(norm, "xterm-256color", .{ .command = bad }, &.{}, null, null);
+        const req = spawnRequest(norm, "xterm-256color", "maru", .{ .command = bad }, &.{}, null, null);
         try std.testing.expectEqualStrings(fallback, req.command);
         try std.testing.expect(req.login);
     }
     // 실행 가능한 절대경로(/bin/sh)는 그대로 쓴다(정상 커스텀 셸 보존) — 폴백이 과잉 적용되지 않음.
-    const ok = spawnRequest(norm, "xterm-256color", .{ .command = "/bin/sh" }, &.{}, null, null);
+    const ok = spawnRequest(norm, "xterm-256color", "maru", .{ .command = "/bin/sh" }, &.{}, null, null);
     try std.testing.expectEqualStrings("/bin/sh", ok.command);
     // 빈 값(자동)도 기본 셸(현행 동작 유지).
     const auto = spawnRequest(norm, "xterm-256color", .{ .command = "" }, &.{}, null, null);

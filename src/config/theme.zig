@@ -1460,6 +1460,15 @@ pub const Config = struct {
     /// 사용자가 자기 환경이 기대하는 값(예: `xterm-256color`·`xterm-ghostty`)으로 바꿀 수 있다(빈 값 무시).
     /// 원격(SSH)은 별개다 — 평범한 `ssh`엔 terminfo가 안 따라가니 `maru ssh`를 쓰거나 원격에 설치한다.
     term: []const u8 = "xterm-maru",
+    /// 셸에 줄 `TERM_PROGRAM` 값. 기본 `maru` — **자기 이름을 말한다.**
+    ///
+    /// 여러 TUI 가 기능을 이 값의 화이트리스트로 켠다(OSC 8 하이퍼링크·데스크톱 알림). `maru` 는
+    /// 그 명단에 없어 기능이 조용히 꺼지는데, 위장에는 실측된 대가가 있다 — `ghostty` 로 두면
+    /// `terminal-browser` 가 **진짜 Ghostty 앱을 AppleScript 로 조작하려 든다**(2026-09-08).
+    /// 그래서 기본은 참말이고 **대가를 아는 사용자만** 바꾼다(빈 값 무시). docs/configuration.md.
+    ///
+    /// 하이퍼링크만 필요하면 바꿀 필요가 없다 — maru 가 `FORCE_HYPERLINK` 로 **능력만** 알린다.
+    term_program: []const u8 = "maru",
     /// 사용자가 주입할 환경변수(각 "KEY=VALUE"). loader가 `env.<KEY> = value` 여러 줄을 모은다(arena 소유).
     /// spawn 시 **부모 상속 env + maru override(TERM 등) 위에 upsert**한다 — 같은 KEY면 덮어쓰고 없으면 추가
     /// ("부모 + 사용자" 정책, Ghostty `env`와 같은 결). 새로 여는 셸에만 적용(reload는 기존 셸 env를 안 바꿈).
@@ -1511,6 +1520,7 @@ pub const Config = struct {
         .window_unfocused_dim = Meta{ .key = "window.unfocused-dim", .doc = .cfg_window_unfocused_dim, .range = .{ 0.0, 1.0 }, .widget = .number, .section = .window },
         .split_divider_thickness = Meta{ .key = "split.divider-thickness", .doc = .cfg_split_divider_thickness, .range = .{ 0.0, 16.0 }, .widget = .number, .section = .window },
         .term = Meta{ .key = "term", .doc = .cfg_term, .widget = .text, .section = .terminal },
+        .term_program = Meta{ .key = "term-program", .doc = .cfg_term_program, .widget = .text, .section = .terminal },
     };
 };
 

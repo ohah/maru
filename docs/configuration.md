@@ -266,6 +266,7 @@ file-panel.external-link-target = in-app
 | `sidebar.agent-hooks` | `true`\|`false` | `true` | provider 훅(claude `settings.json`, codex `hooks.json`)을 설치해 에이전트 **상태·알림·턴 변경분**을 훅에서 받는다 — 켜면 그 터미널은 화면·OSC를 읽는 관측 모드를 쓰지 않는다([agent-hooks.md](agent-hooks.md) §1: 두 모드는 섞이지 않는다). **끄면 지운다** — 켜고 끄기가 한 쌍이라 되돌릴 수 있다. 지우는 것은 우리 표식(`MARU_HOOK_V3`)이 붙은 항목뿐이고, codex 는 `config.toml` 의 신뢰 블록도 함께 거둔다(우리 표식이 붙은 것만 — 사용자가 직접 승인한 항목은 건드리지 않는다). 우리가 넣은 항목은 커맨드 안의 표식으로 식별되고, 표식이 없는 사용자 항목은 순서까지 보존한다. 옛 상태줄 훅(`sidebar.agent-transcript-hook`)은 **없어졌다** — 그것이 하던 일(세션 신원 하나)이 `SessionStart`의 부분집합이라, 사용자 `statusLine`을 감싸던 침습을 지웠다([agent-hooks.md](agent-hooks.md) §5). 앱은 시작할 때 그 설치물을 거두기만 한다. **기본이 켜짐이다**(2026-08-22) — 비용을 재고(훅 1회 10.39 ms, 스크립트 몫은 측정 한계 아래) 양 provider 대화형에서 배지·알림이 실제로 도는 것을 확인한 뒤 전환했다. ⚠️ 켜면 **사용자의 provider 설정 파일을 고친다**. 끄면 되돌아간다. ⚠️ codex 의 오류 턴은 미검증이라(`StopFailure` 가 없다) 그때 배지가 안 풀릴 수 있고, 그러면 이 키를 끄는 것이 즉시 회피책이다 |
 | `sidebar.width` | 정수(120~480) | `180` | 세로 사이드바 폭(논리 pt, DPI 스케일). 사이드바 우측 경계를 드래그하면 이 키에 양방향 반영(드래그 종료 시 앱→config 파일 atomic write, 주석 보존). 범위 밖/비정수는 무시(기본 유지). 런타임은 헤더 아이콘(신호등·⚙ 등)이 겹치지 않게 폰트 크기에 비례한 **동적 하한**으로 다시 끌어올릴 수 있어, 작은 값을 저장해도 실제 폭은 그 하한 이상이 된다 |
 | `term` | 문자열 | `xterm-maru` | 셸에 줄 `$TERM`(컴파일 실패 시 `xterm-256color` 폴백). 아래 참조 |
+| `term-program` | 문자열 | `maru` | 셸에 줄 `$TERM_PROGRAM`. **기본은 자기 이름**이다. 여러 TUI 가 기능을 이 값의 **화이트리스트**로 켜는데(OSC 8 하이퍼링크·데스크톱 알림) `maru` 는 그 명단에 없어 조용히 꺼진다. **바꾸면 위장이고 대가가 있다** — 아래 참조. 빈 값은 `maru` 로 떨어진다 |
 | `shell-integration.ssh` | `true`\|`false` | `false` | 평범한 `ssh`를 `maru ssh`로 라우팅해 원격에 `xterm-maru` terminfo를 전파할지(opt-in). 기본 off(다운그레이드로 원격 안 깨짐). [셸 통합 ssh 라우팅](configuration-shell.md#셸-통합-ssh-라우팅-shell-integrationssh) 참조 |
 | `ssh.server-alive-interval` | 정수(0~3600) | `15` | `maru ssh` 세션에 붙일 `ServerAliveInterval`(초). `server-alive-count-max`와 곱해 **45초 안에** 죽은 연결을 감지한다. **`0`이면 `-o`를 아예 안 붙인다** — ssh는 커맨드라인 `-o`가 설정 파일보다 우선이라, 값을 고정해 붙이면 사용자 `~/.ssh/config`의 `ServerAlive*`를 말없이 덮기 때문이다. 평범한 `ssh`는 건드리지 않는다. [끊김 감지와 재접속](configuration-shell.md#maru-ssh-끊김-감지와-재접속-ssh) 참조 |
 | `ssh.server-alive-count-max` | 정수(1~10) | `3` | 응답 없는 keepalive를 몇 번까지 견딜지(`ServerAliveCountMax`). `server-alive-interval`이 `0`이면 안 쓰인다. 하한이 1인 이유는 ssh에서 0이 "즉시 끊어라"라 오작동에 가깝기 때문이다 |
@@ -275,6 +276,39 @@ file-panel.external-link-target = in-app
 | `shell.args` | 문자열 | POSIX `-i` / **Windows 없음** | 셸 인자(argv, command 제외). 공백으로 토큰 분리(`shell.args = -i -l`). 따옴표 미지원. 빈 값(`shell.args =`)이면 인자 없음. **기본값이 OS 마다 다르다** — POSIX 의 `/bin/sh` 는 `-i` 가 있어야 대화형으로 서지만 Windows 의 pwsh·cmd 는 콘솔에 붙는 순간 이미 대화형이고, PowerShell 5.1 은 `-i` 를 `-InputFormat` 축약으로 읽어 **셸이 안 뜬다**. 아래 참조 |
 | `shell.windows-shell` | `pwsh`\|`powershell`\|`cmd` | `pwsh` | **Windows 전용.** 설정 GUI 에는 노출하지 않는다(파일 전용). 기본으로 띄울 셸 **종류**. `shell.command` 가 비어 있을 때만 본다(명시 경로가 더 구체적이라 그쪽이 이긴다). `pwsh` 는 **PowerShell 7** 을 먼저, `powershell` 은 **Windows PowerShell 5.1** 을 먼저 보고, 없으면 서로에게 내려간다(고정이 아니라 **선호** — 고정하려면 `shell.command` 로 경로를 못 박는다). `cmd` 는 `cmd.exe` 를 곧장 쓴다. **둘을 가르는 이유**는 5.1 과 7 이 같은 셸의 버전 차이가 아니라 **매개변수 집합이 다른 별개 프로그램**이기 때문이다(실측: `-i` 를 5.1 은 `-InputFormat` 축약으로 읽고 값을 요구해 안 뜬다). 경로가 아니라 종류를 고르는 이유는 실제 경로가 기기마다 다르기 때문이다. 다른 OS 에서는 읽히되 쓰이지 않는다(dotfiles 공유 시 diagnostic 이 안 뜨게). 아래 참조 |
 | `keybind` | `<조합> = <action>` | (없음) | 여러 줄 가능. 아래 참조 |
+
+
+### `term-program` 과 「속일 것인가」
+
+maru 는 자식 셸에 **`TERM_PROGRAM=maru`** 를 준다 — 자기 이름을 말한다. 그런데 여러 TUI 가 기능을
+이 값의 **화이트리스트**로 켠다.
+
+| 기능 | 판정하는 곳 | 통과하는 이름 |
+|---|---|---|
+| OSC 8 하이퍼링크 | node `supports-hyperlinks` | `iTerm.app`·`WezTerm`·`vscode`·`ghostty`·`zed`·`Orca` |
+| 데스크톱 알림 | Claude Code·Codex 자체 | `kitty`·`ghostty`·`wezterm` |
+
+`maru` 는 어느 쪽에도 없다. **한때 `ghostty` 로 위장했고, 대가를 치렀다**(2026-09-08 실측):
+`terminal-browser` 가 그 값을 보고 **AppleScript 로 진짜 Ghostty 앱을 조작하려 들었다** — 설치돼
+있으면 엉뚱한 창이 반응하고, 없으면 pane 열기가 실패했다. 화이트리스트를 「**능력**」으로 쓰는 앱과
+「**신원**」으로 쓰는 앱이 섞여 있고, 어느 쪽인지 미리 알 수 없다.
+
+그래서 **기본은 참말**이고, 잃는 기능은 가능한 곳에서 **능력만 따로 알린다**:
+
+- **하이퍼링크는 이미 켜져 있다** — maru 가 `FORCE_HYPERLINK=1` 을 준다. 이것은 *"나는 ghostty다"*
+  가 아니라 *"나는 OSC 8 을 지원한다"* 는 **참말**이라 위장이 아니다. 끄려면 `env.FORCE_HYPERLINK = 0`.
+- **알림은 방법이 없다** — 앱이 질의를 지원하지 않는다. 앱 설정(claude `settings.json`·codex
+  `config.toml`)에서 채널을 명시하면 되찾을 수 있다.
+
+그래도 위장이 필요하면 **이 설정이 탈출구**다.
+
+```
+term-program = ghostty
+```
+
+바꾸는 순간 **위 사고가 다시 가능해진다** — 그 값을 「신원」으로 읽는 앱이 실제로 그 앱을 조작하려
+든다. maru 는 XTVERSION(`CSI > q`)에는 여전히 `maru` 라고 답하므로, 둘을 다 보는 앱에는 앞뒤가
+맞지 않는 상태가 된다.
 
 ## 검증 동작 (forgiving)
 

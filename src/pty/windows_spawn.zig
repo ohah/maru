@@ -155,6 +155,11 @@ pub const EnvOptions = struct {
     /// 사용자 config `env.<KEY>` — 위 결과 **위에** upsert한다.
     env_overrides: []const []const u8 = &.{},
     term: []const u8 = "xterm-256color",
+    /// 자식에게 줄 `TERM_PROGRAM`. 기본 `maru`. **macOS 와 같은 정책**을 쓴다 — 기본은 참말이고,
+    /// 화이트리스트로 기능을 켜는 TUI 때문에 위장이 필요한 사용자만 `term-program` 설정으로 바꾼다
+    /// (docs/configuration.md). 정책을 한쪽에만 두면 같은 설정이 플랫폼마다 다르게 동작한다 —
+    /// `ssh_integration_bin` 의 doc 이 경고하는 바로 그 자리다.
+    term_program: []const u8 = "maru",
     pane_id: ?u64 = null,
     /// opt-in ssh 라우팅이 켜졌을 때의 maru 실행 파일 경로. macOS와 **같은 정책**을 쓴다(`MARU_BIN` +
     /// `MARU_SSH_INTEGRATION=1` 주입, 부모의 동명 키는 그때 떨군다). Windows에서 이 값을 읽을 통합
@@ -210,7 +215,8 @@ pub fn buildEnvEntries(allocator: std.mem.Allocator, opts: EnvOptions) ![][]u8 {
         try appendOwned(allocator, &entries, try allocator.dupe(u8, "COLORTERM=truecolor"));
         // macOS 백엔드와 같은 값이다 — maru는 자기 이름을 말한다(한때 `ghostty`로 위장했다).
         // 근거는 `EnvStorage.appendParentEnv`의 주석이 단일 출처다.
-        try appendOwned(allocator, &entries, try allocator.dupe(u8, "TERM_PROGRAM=maru"));
+        const tp = if (opts.term_program.len > 0) opts.term_program else "maru"; // 빈 값은 기본으로 — 「신원 없음」은 뜻이 없다
+        try appendOwned(allocator, &entries, try std.fmt.allocPrint(allocator, "TERM_PROGRAM={s}", .{tp}));
         if (opts.ssh_integration_bin) |bin| {
             try appendOwned(allocator, &entries, try std.fmt.allocPrint(allocator, "MARU_BIN={s}", .{bin}));
             try appendOwned(allocator, &entries, try allocator.dupe(u8, "MARU_SSH_INTEGRATION=1"));

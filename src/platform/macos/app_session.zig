@@ -50238,12 +50238,17 @@ test "IME Enter commits editor preedit before newline instead of sending it to P
     input_ops.imeEnd(session, null);
     session.app_window.active_tab = terminal_tab;
     const terminal_bytes = session.total_terminal_input_bytes;
+    // A key with no IME callback still belongs to the pinned editor. The
+    // ordinary key router would otherwise send Enter to this terminal tab.
+    input_ops.imeBegin(session);
+    input_ops.imeEnd(session, .{ .key = .enter, .modifiers = .{} });
+    try std.testing.expectEqual(terminal_bytes, session.total_terminal_input_bytes);
     input_ops.imeBegin(session);
     try std.testing.expect(!session.ime_terminal_target_tombstoned);
     input_ops.imeMarked(session, "나");
     input_ops.imeInsert(session, "나");
     input_ops.imeMarked(session, "");
-    input_ops.imeEnd(session, null);
+    input_ops.imeEnd(session, .{ .key = .enter, .modifiers = .{} });
     try std.testing.expectEqualStrings("a한\n나b\n", term.rt.editor_doc.?.file.content);
     try std.testing.expectEqual(terminal_bytes, session.total_terminal_input_bytes);
 }
@@ -50299,7 +50304,13 @@ test "editor IME explicit UTF-16 replacement keeps the document unchanged until 
     input_ops.imeBegin(session);
     try std.testing.expect(input_ops.editorImeReplacement(session, 1, 1));
     try std.testing.expectEqual(@as(usize, 0), term.rt.editor_extra_selections.len);
+    try std.testing.expectEqual(@as(usize, 1), term.rt.editor_selection.?.start());
+    try std.testing.expectEqual(@as(usize, 4), term.rt.editor_selection.?.end());
+    input_ops.imeMarked(session, "나");
+    input_ops.imeMarked(session, "");
+    input_ops.imeInsert(session, "나");
     input_ops.imeEnd(session, null);
+    try std.testing.expectEqualStrings("a나😀b\n", term.rt.editor_doc.?.file.content);
     session.dispatchAppAction(.toggle_find);
     try std.testing.expect(input_ops.editorImeRanges(session) == null);
 }

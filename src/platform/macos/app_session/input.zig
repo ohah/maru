@@ -126,8 +126,20 @@ pub fn editorImeReplacement(self: *AppSession, start_utf16: usize, len_utf16: us
     const end_utf16 = std.math.add(usize, start_utf16, len_utf16) catch return false;
     const start = byteAtUtf16(doc.file.content, start_utf16) orelse return false;
     const end = byteAtUtf16(doc.file.content, end_utf16) orelse return false;
-    term.rt.editor_selection = .{ .anchor_start = start, .anchor_end = end, .focus = end };
+    const replacement: maru.session.editor.selection.Selection = .{ .anchor_start = start, .anchor_end = end, .focus = end };
+    term.rt.editor_selection = replacement;
     editor_ops.mergeCarets(self, term);
+    // A colliding secondary caret may be swallowed by the primary, but it
+    // must not enlarge the explicit range supplied by NSTextInputClient.
+    term.rt.editor_selection = replacement;
+    for (term.rt.editor_extra_selections) |extra| {
+        if (replacement.mergesWith(extra)) {
+            // mergeCarets can leave its input unchanged on allocation failure.
+            // Keep the input method's exact primary range valid in that case.
+            editor_ops.clearExtraSelections(self, term);
+            break;
+        }
+    }
     editor_ops.breakUndoGroup(term);
     self.metal_dirty = true;
     return true;
@@ -562,6 +574,10 @@ pub fn imeEnd(self: *AppSession, event: ?terminal.KeyEvent) void {
             // 텍스트 admission이 OOM이면 replay만 보내는 반쪽 transaction도 만들지 않는다.
             if (admitted and (terminal_target == null or editor_target)) {
                 if (replay_event) |ev| {
+                    // handleKeyEvent reads the *current* pane. A delayed editor
+                    // callback still commits to its pinned document, but its
+                    // replay key must never edit the pane that replaced it.
+                    if (editor_target and !imePinnedTargetIsActive(self)) return;
                     // This Enter confirmed an IME composition. An open completion
                     // popup must not reinterpret it as acceptance of a stale item.
                     if (editor_target and composing) editor_completion.hide(self);
@@ -572,9 +588,18 @@ pub fn imeEnd(self: *AppSession, event: ?terminal.KeyEvent) void {
         .ignore => traceCandidateIME(event, "ignore", false, false),
         .encode_key => if (event) |ev| {
             traceCandidateIME(event, "encode_key", false, false);
+            // A surviving pin can outlive a focus change between AppKit
+            // callbacks. The ordinary key router has no pinned-target input.
+            if (!imePinnedTargetIsActive(self)) return;
             _ = self.handleKeyEvent(ev) catch {};
         },
     }
+}
+
+fn imePinnedTargetIsActive(self: *AppSession) bool {
+    const pinned = self.ime_terminal_target_id orelse return true;
+    if (self.inputFocus() != .terminal or !self.surface_initialized or self.tabs.items.len == 0) return false;
+    return pane_ops.activePane(self).activeTerm().surface.id == pinned;
 }
 
 fn capturePreeditCommitBase(self: *AppSession, target_id: u64) ?terminal.preedit.CommitBase {

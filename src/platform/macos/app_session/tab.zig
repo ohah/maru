@@ -1199,7 +1199,7 @@ pub fn newTab(self: *AppSession) !*Tab {
     // 같은 계약을 따른다 — resizeActiveTabPanes가 단일 leaf에 적용하는 grid와도 정확히 일치한다.
     const full = pane_ops.paneTermRect(self, self.termRect());
     cfg.size = layout_math.gridFromRectPx(self.cell_width_px, self.cell_height_px, full.w, full.h);
-    var req = spawnRequest(cfg, self.loaded_config.config.term, self.loaded_config.config.shell, self.loaded_config.config.env, self.shellIntegrationZdotdir(), self.new_tab_ssh_bin);
+    var req = spawnRequest(cfg, self.loaded_config.config.term, self.loaded_config.config.term_program, self.loaded_config.config.shell, self.loaded_config.config.env, self.shellIntegrationZdotdir(), self.new_tab_ssh_bin);
     // 새 워크스페이스 탭: tab-inherit-cwd면 포커스 cwd 상속, 아니면 root(Ghostty tab-inherit 모델).
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     // deferred launch의 Recovered Sessions orphan adopt는 아직 포커스 Term이 없다. 그때는 cwd 상속을 읽지

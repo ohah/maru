@@ -2340,7 +2340,7 @@ test "ENVHL1 능력은 알리고 신원은 안 속인다 — FORCE_HYPERLINK 를
     // 경로(`appendParentEnv`)를 **아예 안 지난다**(적대적 S3 가 이 실수로 살아남았다). 부모 쪽을
     // 재려면 `initWithParentSnapshot` 에 스냅샷으로 넘겨야 한다.
     {
-        var storage = try EnvStorage.initWithParentSnapshot(std.testing.allocator, &.{}, &.{"PATH=/usr/bin", "FORCE_HYPERLINK=0"}, &.{}, "xterm-256color", "maru", null, null, null, null, null);
+        var storage = try EnvStorage.initWithParentSnapshot(std.testing.allocator, &.{}, &.{ "PATH=/usr/bin", "FORCE_HYPERLINK=0" }, &.{}, "xterm-256color", "maru", null, null, null, null, null);
         defer storage.deinit();
         const envp = storage.envpPtr();
         var first: ?[]const u8 = null;

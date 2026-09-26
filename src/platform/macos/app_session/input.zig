@@ -113,14 +113,18 @@ pub fn editorImeRanges(self: *AppSession) ?EditorImeRanges {
     return .{ .selected_start = start, .selected_len = end - start, .marked_start = mark };
 }
 
-/// Apply an input method's explicit document replacement to the primary
-/// selection. During an existing composition its range is in the virtual
-/// marked string, so the document selection must remain pinned to the range
-/// chosen when that composition began.
+/// Accept an input method's explicit replacement. During an existing
+/// composition its range is in the virtual marked string, so leave the
+/// document selection pinned and report success for the intentional no-op.
+/// A false result means the requested fresh document range was rejected.
 pub fn editorImeReplacement(self: *AppSession, start_utf16: usize, len_utf16: usize) bool {
     if (self.ime_terminal_target_id == null and self.inputFocus() != .terminal) return false;
     const term = activeEditorTermForIme(self) orelse return false;
-    if (term.rt.editor_diff != null or self.ime_had_marked or self.ime_marked_changed or term.rt.editor_preedit.len != 0) return false;
+    if (term.rt.editor_diff != null) return false;
+    if (term.rt.editor_preedit.len != 0 or (self.ime_active and self.ime_had_marked)) return true;
+    // A rejected callback marks the key as consumed with imeMarked(""). That
+    // is not evidence that a virtual marked string ever existed.
+    if (self.ime_marked_changed) return false;
     const doc = term.rt.editor_doc orelse return false;
     if (doc.file.read_only or term.rt.editor_selection == null) return false;
     const end_utf16 = std.math.add(usize, start_utf16, len_utf16) catch return false;
@@ -470,7 +474,10 @@ pub fn imeMarked(self: *AppSession, bytes: []const u8) void {
     if (!self.surface_initialized) return;
     imeSetPreedit(self, bytes);
     self.metal_dirty = true; // 조합 글자는 즉시 보여야 한다
-    if (self.ime_active) self.ime_marked_changed = true;
+    if (self.ime_active) {
+        self.ime_marked_changed = true;
+        if (bytes.len > 0) self.ime_had_marked = true;
+    }
 }
 
 /// 입력기의 deleteBackward 편집 명령(doCommand). 트랜잭션에 기록만 하고 판정은 imeEnd가 한다.

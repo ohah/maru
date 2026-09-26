@@ -412,10 +412,13 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
 
     // 입력기가 텍스트를 확정했다(한글 음절, 영문 일반 타이핑 모두 여기로 온다).
     func insertText(_ string: Any, replacementRange: NSRange) {
-        pendingUnmarkText = nil
-        if replacementRange.location != NSNotFound {
-            controller?.imeEditorReplacement(replacementRange)
+        guard acceptsEditorReplacement(replacementRange) else {
+            // A malformed explicit range must not redirect text to the old
+            // caret. Mark this key as consumed without editing the document.
+            controller?.imeMarked("")
+            return
         }
+        pendingUnmarkText = nil
         markedTextBuffer = ""
         markedSelection = NSRange(location: 0, length: 0)
         let text = (string as? String) ?? (string as? NSAttributedString)?.string ?? ""
@@ -433,14 +436,24 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
 
     // 조합 중 텍스트(예: 'ㅇ' -> '아' -> '안'). 표시는 Zig가 커서 위치에 합성한다.
     func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
-        if replacementRange.location != NSNotFound {
-            controller?.imeEditorReplacement(replacementRange)
+        guard acceptsEditorReplacement(replacementRange) else {
+            controller?.imeMarked("")
+            return
         }
         markedTextBuffer = (string as? String) ?? (string as? NSAttributedString)?.string ?? ""
         markedSelection = selectedRange
         imeLog("setMarkedText", markedTextBuffer)
         controller?.imeMarked(markedTextBuffer)
         controller?.recordSessionHostInputSmokeMarked()
+    }
+
+    private func acceptsEditorReplacement(_ range: NSRange) -> Bool {
+        // Once AppKit has marked text, replacementRange names its virtual
+        // string. The canonical document selection was pinned at composition
+        // start and must not be moved again by this callback.
+        if !markedTextBuffer.isEmpty || pendingUnmarkText != nil { return true }
+        guard range.location != NSNotFound, controller?.imeEditorRanges() != nil else { return true }
+        return controller?.imeEditorReplacement(range) == true
     }
 
     func unmarkText() {
@@ -588,6 +601,12 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         let (markedEnd, markOverflow) = ranges.markedStart.addingReportingOverflow(markedCount)
         let (selectedEnd, selectOverflow) = ranges.selectedStart.addingReportingOverflow(ranges.selectedLength)
         guard !markOverflow, !selectOverflow, ranges.markedStart == ranges.selectedStart else { return nil }
+        // A zero-length query never enters the slice below. Reject a caret in
+        // the middle of a surrogate pair just as the document ABI does.
+        if range.location >= ranges.markedStart, range.location <= markedEnd,
+           !isMarkedScalarBoundary(range.location - ranges.markedStart) { return nil }
+        if end >= ranges.markedStart, end <= markedEnd,
+           !isMarkedScalarBoundary(end - ranges.markedStart) { return nil }
         var parts = ""
         if range.location < ranges.markedStart {
             let prefixEnd = min(end, ranges.markedStart)
@@ -613,6 +632,15 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
             parts += suffix
         }
         return parts
+    }
+
+    private func isMarkedScalarBoundary(_ offset: Int) -> Bool {
+        let text = markedTextBuffer as NSString
+        guard offset >= 0, offset <= text.length else { return false }
+        guard offset > 0, offset < text.length else { return true }
+        let left = text.character(at: offset - 1)
+        let right = text.character(at: offset)
+        return !(0xD800...0xDBFF).contains(left) || !(0xDC00...0xDFFF).contains(right)
     }
 
     func validAttributesForMarkedText() -> [NSAttributedString.Key] {
@@ -12250,9 +12278,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return (selectedStart, selectedLength, markedStart)
     }
 
-    func imeEditorReplacement(_ range: NSRange) {
-        guard let session = appSession, range.location != NSNotFound else { return }
-        _ = maru_macos_app_session_ime_editor_replacement(session, range.location, range.length)
+    func imeEditorReplacement(_ range: NSRange) -> Bool {
+        guard let session = appSession, range.location >= 0, range.length >= 0,
+              range.location != NSNotFound else { return false }
+        return maru_macos_app_session_ime_editor_replacement(session, range.location, range.length) == Self.statusOK
     }
 
     func imeEditorSubstring(_ range: NSRange) -> String? {

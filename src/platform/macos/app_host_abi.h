@@ -1039,7 +1039,9 @@ int32_t maru_macos_app_session_ime_editor_ranges(
     size_t *out_selected_len,
     size_t *out_marked_start
 );
-/* NSNotFound는 Swift가 걸러 낸다. UTF-16 범위가 유효한 편집기면 primary 선택을 갱신한다. */
+/* NSNotFound는 Swift가 걸러 낸다. 새 조합의 유효한 문서 범위면 primary 선택을 갱신한다.
+ * 조합 중 범위는 가상 marked 문자열이므로 기존 문서 선택을 유지하고 OK를 돌린다.
+ * 잘못된 새 문서 범위는 오류이며 Swift는 그 입력을 다른 caret에 삽입하지 않는다. */
 int32_t maru_macos_app_session_ime_editor_replacement(
     MaruAppHostSession *session,
     size_t location,

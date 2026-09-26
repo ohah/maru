@@ -50283,6 +50283,15 @@ test "editor IME explicit UTF-16 replacement keeps the document unchanged until 
     try std.testing.expectEqual(@as(?usize, 4), input_ops.utf16AtByte(term.rt.editor_doc.?.file.content, 8));
     try std.testing.expectEqualStrings("한😀", input_ops.editorImeSubstring(session, 1, 3).?);
     try std.testing.expect(input_ops.editorImeSubstring(session, 3, 1) == null); // half-surrogate boundary
+    try std.testing.expect(!input_ops.editorImeReplacement(session, 3, 1)); // rejected range cannot move the caret
+    try std.testing.expectEqual(@as(usize, 0), term.rt.editor_selection.?.focus);
+    try std.testing.expect(!input_ops.editorImeReplacement(session, std.math.maxInt(usize), 1));
+    try std.testing.expectEqual(@as(usize, 0), term.rt.editor_selection.?.focus);
+    input_ops.imeBegin(session);
+    input_ops.imeMarked(session, ""); // invalid callback consumed the key, but never created a virtual mark
+    try std.testing.expect(!input_ops.editorImeReplacement(session, 1, 1));
+    try std.testing.expectEqual(@as(usize, 0), term.rt.editor_selection.?.focus);
+    input_ops.imeEnd(session, null);
     input_ops.imeBegin(session);
     try std.testing.expect(input_ops.editorImeReplacement(session, 1, 1));
     input_ops.imeMarked(session, "글");
@@ -50291,8 +50300,11 @@ test "editor IME explicit UTF-16 replacement keeps the document unchanged until 
     try std.testing.expectEqual(@as(usize, 1), ranges.marked_start);
     try std.testing.expectEqual(@as(usize, 1), ranges.selected_start);
     try std.testing.expectEqual(@as(usize, 1), ranges.selected_len);
-    try std.testing.expect(!input_ops.editorImeReplacement(session, 3, 1)); // active mark is virtual text
+    try std.testing.expect(input_ops.editorImeReplacement(session, 3, 1)); // active mark is virtual text: accepted no-op
+    try std.testing.expectEqual(@as(usize, 1), term.rt.editor_selection.?.start());
     input_ops.imeMarked(session, "");
+    try std.testing.expect(input_ops.editorImeReplacement(session, 3, 1)); // cleared this key, but it really had a mark
+    try std.testing.expectEqual(@as(usize, 1), term.rt.editor_selection.?.start());
     input_ops.imeInsert(session, "글");
     input_ops.imeEnd(session, null);
     try std.testing.expectEqualStrings("a글😀b\n", term.rt.editor_doc.?.file.content);

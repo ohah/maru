@@ -26101,6 +26101,83 @@ test "RF7: 이벤트를 본 횟수를 센다 — 「비교가 안 일어난다�
     try std.testing.expectEqual(@as(usize, 2), session.remote_events_seen); // 둘 다 봤다
     try std.testing.expectEqual(@as(usize, 1), session.remote_nonce_matched); // 하나가 우리 것
 }
+test "원격 신선도: RF8 미매칭 짝은 분배마다 새로 쓴다 — 옛 event 를 이번 mine 옆에 안 찍는다" {
+    // **보고가 거짓말하던 자리다**(2026-09-26 실측). `orphan agent nonce` 가 `event=` 으로 찍는 값이
+    // `mine` 안에 버젓이 있어 「전달이 깨졌다」로 읽혔는데, 실제로는 **옛 분배의 짝**이었다.
+    // 짝은 기록만 되고 **지워지는 자리가 없었다** — 매칭이 있는 분배도 `unmatched_reported` 와
+    // `unmatched_is_near` 만 풀고 짝은 남겼다.
+    //
+    // 남은 입구는 **「봤지만 기록은 0건」**이다: `noteUnmatchedRemoteNonce` 가 스풀 이름(`t<숫자>`)을
+    // 기록 없이 거르므로(§RA6 detached), 그런 이벤트만 온 분배는 `seen > 0` 인데 짝이 안 남는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const session = try a.create(AppSession);
+    defer a.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), a, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const term = pane_ops.activePane(session).activeTerm();
+    term.agent_remote_channel = maru.session.remote_agent_stream.Channel.initOpen(0);
+    term.rt.observation.ssh_remote_dest_present = true;
+    try term.rt.observation.ssh_remote_dest.appendSlice(a, "openClaw");
+    // **pane 칸이 8 자여야 `tailsMatch` 가 성립한다**(`paneTail8`) — 4 자짜리 이름으로는 near 경로를
+    // 영영 못 밟아 아래 ④⑤ 가 무의미해진다(적대적 검증 ME3 가 그래서 살아남았다).
+    const mine = "host_aaaa_pane0001";
+    @memcpy(term.agent_remote_nonce[0..mine.len], mine);
+    term.agent_remote_nonce_len = mine.len;
+    const ev = "\\t{\\\"hook_event_name\\\":\\\"Stop\\\"}";
+    _ = ev;
+
+    // ① 하나는 우리 것(매칭), 하나는 남의 것(미매칭 기록).
+    remote_agent_ops.feedRemoteAgentTerms(session, "openClaw", &.{
+        "{\"nonce\":\"host_aaaa_pane0001\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"Stop\\\"}\"}",
+        "{\"nonce\":\"host_bbbb_xxxx0002\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"Stop\\\"}\"}",
+    }, 1);
+    try std.testing.expectEqual(@as(usize, 1), session.remote_nonce_matched);
+    try std.testing.expectEqualStrings("host_bbbb_xxxx0002", session.unmatched_event_nonce[0..session.unmatched_event_nonce_len]);
+
+    // ② **스풀 이름만 온 분배** — 기록이 걸러진다. 짝은 **이 분배 것이 없으므로 비어야** 한다.
+    //    안 지우면 ① 의 `host_bbbb_other` 가 살아남아 이번 `mine` 옆에 찍힌다.
+    remote_agent_ops.feedRemoteAgentTerms(session, "openClaw", &.{
+        "{\"nonce\":\"t9\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"Stop\\\"}\"}",
+    }, 2);
+    try std.testing.expectEqual(@as(usize, 1), session.remote_events_seen); // 보긴 봤다
+    try std.testing.expectEqual(@as(usize, 0), session.remote_nonce_matched); // 안 맞았다
+    try std.testing.expectEqual(@as(u8, 0), session.unmatched_event_nonce_len); // **그런데 짝은 없다**
+    try std.testing.expectEqual(@as(u8, 0), session.unmatched_term_nonce_len);
+
+    // ③ **대조군** — 스풀이 아닌 미매칭은 이번 분배 것으로 기록된다(리셋이 기능을 안 죽였다).
+    remote_agent_ops.feedRemoteAgentTerms(session, "openClaw", &.{
+        "{\"nonce\":\"host_cccc_yyyy0003\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"Stop\\\"}\"}",
+    }, 3);
+    try std.testing.expectEqualStrings("host_cccc_yyyy0003", session.unmatched_event_nonce[0..session.unmatched_event_nonce_len]);
+    try std.testing.expectEqualStrings(mine, session.unmatched_term_nonce[0..session.unmatched_term_nonce_len]);
+
+    // ④ **꼬리가 같은 짝**(near)을 기록시킨다 — `unmatched_is_near` 가 참이 된다.
+    remote_agent_ops.feedRemoteAgentTerms(session, "openClaw", &.{
+        "{\"nonce\":\"host_zzzz_pane0001\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"Stop\\\"}\"}",
+    }, 4);
+    try std.testing.expectEqualStrings("host_zzzz_pane0001", session.unmatched_event_nonce[0..session.unmatched_event_nonce_len]);
+    try std.testing.expect(session.unmatched_is_near);
+
+    // ⑤ **그다음 분배의 non-near 미매칭이 기록돼야 한다.**
+    //
+    // `is_near` 를 분배마다 안 지우면 `noteUnmatchedRemoteNonce` 의 「near 가 우선」 규칙이 **다음
+    // 분배까지 넘어가** 이 기록을 거부한다. 그러면 짝이 비어 경고가 **아예 안 뜬다** — 거짓 경고가
+    // 아니라 **놓친 경고**라 더 조용히 나쁘다(적대적 검증 ME3 가 연 자리).
+    remote_agent_ops.feedRemoteAgentTerms(session, "openClaw", &.{
+        "{\"nonce\":\"host_dddd_zzzz0005\",\"line\":\"claude\\t{\\\"hook_event_name\\\":\\\"Stop\\\"}\"}",
+    }, 5);
+    try std.testing.expectEqualStrings("host_dddd_zzzz0005", session.unmatched_event_nonce[0..session.unmatched_event_nonce_len]);
+    try std.testing.expect(!session.unmatched_is_near);
+}
+
 test "RF7: 채널이 관문 앞이면 이벤트를 아예 못 본다 — 그것이 0 으로 드러난다" {
     // `waiting_hello` 는 닫히지도 않았고 이벤트도 못 낸다. 그 상태에서는 비교가 **한 번도** 안 일어나며,
     // 셈이 0 이면 그 사실이 로그에 그대로 남는다.

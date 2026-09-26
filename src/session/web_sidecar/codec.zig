@@ -199,6 +199,19 @@ pub fn encode(message: Message, out: []u8) Error!usize {
             try writeRequest(&cursor, value.browser, value.request);
             try cursor.writeByte(@intFromEnum(value.result));
         },
+        .web_notification => |value| {
+            try writeBrowser(&cursor, value.browser);
+            try cursor.writeU32(value.notification);
+            if (value.origin.len == 0) return error.InvalidNotification;
+            try writeOrigin(&cursor, value.origin);
+            try writeDialogText(&cursor, value.title);
+            try writeDialogText(&cursor, value.body);
+        },
+        .web_notification_click => |value| {
+            try writeBrowser(&cursor, value.browser);
+            if (value.notification == 0) return error.InvalidNotification;
+            try cursor.writeU32(value.notification);
+        },
         .geolocation => |value| {
             try writeRequest(&cursor, value.browser, value.request);
             try fields.checkGeolocation(value);
@@ -400,6 +413,25 @@ pub fn decodeExact(frame: []const u8) Error!Message {
                 .request = request.request,
                 .result = std.enums.fromInt(message_mod.PermissionResult, try cursor.readByte()) orelse return error.UnknownPermissionResult,
             } };
+        },
+        .web_notification => blk: {
+            const browser = try readBrowser(&cursor);
+            const notification = try cursor.readU32();
+            const origin = try readOrigin(&cursor);
+            if (origin.len == 0) return error.InvalidNotification;
+            break :blk .{ .web_notification = .{
+                .browser = browser,
+                .notification = notification,
+                .origin = origin,
+                .title = try readDialogText(&cursor),
+                .body = try readDialogText(&cursor),
+            } };
+        },
+        .web_notification_click => blk: {
+            const browser = try readBrowser(&cursor);
+            const notification = try cursor.readU32();
+            if (notification == 0) return error.InvalidNotification;
+            break :blk .{ .web_notification_click = .{ .browser = browser, .notification = notification } };
         },
         .geolocation => blk: {
             const request = try readRequest(&cursor);
@@ -867,6 +899,9 @@ test "every single-byte corruption of input frames decodes to valid fields or er
         .{ .permission_request = .{ .browser = 3, .request = 2, .origin = "https://a.b", .kinds = 0x8100 } },
         .{ .permission_request = .{ .browser = 3, .request = 2, .origin = "", .media = 0b11 } },
         .{ .permission_reply = .{ .browser = 3, .request = 2, .result = .dismiss } },
+        // W5c 알림.
+        .{ .web_notification = .{ .browser = 3, .notification = 2, .origin = "https://a.b", .title = "제목", .body = "본문\n둘" } },
+        .{ .web_notification_click = .{ .browser = 3, .notification = 2 } },
         // W5b2 위치.
         .{ .permission_request = .{ .browser = 3, .request = 2, .origin = "", .kinds = 0x100, .remembered = true } },
         .{ .geolocation = .{ .browser = 3, .request = 2, .available = true, .latitude = 37.5, .longitude = 127, .accuracy = 30 } },
@@ -1025,6 +1060,28 @@ test "permission fields fail closed both ways" {
     len = try encode(.{ .permission_reply = .{ .browser = 1, .request = 1, .result = .deny } }, &buf);
     buf[body + 12] = 4;
     try std.testing.expectError(error.UnknownPermissionResult, decodeExact(buf[0..len]));
+}
+
+// ── 웹 알림(W5c) ──────────────────────────────────────────────────────────────────────────────────────────
+
+test "web notifications round trip, go the right way, and fail closed" {
+    const shown = (try roundTrip(.{ .web_notification = .{ .browser = 7, .notification = 3, .origin = "https://chat.example", .title = "새 메시지", .body = "안녕\n하세요" } })).web_notification;
+    try std.testing.expectEqual(@as(u32, 3), shown.notification);
+    try std.testing.expectEqualStrings("https://chat.example", shown.origin);
+    try std.testing.expectEqualStrings("새 메시지", shown.title);
+    try std.testing.expectEqualStrings("안녕\n하세요", shown.body);
+    try std.testing.expectEqual(@as(u32, 3), (try roundTrip(.{ .web_notification_click = .{ .browser = 7, .notification = 3 } })).web_notification_click.notification);
+    try std.testing.expectEqual(message_mod.Direction.to_maru, Tag.web_notification.direction());
+    try std.testing.expectEqual(message_mod.Direction.to_sidecar, Tag.web_notification_click.direction());
+    var buf: [512]u8 = undefined;
+    // 출처 없는 알림·위장 출처·제어 문자·누를 수 없는 번호로 누르기는 거절.
+    try std.testing.expectError(error.InvalidNotification, encode(.{ .web_notification = .{ .browser = 1, .notification = 1, .origin = "", .title = "t" } }, &buf));
+    try std.testing.expectError(error.InvalidOrigin, encode(.{ .web_notification = .{ .browser = 1, .notification = 1, .origin = "https://apple.com@evil.test", .title = "t" } }, &buf));
+    try std.testing.expectError(error.ControlCharacter, encode(.{ .web_notification = .{ .browser = 1, .notification = 1, .origin = "https://a.b", .title = "\x1b]0;x\x07" } }, &buf));
+    try std.testing.expectError(error.InvalidNotification, encode(.{ .web_notification_click = .{ .browser = 1, .notification = 0 } }, &buf));
+    const len = try encode(.{ .web_notification_click = .{ .browser = 1, .notification = 5 } }, &buf);
+    std.mem.writeInt(u32, buf[len - 4 ..][0..4], 0, .big);
+    try std.testing.expectError(error.InvalidNotification, decodeExact(buf[0..len]));
 }
 
 // ── 위치(W5b2) ────────────────────────────────────────────────────────────────────────────────────────────

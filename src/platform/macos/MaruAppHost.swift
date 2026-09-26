@@ -8315,9 +8315,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                     Self.testReport("menu-missing \(title)")
                 }
             case "config" where line.count >= 2:
-                // config 한 줄 — `MARU_CONFIG` 파일을 이 한 줄로 바꾼다(reload 로 알림 토스트를 띄우는 데 쓴다).
+                // config 줄[ ;; 줄…] — `MARU_CONFIG` 파일을 이 줄들로 바꾼다(reload 로 알림 토스트를 띄우거나 설정을 바꾸는 데 쓴다).
                 if let path = ProcessInfo.processInfo.environment["MARU_CONFIG"] {
-                    try? (line.dropFirst().joined(separator: " ") + "\n").write(toFile: path, atomically: true, encoding: .utf8)
+                    let text = line.dropFirst().joined(separator: " ").replacingOccurrences(of: " ;; ", with: "\n")
+                    try? (text + "\n").write(toFile: path, atomically: true, encoding: .utf8)
                 }
             case "sheet":
                 // W5a: 이 창에 떠 있는 Chromium 탭 대화상자 — `sheet 종류 제목|글|단추들|입력칸` 또는 `sheet none`.
@@ -8357,6 +8358,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                     if let panel = open.sheet as? NSSavePanel { panel.cancel(nil) } else { open.alert?.buttons.last?.performClick(nil) }
                 } else {
                     Self.testReport("sheet-answer-missing")
+                }
+            case "notification-click":
+                // 마지막 알림을 누른다 — 배너 클릭(didReceive)의 지역 경로와 같은 두 호출(탭으로 · 웹 알림이면 onclick).
+                if let (sid, webToken) = osrTestLastNotification, let session = appSession {
+                    _ = maru_macos_app_session_activate_surface(session, sid)
+                    if webToken != 0 { maru_macos_app_session_web_notification_click(session, sid, webToken) }
+                } else {
+                    Self.testReport("notification-missing")
                 }
             case "macos-location" where line.count >= 2:
                 // macos-location granted 위도 경도 정확도 | denied | unavailable — 위치 요청 때 CoreLocation 대신 이 답을 준다.
@@ -8684,6 +8693,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     enum OsrDevice: Int64 { case camera = 0, microphone = 1, screen = 2, location = 3 }
     /// 시험기 전용(`macos-access`) — macOS 권한 상태를 대신 정한다(비활성 앱·장치 없는 기계에서 TCC 를 다룰 수 없다).
     private var osrTestMacAccess: [OsrDevice: Bool] = [:]
+    /// 시험기 전용(W5c) — 마지막으로 보고한 알림(surface, 웹 알림 번호). `notification-click` 이 누른다.
+    private var osrTestLastNotification: (UInt64, UInt64)?
     /// 떠 있는 macOS 안내 sheet(시험기가 읽는다).
     private weak var osrBlockedAlert: NSAlert?
 
@@ -9446,6 +9457,16 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             &eventId
         ) == Self.statusOK,
               has != 0 else { return }
+        // 시험기 전용(W5c): 보고 파일이 있으면 OS 알림을 띄우지 않고 보고한다(자동 시험이 책상 위에 배너를 뿌리지 않게) —
+        // `notification-click` 이 배너 클릭과 같은 길로 누른다.
+        if ProcessInfo.processInfo.environment["MARU_WEB_OSR_TEST_REPORT"] != nil {
+            let title = titleLen > 0 ? String(decoding: UnsafeBufferPointer(start: titlePtr!, count: titleLen), as: UTF8.self) : ""
+            let body = bodyLen > 0 ? String(decoding: UnsafeBufferPointer(start: bodyPtr!, count: bodyLen), as: UTF8.self) : ""
+            let webToken = maru_macos_app_session_pending_notification_web_token(session)
+            Self.testReport("notification \(title)|\(body.replacingOccurrences(of: "\n", with: "\\n"))|fg=\(foreground)|web=\(webToken != 0)")
+            osrTestLastNotification = (surfaceId, webToken)
+            return
+        }
         guard Bundle.main.bundleIdentifier != nil else { return } // 번들 없으면 알림 API 사용 불가 — skip
         let title = titleLen > 0 ? String(decoding: UnsafeBufferPointer(start: titlePtr!, count: titleLen), as: UTF8.self) : ""
         let body = bodyLen > 0 ? String(decoding: UnsafeBufferPointer(start: bodyPtr!, count: bodyLen), as: UTF8.self) : ""
@@ -9456,6 +9477,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 발신 창이다. 그 token과 surface_id를 실어, 클릭 시 token으로 창/세션을, surface_id로 그 안의 Term을 찾는다.
         // fg=전면 배너 여부(Zig 결정) — willPresent가 읽어 자기 화면 OSC 알림 배너 노이즈를 억제한다.
         var userInfo: [String: Any] = ["wt": activeSurface?.token ?? 0, "sid": surfaceId, "fg": foreground]
+        // W5c: Chromium 탭의 웹 알림이면 그 번호 — 누르면 페이지의 알림 onclick 을 부른다.
+        let webToken = maru_macos_app_session_pending_notification_web_token(session)
+        if webToken != 0 { userInfo["wn"] = webToken }
         let identifier: String
         if routePresent != 0 {
             let stableHostId = String(format: "%016llx%016llx", hostIdHi, hostIdLo)
@@ -9872,6 +9896,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         let callbackAtNs = notificationReleaseContinuousTimeNs()
         let hasStableKey = userInfo["hid"] != nil || userInfo["rid"] != nil || userInfo["eid"] != nil
         let localRoute = hasStableKey ? nil : Self.parseNotificationRoute(userInfo)
+        let webToken = (userInfo["wn"] as? NSNumber)?.uint64Value ?? 0
         Task { @MainActor [weak self] in
             defer { completionHandler() } // 누락 시 OS 경고 — 모든 경로에서 보장.
             guard let self else { return }
@@ -9918,6 +9943,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             }
             if let session = surface.appSession {
                 _ = maru_macos_app_session_activate_surface(session, route.surfaceId)
+                // W5c: 웹 알림이면 페이지의 onclick(그 탭의 그 번호일 때만 — Zig 가 가른다).
+                if webToken != 0 { maru_macos_app_session_web_notification_click(session, route.surfaceId, webToken) }
             }
         }
     }

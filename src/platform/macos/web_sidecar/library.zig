@@ -32,6 +32,11 @@ pub const Api = struct {
     // 대화상자 제목의 출처(W5a) — 사용자 정보·경로를 떼고 IDN 은 안전할 때만 유니코드로(Chrome 의 보안 표시 규칙).
     format_url_for_security_display: *const @TypeOf(c.cef_format_url_for_security_display),
     string_userfree_utf16_free: *const @TypeOf(c.cef_string_userfree_utf16_free),
+    // 웹 알림(W5c) — helper(렌더러)가 대리 스크립트에 네이티브 함수를 넘기고 프로세스 메시지를 보낸다.
+    v8_value_create_function: *const @TypeOf(c.cef_v8_value_create_function),
+    v8_value_create_int: *const @TypeOf(c.cef_v8_value_create_int),
+    v8_context_get_current_context: *const @TypeOf(c.cef_v8_context_get_current_context),
+    process_message_create: *const @TypeOf(c.cef_process_message_create),
 };
 
 pub const LoadError = error{ FrameworkOpenFailed, SymbolMissing };
@@ -62,6 +67,10 @@ pub fn load(framework_binary: [*:0]const u8) LoadError!Api {
         .string_list_value = try find(handle, "cef_string_list_value", @TypeOf(c.cef_string_list_value)),
         .format_url_for_security_display = try find(handle, "cef_format_url_for_security_display", @TypeOf(c.cef_format_url_for_security_display)),
         .string_userfree_utf16_free = try find(handle, "cef_string_userfree_utf16_free", @TypeOf(c.cef_string_userfree_utf16_free)),
+        .v8_value_create_function = try find(handle, "cef_v8_value_create_function", @TypeOf(c.cef_v8_value_create_function)),
+        .v8_value_create_int = try find(handle, "cef_v8_value_create_int", @TypeOf(c.cef_v8_value_create_int)),
+        .v8_context_get_current_context = try find(handle, "cef_v8_context_get_current_context", @TypeOf(c.cef_v8_context_get_current_context)),
+        .process_message_create = try find(handle, "cef_process_message_create", @TypeOf(c.cef_process_message_create)),
     };
 }
 

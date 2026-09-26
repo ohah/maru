@@ -282,7 +282,7 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 185: CR6d-v2b0b extends the read-only input probe with terminal byte/screen generation counters
 // and adds one synchronous transcript-to-canonical-evidence leaf. Raw inventories are borrowed
 // only for the call; Zig owns reduction and absent-target publication.
-pub const abi_version: u32 = 196;
+pub const abi_version: u32 = 197;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -2962,6 +2962,8 @@ const NotificationHistoryItem = struct {
     title: []u8,
     body: []u8,
     surface_id: u64,
+    /// W5c: 웹 알림이면 그 번호(`web_osr.WebNote.token`) — 카드를 누르면 페이지의 `onclick` 도 부른다. 0 이면 웹 알림이 아니다.
+    web_token: u64 = 0,
     timestamp_ns: i128,
     route: ?StableNotificationRoute = null,
     is_read: bool = false,
@@ -7554,6 +7556,8 @@ pub const AppSession = struct {
     editor_clipboard_meta: ?maru.session.editor.clipboard.Meta = null,
     // pendingNotification()이 돌려준 OSC 9/777 알림 title/body의 소유 버퍼(다음 pendingNotification/destroy까지 유효).
     notification_title_out: []u8 = &.{},
+    /// W5c: 방금 내보낸 알림이 웹 알림이면 그 번호(Swift 가 배너 userInfo 에 싣는다) — 아니면 0.
+    notification_web_token_out: u64 = 0,
     notification_body_out: []u8 = &.{},
     // host-backed Term 알림 round-robin 커서(P4 §6.32) — host 알림은 RPC로 pull하므로 tick당 원격 Term 하나만 폴링해
     // 폴링 비용을 bound한다(in-process는 코어 락 read라 매 tick 전부 훑음). 원격 Term 개수로 wrap.

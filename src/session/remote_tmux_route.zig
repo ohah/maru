@@ -127,12 +127,21 @@ pub fn parseSidecar(bytes: []const u8) ?Observed {
 /// 흔한 자리를 앞에 붙여 찾을 확률을 올리되, **못 찾으면 표식이 나가 `lookup_ran = false` 로 접는다** —
 /// 그것이 안전한 실패다(오배달보다 낫다).
 ///
+/// ⚠️ **빈 세션 이름은 건너뛴다**(`[ -n "$s" ] || continue`). `tmux display -t <죽은 pane>` 은
+/// **실패가 아니라 exit 0 에 빈 줄**이다(2026-09-26 원격 실측). 그대로 흘리면 다음 줄의
+/// `list-clients -t ""` 가 tmux 에서 **「지금 세션」**으로 풀려, 죽은 pane 의 이벤트가 **살아 있는
+/// 남의 Term 으로 귀속된다** — 실측에서 `%99`(없는 pane)가 `hwpjs` 와 무관한 클라이언트의 nonce 로
+/// 풀렸다. 이 저장소가 여러 번 못박은 「조용한 오배달보다 안전한 실패가 낫다」의 자리이고, 빈 값은
+/// 「아무거나」가 아니라 **「모른다」**여야 한다. 건너뛰면 클라이언트 구획이 비어 `parseClients` 가
+/// 「붙어 있는 클라이언트 없음」으로 접는다(= `detached`).
+///
 /// ⚠️ 소켓·pane 은 **작은따옴표 안에 들어간다.** 두 값 모두 tmux 가 만든 것이라 작은따옴표를 담지 않지만,
 /// 그 가정을 코드가 아니라 여기 적어 둔다 — 언젠가 사용자 입력이 이 자리에 오면 인용이 아니라 검증이 필요하다.
 pub fn lookupScript(allocator: std.mem.Allocator, socket: []const u8, pane: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator,
         \\PATH="/opt/homebrew/bin:/usr/local/bin:/usr/pkg/bin:$PATH"; command -v tmux >/dev/null 2>&1 || {{ echo '{s}'; exit 0; }};
         \\tmux -S '{s}' display -p -t '{s}' '#{{session_name}}' 2>/dev/null | while IFS= read -r s; do
+        \\[ -n "$s" ] || continue;
         \\tmux -S '{s}' list-clients -t "$s" -F '#{{client_pid}}' 2>/dev/null | while IFS= read -r p; do
         \\if [ -r "/proc/$p/environ" ]; then tr '\0' '\n' < "/proc/$p/environ" | sed -n 's/^LC_MARU_PANE=//p' | head -1;
         \\else ps -E -p "$p" 2>/dev/null | tr ' ' '\n' | sed -n 's/^LC_MARU_PANE=//p' | head -1; fi; echo; done; done
@@ -400,6 +409,27 @@ test "RA7.6 serverSection: 살아 있는 서버 세대 한 줄 — pane 목록�
     try testing.expect(serverSection("nonce-a\n") == null); // 구버전 스크립트
     try testing.expect(serverSection("nonce-a\n" ++ server_marker ++ "\n" ++ panes_marker ++ "\n%0\n") == null);
     try testing.expect(serverSection("nonce-a\n" ++ server_marker ++ "\n   \n") == null);
+}
+
+test "RA7.7 lookupScript: 빈 세션 이름은 귀속을 포기한다 — 죽은 pane 이 남의 Term 으로 가던 것" {
+    const a = testing.allocator;
+    const script = try lookupScript(a, "/tmp/sock", "%99");
+    defer a.free(script);
+
+    // **`tmux display -t <죽은 pane>` 은 실패가 아니라 exit 0 에 빈 줄이다**(2026-09-26 원격 실측).
+    // 그대로 흘리면 `list-clients -t ""` 가 「지금 세션」으로 풀려 **오배달**이 된다.
+    //
+    // **문법 자리에 닻을 내린다** — 루프 머리 **바로 뒤**여야 한다. 부분문자열로 찾으면 주석이나
+    // 다른 줄에 같은 글자가 생겨도 초록이 되고, 그러면 가드가 엉뚱한 자리로 옮겨가도 안 잡힌다.
+    const head = "'#{session_name}' 2>/dev/null | while IFS= read -r s; do";
+    const at = std.mem.indexOf(u8, script, head) orelse return error.LoopHeadNotFound;
+    const rest = std.mem.trimStart(u8, script[at + head.len ..], " \n");
+    try testing.expect(std.mem.startsWith(u8, rest, "[ -n \"$s\" ] || continue;"));
+
+    // 가드가 **바깥 루프**의 것이어야 한다 — 안쪽(`$p`)에 붙으면 빈 세션이 그대로 흘러 들어간다.
+    const guard_at = std.mem.indexOf(u8, script, "[ -n \"$s\" ] || continue;").?;
+    const clients_at = std.mem.indexOf(u8, script, "list-clients").?;
+    try testing.expect(guard_at < clients_at);
 }
 
 test "RA7.6 lookupScript: 서버 세대도 같은 셸에서 묻고, pane 구획보다 앞에 둔다" {

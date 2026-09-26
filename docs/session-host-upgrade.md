@@ -322,6 +322,32 @@ strict preclosed admission gate를 다시 열어
 기존 PTY/runtime serving을 계속한다. terminal 기록 또는 gate reopen을 확정하지 못하면 역시 fail-stop이다. 이 경계는
 Debug assert나 ReleaseFast no-op에 의존하지 않고 두 최적화 모드에서 같은 typed 결과를 낸다.
 
+### 실패한 host 의 재교체 정책 (2026-09-25 결정, 미구현)
+
+**문제.** 위 규칙은 「`upgrade_busy`면 … 마지막 attachment가 떨어진 뒤 다시 시도한다」인데, 코드는 교체를 앱이 host 에
+처음 연결할 때 한 번만 시도하고, 같은 빌드 host 가 이미 있으면 스캔 자체를 건너뛴다(`host_connect.zig` 의
+「current-build host found — upgrade scan skipped」). 그래서 교체가 한 번 실패하면(§7 예약 초과는 활성 세션이 많을수록
+잦은 정상 실패다) 새 host 가 옆에 서고, 옛 host 는 **셸이 모두 닫힐 때까지** 옛 이미지로 남는다. 그동안 새 앱은 옛
+host 에 붙는다(2026-09-05 실측: 셸 12 개를 쥔 host 가 이 경로로 굳었다). 세션 도중의 재교체는 위 조건(모든 runtime 의
+controller·observer 0, 사용자 입력을 끊지 않는다)상 불가능하다.
+
+**결정.**
+
+- **대상 — 같은 앱 번들이 띄운 host 만.** host manifest 에 그 host 를 띄운 앱 번들의 정규화된 실제 경로를 기록하고,
+  같은 경로의 앱만 재교체한다. 여러 워크트리·설치본이 같은 host 디렉터리를 쓰는 환경에서 서로의 host 를 바꿔치기하는
+  일을 막는다(빌드 id 는 해시라 신구 순서가 없다). 이 필드가 없는 host(필드 도입 전에 뜬 host)와
+  `host_exec_upgrade_v1` 을 광고하지 않는 host 는 재교체 대상이 아니다 — 지금처럼 첫 연결 때의 교체 시도만 받는다.
+- **시점 — 앱 시작 시, 복원한 셸을 붙이기 전.** 같은 빌드 host 가 이미 있어도 대상 host 를 찾아 교체를 시도한다. 이
+  시점에는 아직 GUI attachment 가 없어 위 preflight 조건과 맞는다. 세션 도중에는 시도하지 않는다.
+- **실패 — 다음 시작에 계속 시도, 알림은 host 마다 한 번.** 실패 원인(교체 준비 중 출력으로 상태가 예약보다 커짐)은
+  일시적이라 횟수 상한을 두지 않는다. 같은 host 에 대한 실패 알림은 처음 한 번만 띄운다(host 와 대상 빌드 단위로 기록).
+- **시작 지연 — UI 먼저, 교체 중인 host 의 셸은 자리표시자.** 창과 다른 host 의 탭은 바로 띄우고, 교체 중인 host 의
+  셸 탭만 「이어 붙이는 중」으로 두었다가 교체가 끝나면(성공이든 실패든) 붙인다.
+
+**관계.** 재교체가 있어도 실패한 그 실행 동안은 새 앱이 옛 host 에 붙어 있으므로, 새 관측 필드를 도입하는 기능은 여전히
+「필드 없음 = 옛 동작 유지」 폴백을 갖는다(§3 «관측 metadata에 스칼라를 더할 때»). 재교체는 그 폴백이 쓰이는 기간을
+「셸이 모두 닫힐 때까지」에서 「다음 앱 시작까지」로 줄인다.
+
 ## 7. Quiesce 계약
 
 현재 reader의 stack-local response buffer와 실행 중 queue operation은 그대로는 직렬화할 수 없다. U2에서 reader의

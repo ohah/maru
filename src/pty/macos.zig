@@ -653,7 +653,7 @@ pub const PtySession = struct {
 
         // 중립 계약의 `shell_integration`(파일 갈래)을 이 백엔드의 메커니즘 이름(`zdotdir` = zsh `ZDOTDIR`)으로
         // 넘긴다 — 매핑이 백엔드 몫이라는 계약 그대로다(docs/windows-platform.md §4.2).
-        var env_storage = try EnvStorage.initWithParentSnapshot(allocator, request.env, request.parent_env, request.env_overrides, request.term, if (request.shell_integration) |si| si.assetsDir() else null, request.ssh_integration_bin, request.pane_id, request.hook_instance, request.hook_pane);
+        var env_storage = try EnvStorage.initWithParentSnapshot(allocator, request.env, request.parent_env, request.env_overrides, request.term, request.term_program, if (request.shell_integration) |si| si.assetsDir() else null, request.ssh_integration_bin, request.pane_id, request.hook_instance, request.hook_pane);
         defer env_storage.deinit();
 
         var window_size = winsizeFromTerminalSize(request.size, request.cell_width_px, request.cell_height_px);
@@ -1459,10 +1459,10 @@ const EnvStorage = struct {
     /// 훅 pane 칸 없이 부르는 얇은 래퍼(테스트·부모 스냅샷이 없는 경로). 제품 spawn 은
     /// `initWithParentSnapshot` 을 직접 부른다 — 훅 경로의 두 칸이 함께 실리는 곳은 거기다.
     fn init(allocator: std.mem.Allocator, env: []const []const u8, env_overrides: []const []const u8, term: []const u8, zdotdir: ?[]const u8, ssh_integration_bin: ?[]const u8, pane_id: ?u64, hook_instance: ?[]const u8) !EnvStorage {
-        return initWithParentSnapshot(allocator, env, null, env_overrides, term, zdotdir, ssh_integration_bin, pane_id, hook_instance, null);
+        return initWithParentSnapshot(allocator, env, null, env_overrides, term, "maru", zdotdir, ssh_integration_bin, pane_id, hook_instance, null);
     }
 
-    fn initWithParentSnapshot(allocator: std.mem.Allocator, env: []const []const u8, parent_env: ?[]const []const u8, env_overrides: []const []const u8, term: []const u8, zdotdir: ?[]const u8, ssh_integration_bin: ?[]const u8, pane_id: ?u64, hook_instance: ?[]const u8, hook_pane: ?[]const u8) !EnvStorage {
+    fn initWithParentSnapshot(allocator: std.mem.Allocator, env: []const []const u8, parent_env: ?[]const []const u8, env_overrides: []const []const u8, term: []const u8, term_program: []const u8, zdotdir: ?[]const u8, ssh_integration_bin: ?[]const u8, pane_id: ?u64, hook_instance: ?[]const u8, hook_pane: ?[]const u8) !EnvStorage {
         var entries: std.ArrayList([:0]u8) = .empty;
         errdefer {
             for (entries.items) |owned| allocator.free(owned);
@@ -1474,7 +1474,7 @@ const EnvStorage = struct {
             // (예: 멀티플렉서 TERM, 또는 Maru 동작과 안 맞는 terminfo) zsh의 SIGWINCH redraw가 wrap 행 수를 잘못
             // 계산해(상대 커서 이동 \e[A 횟수가 어긋남) 프롬프트가 중복된다. 기본 xterm-256color는 Maru의 xterm식
             // (auto-wrap + deferred wrap) 동작과 맞는다. 단 사용자 config(`term =`)로 바꿀 수 있다.
-            try appendParentEnv(allocator, &entries, parent_env, term, zdotdir, ssh_integration_bin);
+            try appendParentEnv(allocator, &entries, parent_env, term, term_program, zdotdir, ssh_integration_bin);
         } else {
             // 명시 env(테스트 등): 부모 상속·일반 maru override 없이 그대로 쓰되 process-local selector는 예약 키라
             // 제거한다. non-null pane_id면 공통 tail에서 현재 값만 다시 넣는다.
@@ -1561,7 +1561,7 @@ const EnvStorage = struct {
     // 기존 ZDOTDIR은 MARU_ZDOTDIR_PREV로 보존해 통합 .zshenv가 복원한다. ssh_integration_bin이 있으면(opt-in)
     // MARU_BIN/MARU_SSH_INTEGRATION을 주입해 통합 .zshenv가 ssh를 maru ssh로 라우팅하게 한다. entries 소유권·
     // errdefer는 호출자(init)가 가진다(materialize에서 굳힌다).
-    fn appendParentEnv(allocator: std.mem.Allocator, entries: *std.ArrayList([:0]u8), parent_env: ?[]const []const u8, term: []const u8, zdotdir: ?[]const u8, ssh_integration_bin: ?[]const u8) !void {
+    fn appendParentEnv(allocator: std.mem.Allocator, entries: *std.ArrayList([:0]u8), parent_env: ?[]const []const u8, term: []const u8, term_program: []const u8, zdotdir: ?[]const u8, ssh_integration_bin: ?[]const u8) !void {
         // 부모의 모든 env entry를 복사한다. 단 TERM/COLORTERM(+통합 시 ZDOTDIR/MARU_ZDOTDIR_PREV)은
         // 건너뛰고 아래에서 우리 값으로 넣는다(중복 키는 첫 항목이 이기므로 부모 것을 빼야 한다).
         var old_zdotdir: ?[]const u8 = null; // environ 슬라이스(프로세스 수명 동안 유효) — 루프 후 사용
@@ -1647,7 +1647,9 @@ const EnvStorage = struct {
         //
         // maru는 OSC 9/777을 직접 파싱해(core.zig) 네이티브 알림으로 띄우므로, 앱이 보내기만 하면 뜬다.
         // 자기식별의 정식 채널은 XTVERSION(`CSI > q` → `DCS > | maru <version> ST`)이고 이 값은 그 보조다.
-        try appendOwnedEnv(allocator, entries, try allocator.dupeZ(u8, "TERM_PROGRAM=maru"));
+        // **값은 설정이 정한다**(기본 `maru`). 빈 값이면 기본으로 떨어진다 — 「신원 없음」은 뜻이 없다.
+        const tp = if (term_program.len > 0) term_program else "maru";
+        try appendOwnedEnv(allocator, entries, try std.fmt.allocPrintSentinel(allocator, "TERM_PROGRAM={s}", .{tp}, 0));
         // **능력은 알린다 — 신원은 그대로다**(2026-09-26). 위 결정은 *"나는 ghostty다"* 라는 **거짓말**을
         // 버린 것이지 *"나는 OSC 8 을 지원한다"* 라는 **참말**까지 막지 않는다.
         //
@@ -2338,7 +2340,7 @@ test "ENVHL1 능력은 알리고 신원은 안 속인다 — FORCE_HYPERLINK 를
     // 경로(`appendParentEnv`)를 **아예 안 지난다**(적대적 S3 가 이 실수로 살아남았다). 부모 쪽을
     // 재려면 `initWithParentSnapshot` 에 스냅샷으로 넘겨야 한다.
     {
-        var storage = try EnvStorage.initWithParentSnapshot(std.testing.allocator, &.{}, &.{"PATH=/usr/bin", "FORCE_HYPERLINK=0"}, &.{}, "xterm-256color", null, null, null, null, null);
+        var storage = try EnvStorage.initWithParentSnapshot(std.testing.allocator, &.{}, &.{"PATH=/usr/bin", "FORCE_HYPERLINK=0"}, &.{}, "xterm-256color", "maru", null, null, null, null, null);
         defer storage.deinit();
         const envp = storage.envpPtr();
         var first: ?[]const u8 = null;
@@ -2351,7 +2353,7 @@ test "ENVHL1 능력은 알리고 신원은 안 속인다 — FORCE_HYPERLINK 를
         try std.testing.expectEqualStrings("FORCE_HYPERLINK=0", first.?);
     }
 
-    // **신원은 그대로다** — 능력을 알린다고 이름까지 바꾸지 않는다(그 거래는 2026-09-08 에 버렸다).
+    // **기본 신원은 그대로다** — 능력을 알린다고 이름까지 바꾸지 않는다(그 거래는 2026-09-08 에 버렸다).
     {
         var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-256color", null, null, null, null);
         defer storage.deinit();
@@ -2363,6 +2365,37 @@ test "ENVHL1 능력은 알리고 신원은 안 속인다 — FORCE_HYPERLINK 를
                 try std.testing.expectEqualStrings("TERM_PROGRAM=maru", slice);
             }
         }
+    }
+
+    // **대가를 아는 사용자는 바꿀 수 있다**(설정 탈출구, 2026-09-26). 화이트리스트로 기능을 켜는
+    // TUI 때문에 위장이 필요한 사람이 있는데, 기본을 위장으로 두는 것과 **길을 두는 것**은 다르다.
+    // 이 단언이 없으면 「설정을 읽는 척하고 늘 maru」인 변이가 살아남는다.
+    {
+        var storage = try EnvStorage.initWithParentSnapshot(std.testing.allocator, &.{}, &.{"PATH=/usr/bin"}, &.{}, "xterm-256color", "ghostty", null, null, null, null, null);
+        defer storage.deinit();
+        const envp = storage.envpPtr();
+        var seen: ?[]const u8 = null;
+        var i: usize = 0;
+        while (envp[i]) |entry| : (i += 1) {
+            const slice = std.mem.span(entry);
+            if (std.mem.startsWith(u8, slice, "TERM_PROGRAM=")) seen = slice;
+        }
+        try std.testing.expectEqualStrings("TERM_PROGRAM=ghostty", seen.?);
+    }
+
+    // **빈 값은 기본으로 떨어진다** — 「신원 없음」은 뜻이 없고, 빈 `TERM_PROGRAM=` 은 앱을 더
+    // 헷갈리게 한다(`'TERM_PROGRAM' in env` 가 참인데 값이 없다).
+    {
+        var storage = try EnvStorage.initWithParentSnapshot(std.testing.allocator, &.{}, &.{"PATH=/usr/bin"}, &.{}, "xterm-256color", "", null, null, null, null, null);
+        defer storage.deinit();
+        const envp = storage.envpPtr();
+        var seen: ?[]const u8 = null;
+        var i: usize = 0;
+        while (envp[i]) |entry| : (i += 1) {
+            const slice = std.mem.span(entry);
+            if (std.mem.startsWith(u8, slice, "TERM_PROGRAM=")) seen = slice;
+        }
+        try std.testing.expectEqualStrings("TERM_PROGRAM=maru", seen.?);
     }
 }
 
@@ -2483,6 +2516,7 @@ test "EnvStorage parent snapshot preserves caller environment while applying Mar
         &.{ "MARU_TEST_GUI_ENV=fresh", "MARU_PANE_ID=7", "TERM=stale", "FORCE_COLOR=1" },
         &.{},
         "xterm-256color",
+        "maru",
         null,
         null,
         null,
@@ -2503,6 +2537,7 @@ test "EnvStorage treats MARU_PANE_ID as reserved in explicit env and overrides" 
         null,
         &.{"MARU_PANE_ID=8"},
         "ignored",
+        "maru",
         null,
         null,
         null,
@@ -2519,6 +2554,7 @@ test "EnvStorage treats MARU_PANE_ID as reserved in explicit env and overrides" 
         null,
         &.{"MARU_PANE_ID=8"},
         "ignored",
+        "maru",
         null,
         null,
         42,
@@ -2539,6 +2575,7 @@ test "EnvStorage treats MARU_HOOK_INSTANCE as reserved — 상속·override 로 
         null,
         &.{"MARU_HOOK_INSTANCE=222"},
         "ignored",
+        "maru",
         null,
         null,
         null,
@@ -2556,6 +2593,7 @@ test "EnvStorage treats MARU_HOOK_INSTANCE as reserved — 상속·override 로 
         null,
         &.{"MARU_HOOK_INSTANCE=222"},
         "ignored",
+        "maru",
         null,
         null,
         null,
@@ -2577,6 +2615,7 @@ test "EnvStorage 는 MARU_HOOK_PANE 도 예약 키로 다룬다 — 남의 pane 
         &.{"MARU_HOOK_PANE=222"},
         &.{"MARU_HOOK_PANE=333"},
         "ignored",
+        "maru",
         null,
         null,
         null,
@@ -2594,6 +2633,7 @@ test "EnvStorage 는 MARU_HOOK_PANE 도 예약 키로 다룬다 — 남의 pane 
         &.{"MARU_HOOK_PANE=222"},
         &.{"MARU_HOOK_PANE=333"},
         "ignored",
+        "maru",
         null,
         null,
         null,
@@ -2621,6 +2661,7 @@ test "경로를 벗어나는 훅 토큰은 주입하지 않는다 — 이 층이
             null,
             &.{},
             "ignored",
+            "maru",
             null,
             null,
             null,
@@ -2638,6 +2679,7 @@ test "경로를 벗어나는 훅 토큰은 주입하지 않는다 — 이 층이
         null,
         &.{},
         "ignored",
+        "maru",
         null,
         null,
         null,
@@ -2657,6 +2699,7 @@ test "부모의 MARU_HOOK_INSTANCE 는 상속 경로에서도 떨어진다" {
         &.{ "MARU_HOOK_INSTANCE=999", "KEEP=1" },
         &.{},
         "xterm-256color",
+        "maru",
         null,
         null,
         null,

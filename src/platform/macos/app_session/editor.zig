@@ -670,11 +670,11 @@ fn advanceSyntax(self: *AppSession, term: *Term) void {
     if (syntax_color.resumeParse(&term.rt.editor_syntax, doc.file.content)) {
         self.metal_dirty = true;
     }
-    // **괄호 쌍 색**(§5.1d) — 처음 목록 훑기를 이 프레임 몫만큼 잇고, 목록이 바뀌었으면 다시 판정한다. 아직 훑는 중이면 다음 프레임을 부른다(파싱과
+    // **공통 괄호 목록**(§5.1b·§5.1d) — 색과 강조가 함께 쓴다. 아직 훑는 중이면 다음 프레임을 부른다(파싱과
     // 같은 규율 — 안 부르면 idle skip 에서 멈춰 색이 영영 안 온다). 편집 직후의 부분 고침은 편집 통지(`onEditSpan`)가 이미 했다.
     {
         const cfg = self.loaded_config.config.editor;
-        if (!cfg.bracket_pair_colorization) {
+        if (!cfg.bracket_pair_colorization and cfg.match_brackets == .never) {
             syntax_color.dropBrackets(&term.rt.editor_syntax, self.allocator);
         } else if (syntax_color.advanceBrackets(&term.rt.editor_syntax, self.allocator, doc.file.content, cfg.bracket_pair_colorization_independent_pools)) self.metal_dirty = true;
     }
@@ -742,7 +742,7 @@ fn syntaxColors(self: *AppSession, term: *Term) []const []const chrome_editor.co
 
 /// 이 편집기가 칠할 괄호 쌍 색(§5.1d) — 끄거나 비교 뷰면 비어 있다(§5.1b 와 같은 가드). sticky 머리줄도 같은 것을 쓴다.
 pub fn bracketMarksFor(self: *AppSession, term: *Term) syntax_color.BracketMarks {
-    // 이중 방어다(적대적 2회차 D01: 등가) — 끄면 그 프레임 맨 앞(`advanceSyntax`)이 목록을 버려 판정도 비어 있다. 뜻으로 둔다: 끈 설정이 칠하지 않는다.
+    // 목록은 강조·점프도 쓰므로 색을 꺼도 남는다. 이 가드가 색 출력만 끈다.
     if (!self.loaded_config.config.editor.bracket_pair_colorization) return .{};
     if (term.rt.editor_diff != null) return .{};
     return syntax_color.bracketMarks(&term.rt.editor_syntax);
@@ -3649,7 +3649,7 @@ fn movedOffset(
             // **선택의 앞쪽 끝에서 판정하고 커서로 접는다**(§3.9c — VS Code `selection.getStartPosition()`: [1,3] 과 [3,1] 이 같은 데로 간다).
             // 강조(§5.1b)와 **같은 출처**다 — 트리가 있으면 트리(문자열·주석 속 괄호가 빠진다), 없으면 글자 훑기.
             const from = @min(sel.start(), content.len);
-            break :blk brackets_client.jumpTarget(term, content, from) orelse from;
+            break :blk brackets_client.jumpTarget(self.allocator, term, content, from) orelse from;
         },
         .line_end => blk: {
             // **줄 끝은 목표를 `line_end`로 세운다** — End 뒤에 아래로 내려가면 계속 줄 끝을 따라간다.
@@ -42023,9 +42023,9 @@ test "BRP8 괄호 점프 — 닿은 괄호가 없으면 감싸는 쌍의 닫는 
     try testing.expectEqual(@as(usize, 0), term.rt.editor_extra_selections.len); // 같은 곳이라 하나로 합쳤다
 }
 
-test "BRP9 커서가 많은 괄호 점프 — 원소 3,000 개 배열의 원소마다 커서: 전부 감싸는 `]` 앞으로, 형제 짝짓기는 원소 수 자릿수 걸음 (제품 경계, §3.9c)" {
-    // 커서마다 형제를 다시 짝지으면 커서 수 × 원소 수(여기서 약 1,800 만 걸음)로 붙는다 — 적대적 3회차가 커서 1 만에서 12 s 를 쟀다. 한 번의 점프
-    // 동안 형제 쌍 메모(`PairMemo`)를 세워 배열의 자식을 한 번만 짝짓는다. 다음 여는 괄호도 한 번에 걷는다(끝 두 커서).
+test "BRP9 커서가 많은 괄호 점프 — 원소 3,000 개 배열의 원소마다 커서: 공통 목록 한 번으로 모두 같은 도착 (제품 경계, §3.9c)" {
+    // 커서마다 형제를 다시 짝지으면 커서 수 × 원소 수로 붙는다. 공통 목록을 한 번 만들고
+    // 조회만 하여 배열 안 커서들과 배열 밖의 끝 두 커서가 각각 올바른 곳으로 가는지 본다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var fx = try PaneFixture.init(allocator);
@@ -42051,16 +42051,121 @@ test "BRP9 커서가 많은 괄호 점프 — 원소 3,000 개 배열의 원소�
     extras[n] = editor_selection.Selection.at(tail_x + 3); // `y` 앞
     term.rt.editor_selection = editor_selection.Selection.at(base + 1);
     try setExtraSelections(fx.session, term, extras);
-    const prov = &term.rt.editor_syntax.provider.?;
-    const visits0 = prov.sibling_visits;
+    const rebuilds0 = term.rt.editor_syntax.brackets.rebuilds;
     _ = try fx.session.handleKeyEvent(.{ .key = .{ .char = '\\' }, .modifiers = .{ .command = true, .shift = true } });
     // 원소 커서 3,000 개는 `]` 앞 하나로, 끝 두 커서는 `f(` 의 `(` 앞 하나로 합쳤다
     try testing.expectEqual(close, term.rt.editor_selection.?.focus);
     try testing.expectEqual(@as(usize, 1), term.rt.editor_extra_selections.len);
     try testing.expectEqual(open_f, term.rt.editor_extra_selections[0].focus);
-    // 배열의 자식은 약 6,000 개(원소 3,000 + 쉼표 3,000 + 괄호 둘) — 한 번 짝지으면 그 자릿수다
-    const visits = prov.sibling_visits - visits0;
-    try testing.expect(visits >= 2 * n and visits < 4 * n);
+    // 같은 문서의 3,000 커서에 목록은 한 번만 만든다. 이미 만들었다면 그대로 재사용한다.
+    try testing.expect(term.rt.editor_syntax.brackets.rebuilds - rebuilds0 <= 1);
+    try testing.expect(term.rt.editor_syntax.brackets.ready);
+    const resolved = term.rt.editor_syntax.brackets.version;
+    _ = try fx.session.handleKeyEvent(.{ .key = .{ .char = '\\' }, .modifiers = .{ .command = true, .shift = true } });
+    try testing.expectEqual(resolved, term.rt.editor_syntax.brackets.version);
+}
+
+test "BRP10 공통 괄호 목록 — 색을 꺼도 언어별 점프와 강조가 같고 Markdown 기능이 남는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    // 문자열·퍼센트 리터럴을 건너뛰는 결과와 매크로·서로 다른 HTML 잎을 잇는 결과는
+    // 옛 형제 노드 판정과 다르다. 실제 키 이벤트와 그 프레임의 강조 쌍을 함께 확인한다.
+    const Case = struct { path: []const u8, text: []const u8, caret: usize, open: u32, close: u32, next: bool = false };
+    const cases = [_]Case{
+        .{ .path = "a.sh", .text = "echo \"$(x)\"\necho $((1+2))\n", .caret = 0, .open = 18, .close = 24, .next = true },
+        .{ .path = "a.rb", .text = "s = %w[a b]\nf(1)\n", .caret = 0, .open = 13, .close = 15, .next = true },
+        .{ .path = "a.kt", .text = "val s = \"${f(1)}\"\ng(2)\n", .caret = 0, .open = 19, .close = 21, .next = true },
+        .{ .path = "a.c", .text = "#define F(x) (x + 1)\n", .caret = 16, .open = 13, .close = 19 },
+        .{ .path = "a.html", .text = "<p>(see <b>x</b>)</p>\n", .caret = 6, .open = 3, .close = 16 },
+        .{ .path = "b.html", .text = "<b (click)=\"go()\">x</b>\n", .caret = 7, .open = 3, .close = 9 },
+        .{ .path = "a.md", .text = "hello (world)\n", .caret = 9, .open = 6, .close = 12 },
+    };
+    for (cases) |c| {
+        errdefer std.debug.print("BRP10 {s}\n", .{c.path});
+        const term = try openBracketFixture(&fx, allocator, c.path, c.text);
+        fx.session.loaded_config.config.editor.bracket_pair_colorization = false;
+        term.rt.editor_selection = editor_selection.Selection.at(c.caret);
+        _ = try fx.session.handleKeyEvent(.{ .key = .{ .char = '\\' }, .modifiers = .{ .command = true, .shift = true } });
+        try testing.expectEqual(@as(usize, if (c.next) c.open else c.close), term.rt.editor_selection.?.focus);
+        // 다음 여는 괄호로 간 경우도 이제 그 괄호와 짝을 강조한다. 무색 설정은 목록 수명을 끊지 않는다.
+        var got: [16]renderer.metal_frame.GpuQuad = undefined;
+        try testing.expectEqual(@as(usize, 2), (try boxedQuads(fx.session, term, .bracket_match_border, &got)).len);
+        try testing.expectEqual(c.open, term.rt.editor_brackets.pairs.items[0].open);
+        try testing.expectEqual(c.close, term.rt.editor_brackets.pairs.items[0].close);
+        try testing.expectEqual(@as(usize, 0), bracketMarksFor(fx.session, term).toks.len);
+    }
+}
+
+test "BRP11 보간 괄호는 두 글자 범위 — 색·강조를 모두 꺼도 점프, Markdown은 색 없이 강조" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const text = "const s = `a${value}b`;\n";
+    const term = try openBracketFixture(&fx, allocator, "a.ts", text);
+    const open = std.mem.indexOf(u8, text, "${").?;
+    const close = std.mem.indexOfScalar(u8, text, '}').?;
+    for ([_]usize{ open, open + 1, open + 2 }) |pos| {
+        term.rt.editor_selection = editor_selection.Selection.at(pos);
+        _ = try fx.session.handleKeyEvent(.{ .key = .{ .char = '\\' }, .modifiers = .{ .command = true, .shift = true } });
+        try testing.expectEqual(close, term.rt.editor_selection.?.focus);
+    }
+    var got: [16]renderer.metal_frame.GpuQuad = undefined;
+    const boxes = try boxedQuads(fx.session, term, .bracket_match_border, &got);
+    try testing.expectEqual(@as(usize, 2), boxes.len);
+    // 둘 다 같은 줄: 두 글자 ${ 상자가 한 글자 } 상자보다 정확히 한 셀 넓다.
+    try testing.expectEqual(boxes[1].w + @as(f32, @floatFromInt(fx.session.cell_width_px)), boxes[0].w);
+    fx.session.loaded_config.config.editor.bracket_pair_colorization = false;
+    fx.session.loaded_config.config.editor.match_brackets = .never;
+    _ = try boxedQuads(fx.session, term, .bracket_match_border, &got);
+    try testing.expect(!term.rt.editor_syntax.brackets.ready);
+    term.rt.editor_selection = editor_selection.Selection.at(close);
+    _ = try fx.session.handleKeyEvent(.{ .key = .{ .char = '\\' }, .modifiers = .{ .command = true, .shift = true } });
+    try testing.expectEqual(open, term.rt.editor_selection.?.focus);
+    fx.session.loaded_config.config.editor.bracket_pair_colorization = true;
+    fx.session.loaded_config.config.editor.match_brackets = .always;
+    const md = try openBracketFixture(&fx, allocator, "note.md", "hello (world)\n");
+    md.rt.editor_selection = editor_selection.Selection.at(9);
+    try testing.expectEqual(@as(usize, 2), (try boxedQuads(fx.session, md, .bracket_match_border, &got)).len);
+    try testing.expectEqual(@as(usize, 0), bracketMarksFor(fx.session, md).toks.len);
+}
+
+test "BRP12 같은 트리에서 목록이 늦게 완성돼도 강조 캐시가 갱신된다 — 미완성 목록은 그리지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(allocator);
+    try text.appendSlice(allocator, "function f() {\n");
+    for (0..1200) |_| try text.appendSlice(allocator, "  let a = 1;\n");
+    try text.appendSlice(allocator, "}\n");
+    const term = try openBracketFixture(&fx, allocator, "late.js", text.items);
+    const st = &term.rt.editor_syntax;
+    const bytes = term.rt.editor_doc.?.file.content;
+    while (st.pending) _ = syntax_color.resumeParse(st, bytes);
+    try syntax_color.finishBrackets(st, allocator, bytes);
+    term.rt.editor_selection = editor_selection.Selection.at(20);
+    var got: [16]renderer.metal_frame.GpuQuad = undefined;
+    // 닫는 괄호는 화면 밖이라 여는 쪽 하나만 보인다. 문서·caret·트리 포인터는 이 뒤에도 같다.
+    try testing.expectEqual(@as(usize, 1), (try boxedQuads(fx.session, term, .bracket_match_border, &got)).len);
+    const before = term.rt.editor_brackets.computed;
+    const tree = st.provider.?.tree;
+    syntax_color.dropBrackets(st, allocator);
+    st.bracket_walk_budget_ns = 1;
+    try testing.expectEqual(@as(usize, 0), (try boxedQuads(fx.session, term, .bracket_match_border, &got)).len);
+    try testing.expect(!st.brackets.ready);
+    try testing.expectEqual(tree, st.provider.?.tree);
+    var frames: usize = 0;
+    while (!st.brackets.ready and frames < 200) : (frames += 1) {
+        const boxes = try boxedQuads(fx.session, term, .bracket_match_border, &got);
+        if (!st.brackets.ready) try testing.expectEqual(@as(usize, 0), boxes.len);
+    }
+    try testing.expect(st.brackets.ready);
+    try testing.expectEqual(@as(usize, 1), (try boxedQuads(fx.session, term, .bracket_match_border, &got)).len);
+    try testing.expect(term.rt.editor_brackets.computed > before);
 }
 
 test "BRP2 모드와 포커스 — always 는 감싸는 쌍, near 는 닿은 것만, never·포커스 없음은 없다 (제품 경계, §5.1b)" {
@@ -42641,8 +42746,8 @@ test "BPP1 괄호 쌍 색 — 단계마다 세 색이 돌고 짝 없는 괄호�
         try testing.expect(!std.meta.eql(cellFgOf(d.dl, r0, '[', 0).?, c2));
         try testing.expect(!std.meta.eql(cellFgOf(d.dl, r1, ')', 0).?, cu));
     }
-    // 끄면 목록도 버린다 — 켜 둔 채 두면 편집마다 민다·고친다를 헛되이 낸다(새 눈 리뷰)
-    try testing.expect(!term.rt.editor_syntax.brackets.ready and term.rt.editor_syntax.brackets.leaves.items.len == 0);
+    // 색을 꺼도 강조가 같은 목록을 쓴다. 색 출력만 가리고 목록은 유지한다.
+    try testing.expect(term.rt.editor_syntax.brackets.ready);
     fx.session.loaded_config.config.editor.bracket_pair_colorization = true;
     {
         var d = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;

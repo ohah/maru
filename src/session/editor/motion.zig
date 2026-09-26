@@ -215,7 +215,7 @@ pub fn goalAt(bytes: []const u8, line: line_index.Line, offset: usize, map: Colu
 
 /// 괄호 짝으로 점프 — caret 이 **닿은** 괄호의 짝 **시작 offset**
 /// ([문서 모델](../../../docs/native-editor-document-model.md) §3.9c). **grammar 없는 문서의 저하**다 — 트리가 있으면 제품이
-/// `brackets.Tree` 출처로 같은 `brackets.jumpTarget` 을 부른다(문자열·주석 속 괄호가 빠진다).
+/// 색과 같은 `brackets.Index.Source` 로 `brackets.jumpTarget` 을 부른다(언어별 괄호 규칙을 공유한다).
 ///
 /// **대상은 괄호 셋뿐이다.** `pairs.zig` 의 `default_pairs` 에는 따옴표도 있지만 여는 것과 닫는 것이
 /// 같아 **깊이를 못 세고**, 문자열의 시작과 끝을 grammar 없이 못 가른다.

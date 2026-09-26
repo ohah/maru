@@ -22,6 +22,7 @@ const syntax_colors = maru.chrome.components.editor_view.syntax_colors;
 const syntax_capture = maru.session.syntax_capture;
 const editor_language = maru.session.editor.language;
 const bracket_colors = maru.session.editor.bracket_colors;
+const editor_brackets = maru.session.editor.brackets;
 
 /// 한 줄에서 색을 계산하는 열 상한. **중립이 소유한다** — 이 이름은 그것을 다시 내보낼 뿐이다
 /// (두 벌을 두면 한쪽만 늘어도 아무도 모른다).
@@ -66,6 +67,8 @@ pub const State = struct {
     bracket_info: std.ArrayList(bracket_colors.Info) = .empty,
     /// 판정의 작업 칸(짝 · 스택 — 괄호 수의 두 배).
     bracket_scratch: std.ArrayList(u32) = .empty,
+    /// 같은 짝 판정으로 점프·강조를 찾는 목록. 색을 표시하지 않는 괄호도 여기에 남는다.
+    bracket_navigation: editor_brackets.Index = .{},
     /// 지금 판정이 어느 목록 판(`BracketIndex.version`)·어느 풀로 한 것인가. 다르면 그리지 않고 다시 판정한다.
     bracket_resolved: ?BracketResolved = null,
     /// 처음 목록 훑기의 프레임 몫 — 판정자가 줄여 「여러 프레임에 걸친 훑기」를 기계 속도와 무관하게 만든다(`BPP3`).
@@ -99,6 +102,7 @@ pub const State = struct {
         self.bracket_toks.deinit(allocator);
         self.bracket_info.deinit(allocator);
         self.bracket_scratch.deinit(allocator);
+        self.bracket_navigation.deinit(allocator);
         if (self.provider) |*p| p.deinit();
         self.bufs.deinit(allocator);
         self.minimap_bufs.deinit(allocator);
@@ -300,7 +304,7 @@ pub const BracketResolved = struct { version: u64, independent: bool };
 /// 처음 목록 훑기의 프레임 몫 — 파싱 예산(4 ms)과 따로 든다. 4 MB 문서의 전체 훑기가 36~49 ms 라(§5.1d 실측) 스무 프레임 남짓에 나뉜다.
 pub const bracket_walk_budget_ns: u64 = 2 * std.time.ns_per_ms;
 
-/// 괄호 쌍 색을 끈다 — 목록과 판정을 버린다. 켜 둔 채 두면 편집마다 민다·고친다(괄호 수에 선형)를 헛되이 낸다(새 눈 리뷰가 짚었다).
+/// 색과 강조가 모두 꺼졌을 때 목록과 판정을 버린다. 직접 점프는 필요할 때 다시 만든다.
 pub fn dropBrackets(self: *State, allocator: std.mem.Allocator) void {
     if (self.bracket_resolved == null and !self.brackets.ready and !self.brackets.walking) return;
     self.brackets.invalidate();
@@ -308,23 +312,36 @@ pub fn dropBrackets(self: *State, allocator: std.mem.Allocator) void {
     self.bracket_toks.clearAndFree(allocator);
     self.bracket_info.clearAndFree(allocator);
     self.bracket_scratch.clearAndFree(allocator);
+    self.bracket_navigation.deinit(allocator);
     self.bracket_resolved = null;
 }
 
 /// 괄호 쌍 색의 이번 프레임 몫(§5.1d). 처음 목록은 예산을 든 훑기로 잇고, 목록이 바뀌었으면 다시 판정한다. **다음 프레임이 더 필요하면
 /// 참**(아직 훑는 중) — 호출자가 그 프레임을 다시 그리게 해야 이어진다(`resumeParse` 와 같은 규율).
 pub fn advanceBrackets(self: *State, allocator: std.mem.Allocator, source: []const u8, independent: bool) bool {
+    return prepareBrackets(self, allocator, source, independent, self.bracket_walk_budget_ns) catch false;
+}
+
+/// 사용자 명령은 첫 목록을 끝까지 만든다. 프레임은 예산을 나누지만, 점프를 미뤘다가
+/// 다른 위치에서 실행할 수는 없다. 같은 판정 경로를 예산 없이 완료하고 즉시 사용한다.
+pub fn finishBrackets(self: *State, allocator: std.mem.Allocator, source: []const u8) error{OutOfMemory}!void {
+    const independent = if (self.bracket_resolved) |r| r.independent else false;
+    while (try prepareBrackets(self, allocator, source, independent, 0)) {}
+}
+
+fn prepareBrackets(self: *State, allocator: std.mem.Allocator, source: []const u8, independent: bool, budget_ns: u64) error{OutOfMemory}!bool {
+    if (self.pending) return false;
     const p = &(self.provider orelse return false);
-    const ready = self.brackets.step(allocator, p, source, self.bracket_walk_budget_ns) catch {
+    const ready = self.brackets.step(allocator, p, source, budget_ns) catch |err| {
         self.brackets.invalidate();
-        return false;
+        return err;
     };
     if (!ready) return p.tree != null;
     if (self.bracket_resolved) |r| {
         if (r.version == self.brackets.version and r.independent == independent) return false;
     }
     self.bracket_resolved = null;
-    resolveBrackets(self, allocator, source, independent) catch return false;
+    try resolveBrackets(self, allocator, source, independent);
     self.bracket_resolved = .{ .version = self.brackets.version, .independent = independent };
     return false;
 }
@@ -338,6 +355,16 @@ fn resolveBrackets(self: *State, allocator: std.mem.Allocator, source: []const u
     try self.bracket_info.resize(allocator, n);
     try self.bracket_scratch.resize(allocator, 2 * n);
     bracket_colors.resolve(self.bracket_toks.items, independent, self.bracket_info.items, self.bracket_scratch.items[0..n], self.bracket_scratch.items[n..]);
+    try self.bracket_navigation.rebuild(allocator, self.bracket_toks.items, self.bracket_scratch.items[0..n]);
+}
+
+/// 색·강조·점프가 같은 완성된 판만 읽는다. 편집이나 파싱이 앞서면 옛 위치를 노출하지 않는다.
+pub fn bracketSource(self: *const State) ?editor_brackets.Index.Source {
+    const p = &(self.provider orelse return null);
+    if (self.pending or p.tree == null) return null;
+    const r = self.bracket_resolved orelse return null;
+    if (!self.brackets.ready or self.brackets.synced_gen != p.tree_gen or r.version != self.brackets.version) return null;
+    return self.bracket_navigation.source(self.bracket_toks.items);
 }
 
 /// 칠할 괄호들(문서 순). 판정이 지금 목록의 것이 아니면(편집 뒤 아직 안 했다 · 훑는 중) **비어 있다** — 낡은 자리를 칠하지 않는다.
@@ -347,8 +374,9 @@ pub const BracketMarks = struct {
 };
 
 pub fn bracketMarks(self: *const State) BracketMarks {
-    const r = self.bracket_resolved orelse return .{};
-    if (!self.brackets.ready or r.version != self.brackets.version) return .{};
+    _ = bracketSource(self) orelse return .{};
+    // Markdown은 탐색을 유지하지만 인라인 문법이 없어 거짓 빨강을 피하려고 색만 끈다.
+    if (!syntax.bracketRuleFor(self.provider.?.slot.lang).paint) return .{};
     return .{ .toks = self.bracket_toks.items, .info = self.bracket_info.items };
 }
 
@@ -1341,6 +1369,25 @@ fn bracketMarksForTest(allocator: std.mem.Allocator, st: *State, source: []const
         if (!inf.colored) continue;
         try out.append(allocator, .{ t.start, if (inf.invalid) -1 else inf.level });
     }
+}
+
+test "BRC2 공통 괄호 목록의 할당 실패와 다시 파싱 — 낡거나 덜 만든 판정을 내지 않는다" {
+    const Check = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            const text = "const s = `a${f(value)}b`;\n";
+            var st = openParsed(text, .typescript);
+            defer st.deinit(allocator);
+            errdefer std.debug.assert(bracketSource(&st) == null);
+            try finishBrackets(&st, allocator, text);
+            const src = bracketSource(&st) orelse return error.NoBracketSource;
+            try testing.expectEqual(@as(u8, 2), src.pairAt(12).?.open_len);
+            reparse(&st, text);
+            try testing.expect(bracketSource(&st) == null);
+            try finishBrackets(&st, allocator, text);
+            try testing.expect(bracketSource(&st) != null);
+        }
+    };
+    try testing.checkAllAllocationFailures(testing.allocator, Check.run, .{});
 }
 
 test "BRC1 언어마다 무엇이 괄호인가 — VS Code 1.139 TextMate 문법을 돌린 오라클과 괄호마다 같다 (visual-mapping §5.1d)" {

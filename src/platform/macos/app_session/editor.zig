@@ -9148,14 +9148,23 @@ pub fn deleteBy(self: *AppSession, term: *Term, backward: bool, unit: DeleteUnit
                     .char => prevCharBoundary(content, lo),
                     .word => editor_motion.wordLeft(content, lo),
                     .line_edge => blk: {
-                        // **줄 시작까지** — smart home과 같은 자리다(들여쓰기 앞이 아니라 첫 글자).
-                        // 이미 첫 글자면 줄 머리까지 간다(그 함수가 토글을 소유한다).
+                        // **줄 머리까지 — 들여쓰기도 함께 지운다**(§3.2, 2026-09-26).
+                        //
+                        // 예전에는 smart home 과 같은 자리(첫 글자)였다. 그러면 들여쓴 줄에서 `⌘⌫`를
+                        // **두 번** 눌러야 줄이 비고, 그 사이에 「지웠는데 안 지워진 것처럼 보이는」
+                        // 상태가 남는다. VS Code 도 macOS 도 **한 번에 0열**까지다 —
+                        // `DeleteAllLeftAction` 이 `Range(line, 1, line, column)` 을 지운다.
+                        //
+                        // **이동과 일부러 갈린다.** 위 주석의 「이동과 같은 자리」는 `⌥` 짝의 규율이고
+                        // (`⌥←`/`⌥⌫`는 여전히 `wordLeft` 하나를 쓴다), `⌘` 는 VS Code 자신이
+                        // `CursorHome`(하이브리드+smart home)과 `DeleteAllLeft`(0열)로 가른다.
+                        // 경계는 여전히 `motion.zig` 가 소유한다 — `^A` 와 **같은** `lineStart` 다.
                         const li = doc.file.lines.lineAt(lo);
                         const line = doc.file.lines.line(li) orelse break :blk lo;
-                        const start = editor_motion.lineStartSmart(content, line, lo);
-                        // **줄 머리에 있으면 앞 줄과 합친다.** 토글이 첫 글자를 돌려주므로 그대로 두면
-                        // `lo`가 커져 아무것도 안 지우는 **죽은 키**가 된다 — `⌘⌦`가 줄 끝에서 겪던
-                        // 것과 같은 함정이고, macOS는 그 자리에서 앞 개행을 지운다
+                        const start = editor_motion.lineStart(line);
+                        // **줄 머리에 있으면 앞 줄과 합친다.** 안 그러면 `lo` 가 안 줄어 아무것도 안
+                        // 지우는 **죽은 키**가 된다 — `⌘⌦`가 줄 끝에서 겪던 것과 같은 함정이고,
+                        // macOS 도 VS Code 도 그 자리에서 앞 개행을 지운다
                         // (적대적 검증 2026-08-27이 실측으로 잡았다).
                         break :blk if (start < lo) start else prevCharBoundary(content, lo);
                     },
@@ -30183,9 +30192,14 @@ test "DEL1 ⌥⌫·⌘⌫가 낱말·줄 단위로 지운다 — 이동과 같�
     // **§3.2가 "문자/단어/줄 단위 삭제"를 요구한다.** 문자만 있으면 낱말을 지우려고 키를 여러 번
     // 눌러야 한다.
     //
-    // **경계를 다시 세지 않는다**: `motion.zig`의 `wordLeft`·`lineStartSmart`를 그대로 쓴다.
+    // **경계를 다시 세지 않는다**: `motion.zig`의 `wordLeft`·`lineStart`를 그대로 쓴다.
     // 세면 "⌥←로 간 곳"과 "⌥⌫가 지운 곳"이 갈리고, 사용자는 그 차이를 설명할 수 없다 —
     // 이 판정자가 **둘이 같은 자리인지**까지 잰다.
+    //
+    // **`⌘` 는 이동과 일부러 갈린다**(2026-09-26). `⌥` 짝은 여전히 `wordLeft` **하나**를 쓰지만,
+    // `⌘⌫` 는 **0열**까지이고 `⌘←` 는 smart home 이다 — VS Code 자신이 `DeleteAllLeft`
+    // (`Range(line, 1, line, column)`)와 `CursorHome`(하이브리드+토글)을 그렇게 가른다. 경계는
+    // 그래도 `motion.zig` 가 소유한다 — `^A` 가 쓰는 **같은** `lineStart` 다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var fx = try PaneFixture.init(allocator);
@@ -30205,11 +30219,34 @@ test "DEL1 ⌥⌫·⌘⌫가 낱말·줄 단위로 지운다 — 이동과 같�
         try testing.expectEqual(@as(usize, 8), t2.rt.editor_selection.?.focus); // "bar" 앞
     }
 
-    // ⑵ **⌘⌫ = 줄 시작까지**(smart home과 같은 자리 — 들여쓰기 앞이 아니라 첫 글자).
+    // ⑵ **⌘⌫ = 줄 머리(0열)까지 — 들여쓰기도 함께 지운다.**
+    //
+    // 예전에는 smart home 과 같은 자리(첫 글자)였다. 그러면 들여쓴 줄에서 **두 번** 눌러야 줄이
+    // 비고, 그 사이에 「지웠는데 안 지워진 것처럼 보이는」 상태가 남는다. VS Code 도 macOS 도
+    // **한 번에 0열**이다(`DeleteAllLeftAction` 이 `Range(line, 1, line, column)` 을 지운다).
     const t3 = try undoFixture(&fx, allocator, "del1c.txt", "    foo bar\nnext\n");
     t3.rt.editor_selection = editor_selection.Selection.at(7); // "foo" 뒤
     try pressKey(&fx, .backspace, .{ .command = true });
-    try testing.expectEqualStrings("     bar\nnext\n", t3.rt.editor_doc.?.file.content);
+    try testing.expectEqualStrings(" bar\nnext\n", t3.rt.editor_doc.?.file.content);
+
+    // ⑵″ **이동과 갈린다** — 같은 자리에서 `⌘←` 는 smart home 이라 **첫 글자**(4)로 간다.
+    // 이 단언이 없으면 「이동을 0열로 바꾸는」 변이가 살아남아 둘이 조용히 다시 붙는다.
+    {
+        const t = try undoFixture(&fx, allocator, "del1g.txt", "    foo bar\nnext\n");
+        t.rt.editor_selection = editor_selection.Selection.at(7);
+        try pressKey(&fx, .arrow_left, .{ .command = true });
+        try testing.expectEqual(@as(usize, 4), t.rt.editor_selection.?.focus);
+    }
+
+    // ⑵‴ **들여쓰기 «안쪽» 에서가 가장 크게 갈린다.** 옛 토글은 여기서 첫 글자(4)를 돌려주는데
+    // 그것이 caret(2)보다 **뒤**라 `start < lo` 가 거짓이 되고, 앞 줄과 합치는 갈래로 떨어져
+    // **공백 한 칸만** 지웠다 — 줄 머리까지 가는 키가 문자 하나를 무르는 키가 됐다.
+    {
+        const t = try undoFixture(&fx, allocator, "del1h.txt", "    foo bar\nnext\n");
+        t.rt.editor_selection = editor_selection.Selection.at(2); // 들여쓰기 한가운데
+        try pressKey(&fx, .backspace, .{ .command = true });
+        try testing.expectEqualStrings("  foo bar\nnext\n", t.rt.editor_doc.?.file.content);
+    }
 
     // ⑵′ **줄 머리에서 ⌘⌫는 앞 줄과 합친다** — 안 그러면 죽은 키다(`⌘⌦`가 줄 끝에서 겪던 것과
     //     같은 함정. 적대적 검증 2026-08-27이 실측으로 잡았다).
@@ -30345,12 +30382,16 @@ test "DEL5 한글·탭이 섞여도 단위 삭제가 깨진 UTF-8을 만들지 �
     try testing.expectEqualStrings("\t한글 \n다음\n", term.rt.editor_doc.?.file.content);
     try testing.expect(std.unicode.utf8ValidateSlice(term.rt.editor_doc.?.file.content));
 
-    // ⑵ 줄 시작까지 — 탭(들여쓰기) **뒤**가 첫 글자다(smart home과 같은 자리).
+    // ⑵ 줄 머리까지 — **탭(들여쓰기)도 함께** 지운다(0열, §3.2 — 2026-09-26).
+    //
+    // 예전에는 탭 **뒤**(첫 글자)까지라 `"\t\n"` 이 남았다. 지금은 VS Code·macOS 와 같이 한 번에
+    // 0열이다. 탭은 **한 글자**라 UTF-8 경계와도 무관하고, 이 판정자가 재는 「깨진 UTF-8 을 안
+    // 만든다」는 그대로 산다.
     const t2 = try undoFixture(&fx, allocator, "del5b.txt", "\t한글 영어\n");
     const c2 = t2.rt.editor_doc.?.file.content;
     t2.rt.editor_selection = editor_selection.Selection.at(std.mem.indexOfScalar(u8, c2, '\n').?);
     try testing.expect(deleteBy(fx.session, t2, true, .line_edge));
-    try testing.expectEqualStrings("\t\n", t2.rt.editor_doc.?.file.content);
+    try testing.expectEqualStrings("\n", t2.rt.editor_doc.?.file.content);
     try testing.expect(std.unicode.utf8ValidateSlice(t2.rt.editor_doc.?.file.content));
 
     // ⑶ 낱말 앞으로 — 한글 낱말 머리에서 눌러도 반쪽이 안 남는다.

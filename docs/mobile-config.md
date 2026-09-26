@@ -137,7 +137,7 @@
 | `notifications.osc`·`notifications.history-limit` | 알림을 받는 자리도 목록도 없다 |
 | `scrollback.sticky-command` | 그 chrome 표시가 모바일에 없다 |
 | `font.letter-spacing` | 자간을 조절하는 자리가 없다(글리프를 칸에 맞춰 그린다) |
-| `term` | `TERM` 문자열은 **세션을 만드는 쪽**이 정한다 — 모바일은 원격에서 받는다([M3a](plans/mobile-platform.md)) |
+| `term`·`term-program` | `TERM`·`TERM_PROGRAM` 문자열은 **세션을 만드는 쪽**이 정한다 — 모바일은 원격에서 받는다([M3a](plans/mobile-platform.md)). 같은 축이라 판정도 하나다 |
 
 ### 4.3 모바일에만 있는 키
 

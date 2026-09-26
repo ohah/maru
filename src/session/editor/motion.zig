@@ -201,6 +201,11 @@ pub fn offsetForGoal(
         // "아무 자리"가 된다. 0열이 유일하게 **어느 줄에서도 존재하는** 자리다.
         .none => line.start,
         .col => |c| line.start + map.offsetOf(map.ctx, text, c),
+        // **`row_col` 은 시각 축의 목표인데 여기는 논리 축이다** — 행을 모르므로 그대로 옮길 수
+        // 없다. 「줄 머리에서 그만큼」으로 **근사**한다. 랩이 꺼져 있으면 행과 줄이 1:1 이라 이것이
+        // **정확**하고, 랩이 켜진 채 여기로 떨어지는 것은 스냅숏이 답을 못 낸 순간뿐이다(그 걸음은
+        // 이미 「줄 하나」를 통째로 건너뛰는 낮은 정확도의 경로다 — `movedVisualRow` 의 머리 주석).
+        .row_col => |v| line.start + map.offsetOf(map.ctx, text, v),
     };
 }
 

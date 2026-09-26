@@ -268,7 +268,7 @@ fn decodeValidated(
         // 22 개를 잃었는데, 남은 것은 `restore activation failed: InvalidValue` 한 줄뿐이었다. 어느 필드에서
         // 깨졌는지도, 얼마나 읽다 멈췄는지도 알 수 없었다.
         hostLogLine("handoff decode failed: err={s} bytes={d}", .{ @errorName(err), bytes.len });
-        return mapDecodeError(err);
+        return mapDecodeErrorAt(err, "envelope", bytes.len);
     };
     errdefer host.deinit();
     const record_bytes = host.attempt_record orelse {
@@ -278,7 +278,7 @@ fn decodeValidated(
     };
     var attempt = upgrade_attempt_record.decode(allocator, record_bytes) catch |err| {
         hostLogLine("handoff attempt record decode failed: err={s} record_bytes={d}", .{ @errorName(err), record_bytes.len });
-        return mapDecodeError(err);
+        return mapDecodeErrorAt(err, "attempt", record_bytes.len);
     };
     errdefer attempt.deinit();
     if (attempt.host_id != host.host_id or
@@ -540,7 +540,7 @@ fn validateIgnoredHandoffFd(fd: c.fd_t) Error!void {
         return error.InvalidFd;
 }
 
-/// **이름을 잃지 않는다.** `mapDecodeError` 는 디코드 실패 **전부**를 `InvalidState` 하나로 접는다.
+/// **이름을 잃지 않는다.** `mapDecodeErrorAt` 은 디코드 실패 **전부**를 `InvalidState` 하나로 접는다.
 /// 그 이름은 `hostLogLine` 이 stderr 로 찍는데, **원인을 알아야 하는 순간의 부모는 항상 옛 빌드**이고
 /// 그 옛 부모가 stderr 를 `/dev/null` 로 보낸다(`upgrade_preflight.noteChildOutcome` 의 주석). 그래서
 /// 2026-09-10 에 `reason=target_invalid` 한 줄만 남고, 실제 이유(`MissingRequiredField`)에 닿는 데
@@ -566,12 +566,91 @@ pub fn clearDetail() void {
     last_detail_len = 0;
 }
 
-fn mapDecodeError(err: anyerror) Error {
-    noteDetail(@errorName(err));
+/// 디코드 실패를 `InvalidState` 로 접으면서 **어느 디코드에서 몇 바이트를 읽다가**를 남긴다(2026-09-27).
+///
+/// **맥락 없는 판(`mapDecodeError`)은 없앴다** — 남겨 두면 다음 사람이 그쪽을 골라 같은 장님 상태가
+/// 다시 만들어진다. 부르는 자리가 둘뿐이라 갈라 둘 이유도 없다.
+///
+/// **`hostLogLine` 이 그 답을 이미 적는데도 필요하다.** 그것은 fd 2 로 나가고, fd 2 의 행선지를 정하는
+/// 것은 **부모**다. 그리고 원인을 알아야 하는 순간의 부모는 **언제나 옛 빌드**다 — 새 빌드를 깔아야
+/// 업그레이드가 일어나고, 그때 fork 하는 쪽은 아직 옛 이미지이기 때문이다. 옛 빌드가 stderr 를
+/// `/dev/null` 로 보내면 그 줄은 **아무 데도 안 남는다**(`upgrade_preflight.noteChildOutcome` 의 주석이
+/// 같은 함정을 적는다).
+///
+/// 반면 `lastDetail()` 은 **자식이 자기가 연 파일**(`preflight.log`)에 적는 값이라 부모가 무엇이든
+/// 살아남는다. 그래서 맥락을 **그 값에** 싣는다 — 새 채널을 만드는 것이 아니라, 이미 살아남는 채널에
+/// 태우는 것이다.
+///
+/// **실측 2026-09-26**: host 가 둘이 된 채 굳은 설치에서 `preflight.log` 에 남은 것은
+/// `InvalidState(BadMagic)` 뿐이었다. envelope 인지 attempt record 인지, 몇 바이트를 읽었는지가 없어
+/// 원인에 못 닿았다 — handoff 는 fd 준비 전에 unlink 되므로(`handoff_store.zig`) 사후 복구도 없다.
+fn mapDecodeErrorAt(err: anyerror, comptime site: []const u8, len: usize) Error {
+    var buf: [last_detail_buf.len]u8 = undefined;
+    const text = std.fmt.bufPrint(&buf, site ++ ":{s} bytes={d}", .{ @errorName(err), len }) catch {
+        // 이름이 길어 안 들어가면 **자리 이름만이라도** 남긴다 — `BadMagic` 만 있는 것보다 낫다.
+        noteDetail(site);
+        return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.InvalidState,
+        };
+    };
+    noteDetail(text);
     return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         else => error.InvalidState,
     };
+}
+
+test "PFD1 preflight 의 detail 은 «어느 디코드에서 몇 바이트» 까지 실어 보낸다" {
+    // **이 값만 살아남는다.** 같은 답을 `hostLogLine` 이 이미 stderr 로 찍지만, fd 2 의 행선지를 정하는
+    // 것은 **부모**이고 그 순간의 부모는 **언제나 옛 빌드**다 — 새 빌드를 깔아야 업그레이드가 일어나고,
+    // 그때 fork 하는 쪽은 아직 옛 이미지다. 옛 빌드가 stderr 를 `/dev/null` 로 보내면 그 줄은 사라진다.
+    // 반면 `lastDetail()` 은 자식이 **자기가 연 파일**(`preflight.log`)에 적는 값이라 부모와 무관하다.
+    //
+    // **실측 2026-09-26**: host 가 둘이 된 채 굳은 설치에서 남은 것은 `InvalidState(BadMagic)` 뿐이었다.
+    // envelope 인지 attempt record 인지, 몇 바이트를 읽었는지가 없어 원인에 못 닿았다 — handoff 는 fd
+    // 준비 전에 unlink 되므로 사후 복구도 없다.
+    clearDetail();
+    try std.testing.expectEqualStrings("", lastDetail());
+
+    // ⑴ **envelope 자리** — 자리 이름과 크기가 함께 든다.
+    const bad_envelope = [_]u8{0} ** 64;
+    try std.testing.expectError(error.InvalidState, decodeValidated(std.testing.allocator, &bad_envelope));
+    const d1 = lastDetail();
+    try std.testing.expect(std.mem.startsWith(u8, d1, "envelope:"));
+    try std.testing.expect(std.mem.indexOf(u8, d1, "bytes=64") != null);
+    // **오류 이름도 남는다** — 자리만 알고 이유를 모르면 반쪽이다.
+    try std.testing.expect(std.mem.indexOf(u8, d1, "BadMagic") != null);
+
+    // ⑴′ **오류 이름이 «진짜로» 실린다 — 두 번째 오류 종류가 그것을 증명한다.**
+    //
+    // 한 종류만 재면 이름을 **리터럴로 박아 넣은** 변이가 살아남는다(적대적 4회차 `X1`: `{s}` 를
+    // `"BadMagic"` 으로 고쳐도 초록이었다). 봉투 머리보다 **짧은** 입력은 magic 에 닿기 전에
+    // `Truncated` 로 갈리므로, 같은 자리에서 **다른 이름**이 나오는지 본다.
+    clearDetail();
+    const too_short = [_]u8{0} ** 8;
+    try std.testing.expectError(error.InvalidState, decodeValidated(std.testing.allocator, &too_short));
+    const d2 = lastDetail();
+    try std.testing.expect(std.mem.startsWith(u8, d2, "envelope:"));
+    try std.testing.expect(std.mem.indexOf(u8, d2, "bytes=8") != null);
+    try std.testing.expect(std.mem.indexOf(u8, d2, "Truncated") != null);
+    try std.testing.expect(std.mem.indexOf(u8, d2, "BadMagic") == null); // 박아 넣은 이름이 아니다
+
+    // ⑵ **앞선 실행의 이름이 안 남는다 — 그 지움을 `runPreflight` 가 «제품 경로에서» 한다.**
+    //
+    // 판정자가 `clearDetail()` 을 **직접 부르면** 그 배선을 한 번도 안 밟는다(적대적 3회차 `W1` 이
+    // 정확히 그래서 살아남았다 — `runPreflight` 첫 줄을 지워도 초록이었다). 그러니 **제품 함수를
+    // 부른다.** `assertExactOpen` 이 곧바로 거절해 `InvalidFd` 로 끝나지만, 그 거절은 detail 을
+    // 남기지 않으므로 **지움이 있었는지**만 깨끗이 드러난다.
+    //
+    // 안 지우면 「성공한 preflight 옆에 옛 실패 이름」이 붙어 `preflight.log` 가 거짓말을 한다 —
+    // 그 로그는 host 가 굳었을 때 **유일하게 남는 증거**라 거짓말이 특히 비싸다.
+    try std.testing.expect(lastDetail().len > 0); // ⑴ 이 남긴 이름이 아직 있다
+    try std.testing.expectError(
+        error.InvalidFd,
+        runPreflight(std.testing.allocator, std.testing.io, 9999),
+    );
+    try std.testing.expectEqualStrings("", lastDetail());
 }
 
 test "restore gate rejects foreign endpoint before fd access for both roles" {

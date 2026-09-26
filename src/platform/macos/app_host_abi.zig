@@ -173,7 +173,7 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
 }
 
 test "ABI v185 notification release end-all and cold route values match the C header" {
-    try std.testing.expectEqual(@as(u32, 196), abi_version);
+    try std.testing.expectEqual(@as(u32, 197), abi_version);
     const Location = session_mod.web_ops.LocationStatus;
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_POSITION), @intFromEnum(Location.position));
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_UNAVAILABLE), @intFromEnum(Location.unavailable));
@@ -2180,6 +2180,18 @@ pub export fn maru_macos_app_session_pending_clipboard(
     ptr_out.* = if (data.len > 0) data.ptr else null;
     len_out.* = data.len;
     return @intFromEnum(Status.ok);
+}
+
+/// v197(W5c): 방금 내보낸 알림이 웹 알림이면 그 번호.
+pub export fn maru_macos_app_session_pending_notification_web_token(session: ?*AppSession) u64 {
+    const app = session orelse return 0;
+    return app.notification_web_token_out;
+}
+
+/// v197(W5c): 웹 알림을 눌렀다 — 페이지의 onclick.
+pub export fn maru_macos_app_session_web_notification_click(session: ?*AppSession, surface_id: u64, token: u64) void {
+    const app = session orelse return;
+    session_mod.web_osr.clickWebNotification(app.allocator, surface_id, token);
 }
 
 // OSC 9/777 데스크톱 알림 데이터(title, body, surface_id, foreground). has_out=1이면 알림 있음

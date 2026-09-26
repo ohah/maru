@@ -9,7 +9,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 196u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 197u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -1156,6 +1156,12 @@ int32_t maru_macos_app_session_pending_notification(
     uint64_t *runtime_id_lo_out,
     uint64_t *event_id_out
 );
+/* v197(W5c): 방금 pending_notification 이 준 알림이 Chromium 탭의 웹 알림이면 그 번호(0 이면 아니다) — Swift 는 알림 userInfo
+   에 싣고, 누르면 maru_macos_app_session_web_notification_click 으로 돌려준다(페이지의 알림 onclick). */
+uint64_t maru_macos_app_session_pending_notification_web_token(MaruAppHostSession *session);
+/* v197(W5c): 웹 알림을 눌렀다 — 그 탭(surface_id)의 그 번호일 때만 페이지의 onclick 을 부른다(모르는 번호·다른 탭이면 무동작).
+   탭으로 옮기는 것은 activate_surface 가 한다. */
+void maru_macos_app_session_web_notification_click(MaruAppHostSession *session, uint64_t surface_id, uint64_t token);
 /* 데스크톱 알림 클릭 → 발신 surface로 활성화. Swift가 알림 userInfo의 (창 토큰, surface_id)에서 토큰으로 올바른
    창/세션을 고른 뒤(창 키 활성화는 Swift), 이 세션에 surface_id를 넘긴다. Zig가 (탭/panel/Term)을 역조회해 그
    자리로 포커스한다(switchTab→focusPaneByPtr→focusTerm). 찾아 활성화했으면 1, 이미 닫혔으면 0(무동작). session

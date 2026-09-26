@@ -17,7 +17,10 @@
 //!                 렌더러가 내용을 읽어 `file-<수>-<이름들,정렬>-<바이트 합>`, 취소면 `file-cancel`
 //!   /perm?a=X     권한 판정(W5b) — 누르면 X 를 청한다(`notif` 알림 · `midi` MIDI sysex · `fonts` 로컬 글꼴 · `screens` 창 관리 ·
 //!                 `idle` 유휴 감지 · `geo` 위치 · `geox` 위치(`at<위도>,<경도>,<정확도>` — 시한 8 초) · `geolater` 한 문서에서 위치를 두 번 — 1.5 초 뒤 둘째(`at…|at…` 또는 `…|geo-err<코드>`) ·
-//!                 `geoframe` 같은 출처 iframe(`allow=geolocation`)이 `geolater` 를 하고 결과를 위 문서 제목에(`geoframe:…`) · `watch` 위치 지켜보기(3 초 뒤
+//!                 `geoframe` 같은 출처 iframe(`allow=geolocation`)이 `geolater` 를 하고 결과를 위 문서 제목에(`geoframe:…`) ·
+//!                 `nshow` 알림을 띄운다(누르면 `clicked<누른 횟수>`) · `nauto` 같은 것을 페이지가 뜨자마자 · `nforge` 권한을 `granted` 로 속여 알림을 띄우고 `maru` 가 든 전역 수를 제목에(`forged<이 문서>-<about:blank iframe>-g<다른 사이트 iframe>-g<sandbox iframe>-g<같은 출처 iframe>-g<다른 사이트 iframe 안의 iframe>`, 뒤 넷은 도착 순 — `nglobals`·`nnest` 가 맨 위에 postMessage) · `nxtop<포트>` 그 포트의 `nxframe`(같은 사이트·다른 출처 iframe)이 알림을 띄우고 제 `Notification.permission` 을 맨 위 제목에(`x<권한>`) · `nprerender` speculation rules 로 `nactivated` 를 미리 그리고 2 초 뒤 그리로 간다(`nactivated:g<전역 수>-a<미리 그렸으면 1>`) · `nsandbox` CSP `sandbox` 헤더로 불투명 출처가 된 주 프레임이 권한을 속여 알림을
+//!                 띄운다(`sandboxed<maru 전역 수>-<self.origin>`) ·
+//!                 `nflood` 페이지가 뜨자마자 알림 열 개 · `watch` 위치 지켜보기(3 초 뒤
 //!                 `n<받은 수>-<위도·오류들>`) · `cam` 카메라 · `display` 화면 공유 · `displayleave` 화면 공유를 청하고 1.5 초 뒤 스스로
 //!                 `/title?t=perm-left` 로 떠난다 · `displayfail` 같은데 닿지 않는 주소(`127.0.0.1:9`)로 떠난다 — 실패한 이동). 준비는 `X:ready`, 결과는 `X:<결과>`(`granted`·`ok`·`err-<이름>` — 글꼴은 `ok<수>`, 거절이면 빈 목록 `ok0`)
 //!   /ctl          제목을 `a<BEL>b<DEL>c` 로(제어 문자가 든 제목)
@@ -51,6 +54,10 @@ extern "c" fn bind(fd: c_int, addr: *const SockaddrIn, len: u32) c_int;
 extern "c" fn listen(fd: c_int, backlog: c_int) c_int;
 extern "c" fn accept(fd: c_int, addr: ?*anyopaque, len: ?*u32) c_int;
 extern "c" fn getsockname(fd: c_int, addr: *SockaddrIn, len: *u32) c_int;
+extern "c" fn setsockopt(fd: c_int, level: c_int, name: c_int, value: *const anyopaque, len: u32) c_int;
+const sol_socket: c_int = 0xffff;
+const so_rcvtimeo: c_int = 0x1006;
+const Timeval = extern struct { sec: i64, usec: i32 };
 
 /// 팝업 페이지(`/title?t=opened`)가 실제로 요청된 수. 창 없는 모드에서는 허용된 팝업이 **보이지 않는 브라우저**로
 /// 뜨므로 창 수로는 못 잡는다(변이 실측) — 페이지가 불렸는지로 본다.
@@ -79,6 +86,9 @@ fn serve(fd: c_int) void {
     while (true) {
         const conn = accept(fd, null, null);
         if (conn < 0) continue;
+        // 요청 없이 미리 열어 둔 연결(Chromium 의 preconnect — speculation rules 판정에서 실측)에 한 스레드 서버가 묶이지 않게.
+        const timeout: Timeval = .{ .sec = 1, .usec = 0 };
+        _ = setsockopt(conn, sol_socket, so_rcvtimeo, &timeout, @sizeOf(Timeval));
         handle(conn);
         _ = std.c.close(conn);
     }
@@ -95,10 +105,12 @@ fn handle(conn: c_int) void {
     const path = target[0 .. std.mem.indexOfScalar(u8, target, '?') orelse target.len];
     const query = if (std.mem.indexOfScalar(u8, target, '=')) |eq| target[eq + 1 ..] else "";
 
-    var body_buf: [4096]u8 = undefined;
+    var body_buf: [8192]u8 = undefined;
     const body = page(path, query, &body_buf) catch "<!doctype html><title>not-found</title>";
-    var head_buf: [256]u8 = undefined;
-    const head = std.fmt.bufPrint(&head_buf, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {d}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n", .{body.len}) catch return;
+    var head_buf: [320]u8 = undefined;
+    // `/perm?a=nsandbox` 는 CSP sandbox 로 — 주 프레임이 불투명 출처가 된다(같은 프로세스에 남는다).
+    const csp = if (std.mem.eql(u8, path, "/perm") and std.mem.eql(u8, query, "nsandbox")) "Content-Security-Policy: sandbox allow-scripts\r\n" else "";
+    const head = std.fmt.bufPrint(&head_buf, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {d}\r\nCache-Control: no-store\r\n{s}Connection: close\r\n\r\n", .{ body.len, csp }) catch return;
     _ = std.c.write(conn, head.ptr, head.len);
     _ = std.c.write(conn, body.ptr, body.len);
 }
@@ -151,7 +163,8 @@ fn page(path: []const u8, query: []const u8, buf: []u8) ![]const u8 {
     if (std.mem.eql(u8, path, "/folder")) return filePage("webkitdirectory", buf);
     if (std.mem.eql(u8, path, "/perm")) {
         return std.fmt.bufPrint(buf, "<!doctype html><title>loading</title><body style='margin:0;height:100%'><script>" ++
-            "var A='{s}',I=A=='geoinner';function T(x){{(I?top:window).document.title=(I?'geoframe':A)+':'+x}}function E(e){{T('err-'+e.name)}}function K(){{T('ok')}}" ++
+            "var A='{s}',I=A=='geoinner',C=0;function T(x){{(I?top:window).document.title=(I?'geoframe':A)+':'+x}}function E(e){{T('err-'+e.name)}}function K(){{T('ok')}}" ++
+            "function G(w){{return Object.getOwnPropertyNames(w).filter(function(k){{return /maru/i.test(k)}}).length}}" ++
             "function go(){{if(A=='notif')Notification.requestPermission().then(T);" ++
             "else if(A=='midi')navigator.requestMIDIAccess({{sysex:true}}).then(K,E);" ++
             "else if(A=='fonts')queryLocalFonts().then(function(f){{T('ok'+f.length)}},E);" ++
@@ -160,6 +173,21 @@ fn page(path: []const u8, query: []const u8, buf: []u8) ![]const u8 {
             "else if(A=='geo')navigator.geolocation.getCurrentPosition(K,function(e){{T('geo-err'+e.code)}},{{timeout:3000}});" ++
             "else if(A=='geox')navigator.geolocation.getCurrentPosition(function(p){{T('at'+p.coords.latitude.toFixed(3)+','+p.coords.longitude.toFixed(3)+','+p.coords.accuracy)}},function(e){{T('geo-err'+e.code)}},{{timeout:8000}});" ++
             "else if(A=='geoframe'){{var f=document.createElement('iframe');f.allow='geolocation';f.src='/perm?a=geoinner';document.body.appendChild(f)}}" ++
+            "else if(A=='nshow'||A=='nauto'){{var n=new Notification('제목',{{body:'본문\\n둘',tag:'t1'}});n.onclick=function(){{T('clicked'+(++C))}};n.onshow=function(){{T('shown')}}}}" ++
+            "else if(A=='nglobals')top.postMessage('g'+G(window),'*');" ++
+            "else if(A.indexOf('nxtop')==0){{addEventListener('message',function(e){{setTimeout(function(){{T(e.data)}},800)}});var f=document.createElement('iframe');f.src='http://127.0.0.1:'+A.slice(5)+'/perm?a=nxframe';document.body.appendChild(f)}}" ++
+            "else if(A=='nxframe'){{var m='';try{{new Notification('xframe')}}catch(e){{m='-'+e.name}}top.postMessage('x'+Notification.permission+m,'*')}}" ++
+            "else if(A=='nnest'){{top.postMessage('g'+G(window),'*');var c=document.createElement('iframe');c.src='/perm?a=nglobals';document.body.appendChild(c)}}" ++
+            "else if(A=='nprerender'){{var r=document.createElement('script');r.type='speculationrules';r.textContent=JSON.stringify({{prerender:[{{source:'list',urls:['/perm?a=nactivated']}}]}});document.head.appendChild(r);setTimeout(function(){{location.href='/perm?a=nactivated'}},2000)}}" ++
+            "else if(A=='nactivated'){{var e=performance.getEntriesByType('navigation')[0];setTimeout(function(){{T('g'+G(window)+'-a'+(e&&e.activationStart>0?1:0))}},600)}}" ++
+            "else if(A=='nsandbox'){{try{{Object.defineProperty(Notification,'permission',{{get:function(){{return 'granted'}}}})}}catch(e){{}}new Notification('가짜');T('sandboxed'+G(window)+'-'+self.origin)}}" ++
+            "else if(A=='nforge'){{var g=G(window),b=document.createElement('iframe');document.body.appendChild(b);var bl=G(b.contentWindow),got=[];" ++
+            "addEventListener('message',function(e){{got.push(e.data);if(got.length==4)T('forged'+g+'-'+bl+'-'+got.join('-'))}});" ++
+            "var x=document.createElement('iframe');x.src='http://127.0.0.1:'+location.port+'/perm?a=nnest';document.body.appendChild(x);" ++
+            "var sb=document.createElement('iframe');sb.sandbox='allow-scripts';sb.src='/perm?a=nglobals';document.body.appendChild(sb);" ++
+            "var so=document.createElement('iframe');so.src='/perm?a=nglobals';document.body.appendChild(so);" ++
+            "try{{Object.defineProperty(Notification,'permission',{{get:function(){{return 'granted'}}}})}}catch(e){{}}new Notification('가짜')}}" ++
+            "else if(A=='nflood'){{for(var i=0;i<10;i++)new Notification('f'+i);T('flooded')}}" ++
             "else if(A=='geolater'||I){{var g=navigator.geolocation,o={{timeout:5000}},f=function(p){{return 'at'+p.coords.latitude.toFixed(3)}},e=function(x){{return 'geo-err'+x.code}};" ++
             "g.getCurrentPosition(function(p){{var a=f(p);setTimeout(function(){{g.getCurrentPosition(function(q){{T(a+'|'+f(q))}},function(x){{T(a+'|'+e(x))}},o)}},1500)}},function(x){{T(e(x))}},o)}}" ++
             "else if(A=='watch'){{var n=0,l=[];navigator.geolocation.watchPosition(function(p){{n++;l.push(p.coords.latitude.toFixed(3))}},function(e){{l.push('e'+e.code)}});setTimeout(function(){{T('n'+n+'-'+l.join('/'))}},3000)}}" ++
@@ -167,7 +195,7 @@ fn page(path: []const u8, query: []const u8, buf: []u8) ![]const u8 {
             "else if(A=='display')navigator.mediaDevices.getDisplayMedia({{video:true}}).then(K,E);" ++
             "else if(A=='displayleave'){{navigator.mediaDevices.getDisplayMedia({{video:true}}).then(K,E);setTimeout(function(){{location.href='/title?t=perm-left'}},1500)}}" ++
             "else if(A=='displayfail'){{navigator.mediaDevices.getDisplayMedia({{video:true}}).then(K,E);setTimeout(function(){{location.href='http://127.0.0.1:9/'}},1500)}}}}" ++
-            "addEventListener('click',go);if(I)go();requestAnimationFrame(function(){{requestAnimationFrame(function(){{T('ready')}})}})</script>", .{query});
+            "addEventListener('click',go);if(I||A=='nauto'||A=='nflood'||A=='nglobals'||A=='nnest'||A=='nprerender'||A=='nactivated'||A=='nxframe'||A.indexOf('nxtop')==0)go();requestAnimationFrame(function(){{requestAnimationFrame(function(){{T('ready')}})}})</script>", .{query});
     }
     if (std.mem.eql(u8, path, "/ctl")) {
         return "<!doctype html><title>loading</title><script>document.title='a\\x07b\\x7fc'</script>";

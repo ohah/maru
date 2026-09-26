@@ -1688,12 +1688,17 @@ pub const NotificationConfig = struct {
     /// `notifications.update-check` 키로 파싱.
     update_check: bool = true,
 
+    /// Chromium 탭(`browser.engine = chromium`)의 웹 알림을 maru 알림(인앱 센터·데스크톱 배너)으로 넘길지. 기본 true. false 면
+    /// 사이트가 알림 권한을 받아도 maru 알림으로 보이지 않는다(W5c). loader 가 `notifications.web` 키로 파싱.
+    web: bool = true,
+
     /// 인앱 알림 센터(종 아이콘 패널)에 보관할 최대 알림 수(ring). 초과하면 가장 오래된 것부터 버린다. 기본 64.
     /// loader가 `notifications.history-limit` 키로 파싱(8~512, 상한은 메모리 가드).
     history_limit: u32 = 64,
 
-    pub const schema = .{ // 키: notifications.osc / notifications.update-check / notifications.history-limit
+    pub const schema = .{ // 키: notifications.osc / notifications.web / notifications.update-check / notifications.history-limit
         .osc = Meta{ .doc = .cfg_notif_osc, .widget = .toggle, .section = .terminal },
+        .web = Meta{ .doc = .cfg_notif_web, .widget = .toggle, .section = .terminal },
         .update_check = Meta{ .doc = .cfg_notif_update_check, .widget = .toggle, .section = .terminal },
         .history_limit = Meta{ .doc = .cfg_notif_history_limit, .range = .{ 8, 512 }, .widget = .number, .section = .terminal },
     };

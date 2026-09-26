@@ -9,6 +9,7 @@ const std = @import("std");
 const cef = @import("cef.zig");
 const library = @import("library.zig");
 const layout = @import("layout.zig");
+const renderer = @import("renderer.zig");
 
 const SandboxInitialize = *const fn (argc: c_int, argv: [*c][*c]u8) callconv(.c) ?*anyopaque;
 extern "c" fn sandbox_check(pid: c_int, operation: ?[*:0]const u8, kind: c_int) c_int;
@@ -38,14 +39,20 @@ pub fn main(init: std.process.Init.Minimal) u8 {
 
     var framework_path: layout.PathBuf = undefined;
     const framework = layout.join(&framework_path, dir, layout.framework_dir_name ++ "/" ++ layout.framework_binary_name) catch return fail("path too long");
-    const api = library.load(framework) catch return fail("cannot open the CEF framework");
+    const loaded = library.load(framework) catch return fail("cannot open the CEF framework");
+    // 렌더러의 처리기(`renderer.zig`)가 프로세스 수명 동안 쥔다.
+    api_storage = loaded;
+    const api = &api_storage;
 
     // 다른 어떤 CEF 호출보다 먼저 API 버전을 등록한다(첫 호출 뒤의 값은 무시된다 — cef_api_hash.h).
     _ = api.api_hash(cef.api_version, 0);
     var main_args: cef.c.cef_main_args_t = .{ .argc = argc, .argv = argv_c };
-    const code = api.execute_process(&main_args, null, null);
+    // 렌더러 프로세스는 웹 알림 대리 스크립트를 넣는다(W5c). GPU·유틸리티 프로세스는 처리기를 부르지 않는다.
+    const code = api.execute_process(&main_args, renderer.get(api), null);
     return @intCast(std.math.clamp(code, 0, 255));
 }
+
+var api_storage: library.Api = undefined;
 
 fn fail(reason: []const u8) u8 {
     std.debug.print("maru-web-helper: {s}\n", .{reason});

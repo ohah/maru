@@ -23,6 +23,21 @@
 //!                      알리지 않아 새 문서에서 치운다) — 닿지 않는 주소로 떠나 이동이 실패해도(`on_load_start` 없이 오류 페이지)
 //!   perm-ignore        maru 가 못 물음(IGNORE)으로 답해도 페이지는 prompt 로 남지만, Chromium 은 따로 세어 넷이면 다섯째는 묻지
 //!                      않고 거절한다(embargo — 실측. 사용자 닫기는 셋)
+//!   notif-relay        알림을 허용한 출처의 `new Notification` 이 `web_notification`(출처·제목·여러 줄 본문)으로 온다(W5c — Chromium
+//!                      은 OS 로 보내지 않는다) · maru 가 누르면 그 알림의 `onclick` 이 불린다
+//!   notif-stale-click  같은 주소로 다시 연 새 문서에서, 옛 문서의 (누르지 않고 둔) 알림을 눌러도 같은 페이지 번호인 새 문서의
+//!                      알림이 눌리지 않는다(렌더러가 문서 표식을 맞춰 본다)
+//!   notif-click-once   같은 알림을 두 번 눌러도 onclick 은 한 번
+//!   notif-prerender    미리 그린(speculation rules) 문서가 활성화된 뒤에도 `maru` 가 든 전역이 없다
+//!   notif-forged       허용하지 않은 출처(`localhost`)가 `Notification.permission` 을 `granted` 로 속여 띄워도 넘어오지 않는다(sidecar 가 그
+//!                      프레임의 주소로 가른다) · 페이지에 `maru` 가 든 전역이 없다 — 그 문서·스크립트로 만든 `about:blank` iframe·다른
+//!                      사이트 iframe(OOPIF — 대리 스크립트가 들어가지 않는다)·sandbox iframe(불투명 출처)·같은 출처 iframe(대리 스크립트가 꺼내 지운다)·다른 사이트
+//!                      iframe 안의 그 사이트 iframe(부모는 같은 프로세스지만 주 프레임까지 이어지지 않는다) 모두
+//!   notif-cross-origin-frame  포트만 다른(같은 사이트·같은 프로세스) 다른 출처 맨 위 문서 안에서 허용한 출처 iframe 이 띄운
+//!                      알림은 넘어오지 않는다(주 프레임과 같은 출처만)
+//!   notif-opaque       허용한 출처의 주소라도 CSP `sandbox` 로 불투명 출처가 된 문서는 권한을 속여 띄워도 넘어오지 않는다
+//!   notif-flood        열 개를 한꺼번에 띄워도 10 초에 다섯 개까지만 넘어온다
+//!   notif-first-doc    처음부터 알림 페이지로 만든 브라우저의 첫 문서도 넘어온다(대리 스크립트가 첫 문서에도 들어간다)
 //!   perm-remembered    host 를 다시 띄워도(같은 프로필·출처) 허용한 알림·글꼴은 묻지 않고 허용, 차단한 MIDI 는 묻지 않고 거절
 //!                      (사용자 결정 2026-09-25 — Chromium 이 출처별로 기억한다)
 
@@ -32,6 +47,7 @@ const os = @import("os.zig");
 const windows = @import("windows.zig");
 const Host = @import("host.zig").Host;
 const browsers_check = @import("browsers_check.zig");
+const http = @import("http.zig");
 
 const message = protocol.message;
 const BrowserId = message.BrowserId;
@@ -155,6 +171,168 @@ fn waitClosed(host: *Host, request: RequestId) bool {
     return false;
 }
 
+/// `web_notification` 을 기다린다(`timeout_ms` 안에 온 것을 모두 센다). 제목에 `stop_title` 이 오면 그때까지만.
+const Relayed = struct {
+    count: usize = 0,
+    notification: u32 = 0,
+    origin_buf: [64]u8 = undefined,
+    origin_len: usize = 0,
+    text_buf: [128]u8 = undefined,
+    text_len: usize = 0,
+    /// 기다리는 동안 온 이 브라우저의 마지막 제목.
+    title_buf: [64]u8 = undefined,
+    title_len: usize = 0,
+
+    fn title(self: *const Relayed) []const u8 {
+        return self.title_buf[0..self.title_len];
+    }
+};
+
+fn collectRelayed(host: *Host, timeout_ms: u32) Relayed {
+    var out: Relayed = .{};
+    const deadline = os.nowMs() + timeout_ms;
+    while (os.nowMs() < deadline) {
+        const next = (host.next(@intCast(@max(deadline - os.nowMs(), 1))) catch break) orelse break;
+        if (next == .title_changed and next.title_changed.browser == id) {
+            out.title_len = @min(next.title_changed.text.len, out.title_buf.len);
+            @memcpy(out.title_buf[0..out.title_len], next.title_changed.text[0..out.title_len]);
+        }
+        if (next == .web_notification and next.web_notification.browser == id) {
+            const v = next.web_notification;
+            if (out.count == 0) {
+                out.notification = v.notification;
+                out.origin_len = @min(v.origin.len, out.origin_buf.len);
+                @memcpy(out.origin_buf[0..out.origin_len], v.origin[0..out.origin_len]);
+                const text = std.fmt.bufPrint(&out.text_buf, "{s}|{s}", .{ v.title, v.body }) catch "";
+                out.text_len = text.len;
+            }
+            out.count += 1;
+        }
+    }
+    return out;
+}
+
+/// `web_notification` 을 세며 이 브라우저의 제목이 `prefix` 로 시작하고 `:x` 가 든 것(iframe 이 보낸 결과)이 올 때까지 기다린다.
+fn collectRelayedUntil(host: *Host, prefix: []const u8, timeout_ms: u32) Relayed {
+    var out: Relayed = .{};
+    const deadline = os.nowMs() + timeout_ms;
+    while (os.nowMs() < deadline) {
+        const next = (host.next(@intCast(@max(deadline - os.nowMs(), 1))) catch break) orelse break;
+        if (next == .web_notification and next.web_notification.browser == id) out.count += 1;
+        if (next == .title_changed and next.title_changed.browser == id and std.mem.startsWith(u8, next.title_changed.text, prefix)) {
+            out.title_len = @min(next.title_changed.text.len, out.title_buf.len);
+            @memcpy(out.title_buf[0..out.title_len], next.title_changed.text[0..out.title_len]);
+        }
+    }
+    return out;
+}
+
+/// 이 브라우저의 제목이 `prefix` 로 시작할 때까지 기다린다(그 제목을 돌려준다 — 못 오면 빈 제목).
+fn waitTitlePrefix(host: *Host, prefix: []const u8) Relayed {
+    var out: Relayed = .{};
+    const deadline = os.nowMs() + wait_ms;
+    while (os.nowMs() < deadline) {
+        const next = (host.next(@intCast(@max(deadline - os.nowMs(), 1))) catch break) orelse break;
+        if (next == .title_changed and next.title_changed.browser == id and std.mem.startsWith(u8, next.title_changed.text, prefix)) {
+            out.title_len = @min(next.title_changed.text.len, out.title_buf.len);
+            @memcpy(out.title_buf[0..out.title_len], next.title_changed.text[0..out.title_len]);
+            break;
+        }
+    }
+    return out;
+}
+
+fn notificationChecks(report: Report, host: *Host, u: []u8, port: u16, origin: []const u8, detail_buf: []u8) !void {
+    // 허용한 출처(앞 판정이 알림을 허용했다) — 띄우면 넘어온다. 이 알림은 누르지 않고 둔다(아래 옛 알림).
+    try host.send(.{ .navigate = .{ .browser = id, .url = browsers_check.url(u, port, "/perm?a=nshow") } });
+    if (!waitTitle(host, "nshow:ready")) return error.PageNotReady;
+    os.sleepMs(800);
+    try host.send(.{ .mouse = .{ .browser = id, .kind = .down, .point = .{ .x = 100, .y = 100 }, .click_count = 1 } });
+    try host.send(.{ .mouse = .{ .browser = id, .kind = .up, .point = .{ .x = 100, .y = 100 }, .click_count = 1 } });
+    const relayed = collectRelayed(host, 3000);
+    const relay_ok = relayed.count == 1 and std.mem.eql(u8, relayed.origin_buf[0..relayed.origin_len], origin) and
+        std.mem.eql(u8, relayed.text_buf[0..relayed.text_len], "제목|본문\n둘") and relayed.notification != 0;
+    // 같은 주소로 다시 연 새 문서의 알림 — 페이지 번호가 옛 알림과 같다(1).
+    try host.send(.{ .navigate = .{ .browser = id, .url = browsers_check.url(u, port, "/perm?a=nshow") } });
+    if (!waitTitle(host, "nshow:ready")) return error.PageNotReady;
+    os.sleepMs(800);
+    try host.send(.{ .mouse = .{ .browser = id, .kind = .down, .point = .{ .x = 100, .y = 100 }, .click_count = 1 } });
+    try host.send(.{ .mouse = .{ .browser = id, .kind = .up, .point = .{ .x = 100, .y = 100 }, .click_count = 1 } });
+    const again = collectRelayed(host, 2000);
+    // 옛 문서의 알림을 누른다 — 새 문서의 알림이 눌리면 안 된다(렌더러의 문서 표식).
+    if (relayed.notification != 0) try host.send(.{ .web_notification_click = .{ .browser = id, .notification = relayed.notification } });
+    const stale = collectRelayed(host, 1500);
+    const stale_ignored = relayed.notification != 0 and again.count == 1 and !std.mem.startsWith(u8, stale.title(), "nshow:clicked");
+    // 새 알림을 누르면 onclick.
+    if (again.notification != 0) try host.send(.{ .web_notification_click = .{ .browser = id, .notification = again.notification } });
+    const clicked = waitTitle(host, "nshow:clicked1");
+    report(relay_ok and again.count == 1 and clicked, "notif-relay", std.fmt.bufPrint(detail_buf, "알림 {d} 건 · 출처 {s} · 글 [{s}] · 다시 연 문서의 알림 {d} 건 · 누르면 onclick {}", .{ relayed.count, relayed.origin_buf[0..relayed.origin_len], relayed.text_buf[0..relayed.text_len], again.count, clicked }) catch "");
+    report(stale_ignored, "notif-stale-click", std.fmt.bufPrint(detail_buf, "옛 문서의 알림(누르지 않고 둔 것)을 새 문서에서 누름 → 제목 {s}(clicked 가 아니어야)", .{stale.title()}) catch "");
+    // 같은 알림을 다시 누른다 — onclick 은 한 번뿐(Chrome 도 누른 알림은 닫힌다).
+    if (again.notification != 0) try host.send(.{ .web_notification_click = .{ .browser = id, .notification = again.notification } });
+    const twice = collectRelayed(host, 1500);
+    report(clicked and !std.mem.eql(u8, twice.title(), "nshow:clicked2"), "notif-click-once", std.fmt.bufPrint(detail_buf, "같은 알림을 두 번 누름 → 제목 {s}(clicked2 가 아니어야)", .{twice.title()}) catch "");
+
+    // 미리 그린 문서(speculation rules prerender) — 활성화된 뒤에도 `maru` 가 든 전역이 없다(주 프레임이지만 DevTools 대상이
+    // 다를 수 있다 — 적대 검증).
+    try host.send(.{ .navigate = .{ .browser = id, .url = browsers_check.url(u, port, "/perm?a=nprerender") } });
+    const activated = waitTitlePrefix(host, "nactivated:g");
+    report(std.mem.startsWith(u8, activated.title(), "nactivated:g0-"), "notif-prerender", std.fmt.bufPrint(detail_buf, "미리 그린 문서가 활성화됨 → 제목 {s}(g0 이어야 — 끝의 a1 은 실제로 미리 그려졌다는 뜻)", .{activated.title()}) catch "");
+
+    // 허용하지 않은 출처가 권한을 속여 띄운다.
+    var other_buf: [128]u8 = undefined;
+    try host.send(.{ .navigate = .{ .browser = id, .url = std.fmt.bufPrint(&other_buf, "http://localhost:{d}/perm?a=nforge", .{port}) catch unreachable } });
+    if (!waitTitle(host, "nforge:ready")) return error.PageNotReady;
+    os.sleepMs(800);
+    try host.send(.{ .mouse = .{ .browser = id, .kind = .down, .point = .{ .x = 100, .y = 100 }, .click_count = 1 } });
+    try host.send(.{ .mouse = .{ .browser = id, .kind = .up, .point = .{ .x = 100, .y = 100 }, .click_count = 1 } });
+    const forged = collectRelayed(host, 2500);
+    const no_global = std.mem.eql(u8, forged.title(), "nforge:forged0-0-g0-g0-g0-g0");
+    report(forged.count == 0 and no_global, "notif-forged", std.fmt.bufPrint(detail_buf, "허용하지 않은 출처가 권한을 속여 띄움 → 넘어온 알림 {d} 건 · maru 전역 수(이 문서-about:blank-iframe 넷) {s}(모두 0 이어야)", .{ forged.count, forged.title() }) catch "");
+
+    // 포트만 다른 같은 사이트(같은 프로세스)의 허용하지 않은 맨 위 문서가 허용한 출처(이 포트)를 iframe 으로 넣고 그 iframe 이
+    // 알림을 띄운다 — 넘어오지 않는다(Chrome 처럼 주 프레임과 같은 출처만).
+    const other = try http.Server.start();
+    var xtop_buf: [128]u8 = undefined;
+    try host.send(.{ .navigate = .{ .browser = id, .url = std.fmt.bufPrint(&xtop_buf, "http://127.0.0.1:{d}/perm?a=nxtop{d}", .{ other.port, port }) catch unreachable } });
+    const xframe = collectRelayedUntil(host, "nxtop", 6000);
+    report(xframe.count == 0 and std.mem.startsWith(u8, xframe.title(), "nxtop") and std.mem.indexOf(u8, xframe.title(), ":x") != null, "notif-cross-origin-frame", std.fmt.bufPrint(detail_buf, "다른 출처 맨 위 문서 안의 허용한 출처 iframe 이 띄움 → 넘어온 알림 {d} 건 · 제목 {s}(iframe 이 본 권한)", .{ xframe.count, xframe.title() }) catch "");
+
+    // 허용한 출처(127.0.0.1)가 CSP sandbox 로 불투명 출처가 된 문서 — 주소는 허용한 출처지만 넘어오지 않는다(렌더러가 `send`
+    // 를 숨기지 않는다).
+    try host.send(.{ .navigate = .{ .browser = id, .url = browsers_check.url(u, port, "/perm?a=nsandbox") } });
+    if (!waitTitle(host, "nsandbox:ready")) return error.PageNotReady;
+    os.sleepMs(800);
+    try host.send(.{ .mouse = .{ .browser = id, .kind = .down, .point = .{ .x = 100, .y = 100 }, .click_count = 1 } });
+    try host.send(.{ .mouse = .{ .browser = id, .kind = .up, .point = .{ .x = 100, .y = 100 }, .click_count = 1 } });
+    const sandboxed = collectRelayed(host, 2500);
+    report(sandboxed.count == 0 and std.mem.eql(u8, sandboxed.title(), "nsandbox:sandboxed0-null"), "notif-opaque", std.fmt.bufPrint(detail_buf, "허용한 출처의 CSP sandbox 문서가 권한을 속여 띄움 → 넘어온 알림 {d} 건 · 제목 {s}(sandboxed0-null 이어야)", .{ sandboxed.count, sandboxed.title() }) catch "");
+
+    // 폭탄 — 빈도 제한은 브라우저마다라 새 브라우저에서(앞 알림이 창을 쓰지 않게).
+    const flooder: BrowserId = id + 2;
+    try host.send(.{ .create_browser = .{ .browser = flooder, .size = size, .hidden = false, .url = browsers_check.url(u, port, "/perm?a=nflood") } });
+    var flood: Relayed = .{};
+    const flood_deadline = os.nowMs() + 6000;
+    while (os.nowMs() < flood_deadline) {
+        const next = (host.next(@intCast(@max(flood_deadline - os.nowMs(), 1))) catch break) orelse break;
+        if (next == .web_notification and next.web_notification.browser == flooder) flood.count += 1;
+    }
+    try host.send(.{ .destroy_browser = flooder });
+    report(flood.count == 5, "notif-flood", std.fmt.bufPrint(detail_buf, "한꺼번에 열 개 → 넘어온 알림 {d} 건(상한 5)", .{flood.count}) catch "");
+
+    // 처음부터 알림 페이지로 만든 브라우저(첫 문서).
+    const second: BrowserId = id + 1;
+    try host.send(.{ .create_browser = .{ .browser = second, .size = size, .hidden = false, .url = browsers_check.url(u, port, "/perm?a=nauto") } });
+    var first_doc: usize = 0;
+    const deadline = os.nowMs() + wait_ms;
+    while (os.nowMs() < deadline and first_doc == 0) {
+        const next = (host.next(@intCast(@max(deadline - os.nowMs(), 1))) catch break) orelse break;
+        if (next == .web_notification and next.web_notification.browser == second) first_doc += 1;
+    }
+    try host.send(.{ .destroy_browser = second });
+    report(first_doc == 1, "notif-first-doc", std.fmt.bufPrint(detail_buf, "처음부터 알림 페이지인 브라우저의 첫 문서 → 알림 {d} 건", .{first_doc}) catch "");
+}
+
 /// 판정 시작 전 새 브라우저를 만든다.
 fn start(host_path: [:0]const u8, profile_arg: [:0]const u8, u: []u8, port: u16) !Host {
     var host = try Host.spawn(host_path, profile_arg);
@@ -181,6 +359,9 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, p
     const notif_shape = notif_asked.kinds == PermissionKind.notifications.bit() and notif_asked.media == 0 and std.mem.eql(u8, notif_asked.origin(), origin);
     const granted = if (notif.asked != null) try answer(&host, "notif", notif_asked.request, .accept) else Outcome{};
     report(notif_shape and windows_while_asking == 0 and endsWith(&granted, ":granted"), "perm-asks", std.fmt.bufPrint(&detail_buf, "알림 요청(비트 0x{x} · 출처 {s}) 모양 {} · 묻는 동안 host 창 {d} 개 · 허용 → {s}", .{ notif_asked.kinds, notif_asked.origin(), notif_shape, windows_while_asking, granted.title() }) catch "");
+
+    // ── 웹 알림 중계(W5c) ──
+    try notificationChecks(report, &host, &u, port, origin, &detail_buf);
 
     // ── MIDI 차단 ──
     const midi = try ask(&host, &u, port, "midi");

@@ -114,7 +114,7 @@ PERMS = ("<!doctype html><title>perms</title><style>html,body{margin:0;height:10
     "<button class=b id=n style='left:0'>notif</button><button class=b id=m style='left:100px'>midi</button>"
     "<button class=b id=f style='left:200px'>fonts</button><button class=b id=d style='left:300px'>display</button>"
     "<button class=b id=w style='left:400px'>leave</button><button class=b id=c style='left:500px'>chain</button>"
-    "<button class=b id=g style='left:600px'>geo</button><script>"
+    "<button class=b id=g style='left:600px'>geo</button><button class=b id=k style='left:700px'>notify</button><script>"
     "var P=Math.random().toString(36).slice(2,8),S=0;function ping(q){new Image().src='/ev?p='+P+'&s='+(++S)+'&'+q+'&t='+Date.now()}"
     "function on(id,f){document.getElementById(id).onclick=f}function E(k){return function(e){ping('e='+k+'&r=err-'+e.name)}}"
     "on('n',function(){Notification.requestPermission().then(function(r){ping('e=notif&r='+r)})});"
@@ -124,6 +124,8 @@ PERMS = ("<!doctype html><title>perms</title><style>html,body{margin:0;height:10
     "on('w',function(){getScreenDetails().then(function(){ping('e=screens&r=ok')},E('screens'));setTimeout(function(){location.reload()},1500)});"
     "on('c',function(){navigator.mediaDevices.getDisplayMedia({video:true}).then(function(){ping('e=display&r=ok')},E('display'));"
     "setTimeout(function(){getScreenDetails().then(function(){ping('e=screens&r=ok')},E('screens'))},300)});"
+    "on('k',function(){Notification.requestPermission().then(function(r){var n=new Notification('새 소식',{body:'첫 줄\\n둘째 줄'});"
+    "n.onclick=function(){ping('e=nclick')};ping('e=notified&r='+r)})});"
     "on('g',function(){navigator.geolocation.getCurrentPosition(function(p){ping('e=geo&r=at'+p.coords.latitude.toFixed(3)+','+p.coords.longitude.toFixed(3))},"
     "function(e){ping('e=geo&r=err'+e.code)},{timeout:8000})});"
     "requestAnimationFrame(function(){requestAnimationFrame(function(){ping('e=ready')})});"
@@ -810,6 +812,20 @@ view down 0 0 838 152 0 1
 view up 0 0 838 152 0 1
 sleep 1500
 sheet
+mark notif-show
+view down 0 0 938 152 0 1
+view up 0 0 938 152 0 1
+sleep 1500
+mark notif-click
+notification-click
+sleep 1500
+mark notif-off
+config browser.engine = chromium ;; notifications.web = false
+menu Reload Config
+sleep 1500
+view down 0 0 938 152 0 1
+view up 0 0 938 152 0 1
+sleep 1500
 mark perm-leave
 view down 0 0 638 152 0 1
 view up 0 0 638 152 0 1
@@ -819,7 +835,7 @@ sleep 3000
 sheet
 mark end
 SCRIPT
-page_path=/perms run_app "$root/perms.txt" 80000
+page_path=/perms run_app "$root/perms.txt" 90000
 cat "$root/report"
 python3 - "$root/requests.log" "$root/report" "$root/judge.py" <<'PY' || fail "Chromium tab permission requests did not work through the maru sheet"
 import sys
@@ -894,6 +910,15 @@ leave = sheets('perm-leave')
 check(len(leave) == 2 and asks(leave[0], '창') or len(leave) == 2 and asks(leave[0], 'windows'), f'a window-management request shows a sheet ({leave[:1]})')
 check(len(leave) == 2 and leave[1].startswith('none') and not replies('perm-leave'),
       f'when the page leaves while asking, the sheet closes without an answer ({leave})')
+notes = [l for l in after('notif-show') if l.startswith('notification ')]
+check(any(e.get('r') == 'granted' for e in page('notif-show', 'notified')) and len(notes) == 1 and ' · 새 소식|첫 줄\\n둘째 줄|' in notes[0]
+      and 'http://127.0.0.1:' in notes[0].split('|')[0] and notes[0].endswith('web=true'),
+      f'a web notification from an allowed site becomes a maru notification titled with the site origin ({notes})')
+check(page('notif-click', 'nclick') and not [l for l in after('notif-click') if l == 'notification-missing'],
+      'clicking the maru notification goes to the tab and calls the page onclick')
+off = [l for l in after('notif-off') if l.startswith('notification ')]
+check(any(e.get('r') == 'granted' for e in page('notif-off', 'notified')) and not off,
+      f'with notifications.web = false the page still shows its notification but maru does not relay it ({off})')
 check(not any(l.startswith('sheet-answer-missing') for l in lines), 'every sheet the script answered was there')
 sys.exit(0 if ok else 1)
 PY

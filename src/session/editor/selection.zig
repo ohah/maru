@@ -77,10 +77,11 @@ pub const AnchorKind = enum {
 /// **L2는 이 값을 해석하지 않는다**(§3.2) — 시각 열은 뷰 폭·랩·접힘에 의존하는 L3 개념이라,
 /// 여기서는 selection과 생사를 같이하도록 들고만 있는다.
 ///
-/// **`line_end`가 별도 값인 이유**: "줄 끝에 붙어서" 세로로 움직이면 길이가 다른 줄에서도 계속 끝에
-/// 있어야 한다(VSCode `moveToEndOfLine`의 `sticky`). VSCode는 이것을 `leftoverVisibleColumns`에
-/// `MAX_SAFE_SMALL_INTEGER - maxColumn`이라는 **거대한 수**를 넣어 표현하는데, 그러면 "아주 큰 목표 열"과
-/// "줄 끝 고정"이 같은 표현이 되어 읽는 쪽이 의도를 알 수 없다. 여기서는 그 둘을 갈라 둔다.
+/// **`line_end`는 없다 — VSCode가 그 sticky를 기본으로 안 쓴다**(2026-09-26). 한때 "줄 끝에 붙어서"
+/// 세로로 움직이는 별도 값을 뒀는데, VSCode의 `End`/`⌘→`는 `args: { sticky: false }`로 묶여 **줄 끝을
+/// 따라가지 않는다**. 근거로 삼았던 `moveToEndOfLine`의 `sticky` 갈래는 **기본 키가 안 타는 쪽**이었다.
+/// 지금은 줄 끝에서도 그냥 **그 자리의 열**을 목표로 삼는다 — 짧은 줄을 지나면 잘리고, 넓은 줄에서
+/// 되돌아온다. VSCode의 `leftoverVisibleColumns = 0`과 같은 답이다.
 pub const Goal = union(enum) {
     /// 목표 열 없음. 다음 세로 이동이 현재 열에서 시작한다.
     none,
@@ -96,13 +97,11 @@ pub const Goal = union(enum) {
     /// VSCode 가 `leftoverVisibleColumns` 로 하는 일이 이것이다 — 목표는 **행 좌표에 고정**이고,
     /// 좁은 행을 지날 때 잘려도 다음 넓은 행에서 **되돌아온다**. 값이 안 변해야 그 되돌아옴이 있다.
     row_col: u32,
-    /// 줄 끝에 붙는다 — 어느 줄에서도 그 줄의 끝으로 간다.
-    line_end,
 
     pub fn eql(a: Goal, b: Goal) bool {
         if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
         return switch (a) {
-            .none, .line_end => true,
+            .none => true,
             .col => |x| x == b.col,
             .row_col => |x| x == b.row_col,
         };
@@ -513,25 +512,13 @@ test "양끝이 각자 목표 열을 갖는다 — selection 평행이동에서 
     try testing.expect(s.anchor_goal.eql(.{ .col = 3 }));
 }
 
-test "줄 끝 고정은 큰 숫자가 아니라 별도 값이다 — 의도가 읽혀야 한다" {
-    const sticky = Selection{ .anchor_start = 0, .anchor_end = 0, .focus = 5, .goal = .line_end };
-
-    try testing.expect(sticky.goal.eql(.line_end));
-    // 아주 큰 목표 열과 구별된다. 같은 표현이면 소비처가 둘을 갈라낼 수 없다.
-    try testing.expect(!sticky.goal.eql(.{ .col = std.math.maxInt(u32) }));
-}
-
-test "Goal.eql: 네 변종이 서로 구별된다" {
+test "Goal.eql: 세 변종이 서로 구별된다" {
     const none: Goal = .none;
-    const line_end: Goal = .line_end;
     const col3: Goal = .{ .col = 3 };
     const row3: Goal = .{ .row_col = 3 };
 
     try testing.expect(none.eql(.none));
-    try testing.expect(!none.eql(.line_end));
     try testing.expect(!none.eql(.{ .col = 0 }));
-    try testing.expect(line_end.eql(.line_end));
-    try testing.expect(!line_end.eql(.{ .col = 3 }));
     try testing.expect(col3.eql(.{ .col = 3 }));
     try testing.expect(!col3.eql(.{ .col = 4 }));
 
@@ -644,7 +631,7 @@ test "merge: 셋이 사슬로 이어지면 하나가 된다" {
 test "merge: 병합된 selection은 양쪽 목표 열을 버린다" {
     var items = [_]Selection{
         .{ .anchor_start = 0, .anchor_end = 0, .focus = 6, .goal = .{ .col = 3 }, .anchor_goal = .{ .col = 1 } },
-        .{ .anchor_start = 4, .anchor_end = 4, .focus = 10, .goal = .line_end, .anchor_goal = .{ .col = 2 } },
+        .{ .anchor_start = 4, .anchor_end = 4, .focus = 10, .goal = .{ .col = 9 }, .anchor_goal = .{ .col = 2 } },
     };
     _ = mergeOverlapping(&items, 0);
 
@@ -731,8 +718,8 @@ test "시각 상태 무효화는 열 원본과 goal을 함께 지운다" {
     // **같은 구조체에 있으므로 한 번에 묶인다** — 이것이 L3에 따로 두는 대비 실질 이득이다(§3.2a).
     // 뷰 폭이 바뀌면 옛 시각 행·열은 다른 위치를 가리킨다.
     var items = [_]Selection{
-        .{ .anchor_start = 0, .anchor_end = 0, .focus = 5, .goal = .{ .col = 12 }, .anchor_goal = .line_end },
-        .{ .anchor_start = 20, .anchor_end = 20, .focus = 20, .goal = .line_end },
+        .{ .anchor_start = 0, .anchor_end = 0, .focus = 5, .goal = .{ .col = 12 }, .anchor_goal = .{ .row_col = 4 } },
+        .{ .anchor_start = 20, .anchor_end = 20, .focus = 20, .goal = .{ .col = 7 } },
     };
     var sels = Selections.init(&items, 0);
     sels.column = .{ .from_row = 1, .from_col = 2, .to_row = 3, .to_col = 4 };
@@ -754,7 +741,7 @@ test "undo 복원은 열 선택 원본을 되살리지 않는다 (§3.3)" {
     // 마우스를 놓은 사용자가 여전히 열 선택 중인 화면을 본다.
     var items = [_]Selection{
         .{ .anchor_start = 0, .anchor_end = 0, .focus = 7, .goal = .{ .col = 3 } },
-        .{ .anchor_start = 30, .anchor_end = 30, .focus = 30, .goal = .line_end },
+        .{ .anchor_start = 30, .anchor_end = 30, .focus = 30, .goal = .{ .col = 7 } },
     };
     var sels = Selections.init(&items, 1);
     sels.column = .{ .from_row = 0, .from_col = 0, .to_row = 4, .to_col = 8 };
@@ -811,7 +798,7 @@ test "가로 이동은 goal을 재설정하되 열 선택 원본은 건드리지
     // 무효화(뷰 폭 변경)와 **다른 사건**이다 — 그쪽은 좌표계가 바뀌어서, 이쪽은 사용자가 열을
     // 새로 정해서다. 열 선택 드래그 중 좌우 이동은 사각형을 유지해야 한다.
     var items = [_]Selection{
-        .{ .anchor_start = 0, .anchor_end = 0, .focus = 5, .goal = .{ .col = 12 }, .anchor_goal = .line_end },
+        .{ .anchor_start = 0, .anchor_end = 0, .focus = 5, .goal = .{ .col = 12 }, .anchor_goal = .{ .row_col = 4 } },
     };
     var sels = Selections.init(&items, 0);
     sels.column = .{ .from_row = 1, .from_col = 2, .to_row = 3, .to_col = 4 };

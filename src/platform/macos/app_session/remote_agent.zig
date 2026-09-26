@@ -372,6 +372,20 @@ fn tickRemoteAgentTerms(self: *AppSession, dest: []const u8, now_ms: u64) void {
 pub fn feedRemoteAgentTerms(self: *AppSession, dest: []const u8, lines: []const []const u8, now_ms: u64) void {
     self.remote_nonce_matched = 0;
     self.remote_events_seen = 0;
+    // **미매칭 짝도 분배마다 새로 쓴다**(RF8). 안 지우면 보고가 **옛 `event=`/`term=` 옆에 이번
+    // 분배의 `mine`** 을 나란히 찍어 「글자 그대로 같은데 안 맞는다」는 모순을 만든다 — 2026-09-13 에
+    // 며칠을 잡아먹은 그 착시이고, 그때 넣은 가드(`remote_events_seen == 0`)는 입구 하나만 막았다.
+    //
+    // **남은 입구가 「봤지만 기록은 0건」이다**: `noteUnmatchedRemoteNonce` 는 스풀 이름(`t<숫자>`,
+    // §RA6 의 detached)을 **기록하지 않고 빠지므로**, 그런 이벤트만 온 분배는 `seen > 0` 인데도
+    // 짝을 하나도 안 남긴다. 그러면 옛 짝이 그대로 찍힌다(2026-09-26 실측: 원격 9 세션 중 셋이
+    // 붙은 클라이언트가 없어 이벤트가 파일 이름 그대로 나갔다).
+    //
+    // 지우면 `reportOrphanNonce` 의 `unmatched_event_nonce_len == 0` 검사가 비로소 **「이번 분배에
+    // 기록된 짝이 있나」**를 뜻하게 된다 — 그 한 줄이 두 입구를 함께 막는다.
+    self.unmatched_event_nonce_len = 0;
+    self.unmatched_term_nonce_len = 0;
+    self.unmatched_is_near = false;
     var fed: usize = 0;
     var with_nonce: usize = 0;
     // **몇이 실제로 먹을 수 있나.** `fed` 는 「분배 후보였다」일 뿐이고, 채널이 `hello` 관문을 못

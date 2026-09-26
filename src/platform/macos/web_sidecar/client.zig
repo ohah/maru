@@ -24,6 +24,7 @@ const dialogs = @import("dialogs.zig");
 const permissions = @import("permissions.zig");
 const title_gate = @import("title_gate.zig");
 const input = @import("input.zig");
+const notifications = @import("notifications.zig");
 
 var client_obj: c.cef_client_t = undefined;
 var life_span: c.cef_life_span_handler_t = undefined;
@@ -76,6 +77,8 @@ pub fn get() *c.cef_client_t {
         client_obj.get_dialog_handler = &getFileDialog;
         client_obj.get_context_menu_handler = &getContextMenu;
         client_obj.get_permission_handler = &getPermission;
+        // W5c: helper 의 알림 대리 스크립트가 보내는 프로세스 메시지.
+        client_obj.on_process_message_received = &notifications.onProcessMessageReceived;
         life_span.on_before_popup = &onBeforePopup;
         life_span.on_before_close = &onBeforeClose;
         render.get_view_rect = &getViewRect;

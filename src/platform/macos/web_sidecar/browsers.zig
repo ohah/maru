@@ -19,6 +19,7 @@ const ring_producer = @import("ring_producer.zig");
 const iosurface = @import("iosurface.zig");
 const input = @import("input.zig");
 const dialogs = @import("dialogs.zig");
+const notifications = @import("notifications.zig");
 const permissions = @import("permissions.zig");
 
 const Message = protocol.message.Message;
@@ -123,6 +124,8 @@ fn create(value: protocol.message.CreateBrowser, writer: *events.Writer) void {
     }
     // W5b2: 같은 문서에서 위치를 다시 부를 때 멈추지 않게 하는 보정 스크립트(`permissions.zig`).
     permissions.installGeolocationShim(browser);
+    // W5c: 웹 알림 대리 스크립트(Page 도메인은 바로 위가 켠다).
+    notifications.install(browser);
     writer.send(.{ .browser_created = value.browser }) catch {};
 }
 

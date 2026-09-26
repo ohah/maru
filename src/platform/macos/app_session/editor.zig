@@ -3440,13 +3440,7 @@ fn movedVisualRow(self: *AppSession, term: *Term, focus: usize, goal: *editor_se
         if (vr.line != screen_line) continue;
         if (vr.start_col <= col) here = i else break;
     }
-    var cur = here orelse return null;
-    // **`.line_end` 목표는 caret 이 늘 이음매에 선다** — 행 끝 offset 은 뒤 행의 머리와 같은 byte 라,
-    // 위 훑기가 늘 **뒤 행**을 고른다. 그대로 두면 ↓ 한 번이 두 행을 건너뛴다. 이 목표일 때만
-    // 「앞 행의 끝」으로 읽는다(`visualRowSpan` 의 `SeamSide.prev_row` 와 같은 규칙, §3.2).
-    if (goal.* == .line_end and cur > 0 and snap[cur].start_col == col and snap[cur - 1].line == screen_line) {
-        cur -= 1;
-    }
+    const cur = here orelse return null;
     const target = if (down) cur + 1 else (if (cur == 0) return null else cur - 1);
     if (target >= snap.len) return null; // 화면 밖 — 논리 줄로 떨어진다
 
@@ -3454,20 +3448,6 @@ fn movedVisualRow(self: *AppSession, term: *Term, focus: usize, goal: *editor_se
     const dest_doc_line = docLineOfVisibleRow(term, first + dest.line) orelse return null;
     const dest_line = lines.line(dest_doc_line) orelse return null;
     const dest_text = doc.file.content[dest_line.start..dest_line.contentEnd()];
-
-    // **목표가 `line_end` 면 「그 행의 끝」이다** — 주석이 처음부터 그렇게 적혀 있었는데 구현이
-    // 달랐다(2026-09-25 실측).
-    //
-    // ⚠️ **열로 표현하면 안 된다.** 예전에는 `within = maxInt(u32)` 로 두고 `offsetOf` 에 넘겼는데,
-    // 그 안에서 `@as(u64, column) * cell_px` 를 `i32` 로 좁혀 **넘친다** — `^E` 뒤 `↓`(랩 켬)가
-    // ReleaseSafe 에서 패닉, ReleaseFast 에서는 UB 였다. 「아주 큰 열」로 「줄 끝」을 흉내 내지
-    // 않는다는 §3.2 `Goal.line_end` 의 규율이 여기서도 그대로다 — **offset 을 곧바로 낸다.**
-    if (goal.* == .line_end) {
-        // 다음 조각이 **같은 화면 줄**이면 그 머리가 이 행의 끝이다. 아니면 논리 줄 끝이다.
-        if (target + 1 < snap.len and snap[target + 1].line == dest.line)
-            return dest_line.start + map.offsetOf(map.ctx, dest_text, snap[target + 1].start_col);
-        return dest_line.contentEnd();
-    }
 
     // **행 안 열**을 유지한다.
     //
@@ -3483,7 +3463,6 @@ fn movedVisualRow(self: *AppSession, term: *Term, focus: usize, goal: *editor_se
         .none => col -| snap[cur].start_col,
         .col => |c| c -| snap[cur].start_col, // 논리 축 → 행 축, **여기 한 번**
         .row_col => |v| v, // 이미 행 축이다 — 다시 빼지 않는다
-        .line_end => unreachable, // 위에서 돌려줬다
     };
     goal.* = .{ .row_col = within };
     return dest_line.start + map.offsetOf(map.ctx, dest_text, dest.start_col +| within);
@@ -3644,13 +3623,13 @@ fn movedOffset(
         .row_then_line_end => blk: {
             if (visualRowSpan(self, term, focus, .prev_row)) |row| {
                 if (editor_motion.lineEndScope(line, focus, row) == .row) {
-                    // **행 끝은 「열」이지 「줄 끝」이 아니다.** goal 을 `line_end` 로 세우면 다음
-                    // ↓ 가 줄 끝을 따라가 버려, 방금 행 끝에 선 사용자가 줄 끝으로 끌려간다.
                     goal.* = .none;
                     break :blk editor_motion.rowEnd(line, row);
                 }
             }
-            goal.* = .line_end;
+            // **줄 끝에 가도 목표를 「끝」으로 안 세운다**(VS Code `CursorEnd` 의 `sticky: false`).
+            // 세우면 다음 ↓ 가 길이가 다른 줄에서도 계속 끝을 따라가 **원래 열로 못 돌아온다**.
+            goal.* = .none;
             break :blk editor_motion.lineEnd(line);
         },
         // **짝이 없으면 제자리다**(§3.9c) — 「없다」와 「여기다」는 다른 답이고, 없는데 옮기면
@@ -3663,8 +3642,9 @@ fn movedOffset(
             break :blk brackets_client.jumpTarget(term, content, from) orelse from;
         },
         .line_end => blk: {
-            // **줄 끝은 목표를 `line_end`로 세운다** — End 뒤에 아래로 내려가면 계속 줄 끝을 따라간다.
-            goal.* = .line_end;
+            // **목표를 안 세운다** — 다음 세로 이동이 `goalAt` 으로 **그 자리의 열**을 잡는다.
+            // VS Code 의 `CursorLineEnd`(`^E`)도 `leftoverVisibleColumns` 를 0 으로 둔다.
+            goal.* = .none;
             break :blk editor_motion.lineEnd(line);
         },
         .doc_start => blk: {
@@ -5456,12 +5436,11 @@ pub fn diffSwitchSide(self: *AppSession, term: *Term) bool {
 
     var pcm = productColumnMap(term);
     const map = pcm.map();
-    // **`goalAt` 을 쓰지 않는다 — 표시 열을 그대로 잰다.** 그 함수는 줄 끝에 있으면 `.line_end` 를
-    // 주는데(어느 줄에서도 그 줄 끝으로 붙는 **세로 이동**의 성질이다), 열 넘기기에 그것을 적용하면
-    // **왕복이 깨진다**: 짝맞춤 빈 행은 열 0 이 곧 줄 끝이라 넘어갔다 돌아오면 반대 행의 **끝**에
-    // 선다(실측 — `""` → `"added"` 의 byte 5). 여기서 지켜야 하는 것은 "보이던 열"이므로 열을 직접
-    // 재고, 되돌리는 것은 `offsetForGoal` 의 `.col` 갈래 하나를 그대로 쓴다(같은 출처다).
-    const goal: maru.session.editor.selection.Goal = .{ .col = map.columnOf(map.ctx, src[row], byte) };
+    // **`goalAt` 하나를 그대로 쓴다.** 예전에는 여기서 열을 직접 재야 했다 — 그 함수가 줄 끝에서
+    // `.line_end` 를 돌려줬고, 짝맞춤 빈 행은 열 0 이 곧 줄 끝이라 **넘어갔다 돌아오면 반대 행의
+    // 끝**에 섰다(실측 — `""` → `"added"` 의 byte 5). `line_end` 를 없애면서 그 함정도 사라져,
+    // 이제 세로 이동과 **같은 출처**를 쓴다(`goalAt` → `offsetForGoal`).
+    const goal = editor_motion.goalAt(src[row], rowLine(src[row]), byte, map);
     const landed = editor_motion.offsetForGoal(dst[row], rowLine(dst[row]), goal, map);
 
     // **짝맞춤 빈 행으로도 간다** — 그 행은 화면에 실제로 그려져 있다. 거절하면 «어떤 행에서는 키가
@@ -31427,27 +31406,28 @@ test "EDIT7 뷰포트 위에서 줄이 늘어도 화면은 제자리다 — 스�
     try testing.expectEqualStrings(top_text, after_text);
 }
 
-test "MOV14 줄 끝 목표로 내려가면 «그 행의 끝» 이다 — 큰 열로 흉내 내면 넘친다 (§3.2)" {
-    // **두 결함이 한 자리에 있었다**(2026-09-25 실측).
+test "MOV14 `^E` 뒤 세로 이동은 «그 열» 을 지킨다 — 줄 끝에 안 붙는다 (§3.2)" {
+    // **VS Code 의 `End`/`⌘→` 는 `args: { sticky: false }` 다**(2026-09-26).
     //
-    // ⑴ **넘침**: `Goal.line_end` 를 `within = maxInt(u32)` 로 흉내 내 `offsetOf` 에 넘겼는데, 그
-    //    안에서 `@as(u64, column) * cell_px` 를 `i32` 로 좁혀 **넘친다**. `^E` 뒤 `↓`(랩 켬)가
-    //    ReleaseSafe 에서 **패닉**이고 ReleaseFast 에서는 UB 였다 — 사용자 키 경로에서 닿는다.
-    // ⑵ **뜻**: 주석은 「그 행의 끝」이라 적혀 있는데 `dest_text` 가 논리 줄 전체라 실제로는
-    //    **논리 줄 끝**에 착지했다. 랩된 줄에서 ↓ 한 번이 화면에서 서너 행을 건너뛴다.
+    // 예전에는 줄 끝에 가면 목표를 `Goal.line_end` 로 세워 **어느 줄에서도 그 줄 끝**으로 갔다.
+    // 그러면 짧은 줄을 한 번 지난 뒤 **원래 열로 못 돌아온다** — 사용자가 10열에서 내려갔는데
+    // 2열짜리 줄을 지나자 그다음 긴 줄에서도 끝에 서 있다.
     //
-    // §3.2 가 「"줄 끝에 붙는" 이동은 아주 큰 목표 열로 표현하지 않는다」고 못박은 그 규율이
-    // 여기서도 그대로다 — **offset 을 곧바로 낸다.**
+    // 그 값은 **덤으로 넘침까지 데리고 있었다**: 「줄 끝」을 `within = maxInt(u32)` 로 흉내 내
+    // `offsetOf` 에 넘겼고, 그 안에서 `@as(u64, column) * cell_px` 를 `i32` 로 좁혀 **넘쳤다**
+    // (`^E` 뒤 `↓`(랩 켬)가 ReleaseSafe 에서 패닉, ReleaseFast 에서 UB — 2026-09-25).
+    // 값을 없애면 그 자리가 **구조적으로 사라진다** — 아래 ③ 이 그 키 조합을 그대로 누른다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var fx = try PaneFixture.init(allocator);
     defer fx.deinit(allocator);
 
+    // 긴 줄(랩) · 아주 짧은 줄 · 다시 긴 줄. 가운데가 **잘림**을 만들고 마지막이 **되돌아옴**을 잰다.
     var src: std.ArrayList(u8) = .empty;
     defer src.deinit(allocator);
-    try src.appendSlice(allocator, "ab\n"); // 짧은 줄 — 한 행
-    for (0..300) |i| try src.append(allocator, @intCast('a' + (i % 26)));
-    try src.appendSlice(allocator, "\nzz\n"); // 셋째 줄 — 「마지막 행에서 한 번 더」를 볼 자리
+    try src.appendSlice(allocator, "0123456789\n"); // 줄 0 — 열 10 에서 출발
+    try src.appendSlice(allocator, "ab\n"); // 줄 1 — 2열까지밖에 없다
+    try src.appendSlice(allocator, "abcdefghijklmno\n"); // 줄 2 — 되돌아올 자리
     const term = try undoFixture(&fx, allocator, "mov14.txt", src.items);
 
     term.rt.editor_wrap = true;
@@ -31460,78 +31440,35 @@ test "MOV14 줄 끝 목표로 내려가면 «그 행의 끝» 이다 — 큰 열
     const l0 = lines.line(0).?;
     const l1 = lines.line(1).?;
     const l2 = lines.line(2).?;
-    var pcm = productColumnMap(term);
-    const map = pcm.map();
-    const t1 = term.rt.editor_doc.?.file.content[l1.start..l1.contentEnd()];
 
-    // 줄 1 의 조각 머리들 — 다음 조각의 머리가 곧 **앞 행의 끝**이다.
-    var heads: [32]u32 = undefined;
-    var n: usize = 0;
-    for (term.rt.editor_hit_rows[0..term.rt.editor_hit_rows_len]) |vr| {
-        if (vr.line != 1) continue;
-        if (n == heads.len) return error.TooManyPieces; // 잘리면 마지막 행을 못 짚는다
-        heads[n] = vr.start_col;
-        n += 1;
-    }
-    try testing.expect(n >= 3); // 실제로 여러 행으로 접혔다
-    // **줄 셋이 다 보인다** — 아래 왕복이 스크롤을 안 타야 스냅숏이 안 낡는다.
-    try testing.expectEqual(@as(usize, 0), term.rt.editor_first_line);
-    const row0_end = l1.start + map.offsetOf(map.ctx, t1, heads[1]);
-    const row1_end = l1.start + map.offsetOf(map.ctx, t1, heads[2]);
-    try testing.expect(row0_end < row1_end and row1_end < l1.contentEnd());
-
-    // `^E` — 짧은 줄의 끝으로 가고 목표가 `line_end` 가 된다.
+    // ① `^E` — 줄 끝으로 가고 **목표는 안 세운다**. 세우면 아래 ③ 이 끝을 따라간다.
     try pressKey(&fx, .{ .char = 'e' }, .{ .control = true });
     try testing.expectEqual(l0.contentEnd(), term.rt.editor_selection.?.focus);
-    try testing.expectEqual(editor_selection.Goal.line_end, term.rt.editor_selection.?.goal);
+    try testing.expectEqual(editor_selection.Goal.none, term.rt.editor_selection.?.goal);
 
-    // ↓ — **그 행의 끝**이다. 예전에는 여기서 패닉이었고, 안 죽었다면 논리 줄 끝으로 튀었다.
+    // ② ↓ — 짧은 줄에서는 **잘린다**. 여기까지는 옛 동작과 같은 답이라 이것만으로는 못 가린다.
     try pressKey(&fx, .arrow_down, .{});
-    try testing.expectEqual(row0_end, term.rt.editor_selection.?.focus);
-    try testing.expect(term.rt.editor_selection.?.focus != l1.contentEnd());
-
-    // ↓ 한 번 더 — **한 행씩** 간다. 이음매를 「뒤 행 머리」로 읽으면 여기서 한 행을 건너뛴다.
-    try pressKey(&fx, .arrow_down, .{});
-    try testing.expectEqual(row1_end, term.rt.editor_selection.?.focus);
-
-    // ②' **↑ 도 이음매를 「앞 행의 끝」으로 읽어야 한다** — 적대적 3회차가 연 자리다.
-    //
-    // 이음매는 **중간 행의 끝**에만 생긴다(= 다음 행의 머리와 같은 byte). 줄 끝은 마지막 행의
-    // 머리보다 뒤라 이음매가 아니므로, 아래 ④ 의 `↑` 둘은 이 자리를 **한 번도 안 지난다** —
-    // 그래서 「물러남을 ↓ 일 때만」 하는 변이가 살아남았다. 그 변이의 실제 증상은 **죽은 키**다:
-    // 물러나지 않으면 `target = cur - 1` 이 **지금 그 행**을 가리켜 커서가 제자리에 붙는다.
-    try pressKey(&fx, .arrow_up, .{});
-    try testing.expectEqual(row0_end, term.rt.editor_selection.?.focus);
-    try pressKey(&fx, .arrow_down, .{}); // 제자리로 — 아래 ③ 이 이어서 센다
-    try testing.expectEqual(row1_end, term.rt.editor_selection.?.focus);
-
-    // ③ **줄의 마지막 행까지** 내려가면 그때가 줄 끝이다.
-    //
-    // 적대적 2회차가 연 자리다 — 여기를 한 번도 안 밟아 변이 둘이 살아남았다: 「다음 조각이 같은
-    // 화면 줄인가」 가드를 지워도(다른 줄의 조각 머리를 써도), 마지막 행의 착지를 **줄 머리**로
-    // 바꿔도 아무 판정자가 안 깨졌다.
-    var guard: usize = 0;
-    while (term.rt.editor_selection.?.focus != l1.contentEnd()) {
-        guard += 1;
-        if (guard > n + 2) return error.NeverReachedLineEnd; // 행 수보다 더 눌렀다 — 한 행씩이 아니다
-        try pressKey(&fx, .arrow_down, .{});
-    }
     try testing.expectEqual(l1.contentEnd(), term.rt.editor_selection.?.focus);
 
-    // 마지막 행에서 한 번 더 → **다음 줄**의 끝(목표가 `line_end` 라 따라간다).
+    // ③ ↓ — **되돌아온다.** 옛 `line_end` 였다면 줄 2 의 **끝**(15열)에 섰다.
     try pressKey(&fx, .arrow_down, .{});
-    try testing.expectEqual(l2.contentEnd(), term.rt.editor_selection.?.focus);
+    try testing.expectEqual(l2.start + 10, term.rt.editor_selection.?.focus);
+    try testing.expect(term.rt.editor_selection.?.focus != l2.contentEnd());
 
-    // ④ **↑ 도 같은 규칙이다.** 적대적 2회차: 이음매 물러남을 `down` 일 때만 하게 바꿔도 아무도
-    //    안 깨졌다 — 이 판정자가 `↓` 만 눌렀기 때문이다.
+    // ④ ↑ 도 같다 — 짧은 줄을 거슬러 올라도 열 10 으로 돌아온다.
     try pressKey(&fx, .arrow_up, .{});
     try testing.expectEqual(l1.contentEnd(), term.rt.editor_selection.?.focus);
-
-    // 한 번 더 ↑ — **한 행씩** 올라간다. 마지막 행의 머리가 곧 그 앞 행의 끝이다.
-    const prev_row_end = l1.start + map.offsetOf(map.ctx, t1, heads[n - 1]);
-    try testing.expect(prev_row_end < l1.contentEnd());
     try pressKey(&fx, .arrow_up, .{});
-    try testing.expectEqual(prev_row_end, term.rt.editor_selection.?.focus);
+    try testing.expectEqual(l0.start + 10, term.rt.editor_selection.?.focus);
+
+    // ⑤ **`⌘→` 도 같다** — `^E` 만 고치고 `⌘→` 의 「줄」 단계를 두면 한쪽만 sticky 로 남는다.
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    try pressKey(&fx, .arrow_right, .{ .command = true });
+    try testing.expectEqual(l0.contentEnd(), term.rt.editor_selection.?.focus);
+    try testing.expectEqual(editor_selection.Goal.none, term.rt.editor_selection.?.goal);
+    try pressKey(&fx, .arrow_down, .{});
+    try pressKey(&fx, .arrow_down, .{});
+    try testing.expectEqual(l2.start + 10, term.rt.editor_selection.?.focus);
 }
 
 test "MOV15 랩된 줄에서 ↓ 를 거듭 눌러도 목표 열이 유지되고, 좁은 행을 지나면 되돌아온다 (§3.2)" {
@@ -31772,7 +31709,9 @@ test "MOV13 ⌘→ 는 행 끝 → 줄 끝으로 넓어지고, ^A·^E 는 언제
     // 「뒤 행의 머리」로 읽으면 행에서 행으로 한 칸씩 걸어가 줄 끝에 영영 못 간다.
     try pressKey(&fx, .arrow_right, .{ .command = true });
     try testing.expectEqual(end0, term.rt.editor_selection.?.focus);
-    try testing.expectEqual(editor_selection.Goal.line_end, term.rt.editor_selection.?.goal);
+    // **줄 끝에 가도 목표는 안 선다**(VS Code `CursorEnd` 의 `sticky: false`) — 세우면 다음 ↓ 가
+    // 길이가 다른 줄에서도 끝을 따라간다. 그 성질은 `MOV14` 가 전담해 잰다.
+    try testing.expectEqual(editor_selection.Goal.none, term.rt.editor_selection.?.goal);
 
     // ③ **`^A` 는 토글 없이 줄 머리**다 — 랩이 켜져 있어도 행에서 안 멈춘다.
     term.rt.editor_selection = editor_selection.Selection.at(row1 + 5);

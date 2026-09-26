@@ -185,8 +185,9 @@ fn firstNonBlank(bytes: []const u8, start: usize, end: usize) usize {
 
 /// 목표 열을 들고 다른 줄로 옮긴 자리.
 ///
-/// **목표가 `line_end`면 어느 줄에서도 그 줄 끝**이다 — End를 누르고 아래로 내려가면 계속 줄
-/// 끝을 따라가는 것이 자연스럽다(`Goal.line_end`가 그 자리를 위해 있다).
+/// **줄 끝을 따라다니는 갈래는 없다**(2026-09-26). 한때 `Goal.line_end`가 "어느 줄에서도 그 줄
+/// 끝"을 뜻했는데, VSCode의 `End`/`⌘→`는 `args: { sticky: false }`라 **그렇게 안 한다**. 줄 끝에서
+/// 시작해도 목표는 **그 자리의 열**이고, 짧은 줄에서 잘렸다가 넓은 줄에서 되돌아온다.
 pub fn offsetForGoal(
     bytes: []const u8,
     line: line_index.Line,
@@ -195,7 +196,6 @@ pub fn offsetForGoal(
 ) usize {
     const text = bytes[line.start..line.contentEnd()];
     return switch (goal) {
-        .line_end => line.contentEnd(),
         // **목표가 없으면 줄 머리다.** 제품 경로는 여기 오기 전에 목표를 세우므로(`goalAt`) 지금은
         // 닿지 않지만, 공개 함수라 다른 호출자가 생기면 닿는다 — 답을 정해 두지 않으면 그때
         // "아무 자리"가 된다. 0열이 유일하게 **어느 줄에서도 존재하는** 자리다.
@@ -210,9 +210,21 @@ pub fn offsetForGoal(
 }
 
 /// 지금 자리의 목표 열. 세로 이동을 시작할 때 호출자가 이것을 selection에 저장한다.
+///
+/// **줄 끝도 그냥 "그 자리의 열"이다**(2026-09-26). 예전에는 여기서 `Goal.line_end`를 돌려줘
+/// "어느 줄에서도 끝에 붙는" 이동이 됐는데, **VSCode는 그렇게 안 한다** — `CursorEnd`가
+/// `args: { sticky: false }`로 묶여 있어 `leftoverVisibleColumns`가 0이고, 그 뒤의 세로 이동은
+/// **그때 있던 열**을 향한다. 짧은 줄에서 잘렸다가 넓은 줄에서 되돌아오는 것이 그 결과다.
 pub fn goalAt(bytes: []const u8, line: line_index.Line, offset: usize, map: ColumnMap) selection.Goal {
-    if (offset >= line.contentEnd()) return .line_end;
     const text = bytes[line.start..line.contentEnd()];
+    // **줄 끝을 넘겼으면 글자 수 만큼의 열**이다. `offset - line.start`로 그냥 재면 개행 뒤까지
+    // 세어 줄 밖 열이 나온다 — `movedVisualRow`가 같은 자리에서 쓰는 잣대와 하나로 맞춘다.
+    //
+    // **이 갈래를 `@min(offset -| line.start, text.len)` 한 줄로 접어도 답은 같다**(적대적 검증
+    // N5 — 변이가 살아남았고 그것이 정답이다). 그런데도 갈라 두는 이유는 **읽는 사람**이다:
+    // 접으면 "offset이 줄 끝을 넘을 수 있다"는 사실이 `@min` 안에 숨는다. 정답 문제가 아니라
+    // 가독성 문제이므로, 판정자를 더 세우지 않고 여기 적어 둔다.
+    if (offset >= line.contentEnd()) return .{ .col = map.columnOf(map.ctx, text, text.len) };
     return .{ .col = map.columnOf(map.ctx, text, offset - line.start) };
 }
 
@@ -418,21 +430,28 @@ test "MOT4: 세로 이동이 목표 열을 지킨다 — 짧은 줄을 지나도
     try testing.expectEqual(long.start + 7, offsetForGoal(s, long, goal, map));
 }
 
-test "MOT5: 목표가 line_end면 어느 줄에서도 줄 끝을 따라간다" {
-    const s = "0123456789\nab\n\n";
+test "MOT5: 줄 끝에서 세로로 가도 «그 열»이다 — 끝에 안 붙는다 (§3.2)" {
+    // **VSCode의 `End`/`⌘→`는 `args: { sticky: false }`다.** 예전에는 여기서 `Goal.line_end`를
+    // 내 "어느 줄에서도 그 줄 끝"이 됐는데, 그러면 짧은 줄을 한 번 지난 뒤 **원래 열로 못 돌아온다**
+    // — 긴 줄 끝(10열)에서 짧은 줄(2열)을 거쳐 다시 긴 줄로 가면 사용자는 10열을 기대한다.
+    const s = "0123456789\nab\n0123456789\n";
     var idx = try line_index.build(testing.allocator, s);
     defer idx.deinit();
     const sm = SimpleMap{ .tab_width = 4 };
     const map = sm.map();
 
-    // 줄 끝에서 시작하면 목표가 `line_end`다.
     const first = idx.line(0).?;
-    try testing.expectEqual(selection.Goal.line_end, goalAt(s, first, first.contentEnd(), map));
+    const goal = goalAt(s, first, first.contentEnd(), map);
+    // 줄 끝이어도 **열**이다. 별도 값이 아니다.
+    try testing.expectEqual(selection.Goal{ .col = 10 }, goal);
 
-    for ([_]usize{ 1, 2 }) |i| {
-        const line = idx.line(i).?;
-        try testing.expectEqual(line.contentEnd(), offsetForGoal(s, line, .line_end, map));
-    }
+    // 짧은 줄에서는 **잘린다** — 없는 열에 설 수는 없다.
+    const short = idx.line(1).?;
+    try testing.expectEqual(short.contentEnd(), offsetForGoal(s, short, goal, map));
+
+    // 그리고 **되돌아온다.** `line_end`였다면 여기서도 그냥 줄 끝이라 둘을 구별 못 한다.
+    const third = idx.line(2).?;
+    try testing.expectEqual(third.start + 10, offsetForGoal(s, third, goal, map));
 }
 
 test "MOT9: ⌘← 는 행 첫 글자 → 줄 첫 글자 → 줄 머리로 넓어진다 (§3.2)" {

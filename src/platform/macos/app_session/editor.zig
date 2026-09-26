@@ -3223,7 +3223,7 @@ pub fn clearExtraSelections(self: *AppSession, term: *Term) void {
 ///
 /// **할당이 실패하면 안 합치고 만다.** 이동은 이미 섰으므로 여기서 되돌리면 사용자가 누른 키가
 /// 통째로 씹힌다 — 중복 커서가 남는 것이 덜 나쁘다(다음 이동에서 다시 시도한다).
-fn mergeCarets(self: *AppSession, term: *Term) void {
+pub fn mergeCarets(self: *AppSession, term: *Term) void {
     const extras = term.rt.editor_extra_selections;
     if (extras.len == 0) return;
     const primary = term.rt.editor_selection orelse return;
@@ -4382,10 +4382,16 @@ fn preeditLines(self: *AppSession, term: *Term, base: []const []const u8) ?[][]c
     const off = at - line.start;
     if (off > text.len) return null;
 
-    const spliced = self.allocator.alloc(u8, text.len + term.rt.editor_preedit.len) catch return null;
+    // A reconversion/selection preedit visually replaces the selected text on
+    // this line while the canonical document remains untouched until commit.
+    const selection_end = if (term.rt.editor_selection) |sel|
+        if (sel.start() == at and sel.end() <= line.contentEnd()) sel.end() - line.start else off
+    else
+        off;
+    const spliced = self.allocator.alloc(u8, text.len - (selection_end - off) + term.rt.editor_preedit.len) catch return null;
     @memcpy(spliced[0..off], text[0..off]);
     @memcpy(spliced[off..][0..term.rt.editor_preedit.len], term.rt.editor_preedit);
-    @memcpy(spliced[off + term.rt.editor_preedit.len ..], text[off..]);
+    @memcpy(spliced[off + term.rt.editor_preedit.len ..], text[selection_end..]);
 
     const rows = self.allocator.alloc([]const u8, base.len) catch {
         self.allocator.free(spliced);

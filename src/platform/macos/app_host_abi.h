@@ -9,7 +9,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 188u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 189u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -1031,6 +1031,28 @@ int32_t maru_macos_app_session_ime_marked(
     MaruAppHostSession *session,
     const uint8_t *bytes,
     size_t len
+);
+/* v189: 편집기 문서의 primary 선택과 조합 시작점(UTF-16). 편집기 이외의 입력 owner면 오류. */
+int32_t maru_macos_app_session_ime_editor_ranges(
+    MaruAppHostSession *session,
+    size_t *out_selected_start,
+    size_t *out_selected_len,
+    size_t *out_marked_start
+);
+/* NSNotFound는 Swift가 걸러 낸다. UTF-16 범위가 유효한 편집기면 primary 선택을 갱신한다. */
+int32_t maru_macos_app_session_ime_editor_replacement(
+    MaruAppHostSession *session,
+    size_t location,
+    size_t length
+);
+/* 기존 문서 문맥을 UTF-16 범위로 읽는다. cap=0이면 필요한 UTF-8 byte 수만 돌린다. */
+int32_t maru_macos_app_session_ime_editor_substring(
+    MaruAppHostSession *session,
+    size_t location,
+    size_t length,
+    uint8_t *out_bytes,
+    size_t cap,
+    size_t *out_len
 );
 int32_t maru_macos_app_session_ime_end(
     MaruAppHostSession *session,

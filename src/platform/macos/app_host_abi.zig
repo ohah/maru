@@ -172,8 +172,8 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
     try std.testing.expectEqualStrings("maru build: mtime=unknown pid=42", buildIdentityLine(&buf, null, 42));
 }
 
-test "ABI v185 notification release end-all and cold route values match the C header" {
-    try std.testing.expectEqual(@as(u32, 188), abi_version);
+test "ABI v189 editor IME document range exports match the C header" {
+    try std.testing.expectEqual(@as(u32, 189), abi_version);
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @intFromEnum(AppInstanceLeaseResult.acquired));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_HELD), @intFromEnum(AppInstanceLeaseResult.held));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_UNSAFE), @intFromEnum(AppInstanceLeaseResult.unsafe));
@@ -1959,6 +1959,54 @@ pub export fn maru_macos_app_session_ime_marked(
     const app_session = session orelse return @intFromEnum(Status.null_out);
     const slice: []const u8 = if (bytes) |ptr| ptr[0..len] else &.{};
     app_session.imeMarked(slice);
+    return @intFromEnum(Status.ok);
+}
+
+pub export fn maru_macos_app_session_ime_editor_ranges(
+    session: ?*AppSession,
+    out_selected_start: ?*usize,
+    out_selected_len: ?*usize,
+    out_marked_start: ?*usize,
+) c_int {
+    const app_session = session orelse return @intFromEnum(Status.null_out);
+    const start = out_selected_start orelse return @intFromEnum(Status.null_out);
+    const len = out_selected_len orelse return @intFromEnum(Status.null_out);
+    const mark = out_marked_start orelse return @intFromEnum(Status.null_out);
+    const ranges = session_mod.input_ops.editorImeRanges(app_session) orelse return @intFromEnum(Status.invalid_config);
+    start.* = ranges.selected_start;
+    len.* = ranges.selected_len;
+    mark.* = ranges.marked_start;
+    return @intFromEnum(Status.ok);
+}
+
+pub export fn maru_macos_app_session_ime_editor_replacement(
+    session: ?*AppSession,
+    location: usize,
+    length: usize,
+) c_int {
+    const app_session = session orelse return @intFromEnum(Status.null_out);
+    return if (session_mod.input_ops.editorImeReplacement(app_session, location, length))
+        @intFromEnum(Status.ok)
+    else
+        @intFromEnum(Status.invalid_config);
+}
+
+pub export fn maru_macos_app_session_ime_editor_substring(
+    session: ?*AppSession,
+    location: usize,
+    length: usize,
+    out_bytes: ?[*]u8,
+    cap: usize,
+    out_len: ?*usize,
+) c_int {
+    const app_session = session orelse return @intFromEnum(Status.null_out);
+    const size = out_len orelse return @intFromEnum(Status.null_out);
+    const bytes = session_mod.input_ops.editorImeSubstring(app_session, location, length) orelse return @intFromEnum(Status.invalid_config);
+    size.* = bytes.len;
+    if (cap == 0) return @intFromEnum(Status.ok);
+    const ptr = out_bytes orelse return @intFromEnum(Status.null_out);
+    if (cap < bytes.len) return @intFromEnum(Status.invalid_config);
+    @memcpy(ptr[0..bytes.len], bytes);
     return @intFromEnum(Status.ok);
 }
 

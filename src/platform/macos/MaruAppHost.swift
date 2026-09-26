@@ -229,6 +229,9 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     // 조합 중(marked) 텍스트 — NSTextInputClient 프로토콜 응답(hasMarkedText/markedRange)용.
     // 표시·판정 상태의 단일 출처는 Zig(Surface.preedit + IME 트랜잭션)다.
     private var markedTextBuffer: String = ""
+    private var markedSelection = NSRange(location: 0, length: 0)
+    private var interpretingIMEKey = false
+    private var pendingUnmarkText: String?
     // CR6d의 명시적 test-only 후보 문맥 PoC. 일반 터미널은 편집 문서를 소유하지 않으므로 nil이고,
     // probe의 Option-Return transaction만 원문을 PTY 대신 여기에 잠시 둔다.
     private var sessionHostCandidateDocumentContext: String?
@@ -281,8 +284,10 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     func commitMarkedTextIfComposing() {
         guard hasMarkedText() else { return }
         controller?.imeCommit()            // Surface preedit 커밋(조합 글자 PTY로)
-        inputContext?.discardMarkedText()  // AppKit 입력기의 marked 상태 정리(콜백 없이)
         markedTextBuffer = ""               // hasMarkedText() = false 로 동기화
+        markedSelection = NSRange(location: 0, length: 0)
+        pendingUnmarkText = nil
+        inputContext?.discardMarkedText()  // AppKit 입력기의 marked 상태 정리
     }
 
     // 세팅 등 오버레이/keybind 녹음 중이면 메뉴바 keyEquivalent(⌘T 등)를 가로채지 않고 keyDown 경로로 보낸다 —
@@ -376,7 +381,16 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
         // Swift에는 IME 분기 로직이 없다 — 입력기의 비동기/다중 콜백에서도 이중 전송이
         // 구조적으로 불가능하고, 판정 규칙은 Zig unit으로 고정된다.
         controller?.imeKeyTransaction(event, suppressUnconsumedKey: suppressCandidateProbeKey) {
+            self.interpretingIMEKey = true
+            defer { self.interpretingIMEKey = false }
             self.interpretKeyEvents([event])
+            // AppKit may finish a composition with unmarkText alone. The
+            // protocol requires accepting that text; insertText wins if both
+            // callbacks arrive in the same key transaction.
+            if let pending = self.pendingUnmarkText {
+                self.pendingUnmarkText = nil
+                self.controller?.imeInsert(pending)
+            }
         }
     }
 
@@ -398,7 +412,12 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
 
     // 입력기가 텍스트를 확정했다(한글 음절, 영문 일반 타이핑 모두 여기로 온다).
     func insertText(_ string: Any, replacementRange: NSRange) {
+        pendingUnmarkText = nil
+        if replacementRange.location != NSNotFound {
+            controller?.imeEditorReplacement(replacementRange)
+        }
         markedTextBuffer = ""
+        markedSelection = NSRange(location: 0, length: 0)
         let text = (string as? String) ?? (string as? NSAttributedString)?.string ?? ""
         imeLog("insertText", text)
         controller?.imeMarked("") // 조합 표시 제거(전송 판정은 Zig ime_end가)
@@ -414,7 +433,11 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
 
     // 조합 중 텍스트(예: 'ㅇ' -> '아' -> '안'). 표시는 Zig가 커서 위치에 합성한다.
     func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        if replacementRange.location != NSNotFound {
+            controller?.imeEditorReplacement(replacementRange)
+        }
         markedTextBuffer = (string as? String) ?? (string as? NSAttributedString)?.string ?? ""
+        markedSelection = selectedRange
         imeLog("setMarkedText", markedTextBuffer)
         controller?.imeMarked(markedTextBuffer)
         controller?.recordSessionHostInputSmokeMarked()
@@ -422,8 +445,27 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
 
     func unmarkText() {
         imeLog("unmarkText")
+        let committed = markedTextBuffer
+        if sessionHostCandidateDocumentContext != nil {
+            if !committed.isEmpty { sessionHostCandidateDocumentContext = committed }
+            markedTextBuffer = ""
+            markedSelection = NSRange(location: 0, length: 0)
+            controller?.imeMarked("")
+            return
+        }
+        if !committed.isEmpty, !interpretingIMEKey {
+            // Outside keyDown the Zig pin is released by imeMarked(""); commit
+            // while it still identifies the surface that started composition.
+            controller?.imeInsert(committed)
+        }
         markedTextBuffer = ""
+        markedSelection = NSRange(location: 0, length: 0)
         controller?.imeMarked("")
+        if !committed.isEmpty {
+            if interpretingIMEKey {
+                pendingUnmarkText = committed
+            }
+        }
     }
 
     // 포커스 변화는 Zig에 전달만 한다 — 조합 중 텍스트의 확정(커밋)은 Zig setFocused가 소유
@@ -431,6 +473,8 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     // 상태와 화면이 어긋나지 않게).
     func commitComposition() {
         markedTextBuffer = ""
+        markedSelection = NSRange(location: 0, length: 0)
+        pendingUnmarkText = nil
         controller?.imeFocus(false)
         inputContext?.discardMarkedText()
     }
@@ -483,9 +527,17 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     // 마지막 자모에서 Backspace가 자모 삭제 대신 확정(insertText)으로 처리돼 삭제에 키가 한 번
     // 더 들었다(라이브: 가ㄴ -> BS -> 가ㄴ -> BS -> 가).
     func markedRange() -> NSRange {
-        let r = markedTextBuffer.isEmpty
-            ? NSRange()
-            : NSRange(location: 0, length: markedTextBuffer.utf16.count)
+        let r: NSRange
+        if let editor = controller?.imeEditorRanges() {
+            r = markedTextBuffer.isEmpty
+                ? NSRange(location: NSNotFound, length: 0)
+                : NSRange(location: editor.markedStart, length: markedTextBuffer.utf16.count)
+        } else {
+            // Terminal keeps its established zero-based marked-range behavior.
+            r = markedTextBuffer.isEmpty
+                ? NSRange()
+                : NSRange(location: 0, length: markedTextBuffer.utf16.count)
+        }
         imeLog("? markedRange -> loc=\(r.location) len=\(r.length)")
         return r
     }
@@ -493,6 +545,15 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     func selectedRange() -> NSRange {
         if let context = sessionHostCandidateDocumentContext {
             return NSRange(location: context.utf16.count, length: 0)
+        }
+        if let editor = controller?.imeEditorRanges() {
+            if !markedTextBuffer.isEmpty {
+                let count = markedTextBuffer.utf16.count
+                let offset = min(markedSelection.location, count)
+                return NSRange(location: editor.markedStart + offset,
+                               length: min(markedSelection.length, count - offset))
+            }
+            return NSRange(location: editor.selectedStart, length: editor.selectedLength)
         }
         imeLog("? selectedRange -> (빈 NSRange — 터미널 구현)")
         return NSRange()
@@ -503,6 +564,21 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
             let full = NSRange(location: 0, length: context.utf16.count)
             actualRange?.pointee = full
             return NSAttributedString(string: context)
+        }
+        if let editor = controller?.imeEditorRanges() {
+            if !markedTextBuffer.isEmpty, range.location >= editor.markedStart {
+                let relative = range.location - editor.markedStart
+                let count = markedTextBuffer.utf16.count
+                if relative <= count, range.length <= count - relative {
+                    actualRange?.pointee = range
+                    return NSAttributedString(string: (markedTextBuffer as NSString).substring(
+                        with: NSRange(location: relative, length: range.length)))
+                }
+            }
+            if let text = controller?.imeEditorSubstring(range) {
+                actualRange?.pointee = range
+                return NSAttributedString(string: text)
+            }
         }
         imeLog("? attributedSubstring loc=\(range.location) len=\(range.length) -> nil")
         return nil
@@ -12130,6 +12206,38 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             maru_macos_app_session_ime_marked(session, buf.baseAddress, buf.count)
         }
         requestInputVisualTick()
+    }
+
+    func imeEditorRanges() -> (selectedStart: Int, selectedLength: Int, markedStart: Int)? {
+        guard let session = appSession else { return nil }
+        var selectedStart = 0
+        var selectedLength = 0
+        var markedStart = 0
+        guard maru_macos_app_session_ime_editor_ranges(
+            session, &selectedStart, &selectedLength, &markedStart
+        ) == Self.statusOK else { return nil }
+        return (selectedStart, selectedLength, markedStart)
+    }
+
+    func imeEditorReplacement(_ range: NSRange) {
+        guard let session = appSession, range.location != NSNotFound else { return }
+        _ = maru_macos_app_session_ime_editor_replacement(session, range.location, range.length)
+    }
+
+    func imeEditorSubstring(_ range: NSRange) -> String? {
+        guard let session = appSession, range.location != NSNotFound else { return nil }
+        var count = 0
+        guard maru_macos_app_session_ime_editor_substring(
+            session, range.location, range.length, nil, 0, &count
+        ) == Self.statusOK, count <= 1_048_576 else { return nil }
+        var bytes = [UInt8](repeating: 0, count: count)
+        let status = bytes.withUnsafeMutableBufferPointer { buf in
+            maru_macos_app_session_ime_editor_substring(
+                session, range.location, range.length, buf.baseAddress, buf.count, &count
+            )
+        }
+        guard status == Self.statusOK else { return nil }
+        return String(bytes: bytes, encoding: .utf8)
     }
 
     private func requestInputVisualTick() {

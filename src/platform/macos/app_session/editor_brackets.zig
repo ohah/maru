@@ -1,6 +1,6 @@
 //! 짝 괄호 — 제품 배선(visual-mapping §5.1b · document-model §3.9c).
 //!
-//! **판정은 `session/editor/brackets.zig` 한 곳이다.** 여기는 출처를 고르고(트리가 있고 이어 파는 중이 아니면 트리, 아니면 글자 훑기) 강조의
+//! **판정은 `session/editor/brackets.zig` 한 곳이다.** 여기는 출처를 고르고(트리가 있으면 색과 같은 완성된 괄호 목록, 아니면 글자 훑기) 강조의
 //! 조건(설정·포커스·커서 수·빈 선택)을 걸고, 쌍을 **렌더 축 마크**(보이는 줄마다 줄 안 byte)로 옮긴다. 점프(`⇧⌘\`)도 같은 출처 고르기를 쓴다 —
 //! 강조가 가리키는 쌍과 점프가 가는 곳이 갈리면 안 된다.
 //!
@@ -54,23 +54,25 @@ fn treeOf(term: *Term) ?*Provider {
 }
 
 /// **괄호 짝으로 점프**(§3.9c)의 도착 byte — 강조와 같은 출처 고르기. 갈 데가 없으면 `null`(트리가 없으면 닿은 괄호뿐이다). 커서 하나다.
-pub fn jumpTarget(term: *Term, content: []const u8, pos: usize) ?usize {
-    if (treeOf(term)) |p| return brackets.jumpTarget(brackets.Tree(Provider){ .prov = p, .bytes = content }, content.len, pos);
+pub fn jumpTarget(allocator: std.mem.Allocator, term: *Term, content: []const u8, pos: usize) ?usize {
+    if (treeOf(term) != null) {
+        editor_syntax.finishBrackets(&term.rt.editor_syntax, allocator, content) catch return null;
+        const src = editor_syntax.bracketSource(&term.rt.editor_syntax) orelse return null;
+        return brackets.jumpTarget(src, content.len, pos);
+    }
     return brackets.jumpTarget(brackets.Plain{ .bytes = content }, content.len, pos);
 }
 
-/// **커서 여럿의 점프** — `positions[i]` 의 도착을 `out[i]` 에. 커서 수에 상한이 없다(VS Code 와 같다): 한 번의 점프 동안 형제 쌍 메모
-/// (`Provider.PairMemo`)를 세워 같은 부모를 다시 짝짓지 않고, 다음 여는 괄호는 한 번 걷는다. 처음엔 커서 100 개에서 닿은 괄호만 보는 선을 두었다가
-/// (커서 1 만 = 12 s 였다) 이 둘로 걷어냈다.
+/// **커서 여럿의 점프** — 수에 상한이 없다. 공통 목록을 한 번 준비하고 각 커서를 이진 탐색한다.
+/// 목록이 아직 없으면 이 명령 안에서 끝낸다. 준비 중인 목록이나 옛 트리 규칙으로 답하지 않는다.
 pub fn jumpTargets(allocator: std.mem.Allocator, term: *Term, content: []const u8, positions: []const usize, out: []?usize) error{OutOfMemory}!void {
-    if (treeOf(term)) |p| {
-        var memo = Provider.PairMemo.init(allocator);
-        p.memo = &memo;
-        defer {
-            p.memo = null;
-            memo.deinit();
-        }
-        return brackets.jumpTargets(brackets.Tree(Provider){ .prov = p, .bytes = content }, content.len, positions, out, allocator);
+    if (treeOf(term) != null) {
+        try editor_syntax.finishBrackets(&term.rt.editor_syntax, allocator, content);
+        const src = editor_syntax.bracketSource(&term.rt.editor_syntax) orelse {
+            @memset(out, null);
+            return;
+        };
+        return brackets.jumpTargets(src, content.len, positions, out, allocator);
     }
     return brackets.jumpTargets(brackets.Plain{ .bytes = content }, content.len, positions, out, allocator);
 }
@@ -111,8 +113,13 @@ pub fn marks(self: *AppSession, term: *Term) ?[]const []const Mark {
     h.update(std.mem.asBytes(&doc.file.revision));
     h.update(std.mem.asBytes(&@intFromEnum(mode)));
     const tree = treeOf(term);
+    const indexed = editor_syntax.bracketSource(&term.rt.editor_syntax);
+    // 프레임은 목록 작성을 예산으로 나눈다. 아직 완성되지 않았으면 강조를 생략한다 —
+    // 중간 목록이나 이전 판정으로 그리면 색과 강조가 서로 다른 괄호를 가리킨다.
+    if (tree != null and indexed == null) return null;
     // 트리가 오면(파싱이 끝나면) 같은 자리의 답이 바뀐다 — 글자 훑기 → 트리.
     h.update(std.mem.asBytes(&@intFromPtr(if (tree) |p| p.tree else null)));
+    h.update(std.mem.asBytes(&term.rt.editor_syntax.brackets.version));
     while (iter.next()) |sel| {
         // 빈 선택만 괄호를 본다 — 선택이 있는 커서는 자리만 표시한다(그 자리가 바뀌어도 답은 같지만, 비었다가 찬 것은 가른다).
         const tag: u8 = if (sel.isEmpty()) 1 else 0;
@@ -128,8 +135,8 @@ pub fn marks(self: *AppSession, term: *Term) ?[]const []const Mark {
         while (it.next()) |sel| {
             if (!sel.isEmpty()) continue;
             const pos = @min(sel.focus, content.len);
-            const pair = if (tree) |p|
-                brackets.forHighlight(brackets.Tree(Provider){ .prov = p, .bytes = content }, content.len, pos, mode)
+            const pair = if (indexed) |src|
+                brackets.forHighlight(src, content.len, pos, mode)
             else
                 brackets.forHighlight(brackets.Plain{ .bytes = content }, content.len, pos, mode);
             // **같은 쌍이 두 번 들어와도 여기서 거르지 않는다** — 커서 둘이 같은 괄호에 닿으면 같은 쌍이 나오는데, 겹침은 `toRows` 가 괄호
@@ -153,18 +160,22 @@ fn toRows(self: *AppSession, term: *Term, doc: editor_ops.Opened, st: *State) ?[
     if (lines_len == 0) return null;
 
     // 괄호 글자 자리를 모아 정렬·중복 제거 — 쌍이 줄 사이에서 엇갈리거나(커서 둘) 한 괄호를 두 쌍이 나눌 수 있다(`(a)|(b)` 와 `(a|)(b)`).
-    var at: [2 * max_cursors]u32 = undefined;
+    var at: [2 * max_cursors]Mark = undefined;
     var n: usize = 0;
     for (st.pairs.items) |p| {
-        at[n] = p.open;
-        at[n + 1] = p.close;
+        at[n] = .{ .start = p.open, .len = p.open_len };
+        at[n + 1] = .{ .start = p.close, .len = p.close_len };
         n += 2;
     }
     const offs = at[0..n];
-    std.mem.sort(u32, offs, {}, std.sort.asc(u32));
+    std.mem.sort(Mark, offs, {}, struct {
+        fn less(_: void, a: Mark, b: Mark) bool {
+            return a.start < b.start;
+        }
+    }.less);
     var u: usize = 0;
     for (offs) |o| {
-        if (u > 0 and offs[u - 1] == o) continue;
+        if (u > 0 and offs[u - 1].start == o.start) continue;
         offs[u] = o;
         u += 1;
     }
@@ -189,10 +200,10 @@ fn toRows(self: *AppSession, term: *Term, doc: editor_ops.Opened, st: *State) ?[
     for (0..lines_len) |i| {
         if (k >= uniq.len) break;
         const line = editor_ops.visibleDocLine(doc, numbers, visible, i) orelse continue;
-        while (k < uniq.len and uniq[k] < line.start) k += 1; // 접혀 숨은 줄의 괄호
+        while (k < uniq.len and uniq[k].start < line.start) k += 1; // 접혀 숨은 줄의 괄호
         const from = w;
-        while (k < uniq.len and uniq[k] < line.contentEnd()) : (k += 1) {
-            st.mark_buf[w] = .{ .start = uniq[k] - @as(u32, @intCast(line.start)), .len = 1 };
+        while (k < uniq.len and uniq[k].start < line.contentEnd()) : (k += 1) {
+            st.mark_buf[w] = .{ .start = uniq[k].start - @as(u32, @intCast(line.start)), .len = uniq[k].len };
             w += 1;
         }
         if (w > from) {

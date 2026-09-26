@@ -41,7 +41,8 @@ pub const Info = struct {
 /// 종류 수의 상한(독립 풀의 칸).
 pub const max_kinds: usize = 8;
 
-const none = std.math.maxInt(u32);
+/// 짝이 없는 괄호. 색·강조·점프는 이 동일한 짝 판정을 함께 읽는다.
+pub const none = std.math.maxInt(u32);
 
 /// `tokens` 의 판정을 `out` 에 쓴다(길이가 같아야 한다). `partner`·`stack` 은 호출자가 주는 작업 칸(각각 `tokens.len` 이상).
 pub fn resolve(tokens: []const Token, independent: bool, out: []Info, partner: []u32, stack: []u32) void {
@@ -152,7 +153,7 @@ fn utf16Len(line: []const u8) usize {
 }
 
 /// 깊이 가드로 글자가 된 여는 괄호의 표시(① → ②).
-const ignored = none - 1;
+pub const ignored = none - 1;
 
 // ── 판정자 ────────────────────────────────────────────────────────────────────
 

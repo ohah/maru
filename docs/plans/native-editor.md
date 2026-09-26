@@ -786,6 +786,12 @@ GPU 로 그리는 편집기의 가장 가까운 선례(VS Code 실험 GPU 렌더
 | **Split in Group**(한 Term 안에서 같은 문서를 둘로) | **예정 — 계약이 없다**(2026-09-02 사용자 결정). 목적(같은 파일 두 곳 보기)은 **pane 분할로 온전히 이뤄지고**, 이쪽이 더 주는 것은 *"탭 그룹을 안 늘린다"* 하나다. 비용은 **뷰 상태 약 35개를 둘로 + 입력 라우팅 약 50곳** 이고, **비교 뷰 기계는 재활용되지 않는다**(세로를 일부러 공유한다 — 정반대다). 선례도 Split Editor 가 먼저였고 이쪽은 나중에 붙었다. 실측은 [여러 뷰 축](native-editor-multi-view.md) §3·§4 | 새 계약 |
 | **CJK 금칙 처리·UTF-8 외 인코딩·virtual space·modal editing** | 하지 않기로 한 것들 | — |
 
+**괄호 판정 통일(2026-09-26).** 색·짝 강조·점프가 `syntax.BracketIndex`의 언어별 괄호 목록과 공통 짝 결과를 쓴다.
+`${` 전체 폭, 무색 쌍, Markdown의 기존 점프·강조(색 없음), HTML `(click)`을 보존한다. 색 설정은 탐색을 끄지 않는다.
+프레임은 목록을 2 ms씩 만들고 명시적 점프는 필요할 때 완성한다. 비용·제한·통일 전 차분 기록은
+[문서 모델 §3.9c](../native-editor-document-model.md#39c-괄호-짝으로-점프-2026-09-05)와
+[시각 매핑 §5.1b·§5.1d](../native-editor-visual-mapping.md)가 소유한다. 검증 범위는 [검증 매트릭스](../verification-matrix.md)의 괄호 판정 통일 행을 본다.
+
 **선행으로 끌어올린 셋**: 문서 내 검색, 괄호/주석 토글, 스크롤바 검색 마커 → 전부 **N2**로 옮겼다(위 N2 항목). 근거는 "VSCode 사용자 무회귀"가 §1.1의 확정 기준이고, 이 셋은 LSP를 기다릴 필요가 없기 때문이다.
 
 **chrome 이관(CIM)과의 관계 — 선행 조건이 아니다.** [chrome-interaction-migration.md](../chrome-interaction-migration.md)의

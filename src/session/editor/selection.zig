@@ -231,14 +231,31 @@ pub const Selection = struct {
         return self.focus < self.fixedEnd();
     }
 
-    /// 두 selection이 겹치거나 맞닿는가. **맞닿는 것도 겹침으로 본다** — `[0,5)`와 `[5,9)`를 그대로
-    /// 두면 그 경계에 두 caret이 남아 같은 자리에 두 번 삽입된다.
+    /// 두 selection을 **합쳐야 하는가**. 겹치면 언제나 합치고, **맞닿기만 한 것은 한쪽이 「점」일
+    /// 때만** 합친다.
+    ///
+    /// **점(길이 0 caret)이 끼면 맞닿음도 합친다** — `[0,5)`와 `[5,5)`를 그대로 두면 5에 caret이
+    /// 둘 남아 같은 자리에 **두 번 삽입**된다.
+    ///
+    /// **둘 다 범위면 맞닿음은 합치지 않는다**(2026-09-26 정정). `[0,5)`와 `[5,9)`는 caret이 5와
+    /// 9로 **서로 다른 자리**라 중복 삽입이 안 생긴다. 그런데도 합치면 사용자가 **따로 잡은 두
+    /// 덩어리**가 한 덩어리가 되어 각각에 타이핑할 길이 사라진다 — 잃는 쪽이 더 크다. 예전 주석이
+    /// 근거로 든 「경계에 caret 둘」은 **점끼리의 이야기**였는데 범위에까지 밀어 놓은 것이었다.
+    /// VS Code `CursorCollection.normalize`가 같은 자리에서 `isBeforeOrEqual`(점이 끼면)과
+    /// `isBefore`(둘 다 범위면)를 가른다.
     ///
     /// **판정은 파생된 선택 범위로 한다 — anchor 범위는 보지 않는다.** anchor의 일부가 선택 밖에
     /// 있을 수 있기 때문이다(단어를 잡고 그 안으로 focus를 옮기면 그렇다). 겹침은 **사용자가 보는
     /// 범위**의 문제이고, anchor는 다음 드래그를 위한 내부 상태다.
-    pub fn touches(self: Selection, other: Selection) bool {
-        return self.start() <= other.end() and other.start() <= self.end();
+    pub fn mergesWith(self: Selection, other: Selection) bool {
+        const a_lo = self.start();
+        const a_hi = self.end();
+        const b_lo = other.start();
+        const b_hi = other.end();
+        // 한쪽이라도 점이면 **닿기만 해도** 합친다.
+        if (a_lo == a_hi or b_lo == b_hi) return a_lo <= b_hi and b_lo <= a_hi;
+        // 둘 다 범위면 **진짜 겹칠 때만** 합친다 — 끝과 시작이 같은 것은 겹침이 아니다.
+        return a_lo < b_hi and b_lo < a_hi;
     }
 };
 
@@ -379,7 +396,7 @@ pub fn mergeOverlapping(items: []Selection, primary: usize) struct { len: usize,
         const is_primary = cur.anchor_start == p_anchor_start and
             cur.anchor_end == p_anchor_end and cur.focus == p_focus;
 
-        if (write > 0 and items[write - 1].touches(cur)) {
+        if (write > 0 and items[write - 1].mergesWith(cur)) {
             const prev = items[write - 1];
             const lo = @min(prev.start(), cur.start());
             const hi = @max(prev.end(), cur.end());
@@ -524,14 +541,36 @@ test "Goal.eql: 세 변종이 서로 구별된다" {
     try testing.expect(!col3.eql(.{ .col = 4 }));
 }
 
-test "맞닿는 범위도 겹침으로 본다 — 경계에 caret 둘이 남으면 중복 삽입된다" {
+test "SEL-M1 맞닿음은 «점» 이 낄 때만 합친다 — 범위 둘은 따로 산다 (§3.2)" {
+    // **예전 규칙은 근거와 안 맞았다**(2026-09-26 정정). 주석은 *"경계에 caret 둘이 남아 같은
+    // 자리에 두 번 삽입된다"* 였는데, `[0,5)` 와 `[5,9)` 의 caret 은 **5 와 9** 로 서로 다른
+    // 자리다. 중복 삽입은 **점끼리**의 문제인데 그 규칙을 범위에까지 밀어 놓았다.
+    //
+    // 합치면 사용자가 **따로 잡은 두 덩어리**가 하나가 되어 각각에 타이핑할 길이 사라진다.
+    // VS Code `CursorCollection.normalize` 가 같은 자리에서 `isBeforeOrEqual`(점이 끼면)과
+    // `isBefore`(둘 다 범위면)를 가른다.
     const a = Selection.fromPoints(0, 5);
     const b = Selection.fromPoints(5, 9);
-    try testing.expect(a.touches(b));
-    try testing.expect(b.touches(a));
+    try testing.expect(!a.mergesWith(b));
+    try testing.expect(!b.mergesWith(a)); // 대칭이다 — 정렬 순서에 답이 달리면 안 된다
+
+    // **진짜 겹치면** 합친다.
+    const over = Selection.fromPoints(4, 9);
+    try testing.expect(a.mergesWith(over));
+    try testing.expect(over.mergesWith(a));
+
+    // **점이 끼면 맞닿아도** 합친다 — 5 에 caret 둘이 남으면 거기 두 번 삽입된다.
+    const caret_at_edge = Selection.at(5);
+    try testing.expect(a.mergesWith(caret_at_edge));
+    try testing.expect(caret_at_edge.mergesWith(a));
+
+    // 점 둘이 같은 자리여도 합친다.
+    try testing.expect(Selection.at(5).mergesWith(Selection.at(5)));
+    // 점 둘이 다른 자리면 안 합친다 — 멀티커서가 한 번에 무너지면 안 된다.
+    try testing.expect(!Selection.at(5).mergesWith(Selection.at(6)));
 
     const far = Selection.fromPoints(6, 9);
-    try testing.expect(!a.touches(far));
+    try testing.expect(!a.mergesWith(far));
 }
 
 test "merge: 겹치지 않으면 그대로 둔다" {
@@ -680,7 +719,7 @@ test "anchor 범위가 선택 밖으로 나갈 수 있고, 겹침 판정은 그�
 
     // 겹침은 선택 범위 기준이라 [4,6)과 닿지 않는다 — anchor_end(5)가 그 안에 있어도 그렇다.
     const other = Selection.fromPoints(4, 6);
-    try testing.expect(!s.touches(other));
+    try testing.expect(!s.mergesWith(other));
 }
 
 test "caret은 별도 구조가 아니라 길이 0인 selection이다" {

@@ -84,8 +84,18 @@ pub const AnchorKind = enum {
 pub const Goal = union(enum) {
     /// 목표 열 없음. 다음 세로 이동이 현재 열에서 시작한다.
     none,
-    /// 이 시각 열을 향한다.
+    /// 이 시각 열을 향한다. **줄 머리부터** 센 열이다.
     col: u32,
+    /// 이 **행 안 열**을 향한다 — 랩된 줄에서 시각 행의 머리부터 센다.
+    ///
+    /// **`col` 과 갈라 두는 이유**(2026-09-26 실측): 랩이 켜지면 세로 이동은 **행** 축으로 도는데,
+    /// 그때 지켜야 하는 것은 「줄 머리에서 몇 번째」가 아니라 **「이 행 머리에서 몇 번째」**다.
+    /// 둘을 한 값에 담으면 읽는 쪽이 「빼야 하는지」를 알 수 없고, 실제로 그래서 틀렸다 —
+    /// `col` 을 행마다 다시 빼는 바람에 **둘째 걸음부터 0 으로 포화**했다(↓ 두 번에 왼쪽 끝으로).
+    ///
+    /// VSCode 가 `leftoverVisibleColumns` 로 하는 일이 이것이다 — 목표는 **행 좌표에 고정**이고,
+    /// 좁은 행을 지날 때 잘려도 다음 넓은 행에서 **되돌아온다**. 값이 안 변해야 그 되돌아옴이 있다.
+    row_col: u32,
     /// 줄 끝에 붙는다 — 어느 줄에서도 그 줄의 끝으로 간다.
     line_end,
 
@@ -94,6 +104,7 @@ pub const Goal = union(enum) {
         return switch (a) {
             .none, .line_end => true,
             .col => |x| x == b.col,
+            .row_col => |x| x == b.row_col,
         };
     }
 };
@@ -510,10 +521,11 @@ test "줄 끝 고정은 큰 숫자가 아니라 별도 값이다 — 의도가 �
     try testing.expect(!sticky.goal.eql(.{ .col = std.math.maxInt(u32) }));
 }
 
-test "Goal.eql: 세 변종이 서로 구별된다" {
+test "Goal.eql: 네 변종이 서로 구별된다" {
     const none: Goal = .none;
     const line_end: Goal = .line_end;
     const col3: Goal = .{ .col = 3 };
+    const row3: Goal = .{ .row_col = 3 };
 
     try testing.expect(none.eql(.none));
     try testing.expect(!none.eql(.line_end));
@@ -522,6 +534,13 @@ test "Goal.eql: 세 변종이 서로 구별된다" {
     try testing.expect(!line_end.eql(.{ .col = 3 }));
     try testing.expect(col3.eql(.{ .col = 3 }));
     try testing.expect(!col3.eql(.{ .col = 4 }));
+
+    // **같은 숫자라도 좌표계가 다르면 다른 목표다** — `col`은 줄 머리 기준, `row_col`은 행 머리
+    // 기준이다. 둘을 같다고 보면 「환산을 이미 했는가」를 잃어 행마다 또 빼게 된다(2026-09-26).
+    try testing.expect(row3.eql(.{ .row_col = 3 }));
+    try testing.expect(!row3.eql(.{ .row_col = 4 }));
+    try testing.expect(!row3.eql(.{ .col = 3 }));
+    try testing.expect(!col3.eql(.{ .row_col = 3 }));
 }
 
 test "맞닿는 범위도 겹침으로 본다 — 경계에 caret 둘이 남으면 중복 삽입된다" {

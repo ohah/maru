@@ -3405,7 +3405,7 @@ fn restoreScrollAnchor(self: *AppSession, term: *Term, saved: ?ScrollAnchor, d: 
 /// **이음매(`assoc`)를 여기서 정한다**(§4 — 그동안 "부수효과"로 남아 있던 자리): 목표 열이 행
 /// 경계에 정확히 걸리면 **뒤 행의 머리**를 고른다. `paintCarets`의 열 거르기가 이미 그렇게 그리고
 /// 있었고(그래서 화면과 일치한다), CM6의 `assoc = 1`과도 같다.
-fn movedVisualRow(self: *AppSession, term: *Term, focus: usize, goal: editor_selection.Goal, down: bool) ?usize {
+fn movedVisualRow(self: *AppSession, term: *Term, focus: usize, goal: *editor_selection.Goal, down: bool) ?usize {
     // **랩이 꺼졌으면 논리 줄 경로로 보낸다.** 그때 조각은 줄과 1:1이라 두 경로가 **같은 답**을
     // 내므로(뮤턴트로 확인 — 이 분기를 지워도 아무 판정자가 안 깨진다) 정답 문제가 아니라
     // **의존성 문제**다: 시각 경로는 렌더 스냅숏을 읽으므로, 굳이 랩도 아닌데 그것에 기대면
@@ -3444,7 +3444,7 @@ fn movedVisualRow(self: *AppSession, term: *Term, focus: usize, goal: editor_sel
     // **`.line_end` 목표는 caret 이 늘 이음매에 선다** — 행 끝 offset 은 뒤 행의 머리와 같은 byte 라,
     // 위 훑기가 늘 **뒤 행**을 고른다. 그대로 두면 ↓ 한 번이 두 행을 건너뛴다. 이 목표일 때만
     // 「앞 행의 끝」으로 읽는다(`visualRowSpan` 의 `SeamSide.prev_row` 와 같은 규칙, §3.2).
-    if (goal == .line_end and cur > 0 and snap[cur].start_col == col and snap[cur - 1].line == screen_line) {
+    if (goal.* == .line_end and cur > 0 and snap[cur].start_col == col and snap[cur - 1].line == screen_line) {
         cur -= 1;
     }
     const target = if (down) cur + 1 else (if (cur == 0) return null else cur - 1);
@@ -3462,7 +3462,7 @@ fn movedVisualRow(self: *AppSession, term: *Term, focus: usize, goal: editor_sel
     // 그 안에서 `@as(u64, column) * cell_px` 를 `i32` 로 좁혀 **넘친다** — `^E` 뒤 `↓`(랩 켬)가
     // ReleaseSafe 에서 패닉, ReleaseFast 에서는 UB 였다. 「아주 큰 열」로 「줄 끝」을 흉내 내지
     // 않는다는 §3.2 `Goal.line_end` 의 규율이 여기서도 그대로다 — **offset 을 곧바로 낸다.**
-    if (goal == .line_end) {
+    if (goal.* == .line_end) {
         // 다음 조각이 **같은 화면 줄**이면 그 머리가 이 행의 끝이다. 아니면 논리 줄 끝이다.
         if (target + 1 < snap.len and snap[target + 1].line == dest.line)
             return dest_line.start + map.offsetOf(map.ctx, dest_text, snap[target + 1].start_col);
@@ -3470,11 +3470,22 @@ fn movedVisualRow(self: *AppSession, term: *Term, focus: usize, goal: editor_sel
     }
 
     // **행 안 열**을 유지한다.
-    const within: u32 = switch (goal) {
+    //
+    // ⚠️ **논리 열을 행마다 다시 빼면 안 된다.** `Goal.col` 은 「줄 머리에서 몇 번째」인데 여기서
+    // 빼는 것은 **지금** 행의 머리다 — 목표를 세운 행과 지금 행이 다르면 틀린다. 예전에는 `.col`
+    // 갈래가 걸음마다 다시 뺐고, 그래서 **둘째 ↓ 부터 0 으로 포화**해 커서가 왼쪽 끝에 붙었다
+    // (2026-09-26 실측: 행 머리 {0,73,146,219} 에서 열 10 으로 시작해 83 → **146**, 156 이어야 했다).
+    //
+    // 그래서 **한 번만 환산하고 그 값을 목표로 되쓴다** — 그 뒤로는 `row_col` 이라 그대로 쓴다.
+    // 값이 안 변해야 좁은 행(줄의 마지막 행)에서 잘려도 다음 넓은 행에서 **되돌아온다**
+    // (VSCode `leftoverVisibleColumns` 와 같은 성질, §3.2).
+    const within: u32 = switch (goal.*) {
         .none => col -| snap[cur].start_col,
-        .col => |c| c -| snap[cur].start_col,
+        .col => |c| c -| snap[cur].start_col, // 논리 축 → 행 축, **여기 한 번**
+        .row_col => |v| v, // 이미 행 축이다 — 다시 빼지 않는다
         .line_end => unreachable, // 위에서 돌려줬다
     };
+    goal.* = .{ .row_col = within };
     return dest_line.start + map.offsetOf(map.ctx, dest_text, dest.start_col +| within);
 }
 
@@ -3672,7 +3683,7 @@ fn movedOffset(
             // 이동은 `null`이라 아래 논리 줄 경로로 떨어지고, caret 노출이 스크롤을 따라오게 하므로
             // 다음 눌림에는 다시 시각 축으로 돈다.
             if (how == .line_up or how == .line_down) {
-                if (movedVisualRow(self, term, focus, goal.*, how == .line_down)) |v| break :blk v;
+                if (movedVisualRow(self, term, focus, goal, how == .line_down)) |v| break :blk v;
             }
             const step: usize = switch (how) {
                 .line_up, .line_down => 1,
@@ -31521,6 +31532,109 @@ test "MOV14 줄 끝 목표로 내려가면 «그 행의 끝» 이다 — 큰 열
     try testing.expect(prev_row_end < l1.contentEnd());
     try pressKey(&fx, .arrow_up, .{});
     try testing.expectEqual(prev_row_end, term.rt.editor_selection.?.focus);
+}
+
+test "MOV15 랩된 줄에서 ↓ 를 거듭 눌러도 목표 열이 유지되고, 좁은 행을 지나면 되돌아온다 (§3.2)" {
+    // **둘째 걸음부터 커서가 왼쪽 끝에 붙던 것**(2026-09-26 실측).
+    //
+    // `Goal.col` 은 「**줄** 머리에서 몇 번째」인데 `movedVisualRow` 가 그것을 걸음마다 **지금
+    // 행**의 머리로 다시 뺐다. 목표를 세운 행과 지금 행이 갈리는 순간 — 즉 **둘째 걸음** — 부터
+    // 틀리고, 포화 뺄셈이라 조용히 0 이 된다:
+    //
+    //     행 머리 {0, 73, 146, 219, 292}, 열 10 에서 시작
+    //     ↓   83  (= 73 + 10)   ✅
+    //     ↓  146  (= 146 + 0)   ❌  156 이어야 한다 — 여기서 왼쪽 끝으로 붙었다
+    //
+    // 고침은 **한 번만 환산하고 그 값을 목표로 되쓰는 것**(`Goal.row_col`). 값이 안 변해야
+    // 좁은 행에서 잘려도 다음 넓은 행에서 **되돌아온다**(VSCode `leftoverVisibleColumns`).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    // 두 줄 다 화면 폭보다 훨씬 길다 — 줄 하나로는 **되돌아옴**을 못 잰다(좁은 행 뒤에 넓은 행이
+    // 있어야 한다).
+    var src: std.ArrayList(u8) = .empty;
+    defer src.deinit(allocator);
+    for (0..300) |i| try src.append(allocator, @intCast('a' + (i % 26)));
+    try src.append(allocator, '\n');
+    for (0..300) |i| try src.append(allocator, @intCast('a' + (i % 26)));
+    try src.append(allocator, '\n');
+    const term = try undoFixture(&fx, allocator, "mov15.txt", src.items);
+
+    term.rt.editor_wrap = true;
+    term.rt.editor_selection = editor_selection.Selection.at(10);
+    fx.session.gpu_quads.clearRetainingCapacity();
+    var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.EditorPaneDidNotDraw;
+    drawn.dl.deinit(allocator);
+
+    const lines = term.rt.editor_doc.?.file.lines;
+    const l0 = lines.line(0).?;
+    const l1 = lines.line(1).?;
+    var pcm = productColumnMap(term);
+    const map = pcm.map();
+    const t0 = term.rt.editor_doc.?.file.content[l0.start..l0.contentEnd()];
+
+    // **줄 0 의 조각 머리들.** 여기서 다시 세지 않고 렌더가 굳힌 스냅숏을 읽는다(§4.1g).
+    var heads: [32]u32 = undefined;
+    var n: usize = 0;
+    var line1_rows: usize = 0;
+    for (term.rt.editor_hit_rows[0..term.rt.editor_hit_rows_len]) |vr| {
+        if (vr.line == 1) line1_rows += 1;
+        if (vr.line != 0) continue;
+        if (n == heads.len) return error.TooManyPieces;
+        heads[n] = vr.start_col;
+        n += 1;
+    }
+    // 넷 이상이어야 **둘째·셋째 걸음**을 잰다 — 셋이면 옛 결함이 판정 밖에 남는다.
+    try testing.expect(n >= 4);
+    // 둘째 줄도 보여야 **되돌아옴**이 시각 축에서 재진다.
+    try testing.expect(line1_rows >= 1);
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_first_line);
+
+    const start_col: u32 = 10;
+    try testing.expectEqual(@as(u32, 0), heads[0]); // 첫 행은 줄 머리다 — 아래 계산의 전제
+
+    // ⓪ **목표를 첫 행이 아닌 데서 세워도 맞다.** 첫 행에서만 재면 「논리 열 → 행 안 열」 환산을
+    // 지운 변이가 **살아남는다** — 행 0 의 머리가 0 이라 빼도 안 빼도 같은 값이 나온다.
+    term.rt.editor_selection = editor_selection.Selection.at(l0.start + map.offsetOf(map.ctx, t0, heads[1] +| start_col));
+    try pressKey(&fx, .arrow_down, .{});
+    try testing.expectEqual(l0.start + map.offsetOf(map.ctx, t0, heads[2] +| start_col), term.rt.editor_selection.?.focus);
+    try testing.expect(term.rt.editor_selection.?.goal.eql(.{ .row_col = start_col }));
+
+    // 다시 줄 머리 쪽으로 — ① 이 첫 걸음부터 이어서 센다.
+    term.rt.editor_selection = editor_selection.Selection.at(10);
+
+    // ① **행마다 같은 열**이다. 둘째 걸음이 옛 결함이 살던 자리다.
+    var i: usize = 1;
+    while (i < n) : (i += 1) {
+        try pressKey(&fx, .arrow_down, .{});
+        const want = l0.start + map.offsetOf(map.ctx, t0, heads[i] +| start_col);
+        try testing.expectEqual(want, term.rt.editor_selection.?.focus);
+        // 목표는 **행 안 열**로 굳고 값이 안 변한다 — 변하면 되돌아옴이 없다.
+        try testing.expect(term.rt.editor_selection.?.goal.eql(.{ .row_col = start_col }));
+    }
+
+    // ② **마지막 행은 좁다** — 열 10 이 없어 줄 끝으로 잘린다.
+    const last_head = heads[n - 1];
+    const last_width = map.columnOf(map.ctx, t0, t0.len) -| last_head;
+    try testing.expect(last_width < start_col); // 안 그러면 ③ 이 「잘림」을 안 지난다
+    try testing.expectEqual(l0.contentEnd(), term.rt.editor_selection.?.focus);
+
+    // ③ **되돌아온다.** 다음 줄의 넓은 행에서 다시 열 10 이다 — 잘린 값(8)에 안 머문다.
+    try pressKey(&fx, .arrow_down, .{});
+    const t1 = term.rt.editor_doc.?.file.content[l1.start..l1.contentEnd()];
+    try testing.expectEqual(l1.start + map.offsetOf(map.ctx, t1, start_col), term.rt.editor_selection.?.focus);
+
+    // ④ **↑ 도 같다** — 되돌아온 열을 들고 올라간다.
+    try pressKey(&fx, .arrow_up, .{});
+    try testing.expectEqual(l0.contentEnd(), term.rt.editor_selection.?.focus); // 좁은 행 — 다시 잘린다
+    try pressKey(&fx, .arrow_up, .{});
+    try testing.expectEqual(l0.start + map.offsetOf(map.ctx, t0, heads[n - 2] +| start_col), term.rt.editor_selection.?.focus);
+
+    // ⑤ **가로 이동은 목표를 버린다** — 안 버리면 다음 ↓ 가 옛 열로 튄다.
+    try pressKey(&fx, .arrow_right, .{});
+    try testing.expectEqual(editor_selection.Goal.none, term.rt.editor_selection.?.goal);
 }
 
 test "MOV9 랩이 켜지면 위/아래가 시각 행을 따라간다 — 이음매는 뒤 행 머리다 (§4.1g)" {

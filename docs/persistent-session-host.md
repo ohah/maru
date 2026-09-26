@@ -6008,21 +6008,41 @@ original source로 복원하고 marked text를 비운 뒤 CR6c와 같은 실제 
 drift, marker 0/2+, stale historical replay, 직접 ABI input 호출은 실패다. 이 gate는 IME·clipboard 연속성을 닫지만
 stalled socket/backoff, 장시간 soak와 성능 예산은 이 CR6d 계약 밖이며 CR6e가 소유한다.
 
-CR6d의 AppKit child는 실행 파일을 테스트 러너가 직접 `execve`하지 않고, 완성된 `Maru.app` 번들을
+CR6d의 AppKit child는 실행 파일을 테스트 러너가 직접 `execve`하지 않고, 제품 `Maru.app`의
+실행 파일·리소스를 그대로 담은 격리 테스트 번들을
 LaunchServices의 새 인스턴스로 열어 종료까지 기다린다. Screen Recording TCC는 요청 프로세스뿐 아니라
-responsible process도 판정하므로 SSH·터미널 테스트 러너가 직접 낳은 앱은 사용자가 `Maru.app`에 부여한 권한과
+responsible process도 판정하므로 SSH·터미널 테스트 러너가 직접 낳은 앱은 사용자가 앱에 부여한 권한과
 다른 귀속으로 거부될 수 있다. 하네스가 준비한 격리 환경은 LaunchServices child에 그대로 전달하며, 앱의 실제
-PID·frontmost PID와 결과는 기존 summary 및 artifact로 판정한다. 이 예외는 Screen Recording과 전역 HID를 함께
+PID·frontmost PID와 결과는 기존 summary 및 artifact로 판정한다. 수동 입력 스모크에서
+Screen Recording preflight가 실패하면 이 서명된 앱 프로세스가
+`CGRequestScreenCaptureAccess()`를 한 번 호출해 OS에 권한을 요청한다. OS 대화상자 표시는 TCC 상태에 달려 있다.
+그 회차는 요청 결과와 무관하게
+`screen-recording-not-provisioned`로 종료하며, 사용자가 허용한 뒤 새 회차에서 preflight를 다시 확인한다.
+summary의 `session_host_input_smoke_screen_capture_request_attempted`는 호출 시도 여부만 기록하며,
+OS 대화상자의 표시나 승인 여부를 대신 증명하지 않는다.
+비수동 스모크는 요청창을 띄우지 않는다. 어느 쪽도 system-global input source·HID·후보 inventory를
+권한 확인 전에 변경하거나 읽지 않는다. 이 예외는 Screen Recording과 전역 HID를 함께
 검증하는 CR6d에만 적용하며, 제품에 테스트 전용 launch 진입점을 추가하지 않는다. 격리 HOME·config·artifact는
 macOS의 Documents 폴더 권한을 테스트 전제에 섞지 않도록 `/tmp` 아래의 CR6d 전용 루트에 두고, 웹 자산은 실제
-앱 번들 리소스를 사용한다. 실행할 서명된 앱 번들도 byte-preserving 방식으로 같은 `/tmp` 전용 부모에 staging해
-LaunchServices가 저장소의 Documents 경로를 열지 않게 한다. 이미 staging된 앱이 새 제품 번들과 recursive byte
-comparison으로 같으면 그 bundle inode를 보존해 동일 빌드에 부여된 TCC code requirement를 불필요하게 폐기하지
-않는다. 내용이 다를 때만 staging 앱을 교체하며, staging 전후 code-sign 검증이 실패하면 앱을 열지 않는다.
+앱 번들 리소스를 사용한다. 제품 앱은 그대로 두고 사용자의 `~/Applications/MaruCR6DInputSmoke.app`에
+복사한 **CR6d 전용 테스트 번들**의
+`CFBundleIdentifier`를 `dev.maru.apphost.cr6d-input-smoke`, `CFBundleDisplayName`을 `Maru CR6D Test`로
+바꾼 뒤 바깥 번들을 ad-hoc 재서명한다. 권한 설정에서 실사용 Maru와 구분하고, staging을 strict/deep 검증한 뒤
+LaunchServices에 그 exact URL을 등록하고, ID lookup이 같은 경로로 돌아와야 앱을 연다. `/tmp`의 새 번들 ID는
+실제로 TCC 설정의 `kLSApplicationNotFoundErr`와 preflight 거부를 낳았으므로 사용하지 않는다. 앱 경로만
+사용자 Applications에 두고 격리 HOME·config·artifact 및 runtime cwd는 계속 `/tmp` 전용 루트다.
+서명 전에는 제품 번들과 byte equality여야 한다. 재서명은 메인 실행 파일의 signature blob도 바꿀 수 있으므로,
+서명 뒤에는 내부 helper·리소스 byte equality와 strict/deep signature를 다시 확인한다. 전용 ID는 이 opt-in fixture 외의 제품·배포 경로에
+들어가지 않는다. 이렇게 해야 실사용 `dev.maru.apphost`의 Screen Recording 권한을 테스트 빌드의 CDHash 변화로
+오염시키거나 초기화하지 않는다. 새 빌드의 테스트 번들은 다시 승인해야 할 수 있다. 같은 제품 빌드에서 만들어진
+전용 번들이 기존 staging 결과와 recursive byte comparison으로 같으면 그 bundle inode를 보존한다. 다를 때만
+전용 staging 앱을 교체하며, 원본·staging 전후 strict/deep code-sign 검증, 전용 bundle ID와 서명 전
+제품 번들 byte equality가 실패하면 앱을 열지 않는다. 테스트 전용 식별자로 얻은 권한·증거는 배포용 서명 신원의
+권한 검증을 대신하지 않는다.
 로컬 TCC 승인 뒤 재검증은 `build-macos-session-host-cr6c-appkit-smoke-harness`로 하네스만
 `zig-out/bin`에 설치할 수 있다. 이 단계는 제품 app bundle build·copy·sign에 의존하지 않으므로 이미 승인한 staging
 app의 ad-hoc CDHash를 바꾸지 않는다. 제품 코드가 바뀌었다면 이 우회 경로로 낡은 앱을 통과시켜서는 안 되며,
-정상 gate로 새 앱을 staging한 뒤 새 CDHash에 권한을 승인해야 한다.
+정상 gate로 새 전용 앱을 staging한 뒤 새 CDHash에 권한을 승인해야 한다.
 LaunchServices child에는 하네스만 소비하는 원본 app/product/restore-helper 실행파일 경로를 전달하지 않는다. 제품
 child가 실제로 소비하는 격리 root·config·summary·smoke mode만 상속해 불필요한 Documents TCC 요청을 막는다.
 또한 `open`을 실행하기 전에 child working directory를 `/`로 닫아 하네스의 저장소 cwd가 앱의 파일 접근 귀속으로
@@ -6099,9 +6119,13 @@ Metal capture에 포함되지 않으므로 v2a green을 후보창 픽셀 완료�
 목록을 연 뒤 OS-owned window와 anchor의 screen-space 관계를 캡처한다. Screen Recording 권한, 잠금 해제된
 WindowServer, exact frontmost PID가 없으면 pass/skip이 아니라 `not_provisioned` artifact이며 v2a나 좌표 비교로
 대체하지 않는다. v2a 생산자는 첫 물리 key 전에 `before-ime`, 첫 `setMarkedText` callback 뒤 다음 key 전에
-`first-marked` 제품 PPM을 찍고 `maru.session-host-cr6d-ime-pixel.v1` receipt를 atomic no-overwrite로 게시한다.
-별도 `maru-session-host-cr6d-pixel-verify`가 strict schema, exact P6, runtime/surface/세대/좌표와 cursor 두 cell 밖
-변화 0을 다시 판정한다. v2a·v2b0b·v2b1의 구현 진행과 실제 제품 회차 결과는
+`first-marked` 제품 PPM을 찍고 `maru.session-host-cr6d-ime-pixel.v2` receipt를 atomic no-overwrite로 게시한다.
+receipt는 두 제품 Metal frame의 `status_bar_height_px`를 각각 결속한다. 검증기는 두 높이가 같고 캡처 안에
+들어오는지 확인한 다음, 그 높이만큼의 **창 바닥 상태표시줄**을 비교에서 제외한다. 터미널·탭·사이드바를
+포함한 나머지 영역에서는 cursor 두 cell 밖 변화 0을 유지한다. 이는 독립적으로 갱신되는 메모리 숫자가
+IME 증거를 무효화하지 않게 하는 범위 수정이며, cursor 안의 실제 marked 픽셀 변화와 anchor 검사는 그대로다.
+별도 `maru-session-host-cr6d-pixel-verify`가 strict schema, exact P6, runtime/surface/세대/좌표와 이 범위를
+다시 판정한다. v2a·v2b0b·v2b1의 구현 진행과 실제 제품 회차 결과는
 [검증 매트릭스의 session host IME 시각 증거](verification-matrix.md)를 단일 출처로 둔다.
 
 v2b는 곧바로 owner 이름을 하드코딩하지 않는다. **v2b0 window-authority 관측**이 먼저 Screen Recording preflight를
@@ -6130,12 +6154,29 @@ owner identity가 실제 Apple Korean IME와 결속된다는 증거가 없으면
 캡처한다. ScreenCaptureKit의 `SCWindow`가 window ID·owning application·layer·frame을 제공하고 단일 window filter를 지원하는
 공개 계약을 사용한다([SCWindow](https://developer.apple.com/documentation/screencapturekit/scwindow),
 [desktopIndependentWindow](https://developer.apple.com/documentation/screencapturekit/sccontentfilter/init(desktopindependentwindow:))).
+후보 요청 뒤 WindowServer inventory가 OS 창 게시보다 먼저 실행될 수 있으므로, test-only capture-select ABI는
+엄격히 파싱·검증한 inventory에서 **새 외부 후보가 0개인 경우만** `not_ready`를 돌려준다. Swift는 같은 `before`
+inventory를 유지하고 `opened` 전체 inventory를 매번 새로 수집해 최대 60번의 app run-loop tick 또는 monotonic
+1초 중 먼저 도달한 때까지만 재시도한다. 첫 조회를 세 tick 늦추지 않는다. 후보가 2개 이상이거나 owner·서명·geometry·
+schema·counter가 잘못된 경우는 `failed`로 즉시 끝낸다. 재시도 중 수집한 raw inventory는 메모리에서만 소멸하고
+최종 성공한 `opened` 하나만 5회 lifecycle row에 사용한다. 제한 시간 안에 후보가 없으면 `failed`이며,
+`not_provisioned`나 성공으로 정규화하지 않는다. v2b0b의 최종 observation 게시 ABI는 여전히 `passed`/`failed`
+exact-once이고, 재시도 가능한 것은 v2b1의 게시 전 capture-select ABI뿐이다.
+test-only 실패 진단은 이 미분류 RED를 구분하도록 baseline/opened window 개수, 신규 ID 수의 최대값,
+그중 앱 밖 소유 PID의 신규 ID 수의 최대값, 앱 PID이되 `NSApp.windows`에 없는 신규 ID 수의 최대값,
+앱 PID이면서 `NSApp.windows`에 있는 신규 ID 수의 최대값, 각 분류의 신규 창 최대값이 정확히 하나일 때의
+layer·bounds 및 시도 횟수만 숫자로 남길 수 있다. 두 분류의 수치 진단은 권위 없는 실패 분석이며,
+앱 PID 창을 후보로 허용한다는 뜻이 아니다. 이는 후보 선택이나 게시의
+권위가 아니며 window ID·PID·제목·문자열·raw inventory는 실패 artifact에 남기지 않는다.
+`CounterMutation` 실패의 축을 가리기 위해 before/opened의 PTY 입력·commit callback·base-screen 세대가
+각각 달라졌는지의 불리언과 수동 Option-Return 반복 keyDown 횟수만 같은 test-only summary에 남길 수 있다.
+원시 카운터 값·입력 내용은 남기지 않으며 이 진단으로 불변식이나 후보 선별 조건을 완화하지 않는다.
 캡처 직전·직후 동일 window ID/PID와 Apple code-signing identity를 다시 검증한다. receipt는 v2a와 같은 runtime/surface,
 candidate window ID/owner identity/bounds, `firstRect`, capture digest와 capture-complete
 상태를 결속한다. AppKit `firstRect`와 Quartz bounds는 원점 규약이 다르므로 직접 비교하지 않는다. display ID,
 `NSScreen.frame`, `CGDisplayBounds`를 함께 싣고 두 point-space display 크기가 같은지 확인한 뒤 pure converter 하나가 Quartz
 좌상단 원점으로 정규화한다. backing scale은 이 변환에 기여하지 않으므로 receipt 권위에서 제외한다. 음수 origin·좌우/상하
-multi-display fixture가 같은 변환을 검증한다. candidate bounds는 같은 display에서 v2b0의
+multi-display fixture가 같은 변환을 검증한다. candidate bounds 전체가 caret display의 Quartz bounds 안에 있어야 하고, 같은 display에서 v2b0의
 5회 관측이 정한 위/아래 placement별 anchor band에 있어야 하고, 화면 가장자리의 정상적인 위쪽 flip을 허용한다. 관측 전에
 임의 pixel 거리 상한을 만들지 않는다. 판정 뒤에는
 candidate window 부재, original input source, exact first responder와 restore record 소멸을 확인한다. 전체 화면 diff,

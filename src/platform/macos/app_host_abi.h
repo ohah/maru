@@ -9,7 +9,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 188u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 189u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -876,9 +876,37 @@ typedef enum MaruAppHostIMECandidateObservationResult {
     MaruAppHostIMECandidateObservationPassed = 0,
     MaruAppHostIMECandidateObservationFailed = 1,
 } MaruAppHostIMECandidateObservationResult;
+/* 게시 ABI와 달리, capture-select만 검증된 후보 부재를 bounded 재관측 신호로 돌려준다. */
+typedef enum MaruAppHostIMECandidateCaptureSelectionResult {
+    MaruAppHostIMECandidateCaptureSelectionPassed = 0,
+    MaruAppHostIMECandidateCaptureSelectionFailed = 1,
+    MaruAppHostIMECandidateCaptureSelectionNotReady = 2,
+} MaruAppHostIMECandidateCaptureSelectionResult;
+typedef struct MaruAppHostIMECandidateCaptureSelection {
+    uint32_t window_id;
+    int32_t owner_pid;
+    int32_t layer;
+    double x;
+    double y;
+    double w;
+    double h;
+} MaruAppHostIMECandidateCaptureSelection;
+uint32_t maru_macos_session_host_ime_candidate_capture_select(
+    const uint8_t *selection_transcript,
+    size_t selection_transcript_len,
+    MaruAppHostIMECandidateCaptureSelection *out_selection
+);
 uint32_t maru_macos_session_host_ime_candidate_observation_publish(
     const uint8_t *transcript,
     size_t transcript_len,
+    const char *output_path,
+    size_t output_path_len
+);
+uint32_t maru_macos_session_host_ime_candidate_pixel_publish(
+    const uint8_t *transcript,
+    size_t transcript_len,
+    const uint8_t *evidence,
+    size_t evidence_len,
     const char *output_path,
     size_t output_path_len
 );

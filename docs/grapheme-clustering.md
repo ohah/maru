@@ -191,7 +191,7 @@ cluster 분절은 코어 print 경로 `writeCodepoint`(`screen.zig`) **단일 �
 
 단일 진입점을 거치지 않는 두 곳만 명시적으로 챙긴다:
 
-- **IME preedit(조합 중 표시) — codepoint 단위(의도된 한계)**: `Surface.renderSnapshot`의 `PreeditOverlay`는 셀 저장이 아니라 base snapshot 위 scratch에 `preedit_bytes`를 codepoint 단위 폭으로 임시 렌더한다(확정 전이라 core/host grid에 안 들어감). 폭 정책은 overlay의 별도 config가 아니라 **base `RenderSnapshot.ambiguous_wide`가 단일 출처**이고, host-backed 화면은 같은 값을 screen mode bit로 전달한다. **여기엔 cluster 인지를 적용하지 않는다.** 근거(검증): macOS 한글 IME는 조합 중에도 **완성형 음절**(NFC, 예 `한`=U+D55C)을 marked text로 보내고, `setMarkedText`→`imeMarked`→`Surface.preedit` 경로는 그대로 저장한다. 완성형은 단일 코드포인트라 한 셀(폭 2)로 정상 렌더된다. NFD 자모/폭0 combining을 marked text로 보내는 IME에서만 조합 중 표시 한계가 있으며, 확정 직후 PTY 출력은 `writeCodepoint` cluster 경로를 탄다.
+- **IME preedit와 echo 대기 carry — codepoint 단위(의도된 한계)**: `Surface.renderSnapshot`의 `PreeditOverlay`는 셀 저장이 아니라 base snapshot 위 scratch에 `preedit_bytes`를 codepoint 단위 폭으로 임시 렌더한다. 다음 marked text가 시작됐지만 직전 IME 확정 바이트의 PTY echo가 아직 없으면 그 바이트도 bounded client-local carry로 같은 scratch에 그린다([키 입력 계약](key-input-and-shortcuts.md#레이아웃-독립-단축키와-ime)). 폭 정책은 overlay의 별도 config가 아니라 **base `RenderSnapshot.ambiguous_wide`가 단일 출처**이고, host-backed 화면은 같은 값을 screen mode bit로 전달한다. **두 임시 표시 경로에는 cluster 인지를 적용하지 않는다.** 근거(검증): macOS 한글 IME는 조합 중에도 **완성형 음절**(NFC, 예 `한`=U+D55C)을 marked text로 보내고, `setMarkedText`→`imeMarked`→`Surface.preedit` 경로는 그대로 저장한다. 완성형은 단일 코드포인트라 한 셀(폭 2)로 정상 렌더된다. NFD 자모/폭0 combining을 marked text 또는 echo 대기 commit으로 보내는 IME에서는 이 임시 표시가 한계이며, PTY 출력이 도착하면 `writeCodepoint` cluster 경로를 탄다.
 - **클립보드 복사·재출력(`appendRowUtf8`)**: 저장된 다중 코드포인트를 손실 없이 UTF-8로 뽑아야 한다(무손실 — §3.2 잘림 금지와 직결). HG2a 직렬화 확장에 포함한다.
 
 ## 5. 분해 (HG1~HG4)
@@ -291,7 +291,7 @@ cluster 분절은 코어 print 경로 `writeCodepoint`(`screen.zig`) **단일 �
 | `emitEditBand`(주소창 편집 밴드) | caret 열이 `text_field.fieldLayout`(Σ max(1,cellWidth))과 1:1이라 cluster화하려면 L3 레이아웃까지 함께 바꿔야 한다. IME 조합은 입력 경계 `composeHangul`이 덮는다(§4.7) |
 | `buildSidebarHeaderDrawList`(사이드바 검색 밴드) | 위와 같은 caret 열 모델 — 함께 옮겨야 한다 |
 | `platform/macos/chrome/metal_lowering.zig`의 `placeText`(chrome 오버레이·모달·세팅·팔레트·알림 텍스트) | DrawCell이 아니라 오버레이 raster 그리드(cp/fg/width 배열)에 직접 쓰는 별도 표현이라 CG1과 방식이 다르다 |
-| `drawCells`(IME preedit 오버레이, `terminal/preedit.zig`) | 확정 전 텍스트를 base snapshot 위 scratch에 임시 렌더 — 셀 저장이 아니라 표시 전용이고, 주 타깃 한글 IME가 완성형 marked text를 보내 실사용 증상이 없다(§4.7의 "의도된 한계") |
+| `drawCells`·`drawCarryLinear`(IME preedit·echo 대기 carry, `terminal/preedit.zig`) | 조합 중 또는 host echo 대기 텍스트를 base snapshot 위 scratch에 임시 렌더 — 셀 저장이 아니라 표시 전용이고, 주 타깃 한글 IME가 완성형을 보내는 §4.7의 한계를 공유한다. |
 
 앞의 둘은 같은 caret 열 모델이라 **한 슬라이스로 묶어** 옮기는 것이 맞다. 분절·폭이 이제 OS-중립(`chrome/text_layout.zig`)이라 그 슬라이스는 platform을 거치지 않고 L3 안에서 끝난다 — CT-OWN 추출이 열어 준 길이다.
 

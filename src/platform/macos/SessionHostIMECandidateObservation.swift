@@ -57,11 +57,47 @@ final class SessionHostIMECandidateObservation {
         let closed: Snapshot
     }
 
+    struct CaptureRequest {
+        let windowID: UInt32
+        let owner: Owner
+        let layer: Int32
+        let bounds: Bounds
+    }
+
+    private struct SelectionTranscript: Codable {
+        let schema: String
+        let app_pid: Int32
+        let before: Snapshot
+        let opened: Snapshot
+    }
+
     private struct Transcript: Codable {
         let schema: String
         let app_pid: Int32
         let source_id: String
         let rows: [Row]
+    }
+
+    private struct PixelPublication: Codable {
+        let schema: String
+        let runtime_id: String
+        let surface_id: UInt64
+        let frame_generation: UInt64
+        let first_rect: Bounds
+        let window_id: UInt32
+        let owner_pid: Int32
+        let bundle_id: String
+        let signing_id: String
+        let apple_signed: Bool
+        let layer: Int32
+        let bounds: Bounds
+        let pixel_width: Int
+        let pixel_height: Int
+        let capture_sha256: String
+        let capture_complete: Bool
+        let input_source_restored: Bool
+        let first_responder_restored: Bool
+        let restore_record_absent: Bool
     }
 
     private(set) var rows: [Row] = []
@@ -72,6 +108,8 @@ final class SessionHostIMECandidateObservation {
         case malformedWindow
         case invalidOutput
         case transcriptTooLarge
+        case candidateNotReady
+        case candidateTimeout
         case rejected(UInt32)
     }
 
@@ -140,15 +178,41 @@ final class SessionHostIMECandidateObservation {
         rows.append(Row(before: before, opened: opened, closed: closed))
     }
 
+    /// Zig owns candidate selection. Swift receives only the exact numeric row needed for a
+    /// desktop-independent one-window ScreenCaptureKit filter.
+    func captureRequest(before: Snapshot, opened: Snapshot) throws -> CaptureRequest {
+        let transcript = SelectionTranscript(
+            schema: "maru.session-host-cr6d-ime-candidate-selection.v1",
+            app_pid: getpid(), before: before, opened: opened
+        )
+        let data = try JSONEncoder().encode(transcript)
+        guard data.count <= Self.maximumTranscriptBytes else { throw Failure.transcriptTooLarge }
+        var selected = MaruAppHostIMECandidateCaptureSelection()
+        let status: UInt32 = data.withUnsafeBytes { bytes in
+            maru_macos_session_host_ime_candidate_capture_select(
+                bytes.bindMemory(to: UInt8.self).baseAddress, data.count, &selected
+            )
+        }
+        // Only the Zig reducer can classify a complete inventory as temporarily absent.
+        // The AppKit caller owns the finite retry budget, never a second selection heuristic.
+        if status == MaruAppHostIMECandidateCaptureSelectionNotReady.rawValue {
+            throw Failure.candidateNotReady
+        }
+        guard status == 0,
+              let row = opened.windows.first(where: { $0.id == selected.window_id }),
+              row.owner.pid == selected.owner_pid, row.layer == selected.layer,
+              row.bounds.x == selected.x, row.bounds.y == selected.y,
+              row.bounds.w == selected.w, row.bounds.h == selected.h else {
+            throw Failure.rejected(status)
+        }
+        return CaptureRequest(windowID: row.id, owner: row.owner, layer: row.layer, bounds: row.bounds)
+    }
+
     func publish(sourceID: String, outputURL: URL) throws {
         guard rows.count == Self.requiredObservationCount,
               outputURL.isFileURL,
               !FileManager.default.fileExists(atPath: outputURL.path) else { throw Failure.invalidOutput }
-        let transcript = Transcript(
-            schema: "maru.session-host-cr6d-ime-candidate-transcript.v1",
-            app_pid: getpid(), source_id: sourceID, rows: rows
-        )
-        let data = try JSONEncoder().encode(transcript)
+        let data = try encodedTranscript(sourceID: sourceID)
         guard data.count <= Self.maximumTranscriptBytes else { throw Failure.transcriptTooLarge }
         let status: UInt32 = data.withUnsafeBytes { bytes in
             outputURL.path.utf8CString.withUnsafeBufferPointer { path in
@@ -159,6 +223,60 @@ final class SessionHostIMECandidateObservation {
             }
         }
         guard status == 0 else { throw Failure.rejected(status) }
+    }
+
+    func publishPixel(
+        sourceID: String,
+        outputURL: URL,
+        capture: SessionHostIMECandidatePixelCapture.Evidence,
+        runtimeID: String,
+        surfaceID: UInt64,
+        frameGeneration: UInt64,
+        firstRect: CGRect,
+        inputSourceRestored: Bool,
+        firstResponderRestored: Bool,
+        restoreRecordAbsent: Bool
+    ) throws {
+        guard rows.count == Self.requiredObservationCount,
+              outputURL.isFileURL,
+              !FileManager.default.fileExists(atPath: outputURL.path) else { throw Failure.invalidOutput }
+        let transcript = try encodedTranscript(sourceID: sourceID)
+        let evidence = try JSONEncoder().encode(PixelPublication(
+            schema: "maru.session-host-cr6d-ime-candidate-pixel-evidence.v1",
+            runtime_id: runtimeID, surface_id: surfaceID, frame_generation: frameGeneration,
+            first_rect: Self.bounds(firstRect), window_id: capture.window_id,
+            owner_pid: capture.owner_pid, bundle_id: capture.bundle_id,
+            signing_id: capture.signing_id, apple_signed: capture.apple_signed,
+            layer: capture.layer, bounds: capture.bounds,
+            pixel_width: capture.pixel_width, pixel_height: capture.pixel_height,
+            capture_sha256: capture.capture_sha256, capture_complete: capture.capture_complete,
+            input_source_restored: inputSourceRestored,
+            first_responder_restored: firstResponderRestored,
+            restore_record_absent: restoreRecordAbsent
+        ))
+        guard evidence.count <= 16_384 else { throw Failure.transcriptTooLarge }
+        let status: UInt32 = transcript.withUnsafeBytes { transcriptBytes in
+            evidence.withUnsafeBytes { evidenceBytes in
+                outputURL.path.utf8CString.withUnsafeBufferPointer { path in
+                    maru_macos_session_host_ime_candidate_pixel_publish(
+                        transcriptBytes.bindMemory(to: UInt8.self).baseAddress, transcript.count,
+                        evidenceBytes.bindMemory(to: UInt8.self).baseAddress, evidence.count,
+                        path.baseAddress, path.count - 1
+                    )
+                }
+            }
+        }
+        guard status == 0 else { throw Failure.rejected(status) }
+    }
+
+    private func encodedTranscript(sourceID: String) throws -> Data {
+        let transcript = Transcript(
+            schema: "maru.session-host-cr6d-ime-candidate-transcript.v1",
+            app_pid: getpid(), source_id: sourceID, rows: rows
+        )
+        let data = try JSONEncoder().encode(transcript)
+        guard data.count <= Self.maximumTranscriptBytes else { throw Failure.transcriptTooLarge }
+        return data
     }
 
     private static func ownerIdentity(pid: Int32) -> (bundleID: String, signingID: String, appleSigned: Bool) {

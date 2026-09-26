@@ -4261,6 +4261,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var sessionHostInputSmokeGlobalSourceSelected = false
     private var sessionHostInputSmokeGlobalSourceRestored = false
     private var sessionHostInputSmokePostEventAccess = false
+    private var sessionHostInputSmokeScreenCaptureRequestAttempted = false
     private var sessionHostInputSmokeSourceRecordCleared = false
     private var sessionHostInputSmokeAppActive = false
     private var sessionHostInputSmokeFirstResponder = false
@@ -4281,6 +4282,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         let cursor: PixelRect
         let cursorScreen: CGRect
         let firstRect: CGRect
+        let statusBarHeightPx: UInt32
     }
     private var sessionHostInputPixelPhase: UInt32 = 0
     private var sessionHostInputPixelBefore: SessionHostInputPixelSnapshot?
@@ -4288,8 +4290,27 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var sessionHostCandidateObservation: SessionHostIMECandidateObservation?
     private var sessionHostCandidateBefore: SessionHostIMECandidateObservation.Snapshot?
     private var sessionHostCandidateOpened: SessionHostIMECandidateObservation.Snapshot?
+    private var sessionHostCandidatePixelPending = false
+    private var sessionHostCandidatePixelEvidence: SessionHostIMECandidatePixelCapture.Evidence?
+    private var sessionHostCandidatePixelError: String?
     private var sessionHostCandidatePhase: UInt32 = 0
     private var sessionHostCandidateWaitTicks: UInt32 = 0
+    private var sessionHostCandidateSelectAttempts: UInt32 = 0
+    private var sessionHostCandidateSelectStartedAtNs: UInt64 = 0
+    private var sessionHostCandidateBeforeWindowCount = 0
+    private var sessionHostCandidateOpenedWindowCountMax = 0
+    private var sessionHostCandidateNewIDCountMax = 0
+    private var sessionHostCandidateNewExternalCountMax = 0
+    private var sessionHostCandidateNewSelfNonNSAppCountMax = 0
+    private var sessionHostCandidateNewSelfNonNSAppLayer: Int32 = 0
+    private var sessionHostCandidateNewSelfNonNSAppBounds: SessionHostIMECandidateObservation.Bounds?
+    private var sessionHostCandidateNewSelfNSAppCountMax = 0
+    private var sessionHostCandidateNewSelfNSAppLayer: Int32 = 0
+    private var sessionHostCandidateNewSelfNSAppBounds: SessionHostIMECandidateObservation.Bounds?
+    private var sessionHostCandidatePTYInputChanged = false
+    private var sessionHostCandidateCommittedCallbacksChanged = false
+    private var sessionHostCandidateScreenGenerationChanged = false
+    private var sessionHostCandidateOptionReturnRepeatCount: UInt32 = 0
     private var sessionHostCandidateFailure = ""
     private var sessionHostCandidateAdmissionValidated = false
     private var sessionHostCandidateComposeKeyIndex = 0
@@ -4358,9 +4379,18 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     // Observe only physical progress keys; never consume them or bypass the normal IME transaction.
     func observeSessionHostManualInputKey(_ event: NSEvent, view: MaruMetalTerminalView) {
-        guard isSessionHostManualInputSmokeMode, !event.isARepeat,
+        guard isSessionHostManualInputSmokeMode,
               sessionHostInputSmokeOwnsGlobalKeyboardFocus(view: view) else { return }
         let chord = event.modifierFlags.intersection([.command, .control, .option, .shift])
+        if event.isARepeat {
+            if sessionHostInputSmokeStage == 2, sessionHostCandidatePhase == 1,
+               event.keyCode == 36, chord == [.option] {
+                if sessionHostCandidateOptionReturnRepeatCount < UInt32.max {
+                    sessionHostCandidateOptionReturnRepeatCount += 1
+                }
+            }
+            return
+        }
         if sessionHostInputSmokeStage == 3 {
             // A screen substring may already exist while the last syllable is still marked.
             // Require the user's most recent physical key to be an unmodified Return instead.
@@ -4370,7 +4400,15 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
            (sessionHostCandidatePhase == 1 && event.keyCode == 36 && chord == [.option] ||
             sessionHostCandidatePhase == 2 && event.keyCode == 53 && chord.isEmpty) {
             sessionHostManualCandidateKey = event.keyCode
-            sessionHostCandidateWaitTicks = 3
+            if sessionHostCandidatePhase == 1 {
+                // The candidate may live for only a few frames. Start the bounded observation
+                // after this physical key rather than sleeping through the first three frames.
+                sessionHostCandidateSelectStartedAtNs = DispatchTime.now().uptimeNanoseconds
+                sessionHostCandidateSelectAttempts = 0
+                sessionHostCandidateWaitTicks = 0
+            } else {
+                sessionHostCandidateWaitTicks = 3
+            }
         }
     }
 
@@ -10676,14 +10714,19 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         )
         let cursorScreen = window.convertToScreen(view.convert(local, to: nil))
         let summary = surface.latestFrameSummary
-        guard summary.surface_id != 0, surface.lastDrawnGeneration != 0 else { return nil }
+        var metalFrame = MaruAppHostMetalFrame()
+        guard let session = surface.appSession,
+              maru_macos_app_session_metal_frame(session, &metalFrame) == Self.statusOK,
+              summary.surface_id != 0, surface.lastDrawnGeneration != 0,
+              metalFrame.generation == surface.lastDrawnGeneration else { return nil }
         return .init(
             runtimeId: runtimeId,
             surfaceId: summary.surface_id,
             frameGeneration: surface.lastDrawnGeneration,
             cursor: .init(x: UInt32(x), y: UInt32(y), w: UInt32(w), h: UInt32(h)),
             cursorScreen: cursorScreen,
-            firstRect: reportedFirstRect
+            firstRect: reportedFirstRect,
+            statusBarHeightPx: metalFrame.status_bar_height_px
         )
     }
 
@@ -10710,10 +10753,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 "cursor": pixelRect(value.cursor),
                 "cursor_screen": rect(value.cursorScreen),
                 "first_rect": rect(value.firstRect),
+                "status_bar_height_px": value.statusBarHeightPx,
             ]
         }
         let object: [String: Any] = [
-            "schema": "maru.session-host-cr6d-ime-pixel.v1",
+            "schema": "maru.session-host-cr6d-ime-pixel.v2",
             "before": snapshot(before),
             "marked": snapshot(marked),
         ]
@@ -10848,6 +10892,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             // HID posting. Refuse before changing the global input source so a missing Screen
             // Recording grant cannot leave any system mutation behind.
             guard CGPreflightScreenCaptureAccess() else {
+                // Only the explicit manual smoke asks from the signed app. Still fail this run:
+                // a new launch must prove the grant before any global input-source mutation.
+                if isSessionHostManualInputSmokeMode {
+                    sessionHostInputSmokeScreenCaptureRequestAttempted = true
+                    _ = CGRequestScreenCaptureAccess()
+                }
                 failSessionHostInputSmoke("screen-recording-not-provisioned")
                 return
             }
@@ -10977,6 +11027,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 failSessionHostInputSmoke("global-input-source-restore")
                 return
             }
+            guard publishSessionHostCandidatePixel(view: view) else {
+                failSessionHostInputSmoke("candidate-pixel-receipt")
+                return
+            }
             restoreSessionHostInputSmokePasteboard()
             sessionHostInputSmokeStage = 4
             sessionHostInputSmokeRetries = 0
@@ -10989,6 +11043,41 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             ))
         default:
             break
+        }
+    }
+
+    private func publishSessionHostCandidatePixel(view: MaruMetalTerminalView) -> Bool {
+        guard let observation = sessionHostCandidateObservation,
+              let capture = sessionHostCandidatePixelEvidence,
+              let frame = sessionHostInputPixelMarked,
+              let rawRoot = ProcessInfo.processInfo.environment["MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT"] else {
+            return false
+        }
+        let root = URL(fileURLWithPath: rawRoot).standardizedFileURL
+        guard root.lastPathComponent == "session-host-cr6d-home",
+              root.deletingLastPathComponent().lastPathComponent == "maru-macos-app" else { return false }
+        let target = root.appendingPathComponent(
+            "session-host-cr6d-ime-candidate-pixel.json", isDirectory: false
+        ).standardizedFileURL
+        guard target.deletingLastPathComponent() == root else { return false }
+        let recordAbsent = sessionHostInputSmokeSourceRecordURL.map {
+            !FileManager.default.fileExists(atPath: $0.path)
+        } ?? false
+        do {
+            try observation.publishPixel(
+                sourceID: SessionHostInputSourcePolicy.korean2SetSourceID,
+                outputURL: target, capture: capture,
+                runtimeID: frame.runtimeId, surfaceID: frame.surfaceId,
+                frameGeneration: frame.frameGeneration, firstRect: frame.firstRect,
+                inputSourceRestored: sessionHostInputSmokeViewSourceRestored &&
+                    sessionHostInputSmokeGlobalSourceRestored,
+                firstResponderRestored: view.window?.firstResponder === view,
+                restoreRecordAbsent: recordAbsent && sessionHostInputSmokeSourceRecordCleared
+            )
+            return true
+        } catch {
+            sessionHostCandidatePixelError = String(describing: error)
+            return false
         }
     }
 
@@ -11088,6 +11177,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 }
                 guard view.sessionHostCandidateTargetReady(), view.hasMarkedText() else { return false }
                 sessionHostCandidateBefore = try observation.capture(counters: counters, anchor: anchor)
+                sessionHostCandidateBeforeWindowCount = sessionHostCandidateBefore?.windows.count ?? 0
                 if isSessionHostManualInputSmokeMode {
                     sessionHostManualCandidateKey = nil
                     sessionHostCandidatePhase = 1
@@ -11098,12 +11188,113 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                     keyCode: 36, view: view, flags: .maskAlternate
                 ) else { throw SessionHostIMECandidateObservation.Failure.windowServerUnavailable }
                 sessionHostCandidatePhase = 1
-                sessionHostCandidateWaitTicks = 3
+                sessionHostCandidateSelectStartedAtNs = DispatchTime.now().uptimeNanoseconds
+                sessionHostCandidateSelectAttempts = 0
+                sessionHostCandidateWaitTicks = 0
             case 1:
                 if isSessionHostManualInputSmokeMode {
                     guard sessionHostManualCandidateKey == 36 else { return false }
                 }
-                sessionHostCandidateOpened = try observation.capture(counters: counters, anchor: anchor)
+                guard let before = sessionHostCandidateBefore else {
+                    throw SessionHostIMECandidateObservation.Failure.malformedWindow
+                }
+                var selectedRequest: SessionHostIMECandidateObservation.CaptureRequest?
+                if sessionHostCandidateOpened == nil {
+                    let now = DispatchTime.now().uptimeNanoseconds
+                    guard sessionHostCandidateSelectStartedAtNs != 0,
+                          now >= sessionHostCandidateSelectStartedAtNs,
+                          now - sessionHostCandidateSelectStartedAtNs < 1_000_000_000,
+                          sessionHostCandidateSelectAttempts < 60 else {
+                        throw SessionHostIMECandidateObservation.Failure.candidateTimeout
+                    }
+                    sessionHostCandidateSelectAttempts += 1
+                    let opened = try observation.capture(counters: counters, anchor: anchor)
+                    // Diagnostic counts only: selection and every eligibility decision stay in Zig.
+                    // No owner name, PID, window ID, title, or raw inventory enters the summary.
+                    let baselineIDs = Set(before.windows.map(\.id))
+                    let newRows = opened.windows.filter { !baselineIDs.contains($0.id) }
+                    let appWindowIDs = Set(NSApp.windows.compactMap { UInt32(exactly: $0.windowNumber) })
+                    let newSelfNonNSApp = newRows.filter {
+                        $0.owner.pid == getpid() && !appWindowIDs.contains($0.id)
+                    }
+                    let newSelfNSApp = newRows.filter {
+                        $0.owner.pid == getpid() && appWindowIDs.contains($0.id)
+                    }
+                    sessionHostCandidateOpenedWindowCountMax = max(sessionHostCandidateOpenedWindowCountMax, opened.windows.count)
+                    // Compare only boolean axes for a failed test. Zig still owns the immutable
+                    // counter verdict and no raw values or input text leave this process.
+                    sessionHostCandidatePTYInputChanged = sessionHostCandidatePTYInputChanged ||
+                        before.counters.pty_input_bytes != opened.counters.pty_input_bytes
+                    sessionHostCandidateCommittedCallbacksChanged = sessionHostCandidateCommittedCallbacksChanged ||
+                        before.counters.committed_text_callbacks != opened.counters.committed_text_callbacks
+                    sessionHostCandidateScreenGenerationChanged = sessionHostCandidateScreenGenerationChanged ||
+                        before.counters.base_screen_generation != opened.counters.base_screen_generation
+                    sessionHostCandidateNewIDCountMax = max(sessionHostCandidateNewIDCountMax, newRows.count)
+                    sessionHostCandidateNewExternalCountMax = max(
+                        sessionHostCandidateNewExternalCountMax,
+                        newRows.filter { $0.owner.pid != getpid() }.count
+                    )
+                    sessionHostCandidateNewSelfNonNSAppCountMax = max(
+                        sessionHostCandidateNewSelfNonNSAppCountMax, newSelfNonNSApp.count
+                    )
+                    if sessionHostCandidateNewSelfNonNSAppCountMax > 1 {
+                        sessionHostCandidateNewSelfNonNSAppBounds = nil
+                        sessionHostCandidateNewSelfNonNSAppLayer = 0
+                    } else if newSelfNonNSApp.count == 1, let window = newSelfNonNSApp.first {
+                        sessionHostCandidateNewSelfNonNSAppLayer = window.layer
+                        sessionHostCandidateNewSelfNonNSAppBounds = window.bounds
+                    }
+                    // Diagnostic only. The reducer still rejects every app-owned window; the
+                    // bounds help distinguish a visible IME panel from an unrelated app window.
+                    sessionHostCandidateNewSelfNSAppCountMax = max(
+                        sessionHostCandidateNewSelfNSAppCountMax, newSelfNSApp.count
+                    )
+                    if sessionHostCandidateNewSelfNSAppCountMax > 1 {
+                        sessionHostCandidateNewSelfNSAppBounds = nil
+                        sessionHostCandidateNewSelfNSAppLayer = 0
+                    } else if newSelfNSApp.count == 1, let window = newSelfNSApp.first {
+                        sessionHostCandidateNewSelfNSAppLayer = window.layer
+                        sessionHostCandidateNewSelfNSAppBounds = window.bounds
+                    }
+                    do {
+                        selectedRequest = try observation.captureRequest(before: before, opened: opened)
+                    } catch SessionHostIMECandidateObservation.Failure.candidateNotReady {
+                        // No retained inventory, no publication, and no candidate ID selected.
+                        return false
+                    }
+                    sessionHostCandidateOpened = opened
+                }
+                guard sessionHostCandidateOpened != nil else {
+                    throw SessionHostIMECandidateObservation.Failure.malformedWindow
+                }
+                if observation.rows.isEmpty, sessionHostCandidatePixelEvidence == nil {
+                    if let failure = sessionHostCandidatePixelError {
+                        sessionHostCandidateFailure = failure
+                        failSessionHostInputSmoke("candidate-pixel-capture-failed")
+                        return false
+                    }
+                    if sessionHostCandidatePixelPending { return false }
+                    guard #available(macOS 14.0, *) else {
+                        sessionHostCandidateFailure = "screen-capture-kit-not-provisioned"
+                        failSessionHostInputSmoke("candidate-pixel-capture-not-provisioned")
+                        return false
+                    }
+                    guard let request = selectedRequest else {
+                        throw SessionHostIMECandidateObservation.Failure.malformedWindow
+                    }
+                    sessionHostCandidatePixelPending = true
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        do {
+                            self.sessionHostCandidatePixelEvidence = try await
+                                SessionHostIMECandidatePixelCapture.capture(request: request)
+                        } catch {
+                            self.sessionHostCandidatePixelError = String(describing: error)
+                        }
+                        self.sessionHostCandidatePixelPending = false
+                    }
+                    return false
+                }
                 if isSessionHostManualInputSmokeMode {
                     sessionHostManualCandidateKey = nil
                     sessionHostCandidatePhase = 2
@@ -11128,6 +11319,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 try observation.append(before: before, opened: opened, closed: closed)
                 sessionHostCandidateBefore = nil
                 sessionHostCandidateOpened = nil
+                sessionHostCandidateSelectAttempts = 0
+                sessionHostCandidateSelectStartedAtNs = 0
                 if observation.rows.count < SessionHostIMECandidateObservation.requiredObservationCount {
                     sessionHostCandidatePhase = 0
                     sessionHostCandidateComposeKeyIndex = 0
@@ -11166,6 +11359,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             case .malformedWindow: sessionHostCandidateFailure = "malformed-window"
             case .invalidOutput: sessionHostCandidateFailure = "invalid-output"
             case .transcriptTooLarge: sessionHostCandidateFailure = "transcript-too-large"
+            case .candidateNotReady: sessionHostCandidateFailure = "candidate-not-ready-unhandled"
+            case .candidateTimeout: sessionHostCandidateFailure = "candidate-window-timeout"
             case .rejected(let status): sessionHostCandidateFailure = "rejected-\(status)"
             }
             failSessionHostInputSmoke("candidate-observation-failed")
@@ -13287,6 +13482,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         session_host_input_smoke_global_source_selected=\(sessionHostInputSmokeGlobalSourceSelected)
         session_host_input_smoke_global_source_restored=\(sessionHostInputSmokeGlobalSourceRestored)
         session_host_input_smoke_post_event_access=\(sessionHostInputSmokePostEventAccess)
+        session_host_input_smoke_screen_capture_request_attempted=\(sessionHostInputSmokeScreenCaptureRequestAttempted)
         session_host_input_smoke_source_record_cleared=\(sessionHostInputSmokeSourceRecordCleared)
         session_host_input_smoke_app_active=\(sessionHostInputSmokeAppActive)
         session_host_input_smoke_first_responder=\(sessionHostInputSmokeFirstResponder)
@@ -13295,6 +13491,29 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         session_host_input_smoke_candidate_failure=\(sessionHostCandidateFailure)
         session_host_input_smoke_candidate_phase=\(sessionHostCandidatePhase)
         session_host_input_smoke_candidate_rows=\(sessionHostCandidateObservation?.rows.count ?? 0)
+        session_host_input_smoke_candidate_select_attempts=\(sessionHostCandidateSelectAttempts)
+        session_host_input_smoke_candidate_before_windows=\(sessionHostCandidateBeforeWindowCount)
+        session_host_input_smoke_candidate_opened_windows_max=\(sessionHostCandidateOpenedWindowCountMax)
+        session_host_input_smoke_candidate_new_ids_max=\(sessionHostCandidateNewIDCountMax)
+        session_host_input_smoke_candidate_new_external_max=\(sessionHostCandidateNewExternalCountMax)
+        session_host_input_smoke_candidate_new_self_non_nsapp_max=\(sessionHostCandidateNewSelfNonNSAppCountMax)
+        session_host_input_smoke_candidate_new_self_non_nsapp_bounds_present=\(sessionHostCandidateNewSelfNonNSAppBounds != nil)
+        session_host_input_smoke_candidate_new_self_non_nsapp_layer=\(sessionHostCandidateNewSelfNonNSAppLayer)
+        session_host_input_smoke_candidate_new_self_non_nsapp_x=\(sessionHostCandidateNewSelfNonNSAppBounds?.x ?? 0)
+        session_host_input_smoke_candidate_new_self_non_nsapp_y=\(sessionHostCandidateNewSelfNonNSAppBounds?.y ?? 0)
+        session_host_input_smoke_candidate_new_self_non_nsapp_w=\(sessionHostCandidateNewSelfNonNSAppBounds?.w ?? 0)
+        session_host_input_smoke_candidate_new_self_non_nsapp_h=\(sessionHostCandidateNewSelfNonNSAppBounds?.h ?? 0)
+        session_host_input_smoke_candidate_new_self_nsapp_max=\(sessionHostCandidateNewSelfNSAppCountMax)
+        session_host_input_smoke_candidate_new_self_nsapp_bounds_present=\(sessionHostCandidateNewSelfNSAppBounds != nil)
+        session_host_input_smoke_candidate_new_self_nsapp_layer=\(sessionHostCandidateNewSelfNSAppLayer)
+        session_host_input_smoke_candidate_new_self_nsapp_x=\(sessionHostCandidateNewSelfNSAppBounds?.x ?? 0)
+        session_host_input_smoke_candidate_new_self_nsapp_y=\(sessionHostCandidateNewSelfNSAppBounds?.y ?? 0)
+        session_host_input_smoke_candidate_new_self_nsapp_w=\(sessionHostCandidateNewSelfNSAppBounds?.w ?? 0)
+        session_host_input_smoke_candidate_new_self_nsapp_h=\(sessionHostCandidateNewSelfNSAppBounds?.h ?? 0)
+        session_host_input_smoke_candidate_pty_input_changed=\(sessionHostCandidatePTYInputChanged)
+        session_host_input_smoke_candidate_committed_callbacks_changed=\(sessionHostCandidateCommittedCallbacksChanged)
+        session_host_input_smoke_candidate_screen_generation_changed=\(sessionHostCandidateScreenGenerationChanged)
+        session_host_input_smoke_candidate_option_return_repeat_count=\(sessionHostCandidateOptionReturnRepeatCount)
         session_host_input_smoke_manual_input=\(isSessionHostManualInputSmokeMode)
         session_host_input_smoke_manual_return_observed=\(sessionHostManualReturnObserved)
         session_host_input_smoke_callback_has_marked_text=\(sessionHostCallbackHasMarkedText.map { String($0) } ?? "unobserved")

@@ -1157,6 +1157,7 @@ pub fn build(b: *std.Build) void {
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/EditorSaveConflictSmokeDriver.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/SessionHostInputSourcePolicy.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/SessionHostIMECandidateObservation.swift"));
+        macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/SessionHostIMECandidatePixelCapture.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/NotificationReleaseScenarioReceipt.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/NotificationReleaseAppScenario.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/NotificationExactCleanup.swift"));
@@ -2078,6 +2079,7 @@ pub fn build(b: *std.Build) void {
         macos_app_compile.addFileArg(b.path("src/platform/macos/EditorSaveConflictSmokeDriver.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/SessionHostInputSourcePolicy.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/SessionHostIMECandidateObservation.swift"));
+        macos_app_compile.addFileArg(b.path("src/platform/macos/SessionHostIMECandidatePixelCapture.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/NotificationReleaseScenarioReceipt.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/NotificationReleaseAppScenario.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/NotificationExactCleanup.swift"));
@@ -2108,6 +2110,8 @@ pub fn build(b: *std.Build) void {
             // FP10c1: 번들 helper의 code-sign validity/Team ID를 spawn 전에 검증한다.
             "-framework",
             "Security",
+            "-framework",
+            "ScreenCaptureKit",
             // Retina HiDPI: bare 실행파일(.app 번들 없음)에 Info.plist를 __TEXT,__info_plist
             // 섹션으로 임베드해 NSHighResolutionCapable을 켠다. 없으면 macOS가 창을 1x backing
             // store로 렌더해 window.backingScaleFactor가 1.0이 되고 Retina에서 흐려진다.
@@ -3245,16 +3249,21 @@ pub fn build(b: *std.Build) void {
             "Run actual AppKit recovered-session IME and OS clipboard continuity smoke",
         );
         const session_host_cr6d_home = "/tmp/maru-macos-app/session-host-cr6d-home";
+        const session_host_cr6d_user_home = b.graph.environ_map.get("HOME") orelse @panic("CR6d staging requires HOME");
+        if (!std.fs.path.isAbsolute(session_host_cr6d_user_home) or std.mem.eql(u8, session_host_cr6d_user_home, "/"))
+            @panic("CR6d staging requires an absolute user home");
+        const session_host_cr6d_test_app = b.fmt("{s}/Applications/MaruCR6DInputSmoke.app", .{session_host_cr6d_user_home});
         const session_host_cr6d_fixture = b.addSystemCommand(&.{
-            "sh", "-eu", "-c",
+            "sh",         "-eu", "-c",
             "root=/tmp/maru-macos-app/session-host-cr6d-home; " ++
-                "app=/tmp/maru-macos-app/Maru.app; " ++
+                "app=\"$1\"; " ++
                 "rm -rf \"$root\"; mkdir -p \"$root/captures\" \"$root/.config/maru\"; " ++
                 "printf '%s\\n' 'session.keep-alive-after-quit = true' 'input.option-as-meta = false' > \"$root/.config/maru/config\"; " ++
-                "if test -d \"$app\" && /usr/bin/diff -qr zig-out/Maru.app \"$app\" >/dev/null; then :; " ++
-                "else rm -rf \"$app\"; /usr/bin/ditto zig-out/Maru.app \"$app\"; fi; " ++
+                "sh tools/session-host/stage-cr6d-input-app.sh zig-out/Maru.app \"$app\"; " ++
                 "/usr/bin/codesign --verify --strict \"$app\"",
+            "cr6d-stage",
         });
+        session_host_cr6d_fixture.addArg(session_host_cr6d_test_app);
         session_host_cr6d_fixture.setCwd(b.path("."));
         const run_session_host_cr6d_appkit = b.addRunArtifact(session_host_cr6c_appkit_harness);
         run_session_host_cr6d_appkit.setCwd(b.path("."));
@@ -3264,7 +3273,7 @@ pub fn build(b: *std.Build) void {
         );
         run_session_host_cr6d_appkit.setEnvironmentVariable(
             "MARU_SESSION_HOST_CR6D_APP_BUNDLE",
-            "/tmp/maru-macos-app/Maru.app",
+            session_host_cr6d_test_app,
         );
         run_session_host_cr6d_appkit.setEnvironmentVariable(
             "MARU_SESSION_HOST_CR6C_PRODUCT_EXE",
@@ -3306,7 +3315,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"CR6d"},
         });
         const run_session_host_cr6d_boundary_tests = b.addRunArtifact(session_host_cr6d_boundary_tests);
-        run_session_host_cr6d_boundary_tests.addArg("--maru-expect-tests=4");
+        run_session_host_cr6d_boundary_tests.addArg("--maru-expect-tests=8");
         run_session_host_cr6d_boundary_tests.setCwd(b.path("."));
         run_session_host_cr6d_appkit.step.dependOn(&run_session_host_cr6d_boundary_tests.step);
         const session_host_cr6d_preedit_incremental_tests = addProjectTest(b, .{
@@ -3347,8 +3356,8 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"preedit anchor"},
         });
         const run_session_host_cr6d_preedit_anchor_tests = b.addRunArtifact(session_host_cr6d_preedit_anchor_tests);
-        // Six named anchor contracts plus terminal.zig's anonymous facade test block.
-        run_session_host_cr6d_preedit_anchor_tests.addArg("--maru-expect-tests=7");
+        // Eight named anchor contracts plus terminal.zig's anonymous facade test block.
+        run_session_host_cr6d_preedit_anchor_tests.addArg("--maru-expect-tests=9");
         run_session_host_cr6d_preedit_anchor_tests.setCwd(b.path("."));
         session_host_cr6d_preedit_incremental_step.dependOn(&run_session_host_cr6d_preedit_anchor_tests.step);
         const session_host_cr6d_pixel_verify_mod = b.createModule(.{
@@ -3394,9 +3403,13 @@ pub fn build(b: *std.Build) void {
             "sh", "-eu", "-c",
             "summary=/tmp/maru-macos-app/session-host-cr6d-home/app.summary.txt; " ++
                 "candidate=/tmp/maru-macos-app/session-host-cr6d-home/session-host-cr6d-ime-candidate-observation.json; " ++
+                "candidate_pixel=/tmp/maru-macos-app/session-host-cr6d-home/session-host-cr6d-ime-candidate-pixel.json; " ++
                 "test -f \"$summary\"; " ++
                 "test -f \"$candidate\"; " ++
+                "test -f \"$candidate_pixel\"; " ++
                 "/usr/bin/grep -Eq '\"schema\":\"maru.session-host-cr6d-ime-candidate-observation.v1\"' \"$candidate\"; " ++
+                "/usr/bin/grep -Eq '\"schema\":\"maru.session-host-cr6d-ime-candidate-pixel.v1\"' \"$candidate_pixel\"; " ++
+                "/usr/bin/grep -Eq '\"complete\":true' \"$candidate_pixel\"; " ++
                 "/usr/bin/grep -Eq '^session_host_recovery_smoke_stage=2$' \"$summary\"; " ++
                 "/usr/bin/grep -Eq '^session_host_input_smoke_stage=4$' \"$summary\"; " ++
                 "/usr/bin/grep -Eq '^session_host_input_smoke_historical_count=1$' \"$summary\"; " ++
@@ -4635,7 +4648,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_session_host_cr6d_pixel_tests = b.addRunArtifact(session_host_cr6d_pixel_tests);
-    run_session_host_cr6d_pixel_tests.addArg("--maru-expect-tests=8");
+    run_session_host_cr6d_pixel_tests.addArg("--maru-expect-tests=10");
     test_step.dependOn(&run_session_host_cr6d_pixel_tests.step);
     const session_host_cr6d_pixel_step = b.step(
         "test-session-host-cr6d-pixel-validator",
@@ -4655,7 +4668,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_session_host_cr6d_candidate_debug = b.addRunArtifact(session_host_cr6d_candidate_debug);
-    run_session_host_cr6d_candidate_debug.addArg("--maru-expect-tests=10");
+    run_session_host_cr6d_candidate_debug.addArg("--maru-expect-tests=12");
     const session_host_cr6d_candidate_release = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/session_host/ime_candidate_evidence.zig"),
@@ -4665,12 +4678,12 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_session_host_cr6d_candidate_release = b.addRunArtifact(session_host_cr6d_candidate_release);
-    run_session_host_cr6d_candidate_release.addArg("--maru-expect-tests=10");
+    run_session_host_cr6d_candidate_release.addArg("--maru-expect-tests=12");
     test_step.dependOn(&run_session_host_cr6d_candidate_debug.step);
     test_step.dependOn(&run_session_host_cr6d_candidate_release.step);
     const session_host_cr6d_candidate_step = b.step(
         "test-session-host-cr6d-ime-candidate-evidence",
-        "Validate CR6d-v2b0 candidate-window inventory and coordinate evidence",
+        "Validate CR6d-v2b candidate-window inventory, coordinate, and single-window pixel evidence",
     );
     session_host_cr6d_candidate_step.dependOn(&run_session_host_cr6d_candidate_debug.step);
     session_host_cr6d_candidate_step.dependOn(&run_session_host_cr6d_candidate_release.step);
@@ -5397,7 +5410,7 @@ pub fn build(b: *std.Build) void {
         .filters = &.{"CR6d"},
     });
     const run_session_host_cr6d_global_boundary_tests = b.addRunArtifact(session_host_cr6d_global_boundary_tests);
-    run_session_host_cr6d_global_boundary_tests.addArg("--maru-expect-tests=4");
+    run_session_host_cr6d_global_boundary_tests.addArg("--maru-expect-tests=8");
     run_session_host_cr6d_global_boundary_tests.setCwd(b.path("."));
     boundary_step.dependOn(&run_session_host_cr6d_global_boundary_tests.step);
     const session_host_cr6e_boundary_tests = addProjectTest(b, .{

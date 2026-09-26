@@ -91,6 +91,11 @@ pub const IMECandidateObservationResult = enum(u32) {
     passed = c.MaruAppHostIMECandidateObservationPassed,
     failed = c.MaruAppHostIMECandidateObservationFailed,
 };
+pub const IMECandidateCaptureSelectionResult = enum(u32) {
+    passed = c.MaruAppHostIMECandidateCaptureSelectionPassed,
+    failed = c.MaruAppHostIMECandidateCaptureSelectionFailed,
+    not_ready = c.MaruAppHostIMECandidateCaptureSelectionNotReady,
+};
 
 const LeaseSlot = if (builtin.os.tag == .macos)
     struct {
@@ -172,8 +177,8 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
     try std.testing.expectEqualStrings("maru build: mtime=unknown pid=42", buildIdentityLine(&buf, null, 42));
 }
 
-test "ABI v185 notification release end-all and cold route values match the C header" {
-    try std.testing.expectEqual(@as(u32, 188), abi_version);
+test "ABI v189 candidate pixel evidence and notification values match the C header" {
+    try std.testing.expectEqual(@as(u32, 189), abi_version);
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @intFromEnum(AppInstanceLeaseResult.acquired));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_HELD), @intFromEnum(AppInstanceLeaseResult.held));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_UNSAFE), @intFromEnum(AppInstanceLeaseResult.unsafe));
@@ -1434,6 +1439,40 @@ pub export fn maru_macos_app_session_input_smoke_probe(
     return @intFromEnum(Status.ok);
 }
 
+/// CR6d-v2b1 capture preparation. The caller lends complete before/opened inventories and gets
+/// only the reducer-selected numeric identity needed to construct a one-window capture filter.
+pub export fn maru_macos_session_host_ime_candidate_capture_select(
+    transcript_ptr: ?[*]const u8,
+    transcript_len: usize,
+    out_selection: ?*c.MaruAppHostIMECandidateCaptureSelection,
+) u32 {
+    const transcript = transcript_ptr orelse return @intFromEnum(IMECandidateCaptureSelectionResult.failed);
+    const out = out_selection orelse return @intFromEnum(IMECandidateCaptureSelectionResult.failed);
+    out.* = std.mem.zeroes(c.MaruAppHostIMECandidateCaptureSelection);
+    if (transcript_len == 0 or transcript_len > ime_candidate_evidence.max_transcript_bytes)
+        return @intFromEnum(IMECandidateCaptureSelectionResult.failed);
+    const selected = ime_candidate_evidence.selectCaptureCandidate(
+        allocator,
+        transcript[0..transcript_len],
+    ) catch |err| {
+        // Only a fully parsed, validated inventory with no eligible new window is retryable.
+        // The caller has a finite monotonic budget; ambiguity and mutation remain hard failures.
+        if (err == error.CandidateMissing) return @intFromEnum(IMECandidateCaptureSelectionResult.not_ready);
+        std.debug.print("session_host_ime_candidate_capture_select_error={s}\n", .{@errorName(err)});
+        return @intFromEnum(IMECandidateCaptureSelectionResult.failed);
+    };
+    out.* = .{
+        .window_id = selected.window_id,
+        .owner_pid = selected.owner_pid,
+        .layer = selected.layer,
+        .x = selected.x,
+        .y = selected.y,
+        .w = selected.w,
+        .h = selected.h,
+    };
+    return @intFromEnum(IMECandidateCaptureSelectionResult.passed);
+}
+
 /// CR6d-v2b0b의 exact-once 판정/게시 leaf. Swift는 complete raw transcript를 동기 호출 동안만
 /// 빌려주며 선택 규칙이나 artifact writer를 소유하지 않는다.
 pub export fn maru_macos_session_host_ime_candidate_observation_publish(
@@ -1461,6 +1500,39 @@ pub export fn maru_macos_session_host_ime_candidate_observation_publish(
         // Only the typed failure name crosses this diagnostic boundary, never the borrowed
         // transcript or another application's window inventory. The strict verdict is unchanged.
         std.debug.print("session_host_ime_candidate_publish_error={s}\n", .{@errorName(err)});
+        return @intFromEnum(IMECandidateObservationResult.failed);
+    };
+    return @intFromEnum(IMECandidateObservationResult.passed);
+}
+
+pub export fn maru_macos_session_host_ime_candidate_pixel_publish(
+    transcript_ptr: ?[*]const u8,
+    transcript_len: usize,
+    evidence_ptr: ?[*]const u8,
+    evidence_len: usize,
+    output_path_ptr: ?[*]const u8,
+    output_path_len: usize,
+) u32 {
+    const transcript = transcript_ptr orelse return @intFromEnum(IMECandidateObservationResult.failed);
+    const evidence = evidence_ptr orelse return @intFromEnum(IMECandidateObservationResult.failed);
+    const output = output_path_ptr orelse return @intFromEnum(IMECandidateObservationResult.failed);
+    if (transcript_len == 0 or transcript_len > ime_candidate_evidence.max_transcript_bytes or
+        evidence_len == 0 or evidence_len > ime_candidate_evidence.max_artifact_bytes or
+        output_path_len == 0 or output_path_len >= std.fs.max_path_bytes)
+        return @intFromEnum(IMECandidateObservationResult.failed);
+    const output_bytes = output[0..output_path_len];
+    if (std.mem.indexOfScalar(u8, output_bytes, 0) != null)
+        return @intFromEnum(IMECandidateObservationResult.failed);
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    @memcpy(path_buf[0..output_path_len], output_bytes);
+    path_buf[output_path_len] = 0;
+    ime_candidate_evidence.publishPixelObservation(
+        allocator,
+        transcript[0..transcript_len],
+        evidence[0..evidence_len],
+        path_buf[0..output_path_len :0],
+    ) catch |err| {
+        std.debug.print("session_host_ime_candidate_pixel_publish_error={s}\n", .{@errorName(err)});
         return @intFromEnum(IMECandidateObservationResult.failed);
     };
     return @intFromEnum(IMECandidateObservationResult.passed);
@@ -1496,6 +1568,39 @@ test "CR6d-v2b0b observation ABI rejects invalid borrows and publishes no partia
         error.FileNotFound,
         tmp.dir.access(std.testing.io, "candidate.json", .{}),
     );
+}
+
+test "CR6d-v2b1 capture selection distinguishes absent candidate from invalid transcript" {
+    try std.testing.expectEqual(@as(u32, c.MaruAppHostIMECandidateCaptureSelectionNotReady), @intFromEnum(IMECandidateCaptureSelectionResult.not_ready));
+    const empty_windows = &[_]ime_candidate_evidence.Window{};
+    const snapshot = .{
+        .windows = empty_windows,
+        .counters = ime_candidate_evidence.Counters{
+            .pty_input_bytes = 0,
+            .committed_text_callbacks = 0,
+            .base_screen_generation = 0,
+        },
+        .anchor_appkit = ime_candidate_evidence.Rect{ .x = 0, .y = 0, .w = 1, .h = 1 },
+        .displays = &[_]u32{},
+    };
+    var bytes: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer bytes.deinit();
+    var json: std.json.Stringify = .{ .writer = &bytes.writer, .options = .{} };
+    try json.write(.{
+        .schema = "maru.session-host-cr6d-ime-candidate-selection.v1",
+        .app_pid = @as(i32, 999),
+        .before = snapshot,
+        .opened = snapshot,
+    });
+    var selected = std.mem.zeroes(c.MaruAppHostIMECandidateCaptureSelection);
+    try std.testing.expectEqual(@as(u32, c.MaruAppHostIMECandidateCaptureSelectionNotReady), maru_macos_session_host_ime_candidate_capture_select(
+        bytes.written().ptr,
+        bytes.written().len,
+        &selected,
+    ));
+    try std.testing.expectEqual(@as(u32, 0), selected.window_id);
+    const invalid = "{}";
+    try std.testing.expectEqual(@as(u32, c.MaruAppHostIMECandidateObservationFailed), maru_macos_session_host_ime_candidate_capture_select(invalid.ptr, invalid.len, &selected));
 }
 
 /// Reads the published divider grab band and this drag's coalescing instrumentation for the

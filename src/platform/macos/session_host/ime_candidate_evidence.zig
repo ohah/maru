@@ -9,6 +9,7 @@ pub const max_windows: usize = 256;
 pub const required_observations: usize = 5;
 pub const max_transcript_bytes: usize = 1024 * 1024;
 pub const max_artifact_bytes: usize = 16 * 1024;
+pub const digest_hex_bytes: usize = 64;
 
 pub const Rect = struct {
     x: f64,
@@ -29,6 +30,11 @@ pub const Rect = struct {
     fn contains(self: Rect, point: anytype) bool {
         return point.x >= self.x and point.y >= self.y and
             point.x < self.x + self.w and point.y < self.y + self.h;
+    }
+
+    fn containsRect(self: Rect, other: Rect) bool {
+        return self.valid() and other.valid() and other.x >= self.x and other.y >= self.y and
+            other.x + other.w <= self.x + self.w and other.y + other.h <= self.y + self.h;
     }
 };
 
@@ -253,6 +259,63 @@ const RawTranscript = struct {
     rows: []const RawRow,
 };
 
+const CaptureSelectionTranscript = struct {
+    schema: []const u8,
+    app_pid: i32,
+    before: RawSnapshot,
+    opened: RawSnapshot,
+};
+
+pub const CaptureSelection = extern struct {
+    window_id: u32,
+    owner_pid: i32,
+    layer: i32,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+};
+
+/// Selects the one transient window before ScreenCaptureKit sees an ID. Swift submits complete
+/// inventories and therefore cannot quietly grow a second candidate heuristic.
+pub fn selectCaptureCandidate(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+) !CaptureSelection {
+    if (bytes.len == 0 or bytes.len > max_transcript_bytes) return error.InventoryTooLarge;
+    var parsed = std.json.parseFromSlice(CaptureSelectionTranscript, allocator, bytes, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = false,
+        .duplicate_field_behavior = .@"error",
+    }) catch return error.InvalidTranscript;
+    defer parsed.deinit();
+    const raw = parsed.value;
+    if (!std.mem.eql(u8, raw.schema, "maru.session-host-cr6d-ime-candidate-selection.v1"))
+        return error.InvalidTranscript;
+    // The retryable absence verdict must never conceal an input or screen mutation. The final
+    // five-row publisher still proves the full before/open/close counter conjunction later.
+    if (!Counters.eql(raw.before.counters, raw.opened.counters)) return error.CounterMutation;
+    const candidate = try reduceTriplet(raw.app_pid, .{
+        .before = raw.before.windows,
+        .opened = raw.opened.windows,
+        // Selection happens while the window is open. Closure and counter immutability are
+        // deliberately re-proved by the final five-row publisher.
+        .closed = raw.before.windows,
+        .before_counters = raw.before.counters,
+        .opened_counters = raw.opened.counters,
+        .closed_counters = raw.before.counters,
+    });
+    return .{
+        .window_id = candidate.window_id,
+        .owner_pid = candidate.owner.pid,
+        .layer = candidate.layer,
+        .x = candidate.bounds.x,
+        .y = candidate.bounds.y,
+        .w = candidate.bounds.w,
+        .h = candidate.bounds.h,
+    };
+}
+
 const ArtifactRow = struct {
     window_id: u32,
     owner_pid: i32,
@@ -271,6 +334,192 @@ const Artifact = struct {
     source_id: []const u8,
     rows: []const ArtifactRow,
 };
+
+const PixelEvidence = struct {
+    schema: []const u8,
+    runtime_id: []const u8,
+    surface_id: u64,
+    frame_generation: u64,
+    first_rect: Rect,
+    window_id: u32,
+    owner_pid: i32,
+    bundle_id: []const u8,
+    signing_id: []const u8,
+    apple_signed: bool,
+    layer: i32,
+    bounds: Rect,
+    pixel_width: usize,
+    pixel_height: usize,
+    capture_sha256: []const u8,
+    capture_complete: bool,
+    input_source_restored: bool,
+    first_responder_restored: bool,
+    restore_record_absent: bool,
+};
+
+const PixelArtifact = struct {
+    schema: []const u8 = "maru.session-host-cr6d-ime-candidate-pixel.v1",
+    runtime_id: []const u8,
+    surface_id: u64,
+    frame_generation: u64,
+    first_rect: Rect,
+    window_id: u32,
+    owner_pid: i32,
+    bundle_id: []const u8,
+    signing_id: []const u8,
+    apple_signed: bool,
+    layer: i32,
+    bounds: Rect,
+    display_id: u32,
+    anchor_quartz: Rect,
+    pixel_width: usize,
+    pixel_height: usize,
+    capture_sha256: []const u8,
+    capture_complete: bool,
+    input_source_restored: bool,
+    first_responder_restored: bool,
+    restore_record_absent: bool,
+};
+
+fn validLowerHex(bytes: []const u8) bool {
+    if (bytes.len == 0) return false;
+    for (bytes) |byte| if (!((byte >= '0' and byte <= '9') or (byte >= 'a' and byte <= 'f')))
+        return false;
+    return true;
+}
+
+fn publishCanonicalBytes(
+    allocator: std.mem.Allocator,
+    output_path: [:0]const u8,
+    value: anytype,
+) !void {
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
+    var json: std.json.Stringify = .{ .writer = &output.writer, .options = .{} };
+    try json.write(value);
+    try output.writer.writeByte('\n');
+    if (output.written().len > max_artifact_bytes) return error.ArtifactTooLarge;
+    const temporary = try std.fmt.allocPrintSentinel(allocator, "{s}.tmp.{d}", .{ output_path, std.c.getpid() }, 0);
+    defer allocator.free(temporary);
+    const fd = std.c.open(temporary.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .CLOEXEC = true, .NOFOLLOW = true }, @as(std.c.mode_t, 0o600));
+    if (fd < 0) return error.ArtifactCreateFailed;
+    defer _ = std.c.unlink(temporary.ptr);
+    var open = true;
+    defer if (open) {
+        _ = std.c.close(fd);
+    };
+    var offset: usize = 0;
+    while (offset < output.written().len) {
+        const amount = std.c.write(fd, output.written()[offset..].ptr, output.written().len - offset);
+        if (amount < 0 and std.posix.errno(amount) == .INTR) continue;
+        if (amount <= 0) return error.ArtifactWriteFailed;
+        offset += @intCast(amount);
+    }
+    if (std.c.fsync(fd) != 0 or std.c.close(fd) != 0) return error.ArtifactWriteFailed;
+    open = false;
+    if (std.c.link(temporary.ptr, output_path.ptr) != 0) return error.ArtifactPublishFailed;
+}
+
+pub fn publishPixelObservation(
+    allocator: std.mem.Allocator,
+    transcript_bytes: []const u8,
+    evidence_bytes: []const u8,
+    output_path: [:0]const u8,
+) !void {
+    if (transcript_bytes.len == 0 or transcript_bytes.len > max_transcript_bytes or
+        evidence_bytes.len == 0 or evidence_bytes.len > max_artifact_bytes) return error.InventoryTooLarge;
+    var transcript = std.json.parseFromSlice(RawTranscript, allocator, transcript_bytes, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = false,
+        .duplicate_field_behavior = .@"error",
+    }) catch return error.InvalidTranscript;
+    defer transcript.deinit();
+    var parsed_evidence = std.json.parseFromSlice(PixelEvidence, allocator, evidence_bytes, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = false,
+        .duplicate_field_behavior = .@"error",
+    }) catch return error.InvalidTranscript;
+    defer parsed_evidence.deinit();
+    const raw = transcript.value;
+    const evidence = parsed_evidence.value;
+    if (!std.mem.eql(u8, raw.schema, "maru.session-host-cr6d-ime-candidate-transcript.v1") or
+        raw.rows.len != required_observations or
+        raw.source_id.len == 0 or raw.source_id.len > 255 or
+        !std.mem.eql(u8, evidence.schema, "maru.session-host-cr6d-ime-candidate-pixel-evidence.v1") or
+        evidence.runtime_id.len != 32 or !validLowerHex(evidence.runtime_id) or
+        evidence.surface_id == 0 or evidence.frame_generation == 0 or !evidence.first_rect.valid() or
+        evidence.capture_sha256.len != digest_hex_bytes or !validLowerHex(evidence.capture_sha256) or
+        evidence.pixel_width == 0 or evidence.pixel_height == 0 or !evidence.capture_complete or
+        !evidence.input_source_restored or !evidence.first_responder_restored or !evidence.restore_record_absent)
+        return error.InvalidTranscript;
+    var candidates: [required_observations]Candidate = undefined;
+    var anchor: ?ConvertedRect = null;
+    for (raw.rows, 0..) |row, index| {
+        candidates[index] = try reduceTriplet(raw.app_pid, .{
+            .before = row.before.windows,
+            .opened = row.opened.windows,
+            .closed = row.closed.windows,
+            .before_counters = row.before.counters,
+            .opened_counters = row.opened.counters,
+            .closed_counters = row.closed.counters,
+        });
+        const before_anchor = try appKitToQuartz(row.before.anchor_appkit, row.before.displays);
+        const converted = try appKitToQuartz(row.opened.anchor_appkit, row.opened.displays);
+        const closed_anchor = try appKitToQuartz(row.closed.anchor_appkit, row.closed.displays);
+        // A stacked monitor can share the caret's x band. Bind the entire OS window to the
+        // display that owns the caret before accepting its repeated placement as IME evidence.
+        var caret_display_bounds: ?Rect = null;
+        for (row.opened.displays) |display| {
+            if (display.id == converted.display_id) {
+                caret_display_bounds = display.quartz_bounds;
+                break;
+            }
+        }
+        if (!(caret_display_bounds orelse return error.InvalidDisplay).containsRect(candidates[index].bounds))
+            return error.CandidateGeometryDrift;
+        if (!std.meta.eql(before_anchor, converted) or !std.meta.eql(before_anchor, closed_anchor) or
+            !std.meta.eql(row.opened.anchor_appkit, evidence.first_rect)) return error.AnchorDrift;
+        if (anchor) |prior| {
+            if (!std.meta.eql(prior, converted)) return error.AnchorDrift;
+        } else anchor = converted;
+    }
+    const candidate = try validateSeries(&candidates);
+    const converted = anchor orelse return error.AnchorDrift;
+    if (candidate.window_id != evidence.window_id or candidate.owner.pid != evidence.owner_pid or
+        candidate.layer != evidence.layer or !std.meta.eql(candidate.bounds, evidence.bounds) or
+        !std.mem.eql(u8, candidate.owner.bundle_id, evidence.bundle_id) or
+        !std.mem.eql(u8, candidate.owner.signing_id, evidence.signing_id) or
+        candidate.owner.apple_signed != evidence.apple_signed) return error.CandidateIdentityDrift;
+    // No guessed distance threshold: the caret midpoint must share the candidate's horizontal
+    // band, while the candidate may be below it or flip above it at a display edge.
+    const caret = converted.rect.midpoint();
+    const horizontal = caret.x >= candidate.bounds.x and caret.x < candidate.bounds.x + candidate.bounds.w;
+    const below = candidate.bounds.y >= converted.rect.y + converted.rect.h;
+    const above = candidate.bounds.y + candidate.bounds.h <= converted.rect.y;
+    if (!horizontal or (!below and !above)) return error.CandidateGeometryDrift;
+    try publishCanonicalBytes(allocator, output_path, PixelArtifact{
+        .runtime_id = evidence.runtime_id,
+        .surface_id = evidence.surface_id,
+        .frame_generation = evidence.frame_generation,
+        .first_rect = evidence.first_rect,
+        .window_id = evidence.window_id,
+        .owner_pid = evidence.owner_pid,
+        .bundle_id = evidence.bundle_id,
+        .signing_id = evidence.signing_id,
+        .apple_signed = evidence.apple_signed,
+        .layer = evidence.layer,
+        .bounds = evidence.bounds,
+        .display_id = converted.display_id,
+        .anchor_quartz = converted.rect,
+        .pixel_width = evidence.pixel_width,
+        .pixel_height = evidence.pixel_height,
+        .capture_sha256 = evidence.capture_sha256,
+        .capture_complete = evidence.capture_complete,
+        .input_source_restored = evidence.input_source_restored,
+        .first_responder_restored = evidence.first_responder_restored,
+        .restore_record_absent = evidence.restore_record_absent,
+    });
+}
 
 /// Swift lends the complete in-memory transcript once.  Parsing, candidate selection, series
 /// authority and absent-target publication stay in Zig so the producer cannot grow a second
@@ -609,4 +858,216 @@ test "v2b0b publisher rejects unknown schema and transcript cap before publicati
         publishObservation(std.testing.allocator, too_large, path),
     );
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "absent.json", .{}));
+}
+
+test "v2b1 capture selection is reducer-owned and rejects ambiguous inventories" {
+    const snapshot = RawSnapshot{
+        .windows = &.{stable},
+        .counters = counters,
+        .anchor_appkit = .{ .x = 245, .y = 700, .w = 10, .h = 20 },
+        .displays = &.{.{
+            .id = 1,
+            .appkit_frame = .{ .x = 0, .y = 0, .w = 1440, .h = 900 },
+            .quartz_bounds = .{ .x = 0, .y = 0, .w = 1440, .h = 900 },
+        }},
+    };
+    var opened = snapshot;
+    opened.windows = &.{ stable, candidate_fixture };
+    var bytes: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer bytes.deinit();
+    var json: std.json.Stringify = .{ .writer = &bytes.writer, .options = .{} };
+    try json.write(CaptureSelectionTranscript{
+        .schema = "maru.session-host-cr6d-ime-candidate-selection.v1",
+        .app_pid = 999,
+        .before = snapshot,
+        .opened = opened,
+    });
+    const selected = try selectCaptureCandidate(std.testing.allocator, bytes.written());
+    try std.testing.expectEqual(candidate_fixture.id, selected.window_id);
+    try std.testing.expectEqual(candidate_fixture.owner.pid, selected.owner_pid);
+
+    // A missing OS window is the only observation that may be sampled again. Even when no
+    // window has appeared yet, screen/input mutation must not be hidden behind that absence.
+    opened.windows = &.{stable};
+    bytes.clearRetainingCapacity();
+    json = .{ .writer = &bytes.writer, .options = .{} };
+    try json.write(CaptureSelectionTranscript{
+        .schema = "maru.session-host-cr6d-ime-candidate-selection.v1",
+        .app_pid = 999,
+        .before = snapshot,
+        .opened = opened,
+    });
+    try std.testing.expectError(error.CandidateMissing, selectCaptureCandidate(std.testing.allocator, bytes.written()));
+    opened.counters.pty_input_bytes += 1;
+    bytes.clearRetainingCapacity();
+    json = .{ .writer = &bytes.writer, .options = .{} };
+    try json.write(CaptureSelectionTranscript{
+        .schema = "maru.session-host-cr6d-ime-candidate-selection.v1",
+        .app_pid = 999,
+        .before = snapshot,
+        .opened = opened,
+    });
+    try std.testing.expectError(error.CounterMutation, selectCaptureCandidate(std.testing.allocator, bytes.written()));
+    opened.counters = snapshot.counters;
+
+    var sibling = candidate_fixture;
+    sibling.id += 1;
+    opened.windows = &.{ stable, candidate_fixture, sibling };
+    bytes.clearRetainingCapacity();
+    json = .{ .writer = &bytes.writer, .options = .{} };
+    try json.write(CaptureSelectionTranscript{
+        .schema = "maru.session-host-cr6d-ime-candidate-selection.v1",
+        .app_pid = 999,
+        .before = snapshot,
+        .opened = opened,
+    });
+    try std.testing.expectError(error.CandidateAmbiguous, selectCaptureCandidate(std.testing.allocator, bytes.written()));
+}
+
+test "v2b1 pixel publisher binds five-row authority capture and cleanup" {
+    const display = [_]DisplayTranscript{
+        .{
+            .id = 1,
+            .appkit_frame = .{ .x = 0, .y = 0, .w = 1440, .h = 900 },
+            .quartz_bounds = .{ .x = 0, .y = 0, .w = 1440, .h = 900 },
+        },
+        .{
+            .id = 2,
+            .appkit_frame = .{ .x = 0, .y = -900, .w = 1440, .h = 900 },
+            .quartz_bounds = .{ .x = 0, .y = 900, .w = 1440, .h = 900 },
+        },
+    };
+    const anchor: Rect = .{ .x = 245, .y = 700, .w = 10, .h = 20 };
+    var windows: [required_observations][2]Window = undefined;
+    var rows: [required_observations]RawRow = undefined;
+    for (&rows, 0..) |*row, index| {
+        windows[index] = .{ stable, candidate_fixture };
+        windows[index][1].id = @intCast(100 + index);
+        row.* = .{
+            .before = .{ .windows = &.{stable}, .counters = counters, .anchor_appkit = anchor, .displays = &display },
+            .opened = .{ .windows = &windows[index], .counters = counters, .anchor_appkit = anchor, .displays = &display },
+            .closed = .{ .windows = &.{stable}, .counters = counters, .anchor_appkit = anchor, .displays = &display },
+        };
+    }
+    var transcript: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer transcript.deinit();
+    var transcript_json: std.json.Stringify = .{ .writer = &transcript.writer, .options = .{} };
+    try transcript_json.write(RawTranscript{
+        .schema = "maru.session-host-cr6d-ime-candidate-transcript.v1",
+        .app_pid = 999,
+        .source_id = "com.apple.inputmethod.Korean.2SetKorean",
+        .rows = &rows,
+    });
+    const evidence = PixelEvidence{
+        .schema = "maru.session-host-cr6d-ime-candidate-pixel-evidence.v1",
+        .runtime_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        .surface_id = 7,
+        .frame_generation = 9,
+        .first_rect = anchor,
+        .window_id = candidate_fixture.id,
+        .owner_pid = apple_owner.pid,
+        .bundle_id = apple_owner.bundle_id,
+        .signing_id = apple_owner.signing_id,
+        .apple_signed = true,
+        .layer = candidate_fixture.layer,
+        .bounds = candidate_fixture.bounds,
+        .pixel_width = 180,
+        .pixel_height = 120,
+        .capture_sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        .capture_complete = true,
+        .input_source_restored = true,
+        .first_responder_restored = true,
+        .restore_record_absent = true,
+    };
+    var evidence_bytes: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer evidence_bytes.deinit();
+    var evidence_json: std.json.Stringify = .{ .writer = &evidence_bytes.writer, .options = .{} };
+    try evidence_json.write(evidence);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root_buf);
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrintZ(&path_buf, "{s}/pixel.json", .{root_buf[0..root_len]});
+    try publishPixelObservation(std.testing.allocator, transcript.written(), evidence_bytes.written(), path);
+    const artifact = try tmp.dir.readFileAlloc(std.testing.io, "pixel.json", std.testing.allocator, .limited(max_artifact_bytes));
+    defer std.testing.allocator.free(artifact);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, artifact, "maru.session-host-cr6d-ime-candidate-pixel.v1"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, artifact, evidence.capture_sha256));
+
+    // A digest of a real window is insufficient when the caret moved during the five cycles.
+    var drifted = anchor;
+    drifted.x += 1;
+    rows[2].closed.anchor_appkit = drifted;
+    transcript.clearRetainingCapacity();
+    transcript_json = .{ .writer = &transcript.writer, .options = .{} };
+    try transcript_json.write(RawTranscript{
+        .schema = "maru.session-host-cr6d-ime-candidate-transcript.v1",
+        .app_pid = 999,
+        .source_id = "com.apple.inputmethod.Korean.2SetKorean",
+        .rows = &rows,
+    });
+    const drift_path = try std.fmt.bufPrintZ(&path_buf, "{s}/drift.json", .{root_buf[0..root_len]});
+    try std.testing.expectError(error.AnchorDrift, publishPixelObservation(
+        std.testing.allocator,
+        transcript.written(),
+        evidence_bytes.written(),
+        drift_path,
+    ));
+
+    rows[2].closed.anchor_appkit = anchor;
+    transcript.clearRetainingCapacity();
+    transcript_json = .{ .writer = &transcript.writer, .options = .{} };
+    try transcript_json.write(RawTranscript{
+        .schema = "maru.session-host-cr6d-ime-candidate-transcript.v1",
+        .app_pid = 999,
+        .source_id = "com.apple.inputmethod.Korean.2SetKorean",
+        .rows = &rows,
+    });
+    var wrong_rect = evidence;
+    wrong_rect.first_rect = drifted;
+    evidence_bytes.clearRetainingCapacity();
+    evidence_json = .{ .writer = &evidence_bytes.writer, .options = .{} };
+    try evidence_json.write(wrong_rect);
+    const wrong_rect_path = try std.fmt.bufPrintZ(&path_buf, "{s}/wrong-rect.json", .{root_buf[0..root_len]});
+    try std.testing.expectError(error.AnchorDrift, publishPixelObservation(
+        std.testing.allocator,
+        transcript.written(),
+        evidence_bytes.written(),
+        wrong_rect_path,
+    ));
+
+    // An exact display edge is valid. A vertically stacked monitor has the same x band, but
+    // neither a crossing nor a wholly different-display window may borrow caret authority.
+    for ([_]struct { y: f64, valid: bool }{
+        .{ .y = 780, .valid = true },
+        .{ .y = 850, .valid = false },
+        .{ .y = 1100, .valid = false },
+    }, 0..) |placement, index| {
+        for (&windows) |*pair| pair[1].bounds.y = placement.y;
+        transcript.clearRetainingCapacity();
+        transcript_json = .{ .writer = &transcript.writer, .options = .{} };
+        try transcript_json.write(RawTranscript{
+            .schema = "maru.session-host-cr6d-ime-candidate-transcript.v1",
+            .app_pid = 999,
+            .source_id = "com.apple.inputmethod.Korean.2SetKorean",
+            .rows = &rows,
+        });
+        var off_display = evidence;
+        off_display.bounds.y = placement.y;
+        evidence_bytes.clearRetainingCapacity();
+        evidence_json = .{ .writer = &evidence_bytes.writer, .options = .{} };
+        try evidence_json.write(off_display);
+        const off_display_path = try std.fmt.bufPrintZ(&path_buf, "{s}/off-display-{d}.json", .{ root_buf[0..root_len], index });
+        if (placement.valid) {
+            try publishPixelObservation(std.testing.allocator, transcript.written(), evidence_bytes.written(), off_display_path);
+        } else {
+            try std.testing.expectError(error.CandidateGeometryDrift, publishPixelObservation(
+                std.testing.allocator,
+                transcript.written(),
+                evidence_bytes.written(),
+                off_display_path,
+            ));
+        }
+    }
 }

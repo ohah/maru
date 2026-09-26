@@ -2,9 +2,16 @@
 
 등폭 GPU 텍스트 뷰 기반 편집기(N1~N5)의 구현 계획이다. 계약의 단일 출처는 [네이티브 편집기](../native-editor.md)다.
 
-## 네이티브 편집기 (N1 진행 중 — 제품 pane에 떠 있다)
+## 네이티브 편집기 (N1~N5 모두 제품에 섰다 — 단계마다 남은 것이 있다)
 
 계약은 [native-editor.md](../native-editor.md)가 소유한다. 여기서는 **순서와 각 단계의 출하 가능 여부만** 정한다.
+
+**지금 자리(2026-09-26 확인).** 이 절의 제목은 오래 「N1 진행 중」이었는데, 본문과 이력은 다섯 단계가 모두 제품에 선 것을 적는다 — N1(파일이
+뜬다 · 2026-08-14), N1.5(비교 본문 b·c·e), N2(버퍼·편집·검색·멀티커서), N3(조합 글자 표시 · 2026-08-27), N4(구문 색 2층·LSP 표시),
+N5(미니맵 N5a `c0aa24b11` · 막대와 미니맵 N5b `47eecce79`). **「섰다」는 「끝났다」가 아니다** — 단계마다 본문의 「남은 것」이 아직 열린 것을
+적는다. 확인한 것 하나: **N3 의 남은 셋**(`replacementRange` · `markedRange`/`selectedRange` 의 실제 위치 · 멀티 커서 × IME)은 그대로 열려 있다
+(`MaruAppHost.swift` 의 `insertText`·`setMarkedText` 는 `replacementRange` 를 쓰지 않고 `markedRange()` 는 빈 범위를 돌려준다). 단계 뒤의 일은
+아래 「네이티브 편집기 후속」 표가 소유한다.
 2026-08-09 사용자 결정으로 `text` kind와 diff 본문을 CM6에서 Zig+Metal로 이관하며, 마크다운 렌더는 웹에 남는다.
 
 - **N0b — 시각 기준 수령(코드 변경 없음).** [file-panel.md](../file-panel.md) §1·[editor-surface.md](../editor-surface.md)

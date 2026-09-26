@@ -13947,6 +13947,32 @@ pub const AppSession = struct {
             self.dock.view == .source_control and self.scm_tab == .changes;
     }
 
+    /// 편집기 caret 이 지금 **그려지고 있는가**. blink 위상 게이트와 재투영(`metal_dirty`)이 **같은
+    /// 판정**을 쓰게 하는 단일 출처다(도크 검색·커밋 상자와 같은 규율) — 조건을 두 곳에 복제하면
+    /// 하나만 바뀌어도 blink 만 조용히 어긋난다.
+    ///
+    /// **왜 필요한가**: `updateCursorBlink` 의 게이트는 터미널 커서(`cursor_blinks`)·오버레이·텍스트
+    /// blink·rename·사이드바 검색·도크 검색·커밋 상자 일곱뿐이었다. 편집기 pane 이 활성이면 그 일곱이
+    /// **전부 거짓**이라(활성 Term 이 터미널이 아니면 `readActiveSnapshot` 이 중립 스냅샷을 내
+    /// `cursor_visible=false`) early-return 으로 `resetCursorBlink()` 에 닿아 `blink_visible` 이
+    /// **영구 `true`** 로 굳었다 — 편집기 커서가 안 깜빡였다. 같은 누락으로 도크 검색 caret·커밋 상자
+    /// caret 이 앞서 두 번 새어 그 주석이 이 함수 위쪽에 남아 있다.
+    ///
+    /// **`cursor.blink` 설정과 무관하다** — 오버레이(⌘F·⌘K) 입력 caret 과 같은 부류의 **텍스트 입력
+    /// caret** 이다(docs/configuration.md `cursor.blink`: *"오버레이 입력 caret 은 이 설정과 무관하게
+    /// 깜빡인다"*). 그 설정은 **앱의 DECSCUSR 위임**을 뜻하고, 편집기에는 그런 앱이 없다.
+    pub fn editorCaretBlinks(self: *const AppSession) bool {
+        if (!self.surface_initialized or self.tabs.items.len == 0) return false;
+        if (self.app_window.active_tab >= self.tabs.items.len) return false;
+        const tab = self.tabs.items[self.app_window.active_tab];
+        if (tab.active_pane >= tab.panes.items.len) return false;
+        const pane = tab.panes.items[tab.active_pane];
+        if (pane.active_term >= pane.terms.items.len) return false;
+        const term = pane.terms.items[pane.active_term];
+        // **문서가 있어야 caret 이 그려진다** — `editor_view/frame.zig` 의 `paintCarets` 가 그 자리다.
+        return term.kind == .editor and term.rt.editor_doc != null;
+    }
+
     /// Phase 4g-1 후속(14차 리뷰 [0][3]): 입력이 **터미널 뷰→Zig handleKeyEvent 경로**로 가야 하는가 — 모달(notice 제외,
     /// anyModalOverlayOpen) 또는 터미널-라우팅 텍스트 입력(주소창 편집·rename·사이드바 검색·Session Dock 검색) 중 하나라도
     /// 활성. focus-sync 불변식(reconcileWebFocus)의 **override 단일 출처**로 쓴다: 이 값이면 웹뷰가 아니라 터미널 뷰가
@@ -15519,10 +15545,15 @@ pub const AppSession = struct {
         // 쓴다 — 그 함수의 계약이 "caret rect·inputFocus·terminalOwnsInput이 같은 판정을 쓴다"이고
         // blink도 그 caret의 일부다.
         const scm_commit = self.scmCommitOwnsInput();
+        // 편집기 caret 도 같은 부류다 — `caret_visible`(=`blink_visible`)로 **셀을 넣었다 뺐다** 하는
+        // 하드 토글이라(rename·검색 caret 과 동형) 커서 suffix 페이드로는 못 숨기고 full rebuild 가
+        // 필요하다. 게이트를 빠뜨리면 **일곱이 전부 거짓이라 early-return** 으로 위상이 아예 안 돌고
+        // `blink_visible` 이 `true` 로 굳는다(도크 검색·커밋 상자가 겪은 그 함정의 세 번째다).
+        const editor_caret = self.editorCaretBlinks();
         // IME 조합 중에는 커서를 **고정**한다(깜빡이면 커서가 덮은 조합 글자가 깜빡 사라짐). 터미널은 cursor_blinks가
         // Surface preedit로 이미 막지만, 오버레이/rename/검색도 imeComposingActive 단일 출처로 함께 막는다.
         // 스피너는 이 조건에서 제외한다(advanceAgentSpinner가 별도로 진행) — 커서/텍스트/rename/검색 caret blink만 본다.
-        if ((!cursor_blinks and !overlay_open and !text_blinks and !rename_active and !sidebar_search and !dock_search and !scm_commit) or input_ops.imeComposingActive(self)) {
+        if ((!cursor_blinks and !overlay_open and !text_blinks and !rename_active and !sidebar_search and !dock_search and !scm_commit and !editor_caret) or input_ops.imeComposingActive(self)) {
             self.resetCursorBlink(); // 깜빡일 게 없거나 조합 중 — 보이는 위상 고정
             return;
         }
@@ -15572,7 +15603,7 @@ pub const AppSession = struct {
             // 텍스트 blink·rename caret·검색 caret은 blink_visible로 **하드 토글**되는 별도 glyph 셀이라 full rebuild가 필요하다
             // (커서 suffix 페이드로 못 숨김). 이들은 페이드 없이 위상 경계에서 즉각 on/off한다. 에이전트 스피너는 자기 위상(약
             // 133ms)에서 따로 dirty하므로 여기엔 안 넣는다(옛 펄스 폐기 후 500ms 재투영은 byte-identical 낭비, #3).
-            if (text_blinks or rename_active or sidebar_search or dock_search or scm_commit) self.metal_dirty = true;
+            if (text_blinks or rename_active or sidebar_search or dock_search or scm_commit or editor_caret) self.metal_dirty = true;
         }
         // 반주기 안 위치(ms) — 아래 페이드 램프의 위상 입력. baseline을 위에서 전진시켰으므로 항상 [0, interval_ms).
         const into_ms: u32 = @intCast(@divFloor(now_ns - self.blink_phase_ns, std.time.ns_per_ms));
@@ -46063,6 +46094,101 @@ test "cursor blink 위상: tick 수가 아니라 wall-clock 경과로 진행한�
     session.resetCursorBlink();
     try std.testing.expect(session.blink_visible);
     try std.testing.expectEqual(@as(i128, 0), session.blink_phase_ns);
+}
+
+test "BLINK-E1 편집기 pane 에서도 커서가 깜빡인다 — 게이트가 빠지면 위상이 아예 안 돈다" {
+    // **같은 뿌리로 세 번째다**(2026-09-26). `updateCursorBlink` 의 게이트 일곱(터미널 커서·오버레이·
+    // 텍스트 blink·rename·사이드바 검색·도크 검색·커밋 상자)이 편집기 pane 에서 **전부 거짓**이라
+    // early-return 으로 `resetCursorBlink()` 에 닿았고, `blink_visible` 이 **영구 `true`** 로 굳었다.
+    // 앞서 도크 검색 caret·커밋 상자 caret 이 정확히 같은 함정을 겪어 그 주석이 이 함수 위에 남아 있다.
+    //
+    // **배선은 처음부터 멀쩡했다** — `editor_view/frame.zig` 의 `paintCarets` 가
+    // `if (!props.caret_visible) return 0;` 로 이미 막는다. 안 돌던 것은 **위상**이다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "blink-e1.txt", .data = "hello\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "blink-e1.txt" });
+    defer allocator.free(path);
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(io, allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.backing_width_px = session.sidebar_width_px + 800;
+    session.backing_height_px = 600;
+    session.window_padding_px = .{};
+    session.surface_initialized = true;
+
+    // **픽스처가 개념을 갈라야 한다**(TIG6 가 주석으로 경고한 그 함정 — 적대적 R4 가 실제로 밟았다).
+    // pane 이 하나뿐이면 `panes[0]` 과 `panes[active_pane]` 이 **같은 자리**라, 활성 대신 첫 번째를
+    // 보는 변이가 **살아남는다**. 그래서 나눠 두고 **양쪽을 다** 잰다.
+    try pane_ops.splitActivePane(session, .horizontal);
+    const tab = tab_ops.activeTab(session);
+    try std.testing.expectEqual(@as(usize, 2), tab.panes.items.len);
+    try std.testing.expect(tab.active_pane != 0);
+    const first_pane = tab.panes.items[0];
+    const first_term = first_pane.terms.items[first_pane.active_term];
+
+    // ⑴ **둘 다 터미널이면 거짓이다** — 편집기 갈래가 남의 몫을 가져가지 않는다는 대조군.
+    try std.testing.expect(!session.editorCaretBlinks());
+
+    // ⑵ 편집기 Term 을 **활성 pane** 에 연다 — 문서까지 있어야 caret 이 그려진다.
+    const term = try editor_ops.openPathInActivePane(session, path);
+    try std.testing.expect(term.kind == .editor);
+    try std.testing.expect(term.rt.editor_doc != null);
+    try std.testing.expect(session.editorCaretBlinks());
+
+    // ⑶ **문서가 없으면 거짓이다** — 그리지도 않는 caret 때문에 매 틱 전체 grid 를 다시 투영하면
+    //    idle 을 못 든다(사이드바 검색이 폭 10칸 미만을 거르는 것과 같은 규율).
+    const saved_doc = term.rt.editor_doc;
+    term.rt.editor_doc = null;
+    try std.testing.expect(!session.editorCaretBlinks());
+    term.rt.editor_doc = saved_doc;
+
+    // ⑶′ **첫 pane 만 편집기면 거짓이다** — 활성이 아니라 첫 번째를 보는 변이가 여기서 죽는다.
+    //     ⑵ 와 **반대 방향**이라 둘이 함께 있어야 상수를 낸 변이도 산 채로 못 지난다.
+    const saved_kind = first_term.kind;
+    first_term.kind = .editor;
+    const saved_active_kind = term.kind;
+    term.kind = .terminal;
+    try std.testing.expect(!session.editorCaretBlinks());
+    first_term.kind = saved_kind;
+    term.kind = saved_active_kind;
+    try std.testing.expect(session.editorCaretBlinks());
+
+    // ⑷ **위상이 실제로 돈다.** 반주기를 지나면 뒤집힌다 — 게이트가 빠지면 여기서 `true` 로 굳는다.
+    session.blink_visible = true;
+    session.metal_dirty = false;
+    testAdvanceBlinkHalves(session, 1);
+    session.updateCursorBlink(session.readActiveSnapshot(false));
+    try std.testing.expect(!session.blink_visible);
+
+    // ⑸ **재투영이 선다.** 위상만 돌고 `metal_dirty` 가 안 서면 화면이 그대로라 **여전히 안 깜빡인다**
+    //    — 도크 검색 caret 이 정확히 그 상태였다(「위상은 도는데 재투영이 없다」).
+    try std.testing.expect(session.metal_dirty);
+
+    // ⑹ **되돌아온다** — 한 번만 뒤집고 마는 변이를 막는다.
+    testAdvanceBlinkHalves(session, 1);
+    session.updateCursorBlink(session.readActiveSnapshot(false));
+    try std.testing.expect(session.blink_visible);
+
+    // **IME 조합 고정은 여기서 안 잰다**(적대적 R5' — 안 재는 자리로 남긴다). 조합 중 고정은
+    // 게이트 **괄호 바깥**의 `or input_ops.imeComposingActive(self)` 가 지키고 이 변경이 그 자리를
+    // 안 건드린다 — 기존 `cursor blink: IME 조합 중` 판정자의 몫이다. 여기서 재려면 판정자가
+    // `editor_preedit` 를 위조해야 하는데 그 버퍼는 **제품이 소유**해서, 빌린 메모리를 제품이
+    // 해제하려 들어 `panic: Invalid free` 가 났다. 위조가 불가능한 것이 아니라 **위험하다** —
+    // 소유권을 속이는 판정자는 재려던 것 대신 자기 자신을 잰다.
 }
 
 test "cursor blink: 틱마다 토글·steady/조합 고정·활동 리셋·오버레이 caret도 깜빡(suffix-trim 재활용)" {

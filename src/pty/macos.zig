@@ -1633,13 +1633,37 @@ const EnvStorage = struct {
         //
         // 위장의 명분도 사라졌다. 그 앱들이 **이미지 지원은 TERM_PROGRAM이 아니라 `a=q` APC 질의로
         // 감지**하고(Claude Code 바이너리에 `\x1b_Gi=31,...,a=q,t=d,f=24;AAAA` + `;OK` 파싱이 들어 있다),
-        // maru가 이제 그 질의에 답하므로(K5) 이미지 경로는 이름과 무관하게 산다. 남는 손실은 **알림뿐**이고,
-        // 그건 사용자가 claude `settings.json`/codex `config.toml`에서 채널을 명시해 되찾을 수 있다.
+        // maru가 이제 그 질의에 답하므로(K5) 이미지 경로는 이름과 무관하게 산다.
         // 신원을 속여서 얻는 편의보다 **속이지 않는 쪽**을 택한다(사용자 결정 2026-09-08).
+        //
+        // ⚠️ **「남는 손실은 알림뿐」이라고 적었던 것은 틀렸다**(2026-09-26 정정). 둘째 손실이 있었다 —
+        // **OSC 8 하이퍼링크**다. 같은 화이트리스트를 node `supports-hyperlinks` 가 쓰는데
+        // (`iTerm.app`·`WezTerm`·`vscode`·`ghostty`·`zed`·`Orca`, 나머지는 전부 `false`), 거기 없는
+        // maru 에는 앱이 링크를 **아예 안 보낸다.** 알림과 달리 앱 설정으로 되찾을 길도 없었다.
+        // 아래 `FORCE_HYPERLINK` 가 그 자리를 **신원을 안 속이고** 메운다.
+        //
+        // 알림 손실은 그대로다 — 사용자가 claude `settings.json`/codex `config.toml`에서 채널을 명시해
+        // 되찾을 수 있다.
         //
         // maru는 OSC 9/777을 직접 파싱해(core.zig) 네이티브 알림으로 띄우므로, 앱이 보내기만 하면 뜬다.
         // 자기식별의 정식 채널은 XTVERSION(`CSI > q` → `DCS > | maru <version> ST`)이고 이 값은 그 보조다.
         try appendOwnedEnv(allocator, entries, try allocator.dupeZ(u8, "TERM_PROGRAM=maru"));
+        // **능력은 알린다 — 신원은 그대로다**(2026-09-26). 위 결정은 *"나는 ghostty다"* 라는 **거짓말**을
+        // 버린 것이지 *"나는 OSC 8 을 지원한다"* 라는 **참말**까지 막지 않는다.
+        //
+        // 하이퍼링크에는 **질의 프로토콜이 없다.** 이미지는 `a=q` APC 로 물어볼 수 있어 이름과 무관하게
+        // 살았지만(위 문단), OSC 8 은 그런 것이 없어 앱들이 `TERM_PROGRAM` **화이트리스트**로 짐작한다
+        // (node `supports-hyperlinks`: `iTerm.app`·`WezTerm`·`vscode`·`ghostty`). `maru` 는 그 명단에
+        // 없으니 **아예 안 보낸다** — 실측 2026-09-26: 같은 pane 에서 `printf '\e]8;;…'` 는 눌리는데
+        // Claude Code 의 링크는 밑줄조차 안 떴고, `FORCE_HYPERLINK=1` 로 띄우니 살아났다.
+        //
+        // 그래서 **그 생태계의 capability 변수**로 참말을 한다. `FORCE_COLOR` 를 **떨구는** 것과 모순이
+        // 아니다 — 색은 `COLORTERM`/`TERM` 이라는 **표준 채널**이 있어 force 변수가 그것을 덮어 해로운
+        // 반면, 하이퍼링크는 채널이 이것뿐이다.
+        //
+        // **사용자 값이 이긴다** — 위 루프가 부모의 `FORCE_HYPERLINK` 를 안 떨구고, 중복 키는 **첫 항목**이
+        // 이긴다. 끈 사람(`FORCE_HYPERLINK=0`)의 뜻이 유지된다.
+        try appendOwnedEnv(allocator, entries, try allocator.dupeZ(u8, "FORCE_HYPERLINK=1"));
         if (zdotdir) |zd| {
             try appendOwnedEnv(allocator, entries, try std.fmt.allocPrintSentinel(allocator, "ZDOTDIR={s}", .{zd}, 0));
             if (old_zdotdir) |prev| {
@@ -2278,6 +2302,68 @@ test "EnvStorage empty env inherits the parent but forces TERM/COLORTERM to Maru
     try std.testing.expect(maru_term);
     try std.testing.expect(maru_colorterm);
     try std.testing.expect(i >= 2); // 부모 env도 물려받았다(최소 PATH 등)
+}
+
+test "ENVHL1 능력은 알리고 신원은 안 속인다 — FORCE_HYPERLINK 를 주입하되 사용자 값이 이긴다" {
+    // **하이퍼링크에는 질의 프로토콜이 없다.** 이미지는 `a=q` APC 로 물어볼 수 있어 `TERM_PROGRAM`
+    // 화이트리스트와 무관하게 살았지만, OSC 8 은 그런 것이 없어 앱이 이름으로 짐작한다. `maru` 는
+    // node `supports-hyperlinks` 의 명단에 없으니 **아예 안 보낸다**(실측 2026-09-26: 같은 pane 에서
+    // `printf '\e]8;;…'` 는 눌리는데 Claude Code 링크는 밑줄조차 안 떴고, `FORCE_HYPERLINK=1` 로
+    // 띄우니 살아났다).
+    //
+    // 이것은 **참말**이다 — maru 는 실제로 OSC 8 을 지원한다. *"나는 ghostty다"* 라는 거짓말을 버린
+    // 결정(2026-09-08)과 충돌하지 않는다.
+    {
+        var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-256color", null, null, null, null);
+        defer storage.deinit();
+        var count: usize = 0;
+        var is_on = false;
+        const envp = storage.envpPtr();
+        var i: usize = 0;
+        while (envp[i]) |entry| : (i += 1) {
+            const slice = std.mem.span(entry);
+            if (!std.mem.startsWith(u8, slice, "FORCE_HYPERLINK=")) continue;
+            count += 1;
+            is_on = std.mem.eql(u8, slice, "FORCE_HYPERLINK=1");
+        }
+        try std.testing.expectEqual(@as(usize, 1), count);
+        try std.testing.expect(is_on);
+    }
+
+    // **끈 사람의 뜻이 이긴다.** 부모 값을 안 떨구고, 중복 키는 **첫 항목**이 이긴다(부모가 먼저
+    // 들어간다) — 그래서 `FORCE_HYPERLINK=0` 을 둔 사용자에게 우리가 1 을 강요하지 않는다.
+    // 이 단언이 없으면 「부모 것도 떨구고 무조건 1」 인 변이가 살아남는다.
+    //
+    // ⚠️ **`init` 의 둘째 인자는 부모 환경이 아니다** — 그것은 «명시 env» 이고, 그 경우 부모 상속
+    // 경로(`appendParentEnv`)를 **아예 안 지난다**(적대적 S3 가 이 실수로 살아남았다). 부모 쪽을
+    // 재려면 `initWithParentSnapshot` 에 스냅샷으로 넘겨야 한다.
+    {
+        var storage = try EnvStorage.initWithParentSnapshot(std.testing.allocator, &.{}, &.{"PATH=/usr/bin", "FORCE_HYPERLINK=0"}, &.{}, "xterm-256color", null, null, null, null, null);
+        defer storage.deinit();
+        const envp = storage.envpPtr();
+        var first: ?[]const u8 = null;
+        var i: usize = 0;
+        while (envp[i]) |entry| : (i += 1) {
+            const slice = std.mem.span(entry);
+            if (!std.mem.startsWith(u8, slice, "FORCE_HYPERLINK=")) continue;
+            if (first == null) first = slice; // 첫 항목이 이긴다
+        }
+        try std.testing.expectEqualStrings("FORCE_HYPERLINK=0", first.?);
+    }
+
+    // **신원은 그대로다** — 능력을 알린다고 이름까지 바꾸지 않는다(그 거래는 2026-09-08 에 버렸다).
+    {
+        var storage = try EnvStorage.init(std.testing.allocator, &.{}, &.{}, "xterm-256color", null, null, null, null);
+        defer storage.deinit();
+        const envp = storage.envpPtr();
+        var i: usize = 0;
+        while (envp[i]) |entry| : (i += 1) {
+            const slice = std.mem.span(entry);
+            if (std.mem.startsWith(u8, slice, "TERM_PROGRAM=")) {
+                try std.testing.expectEqualStrings("TERM_PROGRAM=maru", slice);
+            }
+        }
+    }
 }
 
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;

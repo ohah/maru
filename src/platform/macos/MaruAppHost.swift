@@ -566,22 +566,53 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
             return NSAttributedString(string: context)
         }
         if let editor = controller?.imeEditorRanges() {
-            if !markedTextBuffer.isEmpty, range.location >= editor.markedStart {
-                let relative = range.location - editor.markedStart
-                let count = markedTextBuffer.utf16.count
-                if relative <= count, range.length <= count - relative {
-                    actualRange?.pointee = range
-                    return NSAttributedString(string: (markedTextBuffer as NSString).substring(
-                        with: NSRange(location: relative, length: range.length)))
-                }
-            }
-            if let text = controller?.imeEditorSubstring(range) {
+            if let text = editorSubstring(range, ranges: editor) {
                 actualRange?.pointee = range
                 return NSAttributedString(string: text)
             }
         }
         imeLog("? attributedSubstring loc=\(range.location) len=\(range.length) -> nil")
         return nil
+    }
+
+    // During composition AppKit queries a virtual document: the selected
+    // canonical span is replaced by marked text. A query may cross either
+    // seam, so reading only the marked buffer or only the document gives the
+    // wrong context to reconversion input methods.
+    private func editorSubstring(_ range: NSRange, ranges: (selectedStart: Int, selectedLength: Int, markedStart: Int)) -> String? {
+        guard let controller, range.location >= 0, range.length >= 0, range.location != NSNotFound else { return nil }
+        let (end, endOverflow) = range.location.addingReportingOverflow(range.length)
+        guard !endOverflow else { return nil }
+        if markedTextBuffer.isEmpty { return controller.imeEditorSubstring(range) }
+        let markedCount = markedTextBuffer.utf16.count
+        let (markedEnd, markOverflow) = ranges.markedStart.addingReportingOverflow(markedCount)
+        let (selectedEnd, selectOverflow) = ranges.selectedStart.addingReportingOverflow(ranges.selectedLength)
+        guard !markOverflow, !selectOverflow, ranges.markedStart == ranges.selectedStart else { return nil }
+        var parts = ""
+        if range.location < ranges.markedStart {
+            let prefixEnd = min(end, ranges.markedStart)
+            guard let prefix = controller.imeEditorSubstring(NSRange(location: range.location, length: prefixEnd - range.location)) else { return nil }
+            parts += prefix
+        }
+        let markFrom = max(range.location, ranges.markedStart)
+        let markTo = min(end, markedEnd)
+        if markFrom < markTo {
+            let markedSlice = NSRange(location: markFrom - ranges.markedStart, length: markTo - markFrom)
+            guard let textRange = Range(markedSlice, in: markedTextBuffer) else { return nil }
+            let markedPart = markedTextBuffer[textRange]
+            // Foundation can map a half-surrogate NSRange to an empty String
+            // range. Keep the same strict UTF-16 boundary rule as the Zig ABI.
+            guard markedPart.utf16.count == markedSlice.length else { return nil }
+            parts += markedPart
+        }
+        if end > markedEnd {
+            let suffixFrom = max(range.location, markedEnd)
+            let (documentFrom, offsetOverflow) = selectedEnd.addingReportingOverflow(suffixFrom - markedEnd)
+            guard !offsetOverflow,
+                  let suffix = controller.imeEditorSubstring(NSRange(location: documentFrom, length: end - suffixFrom)) else { return nil }
+            parts += suffix
+        }
+        return parts
     }
 
     func validAttributesForMarkedText() -> [NSAttributedString.Key] {

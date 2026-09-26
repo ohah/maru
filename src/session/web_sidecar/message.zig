@@ -40,6 +40,8 @@ pub const Tag = enum(u8) {
     /// 위치 요청에 줄 좌표(W5b2) — 허용으로 답하기 **전에** 보낸다. sidecar 는 그 브라우저에 DevTools 위치 덮어쓰기를 건다
     /// (Chromium 의 위치 공급자는 CEF 에서 돌지 않는다 — 실측).
     geolocation = 23,
+    /// 사용자가 maru 알림(배너·목록)을 눌렀다(W5c) — sidecar 는 그 페이지 알림의 `click` 을 부른다(Chrome 과 같다).
+    web_notification_click = 24,
 
     hello_ack = 32,
     browser_created = 33,
@@ -65,6 +67,9 @@ pub const Tag = enum(u8) {
     dialog_closed = 45,
     /// 페이지가 권한(카메라·마이크·위치·알림 등)을 청한다(W5b — C6). 답이 올 때까지 페이지의 그 요청만 기다린다.
     permission_request = 46,
+    /// 페이지가 웹 알림을 띄웠다(W5c — C6). Chromium 은 웹 알림을 OS 로 보내지 않으므로(실측) sidecar 의 대리 스크립트가 받아
+    /// 넘긴다 — 그 출처가 알림을 허용했을 때만.
+    web_notification = 47,
 
     pub fn direction(self: Tag) Direction {
         return if (@intFromEnum(self) < 32) .to_sidecar else .to_maru;
@@ -252,6 +257,21 @@ pub const Geolocation = struct {
 };
 
 pub const max_geolocation_accuracy: f64 = 10_000_000;
+
+/// 웹 알림(W5c). `notification` 은 sidecar 가 매긴 번호(0 은 누를 수 없는 알림 — 서비스 워커 등록의 알림), 글은 대화상자 글
+/// 규칙(줄바꿈·탭은 받고 4 KiB), 출처는 `scheme://host[:port]`(빈 글 금지 — 출처를 모르는 알림은 넘기지 않는다).
+pub const WebNotification = struct {
+    browser: BrowserId,
+    notification: u32,
+    origin: []const u8,
+    title: []const u8,
+    body: []const u8 = "",
+};
+
+pub const WebNotificationClick = struct {
+    browser: BrowserId,
+    notification: u32,
+};
 
 pub const PermissionReply = struct {
     browser: BrowserId,
@@ -552,6 +572,7 @@ pub const Message = union(Tag) {
     file_dialog_reply: FileDialogReply,
     permission_reply: PermissionReply,
     geolocation: Geolocation,
+    web_notification_click: WebNotificationClick,
 
     hello_ack: Hello,
     browser_created: BrowserId,
@@ -568,6 +589,7 @@ pub const Message = union(Tag) {
     file_dialog: FileDialog,
     dialog_closed: Request,
     permission_request: PermissionRequest,
+    web_notification: WebNotification,
 };
 
 test "tags split by direction at 32" {

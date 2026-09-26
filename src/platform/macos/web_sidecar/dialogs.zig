@@ -379,6 +379,7 @@ pub fn handle(msg: Message) bool {
         },
         .permission_reply => |value| permissions.reply(value),
         .geolocation => |value| permissions.geolocation(value),
+        .web_notification_click => |value| @import("notifications.zig").click(value),
         .file_dialog_reply => |value| {
             const entry = table.find(value.browser, value.request, .file) orelse return true;
             const pending = table.take(entry);
@@ -406,6 +407,7 @@ pub fn dropBrowser(id: BrowserId) void {
     while (table.takeFor(id, null)) |pending| release(pending);
     forgetPage(id);
     permissions.forgetBrowser(id);
+    @import("notifications.zig").forgetBrowser(id);
 }
 
 /// 종료 — 모든 요청을 놓는다.

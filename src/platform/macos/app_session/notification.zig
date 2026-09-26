@@ -19,6 +19,7 @@ const app_session_mod = @import("../app_session.zig");
 const AppSession = app_session_mod.AppSession;
 const term_ops = @import("term.zig");
 const agent_ops = @import("agent.zig");
+const web_osr = app_session_mod.web_osr;
 const notificationLocation = app_session_mod.notificationLocation;
 const is_macos = app_session_mod.is_macos;
 const notification_location_buf_len = app_session_mod.notification_location_buf_len;
@@ -89,8 +90,11 @@ pub fn acceptNotification(self: *AppSession) void {
     if (len == 0 or sel >= len) return;
     const history_index = len - 1 - sel; // 역순 매핑(목록 0 = 최신 = 히스토리 끝)
     const surface_id = self.notification_history.items[history_index].surface_id;
+    const web_token = self.notification_history.items[history_index].web_token;
     markNotificationsReadBySurface(self, surface_id); // 그 surface를 봤으니 전체 읽음 — 데스크톱 배너 클릭과 동일 정책(통일)
     _ = self.activateSurfaceById(surface_id); // 닫힌 surface면 false(점프 안 함, 패널은 이미 닫음)
+    // W5c: 웹 알림이면 페이지의 `onclick` 도(데스크톱 배너 클릭과 같다).
+    if (web_token != 0) web_osr.clickWebNotification(self.allocator, surface_id, web_token);
 }
 
 pub fn bellFlashTotalTicks(self: *const AppSession) u32 {
@@ -99,6 +103,7 @@ pub fn bellFlashTotalTicks(self: *const AppSession) u32 {
 
 pub fn pendingNotification(self: *AppSession) ?PendingNotification {
     if (!self.surface_initialized) return null;
+    self.notification_web_token_out = 0;
     // OSC 9/777: 발신 surface의 코어가 자기 시퀀스를 파싱한다(reader 스레드가 core_mutex 아래 적용). 예전엔
     // activeSurface().core만 drain해 **비활성 pane/Term이 보낸 OSC 알림이 영영 안 나왔다** — 모든 Term의 코어를
     // 훑어 첫 pending을 그 surface.id로 실어 보낸다(클릭이 발신 Term으로 점프, activateSurfaceById). 한 호출에
@@ -109,6 +114,11 @@ pub fn pendingNotification(self: *AppSession) ?PendingNotification {
     for (self.tabs.items) |tab| {
         for (tab.panes.items) |pane| {
             for (pane.terms.items) |term| {
+                // W5c: Chromium 탭의 웹 알림(PTY 가 없어 아래 검사보다 먼저).
+                if (term.kind == .web) {
+                    if (webNotificationFrom(self, tab, term, focused_term)) |n| return n;
+                    continue;
+                }
                 if (!term.rt.live_initialized or term.rt.terminated) continue; // 종료(미reap) Term은 건너뜀(dispatchBell과 동형)
                 // **훅 모드 Term 은 훅에서 알림이 온다**(계약 §6). 같은 tail(`emitNotification`)을 타므로
                 // 위치 접두·인앱 히스토리·전면 배너 억제가 관측 모드와 똑같이 적용된다.
@@ -179,6 +189,72 @@ pub fn drainOscNotificationFrom(self: *AppSession, tab: *Tab, term: *Term, focus
     return n;
 }
 
+const web_title_bytes = 256;
+const web_body_bytes = 1024;
+
+/// 웹 알림 글 — `out` 길이를 넘으면 글자 경계에서 자르고, 방향 제어(U+061C·U+200E·U+200F·U+202A–U+202E·U+2066–U+2069)와
+/// 보이지 않는 문자(U+00AD·U+200B–U+200D·U+2028·U+2029·U+2060–U+2064·U+206A–U+206F·U+FEFF·태그 U+E0000–U+E007F)를 뺀다.
+/// 올바르지 않은 UTF-8 은 **한 바이트씩** 넘겨 sanitize 가 대체 문자로 바꾼다(sanitize 도 한 바이트씩 다시 읽는다 — 여러
+/// 바이트를 통째로 넘기면 그 안에 숨은 방향 제어가 살아남는다, 적대 검증).
+fn visibleText(text: []const u8, out: []u8) []const u8 {
+    var len: usize = 0;
+    var i: usize = 0;
+    while (i < text.len) {
+        var n = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
+        if (i + n > text.len) n = 1;
+        if (n > 1) {
+            if (std.unicode.utf8Decode(text[i .. i + n])) |cp| switch (cp) {
+                0x00AD, 0x061C, 0x200B...0x200F, 0x2028, 0x2029, 0x202A...0x202E, 0x2060...0x2064, 0x2066...0x206F, 0xFEFF, 0xE0000...0xE007F => {
+                    i += n;
+                    continue;
+                },
+                else => {},
+            } else |_| n = 1;
+        }
+        const bytes = text[i .. i + n];
+        i += n;
+        if (len + n > out.len) break;
+        @memcpy(out[len..][0..n], bytes);
+        len += n;
+    }
+    return out[0..len];
+}
+
+test "web notification text is cut on a character boundary and loses direction and zero-width marks" {
+    var buf: [8]u8 = undefined;
+    try std.testing.expectEqualStrings("가나", visibleText("가나다", &buf));
+    try std.testing.expectEqualStrings("ab", visibleText("a\u{202E}\u{200B}b\u{2066}", &buf));
+    try std.testing.expectEqualStrings("", visibleText("\u{FEFF}\u{E0041}", &buf));
+    // 디코딩에 실패한 머리 바이트는 한 바이트만 — 그 뒤에 숨은 RLO 도 빠진다.
+    try std.testing.expectEqualStrings("\xf0x", visibleText("\xf0\u{202E}x", &buf));
+}
+
+/// W5c: Chromium 탭의 웹 알림 한 건 — 같은 tail(`emitNotificationAt`)을 타므로 위치 접두·인앱 히스토리·전면 배너 억제·누르면
+/// 그 탭으로가 그대로 적용된다. 제목 앞에 사이트 출처를 붙인다(페이지가 정한 제목·탭 이름만으로는 다른 사이트인 척할 수
+/// 있다). 글은 `visibleText`(자르기·방향과 보이지 않는 문자 빼기) 뒤 원격 알림과 같은 정리(`notification_admission.sanitizeOwned`
+/// — 제어·이스케이프 시퀀스 제거)를 거친다. `notifications.web` 이 꺼져 있으면 대기열만 비운다.
+fn webNotificationFrom(self: *AppSession, tab: *Tab, term: *Term, focused_term: ?*Term) ?PendingNotification {
+    const note = web_osr.takeWebNotification(term.surfaceId()) orelse return null;
+    defer note.free(self.allocator);
+    if (!self.loaded_config.config.notifications.web) return null;
+    const admission = app_session_mod.session_host.notification_admission;
+    // sidecar 가 이미 256·1024 바이트로 자르지만 믿지 않는다 — 글자 경계에서 다시 자르고(버리지 않는다), 방향·폭 없는 문자를
+    // 뺀다(제목이 출처 뒤를 거꾸로 보이게 하거나 다른 글을 숨기지 못하게 — 적대 검증). 결과 상한은 대체 문자로 늘어날 몫까지.
+    var title_buf: [web_title_bytes]u8 = undefined;
+    var body_buf: [web_body_bytes]u8 = undefined;
+    var joined_buf: [web_title_bytes + 300]u8 = undefined;
+    const raw_title = std.fmt.bufPrint(&joined_buf, "{s} · {s}", .{ note.origin, visibleText(note.title, &title_buf) }) catch note.origin;
+    const title = admission.sanitizeOwned(self.allocator, raw_title, .single_line, joined_buf.len * 3) catch return null;
+    defer self.allocator.free(title);
+    const body = admission.sanitizeOwned(self.allocator, visibleText(note.body, &body_buf), .multi_line, body_buf.len * 3) catch return null;
+    defer self.allocator.free(body);
+    var loc_buf: [notification_location_buf_len]u8 = undefined;
+    // 히스토리 항목에도 표식을 싣는다(넣기에 실패하면 앞 항목에 잘못 붙지 않게 — 적대 검증).
+    const n = emitNotificationAt(self, term, focused_term, notificationLocation(&loc_buf, tab, term), title, body, null, null, note.token) orelse return null;
+    self.notification_web_token_out = note.token;
+    return n;
+}
+
 /// OSC 9/777 알림 한 건을 인앱 히스토리에 넣고 Swift가 띄울 `PendingNotification`으로 만든다 — **in-process 코어 drain과
 /// host-backed 원격 pull의 공통 tail**(§6.32 GUI surfacing). `title`/`body`는 borrowed(dupe해 notification_*_out 소유로 복사)
 /// 라 caller가 소스를 clear/deinit해도 안전하다. 제목에 위치(탭 › 팬)를 접두하고, 발신 Term이 지금 보고 있는 Term이면
@@ -186,7 +262,7 @@ pub fn drainOscNotificationFrom(self: *AppSession, tab: *Tab, term: *Term, focus
 /// 게이트와 소스 소비는 caller가 한다. 위치 라벨은 메인 스레드 상태(auto_title/custom_name/surface.title)만 읽는다.
 pub fn emitNotification(self: *AppSession, tab: *Tab, term: *Term, focused_term: ?*Term, title: []const u8, body: []const u8) ?PendingNotification {
     var loc_buf: [notification_location_buf_len]u8 = undefined;
-    return emitNotificationAt(self, term, focused_term, notificationLocation(&loc_buf, tab, term), title, body, null, null);
+    return emitNotificationAt(self, term, focused_term, notificationLocation(&loc_buf, tab, term), title, body, null, null, 0);
 }
 
 fn emitNotificationAt(
@@ -198,6 +274,8 @@ fn emitNotificationAt(
     body: []const u8,
     route: ?app_session_mod.StableNotificationRoute,
     occurred_at_ns: ?u64,
+    /// 웹 알림(W5c)의 누르기 표식 — 히스토리 항목에 싣는다. 웹 알림이 아니면 0.
+    web_token: u64,
 ) ?PendingNotification {
     if (self.notification_title_out.len > 0) {
         self.allocator.free(self.notification_title_out);
@@ -229,6 +307,7 @@ fn emitNotificationAt(
         osc_surface_id,
         if (occurred_at_ns) |ns| @as(i128, ns) else @as(i128, std.Io.Clock.awake.now(self.io).nanoseconds),
         route,
+        web_token,
     );
     return .{
         .title = self.notification_title_out,
@@ -380,6 +459,7 @@ pub fn pollRemoteNotification(self: *AppSession, focused_term: ?*Term) ?PendingN
                 notif.body,
                 .{ .host_id = route.host_id, .runtime_id = route.runtime_id, .event_id = route.event_id },
                 route.occurred_at_ns,
+                0,
             );
         }
         return emitNotification(self, tab, term, focused_term, notif.title, notif.body);
@@ -400,6 +480,7 @@ pub fn pushNotificationHistory(self: *AppSession, title: []const u8, body: []con
         surface_id,
         @as(i128, std.Io.Clock.awake.now(self.io).nanoseconds),
         null,
+        0,
     );
 }
 
@@ -410,6 +491,7 @@ fn pushNotificationHistoryAt(
     surface_id: u64,
     timestamp_ns: i128,
     route: ?app_session_mod.StableNotificationRoute,
+    web_token: u64,
 ) bool {
     const title_dup = self.allocator.dupe(u8, title) catch return false;
     const body_dup = self.allocator.dupe(u8, body) catch {
@@ -429,6 +511,7 @@ fn pushNotificationHistoryAt(
         .timestamp_ns = timestamp_ns,
         .route = route,
         .is_read = false,
+        .web_token = web_token,
     }) catch {
         self.allocator.free(title_dup);
         self.allocator.free(body_dup);

@@ -19,6 +19,9 @@ pub const c = @cImport({
     @cInclude("include/capi/cef_frame_capi.h");
     @cInclude("include/capi/cef_context_menu_handler_capi.h");
     @cInclude("include/capi/cef_parser_capi.h"); // W5a — 대화상자 제목의 출처(보안 표시 형식)
+    @cInclude("include/capi/cef_render_process_handler_capi.h"); // W5c — helper 의 웹 알림 대리 스크립트
+    @cInclude("include/capi/cef_v8_capi.h");
+    @cInclude("include/capi/cef_process_message_capi.h");
 });
 
 pub const api_version: c_int = 15400;

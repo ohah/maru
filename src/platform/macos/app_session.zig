@@ -50323,6 +50323,23 @@ test "editor IME explicit UTF-16 replacement keeps the document unchanged until 
     input_ops.imeInsert(session, "나");
     input_ops.imeEnd(session, null);
     try std.testing.expectEqualStrings("a나😀b\n", term.rt.editor_doc.?.file.content);
+    // A disjoint secondary caret must survive an explicit primary range.
+    // The committed text replaces that exact range and is also copied to the
+    // secondary caret, rather than silently collapsing multi-cursor editing.
+    const disjoint_extra = try allocator.alloc(maru.session.editor.selection.Selection, 1);
+    disjoint_extra[0] = maru.session.editor.selection.Selection.at(9);
+    allocator.free(term.rt.editor_extra_selections);
+    term.rt.editor_extra_selections = disjoint_extra;
+    input_ops.imeBegin(session);
+    try std.testing.expect(input_ops.editorImeReplacement(session, 1, 1));
+    try std.testing.expectEqual(@as(usize, 1), term.rt.editor_extra_selections.len);
+    try std.testing.expectEqual(@as(usize, 9), term.rt.editor_extra_selections[0].focus);
+    input_ops.imeMarked(session, "다");
+    try std.testing.expectEqualStrings("a나😀b\n", term.rt.editor_doc.?.file.content);
+    input_ops.imeMarked(session, "");
+    input_ops.imeInsert(session, "다");
+    input_ops.imeEnd(session, null);
+    try std.testing.expectEqualStrings("a다😀b다\n", term.rt.editor_doc.?.file.content);
     session.dispatchAppAction(.toggle_find);
     try std.testing.expect(input_ops.editorImeRanges(session) == null);
 }

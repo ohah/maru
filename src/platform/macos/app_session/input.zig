@@ -91,6 +91,22 @@ test "editor IME UTF-16 offsets round-trip Korean and astral characters" {
     try std.testing.expectEqual(@as(?usize, 8), byteAtUtf16(text_bytes, 4));
     try std.testing.expectEqual(@as(?usize, null), byteAtUtf16(text_bytes, 3));
     try std.testing.expectEqual(@as(?usize, null), utf16AtByte(text_bytes, 5));
+
+    // NFD Hangul and joined emoji render as clusters but NSTextInputClient
+    // ranges still count scalar UTF-16 units. Every valid byte boundary must
+    // round-trip; UTF-8 continuation bytes and the surrogate hole must fail.
+    const mixed = "한😀👩‍💻z";
+    var byte_offset: usize = 0;
+    while (byte_offset <= mixed.len) : (byte_offset += 1) {
+        if (utf16AtByte(mixed, byte_offset)) |unit_offset| {
+            try std.testing.expectEqual(@as(?usize, byte_offset), byteAtUtf16(mixed, unit_offset));
+        } else {
+            try std.testing.expect(byte_offset < mixed.len);
+            try std.testing.expect((mixed[byte_offset] & 0xc0) == 0x80);
+        }
+    }
+    try std.testing.expect(byteAtUtf16(mixed, std.math.maxInt(usize)) == null);
+    try std.testing.expect(utf16AtByte(mixed, mixed.len + 1) == null);
 }
 
 pub const EditorImeRanges = struct {

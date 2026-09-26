@@ -4238,7 +4238,7 @@ pub fn build(b: *std.Build) void {
                     .{ .name = "syntax", .module = syntax_mod },
                 },
             }),
-            .filters = &.{ "원격 펼침", "IG-원격", "원격 신선도", "원격 매핑" },
+            .filters = &.{ "원격 펼침", "IG-원격", "원격 신선도", "원격 매핑", "RF7" },
         });
         remote_activity_vertical_tests.root_module.link_libc = true;
         for ([_][]const u8{ "AppKit", "Metal", "MetalKit", "QuartzCore", "CoreText", "CoreGraphics", "ImageIO" }) |fw| {
@@ -4248,12 +4248,19 @@ pub fn build(b: *std.Build) void {
             .file = b.path("src/platform/macos/coretext_smoke.m"),
             .flags = &.{"-fobjc-arc"},
         });
+        // **`RF7` 을 여기 넣는 이유**(2026-09-26): 그 판정자들은 전수 스위트
+        // (`test-macos-app-host-abi`)에서만 돌았는데, 그 스텝은 **앱이 떠 있으면 로컬에서 돌리면
+        // 안 된다**(가짜 host 가 쓰는 앱을 조용히 죽인다). 그래서 개발 중에는 사실상 안 돌았다.
+        //
+        // `RF7` 과 `RF8` 은 **같은 상태**를 잰다(`remote_events_seen` · `remote_nonce_matched` ·
+        // 미매칭 짝). 같은 스텝에 있어야 한쪽을 건드릴 때 다른 쪽이 말을 한다 — 실측으로도
+        // `remote_events_seen` 초기화를 부수면 **RF7 둘과 RF8 이 함께** 빨개진다(적대적 ME4·ME5).
         const run_remote_activity_vertical = b.addRunArtifact(remote_activity_vertical_tests);
         // 이름 있는 넷 + 원격 wire **매핑** 판정자 + 이 그래프의 이름 없는 test 블록들(필터와
         // 무관하게 컴파일된다). ⚠️ 매핑을 여기 넣은 이유: `agent_image_scan_backend` 는 `maru` 모듈
         // 의존이 있어 **단독 `zig test` 로 안 돌고**, 전체 `zig build test` 는 캐시로 건너뛴다 —
         // 그러면 새 매핑 판정자가 「돌았는지」를 개수로 확인할 데가 아예 없다.
-        run_remote_activity_vertical.addArg("--maru-expect-tests=31"); // +1: RF8 미매칭 짝 리셋(2026-09-26)
+        run_remote_activity_vertical.addArg("--maru-expect-tests=34"); // +3: RF7 셋을 필터에 넣었다(2026-09-26)
         run_remote_activity_vertical.setCwd(b.path("."));
         b.step("test-remote-activity-vertical", "Run the remote activity view vertical judges only").dependOn(&run_remote_activity_vertical.step);
         // 🔥 **CI 에도 건다**(적대적 E2). 판정자의 **실행**은 `test-macos-app-host-abi` 가 4,781 개를

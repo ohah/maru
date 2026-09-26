@@ -281,7 +281,7 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 185: CR6d-v2b0b extends the read-only input probe with terminal byte/screen generation counters
 // and adds one synchronous transcript-to-canonical-evidence leaf. Raw inventories are borrowed
 // only for the call; Zig owns reduction and absent-target publication.
-pub const abi_version: u32 = 188;
+pub const abi_version: u32 = 189;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -15831,8 +15831,10 @@ pub const AppSession = struct {
                 const bytes = editor_term.rt.editor_preedit;
                 if (bytes.len > 0) {
                     // 조합을 시작한 자리에 넣는다 — 확정 텍스트가 따르는 그 규칙 그대로다.
-                    editor_term.rt.editor_selection = maru.session.editor.selection.Selection.at(editor_term.rt.editor_preedit_at);
-                    editor_ops.clearExtraSelections(self, editor_term);
+                    if (editor_term.rt.editor_selection) |sel| {
+                        if (sel.start() != editor_term.rt.editor_preedit_at)
+                            editor_term.rt.editor_selection = maru.session.editor.selection.Selection.at(editor_term.rt.editor_preedit_at);
+                    }
                     _ = editor_ops.insertText(self, editor_term, bytes);
                 }
                 editor_ops.setEditorPreedit(self, editor_term, "");
@@ -50174,6 +50176,132 @@ test "IME6 포커스를 잃으면 편집기 조합이 확정된다 — 유령 �
     // 조합은 **문서로 확정**되고 화면 상태는 비었다.
     try std.testing.expectEqual(@as(usize, 0), term.rt.editor_preedit.len);
     try std.testing.expectEqualStrings("a\xed\x95\x9cb\n", term.rt.editor_doc.?.file.content);
+
+    session.setFocused(true);
+    const extra = try allocator.alloc(maru.session.editor.selection.Selection, 1);
+    extra[0] = maru.session.editor.selection.Selection.at(5);
+    allocator.free(term.rt.editor_extra_selections);
+    term.rt.editor_extra_selections = extra;
+    term.rt.editor_selection = maru.session.editor.selection.Selection.at(1);
+    input_ops.imeBegin(session);
+    input_ops.imeMarked(session, "글");
+    session.setFocused(false);
+    try std.testing.expectEqualStrings("a글한b글\n", term.rt.editor_doc.?.file.content);
+}
+
+test "IME Enter commits editor preedit before newline instead of sending it to PTY" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 12,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    try dir.dir.writeFile(io, .{ .sub_path = "d.txt", .data = "ab\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "d.txt" });
+    defer allocator.free(path);
+    const term = try editor_ops.openPathInActivePane(session, path);
+    _ = try session.tick();
+    term.rt.editor_selection = maru.session.editor.selection.Selection.at(1);
+
+    input_ops.imeBegin(session);
+    input_ops.imeMarked(session, "한");
+    // AppKit clears the mark and calls insertText before imeEnd(Enter).
+    input_ops.imeMarked(session, "");
+    input_ops.imeInsert(session, "한");
+    input_ops.imeEnd(session, .{ .key = .enter, .modifiers = .{} });
+    try std.testing.expectEqualStrings("a한\nb\n", term.rt.editor_doc.?.file.content);
+    try std.testing.expectEqual(@as(usize, 0), term.rt.editor_preedit.len);
+
+    // A later AppKit callback still belongs to the editor that began the
+    // composition even if the active tab changed in between callbacks. The
+    // direct window selection models that interleaving; tab_ops.switchTab
+    // deliberately commits composition before switching in normal UI use.
+    const editor_tab = session.app_window.active_tab;
+    _ = try tab_ops.newTab(session);
+    const terminal_tab = session.app_window.active_tab;
+    try std.testing.expect(tab_ops.switchTab(session, editor_tab));
+    input_ops.imeBegin(session);
+    input_ops.imeMarked(session, "글");
+    input_ops.imeEnd(session, null);
+    session.app_window.active_tab = terminal_tab;
+    const terminal_bytes = session.total_terminal_input_bytes;
+    input_ops.imeBegin(session);
+    try std.testing.expect(!session.ime_terminal_target_tombstoned);
+    input_ops.imeMarked(session, "나");
+    input_ops.imeInsert(session, "나");
+    input_ops.imeMarked(session, "");
+    input_ops.imeEnd(session, null);
+    try std.testing.expectEqualStrings("a한\n나b\n", term.rt.editor_doc.?.file.content);
+    try std.testing.expectEqual(terminal_bytes, session.total_terminal_input_bytes);
+}
+
+test "editor IME explicit UTF-16 replacement keeps the document unchanged until commit" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 12,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(800, 600, 1000);
+    var dir = std.testing.tmpDir(.{});
+    defer dir.cleanup();
+    try dir.dir.writeFile(io, .{ .sub_path = "d.txt", .data = "a한😀b\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "d.txt" });
+    defer allocator.free(path);
+    const term = try editor_ops.openPathInActivePane(session, path);
+    _ = try session.tick();
+    term.rt.editor_selection = maru.session.editor.selection.Selection.at(0);
+    try std.testing.expectEqual(@as(?usize, 4), input_ops.byteAtUtf16(term.rt.editor_doc.?.file.content, 2));
+    try std.testing.expect(input_ops.byteAtUtf16(term.rt.editor_doc.?.file.content, 3) == null);
+    try std.testing.expectEqual(@as(?usize, 4), input_ops.utf16AtByte(term.rt.editor_doc.?.file.content, 8));
+    try std.testing.expectEqualStrings("한😀", input_ops.editorImeSubstring(session, 1, 3).?);
+    try std.testing.expect(input_ops.editorImeSubstring(session, 3, 1) == null); // half-surrogate boundary
+    input_ops.imeBegin(session);
+    try std.testing.expect(input_ops.editorImeReplacement(session, 1, 1));
+    input_ops.imeMarked(session, "글");
+    try std.testing.expectEqualStrings("a한😀b\n", term.rt.editor_doc.?.file.content);
+    const ranges = input_ops.editorImeRanges(session).?;
+    try std.testing.expectEqual(@as(usize, 1), ranges.marked_start);
+    try std.testing.expectEqual(@as(usize, 1), ranges.selected_start);
+    try std.testing.expectEqual(@as(usize, 1), ranges.selected_len);
+    try std.testing.expect(!input_ops.editorImeReplacement(session, 3, 1)); // active mark is virtual text
+    input_ops.imeMarked(session, "");
+    input_ops.imeInsert(session, "글");
+    input_ops.imeEnd(session, null);
+    try std.testing.expectEqualStrings("a글😀b\n", term.rt.editor_doc.?.file.content);
+    try std.testing.expectEqual(@as(usize, 2), input_ops.editorImeRanges(session).?.selected_start);
+    const extra = try allocator.alloc(maru.session.editor.selection.Selection, 1);
+    extra[0] = .{ .anchor_start = 1, .anchor_end = 4, .focus = 4 };
+    allocator.free(term.rt.editor_extra_selections);
+    term.rt.editor_extra_selections = extra;
+    input_ops.imeBegin(session);
+    try std.testing.expect(input_ops.editorImeReplacement(session, 1, 1));
+    try std.testing.expectEqual(@as(usize, 0), term.rt.editor_extra_selections.len);
+    input_ops.imeEnd(session, null);
+    session.dispatchAppAction(.toggle_find);
+    try std.testing.expect(input_ops.editorImeRanges(session) == null);
 }
 
 test "EF10 모달이 강조를 멎게 해도 ⌘G는 이어진다 — `find_nav`를 내리는 대가의 크기" {

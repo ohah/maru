@@ -32,6 +32,7 @@ const term_ops = @import("term.zig");
 const barMetrics = app_session_mod.barMetrics;
 const pane_ops = @import("pane.zig");
 const editor_ops = @import("editor.zig");
+const editor_completion = @import("editor_completion.zig");
 const settings_ops = @import("settings.zig");
 const shouldReplayAfterCommit = AppSession.shouldReplayAfterCommit;
 const sidebar_ops = @import("sidebar.zig");
@@ -47,6 +48,101 @@ const command_catalog = app_session_mod.command_catalog;
 const config_mod = app_session_mod.config_mod;
 const global_hotkey = app_session_mod.global_hotkey;
 const keyhint_hold = app_session_mod.keyhint_hold;
+
+/// NSTextInputClient counts UTF-16 code units; the document and selections count
+/// UTF-8 bytes. Invalid offsets (including the middle of a scalar) are rejected.
+pub fn utf16AtByte(bytes: []const u8, target: usize) ?usize {
+    if (target > bytes.len) return null;
+    var at: usize = 0;
+    var units: usize = 0;
+    while (at < target) {
+        const width = std.unicode.utf8ByteSequenceLength(bytes[at]) catch return null;
+        const end = at + width;
+        if (end > target or end > bytes.len) return null;
+        const cp = std.unicode.utf8Decode(bytes[at..end]) catch return null;
+        units += if (cp > 0xffff) @as(usize, 2) else 1;
+        at = end;
+    }
+    return units;
+}
+
+pub fn byteAtUtf16(bytes: []const u8, target: usize) ?usize {
+    var at: usize = 0;
+    var units: usize = 0;
+    while (at < bytes.len and units < target) {
+        const width = std.unicode.utf8ByteSequenceLength(bytes[at]) catch return null;
+        const end = at + width;
+        if (end > bytes.len) return null;
+        const cp = std.unicode.utf8Decode(bytes[at..end]) catch return null;
+        const next = units + if (cp > 0xffff) @as(usize, 2) else 1;
+        if (next > target) return null;
+        units = next;
+        at = end;
+    }
+    return if (units == target) at else null;
+}
+
+test "editor IME UTF-16 offsets round-trip Korean and astral characters" {
+    const text_bytes = "a한😀z";
+    try std.testing.expectEqual(@as(?usize, 1), utf16AtByte(text_bytes, 1));
+    try std.testing.expectEqual(@as(?usize, 2), utf16AtByte(text_bytes, 4));
+    try std.testing.expectEqual(@as(?usize, 4), utf16AtByte(text_bytes, 8));
+    try std.testing.expectEqual(@as(?usize, 4), byteAtUtf16(text_bytes, 2));
+    try std.testing.expectEqual(@as(?usize, 8), byteAtUtf16(text_bytes, 4));
+    try std.testing.expectEqual(@as(?usize, null), byteAtUtf16(text_bytes, 3));
+    try std.testing.expectEqual(@as(?usize, null), utf16AtByte(text_bytes, 5));
+}
+
+pub const EditorImeRanges = struct {
+    selected_start: usize,
+    selected_len: usize,
+    marked_start: usize,
+};
+
+pub fn editorImeRanges(self: *AppSession) ?EditorImeRanges {
+    if (self.ime_terminal_target_id == null and self.inputFocus() != .terminal) return null;
+    const term = activeEditorTermForIme(self) orelse return null;
+    if (term.rt.editor_diff != null) return null;
+    const doc = term.rt.editor_doc orelse return null;
+    const sel = term.rt.editor_selection orelse return null;
+    const content = doc.file.content;
+    const start = utf16AtByte(content, sel.start()) orelse return null;
+    const end = utf16AtByte(content, sel.end()) orelse return null;
+    const mark_byte = if (term.rt.editor_preedit.len > 0) term.rt.editor_preedit_at else sel.start();
+    const mark = utf16AtByte(content, mark_byte) orelse return null;
+    return .{ .selected_start = start, .selected_len = end - start, .marked_start = mark };
+}
+
+/// Apply an input method's explicit document replacement to the primary
+/// selection. During an existing composition its range is in the virtual
+/// marked string, so the document selection must remain pinned to the range
+/// chosen when that composition began.
+pub fn editorImeReplacement(self: *AppSession, start_utf16: usize, len_utf16: usize) bool {
+    if (self.ime_terminal_target_id == null and self.inputFocus() != .terminal) return false;
+    const term = activeEditorTermForIme(self) orelse return false;
+    if (term.rt.editor_diff != null or self.ime_had_marked or self.ime_marked_changed or term.rt.editor_preedit.len != 0) return false;
+    const doc = term.rt.editor_doc orelse return false;
+    if (doc.file.read_only or term.rt.editor_selection == null) return false;
+    const end_utf16 = std.math.add(usize, start_utf16, len_utf16) catch return false;
+    const start = byteAtUtf16(doc.file.content, start_utf16) orelse return false;
+    const end = byteAtUtf16(doc.file.content, end_utf16) orelse return false;
+    term.rt.editor_selection = .{ .anchor_start = start, .anchor_end = end, .focus = end };
+    editor_ops.mergeCarets(self, term);
+    editor_ops.breakUndoGroup(term);
+    self.metal_dirty = true;
+    return true;
+}
+
+pub fn editorImeSubstring(self: *AppSession, start_utf16: usize, len_utf16: usize) ?[]const u8 {
+    if (self.ime_terminal_target_id == null and self.inputFocus() != .terminal) return null;
+    const term = activeEditorTermForIme(self) orelse return null;
+    if (term.rt.editor_diff != null) return null;
+    const doc = term.rt.editor_doc orelse return null;
+    const end_utf16 = std.math.add(usize, start_utf16, len_utf16) catch return null;
+    const start = byteAtUtf16(doc.file.content, start_utf16) orelse return null;
+    const end = byteAtUtf16(doc.file.content, end_utf16) orelse return null;
+    return doc.file.content[start..end];
+}
 
 /// 본문 분리: app_session/settings.zig(F9). ABI가 직접 부르므로 진입만 남긴다.
 pub fn keyHintConfig(self: *const AppSession) KeyHintConfigAbi {
@@ -200,12 +296,6 @@ pub fn imeSetPreedit(self: *AppSession, bytes: []const u8) void {
             self.ime_terminal_target_id = active.id;
         }
         const target_id = self.ime_terminal_target_id orelse return;
-        const surface = imeTerminalSurfaceById(self, target_id) orelse {
-            // 진행 중 target 소멸은 transaction 끝까지 tombstone으로 유지한다. 다음 non-empty
-            // callback이 새 active surface를 다시 pin하면 오삽입되므로 여기서 null로 바꾸지 않는다.
-            if (bytes.len == 0 and !self.ime_active) self.ime_terminal_target_id = null;
-            return;
-        };
         // **편집기 Term이면 코어가 아니라 문서 쪽에 둔다**(N3). 편집기의 코어는 1×1 sentinel이라
         // 거기 얹은 조합 글자는 **화면에 닿지 않는다** — 실측: 한글을 치면 조합 중에는 아무것도
         // 안 보이고 음절이 확정될 때만 툭 나타났다(적대적 검증 2026-08-27). 확정 텍스트는 이미
@@ -216,6 +306,12 @@ pub fn imeSetPreedit(self: *AppSession, bytes: []const u8) void {
             if (bytes.len == 0 and !self.ime_active) self.ime_terminal_target_id = null;
             return;
         }
+        const surface = imeTerminalSurfaceById(self, target_id) orelse {
+            // 진행 중 target 소멸은 transaction 끝까지 tombstone으로 유지한다. 다음 non-empty
+            // callback이 새 active surface를 다시 pin하면 오삽입되므로 여기서 null로 바꾸지 않는다.
+            if (bytes.len == 0 and !self.ime_active) self.ime_terminal_target_id = null;
+            return;
+        };
         surface.lockCore(self.io);
         _ = surface.setPreeditLocked(bytes);
         surface.unlockCore(self.io);
@@ -305,6 +401,13 @@ pub fn imeBegin(self: *AppSession) void {
     // **터미널 입력일 때만** — find/palette에서 조합하면 뒤 터미널 스크롤백을 건드리면 안 된다(조합은
     // 오버레이 입력칸으로 가지 터미널로 안 간다; inputFocus 단일 출처로 판정).
     if (self.ime_terminal_target_id != null or self.inputFocus() == .terminal) {
+        if (activeEditorTermForIme(self)) |editor_term| {
+            // A pinned editor may no longer be the active tab. It has no
+            // terminal viewport and is not a reaped terminal surface.
+            if (self.ime_terminal_target_id == null) self.ime_terminal_target_id = editor_term.surface.id;
+            self.ime_had_marked = imeComposingActive(self);
+            return;
+        }
         // viewOffset 읽기는 메인 락-아래(§9.1), scrollToBottom mutate는 reader로 위임(full (a), §9 P3-4).
         const surface = if (self.ime_terminal_target_id) |target_id|
             imeTerminalSurfaceById(self, target_id) orelse {
@@ -380,7 +483,7 @@ pub fn imeEnd(self: *AppSession, event: ?terminal.KeyEvent) void {
     // 존재한다는 이유만으로 routeCommittedText는 새 active로 fallback하지 않지만, encode_key/replay는
     // handleKeyEvent를 직접 타므로 이 명시 상태가 없으면 새 terminal로 샌다.
     if (self.ime_terminal_target_id) |target_id| {
-        if (imeTerminalSurfaceById(self, target_id) == null) {
+        if (imeTerminalSurfaceById(self, target_id) == null and editorTermBySurfaceId(self, target_id) == null) {
             self.ime_terminal_target_tombstoned = true;
         }
     }
@@ -393,7 +496,9 @@ pub fn imeEnd(self: *AppSession, event: ?terminal.KeyEvent) void {
         self.ime_insert_failed = false;
         self.ime_terminal_target_tombstoned = false;
         if (self.ime_terminal_target_id) |target_id| {
-            const still_composing = if (imeTerminalSurfaceById(self, target_id)) |surface| active: {
+            const still_composing = if (editorTermBySurfaceId(self, target_id)) |term|
+                term.rt.editor_preedit.len > 0
+            else if (imeTerminalSurfaceById(self, target_id)) |surface| active: {
                 surface.lockCore(self.io);
                 defer surface.unlockCore(self.io);
                 break :active surface.preeditActiveLocked();
@@ -428,9 +533,13 @@ pub fn imeEnd(self: *AppSession, event: ?terminal.KeyEvent) void {
                 capturePreeditCommitBase(self, target_id)
             else
                 null;
+            // An editor uses the same pinned surface identity as a terminal, but its
+            // committed text belongs in the document. The terminal's paired PTY
+            // enqueue cannot write an editor document (and silently loses the text).
+            const editor_target = if (terminal_target) |target_id| editorTermBySurfaceId(self, target_id) != null else false;
             const admitted = if (terminal_target) |target_id|
-                if (replay_event) |ev|
-                    routeTerminalCommittedWithReplay(self, target_id, text, ev)
+                if (replay_event != null and !editor_target)
+                    routeTerminalCommittedWithReplay(self, target_id, text, replay_event.?)
                 else
                     routeCommittedTextAccepted(self, text)
             else
@@ -451,8 +560,11 @@ pub fn imeEnd(self: *AppSession, event: ?terminal.KeyEvent) void {
             // 터미널 replay도 확정 텍스트와 **같은 surface FIFO** 뒤에 append한다. socket/PTY가
             // 막혀도 Enter/화살표가 텍스트를 추월하지 않고 AppKit callback도 block하지 않는다.
             // 텍스트 admission이 OOM이면 replay만 보내는 반쪽 transaction도 만들지 않는다.
-            if (admitted and terminal_target == null) {
+            if (admitted and (terminal_target == null or editor_target)) {
                 if (replay_event) |ev| {
+                    // This Enter confirmed an IME composition. An open completion
+                    // popup must not reinterpret it as acceptance of a stale item.
+                    if (editor_target and composing) editor_completion.hide(self);
                     _ = self.handleKeyEvent(ev) catch {};
                 }
             }
@@ -548,9 +660,9 @@ pub fn sendCommittedText(self: *AppSession, bytes: []const u8) bool {
     // 시작한 뒤 pane이 편집기로 바뀌면 **그 글자가 문서에 들어간다.** 고정의 요점은 "확정은 조합을
     // 시작한 곳으로 간다"이고, 편집기도 그 규칙 안에 있어야 한다(적대적 검증 2026-08-25).
     if (editorTermBySurfaceId(self, target_id)) |editor_term| {
-        _ = editor_ops.insertText(self, editor_term, bytes);
+        const inserted = editor_ops.insertText(self, editor_term, bytes);
         self.metal_dirty = true;
-        return true; // 편집기가 삼켰다 — PTY로 흘리지 않는다
+        return inserted; // 실패 시 Enter replay도 막는다. PTY로는 흘리지 않는다.
     }
     return sendCommittedTextTo(self, target_id, bytes);
 }

@@ -68,6 +68,13 @@ pub fn register(b: *std.Build, ctx: Context) void {
         "test-session-host-b3-1",
         "B3-1 RPC response authority ownership focused Debug and ReleaseFast gates",
     );
+    // owner.lock **이름** 축. 살아 있는 host 가 자기 lock 이름을 잃으면 바깥에서는 「주인 없음」으로
+    // 보여 승계 대상에서 빠지고, 그 host 는 옛 빌드에 고정된다(2026-09-27 실측). 이 게이트는 이름을
+    // 감사하고 되세우는 계약만 잰다 — `owner_lease.zig` 루트 하나라 실제 host 를 띄우지 않는다.
+    const session_host_owner_lock_heal_step = b.step(
+        "test-session-host-owner-lock-heal",
+        "owner.lock 이름 감사·치유: 지워진 이름과 덮어쓴 이름을 가르고, 잃은 이름을 되세운다",
+    );
     const session_host_b3_2_step = b.step(
         "test-session-host-b3-2",
         "B3-2 private destination admission focused Debug and ReleaseFast gates",
@@ -5212,6 +5219,60 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_b3_1_registry_tests.setCwd(b.path("."));
         session_host_b3_1_step.dependOn(&run_b3_1_leaf_tests.step);
         session_host_b3_1_step.dependOn(&run_b3_1_registry_tests.step);
+
+        // `owner_lease.zig` 루트를 **필터로 잠가** 이름 축 판정자만 돌린다. 이 파일의 다른 판정자는
+        // exec fd 슬롯을 잡으므로 여기서 함께 돌리지 않는다 — 개수를 고정해 필터가 느슨해지면 깨지게 한다.
+        const owner_lock_heal_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/owner_lease.zig",
+                ),
+                .target = target,
+                .optimize = b3_optimize,
+            }),
+            .filters = &.{ "owner lock 감사", "owner lock 치유", "owner.lock 감시" },
+        });
+        const run_owner_lock_heal_tests = b.addRunArtifact(owner_lock_heal_tests);
+        run_owner_lock_heal_tests.addArg("--maru-expect-tests=5");
+        run_owner_lock_heal_tests.setCwd(b.path("."));
+        session_host_owner_lock_heal_step.dependOn(&run_owner_lock_heal_tests.step);
+        if (b3_optimize == optimize)
+            run_session_host_tests.step.dependOn(&run_owner_lock_heal_tests.step);
+
+        // 예방 절반(`touchRuntimeArtifacts` 가 lock 이름도 갱신하는가)은 `daemon.zig` 에 산다.
+        // **`tmp 정리 회피` 세 줄만** 통과시킨다 — 이 파일의 다른 판정자는 실제 daemon 을 fork 하므로
+        // 로컬에서 돌리면 살아 있는 host 를 건드린다. 개수를 고정해 필터가 느슨해지면 깨지게 한다.
+        const owner_lock_touch_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/daemon.zig",
+                ),
+                .target = target,
+                .optimize = b3_optimize,
+            }),
+            .filters = &.{"tmp 정리 회피"},
+        });
+        const run_owner_lock_touch_tests = b.addRunArtifact(owner_lock_touch_tests);
+        run_owner_lock_touch_tests.addArg("--maru-expect-tests=3");
+        run_owner_lock_touch_tests.setCwd(b.path("."));
+        session_host_owner_lock_heal_step.dependOn(&run_owner_lock_touch_tests.step);
+
+        // 배선 축: 순수 판정자는 계약을 재고, 이것은 그 계약이 **두 루프 모두에서 불리는가**를 잰다.
+        // `boundary` 잡도 같은 파일을 돌리지만(build.zig), 이 게이트만 돌려도 배선이 빠진 것을 잡게 둔다.
+        const owner_lock_retention_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "tests/session_host_owner_lock_retention_boundary.zig",
+                ),
+                .target = target,
+                .optimize = b3_optimize,
+            }),
+        });
+        const run_owner_lock_retention_boundary_tests =
+            b.addRunArtifact(owner_lock_retention_boundary_tests);
+        run_owner_lock_retention_boundary_tests.addArg("--maru-expect-tests=1");
+        run_owner_lock_retention_boundary_tests.setCwd(b.path("."));
+        session_host_owner_lock_heal_step.dependOn(&run_owner_lock_retention_boundary_tests.step);
         const b3_2_registry_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path(

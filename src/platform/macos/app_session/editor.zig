@@ -34931,6 +34931,9 @@ test "NS9 대상 줄은 그 pane 에서 실제로 도는 것을 말한다 — �
     const allocator = testing.allocator;
     var fx = try PaneFixture.init(allocator);
     defer fx.deinit(allocator);
+    // 이 spawn 이 실패해도 이 판정자는 선다 — 아래 루프가 심는 `.terminal` 은 여기서만 오는 것이
+    // 아니다(적대적 검증 2회차: spawn 을 강제로 실패시켜도 NS9 는 통과했다). 그래서 `try` 로 조이지
+    // 않는다 — 조이면 **보호는 안 늘고 실패 경로만 는다.**
     pane_ops.newTermInActivePane(fx.session) catch {};
 
     // 관측에 이름을 심는다 — 제품이 읽는 그 자리다.
@@ -34949,8 +34952,9 @@ test "NS9 대상 줄은 그 pane 에서 실제로 도는 것을 말한다 — �
         planted = true;
         break;
     }
-    // 심을 자리가 없으면 이 판정자는 아무것도 안 잰다.
-    try testing.expect(planted);
+    // 심을 자리가 없으면 이 판정자는 아무것도 안 잰다. 위의 `try` 가 spawn 실패를 이미 걸러내므로
+    // 여기까지 와서 못 심었다면 **종류 판정이 바뀐 것**이다 — 그래서 이름이 따로 필요하다.
+    if (!planted) return error.NoTerminalTermToPlantForegroundNameInto;
 
     var buf: [app_session_mod.max_agent_targets]maru.session.agent_selection.Candidate = undefined;
     var folders: [app_session_mod.max_agent_targets][std.fs.max_path_bytes]u8 = undefined;
@@ -34959,9 +34963,10 @@ test "NS9 대상 줄은 그 pane 에서 실제로 도는 것을 말한다 — �
     for (collected.items) |c| {
         if (std.mem.eql(u8, c.shell_name, "fish")) saw = true;
         // 옛 판은 **전부** 고정 문구였다 — 하나라도 그 문구면 그 줄은 대상을 못 가른다.
-        try testing.expect(!std.mem.eql(u8, c.shell_name, maru.i18n.t(.ctx_target_shell)));
+        if (std.mem.eql(u8, c.shell_name, maru.i18n.t(.ctx_target_shell)))
+            return error.TargetRowFellBackToFixedShellPhrase;
     }
-    try testing.expect(saw);
+    if (!saw) return error.PlantedForegroundNameMissingFromTargets;
 }
 
 test "NS8 멀티 커서면 주 선택만 간다고 말한다 — 나머지가 갔다고 믿게 두지 않는다" {

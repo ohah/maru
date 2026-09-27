@@ -4325,7 +4325,7 @@ fn markRangeInLine(
 ///
 /// **열은 `columnsAtOffsets`로 센다**(§5.4 MUST — 픽셀 배치의 단일 출처). 여기서 따로 세면
 /// 렌더와 갈리는 두 번째 출처가 생긴다.
-pub fn editorImeCaretRect(self: *AppSession, term: *Term) ?chrome_draw.Rect {
+pub fn editorImeCaretRect(_: *AppSession, term: *Term) ?chrome_draw.Rect {
     if (term.kind != .editor) return null;
     if (term.rt.editor_diff != null) return null;
     const doc = term.rt.editor_doc orelse return null;
@@ -4336,32 +4336,33 @@ pub fn editorImeCaretRect(self: *AppSession, term: *Term) ?chrome_draw.Rect {
     else if (term.rt.editor_selection) |sel| sel.start() else return null;
     if (at > doc.file.content.len) return null;
 
+    const geom = term.rt.editor_hit_geom;
+    if (!geom.drawn) return null;
     const doc_line = doc.file.lines.lineAt(at);
-    const row = visibleRowOfDocLine(term, @intCast(doc_line)) orelse return null;
-    if (row < term.rt.editor_first_line) return null; // 화면 위로 벗어났다
-    const screen_row = row - term.rt.editor_first_line;
-
     const line = doc.file.lines.line(doc_line) orelse return null;
     const text = doc.file.content[line.start..line.contentEnd()];
-    var map: ProductColumnMap = .{ .tab_width = term.rt.editor_tab_width };
+    var map: ProductColumnMap = .{ .tab_width = geom.tab_width };
     const col = ProductColumnMap.columnOf(&map, text, at - line.start);
-    const first_col = effectiveFirstCol(term.rt.editor_wrap orelse self.loaded_config.config.editor.wrap, term, false);
-    if (col < first_col) return null; // 가로로 벗어났다
-    const screen_col = col - first_col;
 
     // firstRect는 지금 화면에 그린 글자의 자리여야 한다. active_pane_rect는 이미 pane의
     // terminal grid라 editorBodyRect에 다시 넣으면 tab bar·band가 두 번 더해진다.
-    // 렌더가 굳힌 기하를 쓰면 gutter와 content inset도 같은 프레임의 값이 된다.
-    const geom = term.rt.editor_hit_geom;
-    if (!geom.drawn) return null;
-    const cw: i32 = @intCast(self.cell_width_px);
-    const ch: i32 = @intCast(self.cell_height_px);
-    return .{
-        .x = geom.body_x + @as(i32, @intCast(geom.content_left_px)) + @as(i32, @intCast(screen_col)) * cw,
-        .y = geom.body_y + @as(i32, @intCast(screen_row)) * ch,
-        .w = @intCast(self.cell_width_px),
-        .h = @intCast(self.cell_height_px),
-    };
+    // 렌더가 굳힌 기하·시각 행을 쓰면 gutter, 가로 스크롤, 랩 조각까지 같은 프레임의 값이 된다.
+    // 경계 열은 뒤 조각의 시작일 수 있으므로 마지막으로 일치한 행을 고른다.
+    var found: ?chrome_draw.Rect = null;
+    for (term.rt.editor_hit_rows[0..term.rt.editor_hit_rows_len], 0..) |visual, screen_row| {
+        if (visual.kind != .text or term.rt.editor_hit_lines[screen_row] != doc_line) continue;
+        if (col < visual.start_col or col - visual.start_col > geom.content_width) continue;
+        const screen_col = col - visual.start_col;
+        const cw: i32 = @intCast(geom.cell_w_px);
+        const ch: i32 = @intCast(geom.cell_h_px);
+        found = .{
+            .x = geom.body_x + @as(i32, @intCast(geom.content_left_px)) + @as(i32, @intCast(screen_col)) * cw,
+            .y = geom.body_y + @as(i32, @intCast(screen_row)) * ch,
+            .w = @intCast(geom.cell_w_px),
+            .h = @intCast(geom.cell_h_px),
+        };
+    }
+    return found;
 }
 
 /// 조합 중 글자를 **그리는 줄 배열에만** 끼운 사본을 만든다(N3). 조합이 없거나 끼울 자리가
@@ -10278,6 +10279,62 @@ test "IME5 후보창은 조합 글자 아래에 선다 — pane 구석이 아니
     try testing.expect(while_composing.x != @as(i32, @intCast(fx.session.active_pane_rect.x)) or
         while_composing.y != @as(i32, @intCast(fx.session.active_pane_rect.y)));
     _ = body;
+}
+
+test "IME5 랩된 줄의 한자 후보창은 실제로 그린 글자에 붙는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+
+    const line = ("a" ** 180) ++ "Z\n";
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "ime5-wrap.txt", .data = line });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "ime5-wrap.txt" });
+    defer allocator.free(path);
+    const term = try openPathInActivePane(fx.session, path);
+    fx.session.active_pane_rect = pane_ops.paneTermRect(fx.session, fx.leaf_rect);
+    for ([_]struct { wrap: bool, first_piece: u32, first_col: u32 }{
+        .{ .wrap = true, .first_piece = 0, .first_col = 0 },
+        .{ .wrap = true, .first_piece = 1, .first_col = 0 },
+        .{ .wrap = false, .first_piece = 0, .first_col = 150 },
+    }) |cfg| {
+        term.rt.editor_wrap = cfg.wrap;
+        term.rt.editor_first_piece = cfg.first_piece;
+        term.rt.editor_first_col = cfg.first_col;
+        term.rt.editor_row_cache.filled = false;
+        var drawn = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.NoDraw;
+        defer drawn.dl.deinit(allocator);
+        if (cfg.first_piece > 0) try testing.expect(term.rt.editor_hit_geom.top_piece > 0);
+        if (cfg.first_col > 0) try testing.expect(term.rt.editor_first_col > 0);
+
+        term.rt.editor_selection = editor_selection.Selection.at(180);
+        const anchor = editorImeCaretRect(fx.session, term) orelse return error.NoCaretRect;
+        const cw: i32 = @intCast(fx.session.cell_width_px);
+        const ch: i32 = @intCast(fx.session.cell_height_px);
+        var found_marker = false;
+        for (drawn.dl.cells) |cell| {
+            if (cell.codepoint != 'Z') continue;
+            if (cfg.wrap and cfg.first_piece == 0) try testing.expect(cell.row > 0);
+            try testing.expectEqual(@as(i32, @intCast(drawn.rect.x)) + @as(i32, @intCast(cell.col)) * cw, anchor.x);
+            try testing.expectEqual(@as(i32, @intCast(drawn.rect.y)) + @as(i32, @intCast(cell.row)) * ch, anchor.y);
+            found_marker = true;
+            break;
+        }
+        try testing.expect(found_marker);
+        // 렌더 다음 입력기 질의 사이에 폰트 설정이 바뀌어도, 아직 보이는 프레임의
+        // 앵커는 그 프레임의 셀 크기를 따라야 한다.
+        const saved_cw = fx.session.cell_width_px;
+        const saved_ch = fx.session.cell_height_px;
+        fx.session.cell_width_px += 1;
+        fx.session.cell_height_px += 1;
+        const before_redraw = editorImeCaretRect(fx.session, term) orelse return error.NoCaretRect;
+        try testing.expectEqual(anchor, before_redraw);
+        fx.session.cell_width_px = saved_cw;
+        fx.session.cell_height_px = saved_ch;
+    }
 }
 
 test "IME1 조합 중 글자는 화면에 뜨고 문서에는 안 들어간다 (N3 §11)" {

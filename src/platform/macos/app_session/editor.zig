@@ -1974,7 +1974,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
     const pf = if (diff_state_opt) |st| blk: {
         // **상태 줄은 가로로 안 민다** — 한 줄짜리 문구라 밀면 화면에서 사라진다.
         // 한 줄짜리 상태 문구다 — 캐시가 아낄 것이 없다.
-        if (st.view != .compare) break :blk buildPaneOps(lines, null, null, lines.len, term.rt.editor_first_line, 0, 0, null, null, buildSelectionMarks(self, term), null, null, null, @as([]const u32, &.{}), null, syntaxColors(self, term), &.{}, .{}, buildCaretRows(self, term), &.{}, null, self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, null, null, &.{}, .{}, pool);
+        if (st.view != .compare) break :blk buildPaneOps(lines, null, null, lines.len, term.rt.editor_first_line, 0, 0, null, null, buildSelectionMarks(self, term, false), null, null, null, @as([]const u32, &.{}), null, syntaxColors(self, term), &.{}, .{}, buildCaretRows(self, term), &.{}, null, self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, null, null, &.{}, .{}, pool);
         // **좌우가 세로를 공유한다**(§3.5) — 행 배열이 이미 같은 길이라 같은 인덱스가 같은 높이다.
         // 가로는 각자다(§3.5의 그 규칙은 CM6가 "양쪽 줄 길이가 달라 한쪽을 따라가면 다른 쪽이
         // 엉뚱한 곳을 본다"고 적어 둔 근거에서 왔다) — 입력이 붙을 때 열별 `first_col`이 여기 온다.
@@ -2019,7 +2019,7 @@ pub fn appendPaneFrame(self: *AppSession, leaf_rect: maru.session.SplitRect, ter
         mm_drawn = if (mm) |m| m.input.top else null;
         // **진단**(§5.4) — 트리가 있으면 목록을 다시 채우고(구문 오류), 보이는 줄 축의 세 표로 편다. 끄면 없다.
         const diag = diagnosticViews(self, term, draw_lines.len);
-        break :blk buildPaneOps(draw_lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), fc, maxColsForRender(self, term, false), row_cache, buildSelectionMarks(self, term), find_marks, buildOccurrenceMarks(self, term), find_current, marker_lines, marker_current, syntaxColors(self, term), seek_buf[0..seek_n], inlayWindow(self, term), buildCaretRows(self, term), conflictWidgets(self, term), conflictBands(term), self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, mm, diag, sticky_client.compute(self, term, pane_rect, wrap), paneDecorations(self, term), pool);
+        break :blk buildPaneOps(draw_lines, foldNumbers(term), foldMarks(term), term.rt.editor_lines.len, term.rt.editor_first_line, effectiveFirstPiece(wrap, term), fc, maxColsForRender(self, term, false), row_cache, buildSelectionMarks(self, term, preedit_rows != null), find_marks, buildOccurrenceMarks(self, term), find_current, marker_lines, marker_current, syntaxColors(self, term), seek_buf[0..seek_n], inlayWindow(self, term), buildCaretRows(self, term), conflictWidgets(self, term), conflictBands(term), self.blink_visible, caretShape(self), wrap, term.rt.editor_tab_width, pane_rect, @intCast(self.cell_width_px), @intCast(self.cell_height_px), @intCast(self.cell_height_px), scratch, mm, diag, sticky_client.compute(self, term, pane_rect, wrap), paneDecorations(self, term), pool);
     };
     if (pf.ops_len == 0) return null;
     // **배치를 싣는다**(병합 모드가 아니면 지운다 — 옛 배치가 남으면 평범한 편집기에서 클릭이
@@ -4162,7 +4162,7 @@ pub fn addNextOccurrence(self: *AppSession, term: *Term) bool {
 /// **보이는 줄만 채운다.** 저장소는 문서 줄 수만큼 한 번 잡고 재사용한다 — 화면 밖 줄은 빈 슬라이스라
 /// 렌더가 건너뛴다. 못 잡으면 선택이 안 그려질 뿐 다른 것은 그대로다(그리는 것은 곁가지이고, 선택
 /// 자체는 `editor_selection`이 들고 있다).
-fn buildSelectionMarks(self: *AppSession, term: *Term) ?[]const []const chrome_editor.frame.Mark {
+fn buildSelectionMarks(self: *AppSession, term: *Term, primary_projected: bool) ?[]const []const chrome_editor.frame.Mark {
     var iter = selections(term);
     if (iter.count() == 0) return null;
     const doc = term.rt.editor_doc orelse return null;
@@ -4200,7 +4200,7 @@ fn buildSelectionMarks(self: *AppSession, term: *Term) ?[]const []const chrome_e
             // The primary selection has already been replaced in the preedit
             // projection. Painting its old byte range would highlight the
             // composing glyph and the suffix now occupying those columns.
-            if (is_primary and term.rt.editor_preedit.len > 0 and sel.start() == term.rt.editor_preedit_at) continue;
+            if (is_primary and primary_projected and term.rt.editor_preedit.len > 0 and sel.start() == term.rt.editor_preedit_at) continue;
             if (sel.len() == 0) continue; // caret뿐 — 그릴 띠가 없다
             storage[n] = sel;
             n += 1;
@@ -10337,9 +10337,13 @@ test "IME9 여러 줄 재변환 미리보기는 선택 본문 전부를 숨기�
     try testing.expectEqualStrings("", preview[1]);
     try testing.expectEqualStrings("", preview[2]);
     try testing.expectEqualStrings("const a = 1;\nconst b = 2;\nconst c = 3;\n", term.rt.editor_doc.?.file.content);
-    try testing.expect(buildSelectionMarks(fx.session, term) == null);
+    // If the preview cannot be built (for example, the end line is folded),
+    // the unchanged source remains visible and must keep its selection mark.
+    const original_marks = buildSelectionMarks(fx.session, term, false) orelse return error.SourceSelectionMissing;
+    try testing.expectEqual(@as(usize, 1), original_marks[0].len);
+    try testing.expect(buildSelectionMarks(fx.session, term, true) == null);
     term.rt.editor_extra_selections = try allocator.dupe(editor_selection.Selection, &.{editor_selection.Selection.fromPoints(0, 5)});
-    const marks = buildSelectionMarks(fx.session, term) orelse return error.ExtraSelectionMissing;
+    const marks = buildSelectionMarks(fx.session, term, true) orelse return error.ExtraSelectionMissing;
     try testing.expectEqual(@as(usize, 1), marks[0].len);
     try testing.expectEqual(@as(u32, 0), marks[0][0].start);
     try testing.expectEqual(@as(u32, 5), marks[0][0].len);
@@ -24139,7 +24143,7 @@ test "SEL3 선택이 화면에 띠로 서고, 복사가 문서 원본을 뜬다 
     term.rt.editor_selection = .{ .anchor_start = 6, .anchor_end = 6, .focus = 16 };
 
     // ⑴ 줄별로 잘린다.
-    const marks = buildSelectionMarks(fx.session, term) orelse return error.NoMarks;
+    const marks = buildSelectionMarks(fx.session, term, false) orelse return error.NoMarks;
     try testing.expectEqual(@as(usize, 1), marks[0].len);
     try testing.expectEqual(@as(u32, 6), marks[0][0].start); // "alpha "(6) 뒤
     try testing.expectEqual(@as(u32, 4), marks[0][0].len); // "beta"
@@ -24214,7 +24218,7 @@ test "MC1 다음 일치 추가가 커서를 늘리고, 띠가 전부 서고, 복
         var d = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.NoDraw;
         defer d.dl.deinit(allocator);
     }
-    const marks = buildSelectionMarks(fx.session, term) orelse return error.NoMarks;
+    const marks = buildSelectionMarks(fx.session, term, false) orelse return error.NoMarks;
     try testing.expectEqual(@as(usize, 1), marks[0].len);
     try testing.expectEqual(@as(u32, 0), marks[0][0].start);
     try testing.expectEqual(@as(usize, 1), marks[1].len);
@@ -32069,7 +32073,7 @@ fn fuzzRound(
         }
         try testing.expect(cursor_count <= editor_selection.max_cursors);
 
-        if (buildSelectionMarks(session, term)) |marks| {
+        if (buildSelectionMarks(session, term, false)) |marks| {
             const lines = editorLines(term);
             try testing.expectEqual(lines.len, marks.len); // 보이는 줄 축이다
             var drawn: usize = 0;
@@ -32162,7 +32166,7 @@ test "MC5 접힌 문서에서도 커서 띠가 보이는 줄 축으로 선다 (�
         defer d.dl.deinit(allocator);
     }
     {
-        const marks = buildSelectionMarks(fx.session, term) orelse return error.NoMarks;
+        const marks = buildSelectionMarks(fx.session, term, false) orelse return error.NoMarks;
         var drawn: usize = 0;
         for (marks) |row| drawn += row.len;
         try testing.expectEqual(@as(usize, 3), drawn); // 펼친 상태에선 셋 다 보인다
@@ -32177,7 +32181,7 @@ test "MC5 접힌 문서에서도 커서 띠가 보이는 줄 축으로 선다 (�
     const folded_lines = editorLines(term).len;
     try testing.expect(folded_lines < 4); // 실제로 접혔나 — 안 접혔으면 아래 판정이 공허하다
 
-    const marks = buildSelectionMarks(fx.session, term) orelse return error.NoMarks;
+    const marks = buildSelectionMarks(fx.session, term, false) orelse return error.NoMarks;
     try testing.expectEqual(folded_lines, marks.len); // 보이는 줄 축이다
     var drawn: usize = 0;
     for (marks, 0..) |row, i| {
@@ -32252,7 +32256,7 @@ test "MC4 병합 훑기가 줄마다 전부 훑던 방식과 같은 답을 낸�
             term.rt.editor_extra_selections = extras;
         }
 
-        const marks = buildSelectionMarks(fx.session, term) orelse continue;
+        const marks = buildSelectionMarks(fx.session, term, false) orelse continue;
 
         // ── 순진한 기준 구현: 줄마다 커서 전부를 훑는다 ──
         const docf = term.rt.editor_doc.?;
@@ -32321,7 +32325,7 @@ test "MC3 마크 저장소가 커서 수에 곱해지지 않는다 (§9.1 — �
         var d = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.NoDraw;
         defer d.dl.deinit(allocator);
     }
-    const marks = buildSelectionMarks(fx.session, term) orelse return error.NoMarks;
+    const marks = buildSelectionMarks(fx.session, term, false) orelse return error.NoMarks;
 
     var drawn: usize = 0;
     for (marks) |row| drawn += row.len;
@@ -32356,7 +32360,7 @@ test "MC2 같은 줄에 커서가 여럿이면 그 줄에 띠도 여럿 선다 (
         var d = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.NoDraw;
         defer d.dl.deinit(allocator);
     }
-    const marks = buildSelectionMarks(fx.session, term) orelse return error.NoMarks;
+    const marks = buildSelectionMarks(fx.session, term, false) orelse return error.NoMarks;
     // **한 줄에 셋이다.**
     try testing.expectEqual(@as(usize, 3), marks[0].len);
     var starts: [3]u32 = undefined;

@@ -71,6 +71,13 @@ pub fn register(b: *std.Build, ctx: Context) void {
     // owner.lock **이름** 축. 살아 있는 host 가 자기 lock 이름을 잃으면 바깥에서는 「주인 없음」으로
     // 보여 승계 대상에서 빠지고, 그 host 는 옛 빌드에 고정된다(2026-09-27 실측). 이 게이트는 이름을
     // 감사하고 되세우는 계약만 잰다 — `owner_lease.zig` 루트 하나라 실제 host 를 띄우지 않는다.
+    // 승계 거절 **사유** 축. CR4a 게이트에 얹었다가 그쪽 경계 판정자
+    // (`CR4a 경계는 observer attach와 final candidate 준비만 연다`)에 걸렸다 — 주제가 다른 등록이
+    // 그 슬라이스에 쌓이지 못하게 막는 판정자였고, 그 지적이 옳다. 전용 스텝으로 둔다.
+    const session_host_upgrade_refusal_step = b.step(
+        "test-session-host-upgrade-refusal",
+        "승계 preflight 가 거절 사유를 이름으로 가르는가 — 구독·attachment·멤버십",
+    );
     const session_host_owner_lock_heal_step = b.step(
         "test-session-host-owner-lock-heal",
         "owner.lock 이름 감사·치유: 지워진 이름과 덮어쓴 이름을 가르고, 잃은 이름을 되세운다",
@@ -2260,20 +2267,6 @@ pub fn register(b: *std.Build, ctx: Context) void {
         const run_cr4a_poll_owner_process_tests = b.addRunArtifact(cr4a_poll_owner_process_tests);
         run_cr4a_poll_owner_process_tests.addArg("--maru-expect-tests=1");
         session_host_cr4a_step.dependOn(&run_cr4a_poll_owner_process_tests.step);
-
-        // 승계 거절 사유를 이름으로 가르는 순수 판정. syscall 이 없어 실제 host 를 안 띄운다.
-        const upgrade_refusal_tests = addProjectTest(b, .{
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("src/platform/macos/session_host/poll_owner.zig"),
-                .target = target,
-                .optimize = cr4a_optimize,
-                .imports = &.{.{ .name = "maru", .module = maru_mod }},
-            }),
-            .filters = &.{"승계 preflight:"},
-        });
-        const run_upgrade_refusal_tests = b.addRunArtifact(upgrade_refusal_tests);
-        run_upgrade_refusal_tests.addArg("--maru-expect-tests=2");
-        session_host_cr4a_step.dependOn(&run_upgrade_refusal_tests.step);
 
         const cr4a_restore_exec_bootstrap_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
@@ -5287,6 +5280,26 @@ pub fn register(b: *std.Build, ctx: Context) void {
         run_owner_lock_retention_boundary_tests.addArg("--maru-expect-tests=1");
         run_owner_lock_retention_boundary_tests.setCwd(b.path("."));
         session_host_owner_lock_heal_step.dependOn(&run_owner_lock_retention_boundary_tests.step);
+
+        // 승계 거절 사유 — `poll_owner` 루트를 필터로 잠가 순수 판정자 둘만 돌린다. 이 파일의 다른
+        // 판정자는 실제 daemon 을 띄우므로 함께 돌리지 않는다.
+        const upgrade_refusal_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/poll_owner.zig",
+                ),
+                .target = target,
+                .optimize = b3_optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"승계 preflight:"},
+        });
+        const run_upgrade_refusal_tests = b.addRunArtifact(upgrade_refusal_tests);
+        run_upgrade_refusal_tests.addArg("--maru-expect-tests=2");
+        run_upgrade_refusal_tests.setCwd(b.path("."));
+        session_host_upgrade_refusal_step.dependOn(&run_upgrade_refusal_tests.step);
+        if (b3_optimize == optimize)
+            run_session_host_tests.step.dependOn(&run_upgrade_refusal_tests.step);
         const b3_2_registry_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path(
